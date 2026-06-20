@@ -53,11 +53,13 @@ MinToHip::matchAndRewrite(mlir::Operation *op,
     mlir::RankedTensorType stepResultType =
         (i == numInputs - 1) ? resultType : accType;
 
-    mlir::Value source =
-        (accType.getRank() == stepResultType.getRank()) ? accumulate : rhs;
-    mlir::Value init = createEmptyTensor(rewriter, loc, stepResultType, source);
-    auto minOp = mlir::hip::MinOp::create(rewriter, loc, stepResultType,
-                                          context, accumulate, rhs, init);
+    mlir::FailureOr<mlir::Value> initOrFailure = createBroadcastEmptyTensor(
+        rewriter, loc, stepResultType, {accumulate, rhs});
+    if (mlir::failed(initOrFailure))
+      return rewriter.notifyMatchFailure(
+          op, "Min: no ranked operand spans dynamic result dim");
+    auto minOp = mlir::hip::MinOp::create(rewriter, loc, context, accumulate,
+                                          rhs, *initOrFailure);
     accumulate = minOp->getResult(0);
   }
 

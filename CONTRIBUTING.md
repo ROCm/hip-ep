@@ -24,7 +24,7 @@ expectations for this repo.
 
 1. **Keep PRs small.** Large feature work should be decomposed into a
    series of independent PRs (precursors first, then the main change).
-   ~500 LOC / ~10 files is the soft threshold; bigger PRs need the
+   ~1000 LOC / ~20 files is the soft threshold; bigger PRs need the
    Summary section to explain why they cannot be split.
 2. **Human in the loop for AI-generated content.** You can use Cursor,
    Claude, Copilot, or whatever helps you write code, but you are the
@@ -60,7 +60,7 @@ The points that bite hardest in this repo:
 
 ### What "small" means here
 
-- **~500 changed LOC** or **~10 changed files** (whichever is hit
+- **~1000 changed LOC** or **~20 changed files** (whichever is hit
   first) is the soft threshold. PRs above this get the `large-pr`
   label automatically as a reviewer signal — not a hard block.
 - A `large-pr` PR is acceptable when the work genuinely cannot be

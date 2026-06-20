@@ -17,7 +17,11 @@ permissions:
 
 jobs:
   build-windows:
-    runs-on: windows-latest
+    # windows-latest now serves the VS 2026 (VS 18) image, under which the
+    # pinned onnxruntime-genai / onnxruntime_extensions fails to build
+    # (gsl/util C2220 warning-as-error). Pin to the VS 2022 image per
+    # actions/runner-images#14017.
+    runs-on: windows-2022
     # Cancel the build job when a newer commit lands on the same PR ref to
     # save runner minutes. gpu-test deliberately does NOT inherit this rule
     # (see its own concurrency block below) so an in-progress GPU run keeps
@@ -27,23 +31,26 @@ jobs:
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
     env:
-      PREBUILT_CACHE_VERSION: "3"  # bump to invalidate prebuilt cache (added cp314 wheels)
-      LLVM_TAG: llvm-22.1.0-release
-      FLATBUFFERS_TAG: flatbuffers-25.12.19-release
-      PROTO_TAG: protobuf-34.0-release
+      # LLVM/MLIR/LLD are built from source at this upstream release tag.
+      # Bumping it only invalidates the llvm-install cache. NOTE: this is NOT
+      # the morphizen FetchContent fallback pin (cmake/deps.txt) -- the project
+      # resolves LLVM via find_package against this build, so that fallback is
+      # unused.
+      LLVM_TAG: llvmorg-22.1.0
       ONNXRUNTIME_VERSION: "1.25.1"
       # Space-separated list of microsoft/onnxruntime PR numbers to fetch
       # from github.com/microsoft/onnxruntime/pull/<n>.patch and `git apply`
       # on top of the pinned ONNXRUNTIME_VERSION tag during the source-build
-      # step. The PR list is also part of the prebuilt-local cache key, so
-      # editing this list auto-invalidates the cached install prefix.
+      # step. The PR list is also part of the ort-install cache key, so
+      # editing this list auto-invalidates the cached ORT install prefix.
       # Remove a PR number once its fix is in the pinned ONNXRUNTIME_VERSION.
       ONNXRUNTIME_PR_PATCHES: "28608"
-      GTEST_VERSION: "1.15.0"
-      THEROCK_VERSION: therock-dist-windows-gfx1151-7.11.0
       SCCACHE_GHA_ENABLED: "true"
-      OGA_REPO: AMDmoore/onnxruntime-genai
-      OGA_REF: 2615301864b4d2397231d443865cb96111cc5fc2
+      OGA_VERSION: "0.14.0"
+      # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
+      # pull/<n>.patch and `git apply` on top of v<OGA_VERSION>. Part of the OGA
+      # cache key. Remove a PR once it lands in the pinned OGA release.
+      OGA_PR_PATCHES: "2194"
       # ilammy/msvc-dev-cmd and mozilla-actions/sccache-action have no
       # Node.js 24 releases yet; allow Node.js 20 until they are updated.
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
@@ -74,58 +81,45 @@ jobs:
           git submodule update --init --recursive --depth 1
 
       # -----------------------------------------------------------------------
-      # Cache: ORT + LLVM prebuilt + flatbuffers + protobuf + gtest
-      # All are installed into the same prebuilt-local prefix so one cache
-      # entry covers all of them.
-      # Note: protobuf is excluded from prebuilt downloads – cmake/deps.cmake
-      # fetches v21.12 via FetchContent (same version pinned by morphizen) to
-      # avoid C4267 errors from mismatched protobuf versions.
-      # ORT is built from source and installed here (same pattern as GTest).
+      # Per-dependency caches. Each dep is built from source into its own
+      # ${{ runner.workspace }}/<dep>-install prefix and cached separately so a
+      # version bump of one dep does not invalidate the others. The configure
+      # step lists all of them on CMAKE_PREFIX_PATH (no merge/copy).
+      #
+      # The llvm/protobuf/flatbuffers/gtest caches are byte-identical to the
+      # ones produced by windows-build-mock.yml, so their keys are shared
+      # across both workflows -- whichever job builds a dep first populates
+      # the cache for both, and the expensive LLVM cold build runs once.
+      # Only the ORT cache differs per-PR via the patched-PR list.
       # -----------------------------------------------------------------------
-      - name: Cache prebuilt-local
-        id: cache-prebuilt
+      - name: Cache ort-install
+        id: cache-ort
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
-          path: ${{ runner.workspace }}/prebuilt-local
-          # The `ortpr-<list>` segment embeds the ONNXRUNTIME_PR_PATCHES env
-          # value verbatim, so editing the PR list auto-invalidates the
-          # cached install prefix. Without this, bumping the patched PR set
-          # but leaving ONNXRUNTIME_VERSION fixed would silently keep the
-          # previous-patch ORT artifacts in the cache.
-          key: prebuilt-v${{ env.PREBUILT_CACHE_VERSION }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}-${{ env.LLVM_TAG }}-${{ env.FLATBUFFERS_TAG }}-${{ env.PROTO_TAG }}-gtest${{ env.GTEST_VERSION }}
+          path: ${{ runner.workspace }}/ort-install
+          # `ortpr-<list>` embeds ONNXRUNTIME_PR_PATCHES verbatim so editing
+          # the patched-PR set auto-invalidates the cached ORT prefix.
+          key: dep-ort-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}
 
-      # -----------------------------------------------------------------------
-      # Cache: TheRock HIP SDK for Windows (separate cache – large tarball)
-      # -----------------------------------------------------------------------
-      - name: Cache TheRock
-        id: cache-therock
+      - name: Cache llvm-install
+        id: cache-llvm
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
-          path: ${{ runner.workspace }}/therock-dist
-          key: ${{ env.THEROCK_VERSION }}
+          path: ${{ runner.workspace }}/llvm-install
+          key: dep-llvm-${{ env.LLVM_TAG }}
 
-      - name: Download & extract TheRock
-        if: steps.cache-therock.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          THEROCK_DIST="$(cygpath -u '${{ runner.workspace }}/therock-dist')"
-          mkdir -p "$THEROCK_DIST"
-          curl -fsSL \
-            "https://repo.amd.com/rocm/tarball/${{ env.THEROCK_VERSION }}.tar.gz" \
-            -o therock.tar.gz
-          tar -xzf therock.tar.gz -C "$THEROCK_DIST" --strip-components=1
-          rm therock.tar.gz
+      # protobuf / flatbuffers / gtest are NOT pre-built or cached here anymore:
+      # cmake/deps.cmake resolves them (find_package first, from-source
+      # FetchContent fallback) during the project build. With no prefix install
+      # they take the from-source path (sccache-accelerated). gtest is only
+      # pulled when unit tests are enabled (morphizen_ENABLE_UNIT_TEST=OFF here).
 
       # -----------------------------------------------------------------------
-      # The prebuilt LLVM package has C:\msvsn2022 hardcoded in LLVMExports.cmake
-      # for the DIA SDK path (known LLVM issue: llvm/llvm-project#111829).
-      # Create a junction from C:\msvsn2022 to the actual VS installation.
+      # TheRock HIP SDK is NOT downloaded explicitly here: with no -DTHEROCK_DIST
+      # passed to Configure, cmake/deps.cmake auto-downloads + extracts it into
+      # the build tree (<build>/_therock) during configure. This exercises the
+      # default auto-download path in CI. (gpu-test downloads TheRock itself.)
       # -----------------------------------------------------------------------
-      - name: Fix DIA SDK path from prebuilt LLVM
-        shell: cmd
-        run: |
-          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do set "VS_PATH=%%i"
-          mklink /J C:\msvsn2022 "%VS_PATH%"
 
       # -----------------------------------------------------------------------
       # llvm-lit.py (from prebuilt) requires the lit pip package at runtime.
@@ -148,14 +142,14 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.9
 
       # -----------------------------------------------------------------------
-      # Build ONNX Runtime from source and install into prebuilt-local.
+      # Build ONNX Runtime from source and install into ort-install.
       # Produces both the ORT shared library (build-time dep for onnx-hipdnn-ep)
       # and onnxruntime_perf_test.exe (GPU test tool).
       # Requires MSVC env; placed after Setup MSVC (same pattern as GTest).
       # Clone and build are skipped when the ORT build cache hits.
       # -----------------------------------------------------------------------
       - name: Checkout ONNX Runtime v${{ env.ONNXRUNTIME_VERSION }}
-        if: steps.cache-prebuilt.outputs.cache-hit != 'true'
+        if: steps.cache-ort.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: Microsoft/onnxruntime
@@ -169,12 +163,12 @@ jobs:
       # ONNXRUNTIME_PR_PATCHES (env). Each PR's `.patch` endpoint returns the
       # git format-patch mailbox for the PR's current head, which we apply on
       # top of the pinned ONNXRUNTIME_VERSION tag. The cache key on
-      # `prebuilt-local` includes the PR list, so adding/removing a PR
+      # `ort-install` includes the PR list, so adding/removing a PR
       # number forces a rebuild. The source-onnxruntime tree itself is not
       # cached, so a fresh checkout always lands here clean and patches
       # apply directly. No idempotency needed.
       - name: Apply ONNX Runtime PR patches
-        if: steps.cache-prebuilt.outputs.cache-hit != 'true'
+        if: steps.cache-ort.outputs.cache-hit != 'true'
         shell: pwsh
         working-directory: ${{ github.workspace }}\source-onnxruntime
         env:
@@ -199,7 +193,7 @@ jobs:
           }
 
       - name: Build ONNX Runtime
-        if: steps.cache-prebuilt.outputs.cache-hit != 'true'
+        if: steps.cache-ort.outputs.cache-hit != 'true'
         shell: cmd
         run: |
           cd /d "${{ github.workspace }}\source-onnxruntime"
@@ -216,21 +210,21 @@ jobs:
             --cmake_generator Ninja ^
             --build_wheel
 
-      - name: Install ORT into prebuilt-local
-        if: steps.cache-prebuilt.outputs.cache-hit != 'true'
+      - name: Install ORT into ort-install
+        if: steps.cache-ort.outputs.cache-hit != 'true'
         shell: bash
         run: |
           cmake --install "${{ runner.workspace }}/build-onnxruntime/Release" \
-            --prefix "${{ runner.workspace }}/prebuilt-local"
+            --prefix "${{ runner.workspace }}/ort-install"
           # perf_test is not a cmake install target; copy manually so it lands
-          # in prebuilt-local (cached) rather than the ephemeral build directory.
+          # in ort-install (cached) rather than the ephemeral build directory.
           PERF_TEST=$(find "${{ runner.workspace }}/build-onnxruntime" \
             -name "onnxruntime_perf_test.exe" -type f | head -1)
           if [ -z "$PERF_TEST" ]; then
             echo "ERROR: onnxruntime_perf_test.exe not found in build tree"
             exit 1
           fi
-          cp "$PERF_TEST" "${{ runner.workspace }}/prebuilt-local/bin/"
+          cp "$PERF_TEST" "${{ runner.workspace }}/ort-install/bin/"
           # DirectML.dll is not installed by cmake --install; copy manually.
           DML_DLL=$(find "${{ runner.workspace }}/build-onnxruntime" \
             -path "*/x64-win/DirectML.dll" -type f | head -1)
@@ -238,8 +232,8 @@ jobs:
             echo "ERROR: DirectML.dll not found in build tree"
             exit 1
           fi
-          cp "$DML_DLL" "${{ runner.workspace }}/prebuilt-local/bin/"
-          # Cache the cp314 ORT Python wheel inside prebuilt-local so it
+          cp "$DML_DLL" "${{ runner.workspace }}/ort-install/bin/"
+          # Cache the cp314 ORT Python wheel inside ort-install so it
           # rides the same cache key as the rest of the ORT artifacts.
           # Output path: build-onnxruntime/Release/dist/onnxruntime_directml-1.25.1-cp314-cp314-win_amd64.whl
           ORT_WHEEL=$(find "${{ runner.workspace }}/build-onnxruntime" \
@@ -248,121 +242,133 @@ jobs:
             echo "ERROR: onnxruntime_directml wheel not found in build tree"
             exit 1
           fi
-          mkdir -p "${{ runner.workspace }}/prebuilt-local/wheels"
-          cp "$ORT_WHEEL" "${{ runner.workspace }}/prebuilt-local/wheels/"
+          mkdir -p "${{ runner.workspace }}/ort-install/wheels"
+          cp "$ORT_WHEEL" "${{ runner.workspace }}/ort-install/wheels/"
           echo "Cached ORT wheel: $(basename "$ORT_WHEEL")"
 
       # -----------------------------------------------------------------------
-      # Download LLVM prebuilt (from wcy123/llvm-mlir-prebuilt releases)
+      # Build LLVM/MLIR/LLD/Clang from source into llvm-install.
+      # Projects clang;mlir;lld, X86 backend only. The EP find_package()s
+      # LLVM/MLIR/LLD and lib/Target/LLVM links X86 codegen + lldCOFF/lldCommon
+      # for the in-process COFF DLL linker; clang is shipped so lib/Runtime's
+      # runtime-bitcode step uses a version-matched clang from the prefix (and
+      # so this build stays identical to cmake/deps.cmake's from-source
+      # fallback). /MT matches the toolchain; RTTI on, zlib/zstd off.
+      # LLVM_INSTALL_UTILS=ON ships FileCheck (+ not/count) for the LIT suite.
+      # Cold build is multi-hour (clang dominates); sccache + the shared
+      # llvm-install cache amortize it.
       # -----------------------------------------------------------------------
-      - name: Download LLVM prebuilt
-        if: steps.cache-prebuilt.outputs.cache-hit != 'true'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          PREBUILT_DIR="${{ runner.workspace }}/prebuilt-local"
-          mkdir -p "$PREBUILT_DIR"
-          gh release download "${{ env.LLVM_TAG }}" \
-            --repo wcy123/llvm-mlir-prebuilt \
-            --pattern "llvm-22.1.0-release-windows-x64.zip" \
-            --dir "$PREBUILT_DIR"
-          unzip -q -o "$PREBUILT_DIR/llvm-22.1.0-release-windows-x64.zip" -d "$PREBUILT_DIR"
-          rm "$PREBUILT_DIR/llvm-22.1.0-release-windows-x64.zip"
-
-      # -----------------------------------------------------------------------
-      # Download flatbuffers prebuilt
-      # -----------------------------------------------------------------------
-      - name: Download flatbuffers prebuilt
-        if: steps.cache-prebuilt.outputs.cache-hit != 'true'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          PREBUILT_DIR="${{ runner.workspace }}/prebuilt-local"
-          gh release download "${{ env.FLATBUFFERS_TAG }}" \
-            --repo wcy123/llvm-mlir-prebuilt \
-            --pattern "flatbuffers-25.12.19-release-windows-x64.zip" \
-            --dir "$PREBUILT_DIR"
-          unzip -q -o "$PREBUILT_DIR/flatbuffers-25.12.19-release-windows-x64.zip" -d "$PREBUILT_DIR"
-          rm "$PREBUILT_DIR/flatbuffers-25.12.19-release-windows-x64.zip"
-
-      # -----------------------------------------------------------------------
-      # Download protobuf prebuilt
-      # -----------------------------------------------------------------------
-      - name: Download protobuf prebuilt
-        if: steps.cache-prebuilt.outputs.cache-hit != 'true'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          PREBUILT_DIR="${{ runner.workspace }}/prebuilt-local"
-          mkdir -p "$PREBUILT_DIR"
-          gh release download "${{ env.PROTO_TAG }}" \
-            --repo wcy123/llvm-mlir-prebuilt \
-            --pattern "protobuf-34.0-release-windows-x64.zip" \
-            --dir "$PREBUILT_DIR"
-          unzip -q -o "$PREBUILT_DIR/protobuf-34.0-release-windows-x64.zip" -d "$PREBUILT_DIR"
-          rm "$PREBUILT_DIR/protobuf-34.0-release-windows-x64.zip"
-
-      # -----------------------------------------------------------------------
-      # Build GTest from source and install into prebuilt-local.
-      # cmake/deps.cmake does find_package(GTest CONFIG QUIET) first; if found
-      # via CMAKE_PREFIX_PATH it skips FetchContent entirely.
-      # Requires MSVC env (cl.exe + ninja) hence placed after Setup MSVC.
-      # -----------------------------------------------------------------------
-      - name: Build GTest
-        if: steps.cache-prebuilt.outputs.cache-hit != 'true'
-        shell: cmd
-        run: |
-          curl -fsSL "https://github.com/google/googletest/archive/refs/tags/v${{ env.GTEST_VERSION }}.zip" -o gtest.zip
-          unzip -q gtest.zip
-          cmake -G Ninja -B gtest-build -S "googletest-${{ env.GTEST_VERSION }}" ^
-            -DCMAKE_BUILD_TYPE=Release ^
-            "-DCMAKE_INSTALL_PREFIX=${{ runner.workspace }}/prebuilt-local" ^
-            "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded" ^
-            -DBUILD_GMOCK=ON
-          ninja -C gtest-build install
-          rd /s /q gtest-build "googletest-${{ env.GTEST_VERSION }}"
-          del gtest.zip
-
-      # -----------------------------------------------------------------------
-      # Configure
-      # -----------------------------------------------------------------------
-      - name: Configure
+      - name: Build LLVM/MLIR/LLD from source
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          cmake -S . -B ../build/$(basename "$PWD") \
-            -G Ninja \
-            -DBUILD_SHARED_LIBS=OFF \
-            "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded" \
+          SRC="${{ runner.workspace }}/llvm-project"
+          git init "$SRC"
+          git -C "$SRC" remote add origin https://github.com/llvm/llvm-project.git
+          git -C "$SRC" fetch --depth 1 origin "${{ env.LLVM_TAG }}"
+          git -C "$SRC" checkout FETCH_HEAD
+          cmake -G Ninja -S "$SRC/llvm" -B "${{ runner.workspace }}/build-llvm" \
             -DCMAKE_BUILD_TYPE=Release \
-            "-DCMAKE_PREFIX_PATH=${{ runner.workspace }}/prebuilt-local" \
-            "-DCMAKE_INSTALL_PREFIX=${{ runner.workspace }}/install" \
-            -DBUILD_EP=ON \
-            -DBUILD_HIP_TOOLS=ON \
-            "-DTHEROCK_DIST=${{ runner.workspace }}/therock-dist" \
-            -DHIP_ARCHITECTURES=gfx1151 \
-            -Dmorphizen_ENABLE_UNIT_TEST=OFF \
-            -DBUILD_MOCK_RUNTIME=OFF \
-            -DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON \
+            -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
+            -DLLVM_TARGETS_TO_BUILD=X86 \
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
+            -DCMAKE_INSTALL_PREFIX="${{ runner.workspace }}/llvm-install" \
+            -DLLVM_ENABLE_RTTI=ON \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_BUILD_TOOLS=ON \
+            -DLLVM_INSTALL_UTILS=ON \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-
+          cmake --build "${{ runner.workspace }}/build-llvm" --target install
 
       # -----------------------------------------------------------------------
-      # Build & Install
+      # protobuf, flatbuffers and gtest are no longer pre-built here -- they are
+      # resolved by cmake/deps.cmake during Configure/Build (find_package first,
+      # from-source FetchContent fallback, sccache-accelerated).
       # -----------------------------------------------------------------------
-      - name: Build & Install
+
+      # -----------------------------------------------------------------------
+      # Build the AMD GPU umbrella EP (onnxruntime-ep-amdgpu) + hipep-backend
+      # shim from the fork's PR branch. USE_AMDGPU forces DML/MIGraphX off and
+      # HIPEP on (no MIGraphX SDK needed); the shim loads hipep.dll (the
+      # morphizen EP, renamed via cmake/deps.cmake). Built against ort-install.
+      # Commit is pinned; bump it (and the cache key below) when the fork moves.
+      #
+      # Built BEFORE onnx-hipdnn-ep so its wheel target can bundle amdgpu-ep.dll
+      # + hipep-backend.dll (HIPEP_WHEEL_EXTRA_DLLS below). amdgpu-ep only
+      # links ort-install, so it has no dependency on the onnx-hipdnn-ep build.
+      # -----------------------------------------------------------------------
+      - name: Cache amdgpu-ep build
+        id: cache-amdgpu
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ${{ runner.workspace }}/build-amdgpu
+          # amdgpu-ep/hipep-backend link against the patched ort-install, so the
+          # key folds in the pinned fork commit + ORT version/PR list; bumping
+          # any of them forces a rebuild. On a hit the checkout + build below are
+          # skipped and the staging step finds the cached DLLs in build-amdgpu.
+          key: dep-amdgpu-19dc45a-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
+
+      - name: Checkout amdgpu-ep
+        if: steps.cache-amdgpu.outputs.cache-hit != 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: zz002/onnxruntime-ep-amdgpu
+          ref: 19dc45af58bf3b2775d87fe80455a2543c7b24fb
+          path: source-amdgpu
+          fetch-depth: 1
+          show-progress: false
+
+      - name: Build amdgpu-ep
+        if: steps.cache-amdgpu.outputs.cache-hit != 'true'
         shell: bash
-        run: cmake --build ../build/$(basename "$PWD") --parallel $(nproc) --target install
+        run: |
+          # onnxruntime-ep-amdgpu requires CMake >= 4.2; the runner's system
+          # cmake is 3.31, so use a pip-provided cmake for this build.
+          python -m pip install -q "cmake>=4.2"
+          CMAKE="$(python -c "import cmake, os; print(os.path.join(cmake.CMAKE_BIN_DIR, 'cmake.exe'))")"
+          echo "Using $("$CMAKE" --version | head -1)"
+          "$CMAKE" -G Ninja -S source-amdgpu -B "${{ runner.workspace }}/build-amdgpu" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DUSE_AMDGPU=ON \
+            -DCMAKE_PREFIX_PATH="${{ runner.workspace }}/ort-install" \
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+          "$CMAKE" --build "${{ runner.workspace }}/build-amdgpu" --target amdgpu-ep hipep-ep
 
       # -----------------------------------------------------------------------
-      # Run LIT tests (FileCheck-based IR tests; no GPU required)
+      # Build onnx-hipdnn-ep via the cross-platform build.py (same driver
+      # as the Linux CI and docs/quick_start.md). Cached LLVM/ORT prefixes are
+      # injected; protobuf/flatbuffers build from source and TheRock auto-downloads
+      # via cmake/deps.cmake. build.py's default build/install dirs resolve to
+      # ${{ runner.workspace }}/build/<repo> and ${{ runner.workspace }}/install
+      # (repo.parent), matching what the later staging step expects. The LIT tests
+      # run inside build.py after install.
+      #
+      # HIPEP_WHEEL_EXTRA_DLLS feeds the wheel target the amdgpu-ep.dll +
+      # hipep-backend.dll built above, so the morphizen wheel ships the whole
+      # AMD GPU umbrella chain in onnxruntime/capi/ next to hipep.dll.
       # -----------------------------------------------------------------------
-      - name: Run LIT tests
+      - name: Build onnx-hipdnn-ep
         shell: bash
-        run: cmake --build ../build/$(basename "$PWD") --target check-hip-mlir-lit
+        run: |
+          AMDGPU_BUILD="${{ runner.workspace }}/build-amdgpu"
+          AMDGPU_EP=$(find "$AMDGPU_BUILD" -name "amdgpu-ep.dll" -type f | head -1)
+          HIPEP_BACKEND=$(find "$AMDGPU_BUILD" -name "hipep-backend.dll" -type f | head -1)
+          echo "amdgpu-ep.dll:     $AMDGPU_EP"
+          echo "hipep-backend.dll: $HIPEP_BACKEND"
+          python build.py \
+            --config Release \
+            --cmake_generator Ninja \
+            --hip_arch gfx1151 \
+            --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install" \
+            --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON \
+            --cmake_extra_defines "HIPEP_WHEEL_EXTRA_DLLS=$AMDGPU_EP;$HIPEP_BACKEND"
 
       # -----------------------------------------------------------------------
       # Build OGA (onnxruntime-genai) for model_benchmark.exe
@@ -374,22 +380,63 @@ jobs:
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/oga-artifacts
-          # Reuse PREBUILT_CACHE_VERSION as the OGA cache version too: when
-          # the OGA build outputs change shape (e.g. wheel added), bumping
-          # PREBUILT_CACHE_VERSION invalidates both ORT and OGA caches in
-          # one step instead of needing two separate version knobs.
-          key: oga-dml-v${{ env.PREBUILT_CACHE_VERSION }}-${{ env.OGA_REF }}-ort${{ env.ONNXRUNTIME_VERSION }}
+          # OGA is built against the patched ort-install, so the key folds in
+          # both OGA's own PR list and ONNXRUNTIME_PR_PATCHES; editing either
+          # forces a rebuild. The mm<N> token bumps when the OGA artifact set
+          # changes shape, or when a PR's branch content changes under the same
+          # number (mm2: PR 2194 now carries the AMDGPU OGA integration).
+          key: oga-dml-mm2-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
 
+      # OGA is built from upstream microsoft/onnxruntime-genai + PR patches
+      # (OGA_PR_PATCHES). PR 2194 (the dynamic-shape-morphizen branch) now also
+      # carries the AMDGPU umbrella integration, so the patched upstream build
+      # is the AMDGPU-targeted OGA -- no fork checkout needed.
       - name: Checkout OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: ${{ env.OGA_REPO }}
-          ref: ${{ env.OGA_REF }}
+          repository: microsoft/onnxruntime-genai
+          ref: v${{ env.OGA_VERSION }}
           path: source-oga
           submodules: true
           fetch-depth: 1
           show-progress: false
+
+      # Fetch and apply microsoft/onnxruntime-genai PR patches listed in
+      # OGA_PR_PATCHES (env), mirroring the ONNX Runtime PR patch step. The
+      # source-oga tree is a fresh checkout so patches apply directly; the OGA
+      # cache key includes the PR list, so editing it forces a rebuild.
+      - name: Apply OGA PR patches
+        if: steps.cache-oga.outputs.cache-hit != 'true'
+        shell: pwsh
+        working-directory: ${{ github.workspace }}\source-oga
+        env:
+          OGA_PRS: ${{ env.OGA_PR_PATCHES }}
+        run: |
+          $prs = $env:OGA_PRS.Trim()
+          if (-not $prs) {
+            Write-Host "OGA_PR_PATCHES is empty; nothing to apply"
+            exit 0
+          }
+          # pull/<n>.patch is a format-patch series; apply with `git am` so that
+          # intra-series file renames (morphizen_ep -> amdgpu) replay against the
+          # correct intermediate tree. `git apply` flattens the series and chokes
+          # on the rename whose pre-image only exists after an earlier commit.
+          git config user.email "ci@rocm.amd.com"
+          git config user.name "ROCm CI"
+          foreach ($pr in $prs -split '\s+') {
+            if (-not $pr) { continue }
+            $url = "https://github.com/microsoft/onnxruntime-genai/pull/$pr.patch"
+            $tmp = Join-Path $env:RUNNER_TEMP "oga-pr-$pr.patch"
+            Write-Host "Fetching $url"
+            Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+            Write-Host "Applying PR #$pr"
+            git am --3way --whitespace=nowarn $tmp
+            if ($LASTEXITCODE -ne 0) {
+              git am --abort
+              throw "PR #$pr failed to apply (exit $LASTEXITCODE)"
+            }
+          }
 
       - name: Prepare ORT_HOME for OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
@@ -397,7 +444,7 @@ jobs:
         run: |
           ORT_HOME="${{ runner.workspace }}/oga-ort-home"
           mkdir -p "$ORT_HOME/include" "$ORT_HOME/lib"
-          PREBUILT="${{ runner.workspace }}/prebuilt-local"
+          PREBUILT="${{ runner.workspace }}/ort-install"
           cp -r "$PREBUILT/include/onnxruntime/"* "$ORT_HOME/include/"
           cp "$PREBUILT/lib/"onnxruntime*.lib "$ORT_HOME/lib/"
           cp "$PREBUILT/bin/onnxruntime.dll" "$ORT_HOME/lib/"
@@ -435,6 +482,35 @@ jobs:
           cp "$OGA_WHEEL" "${{ runner.workspace }}/oga-artifacts/"
           echo "Cached OGA wheel: $(basename "$OGA_WHEEL")"
 
+          # Cache the Python e2e benchmark scripts (benchmark_e2e.py + its metrics
+          # helper) so the gpu-test wheel smoke can run them without an OGA source
+          # checkout (which only happens on a cache miss).
+          mkdir -p "${{ runner.workspace }}/oga-artifacts/benchmark-python"
+          cp "${{ github.workspace }}/source-oga/benchmark/python/benchmark_e2e.py" \
+             "${{ github.workspace }}/source-oga/benchmark/python/metrics.py" \
+             "${{ runner.workspace }}/oga-artifacts/benchmark-python/"
+
+          # build.py --skip_examples leaves examples/c unbuilt. Build only
+          # model_mm (the multimodal example used by VL model CI) as a standalone
+          # cmake project against the just-built OGA lib + ORT_HOME. build.py's
+          # build_examples ignores CXXFLAGS, so set -DCMAKE_CXX_FLAGS=-FS here to
+          # force synchronous compiler-PDB writes (parallel model_mm.cpp /
+          # common.cpp otherwise clash on vc140.pdb -> C1041).
+          cmake -S "${{ github.workspace }}/source-oga/examples/c" \
+            -B "${{ runner.workspace }}/build-oga-examples" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DMODEL_MM=ON -DCMAKE_CXX_FLAGS=-FS \
+            -DORT_INCLUDE_DIR="$ORT_HOME/include" \
+            -DORT_LIB_DIR="$ORT_HOME/lib" \
+            -DOGA_INCLUDE_DIR="${{ github.workspace }}/source-oga/src" \
+            -DOGA_LIB_DIR="$OGA_OUT"
+          cmake --build "${{ runner.workspace }}/build-oga-examples" --target model_mm
+          cp "${{ runner.workspace }}/build-oga-examples/model_mm.exe" \
+            "${{ runner.workspace }}/oga-artifacts/"
+
+          # benchmark_multimodal.py drives model_mm for the VL benchmark.
+          cp "${{ github.workspace }}/source-oga/benchmark/python/benchmark_multimodal.py" \
+            "${{ runner.workspace }}/oga-artifacts/"
+
       # -----------------------------------------------------------------------
       # Stage GPU test package:
       #   staging/bin/    – executables + DLLs needed at runtime on the GPU box
@@ -446,8 +522,8 @@ jobs:
         run: |
           mkdir -p staging/bin staging/lib
 
-          # onnxruntime_perf_test.exe + onnxruntime.dll – from prebuilt-local
-          PREBUILT="${{ runner.workspace }}/prebuilt-local"
+          # onnxruntime_perf_test.exe + onnxruntime.dll – from ort-install
+          PREBUILT="${{ runner.workspace }}/ort-install"
           PERF_TEST=$(find "$PREBUILT" -name "onnxruntime_perf_test.exe" -type f | head -1)
           if [ -z "$PERF_TEST" ]; then
             echo "ERROR: onnxruntime_perf_test.exe not found in $PREBUILT"
@@ -460,27 +536,46 @@ jobs:
           cp "$PREBUILT/bin/onnxruntime_providers_shared.dll" staging/bin/
           cp "$PREBUILT/bin/DirectML.dll" staging/bin/
 
-          # MorphiZen EP DLL + other DLLs/EXEs from onnx-hipdnn-ep install
+          # MorphiZen EP DLL + per-arch custom_kernels_gfx<arch>.dll + other
+          # install DLLs/EXEs (kernel DLL must sit next to the EP DLL so
+          # LlvmIrJit's GetModuleFileName-anchored Load finds it).
           cp "${{ runner.workspace }}/install/bin/"*.dll staging/bin/ 2>/dev/null || true
           cp "${{ runner.workspace }}/install/bin/"*.exe staging/bin/ 2>/dev/null || true
 
-          # mm unit test binary (requires a real GPU; runs in gpu-test job)
-          MM_TEST=$(find "${{ runner.workspace }}/build" -name "mm_tests.exe" -type f | head -1)
-          if [ -n "$MM_TEST" ]; then
-            cp "$MM_TEST" staging/bin/
-            echo "  Packaged: mm_tests.exe <- $MM_TEST"
-          else
-            echo "  WARNING: mm_tests.exe not found in build tree"
+          # AMD GPU umbrella EP + hipep-backend shim (built from the fork PR
+          # above). The umbrella loads hipep-backend.dll, which loads hipep.dll
+          # (the morphizen EP, already copied from install/bin). All three sit
+          # together in staging/bin so the load chain resolves.
+          AMDGPU_BUILD="${{ runner.workspace }}/build-amdgpu"
+          AMDGPU_EP=$(find "$AMDGPU_BUILD" -name "amdgpu-ep.dll" -type f | head -1)
+          HIPEP_BACKEND=$(find "$AMDGPU_BUILD" -name "hipep-backend.dll" -type f | head -1)
+          if [ -z "$AMDGPU_EP" ] || [ -z "$HIPEP_BACKEND" ]; then
+            echo "ERROR: amdgpu-ep.dll or hipep-backend.dll not found in $AMDGPU_BUILD"
+            exit 1
           fi
+          cp "$AMDGPU_EP" staging/bin/
+          cp "$HIPEP_BACKEND" staging/bin/
 
-          # Import libraries needed by the MorphiZen JIT linker (lld-link).
-          # hip-compiler.dll embeds the build-time install path for
-          # hip_custom_kernels.lib; staging/lib/ preserves them so the
-          # gpu-test job can restore them at the expected location.
+          # Smoke: the per-arch kernel DLL must be present in staging/bin/
+          # for the gpu-test job to load it. Failure here means the install
+          # rule in 3rd-party/custom_kernels/CMakeLists.txt regressed.
+          KERNEL_DLL="staging/bin/custom_kernels_gfx1151.dll"
+          if [ ! -f "$KERNEL_DLL" ]; then
+            echo "ERROR: $KERNEL_DLL missing from install (HIP_ARCHITECTURES=gfx1151)"
+            ls -1 "${{ runner.workspace }}/install/bin/" || true
+            exit 1
+          fi
+          echo "OK: $(basename "$KERNEL_DLL") present"
+
+          # Import libraries that get bundled into the MorphiZen JIT-linker
+          # path. Kept as a glob so the set evolves with the install rules
+          # without touching this workflow each time.
           cp "${{ runner.workspace }}/install/lib/"*.lib staging/lib/ 2>/dev/null || true
 
-          # amdhip64_7.dll – HIP runtime required at inference time
-          cp "${{ runner.workspace }}/therock-dist/bin/amdhip64_7.dll" staging/bin/
+          # amdhip64_7.dll – HIP runtime required at inference time. TheRock was
+          # auto-downloaded by cmake/deps.cmake into the build tree's _therock.
+          THEROCK_DIR="../build/$(basename "$PWD")/_therock"
+          cp "$THEROCK_DIR/bin/amdhip64_7.dll" staging/bin/
 
           # MorphiZen EP config
           cp etc/morphizen_config.json staging/
@@ -511,20 +606,21 @@ jobs:
           done
 
           # ---------------------------------------------------------------
-          # OGA artifacts: model_benchmark.exe + onnxruntime-genai.dll
+          # OGA artifacts: model_benchmark.exe + onnxruntime-genai.dll, plus
+          # model_mm.exe + benchmark_multimodal.py for the VL model tests.
           # ---------------------------------------------------------------
           cp "${{ runner.workspace }}/oga-artifacts/model_benchmark.exe" staging/bin/
           cp "${{ runner.workspace }}/oga-artifacts/onnxruntime-genai.dll" staging/bin/
+          cp "${{ runner.workspace }}/oga-artifacts/model_mm.exe" staging/bin/
+          cp "${{ runner.workspace }}/oga-artifacts/benchmark_multimodal.py" staging/bin/
 
           # ---------------------------------------------------------------
-          # Python wheels (ORT + OGA cp314) — bundled into the same artifact
-          # under staging/wheels/ so downstream consumers download a single
-          # zip. Both wheels are cached inside prebuilt-local / oga-artifacts
-          # respectively, so cache hits restore them without re-running ORT
-          # or OGA from source.
+          # Python wheels (ORT + OGA cp314) bundled into the artifact under
+          # staging/wheels/. Both are cached inside ort-install / oga-artifacts,
+          # so cache hits restore them without rebuilding ORT / OGA.
           # ---------------------------------------------------------------
           mkdir -p staging/wheels
-          ORT_WHEEL=$(find "${{ runner.workspace }}/prebuilt-local/wheels" \
+          ORT_WHEEL=$(find "${{ runner.workspace }}/ort-install/wheels" \
             -name "onnxruntime_directml-*.whl" -type f | head -1)
           OGA_WHEEL=$(find "${{ runner.workspace }}/oga-artifacts" \
             -name "onnxruntime_genai_directml-*.whl" -type f | head -1)
@@ -545,6 +641,40 @@ jobs:
         with:
           name: gpu-test-package
           path: staging/
+          retention-days: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release_')) && 14 || 3 }}
+
+      # -----------------------------------------------------------------------
+      # Python wheel package: the three project wheels + run_onnx.py + OGA
+      # benchmark scripts. ROCm wheels are NOT bundled — they are installed
+      # from repo.amd.com at runtime (CI smoke) or downloaded by the local
+      # package_release.ps1 script when building the offline distribution.
+      # -----------------------------------------------------------------------
+      - name: Stage Python wheel package
+        shell: bash
+        run: |
+          mkdir -p wheelpkg/wheels
+          ORT_WHEEL=$(find "${{ runner.workspace }}/ort-install/wheels" \
+            -name "onnxruntime_directml-*.whl" -type f | head -1)
+          OGA_WHEEL=$(find "${{ runner.workspace }}/oga-artifacts" \
+            -name "onnxruntime_genai_directml-*.whl" -type f | head -1)
+          EP_WHEEL=$(find "../build/$(basename "$PWD")/python/dist" \
+            -name "onnxruntime_ep_hipep-*.whl" -type f | head -1)
+          if [ -z "$ORT_WHEEL" ] || [ -z "$OGA_WHEEL" ] || [ -z "$EP_WHEEL" ]; then
+            echo "ERROR: wheel(s) missing"
+            echo "  ORT=$ORT_WHEEL OGA=$OGA_WHEEL EP=$EP_WHEEL"
+            exit 1
+          fi
+          cp "$ORT_WHEEL" "$OGA_WHEEL" "$EP_WHEEL" wheelpkg/wheels/
+          cp python/examples/run_onnx.py wheelpkg/
+          cp "${{ runner.workspace }}/oga-artifacts/benchmark-python/"*.py wheelpkg/
+          echo "=== Python wheel package layout ==="
+          find wheelpkg/ -maxdepth 2 -mindepth 1 | sort
+
+      - name: Upload Python wheel package
+        uses: actions/upload-artifact@v4
+        with:
+          name: hipep-python-package
+          path: wheelpkg/
           retention-days: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release_')) && 14 || 3 }}
 
   # ---------------------------------------------------------------------------
@@ -580,12 +710,21 @@ jobs:
           if exist gpu-test-package rd /s /q gpu-test-package
           if exist l2-results rd /s /q l2-results
           if exist oga-results rd /s /q oga-results
+          if exist oga-smoke-venv rd /s /q oga-smoke-venv
+          if exist oga-smoke-results rd /s /q oga-smoke-results
+          if exist wheelpkg rd /s /q wheelpkg
 
       - name: Download GPU test package
         uses: actions/download-artifact@v4
         with:
           name: gpu-test-package
           path: gpu-test-package
+
+      - name: Download Python wheel package
+        uses: actions/download-artifact@v4
+        with:
+          name: hipep-python-package
+          path: wheelpkg
 
       # TheRock DLLs are required at runtime on the GPU machine.
       # Download is fast enough that caching is not needed on the self-hosted runner.
@@ -600,33 +739,17 @@ jobs:
           tar -xzf therock.tar.gz -C $dist --strip-components=1
           Remove-Item therock.tar.gz
 
-      # -----------------------------------------------------------------------
-      # Run mm unit tests on the real GPU machine.
-      # mm_tests.exe is a standalone GTest binary that calls hipMalloc etc.
-      # -----------------------------------------------------------------------
-      - name: Run mm unit tests (GPU)
-        shell: cmd
-        run: |
-          set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
-          gpu-test-package\bin\mm_tests.exe
-
-      # Run perf test against seq128 models via MorphiZen EP.
-      # Models are pre-placed on the runner at C:\actions-runner\_work\model\.
-      # -t 30        : run for 30 seconds per model
-      # -c 1         : single session
-      # -s           : sequential execution
-      # -I           : generate random inputs (no test data files needed)
-      # THEROCK_DIST : required by discoverLibraries() to locate HIP libs
-      # LIB          : all link-time libs are packaged in gpu-test-package/lib/
-      #                (MSVC release CRT + hip_custom_kernels); no VS required.
+      # Run perf test against seq128 models via MorphiZen EP (models pre-placed
+      # at C:\actions-runner\_work\model\). Default bitcode (LLVM_IR) path only
+      # needs PATH -> ROCm runtime DLLs (therock-dist/bin) + co-located
+      # custom_kernels; the in-memory JIT reads neither THEROCK_DIST nor LIB
+      # (those are NATIVE-only, set in the native smoke steps below).
       # Output is tee'd to results/ for QPS extraction. Non-zero exit code
       # sets FAILED but continues so all models are tested.
       - name: Run onnxruntime_perf_test (GPU)
         shell: cmd
         run: |
-          set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
-          set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
           set MODEL_DIR=${{ runner.workspace }}\model
           if not exist "%MODEL_DIR%" (
             echo [ERROR] MODEL_DIR not found: %MODEL_DIR%
@@ -644,8 +767,8 @@ jobs:
           for /r "%MODEL_DIR%" %%M in (*seq128.onnx) do (
             echo === Testing %%~nxM ===
             onnxruntime_perf_test.exe ^
-              --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" ^
-              --plugin_eps "MorphiZenExecutionProvider" ^
+              --plugin_ep_libs "hipep|hipep.dll" ^
+              --plugin_eps "hipep" ^
               --plugin_ep_options "config_file|..\morphizen_config.json" ^
               -C "session.disable_cpu_ep_fallback|1" ^
               -t 30 -c 1 -s ^
@@ -654,6 +777,94 @@ jobs:
             if errorlevel 1 set FAILED=1
           )
           exit /b %FAILED%
+
+      # ----------------------------------------------------------------------
+      # Native artifact smoke test (artifact_format=NATIVE), direct hipep EP.
+      # Exercises the dual-format path: CompilerDriver emits a per-model .dll
+      # (lld-link in-process), InferenceState loads it via morphizen::Plugin
+      # (LoadLibrary). LLVM IR stays the production default; native is opt-in.
+      # lld-link consumes the MSVC/UCRT release CRT import libs + hipdnn-ep-tls.lib
+      # staged into gpu-test-package/lib (+ LIB) to link the model .dll. This is
+      # now a real gate (no exit /b 0): if native breaks, the job fails.
+      # ----------------------------------------------------------------------
+      - name: Run native-artifact smoke test (GPU)
+        if: always()
+        shell: cmd
+        run: |
+          set THEROCK_DIST=${{ runner.workspace }}\therock-dist
+          set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
+          set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
+          set MODEL_DIR=${{ runner.workspace }}\model
+          if not exist "%MODEL_DIR%" (
+            echo [SKIP] MODEL_DIR not found: %MODEL_DIR%
+            exit /b 0
+          )
+          cd gpu-test-package\bin
+          mkdir ..\results-native 2>nul
+          rem Smoke, not a benchmark: first seq128 model, ONE inference (-r 1).
+          rem Exercises native compile -> link -> load -> execute end-to-end
+          rem without a full perf sweep (native is opt-in / non-production; the
+          rem LLVM-IR default path is what the perf jobs above measure).
+          set "SMOKE_MODEL="
+          for /r "%MODEL_DIR%" %%M in (*seq128.onnx) do if not defined SMOKE_MODEL set "SMOKE_MODEL=%%M"
+          if not defined SMOKE_MODEL (
+            echo [SKIP] no *seq128.onnx model under %MODEL_DIR%
+            exit /b 0
+          )
+          echo === Native smoke %SMOKE_MODEL% ===
+          onnxruntime_perf_test.exe ^
+            --plugin_ep_libs "hipep|hipep.dll" ^
+            --plugin_eps "hipep" ^
+            --plugin_ep_options "config_file|..\morphizen_config.json artifact_format|NATIVE" ^
+            -C "session.disable_cpu_ep_fallback|1" ^
+            -r 1 -c 1 -s ^
+            "%SMOKE_MODEL%" > "..\results-native\smoke.txt" 2>&1
+          set RC=%ERRORLEVEL%
+          type "..\results-native\smoke.txt"
+          rem Real gate: hipdnn-ep-tls.lib is now staged into gpu-test-package/lib
+          rem so the NATIVE compile -> lld-link -> load -> execute path must pass.
+          exit /b %RC%
+
+      # ----------------------------------------------------------------------
+      # AMD GPU umbrella NATIVE smoke test: same NATIVE compile/link/load path,
+      # but driven through the amdgpu-ep umbrella instead of the hipep EP
+      # directly. profile=llm (an umbrella option, ep.amdgpuexecutionprovider.
+      # prefix) selects the hipep backend; the umbrella forwards non-umbrella
+      # session-config entries verbatim, so artifact_format is passed as a raw
+      # ep.hipep.* entry to reach the backend. Real gate (no exit /b 0).
+      # ----------------------------------------------------------------------
+      - name: Run AMD GPU umbrella native smoke test (GPU)
+        if: always()
+        shell: cmd
+        run: |
+          set THEROCK_DIST=${{ runner.workspace }}\therock-dist
+          set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
+          set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
+          set MODEL_DIR=${{ runner.workspace }}\model
+          if not exist "%MODEL_DIR%" (
+            echo [SKIP] MODEL_DIR not found: %MODEL_DIR%
+            exit /b 0
+          )
+          cd gpu-test-package\bin
+          mkdir ..\results-amdgpu-native 2>nul
+          set "SMOKE_MODEL="
+          for /r "%MODEL_DIR%" %%M in (*seq128.onnx) do if not defined SMOKE_MODEL set "SMOKE_MODEL=%%M"
+          if not defined SMOKE_MODEL (
+            echo [SKIP] no *seq128.onnx model under %MODEL_DIR%
+            exit /b 0
+          )
+          echo === AMD GPU umbrella native smoke %SMOKE_MODEL% ===
+          onnxruntime_perf_test.exe ^
+            --plugin_ep_libs "AMDGPUExecutionProvider|amdgpu-ep.dll" ^
+            --plugin_eps "AMDGPUExecutionProvider" ^
+            --plugin_ep_options "profile|llm" ^
+            -C "session.disable_cpu_ep_fallback|1" ^
+            -C "ep.hipep.artifact_format|NATIVE" ^
+            -r 1 -c 1 -s ^
+            "%SMOKE_MODEL%" > "..\results-amdgpu-native\smoke.txt" 2>&1
+          set RC=%ERRORLEVEL%
+          type "..\results-amdgpu-native\smoke.txt"
+          exit /b %RC%
 
       # ----------------------------------------------------------------------
       # EPContext export + import perf test (PR #132 sidecar-in-tar path).
@@ -668,10 +879,8 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $PSNativeCommandUseErrorActionPreference = $false
-          $env:THEROCK_DIST = "${{ runner.workspace }}\therock-dist"
           $pkgBin = Join-Path $PWD "gpu-test-package\bin"
           $env:PATH = "${{ runner.workspace }}\therock-dist\bin;$pkgBin;$env:PATH"
-          $env:LIB = (Join-Path $PWD "gpu-test-package\lib") + ";${{ runner.workspace }}\therock-dist\lib"
 
           $modelDir = "${{ runner.workspace }}\model"
           if (-not (Test-Path $modelDir)) {
@@ -699,8 +908,8 @@ jobs:
 
             Write-Host "=== EPContext export: $($m.Name) ==="
             & .\onnxruntime_perf_test.exe `
-              --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" `
-              --plugin_eps "MorphiZenExecutionProvider" `
+              --plugin_ep_libs "hipep|hipep.dll" `
+              --plugin_eps "hipep" `
               --plugin_ep_options "config_file|..\morphizen_config.json" `
               -C "session.disable_cpu_ep_fallback|1 ep.context_enable|1 ep.context_embed_mode|0 ep.context_file_path|$ctxPath" `
               -t 5 -c 1 -s -I `
@@ -719,8 +928,8 @@ jobs:
 
             Write-Host "=== EPContext import: $($m.Name) ==="
             & .\onnxruntime_perf_test.exe `
-              --plugin_ep_libs "MorphiZenExecutionProvider|onnxruntime_morphizen_ep.dll" `
-              --plugin_eps "MorphiZenExecutionProvider" `
+              --plugin_ep_libs "hipep|hipep.dll" `
+              --plugin_eps "hipep" `
               --plugin_ep_options "config_file|..\morphizen_config.json" `
               -C "session.disable_cpu_ep_fallback|1" `
               -t 30 -c 1 -s -I `
@@ -746,16 +955,17 @@ jobs:
         run: |
           $ErrorActionPreference = 'Continue'
           $PSNativeCommandUseErrorActionPreference = $false
-          $env:THEROCK_DIST = "${{ runner.workspace }}\therock-dist"
           $pkgBin = Join-Path $PWD "gpu-test-package\bin"
           $env:PATH = "${{ runner.workspace }}\therock-dist\bin;$pkgBin;$env:PATH"
-          $env:LIB = (Join-Path $PWD "gpu-test-package\lib") + ";${{ runner.workspace }}\therock-dist\lib"
-          $env:HIP_CUSTOM_KERNELS_DIR = Join-Path $PWD "gpu-test-package\lib"
 
-          $ogaModelRoot = "${{ runner.workspace }}\oga-models"
+          # amdgpu-oga-models holds AMDGPU-profile genai_config copies; it was
+          # generated once on the GPU runner and persists across runs, so just
+          # consume it here (no re-copy / no config rewrite). It must be present
+          # -- treat its absence as an error, not a skip.
+          $ogaModelRoot = "${{ runner.workspace }}\amdgpu-oga-models"
           if (-not (Test-Path $ogaModelRoot)) {
-            Write-Host "[SKIP] OGA model directory not found: $ogaModelRoot"
-            exit 0
+            Write-Host "[ERROR] AMDGPU OGA model directory not found: $ogaModelRoot"
+            exit 1
           }
 
           $benchmark = Join-Path $pkgBin "model_benchmark.exe"
@@ -764,24 +974,15 @@ jobs:
             exit 0
           }
 
-          $epDll = Join-Path $pkgBin "onnxruntime_morphizen_ep.dll"
           New-Item -ItemType Directory -Force -Path "oga-results" | Out-Null
 
           $failed = 0
           foreach ($modelDir in (Get-ChildItem $ogaModelRoot -Directory)) {
-            $pipelineConfig = Join-Path $modelDir.FullName "genai_config_128.json"
-            if (-not (Test-Path $pipelineConfig)) {
-              Write-Host "[SKIP] No genai_config_128.json in $($modelDir.Name)"
+            $genaiCfgPath = Join-Path $modelDir.FullName "genai_config.json"
+            if (-not (Test-Path $genaiCfgPath)) {
+              Write-Host "[SKIP] No genai_config.json in $($modelDir.Name)"
               continue
             }
-            $genaiCfgPath = Join-Path $modelDir.FullName "genai_config.json"
-            Copy-Item $pipelineConfig $genaiCfgPath -Force
-            $cfgJson = Get-Content $genaiCfgPath -Raw | ConvertFrom-Json
-            $epName = try {
-              $opts = $cfgJson.model.decoder.session_options.provider_options[0]
-              ($opts.PSObject.Properties | Select-Object -First 1).Name
-            } catch { $null }
-            if (-not $epName) { $epName = "MorphiZenExecutionProvider" }
             $promptFile = Join-Path $modelDir.FullName "prompt.txt"
             $promptArgs = if (Test-Path $promptFile) {
               @("--prompt_file", $promptFile)
@@ -789,16 +990,106 @@ jobs:
               @("-l", "128")
             }
             $outFile = "oga-results\$($modelDir.Name).txt"
-            Write-Host "=== OGA Benchmark: $($modelDir.Name) (EP=$epName) ==="
-            & $benchmark `
-              -i $modelDir.FullName `
-              -g 128 -r 5 -w 1 -b 1 -ml -1 `
-              @promptArgs `
-              --ep_library $epName $epDll `
-              -v 2>&1 | Tee-Object -FilePath $outFile
-            if ($LASTEXITCODE -ne 0) { $failed = 1 }
+            # MorphiZenEP is selected via genai_config.json provider_options and
+            # the EP DLL is auto-discovered next to onnxruntime-genai.dll. Do NOT
+            # pass --ep_library: upstream model_benchmark rejects it, and where
+            # supported it double-registers the EP and crashes on shutdown.
+            Write-Host "=== OGA Benchmark: $($modelDir.Name) ==="
+            $bargs = @('-i', $modelDir.FullName, '-g', '128', '-r', '5', '-w', '1', '-b', '1') + $promptArgs + @('-v')
+            $tmpOut = [System.IO.Path]::GetTempFileName()
+            $tmpErr = [System.IO.Path]::GetTempFileName()
+            # Launch model_benchmark and sample its per-process GPU memory via
+            # Windows perf counters while it runs (peak of dedicated + shared).
+            # External measurement keeps the EP/inference path untouched.
+            $proc = Start-Process -FilePath $benchmark -ArgumentList $bargs `
+              -NoNewWindow -PassThru `
+              -RedirectStandardOutput $tmpOut -RedirectStandardError $tmpErr
+            # Cache the native handle so $proc.ExitCode is readable after exit;
+            # without this Start-Process -PassThru can leave ExitCode $null, and
+            # `$null -ne 0` is $true in PowerShell -> false failure.
+            $null = $proc.Handle
+            $peakDed = 0L
+            $peakShared = 0L
+            while (-not $proc.HasExited) {
+              Start-Sleep -Milliseconds 1500
+              try {
+                $d = (Get-Counter "\GPU Process Memory(pid_$($proc.Id)_*)\Dedicated Usage" -ErrorAction Stop).CounterSamples |
+                  Measure-Object -Property CookedValue -Sum
+                if ($d.Sum -gt $peakDed) { $peakDed = [long]$d.Sum }
+                $s = (Get-Counter "\GPU Process Memory(pid_$($proc.Id)_*)\Shared Usage" -ErrorAction Stop).CounterSamples |
+                  Measure-Object -Property CookedValue -Sum
+                if ($s.Sum -gt $peakShared) { $peakShared = [long]$s.Sum }
+              } catch { }
+            }
+            $proc.WaitForExit()
+            # Reassemble tool output into $outFile (so the publish-step parsers
+            # see model_benchmark's TTFT/TPS/Peak working set), echo to the log,
+            # then append the sampled GPU peaks for the publish step.
+            Get-Content $tmpOut, $tmpErr -ErrorAction SilentlyContinue | Set-Content $outFile
+            Add-Content $outFile "[GPUMEM] Dedicated GPU memory: $peakDed bytes"
+            Add-Content $outFile "[GPUMEM] Shared GPU memory: $peakShared bytes"
+            Get-Content $outFile | Write-Host
+            Remove-Item $tmpOut, $tmpErr -ErrorAction SilentlyContinue
+            $ec = $proc.ExitCode
+            if ($null -ne $ec -and $ec -ne 0) { $failed = 1 }
           }
           exit $failed
+
+      # -----------------------------------------------------------------------
+      # OGA wheel smoke: install the project wheels from the morphizen-python-
+      # package artifact + ROCm wheels from repo.amd.com, then run OGA's
+      # benchmark_e2e.py against a real model.
+      # -----------------------------------------------------------------------
+      # The cp314 ORT/OGA wheels need Python 3.14 to create the smoke venv (the
+      # runner's default python may be a different version).
+      - name: Setup Python 3.14 (wheel smoke)
+        if: always()
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Run OGA wheel smoke (Python)
+        if: always()
+        timeout-minutes: 40
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          $model = "${{ runner.workspace }}\amdgpu-oga-models\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml"
+          if (-not (Test-Path $model)) { Write-Host "[SKIP] model not found: $model"; exit 0 }
+
+          # The morphizen wheel now bundles the whole AMD GPU umbrella chain
+          # (amdgpu-ep.dll + hipep-backend.dll + hipep.dll + hip-compiler +
+          # custom_kernels) into onnxruntime/capi/, next to onnxruntime.dll where
+          # OGA discovers the EP. No DLL injection needed — exercise the wheel
+          # path end-to-end.
+          $pkg = "$PWD\wheelpkg"
+          $venv = "$PWD\oga-smoke-venv"
+          if (Test-Path $venv) { Remove-Item $venv -Recurse -Force }
+          python -m venv $venv
+          $py = "$venv\Scripts\python.exe"
+
+          # Install project wheels from local dir + ROCm wheels from repo.amd.com.
+          Push-Location "$pkg\wheels"
+          & $py -m pip install --quiet `
+            (Get-Item onnxruntime_directml-*.whl).Name `
+            (Get-Item onnxruntime_ep_hipep-*.whl).Name `
+            (Get-Item onnxruntime_genai_directml-*.whl).Name `
+            --extra-index-url https://repo.amd.com/rocm/whl/gfx1151/ `
+            psutil tqdm pandas
+          Pop-Location
+          if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] wheel install failed"; exit 1 }
+          & "$venv\Scripts\rocm-sdk.exe" init   # expand rocm[devel] import libs
+          if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] rocm-sdk init failed"; exit 1 }
+
+          # run_onnx.py --benchmark sets up env (THEROCK_DIST/LIB/PATH) from the
+          # installed wheels, then delegates to benchmark_e2e.py.
+          New-Item -ItemType Directory -Force -Path oga-smoke-results | Out-Null
+          & $py "$pkg\run_onnx.py" --benchmark "$pkg\benchmark_e2e.py" `
+            -i $model -l 128 -g 128 -r 5 -w 1 -b 1 -m -1 -v `
+            2>&1 | Tee-Object -FilePath "oga-smoke-results\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml.txt"
+          exit $LASTEXITCODE
 
       # -----------------------------------------------------------------------
       # L2 accuracy test: compare MorphiZen EP vs CPU output for each model
@@ -810,9 +1101,10 @@ jobs:
         shell: cmd
         run: |
           setlocal enabledelayedexpansion
-          set THEROCK_DIST=${{ runner.workspace }}\therock-dist
           set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
-          set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
+          rem The EP DLL is now hipep.dll; hip-onnx-runner's legacy default name
+          rem is onnxruntime_morphizen_ep.dll, so point it at the new DLL.
+          set MORPHIZEN_EP_LIB=%CD%\gpu-test-package\bin\hipep.dll
           set L2_MODEL_DIR=${{ runner.workspace }}\l2-test-models
           if not exist "%L2_MODEL_DIR%" (
             echo [SKIP] L2 model directory not found: %L2_MODEL_DIR%
@@ -1007,18 +1299,53 @@ jobs:
             $ttft = if ($ttftMatch.Success) { "{0:F1}" -f ([double]$ttftMatch.Groups[1].Value / 1000) } else { "-" }
             $tps  = if ($tpsMatch.Success) { "{0:F1}" -f [double]$tpsMatch.Groups[2].Value } else { "-" }
             $mem  = if ($memMatch.Success) { "{0:F2}" -f ([double]$memMatch.Groups[1].Value / 1GB) } else { "-" }
-            $ogaRows += "| $model | 1 | 5 | 128 | 128 | $ttft | $tps | $mem |`n"
+            # GPU peak sampled externally during the run (see OGA benchmark
+            # step). Report the total (dedicated + shared): on the UMA APU the
+            # WDDM dedicated/shared split drifts with memory pressure run-to-run,
+            # but their sum -- the real footprint -- is stable.
+            $gpuDed = [regex]::Match($content, '\[GPUMEM\]\s*Dedicated GPU memory:\s+(\d+)\s+bytes')
+            $gpuSh  = [regex]::Match($content, '\[GPUMEM\]\s*Shared GPU memory:\s+(\d+)\s+bytes')
+            $gpuGB = if ($gpuDed.Success -or $gpuSh.Success) {
+              $tot = 0.0
+              if ($gpuDed.Success) { $tot += [double]$gpuDed.Groups[1].Value }
+              if ($gpuSh.Success) { $tot += [double]$gpuSh.Groups[1].Value }
+              "{0:F2}" -f ($tot / 1GB)
+            } else { "-" }
+            $ogaRows += "| $model | 1 | 5 | 128 | 128 | $ttft | $tps | $mem | $gpuGB |`n"
           }
           $ogaSection = ""
           if ($ogaRows) {
             $ogaSection = "`n## OGA Benchmark Results`n`n" +
-                          "| Model | Warmup | Reps | Prompt Len | Gen Tokens | TTFT (ms) | TPS | Peak Mem (GB) |`n" +
-                          "|-------|----:|----:|----:|----:|----:|----:|----:|`n" +
+                          "| Model | Warmup | Reps | Prompt Len | Gen Tokens | TTFT (ms) | TPS | Peak Mem (GB) | GPU Mem (GB) |`n" +
+                          "|-------|----:|----:|----:|----:|----:|----:|----:|----:|`n" +
                           $ogaRows
           }
 
+          # --- OGA Python wheel smoke (benchmark_e2e.py) results ---
+          $smokeRows = ""
+          foreach ($f in (Get-ChildItem "oga-smoke-results/*.txt" -ErrorAction SilentlyContinue)) {
+            $model = $f.BaseName
+            $content = Get-Content $f.FullName -Raw
+            $ppMatch = [regex]::Match($content, 'Average Prompt Processing Throughput \(per token\):\s+([\d.]+)')
+            $tgMatch = [regex]::Match($content, 'Average Token Generation Throughput \(per token\):\s+([\d.]+)')
+            $ttft = if ($ppMatch.Success) { "{0:F0}" -f (128.0 / [double]$ppMatch.Groups[1].Value * 1000) } else { "-" }
+            $tps  = if ($tgMatch.Success) { "{0:F1}" -f [double]$tgMatch.Groups[1].Value } else { "-" }
+            if ($tgMatch.Success) {
+              $smokeRows += "| $model | $ttft | $tps |`n"
+            } else {
+              $smokeRows += "| $model | failed | - |`n"
+            }
+          }
+          $smokeSection = ""
+          if ($smokeRows) {
+            $smokeSection = "`n## OGA Wheel Smoke (Python benchmark_e2e.py)`n`n" +
+                            "| Model | TTFT (ms) | TPS |`n" +
+                            "|-------|----:|----:|`n" +
+                            $smokeRows
+          }
+
           $footer = "`nRun: [${{ github.run_number }}]($runUrl) - Commit: ``$sha``"
-          $summary = $header + $tableRows + $epctxSection + $ogaSection + $footer
+          $summary = $header + $tableRows + $epctxSection + $ogaSection + $smokeSection + $footer
 
           # Always write to step summary and log
           Write-Host $summary

@@ -171,10 +171,16 @@ endfunction()
 
 #------------------------------------------------------------------------------
 # Internal: Build architecture flags
+#
+# ARCH_LIST overrides the global HIP_ARCHITECTURES when non-empty so a single
+# configure can build N per-arch shared libraries each with one fatbin slice.
 #------------------------------------------------------------------------------
-function(_hip_get_arch_flags OUTPUT_VAR)
+function(_hip_get_arch_flags ARCH_LIST OUTPUT_VAR)
     set(arch_flags "")
-    foreach(arch ${HIP_ARCHITECTURES})
+    if(NOT ARCH_LIST)
+        set(ARCH_LIST ${HIP_ARCHITECTURES})
+    endif()
+    foreach(arch ${ARCH_LIST})
         list(APPEND arch_flags "--offload-arch=${arch}")
     endforeach()
     set(${OUTPUT_VAR} ${arch_flags} PARENT_SCOPE)
@@ -182,10 +188,10 @@ endfunction()
 
 #------------------------------------------------------------------------------
 # Internal: Compile HIP sources to object files (Windows only)
-# For multi-config generators, creates per-config object files
+# For multi-config generators, creates per-config object files.
 #------------------------------------------------------------------------------
-function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS OUTPUT_OBJS)
-    _hip_get_arch_flags(arch_flags)
+function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS ARCH_LIST OUTPUT_OBJS)
+    _hip_get_arch_flags("${ARCH_LIST}" arch_flags)
 
     # Build include flags
     # NOTE: -I and path are separate list items to handle paths with spaces
@@ -195,6 +201,12 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
     foreach(dir ${INCLUDE_DIRS})
         list(APPEND include_flags "-I" "${dir}")
     endforeach()
+
+    # Flip HIP_KERNEL_API to `__declspec(dllexport)` for the per-arch kernel
+    # DLL build (see 3rd-party/custom_kernels/include/hip_custom_kernels.h).
+    # Harmless on static libs / executables -- nothing in this tree ships
+    # the kernel symbols outside a SHARED `custom_kernels_<arch>` build.
+    set(define_flags "-DHIP_CUSTOM_KERNELS_EXPORTS")
 
     # MSVC ABI compatibility flags
     set(abi_flags
@@ -281,6 +293,7 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
                     -o "${output_obj}"
                     ${arch_flags}
                     ${include_flags}
+                    ${define_flags}
                     ${abi_flags}
                     ${warning_flags}
                     $<$<CONFIG:Debug>:-D_DEBUG>
@@ -320,6 +333,7 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
                     -o "${output_obj}"
                     ${arch_flags}
                     ${include_flags}
+                    ${define_flags}
                     ${abi_flags}
                     ${warning_flags}
                     ${build_flags}
@@ -350,7 +364,7 @@ endfunction()
 #------------------------------------------------------------------------------
 function(hip_add_executable TARGET_NAME)
     cmake_parse_arguments(ARG "" ""
-        "INCLUDE_DIRECTORIES;COMPILE_OPTIONS;LINK_LIBRARIES;DEPENDS" ${ARGN})
+        "INCLUDE_DIRECTORIES;COMPILE_OPTIONS;LINK_LIBRARIES;DEPENDS;OFFLOAD_ARCHS" ${ARGN})
 
     # Remaining arguments are source files
     set(sources ${ARG_UNPARSED_ARGUMENTS})
@@ -381,7 +395,8 @@ function(hip_add_executable TARGET_NAME)
 
         # Compile HIP sources with hipcc
         _hip_compile_sources(${TARGET_NAME} "${sources}"
-            "${ARG_INCLUDE_DIRECTORIES}" "${all_compile_opts}" hip_objs)
+            "${ARG_INCLUDE_DIRECTORIES}" "${all_compile_opts}"
+            "${ARG_OFFLOAD_ARCHS}" hip_objs)
 
         # Create custom target for HIP compilation
         add_custom_target(${TARGET_NAME}_hip_compile DEPENDS ${hip_objs})
@@ -396,8 +411,12 @@ function(hip_add_executable TARGET_NAME)
         add_executable(${TARGET_NAME} ${sources})
         set_source_files_properties(${sources} PROPERTIES LANGUAGE HIP)
 
-        # Set architectures
-        if(HIP_ARCHITECTURES)
+        # Set architectures (per-target OFFLOAD_ARCHS overrides the global list)
+        if(ARG_OFFLOAD_ARCHS)
+            set_target_properties(${TARGET_NAME} PROPERTIES
+                HIP_ARCHITECTURES "${ARG_OFFLOAD_ARCHS}"
+            )
+        elseif(HIP_ARCHITECTURES)
             set_target_properties(${TARGET_NAME} PROPERTIES
                 HIP_ARCHITECTURES "${HIP_ARCHITECTURES}"
             )
@@ -438,7 +457,7 @@ endfunction()
 #------------------------------------------------------------------------------
 function(hip_add_library TARGET_NAME)
     cmake_parse_arguments(ARG "STATIC;SHARED" ""
-        "INCLUDE_DIRECTORIES;COMPILE_OPTIONS;LINK_LIBRARIES;DEPENDS" ${ARGN})
+        "INCLUDE_DIRECTORIES;COMPILE_OPTIONS;LINK_LIBRARIES;DEPENDS;OFFLOAD_ARCHS" ${ARGN})
 
     # Determine library type
     if(ARG_SHARED)
@@ -476,7 +495,8 @@ function(hip_add_library TARGET_NAME)
 
         # Compile HIP sources with hipcc
         _hip_compile_sources(${TARGET_NAME} "${sources}"
-            "${ARG_INCLUDE_DIRECTORIES}" "${all_compile_opts}" hip_objs)
+            "${ARG_INCLUDE_DIRECTORIES}" "${all_compile_opts}"
+            "${ARG_OFFLOAD_ARCHS}" hip_objs)
 
         # Create custom target for HIP compilation
         add_custom_target(${TARGET_NAME}_hip_compile DEPENDS ${hip_objs})
@@ -497,8 +517,12 @@ function(hip_add_library TARGET_NAME)
         add_library(${TARGET_NAME} ${lib_type} ${sources})
         set_source_files_properties(${sources} PROPERTIES LANGUAGE HIP)
 
-        # Set architectures
-        if(HIP_ARCHITECTURES)
+        # Set architectures (per-target OFFLOAD_ARCHS overrides the global list)
+        if(ARG_OFFLOAD_ARCHS)
+            set_target_properties(${TARGET_NAME} PROPERTIES
+                HIP_ARCHITECTURES "${ARG_OFFLOAD_ARCHS}"
+            )
+        elseif(HIP_ARCHITECTURES)
             set_target_properties(${TARGET_NAME} PROPERTIES
                 HIP_ARCHITECTURES "${HIP_ARCHITECTURES}"
             )

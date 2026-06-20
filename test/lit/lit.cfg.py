@@ -33,6 +33,20 @@ config.suffixes = [".mlir"]
 config.test_source_root = os.path.dirname(__file__)
 config.test_exec_root = config.test_source_root
 
+# Correct llvm_tools_dir for multi-config generators BEFORE LLVMConfig runs.
+# LLVMConfig.__init__ -> use_default_substitutions registers FileCheck/not/count
+# against config.llvm_tools_dir immediately (and substitutions are first-wins),
+# so the path must be right here, not patched afterwards. LLVM_TOOLS_BINARY_DIR
+# (from cmake) is <llvm-build>/bin, but a Visual Studio multi-config build emits
+# the tools under <llvm-build>/<mode>/bin (e.g. .../Release/bin) -- the mode
+# segment goes BEFORE bin, not after. Rewrite <...>/bin -> <...>/<mode>/bin when
+# that exists; fall back to the bare dir (Ninja single-config + prebuilt-prefix,
+# where the tools sit directly in bin).
+_llvm_parent, _llvm_leaf = os.path.split(config.llvm_tools_dir.rstrip("/\\"))
+_llvm_mode_dir = os.path.join(_llvm_parent, config.hip_build_mode, _llvm_leaf)
+if os.path.isdir(_llvm_mode_dir):
+    config.llvm_tools_dir = _llvm_mode_dir
+
 # Initialize LLVMConfig using llvm_tools_dir from lit.site.cfg.py.
 # This sets up PATH and enables add_tool_substitutions / with_environment.
 llvm_config = lit.llvm.config.LLVMConfig(lit_config, config)

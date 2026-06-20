@@ -30,18 +30,22 @@ foreach(test_file ${MLIR_E2E_TESTS})
     # Test 1: Compile .mlir → .dll
     # WORKING_DIRECTORY is set to the per-test dir so constants.bin
     # (the default constants filename) is written there.
+    # --mode NATIVE: the default artifact format is now LLVM_IR (.bc), so
+    # request a native .dll explicitly to keep the ELF init/fini check below
+    # meaningful and exercise the native loader path.
     add_test(NAME E2E_Compile_${test_name}
         COMMAND $<TARGET_FILE:hip-compiler>
             "${test_file}"
             -o "${dll_output}"
+            --mode NATIVE
         WORKING_DIRECTORY "${test_dir}"
     )
 
     # Test 2: Execute .dll
-    # WORKING_DIRECTORY matches the compile step so hip-test-dll resolves
+    # WORKING_DIRECTORY matches the compile step so hip-test resolves
     # constants.bin from the same per-test dir via DiskFileSystem(".").
     add_test(NAME E2E_Execute_${test_name}
-        COMMAND $<TARGET_FILE:hip-test-dll>
+        COMMAND $<TARGET_FILE:hip-test>
             "${dll_output}"
             --verbose
             --validate

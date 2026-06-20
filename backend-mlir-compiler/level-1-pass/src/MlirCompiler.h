@@ -15,8 +15,15 @@
 
 namespace hipdnn::level1pass {
 
-// Artifact format (native DLL or LLVM IR)
-enum class ArtifactFormat { Native, LlvmIr };
+// Per-model artifact format, selected by the `artifact_format` provider
+// option (single compile option). Both are loaded by the EP via
+// InferenceState::create:
+//   * LlvmIr -> OS-portable LLVM IR (serialized as .bc), JIT-loaded in-process
+//               by LlvmIrJit.
+//   * Native -> per-OS native .dll/.so loaded via morphizen::Plugin
+//               (LoadLibrary/dlopen). Opt-in; see
+//               docs/native-vs-ir-comparison.md.
+enum class ArtifactFormat { LLVM_IR, NATIVE };
 
 // Compilation configuration
 //
@@ -32,6 +39,13 @@ struct CompilationConfig {
   ArtifactFormat artifactFormat;
   int optLevel;
   bool skipConstantData = true;
+  // Output-allocator mode (2-arg inference_compute + in-graph hip.alloc_output)
+  // is the only ABI at the EP front-end -- there is no provider option and no
+  // classic out-param fallback. load_config sets this true unconditionally and
+  // writes the SAME value into the model metadata so the EP's dispatch arity
+  // always agrees with the compiled DLL's ABI. Default true so any path that
+  // bypasses load_config still gets the supported ABI.
+  bool useOutputAllocator = true;
 };
 
 // Compiled artifact (bytes + metadata)
@@ -42,25 +56,27 @@ struct CompilationArtifact {
 };
 
 /**
- * Simplified MLIR compiler that uses the hip-compiler plugin C API.
+ * MLIR compiler driver that dispatches to the hip-compiler plugin C API.
  *
- * Replaces the old direct LLVM/MLIR integration (MlirParser, MlirTransformer,
- * LlvmCompiler).
+ * `compileFromBytecode` serializes the provided MLIR bytecode, calls
+ * `hip_compile_with_fs` in `hip-compiler.dll`, and reads back the
+ * resulting per-model LLVM bitcode artifact for inclusion in the
+ * EPContext tar. The downstream EP loads it via LlvmIrJit.
  *
  * NOTE: Mock runtime is not supported. The hip-compiler plugin always
- * generates native code that targets the actual HIP/ROCm runtime.
- * Mock runtime functionality was removed as it is not compatible with the
- * plugin-based compilation architecture.
+ * targets the real HIP/ROCm runtime; ML inference on a host without
+ * ROCm is fundamentally out of scope for this driver.
  */
 class MlirCompiler {
 public:
   /**
-   * Compile MLIR bytecode to native artifact (DLL).
+   * Compile MLIR bytecode to a per-model LLVM bitcode artifact.
    *
    * @param mlir_bytecode  MLIR bytecode (as from Graph.save_string())
    * @param config         Compilation configuration
-   * @return               Compiled artifact (bytes + metadata), or nullopt on
-   * failure
+   * @param fs             FileSystem for externalized constants
+   * @return               Compiled bitcode artifact (bytes + metadata),
+   *                       or nullopt on failure
    */
   static std::optional<CompilationArtifact>
   compileFromBytecode(const std::string &mlir_bytecode,

@@ -61,10 +61,57 @@ struct HipDstBufferizableModel
   }
 };
 
+// Bufferization model for the non-DPS readback ops (hip.readback_dim,
+// hip.readback_scalar). Each reads its `scalar` tensor operand (a device
+// buffer) and produces a NON-tensor result (index for readback_dim, the
+// operand's element type for readback_scalar). So bufferization only rewrites
+// the tensor operand to its memref buffer; the result type passes through
+// unchanged and nothing aliases the operand. `op->getResult(0).getType()`
+// already carries the right result type for either op.
+template <typename OpTy>
+struct HipReadbackBufferizableModel
+    : public bufferization::BufferizableOpInterface::ExternalModel<
+          HipReadbackBufferizableModel<OpTy>, OpTy> {
+  bool bufferizesToMemoryRead(Operation *, OpOperand &,
+                              const bufferization::AnalysisState &) const {
+    return true;
+  }
+  bool bufferizesToMemoryWrite(Operation *, OpOperand &,
+                               const bufferization::AnalysisState &) const {
+    return false;
+  }
+  bufferization::AliasingValueList
+  getAliasingValues(Operation *, OpOperand &,
+                    const bufferization::AnalysisState &) const {
+    return {};
+  }
+  LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
+                          const bufferization::BufferizationOptions &options,
+                          bufferization::BufferizationState &state) const {
+    auto readback = cast<OpTy>(op);
+    FailureOr<Value> scalarBuf =
+        getBuffer(rewriter, readback.getScalar(), options, state);
+    if (failed(scalarBuf))
+      return failure();
+    auto newOp =
+        OpTy::create(rewriter, op->getLoc(), op->getResult(0).getType(),
+                     readback.getCtx(), *scalarBuf);
+    bufferization::replaceOpWithBufferizedValues(rewriter, op,
+                                                 newOp.getResult());
+    return success();
+  }
+};
+
 inline void
 registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *ctx, HipDialect *) {
+    ReadbackDimOp::attachInterface<HipReadbackBufferizableModel<ReadbackDimOp>>(
+        *ctx);
+    ReadbackScalarOp::attachInterface<
+        HipReadbackBufferizableModel<ReadbackScalarOp>>(*ctx);
     ConvOp::attachInterface<HipDstBufferizableModel<ConvOp>>(*ctx);
+    ConvTransposeOp::attachInterface<HipDstBufferizableModel<ConvTransposeOp>>(
+        *ctx);
     MatmulOp::attachInterface<HipDstBufferizableModel<MatmulOp>>(*ctx);
     RmsNormOp::attachInterface<HipDstBufferizableModel<RmsNormOp>>(*ctx);
     SkipRmsNormOp::attachInterface<HipDstBufferizableModel<SkipRmsNormOp>>(
@@ -82,16 +129,24 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     GqaOp::attachInterface<HipDstBufferizableModel<GqaOp>>(*ctx);
     CastOp::attachInterface<HipDstBufferizableModel<CastOp>>(*ctx);
     SigmoidOp::attachInterface<HipDstBufferizableModel<SigmoidOp>>(*ctx);
+    TanhOp::attachInterface<HipDstBufferizableModel<TanhOp>>(*ctx);
     SoftplusOp::attachInterface<HipDstBufferizableModel<SoftplusOp>>(*ctx);
     GeluOp::attachInterface<HipDstBufferizableModel<GeluOp>>(*ctx);
+    LeakyReluOp::attachInterface<HipDstBufferizableModel<LeakyReluOp>>(*ctx);
+    ResizeOp::attachInterface<HipDstBufferizableModel<ResizeOp>>(*ctx);
+    GlobalPoolOp::attachInterface<HipDstBufferizableModel<GlobalPoolOp>>(*ctx);
     ReciprocalOp::attachInterface<HipDstBufferizableModel<ReciprocalOp>>(*ctx);
     SqrtOp::attachInterface<HipDstBufferizableModel<SqrtOp>>(*ctx);
+    PoolOp::attachInterface<HipDstBufferizableModel<PoolOp>>(*ctx);
     SubOp::attachInterface<HipDstBufferizableModel<SubOp>>(*ctx);
     ReduceSumOp::attachInterface<HipDstBufferizableModel<ReduceSumOp>>(*ctx);
     ReduceMaxOp::attachInterface<HipDstBufferizableModel<ReduceMaxOp>>(*ctx);
+    ReduceMeanOp::attachInterface<HipDstBufferizableModel<ReduceMeanOp>>(*ctx);
     MatMulNBitsOp::attachInterface<HipDstBufferizableModel<MatMulNBitsOp>>(
         *ctx);
     QMoEOp::attachInterface<HipDstBufferizableModel<QMoEOp>>(*ctx);
+    GatherBlockQuantizedOp::attachInterface<
+        HipDstBufferizableModel<GatherBlockQuantizedOp>>(*ctx);
     CausalConvWithStateOp::attachInterface<
         HipDstBufferizableModel<CausalConvWithStateOp>>(*ctx);
     HipDNNGraphOp::attachInterface<HipDstBufferizableModel<HipDNNGraphOp>>(
@@ -102,6 +157,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
         HipDstBufferizableModel<LinearAttentionOp>>(*ctx);
     LayerNormOp::attachInterface<HipDstBufferizableModel<LayerNormOp>>(*ctx);
     MinOp::attachInterface<HipDstBufferizableModel<MinOp>>(*ctx);
+    MaxOp::attachInterface<HipDstBufferizableModel<MaxOp>>(*ctx);
     NegOp::attachInterface<HipDstBufferizableModel<NegOp>>(*ctx);
     EqualOp::attachInterface<HipDstBufferizableModel<EqualOp>>(*ctx);
     DivOp::attachInterface<HipDstBufferizableModel<DivOp>>(*ctx);
@@ -109,6 +165,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     AndOp::attachInterface<HipDstBufferizableModel<AndOp>>(*ctx);
     CosOp::attachInterface<HipDstBufferizableModel<CosOp>>(*ctx);
     SinOp::attachInterface<HipDstBufferizableModel<SinOp>>(*ctx);
+    ExpOp::attachInterface<HipDstBufferizableModel<ExpOp>>(*ctx);
     CumSumOp::attachInterface<HipDstBufferizableModel<CumSumOp>>(*ctx);
     PadOp::attachInterface<HipDstBufferizableModel<PadOp>>(*ctx);
     TileOp::attachInterface<HipDstBufferizableModel<TileOp>>(*ctx);

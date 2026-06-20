@@ -14,15 +14,22 @@ add_library(OnnxToHip STATIC
   ActivationConversion.cpp
   CastConversion.cpp
   ReduceSumConversion.cpp
+  ReduceMeanConversion.cpp
   MatMulNBitsConversion.cpp
   QMoEConversion.cpp
+  GatherBlockQuantizedConversion.cpp
   ConvConversion.cpp
+  ConvTransposeConversion.cpp
   NormConversion.cpp
   RotaryEmbeddingConversion.cpp
   GqaConversion.cpp
   MultiHeadAttentionConversion.cpp
+  AttentionConversion.cpp
+  HipGqaBuilder.cpp
   GatherConversion.cpp
   GatherShapeFold.cpp
+  ReshapeShapeFold.cpp
+  PadShapeFold.cpp
   ShapeConversion.cpp
   ReshapeConversion.cpp
   CausalConvWithStateConversion.cpp
@@ -31,19 +38,26 @@ add_library(OnnxToHip STATIC
   LinearAttentionConversion.cpp
   RangeConversion.cpp
   FastGeluFusion.cpp
+  ErfGeluFusion.cpp
+  ProjectorOpsRewrites.cpp
+  LpNormalizationConversion.cpp
   EqualConversion.cpp
   DivConversion.cpp
   ReduceMaxConversion.cpp
   MinConversion.cpp
+  MaxConversion.cpp
   NotConversion.cpp
   CosConversion.cpp
   SinConversion.cpp
+  ExpConversion.cpp
   CumSumConversion.cpp
   PadConversion.cpp
   TileConversion.cpp
   ExpandConversion.cpp
   ReduceProdConversion.cpp
   LessConversion.cpp
+  GreaterOrEqualConversion.cpp
+  LessOrEqualConversion.cpp
   GatherNDConversion.cpp
   SignConversion.cpp
   ModConversion.cpp
@@ -55,7 +69,14 @@ add_library(OnnxToHip STATIC
   SizeConversion.cpp
   NonZeroConversion.cpp
   ConcatConversion.cpp
+  PoolConversion.cpp
+  ResizeConversion.cpp
+  GlobalPoolConversion.cpp
+  FlattenConversion.cpp
   LoopOutline.cpp
+  ReluConversion.cpp
+  LeakyReluConversion.cpp
+  ClipConversion.cpp
 )
 
 add_dependencies(OnnxToHip
@@ -71,6 +92,7 @@ target_link_libraries(OnnxToHip PUBLIC
   MLIRFuncDialect
   MLIRArithDialect
   MLIRTensorDialect
+  MLIRLinalgDialect
   MLIRMemRefDialect
   MLIRBufferizationDialect
   MLIRIR

@@ -1266,8 +1266,10 @@ void GemmFp16U4Impl(
         FUSED_DQ ? (b_n_g * (K >> 1) + (b_k8 >> 1)) : 0;
     [[maybe_unused]] const int b_gid_base =
         FUSED_DQ ? (b_n_g * num_groups_k) : 0;
+    // cached_k_grp is the quant-group index currently loaded into cached_s/
+    // neg_zs; -1 forces a load on the first K-step. See the group derivation
+    // in issueLoads (keyed on the thread's actual k offset, not just t).
     [[maybe_unused]] int      cached_k_grp = -1;
-    [[maybe_unused]] int      next_grp_k = 0;
     [[maybe_unused]] _Float16 cached_s = 0;
     [[maybe_unused]] _Float16 neg_zs = 0;
 
@@ -1335,13 +1337,23 @@ void GemmFp16U4Impl(
             if constexpr (FUSED_DQ) {
                 pf_b4 = *reinterpret_cast<const uint32_t*>(
                     &B_packed[b_byte_base + (t >> 1)]);
-                if(__builtin_expect(t >= next_grp_k, 0))
+                // This thread dequants 8 contiguous nibbles at k=[t+b_k8 ..
+                // t+b_k8+7]. With block_size>=16 (kernel precondition) and b_k8
+                // a multiple of 8, those 8 weights lie entirely in ONE quant
+                // group: (t + b_k8) / group_size. Deriving the group from t
+                // ALONE is only valid when BK_T <= group_size; the 128x32
+                // WT2x1 tile has BK_T=64, so on a group_size<64 model (e.g. 32)
+                // a single K-step straddles two groups and the upper half would
+                // otherwise be dequantized with the previous group's scale.
+                // Cache keyed on the group index so the common BK_T<=group_size
+                // case still skips the reload across K-steps.
+                const int grp = (t + b_k8) / group_size;
+                if(__builtin_expect(grp != cached_k_grp, 0))
                 {
-                    cached_k_grp++;
-                    next_grp_k += group_size;
-                    cached_s   = scales[cached_k_grp + b_gid_base];
+                    cached_k_grp = grp;
+                    cached_s     = scales[grp + b_gid_base];
                     if constexpr(USE_ZEROS)
-                        neg_zs = -zeros[cached_k_grp + b_gid_base] * cached_s;
+                        neg_zs = -zeros[grp + b_gid_base] * cached_s;
                 }
             } else {
                 const _Float16* b_src = &B_fp16[b_n_g * K + t + b_k8];
@@ -2259,8 +2271,9 @@ void GemmFp16I8Impl(
     // Per-thread base offsets (constant across the K-loop).
     const int b_elem_base = b_n_g * K + b_k8;
     const int b_gid_base  = b_n_g * num_groups_k;
+    // -1 forces a scale load on the first K-step; the group index is derived
+    // from the thread's actual k offset (t+b_k8), see issueLoads below.
     int      cached_k_grp = -1;
-    int      next_grp_k   = 0;
     _Float16 cached_s     = 0;
     _Float16 neg_zs       = 0;
 
@@ -2313,16 +2326,20 @@ void GemmFp16I8Impl(
             // already includes b_k8, so the byte address is `b_elem_base + t`.
             pf_b8 = *reinterpret_cast<const uint2*>(&B[b_elem_base + t]);
 
-            // Group/scale stepping: K-step is `t` (in elements). When `t`
-            // crosses a group boundary, advance the cached scale and (if
-            // present) the cached -zp*scale precomputation.
-            if (__builtin_expect(t >= next_grp_k, 0)) {
-                cached_k_grp++;
-                next_grp_k += group_size;
-                cached_s = scales[cached_k_grp + b_gid_base];
+            // Group/scale stepping: this thread loads 8 contiguous weights at
+            // k=[t+b_k8 .. t+b_k8+7], which lie in one quant group
+            // (t+b_k8)/group_size (block_size>=16, b_k8 multiple of 8). Derive
+            // the group from the thread's actual k offset, NOT from t alone:
+            // when BK_T > group_size a single K-step straddles two groups and
+            // the upper half must use a later scale. Cache keyed on the group
+            // index so BK_T<=group_size still reuses the load across K-steps.
+            const int grp = (t + b_k8) / group_size;
+            if (__builtin_expect(grp != cached_k_grp, 0)) {
+                cached_k_grp = grp;
+                cached_s = scales[grp + b_gid_base];
                 if constexpr (USE_ZEROS) {
                     _Float16 zp_h = static_cast<_Float16>(
-                                        zeros[cached_k_grp + b_gid_base]);
+                                        zeros[grp + b_gid_base]);
                     neg_zs = -zp_h * cached_s;
                 } else {
                     // ONNX default zp = 2^(bits-1) = 128 for bits=8.

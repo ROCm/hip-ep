@@ -29,12 +29,22 @@ endif()
 
 message(STATUS "Found Python: ${Python3_EXECUTABLE}")
 
-# Clang REQUIRED for bitcode generation
-find_program(CLANG_EXECUTABLE NAMES clang clang-cl
-    PATHS
-        ${LLVM_BINARY_DIR}/bin       # When LLVM built from source
-        ${LLVM_TOOLS_BINARY_DIR}     # When LLVM installed via package
-)
+# Clang REQUIRED for bitcode generation.
+# When LLVM is built from source as a subproject the `clang` target exists but
+# its .exe is not present at configure time, so find_program cannot see it --
+# use the target directly (the bitcode custom commands below then gain a
+# build-time dependency on it). Fall back to find_program for the prebuilt /
+# installed-LLVM case.
+if(TARGET clang)
+    set(CLANG_EXECUTABLE clang)
+    message(STATUS "Using in-tree clang target for bitcode generation")
+else()
+    find_program(CLANG_EXECUTABLE NAMES clang clang-cl
+        PATHS
+            ${LLVM_BINARY_DIR}/bin       # When LLVM built from source
+            ${LLVM_TOOLS_BINARY_DIR}     # When LLVM installed via package
+    )
+endif()
 
 if(NOT CLANG_EXECUTABLE)
     message(FATAL_ERROR
@@ -57,12 +67,18 @@ endif()
 
 message(STATUS "Found Clang for bitcode generation: ${CLANG_EXECUTABLE}")
 
-# llvm-link REQUIRED for combining bitcode files
-find_program(LLVM_LINK_EXECUTABLE NAMES llvm-link
-    PATHS
-        ${LLVM_BINARY_DIR}/bin
-        ${LLVM_TOOLS_BINARY_DIR}
-)
+# llvm-link REQUIRED for combining bitcode files. Same in-tree-target-first
+# logic as clang above (llvm-link is a standard LLVM tool target).
+if(TARGET llvm-link)
+    set(LLVM_LINK_EXECUTABLE llvm-link)
+    message(STATUS "Using in-tree llvm-link target")
+else()
+    find_program(LLVM_LINK_EXECUTABLE NAMES llvm-link
+        PATHS
+            ${LLVM_BINARY_DIR}/bin
+            ${LLVM_TOOLS_BINARY_DIR}
+    )
+endif()
 
 if(NOT LLVM_LINK_EXECUTABLE)
     message(FATAL_ERROR "llvm-link not found (required for combining runtime modules)")
@@ -90,9 +106,7 @@ message(STATUS "Found morphizen-foundation: ${MORPHIZEN_FOUNDATION_INCLUDE_DIR}"
 # ============================================================================
 # STEP 2: Determine Runtime Mode (Mock or Real)
 # ============================================================================
-
-# Default to Mock runtime (no GPU required)
-option(BUILD_MOCK_RUNTIME "Build mock runtime (no GPU required)" ON)
+# BUILD_MOCK_RUNTIME is declared once in the top-level CMakeLists.txt.
 
 if(NOT BUILD_MOCK_RUNTIME)
     # Try to find ROCm components
@@ -208,6 +222,12 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
         COMMAND ${CLANG_EXECUTABLE}
                 -c -emit-llvm -std=c++17
                 -D_CRT_SECURE_NO_WARNINGS
+                # Trim MSVC-CRT symbols the JIT can't resolve: _Init_thread_*
+                # (magic statics), sized operator delete, type_info vtable.
+                # LlvmIrJit shims the unsized delete; the rest go unused.
+                -fno-threadsafe-statics
+                -fno-sized-deallocation
+                -fno-rtti
                 $<$<CONFIG:Debug>:-D_DEBUG>
                 $<$<CONFIG:Debug>:-D_ITERATOR_DEBUG_LEVEL=2>
                 $<$<CONFIG:Debug>:-O0>
@@ -220,6 +240,7 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
         DEPENDS ${SOURCE_FILE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/hipdnn_ep_runtime.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/runtime_state_internal.h
+                ${CMAKE_CURRENT_SOURCE_DIR}/op_state.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/op_profile.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/debug_log.h
                 ${IMPL_DEPS}
@@ -235,6 +256,10 @@ compile_to_bitcode(hipdnn_ep_runtime_state.cpp runtime_state.bc)
 compile_to_bitcode(hipdnn_ep_runtime_tensor.cpp runtime_tensor.bc)
 compile_to_bitcode(hipdnn_ep_runtime_loop.cpp runtime_loop.bc)
 compile_to_bitcode(op_profile.cpp runtime_op_profile.bc)
+compile_to_bitcode(output_allocator.cpp runtime_output_allocator.bc)
+# Op-state slots ABI + reference constructors. Shared (host-only allocation),
+# so the same TU serves both the real and mock runtimes.
+compile_to_bitcode(op_state.cpp runtime_op_state.bc)
 
 # Compile implementation-specific files
 if(NOT BUILD_MOCK_RUNTIME)
@@ -256,9 +281,11 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/range.cpp runtime_range.bc)
     compile_to_bitcode(real/gather.cpp runtime_gather.bc)
     compile_to_bitcode(real/reduce_sum.cpp runtime_reduce_sum.bc)
+    compile_to_bitcode(real/reduce_mean.cpp runtime_reduce_mean.bc)
     compile_to_bitcode(real/reduce_max.cpp runtime_reduce_max.bc)
     compile_to_bitcode(real/matmul_nbits.cpp runtime_matmul_nbits.bc)
     compile_to_bitcode(real/qmoe.cpp runtime_qmoe.bc)
+    compile_to_bitcode(real/gather_block_quantized.cpp runtime_gather_block_quantized.bc)
     compile_to_bitcode(real/causal_conv_with_state.cpp runtime_causal_conv_with_state.bc)
     compile_to_bitcode(real/test_hip_from_dll.cpp test_hip_from_dll.bc)
     compile_to_bitcode(real/gemm.cpp runtime_gemm.bc)
@@ -272,6 +299,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/not.cpp runtime_not.bc)
     compile_to_bitcode(real/cos.cpp runtime_cos.bc)
     compile_to_bitcode(real/sin.cpp runtime_sin.bc)
+    compile_to_bitcode(real/exp.cpp runtime_exp.bc)
     compile_to_bitcode(real/cumsum.cpp runtime_cumsum.bc)
     compile_to_bitcode(real/pad.cpp runtime_pad.bc)
     compile_to_bitcode(real/tile.cpp runtime_tile.bc)
@@ -286,65 +314,17 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/multi_head_attention.cpp runtime_multi_head_attention.bc)
     compile_to_bitcode(real/nonzero.cpp runtime_nonzero.bc)
     compile_to_bitcode(real/size.cpp runtime_size.bc)
-
-    # Compile MemoryManager sources to bitcode so model DLLs need no separate mm.lib.
-    # These files include private mm headers from lib/MemoryManager/ and public mm
-    # headers from include/mm/, plus HIP headers from THEROCK_DIST/include.
-    set(MM_SOURCE_DIR ${CMAKE_SOURCE_DIR}/lib/MemoryManager)
-    set(MM_PUBLIC_HEADERS
-        ${CMAKE_SOURCE_DIR}/include/mm/mm_api.h
-        ${CMAKE_SOURCE_DIR}/include/mm/mm_types.h
-        ${CMAKE_SOURCE_DIR}/include/mm/mm_config.h
-        ${CMAKE_SOURCE_DIR}/include/mm/mm_kv.h)
-    set(MM_PRIVATE_HEADERS
-        ${MM_SOURCE_DIR}/mm_hal.h
-        ${MM_SOURCE_DIR}/mm_handle_table.h
-        ${MM_SOURCE_DIR}/mm_kv_manager.h
-        ${MM_SOURCE_DIR}/mm_activation.h)
-
-    macro(compile_mm_to_bitcode SOURCE_NAME OUTPUT_BC)
-        set(_MM_FLAGS "")
-        if(NOT WIN32)
-            list(APPEND _MM_FLAGS "-fPIC")
-        endif()
-        list(APPEND _MM_FLAGS
-            "-I" "${CMAKE_SOURCE_DIR}/include"
-            "-I" "${MM_SOURCE_DIR}"
-            "-I" "${THEROCK_DIST}/include"
-            "-D__HIP_PLATFORM_AMD__")
-        add_custom_command(
-            OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${OUTPUT_BC}
-            COMMAND ${CLANG_EXECUTABLE}
-                    -c -emit-llvm -std=c++17
-                    -D_CRT_SECURE_NO_WARNINGS
-                    $<$<CONFIG:Debug>:-O0>
-                    $<$<NOT:$<CONFIG:Debug>>:-DNDEBUG>
-                    $<$<NOT:$<CONFIG:Debug>>:-O2>
-                    ${_MM_FLAGS}
-                    "${MM_SOURCE_DIR}/${SOURCE_NAME}"
-                    -o ${CMAKE_CURRENT_BINARY_DIR}/${OUTPUT_BC}
-            DEPENDS
-                "${MM_SOURCE_DIR}/${SOURCE_NAME}"
-                ${MM_PUBLIC_HEADERS}
-                ${MM_PRIVATE_HEADERS}
-            COMMENT "Compiling mm/${SOURCE_NAME} to bitcode"
-            VERBATIM
-            COMMAND_EXPAND_LISTS
-        )
-    endmacro()
-
-    compile_mm_to_bitcode(mm_config.cpp       mm_config.bc)
-    compile_mm_to_bitcode(mm_hal.cpp          mm_hal.bc)
-    compile_mm_to_bitcode(mm_handle_table.cpp mm_handle_table.bc)
-    compile_mm_to_bitcode(mm_activation.cpp   mm_activation.bc)
-    compile_mm_to_bitcode(mm_kv_manager.cpp   mm_kv_manager.bc)
-    compile_mm_to_bitcode(mm_core.cpp         mm_core.bc)
+    compile_to_bitcode(real/pool.cpp runtime_pool.bc)
+    compile_to_bitcode(real/resize.cpp runtime_resize.bc)
+    compile_to_bitcode(real/global_pool.cpp runtime_global_pool.bc)
 
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_loop.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_profile.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_output_allocator.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_memory.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_hip.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_miopen.bc
@@ -362,6 +342,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_range.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_sum.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_mean.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_max.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_matmul_nbits.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmoe.bc
@@ -378,6 +359,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_not.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_cos.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_sin.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_exp.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_cumsum.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_pad.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tile.bc
@@ -392,24 +374,27 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_multi_head_attention.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_nonzero.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_size.bc
-        ${CMAKE_CURRENT_BINARY_DIR}/mm_config.bc
-        ${CMAKE_CURRENT_BINARY_DIR}/mm_hal.bc
-        ${CMAKE_CURRENT_BINARY_DIR}/mm_handle_table.bc
-        ${CMAKE_CURRENT_BINARY_DIR}/mm_activation.bc
-        ${CMAKE_CURRENT_BINARY_DIR}/mm_kv_manager.bc
-        ${CMAKE_CURRENT_BINARY_DIR}/mm_core.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_pool.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_resize.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_global_pool.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather_block_quantized.bc
     )
 else()
     # Mock runtime for testing without GPU
     compile_to_bitcode(mock/mock_gpu.cpp runtime_mock.bc)
     compile_to_bitcode(mock/memory.cpp runtime_memory.bc)
     compile_to_bitcode(mock/test_hip_from_dll.cpp test_hip_from_dll.bc)
+    # Mock per-op state constructors (real ones live in each op's real/ TU).
+    compile_to_bitcode(mock/op_state_stubs.cpp runtime_op_state_stubs.bc)
 
     set(RUNTIME_BC_MODULES
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_loop.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_profile.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_output_allocator.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_state.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_state_stubs.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_memory.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_mock.bc
         ${CMAKE_CURRENT_BINARY_DIR}/test_hip_from_dll.bc
@@ -446,6 +431,70 @@ add_custom_target(HipRuntime
 set(RUNTIME_BC_PATH ${CMAKE_CURRENT_BINARY_DIR}/runtime.bc PARENT_SCOPE)
 
 add_custom_target(RuntimeBitcode DEPENDS HipRuntime)
+
+# ============================================================================
+# STEP 6: Native current-stream accessor (NOT bitcode)
+# ============================================================================
+# The per-thread session-stream slot is compiled natively here, deliberately
+# kept out of runtime.bc. A thread_local inside runtime.bc would force the JIT
+# to lower emulated TLS (__emutls_get_address), which has no definition in the
+# JIT process. Instead the JIT'd runtime calls these accessors as ordinary
+# external functions: the host (EP DLL / hip-test / hip-inspect) defines them
+# (see LlvmIrJit absolute-symbol registration), and native model DLLs link
+# their own copy of this lib (CompilerDriver::discoverLibraries).
+add_library(hipdnn-ep-tls STATIC tls_stream.cpp)
+set_target_properties(hipdnn-ep-tls PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(hipdnn-ep-tls PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Install the import/static lib so NATIVE model DLLs can link it on a deploy
+# host that only has the packaged tree (no build dir). CompilerDriver bakes the
+# build-tree path into HIPDNN_EP_TLS_LIB_DIR, which does not exist on the GPU
+# test machine; staging hipdnn-ep-tls.lib into install/lib (then onto LIB) lets
+# lld-link resolve it there. Bitcode (default) does not need it.
+install(TARGETS hipdnn-ep-tls ARCHIVE DESTINATION lib)
+
+# ============================================================================
+# STEP 7: Shared embedded runtime.bc (single source of truth)
+# ============================================================================
+# Both consumers need runtime.bc embedded as bytes:
+#   - the compiler (LLVMBackend::linkRuntimeModule, native producer path)
+#   - the EP / tools (LlvmIrJit, JIT load path)
+# Generate the C array ONCE here and expose it as a static lib both link,
+# instead of each target running its own xxd step. This keeps a single source
+# of truth and removes the latent duplicate-symbol hazard if a binary ever
+# links both consumers (each previously defined its own runtime_bc_data).
+# Note: each consuming binary still embeds its own copy (separate DLLs); this
+# consolidates the build logic, not the per-binary bytes.
+if(TARGET RuntimeBitcode)
+    add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/cmake/xxd.py
+                --var runtime_bc_data
+                --output ${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp.tmp
+                ${CMAKE_CURRENT_BINARY_DIR}/runtime.bc
+        COMMAND ${Python3_EXECUTABLE} -c
+                "import os; data = open('${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp.tmp').read(); data = data.replace('static const unsigned char', 'extern \"C\" const unsigned char'); bc_size = os.path.getsize('${CMAKE_CURRENT_BINARY_DIR}/runtime.bc'); data = '#include <cstddef>\\n' + data + f'\\nextern \"C\" const size_t runtime_bc_data_size = {bc_size};\\n'; open('${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp', 'w').write(data)"
+        COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp.tmp
+        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/runtime.bc RuntimeBitcode
+        COMMENT "Embedding runtime.bc (shared) via runtime_ir_data.cpp"
+        VERBATIM
+    )
+else()
+    # No clang at configure time -> empty bytes; consumers treat size 0 as a
+    # degraded/fatal mode but unrelated targets still build.
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp
+        "#include <cstddef>\n"
+        "extern \"C\" const unsigned char runtime_bc_data[] = {0};\n"
+        "extern \"C\" const size_t runtime_bc_data_size = 0;\n"
+    )
+endif()
+
+add_library(runtime-bc-embed STATIC ${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp)
+set_target_properties(runtime-bc-embed PROPERTIES POSITION_INDEPENDENT_CODE ON)
+if(TARGET RuntimeBitcode)
+    add_dependencies(runtime-bc-embed RuntimeBitcode)
+endif()
 
 message(STATUS "Runtime library configuration:")
 message(STATUS "  Mode: ${BUILD_MOCK_RUNTIME}")

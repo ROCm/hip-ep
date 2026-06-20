@@ -14,12 +14,29 @@
  *   - Clang during bitcode compilation (lib/Runtime/real/)
  *   - MSVC for any host-side C/C++ code
  *
- * The .hip implementations (compiled by hipcc into a static library) define
- * these functions with extern "C" linkage. At model-DLL link time, the static
- * library is linked alongside MIOpen/hipBLASLt/amdhip64 import libs.
+ * The .hip implementations (compiled by hipcc) define these functions with
+ * extern "C" linkage and ship in a per-arch shared library
+ * (custom_kernels_<arch>.{dll,so}); see HIP_KERNEL_API below.
  */
 
 #include <stdint.h>
+
+// Exports each launcher from the per-arch kernel shared library
+// (custom_kernels_<arch>.{dll,so}), which the model artifact resolves at load
+// (JIT dlopen, or native import). Pre-dual-format the kernels were linked into
+// model.dll, so no export was needed -- hence this is new. EXPORTS is defined
+// only when building that library (hip_utils.cmake); consumers leave it empty.
+#if defined(_WIN32)
+  #if defined(HIP_CUSTOM_KERNELS_EXPORTS)
+    #define HIP_KERNEL_API __declspec(dllexport)
+  #else
+    #define HIP_KERNEL_API
+  #endif
+#elif defined(__GNUC__) || defined(__clang__)
+  #define HIP_KERNEL_API __attribute__((visibility("default")))
+#else
+  #define HIP_KERNEL_API
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -44,6 +61,8 @@ typedef enum {
     HIP_DTYPE_FLOAT64  = 4,
     HIP_DTYPE_BFLOAT16 = 5,
     HIP_DTYPE_INT16    = 6,
+    HIP_DTYPE_UINT8    = 7,
+    HIP_DTYPE_INT8     = 8,
 } hip_dtype_t;
 
 /* =========================================================================
@@ -63,7 +82,7 @@ typedef enum {
  * Currently supported types: HIP_DTYPE_INT64
  * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure
  */
-int hip_elementwise_sub(
+HIP_KERNEL_API int hip_elementwise_sub(
     void* stream,
     const void* lhs,
     const void* rhs,
@@ -103,7 +122,7 @@ int hip_elementwise_sub(
  * HIP_DTYPE_BFLOAT16, HIP_DTYPE_INT32, HIP_DTYPE_INT64
  * Returns: 0 on success (hipSuccess), non-zero on failure (including rank > max)
  */
-int hip_elementwise_where(
+HIP_KERNEL_API int hip_elementwise_where(
     void* stream,
     const void* condition,
     const void* x,
@@ -131,55 +150,68 @@ int hip_elementwise_where(
  *               hip_dtype)
  * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure.
  */
-int hip_elementwise_neg(
+HIP_KERNEL_API int hip_elementwise_neg(
     void* stream,
     const void* input,
     void* output,
     int64_t num_elements,
     int hip_dtype);
 
-int hip_elementwise_sign(
+HIP_KERNEL_API int hip_elementwise_sign(
     void* stream,
     const void* input,
     void* output,
     int64_t num_elements,
     int hip_dtype);
 
-int hip_elementwise_cos(
+HIP_KERNEL_API int hip_elementwise_cos(
     void* stream,
     const void* input,
     void* output,
     int64_t num_elements,
     int hip_dtype);
 
-int hip_elementwise_sin(
+HIP_KERNEL_API int hip_elementwise_sin(
     void* stream,
     const void* input,
     void* output,
     int64_t num_elements,
     int hip_dtype);
 
-int hip_elementwise_not(
+HIP_KERNEL_API int hip_elementwise_exp(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+HIP_KERNEL_API int hip_elementwise_not(
     void* stream,
     const void* input,
     void* output,
     int64_t num_elements);
 
 /* =========================================================================
- * Elementwise Binary (Div / Mod / Equal / Less)
+ * Elementwise Binary (Mul / Add / Min / Max / Div / Mod / Equal / Less)
  * =========================================================================
  *
- * Same-shape binary elementwise ops added for the Qwen3.5 vision model.
- * All four share a single .hip TU (elementwise_binary_kernel.hip).
+ * Same-shape binary elementwise ops. All eight share one translation unit:
+ * 3rd-party/custom_kernels/hip/elementwise_binary_kernel.hip.
  *
- * Important: broadcasting is NOT performed in these kernels. lhs and rhs
- * must already have identical shape (broadcasting is materialised
- * upstream via Expand).
+ * Mul / Add / Min / Max are reached from wrap_miopenOpTensor when MIOpen's
+ * miopenOpTensor rejects the element type (notably INT32/INT64). Float
+ * dtypes still use MIOpen for performance and autotuning.
  *
- * Output dtype for Equal/Less is bool (1 byte); their hip_dtype refers to
- * the INPUT type. For Div/Mod, output dtype matches input dtype.
+ * Div / Mod / Equal / Less were added for the Qwen3.5 vision path. Equal and
+ * Less write bool (1 byte); their hip_dtype refers to the input element type.
+ * Div and Mod preserve the input dtype.
+ *
+ * Broadcasting is not performed in these kernels. lhs and rhs must already
+ * match in shape; upstream Expand / broadcast materialization is required.
+ *
+ * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure.
  */
-int hip_elementwise_div(
+HIP_KERNEL_API int hip_elementwise_div(
     void* stream,
     const void* lhs,
     const void* rhs,
@@ -187,7 +219,39 @@ int hip_elementwise_div(
     int64_t num_elements,
     int hip_dtype);
 
-int hip_elementwise_mod(
+HIP_KERNEL_API int hip_elementwise_mul(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+HIP_KERNEL_API int hip_elementwise_add(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+HIP_KERNEL_API int hip_elementwise_min(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+HIP_KERNEL_API int hip_elementwise_max(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+HIP_KERNEL_API int hip_elementwise_mod(
     void* stream,
     const void* lhs,
     const void* rhs,
@@ -196,15 +260,53 @@ int hip_elementwise_mod(
     int hip_dtype,
     int fmod_flag);
 
-int hip_elementwise_equal(
+/* Broadcasting binary elementwise (Add / Mul / Min / Max), 4-D operands.
+ *
+ * Each operand is described by a 4-element int64 shape array (the lowering
+ * left-pads ranks < 4 with leading 1s). NumPy/ONNX broadcasting is applied
+ * per axis: any axis whose operand extent is 1 is broadcast against the
+ * (larger) output extent. `out_shape4` is the broadcast result shape.
+ *
+ * Replaces MIOpen's miopenOpTensor for the float/half path, which is
+ * pathologically slow on gfx1151 for vision-encoder elementwise shapes.
+ *
+ *   op: 0 = add, 1 = mul, 2 = min, 3 = max
+ *
+ * Supported hip_dtype: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16.
+ * Returns: 0 on success, -1 on unsupported dtype / launch error, -2 when the
+ * output volume exceeds the 32-bit index range (caller should fall back).
+ */
+HIP_KERNEL_API int hip_elementwise_binary_bcast(
     void* stream,
     const void* lhs,
     const void* rhs,
     void* output,
-    int64_t num_elements,
+    const int64_t* lhs_shape4,
+    const int64_t* rhs_shape4,
+    const int64_t* out_shape4,
+    int op,
     int hip_dtype);
 
-int hip_elementwise_less(
+/*
+ * Element-wise Equal with optional scalar broadcast.
+ *
+ * `lhs_num_elements` / `rhs_num_elements` may each be 1 (scalar broadcast)
+ * or equal to `out_num_elements` (no broadcast). Other mismatches are
+ * rejected by the host wrapper.
+ *
+ * Output type is always uint8 (1-byte bool).
+ */
+HIP_KERNEL_API int hip_elementwise_equal(
+    void* stream,
+    const void* lhs,
+    const void* rhs,
+    void* output,
+    int64_t lhs_num_elements,
+    int64_t rhs_num_elements,
+    int64_t out_num_elements,
+    int hip_dtype);
+
+HIP_KERNEL_API int hip_elementwise_less(
     void* stream,
     const void* lhs,
     const void* rhs,
@@ -215,7 +317,7 @@ int hip_elementwise_less(
 /* And over bool (1-byte) tensors. No hip_dtype: bool is the only supported
  * input/output type (mirrors ORT v1.22.2 SPECIALIZED_BINARY_ELEMENTWISE_IMPL(And, bool)).
  */
-int hip_elementwise_and(
+HIP_KERNEL_API int hip_elementwise_and(
     void* stream,
     const void* lhs,
     const void* rhs,
@@ -234,7 +336,7 @@ int hip_elementwise_and(
  * Supported hip_dtype: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16, HIP_DTYPE_BFLOAT16
  * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure
  */
-int hip_elementwise_reciprocal(
+HIP_KERNEL_API int hip_elementwise_reciprocal(
     void* stream,
     const void* input,
     void* output,
@@ -253,7 +355,7 @@ int hip_elementwise_reciprocal(
  * Supported hip_dtype: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16, HIP_DTYPE_BFLOAT16
  * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure
  */
-int hip_elementwise_sqrt(
+HIP_KERNEL_API int hip_elementwise_sqrt(
     void* stream,
     const void* input,
     void* output,
@@ -291,13 +393,38 @@ int hip_elementwise_sqrt(
  *
  * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure
  */
-int hip_elementwise_gelu(
+HIP_KERNEL_API int hip_elementwise_gelu(
     void* stream,
     const void* input,
     void* output,
     int64_t num_elements,
     int hip_dtype,
     int64_t approximate);
+
+/* =========================================================================
+ * LeakyRelu Activation
+ * =========================================================================
+ *
+ * Applies LeakyRelu element-wise: y = x >= 0 ? x : alpha * x
+ *
+ * Parameters:
+ *   stream       - HIP stream (cast to hipStream_t internally)
+ *   input        - Device pointer to input tensor
+ *   output       - Device pointer to output tensor
+ *   num_elements - Total number of elements
+ *   hip_dtype    - Data type enum (HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ *                  HIP_DTYPE_FLOAT64)
+ *   alpha        - Slope for negative values (default 0.01 per ONNX spec)
+ *
+ * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure
+ */
+HIP_KERNEL_API int hip_leaky_relu(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype,
+    double alpha);
 
 /* =========================================================================
  * Rotary Position Embedding (RoPE)
@@ -345,7 +472,7 @@ int hip_elementwise_gelu(
  *
  * Returns: 0 on success, non-zero on error
  */
-int hip_rope_forward(
+HIP_KERNEL_API int hip_rope_forward(
     void* stream,
     const void* input,
     const void* position_ids,
@@ -367,7 +494,11 @@ int hip_rope_forward(
  * =========================================================================
  *
  * Individual kernel launchers for the 12-step GQA pipeline (Step 0 + Steps 1-11).
- * All FP16 only. The orchestration (hipBLASLt GEMMs, workspace, temp
+ * The pure data-movement kernels (append / concat / rope / transpose / expand /
+ * split) take element_size_bytes (2 = fp16, 4 = fp32) and dispatch to the
+ * matching typed kernel -- this fp32-enables the decomposed GQA pipeline used
+ * by the Whisper no_causal path. The fused / flash decode kernels remain FP16
+ * only (Llama / gpt-oss). The orchestration (hipBLASLt GEMMs, workspace, temp
  * buffers) lives in the runtime wrapper (real/gqa.cpp).
  */
 
@@ -378,11 +509,12 @@ int hip_rope_forward(
  * Use when past and present share the same buffer (aliased / in-place).
  * seqlens_k: optional device pointer [B] int32. When non-null, past_len is
  * derived from seqlens_k[b]+1-sq (per-batch) and the host past_len is ignored.
- * Pass NULL for host-side past_len. */
-int hip_gqa_kv_cache_append(
+ * Pass NULL for host-side past_len.
+ * element_size_bytes: 2 = fp16, 4 = fp32. */
+HIP_KERNEL_API int hip_gqa_kv_cache_append(
     void* stream, const void* src, void* cache,
     int batch_size, int sq, int G, int d, int present_seq, int past_len,
-    const void* seqlens_k);
+    const void* seqlens_k, int element_size_bytes);
 
 /* KV cache concat: concatenate past data and new tokens into a fresh present
  * buffer.  Fills present [B,G,present_seq,d] by copying past data from
@@ -390,53 +522,59 @@ int hip_gqa_kv_cache_append(
  * from current BSHD [B,sq,G,d] at [past_len,past_len+sq).
  * past_seq and present_seq are the actual sequence dimensions (strides) of the
  * respective buffers.  Handles the stride mismatch (past_seq != present_seq)
- * in a single kernel launch. */
-int hip_gqa_kv_cache_concat(
+ * in a single kernel launch.
+ * element_size_bytes: 2 = fp16, 4 = fp32. */
+HIP_KERNEL_API int hip_gqa_kv_cache_concat(
     void* stream, const void* past, const void* current, void* present,
     int batch_size, int past_len, int sq, int G, int d,
-    int past_seq, int present_seq);
+    int past_seq, int present_seq, int element_size_bytes);
 
-/* Internal GQA RoPE (half-rotated, FP16):
+/* Internal GQA RoPE (half-rotated):
  * out[d] = in[d]*cos - in[d+half]*sin
  * out[d+half] = in[d+half]*cos + in[d]*sin
  * seqlens_k: optional device pointer [B] int32. When non-null, past_len is
- * derived from seqlens_k[b]+1-seq_len and the host past_len is ignored. */
-int hip_gqa_rope(
+ * derived from seqlens_k[b]+1-seq_len and the host past_len is ignored.
+ * element_size_bytes: 2 = fp16, 4 = fp32. */
+HIP_KERNEL_API int hip_gqa_rope(
     void* stream, const void* input, void* output,
     const void* cos_cache, const void* sin_cache,
     int batch_size, int seq_len, int num_heads,
     int head_dim, int half_rot, int past_len,
-    const void* seqlens_k);
+    const void* seqlens_k, int element_size_bytes);
 
 /* Transpose middle two dims of 4D tensor:
- * [B, dim1, dim2, D] -> [B, dim2, dim1, D] */
-int hip_gqa_transpose_mid_dims(
+ * [B, dim1, dim2, D] -> [B, dim2, dim1, D]
+ * element_size_bytes: 2 = fp16, 4 = fp32. */
+HIP_KERNEL_API int hip_gqa_transpose_mid_dims(
     void* stream, const void* src, void* dst,
-    int batch_size, int dim1, int dim2, int D);
+    int batch_size, int dim1, int dim2, int D, int element_size_bytes);
 
 /* KV group expansion: replicate G groups -> H heads.
- * For head h, copies from group g = h / heads_per_group. */
-int hip_gqa_expand_kv(
+ * For head h, copies from group g = h / heads_per_group.
+ * element_size_bytes: 2 = fp16, 4 = fp32. */
+HIP_KERNEL_API int hip_gqa_expand_kv(
     void* stream, const void* src, void* dst,
     int total_heads, int heads_per_group,
-    int src_stride, int dst_stride, int copy_elems);
+    int src_stride, int dst_stride, int copy_elems, int element_size_bytes);
 
 /* Split packed QKV [B*S, (H+2*G)*d] into separate Q, K, V buffers.
- * Q: [B*S, H*d], K: [B*S, G*d], V: [B*S, G*d] */
-int hip_gqa_split_qkv(
+ * Q: [B*S, H*d], K: [B*S, G*d], V: [B*S, G*d]
+ * element_size_bytes: 2 = fp16, 4 = fp32. */
+HIP_KERNEL_API int hip_gqa_split_qkv(
     void* stream, const void* packed, void* Q, void* K, void* V,
-    int batch_size, int seq_len, int num_heads, int kv_num_heads, int head_dim);
+    int batch_size, int seq_len, int num_heads, int kv_num_heads, int head_dim,
+    int element_size_bytes);
 
 /* Causal mask (prefill only): S[k,q] = -inf where k > past_len + q.
  * When local_window_size > 0, also masks k < past_len + q - local_window_size + 1. */
-int hip_gqa_causal_mask(
+HIP_KERNEL_API int hip_gqa_causal_mask(
     void* stream, void* S,
     int total_heads, int skv, int sq,
     int batch_stride, int past_len, int local_window_size);
 
 /* Causal mask on fp32 Score matrix.  Same semantics as hip_gqa_causal_mask
  * but operates on float* and writes -INFINITY instead of -65504. */
-int hip_gqa_causal_mask_f32(
+HIP_KERNEL_API int hip_gqa_causal_mask_f32(
     void* stream, void* S,
     int total_heads, int skv, int sq,
     int batch_stride, int past_len, int local_window_size);
@@ -447,17 +585,34 @@ int hip_gqa_causal_mask_f32(
  *   softmax_i = exp(x_i) / (exp(head_sink[h]) + sum_j exp(x_j))
  * When head_sink is null but use_smooth_softmax is set, uses sink = 0:
  *   softmax_i = exp(x_i) / (exp(0) + sum_j exp(x_j)) */
-int hip_gqa_softmax_inplace(
+HIP_KERNEL_API int hip_gqa_softmax_inplace(
     void* stream, void* data,
     int total_head_queries, int rows, int cols,
     int batch_stride, const void* head_sink, int num_heads,
     int use_smooth_softmax);
 
+/* Row-wise softmax over a flattened [rows, cols] row-major fp16 buffer.
+ * One block per row, softmaxes the `cols` elements of each row in-place
+ * (data is overwritten with normalized probabilities). Matches ONNX
+ * Softmax semantics for axis = -1 on the flattened input. Used by the
+ * standalone `hip_miopen_softmax` runtime entry point. */
+HIP_KERNEL_API int hip_softmax_row_2d_inplace(void* stream, void* data, int rows, int cols);
+
 /* Column-wise softmax: fp32 input -> fp16 output.
  * Reads fp32 Score matrix (no fp16 overflow/inf), writes fp16 probabilities.
  * input_batch_stride is in float elements, output_batch_stride in half elements. */
-int hip_gqa_softmax_f32_to_f16(
+HIP_KERNEL_API int hip_gqa_softmax_f32_to_f16(
     void* stream, const void* input_f32, void* output_f16,
+    int total_head_queries, int rows, int cols,
+    int input_batch_stride, int output_batch_stride,
+    const void* head_sink, int num_heads, int use_smooth_softmax);
+
+/* Column-wise softmax: fp32 input -> fp32 output.
+ * Same as hip_gqa_softmax_f32_to_f16 but writes fp32 probabilities, feeding
+ * the fp32 Value GEMM on the Whisper no_causal fp32 decomposed path.
+ * input_batch_stride and output_batch_stride are both in float elements. */
+HIP_KERNEL_API int hip_gqa_softmax_f32_to_f32(
+    void* stream, const void* input_f32, void* output_f32,
     int total_head_queries, int rows, int cols,
     int input_batch_stride, int output_batch_stride,
     const void* head_sink, int num_heads, int use_smooth_softmax);
@@ -471,7 +626,7 @@ int hip_gqa_softmax_f32_to_f16(
  * reads total_seq = seqlens_k[b]+1 as the loop bound (instead of skv).
  * NOTE: assumes wave32 (RDNA); not portable to CDNA/wave64 without changes
  * to the warp shuffle reduction tree. */
-int hip_gqa_fused_decode(
+HIP_KERNEL_API int hip_gqa_fused_decode(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int H, int G, int d, int skv, int max_seq,
     float scale, const void* seqlens_k);
@@ -479,7 +634,7 @@ int hip_gqa_fused_decode(
 /* Fused GQA prefill (sq > 1, d == 128): Flash Attention 2 with WMMA
  * tile GEMMs and online softmax. Double-buffered KV tiles, causal mask.
  * Replaces steps 3, 6-11 of the decomposed pipeline. */
-int hip_gqa_fused_prefill(
+HIP_KERNEL_API int hip_gqa_fused_prefill(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int H, int G, int sq, int skv, int max_seq, int past_len,
     float scale);
@@ -512,7 +667,7 @@ int hip_gqa_fused_prefill(
  * s_h = 0 for all heads. This is the gpt-oss-20b / Mistral-style attention
  * sink. The partials are unaffected; the term is folded in by the reduce
  * kernel. */
-int hip_gqa_flash_decode(
+HIP_KERNEL_API int hip_gqa_flash_decode(
     void* stream,
     const void* Q, const void* Kcache, const void* Vcache,
     void* O,
@@ -542,7 +697,7 @@ int hip_gqa_flash_decode(
  * Currently supported conversions: INT64 -> INT32
  * Returns: 0 on success, non-zero on failure
  */
-int hip_cast(
+HIP_KERNEL_API int hip_cast(
     void* stream,
     const void* input,
     void* output,
@@ -569,11 +724,14 @@ int hip_cast(
  *   output_num_elements  - total elements in output tensor
  *   element_size_bytes   - byte size per element (used for raw copy)
  *
- * Currently supports: axis=0
+ * Generic axis support. data has logical shape [outer, axis_size, inner];
+ * output has logical shape [outer, indices_num, inner]. The caller computes
+ * axis_size = data.shape[axis] and inner_size = product(data.shape[axis+1:]);
+ * outer_size is derived as data_num / (axis_size * inner_size).
  * Supported element sizes: 2 (f16/bf16), 4 (f32/i32), 8 (i64/f64)
  * Returns: 0 on success, non-zero on failure
  */
-int hip_gather(
+HIP_KERNEL_API int hip_gather(
     void* stream,
     const void* data,
     const void* indices,
@@ -582,7 +740,10 @@ int hip_gather(
     int64_t data_num_elements,
     int64_t indices_num_elements,
     int64_t output_num_elements,
-    int element_size_bytes);
+    int64_t axis_size,
+    int64_t inner_size,
+    int element_size_bytes,
+    int indices_element_size_bytes);
 
 /* =========================================================================
  * ReduceSum (Parallel Sum Reduction)
@@ -607,13 +768,160 @@ int hip_gather(
  *     final result is narrowed back to half.
  * Returns: 0 on success, non-zero on failure
  */
-int hip_reduce_sum(
+/* `inner_size` = product of input dims AFTER the reduced axis (1 for a
+ * trailing/contiguous reduce). Enables reducing a non-trailing axis (e.g.
+ * channel-axis LayerNorm2d over NCHW): reduced elements are strided by
+ * `inner_size`. inner_size==1 preserves the contiguous fast path. */
+HIP_KERNEL_API int hip_reduce_sum(
     void* stream,
     const void* data,
     void* output,
     int64_t num_input_elements,
     int64_t num_output_elements,
+    int64_t inner_size,
     int hip_dtype);
+
+/* =========================================================================
+ * ReduceMean (Parallel Mean Reduction)
+ * =========================================================================
+ *
+ * Same layout convention and `inner_size` semantics as hip_reduce_sum, but
+ * divides the float-accumulated sum of each `reduce_size`-element slice by
+ * reduce_size = num_input / num_output before the half narrowing. The division
+ * is performed in-kernel so the op needs no compile-time-static reduce dim and
+ * tolerates a dynamic reduce axis.
+ *
+ * Supported types: HIP_DTYPE_FLOAT16 only (ONNX ReduceMean is float-domain;
+ * the true-fp16 EP path only ever feeds half tensors). Other dtypes return -1.
+ * Returns: 0 on success, non-zero on failure
+ */
+HIP_KERNEL_API int hip_reduce_mean(
+    void* stream,
+    const void* data,
+    void* output,
+    int64_t num_input_elements,
+    int64_t num_output_elements,
+    int64_t inner_size,
+    int hip_dtype);
+
+/* =========================================================================
+ * Pool — MaxPool / AveragePool / LpPool (1D / 2D / 3D)
+ * =========================================================================
+ *
+ * Generic ONNX window pooling over an `(N, C, D_1[, D_2[, D_3]])` input.
+ * Lays the output `(N, C, O_1[, O_2[, O_3]])` out in row-major order matching
+ * the input layout.
+ *
+ * `mode` selects the per-window reduction (must match HIPDNN_EP_POOL_* in
+ * lib/Runtime/hipdnn_ep_runtime.h):
+ *   0 (AVERAGE): Y = sum(window) / divisor
+ *   1 (MAX)    : Y = max(window)
+ *   2 (LP)     : Y = pow(sum(pow(|window|, p)), 1/p)
+ *
+ * Pad positions are never read (they fall outside the input bounds). For
+ * AVERAGE, `count_include_pad` picks the divisor: 0 = number of in-bounds
+ * window elements, 1 = full kernel volume (pad cells contribute 0 to the
+ * sum). `p` is the LP norm exponent (>= 1); both are ignored for the modes
+ * that don't use them.
+ *
+ * Optional `indices` (i64 buffer the same shape as the output) records the
+ * row-major flat index in the *unpadded* input that each max came from —
+ * MAX mode only; matches ONNX MaxPool spec for storage_order = 0. Pass NULL
+ * for AVERAGE / LP.
+ *
+ * `spatial_rank` selects how many of the per-axis arrays are read; for
+ * spatial_rank < 3 the trailing slots in `in_d`, `out_d`, `kernel`,
+ * `strides`, `pads_begin`, `dilations` must be set to 1 / 0 by the caller
+ * (the lowering does this).
+ *
+ * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64.
+ * Returns: 0 on success, non-zero on failure.
+ */
+HIP_KERNEL_API int hip_pool(
+    void* stream,
+    const void* input,
+    void* output,
+    void* indices,            /* int64_t* — nullable, MAX only */
+    int hip_dtype,
+    int mode,
+    int spatial_rank,
+    int64_t N, int64_t C,
+    int64_t in_d0, int64_t in_d1, int64_t in_d2,
+    int64_t out_d0, int64_t out_d1, int64_t out_d2,
+    int64_t k0, int64_t k1, int64_t k2,
+    int64_t s0, int64_t s1, int64_t s2,
+    int64_t p0, int64_t p1, int64_t p2,
+    int64_t dil0, int64_t dil1, int64_t dil2,
+    int count_include_pad,
+    int p);
+
+
+ /* =========================================================================
+ * Resize (1D / 2D / 3D spatial)
+ * =========================================================================
+ *
+ * Resamples the trailing spatial axes of an `(N, C, D_1, ..., D_k)` input
+ * onto an `(N, C, O_1, ..., O_k)` output grid.  Per-axis scale is computed
+ * inside the kernel as `scale = in_dim / out_dim`.  The (N, C) prefix is
+ * pass-through.
+ *
+ *  mode:               0 = nearest, 1 = linear (N-linear)
+ *  coord_transform:    0 = half_pixel, 1 = asymmetric, 2 = align_corners
+ *  nearest_mode:       0 = round_prefer_floor (only used when mode=nearest)
+ *
+ * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64.
+ * Returns: 0 on success, non-zero on failure.
+ */
+HIP_KERNEL_API int hip_resize(
+    void* stream,
+    const void* input,
+    void* output,
+    int hip_dtype,
+    int spatial_rank,
+    int64_t N, int64_t C,
+    int64_t in_d0, int64_t in_d1, int64_t in_d2,
+    int64_t out_d0, int64_t out_d1, int64_t out_d2,
+    int mode,
+    int coord_transform,
+    int nearest_mode);
+
+/* =========================================================================
+ * Global pool (avg / max / lp)
+ * =========================================================================
+ *
+ * Reduces each contiguous `reduce_size`-element slice into a single value.
+ * Data is viewed as `[outer, reduce_size]` where
+ *   outer       = N * C
+ *   reduce_size = D_1 * D_2 * ... * D_k   (product of all spatial dims)
+ *
+ * `mode` selects the reduction (must match HIPDNN_EP_GLOBAL_POOL_* in
+ * lib/Runtime/hipdnn_ep_runtime.h):
+ *   0 (AVERAGE): Y = mean(slice)
+ *   1 (MAX)    : Y = max(slice)
+ *   2 (LP)     : Y = pow(sum(pow(|slice|, p)), 1/p)
+ *
+ * `p` is the LP-norm exponent; ignored for AVG / MAX. Caller must guarantee
+ * `p >= 1` for LP (the runtime wrapper rejects values below that).
+ *
+ * One reduction block per output element (per (n, c) slice). Accumulation
+ * happens in float (regardless of input dtype) to keep precision on long
+ * spatial reductions of fp16 / bf16 inputs.
+ *
+ * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_BFLOAT16, HIP_DTYPE_FLOAT64.
+ * Returns: 0 on success, non-zero on failure
+ */
+HIP_KERNEL_API int hip_global_pool(
+    void* stream,
+    const void* data,
+    void* output,
+    int64_t outer,
+    int64_t reduce_size,
+    int hip_dtype,
+    int mode,
+    int p);
 
 /* =========================================================================
  * Block reductions (Max / Prod) -- same layout convention as hip_reduce_sum.
@@ -631,20 +939,23 @@ int hip_reduce_sum(
  * Supported hip_dtypes: HIP_DTYPE_INT32, HIP_DTYPE_INT64, HIP_DTYPE_FLOAT16
  * (FP16 accumulates in float, narrows on write).
  */
-int hip_reduce_max(
+/* `inner_size`: see hip_reduce_sum (strided non-trailing-axis support). */
+HIP_KERNEL_API int hip_reduce_max(
     void* stream,
     const void* data,
     void* output,
     int64_t num_input_elements,
     int64_t num_output_elements,
+    int64_t inner_size,
     int hip_dtype);
 
-int hip_reduce_prod(
+HIP_KERNEL_API int hip_reduce_prod(
     void* stream,
     const void* data,
     void* output,
     int64_t num_input_elements,
     int64_t num_output_elements,
+    int64_t inner_size,
     int hip_dtype);
 
 /* =========================================================================
@@ -664,7 +975,7 @@ int hip_reduce_prod(
  * Both kernels are bounded to kTileMaxRank = 8 input/output dimensions
  * (matches ORT's TArray<int64, 8> default).
  */
-int hip_tile(
+HIP_KERNEL_API int hip_tile(
     void* stream,
     const void* input,
     void* output,
@@ -673,7 +984,7 @@ int hip_tile(
     int rank,
     int hip_dtype);
 
-int hip_expand(
+HIP_KERNEL_API int hip_expand(
     void* stream,
     const void* input,
     void* output,
@@ -694,7 +1005,7 @@ int hip_expand(
  * decomposition are computed on the host; the kernel runs one thread per
  * output element and reads K indices inline (no scratch buffer).
  */
-int hip_gather_nd(
+HIP_KERNEL_API int hip_gather_nd(
     void* stream,
     const void* input,
     const void* indices,
@@ -731,12 +1042,24 @@ int hip_gather_nd(
  *
  * Supported dtypes: f16, f32, i32, i64.
  */
-int hip_slice(
+HIP_KERNEL_API int hip_slice(
     void* stream,
     const void* input,
     void* output,
     const int64_t* input_shape_host,
-    const int64_t* output_shape_host,
+    const int64_t* output_shape_host,     /* physical alloc shape       */
+    const int64_t* logical_extent_host,   /* per-axis actual slice extent;
+                                             may be NULL, in which case the
+                                             kernel treats it as identical to
+                                             output_shape_host (i.e. no
+                                             over-alloc; entire physical
+                                             buffer is filled by the slice).
+                                             When set and logical[d] <
+                                             output_shape[d] for some d,
+                                             positions in the over-allocated
+                                             tail are filled with zero — the
+                                             host wrapper does not need to
+                                             pre-memset the buffer.        */
     const int64_t* starts_per_axis_host,  /* length = rank */
     const int64_t* steps_per_axis_host,   /* length = rank */
     int rank,
@@ -772,17 +1095,51 @@ int hip_slice(
  *
  * Supported dtypes: f16, f32, i32, i64. INT64 indices only.
  */
-int hip_scatter_nd(
+HIP_KERNEL_API int hip_scatter_nd(
     void* stream,
     const void* data,
     const void* indices,
     const void* updates,
     void* output,
+    const int32_t* count_ptr,
     const int64_t* data_shape_host,
     int data_rank,
     const int64_t* indices_shape_host,
     int indices_rank,
     int reduction_id,
+    int hip_dtype);
+
+/* =========================================================================
+ * NonZero
+ * =========================================================================
+ *
+ * Single-block cooperative ordered scan: each thread counts the non-zeros in
+ * its chunk, thread 0 exclusive-scans the per-chunk counts, then each thread
+ * re-walks its chunk and writes coordinates into output[rank, capacity] at
+ * stride = capacity, in row-major (ONNX-spec) order. Columns beyond the true
+ * count are left undefined (the launcher zero-fills them defensively).
+ *
+ * After completion, *count_ptr (device i32) holds the actual number of
+ * non-zero elements. The host reads it back via hipdnn_ep_readback_i32
+ * (lowered from hip.readback_dim) and slices the output to its true extent, so
+ * downstream ops and the ORT-reported shape use the count rather than the
+ * worst-case capacity.
+ *
+ * input_dims_host: host pointer to int64_t[rank] holding the input
+ * shape (copied to device internally before the kernel launch).
+ *
+ * Supported dtypes: f16, f32, i32, i64, i8, u8.
+ * Bounded to rank <= 8.
+ */
+HIP_KERNEL_API int hip_nonzero(
+    void* stream,
+    const void* input,
+    void* output,
+    int* count_ptr,
+    int64_t input_num_elements,
+    int64_t input_rank,
+    const int64_t* input_dims_host,
+    int64_t output_capacity,
     int hip_dtype);
 
 /* =========================================================================
@@ -797,7 +1154,7 @@ int hip_scatter_nd(
  *
  * FP16 accumulates in float to avoid precision loss for long axes.
  */
-int hip_cumsum(
+HIP_KERNEL_API int hip_cumsum(
     void* stream,
     const void* x,
     void* y,
@@ -822,7 +1179,7 @@ int hip_cumsum(
  * `pad_value_host` : host pointer to a scalar of the data type (used only
  *                    when pad_mode == Constant). May be null -> default 0.
  */
-int hip_pad(
+HIP_KERNEL_API int hip_pad(
     void* stream,
     const void* input,
     void* output,
@@ -846,7 +1203,7 @@ int hip_pad(
  * `hip_dtype`   : I/O type for input/scale/bias/output -- FLOAT16 or FLOAT32.
  * `mean_dtype`  : type of mean/inv_std output buffers -- FLOAT16 or FLOAT32.
  */
-int hip_layer_norm(
+HIP_KERNEL_API int hip_layer_norm(
     void* stream,
     const void* input,
     const void* scale,
@@ -884,7 +1241,7 @@ int hip_layer_norm(
  *                  HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT64
  * Returns: 0 on success, non-zero on failure
  */
-int hip_range(
+HIP_KERNEL_API int hip_range(
     void* stream,
     const void* start,
     const void* limit,
@@ -920,7 +1277,7 @@ int hip_range(
  *
  * Returns: 0 on success, non-zero hipError_t / -1 on failure.
  */
-int hip_transpose(
+HIP_KERNEL_API int hip_transpose(
     void* stream,
     const void* input,
     void* output,
@@ -965,7 +1322,7 @@ int hip_transpose(
  *
  * Returns: 0 on success, non-zero on failure
  */
-int hip_matmul_nbits(
+HIP_KERNEL_API int hip_matmul_nbits(
     void* stream,
     const void* A,
     const void* B,
@@ -995,10 +1352,66 @@ int hip_matmul_nbits(
  *   N:         output rows
  *   groups_k:  K / block_size (round-up)
  */
-void hip_matmul_nbits_unpack_zp_u8(
+HIP_KERNEL_API void hip_matmul_nbits_unpack_zp_u8(
     void* stream, const void* zp_packed, void* dst_u8, int N, int groups_k);
-void hip_matmul_nbits_convert_zp_fp16(
+HIP_KERNEL_API void hip_matmul_nbits_convert_zp_fp16(
     void* stream, const void* zp_packed, void* dst_fp16, int N, int groups_k);
+
+/* =========================================================================
+ * GatherBlockQuantized (com.microsoft)
+ * =========================================================================
+ *
+ * Combined gather + block-wise dequantize. Equivalent to
+ *   tmp        = Gather(data, indices, axis=gather_axis)   // raw quantized
+ *   output[..] = (decode(tmp[..]) - zp_block[..]) * scale_block[..]
+ * computed in one fused kernel: one thread per output element.
+ *
+ * Storage / packing:
+ *   data         - packed quantized weights (uint8 storage). For bits==4,
+ *                  two nibbles per byte: low nibble first, high nibble
+ *                  second (matches MatMulNBits convention).
+ *   bits == 4 + is_signed_data == 1  -> int4   (sign-extend the nibble)
+ *   bits == 4 + is_signed_data == 0  -> uint4  (raw nibble in [0,15])
+ *   bits == 8 + is_signed_data == 0  -> uint8  (raw byte  in [0,255])
+ *   bits == 8 + is_signed_data == 1  -> int8   (signed byte in [-128,127])
+ *
+ * scales       - one per (data block) along quantize_axis: same shape as
+ *                data except dim quantize_axis is data.shape[qa]/block_size.
+ *                Type: T2 in {fp32, fp16, bf16}, matches output.
+ * zero_points  - same logical shape as scales; same packing as data
+ *                (sub-byte for bits==4). May be null; default zp is then
+ *                applied to every block (caller-supplied via default_zp).
+ *
+ * gather_axis / quantize_axis must be normalized to [0, data_rank) by the
+ * caller (negatives resolved). For uint8 data the spec requires
+ * gather_axis == 0; that constraint is enforced by the host wrapper, not
+ * by the kernel.
+ *
+ * Output rank = indices_rank + (data_rank - 1). Output shape =
+ *   data.shape[0:gather_axis] ++ indices.shape ++ data.shape[gather_axis+1:]
+ * out_dtype is the element type of `scales` and `output`.
+ *
+ * Returns: 0 on success, non-zero hipError_t on failure (incl. rank > max).
+ */
+HIP_KERNEL_API int hip_gather_block_quantized(
+    void* stream,
+    const void* data,            // packed quantized
+    const void* indices,         // int32 or int64
+    const void* scales,          // T2 per block
+    const void* zero_points,     // packed (nullable)
+    void* output,                // T2 dequantized
+    const int64_t* data_shape,    int data_rank,
+    const int64_t* indices_shape, int indices_rank,
+    const int64_t* scales_shape,  int scales_rank,
+    const int64_t* output_shape,  int output_rank,
+    int bits,                    // 4 or 8
+    int block_size,              // power of 2, >= 16
+    int gather_axis,             // normalized
+    int quantize_axis,           // normalized
+    int default_zp,              // applied when zero_points == null
+    int is_signed_data,          // 1 if int4 / int8, 0 if uint4 / uint8
+    int indices_is_int64,        // 1 = i64, 0 = i32
+    int out_dtype);              // hip_dtype_t (FLOAT16 / FLOAT32 / BFLOAT16)
 
 /* =========================================================================
  * QMoE Sub-Kernels
@@ -1017,7 +1430,7 @@ void hip_matmul_nbits_convert_zp_fp16(
  *   expert_weights - GPU [num_tokens, k] (output, same type as probs)
  *   normalize      - 1 to normalize selected weights (sum-to-one)
  */
-int hip_qmoe_topk_routing(
+HIP_KERNEL_API int hip_qmoe_topk_routing(
     void* stream,
     const void* router_probs,
     void* expert_indices,
@@ -1031,7 +1444,7 @@ int hip_qmoe_topk_routing(
 /* Gather rows: gathered[i,:] = input[token_ids[i],:]
  *   token_ids - GPU [count] int32
  */
-int hip_qmoe_gather_tokens(
+HIP_KERNEL_API int hip_qmoe_gather_tokens(
     void* stream,
     const void* input,
     void* gathered,
@@ -1043,7 +1456,7 @@ int hip_qmoe_gather_tokens(
 /* In-place bias: data[i,j] += bias[j]
  *   No-op if bias is NULL.
  */
-int hip_qmoe_add_bias(
+HIP_KERNEL_API int hip_qmoe_add_bias(
     void* stream,
     void* data,
     const void* bias,
@@ -1057,7 +1470,7 @@ int hip_qmoe_add_bias(
  *   L = clamp(linear, -limit, limit)
  *   out = G * sigmoid(alpha*G) * (L + beta)
  */
-int hip_qmoe_swiglu(
+HIP_KERNEL_API int hip_qmoe_swiglu(
     void* stream,
     const void* input,
     void* output,
@@ -1072,7 +1485,7 @@ int hip_qmoe_swiglu(
  *   token_ids - GPU [count] int32
  *   weights   - GPU [count] (same type as output)
  */
-int hip_qmoe_scatter_add(
+HIP_KERNEL_API int hip_qmoe_scatter_add(
     void* stream,
     void* output,
     const void* expert_out,
@@ -1099,7 +1512,7 @@ int hip_qmoe_scatter_add(
  *
  * Constraints: fp16 only; num_experts <= 1024.
  */
-int hip_qmoe_bucket_tokens(
+HIP_KERNEL_API int hip_qmoe_bucket_tokens(
     void* stream,
     const void* expert_indices,
     const void* expert_weights,
@@ -1140,7 +1553,7 @@ int hip_qmoe_bucket_tokens(
  * Constraints: fp16 only (element_size_bytes == 2); hidden_size and
  * inter_size both multiples of 32; block_size > 0 and even.
  */
-int hip_qmoe_decode_fused(
+HIP_KERNEL_API int hip_qmoe_decode_fused(
     void* stream,
     const void* input,
     const void* expert_indices,
@@ -1246,7 +1659,7 @@ int hip_qmoe_decode_fused(
  *
  * Returns: 0 on success, non-zero on failure
  */
-int hip_linear_attention_decode(
+HIP_KERNEL_API int hip_linear_attention_decode(
     void* stream,
     const void* query,
     const void* key,
@@ -1267,6 +1680,24 @@ int hip_linear_attention_decode(
     int64_t decay_per_key_dim,
     int64_t beta_per_head,
     int64_t type);
+
+// Max memref rank honoured by the strided memref.copy fast path
+// (hip_strided_copy) and the host per-row fallback in memrefCopy. Defined
+// once here so the kernel and the runtime helper cannot drift out of sync.
+#define HIPDNN_MAX_MEMREF_RANK 12
+
+// Parallel strided device-to-device copy (one launch) for MLIR memref.copy
+// where neither side is contiguous and the copy spans multiple outer dims.
+// Replaces the host per-row hipMemcpyAsync loop in memrefCopy. Pointers are
+// element-aligned bases; outer_sizes/strides cover the outer dims, row_elems
+// is the contiguous inner suffix. Returns 0 on success, -2 if elem_size is
+// unsupported (caller falls back to the host per-row path).
+HIP_KERNEL_API int hip_strided_copy(void *stream, void *dst, const void *src,
+                     int64_t elem_size, int outer_rank,
+                     const int64_t *outer_sizes,
+                     const int64_t *src_outer_strides,
+                     const int64_t *dst_outer_strides, int64_t row_elems,
+                     int64_t outer_total);
 
 /* =========================================================================
  * Causal Depthwise 1D Conv -- single-step "decode" path
@@ -1306,7 +1737,7 @@ int hip_linear_attention_decode(
  *
  * Returns: 0 on success, non-zero on failure.
  */
-int hip_causal_conv_step_decode(
+HIP_KERNEL_API int hip_causal_conv_step_decode(
     void* stream,
     const void* input,
     const void* weight,
@@ -1316,6 +1747,27 @@ int hip_causal_conv_step_decode(
     void* present_state,
     int64_t batch_size,
     int64_t channels,
+    int64_t kernel_size,
+    int64_t activation,
+    int64_t element_size_bytes);
+
+// Prefill (seq_len > 1) fused causal depthwise 1D conv + bias + SiLU. One
+// launch replaces the MIOpen path (Find + 3 pitched memcpys + conv + bias +
+// activation + mul). fp32 accumulate; numerically matches the decode-step
+// kernel at seq_len==1. Same layout/contract as hip_causal_conv_step_decode
+// plus a seq_len argument. Supports kernel_size in [1,8], activation 0/1,
+// element_size 2/4; caller falls back to MIOpen for anything else.
+HIP_KERNEL_API int hip_causal_conv_prefill(
+    void* stream,
+    const void* input,
+    const void* weight,
+    const void* bias,
+    const void* past_state,
+    void* output,
+    void* present_state,
+    int64_t batch_size,
+    int64_t channels,
+    int64_t seq_len,
     int64_t kernel_size,
     int64_t activation,
     int64_t element_size_bytes);
@@ -1344,7 +1796,7 @@ int hip_causal_conv_step_decode(
  *
  * Returns: 0 on success, non-zero on failure
  */
-int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
+HIP_KERNEL_API int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
                        void* C, int M, int K, int N);
 
 #ifdef __cplusplus

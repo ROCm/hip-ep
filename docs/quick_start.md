@@ -4,8 +4,12 @@ Licensed under the MIT License.
 -->
 # Quick Start Guide
 
-This guide covers the **pre-built flow**: downloading ready-made LLVM/MLIR/LLD,
-FlatBuffers, and Protobuf binaries instead of compiling them from source.
+This guide builds onnx-hipdnn-ep on Windows. The C++ dependencies
+(LLVM/MLIR/LLD, FlatBuffers, Protobuf, ONNX Runtime) and the TheRock ROCm SDK
+are resolved automatically by CMake (see step 2): they are reused from
+a prefix when one is available, and otherwise built or downloaded from source.
+ONNX Runtime is built explicitly only if you need to modify it or build OGA
+(step 1 is otherwise optional).
 
 ## Prerequisites
 
@@ -16,8 +20,8 @@ FlatBuffers, and Protobuf binaries instead of compiling them from source.
 | **MSVC 2022** | C++ compiler (Visual Studio Build Tools or full IDE) |
 | **Python 3** | LLVM/MLIR tools runtime |
 | **sccache** | Compiler cache (significantly speeds up rebuilds) |
-| **`gh` CLI** | Downloading pre-built binaries (`gh auth login` required) |
-| **`unzip`** | Extracting downloaded archives (available in Git Bash / MSYS2) |
+| **`gh` CLI** | Authenticating access to the private MorphiZen submodule (`gh auth login`) |
+| **Git** | Clone + submodules; from-source deps are fetched via git |
 
 **<span style="color:red">IMPORTANT</span> -- MSVC Environment Setup:**
 
@@ -40,15 +44,15 @@ echo $INCLUDE  # Should contain paths under "Microsoft Visual Studio"
 #    workload). Skip this step if you already have a full VS 2022 IDE.
 winget install Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.NativeDesktop --add Microsoft.VisualStudio.Component.VC.CMake.Project --includeRecommended"
 
-# 2. Ninja, Python 3, sccache, GitHub CLI, Git (provides Git Bash + unzip)
+# 2. Ninja, Python 3, sccache, GitHub CLI, Git (provides Git Bash)
 winget install Ninja-build.Ninja
 winget install Python.Python.3.14
 winget install Mozilla.sccache
 winget install GitHub.cli
 winget install Git.Git
 
-# 3. Authenticate gh (needed to download pre-built LLVM/MLIR/Protobuf/FlatBuffers
-#    archives from wcy123/llvm-mlir-prebuilt releases)
+# 3. Authenticate gh / set up an SSH key with access to the private
+#    ROCm/MorphiZen submodule (cloned by `git submodule update`).
 gh auth login
 ```
 
@@ -65,24 +69,23 @@ ninja --version
 python --version
 sccache --version
 gh --version
-unzip -v | head -1        # provided by Git for Windows
 ```
 
 ## Directory Layout
 
 All paths are relative to the directory that contains the project source
 (`<workspace>/`). Clone the repository so that the source, build, and
-prebuilt-local directories are siblings:
+local directories are siblings:
 
 ```
 <workspace>/
 ├── <repo>/             # project source — this is $PWD for all commands below
 ├── build/
 │   └── <repo>/         # cmake build output  ../build/$(basename $PWD)
-└── prebuilt-local/     # pre-built Release binaries  ../prebuilt-local
+└── local/              # install/staging prefix  ../local
     ├── bin/
     ├── include/
-    └── lib/cmake/{llvm,mlir,lld,flatbuffers,protobuf,...}
+    └── lib/cmake/onnxruntime/
 ```
 
 ## One-Time Setup
@@ -102,10 +105,16 @@ git submodule update --init --recursive
 All subsequent commands run from the `onnx-hipdnn-ep/` project root unless
 explicitly noted.
 
-### 1. Build ONNX Runtime (Required for BUILD_EP=ON)
+### 1. Build ONNX Runtime (optional)
 
-Build ONNX Runtime **before** downloading pre-built dependencies to avoid
-FlatBuffers version conflicts (ORT bundles its own FlatBuffers).
+This step is **optional**: build ONNX Runtime from source only if you need to
+modify ORT itself. Otherwise skip it -- the EP's CMake auto-downloads the pinned
+ONNX Runtime release (step 2) and uses that. When built from source, ORT is
+built standalone -- not as a subdirectory of this project -- so its bundled
+FlatBuffers does not conflict with ours.
+
+> **Note**: the OGA build (step 3) needs a local ORT for its `ORT_HOME`. If you
+> plan to run OGA, build ORT here (or stage the release zip into `ORT_HOME`).
 
 **Clone ONNX Runtime** (if not already cloned):
 
@@ -120,22 +129,22 @@ cd onnxruntime
 
 ```bash
 # Build ONNX Runtime using build.bat (do NOT set CMAKE_INSTALL_PREFIX during build)
-# This ensures ONNX Runtime uses its own FlatBuffers version, avoiding conflicts with prebuilt FlatBuffers.
+# This ensures ONNX Runtime uses its own FlatBuffers version, avoiding conflicts with ours.
 # --build_wheel additionally produces a Python wheel under
-# ../build/onnxruntime/Release/dist/, which is needed for the OGA build below
-# and lets you `pip install` ONNX Runtime later (see "Install Python Wheels").
+# ../build/onnxruntime/Release/dist/, used only by the optional Python wheels
+# step (step 4); it is not required to build OGA itself.
 ./build.bat --config Release --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync --build_dir ../build/onnxruntime --skip_tests --disable_memleak_checker --use_dml --build_wheel
 
-# Install to prebuilt-local (set prefix at install time, not during configuration)
-mkdir -p ../prebuilt-local
-PREBUILT_DIR=$(cd ../prebuilt-local && pwd)
-cmake --install ../build/onnxruntime/Release --prefix "$PREBUILT_DIR"
+# Install to local (set prefix at install time, not during configuration)
+mkdir -p ../local
+LOCAL_DIR=$(cd ../local && pwd)
+cmake --install ../build/onnxruntime/Release --prefix "$LOCAL_DIR"
 ```
 
 **Verify installation**:
 
 ```bash
-ls $PREBUILT_DIR/lib/cmake/onnxruntime/
+ls $LOCAL_DIR/lib/cmake/onnxruntime/
 # Should see onnxruntime-config.cmake and related files
 
 ls ../build/onnxruntime/Release/dist/onnxruntime_directml-*.whl
@@ -143,84 +152,45 @@ ls ../build/onnxruntime/Release/dist/onnxruntime_directml-*.whl
 # onnxruntime_directml-1.25.1-cp314-cp314-win_amd64.whl
 ```
 
-### 2. Download Pre-built Dependencies
+### 2. Build onnx-hipdnn-ep
 
-Step 1 leaves you inside `<workspace>/onnxruntime/`. Switch back to the
-project root and run the bundled setup script (uses Git Bash / MSYS2):
+`build.py` is the cross-platform build driver (the same one used on Linux
+and in CI): it ensures submodules, sets up the build, resolves every dependency
+via `cmake/deps.cmake` (TheRock SDK + GPU arch auto-detected for real builds),
+and runs the cmake configure/build/install plus the LIT tests. A fresh tree needs
+no manual dependency setup; the cold from-source LLVM build is the long pole
+(multi-hour).
 
-```bash
-cd ../onnx-hipdnn-ep
-bash scripts/setup-prebuilt.sh
-```
-
-This downloads the following assets from
-`https://github.com/wcy123/llvm-mlir-prebuilt/releases` and extracts them into
-`../prebuilt-local/`:
-
-| Release tag | Asset |
-|---|---|
-| `llvm-22.1.0-release` | `llvm-22.1.0-release-windows-x64.zip` |
-| `protobuf-34.0-release` | `protobuf-34.0-release-windows-x64.zip` |
-| `flatbuffers-25.12.19-release` | `flatbuffers-25.12.19-release-windows-x64.zip` |
-
-Already-downloaded zip files are skipped on subsequent runs.
-
-### 3. Build onnx-hipdnn-ep
-
-**Prerequisites**: Complete steps 1-2 (build ONNX Runtime, download prebuilt dependencies) and install [TheRock SDK](https://repo.amd.com/rocm/tarball/). Recommended version: **TheRock 7.11.0**.
+On Windows the default generator is "Visual Studio 17 2022" (it locates MSVC on
+its own, so no special prompt is needed). To use Ninja instead, run from an
+"x64 Native Tools Command Prompt for VS" and pass `--cmake_generator Ninja`.
 
 Run from the project root:
 
 ```bash
-PREBUILT_DIR=$(cd ../prebuilt-local && pwd)
-THEROCK_DIST=$(cd ../therock && pwd)
-# For new users of this project, we recommend using the HIP provided by therock.
-# If you really want to use a pre-installed HIP instead, you can skip this unset.
+mkdir -p ../local
+LOCAL_DIR=$(cd ../local && pwd)
+# For new users we recommend the HIP shipped by TheRock; unset a pre-installed
+# HIP so it does not interfere (skip if you intend to use a pre-installed HIP).
 unset HIP_PATH
 
-cmake -S . -B ../build/$(basename $PWD) \
-  -G Ninja \
-  -DBUILD_SHARED_LIBS=OFF \
-  -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
-  -DCMAKE_BUILD_TYPE=Release \
-  "-DCMAKE_PREFIX_PATH=$PREBUILT_DIR" \
-  "-DCMAKE_INSTALL_PREFIX=$PREBUILT_DIR" \
-  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-  -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-  -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
-  -DTHEROCK_DIST="$THEROCK_DIST" \
-  -DHIP_PLATFORM=amd \
-  -DHIP_ARCHITECTURES=gfx1151 \
-  -DBUILD_EP=ON \
-  -DBUILD_MOCK_RUNTIME=OFF \
-  -DBUILD_HIP_TOOLS=ON
+python build.py --install_dir "$LOCAL_DIR" --cmake_prefix_path "$LOCAL_DIR"
+#   --mock                    mock runtime (no GPU/HIP/TheRock)
+#   --hip_arch gfx1151        target GPU; auto-detected by default. Set it for a
+#                             cross-machine build+run -- the *target* GPU's arch
+#                             (e.g. from `offload-arch.exe` on that machine)
+#   --therock_dist <path>     reuse a local TheRock SDK (else auto-downloaded)
+#   --cmake_generator Ninja   use Ninja (run from an x64 Native Tools prompt)
+#   --config RelWithDebInfo   build type (default Release)
+#   --skip_tests              skip the LIT tests (run by default after install)
+#   --clean                   remove build/ and install/
 ```
 
-**Note**: Replace `gfx1151` with your GPU architecture. Detect using: `$THEROCK_DIST/lib/llvm/bin/amdgpu-arch.exe`
+`--cmake_prefix_path "$LOCAL_DIR"` lets the build reuse an ONNX Runtime you
+installed in step 1; omit it and ORT is auto-downloaded. The MorphiZen EP, HIP
+tools and LIT tests are built and installed into `../local/`.
 
-**Key options:**
-
-| Option | Value | Notes |
-|--------|-------|-------|
-| `-G Ninja` | — | Recommended for faster builds; MSVC generator also works |
-| `CMAKE_MSVC_RUNTIME_LIBRARY` | `MultiThreaded` | Must match pre-built binaries (`/MT`) |
-| `CMAKE_BUILD_TYPE` | `Release` | Pre-built binaries are Release; Debug CRT (`/MTd`) is incompatible |
-| `CMAKE_PREFIX_PATH` | `$PREBUILT_DIR` | Where to find dependencies |
-| `CMAKE_INSTALL_PREFIX` | `$PREBUILT_DIR` | Where to install |
-| `CMAKE_C/CXX_COMPILER_LAUNCHER` | `sccache` | Omit if sccache is not installed |
-| `THEROCK_DIST` | Path to TheRock SDK | Required |
-| `HIP_PLATFORM` | `amd` | Required |
-| `HIP_ARCHITECTURES` | GPU architecture (e.g., `gfx1151`) | Required |
-| `BUILD_EP` | `ON` | Build MorphiZen Execution Provider |
-
-#### Build
-
-```bash
-cmake --build ../build/$(basename $PWD) --config Release --parallel
-cmake --install ../build/$(basename $PWD) --config Release
-```
-
-### 4. Build OGA (onnxruntime-genai)
+### 3. Build OGA (onnxruntime-genai)
 
 OGA (ONNX Runtime GenAI) provides the generative-pipeline runtime used by
 `model_benchmark.exe` (and the Python `onnxruntime_genai` module) to drive
@@ -228,27 +198,29 @@ prefill + decode token generation against models prepared via the [ONNX
 Model Splitter](../tools/onnx-model-splitter/README.md). Build it after
 step 1 (ORT) so it links against the same ORT version.
 
-**Prerequisites**: step 1 (ORT built with `--build_wheel`). Step 3 is only
-needed later to *run* `model_benchmark` against MorphiZen EP, not to build
-OGA itself.
+**Prerequisites**: a local ORT install for `ORT_HOME` (build it in step 1, or
+stage the release zip). `--build_wheel` is only needed if you also want the ORT
+Python wheel (step 4); it is not required to build OGA's C++ artifacts. Step 2
+is only needed later to *run* `model_benchmark` against MorphiZen EP, not to
+build OGA itself.
 
 Run all commands below from the `onnx-hipdnn-ep/` project root.
 
-#### 4a. Prepare ORT_HOME
+#### 3a. Prepare ORT_HOME
 
 OGA's CMake expects an `ORT_HOME/` directory layout with `include/` and `lib/`
-subdirectories. Stage one from the ORT install under `$PREBUILT_DIR`:
+subdirectories. Stage one from the ORT install under `$LOCAL_DIR`:
 
 ```bash
 mkdir -p ../build/oga-ort-home/include ../build/oga-ort-home/lib
 ORT_HOME=$(cd ../build/oga-ort-home && pwd)
-cp -r "$PREBUILT_DIR/include/onnxruntime/"* "$ORT_HOME/include/"
-cp "$PREBUILT_DIR/lib/"onnxruntime*.lib "$ORT_HOME/lib/"
-cp "$PREBUILT_DIR/bin/onnxruntime.dll" "$ORT_HOME/lib/"
-cp "$PREBUILT_DIR/bin/onnxruntime_providers_shared.dll" "$ORT_HOME/lib/"
+cp -r "$LOCAL_DIR/include/onnxruntime/"* "$ORT_HOME/include/"
+cp "$LOCAL_DIR/lib/"onnxruntime*.lib "$ORT_HOME/lib/"
+cp "$LOCAL_DIR/bin/onnxruntime.dll" "$ORT_HOME/lib/"
+cp "$LOCAL_DIR/bin/onnxruntime_providers_shared.dll" "$ORT_HOME/lib/"
 ```
 
-#### 4b. Clone OGA
+#### 3b. Clone OGA
 
 ```bash
 cd ..  # Go to workspace directory (sibling of onnx-hipdnn-ep)
@@ -262,7 +234,7 @@ git submodule update --init --recursive
 > If you want byte-for-byte reproducibility, check out that commit instead of
 > the branch tip.
 
-#### 4c. Build OGA
+#### 3c. Build OGA
 
 > **Note**: when executing below python command,
 > you may meet error of "ModuleNotFoundError: No module named ..."
@@ -291,41 +263,87 @@ This produces three artifacts under `../build/onnxruntime-genai/Release/`:
 |----------|------|---------|
 | `model_benchmark.exe` | `benchmark/c/model_benchmark.exe` | End-to-end LLM benchmark (used in [OGA End-to-End Benchmarking](#oga-end-to-end-benchmarking-with-model_benchmark)) |
 | `onnxruntime-genai.dll` | `onnxruntime-genai.dll` | Runtime DLL (loaded by `model_benchmark.exe` and the Python module) |
-| `onnxruntime_genai_directml-*.whl` | `wheel/onnxruntime_genai_directml-*.whl` | Python wheel (see [Install Python Wheels](#5-install-python-wheels-optional)) |
+| `onnxruntime_genai_directml-*.whl` | `wheel/onnxruntime_genai_directml-*.whl` | Python wheel (see [Install Python Wheels](#4-install-python-wheels-optional)) |
 
-#### 4d. Install OGA artifacts into prebuilt-local
+#### 3d. Install OGA artifacts into local
 
 ```bash
-cp ../build/onnxruntime-genai/Release/benchmark/c/model_benchmark.exe "$PREBUILT_DIR/bin/"
-cp ../build/onnxruntime-genai/Release/onnxruntime-genai.dll "$PREBUILT_DIR/bin/"
+cp ../build/onnxruntime-genai/Release/benchmark/c/model_benchmark.exe "$LOCAL_DIR/bin/"
+cp ../build/onnxruntime-genai/Release/onnxruntime-genai.dll "$LOCAL_DIR/bin/"
 ```
 
-After this, `$PREBUILT_DIR/bin/` has the OGA artifacts (`model_benchmark.exe`
+After this, `$LOCAL_DIR/bin/` has the OGA artifacts (`model_benchmark.exe`
 and `onnxruntime-genai.dll`) used by [OGA End-to-End Benchmarking](#oga-end-to-end-benchmarking-with-model_benchmark)
 below. `onnxruntime_perf_test.exe` is staged separately in
 [Latency Benchmarking](#latency-benchmarking-with-onnxruntime_perf_test).
 
-### 5. Install Python Wheels (Optional)
+### 4. Install Python Wheels (Optional)
 
 If you also want to drive ORT / OGA from Python (e.g. to write your own
-generation script instead of using `model_benchmark.exe`), install the two
-wheels produced by steps 1 and 4:
+generation script instead of using `model_benchmark.exe`), install the wheels.
+The MorphiZen EP wheel is built by default by `build.py` (pass `--skip_wheel` to
+opt out, or build just it with `cmake --build <build> --target wheel`) at
+`../build/onnx-hipdnn-ep/python/dist/`.
+
+**Install** -- give ORT / EP / OGA as local `.whl` files (so pip uses your custom
+builds, not the stock PyPI ones), and let `--extra-index-url` resolve ROCm:
 
 ```bash
 cd ../onnx-hipdnn-ep  # Back to the project root
 pip install \
   ../build/onnxruntime/Release/dist/onnxruntime_directml-*.whl \
-  ../build/onnxruntime-genai/Release/wheel/onnxruntime_genai_directml-*.whl
+  ../build/onnx-hipdnn-ep/python/dist/onnxruntime_morphizen_ep-*.whl \
+  ../build/onnxruntime-genai/Release/wheel/onnxruntime_genai_directml-*.whl \
+  --extra-index-url https://repo.amd.com/rocm/whl/gfx1151/
 ```
-> **Note**: the first whl file may be in  ../build/onnxruntime/Release/Release/dist/
->  Try this path if you meet error "the file does not exist"
+> **Note**: the ORT whl may be under `../build/onnxruntime/Release/Release/dist/`.
+> Replace `gfx1151` with your GPU arch. Install the EP wheel AFTER onnxruntime:
+> it ships its own native files (EP plugin, hip-compiler, custom kernels, CRT
+> import libs) straight into `onnxruntime/capi/` next to `onnxruntime.dll`. The
+> ROCm JIT import libs (amdhip64/MIOpen/hipBLASLt) come from the `rocm[devel]`
+> wheel (expanded next).
 
-Verify:
+**Expand ROCm devel** -- the EP's JIT linker needs the ROCm import libs, which
+`rocm[devel]` ships compressed. Expand them once:
 
 ```bash
-python -c "import onnxruntime as ort; print(ort.__version__)"
-python -c "import onnxruntime_genai as og; print(og.__version__)"
+rocm-sdk init   # populates site-packages/_rocm_sdk_devel/lib
 ```
+
+**Lib search paths** -- the per-model JIT link step resolves import libs from two
+places, supplied via env vars before running:
+
+- `THEROCK_DIST` -> the ROCm lib root (`<site-packages>/_rocm_sdk_devel`, or a
+  TheRock SDK for dev builds); supplies `amdhip64`/`MIOpen`/`hipBLASLt`.
+- `LIB` (Windows) -> append `<onnxruntime/capi>`; supplies the colocated CRT and
+  `hip_custom_kernels` import libs.
+
+**Use** -- there is no Python API to import; the native files are found by
+location. Set the env vars and run a model whose `genai_config.json` names the
+provider `MorphiZenEP`. This is exactly what the CI wheel smoke does (`Run OGA
+wheel smoke (Python)` in `.github/workflows/windows-build.yml`):
+
+```bash
+# site-packages root + the colocated capi dir
+SP=$(python -c "import onnxruntime, os; print(os.path.dirname(os.path.dirname(onnxruntime.__file__)))")
+CAPI="$SP/onnxruntime/capi"
+
+# JIT link: ROCm import libs from rocm[devel]; CRT + custom kernels from capi
+export THEROCK_DIST="$SP/_rocm_sdk_devel"
+export LIB="$CAPI"                      # Windows; ';'-separated if appending
+# Runtime DLLs: EP + hip-compiler (capi) and ROCm (rocm wheel bins) on PATH
+# (replace gfx1151 with your GPU arch)
+export PATH="$CAPI:$SP/_rocm_sdk_core/bin:$SP/_rocm_sdk_libraries_gfx1151/bin:$PATH"
+
+# Run OGA's own end-to-end benchmark from the OGA source cloned in step 3
+python onnxruntime-genai/benchmark/python/benchmark_e2e.py \
+  -i /path/to/model_dir -l 128 -g 128 -r 5 -w 1 -b 1 -m -1 -v
+```
+
+`benchmark_e2e.py` runs with the default `-e follow_config`, so the model's
+`genai_config.json` must list `MorphiZenEP`; OGA then discovers the colocated EP
+automatically. For plain ORT, register the colocated plugin via
+`ort.register_execution_provider_library("MorphiZenEP", "$CAPI/onnxruntime_morphizen_ep.dll")`.
 
 ## Model Preparation
 
@@ -373,27 +391,32 @@ timing. It is built automatically when `BUILD_HIP_TOOLS=ON`.
 
 ```bash
 # first cd to your onnx-hipdnn-ep directory
-export THEROCK_DIST=$(cd ../therock && pwd)
-export PATH="$THEROCK_DIST/bin:$PREBUILT_DIR/bin:$PATH"
+# TheRock auto-downloaded by the build lives under the build dir; if you passed
+# your own -DTHEROCK_DIST, point at that path instead.
+export THEROCK_DIST=$(cd ../build/$(basename $PWD)/_therock && pwd)
+export PATH="$THEROCK_DIST/bin:$LOCAL_DIR/bin:$PATH"
+```
 
-> **Note**: hip-onnx-runner.exe run onnx model with random data as input.
->  But for llm model, the input_ids should be in valid scope (< voab size) and not be random.
->  So for below test, it is necessary to produce valid data file as input.
->  Please run :
->  # python tools/hip-onnx-runner/gen_hip_onnx_runner_inputs.py -o gen_inputs /path/to/your_test_model.onnx
->  to produce dir holding test data and use "-i" option to let hip-onnx-runner.exe use this dir as input
+> **Note**: `hip-onnx-runner.exe` feeds the model random input by default. For an
+> LLM the `input_ids` must be within range (`< vocab size`), not random, so
+> generate a valid input directory first and pass it with `-i`:
+>
+> ```bash
+> python tools/hip-onnx-runner/gen_hip_onnx_runner_inputs.py -o gen_inputs /path/to/your_test_model.onnx
+> ```
 
+```bash
 # Run with MorphiZen EP (default), using a fixed-shape model from Model Preparation
-$PREBUILT_DIR/bin/hip-onnx-runner.exe -m /path/to/output/prefill_p512m16384.onnx -i gen_inputs
+$LOCAL_DIR/bin/hip-onnx-runner.exe -m /path/to/output/prefill_p512m16384.onnx -i gen_inputs
 
 # Run with CPU only (no EP)
-$PREBUILT_DIR/bin/hip-onnx-runner.exe -m /path/to/output/prefill_p512m16384.onnx -n -i gen_inputs
+$LOCAL_DIR/bin/hip-onnx-runner.exe -m /path/to/output/prefill_p512m16384.onnx -n -i gen_inputs
 
 # Dump outputs for comparison
-$PREBUILT_DIR/bin/hip-onnx-runner.exe -m /path/to/output/prefill_p512m16384.onnx -i gen_inputs -d 2
+$LOCAL_DIR/bin/hip-onnx-runner.exe -m /path/to/output/prefill_p512m16384.onnx -i gen_inputs -d 2
 
 # L2-norm compare EP vs CPU outputs
-$PREBUILT_DIR/bin/hip-onnx-runner.exe -L ep_o_dump,cpu_o_dump
+$LOCAL_DIR/bin/hip-onnx-runner.exe -L ep_o_dump,cpu_o_dump
 ```
 
 **Key flags:**
@@ -414,14 +437,16 @@ compare MorphiZen EP (AMD GPU via HIP) against DML EP.
 **Setup:**
 
 `onnxruntime_perf_test.exe` is not installed by
-default. Copy it into `../prebuilt-local/bin` before running:
+default. Copy it into `../local/bin` before running:
 
 ```bash
-cp ../build/onnxruntime/Release/Release/onnxruntime_perf_test.exe $PREBUILT_DIR/bin/
+cp ../build/onnxruntime/Release/Release/onnxruntime_perf_test.exe $LOCAL_DIR/bin/
 
-export THEROCK_DIST=$(cd ../therock && pwd)
+# TheRock auto-downloaded by the build lives under the build dir; if you passed
+# your own -DTHEROCK_DIST, point at that path instead.
+export THEROCK_DIST=$(cd ../build/$(basename $PWD)/_therock && pwd)
 export PATH="$THEROCK_DIST/bin:$PATH"
-cd $PREBUILT_DIR/bin
+cd $LOCAL_DIR/bin
 ```
 
 **MorphiZen EP:**
@@ -457,8 +482,8 @@ cd $PREBUILT_DIR/bin
 ### OGA End-to-End Benchmarking with model_benchmark
 
 `model_benchmark` benchmarks the full generative pipeline (prefill + decode
-token generation). It was built and installed into `$PREBUILT_DIR/bin/` in
-[step 4](#4-build-oga-onnxruntime-genai).  Before running, please copy the
+token generation). It was built and installed into `$LOCAL_DIR/bin/` in
+[step 3](#3-build-oga-onnxruntime-genai).  Before running, please copy the
 tokenizer related files from original model directory to /path/to/output
 
 ```bash
@@ -496,32 +521,40 @@ Linux uses Docker for build and a separate path for runtime. See
 
 ## ABI Note
 
-The pre-built binaries are compiled with the **Release `/MT`** runtime
+The dependencies are compiled with the **Release `/MT`** runtime
 (`MultiThreaded` static CRT). Using `-DCMAKE_BUILD_TYPE=Debug` or
 `-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDebug` will produce runtime library
 mismatch linker errors.
 
-## Updating Pre-built Binaries
+## Updating the C++ Dependencies
 
-When new releases are published to `wcy123/llvm-mlir-prebuilt`, update the tag
-variables at the top of `scripts/setup-prebuilt.sh` and re-run it. Delete the
-old zip files in `../prebuilt-local/` if you want a clean re-download.
+Dependency versions are pinned in [`cmake/deps.txt`](../cmake/deps.txt) -- the
+single source of truth for LLVM/MLIR/LLD, protobuf, flatbuffers, ONNX Runtime
+and TheRock. To move to a newer version, edit the relevant line there; the next
+configure picks it up (rebuilding from source, or re-resolving from your prefix).
 
 ## Troubleshooting
 
-### CMake cannot find LLVM/MLIR
+### CMake builds LLVM from source unexpectedly (slow cold configure)
 
-**Symptom:** `Could not find package LLVM` or similar.
+**Symptom:** configure starts cloning/building `llvm-project` (multi-hour).
 
-**Solution:** Verify `../prebuilt-local/lib/cmake/llvm/` exists. Re-run
-`bash scripts/setup-prebuilt.sh` if the directory is missing.
+**Cause:** no LLVM/MLIR was found on `CMAKE_PREFIX_PATH`, so
+[`cmake/deps.cmake`](../cmake/deps.cmake) falls back to a from-source build.
 
-### `gh` authentication error during setup
+**Solution:** this is expected on a fresh tree with no prefix. To avoid it,
+install a prebuilt LLVM/MLIR/LLD into a prefix and pass
+`-DCMAKE_PREFIX_PATH=<prefix>`, and reuse the same build dir so the source build
+is cached across reconfigures.
 
-**Symptom:** `gh release download` fails with `HTTP 401`.
+### Dependency build cannot find a compiler
 
-**Solution:** Run `gh auth login` and authenticate with a GitHub account that
-has access to `wcy123/llvm-mlir-prebuilt`.
+**Symptom:** the dependency builds fail with `cl.exe`/`ninja` not found
+or a CMake compiler-detection error.
+
+**Solution:** Run configure/build from a Visual Studio Developer shell (so
+`cl.exe`, `ninja` and `git` are on PATH). The LLVM build also needs several GB
+of free disk and is long on a cold `sccache`.
 
 ### sccache not found
 
@@ -546,16 +579,3 @@ configure command.
 **Solution:** Ensure `lit` is installed via pip (`pip install lit`) and that
 CMake found the correct `lit.exe` during configure. Re-run configure with
 `--fresh` after installing lit.
-
-### Missing DIA SDK library (diaguids.lib)
-
-**Symptom:** `ninja: error: 'C:/msvsn2022/DIA SDK/lib/amd64/diaguids.lib' missing`
-
-**Cause:** The prebuilt LLVM package has `C:\msvsn2022` hardcoded in LLVMExports.cmake for the DIA SDK path. This is a known LLVM issue: https://github.com/llvm/llvm-project/issues/111829
-
-**Solution:** Create a junction from `C:\msvsn2022` to your Visual Studio installation:
-
-```bash
-# Auto-detect VS installation path and create junction
-for /f "usebackq delims=" %i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do mklink /J C:\msvsn2022 "%i"
-```

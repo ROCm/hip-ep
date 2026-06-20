@@ -18,6 +18,14 @@ class Model;
 
 namespace mlir_compilation {
 
+// One grow-on-demand GPU scratch buffer for a host (CPU) graph output in
+// output-allocator mode. Keeping the pointer and its capacity together (vs two
+// parallel vectors) means the two can never fall out of sync on resize.
+struct HostOutputScratch {
+  void *ptr = nullptr; // device buffer the DLL writes into (nullptr = unset)
+  size_t capacity = 0; // bytes currently allocated at ptr
+};
+
 // Custom Op implementation for MLIR-compiled models
 // Loads artifacts from EPContext and executes inference
 class MlirCustomOp : public morphizen::CustomOpImp {
@@ -26,12 +34,22 @@ public:
                const std::shared_ptr<morphizen::MetaDefProto> &meta_def,
                onnxruntime::Model *model);
 
-  ~MlirCustomOp() override = default;
+  // Defined out-of-line: frees the allocator-mode host-output GPU scratch and
+  // releases the lazy-allocated HIPDNN_EP_PERF event pair below
+  // (hipEventDestroy lives in the hip header, which we keep out of this
+  // header).
+  ~MlirCustomOp() override;
 
   // Execute inference using loaded artifact
   void Compute(const OrtApi *api, OrtKernelContext *context) const override;
 
 private:
+  // Output-allocator dispatch (2-arg inference_compute). Installs a per-Compute
+  // callback that allocates each graph output in-graph, then performs any
+  // host-output device->host copies. Selected in Compute() when
+  // use_output_allocator_ is true.
+  void compute_with_output_allocator(OrtKernelContext *context) const;
+
   // Inference state owns the artifact (clear ownership via unique_ptr)
   std::unique_ptr<customop::InferenceState> inference_state_;
 
@@ -48,18 +66,30 @@ private:
   // between the metadata (DLL-order) and the fused node (ORT-order).
   std::vector<int> output_index_map_;
 
-  // For each metadata output index, the compiler-input index of the matching
-  // past_key_values input (or -1 if this output is not a `present.*` tensor).
-  // Precomputed so the per-inference shape-override loop is O(1) per output
-  // instead of an O(N×M) name-string scan.
-  // TODO: replace the underlying name-based heuristic in
-  // build_present_to_past_input_idx() by emitting explicit past↔present pairs
-  // from the compiler (Level-1 pass walks GqaOp operands which carry the
-  // pairing directly). Today's helper relies on the convention that present
-  // outputs are named "present.N.{key,value}" and past inputs are named
-  // "past_key_values.N.{key,value}"; an upstream rename would silently break
-  // the share-buffer override (KV cache corruption with no crash).
-  std::vector<int> present_to_past_input_idx_;
+  // True when the compiled DLL was built in output-allocator mode (2-arg
+  // inference_compute; graph outputs allocated via the EP callback). Read from
+  // the embedded metadata in the ctor so it always matches the loaded DLL's
+  // ABI -- even when the artifact came from a reused EPContext. Selects the
+  // dispatch path in Compute().
+  bool use_output_allocator_ = false;
+
+  // Allocator-mode host-output GPU scratch: one device buffer per output index,
+  // grow-on-demand, reused across Compute() and freed in the dtor. Only
+  // populated when use_output_allocator_ is true and an output lands in host
+  // (CPU) memory -- the DLL writes GPU results here and Compute() D2H-copies
+  // into the ORT host buffer. mutable: Compute() is const but this is a runtime
+  // cache, not observable state. Left empty (no allocation) in classic mode and
+  // in mock builds.
+  mutable std::vector<HostOutputScratch> host_out_scratch_;
+
+  // HIPDNN_EP_PERF wall-clock event pair. Created lazily on the first
+  // Compute() that observes perf_enabled(), then reused for the lifetime of
+  // this MlirCustomOp instance and destroyed in the destructor. Stored as
+  // void* to keep hip headers out of this header; the actual hipEvent_t type
+  // is just a pointer typedef on amdhip64, so the round-trip is safe.
+  // Mutable because Compute() is const but lazy-init writes these once.
+  mutable void *ep_perf_ev_start_ = nullptr;
+  mutable void *ep_perf_ev_stop_ = nullptr;
 };
 
 } // namespace mlir_compilation

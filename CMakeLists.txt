@@ -43,71 +43,62 @@ if(MSVC)
   endforeach()
 endif()
 
-# ==============================================================================
-# TheRock ROCm SDK Configuration
-# ==============================================================================
-# THEROCK_DIST points to the TheRock ROCm SDK installation directory.
-# It can be set via:
-#   1. CMake cache variable: -DTHEROCK_DIST=/path/to/therock
-#   2. Environment variable: THEROCK_DIST=/path/to/therock
-# ==============================================================================
-set(THEROCK_DIST "" CACHE PATH "TheRock ROCm SDK distribution path")
-if(NOT THEROCK_DIST AND DEFINED ENV{THEROCK_DIST})
-  set(THEROCK_DIST "$ENV{THEROCK_DIST}")
-endif()
-
-# Strip any trailing whitespace from THEROCK_DIST
-if(THEROCK_DIST)
-  string(STRIP "${THEROCK_DIST}" THEROCK_DIST)
-  message(STATUS "[onnx-hipdnn-ep] THEROCK_DIST: ${THEROCK_DIST}")
-
-  # Add to CMAKE_PREFIX_PATH for find_package
-  list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}")
-  list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}/lib/cmake")
-endif()
-
 option(BUILD_EP "Build the ONNX HIP DNN Execution Provider" OFF)
+option(BUILD_HIP_TOOLS "Build HIP MLIR compiler tools (hip-mlir-opt, hip-compiler)" OFF)
+option(BUILD_MOCK_RUNTIME "Build mock runtime (no GPU required)" ON)
+option(BUILD_HIP_UNIT_TESTS "Build and register LIT and E2E tests with CTest" ON)
+option(BUILD_PYTHON_WHEEL "Configure the 'wheel' target that packages the EP as a Python wheel" OFF)
+
+# Centralized dependency resolution. Always included; internally partitions by
+# BUILD_EP / BUILD_HIP_TOOLS so a tools-only tree (BUILD_EP=OFF) still gets the
+# shared toolchain (LLVM/MLIR/LLD, flatbuffers, cpptrace, TheRock) without the
+# EP-only bits (morphizen, ORT, protobuf).
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
+
+option(HIPDNN_EP_LINK_HIP_HOST
+       "Link hip::host into the EP DLL (enables HIP host APIs in EP code)" ON)
+option(HIPDNN_EP_LOAD_KERNEL_DLLS
+       "JIT-load per-arch custom_kernels_<arch>.{dll,so} at session create" ON)
+
+if(BUILD_MOCK_RUNTIME)
+  set(HIPDNN_EP_LINK_HIP_HOST OFF)
+  set(HIPDNN_EP_LOAD_KERNEL_DLLS OFF)
+endif()
+
+if(HIPDNN_EP_LOAD_KERNEL_DLLS AND NOT HIPDNN_EP_LINK_HIP_HOST)
+  message(FATAL_ERROR
+    "HIPDNN_EP_LOAD_KERNEL_DLLS=ON requires HIPDNN_EP_LINK_HIP_HOST=ON "
+    "(LlvmIrJit::detectCustomKernelArch needs hipGetDeviceProperties).")
+endif()
 
 if(BUILD_EP)
-  include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
-  # MLIR backend compiler
-  add_subdirectory(backend-mlir-compiler)
+  # Add custom_kernels here so the per-arch custom_kernels_<arch> SHARED
+  # targets exist for custom-op-mlir to depend on. The guard prevents a
+  # duplicate add_subdirectory when BUILD_HIP_TOOLS re-includes it below.
+  if(NOT BUILD_MOCK_RUNTIME AND NOT _CUSTOM_KERNELS_SUBDIR_ADDED)
+    add_subdirectory(3rd-party/custom_kernels)
+    set(_CUSTOM_KERNELS_SUBDIR_ADDED TRUE)
+  endif()
+
+  # backend-mlir-compiler is added later (in the BUILD_HIP_TOOLS block, after
+  # lib/Runtime so the RuntimeBitcode target exists when custom-op-mlir embeds
+  # runtime.bc).
   add_subdirectory(tools/hip-onnx-runner)
 endif()
 
 # ==============================================================================
 # HIP MLIR Compiler Tools (optional)
 # ==============================================================================
-# Build the MLIR-based HIP compiler tools (hip-mlir-opt, hip-compiler).
-# Requires LLVM and MLIR to be available via find_package.
-#
-# Usage:
-#   cmake -B build -S . -DBUILD_HIP_TOOLS=ON \
-#     [-DONNX_MLIR_SRC=/path/to/onnx-mlir -DONNX_MLIR_BUILD=/path/to/build]
+# Build the MLIR-based HIP compiler tools (hip-mlir-opt, hip-compiler). LLVM/MLIR
+# are resolved by cmake/deps.cmake (included above); enable with
+# -DBUILD_HIP_TOOLS=ON.
 # ==============================================================================
-option(BUILD_HIP_TOOLS "Build HIP MLIR compiler tools (hip-mlir-opt, hip-compiler)" OFF)
-
 if(BUILD_HIP_TOOLS)
-  find_package(LLVM REQUIRED CONFIG)
-  find_package(MLIR REQUIRED CONFIG)
-  find_package(flatbuffers REQUIRED CONFIG)
-
-  # cpptrace for crash backtraces
-  include(FetchContent)
-  set(_saved_bsl_cpptrace ${BUILD_SHARED_LIBS})
-  set(BUILD_SHARED_LIBS OFF)
-  if(WIN32)
-    set(CPPTRACE_UNWIND_WITH_WINAPI ON CACHE BOOL "" FORCE)
-    set(CPPTRACE_UNWIND_WITH_DBGHELP OFF CACHE BOOL "" FORCE)
-  endif()
-  FetchContent_Declare(
-    cpptrace
-    GIT_REPOSITORY https://github.com/jeremy-rifkin/cpptrace.git
-    GIT_TAG v0.8.3
-  )
-  FetchContent_MakeAvailable(cpptrace)
-  set(BUILD_SHARED_LIBS ${_saved_bsl_cpptrace})
-
+  # LLVM/MLIR, flatbuffers and cpptrace are fully resolved by cmake/deps.cmake
+  # (included above for any BUILD_EP or BUILD_HIP_TOOLS tree): find_package
+  # against a prefix, or a from-source FetchContent build that sets the LLVM_*/
+  # MLIR_* consumer variables and helper functions directly. The block below
+  # only consumes what deps.cmake already populated.
   message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
   message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
   message(STATUS "Using MLIRConfig.cmake in: ${MLIR_DIR}")
@@ -121,9 +112,8 @@ if(BUILD_HIP_TOOLS)
   include_directories(${LLVM_INCLUDE_DIRS})
   include_directories(${MLIR_INCLUDE_DIRS})
 
-  # onnx-mlir is no longer required. The convert-onnx-to-hip pass uses
-  # MLIR's generic Operation API to match ONNX ops by name, so no onnx-mlir
-  # headers or libraries are needed.
+  # The convert-onnx-to-hip pass matches ONNX ops by name via MLIR's generic
+  # Operation API, so no onnx-mlir headers or libraries are needed.
 
   list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
   list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
@@ -136,24 +126,23 @@ if(BUILD_HIP_TOOLS)
   # FlatBuffers schemas (GenerateInterface pass metadata)
   add_subdirectory(schemas)
 
-  # ==============================================================================
-  # Mock vs Real Runtime Configuration
-  # ==============================================================================
-  option(BUILD_MOCK_RUNTIME "Build mock runtime (no GPU required)" ON)
-
-  if(BUILD_MOCK_RUNTIME)
-    message(STATUS "Building with MOCK runtime (no GPU required)")
-  else()
-    message(STATUS "Building with REAL runtime (requires HIP/MIOpen)")
-    # Add custom HIP kernels library for Real Runtime
+  # Real-runtime GPU kernels (guarded against the early BUILD_EP add above).
+  if(NOT BUILD_MOCK_RUNTIME AND NOT _CUSTOM_KERNELS_SUBDIR_ADDED)
     add_subdirectory(3rd-party/custom_kernels)
+    set(_CUSTOM_KERNELS_SUBDIR_ADDED TRUE)
   endif()
 
   # TableGen targets
   add_subdirectory(include/hip)
 
-  # Library targets
+  # lib/Runtime produces runtime.bc consumed by backend-mlir-compiler.
   add_subdirectory(lib)
+
+  # Must come AFTER lib/Runtime (RuntimeBitcode dep) and BEFORE tools/
+  # (tools/hip-test links morphizen-custom-op-mlir).
+  if(BUILD_EP)
+    add_subdirectory(backend-mlir-compiler)
+  endif()
 
   # DLL target (hip-compiler.dll)
   add_subdirectory(dll)
@@ -172,8 +161,6 @@ if(BUILD_HIP_TOOLS)
   #   ctest --test-dir <build> -C Release     # run all tests
   #   ctest -R MorphizenMLIRLitTests          # run LIT tests only
   # ==============================================================================
-  option(BUILD_HIP_UNIT_TESTS "Build and register LIT and E2E tests with CTest" ON)
-
   if(BUILD_HIP_UNIT_TESTS)
     include(CTest)
     enable_testing()
@@ -184,9 +171,14 @@ if(BUILD_HIP_TOOLS)
     # E2E integration tests (compile MLIR → DLL → execute)
     add_subdirectory(test/e2e)
 
-    # Memory manager unit tests (requires HIP)
-    if(NOT BUILD_MOCK_RUNTIME)
-      add_subdirectory(test/mm)
-    endif()
+    # Runtime unit tests (GPU-free; native against mock types)
+    add_subdirectory(test/runtime)
   endif()
+endif()
+
+# Python wheel packaging (opt-in; defines the 'wheel' target). Added last so
+# both the EP target (morphizen_CORE_DYNAMIC_UNIQUE_ID, from deps.cmake) and the
+# JIT compiler plugin target (hip-compiler-dll, from BUILD_HIP_TOOLS) exist.
+if(BUILD_EP AND BUILD_PYTHON_WHEEL)
+  add_subdirectory(python)
 endif()

@@ -67,6 +67,8 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
                int64_t output_rank, int64_t starts_num_elements,
                int64_t axes_num_elements, int64_t steps_num_elements,
                int64_t data_type) {
+  // (Slice runtime entry trace removed; was used for the slice-empty-buffer
+  // root-cause investigation. Re-add with a HIPDNN_EP_DEBUG gate if needed.)
   OP_PROFILE(
       "slice",
       [&] {
@@ -78,8 +80,7 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
       },
       state);
 
-  if (!state || !data || !starts || !ends || !output || !data_shape ||
-      !output_shape) {
+  if (!state || !starts || !ends || !output || !data_shape || !output_shape) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_slice: null required argument\n");
     return -1;
   }
@@ -89,6 +90,51 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
         "[REAL] wrap_slice: invalid ranks (data_rank=%lld, output_rank=%lld)\n",
         (long long)data_rank, (long long)output_rank);
     return -1;
+  }
+  // Empty input fast path: ORT passes a null `data` pointer for a tensor
+  // with zero elements (e.g. `image_features` with shape[0]==0 in the VLM
+  // embedding sub-model on a text-only call). Slicing an empty input
+  // necessarily produces an empty logical output; the physical output buffer
+  // is over-allocated by SliceToHip to the IR static dim and must be
+  // zero-filled so downstream consumers (e.g. ScatterND's updates buffer)
+  // see the zero tail the existing logical-extent==0 kernel path would have
+  // written. Returning -1 here would leave the buffer at its pool-init
+  // value and silently feed downstream ops garbage / zero, masking the
+  // missing-write as "EP produced zero output".
+  int64_t data_num_elements = 1;
+  for (int d = 0; d < data_rank; ++d)
+    data_num_elements *= data_shape[d];
+  if (!data || data_num_elements == 0) {
+    int64_t out_num_elements = 1;
+    for (int d = 0; d < output_rank; ++d)
+      out_num_elements *= output_shape[d];
+    int64_t elem_size = hipdnn_ep_datatype_size(data_type);
+    if (elem_size <= 0) {
+      fprintf(stderr,
+              "[REAL] wrap_slice: empty-input path -- unsupported "
+              "data_type=%s(%lld)\n",
+              hipdnn_ep_datatype_name(data_type), (long long)data_type);
+      return -1;
+    }
+    if (output && out_num_elements > 0) {
+      hipStream_t s =
+          static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+      hipError_t err = hipMemsetAsync(output, 0,
+                                      static_cast<size_t>(out_num_elements) *
+                                          static_cast<size_t>(elem_size),
+                                      s);
+      if (err != hipSuccess) {
+        fprintf(stderr,
+                "[REAL] wrap_slice: empty-input hipMemsetAsync failed: %s\n",
+                hipGetErrorString(err));
+        return -1;
+      }
+    }
+    RUNTIME_DEBUG_LOG(
+        "[REAL] wrap_slice: empty input (data=%p data_num_elements=%lld) "
+        "-- zeroed output and returning success\n",
+        data, (long long)data_num_elements);
+    return 0;
   }
   if (data_rank > kSliceRuntimeMaxRank) {
     fprintf(stderr, "[REAL] wrap_slice: data_rank=%lld exceeds max %d\n",
@@ -236,10 +282,14 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
     step_per_axis[axis] = step;
   }
 
-  // Sanity check: derived output extents must match the IR-supplied
-  // output shape. Mismatches are programming bugs (lowering or upstream
-  // shape-inference disagreement) and would silently corrupt data, so
-  // fail loud rather than launch a broken kernel.
+  // Per-axis logical output extent (= actual ONNX-Slice output size,
+  // possibly < the physically allocated buffer dim when SliceToHip
+  // over-allocated due to runtime-only starts/ends). Initialised to
+  // output_shape; only sliced axes are recomputed in the loop below.
+  int64_t logical_extent[kSliceRuntimeMaxRank];
+  for (int d = 0; d < data_rank; ++d)
+    logical_extent[d] = output_shape[d];
+
   for (int d = 0; d < data_rank; ++d) {
     if (!axis_set[d])
       continue; // unmodified axis: output extent must == data extent.
@@ -272,14 +322,32 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
       expected = (end - start + step + 1) / step;
     if (expected < 0)
       expected = 0;
-    if (expected != output_shape[d]) {
+    // Three cases:
+    //   (a) expected == output_shape[d]: normal, logical_extent[d] =
+    //       output_shape[d] (already initialised below).
+    //   (b) expected == 0 (empty slice). Set logical_extent[d] = 0 so the
+    //       kernel fills the entire physical extent with zeros — no
+    //       separate memset, single kernel call.
+    //   (c) expected > 0 && expected < output_shape[d]: compile-time
+    //       OVER-ALLOCATION. SliceToHip uses `tensor.dim(data, i)` as an
+    //       upper bound for dynamic output dims since the actual extent
+    //       depends on runtime starts/ends. Pass logical_extent[d] =
+    //       expected so the kernel slices the valid prefix and zeros the
+    //       over-allocated tail.
+    //   (d) expected > output_shape[d] is impossible (slice cannot widen
+    //       any axis) and remains a hard error.
+    if (expected > output_shape[d]) {
       fprintf(stderr,
               "[REAL] wrap_slice: derived output extent on axis %d "
-              "(%lld) != IR output_shape (%lld) -- aborting to avoid "
-              "writing out-of-bounds\n",
-              d, (long long)expected, (long long)output_shape[d]);
+              "(%lld) > IR output_shape (%lld) -- aborting "
+              "(start=%lld end=%lld step=%lld dim=%lld data_rank=%lld "
+              "K=%lld)\n",
+              d, (long long)expected, (long long)output_shape[d],
+              (long long)start, (long long)end, (long long)step, (long long)dim,
+              (long long)data_rank, (long long)K);
       return -1;
     }
+    logical_extent[d] = expected;
   }
 
   for (int d = 0; d < data_rank; ++d) {
@@ -295,6 +363,6 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
                     hipdnn_ep_datatype_name(data_type));
 
   return hip_slice(hipdnn_ep_state_get_stream(state), data, output, data_shape,
-                   output_shape, start_per_axis, step_per_axis,
+                   output_shape, logical_extent, start_per_axis, step_per_axis,
                    static_cast<int>(data_rank), hip_dtype);
 }

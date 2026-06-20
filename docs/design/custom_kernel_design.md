@@ -6,15 +6,15 @@ Licensed under the MIT License.
 
 ## Architecture
 
-The existing ops (Conv, Gemm, etc.) call ROCm library APIs (MIOpen, hipBLASLt) which ship as `.lib` + `.dll`. GQA and RoPE have no such library API, so we build custom HIP kernels as a **static library** that gets linked directly into `model.dll`.
+The existing ops (Conv, Gemm, etc.) call ROCm library APIs (MIOpen, hipBLASLt) which ship as `.lib` + `.dll`. GQA, RoPE, and the other ops without ROCm-library coverage are built as **per-arch shared libraries** (`custom_kernels_<arch>.{dll,so}`) that ship next to the EP binary. `LlvmIrJit` `dlopen`s the matching variant at JIT init based on the device's `gcnArchName`, so the per-model bitcode never carries kernel code.
 
 ```mermaid
 flowchart TD
-    subgraph buildTime ["Build Time (once)"]
+    subgraph buildTime ["Build Time (once, per arch)"]
         HIP["custom_kernels/hip/*.hip"]
-        HIPCC["hipcc"]
-        KLIB["hip_custom_kernels.lib (static)"]
-        HIP -->|"hipcc -c"| HIPCC --> KLIB
+        HIPCC["hipcc --offload-arch=gfxNNNN"]
+        KSO["custom_kernels_gfxNNNN.{dll,so}"]
+        HIP -->|"hipcc -c"| HIPCC --> KSO
 
         RT["lib/Runtime/real/gqa.cpp\nlib/Runtime/real/rotary_embedding.cpp"]
         HDR["custom_kernels/include/\nhip_custom_kernels.h (pure C)"]
@@ -25,18 +25,22 @@ flowchart TD
 
     subgraph modelCompile ["Model Compile Time (per model)"]
         MIR["Model MLIR IR"]
-        OBJ["model.obj"]
-        DLL["model.dll"]
-        MIR -->|"+ runtime.bc merge + LLVM opt"| OBJ
-        OBJ -->|"LLD link"| DLL
-        KLIB -->|"static link"| DLL
-        ROCM["amdhip64.lib\nMIOpen.lib\nhipblaslt.lib"] -->|"import link"| DLL
+        BCOUT["model.bc (OS-portable)"]
+        MIR -->|"LLVM opt + strip-triple"| BCOUT
+    end
+
+    subgraph runtime ["Session Creation (per session, in EP DLL)"]
+        BCIN["model.bc bytes"]
+        EMBED["runtime.bc embedded in EP DLL"]
+        JIT["LlvmIrJit::create\n(LLJIT JITDylib)"]
+        BCIN --> JIT
+        EMBED --> JIT
+        KSO -->|"dlopen + DynamicLibrarySearchGenerator"| JIT
+        ROCM["amdhip64.dll\nMIOpen.dll\nhipblaslt.dll\nhipdnn_backend.dll"] -->|"DynamicLibrarySearchGenerator::Load"| JIT
     end
 ```
 
-
-
-Key insight: The `.hip` files contain `__global__` kernels compiled by hipcc into fat binaries (host + device code). When statically linked into `model.dll`, the HIP runtime extracts and launches the device code at inference time.
+Key insight: The `.hip` files contain `__global__` kernels compiled by hipcc into fat binaries (host + device code). They live in `custom_kernels_<arch>.{dll,so}` co-located with the EP binary, NOT inside the per-model artifact. `LlvmIrJit` resolves `hip_*` launcher symbols against this shared library at JIT init via `DynamicLibrarySearchGenerator::Load`, anchored on `GetModuleFileName` / `dladdr` of the EP DLL.
 
 ## Directory Structure
 
@@ -58,9 +62,9 @@ onnx-hipdnn-ep/
 │   │   ├── rotary_embedding.cpp      # wrap_rotary_embedding -> calls C launchers
 │   │   └── gqa.cpp                   # wrap_group_query_attention -> calls C launchers
 │   └── CMakeLists.txt                # MODIFIED: Add new bitcode modules
-└── lib/Compiler/
-    ├── CompilerDriver.cpp            # MODIFIED: Add hip_custom_kernels.lib to link line
-    └── CMakeLists.txt                # MODIFIED: Configure HIP_CUSTOM_KERNELS_LIB_PATH
+└── backend-mlir-compiler/custom-op-mlir/
+    ├── src/LlvmIrJit.cpp            # dlopens custom_kernels_<arch>.{dll,so} at JIT init
+    └── CMakeLists.txt                # add_dependencies on per-arch custom_kernels_<arch>
 ```
 
 ## File Details
@@ -135,52 +139,55 @@ Implements GQA as a multi-step operation:
 
 ### 5. `custom_kernels/CMakeLists.txt`
 
-Build the static library AND install both the `.lib` and `.h` to the install prefix. At model-compile time, CompilerDriver discovers the installed `.lib` from the install prefix.
+Build one SHARED library per arch in `HIP_ARCHITECTURES`, each carrying a single fatbin slice for that arch. Install side-by-side with the EP binary so `LlvmIrJit` finds it via `GetModuleFileName` / `dladdr` anchoring. No static archive is produced.
 
 ```cmake
 cmake_minimum_required(VERSION 3.18)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/hip_utils.cmake)
 
-# Default architecture if not set by parent
+# Require HIP_ARCHITECTURES (no silent default that may not match hardware)
 if(NOT HIP_ARCHITECTURES)
-    set(HIP_ARCHITECTURES "gfx1103" CACHE STRING
-        "Target GPU architectures for custom kernels")
+    message(FATAL_ERROR "HIP_ARCHITECTURES is not set.")
 endif()
 
-# Build the static library from HIP sources
-hip_add_library(hip_custom_kernels STATIC
+set(_kernel_sources
     hip/rope_kernel.hip
     hip/gqa_kernel.hip
-    INCLUDE_DIRECTORIES
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    # ... ~30 more .hip TUs
 )
 
-# Export the library path for CompilerDriver to discover at model-compile time
-set(HIP_CUSTOM_KERNELS_LIB_PATH "$<TARGET_FILE:hip_custom_kernels>" PARENT_SCOPE)
+# One SHARED target per arch; OFFLOAD_ARCHS narrows the global list to a
+# single element so each DLL/SO carries one fatbin slice instead of N.
+foreach(_arch IN LISTS HIP_ARCHITECTURES)
+    set(_target custom_kernels_${_arch})
+    hip_add_library(${_target} SHARED ${_kernel_sources}
+        INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR}/include
+        OFFLOAD_ARCHS       ${_arch}
+    )
+    install(TARGETS ${_target}
+        RUNTIME DESTINATION bin   # Windows .dll co-located with EP .dll
+        LIBRARY DESTINATION lib   # Linux .so co-located with EP .so
+        ARCHIVE DESTINATION lib   # Windows import lib (unused by EP, harmless)
+    )
+endforeach()
 
-# Export include directory for Runtime bitcode compilation
 set(HIP_CUSTOM_KERNELS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include" PARENT_SCOPE)
-
-# Install the static library and header to the install prefix
-install(TARGETS hip_custom_kernels
-    ARCHIVE DESTINATION lib
-    LIBRARY DESTINATION lib
-)
-install(FILES include/hip_custom_kernels.h DESTINATION include)
 ```
 
-After `cmake --install`, the install prefix will contain:
+After `cmake --install`, the install prefix contains one DLL/SO per requested arch:
 
-- `<prefix>/lib/hip_custom_kernels.lib` (or `.a` on Linux)
-- `<prefix>/include/hip_custom_kernels.h`
+- Windows: `<prefix>/bin/custom_kernels_gfx1100.dll`, `<prefix>/bin/custom_kernels_gfx1151.dll`, ...
+- Linux:   `<prefix>/lib/libcustom_kernels_gfx1100.so`, `<prefix>/lib/libcustom_kernels_gfx1151.so`, ...
 
-The top-level `CMakeLists.txt` gates this on real runtime builds:
+The header is intentionally NOT installed: the EP-side build always uses the in-tree header at `3rd-party/custom_kernels/include/hip_custom_kernels.h` so the host-side declarations stay in lockstep with the kernel TUs.
+
+The top-level `CMakeLists.txt` adds the subdir on real-runtime EP builds (the per-arch SHARED targets are needed by `backend-mlir-compiler/custom-op-mlir/CMakeLists.txt` to register `add_dependencies`):
 
 ```cmake
-# Custom HIP kernels (GQA, RoPE) — only when building real runtime with ROCm
-if(NOT BUILD_MOCK_RUNTIME)
-    add_subdirectory(custom_kernels)
+if(BUILD_EP AND NOT BUILD_MOCK_RUNTIME AND NOT _CUSTOM_KERNELS_SUBDIR_ADDED)
+    add_subdirectory(3rd-party/custom_kernels)
+    set(_CUSTOM_KERNELS_SUBDIR_ADDED TRUE)
 endif()
 ```
 
@@ -205,30 +212,39 @@ compile_to_bitcode(real/gqa.cpp runtime_gqa.bc)
 
 Add them to `RUNTIME_BC_MODULES` list. Also add `-I${CMAKE_SOURCE_DIR}/custom_kernels/include` to the `compile_to_bitcode` macro's include flags so Clang can find `hip_custom_kernels.h`.
 
-### 8. `lib/Compiler/CompilerDriver.cpp` changes
+### 8. Consumer-side resolution in `LlvmIrJit::create`
 
-In `compileImpl()` (around line 180-204), add the custom kernel library to the link line. The library is discovered from the **install prefix** (same `CMAKE_PREFIX_PATH` used during build, configured via CMake at compile time):
+The compiler is no longer involved in linking against the kernel library — the per-model bitcode keeps external `hip_*` declarations and resolution happens at JIT init inside the EP DLL:
 
 ```cpp
-// Custom kernel library path - configured at CMake time from CMAKE_INSTALL_PREFIX
-// Defined via: target_compile_definitions(... HIP_CUSTOM_KERNELS_LIB_PATH="...")
-std::string custom_kernels_lib = HIP_CUSTOM_KERNELS_LIB_PATH;
-if (llvm::sys::fs::exists(custom_kernels_lib)) {
-    libraries.push_back(custom_kernels_lib);
-    std::cout << "  Linking custom kernels: " << custom_kernels_lib << "\n";
-}
+// 3rd-party/custom_kernels installs custom_kernels_<arch>.{dll,so} next
+// to the EP binary. LlvmIrJit picks the matching variant via gcnArchName.
+const std::string kernel_arch = detectCustomKernelArch();   // hipGetDeviceProperties
+const std::string basename =
+#ifdef _WIN32
+    "custom_kernels_" + kernel_arch + ".dll";
+#else
+    "libcustom_kernels_" + kernel_arch + ".so";
+#endif
+std::string kernel_lib = thisModuleDirectory();             // GetModuleFileName / dladdr
+kernel_lib += path_sep;
+kernel_lib += basename;
+
+auto gen = llvm::orc::DynamicLibrarySearchGenerator::Load(
+    kernel_lib.c_str(), global_prefix);
+jit->getMainJITDylib().addGenerator(std::move(*gen));
 ```
 
-The path is baked in at CMake configure time via a `#define`, pointing to `<install_prefix>/lib/hip_custom_kernels.lib`. This follows the same pattern as the install prefix (`../../local`) used by the project.
+`thisModuleDirectory()` anchors the lookup to the EP DLL's own directory, so the kernel SO/DLL resolves through the loader without any `LD_LIBRARY_PATH` / `PATH` dependency. The generator is added BEFORE `GetForCurrentProcess` so the per-arch DLL takes priority over any look-alike symbol that may live in another already-loaded module.
 
-### 9. Install rules summary
+### 9. Install layout
 
-The `custom_kernels/CMakeLists.txt` install rules ensure that after `cmake --install`:
+After `cmake --install`, the install prefix contains:
 
-- `<prefix>/lib/hip_custom_kernels.lib` -- static library with compiled HIP kernels (fat binaries)
-- `<prefix>/include/hip_custom_kernels.h` -- pure C header for the kernel API
+- Windows: `<prefix>/bin/onnxruntime_morphizen_ep.dll` (the EP) and `<prefix>/bin/custom_kernels_<arch>.dll` (one per requested arch) co-located.
+- Linux:   `<prefix>/lib/libonnxruntime_morphizen_ep.so` (the EP) and `<prefix>/lib/libcustom_kernels_<arch>.so` (one per requested arch) co-located. The EP `.so` is built with `RPATH=$ORIGIN`.
 
-CompilerDriver discovers the `.lib` at model-compile time via the configured install prefix path, and passes it to DLLLinker alongside MIOpen/hipBLASLt import libs.
+CI workflows assert co-location by checking for `custom_kernels_gfx1151.dll` / `libcustom_kernels_gfx1151.so` in the staging step — failure here means the install rule in `3rd-party/custom_kernels/CMakeLists.txt` regressed.
 
 ### 10. `custom_kernels/hip/matmul_nbits_kernel.hip`
 
@@ -261,7 +277,7 @@ Four execution paths, auto-dispatched by shape:
 
 ## Key Design Decisions
 
-- **Static lib, not DLL**: The kernel code is embedded in `model.dll` via static linking. No extra DLL dependency beyond amdhip64.dll.
+- **Per-arch SHARED library, not static lib**: One `custom_kernels_<arch>.{dll,so}` per arch in `HIP_ARCHITECTURES`, each with a single fatbin slice. Co-located with the EP binary; `LlvmIrJit::create` `dlopen`s the matching variant at JIT init based on `gcnArchName`. Per-model bitcode stays free of GPU code, which is what keeps it OS-portable and bytewise-stable across model recompiles when only the host CRT changes.
 - **Pure C header interface**: The header uses only C types (`void`*, `int64_t`, `float`) so it can be included by Clang during bitcode compilation AND by MSVC if needed.
-- **Separation of concerns**: `.hip` files contain device code (compiled by hipcc); `.cpp` runtime wrappers contain host logic (compiled by Clang to bitcode). They communicate through the C header.
-- `**hip_utils.cmake` reuse**: Proven approach from onnx-hipdnn-ep, handles Windows hipcc compilation, multi-config generators, architecture flags.
+- **Separation of concerns**: `.hip` files contain device code (compiled by hipcc); `.cpp` runtime wrappers contain host logic (compiled by Clang to bitcode and embedded as `runtime.bc` inside the EP DLL). They communicate through the C header.
+- **`hip_utils.cmake` reuse**: Proven approach for Windows hipcc compilation, multi-config generators, architecture flags. The `OFFLOAD_ARCHS` arg overrides the global `HIP_ARCHITECTURES` so each per-arch target builds a single-slice fatbin instead of a multi-slice bloated one.

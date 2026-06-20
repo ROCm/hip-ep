@@ -17,45 +17,45 @@
 # compiler tree here because it shares the same owners today; split into
 # its own runtime entry if a runtime-only owner joins.
 # ---------------------------------------------------------------------------
-/lib/Compiler/                  @fhanuman @amd-mingw @edelaye
-/lib/Conversion/                @fhanuman @amd-mingw @edelaye
-/lib/Dialect/                   @fhanuman @amd-mingw @edelaye
-/lib/Target/                    @fhanuman @amd-mingw @edelaye
-/lib/CInterface/                @fhanuman @amd-mingw @edelaye
-/include/hip/Compiler/          @fhanuman @amd-mingw @edelaye
-/include/hip/Conversion/        @fhanuman @amd-mingw @edelaye
-/include/hip/Dialect/           @fhanuman @amd-mingw @edelaye
-/include/hip/Target/            @fhanuman @amd-mingw @edelaye
-/include/hip/Support/           @fhanuman @amd-mingw @edelaye
-/include/hip/InitAllPasses.h    @fhanuman @amd-mingw @edelaye
-/include/hip/compiler_api.h     @fhanuman @amd-mingw @edelaye
-/include/hip/compiler_types.h   @fhanuman @amd-mingw @edelaye
-/backend-mlir-compiler/         @fhanuman @amd-mingw @edelaye
-/morphizen_mlir_init/           @fhanuman @amd-mingw @edelaye
-/schemas/                       @fhanuman @amd-mingw @edelaye
-/test/lit/                      @fhanuman @amd-mingw @edelaye
-/tools/hip-compiler/            @fhanuman @amd-mingw @edelaye
-/tools/hip-mlir-opt/            @fhanuman @amd-mingw @edelaye
-/tools/hip-inspect-dll/         @fhanuman @amd-mingw @edelaye
+/lib/Compiler/                  @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
+/lib/Conversion/                @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
+/lib/Dialect/                   @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
+/lib/Target/                    @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
+/lib/CInterface/                @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
+/include/hip/Compiler/          @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
+/include/hip/Conversion/        @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
+/include/hip/Dialect/           @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
+/include/hip/Target/            @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
+/include/hip/Support/           @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
+/include/hip/InitAllPasses.h    @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
+/include/hip/compiler_api.h     @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
+/include/hip/compiler_types.h   @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
+/backend-mlir-compiler/         @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
+/morphizen_mlir_init/           @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
+/schemas/                       @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
+/test/lit/                      @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
+/tools/hip-compiler/            @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
+/tools/hip-mlir-opt/            @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
+/tools/hip-inspect/             @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
 
 # ---------------------------------------------------------------------------
 # Runtime: EP runtime state, real/mock GPU backends, graph runtime, runtime
 # test tools that exercise the EP ABI.
 # ---------------------------------------------------------------------------
-/lib/Runtime/                   @fhanuman @amd-mingw @edelaye
-/lib/HipDNNGraphRuntime/        @fhanuman @amd-mingw @edelaye
-/tools/hip-onnx-runner/         @fhanuman @amd-mingw @edelaye
-/tools/hip-test-dll/            @fhanuman @amd-mingw @edelaye
+/lib/Runtime/                   @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
+/lib/HipDNNGraphRuntime/        @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
+/tools/hip-onnx-runner/         @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
+/tools/hip-test/                @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
 
 # ---------------------------------------------------------------------------
 # Shared: utilities and graph machinery used by both compiler and runtime.
 # ---------------------------------------------------------------------------
-/lib/Support/                   @fhanuman @amd-mingw @edelaye
-/lib/HipDNNGraph/               @fhanuman @amd-mingw @edelaye
+/lib/Support/                   @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
+/lib/HipDNNGraph/               @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
 
 # ---------------------------------------------------------------------------
 # Tests + design docs: integration / accuracy / TPS coverage and
 # architecture decisions.
 # ---------------------------------------------------------------------------
-/test/python/                   @fhanuman @amd-mingw @edelaye
-/docs/design/                   @fhanuman @amd-mingw @edelaye
+/test/python/                   @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd
+/docs/design/                   @fhanuman @amd-mingw @edelaye @wcy123 @qianglin-amd

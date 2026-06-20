@@ -9,6 +9,19 @@ namespace mlir {
 namespace hip {
 namespace {
 
+/// Read element \p idx of the 1-D `shape` operand to a host `index`. Folds a
+/// constant shape; otherwise reads it back with a stream sync (see
+/// ReadbackScalar.h) -- a bare host load of the GPU-computed extent races the
+/// producing kernel and sizes the output from stale memory (a zero collapses to
+/// a null buffer and `wrap_expand` fails; a wrong size collapses the result).
+static mlir::Value readShapeEntryToIndex(mlir::PatternRewriter &rewriter,
+                                         mlir::Location loc, mlir::Value ctx,
+                                         mlir::Value shape, int64_t idx) {
+  mlir::Value scalar = readbackShapeEntryToHost(rewriter, loc, ctx, shape, idx);
+  return mlir::arith::IndexCastOp::create(rewriter, loc,
+                                          rewriter.getIndexType(), scalar);
+}
+
 /// onnx.Expand -> hip.expand
 ///
 /// We trust the result type produced by ONNX shape inference. For dynamic
@@ -54,12 +67,10 @@ struct ExpandToHip : public mlir::RewritePattern {
       int64_t shapeIdx = i - (resultRank - shapeLen);
       mlir::Value dim;
       if (shapeIdx >= 0) {
-        mlir::Value idx =
-            mlir::arith::ConstantIndexOp::create(rewriter, loc, shapeIdx);
-        mlir::Value extracted = mlir::tensor::ExtractOp::create(
-            rewriter, loc, shape, mlir::ValueRange{idx});
-        dim = mlir::arith::IndexCastOp::create(
-            rewriter, loc, rewriter.getIndexType(), extracted);
+        // The shape entry may be GPU-computed; read it back with a stream sync
+        // (constants fold) instead of a bare host load of device memory. See
+        // readShapeEntryToIndex for the correctness rationale.
+        dim = readShapeEntryToIndex(rewriter, loc, context, shape, shapeIdx);
       } else {
         int64_t inputIdx = i - (resultRank - inputRank);
         if (inputIdx < 0)
@@ -74,8 +85,8 @@ struct ExpandToHip : public mlir::RewritePattern {
         mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
                                       resultType.getElementType(), dynSizes);
 
-    auto hipOp = mlir::hip::ExpandOp::create(rewriter, loc, resultType, context,
-                                             input, shape, init);
+    auto hipOp =
+        mlir::hip::ExpandOp::create(rewriter, loc, context, input, shape, init);
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }

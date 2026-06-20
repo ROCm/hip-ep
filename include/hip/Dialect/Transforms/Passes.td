@@ -106,8 +106,53 @@ def ConvertOnnxToHipPass : Pass<"convert-onnx-to-hip", "mlir::ModuleOp"> {
     "mlir::arith::ArithDialect",
     "mlir::func::FuncDialect",
     "mlir::tensor::TensorDialect",
+    "mlir::linalg::LinalgDialect",
     "mlir::memref::MemRefDialect",
     "mlir::bufferization::BufferizationDialect"
+  ];
+}
+
+def AssignOpStateSlotsPass
+    : Pass<"assign-op-state-slots", "mlir::ModuleOp"> {
+  let summary = "Assign one op-state slot per stateful op instance";
+  let description = [{
+    Identity half of the op-state-slots design
+    (docs/design/op-state-slots-design.md). Walks the module in program order
+    and gives EACH op implementing `OpStateOpInterface` its own dense slot
+    `0..N-1`, stamping `hip.op_state_slot` on the op and recording the total as
+    the module attribute `hipdnn.num_op_state_slots`.
+
+    Per-instance is the default: two ops of the same kind get two slots and
+    two independent state objects. No per-class deduplication is done here.
+
+    Runs before --convert-hip-to-llvm so the slot is available to the lowering
+    (threaded into the op's wrap_* call) and to --generate-op-state-init. A
+    no-op (no module attr) when no op implements the interface.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect"
+  ];
+}
+
+def GenerateOpStateInitPass
+    : Pass<"generate-op-state-init", "mlir::ModuleOp"> {
+  let summary = "Emit @hipdnn_ep_op_states_init_fn from per-op generateOpStateInit";
+  let description = [{
+    Construction half of the op-state-slots design
+    (docs/design/op-state-slots-design.md). Runs AFTER --assign-op-state-slots
+    and BEFORE --convert-hip-to-llvm, while the HIP ops still exist. Emits a
+    standalone `llvm.func @hipdnn_ep_op_states_init_fn(!llvm.ptr) -> i32` that:
+      1. calls @hipdnn_ep_op_states_alloc(state, N) to size the slot array,
+      2. for each stateful op (in slot order) calls the op's
+         `generateOpStateInit` (which emits its construct_* call from the op's
+         own attributes) and stores the result via @hipdnn_ep_op_state_set.
+
+    --generate-interface later calls this function from inference_init. A no-op
+    when `hipdnn.num_op_state_slots` is absent or zero.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::LLVM::LLVMDialect"
   ];
 }
 
@@ -194,15 +239,21 @@ def PoolAllocsPass : Pass<"hip-pool-allocs", "mlir::func::FuncOp"> {
     which uses grow-on-demand semantics: the runtime grows the pool when the
     requested size exceeds current capacity.
 
-    Static allocations use greedy best-fit offset assignment (inspired by
-    greedy best-fit strip packing).  Dynamic allocations
-    are bucketed by their byte-size SSA value: non-overlapping lifetimes within
-    a bucket share an offset.
+    Static allocations use greedy best-fit offset assignment.  Dynamic
+    allocations are bucketed by their byte-size SSA value: non-overlapping
+    lifetimes within a bucket share an offset.
 
     Sub-buffer offsets are aligned to 256 bytes by default (configurable).
 
     Recommended pipeline position:
       hip-optimize-memrefs (optional) -> hip-pool-allocs -> hip-lower-allocs
+
+    Emission strategy:
+      Per-bucket size arithmetic and the pool acquisition are anchored at
+      the latest legal point in the block — after every dyn-operand def
+      and before the earliest pooled alloc. No code motion, no hoist
+      whitelist, no reshape pre-folds. See `findLatestLegalInsertionPoint`
+      in PoolAllocs.cpp for the helper that picks the point.
   }];
   let options = [
     Option<"alignment", "alignment", "int64_t", /*default=*/"256",
@@ -210,6 +261,132 @@ def PoolAllocsPass : Pass<"hip-pool-allocs", "mlir::func::FuncOp"> {
   ];
   let dependentDialects = [
     "mlir::hip::HipDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
+def HoistAllocSizeArithPass
+    : Pass<"hip-hoist-alloc-size-arith", "mlir::func::FuncOp"> {
+  let summary = "Hoist speculatable size arithmetic feeding memref.alloc dynamic "
+                "operands above the earliest dynamic memref.alloc in the entry "
+                "block";
+  let description = [{
+    Hoists speculatable producers of `memref.alloc` dynamic operands to a
+    point above the earliest dynamic `memref.alloc` in the function's
+    single entry block.  After this pass, every dynamic alloc's
+    dyn-operand SSA values dominate the earliest dynamic alloc — which is
+    exactly the precondition `--hip-pool-allocs` needs to anchor its
+    bucket-size arithmetic and `hip.get_pool` at a single-block-dominant
+    point.
+
+    Algorithm
+    ---------
+    Single-entry-block functions only (PoolAllocs already enforces this);
+    multi-block functions are skipped.  Only entry-block allocs are
+    considered — allocs nested inside region-carrying ops are untouched.
+
+    1. Collect every entry-block `memref.alloc` with at least one dynamic
+       operand.
+    2. Pick `earliestAlloc` = the one earliest in the block (per
+       `Operation::isBeforeInBlock`).
+    3. For each dynamic alloc, walk SSA backward from each of its dynamic
+       operands.  An op is hoistable when:
+         - it is in the entry block,
+         - it is below `earliestAlloc` (otherwise it already dominates),
+         - it is not a `memref.alloc` / `memref.alloca`,
+         - it satisfies `mlir::isSpeculatable(op)`,
+         - and every transitive operand is itself hoistable (or already
+           dominates `earliestAlloc`).
+    4. Topologically sorted (operands before uses), each hoistable op is
+       moved to immediately before `earliestAlloc`.  Forward iteration of
+       insertion order is operands-first, so each `moveBefore` pushes
+       prior moves up by one slot — final layout has the deepest operands
+       at the top of the hoist region.
+
+    Why "speculatable" is the right predicate
+    -----------------------------------------
+    `mlir::isSpeculatable` checks for both side effects AND undefined
+    behaviour.  Conditionally-speculatable ops (`arith.divsi`, `arith.divui`)
+    return false unless their divisor is a known-non-zero constant — so
+    hoisting them across a runtime guard cannot expose UB earlier.  This
+    is the same predicate upstream MLIR's LICM uses, and it admits new
+    arith ops automatically as the dialect evolves (vs. an explicit
+    allow-list that has to be maintained by hand).
+
+    Pipeline placement
+    ------------------
+    Wired into `buildOnnxToHipPipelineTail` between
+    `--hip-materialize-host-scalars` and `--hip-pool-allocs`.  Running
+    after host-scalar materialisation means rewrites that turn an alloc
+    into a `memref.view` over host scratch are visible (we will not try
+    to hoist their producers).  Running before pool-allocs means
+    pool-allocs sees IR where every dynamic alloc's operand chain has
+    already been pulled above the earliest dynamic alloc.
+
+    Why a separate pass (vs. an internal phase of pool-allocs)
+    ----------------------------------------------------------
+    `--hip-pool-allocs` deliberately does not move ops or fold shape
+    queries internally; it only places `hip.get_pool` + bucket-size
+    arithmetic at a single dominator point.  Keeping the hoist as a
+    standalone, separately-named pass — composed via the pipeline rather
+    than embedded in pool-allocs — keeps each pass single-purpose and is
+    idiomatic with MLIR convention (`--loop-invariant-code-motion`,
+    `--canonicalize`, IREE's `--iree-stream-emplace-transients`, etc.
+    are all standalone composable passes).
+
+    Caveat — does NOT pre-canonicalize
+    ----------------------------------
+    The pass moves existing ops; it does not duplicate, fold, or
+    simplify.  If an input IR has e.g. `arith.muli %x, %c0` (which would
+    fold to zero), this pass leaves it alone.  Canonicalisation runs
+    separately and earlier in the pipeline.
+
+    Idempotent: a second invocation finds no ops below `earliestAlloc`
+    that need moving, so it is a no-op.
+
+    Example IR (canonical case after bufferisation)
+    ------------------------------------------------------------
+
+    Before — `%6` and `%7` are speculatable but live below `%alloc`,
+    blocking single-block dominator-emit:
+
+    ```mlir
+    %dim   = memref.dim %arg, %c0 : memref<?x?xi64>
+    %dim_0 = memref.dim %arg, %c1 : memref<?x?xi64>
+    %alloc = memref.alloc(%dim, %dim_0) : memref<?x?xui8>
+    // ... unrelated ops ...
+    %6 = arith.muli %dim, %dim_0      : index
+    %7 = arith.muli %6,   %c4096      : index
+    %alloc_6 = memref.alloc(%7) : memref<3x?xi64>
+    ```
+
+    After — `%6` and `%7` hoisted to just before `%alloc`; original
+    locations now live above the earliest dynamic alloc:
+
+    ```mlir
+    %dim   = memref.dim %arg, %c0 : memref<?x?xi64>
+    %dim_0 = memref.dim %arg, %c1 : memref<?x?xi64>
+    %6 = arith.muli %dim, %dim_0      : index
+    %7 = arith.muli %6,   %c4096      : index
+    %alloc = memref.alloc(%dim, %dim_0) : memref<?x?xui8>
+    // ... unrelated ops ...
+    %alloc_6 = memref.alloc(%7) : memref<3x?xi64>
+    ```
+
+    Non-goals
+    ---------
+      - Multi-block functions: `--hip-pool-allocs` does not pool them
+        either, so they are silently skipped.  Allocs nested in
+        region-carrying ops within a single entry block are also left
+        untouched (only entry-block allocs are considered).
+      - Op duplication / cloning: an op with multiple uses is moved
+        once; hoisting follows existing SSA edges.  Cross-region cloning
+        à la IREE's `computeSizeSliceInRegion` is unnecessary for
+        single-block IR.
+      - Static-only allocs: no dynamic operands → nothing to hoist.
+  }];
+  let dependentDialects = [
     "mlir::arith::ArithDialect",
     "mlir::memref::MemRefDialect"
   ];
@@ -266,6 +443,296 @@ def LowerAllocsPass : Pass<"hip-lower-allocs", "mlir::func::FuncOp"> {
   }];
   let dependentDialects = [
     "mlir::hip::HipDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
+def RelaxMultiDynExpandShapePass
+    : Pass<"hip-relax-multi-dyn-expand-shape", "mlir::func::FuncOp"> {
+  let summary = "Rewrite memref.expand_shape ops with multiple dynamic output "
+                "dims per reassociation group into memref.reinterpret_cast";
+  let description = [{
+    Workaround for upstream `expand-strided-metadata` (LLVM as of our
+    prebuilt) asserting "There must be at most one dynamic size per group"
+    when a `memref.expand_shape` carries a reassociation group containing
+    more than one dynamic output dim — even though the op carries explicit
+    `output_shape` operands that fully determine every dim's size.
+
+    This pass matches exactly that case and rewrites the op into a
+    `memref.reinterpret_cast` with explicit sizes/strides computed from the
+    `output_shape` operands and the source's static layout.  The resulting
+    `memref.reinterpret_cast` is already lowerable by the existing
+    downstream LLVM-conversion patterns.
+
+    Single-dyn-per-group `memref.expand_shape` and all `memref.collapse_shape`
+    are left untouched — upstream handles those correctly.
+
+    Canonical IR pattern that triggers a match (ONNX `Range -> Reshape`
+    materialising 2-D position_ids):
+
+        %expand = memref.expand_shape %src [[0, 1]]
+                  output_shape [%bs, %ss]
+                  : memref<?xi64> into memref<?x?xi64>
+
+    After this pass:
+
+        %cast = memref.reinterpret_cast %src to
+                  offset: [0], sizes: [%bs, %ss], strides: [%ss, 1]
+                  : memref<?xi64> to memref<?x?xi64>
+
+    Pipeline placement: very first sub-pass of `buildHipToLLVMPipeline`,
+    immediately before `memref::createExpandStridedMetadataPass()`.
+
+    Retirement: when upstream `expand-strided-metadata` is upgraded to
+    consult `output_shape`, this pass becomes a no-op and can be deleted.
+  }];
+  let dependentDialects = [
+    "mlir::affine::AffineDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
+def ResolveTensorDimsPass
+    : Pass<"hip-resolve-tensor-dims", "mlir::func::FuncOp"> {
+  let summary = "Fold `tensor.dim` queries via upstream reify patterns "
+                "(pre-bufferize)";
+  let description = [{
+    Per-`func.func` greedy rewrite that wraps upstream MLIR's
+    `populateResolveRankedShapedTypeResultDimsPatterns` (plus the
+    `InferShapedTypeOpInterface` companion populator and the tensor-
+    dialect canonicalisers) in a single fixed point. Folds `tensor.dim`
+    of any op carrying `ReifyRankedShapedTypeOpInterface` --
+    `tensor.expand_shape`, `tensor.collapse_shape`, `tensor.pad`, and
+    every HIP DPS op (which carries the interface via the dialect's
+    own external models registered in `InitAllPasses.h`).
+
+    Coverage assumes
+    `mlir::tensor::registerInferTypeOpInterfaceExternalModels` has
+    been wired into the dialect registry; without that registration
+    the upstream patterns are inert and reshape-dim queries silently
+    fall through to bufferize, where they get materialised as
+    `memref.dim` of a reshape op and explode the dominance domain
+    count of `--hip-pool-allocs`.
+
+    Pipeline placement: between `--hip-infer-shapes` and
+    `--one-shot-bufferize`, so refined dim values propagate into
+    bufferize's allocation sizing. Idempotent.
+  }];
+  // affine + arith are materialised by the upstream reify folds
+  // (`affine.apply` for collapse products, `arith.constant` for static
+  // slots); tensor is already loaded as the input dialect, so it is not
+  // listed here.
+  let dependentDialects = [
+    "mlir::affine::AffineDialect",
+    "mlir::arith::ArithDialect"
+  ];
+}
+
+def LoopBodyToOutParamsPass
+    : Pass<"hip-loop-body-to-out-params", "mlir::ModuleOp"> {
+  let summary = "Promote outlined hip.loop body returns to out-param ABI";
+  let description = [{
+    Runs AFTER `one-shot-bufferize` and BEFORE `buffer-deallocation` in
+    both classic and allocator pipelines.
+
+    `onnx-loop-outline` emits each `hip.loop` body as a private
+    `func.func` named `*_loop_body_*`. After bufferization those helpers
+    still return loop-carried memrefs, while `convert-hip-to-llvm`
+    LoopLowering expects the out-param ABI (`v_in` + `v_out` per
+    loop-carried value, with `{bufferize.result}` on each out-param).
+
+    Module-level `buffer-results-to-out-params` promotes `@main_graph` in
+    the classic pipeline but skips private functions; the allocator
+    pipeline skips module-level out-params on `@main_graph` entirely.
+    This pass closes the gap by calling MLIR's
+    `promoteBufferResultsToOutParams` with `modifyPublicFunctions = false`
+    and a filter on `*_loop_body_*` only.
+
+    Example (one loop-carried memref):
+      Before:  private @body(..., %v_in) -> memref<16xf32> { return %out }
+      After:   private @body(..., %v_in, %v_out {bufferize.result}) { return }
+  }];
+  let dependentDialects = [
+    "mlir::func::FuncDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
+def UseOutputAllocatorPass
+    : Pass<"hip-use-output-allocator", "mlir::func::FuncOp"> {
+  let summary = "Rewrite returned memref.alloc outputs to hip.alloc_output";
+  let description = [{
+    Replaces each graph-output memref.alloc (a value returned by func.return)
+    with hip.alloc_output, reusing the alloc's dynamic-size operands and setting
+    out_idx to the return operand position.  Output buffers are then obtained
+    from the EP output allocator (EP/runtime-owned) instead of being deallocated
+    or pooled.
+
+    Scope: only public (graph-entry) functions are rewritten.  Private helpers
+    (e.g. outlined onnx.Loop bodies) carry a !hip.context arg 0 and return
+    memref.allocs too, but their results are DLL-internal, never EP outputs, so
+    they are left unchanged.  Functions lacking !hip.context as argument 0 are
+    likewise skipped.
+
+    The pass also stamps the `hipdnn.use_output_allocator` BoolAttr (value =
+    true) on the parent module -- the allocator-mode marker that downstream
+    convert-hip-to-llvm and generate-interface read to select the allocator ABI.
+    It is a typed bool, not a presence-only UnitAttr, so readers test the VALUE
+    (absence and `= false` both mean classic mode).  It is stamped even when no
+    alloc is rewritten, because the mode is decided by the pass being run, not by
+    the IR contents (a zero-output graph must still be marked).  Leaves the
+    function signature and func.return untouched.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
+def InferShapesPass : Pass<"hip-infer-shapes", "mlir::ModuleOp"> {
+  let summary = "Refine dynamic dims in HIP DPS op result types via "
+                "`ReifyRankedShapedTypeOpInterface`";
+  let description = [{
+    Walks every op that implements `ReifyRankedShapedTypeOpInterface` and
+    has at least one `RankedTensorType` result (memref-mode DPS ops are
+    skipped). For each such op, calls `reifyResultShapes` to discover
+    static dim values that the op contract knows but the IR types still
+    spell as `?`, and refines:
+
+      1. The DPS `outs` operand's producer result type, when the producer
+         is a `tensor.empty` -- the only zero-cost refinement we can do
+         today. The tensor.empty is rebuilt with the refined shape; any
+         dynamic dim operands that became static are dropped.
+      2. The op's own result type, in place.
+      3. Each consumer whose operand type no longer matches: a
+         `tensor.cast` is inserted on the use-edge to bridge the new
+         (more-static) type back to the original type. DPS consumers
+         that take the refined value as their `outs` operand are
+         deliberately NOT cast back -- they will be refined in turn on
+         the same module walk (topo-ordered by IR position).
+
+    Why DPS-aware
+    -------------
+    HIP DPS ops require `result_type == outs_operand_type`, so refining
+    the op's result without matching the outs operand's producer would
+    produce a verifier error. This pass handles the DPS contract by
+    rewriting the producer at the same time as the result type. See
+    [docs/design/hip-shape-inference.md](docs/design/hip-shape-inference.md)
+    for the full design discussion.
+
+    Pipeline placement
+    ------------------
+    Wired into `buildOnnxToHipPipelineTail` (the shared post-conversion
+    segment of `buildOnnxToHipPipeline`) immediately after
+    `convert-onnx-to-hip` and before `one-shot-bufferize`. Refining
+    tensor result types BEFORE bufferize propagates static dims through
+    the alloc / pool sizing computations and removes spurious
+    `memref.dim` ops that the legalisation chain would otherwise leave
+    at the top of the function. The pass is also a no-op when no op in
+    the function carries the interface (or when no further refinement
+    is possible), so it is safe to run unconditionally on every model.
+
+    Idempotent: a second invocation that finds no further refinements is
+    a no-op.
+
+    Example:
+    ```mlir
+    // before
+    %empty = tensor.empty(%dynM, %dynN) : tensor<?x?xf16>
+    %y = hip.matmul(%ctx) ins(%a, %b : tensor<2x4xf16>, tensor<4x8xf16>)
+                          outs(%empty : tensor<?x?xf16>) -> tensor<?x?xf16>
+
+    // after
+    %empty = tensor.empty() : tensor<2x8xf16>
+    %y = hip.matmul(%ctx) ins(%a, %b : tensor<2x4xf16>, tensor<4x8xf16>)
+                          outs(%empty : tensor<2x8xf16>) -> tensor<2x8xf16>
+    ```
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::tensor::TensorDialect"
+  ];
+}
+
+def InferLoopBodyShapesPass
+    : Pass<"hip-infer-loop-body-shapes", "mlir::ModuleOp"> {
+  let summary = "Rank-establish unranked tensors inside outlined hip.loop "
+                "body functions before `convert-onnx-to-hip`";
+  let description = [{
+    Runs AFTER `onnx-loop-outline` and BEFORE `convert-onnx-to-hip`. The
+    importer (MorphiZen) emits `tensor<*xT>` (unranked) for values whose
+    shape it cannot infer -- most commonly an outlined `hip.loop` body's
+    loop-carried output (e.g. an `onnx.Concat` that accumulates along the
+    sequence axis). `convert-onnx-to-hip`'s op converters require ranked
+    result types (`ConcatConversion` bails on unranked), so an unranked
+    body output blocks conversion AND leaves the body `func.return`
+    operand type-incompatible with the func signature.
+
+    This pass closes that gap by, for every `hip.loop` body func:
+      1. Seeding the body's loop-carried block args from the loop op's
+         `$v_init` operand types (already ranked post-outline; done for
+         robustness / parity with onnx-mlir `ONNXLoopOp::inferShapes`).
+      2. Forward-inferring unranked `onnx.*` result types from operand
+         types (currently: `onnx.Concat`), iterated to a fixed point.
+      3. Loop-contract backstop: any loop-carried body output still
+         unranked is set to the matching `$v_init` type -- the ONNX Loop
+         spec guarantees body-output type == loop-carried-input type.
+      4. Reconciling the body func's declared result types from the (now
+         ranked) terminator operand types.
+
+    Post-conversion `--hip-infer-shapes` still handles all `?`-dim
+    narrowing on HIP-dialect ops; this pass only establishes rank so
+    conversion can proceed.
+
+    Example (one body func):
+    ```mlir
+    // before
+    func.func private @loop_body(%ctx, %i, %c, %acc: tensor<1x?x1152xf16>, ...)
+        -> tensor<*xf16> {
+      %a = hip.multi_head_attention ... : tensor<?x?x?xf16>
+      %r = "onnx.Concat"(%acc, %a) {axis = 1} :
+             (tensor<1x?x1152xf16>, tensor<?x?x?xf16>) -> tensor<*xf16>
+      return %r : tensor<*xf16>
+    }
+
+    // after
+    func.func private @loop_body(%ctx, %i, %c, %acc: tensor<1x?x1152xf16>, ...)
+        -> tensor<1x?x1152xf16> {
+      %a = hip.multi_head_attention ... : tensor<?x?x?xf16>
+      %r = "onnx.Concat"(%acc, %a) {axis = 1} :
+             (tensor<1x?x1152xf16>, tensor<?x?x?xf16>) -> tensor<1x?x1152xf16>
+      return %r : tensor<1x?x1152xf16>
+    }
+    ```
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::func::FuncDialect"
+  ];
+}
+
+def FixLoopAccumulatorOffsetPass
+    : Pass<"hip-fix-loop-accumulator-offset", "mlir::func::FuncOp"> {
+  let summary = "Rewrite frozen Concat-accumulator offsets in outlined "
+                "hip.loop body functions to iter-driven offsets";
+  let description = [{
+    Out-param promotion + the LoopLowering trampoline alias each loop-carried
+    `v_in` arg and its `{bufferize.result}` `v_out` out-param onto one
+    immutable memref descriptor, so `memref.dim %v_in, %cN` is frozen at the
+    v_init dim every iteration. A growing-Concat accumulator then appends each
+    chunk at that frozen offset and only the last chunk survives.
+
+    This pass rewrites each chunk-append `memref.subview` OFFSET from the frozen
+    `memref.dim` to the real per-iter chunk start: `seqlens_k[iter]` (read via a
+    synchronized `hip.readback_scalar` of the body's first
+    `hip.gather -> memref<1xi32>`), or `iter * chunk_size` when there is no
+    seqlens gather. Only OFFSETs are touched. Runs after buffer-deallocation
+    and before the pool/hoist passes. See FixLoopAccumulatorOffset.cpp for the
+    matcher and a Before/After snippet.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::arith::ArithDialect",
     "mlir::memref::MemRefDialect"
   ];
 }

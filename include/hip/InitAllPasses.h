@@ -11,14 +11,18 @@
 #include "hip/Dialect/Transforms/Passes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Transforms/BufferDeallocationOpInterfaceImpl.h"
 #include "mlir/Dialect/Arith/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Bufferization/Transforms/FuncBufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/MemRef/Transforms/AllocationOpInterfaceImpl.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Tensor/IR/TensorInferTypeOpInterfaceImpl.h"
 #include "mlir/Dialect/Tensor/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/MLIRContext.h"
@@ -27,8 +31,15 @@
 namespace hip::compiler {
 
 namespace detail {
-/// Minimal ONNX dialect stub that claims the "onnx" namespace and permits
-/// unknown operations.  This avoids depending on the full onnx-mlir library.
+/// Minimal ONNX dialect stub that claims the "onnx" namespace and
+/// permits unknown operations, avoiding a dependency on the full
+/// onnx-mlir library. The importer is responsible for emitting
+/// `tensor<*xT>` (unranked) for values whose shape it does not know;
+/// any unranked tensors that survive into the HIP dialect are refined
+/// post-conversion by `--hip-infer-shapes` via
+/// `ReifyRankedShapedTypeOpInterface`. See
+/// `docs/design/unranked-tensor-handling.md` for the cross-repo
+/// contract.
 class OnnxStubDialect : public mlir::Dialect {
 public:
   explicit OnnxStubDialect(mlir::MLIRContext *ctx)
@@ -47,12 +58,21 @@ inline void registerAllDialects(mlir::DialectRegistry &registry) {
   registry.insert<mlir::func::FuncDialect>();
   registry.insert<mlir::memref::MemRefDialect>();
   registry.insert<mlir::tensor::TensorDialect>();
+  registry.insert<mlir::linalg::LinalgDialect>();
   registry.insert<mlir::bufferization::BufferizationDialect>();
   registry.insert<mlir::LLVM::LLVMDialect>();
   registry.insert<mlir::hip::HipDialect>();
   registry.insert<detail::OnnxStubDialect>();
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
+  // The ownership-based buffer-deallocation pass walks arith ops (e.g.
+  // arith.select on buffers, present in hybrid/MoE graphs). Without this
+  // external model the pass fatal-errors: "interface
+  // BufferDeallocationOpInterface promised by dialect 'arith' but never
+  // implemented".
+  mlir::arith::registerBufferDeallocationOpInterfaceExternalModels(registry);
   mlir::tensor::registerBufferizableOpInterfaceExternalModels(registry);
+  mlir::tensor::registerInferTypeOpInterfaceExternalModels(registry);
+  mlir::linalg::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(
       registry);
   mlir::memref::registerAllocationOpInterfaceExternalModels(registry);

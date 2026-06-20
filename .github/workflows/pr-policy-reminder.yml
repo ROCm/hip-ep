@@ -66,8 +66,8 @@ jobs:
         with:
           script: |
             const pr = context.payload.pull_request;
-            const LOC_LIMIT = 500;
-            const FILE_LIMIT = 10;
+            const LOC_LIMIT = 1000;
+            const FILE_LIMIT = 20;
             const changedLoc = (pr.additions || 0) + (pr.deletions || 0);
             const changedFiles = pr.changed_files || 0;
             if (changedLoc > LOC_LIMIT || changedFiles > FILE_LIMIT) {

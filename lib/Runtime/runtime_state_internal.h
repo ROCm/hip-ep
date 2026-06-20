@@ -17,8 +17,15 @@
 #ifndef HIPDNN_EP_RUNTIME_STATE_INTERNAL_H
 #define HIPDNN_EP_RUNTIME_STATE_INTERNAL_H
 
-#include "mm/mm_types.h"
 #include "runtime_types.h"
+// For hipdnn_output_allocator_t (the output_allocator field below). Acyclic:
+// hipdnn_ep_runtime.h only forward-declares RuntimeState; it does not include
+// this internal header.
+#include "hipdnn_ep_runtime.h"
+// For `struct OpState` (the op_states array element type below). op_state.h is
+// layout-agnostic (it only forward-declares RuntimeState), so including it here
+// is acyclic.
+#include "op_state.h"
 
 // Internal runtime state structure
 // This struct is opaque to generated code (passed as void*)
@@ -34,30 +41,57 @@ struct RuntimeState {
   void *gpu_constants_blob;
   void **gpu_constants;
   size_t num_constants;
-  mm::handle_t gpu_constants_handle;
 
-  // OGA pipeline shared constants cache: prefill and decode models share
-  // the same constants blob via process-wide named shared memory + atomic
-  // ref count. Set by try_attach_shared_constants when reusing another
-  // model's blob; cleanup decrements ref_count and only the last
-  // reference frees the GPU memory.
-  bool constants_is_shared;
-  void *shared_constants_mapping; // Win32 file mapping HANDLE
-  void *shared_constants_view; // MapViewOfFile pointer (SharedConstantsMeta*)
-
-  // Memory pooling support
-  void *pool_base;        // Single large memory pool
-  size_t pool_size;       // Total pool size in bytes
-  size_t *buffer_offsets; // Offset for each buffer in the pool
-  size_t num_buffers;     // Number of buffers in the pool
+  // Memory pooling support — multi-domain.
+  //
+  // hip-pool-allocs partitions a function's pooled allocs into independent
+  // dominance domains; each domain owns one contiguous GPU pool that grows on
+  // demand. Domain 0 carries the legacy single-pool semantics (eagerly sized
+  // by hipdnn_ep_pool_init using static offsets) so single-domain models are
+  // bit-identical to the pre-multi-domain runtime. Domains 1..N start empty
+  // and grow lazily on the first hipdnn_ep_get_pool_base(state, domain_id, ...)
+  // call.
+  //
+  // The per-domain pool arrays are themselves grown on demand: there is no
+  // compile-time cap on the domain count. pool_base/pool_size are heap arrays
+  // of num_pool_domains entries, reallocated (zero-filling new slots) the first
+  // time a higher domain_id is observed — by hipdnn_ep_get_pool_base for the
+  // lazy domains and by hipdnn_ep_pool_init for domain 0. Every domain_id is
+  // first seen on the cold first inference, so num_pool_domains stabilises
+  // after that and no further array realloc happens at steady state — mirroring
+  // the grow-on-demand contract of the individual pools. realloc-move is safe
+  // because nothing caches &pool_base[i] across calls; pool_base[domain_id] is
+  // re-derived from state on every access.
+  int num_pool_domains;   // Number of slots currently allocated in the arrays
+  void **pool_base;       // [num_pool_domains] per-domain GPU pool base ptrs
+  size_t *pool_size;      // [num_pool_domains] per-domain pool size in bytes
+  size_t *buffer_offsets; // Offsets for static buffers in domain 0
+  size_t num_buffers;     // Static buffer count in domain 0
 
   // Shared workspace for operator temp buffers (MatMul GEMM ws, GQA pipeline).
   // Lazily grown via hipdnn_ep_state_ensure_workspace(); never shrinks.
   void *workspace;
   size_t workspace_size;
-  mm::handle_t workspace_handle;
 
-  // Per-state scratch buffer for wrap_qmoe transient device buffers
+  // Host-mapped scratch buffer for tiny host-fed scalars routed away from the
+  // GPU pool by hip-materialize-host-scalars.
+  // hipHostMalloc(hipHostMallocMapped): host-writable AND GPU-readable.
+  // Grow-on-demand via hipdnn_ep_get_host_scratch_base(); never shrinks.
+  // hipHostFree'd in cleanup. Why: on some targets the regular GPU pool is
+  // real device memory; host stores into it SEGV. Other targets silently
+  // worked because hipMalloc returned UMA-mapped host memory there, masking
+  // the bug.
+  void *host_scratch_base;
+  size_t host_scratch_size;
+
+  // Output allocator installed by the EP before inference_compute via
+  // hipdnn_ep_set_output_allocator. hipdnn_ep_alloc_output forwards to
+  // allocate(self, ...). Borrowed: `self` is EP-owned, never freed here.
+  // allocate == nullptr means no allocator is installed (the classic pipeline
+  // never calls alloc_output); zero-initialized in initialize_state_handles.
+  hipdnn_output_allocator_t output_allocator;
+
+  // Per-session scratch buffer for wrap_qmoe transient device buffers
   // (expert_indices, expert_weights, gather_buf, fc1_buf, act_buf, fc2_buf,
   // token_ids, token_wts -- 8 sub-buffers laid out at fixed offsets).
   //
@@ -65,51 +99,71 @@ struct RuntimeState {
   // call, every layer, every inference. On 24-layer gpt-oss-20b that's 192
   // mallocs + 192 frees per token; HIP's hipMalloc takes ~50 us each on
   // Windows, so the storm cost ~10-12 ms/token and bottlenecked decode TPS to
-  // ~40 tok/s versus a Vulkan baseline of ~70 on the same gfx1151.
+  // roughly half the Vulkan baseline on the same hardware.
   //
   // Layout policy: one contiguous buffer sized to fit ALL sub-buffers for the
   // largest (num_tokens, hidden, inter, k, num_experts, elem) shape ever seen
   // by this session. Sub-buffer offsets recomputed per-call (cheap arithmetic);
   // the buffer itself grows on demand via hipdnn_ep_state_ensure_qmoe_scratch
-  // and never shrinks (mirrors the `workspace` field's policy).
+  // and never shrinks (mirrors the `workspace` field's policy). Shared by all
+  // qmoe instances in the session: safe because the HIP stream is serialised,
+  // so the next qmoe launches only after the previous one's kernels finish.
   //
   // Pinned host mirror is needed for the 24-bytes-per-layer D2H readback of
   // expert routing decisions (still required at decode pre-Phase-2). hipHost-
   // Malloc'd once with hipHostMallocDefault; reused across calls without sync.
   void *qmoe_scratch;
   size_t qmoe_scratch_size;
-  mm::handle_t qmoe_scratch_handle;
   void *qmoe_host_scratch; // pinned host mirror for D2H of expert idx/weights
   size_t qmoe_host_scratch_size;
 
-  // GQA GEMM descriptor cache (GqaGemmCache*) for the decomposed path.
-  // Caches hipBLASLt descriptors + algorithms by GEMM shape.
-  void *gqa_gemm_cache;
+  // Per-session scratch buffer for the MIOpen convolution workspace
+  // (wrap_miopenConvolutionForward, both 2D and the H=1 1D conv path).
+  //
+  // The MIOpen forward-convolution Find API selects an algorithm whose
+  // workspace requirement is shape-dependent (winograd/gemm/etc). Whisper's
+  // encoder front-end runs the same two Conv shapes every inference
+  // (Cin=128/Cout=1280 K=3 s=1, Cin=1280/Cout=1280 K=3 s=2), so a per-call
+  // hipMalloc/hipFree of the workspace would be wasted work after the
+  // first call. Same grow-on-demand policy as qmoe_scratch above: lazily
+  // allocated on first use, never shrinks, freed in
+  // hipdnn_ep_state_cleanup. Single-buffer reuse is safe because the HIP
+  // stream is serialised -- the next conv launches only after the previous
+  // miopenConvolutionForward + bias add have consumed the workspace.
+  void *conv_scratch;
+  size_t conv_scratch_size;
 
-  // MultiHeadAttention GEMM descriptor cache (MhaGemmCache*) for the
-  // decomposed Score + Value path. Same shape-keyed hipBLASLt descriptor
-  // cache as gqa_gemm_cache, distinct so concurrent MHA + GQA sessions
-  // do not contend on a single map.
-  void *mha_gemm_cache;
+  // NOTE: the GQA GEMM descriptor cache (GqaGemmCache) formerly lived here as
+  // gqa_gemm_cache. It is now per-op-instance: each gqa instance owns one in
+  // its GqaState op-state slot (see op_states below and
+  // docs/design/op-state-slots-design.md), so concurrent sessions (and
+  // distinct GQA layers) no longer share one descriptor map.
 
-  // CausalConvWithState MIOpen descriptor + algorithm cache
-  // (CausalConvCache*). Caches MIOpen tensor / convolution / bias / activation
-  // descriptors and the heuristic-selected forward algorithm by shape, so that
-  // miopenFindConvolutionForwardAlgorithm runs only once per shape rather than
-  // every layer × every token.
-  void *causal_conv_cache;
+  // NOTE: the MultiHeadAttention GEMM descriptor cache (MhaGemmCache) formerly
+  // lived here as mha_gemm_cache. It is now per-op-instance: each
+  // multi_head_attention instance owns one in its MhaState op-state slot (see
+  // op_states below and docs/design/op-state-slots-design.md).
 
-  // MatMulNBits asym-path zero_points unpack cache (ZpUnpackCache*).
+  // NOTE: the CausalConvWithState MIOpen descriptor + algorithm cache
+  // (CausalConvCache) formerly lived here as causal_conv_cache. It is now
+  // per-op-instance: each causal_conv_with_state instance owns one in its
+  // CausalConvState op-state slot (see op_states below and
+  // docs/design/op-state-slots-design.md), so concurrent instances no longer
+  // share one descriptor cache.
+
+  // Asym zero_points unpack cache (ZpUnpackCache*) used by wrap_qmoe.
   //
   // The asym AWQ path stores zero_points as packed nibbles [N, ceil(K/bs/2)].
   // Two unpacked layouts are needed (u8 [N, K/bs] for GEMV/naive, fp16 for
   // WMMA/col-major GEMV M>1), and naively the unpack kernel is launched on
-  // every wrap_matmul_nbits call. For 8B asym decode this is ~225 redundant
-  // launches per Compute(). Since zero_points points into the model constants
-  // blob (stable for the session lifetime), we cache the unpacked buffer per
-  // input pointer. Lazily created on first asym call. Owned by
-  // lib/Runtime/real/matmul_nbits.cpp; freed in hipdnn_ep_state_cleanup via
+  // every call. Since zero_points points into the model constants blob (stable
+  // for the session lifetime), we cache the unpacked buffer per input pointer.
+  // Lazily created on first asym call. Freed in hipdnn_ep_state_cleanup via
   // hipdnn_ep_zp_unpack_cache_destroy.
+  //
+  // NOTE: matmul_nbits no longer uses this shared cache -- it owns a
+  // per-instance ZpUnpackCache in its MatmulNbitsState op-state slot. This
+  // field is therefore qmoe-owned.
   void *zp_unpack_cache;
 
   // Per-operator profiling state (OpProfileState*, gated on HIPDNN_EP_PERF).
@@ -141,8 +195,8 @@ struct RuntimeState {
   //
   // Invalidated by hipdnn_ep_runtime_begin_compute() at the start of each
   // Compute(), called from the EP-side MlirCustomOp::Compute() entry.
-  // If the symbol is not exported (older model.dll), invalidation does
-  // not happen and the cache is unsafe -- the EP logs a warning at
+  // If the symbol is not exported (older per-model bitcode), invalidation
+  // does not happen and the cache is unsafe -- the EP logs a warning at
   // session creation and the user must set HIPDNN_EP_GQA_CACHE_SEQLENS=0.
   bool seqlens_k_cached_valid;
   int32_t seqlens_k_cached_val;
@@ -202,6 +256,15 @@ struct RuntimeState {
   void
       *loop_cond_dev; // hipHostGetDevicePointer(loop_cond_host), passed to body
   void *loop_event;   // hipEvent_t cast to void*; reused for cond-readback sync
+
+  // Per-op state slots (see docs/design/op-state-slots-design.md). One entry
+  // per stateful op instance, sized by --assign-op-state-slots and constructed
+  // by the generated @hipdnn_ep_op_states_init_fn during inference_init. Each
+  // entry's concrete type derives from OpState; cleanup walks the array calling
+  // each object's `deletor`, so teardown needs no per-type knowledge. Managed
+  // by hipdnn_ep_op_states_alloc / _set / _get in op_state.cpp.
+  OpState **op_states;
+  int num_op_states;
 };
 
 #endif // HIPDNN_EP_RUNTIME_STATE_INTERNAL_H

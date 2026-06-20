@@ -5,11 +5,13 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
+#include "../op_state.h"
 #include "cache_utils.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
@@ -43,9 +45,22 @@ static bool autotune_enabled() {
 
 struct MatmulCacheKey {
   int64_t M, N, K, batch_count, elem_size;
+  // hipBLASLt's STRIDED_BATCH_OFFSET on layA, in elements. Two distinct
+  // values reach this site at the same (M,N,K,batch,elem_size):
+  //   * 0   — B is a broadcast weight (rank-2 [K,N], or rank-N
+  //           [1,...,1,K,N] whose leading-dim product is 1).
+  //   * K*N — B is per-batch (leading-dim product > 1; the buffer holds
+  //           multiple [K,N] matrices laid out contiguously).
+  // Part of the cache key because the layout descriptor is parameterised
+  // by the stride: mixing the two would silently route one path through
+  // the other's stride and read past the end of a broadcast weight buffer.
+  // Keyed on the actual int stride (not a 0/1 bool) so any future site
+  // that legitimately uses a stride other than {0, K*N} also gets its
+  // own cache entry rather than aliasing one of these two.
+  int64_t b_batch_stride;
   bool operator==(const MatmulCacheKey &o) const {
     return M == o.M && N == o.N && K == o.K && batch_count == o.batch_count &&
-           elem_size == o.elem_size;
+           elem_size == o.elem_size && b_batch_stride == o.b_batch_stride;
   }
 };
 
@@ -57,19 +72,23 @@ struct MatmulCacheKeyHash {
     hash_combine_val(h, k.K);
     hash_combine_val(h, k.batch_count);
     hash_combine_val(h, k.elem_size);
+    hash_combine_val(h, k.b_batch_stride);
     return h;
   }
 };
 
 /// Cached hipBLASLt descriptors + multi-algorithm auto-tune state for a
 /// single (M, N, K, batch, elem_size) shape. Descriptors are created in
-/// queryOrCreateMatmul() and live for the process lifetime.
+/// queryOrCreateMatmul() and owned by the MatmulAlgoTable, which frees them
+/// when the last session sharing it is destroyed.
 struct MatmulCacheEntry {
   hipblasLtMatmulDesc_t desc;
   hipblasLtMatrixLayout_t layA, layB, layC;
   hipblasLtMatmulAlgo_t algo;
   size_t workspace_size;
-  bool tuned;
+  // Set true (with release ordering) once autotune has chosen `algo`. Atomic so
+  // sessions sharing this entry can read it lock-free on the steady-state path.
+  std::atomic<bool> tuned;
   int num_candidates;
   size_t max_candidate_workspace;
   // True if no heuristic algorithm could be found and we should fall back to
@@ -78,22 +97,74 @@ struct MatmulCacheEntry {
   // default kernel when its Tensile library has no matching tile.
   bool use_default_algo;
   hipblasLtMatmulHeuristicResult_t candidates[MAX_ALGO_CANDIDATES];
+  // Serialises the one-time autotune of this entry across all sessions sharing
+  // it; pairs with the atomic `tuned` for a lock-free steady state.
+  std::mutex tune_mu;
 };
 
-static std::unordered_map<MatmulCacheKey, MatmulCacheEntry, MatmulCacheKeyHash>
-    g_matmul_cache;
+// One hipBLASLt algo table per device, shared across every session in the
+// process and freed when the last session holding it is destroyed. The table
+// owns the descriptors and frees them in its destructor, fixing the previous
+// process-lifetime leak. Entries are stored by pointer so they keep a stable
+// address (raw MatmulCacheEntry* handed out below) and can hold a non-movable
+// std::once_flag.
+struct MatmulAlgoTable {
+  std::mutex mu;
+  std::unordered_map<MatmulCacheKey, std::unique_ptr<MatmulCacheEntry>,
+                     MatmulCacheKeyHash>
+      map;
+  ~MatmulAlgoTable() {
+    for (auto &kv : map) {
+      MatmulCacheEntry &e = *kv.second;
+      if (e.layC)
+        hipblasLtMatrixLayoutDestroy(e.layC);
+      if (e.layB)
+        hipblasLtMatrixLayoutDestroy(e.layB);
+      if (e.layA)
+        hipblasLtMatrixLayoutDestroy(e.layA);
+      if (e.desc)
+        hipblasLtMatmulDescDestroy(e.desc);
+    }
+  }
+};
 
-static MatmulCacheEntry *queryOrCreateMatmul(hipblasLtHandle_t handle,
+// Per-instance op state: each hip.matmul slot holds a shared_ptr to its
+// device's shared table, keeping it alive for the session's lifetime. The table
+// is reached through a global WeakStore keyed by device (see op_state.h); it is
+// weak_ptr-backed, so it lives only while some session's MatmulState holds a
+// shared_ptr to it.
+struct MatmulState : OpStateT<MatmulState> {
+  std::shared_ptr<MatmulAlgoTable> table;
+  MatmulState() {
+    int dev = 0;
+    hipGetDevice(&dev);
+    table = WeakStore<int, MatmulAlgoTable>::get_or_create(
+        dev, [] { return std::make_shared<MatmulAlgoTable>(); });
+  }
+};
+
+extern "C" int8_t hipdnn_ep_op_state_construct_matmul(RuntimeState *state,
+                                                      int32_t slot) {
+  return MatmulState::create(state, slot);
+}
+
+static MatmulCacheEntry *queryOrCreateMatmul(MatmulAlgoTable &table,
+                                             hipblasLtHandle_t handle,
                                              const MatmulCacheKey &key) {
   assert(handle && "queryOrCreateMatmul: null handle");
-  auto it = g_matmul_cache.find(key);
-  if (it != g_matmul_cache.end())
-    return &it->second;
+  // The table is shared across sessions via WeakStore, so guard find/insert.
+  // Entries are never erased, so the returned raw pointer stays valid for
+  // unlocked read/tune after this returns.
+  std::lock_guard<std::mutex> tableGuard(table.mu);
+  auto it = table.map.find(key);
+  if (it != table.map.end())
+    return it->second.get();
 
   hipDataType dt = (key.elem_size == 2) ? HIP_R_16F : HIP_R_32F;
   int64_t M = key.M, N = key.N, K = key.K;
 
-  MatmulCacheEntry entry{};
+  auto entryPtr = std::make_unique<MatmulCacheEntry>();
+  MatmulCacheEntry &entry = *entryPtr;
   entry.tuned = false;
   entry.num_candidates = 0;
   entry.max_candidate_workspace = 0;
@@ -126,7 +197,19 @@ static MatmulCacheEntry *queryOrCreateMatmul(hipblasLtHandle_t handle,
 
   if (key.batch_count > 1) {
     int64_t bc = key.batch_count;
-    int64_t sA = K * N, sB = M * K, sC = M * N;
+    // layA → user's B. The stride is whatever the compiler computed —
+    // 0 for broadcast B (rank-2 [K,N] or rank-N [1,...,1,K,N]), K*N for
+    // per-batch B (rank-N with leading-dim product > 1). Setting sA = K*N
+    // for a broadcast weight reads K*N elements PAST the end of the
+    // buffer on batch 1+ and feeds garbage into the GEMM — typical symptom
+    // on vision models is image-0 correct, image-1+ NaN (the OOB read
+    // often lands in a fp16-NaN pattern from adjacent pool slots /
+    // constants). Mis-setting sA = 0 for a per-batch B does the opposite:
+    // every batch reads matrix 0 instead of its own.
+    // layB → user's A and layC → output are always per-batch (the BATCH
+    // partition comes from A's leading dim by construction).
+    int64_t sA = key.b_batch_stride;
+    int64_t sB = M * K, sC = M * N;
     MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutSetAttribute(
         entry.layA, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &bc, sizeof(bc)));
     MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutSetAttribute(
@@ -234,7 +317,7 @@ cache_fail:
   return nullptr;
 
 cache_done:
-  auto [ins, _] = g_matmul_cache.emplace(key, entry);
+  auto [ins, _] = table.map.emplace(key, std::move(entryPtr));
 
   RUNTIME_DEBUG_LOG("[MATMUL] cached M=%lld N=%lld K=%lld batch=%lld: "
                     "%d algo(s), autotune=%s\n",
@@ -242,7 +325,7 @@ cache_done:
                     (long long)key.batch_count, entry.num_candidates,
                     entry.tuned ? "skipped" : "pending");
 
-  return &ins->second;
+  return ins->second.get();
 }
 
 //===----------------------------------------------------------------------===//
@@ -348,9 +431,10 @@ static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
 // Both fp16 and fp32 use HIPBLAS_COMPUTE_32F for accumulation precision.
 //===----------------------------------------------------------------------===//
 
-int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
-                         void *output, int64_t M, int64_t N, int64_t K,
-                         int64_t batch_count, int64_t elem_size) {
+int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
+                         const void *B, void *output, int64_t M, int64_t N,
+                         int64_t K, int64_t batch_count, int64_t elem_size,
+                         int64_t b_batch_stride) {
   OP_PROFILE(
       "matmul",
       [&] {
@@ -383,14 +467,22 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
 
   const char *type_name = (elem_size == 2) ? "f16" : "f32";
   RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: M=%lld, N=%lld, K=%lld, "
-                    "batch=%lld, elem_size=%lld (%s), "
+                    "batch=%lld, b_batch_stride=%lld, elem_size=%lld (%s), "
                     "total_bytes=%lld\n",
                     (long long)M, (long long)N, (long long)K,
-                    (long long)batch_count, (long long)elem_size, type_name,
+                    (long long)batch_count, (long long)b_batch_stride,
+                    (long long)elem_size, type_name,
                     (long long)(batch_count * M * N * elem_size));
 
-  MatmulCacheKey key{M, N, K, batch_count, elem_size};
-  MatmulCacheEntry *cached = queryOrCreateMatmul(handle, key);
+  MatmulState *ms = MatmulState::get_slot(state, op_state_slot);
+  if (!ms || !ms->table) {
+    fprintf(stderr, "wrap_hipblasLtMatmul: missing op-state for slot %d\n",
+            op_state_slot);
+    return -1;
+  }
+
+  MatmulCacheKey key{M, N, K, batch_count, elem_size, b_batch_stride};
+  MatmulCacheEntry *cached = queryOrCreateMatmul(*ms->table, handle, key);
   if (!cached) {
     fprintf(stderr,
             "wrap_hipblasLtMatmul: failed to create/find cached "
@@ -411,9 +503,19 @@ int wrap_hipblasLtMatmul(RuntimeState *state, const void *A, const void *B,
   void *ws_ptr = hipdnn_ep_state_get_workspace(state);
   size_t ws_size = hipdnn_ep_state_get_workspace_size(state);
 
-  // Auto-tune on first call: benchmark all candidates with real GPU data
-  if (!cached->tuned) {
-    autotuneMatmul(handle, stream, cached, B, A, output, ws_ptr, ws_size, key);
+  // Auto-tune once per shape across all sessions sharing this entry: the
+  // winning algo is device-specific and identical for every session, so the
+  // first caller benchmarks (with its own stream/workspace/data) and the rest
+  // reuse the result. Double-checked locking on the per-entry mutex keeps the
+  // steady state a lock-free atomic read; only concurrent first-touch of the
+  // same shape blocks. (std::call_once is deliberately avoided: its MSVC
+  // __std_init_once_* support symbols are unresolvable in the JIT-linked
+  // runtime bitcode.)
+  if (!cached->tuned.load(std::memory_order_acquire)) {
+    std::lock_guard<std::mutex> tuneGuard(cached->tune_mu);
+    if (!cached->tuned.load(std::memory_order_relaxed))
+      autotuneMatmul(handle, stream, cached, B, A, output, ws_ptr, ws_size,
+                     key);
   }
 
   float alpha = 1.0f;
