@@ -10,29 +10,66 @@
 #include <cstdint>
 #include <cstdio>
 
-// Generic gather kernel for axis=0 with arbitrary number of indices.
+// Generic gather kernel for arbitrary axis.
+// data    has logical shape [outer, axis_size, inner]
+// indices has indices_num elements (flattened)
+// output  has logical shape [outer, indices_num, inner]
 // Each thread copies one element of the output tensor.
-// Thread tid maps to: index_idx = tid / slice_size, offset = tid % slice_size.
-// output[tid] = data[indices[index_idx] * slice_size + offset]
-template <typename T>
-__global__ void gather_axis0_kernel(
+//
+// IdxT is the element type of the ONNX `indices` tensor. ONNX permits both
+// int32 and int64 index tensors; reading an int32 buffer as int64 fuses
+// adjacent indices into huge out-of-range values, which the bounds check then
+// maps to 0 -> the whole gather silently returns zeros. Templating on IdxT and
+// widening to int64 in-kernel handles both layouts.
+template <typename T, typename IdxT>
+__global__ void gather_kernel(
     const T* __restrict__ data,
-    const int64_t* __restrict__ indices,
+    const IdxT* __restrict__ indices,
     T* __restrict__ output,
-    int64_t slice_size,
-    int64_t data_axis_size,
+    int64_t outer_size,
+    int64_t axis_size,
+    int64_t inner_size,
+    int64_t indices_num,
     int64_t total_elements) {
   int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (tid < total_elements) {
-    int64_t index_idx = tid / slice_size;
-    int64_t offset = tid % slice_size;
-    int64_t index_val = indices[index_idx];
-    if (index_val < 0) index_val += data_axis_size;
-    if (index_val < 0 || index_val >= data_axis_size) {
-      output[tid] = T(0);
-      return;
-    }
-    output[tid] = data[index_val * slice_size + offset];
+  if (tid >= total_elements) return;
+  int64_t inner_off = tid % inner_size;
+  int64_t idx_off = (tid / inner_size) % indices_num;
+  int64_t outer_off = tid / (inner_size * indices_num);
+  int64_t index_val = static_cast<int64_t>(indices[idx_off]);
+  if (index_val < 0) index_val += axis_size;
+  if (index_val < 0 || index_val >= axis_size) {
+    output[tid] = T(0);
+    return;
+  }
+  int64_t data_off =
+      (outer_off * axis_size + index_val) * inner_size + inner_off;
+  output[tid] = data[data_off];
+}
+
+// Dispatch on the index element type (4 = int32, 8 = int64). The data element
+// type is fixed by the caller's `T`.
+template <typename T>
+static void launch_gather(int grid_size, int block_size, hipStream_t stream,
+                          const void* data, const void* indices, void* output,
+                          int64_t outer_size, int64_t axis_size,
+                          int64_t inner_size, int64_t indices_num,
+                          int64_t total_elements,
+                          int indices_element_size_bytes) {
+  if (indices_element_size_bytes == 4) {
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(gather_kernel<T, int32_t>),
+                       dim3(grid_size), dim3(block_size), 0, stream,
+                       static_cast<const T*>(data),
+                       static_cast<const int32_t*>(indices),
+                       static_cast<T*>(output), outer_size, axis_size,
+                       inner_size, indices_num, total_elements);
+  } else {
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(gather_kernel<T, int64_t>),
+                       dim3(grid_size), dim3(block_size), 0, stream,
+                       static_cast<const T*>(data),
+                       static_cast<const int64_t*>(indices),
+                       static_cast<T*>(output), outer_size, axis_size,
+                       inner_size, indices_num, total_elements);
   }
 }
 
@@ -45,7 +82,10 @@ extern "C" int hip_gather(
     int64_t data_num_elements,
     int64_t indices_num_elements,
     int64_t output_num_elements,
-    int element_size_bytes) {
+    int64_t axis_size,
+    int64_t inner_size,
+    int element_size_bytes,
+    int indices_element_size_bytes) {
   if (output_num_elements <= 0) return 0;
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
@@ -53,56 +93,55 @@ extern "C" int hip_gather(
   int grid_size = static_cast<int>(
       (output_num_elements + kBlockSize - 1) / kBlockSize);
 
-  if (axis != 0) {
+  // axis_size = data.shape[axis]; inner_size = product(data.shape[axis+1:])
+  // outer_size derived from data layout: data has outer*axis_size*inner elems.
+  int64_t outer_size = (axis_size > 0 && inner_size > 0)
+      ? data_num_elements / (axis_size * inner_size)
+      : 0;
+  if (outer_size <= 0) {
     fprintf(stderr,
-            "[custom_kernels] hip_gather: only axis=0 supported, got %lld\n",
-            (long long)axis);
+            "[custom_kernels] hip_gather: bad geometry axis=%lld data_num=%lld "
+            "axis_size=%lld inner_size=%lld\n",
+            (long long)axis, (long long)data_num_elements,
+            (long long)axis_size, (long long)inner_size);
     return -1;
   }
 
-  // For axis=0: output = [indices_shape..., data_shape[1:]]
-  // slice_size = product of data dimensions after axis 0
-  // data_axis_size = data_shape[0]
-  int64_t slice_size = (indices_num_elements > 0)
-      ? output_num_elements / indices_num_elements
-      : output_num_elements;
-  int64_t data_axis_size = (slice_size > 0)
-      ? data_num_elements / slice_size
-      : 0;
+  if (indices_element_size_bytes != 4 && indices_element_size_bytes != 8) {
+    fprintf(stderr,
+            "[custom_kernels] hip_gather: unsupported indices element_size=%d "
+            "(expected 4 or 8)\n",
+            indices_element_size_bytes);
+    return -1;
+  }
 
-  CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_gather: axis=0, elem_size=%d, "
-          "data_num=%lld, indices_num=%lld, output_num=%lld, "
-          "slice_size=%lld, data_axis_size=%lld, grid=%d, block=%d\n",
-          element_size_bytes,
+  CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_gather: axis=%lld, elem_size=%d, "
+          "idx_size=%d, data_num=%lld, indices_num=%lld, output_num=%lld, "
+          "outer=%lld, axis_size=%lld, inner=%lld, grid=%d, block=%d\n",
+          (long long)axis, element_size_bytes, indices_element_size_bytes,
           (long long)data_num_elements, (long long)indices_num_elements,
           (long long)output_num_elements,
-          (long long)slice_size, (long long)data_axis_size,
+          (long long)outer_size, (long long)axis_size, (long long)inner_size,
           grid_size, kBlockSize);
 
   switch (element_size_bytes) {
     case 2:
-      hipLaunchKernelGGL(gather_axis0_kernel<uint16_t>,
-                         dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
-                         static_cast<const uint16_t*>(data),
-                         static_cast<const int64_t*>(indices),
-                         static_cast<uint16_t*>(output),
-                         slice_size, data_axis_size, output_num_elements);
+      launch_gather<uint16_t>(grid_size, kBlockSize, hip_stream, data, indices,
+                              output, outer_size, axis_size, inner_size,
+                              indices_num_elements, output_num_elements,
+                              indices_element_size_bytes);
       break;
     case 4:
-      hipLaunchKernelGGL(gather_axis0_kernel<uint32_t>,
-                         dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
-                         static_cast<const uint32_t*>(data),
-                         static_cast<const int64_t*>(indices),
-                         static_cast<uint32_t*>(output),
-                         slice_size, data_axis_size, output_num_elements);
+      launch_gather<uint32_t>(grid_size, kBlockSize, hip_stream, data, indices,
+                              output, outer_size, axis_size, inner_size,
+                              indices_num_elements, output_num_elements,
+                              indices_element_size_bytes);
       break;
     case 8:
-      hipLaunchKernelGGL(gather_axis0_kernel<int64_t>,
-                         dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
-                         static_cast<const int64_t*>(data),
-                         static_cast<const int64_t*>(indices),
-                         static_cast<int64_t*>(output),
-                         slice_size, data_axis_size, output_num_elements);
+      launch_gather<int64_t>(grid_size, kBlockSize, hip_stream, data, indices,
+                             output, outer_size, axis_size, inner_size,
+                             indices_num_elements, output_num_elements,
+                             indices_element_size_bytes);
       break;
     default:
       fprintf(stderr,

@@ -13,7 +13,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 ## Features
 
 - **MLIR Compiler Pipeline**: ONNX dialect → HIP dialect → LLVM IR → native DLL
-- **MIOpen Integration**: Conv, Softmax, RMS Norm, Mul, Sigmoid, Softplus, CausalConvWithState via MIOpen library
+- **MIOpen Integration**: Conv, ConvTranspose, Softmax, RMS Norm, Mul, Sigmoid, Tanh, Softplus, CausalConvWithState via MIOpen library
 - **hipBLASLt MatMul**: High-performance matrix multiplication
 - **Custom HIP Kernels**: GQA, RoPE, Cast, Sub, Gather, ReduceSum, Reciprocal, Sqrt, GELU, Range, LinearAttention
 - **Memory Pool Optimization**: `hip-pool-allocs` pass packs allocations into a single grow-on-demand buffer
@@ -28,48 +28,77 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | Operation | Backend |
 |-----------|---------|
 | Conv | MIOpen |
+| ConvTranspose | MIOpen |
 | MatMul | hipBLASLt |
+| Gemm | hipBLASLt |
+| Transpose | Custom HIP Kernel |
 | Mul | MIOpen |
 | Add | MIOpen |
+| Softmax | MIOpen |
 | Sigmoid | MIOpen |
+| Tanh | MIOpen |
 | Softplus | MIOpen |
 | Gelu | Custom HIP kernel |
 | Reciprocal | Custom HIP kernel |
 | Sqrt | Custom HIP kernel |
+| Exp | Custom HIP Kernel |
+| Pow | Decomposed → Mul / Sqrt / Reciprocal for constant scalar exponents; otherwise Custom HIP Kernel (`hip.pow`) |
 | Sub | Custom HIP Kernel |
 | Cast | Custom HIP Kernel |
 | CastLike | Decomposed → Cast |
 | Neg | Custom HIP Kernel |
 | Equal | Custom HIP Kernel |
 | Not | Custom HIP Kernel |
+| And | Custom HIP Kernel |
 | Cos | Custom HIP Kernel |
 | Sin | Custom HIP Kernel |
 | Div | Custom HIP Kernel |
 | Mod | Custom HIP Kernel |
 | Sign | Custom HIP Kernel |
+| Where | Custom HIP Kernel |
 | Less | Custom HIP Kernel |
+| GreaterOrEqual | Decomposed (Not(Less(A, B))) |
+| LessOrEqual | Decomposed (Not(Less(B, A))) |
 | Min | MIOpen |
+| Max | MIOpen |
 | ReduceSum | Custom HIP Kernel |
 | ReduceMax | Custom HIP Kernel |
 | ReduceProd | Custom HIP Kernel |
+| ReduceMean | Custom HIP Kernel |
 | CumSum | Custom HIP Kernel |
 | Pad | Custom HIP Kernel |
 | Tile | Custom HIP Kernel |
 | Expand | Custom HIP Kernel |
 | GatherND | Custom HIP Kernel |
+| ScatterND | Custom HIP Kernel (reductions: none / add / mul / min / max) |
 | Range | Custom HIP kernel |
-| NonZero | Runtime stub (not yet GPU-accelerated) |
+| Size | Custom HIP Kernel (folds to a constant for static shapes) |
+| NonZero | Custom HIP Kernel |
 | Gather | Custom HIP Kernel |
-| LayerNormalization | MIOpen |
+| LayerNormalization | Custom HIP Kernel |
+| SkipLayerNormalization (com.microsoft) | Decomposed → Add (MIOpen) + LayerNormalization (Custom HIP Kernel) |
 | SimplifiedLayerNormalization | MIOpen |
 | SkipSimplifiedLayerNormalization (com.microsoft) | MIOpen |
+| LpNormalization | Decomposed → Mul / ReduceSum / Sqrt / Div |
 | RotaryEmbedding (com.microsoft) | Custom HIP Kernel |
 | GroupQueryAttention (com.microsoft) | Custom HIP Kernel |
-| MultiHeadAttention (com.microsoft) | Runtime stub (not yet GPU-accelerated) |
+| MultiHeadAttention (com.microsoft) | hipBLASLt + Custom HIP Kernels (encoder–decoder attention also lowers to GroupQueryAttention) |
+| Attention (com.microsoft) | Custom HIP Kernel (fused QKV split, lowered to GroupQueryAttention) |
 | MatMulNBits (com.microsoft) | Custom HIP Kernel |
 | QMoE (com.microsoft) | Custom HIP Kernel |
+| GatherBlockQuantized (com.microsoft) | Custom HIP Kernel |
 | LinearAttention (com.microsoft) | Custom HIP Kernel |
-| CausalConvWithState (com.microsoft) | MIOpen |
+| CausalConvWithState (com.microsoft) | Custom HIP Kernel (decode / prefill fast paths) + MIOpen (general fallback) |
+| Relu | Decomposed → Max (MIOpen) |
+| LeakyRelu | Custom HIP Kernel |
+| Clip | Decomposed → Max + Min (MIOpen) |
+| MaxPool | Custom HIP Kernel |
+| AveragePool | Custom HIP Kernel |
+| LpPool | Custom HIP Kernel |
+| Resize | Custom HIP Kernel |
+| GlobalAveragePool | Custom HIP Kernel |
+| GlobalMaxPool | Custom HIP Kernel |
+| GlobalLpPool | Custom HIP Kernel |
 
 ### Compiler-Optimized Operations
 
@@ -81,12 +110,13 @@ These operations are handled through standard MLIR transformations without requi
 | Unsqueeze | tensor.expand_shape | Inserts size-1 axes; shape/stride reinterpretation only |
 | Squeeze | tensor.collapse_shape | Removes size-1 axes; shape/stride reinterpretation only |
 | Split | tensor.extract_slice | Zero-copy tensor partitioning; creates views without data movement |
-| Slice (constant params, positive stride) | tensor.extract_slice (compile-time decompose) | Most common case — constant starts/ends/axes/steps with positive unit/N stride. Lowers to zero-copy `memref.subview` after bufferization. Non-constant indices or negative steps fall through to a native `hip.slice` op with a runtime stub (logs only, no kernel today). |
+| Slice (constant params, positive stride) | tensor.extract_slice (compile-time decompose) | Most common case — constant starts/ends/axes/steps with positive unit/N stride. Lowers to zero-copy `memref.subview` after bufferization. Non-constant indices or negative steps fall through to a native `hip.slice` op backed by a runtime kernel (`hip_slice`); index tensors are assumed INT64. |
 | Concat | tensor.empty + tensor.insert_slice | Variadic-input concatenation along any axis. Rewritten to one `tensor.empty` plus N `tensor.insert_slice` ops; each insert bufferizes to a `memref.subview` + `memref.copy` against the pooled output buffer. Static, dynamic and mixed shapes are all handled via mixed `OpFoldResult` offsets/sizes; no Concat-specific runtime kernel. |
-| ScatterND | `hip.scatter_nd` (runtime stub) | Native DPS op carrying the ONNX `reduction` attribute (`none` / `add` / `mul` / `min` / `max`). Runtime currently logs its parameters only — models exercising ScatterND will produce uninitialised output until the kernel is implemented. |
+| Shape | tensor.dim + tensor.from_elements | Fully static shapes fold to a compile-time constant (placed in the constants blob). Dynamic dims lower to `tensor.dim` queries assembled via `tensor.from_elements`; honours optional `start`/`end` sub-range attributes. |
 | Constant | arith.constant or externalized to .constants.bin | ONNX Constant nodes: small values inlined, large tensors externalized |
 | ConstantOfShape | arith.constant (compile-time fold) | Folds to a splat constant when the shape input is itself constant; honours optional `value` attribute |
 | Identity | SSA value forwarding | Pass-through op; the input value is wired directly to every user (equivalent to a full-range `memref.subview` view, but cheaper — no view op is materialised in the IR) |
+| Flatten | tensor.collapse_shape (+ tensor.expand_shape for axis = 0 / axis = r) | Reshapes rank-r input to rank-2; pure metadata reinterpretation. Dynamic dims supported. |
 
 ---
 
@@ -102,54 +132,91 @@ These operations are handled through standard MLIR transformations without requi
 - **Custom HIP Kernels** (`3rd-party/custom_kernels/`) — handwritten `.hip` kernels for GQA, RoPE, etc.
 - **Compiler DLL** (`dll/`) — `hip-compiler.dll` exposing the C API
 - **Schemas** (`schemas/`) — FlatBuffers definitions for model metadata and compilation options
-- **Tools** — `hip-mlir-opt`, `hip-compiler`, `hip-test-dll`, `hip-inspect-dll`, `hip-onnx-runner`
+- **Tools** — `hip-mlir-opt`, `hip-compiler`, `hip-onnx-runner`, `hip-inspect`, `hip-test`
 - **Backend Integration** (`backend-mlir-compiler/`) — bridges to MorphiZen Execution Provider
 
 ### Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        COMPILE-TIME                            │
-├─────────────────────────────────────────────────────────────┤
-│                                                              │
-│  ONNX Model (.onnx)                                         │
-│      ↓                                                       │
-│  onnx-to-hip-pipeline                                        │
-│      hip-add-context-arg                                     │
-│      convert-onnx-to-hip ── constants → .constants.bin       │
-│      one-shot-bufferize (tensor → memref)                    │
-│      buffer-deallocation                                     │
-│      hip-optimize-memrefs (liveness-based buffer reuse)      │
-│      hip-pool-allocs (single grow-on-demand pool)            │
-│      hip-lower-allocs (memref.alloc → hip.alloc/free)        │
-│      hip-resolve-extern-constants                            │
-│      ↓                                                       │
-│  hip-to-llvm-pipeline                                        │
-│      convert-hip-to-llvm (HIP ops → runtime C API calls)    │
-│      generate-interface (inference_init/compute/cleanup)     │
-│      ↓                                                       │
-│  MLIR → LLVM IR → merge runtime.bc → optimize → link        │
-│      ↓                          ↑                            │
-│  model.dll              amdhip64 / MIOpen / hipblaslt /      │
-│  + constants.bin         hip_custom_kernels.lib               │
-│                                                              │
-└─────────────────────────────────────────────────────────────┘
-                     ↓
-┌─────────────────────────────────────────────────────────────┐
-│                          RUNTIME                               │
-├─────────────────────────────────────────────────────────────┤
-│                                                              │
-│  Load model.dll + constants.bin                              │
-│      ↓                                                       │
-│  inference_init   → GPU handles, upload constants, alloc pool│
-│  inference_compute → execute ops (MIOpen/hipBLASLt/kernels)  │
-│  inference_cleanup → free GPU resources                      │
-│                                                              │
-│  Dependencies: amdhip64.dll, MIOpen.dll, hipblaslt.dll       │
-│  No LLVM/MLIR needed at inference time                       │
-│                                                              │
-└─────────────────────────────────────────────────────────────┘
+=== COMPILE-TIME ===
+
+ONNX Model (.onnx)
+  │
+  ▼
+onnx-to-hip-pipeline
+    simplify-onnx                  (CastLike → Cast, drop dead type-donor args)
+    hip-add-context-arg
+    onnx-loop-outline              (+ hip-infer-loop-body-shapes)
+    convert-onnx-to-hip            constants → .constants.bin
+    hip-infer-shapes               (refine dynamic result dims)
+    hip-resolve-tensor-dims
+    one-shot-bufferize             (tensor → memref)
+    hip-loop-body-to-out-params    (outlined onnx.Loop bodies → out-param ABI)
+    buffer-deallocation            (ownership-based)
+    hip-use-output-allocator       (default ABI; outputs allocated in-graph via
+                                    EP callback. classic builds instead run
+                                    buffer-results-to-out-params before dealloc)
+    hip-fix-loop-accumulator-offset (onnx.Loop growing-accumulator offsets)
+    convert-linalg-to-loops        (lower any residual linalg.* to scf + stores)
+    hip-optimize-memrefs           (liveness-based buffer reuse)
+    hip-promote-strided-operands
+    hip-materialize-host-scalars   (host-mapped scratch for shape scalars)
+    hip-hoist-alloc-size-arith
+    hip-pool-allocs                (single grow-on-demand GPU pool)
+    convert-bufferization-to-memref (lower residual bufferization.* ops)
+    hip-lower-allocs               (memref.alloc → hip.alloc/free)
+    hip-resolve-extern-constants
+  │  (canonicalize / CSE cleanup runs interleaved between stages)
+  ▼
+hip-to-llvm-pipeline
+    hip-relax-multi-dyn-expand-shape
+    expand-strided-metadata        (+ lower-affine)
+    scf-to-control-flow            (+ reconcile-unrealized-casts)
+    convert-hip-to-llvm            (HIP ops → runtime C API calls)
+    generate-interface             (inference_init / compute / cleanup)
+  │
+  ▼
+MLIR → LLVM IR → optimize
+  │
+  ▼
+artifact_format?
+  ├─ LLVM_IR (default): emit model.bc  (runtime.bc kept separate;
+  │                     OS-portable, no linker)
+  └─ NATIVE  (opt-in) : merge runtime.bc → link model.dll/.so
+  │
+  ▼
+model.bc | model.dll   +   constants.bin
+
+
+=== RUNTIME ===
+
+Load artifact + constants.bin   (loader = artifact_format)
+  ├─ LLVM_IR: LlvmIrJit JIT-links model.bc + the runtime.bc
+  │           embedded in the EP, in-process (LLVM ORC)
+  └─ NATIVE : LoadLibrary / dlopen model.dll/.so
+  │
+  ▼
+inference_init    → GPU handles, upload constants, alloc pool
+inference_compute → execute ops (MIOpen / hipBLASLt / kernels)
+inference_cleanup → free GPU resources
+
+Dependencies: amdhip64, MIOpen, hipblaslt, custom_kernels
+No OS toolchain at inference time (LLVM_IR JITs in-process;
+the LLVM ORC engine ships inside the EP)
 ```
+
+> **Output-allocator ABI.** By default the EP compiles every model to the
+> 2-arg `inference_compute(state, inputs)` form: graph outputs are allocated
+> *in-graph* at runtime via the EP's output-allocator callback (`hip.alloc_output`),
+> selected by the `hip-use-output-allocator` pass stamping a module attribute.
+> The classic 3-arg out-param ABI remains for the `hip-compiler` CLI / LIT tests.
+
+> **Artifact format.** Selected by the single compile option `artifact_format`
+> (`LLVM_IR` default, `NATIVE` opt-in) and recorded in the EPContext metadata,
+> which the EP reads at load time. The default ships **OS-portable LLVM IR** (`.bc`,
+> JIT-loaded in-process); native `.dll`/`.so` stays a first-class opt-in for
+> benchmarking/parity — see
+> [docs/native-vs-ir-comparison.md](docs/native-vs-ir-comparison.md).
 
 ---
 

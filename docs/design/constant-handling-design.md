@@ -78,14 +78,21 @@ Compile time
                                                                               CLI / standalone use)
                                                                                         │
 Runtime  (hip-compiler.dll NOT loaded)                                                  │
-  ╔═════════════════════════════════╗                               ╔═══════════════════╧══════════════╗
-  ║         morphizen-ep.dll        ║                               ║          model.dll               ║
-  ║                                 ║                               ║                                  ║
-  ║  ┌─────────────────────────┐    ║  inference_init(fs)           ║  fs->create_reader(name)         ║
-  ║  │ MyCustomOp (HipDnnEP)   ├────╫──────────────────────────────▶  → FileReader                   ║
-  ║  │ fs = get_file_system()  │    ║                               ║     fread() / mmap()             ║
-  ║  └─────────────────────────┘    ║                               ╚══════════════════════════════════╝
-  ╚═════════════════════════════════╝
+  ╔═════════════════════════════════════════════════════════════════════════════════════╗
+  ║                                morphizen-ep.dll                                     ║
+  ║                                                                                     ║
+  ║  ┌─────────────────────────┐    LlvmIrJit::create(model.bc bytes)                  ║
+  ║  │ MyCustomOp (HipDnnEP)   ├──▶ JIT-loaded into the EP DLL's address space          ║
+  ║  │ fs = get_file_system()  │       │                                                ║
+  ║  └─────────────────────────┘       │ inference_init(fs)                             ║
+  ║                                    ▼                                                ║
+  ║                              JITted in-memory module                                ║
+  ║                                fs->create_reader(name)  ─── reads constants.bin ───▶║──┐
+  ║                                  → FileReader                                       ║  │
+  ║                                    fread() / mmap()                                 ║  │
+  ╚═════════════════════════════════════════════════════════════════════════════════════╝  │
+                                                                                           │
+                                                                              EP tar cache ◀┘
 ```
 
 **Compile time**: the `OnnxToHip` pass calls

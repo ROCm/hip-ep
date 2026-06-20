@@ -4,8 +4,11 @@
 // ============================================================================
 // TEST PURPOSE:
 // Verify hip.equal lowers to llvm.call @wrap_equal with signature
-//   (state, lhs, rhs, output, num_elements, data_type) -> i32.
+//   (state, lhs, rhs, output,
+//    a_num_elements, b_num_elements, out_num_elements, data_type) -> i32.
 // Output is i1 (bool, 1 byte); data_type identifies the input element type.
+// Per-operand element counts let the kernel handle scalar (numel==1)
+// broadcast via zero stride without an upfront Expand of the scalar.
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
@@ -22,7 +25,7 @@ module {
     hip.equal(%ctx) ins(%a, %b : memref<8xi64, 1>, memref<8xi64, 1>)
                     outs(%c : memref<8xi1, 1>)
 
-    // CHECK: llvm.call @wrap_equal({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_equal({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64) -> i32
     return
   }
 
@@ -38,7 +41,7 @@ module {
                     outs(%c : memref<?xi1, 1>)
 
     // CHECK: llvm.extractvalue %{{.*}}[3, 0]
-    // CHECK: llvm.call @wrap_equal({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_equal({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64) -> i32
     return
   }
 }

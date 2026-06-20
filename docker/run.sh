@@ -14,9 +14,12 @@
 #           already-running or stopped container of the same name.
 #   stop    Stop + rm the long-lived shell container.
 #
-# Env knobs (override on the command line, e.g. `BUILD_OGA=1 ./run.sh build`):
-#   IMAGE, CONTAINER_NAME, HIP_ARCHITECTURES, UBUNTU_USER_ID, BUILD_OGA,
-#   SKIP_LIT, FORCE_RECONFIGURE.
+# Env knobs (override on the command line, e.g. `HIP_ARCHITECTURES=gfx942 ./run.sh build`):
+#   IMAGE, CONTAINER_NAME, HIP_ARCHITECTURES.
+#
+# `build` runs the native driver build.py inside the container (docker
+# is just an isolation wrapper). OGA + ONNX-Runtime-from-source patching are CI
+# concerns (see .github/workflows/linux-build.yml), not local docker knobs.
 
 set -euo pipefail
 
@@ -26,23 +29,38 @@ DOCKER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SOURCE_DIR="$(cd "$DOCKER_DIR/.." && pwd -P)"
 WORKSPACE="$(cd "$SOURCE_DIR/.." && pwd -P)"
 
+# Auto-detect the host GPU arch from the amdgpu kernel driver's sysfs topology
+# (gfx_target_version per KFD node), so a developer with a different GPU need
+# not pass HIP_ARCHITECTURES. This is host-side on purpose: the compile-only
+# `build` container has no /dev/kfd, so the GPU node's properties are
+# unreadable inside it ("Operation not permitted"); and the ROCm/TheRock arch
+# tools aren't available before the SDK is downloaded. Needs only the amdgpu
+# kernel module (no ROCm userland). gfx_target_version encodes the arch as
+# major*10000 + minor*100 + step (e.g. 110501 -> gfx1151, 90010 -> gfx90a);
+# the CPU node reports 0 and is skipped.
+detect_hip_arch() {
+    local props v major minor step
+    for props in /sys/class/kfd/kfd/topology/nodes/*/properties; do
+        [ -r "$props" ] || continue
+        v=$(awk '/^gfx_target_version /{print $2; exit}' "$props" 2>/dev/null) || continue
+        [ -n "$v" ] && [ "$v" != "0" ] || continue
+        major=$((v / 10000)); minor=$(((v / 100) % 100)); step=$((v % 100))
+        printf 'gfx%d%x%x\n' "$major" "$minor" "$step"
+        return 0
+    done
+    return 1
+}
+
 : "${IMAGE:=hipdnn-ep-build:llvm22-noble}"
 : "${CONTAINER_NAME:=${USER}.hipdnn-ep.shell}"
-: "${HIP_ARCHITECTURES:=gfx1151}"
-# if you want to test rx9070, uncomment below line.
-# : "${HIP_ARCHITECTURES:=gfx1201}"  
-# Single integer used for both the renumbered UID and GID of the default
-# `ubuntu` user inside the image (parks the squatter so the entrypoint can
-# claim HOST_UID/HOST_GID, typically 1000/1000). Default matches CI; only
-# change if 60001 is already taken on your system. Forwarded as a Docker
-# `--build-arg` in cmd_image; consumed by the ARG of the same name in
-# docker/Dockerfile.
-: "${UBUNTU_USER_ID:=60001}"
-: "${BUILD_OGA:=0}"
-# OGA_REF intentionally not defaulted; build.sh owns the pin. Unset on the
-# host means "use build.sh default"; setting it overrides.
-: "${SKIP_LIT:=0}"
-: "${FORCE_RECONFIGURE:=0}"
+if [ -z "${HIP_ARCHITECTURES:-}" ]; then
+    if HIP_ARCHITECTURES="$(detect_hip_arch)"; then
+        echo "[host] auto-detected HIP_ARCHITECTURES=$HIP_ARCHITECTURES (from /sys/class/kfd)"
+    else
+        HIP_ARCHITECTURES=gfx1151
+        echo "[host] no AMD GPU detected in /sys/class/kfd; defaulting HIP_ARCHITECTURES=$HIP_ARCHITECTURES"
+    fi
+fi
 
 host_uid=$(id -u)
 host_gid=$(id -g)
@@ -61,17 +79,6 @@ populate_common_args() {
         -e "HOST_HOME=$WORKSPACE/.docker-home"
         -e "SOURCE_DIR=$SOURCE_DIR"
         -e "HIP_ARCHITECTURES=$HIP_ARCHITECTURES"
-        -e "BUILD_OGA=$BUILD_OGA"
-        -e "SKIP_LIT=$SKIP_LIT"
-        -e "FORCE_RECONFIGURE=$FORCE_RECONFIGURE"
-    )
-    if [ -n "${OGA_REF:-}" ]; then
-        _out+=(-e "OGA_REF=$OGA_REF")
-    fi
-    if [ -n "${ONNXRUNTIME_PR_PATCHES:-}" ]; then
-        _out+=(-e "ONNXRUNTIME_PR_PATCHES=$ONNXRUNTIME_PR_PATCHES")
-    fi
-    _out+=(
         -w "$SOURCE_DIR"
         --cap-add SYS_PTRACE
         -v "/dev/shm:/dev/shm"
@@ -92,8 +99,8 @@ populate_gpu_args() {
 }
 
 cmd_image() {
-    echo "[host] docker build -t $IMAGE --build-arg UBUNTU_USER_ID=$UBUNTU_USER_ID $DOCKER_DIR"
-    docker build -t "$IMAGE" --build-arg "UBUNTU_USER_ID=$UBUNTU_USER_ID" "$DOCKER_DIR"
+    echo "[host] docker build -t $IMAGE $DOCKER_DIR"
+    docker build -t "$IMAGE" "$DOCKER_DIR"
 }
 
 cmd_build() {
@@ -104,10 +111,15 @@ cmd_build() {
     local -a docker_args=()
     populate_common_args docker_args
     set -x
+    # docker is now just an isolation wrapper around the same native driver
+    # build.py (no second build recipe). HIP_ARCHITECTURES is detected
+    # host-side above and passed in (the compile-only container has no GPU node
+    # to auto-detect from). LLVM/ORT/protobuf/flatbuffers/TheRock are resolved
+    # by cmake/deps.cmake; OGA is a CI concern and is not built here.
     docker run --rm -t \
         "${docker_args[@]}" \
         "$IMAGE" \
-        bash "$DOCKER_DIR/build.sh"
+        python3 "$SOURCE_DIR/build.py" --config Release --hip_arch "$HIP_ARCHITECTURES"
 }
 
 cmd_shell() {

@@ -44,16 +44,21 @@ def _make_embedding_gather_model(
     seq_len: int,
     embed_range: tuple[float, float] = (-0.1, 0.1),
     seed: int = 99,
+    idx_dtype: int = TensorProto.INT64,
 ):
     """Build a Gather ONNX model matching embedding lookup pattern.
 
     data = initializer [vocab_size, hidden] f16 (embedding table)
-    indices = input [1, seq_len] i64 (token IDs)
+    indices = input [1, seq_len] (int32 or int64 token IDs)
     output = [1, seq_len, hidden] f16
+
+    ONNX allows the indices tensor to be int32 or int64; transformer text
+    models commonly feed an int32 input_ids straight into the embedding Gather,
+    so both index widths must produce identical results.
     """
     indices = helper.make_tensor_value_info(
         "input_ids",
-        TensorProto.INT64,
+        idx_dtype,
         [1, seq_len],
     )
     output = helper.make_tensor_value_info(
@@ -109,6 +114,28 @@ class TestGather:
 
         rng = np.random.default_rng(42)
         ids = rng.integers(0, LLAMA_VOCAB, [1, seq_len], dtype=np.int64)
+
+        actual, expected = model_runner.run_sample(model, [ids])
+        compare_outputs(actual, expected, atol=0)
+
+    @pytest.mark.parametrize("seq_len", SEQ_LENS)
+    def test_gather_embedding_int32_indices(self, model_runner, seq_len):
+        """Embedding lookup with int32 token IDs (ONNX allows int32 indices).
+
+        Regression guard: the gather kernel previously read the indices buffer
+        as int64 unconditionally, fusing adjacent int32 values into huge
+        out-of-range indices that the bounds check mapped to 0 -> all-zero
+        embeddings. int32 and int64 indices must match the CPU reference.
+        """
+        model = _make_embedding_gather_model(
+            LLAMA_VOCAB,
+            LLAMA_HIDDEN,
+            seq_len,
+            idx_dtype=TensorProto.INT32,
+        )
+
+        rng = np.random.default_rng(42)
+        ids = rng.integers(0, LLAMA_VOCAB, [1, seq_len], dtype=np.int32)
 
         actual, expected = model_runner.run_sample(model, [ids])
         compare_outputs(actual, expected, atol=0)

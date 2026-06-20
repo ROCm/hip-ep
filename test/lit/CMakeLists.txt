@@ -10,10 +10,12 @@
 #   18.x, which has no __main__.py. This caused MorphizenMLIRLitTests to
 #   always report "Passed" in CI despite never executing a single test.
 #
-# WHY NO_DEFAULT_PATH:
-#   HINTS restricts the search to Python's own Scripts/ and bin/ directories,
-#   preventing find_program from picking up a different lit.exe that may exist
-#   elsewhere on PATH (e.g. from the MSVC toolchain).
+# WHY NO_DEFAULT_PATH on Windows only:
+#   On Windows, HINTS + NO_DEFAULT_PATH pins the search to Python's own Scripts/
+#   dir so find_program can't grab an unrelated lit.exe from the MSVC toolchain
+#   on PATH. On Unix there is no such conflict, and pip frequently installs the
+#   lit console script outside the interpreter's own dir (e.g. /usr/local/bin or
+#   ~/.local/bin), so the default PATH search must stay enabled there.
 #
 # WHY the pip console_scripts lit.exe is safe from the multiprocessing loop:
 #   pip generates lit.exe as a compiled launcher that calls lit.main:main
@@ -26,10 +28,15 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 # Derive Python's Scripts/ (Windows) and bin/ (Unix) dirs from the interpreter
 # path — these are where pip installs console_scripts entry points like lit.
 get_filename_component(_python_dir "${Python3_EXECUTABLE}" DIRECTORY)
+if(WIN32)
+    set(_lit_no_default_path NO_DEFAULT_PATH)
+else()
+    set(_lit_no_default_path "")
+endif()
 find_program(LIT_EXECUTABLE
     NAMES lit
     HINTS "${_python_dir}/Scripts" "${_python_dir}/bin" "${_python_dir}"
-    NO_DEFAULT_PATH
+    ${_lit_no_default_path}
     REQUIRED
     DOC "lit test runner from pip install lit"
 )
@@ -59,10 +66,23 @@ configure_file(
 # which is the correct behaviour on both dev machines and CI runners.
 set(LIT_ARGS "-sv" CACHE STRING "Extra arguments passed to lit (e.g. -j4 --no-progress-bar)")
 
+# Tools the suite needs at run time. hip-mlir-opt/hip-compiler are always our
+# targets. The LIT support utilities (FileCheck/not/count) are EXCLUDE_FROM_ALL
+# LLVM targets in a from-source (embedded) build and must be built before the
+# suite runs; in a prebuilt-prefix build they are plain executables in the
+# prefix (not targets), already on disk, so only depend on the ones that exist
+# as targets here.
+set(_lit_deps hip-mlir-opt hip-compiler)
+foreach(_lit_tool FileCheck not count)
+    if(TARGET ${_lit_tool})
+        list(APPEND _lit_deps ${_lit_tool})
+    endif()
+endforeach()
+
 # Add custom build target for manual invocation: cmake --build . --target check-hip-mlir-lit
 add_custom_target(check-hip-mlir-lit
     COMMAND ${LIT_EXECUTABLE} ${LIT_ARGS} --param=build_mode=$<CONFIG> .
-    DEPENDS hip-mlir-opt hip-compiler
+    DEPENDS ${_lit_deps}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     COMMENT "Running LIT tests for hip-mlir-compiler"
 )

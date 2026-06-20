@@ -6,6 +6,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
+#include "../op_state.h"
 #include "../runtime_state_internal.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
@@ -92,16 +93,16 @@ static bool gqa_fused_decode_disabled() {
 // the first GQA call -- a 32-layer Llama decode then issues one D2H
 // instead of 32, eliminating ~30-45 ms/token of pipeline stalls on Strix
 // Halo. Set HIPDNN_EP_GQA_CACHE_SEQLENS=0 to disable (escape hatch for
-// running against an older model.dll without the begin_compute export, or
-// for A/B measurement).
+// running against an older per-model bitcode without the begin_compute
+// export, or for A/B measurement).
 //
 // Correctness depends on the EP-side MlirCustomOp::Compute() invoking
 // hipdnn_ep_runtime_begin_compute(state) at the start of each forward
-// pass to invalidate the cache. Older model.dlls without that symbol
-// exported are detected at session creation and produce a LOG(WARNING)
-// directing the user to set HIPDNN_EP_GQA_CACHE_SEQLENS=0 (otherwise the
-// cache would survive across forward passes and return stale total_seq
-// values).
+// pass to invalidate the cache. Older per-model bitcode without that
+// symbol exported is detected at session creation and produces a
+// LOG(WARNING) directing the user to set HIPDNN_EP_GQA_CACHE_SEQLENS=0
+// (otherwise the cache would survive across forward passes and return
+// stale total_seq values).
 static bool gqa_cache_seqlens_enabled() {
   static const bool enabled = [] {
     const char *v = std::getenv("HIPDNN_EP_GQA_CACHE_SEQLENS");
@@ -279,6 +280,10 @@ struct GqaGemmKey {
   int64_t m, n, k, batch;
   bool transA; // true for Score GEMM (K^T * Q), false for Value GEMM (V * S)
   bool outputFp32; // true to use HIP_R_32F for C/D layouts (Score GEMM)
+  // true to use HIP_R_32F for the A/B input layouts (fp32 GQA, e.g. Whisper
+  // no_causal). When false the inputs are HIP_R_16F (fp16 GQA -- Llama /
+  // gpt-oss, byte-identical to the pre-fp32 behaviour).
+  bool inputFp32;
   // Optional explicit per-operand batch strides (in elements). A value of 0
   // means "use the default dense stride" (m*k for A, n*k for B, n*m for C/D).
   // Non-zero values override the default and enable batch layouts that differ
@@ -291,7 +296,8 @@ struct GqaGemmKey {
   bool operator==(const GqaGemmKey &o) const {
     return m == o.m && n == o.n && k == o.k && batch == o.batch &&
            transA == o.transA && outputFp32 == o.outputFp32 &&
-           strideA == o.strideA && strideB == o.strideB && strideC == o.strideC;
+           inputFp32 == o.inputFp32 && strideA == o.strideA &&
+           strideB == o.strideB && strideC == o.strideC;
   }
 };
 
@@ -304,6 +310,7 @@ struct GqaGemmKeyHash {
     hash_combine_val(h, k.batch);
     hash_combine_val(h, k.transA);
     hash_combine_val(h, k.outputFp32);
+    hash_combine_val(h, k.inputFp32);
     hash_combine_val(h, k.strideA);
     hash_combine_val(h, k.strideB);
     hash_combine_val(h, k.strideC);
@@ -323,19 +330,39 @@ struct GqaGemmCacheEntry {
 
 struct GqaGemmCache {
   std::unordered_map<GqaGemmKey, GqaGemmCacheEntry, GqaGemmKeyHash> entries;
+  // Destroys every cached hipBLASLt descriptor/layout entry. Defined
+  // out-of-line below. Runs when the owning op-state slot is torn down
+  // (GqaState's deletor).
+  ~GqaGemmCache();
 };
 
-static GqaGemmCache *get_gemm_cache(RuntimeState *state) {
-  if (!state->gqa_gemm_cache)
-    state->gqa_gemm_cache = new GqaGemmCache;
-  return static_cast<GqaGemmCache *>(state->gqa_gemm_cache);
+// Per-instance GQA op-state (see op-state-slots-design.md): owns this
+// instance's per-GEMM-shape hipBLASLt descriptor/algorithm cache. Replaces the
+// former shared RuntimeState::gqa_gemm_cache, so concurrent sessions (and
+// distinct GQA layers) no longer share one descriptor map.
+struct GqaState : OpStateT<GqaState> {
+  GqaGemmCache cache;
+};
+
+// Resolve this GQA instance's descriptor cache from its op-state slot. Returns
+// nullptr when the slot is unconstructed (init failure) — callers propagate the
+// error rather than lazily allocating, since the slot is built at session init.
+static GqaGemmCache *get_gemm_cache(RuntimeState *state, int op_state_slot) {
+  GqaState *gs = GqaState::get_slot(state, op_state_slot);
+  return gs ? &gs->cache : nullptr;
 }
 
 static const GqaGemmCacheEntry *queryOrCreateGemmState(RuntimeState *state,
                                                        hipblasLtHandle_t handle,
-                                                       const GqaGemmKey &key) {
+                                                       const GqaGemmKey &key,
+                                                       int op_state_slot) {
   assert(handle && "queryOrCreateGemmState: null handle");
-  auto *cache = get_gemm_cache(state);
+  auto *cache = get_gemm_cache(state, op_state_slot);
+  if (!cache) {
+    fprintf(stderr, "queryOrCreateGemmState: no GqaState at slot %d\n",
+            op_state_slot);
+    return nullptr;
+  }
   auto it = cache->entries.find(key);
   if (it != cache->entries.end())
     return &it->second;
@@ -371,14 +398,16 @@ static const GqaGemmCacheEntry *queryOrCreateGemmState(RuntimeState *state,
     int64_t strideB = key.strideB != 0 ? key.strideB : n * k;
     int64_t strideC = key.strideC != 0 ? key.strideC : n * m;
 
+    // Input operand element type: HIP_R_16F (fp16 GQA) or HIP_R_32F (fp32
+    // GQA, e.g. Whisper no_causal). Compute is HIPBLAS_COMPUTE_32F either way.
+    hipDataType inType = key.inputFp32 ? HIP_R_32F : HIP_R_16F;
     int64_t a_rows = key.transA ? k : m;
     int64_t a_cols = key.transA ? m : k;
-    GQA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layA, HIP_R_16F, a_rows,
+    GQA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layA, inType, a_rows,
                                                 a_cols, a_rows));
     GQA_CACHE_CHECK(setLayoutBatch(entry.layA, batch, strideA));
 
-    GQA_CACHE_CHECK(
-        hipblasLtMatrixLayoutCreate(&entry.layB, HIP_R_16F, k, n, k));
+    GQA_CACHE_CHECK(hipblasLtMatrixLayoutCreate(&entry.layB, inType, k, n, k));
     GQA_CACHE_CHECK(setLayoutBatch(entry.layB, batch, strideB));
 
     hipDataType outType = key.outputFp32 ? HIP_R_32F : HIP_R_16F;
@@ -452,24 +481,62 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
                            const void *new_value, void *present_key,
                            void *present_value, int B, int past_len, int sq,
                            int G, int d, int past_buf_seq, int present_seq,
-                           const void *seqlens_k_ptr) {
+                           const void *seqlens_k_ptr, int elem_sz,
+                           bool no_causal = false, int skv = -1) {
+  // no_causal (Whisper encoder / cross-attn): bidirectional, no past KV.
+  // The KV to attend over is the FULL `new_key`/`new_value` (Skv tokens), not
+  // `sq` newly-appended tokens. Two sub-cases distinguished by sq vs Skv:
+  //   * Cross-attn (sq != Skv): `key`/`value` arrive as rank-4 BNSH
+  //     [B, G, Skv, d] -- already in the present_key layout. A straight
+  //     device-to-device copy of all Skv tokens populates present_*.
+  //   * Encoder self-attn (sq == Skv): `key`/`value` are BSHD [B, Skv, G, d];
+  //     fall through to the append kernel below with past_len forced to 0 and
+  //     seqlens_k=nullptr so it transposes all Skv tokens to offset 0 WITHOUT
+  //     the +1 PAST-token convention.
+  if (no_causal && skv >= 0 && skv != sq) {
+    // elem_sz is 2 (fp16) or 4 (fp32); the decomposed pipeline supports both.
+    size_t bytes = static_cast<size_t>(B) * G * static_cast<size_t>(skv) * d *
+                   static_cast<size_t>(elem_sz);
+    if (hipMemcpyAsync(present_key, new_key, bytes, hipMemcpyDeviceToDevice,
+                       stream) != hipSuccess)
+      return -1;
+    if (hipMemcpyAsync(present_value, new_value, bytes, hipMemcpyDeviceToDevice,
+                       stream) != hipSuccess)
+      return -1;
+    return 0;
+  }
+  if (no_causal) {
+    // Encoder self-attn: append all Skv (== sq) tokens at offset 0, bypassing
+    // the seqlens_k +1 convention (pass nullptr so the kernel uses past_len=0).
+    if (hip_gqa_kv_cache_append(stream, new_key, present_key, B, sq, G, d,
+                                present_seq, /*past_len=*/0,
+                                /*seqlens_k_ptr=*/nullptr, elem_sz) != 0)
+      return -1;
+    if (hip_gqa_kv_cache_append(stream, new_value, present_value, B, sq, G, d,
+                                present_seq, /*past_len=*/0,
+                                /*seqlens_k_ptr=*/nullptr, elem_sz) != 0)
+      return -1;
+    return 0;
+  }
   if (past_key && past_len > 0 && past_key != present_key) {
     // Separate-buffer concat: needs host-side past_len for stride computation
     if (hip_gqa_kv_cache_concat(stream, past_key, new_key, present_key, B,
-                                past_len, sq, G, d, past_buf_seq,
-                                present_seq) != 0)
+                                past_len, sq, G, d, past_buf_seq, present_seq,
+                                elem_sz) != 0)
       return -1;
     if (hip_gqa_kv_cache_concat(stream, past_value, new_value, present_value, B,
-                                past_len, sq, G, d, past_buf_seq,
-                                present_seq) != 0)
+                                past_len, sq, G, d, past_buf_seq, present_seq,
+                                elem_sz) != 0)
       return -1;
   } else {
     // In-place append: kernel can read past_len from device via seqlens_k_ptr
     if (hip_gqa_kv_cache_append(stream, new_key, present_key, B, sq, G, d,
-                                present_seq, past_len, seqlens_k_ptr) != 0)
+                                present_seq, past_len, seqlens_k_ptr,
+                                elem_sz) != 0)
       return -1;
     if (hip_gqa_kv_cache_append(stream, new_value, present_value, B, sq, G, d,
-                                present_seq, past_len, seqlens_k_ptr) != 0)
+                                present_seq, past_len, seqlens_k_ptr,
+                                elem_sz) != 0)
       return -1;
   }
   return 0;
@@ -495,13 +562,22 @@ static int gqa_forward_hipblaslt(
     void *present_key,       // BNSD [B, G, present_buf_seq, d]
     void *present_value, int64_t B, int64_t sq, int64_t skv,
     int64_t past_buf_seq, int64_t H, int64_t G, int64_t d, float scale,
-    int64_t do_rotary, int64_t local_window_size) {
+    int64_t do_rotary, int64_t local_window_size, bool no_causal,
+    int64_t element_size_bytes, int op_state_slot) {
 
   int64_t HPG = H / G;
   // present_seq is the buffer dimension of present_key (may be max_length
   // for pre-allocated caches, larger than the actual valid token count).
   int64_t present_seq = skv;
-  size_t elem_sz = 2; // FP16
+  // 2 = fp16 (Llama / gpt-oss), 4 = fp32 (Whisper no_causal). Drives scratch
+  // buffer sizing, the GEMM layout element type, the softmax output dtype, and
+  // the data-movement kernel dispatch below.
+  size_t elem_sz = static_cast<size_t>(element_size_bytes);
+  // hipBLASLt matrix layout element type for the fp16-in/fp16-out GEMMs
+  // (Value GEMM operands K/V/P/O). The Score GEMM accumulates to fp32 either
+  // way; only its input operands (K, Q) use this type. Compute stays
+  // HIPBLAS_COMPUTE_32F regardless.
+  bool gemm_fp32 = (elem_sz == 4);
 
   bool need_rope = do_rotary && cos_cache && sin_cache;
 
@@ -535,7 +611,14 @@ static int gqa_forward_hipblaslt(
   int32_t seqlens_k_pre =
       read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state);
   int64_t total_seq_pre = -1;
-  if (seqlens_k_pre != kSeqlensKNotRead) {
+  if (no_causal) {
+    // no_causal (Whisper encoder / cross-attn): seqlens_k = skv means "all skv
+    // keys valid", there is no past. total_seq is exactly skv -- do NOT apply
+    // the +1 decode convention (would over-count and trip the smart-dispatch
+    // size check / fused validation). See the matching exemption at the
+    // decomposed-path total_seq derivation below.
+    total_seq_pre = skv;
+  } else if (seqlens_k_pre != kSeqlensKNotRead) {
     // -1 is ORT's prefill sentinel: total_seq=sq, past_len=0. Real values
     // are 0..max_seq; total_seq = seqlens_k_val + 1.
     total_seq_pre =
@@ -591,10 +674,29 @@ static int gqa_forward_hipblaslt(
   // branch too.
   bool fused_packed_qkv = (!key && !value);
   bool kv_inputs_ok = (key && value) || fused_packed_qkv;
+  // The fused (hip_gqa_fused_decode) and flash (hip_gqa_flash_decode) decode
+  // kernels are __half-only (their Q/K/V/O pointers are `const __half*`). They
+  // are correct for the fp16 causal decode of Llama / gpt-oss (elem_size==2).
+  // The fp32 GQA path (Whisper decoder self-attn, elem_size==4) must NOT reach
+  // them: feeding fp32 buffers to a __half kernel reinterprets the bytes and
+  // produces garbage (observed: O == -4.28e37 sentinel leak → token 0 spam in
+  // greedy decode). The decomposed hipBLASLt pipeline below IS fp32-capable, so
+  // route fp32 decode there. This is the decode-side analogue of the no_causal
+  // exemption (the prefill sq>1 fp32 path already used decomposed). GATE-1
+  // (Llama / gpt-oss) is fp16 so `fused_fp16` stays true for them — byte
+  // identical.
+  bool fused_fp16 = (element_size_bytes == 2);
+  // no_causal (Whisper encoder / cross-attn) always takes the decomposed
+  // hipBLASLt path. The fused/flash decode kernels are decode-only (sq==1) and
+  // read seqlens_k with the +1 PAST-token convention, plus assume the KV cache
+  // is appended in BSHD->BNSD layout from `sq` new tokens. Neither holds for
+  // bidirectional no-past attention where `key` is the full Skv-length KV
+  // (cross-attn ships it as rank-4 BNSH with Skv != sq). Routing no_causal to
+  // the decomposed path keeps a single correct code path for these models.
   bool fused_predicate =
-      (!gqa_fused_decode_disabled() && fused_d && sq == 1 && kv_inputs_ok &&
-       present_key && present_value && sliding_ok_for_fused &&
-       sink_ok_for_fused && size_ok_for_fused);
+      (!gqa_fused_decode_disabled() && !no_causal && fused_fp16 && fused_d &&
+       sq == 1 && kv_inputs_ok && present_key && present_value &&
+       sliding_ok_for_fused && sink_ok_for_fused && size_ok_for_fused);
 
   if (fused_predicate) {
     const void *qSrc = query;
@@ -710,10 +812,10 @@ static int gqa_forward_hipblaslt(
       void *d_Qsplit = ws + off_split;
       void *d_Ksplit = ws + off_split + Q_full_bytes;
       void *d_Vsplit = ws + off_split + Q_full_bytes + K_full_bytes;
-      if (hip_gqa_split_qkv(stream, query, d_Qsplit, d_Ksplit, d_Vsplit,
-                            static_cast<int>(B), static_cast<int>(sq),
-                            static_cast<int>(H), static_cast<int>(G),
-                            static_cast<int>(d)) != 0)
+      if (hip_gqa_split_qkv(
+              stream, query, d_Qsplit, d_Ksplit, d_Vsplit, static_cast<int>(B),
+              static_cast<int>(sq), static_cast<int>(H), static_cast<int>(G),
+              static_cast<int>(d), static_cast<int>(elem_sz)) != 0)
         return -1;
       qSrc = d_Qsplit;
       kSrc = d_Ksplit;
@@ -729,12 +831,14 @@ static int gqa_forward_hipblaslt(
       if (hip_gqa_rope(stream, qSrc, d_Qroped, cos_cache, sin_cache,
                        static_cast<int>(B), static_cast<int>(sq),
                        static_cast<int>(H), static_cast<int>(d), half_rot,
-                       static_cast<int>(past_len), seqlens_k_ptr) != 0)
+                       static_cast<int>(past_len), seqlens_k_ptr,
+                       static_cast<int>(elem_sz)) != 0)
         return -1;
       if (hip_gqa_rope(stream, kSrc, d_Kroped, cos_cache, sin_cache,
                        static_cast<int>(B), static_cast<int>(sq),
                        static_cast<int>(G), static_cast<int>(d), half_rot,
-                       static_cast<int>(past_len), seqlens_k_ptr) != 0)
+                       static_cast<int>(past_len), seqlens_k_ptr,
+                       static_cast<int>(elem_sz)) != 0)
         return -1;
 
       qSrc = d_Qroped;
@@ -742,12 +846,12 @@ static int gqa_forward_hipblaslt(
       // vSrc is intentionally NOT updated: V is never RoPE'd.
     }
 
-    if (update_kv_cache(stream, past_key, past_value, kSrc, vSrc, present_key,
-                        present_value, static_cast<int>(B),
-                        static_cast<int>(past_len), static_cast<int>(sq),
-                        static_cast<int>(G), static_cast<int>(d),
-                        static_cast<int>(past_buf_seq),
-                        static_cast<int>(present_seq), seqlens_k_ptr) != 0)
+    if (update_kv_cache(
+            stream, past_key, past_value, kSrc, vSrc, present_key,
+            present_value, static_cast<int>(B), static_cast<int>(past_len),
+            static_cast<int>(sq), static_cast<int>(G), static_cast<int>(d),
+            static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
+            seqlens_k_ptr, static_cast<int>(elem_sz)) != 0)
       return -1;
 
     if (use_flash_decode) {
@@ -822,7 +926,19 @@ static int gqa_forward_hipblaslt(
   // have no validated multi-batch decode workload yet.
   int64_t total_seq = skv;
   int64_t past_len = skv - sq;
-  if (seqlens_k_ptr) {
+  // no_causal (Whisper encoder self-attn + decoder cross-attn) is bidirectional
+  // with NO past KV: the converters emit a compile-time seqlens_k = skv meaning
+  // "all skv keys are valid". The ORT decode convention below (seqlens_k[b] =
+  // PAST tokens, total = past + current => total_seq = seqlens_k+1) does NOT
+  // apply here. Applying it would give total_seq = skv+1 > present_seq = skv ->
+  // rc=-1 -> zeroed output. Also, past_len = total_seq - sq is invalid when
+  // sq != skv (cross-attn has sq=1, skv=1500 => bogus past_len=1499). For
+  // no_causal there is no past, so total_seq = skv (== present_seq) and
+  // past_len = 0; skip the seqlens_k readback entirely.
+  if (no_causal) {
+    total_seq = skv;
+    past_len = 0;
+  } else if (seqlens_k_ptr) {
     int32_t seqlens_k_val = 0;
 
     if (seqlens_k_pre != kSeqlensKNotRead) {
@@ -951,6 +1067,7 @@ static int gqa_forward_hipblaslt(
                 /*batch=*/B * G,
                 /*transA=*/true,
                 /*outputFp32=*/true,
+                /*inputFp32=*/gemm_fp32,
                 /*strideA=*/present_seq * d,
                 /*strideB=*/HPG * sq * d,
                 /*strideC=*/HPG * sq * total_seq};
@@ -962,12 +1079,14 @@ static int gqa_forward_hipblaslt(
                 /*k=*/total_seq,
                 /*batch=*/B * G,
                 /*transA=*/false,
-                /*outputFp32=*/false,
+                /*outputFp32=*/gemm_fp32,
+                /*inputFp32=*/gemm_fp32,
                 /*strideA=*/present_seq * d,
                 /*strideB=*/HPG * sq * total_seq,
                 /*strideC=*/HPG * sq * d};
   } else {
-    scoreKey = {total_seq,     sq, d, B * H, true, true,
+    scoreKey = {total_seq,           sq,        d, B * H, true,
+                /*outputFp32=*/true, gemm_fp32,
                 /*strideA=*/0,
                 /*strideB=*/0,
                 /*strideC=*/0};
@@ -976,18 +1095,19 @@ static int gqa_forward_hipblaslt(
                 total_seq,
                 B * H,
                 false,
-                false,
+                /*outputFp32=*/gemm_fp32,
+                gemm_fp32,
                 /*strideA=*/0,
                 /*strideB=*/0,
                 /*strideC=*/0};
   }
 
   const GqaGemmCacheEntry *scoreState =
-      queryOrCreateGemmState(state, ltHandle, scoreKey);
+      queryOrCreateGemmState(state, ltHandle, scoreKey, op_state_slot);
   if (!scoreState)
     return -1;
   const GqaGemmCacheEntry *valueState =
-      queryOrCreateGemmState(state, ltHandle, valueKey);
+      queryOrCreateGemmState(state, ltHandle, valueKey, op_state_slot);
   if (!valueState)
     return -1;
 
@@ -1086,10 +1206,10 @@ static int gqa_forward_hipblaslt(
       void *d_Qsplit = ws + off_Qsplit;
       void *d_Ksplit = ws + off_Ksplit;
       void *d_Vsplit = ws + off_Vsplit;
-      HIP_CHECK(hip_gqa_split_qkv(stream, query, d_Qsplit, d_Ksplit, d_Vsplit,
-                                  static_cast<int>(B), static_cast<int>(sq),
-                                  static_cast<int>(H), static_cast<int>(G),
-                                  static_cast<int>(d)));
+      HIP_CHECK(hip_gqa_split_qkv(
+          stream, query, d_Qsplit, d_Ksplit, d_Vsplit, static_cast<int>(B),
+          static_cast<int>(sq), static_cast<int>(H), static_cast<int>(G),
+          static_cast<int>(d), static_cast<int>(elem_sz)));
       qSrc = d_Qsplit;
       kSrc = d_Ksplit;
       vSrc = d_Vsplit;
@@ -1106,11 +1226,13 @@ static int gqa_forward_hipblaslt(
       HIP_CHECK(hip_gqa_rope(stream, qSrc, d_Qroped, cos_cache, sin_cache,
                              static_cast<int>(B), static_cast<int>(sq),
                              static_cast<int>(H), static_cast<int>(d), half_rot,
-                             static_cast<int>(past_len), nullptr));
+                             static_cast<int>(past_len), nullptr,
+                             static_cast<int>(elem_sz)));
       HIP_CHECK(hip_gqa_rope(stream, kSrc, d_Kroped, cos_cache, sin_cache,
                              static_cast<int>(B), static_cast<int>(sq),
                              static_cast<int>(G), static_cast<int>(d), half_rot,
-                             static_cast<int>(past_len), nullptr));
+                             static_cast<int>(past_len), nullptr,
+                             static_cast<int>(elem_sz)));
 
       qSrc = d_Qroped;
       kSrc = d_Kroped;
@@ -1123,7 +1245,7 @@ static int gqa_forward_hipblaslt(
     if (need_transpose) {
       HIP_CHECK(hip_gqa_transpose_mid_dims(
           stream, qSrc, d_Qtrans, static_cast<int>(B), static_cast<int>(sq),
-          static_cast<int>(H), static_cast<int>(d)));
+          static_cast<int>(H), static_cast<int>(d), static_cast<int>(elem_sz)));
     }
 
     // ---- Steps 4-5: KV Cache Update ----
@@ -1137,12 +1259,16 @@ static int gqa_forward_hipblaslt(
     // decode step. The expand path has already consumed total_seq host-side
     // above, so it passes nullptr to preserve the pre-refactor behaviour.
     if (present_key && present_value) {
+      // For no_causal, never hand seqlens_k to the append kernel (it would
+      // apply the +1 PAST-token convention); update_kv_cache routes no_causal
+      // through its bidirectional copy/append branch using skv directly.
       HIP_CHECK(update_kv_cache(
           stream, past_key, past_value, kSrc, vSrc, present_key, present_value,
           static_cast<int>(B), static_cast<int>(past_len), static_cast<int>(sq),
           static_cast<int>(G), static_cast<int>(d),
           static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
-          use_no_expand ? seqlens_k_ptr : nullptr));
+          (use_no_expand && !no_causal) ? seqlens_k_ptr : nullptr,
+          static_cast<int>(elem_sz), no_causal, static_cast<int>(skv)));
     }
 
     // ---- Steps 6-7: KV Expand [B*G, present_seq, d] -> [B*H, total_seq, d]
@@ -1155,12 +1281,14 @@ static int gqa_forward_hipblaslt(
       int kvDstStride = static_cast<int>(total_seq * d);
       int expandCopy = static_cast<int>(total_seq * d);
 
-      HIP_CHECK(hip_gqa_expand_kv(
-          stream, kCache, d_Kexp, static_cast<int>(B * H),
-          static_cast<int>(HPG), kvSrcStride, kvDstStride, expandCopy));
-      HIP_CHECK(hip_gqa_expand_kv(
-          stream, vCache, d_Vexp, static_cast<int>(B * H),
-          static_cast<int>(HPG), kvSrcStride, kvDstStride, expandCopy));
+      HIP_CHECK(
+          hip_gqa_expand_kv(stream, kCache, d_Kexp, static_cast<int>(B * H),
+                            static_cast<int>(HPG), kvSrcStride, kvDstStride,
+                            expandCopy, static_cast<int>(elem_sz)));
+      HIP_CHECK(
+          hip_gqa_expand_kv(stream, vCache, d_Vexp, static_cast<int>(B * H),
+                            static_cast<int>(HPG), kvSrcStride, kvDstStride,
+                            expandCopy, static_cast<int>(elem_sz)));
     }
 
     // ---- Step 8: Score GEMM (fp16 in, fp32 out) ----
@@ -1185,17 +1313,30 @@ static int gqa_forward_hipblaslt(
     // (the no-expand strided-batched output lands in BNSD order too).
     int scoreF32BatchStride = static_cast<int>(sq * total_seq);
     int scoreFp16BatchStride = static_cast<int>(sq * total_seq);
-    if (sq > 1 || local_window_size > 0) {
+    if ((sq > 1 || local_window_size > 0) && !no_causal) {
       HIP_CHECK(hip_gqa_causal_mask_f32(
           stream, d_S_f32, static_cast<int>(B * H), static_cast<int>(total_seq),
           static_cast<int>(sq), scoreF32BatchStride, static_cast<int>(past_len),
           static_cast<int>(local_window_size)));
     }
-    HIP_CHECK(hip_gqa_softmax_f32_to_f16(
-        stream, d_S_f32, d_S_fp16, static_cast<int>(B * H * sq),
-        static_cast<int>(total_seq), static_cast<int>(sq), scoreF32BatchStride,
-        scoreFp16BatchStride, head_sink, static_cast<int>(H),
-        static_cast<int>(use_smooth_softmax)));
+    // fp16 GQA: softmax writes fp16 probabilities for the fp16 Value GEMM.
+    // fp32 GQA (Whisper no_causal): softmax writes fp32 probabilities for the
+    // fp32 Value GEMM. d_S_fp16 is the probabilities buffer either way (sized
+    // by elem_sz above), so the name is fp16-specific but the buffer holds
+    // fp32 when gemm_fp32.
+    if (gemm_fp32) {
+      HIP_CHECK(hip_gqa_softmax_f32_to_f32(
+          stream, d_S_f32, d_S_fp16, static_cast<int>(B * H * sq),
+          static_cast<int>(total_seq), static_cast<int>(sq),
+          scoreF32BatchStride, scoreFp16BatchStride, head_sink,
+          static_cast<int>(H), static_cast<int>(use_smooth_softmax)));
+    } else {
+      HIP_CHECK(hip_gqa_softmax_f32_to_f16(
+          stream, d_S_f32, d_S_fp16, static_cast<int>(B * H * sq),
+          static_cast<int>(total_seq), static_cast<int>(sq),
+          scoreF32BatchStride, scoreFp16BatchStride, head_sink,
+          static_cast<int>(H), static_cast<int>(use_smooth_softmax)));
+    }
 
     // ---- Step 10: Value GEMM (fp16 in, fp16 out) ----
     // A = V : no-expand reads present_value directly; expand reads d_Vexp.
@@ -1217,7 +1358,8 @@ static int gqa_forward_hipblaslt(
     if (need_transpose) {
       HIP_CHECK(hip_gqa_transpose_mid_dims(
           stream, d_O, output, static_cast<int>(B), static_cast<int>(H),
-          static_cast<int>(sq), static_cast<int>(d)));
+          static_cast<int>(sq), static_cast<int>(d),
+          static_cast<int>(elem_sz)));
     }
 
     RUNTIME_DEBUG_LOG(
@@ -1238,6 +1380,8 @@ cleanup:
 
 int wrap_group_query_attention(
     RuntimeState *state,
+    // Per-instance op-state slot (GqaState: this layer's GEMM descriptor cache)
+    int op_state_slot,
     // Inputs 1-7 (core GQA)
     void *query, void *key, void *value, void *past_key, void *past_value,
     void *seqlens_k, void *total_seq_len,
@@ -1247,11 +1391,15 @@ int wrap_group_query_attention(
     void *attention_bias, void *head_sink, void *k_scale, void *v_scale,
     // Outputs
     void *output, void *present_key, void *present_value, void *output_qk,
-    // Attributes (12)
+    // Attributes (13)
     int64_t num_heads, int64_t kv_num_heads, float scale, int64_t do_rotary,
     int64_t rotary_interleaved, float softcap, int64_t local_window_size,
     int64_t smooth_softmax, int64_t qk_output, int64_t k_quant_type,
     int64_t v_quant_type, int64_t kv_cache_bit_width,
+    // Whisper bidirectional-attention flag: when non-zero, the causal mask
+    // step in gqa_forward_hipblaslt is skipped. Default 0 preserves Llama /
+    // gpt-oss behaviour.
+    int32_t no_causal,
     // Shape values (6): past_buf_seq is the buffer dimension of past_key
     // (may differ from actual past token count for pre-allocated caches)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
@@ -1283,21 +1431,19 @@ int wrap_group_query_attention(
             (long long)num_heads, (long long)kv_num_heads);
     return -1;
   }
-  // The hipBLASLt GQA pipeline is currently FP16-only: all matrix layouts are
-  // created with HIP_R_16F and every custom HIP kernel (rope_kernel,
-  // kv_cache_append_kernel, softmax_inplace_kernel, etc.) operates on __half.
-  // This matches requirements where GQA runs in FP16.
-  //
-  // Future FP32 (or BF16) support would require:
-  //   1. Parameterizing all hipblasLtMatrixLayoutCreate() calls with the
-  //      runtime data type instead of hard-coded HIP_R_16F.
-  //   2. Templating the custom HIP kernels on the element type so they can
-  //      handle float / __hip_bfloat16 in addition to __half.
-  //   3. Adjusting workspace layout sizing for 4-byte (or other) elements.
-  if (element_size_bytes != 2) {
+  // The decomposed hipBLASLt GQA pipeline supports fp16 (elem_size=2) and
+  // fp32 (elem_size=4): GEMM matrix layouts are created with the runtime data
+  // type (gemm_fp32), the data-movement custom kernels (rope / append / concat
+  // / transpose / expand / split) dispatch on element_size_bytes, and softmax
+  // writes fp16 or fp32 probabilities to match. The fp32 path is used by
+  // Whisper's no_causal attention (encoder self-attn + decoder cross-attn),
+  // which is forced down the decomposed path. The fused / flash decode kernels
+  // (Llama / gpt-oss) remain FP16-only; no_causal never reaches them. BF16 is
+  // not yet supported.
+  if (element_size_bytes != 2 && element_size_bytes != 4) {
     fprintf(stderr,
             "wrap_group_query_attention: hipBLASLt pipeline requires "
-            "FP16 (elem_size=2), got %lld\n",
+            "FP16 (elem_size=2) or FP32 (elem_size=4), got %lld\n",
             (long long)element_size_bytes);
     return -1;
   }
@@ -1393,7 +1539,7 @@ int wrap_group_query_attention(
       seqlens_k, cos_cache, sin_cache, head_sink, has_smooth_softmax, output,
       present_key, present_value, batch_size, seq_len_q, seq_len_kv,
       past_buf_seq, num_heads, kv_num_heads, head_dim, scale, do_rotary,
-      local_window_size);
+      local_window_size, no_causal != 0, element_size_bytes, op_state_slot);
 
   if (rc != 0) {
     fprintf(stderr, "wrap_group_query_attention: gqa_forward failed (rc=%d)\n",
@@ -1406,11 +1552,8 @@ int wrap_group_query_attention(
   return rc;
 }
 
-void hipdnn_ep_gqa_gemm_cache_destroy(void *cache_ptr) {
-  auto *cache = static_cast<GqaGemmCache *>(cache_ptr);
-  if (!cache)
-    return;
-  for (auto &[k, e] : cache->entries) {
+GqaGemmCache::~GqaGemmCache() {
+  for (auto &[k, e] : entries) {
     if (e.layD)
       hipblasLtMatrixLayoutDestroy(e.layD);
     if (e.layC)
@@ -1422,5 +1565,12 @@ void hipdnn_ep_gqa_gemm_cache_destroy(void *cache_ptr) {
     if (e.desc)
       hipblasLtMatmulDescDestroy(e.desc);
   }
-  delete cache;
+}
+
+// Construct this GQA instance's op-state slot (see op-state-slots-design.md).
+// No compile-time params: the descriptor cache fills lazily per GEMM shape. The
+// construct fn stores the state into op_states[slot] itself.
+extern "C" int8_t hipdnn_ep_op_state_construct_gqa(RuntimeState *state,
+                                                   int32_t slot) {
+  return GqaState::create(state, slot);
 }

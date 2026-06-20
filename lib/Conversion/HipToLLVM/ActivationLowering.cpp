@@ -80,10 +80,10 @@ lowerMiopenActivation(OpType op, typename OpType::Adaptor adaptor,
   Value dataTypeVal = createI64Const(dataType);
   Value activationModeVal = createI64Const(activationMode);
 
-  // int wrap_miopenActivationForward(RuntimeState* state, void* input,
-  //     void* output, int64_t num_elements, int64_t data_type,
+  // int wrap_miopenActivationForward(RuntimeState* state, int op_state_slot,
+  //     void* input, void* output, int64_t num_elements, int64_t data_type,
   //     int64_t activation_mode)
-  SmallVector<Type, 6> paramTypes = {ptrType, ptrType, ptrType,
+  SmallVector<Type, 7> paramTypes = {ptrType, i32Type, ptrType, ptrType,
                                      i64Type, i64Type, i64Type};
 
   FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -91,8 +91,11 @@ lowerMiopenActivation(OpType op, typename OpType::Adaptor adaptor,
   if (failed(funcOp))
     return failure();
 
-  SmallVector<Value, 6> args = {statePtr,    inputPtr,    outputPtr,
-                                numElements, dataTypeVal, activationModeVal};
+  SmallVector<Value, 7> args = {
+      statePtr,         getOpStateSlotValue(op, rewriter, loc),
+      inputPtr,         outputPtr,
+      numElements,      dataTypeVal,
+      activationModeVal};
 
   LLVM::CallOp::create(rewriter, loc, *funcOp, args);
   rewriter.eraseOp(op);
@@ -114,6 +117,20 @@ struct SigmoidOpLowering : public ConvertOpToLLVMPattern<SigmoidOp> {
                   ConversionPatternRewriter &rewriter) const override {
     return lowerMiopenActivation<SigmoidOp, kActivationSigmoid>(op, adaptor,
                                                                 rewriter);
+  }
+};
+
+// hip.tanh(ctx, x, y)
+//   -> wrap_miopenActivationForward(state, x, y, num_elements,
+//                                    data_type, activation_mode=TANH)
+struct TanhOpLowering : public ConvertOpToLLVMPattern<TanhOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(TanhOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    return lowerMiopenActivation<TanhOp, kActivationTanh>(op, adaptor,
+                                                          rewriter);
   }
 };
 
@@ -219,6 +236,88 @@ struct GeluOpLowering : public ConvertOpToLLVMPattern<GeluOp> {
   }
 };
 
+// hip.leaky_relu(ctx, input, output)
+//   -> wrap_leaky_relu(state, input, output, num_elements, data_type, alpha)
+// Uses custom HIP kernel (hip_leaky_relu).
+// Supports static and dynamic shapes (computes num_elements at runtime).
+// Supports data types: f32, f16, f64.
+struct LeakyReluOpLowering : public ConvertOpToLLVMPattern<LeakyReluOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(LeakyReluOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+    Type f64Type = rewriter.getF64Type();
+
+    auto createI64Const = [&](int64_t value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+
+    Value statePtr = adaptor.getCtx();
+    Value inputPtr =
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
+
+    auto outputType = cast<MemRefType>(op.getOutput().getType());
+
+    // Compute num_elements (supports dynamic shapes)
+    Value numElements = createI64Const(1);
+    MemRefDescriptor outputDesc(adaptor.getOutput());
+
+    for (auto dimIdx : llvm::seq<int64_t>(outputType.getRank())) {
+      Value dimSize;
+      if (outputType.isDynamicDim(dimIdx)) {
+        dimSize = outputDesc.size(rewriter, loc, dimIdx);
+      } else {
+        dimSize = createI64Const(outputType.getDimSize(dimIdx));
+      }
+      numElements = LLVM::MulOp::create(rewriter, loc, numElements, dimSize);
+    }
+
+    Type elemType = outputType.getElementType();
+    int64_t dataType = getHipdnnDataType(elemType);
+
+    if (dataType != 0 && dataType != 1 && dataType != 6) {
+      std::string errorMsg;
+      llvm::raw_string_ostream os(errorMsg);
+      os << "unsupported element type '" << elemType
+         << "' for LeakyRelu. Only f32, f16, and f64 are supported";
+      return rewriter.notifyMatchFailure(op, os.str());
+    }
+
+    Value dataTypeVal = createI64Const(dataType);
+
+    double alphaVal = op.getAlpha().convertToDouble();
+    Value alphaConst = LLVM::ConstantOp::create(
+        rewriter, loc, f64Type, rewriter.getF64FloatAttr(alphaVal));
+
+    // int wrap_leaky_relu(RuntimeState* state, void* input, void* output,
+    //                     int64_t num_elements, int64_t data_type, double
+    //                     alpha)
+    SmallVector<Type, 6> paramTypes = {ptrType, ptrType, ptrType,
+                                       i64Type, i64Type, f64Type};
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapLeakyRelu, paramTypes, i32Type);
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value, 6> args = {statePtr,    inputPtr,    outputPtr,
+                                  numElements, dataTypeVal, alphaConst};
+
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 // hip.silu(handle, input, output)
 struct SiluOpLowering : public ConvertOpToLLVMPattern<SiluOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -297,8 +396,9 @@ struct MiopenSoftmaxOpLowering
 
 void populateActivationLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns) {
-  patterns.add<SigmoidOpLowering, SoftplusOpLowering, GeluOpLowering,
-               SiluOpLowering, MiopenSoftmaxOpLowering>(converter);
+  patterns.add<SigmoidOpLowering, TanhOpLowering, SoftplusOpLowering,
+               GeluOpLowering, LeakyReluOpLowering, SiluOpLowering,
+               MiopenSoftmaxOpLowering>(converter);
 }
 
 } // namespace hip

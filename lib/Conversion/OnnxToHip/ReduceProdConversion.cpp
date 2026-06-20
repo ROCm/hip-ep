@@ -159,8 +159,6 @@ ReduceProdToHip::matchAndRewrite(mlir::Operation *op,
 
   mlir::Location loc = op->getLoc();
   mlir::Value data = op->getOperand(0);
-  auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 
   int64_t noopWithEmptyAxes = 0;
   if (auto noopAttr =
@@ -205,14 +203,23 @@ ReduceProdToHip::matchAndRewrite(mlir::Operation *op,
         mlir::arith::ConstantOp::create(rewriter, loc, axesType, axesAttr);
   }
 
+  // Resolve the result type (infer if the importer left it unranked). axesKnown
+  // also covers the compile-time-constant axes-operand case extracted above.
+  auto resultTypeOr =
+      inferReduceResultType(op, data, axesVec, axesKnown, keepdims);
+  if (mlir::failed(resultTypeOr))
+    return rewriter.notifyMatchFailure(
+        op, "ReduceProd: cannot infer unranked result (need ranked input and "
+            "static axes)");
+  mlir::RankedTensorType resultType = *resultTypeOr;
+
   mlir::Value init = buildReduceProdInit(rewriter, loc, resultType, data,
                                          axesVec, axesKnown, keepdims);
 
   auto keepdimsAttr = rewriter.getI64IntegerAttr(keepdims);
   auto noopAttr = rewriter.getI64IntegerAttr(noopWithEmptyAxes);
-  auto hipOp = mlir::hip::ReduceProdOp::create(rewriter, loc, resultType,
-                                               context, data, axesOperand, init,
-                                               keepdimsAttr, noopAttr);
+  auto hipOp = mlir::hip::ReduceProdOp::create(
+      rewriter, loc, context, data, axesOperand, init, keepdimsAttr, noopAttr);
 
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();

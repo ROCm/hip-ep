@@ -23,8 +23,32 @@ int wrap_transpose(RuntimeState *state, const void *input, void *output,
         return std::string(b);
       },
       state);
+  // Empty transpose is a no-op (NonZero count=0 → [3,0] indices in embedding).
+  if (num_elements <= 0)
+    return 0;
+
   if (!state || !input || !output || !input_shape || !perm) {
-    RUNTIME_DEBUG_LOG("[REAL] wrap_transpose: null argument\n");
+    RUNTIME_DEBUG_LOG(
+        "[REAL] wrap_transpose: null argument (state=%p input=%p output=%p "
+        "input_shape=%p perm=%p rank=%lld num=%lld elem=%lld)\n",
+        (void *)state, input, output, (const void *)input_shape,
+        (const void *)perm, (long long)rank, (long long)num_elements,
+        (long long)element_size_bytes);
+    if (input_shape && rank > 0 && rank <= 8) {
+      fprintf(stderr, "  input_shape=[");
+      for (int64_t i = 0; i < rank; ++i)
+        fprintf(stderr, "%lld%s", (long long)input_shape[i],
+                i + 1 == rank ? "" : ",");
+      fprintf(stderr, "]");
+      if (perm) {
+        fprintf(stderr, "  perm=[");
+        for (int64_t i = 0; i < rank; ++i)
+          fprintf(stderr, "%lld%s", (long long)perm[i],
+                  i + 1 == rank ? "" : ",");
+        fprintf(stderr, "]");
+      }
+      fprintf(stderr, "\n");
+    }
     return -1;
   }
   if (rank <= 0) {

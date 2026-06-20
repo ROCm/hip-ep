@@ -35,6 +35,13 @@
 //   i1-true and forces `cond_is_passthrough` so the runtime takes the fast
 //   counted-loop path -- matches ONNX spec where missing cond means M is the
 //   only termination condition
+// - When v_init's operand type is more refined than the source onnx.Loop body
+//   block v_in arg (canonical case: importer emits `tensor<*xT>` for body
+//   block args inside Loop subgraphs), v_carry types on the outlined body
+//   func's entry block AND the `hip.loop` result types both come from v_init
+//   -- the outliner does not propagate the under-refined block arg type
+//   through. Refinement of the cloned body ops is left for `--hip-infer-shapes`
+//   post-conversion (see `docs/design/unranked-tensor-handling.md`)
 // ============================================================================
 
 // RUN: hip-mlir-opt --hip-add-context-arg --onnx-loop-outline --split-input-file %s | FileCheck %s
@@ -177,7 +184,9 @@ module {
 // synthesizes `arith.constant true : i1` for hip.loop's cond_init and
 // forces `cond_is_passthrough` -- the LLVM lowering then picks the fast
 // path `hipdnn_ep_run_counted_loop`, identical to a dynamically-detected
-// passthrough case.  Matches Qwen3.5 vision encoder loop topology.
+// passthrough case.  Matches the canonical HF vision-encoder counted-
+// attention-loop topology (Loop with no cond_init, fixed trip count
+// from the encoder depth, body is one iter of attention).
 module {
   func.func @main_graph_no_cond(%A: tensor<16xf32>, %B: tensor<16xf32>) -> tensor<16xf32> {
     %M = "onnx.Constant"() {value = dense<4> : tensor<i64>} : () -> tensor<i64>
@@ -212,4 +221,130 @@ module {
   //
   // CHECK: %[[ADD:.*]] = "onnx.Add"(%[[V_IN]], %[[CAP]])
   // CHECK: return %[[ADD]] : tensor<16xf32>
+}
+
+// -----
+
+// Test 5: outline-time v_init plumbing.  When the v_init operand carries
+// a more-refined type than the source onnx.Loop body block v_in arg
+// (canonical case: importer emits `tensor<*xT>` for body block args
+// inside a Loop subgraph because ONNX shape inference does not recurse
+// into Loop bodies, while the v_init feeding the loop from the outer
+// graph carries the importer-derived rank), the outliner must source
+// the v_carry entry arg from v_init -- NOT from the body block arg.
+// Both invariants below are required for the loop verifier
+// (`hip.loop result_type[i] == v_init[i].type`) and for the LLVM
+// lowering's trampoline construction, which reads the body func
+// argument types directly to build per-arg memref descriptor structs
+// (see LoopLowering.cpp:155 and `inference_compute`'s call boundary).
+// Refinement of the cloned body ops' types happens later in the
+// pipeline via `--hip-infer-shapes`; this test pins only what
+// LoopOutline itself produces.
+module {
+  func.func @main_graph_v_init_refined(%A: tensor<16xf32>) -> tensor<16xf32> {
+    %M = "onnx.Constant"() {value = dense<4> : tensor<i64>} : () -> tensor<i64>
+    %cond_init = "onnx.Constant"() {value = dense<1> : tensor<i1>} : () -> tensor<i1>
+    %v_final = "onnx.Loop"(%M, %cond_init, %A) ({
+    ^bb0(%iter: tensor<i64>, %cond_in: tensor<i1>, %acc_in: tensor<?xf32>):
+      %acc_out = "onnx.Identity"(%acc_in) : (tensor<?xf32>) -> tensor<?xf32>
+      %cond_out = "onnx.Identity"(%cond_in) : (tensor<i1>) -> tensor<i1>
+      "onnx.Yield"(%cond_out, %acc_out) : (tensor<i1>, tensor<?xf32>) -> ()
+    }) : (tensor<i64>, tensor<i1>, tensor<16xf32>) -> tensor<16xf32>
+    return %v_final : tensor<16xf32>
+  }
+
+  // CHECK-LABEL: func.func @main_graph_v_init_refined
+  // hip.loop.result_type derived from v_init (tensor<16xf32>), not from
+  // the under-refined onnx.Loop body output (tensor<?xf32>).
+  // CHECK: %[[R:.*]] = hip.loop
+  // CHECK-SAME: iter_args(%{{.*}} : tensor<16xf32>)
+  // CHECK-SAME: -> (tensor<16xf32>)
+  // CHECK-SAME: body @main_graph_v_init_refined_loop_body_n0
+  // CHECK: return %[[R]] : tensor<16xf32>
+  //
+  // Body func arg slot 3 (v_carry) has the REFINED v_init type
+  // (tensor<16xf32>), not the under-refined body block v_in arg type
+  // (tensor<?xf32>). The body func's declared return type matches the
+  // cloned onnx.Identity result type as written in the source IR
+  // (tensor<?xf32>); refinement to tensor<16xf32> happens later via
+  // `--hip-infer-shapes` and is not part of LoopOutline's contract.
+  // CHECK-LABEL: func.func private @main_graph_v_init_refined_loop_body_n0
+  // CHECK-SAME: (%{{.*}}: !hip.context,
+  // CHECK-SAME:  %{{.*}}: tensor<i64>,
+  // CHECK-SAME:  %{{.*}}: tensor<i1>,
+  // CHECK-SAME:  %[[V_IN:.*]]: tensor<16xf32>) -> tensor<?xf32>
+}
+
+// -----
+
+// Test 6: regression closure for the canonical Loop-body shape gap.
+//
+// Source pattern lifted from a real HF vision-encoder ONNX export with
+// an `onnx.Loop` whose body terminates in a Concat of the v_carry
+// block arg and a captured rank-3 tensor. The importer's shape
+// inference has no per-iter rank for the body block arg (no caller
+// has visited the loop yet at import time), so it emits
+// `tensor<*xf16>` (unranked) for that arg and for every body-internal
+// value derived from it. The `onnx.Loop`'s declared result type, by
+// contrast, mirrors the v_init operand fed in from the outer graph
+// (rank-3 dynamic).
+//
+// Pre-fix, OnnxLoopOutlinePass took `loopOp->getResultTypes()`
+// verbatim for hip.loop's result types when the source onnx.Loop's
+// declared result was rank-0 / unranked, and the loop verifier
+// (correctly) rejected:
+//
+//   error: 'hip.loop' op result type #0 ('tensor<*xf16>') must match
+//          v_init type #0 ('tensor<?x?x?xf16>')
+//
+// Post-fix: hip.loop result types come from `LoopOp::inferReturnTypes`
+// (reads v_init); the outlined body func's v_carry arg slot comes
+// from v_init too. The cloned `onnx.Concat` still carries its source
+// unranked result type at outline-pass exit -- that's refined to
+// ranked post-conversion by `--hip-infer-shapes` via
+// `ReifyRankedShapedTypeOpInterface`. This test pins only the
+// outline-time invariants.
+module {
+  func.func @vision_encoder_loop(%attn_in: tensor<?x?x?xf16>,
+                                 %M: tensor<i64>,
+                                 %newshape: tensor<4xi64>)
+      -> tensor<1x?x16x72xf16> {
+    %cond_init = "onnx.NoValue"() {value} : () -> none
+    %r = "onnx.Loop"(%M, %cond_init, %attn_in) ({
+    ^bb0(%iter: tensor<i64>, %cond_in: tensor<ui8>, %acc: tensor<*xf16>):
+      %step = "onnx.Concat"(%acc, %attn_in) {axis = 1 : si64}
+              : (tensor<*xf16>, tensor<?x?x?xf16>) -> tensor<*xf16>
+      %cond_out = "onnx.Identity"(%cond_in) : (tensor<ui8>) -> tensor<ui8>
+      "onnx.Yield"(%cond_out, %step) : (tensor<ui8>, tensor<*xf16>) -> ()
+    }) : (tensor<i64>, none, tensor<?x?x?xf16>) -> tensor<*xf16>
+    %y = "onnx.Reshape"(%r, %newshape) {allowzero = 0 : si64}
+         : (tensor<*xf16>, tensor<4xi64>) -> tensor<1x?x16x72xf16>
+    return %y : tensor<1x?x16x72xf16>
+  }
+
+  // CHECK-LABEL: func.func @vision_encoder_loop
+  //
+  // hip.loop's result type is sourced from v_init via
+  // `LoopOp::inferReturnTypes`. Without that, the unranked source
+  // result type would flow through and the loop verifier would reject.
+  // CHECK: %[[R:.*]] = hip.loop
+  // CHECK-SAME: iter_args(%{{.*}} : tensor<?x?x?xf16>)
+  // CHECK-SAME: -> (tensor<?x?x?xf16>)
+  // CHECK-SAME: cond_is_passthrough
+  //
+  // Body func arg slot 3 (v_carry) is the rank-3 v_init type, NOT the
+  // unranked type the original onnx.Loop body block declared for
+  // %acc. The cloned onnx.Concat keeps its source unranked result
+  // type; the body func's declared return type matches. Refinement
+  // happens later via `--hip-infer-shapes`.
+  // CHECK-LABEL: func.func private @vision_encoder_loop_loop_body_n0
+  // CHECK-SAME: (%{{.*}}: !hip.context,
+  // CHECK-SAME:  %{{.*}}: tensor<i64>,
+  // CHECK-SAME:  %{{.*}}: tensor<ui8>,
+  // CHECK-SAME:  %{{.*}}: tensor<?x?x?xf16>,
+  // CHECK-SAME:  %{{.*}}: tensor<?x?x?xf16>) -> tensor<*xf16>
+  //
+  // CHECK: %[[CONCAT:.*]] = "onnx.Concat"
+  // CHECK-SAME: -> tensor<*xf16>
+  // CHECK: return %[[CONCAT]] : tensor<*xf16>
 }

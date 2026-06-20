@@ -94,7 +94,7 @@ struct GatherNDToHip : public mlir::RewritePattern {
                                       resultType.getElementType(), dynSizes);
 
     auto hipOp = mlir::hip::GatherNDOp::create(
-        rewriter, loc, resultType, context, data, indices, init,
+        rewriter, loc, context, data, indices, init,
         rewriter.getI64IntegerAttr(batchDims));
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();

@@ -18,7 +18,7 @@
 #include "InferenceState.h"
 
 // HIPDNN_EP_PERF instrumentation dependencies
-#ifndef BUILD_MOCK_RUNTIME
+#ifdef HIPDNN_EP_LINK_HIP_HOST
 #include <hip/hip_runtime_api.h>
 #endif
 #include <algorithm>
@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 // Environment parameters (global scope, before namespace)
@@ -201,57 +202,22 @@ static std::vector<int> build_output_index_map(
   return map;
 }
 
-// Precompute, for each metadata output, the compiler-input index of the
-// matching past_key_values input (or -1 if the output is not a `present.*`
-// tensor / no matching past input was found). Built once at MlirCustomOp
-// construction so the per-inference shape-override path is O(1) per output
-// instead of an O(N×M) name-string scan on the decode hot path.
-//
-// TODO (follow-up PR): replace this name-based heuristic with explicit
-// past↔present pairs serialized into the model_metadata ProtoBuf.  The
-// emission point is the compiler-side MLIR pipeline (which has hip.gqa
-// ops with past_key/present_key SSA values) -- NOT the Level-1 pass,
-// which only sees the OrtGraph and would need a parallel GQA-node walker.
-// The proposed schema adds `repeated PresentToPast pairs` to Metadata,
-// emitted by an MLIR pass walking hip.gqa operands, and consumed here in
-// place of (or as an override for) the name-based string match.  The
-// name match works for OGA-exported models (the only flavor we ship
-// today) but assumes the `past_key_values.N.K` ↔ `present.N.K` naming
-// convention, which is brittle to future exporters.
-static std::vector<int> build_present_to_past_input_idx(
-    const google::protobuf::RepeatedPtrField<mlir_metadata::Output> &outputs,
-    const google::protobuf::RepeatedPtrField<mlir_metadata::Input> &inputs) {
-  std::unordered_map<std::string, int> input_name_to_idx;
-  input_name_to_idx.reserve(inputs.size());
-  for (int i = 0; i < inputs.size(); ++i)
-    input_name_to_idx.emplace(inputs[i].name(), i);
-
-  std::vector<int> result(outputs.size(), -1);
-  for (int i = 0; i < outputs.size(); ++i) {
-    const std::string &name = outputs[i].name();
-    if (name.size() < 9 || name.substr(0, 8) != "present.")
-      continue;
-    std::string past_name = "past_key_values." + name.substr(8);
-    auto it = input_name_to_idx.find(past_name);
-    if (it != input_name_to_idx.end())
-      result[i] = it->second;
-  }
-  return result;
-}
-
 // Marshal output tensors from ORT context using metadata outputs.
 // output_index_map maps from metadata output index (= DLL output index) to
 // the ORT kernel context output index.
-// For dynamic shapes (dim == -1 in metadata), resolves the actual dimension
-// value from the corresponding input tensor using DimSource references.
-// present_to_past_input_idx is precomputed at MlirCustomOp construction;
-// entry is -1 for outputs that are not `present.*` tensors.
+//
+// Classic ABI only (use_output_allocator=0): every output shape in the
+// metadata is fully static. Dynamic output dims (and the runtime DimSource
+// resolution / OGA shared-KV-buffer override that classic mode once used to
+// size them) were removed when the output-allocator ABI became the default --
+// allocator mode sizes dynamic outputs in-graph via output_allocate_cb and
+// never calls this function. The compiler rejects a dynamic output dim in
+// classic mode at build time (see build_metadata_json), so a -1 surviving to
+// here indicates a metadata/compiler bug and aborts.
 TensorData marshal_output_tensors(
     OrtKernelContext *context,
     const google::protobuf::RepeatedPtrField<mlir_metadata::Output> &outputs,
-    const std::vector<int> &output_index_map,
-    const std::vector<int> &input_index_map,
-    const std::vector<int> &present_to_past_input_idx) {
+    const std::vector<int> &output_index_map) {
   if (outputs.size() == 0) {
     LOG(FATAL) << "No output shapes in metadata";
   }
@@ -268,98 +234,12 @@ TensorData marshal_output_tensors(
     data.shapes[i].assign(output_meta.shape().begin(),
                           output_meta.shape().end());
 
-    // Resolve dynamic dims (-1) using DimSource entries from metadata.
-    // Each DimSource with resolved=true says "this output dim equals
-    // input[X].shape[Y]". Static dims and unresolved dynamic dims have
-    // resolved=false and are left alone here (the post-loop CHECK below
-    // will catch any unresolved dynamic dim that survives).
-    for (int d = 0; d < static_cast<int>(data.shapes[i].size()); ++d) {
-      if (data.shapes[i][d] != -1)
-        continue;
-      if (d >= output_meta.dim_sources_size())
-        continue;
-      const auto &ds = output_meta.dim_sources(d);
-      if (!ds.resolved())
-        continue;
-      int src_input = ds.input_idx();
-      int src_dim = ds.dim_idx();
-      CHECK(src_input >= 0 &&
-            src_input < static_cast<int>(input_index_map.size()))
-          << "Output '" << output_meta.name() << "' dim " << d
-          << ": DimSource references input " << src_input << " but only "
-          << input_index_map.size() << " inputs are mapped";
-      int ort_input_idx = input_index_map[src_input];
-      auto src_tensor = ctx.GetInput(ort_input_idx);
-      auto src_shape = src_tensor.GetTensorTypeAndShapeInfo().GetShape();
-      CHECK(src_dim >= 0 && src_dim < static_cast<int>(src_shape.size()))
-          << "Output '" << output_meta.name() << "' dim " << d
-          << ": DimSource references input[" << src_input << "] dim " << src_dim
-          << " but that input has rank " << src_shape.size();
-      data.shapes[i][d] = src_shape[src_dim];
-    }
-
-    // OGA's past_present_share_buffer binds the same OrtValue to both
-    // past_key (input) and present_key (output). DimSource may resolve
-    // present_key's seq dim from attention_mask (tight shape, e.g. 7) instead
-    // of the pre-allocated buffer size (e.g. 128). Override from the matching
-    // past input's actual shape BEFORE GetOutput so ORT returns the pre-
-    // allocated buffer (preserving pointer identity for in-place GQA append).
-    //
-    // Heuristic gating: "past dim is strictly larger than DimSource result"
-    // is the proxy for shared-buffer mode here.  Reliable in practice for
-    // OGA (past = max_length pre-allocated, DimSource resolves to tight
-    // current length), but a future model with non-shared buffers and a
-    // past_total > current_total (e.g. historical context that legitimately
-    // shrinks) would misfire this heuristic.  TODO: replace the heuristic
-    // with an explicit `past_present_share_buffer` attribute plumbed from
-    // the ONNX GQA node into the model_metadata; gate the override on the
-    // attribute rather than on the per-dim shape comparison.
-    int past_idx = (i < static_cast<int>(present_to_past_input_idx.size()))
-                       ? present_to_past_input_idx[i]
-                       : -1;
-    if (past_idx >= 0 && past_idx < static_cast<int>(input_index_map.size())) {
-      int ort_past_idx = input_index_map[past_idx];
-      auto past_tensor = ctx.GetInput(ort_past_idx);
-      auto past_shape = past_tensor.GetTensorTypeAndShapeInfo().GetShape();
-      if (past_shape.size() != data.shapes[i].size()) {
-        MY_LOG(2) << "Output[" << i << "] '" << output_meta.name()
-                  << "': share-buffer override skipped (rank mismatch: past="
-                  << past_shape.size() << " vs out=" << data.shapes[i].size()
-                  << ")";
-      } else {
-        // Only override dimensions that were dynamic (-1) in the compiled
-        // metadata.  Static dims are architecture constants (batch=1,
-        // num_heads, head_dim) and must never change — restricting the
-        // override to dynamic dims prevents accidental corruption.
-        bool overridden = false;
-        bool any_dynamic = false;
-        for (int d = 0; d < static_cast<int>(past_shape.size()); ++d) {
-          if (output_meta.shape(d) != -1)
-            continue;
-          any_dynamic = true;
-          if (past_shape[d] > data.shapes[i][d]) {
-            data.shapes[i][d] = past_shape[d];
-            overridden = true;
-          }
-        }
-        if (overridden) {
-          MY_LOG(2) << "Output[" << i << "] '" << output_meta.name()
-                    << "': overrode dynamic dims from past input shape";
-        } else if (any_dynamic) {
-          MY_LOG(2) << "Output[" << i << "] '" << output_meta.name()
-                    << "': share-buffer override skipped (past not larger "
-                       "than DimSource — non-shared-buffer mode or pre-grow)";
-        }
-      }
-    }
-
     for (int d = 0; d < static_cast<int>(data.shapes[i].size()); ++d) {
       CHECK(data.shapes[i][d] >= 0)
           << "Output '" << output_meta.name() << "' dim " << d
-          << " is still dynamic (-1) after DimSource resolution. "
-          << "This means the compiler emitted no resolvable DimSource and "
-          << "no past-input override fired. Check that the dynamic dim has "
-          << "a dim_param shared with at least one input.";
+          << " is dynamic (-1) in classic ABI metadata. Classic mode supports "
+          << "only static output shapes; this model must be compiled with the "
+          << "output allocator (the default ABI).";
     }
 
     int ort_idx = output_index_map[i];
@@ -449,6 +329,25 @@ std::vector<uint8_t> load_artifact_from_epcontext(
   MY_LOG(1) << "Loaded artifact: " << total_read << " bytes";
   return artifact_bytes;
 }
+
+// Decide which loader the EP should use for this artifact. The format is
+// recorded in the EPContext metadata by the compiler (artifact_format), which
+// always sets it (see pass_main.cpp); an empty/unknown value means a malformed
+// or pre-PR EPContext and is fatal here rather than mis-loaded.
+customop::ArtifactKind determine_artifact_kind(const std::string &format_str) {
+  customop::ArtifactKind kind;
+  if (!customop::artifactKindFromFormat(format_str, kind)) {
+    LOG(FATAL) << "EPContext metadata has empty/unknown artifact_format='"
+               << format_str << "'; expected '"
+               << customop::kArtifactFormatLlvmIr << "' or '"
+               << customop::kArtifactFormatNative << "'.";
+  }
+
+  MY_LOG(1) << "Artifact loader: "
+            << (kind == customop::ArtifactKind::NATIVE ? "native (Plugin)"
+                                                       : "LLVM IR (JIT)");
+  return kind;
+}
 } // anonymous namespace
 
 // ============================================================================
@@ -473,7 +372,8 @@ std::vector<uint8_t> load_artifact_from_epcontext(
 // Interpretation grid for the decode gap vs llama.cpp Vulkan:
 //   compute_cpu >> gpu       -> host dispatch / launch overhead dominates
 //                               (per-kernel hipLaunchKernel cost, bitcode
-//                               trampolines, or glue code in model.dll)
+//                               trampolines, or glue code in the JITted
+//                               per-model module)
 //   fence_residual >> 0      -> compute() is queueing async GPU work; the
 //                               host returns early and we under-count GPU
 //                               per call
@@ -483,13 +383,19 @@ std::vector<uint8_t> load_artifact_from_epcontext(
 //                               attention, etc.)
 //
 // Overhead when disabled: ~0 (single branch on a cached bool).
-// Overhead when enabled:  ~25us/call (hipEventCreate+Record+Sync+Destroy +
-//   one hipDeviceSynchronize + one fprintf) - negligible vs decode cost.
+// Overhead when enabled:  small per-call cost dominated by the
+//   hipDeviceSynchronize fence at the end of the timing block and the
+//   per-Compute fprintf line. hipEventCreate/Destroy is now amortized
+//   (events are session-scoped, lazy-allocated on first perf-enabled
+//   Compute), and the events themselves are created with
+//   hipEventDisableSystemFence so record() does not issue a system-scope
+//   acquire/release fence -- both wasted work for events we only read
+//   after the device-wide sync.
 // ============================================================================
 namespace {
 
 bool perf_enabled() {
-#ifdef BUILD_MOCK_RUNTIME
+#ifndef HIPDNN_EP_LINK_HIP_HOST
   return false;
 #else
   static const bool enabled = [] {
@@ -575,6 +481,85 @@ PerfCollector g_perf_collector;
 
 PerfCollector &perf_collector() { return g_perf_collector; }
 
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+// Per-Compute() HIPDNN_EP_PERF timer, shared by the classic and
+// output-allocator dispatch paths so the event lifecycle and PerfSample
+// assembly live in one place. Brackets the GPU work with a session-lifetime
+// event pair (owned by MlirCustomOp, lazily created here, released in its
+// destructor) and times the host phases with steady_clock.
+//
+// Usage: construct after begin-of-Compute, record_start() right before the
+// inference dispatch, record_stop() right after it returns, then populate the
+// host-phase fields on a PerfSample (they differ per path) and call finish(),
+// which fences the device, reads GPU elapsed time, fills wall/gpu/
+// fence_residual, and records the sample. Only construct when perf is enabled
+// (the disabled path must stay allocation- and timing-free).
+class EpPerfTimer {
+public:
+  using clock = std::chrono::steady_clock;
+
+  static double ms(clock::time_point a, clock::time_point b) {
+    return std::chrono::duration<double, std::milli>(b - a).count();
+  }
+
+  // start_slot / stop_slot are MlirCustomOp's mutable void* event handles.
+  // They are created once (on the first perf-enabled Compute()) and reused;
+  // t_enter is captured after creation so the one-time cost is excluded.
+  EpPerfTimer(void *&start_slot, void *&stop_slot, hipStream_t stream)
+      : stream_(stream) {
+    if (!start_slot) {
+      // hipEventDisableSystemFence: see op_profile.cpp
+      // (op_profile_acquire_event_pair) for the canonical rationale and
+      // guardrail. Safe here -- elapsed time is read only after the
+      // hipDeviceSynchronize() in finish().
+      hipEvent_t a = nullptr, b = nullptr;
+      (void)hipEventCreateWithFlags(&a, hipEventDisableSystemFence);
+      (void)hipEventCreateWithFlags(&b, hipEventDisableSystemFence);
+      start_slot = static_cast<void *>(a);
+      stop_slot = static_cast<void *>(b);
+    }
+    start_ = static_cast<hipEvent_t>(start_slot);
+    stop_ = static_cast<hipEvent_t>(stop_slot);
+    t_enter_ = clock::now();
+  }
+
+  clock::time_point t_enter() const { return t_enter_; }
+  clock::time_point t_after_compute() const { return t_after_compute_; }
+
+  // HIP error codes are intentionally discarded: a failure here only corrupts
+  // diagnostic numbers, never the inference result (the (void) cast also
+  // silences MSVC C4834 on the [[nodiscard]] return).
+  void record_start() { (void)hipEventRecord(start_, stream_); }
+  void record_stop() {
+    t_after_compute_ = clock::now();
+    (void)hipEventRecord(stop_, stream_);
+  }
+
+  // Closes the timing window: fences the device (the residual measures async
+  // work still queued after the dispatch returned), reads GPU elapsed time,
+  // fills the device-side fields on the caller-populated sample, and records
+  // it. The caller must have set the marshal_*/compute_cpu fields first.
+  void finish(PerfSample &s) {
+    (void)hipDeviceSynchronize();
+    const auto t_after_fence = clock::now();
+    float gpu_ms = 0.0f;
+    (void)hipEventSynchronize(stop_);
+    (void)hipEventElapsedTime(&gpu_ms, start_, stop_);
+    s.wall_ms = ms(t_enter_, t_after_fence);
+    s.gpu_ms = static_cast<double>(gpu_ms);
+    s.fence_residual_ms = ms(t_after_compute_, t_after_fence);
+    perf_collector().record(s);
+  }
+
+private:
+  hipStream_t stream_ = nullptr;
+  hipEvent_t start_ = nullptr;
+  hipEvent_t stop_ = nullptr;
+  clock::time_point t_enter_;
+  clock::time_point t_after_compute_;
+};
+#endif // HIPDNN_EP_LINK_HIP_HOST
+
 // Dumps the summary at DLL unload.  See ordering note above.
 struct PerfSummaryPrinter {
   ~PerfSummaryPrinter() {
@@ -584,6 +569,136 @@ struct PerfSummaryPrinter {
   }
 };
 PerfSummaryPrinter g_perf_printer;
+
+// ===========================================================================
+// Output-allocator mode (2-arg inference_compute) plumbing.
+//
+// In allocator mode the DLL receives no pre-filled outputs span. Instead
+// main_graph calls hipdnn_ep_alloc_output(out_idx, shape, rank, elem_size) for
+// each graph output once its runtime shape is known; the runtime forwards to
+// the callback the EP installed. The callback maps out_idx -> ORT output, asks
+// ORT for the buffer at the DLL's in-graph shape, and returns a pointer the DLL
+// writes into:
+//   * GPU (aliased) output -> ORT's GPU-accessible pointer (zero-copy).
+//   * host (CPU) output    -> an EP-owned GPU scratch pointer; Compute()
+//                             D2H-copies it into ORT's host buffer afterwards.
+// ===========================================================================
+
+// One deferred device->host copy for a host (CPU) output.
+struct PendingD2H {
+  void *gpu_src;  // EP GPU scratch the DLL wrote into
+  void *host_dst; // ORT host output buffer
+  size_t nbytes;
+};
+
+// Per-Compute() context passed to the C callback via output_allocator_t.self.
+// Lives on compute_with_output_allocator's stack for the duration of the 2-arg
+// inference_compute; the allocator is cleared on the RuntimeState before it
+// goes out of scope so `self` can never dangle.
+struct OutputAllocatorCtx {
+  Ort::KernelContext *ctx = nullptr;
+  const google::protobuf::RepeatedPtrField<mlir_metadata::Output> *outputs =
+      nullptr;
+  const std::vector<int> *output_index_map = nullptr;
+  // Borrowed from the MlirCustomOp instance (grow-on-demand, reused across
+  // Compute()): one GPU scratch buffer per output index for host outputs.
+  std::vector<HostOutputScratch> *host_out_scratch = nullptr;
+  std::vector<PendingD2H> pending_d2h; // filled during compute, consumed after
+  // Output-completeness guard: which metadata outputs received an alloc call.
+  std::vector<bool> allocated;
+};
+
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+// Ensure scratch[idx] holds at least nbytes of device memory. Grows by
+// hipFree + hipMalloc (never shrinks). Safe within a Compute(): each output
+// index is allocated exactly once, so a grow here cannot invalidate a pointer
+// the DLL is still about to write this pass (distinct indices = distinct
+// buffers). LOG(FATAL) on failure -- never returns null.
+static void *ensure_host_out_slot(std::vector<HostOutputScratch> &scratch,
+                                  size_t idx, size_t nbytes) {
+  if (idx >= scratch.size())
+    scratch.resize(idx + 1);
+  HostOutputScratch &slot = scratch[idx];
+  if (slot.capacity < nbytes) {
+    if (slot.ptr)
+      (void)hipFree(slot.ptr);
+    void *p = nullptr;
+    hipError_t e = hipMalloc(&p, nbytes ? nbytes : 1);
+    if (e != hipSuccess || !p)
+      LOG(FATAL) << "hipMalloc(" << nbytes
+                 << ") for output-allocator host scratch failed: "
+                 << hipGetErrorString(e);
+    slot.ptr = p;
+    slot.capacity = nbytes;
+  }
+  return slot.ptr;
+}
+#endif // HIPDNN_EP_LINK_HIP_HOST
+
+// C callback installed on the RuntimeState (output_allocator_t.allocate).
+// noexcept: invoked from C (the model.dll runtime); a C++ exception crossing
+// that boundary is UB. Any failure aborts via LOG(FATAL) with a clear message
+// rather than returning null (a null would be written by the DLL -> segfault
+// with no diagnostic).
+void *output_allocate_cb(void *self, int64_t out_idx, const int64_t *shape,
+                         int64_t rank, int64_t elem_size) noexcept {
+  auto *octx = static_cast<OutputAllocatorCtx *>(self);
+  try {
+    if (out_idx < 0 || out_idx >= static_cast<int64_t>(octx->outputs->size())) {
+      LOG(FATAL) << "output allocator: out_idx " << out_idx << " out of range ("
+                 << octx->outputs->size() << " outputs)";
+    }
+    // Use the DLL's in-graph shape verbatim -- the EP never reshapes an output
+    // here. The shape is computed in-graph by hip.alloc_output from its
+    // producer's operands; when a dynamic output dim is sized from a graph
+    // input's `memref.dim`, the requested shape already equals that input
+    // buffer's allocated extent. ORT's GetOutput then returns the pre-bound
+    // (IO-bound) buffer rather than allocating a fresh one, so when an input
+    // and output are bound to the same buffer that identity is preserved with
+    // no EP-side override.
+    std::vector<int64_t> out_shape(shape, shape + rank);
+
+    int ort_idx = (*octx->output_index_map)[static_cast<int>(out_idx)];
+    auto out_tensor = octx->ctx->GetOutput(ort_idx, out_shape);
+    int mem_type =
+        static_cast<int>(out_tensor.GetTensorMemoryInfo().GetDeviceType());
+    void *ort_ptr = out_tensor.GetTensorMutableRawData();
+
+    octx->allocated[static_cast<size_t>(out_idx)] = true;
+
+    if (mem_type == TENSOR_MEMORY_GPU) {
+      // Zero-copy: ORT buffer is already GPU-accessible (e.g. the EP's
+      // host-mapped allocator, or caller-provided device memory). The DLL
+      // writes into it directly.
+      return ort_ptr;
+    }
+
+    // Host (CPU) output: the DLL writes into EP GPU scratch; Compute()
+    // D2H-copies into ort_ptr after inference_compute returns (the 2-arg
+    // interface already stream-synced).
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+    size_t nelem = 1;
+    for (int64_t d : out_shape)
+      nelem *= static_cast<size_t>(d);
+    size_t nbytes = nelem * static_cast<size_t>(elem_size);
+    void *gpu = ensure_host_out_slot(*octx->host_out_scratch,
+                                     static_cast<size_t>(out_idx), nbytes);
+    octx->pending_d2h.push_back({gpu, ort_ptr, nbytes});
+    return gpu;
+#else
+    // Mock runtime writes host memory directly; no GPU staging needed.
+    (void)elem_size;
+    return ort_ptr;
+#endif
+  } catch (const std::exception &e) {
+    LOG(FATAL) << "output allocator callback failed for out_idx " << out_idx
+               << ": " << e.what();
+  } catch (...) {
+    LOG(FATAL) << "output allocator callback failed for out_idx " << out_idx
+               << " (unknown exception)";
+  }
+  return nullptr; // unreachable: LOG(FATAL) aborts. Silences -Wreturn-type.
+}
 
 } // anonymous namespace
 
@@ -597,22 +712,156 @@ MlirCustomOp::MlirCustomOp(
 
   // Parse metadata from JSON
   metadata_ = parse_metadata_from_metadef(context, meta_def);
+  // Dispatch mode travels with the artifact's metadata (not a live provider
+  // option), so it always matches the loaded DLL's ABI.
+  use_output_allocator_ = metadata_.use_output_allocator();
   // Precompute index mappings (compiler order -> ORT kernel context order)
   input_index_map_ = build_input_index_map(*meta_def);
   output_index_map_ = build_output_index_map(metadata_.outputs(), *meta_def);
-  // Precompute present.* -> past_key_values.* input index lookup so the
-  // shape-override loop in marshal_output_tensors is O(1) per output instead
-  // of an O(N×M) name-string scan on the per-token decode hot path.
-  present_to_past_input_idx_ =
-      build_present_to_past_input_idx(metadata_.outputs(), metadata_.inputs());
   // Get FileSystem from PassContext for constants file resolution.
   // const_cast follows the established morphizen pattern (custom_op_imp.hpp).
   auto fs =
       const_cast<morphizen::PassContext *>(context.get())->get_file_system();
-  // Create inference state from DLL bytes (uses morphizen::Plugin)
-  inference_state_ = customop::InferenceState::create(
-      load_artifact_from_epcontext(context, metadata_.artifact_filename()),
-      fs.get());
+  auto artifact_bytes =
+      load_artifact_from_epcontext(context, metadata_.artifact_filename());
+  auto kind = determine_artifact_kind(metadata_.artifact_format());
+  inference_state_ =
+      customop::InferenceState::create(artifact_bytes, fs.get(), kind);
+}
+
+MlirCustomOp::~MlirCustomOp() {
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+  // Free the allocator-mode host-output GPU scratch (one buffer per output
+  // index). No-op in classic mode (the vector stays empty).
+  for (const HostOutputScratch &slot : host_out_scratch_)
+    if (slot.ptr)
+      (void)hipFree(slot.ptr);
+
+  // Release the lazy-allocated HIPDNN_EP_PERF event pair. Created on first
+  // perf-enabled Compute() and reused for the session lifetime; nullptr here
+  // means perf was never enabled, so nothing to release. Guarded by
+  // HIPDNN_EP_LINK_HIP_HOST (not BUILD_MOCK_RUNTIME): hipEvent_t /
+  // hipEventDestroy are only declared when the HIP headers are linked, and
+  // ep_perf_ev_* are only ever assigned by EpPerfTimer, which is itself behind
+  // this same macro -- so in builds without it these handles are always null
+  // and need no cleanup.
+  if (ep_perf_ev_start_) {
+    (void)hipEventDestroy(static_cast<hipEvent_t>(ep_perf_ev_start_));
+    ep_perf_ev_start_ = nullptr;
+  }
+  if (ep_perf_ev_stop_) {
+    (void)hipEventDestroy(static_cast<hipEvent_t>(ep_perf_ev_stop_));
+    ep_perf_ev_stop_ = nullptr;
+  }
+#endif
+}
+
+// Output-allocator dispatch: 2-arg inference_compute with in-graph
+// hip.alloc_output. The EP installs a per-Compute callback that hands each
+// graph output an ORT (or GPU-scratch) buffer; host outputs are D2H-copied
+// afterwards. See the OutputAllocatorCtx / output_allocate_cb block above.
+void MlirCustomOp::compute_with_output_allocator(
+    OrtKernelContext *context) const {
+  MY_LOG(2) << "MlirCustomOp::compute_with_output_allocator()";
+
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+  // Allocator mode is a separate dispatch that returns before the classic
+  // Compute() perf block, so it must emit its own PerfSample (§4 per-call
+  // distribution) and per-op flush (§3 GPU table) here. Without this an
+  // output-allocator session -- every KV-cache model, the default ABI --
+  // produces no EP-side [PERF]/[PERF SUMMARY] lines under HIPDNN_EP_PERF=1.
+  // Unlike the classic path there is no marshal-out pre-pass (outputs are
+  // allocated in-graph via output_allocate_cb), so marshal_out_ms is 0.
+  const bool perf = perf_enabled();
+  std::optional<EpPerfTimer> timer;
+  EpPerfTimer::clock::time_point t_after_in{};
+  if (perf)
+    timer.emplace(ep_perf_ev_start_, ep_perf_ev_stop_,
+                  static_cast<hipStream_t>(inference_state_->get_stream_raw()));
+#endif
+
+  auto inputs = marshal_input_tensors(context, input_index_map_);
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+  if (perf)
+    t_after_in = EpPerfTimer::clock::now();
+#endif
+
+  Ort::KernelContext ort_ctx(context);
+  OutputAllocatorCtx octx;
+  octx.ctx = &ort_ctx;
+  octx.outputs = &metadata_.outputs();
+  octx.output_index_map = &output_index_map_;
+  octx.host_out_scratch = &host_out_scratch_;
+  octx.allocated.assign(metadata_.outputs().size(), false);
+
+  output_allocator_t alloc;
+  alloc.self = &octx;
+  alloc.allocate = &output_allocate_cb;
+  inference_state_->set_output_allocator(&alloc);
+
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+  if (perf)
+    timer->record_start();
+#endif
+
+  int ret = inference_state_->compute_with_output_allocator(&inputs.span);
+
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+  if (perf)
+    timer->record_stop();
+#endif
+
+  // Clear before octx leaves scope so a stale self pointer can never be used by
+  // a later call (e.g. the next Compute() before it reinstalls its own ctx).
+  inference_state_->set_output_allocator(nullptr);
+
+  if (ret != 0) {
+    LOG(ERROR) << "inference_compute (allocator) failed with code: " << ret;
+  }
+
+  // Output-completeness guard. Allocator mode requires every declared output to
+  // be produced in-graph (each yields a hip.alloc_output -> callback). A
+  // missing one means a passthrough / aliased output the DLL never allocates --
+  // unsupported today. Fail loudly rather than hand ORT an uninitialized buffer
+  // (which can silently pass a CPU-vs-CPU comparison).
+  for (size_t i = 0; i < octx.allocated.size(); ++i) {
+    if (!octx.allocated[i]) {
+      LOG(FATAL) << "output allocator: output '"
+                 << metadata_.outputs()[static_cast<int>(i)].name() << "' (idx "
+                 << i
+                 << ") was never allocated by the model.dll. Passthrough / "
+                    "aliased outputs are not supported in output-allocator "
+                    "mode yet.";
+    }
+  }
+
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+  // Deferred host-output copies. The 2-arg interface already stream-synced, so
+  // the GPU scratch holds final data; a blocking hipMemcpy is safe.
+  for (const auto &p : octx.pending_d2h) {
+    hipError_t e =
+        hipMemcpy(p.host_dst, p.gpu_src, p.nbytes, hipMemcpyDeviceToHost);
+    if (e != hipSuccess) {
+      LOG(FATAL) << "output allocator: D2H copy of " << p.nbytes
+                 << " bytes failed: " << hipGetErrorString(e);
+    }
+  }
+
+  if (perf) {
+    // finish() fences after the post-compute D2H copies, so wall_ms /
+    // fence_residual_ms capture host-visible completion.
+    PerfSample s;
+    s.marshal_in_ms = EpPerfTimer::ms(timer->t_enter(), t_after_in);
+    s.marshal_out_ms = 0.0; // allocator mode: outputs allocated in-graph
+    s.compute_cpu_ms = EpPerfTimer::ms(t_after_in, timer->t_after_compute());
+    timer->finish(s);
+    // Resolve the per-op table AFTER the timing window closes (see the
+    // flush_op_profile contract -- keeps the resolve cost out of wall_ms).
+    inference_state_->flush_op_profile();
+  }
+#endif
+
+  MY_LOG(2) << "compute_with_output_allocator completed";
 }
 
 void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
@@ -620,20 +869,29 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
 
   // Tell the runtime that a new forward pass is starting so per-Compute()
   // caches (currently the GQA seqlens_k cache) are invalidated. No-op if
-  // the model.dll predates the begin_compute export -- but in that case
-  // the cache must be disabled via HIPDNN_EP_GQA_CACHE_SEQLENS=0
+  // the per-model bitcode predates the begin_compute export -- but in that
+  // case the cache must be disabled via HIPDNN_EP_GQA_CACHE_SEQLENS=0
   // (default-on), otherwise stale values would survive across forward
   // passes. The mismatch is detected at session creation and produces a
   // LOG(WARNING). The call is a single cached indirect dispatch, so
   // leaving it on the fast path costs ~1 ns.
   inference_state_->begin_compute();
 
+  if (use_output_allocator_) {
+    // Allocator mode owns its output staging (no pre-filled outputs span) and
+    // its own post-compute host D2H; it runs its OWN HIPDNN_EP_PERF timing +
+    // per-op flush internally (see compute_with_output_allocator) rather than
+    // the classic perf block below.
+    compute_with_output_allocator(context);
+    MY_LOG(2) << "Compute completed successfully (allocator mode)";
+    return;
+  }
+
   if (!perf_enabled()) {
     // --- Fast path: original behaviour, no timing overhead. ---
     auto inputs = marshal_input_tensors(context, input_index_map_);
     auto outputs =
-        marshal_output_tensors(context, metadata_.outputs(), output_index_map_,
-                               input_index_map_, present_to_past_input_idx_);
+        marshal_output_tensors(context, metadata_.outputs(), output_index_map_);
 
     int ret = inference_state_->compute(&inputs.span, &outputs.span);
     if (ret != 0) {
@@ -645,48 +903,23 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
     return;
   }
 
-#ifndef BUILD_MOCK_RUNTIME
+#ifdef HIPDNN_EP_LINK_HIP_HOST
   // --- HIPDNN_EP_PERF path: wall + per-phase + GPU timing. ---
-  using clock = std::chrono::steady_clock;
-  auto elapsed_ms = [](clock::time_point a, clock::time_point b) {
-    return std::chrono::duration<double, std::milli>(b - a).count();
-  };
+  // The stream may be the default stream (hipStream_t(0)); hipEvent APIs
+  // accept that fine.
+  EpPerfTimer timer(
+      ep_perf_ev_start_, ep_perf_ev_stop_,
+      static_cast<hipStream_t>(inference_state_->get_stream_raw()));
 
-  const auto t_enter = clock::now();
   auto inputs = marshal_input_tensors(context, input_index_map_);
-  const auto t_after_in = clock::now();
+  const auto t_after_in = EpPerfTimer::clock::now();
   auto outputs =
-      marshal_output_tensors(context, metadata_.outputs(), output_index_map_,
-                             input_index_map_, present_to_past_input_idx_);
-  const auto t_after_out = clock::now();
+      marshal_output_tensors(context, metadata_.outputs(), output_index_map_);
+  const auto t_after_out = EpPerfTimer::clock::now();
 
-  // Stream used by inference_compute (first field of RuntimeState).  May be
-  // the default stream (hipStream_t(0)) — hipEvent APIs accept that fine.
-  auto stream = static_cast<hipStream_t>(inference_state_->get_stream_raw());
-
-  // HIP error codes are intentionally discarded below: any failure here only
-  // corrupts diagnostic numbers, never the inference result.  Casting to void
-  // also suppresses C4834 ([[nodiscard]] discarded) under MSVC /W4.
-  hipEvent_t ev_start = nullptr, ev_stop = nullptr;
-  (void)hipEventCreate(&ev_start);
-  (void)hipEventCreate(&ev_stop);
-  (void)hipEventRecord(ev_start, stream);
-
+  timer.record_start();
   const int ret = inference_state_->compute(&inputs.span, &outputs.span);
-  const auto t_after_compute = clock::now();
-
-  (void)hipEventRecord(ev_stop, stream);
-  // hipDeviceSynchronize() is the fence: measures residual async work left
-  // on any stream after compute() returned.  For correctly-synchronous
-  // dispatch paths this should be ~0.
-  (void)hipDeviceSynchronize();
-  const auto t_after_fence = clock::now();
-
-  float gpu_ms_f = 0.0f;
-  (void)hipEventSynchronize(ev_stop);
-  (void)hipEventElapsedTime(&gpu_ms_f, ev_start, ev_stop);
-  (void)hipEventDestroy(ev_start);
-  (void)hipEventDestroy(ev_stop);
+  timer.record_stop();
 
   if (ret != 0) {
     LOG(ERROR) << "inference_compute() failed with code: " << ret;
@@ -694,16 +927,20 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
   }
 
   PerfSample s;
-  s.wall_ms = elapsed_ms(t_enter, t_after_fence);
-  s.marshal_in_ms = elapsed_ms(t_enter, t_after_in);
-  s.marshal_out_ms = elapsed_ms(t_after_in, t_after_out);
-  s.compute_cpu_ms = elapsed_ms(t_after_out, t_after_compute);
-  s.gpu_ms = static_cast<double>(gpu_ms_f);
-  s.fence_residual_ms = elapsed_ms(t_after_compute, t_after_fence);
-  perf_collector().record(s);
+  s.marshal_in_ms = EpPerfTimer::ms(timer.t_enter(), t_after_in);
+  s.marshal_out_ms = EpPerfTimer::ms(t_after_in, t_after_out);
+  s.compute_cpu_ms = EpPerfTimer::ms(t_after_out, timer.t_after_compute());
+  timer.finish(s);
+
+  // Resolve the per-op table AFTER the timing window closes. The resolve
+  // (one hipEventElapsedTime per recorded op + std::map aggregation + a
+  // per-row fprintf) costs ~1 ms/Compute on a typical decoder graph -- large
+  // enough that keeping it inside the window measurably inflated wall_ms.
+  // See the flush_op_profile() contract in InferenceState.h.
+  inference_state_->flush_op_profile();
 
   MY_LOG(2) << "Compute completed successfully";
-#endif // BUILD_MOCK_RUNTIME
+#endif // HIPDNN_EP_LINK_HIP_HOST
 }
 
 } // namespace mlir_compilation

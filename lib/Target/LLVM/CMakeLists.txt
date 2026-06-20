@@ -5,53 +5,17 @@
 
 message(STATUS "Building Target LLVM Library")
 
-# ============================================================================
-# Runtime bitcode stub
-# ============================================================================
-# When RuntimeBitcode is not available (no Clang / no HIP runtime build),
-# generate a stub runtime_ir_data.cpp with empty data.  LLVMBackend handles
-# this gracefully (bcSize == 0 → skip linking).
-if(NOT TARGET RuntimeBitcode)
-    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp
-        "#include <cstddef>\n"
-        "extern \"C\" const unsigned char runtime_bc_data[] = {0};\n"
-        "extern \"C\" const size_t runtime_bc_data_size = 0;\n"
-    )
-    set(RUNTIME_IR_DATA_SRC ${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp)
-else()
-    # Python 3 required for xxd.py (converts bitcode to C array)
-    find_package(Python3 REQUIRED COMPONENTS Interpreter)
-
-    if(NOT RUNTIME_BC_PATH)
-        set(RUNTIME_BC_PATH ${CMAKE_CURRENT_BINARY_DIR}/../../Runtime/runtime.bc)
-    endif()
-
-    add_custom_command(
-        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp
-        COMMAND ${Python3_EXECUTABLE}
-                ${CMAKE_SOURCE_DIR}/cmake/xxd.py
-                --var runtime_bc_data
-                --output ${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp.tmp
-                ${RUNTIME_BC_PATH}
-        COMMAND ${Python3_EXECUTABLE} -c
-                "import os; data = open('${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp.tmp').read(); data = data.replace('static const unsigned char', 'extern \"C\" const unsigned char'); bc_size = os.path.getsize('${RUNTIME_BC_PATH}'); data = '#include <cstddef>\\n' + data + f'\\nextern \"C\" const size_t runtime_bc_data_size = {bc_size};\\n'; open('${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp', 'w').write(data)"
-        COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp.tmp
-        DEPENDS ${RUNTIME_BC_PATH}
-        COMMENT "Generating runtime_ir_data.cpp from runtime.bc"
-        VERBATIM
-    )
-    set(RUNTIME_IR_DATA_SRC ${CMAKE_CURRENT_BINARY_DIR}/runtime_ir_data.cpp)
-endif()
-
-# Create target LLVM library
+# Create target LLVM library. The embedded runtime.bc (runtime_bc_data) is
+# provided by the shared runtime-bc-embed lib (lib/Runtime) so the bytes are
+# generated once and shared with the EP/JIT consumer; LLVMBackend.cpp's extern
+# reference pulls the embed object into the final binary.
 add_library(HipTargetLLVM STATIC
   LLVMBackend.cpp
   DLLLinker.cpp
-  ${RUNTIME_IR_DATA_SRC}
 )
 
-if(TARGET RuntimeBitcode)
-    add_dependencies(HipTargetLLVM RuntimeBitcode)
+if(TARGET runtime-bc-embed)
+    target_link_libraries(HipTargetLLVM PUBLIC runtime-bc-embed)
 endif()
 
 # Link LLVM components
@@ -137,19 +101,34 @@ target_link_libraries(HipTargetLLVM PUBLIC
 
 # Bake the clang++ path used by DLLLinker.cpp's Linux subprocess link.
 # DLLLinker has a PATH fallback if the baked path is stale (e.g. CI build
-# deployed to a host with clang elsewhere). HINTS scopes the search to
-# the LLVM tree we configure against so a stale `/usr/bin/clang-18`
-# doesn't shadow apt llvm-22. clang++ (not bare clang) — the driver
-# auto-pulls libstdc++ which the generated model object needs for
+# deployed to a host with clang elsewhere). clang++ (not bare clang) — the
+# driver auto-pulls libstdc++ which the generated model object needs for
 # __cxa_begin_catch / __cxa_rethrow.
 if(NOT WIN32)
-    find_program(HIPDNN_CLANG_EXECUTABLE NAMES clang++
-        HINTS
-            ${LLVM_BINARY_DIR}/bin
-            ${LLVM_TOOLS_BINARY_DIR}
-    )
+    if(TARGET clang)
+        # In-tree (from-source) LLVM: the clang/lld .exe are not present at
+        # configure time, so find_program can't see them and would fall back to
+        # a system clang (defeating the self-contained from-source build). We
+        # know where the driver lands, so bake that path. clang itself is built
+        # because lib/Runtime's bitcode step depends on the in-tree clang target;
+        # lld is forced to build by deps.cmake (a standalone ALL target, kept out
+        # of any install/export set). Mirrors lib/Runtime's in-tree-target use.
+        set(HIPDNN_CLANG_EXECUTABLE "${LLVM_TOOLS_BINARY_DIR}/clang++")
+        message(STATUS "Using in-tree clang++ for runtime DLL linking: ${HIPDNN_CLANG_EXECUTABLE}")
+    else()
+        # Prebuilt / installed LLVM (find_package path, incl. CI's llvm-install):
+        # the clang++ binary already exists, so resolve it now. HINTS scope the
+        # search to the LLVM tree we configure against.
+        find_program(HIPDNN_CLANG_EXECUTABLE NAMES clang++
+            HINTS
+                ${LLVM_BINARY_DIR}/bin
+                ${LLVM_TOOLS_BINARY_DIR}
+        )
+        if(HIPDNN_CLANG_EXECUTABLE)
+            message(STATUS "Found clang++ for runtime DLL linking: ${HIPDNN_CLANG_EXECUTABLE}")
+        endif()
+    endif()
     if(HIPDNN_CLANG_EXECUTABLE)
-        message(STATUS "Found clang++ for runtime DLL linking: ${HIPDNN_CLANG_EXECUTABLE}")
         target_compile_definitions(HipTargetLLVM PRIVATE
             HIPDNN_CLANG_PATH="${HIPDNN_CLANG_EXECUTABLE}"
             HIPDNN_LLVM_MAJOR=${LLVM_VERSION_MAJOR})

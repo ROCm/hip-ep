@@ -26,6 +26,7 @@ target_link_libraries(LibHipCompiler PUBLIC
   MLIRLLVMDialect
   MLIRBufferizationDialect
   MLIRBufferizationTransforms
+  MLIRTensorInferTypeOpInterfaceImpl
   MLIRSCFDialect
   MLIRSCFToControlFlow
   MLIRParser
@@ -56,21 +57,40 @@ target_include_directories(LibHipCompiler PUBLIC
   ${CMAKE_BINARY_DIR}/3rd-party/onnx-mlir
 )
 
-# Configure custom kernels library path for CompilerDriver
-# When building with real runtime, tell CompilerDriver where to find the
-# installed hip_custom_kernels.lib at model-compile time.
-if(NOT BUILD_MOCK_RUNTIME AND TARGET hip_custom_kernels)
-    # Provide CompilerDriver with the exact path to the built custom kernels
-    # archive so it can inject the library on the model DLL link line without
-    # relying on an install step.
-    target_compile_definitions(LibHipCompiler PRIVATE
-        "HIP_CUSTOM_KERNELS_LIB_PATH=\"$<TARGET_FILE:hip_custom_kernels>\""
-    )
-    message(STATUS "Custom kernels lib path for CompilerDriver: $<TARGET_FILE:hip_custom_kernels>")
+# Native artifact path (CompilationOptions.output_mode == NATIVE):
+# CompilerDriver::discoverLibraries links the per-arch custom-kernels import
+# library (custom_kernels_<arch>.{lib,so}) into the generated model DLL. Tell
+# it where that lib lives (build-tree dir of the first configured arch) and
+# which arch to link by default; both are overridable at runtime via the
+# HIP_CUSTOM_KERNELS_DIR / HIP_CUSTOM_KERNELS_ARCH env vars.
+if(HIP_ARCHITECTURES)
+    list(GET HIP_ARCHITECTURES 0 _ck_first_arch)
+    if(NOT BUILD_MOCK_RUNTIME AND TARGET custom_kernels_${_ck_first_arch})
+        target_compile_definitions(LibHipCompiler PRIVATE
+            "HIPDNN_CK_LIB_DIR=\"$<TARGET_LINKER_FILE_DIR:custom_kernels_${_ck_first_arch}>\""
+            "HIPDNN_CK_DEFAULT_ARCH=\"${_ck_first_arch}\""
+        )
+        message(STATUS
+            "Custom kernels (native link): arch=${_ck_first_arch}, "
+            "dir=$<TARGET_LINKER_FILE_DIR:custom_kernels_${_ck_first_arch}>")
+    endif()
 endif()
 
-# hipDNN graph runtime import library path for model.dll linking.
-# Uses generator expression to get the actual import library location.
+# Native current-stream accessor (tls_stream.cpp). runtime.bc references but no
+# longer defines hipdnn_ep_get/set_current_stream, so every native model DLL
+# must link this static lib. Point the driver at its build-tree location.
+if(TARGET hipdnn-ep-tls)
+    target_compile_definitions(LibHipCompiler PRIVATE
+        "HIPDNN_EP_TLS_LIB_DIR=\"$<TARGET_LINKER_FILE_DIR:hipdnn-ep-tls>\""
+        "HIPDNN_EP_TLS_LIB_NAME=\"$<TARGET_LINKER_FILE_BASE_NAME:hipdnn-ep-tls>\""
+    )
+endif()
+
+# OnnxToHipDNN provides the OutlineOnnxToHipDNN / CompileHipDNNGraphs passes,
+# which CompilerDriver uses when a hipDNN handle is set. Gated on the runtime
+# target so a hipDNN-less build (no TheRock SDK) still configures.
+# The native path also links hipdnn_graph_runtime into the model DLL; pass its
+# import-library path via a generator expression.
 if(TARGET hipdnn_graph_runtime)
     target_compile_definitions(LibHipCompiler PRIVATE
         "HIPDNN_GRAPH_RUNTIME_LIB_PATH=\"$<TARGET_LINKER_FILE:hipdnn_graph_runtime>\""
