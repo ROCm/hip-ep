@@ -72,25 +72,25 @@ int wrap_pool(RuntimeState *state, void *input, void *output, void *indices,
       state);
 
   if (!state || !input || !output) {
-    fprintf(stderr, "[REAL] wrap_pool: null argument\n");
+    hipdnn_ep_log_emit("[REAL] wrap_pool: null argument\n");
     return -1;
   }
   // Indices are MAX-only; ignore any stray pointer for other modes.
   bool want_indices = has_indices && pool_mode == HIPDNN_EP_POOL_MAX;
   if (want_indices && !indices) {
-    fprintf(stderr, "[REAL] wrap_pool: has_indices=1 but indices ptr is "
-                    "null\n");
+    hipdnn_ep_log_emit("[REAL] wrap_pool: has_indices=1 but indices ptr is "
+                       "null\n");
     return -1;
   }
   if (pool_mode != HIPDNN_EP_POOL_AVERAGE && pool_mode != HIPDNN_EP_POOL_MAX &&
       pool_mode != HIPDNN_EP_POOL_LP) {
-    fprintf(stderr, "[REAL] wrap_pool: unsupported pool_mode %lld\n",
-            (long long)pool_mode);
+    hipdnn_ep_log_emit("[REAL] wrap_pool: unsupported pool_mode %lld\n",
+                       (long long)pool_mode);
     return -1;
   }
   if (pool_mode == HIPDNN_EP_POOL_LP && p < 1) {
-    fprintf(stderr, "[REAL] wrap_pool: LpPool requires p >= 1 (got %lld)\n",
-            (long long)p);
+    hipdnn_ep_log_emit("[REAL] wrap_pool: LpPool requires p >= 1 (got %lld)\n",
+                       (long long)p);
     return -1;
   }
   (void)storage_order;
@@ -98,8 +98,8 @@ int wrap_pool(RuntimeState *state, void *input, void *output, void *indices,
 
   int hip_dtype = hipdnn_ep_to_hip_dtype(data_type);
   if (hip_dtype < 0) {
-    fprintf(stderr, "[REAL] wrap_pool: unsupported data_type %lld\n",
-            (long long)data_type);
+    hipdnn_ep_log_emit("[REAL] wrap_pool: unsupported data_type %lld\n",
+                       (long long)data_type);
     return -1;
   }
 
@@ -122,7 +122,7 @@ int wrap_pool(RuntimeState *state, void *input, void *output, void *indices,
       in1, in2, out0, out1, out2, k0, k1, k2, s0, s1, s2, p0, p1, p2, dil0,
       dil1, dil2, static_cast<int>(count_include_pad), static_cast<int>(p));
   if (rc != 0) {
-    fprintf(stderr, "[REAL] wrap_pool: kernel launch failed (%d)\n", rc);
+    hipdnn_ep_log_emit("[REAL] wrap_pool: kernel launch failed (%d)\n", rc);
     return -1;
   }
 

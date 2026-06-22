@@ -57,9 +57,9 @@ int wrap_nonzero(RuntimeState *state, void *input, void *output,
 
   int hip_dtype = nonzero_hipdnn_to_hip_dtype(input_data_type);
   if (hip_dtype < 0) {
-    fprintf(stderr, "[REAL] wrap_nonzero: unsupported data_type=%s(%lld)\n",
-            hipdnn_ep_datatype_name(input_data_type),
-            (long long)input_data_type);
+    hipdnn_ep_log_emit("[REAL] wrap_nonzero: unsupported data_type=%s(%lld)\n",
+                       hipdnn_ep_datatype_name(input_data_type),
+                       (long long)input_data_type);
     return -1;
   }
 

@@ -16,8 +16,8 @@
   do {                                                                         \
     hipError_t error = (cmd);                                                  \
     if (error != hipSuccess) {                                                 \
-      fprintf(stderr, "HIP error at %s:%d: %s\n", __FILE__, __LINE__,          \
-              hipGetErrorString(error));                                       \
+      hipdnn_ep_log_emit("HIP error at %s:%d: %s\n", __FILE__, __LINE__,       \
+                         hipGetErrorString(error));                            \
       return -1;                                                               \
     }                                                                          \
   } while (0)
@@ -58,10 +58,10 @@ int wrap_reduce_mean(RuntimeState *state, void *data, void *axes, void *output,
     void *stream = hipdnn_ep_state_get_stream(state);
     int64_t element_size_bytes = hipdnn_ep_datatype_size(data_type);
     if (element_size_bytes < 0) {
-      fprintf(stderr,
-              "[REAL] wrap_reduce_mean: unsupported data_type=%lld for noop "
-              "memcpy\n",
-              (long long)data_type);
+      hipdnn_ep_log_emit(
+          "[REAL] wrap_reduce_mean: unsupported data_type=%lld for noop "
+          "memcpy\n",
+          (long long)data_type);
       return -1;
     }
     int64_t total_bytes = data_num_elements * element_size_bytes;
@@ -78,10 +78,10 @@ int wrap_reduce_mean(RuntimeState *state, void *data, void *axes, void *output,
 
   int hip_dtype = hipdnn_to_hip_dtype_mean(data_type);
   if (hip_dtype < 0) {
-    fprintf(stderr,
-            "[REAL] wrap_reduce_mean: unsupported data_type=%s(%lld) "
-            "(supported: f16)\n",
-            hipdnn_ep_datatype_name(data_type), (long long)data_type);
+    hipdnn_ep_log_emit(
+        "[REAL] wrap_reduce_mean: unsupported data_type=%s(%lld) "
+        "(supported: f16)\n",
+        hipdnn_ep_datatype_name(data_type), (long long)data_type);
     return -1;
   }
 

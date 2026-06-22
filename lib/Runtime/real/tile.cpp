@@ -55,8 +55,9 @@ int wrap_tile(RuntimeState *state, void *input, void *repeats, void *output,
     return -1;
   }
   if (input_rank != output_rank) {
-    fprintf(stderr, "[REAL] wrap_tile: input_rank(%lld) != output_rank(%lld)\n",
-            (long long)input_rank, (long long)output_rank);
+    hipdnn_ep_log_emit(
+        "[REAL] wrap_tile: input_rank(%lld) != output_rank(%lld)\n",
+        (long long)input_rank, (long long)output_rank);
     return -1;
   }
   if (input_rank == 0) {
@@ -65,10 +66,10 @@ int wrap_tile(RuntimeState *state, void *input, void *repeats, void *output,
 
   int hip_dtype = tile_hipdnn_to_hip_dtype(data_type);
   if (hip_dtype < 0) {
-    fprintf(stderr,
-            "[REAL] wrap_tile: unsupported data_type=%s(%lld) "
-            "(supported: f16, f32, i32, i64)\n",
-            hipdnn_ep_datatype_name(data_type), (long long)data_type);
+    hipdnn_ep_log_emit("[REAL] wrap_tile: unsupported data_type=%s(%lld) "
+                       "(supported: f16, f32, i32, i64)\n",
+                       hipdnn_ep_datatype_name(data_type),
+                       (long long)data_type);
     return -1;
   }
 

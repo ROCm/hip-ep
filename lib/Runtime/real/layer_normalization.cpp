@@ -57,16 +57,16 @@ int wrap_layer_normalization(RuntimeState *state, void *input, void *scale,
     return -1;
   }
   if (scale_num_elements <= 0) {
-    fprintf(stderr,
-            "[REAL] wrap_layer_normalization: scale_num_elements=%lld\n",
-            (long long)scale_num_elements);
+    hipdnn_ep_log_emit(
+        "[REAL] wrap_layer_normalization: scale_num_elements=%lld\n",
+        (long long)scale_num_elements);
     return -1;
   }
   if (input_num_elements % scale_num_elements != 0) {
-    fprintf(stderr,
-            "[REAL] wrap_layer_normalization: input_num(%lld) not divisible "
-            "by scale_num(%lld)\n",
-            (long long)input_num_elements, (long long)scale_num_elements);
+    hipdnn_ep_log_emit(
+        "[REAL] wrap_layer_normalization: input_num(%lld) not divisible "
+        "by scale_num(%lld)\n",
+        (long long)input_num_elements, (long long)scale_num_elements);
     return -1;
   }
 
@@ -76,10 +76,10 @@ int wrap_layer_normalization(RuntimeState *state, void *input, void *scale,
   } else if (element_size_bytes == 4) {
     hip_dtype = HIP_DTYPE_FLOAT32;
   } else {
-    fprintf(stderr,
-            "[REAL] wrap_layer_normalization: unsupported element_size=%lld "
-            "(supported: 2=fp16, 4=fp32)\n",
-            (long long)element_size_bytes);
+    hipdnn_ep_log_emit(
+        "[REAL] wrap_layer_normalization: unsupported element_size=%lld "
+        "(supported: 2=fp16, 4=fp32)\n",
+        (long long)element_size_bytes);
     return -1;
   }
 
@@ -91,10 +91,10 @@ int wrap_layer_normalization(RuntimeState *state, void *input, void *scale,
   } else if (stash_type == kOnnxStashFloat16) {
     mean_dtype = HIP_DTYPE_FLOAT16;
   } else {
-    fprintf(stderr,
-            "[REAL] wrap_layer_normalization: unsupported stash_type=%lld "
-            "(supported: 1=fp32, 10=fp16)\n",
-            (long long)stash_type);
+    hipdnn_ep_log_emit(
+        "[REAL] wrap_layer_normalization: unsupported stash_type=%lld "
+        "(supported: 1=fp32, 10=fp16)\n",
+        (long long)stash_type);
     return -1;
   }
 

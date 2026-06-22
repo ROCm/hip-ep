@@ -47,31 +47,31 @@ int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
       },
       state);
   if (!state) {
-    fprintf(stderr, "wrap_rotary_embedding: null state\n");
+    hipdnn_ep_log_emit("wrap_rotary_embedding: null state\n");
     return -1;
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
   if (!stream) {
-    fprintf(stderr, "wrap_rotary_embedding: null stream\n");
+    hipdnn_ep_log_emit("wrap_rotary_embedding: null stream\n");
     return -1;
   }
 
   if (batch_size <= 0 || seq_len <= 0 || num_heads <= 0 || head_dim <= 0 ||
       rotary_dim <= 0) {
-    fprintf(stderr,
-            "wrap_rotary_embedding: invalid dims "
-            "(batch=%lld, seq=%lld, num_heads=%lld, head_dim=%lld, "
-            "rotary_dim=%lld)\n",
-            (long long)batch_size, (long long)seq_len, (long long)num_heads,
-            (long long)head_dim, (long long)rotary_dim);
+    hipdnn_ep_log_emit("wrap_rotary_embedding: invalid dims "
+                       "(batch=%lld, seq=%lld, num_heads=%lld, head_dim=%lld, "
+                       "rotary_dim=%lld)\n",
+                       (long long)batch_size, (long long)seq_len,
+                       (long long)num_heads, (long long)head_dim,
+                       (long long)rotary_dim);
     return -1;
   }
   if (rotary_dim > head_dim) {
-    fprintf(stderr,
-            "wrap_rotary_embedding: rotary_dim (%lld) must be <= head_dim "
-            "(%lld)\n",
-            (long long)rotary_dim, (long long)head_dim);
+    hipdnn_ep_log_emit(
+        "wrap_rotary_embedding: rotary_dim (%lld) must be <= head_dim "
+        "(%lld)\n",
+        (long long)rotary_dim, (long long)head_dim);
     return -1;
   }
 
@@ -93,8 +93,8 @@ int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
                             element_size_bytes, is_bnsh);
 
   if (rc != 0) {
-    fprintf(stderr, "wrap_rotary_embedding: hip_rope_forward failed (rc=%d)\n",
-            rc);
+    hipdnn_ep_log_emit(
+        "wrap_rotary_embedding: hip_rope_forward failed (rc=%d)\n", rc);
   } else {
     RUNTIME_DEBUG_LOG("[REAL] wrap_rotary_embedding: completed successfully\n");
   }

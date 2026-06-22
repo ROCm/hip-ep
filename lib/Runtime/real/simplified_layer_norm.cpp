@@ -200,14 +200,14 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, int op_state_slot,
       },
       state);
   if (!state || !input || !scale || !output) {
-    fprintf(stderr, "Invalid arguments to wrap_miopenT5LayerNormForward\n");
+    hipdnn_ep_log_emit("Invalid arguments to wrap_miopenT5LayerNormForward\n");
     return -1;
   }
 
   miopenHandle_t handle =
       static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
   if (!handle) {
-    fprintf(stderr, "wrap_miopenT5LayerNormForward: null MIOpen handle\n");
+    hipdnn_ep_log_emit("wrap_miopenT5LayerNormForward: null MIOpen handle\n");
     return -1;
   }
 
@@ -230,17 +230,17 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, int op_state_slot,
   else if (element_size_bytes == 4)
     data_type = miopenFloat;
   else {
-    fprintf(stderr,
-            "wrap_miopenT5LayerNormForward: unsupported element_size %lld\n",
-            (long long)element_size_bytes);
+    hipdnn_ep_log_emit(
+        "wrap_miopenT5LayerNormForward: unsupported element_size %lld\n",
+        (long long)element_size_bytes);
     return -1;
   }
 
   T5NormState *ns = T5NormState::get_slot(state, op_state_slot);
   if (!ns || !ns->table) {
-    fprintf(stderr,
-            "wrap_miopenT5LayerNormForward: missing op-state for slot %d\n",
-            op_state_slot);
+    hipdnn_ep_log_emit(
+        "wrap_miopenT5LayerNormForward: missing op-state for slot %d\n",
+        op_state_slot);
     return -1;
   }
 
@@ -248,8 +248,7 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, int op_state_slot,
   T5NormCacheKey key{num_rows, hidden_dim, data_type};
   const T5NormCacheEntry *c = queryOrCreateT5Norm(*ns->table, key);
   if (!c) {
-    fprintf(
-        stderr,
+    hipdnn_ep_log_emit(
         "wrap_miopenT5LayerNormForward: descriptor cache creation failed\n");
     return -1;
   }
@@ -257,8 +256,8 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, int op_state_slot,
   // Use shared workspace for rstd scratch buffer (always f32)
   size_t rstd_bytes = static_cast<size_t>(num_rows) * sizeof(float);
   if (hipdnn_ep_state_ensure_workspace(state, rstd_bytes) != 0) {
-    fprintf(stderr,
-            "wrap_miopenT5LayerNormForward: workspace allocation failed\n");
+    hipdnn_ep_log_emit(
+        "wrap_miopenT5LayerNormForward: workspace allocation failed\n");
     return -1;
   }
   void *rstd_buf = hipdnn_ep_state_get_workspace(state);

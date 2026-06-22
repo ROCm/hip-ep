@@ -57,10 +57,10 @@ int wrap_equal(RuntimeState *state, void *a, void *b, void *output,
 
   int hip_dtype = equal_hipdnn_to_hip_dtype(data_type);
   if (hip_dtype < 0) {
-    fprintf(stderr,
-            "[REAL] wrap_equal: unsupported input data_type=%s(%lld) "
-            "(supported: f16, f32, i32, i64)\n",
-            hipdnn_ep_datatype_name(data_type), (long long)data_type);
+    hipdnn_ep_log_emit(
+        "[REAL] wrap_equal: unsupported input data_type=%s(%lld) "
+        "(supported: f16, f32, i32, i64)\n",
+        hipdnn_ep_datatype_name(data_type), (long long)data_type);
     return -1;
   }
 
@@ -71,17 +71,17 @@ int wrap_equal(RuntimeState *state, void *a, void *b, void *output,
   // Anything more general (rank-aware NumPy broadcast) must be materialised
   // upstream via Expand and is rejected here so the kernel never reads OOB.
   if (a_num_elements != out_num_elements && a_num_elements != 1) {
-    fprintf(stderr,
-            "[REAL] wrap_equal: unsupported broadcast: a_num=%lld out=%lld "
-            "(only scalar a (1) or full a (out) are supported)\n",
-            (long long)a_num_elements, (long long)out_num_elements);
+    hipdnn_ep_log_emit(
+        "[REAL] wrap_equal: unsupported broadcast: a_num=%lld out=%lld "
+        "(only scalar a (1) or full a (out) are supported)\n",
+        (long long)a_num_elements, (long long)out_num_elements);
     return -1;
   }
   if (b_num_elements != out_num_elements && b_num_elements != 1) {
-    fprintf(stderr,
-            "[REAL] wrap_equal: unsupported broadcast: b_num=%lld out=%lld "
-            "(only scalar b (1) or full b (out) are supported)\n",
-            (long long)b_num_elements, (long long)out_num_elements);
+    hipdnn_ep_log_emit(
+        "[REAL] wrap_equal: unsupported broadcast: b_num=%lld out=%lld "
+        "(only scalar b (1) or full b (out) are supported)\n",
+        (long long)b_num_elements, (long long)out_num_elements);
     return -1;
   }
 

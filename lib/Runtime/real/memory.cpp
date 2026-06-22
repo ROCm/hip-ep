@@ -16,11 +16,11 @@ int wrap_hipMemcpyAsync(RuntimeState *state, void *dst_ptr, const void *src_ptr,
                         size_t size_bytes) {
   OP_PROFILE_CPU("memcpy_d2d", state);
   if (!state) {
-    fprintf(stderr, "wrap_hipMemcpyAsync: null state\n");
+    hipdnn_ep_log_emit("wrap_hipMemcpyAsync: null state\n");
     return -1;
   }
   if (!dst_ptr || !src_ptr) {
-    fprintf(stderr, "wrap_hipMemcpyAsync: null pointer\n");
+    hipdnn_ep_log_emit("wrap_hipMemcpyAsync: null pointer\n");
     return -1;
   }
   if (size_bytes == 0) {
@@ -36,8 +36,8 @@ int wrap_hipMemcpyAsync(RuntimeState *state, void *dst_ptr, const void *src_ptr,
                                   hipMemcpyDeviceToDevice, stream);
 
   if (err != hipSuccess) {
-    fprintf(stderr, "wrap_hipMemcpyAsync: copy failed (%zu bytes): %s\n",
-            size_bytes, hipGetErrorString(err));
+    hipdnn_ep_log_emit("wrap_hipMemcpyAsync: copy failed (%zu bytes): %s\n",
+                       size_bytes, hipGetErrorString(err));
     return -1;
   }
 
@@ -48,11 +48,11 @@ int wrap_hipMemcpy2DAsync(RuntimeState *state, void *dst_ptr, size_t dst_pitch,
                           const void *src_ptr, size_t src_pitch, size_t width,
                           size_t height) {
   if (!state) {
-    fprintf(stderr, "wrap_hipMemcpy2DAsync: null state\n");
+    hipdnn_ep_log_emit("wrap_hipMemcpy2DAsync: null state\n");
     return -1;
   }
   if (!dst_ptr || !src_ptr) {
-    fprintf(stderr, "wrap_hipMemcpy2DAsync: null pointer\n");
+    hipdnn_ep_log_emit("wrap_hipMemcpy2DAsync: null pointer\n");
     return -1;
   }
   if (width == 0 || height == 0) {
@@ -73,9 +73,9 @@ int wrap_hipMemcpy2DAsync(RuntimeState *state, void *dst_ptr, size_t dst_pitch,
   RUNTIME_DEBUG_LOG("[REAL] wrap_hipMemcpy2DAsync: end -> %d\n", (int)err);
 
   if (err != hipSuccess) {
-    fprintf(stderr,
-            "wrap_hipMemcpy2DAsync: copy failed (width=%zu height=%zu): %s\n",
-            width, height, hipGetErrorString(err));
+    hipdnn_ep_log_emit(
+        "wrap_hipMemcpy2DAsync: copy failed (width=%zu height=%zu): %s\n",
+        width, height, hipGetErrorString(err));
     return -1;
   }
 
@@ -101,11 +101,11 @@ int wrap_strided_copy(RuntimeState *state, void *dst_ptr, const void *src_ptr,
                       int64_t src_pitch_elems, int64_t dst_pitch_elems,
                       int64_t row_elems) {
   if (!state) {
-    fprintf(stderr, "wrap_strided_copy: null state\n");
+    hipdnn_ep_log_emit("wrap_strided_copy: null state\n");
     return -1;
   }
   if (!dst_ptr || !src_ptr) {
-    fprintf(stderr, "wrap_strided_copy: null pointer\n");
+    hipdnn_ep_log_emit("wrap_strided_copy: null pointer\n");
     return -1;
   }
   if (height == 0 || row_elems == 0)
@@ -145,8 +145,8 @@ int wrap_strided_copy(RuntimeState *state, void *dst_ptr, const void *src_ptr,
                                     width_bytes, static_cast<size_t>(height),
                                     hipMemcpyDeviceToDevice, stream);
   if (err != hipSuccess) {
-    fprintf(stderr, "wrap_strided_copy: fallback 2D copy failed: %s\n",
-            hipGetErrorString(err));
+    hipdnn_ep_log_emit("wrap_strided_copy: fallback 2D copy failed: %s\n",
+                       hipGetErrorString(err));
     return -1;
   }
   return 0;
@@ -159,7 +159,7 @@ int wrap_strided_copy(RuntimeState *state, void *dst_ptr, const void *src_ptr,
 // inert dynamic dim).
 int32_t hipdnn_ep_readback_i32(RuntimeState *state, const void *device_scalar) {
   if (!state || !device_scalar) {
-    fprintf(stderr, "hipdnn_ep_readback_i32: null argument\n");
+    hipdnn_ep_log_emit("hipdnn_ep_readback_i32: null argument\n");
     return 0;
   }
   hipStream_t stream =
@@ -171,14 +171,14 @@ int32_t hipdnn_ep_readback_i32(RuntimeState *state, const void *device_scalar) {
   hipError_t err = hipMemcpyAsync(&host_val, device_scalar, sizeof(int32_t),
                                   hipMemcpyDefault, stream);
   if (err != hipSuccess) {
-    fprintf(stderr, "hipdnn_ep_readback_i32: D2H copy failed: %s\n",
-            hipGetErrorString(err));
+    hipdnn_ep_log_emit("hipdnn_ep_readback_i32: D2H copy failed: %s\n",
+                       hipGetErrorString(err));
     return 0;
   }
   err = hipStreamSynchronize(stream);
   if (err != hipSuccess) {
-    fprintf(stderr, "hipdnn_ep_readback_i32: stream sync failed: %s\n",
-            hipGetErrorString(err));
+    hipdnn_ep_log_emit("hipdnn_ep_readback_i32: stream sync failed: %s\n",
+                       hipGetErrorString(err));
     return 0;
   }
   return host_val;
@@ -198,7 +198,7 @@ int32_t hipdnn_ep_readback_i32(RuntimeState *state, const void *device_scalar) {
 void hipdnn_ep_readback_scalar(RuntimeState *state, void *host_dst,
                                const void *device_scalar, int64_t num_bytes) {
   if (!state || !host_dst || !device_scalar || num_bytes <= 0) {
-    fprintf(stderr, "hipdnn_ep_readback_scalar: invalid argument\n");
+    hipdnn_ep_log_emit("hipdnn_ep_readback_scalar: invalid argument\n");
     return;
   }
   hipStream_t stream =
@@ -211,13 +211,13 @@ void hipdnn_ep_readback_scalar(RuntimeState *state, void *host_dst,
       hipMemcpyAsync(host_dst, device_scalar, static_cast<size_t>(num_bytes),
                      hipMemcpyDefault, stream);
   if (err != hipSuccess) {
-    fprintf(stderr, "hipdnn_ep_readback_scalar: D2H copy failed: %s\n",
-            hipGetErrorString(err));
+    hipdnn_ep_log_emit("hipdnn_ep_readback_scalar: D2H copy failed: %s\n",
+                       hipGetErrorString(err));
     return;
   }
   err = hipStreamSynchronize(stream);
   if (err != hipSuccess) {
-    fprintf(stderr, "hipdnn_ep_readback_scalar: stream sync failed: %s\n",
-            hipGetErrorString(err));
+    hipdnn_ep_log_emit("hipdnn_ep_readback_scalar: stream sync failed: %s\n",
+                       hipGetErrorString(err));
   }
 }

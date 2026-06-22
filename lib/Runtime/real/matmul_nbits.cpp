@@ -74,8 +74,8 @@ const void *lookup_or_unpack_zp_u8(ZpUnpackCache &cache, void *stream,
   // pointer — shouldn't happen for stable model constants, but guard it).
   void *dst = nullptr;
   if (hipMalloc(&dst, need) != hipSuccess) {
-    fprintf(stderr, "matmul_nbits: hipMalloc(%zu) for zp_u8 cache failed\n",
-            need);
+    hipdnn_ep_log_emit("matmul_nbits: hipMalloc(%zu) for zp_u8 cache failed\n",
+                       need);
     return nullptr;
   }
   hip_matmul_nbits_unpack_zp_u8(stream, zp_packed, dst, N, groups_k);
@@ -103,8 +103,8 @@ const void *lookup_or_convert_zp_fp16(ZpUnpackCache &cache, void *stream,
 
   void *dst = nullptr;
   if (hipMalloc(&dst, need) != hipSuccess) {
-    fprintf(stderr, "matmul_nbits: hipMalloc(%zu) for zp_fp16 cache failed\n",
-            need);
+    hipdnn_ep_log_emit(
+        "matmul_nbits: hipMalloc(%zu) for zp_fp16 cache failed\n", need);
     return nullptr;
   }
   hip_matmul_nbits_convert_zp_fp16(stream, zp_packed, dst, N, groups_k);
@@ -157,7 +157,7 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
       },
       state);
   if (!state || !A || !B || !scales || !output) {
-    fprintf(stderr, "wrap_matmul_nbits: null argument\n");
+    hipdnn_ep_log_emit("wrap_matmul_nbits: null argument\n");
     return -1;
   }
 
@@ -172,12 +172,12 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
 
   void *stream = hipdnn_ep_state_get_stream(state);
   if (!stream) {
-    fprintf(stderr, "wrap_matmul_nbits: null stream\n");
+    hipdnn_ep_log_emit("wrap_matmul_nbits: null stream\n");
     return -1;
   }
 
   if (g_idx) {
-    fprintf(stderr, "wrap_matmul_nbits: g_idx not supported\n");
+    hipdnn_ep_log_emit("wrap_matmul_nbits: g_idx not supported\n");
     return -1;
   }
 
@@ -189,8 +189,8 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   if (zero_points && zp_elem_size == 1 && bits == 4 && block_size > 0) {
     MatmulNbitsState *mst = MatmulNbitsState::get_slot(state, op_state_slot);
     if (!mst) {
-      fprintf(stderr, "wrap_matmul_nbits: no MatmulNbitsState at slot %d\n",
-              op_state_slot);
+      hipdnn_ep_log_emit("wrap_matmul_nbits: no MatmulNbitsState at slot %d\n",
+                         op_state_slot);
       return -1;
     }
     int ngk = static_cast<int>((K + block_size - 1) / block_size);

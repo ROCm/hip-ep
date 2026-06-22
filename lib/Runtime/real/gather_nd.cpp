@@ -60,19 +60,18 @@ int wrap_gather_nd(RuntimeState *state, void *data, void *indices, void *output,
     return -1;
   }
   if (data_rank <= 0 || indices_rank <= 0) {
-    fprintf(stderr,
-            "[REAL] wrap_gather_nd: zero-rank input "
-            "(data_rank=%lld, indices_rank=%lld)\n",
-            (long long)data_rank, (long long)indices_rank);
+    hipdnn_ep_log_emit("[REAL] wrap_gather_nd: zero-rank input "
+                       "(data_rank=%lld, indices_rank=%lld)\n",
+                       (long long)data_rank, (long long)indices_rank);
     return -1;
   }
 
   int hip_dtype = gather_nd_hipdnn_to_hip_dtype(data_type);
   if (hip_dtype < 0) {
-    fprintf(stderr,
-            "[REAL] wrap_gather_nd: unsupported data_type=%s(%lld) "
-            "(supported: f16, f32, i32, i64)\n",
-            hipdnn_ep_datatype_name(data_type), (long long)data_type);
+    hipdnn_ep_log_emit("[REAL] wrap_gather_nd: unsupported data_type=%s(%lld) "
+                       "(supported: f16, f32, i32, i64)\n",
+                       hipdnn_ep_datatype_name(data_type),
+                       (long long)data_type);
     return -1;
   }
 

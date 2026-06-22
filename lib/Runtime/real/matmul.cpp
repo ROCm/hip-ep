@@ -272,12 +272,11 @@ static MatmulCacheEntry *queryOrCreateMatmul(MatmulAlgoTable &table,
       // passing algo=nullptr at call time. This keeps the cached layout/desc
       // so we don't pay create cost again, but avoids the heuristic on a
       // shape gfx1151's Tensile library has no tile for.
-      fprintf(stderr,
-              "queryOrCreateMatmul: no algo from heuristic for M=%lld "
-              "N=%lld K=%lld batch=%lld; falling back to default algo "
-              "(algo=nullptr, ws=0)\n",
-              (long long)M, (long long)N, (long long)K,
-              (long long)key.batch_count);
+      hipdnn_ep_log_emit(
+          "queryOrCreateMatmul: no algo from heuristic for M=%lld "
+          "N=%lld K=%lld batch=%lld; falling back to default algo "
+          "(algo=nullptr, ws=0)\n",
+          (long long)M, (long long)N, (long long)K, (long long)key.batch_count);
       entry.num_candidates = 0;
       entry.workspace_size = 0;
       entry.max_candidate_workspace = 0;
@@ -343,7 +342,7 @@ static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
       hipEventCreate(&ev_stop) != hipSuccess) {
     if (ev_start)
       hipEventDestroy(ev_start);
-    fprintf(stderr, "[AUTOTUNE] WARNING: hipEventCreate failed, skipping\n");
+    hipdnn_ep_log_emit("[AUTOTUNE] WARNING: hipEventCreate failed, skipping\n");
     entry->tuned = true;
     return;
   }
@@ -390,11 +389,10 @@ static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
   hipEventDestroy(ev_stop);
 
   if (tested == 0) {
-    fprintf(stderr,
-            "[AUTOTUNE] WARNING: M=%lld N=%lld K=%lld batch=%lld: "
-            "0/%d candidates passed, keeping heuristic #0\n",
-            (long long)key.M, (long long)key.N, (long long)key.K,
-            (long long)key.batch_count, entry->num_candidates);
+    hipdnn_ep_log_emit("[AUTOTUNE] WARNING: M=%lld N=%lld K=%lld batch=%lld: "
+                       "0/%d candidates passed, keeping heuristic #0\n",
+                       (long long)key.M, (long long)key.N, (long long)key.K,
+                       (long long)key.batch_count, entry->num_candidates);
     return;
   }
 
@@ -445,7 +443,7 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
       },
       state);
   if (!state || !A || !B || !output) {
-    fprintf(stderr, "Invalid arguments to wrap_hipblasLtMatmul\n");
+    hipdnn_ep_log_emit("Invalid arguments to wrap_hipblasLtMatmul\n");
     return -1;
   }
 
@@ -455,13 +453,13 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
 
   if (!handle || !stream) {
-    fprintf(stderr, "wrap_hipblasLtMatmul: null handle or stream\n");
+    hipdnn_ep_log_emit("wrap_hipblasLtMatmul: null handle or stream\n");
     return -1;
   }
 
   if (elem_size != 2 && elem_size != 4) {
-    fprintf(stderr, "wrap_hipblasLtMatmul: unsupported elem_size %lld\n",
-            (long long)elem_size);
+    hipdnn_ep_log_emit("wrap_hipblasLtMatmul: unsupported elem_size %lld\n",
+                       (long long)elem_size);
     return -1;
   }
 
@@ -476,18 +474,18 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
 
   MatmulState *ms = MatmulState::get_slot(state, op_state_slot);
   if (!ms || !ms->table) {
-    fprintf(stderr, "wrap_hipblasLtMatmul: missing op-state for slot %d\n",
-            op_state_slot);
+    hipdnn_ep_log_emit("wrap_hipblasLtMatmul: missing op-state for slot %d\n",
+                       op_state_slot);
     return -1;
   }
 
   MatmulCacheKey key{M, N, K, batch_count, elem_size, b_batch_stride};
   MatmulCacheEntry *cached = queryOrCreateMatmul(*ms->table, handle, key);
   if (!cached) {
-    fprintf(stderr,
-            "wrap_hipblasLtMatmul: failed to create/find cached "
-            "descriptors for M=%lld N=%lld K=%lld batch=%lld\n",
-            (long long)M, (long long)N, (long long)K, (long long)batch_count);
+    hipdnn_ep_log_emit("wrap_hipblasLtMatmul: failed to create/find cached "
+                       "descriptors for M=%lld N=%lld K=%lld batch=%lld\n",
+                       (long long)M, (long long)N, (long long)K,
+                       (long long)batch_count);
     return -1;
   }
 
@@ -538,7 +536,8 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
                       algo_ptr, call_ws_ptr, call_ws_size, stream);
 
   if (st != HIPBLAS_STATUS_SUCCESS) {
-    fprintf(stderr, "wrap_hipblasLtMatmul: hipblasLtMatmul failed (%d)\n", st);
+    hipdnn_ep_log_emit("wrap_hipblasLtMatmul: hipblasLtMatmul failed (%d)\n",
+                       st);
     return -1;
   }
 

@@ -66,27 +66,27 @@ extern "C" int wrap_linear_attention(
 
   if (type != HIPDNN_EP_DATATYPE_FLOAT && type != HIPDNN_EP_DATATYPE_HALF &&
       type != HIPDNN_EP_DATATYPE_BFLOAT16) {
-    fprintf(stderr,
-            "[linear_attention] ERROR: unsupported element type %lld "
-            "(expect HIPDNN_EP_DATATYPE_FLOAT/HALF/BFLOAT16)\n",
-            (long long)type);
+    hipdnn_ep_log_emit(
+        "[linear_attention] ERROR: unsupported element type %lld "
+        "(expect HIPDNN_EP_DATATYPE_FLOAT/HALF/BFLOAT16)\n",
+        (long long)type);
     return -1;
   }
 
   const int64_t elem_size = hipdnn_ep_datatype_size(type);
   if (elem_size <= 0) {
-    fprintf(stderr,
-            "[linear_attention] ERROR: invalid elem_size from type %lld\n",
-            (long long)type);
+    hipdnn_ep_log_emit(
+        "[linear_attention] ERROR: invalid elem_size from type %lld\n",
+        (long long)type);
     return -1;
   }
 
   // Validate required inputs
   if (!query || !key || !value || !output || !present_state) {
-    fprintf(stderr,
-            "[linear_attention] ERROR: null required pointer "
-            "(query=%p key=%p value=%p output=%p present_state=%p)\n",
-            query, key, value, output, present_state);
+    hipdnn_ep_log_emit(
+        "[linear_attention] ERROR: null required pointer "
+        "(query=%p key=%p value=%p output=%p present_state=%p)\n",
+        query, key, value, output, present_state);
     return -1;
   }
 
@@ -94,17 +94,17 @@ extern "C" int wrap_linear_attention(
   if ((update_rule == kUpdateRuleGated ||
        update_rule == kUpdateRuleGatedDelta) &&
       !decay) {
-    fprintf(stderr,
-            "[linear_attention] ERROR: decay is required for rule=%lld\n",
-            (long long)update_rule);
+    hipdnn_ep_log_emit(
+        "[linear_attention] ERROR: decay is required for rule=%lld\n",
+        (long long)update_rule);
     return -1;
   }
   if ((update_rule == kUpdateRuleDelta ||
        update_rule == kUpdateRuleGatedDelta) &&
       !beta) {
-    fprintf(stderr,
-            "[linear_attention] ERROR: beta is required for rule=%lld\n",
-            (long long)update_rule);
+    hipdnn_ep_log_emit(
+        "[linear_attention] ERROR: beta is required for rule=%lld\n",
+        (long long)update_rule);
     return -1;
   }
 
@@ -117,15 +117,15 @@ extern "C" int wrap_linear_attention(
 
   void *hip_stream = hipdnn_ep_state_get_stream(state);
   if (!hip_stream) {
-    fprintf(stderr, "[linear_attention] ERROR: failed to get HIP stream\n");
+    hipdnn_ep_log_emit("[linear_attention] ERROR: failed to get HIP stream\n");
     return -1;
   }
 
   hipblasLtHandle_t blaslt_handle =
       (hipblasLtHandle_t)hipdnn_ep_state_get_hipblas_handle(state);
   if (!blaslt_handle) {
-    fprintf(stderr,
-            "[linear_attention] ERROR: failed to get hipBLASLt handle\n");
+    hipdnn_ep_log_emit(
+        "[linear_attention] ERROR: failed to get hipBLASLt handle\n");
     return -1;
   }
 
@@ -202,10 +202,10 @@ extern "C" int wrap_linear_attention(
         seq_len, Hq, Hkv, Nk, dk, dv, scale, update_rule, decay_per_key_dim,
         beta_per_head, type);
     if (kern_result != 0) {
-      fprintf(stderr,
-              "[linear_attention] ERROR: decode kernel failed at t=%lld "
-              "(%d)\n",
-              (long long)t, kern_result);
+      hipdnn_ep_log_emit(
+          "[linear_attention] ERROR: decode kernel failed at t=%lld "
+          "(%d)\n",
+          (long long)t, kern_result);
       result = -1;
       goto cleanup;
     }

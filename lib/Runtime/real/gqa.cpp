@@ -359,8 +359,8 @@ static const GqaGemmCacheEntry *queryOrCreateGemmState(RuntimeState *state,
   assert(handle && "queryOrCreateGemmState: null handle");
   auto *cache = get_gemm_cache(state, op_state_slot);
   if (!cache) {
-    fprintf(stderr, "queryOrCreateGemmState: no GqaState at slot %d\n",
-            op_state_slot);
+    hipdnn_ep_log_emit("queryOrCreateGemmState: no GqaState at slot %d\n",
+                       op_state_slot);
     return nullptr;
   }
   auto it = cache->entries.find(key);
@@ -435,10 +435,10 @@ static const GqaGemmCacheEntry *queryOrCreateGemmState(RuntimeState *state,
     pref = nullptr;
 
     if (returned == 0) {
-      fprintf(stderr,
-              "GQA: no algorithm found for GEMM m=%lld n=%lld k=%lld "
-              "batch=%lld\n",
-              (long long)m, (long long)n, (long long)k, (long long)key.batch);
+      hipdnn_ep_log_emit(
+          "GQA: no algorithm found for GEMM m=%lld n=%lld k=%lld "
+          "batch=%lld\n",
+          (long long)m, (long long)n, (long long)k, (long long)key.batch);
       goto cache_fail;
     }
 
@@ -741,13 +741,12 @@ static int gqa_forward_hipblaslt(
         int64_t past_len_check = total_seq - sq;
         if (total_seq < 1 || past_len_check < 0 || total_seq > present_seq ||
             past_len_check > past_buf_seq) {
-          fprintf(stderr,
-                  "gqa_forward_hipblaslt (fused decode): invalid "
-                  "seqlens_k[0]+1=%lld (sq=%lld, past_len=%lld, "
-                  "present_seq=%lld, past_buf_seq=%lld)\n",
-                  (long long)total_seq, (long long)sq,
-                  (long long)past_len_check, (long long)present_seq,
-                  (long long)past_buf_seq);
+          hipdnn_ep_log_emit("gqa_forward_hipblaslt (fused decode): invalid "
+                             "seqlens_k[0]+1=%lld (sq=%lld, past_len=%lld, "
+                             "present_seq=%lld, past_buf_seq=%lld)\n",
+                             (long long)total_seq, (long long)sq,
+                             (long long)past_len_check, (long long)present_seq,
+                             (long long)past_buf_seq);
           return -1;
         }
         past_len = past_len_check;
@@ -880,19 +879,19 @@ static int gqa_forward_hipblaslt(
       // never see them -- assert defensively rather than silently producing
       // wrong results.
       if (local_window_size > 0) {
-        fprintf(stderr,
-                "gqa_forward_hipblaslt: BUG -- fused_decode (non-flash) cannot "
-                "handle local_window_size=%lld; predicate should have routed "
-                "to flash_decode or the decomposed path.\n",
-                (long long)local_window_size);
+        hipdnn_ep_log_emit(
+            "gqa_forward_hipblaslt: BUG -- fused_decode (non-flash) cannot "
+            "handle local_window_size=%lld; predicate should have routed "
+            "to flash_decode or the decomposed path.\n",
+            (long long)local_window_size);
         return -1;
       }
       if (head_sink != nullptr || use_smooth_softmax) {
-        fprintf(stderr,
-                "gqa_forward_hipblaslt: BUG -- fused_decode (non-flash) cannot "
-                "handle head_sink=%p smooth=%d; predicate should have routed "
-                "to flash_decode or the decomposed path.\n",
-                head_sink, static_cast<int>(use_smooth_softmax));
+        hipdnn_ep_log_emit(
+            "gqa_forward_hipblaslt: BUG -- fused_decode (non-flash) cannot "
+            "handle head_sink=%p smooth=%d; predicate should have routed "
+            "to flash_decode or the decomposed path.\n",
+            head_sink, static_cast<int>(use_smooth_softmax));
         return -1;
       }
       // skv is passed as a fallback; kernel reads seqlens_k[b]+1 when available
@@ -954,10 +953,10 @@ static int gqa_forward_hipblaslt(
       seqlens_k_val = seqlens_k_host[0];
       for (int64_t b = 1; b < B; ++b) {
         if (seqlens_k_host[b] != seqlens_k_val) {
-          fprintf(stderr,
-                  "gqa_forward_hipblaslt: per-batch seqlens_k not yet "
-                  "supported (batch %lld has %d, batch 0 has %d)\n",
-                  (long long)b, seqlens_k_host[b], seqlens_k_val);
+          hipdnn_ep_log_emit(
+              "gqa_forward_hipblaslt: per-batch seqlens_k not yet "
+              "supported (batch %lld has %d, batch 0 has %d)\n",
+              (long long)b, seqlens_k_host[b], seqlens_k_val);
           return -1;
         }
       }
@@ -985,12 +984,12 @@ static int gqa_forward_hipblaslt(
       past_len = total_seq - sq;
       if (total_seq < 1 || past_len < 0 || total_seq > present_seq ||
           past_len > past_buf_seq) {
-        fprintf(stderr,
-                "gqa_forward_hipblaslt: invalid seqlens_k[0]+1=%lld "
-                "(sq=%lld, past_len=%lld, present_seq=%lld, "
-                "past_buf_seq=%lld)\n",
-                (long long)total_seq, (long long)sq, (long long)past_len,
-                (long long)present_seq, (long long)past_buf_seq);
+        hipdnn_ep_log_emit("gqa_forward_hipblaslt: invalid seqlens_k[0]+1=%lld "
+                           "(sq=%lld, past_len=%lld, present_seq=%lld, "
+                           "past_buf_seq=%lld)\n",
+                           (long long)total_seq, (long long)sq,
+                           (long long)past_len, (long long)present_seq,
+                           (long long)past_buf_seq);
         return -1;
       }
     }
@@ -1417,18 +1416,17 @@ int wrap_group_query_attention(
       state);
 
   if (!state) {
-    fprintf(stderr, "wrap_group_query_attention: null state\n");
+    hipdnn_ep_log_emit("wrap_group_query_attention: null state\n");
     return -1;
   }
   if (!query || !output) {
-    fprintf(stderr, "wrap_group_query_attention: null required argument\n");
+    hipdnn_ep_log_emit("wrap_group_query_attention: null required argument\n");
     return -1;
   }
   if (num_heads % kv_num_heads != 0) {
-    fprintf(stderr,
-            "wrap_group_query_attention: num_heads (%lld) must be "
-            "divisible by kv_num_heads (%lld)\n",
-            (long long)num_heads, (long long)kv_num_heads);
+    hipdnn_ep_log_emit("wrap_group_query_attention: num_heads (%lld) must be "
+                       "divisible by kv_num_heads (%lld)\n",
+                       (long long)num_heads, (long long)kv_num_heads);
     return -1;
   }
   // The decomposed hipBLASLt GQA pipeline supports fp16 (elem_size=2) and
@@ -1441,10 +1439,10 @@ int wrap_group_query_attention(
   // (Llama / gpt-oss) remain FP16-only; no_causal never reaches them. BF16 is
   // not yet supported.
   if (element_size_bytes != 2 && element_size_bytes != 4) {
-    fprintf(stderr,
-            "wrap_group_query_attention: hipBLASLt pipeline requires "
-            "FP16 (elem_size=2) or FP32 (elem_size=4), got %lld\n",
-            (long long)element_size_bytes);
+    hipdnn_ep_log_emit(
+        "wrap_group_query_attention: hipBLASLt pipeline requires "
+        "FP16 (elem_size=2) or FP32 (elem_size=4), got %lld\n",
+        (long long)element_size_bytes);
     return -1;
   }
 
@@ -1453,46 +1451,46 @@ int wrap_group_query_attention(
   hipblasLtHandle_t ltHandle =
       static_cast<hipblasLtHandle_t>(hipdnn_ep_state_get_hipblas_handle(state));
   if (!stream || !ltHandle) {
-    fprintf(stderr, "wrap_group_query_attention: null stream or hipblas "
-                    "handle\n");
+    hipdnn_ep_log_emit("wrap_group_query_attention: null stream or hipblas "
+                       "handle\n");
     return -1;
   }
 
   // Reject features not yet implemented
   if (position_ids != nullptr) {
-    fprintf(stderr,
-            "wrap_group_query_attention: position_ids not yet implemented\n");
+    hipdnn_ep_log_emit(
+        "wrap_group_query_attention: position_ids not yet implemented\n");
     return -1;
   }
   if (attention_bias != nullptr) {
-    fprintf(stderr,
-            "wrap_group_query_attention: attention_bias not yet implemented\n");
+    hipdnn_ep_log_emit(
+        "wrap_group_query_attention: attention_bias not yet implemented\n");
     return -1;
   }
   if (k_scale != nullptr || v_scale != nullptr) {
-    fprintf(stderr, "wrap_group_query_attention: KV cache quantization not yet "
-                    "implemented\n");
+    hipdnn_ep_log_emit(
+        "wrap_group_query_attention: KV cache quantization not yet "
+        "implemented\n");
     return -1;
   }
   if (output_qk != nullptr) {
-    fprintf(stderr,
-            "wrap_group_query_attention: output_qk not yet implemented\n");
+    hipdnn_ep_log_emit(
+        "wrap_group_query_attention: output_qk not yet implemented\n");
     return -1;
   }
   if (qk_output != 0) {
-    fprintf(stderr,
-            "wrap_group_query_attention: qk_output not yet implemented\n");
+    hipdnn_ep_log_emit(
+        "wrap_group_query_attention: qk_output not yet implemented\n");
     return -1;
   }
   if (k_quant_type != 0 || v_quant_type != 0) {
-    fprintf(
-        stderr,
+    hipdnn_ep_log_emit(
         "wrap_group_query_attention: quantization types not yet implemented\n");
     return -1;
   }
   if (kv_cache_bit_width != 8) {
-    fprintf(stderr,
-            "wrap_group_query_attention: non-8bit cache not yet implemented\n");
+    hipdnn_ep_log_emit(
+        "wrap_group_query_attention: non-8bit cache not yet implemented\n");
     return -1;
   }
 
@@ -1542,8 +1540,8 @@ int wrap_group_query_attention(
       local_window_size, no_causal != 0, element_size_bytes, op_state_slot);
 
   if (rc != 0) {
-    fprintf(stderr, "wrap_group_query_attention: gqa_forward failed (rc=%d)\n",
-            rc);
+    hipdnn_ep_log_emit(
+        "wrap_group_query_attention: gqa_forward failed (rc=%d)\n", rc);
   } else {
     RUNTIME_DEBUG_LOG(
         "[REAL] wrap_group_query_attention: completed successfully\n");

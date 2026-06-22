@@ -173,22 +173,23 @@ static int broadcastBiasToOutput(RuntimeState *state, const void *C,
   miopenHandle_t handle =
       static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
   if (!handle) {
-    fprintf(stderr, "wrap_gemm: broadcastBiasToOutput: null MIOpen handle\n");
+    hipdnn_ep_log_emit(
+        "wrap_gemm: broadcastBiasToOutput: null MIOpen handle\n");
     return -1;
   }
 
   hipStream_t stream =
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
   if (!stream) {
-    fprintf(stderr, "wrap_gemm: broadcastBiasToOutput: null stream\n");
+    hipdnn_ep_log_emit("wrap_gemm: broadcastBiasToOutput: null stream\n");
     return -1;
   }
 
   miopenDataType_t dt;
   if (!resolveGemmMiopenType(typeCode, dt)) {
-    fprintf(stderr,
-            "wrap_gemm: broadcastBiasToOutput: unsupported typeCode %lld\n",
-            (long long)typeCode);
+    hipdnn_ep_log_emit(
+        "wrap_gemm: broadcastBiasToOutput: unsupported typeCode %lld\n",
+        (long long)typeCode);
     return -1;
   }
 
@@ -205,10 +206,10 @@ static int broadcastBiasToOutput(RuntimeState *state, const void *C,
   size_t outBytes = static_cast<size_t>(M) * static_cast<size_t>(N) * elemSize;
   hipError_t hipErr = hipMemsetAsync(output, 0, outBytes, stream);
   if (hipErr != hipSuccess) {
-    fprintf(stderr,
-            "wrap_gemm: broadcastBiasToOutput: hipMemsetAsync(%zu bytes) "
-            "failed (%d): %s\n",
-            outBytes, (int)hipErr, hipGetErrorString(hipErr));
+    hipdnn_ep_log_emit(
+        "wrap_gemm: broadcastBiasToOutput: hipMemsetAsync(%zu bytes) "
+        "failed (%d): %s\n",
+        outBytes, (int)hipErr, hipGetErrorString(hipErr));
     return -1;
   }
 
@@ -437,12 +438,12 @@ static GemmCacheEntry selectGemmAlgo(
     entry.workspace_size = heurs[best_idx].workspaceSize;
     entry.use_default_algo = false;
   } else {
-    fprintf(stderr,
-            "wrap_gemm: no algorithm from heuristic for M=%lld N=%lld "
-            "K=%lld transA=%lld transB=%lld typeCode=%lld; falling back "
-            "to default algo (algo=nullptr, ws=0)\n",
-            (long long)M, (long long)N, (long long)K, (long long)transA,
-            (long long)transB, (long long)typeCode);
+    hipdnn_ep_log_emit(
+        "wrap_gemm: no algorithm from heuristic for M=%lld N=%lld "
+        "K=%lld transA=%lld transB=%lld typeCode=%lld; falling back "
+        "to default algo (algo=nullptr, ws=0)\n",
+        (long long)M, (long long)N, (long long)K, (long long)transA,
+        (long long)transB, (long long)typeCode);
     entry.workspace_size = 0;
     entry.use_default_algo = true;
   }
@@ -496,7 +497,7 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
       },
       state);
   if (!state || !A || !B || !output) {
-    fprintf(stderr, "wrap_gemm: invalid arguments\n");
+    hipdnn_ep_log_emit("wrap_gemm: invalid arguments\n");
     return -1;
   }
 
@@ -506,13 +507,14 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
 
   if (!handle || !stream) {
-    fprintf(stderr, "wrap_gemm: null handle or stream\n");
+    hipdnn_ep_log_emit("wrap_gemm: null handle or stream\n");
     return -1;
   }
 
   GemmState *gs = GemmState::get_slot(state, op_state_slot);
   if (!gs || !gs->table) {
-    fprintf(stderr, "wrap_gemm: missing op-state for slot %d\n", op_state_slot);
+    hipdnn_ep_log_emit("wrap_gemm: missing op-state for slot %d\n",
+                       op_state_slot);
     return -1;
   }
   GemmAlgoTable &table = *gs->table;
@@ -521,8 +523,8 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
   hipblasComputeType_t computeType;
   hipDataType scaleType;
   if (!resolveGemmTypes(typeCode, dataType, computeType, scaleType)) {
-    fprintf(stderr, "wrap_gemm: unsupported typeCode %lld\n",
-            (long long)typeCode);
+    hipdnn_ep_log_emit("wrap_gemm: unsupported typeCode %lld\n",
+                       (long long)typeCode);
     return -1;
   }
 

@@ -176,8 +176,8 @@ const MhaGemmCacheEntry *queryOrCreateMhaGemm(RuntimeState *state,
   assert(handle && "queryOrCreateMhaGemm: null handle");
   auto *cache = get_mha_gemm_cache(state, op_state_slot);
   if (!cache) {
-    fprintf(stderr, "queryOrCreateMhaGemm: no MhaState at slot %d\n",
-            op_state_slot);
+    hipdnn_ep_log_emit("queryOrCreateMhaGemm: no MhaState at slot %d\n",
+                       op_state_slot);
     return nullptr;
   }
   auto it = cache->entries.find(key);
@@ -242,11 +242,11 @@ const MhaGemmCacheEntry *queryOrCreateMhaGemm(RuntimeState *state,
     hipblasLtMatmulPreferenceDestroy(pref);
     pref = nullptr;
     if (returned == 0) {
-      fprintf(stderr,
-              "MHA: no hipBLASLt algorithm found for GEMM m=%lld n=%lld "
-              "k=%lld batch=%lld transA=%d outputFp32=%d\n",
-              (long long)m, (long long)n, (long long)k, (long long)batch,
-              (int)key.transA, (int)key.outputFp32);
+      hipdnn_ep_log_emit(
+          "MHA: no hipBLASLt algorithm found for GEMM m=%lld n=%lld "
+          "k=%lld batch=%lld transA=%d outputFp32=%d\n",
+          (long long)m, (long long)n, (long long)k, (long long)batch,
+          (int)key.transA, (int)key.outputFp32);
       goto cache_fail;
     }
     entry.algo = heur.algo;
@@ -356,58 +356,59 @@ extern "C" int wrap_multi_head_attention(
 
   // ---- Validate inputs against the implemented (Q_K_V_BSNH fp16) subset ----
   if (!query || !output) {
-    fprintf(stderr, "[multi_head_attention] ERROR: query or output is null\n");
+    hipdnn_ep_log_emit(
+        "[multi_head_attention] ERROR: query or output is null\n");
     return -1;
   }
   if (element_size_bytes != 2) {
-    fprintf(stderr,
-            "[multi_head_attention] ERROR: only fp16 (elem=2) is supported "
-            "(got elem=%lld)\n",
-            (long long)element_size_bytes);
+    hipdnn_ep_log_emit(
+        "[multi_head_attention] ERROR: only fp16 (elem=2) is supported "
+        "(got elem=%lld)\n",
+        (long long)element_size_bytes);
     return -1;
   }
   if (query_rank != 3) {
-    fprintf(stderr,
-            "[multi_head_attention] ERROR: only rank-3 query [B,S,N*H] is "
-            "supported (got rank=%lld - packed QKV / BSN3H not yet "
-            "implemented)\n",
-            (long long)query_rank);
+    hipdnn_ep_log_emit(
+        "[multi_head_attention] ERROR: only rank-3 query [B,S,N*H] is "
+        "supported (got rank=%lld - packed QKV / BSN3H not yet "
+        "implemented)\n",
+        (long long)query_rank);
     return -1;
   }
   if (!key || !value) {
-    fprintf(stderr,
-            "[multi_head_attention] ERROR: only separate Q/K/V (Q_K_V_BSNH) "
-            "is supported; packed QKV in query is not yet implemented "
-            "(key=%p value=%p)\n",
-            key, value);
+    hipdnn_ep_log_emit(
+        "[multi_head_attention] ERROR: only separate Q/K/V (Q_K_V_BSNH) "
+        "is supported; packed QKV in query is not yet implemented "
+        "(key=%p value=%p)\n",
+        key, value);
     return -1;
   }
   if (bias || key_padding_mask || attention_bias || past_key || past_value ||
       past_sequence_length || cache_indirection) {
-    fprintf(stderr,
-            "[multi_head_attention] ERROR: bias / key_padding_mask / "
-            "attention_bias / past KV / cache_indirection are not yet "
-            "implemented (bias=%p mask=%p attn_bias=%p past_k=%p past_v=%p "
-            "past_seq=%p cache_ind=%p)\n",
-            bias, key_padding_mask, attention_bias, past_key, past_value,
-            past_sequence_length, cache_indirection);
+    hipdnn_ep_log_emit(
+        "[multi_head_attention] ERROR: bias / key_padding_mask / "
+        "attention_bias / past KV / cache_indirection are not yet "
+        "implemented (bias=%p mask=%p attn_bias=%p past_k=%p past_v=%p "
+        "past_seq=%p cache_ind=%p)\n",
+        bias, key_padding_mask, attention_bias, past_key, past_value,
+        past_sequence_length, cache_indirection);
     return -1;
   }
   if (present_key || present_value || qk) {
-    fprintf(stderr,
-            "[multi_head_attention] ERROR: present_key / present_value / qk "
-            "outputs are not yet implemented (present_k=%p present_v=%p "
-            "qk=%p)\n",
-            present_key, present_value, qk);
+    hipdnn_ep_log_emit(
+        "[multi_head_attention] ERROR: present_key / present_value / qk "
+        "outputs are not yet implemented (present_k=%p present_v=%p "
+        "qk=%p)\n",
+        present_key, present_value, qk);
     return -1;
   }
   if (num_heads <= 0 || batch_size <= 0 || seq_len_q <= 0 || seq_len_kv <= 0 ||
       query_hidden <= 0) {
-    fprintf(stderr,
-            "[multi_head_attention] ERROR: invalid shape (B=%lld sq=%lld "
-            "skv=%lld N=%lld query_hidden=%lld)\n",
-            (long long)batch_size, (long long)seq_len_q, (long long)seq_len_kv,
-            (long long)num_heads, (long long)query_hidden);
+    hipdnn_ep_log_emit(
+        "[multi_head_attention] ERROR: invalid shape (B=%lld sq=%lld "
+        "skv=%lld N=%lld query_hidden=%lld)\n",
+        (long long)batch_size, (long long)seq_len_q, (long long)seq_len_kv,
+        (long long)num_heads, (long long)query_hidden);
     return -1;
   }
 
@@ -418,20 +419,20 @@ extern "C" int wrap_multi_head_attention(
   int64_t H = head_size;
   if (H <= 0) {
     if (query_hidden % num_heads != 0) {
-      fprintf(stderr,
-              "[multi_head_attention] ERROR: query_hidden (%lld) not "
-              "divisible by num_heads (%lld); cannot derive head_size\n",
-              (long long)query_hidden, (long long)num_heads);
+      hipdnn_ep_log_emit(
+          "[multi_head_attention] ERROR: query_hidden (%lld) not "
+          "divisible by num_heads (%lld); cannot derive head_size\n",
+          (long long)query_hidden, (long long)num_heads);
       return -1;
     }
     H = query_hidden / num_heads;
   }
   // v_hidden==0 sentinel means "value matches Q"; otherwise require equal Hv.
   if (v_hidden > 0 && v_hidden != query_hidden) {
-    fprintf(stderr,
-            "[multi_head_attention] ERROR: v_hidden (%lld) != query_hidden "
-            "(%lld); different Hq and Hv is not yet implemented\n",
-            (long long)v_hidden, (long long)query_hidden);
+    hipdnn_ep_log_emit(
+        "[multi_head_attention] ERROR: v_hidden (%lld) != query_hidden "
+        "(%lld); different Hq and Hv is not yet implemented\n",
+        (long long)v_hidden, (long long)query_hidden);
     return -1;
   }
 
@@ -441,11 +442,10 @@ extern "C" int wrap_multi_head_attention(
   const int64_t Skv = seq_len_kv;
   const int64_t hidden = N * H;
   if (hidden != query_hidden) {
-    fprintf(stderr,
-            "[multi_head_attention] ERROR: derived hidden (N*H=%lld*%lld="
-            "%lld) != query_hidden (%lld)\n",
-            (long long)N, (long long)H, (long long)hidden,
-            (long long)query_hidden);
+    hipdnn_ep_log_emit(
+        "[multi_head_attention] ERROR: derived hidden (N*H=%lld*%lld="
+        "%lld) != query_hidden (%lld)\n",
+        (long long)N, (long long)H, (long long)hidden, (long long)query_hidden);
     return -1;
   }
 
@@ -460,14 +460,15 @@ extern "C" int wrap_multi_head_attention(
   hipStream_t stream =
       reinterpret_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
   if (!stream) {
-    fprintf(stderr, "[multi_head_attention] ERROR: failed to get HIP stream\n");
+    hipdnn_ep_log_emit(
+        "[multi_head_attention] ERROR: failed to get HIP stream\n");
     return -1;
   }
   hipblasLtHandle_t ltHandle = reinterpret_cast<hipblasLtHandle_t>(
       hipdnn_ep_state_get_hipblas_handle(state));
   if (!ltHandle) {
-    fprintf(stderr,
-            "[multi_head_attention] ERROR: failed to get hipBLASLt handle\n");
+    hipdnn_ep_log_emit(
+        "[multi_head_attention] ERROR: failed to get hipBLASLt handle\n");
     return -1;
   }
 
@@ -500,17 +501,17 @@ extern "C" int wrap_multi_head_attention(
                           sz_p_f16 + sz_o_bnsh + sz_gemm_ws;
 
   if (hipdnn_ep_state_ensure_workspace(state, total_ws) != 0) {
-    fprintf(stderr,
-            "[multi_head_attention] ERROR: failed to ensure workspace of "
-            "%zu bytes\n",
-            total_ws);
+    hipdnn_ep_log_emit(
+        "[multi_head_attention] ERROR: failed to ensure workspace of "
+        "%zu bytes\n",
+        total_ws);
     return -1;
   }
   char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
   if (!ws) {
-    fprintf(stderr,
-            "[multi_head_attention] ERROR: workspace pointer is null after "
-            "ensure_workspace\n");
+    hipdnn_ep_log_emit(
+        "[multi_head_attention] ERROR: workspace pointer is null after "
+        "ensure_workspace\n");
     return -1;
   }
   size_t off = 0;
@@ -598,10 +599,10 @@ extern "C" int wrap_multi_head_attention(
     const MhaGemmCacheEntry *scoreState =
         queryOrCreateMhaGemm(state, ltHandle, scoreKey, op_state_slot);
     if (!scoreState) {
-      fprintf(stderr,
-              "[multi_head_attention] ERROR: failed to build Score GEMM "
-              "state for B*N=%lld Skv=%lld Sq=%lld H=%lld\n",
-              (long long)(B * N), (long long)Skv, (long long)Sq, (long long)H);
+      hipdnn_ep_log_emit(
+          "[multi_head_attention] ERROR: failed to build Score GEMM "
+          "state for B*N=%lld Skv=%lld Sq=%lld H=%lld\n",
+          (long long)(B * N), (long long)Skv, (long long)Sq, (long long)H);
       result = -1;
       goto cleanup;
     }
@@ -654,10 +655,10 @@ extern "C" int wrap_multi_head_attention(
     const MhaGemmCacheEntry *valueState =
         queryOrCreateMhaGemm(state, ltHandle, valueKey, op_state_slot);
     if (!valueState) {
-      fprintf(stderr,
-              "[multi_head_attention] ERROR: failed to build Value GEMM "
-              "state for B*N=%lld Sq=%lld Skv=%lld H=%lld\n",
-              (long long)(B * N), (long long)Sq, (long long)Skv, (long long)H);
+      hipdnn_ep_log_emit(
+          "[multi_head_attention] ERROR: failed to build Value GEMM "
+          "state for B*N=%lld Sq=%lld Skv=%lld H=%lld\n",
+          (long long)(B * N), (long long)Sq, (long long)Skv, (long long)H);
       result = -1;
       goto cleanup;
     }

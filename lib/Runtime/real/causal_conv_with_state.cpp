@@ -214,15 +214,15 @@ int wrap_causal_conv_with_state(RuntimeState *state, int op_state_slot,
   // ad-hoc cleanup paths (and to keep the OP_PROFILE scope tight around the
   // actual GPU work).
   if (!state || !input || !weight || !output || !present_state) {
-    fprintf(stderr, "wrap_causal_conv_with_state: null required argument\n");
+    hipdnn_ep_log_emit("wrap_causal_conv_with_state: null required argument\n");
     return -1;
   }
 
   if (ndim != 1) {
-    fprintf(stderr,
-            "wrap_causal_conv_with_state: ndim=%lld not yet supported "
-            "(only ndim=1)\n",
-            (long long)ndim);
+    hipdnn_ep_log_emit(
+        "wrap_causal_conv_with_state: ndim=%lld not yet supported "
+        "(only ndim=1)\n",
+        (long long)ndim);
     return -1;
   }
 
@@ -232,23 +232,23 @@ int wrap_causal_conv_with_state(RuntimeState *state, int op_state_slot,
   else if (element_size_bytes == 2)
     dt = miopenHalf;
   else {
-    fprintf(stderr,
-            "wrap_causal_conv_with_state: unsupported element_size %lld\n",
-            (long long)element_size_bytes);
+    hipdnn_ep_log_emit(
+        "wrap_causal_conv_with_state: unsupported element_size %lld\n",
+        (long long)element_size_bytes);
     return -1;
   }
 
   hipStream_t stream =
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
   if (!stream) {
-    fprintf(stderr, "wrap_causal_conv_with_state: null stream\n");
+    hipdnn_ep_log_emit("wrap_causal_conv_with_state: null stream\n");
     return -1;
   }
 
   miopenHandle_t handle =
       static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
   if (!handle) {
-    fprintf(stderr, "wrap_causal_conv_with_state: null MIOpen handle\n");
+    hipdnn_ep_log_emit("wrap_causal_conv_with_state: null MIOpen handle\n");
     return -1;
   }
 
@@ -295,10 +295,10 @@ int wrap_causal_conv_with_state(RuntimeState *state, int op_state_slot,
         stream, input, weight, bias, past_state, output, present_state,
         batch_size, channels, kernel_size, activation, element_size_bytes);
     if (rc != 0) {
-      fprintf(stderr,
-              "wrap_causal_conv_with_state: hip_causal_conv_step_decode "
-              "failed (%d)\n",
-              rc);
+      hipdnn_ep_log_emit(
+          "wrap_causal_conv_with_state: hip_causal_conv_step_decode "
+          "failed (%d)\n",
+          rc);
       return -1;
     }
     RUNTIME_DEBUG_LOG(
@@ -320,10 +320,10 @@ int wrap_causal_conv_with_state(RuntimeState *state, int op_state_slot,
                                 present_state, batch_size, channels, seq_len,
                                 kernel_size, activation, element_size_bytes);
     if (rc != 0) {
-      fprintf(stderr,
-              "wrap_causal_conv_with_state: hip_causal_conv_prefill failed "
-              "(%d)\n",
-              rc);
+      hipdnn_ep_log_emit(
+          "wrap_causal_conv_with_state: hip_causal_conv_prefill failed "
+          "(%d)\n",
+          rc);
       return -1;
     }
     RUNTIME_DEBUG_LOG(
@@ -347,9 +347,9 @@ int wrap_causal_conv_with_state(RuntimeState *state, int op_state_slot,
 
   CausalConvState *ccs = CausalConvState::get_slot(state, op_state_slot);
   if (!ccs) {
-    fprintf(stderr,
-            "wrap_causal_conv_with_state: no CausalConvState at slot %d\n",
-            op_state_slot);
+    hipdnn_ep_log_emit(
+        "wrap_causal_conv_with_state: no CausalConvState at slot %d\n",
+        op_state_slot);
     return -1;
   }
   auto *cache = &ccs->cache;
@@ -362,10 +362,9 @@ int wrap_causal_conv_with_state(RuntimeState *state, int op_state_slot,
           fresh, dt, batch_size, channels, virtual_len, seq_len, kernel_size,
           bias != nullptr, activation);
       if (st != miopenStatusSuccess) {
-        fprintf(stderr,
-                "wrap_causal_conv_with_state: MIOpen descriptor "
-                "creation failed (%d)\n",
-                static_cast<int>(st));
+        hipdnn_ep_log_emit("wrap_causal_conv_with_state: MIOpen descriptor "
+                           "creation failed (%d)\n",
+                           static_cast<int>(st));
         destroyEntry(fresh);
         return -1;
       }
@@ -402,18 +401,18 @@ int wrap_causal_conv_with_state(RuntimeState *state, int op_state_slot,
         handle, entry->wDesc, entry->inDesc, entry->convDesc, entry->outDesc,
         &conv_workspace_size);
     if (st != miopenStatusSuccess) {
-      fprintf(stderr,
-              "wrap_causal_conv_with_state: GetWorkSpaceSize failed (%d)\n",
-              static_cast<int>(st));
+      hipdnn_ep_log_emit(
+          "wrap_causal_conv_with_state: GetWorkSpaceSize failed (%d)\n",
+          static_cast<int>(st));
       return -1;
     }
   }
 
   const size_t total_ws = virtual_size + sigmoid_size + conv_workspace_size;
   if (total_ws > 0 && hipdnn_ep_state_ensure_workspace(state, total_ws) != 0) {
-    fprintf(stderr,
-            "wrap_causal_conv_with_state: ensure_workspace(%zu) failed\n",
-            total_ws);
+    hipdnn_ep_log_emit(
+        "wrap_causal_conv_with_state: ensure_workspace(%zu) failed\n",
+        total_ws);
     return -1;
   }
   char *ws_base = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
@@ -444,10 +443,10 @@ int wrap_causal_conv_with_state(RuntimeState *state, int op_state_slot,
                             static_cast<size_t>(state_len) * es, height,
                             hipMemcpyDeviceToDevice, stream);
     if (herr != hipSuccess) {
-      fprintf(stderr,
-              "wrap_causal_conv_with_state: hipMemcpy2DAsync(past_state) "
-              "failed (%d)\n",
-              static_cast<int>(herr));
+      hipdnn_ep_log_emit(
+          "wrap_causal_conv_with_state: hipMemcpy2DAsync(past_state) "
+          "failed (%d)\n",
+          static_cast<int>(herr));
       return -1;
     }
   } else {
@@ -458,10 +457,10 @@ int wrap_causal_conv_with_state(RuntimeState *state, int op_state_slot,
         hipMemset2DAsync(virtual_buf, dpitch, 0,
                          static_cast<size_t>(state_len) * es, height, stream);
     if (herr != hipSuccess) {
-      fprintf(stderr,
-              "wrap_causal_conv_with_state: hipMemset2DAsync(past_state) "
-              "failed (%d)\n",
-              static_cast<int>(herr));
+      hipdnn_ep_log_emit(
+          "wrap_causal_conv_with_state: hipMemset2DAsync(past_state) "
+          "failed (%d)\n",
+          static_cast<int>(herr));
       return -1;
     }
   }
@@ -473,10 +472,9 @@ int wrap_causal_conv_with_state(RuntimeState *state, int op_state_slot,
                           static_cast<size_t>(seq_len) * es, height,
                           hipMemcpyDeviceToDevice, stream);
   if (herr != hipSuccess) {
-    fprintf(stderr,
-            "wrap_causal_conv_with_state: hipMemcpy2DAsync(input) "
-            "failed (%d)\n",
-            static_cast<int>(herr));
+    hipdnn_ep_log_emit("wrap_causal_conv_with_state: hipMemcpy2DAsync(input) "
+                       "failed (%d)\n",
+                       static_cast<int>(herr));
     return -1;
   }
 
@@ -488,10 +486,10 @@ int wrap_causal_conv_with_state(RuntimeState *state, int op_state_slot,
                           dpitch, static_cast<size_t>(state_len) * es, height,
                           hipMemcpyDeviceToDevice, stream);
   if (herr != hipSuccess) {
-    fprintf(stderr,
-            "wrap_causal_conv_with_state: hipMemcpy2DAsync(present_state) "
-            "failed (%d)\n",
-            static_cast<int>(herr));
+    hipdnn_ep_log_emit(
+        "wrap_causal_conv_with_state: hipMemcpy2DAsync(present_state) "
+        "failed (%d)\n",
+        static_cast<int>(herr));
     return -1;
   }
 
@@ -504,10 +502,9 @@ int wrap_causal_conv_with_state(RuntimeState *state, int op_state_slot,
   do {                                                                         \
     mst = (call);                                                              \
     if (mst != miopenStatusSuccess) {                                          \
-      fprintf(stderr,                                                          \
-              "wrap_causal_conv_with_state: MIOpen error %d at "               \
-              "%s:%d\n",                                                       \
-              mst, __FILE__, __LINE__);                                        \
+      hipdnn_ep_log_emit("wrap_causal_conv_with_state: MIOpen error %d at "    \
+                         "%s:%d\n",                                            \
+                         mst, __FILE__, __LINE__);                             \
       return -1;                                                               \
     }                                                                          \
   } while (0)
@@ -521,8 +518,8 @@ int wrap_causal_conv_with_state(RuntimeState *state, int op_state_slot,
         /*requestAlgoCount=*/1, &returnedAlgoCount, &perfResult, conv_workspace,
         conv_workspace_size, /*exhaustiveSearch=*/false));
     if (returnedAlgoCount <= 0) {
-      fprintf(stderr,
-              "wrap_causal_conv_with_state: Find returned no algorithms\n");
+      hipdnn_ep_log_emit(
+          "wrap_causal_conv_with_state: Find returned no algorithms\n");
       return -1;
     }
     entry->algo = perfResult.fwd_algo;

@@ -44,8 +44,8 @@ static miopenDataType_t hipdnn_ep_to_miopen_type(int64_t data_type, bool &ok) {
   case HIPDNN_EP_DATATYPE_BFLOAT16:
     return miopenBFloat16;
   default:
-    fprintf(stderr, "[REAL] unsupported data_type %lld for MIOpen\n",
-            (long long)data_type);
+    hipdnn_ep_log_emit("[REAL] unsupported data_type %lld for MIOpen\n",
+                       (long long)data_type);
     ok = false;
     return miopenFloat;
   }
@@ -194,17 +194,17 @@ namespace {
 int launchReciprocalHip(RuntimeState *state, void *input, void *output,
                         int64_t num_elements, int64_t data_type) {
   if (!state || !input || !output) {
-    fprintf(stderr, "launchReciprocalHip: null argument\n");
+    hipdnn_ep_log_emit("launchReciprocalHip: null argument\n");
     return -1;
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
   int hip_dtype = hipdnn_ep_to_hip_dtype_elementwise_unary(data_type);
   if (hip_dtype < 0) {
-    fprintf(stderr,
-            "[REAL] wrap_power (reciprocal HIP): unsupported data_type %lld "
-            "(%s)\n",
-            (long long)data_type, hipdnn_ep_datatype_name(data_type));
+    hipdnn_ep_log_emit(
+        "[REAL] wrap_power (reciprocal HIP): unsupported data_type %lld "
+        "(%s)\n",
+        (long long)data_type, hipdnn_ep_datatype_name(data_type));
     return -1;
   }
 
@@ -219,16 +219,16 @@ int launchReciprocalHip(RuntimeState *state, void *input, void *output,
 int launchSqrtHip(RuntimeState *state, void *input, void *output,
                   int64_t num_elements, int64_t data_type) {
   if (!state || !input || !output) {
-    fprintf(stderr, "launchSqrtHip: null argument\n");
+    hipdnn_ep_log_emit("launchSqrtHip: null argument\n");
     return -1;
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
   int hip_dtype = hipdnn_ep_to_hip_dtype_elementwise_unary(data_type);
   if (hip_dtype < 0) {
-    fprintf(stderr,
-            "[REAL] wrap_power (sqrt HIP): unsupported data_type %lld (%s)\n",
-            (long long)data_type, hipdnn_ep_datatype_name(data_type));
+    hipdnn_ep_log_emit(
+        "[REAL] wrap_power (sqrt HIP): unsupported data_type %lld (%s)\n",
+        (long long)data_type, hipdnn_ep_datatype_name(data_type));
     return -1;
   }
 
@@ -253,7 +253,7 @@ int wrap_power(RuntimeState *state, void *input, void *output,
       },
       state);
   if (!state || !input || !output) {
-    fprintf(stderr, "wrap_power: null argument\n");
+    hipdnn_ep_log_emit("wrap_power: null argument\n");
     return -1;
   }
 
@@ -274,7 +274,7 @@ int wrap_power(RuntimeState *state, void *input, void *output,
   miopenHandle_t handle =
       static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
   if (!handle) {
-    fprintf(stderr, "wrap_power: null MIOpen handle\n");
+    hipdnn_ep_log_emit("wrap_power: null MIOpen handle\n");
     return -1;
   }
 
@@ -282,7 +282,7 @@ int wrap_power(RuntimeState *state, void *input, void *output,
                               alpha,        beta,      gamma};
   const PowerActivationCacheEntry *c = queryOrCreatePowerActivation(key);
   if (!c) {
-    fprintf(stderr, "wrap_power: descriptor cache creation failed\n");
+    hipdnn_ep_log_emit("wrap_power: descriptor cache creation failed\n");
     return -1;
   }
 
@@ -291,7 +291,7 @@ int wrap_power(RuntimeState *state, void *input, void *output,
       miopenActivationForward(handle, c->actDesc, &scale_alpha, c->inDesc,
                               input, &scale_beta, c->outDesc, output);
   if (st != miopenStatusSuccess) {
-    fprintf(stderr, "wrap_power: miopenActivationForward failed (%d)\n", st);
+    hipdnn_ep_log_emit("wrap_power: miopenActivationForward failed (%d)\n", st);
     return -1;
   }
 
