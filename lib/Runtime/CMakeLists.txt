@@ -147,6 +147,62 @@ else()
 endif()
 
 # ============================================================================
+# STEP 2b: Compile ck_dsl-generated HIP kernels to gfx HSACO at build time
+# ============================================================================
+# The ck_dsl norm fast paths ship as ck_dsl-generated HIP *source* (.hip) under
+# 3rd-party/custom_kernels/ck_dsl. We compile them to an arch-specific HSACO
+# here with `hipcc --genco`, then embed the HSACO bytes into a header the
+# runtime shims include. No compiled binary is committed -- the .hip source is
+# the single source of truth (regenerate via ck_dsl's core.lower_hip backend).
+if(NOT BUILD_MOCK_RUNTIME)
+    set(CKDSL_OFFLOAD_ARCH "gfx1151" CACHE STRING
+        "GPU arch for ck_dsl HIP norm kernels (HSACO is arch-specific)")
+
+    find_program(HIPCC_EXECUTABLE NAMES hipcc hipcc.bat hipcc.exe
+        PATHS ${THEROCK_DIST}/bin ${hip_DIR}/../../bin ${hip_DIR}/../../../bin)
+    if(NOT HIPCC_EXECUTABLE)
+        message(FATAL_ERROR
+            "hipcc not found (needed to compile ck_dsl .hip kernels). "
+            "Set THEROCK_DIST or add hipcc to PATH.")
+    endif()
+    message(STATUS "ck_dsl: using hipcc at ${HIPCC_EXECUTABLE} "
+                   "(arch ${CKDSL_OFFLOAD_ARCH})")
+
+    set(CKDSL_KERNEL_DIR ${CMAKE_SOURCE_DIR}/3rd-party/custom_kernels/ck_dsl)
+    set(CKDSL_GEN_ROOT ${CMAKE_CURRENT_BINARY_DIR}/ckdsl_gen)
+    set(CKDSL_GEN_DIR ${CKDSL_GEN_ROOT}/ck_dsl)
+    file(MAKE_DIRECTORY ${CKDSL_GEN_DIR})
+
+    # hip_name: basename of the committed .hip; var: C symbol the shim includes.
+    function(ckdsl_kernel_header hip_name var)
+        set(hsaco ${CMAKE_CURRENT_BINARY_DIR}/${hip_name}.hsaco)
+        set(header ${CKDSL_GEN_DIR}/${hip_name}_hsaco.h)
+        add_custom_command(
+            OUTPUT ${hsaco}
+            COMMAND ${HIPCC_EXECUTABLE} --genco
+                    --offload-arch=${CKDSL_OFFLOAD_ARCH}
+                    ${CKDSL_KERNEL_DIR}/${hip_name}.hip -o ${hsaco}
+            DEPENDS ${CKDSL_KERNEL_DIR}/${hip_name}.hip
+            COMMENT "ck_dsl: hipcc --genco ${hip_name}.hip -> HSACO (${CKDSL_OFFLOAD_ARCH})"
+            VERBATIM)
+        add_custom_command(
+            OUTPUT ${header}
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/cmake/hsaco_to_header.py
+                    ${hsaco} --var ${var} --output ${header}
+            DEPENDS ${hsaco} ${CMAKE_SOURCE_DIR}/cmake/hsaco_to_header.py
+            COMMENT "ck_dsl: embed ${hip_name}.hsaco -> ${hip_name}_hsaco.h"
+            VERBATIM)
+        set(CKDSL_GEN_HEADERS ${CKDSL_GEN_HEADERS} ${header} PARENT_SCOPE)
+    endfunction()
+
+    ckdsl_kernel_header(ck_dsl_rmsnorm2d_f32_gfx1151
+                        kCkDslRmsnorm2dF32Gfx1151Hsaco)
+    ckdsl_kernel_header(ck_dsl_add_rmsnorm2d_f32_gfx1151
+                        kCkDslAddRmsnorm2dF32Gfx1151Hsaco)
+endif()
+
+# ============================================================================
 # STEP 3: Generate LLVM Bitcode from Runtime Modules
 # ============================================================================
 
@@ -203,6 +259,10 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
         # HSACO blobs as "ck_dsl/<name>.h".
         list(APPEND COMPILE_FLAGS "-I" "${CMAKE_SOURCE_DIR}/3rd-party/custom_kernels")
 
+        # Build-generated ck_dsl HSACO headers (compiled from committed .hip via
+        # hipcc in STEP 2b); included as "ck_dsl/<name>_hsaco.h".
+        list(APPEND COMPILE_FLAGS "-I" "${CKDSL_GEN_ROOT}")
+
         # Add ROCm includes
         if(THEROCK_DIST)
             message(STATUS "Adding TheRock includes for ${OUTPUT_BC}: ${THEROCK_DIST}/include")
@@ -214,7 +274,8 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
             ${CMAKE_CURRENT_SOURCE_DIR}/real/runtime_types.h
             ${CMAKE_CURRENT_SOURCE_DIR}/real/cache_utils.h
             ${CMAKE_CURRENT_SOURCE_DIR}/real/zp_unpack_cache.h
-            ${CMAKE_SOURCE_DIR}/3rd-party/custom_kernels/include/hip_custom_kernels.h)
+            ${CMAKE_SOURCE_DIR}/3rd-party/custom_kernels/include/hip_custom_kernels.h
+            ${CKDSL_GEN_HEADERS})
     else()
         list(APPEND COMPILE_FLAGS "-I" "${CMAKE_CURRENT_SOURCE_DIR}/mock")
         list(APPEND IMPL_DEPS
