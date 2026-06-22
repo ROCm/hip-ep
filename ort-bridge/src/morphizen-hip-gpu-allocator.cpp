@@ -25,43 +25,9 @@
 #include <cstring>
 #include <string>
 
-#include <atomic>
-#include <chrono>
-#include <cstdio>
-
 namespace morphizen {
 
 namespace {
-
-// TEMPORARY verification instrumentation: measure how much wall time the EP
-// allocator spends in hipHostMalloc / hipHostFree across the whole process,
-// and how many times each is called. Prints a one-line summary at DLL unload
-// (static destructor). Remove once the alloc-cost hypothesis is confirmed.
-struct AllocProfile {
-  std::atomic<uint64_t> alloc_reqs{0};  // every AllocImpl call
-  std::atomic<uint64_t> pool_hits{0};   // served from the free-list (no driver)
-  std::atomic<uint64_t> alloc_calls{0}; // actual hipHostMalloc (cold miss)
-  std::atomic<uint64_t> alloc_ns{0};
-  std::atomic<uint64_t> alloc_bytes{0};
-  std::atomic<uint64_t> free_calls{0}; // actual hipHostFree (destructor only)
-  std::atomic<uint64_t> free_ns{0};
-  ~AllocProfile() {
-    uint64_t ar = alloc_reqs.load(), ph = pool_hits.load();
-    uint64_t ac = alloc_calls.load(), an = alloc_ns.load();
-    uint64_t fc = free_calls.load(), fn = free_ns.load();
-    std::fprintf(
-        stderr,
-        "[ALLOC PROFILE] AllocImpl reqs=%llu pool_hits=%llu | hipHostMalloc "
-        "calls=%llu total=%.3fms avg=%.4fms bytes=%llu | hipHostFree "
-        "calls=%llu total=%.3fms avg=%.4fms\n",
-        (unsigned long long)ar, (unsigned long long)ph,
-        (unsigned long long)ac, an / 1e6, ac ? (an / 1e6) / ac : 0.0,
-        (unsigned long long)alloc_bytes.load(), (unsigned long long)fc,
-        fn / 1e6, fc ? (fn / 1e6) / fc : 0.0);
-    std::fflush(stderr);
-  }
-};
-AllocProfile g_alloc_profile;
 
 // Convert a non-success hipError_t into an OrtStatus*. The caller owns the
 // returned status (must release via ort_api.ReleaseStatus).
@@ -132,7 +98,6 @@ void* ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator* this_,
     return nullptr;
   }
   auto* self = static_cast<HipGpuAllocator*>(this_);
-  g_alloc_profile.alloc_reqs.fetch_add(1, std::memory_order_relaxed);
 
   // Fast path: reuse a same-size buffer from the free list (no driver call).
   {
@@ -141,7 +106,6 @@ void* ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator* this_,
     if (it != self->free_lists_.end() && !it->second.empty()) {
       void* ptr = it->second.back();
       it->second.pop_back();
-      g_alloc_profile.pool_hits.fetch_add(1, std::memory_order_relaxed);
       return ptr;
     }
   }
@@ -163,15 +127,8 @@ void* ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator* this_,
   // / CopyCpuToDevice through the HIP runtime. Tracked separately because
   // the OGA-side change cuts across the smartptrs / DeviceBuffer abstraction.
   void* ptr = nullptr;
-  auto _t0 = std::chrono::high_resolution_clock::now();
   hipError_t err =
       hipHostMalloc(&ptr, size, hipHostMallocMapped | hipHostMallocCoherent);
-  auto _t1 = std::chrono::high_resolution_clock::now();
-  g_alloc_profile.alloc_calls.fetch_add(1, std::memory_order_relaxed);
-  g_alloc_profile.alloc_ns.fetch_add(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(_t1 - _t0).count(),
-      std::memory_order_relaxed);
-  g_alloc_profile.alloc_bytes.fetch_add(size, std::memory_order_relaxed);
   if (err != hipSuccess) {
     LOG(ERROR) << "[MorphiZen HIP] hipHostMalloc(Mapped|Coherent) failed for "
                << size << " bytes (device " << self->device_id_
@@ -212,13 +169,7 @@ HipGpuAllocator::~HipGpuAllocator() {
   ScopedDevice _(device_id_);
   std::lock_guard<std::mutex> lk(pool_mutex_);
   for (const auto& kv : ptr_to_size_) {
-    auto _t0 = std::chrono::high_resolution_clock::now();
     hipError_t err = hipHostFree(kv.first);
-    auto _t1 = std::chrono::high_resolution_clock::now();
-    g_alloc_profile.free_calls.fetch_add(1, std::memory_order_relaxed);
-    g_alloc_profile.free_ns.fetch_add(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(_t1 - _t0).count(),
-        std::memory_order_relaxed);
     if (err != hipSuccess) {
       LOG(WARNING) << "[MorphiZen HIP] hipHostFree failed (device " << device_id_
                    << "): " << hipGetErrorString(err);
