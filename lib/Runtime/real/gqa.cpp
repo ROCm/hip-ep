@@ -348,7 +348,7 @@ struct GqaState : OpStateT<GqaState> {
 // nullptr when the slot is unconstructed (init failure) — callers propagate the
 // error rather than lazily allocating, since the slot is built at session init.
 static GqaGemmCache *get_gemm_cache(RuntimeState *state, int op_state_slot) {
-  GqaState *gs = GqaState::get_slot(state, op_state_slot);
+  GqaState *gs = GqaState::get_op_state(state, op_state_slot);
   return gs ? &gs->cache : nullptr;
 }
 
@@ -1572,5 +1572,6 @@ GqaGemmCache::~GqaGemmCache() {
 // construct fn stores the state into op_states[slot] itself.
 extern "C" int8_t hipdnn_ep_op_state_construct_gqa(RuntimeState *state,
                                                    int32_t slot) {
-  return GqaState::create(state, slot);
+  hipdnn_ep_op_state_set(state, slot, GqaState::create().release());
+  return 0;
 }

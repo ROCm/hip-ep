@@ -126,7 +126,8 @@ struct ActivationState : OpStateT<ActivationState> {
 
 extern "C" int8_t hipdnn_ep_op_state_construct_activation(RuntimeState *state,
                                                           int32_t slot) {
-  return ActivationState::create(state, slot);
+  hipdnn_ep_op_state_set(state, slot, ActivationState::create().release());
+  return 0;
 }
 
 static const ActivationCacheEntry *
@@ -246,7 +247,7 @@ int wrap_miopenActivationForward(RuntimeState *state, int op_state_slot,
     return -1;
   }
 
-  ActivationState *as = ActivationState::get_slot(state, op_state_slot);
+  ActivationState *as = ActivationState::get_op_state(state, op_state_slot);
   if (!as || !as->table) {
     fprintf(stderr,
             "[REAL] wrap_miopenActivationForward: missing op-state for slot "
