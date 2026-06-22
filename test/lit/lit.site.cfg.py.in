@@ -26,9 +26,11 @@ config.hip_build_dir = r"@CMAKE_BINARY_DIR@"
 # string) so that lit substitutes the actual config (Debug/Release) at runtime.
 config.hip_build_mode = "@LLVM_BUILD_MODE@"
 
-# Whether the tools were built exporting their MLIR symbols for plugins
-# (HIPDNN_ENABLE_PLUGINS). lit.cfg.py turns this into the `hip_plugins_enabled`
-# feature that gates the Plugin/ pass tests.
+# Whether to run the Plugin/ pass tests (CMake HIPDNN_PLUGIN_LIT_TESTS, default
+# OFF). These tests require the host to be built against a plugin-capable LLVM
+# that exports its mlir:: symbols; CMake cannot detect that, so it is an explicit
+# opt-in. lit.cfg.py turns this into the `hip_plugins_enabled` feature (further
+# restricted to non-Windows) that gates the Plugin/ pass tests.
 config.hip_plugins_enabled = @HIPDNN_PLUGINS_LIT_FEATURE@
 
 lit.llvm.initialize(lit_config, config)

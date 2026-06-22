@@ -120,16 +120,22 @@ config.substitutions.append(
     ("%hip-ep-sample-plugin", sample_plugin_path.replace("\\", "/"))
 )
 
-# `hip_plugins_enabled` feature: set when the tools were built with
-# HIPDNN_ENABLE_PLUGINS (they export their MLIR symbols) AND on a platform where
-# a dlopen'd plugin's mlir::PassRegistration binds to the host's single pass
-# registry. That binding only holds on ELF (-rdynamic / export_executable_-
-# symbols_for_plugins lets the host's definitions interpose the plugin's
-# undefined MLIR refs at load). On Windows a plugin DLL must link the MLIR
-# libraries to resolve at link time, so it gets its OWN registry and the
-# host never sees the registration -- hence the feature (and the plugin-PASS
-# tests that gate on it) is restricted to non-Windows. The loader / slot-
-# recording / bitcode / library paths are pure C ABI, work everywhere, and are
-# covered by the unit test rather than these LIT tests.
+# `hip_plugins_enabled` feature: gates the Plugin/ pass tests, which dlopen a
+# plugin into hip-mlir-opt and require the plugin's mlir::PassRegistration to
+# bind to the host's single pass registry. Two conditions must both hold, so the
+# feature is an explicit opt-in (CMake HIPDNN_PLUGIN_LIT_TESTS, default OFF, which
+# drives config.hip_plugins_enabled):
+#   1. The host must EXPORT its mlir:: symbols, which only happens when it was
+#      built against a plugin-capable LLVM (shared / default-visibility). A
+#      static, hidden-visibility LLVM (e.g. the CI cache) cannot export them, so
+#      the plugin's undefined MLIR refs never resolve to the host -> load fails.
+#      CMake cannot detect the LLVM's visibility, hence the manual opt-in.
+#   2. The binding mechanism is ELF-only (-rdynamic / export_executable_symbols_-
+#      for_plugins lets the host's definitions interpose the plugin's undefined
+#      refs at load). On Windows a plugin DLL must link the MLIR libraries to
+#      resolve at link time, so it gets its OWN registry and the host never sees
+#      the registration -- hence the feature is also restricted to non-Windows.
+# The loader / slot-recording / bitcode / library paths are pure C ABI, work
+# everywhere, and are covered by the unit test rather than these LIT tests.
 if getattr(config, "hip_plugins_enabled", False) and os.name != "nt":
     config.available_features.add("hip_plugins_enabled")

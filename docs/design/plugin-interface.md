@@ -288,10 +288,12 @@ registration (and the dialect/op extension, which shares the same registries) is
 supported on Linux but not on Windows with the static-MLIR build.** Making it
 work on Windows would require the shared-`libMLIR` dylib model above. The
 consequences in-tree: the sample plugin links the MLIR libraries only on Windows
-(so it still builds), and the plugin-pass LIT tests are gated to non-Windows via
-the `hip_plugins_enabled` feature. The loader / pipeline-slot recording / bitcode
-/ library contributions are pure C ABI and work on every platform (covered by the
-plugin-loader unit test).
+(so it still builds), and the plugin-pass LIT tests are gated via the
+`hip_plugins_enabled` feature -- non-Windows *and* an explicit opt-in
+(`-DHIPDNN_PLUGIN_LIT_TESTS=ON`, default OFF) for the LLVM-visibility requirement
+covered in "LLVM build configuration the plugin host needs" below. The loader /
+pipeline-slot recording / bitcode / library contributions are pure C ABI and work
+on every platform (covered by the plugin-loader unit test).
 
 The bitcode and library contributions do not cross MLIR's global state, so
 they work regardless of this -- the symbol-export requirement applies
@@ -340,6 +342,16 @@ Practical consequences for a downstream team:
   future prebuilt `hip-compiler` distribution intended to host plugins must be
   built that way; until then, plugin authors build `onnx-hipdnn-ep` themselves
   against a plugin-capable LLVM (which also lets them target their own GPU arch).
+
+In-tree, the plugin-pass LIT tests (`test/lit/Plugin/`) encode exactly this
+dependency: CMake cannot detect the host LLVM's visibility, so running them is an
+explicit opt-in via `-DHIPDNN_PLUGIN_LIT_TESTS=ON` (default OFF). A builder on a
+plugin-capable LLVM turns it on to exercise the MLIR-contributing path; the
+default static / hidden-visibility build (the CI cache) leaves it off, where the
+tests are `UNSUPPORTED` rather than spuriously failing. `HIPDNN_ENABLE_PLUGINS`
+is independent and stays on -- the sample plugin still builds and the host still
+emits the export flag; the opt-in only controls whether the load-dependent tests
+run.
 
 ## What a downstream team does
 

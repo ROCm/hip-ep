@@ -17,6 +17,12 @@
 // static MLIR registries and the lookup would miss -- hence the
 // hip_plugins_enabled gate.) The slot-recording / bitcode / library halves of
 // the ABI work regardless and are covered by test/plugin/test_plugin_loader.
+//
+// hip_plugins_enabled is an explicit opt-in (CMake -DHIPDNN_PLUGIN_LIT_TESTS=ON,
+// default OFF) because the symbol export above only actually works when the host
+// is built against a plugin-capable LLVM (shared / default-visibility); against
+// a static, hidden-visibility LLVM the export is empty and the plugin fails to
+// load. Without the opt-in this test is UNSUPPORTED rather than failing.
 //===----------------------------------------------------------------------===//
 
 // RUN: env HIP_EP_PLUGINS=%hip-ep-sample-plugin \
