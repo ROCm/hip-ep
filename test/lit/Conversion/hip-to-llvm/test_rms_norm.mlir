@@ -43,7 +43,7 @@ func.func @rms_norm_static_f32(%ctx: !hip.context) {
   // CHECK-DAG: llvm.mlir.constant(9.99999974E-6 : f32)
 
   // Verify runtime function call (10 params with element_size_bytes)
-  // CHECK: llvm.call @wrap_miopenT5LayerNormForward({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, f32, i64) -> i32
+  // CHECK: llvm.call @wrap_miopenT5LayerNormForward({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, f32, i64) -> i32
   hip.rms_norm(%ctx)
       ins(%input, %scale : memref<128x512xf32, 1>, memref<512xf32, 1>)
       outs(%output : memref<128x512xf32, 1>)
@@ -59,7 +59,7 @@ func.func @rms_norm_static_f16(%ctx: !hip.context) {
   %output = memref.alloc() : memref<1024xf16, 1>
 
   // 1D tensor test case
-  // CHECK: llvm.call @wrap_miopenT5LayerNormForward({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, f32, i64) -> i32
+  // CHECK: llvm.call @wrap_miopenT5LayerNormForward({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, f32, i64) -> i32
   hip.rms_norm(%ctx)
       ins(%input, %scale : memref<1024xf16, 1>, memref<1024xf16, 1>)
       outs(%output : memref<1024xf16, 1>)
@@ -78,7 +78,7 @@ func.func @rms_norm_3d(%ctx: !hip.context) {
   // CHECK: llvm.mlir.constant(2 : i64) : i64
   // CHECK: llvm.mlir.constant(64 : i64) : i64
   // CHECK: llvm.mlir.constant(128 : i64) : i64
-  // CHECK: llvm.call @wrap_miopenT5LayerNormForward({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, f32, i64) -> i32
+  // CHECK: llvm.call @wrap_miopenT5LayerNormForward({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, f32, i64) -> i32
   hip.rms_norm(%ctx)
       ins(%input, %scale : memref<2x64x128xf32, 1>, memref<128xf32, 1>)
       outs(%output : memref<2x64x128xf32, 1>)
@@ -104,7 +104,7 @@ func.func @rms_norm_dynamic(%ctx: !hip.context, %input: memref<?x512xf16, 1>) {
   // CHECK: llvm.mul {{.*}}, {{.*}} : i64
   // CHECK: llvm.mul {{.*}}, {{.*}} : i64
 
-  // CHECK: llvm.call @wrap_miopenT5LayerNormForward({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, f32, i64) -> i32
+  // CHECK: llvm.call @wrap_miopenT5LayerNormForward({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, f32, i64) -> i32
   hip.rms_norm(%ctx)
       ins(%input, %scale : memref<?x512xf16, 1>, memref<?xf16, 1>)
       outs(%output : memref<?x512xf16, 1>)
@@ -130,7 +130,7 @@ func.func @rms_norm_fully_dynamic(%ctx: !hip.context, %input: memref<?x?xf16, 1>
   // CHECK: llvm.mul {{.*}}, {{.*}} : i64
   // CHECK: llvm.mul {{.*}}, {{.*}} : i64
 
-  // CHECK: llvm.call @wrap_miopenT5LayerNormForward({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, f32, i64) -> i32
+  // CHECK: llvm.call @wrap_miopenT5LayerNormForward({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, f32, i64) -> i32
   hip.rms_norm(%ctx)
       ins(%input, %scale : memref<?x?xf16, 1>, memref<?xf16, 1>)
       outs(%output : memref<?x?xf16, 1>)

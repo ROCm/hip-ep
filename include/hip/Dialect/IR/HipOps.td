@@ -8,7 +8,6 @@
 
 include "hip/Dialect/IR/HipDialect.td"
 include "hip/Dialect/IR/HipDpsOpInterface.td"
-include "hip/Dialect/IR/HipOpStateInterface.td"
 include "hip/Dialect/IR/HipTypes.td"
 include "mlir/Interfaces/DestinationStyleOpInterface.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
@@ -612,7 +611,7 @@ def Hip_ConvTransposeOp : Hip_DpsOp<"conv_transpose"> {
 // reason to write that boilerplate by hand. Matmul is the worked
 // example for the orthogonality of these two layers on #260; #262
 // extends the same split to gemm / qmoe / matmul_nbits.
-def Hip_MatmulOp : Hip_DpsOp<"matmul", /*traits=*/[OpStateOpInterface],
+def Hip_MatmulOp : Hip_DpsOp<"matmul", /*traits=*/[],
                              /*outsAccessor=*/"Output",
                              /*autoReify=*/0,
                              /*autoInfer=*/1,
@@ -667,20 +666,6 @@ def Hip_MatmulOp : Hip_DpsOp<"matmul", /*traits=*/[OpStateOpInterface],
     attr-dict (`:` type($result_tensors)^)?
   }];
 
-  // OpStateOpInterface: construct this matmul instance's per-session state
-  // (MatmulState), which holds a shared_ptr to the device-wide hipBLASLt algo
-  // table. No compile-time params — the table fills lazily per call. The
-  // construct fn stores the state into op_states[slot] itself.
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_matmul",
-          {});
-    }
-  }];
-
   let hasVerifier = 1;
 }
 
@@ -689,8 +674,7 @@ def Hip_MatmulOp : Hip_DpsOp<"matmul", /*traits=*/[OpStateOpInterface],
 //===----------------------------------------------------------------------===//
 
 def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
-                                  /*traits=*/[AttrSizedOperandSegments,
-                                              OpStateOpInterface],
+                                  /*traits=*/[AttrSizedOperandSegments],
                                   /*outsAccessor=*/"Output",
                                   /*autoReify=*/0,
                                   /*autoInfer=*/1,
@@ -752,20 +736,6 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
     (`bias` `(` $bias^ `:` type($bias) `)`)?
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
-  }];
-
-  // OpStateOpInterface: construct this MatMulNBits instance's per-session
-  // zero_points unpack cache (MatmulNbitsState). No compile-time params — the
-  // cache fills lazily per call. The construct fn stores the state into
-  // op_states[slot] itself.
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot,
-          "hipdnn_ep_op_state_construct_matmul_nbits", {});
-    }
   }];
 }
 
@@ -931,7 +901,7 @@ def Hip_GatherBlockQuantizedOp : Hip_DpsOp<"gather_block_quantized"> {
 
 // ===== MIOpen ops ============================================================
 
-def Hip_RmsNormOp : Hip_DpsOp<"rms_norm", /*traits=*/[OpStateOpInterface],
+def Hip_RmsNormOp : Hip_DpsOp<"rms_norm", /*traits=*/[],
                               /*outsAccessor=*/"Output",
                               /*autoReify=*/0,
                               /*autoInfer=*/1,
@@ -977,20 +947,6 @@ def Hip_RmsNormOp : Hip_DpsOp<"rms_norm", /*traits=*/[OpStateOpInterface],
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
-
-  // OpStateOpInterface: construct this instance's per-session state
-  // (T5NormState), which holds a shared_ptr to the device-wide MIOpen
-  // descriptor table shared across sessions via WeakStore.
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_t5norm",
-          {});
-    }
-  }];
-
   let hasVerifier = 1;
 }
 
@@ -1087,7 +1043,7 @@ def Hip_LayerNormOp : Hip_DpsOp<"layer_norm",
 }
 
 def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
-    [AttrSizedOperandSegments, OpStateOpInterface]> {
+    [AttrSizedOperandSegments]> {
   let summary = "Fused skip + RMS normalization (com.microsoft.SkipSimplifiedLayerNormalization)";
   let description = [{
     Full alignment with Microsoft ONNX Runtime SkipSimplifiedLayerNormalization
@@ -1161,20 +1117,6 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
     `outs` `(` $outputs `:` type($outputs) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
-
-  // OpStateOpInterface: construct this instance's per-session state
-  // (SkipT5NormState), which holds a shared_ptr to the device-wide MIOpen
-  // descriptor table shared across sessions via WeakStore.
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot,
-          "hipdnn_ep_op_state_construct_skip_t5norm", {});
-    }
-  }];
-
   let hasVerifier = 1;
 }
 
@@ -1243,23 +1185,8 @@ def Hip_MiopenAddOp : Hip_DpsOp_Broadcast<"miopen.add",
   let hasVerifier = 1;
 }
 
-def Hip_MulOp : Hip_DpsOp_Broadcast<"mul", /*operandGetters=*/["Lhs", "Rhs"],
-                                    /*outsAccessor=*/"Output",
-                                    /*traits=*/[OpStateOpInterface]> {
+def Hip_MulOp : Hip_DpsOp_Broadcast<"mul", /*operandGetters=*/["Lhs", "Rhs"]> {
   let summary = "Elementwise multiplication";
-
-  // OpStateOpInterface: hip.mul/add/min/max all lower to wrap_miopenOpTensor,
-  // which owns the shared MIOpen OpTensor descriptor table (OpTensorState);
-  // each instance's slot holds a shared_ptr to the device-wide table.
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_optensor",
-          {});
-    }
-  }];
   let description = [{
     Performs elementwise multiplication: output = lhs * rhs
 
@@ -1285,21 +1212,8 @@ def Hip_MulOp : Hip_DpsOp_Broadcast<"mul", /*operandGetters=*/["Lhs", "Rhs"],
   let hasVerifier = 1;
 }
 
-def Hip_AddOp : Hip_DpsOp_Broadcast<"add", /*operandGetters=*/["Lhs", "Rhs"],
-                                    /*outsAccessor=*/"Output",
-                                    /*traits=*/[OpStateOpInterface]> {
+def Hip_AddOp : Hip_DpsOp_Broadcast<"add", /*operandGetters=*/["Lhs", "Rhs"]> {
   let summary = "Elementwise addition";
-
-  // OpStateOpInterface: shared OpTensorState (see hip.mul).
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_optensor",
-          {});
-    }
-  }];
   let description = [{
     Performs elementwise addition: output = lhs + rhs
 
@@ -1325,21 +1239,8 @@ def Hip_AddOp : Hip_DpsOp_Broadcast<"add", /*operandGetters=*/["Lhs", "Rhs"],
   let hasVerifier = 1;
 }
 
-def Hip_MinOp : Hip_DpsOp_Broadcast<"min", /*operandGetters=*/["Lhs", "Rhs"],
-                                    /*outsAccessor=*/"Output",
-                                    /*traits=*/[OpStateOpInterface]> {
+def Hip_MinOp : Hip_DpsOp_Broadcast<"min", /*operandGetters=*/["Lhs", "Rhs"]> {
   let summary = "Elementwise minimum";
-
-  // OpStateOpInterface: shared OpTensorState (see hip.mul).
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_optensor",
-          {});
-    }
-  }];
   let description = [{
     Performs elementwise minimum: output = min(lhs, rhs)
 
@@ -1370,19 +1271,8 @@ def Hip_MinOp : Hip_DpsOp_Broadcast<"min", /*operandGetters=*/["Lhs", "Rhs"],
   }];
 }
 
-def Hip_MaxOp : Hip_DpsOp<"max", /*traits=*/[OpStateOpInterface]> {
+def Hip_MaxOp : Hip_DpsOp<"max"> {
   let summary = "Elementwise maximum";
-
-  // OpStateOpInterface: shared OpTensorState (see hip.mul).
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_optensor",
-          {});
-    }
-  }];
   let description = [{
     Performs elementwise maximum: output = max(lhs, rhs)
 
@@ -1550,26 +1440,12 @@ def Hip_SiluOp : Hip_DpsOp<"silu", /*traits=*/[],
   let hasVerifier = 1;
 }
 
-def Hip_SigmoidOp : Hip_DpsOp<"sigmoid", /*traits=*/[OpStateOpInterface],
+def Hip_SigmoidOp : Hip_DpsOp<"sigmoid", /*traits=*/[],
                               /*outsAccessor=*/"Y",
                               /*autoReify=*/1,
                               /*autoInfer=*/1,
                               /*declareInfer=*/1> {
   let summary = "Sigmoid activation";
-
-  // OpStateOpInterface: construct this instance's per-session ActivationState,
-  // which holds a shared_ptr to the device-wide MIOpen descriptor table shared
-  // across sessions via WeakStore. All three MIOpen activations (sigmoid, tanh,
-  // softplus) share the same construct + table.
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot,
-          "hipdnn_ep_op_state_construct_activation", {});
-    }
-  }];
   let description = [{
     Applies sigmoid activation: y = 1 / (1 + exp(-x))
 
@@ -1595,23 +1471,12 @@ def Hip_SigmoidOp : Hip_DpsOp<"sigmoid", /*traits=*/[OpStateOpInterface],
   }];
 }
 
-def Hip_TanhOp : Hip_DpsOp<"tanh", /*traits=*/[OpStateOpInterface],
+def Hip_TanhOp : Hip_DpsOp<"tanh", /*traits=*/[],
                            /*outsAccessor=*/"Y",
                            /*autoReify=*/1,
                            /*autoInfer=*/1,
                            /*declareInfer=*/1> {
   let summary = "Tanh activation";
-
-  // OpStateOpInterface: shared ActivationState (see hip.sigmoid).
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot,
-          "hipdnn_ep_op_state_construct_activation", {});
-    }
-  }];
   let description = [{
     Applies hyperbolic-tangent activation: y = tanh(x)
 
@@ -1637,23 +1502,12 @@ def Hip_TanhOp : Hip_DpsOp<"tanh", /*traits=*/[OpStateOpInterface],
   }];
 }
 
-def Hip_SoftplusOp : Hip_DpsOp<"softplus", /*traits=*/[OpStateOpInterface],
+def Hip_SoftplusOp : Hip_DpsOp<"softplus", /*traits=*/[],
                                /*outsAccessor=*/"Y",
                                /*autoReify=*/1,
                                /*autoInfer=*/1,
                                /*declareInfer=*/1> {
   let summary = "Softplus activation: y = ln(exp(x) + 1)";
-
-  // OpStateOpInterface: shared ActivationState (see hip.sigmoid).
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot,
-          "hipdnn_ep_op_state_construct_activation", {});
-    }
-  }];
   let description = [{
     Applies the softplus activation function element-wise.
     Implements the standard ONNX Softplus operator.
@@ -2309,7 +2163,7 @@ def Hip_ReduceMaxOp : Hip_DpsOp_Reduction<"reduce_max"> {
 // ===== Causal Conv with State ================================================
 
 def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
-    [AttrSizedOperandSegments, OpStateOpInterface]> {
+    [AttrSizedOperandSegments]> {
   let summary = "Stateful causal depthwise convolution";
   let description = [{
     Causal depthwise convolution with carry state for incremental decoding.
@@ -2376,26 +2230,11 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
     `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
-
-  // OpStateOpInterface: construct this instance's per-session MIOpen
-  // descriptor/algo cache (CausalConvState). No compile-time params — the
-  // cache fills lazily per shape. The construct fn stores the state into
-  // op_states[slot] itself.
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot,
-          "hipdnn_ep_op_state_construct_causal_conv_with_state", {});
-    }
-  }];
 }
 
 // ===== Group Query Attention =================================================
 
-def Hip_GqaOp : Hip_DpsOp<"gqa",
-    [AttrSizedOperandSegments, OpStateOpInterface]> {
+def Hip_GqaOp : Hip_DpsOp<"gqa", [AttrSizedOperandSegments]> {
   let summary = "Group Query Attention - Full MS spec implementation";
   let description = [{
     Complete implementation of com.microsoft.GroupQueryAttention (v1) specification.
@@ -2535,19 +2374,6 @@ def Hip_GqaOp : Hip_DpsOp<"gqa",
     attr-dict (`:` type($result_tensors)^)?
   }];
 
-  // OpStateOpInterface: construct this GQA instance's per-session hipBLASLt
-  // GEMM descriptor/algo cache (GqaState). No compile-time params — the cache
-  // fills lazily per GEMM shape. The construct fn stores the state into
-  // op_states[slot] itself.
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_gqa", {});
-    }
-  }];
-
   let hasVerifier = 1;
 }
 
@@ -2662,7 +2488,7 @@ def Hip_HipDNNGraphOp : Hip_DpsOp<"hipdnn_graph", [
 // ===== Multi-Head Attention =================================================
 
 def Hip_MultiHeadAttentionOp : Hip_DpsOp<"multi_head_attention",
-    [AttrSizedOperandSegments, OpStateOpInterface]> {
+    [AttrSizedOperandSegments]> {
   let summary = "Multi-Head Attention (com.microsoft.MultiHeadAttention v1)";
   let description = [{
     Implements the com.microsoft.MultiHeadAttention operator (opset v1).
@@ -2803,20 +2629,6 @@ def Hip_MultiHeadAttentionOp : Hip_DpsOp<"multi_head_attention",
     `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
-
-  // OpStateOpInterface: construct this MHA instance's per-session hipBLASLt
-  // GEMM descriptor/algo cache (MhaState). No compile-time params — the cache
-  // fills lazily per GEMM shape. The construct fn stores the state into
-  // op_states[slot] itself.
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot,
-          "hipdnn_ep_op_state_construct_multi_head_attention", {});
-    }
-  }];
 }
 
 def Hip_LinearAttentionOp : Hip_DpsOp<"linear_attention",
@@ -2918,7 +2730,7 @@ def Hip_LinearAttentionOp : Hip_DpsOp<"linear_attention",
   }];
 }
 
-def Hip_GemmOp : Hip_DpsOp<"gemm", /*traits=*/[OpStateOpInterface],
+def Hip_GemmOp : Hip_DpsOp<"gemm", /*traits=*/[],
                            /*outsAccessor=*/"Output",
                            /*autoReify=*/0,
                            /*autoInfer=*/1,
@@ -2963,19 +2775,6 @@ def Hip_GemmOp : Hip_DpsOp<"gemm", /*traits=*/[OpStateOpInterface],
     `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
-  }];
-
-  // OpStateOpInterface: construct this instance's per-session GemmState, which
-  // holds a shared_ptr to the device-wide hipBLASLt algo table shared across
-  // sessions via WeakStore.
-  let extraClassDeclaration = [{
-    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
-                                      ::mlir::Location loc,
-                                      ::mlir::Value statePtr, int32_t slot) {
-      return ::mlir::hip::emitOpStateConstruct(
-          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_gemm",
-          {});
-    }
   }];
 }
 

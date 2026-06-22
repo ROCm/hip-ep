@@ -22,10 +22,6 @@
 // hipdnn_ep_runtime.h only forward-declares RuntimeState; it does not include
 // this internal header.
 #include "hipdnn_ep_runtime.h"
-// For `struct OpState` (the op_states array element type below). op_state.h is
-// layout-agnostic (it only forward-declares RuntimeState), so including it here
-// is acyclic.
-#include "op_state.h"
 
 // Internal runtime state structure
 // This struct is opaque to generated code (passed as void*)
@@ -91,7 +87,7 @@ struct RuntimeState {
   // never calls alloc_output); zero-initialized in initialize_state_handles.
   hipdnn_output_allocator_t output_allocator;
 
-  // Per-session scratch buffer for wrap_qmoe transient device buffers
+  // Per-state scratch buffer for wrap_qmoe transient device buffers
   // (expert_indices, expert_weights, gather_buf, fc1_buf, act_buf, fc2_buf,
   // token_ids, token_wts -- 8 sub-buffers laid out at fixed offsets).
   //
@@ -105,9 +101,7 @@ struct RuntimeState {
   // largest (num_tokens, hidden, inter, k, num_experts, elem) shape ever seen
   // by this session. Sub-buffer offsets recomputed per-call (cheap arithmetic);
   // the buffer itself grows on demand via hipdnn_ep_state_ensure_qmoe_scratch
-  // and never shrinks (mirrors the `workspace` field's policy). Shared by all
-  // qmoe instances in the session: safe because the HIP stream is serialised,
-  // so the next qmoe launches only after the previous one's kernels finish.
+  // and never shrinks (mirrors the `workspace` field's policy).
   //
   // Pinned host mirror is needed for the 24-bytes-per-layer D2H readback of
   // expert routing decisions (still required at decode pre-Phase-2). hipHost-
@@ -117,7 +111,7 @@ struct RuntimeState {
   void *qmoe_host_scratch; // pinned host mirror for D2H of expert idx/weights
   size_t qmoe_host_scratch_size;
 
-  // Per-session scratch buffer for the MIOpen convolution workspace
+  // Per-state scratch buffer for the MIOpen convolution workspace
   // (wrap_miopenConvolutionForward, both 2D and the H=1 1D conv path).
   //
   // The MIOpen forward-convolution Find API selects an algorithm whose
@@ -133,37 +127,34 @@ struct RuntimeState {
   void *conv_scratch;
   size_t conv_scratch_size;
 
-  // NOTE: the GQA GEMM descriptor cache (GqaGemmCache) formerly lived here as
-  // gqa_gemm_cache. It is now per-op-instance: each gqa instance owns one in
-  // its GqaState op-state slot (see op_states below and
-  // docs/design/op-state-slots-design.md), so concurrent sessions (and
-  // distinct GQA layers) no longer share one descriptor map.
+  // GQA GEMM descriptor cache (GqaGemmCache*) for the decomposed path.
+  // Caches hipBLASLt descriptors + algorithms by GEMM shape.
+  void *gqa_gemm_cache;
 
-  // NOTE: the MultiHeadAttention GEMM descriptor cache (MhaGemmCache) formerly
-  // lived here as mha_gemm_cache. It is now per-op-instance: each
-  // multi_head_attention instance owns one in its MhaState op-state slot (see
-  // op_states below and docs/design/op-state-slots-design.md).
+  // MultiHeadAttention GEMM descriptor cache (MhaGemmCache*) for the
+  // decomposed Score + Value path. Same shape-keyed hipBLASLt descriptor
+  // cache as gqa_gemm_cache, distinct so concurrent MHA + GQA sessions
+  // do not contend on a single map.
+  void *mha_gemm_cache;
 
-  // NOTE: the CausalConvWithState MIOpen descriptor + algorithm cache
-  // (CausalConvCache) formerly lived here as causal_conv_cache. It is now
-  // per-op-instance: each causal_conv_with_state instance owns one in its
-  // CausalConvState op-state slot (see op_states below and
-  // docs/design/op-state-slots-design.md), so concurrent instances no longer
-  // share one descriptor cache.
+  // CausalConvWithState MIOpen descriptor + algorithm cache
+  // (CausalConvCache*). Caches MIOpen tensor / convolution / bias / activation
+  // descriptors and the heuristic-selected forward algorithm by shape, so that
+  // miopenFindConvolutionForwardAlgorithm runs only once per shape rather than
+  // every layer × every token.
+  void *causal_conv_cache;
 
-  // Asym zero_points unpack cache (ZpUnpackCache*) used by wrap_qmoe.
+  // MatMulNBits asym-path zero_points unpack cache (ZpUnpackCache*).
   //
   // The asym AWQ path stores zero_points as packed nibbles [N, ceil(K/bs/2)].
   // Two unpacked layouts are needed (u8 [N, K/bs] for GEMV/naive, fp16 for
   // WMMA/col-major GEMV M>1), and naively the unpack kernel is launched on
-  // every call. Since zero_points points into the model constants blob (stable
-  // for the session lifetime), we cache the unpacked buffer per input pointer.
-  // Lazily created on first asym call. Freed in hipdnn_ep_state_cleanup via
+  // every wrap_matmul_nbits call. For 8B asym decode this is ~225 redundant
+  // launches per Compute(). Since zero_points points into the model constants
+  // blob (stable for the session lifetime), we cache the unpacked buffer per
+  // input pointer. Lazily created on first asym call. Owned by
+  // lib/Runtime/real/matmul_nbits.cpp; freed in hipdnn_ep_state_cleanup via
   // hipdnn_ep_zp_unpack_cache_destroy.
-  //
-  // NOTE: matmul_nbits no longer uses this shared cache -- it owns a
-  // per-instance ZpUnpackCache in its MatmulNbitsState op-state slot. This
-  // field is therefore qmoe-owned.
   void *zp_unpack_cache;
 
   // Per-operator profiling state (OpProfileState*, gated on HIPDNN_EP_PERF).
@@ -256,15 +247,6 @@ struct RuntimeState {
   void
       *loop_cond_dev; // hipHostGetDevicePointer(loop_cond_host), passed to body
   void *loop_event;   // hipEvent_t cast to void*; reused for cond-readback sync
-
-  // Per-op state slots (see docs/design/op-state-slots-design.md). One entry
-  // per stateful op instance, sized by --assign-op-state-slots and constructed
-  // by the generated @hipdnn_ep_op_states_init_fn during inference_init. Each
-  // entry's concrete type derives from OpState; cleanup walks the array calling
-  // each object's `deletor`, so teardown needs no per-type knowledge. Managed
-  // by hipdnn_ep_op_states_alloc / _set / _get in op_state.cpp.
-  OpState **op_states;
-  int num_op_states;
 };
 
 #endif // HIPDNN_EP_RUNTIME_STATE_INTERNAL_H

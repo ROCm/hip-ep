@@ -65,9 +65,8 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
     Value elemSizeVal = createI64Const(elemSize);
     Value zpElemSizeVal = createI64Const(op.getZpElemSize());
 
-    SmallVector<Type, 17> paramTypes = {
+    SmallVector<Type, 16> paramTypes = {
         ptrType, // state
-        i32Type, // op_state_slot
         ptrType, // A
         ptrType, // B
         ptrType, // scales
@@ -91,8 +90,7 @@ struct MatMulNBitsOpLowering : public ConvertOpToLLVMPattern<MatMulNBitsOp> {
       return failure();
     }
 
-    SmallVector<Value, 17> args = {statePtr,
-                                   getOpStateSlotValue(op, rewriter, loc),
+    SmallVector<Value, 16> args = {statePtr,
                                    APtr,
                                    BPtr,
                                    scalesPtr,

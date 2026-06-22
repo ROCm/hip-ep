@@ -1,12 +1,7 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// RUN: hip-mlir-opt --assign-op-state-slots --convert-hip-to-llvm %s | FileCheck %s
-//
-// The trailing i32 on each wrap_multi_head_attention call is op_state_slot,
-// threaded by --assign-op-state-slots. It selects this MHA instance's
-// per-instance MhaState (hipBLASLt GEMM descriptor cache), replacing the
-// former shared RuntimeState::mha_gemm_cache.
+// RUN: hip-mlir-opt --convert-hip-to-llvm %s | FileCheck %s
 
 module {
   func.func @test_multi_head_attention_lowering(
@@ -42,8 +37,6 @@ module {
 // - 8 shape params: batch_size=1, seq_len_q=128, seq_len_kv=128,
 //                   query_hidden=4096, v_hidden=4096, head_size=0,
 //                   query_rank=3, element_size_bytes=2
-// - 1 i32: op_state_slot (per-instance MhaState; threaded by
-//          --assign-op-state-slots, replaces shared RuntimeState::mha_gemm_cache)
 
 // =============================================================================
 // Dynamic shape: batch_size, seq_len, hidden_dim are all dynamic.

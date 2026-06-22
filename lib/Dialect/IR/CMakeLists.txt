@@ -6,7 +6,6 @@
 add_library(HipDialectIR STATIC
   HipDialect.cpp
   HipDpsOpInterface.cpp
-  HipOpStateInterface.cpp
   HipReifyResultShapesImpl.cpp
   HipShapeUtils.cpp
 )
@@ -15,7 +14,6 @@ add_dependencies(HipDialectIR
   HipDialectIncGen
   HipTypesIncGen
   HipDpsOpInterfaceIncGen
-  HipOpStateInterfaceIncGen
   HipOpsIncGen
 )
 
@@ -35,9 +33,6 @@ target_link_libraries(HipDialectIR PUBLIC
   MLIRInferTypeOpInterface
   MLIRTensorDialect
   MLIRMemRefDialect
-  # OpStateOpInterface's emitOpStateConstruct helper emits LLVM-dialect calls
-  # (the per-op state constructor calls woven into the op-state init function).
-  MLIRLLVMDialect
 )
 
 # HipDialect.cpp aggregates every TableGen-generated op class (GET_OP_CLASSES).

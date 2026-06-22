@@ -6,7 +6,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
-#include "../op_state.h"
+#include "../runtime_state_internal.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
@@ -125,26 +125,12 @@ struct MhaGemmCacheEntry {
 
 struct MhaGemmCache {
   std::unordered_map<MhaGemmKey, MhaGemmCacheEntry, MhaGemmKeyHash> entries;
-  // Destroys every cached hipBLASLt descriptor/layout entry. Defined
-  // out-of-line below. Runs when the owning op-state slot is torn down
-  // (MhaState's deletor).
-  ~MhaGemmCache();
 };
 
-// Per-instance MultiHeadAttention op-state (see op-state-slots-design.md):
-// owns this instance's per-GEMM-shape hipBLASLt descriptor/algorithm cache.
-// Replaces the former shared RuntimeState::mha_gemm_cache, so concurrent
-// sessions (and distinct MHA layers) no longer share one descriptor map.
-struct MhaState : OpStateT<MhaState> {
-  MhaGemmCache cache;
-};
-
-// Resolve this MHA instance's descriptor cache from its op-state slot. Returns
-// nullptr when the slot is unconstructed (init failure) — callers propagate the
-// error rather than lazily allocating, since the slot is built at session init.
-MhaGemmCache *get_mha_gemm_cache(RuntimeState *state, int op_state_slot) {
-  MhaState *ms = MhaState::get_slot(state, op_state_slot);
-  return ms ? &ms->cache : nullptr;
+MhaGemmCache *get_mha_gemm_cache(RuntimeState *state) {
+  if (!state->mha_gemm_cache)
+    state->mha_gemm_cache = new MhaGemmCache;
+  return static_cast<MhaGemmCache *>(state->mha_gemm_cache);
 }
 
 //===----------------------------------------------------------------------===//
@@ -171,15 +157,9 @@ hipblasStatus_t setLayoutBatch(hipblasLtMatrixLayout_t layout,
 
 const MhaGemmCacheEntry *queryOrCreateMhaGemm(RuntimeState *state,
                                               hipblasLtHandle_t handle,
-                                              const MhaGemmKey &key,
-                                              int op_state_slot) {
+                                              const MhaGemmKey &key) {
   assert(handle && "queryOrCreateMhaGemm: null handle");
-  auto *cache = get_mha_gemm_cache(state, op_state_slot);
-  if (!cache) {
-    fprintf(stderr, "queryOrCreateMhaGemm: no MhaState at slot %d\n",
-            op_state_slot);
-    return nullptr;
-  }
+  auto *cache = get_mha_gemm_cache(state);
   auto it = cache->entries.find(key);
   if (it != cache->entries.end())
     return &it->second;
@@ -275,8 +255,17 @@ cache_done:
   return &ins->second;
 }
 
-MhaGemmCache::~MhaGemmCache() {
-  for (auto &kv : entries) {
+} // namespace
+
+//===----------------------------------------------------------------------===//
+// C-ABI cache destroy (called from hipdnn_ep_state_cleanup)
+//===----------------------------------------------------------------------===//
+
+extern "C" void hipdnn_ep_mha_gemm_cache_destroy(void *cache_ptr) {
+  auto *cache = static_cast<MhaGemmCache *>(cache_ptr);
+  if (!cache)
+    return;
+  for (auto &kv : cache->entries) {
     auto &e = kv.second;
     if (e.layD)
       hipblasLtMatrixLayoutDestroy(e.layD);
@@ -289,21 +278,7 @@ MhaGemmCache::~MhaGemmCache() {
     if (e.desc)
       hipblasLtMatmulDescDestroy(e.desc);
   }
-}
-
-} // namespace
-
-//===----------------------------------------------------------------------===//
-// Per-op state construction (called from the generated op-states init).
-//===----------------------------------------------------------------------===//
-
-// Construct this MHA instance's op-state slot (see op-state-slots-design.md).
-// No compile-time params: the descriptor cache fills lazily per GEMM shape. The
-// construct fn stores the state into op_states[slot] itself.
-extern "C" int8_t
-hipdnn_ep_op_state_construct_multi_head_attention(RuntimeState *state,
-                                                  int32_t slot) {
-  return MhaState::create(state, slot);
+  delete cache;
 }
 
 //===----------------------------------------------------------------------===//
@@ -312,9 +287,7 @@ hipdnn_ep_op_state_construct_multi_head_attention(RuntimeState *state,
 //===----------------------------------------------------------------------===//
 
 extern "C" int wrap_multi_head_attention(
-    RuntimeState *state,
-    // Per-instance op-state slot (MhaState: this layer's GEMM descriptor cache)
-    int op_state_slot, void *query, void *key, void *value, void *bias,
+    RuntimeState *state, void *query, void *key, void *value, void *bias,
     void *key_padding_mask, void *attention_bias, void *past_key,
     void *past_value, void *past_sequence_length, void *cache_indirection,
     void *output, void *present_key, void *present_value, void *qk,
@@ -596,7 +569,7 @@ extern "C" int wrap_multi_head_attention(
     scoreKey.strideC = Skv * Sq;
 
     const MhaGemmCacheEntry *scoreState =
-        queryOrCreateMhaGemm(state, ltHandle, scoreKey, op_state_slot);
+        queryOrCreateMhaGemm(state, ltHandle, scoreKey);
     if (!scoreState) {
       fprintf(stderr,
               "[multi_head_attention] ERROR: failed to build Score GEMM "
@@ -652,7 +625,7 @@ extern "C" int wrap_multi_head_attention(
     valueKey.strideC = Sq * H;
 
     const MhaGemmCacheEntry *valueState =
-        queryOrCreateMhaGemm(state, ltHandle, valueKey, op_state_slot);
+        queryOrCreateMhaGemm(state, ltHandle, valueKey);
     if (!valueState) {
       fprintf(stderr,
               "[multi_head_attention] ERROR: failed to build Value GEMM "

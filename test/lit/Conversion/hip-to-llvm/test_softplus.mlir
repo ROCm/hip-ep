@@ -35,7 +35,7 @@ module {
     // CHECK: %{{.*}} = llvm.mul %{{.*}}, %{{.*}} : i64
     // CHECK: %{{.*}} = llvm.mlir.constant(0 : i64) : i64
     // CHECK: %{{.*}} = llvm.mlir.constant(3 : i64) : i64
-    // CHECK: %{{.*}} = llvm.call @wrap_miopenActivationForward(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+    // CHECK: %{{.*}} = llvm.call @wrap_miopenActivationForward(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
 
     return
   }
@@ -59,7 +59,7 @@ module {
     // CHECK: %{{.*}} = llvm.mul %{{.*}}, %{{.*}} : i64
     // CHECK: %{{.*}} = llvm.mlir.constant(0 : i64) : i64
     // CHECK: %{{.*}} = llvm.mlir.constant(3 : i64) : i64
-    // CHECK: %{{.*}} = llvm.call @wrap_miopenActivationForward(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+    // CHECK: %{{.*}} = llvm.call @wrap_miopenActivationForward(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
 
     return
   }
@@ -81,7 +81,7 @@ module {
     // CHECK: %{{.*}} = llvm.mul %{{.*}}, %{{.*}} : i64
     // CHECK: %{{.*}} = llvm.mlir.constant(1 : i64) : i64
     // CHECK: %{{.*}} = llvm.mlir.constant(3 : i64) : i64
-    // CHECK: %{{.*}} = llvm.call @wrap_miopenActivationForward(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+    // CHECK: %{{.*}} = llvm.call @wrap_miopenActivationForward(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
 
     return
   }
@@ -103,7 +103,7 @@ module {
     // CHECK: %{{.*}} = llvm.mul %{{.*}}, %{{.*}} : i64
     // CHECK: %{{.*}} = llvm.mlir.constant(2 : i64) : i64
     // CHECK: %{{.*}} = llvm.mlir.constant(3 : i64) : i64
-    // CHECK: %{{.*}} = llvm.call @wrap_miopenActivationForward(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+    // CHECK: %{{.*}} = llvm.call @wrap_miopenActivationForward(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
 
     return
   }
@@ -125,7 +125,7 @@ module {
     // CHECK-DAG: %{{.*}} = llvm.mul %{{.*}}, %{{.*}} : i64
     // CHECK-DAG: %{{.*}} = llvm.mlir.constant(0 : i64) : i64
     // CHECK-DAG: %{{.*}} = llvm.mlir.constant(3 : i64) : i64
-    // CHECK: %{{.*}} = llvm.call @wrap_miopenActivationForward(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+    // CHECK: %{{.*}} = llvm.call @wrap_miopenActivationForward(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
 
     return
   }
@@ -149,7 +149,7 @@ module {
     // CHECK-DAG: %{{.*}} = llvm.mul %{{.*}}, %{{.*}} : i64
     // CHECK-DAG: %{{.*}} = llvm.mlir.constant(1 : i64) : i64
     // CHECK-DAG: %{{.*}} = llvm.mlir.constant(3 : i64) : i64
-    // CHECK: %{{.*}} = llvm.call @wrap_miopenActivationForward(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+    // CHECK: %{{.*}} = llvm.call @wrap_miopenActivationForward(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
 
     return
   }

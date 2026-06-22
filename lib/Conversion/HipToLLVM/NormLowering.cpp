@@ -44,7 +44,6 @@ struct RmsNormOpLowering : public ConvertOpToLLVMPattern<RmsNormOp> {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
-    Type i32Type = rewriter.getI32Type();
     Type i64Type = rewriter.getI64Type();
     Type f32Type = rewriter.getF32Type();
 
@@ -80,10 +79,9 @@ struct RmsNormOpLowering : public ConvertOpToLLVMPattern<RmsNormOp> {
     Value stashTypeVal = LLVM::ConstantOp::create(
         rewriter, loc, i64Type, rewriter.getI64IntegerAttr(op.getStashType()));
 
-    // Runtime function signature (11 params)
+    // Runtime function signature (10 params)
     SmallVector<Type> paramTypes = {
-        ptrType, i32Type,          // state, op_state_slot
-        ptrType, ptrType, ptrType, // input, scale, output
+        ptrType, ptrType, ptrType, ptrType, // state, input, scale, output
         i64Type, i64Type, i64Type, // input_num_elements, scale_num_elements,
                                    // element_size_bytes
         i64Type, f32Type, i64Type  // axis, epsilon, stash_type
@@ -95,13 +93,16 @@ struct RmsNormOpLowering : public ConvertOpToLLVMPattern<RmsNormOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value> args = {
-        statePtr,         getOpStateSlotValue(op, rewriter, loc),
-        inputPtr,         scalePtr,
-        outputPtr,        inputNumElements,
-        scaleNumElements, elementSizeBytesVal,
-        axisVal,          epsilonVal,
-        stashTypeVal};
+    SmallVector<Value> args = {statePtr,
+                               inputPtr,
+                               scalePtr,
+                               outputPtr,
+                               inputNumElements,
+                               scaleNumElements,
+                               elementSizeBytesVal,
+                               axisVal,
+                               epsilonVal,
+                               stashTypeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -119,7 +120,6 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
-    Type i32Type = rewriter.getI32Type();
     Type i64Type = rewriter.getI64Type();
     Type f32Type = rewriter.getF32Type();
 
@@ -161,10 +161,9 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
     Value epsilonVal =
         LLVM::ConstantOp::create(rewriter, loc, f32Type, op.getEpsilonAttr());
 
-    // Runtime function signature (12 params)
+    // Runtime function signature (11 params)
     SmallVector<Type> paramTypes = {
         ptrType, // state
-        i32Type, // op_state_slot
         ptrType, // input
         ptrType, // skip
         ptrType, // gamma
@@ -183,17 +182,11 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value> args = {statePtr,
-                               getOpStateSlotValue(op, rewriter, loc),
-                               inputPtr,
-                               skipPtr,
-                               gammaPtr,
-                               biasPtr,
-                               outputPtr,
-                               skipOutputPtr,
-                               inputNumElements,
-                               gammaNumElements,
-                               elementSizeBytesVal,
+    SmallVector<Value> args = {statePtr,         inputPtr,
+                               skipPtr,          gammaPtr,
+                               biasPtr,          outputPtr,
+                               skipOutputPtr,    inputNumElements,
+                               gammaNumElements, elementSizeBytesVal,
                                epsilonVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
