@@ -217,6 +217,13 @@ needs to run.
 > the MLIR libraries, the registry is duplicated: `requestPipelineSlot` records
 > the request but the pipeline warns and skips the pass. Runtime bitcode and
 > external library contributions are unaffected either way.
+>
+> This binding is **ELF-only**: a Windows DLL must resolve all symbols at link
+> time, so it links the MLIR libraries and gets its own registry. Plugin-pass
+> registration therefore works on Linux but **not** on Windows with the
+> static-MLIR build (it would need a shared-`libMLIR` build). The loader,
+> bitcode, and library contributions work on every platform. See the design
+> doc's "Linkage requirement" for the full story.
 
 ---
 
@@ -429,6 +436,14 @@ is planned.
   and some MLIR utility passes), so a hand-listed pipeline that needs the C-ABI
   entry point should compose the registered *pipeline names* (which include
   them) rather than enumerate every pass. The menu documents which is which.
+
+> **`HIPDNN_EP_PIPELINE` bypasses `requestPipelineSlot`.** An override replaces
+> the built-in pipeline wholesale, and slot injection (section 4) runs only
+> inside the built-in builders. So a pass you scheduled with
+> `requestPipelineSlot` does **not** run while `HIPDNN_EP_PIPELINE` is set (the
+> driver warns once if a slot request is pending). If you compose your own
+> pipeline, name your pass in the string directly, e.g.
+> `func.func(my-vendor-pass), onnx-to-hip-pipeline, hip-to-llvm-pipeline`.
 
 **Planned (not yet in the ABI):**
 

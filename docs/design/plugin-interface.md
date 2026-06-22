@@ -278,6 +278,21 @@ how the CLI tools are built.) ROCm's `libamd_comgr.so` references no MLIR
 symbols and resolves its LLVM from the same shared `libLLVM`, so exporting the
 host's MLIR symbols does not perturb comgr.
 
+**Platform support (important):** the "leave MLIR undefined, bind to the host"
+mechanism is ELF-specific. A Linux shared object may carry undefined symbols and
+resolve them at `dlopen` against the `-rdynamic` host. A **Windows** DLL cannot:
+the linker must resolve every symbol at link time, and there is no host import
+library to bind against, so a plugin DLL has to link the MLIR libraries -- which
+gives it its own pass registry that the host never reads. **So plugin-pass
+registration (and the dialect/op extension, which shares the same registries) is
+supported on Linux but not on Windows with the static-MLIR build.** Making it
+work on Windows would require the shared-`libMLIR` dylib model above. The
+consequences in-tree: the sample plugin links the MLIR libraries only on Windows
+(so it still builds), and the plugin-pass LIT tests are gated to non-Windows via
+the `hip_plugins_enabled` feature. The loader / pipeline-slot recording / bitcode
+/ library contributions are pure C ABI and work on every platform (covered by the
+plugin-loader unit test).
+
 The bitcode and library contributions do not cross MLIR's global state, so
 they work regardless of this -- the symbol-export requirement applies
 specifically to the pass (and, for the planned dialect/op extension, the
@@ -568,7 +583,12 @@ parts; the first two **ship today**, the third is planned.
   on the inner text (composing from in-tree passes by name); when unset, the
   in-tree default runs unchanged. A parse failure is reported up front; the
   override resolves from the host's own registry, so this part does **not**
-  require shared MLIR.
+  require shared MLIR. **Interaction with `requestPipelineSlot`:** an override
+  replaces the built-in pipeline wholesale, and slot injection runs only inside
+  the built-in builders, so plugin slot requests do **not** run under an
+  override (the driver warns once if any are pending). A custom pipeline that
+  wants a plugin pass must name it directly in the `HIPDNN_EP_PIPELINE` string
+  (e.g. `func.func(my-vendor-pass), onnx-to-hip-pipeline, hip-to-llvm-pipeline`).
 - **Registered pipeline builder** *(planned)*. For passes that need
   runtime-bound state a textual string cannot carry (e.g. the
   in-memory-filesystem variant of `convert-onnx-to-hip`), a plugin would

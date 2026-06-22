@@ -270,6 +270,31 @@ bool CompilerDriver::runMLIRPasses(
     }
     COMPILER_DEBUG_LOG("[CompilerDriver] HIPDNN_EP_PIPELINE set: built-in "
                        "pipeline overridden by a custom pipeline\n");
+    // A custom pipeline replaces the built-in builders wholesale, and
+    // requestPipelineSlot() injections only run inside those builders
+    // (lib/Dialect/Transforms/Pipelines.cpp::addPluginPassesForSlot). So a
+    // plugin's slot requests are NOT applied under an override. Warn once if
+    // any are pending, so the interaction is not silent -- a custom pipeline
+    // that wants a plugin pass must name it directly in HIPDNN_EP_PIPELINE.
+    bool anySlotRequested = false;
+    for (int slotIdx = 0;
+         slotIdx <= static_cast<int>(
+                        ::hip::compiler::PipelineSlot::AfterGenerateInterface);
+         ++slotIdx) {
+      if (!::hip::compiler::pluginPassesForSlot(
+               static_cast<::hip::compiler::PipelineSlot>(slotIdx))
+               .empty()) {
+        anySlotRequested = true;
+        break;
+      }
+    }
+    if (anySlotRequested) {
+      llvm::errs()
+          << "[plugin-loader] WARNING: HIPDNN_EP_PIPELINE is set, so the "
+             "built-in pipeline is bypassed and plugin requestPipelineSlot() "
+             "injections do NOT run. Name the plugin pass directly in the "
+             "HIPDNN_EP_PIPELINE string to run it under the override.\n";
+    }
   } else {
     mlir::hip::OnnxToHipPipelineOptions onnxToHipOpts;
     onnxToHipOpts.externalizeMinNumElements =
