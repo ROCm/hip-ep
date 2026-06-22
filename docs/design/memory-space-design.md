@@ -598,18 +598,31 @@ void hipdnn_ep_readback_scalar(RuntimeState *state, void *host_dst,
 `hip.stream_sync` before the host read, so the only remaining job is removing the
 synchronizations that turn out to be unnecessary.
 
+**Pass:** `EliminateStreamSyncsPass`
+
 **Pipeline position:** after MaterializeDeviceLoads (Slot 6c), before PoolAllocs (Slot 6+).
 
 ```
 Slot 6c: MaterializeDeviceLoads     → inserts hip.memcpy_d2h_async + hip.stream_sync
-Slot 6d: -eliminate-gpu-barriers    → reuse MLIR's existing pass
+Slot 6d: EliminateStreamSyncs       → custom pass (see below)
 Slot 6+: PoolAllocs                 → pools all allocations
 ```
 
-Reuse MLIR's existing [`-eliminate-gpu-barriers`](https://mlir.llvm.org/doxygen/EliminateBarriers_8cpp_source.html)
-pass. It works on any op that implements `MemoryEffectsOpInterface`, not just
-`gpu.barrier`, so no custom pass is needed. For each barrier it compares the memory
-effects before and after, and removes the barrier when there is no conflict.
+This needs a custom pass, `-hip-eliminate-stream-syncs`. MLIR's
+[`-eliminate-gpu-barriers`](https://mlir.llvm.org/doxygen/EliminateBarriers_8cpp_source.html)
+**cannot** be reused: it matches only `gpu::BarrierOp` (its pattern is
+`OpRewritePattern<gpu::BarrierOp>`), so it never sees `hip.stream_sync`. It uses
+`MemoryEffectsOpInterface` only to analyze the ops *around* a barrier — not to decide
+what counts as a barrier — and offers no trait or interface to opt a custom sync op in.
+
+The custom pass follows the same idea — drop a sync when no memory access around it
+actually needs the ordering it enforces (for example, an adjacent sync already covers it):
+
+1. Match each `hip.stream_sync`.
+2. Via `MemoryEffectsOpInterface`, collect the memory effects of the ops before and
+   after it, stopping at the neighboring syncs.
+3. Erase the sync if no before/after pair conflicts — i.e. no two accesses to aliasing
+   memory where at least one is a write.
 
 ### Memory Effects
 
