@@ -115,29 +115,48 @@ target_compile_definitions(hip_ep_sample_plugin PRIVATE
   "HIP_EP_SAMPLE_LIB_NAME=\"hip_ep_sample_lib\""
 )
 
-# Plugin links against the MLIR libraries it actually uses
-# (PassRegistration<>, PassWrapper<>, func::FuncOp). It does NOT link
-# LibHipCompiler -- a real vendor plugin is a downstream binary
-# consumer of the public hip-compiler artefact, not an internal
-# component, so we match that constraint here in the in-tree sample.
+# MLIR linkage -- platform-dependent, because the shared-registry model is
+# platform-dependent (see docs/design/plugin-interface.md "Linkage
+# requirement"):
 #
-# Bringing in MLIRPass also brings the MLIRSupport / MLIRIR transitive
-# dependencies the pass needs.
-target_link_libraries(hip_ep_sample_plugin PRIVATE
-  MLIRPass
-  MLIRIR
-  MLIRSupport
-  MLIRFuncDialect
-)
-
-# The plugin uses public hip-compiler headers (PluginAPI.h,
-# PluginRegistry.h). Both already on the global include path via
-# the top-level include_directories(); no per-target setup needed.
-
-# Pull in the LLVM_ATTRIBUTE_WEAK / Compiler.h shim from LLVM.
+# * Non-Windows (ELF): link MLIR HEADERS ONLY, NOT the libraries. The plugin's
+#   MLIR symbols (PassRegistration<>, the pass registry, op TypeIDs) stay
+#   UNDEFINED in the .so and bind to the symbol-exporting host (built with
+#   HIPDNN_ENABLE_PLUGINS -> export_executable_symbols_for_plugins / -rdynamic)
+#   at dlopen, so the registration lands in the host's single registry. This is
+#   the headers-only rule a real downstream plugin follows (the HipDnnEpConfig
+#   package and the hip-ep-plugin example), so the sample is a faithful
+#   template. Linking the MLIR libraries here would give the plugin its own
+#   registry copy the host never reads -- the split-registry failure documented
+#   in docs/plugin_authoring.md "section 4".
+#
+# * Windows (PE/COFF): a DLL must resolve every symbol at link time -- it cannot
+#   leave mlir::registerPass undefined -- and there is no host import library to
+#   bind against, so the DLL must link the MLIR libraries. That gives it a
+#   private registry, so plugin-PASS registration does not cross the DLL
+#   boundary on Windows with this static-MLIR model (it would need a shared
+#   libMLIR build). The plugin-pass LIT tests are gated to non-Windows
+#   accordingly (lit.cfg.py `hip_plugins_enabled`); the loader / slot-recording /
+#   bitcode / library halves are pure C ABI and work on Windows (unit test).
+#
+# In neither case does the plugin link LibHipCompiler: a vendor plugin is a
+# downstream consumer of the public hip-compiler artefact, not an internal
+# component.
+#
+# The plugin uses public hip-compiler headers (PluginAPI.h, PluginRegistry.h,
+# on the global include path) plus MLIR / LLVM headers (the *_INCLUDE_DIRS).
 target_include_directories(hip_ep_sample_plugin PRIVATE
+  ${MLIR_INCLUDE_DIRS}
   ${LLVM_INCLUDE_DIRS}
 )
+if(WIN32)
+  target_link_libraries(hip_ep_sample_plugin PRIVATE
+    MLIRPass
+    MLIRIR
+    MLIRSupport
+    MLIRFuncDialect
+  )
+endif()
 
 # Windows: export hipEpGetPluginInfo without a .def file.
 set_target_properties(hip_ep_sample_plugin PROPERTIES
