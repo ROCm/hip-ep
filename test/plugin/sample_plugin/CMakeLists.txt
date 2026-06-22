@@ -135,9 +135,11 @@ target_compile_definitions(hip_ep_sample_plugin PRIVATE
 #   bind against, so the DLL must link the MLIR libraries. That gives it a
 #   private registry, so plugin-PASS registration does not cross the DLL
 #   boundary on Windows with this static-MLIR model (it would need a shared
-#   libMLIR build). The plugin-pass LIT tests are gated to non-Windows
-#   accordingly (lit.cfg.py `hip_plugins_enabled`); the loader / slot-recording /
-#   bitcode / library halves are pure C ABI and work on Windows (unit test).
+#   libMLIR build). The plugin-pass LIT tests gate on this via lit.cfg.py
+#   `hip_plugins_enabled` -- non-Windows and an explicit opt-in
+#   (-DHIPDNN_PLUGIN_LIT_TESTS=ON, default OFF, for the host LLVM-visibility
+#   requirement); the loader / slot-recording / bitcode / library halves are
+#   pure C ABI and work on Windows (unit test).
 #
 # In neither case does the plugin link LibHipCompiler: a vendor plugin is a
 # downstream consumer of the public hip-compiler artefact, not an internal

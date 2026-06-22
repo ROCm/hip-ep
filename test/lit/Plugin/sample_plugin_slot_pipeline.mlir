@@ -14,6 +14,12 @@
 // pass resolves in the host registry (via the HIPDNN_ENABLE_PLUGINS symbol
 // export). The companion test sample_plugin_pass.mlir invokes the pass directly
 // (--hip-ep-sample-print-functions); this one proves the slot wiring.
+//
+// hip_plugins_enabled is an explicit opt-in (CMake -DHIPDNN_PLUGIN_LIT_TESTS=ON,
+// default OFF) because the symbol export only works when the host is built
+// against a plugin-capable LLVM (shared / default-visibility); against a static,
+// hidden-visibility LLVM the plugin fails to load. Without the opt-in this test
+// is UNSUPPORTED rather than failing.
 //===----------------------------------------------------------------------===//
 
 // RUN: env HIP_EP_PLUGINS=%hip-ep-sample-plugin \
