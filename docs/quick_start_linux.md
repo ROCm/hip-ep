@@ -81,7 +81,7 @@ python3 build.py
 The result tree under `<workspace>/install/`:
 
 - `bin/hip-onnx-runner`, `bin/hip-compiler`, `bin/hip-mlir-opt`, `bin/hip-test`
-- `lib/libhip-compiler.so`, `lib/libonnxruntime_morphizen_ep.so`
+- `lib/libhip-compiler.so`, `lib/libhipep.so`
 
 A locally-built `install/` is **not** fully self-contained: `libonnxruntime.so`
 lives in the ONNX Runtime prefix and the ROCm libs in TheRock, so run with
@@ -99,7 +99,7 @@ section once `install/bin/` is populated.
 ## Use the prebuilt package (testers, no compile)
 
 A ready-to-run package is published for each green build. It contains every
-`.so` / binary the host needs (`libonnxruntime_morphizen_ep`,
+`.so` / binary the host needs (`libhipep`,
 `hip-onnx-runner`, `onnxruntime_perf_test`, `model_benchmark`,
 `libonnxruntime`, `libonnxruntime-genai`) plus a `clang`/`lld` toolchain in
 `bin/` (next to the other tools). TheRock is **not** included — install ROCm on
@@ -169,7 +169,7 @@ export LIBRARY_PATH="$ROOT/lib:$THEROCK_DIST/lib"
 export PATH="$ROOT/bin:$PATH"
 
 # Sanity check
-ldd "$ROOT/lib/libonnxruntime_morphizen_ep.so" | grep "not found"   # expect empty
+ldd "$ROOT/lib/libhipep.so" | grep "not found"   # expect empty
 "$ROOT/bin/hip-onnx-runner" --help | head -5
 ```
 
@@ -178,17 +178,11 @@ ldd "$ROOT/lib/libonnxruntime_morphizen_ep.so" | grep "not found"   # expect emp
 host workspace path. Every command below uses `$ROOT/bin/<tool>`
 exclusively, so the snippets are identical regardless of entry path.
 
-## Model Preparation
-
-Same as the Windows guide — see
-[quick_start.md "Model Preparation"](quick_start.md#model-preparation).
-Run from the project root (inside the container if you used the Docker path).
-
 ## Testing & Benchmarking
 
 ### Model Inference with hip-onnx-runner
 
-`hip-onnx-runner` runs a single ONNX model through MorphiZen EP and reports
+`hip-onnx-runner` runs a single ONNX model through hipep EP and reports
 timing. It is built by `build.py` and also ships in the prebuilt
 package.
 
@@ -203,14 +197,17 @@ package.
 > ```
 
 ```bash
-# Run with MorphiZen EP (default), using a fixed-shape model from Model Preparation
-$ROOT/bin/hip-onnx-runner -m /path/to/output/prefill_p512m16384.onnx -i gen_inputs
+# Run with hipep EP (default), on your model directly (dynamic shape)
+$ROOT/bin/hip-onnx-runner -m /path/to/model.onnx -i gen_inputs
+
+# Resolve symbolic input dims at runtime (the EP still compiles the dynamic graph)
+$ROOT/bin/hip-onnx-runner -m /path/to/model.onnx -i gen_inputs -f sequence_length:128
 
 # Run with CPU only (no EP)
-$ROOT/bin/hip-onnx-runner -m /path/to/output/prefill_p512m16384.onnx -n -i gen_inputs
+$ROOT/bin/hip-onnx-runner -m /path/to/model.onnx -n -i gen_inputs
 
 # Dump outputs for comparison
-$ROOT/bin/hip-onnx-runner -m /path/to/output/prefill_p512m16384.onnx -i gen_inputs -d 2
+$ROOT/bin/hip-onnx-runner -m /path/to/model.onnx -i gen_inputs -d 2
 
 # L2-norm compare EP vs CPU outputs
 $ROOT/bin/hip-onnx-runner -L ep_o_dump,cpu_o_dump
@@ -224,22 +221,23 @@ $ROOT/bin/hip-onnx-runner -L ep_o_dump,cpu_o_dump
 | `-n` | CPU only, skip EP registration |
 | `-d 0\|1\|2\|3` | Dump level: 0=off, 1=inputs, 2=outputs, 3=both |
 | `-i <dir>` | Load inputs from directory instead of random |
+| `-f <name>:<val>` | Resolve a symbolic input dim at runtime (repeatable/comma-separated); EP still compiles the dynamic graph, unmatched symbolic dims default to 1 |
 | `-L dir1,dir2` | L2-norm comparison of two output directories |
 
 ### Latency Benchmarking with onnxruntime_perf_test
 
 `onnxruntime_perf_test` benchmarks inference latency. It ships in the prebuilt
-package; a local build may not include it. The examples below compare MorphiZen
+package; a local build may not include it. The examples below compare hipep
 EP against the CPU EP baseline (DML is Windows-only).
 
 ```bash
 # CPU baseline (no EP; useful to size the EP speedup)
 $ROOT/bin/onnxruntime_perf_test -e cpu -t 30 -c 1 -s /path/to/MODEL.onnx
 
-# MorphiZen EP
+# hipep EP
 $ROOT/bin/onnxruntime_perf_test \
-  --plugin_ep_libs "MorphiZenEP|$ROOT/lib/libonnxruntime_morphizen_ep.so" \
-  --plugin_eps     "MorphiZenEP" \
+  --plugin_ep_libs "hipep|$ROOT/lib/libhipep.so" \
+  --plugin_eps     "hipep" \
   -C "session.disable_cpu_ep_fallback|1" \
   -t 60 -c 1 -s -I \
   /path/to/MODEL.onnx
@@ -254,7 +252,7 @@ $ROOT/bin/onnxruntime_perf_test \
 | `-s` | Show per-iteration latency statistics |
 | `-I` | Use sequential inputs (do not randomize) |
 
-> The first iteration triggers MorphiZen's HIP kernel JIT compile
+> The first iteration triggers hipep's HIP kernel JIT compile
 > (multi-minute); bump `-t` so steady-state samples dominate the average.
 
 ### OGA End-to-End Benchmarking with model_benchmark
@@ -263,18 +261,22 @@ $ROOT/bin/onnxruntime_perf_test \
 decode token generation). It is not part of the local build, so use the
 prebuilt package to get it.
 
+The EP is selected by the model's `genai_config.json` `provider_options` and
+auto-discovered next to the OGA runtime lib -- do NOT pass `--ep_library`
+(upstream `model_benchmark` rejects it). With the upstream OGA (v0.14.0 + PR2194)
+the EP is the AMD GPU umbrella (`provider_options [{ "AMDGPU": {"profile": "llm"} }]`);
+the prebuilt package bundles the umbrella libs.
+
 ```bash
 # Auto-generated prompt (128 tokens, generate 32)
 $ROOT/bin/model_benchmark \
   -i /path/to/oga-model-dir \
-  --ep_library MorphiZenEP $ROOT/lib/libonnxruntime_morphizen_ep.so \
   -l 128 -g 32 -ml -1 \
   -r 5 -w 1
 
 # Prompt from file
 $ROOT/bin/model_benchmark \
   -i /path/to/oga-model-dir \
-  --ep_library MorphiZenEP $ROOT/lib/libonnxruntime_morphizen_ep.so \
   --prompt_file /path/to/prompt.txt -g 128 -ml -1 \
   -r 5 -w 1
 ```
@@ -291,7 +293,6 @@ $ROOT/bin/model_benchmark \
 | Flag | Description |
 |------|-------------|
 | `-i <path>` | Path to OGA model directory (with `genai_config.json`) |
-| `--ep_library <name> <path>` | Register a custom EP library |
 | `-l <n>` | Length of auto-generated prompt (exclusive with `--prompt_file`) |
 | `--prompt_file <path>` | Load prompt text from a file (exclusive with `-l`) |
 | `-g <n>` | Max number of tokens to generate |
@@ -345,13 +346,13 @@ Inside `./docker/run.sh shell` this is handled automatically — the
 container entrypoint reads the host GID off `/dev/kfd` and adds the
 in-container user to it, so you don't need host `render` membership.
 
-**`EP library not found: libonnxruntime_morphizen_ep.so` from `hip-onnx-runner`**
+**`EP library not found: libhipep.so` from `hip-onnx-runner`**
 
 The runner's search order is `$MORPHIZEN_EP_LIB` (full path) → cwd →
-`<exe-dir>/libonnxruntime_morphizen_ep.so` → `<exe-dir>/../lib/libonnxruntime_morphizen_ep.so`.
+`<exe-dir>/libhipep.so` → `<exe-dir>/../lib/libhipep.so`.
 If you're running out of `install/bin/`, no env vars are needed — the
 sibling `install/lib/` is auto-discovered. If you've copied the binary
-elsewhere, set `MORPHIZEN_EP_LIB=/full/path/to/libonnxruntime_morphizen_ep.so`.
+elsewhere, set `MORPHIZEN_EP_LIB=/full/path/to/libhipep.so`.
 
 **`clang++ not found on PATH and HIPDNN_CLANG_PATH is unset or stale` from `hip-compiler`**
 
