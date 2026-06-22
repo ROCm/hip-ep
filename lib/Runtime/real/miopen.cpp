@@ -156,14 +156,13 @@ int wrap_miopenConvolutionForward(
       },
       state);
   if (!state || !input || !weights || !output) {
-    fprintf(stderr, "Invalid arguments to wrap_miopenConvolutionForward\n");
+    hipdnn_ep_log_emit("Invalid arguments to wrap_miopenConvolutionForward\n");
     return -1;
   }
   bool dt_ok;
   miopenDataType_t miopen_dt = conv_to_miopen_type(data_type, dt_ok);
   if (!dt_ok) {
-    fprintf(
-        stderr,
+    hipdnn_ep_log_emit(
         "[REAL] wrap_miopenConvolutionForward: unsupported data_type %lld\n",
         (long long)data_type);
     return -1;
@@ -258,10 +257,10 @@ int wrap_miopenConvolutionForward(
 
   if (workspace_size > 0) {
     if (hipdnn_ep_state_ensure_conv_scratch(state, workspace_size) != 0) {
-      fprintf(stderr,
-              "wrap_miopenConvolutionForward: failed to grow conv_scratch to "
-              "%zu bytes\n",
-              workspace_size);
+      hipdnn_ep_log_emit(
+          "wrap_miopenConvolutionForward: failed to grow conv_scratch to "
+          "%zu bytes\n",
+          workspace_size);
       result = -1;
       goto cleanup;
     }
@@ -281,8 +280,8 @@ int wrap_miopenConvolutionForward(
       workspace_size,       // workspaceSize
       false));
   if (returned_algo_count < 1) {
-    fprintf(stderr, "wrap_miopenConvolutionForward: MIOpen Find returned no "
-                    "algorithms\n");
+    hipdnn_ep_log_emit("wrap_miopenConvolutionForward: MIOpen Find returned no "
+                       "algorithms\n");
     result = -1;
     goto cleanup;
   }
@@ -373,7 +372,8 @@ int wrap_miopenConvolutionTranspose(
   (void)pad_bottom;
   (void)pad_right;
   if (!state || !input || !weights || !output) {
-    fprintf(stderr, "Invalid arguments to wrap_miopenConvolutionTranspose\n");
+    hipdnn_ep_log_emit(
+        "Invalid arguments to wrap_miopenConvolutionTranspose\n");
     return -1;
   }
 
@@ -389,9 +389,9 @@ int wrap_miopenConvolutionTranspose(
     miopen_dt = miopenBFloat16;
     break;
   default:
-    fprintf(stderr,
-            "wrap_miopenConvolutionTranspose: unsupported data_type=%lld\n",
-            (long long)data_type);
+    hipdnn_ep_log_emit(
+        "wrap_miopenConvolutionTranspose: unsupported data_type=%lld\n",
+        (long long)data_type);
     return -1;
   }
 
@@ -469,7 +469,8 @@ int wrap_miopenConvolutionTranspose(
   if (workspace_size > find_workspace_size) {
     hipError_t err = hipFree(find_workspace);
     if (err != hipSuccess)
-      fprintf(stderr, "Warning: hipFree failed for find_workspace: %d\n", err);
+      hipdnn_ep_log_emit("Warning: hipFree failed for find_workspace: %d\n",
+                         err);
     find_workspace = nullptr;
     HIP_CHECK(hipMalloc(&workspace, workspace_size));
   }
@@ -502,12 +503,13 @@ cleanup:
   if (workspace) {
     hipError_t err = hipFree(workspace);
     if (err != hipSuccess)
-      fprintf(stderr, "Warning: hipFree failed for workspace: %d\n", err);
+      hipdnn_ep_log_emit("Warning: hipFree failed for workspace: %d\n", err);
   }
   if (find_workspace && find_workspace != workspace) {
     hipError_t err = hipFree(find_workspace);
     if (err != hipSuccess)
-      fprintf(stderr, "Warning: hipFree failed for find_workspace: %d\n", err);
+      hipdnn_ep_log_emit("Warning: hipFree failed for find_workspace: %d\n",
+                         err);
   }
   if (input_desc)
     miopenDestroyTensorDescriptor(input_desc);

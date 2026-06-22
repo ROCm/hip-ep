@@ -73,33 +73,34 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
     return -1;
   }
   if (data_rank <= 0) {
-    fprintf(stderr, "[REAL] wrap_pad: invalid data_rank=%lld\n",
-            (long long)data_rank);
+    hipdnn_ep_log_emit("[REAL] wrap_pad: invalid data_rank=%lld\n",
+                       (long long)data_rank);
     return -1;
   }
   if (data_rank != output_rank) {
-    fprintf(stderr, "[REAL] wrap_pad: data_rank(%lld) != output_rank(%lld)\n",
-            (long long)data_rank, (long long)output_rank);
+    hipdnn_ep_log_emit(
+        "[REAL] wrap_pad: data_rank(%lld) != output_rank(%lld)\n",
+        (long long)data_rank, (long long)output_rank);
     return -1;
   }
   if (pads_num_elements <= 0) {
-    fprintf(stderr, "[REAL] wrap_pad: pads_num_elements=%lld must be > 0\n",
-            (long long)pads_num_elements);
+    hipdnn_ep_log_emit("[REAL] wrap_pad: pads_num_elements=%lld must be > 0\n",
+                       (long long)pads_num_elements);
     return -1;
   }
 
   int hip_dtype = pad_hipdnn_to_hip_dtype(data_type);
   if (hip_dtype < 0) {
-    fprintf(stderr,
-            "[REAL] wrap_pad: unsupported data_type=%s(%lld) "
-            "(supported: f16, f32, i32, i64)\n",
-            hipdnn_ep_datatype_name(data_type), (long long)data_type);
+    hipdnn_ep_log_emit("[REAL] wrap_pad: unsupported data_type=%s(%lld) "
+                       "(supported: f16, f32, i32, i64)\n",
+                       hipdnn_ep_datatype_name(data_type),
+                       (long long)data_type);
     return -1;
   }
   int element_size = static_cast<int>(hipdnn_ep_datatype_size(data_type));
   if (element_size <= 0) {
-    fprintf(stderr, "[REAL] wrap_pad: bad element size for data_type=%lld\n",
-            (long long)data_type);
+    hipdnn_ep_log_emit("[REAL] wrap_pad: bad element size for data_type=%lld\n",
+                       (long long)data_type);
     return -1;
   }
 
@@ -114,8 +115,8 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
                                   pads_num_elements * sizeof(int64_t),
                                   hipMemcpyDeviceToHost, hip_stream);
   if (err != hipSuccess) {
-    fprintf(stderr, "[REAL] wrap_pad: pads D2H failed: %s\n",
-            hipGetErrorString(err));
+    hipdnn_ep_log_emit("[REAL] wrap_pad: pads D2H failed: %s\n",
+                       hipGetErrorString(err));
     return -1;
   }
 
@@ -126,8 +127,8 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
                          axes_num_elements * sizeof(int64_t),
                          hipMemcpyDeviceToHost, hip_stream);
     if (err != hipSuccess) {
-      fprintf(stderr, "[REAL] wrap_pad: axes D2H failed: %s\n",
-              hipGetErrorString(err));
+      hipdnn_ep_log_emit("[REAL] wrap_pad: axes D2H failed: %s\n",
+                         hipGetErrorString(err));
       return -1;
     }
   }
@@ -140,8 +141,8 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
     err = hipMemcpyAsync(cv_buf, constant_value, element_size,
                          hipMemcpyDeviceToHost, hip_stream);
     if (err != hipSuccess) {
-      fprintf(stderr, "[REAL] wrap_pad: constant_value D2H failed: %s\n",
-              hipGetErrorString(err));
+      hipdnn_ep_log_emit("[REAL] wrap_pad: constant_value D2H failed: %s\n",
+                         hipGetErrorString(err));
       return -1;
     }
     have_cv = true;
@@ -149,8 +150,8 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
 
   err = hipStreamSynchronize(hip_stream);
   if (err != hipSuccess) {
-    fprintf(stderr, "[REAL] wrap_pad: stream sync after D2H failed: %s\n",
-            hipGetErrorString(err));
+    hipdnn_ep_log_emit("[REAL] wrap_pad: stream sync after D2H failed: %s\n",
+                       hipGetErrorString(err));
     return -1;
   }
 
@@ -161,9 +162,9 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
   int64_t num_axes_padded =
       axes_host.empty() ? data_rank : static_cast<int64_t>(axes_host.size());
   if (pads_num_elements != 2 * num_axes_padded) {
-    fprintf(stderr,
-            "[REAL] wrap_pad: pads length(%lld) != 2 * num_axes(%lld)\n",
-            (long long)pads_num_elements, (long long)num_axes_padded);
+    hipdnn_ep_log_emit(
+        "[REAL] wrap_pad: pads length(%lld) != 2 * num_axes(%lld)\n",
+        (long long)pads_num_elements, (long long)num_axes_padded);
     return -1;
   }
   for (int64_t i = 0; i < num_axes_padded; ++i) {
@@ -171,8 +172,8 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
     if (axis < 0)
       axis += data_rank;
     if (axis < 0 || axis >= data_rank) {
-      fprintf(stderr, "[REAL] wrap_pad: axis=%lld out of range [0, %lld)\n",
-              (long long)axis, (long long)data_rank);
+      hipdnn_ep_log_emit("[REAL] wrap_pad: axis=%lld out of range [0, %lld)\n",
+                         (long long)axis, (long long)data_rank);
       return -1;
     }
     lower_pads[axis] = pads_host[i];

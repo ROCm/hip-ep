@@ -70,9 +70,9 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
   if (src_data_type == dst_data_type) {
     int64_t elem_size = hipdnn_ep_datatype_size(src_data_type);
     if (elem_size <= 0) {
-      fprintf(stderr,
-              "[REAL] wrap_cast same-dtype: unsupported data type %lld\n",
-              (long long)src_data_type);
+      hipdnn_ep_log_emit(
+          "[REAL] wrap_cast same-dtype: unsupported data type %lld\n",
+          (long long)src_data_type);
       return -1;
     }
     if (input == output) {
@@ -84,11 +84,11 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
         hipMemcpyAsync(output, input, bytes, hipMemcpyDeviceToDevice,
                        static_cast<hipStream_t>(stream));
     if (err != hipSuccess) {
-      fprintf(stderr,
-              "[REAL] wrap_cast same-dtype hipMemcpyAsync failed: %s "
-              "(n=%lld dtype=%lld)\n",
-              hipGetErrorString(err), (long long)num_elements,
-              (long long)src_data_type);
+      hipdnn_ep_log_emit(
+          "[REAL] wrap_cast same-dtype hipMemcpyAsync failed: %s "
+          "(n=%lld dtype=%lld)\n",
+          hipGetErrorString(err), (long long)num_elements,
+          (long long)src_data_type);
       return -1;
     }
     RUNTIME_DEBUG_LOG(
@@ -103,9 +103,9 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
   int dst_hip_dtype = hipdnn_to_hip_dtype(dst_data_type);
 
   if (src_hip_dtype < 0 || dst_hip_dtype < 0) {
-    fprintf(stderr,
-            "[REAL] wrap_cast: unsupported data type src=%lld dst=%lld\n",
-            (long long)src_data_type, (long long)dst_data_type);
+    hipdnn_ep_log_emit(
+        "[REAL] wrap_cast: unsupported data type src=%lld dst=%lld\n",
+        (long long)src_data_type, (long long)dst_data_type);
     return -1;
   }
 

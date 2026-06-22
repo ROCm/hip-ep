@@ -36,8 +36,13 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
                                  const void *metadata_blob, size_t blob_size) {
   auto t0 = timing_now();
 
+  // One-shot CRT-binding diagnostic (HIPDNN_EP_DIAG_CRT=1). Runs from the JIT'd
+  // runtime module, so it reports which loaded CRT instance the JIT resolved
+  // this module's fprintf/stderr/getenv to. No-op unless the env var is set.
+  hipdnn_ep_diag_crt_binding("JIT-runtime");
+
   if (!out_state || !fs) {
-    fprintf(stderr, "Invalid arguments to hipdnn_ep_state_init_with_fs\n");
+    hipdnn_ep_log_emit("Invalid arguments to hipdnn_ep_state_init_with_fs\n");
     return 1;
   }
 
@@ -132,7 +137,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
 
   RuntimeState *state = (RuntimeState *)malloc(sizeof(RuntimeState));
   if (!state) {
-    fprintf(stderr, "Failed to allocate runtime state\n");
+    hipdnn_ep_log_emit("Failed to allocate runtime state\n");
     return 1;
   }
 
@@ -182,13 +187,14 @@ static int initialize_state_handles(RuntimeState **out_state) {
 
   int device_count = 0;
   if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
-    fprintf(stderr, "Failed to get HIP device count or no devices available\n");
+    hipdnn_ep_log_emit(
+        "Failed to get HIP device count or no devices available\n");
     free(state);
     return 2;
   }
 
   if (hipSetDevice(0) != hipSuccess) {
-    fprintf(stderr, "Failed to set HIP device 0\n");
+    hipdnn_ep_log_emit("Failed to set HIP device 0\n");
     free(state);
     return 3;
   }
@@ -196,7 +202,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   TIMING_LOG("[Session] HIP device init: %.3fs\n", record_elapsed(t_prev));
 
   if (hipStreamCreate(&state->stream) != hipSuccess) {
-    fprintf(stderr, "Failed to create HIP stream\n");
+    hipdnn_ep_log_emit("Failed to create HIP stream\n");
     free(state);
     return 6;
   }
@@ -204,7 +210,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   TIMING_LOG("[Session] hipStreamCreate: %.3fs\n", record_elapsed(t_prev));
 
   if (miopenCreate(&state->miopen_handle) != miopenStatusSuccess) {
-    fprintf(stderr, "Failed to create MIOpen handle\n");
+    hipdnn_ep_log_emit("Failed to create MIOpen handle\n");
     if (state->stream)
       HIP_CLEANUP(hipStreamDestroy(state->stream));
     free(state);
@@ -213,7 +219,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
 
   if (miopenSetStream(state->miopen_handle, state->stream) !=
       miopenStatusSuccess) {
-    fprintf(stderr, "Failed to set MIOpen stream\n");
+    hipdnn_ep_log_emit("Failed to set MIOpen stream\n");
     miopenDestroy(state->miopen_handle);
     if (state->stream)
       HIP_CLEANUP(hipStreamDestroy(state->stream));
@@ -224,7 +230,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   TIMING_LOG("[Session] MIOpen init: %.3fs\n", record_elapsed(t_prev));
 
   if (hipblasLtCreate(&state->hipblas_handle) != HIPBLAS_STATUS_SUCCESS) {
-    fprintf(stderr, "Failed to create hipBLASLt handle\n");
+    hipdnn_ep_log_emit("Failed to create hipBLASLt handle\n");
     miopenDestroy(state->miopen_handle);
     if (state->stream)
       HIP_CLEANUP(hipStreamDestroy(state->stream));
@@ -238,7 +244,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   // propagation (e.g., Range delta==0).
   if (hipMalloc((void **)&state->device_error_flag, sizeof(int)) !=
       hipSuccess) {
-    fprintf(stderr, "Failed to allocate device error flag\n");
+    hipdnn_ep_log_emit("Failed to allocate device error flag\n");
     hipblasLtDestroy(state->hipblas_handle);
     miopenDestroy(state->miopen_handle);
     if (state->stream)
@@ -248,7 +254,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   }
   if (hipMemsetAsync(state->device_error_flag, 0, sizeof(int), state->stream) !=
       hipSuccess) {
-    fprintf(stderr, "Failed to initialize device error flag\n");
+    hipdnn_ep_log_emit("Failed to initialize device error flag\n");
     HIP_CLEANUP(hipFree(state->device_error_flag));
     state->device_error_flag = nullptr;
     hipblasLtDestroy(state->hipblas_handle);
@@ -276,7 +282,7 @@ static int prepare_constants_array(RuntimeState *state,
   state->gpu_constants =
       (void **)calloc(static_cast<size_t>(count), sizeof(void *));
   if (!state->gpu_constants) {
-    fprintf(stderr, "Failed to allocate gpu_constants array\n");
+    hipdnn_ep_log_emit("Failed to allocate gpu_constants array\n");
     return 1;
   }
   state->num_constants = static_cast<size_t>(count);
@@ -307,8 +313,8 @@ static int hipmalloc_and_fixup(RuntimeState *state,
                                size_t total_size) {
   auto t_prev = timing_now();
   if (hipMalloc(&state->gpu_constants_blob, total_size) != hipSuccess) {
-    fprintf(stderr, "hipMalloc failed for constants blob (%zu bytes)\n",
-            total_size);
+    hipdnn_ep_log_emit("hipMalloc failed for constants blob (%zu bytes)\n",
+                       total_size);
     return 1;
   }
   TIMING_LOG("[Session] hipMalloc VRAM: %.3fs (%zu bytes)\n",
@@ -332,7 +338,8 @@ static int bulk_load_constants(RuntimeState *state, morphizen::FileSystem *fs,
 
   auto reader = fs->create_reader_template(constants_filename);
   if (!reader) {
-    fprintf(stderr, "Failed to open %s via FileSystem\n", constants_filename);
+    hipdnn_ep_log_emit("Failed to open %s via FileSystem\n",
+                       constants_filename);
     return 1;
   }
   size_t total_size = reader->size();
@@ -349,14 +356,14 @@ static int bulk_load_constants(RuntimeState *state, morphizen::FileSystem *fs,
   if (!src) {
     cpu_buf = malloc(total_size);
     if (!cpu_buf) {
-      fprintf(stderr, "Failed to allocate staging buffer (%zu bytes)\n",
-              total_size);
+      hipdnn_ep_log_emit("Failed to allocate staging buffer (%zu bytes)\n",
+                         total_size);
       return 1;
     }
     size_t bytes_read = reader->fread(cpu_buf, total_size);
     if (bytes_read != total_size) {
-      fprintf(stderr, "Short read: got %zu of %zu bytes\n", bytes_read,
-              total_size);
+      hipdnn_ep_log_emit("Short read: got %zu of %zu bytes\n", bytes_read,
+                         total_size);
       free(cpu_buf);
       return 1;
     }
@@ -367,7 +374,7 @@ static int bulk_load_constants(RuntimeState *state, morphizen::FileSystem *fs,
 
   if (hipMemcpy(state->gpu_constants_blob, src, total_size,
                 hipMemcpyHostToDevice) != hipSuccess) {
-    fprintf(stderr, "hipMemcpy failed for constants blob\n");
+    hipdnn_ep_log_emit("hipMemcpy failed for constants blob\n");
     free(cpu_buf);
     return 1;
   }
@@ -415,13 +422,13 @@ static bool fref_cache_open(FrefCache *c, const char *path) {
   fref_cache_release(c);
   size_t path_len = std::strlen(path);
   if (path_len + 1 > sizeof(c->path)) {
-    fprintf(stderr, "file-ref path too long (%zu bytes)\n", path_len);
+    hipdnn_ep_log_emit("file-ref path too long (%zu bytes)\n", path_len);
     return false;
   }
   memcpy(c->path, path, path_len + 1);
   c->fp = std::fopen(c->path, "rb");
   if (!c->fp) {
-    fprintf(stderr, "Failed to open file-ref source: %s\n", c->path);
+    hipdnn_ep_log_emit("Failed to open file-ref source: %s\n", c->path);
     return false;
   }
   return true;
@@ -432,20 +439,20 @@ static int fref_fetch(FrefCache *c, int64_t file_offset, size_t size,
                       void *staging) {
 #ifdef _WIN32
   if (_fseeki64(c->fp, file_offset, SEEK_SET) != 0) {
-    fprintf(stderr, "fref_fetch: fseek64 to %lld failed\n",
-            (long long)file_offset);
+    hipdnn_ep_log_emit("fref_fetch: fseek64 to %lld failed\n",
+                       (long long)file_offset);
     return 1;
   }
 #else
   if (std::fseek(c->fp, (long)file_offset, SEEK_SET) != 0) {
-    fprintf(stderr, "fref_fetch: fseek to %lld failed\n",
-            (long long)file_offset);
+    hipdnn_ep_log_emit("fref_fetch: fseek to %lld failed\n",
+                       (long long)file_offset);
     return 1;
   }
 #endif
   size_t got = std::fread(staging, 1, size, c->fp);
   if (got != size) {
-    fprintf(stderr, "fref_fetch: short read (got %zu of %zu)\n", got, size);
+    hipdnn_ep_log_emit("fref_fetch: short read (got %zu of %zu)\n", got, size);
     return 1;
   }
   return 0;
@@ -474,15 +481,15 @@ static bool sidecar_cache_open(SidecarReaderCache *c, morphizen::FileSystem *fs,
     return c->reader != nullptr;
   c->tried_open = true;
   if (!fs || !constants_filename) {
-    fprintf(stderr,
-            "per_entry: SidecarSource entry but fs / constants_filename "
-            "unavailable\n");
+    hipdnn_ep_log_emit(
+        "per_entry: SidecarSource entry but fs / constants_filename "
+        "unavailable\n");
     return false;
   }
   c->reader = fs->create_reader_template(constants_filename);
   if (!c->reader) {
-    fprintf(stderr, "per_entry: failed to open partial sidecar %s\n",
-            constants_filename);
+    hipdnn_ep_log_emit("per_entry: failed to open partial sidecar %s\n",
+                       constants_filename);
     return false;
   }
   c->total_size = c->reader->size();
@@ -494,10 +501,10 @@ static bool sidecar_cache_open(SidecarReaderCache *c, morphizen::FileSystem *fs,
 static int sidecar_fetch(SidecarReaderCache *c, int64_t offset, size_t size,
                          void *staging) {
   if ((uint64_t)offset + size > (uint64_t)c->total_size) {
-    fprintf(stderr,
-            "per_entry: sidecar fetch out of range (offset=%lld size=%zu "
-            "total=%zu)\n",
-            (long long)offset, size, c->total_size);
+    hipdnn_ep_log_emit(
+        "per_entry: sidecar fetch out of range (offset=%lld size=%zu "
+        "total=%zu)\n",
+        (long long)offset, size, c->total_size);
     return 1;
   }
   if (c->mmap_base) {
@@ -516,16 +523,16 @@ static int sidecar_fetch(SidecarReaderCache *c, int64_t offset, size_t size,
     size_t toRead = (size_t)std::min<uint64_t>(remaining_skip, kSkipChunk);
     size_t got = c->reader->fread(skip_buf, toRead);
     if (got != toRead) {
-      fprintf(stderr, "per_entry: sidecar skip short read (got %zu of %zu)\n",
-              got, toRead);
+      hipdnn_ep_log_emit(
+          "per_entry: sidecar skip short read (got %zu of %zu)\n", got, toRead);
       return 1;
     }
     remaining_skip -= toRead;
   }
   size_t got = c->reader->fread(staging, size);
   if (got != size) {
-    fprintf(stderr, "per_entry: sidecar payload short read (got %zu of %zu)\n",
-            got, size);
+    hipdnn_ep_log_emit(
+        "per_entry: sidecar payload short read (got %zu of %zu)\n", got, size);
     return 1;
   }
   return 0;
@@ -561,8 +568,8 @@ static int per_entry_load_constants(RuntimeState *state,
   uint8_t *staging =
       max_tensor_size ? (uint8_t *)malloc(max_tensor_size) : nullptr;
   if (max_tensor_size && !staging) {
-    fprintf(stderr, "per_entry: failed to alloc %zu bytes staging\n",
-            max_tensor_size);
+    hipdnn_ep_log_emit("per_entry: failed to alloc %zu bytes staging\n",
+                       max_tensor_size);
     return 1;
   }
 
@@ -586,8 +593,9 @@ static int per_entry_load_constants(RuntimeState *state,
       auto *eb = splat->elem_bytes();
       size_t elem_size = eb ? eb->size() : 0;
       if (elem_size == 0 || elem_size > 8) {
-        fprintf(stderr, "per_entry: entry %lld invalid splat elem_size %zu\n",
-                (long long)i, elem_size);
+        hipdnn_ep_log_emit(
+            "per_entry: entry %lld invalid splat elem_size %zu\n", (long long)i,
+            elem_size);
         free(staging);
         fref_cache_release(&fcache);
         return 1;
@@ -597,8 +605,8 @@ static int per_entry_load_constants(RuntimeState *state,
         memcpy(staging + off, elem_bytes, elem_size);
       }
       if (hipMemcpy(dst, staging, sz, hipMemcpyHostToDevice) != hipSuccess) {
-        fprintf(stderr, "per_entry: hipMemcpy failed for splat entry %lld\n",
-                (long long)i);
+        hipdnn_ep_log_emit("per_entry: hipMemcpy failed for splat entry %lld\n",
+                           (long long)i);
         free(staging);
         fref_cache_release(&fcache);
         return 1;
@@ -620,8 +628,9 @@ static int per_entry_load_constants(RuntimeState *state,
         return 1;
       }
       if (hipMemcpy(dst, staging, sz, hipMemcpyHostToDevice) != hipSuccess) {
-        fprintf(stderr, "per_entry: hipMemcpy failed for file-ref entry %lld\n",
-                (long long)i);
+        hipdnn_ep_log_emit(
+            "per_entry: hipMemcpy failed for file-ref entry %lld\n",
+            (long long)i);
         free(staging);
         fref_cache_release(&fcache);
         return 1;
@@ -642,8 +651,9 @@ static int per_entry_load_constants(RuntimeState *state,
         return 1;
       }
       if (hipMemcpy(dst, staging, sz, hipMemcpyHostToDevice) != hipSuccess) {
-        fprintf(stderr, "per_entry: hipMemcpy failed for sidecar entry %lld\n",
-                (long long)i);
+        hipdnn_ep_log_emit(
+            "per_entry: hipMemcpy failed for sidecar entry %lld\n",
+            (long long)i);
         free(staging);
         fref_cache_release(&fcache);
         return 1;
@@ -654,9 +664,9 @@ static int per_entry_load_constants(RuntimeState *state,
       // NONE in a per-entry-mode module is invalid: the dispatch only
       // calls us when at least one entry has a source, but every entry
       // with source=NONE has no data anywhere for us to load.
-      fprintf(stderr,
-              "per_entry: entry %lld has source=NONE in per-entry mode\n",
-              (long long)i);
+      hipdnn_ep_log_emit(
+          "per_entry: entry %lld has source=NONE in per-entry mode\n",
+          (long long)i);
       free(staging);
       fref_cache_release(&fcache);
       return 1;
@@ -673,7 +683,7 @@ static int per_entry_load_constants(RuntimeState *state,
 
 int hipdnn_ep_state_cleanup(RuntimeState *state) {
   if (!state) {
-    fprintf(stderr, "Invalid runtime state in cleanup\n");
+    hipdnn_ep_log_emit("Invalid runtime state in cleanup\n");
     return 0; // Best-effort - don't fail
   }
 
@@ -827,8 +837,8 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
 
 void *hipdnn_ep_constant_get(RuntimeState *state, int64_t index) {
   if (!state || index < 0 || (size_t)index >= state->num_constants) {
-    fprintf(stderr, "hipdnn_ep_constant_get: invalid state or index %lld\n",
-            (long long)index);
+    hipdnn_ep_log_emit("hipdnn_ep_constant_get: invalid state or index %lld\n",
+                       (long long)index);
     return nullptr;
   }
   return state->gpu_constants[index];
@@ -912,8 +922,8 @@ static bool ensure_pool_domains(RuntimeState *state, int needed_count) {
   auto *new_base = static_cast<void **>(
       realloc(state->pool_base, sizeof(void *) * needed_count));
   if (!new_base) {
-    fprintf(stderr, "Failed to grow pool_base array to %d domains\n",
-            needed_count);
+    hipdnn_ep_log_emit("Failed to grow pool_base array to %d domains\n",
+                       needed_count);
     return false;
   }
   state->pool_base = new_base;
@@ -922,8 +932,8 @@ static bool ensure_pool_domains(RuntimeState *state, int needed_count) {
   if (!new_size) {
     // pool_base already grew; leaving it larger than num_pool_domains is safe
     // because num_pool_domains (updated below) still bounds every loop.
-    fprintf(stderr, "Failed to grow pool_size array to %d domains\n",
-            needed_count);
+    hipdnn_ep_log_emit("Failed to grow pool_size array to %d domains\n",
+                       needed_count);
     return false;
   }
   state->pool_size = new_size;
@@ -940,7 +950,7 @@ extern "C" {
 int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
                         const size_t *buffer_offsets, size_t num_buffers) {
   if (!state) {
-    fprintf(stderr, "Invalid state parameter to hipdnn_ep_pool_init\n");
+    hipdnn_ep_log_emit("Invalid state parameter to hipdnn_ep_pool_init\n");
     return 1;
   }
 
@@ -955,8 +965,8 @@ int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
   // on first hip.get_pool call (lazy init).
   if (pool_size > 0) {
     if (hipMalloc(&state->pool_base[0], pool_size) != hipSuccess) {
-      fprintf(stderr, "Failed to allocate memory pool of size %zu bytes\n",
-              pool_size);
+      hipdnn_ep_log_emit("Failed to allocate memory pool of size %zu bytes\n",
+                         pool_size);
       return 2; // Pool allocation failed
     }
   } else {
@@ -971,7 +981,7 @@ int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
   if (num_buffers > 0 && buffer_offsets) {
     state->buffer_offsets = (size_t *)malloc(sizeof(size_t) * num_buffers);
     if (!state->buffer_offsets) {
-      fprintf(stderr, "Failed to allocate buffer offsets array\n");
+      hipdnn_ep_log_emit("Failed to allocate buffer offsets array\n");
       if (state->pool_base[0]) {
         HIP_CLEANUP(hipFree(state->pool_base[0]));
         state->pool_base[0] = nullptr;
@@ -996,13 +1006,13 @@ void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index) {
   // on a pool_size==0 model whose arrays were never grown) is a null deref.
   if (!state || !state->pool_base || state->num_pool_domains < 1 ||
       !state->pool_base[0]) {
-    fprintf(stderr, "Invalid state or pool not initialized\n");
+    hipdnn_ep_log_emit("Invalid state or pool not initialized\n");
     return nullptr;
   }
 
   if (index >= state->num_buffers) {
-    fprintf(stderr, "Buffer index %zu out of range (num_buffers = %zu)\n",
-            index, state->num_buffers);
+    hipdnn_ep_log_emit("Buffer index %zu out of range (num_buffers = %zu)\n",
+                       index, state->num_buffers);
     return nullptr;
   }
 
@@ -1014,14 +1024,14 @@ void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index) {
 void *hipdnn_ep_get_pool_base(RuntimeState *state, int domain_id,
                               size_t needed_size) {
   if (!state) {
-    fprintf(stderr, "Invalid state parameter to hipdnn_ep_get_pool_base\n");
+    hipdnn_ep_log_emit("Invalid state parameter to hipdnn_ep_get_pool_base\n");
     return nullptr;
   }
   if (domain_id < 0) {
-    fprintf(stderr,
-            "hipdnn_ep_get_pool_base: negative domain_id %d — this is a "
-            "compiler bug (hip-pool-allocs assigns domain ids starting at 0)\n",
-            domain_id);
+    hipdnn_ep_log_emit(
+        "hipdnn_ep_get_pool_base: negative domain_id %d — this is a "
+        "compiler bug (hip-pool-allocs assigns domain ids starting at 0)\n",
+        domain_id);
     return nullptr;
   }
   // Grow the per-domain arrays the first time this domain_id is seen. There is
@@ -1053,19 +1063,18 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state, int domain_id,
     if (state->pool_base[domain_id]) {
       if (state->stream)
         HIP_CLEANUP(hipStreamSynchronize(state->stream));
-      fprintf(stderr,
-              "hipdnn_ep_get_pool_base: growing pool[%d] %zu -> %zu bytes "
-              "(rare; first time this large input shape was seen)\n",
-              domain_id, state->pool_size[domain_id], needed_size);
-      fflush(stderr);
+      hipdnn_ep_log_emit(
+          "hipdnn_ep_get_pool_base: growing pool[%d] %zu -> %zu bytes "
+          "(rare; first time this large input shape was seen)\n",
+          domain_id, state->pool_size[domain_id], needed_size);
       HIP_CLEANUP(hipFree(state->pool_base[domain_id]));
     }
     void *new_base = nullptr;
     if (hipMalloc(&new_base, needed_size) != hipSuccess) {
-      fprintf(stderr,
-              "hipdnn_ep_get_pool_base: hipMalloc failed for pool[%d] grow "
-              "(%zu -> %zu bytes)\n",
-              domain_id, state->pool_size[domain_id], needed_size);
+      hipdnn_ep_log_emit(
+          "hipdnn_ep_get_pool_base: hipMalloc failed for pool[%d] grow "
+          "(%zu -> %zu bytes)\n",
+          domain_id, state->pool_size[domain_id], needed_size);
       state->pool_base[domain_id] = nullptr;
       state->pool_size[domain_id] = 0;
       return nullptr;
@@ -1078,8 +1087,8 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state, int domain_id,
 
 void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size) {
   if (!state) {
-    fprintf(stderr,
-            "Invalid state parameter to hipdnn_ep_get_host_scratch_base\n");
+    hipdnn_ep_log_emit(
+        "Invalid state parameter to hipdnn_ep_get_host_scratch_base\n");
     return nullptr;
   }
   // Mirrors hipdnn_ep_get_pool_base growth semantics for the host-mapped
@@ -1094,20 +1103,19 @@ void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size) {
     if (state->host_scratch_base) {
       if (state->stream)
         HIP_CLEANUP(hipStreamSynchronize(state->stream));
-      fprintf(stderr,
-              "hipdnn_ep_get_host_scratch_base: growing host scratch "
-              "%zu -> %zu bytes (rare; first time this large)\n",
-              state->host_scratch_size, needed_size);
-      fflush(stderr);
+      hipdnn_ep_log_emit(
+          "hipdnn_ep_get_host_scratch_base: growing host scratch "
+          "%zu -> %zu bytes (rare; first time this large)\n",
+          state->host_scratch_size, needed_size);
       HIP_CLEANUP(hipHostFree(state->host_scratch_base));
     }
     void *new_base = nullptr;
     if (hipHostMalloc(&new_base, needed_size, hipHostMallocMapped) !=
         hipSuccess) {
-      fprintf(stderr,
-              "hipdnn_ep_get_host_scratch_base: hipHostMalloc failed "
-              "(%zu -> %zu bytes)\n",
-              state->host_scratch_size, needed_size);
+      hipdnn_ep_log_emit(
+          "hipdnn_ep_get_host_scratch_base: hipHostMalloc failed "
+          "(%zu -> %zu bytes)\n",
+          state->host_scratch_size, needed_size);
       state->host_scratch_base = nullptr;
       state->host_scratch_size = 0;
       return nullptr;
@@ -1167,8 +1175,7 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
   }
 
   if (hipMalloc(&state->workspace, alloc_size) != hipSuccess) {
-    fprintf(
-        stderr,
+    hipdnn_ep_log_emit(
         "hipdnn_ep_state_ensure_workspace: hipMalloc failed for %zu bytes\n",
         alloc_size);
     std::abort();
@@ -1228,10 +1235,10 @@ int hipdnn_ep_state_ensure_qmoe_scratch(RuntimeState *state,
   }
 
   if (hipMalloc(&state->qmoe_scratch, alloc_size) != hipSuccess) {
-    fprintf(stderr,
-            "hipdnn_ep_state_ensure_qmoe_scratch: hipMalloc failed for %zu "
-            "bytes\n",
-            alloc_size);
+    hipdnn_ep_log_emit(
+        "hipdnn_ep_state_ensure_qmoe_scratch: hipMalloc failed for %zu "
+        "bytes\n",
+        alloc_size);
     return -1;
   }
   state->qmoe_scratch_size = alloc_size;
@@ -1276,10 +1283,10 @@ int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
 
   if (hipHostMalloc(&state->qmoe_host_scratch, alloc_size,
                     hipHostMallocDefault) != hipSuccess) {
-    fprintf(stderr,
-            "hipdnn_ep_state_ensure_qmoe_host_scratch: hipHostMalloc failed "
-            "for %zu bytes\n",
-            alloc_size);
+    hipdnn_ep_log_emit(
+        "hipdnn_ep_state_ensure_qmoe_host_scratch: hipHostMalloc failed "
+        "for %zu bytes\n",
+        alloc_size);
     return -1;
   }
   state->qmoe_host_scratch_size = alloc_size;
@@ -1324,10 +1331,10 @@ int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
   }
 
   if (hipMalloc(&state->conv_scratch, alloc_size) != hipSuccess) {
-    fprintf(stderr,
-            "hipdnn_ep_state_ensure_conv_scratch: hipMalloc failed for %zu "
-            "bytes\n",
-            alloc_size);
+    hipdnn_ep_log_emit(
+        "hipdnn_ep_state_ensure_conv_scratch: hipMalloc failed for %zu "
+        "bytes\n",
+        alloc_size);
     return -1;
   }
   state->conv_scratch_size = alloc_size;
@@ -1340,7 +1347,7 @@ void *hipdnn_ep_state_get_error_flag_device_ptr(RuntimeState *state) {
 
 int hipdnn_ep_state_reset_error_flag(RuntimeState *state) {
   if (!state || !state->device_error_flag || !state->stream) {
-    fprintf(stderr, "hipdnn_ep_state_reset_error_flag: invalid state\n");
+    hipdnn_ep_log_emit("hipdnn_ep_state_reset_error_flag: invalid state\n");
     return -1;
   }
   hipError_t err =
@@ -1350,8 +1357,8 @@ int hipdnn_ep_state_reset_error_flag(RuntimeState *state) {
 
 int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state) {
   if (!state || !state->device_error_flag || !state->stream) {
-    fprintf(stderr,
-            "hipdnn_ep_state_read_and_clear_error_flag: invalid state\n");
+    hipdnn_ep_log_emit(
+        "hipdnn_ep_state_read_and_clear_error_flag: invalid state\n");
     return -1;
   }
 

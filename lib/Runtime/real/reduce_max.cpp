@@ -68,9 +68,9 @@ int wrap_reduce_max(RuntimeState *state, void *data, void *axes, void *output,
     void *stream = hipdnn_ep_state_get_stream(state);
     int64_t element_size_bytes = hipdnn_ep_datatype_size(data_type);
     if (element_size_bytes < 0) {
-      fprintf(stderr,
-              "[REAL] wrap_reduce_max: unsupported data_type=%lld for noop\n",
-              (long long)data_type);
+      hipdnn_ep_log_emit(
+          "[REAL] wrap_reduce_max: unsupported data_type=%lld for noop\n",
+          (long long)data_type);
       return -1;
     }
     int64_t total_bytes = data_num_elements * element_size_bytes;
@@ -81,9 +81,9 @@ int wrap_reduce_max(RuntimeState *state, void *data, void *axes, void *output,
         hipMemcpyAsync(output, data, total_bytes, hipMemcpyDeviceToDevice,
                        static_cast<hipStream_t>(stream));
     if (err != hipSuccess) {
-      fprintf(stderr,
-              "[REAL] wrap_reduce_max: noop hipMemcpyAsync failed: %s\n",
-              hipGetErrorString(err));
+      hipdnn_ep_log_emit(
+          "[REAL] wrap_reduce_max: noop hipMemcpyAsync failed: %s\n",
+          hipGetErrorString(err));
       return -1;
     }
     return 0;
@@ -91,10 +91,10 @@ int wrap_reduce_max(RuntimeState *state, void *data, void *axes, void *output,
 
   int hip_dtype = reduce_max_hipdnn_to_hip_dtype(data_type);
   if (hip_dtype < 0) {
-    fprintf(stderr,
-            "[REAL] wrap_reduce_max: unsupported data_type=%s(%lld) "
-            "(supported: f16, i32, i64)\n",
-            hipdnn_ep_datatype_name(data_type), (long long)data_type);
+    hipdnn_ep_log_emit("[REAL] wrap_reduce_max: unsupported data_type=%s(%lld) "
+                       "(supported: f16, i32, i64)\n",
+                       hipdnn_ep_datatype_name(data_type),
+                       (long long)data_type);
     return -1;
   }
 

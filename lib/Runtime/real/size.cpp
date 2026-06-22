@@ -26,11 +26,11 @@
 // safe.
 int wrap_size(RuntimeState *state, void *output, int64_t num_elements) {
   if (!state) {
-    fprintf(stderr, "Invalid state in wrap_size\n");
+    hipdnn_ep_log_emit("Invalid state in wrap_size\n");
     return -1;
   }
   if (!output) {
-    fprintf(stderr, "Invalid output pointer in wrap_size\n");
+    hipdnn_ep_log_emit("Invalid output pointer in wrap_size\n");
     return -1;
   }
 

@@ -91,24 +91,23 @@ int wrap_scatter_nd(RuntimeState *state, void *data, void *indices,
     return -1;
   }
   if (data_rank <= 0 || indices_rank <= 0) {
-    fprintf(stderr,
-            "[REAL] wrap_scatter_nd: zero-rank input "
-            "(data_rank=%lld, indices_rank=%lld)\n",
-            (long long)data_rank, (long long)indices_rank);
+    hipdnn_ep_log_emit("[REAL] wrap_scatter_nd: zero-rank input "
+                       "(data_rank=%lld, indices_rank=%lld)\n",
+                       (long long)data_rank, (long long)indices_rank);
     return -1;
   }
   if (reduction_id < 0 || reduction_id > 4) {
-    fprintf(stderr, "[REAL] wrap_scatter_nd: invalid reduction_id=%lld\n",
-            (long long)reduction_id);
+    hipdnn_ep_log_emit("[REAL] wrap_scatter_nd: invalid reduction_id=%lld\n",
+                       (long long)reduction_id);
     return -1;
   }
 
   int hip_dtype = scatter_nd_hipdnn_to_hip_dtype(data_type);
   if (hip_dtype < 0) {
-    fprintf(stderr,
-            "[REAL] wrap_scatter_nd: unsupported data_type=%s(%lld) "
-            "(supported: f16, f32, i32, i64)\n",
-            hipdnn_ep_datatype_name(data_type), (long long)data_type);
+    hipdnn_ep_log_emit("[REAL] wrap_scatter_nd: unsupported data_type=%s(%lld) "
+                       "(supported: f16, f32, i32, i64)\n",
+                       hipdnn_ep_datatype_name(data_type),
+                       (long long)data_type);
     return -1;
   }
 
@@ -139,9 +138,9 @@ int wrap_scatter_nd(RuntimeState *state, void *data, void *indices,
                                       hipMemcpyDeviceToDevice,
                                       static_cast<hipStream_t>(stream));
       if (err != hipSuccess) {
-        fprintf(stderr,
-                "[REAL] wrap_scatter_nd: empty-updates D2D copy failed: %s\n",
-                hipGetErrorString(err));
+        hipdnn_ep_log_emit(
+            "[REAL] wrap_scatter_nd: empty-updates D2D copy failed: %s\n",
+            hipGetErrorString(err));
         return -1;
       }
     }

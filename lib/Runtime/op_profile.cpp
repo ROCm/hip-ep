@@ -201,24 +201,25 @@ void op_profile_resolve_and_print(OpProfileState *ps) {
   }
 
   int lineWidth = maxNameLen + 2 + 5 + 1 + 9 + 1 + 9 + 1 + 6;
-  fprintf(stderr, "\n[PERF] ");
-  for (int i = 0; i < lineWidth; ++i)
-    fputc('=', stderr);
-  fputc('\n', stderr);
-  fprintf(stderr, "[PERF]  %-*s %5s %9s %9s %6s\n", maxNameLen, "", "calls",
-          "gpu (ms)", "cpu (ms)", "gpu %");
+  // Emit the separator as a single formatted line (no CRT stdio FILE*): the
+  // bitcode-JIT'd runtime resolves fputc to a different CRT than the stdout/
+  // stderr FILE table, so a direct fputc(stderr) is a cross-CRT FILE* handoff
+  // (corruption). hipdnn_ep_log_emit goes straight to the OS stderr handle.
+  hipdnn_ep_log_emit("\n[PERF] %s\n", std::string(lineWidth, '=').c_str());
+  hipdnn_ep_log_emit("[PERF]  %-*s %5s %9s %9s %6s\n", maxNameLen, "", "calls",
+                     "gpu (ms)", "cpu (ms)", "gpu %");
 
   for (auto &r : rows) {
     if (r.hasGpu) {
       double pct =
           grandTotalGpuMs > 0 ? r.totalGpuMs / grandTotalGpuMs * 100 : 0;
-      fprintf(stderr, "[PERF]  %-*s %5lld %9.1f %9.1f %5.1f%%\n", maxNameLen,
-              r.name.c_str(), (long long)r.totalCount, r.totalGpuMs,
-              r.totalCpuMs, pct);
+      hipdnn_ep_log_emit("[PERF]  %-*s %5lld %9.1f %9.1f %5.1f%%\n", maxNameLen,
+                         r.name.c_str(), (long long)r.totalCount, r.totalGpuMs,
+                         r.totalCpuMs, pct);
     } else {
-      fprintf(stderr, "[PERF]  %-*s %5lld %9s %9.1f %6s\n", maxNameLen,
-              r.name.c_str(), (long long)r.totalCount, "n/a", r.totalCpuMs,
-              "n/a");
+      hipdnn_ep_log_emit("[PERF]  %-*s %5lld %9s %9.1f %6s\n", maxNameLen,
+                         r.name.c_str(), (long long)r.totalCount, "n/a",
+                         r.totalCpuMs, "n/a");
     }
     bool hasShapes = r.shapes.size() > 1 ||
                      (r.shapes.size() == 1 && !r.shapes[0].shape.empty());
@@ -227,17 +228,14 @@ void op_profile_resolve_and_print(OpProfileState *ps) {
         if (sh.shape.empty())
           continue;
         double pct = grandTotalGpuMs > 0 ? sh.gpuMs / grandTotalGpuMs * 100 : 0;
-        fprintf(stderr, "[PERF]    %-*s %5lld %9.1f %9.1f %5.1f%%\n",
-                maxNameLen - 2, sh.shape.c_str(), (long long)sh.count, sh.gpuMs,
-                sh.cpuMs, pct);
+        hipdnn_ep_log_emit("[PERF]    %-*s %5lld %9.1f %9.1f %5.1f%%\n",
+                           maxNameLen - 2, sh.shape.c_str(),
+                           (long long)sh.count, sh.gpuMs, sh.cpuMs, pct);
       }
     }
   }
-  fprintf(stderr, "[PERF]  %-*s %5s %9.1f %9.1f\n", maxNameLen, "TOTAL", "",
-          grandTotalGpuMs, grandTotalCpuMs);
-  fprintf(stderr, "[PERF] ");
-  for (int i = 0; i < lineWidth; ++i)
-    fputc('=', stderr);
-  fprintf(stderr, "\n\n");
+  hipdnn_ep_log_emit("[PERF]  %-*s %5s %9.1f %9.1f\n", maxNameLen, "TOTAL", "",
+                     grandTotalGpuMs, grandTotalCpuMs);
+  hipdnn_ep_log_emit("[PERF] %s\n\n", std::string(lineWidth, '=').c_str());
   ps->profile.clear();
 }

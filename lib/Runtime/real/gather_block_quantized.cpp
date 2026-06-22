@@ -76,8 +76,8 @@ extern "C" int wrap_gather_block_quantized(
 
   if (!state || !data || !indices || !scales || !output || !data_shape ||
       !indices_shape || !scales_shape || !output_shape) {
-    fprintf(stderr,
-            "[REAL] wrap_gather_block_quantized: null required argument\n");
+    hipdnn_ep_log_emit(
+        "[REAL] wrap_gather_block_quantized: null required argument\n");
     return -1;
   }
 
@@ -92,11 +92,10 @@ extern "C" int wrap_gather_block_quantized(
     quantize_axis_n += static_cast<int>(data_rank);
   if (gather_axis_n < 0 || gather_axis_n >= data_rank || quantize_axis_n < 0 ||
       quantize_axis_n >= data_rank) {
-    fprintf(stderr,
-            "[REAL] wrap_gather_block_quantized: axis out of range "
-            "(data_rank=%lld gather_axis=%lld quantize_axis=%lld)\n",
-            (long long)data_rank, (long long)gather_axis,
-            (long long)quantize_axis);
+    hipdnn_ep_log_emit("[REAL] wrap_gather_block_quantized: axis out of range "
+                       "(data_rank=%lld gather_axis=%lld quantize_axis=%lld)\n",
+                       (long long)data_rank, (long long)gather_axis,
+                       (long long)quantize_axis);
     return -1;
   }
 
@@ -105,10 +104,9 @@ extern "C" int wrap_gather_block_quantized(
   bool is_signed_data =
       (data_dtype == HIPDNN_EP_DATATYPE_INT8); // i8 storage -> int4 / int8
   if (bits == 8 && !is_signed_data && gather_axis_n != 0) {
-    fprintf(stderr,
-            "[REAL] wrap_gather_block_quantized: ONNX spec requires "
-            "gather_axis == 0 for uint8 data, got %d\n",
-            gather_axis_n);
+    hipdnn_ep_log_emit("[REAL] wrap_gather_block_quantized: ONNX spec requires "
+                       "gather_axis == 0 for uint8 data, got %d\n",
+                       gather_axis_n);
     return -1;
   }
 
@@ -146,11 +144,10 @@ extern "C" int wrap_gather_block_quantized(
   int64_t logical_data_shape_buf[8];
   if (data_rank >
       static_cast<int64_t>(sizeof(logical_data_shape_buf) / sizeof(int64_t))) {
-    fprintf(stderr,
-            "[REAL] wrap_gather_block_quantized: data_rank=%lld exceeds "
-            "max supported rank %zu\n",
-            (long long)data_rank,
-            sizeof(logical_data_shape_buf) / sizeof(int64_t));
+    hipdnn_ep_log_emit(
+        "[REAL] wrap_gather_block_quantized: data_rank=%lld exceeds "
+        "max supported rank %zu\n",
+        (long long)data_rank, sizeof(logical_data_shape_buf) / sizeof(int64_t));
     return -1;
   }
   for (int64_t i = 0; i < data_rank; ++i)
@@ -163,19 +160,19 @@ extern "C" int wrap_gather_block_quantized(
   if (hip_out_dtype != HIP_DTYPE_FLOAT32 &&
       hip_out_dtype != HIP_DTYPE_FLOAT16 &&
       hip_out_dtype != HIP_DTYPE_BFLOAT16) {
-    fprintf(stderr,
-            "[REAL] wrap_gather_block_quantized: unsupported scales/output "
-            "dtype %s (%lld); kernel supports fp32/fp16/bf16\n",
-            hipdnn_ep_datatype_name(scales_dtype), (long long)scales_dtype);
+    hipdnn_ep_log_emit(
+        "[REAL] wrap_gather_block_quantized: unsupported scales/output "
+        "dtype %s (%lld); kernel supports fp32/fp16/bf16\n",
+        hipdnn_ep_datatype_name(scales_dtype), (long long)scales_dtype);
     return -1;
   }
 
   if (indices_dtype != HIPDNN_EP_DATATYPE_INT32 &&
       indices_dtype != HIPDNN_EP_DATATYPE_INT64) {
-    fprintf(stderr,
-            "[REAL] wrap_gather_block_quantized: indices dtype must be "
-            "i32 or i64, got %s (%lld)\n",
-            hipdnn_ep_datatype_name(indices_dtype), (long long)indices_dtype);
+    hipdnn_ep_log_emit(
+        "[REAL] wrap_gather_block_quantized: indices dtype must be "
+        "i32 or i64, got %s (%lld)\n",
+        hipdnn_ep_datatype_name(indices_dtype), (long long)indices_dtype);
     return -1;
   }
   int indices_is_int64 = (indices_dtype == HIPDNN_EP_DATATYPE_INT64) ? 1 : 0;

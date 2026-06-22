@@ -56,17 +56,17 @@ int wrap_cumsum(RuntimeState *state, void *x, void *axis, void *y,
     return -1;
   }
   if (data_rank <= 0) {
-    fprintf(stderr, "[REAL] wrap_cumsum: invalid data_rank=%lld\n",
-            (long long)data_rank);
+    hipdnn_ep_log_emit("[REAL] wrap_cumsum: invalid data_rank=%lld\n",
+                       (long long)data_rank);
     return -1;
   }
 
   int hip_dtype = cumsum_hipdnn_to_hip_dtype(data_type);
   if (hip_dtype < 0) {
-    fprintf(stderr,
-            "[REAL] wrap_cumsum: unsupported data_type=%s(%lld) "
-            "(supported: f16, f32, i32, i64)\n",
-            hipdnn_ep_datatype_name(data_type), (long long)data_type);
+    hipdnn_ep_log_emit("[REAL] wrap_cumsum: unsupported data_type=%s(%lld) "
+                       "(supported: f16, f32, i32, i64)\n",
+                       hipdnn_ep_datatype_name(data_type),
+                       (long long)data_type);
     return -1;
   }
 
@@ -83,15 +83,15 @@ int wrap_cumsum(RuntimeState *state, void *x, void *axis, void *y,
     hipError_t err = hipMemcpyAsync(&a32, axis, sizeof(int32_t),
                                     hipMemcpyDeviceToHost, hip_stream);
     if (err != hipSuccess) {
-      fprintf(stderr, "[REAL] wrap_cumsum: D2H axis (int32) failed: %s\n",
-              hipGetErrorString(err));
+      hipdnn_ep_log_emit("[REAL] wrap_cumsum: D2H axis (int32) failed: %s\n",
+                         hipGetErrorString(err));
       return -1;
     }
     err = hipStreamSynchronize(hip_stream);
     if (err != hipSuccess) {
-      fprintf(stderr,
-              "[REAL] wrap_cumsum: stream sync after D2H axis failed: %s\n",
-              hipGetErrorString(err));
+      hipdnn_ep_log_emit(
+          "[REAL] wrap_cumsum: stream sync after D2H axis failed: %s\n",
+          hipGetErrorString(err));
       return -1;
     }
     axis_value = static_cast<int64_t>(a32);
@@ -99,22 +99,22 @@ int wrap_cumsum(RuntimeState *state, void *x, void *axis, void *y,
     hipError_t err = hipMemcpyAsync(&axis_value, axis, sizeof(int64_t),
                                     hipMemcpyDeviceToHost, hip_stream);
     if (err != hipSuccess) {
-      fprintf(stderr, "[REAL] wrap_cumsum: D2H axis (int64) failed: %s\n",
-              hipGetErrorString(err));
+      hipdnn_ep_log_emit("[REAL] wrap_cumsum: D2H axis (int64) failed: %s\n",
+                         hipGetErrorString(err));
       return -1;
     }
     err = hipStreamSynchronize(hip_stream);
     if (err != hipSuccess) {
-      fprintf(stderr,
-              "[REAL] wrap_cumsum: stream sync after D2H axis failed: %s\n",
-              hipGetErrorString(err));
+      hipdnn_ep_log_emit(
+          "[REAL] wrap_cumsum: stream sync after D2H axis failed: %s\n",
+          hipGetErrorString(err));
       return -1;
     }
   } else {
-    fprintf(stderr,
-            "[REAL] wrap_cumsum: unsupported axis_dtype=%s(%lld) "
-            "(supported: i32, i64)\n",
-            hipdnn_ep_datatype_name(axis_dtype), (long long)axis_dtype);
+    hipdnn_ep_log_emit("[REAL] wrap_cumsum: unsupported axis_dtype=%s(%lld) "
+                       "(supported: i32, i64)\n",
+                       hipdnn_ep_datatype_name(axis_dtype),
+                       (long long)axis_dtype);
     return -1;
   }
 
@@ -122,8 +122,8 @@ int wrap_cumsum(RuntimeState *state, void *x, void *axis, void *y,
   if (axis_value < 0)
     axis_value += data_rank;
   if (axis_value < 0 || axis_value >= data_rank) {
-    fprintf(stderr, "[REAL] wrap_cumsum: axis=%lld out of range [0, %lld)\n",
-            (long long)axis_value, (long long)data_rank);
+    hipdnn_ep_log_emit("[REAL] wrap_cumsum: axis=%lld out of range [0, %lld)\n",
+                       (long long)axis_value, (long long)data_rank);
     return -1;
   }
 

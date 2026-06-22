@@ -88,10 +88,10 @@ int ensureLoopBuffers(RuntimeState *state, int64_t max_trip_count) {
     void *new_buf = nullptr;
     if (hipHostMalloc(&new_buf, new_cap * sizeof(int64_t),
                       hipHostMallocDefault) != hipSuccess) {
-      fprintf(stderr,
-              "hipdnn_ep_run_*_loop: hipHostMalloc for iter cpu buf (%zu "
-              "entries) failed\n",
-              new_cap);
+      hipdnn_ep_log_emit(
+          "hipdnn_ep_run_*_loop: hipHostMalloc for iter cpu buf (%zu "
+          "entries) failed\n",
+          new_cap);
       return -1;
     }
     int64_t *new_arr = static_cast<int64_t *>(new_buf);
@@ -116,8 +116,8 @@ int ensureLoopBuffers(RuntimeState *state, int64_t max_trip_count) {
   }
   if (!state->loop_iter_dev) {
     if (hipMalloc(&state->loop_iter_dev, sizeof(int64_t)) != hipSuccess) {
-      fprintf(stderr,
-              "hipdnn_ep_run_*_loop: hipMalloc for iter dev buffer failed\n");
+      hipdnn_ep_log_emit(
+          "hipdnn_ep_run_*_loop: hipMalloc for iter dev buffer failed\n");
       state->loop_iter_dev = nullptr;
       return -1;
     }
@@ -126,15 +126,16 @@ int ensureLoopBuffers(RuntimeState *state, int64_t max_trip_count) {
     // Bool stored as 1 byte (matches LLVM bool ABI and memref<i1> layout).
     if (hipHostMalloc(&state->loop_cond_host, sizeof(int8_t),
                       hipHostMallocMapped) != hipSuccess) {
-      fprintf(stderr,
-              "hipdnn_ep_run_*_loop: hipHostMalloc for cond buffer failed\n");
+      hipdnn_ep_log_emit(
+          "hipdnn_ep_run_*_loop: hipHostMalloc for cond buffer failed\n");
       state->loop_cond_host = nullptr;
       return -1;
     }
     if (hipHostGetDevicePointer(&state->loop_cond_dev, state->loop_cond_host,
                                 0) != hipSuccess) {
-      fprintf(stderr, "hipdnn_ep_run_*_loop: hipHostGetDevicePointer for cond "
-                      "buffer failed\n");
+      hipdnn_ep_log_emit(
+          "hipdnn_ep_run_*_loop: hipHostGetDevicePointer for cond "
+          "buffer failed\n");
       hipHostFree(state->loop_cond_host);
       state->loop_cond_host = nullptr;
       state->loop_cond_dev = nullptr;
@@ -144,7 +145,8 @@ int ensureLoopBuffers(RuntimeState *state, int64_t max_trip_count) {
   if (!state->loop_event) {
     hipEvent_t evt = nullptr;
     if (hipEventCreateWithFlags(&evt, hipEventDisableTiming) != hipSuccess) {
-      fprintf(stderr, "hipdnn_ep_run_*_loop: hipEventCreateWithFlags failed\n");
+      hipdnn_ep_log_emit(
+          "hipdnn_ep_run_*_loop: hipEventCreateWithFlags failed\n");
       return -1;
     }
     state->loop_event = static_cast<void *>(evt);
@@ -237,9 +239,9 @@ int runLoopImpl(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
     // kernel-launch race that the old `*iter_host = i; fence;` design had.
     if (hipMemcpyAsync(iter_dev, &iter_cpu_buf[i], sizeof(int64_t),
                        hipMemcpyHostToDevice, stream) != hipSuccess) {
-      fprintf(stderr,
-              "hipdnn_ep_run_*_loop: hipMemcpyAsync for iter[%lld] failed\n",
-              static_cast<long long>(i));
+      hipdnn_ep_log_emit(
+          "hipdnn_ep_run_*_loop: hipMemcpyAsync for iter[%lld] failed\n",
+          static_cast<long long>(i));
       return -1;
     }
     int rc =

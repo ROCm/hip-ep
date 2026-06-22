@@ -59,13 +59,13 @@ int wrap_resize(RuntimeState *state, void *input, void *output,
       state);
 
   if (!state || !input || !output) {
-    fprintf(stderr, "[REAL] wrap_resize: null argument\n");
+    hipdnn_ep_log_emit("[REAL] wrap_resize: null argument\n");
     return -1;
   }
   int hip_dtype = hipdnn_ep_to_hip_dtype(data_type);
   if (hip_dtype < 0) {
-    fprintf(stderr, "[REAL] wrap_resize: unsupported data_type %lld\n",
-            (long long)data_type);
+    hipdnn_ep_log_emit("[REAL] wrap_resize: unsupported data_type %lld\n",
+                       (long long)data_type);
     return -1;
   }
 
@@ -85,7 +85,7 @@ int wrap_resize(RuntimeState *state, void *input, void *output,
       in0, in1, in2, out0, out1, out2, static_cast<int>(mode),
       static_cast<int>(coord_transform), static_cast<int>(nearest_mode));
   if (rc != 0) {
-    fprintf(stderr, "[REAL] wrap_resize: kernel launch failed (%d)\n", rc);
+    hipdnn_ep_log_emit("[REAL] wrap_resize: kernel launch failed (%d)\n", rc);
     return -1;
   }
   RUNTIME_DEBUG_LOG("[REAL] wrap_resize: completed successfully\n");

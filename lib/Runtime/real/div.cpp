@@ -58,10 +58,10 @@ int wrap_div(RuntimeState *state, void *lhs, void *rhs, void *output,
 
   int hip_dtype = div_hipdnn_to_hip_dtype(data_type);
   if (hip_dtype < 0) {
-    fprintf(stderr,
-            "[REAL] wrap_div: unsupported data_type=%s(%lld) "
-            "(supported: f16, f32, i32, i64)\n",
-            hipdnn_ep_datatype_name(data_type), (long long)data_type);
+    hipdnn_ep_log_emit("[REAL] wrap_div: unsupported data_type=%s(%lld) "
+                       "(supported: f16, f32, i32, i64)\n",
+                       hipdnn_ep_datatype_name(data_type),
+                       (long long)data_type);
     return -1;
   }
 
@@ -81,8 +81,8 @@ int wrap_div(RuntimeState *state, void *lhs, void *rhs, void *output,
     const size_t needed = per_side * static_cast<size_t>((!lhs_eq_out ? 1 : 0) +
                                                          (!rhs_eq_out ? 1 : 0));
     if (hipdnn_ep_state_ensure_workspace(state, needed) != 0) {
-      fprintf(stderr, "[REAL] wrap_div: workspace ensure failed (%zu bytes)\n",
-              needed);
+      hipdnn_ep_log_emit(
+          "[REAL] wrap_div: workspace ensure failed (%zu bytes)\n", needed);
       return -1;
     }
     void *ws = hipdnn_ep_state_get_workspace(state);
@@ -94,7 +94,8 @@ int wrap_div(RuntimeState *state, void *lhs, void *rhs, void *output,
       int rc =
           hip_expand(stream, lhs, ws_byte, in_lhs, 4, out_shape, 4, hip_dtype);
       if (rc != 0) {
-        fprintf(stderr, "[REAL] wrap_div: hip_expand(lhs) failed (%d)\n", rc);
+        hipdnn_ep_log_emit("[REAL] wrap_div: hip_expand(lhs) failed (%d)\n",
+                           rc);
         return -1;
       }
       lhs_use = ws_byte;
@@ -105,7 +106,8 @@ int wrap_div(RuntimeState *state, void *lhs, void *rhs, void *output,
       int rc =
           hip_expand(stream, rhs, ws_byte, in_rhs, 4, out_shape, 4, hip_dtype);
       if (rc != 0) {
-        fprintf(stderr, "[REAL] wrap_div: hip_expand(rhs) failed (%d)\n", rc);
+        hipdnn_ep_log_emit("[REAL] wrap_div: hip_expand(rhs) failed (%d)\n",
+                           rc);
         return -1;
       }
       rhs_use = ws_byte;

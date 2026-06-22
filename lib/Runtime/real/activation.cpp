@@ -27,8 +27,8 @@ static miopenDataType_t hipdnn_ep_to_miopen_type(int64_t data_type, bool &ok) {
   case HIPDNN_EP_DATATYPE_BFLOAT16:
     return miopenBFloat16;
   default:
-    fprintf(stderr, "[REAL] unsupported data_type %lld for MIOpen\n",
-            (long long)data_type);
+    hipdnn_ep_log_emit("[REAL] unsupported data_type %lld for MIOpen\n",
+                       (long long)data_type);
     ok = false;
     return miopenFloat;
   }
@@ -47,8 +47,8 @@ static miopenActivationMode_t hipdnn_ep_to_miopen_activation(int64_t mode,
   case HIPDNN_EP_ACTIVATION_SOFTPLUS:
     return miopenActivationSOFTRELU;
   default:
-    fprintf(stderr, "[REAL] unsupported activation_mode %lld for MIOpen\n",
-            (long long)mode);
+    hipdnn_ep_log_emit("[REAL] unsupported activation_mode %lld for MIOpen\n",
+                       (long long)mode);
     ok = false;
     return miopenActivationLOGISTIC;
   }
@@ -225,7 +225,7 @@ int wrap_miopenActivationForward(RuntimeState *state, int op_state_slot,
       },
       state);
   if (!state || !input || !output) {
-    fprintf(stderr, "wrap_miopenActivationForward: null argument\n");
+    hipdnn_ep_log_emit("wrap_miopenActivationForward: null argument\n");
     return -1;
   }
 
@@ -242,24 +242,24 @@ int wrap_miopenActivationForward(RuntimeState *state, int op_state_slot,
   miopenHandle_t handle =
       static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
   if (!handle) {
-    fprintf(stderr, "wrap_miopenActivationForward: null MIOpen handle\n");
+    hipdnn_ep_log_emit("wrap_miopenActivationForward: null MIOpen handle\n");
     return -1;
   }
 
   ActivationState *as = ActivationState::get_slot(state, op_state_slot);
   if (!as || !as->table) {
-    fprintf(stderr,
-            "[REAL] wrap_miopenActivationForward: missing op-state for slot "
-            "%d\n",
-            op_state_slot);
+    hipdnn_ep_log_emit(
+        "[REAL] wrap_miopenActivationForward: missing op-state for slot "
+        "%d\n",
+        op_state_slot);
     return -1;
   }
 
   ActivationCacheKey key{num_elements, data_type, activation_mode};
   const ActivationCacheEntry *c = queryOrCreateActivation(*as->table, key);
   if (!c) {
-    fprintf(stderr, "[REAL] wrap_miopenActivationForward: descriptor cache "
-                    "creation failed\n");
+    hipdnn_ep_log_emit("[REAL] wrap_miopenActivationForward: descriptor cache "
+                       "creation failed\n");
     return -1;
   }
 
@@ -267,10 +267,9 @@ int wrap_miopenActivationForward(RuntimeState *state, int op_state_slot,
   miopenStatus_t st = miopenActivationForward(
       handle, c->actDesc, &alpha, c->inDesc, input, &beta, c->outDesc, output);
   if (st != miopenStatusSuccess) {
-    fprintf(stderr,
-            "[REAL] wrap_miopenActivationForward: "
-            "miopenActivationForward failed (%d)\n",
-            st);
+    hipdnn_ep_log_emit("[REAL] wrap_miopenActivationForward: "
+                       "miopenActivationForward failed (%d)\n",
+                       st);
     return -1;
   }
 
@@ -341,13 +340,13 @@ extern "C" int hip_miopen_softmax(void *state, const void *input, void *output,
       },
       st);
   if (!state || !input || !output) {
-    fprintf(stderr, "[REAL] hip_miopen_softmax: null argument\n");
+    hipdnn_ep_log_emit("[REAL] hip_miopen_softmax: null argument\n");
     return -1;
   }
   if (rows <= 0 || cols <= 0) {
-    fprintf(stderr,
-            "[REAL] hip_miopen_softmax: invalid dims rows=%lld cols=%lld\n",
-            (long long)rows, (long long)cols);
+    hipdnn_ep_log_emit(
+        "[REAL] hip_miopen_softmax: invalid dims rows=%lld cols=%lld\n",
+        (long long)rows, (long long)cols);
     return -1;
   }
 
@@ -359,8 +358,8 @@ extern "C" int hip_miopen_softmax(void *state, const void *input, void *output,
       output, input, static_cast<size_t>(rows) * cols * sizeof(uint16_t),
       hipMemcpyDeviceToDevice, static_cast<hipStream_t>(stream));
   if (err != hipSuccess) {
-    fprintf(stderr, "[REAL] hip_miopen_softmax: hipMemcpyAsync failed: %s\n",
-            hipGetErrorString(err));
+    hipdnn_ep_log_emit("[REAL] hip_miopen_softmax: hipMemcpyAsync failed: %s\n",
+                       hipGetErrorString(err));
     return -1;
   }
 
@@ -381,7 +380,7 @@ int wrap_gelu(RuntimeState *state, void *input, void *output,
       },
       state);
   if (!state || !input || !output) {
-    fprintf(stderr, "[REAL] wrap_gelu: null argument\n");
+    hipdnn_ep_log_emit("[REAL] wrap_gelu: null argument\n");
     return -1;
   }
 
@@ -389,8 +388,8 @@ int wrap_gelu(RuntimeState *state, void *input, void *output,
   int hip_dtype = hipdnn_ep_to_hip_dtype_elementwise_unary(data_type);
 
   if (hip_dtype < 0) {
-    fprintf(stderr, "[REAL] wrap_gelu: unsupported data_type %lld\n",
-            (long long)data_type);
+    hipdnn_ep_log_emit("[REAL] wrap_gelu: unsupported data_type %lld\n",
+                       (long long)data_type);
     return -1;
   }
 
@@ -409,7 +408,7 @@ int wrap_gelu(RuntimeState *state, void *input, void *output,
                                     hip_dtype, approximate);
 
   if (result != 0) {
-    fprintf(stderr, "[REAL] wrap_gelu: kernel launch failed (%d)\n", result);
+    hipdnn_ep_log_emit("[REAL] wrap_gelu: kernel launch failed (%d)\n", result);
     return -1;
   }
 
@@ -428,7 +427,7 @@ int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
       },
       state);
   if (!state || !input || !output) {
-    fprintf(stderr, "[REAL] wrap_leaky_relu: null argument\n");
+    hipdnn_ep_log_emit("[REAL] wrap_leaky_relu: null argument\n");
     return -1;
   }
 
@@ -436,8 +435,8 @@ int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
   int hip_dtype = hipdnn_ep_to_hip_dtype_elementwise_unary(data_type);
 
   if (hip_dtype < 0) {
-    fprintf(stderr, "[REAL] wrap_leaky_relu: unsupported data_type %lld\n",
-            (long long)data_type);
+    hipdnn_ep_log_emit("[REAL] wrap_leaky_relu: unsupported data_type %lld\n",
+                       (long long)data_type);
     return -1;
   }
 
@@ -450,8 +449,8 @@ int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
       hip_leaky_relu(stream, input, output, num_elements, hip_dtype, alpha);
 
   if (result != 0) {
-    fprintf(stderr, "[REAL] wrap_leaky_relu: kernel launch failed (%d)\n",
-            result);
+    hipdnn_ep_log_emit("[REAL] wrap_leaky_relu: kernel launch failed (%d)\n",
+                       result);
     return -1;
   }
 

@@ -227,15 +227,15 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, int op_state_slot,
       },
       state);
   if (!state || !input || !skip || !gamma || !output) {
-    fprintf(stderr,
-            "wrap_skip_simplified_layer_norm: null required argument\n");
+    hipdnn_ep_log_emit(
+        "wrap_skip_simplified_layer_norm: null required argument\n");
     return -1;
   }
 
   miopenHandle_t handle =
       static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
   if (!handle) {
-    fprintf(stderr, "wrap_skip_simplified_layer_norm: null MIOpen handle\n");
+    hipdnn_ep_log_emit("wrap_skip_simplified_layer_norm: null MIOpen handle\n");
     return -1;
   }
 
@@ -258,17 +258,17 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, int op_state_slot,
   else if (element_size_bytes == 4)
     data_type = miopenFloat;
   else {
-    fprintf(stderr,
-            "wrap_skip_simplified_layer_norm: unsupported element_size %lld\n",
-            (long long)element_size_bytes);
+    hipdnn_ep_log_emit(
+        "wrap_skip_simplified_layer_norm: unsupported element_size %lld\n",
+        (long long)element_size_bytes);
     return -1;
   }
 
   SkipT5NormState *ns = SkipT5NormState::get_slot(state, op_state_slot);
   if (!ns || !ns->table) {
-    fprintf(stderr,
-            "wrap_skip_simplified_layer_norm: missing op-state for slot %d\n",
-            op_state_slot);
+    hipdnn_ep_log_emit(
+        "wrap_skip_simplified_layer_norm: missing op-state for slot %d\n",
+        op_state_slot);
     return -1;
   }
 
@@ -276,8 +276,7 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, int op_state_slot,
   SkipT5NormCacheKey key{num_rows, hidden_dim, data_type};
   const SkipT5NormCacheEntry *c = queryOrCreateSkipT5Norm(*ns->table, key);
   if (!c) {
-    fprintf(
-        stderr,
+    hipdnn_ep_log_emit(
         "wrap_skip_simplified_layer_norm: descriptor cache creation failed\n");
     return -1;
   }
@@ -293,8 +292,8 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, int op_state_slot,
   size_t total_ws = skip_aligned + rstd_bytes;
 
   if (hipdnn_ep_state_ensure_workspace(state, total_ws) != 0) {
-    fprintf(stderr,
-            "wrap_skip_simplified_layer_norm: workspace allocation failed\n");
+    hipdnn_ep_log_emit(
+        "wrap_skip_simplified_layer_norm: workspace allocation failed\n");
     return -1;
   }
   char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));

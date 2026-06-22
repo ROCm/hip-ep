@@ -35,19 +35,19 @@ int wrap_transpose(RuntimeState *state, const void *input, void *output,
         (const void *)perm, (long long)rank, (long long)num_elements,
         (long long)element_size_bytes);
     if (input_shape && rank > 0 && rank <= 8) {
-      fprintf(stderr, "  input_shape=[");
+      hipdnn_ep_log_emit("  input_shape=[");
       for (int64_t i = 0; i < rank; ++i)
-        fprintf(stderr, "%lld%s", (long long)input_shape[i],
-                i + 1 == rank ? "" : ",");
-      fprintf(stderr, "]");
+        hipdnn_ep_log_emit("%lld%s", (long long)input_shape[i],
+                           i + 1 == rank ? "" : ",");
+      hipdnn_ep_log_emit("]");
       if (perm) {
-        fprintf(stderr, "  perm=[");
+        hipdnn_ep_log_emit("  perm=[");
         for (int64_t i = 0; i < rank; ++i)
-          fprintf(stderr, "%lld%s", (long long)perm[i],
-                  i + 1 == rank ? "" : ",");
-        fprintf(stderr, "]");
+          hipdnn_ep_log_emit("%lld%s", (long long)perm[i],
+                             i + 1 == rank ? "" : ",");
+        hipdnn_ep_log_emit("]");
       }
-      fprintf(stderr, "\n");
+      hipdnn_ep_log_emit("\n");
     }
     return -1;
   }

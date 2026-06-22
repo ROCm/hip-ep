@@ -85,8 +85,7 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
     return -1;
   }
   if (data_rank <= 0 || data_rank != output_rank) {
-    fprintf(
-        stderr,
+    hipdnn_ep_log_emit(
         "[REAL] wrap_slice: invalid ranks (data_rank=%lld, output_rank=%lld)\n",
         (long long)data_rank, (long long)output_rank);
     return -1;
@@ -110,10 +109,10 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
       out_num_elements *= output_shape[d];
     int64_t elem_size = hipdnn_ep_datatype_size(data_type);
     if (elem_size <= 0) {
-      fprintf(stderr,
-              "[REAL] wrap_slice: empty-input path -- unsupported "
-              "data_type=%s(%lld)\n",
-              hipdnn_ep_datatype_name(data_type), (long long)data_type);
+      hipdnn_ep_log_emit("[REAL] wrap_slice: empty-input path -- unsupported "
+                         "data_type=%s(%lld)\n",
+                         hipdnn_ep_datatype_name(data_type),
+                         (long long)data_type);
       return -1;
     }
     if (output && out_num_elements > 0) {
@@ -124,9 +123,9 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
                                           static_cast<size_t>(elem_size),
                                       s);
       if (err != hipSuccess) {
-        fprintf(stderr,
-                "[REAL] wrap_slice: empty-input hipMemsetAsync failed: %s\n",
-                hipGetErrorString(err));
+        hipdnn_ep_log_emit(
+            "[REAL] wrap_slice: empty-input hipMemsetAsync failed: %s\n",
+            hipGetErrorString(err));
         return -1;
       }
     }
@@ -137,22 +136,23 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
     return 0;
   }
   if (data_rank > kSliceRuntimeMaxRank) {
-    fprintf(stderr, "[REAL] wrap_slice: data_rank=%lld exceeds max %d\n",
-            (long long)data_rank, kSliceRuntimeMaxRank);
+    hipdnn_ep_log_emit("[REAL] wrap_slice: data_rank=%lld exceeds max %d\n",
+                       (long long)data_rank, kSliceRuntimeMaxRank);
     return -1;
   }
   if (starts_num_elements <= 0) {
-    fprintf(stderr, "[REAL] wrap_slice: starts_num_elements=%lld must be > 0\n",
-            (long long)starts_num_elements);
+    hipdnn_ep_log_emit(
+        "[REAL] wrap_slice: starts_num_elements=%lld must be > 0\n",
+        (long long)starts_num_elements);
     return -1;
   }
 
   int hip_dtype = slice_hipdnn_to_hip_dtype(data_type);
   if (hip_dtype < 0) {
-    fprintf(stderr,
-            "[REAL] wrap_slice: unsupported data_type=%s(%lld) "
-            "(supported: f16, f32, i32, i64)\n",
-            hipdnn_ep_datatype_name(data_type), (long long)data_type);
+    hipdnn_ep_log_emit("[REAL] wrap_slice: unsupported data_type=%s(%lld) "
+                       "(supported: f16, f32, i32, i64)\n",
+                       hipdnn_ep_datatype_name(data_type),
+                       (long long)data_type);
     return -1;
   }
 
@@ -173,58 +173,56 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
       hipMemcpyAsync(starts_host.data(), starts, K * sizeof(int64_t),
                      hipMemcpyDeviceToHost, hip_stream);
   if (err != hipSuccess) {
-    fprintf(stderr, "[REAL] wrap_slice: starts D2H failed: %s\n",
-            hipGetErrorString(err));
+    hipdnn_ep_log_emit("[REAL] wrap_slice: starts D2H failed: %s\n",
+                       hipGetErrorString(err));
     return -1;
   }
   err = hipMemcpyAsync(ends_host.data(), ends, K * sizeof(int64_t),
                        hipMemcpyDeviceToHost, hip_stream);
   if (err != hipSuccess) {
-    fprintf(stderr, "[REAL] wrap_slice: ends D2H failed: %s\n",
-            hipGetErrorString(err));
+    hipdnn_ep_log_emit("[REAL] wrap_slice: ends D2H failed: %s\n",
+                       hipGetErrorString(err));
     return -1;
   }
 
   if (axes && axes_num_elements > 0) {
     if (axes_num_elements != K) {
-      fprintf(stderr,
-              "[REAL] wrap_slice: axes_num_elements(%lld) != "
-              "starts_num_elements(%lld)\n",
-              (long long)axes_num_elements, (long long)K);
+      hipdnn_ep_log_emit("[REAL] wrap_slice: axes_num_elements(%lld) != "
+                         "starts_num_elements(%lld)\n",
+                         (long long)axes_num_elements, (long long)K);
       return -1;
     }
     axes_host.resize(K);
     err = hipMemcpyAsync(axes_host.data(), axes, K * sizeof(int64_t),
                          hipMemcpyDeviceToHost, hip_stream);
     if (err != hipSuccess) {
-      fprintf(stderr, "[REAL] wrap_slice: axes D2H failed: %s\n",
-              hipGetErrorString(err));
+      hipdnn_ep_log_emit("[REAL] wrap_slice: axes D2H failed: %s\n",
+                         hipGetErrorString(err));
       return -1;
     }
   }
 
   if (steps && steps_num_elements > 0) {
     if (steps_num_elements != K) {
-      fprintf(stderr,
-              "[REAL] wrap_slice: steps_num_elements(%lld) != "
-              "starts_num_elements(%lld)\n",
-              (long long)steps_num_elements, (long long)K);
+      hipdnn_ep_log_emit("[REAL] wrap_slice: steps_num_elements(%lld) != "
+                         "starts_num_elements(%lld)\n",
+                         (long long)steps_num_elements, (long long)K);
       return -1;
     }
     steps_host.resize(K);
     err = hipMemcpyAsync(steps_host.data(), steps, K * sizeof(int64_t),
                          hipMemcpyDeviceToHost, hip_stream);
     if (err != hipSuccess) {
-      fprintf(stderr, "[REAL] wrap_slice: steps D2H failed: %s\n",
-              hipGetErrorString(err));
+      hipdnn_ep_log_emit("[REAL] wrap_slice: steps D2H failed: %s\n",
+                         hipGetErrorString(err));
       return -1;
     }
   }
 
   err = hipStreamSynchronize(hip_stream);
   if (err != hipSuccess) {
-    fprintf(stderr, "[REAL] wrap_slice: stream sync after D2H failed: %s\n",
-            hipGetErrorString(err));
+    hipdnn_ep_log_emit("[REAL] wrap_slice: stream sync after D2H failed: %s\n",
+                       hipGetErrorString(err));
     return -1;
   }
 
@@ -243,13 +241,14 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
     if (axis < 0)
       axis += data_rank;
     if (axis < 0 || axis >= data_rank) {
-      fprintf(stderr, "[REAL] wrap_slice: axis=%lld out of range [0, %lld)\n",
-              (long long)axis, (long long)data_rank);
+      hipdnn_ep_log_emit(
+          "[REAL] wrap_slice: axis=%lld out of range [0, %lld)\n",
+          (long long)axis, (long long)data_rank);
       return -1;
     }
     if (axis_set[axis]) {
-      fprintf(stderr, "[REAL] wrap_slice: duplicate axis %lld\n",
-              (long long)axis);
+      hipdnn_ep_log_emit("[REAL] wrap_slice: duplicate axis %lld\n",
+                         (long long)axis);
       return -1;
     }
     axis_set[axis] = true;
@@ -260,8 +259,8 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
     int64_t step = steps_host.empty() ? 1 : steps_host[k];
 
     if (step == 0) {
-      fprintf(stderr, "[REAL] wrap_slice: zero step on axis %lld\n",
-              (long long)axis);
+      hipdnn_ep_log_emit("[REAL] wrap_slice: zero step on axis %lld\n",
+                         (long long)axis);
       return -1;
     }
 
@@ -337,14 +336,14 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
     //   (d) expected > output_shape[d] is impossible (slice cannot widen
     //       any axis) and remains a hard error.
     if (expected > output_shape[d]) {
-      fprintf(stderr,
-              "[REAL] wrap_slice: derived output extent on axis %d "
-              "(%lld) > IR output_shape (%lld) -- aborting "
-              "(start=%lld end=%lld step=%lld dim=%lld data_rank=%lld "
-              "K=%lld)\n",
-              d, (long long)expected, (long long)output_shape[d],
-              (long long)start, (long long)end, (long long)step, (long long)dim,
-              (long long)data_rank, (long long)K);
+      hipdnn_ep_log_emit(
+          "[REAL] wrap_slice: derived output extent on axis %d "
+          "(%lld) > IR output_shape (%lld) -- aborting "
+          "(start=%lld end=%lld step=%lld dim=%lld data_rank=%lld "
+          "K=%lld)\n",
+          d, (long long)expected, (long long)output_shape[d], (long long)start,
+          (long long)end, (long long)step, (long long)dim, (long long)data_rank,
+          (long long)K);
       return -1;
     }
     logical_extent[d] = expected;

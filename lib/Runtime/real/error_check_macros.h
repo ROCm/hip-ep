@@ -5,6 +5,7 @@
 #ifndef HIPDNN_EP_ERROR_CHECK_MACROS_H
 #define HIPDNN_EP_ERROR_CHECK_MACROS_H
 
+#include "../debug_log.h"
 #include <cstdio>
 #include <hip/hip_runtime.h>
 #include <hipblaslt/hipblaslt.h>
@@ -36,8 +37,8 @@
   do {                                                                         \
     miopenStatus_t status = (expr);                                            \
     if (status != miopenStatusSuccess) {                                       \
-      fprintf(stderr, "MIOpen error: %s failed at %s:%d (status=%d)\n", #expr, \
-              __FILE__, __LINE__, status);                                     \
+      hipdnn_ep_log_emit("MIOpen error: %s failed at %s:%d (status=%d)\n",     \
+                         #expr, __FILE__, __LINE__, status);                   \
       result = -1;                                                             \
       goto label;                                                              \
     }                                                                          \
@@ -47,8 +48,8 @@
   do {                                                                         \
     hipError_t error = static_cast<hipError_t>(expr);                          \
     if (error != hipSuccess) {                                                 \
-      fprintf(stderr, "HIP error: %s failed at %s:%d: %s\n", #expr, __FILE__,  \
-              __LINE__, hipGetErrorString(error));                             \
+      hipdnn_ep_log_emit("HIP error: %s failed at %s:%d: %s\n", #expr,         \
+                         __FILE__, __LINE__, hipGetErrorString(error));        \
       result = -1;                                                             \
       goto label;                                                              \
     }                                                                          \
@@ -58,8 +59,8 @@
   do {                                                                         \
     hipblasStatus_t status = (expr);                                           \
     if (status != HIPBLAS_STATUS_SUCCESS) {                                    \
-      fprintf(stderr, "hipBLAS error: %s failed at %s:%d (status=%d)\n",       \
-              #expr, __FILE__, __LINE__, status);                              \
+      hipdnn_ep_log_emit("hipBLAS error: %s failed at %s:%d (status=%d)\n",    \
+                         #expr, __FILE__, __LINE__, status);                   \
       result = -1;                                                             \
       goto label;                                                              \
     }                                                                          \

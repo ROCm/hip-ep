@@ -17,6 +17,7 @@
 // nothing here touches HIP/MIOpen/hipBLASLt. See test/runtime/.
 //===----------------------------------------------------------------------===//
 
+#include "debug_log.h"
 #include "hipdnn_ep_runtime.h"
 #include "runtime_state_internal.h"
 
@@ -49,10 +50,9 @@ extern "C" void *hipdnn_ep_alloc_output(RuntimeState *state, int64_t out_idx,
                                         const int64_t *shape, int64_t rank,
                                         int64_t elem_size) {
   if (!state || !state->output_allocator.allocate) {
-    fprintf(stderr,
-            "hipdnn_ep_alloc_output: no output allocator installed "
-            "(out_idx=%lld)\n",
-            (long long)out_idx);
+    hipdnn_ep_log_emit("hipdnn_ep_alloc_output: no output allocator installed "
+                       "(out_idx=%lld)\n",
+                       (long long)out_idx);
     return nullptr;
   }
   return state->output_allocator.allocate(state->output_allocator.self, out_idx,

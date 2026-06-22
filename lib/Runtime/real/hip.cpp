@@ -2,6 +2,7 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
+#include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
@@ -14,8 +15,8 @@
   do {                                                                         \
     hipError_t error = (cmd);                                                  \
     if (error != hipSuccess) {                                                 \
-      fprintf(stderr, "HIP error at %s:%d: %s\n", __FILE__, __LINE__,          \
-              hipGetErrorString(error));                                       \
+      hipdnn_ep_log_emit("HIP error at %s:%d: %s\n", __FILE__, __LINE__,       \
+                         hipGetErrorString(error));                            \
       return -1;                                                               \
     }                                                                          \
   } while (0)
@@ -45,8 +46,8 @@ extern "C" void *hip_device_malloc(int64_t size) {
   void *ptr = nullptr;
   hipError_t err = hipMalloc(&ptr, size);
   if (err != hipSuccess) {
-    fprintf(stderr, "hip_device_malloc(%lld) failed: %s\n", (long long)size,
-            hipGetErrorString(err));
+    hipdnn_ep_log_emit("hip_device_malloc(%lld) failed: %s\n", (long long)size,
+                       hipGetErrorString(err));
     return nullptr;
   }
   return ptr;
@@ -57,8 +58,8 @@ extern "C" void hip_device_free(void *ptr) {
     return;
   hipError_t err = hipFree(ptr);
   if (err != hipSuccess) {
-    fprintf(stderr, "hip_device_free(%p) failed: %s\n", ptr,
-            hipGetErrorString(err));
+    hipdnn_ep_log_emit("hip_device_free(%p) failed: %s\n", ptr,
+                       hipGetErrorString(err));
   }
 }
 
@@ -151,8 +152,8 @@ extern "C" void memrefCopy(int64_t elemSize, UnrankedMemRefHeader *src,
     hipError_t err = hipMemcpyAsync(dstBase, srcBase, elemSize,
                                     hipMemcpyDeviceToDevice, stream);
     if (err != hipSuccess) {
-      fprintf(stderr, "memrefCopy(rank-0) failed: %s\n",
-              hipGetErrorString(err));
+      hipdnn_ep_log_emit("memrefCopy(rank-0) failed: %s\n",
+                         hipGetErrorString(err));
     }
     return;
   }
@@ -191,8 +192,9 @@ extern "C" void memrefCopy(int64_t elemSize, UnrankedMemRefHeader *src,
     hipError_t err = hipMemcpyAsync(dstBase, srcBase, rowBytes,
                                     hipMemcpyDeviceToDevice, stream);
     if (err != hipSuccess) {
-      fprintf(stderr, "memrefCopy(%lld bytes contig) failed: %s\n",
-              static_cast<long long>(rowBytes), hipGetErrorString(err));
+      hipdnn_ep_log_emit("memrefCopy(%lld bytes contig) failed: %s\n",
+                         static_cast<long long>(rowBytes),
+                         hipGetErrorString(err));
     }
     return;
   }
@@ -210,8 +212,8 @@ extern "C" void memrefCopy(int64_t elemSize, UnrankedMemRefHeader *src,
         hipMemcpy2DAsync(dstBase, dstPitch, srcBase, srcPitch, rowBytes, height,
                          hipMemcpyDeviceToDevice, stream);
     if (err != hipSuccess) {
-      fprintf(stderr, "memrefCopy(rank-2 strided) failed: %s\n",
-              hipGetErrorString(err));
+      hipdnn_ep_log_emit("memrefCopy(rank-2 strided) failed: %s\n",
+                         hipGetErrorString(err));
     }
     return;
   }
@@ -222,8 +224,9 @@ extern "C" void memrefCopy(int64_t elemSize, UnrankedMemRefHeader *src,
   // is comfortably above anything we currently generate.
   constexpr int64_t kMaxRank = HIPDNN_MAX_MEMREF_RANK;
   if (rank > kMaxRank) {
-    fprintf(stderr, "memrefCopy: rank %lld exceeds supported maximum %lld\n",
-            static_cast<long long>(rank), static_cast<long long>(kMaxRank));
+    hipdnn_ep_log_emit("memrefCopy: rank %lld exceeds supported maximum %lld\n",
+                       static_cast<long long>(rank),
+                       static_cast<long long>(kMaxRank));
     return;
   }
 
@@ -257,8 +260,8 @@ extern "C" void memrefCopy(int64_t elemSize, UnrankedMemRefHeader *src,
     hipError_t err = hipMemcpyAsync(dstBase + dstByteOff, srcBase + srcByteOff,
                                     rowBytes, hipMemcpyDeviceToDevice, stream);
     if (err != hipSuccess) {
-      fprintf(stderr, "memrefCopy(strided row) failed: %s\n",
-              hipGetErrorString(err));
+      hipdnn_ep_log_emit("memrefCopy(strided row) failed: %s\n",
+                         hipGetErrorString(err));
       return;
     }
     // Increment the outer multi-dim index (least-significant axis first).

@@ -57,8 +57,9 @@ int wrap_mod(RuntimeState *state, void *lhs, void *rhs, void *output,
 
   int hip_dtype = mod_hipdnn_to_hip_dtype(data_type);
   if (hip_dtype < 0) {
-    fprintf(stderr, "[REAL] wrap_mod: unsupported data_type=%s(%lld)\n",
-            hipdnn_ep_datatype_name(data_type), (long long)data_type);
+    hipdnn_ep_log_emit("[REAL] wrap_mod: unsupported data_type=%s(%lld)\n",
+                       hipdnn_ep_datatype_name(data_type),
+                       (long long)data_type);
     return -1;
   }
 
@@ -68,15 +69,15 @@ int wrap_mod(RuntimeState *state, void *lhs, void *rhs, void *output,
   bool is_fp = (data_type == HIPDNN_EP_DATATYPE_HALF ||
                 data_type == HIPDNN_EP_DATATYPE_FLOAT);
   if (fmod == 0 && !is_int) {
-    fprintf(stderr,
-            "[REAL] wrap_mod: fmod=0 requires integer data_type, got %s\n",
-            hipdnn_ep_datatype_name(data_type));
+    hipdnn_ep_log_emit(
+        "[REAL] wrap_mod: fmod=0 requires integer data_type, got %s\n",
+        hipdnn_ep_datatype_name(data_type));
     return -1;
   }
   if (fmod != 0 && !is_fp) {
-    fprintf(stderr,
-            "[REAL] wrap_mod: fmod=1 requires float data_type, got %s\n",
-            hipdnn_ep_datatype_name(data_type));
+    hipdnn_ep_log_emit(
+        "[REAL] wrap_mod: fmod=1 requires float data_type, got %s\n",
+        hipdnn_ep_datatype_name(data_type));
     return -1;
   }
 

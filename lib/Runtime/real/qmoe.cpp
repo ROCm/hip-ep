@@ -47,23 +47,23 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       },
       state);
   if (router_weights) {
-    fprintf(stderr, "wrap_qmoe: router_weights is not supported yet\n");
+    hipdnn_ep_log_emit("wrap_qmoe: router_weights is not supported yet\n");
     return -1;
   }
   if (!state || !input || !router_probs || !output) {
-    fprintf(stderr, "wrap_qmoe: null argument\n");
+    hipdnn_ep_log_emit("wrap_qmoe: null argument\n");
     return -1;
   }
 
   if (swiglu_fusion != 1) {
-    fprintf(stderr, "wrap_qmoe: only swiglu_fusion=1 supported, got %lld\n",
-            (long long)swiglu_fusion);
+    hipdnn_ep_log_emit("wrap_qmoe: only swiglu_fusion=1 supported, got %lld\n",
+                       (long long)swiglu_fusion);
     return -1;
   }
 
   if (fc3_weights || fc3_scales || fc3_bias || fc3_zero_points) {
-    fprintf(stderr, "wrap_qmoe: fc3 (unfused SwiGLU) not supported, "
-                    "use swiglu_fusion=1\n");
+    hipdnn_ep_log_emit("wrap_qmoe: fc3 (unfused SwiGLU) not supported, "
+                       "use swiglu_fusion=1\n");
     return -1;
   }
 
@@ -78,26 +78,25 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   // with STATUS_INTEGER_DIVIDE_BY_ZERO inside the k_blocks computations below
   // (and produces invalid quant layouts even at >0 if not a multiple of 2).
   if (block_size <= 0 || (block_size & 1) != 0) {
-    fprintf(stderr,
-            "wrap_qmoe: invalid block_size=%lld (must be a positive even "
-            "value matching the weights' quant block layout)\n",
-            (long long)block_size);
+    hipdnn_ep_log_emit(
+        "wrap_qmoe: invalid block_size=%lld (must be a positive even "
+        "value matching the weights' quant block layout)\n",
+        (long long)block_size);
     return -1;
   }
   if (hidden_size <= 0 || inter_size <= 0 || num_experts <= 0 || k <= 0 ||
       num_tokens <= 0 || elem_size <= 0) {
-    fprintf(stderr,
-            "wrap_qmoe: invalid sizes (tokens=%lld hidden=%lld inter=%lld "
-            "experts=%lld k=%lld elem=%lld)\n",
-            (long long)num_tokens, (long long)hidden_size,
-            (long long)inter_size, (long long)num_experts, (long long)k,
-            (long long)elem_size);
+    hipdnn_ep_log_emit(
+        "wrap_qmoe: invalid sizes (tokens=%lld hidden=%lld inter=%lld "
+        "experts=%lld k=%lld elem=%lld)\n",
+        (long long)num_tokens, (long long)hidden_size, (long long)inter_size,
+        (long long)num_experts, (long long)k, (long long)elem_size);
     return -1;
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
   if (!stream) {
-    fprintf(stderr, "wrap_qmoe: null stream\n");
+    hipdnn_ep_log_emit("wrap_qmoe: null stream\n");
     return -1;
   }
 
@@ -150,8 +149,8 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   size_t total_scratch = off_sorted_weights + sz_sorted_weights;
 
   if (hipdnn_ep_state_ensure_qmoe_scratch(state, total_scratch) != 0) {
-    fprintf(stderr, "wrap_qmoe: ensure_qmoe_scratch(%zu) failed\n",
-            total_scratch);
+    hipdnn_ep_log_emit("wrap_qmoe: ensure_qmoe_scratch(%zu) failed\n",
+                       total_scratch);
     return -1;
   }
   char *scratch_base =
@@ -216,8 +215,8 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     size_t total_host = hsz_counts;
 
     if (hipdnn_ep_state_ensure_qmoe_host_scratch(state, total_host) != 0) {
-      fprintf(stderr, "wrap_qmoe: ensure_qmoe_host_scratch(%zu) failed\n",
-              total_host);
+      hipdnn_ep_log_emit("wrap_qmoe: ensure_qmoe_host_scratch(%zu) failed\n",
+                         total_host);
       return -1;
     }
     char *host_base =
