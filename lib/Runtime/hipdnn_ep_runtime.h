@@ -395,13 +395,12 @@ int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
 
 // Per-op state slots (see docs/design/op-state-slots-design.md). The generated
 // @hipdnn_ep_op_states_init_fn (built by --generate-op-state-init) calls
-// _alloc once, then per stateful op calls its construct symbol and _set. _get
-// (declared in op_state.h) reaches a slot from an op's runtime entry. Cleanup
-// walks the array via each object's deletor. OpState is opaque here.
-struct OpState;
+// _alloc once, then per stateful op calls its construct symbol; each construct
+// stores its built state via hipdnn_ep_op_state_set (plain C++, declared in
+// op_state.h, since it is bitcode-internal -- never called by generated IR).
+// _get (also in op_state.h) reaches a slot from an op's runtime entry. Cleanup
+// walks the array via each object's deletor.
 bool hipdnn_ep_op_states_alloc(RuntimeState *state, int64_t n);
-bool hipdnn_ep_op_state_set(RuntimeState *state, int32_t slot,
-                            struct OpState *value);
 
 // Device-side runtime error flag (set by kernels, observed by wrappers).
 // Intended for operators that detect runtime-invalid inputs on GPU (e.g. Range

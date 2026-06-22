@@ -16,7 +16,7 @@
 //   ^construct:
 //     // per stateful op, in slot order. Each construct_<op> stores its built
 //     // state into op_states[slot] itself (via hipdnn_ep_op_state_set, called
-//     // inside the runtime fn) and returns an i8 ok flag:
+//     // inside the runtime fn) and returns a vestigial i8 (always 0):
 //     %ok = <op.generateOpStateInit emits: call construct_<op>(%state, slot,
 //     attrs)> llvm.return 0
 //   ^fail:
@@ -133,11 +133,11 @@ struct GenerateOpStateInitPass
     Value oneI32 = LLVM::ConstantOp::create(builder, loc, i32Type,
                                             builder.getI32IntegerAttr(1));
 
-    // On alloc failure, return failure (1) WITHOUT running any construct_<op>:
-    // the slot array is null, so the store inside construct_<op> would refuse
-    // (see op_state.cpp / OpStateT::create) and free the state, but skipping
-    // construction entirely avoids the wasted device-resource churn.
-    // inference_init maps the returned 1 to a failed session.
+    // On alloc failure, return failure (1) WITHOUT running any construct_<op>.
+    // This skip is load-bearing: the slot array is null, and
+    // hipdnn_ep_op_state_set assumes a valid slot into an allocated array (it
+    // no longer bounds-checks), so a construct_<op> must never run when alloc
+    // failed. inference_init maps the returned 1 to a failed session.
     Block *constructBlock = initFn.addBlock();
     Block *allocFailBlock = initFn.addBlock();
     LLVM::CondBrOp::create(builder, loc, allocFailed, allocFailBlock,
@@ -148,10 +148,8 @@ struct GenerateOpStateInitPass
 
     // Success path: per stateful op (slot order), call its construct_<op>,
     // which builds the state and stores it into its own slot, then report
-    // success (0). The i8 ok result is not branched on here: a refused store
-    // can only come from a compiler-assigned out-of-range slot (a bug), and the
-    // construct fn already frees the state in that case, so there is nothing to
-    // unwind.
+    // success (0). The i8 result of each construct_<op> is vestigial (always 0)
+    // and intentionally not branched on.
     builder.setInsertionPointToStart(constructBlock);
     for (int64_t slot = 0; slot < numSlots; ++slot) {
       Operation *op = bySlot[slot];

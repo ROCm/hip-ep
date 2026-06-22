@@ -193,7 +193,8 @@ struct CausalConvState : OpStateT<CausalConvState> {
 extern "C" int8_t
 hipdnn_ep_op_state_construct_causal_conv_with_state(RuntimeState *state,
                                                     int32_t slot) {
-  return CausalConvState::create(state, slot);
+  hipdnn_ep_op_state_set(state, slot, CausalConvState::create().release());
+  return 0;
 }
 
 // SiLU(x) = x * sigmoid(x) = x / (1 + exp(-x))
@@ -345,7 +346,7 @@ int wrap_causal_conv_with_state(RuntimeState *state, int op_state_slot,
                     bias ? 1 : 0,
                     activation};
 
-  CausalConvState *ccs = CausalConvState::get_slot(state, op_state_slot);
+  CausalConvState *ccs = CausalConvState::get_op_state(state, op_state_slot);
   if (!ccs) {
     fprintf(stderr,
             "wrap_causal_conv_with_state: no CausalConvState at slot %d\n",

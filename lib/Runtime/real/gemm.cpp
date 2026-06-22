@@ -123,7 +123,8 @@ struct GemmState : OpStateT<GemmState> {
 
 extern "C" int8_t hipdnn_ep_op_state_construct_gemm(RuntimeState *state,
                                                     int32_t slot) {
-  return GemmState::create(state, slot);
+  hipdnn_ep_op_state_set(state, slot, GemmState::create().release());
+  return 0;
 }
 
 // =============================================================================
@@ -510,7 +511,7 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
     return -1;
   }
 
-  GemmState *gs = GemmState::get_slot(state, op_state_slot);
+  GemmState *gs = GemmState::get_op_state(state, op_state_slot);
   if (!gs || !gs->table) {
     fprintf(stderr, "wrap_gemm: missing op-state for slot %d\n", op_state_slot);
     return -1;
