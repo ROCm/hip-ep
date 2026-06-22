@@ -170,3 +170,16 @@ set_target_properties(hip_ep_sample_plugin PROPERTIES
 
 # C++17 to match the rest of the tree.
 target_compile_features(hip_ep_sample_plugin PRIVATE cxx_std_17)
+
+# Build the plugin with RTTI OFF on ELF, matching LLVM/MLIR's default no-RTTI
+# ABI. The headers-only plugin (above) resolves its MLIR symbols against the
+# host at dlopen; if it is compiled with RTTI on it emits references to RTTI
+# typeinfo (e.g. `typeinfo for mlir::Pass`, _ZTIN4mlir4PassE) that a no-RTTI
+# host -- the LLVM default, and what CI ships -- does not export, so the load
+# fails with an undefined-symbol error. The plugin needs no RTTI of its own:
+# MLIR provides TypeID without it (MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID).
+# Windows links the MLIR libraries and gates the plugin-pass tests off, so it
+# keeps the toolchain default there.
+if(NOT WIN32)
+  target_compile_options(hip_ep_sample_plugin PRIVATE -fno-rtti)
+endif()
