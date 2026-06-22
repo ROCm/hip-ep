@@ -18,7 +18,6 @@
 
 #include <hip/hip_runtime.h>
 
-#include <atomic>
 #include <cstdio>
 #include <mutex>
 #include <string>
@@ -38,9 +37,16 @@ inline const std::string &deviceArch() {
     if (hipGetDeviceProperties(&props, device) != hipSuccess)
       return {};
     std::string name(props.gcnArchName);
-    const auto colon = name.find(':');
-    if (colon != std::string::npos)
-      name.resize(colon);
+    // Strip any ":<features>" suffix WITHOUT std::string::find -- find() pulls
+    // in the MSVC CRT helper __std_find_trivial_1, which the in-process LLVM
+    // JIT (EP statically links the CRT, so __std_* are not exported) cannot
+    // resolve when this header is compiled into runtime.bc.
+    for (size_t i = 0; i < name.size(); ++i) {
+      if (name[i] == ':') {
+        name.resize(i);
+        break;
+      }
+    }
     return name;
   }();
   return arch;
@@ -63,24 +69,28 @@ struct KernelDef {
 inline hipFunction_t loadKernel(const KernelDef &def) {
   struct Loaded {
     hipFunction_t function = nullptr;
-    std::atomic<bool> ok{false};
-    std::once_flag once;
+    bool tried = false;
+    bool ok = false;
   };
   static std::mutex mutex;
   static std::unordered_map<const char *, Loaded> cache;
 
-  Loaded *entry;
-  {
-    std::lock_guard<std::mutex> lock(mutex);
-    entry = &cache[def.symbol];
-  }
-  std::call_once(entry->once, [&]() {
+  // Load-once-per-symbol under the cache mutex. We deliberately avoid
+  // std::call_once here: on Windows it lowers to __std_init_once_* CRT helpers
+  // that the in-process LLVM JIT cannot resolve once this header is compiled
+  // into runtime.bc (the EP statically links the CRT, so they are not
+  // exported). Holding the mutex across the one-time hipModuleLoadData is
+  // cheap (fires at most once per process) and keeps the same semantics.
+  std::lock_guard<std::mutex> lock(mutex);
+  Loaded &entry = cache[def.symbol];
+  if (!entry.tried) {
+    entry.tried = true;
     hipModule_t module = nullptr;
     hipError_t err = hipModuleLoadData(&module, def.hsaco);
     if (err != hipSuccess) {
       fprintf(stderr, "ck_dsl: hipModuleLoadData(%s) failed: %s\n", def.label,
               hipGetErrorString(err));
-      return;
+      return nullptr;
     }
     hipFunction_t function = nullptr;
     err = hipModuleGetFunction(&function, module, def.symbol);
@@ -88,12 +98,12 @@ inline hipFunction_t loadKernel(const KernelDef &def) {
       fprintf(stderr, "ck_dsl: hipModuleGetFunction(%s) failed: %s\n",
               def.symbol, hipGetErrorString(err));
       hipModuleUnload(module);
-      return;
+      return nullptr;
     }
-    entry->function = function;
-    entry->ok.store(true, std::memory_order_release);
-  });
-  return entry->ok.load(std::memory_order_acquire) ? entry->function : nullptr;
+    entry.function = function;
+    entry.ok = true;
+  }
+  return entry.ok ? entry.function : nullptr;
 }
 
 } // namespace ckdsl
