@@ -11,6 +11,16 @@ ONNX ops, custom kernels, or MLIR passes on top of `onnx-hipdnn-ep`.
 `HIP_EP_PLUGIN_API_VERSION` as a moving target and rebuild plugins when it
 changes.
 
+**Platform support:** the pass, custom-dialect/op, and pipeline-composition
+contributions require the host and plugin to share one MLIR instance. The
+shipped static-MLIR build achieves that only on **Linux** (the host exports its
+MLIR symbols and the plugin leaves them undefined; see
+[section 4](#4-contributing-an-mlir-pass)). On Windows those contributions would
+need a shared-`libMLIR` build, which the public build does not use, so **they
+are Linux-only today**. The runtime-bitcode and library contributions are pure C
+ABI and work on every platform. This guide's examples target Linux; the design
+doc's "Linkage requirement" has the platform detail.
+
 This guide is the practical companion to
 [`docs/design/plugin-interface.md`](design/plugin-interface.md): it covers
 *how* to author a plugin, while the design doc covers the architecture and
@@ -139,13 +149,15 @@ set_target_properties(my_vendor_plugin PROPERTIES
 
 Requirements that are easy to miss:
 
-- **Link MLIR HEADERS only, not the MLIR libraries.** The plugin's MLIR
+- **Link MLIR HEADERS only, not the MLIR libraries** (Linux). The plugin's MLIR
   symbols stay undefined and resolve against the symbol-exporting host at
   `dlopen` time. This requires the host to have been built with
   `HIPDNN_ENABLE_PLUGINS` (default ON), which exports its MLIR symbols. A
   plugin that links the MLIR libraries (`MLIR` aggregate or the per-component
   archives) gets its own registry copy and its contributed pass is invisible
-  to the host (see section 4).
+  to the host (see section 4). On Windows the headers-only form does not link
+  (a DLL must resolve every symbol), so plugin passes are not supported there
+  with this build -- see the Platform support note above.
 - **Use the SAME MLIR build as the host.** The registry/op types are ABI
   objects: the plugin's MLIR headers must match the host's MLIR version and
   `LLVM_ENABLE_RTTI` setting.

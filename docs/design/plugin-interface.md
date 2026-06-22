@@ -522,11 +522,24 @@ downstream plugin exists.
 
 ## Custom ops: a plugin-owned dialect end-to-end
 
-A plugin can contribute its **own dialect op** that lives across the whole
-pipeline -- introduced from a model op, bufferized like an in-tree op, and
-lowered to a vendor kernel -- entirely from out-of-tree code, via three
-idiomatic MLIR seams that ride the same [linkage](#linkage-requirement) as a
-plugin pass (no shared `libMLIR` dylib):
+There are two ways a plugin can handle a custom op, by how much of the pipeline
+the op must survive:
+
+- **Lower it directly in a pass** (the [walkthrough above](#what-a-downstream-team-does)).
+  A pass matches the model op (e.g. `onnx.Custom("myvendor.FusedOp")`) and
+  rewrites it straight to a `wrap_*` runtime call. This is the simplest path and
+  the right one when the op's entire lowering is a single local rewrite and it
+  never needs to exist as a typed value across passes.
+- **A first-class dialect op** (this section). The op is a real `vendor.add`-style
+  op that flows through bufferization and the standard HIP→LLVM lowering like an
+  in-tree op. Use this when the op must survive multiple passes, participate in
+  bufferization, or carry its own types and shape inference.
+
+The first-class path lets a plugin contribute its **own dialect op** that lives
+across the whole pipeline -- introduced from a model op, bufferized like an
+in-tree op, and lowered to a vendor kernel -- entirely from out-of-tree code, via
+three idiomatic MLIR seams that ride the same [linkage](#linkage-requirement) as
+a plugin pass (no shared `libMLIR` dylib):
 
 1. **Dialect + op + interface models** -- `addDialectRegistration(fn)` hands the
    host a callback it runs against the `DialectRegistry` the pipeline's
