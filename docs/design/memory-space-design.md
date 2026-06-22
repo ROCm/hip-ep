@@ -31,7 +31,10 @@ Licensed under the MIT License.
 - [Memory Transfer Operations](#memory-transfer-operations)
 - [Synchronization Optimization](#synchronization-optimization)
   - [Current State](#current-state)
+  - [Sync Coalescing](#sync-coalescing)
   - [Sync Elimination Pass](#sync-elimination-pass)
+  - [Memory Effects](#memory-effects)
+  - [Migration / Removal Ordering](#migration--removal-ordering)
 - [Related Documents](#related-documents)
 
 ---
@@ -371,9 +374,9 @@ def Hip_PadOp : Hip_Op<"pad"> {
 
 A GPU op constrains its operands to device memory.
 
-**Transfer operations** (cross-boundary): one operand is host and the other is device.
-The `hip.memcpy_*` ops are written this way — see [The Copy Ops](#the-copy-ops). Their
-lowering reads the operand spaces to pick the right runtime copy.
+**Transfer operation** (cross-boundary): `hip.memcpy_d2h_async` has a host destination
+and a device source — see [The Copy Op (D2H only)](#the-copy-op-d2h-only). It is the only
+transfer op; the other direction (H2D) is a `memref.memory_space_cast`, not a copy.
 
 **Pool operations:**
 
@@ -422,47 +425,31 @@ verifier.)
 
 ## Memory Transfer Operations
 
-The scalar-only `hip.readback_scalar` is replaced by directional copy ops that work for
-any size.
+The two directions are not the same. Reading a device value back to the host (D2H) needs
+a copy and a wait. Handing host data to the GPU (H2D) needs neither on a shared-memory
+(UMA) GPU. So there is one copy op (for D2H) plus `hip.stream_sync`, and H2D is a free
+cast. This replaces the old `hip.readback_scalar` / `hip.readback_dim`.
 
-### Why Not `hip.readback_scalar`
+### Why Not `hip.readback_scalar` / `hip.readback_dim`
 
 ```mlir
 %value = hip.readback_scalar(%ctx, %device_scalar) : tensor<i64> -> i64
 ```
 
-- It is a special-case op for one task, and it only handles scalars.
-- It bundles the copy and the synchronization together, so the synchronization cannot
-  be moved or removed later.
+`hip.readback_scalar` and its `index`-typed sibling `hip.readback_dim` share two problems:
 
-### The Copy Ops
+- They only handle a single scalar.
+- They do the copy and the wait in one op, so the wait cannot be moved or removed later.
 
-One op per direction, each in a blocking and a non-blocking form. The non-blocking
-(`*_async`) form does the copy but does not wait; a separate `hip.stream_sync` orders
-it against the host read. All four carry `MemoryEffectsOpInterface` (used by the
-[Sync Elimination Pass](#sync-elimination-pass)). Operand order is `ctx, dst, src`.
+### The Copy Op (D2H only)
+
+D2H is the one direction that needs a copy op. `hip.memcpy_d2h_async` copies a device
+buffer to a host buffer and returns right away; a separate `hip.stream_sync` makes the
+host wait for it. Both carry `MemoryEffectsOpInterface` so the
+[Sync Elimination Pass](#sync-elimination-pass) can reason about them. Operand order is
+`ctx, dst, src`.
 
 ```tablegen
-def Hip_MemcpyD2HOp : Hip_Op<"memcpy_d2h", [
-    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
-  let summary = "Copy device memory to host and block until it completes";
-  let arguments = (ins
-    Hip_ContextType:$ctx,
-    Hip_TensorOrHostMemRef:$dst,    // host destination
-    Hip_TensorOrDeviceMemref:$src   // device source
-  );
-}
-
-def Hip_MemcpyH2DOp : Hip_Op<"memcpy_h2d", [
-    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
-  let summary = "Copy host memory to device and block until it completes";
-  let arguments = (ins
-    Hip_ContextType:$ctx,
-    Hip_TensorOrDeviceMemref:$dst,  // device destination
-    Hip_TensorOrHostMemRef:$src     // host source
-  );
-}
-
 def Hip_MemcpyD2HAsyncOp : Hip_Op<"memcpy_d2h_async", [
     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Copy device memory to host without blocking";
@@ -472,41 +459,40 @@ def Hip_MemcpyD2HAsyncOp : Hip_Op<"memcpy_d2h_async", [
     Hip_TensorOrDeviceMemref:$src   // device source
   );
 }
-
-def Hip_MemcpyH2DAsyncOp : Hip_Op<"memcpy_h2d_async", [
-    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
-  let summary = "Copy host memory to device without blocking";
-  let arguments = (ins
-    Hip_ContextType:$ctx,
-    Hip_TensorOrDeviceMemref:$dst,  // device destination
-    Hip_TensorOrHostMemRef:$src     // host source
-  );
-}
 ```
 
-The operand type constraints fix the direction, so a wrong-direction copy is rejected
-at compile time. The `*_async` ops lower to `hipMemcpyAsync` with no wait; all transfers
-run on the single HIP stream, so stream order is implicit and no completion token is
-needed.
+The operand types fix the direction, so a wrong-direction copy is rejected at compile
+time. The op lowers to `hipMemcpyAsync` with no wait; all work runs on one HIP stream,
+so stream order is implicit and no completion token is needed.
+
+### H2D Needs No Copy
+
+Handing host data to the GPU goes the other way, and on a shared-memory (UMA) GPU it is
+free. Host scratch (`hip.get_host_scratch`) is already GPU-readable, so the GPU reads it
+in place — the "copy" is just a `memref.memory_space_cast` that changes the type, not the
+bytes. No wait is needed: the kernel that reads the buffer runs on the same stream as
+whatever filled it, so the stream already orders them. A real H2D copy only comes back on
+a discrete-VRAM GPU, and even then the host does not wait.
 
 ### Usage Pattern
 
-**Blocking copy** — `memcpy_d2h` waits, so the value is ready right after:
-
-```mlir
-%host = memref.alloc() : memref<i64, #hip.mem<host>>
-hip.memcpy_d2h %ctx, %host, %device          // copies and blocks
-%value = memref.load %host[] : memref<i64, #hip.mem<host>>
-```
-
-**Non-blocking copy** — `memcpy_d2h_async` returns immediately, so a `hip.stream_sync`
-is needed before the host reads:
+**Read a device value on the host (D2H)** — copy, wait, then load:
 
 ```mlir
 %host = memref.alloc() : memref<i64, #hip.mem<host>>
 hip.memcpy_d2h_async %ctx, %host, %device     // copies, does not wait
 hip.stream_sync %ctx                          // wait before the host read
 %value = memref.load %host[] : memref<i64, #hip.mem<host>>
+```
+
+**Hand host data to a kernel (H2D)** — just a cast, no copy and no wait:
+
+```mlir
+%host = memref.alloc() : memref<i64, #hip.mem<host>>
+memref.store %value, %host[]                  // host fills it
+%device = memref.memory_space_cast %host
+        : memref<i64, #hip.mem<host>> to memref<i64, #hip.mem<device>>
+hip.some_kernel(%ctx) ins(%device)            // GPU reads it in place
 ```
 
 ### Automatic Insertion Pass
@@ -571,26 +557,50 @@ synchronization it adds that turns out to be unnecessary is removed by the
 
 ### Current State
 
-Every `hip.memcpy_d2h` synchronizes the stream immediately:
+Today each host read of a device scalar goes through `hip.readback_scalar` (or
+`hip.readback_dim`), which copies and waits in one step. Several reads mean several waits:
 
 ```mlir
 // Range needs start/limit/delta on host
-hip.memcpy_d2h %ctx, %host_start, %device_start  // hipMemcpyAsync + hipStreamSynchronize
-hip.memcpy_d2h %ctx, %host_limit, %device_limit  // hipMemcpyAsync + hipStreamSynchronize
-hip.memcpy_d2h %ctx, %host_delta, %device_delta  // hipMemcpyAsync + hipStreamSynchronize
+%start = hip.readback_scalar(%ctx, %device_start) : ... -> i64  // hipMemcpyAsync + hipStreamSynchronize
+%limit = hip.readback_scalar(%ctx, %device_limit) : ... -> i64  // hipMemcpyAsync + hipStreamSynchronize
+%delta = hip.readback_scalar(%ctx, %device_delta) : ... -> i64  // hipMemcpyAsync + hipStreamSynchronize
 ```
 
-Current codebase: 72 occurrences of `hipStreamSynchronize` across 24 files.
+`hipStreamSynchronize` shows up in tens of call sites across the runtime (an
+illustrative count, not a hard number). The separate `wrap_hipMemcpyD2H` runtime helper
+exists but is dead — no caller; the live D2H path is `hipdnn_ep_readback_*`.
 
-Runtime implementation (`lib/Runtime/real/memory.cpp:117-138`):
+Runtime implementation (`lib/Runtime/real/memory.cpp`, `hipdnn_ep_readback_scalar`):
 ```cpp
 void hipdnn_ep_readback_scalar(RuntimeState *state, void *host_dst,
                                const void *device_scalar, int64_t num_bytes) {
+  // hipMemcpyDefault (not DeviceToHost): the source may be host-accessible
+  // (host-mapped scratch or a UMA pool), where an explicit D2H fails.
   hipMemcpyAsync(host_dst, device_scalar, num_bytes,
-                 hipMemcpyDeviceToHost, stream);
+                 hipMemcpyDefault, stream);
   hipStreamSynchronize(stream);  // Blocks host thread
 }
 ```
+
+### Sync Coalescing
+
+The goal is many copies but one wait. The `Range` reads above are three copies and three
+waits; grouped, they become three copies and one wait:
+
+```mlir
+hip.memcpy_d2h_async %ctx, %host_start, %device_start   // copy, no wait
+hip.memcpy_d2h_async %ctx, %host_limit, %device_limit   // copy, no wait
+hip.memcpy_d2h_async %ctx, %host_delta, %device_delta   // copy, no wait
+hip.stream_sync %ctx                                    // one wait for all three
+```
+
+Reaching this is an active step, not automatic. In this design `MaterializeDeviceLoads`
+does it at insertion time: it emits the async copies grouped, then one shared
+`hip.stream_sync` (keeping copy and sync as separate ops). The
+[Sync Elimination Pass](#sync-elimination-pass) then drops any waits left over. A general
+pass that reorders copies from any source to widen this is future work; because the copy
+and sync stay separate ops, it can build on the same IR without changes here.
 
 ### Sync Elimination Pass
 
@@ -626,7 +636,7 @@ actually needs the ordering it enforces (for example, an adjacent sync already c
 
 ### Memory Effects
 
-The elimination pass needs memory effects on the sync op and the async copy ops.
+The elimination pass needs memory effects on the sync op and the async copy op.
 
 **hip.stream_sync** (the barrier) acts as a full barrier — it reads and writes all
 memory:
@@ -646,13 +656,12 @@ void StreamSyncOp::getEffects(EffectsVector &effects) {
 }
 ```
 
-**The copy ops** already carry the trait in their definitions above. Each reads its
-`src` operand and writes its `dst` operand (operand order `ctx, dst, src`, so `dst` is
-operand 1 and `src` is operand 2). D2H and H2D have the same shape:
+**The copy op** already carries the trait in its definition above. It reads its `src`
+operand and writes its `dst` operand (operand order `ctx, dst, src`, so `dst` is operand
+1 and `src` is operand 2):
 
 ```cpp
-// hip.memcpy_d2h and hip.memcpy_d2h_async (H2D is the mirror image):
-void MemcpyD2HOp::getEffects(EffectsVector &effects) {
+void MemcpyD2HAsyncOp::getEffects(EffectsVector &effects) {
   effects.emplace_back(MemoryEffects::Read::get(),
                        &getOperation()->getOpOperand(2),   // src (device)
                        DefaultResource::get());
@@ -664,6 +673,16 @@ void MemcpyD2HOp::getEffects(EffectsVector &effects) {
 
 `memref.load` / `memref.store` already carry Read/Write effects, and DPS compute ops
 get theirs from the shared `emitDpsMemoryEffects` helper.
+
+### Migration / Removal Ordering
+
+Retire `hip.readback_scalar` / `hip.readback_dim` in this order, so correctness never
+depends on guessed memory placement:
+
+1. Split D2H readback into `hip.memcpy_d2h_async` + `hip.stream_sync`.
+2. Add sync coalescing and the [Sync Elimination Pass](#sync-elimination-pass).
+3. Remove the fused readback ops last, once the memory-space attributes and op memory
+   effects are solid.
 
 ---
 
@@ -677,4 +696,3 @@ get theirs from the shared `emitDpsMemoryEffects` helper.
 - [MLIR Operation Definition](https://mlir.llvm.org/docs/DefiningDialects/Operations/) - ODS operation definition guide
 - [Aliasing guarantees on memrefs from different memory spaces](https://discourse.llvm.org/t/aliasing-guarantees-on-memrefs-from-different-memory-spaces/61154) - LLVM Discourse discussion on memory space semantics
 - [Defining constraint on ops with CPred](https://discourse.llvm.org/t/defining-constraint-on-ops-with-cpred/4217) - LLVM Discourse example of custom CPred constraints
-
