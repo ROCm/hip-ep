@@ -8,7 +8,7 @@
 // descriptor table (shared across sessions via WeakStore). The constructor
 // takes no compile-time args. The generated init must allocate the slot array,
 // then call hipdnn_ep_op_state_construct_t5norm with slot 0, which stores the
-// state into op_states[0] itself and returns an i8 ok flag. See
+// state into op_states[0] itself and returns an i8 status (vestigial, always 0). See
 // docs/design/op-state-slots-design.md.
 // ============================================================================
 

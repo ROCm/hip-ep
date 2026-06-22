@@ -98,7 +98,7 @@ ConvOp::generateOpStateInit(b, loc, statePtr, slot):
     ctor  = declare_extern("hipdnn_ep_op_state_construct_conv",
                            ret = i8, params = [ptr, i32, i64, i64])
     ok    = b.call(ctor, [ statePtr, const(slot), const(k), const(s) ])
-    return ok                                                # i8: store refused => 0
+    return ok                                                # i8: vestigial, always 0
 ```
 
 The runtime constructor takes those parameters, builds the state with `OpStateT::create` (which returns an owning `std::unique_ptr<T>` with `deletor` already wired), and hands the released pointer to `hipdnn_ep_op_state_set`, which stores it into the slot. `_set` is plain C++ internal to the runtime bitcode (never called by generated IR) and has no failure path: the compiler always supplies a valid slot into an already-allocated array, so the `RuntimeState` layout stays opaque without bounds-check ceremony:
