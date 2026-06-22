@@ -100,7 +100,8 @@ struct SkipT5NormState : OpStateT<SkipT5NormState> {
 
 extern "C" int8_t hipdnn_ep_op_state_construct_skip_t5norm(RuntimeState *state,
                                                            int32_t slot) {
-  return SkipT5NormState::create(state, slot);
+  hipdnn_ep_op_state_set(state, slot, SkipT5NormState::create().release());
+  return 0;
 }
 
 static const SkipT5NormCacheEntry *
@@ -264,7 +265,7 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, int op_state_slot,
     return -1;
   }
 
-  SkipT5NormState *ns = SkipT5NormState::get_slot(state, op_state_slot);
+  SkipT5NormState *ns = SkipT5NormState::get_op_state(state, op_state_slot);
   if (!ns || !ns->table) {
     fprintf(stderr,
             "wrap_skip_simplified_layer_norm: missing op-state for slot %d\n",

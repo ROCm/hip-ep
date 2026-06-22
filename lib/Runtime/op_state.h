@@ -38,46 +38,40 @@ struct OpState {
   void (*deletor)(OpState *) = nullptr;
 };
 
-// Opaque slot accessors (defined in op_state.cpp where RuntimeState is
-// complete). `_get` returns nullptr for an out-of-range slot or an
-// unconstructed one; `_set` bounds- and null-checks the store and returns true
-// on success. Generated IR never touches the slot array directly -- every state
-// stores itself through `_set` (see OpStateT::create), keeping the RuntimeState
-// layout opaque to both generated IR and op translation units.
+// Slot accessors. `hipdnn_ep_op_state_get` stays `extern "C"`: it is the opaque
+// reader (defined in op_state.cpp where RuntimeState is complete) and returns
+// nullptr for an out-of-range or unconstructed slot. `hipdnn_ep_op_state_set`
+// is plain C++ -- it is only ever called from within the runtime bitcode (by
+// the per-op construct_<op> functions), never by generated IR, so it needs no
+// C ABI and no failure path: the compiler always hands it a valid slot into an
+// already-allocated array. Together they keep the RuntimeState layout opaque to
+// the op translation units that include this header.
 extern "C" void *hipdnn_ep_op_state_get(RuntimeState *state, int slot);
-extern "C" bool hipdnn_ep_op_state_set(RuntimeState *state, int32_t slot,
-                                       OpState *value);
+void hipdnn_ep_op_state_set(RuntimeState *state, int32_t slot, OpState *value);
 
 // CRTP base for per-op state structs: derive `struct FooState :
 // OpStateT<FooState>`. The constructor wires `deletor` to destroy the concrete
-// type, so a derived state can never forget to set it. `get_slot` reaches the
-// instance from an operator's runtime entry, and `create` builds the state and
-// stores it into its slot.
+// type, so a derived state can never forget to set it. `get_op_state` reaches
+// this op's instance from its runtime entry; `create` builds an owning instance
+// that the construct_<op> function then stores into its slot.
 template <class T> struct OpStateT : OpState {
   OpStateT() {
     this->deletor = [](OpState *p) { delete static_cast<T *>(p); };
   }
 
   // Reach this op's state inside its runtime entry.
-  static T *get_slot(RuntimeState *state, int slot) {
+  static T *get_op_state(RuntimeState *state, int slot) {
     return static_cast<T *>(hipdnn_ep_op_state_get(state, slot));
   }
 
-  // Construct T and store it into op_states[slot]; returns 1 on success, 0 if
-  // the store is refused (alloc failed / out-of-range slot), freeing the object
-  // via its deletor so nothing leaks. Uses a throwing `new` (as the rest of the
-  // runtime does): the nothrow placement form pulls in `operator new(size_t,
-  // nothrow_t)` / `std::nothrow`, which are not resolvable when the runtime
-  // bitcode is JIT-linked into the EP process, so every model's global_ctors
-  // would fail to materialize.
-  template <class... Args>
-  static int8_t create(RuntimeState *state, int32_t slot, Args &&...args) {
-    T *st = new T(std::forward<Args>(args)...);
-    if (!hipdnn_ep_op_state_set(state, slot, st)) {
-      st->deletor(st);
-      return 0;
-    }
-    return 1;
+  // Build an owning T. The caller (construct_<op>) hands the released pointer
+  // to hipdnn_ep_op_state_set. Uses a throwing `new` (as the rest of the
+  // runtime does): the nothrow form pulls in `operator new(size_t, nothrow_t)`
+  // / `std::nothrow`, which are not resolvable when the runtime bitcode is
+  // JIT-linked into the EP process, so every model's global_ctors would fail to
+  // materialize.
+  template <class... Args> static std::unique_ptr<T> create(Args &&...args) {
+    return std::unique_ptr<T>(new T(std::forward<Args>(args)...));
   }
 };
 
