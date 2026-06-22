@@ -25,7 +25,8 @@ struct MockOpState : OpStateT<MockOpState> {};
 // in real/matmul_nbits.cpp); the mock owns no device memory.
 extern "C" int8_t hipdnn_ep_op_state_construct_matmul_nbits(RuntimeState *state,
                                                             int32_t slot) {
-  return MockOpState::create(state, slot);
+  hipdnn_ep_op_state_set(state, slot, MockOpState::create().release());
+  return 0;
 }
 
 // MatMul: real runtime holds a shared_ptr to a device-wide hipBLASLt algo
@@ -33,7 +34,8 @@ extern "C" int8_t hipdnn_ep_op_state_construct_matmul_nbits(RuntimeState *state,
 // resources.
 extern "C" int8_t hipdnn_ep_op_state_construct_matmul(RuntimeState *state,
                                                       int32_t slot) {
-  return MockOpState::create(state, slot);
+  hipdnn_ep_op_state_set(state, slot, MockOpState::create().release());
+  return 0;
 }
 
 // CausalConvWithState: real runtime owns a per-shape MIOpen descriptor/algo
@@ -42,14 +44,16 @@ extern "C" int8_t hipdnn_ep_op_state_construct_matmul(RuntimeState *state,
 extern "C" int8_t
 hipdnn_ep_op_state_construct_causal_conv_with_state(RuntimeState *state,
                                                     int32_t slot) {
-  return MockOpState::create(state, slot);
+  hipdnn_ep_op_state_set(state, slot, MockOpState::create().release());
+  return 0;
 }
 
 // GQA: real runtime owns a per-GEMM-shape hipBLASLt descriptor/algo cache
 // (GqaState in real/gqa.cpp); the mock owns no device/hipBLASLt resources.
 extern "C" int8_t hipdnn_ep_op_state_construct_gqa(RuntimeState *state,
                                                    int32_t slot) {
-  return MockOpState::create(state, slot);
+  hipdnn_ep_op_state_set(state, slot, MockOpState::create().release());
+  return 0;
 }
 
 // MultiHeadAttention: real runtime owns a per-GEMM-shape hipBLASLt
@@ -58,7 +62,8 @@ extern "C" int8_t hipdnn_ep_op_state_construct_gqa(RuntimeState *state,
 extern "C" int8_t
 hipdnn_ep_op_state_construct_multi_head_attention(RuntimeState *state,
                                                   int32_t slot) {
-  return MockOpState::create(state, slot);
+  hipdnn_ep_op_state_set(state, slot, MockOpState::create().release());
+  return 0;
 }
 
 // Activation (sigmoid/tanh/softplus): real runtime holds a shared_ptr to a
@@ -66,7 +71,8 @@ hipdnn_ep_op_state_construct_multi_head_attention(RuntimeState *state,
 // the mock owns no device/MIOpen resources.
 extern "C" int8_t hipdnn_ep_op_state_construct_activation(RuntimeState *state,
                                                           int32_t slot) {
-  return MockOpState::create(state, slot);
+  hipdnn_ep_op_state_set(state, slot, MockOpState::create().release());
+  return 0;
 }
 
 // MIOpen OpTensor (miopen.add): real runtime holds a shared_ptr to a
@@ -74,7 +80,8 @@ extern "C" int8_t hipdnn_ep_op_state_construct_activation(RuntimeState *state,
 // the mock owns no device/MIOpen resources.
 extern "C" int8_t hipdnn_ep_op_state_construct_optensor(RuntimeState *state,
                                                         int32_t slot) {
-  return MockOpState::create(state, slot);
+  hipdnn_ep_op_state_set(state, slot, MockOpState::create().release());
+  return 0;
 }
 
 // SimplifiedLayerNorm (rms_norm): real runtime holds a shared_ptr to a
@@ -82,7 +89,8 @@ extern "C" int8_t hipdnn_ep_op_state_construct_optensor(RuntimeState *state,
 // real/simplified_layer_norm.cpp); the mock owns no device/MIOpen resources.
 extern "C" int8_t hipdnn_ep_op_state_construct_t5norm(RuntimeState *state,
                                                       int32_t slot) {
-  return MockOpState::create(state, slot);
+  hipdnn_ep_op_state_set(state, slot, MockOpState::create().release());
+  return 0;
 }
 
 // SkipSimplifiedLayerNorm (skip_rms_norm): real runtime holds a shared_ptr to a
@@ -91,12 +99,14 @@ extern "C" int8_t hipdnn_ep_op_state_construct_t5norm(RuntimeState *state,
 // resources.
 extern "C" int8_t hipdnn_ep_op_state_construct_skip_t5norm(RuntimeState *state,
                                                            int32_t slot) {
-  return MockOpState::create(state, slot);
+  hipdnn_ep_op_state_set(state, slot, MockOpState::create().release());
+  return 0;
 }
 
 // Gemm: real runtime holds a shared_ptr to a device-wide hipBLASLt algo table
 // (GemmState in real/gemm.cpp); the mock owns no device/hipBLASLt resources.
 extern "C" int8_t hipdnn_ep_op_state_construct_gemm(RuntimeState *state,
                                                     int32_t slot) {
-  return MockOpState::create(state, slot);
+  hipdnn_ep_op_state_set(state, slot, MockOpState::create().release());
+  return 0;
 }
