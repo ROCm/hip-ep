@@ -351,16 +351,6 @@ void mlir::hip::buildHipToLLVMPipeline(
   // final LLVM IR and "Failed to translate MLIR to LLVM IR" aborts compile.
   pm.addPass(createLowerAffinePass());
 
-  // Op-state slots (docs/design/op-state-slots-design.md). Assign one slot per
-  // stateful op instance, then emit @hipdnn_ep_op_states_init_fn while the HIP
-  // ops (and their OpStateOpInterface impls) still exist. Both run BEFORE the
-  // lowering below: assign so the slot is available to the wrap_* lowering and
-  // to generate-op-state-init; generate-op-state-init because generate-
-  // interface (after lowering) only calls the function this builds. Both are
-  // no-ops on modules with no stateful ops.
-  pm.addPass(createAssignOpStateSlotsPass());
-  pm.addPass(createGenerateOpStateInitPass());
-
   // Lower `scf.for` / `scf.if` introduced by convert-linalg-to-loops (5a) to
   // unstructured control flow, then reconcile any leftover unrealized casts.
   // ConvertHipToLLVM has no SCF patterns, so a surviving scf.for would fail

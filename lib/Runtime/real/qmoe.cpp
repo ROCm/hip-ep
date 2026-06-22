@@ -259,13 +259,6 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: %lld/%lld experts active\n",
                       (long long)active_experts, (long long)num_experts);
 
-    // Per-session pointer-keyed zero_points unpack cache (qmoe-owned, lives on
-    // RuntimeState). Each expert's fc1/fc2 zp is a distinct pointer into the
-    // constants blob, so each gets its own entry; unpack cost is paid once per
-    // expert across the session lifetime.
-    hipdnn_ep_real::ZpUnpackCache *zpc =
-        hipdnn_ep_real::get_or_create_zp_cache(state);
-
     for (int64_t e = 0; e < num_experts; e++) {
       int64_t count = static_cast<int64_t>(h_counts[e]);
       if (count == 0) {
@@ -309,7 +302,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                                      : nullptr;
 
       // hip_matmul_nbits no longer unpacks zp internally — pre-unpack via the
-      // per-session pointer-keyed cache (same path as wrap_matmul_nbits). Each
+      // per-state pointer-keyed cache (same path as wrap_matmul_nbits). Each
       // expert's fc1_zp_e is a distinct pointer into the constants blob, so
       // each expert gets its own cache entry; the cost is paid once per
       // expert across the lifetime of the session.
@@ -318,7 +311,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       if (fc1_zp_e && expert_weight_bits == 4 && block_size > 0) {
         int ngk = static_cast<int>(k_blocks_fc1);
         fc1_pre_zp_u8 = hipdnn_ep_real::lookup_or_unpack_zp_u8(
-            *zpc, stream, fc1_zp_e, static_cast<int>(fusion_inter), ngk);
+            state, stream, fc1_zp_e, static_cast<int>(fusion_inter), ngk);
         if (!fc1_pre_zp_u8) {
           result = -1;
           goto cleanup;
@@ -326,7 +319,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
         bool wmma_data_format = (hidden_size % 32 == 0);
         if (wmma_data_format && count > 1) {
           fc1_pre_zp_fp16 = hipdnn_ep_real::lookup_or_convert_zp_fp16(
-              *zpc, stream, fc1_zp_e, static_cast<int>(fusion_inter), ngk);
+              state, stream, fc1_zp_e, static_cast<int>(fusion_inter), ngk);
           if (!fc1_pre_zp_fp16) {
             result = -1;
             goto cleanup;
@@ -371,7 +364,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       if (fc2_zp_e && expert_weight_bits == 4 && block_size > 0) {
         int ngk = static_cast<int>(k_blocks_fc2);
         fc2_pre_zp_u8 = hipdnn_ep_real::lookup_or_unpack_zp_u8(
-            *zpc, stream, fc2_zp_e, static_cast<int>(hidden_size), ngk);
+            state, stream, fc2_zp_e, static_cast<int>(hidden_size), ngk);
         if (!fc2_pre_zp_u8) {
           result = -1;
           goto cleanup;
@@ -379,7 +372,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
         bool wmma_data_format = (inter_size % 32 == 0);
         if (wmma_data_format && count > 1) {
           fc2_pre_zp_fp16 = hipdnn_ep_real::lookup_or_convert_zp_fp16(
-              *zpc, stream, fc2_zp_e, static_cast<int>(hidden_size), ngk);
+              state, stream, fc2_zp_e, static_cast<int>(hidden_size), ngk);
           if (!fc2_pre_zp_fp16) {
             result = -1;
             goto cleanup;
@@ -405,7 +398,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
 
 cleanup:
   // Sub-buffers above (d_expert_indices ... d_sorted_weights) are views into
-  // the per-session RuntimeState::qmoe_scratch pool -- freed in
+  // RuntimeState->qmoe_scratch -- owned by the runtime state, freed in
   // hipdnn_ep_state_cleanup. Do NOT hipFree them here.
   if (result == 0) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: completed successfully\n");
