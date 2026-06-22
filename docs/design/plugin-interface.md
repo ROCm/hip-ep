@@ -298,6 +298,49 @@ they work regardless of this -- the symbol-export requirement applies
 specifically to the pass (and, for the planned dialect/op extension, the
 dialect and type registries).
 
+### LLVM build configuration the plugin host needs
+
+Whether a plugin that contributes MLIR (a pass or a custom dialect/op) can load
+**depends on how the LLVM/MLIR that `hip-compiler` / `hip-mlir-opt` were built
+against was configured** -- specifically, whether the host can export its
+`mlir::` symbols. Two configurations behave differently, and only one hosts
+plugins:
+
+- **Shared `libLLVM` + default-visibility MLIR** (e.g. a distro LLVM, which the
+  standard build container uses). The host links the shared `libLLVM` while the
+  static MLIR libraries keep default visibility, so `-rdynamic` exports the
+  `mlir::` symbols and a plugin's references resolve at `dlopen`. comgr is
+  unaffected because there is a single shared `libLLVM` for everything to bind
+  to. **Plugins load.** This is the configuration this document describes and
+  the one the project is verified against.
+- **Static, hidden-visibility LLVM** (e.g. a from-source LLVM built with
+  `CMAKE_CXX_VISIBILITY_PRESET=hidden`, as the CI cache is). Hidden visibility is
+  required there to keep the statically-linked `llvm::` symbols out of the
+  dynamic symbol table -- otherwise ROCm's `libamd_comgr.so` binds its own
+  versioned `llvm::` references to that copy and **segfaults** during device-code
+  compilation. But hidden visibility also hides `mlir::`, so the host cannot
+  export it, and an MLIR-contributing plugin **fails to load** (unresolved
+  `mlir::` symbols). Pure bitcode / library plugins still work (no MLIR symbols
+  to resolve).
+
+Practical consequences for a downstream team:
+
+- **Build `onnx-hipdnn-ep` against a shared / default-visibility LLVM** if you
+  intend to ship pass or custom-op plugins. The standard build container does
+  this; a from-source static + hidden-visibility LLVM does not.
+- **A plugin that references any `mlir::` symbol fails to load as a whole on a
+  non-exporting host** -- `dlopen` stops at the first unresolved symbol, so even
+  that plugin's bitcode / library contributions never run. A plugin that must
+  work against a non-exporting host has to stay free of MLIR code (bitcode /
+  library only).
+- The underlying tension -- `mlir::` must be exported for plugins, while `llvm::`
+  must stay private for comgr when LLVM is static -- is only fully resolved by a
+  host build that exports `mlir::` while keeping `llvm::` hidden (e.g. a shared
+  `libMLIR` build, or a curated export list scoped to the `mlir::` namespace). A
+  future prebuilt `hip-compiler` distribution intended to host plugins must be
+  built that way; until then, plugin authors build `onnx-hipdnn-ep` themselves
+  against a plugin-capable LLVM (which also lets them target their own GPU arch).
+
 ## What a downstream team does
 
 A downstream team builds its plugin in a separate repo that consumes a
