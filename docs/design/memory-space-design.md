@@ -135,8 +135,8 @@ def HIP_MemorySpaceAttr : AttrDef<HIP_Dialect, "MemorySpace"> {
   let summary = "HIP memory space attribute";
   let description = [{
     Where a HIP buffer lives:
-    - `device`: GPU memory (hip.get_pool -> hipMalloc)
-    - `host`:   host-mapped memory (hip.get_host_scratch -> hipHostMalloc)
+    - `device`: GPU memory (`hip.get_pool`, backed by hipMalloc)
+    - `host`:   host-mapped memory (`hip.get_host_scratch`, backed by hipHostMalloc)
 
     Syntax: `#hip.mem<device>` or `#hip.mem<host>`.
   }];
@@ -164,48 +164,30 @@ that create plain `memref<...>` temporaries with no space.
 
 ### LLVM Address Space Mapping
 
-Maps to AMDGPU LLVM address spaces following MLIR GPU dialect conventions.
+The generated `inference_compute` / `main_graph` is **host (CPU) code, not a GPU
+kernel**. It calls `hipMalloc`, MIOpen / hipBLASLt, and the runtime `wrap_*` /
+`hipdnn_ep_*` helpers (all `void *` C ABI); the memref "pointers" are device
+addresses held as plain host values. So the memory space is a **compile-time
+placement tag** the passes read to decide where to insert D2H copies — not a
+hardware address space in the generated code.
 
-**AMDGPU Address Spaces (Reference):**
+**Both spaces lower to LLVM address space 0.** The type converter maps
+`#hip.mem<device>` and `#hip.mem<host>` to 0, so no `addrspacecast` is added and
+device pointers reach the `void *` runtime ABI unchanged. This matches the
+current lowering: `getMemRefAddressSpace` returns 0 for every memref, and
+`AllocOpLowering` only inserts an `addrspacecast` for a non-zero space
+(`lib/Conversion/HipToLLVM/MemoryLowering.cpp`).
 
-| Address Space | Name | HIP Memory Space | Usage |
-|---|---|---|---|
-| 0 | Generic/Flat | `#hip.mem<host>` | Host-accessible memory |
-| 1 | Global | `#hip.mem<device>` | Device global memory (GPU-only) |
-| 3 | Local | — | Workgroup shared memory (LDS) |
-| 4 | Constant | — | Read-only constant data |
-| 5 | Private | — | Per-thread scratch |
-
-**Currently supported:** AS 0 (host) and AS 1 (device) only.
-
-**Type Converter Setup:**
+**Type Converter Setup.** Register the mapping with `addTypeAttributeConversion`;
+the callback returns the numeric space as an `IntegerAttr`:
 
 ```cpp
-// In LLVMTypeConverter setup
-converter.addMemRefAttrConversion(
-  [](Attribute attr, MemRefType type) -> std::optional<unsigned> {
-    if (auto space = dyn_cast<MemorySpaceAttr>(attr)) {
-      switch (space.getKind()) {
-        case MemorySpaceKind::Device:
-          return 1u;  // AMDGPU Global (device memory)
-        case MemorySpaceKind::Host:
-          return 0u;  // AMDGPU Generic/Flat (host-accessible)
-      }
-    }
-    return std::nullopt;
+// Device and host both collapse to AS 0.
+converter.addTypeAttributeConversion(
+  [](BaseMemRefType memref, hip::MemorySpaceAttr space) -> IntegerAttr {
+    return IntegerAttr::get(IntegerType::get(memref.getContext(), 64), 0);
   });
 ```
-
-**Device memory (`#hip.mem<device>`):**
-- Maps to AS 1 (AMDGPU Global)
-- GPU kernels access device memory in AS 1
-- Used by `hipMalloc` allocations
-
-**Host memory (`#hip.mem<host>`):**
-- Maps to AS 0 (AMDGPU Generic/Flat)
-- Host-accessible via `hipHostMalloc`
-- Uses flat addressing instructions
-- Accessible from both CPU and GPU
 
 ---
 
@@ -328,17 +310,10 @@ def Hip_DeviceMemRef : Type<
   "device memref (#hip.mem<device>)"
 >;
 
-// memref whose memory space is #hip.mem<host>
-def Hip_HostMemRef : Type<
-  CPred<"::llvm::isa<::mlir::MemRefType>($_self) && "
-        "::llvm::cast<::mlir::MemRefType>($_self).getMemorySpace() && "
-        "::llvm::isa<::mlir::hip::MemorySpaceAttr>("
-        "::llvm::cast<::mlir::MemRefType>($_self).getMemorySpace()) && "
-        "::llvm::cast<::mlir::hip::MemorySpaceAttr>("
-        "::llvm::cast<::mlir::MemRefType>($_self).getMemorySpace()).getKind() == "
-        "::mlir::hip::MemorySpaceKind::Host">,
-  "host memref (#hip.mem<host>)"
->;
+// memref whose memory space is #hip.mem<host>. Identical to Hip_DeviceMemRef
+// above, except the final getKind() check compares against MemorySpaceKind::Host.
+def Hip_HostMemRef : Type<CPred<"/* same as Hip_DeviceMemRef, Kind == Host */">,
+  "host memref (#hip.mem<host>)">;
 
 // Pre-bufferization tensor OR post-bufferization device/host memref.
 // Mirrors Hip_TensorOrMemRef so the same op definition verifies in both phases.
@@ -388,7 +363,8 @@ def Hip_GetPoolOp : Hip_Op<"get_pool"> {
 ```
 
 `hip.get_pool` is created after bufferization, so its result is always a memref —
-hence `Hip_DeviceMemRef`, not the tensor-or-memref form. Its lowering calls `hipMalloc`.
+hence `Hip_DeviceMemRef`, not the tensor-or-memref form. Its lowering allocates the
+device pool via `hipdnn_ep_get_pool_base` (which is `hipMalloc`-backed, grow-on-demand).
 
 ### Verification Examples
 
@@ -567,9 +543,9 @@ Today each host read of a device scalar goes through `hip.readback_scalar` (or
 %delta = hip.readback_scalar(%ctx, %device_delta) : ... -> i64  // hipMemcpyAsync + hipStreamSynchronize
 ```
 
-`hipStreamSynchronize` shows up in tens of call sites across the runtime (an
-illustrative count, not a hard number). The separate `wrap_hipMemcpyD2H` runtime helper
-exists but is dead — no caller; the live D2H path is `hipdnn_ep_readback_*`.
+`hipStreamSynchronize` appears in many runtime call sites. The separate
+`wrap_hipMemcpyD2H` runtime helper exists but is dead — no caller; the live D2H path
+is `hipdnn_ep_readback_*`.
 
 Runtime implementation (`lib/Runtime/real/memory.cpp`, `hipdnn_ep_readback_scalar`):
 ```cpp
@@ -690,7 +666,6 @@ depends on guessed memory placement:
 
 - [hip-shape-inference.md](hip-shape-inference.md) - Dynamic shape inference for HIP operations
 - [pool-allocs-memory-planning.md](pool-allocs-memory-planning.md) - Memory pooling algorithm and graph coloring
-- [AMDGPU Backend User Guide](https://llvm.org/docs/AMDGPUUsage.html) - LLVM address space mapping for AMDGPU
 - [MLIR GPU Dialect](https://mlir.llvm.org/docs/Dialects/GPU/) - Standard GPU dialect memory space patterns
 - [MLIR Constraints](https://mlir.llvm.org/docs/DefiningDialects/Constraints/) - TableGen CPred constraint documentation
 - [MLIR Operation Definition](https://mlir.llvm.org/docs/DefiningDialects/Operations/) - ODS operation definition guide
