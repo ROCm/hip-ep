@@ -27,10 +27,10 @@ env:
   # only invalidates the llvm-install cache.
   LLVM_TAG: llvmorg-22.1.0
   ONNXRUNTIME_VERSION: "1.27.0"
-  # Space-separated microsoft/onnxruntime PR numbers. Non-empty => build ORT
-  # from source and `git apply` each PR on top of the pinned tag; empty => use
-  # the official prebuilt release. Part of the ort-install cache key. Remove a
-  # PR once its fix lands in the pinned ONNX Runtime release.
+  # Space-separated microsoft/onnxruntime PR numbers `git apply`-ed on top of
+  # the pinned tag during the from-source build (an empty list applies nothing;
+  # ORT is still built from source either way). Part of the ort-install cache
+  # key. Remove a PR once its fix lands in the pinned ONNX Runtime release.
   ONNXRUNTIME_PR_PATCHES: ""
   OGA_VERSION: "0.14.0"
   # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
