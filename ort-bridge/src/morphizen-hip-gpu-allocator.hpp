@@ -13,12 +13,28 @@
 
 #include "./api-ptrs.hpp"
 
+#include <array>
 #include <cstddef>
+#include <map>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
 
 namespace morphizen {
+
+// Fixed size-class boundaries (bytes). A request of N bytes is served from the
+// first class whose capacity is >= N, and the buffer is allocated at the full
+// class capacity so any later request mapping to the same class can reuse it.
+// Requests larger than the last class are allocated at their exact size and
+// pooled best-fit instead (see the large-buffer free list in the .cpp).
+inline constexpr size_t kSizeClasses[] = {
+    4ull * 1024,         // 4 KB
+    64ull * 1024,        // 64 KB
+    1ull * 1024 * 1024,  // 1 MB
+    16ull * 1024 * 1024, // 16 MB
+};
+inline constexpr size_t kNumSizeClasses =
+    sizeof(kSizeClasses) / sizeof(kSizeClasses[0]);
 
 // hipHostMalloc(Mapped|Coherent) backed OrtAllocator. One instance is created
 // per OrtMemoryInfo registered with OrtEpDevice (typically one DEFAULT GPU
@@ -44,28 +60,39 @@ private:
   static const OrtMemoryInfo* ORT_API_CALL InfoImpl(const OrtAllocator* this_);
   static void* ORT_API_CALL ReserveImpl(OrtAllocator* this_, size_t size);
 
-  // Caching free-list. hipHostMalloc is a heavyweight (page-pinning) call:
-  // ORT re-allocates the per-Run input device-copy buffers and (allocator
-  // mode) the graph-output buffers on EVERY inference, so without caching the
-  // EP pays dozens of hipHostMalloc + hipHostFree per Compute (the dominant
-  // non-compute cost on small fixed-shape graphs). Instead Free returns the
-  // buffer to a size-keyed free list and Alloc reuses it; the driver is only
-  // touched on a cold miss (first inference / a newly-seen size). The pool
-  // grows on demand and is released wholesale in the destructor — matching
-  // the project's per-session "grow-on-demand, never shrink, free at cleanup"
-  // memory contract. Keyed on exact byte size so fixed-shape models reuse at
-  // 100% hit rate; distinct dynamic-shape sizes simply pool separately.
+  // Fixed size-class caching allocator. hipHostMalloc is a heavyweight
+  // (page-pinning) call: ORT re-allocates the per-Run input device-copy
+  // buffers and (allocator mode) the graph-output buffers on EVERY inference,
+  // so without caching the EP pays dozens of hipHostMalloc + hipHostFree per
+  // Compute (the dominant non-compute cost on small fixed-shape graphs).
+  //
+  // A request is rounded up to one of kSizeClasses and served from that
+  // class's free list; the buffer is allocated at the full class capacity, so
+  // every buffer within a class is interchangeable and any later request
+  // mapping to the same class reuses it (100% hit rate after warmup, with at
+  // most a few distinct class sizes regardless of how many dynamic shapes the
+  // model sees). Requests larger than the last class are allocated at their
+  // exact size and recycled best-fit (the smallest free large buffer that is
+  // >= the new request is reused). Free never returns memory to the driver;
+  // everything is released wholesale in the destructor — matching the
+  // project's per-session "grow-on-demand, never shrink, free at cleanup"
+  // memory contract.
   //
   // Reuse needs no per-handout stream sync: ORT only calls Free after Run
   // returns, and allocator-mode inference_compute ends with a full
   // hipdnn_ep_stream_sync, so any GPU work touching a freed buffer has
   // already drained before it can be handed back out.
   std::mutex pool_mutex_;
-  std::unordered_map<size_t, std::vector<void*>> free_lists_;
-  // Every pointer hipHostMalloc'd by this allocator -> its byte size. Entries
-  // persist for the allocator's lifetime (Free does not erase them; it only
-  // moves the pointer onto free_lists_) so the destructor can free them all
-  // and FreeImpl can recover a pointer's bucket size.
+  // Index i holds reusable buffers each exactly kSizeClasses[i] bytes.
+  std::array<std::vector<void*>, kNumSizeClasses> free_lists_;
+  // Freed buffers larger than the largest size class, keyed by their exact
+  // allocated byte size. Reuse is best-fit via lower_bound(request).
+  std::multimap<size_t, void*> large_free_;
+  // Every pointer hipHostMalloc'd by this allocator -> its allocated byte size
+  // (the rounded-up class capacity for pooled buffers, the exact size for
+  // large ones). Entries persist for the allocator's lifetime (Free does not
+  // erase them; it only moves the pointer onto a free list) so the destructor
+  // can free them all and FreeImpl can recover a pointer's bucket.
   std::unordered_map<void*, size_t> ptr_to_size_;
 
   const OrtMemoryInfo* memory_info_;
