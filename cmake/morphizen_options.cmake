@@ -79,6 +79,8 @@ set(MORPHIZEN_VERSION_INFO_FILE "${CMAKE_CURRENT_SOURCE_DIR}/morphizen-core/etc/
 #
 set(morphizen_OUTPUT_NAME "onnxruntime_vitisai_ep" CACHE STRING "Output name of MorphiZen library (using VitisAI name for ORT compatibility)")
 
+set(MORPHIZEN_EP_REGISTRATION_NAME "morphizenexecutionprovider" CACHE STRING "EP registration name for ORT")
+
 ## this option is used to trim morphizen_config.json
 option(TRIM_CONFIG "trim default morphizen_config.json" "${TRIM_CONFIG_DEFAULT}")
 option(morphizen_ENABLE_ORT_BRIDGE "enable onnxruntime bridge" ON)
@@ -123,6 +125,7 @@ message(STATUS "  morphizen_WITH_MORPHIZEN_CONFIG_FILE : ${morphizen_WITH_MORPHI
 message(STATUS "  MORPHIZEN_JSON_CONFIG_FILE : ${MORPHIZEN_JSON_CONFIG_FILE}")
 message(STATUS "  MORPHIZEN_VERSION_INFO_FILE : ${MORPHIZEN_VERSION_INFO_FILE}")
 message(STATUS "  morphizen_OUTPUT_NAME : ${morphizen_OUTPUT_NAME}")
+message(STATUS "  MORPHIZEN_EP_REGISTRATION_NAME : ${MORPHIZEN_EP_REGISTRATION_NAME}")
 message(STATUS "  TRIM_CONFIG : ${TRIM_CONFIG}")
 message(STATUS "  BUILD_PYTHON : ${BUILD_PYTHON}")
 message(STATUS "  morphizen_ENABLE_ORT_BRIDGE : ${morphizen_ENABLE_ORT_BRIDGE}")
