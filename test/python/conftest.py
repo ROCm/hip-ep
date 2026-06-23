@@ -54,13 +54,16 @@ def _ep_runtime_dirs(repo_root):
 
     Honours an out-of-tree install layout via env vars (set them when you build
     with a custom --install_dir / --build_dir, e.g. the quick-start $ROOT layout):
-      MORPHIZEN_EP_BIN  -- dir holding onnxruntime_morphizen_ep.dll
+      HIPEP_EP_BIN      -- dir holding the AMD GPU umbrella EP chain
+                           (amdgpu-ep.dll + hipep-backend.dll + hipep.dll)
                            (default <repo>/install/dist/bin)
       THEROCK_DIST      -- TheRock SDK root; its bin/ holds amdhip64*.dll etc.
                            (default <repo>/install/therock)
     Falls back to the legacy in-repo layout so existing setups keep working.
+    The legacy MORPHIZEN_EP_BIN name is still honoured as a fallback so older
+    local setups / scripts keep working during the rename.
     """
-    ep_env = os.environ.get("MORPHIZEN_EP_BIN")
+    ep_env = os.environ.get("HIPEP_EP_BIN") or os.environ.get("MORPHIZEN_EP_BIN")
     ep_bin = pathlib.Path(ep_env) if ep_env else repo_root / "install" / "dist" / "bin"
     therock_env = os.environ.get("THEROCK_DIST")
     therock_bin = (

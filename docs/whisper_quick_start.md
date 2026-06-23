@@ -197,7 +197,7 @@ Run this in every shell before any Whisper command.
 
 Use the same `$ROOT` you built with in §1. The auto-downloaded TheRock SDK lives
 under the build dir (`$ROOT/build/_therock`); if you passed your own
-`-DTHEROCK_DIST`, point at that instead. `MORPHIZEN_EP_BIN` tells the Python
+`-DTHEROCK_DIST`, point at that instead. `HIPEP_EP_BIN` tells the Python
 tests where the EP DLL is — **required when you installed out-of-tree** (the
 `$ROOT/local` layout here); the tests otherwise look in the legacy in-repo
 `install/dist/bin` and `skip` with "AMDGPU EP not found".
@@ -209,7 +209,7 @@ cd <repo-root>
 conda activate hipdnn-ep
 export ROOT=/c/Users/$USER/work/rocm-ep-workspace   # same short path as §1
 export THEROCK_DIST="$ROOT/build/_therock"
-export MORPHIZEN_EP_BIN="$ROOT/local/bin"
+export HIPEP_EP_BIN="$ROOT/local/bin"
 export PATH="$THEROCK_DIST/bin:$ROOT/local/bin:$PATH"
 ```
 
@@ -220,14 +220,14 @@ cd <repo-root>
 conda activate hipdnn-ep
 $ROOT = "C:\Users\$env:USERNAME\work\rocm-ep-workspace"   # same short path as §1
 $env:THEROCK_DIST = "$ROOT\build\_therock"
-$env:MORPHIZEN_EP_BIN = "$ROOT\local\bin"
+$env:HIPEP_EP_BIN = "$ROOT\local\bin"
 $env:Path = "$env:THEROCK_DIST\bin;$ROOT\local\bin;$env:Path"
 ```
 
 > **Why this matters:** without `THEROCK_DIST` / `PATH`, the EP fails to link the
 > model DLL (`amdhip64_7.dll missing` / `Failed to link DLL`) and silently falls
 > back to CPU. If a "GPU" run is suspiciously slow or wrong, check this first.
-> Without `MORPHIZEN_EP_BIN` (out-of-tree install), the tests can't find the EP
+> Without `HIPEP_EP_BIN` (out-of-tree install), the tests can't find the EP
 > DLL and `skip` instead of running.
 
 ---
@@ -549,7 +549,7 @@ EP comparison.
 | Changed a runtime `.cpp` / kernel, behavior didn't change | Cached model DLLs embed the old bitcode. Clear the cache after rebuilding (PowerShell `Remove-Item "$env:TEMP\morphizen_mlir_*"` / Git Bash `rm -f "$TEMP"/morphizen_mlir_*`). |
 | A test `skip`s with "audio unavailable" | The network can't reach github/HF for the test clips. Connect and re-run; the audio caches locally after the first fetch. |
 | Model setup fails / `Could not obtain the Whisper raw model` | The raw bundle download from `amd/whisper-large-v3-onnx-{fp16,fp32}` failed. If it's an auth / rate-limit error, run `hf auth login` and retry. If HF is unreachable, build the models locally instead (§3b: `python scripts/build_whisper_models.py`). |
-| Every test `skip`s with "AMDGPU EP not found — run build.py first" | The tests can't locate the EP DLL. For an out-of-tree install (`$ROOT/local`), set `MORPHIZEN_EP_BIN` (§2). Verify `amdgpu-ep.dll` (+ `hipep-backend.dll` + `hipep.dll`) exist at `$ROOT/local/bin/`. |
+| Every test `skip`s with "AMDGPU EP not found — run build.py first" | The tests can't locate the EP DLL. For an out-of-tree install (`$ROOT/local`), set `HIPEP_EP_BIN` (§2). Verify `amdgpu-ep.dll` (+ `hipep-backend.dll` + `hipep.dll`) exist at `$ROOT/local/bin/`. |
 | EP registration fails (`requested API version [N] is not available`) / access violation on session create | The pip `onnxruntime` version ≠ the ORT the EP links (`cmake/deps.txt`). PyPI's `onnxruntime-directml` often lags the pinned tag, so `pip install` alone won't fix it — build a matching ORT wheel from source and install it (see §1b). |
 
 For internals (how the ONNX surgery works, the `no_causal` GQA path, the fp32
