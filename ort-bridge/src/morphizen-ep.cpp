@@ -110,7 +110,8 @@ void MorphiZenEP::update_provider_options_from_session_config(
 
     MY_LOG(2) << "Processing " << num_keys << " config entries";
 
-    const std::string morphizen_ep_prefix = "ep.morphizenexecutionprovider.";
+    const std::string morphizen_ep_prefix =
+        "ep." MORPHIZEN_EP_REGISTRATION_NAME_LOWER ".";
     for (size_t i = 0; i < num_keys; ++i) {
       if (keys[i] != nullptr && values[i] != nullptr) {
         std::string key_str(keys[i]);

@@ -283,6 +283,10 @@ cc_library(
         # Mirrors CMake: target_compile_definitions(morphizen-core-static PUBLIC MORPHIZEN_HAS_PATTERN_MATCHING=1)
         # Propagates transitively so all consumers (unit-test, ort-bridge/test, etc.) see Pattern APIs.
         "MORPHIZEN_HAS_PATTERN_MATCHING=1",
+        # EP provider-option prefix name (the CMake build injects this via
+        # add_compile_definitions). Propagates transitively so config_reader.cpp
+        # (this target) and morphizen-ep.cpp (ort-bridge consumer) form `ep.<name>.`.
+        r'MORPHIZEN_EP_REGISTRATION_NAME_LOWER=\"morphizenexecutionprovider\"',
     ],
     includes = [
         ".",  # For generated files in current directory
