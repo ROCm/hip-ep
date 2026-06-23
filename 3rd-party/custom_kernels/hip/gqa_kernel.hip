@@ -7,6 +7,7 @@
 #include <hip/hip_fp16.h>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <algorithm>
 
 #include "hip_custom_kernels.h"
@@ -1596,6 +1597,280 @@ gqa_flash_decode_kernel(
 }
 
 //===----------------------------------------------------------------------===//
+// WMMA Split-K Decode Kernel (sq == 1) -- optimized TPS path
+//===----------------------------------------------------------------------===//
+// Drop-in producer of the SAME [B, H, K_SPLITS, D+2] partials as the scalar
+// gqa_flash_decode_kernel above, so it shares the identical FA-2 reduce (and
+// therefore seqlens_k / sliding-window / head-sink / smooth-softmax handling).
+//
+// Why WMMA: the scalar kernel's per-key Q.K dot ends in a 5-step __shfl_xor
+// cross-lane reduction that is a serialized VALU latency chain (~41% of the
+// decode runtime for high-GQA D=64, see OPTIMIZATION.md ch.8). This kernel
+// instead packs the HPG query heads of one KV group into the M=16 rows of a
+// WMMA 16x16x16 tile and runs the QK / PV GEMMs on the matrix unit, removing
+// the reduction entirely. A software pipeline keeps the NEXT KV tile's global
+// loads in flight (in registers) across the current tile's GEMMs to hide DRAM
+// latency on the single resident wave.
+//
+// Grid: (G, K_SPLITS, B). Block: 32 (one wave). M=16 rows == HPG query heads
+// (rows >= HPG are inert / never written). Split math mirrors the scalar
+// kernel exactly (eff_skv, kv_lo, chunk).
+//===----------------------------------------------------------------------===//
+template <int D, int K_SPLITS, int HPG, int BKV>
+__global__ void __launch_bounds__(32)
+gqa_flash_decode_wmma_kernel(
+    const __half* __restrict__ Q_in,       // [B, 1, H, D] (sq=1) == [B, H, D]
+    const __half* __restrict__ K_in,       // [B, G, max_seq, D]
+    const __half* __restrict__ V_in,       // [B, G, max_seq, D]
+    float* __restrict__ partials,          // [B, H, K_SPLITS, D+2]
+    int H, int G, int max_seq, float scale,
+    const int* __restrict__ seqlens_k,
+    int local_window_size) {
+  constexpr int DSTR    = D + 2;
+  constexpr int S_STR   = BKV + 1;
+  constexpr int P_STR   = BKV + 2;
+  constexpr int Q_TILES = D / kWmmaTile;
+  constexpr int O_TILES = D / kWmmaTile;
+  constexpr int N_TILES = BKV / kWmmaTile;
+
+  const _Float16* Q = reinterpret_cast<const _Float16*>(Q_in);
+  const _Float16* K = reinterpret_cast<const _Float16*>(K_in);
+  const _Float16* V = reinterpret_cast<const _Float16*>(V_in);
+
+  const int head_kv = __builtin_amdgcn_readfirstlane(blockIdx.x);
+  const int split   = __builtin_amdgcn_readfirstlane(blockIdx.y);
+  const int batch   = __builtin_amdgcn_readfirstlane(blockIdx.z);
+
+  const int lane      = threadIdx.x;
+  const int wmma_lane = lane % kWmmaTile;
+  const int pair      = lane / kWmmaTile;
+
+  // total_seq = seqlens_k[batch] + 1, clamped to [0, max_seq] (mirrors scalar).
+  const int raw_skv = seqlens_k
+      ? __builtin_amdgcn_readfirstlane(seqlens_k[batch] + 1)
+      : max_seq;
+  const int eff_skv = (raw_skv > 0)
+      ? (raw_skv < max_seq ? raw_skv : max_seq) : 0;
+  int kv_lo = 0;
+  if (local_window_size > 0 && eff_skv > local_window_size) {
+    kv_lo = eff_skv - local_window_size;
+  }
+  const int kv_range = eff_skv - kv_lo;
+  const int chunk    = (kv_range + K_SPLITS - 1) / K_SPLITS;
+  const int kv_start = kv_lo + chunk * split;
+  int kv_end_tmp     = kv_start + chunk;
+  if (kv_end_tmp > eff_skv) kv_end_tmp = eff_skv;
+  const int kv_end   = kv_end_tmp;
+
+  // Empty slice: emit identity partials so the reduce ignores this split.
+  if (kv_start >= kv_end) {
+    if (lane < HPG) {
+      const int head_q = head_kv * HPG + lane;
+      float* pd = partials +
+          flash_decode_partial_offset(batch, head_q, split, H, K_SPLITS, D);
+      pd[0] = -INFINITY;  // m
+      pd[1] = 0.0f;       // l
+      #pragma unroll
+      for (int c = 0; c < D; ++c) pd[2 + c] = 0.0f;
+    }
+    return;
+  }
+
+  extern __shared__ char smem_dw[];
+  float*    S_lds = reinterpret_cast<float*>(smem_dw);
+  _Float16* K_lds = reinterpret_cast<_Float16*>(smem_dw + 16 * S_STR * sizeof(float));
+  _Float16* V_lds = K_lds + BKV * DSTR;
+  _Float16* P_lds = V_lds + BKV * DSTR;
+  float*    ml    = reinterpret_cast<float*>(P_lds + 16 * P_STR);  // [16*3]
+
+  const size_t kv_base = (static_cast<size_t>(batch) * G + head_kv)
+                         * static_cast<size_t>(max_seq) * D;
+
+  // Q fragments: lane wmma_lane holds row wmma_lane (head_kv*HPG + wmma_lane).
+  half16 Q_reg[Q_TILES];
+  {
+    const bool valid = wmma_lane < HPG;
+    const int head = head_kv * HPG + wmma_lane;
+    const size_t q_row = (static_cast<size_t>(batch) * H + head) * D;
+    #pragma unroll
+    for (int tk = 0; tk < Q_TILES; ++tk)
+      Q_reg[tk] = valid ? HALF16(Q[q_row + tk * 16]) : half16{};
+  }
+
+  if (lane < 16) {
+    ml[lane * 3]     = -INFINITY;
+    ml[lane * 3 + 1] = 0.0f;
+    ml[lane * 3 + 2] = 1.0f;
+  }
+
+  float8 O_frag[O_TILES] = {};
+
+  const float scale_log2e = scale * LOG2E;
+  const int num_tiles = (kv_end - kv_start + BKV - 1) / BKV;
+
+  // Software pipeline: prefetch the next tile's K/V global loads into registers
+  // while the current tile's GEMMs run (see gqa_flash_decode_wmma.hip rationale).
+  // Only viable when the per-lane register footprint is small (D=64/BKV=16).
+  constexpr int kPET = (BKV * D) / 32;          // elements per lane per tile
+  constexpr bool kPrefetch = (kPET <= 32);
+
+  _Float16 k_pf[kPrefetch ? kPET : 1];
+  _Float16 v_pf[kPrefetch ? kPET : 1];
+  if (kPrefetch) {
+    #pragma unroll
+    for (int j = 0; j < kPET; ++j) {
+      const int i = lane + j * 32;
+      const int row = i / D, col = i % D;
+      const int kv_pos = kv_start + row;          // tile 0
+      const bool ok = kv_pos < kv_end;
+      k_pf[j] = ok ? K[kv_base + static_cast<size_t>(kv_pos) * D + col] : (_Float16)0;
+      v_pf[j] = ok ? V[kv_base + static_cast<size_t>(kv_pos) * D + col] : (_Float16)0;
+    }
+  }
+
+  for (int t = 0; t < num_tiles; ++t) {
+    const int kv0 = kv_start + t * BKV;
+
+    if (kPrefetch) {
+      #pragma unroll
+      for (int j = 0; j < kPET; ++j) {
+        const int i = lane + j * 32;
+        const int row = i / D, col = i % D;
+        K_lds[row * DSTR + col] = k_pf[j];
+        V_lds[row * DSTR + col] = v_pf[j];
+      }
+      __syncthreads();
+      const int kv0n = kv_start + (t + 1) * BKV;
+      if (t + 1 < num_tiles) {
+        #pragma unroll
+        for (int j = 0; j < kPET; ++j) {
+          const int i = lane + j * 32;
+          const int row = i / D, col = i % D;
+          const int kv_pos = kv0n + row;
+          const bool ok = kv_pos < kv_end;
+          k_pf[j] = ok ? K[kv_base + static_cast<size_t>(kv_pos) * D + col] : (_Float16)0;
+          v_pf[j] = ok ? V[kv_base + static_cast<size_t>(kv_pos) * D + col] : (_Float16)0;
+        }
+      }
+    } else {
+      for (int i = lane; i < BKV * D; i += 32) {
+        const int row = i / D, col = i % D;
+        const int kv_pos = kv0 + row;
+        if (kv_pos < kv_end) {
+          K_lds[row * DSTR + col] = K[kv_base + static_cast<size_t>(kv_pos) * D + col];
+          V_lds[row * DSTR + col] = V[kv_base + static_cast<size_t>(kv_pos) * D + col];
+        } else {
+          K_lds[row * DSTR + col] = (_Float16)0;
+          V_lds[row * DSTR + col] = (_Float16)0;
+        }
+      }
+      __syncthreads();
+    }
+
+    // scoreGEMM: S[16, BKV] = Q . K^T (scaled, log2 domain) -> S_lds.
+    #pragma unroll
+    for (int sj = 0; sj < N_TILES; ++sj) {
+      float8 s_frag = {};
+      #pragma unroll
+      for (int tk = 0; tk < Q_TILES; ++tk) {
+        half16 kf = HALF16(K_lds[(sj * 16 + wmma_lane) * DSTR + tk * 16]);
+        s_frag = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(Q_reg[tk], kf, s_frag);
+      }
+      #pragma unroll
+      for (int ele = 0; ele < 8; ++ele) {
+        const int r = ele * 2 + pair;
+        const int c = sj * 16 + wmma_lane;
+        S_lds[r * S_STR + c] = s_frag[ele] * scale_log2e;
+      }
+    }
+    __syncthreads();
+
+    // Online softmax over the BKV columns (no causal mask at decode).
+    {
+      const int row  = lane / 2;
+      const int half = lane & 1;
+      const int col_start = half * (BKV / 2);
+
+      float local_max = -INFINITY;
+      #pragma unroll
+      for (int c = 0; c < BKV / 2; ++c) {
+        const int kv_pos = kv0 + col_start + c;
+        float s = (kv_pos < kv_end) ? S_lds[row * S_STR + col_start + c]
+                                    : -INFINITY;
+        S_lds[row * S_STR + col_start + c] = s;
+        local_max = fmaxf(local_max, s);
+      }
+      local_max = fmaxf(local_max, __shfl_xor(local_max, 1));
+
+      const float m_old = ml[row * 3];
+      const float l_old = ml[row * 3 + 1];
+      const float m_new = fmaxf(m_old, local_max);
+      const float correction = exp2f(m_old - m_new);
+
+      float local_sum = 0.0f;
+      #pragma unroll
+      for (int c = 0; c < BKV / 2; ++c) {
+        const float p = exp2f(S_lds[row * S_STR + col_start + c] - m_new);
+        local_sum += p;
+        P_lds[row * P_STR + col_start + c] = static_cast<_Float16>(p);
+      }
+      local_sum += __shfl_xor(local_sum, 1);
+
+      if (half == 0) {
+        ml[row * 3]     = m_new;
+        ml[row * 3 + 1] = correction * l_old + local_sum;
+        ml[row * 3 + 2] = correction;
+      }
+    }
+    __syncthreads();
+
+    // valueGEMM: rescale running O by correction, then O += P . V.
+    #pragma unroll
+    for (int tj = 0; tj < O_TILES; ++tj)
+      #pragma unroll
+      for (int ele = 0; ele < 8; ++ele)
+        O_frag[tj][ele] *= ml[(ele * 2 + pair) * 3 + 2];
+
+    #pragma unroll
+    for (int tj = 0; tj < O_TILES; ++tj) {
+      #pragma unroll
+      for (int tk = 0; tk < N_TILES; ++tk) {
+        half16 p = HALF16(P_lds[wmma_lane * P_STR + tk * 16]);
+        half16 v;
+        #pragma unroll
+        for (int e = 0; e < 16; ++e)
+          v[e] = V_lds[(tk * 16 + e) * DSTR + tj * 16 + wmma_lane];
+        O_frag[tj] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(p, v, O_frag[tj]);
+      }
+    }
+    __syncthreads();
+  }
+
+  // Epilogue: write UN-normalized partials (m, l, O) per query head row; the
+  // shared reduce kernel performs the /l normalization + sink terms.
+  #pragma unroll
+  for (int tj = 0; tj < O_TILES; ++tj)
+    #pragma unroll
+    for (int ele = 0; ele < 8; ++ele) {
+      const int r = ele * 2 + pair;
+      const int c = tj * 16 + wmma_lane;
+      if (r < HPG) {
+        const int head_q = head_kv * HPG + r;
+        float* pd = partials +
+            flash_decode_partial_offset(batch, head_q, split, H, K_SPLITS, D);
+        pd[2 + c] = O_frag[tj][ele];
+      }
+    }
+  if (lane < HPG) {
+    const int head_q = head_kv * HPG + lane;
+    float* pd = partials +
+        flash_decode_partial_offset(batch, head_q, split, H, K_SPLITS, D);
+    pd[0] = ml[lane * 3];
+    pd[1] = ml[lane * 3 + 1];
+  }
+}
+
+//===----------------------------------------------------------------------===//
 // FA-2 Split-K Reduction
 //===----------------------------------------------------------------------===//
 // Combines K_SPLITS partial (m, l, O) into the final output per (B, head_q).
@@ -1738,21 +2013,58 @@ extern "C" int hip_gqa_flash_decode(
   float* hP = static_cast<float*>(partials_workspace);
   const int* iSeq = static_cast<const int*>(seqlens_k);
 
-  dim3 grid_main(B * G, K_SPLITS);
-  if (hpg == 4) {
-    if (d == 128) {
-      gqa_flash_decode_kernel<128, 8, 4>
-          <<<grid_main, 4 * WAVE_SIZE, 0, stream>>>(
-              hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size);
-    } else { /* d == 64 */
-      gqa_flash_decode_kernel<64, 8, 4>
-          <<<grid_main, 4 * WAVE_SIZE, 0, stream>>>(
+  // Impl select. The WMMA decode replaces the scalar per-key QK dot's 5-step
+  // __shfl_xor cross-lane reduction with the matrix unit. Measured on gfx1151
+  // (Radeon 8060S, 20 CU): it WINS for D=64 (gpt-oss-20b ~1.1-1.3x, Llama D=64
+  // ~parity) but LOSES badly for D=128 (Llama-3.1-8b ~0.3x) because the
+  // single-wave WMMA path is compute-heavier and split-K=8 under-fills the 20
+  // CUs. So default WMMA only at D=64, scalar at D=128. Both emit the same
+  // [B,H,K_SPLITS,D+2] partials, so the reduce (seqlens_k / window / sink) is
+  // identical either way. Env overrides (for A/B benchmarking):
+  //   HIPDNN_GQA_DECODE_SCALAR=1 -> force scalar; HIPDNN_GQA_DECODE_WMMA=1 -> force WMMA.
+  bool use_wmma = (d == 64);
+  if (const char* e = getenv("HIPDNN_GQA_DECODE_SCALAR")) { if (atoi(e) != 0) use_wmma = false; }
+  if (const char* e = getenv("HIPDNN_GQA_DECODE_WMMA"))   { if (atoi(e) != 0) use_wmma = true; }
+
+  if (use_wmma) {
+    // BKV: D=64 -> 16 (small tile, more resident -> better latency hiding);
+    // D=128 -> 32 (direct staging path). Grid (G, K_SPLITS, B), one wave/block.
+    const int BKV = (d == 64) ? 16 : 32;
+    auto smem_bytes = [](int D_, int bkv) -> size_t {
+      const int DSTR = D_ + 2;
+      return (size_t)16 * (bkv + 1) * sizeof(float)
+           + (size_t)2 * bkv * DSTR * sizeof(_Float16)
+           + (size_t)16 * (bkv + 2) * sizeof(_Float16)
+           + (size_t)16 * 3 * sizeof(float);
+    };
+    dim3 grid_wmma((unsigned)G, (unsigned)K_SPLITS, (unsigned)B);
+    #define LAUNCH_DW(D_, HPG_, BKV_)                                          \
+      gqa_flash_decode_wmma_kernel<D_, 8, HPG_, BKV_>                          \
+          <<<grid_wmma, 32, smem_bytes(D_, BKV_), stream>>>(                   \
+              hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size)
+    if (hpg == 4) {
+      if (d == 128) LAUNCH_DW(128, 4, 32); else LAUNCH_DW(64, 4, 16);
+    } else { /* hpg == 8, d == 64 */
+      LAUNCH_DW(64, 8, 16);
+    }
+    #undef LAUNCH_DW
+  } else {
+    dim3 grid_main(B * G, K_SPLITS);
+    if (hpg == 4) {
+      if (d == 128) {
+        gqa_flash_decode_kernel<128, 8, 4>
+            <<<grid_main, 4 * WAVE_SIZE, 0, stream>>>(
+                hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size);
+      } else { /* d == 64 */
+        gqa_flash_decode_kernel<64, 8, 4>
+            <<<grid_main, 4 * WAVE_SIZE, 0, stream>>>(
+                hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size);
+      }
+    } else { /* hpg == 8, d == 64 (asserted above) */
+      gqa_flash_decode_kernel<64, 8, 8>
+          <<<grid_main, 8 * WAVE_SIZE, 0, stream>>>(
               hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size);
     }
-  } else { /* hpg == 8, d == 64 (asserted above) */
-    gqa_flash_decode_kernel<64, 8, 8>
-        <<<grid_main, 8 * WAVE_SIZE, 0, stream>>>(
-            hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size);
   }
 
   // Reduce kernel does not depend on HPG; it walks the K_SPLITS partials
