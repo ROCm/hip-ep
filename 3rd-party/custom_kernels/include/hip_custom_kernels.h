@@ -639,6 +639,26 @@ HIP_KERNEL_API int hip_gqa_fused_prefill(
     void* O, int B, int H, int G, int sq, int skv, int max_seq, int past_len,
     float scale);
 
+/* Optimized fused GQA prefill (sq > 1, d in {64,128}, fp16, causal, GQA) --
+ * Flash-Attention-2 with WMMA tile GEMMs and intra-wave online softmax. These
+ * reproduce the gqa_compare TTFT-winning kernels (OPTIMIZATION.md ch.13):
+ *   v5: warp-private / register-resident (best at d == 64).
+ *   v7: M-register-blocked, global-streamed K (best at d == 128).
+ * Each self-tunes its launch config on the first call per (d,sq,skv,Hq,G)
+ * shape and caches the winner process-wide. Layout: Q [B,sq,Hq,d];
+ * K/V cache [B,G,max_seq,d] (post-RoPE, post-append). Returns 0 on success,
+ * -1 if d is unsupported. No seqlens_k / sliding-window / head-sink / smooth
+ * softmax / softcap -- caller must gate those out (use the decomposed path). */
+HIP_KERNEL_API int hip_gqa_flash_prefill_v5(
+    void* stream, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
+    int past_len, float scale);
+
+HIP_KERNEL_API int hip_gqa_flash_prefill_v7(
+    void* stream, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
+    int past_len, float scale);
+
 /* FA-2 split-K GQA decode (sq == 1, d in {64, 128}, HPG=H/G==4):
  * GQA-aware kernel that loads K/V tiles into LDS once and reuses them
  * across the 4 query heads of each KV group, then a second kernel
@@ -648,10 +668,19 @@ HIP_KERNEL_API int hip_gqa_fused_prefill(
  * Llama-3.x family shows large bandwidth headroom over the existing
  * one-block-per-head fused decode.
  *
- * Workspace: float scratch sized B*H*K_SPLITS*(d+2)*sizeof(float) bytes.
+ * Workspace: float scratch sized B*H*max_splits*(d+2)*sizeof(float) bytes.
  * Caller is responsible for allocating and passing it in.
  *
- * K_SPLITS: only 8 supported in V1. Returns -1 on unsupported (HPG, d, K_SPLITS).
+ * skv: current total KV length (host-known). Used only to autotune the split
+ * count / impl and key the per-shape cache; the kernels read seqlens_k for the
+ * exact per-batch length at runtime. Pass <= 0 to fall back to max_seq.
+ *
+ * max_splits: workspace capacity in splits. The launcher autotunes the actual
+ * split count (8..max_splits, capped at 64) and the scalar-vs-WMMA impl on the
+ * first call per (B,H,G,d, skv-bucket) shape, caches the winner in a
+ * process-wide map (matmul_nbits-style), and reuses it on later calls.
+ * Env overrides skip autotune: HIPDNN_GQA_DECODE_SCALAR / _WMMA (impl),
+ * HIPDNN_GQA_DECODE_SPLITS=N (count), HIPDNN_GQA_DECODE_NOAUTOTUNE=1 (fixed).
  *
  * seqlens_k: optional device pointer [B] int32. When non-null, total_seq
  * = seqlens_k[b]+1 is read on-device (no host sync).
@@ -672,7 +701,7 @@ HIP_KERNEL_API int hip_gqa_flash_decode(
     const void* Q, const void* Kcache, const void* Vcache,
     void* O,
     void* partials_workspace,
-    int B, int H, int G, int d, int max_seq, int K_SPLITS,
+    int B, int H, int G, int d, int skv, int max_seq, int max_splits,
     float scale,
     const void* seqlens_k,
     int local_window_size,
