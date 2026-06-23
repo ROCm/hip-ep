@@ -33,7 +33,7 @@ extern "C" int hip_gqa_flash_decode(
     const void* Q, const void* Kcache, const void* Vcache,
     void* O,
     void* partials_workspace,
-    int B, int H, int G, int d, int max_seq, int K_SPLITS,
+    int B, int H, int G, int d, int skv, int max_seq, int max_splits,
     float scale,
     const void* seqlens_k,
     int local_window_size,
@@ -47,7 +47,12 @@ extern "C" int hip_gqa_fused_decode(
     void* O, int B, int H, int G, int d, int skv, int max_seq,
     float scale, const void* seqlens_k);
 
-static constexpr int K_SPLITS = 8;
+// Partials workspace capacity in splits. Must be >= the launcher's autotune
+// ceiling (kFlashDecodeMaxSplits=64 in gqa_kernel.hip) so the autotuned path
+// can pick any split count without overflowing dPart.
+static constexpr int MAX_SPLITS = 64;
+// Production-baseline split count (what the EP locked before this change).
+static constexpr int BASELINE_SPLITS = 8;
 
 #define HIP_CHECK(expr)                                                        \
   do {                                                                         \
@@ -138,24 +143,56 @@ static float max_abs(const std::vector<float>& a, const std::vector<float>& b) {
   return m;
 }
 
+// Decode configurations the harness exercises.
+//   AUTO       : production flow after this change -- launcher autotunes
+//                (impl, split-count<=64) per shape and caches the winner.
+//   BASELINE   : production flow BEFORE this change -- default impl
+//                (wmma@d64 / scalar@d128) locked at K_SPLITS=8.
+//   SCALAR8/WMMA8: force one impl at 8 splits (correctness A/B coverage).
+enum DecodeMode { MODE_AUTO, MODE_BASELINE, MODE_SCALAR8, MODE_WMMA8 };
+
+static void set_mode_env(DecodeMode m) {
+  // Cleared ("") => atoi==0 => not forced (launcher reads getenv every call).
+  switch (m) {
+    case MODE_AUTO:
+      _putenv_s("HIPDNN_GQA_DECODE_SCALAR", "");
+      _putenv_s("HIPDNN_GQA_DECODE_WMMA", "");
+      _putenv_s("HIPDNN_GQA_DECODE_SPLITS", "");
+      break;
+    case MODE_BASELINE:  // default impl, fixed 8 splits
+      _putenv_s("HIPDNN_GQA_DECODE_SCALAR", "");
+      _putenv_s("HIPDNN_GQA_DECODE_WMMA", "");
+      _putenv_s("HIPDNN_GQA_DECODE_SPLITS", "8");
+      break;
+    case MODE_SCALAR8:
+      _putenv_s("HIPDNN_GQA_DECODE_SCALAR", "1");
+      _putenv_s("HIPDNN_GQA_DECODE_WMMA", "");
+      _putenv_s("HIPDNN_GQA_DECODE_SPLITS", "8");
+      break;
+    case MODE_WMMA8:
+      _putenv_s("HIPDNN_GQA_DECODE_SCALAR", "");
+      _putenv_s("HIPDNN_GQA_DECODE_WMMA", "1");
+      _putenv_s("HIPDNN_GQA_DECODE_SPLITS", "8");
+      break;
+  }
+}
+
 // ---- run one launcher config; returns avg ms over iters --------------------
-static double run_kernel(bool use_scalar, const Case& c, float scale,
+static double run_kernel(DecodeMode mode, const Case& c, float scale,
                          const __half* dQ, const __half* dK, const __half* dV,
                          __half* dO, float* dPart, const int* dSeq,
                          const __half* dSink, int iters,
                          std::vector<float>& host_O) {
-  // Force the path explicitly so the A/B exercises BOTH kernels on every shape
-  // (the production default only picks WMMA at D=64).
-  if (use_scalar) { _putenv_s("HIPDNN_GQA_DECODE_SCALAR", "1"); _putenv_s("HIPDNN_GQA_DECODE_WMMA", "0"); }
-  else            { _putenv_s("HIPDNN_GQA_DECODE_SCALAR", "0"); _putenv_s("HIPDNN_GQA_DECODE_WMMA", "1"); }
+  set_mode_env(mode);
 
   const int B = c.B, H = c.H, G = c.G, D = c.D, max_seq = c.max_seq;
   const void* sinkp = c.sink ? (const void*)dSink : nullptr;
 
-  // Warmup + correctness fetch.
+  // Warmup + correctness fetch. For AUTO this first call also runs the autotune
+  // pass (timed candidates) and caches the winner; subsequent calls reuse it.
   HIP_CHECK((hipError_t)hip_gqa_flash_decode(
-      nullptr, dQ, dK, dV, dO, dPart, B, H, G, D, max_seq, K_SPLITS, scale,
-      dSeq, c.window, sinkp, c.smooth));
+      nullptr, dQ, dK, dV, dO, dPart, B, H, G, D, c.total, max_seq, MAX_SPLITS,
+      scale, dSeq, c.window, sinkp, c.smooth));
   HIP_CHECK(hipDeviceSynchronize());
   host_O.resize((size_t)B * H * D);
   {
@@ -170,8 +207,9 @@ static double run_kernel(bool use_scalar, const Case& c, float scale,
   HIP_CHECK(hipEventCreate(&b));
   HIP_CHECK(hipEventRecord(a));
   for (int it = 0; it < iters; ++it) {
-    hip_gqa_flash_decode(nullptr, dQ, dK, dV, dO, dPart, B, H, G, D, max_seq,
-                         K_SPLITS, scale, dSeq, c.window, sinkp, c.smooth);
+    hip_gqa_flash_decode(nullptr, dQ, dK, dV, dO, dPart, B, H, G, D, c.total,
+                         max_seq, MAX_SPLITS, scale, dSeq, c.window, sinkp,
+                         c.smooth);
   }
   HIP_CHECK(hipEventRecord(b));
   HIP_CHECK(hipEventSynchronize(b));
@@ -249,7 +287,7 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose) {
   HIP_CHECK(hipMalloc(&dO, (size_t)B * H * D * sizeof(__half)));
   HIP_CHECK(hipMalloc(&dSink, hSink.size() * sizeof(__half)));
   HIP_CHECK(hipMalloc(&dSeq, (size_t)B * sizeof(int)));
-  HIP_CHECK(hipMalloc(&dPart, (size_t)B * H * K_SPLITS * (D + 2) * sizeof(float)));
+  HIP_CHECK(hipMalloc(&dPart, (size_t)B * H * MAX_SPLITS * (D + 2) * sizeof(float)));
   HIP_CHECK(hipMemcpy(dQ, hQ.data(), hQ.size() * sizeof(__half), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(dK, hK.data(), hK.size() * sizeof(__half), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(dV, hV.data(), hV.size() * sizeof(__half), hipMemcpyHostToDevice));
@@ -259,14 +297,19 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose) {
   std::vector<float> ref;
   cpu_reference(c, Q, K, Vv, Seq, Sink, scale, ref);
 
-  std::vector<float> O_wmma, O_scalar;
-  double ms_wmma   = run_kernel(false, c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink, iters, O_wmma);
-  double ms_scalar = run_kernel(true,  c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink, iters, O_scalar);
+  // ours = autotuned (impl + dynamic split-K); ori = production baseline
+  // (default impl @ 8 splits). scalar8/wmma8 give per-impl correctness coverage.
+  std::vector<float> O_auto, O_base, O_wmma, O_scalar;
+  double ms_auto   = run_kernel(MODE_AUTO,     c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink, iters, O_auto);
+  double ms_base   = run_kernel(MODE_BASELINE, c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink, iters, O_base);
+  double ms_wmma   = run_kernel(MODE_WMMA8,    c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink, iters, O_wmma);
+  double ms_scalar = run_kernel(MODE_SCALAR8,  c, scale, dQ, dK, dV, dO, dPart, dSeq, dSink, iters, O_scalar);
 
+  double l2_auto   = rel_l2(O_auto, ref);
+  double l2_base   = rel_l2(O_base, ref);
   double l2_wmma   = rel_l2(O_wmma, ref);
   double l2_scalar = rel_l2(O_scalar, ref);
   double l2_ab     = rel_l2(O_wmma, O_scalar);
-  float  mx_wmma   = max_abs(O_wmma, ref);
 
   // Legacy fused decode = the ORIGINAL baseline; only valid without window/sink.
   const bool fused_ok_shape = (c.window <= 0 && !c.sink && !c.smooth);
@@ -279,26 +322,28 @@ static int run_case(const Case& c, int iters, unsigned seed, bool verbose) {
   }
 
   const double tol = 2e-2;  // fp16 accumulation tolerance
-  bool ok = (l2_wmma < tol) && (l2_scalar < tol) &&
-            (!fused_ran || l2_fused < tol);
+  bool ok = (l2_auto < tol) && (l2_base < tol) && (l2_wmma < tol) &&
+            (l2_scalar < tol) && (!fused_ran || l2_fused < tol);
 
   printf("%-22s B%d H%d G%d(hpg%d) D%d | len=%d win=%d sink=%d smooth=%d\n",
          c.name, B, H, G, H / G, D, c.total, c.window, c.sink, c.smooth);
-  printf("   relL2  wmma=%.2e  scalar=%.2e  (wmma-vs-scalar=%.2e)  maxAbs_wmma=%.3e\n",
-         l2_wmma, l2_scalar, l2_ab, mx_wmma);
+  printf("   relL2  ours=%.2e  ori=%.2e  wmma=%.2e  scalar=%.2e  (wmma-vs-scalar=%.2e)\n",
+         l2_auto, l2_base, l2_wmma, l2_scalar, l2_ab);
+  printf("   latency  ours(auto)=%.4f ms  ori(8-split)=%.4f ms\n",
+         ms_auto, ms_base);
   if (fused_ran) {
-    printf("   latency  wmma=%.4f ms  scalar=%.4f ms  fused(legacy)=%.4f ms\n",
-           ms_wmma, ms_scalar, ms_fused);
-    printf("   speedup  wmma-vs-scalar=%.2fx  wmma-vs-fused=%.2fx  scalar-vs-fused=%.2fx   %s\n",
-           ms_scalar / ms_wmma, ms_fused / ms_wmma, ms_fused / ms_scalar,
-           ok ? "PASS" : "*** FAIL ***");
+    printf("            scalar8=%.4f ms  wmma8=%.4f ms  fused(legacy)=%.4f ms\n",
+           ms_scalar, ms_wmma, ms_fused);
+    printf("   speedup  ours-vs-ori=%.2fx  ours-vs-fused=%.2fx   %s\n",
+           ms_base / ms_auto, ms_fused / ms_auto, ok ? "PASS" : "*** FAIL ***");
   } else {
-    printf("   latency  wmma=%.4f ms  scalar=%.4f ms  speedup=%.2fx   %s\n",
-           ms_wmma, ms_scalar, ms_scalar / ms_wmma, ok ? "PASS" : "*** FAIL ***");
+    printf("            scalar8=%.4f ms  wmma8=%.4f ms\n", ms_scalar, ms_wmma);
+    printf("   speedup  ours-vs-ori=%.2fx   %s\n",
+           ms_base / ms_auto, ok ? "PASS" : "*** FAIL ***");
   }
   if (verbose && !ok) {
     for (int i = 0; i < std::min(8, B * H * D); ++i)
-      printf("      [%d] ref=%.5f wmma=%.5f scalar=%.5f\n", i, ref[i], O_wmma[i], O_scalar[i]);
+      printf("      [%d] ref=%.5f ours=%.5f ori=%.5f\n", i, ref[i], O_auto[i], O_base[i]);
   }
 
   hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO);
@@ -335,8 +380,8 @@ int main(int argc, char** argv) {
   HIP_CHECK(hipGetDevice(&dev));
   hipDeviceProp_t prop;
   HIP_CHECK(hipGetDeviceProperties(&prop, dev));
-  printf("Device: %s (%d CUs)  iters=%d  K_SPLITS=%d\n\n",
-         prop.name, prop.multiProcessorCount, iters, K_SPLITS);
+  printf("Device: %s (%d CUs)  iters=%d  max_splits=%d (ori baseline=%d)\n\n",
+         prop.name, prop.multiProcessorCount, iters, MAX_SPLITS, BASELINE_SPLITS);
 
   int fails = 0;
   if (all || !have_single) {

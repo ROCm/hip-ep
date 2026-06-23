@@ -9,8 +9,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 
 #include "hip_custom_kernels.h"
+#include "debug_log.h"
 
 static constexpr int GQA_THREADS = 256;
 static constexpr int WAVE_SIZE = 32;  // RDNA wave32; not portable to CDNA/wave64
@@ -1441,7 +1445,7 @@ __device__ __forceinline__ size_t flash_decode_partial_offset(
   return ((size_t)((b * H + h_q) * K_SPLITS + k_split)) * (size_t)(D + 2);
 }
 
-template <int D, int K_SPLITS, int HPG>
+template <int D, int HPG>
 __global__ void __launch_bounds__(HPG * WAVE_SIZE)
 gqa_flash_decode_kernel(
     const __half* __restrict__ Q_roped,    // [B, 1, H, D] (BSHD with sq=1)
@@ -1451,8 +1455,13 @@ gqa_flash_decode_kernel(
     int H, int G, int max_seq,
     float scale,
     const int* __restrict__ seqlens_k,
-    int local_window_size) {  // <=0 disables; > 0 = sliding-window length
-  constexpr int BKV = FLASH_DECODE_BKV;
+    int local_window_size,
+    int K_SPLITS) {  // runtime split-K count (was a template param)
+  // Keep the K+V LDS tile at ~16KB/block (4 blocks resident per 64KB-LDS CU)
+  // regardless of D, so DRAM latency stays hidden. At BKV=64,D=128 the tile
+  // would be 32KB -> only 2 resident blocks -> latency-bound (decode stalls
+  // ~1.6x). 2*BKV*D*2 bytes: D=128 -> BKV=32 (16KB), D=64 -> BKV=64 (16KB).
+  constexpr int BKV = (D == 128) ? 32 : FLASH_DECODE_BKV;
   constexpr int THREADS = HPG * WAVE_SIZE;  // total threads in block
   constexpr int EPT = D / WAVE_SIZE;  // elements-per-thread along d
 
@@ -1509,17 +1518,20 @@ gqa_flash_decode_kernel(
     return;
   }
 
-  // LDS tiles for K/V (shared across HPG=4 query heads for dedup).
-  __shared__ __half K_lds[BKV * D];
-  __shared__ __half V_lds[BKV * D];
+  // LDS tiles for K/V (shared across HPG=4 query heads for dedup). 16B-aligned
+  // so the cooperative load can move 8 fp16 per float4 (see staging below).
+  static_assert(EPT % 2 == 0, "EPT must be even for __half2 vectorized loads");
+  __shared__ __align__(16) __half K_lds[BKV * D];
+  __shared__ __align__(16) __half V_lds[BKV * D];
 
-  // Load this wave's Q into registers (fp16, EPT elements per lane).
-  __half Q_reg[EPT];
+  // Load this wave's Q into registers, pre-converted to fp32 (the per-key dot
+  // is fp32; converting once here avoids EPT half->float casts per key).
+  float Q_f[EPT];
   {
     const __half* Q_ptr = Q_roped + (size_t)(batch * H + head_q) * D;
     #pragma unroll
     for (int e = 0; e < EPT; ++e)
-      Q_reg[e] = Q_ptr[lane_id * EPT + e];
+      Q_f[e] = __half2float(Q_ptr[lane_id * EPT + e]);
   }
 
   // KV cache base offset for this (batch, head_kv).
@@ -1540,27 +1552,35 @@ gqa_flash_decode_kernel(
     const int tile_n = (tile_start + BKV <= kv_end)
         ? BKV : (kv_end - tile_start);
 
-    // Cooperative LDS load of K and V tiles. All THREADS = HPG*WAVE_SIZE
-    // threads. Tile element count = tile_n * D, distributed round-robin.
-    // HPG=8 doubles thread count (256 vs 128) so the load also doubles its
-    // parallelism, partially offsetting the larger Q working set per block.
-    for (int i = tid; i < tile_n * D; i += THREADS) {
-      const int t = i / D;
-      const int dd = i % D;
-      const size_t g_off = kv_base + (size_t)(tile_start + t) * D + dd;
-      K_lds[t * D + dd] = Kcache[g_off];
-      V_lds[t * D + dd] = Vcache[g_off];
+    // Cooperative vectorized LDS load of K and V tiles: one float4 moves 8 fp16
+    // (D % 8 == 0, and the tile base kv_base+tile_start*D is 16B-aligned since
+    // tile_start*D*2 is a multiple of D*2 >= 128B), cutting load instructions 8x
+    // vs the per-element copy. All THREADS cooperate round-robin.
+    {
+      const int total_vec = (tile_n * D) / 8;
+      const float4* Kv = reinterpret_cast<const float4*>(
+          Kcache + kv_base + (size_t)tile_start * D);
+      const float4* Vv = reinterpret_cast<const float4*>(
+          Vcache + kv_base + (size_t)tile_start * D);
+      float4* Ksv = reinterpret_cast<float4*>(K_lds);
+      float4* Vsv = reinterpret_cast<float4*>(V_lds);
+      for (int i = tid; i < total_vec; i += THREADS) {
+        Ksv[i] = Kv[i];
+        Vsv[i] = Vv[i];
+      }
     }
     __syncthreads();
 
     // Each wave processes the tile against its own query head.
     for (int t = 0; t < tile_n; ++t) {
-      // Per-lane partial dot: sum_e Q[lane*EPT+e] * K[t, lane*EPT+e]
+      // Per-lane partial dot via __half2 reads (2 fp16 / load + half22float2).
       float dot_partial = 0.0f;
       #pragma unroll
-      for (int e = 0; e < EPT; ++e) {
-        dot_partial += __half2float(Q_reg[e]) *
-                       __half2float(K_lds[t * D + lane_id * EPT + e]);
+      for (int e = 0; e < EPT; e += 2) {
+        const __half2 kk =
+            *reinterpret_cast<const __half2*>(&K_lds[t * D + lane_id * EPT + e]);
+        const float2 kf = __half22float2(kk);
+        dot_partial += Q_f[e] * kf.x + Q_f[e + 1] * kf.y;
       }
       // Warp reduce across 32 lanes -> all lanes hold the full dot.
       dot_partial += __shfl_xor(dot_partial, 16);
@@ -1576,9 +1596,12 @@ gqa_flash_decode_kernel(
       l_acc = correction * l_acc + p;
 
       #pragma unroll
-      for (int e = 0; e < EPT; ++e) {
-        const float V_val = __half2float(V_lds[t * D + lane_id * EPT + e]);
-        O_acc[e] = correction * O_acc[e] + p * V_val;
+      for (int e = 0; e < EPT; e += 2) {
+        const __half2 vv =
+            *reinterpret_cast<const __half2*>(&V_lds[t * D + lane_id * EPT + e]);
+        const float2 vf = __half22float2(vv);
+        O_acc[e]     = correction * O_acc[e]     + p * vf.x;
+        O_acc[e + 1] = correction * O_acc[e + 1] + p * vf.y;
       }
       m_acc = m_new;
     }
@@ -1616,7 +1639,7 @@ gqa_flash_decode_kernel(
 // (rows >= HPG are inert / never written). Split math mirrors the scalar
 // kernel exactly (eff_skv, kv_lo, chunk).
 //===----------------------------------------------------------------------===//
-template <int D, int K_SPLITS, int HPG, int BKV>
+template <int D, int HPG, int BKV>
 __global__ void __launch_bounds__(32)
 gqa_flash_decode_wmma_kernel(
     const __half* __restrict__ Q_in,       // [B, 1, H, D] (sq=1) == [B, H, D]
@@ -1625,7 +1648,8 @@ gqa_flash_decode_wmma_kernel(
     float* __restrict__ partials,          // [B, H, K_SPLITS, D+2]
     int H, int G, int max_seq, float scale,
     const int* __restrict__ seqlens_k,
-    int local_window_size) {
+    int local_window_size,
+    int K_SPLITS) {  // runtime split-K count (was a template param)
   constexpr int DSTR    = D + 2;
   constexpr int S_STR   = BKV + 1;
   constexpr int P_STR   = BKV + 2;
@@ -1895,7 +1919,7 @@ gqa_flash_decode_wmma_kernel(
 // Block: D threads. Each thread reduces one element of the d-dimension.
 //===----------------------------------------------------------------------===//
 
-template <int D, int K_SPLITS>
+template <int D>
 __global__ void __launch_bounds__(D)
 gqa_flash_decode_reduce_kernel(
     const float* __restrict__ partials,    // [B, H, K_SPLITS, D+2]
@@ -1903,15 +1927,15 @@ gqa_flash_decode_reduce_kernel(
     int H,
     const __half* __restrict__ head_sink,  // [num_heads] or null
     int num_heads,
-    int use_smooth_softmax) {
+    int use_smooth_softmax,
+    int K_SPLITS) {  // runtime split-K count (was a template param)
   const int linear = __builtin_amdgcn_readfirstlane(blockIdx.x);
   const int batch  = __builtin_amdgcn_readfirstlane(linear / H);
   const int head_q = __builtin_amdgcn_readfirstlane(linear % H);
   const int tid    = threadIdx.x;
 
-  // Pass 1: find global_m. K_SPLITS is small (8) - serial per thread is fine.
+  // Pass 1: find global_m. K_SPLITS is small (8..64) - serial per thread is fine.
   float global_m = -INFINITY;
-  #pragma unroll
   for (int k = 0; k < K_SPLITS; ++k) {
     const float* p = partials +
         flash_decode_partial_offset(batch, head_q, k, H, K_SPLITS, D);
@@ -1931,7 +1955,6 @@ gqa_flash_decode_reduce_kernel(
   // Pass 2: accumulate l and O contributions.
   float l_sum = 0.0f;
   float O_sum = 0.0f;
-  #pragma unroll
   for (int k = 0; k < K_SPLITS; ++k) {
     const float* p = partials +
         flash_decode_partial_offset(batch, head_q, k, H, K_SPLITS, D);
@@ -1958,21 +1981,193 @@ gqa_flash_decode_reduce_kernel(
   O[(batch * H + head_q) * D + tid] = __float2half(O_sum * inv_l);
 }
 
+//===----------------------------------------------------------------------===//
+// FA-2 split-K decode: runtime split count + (scalar|WMMA) autotune cache
+//
+// The three decode kernels above take K_SPLITS as a *runtime* argument, so the
+// launcher is free to pick any split count up to the workspace capacity the
+// caller allocated. Production previously locked K_SPLITS=8 (one template
+// instantiation + a fixed B*H*8*(D+2) partials workspace). On the 20-CU gfx1151
+// that under-fills the GPU at long context: split-K decode launches only
+// B*G*K_SPLITS thread blocks, so with B=1, G=8, K_SPLITS=8 just 64 blocks share
+// 20 CUs and the kernel is launch/occupancy-bound, not bandwidth-bound. Raising
+// the split count at large skv fills the CUs and is the dominant decode-TPS win.
+//
+// Following matmul_nbits' GEMV autotuner (matmul_nbits_kernel.hip): the first
+// call for each (B,H,G,d, skv-bucket) shape benchmarks a small candidate set of
+// (impl, split-count) pairs with hipEvent timing and caches the fastest config
+// in a process-wide map; every later call for that shape just looks it up (no
+// re-timing). skv is bucketed to the next power of two so the map holds
+// O(log max_seq) entries per layer-shape rather than one per decode step (skv
+// grows by 1 every token). The map stores exactly the shapes that are fed.
+//===----------------------------------------------------------------------===//
+
+// Workspace capacity / autotune ceiling. Splitting decode into >64 chunks on a
+// 20-CU part yields diminishing returns and inflates the partials workspace and
+// the reduce's per-head serial scan, so cap here.
+static constexpr int kFlashDecodeMaxSplits = 64;
+
+struct FlashDecodeCfg { bool use_wmma; int splits; };
+
+// Launch one (impl, splits) configuration: split-K decode + FA-2 reduce. Both
+// impls emit identical [B,H,splits,D+2] partials, so the reduce is shared.
+static inline void launchFlashDecodeConfig(
+    const FlashDecodeCfg& cfg, hipStream_t stream,
+    const __half* hQ, const __half* hK, const __half* hV, __half* hO, float* hP,
+    int B, int H, int G, int d, int hpg, int max_seq, float scale,
+    const int* iSeq, int local_window_size,
+    const __half* hSink, int use_smooth_softmax) {
+  const int splits = cfg.splits;
+  if (cfg.use_wmma) {
+    // BKV: D=64 -> 16 (small tile, more resident -> better latency hiding);
+    // D=128 -> 32 (direct staging path). Grid (G, splits, B), one wave/block.
+    auto smem_bytes = [](int D_, int bkv) -> size_t {
+      const int DSTR = D_ + 2;
+      return (size_t)16 * (bkv + 1) * sizeof(float)
+           + (size_t)2 * bkv * DSTR * sizeof(_Float16)
+           + (size_t)16 * (bkv + 2) * sizeof(_Float16)
+           + (size_t)16 * 3 * sizeof(float);
+    };
+    dim3 grid_wmma((unsigned)G, (unsigned)splits, (unsigned)B);
+    #define LAUNCH_DW(D_, HPG_, BKV_)                                          \
+      gqa_flash_decode_wmma_kernel<D_, HPG_, BKV_>                            \
+          <<<grid_wmma, 32, smem_bytes(D_, BKV_), stream>>>(                   \
+              hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size,   \
+              splits)
+    if (hpg == 4) {
+      if (d == 128) LAUNCH_DW(128, 4, 32); else LAUNCH_DW(64, 4, 16);
+    } else { /* hpg == 8, d == 64 */
+      LAUNCH_DW(64, 8, 16);
+    }
+    #undef LAUNCH_DW
+  } else {
+    dim3 grid_main(B * G, splits);
+    if (hpg == 4) {
+      if (d == 128)
+        gqa_flash_decode_kernel<128, 4><<<grid_main, 4 * WAVE_SIZE, 0, stream>>>(
+            hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size, splits);
+      else
+        gqa_flash_decode_kernel<64, 4><<<grid_main, 4 * WAVE_SIZE, 0, stream>>>(
+            hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size, splits);
+    } else { /* hpg == 8, d == 64 */
+      gqa_flash_decode_kernel<64, 8><<<grid_main, 8 * WAVE_SIZE, 0, stream>>>(
+          hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size, splits);
+    }
+  }
+
+  // Reduce: one block per query head, block dim D. seqlens_k / sliding-window /
+  // head_sink / smooth_softmax are all folded in here (not the partials).
+  dim3 grid_reduce(B * H);
+  if (d == 128)
+    gqa_flash_decode_reduce_kernel<128><<<grid_reduce, 128, 0, stream>>>(
+        hP, hO, H, hSink, H, use_smooth_softmax, splits);
+  else
+    gqa_flash_decode_reduce_kernel<64><<<grid_reduce, 64, 0, stream>>>(
+        hP, hO, H, hSink, H, use_smooth_softmax, splits);
+}
+
+// Candidate split counts, clamped to [1, cap] and to the useful range for skv
+// (no point launching more splits than there are 16-key tiles). Deduplicated.
+static void flashDecodeCandidateSplits(int skv, int max_splits,
+                                       int (&out)[5], int& n) {
+  static const int kBase[5] = {8, 16, 32, 48, 64};
+  int cap = max_splits < kFlashDecodeMaxSplits ? max_splits : kFlashDecodeMaxSplits;
+  if (cap < 1) cap = 1;
+  int eff = skv > 0 ? skv : 1;
+  int max_useful = (eff + 15) / 16; if (max_useful < 1) max_useful = 1;
+  n = 0;
+  for (int s : kBase) {
+    int v = s; if (v > cap) v = cap; if (v > max_useful) v = max_useful;
+    bool dup = false;
+    for (int i = 0; i < n; ++i) if (out[i] == v) dup = true;
+    if (!dup) out[n++] = v;
+  }
+}
+
+static std::unordered_map<std::string, FlashDecodeCfg> g_flash_decode_cache;
+static std::mutex g_flash_decode_mutex;
+
+static std::string flashDecodeKey(int B, int H, int G, int d, int skv) {
+  int bucket = 1;
+  while (bucket < skv) bucket <<= 1;
+  return std::to_string(B) + "_" + std::to_string(H) + "_" + std::to_string(G) +
+         "_" + std::to_string(d) + "_" + std::to_string(bucket);
+}
+
+// Benchmark all (impl, splits) candidates on the actual device buffers and pick
+// the fastest. Leaves the output buffers holding the *last* candidate's result;
+// the caller relaunches the winner afterwards to produce the correct output.
+static FlashDecodeCfg tuneFlashDecode(
+    hipStream_t stream,
+    const __half* hQ, const __half* hK, const __half* hV, __half* hO, float* hP,
+    int B, int H, int G, int d, int hpg, int skv, int max_seq, int max_splits,
+    float scale, const int* iSeq, int local_window_size,
+    const __half* hSink, int use_smooth_softmax) {
+  int split_set[5]; int n_splits = 0;
+  flashDecodeCandidateSplits(skv, max_splits, split_set, n_splits);
+  const bool impls[2] = {false, true};  // {scalar, WMMA}; geometry is identical
+
+  hipEvent_t ev0, ev1;
+  hipEventCreate(&ev0);
+  hipEventCreate(&ev1);
+  constexpr int WARMUP = 2;
+  constexpr int ITERS  = 10;
+
+  FlashDecodeCfg best{(d == 64), split_set[0]};
+  float best_ms = 1e30f;
+
+  for (int ii = 0; ii < 2; ++ii) {
+    for (int si = 0; si < n_splits; ++si) {
+      FlashDecodeCfg cfg{impls[ii], split_set[si]};
+      for (int w = 0; w < WARMUP; ++w)
+        launchFlashDecodeConfig(cfg, stream, hQ, hK, hV, hO, hP, B, H, G, d, hpg,
+                                max_seq, scale, iSeq, local_window_size, hSink,
+                                use_smooth_softmax);
+      hipEventRecord(ev0, stream);
+      for (int it = 0; it < ITERS; ++it)
+        launchFlashDecodeConfig(cfg, stream, hQ, hK, hV, hO, hP, B, H, G, d, hpg,
+                                max_seq, scale, iSeq, local_window_size, hSink,
+                                use_smooth_softmax);
+      hipEventRecord(ev1, stream);
+      hipEventSynchronize(ev1);
+      float ms = 0.0f;
+      hipEventElapsedTime(&ms, ev0, ev1);
+      CUSTOM_KERNELS_DEBUG_LOG(
+          "[custom_kernels]   flash_decode cand impl=%-6s splits=%2d : %.4f ms\n",
+          cfg.use_wmma ? "wmma" : "scalar", cfg.splits, ms / ITERS);
+      if (ms < best_ms) { best_ms = ms; best = cfg; }
+    }
+  }
+
+  hipEventDestroy(ev0);
+  hipEventDestroy(ev1);
+  return best;
+}
+
 // Launcher: dispatches FA-2 split-K decode + reduction.
-//   workspace: float scratch of size B*H*K_SPLITS*(D+2)*4 bytes.
-//   K_SPLITS: only 8 supported in V1.
+//   partials_workspace: float scratch of size B*H*max_splits*(d+2)*4 bytes.
+//   skv:        current total KV length (host-known) used only for autotune
+//               keying + candidate clamping; the kernels read seqlens_k for the
+//               exact per-batch length at runtime.
+//   max_splits: workspace capacity in splits (autotune picks an actual count
+//               <= this). Pass <= kFlashDecodeMaxSplits.
+// Impl / split selection is autotuned per (B,H,G,d, skv-bucket) and cached.
+// Env overrides (skip autotune entirely):
+//   HIPDNN_GQA_DECODE_SCALAR=1 / _WMMA=1 -> force impl
+//   HIPDNN_GQA_DECODE_SPLITS=N           -> force split count
+//   HIPDNN_GQA_DECODE_NOAUTOTUNE=1       -> fixed heuristic (wmma@d64, splits=8)
 extern "C" int hip_gqa_flash_decode(
     void* stream_ptr,
     const void* Q, const void* Kcache, const void* Vcache,
     void* O,
     void* partials_workspace,
-    int B, int H, int G, int d, int max_seq, int K_SPLITS,
+    int B, int H, int G, int d, int skv, int max_seq, int max_splits,
     float scale,
     const void* seqlens_k,
     int local_window_size,
     const void* head_sink,
     int use_smooth_softmax) {
-  // HPG = heads-per-group (Q heads sharing one KV head). The kernel is
+  // HPG = heads-per-group (Q heads sharing one KV head). The kernels are
   // instantiated for HPG=4 (Llama-3.x family at d=64 and d=128) and HPG=8
   // (gpt-oss-20b at d=64). HPG=8 with d=128 is rejected to keep template
   // bloat bounded; no current model needs it.
@@ -1998,12 +2193,6 @@ extern "C" int hip_gqa_flash_decode(
             d);
     return -1;
   }
-  if (K_SPLITS != 8) {
-    fprintf(stderr,
-            "hip_gqa_flash_decode: only K_SPLITS=8 supported (got %d)\n",
-            K_SPLITS);
-    return -1;
-  }
 
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
   const __half* hQ = static_cast<const __half*>(Q);
@@ -2012,76 +2201,879 @@ extern "C" int hip_gqa_flash_decode(
   __half* hO = static_cast<__half*>(O);
   float* hP = static_cast<float*>(partials_workspace);
   const int* iSeq = static_cast<const int*>(seqlens_k);
-
-  // Impl select. The WMMA decode replaces the scalar per-key QK dot's 5-step
-  // __shfl_xor cross-lane reduction with the matrix unit. Measured on gfx1151
-  // (Radeon 8060S, 20 CU): it WINS for D=64 (gpt-oss-20b ~1.1-1.3x, Llama D=64
-  // ~parity) but LOSES badly for D=128 (Llama-3.1-8b ~0.3x) because the
-  // single-wave WMMA path is compute-heavier and split-K=8 under-fills the 20
-  // CUs. So default WMMA only at D=64, scalar at D=128. Both emit the same
-  // [B,H,K_SPLITS,D+2] partials, so the reduce (seqlens_k / window / sink) is
-  // identical either way. Env overrides (for A/B benchmarking):
-  //   HIPDNN_GQA_DECODE_SCALAR=1 -> force scalar; HIPDNN_GQA_DECODE_WMMA=1 -> force WMMA.
-  bool use_wmma = (d == 64);
-  if (const char* e = getenv("HIPDNN_GQA_DECODE_SCALAR")) { if (atoi(e) != 0) use_wmma = false; }
-  if (const char* e = getenv("HIPDNN_GQA_DECODE_WMMA"))   { if (atoi(e) != 0) use_wmma = true; }
-
-  if (use_wmma) {
-    // BKV: D=64 -> 16 (small tile, more resident -> better latency hiding);
-    // D=128 -> 32 (direct staging path). Grid (G, K_SPLITS, B), one wave/block.
-    const int BKV = (d == 64) ? 16 : 32;
-    auto smem_bytes = [](int D_, int bkv) -> size_t {
-      const int DSTR = D_ + 2;
-      return (size_t)16 * (bkv + 1) * sizeof(float)
-           + (size_t)2 * bkv * DSTR * sizeof(_Float16)
-           + (size_t)16 * (bkv + 2) * sizeof(_Float16)
-           + (size_t)16 * 3 * sizeof(float);
-    };
-    dim3 grid_wmma((unsigned)G, (unsigned)K_SPLITS, (unsigned)B);
-    #define LAUNCH_DW(D_, HPG_, BKV_)                                          \
-      gqa_flash_decode_wmma_kernel<D_, 8, HPG_, BKV_>                          \
-          <<<grid_wmma, 32, smem_bytes(D_, BKV_), stream>>>(                   \
-              hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size)
-    if (hpg == 4) {
-      if (d == 128) LAUNCH_DW(128, 4, 32); else LAUNCH_DW(64, 4, 16);
-    } else { /* hpg == 8, d == 64 */
-      LAUNCH_DW(64, 8, 16);
-    }
-    #undef LAUNCH_DW
-  } else {
-    dim3 grid_main(B * G, K_SPLITS);
-    if (hpg == 4) {
-      if (d == 128) {
-        gqa_flash_decode_kernel<128, 8, 4>
-            <<<grid_main, 4 * WAVE_SIZE, 0, stream>>>(
-                hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size);
-      } else { /* d == 64 */
-        gqa_flash_decode_kernel<64, 8, 4>
-            <<<grid_main, 4 * WAVE_SIZE, 0, stream>>>(
-                hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size);
-      }
-    } else { /* hpg == 8, d == 64 (asserted above) */
-      gqa_flash_decode_kernel<64, 8, 8>
-          <<<grid_main, 8 * WAVE_SIZE, 0, stream>>>(
-              hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size);
-    }
-  }
-
-  // Reduce kernel does not depend on HPG; it walks the K_SPLITS partials
-  // per (b, h_q) and merges. Grid is one block per query head, block dim D.
-  // The smooth-softmax / head_sink path is folded into the denominator here
-  // (not the partials), since the sink only affects the final L term.
-  dim3 grid_reduce(B * H);
   const __half* hSink = static_cast<const __half*>(head_sink);
-  if (d == 128) {
-    gqa_flash_decode_reduce_kernel<128, 8>
-        <<<grid_reduce, 128, 0, stream>>>(hP, hO, H, hSink, H,
-                                          use_smooth_softmax);
-  } else { /* d == 64 */
-    gqa_flash_decode_reduce_kernel<64, 8>
-        <<<grid_reduce, 64, 0, stream>>>(hP, hO, H, hSink, H,
-                                         use_smooth_softmax);
+
+  int cap = max_splits;
+  if (cap < 1) cap = 1;
+  if (cap > kFlashDecodeMaxSplits) cap = kFlashDecodeMaxSplits;
+  const int eff_skv = skv > 0 ? skv : max_seq;  // host-side length for tuning
+  // Effective KV range each query actually scans. Sliding-window layers clamp
+  // to `local_window_size`, so their optimal split count is driven by the
+  // window (e.g. 128), NOT the full context -- they MUST key/tune separately
+  // from full-attention layers of the same (B,H,G,d,skv) or they would reuse a
+  // large split count and pay reduce/empty-split overhead over a tiny range.
+  const int tune_len = (local_window_size > 0 && eff_skv > local_window_size)
+                           ? local_window_size
+                           : eff_skv;
+
+  // --- Config selection: env override > autotune cache > one-shot tune ---
+  FlashDecodeCfg cfg{(d == 64), cap < 8 ? cap : 8};
+
+  bool forced = false;
+  if (const char* e = getenv("HIPDNN_GQA_DECODE_SCALAR")) { if (atoi(e) != 0) { cfg.use_wmma = false; forced = true; } }
+  if (const char* e = getenv("HIPDNN_GQA_DECODE_WMMA"))   { if (atoi(e) != 0) { cfg.use_wmma = true;  forced = true; } }
+  if (const char* e = getenv("HIPDNN_GQA_DECODE_SPLITS")) {
+    int v = atoi(e); if (v >= 1) { cfg.splits = v > cap ? cap : v; forced = true; }
   }
+  bool no_autotune = false;
+  if (const char* e = getenv("HIPDNN_GQA_DECODE_NOAUTOTUNE")) no_autotune = (atoi(e) != 0);
+
+  if (!forced && !no_autotune) {
+    const std::string key = flashDecodeKey(B, H, G, d, tune_len);
+    std::lock_guard<std::mutex> lock(g_flash_decode_mutex);
+    auto it = g_flash_decode_cache.find(key);
+    if (it != g_flash_decode_cache.end()) {
+      cfg = it->second;
+    } else {
+      cfg = tuneFlashDecode(stream, hQ, hK, hV, hO, hP, B, H, G, d, hpg,
+                            tune_len, max_seq, cap, scale, iSeq,
+                            local_window_size, hSink, use_smooth_softmax);
+      g_flash_decode_cache[key] = cfg;
+      CUSTOM_KERNELS_DEBUG_LOG(
+          "[custom_kernels] flash_decode autotune: key=\"%s\" -> impl=%s splits=%d "
+          "(cache size=%zu)\n",
+          key.c_str(), cfg.use_wmma ? "wmma" : "scalar", cfg.splits,
+          g_flash_decode_cache.size());
+    }
+  }
+
+  // Produce the correct output with the selected config (tuning above left the
+  // buffers holding the last candidate's result).
+  launchFlashDecodeConfig(cfg, stream, hQ, hK, hV, hO, hP, B, H, G, d, hpg,
+                          max_seq, scale, iSeq, local_window_size, hSink,
+                          use_smooth_softmax);
 
   return hipGetLastError();
+}
+
+//===----------------------------------------------------------------------===//
+// Fused FA-2 WMMA prefill kernels (v5 d64 / v7 d128)
+//
+// Merged in from the former standalone gqa_flash_prefill_v5.hip /
+// gqa_flash_prefill_v7.hip. fp16 in/out, fp32 accumulate, D in {64,128},
+// causal, GQA. Q [B,sq,Hq,D]; K/V cache [B,G,max_seq,D]. Each launcher
+// self-tunes its config per (d,sq,skv,Hq,G) shape on first use.
+//===----------------------------------------------------------------------===//
+namespace {
+typedef _Float16 half16_t __attribute__((ext_vector_type(16)));
+typedef _Float16 half8_t __attribute__((ext_vector_type(8)));
+typedef float float8_t __attribute__((ext_vector_type(8)));
+#ifndef HALF16_LOAD
+#define HALF16_LOAD(ptr) (*reinterpret_cast<const half16_t*>(ptr))
+#endif
+
+
+
+
+// ---------------------------------------------------------------------
+// Warp-private prefill kernel (v5). Grid: (num_q_tiles*B, Hq). Block: 32.
+// Each wave owns M_TILES 16-row q-subtiles x all BKV columns. Only LDS is
+// P_lds (C->A transpose); only sync is single-wave around it.
+// ---------------------------------------------------------------------
+template <int M_TILES, int BKV, int D>
+__global__ void __launch_bounds__(32)
+gqa_flash_prefill_v5_kernel(
+    const _Float16* __restrict__ Q,       // [B, sq, Hq, D]
+    const _Float16* __restrict__ Kcache,  // [B, G, max_seq, D]
+    const _Float16* __restrict__ Vcache,  // [B, G, max_seq, D]
+    _Float16* __restrict__ O,             // [B, sq, Hq, D]
+    int B_count, int Hq, int G, int sq, int skv, int max_seq, int past_len,
+    float scale, int ablate)
+{
+    // ablation bitmask (perf diagnostics only; wrong numerics):
+    //   bit0 skip softmax, bit1 skip valueGEMM, bit2 skip scoreGEMM,
+    //   bit3 skip global loads (K frags + V_lds staging).
+    const int abl = __builtin_amdgcn_readfirstlane(ablate);
+    constexpr int kWmmaTile = 16;
+    constexpr int ROWS      = M_TILES * kWmmaTile;
+    constexpr int S_TILES_J = BKV / kWmmaTile;   // 16-col score tiles
+    constexpr int D_TILES   = D / kWmmaTile;     // 16-col D tiles
+    constexpr int P_STR     = BKV + 2;
+    constexpr int V_STR     = D + 2;             // V_lds row stride (pad)
+    constexpr float kLog2e  = 1.4426950408889634f;
+
+    const int num_q_tiles = (sq + ROWS - 1) / ROWS;
+    const int q_tile_idx  = __builtin_amdgcn_readfirstlane(blockIdx.x % num_q_tiles);
+    const int batch       = __builtin_amdgcn_readfirstlane(blockIdx.x / num_q_tiles);
+    const int head_q      = __builtin_amdgcn_readfirstlane(blockIdx.y);
+    const int head_kv     = __builtin_amdgcn_readfirstlane(head_q / (Hq / G));
+    const int q_start     = q_tile_idx * ROWS;
+
+    const int lane_id   = threadIdx.x;          // 0..31
+    const int wmma_lane = lane_id % kWmmaTile;   // 0..15
+    const int pair      = lane_id / kWmmaTile;   // 0 -> even rows, 1 -> odd
+
+    // Per-wave LDS: P scratch for the WMMA C->A transpose of P, and a V tile
+    // staged with coalesced HALF16 loads (the direct-from-global V fragment is
+    // a stride-D gather that wrecks D=128; K stays direct since it is already
+    // coalesced HALF16 along D).
+    extern __shared__ char smem_v5[];
+    _Float16* P_lds = reinterpret_cast<_Float16*>(smem_v5);
+    _Float16* V_lds = reinterpret_cast<_Float16*>(
+        smem_v5 + ROWS * P_STR * sizeof(_Float16));
+
+    const size_t kv_base =
+        (static_cast<size_t>(batch) * G + head_kv) * max_seq * D;
+
+    // ---- Q in registers: Q_reg[mi][tk], row = q_start + mi*16 + wmma_lane ----
+    half16_t Q_reg[M_TILES][D_TILES];
+    #pragma unroll
+    for (int mi = 0; mi < M_TILES; ++mi) {
+        const int q_pos = q_start + mi * 16 + wmma_lane;
+        const bool valid = q_pos < sq;
+        const size_t q_row_base =
+            (static_cast<size_t>(batch * sq + (valid ? q_pos : 0)) * Hq + head_q) * D;
+        #pragma unroll
+        for (int tk = 0; tk < D_TILES; ++tk)
+            Q_reg[mi][tk] = valid ? HALF16_LOAD(&Q[q_row_base + tk * 16]) : half16_t{};
+    }
+
+    // ---- running state in registers (per owned row) ----
+    float8_t O_frag[M_TILES][D_TILES] = {};
+    float    m_reg[M_TILES][8];
+    float    l_reg[M_TILES][8];
+    #pragma unroll
+    for (int mi = 0; mi < M_TILES; ++mi)
+        #pragma unroll
+        for (int e = 0; e < 8; ++e) { m_reg[mi][e] = -INFINITY; l_reg[mi][e] = 0.0f; }
+
+    // Score GEMM for one kv tile -> S_reg (registers), scaled by scale*log2e.
+    // K is loaded straight from global as B-fragments (reused across mi).
+    auto scoreGEMM = [&](int kv0, float8_t S_reg[M_TILES][S_TILES_J]) {
+        #pragma unroll
+        for (int mi = 0; mi < M_TILES; ++mi)
+            #pragma unroll
+            for (int sj = 0; sj < S_TILES_J; ++sj) S_reg[mi][sj] = float8_t{};
+        if (abl & 4) return;  // skip scoreGEMM (also its K loads)
+        #pragma unroll
+        for (int sj = 0; sj < S_TILES_J; ++sj) {
+            const int key = kv0 + sj * 16 + wmma_lane;
+            const bool kvalid = key < skv;
+            const size_t k_row = kv_base + static_cast<size_t>(kvalid ? key : 0) * D;
+            #pragma unroll
+            for (int tk = 0; tk < D_TILES; ++tk) {
+                half16_t k_frag = (kvalid && !(abl & 8))
+                                         ? HALF16_LOAD(&Kcache[k_row + tk * 16])
+                                         : half16_t{};
+                #pragma unroll
+                for (int mi = 0; mi < M_TILES; ++mi)
+                    S_reg[mi][sj] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+                        Q_reg[mi][tk], k_frag, S_reg[mi][sj]);
+            }
+        }
+        #pragma unroll
+        for (int mi = 0; mi < M_TILES; ++mi)
+            #pragma unroll
+            for (int sj = 0; sj < S_TILES_J; ++sj)
+                #pragma unroll
+                for (int e = 0; e < 8; ++e)
+                    S_reg[mi][sj][e] *= scale * kLog2e;
+    };
+
+    const int kv_max    = (skv - 1 < past_len + q_start + ROWS - 1)
+                              ? (skv - 1) : (past_len + q_start + ROWS - 1);
+    const int num_tiles = kv_max / BKV + 1;
+
+    for (int t = 0; t < num_tiles; ++t) {
+        const int kv0 = t * BKV;
+
+        // Stage V tile into LDS with coalesced HALF16 loads along D.
+        if (!(abl & 8)) {
+            #pragma unroll
+            for (int i = lane_id; i < BKV * D_TILES; i += 32) {
+                const int kv_local = i / D_TILES;
+                const int dt       = i % D_TILES;
+                const int kv_pos   = kv0 + kv_local;
+                half16_t vv = (kv_pos < skv)
+                    ? HALF16_LOAD(&Vcache[kv_base + (size_t)kv_pos * D + dt * 16])
+                    : half16_t{};
+                *reinterpret_cast<half16_t*>(&V_lds[kv_local * V_STR + dt * 16]) = vv;
+            }
+        }
+
+        float8_t S_reg[M_TILES][S_TILES_J];
+        scoreGEMM(kv0, S_reg);
+
+        // ---- online softmax, fully intra-wave; writes P_lds (row-major) ----
+        float corr_reg[M_TILES][8];
+        #pragma unroll
+        for (int mi = 0; mi < M_TILES; ++mi)
+            #pragma unroll
+            for (int e = 0; e < 8; ++e) corr_reg[mi][e] = 1.0f;
+        if (!(abl & 1))
+        #pragma unroll
+        for (int mi = 0; mi < M_TILES; ++mi) {
+            #pragma unroll
+            for (int e = 0; e < 8; ++e) {
+                const int row    = mi * 16 + e * 2 + pair;        // local q row
+                const int q_pos  = q_start + row;
+                // causal mask + per-row partial max over this lane's columns
+                float rmax = -INFINITY;
+                #pragma unroll
+                for (int sj = 0; sj < S_TILES_J; ++sj) {
+                    const int kv_pos = kv0 + sj * 16 + wmma_lane;
+                    if (kv_pos >= skv || kv_pos > past_len + q_pos)
+                        S_reg[mi][sj][e] = -INFINITY;
+                    rmax = fmaxf(rmax, S_reg[mi][sj][e]);
+                }
+                rmax = fmaxf(rmax, __shfl_xor(rmax, 1));
+                rmax = fmaxf(rmax, __shfl_xor(rmax, 2));
+                rmax = fmaxf(rmax, __shfl_xor(rmax, 4));
+                rmax = fmaxf(rmax, __shfl_xor(rmax, 8));
+
+                const float m_old = m_reg[mi][e];
+                const float m_new = fmaxf(m_old, rmax);
+                const float corr  = exp2f(m_old - m_new);
+                corr_reg[mi][e]   = corr;
+
+                float rsum = 0.0f;
+                #pragma unroll
+                for (int sj = 0; sj < S_TILES_J; ++sj) {
+                    const float p = exp2f(S_reg[mi][sj][e] - m_new);
+                    rsum += p;
+                    P_lds[row * P_STR + sj * 16 + wmma_lane] = static_cast<_Float16>(p);
+                }
+                rsum += __shfl_xor(rsum, 1);
+                rsum += __shfl_xor(rsum, 2);
+                rsum += __shfl_xor(rsum, 4);
+                rsum += __shfl_xor(rsum, 8);
+
+                m_reg[mi][e] = m_new;
+                l_reg[mi][e] = corr * l_reg[mi][e] + rsum;
+            }
+        }
+        __syncthreads();   // single-wave: P_lds + V_lds visible for valueGEMM
+
+        // ---- value GEMM: rescale O by correction, O += P . V (V from global) ----
+        #pragma unroll
+        for (int mi = 0; mi < M_TILES; ++mi)
+            #pragma unroll
+            for (int tj = 0; tj < D_TILES; ++tj)
+                #pragma unroll
+                for (int e = 0; e < 8; ++e)
+                    O_frag[mi][tj][e] *= corr_reg[mi][e];
+
+        if (!(abl & 2))
+        #pragma unroll
+        for (int tj = 0; tj < D_TILES; ++tj) {
+            #pragma unroll
+            for (int tk = 0; tk < S_TILES_J; ++tk) {
+                // V as B-fragment from LDS: v[e=kv] for column d = tj*16+wmma_lane
+                half16_t v_frag;
+                #pragma unroll
+                for (int e = 0; e < 16; ++e)
+                    v_frag[e] = V_lds[(tk * 16 + e) * V_STR + tj * 16 + wmma_lane];
+                #pragma unroll
+                for (int mi = 0; mi < M_TILES; ++mi) {
+                    half16_t p_frag = HALF16_LOAD(
+                        &P_lds[(mi * 16 + wmma_lane) * P_STR + tk * 16]);
+                    O_frag[mi][tj] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+                        p_frag, v_frag, O_frag[mi][tj]);
+                }
+            }
+        }
+        __syncthreads();   // WAR: P_lds reused by next tile's softmax
+    }
+
+    // ---- Epilogue: O / l ----
+    #pragma unroll
+    for (int mi = 0; mi < M_TILES; ++mi) {
+        #pragma unroll
+        for (int tj = 0; tj < D_TILES; ++tj) {
+            #pragma unroll
+            for (int e = 0; e < 8; ++e) {
+                const int row   = mi * 16 + e * 2 + pair;
+                const int c     = tj * 16 + wmma_lane;
+                const int q_pos = q_start + row;
+                if (q_pos < sq && c < D) {
+                    const float l_val   = fmaxf(l_reg[mi][e], 1e-6f);
+                    const float out_val = O_frag[mi][tj][e] / l_val;
+                    O[(static_cast<size_t>(batch * sq + q_pos) * Hq + head_q) * D + c] =
+                        static_cast<_Float16>(out_val);
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Host side: LDS sizing, autotune (M_TILES x BKV), launcher.
+// ---------------------------------------------------------------------
+static inline size_t prefillV5SmemBytes(int m_tiles, int bkv, int d) {
+    const size_t p_lds = (size_t)(m_tiles * 16) * (bkv + 2) * sizeof(_Float16);
+    const size_t v_lds = (size_t)bkv * (d + 2) * sizeof(_Float16);
+    return p_lds + v_lds;
+}
+static constexpr size_t kPrefillV5MaxSmem = 65536;
+
+static int g_v5_ablate = 0;  // perf-diagnostics ablation bitmask (default off)
+
+static inline void dispatchPrefillV5(
+    int m_tiles, int bkv, int d, hipStream_t stream,
+    const _Float16* Q, const _Float16* Kcache, const _Float16* Vcache,
+    _Float16* O, int B, int Hq, int G, int sq, int skv, int max_seq,
+    int past_len, float scale)
+{
+    const int rows = m_tiles * 16;
+    const int num_q_tiles = (sq + rows - 1) / rows;
+    dim3 grid(num_q_tiles * B, Hq);
+    const size_t smem = prefillV5SmemBytes(m_tiles, bkv, d);
+    const int ablate = g_v5_ablate;
+
+    #define LAUNCH_V5(MT_, BKV_, D_)                                            \
+        gqa_flash_prefill_v5_kernel<MT_, BKV_, D_>                              \
+            <<<grid, 32, smem, stream>>>(                                       \
+                Q, Kcache, Vcache, O, B, Hq, G, sq, skv, max_seq, past_len,     \
+                scale, ablate)
+
+    if (d == 64) {
+        if (m_tiles == 2 && bkv == 64)      LAUNCH_V5(2, 64, 64);
+        else if (m_tiles == 2)              LAUNCH_V5(2, 32, 64);
+        else if (bkv == 64)                 LAUNCH_V5(1, 64, 64);
+        else                                LAUNCH_V5(1, 32, 64);
+    } else {
+        if (m_tiles == 2 && bkv == 64)      LAUNCH_V5(2, 64, 128);
+        else if (m_tiles == 2)              LAUNCH_V5(2, 32, 128);
+        else if (bkv == 64)                 LAUNCH_V5(1, 64, 128);
+        else                                LAUNCH_V5(1, 32, 128);
+    }
+    #undef LAUNCH_V5
+}
+
+struct PrefillV5Cfg { int m_tiles; int bkv; };
+static inline int prefillV5Candidates(int d, PrefillV5Cfg* out) {
+    static const PrefillV5Cfg kAll[] = {
+        {1, 32}, {1, 64}, {2, 32}, {2, 64}};
+    int n = 0;
+    for (const PrefillV5Cfg& c : kAll)
+        if (prefillV5SmemBytes(c.m_tiles, c.bkv, d) <= kPrefillV5MaxSmem) out[n++] = c;
+    return n;
+}
+
+static std::unordered_map<std::string, int> g_v5_cfg_cache;
+static std::mutex g_v5_cfg_mutex;
+static char g_v5_tune_info[128] = "gqa_flash_prefill_v5 cfg=?";
+
+static int tunePrefillV5Cfg(
+    int d, hipStream_t stream,
+    const _Float16* Q, const _Float16* Kcache, const _Float16* Vcache,
+    _Float16* O, int B, int Hq, int G, int sq, int skv, int max_seq,
+    int past_len, float scale)
+{
+    PrefillV5Cfg cands[8];
+    const int nc = prefillV5Candidates(d, cands);
+    constexpr int kWarmup = 30, kRounds = 4, kIters = 30;
+
+    auto launch_cfg = [&](const PrefillV5Cfg& c) {
+        dispatchPrefillV5(c.m_tiles, c.bkv, d, stream, Q, Kcache, Vcache, O,
+                          B, Hq, G, sq, skv, max_seq, past_len, scale);
+    };
+
+    for (int w = 0; w < kWarmup; ++w) launch_cfg(cands[w % nc]);
+    (void)hipDeviceSynchronize();
+
+    hipEvent_t ev0, ev1;
+    (void)hipEventCreate(&ev0);
+    (void)hipEventCreate(&ev1);
+    float best_ms[8];
+    for (int i = 0; i < nc; ++i) best_ms[i] = 1.0e30f;
+    for (int r = 0; r < kRounds; ++r) {
+        for (int idx = 0; idx < nc; ++idx) {
+            launch_cfg(cands[idx]);
+            (void)hipEventRecord(ev0, stream);
+            for (int i = 0; i < kIters; ++i) launch_cfg(cands[idx]);
+            (void)hipEventRecord(ev1, stream);
+            (void)hipEventSynchronize(ev1);
+            float ms = 0.0f;
+            (void)hipEventElapsedTime(&ms, ev0, ev1);
+            if (ms < best_ms[idx]) best_ms[idx] = ms;
+        }
+    }
+    (void)hipEventDestroy(ev0);
+    (void)hipEventDestroy(ev1);
+
+    if (getenv("HIPDNN_PREFILL_TUNE_DEBUG")) {
+        for (int i = 0; i < nc; ++i)
+            fprintf(stderr,
+                "[prefill-v5-tune] d=%d sq=%d skv=%d  M_TILES=%-2d BKV=%-3d "
+                "num_q_tiles=%-4d : %.5f ms/call\n",
+                d, sq, skv, cands[i].m_tiles, cands[i].bkv,
+                (sq + cands[i].m_tiles * 16 - 1) / (cands[i].m_tiles * 16),
+                best_ms[i] / kIters);
+    }
+
+    int best = 0;
+    for (int i = 1; i < nc; ++i) if (best_ms[i] < best_ms[best]) best = i;
+    return cands[best].m_tiles * 1000 + cands[best].bkv;
+}
+
+
+
+
+
+// ---------------------------------------------------------------------
+// M-register-blocked shared-KV prefill kernel (v7). Grid: (num_q_tiles*B, Hq).
+// Block: NW*32 threads. Each wave owns MT 16-row q-subtiles; K/V tiles are
+// staged once into block-shared LDS, and within a wave each K/V fragment feeds
+// all MT M-tiles -> the LDS read of K/V is amortized MT x.
+// ---------------------------------------------------------------------
+template <int NW, int BKV, int D, int MT>
+__global__ void __launch_bounds__(NW * 32)
+gqa_flash_prefill_v7_kernel(
+    const _Float16* __restrict__ Q,       // [B, sq, Hq, D]
+    const _Float16* __restrict__ Kcache,  // [B, G, max_seq, D]
+    const _Float16* __restrict__ Vcache,  // [B, G, max_seq, D]
+    _Float16* __restrict__ O,             // [B, sq, Hq, D]
+    int B_count, int Hq, int G, int sq, int skv, int max_seq, int past_len,
+    float scale, int ablate)
+{
+    const int abl = __builtin_amdgcn_readfirstlane(ablate);
+    constexpr int kWmmaTile = 16;
+    constexpr int ROWS      = NW * MT * kWmmaTile;   // query rows per block
+    constexpr int S_TILES_J = BKV / kWmmaTile;
+    constexpr int D_TILES   = D / kWmmaTile;
+    constexpr int P_STR     = BKV + 2;
+    constexpr int KV_STR    = D + 2;
+    constexpr float kLog2e  = 1.4426950408889634f;
+
+    const int num_q_tiles = (sq + ROWS - 1) / ROWS;
+    const int q_tile_idx  = __builtin_amdgcn_readfirstlane(blockIdx.x % num_q_tiles);
+    const int batch       = __builtin_amdgcn_readfirstlane(blockIdx.x / num_q_tiles);
+    const int head_q      = __builtin_amdgcn_readfirstlane(blockIdx.y);
+    const int head_kv     = __builtin_amdgcn_readfirstlane(head_q / (Hq / G));
+
+    const int tid       = threadIdx.x;
+    const int wave_id   = tid / 32;
+    const int lane_id   = tid % 32;
+    const int wmma_lane = lane_id % kWmmaTile;
+    const int pair      = lane_id / kWmmaTile;       // 0 -> even rows, 1 -> odd
+
+    const int q_start   = q_tile_idx * ROWS;
+    const int row_base  = q_start + wave_id * MT * kWmmaTile;  // wave's first row
+    const int pbase     = wave_id * MT * kWmmaTile;           // wave's P_lds offset
+
+    // K streams from global (cache-resident) straight into WMMA fragments; only
+    // V (stride-D gather) and the per-wave P transpose need LDS.
+    extern __shared__ char smem_v7[];
+    _Float16* V_lds = reinterpret_cast<_Float16*>(smem_v7);
+    _Float16* P_lds = reinterpret_cast<_Float16*>(
+        smem_v7 + (size_t)BKV * KV_STR * sizeof(_Float16));
+
+    const size_t kv_base =
+        (static_cast<size_t>(batch) * G + head_kv) * max_seq * D;
+
+    // ---- Q in registers: Q_reg[mt][tk], row = row_base + mt*16 + wmma_lane.
+    //      (Tried Q->LDS to free VGPRs -- net loss: occupancy didn't rise but the
+    //       per-WMMA LDS re-reads hit the LDS port; registers win here.) ----
+    half16_t Q_reg[MT][D_TILES];
+    #pragma unroll
+    for (int mt = 0; mt < MT; ++mt) {
+        const int q_pos = row_base + mt * kWmmaTile + wmma_lane;
+        const bool valid = q_pos < sq;
+        const size_t q_row_base =
+            (static_cast<size_t>(batch * sq + (valid ? q_pos : 0)) * Hq + head_q) * D;
+        #pragma unroll
+        for (int tk = 0; tk < D_TILES; ++tk)
+            Q_reg[mt][tk] = valid ? HALF16_LOAD(&Q[q_row_base + tk * 16]) : half16_t{};
+    }
+
+    // ---- running state: O stored compactly as half8 (fp16 carry) ----
+    half8_t O_h[MT][D_TILES] = {};
+    float   m_reg[MT][8];
+    float   l_reg[MT][8];
+    #pragma unroll
+    for (int mt = 0; mt < MT; ++mt)
+        #pragma unroll
+        for (int e = 0; e < 8; ++e) { m_reg[mt][e] = -INFINITY; l_reg[mt][e] = 0.0f; }
+
+    const int kv_max    = (skv - 1 < past_len + q_start + ROWS - 1)
+                              ? (skv - 1) : (past_len + q_start + ROWS - 1);
+    const int num_tiles = kv_max / BKV + 1;
+
+    for (int t = 0; t < num_tiles; ++t) {
+        const int kv0 = t * BKV;
+
+        // ---- cooperative V staging into shared LDS (K streams from global) ----
+        if (!(abl & 8)) {
+            #pragma unroll
+            for (int i = tid; i < BKV * D_TILES; i += NW * 32) {
+                const int kv_local = i / D_TILES;
+                const int dt       = i % D_TILES;
+                const int kv_pos   = kv0 + kv_local;
+                const bool kvalid  = kv_pos < skv;
+                const size_t off   = kv_base + (size_t)(kvalid ? kv_pos : 0) * D + dt * 16;
+                half16_t vv = kvalid ? HALF16_LOAD(&Vcache[off]) : half16_t{};
+                *reinterpret_cast<half16_t*>(&V_lds[kv_local * KV_STR + dt * 16]) = vv;
+            }
+        }
+        // NB: no barrier here. v7 streams K from global and softmax only touches
+        // S_reg/P_lds -- nothing between here and B2 reads V_lds, so the V staging
+        // overlaps the scoreGEMM+softmax work and is made visible by B2.
+        // (The previous B1 was a v6 leftover from when scoreGEMM read K from LDS.)
+
+        // ---- score GEMM: K streamed from global (cache-resident), reused / MT ----
+        float8_t S_reg[MT][S_TILES_J];
+        #pragma unroll
+        for (int mt = 0; mt < MT; ++mt)
+            #pragma unroll
+            for (int sj = 0; sj < S_TILES_J; ++sj) S_reg[mt][sj] = float8_t{};
+        if (!(abl & 4)) {
+            #pragma unroll
+            for (int sj = 0; sj < S_TILES_J; ++sj) {
+                const int key = kv0 + sj * 16 + wmma_lane;
+                const bool kvalid = key < skv;
+                const size_t k_row = kv_base + (size_t)(kvalid ? key : 0) * D;
+                for (int tk = 0; tk < D_TILES; ++tk) {
+                    half16_t k_frag = (kvalid && !(abl & 16))
+                        ? HALF16_LOAD(&Kcache[k_row + tk * 16]) : half16_t{};
+                    #pragma unroll
+                    for (int mt = 0; mt < MT; ++mt)
+                        S_reg[mt][sj] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+                            Q_reg[mt][tk], k_frag, S_reg[mt][sj]);
+                }
+            }
+            #pragma unroll
+            for (int mt = 0; mt < MT; ++mt)
+                #pragma unroll
+                for (int sj = 0; sj < S_TILES_J; ++sj)
+                    #pragma unroll
+                    for (int e = 0; e < 8; ++e) S_reg[mt][sj][e] *= scale * kLog2e;
+        }
+
+        // ---- online softmax (per M-tile, intra-wave); fold corr into O_h ----
+        if (!(abl & 1)) {
+            #pragma unroll
+            for (int mt = 0; mt < MT; ++mt) {
+                float corr_e[8];
+                #pragma unroll
+                for (int e = 0; e < 8; ++e) {
+                    const int row    = e * 2 + pair;
+                    const int q_pos  = row_base + mt * kWmmaTile + row;
+                    float rmax = -INFINITY;
+                    #pragma unroll
+                    for (int sj = 0; sj < S_TILES_J; ++sj) {
+                        const int kv_pos = kv0 + sj * 16 + wmma_lane;
+                        if (kv_pos >= skv || kv_pos > past_len + q_pos)
+                            S_reg[mt][sj][e] = -INFINITY;
+                        rmax = fmaxf(rmax, S_reg[mt][sj][e]);
+                    }
+                    rmax = fmaxf(rmax, __shfl_xor(rmax, 1));
+                    rmax = fmaxf(rmax, __shfl_xor(rmax, 2));
+                    rmax = fmaxf(rmax, __shfl_xor(rmax, 4));
+                    rmax = fmaxf(rmax, __shfl_xor(rmax, 8));
+
+                    const float m_old = m_reg[mt][e];
+                    const float m_new = fmaxf(m_old, rmax);
+                    const float corr  = exp2f(m_old - m_new);
+                    corr_e[e]         = corr;
+
+                    float rsum = 0.0f;
+                    #pragma unroll
+                    for (int sj = 0; sj < S_TILES_J; ++sj) {
+                        const float p = exp2f(S_reg[mt][sj][e] - m_new);
+                        rsum += p;
+                        P_lds[(pbase + mt * kWmmaTile + row) * P_STR + sj * 16 + wmma_lane] =
+                            static_cast<_Float16>(p);
+                    }
+                    rsum += __shfl_xor(rsum, 1);
+                    rsum += __shfl_xor(rsum, 2);
+                    rsum += __shfl_xor(rsum, 4);
+                    rsum += __shfl_xor(rsum, 8);
+
+                    m_reg[mt][e] = m_new;
+                    l_reg[mt][e] = corr * l_reg[mt][e] + rsum;
+                }
+                // rescale this M-tile's running O by correction (fp16 carry)
+                #pragma unroll
+                for (int tj = 0; tj < D_TILES; ++tj)
+                    #pragma unroll
+                    for (int e = 0; e < 8; ++e)
+                        O_h[mt][tj][e] =
+                            static_cast<_Float16>((float)O_h[mt][tj][e] * corr_e[e]);
+            }
+        }
+        __syncthreads();   // B2
+
+        // ---- value GEMM: V gathered once per (tj,tk), reused across MT ----
+        if (!(abl & 2))
+        for (int tj = 0; tj < D_TILES; ++tj) {
+            float8_t Of[MT];
+            #pragma unroll
+            for (int mt = 0; mt < MT; ++mt)
+                #pragma unroll
+                for (int e = 0; e < 8; ++e) Of[mt][e] = (float)O_h[mt][tj][e];
+            #pragma unroll
+            for (int tk = 0; tk < S_TILES_J; ++tk) {
+                half16_t v_frag;
+                #pragma unroll
+                for (int e = 0; e < 16; ++e)
+                    v_frag[e] = V_lds[(tk * 16 + e) * KV_STR + tj * 16 + wmma_lane];
+                #pragma unroll
+                for (int mt = 0; mt < MT; ++mt) {
+                    half16_t p_frag = HALF16_LOAD(
+                        &P_lds[(pbase + mt * kWmmaTile + wmma_lane) * P_STR + tk * 16]);
+                    Of[mt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+                        p_frag, v_frag, Of[mt]);
+                }
+            }
+            #pragma unroll
+            for (int mt = 0; mt < MT; ++mt)
+                #pragma unroll
+                for (int e = 0; e < 8; ++e)
+                    O_h[mt][tj][e] = static_cast<_Float16>(Of[mt][e]);
+        }
+        __syncthreads();   // B3: WAR -- V_lds reused next tile
+    }
+
+    // ---- Epilogue: O / l ----
+    #pragma unroll
+    for (int mt = 0; mt < MT; ++mt)
+        #pragma unroll
+        for (int tj = 0; tj < D_TILES; ++tj) {
+            #pragma unroll
+            for (int e = 0; e < 8; ++e) {
+                const int row   = e * 2 + pair;
+                const int c     = tj * 16 + wmma_lane;
+                const int q_pos = row_base + mt * kWmmaTile + row;
+                if (q_pos < sq && c < D) {
+                    const float l_val   = fmaxf(l_reg[mt][e], 1e-6f);
+                    const float out_val = (float)O_h[mt][tj][e] / l_val;
+                    O[(static_cast<size_t>(batch * sq + q_pos) * Hq + head_q) * D + c] =
+                        static_cast<_Float16>(out_val);
+                }
+            }
+        }
+}
+
+// ---------------------------------------------------------------------
+// Host side: LDS sizing, autotune (NW x BKV at MT=2), launcher.
+// ---------------------------------------------------------------------
+static inline size_t prefillV7SmemBytes(int nw, int bkv, int d, int mt) {
+    const size_t v_lds = (size_t)bkv * (d + 2) * sizeof(_Float16);   // K streams from global
+    const size_t p_lds = (size_t)(nw * mt * 16) * (bkv + 2) * sizeof(_Float16);
+    return v_lds + p_lds;
+}
+static constexpr size_t kPrefillV7MaxSmem = 65536;
+
+static int g_v7_ablate = 0;
+
+static inline void dispatchPrefillV7(
+    int nw, int bkv, int mt, int d, hipStream_t stream,
+    const _Float16* Q, const _Float16* Kcache, const _Float16* Vcache,
+    _Float16* O, int B, int Hq, int G, int sq, int skv, int max_seq,
+    int past_len, float scale)
+{
+    const int rows = nw * mt * 16;
+    const int num_q_tiles = (sq + rows - 1) / rows;
+    dim3 grid(num_q_tiles * B, Hq);
+    const size_t smem = prefillV7SmemBytes(nw, bkv, d, mt);
+    const int ablate = g_v7_ablate;
+
+    #define LAUNCH_V7(NW_, BKV_, D_, MT_)                                       \
+        gqa_flash_prefill_v7_kernel<NW_, BKV_, D_, MT_>                         \
+            <<<grid, NW_ * 32, smem, stream>>>(                                 \
+                Q, Kcache, Vcache, O, B, Hq, G, sq, skv, max_seq, past_len,     \
+                scale, ablate)
+    #define DISPATCH_V7_D(D_)                                                   \
+        do {                                                                    \
+            if (mt == 1) {                                                      \
+                if      (nw == 4 && bkv == 64) LAUNCH_V7(4, 64, D_, 1);         \
+                else if (nw == 4)              LAUNCH_V7(4, 32, D_, 1);         \
+                else if (nw == 2 && bkv == 64) LAUNCH_V7(2, 64, D_, 1);         \
+                else if (nw == 2)              LAUNCH_V7(2, 32, D_, 1);         \
+                else if (bkv == 64)            LAUNCH_V7(1, 64, D_, 1);         \
+                else                           LAUNCH_V7(1, 32, D_, 1);         \
+            } else {                                                            \
+                if      (nw == 4 && bkv == 64) LAUNCH_V7(4, 64, D_, 2);         \
+                else if (nw == 4)              LAUNCH_V7(4, 32, D_, 2);         \
+                else if (nw == 2 && bkv == 64) LAUNCH_V7(2, 64, D_, 2);         \
+                else if (nw == 2)              LAUNCH_V7(2, 32, D_, 2);         \
+                else if (bkv == 64)            LAUNCH_V7(1, 64, D_, 2);         \
+                else                           LAUNCH_V7(1, 32, D_, 2);         \
+            }                                                                   \
+        } while (0)
+
+    if (d == 64) DISPATCH_V7_D(64);
+    else         DISPATCH_V7_D(128);
+    #undef DISPATCH_V7_D
+    #undef LAUNCH_V7
+}
+
+struct PrefillV7Cfg { int nw; int bkv; int mt; };
+static inline int prefillV7Candidates(int d, PrefillV7Cfg* out) {
+    // MT=1 cuts register-resident Q in half (key for D=128 where MT=2 spills
+    // ~358 VGPR dwords to scratch). K streams from global (cache-resident) so
+    // losing the MT-fold K reuse is nearly free -- worth tuning per shape.
+    static const PrefillV7Cfg kAll[] = {
+        {1, 32, 1}, {1, 64, 1}, {2, 32, 1}, {2, 64, 1}, {4, 32, 1}, {4, 64, 1},
+        {1, 32, 2}, {1, 64, 2}, {2, 32, 2}, {2, 64, 2}, {4, 32, 2}, {4, 64, 2}};
+    int n = 0;
+    for (const PrefillV7Cfg& c : kAll)
+        if (prefillV7SmemBytes(c.nw, c.bkv, d, c.mt) <= kPrefillV7MaxSmem) out[n++] = c;
+    return n;
+}
+
+static std::unordered_map<std::string, int> g_v7_cfg_cache;
+static std::mutex g_v7_cfg_mutex;
+static char g_v7_tune_info[128] = "gqa_flash_prefill_v7 cfg=?";
+
+static int tunePrefillV7Cfg(
+    int d, hipStream_t stream,
+    const _Float16* Q, const _Float16* Kcache, const _Float16* Vcache,
+    _Float16* O, int B, int Hq, int G, int sq, int skv, int max_seq,
+    int past_len, float scale)
+{
+    PrefillV7Cfg cands[12];
+    const int nc = prefillV7Candidates(d, cands);
+    constexpr int kWarmup = 30, kRounds = 4, kIters = 30;
+
+    auto launch_cfg = [&](const PrefillV7Cfg& c) {
+        dispatchPrefillV7(c.nw, c.bkv, c.mt, d, stream, Q, Kcache, Vcache, O,
+                          B, Hq, G, sq, skv, max_seq, past_len, scale);
+    };
+
+    for (int w = 0; w < kWarmup; ++w) launch_cfg(cands[w % nc]);
+    (void)hipDeviceSynchronize();
+
+    hipEvent_t ev0, ev1;
+    (void)hipEventCreate(&ev0);
+    (void)hipEventCreate(&ev1);
+    float best_ms[12];
+    for (int i = 0; i < nc; ++i) best_ms[i] = 1.0e30f;
+    for (int r = 0; r < kRounds; ++r) {
+        for (int idx = 0; idx < nc; ++idx) {
+            launch_cfg(cands[idx]);
+            (void)hipEventRecord(ev0, stream);
+            for (int i = 0; i < kIters; ++i) launch_cfg(cands[idx]);
+            (void)hipEventRecord(ev1, stream);
+            (void)hipEventSynchronize(ev1);
+            float ms = 0.0f;
+            (void)hipEventElapsedTime(&ms, ev0, ev1);
+            if (ms < best_ms[idx]) best_ms[idx] = ms;
+        }
+    }
+    (void)hipEventDestroy(ev0);
+    (void)hipEventDestroy(ev1);
+
+    if (getenv("HIPDNN_PREFILL_TUNE_DEBUG")) {
+        for (int i = 0; i < nc; ++i)
+            fprintf(stderr,
+                "[prefill-v7-tune] d=%d sq=%d skv=%d  NW=%-2d BKV=%-3d MT=%d "
+                "num_q_tiles=%-4d : %.5f ms/call\n",
+                d, sq, skv, cands[i].nw, cands[i].bkv, cands[i].mt,
+                (sq + cands[i].nw * cands[i].mt * 16 - 1) /
+                    (cands[i].nw * cands[i].mt * 16),
+                best_ms[i] / kIters);
+    }
+
+    int best = 0;
+    for (int i = 1; i < nc; ++i) if (best_ms[i] < best_ms[best]) best = i;
+    return cands[best].mt * 1000000 + cands[best].nw * 1000 + cands[best].bkv;
+}
+
+}  // namespace (fused prefill v5/v7)
+
+
+extern "C" const char* hip_gqa_flash_prefill_v5_last_tune_info() {
+    return g_v5_tune_info;
+}
+
+// Perf-diagnostics ablation (bit0 skip softmax, bit1 skip valueGEMM,
+// bit2 skip scoreGEMM, bit3 skip global loads). Wrong numerics; latency only.
+extern "C" void hip_gqa_flash_prefill_v5_set_ablate(int mask) {
+    g_v5_ablate = mask;
+}
+
+extern "C" int hip_gqa_flash_prefill_v5(
+    void* stream_ptr,
+    const void* Q, const void* Kcache, const void* Vcache, void* O,
+    int B, int Hq, int G, int sq, int skv, int d, int max_seq, int past_len,
+    float scale)
+{
+    if (d != 64 && d != 128) return -1;
+
+    hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+    const _Float16* Q_ptr = static_cast<const _Float16*>(Q);
+    const _Float16* K_ptr = static_cast<const _Float16*>(Kcache);
+    const _Float16* V_ptr = static_cast<const _Float16*>(Vcache);
+    _Float16* O_ptr       = static_cast<_Float16*>(O);
+
+    std::string key = std::to_string(d) + "_" + std::to_string(sq) + "_" +
+                      std::to_string(skv) + "_" + std::to_string(Hq) + "_" +
+                      std::to_string(G);
+    int cfg;
+    {
+        std::lock_guard<std::mutex> lk(g_v5_cfg_mutex);
+        auto it = g_v5_cfg_cache.find(key);
+        if (it != g_v5_cfg_cache.end()) {
+            cfg = it->second;
+        } else {
+            cfg = tunePrefillV5Cfg(d, stream, Q_ptr, K_ptr, V_ptr, O_ptr,
+                                   B, Hq, G, sq, skv, max_seq, past_len, scale);
+            g_v5_cfg_cache[key] = cfg;
+            snprintf(g_v5_tune_info, sizeof(g_v5_tune_info),
+                     "gqa_flash_prefill_v5 cfg=M%d_BKV%d", cfg / 1000, cfg % 1000);
+        }
+    }
+    int m_tiles = cfg / 1000, bkv = cfg % 1000;
+    dispatchPrefillV5(m_tiles, bkv, d, stream, Q_ptr, K_ptr, V_ptr, O_ptr,
+                      B, Hq, G, sq, skv, max_seq, past_len, scale);
+    return 0;
+}
+
+
+extern "C" const char* hip_gqa_flash_prefill_v7_last_tune_info() {
+    return g_v7_tune_info;
+}
+
+extern "C" void hip_gqa_flash_prefill_v7_set_ablate(int mask) {
+    g_v7_ablate = mask;
+}
+
+extern "C" int hip_gqa_flash_prefill_v7(
+    void* stream_ptr,
+    const void* Q, const void* Kcache, const void* Vcache, void* O,
+    int B, int Hq, int G, int sq, int skv, int d, int max_seq, int past_len,
+    float scale)
+{
+    if (d != 64 && d != 128) return -1;
+
+    hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+    const _Float16* Q_ptr = static_cast<const _Float16*>(Q);
+    const _Float16* K_ptr = static_cast<const _Float16*>(Kcache);
+    const _Float16* V_ptr = static_cast<const _Float16*>(Vcache);
+    _Float16* O_ptr       = static_cast<_Float16*>(O);
+
+    std::string key = std::to_string(d) + "_" + std::to_string(sq) + "_" +
+                      std::to_string(skv) + "_" + std::to_string(Hq) + "_" +
+                      std::to_string(G);
+    int cfg;
+    {
+        std::lock_guard<std::mutex> lk(g_v7_cfg_mutex);
+        auto it = g_v7_cfg_cache.find(key);
+        if (it != g_v7_cfg_cache.end()) {
+            cfg = it->second;
+        } else {
+            cfg = tunePrefillV7Cfg(d, stream, Q_ptr, K_ptr, V_ptr, O_ptr,
+                                   B, Hq, G, sq, skv, max_seq, past_len, scale);
+            g_v7_cfg_cache[key] = cfg;
+            snprintf(g_v7_tune_info, sizeof(g_v7_tune_info),
+                     "gqa_flash_prefill_v7 cfg=NW%d_BKV%d_MT%d",
+                     (cfg / 1000) % 1000, cfg % 1000, cfg / 1000000);
+        }
+    }
+    int mt = cfg / 1000000, nw = (cfg / 1000) % 1000, bkv = cfg % 1000;
+    dispatchPrefillV7(nw, bkv, mt, d, stream, Q_ptr, K_ptr, V_ptr, O_ptr,
+                      B, Hq, G, sq, skv, max_seq, past_len, scale);
+    return 0;
 }

@@ -73,6 +73,20 @@ static bool gqa_no_expand_prefill_enabled() {
   return enabled;
 }
 
+// Env-var gate for the fused FA-2 WMMA prefill kernels (v5/v7). Default off.
+// When enabled (and eligible -- see gqa_forward_hipblaslt), prefill replaces
+// the decomposed Score/softmax/Value GEMM sequence with a single kernel that
+// reads the post-RoPE BSHD Q + BNSD KV cache directly and writes BSHD output
+// (v5 at d==64, v7 at d==128). Requires the no-expand prefill layout, so it
+// implies HIPDNN_EP_GQA_NO_EXPAND_PREFILL semantics for its operands.
+static bool gqa_fused_prefill_enabled() {
+  static const bool enabled = [] {
+    const char *v = std::getenv("HIPDNN_EP_GQA_FUSED_PREFILL");
+    return v && std::strcmp(v, "0") != 0;
+  }();
+  return enabled;
+}
+
 // Env-var gate to force decode through the decomposed hipBLASLt pipeline
 // instead of the fused custom kernel hip_gqa_fused_decode. Default off
 // (fused path is preferred). Set HIPDNN_EP_GQA_DISABLE_FUSED_DECODE=1 to
@@ -227,8 +241,13 @@ static int gqa_flash_decode_min_skv() {
   return threshold;
 }
 
-// FA-2 split-K geometry (must match hip_gqa_flash_decode launcher).
-static constexpr int kFlashDecodeKSplits = 8;
+// FA-2 split-K decode workspace capacity, in splits. The launcher autotunes
+// the actual split count (8..this, then caps at its own kFlashDecodeMaxSplits)
+// per shape and caches the winner; the partials workspace must be sized for the
+// largest split count it may pick. 64 matches gqa_kernel.hip's cap and fills
+// the 20-CU gfx1151 even at small batch*group; the workspace cost is tiny
+// (e.g. B=1,H=32,d=128 -> 32*64*130*4 ≈ 1.06 MB).
+static constexpr int kFlashDecodeMaxSplits = 64;
 
 // Geometry gate for the flash_decode kernel. The launcher has template
 // instantiations for:
@@ -783,7 +802,7 @@ static int gqa_forward_hipblaslt(
     const size_t rope_temp_bytes =
         need_rope ? (Q_full_bytes + K_full_bytes) : 0;
     const size_t flash_partials_bytes =
-        use_flash_decode ? static_cast<size_t>(B) * H * kFlashDecodeKSplits *
+        use_flash_decode ? static_cast<size_t>(B) * H * kFlashDecodeMaxSplits *
                                (d + 2) * sizeof(float)
                          : 0;
     const size_t total_ws_bytes =
@@ -860,16 +879,16 @@ static int gqa_forward_hipblaslt(
       if (hip_gqa_flash_decode(
               stream, qSrc, present_key, present_value, output, partials,
               static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
-              static_cast<int>(d), static_cast<int>(present_seq),
-              kFlashDecodeKSplits, scale, seqlens_k_ptr,
-              static_cast<int>(local_window_size), head_sink,
+              static_cast<int>(d), static_cast<int>(skv),
+              static_cast<int>(present_seq), kFlashDecodeMaxSplits, scale,
+              seqlens_k_ptr, static_cast<int>(local_window_size), head_sink,
               static_cast<int>(use_smooth_softmax)) != 0)
         return -1;
       RUNTIME_DEBUG_LOG(
           "[REAL] flash GQA decode: B=%lld sq=%lld skv=%lld H=%lld G=%lld "
-          "d=%lld K_SPLITS=%d window=%lld sink=%d smooth=%d zero_d2h=%d\n",
+          "d=%lld max_splits=%d window=%lld sink=%d smooth=%d zero_d2h=%d\n",
           (long long)B, (long long)sq, (long long)skv, (long long)H,
-          (long long)G, (long long)d, kFlashDecodeKSplits,
+          (long long)G, (long long)d, kFlashDecodeMaxSplits,
           (long long)local_window_size, static_cast<int>(head_sink != nullptr),
           static_cast<int>(use_smooth_softmax),
           static_cast<int>(seqlens_k_ptr != nullptr && !need_host_past_len));
@@ -1051,6 +1070,17 @@ static int gqa_forward_hipblaslt(
                        present_value &&
                        (sq == 1 || gqa_no_expand_prefill_enabled());
   bool need_transpose = (sq > 1);
+
+  // Fused FA-2 WMMA prefill (v5 d64 / v7 d128) eligibility. These kernels are
+  // fp16, causal, GQA, and read the BNSD cache + BSHD roped Q directly -- they
+  // do NOT support sliding window, head sink, smooth softmax, fp32, or the
+  // bidirectional (no_causal) mask, so we gate all of those out and let the
+  // decomposed path keep handling them. Requires the no-expand operand layout.
+  bool use_fused_prefill = gqa_fused_prefill_enabled() && use_no_expand &&
+                           (sq > 1) && !gemm_fp32 && !no_causal &&
+                           (d == 64 || d == 128) && (local_window_size <= 0) &&
+                           (head_sink == nullptr) && !use_smooth_softmax &&
+                           present_key && present_value;
 
   // GEMM descriptor keys. The no-expand flavour uses explicit per-operand
   // strides (non-zero stride fields); the expand flavour leaves them zero
@@ -1242,7 +1272,10 @@ static int gqa_forward_hipblaslt(
     // ---- Step 3: Q Transpose BSHD [B,S,H,d] -> BNSD [B,H,S,d] ----
     // Skipped for sq == 1 because BSHD [B, 1, H, d] and BNSD [B, H, 1, d]
     // are bit-identical in memory -- the Score GEMM can read qSrc directly.
-    if (need_transpose) {
+    // Fused prefill consumes qSrc (BSHD) directly, so its BNSD transpose is
+    // dead work -- skip it. (d_Qtrans is still reserved in the workspace but
+    // never read on this path.)
+    if (need_transpose && !use_fused_prefill) {
       HIP_CHECK(hip_gqa_transpose_mid_dims(
           stream, qSrc, d_Qtrans, static_cast<int>(B), static_cast<int>(sq),
           static_cast<int>(H), static_cast<int>(d), static_cast<int>(elem_sz)));
@@ -1269,6 +1302,38 @@ static int gqa_forward_hipblaslt(
           static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
           (use_no_expand && !no_causal) ? seqlens_k_ptr : nullptr,
           static_cast<int>(elem_sz), no_causal, static_cast<int>(skv)));
+    }
+
+    // ---- Fused prefill fast path (opt-in, replaces steps 6-11) ----
+    // A single FA-2 WMMA kernel reads the post-RoPE BSHD Q (qSrc) and the
+    // freshly-appended BNSD KV cache directly, writing BSHD output. v5 wins at
+    // d==64, v7 at d==128 (OPTIMIZATION.md ch.13/§16.4). Each self-tunes its
+    // launch config per shape on first use. total_seq is the valid KV length
+    // (past_len + sq); present_seq is the cache buffer stride (max_seq).
+    if (use_fused_prefill) {
+      int fp_rc = (d == 64)
+                      ? hip_gqa_flash_prefill_v5(
+                            stream, qSrc, present_key, present_value, output,
+                            static_cast<int>(B), static_cast<int>(H),
+                            static_cast<int>(G), static_cast<int>(sq),
+                            static_cast<int>(total_seq), static_cast<int>(d),
+                            static_cast<int>(present_seq),
+                            static_cast<int>(past_len), scale)
+                      : hip_gqa_flash_prefill_v7(
+                            stream, qSrc, present_key, present_value, output,
+                            static_cast<int>(B), static_cast<int>(H),
+                            static_cast<int>(G), static_cast<int>(sq),
+                            static_cast<int>(total_seq), static_cast<int>(d),
+                            static_cast<int>(present_seq),
+                            static_cast<int>(past_len), scale);
+      if (fp_rc != 0)
+        result = -1;
+      RUNTIME_DEBUG_LOG(
+          "[REAL] GQA fused prefill v%d: B=%lld sq=%lld total_seq=%lld H=%lld "
+          "G=%lld d=%lld past_len=%lld rc=%d\n",
+          (d == 64 ? 5 : 7), (long long)B, (long long)sq, (long long)total_seq,
+          (long long)H, (long long)G, (long long)d, (long long)past_len, fp_rc);
+      goto cleanup;
     }
 
     // ---- Steps 6-7: KV Expand [B*G, present_seq, d] -> [B*H, total_seq, d]
