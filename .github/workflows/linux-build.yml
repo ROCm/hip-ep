@@ -305,6 +305,10 @@ jobs:
             echo "OGA_PR_PATCHES is empty; nothing to apply"
             exit 0
           fi
+          # pull/<n>.patch is a format-patch series; apply with `git am` so that
+          # intra-series file renames (morphizen_ep -> amdgpu) replay against the
+          # correct intermediate tree. `git apply` flattens the series and chokes
+          # on the rename whose pre-image only exists after an earlier commit.
           # git am needs a committer identity on a bare runner.
           git config user.email "ci@onnx-hipdnn-ep.local"
           git config user.name "onnx-hipdnn-ep CI"
@@ -316,7 +320,8 @@ jobs:
             curl -fsSL --retry 6 --retry-delay 10 --retry-all-errors \
               "$url" -o "/tmp/oga-pr-${pr}.patch"
             echo "Applying PR #${pr}"
-            git am --whitespace=nowarn "/tmp/oga-pr-${pr}.patch"
+            git am --3way --whitespace=nowarn "/tmp/oga-pr-${pr}.patch" \
+              || { git am --abort; echo "PR #${pr} failed to apply"; exit 1; }
           done
 
       - name: Build OGA
