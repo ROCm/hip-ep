@@ -60,6 +60,20 @@ struct ScopedDevice {
 // whatever HIP device the caller had selected" than throw across the EP
 // factory ABI boundary. Real production callers go through
 // MorphiZenEpFactory::CreateMemoryInfo_V2, which always sets a valid id.
+// Map a request (or an allocated buffer's size) to a fixed size class. Returns
+// the index into kSizeClasses of the first class whose capacity is >= size, or
+// -1 when size exceeds the largest class (a "large" buffer handled best-fit).
+// Because pooled buffers are allocated at exactly their class capacity, calling
+// this on an allocated buffer's stored size recovers the class it belongs to.
+int SizeClassIndex(size_t size) noexcept {
+  for (int i = 0; i < static_cast<int>(kNumSizeClasses); ++i) {
+    if (size <= kSizeClasses[i]) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 int TryGetDeviceId(const OrtMemoryInfo* memory_info) noexcept {
   if (memory_info == nullptr) {
     return -1;
@@ -99,16 +113,35 @@ void* ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator* this_,
   }
   auto* self = static_cast<HipGpuAllocator*>(this_);
 
-  // Fast path: reuse a same-size buffer from the free list (no driver call).
+  const int cls = SizeClassIndex(size);
+
+  // Fast path: reuse a pooled buffer with no driver call. For a size class,
+  // any buffer in that class fits (they are all the class capacity). For a
+  // large request, take the smallest free large buffer that is >= the request
+  // (best-fit) so a freed 32 MB buffer can still serve a later 31 MB request.
   {
     std::lock_guard<std::mutex> lk(self->pool_mutex_);
-    auto it = self->free_lists_.find(size);
-    if (it != self->free_lists_.end() && !it->second.empty()) {
-      void* ptr = it->second.back();
-      it->second.pop_back();
-      return ptr;
+    if (cls >= 0) {
+      auto& fl = self->free_lists_[cls];
+      if (!fl.empty()) {
+        void* ptr = fl.back();
+        fl.pop_back();
+        return ptr;
+      }
+    } else {
+      auto it = self->large_free_.lower_bound(size);
+      if (it != self->large_free_.end()) {
+        void* ptr = it->second;
+        self->large_free_.erase(it);
+        return ptr;
+      }
     }
   }
+
+  // Cold miss: allocate. Pooled requests are rounded up to the full class
+  // capacity so the buffer is reusable by any later request in the same class;
+  // large requests are allocated at their exact size.
+  const size_t alloc_size = (cls >= 0) ? kSizeClasses[cls] : size;
 
   ScopedDevice _(self->device_id_);
   // On AMD APU iGPU (the only hardware MorphiZen EP currently targets) the
@@ -127,17 +160,17 @@ void* ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator* this_,
   // / CopyCpuToDevice through the HIP runtime. Tracked separately because
   // the OGA-side change cuts across the smartptrs / DeviceBuffer abstraction.
   void* ptr = nullptr;
-  hipError_t err =
-      hipHostMalloc(&ptr, size, hipHostMallocMapped | hipHostMallocCoherent);
+  hipError_t err = hipHostMalloc(&ptr, alloc_size,
+                                 hipHostMallocMapped | hipHostMallocCoherent);
   if (err != hipSuccess) {
     LOG(ERROR) << "[MorphiZen HIP] hipHostMalloc(Mapped|Coherent) failed for "
-               << size << " bytes (device " << self->device_id_
+               << alloc_size << " bytes (device " << self->device_id_
                << "): " << hipGetErrorString(err);
     return nullptr;
   }
   {
     std::lock_guard<std::mutex> lk(self->pool_mutex_);
-    self->ptr_to_size_[ptr] = size;
+    self->ptr_to_size_[ptr] = alloc_size;
   }
   return ptr;
 }
@@ -150,9 +183,16 @@ void ORT_API_CALL HipGpuAllocator::FreeImpl(OrtAllocator* this_, void* p) {
   std::lock_guard<std::mutex> lk(self->pool_mutex_);
   auto it = self->ptr_to_size_.find(p);
   if (it != self->ptr_to_size_.end()) {
-    // Return to the free list for reuse; do NOT release to the driver here.
-    // Safe to reuse without a stream sync: see the pool comment in the header.
-    self->free_lists_[it->second].push_back(p);
+    // Return to the pool for reuse; do NOT release to the driver here. Safe to
+    // reuse without a stream sync: see the pool comment in the header. The
+    // stored size is the class capacity for pooled buffers (so SizeClassIndex
+    // recovers the class) and the exact size for large buffers.
+    const int cls = SizeClassIndex(it->second);
+    if (cls >= 0) {
+      self->free_lists_[cls].push_back(p);
+    } else {
+      self->large_free_.emplace(it->second, p);
+    }
     return;
   }
   // Defensive: a pointer we never handed out (should not happen). Release it
@@ -171,11 +211,14 @@ HipGpuAllocator::~HipGpuAllocator() {
   for (const auto& kv : ptr_to_size_) {
     hipError_t err = hipHostFree(kv.first);
     if (err != hipSuccess) {
-      LOG(WARNING) << "[MorphiZen HIP] hipHostFree failed (device " << device_id_
-                   << "): " << hipGetErrorString(err);
+      LOG(WARNING) << "[MorphiZen HIP] hipHostFree failed (device "
+                   << device_id_ << "): " << hipGetErrorString(err);
     }
   }
-  free_lists_.clear();
+  for (auto& fl : free_lists_) {
+    fl.clear();
+  }
+  large_free_.clear();
   ptr_to_size_.clear();
 }
 
