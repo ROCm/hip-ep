@@ -4,7 +4,8 @@
  */
 
 //===----------------------------------------------------------------------===//
-// GPU-free unit tests for HalAllocator (ApuHalAllocator + DiscreteHalAllocator).
+// GPU-free unit tests for HalAllocator (ApuHalAllocator +
+// DiscreteHalAllocator).
 //
 // Compiled with HIPDNN_EP_MM_MOCK_HAL so all HIP calls are replaced with
 // malloc/free/memcpy. Tests verify the block contract without a GPU.
@@ -22,12 +23,12 @@
 // Shared failure counter — defined in test_memory_manager.cpp, extern here.
 extern int g_failures;
 
-#define CHECK(cond)                                                             \
-  do {                                                                          \
-    if (!(cond)) {                                                              \
-      std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);      \
-      ++g_failures;                                                             \
-    }                                                                           \
+#define CHECK(cond)                                                            \
+  do {                                                                         \
+    if (!(cond)) {                                                             \
+      std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);     \
+      ++g_failures;                                                            \
+    }                                                                          \
   } while (0)
 
 //===----------------------------------------------------------------------===//

@@ -55,7 +55,7 @@ static inline int hipHostFree(void *ptr) {
   return 0;
 }
 static inline int hipMemcpyAsync(void *dst, const void *src, size_t n,
-                                  int /*kind*/, void * /*stream*/) {
+                                 int /*kind*/, void * /*stream*/) {
   memcpy(dst, src, n);
   return 0;
 }
@@ -80,9 +80,10 @@ HalBlock DiscreteHalAllocator::alloc(size_t bytes, MemTier /*preferred*/) {
   }
 
   // Allocate pinned host RAM up-front (pre-alloc avoids latency at evict time).
-  if (hipHostMalloc(&block.cpu_ptr, bytes, hipHostMallocDefault) != hipSuccess) {
-    fprintf(stderr,
-            "DiscreteHalAllocator::alloc: hipHostMalloc(%zu) failed\n", bytes);
+  if (hipHostMalloc(&block.cpu_ptr, bytes, hipHostMallocDefault) !=
+      hipSuccess) {
+    fprintf(stderr, "DiscreteHalAllocator::alloc: hipHostMalloc(%zu) failed\n",
+            bytes);
     hipFree(block.gpu_ptr);
     block.gpu_ptr = nullptr;
     return block;
@@ -107,19 +108,19 @@ void DiscreteHalAllocator::free(HalBlock &block) {
 }
 
 // Eviction (GPU → CPU): async D2H memcpy on the provided stream.
-// VRAM is retained — the GPU page acts as a "clean slot" for future H2D restore.
-// After stream completion: cpu_valid = true, resident = CPU.
-// IMPORTANT: the caller must ensure the stream has drained (hipStreamSynchronize)
-// before reading cpu_ptr from the host; the GPU write completes asynchronously.
+// VRAM is retained — the GPU page acts as a "clean slot" for future H2D
+// restore. After stream completion: cpu_valid = true, resident = CPU.
+// IMPORTANT: the caller must ensure the stream has drained
+// (hipStreamSynchronize) before reading cpu_ptr from the host; the GPU write
+// completes asynchronously.
 void DiscreteHalAllocator::evict_to_cpu(HalBlock &block, void *stream) {
   if (!block.gpu_ptr || !block.cpu_ptr)
     return;
 
-  // Cast to hipStream_t only in real builds; mock hipMemcpyAsync takes void*.
+    // Cast to hipStream_t only in real builds; mock hipMemcpyAsync takes void*.
 #ifndef HIPDNN_EP_MM_MOCK_HAL
   hipMemcpyAsync(block.cpu_ptr, block.gpu_ptr, block.size,
-                 hipMemcpyDeviceToHost,
-                 static_cast<hipStream_t>(stream));
+                 hipMemcpyDeviceToHost, static_cast<hipStream_t>(stream));
 #else
   hipMemcpyAsync(block.cpu_ptr, block.gpu_ptr, block.size,
                  hipMemcpyDeviceToHost, stream);
@@ -127,7 +128,8 @@ void DiscreteHalAllocator::evict_to_cpu(HalBlock &block, void *stream) {
 
   block.resident = MemTier::CPU;
   block.cpu_valid = true;
-  // gpu_valid is cleared: GPU copy is now stale (CPU is authoritative after sync).
+  // gpu_valid is cleared: GPU copy is now stale (CPU is authoritative after
+  // sync).
   block.gpu_valid = false;
 }
 
@@ -142,8 +144,7 @@ void DiscreteHalAllocator::restore_to_gpu(HalBlock &block, void *stream) {
 
 #ifndef HIPDNN_EP_MM_MOCK_HAL
   hipMemcpyAsync(block.gpu_ptr, block.cpu_ptr, block.size,
-                 hipMemcpyHostToDevice,
-                 static_cast<hipStream_t>(stream));
+                 hipMemcpyHostToDevice, static_cast<hipStream_t>(stream));
 #else
   hipMemcpyAsync(block.gpu_ptr, block.cpu_ptr, block.size,
                  hipMemcpyHostToDevice, stream);
