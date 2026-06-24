@@ -15,6 +15,7 @@
 
 #include <array>
 #include <cstddef>
+#include <map>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -25,8 +26,11 @@ namespace morphizen {
 // first class whose capacity is >= N, and the buffer is allocated at the full
 // class capacity so any later request mapping to the same class can reuse it.
 // Requests larger than the last class are allocated at their exact size and
-// freed straight back to the driver on Free (not pooled) to keep peak memory
-// bounded — see FreeImpl in the .cpp.
+// pooled best-fit in a SEPARATE large free list that is capped at
+// kMaxLargeFreeBuffers entries; on a cold miss the smallest pooled large
+// buffers are evicted (freed to the driver) before a new one is allocated, so
+// peak memory stays bounded even when a model grows its largest transient
+// incrementally — see AllocImpl in the .cpp.
 inline constexpr size_t kSizeClasses[] = {
     1ull * 1024,         // 1 KB
     2ull * 1024,         // 2 KB
@@ -58,6 +62,14 @@ inline constexpr size_t kSizeClasses[] = {
 };
 inline constexpr size_t kNumSizeClasses =
     sizeof(kSizeClasses) / sizeof(kSizeClasses[0]);
+
+// Upper bound on the number of buffers kept in the large free list (those
+// bigger than the largest size class). Large buffers are expensive to keep
+// pinned, so when a cold miss would grow the driver-side footprint we evict the
+// smallest pooled large buffers down to this cap first. Small enough to keep
+// peak memory bounded under an incrementally-growing transient, large enough to
+// retain useful reuse across the few distinct large shapes a model exercises.
+inline constexpr size_t kMaxLargeFreeBuffers = 4;
 
 // hipHostMalloc(Mapped|Coherent) backed OrtAllocator. One instance is created
 // per OrtMemoryInfo registered with OrtEpDevice (typically one DEFAULT GPU
@@ -94,33 +106,40 @@ private:
   // every buffer within a class is interchangeable and any later request
   // mapping to the same class reuses it (100% hit rate after warmup, with at
   // most a few distinct class sizes regardless of how many dynamic shapes the
-  // model sees). Pooled buffers never return to the driver on Free; they are
-  // released wholesale in the destructor — matching the project's per-session
-  // "grow-on-demand, never shrink, free at cleanup" memory contract.
+  // model sees). Requests larger than the last class are allocated at their
+  // exact size and recycled best-fit (the smallest free large buffer that is
+  // >= the new request is reused). Free never returns memory to the driver
+  // (except large-buffer eviction below); everything is released wholesale in
+  // the destructor — matching the project's per-session "grow-on-demand, never
+  // shrink, free at cleanup" memory contract.
   //
-  // Requests larger than the last class are NOT pooled: they are allocated at
-  // their exact size and freed straight back to the driver on Free. Best-fit
-  // pooling of large buffers made the working set balloon when a model grows
-  // its largest transient incrementally across Runs — each slightly-larger
-  // request misses the pool and allocates fresh while the prior near-size
-  // buffers stay pinned in the free list. Freeing large buffers eagerly keeps
-  // peak memory bounded at the cost of a hipHostMalloc/hipHostFree pair per
-  // large transient per Run (acceptable: large transients are few).
+  // The large free list is the one exception to "never shrink": it is capped at
+  // kMaxLargeFreeBuffers, and on a cold miss for a large request AllocImpl
+  // evicts the smallest pooled large buffers (freeing them to the driver) down
+  // to the cap before allocating the new one. This keeps reuse performance for
+  // the handful of distinct large shapes a model actually uses while preventing
+  // the working set from ballooning when a model grows its largest transient a
+  // little each Run (otherwise each slightly-larger request would allocate
+  // fresh while every prior near-size buffer stayed pinned in the free list).
   //
   // Reuse needs no per-handout stream sync: ORT only calls Free after Run
   // returns, and allocator-mode inference_compute ends with a full
   // hipdnn_ep_stream_sync, so any GPU work touching a freed buffer has
-  // already drained before it can be handed back out (or, for large buffers,
-  // before it is released to the driver).
+  // already drained before it can be handed back out (or evicted).
   std::mutex pool_mutex_;
   // Index i holds reusable buffers each exactly kSizeClasses[i] bytes.
   std::array<std::vector<void*>, kNumSizeClasses> free_lists_;
+  // Freed buffers larger than the largest size class, keyed by their exact
+  // allocated byte size. Reuse is best-fit via lower_bound(request); eviction
+  // takes the smallest via begin(). Capped at kMaxLargeFreeBuffers.
+  std::multimap<size_t, void*> large_free_;
   // Every pointer hipHostMalloc'd by this allocator that is still outstanding
   // -> its allocated byte size (the rounded-up class capacity for pooled
   // buffers, the exact size for large ones). Pooled buffers stay tracked for
   // the allocator's lifetime (Free only moves them onto a free list) so the
-  // destructor can release them; large buffers are erased from this map when
-  // freed eagerly in FreeImpl.
+  // destructor can release them and AllocImpl can recover an evicted large
+  // buffer's size; an evicted large buffer is erased from this map in AllocImpl
+  // when it is freed to the driver.
   std::unordered_map<void*, size_t> ptr_to_size_;
 
   const OrtMemoryInfo* memory_info_;
