@@ -26,6 +26,11 @@
 // layout-agnostic (it only forward-declares RuntimeState), so including it here
 // is acyclic.
 #include "op_state.h"
+// Unified Memory Manager (Phase 1). All session-scoped GPU/host buffers
+// (pool domains, workspace, host-scalar scratch, qmoe host scratch) are now
+// owned by MemoryManager and accessed through it. seqlens_k cache also lives
+// in MM so begin_compute() is the single invalidation point.
+#include "mm/memory_manager.h"
 
 // Internal runtime state structure
 // This struct is opaque to generated code (passed as void*)
@@ -42,45 +47,35 @@ struct RuntimeState {
   void **gpu_constants;
   size_t num_constants;
 
-  // Memory pooling support — multi-domain.
+  // -------------------------------------------------------------------------
+  // Unified Memory Manager (Phase 1+).
   //
-  // hip-pool-allocs partitions a function's pooled allocs into independent
-  // dominance domains; each domain owns one contiguous GPU pool that grows on
-  // demand. Domain 0 carries the legacy single-pool semantics (eagerly sized
-  // by hipdnn_ep_pool_init using static offsets) so single-domain models are
-  // bit-identical to the pre-multi-domain runtime. Domains 1..N start empty
-  // and grow lazily on the first hipdnn_ep_get_pool_base(state, domain_id, ...)
-  // call.
+  // All session-scoped memory — pool domains, shared workspace, host-scalar
+  // scratch, qmoe host scratch — is now owned by `mm`. The extern C API
+  // functions in hipdnn_ep_runtime.h remain unchanged; their implementations
+  // in hipdnn_ep_runtime_state.cpp delegate to mm->*.
   //
-  // The per-domain pool arrays are themselves grown on demand: there is no
-  // compile-time cap on the domain count. pool_base/pool_size are heap arrays
-  // of num_pool_domains entries, reallocated (zero-filling new slots) the first
-  // time a higher domain_id is observed — by hipdnn_ep_get_pool_base for the
-  // lazy domains and by hipdnn_ep_pool_init for domain 0. Every domain_id is
-  // first seen on the cold first inference, so num_pool_domains stabilises
-  // after that and no further array realloc happens at steady state — mirroring
-  // the grow-on-demand contract of the individual pools. realloc-move is safe
-  // because nothing caches &pool_base[i] across calls; pool_base[domain_id] is
-  // re-derived from state on every access.
-  int num_pool_domains;   // Number of slots currently allocated in the arrays
-  void **pool_base;       // [num_pool_domains] per-domain GPU pool base ptrs
-  size_t *pool_size;      // [num_pool_domains] per-domain pool size in bytes
-  size_t *buffer_offsets; // Offsets for static buffers in domain 0
-  size_t num_buffers;     // Static buffer count in domain 0
+  // The legacy flat fields below (pool_base, pool_size, workspace, …) are kept
+  // during the Phase-1 transition period so that the EXISTING EXTERN C ABI
+  // surface compiles unchanged. They are effectively aliases — the actual data
+  // lives in mm, and these fields are unused once mm is created. They will be
+  // removed in Phase 2 once all callers are proven to go through mm.
+  // -------------------------------------------------------------------------
 
-  // Shared workspace for operator temp buffers (MatMul GEMM ws, GQA pipeline).
-  // Lazily grown via hipdnn_ep_state_ensure_workspace(); never shrinks.
+  MemoryManager *mm; // owns all session-scoped memory; created in init
+
+  // LEGACY: kept for ABI transition. Do not use directly — go through mm.
+  int num_pool_domains;   // mirrors mm->num_pool_domains()
+  void **pool_base;       // unused after Phase 1 (mm owns the pools)
+  size_t *pool_size;      // unused after Phase 1
+  size_t *buffer_offsets; // unused after Phase 1 (mm->buffer_offsets_)
+  size_t num_buffers;     // unused after Phase 1 (mm->num_buffers_)
+
+  // LEGACY: kept for ABI transition. Do not use directly — go through mm.
   void *workspace;
   size_t workspace_size;
 
-  // Host-mapped scratch buffer for tiny host-fed scalars routed away from the
-  // GPU pool by hip-materialize-host-scalars.
-  // hipHostMalloc(hipHostMallocMapped): host-writable AND GPU-readable.
-  // Grow-on-demand via hipdnn_ep_get_host_scratch_base(); never shrinks.
-  // hipHostFree'd in cleanup. Why: on some targets the regular GPU pool is
-  // real device memory; host stores into it SEGV. Other targets silently
-  // worked because hipMalloc returned UMA-mapped host memory there, masking
-  // the bug.
+  // LEGACY: kept for ABI transition. Do not use directly — go through mm.
   void *host_scratch_base;
   size_t host_scratch_size;
 
@@ -91,6 +86,7 @@ struct RuntimeState {
   // never calls alloc_output); zero-initialized in initialize_state_handles.
   hipdnn_output_allocator_t output_allocator;
 
+  // LEGACY: kept for ABI transition. Do not use directly — go through mm.
   // Per-session scratch buffer for wrap_qmoe transient device buffers
   // (expert_indices, expert_weights, gather_buf, fc1_buf, act_buf, fc2_buf,
   // token_ids, token_wts -- 8 sub-buffers laid out at fixed offsets).
@@ -182,22 +178,15 @@ struct RuntimeState {
   void *hipdnn_handle;
   void *hipdnn_graph_registry;
 
-  // Per-Compute() cache for seqlens_k_val (decode hot path).
+  // Per-Compute() seqlens_k cache — now lives in RuntimeState::mm.
   //
-  // Decode runs 32 GQA layers per token, all reading the same seqlens_k
-  // from device memory. The decomposed-path readback in gqa.cpp issues a
-  // hipMemcpyAsync(D2H) + hipStreamSynchronize per layer (31 redundant
-  // pipeline stalls, tens of ms per token on long-context decode). The cache
-  // is on by default
-  // (HIPDNN_EP_GQA_CACHE_SEQLENS=1, set to 0 to disable): the first GQA
-  // in a forward pass populates the cache and the remaining 31 layers
-  // reuse it.
+  // These three fields are kept here as ALIASES so that the existing code in
+  // gqa.cpp (which reads/writes state->seqlens_k_cached_*) continues to
+  // compile unchanged during Phase 1. They are populated from / flushed to
+  // mm->seqlens_k_* by hipdnn_ep_runtime_begin_compute(). In Phase 2 the
+  // gqa.cpp accessors will be redirected to mm directly and these removed.
   //
-  // Invalidated by hipdnn_ep_runtime_begin_compute() at the start of each
-  // Compute(), called from the EP-side MlirCustomOp::Compute() entry.
-  // If the symbol is not exported (older per-model bitcode), invalidation
-  // does not happen and the cache is unsafe -- the EP logs a warning at
-  // session creation and the user must set HIPDNN_EP_GQA_CACHE_SEQLENS=0.
+  // Invalidated by hipdnn_ep_runtime_begin_compute() via mm->begin_compute().
   bool seqlens_k_cached_valid;
   int32_t seqlens_k_cached_val;
   const void *seqlens_k_cached_ptr;

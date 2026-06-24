@@ -36,3 +36,6 @@ target_compile_definitions(test-output-allocator PRIVATE HIPDNN_EP_RT_NO_EXPORT)
 add_test(NAME OutputAllocatorUnitTest COMMAND test-output-allocator)
 
 set_target_properties(test-output-allocator PROPERTIES FOLDER "runtime-tests")
+
+# Unified Memory Manager unit tests (GPU-free, Phase 1+)
+add_subdirectory(mm)
