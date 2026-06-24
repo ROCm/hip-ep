@@ -23,7 +23,8 @@
 #include <cstring>
 
 // HIP calls for GPU buffers that are NOT managed through the HAL (pool domains,
-// shared workspace). These are pure VRAM allocations with no CPU backing needed.
+// shared workspace). These are pure VRAM allocations with no CPU backing
+// needed.
 #ifndef HIPDNN_EP_MM_MOCK_HAL
 #include "runtime_types.h"
 
@@ -179,8 +180,7 @@ bool MemoryManager::grow_host_buffer(void **ptr_out, size_t *size_out,
 
   if (*ptr_out) {
     hip_sync_stream(stream_);
-    fprintf(stderr,
-            "MemoryManager: growing host buffer %s %zu -> %zu bytes\n",
+    fprintf(stderr, "MemoryManager: growing host buffer %s %zu -> %zu bytes\n",
             debug_name, *size_out, new_size);
     fflush(stderr);
     hip_free_host(*ptr_out);

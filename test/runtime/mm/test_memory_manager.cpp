@@ -23,12 +23,12 @@
 // Non-static so test_hal.cpp can use it as extern int g_failures.
 int g_failures = 0;
 
-#define CHECK(cond)                                                             \
-  do {                                                                          \
-    if (!(cond)) {                                                              \
-      std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);      \
-      ++g_failures;                                                             \
-    }                                                                           \
+#define CHECK(cond)                                                            \
+  do {                                                                         \
+    if (!(cond)) {                                                             \
+      std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);     \
+      ++g_failures;                                                            \
+    }                                                                          \
   } while (0)
 
 // Helper: create a MemoryManager backed by a fresh ApuHalAllocator (mock mode).
@@ -108,8 +108,7 @@ static void test_load_pool_plan_sets_buffers() {
   CHECK(buf0 != nullptr);
   CHECK(buf1 != nullptr);
   // buf1 should be 128 bytes past buf0.
-  CHECK(reinterpret_cast<char *>(buf1) ==
-        reinterpret_cast<char *>(buf0) + 128);
+  CHECK(reinterpret_cast<char *>(buf1) == reinterpret_cast<char *>(buf0) + 128);
   delete mm;
 }
 
@@ -117,7 +116,7 @@ static void test_get_buffer_from_pool_out_of_range_returns_null() {
   auto mm = make_mm();
   size_t offsets[] = {0, 64};
   mm->load_pool_plan(128, offsets, 2);
-  mm->get_pool_base(0, 128); // ensure pool is allocated
+  mm->get_pool_base(0, 128);              // ensure pool is allocated
   void *p = mm->get_buffer_from_pool(99); // index out of range
   CHECK(p == nullptr);
   delete mm;
