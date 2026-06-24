@@ -586,13 +586,18 @@ __global__ void linear_attention_prefill_chunked_kernel(
         }
         __syncthreads();
         const float a_last = Asm[Ceff - 1];
-        // Precompute the per-s state-update scale a_last/A_s ONCE (Ceff divisions
+        // Precompute the per-s state-update scale (A_{C-1}/A_s) ONCE (Ceff exps
         // total) instead of recomputing it inside the dk*dv phase-6 loop below.
-        // Kept as a division (not a_last * 1/A_s): a_last <= A_s so the quotient
-        // is <=1 and overflow-safe, whereas 1/A_s alone can overflow when A_s
-        // underflows under strong intra-chunk decay.
+        // Compute it as exp(clog_last - clog_s), NOT as the ratio a_last/A_s:
+        // under strong intra-chunk decay clog_s can be very negative, so both
+        // A_s = exp(clog_s) AND a_last = exp(clog_last) underflow to 0 in fp32
+        // and the ratio becomes 0/0 = NaN (which then poisons S and every
+        // subsequent chunk -> all-garbage output). The difference clog_last -
+        // clog_s is bounded (<= 0 for log-decay g <= 0), so exp() of it is in
+        // (0, 1] and always finite. This also matches the exp(clog_t - clog_s)
+        // form already used for the P/T ratios above (internal consistency).
         for (int s = tid; s < Ceff; s += nthreads)
-            rlast[s] = a_last / Asm[s];
+            rlast[s] = expf(clog[Ceff - 1] - clog[s]);
         __syncthreads();
 
         // B[t][j] = beta_t v_t[j] - beta_t A_t (S0^T k_t)[j]  -> Usm
