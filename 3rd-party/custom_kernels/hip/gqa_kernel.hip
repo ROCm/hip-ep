@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <algorithm>
+#include <unordered_map>
 
 #include "hip_custom_kernels.h"
 
