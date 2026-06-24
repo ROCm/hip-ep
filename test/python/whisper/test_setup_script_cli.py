@@ -16,10 +16,17 @@ _spec.loader.exec_module(swm)
 
 
 def test_resolve_target_default_large_v3():
-    name, precision = swm._resolve_args([])
+    name, precision, list_only = swm._resolve_args([])
     assert name == "large-v3" and precision == "fp16"
+    assert list_only is False
 
 
 def test_resolve_target_variant_fp32():
-    name, precision = swm._resolve_args(["--variant", "tiny", "--fp32"])
+    name, precision, list_only = swm._resolve_args(["--variant", "tiny", "--fp32"])
     assert name == "tiny" and precision == "fp32"
+    assert list_only is False
+
+
+def test_resolve_list_flag():
+    name, precision, list_only = swm._resolve_args(["--variant", "base", "--list"])
+    assert (name, precision, list_only) == ("base", "fp16", True)

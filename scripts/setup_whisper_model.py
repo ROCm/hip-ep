@@ -23,7 +23,7 @@ import sys
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "test" / "python"))
 
-from conftest import setup_whisper_variant  # noqa: E402
+from conftest import setup_whisper_variant, whisper_model_dir  # noqa: E402
 
 
 def _resolve_args(argv):
@@ -32,12 +32,20 @@ def _resolve_args(argv):
     )
     ap.add_argument("--variant", default="large-v3", help="variant name")
     ap.add_argument("--fp32", action="store_true", help="select fp32 (default: fp16)")
+    ap.add_argument(
+        "--list",
+        action="store_true",
+        help="print the resolved model dir and exit, without running setup",
+    )
     ns = ap.parse_args(argv)
-    return ns.variant, ("fp32" if ns.fp32 else "fp16")
+    return ns.variant, ("fp32" if ns.fp32 else "fp16"), ns.list
 
 
 def main() -> int:
-    name, precision = _resolve_args(sys.argv[1:])
+    name, precision, list_only = _resolve_args(sys.argv[1:])
+    if list_only:
+        print(f"{name} ({precision}): {whisper_model_dir(name, precision)}")
+        return 0
     print(f"[whisper-setup] target: {name} ({precision})")
     try:
         model_dir, _var = setup_whisper_variant(name, precision)
