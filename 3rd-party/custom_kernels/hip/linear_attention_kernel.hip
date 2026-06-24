@@ -555,6 +555,7 @@ __global__ void linear_attention_prefill_chunked_kernel(
     float* Asm = Pm + LA_CHUNK * LA_CHUNK;          // [LA_CHUNK]
     float* clog = Asm + LA_CHUNK;                   // [LA_CHUNK]
     float* bsm = clog + LA_CHUNK;                   // [LA_CHUNK]
+    float* rlast = bsm + LA_CHUNK;                  // [LA_CHUNK] a_last/A_s
 
     for (int c0 = 0; c0 < seq_len; c0 += LA_CHUNK) {
         const int Ceff = min(LA_CHUNK, seq_len - c0);
@@ -585,17 +586,33 @@ __global__ void linear_attention_prefill_chunked_kernel(
         }
         __syncthreads();
         const float a_last = Asm[Ceff - 1];
+        // Precompute the per-s state-update scale a_last/A_s ONCE (Ceff divisions
+        // total) instead of recomputing it inside the dk*dv phase-6 loop below.
+        // Kept as a division (not a_last * 1/A_s): a_last <= A_s so the quotient
+        // is <=1 and overflow-safe, whereas 1/A_s alone can overflow when A_s
+        // underflows under strong intra-chunk decay.
+        for (int s = tid; s < Ceff; s += nthreads)
+            rlast[s] = a_last / Asm[s];
+        __syncthreads();
 
         // B[t][j] = beta_t v_t[j] - beta_t A_t (S0^T k_t)[j]  -> Usm
+        // Register-blocked over t: read each S[i,j] from GLOBAL once and fold it
+        // into all Ceff partial sums sk[t], instead of re-reading the whole S
+        // column once per t (LA_CHUNK x fewer global S loads).
         for (int j = tid; j < dv; j += nthreads) {
+            float sk[LA_CHUNK];
+            for (int t = 0; t < Ceff; t++)
+                sk[t] = 0.f;
+            for (int i = 0; i < dk; i++) {
+                float s = to_float(S[i * dv + j]);
+                for (int t = 0; t < Ceff; t++)
+                    sk[t] += s * Ksm[t * dk + i];
+            }
             for (int t = 0; t < Ceff; t++) {
-                float sk = 0.f;
-                for (int i = 0; i < dk; i++)
-                    sk += to_float(S[i * dv + j]) * Ksm[t * dk + i];
                 float vtj = to_float(
                     value[b * v_bs + (int64_t)(c0 + t) * Hkv * dv +
                           (int64_t)g * dv + j]);
-                Usm[t * dv + j] = bsm[t] * vtj - bsm[t] * Asm[t] * sk;
+                Usm[t * dv + j] = bsm[t] * vtj - bsm[t] * Asm[t] * sk[t];
             }
         }
 
@@ -635,15 +652,23 @@ __global__ void linear_attention_prefill_chunked_kernel(
 
         // O[t][j] = scale*( A_t (q_t . S0[:,j]) + sum_{s<=t} P[t,s] U[s,j] )
         // uses chunk-START S0 (global, not yet updated)
+        // Register-blocked over t: read each S0[i,j] from GLOBAL once and fold
+        // it into all Ceff inter-chunk partial sums qs[t] (the (A.*Q) @ S0 term),
+        // mirroring the phase-2 blocking (LA_CHUNK x fewer global S0 loads).
         for (int j = tid; j < dv; j += nthreads) {
-            for (int t = 0; t < Ceff; t++) {
-                float inter = 0.f;
-                for (int i = 0; i < dk; i++)
-                    inter += to_float(
+            float qs[LA_CHUNK];
+            for (int t = 0; t < Ceff; t++)
+                qs[t] = 0.f;
+            for (int i = 0; i < dk; i++) {
+                float s = to_float(S[i * dv + j]);
+                for (int t = 0; t < Ceff; t++)
+                    qs[t] += to_float(
                                  query[b * q_bs + (int64_t)(c0 + t) * Hq * dk +
                                        (int64_t)h_q * dk + i]) *
-                             to_float(S[i * dv + j]);
-                inter *= Asm[t];
+                             s;
+            }
+            for (int t = 0; t < Ceff; t++) {
+                float inter = Asm[t] * qs[t];
                 float intra = 0.f;
                 for (int s = 0; s <= t; s++)
                     intra += Pm[t * Ceff + s] * Usm[s * dv + j];
@@ -659,7 +684,7 @@ __global__ void linear_attention_prefill_chunked_kernel(
             int i = idx / dv, j = idx % dv;
             float acc = a_last * to_float(S[i * dv + j]);
             for (int s = 0; s < Ceff; s++)
-                acc += (a_last / Asm[s]) * Ksm[s * dk + i] * Usm[s * dv + j];
+                acc += rlast[s] * Ksm[s * dk + i] * Usm[s * dv + j];
             S[i * dv + j] = from_float<T>(acc);
         }
         __syncthreads();   // S update complete before next chunk reads it
@@ -701,10 +726,11 @@ extern "C" int hip_linear_attention_prefill_chunked(
     const int dk_i = static_cast<int>(dk);
     const int dv_i = static_cast<int>(dv);
 
-    // LDS budget: Ksm + Usm + Tm + Pm + 3 vectors of length LA_CHUNK.
+    // LDS budget: Ksm + Usm + Tm + Pm + 4 vectors of length LA_CHUNK
+    // (Asm, clog, bsm, rlast).
     const size_t smem_bytes =
         static_cast<size_t>(LA_CHUNK * dk_i + LA_CHUNK * dv_i +
-                            2 * LA_CHUNK * LA_CHUNK + 3 * LA_CHUNK) *
+                            2 * LA_CHUNK * LA_CHUNK + 4 * LA_CHUNK) *
         sizeof(float);
     if (smem_bytes > 64 * 1024) return 1;           // too big -> fall back
 
