@@ -1220,7 +1220,7 @@ HIP_KERNEL_API int hip_layer_norm(
 /* L2 normalization over the last axis:
  *   y = x * rsqrt(sum(x^2, last_axis) + epsilon)
  * One block per row; FP32 accumulation. hip_dtype: FLOAT16 or FLOAT32. */
-int hip_l2_normalize(
+HIP_KERNEL_API int hip_l2_normalize(
     void* stream,
     const void* input,
     void* output,
