@@ -121,14 +121,6 @@ def make_morphizen_session_factory(repo_root, model_dir):
     def factory(model_name):
         so = ort.SessionOptions()
         so.add_session_config_entry("session.disable_aot_function_inlining", "1")
-        # Force NATIVE artifact format: the default in-process LLVM-IR ORC JIT
-        # crashes at session create on Windows (comgr LLVM-symbol collision; the
-        # version-script fix is Linux-only). artifact_format is a hipep *backend*
-        # option, passed as a raw `ep.hipep.*` session-config entry (NOT a
-        # provider option — ORT rejects unknown provider options; the umbrella
-        # forwards non-umbrella-prefixed config entries verbatim to the backend).
-        # Mirrors CI's `-C ep.hipep.artifact_format|NATIVE`.
-        so.add_session_config_entry("ep.hipep.artifact_format", "NATIVE")
         # profile=llm tells the AMDGPU umbrella to dispatch to the hipep backend.
         so.add_provider_for_devices(devices, dict(EP_PROVIDER_OPTIONS))
         return ort.InferenceSession(str(model_dir / model_name), sess_options=so)
