@@ -899,8 +899,10 @@ def make_whisper_inputs(audio_path: pathlib.Path, cfg: WhisperModelConfig) -> di
     import soundfile as sf
     from transformers import WhisperFeatureExtractor
 
-    # Pick the feature extractor by mel count: 128-mel (large-v3/turbo) vs 80-mel
-    # (tiny/base/small/medium). Both are canonical FE configs for their mel count.
+    # Pick the feature extractor by mel count. All openai 80-mel Whisper models
+    # (tiny/base/small/medium) share one preprocessor config (80 mels, 16 kHz,
+    # same mel filterbank, 30 s window), so whisper-tiny is just a lightweight
+    # representative for the whole 80-mel family; large-v3/turbo use 128 mels.
     fe_id = "openai/whisper-large-v3" if cfg.n_mels == 128 else "openai/whisper-tiny"
     fe = WhisperFeatureExtractor.from_pretrained(fe_id)
 
