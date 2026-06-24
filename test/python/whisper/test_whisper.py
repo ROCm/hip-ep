@@ -150,12 +150,9 @@ def _setup():
 def _gc_between_tests():
     """Free ORT sessions + GPU memory between tests.
 
-    Each test creates a CPU reference session and an EP session; without
-    explicit cleanup they linger into the next test and inflate peak memory.
-    On 32 GB UMA machines (Strix Halo) CPU+GPU share one pool, so this keeps
-    the peak within budget. (The Windows access violations originally seen on
-    CI turned out to be a bitcode-JIT bug, not OOM — see the JIT allocator /
-    Tier-1 fixes; this fixture is memory hygiene, not the crash fix.)
+    Each test creates a CPU reference session and an EP session; collecting them
+    between tests keeps peak allocation within budget on shared-memory (UMA)
+    machines where CPU and GPU draw from one pool.
     """
     yield
     gc.collect()
