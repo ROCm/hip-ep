@@ -176,6 +176,37 @@ extern "C" int wrap_linear_attention(
                              (hipStream_t)hip_stream));
   }
 
+  // Fast path: prefill (seq_len > 1) of the gated_delta rule is handled by a
+  // single chunked-parallel launch that processes the whole sequence (keeps
+  // the recurrent state fp32 across each chunk -> more accurate than the
+  // per-token kernel, and replaces ~seq_len launches with one). The launcher
+  // returns 1 when it declines an unsupported config; we then fall back to the
+  // per-token loop below.
+  if (update_rule == kUpdateRuleGatedDelta && seq_len > 1) {
+    int rc = hip_linear_attention_prefill_chunked(
+        hip_stream, query, key, value, decay, beta, present_state, output, B,
+        seq_len, Hq, Hkv, Nk, dk, dv, scale, update_rule, decay_per_key_dim,
+        beta_per_head, type);
+    if (rc == 0) {
+      RUNTIME_DEBUG_LOG(
+          "[linear_attention] prefill via chunked-parallel kernel (%lld "
+          "token(s))\n",
+          (long long)seq_len);
+      goto cleanup;
+    }
+    if (rc < 0) {
+      fprintf(stderr,
+              "[linear_attention] ERROR: chunked prefill kernel failed (%d)\n",
+              rc);
+      result = -1;
+      goto cleanup;
+    }
+    RUNTIME_DEBUG_LOG(
+        "[linear_attention] chunked prefill declined (rc=%d); falling back to "
+        "per-token loop\n",
+        rc);
+  }
+
   RUNTIME_DEBUG_LOG(
       "[linear_attention] dispatching %lld token(s) via per-step decode "
       "kernel\n",
