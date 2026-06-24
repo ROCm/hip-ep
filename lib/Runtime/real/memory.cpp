@@ -47,6 +47,14 @@ int wrap_hipMemcpyAsync(RuntimeState *state, void *dst_ptr, const void *src_ptr,
 int wrap_hipMemcpy2DAsync(RuntimeState *state, void *dst_ptr, size_t dst_pitch,
                           const void *src_ptr, size_t src_pitch, size_t width,
                           size_t height) {
+  OP_PROFILE(
+      "memcpy_2d",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "w=%zu h=%zu", width, height);
+        return std::string(b);
+      },
+      state);
   if (!state) {
     fprintf(stderr, "wrap_hipMemcpy2DAsync: null state\n");
     return -1;
@@ -100,6 +108,15 @@ int wrap_strided_copy(RuntimeState *state, void *dst_ptr, const void *src_ptr,
                       int64_t elem_bytes, int64_t height,
                       int64_t src_pitch_elems, int64_t dst_pitch_elems,
                       int64_t row_elems) {
+  OP_PROFILE(
+      "strided_copy",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "h=%lld row=%lld es=%lld", (long long)height,
+                 (long long)row_elems, (long long)elem_bytes);
+        return std::string(b);
+      },
+      state);
   if (!state) {
     fprintf(stderr, "wrap_strided_copy: null state\n");
     return -1;
@@ -158,6 +175,12 @@ int wrap_strided_copy(RuntimeState *state, void *dst_ptr, const void *src_ptr,
 // the host value is read. Returns 0 on any failure (a zero extent is a safe,
 // inert dynamic dim).
 int32_t hipdnn_ep_readback_i32(RuntimeState *state, const void *device_scalar) {
+  // CPU-only profiling: this call issues a hipStreamSynchronize, so its cost is
+  // host-side wait time (GPU drain), invisible to GPU per-op events. Surfacing
+  // it as a profiled row attributes the dynamic-shape readback sync overhead
+  // (Range / Reshape(-1) / readback_dim) that otherwise lands in "outside
+  // scopes".
+  OP_PROFILE_CPU("readback_i32", state);
   if (!state || !device_scalar) {
     fprintf(stderr, "hipdnn_ep_readback_i32: null argument\n");
     return 0;
@@ -197,6 +220,10 @@ int32_t hipdnn_ep_readback_i32(RuntimeState *state, const void *device_scalar) {
 // collapsed dynamic dimension.
 void hipdnn_ep_readback_scalar(RuntimeState *state, void *host_dst,
                                const void *device_scalar, int64_t num_bytes) {
+  // CPU-only profiling: like readback_i32 this issues a hipStreamSynchronize;
+  // its cost is host-side GPU-drain time. Profiling it attributes the
+  // Range/Expand/Pad/Loop shape-readback sync overhead.
+  OP_PROFILE_CPU("readback_scalar", state);
   if (!state || !host_dst || !device_scalar || num_bytes <= 0) {
     fprintf(stderr, "hipdnn_ep_readback_scalar: invalid argument\n");
     return;
