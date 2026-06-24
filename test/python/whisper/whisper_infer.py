@@ -28,6 +28,7 @@ re-types it so the token-embed Gather gets int64 indices — the only dtype
 hip_gather supports).
 """
 
+import os
 import pathlib
 import sys
 
@@ -572,6 +573,79 @@ def _greedy_decode_numpy(
         timings["decode_ms"] = decode_ms
         timings["n_decode_steps"] = n_decode_steps
     return tokens
+
+
+# ── FD-capture + compile tripwire (shared with test_whisper.py) ──────────────
+
+
+class CaptureFD:
+    """Capture FD-level stderr+stdout into a temp file for a bounded ``with`` block.
+
+    Used ONLY around MorphiZen session creation + one warmup decode, to grab the
+    EP's compile-failure / [REAL] wrap_* signal for the silent-CPU-fallback
+    tripwire — then it is torn down so the TIMED decode loop runs at full FD
+    speed.
+
+    Why not pytest's ``capfd`` fixture: merely DECLARING ``capfd`` on a test
+    installs FD-level capture for the test's entire lifetime, and even
+    ``capfd.disabled()`` (suspend/resume) leaves residual overhead — measured
+    ~41 tok/s for fp16 vs ~48 when the test never touches capfd at all (verified
+    by an isolated in-pytest bench). This helper instead does the FD redirect
+    ourselves, scoped to exactly the compile window, so the timed region is
+    byte-for-byte the same FD state as scripts/transcribe_whisper.py → the
+    in-suite number matches the isolated ~48 tok/s.
+    """
+
+    def __init__(self):
+        self._tmp = None
+        self._saved_out = None
+        self._saved_err = None
+        self.text = ""
+
+    def __enter__(self):
+        import tempfile
+
+        sys.stdout.flush()
+        sys.stderr.flush()
+        self._tmp = tempfile.TemporaryFile(mode="w+b")
+        self._saved_out = os.dup(1)
+        self._saved_err = os.dup(2)
+        os.dup2(self._tmp.fileno(), 1)
+        os.dup2(self._tmp.fileno(), 2)
+        return self
+
+    def __exit__(self, *exc):
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.dup2(self._saved_out, 1)
+        os.dup2(self._saved_err, 2)
+        os.close(self._saved_out)
+        os.close(self._saved_err)
+        self._tmp.seek(0)
+        self.text = self._tmp.read().decode("utf-8", errors="replace")
+        self._tmp.close()
+        return False  # do not suppress exceptions
+
+
+def assert_compiled_on_gpu(stderr_text):
+    """Hard tripwire: the MorphiZen MLIR backend MUST NOT report a compile
+    failure. ``MlirCompiler.cpp ... Compilation failed`` (FD-level stderr from
+    the EP) means the model fell back to CPU silently — at which point any
+    GPU-vs-CPU cosine is meaningless (it becomes CPU-vs-CPU == 1.0 and hides
+    kernel bugs).
+
+    This signal IS visible to ``CaptureFD`` (it is emitted by the EP host, which
+    shares the Python process CRT, not the model DLL's private CRT), so it is a
+    more reliable tripwire than the ``[REAL]`` lines (which the model DLL prints
+    via its own CRT and capfd may miss).
+    """
+    assert "MLIR compilation failed" not in stderr_text and (
+        "Compilation failed" not in stderr_text
+    ), (
+        "MorphiZen MLIR compilation FAILED → silent CPU fallback. The cosine "
+        "below would be a CPU-vs-CPU artifact, NOT a kernel result. Fix the "
+        "compiler before trusting accuracy. Captured stderr:\n" + stderr_text[-2000:]
+    )
 
 
 # ── Token <-> text + audio ────────────────────────────────────────────────────
