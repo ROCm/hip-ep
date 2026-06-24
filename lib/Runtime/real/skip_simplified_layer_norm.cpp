@@ -310,16 +310,17 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, int op_state_slot,
 
   //===--------------------------------------------------------------------===//
   // Fast path: ck_dsl-generated fused (Add + RMSNorm * Gamma) kernel.
-  // Only fires for the exact shape the HSACO was compiled for (f32,
+  // Only fires for the exact shape the HSACOs were compiled for (f32 or f16,
   // hidden_dim=4096, no bias). Anything else falls through to the MIOpen
   // baseline below.
   //===--------------------------------------------------------------------===//
-  if (data_type == miopenFloat && !bias && hidden_dim == 4096) {
+  if ((data_type == miopenFloat || data_type == miopenHalf) && !bias &&
+      hidden_dim == 4096) {
     void *stream = hipdnn_ep_state_get_stream(state);
     if (stream) {
-      int ck_rc = ck_dsl_skip_simplified_layer_norm(stream, input, skip, gamma,
-                                                    output, skip_buf, num_rows,
-                                                    hidden_dim, epsilon);
+      int ck_rc = ck_dsl_skip_simplified_layer_norm(
+          stream, input, skip, gamma, output, skip_buf, num_rows, hidden_dim,
+          epsilon, element_size_bytes);
       if (ck_rc == 0) {
         RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: ck_dsl "
                           "fused fast path used (M=%lld, N=%lld)\n",

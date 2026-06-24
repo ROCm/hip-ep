@@ -1136,7 +1136,8 @@ int ck_dsl_skip_simplified_layer_norm(void *stream, const void *input,
                                       const void *skip, const void *gamma,
                                       void *output, void *residual_sum_out,
                                       int64_t num_rows, int64_t hidden_dim,
-                                      float epsilon);
+                                      float epsilon,
+                                      int64_t element_size_bytes);
 
 // MatMulNBits operation wrapper (quantized N-bit matrix multiplication)
 // Dequantizes packed int4 weights and computes Y = A @ dequant(B)^T + bias

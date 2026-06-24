@@ -27,28 +27,45 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <unordered_map>
 
 #include "ck_dsl/ck_dsl_add_rmsnorm2d_f32_gfx1151_hsaco.h"
+#include "ck_dsl/ck_dsl_add_rmsnorm2d_f16_gfx1151_hsaco.h"
 #include "ck_dsl_kernel.h"
 
 // Catch a truncated / mis-regenerated embedded HSACO at compile time.
 static_assert(sizeof(kCkDslAddRmsnorm2dF32Gfx1151Hsaco) ==
                   kCkDslAddRmsnorm2dF32Gfx1151Hsaco_size,
               "embedded HSACO length mismatch (regenerate header)");
+static_assert(sizeof(kCkDslAddRmsnorm2dF16Gfx1151Hsaco) ==
+                  kCkDslAddRmsnorm2dF16Gfx1151Hsaco_size,
+              "embedded HSACO length mismatch (regenerate header)");
 
 namespace {
 
-// Per-architecture fused (Add + RMSNorm) kernel for the f32 / N=4096 shape.
-// The symbol comes from AddRMSNorm2DBF16Spec(n_per_block=4096, block_size=256,
-// vec=4, dtype="f32", save_residual=True).kernel_name(). To support a discrete
-// GPU, generate its HSACO and add a row keyed by its gcnArchName.
-const std::unordered_map<std::string, ckdsl::KernelDef> &kernelTable() {
+// Per-architecture fused (Add + RMSNorm) kernel for the N=4096 shape, one
+// table per I/O dtype. The symbols come from AddRMSNorm2DBF16Spec(
+// n_per_block=4096, block_size=256, vec=4, dtype=<dt>, save_residual=True)
+// .kernel_name() (note: the instance name keeps its "bf16" prefix for all
+// dtypes). To support a discrete GPU, generate its HSACO and add a row keyed
+// by its gcnArchName.
+const std::unordered_map<std::string, ckdsl::KernelDef> &kernelTableF32() {
   static const std::unordered_map<std::string, ckdsl::KernelDef> table = {
       {"gfx1151",
        {kCkDslAddRmsnorm2dF32Gfx1151Hsaco,
         "ck_dsl_add_rmsnorm2d_bf16_f32_N4096_b256_v4_sr", "f32/N=4096/b=256",
+        /*block_size=*/256}},
+  };
+  return table;
+}
+
+const std::unordered_map<std::string, ckdsl::KernelDef> &kernelTableF16() {
+  static const std::unordered_map<std::string, ckdsl::KernelDef> table = {
+      {"gfx1151",
+       {kCkDslAddRmsnorm2dF16Gfx1151Hsaco,
+        "ck_dsl_add_rmsnorm2d_bf16_f16_N4096_b256_v4_sr", "f16/N=4096/b=256",
         /*block_size=*/256}},
   };
   return table;
@@ -88,10 +105,23 @@ int ck_dsl_skip_simplified_layer_norm(void *stream, const void *input,
                                       const void *skip, const void *gamma,
                                       void *output, void *residual_sum_out,
                                       int64_t num_rows, int64_t hidden_dim,
-                                      float epsilon) {
+                                      float epsilon,
+                                      int64_t element_size_bytes) {
   constexpr int kRejectFallback = -2;
 
+  // A/B escape hatch (PR #271 perf testing, not shipped): setting
+  // HIPDNN_EP_DISABLE_CKDSL_NORM=1 forces the MIOpen baseline by rejecting
+  // here. Read once per process so it adds no per-call overhead to the ON path.
+  static const bool ckdsl_norm_disabled = [] {
+    const char *e = std::getenv("HIPDNN_EP_DISABLE_CKDSL_NORM");
+    return e && e[0] == '1';
+  }();
+  if (ckdsl_norm_disabled)
+    return kRejectFallback;
+
   if (hidden_dim != kHiddenDim)
+    return kRejectFallback;
+  if (element_size_bytes != 4 && element_size_bytes != 2)
     return kRejectFallback;
   if (num_rows <= 0 || !input || !skip || !gamma || !output ||
       !residual_sum_out)
@@ -99,9 +129,10 @@ int ck_dsl_skip_simplified_layer_norm(void *stream, const void *input,
   if (num_rows > INT32_MAX)
     return kRejectFallback;
 
-  // Pick the kernel built for the running device; fall back to MIOpen if there
-  // is none (e.g. an architecture we haven't generated an HSACO for yet).
-  const auto &table = kernelTable();
+  // Pick the kernel built for the running device + I/O dtype; fall back to
+  // MIOpen if there is none (e.g. an arch we haven't generated an HSACO for).
+  const auto &table =
+      (element_size_bytes == 4) ? kernelTableF32() : kernelTableF16();
   auto it = table.find(ckdsl::deviceArch());
   if (it == table.end())
     return kRejectFallback;

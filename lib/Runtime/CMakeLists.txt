@@ -200,6 +200,10 @@ if(NOT BUILD_MOCK_RUNTIME)
                         kCkDslRmsnorm2dF32Gfx1151Hsaco)
     ckdsl_kernel_header(ck_dsl_add_rmsnorm2d_f32_gfx1151
                         kCkDslAddRmsnorm2dF32Gfx1151Hsaco)
+    ckdsl_kernel_header(ck_dsl_rmsnorm2d_f16_gfx1151
+                        kCkDslRmsnorm2dF16Gfx1151Hsaco)
+    ckdsl_kernel_header(ck_dsl_add_rmsnorm2d_f16_gfx1151
+                        kCkDslAddRmsnorm2dF16Gfx1151Hsaco)
 endif()
 
 # ============================================================================
