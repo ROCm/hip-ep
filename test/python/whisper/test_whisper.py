@@ -323,7 +323,6 @@ def test_encoder_correctness(precision, capfd):
     silent-CPU-fallback case independently of the numeric threshold.
     """
     model_dir, dtype, prec = precision
-    os.environ["HIPDNN_EP_DEBUG"] = "1"
     audio = make_whisper_inputs(_AUDIO, _CFG)["audio_features"].astype(dtype)
 
     # CPU reference: the original dynamic encoder at this precision.
@@ -820,7 +819,6 @@ def test_e2e_transcription_greedy(precision, capfd):
     fed separately = [real_past .. real_past + S - 1].
     """
     model_dir, dtype, prec = precision
-    os.environ["HIPDNN_EP_DEBUG"] = "1"
     audio = make_whisper_inputs(_AUDIO, _CFG)["audio_features"].astype(dtype)
 
     cpu_tokens = _greedy_decode_cpu(audio, model_dir=model_dir, dtype=dtype)
@@ -1424,7 +1422,6 @@ def test_librispeech_gpu_vs_cpu(librispeech, default_precision, capfd, clip):
     """
     model_dir, dtype, prec = default_precision
     refs, data_dir = librispeech
-    os.environ["HIPDNN_EP_DEBUG"] = "1"
     audio = make_whisper_inputs(data_dir / clip, _CFG)["audio_features"].astype(dtype)
 
     cpu_tokens = _greedy_decode_cpu(audio, model_dir=model_dir, dtype=dtype)
@@ -1465,7 +1462,6 @@ def test_librispeech_wer(librispeech, default_precision, capfd, clip):
     """
     model_dir, dtype, prec = default_precision
     refs, data_dir = librispeech
-    os.environ["HIPDNN_EP_DEBUG"] = "1"
     audio = make_whisper_inputs(data_dir / clip, _CFG)["audio_features"].astype(dtype)
 
     capfd.readouterr()
@@ -1498,7 +1494,6 @@ def test_long_30s_gpu_vs_cpu(librispeech, default_precision, capfd):
     model_dir, dtype, prec = default_precision
     refs, data_dir = librispeech
     clip = "long_30s.wav"
-    os.environ["HIPDNN_EP_DEBUG"] = "1"
     audio = make_whisper_inputs(data_dir / clip, _CFG)["audio_features"].astype(dtype)
 
     cpu_tokens = _greedy_decode_cpu(
