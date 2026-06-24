@@ -899,10 +899,10 @@ def make_whisper_inputs(audio_path: pathlib.Path, cfg: WhisperModelConfig) -> di
     import soundfile as sf
     from transformers import WhisperFeatureExtractor
 
-    # The processor config (mel filterbanks, target sample rate, n_mels)
-    # is the same across whisper-large-v3 variants — use the openai original
-    # so we don't depend on the built ONNX bundle shipping a processor.
-    fe = WhisperFeatureExtractor.from_pretrained("openai/whisper-large-v3")
+    # Pick the feature extractor by mel count: 128-mel (large-v3/turbo) vs 80-mel
+    # (tiny/base/small/medium). Both are canonical FE configs for their mel count.
+    fe_id = "openai/whisper-large-v3" if cfg.n_mels == 128 else "openai/whisper-tiny"
+    fe = WhisperFeatureExtractor.from_pretrained(fe_id)
 
     audio, sr = sf.read(str(audio_path))
     # soundfile returns shape (N,) for mono, (N, C) for multi-channel.
