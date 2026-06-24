@@ -141,26 +141,47 @@ see §1b, which is mandatory before the EP will load.
 ## 1. Build the EP (one-time)
 
 From the repo root. Choose a **short** `$ROOT` (see the MAX_PATH note above) and
-route both the build tree and the install prefix through it.
+route the build trees + install prefixes through it. Run the LLVM step from an
+**x64 Native Tools Command Prompt for VS 2022** (Ninja needs the MSVC env).
 
-**Git Bash:**
+### Step 1a — build LLVM into an `llvm-install` prefix (Tier-1, one-time)
+
+**Build the EP against a real `llvm-install` (Tier-1), not the from-source
+fallback.** On Windows a Tier-2 / FetchContent in-tree LLVM produces a `hipep.dll`
+whose in-process **bitcode** JIT crashes at session-create; CI builds and
+`find_package()`s a standalone `llvm-install`, and matching that locally is what
+makes the default bitcode path work. The recipe (pins live in
+`.github/workflows/windows-build.yml`):
 
 ```bash
 ROOT=/c/Users/$USER/work/hip-ep-workspace   # pick a SHORT path; see note above
-python build.py --build_dir "$ROOT/build" --install_dir "$ROOT/local" --cmake_prefix_path "$ROOT/local"
+git clone --depth 1 -b llvmorg-22.1.0 https://github.com/llvm/llvm-project.git "$ROOT/llvm-src"
+cmake -G Ninja -S "$ROOT/llvm-src/llvm" -B "$ROOT/build-llvm" \
+  -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
+  -DLLVM_TARGETS_TO_BUILD=X86 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
+  -DCMAKE_INSTALL_PREFIX="$ROOT/llvm-install" -DLLVM_ENABLE_RTTI=ON \
+  -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF \
+  -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF \
+  -DLLVM_BUILD_TOOLS=ON -DLLVM_INSTALL_UTILS=ON \
+  -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+cmake --build "$ROOT/build-llvm" --target install
 ```
 
-**PowerShell:**
+Multi-hour the first time; reusable forever after — point every `build.py` at it.
 
-```powershell
-$ROOT = "C:\Users\$env:USERNAME\work\hip-ep-workspace"   # pick a SHORT path; see note above
-python build.py --build_dir "$ROOT\build" --install_dir "$ROOT\local" --cmake_prefix_path "$ROOT\local"
+### Step 1b — build the EP against `llvm-install`
+
+```bash
+python build.py --build_dir "$ROOT/build" --install_dir "$ROOT/local" --cmake_prefix_path "$ROOT/llvm-install"
 ```
 
-This resolves the LLVM/MLIR/Protobuf/FlatBuffers + ONNX Runtime deps (auto-downloaded
-unless `--cmake_prefix_path` points at prebuilt ones) + the TheRock ROCm SDK,
-detects your GPU, and builds the compiler + the EP backend (`hipep.dll`) into
-`$ROOT/local/`. See the main [Quick Start](quick_start.md) for details and troubleshooting.
+PowerShell: same commands with `$ROOT = "C:\Users\$env:USERNAME\work\hip-ep-workspace"`
+and `\`-separated paths.
+
+`build.py` resolves the remaining deps (Protobuf/FlatBuffers + ONNX Runtime
+auto-downloaded), the TheRock ROCm SDK, detects your GPU, and builds the compiler
++ the EP backend (`hipep.dll`) into `$ROOT/local/`. See the main
+[Quick Start](quick_start.md) for details and troubleshooting.
 
 After it finishes you should have `$ROOT/local/bin/hipep.dll`.
 
@@ -270,11 +291,10 @@ $env:Path = "$env:THEROCK_DIST\bin;$ROOT\local\bin;$env:Path"
 > Without `HIPEP_EP_BIN` (out-of-tree install), the tests can't find the EP
 > DLL and `skip` instead of running.
 
-> **Optional — `HIPEP_ARTIFACT_FORMAT=NATIVE` (local debugging only):** the tests
-> default to the production bitcode (in-process LLVM-IR JIT) path. If a *from-source*
-> (Tier-2) local build crashes at session create on the in-process JIT, set
-> `HIPEP_ARTIFACT_FORMAT=NATIVE` to compile each model to a per-model DLL instead.
-> Leave it unset for normal runs and in CI (bitcode is the default and what CI gates).
+> **Optional — `HIPEP_ARTIFACT_FORMAT=NATIVE` (escape hatch):** the tests default
+> to the production bitcode (in-process LLVM-IR JIT) path, which works once you
+> build against the Tier-1 `llvm-install` (Step 1a). `HIPEP_ARTIFACT_FORMAT=NATIVE`
+> forces a per-model DLL instead; leave it unset for normal runs and in CI.
 
 ---
 
