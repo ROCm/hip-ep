@@ -720,7 +720,7 @@ def _ensure_whisper_raw(name: str, model_dir: pathlib.Path, precision: str) -> N
         f"Whisper {name} {precision} raw model not found at {model_dir}.\n"
         f"  Build it locally: python scripts/build_whisper_models.py "
         f"--variant {name} --precision {precision}\n"
-        f"  (or: python build.py --build-whisper-models)"
+        f"  (or: python scripts/build_whisper_models.py --variant {name})"
     )
 
 
@@ -765,7 +765,7 @@ def _ensure_whisper_raw_downloaded(model_dir: pathlib.Path, hf_repo: str) -> Non
         f"Could not obtain the Whisper raw model for {model_dir}.\n"
         f"  - Primary: it auto-downloads from https://huggingface.co/{hf_repo} "
         "(run `hf auth login` if the repo needs auth / you are rate-limited).\n"
-        "  - Backup:  build it locally with `python build.py --build-whisper-models`."
+        "  - Backup:  build it locally with `python scripts/build_whisper_models.py --variant large-v3`."
     )
     try:
         from huggingface_hub import snapshot_download
@@ -803,7 +803,7 @@ def setup_whisper_model_dir(model_dir: pathlib.Path) -> None:
             raise FileNotFoundError(
                 f"Whisper raw model incomplete at {model_dir} (missing {fname}). "
                 f"Download from https://huggingface.co/{WHISPER_HF_REPO_FP32} or "
-                "build it: python build.py --build-whisper-models"
+                "build it: python scripts/build_whisper_models.py --variant large-v3"
             )
     _apply_whisper_surgery_and_fix_shapes(model_dir)
 
@@ -875,7 +875,7 @@ def setup_whisper_fp16_model_dir(model_dir: pathlib.Path) -> None:
             raise FileNotFoundError(
                 f"Whisper fp16 raw model incomplete at {model_dir} (missing {fname}). "
                 f"Download from https://huggingface.co/{WHISPER_HF_REPO_FP16} or "
-                "build it: python build.py --build-whisper-models"
+                "build it: python scripts/build_whisper_models.py --variant large-v3"
             )
     _apply_whisper_surgery_and_fix_shapes(model_dir)
 

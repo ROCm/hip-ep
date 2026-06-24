@@ -25,7 +25,7 @@ Prerequisites (same as the tests — see docs/whisper_quick_start.md):
   * THEROCK_DIST + install/{therock,dist}/bin are on PATH (so the EP can link the
     model DLL). Without them the EP raises rather than silently falling back.
   * The Whisper model must already be BUILT LOCALLY first:
-        python build.py --build-whisper-models
+        python scripts/build_whisper_models.py
     This script only PREPARES (surgery + fix_shapes) and transcribes — it does
     NOT download or build the model. If the raw bundle is absent it exits with a
     build hint rather than a raw traceback.
@@ -95,7 +95,7 @@ def main() -> int:
         "fp16 model (body fp16, lm_head fp32 so greedy is argmax-lossless) — it is "
         "faster than fp32 on GPU. The raw model auto-downloads from "
         "huggingface.co/amd/whisper-large-v3-onnx-{fp16,fp32} on first use; a local "
-        "'python build.py --build-whisper-models' is the backup "
+        "'python scripts/build_whisper_models.py' is the backup "
         "(see docs/whisper_quick_start.md).",
     )
     ap.add_argument(
@@ -130,7 +130,7 @@ def main() -> int:
         return 1
 
     # Precision selection: fp16 (DEFAULT) or fp32 (--fp32). Both are built locally
-    # via the OGA DML builder (python build.py --build-whisper-models). dtype
+    # via the OGA DML builder (python scripts/build_whisper_models.py). dtype
     # drives the KV/audio cast; lm_head stays fp32 in both so greedy argmax is
     # lossless. fp16 is the default because it is faster on GPU and bit-faithful.
     use_fp16 = not args.fp32
@@ -139,7 +139,7 @@ def main() -> int:
     model_dir = MODEL_DIR_FP16 if use_fp16 else MODEL_DIR
 
     # The setup helpers auto-download the raw model from HF on first use (backup:
-    # python build.py --build-whisper-models) and raise FileNotFoundError if
+    # python scripts/build_whisper_models.py) and raise FileNotFoundError if
     # neither source is reachable.
     print(f"[transcribe] preparing {prec} model at {model_dir}")
     try:
