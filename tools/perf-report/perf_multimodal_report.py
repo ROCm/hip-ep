@@ -823,17 +823,30 @@ class ComputeSample:
 
 
 def _classify_stage(block: list[str]) -> str:
-    """prefill vs decode from the op block's sequence length.
+    """prefill vs decode from the op block's attention sequence length.
 
-    Decode processes exactly one new token, so its attention / matmul shapes
-    carry ``sq=1,`` (gqa) or ``m=1,`` (matmul_nbits). Everything else --
-    text prefill (``sq=301,``), the vision encoder (``sq=1196,`` MHA), and
-    the embedding/glue Computes -- is the one-time TTFT work, bucketed as
-    prefill. This is the standard autoregressive single-token tell; the
-    ``sq=1,``/``m=1,`` trailing comma avoids matching ``sq=1196`` / ``m=1196``.
+    Decode processes exactly one new token, so its attention op carries
+    ``sq=1,``. Every attention variant the EP emits prints ``sq=`` -- ``gqa``,
+    ``multi_head_attention``, and ``linear_attention`` all do -- so the tell is
+    attention-kind-agnostic. Prefill (text prompt, vision encoder) runs
+    attention over many tokens (``sq=301,``, ``sq=1196,``), and the
+    embedding/glue Computes have no single-token attention -- all bucketed as
+    prefill. The ``sq=1,`` trailing comma avoids matching ``sq=1196``.
+
+    Do NOT also key decode on ``m=1,`` (matmul_nbits): an ``m=1`` matmul is NOT
+    unique to decode. A prefill that slices its lm_head to the LAST token only
+    (a common optimization -- logits are needed for just the final prompt
+    position to sample the first token) emits ``m=1,n=<vocab>,k=...`` while its
+    attention is still ``sq=<prompt_len>``. Keying on ``m=1,`` then misfiled
+    that whole text-prefill Compute as decode, zeroing the "Text prefill" row in
+    the # 2 stage breakdown. Models whose prefill lm_head is NOT sliced
+    (``m=<prompt_len>``) were unaffected, which is why it showed up on some
+    models and not others. ``sq=1,`` (true single-token attention) is the only
+    reliable autoregressive tell, present in every decode block and no prefill
+    block.
     """
     text = "\n".join(block)
-    return "decode" if ("sq=1," in text or "m=1," in text) else "prefill"
+    return "decode" if "sq=1," in text else "prefill"
 
 
 # Prefill sub-model buckets, by op signature (Qwen-VL-shaped; the text-prefill
