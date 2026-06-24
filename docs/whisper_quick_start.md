@@ -390,8 +390,7 @@ pytest test/python/whisper/test_whisper.py -k "($SEL) and fp32" -v -s
 > constants blob is ~2× the fp16 one). On a 32 GB UMA part this drives the peak
 > high; splitting into one process per precision caps it at a single precision's
 > footprint. To run both in one process anyway (plenty of memory), drop the
-> `and fp16`/`and fp32` filters. (This is peak-memory hygiene — the access
-> violations originally seen on CI were a bitcode-JIT bug, not OOM.)
+> `and fp16`/`and fp32` filters.
 
 ### 4d. Per-op numeric tests (vs ORT CPU)
 
