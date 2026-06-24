@@ -1218,7 +1218,7 @@ HIP_KERNEL_API int hip_layer_norm(
     int mean_dtype);
 
 /* SiLU / swish: y = x * sigmoid(x). fp32 math; hip_dtype FLOAT16 or FLOAT32. */
-int hip_silu(
+HIP_KERNEL_API int hip_silu(
     void* stream,
     const void* input,
     void* output,
