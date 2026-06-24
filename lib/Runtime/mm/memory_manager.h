@@ -7,8 +7,8 @@
 //
 // MemoryManager is the single owner of all session-scoped GPU and host memory.
 // It replaces the six independent `ensure_*` patterns previously scattered
-// across RuntimeState (workspace, host_scratch, qmoe_scratch, qmoe_host_scratch,
-// conv_scratch, and the per-domain pool arrays).
+// across RuntimeState (workspace, host_scratch, qmoe_scratch,
+// qmoe_host_scratch, conv_scratch, and the per-domain pool arrays).
 //
 // Phase 1 scope:
 //   - Wraps all six existing patterns behind a uniform typed API.
@@ -197,8 +197,9 @@ private:
                         const char *debug_name);
 
 public:
-  // Set the HIP stream (borrowed; not owned). Called by initialize_state_handles
-  // after the stream is created so grow_gpu_buffer can sync before realloc.
+  // Set the HIP stream (borrowed; not owned). Called by
+  // initialize_state_handles after the stream is created so grow_gpu_buffer can
+  // sync before realloc.
   void set_stream(void *stream) { stream_ = stream; }
 };
 
