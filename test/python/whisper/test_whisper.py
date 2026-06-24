@@ -178,7 +178,7 @@ def precision(request):
     Yields ``(model_dir, np_dtype, label)``:
       * fp16 → the OGA DML bundle (body fp16 + fp32 lm_head), auto-downloaded
         from ``amd/whisper-large-v3-onnx-fp16`` on first use (backup: ``python
-        build.py --build-whisper-models``). If it can be neither downloaded nor
+        scripts/build_whisper_models.py --variant large-v3``). If it can be neither downloaded nor
         found, the fp16 parametrization SKIPS cleanly (the fp32 leg still runs,
         so an offline machine keeps full fp32 coverage).
       * fp32 → the native-fp32 bundle (set up by the autouse ``_setup``
@@ -194,7 +194,7 @@ def precision(request):
             pytest.skip(
                 f"fp16 Whisper model unavailable: {e!r} (auto-downloads from "
                 "huggingface.co/amd/whisper-large-v3-onnx-fp16; backup: "
-                "python build.py --build-whisper-models)"
+                "python scripts/build_whisper_models.py --variant large-v3)"
             )
         return model_dir, np.float16, "fp16"
     return _MODEL_DIR, np.float32, "fp32"

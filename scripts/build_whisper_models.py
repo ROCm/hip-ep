@@ -21,7 +21,6 @@ Run:
     python scripts/build_whisper_models.py            # build default variants (fp32 + fp16)
     python scripts/build_whisper_models.py --list     # show what would be built
     python scripts/build_whisper_models.py --variant tiny --variant base  # specific variants
-    python build.py --build-whisper-models            # same, via the build wrapper
 
 Outputs (raw OGA bundles; conftest then surgeries + fix_shapes them):
     models/whisper-{variant}-onnx/        fp32: encoder/decoder.onnx (+.data) + configs
