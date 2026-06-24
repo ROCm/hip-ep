@@ -30,8 +30,8 @@
 #include <string>
 #include <unordered_map>
 
-#include "ck_dsl/ck_dsl_add_rmsnorm2d_f32_gfx1151_hsaco.h"
 #include "ck_dsl/ck_dsl_add_rmsnorm2d_f16_gfx1151_hsaco.h"
+#include "ck_dsl/ck_dsl_add_rmsnorm2d_f32_gfx1151_hsaco.h"
 #include "ck_dsl_kernel.h"
 
 // Catch a truncated / mis-regenerated embedded HSACO at compile time.

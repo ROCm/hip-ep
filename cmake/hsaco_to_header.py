@@ -2,15 +2,15 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
 #
+import argparse
+import sys
+
 # Emit a C header embedding a compiled HSACO as a byte array plus a `_size`
 # constant. Used by lib/Runtime/CMakeLists.txt to turn the ck_dsl-generated
 # `.hip` kernels (compiled to a gfx-specific HSACO via `hipcc --genco`) into
 # the `kCkDsl...Hsaco[]` / `kCkDsl...Hsaco_size` symbols the ck_dsl runtime
 # shims include. The HSACO itself is a build artifact and is never committed;
 # only the ck_dsl-generated `.hip` source lives in the tree.
-#
-import argparse
-import sys
 
 
 def main(argv):
@@ -26,13 +26,16 @@ def main(argv):
 
     with open(args.output, "w") as out:
         out.write("/*\n")
-        out.write(" * Copyright (C) 2026 Advanced Micro Devices, Inc. "
-                  "All rights reserved.\n")
+        out.write(
+            " * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.\n"
+        )
         out.write(" * Licensed under the MIT License.\n")
         out.write(" */\n")
-        out.write("// AUTO-GENERATED at build time from a ck_dsl-generated .hip "
-                  "kernel.\n// Do not edit and do not commit; regenerate via the "
-                  "EP build.\n")
+        out.write(
+            "// AUTO-GENERATED at build time from a ck_dsl-generated .hip "
+            "kernel.\n// Do not edit and do not commit; regenerate via the "
+            "EP build.\n"
+        )
         out.write("#pragma once\n\n")
         out.write(f"static const unsigned char {args.var}[] = {{\n")
         for i in range(0, len(data), args.column):
