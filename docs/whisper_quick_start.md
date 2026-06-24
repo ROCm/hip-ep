@@ -230,6 +230,12 @@ $env:Path = "$env:THEROCK_DIST\bin;$ROOT\local\bin;$env:Path"
 > Without `HIPEP_EP_BIN` (out-of-tree install), the tests can't find the EP
 > DLL and `skip` instead of running.
 
+> **Optional — `HIPEP_ARTIFACT_FORMAT=NATIVE` (local debugging only):** the tests
+> default to the production bitcode (in-process LLVM-IR JIT) path. If a *from-source*
+> (Tier-2) local build crashes at session create on the in-process JIT, set
+> `HIPEP_ARTIFACT_FORMAT=NATIVE` to compile each model to a per-model DLL instead.
+> Leave it unset for normal runs and in CI (bitcode is the default and what CI gates).
+
 ---
 
 ## 3. Get + compile the model
