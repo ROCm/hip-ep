@@ -13,9 +13,9 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 ## Features
 
 - **MLIR Compiler Pipeline**: ONNX dialect → HIP dialect → LLVM IR → native DLL
-- **MIOpen Integration**: Conv, ConvTranspose, Softmax, RMS Norm, Mul, Sigmoid, Tanh, Softplus, CausalConvWithState via MIOpen library
+- **MIOpen Integration**: Conv, ConvTranspose, RMS Norm, Sigmoid, Tanh, Softplus; fp elementwise Mul/Add/Min/Max; CausalConvWithState uses MIOpen only on the general fallback path
 - **hipBLASLt MatMul**: High-performance matrix multiplication
-- **Custom HIP Kernels**: GQA, RoPE, Cast, Sub, Gather, ReduceSum, Reciprocal, Sqrt, GELU, Range, LinearAttention
+- **Custom HIP Kernels**: GQA, RoPE, Cast, Sub, Gather, ReduceSum, Reciprocal, Sqrt, GELU, Range, LinearAttention, Softmax, CausalConvWithState(fast path)
 - **Memory Pool Optimization**: `hip-pool-allocs` pass packs allocations into a single grow-on-demand buffer
 - **Constant Externalization**: Large model weights stored in sidecar `.constants.bin` files
 - **Mock Runtime**: GPU-free development and testing with `BUILD_MOCK_RUNTIME=ON`
@@ -34,7 +34,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | Transpose | Custom HIP Kernel |
 | Mul | MIOpen |
 | Add | MIOpen |
-| Softmax | MIOpen |
+| Softmax | Custom HIP Kernel |
 | Sigmoid | MIOpen |
 | Tanh | MIOpen |
 | Softplus | MIOpen |
@@ -42,7 +42,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | Reciprocal | Custom HIP kernel |
 | Sqrt | Custom HIP kernel |
 | Exp | Custom HIP Kernel |
-| Pow | Decomposed → Mul / Sqrt / Reciprocal for constant scalar exponents; otherwise Custom HIP Kernel (`hip.pow`) |
+| Pow | Decomposed → Mul / Sqrt / Reciprocal for constant scalar exponents |
 | Sub | Custom HIP Kernel |
 | Cast | Custom HIP Kernel |
 | CastLike | Decomposed → Cast |
