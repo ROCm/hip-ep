@@ -4,7 +4,7 @@
  */
 
 //===----------------------------------------------------------------------===//
-// GPU-free unit tests for HalAllocator (ApuHalAllocator +
+// GPU-free unit tests for HalAllocator (IGpuHalAllocator +
 // DiscreteHalAllocator).
 //
 // Compiled with HIPDNN_EP_MM_MOCK_HAL so all HIP calls are replaced with
@@ -32,11 +32,11 @@ extern int g_failures;
   } while (0)
 
 //===----------------------------------------------------------------------===//
-// ApuHalAllocator tests
+// IGpuHalAllocator tests
 //===----------------------------------------------------------------------===//
 
 static void test_apu_alloc_returns_valid_block() {
-  ApuHalAllocator hal;
+  IGpuHalAllocator hal;
   HalBlock b = hal.alloc(1024, MemTier::GPU);
   CHECK(b.gpu_ptr != nullptr);
   CHECK(b.cpu_ptr != nullptr);
@@ -52,7 +52,7 @@ static void test_apu_alloc_returns_valid_block() {
 }
 
 static void test_apu_alloc_zero_rounds_up() {
-  ApuHalAllocator hal;
+  IGpuHalAllocator hal;
   HalBlock b = hal.alloc(0, MemTier::GPU);
   // size=0 is rounded to 1 to avoid undefined hipHostMalloc(0)
   CHECK(b.gpu_ptr != nullptr);
@@ -60,7 +60,7 @@ static void test_apu_alloc_zero_rounds_up() {
 }
 
 static void test_apu_evict_to_cpu_is_metadata_only() {
-  ApuHalAllocator hal;
+  IGpuHalAllocator hal;
   HalBlock b = hal.alloc(64, MemTier::GPU);
   // Write a sentinel through the GPU pointer.
   *reinterpret_cast<uint32_t *>(b.gpu_ptr) = 0xDEADBEEF;
@@ -73,7 +73,7 @@ static void test_apu_evict_to_cpu_is_metadata_only() {
 }
 
 static void test_apu_restore_to_gpu_is_metadata_only() {
-  ApuHalAllocator hal;
+  IGpuHalAllocator hal;
   HalBlock b = hal.alloc(64, MemTier::GPU);
   hal.evict_to_cpu(b, nullptr);
   CHECK(b.resident == MemTier::CPU);
@@ -84,14 +84,14 @@ static void test_apu_restore_to_gpu_is_metadata_only() {
 }
 
 static void test_apu_free_null_block_is_noop() {
-  ApuHalAllocator hal;
+  IGpuHalAllocator hal;
   HalBlock empty{};
   hal.free(empty); // must not crash
   CHECK(empty.gpu_ptr == nullptr);
 }
 
 static void test_apu_is_integrated() {
-  ApuHalAllocator hal;
+  IGpuHalAllocator hal;
   CHECK(hal.is_integrated());
 }
 
@@ -182,7 +182,7 @@ static void test_discrete_free_null_block_is_noop() {
 //===----------------------------------------------------------------------===//
 
 static void test_factory_returns_nonnull() {
-  // In mock mode, factory always returns ApuHalAllocator.
+  // In mock mode, factory always returns IGpuHalAllocator.
   HalAllocator *hal = hal_create_for_device(0);
   CHECK(hal != nullptr);
   delete hal;

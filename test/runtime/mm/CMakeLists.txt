@@ -20,7 +20,7 @@ add_executable(test-memory-manager
     test_hal.cpp
     test_memory_manager.cpp
     # Source files under test — compiled natively, NOT as bitcode.
-    ${CMAKE_SOURCE_DIR}/lib/Runtime/mm/hal_apu.cpp
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/mm/hal_igpu.cpp
     ${CMAKE_SOURCE_DIR}/lib/Runtime/mm/hal_discrete.cpp
     ${CMAKE_SOURCE_DIR}/lib/Runtime/mm/hal_factory.cpp
     ${CMAKE_SOURCE_DIR}/lib/Runtime/mm/memory_manager.cpp
