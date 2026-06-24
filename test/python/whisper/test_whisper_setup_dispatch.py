@@ -27,9 +27,10 @@ def test_whisper_model_dir_convention():
 def test_setup_variant_threads_n_text_ctx(monkeypatch):
     calls = {}
 
-    # Fake a resolved variant with a sentinel n_text_ctx so we can assert it is
-    # the value threaded into surgery+fix_shapes.
-    fake_cfg = conftest.WhisperModelConfig(n_text_ctx=448, n_vocab=51865)
+    # Fake a resolved variant with a distinguishable sentinel n_text_ctx (999,
+    # not 448 which is the default) so the assertion proves the value was
+    # threaded, not that the default was used.
+    fake_cfg = conftest.WhisperModelConfig(n_text_ctx=999, n_vocab=51865)
     fake_var = conftest.WhisperVariant(
         name="tiny",
         hf_model_id="openai/whisper-tiny",
@@ -45,7 +46,7 @@ def test_setup_variant_threads_n_text_ctx(monkeypatch):
     # Pretend the raw files exist so the guard passes.
     monkeypatch.setattr(conftest.pathlib.Path, "exists", lambda self: True)
 
-    def _fake_surgery(model_dir, n_text_ctx=448):
+    def _fake_surgery(model_dir, n_text_ctx=448):  # default stays 448; sentinel is 999
         calls["model_dir"] = model_dir
         calls["n_text_ctx"] = n_text_ctx
 
@@ -56,5 +57,5 @@ def test_setup_variant_threads_n_text_ctx(monkeypatch):
     model_dir, var = conftest.setup_whisper_variant("tiny", "fp16")
     assert model_dir.name == "whisper-tiny-onnx-fp16"
     assert var is fake_var
-    assert calls["n_text_ctx"] == 448
+    assert calls["n_text_ctx"] == 999
     assert calls["model_dir"].name == "whisper-tiny-onnx-fp16"

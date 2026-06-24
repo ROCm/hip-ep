@@ -736,6 +736,8 @@ def setup_whisper_variant(
     var = resolve_whisper_variant(name)
     model_dir = whisper_model_dir(name, precision)
     _ensure_whisper_raw(name, model_dir, precision)
+    # Defense-in-depth: _ensure_whisper_raw guarantees both files on success today,
+    # but re-check so a future change there can't silently proceed with a half-built dir.
     for fname in ("encoder.onnx", "decoder.onnx"):
         if not (model_dir / fname).exists():
             raise FileNotFoundError(
