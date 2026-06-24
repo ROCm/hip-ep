@@ -63,7 +63,7 @@ const std::unordered_map<std::string, ckdsl::KernelDef> &kernelTableF16() {
 // launch overhead dominates) but loses to MIOpen on prefill-shaped large M, so
 // keep big batches on the MIOpen baseline. Prototype heuristic; tune via a
 // per-M sweep.
-constexpr int64_t kMaxCkDslDecodeRows = 32;
+constexpr int64_t kMaxCkDslDecodeRows = 1;
 
 // ABI matches RMSNorm2DSpec.signature() (natural alignment; the 3 leading
 // pointers are 8-aligned and M/N/eps pack contiguously, so field offsets

@@ -78,7 +78,7 @@ constexpr int kHiddenDim = 4096;
 // through ck_dsl. ck_dsl wins on small M (autoregressive decode) but loses to
 // MIOpen on prefill-shaped large M, so keep big batches on the MIOpen baseline.
 // Prototype heuristic; tune via a per-M sweep.
-constexpr int64_t kMaxCkDslDecodeRows = 32;
+constexpr int64_t kMaxCkDslDecodeRows = 1;
 
 // ABI matches AddRMSNorm2DBF16Spec.signature() (natural alignment; the 5
 // leading pointers are 8-aligned and M/N/eps pack contiguously, so field
