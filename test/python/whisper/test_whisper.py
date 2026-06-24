@@ -249,16 +249,6 @@ def _morphizen_session(model_name, model_dir=_MODEL_DIR):
     # not need this (its Gelu is not inlined by ORT), but setting it everywhere
     # is harmless and keeps the helper uniform.
     so.add_session_config_entry("session.disable_aot_function_inlining", "1")
-    # Force the NATIVE artifact format (compile each model to a per-model DLL +
-    # LoadLibrary) instead of the default in-process LLVM-IR ORC JIT. On Windows
-    # the JIT path crashes at session create (comgr LLVM-symbol collision; the
-    # version-script localization that fixes it is Linux-only). artifact_format
-    # is a hipep *backend* option, so it must be passed as a raw `ep.hipep.*`
-    # session-config entry (NOT a provider option — ORT validates those against
-    # the umbrella's declared options and rejects an unknown `artifact_format`);
-    # the AMDGPU umbrella forwards non-umbrella-prefixed config entries verbatim
-    # to the backend. Mirrors CI's `-C ep.hipep.artifact_format|NATIVE`.
-    so.add_session_config_entry("ep.hipep.artifact_format", "NATIVE")
     # profile=llm tells the AMDGPU umbrella to dispatch to the hipep backend.
     so.add_provider_for_devices(devices, dict(EP_PROVIDER_OPTIONS))
     return ort.InferenceSession(str(model_dir / model_name), sess_options=so)
