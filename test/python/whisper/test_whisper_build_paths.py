@@ -38,3 +38,8 @@ def test_variant_sources_match_conftest():
 
     for name, src in bwm.VARIANT_SOURCES.items():
         assert WHISPER_VARIANTS[name] == src
+    # reverse: every conftest variant must also be in the builder table
+    for name in WHISPER_VARIANTS:
+        assert name in bwm.VARIANT_SOURCES, (
+            f"{name} missing from builder VARIANT_SOURCES"
+        )
