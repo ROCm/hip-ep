@@ -297,6 +297,30 @@ bool installSearchGenerators(llvm::orc::LLJIT &jit) {
   }
 #endif // HIPDNN_EP_LOAD_KERNEL_DLLS
 
+#ifdef _WIN32
+  // Pin the C runtime to the shared UCRT before the process generator (ORC
+  // tries generators in add-order). Binds the runtime's stdio family to the
+  // same UCRT that owns the stderr/_iob FILE; otherwise the process search
+  // picks legacy msvcrt.dll's fputs over a ucrtbase FILE -> heap corruption
+  // under perf=1. Match this build's CRT: debug (/MTd, /MDd; _DEBUG) ships
+  // ucrtbased.dll, release ships ucrtbase.dll. operator new/delete and
+  // type_info stay pinned to the EP DLL via the absolute shims (which outrank
+  // generators), so the C++ heap is untouched.
+#ifdef _DEBUG
+  constexpr const char *kUcrtDll = "ucrtbased.dll";
+#else
+  constexpr const char *kUcrtDll = "ucrtbase.dll";
+#endif
+  if (auto ucrt = llvm::orc::DynamicLibrarySearchGenerator::Load(
+          kUcrtDll, global_prefix)) {
+    jd.addGenerator(std::move(*ucrt));
+  } else {
+    LOG(INFO) << "LlvmIrJit: Load(" << kUcrtDll
+              << ") failed: " << llvm::toString(ucrt.takeError())
+              << "; stdio may bind to a foreign CRT under perf=1.";
+  }
+#endif // _WIN32
+
   // Process image: EP DLL, amdhip64, the libs above, the CRT, ORT, ...
   auto gen = llvm::orc::DynamicLibrarySearchGenerator::GetForCurrentProcess(
       global_prefix);
