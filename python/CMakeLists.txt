@@ -38,7 +38,7 @@ configure_file(
   @ONLY)
 
 # The EP shared library target is created by morphizen via deps.cmake; its name
-# is the (git-versioned) unique id, output name hipep (morphizen_OUTPUT_NAME).
+# is the (git-versioned) unique id, output name hipgpu (morphizen_OUTPUT_NAME).
 set(_ep_target "${morphizen_CORE_DYNAMIC_UNIQUE_ID}")
 if(NOT TARGET ${_ep_target})
   message(FATAL_ERROR
@@ -82,14 +82,14 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
 endforeach()
 
 # Externally-built DLLs to also bundle next to the EP (absolute paths, ;-list).
-# Used to ship the AMD GPU umbrella chain (amdgpu-ep.dll + hipep-backend.dll),
+# Used to ship the AMD GPU umbrella chain (amdgpu-ep.dll + hip-backend.dll),
 # which is built in the separate onnxruntime-ep-amdgpu repo and has no target
 # here. Passed as --optional-dll so a plain EP-only wheel (var unset) is
 # unaffected and a missing path warns instead of failing. The caller (CI) is
 # responsible for building those DLLs before this wheel target runs.
-set(HIPEP_WHEEL_EXTRA_DLLS "" CACHE STRING
+set(HIP_WHEEL_EXTRA_DLLS "" CACHE STRING
   "Absolute paths (;-list) of externally-built DLLs to bundle into the wheel")
-foreach(_extra IN LISTS HIPEP_WHEEL_EXTRA_DLLS)
+foreach(_extra IN LISTS HIP_WHEEL_EXTRA_DLLS)
   if(_extra)
     list(APPEND _dll_args "--optional-dll" "${_extra}")
   endif()
@@ -98,8 +98,8 @@ endforeach()
 add_custom_target(wheel ALL
   # 1. Stage the package sources into the build dir (keep source tree clean).
   COMMAND ${CMAKE_COMMAND} -E copy_directory
-          "${_pkg_src}/onnxruntime_ep_hipep"
-          "${_stage}/onnxruntime_ep_hipep"
+          "${_pkg_src}/onnxruntime_ep_hip"
+          "${_stage}/onnxruntime_ep_hip"
   COMMAND ${CMAKE_COMMAND} -E copy
           "${_pkg_src}/setup.py"
           "${_stage}/"
@@ -115,13 +115,13 @@ add_custom_target(wheel ALL
   #    they linger across runs and would re-pack stale (e.g. removed) artifacts.
   #    --no-deps: do not pull deps here.
   COMMAND ${CMAKE_COMMAND} -E rm -rf
-          "${_stage}/build" "${_stage}/onnxruntime_ep_hipep.egg-info"
+          "${_stage}/build" "${_stage}/onnxruntime_ep_hip.egg-info"
   COMMAND ${CMAKE_COMMAND} -E rm -rf "${_dist_dir}"
   COMMAND ${Python3_EXECUTABLE} -m pip wheel "${_stage}"
           --no-deps --wheel-dir "${_dist_dir}"
   DEPENDS ${_wheel_deps}
   WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
-  COMMENT "Building onnxruntime_ep_hipep wheel -> ${_dist_dir}"
+  COMMENT "Building onnxruntime_ep_hip wheel -> ${_dist_dir}"
   VERBATIM)
 
 message(STATUS "Python wheel target 'wheel' configured (out: ${_dist_dir})")
