@@ -849,19 +849,39 @@ def _classify_stage(block: list[str]) -> str:
     return "decode" if "sq=1," in text else "prefill"
 
 
-# Prefill sub-model buckets, by op signature (Qwen-VL-shaped; the text-prefill
-# / vision tells are fairly general, embedding/glue is a catch-all):
-#   vision       -> multi_head_attention (the ViT encoder)
-#   text_prefill -> matmul_nbits (the quantized LLM prefill)
+def _has_op(block: list[str], name: str) -> bool:
+    """True iff the block has an op-NAME parent row for exactly ``name``.
+
+    Matches the parent-row prefix ``[PERF]  <name> `` (op name 2-space-indented,
+    then column whitespace) so it tests the exact op name -- NOT a substring.
+    This is load-bearing: a substring test for ``conv`` would also match the
+    text decoder's ``causal_conv`` (linear-attention / SSM hybrids) and misfile
+    that text prefill as vision. Shape sub-rows (4-space indent) never match.
+    """
+    prefix = f"[PERF]  {name} "
+    return any(ln.startswith(prefix) for ln in block)
+
+
+# Prefill sub-model buckets, by op signature. One Compute belongs to exactly one
+# sub-model session (vision.onnx / embedding.onnx / text.onnx are separate
+# graphs -> separate Compute calls), so the buckets are disjoint and order only
+# decides which tell we trust first:
+#   text_prefill -> matmul_nbits (the quantized LLM). Checked first; the vision
+#                   encoders in the target models are fp16 (no matmul_nbits), so
+#                   this never steals a vision Compute.
+#   vision       -> the ViT/SigLIP encoder. Two attention styles appear: a FUSED
+#                   op (multi_head_attention, e.g. Qwen-VL) or DECOMPOSED
+#                   attention (matmul + softmax, e.g. gemma3 SigLIP), the latter
+#                   also carrying a patch-embedding `conv`. Any of those (exact
+#                   op names) identifies vision.
 #   embedding    -> image-feature scatter (nonzero / scatter_nd)
 #   glue         -> everything else (tiny inter-op Computes)
 def _prefill_substage(block: list[str]) -> str:
-    text = "\n".join(block)
-    if "multi_head_attention" in text:
-        return "vision"
-    if "matmul_nbits" in text:
+    if _has_op(block, "matmul_nbits"):
         return "text_prefill"
-    if "nonzero" in text or "scatter_nd" in text:
+    if any(_has_op(block, op) for op in ("multi_head_attention", "softmax", "conv")):
+        return "vision"
+    if _has_op(block, "nonzero") or _has_op(block, "scatter_nd"):
         return "embedding"
     return "glue"
 
