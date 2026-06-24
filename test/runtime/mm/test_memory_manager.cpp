@@ -6,7 +6,7 @@
 //===----------------------------------------------------------------------===//
 // GPU-free unit tests for MemoryManager (Phase 1 scope).
 //
-// Uses MockHalAllocator (which wraps ApuHalAllocator under
+// Uses MockHalAllocator (which wraps IGpuHalAllocator under
 // HIPDNN_EP_MM_MOCK_HAL) to verify pool management, scratch, workspace,
 // host-scalar, seqlens_k cache, and domain-independence contracts.
 //
@@ -31,9 +31,10 @@ int g_failures = 0;
     }                                                                          \
   } while (0)
 
-// Helper: create a MemoryManager backed by a fresh ApuHalAllocator (mock mode).
+// Helper: create a MemoryManager backed by a fresh IGpuHalAllocator (mock
+// mode).
 static MemoryManager *make_mm() {
-  return new MemoryManager(new ApuHalAllocator());
+  return new MemoryManager(new IGpuHalAllocator());
 }
 
 //===----------------------------------------------------------------------===//

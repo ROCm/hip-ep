@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-//===- hal_apu.cpp - APU / UMA HalAllocator implementation ---------------===//
+//===- hal_igpu.cpp - APU / UMA HalAllocator implementation ---------------===//
 //
 // Integrated GPU (AMD APU / iGPU) backend where GPU and CPU share physical
 // memory. Uses hipHostMalloc(Mapped|NonCoherent) so that:
@@ -74,7 +74,7 @@ static inline int hipEventDestroy(void * /*ev*/) { return 0; }
 #define hipSuccess 0
 #endif // HIPDNN_EP_MM_MOCK_HAL
 
-HalBlock ApuHalAllocator::alloc(size_t bytes, MemTier /*preferred*/) {
+HalBlock IGpuHalAllocator::alloc(size_t bytes, MemTier /*preferred*/) {
   if (bytes == 0)
     bytes = 1; // hipHostMalloc(0) is undefined
 
@@ -85,7 +85,7 @@ HalBlock ApuHalAllocator::alloc(size_t bytes, MemTier /*preferred*/) {
   if (hipHostMalloc(&cpu_ptr, bytes,
                     hipHostMallocMapped | hipHostMallocNonCoherent) !=
       hipSuccess) {
-    fprintf(stderr, "ApuHalAllocator::alloc: hipHostMalloc(%zu) failed\n",
+    fprintf(stderr, "IGpuHalAllocator::alloc: hipHostMalloc(%zu) failed\n",
             bytes);
     return block; // gpu_ptr == nullptr signals failure
   }
@@ -93,7 +93,8 @@ HalBlock ApuHalAllocator::alloc(size_t bytes, MemTier /*preferred*/) {
   // On APU UMA, hipHostGetDevicePointer returns the same VA as the host ptr.
   void *gpu_ptr = nullptr;
   if (hipHostGetDevicePointer(&gpu_ptr, cpu_ptr, 0) != hipSuccess) {
-    fprintf(stderr, "ApuHalAllocator::alloc: hipHostGetDevicePointer failed\n");
+    fprintf(stderr,
+            "IGpuHalAllocator::alloc: hipHostGetDevicePointer failed\n");
     hipHostFree(cpu_ptr);
     return block;
   }
@@ -106,7 +107,7 @@ HalBlock ApuHalAllocator::alloc(size_t bytes, MemTier /*preferred*/) {
   return block;
 }
 
-void ApuHalAllocator::free(HalBlock &block) {
+void IGpuHalAllocator::free(HalBlock &block) {
   if (!block.cpu_ptr)
     return;
   hipHostFree(block.cpu_ptr);
@@ -119,7 +120,7 @@ void ApuHalAllocator::free(HalBlock &block) {
 // already CPU-accessible. We record a HIP event on the stream so that any
 // subsequent CPU read (after hipStreamSynchronize / hipEventSynchronize) sees
 // the GPU-written data (NonCoherent ordering contract).
-void ApuHalAllocator::evict_to_cpu(HalBlock &block, void *stream) {
+void IGpuHalAllocator::evict_to_cpu(HalBlock &block, void *stream) {
   if (!block.gpu_ptr)
     return;
 
@@ -159,7 +160,7 @@ void ApuHalAllocator::evict_to_cpu(HalBlock &block, void *stream) {
 // to subsequent GPU reads. On NonCoherent APU memory the safest approach is
 // to call hipStreamSynchronize on the host side before the next GPU launch
 // that reads this block — that is the MemoryManager's responsibility.
-void ApuHalAllocator::restore_to_gpu(HalBlock &block, void *stream) {
+void IGpuHalAllocator::restore_to_gpu(HalBlock &block, void *stream) {
   if (!block.gpu_ptr)
     return;
   (void)stream; // no async transfer needed; caller must have synced CPU writes

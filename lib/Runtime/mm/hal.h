@@ -7,7 +7,7 @@
 //
 // Defines HalAllocator — the polymorphic interface between MemoryManager and
 // the HIP runtime. Two concrete backends:
-//   ApuHalAllocator  — integrated GPU / UMA (hipHostMalloc Mapped+NonCoherent;
+//   IGpuHalAllocator  — integrated GPU / UMA (hipHostMalloc Mapped+NonCoherent;
 //                      gpu_ptr == cpu_ptr; eviction/restore are fence-only)
 //   DiscreteHalAllocator — discrete dGPU (hipMalloc VRAM + hipHostMalloc
 //                          pinned; both allocated at alloc() time;
@@ -118,11 +118,11 @@ public:
 HalAllocator *hal_create_for_device(int device_id);
 
 //===----------------------------------------------------------------------===//
-// Concrete backends (declared here, implemented in hal_apu.cpp /
+// Concrete backends (declared here, implemented in hal_igpu.cpp /
 // hal_discrete.cpp). Exposed so unit tests can construct either one directly.
 //===----------------------------------------------------------------------===//
 
-class ApuHalAllocator : public HalAllocator {
+class IGpuHalAllocator : public HalAllocator {
 public:
   HalBlock alloc(size_t bytes, MemTier preferred) override;
   void free(HalBlock &block) override;

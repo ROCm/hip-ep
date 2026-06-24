@@ -270,7 +270,7 @@ endmacro()
 # Compiled to bitcode so the MM is merged into each per-model DLL alongside
 # the rest of the runtime. The HAL factory is included here; it selects the
 # correct backend at session-create time via hipDeviceGetAttribute.
-compile_to_bitcode(mm/hal_apu.cpp runtime_mm_hal_apu.bc)
+compile_to_bitcode(mm/hal_igpu.cpp runtime_mm_hal_igpu.bc)
 compile_to_bitcode(mm/hal_discrete.cpp runtime_mm_hal_discrete.bc)
 compile_to_bitcode(mm/hal_factory.cpp runtime_mm_hal_factory.bc)
 compile_to_bitcode(mm/memory_manager.cpp runtime_mm_memory_manager.bc)
@@ -343,7 +343,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/global_pool.cpp runtime_global_pool.bc)
 
     set(RUNTIME_BC_MODULES
-        ${CMAKE_CURRENT_BINARY_DIR}/runtime_mm_hal_apu.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_mm_hal_igpu.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_mm_hal_discrete.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_mm_hal_factory.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_mm_memory_manager.bc
@@ -416,7 +416,7 @@ else()
     compile_to_bitcode(mock/op_state_stubs.cpp runtime_op_state_stubs.bc)
 
     set(RUNTIME_BC_MODULES
-        ${CMAKE_CURRENT_BINARY_DIR}/runtime_mm_hal_apu.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_mm_hal_igpu.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_mm_hal_discrete.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_mm_hal_factory.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_mm_memory_manager.bc
