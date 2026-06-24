@@ -167,10 +167,26 @@ extern "C" int wrap_linear_attention(
 
   int result = 0;
 
-  // Initialize present_state from past_state (or zeros)
+  // Initialize present_state from past_state (or zeros).
+  //
+  // Skip the copy when the two buffers alias (past_state == present_state).
+  // Under a shared-buffer binding (OGA past_present_share_buffer / EP GPU
+  // aliasing) the recurrent state is one buffer used for both past input and
+  // present output, so present already holds past's data and the decode/prefill
+  // kernel updates it in place -- the copy is a semantic no-op. It is NOT free
+  // to issue, though: the buffer comes from the EP's host-mapped allocator
+  // (hipHostMallocMapped), and on that memory hipMemcpyAsync D2D degenerates to
+  // a synchronous host-staged copy, costing host (CPU) time per call. At
+  // decode this dominates the op (profiled ~54.6 ms CPU vs ~5.6 ms GPU across
+  // 30 single-token LA calls; ~1.8 ms CPU per layer per token), so skipping the
+  // self-copy removes the per-token recurrent-state staging overhead.
   if (past_state) {
-    HIP_CHECK(hipMemcpyAsync(present_state, past_state, total_state_bytes,
-                             hipMemcpyDeviceToDevice, (hipStream_t)hip_stream));
+    if (past_state != present_state) {
+      HIP_CHECK(hipMemcpyAsync(present_state, past_state, total_state_bytes,
+                               hipMemcpyDeviceToDevice,
+                               (hipStream_t)hip_stream));
+    }
+    // else: aliased shared buffer -> present already == past, copy is a no-op.
   } else {
     HIP_CHECK(hipMemsetAsync(present_state, 0, total_state_bytes,
                              (hipStream_t)hip_stream));
