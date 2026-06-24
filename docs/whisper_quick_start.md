@@ -59,12 +59,22 @@ surgery; only shape params, n_mels, vocab, and special-token IDs differ):
 
 `head_dim` is 64 and the decoder context is 448 for every variant.
 
-Build + prepare a non-large-v3 variant (large-v3 auto-downloads on first use; the
-others require a local OGA build):
+Build + prepare a single non-large-v3 variant (large-v3 auto-downloads on first
+use; the others require a local OGA build):
 
 ```bash
 python scripts/build_whisper_models.py --variant large-v3-turbo   # or tiny/base/small/medium (fp16)
 python scripts/setup_whisper_model.py --variant large-v3-turbo    # surgery + fix_shapes (fp16)
+```
+
+Or **build + prepare ALL five local variants at once** (large-v3 is fetched
+on-demand by the test, so it is not in this list):
+
+```bash
+python scripts/build_whisper_models.py                            # default set, fp16
+for v in large-v3-turbo tiny base small medium; do
+  python scripts/setup_whisper_model.py --variant "$v"            # surgery + fix_shapes
+done
 ```
 
 The added variants only need **fp16** — the build script and `setup_whisper_model.py`
@@ -77,9 +87,14 @@ fp32-vs-fp32 benchmark (§6).
 it builds the default set (`large-v3-turbo tiny base small medium`). See
 `python scripts/build_whisper_models.py --list` for the full list.
 
+> **large-v3-turbo build note.** Turbo has an asymmetric encoder/decoder (32 / 4
+> layers); the stock OGA 0.13.1 builder crashes on it. `build_whisper_models.py`
+> monkeypatches the builder in its isolated venv to fix this — no action needed,
+> but if you build turbo by some other means, expect an `IndexError: index 4 is
+> out of range`.
+
 Per-variant EP correctness is covered by
-`test/python/whisper/test_whisper_variant_smoke.py` (EP-GPU vs ORT-CPU greedy token
-match; skips cleanly if a variant is not built or the EP is not found).
+`test/python/whisper/test_whisper_variant_smoke.py` — see [§4f](#4f-per-variant-smoke-turbo--small-sizes).
 
 ---
 
@@ -447,14 +462,48 @@ pytest test/numeric/tests/test_whisper_encoder_attention.py test/numeric/tests/t
 ctest --test-dir $ROOT/build -C Release -R MorphizenMLIRLitTests
 ```
 
+### 4f. Per-variant smoke (turbo + small sizes)
+
+§4a–4e all target **large-v3**. The other five variants (turbo + tiny/base/small/
+medium) are covered by one parametrized smoke test that asserts **EP-GPU greedy
+tokens == ORT-CPU greedy tokens** on the *same* variant. (It does NOT assert
+verbatim text — the small models have low transcription accuracy, so EP-vs-CPU
+token equality is what isolates EP correctness from model quality.)
+
+First build + prepare the variants (see [Supported variants](#supported-variants)
+for the build-all loop), then run the whole set:
+
+```bash
+pytest test/python/whisper/test_whisper_variant_smoke.py -v -s
+```
+
+…or one variant at a time:
+
+```bash
+pytest test/python/whisper/test_whisper_variant_smoke.py -k tiny -v -s
+```
+
+Each variant prints its GPU transcription and **passes** when it matches the CPU
+reference token-for-token. A variant that has not been built/prepared, or a host
+without the EP, **skips** cleanly. Verified on gfx1151 (bitcode path): all five
+emit the verbatim JFK quote.
+
+> **Run on the default bitcode path** — do NOT set `HIPEP_ARTIFACT_FORMAT=NATIVE`.
+> The opt-in NATIVE (per-model-DLL) path predates the bitcode-JIT fix and can mis-
+> decode (e.g. tiny emits EOT immediately); the default bitcode JIT is the correct,
+> validated path.
+
 ### Run everything at once
 
 ```
-pytest test/python/whisper/test_whisper.py -v -s
+pytest test/python/whisper/test_whisper.py -v -s                  # large-v3 full matrix
+pytest test/python/whisper/test_whisper_variant_smoke.py -v -s    # turbo + small sizes (§4f)
 ```
 
 On a 32 GB UMA machine, prefer running the precision-parametrized tests one
-precision at a time (see §4c) instead of the all-at-once command above.
+precision at a time (see §4c) instead of the all-at-once `test_whisper.py` command.
+The variant smoke test is fp16-only and lightweight (the small models are tiny),
+so it runs comfortably in one process.
 
 ---
 
