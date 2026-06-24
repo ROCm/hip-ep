@@ -15,7 +15,6 @@
 
 #include <array>
 #include <cstddef>
-#include <map>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -26,11 +25,35 @@ namespace morphizen {
 // first class whose capacity is >= N, and the buffer is allocated at the full
 // class capacity so any later request mapping to the same class can reuse it.
 // Requests larger than the last class are allocated at their exact size and
-// pooled best-fit instead (see the large-buffer free list in the .cpp).
+// freed straight back to the driver on Free (not pooled) to keep peak memory
+// bounded — see FreeImpl in the .cpp.
 inline constexpr size_t kSizeClasses[] = {
+    1ull * 1024,         // 1 KB
+    2ull * 1024,         // 2 KB
     4ull * 1024,         // 4 KB
+    6ull * 1024,         // 6 KB
+    8ull * 1024,         // 8 KB
+    12ull * 1024,        // 12 KB
+    16ull * 1024,        // 16 KB
+    24ull * 1024,        // 24 KB
+    32ull * 1024,        // 32 KB
+    48ull * 1024,        // 48 KB
     64ull * 1024,        // 64 KB
+    96ull * 1024,        // 96 KB
+    128ull * 1024,       // 128 KB
+    192ull * 1024,       // 192 KB
+    256ull * 1024,       // 256 KB
+    384ull * 1024,       // 384 KB
+    512ull * 1024,       // 512 KB
+    768ull * 1024,       // 768 KB
     1ull * 1024 * 1024,  // 1 MB
+    1536ull * 1024,      // 1.5 MB
+    2ull * 1024 * 1024,  // 2 MB
+    3ull * 1024 * 1024,  // 3 MB
+    4ull * 1024 * 1024,  // 4 MB
+    6ull * 1024 * 1024,  // 6 MB
+    8ull * 1024 * 1024,  // 8 MB
+    12ull * 1024 * 1024, // 12 MB
     16ull * 1024 * 1024, // 16 MB
 };
 inline constexpr size_t kNumSizeClasses =
@@ -71,28 +94,33 @@ private:
   // every buffer within a class is interchangeable and any later request
   // mapping to the same class reuses it (100% hit rate after warmup, with at
   // most a few distinct class sizes regardless of how many dynamic shapes the
-  // model sees). Requests larger than the last class are allocated at their
-  // exact size and recycled best-fit (the smallest free large buffer that is
-  // >= the new request is reused). Free never returns memory to the driver;
-  // everything is released wholesale in the destructor — matching the
-  // project's per-session "grow-on-demand, never shrink, free at cleanup"
-  // memory contract.
+  // model sees). Pooled buffers never return to the driver on Free; they are
+  // released wholesale in the destructor — matching the project's per-session
+  // "grow-on-demand, never shrink, free at cleanup" memory contract.
+  //
+  // Requests larger than the last class are NOT pooled: they are allocated at
+  // their exact size and freed straight back to the driver on Free. Best-fit
+  // pooling of large buffers made the working set balloon when a model grows
+  // its largest transient incrementally across Runs — each slightly-larger
+  // request misses the pool and allocates fresh while the prior near-size
+  // buffers stay pinned in the free list. Freeing large buffers eagerly keeps
+  // peak memory bounded at the cost of a hipHostMalloc/hipHostFree pair per
+  // large transient per Run (acceptable: large transients are few).
   //
   // Reuse needs no per-handout stream sync: ORT only calls Free after Run
   // returns, and allocator-mode inference_compute ends with a full
   // hipdnn_ep_stream_sync, so any GPU work touching a freed buffer has
-  // already drained before it can be handed back out.
+  // already drained before it can be handed back out (or, for large buffers,
+  // before it is released to the driver).
   std::mutex pool_mutex_;
   // Index i holds reusable buffers each exactly kSizeClasses[i] bytes.
   std::array<std::vector<void*>, kNumSizeClasses> free_lists_;
-  // Freed buffers larger than the largest size class, keyed by their exact
-  // allocated byte size. Reuse is best-fit via lower_bound(request).
-  std::multimap<size_t, void*> large_free_;
-  // Every pointer hipHostMalloc'd by this allocator -> its allocated byte size
-  // (the rounded-up class capacity for pooled buffers, the exact size for
-  // large ones). Entries persist for the allocator's lifetime (Free does not
-  // erase them; it only moves the pointer onto a free list) so the destructor
-  // can free them all and FreeImpl can recover a pointer's bucket.
+  // Every pointer hipHostMalloc'd by this allocator that is still outstanding
+  // -> its allocated byte size (the rounded-up class capacity for pooled
+  // buffers, the exact size for large ones). Pooled buffers stay tracked for
+  // the allocator's lifetime (Free only moves them onto a free list) so the
+  // destructor can release them; large buffers are erased from this map when
+  // freed eagerly in FreeImpl.
   std::unordered_map<void*, size_t> ptr_to_size_;
 
   const OrtMemoryInfo* memory_info_;
