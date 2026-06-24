@@ -97,8 +97,8 @@ def make_morphizen_session_factory(repo_root, model_dir):
     def factory(model_name):
         so = ort.SessionOptions()
         so.add_session_config_entry("session.disable_aot_function_inlining", "1")
-        # bitcode by default; HIPEP_ARTIFACT_FORMAT=NATIVE opts into the per-model
-        # DLL path (local workaround for from-source builds whose JIT misbehaves).
+        # bitcode by default; HIPEP_ARTIFACT_FORMAT=NATIVE is an opt-in escape
+        # hatch (per-model DLL) — normally unneeded. See apply_artifact_format.
         apply_artifact_format(so)
         # profile=llm tells the AMDGPU umbrella to dispatch to the hipep backend.
         so.add_provider_for_devices(devices, dict(EP_PROVIDER_OPTIONS))
