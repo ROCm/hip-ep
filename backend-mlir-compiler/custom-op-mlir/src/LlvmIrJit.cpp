@@ -31,6 +31,7 @@ extern "C" const unsigned char runtime_bc_data[];
 extern "C" const std::size_t runtime_bc_data_size;
 
 #include <cstdint>
+#include <cstdlib>
 #include <mutex>
 #include <new>
 #include <typeinfo>
@@ -81,6 +82,27 @@ llvm::Error installPlatformSymbolShims(llvm::orc::LLJIT &jit) {
   add("??2@YAPEAX_K@Z", op_new_sz);     // operator new(size_t)
   add("??3@YAXPEAX@Z", op_delete);      // operator delete(void*)
   add("??3@YAXPEAX_K@Z", op_delete_sz); // operator delete(void*, size_t)
+
+  // Pin the C allocator (malloc family) to THIS DLL's static CRT too, for the
+  // SAME reason as operator new/delete above. With /MT the runtime's malloc/
+  // free/calloc/realloc are statically linked and NOT exported, so the process
+  // search generator would otherwise bind them to a *different* CRT loaded in
+  // the host process (e.g. the host's ucrtbase under python.exe). That splits
+  // allocations across two heaps: operator new uses this DLL's heap (pinned
+  // above) while a bare malloc would use ucrtbase's — and any cross-CRT free
+  // (or a new'd buffer reaching free, or a malloc'd buffer reaching delete)
+  // corrupts the heap, producing non-deterministic access violations during
+  // inference (it only bit the in-process JIT path; the NATIVE model.dll links
+  // its own self-consistent static CRT, and a host whose CRT happens to match
+  // this DLL's hid the split). Routing the whole malloc family through this
+  // DLL's CRT keeps a single consistent heap regardless of the host process.
+  add("malloc",
+      reinterpret_cast<void *>(static_cast<void *(*)(size_t)>(::malloc)));
+  add("free", reinterpret_cast<void *>(static_cast<void (*)(void *)>(::free)));
+  add("calloc", reinterpret_cast<void *>(
+                    static_cast<void *(*)(size_t, size_t)>(::calloc)));
+  add("realloc", reinterpret_cast<void *>(
+                     static_cast<void *(*)(void *, size_t)>(::realloc)));
 
   // Read the `std::type_info` vtable pointer out of a live polymorphic
   // instance; `typeid(int)` shares the vtable with every other
