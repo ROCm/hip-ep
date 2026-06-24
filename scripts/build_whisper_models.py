@@ -3,7 +3,7 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
 #
-"""Standalone builder for the Whisper-large-v3 ONNX models (fp32 + fp16).
+"""Standalone builder for Whisper variant ONNX models (fp32 + fp16).
 
 Both precisions are produced by the SAME pinned OGA DirectML model builder, so
 pinning the builder deps + the HF model revision makes both models reproducible.
@@ -18,12 +18,14 @@ builder via subprocess in that venv. The dev env is never touched.
 
 Run:
     conda activate hipdnn-ep
-    python scripts/build_whisper_models.py            # build fp32 + fp16
+    python scripts/build_whisper_models.py            # build default variants (fp32 + fp16)
+    python scripts/build_whisper_models.py --list     # show what would be built
+    python scripts/build_whisper_models.py --variant tiny --variant base  # specific variants
     python build.py --build-whisper-models            # same, via the build wrapper
 
 Outputs (raw OGA bundles; conftest then surgeries + fix_shapes them):
-    models/whisper-large-v3-onnx/        fp32: encoder/decoder.onnx (+.data) + configs
-    models/whisper-large-v3-onnx-fp16/   fp16: same layout, fp16 body + fp32 lm_head
+    models/whisper-{variant}-onnx/        fp32: encoder/decoder.onnx (+.data) + configs
+    models/whisper-{variant}-onnx-fp16/   fp16: same layout, fp16 body + fp32 lm_head
 """
 
 import argparse
@@ -36,11 +38,23 @@ MODELS = REPO_ROOT / "models"
 BUILDER_VENV = REPO_ROOT / "install" / "whisper-builder-venv"
 
 # ---------------------------------------------------------------------------
-# Pinned inputs for reproducibility (same idiom as build.py's version pins).
+# Pinned per-variant sources (same idiom as build.py's version pins).
+# DUPLICATED from conftest.WHISPER_VARIANTS so this builder stays standalone
+# (no test-infra import). test_whisper_build_paths.py asserts the two match.
 # ---------------------------------------------------------------------------
-WHISPER_HF_MODEL = "openai/whisper-large-v3"
-# Pin the COMMIT revision (not a moving tag) so the weights are byte-stable.
-WHISPER_HF_REVISION = "06f233fe06e710322aca913c1bc4249a0d71fce1"
+VARIANT_SOURCES = {
+    # name            (hf_model_id,                    revision)
+    "large-v3": ("openai/whisper-large-v3", "06f233fe06e710322aca913c1bc4249a0d71fce1"),
+    "large-v3-turbo": ("openai/whisper-large-v3-turbo", "main"),
+    "tiny": ("openai/whisper-tiny", "main"),
+    "base": ("openai/whisper-base", "main"),
+    "small": ("openai/whisper-small", "main"),
+    "medium": ("openai/whisper-medium", "main"),
+}
+
+# Default build set when --variant is omitted (turbo + the small sizes; large-v3
+# is built/downloaded via its own AMD-HF path in conftest, so it is not default).
+DEFAULT_VARIANTS = ["large-v3-turbo", "tiny", "base", "small", "medium"]
 
 # Exact builder deps. onnxruntime-genai-directml is the STOCK builder package;
 # torch CPU is fine (the builder only reads HF weights). These live ONLY in the
@@ -53,11 +67,16 @@ BUILDER_REQUIREMENTS = [
     "onnx_ir==0.2.1",
 ]
 
-# (precision, output dir) — the two models the unified builder emits.
-PRECISIONS = [
-    ("fp32", MODELS / "whisper-large-v3-onnx"),
-    ("fp16", MODELS / "whisper-large-v3-onnx-fp16"),
-]
+
+def whisper_output_dirs(variant: str) -> "tuple[Path, Path]":
+    """Return (fp32_dir, fp16_dir) under models/ for a variant.
+
+    Naming convention MUST match conftest (models/whisper-{variant}-onnx[-fp16]).
+    """
+    return (
+        MODELS / f"whisper-{variant}-onnx",
+        MODELS / f"whisper-{variant}-onnx-fp16",
+    )
 
 
 def _venv_python(vdir: Path) -> Path:
@@ -163,25 +182,25 @@ print("[builder-subproc] done:", precision, "->", out_dir)
 """ % (_NUM_STUBS, _NUM_STUBS)
 
 
-def build_one(py: Path, precision: str, out_dir: Path) -> None:
-    """Build one precision via the OGA builder in the isolated venv. Idempotent
-    (skips if the raw encoder+decoder already exist)."""
+def build_one(
+    py: Path, model_id: str, revision: str, precision: str, out_dir: Path
+) -> None:
+    """Build one (variant, precision) via the OGA builder in the isolated venv.
+    Idempotent (skips if the raw encoder+decoder already exist)."""
     if (out_dir / "encoder.onnx").exists() and (out_dir / "decoder.onnx").exists():
-        print(f"[whisper-build] {precision}: already built -> {out_dir}")
+        print(f"[whisper-build] {out_dir.name}: already built")
         return
     out_dir.mkdir(parents=True, exist_ok=True)
-    # Shared HF download cache for BOTH precisions (fp32 + fp16 build from the same
-    # weights). Lives under the disposable builder venv — wiped by `build.py --clean`.
     cache_dir = BUILDER_VENV / "_hf_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    print(f"[whisper-build] building {precision} -> {out_dir}")
+    print(f"[whisper-build] building {precision} {model_id} -> {out_dir}")
     subprocess.run(
         [
             str(py),
             "-c",
             BUILDER_SNIPPET,
-            WHISPER_HF_MODEL,
-            WHISPER_HF_REVISION,
+            model_id,
+            revision,
             precision,
             str(out_dir),
             str(cache_dir),
@@ -192,8 +211,15 @@ def build_one(py: Path, precision: str, out_dir: Path) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Build reproducible Whisper-large-v3 fp32 + fp16 ONNX via the "
-        "pinned OGA DirectML model builder (isolated venv)."
+        description="Build reproducible Whisper fp32 + fp16 ONNX via the pinned "
+        "OGA DirectML model builder (isolated venv)."
+    )
+    ap.add_argument(
+        "--variant",
+        action="append",
+        default=None,
+        help="variant to build (repeatable, or comma-separated). "
+        f"Known: {sorted(VARIANT_SOURCES)}. Default: {DEFAULT_VARIANTS}.",
     )
     ap.add_argument(
         "--precision",
@@ -201,21 +227,39 @@ def main() -> int:
         default="both",
         help="which precision(s) to build (default: both)",
     )
+    ap.add_argument(
+        "--list",
+        action="store_true",
+        help="print the resolved variant -> output-dir mapping and exit",
+    )
     args = ap.parse_args()
 
-    py = ensure_builder_venv()
-    for prec, out_dir in PRECISIONS:
-        if args.precision in (prec, "both"):
-            build_one(py, prec, out_dir)
+    # Resolve --variant (repeatable AND comma-list) -> flat list; default set.
+    if args.variant:
+        variants = []
+        for v in args.variant:
+            variants.extend(p.strip() for p in v.split(",") if p.strip())
+    else:
+        variants = list(DEFAULT_VARIANTS)
+    for v in variants:
+        if v not in VARIANT_SOURCES:
+            ap.error(f"unknown variant {v!r}; known: {sorted(VARIANT_SOURCES)}")
 
-    print("[whisper-build] DONE. Raw models:")
-    for prec, out_dir in PRECISIONS:
-        if args.precision in (prec, "both"):
-            print(f"    {prec}: {out_dir}")
-    print(
-        "[whisper-build] Next: setup surgeries+fix_shapes them on first use "
-        "(pytest / scripts/setup_whisper_model.py)."
-    )
+    if args.list:
+        for v in variants:
+            fp32, fp16 = whisper_output_dirs(v)
+            print(f"{v}: fp32={fp32}  fp16={fp16}  src={VARIANT_SOURCES[v]}")
+        return 0
+
+    py = ensure_builder_venv()
+    for v in variants:
+        model_id, revision = VARIANT_SOURCES[v]
+        fp32_dir, fp16_dir = whisper_output_dirs(v)
+        for prec, out_dir in (("fp32", fp32_dir), ("fp16", fp16_dir)):
+            if args.precision in (prec, "both"):
+                build_one(py, model_id, revision, prec, out_dir)
+
+    print("[whisper-build] DONE.")
     return 0
 
 
