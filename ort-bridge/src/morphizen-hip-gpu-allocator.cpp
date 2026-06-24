@@ -115,26 +115,22 @@ void* ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator* this_,
 
   const int cls = SizeClassIndex(size);
 
-  // Fast path: reuse a pooled buffer with no driver call. For a size class,
-  // any buffer in that class fits (they are all the class capacity). For a
-  // large request, take the smallest free large buffer that is >= the request
-  // (best-fit) so a freed 32 MB buffer can still serve a later 31 MB request.
-  {
+  // Fast path: reuse a pooled buffer with no driver call. Only size-class
+  // buffers are pooled (any buffer in a class fits — they are all the class
+  // capacity). Large requests (cls < 0) are intentionally NOT pooled: they are
+  // freed back to the driver on Free (see FreeImpl). Best-fit pooling of large
+  // buffers caused the working set to balloon when a model grows its largest
+  // transient by a little each Run (every slightly-larger request misses the
+  // pool and allocates fresh, while the prior near-size buffers stay pinned in
+  // the free list), so large buffers are now allocated fresh and released each
+  // time rather than accumulating.
+  if (cls >= 0) {
     std::lock_guard<std::mutex> lk(self->pool_mutex_);
-    if (cls >= 0) {
-      auto& fl = self->free_lists_[cls];
-      if (!fl.empty()) {
-        void* ptr = fl.back();
-        fl.pop_back();
-        return ptr;
-      }
-    } else {
-      auto it = self->large_free_.lower_bound(size);
-      if (it != self->large_free_.end()) {
-        void* ptr = it->second;
-        self->large_free_.erase(it);
-        return ptr;
-      }
+    auto& fl = self->free_lists_[cls];
+    if (!fl.empty()) {
+      void* ptr = fl.back();
+      fl.pop_back();
+      return ptr;
     }
   }
 
@@ -180,23 +176,29 @@ void ORT_API_CALL HipGpuAllocator::FreeImpl(OrtAllocator* this_, void* p) {
     return;
   }
   auto* self = static_cast<HipGpuAllocator*>(this_);
-  std::lock_guard<std::mutex> lk(self->pool_mutex_);
-  auto it = self->ptr_to_size_.find(p);
-  if (it != self->ptr_to_size_.end()) {
-    // Return to the pool for reuse; do NOT release to the driver here. Safe to
-    // reuse without a stream sync: see the pool comment in the header. The
-    // stored size is the class capacity for pooled buffers (so SizeClassIndex
-    // recovers the class) and the exact size for large buffers.
-    const int cls = SizeClassIndex(it->second);
-    if (cls >= 0) {
-      self->free_lists_[cls].push_back(p);
-    } else {
-      self->large_free_.emplace(it->second, p);
+  {
+    std::lock_guard<std::mutex> lk(self->pool_mutex_);
+    auto it = self->ptr_to_size_.find(p);
+    if (it != self->ptr_to_size_.end()) {
+      // The stored size is the class capacity for pooled buffers (so
+      // SizeClassIndex recovers the class) and the exact size for large ones.
+      const int cls = SizeClassIndex(it->second);
+      if (cls >= 0) {
+        // Return to the pool for reuse; do NOT release to the driver here. Safe
+        // to reuse without a stream sync: see the pool comment in the header.
+        self->free_lists_[cls].push_back(p);
+        return;
+      }
+      // Large buffer: release to the driver instead of pooling, to keep the
+      // working set from ballooning when a model grows its largest transient
+      // incrementally across Runs. Drop the tracking entry first so the
+      // destructor doesn't double-free, then free outside the lock.
+      self->ptr_to_size_.erase(it);
     }
-    return;
   }
-  // Defensive: a pointer we never handed out (should not happen). Release it
-  // directly so we don't leak, rather than pooling an unknown-size buffer.
+  // Either a large buffer (freed back to the driver per the policy above) or a
+  // pointer we never handed out (defensive — should not happen, but release it
+  // directly so we don't leak). hipHostFree after Run+stream-sync is safe.
   ScopedDevice _(self->device_id_);
   (void)hipHostFree(p);
 }
@@ -218,7 +220,6 @@ HipGpuAllocator::~HipGpuAllocator() {
   for (auto& fl : free_lists_) {
     fl.clear();
   }
-  large_free_.clear();
   ptr_to_size_.clear();
 }
 
