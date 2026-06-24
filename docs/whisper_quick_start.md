@@ -43,6 +43,40 @@ selected at run time with `--fp32`; see §6 for fp16-vs-fp32 numbers.
 
 ---
 
+## Supported variants
+
+The EP supports these Whisper variants (all share one architecture + decoder
+surgery; only shape params, n_mels, vocab, and special-token IDs differ):
+
+| Variant        | n_mels | enc / dec layers | heads | vocab | source                        |
+|----------------|--------|------------------|-------|-------|-------------------------------|
+| large-v3       | 128    | 32 / 32          | 20    | 51866 | AMD HF (auto-download)        |
+| large-v3-turbo | 128    | 32 / 4           | 20    | 51866 | local OGA build               |
+| medium         | 80     | 24 / 24          | 16    | 51865 | local OGA build               |
+| small          | 80     | 12 / 12          | 12    | 51865 | local OGA build               |
+| base           | 80     | 6 / 6            | 8     | 51865 | local OGA build               |
+| tiny           | 80     | 4 / 4            | 6     | 51865 | local OGA build               |
+
+`head_dim` is 64 and the decoder context is 448 for every variant.
+
+Build + prepare a non-large-v3 variant (large-v3 auto-downloads on first use; the
+others require a local OGA build):
+
+```bash
+python scripts/build_whisper_models.py --variant large-v3-turbo   # or tiny/base/small/medium
+python scripts/setup_whisper_model.py --variant large-v3-turbo    # surgery + fix_shapes
+```
+
+`--variant` accepts a comma-separated list or multiple `--variant` flags; omitting
+it builds the default set (`large-v3-turbo tiny base small medium`). See
+`python scripts/build_whisper_models.py --list` for the full list.
+
+Per-variant EP correctness is covered by
+`test/python/whisper/test_whisper_variant_smoke.py` (EP-GPU vs ORT-CPU greedy token
+match; skips cleanly if a variant is not built or the EP is not found).
+
+---
+
 ## Pipeline overview
 
 Whisper runs as **three separate ONNX graphs**, each compiled to its own GPU
