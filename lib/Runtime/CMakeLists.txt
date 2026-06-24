@@ -256,6 +256,8 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
                 ${CMAKE_CURRENT_SOURCE_DIR}/op_state.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/op_profile.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/debug_log.h
+                ${CMAKE_CURRENT_SOURCE_DIR}/mm/hal.h
+                ${CMAKE_CURRENT_SOURCE_DIR}/mm/memory_manager.h
                 ${IMPL_DEPS}
                 ${CMAKE_BINARY_DIR}/schemas/model_metadata_generated.h
         COMMENT "Compiling ${SOURCE_FILE} to bitcode"
@@ -263,6 +265,15 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
         COMMAND_EXPAND_LISTS
     )
 endmacro()
+
+# Unified Memory Manager — HAL backends + MemoryManager (Phase 1+).
+# Compiled to bitcode so the MM is merged into each per-model DLL alongside
+# the rest of the runtime. The HAL factory is included here; it selects the
+# correct backend at session-create time via hipDeviceGetAttribute.
+compile_to_bitcode(mm/hal_apu.cpp runtime_mm_hal_apu.bc)
+compile_to_bitcode(mm/hal_discrete.cpp runtime_mm_hal_discrete.bc)
+compile_to_bitcode(mm/hal_factory.cpp runtime_mm_hal_factory.bc)
+compile_to_bitcode(mm/memory_manager.cpp runtime_mm_memory_manager.bc)
 
 # Compile shared implementation files
 compile_to_bitcode(hipdnn_ep_runtime_state.cpp runtime_state.bc)
@@ -332,6 +343,10 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/global_pool.cpp runtime_global_pool.bc)
 
     set(RUNTIME_BC_MODULES
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_mm_hal_apu.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_mm_hal_discrete.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_mm_hal_factory.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_mm_memory_manager.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_loop.bc
@@ -401,6 +416,10 @@ else()
     compile_to_bitcode(mock/op_state_stubs.cpp runtime_op_state_stubs.bc)
 
     set(RUNTIME_BC_MODULES
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_mm_hal_apu.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_mm_hal_discrete.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_mm_hal_factory.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_mm_memory_manager.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_loop.bc
