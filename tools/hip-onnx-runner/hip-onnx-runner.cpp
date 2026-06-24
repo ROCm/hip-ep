@@ -811,10 +811,6 @@ int main(int argc, char *argv[]) {
       "3=both",
       "0");
   mo.add_option("s", "seed", "RNG seed for random inputs", "42");
-  mo.add_option("r", "repeat",
-                "Number of timed inference runs (warm steady-state); reports "
-                "min/mean over runs. Default 1.",
-                "1");
   mo.add_option("i", "input-dir",
                 "Directory with input_<idx>_<name>_<type>.bin only; empty = "
                 "random inputs",
@@ -953,27 +949,14 @@ int main(int argc, char *argv[]) {
     }
     std::cout << "Found " << devices.size() << " EP device(s)\n";
 
-    // EP provider options. Optionally select the per-model artifact backend
-    // via $HIPDNN_EP_ARTIFACT_FORMAT (LLVM_IR | NATIVE). NATIVE compiles each
-    // subgraph to a per-OS .dll/.so loaded via LoadLibrary -- the EP's
-    // load_config reads the "artifact_format" provider option (see
-    // backend-mlir-compiler/level-1-pass/src/pass_main.cpp). Useful for dev /
-    // benchmarking; the LLVM-IR JIT path can crash when combined with
-    // HIPDNN_EP_PERF=1, so native is the stable choice for perf runs.
-    std::unordered_map<std::string, std::string> ep_options;
-    if (const char *fmt = std::getenv("HIPDNN_EP_ARTIFACT_FORMAT");
-        fmt && *fmt) {
-      ep_options["artifact_format"] = fmt;
-      std::cout << "EP provider option artifact_format=" << fmt << "\n";
-    }
-
     // ORT >=1.24 added an AppendExecutionProvider_V2 overload that accepts
     // Ort::KeyValuePairs alongside the legacy std::unordered_map<string,string>
     // version. Passing a brace-init `{}` is ambiguous against both candidates
     // on the prebuilt Linux ORT package we ship here. Spell out the map type
     // so we always bind to the original overload and stay compatible with the
     // older ORT version we still link against on Windows.
-    session_opts.AppendExecutionProvider_V2(env, devices, ep_options);
+    session_opts.AppendExecutionProvider_V2(
+        env, devices, std::unordered_map<std::string, std::string>{});
     session_opts.AddConfigEntry("session.disable_cpu_ep_fallback", "1");
   }
 
@@ -1156,44 +1139,22 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  // Run inference. With -r N>1 the loop reuses one session so the GPU stays
-  // warm (steady-state clocks) -- the first run is reported separately as the
-  // cold sample, then min/mean over the remaining runs. The last run's outputs
-  // are kept for dumping.
-  const int repeat = std::max(1, mo.get<int>("repeat"));
-  std::cout << "Running inference (" << repeat << " run(s))...\n";
+  // Run inference
+  std::cout << "Running inference...\n";
   std::vector<Ort::Value> outputs;
   {
-    double cold_us = 0.0;
-    double min_us = 0.0;
-    double sum_us = 0.0;
-    int warm_count = 0;
-    for (int run = 0; run < repeat; ++run) {
-      auto t0 = std::chrono::steady_clock::now();
-      try {
-        outputs = session->Run(Ort::RunOptions{}, input_names.data(),
-                               input_tensors.data(), input_count,
-                               output_names.data(), output_count);
-      } catch (const Ort::Exception &e) {
-        std::cerr << "Inference failed: " << e.what() << "\n";
-        return 1;
-      }
-      const double us = elapsed_since(t0) * 1e6;
-      if (run == 0) {
-        cold_us = us;
-      } else {
-        sum_us += us;
-        min_us = (warm_count == 0) ? us : std::min(min_us, us);
-        ++warm_count;
-      }
+    auto t0 = std::chrono::steady_clock::now();
+    try {
+      outputs = session->Run(Ort::RunOptions{}, input_names.data(),
+                             input_tensors.data(), input_count,
+                             output_names.data(), output_count);
+      std::cout << "Inference: "
+                << static_cast<int64_t>(elapsed_since(t0) * 1e6) << " us\n";
+      std::cout << "OK - " << outputs.size() << " output tensor(s)\n";
+    } catch (const Ort::Exception &e) {
+      std::cerr << "Inference failed: " << e.what() << "\n";
+      return 1;
     }
-    std::cout << "Inference cold: " << static_cast<int64_t>(cold_us) << " us\n";
-    if (warm_count > 0) {
-      std::cout << "Inference warm: min=" << static_cast<int64_t>(min_us)
-                << " us  mean=" << static_cast<int64_t>(sum_us / warm_count)
-                << " us  (" << warm_count << " run(s))\n";
-    }
-    std::cout << "OK - " << outputs.size() << " output tensor(s)\n";
   }
 
   if (dump_level == 2 || dump_level == 3) {
