@@ -1078,16 +1078,6 @@ def create_ep_session(model_path, repo_root, provider_options=None):
     if not devices:
         pytest.skip("AMDGPU EP not found — run build.py first")
     so = ort.SessionOptions()
-    # Force the NATIVE artifact format (per-model DLL + LoadLibrary) instead of
-    # the default in-process LLVM-IR ORC JIT. On Windows the JIT path crashes at
-    # session create (comgr LLVM-symbol collision; the version-script
-    # localization that fixes it is Linux-only). artifact_format is a hipep
-    # *backend* option, so it must be passed as a raw `ep.hipep.*` session-config
-    # entry — NOT a provider option, which ORT validates against the umbrella's
-    # declared options and rejects as unknown. The AMDGPU umbrella forwards
-    # non-umbrella-prefixed config entries verbatim to the backend. Mirrors CI's
-    # `-C ep.hipep.artifact_format|NATIVE` native smoke test.
-    so.add_session_config_entry("ep.hipep.artifact_format", "NATIVE")
     so.add_provider_for_devices(devices, provider_options or dict(EP_PROVIDER_OPTIONS))
     return ort.InferenceSession(model_path, sess_options=so)
 
