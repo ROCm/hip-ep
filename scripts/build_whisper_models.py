@@ -16,9 +16,15 @@ shadows the OGA FORK that build.py --build-oga installs (both import as
 models in a DEDICATED, PINNED venv (install/whisper-builder-venv/) and runs the
 builder via subprocess in that venv. The dev env is never touched.
 
+Default precision is fp16: the added variants (turbo + small sizes) only need
+fp16 (all variant tests run fp16), which halves build + disk + test work. fp32
+is still available via --precision (large-v3 keeps its fp32-vs-fp32 cross-backend
+benchmark, sourced by download in conftest).
+
 Run:
     conda activate hipdnn-ep
-    python scripts/build_whisper_models.py            # build default variants (fp32 + fp16)
+    python scripts/build_whisper_models.py            # build default variants (fp16)
+    python scripts/build_whisper_models.py --precision both   # fp32 + fp16
     python scripts/build_whisper_models.py --list     # show what would be built
     python scripts/build_whisper_models.py --variant tiny --variant base  # specific variants
 
@@ -313,8 +319,10 @@ def main() -> int:
     ap.add_argument(
         "--precision",
         choices=["fp32", "fp16", "both"],
-        default="both",
-        help="which precision(s) to build (default: both)",
+        default="fp16",
+        help="which precision(s) to build (default: fp16). The added variants "
+        "(turbo + small sizes) only need fp16; pass fp32/both for large-v3's "
+        "cross-backend fp32-vs-fp32 benchmark.",
     )
     ap.add_argument(
         "--list",

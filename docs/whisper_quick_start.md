@@ -63,9 +63,15 @@ Build + prepare a non-large-v3 variant (large-v3 auto-downloads on first use; th
 others require a local OGA build):
 
 ```bash
-python scripts/build_whisper_models.py --variant large-v3-turbo   # or tiny/base/small/medium
-python scripts/setup_whisper_model.py --variant large-v3-turbo    # surgery + fix_shapes
+python scripts/build_whisper_models.py --variant large-v3-turbo   # or tiny/base/small/medium (fp16)
+python scripts/setup_whisper_model.py --variant large-v3-turbo    # surgery + fix_shapes (fp16)
 ```
+
+The added variants only need **fp16** — the build script and `setup_whisper_model.py`
+both default to fp16, and the per-variant smoke test runs fp16 only. (Pass
+`--precision both` / `--fp32` if you ever want fp32 for one of these.) This halves
+build + disk + test work; large-v3 keeps its fp32 bundle for the cross-backend
+fp32-vs-fp32 benchmark (§6).
 
 `--variant` accepts a comma-separated list or multiple `--variant` flags; omitting
 it builds the default set (`large-v3-turbo tiny base small medium`). See
@@ -314,16 +320,17 @@ models/whisper-large-v3-onnx-fp16/   (default; fp32 dir mirrors this layout)
 
 The §3 download is the normal path. Build locally only if HF is unreachable, or
 to **reproduce** the published models from source. `python
-scripts/build_whisper_models.py` builds BOTH the fp32 (`models/whisper-large-v3-onnx/`)
-and fp16 (`models/whisper-large-v3-onnx-fp16/`) bundles from
-`openai/whisper-large-v3` (pinned HF revision) via a pinned OGA DirectML model
-builder running in an isolated venv. This is exactly how the AMD HF repos were
+scripts/build_whisper_models.py` builds from `openai/whisper-large-v3` (pinned HF
+revision) via a pinned OGA DirectML model builder running in an isolated venv into
+`models/whisper-large-v3-onnx{,-fp16}/`. This is exactly how the AMD HF repos were
 produced, so the output is byte-equivalent. First run downloads the HF *weights* +
-builds (~10 min); idempotent after.
+builds (~10 min); idempotent after. The default precision is **fp16**; large-v3's
+fp32-vs-fp32 cross-backend benchmark (§6) needs the fp32 bundle too, so pass
+`--precision both` when reproducing large-v3 locally.
 
 ```
-python scripts/build_whisper_models.py            # both precisions
-python scripts/build_whisper_models.py --precision fp16   # one only
+python scripts/build_whisper_models.py --variant large-v3 --precision both  # fp32 + fp16
+python scripts/build_whisper_models.py --variant large-v3                    # fp16 only
 ```
 
 Because this writes the same `models/whisper-large-v3-onnx{,-fp16}/` dirs the §3
