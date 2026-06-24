@@ -692,6 +692,61 @@ WHISPER_HF_REPO_FP32 = "amd/whisper-large-v3-onnx-fp32"
 WHISPER_HF_REPO_FP16 = "amd/whisper-large-v3-onnx-fp16"
 
 
+def whisper_model_dir(name: str, precision: str) -> pathlib.Path:
+    """Return the model directory for a (variant, precision) pair.
+
+    Naming convention: models/whisper-{name}-onnx[-fp16]. MUST match
+    build_whisper_models.whisper_output_dirs so both the builder and the test
+    infra resolve to the same on-disk location.
+    """
+    suffix = "-fp16" if precision == "fp16" else ""
+    return REPO_ROOT / "models" / f"whisper-{name}-onnx{suffix}"
+
+
+def _ensure_whisper_raw(name: str, model_dir: pathlib.Path, precision: str) -> None:
+    """Ensure model_dir/{encoder,decoder}.onnx exist.
+
+    large-v3 downloads from its AMD HF repo (existing behavior); all other
+    variants are LOCAL-BUILD primary (no AMD repo) — raises FileNotFoundError
+    with a build hint if absent.
+    """
+    if (model_dir / "encoder.onnx").exists() and (model_dir / "decoder.onnx").exists():
+        return
+    if name == "large-v3":
+        repo = WHISPER_HF_REPO_FP16 if precision == "fp16" else WHISPER_HF_REPO_FP32
+        _ensure_whisper_raw_downloaded(model_dir, repo)
+        return
+    raise FileNotFoundError(
+        f"Whisper {name} {precision} raw model not found at {model_dir}.\n"
+        f"  Build it locally: python scripts/build_whisper_models.py "
+        f"--variant {name} --precision {precision}\n"
+        f"  (or: python build.py --build-whisper-models)"
+    )
+
+
+def setup_whisper_variant(
+    name: str, precision: str = "fp16"
+) -> "tuple[pathlib.Path, WhisperVariant]":
+    """Idempotent prep for ANY Whisper variant.
+
+    Ensures the raw OGA bundle (local build primary; large-v3 may download from
+    the AMD HF repo), then runs surgery + fix_shapes using the variant's
+    n_text_ctx. Returns (model_dir, WhisperVariant).
+    """
+    var = resolve_whisper_variant(name)
+    model_dir = whisper_model_dir(name, precision)
+    _ensure_whisper_raw(name, model_dir, precision)
+    for fname in ("encoder.onnx", "decoder.onnx"):
+        if not (model_dir / fname).exists():
+            raise FileNotFoundError(
+                f"Whisper {name} {precision} incomplete at {model_dir} "
+                f"(missing {fname}); build with "
+                f"python scripts/build_whisper_models.py --variant {name}"
+            )
+    _apply_whisper_surgery_and_fix_shapes(model_dir, var.cfg.n_text_ctx)
+    return model_dir, var
+
+
 def _ensure_whisper_raw_downloaded(model_dir: pathlib.Path, hf_repo: str) -> None:
     """Fetch the raw OGA bundle from ``hf_repo`` into ``model_dir`` if absent.
 
@@ -751,7 +806,9 @@ def setup_whisper_model_dir(model_dir: pathlib.Path) -> None:
     _apply_whisper_surgery_and_fix_shapes(model_dir)
 
 
-def _apply_whisper_surgery_and_fix_shapes(model_dir: pathlib.Path) -> None:
+def _apply_whisper_surgery_and_fix_shapes(
+    model_dir: pathlib.Path, n_text_ctx: int = 448
+) -> None:
     """Surgery + fix_shapes on a locally-built Whisper bundle (fp32 OR fp16).
 
     Consumes ``model_dir/{encoder,decoder}.onnx`` (+ ``.data`` sidecars) and emits
@@ -781,8 +838,8 @@ def _apply_whisper_surgery_and_fix_shapes(model_dir: pathlib.Path) -> None:
             {
                 "batch_size": 1,
                 "sequence_length": 4,
-                "past_sequence_length": 448,
-                "total_sequence_length": 448,
+                "past_sequence_length": n_text_ctx,
+                "total_sequence_length": n_text_ctx,
             },
         )
 
@@ -794,8 +851,8 @@ def _apply_whisper_surgery_and_fix_shapes(model_dir: pathlib.Path) -> None:
             {
                 "batch_size": 1,
                 "sequence_length": 1,
-                "past_sequence_length": 448,
-                "total_sequence_length": 448,
+                "past_sequence_length": n_text_ctx,
+                "total_sequence_length": n_text_ctx,
             },
         )
 
