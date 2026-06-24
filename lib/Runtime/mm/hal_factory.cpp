@@ -18,29 +18,22 @@
 #ifndef HIPDNN_EP_MM_MOCK_HAL
 #include "runtime_types.h"
 
-// hipDeviceGetAttribute is available in both real HIP and the mock (via
-// mock_types.h which declares the function forward); however, the mock's
-// hipDeviceProp_t already carries an `integrated` field. We use
-// hipGetDeviceProperties for simplicity since the mock provides it too.
-#else
-// In mock mode we only need the struct definition; mock_types.h provides it.
-#include "mock_types.h"
-
-static inline int hipGetDeviceProperties(hipDeviceProp_t *prop,
-                                         int /*device*/) {
-  prop->integrated = 1; // mock always reports integrated (APU)
-  return 0;             // hipSuccess == 0
-}
-#define hipSuccess 0
-#endif
-
 HalAllocator *hal_create_for_device(int device_id) {
   hipDeviceProp_t prop{};
+  // hipGetDeviceProperties returns 0 on success; prop.integrated is 1 for APU.
   int rc = hipGetDeviceProperties(&prop, device_id);
   bool integrated = (rc == hipSuccess) && (prop.integrated != 0);
-
-  if (integrated) {
+  if (integrated)
     return new ApuHalAllocator();
-  }
   return new DiscreteHalAllocator();
 }
+
+#else
+// Mock / unit-test path: no HIP SDK available. Always return ApuHalAllocator
+// because both backends use malloc under HIPDNN_EP_MM_MOCK_HAL, and APU is
+// the simpler of the two for tests. Avoids redefining hipGetDeviceProperties
+// which mock_types.h already declares as extern "C".
+HalAllocator *hal_create_for_device(int /*device_id*/) {
+  return new ApuHalAllocator();
+}
+#endif
