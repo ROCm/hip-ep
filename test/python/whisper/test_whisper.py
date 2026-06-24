@@ -71,6 +71,7 @@ from conftest import (  # noqa: E402
     EP_PROVIDER_OPTIONS,
     REPO_ROOT,
     WhisperModelConfig,
+    apply_artifact_format,
     get_amd_dml_providers,
     make_whisper_inputs,
     register_morphizen_ep,
@@ -251,6 +252,9 @@ def _morphizen_session(model_name, model_dir=_MODEL_DIR):
     # not need this (its Gelu is not inlined by ORT), but setting it everywhere
     # is harmless and keeps the helper uniform.
     so.add_session_config_entry("session.disable_aot_function_inlining", "1")
+    # bitcode by default; HIPEP_ARTIFACT_FORMAT=NATIVE opts into the per-model
+    # DLL path (local workaround for from-source builds whose JIT misbehaves).
+    apply_artifact_format(so)
     # profile=llm tells the AMDGPU umbrella to dispatch to the hipep backend.
     so.add_provider_for_devices(devices, dict(EP_PROVIDER_OPTIONS))
     return ort.InferenceSession(str(model_dir / model_name), sess_options=so)

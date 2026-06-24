@@ -46,6 +46,28 @@ EP_OGA_NAME = "AMDGPU"
 # Provider option the umbrella forwards to pick the hipep backend.
 EP_PROVIDER_OPTIONS = {"profile": "llm"}
 
+# Optional artifact-format override for LOCAL debugging. Production / CI use the
+# default in-process LLVM-IR (bitcode) JIT, so this is UNSET by default and the
+# tests run on bitcode. Set HIPEP_ARTIFACT_FORMAT=NATIVE to compile each model
+# to a per-model DLL (lld-link + LoadLibrary) instead — a convenience on dev
+# machines whose from-source (Tier-2) build can't run the in-process JIT. The
+# value rides through as a raw `ep.hipep.*` session-config entry (NOT a provider
+# option: ORT validates those against the umbrella's declared set and rejects an
+# unknown key; the umbrella forwards non-umbrella-prefixed config entries to the
+# backend verbatim). Mirrors CI's `-C ep.hipep.artifact_format|NATIVE`.
+ARTIFACT_FORMAT_ENV = "HIPEP_ARTIFACT_FORMAT"
+
+
+def apply_artifact_format(so):
+    """Apply the optional HIPEP_ARTIFACT_FORMAT override to a SessionOptions.
+
+    No-op (bitcode default) when the env var is unset/empty.
+    """
+    fmt = os.environ.get(ARTIFACT_FORMAT_ENV, "").strip()
+    if fmt:
+        so.add_session_config_entry("ep.hipep.artifact_format", fmt)
+
+
 _morphizen_registered = False
 
 
@@ -1246,6 +1268,9 @@ def create_ep_session(model_path, repo_root, provider_options=None):
     if not devices:
         pytest.skip("AMDGPU EP not found — run build.py first")
     so = ort.SessionOptions()
+    apply_artifact_format(
+        so
+    )  # bitcode by default; HIPEP_ARTIFACT_FORMAT=NATIVE opts in
     so.add_provider_for_devices(devices, provider_options or dict(EP_PROVIDER_OPTIONS))
     return ort.InferenceSession(model_path, sess_options=so)
 
