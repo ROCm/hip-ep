@@ -5,24 +5,19 @@
 // imported via onnx-mlir / morphizen mlir-imp.
 //
 // Verifies the complete hipdnn-pipeline:
-// 1. convert-onnx-to-hip: onnx.LpNormalization decomposes into
-//    Mul / ReduceSum / Sqrt / Div, each handled by its own converter.
-//    The broadcasting Div is rewritten by BroadcastDivToMulReciprocal
-//    into Mul(x, Reciprocal(norm)). No new HIP op or runtime symbol is
-//    introduced — only existing primitives are exercised.
+// 1. convert-onnx-to-hip: onnx.LpNormalization (p=2) decomposes into
+//    Mul / ReduceSum / Sqrt / Div, the broadcasting Div is rewritten into
+//    Mul(x, Reciprocal(norm)), and L2NormFusion then folds that whole
+//    chain into a single hip.l2_norm (epsilon = 0, numerically identical).
 // 2. canonicalize: simplify redundant operations
 // 3. memory-pooling: pool output buffer into single allocation
-// 4. convert-hip-to-llvm: HIP ops -> LLVM runtime calls
-//    (wrap_miopenOpTensor for Mul, wrap_reduce_sum for ReduceSum,
-//     wrap_power for Sqrt + Reciprocal)
+// 4. convert-hip-to-llvm: hip.l2_norm -> wrap_l2_normalize runtime call
 // 5. generate-interface: create inference_init/compute/cleanup/metadata
 
 // CHECK: module attributes {
 // CHECK-SAME: hipdnn.input_count = 1
 // CHECK-SAME: hipdnn.output_count = 1
-// CHECK-DAG: llvm.func @wrap_miopenOpTensor
-// CHECK-DAG: llvm.func @wrap_reduce_sum
-// CHECK-DAG: llvm.func @wrap_power
+// CHECK-DAG: llvm.func @wrap_l2_normalize
 // CHECK-DAG: llvm.func @inference_init
 // CHECK-DAG: llvm.func @inference_compute
 // CHECK-DAG: llvm.func @inference_cleanup

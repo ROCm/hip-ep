@@ -7,9 +7,13 @@
 // into Mul(x,x) -> ReduceSum(axis, keepdims=1) -> Sqrt -> Div(x, norm). The
 // final Div broadcasts (rhs has 1 along the reduce axis), so
 // BroadcastDivToMulReciprocal -- also in the pre-lowering loop -- rewrites
-// it into Mul(x, Reciprocal(norm)). The expected hip.* op set is therefore:
-// hip.mul, hip.reduce_sum, hip.sqrt, hip.reciprocal, hip.mul. p=1 gets one
-// extra hip.sqrt for the Sqrt(x*x)=|x| step.
+// it into Mul(x, Reciprocal(norm)).
+//
+// For p=2 the resulting Mul/ReduceSum/Sqrt/Reciprocal/Mul chain is exactly
+// the pattern L2NormFusion matches, so it is then folded into a single
+// hip.l2_norm (epsilon = 0, numerically identical: x / sqrt(sum(x^2))).
+// p=1 inserts an extra Sqrt(x*x)=|x| step, which does not match the L2
+// pattern, so it stays as the primitive decomposition.
 
 module {
   func.func @main_graph(%arg0: tensor<4xf32>) -> tensor<4xf32> {
@@ -26,11 +30,9 @@ module {
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[X:.*]]: tensor<2x3xf32>)
   // CHECK-NOT: onnx.LpNormalization
   // CHECK-NOT: onnx.Div
-  // CHECK: hip.mul(%[[CTX]]) ins(%[[X]], %[[X]]
-  // CHECK: hip.reduce_sum
-  // CHECK: hip.sqrt
-  // CHECK: hip.reciprocal
-  // CHECK: hip.mul
+  // p=2 chain is folded into a single hip.l2_norm by L2NormFusion.
+  // CHECK: hip.l2_norm(%[[CTX]]) ins(%[[X]]
+  // CHECK-NOT: hip.reduce_sum
 
   // p=1, explicit axis=1 on a rank-3 f16 input. p=1 path inserts an extra
   // Sqrt(x*x) before the reduction to compute |x|.
@@ -60,13 +62,7 @@ module {
   // CHECK-LABEL: func.func @lp_norm_dynamic
   // CHECK-SAME: (%[[CTX2:.*]]: !hip.context, %[[X2:.*]]: tensor<?x?x16xf32>)
   // CHECK-NOT: onnx.LpNormalization
-  // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
-  // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
-  // CHECK: tensor.dim
-  // CHECK: tensor.dim
-  // CHECK: hip.mul
-  // CHECK: hip.reduce_sum
-  // CHECK: hip.sqrt
-  // CHECK: hip.reciprocal
-  // CHECK: hip.mul
+  // p=2 dynamic-shape chain is likewise folded into hip.l2_norm.
+  // CHECK: hip.l2_norm(%[[CTX2]]) ins(%[[X2]]
+  // CHECK-NOT: hip.reduce_sum
 }
