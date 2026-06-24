@@ -233,6 +233,48 @@ jobs:
       # (not cached).
 
       # -----------------------------------------------------------------------
+      # Build the AMD GPU umbrella EP (onnxruntime-ep-amdgpu) + hipep-backend
+      # shim from the fork's pinned commit. USE_AMDGPU forces DML/MIGraphX off
+      # and HIPEP on (no MIGraphX SDK needed); the shim loads libhipep.so (the
+      # morphizen EP). Built against ort-install only, so it has no dependency
+      # on the onnx-hipdnn-ep build below. Bump the commit + cache key together
+      # when the fork moves.
+      # -----------------------------------------------------------------------
+      - name: Cache amdgpu-ep build
+        id: cache-amdgpu
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: ${{ runner.workspace }}/build-amdgpu
+          key: linux-amdgpu-19dc45a-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
+
+      - name: Checkout amdgpu-ep
+        if: steps.cache-amdgpu.outputs.cache-hit != 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: zz002/onnxruntime-ep-amdgpu
+          ref: 19dc45af58bf3b2775d87fe80455a2543c7b24fb
+          path: source-amdgpu
+          fetch-depth: 1
+          show-progress: false
+
+      - name: Build amdgpu-ep
+        if: steps.cache-amdgpu.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          # onnxruntime-ep-amdgpu requires CMake >= 4.2; pin a pip cmake for it.
+          python3 -m pip install -q "cmake>=4.2"
+          CMAKE="$(python3 -c "import cmake, os; print(os.path.join(cmake.CMAKE_BIN_DIR, 'cmake'))")"
+          echo "Using $("$CMAKE" --version | head -1)"
+          "$CMAKE" -G Ninja -S source-amdgpu -B "${{ runner.workspace }}/build-amdgpu" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DUSE_AMDGPU=ON \
+            -DCMAKE_PREFIX_PATH="${{ runner.workspace }}/ort-install" \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+          "$CMAKE" --build "${{ runner.workspace }}/build-amdgpu" \
+            --target amdgpu-ep hipep-ep
+
+      # -----------------------------------------------------------------------
       # Build this project natively via the plain build.py. Deps are
       # injected as prefixes (llvm-install + ort-install); protobuf/flatbuffers
       # are resolved from source and TheRock auto-downloaded by cmake/deps.cmake.
@@ -337,6 +379,24 @@ jobs:
           cp "$ART/model_benchmark" "${{ runner.workspace }}/install/bin/"
           cp -a "$ART"/libonnxruntime-genai.so* "${{ runner.workspace }}/install/lib/"
 
+      # AMD GPU umbrella EP (libamdgpu-ep.so) + hipep-backend shim
+      # (libhipep-backend.so) from the fork build above. Drop them into
+      # install/lib so the closure pass resolves their deps and the staging
+      # step ships them next to libhipep.so (the morphizen EP they load).
+      - name: Install amdgpu-ep artifacts into install/
+        run: |
+          set -euo pipefail
+          AMDGPU_BUILD="${{ runner.workspace }}/build-amdgpu"
+          AMDGPU_EP=$(find "$AMDGPU_BUILD" -name "libamdgpu-ep.so" -type f | head -1)
+          HIPEP_BACKEND=$(find "$AMDGPU_BUILD" -name "libhipep-backend.so" -type f | head -1)
+          if [ -z "$AMDGPU_EP" ] || [ -z "$HIPEP_BACKEND" ]; then
+            echo "ERROR: libamdgpu-ep.so or libhipep-backend.so not found in $AMDGPU_BUILD"
+            find "$AMDGPU_BUILD" -name '*.so' -type f || true
+            exit 1
+          fi
+          cp -a "$AMDGPU_EP" "$HIPEP_BACKEND" "${{ runner.workspace }}/install/lib/"
+          echo "Installed: $(basename "$AMDGPU_EP") $(basename "$HIPEP_BACKEND")"
+
       # -----------------------------------------------------------------------
       # Bundle the runtime .so into install/lib so the artifact is
       # self-contained with LD_LIBRARY_PATH=install/lib:$THEROCK/lib. scripts/
@@ -367,6 +427,8 @@ jobs:
           stage_pass \
             "$INSTALL"/lib/libhipep.so \
             "$INSTALL"/lib/libhip-compiler.so \
+            "$INSTALL"/lib/libamdgpu-ep.so \
+            "$INSTALL"/lib/libhipep-backend.so \
             "$INSTALL"/bin/hip-compiler \
             "$INSTALL"/bin/hip-onnx-runner \
             "$INSTALL"/bin/hip-test \
@@ -467,6 +529,17 @@ jobs:
             exit 1
           fi
           echo "OK: $(basename "$KERNEL_SO") present"
+
+          # Smoke: AMD GPU umbrella EP + hipep-backend shim must ship next to
+          # libhipep.so so the umbrella load chain resolves on the GPU host.
+          for so in libamdgpu-ep.so libhipep-backend.so; do
+            if [ ! -f "staging/lib/$so" ]; then
+              echo "ERROR: staging/lib/$so missing (amdgpu-ep build/stage regressed)"
+              ls -1 staging/lib/ | head -40
+              exit 1
+            fi
+            echo "OK: $so present"
+          done
 
           rm -f staging/lib/libHipCInterface.a \
                 staging/lib/libcpptrace.a \
