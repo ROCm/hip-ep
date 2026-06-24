@@ -27,7 +27,6 @@
 
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <string>
 #include <unordered_map>
 
@@ -75,6 +74,12 @@ const std::unordered_map<std::string, ckdsl::KernelDef> &kernelTableF16() {
 // drops back to the caller's baseline path.
 constexpr int kHiddenDim = 4096;
 
+// Decode-shaped cutoff: only route calls with at most this many rows (M)
+// through ck_dsl. ck_dsl wins on small M (autoregressive decode) but loses to
+// MIOpen on prefill-shaped large M, so keep big batches on the MIOpen baseline.
+// Prototype heuristic; tune via a per-M sweep.
+constexpr int64_t kMaxCkDslDecodeRows = 32;
+
 // ABI matches AddRMSNorm2DBF16Spec.signature() (natural alignment; the 5
 // leading pointers are 8-aligned and M/N/eps pack contiguously, so field
 // offsets match the ck_dsl signature without packing):
@@ -109,16 +114,6 @@ int ck_dsl_skip_simplified_layer_norm(void *stream, const void *input,
                                       int64_t element_size_bytes) {
   constexpr int kRejectFallback = -2;
 
-  // A/B escape hatch (PR #271 perf testing, not shipped): setting
-  // HIPDNN_EP_DISABLE_CKDSL_NORM=1 forces the MIOpen baseline by rejecting
-  // here. Read once per process so it adds no per-call overhead to the ON path.
-  static const bool ckdsl_norm_disabled = [] {
-    const char *e = std::getenv("HIPDNN_EP_DISABLE_CKDSL_NORM");
-    return e && e[0] == '1';
-  }();
-  if (ckdsl_norm_disabled)
-    return kRejectFallback;
-
   if (hidden_dim != kHiddenDim)
     return kRejectFallback;
   if (element_size_bytes != 4 && element_size_bytes != 2)
@@ -127,6 +122,9 @@ int ck_dsl_skip_simplified_layer_norm(void *stream, const void *input,
       !residual_sum_out)
     return kRejectFallback;
   if (num_rows > INT32_MAX)
+    return kRejectFallback;
+  // Keep prefill-shaped (large M) calls on MIOpen; ck_dsl only for decode.
+  if (num_rows > kMaxCkDslDecodeRows)
     return kRejectFallback;
 
   // Pick the kernel built for the running device + I/O dtype; fall back to
