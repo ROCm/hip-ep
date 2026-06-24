@@ -575,6 +575,113 @@ class WhisperModelConfig:
     n_vocab: int = 51866
 
 
+# ── Whisper variant registry + config/token derivation ───────────────────────
+#
+# Per-variant shape params (state, layers, heads, n_mels, vocab) are DERIVED from
+# each model's transformers WhisperConfig (whisper_model_config_from_hf_config) —
+# we do NOT maintain a hardcoded dimension table. The registry pins only the HF
+# model id + revision so the source weights are reproducible. head_dim is 64,
+# n_text_ctx is 448, n_audio_ctx is 1500 for every Whisper variant.
+WHISPER_VARIANTS = {
+    # name            (hf_model_id,                    revision)
+    "large-v3": ("openai/whisper-large-v3", "06f233fe06e710322aca913c1bc4249a0d71fce1"),
+    "large-v3-turbo": ("openai/whisper-large-v3-turbo", "main"),
+    "tiny": ("openai/whisper-tiny", "main"),
+    "base": ("openai/whisper-base", "main"),
+    "small": ("openai/whisper-small", "main"),
+    "medium": ("openai/whisper-medium", "main"),
+}
+
+
+def whisper_model_config_from_hf_config(c) -> "WhisperModelConfig":
+    """Map a transformers WhisperConfig (or any object exposing the same attrs)
+    to our WhisperModelConfig. This is the single source of per-variant shape
+    params — the OGA builder reads the same WhisperConfig, so the ONNX and our
+    test config can never disagree."""
+    return WhisperModelConfig(
+        n_audio_state=c.d_model,
+        n_audio_layer=c.encoder_layers,
+        n_audio_head=c.encoder_attention_heads,
+        n_audio_ctx=c.max_source_positions,
+        n_text_state=c.d_model,
+        n_text_layer=c.decoder_layers,
+        n_text_head=c.decoder_attention_heads,
+        n_text_ctx=c.max_target_positions,
+        n_mels=c.num_mel_bins,
+        n_vocab=c.vocab_size,
+    )
+
+
+# Forced-start specials for transcription (English, no timestamps). The IDs are
+# READ from the tokenizer per variant — large-v3's 51866 layout added a language
+# vs the 51865 multilingual layout, which shifts <|transcribe|>/<|notimestamps|>
+# by one, so these MUST NOT be hardcoded.
+WHISPER_SPECIAL_TOKENS = (
+    "<|startoftranscript|>",
+    "<|en|>",
+    "<|transcribe|>",
+    "<|notimestamps|>",
+)
+
+
+def whisper_start_tokens(tokenizer):
+    """Derive (start_tokens, eot) from a tokenizer exposing
+    convert_tokens_to_ids(str) -> int. Returns (list[int], int)."""
+    start = [tokenizer.convert_tokens_to_ids(t) for t in WHISPER_SPECIAL_TOKENS]
+    eot = tokenizer.convert_tokens_to_ids("<|endoftext|>")
+    return start, eot
+
+
+@dataclass
+class WhisperVariant:
+    """A fully-resolved Whisper variant: pinned source + derived shape config +
+    derived forced-start tokens. head_dim / n_layers / n_heads / self_kv_slots
+    are read off cfg so callers never recompute them."""
+
+    name: str
+    hf_model_id: str
+    revision: str
+    cfg: "WhisperModelConfig"
+    start_tokens: list
+    eot: int
+
+    @property
+    def n_layers(self) -> int:
+        return self.cfg.n_text_layer
+
+    @property
+    def n_heads(self) -> int:
+        return self.cfg.n_text_head
+
+    @property
+    def head_dim(self) -> int:
+        return self.cfg.n_text_state // self.cfg.n_text_head
+
+    @property
+    def self_kv_slots(self) -> int:
+        return self.cfg.n_text_ctx
+
+
+def resolve_whisper_variant(name) -> "WhisperVariant":
+    """Resolve a variant name to a WhisperVariant. Reads the HF WhisperConfig +
+    tokenizer (network/cache) for shapes and forced-start tokens. Raises KeyError
+    for an unknown name."""
+    if name not in WHISPER_VARIANTS:
+        raise KeyError(
+            f"unknown Whisper variant {name!r}; known: {sorted(WHISPER_VARIANTS)}"
+        )
+    hf_id, rev = WHISPER_VARIANTS[name]
+    from transformers import WhisperConfig, WhisperTokenizer
+
+    cfg = whisper_model_config_from_hf_config(
+        WhisperConfig.from_pretrained(hf_id, revision=rev)
+    )
+    start, eot = whisper_start_tokens(
+        WhisperTokenizer.from_pretrained(hf_id, revision=rev)
+    )
+    return WhisperVariant(name, hf_id, rev, cfg, start, eot)
+
+
 # Canonical AMD-hosted raw OGA bundles (encoder/decoder + tokenizer + config).
 # These are the default model source: the setup helpers below download them on
 # first use; a local build (scripts/build_whisper_models.py) is the backup that
