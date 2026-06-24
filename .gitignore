@@ -72,8 +72,11 @@ Thumbs.db
 .cline/
 .cursor/
 
-# Claude Code local settings (machine-specific)
-.claude/settings.local.json
+# Claude Code workspace (worktrees, local settings, sdd ledger — never committed)
+.claude/
+
+# Agentic spec/plan scratch docs (superpowers) — working artifacts, not shipped
+docs/superpowers/
 
 # Additional IDE/editor files
 *.sublime-project
