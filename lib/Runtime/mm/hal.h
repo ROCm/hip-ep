@@ -36,11 +36,11 @@ typedef ihipStream_t *hipStream_t_alias;
 
 // Values match HIPDNN_MM_CLASS_* constants in hipdnn_ep_runtime.h.
 enum class MemClass : int {
-  Weight = 0,      // Model constants blob (session-lifetime, GPU VRAM)
-  Activation = 1,  // Intermediate tensors (inference-scoped, pool-managed)
-  KVCache = 2,     // KV cache blocks (sequence-scoped, eviction-eligible)
-  Scratch = 3,     // Temporary workspace (op-scoped, bump-ptr recycled)
-  HostScalar = 4,  // Tiny scalars requiring host-write + GPU-read access
+  Weight = 0,     // Model constants blob (session-lifetime, GPU VRAM)
+  Activation = 1, // Intermediate tensors (inference-scoped, pool-managed)
+  KVCache = 2,    // KV cache blocks (sequence-scoped, eviction-eligible)
+  Scratch = 3,    // Temporary workspace (op-scoped, bump-ptr recycled)
+  HostScalar = 4, // Tiny scalars requiring host-write + GPU-read access
 };
 
 //===----------------------------------------------------------------------===//

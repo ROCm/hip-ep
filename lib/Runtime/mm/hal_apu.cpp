@@ -39,7 +39,8 @@
 // Mock stubs — unit-test path
 #include <cstdlib>
 
-static inline int hipHostMalloc(void **ptr, size_t size, unsigned int /*flags*/) {
+static inline int hipHostMalloc(void **ptr, size_t size,
+                                unsigned int /*flags*/) {
   *ptr = malloc(size);
   return *ptr ? 0 : -1;
 }
@@ -92,8 +93,7 @@ HalBlock ApuHalAllocator::alloc(size_t bytes, MemTier /*preferred*/) {
   // On APU UMA, hipHostGetDevicePointer returns the same VA as the host ptr.
   void *gpu_ptr = nullptr;
   if (hipHostGetDevicePointer(&gpu_ptr, cpu_ptr, 0) != hipSuccess) {
-    fprintf(stderr,
-            "ApuHalAllocator::alloc: hipHostGetDevicePointer failed\n");
+    fprintf(stderr, "ApuHalAllocator::alloc: hipHostGetDevicePointer failed\n");
     hipHostFree(cpu_ptr);
     return block;
   }
@@ -126,9 +126,9 @@ void ApuHalAllocator::evict_to_cpu(HalBlock &block, void *stream) {
 #ifndef HIPDNN_EP_MM_MOCK_HAL
   if (stream) {
     void *ev = nullptr;
-    if (hipEventCreateWithFlags(
-            reinterpret_cast<hipEvent_t *>(&ev),
-            hipEventDisableTiming) == hipSuccess && ev) {
+    if (hipEventCreateWithFlags(reinterpret_cast<hipEvent_t *>(&ev),
+                                hipEventDisableTiming) == hipSuccess &&
+        ev) {
       hipEventRecord(static_cast<hipEvent_t>(ev),
                      static_cast<hipStream_t>(stream));
       // Store the fence event in the block so restore_to_gpu can wait on it.
