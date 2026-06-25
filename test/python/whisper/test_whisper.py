@@ -68,10 +68,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 from conftest import (  # noqa: E402
     AMD_VENDOR_ID,
-    EP_PROVIDER_OPTIONS,
     REPO_ROOT,
     WhisperModelConfig,
-    apply_artifact_format,
     get_amd_dml_providers,
     make_whisper_inputs,
     register_morphizen_ep,
@@ -144,18 +142,6 @@ def _setup():
         pytest.skip("jfk.wav unavailable (network fetch failed, no local cache)")
     setup_whisper_model_dir(_MODEL_DIR)
     yield
-
-
-@pytest.fixture(autouse=True)
-def _gc_between_tests():
-    """Free ORT sessions + GPU memory between tests.
-
-    Each test creates a CPU reference session and an EP session; collecting them
-    between tests keeps peak allocation within budget on shared-memory (UMA)
-    machines where CPU and GPU draw from one pool.
-    """
-    yield
-    gc.collect()
 
 
 def _prepare_fp16_model_dir():
@@ -235,7 +221,7 @@ def _cpu_session(model_name, model_dir=_MODEL_DIR):
 def _morphizen_session(model_name, model_dir=_MODEL_DIR):
     devices = register_morphizen_ep(REPO_ROOT)
     if not devices:
-        pytest.skip("AMDGPU EP not found — run build.py first")
+        pytest.skip("MorphiZen EP not found — run build.py first")
     so = ort.SessionOptions()
     # CRITICAL for the decoder: disable ORT's ahead-of-time function inlining.
     # The Whisper decoder MLP uses ai.onnx Gelu, which is a registered ONNX
@@ -249,11 +235,7 @@ def _morphizen_session(model_name, model_dir=_MODEL_DIR):
     # not need this (its Gelu is not inlined by ORT), but setting it everywhere
     # is harmless and keeps the helper uniform.
     so.add_session_config_entry("session.disable_aot_function_inlining", "1")
-    # bitcode by default; HIPEP_ARTIFACT_FORMAT=NATIVE is an opt-in escape hatch
-    # (per-model DLL) — normally unneeded. See apply_artifact_format in conftest.
-    apply_artifact_format(so)
-    # profile=llm tells the AMDGPU umbrella to dispatch to the hipep backend.
-    so.add_provider_for_devices(devices, dict(EP_PROVIDER_OPTIONS))
+    so.add_provider_for_devices(devices, {})
     return ort.InferenceSession(str(model_dir / model_name), sess_options=so)
 
 
@@ -322,13 +304,12 @@ def test_encoder_correctness(precision, capfd):
     silent-CPU-fallback case independently of the numeric threshold.
     """
     model_dir, dtype, prec = precision
+    os.environ["HIPDNN_EP_DEBUG"] = "1"
     audio = make_whisper_inputs(_AUDIO, _CFG)["audio_features"].astype(dtype)
 
     # CPU reference: the original dynamic encoder at this precision.
     cpu = _cpu_session("encoder.onnx", model_dir)
     cpu_hidden, _ = _encoder_cross_kv(cpu, audio, dtype=dtype)
-    del cpu
-    gc.collect()
 
     # IMPORTANT: the MorphiZen MLIR compile happens at SESSION INIT, so the
     # "Compilation failed" stderr is emitted by InferenceSession(), not run().
@@ -390,7 +371,6 @@ def test_decoder_prefill_correctness(precision, capfd):
     # from any encoder GPU/CPU drift.
     cpu_enc = _cpu_session("encoder.onnx", model_dir)
     _, cross = _encoder_cross_kv(cpu_enc, audio, dtype=dtype)
-    del cpu_enc
 
     # ── CPU reference: DYNAMIC decoder, empty (0-slot) past ──────────────────
     cpu_dec = _cpu_session("decoder.onnx", model_dir)
@@ -404,8 +384,6 @@ def test_decoder_prefill_correctness(precision, capfd):
             (1, _N_HEADS, 0, _HEAD_DIM), dtype=dtype
         )
     cpu_logits = dict(zip(cpu_names, cpu_dec.run(None, cpu_feed)))["logits"]
-    del cpu_dec, cpu_feed
-    gc.collect()
 
     # ── MorphiZen GPU: static 448-slot shared-buffer prefill ─────────────────
     # int64 ids (surgered decoder re-types input_ids to int64 for the GPU token-
@@ -472,8 +450,6 @@ def test_decoder_decode_correctness(precision):
     # Shared cross-KV from the CPU encoder (isolate the decoder).
     cpu_enc = _cpu_session("encoder.onnx", model_dir)
     _, cross = _encoder_cross_kv(cpu_enc, audio, dtype=dtype)
-    del cpu_enc
-    gc.collect()
 
     # ── CPU reference: DYNAMIC decoder, empty growing past ───────────────────
     cpu_dec = _cpu_session("decoder.onnx", model_dir)
@@ -818,11 +794,11 @@ def test_e2e_transcription_greedy(precision, capfd):
     fed separately = [real_past .. real_past + S - 1].
     """
     model_dir, dtype, prec = precision
+    os.environ["HIPDNN_EP_DEBUG"] = "1"
     audio = make_whisper_inputs(_AUDIO, _CFG)["audio_features"].astype(dtype)
 
     cpu_tokens = _greedy_decode_cpu(audio, model_dir=model_dir, dtype=dtype)
     cpu_text = _decode_text(cpu_tokens)
-    gc.collect()
 
     capfd.readouterr()
     mz_tokens = _greedy_decode_morphizen(audio, model_dir=model_dir, dtype=dtype)
@@ -1421,11 +1397,11 @@ def test_librispeech_gpu_vs_cpu(librispeech, default_precision, capfd, clip):
     """
     model_dir, dtype, prec = default_precision
     refs, data_dir = librispeech
+    os.environ["HIPDNN_EP_DEBUG"] = "1"
     audio = make_whisper_inputs(data_dir / clip, _CFG)["audio_features"].astype(dtype)
 
     cpu_tokens = _greedy_decode_cpu(audio, model_dir=model_dir, dtype=dtype)
     cpu_text = _decode_text(cpu_tokens)
-    gc.collect()
 
     capfd.readouterr()
     gpu_tokens = _greedy_decode_morphizen(audio, model_dir=model_dir, dtype=dtype)
@@ -1461,6 +1437,7 @@ def test_librispeech_wer(librispeech, default_precision, capfd, clip):
     """
     model_dir, dtype, prec = default_precision
     refs, data_dir = librispeech
+    os.environ["HIPDNN_EP_DEBUG"] = "1"
     audio = make_whisper_inputs(data_dir / clip, _CFG)["audio_features"].astype(dtype)
 
     capfd.readouterr()
@@ -1493,13 +1470,13 @@ def test_long_30s_gpu_vs_cpu(librispeech, default_precision, capfd):
     model_dir, dtype, prec = default_precision
     refs, data_dir = librispeech
     clip = "long_30s.wav"
+    os.environ["HIPDNN_EP_DEBUG"] = "1"
     audio = make_whisper_inputs(data_dir / clip, _CFG)["audio_features"].astype(dtype)
 
     cpu_tokens = _greedy_decode_cpu(
         audio, max_length=_LONG_MAX_LEN, model_dir=model_dir, dtype=dtype
     )
     cpu_text = _decode_text(cpu_tokens)
-    gc.collect()
 
     capfd.readouterr()
     gpu_tokens = _greedy_decode_morphizen(
