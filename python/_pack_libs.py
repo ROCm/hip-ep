@@ -87,7 +87,7 @@ def main():
         default=[],
         metavar="PATH",
         help="Externally-built runtime library to bundle if present (repeatable), "
-        "e.g. the amdgpu-ep/hipep-backend DLLs built in a separate repo. Missing "
+        "e.g. the amdgpu-ep/hip-backend DLLs built in a separate repo. Missing "
         "paths warn instead of failing, so a plain EP-only wheel build still works.",
     )
     ap.add_argument(
