@@ -878,11 +878,11 @@ int main(int argc, char *argv[]) {
   // ORT environment
   Ort::Env env(ORT_LOGGING_LEVEL_ERROR, "hip-onnx-runner");
 
-  const std::string kEpName = "hipep";
+  const std::string kEpName = "hipgpu";
 #ifdef _WIN32
-  const std::string ep_lib_name = "hipep.dll";
+  const std::string ep_lib_name = "hipgpu.dll";
 #else
-  const std::string ep_lib_name = "libhipep.so";
+  const std::string ep_lib_name = "libhipgpu.so";
 #endif
 
   if (!no_ep) {

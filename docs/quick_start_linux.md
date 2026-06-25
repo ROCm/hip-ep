@@ -81,7 +81,7 @@ python3 build.py
 The result tree under `<workspace>/install/`:
 
 - `bin/hip-onnx-runner`, `bin/hip-compiler`, `bin/hip-mlir-opt`, `bin/hip-test`
-- `lib/libhip-compiler.so`, `lib/libhipep.so`
+- `lib/libhip-compiler.so`, `lib/libhipgpu.so`
 
 A locally-built `install/` is **not** fully self-contained: `libonnxruntime.so`
 lives in the ONNX Runtime prefix and the ROCm libs in TheRock, so run with
@@ -99,7 +99,7 @@ section once `install/bin/` is populated.
 ## Use the prebuilt package (testers, no compile)
 
 A ready-to-run package is published for each green build. It contains every
-`.so` / binary the host needs (`libhipep`,
+`.so` / binary the host needs (`libhipgpu`,
 `hip-onnx-runner`, `onnxruntime_perf_test`, `model_benchmark`,
 `libonnxruntime`, `libonnxruntime-genai`) plus a `clang`/`lld` toolchain in
 `bin/` (next to the other tools). TheRock is **not** included — install ROCm on
@@ -169,7 +169,7 @@ export LIBRARY_PATH="$ROOT/lib:$THEROCK_DIST/lib"
 export PATH="$ROOT/bin:$PATH"
 
 # Sanity check
-ldd "$ROOT/lib/libhipep.so" | grep "not found"   # expect empty
+ldd "$ROOT/lib/libhipgpu.so" | grep "not found"   # expect empty
 "$ROOT/bin/hip-onnx-runner" --help | head -5
 ```
 
@@ -182,7 +182,7 @@ exclusively, so the snippets are identical regardless of entry path.
 
 ### Model Inference with hip-onnx-runner
 
-`hip-onnx-runner` runs a single ONNX model through hipep EP and reports
+`hip-onnx-runner` runs a single ONNX model through hipgpu EP and reports
 timing. It is built by `build.py` and also ships in the prebuilt
 package.
 
@@ -197,7 +197,7 @@ package.
 > ```
 
 ```bash
-# Run with hipep EP (default), on your model directly (dynamic shape)
+# Run with hipgpu EP (default), on your model directly (dynamic shape)
 $ROOT/bin/hip-onnx-runner -m /path/to/model.onnx -i gen_inputs
 
 # Resolve symbolic input dims at runtime (the EP still compiles the dynamic graph)
@@ -227,17 +227,17 @@ $ROOT/bin/hip-onnx-runner -L ep_o_dump,cpu_o_dump
 ### Latency Benchmarking with onnxruntime_perf_test
 
 `onnxruntime_perf_test` benchmarks inference latency. It ships in the prebuilt
-package; a local build may not include it. The examples below compare hipep
+package; a local build may not include it. The examples below compare hipgpu
 EP against the CPU EP baseline (DML is Windows-only).
 
 ```bash
 # CPU baseline (no EP; useful to size the EP speedup)
 $ROOT/bin/onnxruntime_perf_test -e cpu -t 30 -c 1 -s /path/to/MODEL.onnx
 
-# hipep EP
+# hipgpu EP
 $ROOT/bin/onnxruntime_perf_test \
-  --plugin_ep_libs "hipep|$ROOT/lib/libhipep.so" \
-  --plugin_eps     "hipep" \
+  --plugin_ep_libs "hipgpu|$ROOT/lib/libhipgpu.so" \
+  --plugin_eps     "hipgpu" \
   -C "session.disable_cpu_ep_fallback|1" \
   -t 60 -c 1 -s -I \
   /path/to/MODEL.onnx
@@ -252,7 +252,7 @@ $ROOT/bin/onnxruntime_perf_test \
 | `-s` | Show per-iteration latency statistics |
 | `-I` | Use sequential inputs (do not randomize) |
 
-> The first iteration triggers hipep's HIP kernel JIT compile
+> The first iteration triggers hipgpu's HIP kernel JIT compile
 > (multi-minute); bump `-t` so steady-state samples dominate the average.
 
 ### OGA End-to-End Benchmarking with model_benchmark
@@ -346,13 +346,13 @@ Inside `./docker/run.sh shell` this is handled automatically — the
 container entrypoint reads the host GID off `/dev/kfd` and adds the
 in-container user to it, so you don't need host `render` membership.
 
-**`EP library not found: libhipep.so` from `hip-onnx-runner`**
+**`EP library not found: libhipgpu.so` from `hip-onnx-runner`**
 
 The runner's search order is `$MORPHIZEN_EP_LIB` (full path) → cwd →
-`<exe-dir>/libhipep.so` → `<exe-dir>/../lib/libhipep.so`.
+`<exe-dir>/libhipgpu.so` → `<exe-dir>/../lib/libhipgpu.so`.
 If you're running out of `install/bin/`, no env vars are needed — the
 sibling `install/lib/` is auto-discovered. If you've copied the binary
-elsewhere, set `MORPHIZEN_EP_LIB=/full/path/to/libhipep.so`.
+elsewhere, set `MORPHIZEN_EP_LIB=/full/path/to/libhipgpu.so`.
 
 **`clang++ not found on PATH and HIPDNN_CLANG_PATH is unset or stale` from `hip-compiler`**
 
