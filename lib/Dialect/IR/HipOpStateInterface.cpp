@@ -38,9 +38,10 @@ Value emitOpStateConstruct(OpBuilder &builder, Location loc, Value statePtr,
   Type i32Type = builder.getI32Type();
   Type i64Type = builder.getI64Type();
 
-  // Construct signature: (RuntimeState*, i32 slot, i64 x N) -> i8 (ok). The
-  // constructor stores the built state into op_states[slot] itself (via
-  // hipdnn_ep_op_state_set) and returns whether the store succeeded.
+  // Construct signature: (RuntimeState*, i32 slot, i64 x N) -> i8. The
+  // constructor builds its state and stores it into op_states[slot] itself (via
+  // hipdnn_ep_op_state_set). The i8 result is vestigial (always 0) -- it keeps
+  // a stable call signature but the init pass does not branch on it.
   SmallVector<Type> paramTypes;
   paramTypes.push_back(ptrType);
   paramTypes.push_back(i32Type);

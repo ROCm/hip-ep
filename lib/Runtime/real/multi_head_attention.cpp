@@ -143,7 +143,7 @@ struct MhaState : OpStateT<MhaState> {
 // nullptr when the slot is unconstructed (init failure) — callers propagate the
 // error rather than lazily allocating, since the slot is built at session init.
 MhaGemmCache *get_mha_gemm_cache(RuntimeState *state, int op_state_slot) {
-  MhaState *ms = MhaState::get_slot(state, op_state_slot);
+  MhaState *ms = MhaState::get_op_state(state, op_state_slot);
   return ms ? &ms->cache : nullptr;
 }
 
@@ -303,7 +303,8 @@ MhaGemmCache::~MhaGemmCache() {
 extern "C" int8_t
 hipdnn_ep_op_state_construct_multi_head_attention(RuntimeState *state,
                                                   int32_t slot) {
-  return MhaState::create(state, slot);
+  hipdnn_ep_op_state_set(state, slot, MhaState::create().release());
+  return 0;
 }
 
 //===----------------------------------------------------------------------===//

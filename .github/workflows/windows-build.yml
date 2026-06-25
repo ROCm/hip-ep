@@ -713,6 +713,7 @@ jobs:
           if exist oga-smoke-venv rd /s /q oga-smoke-venv
           if exist oga-smoke-results rd /s /q oga-smoke-results
           if exist wheelpkg rd /s /q wheelpkg
+          if exist therock-dist rd /s /q therock-dist
 
       - name: Download GPU test package
         uses: actions/download-artifact@v4
@@ -731,7 +732,7 @@ jobs:
       - name: Download & extract TheRock
         shell: pwsh
         run: |
-          $dist = "${{ runner.workspace }}\therock-dist"
+          $dist = "$PWD\therock-dist"
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
           curl.exe -fsSL `
             "https://repo.amd.com/rocm/tarball/${{ env.THEROCK_VERSION }}.tar.gz" `
@@ -749,7 +750,7 @@ jobs:
       - name: Run onnxruntime_perf_test (GPU)
         shell: cmd
         run: |
-          set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
+          set PATH=%CD%\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set MODEL_DIR=${{ runner.workspace }}\model
           if not exist "%MODEL_DIR%" (
             echo [ERROR] MODEL_DIR not found: %MODEL_DIR%
@@ -791,9 +792,9 @@ jobs:
         if: always()
         shell: cmd
         run: |
-          set THEROCK_DIST=${{ runner.workspace }}\therock-dist
-          set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
-          set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
+          set THEROCK_DIST=%CD%\therock-dist
+          set PATH=%CD%\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
+          set LIB=%CD%\gpu-test-package\lib;%CD%\therock-dist\lib
           set MODEL_DIR=${{ runner.workspace }}\model
           if not exist "%MODEL_DIR%" (
             echo [SKIP] MODEL_DIR not found: %MODEL_DIR%
@@ -837,9 +838,9 @@ jobs:
         if: always()
         shell: cmd
         run: |
-          set THEROCK_DIST=${{ runner.workspace }}\therock-dist
-          set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
-          set LIB=%CD%\gpu-test-package\lib;${{ runner.workspace }}\therock-dist\lib
+          set THEROCK_DIST=%CD%\therock-dist
+          set PATH=%CD%\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
+          set LIB=%CD%\gpu-test-package\lib;%CD%\therock-dist\lib
           set MODEL_DIR=${{ runner.workspace }}\model
           if not exist "%MODEL_DIR%" (
             echo [SKIP] MODEL_DIR not found: %MODEL_DIR%
@@ -880,7 +881,7 @@ jobs:
           $ErrorActionPreference = 'Continue'
           $PSNativeCommandUseErrorActionPreference = $false
           $pkgBin = Join-Path $PWD "gpu-test-package\bin"
-          $env:PATH = "${{ runner.workspace }}\therock-dist\bin;$pkgBin;$env:PATH"
+          $env:PATH = "$PWD\therock-dist\bin;$pkgBin;$env:PATH"
 
           $modelDir = "${{ runner.workspace }}\model"
           if (-not (Test-Path $modelDir)) {
@@ -956,7 +957,7 @@ jobs:
           $ErrorActionPreference = 'Continue'
           $PSNativeCommandUseErrorActionPreference = $false
           $pkgBin = Join-Path $PWD "gpu-test-package\bin"
-          $env:PATH = "${{ runner.workspace }}\therock-dist\bin;$pkgBin;$env:PATH"
+          $env:PATH = "$PWD\therock-dist\bin;$pkgBin;$env:PATH"
 
           # amdgpu-oga-models holds AMDGPU-profile genai_config copies; it was
           # generated once on the GPU runner and persists across runs, so just
@@ -1101,7 +1102,7 @@ jobs:
         shell: cmd
         run: |
           setlocal enabledelayedexpansion
-          set PATH=${{ runner.workspace }}\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
+          set PATH=%CD%\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           rem The EP DLL is now hipep.dll; hip-onnx-runner's legacy default name
           rem is onnxruntime_morphizen_ep.dll, so point it at the new DLL.
           set MORPHIZEN_EP_LIB=%CD%\gpu-test-package\bin\hipep.dll

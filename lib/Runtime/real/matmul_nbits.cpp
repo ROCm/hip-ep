@@ -137,7 +137,8 @@ struct MatmulNbitsState : OpStateT<MatmulNbitsState> {
 
 extern "C" int8_t hipdnn_ep_op_state_construct_matmul_nbits(RuntimeState *state,
                                                             int32_t slot) {
-  return MatmulNbitsState::create(state, slot);
+  hipdnn_ep_op_state_set(state, slot, MatmulNbitsState::create().release());
+  return 0;
 }
 
 int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
@@ -187,7 +188,8 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   const void *pre_zp_u8 = nullptr;
   const void *pre_zp_fp16 = nullptr;
   if (zero_points && zp_elem_size == 1 && bits == 4 && block_size > 0) {
-    MatmulNbitsState *mst = MatmulNbitsState::get_slot(state, op_state_slot);
+    MatmulNbitsState *mst =
+        MatmulNbitsState::get_op_state(state, op_state_slot);
     if (!mst) {
       fprintf(stderr, "wrap_matmul_nbits: no MatmulNbitsState at slot %d\n",
               op_state_slot);

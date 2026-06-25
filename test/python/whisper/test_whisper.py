@@ -152,10 +152,9 @@ def _setup():
 def _gc_between_tests():
     """Free ORT sessions + GPU memory between tests.
 
-    On 32 GB UMA machines (Strix Halo) CPU+GPU share a single memory pool.
-    Without explicit cleanup, sessions from one test linger into the next and
-    peak allocation can exceed what's available — manifesting as a Windows
-    access violation during session creation.
+    Each test creates a CPU reference session and an EP session; collecting them
+    between tests keeps peak allocation within budget on shared-memory (UMA)
+    machines where CPU and GPU draw from one pool.
     """
     yield
     gc.collect()
@@ -252,8 +251,8 @@ def _morphizen_session(model_name, model_dir=_MODEL_DIR):
     # not need this (its Gelu is not inlined by ORT), but setting it everywhere
     # is harmless and keeps the helper uniform.
     so.add_session_config_entry("session.disable_aot_function_inlining", "1")
-    # bitcode by default; HIPEP_ARTIFACT_FORMAT=NATIVE opts into the per-model
-    # DLL path (local workaround for from-source builds whose JIT misbehaves).
+    # bitcode by default; HIPEP_ARTIFACT_FORMAT=NATIVE is an opt-in escape hatch
+    # (per-model DLL) — normally unneeded. See apply_artifact_format in conftest.
     apply_artifact_format(so)
     # profile=llm tells the AMDGPU umbrella to dispatch to the hipep backend.
     so.add_provider_for_devices(devices, dict(EP_PROVIDER_OPTIONS))

@@ -94,7 +94,8 @@ struct T5NormState : OpStateT<T5NormState> {
 
 extern "C" int8_t hipdnn_ep_op_state_construct_t5norm(RuntimeState *state,
                                                       int32_t slot) {
-  return T5NormState::create(state, slot);
+  hipdnn_ep_op_state_set(state, slot, T5NormState::create().release());
+  return 0;
 }
 
 static const T5NormCacheEntry *queryOrCreateT5Norm(T5NormTable &table,
@@ -236,7 +237,7 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, int op_state_slot,
     return -1;
   }
 
-  T5NormState *ns = T5NormState::get_slot(state, op_state_slot);
+  T5NormState *ns = T5NormState::get_op_state(state, op_state_slot);
   if (!ns || !ns->table) {
     fprintf(stderr,
             "wrap_miopenT5LayerNormForward: missing op-state for slot %d\n",

@@ -443,10 +443,10 @@ pytest test/python/whisper/test_whisper.py -k "($SEL) and fp32" -v -s
 > GPU buffer pool (`g_gpu_buffer_pool`) and the hipBLASLt autotune cache
 > (`g_gemm_algo_cache`) — they live until the process exits. Running fp16 + fp32
 > in one process therefore accumulates both precisions' GPU footprint (the fp32
-> constants blob is ~2× the fp16 one). On a 32 GB UMA part this can exhaust the
-> shared pool and crash with an access violation. Splitting into one process per
-> precision caps the peak at a single precision's footprint. To run both in one
-> process anyway (plenty of memory), drop the `and fp16`/`and fp32` filters.
+> constants blob is ~2× the fp16 one). On a 32 GB UMA part this drives the peak
+> high; splitting into one process per precision caps it at a single precision's
+> footprint. To run both in one process anyway (plenty of memory), drop the
+> `and fp16`/`and fp32` filters.
 
 ### 4d. Per-op numeric tests (vs ORT CPU)
 
