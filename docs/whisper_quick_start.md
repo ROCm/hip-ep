@@ -4,9 +4,10 @@ Licensed under the MIT License.
 -->
 # Whisper-large-v3 Quick Start
 
-End-to-end guide for running **Whisper-large-v3** speech-to-text on the MorphiZen
-EP from a fresh checkout: build the EP, build + compile the model, run the
-tests, transcribe your own audio, and compare against CPU / Vulkan.
+End-to-end guide for running **Whisper** speech-to-text (large-v3 + the
+turbo/tiny/base/small/medium variants) on the AMDGPU EP from a fresh checkout:
+build the EP, build + compile the model, run the tests, transcribe your own audio,
+and compare against CPU / Vulkan.
 
 Whisper runs **fp16 by default** — it is both faster on GPU and bit-faithful: the
 fp16 build keeps the `lm_head` in fp32 while the body is fp16, so greedy decoding
@@ -349,7 +350,7 @@ models/whisper-large-v3-onnx-fp16/   (default; fp32 dir mirrors this layout)
 ```
 
 > **"Compiling the model"** happens the first time the EP loads one of the
-> `*_fixed*.onnx` files (MorphiZen lowers ONNX → HIP → a GPU `model.dll`, cached
+> `*_fixed*.onnx` files (the EP lowers ONNX → HIP → a GPU `model.dll`, cached
 > in `%TEMP%/morphizen_mlir_*`). The pytest runs in the next step trigger it. To
 > force a fresh compile, delete the cache — **PowerShell:**
 > `Remove-Item "$env:TEMP\morphizen_mlir_*"` · **Git Bash:** `rm -f "$TEMP"/morphizen_mlir_*`.
@@ -440,15 +441,12 @@ pytest test/python/whisper/test_whisper.py -k "$SEL" -v -s
 …or narrow to one variant / precision with the test-id substrings (e.g.
 `-k "$SEL and tiny-fp16"`, `-k "$SEL and large-v3-fp32"`).
 
-> **No memory split needed.** A previous version of this guide told you to run
-> fp16 and fp32 in separate processes "to save memory." That was based on a
-> misdiagnosis: the `0xc0000005` crashes were the in-process bitcode-JIT cross-CRT
-> heap corruption (fixed by the Tier-1 `llvm-install` build in §1 + the
-> malloc/stdio pinning in `LlvmIrJit.cpp`), **not** GPU-memory exhaustion. The
-> dev/CI host is 128 GB; the full matrix runs in one process. (Two runtime caches
-> do survive session teardown — `g_gpu_buffer_pool`, `g_gemm_algo_cache` — but a
-> few GB is immaterial here.) If the in-process JIT ever flakes on your box, set
-> `HIPEP_ARTIFACT_FORMAT=NATIVE` (§4a escape hatch) — never split by precision.
+> **Run the whole matrix in one process.** The dev/CI host is 128 GB, so fp16 (all
+> variants) + fp32 (large-v3) fit comfortably together — no per-precision split. If
+> the in-process bitcode JIT ever flakes on your box (a `0xc0000005` at
+> session-create), build against the Tier-1 `llvm-install` (§1), or fall back to
+> `HIPEP_ARTIFACT_FORMAT=NATIVE` (§4a escape hatch) — that bypasses the JIT
+> entirely. Do not split by precision.
 
 ### 4d. Per-op numeric tests (vs ORT CPU)
 
@@ -488,13 +486,12 @@ cached (already-compiled) sessions — so variant performance is recorded in CI 
 alongside the correctness check. For an isolated measurement use
 `scripts/transcribe_whisper.py --variant <name>` (§5).
 
-> **Both artifact formats are correct on a current EP build.** Default is the
-> in-process bitcode JIT; `HIPEP_ARTIFACT_FORMAT=NATIVE` (per-model DLL) is the
-> escape hatch if the JIT flakes on your host — both produce identical tokens when
-> the EP is built against a Tier-1 `llvm-install` (§1). (An *old/stale* EP build's
-> NATIVE path could mis-decode because the per-model DLL embeds the runtime bitcode
-> at build time — that was a stale-build artifact, not a NATIVE-vs-bitcode
-> correctness difference. Rebuild if you see it.)
+> **Both artifact formats produce identical tokens.** Default is the in-process
+> bitcode JIT; `HIPEP_ARTIFACT_FORMAT=NATIVE` (per-model DLL) is the escape hatch
+> if the JIT flakes on your host. Both are correct when the EP is built against a
+> Tier-1 `llvm-install` (§1) and rebuilt after any runtime/kernel change (the
+> NATIVE per-model DLL embeds the runtime bitcode at build time, so always rebuild
+> + clear the cache after touching runtime code).
 
 ### Run everything at once
 
@@ -592,41 +589,43 @@ Pipeline phases (all on GPU):
 
 ## 6. Compare backends (CPU / DirectML / Vulkan)
 
-### MorphiZen vs CPU vs DirectML, fp32 + fp16 (the fair comparison)
+This whole section compares **Whisper-large-v3 only** — the cross-backend perf
+test runs the one canonical model so every backend executes the *same* ONNX graph
+(the variant perf numbers live in the per-variant `PERF` line, §4f).
+
+### AMDGPU EP vs CPU vs DirectML — Whisper-large-v3, fp32 + fp16
 
 ```bash
 pytest test/python/whisper/test_whisper.py::test_perf_decode_tps -v -s
 ```
 
-Prints a decode-throughput table across MorphiZen / CPU / DirectML for **both
-precisions**. The fp32 rows always run; the fp16 rows run only if the fp16 model
-is available (§3) and are skipped with a note otherwise. The DirectML leg is
-skipped by default (it always fails on the Whisper decoder, below); opt in with
-`HIPDNN_WHISPER_PERF_DML=1`. Reference numbers (gfx1151, jfk.wav ~11 s,
-2026-06-10; numbers vary run-to-run):
+Prints a decode-throughput table for **Whisper-large-v3** across the AMDGPU EP /
+CPU / DirectML for **both precisions**. The fp32 rows always run; the fp16 rows run
+only if the fp16 model is available (§3) and are skipped with a note otherwise. The
+DirectML leg is skipped by default (it always fails on the Whisper decoder, below);
+opt in with `HIPDNN_WHISPER_PERF_DML=1`. Reference numbers (gfx1151, jfk.wav ~11 s;
+numbers vary run-to-run):
 
 | Backend | precision | decode tok/s | encoder ms | transcription |
 |---|---|---|---|---|
-| MorphiZen EP | **fp16** | **~45** | **~460** | JFK quote ✅ |
-| MorphiZen EP | fp32 | ~24 | ~1300 | JFK quote ✅ |
+| AMDGPU EP | **fp16** | **~45** | **~460** | JFK quote ✅ |
+| AMDGPU EP | fp32 | ~24 | ~1300 | JFK quote ✅ |
 | CPU EP | fp32 | ~22 | — | JFK quote ✅ |
 | CPU EP | fp16 | ~18 | — | JFK quote ✅ (emulated fp16) |
 | DirectML EP | fp32 / fp16 | **fails** | — | cross-attn `MultiHeadAttention` unsupported on DML |
 
-The in-suite fp16 number (~45 tok/s) now matches the isolated
-`scripts/transcribe_whisper.py` run (~45–48). *(Historically the perf test
-under-reported fp16 at ~28: setting `HIPDNN_EP_DEBUG=1` to capture the dispatch
-tripwire latched a process-wide debug flag — `static const bool`, see
-`include/hip/debug_log.h` — that turned on per-op FD logging for the whole
-process and throttled decode; pytest's `capfd` capture compounded it. The test
-now never sets that env var and uses a bounded FD-redirect only around
-session-create. **General rule: never enable tracing/debug env vars in a process
-that will later measure throughput.**)*
+The in-suite fp16 number (~45 tok/s) matches the isolated
+`scripts/transcribe_whisper.py` run (~45–48). The perf test never sets
+`HIPDNN_EP_DEBUG` and captures the dispatch tripwire with a bounded FD-redirect
+only around session-create, so decode throughput isn't throttled. **General rule:
+never enable tracing/debug env vars in a process that will later measure
+throughput** (some are latched process-wide — `static const bool`, see
+`include/hip/debug_log.h`).
 
-**fp16 is both correct AND faster on MorphiZen here** — decode ~24→~45 tok/s and
-encoder ~1300→~460 ms vs MorphiZen fp32, while still emitting the verbatim JFK
-quote (argmax-lossless because the OGA build keeps `lm_head` fp32). MorphiZen-fp32
-vs CPU-fp32 is the apples-to-apples pair (identical ONNX, same ORT API, same loop);
+**fp16 is both correct AND faster on the AMDGPU EP here** — decode ~24→~45 tok/s
+and encoder ~1300→~460 ms vs fp32, while still emitting the verbatim JFK quote
+(argmax-lossless because the OGA build keeps `lm_head` fp32). AMDGPU-EP-fp32 vs
+CPU-fp32 is the apples-to-apples pair (identical ONNX, same ORT API, same loop);
 note run-to-run variance. CPU fp16 is *slower* than CPU fp32 (ORT CPU has no native
 fp16 compute — it's emulated). DirectML **cannot run the Whisper decoder** in
 either precision — `com.microsoft.MultiHeadAttention` rejects the cross-attention
