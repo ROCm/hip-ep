@@ -59,22 +59,29 @@ llvm_map_components_to_libnames(bitcode_jit_llvm_libs
 # Create custom op library
 set(LIB_NAME morphizen-custom-op-mlir)
 
-# Gather CPU-fallback: embed a minimal valid ONNX (ORT Session). MorphiZen MLIR
-# backend's model_proto_serialize_as_string is NOT ONNX protobuf — do not feed
-# it to Ort::Session (protobuf parse fails). Source: onnx/gather_cpu_fb_*.onnx
-set(_HIPDNN_GATHER_FB_ONNX
-    ${CMAKE_CURRENT_SOURCE_DIR}/onnx/gather_cpu_fb_axis0_fp16_i64.onnx)
-set(_HIPDNN_GATHER_FB_GEN_INC
-    ${CMAKE_CURRENT_BINARY_DIR}/gather_cpu_fb_onnx_data.inc)
+# Gather CPU-fallback: CPUGate shell ONNX (Quark-style inner Session) + Ort::Op.
+set(_HIPDNN_CPUGATE_SHELL_ONNX
+    ${CMAKE_CURRENT_SOURCE_DIR}/onnx/cpugate_shell.onnx)
+set(_HIPDNN_CPUGATE_SHELL_GEN_INC
+    ${CMAKE_CURRENT_BINARY_DIR}/cpugate_shell_onnx_data.inc)
+
 add_custom_command(
-  OUTPUT ${_HIPDNN_GATHER_FB_GEN_INC}
+  OUTPUT ${_HIPDNN_CPUGATE_SHELL_ONNX}
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/scripts/gen_cpugate_shell_onnx.py
+          ${_HIPDNN_CPUGATE_SHELL_ONNX}
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/scripts/gen_cpugate_shell_onnx.py
+  COMMENT "Generating CPUGate shell ONNX")
+
+add_custom_command(
+  OUTPUT ${_HIPDNN_CPUGATE_SHELL_GEN_INC}
   COMMAND
     ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_binary_c_array.py
-    ${_HIPDNN_GATHER_FB_ONNX} kGatherCpuFbOnnx ${_HIPDNN_GATHER_FB_GEN_INC}
-  DEPENDS ${_HIPDNN_GATHER_FB_ONNX}
+    ${_HIPDNN_CPUGATE_SHELL_ONNX} kCpugateShellOnnx ${_HIPDNN_CPUGATE_SHELL_GEN_INC}
+  DEPENDS ${_HIPDNN_CPUGATE_SHELL_ONNX}
           ${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_binary_c_array.py
-  COMMENT "Embedding Gather CPU-fallback ONNX (ORT-parseable)")
+  COMMENT "Embedding CPUGate shell ONNX")
 
 add_library(${LIB_NAME} STATIC
   src/plugin_registration.cpp
@@ -82,6 +89,7 @@ add_library(${LIB_NAME} STATIC
   src/InferenceState.cpp
   src/LlvmIrJit.cpp
   src/LoadedArtifact.cpp
+  src/cpu_fallback_cpugate.cpp
   src/cpu_fallback_bridge.cpp
 )
 if(TARGET RuntimeBitcode)
@@ -90,6 +98,9 @@ endif()
 
 # Define MORPHIZEN_CUSTOM_OP for conditional compilation
 target_compile_definitions(${LIB_NAME} PRIVATE "MORPHIZEN_CUSTOM_OP=1")
+# Match morphizen-core (main.cpp): ORT headers stamp ORT_API_MANUAL_INIT into each
+# .obj; a TU that includes onnxruntime without this define links as LNK2038.
+target_compile_definitions(${LIB_NAME} PRIVATE "ORT_API_MANUAL_INIT=1")
 
 if(HIPDNN_EP_LINK_HIP_HOST)
   target_compile_definitions(${LIB_NAME} PRIVATE "HIPDNN_EP_LINK_HIP_HOST=1")
@@ -123,16 +134,16 @@ endif()
 # Include directories
 target_include_directories(${LIB_NAME} PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
-  ${CMAKE_CURRENT_BINARY_DIR} # gather_cpu_fb_onnx_data.inc (CPU Gather fallback)
+  ${CMAKE_CURRENT_BINARY_DIR} # cpugate_shell_onnx_data.inc (CPU fallback CPUGate)
   ${CMAKE_CURRENT_BINARY_DIR}/..  # For generated protobuf headers (metadata.pb.h)
   ${CMAKE_SOURCE_DIR}/include     # Shared project headers (timing.h, etc.)
   ${LLVM_INCLUDE_DIRS}            # LLVM ORC headers consumed by LlvmIrJit.cpp
   ${CMAKE_SOURCE_DIR}/lib/Runtime # hipdnn_ep_runtime.h (CPU fallback ABI)
 )
 
-# Ensure gather_cpu_fb_onnx_data.inc exists before compiling cpu_fallback_bridge.cpp.
-add_custom_target(hipdnn_gather_cpu_fb_onnx_inc DEPENDS ${_HIPDNN_GATHER_FB_GEN_INC})
-add_dependencies(${LIB_NAME} hipdnn_gather_cpu_fb_onnx_inc)
+# Ensure cpugate_shell_onnx_data.inc exists before compiling cpu_fallback_cpugate.cpp.
+add_custom_target(hipdnn_cpugate_shell_onnx_inc DEPENDS ${_HIPDNN_CPUGATE_SHELL_GEN_INC})
+add_dependencies(${LIB_NAME} hipdnn_cpugate_shell_onnx_inc)
 
 # Link to EP target with whole archive to ensure registration
 # Only link if target is defined (set by parent morphizen build system)
