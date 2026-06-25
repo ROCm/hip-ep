@@ -11,8 +11,9 @@
 // HipToLLVM lowering keeps resolving), and we route straight into the
 // optimized fused custom kernels with the minimum prep:
 //
-//   prefill (sq > 1): [split] -> [rope] -> kv-cache update -> hip_gqa_flash_prefill_v2
-//   decode  (sq == 1): [split] -> [rope] -> kv-cache update -> hip_gqa_flash_decode_v2
+//   prefill (sq > 1): [split] -> [rope] -> kv-cache update ->
+//   hip_gqa_flash_prefill_v2 decode  (sq == 1): [split] -> [rope] -> kv-cache
+//   update -> hip_gqa_flash_decode_v2
 //
 // The previous decomposed hipBLASLt pipeline, the per-instance GEMM descriptor
 // cache, and all env-var dispatch gates are gone. Features the fused kernels do
@@ -86,9 +87,9 @@ static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
 static constexpr int kFlashDecodeMaxSplits = 64;
 
 // Geometry gate for the flash_decode kernel template instantiations. The scalar
-// decode kernel is templated for HpG in {1,2,3,4,8,16} (so it covers MHA and the
-// common GQA ratios) at d in {64,128}; WMMA is layered on top inside the kernel
-// where it helps. Anything outside this set has no decode kernel.
+// decode kernel is templated for HpG in {1,2,3,4,8,16} (so it covers MHA and
+// the common GQA ratios) at d in {64,128}; WMMA is layered on top inside the
+// kernel where it helps. Anything outside this set has no decode kernel.
 static inline bool flash_decode_geometry_ok(int64_t H, int64_t G, int64_t d) {
   if (G <= 0)
     return false;
@@ -197,8 +198,9 @@ static int gqa_forward_fused(
                   "gqa_forward_fused (decode): invalid seqlens_k[0]+1=%lld "
                   "(sq=%lld, past_len=%lld, present_seq=%lld, "
                   "past_buf_seq=%lld)\n",
-                  (long long)total_seq, (long long)sq, (long long)past_len_check,
-                  (long long)present_seq, (long long)past_buf_seq);
+                  (long long)total_seq, (long long)sq,
+                  (long long)past_len_check, (long long)present_seq,
+                  (long long)past_buf_seq);
           return -1;
         }
         past_len = past_len_check;
@@ -224,7 +226,8 @@ static int gqa_forward_fused(
     // One combined workspace request: [split? | rope-temp? | flash-partials].
     const size_t split_bytes =
         packed_qkv ? (Q_full_bytes + K_full_bytes + K_full_bytes) : 0;
-    const size_t rope_temp_bytes = need_rope ? (Q_full_bytes + K_full_bytes) : 0;
+    const size_t rope_temp_bytes =
+        need_rope ? (Q_full_bytes + K_full_bytes) : 0;
     const size_t flash_partials_bytes = static_cast<size_t>(B) * H *
                                         kFlashDecodeMaxSplits * (d + 2) *
                                         sizeof(float);
@@ -243,10 +246,10 @@ static int gqa_forward_fused(
       void *d_Qsplit = ws + off_split;
       void *d_Ksplit = ws + off_split + Q_full_bytes;
       void *d_Vsplit = ws + off_split + Q_full_bytes + K_full_bytes;
-      if (hip_gqa_split_qkv(stream, query, d_Qsplit, d_Ksplit, d_Vsplit,
-                            static_cast<int>(B), static_cast<int>(sq),
-                            static_cast<int>(H), static_cast<int>(G),
-                            static_cast<int>(d), static_cast<int>(elem_sz)) != 0)
+      if (hip_gqa_split_qkv(
+              stream, query, d_Qsplit, d_Ksplit, d_Vsplit, static_cast<int>(B),
+              static_cast<int>(sq), static_cast<int>(H), static_cast<int>(G),
+              static_cast<int>(d), static_cast<int>(elem_sz)) != 0)
         return -1;
       qSrc = d_Qsplit;
       kSrc = d_Ksplit;
@@ -274,31 +277,31 @@ static int gqa_forward_fused(
       kSrc = d_Kroped; // V is never RoPE'd.
     }
 
-    if (update_kv_cache(stream, past_key, past_value, kSrc, vSrc, present_key,
-                        present_value, static_cast<int>(B),
-                        static_cast<int>(past_len), static_cast<int>(sq),
-                        static_cast<int>(G), static_cast<int>(d),
-                        static_cast<int>(past_buf_seq),
-                        static_cast<int>(present_seq), seqlens_k_ptr,
-                        static_cast<int>(elem_sz)) != 0)
+    if (update_kv_cache(
+            stream, past_key, past_value, kSrc, vSrc, present_key,
+            present_value, static_cast<int>(B), static_cast<int>(past_len),
+            static_cast<int>(sq), static_cast<int>(G), static_cast<int>(d),
+            static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
+            seqlens_k_ptr, static_cast<int>(elem_sz)) != 0)
       return -1;
 
     {
       char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
       void *partials = ws + off_partials;
-      if (hip_gqa_flash_decode_v2(stream, qSrc, present_key, present_value, output,
-                               partials, static_cast<int>(B),
-                               static_cast<int>(H), static_cast<int>(G),
-                               static_cast<int>(d), static_cast<int>(skv),
-                               static_cast<int>(present_seq),
-                               kFlashDecodeMaxSplits, scale, seqlens_k_ptr,
-                               /*local_window_size=*/0, /*head_sink=*/nullptr,
-                               /*smooth_softmax=*/0) != 0)
+      if (hip_gqa_flash_decode_v2(
+              stream, qSrc, present_key, present_value, output, partials,
+              static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
+              static_cast<int>(d), static_cast<int>(skv),
+              static_cast<int>(present_seq), kFlashDecodeMaxSplits, scale,
+              seqlens_k_ptr,
+              /*local_window_size=*/0, /*head_sink=*/nullptr,
+              /*smooth_softmax=*/0) != 0)
         return -1;
-      RUNTIME_DEBUG_LOG("[REAL] flash GQA decode: B=%lld skv=%lld H=%lld G=%lld "
-                        "d=%lld max_splits=%d\n",
-                        (long long)B, (long long)skv, (long long)H,
-                        (long long)G, (long long)d, kFlashDecodeMaxSplits);
+      RUNTIME_DEBUG_LOG(
+          "[REAL] flash GQA decode: B=%lld skv=%lld H=%lld G=%lld "
+          "d=%lld max_splits=%d\n",
+          (long long)B, (long long)skv, (long long)H, (long long)G,
+          (long long)d, kFlashDecodeMaxSplits);
     }
     return 0;
   }
@@ -345,11 +348,12 @@ static int gqa_forward_fused(
       past_len = total_seq - sq;
       if (total_seq < 1 || past_len < 0 || total_seq > present_seq ||
           past_len > past_buf_seq) {
-        fprintf(stderr,
-                "gqa_forward_fused (prefill): invalid seqlens_k[0]+1=%lld "
-                "(sq=%lld, past_len=%lld, present_seq=%lld, past_buf_seq=%lld)\n",
-                (long long)total_seq, (long long)sq, (long long)past_len,
-                (long long)present_seq, (long long)past_buf_seq);
+        fprintf(
+            stderr,
+            "gqa_forward_fused (prefill): invalid seqlens_k[0]+1=%lld "
+            "(sq=%lld, past_len=%lld, present_seq=%lld, past_buf_seq=%lld)\n",
+            (long long)total_seq, (long long)sq, (long long)past_len,
+            (long long)present_seq, (long long)past_buf_seq);
         return -1;
       }
     }
@@ -410,13 +414,12 @@ static int gqa_forward_fused(
   }
 
   if (present_key && present_value &&
-      update_kv_cache(stream, past_key, past_value, kSrc, vSrc, present_key,
-                      present_value, static_cast<int>(B),
-                      static_cast<int>(past_len), static_cast<int>(sq),
-                      static_cast<int>(G), static_cast<int>(d),
-                      static_cast<int>(past_buf_seq),
-                      static_cast<int>(present_seq), seqlens_k_ptr,
-                      static_cast<int>(elem_sz)) != 0)
+      update_kv_cache(
+          stream, past_key, past_value, kSrc, vSrc, present_key, present_value,
+          static_cast<int>(B), static_cast<int>(past_len), static_cast<int>(sq),
+          static_cast<int>(G), static_cast<int>(d),
+          static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
+          seqlens_k_ptr, static_cast<int>(elem_sz)) != 0)
     return -1;
 
   // Single unified entry; v5 (d==64) / v7 (d==128) selection lives in the
@@ -428,9 +431,9 @@ static int gqa_forward_fused(
       static_cast<int>(present_seq), static_cast<int>(past_len), scale);
   RUNTIME_DEBUG_LOG("[REAL] GQA fused prefill (d=%lld -> v%d): B=%lld sq=%lld "
                     "total_seq=%lld H=%lld G=%lld past_len=%lld rc=%d\n",
-                    (long long)d, (d == 64 ? 5 : 7), (long long)B, (long long)sq,
-                    (long long)total_seq, (long long)H, (long long)G,
-                    (long long)past_len, fp_rc);
+                    (long long)d, (d == 64 ? 5 : 7), (long long)B,
+                    (long long)sq, (long long)total_seq, (long long)H,
+                    (long long)G, (long long)past_len, fp_rc);
   return fp_rc != 0 ? -1 : 0;
 }
 
@@ -516,9 +519,10 @@ int wrap_gqa_flash(
     return -1;
   }
   if (local_window_size > 0) {
-    fprintf(stderr, "wrap_gqa_flash: sliding window "
-                    "(local_window_size=%lld) not supported on the fused "
-                    "path\n",
+    fprintf(stderr,
+            "wrap_gqa_flash: sliding window "
+            "(local_window_size=%lld) not supported on the fused "
+            "path\n",
             (long long)local_window_size);
     return -1;
   }
@@ -540,13 +544,11 @@ int wrap_gqa_flash(
     return -1;
   }
   if (position_ids != nullptr) {
-    fprintf(stderr,
-            "wrap_gqa_flash: position_ids not supported\n");
+    fprintf(stderr, "wrap_gqa_flash: position_ids not supported\n");
     return -1;
   }
   if (attention_bias != nullptr) {
-    fprintf(stderr,
-            "wrap_gqa_flash: attention_bias not supported\n");
+    fprintf(stderr, "wrap_gqa_flash: attention_bias not supported\n");
     return -1;
   }
   if (k_scale != nullptr || v_scale != nullptr || k_quant_type != 0 ||
@@ -571,27 +573,29 @@ int wrap_gqa_flash(
   if (scale == 0.0f && head_dim > 0)
     scale = 1.0f / sqrtf(static_cast<float>(head_dim));
 
-  (void)total_seq_len;       // runtime derives total_seq from seqlens_k
-  (void)rotary_interleaved;  // interleaved layout handled inside hip_gqa_rope
-  (void)softcap;             // not applied on the fused path
-  (void)kv_cache_bit_width;  // KV quant rejected above
-  (void)op_state_slot;       // slim path is stateless
+  (void)total_seq_len;      // runtime derives total_seq from seqlens_k
+  (void)rotary_interleaved; // interleaved layout handled inside hip_gqa_rope
+  (void)softcap;            // not applied on the fused path
+  (void)kv_cache_bit_width; // KV quant rejected above
+  (void)op_state_slot;      // slim path is stateless
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_gqa_flash (slim/fused): batch=%lld seq_q=%lld "
       "seq_kv=%lld H=%lld G=%lld d=%lld do_rotary=%lld packed_qkv=%d\n",
       (long long)batch_size, (long long)seq_len_q, (long long)seq_len_kv,
       (long long)num_heads, (long long)kv_num_heads, (long long)head_dim,
-      (long long)do_rotary, static_cast<int>(key == nullptr && value == nullptr));
+      (long long)do_rotary,
+      static_cast<int>(key == nullptr && value == nullptr));
 
   int rc = gqa_forward_fused(state, stream, query, key, value, past_key,
-                             past_value, seqlens_k, cos_cache, sin_cache, output,
-                             present_key, present_value, batch_size, seq_len_q,
-                             seq_len_kv, past_buf_seq, num_heads, kv_num_heads,
-                             head_dim, scale, do_rotary);
+                             past_value, seqlens_k, cos_cache, sin_cache,
+                             output, present_key, present_value, batch_size,
+                             seq_len_q, seq_len_kv, past_buf_seq, num_heads,
+                             kv_num_heads, head_dim, scale, do_rotary);
   if (rc != 0)
-    fprintf(stderr, "wrap_gqa_flash: gqa_forward_fused failed "
-                    "(rc=%d)\n",
+    fprintf(stderr,
+            "wrap_gqa_flash: gqa_forward_fused failed "
+            "(rc=%d)\n",
             rc);
   return rc;
 }

@@ -345,8 +345,9 @@ struct GqaState : OpStateT<GqaState> {
 };
 
 // Resolve this GQA instance's descriptor cache from its op-state slot. Returns
-// nullptr when the slot is unconstructed (init failure) ΓÇö callers propagate the
-// error rather than lazily allocating, since the slot is built at session init.
+// nullptr when the slot is unconstructed (init failure) ΓÇö callers propagate
+// the error rather than lazily allocating, since the slot is built at session
+// init.
 static GqaGemmCache *get_gemm_cache(RuntimeState *state, int op_state_slot) {
   GqaState *gs = GqaState::get_op_state(state, op_state_slot);
   return gs ? &gs->cache : nullptr;
