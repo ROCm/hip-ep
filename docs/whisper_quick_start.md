@@ -415,6 +415,26 @@ The test audio (jfk.wav from whisper.cpp, LibriSpeech clips from the HF
 datasets-server) auto-downloads on first run; tests `skip` cleanly if the network
 is unreachable.
 
+**Model-level accuracy tests + their model coverage** (all in
+`test/python/whisper/test_whisper.py`; each compares the GPU EP against an ORT-CPU
+reference of the same model). The per-op numeric tests (§4d) and MLIR LIT (§4e)
+are excluded here — they validate single ops / IR shapes, not whole-model accuracy.
+
+| Test (§) | Asserts | Models covered | Precision |
+|---|---|---|---|
+| `test_encoder_correctness` (4c) | encoder hidden cosine, GPU vs CPU | **all 6 variants** | fp16 (all) + fp32 (large-v3) |
+| `test_decoder_prefill_correctness` (4c) | prefill logits cosine | **all 6 variants** | fp16 (all) + fp32 (large-v3) |
+| `test_decoder_decode_correctness` (4c) | per-step decode logits cosine | **all 6 variants** | fp16 (all) + fp32 (large-v3) |
+| `test_e2e_transcription_greedy` (4a) | greedy tokens GPU == CPU (verbatim) | **all 6 variants** | fp16 (all) + fp32 (large-v3) |
+| `test_librispeech_gpu_vs_cpu` (4b) | 5 clips, GPU == CPU verbatim | large-v3 | fp16 *or* fp32 (default) |
+| `test_librispeech_wer` (4b) | 5 clips, WER vs ground truth | large-v3 | fp16 *or* fp32 (default) |
+| `test_long_30s_gpu_vs_cpu` (4b) | 30 s clip, GPU == CPU | large-v3 | fp16 *or* fp32 (default) |
+
+"All 6 variants" = large-v3, large-v3-turbo, tiny, base, small, medium (fp16 for
+every one; large-v3 additionally fp32). `test_perf_decode_tps` (§6) is a perf
+test, not listed here. The per-variant decode tok/s / RTF come from the `PERF`
+line `test_e2e_transcription_greedy` prints (§4f).
+
 ### 4a. End-to-end transcription (the headline)
 
 Runs the full pipeline on GPU and asserts the transcription matches the ORT CPU
