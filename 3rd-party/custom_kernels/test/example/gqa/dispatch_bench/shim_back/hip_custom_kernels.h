@@ -140,7 +140,7 @@ HIP_KERNEL_API int hip_elementwise_where(
  *
  * Per-op launchers for the 5 ONNX unary ops added for the Qwen3.5 vision
  * model. All five share a single .hip translation unit
- * (lib/Runtime/Kernels/hip/elementwise_unary_kernel.hip).
+ * (3rd-party/custom_kernels/hip/elementwise_unary_kernel.hip).
  *
  * Supported hip_dtype (per op, may differ):
  *   Neg/Sign  : FLOAT16, INT32, INT64 (+ FLOAT32 for free)
@@ -196,7 +196,7 @@ HIP_KERNEL_API int hip_elementwise_not(
  * =========================================================================
  *
  * Same-shape binary elementwise ops. All eight share one translation unit:
- * lib/Runtime/Kernels/hip/elementwise_binary_kernel.hip.
+ * 3rd-party/custom_kernels/hip/elementwise_binary_kernel.hip.
  *
  * Mul / Add / Min / Max are reached from wrap_miopenOpTensor when MIOpen's
  * miopenOpTensor rejects the element type (notably INT32/INT64). Float
@@ -369,7 +369,7 @@ HIP_KERNEL_API int hip_elementwise_sqrt(
  * Element-wise GELU activation via HIP with support for exact and approximate modes.
  *
  * Approximate mode (approximate=1, tanh):
- *   Formula: GELU(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x³)))
+ *   Formula: GELU(x) Γëê 0.5 * x * (1 + tanh(sqrt(2/╧Ç) * (x + 0.044715 * x┬│)))
  *   Standard approximation used in PyTorch, TensorFlow, and ONNX.
  *
  * Exact mode (approximate=0, erf, default):
@@ -617,38 +617,27 @@ HIP_KERNEL_API int hip_gqa_softmax_f32_to_f32(
     int input_batch_stride, int output_batch_stride,
     const void* head_sink, int num_heads, int use_smooth_softmax);
 
-/* [removed] hip_gqa_fused_decode: the legacy one-block-per-(batch,head_q)
- * decode kernel has been retired. Single-token decode now runs exclusively
- * through hip_gqa_flash_decode_v2 (FA-2 split-K; scalar templated for HpG in
- * {1,2,3,4,8,16} so it covers MHA + GQA, with WMMA layered on where it wins). */
-
-/* Optimized fused GQA prefill (sq > 1, d in {64,128}, fp16, causal, GQA) --
- * Flash-Attention-2 with WMMA tile GEMMs and intra-wave online softmax. These
- * reproduce the gqa_compare TTFT-winning kernels (OPTIMIZATION.md ch.13):
- *   v5: warp-private / register-resident (best at d == 64).
- *   v7: M-register-blocked, global-streamed K (best at d == 128).
- * Each self-tunes its launch config on the first call per (d,sq,skv,Hq,G)
- * shape and caches the winner process-wide. Layout: Q [B,sq,Hq,d];
- * K/V cache [B,G,max_seq,d] (post-RoPE, post-append). Returns 0 on success,
- * -1 if d is unsupported. No seqlens_k / sliding-window / head-sink / smooth
- * softmax / softcap -- caller must gate those out (use the decomposed path). */
-HIP_KERNEL_API int hip_gqa_flash_prefill_v5_v2(
+/* Fused GQA decode (sq == 1, d in {64, 128, 256}): single-token attention
+ * via cooperative dot product + online softmax in log2e space, one block
+ * per (batch, head_q) with D threads (D == d).
+ * Replaces steps 3, 6-11 of the decomposed pipeline.
+ * Returns -1 for unsupported d values.
+ * seqlens_k: optional device pointer [B] int32. When non-null, the kernel
+ * reads total_seq = seqlens_k[b]+1 as the loop bound (instead of skv).
+ * NOTE: assumes wave32 (RDNA); not portable to CDNA/wave64 without changes
+ * to the warp shuffle reduction tree. */
+HIP_KERNEL_API int hip_gqa_fused_decode(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
-    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
-    int past_len, float scale);
+    void* O, int B, int H, int G, int d, int skv, int max_seq,
+    float scale, const void* seqlens_k);
 
-HIP_KERNEL_API int hip_gqa_flash_prefill_v7_v2(
+/* Fused GQA prefill (sq > 1, d == 128): Flash Attention 2 with WMMA
+ * tile GEMMs and online softmax. Double-buffered KV tiles, causal mask.
+ * Replaces steps 3, 6-11 of the decomposed pipeline. */
+HIP_KERNEL_API int hip_gqa_fused_prefill(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
-    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
-    int past_len, float scale);
-
-/* Unified fused flash-prefill entry: picks v5 (d==64) or v7 (d==128) internally
- * so the runtime calls one symbol for any eligible prefill. Same layout /
- * constraints as v5/v7 above. Returns 0 on success, -1 if d is unsupported. */
-HIP_KERNEL_API int hip_gqa_flash_prefill_v2(
-    void* stream, const void* Q, const void* Kcache, const void* Vcache,
-    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
-    int past_len, float scale);
+    void* O, int B, int H, int G, int sq, int skv, int max_seq, int past_len,
+    float scale);
 
 /* FA-2 split-K GQA decode (sq == 1, d in {64, 128}, HPG=H/G==4):
  * GQA-aware kernel that loads K/V tiles into LDS once and reuses them
@@ -659,19 +648,10 @@ HIP_KERNEL_API int hip_gqa_flash_prefill_v2(
  * Llama-3.x family shows large bandwidth headroom over the existing
  * one-block-per-head fused decode.
  *
- * Workspace: float scratch sized B*H*max_splits*(d+2)*sizeof(float) bytes.
+ * Workspace: float scratch sized B*H*K_SPLITS*(d+2)*sizeof(float) bytes.
  * Caller is responsible for allocating and passing it in.
  *
- * skv: current total KV length (host-known). Used only to autotune the split
- * count / impl and key the per-shape cache; the kernels read seqlens_k for the
- * exact per-batch length at runtime. Pass <= 0 to fall back to max_seq.
- *
- * max_splits: workspace capacity in splits. The launcher autotunes the actual
- * split count (8..max_splits, capped at 64) and the scalar-vs-WMMA impl on the
- * first call per (B,H,G,d, skv-bucket) shape, caches the winner in a
- * process-wide map (matmul_nbits-style), and reuses it on later calls.
- * Env overrides skip autotune: HIPDNN_GQA_DECODE_SCALAR / _WMMA (impl),
- * HIPDNN_GQA_DECODE_SPLITS=N (count), HIPDNN_GQA_DECODE_NOAUTOTUNE=1 (fixed).
+ * K_SPLITS: only 8 supported in V1. Returns -1 on unsupported (HPG, d, K_SPLITS).
  *
  * seqlens_k: optional device pointer [B] int32. When non-null, total_seq
  * = seqlens_k[b]+1 is read on-device (no host sync).
@@ -687,12 +667,12 @@ HIP_KERNEL_API int hip_gqa_flash_prefill_v2(
  * s_h = 0 for all heads. This is the gpt-oss-20b / Mistral-style attention
  * sink. The partials are unaffected; the term is folded in by the reduce
  * kernel. */
-HIP_KERNEL_API int hip_gqa_flash_decode_v2(
+HIP_KERNEL_API int hip_gqa_flash_decode(
     void* stream,
     const void* Q, const void* Kcache, const void* Vcache,
     void* O,
     void* partials_workspace,
-    int B, int H, int G, int d, int skv, int max_seq, int max_splits,
+    int B, int H, int G, int d, int max_seq, int K_SPLITS,
     float scale,
     const void* seqlens_k,
     int local_window_size,
@@ -825,7 +805,7 @@ HIP_KERNEL_API int hip_reduce_mean(
     int hip_dtype);
 
 /* =========================================================================
- * Pool — MaxPool / AveragePool / LpPool (1D / 2D / 3D)
+ * Pool ΓÇö MaxPool / AveragePool / LpPool (1D / 2D / 3D)
  * =========================================================================
  *
  * Generic ONNX window pooling over an `(N, C, D_1[, D_2[, D_3]])` input.
@@ -845,7 +825,7 @@ HIP_KERNEL_API int hip_reduce_mean(
  * that don't use them.
  *
  * Optional `indices` (i64 buffer the same shape as the output) records the
- * row-major flat index in the *unpadded* input that each max came from —
+ * row-major flat index in the *unpadded* input that each max came from ΓÇö
  * MAX mode only; matches ONNX MaxPool spec for storage_order = 0. Pass NULL
  * for AVERAGE / LP.
  *
@@ -862,7 +842,7 @@ HIP_KERNEL_API int hip_pool(
     void* stream,
     const void* input,
     void* output,
-    void* indices,            /* int64_t* — nullable, MAX only */
+    void* indices,            /* int64_t* ΓÇö nullable, MAX only */
     int hip_dtype,
     int mode,
     int spatial_rank,
@@ -1038,7 +1018,7 @@ HIP_KERNEL_API int hip_gather_nd(
     int hip_dtype);
 
 /* =========================================================================
- * Slice (ONNX-13+ — non-constant indices / negative-step fallback)
+ * Slice (ONNX-13+ ΓÇö non-constant indices / negative-step fallback)
  * =========================================================================
  *
  * The compile-time-constant + positive-stride case is folded to
@@ -1077,7 +1057,7 @@ HIP_KERNEL_API int hip_slice(
                                              When set and logical[d] <
                                              output_shape[d] for some d,
                                              positions in the over-allocated
-                                             tail are filled with zero — the
+                                             tail are filled with zero ΓÇö the
                                              host wrapper does not need to
                                              pre-memset the buffer.        */
     const int64_t* starts_per_axis_host,  /* length = rank */
@@ -1104,12 +1084,12 @@ HIP_KERNEL_API int hip_slice(
  *   slice_size         = product(data.shape[K:])
  *
  * `reduction_id`:
- *   0 = none ("replace")  — last-writer-wins for duplicate indices,
+ *   0 = none ("replace")  ΓÇö last-writer-wins for duplicate indices,
  *                           matching ONNX's "undefined" guarantee.
- *   1 = add               — atomicAdd (or CAS-emulation for fp16).
- *   2 = mul               — CAS-emulated atomic multiply.
- *   3 = min               — CAS-emulated atomic min.
- *   4 = max               — CAS-emulated atomic max.
+ *   1 = add               ΓÇö atomicAdd (or CAS-emulation for fp16).
+ *   2 = mul               ΓÇö CAS-emulated atomic multiply.
+ *   3 = min               ΓÇö CAS-emulated atomic min.
+ *   4 = max               ΓÇö CAS-emulated atomic max.
  *
  * Bounded to rank <= 8.
  *
@@ -1438,7 +1418,7 @@ HIP_KERNEL_API int hip_gather_block_quantized(
  * =========================================================================
  *
  * Individual kernel launchers for QMoE (Quantized Mixture-of-Experts).
- * These only launch GPU kernels — no memory allocation, no stream sync.
+ * These only launch GPU kernels ΓÇö no memory allocation, no stream sync.
  * The runtime wrapper (wrap_qmoe) orchestrates the expert loop.
  *
  * All functions take element_size_bytes: 2 for fp16, 4 for fp32.
@@ -1680,33 +1660,6 @@ HIP_KERNEL_API int hip_qmoe_decode_fused(
  * Returns: 0 on success, non-zero on failure
  */
 HIP_KERNEL_API int hip_linear_attention_decode(
-    void* stream,
-    const void* query,
-    const void* key,
-    const void* value,
-    const void* decay,
-    const void* beta,
-    void* state,
-    void* output,
-    int64_t B,
-    int64_t seq_len,
-    int64_t Hq,
-    int64_t Hkv,
-    int64_t Nk,
-    int64_t dk,
-    int64_t dv,
-    float scale,
-    int64_t update_rule,
-    int64_t decay_per_key_dim,
-    int64_t beta_per_head,
-    int64_t type);
-
-// Chunked-parallel gated-delta prefill kernel (single launch, processes the
-// whole sequence). Returns >0 (=1) when it declines the launch (caller must
-// fall back to the per-token decode loop); 0 on success; <0 on launch error.
-// Only the gated_delta rule with scalar log-decay (decay_per_key_dim==0) is
-// supported; other rules/layouts/oversized smem are declined.
-HIP_KERNEL_API int hip_linear_attention_prefill_chunked(
     void* stream,
     const void* query,
     const void* key,

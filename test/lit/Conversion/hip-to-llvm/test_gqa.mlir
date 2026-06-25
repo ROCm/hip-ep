@@ -3,7 +3,7 @@
 
 // RUN: hip-mlir-opt --assign-op-state-slots --convert-hip-to-llvm %s | FileCheck %s
 //
-// The trailing i32 on the wrap_group_query_attention call is op_state_slot,
+// The trailing i32 on the wrap_gqa_flash call is op_state_slot,
 // threaded by --assign-op-state-slots. It selects this GQA instance's
 // per-instance GqaState (hipBLASLt GEMM descriptor cache), replacing the
 // former shared RuntimeState::gqa_gemm_cache.
@@ -35,7 +35,7 @@ module {
 }
 
 // CHECK-LABEL: llvm.func @test_gqa_lowering
-// CHECK: llvm.call @wrap_group_query_attention({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f32, i64, i64, f32, i64, i64, i64, i64, i64, i64, i32, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK: llvm.call @wrap_gqa_flash({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, f32, i64, i64, f32, i64, i64, i64, i64, i64, i64, i32, i64, i64, i64, i64, i64, i64) -> i32
 
 // Verify 39 parameters (full MS GQA spec signature + no_causal + op_state_slot):
 // - 19 pointers: state, query, key, value, past_key, past_value, seqlens_k, total_seq_len,
