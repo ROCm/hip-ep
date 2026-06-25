@@ -39,7 +39,9 @@ import onnxruntime as ort
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from conftest import (  # noqa: E402
     AMD_VENDOR_ID,
+    EP_PROVIDER_OPTIONS,
     WhisperModelConfig,
+    apply_artifact_format,
     make_whisper_inputs,
     register_morphizen_ep,
 )
@@ -77,7 +79,7 @@ def make_cpu_session_factory(model_dir):
 
 
 def make_morphizen_session_factory(repo_root, model_dir):
-    """Return ``factory(name) -> MorphiZen-EP InferenceSession``.
+    """Return ``factory(name) -> AMDGPU-umbrella-EP InferenceSession``.
 
     Resolves the EP devices once and raises ``RuntimeError`` if the EP DLL isn't
     found (so a CLI run fails loudly rather than silently on CPU). Sets
@@ -88,14 +90,18 @@ def make_morphizen_session_factory(repo_root, model_dir):
     devices = register_morphizen_ep(repo_root)
     if not devices:
         raise RuntimeError(
-            "MorphiZen EP not found — run `python build.py` first (expected "
-            "install/dist/bin/onnxruntime_morphizen_ep.dll)."
+            "AMDGPU EP not found — run `python build.py` first (expected "
+            "amdgpu-ep.dll in the EP bin dir)."
         )
 
     def factory(model_name):
         so = ort.SessionOptions()
         so.add_session_config_entry("session.disable_aot_function_inlining", "1")
-        so.add_provider_for_devices(devices, {})
+        # bitcode by default; HIPEP_ARTIFACT_FORMAT=NATIVE is an opt-in escape
+        # hatch (per-model DLL) — normally unneeded. See apply_artifact_format.
+        apply_artifact_format(so)
+        # profile=llm tells the AMDGPU umbrella to dispatch to the hipep backend.
+        so.add_provider_for_devices(devices, dict(EP_PROVIDER_OPTIONS))
         return ort.InferenceSession(str(model_dir / model_name), sess_options=so)
 
     return factory
