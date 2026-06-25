@@ -1407,30 +1407,55 @@ def librispeech():
 _SAMPLE_IDS = [f"sample_{i}.wav" for i in range(5)]
 
 
-@pytest.mark.parametrize("clip", _SAMPLE_IDS)
-def test_librispeech_gpu_vs_cpu(librispeech, default_precision, capfd, clip):
-    """MorphiZen GPU greedy == CPU greedy VERBATIM for each LibriSpeech clip.
+@pytest.fixture(scope="module", params=_CORE_VARIANTS, ids=lambda n: n)
+def lspeech_variant(request):
+    """Every variant at fp16 for the multi-clip / long-audio GPU==CPU suites.
 
-    The strong faithfulness bar: independent of the audio content, the EP's greedy
-    transcription must reproduce the CPU greedy transcription exactly. Runs at the
-    default precision (fp16 if built, else fp32) — a SINGLE leg, not the fp16×fp32
-    matrix, so the 5-clip GPU sweep does not double in wall-clock.
+    These suites assert GPU == CPU greedy (EP correctness), which is independent of
+    model transcription quality, so they run across ALL variants. (WER vs ground
+    truth is model-quality-dependent and stays large-v3 — see
+    ``test_librispeech_wer``.) Yields ``(model_dir, variant, np.float16)``; skips a
+    variant whose fp16 bundle isn't built.
     """
-    model_dir, dtype, prec = default_precision
-    refs, data_dir = librispeech
-    audio = make_whisper_inputs(data_dir / clip, _CFG)["audio_features"].astype(dtype)
+    name = request.param
+    try:
+        model_dir, var = setup_whisper_variant(name, precision="fp16")
+    except Exception as e:  # noqa: BLE001 — unbuilt variant → skip that leg
+        pytest.skip(f"{name} fp16 bundle unavailable: {e!r}")
+    return model_dir, var, np.float16
 
-    cpu_tokens = _greedy_decode_cpu(audio, model_dir=model_dir, dtype=dtype)
-    cpu_text = _decode_text(cpu_tokens)
+
+@pytest.mark.parametrize("clip", _SAMPLE_IDS)
+def test_librispeech_gpu_vs_cpu(librispeech, lspeech_variant, capfd, clip):
+    """GPU greedy == CPU greedy VERBATIM for each LibriSpeech clip, per variant.
+
+    The strong faithfulness bar: independent of the audio content AND the model
+    size, the EP's greedy transcription must reproduce the CPU greedy transcription
+    exactly. Runs fp16 across every variant (a single precision leg per variant, so
+    the sweep stays bounded).
+    """
+    model_dir, var, dtype = lspeech_variant
+    name = var.name
+    refs, data_dir = librispeech
+    audio = make_whisper_inputs(data_dir / clip, var.cfg)["audio_features"].astype(
+        dtype
+    )
+
+    cpu_tokens = _greedy_decode_cpu(
+        audio, model_dir=model_dir, dtype=dtype, variant=var
+    )
+    cpu_text = _decode_text(cpu_tokens, tokenizer_id=var.hf_model_id, eot=var.eot)
     gc.collect()
 
     capfd.readouterr()
-    gpu_tokens = _greedy_decode_morphizen(audio, model_dir=model_dir, dtype=dtype)
+    gpu_tokens = _greedy_decode_morphizen(
+        audio, model_dir=model_dir, dtype=dtype, variant=var
+    )
     stderr_text = "".join(capfd.readouterr())
-    gpu_text = _decode_text(gpu_tokens)
+    gpu_text = _decode_text(gpu_tokens, tokenizer_id=var.hf_model_id, eot=var.eot)
 
-    print(f"\n[{clip}/{prec}] CPU : {cpu_text!r}")
-    print(f"[{clip}/{prec}] GPU : {gpu_text!r}")
+    print(f"\n[{clip}/{name}] CPU : {cpu_text!r}")
+    print(f"[{clip}/{name}] GPU : {gpu_text!r}")
 
     # No silent CPU fallback — otherwise GPU==CPU is trivially true (both CPU).
     _assert_compiled_on_gpu(stderr_text)
@@ -1440,7 +1465,7 @@ def test_librispeech_gpu_vs_cpu(librispeech, default_precision, capfd, clip):
         n = min(len(cpu_tokens), len(gpu_tokens))
         first = next((i for i in range(n) if cpu_tokens[i] != gpu_tokens[i]), n)
         pytest.fail(
-            f"{clip}: GPU greedy diverged from CPU at token index {first} "
+            f"{clip}/{name}: GPU greedy diverged from CPU at token index {first} "
             f"(cpu_len={len(cpu_tokens)}, gpu_len={len(gpu_tokens)})\n"
             f"  cpu: {cpu_text!r}\n  gpu: {gpu_text!r}"
         )
@@ -1455,6 +1480,16 @@ def test_librispeech_wer(librispeech, default_precision, capfd, clip):
     always printed so a real regression (e.g. 50 % WER) is distinguishable from
     normalization noise (~10 %). Runs at the default precision (fp16 if built,
     else fp32).
+
+    LARGE-V3 ONLY — intentionally NOT parametrized over variants. Unlike the
+    GPU==CPU suites (EP-correctness, model-quality-independent), WER is measured
+    against the GROUND-TRUTH transcript, so it is a MODEL-QUALITY metric. The small
+    variants (tiny/base/small) genuinely transcribe worse — a `_WER_THRESHOLD`
+    tuned for large-v3 would fail on them, and a per-variant relaxed threshold
+    would be arbitrary and brittle. A small model's WER reflects the MODEL, not the
+    EP, so it adds no EP-correctness signal; per-variant EP correctness is already
+    covered by `test_librispeech_gpu_vs_cpu` (GPU==CPU, all variants) + the §4a/§4c
+    matrix. Keeping WER on large-v3 keeps it a meaningful accuracy gate.
     """
     model_dir, dtype, prec = default_precision
     refs, data_dir = librispeech
@@ -1477,48 +1512,51 @@ def test_librispeech_wer(librispeech, default_precision, capfd, clip):
     )
 
 
-def test_long_30s_gpu_vs_cpu(librispeech, default_precision, capfd):
+def test_long_30s_gpu_vs_cpu(librispeech, lspeech_variant, capfd):
     """Long (~24 s) concatenated clip: GPU greedy == CPU greedy all the way down.
 
-    THE KEY NEW COVERAGE. ~24 s of audio drives the decode loop a few hundred
-    tokens deep toward the 448-slot self-KV cap, so this stresses whether the
-    decode stays correct late in the sequence (KV buffer filling, position_ids
+    THE KEY DEEP-DECODE COVERAGE. ~24 s of audio drives the decode loop a few
+    hundred tokens deep toward the 448-slot self-KV cap, so this stresses whether
+    the decode stays correct late in the sequence (KV buffer filling, position_ids
     advancing). Asserts verbatim GPU==CPU; also reports WER vs the concatenated
-    reference (lenient — concatenation seams can cause minor errors). Runs at the
-    default precision (fp16 if built, else fp32).
+    reference (informational — concatenation seams can cause minor errors). Runs
+    fp16 across every variant (GPU==CPU is model-quality-independent).
     """
-    model_dir, dtype, prec = default_precision
+    model_dir, var, dtype = lspeech_variant
+    name = var.name
     refs, data_dir = librispeech
     clip = "long_30s.wav"
-    audio = make_whisper_inputs(data_dir / clip, _CFG)["audio_features"].astype(dtype)
+    audio = make_whisper_inputs(data_dir / clip, var.cfg)["audio_features"].astype(
+        dtype
+    )
 
     cpu_tokens = _greedy_decode_cpu(
-        audio, max_length=_LONG_MAX_LEN, model_dir=model_dir, dtype=dtype
+        audio, max_length=_LONG_MAX_LEN, model_dir=model_dir, dtype=dtype, variant=var
     )
-    cpu_text = _decode_text(cpu_tokens)
+    cpu_text = _decode_text(cpu_tokens, tokenizer_id=var.hf_model_id, eot=var.eot)
     gc.collect()
 
     capfd.readouterr()
     gpu_tokens = _greedy_decode_morphizen(
-        audio, max_length=_LONG_MAX_LEN, model_dir=model_dir, dtype=dtype
+        audio, max_length=_LONG_MAX_LEN, model_dir=model_dir, dtype=dtype, variant=var
     )
     stderr_text = "".join(capfd.readouterr())
-    gpu_text = _decode_text(gpu_tokens)
+    gpu_text = _decode_text(gpu_tokens, tokenizer_id=var.hf_model_id, eot=var.eot)
     _assert_compiled_on_gpu(stderr_text)
 
-    # Decode-step count = tokens beyond the 4 forced-start tokens.
-    n_decode = len(gpu_tokens) - len(_START_TOKENS)
-    print(f"\n[long/{prec}] decode tokens (GPU) = {n_decode}")
-    print(f"[long/{prec}] CPU : {cpu_text!r}")
-    print(f"[long/{prec}] GPU : {gpu_text!r}")
+    # Decode-step count = tokens beyond the forced-start tokens.
+    n_decode = len(gpu_tokens) - len(var.start_tokens)
+    print(f"\n[long/{name}] decode tokens (GPU) = {n_decode}")
+    print(f"[long/{name}] CPU : {cpu_text!r}")
+    print(f"[long/{name}] GPU : {gpu_text!r}")
     ref = refs[clip]
-    print(f"[long/{prec}] WER (GPU vs ground truth) = {_wer(ref, gpu_text):.4f}")
+    print(f"[long/{name}] WER (GPU vs ground truth) = {_wer(ref, gpu_text):.4f}")
 
     if gpu_tokens != cpu_tokens:
         n = min(len(cpu_tokens), len(gpu_tokens))
         first = next((i for i in range(n) if cpu_tokens[i] != gpu_tokens[i]), n)
         pytest.fail(
-            f"long clip: GPU greedy diverged from CPU at token index {first} "
+            f"long clip/{name}: GPU greedy diverged from CPU at token index {first} "
             f"of {n_decode} decode tokens (cpu_len={len(cpu_tokens)}, "
             f"gpu_len={len(gpu_tokens)}) — a deep-decode (KV/position_ids) bug\n"
             f"  cpu: {cpu_text!r}\n  gpu: {gpu_text!r}"

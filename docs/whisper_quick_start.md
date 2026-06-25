@@ -426,9 +426,9 @@ are excluded here — they validate single ops / IR shapes, not whole-model accu
 | `test_decoder_prefill_correctness` (4c) | prefill logits cosine | **all 6 variants** | fp16 (all) + fp32 (large-v3) |
 | `test_decoder_decode_correctness` (4c) | per-step decode logits cosine | **all 6 variants** | fp16 (all) + fp32 (large-v3) |
 | `test_e2e_transcription_greedy` (4a) | greedy tokens GPU == CPU (verbatim) | **all 6 variants** | fp16 (all) + fp32 (large-v3) |
-| `test_librispeech_gpu_vs_cpu` (4b) | 5 clips, GPU == CPU verbatim | large-v3 | fp16 *or* fp32 (default) |
-| `test_librispeech_wer` (4b) | 5 clips, WER vs ground truth | large-v3 | fp16 *or* fp32 (default) |
-| `test_long_30s_gpu_vs_cpu` (4b) | 30 s clip, GPU == CPU | large-v3 | fp16 *or* fp32 (default) |
+| `test_librispeech_gpu_vs_cpu` (4b) | 5 clips, GPU == CPU verbatim | **all 6 variants** | fp16 |
+| `test_long_30s_gpu_vs_cpu` (4b) | 30 s clip, GPU == CPU | **all 6 variants** | fp16 |
+| `test_librispeech_wer` (4b) | 5 clips, WER vs ground truth | large-v3 (see §4b) | fp16 *or* fp32 (default) |
 
 "All 6 variants" = large-v3, large-v3-turbo, tiny, base, small, medium (fp16 for
 every one; large-v3 additionally fp32). `test_perf_decode_tps` (§6) is a perf
@@ -456,12 +456,29 @@ is slow — it pays the MLIR compile of the encoder + both decoder variants.)
 
 ### 4b. Multi-clip correctness + accuracy (WER)
 
-5 LibriSpeech clips + a long concatenated clip. Each asserts **GPU == CPU
-verbatim** *and* **WER vs ground truth** within threshold:
+5 LibriSpeech clips + a long (~24 s) concatenated clip.
+
+- **`test_librispeech_gpu_vs_cpu` / `test_long_30s_gpu_vs_cpu`** assert **GPU == CPU
+  verbatim** and run **fp16 across every variant** — GPU==CPU is an EP-correctness
+  check (independent of how well the model transcribes), so it's valid for all
+  sizes. The long clip drives the decode loop a few hundred tokens deep (toward the
+  448-slot self-KV cap), stressing late-sequence KV / position_ids handling.
+- **`test_librispeech_wer`** asserts **WER vs ground truth** and runs **large-v3
+  only**.
 
 ```bash
 pytest test/python/whisper/test_whisper.py -k "librispeech or long_30s" -v -s
 ```
+
+> **Why WER is large-v3 only (and the GPU==CPU suites are not).** WER is measured
+> against the ground-truth transcript, so it is a **model-quality** metric, not an
+> EP-correctness one. The small variants (tiny/base/small) genuinely transcribe
+> worse — a `_WER_THRESHOLD` tuned for large-v3 would fail on them, and a
+> per-variant relaxed threshold would be arbitrary and brittle. A small model's WER
+> tells you about the *model*, not the EP, so it adds no EP signal. Per-variant EP
+> correctness is already fully covered by the GPU==CPU suites above (all variants)
+> plus the §4c phase matrix — so WER stays on large-v3, where the threshold is a
+> meaningful accuracy gate.
 
 ### 4c. Per-phase correctness (all variants)
 
