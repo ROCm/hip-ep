@@ -31,9 +31,10 @@ namespace morphizen {
 // The class boundaries are generated at compile time in four tiers, with the
 // tier edges de-duplicated where they meet:
 //   [128 B, 1 KB] : powers of two                   -> 128, 256, 512, 1024
-//   (1 KB, 1 MB]  : 4 steps per octave (3 inserts)  -> base*{1, 1.25, 1.5, 1.75}
-//   (1 MB, 4 MB]  : 16 steps per octave (15 inserts) -> base*{1 + k/16}
-//   (4 MB, 16 MB] : 32 steps per octave (31 inserts) -> base*{1 + k/32}
+//   (1 KB, 1 MB]  : 4 steps per octave (3 inserts)  ->
+//   base*{1, 1.25, 1.5, 1.75} (1 MB, 4 MB]  : 16 steps per octave (15 inserts)
+//   -> base*{1 + k/16} (4 MB, 16 MB] : 32 steps per octave (31 inserts) ->
+//   base*{1 + k/32}
 // This gives fine granularity for the small/medium transients a model churns
 // every Run while keeping the total class count modest.
 namespace detail {
