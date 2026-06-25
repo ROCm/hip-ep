@@ -6,7 +6,7 @@ Licensed under the MIT License.
 
 End-to-end guide for running **Whisper** speech-to-text (large-v3 + the
 turbo/tiny/base/small/medium variants) on the AMDGPU EP from a fresh checkout:
-build the EP, build + compile the model, run the tests, transcribe your own audio,
+build the EP, build + prepare the model, run the tests, transcribe your own audio,
 and compare against CPU / Vulkan.
 
 Whisper runs **fp16 by default** — it is both faster on GPU and bit-faithful: the
@@ -315,72 +315,89 @@ $env:Path = "$env:THEROCK_DIST\bin;$ROOT\local\bin;$env:Path"
 
 ---
 
-## 3. Get + compile the model
+## 3. Get + prepare the model
+
+**Sourcing differs by variant** — only large-v3 is published as a prebuilt ONNX:
+
+| Variant | Source | Precisions |
+|---|---|---|
+| large-v3 | auto-download (AMD HF) | fp16 + fp32 |
+| large-v3-turbo, tiny, base, small, medium | local OGA build (§3b) | fp16 |
 
 **You normally don't run anything here** — the tests (§4) and
-`transcribe_whisper.py` (§5) prepare the model on demand: they download the raw
-OGA bundle from the AMD HF repo on first use, then apply the EP surgery +
-`fix_shapes` automatically. To do it ahead of time (or to verify the download),
-run the consume-only setup wrapper, which fetches the raw bundle if absent and
-prepares it for the EP:
-
-```
-python scripts/setup_whisper_model.py          # fp16 (default) — amd/whisper-large-v3-onnx-fp16
-python scripts/setup_whisper_model.py --fp32   # fp32          — amd/whisper-large-v3-onnx-fp32
-```
-
-This downloads `encoder.onnx`/`decoder.onnx` (+ `.data`) + tokenizer + config from
-Hugging Face (first run ~3–6 GB per precision), then applies the ONNX surgery
+`transcribe_whisper.py` (§5) prepare the model on demand. To prepare ahead of time,
+run the consume-only setup wrapper for a variant. It applies the EP surgery
 (`past_sequence_length` input + position-/token-embed fixes for the static
-shared-buffer KV cache) and `fix_shapes`. Idempotent — instant once prepared.
-
-> **Gated / rate-limited?** If the download fails for auth reasons, run
-> `hf auth login` with a token that can read the repo and retry. If HF is
-> unreachable entirely, build the models locally instead (§3b).
-
-Verify the variants were produced (`ls` on Git Bash, `dir` on PowerShell) — the
-default fp16 bundle lives in `models/whisper-large-v3-onnx-fp16/`, the fp32 bundle
-in `models/whisper-large-v3-onnx/`; both have the same file set:
+shared-buffer KV cache) + `fix_shapes`; for large-v3 it first downloads the raw
+bundle from HF (~3–6 GB/precision), for the other variants it consumes the bundle
+you built in §3b. Idempotent.
 
 ```
-models/whisper-large-v3-onnx-fp16/   (default; fp32 dir mirrors this layout)
-  encoder.onnx (+.data), decoder.onnx (+.data), tokenizer.json, genai_config.json   (raw bundle from HF)
+python scripts/setup_whisper_model.py --variant large-v3          # fp16 (default), auto-downloads
+python scripts/setup_whisper_model.py --variant large-v3 --fp32   # fp32, auto-downloads
+python scripts/setup_whisper_model.py --variant tiny              # fp16; build it first (§3b)
+```
+
+`--variant` defaults to `large-v3`. Prepare all six at once (after building the
+five local ones, §3b):
+
+```bash
+for v in large-v3 large-v3-turbo tiny base small medium; do
+  python scripts/setup_whisper_model.py --variant "$v"
+done
+```
+
+> **Gated / rate-limited large-v3 download?** Run `hf auth login` with a token that
+> can read the repo and retry. If HF is unreachable, build large-v3 locally (§3b).
+
+Each prepared variant dir (`models/whisper-<variant>-onnx[-fp16]/`) holds:
+
+```
+  encoder.onnx (+.data), decoder.onnx (+.data), tokenizer.json, genai_config.json   (raw bundle)
   encoder_fixed.onnx, decoder_surgery.onnx,
-  decoder_fixed_prefill.onnx (S=4), decoder_fixed_decode.onnx (S=1)                  (compiled-shape variants)
+  decoder_fixed_prefill.onnx (S=4), decoder_fixed_decode.onnx (S=1)                  (surgered + fixed-shape)
 ```
 
-> **"Compiling the model"** happens the first time the EP loads one of the
-> `*_fixed*.onnx` files (the EP lowers ONNX → HIP → a GPU `model.dll`, cached
-> in `%TEMP%/morphizen_mlir_*`). The pytest runs in the next step trigger it. To
-> force a fresh compile, delete the cache — **PowerShell:**
-> `Remove-Item "$env:TEMP\morphizen_mlir_*"` · **Git Bash:** `rm -f "$TEMP"/morphizen_mlir_*`.
-> **Always do this after pulling a runtime/kernel change** — the cache key is the
-> ONNX hash, not the runtime version, so stale DLLs are otherwise reused silently.
+> **First run per model is slower:** the EP JIT-compiles each `*_fixed*.onnx`
+> in-process at session load (ONNX → HIP → LLVM IR); there is no on-disk model
+> artifact to manage. After rebuilding the EP (runtime/kernel change) the next run
+> JITs the new code automatically. (The opt-in `HIPEP_ARTIFACT_FORMAT=NATIVE` path
+> instead writes a per-model DLL under `%TEMP%/morphizen_mlir_*`, which you clear
+> with `rm -f "$TEMP"/morphizen_mlir_*` after a runtime change; the default JIT
+> path needs no such step.)
 
 ---
 
-## 3b. Build the models locally (backup)
+## 3b. Build the variants locally
 
-The §3 download is the normal path. Build locally only if HF is unreachable, or
-to **reproduce** the published models from source. `python
-scripts/build_whisper_models.py` builds from `openai/whisper-large-v3` (pinned HF
-revision) via a pinned OGA DirectML model builder running in an isolated venv into
-`models/whisper-large-v3-onnx{,-fp16}/`. This is exactly how the AMD HF repos were
-produced, so the output is byte-equivalent. First run downloads the HF *weights* +
-builds (~10 min); idempotent after. The default precision is **fp16**; large-v3's
-fp32-vs-fp32 cross-backend benchmark (§6) needs the fp32 bundle too, so pass
-`--precision both` when reproducing large-v3 locally.
+The five non-large-v3 variants (turbo + tiny/base/small/medium) are **not
+published** — build them with the pinned OGA DirectML model builder (runs in an
+isolated venv from `openai/whisper-<size>` at a pinned HF revision; the builder
+also patches OGA's asymmetric-layer bug so turbo's 32-enc/4-dec model builds).
+Default precision is **fp16** (all the per-variant tests run fp16):
 
 ```
-python scripts/build_whisper_models.py --variant large-v3 --precision both  # fp32 + fp16
-python scripts/build_whisper_models.py --variant large-v3                    # fp16 only
+python scripts/build_whisper_models.py                          # default set: turbo + tiny/base/small/medium (fp16)
+python scripts/build_whisper_models.py --variant tiny,base      # specific variants
+python scripts/build_whisper_models.py --list                   # show variant -> output dir
 ```
 
-Because this writes the same `models/whisper-large-v3-onnx{,-fp16}/` dirs the §3
-download targets, a subsequent `setup_whisper_model.py` (or any test) sees the raw
-bundle already present and **skips the download** — the local build pre-populates
-the cache. No manual `onnxruntime-genai-directml` install is needed and the OGA
-fork is never shadowed — the builder runs in its own isolated venv (see §0).
+Then prepare each (surgery + `fix_shapes`, §3):
+
+```bash
+for v in large-v3-turbo tiny base small medium; do
+  python scripts/setup_whisper_model.py --variant "$v"
+done
+```
+
+large-v3 normally downloads (§3); to **reproduce it locally** instead (e.g. HF
+unreachable, or to rebuild the fp32 bundle the §6 benchmark needs), pass
+`--variant large-v3 --precision both`. The build writes the same
+`models/whisper-large-v3-onnx{,-fp16}/` dirs the download targets, so a later
+`setup_whisper_model.py` / test sees the bundle present and skips the download.
+First build per variant downloads the HF *weights* + builds (~a few min each);
+idempotent after. No manual `onnxruntime-genai-directml` install is needed and the
+OGA fork is never shadowed — the builder runs in its own isolated venv (see §0).
 
 ### Precisions (fp16 default, fp32 opt-out)
 
@@ -469,12 +486,12 @@ ctest --test-dir $ROOT/build -C Release -R MorphizenMLIRLitTests
 
 ### 4f. Per-variant coverage + the PERF line
 
-There is **no separate variant smoke file** — `test_whisper_variant_smoke.py` was
-merged into `test_whisper.py`. §4a (e2e) and §4c (per-phase cosine) are already
-parametrized over **every variant** (fp16) **+ large-v3 (fp32)**, so a variant's
-encoder/prefill/decode correctness and GPU==CPU greedy-token check come for free
-there. Build the variants first (see [Supported variants](#supported-variants)),
-then narrow to one with the test-id substring, e.g.:
+All whisper tests live in `test_whisper.py`. §4a (e2e) and §4c (per-phase cosine)
+are parametrized over **every variant** (fp16) **+ large-v3 (fp32)**, so a
+variant's encoder/prefill/decode correctness and GPU==CPU greedy-token check are
+covered there. Build the variants first (see
+[Supported variants](#supported-variants)), then narrow to one with the test-id
+substring, e.g.:
 
 ```bash
 pytest "test/python/whisper/test_whisper.py::test_e2e_transcription_greedy" -k tiny -v -s
@@ -508,17 +525,22 @@ The `-s` flag surfaces the per-variant `PERF` lines.
 ## 5. Transcribe your own audio (standalone e2e)
 
 `scripts/transcribe_whisper.py` drives the same greedy-decode harness the tests
-use (shared from `test/python/whisper/whisper_infer.py`). It auto-prepares the model
-(§3) on first run, so this one command works from a fresh checkout. Runs
-identically in PowerShell and Git Bash.
+use (shared from `test/python/whisper/whisper_infer.py`). It runs **one** variant
+per invocation — `--variant` (default `large-v3`); it auto-prepares large-v3 (§3)
+on first run, so the default command works from a fresh checkout, while the other
+variants must be built first (§3b). Runs identically in PowerShell and Git Bash.
 
-Transcribe the bundled **jfk.wav** demo clip — if it isn't cached yet, the script
-**downloads it on demand**, so this works on a fresh checkout with nothing
-pre-fetched:
+Transcribe the bundled **jfk.wav** demo clip with the default large-v3 — if the
+clip isn't cached yet, the script **downloads it on demand**, so this works on a
+fresh checkout with nothing pre-fetched:
 
 ```
-python scripts/transcribe_whisper.py test/python/data/whisper/jfk.wav
+python scripts/transcribe_whisper.py test/python/data/whisper/jfk.wav                       # large-v3 (default)
+python scripts/transcribe_whisper.py test/python/data/whisper/jfk.wav --variant tiny        # a specific variant
 ```
+
+It does **not** loop over all variants — pick one with `--variant` (to sweep all,
+call it once per variant in a shell loop).
 
 (Expected: *"And so my fellow Americans, ask not what your country can do for
 you..."*) The LibriSpeech clips fetched by §4 also work, e.g.
@@ -550,14 +572,8 @@ the precision:
 python scripts/transcribe_whisper.py test/python/data/whisper/jfk.wav --fp32
 ```
 
-**Any variant** via `--variant` (default `large-v3`; the others need a local OGA
-build, §3b). This is the standalone way to measure a variant's decode tok/s / RTF
-(the same metrics the §4f `PERF` line prints in CI):
-
-```
-python scripts/transcribe_whisper.py test/python/data/whisper/jfk.wav --variant large-v3-turbo
-python scripts/transcribe_whisper.py test/python/data/whisper/jfk.wav --variant tiny
-```
+With `--metrics` (default on), `--variant <name>` is the standalone way to measure
+a variant's decode tok/s / RTF — the same numbers the §4f `PERF` line prints in CI.
 
 - Audio must be **16 kHz mono**. Resample first if needed (e.g. `ffmpeg -i in.mp3
   -ar 16000 -ac 1 out.wav`). The feature extractor
