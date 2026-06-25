@@ -495,6 +495,11 @@ without the EP, **skips** cleanly. Verified on gfx1151: all five emit the verbat
 JFK quote. (This smoke is now a fast subset of §4a/§4c, which also cover every
 variant; keep it for a quick standalone check.)
 
+It also prints a steady-state **PERF** line per variant (encoder ms / prefill ms /
+decode tok/s / RTF), measured on cached/already-compiled sessions, so the variant
+performance is recorded in CI logs alongside the correctness check. For an
+isolated measurement use `scripts/transcribe_whisper.py --variant <name>` (§5).
+
 > **Both artifact formats are correct on a current EP build.** Default is the
 > in-process bitcode JIT; `HIPEP_ARTIFACT_FORMAT=NATIVE` (per-model DLL) is the
 > escape hatch if the JIT flakes on your host — both produce identical tokens when
@@ -558,6 +563,15 @@ the precision:
 
 ```
 python scripts/transcribe_whisper.py test/python/data/whisper/jfk.wav --fp32
+```
+
+**Any variant** via `--variant` (default `large-v3`; the others need a local OGA
+build, §3b). This is the standalone way to measure a variant's decode tok/s / RTF
+(the same metrics the §4f smoke prints in CI):
+
+```
+python scripts/transcribe_whisper.py test/python/data/whisper/jfk.wav --variant large-v3-turbo
+python scripts/transcribe_whisper.py test/python/data/whisper/jfk.wav --variant tiny
 ```
 
 - Audio must be **16 kHz mono**. Resample first if needed (e.g. `ffmpeg -i in.mp3
