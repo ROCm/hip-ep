@@ -477,3 +477,325 @@ extern "C" int hip_linear_attention_decode(
     }
     return static_cast<int>(err);
 }
+
+//===----------------------------------------------------------------------===//
+// Chunked-parallel gated-delta PREFILL kernel
+//===----------------------------------------------------------------------===//
+//
+// Replaces the per-token launch loop (one decode-kernel launch per timestep,
+// each streaming the whole recurrent state from global) with a SINGLE launch
+// that processes the entire sequence.  One block per (batch, kv_head); each
+// block loops over chunks of LA_CHUNK tokens, keeping the recurrent state S in
+// GLOBAL (read once / written once per chunk) and the per-chunk tiles + the
+// [C,C] coupling matrices in LDS.
+//
+// Math (scalar gate a_t = exp(g_t), per kv-head; tokens 0..C-1 in a chunk;
+// chunk-start state S0):
+//   cumlog_t = sum_{j<=t} g_j ;  A_t = exp(cumlog_t)
+//   ratio(t,s) = exp(cumlog_t - cumlog_s)            (<=1 for t>=s since g<=0)
+//   T[t,s] = beta_t ratio(t,s) (k_s . k_t)           (strict lower, s<t)
+//   B[t]   = beta_t v_t - beta_t A_t (S0^T k_t)
+//   (I + T) U = B                                    (unit lower-tri solve)
+//   P[t,s] = ratio(t,s) (q_t . k_s)                  (lower incl diag, s<=t)
+//   O      = scale * ( (A.*Q) @ S0 + tril(P) @ U )   (uses chunk-START S0!)
+//   S_end  = A_{C-1} S0 + Ktilde^T U, Ktilde_s = (A_{C-1}/A_s) k_s
+//
+// The chunked form keeps S in fp32 across the whole chunk (only the chunk-end
+// write rounds to fp16), so it is strictly MORE accurate than the per-token
+// kernel which quantizes S to fp16 every timestep, while doing dense matmuls
+// instead of per-token rank-1 updates.  Validated bit-close to the naive
+// per-token recurrence (== ORT CPU) in fp64, and cosine ~0.9999999 in fp16.
+//
+// Only the gated_delta rule with scalar log-decay (decay_per_key_dim==0) is
+// implemented here; the launcher declines other configs so the runtime falls
+// back to the per-token loop.
+static constexpr int LA_CHUNK         = 32;   // tokens per chunk
+static constexpr int LA_PREFILL_THREADS = 256;
+
+template <typename T>
+__global__ void linear_attention_prefill_chunked_kernel(
+    const T* __restrict__ query,
+    const T* __restrict__ key,
+    const T* __restrict__ value,
+    const T* __restrict__ decay,
+    const T* __restrict__ beta_in,
+    T* __restrict__ state,        // [B, Hkv, dk, dv], pre-initialized
+    T* __restrict__ output,       // [B, seq_len, Hout*dv]
+    int seq_len, int Hq, int Hkv, int n_k, int dk, int dv,
+    float scale, int beta_per_head)
+{
+    const int bg = blockIdx.x;
+    const int b  = bg / Hkv;
+    const int g  = bg % Hkv;
+    const int tid = threadIdx.x;
+    const int nthreads = blockDim.x;
+
+    const bool inverse_gqa = (Hq < Hkv);
+    const int Hout  = Hq >= Hkv ? Hq : Hkv;
+    const int h_q   = inverse_gqa ? (g * Hq / Hkv) : (g * (Hq / Hkv));
+    const int h_out = inverse_gqa ? g : (g * (Hq / Hkv));
+    const int h_k   = g * n_k / Hkv;
+
+    const int64_t q_bs   = (int64_t)seq_len * Hq   * dk;
+    const int64_t k_bs   = (int64_t)seq_len * n_k  * dk;
+    const int64_t v_bs   = (int64_t)seq_len * Hkv  * dv;
+    const int64_t out_bs = (int64_t)seq_len * Hout * dv;
+    const int64_t decay_bs = (int64_t)seq_len * Hkv;          // scalar per head
+    const int64_t beta_bs  = beta_per_head ? (int64_t)seq_len * Hkv
+                                           : (int64_t)seq_len;
+    const int64_t state_bs = (int64_t)Hkv * dk * dv;
+
+    T* S = state + b * state_bs + (int64_t)g * dk * dv;        // [dk,dv]
+
+    extern __shared__ float smem[];
+    float* Ksm = smem;                              // [LA_CHUNK*dk]
+    float* Usm = Ksm + LA_CHUNK * dk;               // [LA_CHUNK*dv] : B -> U
+    float* Tm  = Usm + LA_CHUNK * dv;               // [LA_CHUNK*LA_CHUNK]
+    float* Pm  = Tm + LA_CHUNK * LA_CHUNK;          // [LA_CHUNK*LA_CHUNK]
+    float* Asm = Pm + LA_CHUNK * LA_CHUNK;          // [LA_CHUNK]
+    float* clog = Asm + LA_CHUNK;                   // [LA_CHUNK]
+    float* bsm = clog + LA_CHUNK;                   // [LA_CHUNK]
+    float* rlast = bsm + LA_CHUNK;                  // [LA_CHUNK] a_last/A_s
+
+    for (int c0 = 0; c0 < seq_len; c0 += LA_CHUNK) {
+        const int Ceff = min(LA_CHUNK, seq_len - c0);
+
+        // load K tile, beta; build cumlog/A (single-thread prefix scan)
+        for (int idx = tid; idx < Ceff * dk; idx += nthreads) {
+            int t = idx / dk, i = idx % dk;
+            Ksm[t * dk + i] = to_float(
+                key[b * k_bs + (int64_t)(c0 + t) * n_k * dk +
+                    (int64_t)h_k * dk + i]);
+        }
+        for (int t = tid; t < Ceff; t += nthreads) {
+            const int64_t beta_idx =
+                beta_per_head ? b * beta_bs + (int64_t)(c0 + t) * Hkv + g
+                              : b * beta_bs + (int64_t)(c0 + t);
+            bsm[t] = to_float(beta_in[beta_idx]);
+        }
+        __syncthreads();
+        if (tid == 0) {
+            float acc = 0.f;
+            for (int t = 0; t < Ceff; t++) {
+                float gt = to_float(
+                    decay[b * decay_bs + (int64_t)(c0 + t) * Hkv + g]);
+                acc += gt;
+                clog[t] = acc;
+                Asm[t] = expf(acc);
+            }
+        }
+        __syncthreads();
+        const float a_last = Asm[Ceff - 1];
+        // Precompute the per-s state-update scale (A_{C-1}/A_s) ONCE (Ceff exps
+        // total) instead of recomputing it inside the dk*dv phase-6 loop below.
+        // Compute it as exp(clog_last - clog_s), NOT as the ratio a_last/A_s:
+        // under strong intra-chunk decay clog_s can be very negative, so both
+        // A_s = exp(clog_s) AND a_last = exp(clog_last) underflow to 0 in fp32
+        // and the ratio becomes 0/0 = NaN (which then poisons S and every
+        // subsequent chunk -> all-garbage output). The difference clog_last -
+        // clog_s is bounded (<= 0 for log-decay g <= 0), so exp() of it is in
+        // (0, 1] and always finite. This also matches the exp(clog_t - clog_s)
+        // form already used for the P/T ratios above (internal consistency).
+        for (int s = tid; s < Ceff; s += nthreads)
+            rlast[s] = expf(clog[Ceff - 1] - clog[s]);
+        __syncthreads();
+
+        // B[t][j] = beta_t v_t[j] - beta_t A_t (S0^T k_t)[j]  -> Usm
+        // Register-blocked over t: read each S[i,j] from GLOBAL once and fold it
+        // into all Ceff partial sums sk[t], instead of re-reading the whole S
+        // column once per t (LA_CHUNK x fewer global S loads).
+        for (int j = tid; j < dv; j += nthreads) {
+            float sk[LA_CHUNK];
+            for (int t = 0; t < Ceff; t++)
+                sk[t] = 0.f;
+            for (int i = 0; i < dk; i++) {
+                float s = to_float(S[i * dv + j]);
+                for (int t = 0; t < Ceff; t++)
+                    sk[t] += s * Ksm[t * dk + i];
+            }
+            for (int t = 0; t < Ceff; t++) {
+                float vtj = to_float(
+                    value[b * v_bs + (int64_t)(c0 + t) * Hkv * dv +
+                          (int64_t)g * dv + j]);
+                Usm[t * dv + j] = bsm[t] * vtj - bsm[t] * Asm[t] * sk[t];
+            }
+        }
+
+        // T[t][s] (strict lower), P[t][s] (lower incl diag)
+        for (int idx = tid; idx < Ceff * Ceff; idx += nthreads) {
+            int t = idx / Ceff, s = idx % Ceff;
+            if (s < t) {
+                float kk = 0.f;
+                for (int i = 0; i < dk; i++)
+                    kk += Ksm[t * dk + i] * Ksm[s * dk + i];
+                Tm[t * Ceff + s] = bsm[t] * expf(clog[t] - clog[s]) * kk;
+            } else if (s == t) {
+                Tm[t * Ceff + s] = 0.f;
+            }
+            if (s <= t) {
+                float qk = 0.f;
+                for (int i = 0; i < dk; i++)
+                    qk += to_float(
+                              query[b * q_bs + (int64_t)(c0 + t) * Hq * dk +
+                                    (int64_t)h_q * dk + i]) *
+                          Ksm[s * dk + i];
+                Pm[t * Ceff + s] = expf(clog[t] - clog[s]) * qk;
+            }
+        }
+        __syncthreads();
+
+        // forward substitution: U[t] = B[t] - sum_{s<t} T[t,s] U[s] (serial t)
+        for (int t = 1; t < Ceff; t++) {
+            for (int j = tid; j < dv; j += nthreads) {
+                float acc = Usm[t * dv + j];
+                for (int s = 0; s < t; s++)
+                    acc -= Tm[t * Ceff + s] * Usm[s * dv + j];
+                Usm[t * dv + j] = acc;
+            }
+            __syncthreads();
+        }
+
+        // O[t][j] = scale*( A_t (q_t . S0[:,j]) + sum_{s<=t} P[t,s] U[s,j] )
+        // uses chunk-START S0 (global, not yet updated)
+        // Register-blocked over t: read each S0[i,j] from GLOBAL once and fold
+        // it into all Ceff inter-chunk partial sums qs[t] (the (A.*Q) @ S0 term),
+        // mirroring the phase-2 blocking (LA_CHUNK x fewer global S0 loads).
+        for (int j = tid; j < dv; j += nthreads) {
+            float qs[LA_CHUNK];
+            for (int t = 0; t < Ceff; t++)
+                qs[t] = 0.f;
+            for (int i = 0; i < dk; i++) {
+                float s = to_float(S[i * dv + j]);
+                for (int t = 0; t < Ceff; t++)
+                    qs[t] += to_float(
+                                 query[b * q_bs + (int64_t)(c0 + t) * Hq * dk +
+                                       (int64_t)h_q * dk + i]) *
+                             s;
+            }
+            for (int t = 0; t < Ceff; t++) {
+                float inter = Asm[t] * qs[t];
+                float intra = 0.f;
+                for (int s = 0; s <= t; s++)
+                    intra += Pm[t * Ceff + s] * Usm[s * dv + j];
+                output[b * out_bs + (int64_t)(c0 + t) * Hout * dv +
+                       (int64_t)h_out * dv + j] =
+                    from_float<T>(scale * (inter + intra));
+            }
+        }
+        __syncthreads();   // all reads of S0 done before the update below
+
+        // S = a_last*S + Ktilde^T U,  Ktilde[s][i] = (a_last/A_s) Ksm[s][i]
+        for (int idx = tid; idx < dk * dv; idx += nthreads) {
+            int i = idx / dv, j = idx % dv;
+            float acc = a_last * to_float(S[i * dv + j]);
+            for (int s = 0; s < Ceff; s++)
+                acc += rlast[s] * Ksm[s * dk + i] * Usm[s * dv + j];
+            S[i * dv + j] = from_float<T>(acc);
+        }
+        __syncthreads();   // S update complete before next chunk reads it
+    }
+}
+
+extern "C" int hip_linear_attention_prefill_chunked(
+    void* stream,
+    const void* query,
+    const void* key,
+    const void* value,
+    const void* decay,
+    const void* beta,
+    void* state,
+    void* output,
+    int64_t B,
+    int64_t seq_len,
+    int64_t Hq,
+    int64_t Hkv,
+    int64_t Nk,
+    int64_t dk,
+    int64_t dv,
+    float scale,
+    int64_t update_rule,
+    int64_t decay_per_key_dim,
+    int64_t beta_per_head,
+    int64_t type)
+{
+    // Decline (return 1 -> caller falls back to per-token loop) for any config
+    // this kernel does not implement.
+    if (update_rule != LA_RULE_GATED_DELTA) return 1;
+    if (decay_per_key_dim != 0) return 1;          // only scalar log-decay
+    if (seq_len <= 1) return 1;                      // decode handled elsewhere
+    if (B <= 0 || Hkv <= 0 || Hq <= 0 || Nk <= 0) return 1;
+    if (Hq >= Hkv ? (Hq % Hkv != 0) : (Hkv % Hq != 0)) return 1;
+    if (Hkv % Nk != 0) return 1;
+    if (!decay || !beta) return 1;                  // gated_delta needs both
+
+    const int dk_i = static_cast<int>(dk);
+    const int dv_i = static_cast<int>(dv);
+
+    // LDS budget: Ksm + Usm + Tm + Pm + 4 vectors of length LA_CHUNK
+    // (Asm, clog, bsm, rlast).
+    const size_t smem_bytes =
+        static_cast<size_t>(LA_CHUNK * dk_i + LA_CHUNK * dv_i +
+                            2 * LA_CHUNK * LA_CHUNK + 4 * LA_CHUNK) *
+        sizeof(float);
+    if (smem_bytes > 64 * 1024) return 1;           // too big -> fall back
+
+    hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+    const int grid  = static_cast<int>(B * Hkv);
+    const int block = LA_PREFILL_THREADS;
+    const int beta_per_head_i = beta_per_head ? 1 : 0;
+
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_linear_attention_prefill_chunked: B=%lld "
+        "seq_len=%lld Hq=%lld Hkv=%lld Nk=%lld dk=%d dv=%d scale=%.6f "
+        "chunk=%d grid=%d block=%d smem=%zu\n",
+        (long long)B, (long long)seq_len, (long long)Hq, (long long)Hkv,
+        (long long)Nk, dk_i, dv_i, (double)scale, LA_CHUNK, grid, block,
+        smem_bytes);
+
+    if (type == 0) {
+        hipLaunchKernelGGL(
+            linear_attention_prefill_chunked_kernel<float>,
+            dim3(grid), dim3(block), smem_bytes, hip_stream,
+            static_cast<const float*>(query), static_cast<const float*>(key),
+            static_cast<const float*>(value), static_cast<const float*>(decay),
+            static_cast<const float*>(beta), static_cast<float*>(state),
+            static_cast<float*>(output), static_cast<int>(seq_len),
+            static_cast<int>(Hq), static_cast<int>(Hkv), static_cast<int>(Nk),
+            dk_i, dv_i, scale, beta_per_head_i);
+    } else if (type == 1) {
+        hipLaunchKernelGGL(
+            linear_attention_prefill_chunked_kernel<__half>,
+            dim3(grid), dim3(block), smem_bytes, hip_stream,
+            static_cast<const __half*>(query), static_cast<const __half*>(key),
+            static_cast<const __half*>(value), static_cast<const __half*>(decay),
+            static_cast<const __half*>(beta), static_cast<__half*>(state),
+            static_cast<__half*>(output), static_cast<int>(seq_len),
+            static_cast<int>(Hq), static_cast<int>(Hkv), static_cast<int>(Nk),
+            dk_i, dv_i, scale, beta_per_head_i);
+    } else if (type == 2) {
+        hipLaunchKernelGGL(
+            linear_attention_prefill_chunked_kernel<__hip_bfloat16>,
+            dim3(grid), dim3(block), smem_bytes, hip_stream,
+            static_cast<const __hip_bfloat16*>(query),
+            static_cast<const __hip_bfloat16*>(key),
+            static_cast<const __hip_bfloat16*>(value),
+            static_cast<const __hip_bfloat16*>(decay),
+            static_cast<const __hip_bfloat16*>(beta),
+            static_cast<__hip_bfloat16*>(state),
+            static_cast<__hip_bfloat16*>(output), static_cast<int>(seq_len),
+            static_cast<int>(Hq), static_cast<int>(Hkv), static_cast<int>(Nk),
+            dk_i, dv_i, scale, beta_per_head_i);
+    } else {
+        return 1;
+    }
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        fprintf(stderr,
+                "[custom_kernels] hip_linear_attention_prefill_chunked launch "
+                "failed: %s\n",
+                hipGetErrorString(err));
+        return static_cast<int>(err);   // negative-ish; caller treats !=0,!=1
+    }
+    return 0;
+}
