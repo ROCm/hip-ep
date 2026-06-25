@@ -23,6 +23,14 @@ from framework.comparator import compare_outputs
 from framework.onnx_utils import make_model_from_nodes
 
 
+# Encoder front-end (n_mels, hidden) for the 80-mel variant family — tiny 80/384,
+# base 80/512, small 80/768, medium 80/1024. large-v3 & turbo are 128/1280, which
+# the dedicated layer0/layer1 tests above already cover. Each variant runs the
+# same two conv layers: layer0 = n_mels->hidden k3 s1, layer1 = hidden->hidden
+# k3 s2 (the only front-end shape that differs across variants).
+VARIANT_ENC_80MEL = [(80, 384), (80, 512), (80, 768), (80, 1024)]
+
+
 def _make_conv1d_model(cin, lin, cout, k, stride, pad, dtype=TensorProto.FLOAT16):
     """Single-op rank-3 Conv model with weight+bias as initializers."""
     np_dtype = np.float16 if dtype == TensorProto.FLOAT16 else np.float32
@@ -86,6 +94,21 @@ class TestWhisperConv1d:
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=2e-3, rtol=1e-2)
 
+    @pytest.mark.parametrize("n_mels,hidden", VARIANT_ENC_80MEL)
+    def test_encoder_frontend_variant(self, model_runner, n_mels, hidden):
+        """Both encoder conv layers for an 80-mel variant (layer0 + layer1)."""
+        rng = np.random.default_rng(hidden)
+        # layer0: n_mels -> hidden, k3 s1
+        m0 = _make_conv1d_model(cin=n_mels, lin=3000, cout=hidden, k=3, stride=1, pad=1)
+        x0 = (rng.standard_normal((1, n_mels, 3000)) * 0.1).astype(np.float16)
+        a0, e0 = model_runner.run_sample(m0, [x0])
+        compare_outputs(a0, e0, atol=5e-3, rtol=1e-2)
+        # layer1: hidden -> hidden, k3 s2
+        m1 = _make_conv1d_model(cin=hidden, lin=3000, cout=hidden, k=3, stride=2, pad=1)
+        x1 = (rng.standard_normal((1, hidden, 3000)) * 0.1).astype(np.float16)
+        a1, e1 = model_runner.run_sample(m1, [x1])
+        compare_outputs(a1, e1, atol=5e-3, rtol=1e-2)
+
 
 class TestWhisperConv1dFp32:
     """fp32 variants of the whisper encoder Conv shapes.
@@ -115,3 +138,32 @@ class TestWhisperConv1dFp32:
         x = (rng.standard_normal((1, 1280, 3000)) * 0.1).astype(np.float32)
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-4, rtol=1e-4)
+
+    @pytest.mark.parametrize("n_mels,hidden", VARIANT_ENC_80MEL)
+    def test_encoder_frontend_variant_fp32(self, model_runner, n_mels, hidden):
+        """Both encoder conv layers for an 80-mel variant in fp32."""
+        rng = np.random.default_rng(hidden)
+        m0 = _make_conv1d_model(
+            cin=n_mels,
+            lin=3000,
+            cout=hidden,
+            k=3,
+            stride=1,
+            pad=1,
+            dtype=TensorProto.FLOAT,
+        )
+        x0 = (rng.standard_normal((1, n_mels, 3000)) * 0.1).astype(np.float32)
+        a0, e0 = model_runner.run_sample(m0, [x0])
+        compare_outputs(a0, e0, atol=1e-4, rtol=1e-4)
+        m1 = _make_conv1d_model(
+            cin=hidden,
+            lin=3000,
+            cout=hidden,
+            k=3,
+            stride=2,
+            pad=1,
+            dtype=TensorProto.FLOAT,
+        )
+        x1 = (rng.standard_normal((1, hidden, 3000)) * 0.1).astype(np.float32)
+        a1, e1 = model_runner.run_sample(m1, [x1])
+        compare_outputs(a1, e1, atol=1e-4, rtol=1e-4)
