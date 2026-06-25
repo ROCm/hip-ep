@@ -558,7 +558,7 @@ jobs:
 
           # Smoke: the per-arch kernel DLL must be present in staging/bin/
           # for the gpu-test job to load it. Failure here means the install
-          # rule in 3rd-party/custom_kernels/CMakeLists.txt regressed.
+          # rule in lib/Runtime/Kernels/CMakeLists.txt regressed.
           KERNEL_DLL="staging/bin/custom_kernels_gfx1151.dll"
           if [ ! -f "$KERNEL_DLL" ]; then
             echo "ERROR: $KERNEL_DLL missing from install (HIP_ARCHITECTURES=gfx1151)"

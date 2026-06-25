@@ -3,7 +3,15 @@
 # ** Licensed under the MIT License.
 ##
 
-# hip_custom_kernels - Custom HIP kernels for ops without ROCm library support
+# Custom HIP kernels for ops without ROCm library support.
+#
+# This tree lives under lib/Runtime/ because the kernels are the
+# GPU-architecture-dependent half of the runtime (the EP/compiler proper are
+# arch-independent). The build artifacts intentionally keep the
+# custom_kernels_<arch> name regardless of the directory: the EP's JIT
+# arch-probing (LlvmIrJit) and the CI co-location checks key on that exact
+# filename, so the output names are decoupled from the directory name -- do not
+# rename the targets to match the folder.
 #
 # Per-arch shared libraries: one SHARED library per arch in HIP_ARCHITECTURES,
 # each carrying a single fatbin slice. The EP DLL dlopens the matching variant
@@ -92,6 +100,6 @@ endforeach()
 set(HIP_CUSTOM_KERNELS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include" PARENT_SCOPE)
 
 # Header is intentionally NOT installed: the EP-side build always uses the
-# in-tree header (3rd-party/custom_kernels/include/hip_custom_kernels.h) so
+# in-tree header (lib/Runtime/Kernels/include/hip_custom_kernels.h) so
 # the host-side declarations stay in lockstep with the kernel TUs that
 # implement them.

@@ -140,7 +140,7 @@ HIP_KERNEL_API int hip_elementwise_where(
  *
  * Per-op launchers for the 5 ONNX unary ops added for the Qwen3.5 vision
  * model. All five share a single .hip translation unit
- * (3rd-party/custom_kernels/hip/elementwise_unary_kernel.hip).
+ * (lib/Runtime/Kernels/hip/elementwise_unary_kernel.hip).
  *
  * Supported hip_dtype (per op, may differ):
  *   Neg/Sign  : FLOAT16, INT32, INT64 (+ FLOAT32 for free)
@@ -196,7 +196,7 @@ HIP_KERNEL_API int hip_elementwise_not(
  * =========================================================================
  *
  * Same-shape binary elementwise ops. All eight share one translation unit:
- * 3rd-party/custom_kernels/hip/elementwise_binary_kernel.hip.
+ * lib/Runtime/Kernels/hip/elementwise_binary_kernel.hip.
  *
  * Mul / Add / Min / Max are reached from wrap_miopenOpTensor when MIOpen's
  * miopenOpTensor rejects the element type (notably INT32/INT64). Float

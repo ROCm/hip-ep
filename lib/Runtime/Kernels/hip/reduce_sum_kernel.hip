@@ -512,7 +512,7 @@ __device__ inline float reduce_op_max<float>(float a, float b) {
   // Use the <cmath> macro instead of std::numeric_limits<float>::quiet_NaN():
   // the latter is an unannotated `constexpr` member function, and the host
   // build for MSVC 14.51 disables clang's implicit constexpr->__host__ __device__
-  // promotion (see 3rd-party/custom_kernels/cmake/hip_utils.cmake), which
+  // promotion (see lib/Runtime/Kernels/cmake/hip_utils.cmake), which
   // would otherwise make this call host-only and break device compilation.
   return (isnan(a) || isnan(b)) ? NAN : (a > b ? a : b);
 }
