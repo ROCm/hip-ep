@@ -420,19 +420,21 @@ is unreachable.
 reference of the same model). The per-op numeric tests (§4d) and MLIR LIT (§4e)
 are excluded here — they validate single ops / IR shapes, not whole-model accuracy.
 
-| Test (§) | Asserts | Models covered | Precision |
-|---|---|---|---|
-| `test_encoder_correctness` (4c) | encoder hidden cosine, GPU vs CPU | **all 6 variants** | fp16 (all) + fp32 (large-v3) |
-| `test_decoder_prefill_correctness` (4c) | prefill logits cosine | **all 6 variants** | fp16 (all) + fp32 (large-v3) |
-| `test_decoder_decode_correctness` (4c) | per-step decode logits cosine | **all 6 variants** | fp16 (all) + fp32 (large-v3) |
-| `test_e2e_transcription_greedy` (4a) | greedy tokens GPU == CPU (verbatim) | **all 6 variants** | fp16 (all) + fp32 (large-v3) |
-| `test_librispeech_gpu_vs_cpu` (4b) | 5 clips, GPU == CPU verbatim | **all 6 variants** | fp16 |
-| `test_long_30s_gpu_vs_cpu` (4b) | 30 s clip, GPU == CPU | **all 6 variants** | fp16 |
-| `test_librispeech_wer` (4b) | 5 clips, WER vs ground truth | large-v3 (see §4b) | fp16 *or* fp32 (default) |
+| Test (§) | Asserts | Models covered |
+|---|---|---|
+| `test_encoder_correctness` (4c) | encoder hidden cosine, GPU vs CPU | **all 6 variants** |
+| `test_decoder_prefill_correctness` (4c) | prefill logits cosine | **all 6 variants** |
+| `test_decoder_decode_correctness` (4c) | per-step decode logits cosine | **all 6 variants** |
+| `test_e2e_transcription_greedy` (4a) | greedy tokens GPU == CPU (verbatim) | **all 6 variants** |
+| `test_librispeech_gpu_vs_cpu` (4b) | 5 clips, GPU == CPU verbatim | **all 6 variants** |
+| `test_long_30s_gpu_vs_cpu` (4b) | 30 s clip, GPU == CPU | **all 6 variants** |
+| `test_librispeech_wer` (4b) | 5 clips, WER vs ground truth | large-v3 (see §4b) |
 
-"All 6 variants" = large-v3, large-v3-turbo, tiny, base, small, medium (fp16 for
-every one; large-v3 additionally fp32). `test_perf_decode_tps` (§6) is a perf
-test, not listed here. The per-variant decode tok/s / RTF come from the `PERF`
+"All 6 variants" = large-v3, large-v3-turbo, tiny, base, small, medium.
+**Precision:** every variant runs **fp16** (the default); large-v3 *additionally*
+runs **fp32** in the cosine / e2e tests (§4a/§4c) — see each subsection for the
+exact legs. `test_perf_decode_tps` (§6) is a perf test, not listed here. The
+per-variant decode tok/s / RTF come from the `PERF`
 line `test_e2e_transcription_greedy` prints (§4f).
 
 ### 4a. End-to-end transcription (the headline)
