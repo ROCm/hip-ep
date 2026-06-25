@@ -656,9 +656,16 @@ def decode_text(tokens, tokenizer_id="openai/whisper-large-v3", eot=EOT):
     return tok.decode(body, skip_special_tokens=True).strip()
 
 
-def load_audio_features(audio_path):
-    """Load a 16 kHz wav -> fp32 log-mel ``audio_features`` (Whisper's 30 s window)."""
-    return make_whisper_inputs(pathlib.Path(audio_path), CFG)["audio_features"].astype(
+def load_audio_features(audio_path, variant=None):
+    """Load a 16 kHz wav -> fp32 log-mel ``audio_features`` (Whisper's 30 s window).
+
+    ``variant`` (None → large-v3) selects the mel count: 80 for tiny/base/small/
+    medium, 128 for large-v3/turbo. make_whisper_inputs picks the matching feature
+    extractor from ``cfg.n_mels``, so a wrong cfg would build the wrong channel
+    count and the encoder Conv would reject it.
+    """
+    cfg = variant.cfg if variant is not None else CFG
+    return make_whisper_inputs(pathlib.Path(audio_path), cfg)["audio_features"].astype(
         np.float32
     )
 

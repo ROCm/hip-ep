@@ -77,11 +77,24 @@ def test_variant_smoke(variant_name):
     gc.collect()
 
     # GPU under test. make_morphizen_session_factory raises if the EP is absent.
+    # Cache sessions so the compile/warmup run and the timed run reuse the SAME
+    # sessions (each MorphiZen session compiles its ONNX at creation; without the
+    # cache the timed run would recompile and the perf numbers would be cold).
     try:
-        mz_factory = whisper_infer.make_morphizen_session_factory(REPO_ROOT, model_dir)
+        base_factory = whisper_infer.make_morphizen_session_factory(
+            REPO_ROOT, model_dir
+        )
     except RuntimeError as e:
         pytest.skip(f"MorphiZen EP unavailable: {e}")
+    _session_cache = {}
 
+    def mz_factory(name):
+        if name not in _session_cache:
+            _session_cache[name] = base_factory(name)
+        return _session_cache[name]
+
+    # First run: compiles the graphs (JIT) + proves GPU dispatch; also primes the
+    # cached sessions so the timed run below is steady-state.
     with whisper_infer.CaptureFD() as cap:
         mz_tokens = whisper_infer.greedy_decode_morphizen(
             mz_factory, audio, variant=var, dtype=dtype
@@ -96,4 +109,24 @@ def test_variant_smoke(variant_name):
     assert mz_tokens == cpu_tokens, (
         f"{variant_name}: EP greedy tokens != CPU greedy tokens\n"
         f"  cpu_len={len(cpu_tokens)} gpu_len={len(mz_tokens)}"
+    )
+
+    # ── Perf metrics (steady-state) ──────────────────────────────────────────
+    # Re-run on the cached (already-compiled) sessions with timing on, so CI logs
+    # carry a per-variant performance line alongside the correctness check. This
+    # is the reproducible in-repo source of the variant perf numbers (also
+    # measurable standalone via `scripts/transcribe_whisper.py --variant <name>`).
+    # decode tok/s = decode_steps / decode_loop_wall; RTF = total compute / audio.
+    timings = {}
+    whisper_infer.greedy_decode_morphizen(
+        mz_factory, audio, variant=var, dtype=dtype, timings=timings
+    )
+    audio_s = whisper_infer.audio_duration_s(_AUDIO)
+    enc, prefill = timings["enc_ms"], timings["prefill_ms"]
+    decode, n = timings["decode_ms"], timings["n_decode_steps"]
+    tps = n / (decode / 1e3) if decode > 0 else 0.0
+    rtf = ((enc + prefill + decode) / 1e3) / audio_s if audio_s > 0 else 0.0
+    print(
+        f"[{variant_name}] PERF (fp16, gfx-GPU): encoder={enc:.0f}ms "
+        f"prefill={prefill:.0f}ms decode={tps:.1f}tok/s ({n} steps) RTF={rtf:.3f}"
     )
