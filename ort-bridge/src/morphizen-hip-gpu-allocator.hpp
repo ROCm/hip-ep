@@ -15,7 +15,6 @@
 
 #include <array>
 #include <cstddef>
-#include <map>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -25,51 +24,75 @@ namespace morphizen {
 // Fixed size-class boundaries (bytes). A request of N bytes is served from the
 // first class whose capacity is >= N, and the buffer is allocated at the full
 // class capacity so any later request mapping to the same class can reuse it.
-// Requests larger than the last class are allocated at their exact size and
-// pooled best-fit in a SEPARATE large free list that is capped at
-// kMaxLargeFreeBuffers entries; on a cold miss the smallest pooled large
-// buffers are evicted (freed to the driver) before a new one is allocated, so
-// peak memory stays bounded even when a model grows its largest transient
-// incrementally — see AllocImpl in the .cpp.
-inline constexpr size_t kSizeClasses[] = {
-    1ull * 1024,         // 1 KB
-    2ull * 1024,         // 2 KB
-    4ull * 1024,         // 4 KB
-    6ull * 1024,         // 6 KB
-    8ull * 1024,         // 8 KB
-    12ull * 1024,        // 12 KB
-    16ull * 1024,        // 16 KB
-    24ull * 1024,        // 24 KB
-    32ull * 1024,        // 32 KB
-    48ull * 1024,        // 48 KB
-    64ull * 1024,        // 64 KB
-    96ull * 1024,        // 96 KB
-    128ull * 1024,       // 128 KB
-    192ull * 1024,       // 192 KB
-    256ull * 1024,       // 256 KB
-    384ull * 1024,       // 384 KB
-    512ull * 1024,       // 512 KB
-    768ull * 1024,       // 768 KB
-    1ull * 1024 * 1024,  // 1 MB
-    1536ull * 1024,      // 1.5 MB
-    2ull * 1024 * 1024,  // 2 MB
-    3ull * 1024 * 1024,  // 3 MB
-    4ull * 1024 * 1024,  // 4 MB
-    6ull * 1024 * 1024,  // 6 MB
-    8ull * 1024 * 1024,  // 8 MB
-    12ull * 1024 * 1024, // 12 MB
-    16ull * 1024 * 1024, // 16 MB
-};
-inline constexpr size_t kNumSizeClasses =
-    sizeof(kSizeClasses) / sizeof(kSizeClasses[0]);
+// Requests larger than the last class (> 4 MB) are NOT pooled: they are
+// allocated at their exact size and released straight back to the driver in
+// FreeImpl, so a one-off huge transient can never pin memory in a free list.
+//
+// The class boundaries are generated at compile time in three tiers, with the
+// tier edges de-duplicated where they meet:
+//   [128 B, 1 KB] : powers of two                  -> 128, 256, 512, 1024
+//   (1 KB, 1 MB]  : 4 steps per octave (3 inserts) -> base*{1, 1.25, 1.5, 1.75}
+//   (1 MB, 4 MB]  : 16 steps per octave (15 inserts) -> base*{1 + k/16}
+// This gives fine granularity for the small/medium transients a model churns
+// every Run while keeping the total class count modest.
+namespace detail {
 
-// Upper bound on the number of buffers kept in the large free list (those
-// bigger than the largest size class). Large buffers are expensive to keep
-// pinned, so when a cold miss would grow the driver-side footprint we evict the
-// smallest pooled large buffers down to this cap first. Small enough to keep
-// peak memory bounded under an incrementally-growing transient, large enough to
-// retain useful reuse across the few distinct large shapes a model exercises.
-inline constexpr size_t kMaxLargeFreeBuffers = 4;
+// Compile-time-built table of size classes. Capacity (128) is comfortably
+// above the ~76 classes the three tiers below actually produce; `count` is the
+// number of valid leading entries in `data`.
+struct SizeClassTable {
+  size_t data[128];
+  size_t count;
+  // De-duplicating append (tier edges 1 KB and 1 MB are produced twice). A
+  // constexpr member function is used instead of a local lambda because
+  // defining a lambda variable inside a constexpr function is not allowed
+  // before C++23.
+  constexpr void Add(size_t v) {
+    if (count == 0 || data[count - 1] != v) {
+      data[count++] = v;
+    }
+  }
+};
+
+constexpr SizeClassTable BuildSizeClasses() {
+  SizeClassTable t{};
+  t.count = 0;
+  constexpr size_t kKB = 1024;
+  constexpr size_t kMB = 1024 * 1024;
+  // Tier 1: 128 B .. 1 KB, doubling.
+  for (size_t v = 128; v <= kKB; v *= 2) {
+    t.Add(v);
+  }
+  // Tier 2: 1 KB .. 1 MB, quarter steps within each octave (3 inserts/octave).
+  for (size_t base = kKB; base < kMB; base *= 2) {
+    for (size_t k = 0; k < 4; ++k) {
+      t.Add(base + base * k / 4);
+    }
+  }
+  t.Add(kMB);
+  // Tier 3: 1 MB .. 4 MB, sixteenth steps per octave (15 inserts/octave).
+  for (size_t base = kMB; base < 4 * kMB; base *= 2) {
+    for (size_t k = 0; k < 16; ++k) {
+      t.Add(base + base * k / 16);
+    }
+  }
+  t.Add(4 * kMB);
+  // Tier4: 4 MB .. 16 MB, sixty-fourth steps per octave (31 inserts/octave).
+  for (size_t base = 4 * kMB; base < 16 * kMB; base *= 2) {
+    for (size_t k = 0; k < 32; ++k) {
+      t.Add(base + base * k / 32);
+    }
+  }
+  t.Add(16 * kMB);
+  return t;
+}
+
+inline constexpr SizeClassTable kSizeClassTable = BuildSizeClasses();
+
+} // namespace detail
+
+inline constexpr const size_t* kSizeClasses = detail::kSizeClassTable.data;
+inline constexpr size_t kNumSizeClasses = detail::kSizeClassTable.count;
 
 // hipHostMalloc(Mapped|Coherent) backed OrtAllocator. One instance is created
 // per OrtMemoryInfo registered with OrtEpDevice (typically one DEFAULT GPU
@@ -106,40 +129,32 @@ private:
   // every buffer within a class is interchangeable and any later request
   // mapping to the same class reuses it (100% hit rate after warmup, with at
   // most a few distinct class sizes regardless of how many dynamic shapes the
-  // model sees). Requests larger than the last class are allocated at their
-  // exact size and recycled best-fit (the smallest free large buffer that is
-  // >= the new request is reused). Free never returns memory to the driver
-  // (except large-buffer eviction below); everything is released wholesale in
-  // the destructor — matching the project's per-session "grow-on-demand, never
-  // shrink, free at cleanup" memory contract.
+  // model sees). Pooled (<= 4 MB) buffers are never returned to the driver in
+  // Free; they are released wholesale in the destructor — matching the
+  // project's per-session "grow-on-demand, never shrink, free at cleanup"
+  // memory contract.
   //
-  // The large free list is the one exception to "never shrink": it is capped at
-  // kMaxLargeFreeBuffers, and on a cold miss for a large request AllocImpl
-  // evicts the smallest pooled large buffers (freeing them to the driver) down
-  // to the cap before allocating the new one. This keeps reuse performance for
-  // the handful of distinct large shapes a model actually uses while preventing
-  // the working set from ballooning when a model grows its largest transient a
-  // little each Run (otherwise each slightly-larger request would allocate
-  // fresh while every prior near-size buffer stayed pinned in the free list).
+  // Requests larger than the largest size class (> 4 MB) are NOT pooled: they
+  // are allocated at their exact size and released straight back to the driver
+  // in FreeImpl. A model's largest transients are few and shape-specific, so
+  // pooling them buys little reuse while risking an unbounded pinned working
+  // set when a model grows its largest transient a little each Run. Treating
+  // them as one-shot allocations keeps peak memory bounded with no eviction
+  // bookkeeping.
   //
   // Reuse needs no per-handout stream sync: ORT only calls Free after Run
   // returns, and allocator-mode inference_compute ends with a full
   // hipdnn_ep_stream_sync, so any GPU work touching a freed buffer has
-  // already drained before it can be handed back out (or evicted).
+  // already drained before it can be handed back out.
   std::mutex pool_mutex_;
   // Index i holds reusable buffers each exactly kSizeClasses[i] bytes.
   std::array<std::vector<void*>, kNumSizeClasses> free_lists_;
-  // Freed buffers larger than the largest size class, keyed by their exact
-  // allocated byte size. Reuse is best-fit via lower_bound(request); eviction
-  // takes the smallest via begin(). Capped at kMaxLargeFreeBuffers.
-  std::multimap<size_t, void*> large_free_;
   // Every pointer hipHostMalloc'd by this allocator that is still outstanding
   // -> its allocated byte size (the rounded-up class capacity for pooled
   // buffers, the exact size for large ones). Pooled buffers stay tracked for
   // the allocator's lifetime (Free only moves them onto a free list) so the
-  // destructor can release them and AllocImpl can recover an evicted large
-  // buffer's size; an evicted large buffer is erased from this map in AllocImpl
-  // when it is freed to the driver.
+  // destructor can release them; a large buffer is erased from this map in
+  // FreeImpl when it is freed back to the driver.
   std::unordered_map<void*, size_t> ptr_to_size_;
 
   const OrtMemoryInfo* memory_info_;
