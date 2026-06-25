@@ -31,8 +31,7 @@ import pytest
 from onnx import TensorProto, helper
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-# AMDGPU umbrella EP (loads hipep-backend.dll → hipep.dll underneath).
-EP_DLL = REPO_ROOT / "install" / "dist" / "bin" / "amdgpu-ep.dll"
+EP_DLL = REPO_ROOT / "install" / "dist" / "bin" / "onnxruntime_morphizen_ep.dll"
 
 # Symbolic name carried by the output's data-dependent dim. Intentionally on no
 # input -- that is the whole point of the repro.
@@ -75,16 +74,16 @@ _WORKER = textwrap.dedent(
 
     model_path, ep_dll = sys.argv[1], sys.argv[2]
 
-    ort.register_execution_provider_library("AMDGPUExecutionProvider", ep_dll)
+    ort.register_execution_provider_library("MorphiZenExecutionProvider", ep_dll)
     from onnxruntime.capi._pybind_state import get_ep_devices
     devices = [d for d in get_ep_devices()
-               if d.ep_name == "AMDGPUExecutionProvider"]
+               if d.ep_name == "MorphiZenExecutionProvider"]
     if not devices:
         print("NO_EP_DEVICES", file=sys.stderr)
         sys.exit(3)
 
     so = ort.SessionOptions()
-    so.add_provider_for_devices(devices, {"profile": "llm"})
+    so.add_provider_for_devices(devices, {})
     sess = ort.InferenceSession(model_path, sess_options=so)
     print("SESSION_CREATED_OK")
     """
