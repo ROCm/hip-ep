@@ -401,20 +401,19 @@ is unreachable.
 Runs the full pipeline on GPU and asserts the transcription matches the ORT CPU
 fp32 reference **verbatim**:
 
-Clear the compiled-model cache to force a real compile, then run the test
-(parametrized across fp16 + fp32 — split per precision on tight memory, see §4c):
+The e2e test is parametrized over (variant, precision): fp16 for every variant +
+fp32 for large-v3. Run the whole set, or one combo via the test-id substring:
 
 ```
-# PowerShell:  Remove-Item "$env:TEMP\morphizen_mlir_*" -ErrorAction Ignore
-# Git Bash:    rm -f "$TEMP"/morphizen_mlir_*
-pytest test/python/whisper/test_whisper.py::test_e2e_transcription_greedy -k fp16 -v -s
-pytest test/python/whisper/test_whisper.py::test_e2e_transcription_greedy -k fp32 -v -s
+pytest test/python/whisper/test_whisper.py::test_e2e_transcription_greedy -v -s
+# one combo:
+pytest test/python/whisper/test_whisper.py::test_e2e_transcription_greedy -k large-v3-fp16 -v -s
 ```
 
-Expected: both the GPU and CPU runs print
-*"And so my fellow Americans, ask not what your country can do for you, ask what
-you can do for your country."* and the test **passes**. (First run is slow — it
-pays the MLIR compile of the encoder + both decoder variants.)
+Expected: each (variant, precision) GPU run matches its CPU greedy tokens; large-v3
+prints *"And so my fellow Americans, ask not what your country can do for you, ask
+what you can do for your country."* and the test **passes**. (First run per model
+is slow — it pays the MLIR compile of the encoder + both decoder variants.)
 
 ### 4b. Multi-clip correctness + accuracy (WER)
 
@@ -425,35 +424,42 @@ verbatim** *and* **WER vs ground truth** within threshold:
 pytest test/python/whisper/test_whisper.py -k "librispeech or long_30s" -v -s
 ```
 
-### 4c. Per-step correctness
+### 4c. Per-phase correctness (all variants)
 
-These three tests are parametrized across **both** precisions (`fp16` + `fp32`).
-On memory-constrained machines, run each precision in its **own pytest process**
-(`-k "... and fp16"`, then `-k "... and fp32"`) so the first precision's GPU
-memory is fully reclaimed before the second starts:
+The three phase tests (encoder / prefill / decode cosine) and the e2e test are
+parametrized over **(variant, precision)**: **fp16 across every variant** (turbo +
+tiny/base/small/medium + large-v3) **plus a single fp32 leg on large-v3**. Run the
+whole matrix in one process:
 
 ```bash
 SEL="encoder_correctness or decoder_prefill_correctness or decoder_decode_correctness"
-pytest test/python/whisper/test_whisper.py -k "($SEL) and fp16" -v -s
-pytest test/python/whisper/test_whisper.py -k "($SEL) and fp32" -v -s
+pytest test/python/whisper/test_whisper.py -k "$SEL" -v -s
 ```
 
-> **Why split by precision?** The MorphiZen runtime keeps two **process-global**
-> GPU caches that are NOT freed on `InferenceSession` destruction — the transient
-> GPU buffer pool (`g_gpu_buffer_pool`) and the hipBLASLt autotune cache
-> (`g_gemm_algo_cache`) — they live until the process exits. Running fp16 + fp32
-> in one process therefore accumulates both precisions' GPU footprint (the fp32
-> constants blob is ~2× the fp16 one). On a 32 GB UMA part this drives the peak
-> high; splitting into one process per precision caps it at a single precision's
-> footprint. To run both in one process anyway (plenty of memory), drop the
-> `and fp16`/`and fp32` filters.
+…or narrow to one variant / precision with the test-id substrings (e.g.
+`-k "$SEL and tiny-fp16"`, `-k "$SEL and large-v3-fp32"`).
+
+> **No memory split needed.** A previous version of this guide told you to run
+> fp16 and fp32 in separate processes "to save memory." That was based on a
+> misdiagnosis: the `0xc0000005` crashes were the in-process bitcode-JIT cross-CRT
+> heap corruption (fixed by the Tier-1 `llvm-install` build in §1 + the
+> malloc/stdio pinning in `LlvmIrJit.cpp`), **not** GPU-memory exhaustion. The
+> dev/CI host is 128 GB; the full matrix runs in one process. (Two runtime caches
+> do survive session teardown — `g_gpu_buffer_pool`, `g_gemm_algo_cache` — but a
+> few GB is immaterial here.) If the in-process JIT ever flakes on your box, set
+> `HIPEP_ARTIFACT_FORMAT=NATIVE` (§4a escape hatch) — never split by precision.
 
 ### 4d. Per-op numeric tests (vs ORT CPU)
 
-Conv1d, attention, and LayerNorm, both fp16 and fp32 (one line):
+Conv1d, attention, and LayerNorm — **fp16 + fp32 across every variant's shapes**
+(attention parametrizes d_model/num_heads per variant; conv1d covers each
+variant's encoder front-end). One line — note `profile=llm` is the ONLY provider
+option the AMDGPU umbrella accepts (do NOT pass `config_file=`, the umbrella
+rejects unknown provider options). `THEROCK_DIST` must be set so the numeric
+backend can find the ROCm runtime DLLs:
 
 ```
-pytest test/numeric/tests/test_whisper_encoder_attention.py test/numeric/tests/test_whisper_cross_attention.py test/numeric/tests/test_whisper_self_attention.py test/numeric/tests/test_conv1d.py test/numeric/tests/test_layer_norm.py --backend ort_ep --ep-name AMDGPUExecutionProvider --ep-dll $ROOT/local/bin/amdgpu-ep.dll --ep-option profile=llm --ep-option config_file=$ROOT/local/bin/morphizen_config.json -v
+pytest test/numeric/tests/test_whisper_encoder_attention.py test/numeric/tests/test_whisper_cross_attention.py test/numeric/tests/test_whisper_self_attention.py test/numeric/tests/test_conv1d.py test/numeric/tests/test_layer_norm.py --backend ort_ep --ep-name AMDGPUExecutionProvider --ep-dll $ROOT/local/bin/amdgpu-ep.dll --ep-option profile=llm -v
 ```
 
 ### 4e. MLIR conversion (LIT)
@@ -485,13 +491,17 @@ pytest test/python/whisper/test_whisper_variant_smoke.py -k tiny -v -s
 
 Each variant prints its GPU transcription and **passes** when it matches the CPU
 reference token-for-token. A variant that has not been built/prepared, or a host
-without the EP, **skips** cleanly. Verified on gfx1151 (bitcode path): all five
-emit the verbatim JFK quote.
+without the EP, **skips** cleanly. Verified on gfx1151: all five emit the verbatim
+JFK quote. (This smoke is now a fast subset of §4a/§4c, which also cover every
+variant; keep it for a quick standalone check.)
 
-> **Run on the default bitcode path** — do NOT set `HIPEP_ARTIFACT_FORMAT=NATIVE`.
-> The opt-in NATIVE (per-model-DLL) path predates the bitcode-JIT fix and can mis-
-> decode (e.g. tiny emits EOT immediately); the default bitcode JIT is the correct,
-> validated path.
+> **Both artifact formats are correct on a current EP build.** Default is the
+> in-process bitcode JIT; `HIPEP_ARTIFACT_FORMAT=NATIVE` (per-model DLL) is the
+> escape hatch if the JIT flakes on your host — both produce identical tokens when
+> the EP is built against a Tier-1 `llvm-install` (§1). (An *old/stale* EP build's
+> NATIVE path could mis-decode because the per-model DLL embeds the runtime bitcode
+> at build time — that was a stale-build artifact, not a NATIVE-vs-bitcode
+> correctness difference. Rebuild if you see it.)
 
 ### Run everything at once
 
@@ -500,10 +510,8 @@ pytest test/python/whisper/test_whisper.py -v -s                  # large-v3 ful
 pytest test/python/whisper/test_whisper_variant_smoke.py -v -s    # turbo + small sizes (§4f)
 ```
 
-On a 32 GB UMA machine, prefer running the precision-parametrized tests one
-precision at a time (see §4c) instead of the all-at-once `test_whisper.py` command.
-The variant smoke test is fp16-only and lightweight (the small models are tiny),
-so it runs comfortably in one process.
+The full `test_whisper.py` matrix (all variants fp16 + large-v3 fp32) runs in a
+single process on the 128 GB dev/CI host — no per-precision split needed (see §4c).
 
 ---
 
