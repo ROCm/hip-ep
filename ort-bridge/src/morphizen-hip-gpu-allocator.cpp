@@ -116,8 +116,8 @@ void* ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator* this_,
   const int cls = SizeClassIndex(size);
 
   // Fast path: reuse a pooled buffer with no driver call. Only requests that
-  // map to a size class (<= 4 MB) are pooled; any buffer in that class fits
-  // (they are all the class capacity). Large requests (cls < 0, > 4 MB) are
+  // map to a size class (<= 16 MB) are pooled; any buffer in that class fits
+  // (they are all the class capacity). Large requests (cls < 0, > 16 MB) are
   // never pooled — they are allocated at exact size and released straight back
   // to the driver in FreeImpl, so a one-off huge transient can't pin memory.
   if (cls >= 0) {
@@ -181,14 +181,14 @@ void ORT_API_CALL HipGpuAllocator::FreeImpl(OrtAllocator* this_, void* p) {
       // SizeClassIndex recovers the class) and the exact size for large ones.
       const int cls = SizeClassIndex(it->second);
       if (cls >= 0) {
-        // Pooled small/medium buffer (<= 4 MB): return to its free list for
+        // Pooled small/medium buffer (<= 16 MB): return to its free list for
         // reuse; do NOT release to the driver here. Stays tracked in
         // ptr_to_size_ so the destructor can release it. Safe to reuse without
         // a stream sync: see the pool comment in the header.
         self->free_lists_[cls].push_back(p);
         return;
       }
-      // Large buffer (> 4 MB): never pooled. Stop tracking it and release it
+      // Large buffer (> 16 MB): never pooled. Stop tracking it and release it
       // to the driver below (outside the lock — hipHostFree is heavyweight).
       self->ptr_to_size_.erase(it);
     }
