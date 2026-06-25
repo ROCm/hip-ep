@@ -27,7 +27,7 @@
 // (`#define _CLANG_BUILTIN2(NAME) ...` with no `#ifndef` guard), so empty
 // pre-definitions no longer survive long enough to suppress the overload
 // emission.  Force-included from `_hip_compile_sources` in
-// `3rd-party/custom_kernels/cmake/hip_utils.cmake` (Windows only).
+// `lib/Runtime/Kernels/cmake/hip_utils.cmake` (Windows only).
 
 #ifndef HIPDNN_EP_MSVC_HIP_CMATH_WORKAROUND_H
 #define HIPDNN_EP_MSVC_HIP_CMATH_WORKAROUND_H
