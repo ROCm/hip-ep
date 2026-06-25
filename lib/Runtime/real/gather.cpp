@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <new>
 #include <vector>
 
 int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
@@ -80,65 +81,87 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
         return -1;
       }
 
-      std::vector<char> host_data(static_cast<size_t>(data_bytes));
-      std::vector<char> host_output(static_cast<size_t>(output_bytes));
-      // ORT CreateTensor reads indices with native element alignment; staging
-      // int32/int64 in typed vectors avoids UB from std::vector<char>::data().
+      std::vector<char> host_data;
+      std::vector<char> host_output;
       std::vector<int64_t> host_indices_i64;
       std::vector<int32_t> host_indices_i32;
       std::vector<char> host_indices_raw;
       void *indices_host = nullptr;
-      if (indices_element_size_bytes == 8) {
-        host_indices_i64.resize(
-            static_cast<size_t>(indices_num_elements));
-        indices_host = host_indices_i64.data();
-      } else if (indices_element_size_bytes == 4) {
-        host_indices_i32.resize(
-            static_cast<size_t>(indices_num_elements));
-        indices_host = host_indices_i32.data();
-      } else {
-        host_indices_raw.resize(static_cast<size_t>(indices_bytes));
-        indices_host = host_indices_raw.data();
+      bool staging_ok = true;
+      try {
+        if (data_bytes > 0) {
+          host_data.resize(static_cast<size_t>(data_bytes));
+        }
+        if (output_bytes > 0) {
+          host_output.resize(static_cast<size_t>(output_bytes));
+        }
+        if (indices_element_size_bytes == 8) {
+          if (indices_num_elements > 0) {
+            host_indices_i64.resize(
+                static_cast<size_t>(indices_num_elements));
+          }
+          indices_host = host_indices_i64.data();
+        } else if (indices_element_size_bytes == 4) {
+          if (indices_num_elements > 0) {
+            host_indices_i32.resize(
+                static_cast<size_t>(indices_num_elements));
+          }
+          indices_host = host_indices_i32.data();
+        } else if (indices_bytes > 0) {
+          host_indices_raw.resize(static_cast<size_t>(indices_bytes));
+          indices_host = host_indices_raw.data();
+        }
+      } catch (const std::bad_alloc &) {
+        RUNTIME_DEBUG_LOG(
+            "[REAL] wrap_gather: CPU fallback host staging OOM "
+            "(data_bytes=%lld indices_bytes=%lld output_bytes=%lld); "
+            "using GPU kernel\n",
+            (long long)data_bytes, (long long)indices_bytes,
+            (long long)output_bytes);
+        staging_ok = false;
       }
 
-      if (wrap_hipMemcpyD2H(host_data.data(), data, data_bytes, stream) != 0)
-        return -1;
-      if (wrap_hipMemcpyD2H(indices_host, indices, indices_bytes, stream) != 0)
-        return -1;
-      if (wrap_hipStreamSynchronize(stream) != 0)
-        return -1;
-
-      HipdnnCpuFbGatherDesc desc{};
-      desc.axis = axis;
-      desc.data_hip_dtype = data_hip_dtype;
-      desc.indices_hip_dtype = indices_hip_dtype;
-      desc.indices_element_size_bytes = indices_element_size_bytes;
-      desc.data_rank = data_rank;
-      desc.data_shape = data_shape;
-      desc.data_host = host_data.data();
-      desc.indices_rank = indices_rank;
-      desc.indices_shape = indices_shape;
-      desc.indices_host = indices_host;
-      desc.output_rank = output_rank;
-      desc.output_shape = output_shape;
-      desc.output_host = host_output.data();
-      desc.data_num_elements = data_num_elements;
-      desc.indices_num_elements = indices_num_elements;
-      desc.output_num_elements = output_num_elements;
-
-      const int fb_rc = state->cpu_fallback.invoke(
-          state->cpu_fallback.user, state, HIPDNN_CPU_FB_OP_GATHER, &desc,
-          sizeof(desc));
-      if (fb_rc != 0) {
-        fprintf(stderr,
-                "[REAL] wrap_gather: CPU fallback invoke failed rc=%d; "
-                "falling back to GPU kernel\n",
-                fb_rc);
-      } else {
-        if (wrap_hipMemcpyH2D(output, host_output.data(), output_bytes,
-                              stream) != 0)
+      if (staging_ok) {
+        if (wrap_hipMemcpyD2H(host_data.data(), data, data_bytes, stream) != 0)
           return -1;
-        return 0;
+        if (wrap_hipMemcpyD2H(indices_host, indices, indices_bytes, stream) !=
+            0)
+          return -1;
+        if (wrap_hipStreamSynchronize(stream) != 0)
+          return -1;
+
+        HipdnnCpuFbGatherDesc desc{};
+        desc.axis = axis;
+        desc.data_hip_dtype = data_hip_dtype;
+        desc.indices_hip_dtype = indices_hip_dtype;
+        desc.indices_element_size_bytes = indices_element_size_bytes;
+        desc.data_rank = data_rank;
+        desc.data_shape = data_shape;
+        desc.data_host = host_data.data();
+        desc.indices_rank = indices_rank;
+        desc.indices_shape = indices_shape;
+        desc.indices_host = indices_host;
+        desc.output_rank = output_rank;
+        desc.output_shape = output_shape;
+        desc.output_host = host_output.data();
+        desc.data_num_elements = data_num_elements;
+        desc.indices_num_elements = indices_num_elements;
+        desc.output_num_elements = output_num_elements;
+
+        const int fb_rc = state->cpu_fallback.invoke(
+            state->cpu_fallback.user, state, HIPDNN_CPU_FB_OP_GATHER, &desc,
+            sizeof(desc));
+        if (fb_rc != 0) {
+          fprintf(stderr,
+                  "[REAL] wrap_gather: CPU fallback invoke failed rc=%d; "
+                  "falling back to GPU kernel\n",
+                  fb_rc);
+        } else {
+          if (wrap_hipMemcpyH2D(output, host_output.data(), output_bytes,
+                                stream) != 0)
+            return -1;
+          return 0;
+        }
       }
     }
   }

@@ -4,23 +4,18 @@
  */
 
 //===----------------------------------------------------------------------===//
-// Debug-only CPU fallback: model.dll calls back with host-staged tensors; we
-// run a tiny ORT CPU `Session` over a **pre-serialized ONNX** Gather graph — see
-// docs/design/debug-cpu-fallback-plan.md and custom-op-mlir/onnx/README.md.
+// Debug-only CPU fallback: model.dll calls back with host-staged tensors; the EP
+// runs a host reference Gather (large / fp16 tensors) or CPUGate + Ort::Op for
+// small exotic cases. See docs/design/debug-cpu-fallback-plan.md.
 //
-// MorphiZen **MLIR** backend: `model_proto_serialize_as_string` is **not**
-// ONNX protobuf (it serializes the internal MLIR model). Feeding those bytes
-// to `Ort::Session` fails with "protobuf parsing failed". The EP therefore
-// embeds a minimal valid ONNX built offline (`onnx/gather_cpu_fb_*.onnx`).
-//
-// Historical: `morphizen::OpInvoker` + stock `Ort::OpAttr` also broke
-// (`Ort::OpAttr*` reinterpreted as `AttributeProto*`). Do not revive that path.
+// Do not use MorphiZen `model_proto_serialize_as_string` or `OpInvoker` here —
+// MLIR serialization is not ONNX protobuf; OpInvoker mis-handles `Ort::OpAttr`.
 //
 // This path must never abort the process: use soft errors + exceptions.
 //===----------------------------------------------------------------------===//
 
+#include "cpu_fallback_cpugate.h"
 #include "hipdnn_ep_runtime.h"
-#include "morphizen/onnxruntime_api.hpp"
 
 #include <glog/logging.h>
 
@@ -28,56 +23,11 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
-#include <memory>
-#include <mutex>
+#include <new>
 #include <optional>
-#include <stdexcept>
-#include <string>
-#include <unordered_map>
-#include <utility>
 #include <vector>
 
-// ONNX bytes embedded at build time (see CMake + scripts/embed_binary_c_array.py).
-// Included as .inc in this TU so we never rely on a second object file reaching
-// morphizen-custom-op-mlir.lib (MSVC incremental / generator quirks caused LNK2019).
-#include "gather_cpu_fb_onnx_data.inc"
-
 namespace mlir_compilation::customop {
-
-struct GatherCacheKey {
-  int64_t axis = 0;
-  int64_t data_hip_dtype = -1;
-  int64_t indices_hip_dtype = -1;
-
-  bool operator==(const GatherCacheKey &o) const {
-    return axis == o.axis && data_hip_dtype == o.data_hip_dtype &&
-           indices_hip_dtype == o.indices_hip_dtype;
-  }
-};
-
-struct GatherCacheKeyHash {
-  size_t operator()(const GatherCacheKey &k) const noexcept {
-    return static_cast<size_t>(k.axis) ^
-           (static_cast<size_t>(k.data_hip_dtype) * 1315423911u) ^
-           (static_cast<size_t>(k.indices_hip_dtype) * 2654435761u);
-  }
-};
-
-/// One ORT CPU session per (axis, data dtype, indices dtype). Session bytes
-/// come from embedded ONNX (ORT-parseable), not MorphiZen MLIR serialization.
-struct GatherOnnxCpuSession {
-  Ort::Session session_{nullptr};
-
-  static std::unique_ptr<GatherOnnxCpuSession> try_create(const GatherCacheKey &k);
-
-  void invoke(Ort::Value *input_values, size_t input_count, Ort::Value *output_values,
-              size_t output_count);
-};
-
-static std::mutex g_gather_fb_mutex;
-static std::unordered_map<GatherCacheKey, std::unique_ptr<GatherOnnxCpuSession>,
-                          GatherCacheKeyHash>
-    g_gather_cpu_sessions;
 
 static int64_t product_dims(const int64_t *shape, int64_t rank) {
   int64_t p = 1;
@@ -93,10 +43,6 @@ static int64_t product_dims(const int64_t *shape, int64_t rank) {
   return p;
 }
 
-/// ONNX Gather output rank = `indices_rank + (data_rank - 1)`; element count
-/// matches the MLIR memref product even when MLIR uses a lower-rank `tensor`
-/// with the same linear layout (e.g. `[1,4096]` vs `[1,1,4096]`). ORT needs the
-/// canonical rank for `CreateTensor`; see invoke_gather_cpu.
 static bool gather_onnx_output_shape(const HipdnnCpuFbGatherDesc *d,
                                      std::vector<int64_t> &out_shape) {
   out_shape.clear();
@@ -203,82 +149,231 @@ make_cpu_tensor(const Ort::MemoryInfo &mi, void *base, const int64_t *shape,
   }
 }
 
-std::unique_ptr<GatherOnnxCpuSession>
-GatherOnnxCpuSession::try_create(const GatherCacheKey &k) {
-  // Bundled asset: opset-13 Gather, axis=0, fp16 data + int64 indices in ONNX.
-  // Runtime may carry int32 indices (`indices_element_size_bytes==4`); we widen
-  // to int64 before `CreateTensor` (same ONNX). Extend onnx/ + embed for more keys.
-  if (k.axis != 0) {
-    LOG(ERROR) << "cpu_fallback Gather: embedded ONNX is axis=0 only; got axis="
-               << k.axis;
-    return nullptr;
-  }
-  if (k.data_hip_dtype != HIPDNN_EP_DATATYPE_HALF) {
-    LOG(ERROR) << "cpu_fallback Gather: embedded ONNX is fp16 data only; got "
-                    "data_hip_dtype="
-               << k.data_hip_dtype;
-    return nullptr;
-  }
-  if (k.indices_hip_dtype != HIPDNN_EP_DATATYPE_INT64 &&
-      k.indices_hip_dtype != HIPDNN_EP_DATATYPE_INT32) {
-    LOG(ERROR) << "cpu_fallback Gather: embedded ONNX expects int32/int64 "
-                    "indices; got indices_hip_dtype="
-               << k.indices_hip_dtype;
-    return nullptr;
-  }
-
-  try {
-    Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "hipdnn_cpu_fb_gather");
-    Ort::SessionOptions options{};
-    // Nested `Session::Run` from inside MorphiZen EP + tiny graphs: keep the
-    // inner session predictable (external `Ort::Value` views + aggressive
-    // optimizers have produced bogus Gather diagnostics in the field).
-    options.SetGraphOptimizationLevel(ORT_DISABLE_ALL);
-    Ort::Session session(
-        env, reinterpret_cast<const char *>(kGatherCpuFbOnnx),
-        kGatherCpuFbOnnx_len, options);
-    auto out = std::unique_ptr<GatherOnnxCpuSession>(new GatherOnnxCpuSession);
-    out->session_ = std::move(session);
-    return out;
-  } catch (const Ort::Exception &e) {
-    LOG(ERROR) << "cpu_fallback Gather: ORT Session from embedded ONNX failed: "
-                 << e.what();
-    return nullptr;
+static int64_t hip_dtype_element_size_bytes(int64_t hip_ty) {
+  switch (hip_ty) {
+  case HIPDNN_EP_DATATYPE_HALF:
+  case HIPDNN_EP_DATATYPE_BFLOAT16:
+    return 2;
+  case HIPDNN_EP_DATATYPE_FLOAT:
+  case HIPDNN_EP_DATATYPE_INT32:
+    return 4;
+  case HIPDNN_EP_DATATYPE_INT64:
+  case HIPDNN_EP_DATATYPE_DOUBLE:
+    return 8;
+  case HIPDNN_EP_DATATYPE_INT8:
+  case HIPDNN_EP_DATATYPE_UINT8:
+    return 1;
+  default:
+    return -1;
   }
 }
 
-void GatherOnnxCpuSession::invoke(Ort::Value *input_values, size_t input_count,
-                                  Ort::Value *output_values,
-                                  size_t output_count) {
-  if (input_count != 2 || output_count != 1) {
-    LOG(ERROR) << "cpu_fallback Gather: expected 2 inputs and 1 output, got "
-                 << input_count << " in / " << output_count << " out";
-    throw std::runtime_error("GatherOnnxCpuSession: bad IO arity");
+static int64_t read_gather_index(const void *indices_host, int64_t i,
+                                 int64_t idx_bytes) {
+  if (idx_bytes == 8) {
+    return static_cast<const int64_t *>(indices_host)[i];
   }
-
-  Ort::RunOptions run_options{nullptr};
-  const char *input_names[] = {"Input_0", "Input_1"};
-  const char *output_names[] = {"Output_0"};
-  // Prefer `Session::Run` with caller-owned `Ort::Value` outputs over `IoBinding`:
-  // some ORT builds still mis-handle external-memory tensors in IoBinding for
-  // small graphs (symptoms match binding the wrong logical input even when
-  // names are spelled correctly — bogus Gather index diagnostics).
-  session_.Run(run_options, input_names, input_values, input_count, output_names,
-               output_values, output_count);
+  return static_cast<int64_t>(
+      static_cast<const int32_t *>(indices_host)[i]);
 }
 
-static GatherOnnxCpuSession *acquire_gather_cpu_session(const GatherCacheKey &k) {
-  std::lock_guard<std::mutex> lock(g_gather_fb_mutex);
-  auto it = g_gather_cpu_sessions.find(k);
-  if (it != g_gather_cpu_sessions.end())
-    return it->second.get();
+// Host reference for ONNX Gather on dense row-major buffers. Matches the GPU
+// gather_kernel layout ([outer, axis_size, inner]) and index rules (negative
+// index += axis_size; OOB -> zero).
+static int reference_gather_on_host(const HipdnnCpuFbGatherDesc *d) {
+  if (!d->data_host || !d->indices_host || !d->output_host || !d->data_shape ||
+      d->data_rank <= 0) {
+    return -1;
+  }
+  if (d->axis < 0 || d->axis >= d->data_rank) {
+    return -1;
+  }
 
-  std::unique_ptr<GatherOnnxCpuSession> sess = GatherOnnxCpuSession::try_create(k);
-  if (!sess)
-    return nullptr;
-  GatherOnnxCpuSession *raw = sess.get();
-  g_gather_cpu_sessions.emplace(k, std::move(sess));
-  return raw;
+  const int64_t elem_size = hip_dtype_element_size_bytes(d->data_hip_dtype);
+  if (elem_size <= 0) {
+    return -1;
+  }
+  if (d->indices_element_size_bytes != 4 &&
+      d->indices_element_size_bytes != 8) {
+    return -1;
+  }
+
+  int64_t inner = 1;
+  for (int64_t i = d->axis + 1; i < d->data_rank; ++i) {
+    inner *= d->data_shape[i];
+  }
+  int64_t outer = 1;
+  for (int64_t i = 0; i < d->axis; ++i) {
+    outer *= d->data_shape[i];
+  }
+  const int64_t axis_dim = d->data_shape[d->axis];
+  const int64_t indices_num = d->indices_num_elements;
+  if (inner <= 0 || axis_dim <= 0 || indices_num < 0) {
+    return -1;
+  }
+  if (d->output_num_elements != outer * indices_num * inner) {
+    LOG(ERROR) << "cpu_fallback Gather: reference layout mismatch "
+               << "output_num=" << d->output_num_elements << " expected "
+               << (outer * indices_num * inner);
+    return -1;
+  }
+
+  const auto *data = static_cast<const char *>(d->data_host);
+  auto *out = static_cast<char *>(d->output_host);
+  const size_t slice_bytes = static_cast<size_t>(inner * elem_size);
+
+  for (int64_t o = 0; o < outer; ++o) {
+    for (int64_t i = 0; i < indices_num; ++i) {
+      int64_t ix =
+          read_gather_index(d->indices_host, i, d->indices_element_size_bytes);
+      if (ix < 0) {
+        ix += axis_dim;
+      }
+      char *out_slice =
+          out + static_cast<size_t>((o * indices_num + i) * inner * elem_size);
+      if (ix < 0 || ix >= axis_dim) {
+        std::memset(out_slice, 0, slice_bytes);
+        continue;
+      }
+      const char *data_slice = data + static_cast<size_t>(
+                                           (o * axis_dim + ix) * inner *
+                                           elem_size);
+      std::memcpy(out_slice, data_slice, slice_bytes);
+    }
+  }
+  return 0;
+}
+
+// CPUGate path only for small tensors (avoids fp16->fp32 full-table promotion).
+static constexpr int64_t kCpugateGatherMaxDataBytes = 64 * 1024 * 1024;
+
+static bool gather_needs_fp32_promotion(ONNXTensorElementDataType et) {
+  return et == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 ||
+         et == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
+}
+
+static ONNXTensorElementDataType gather_ort_kernel_dtype(
+    ONNXTensorElementDataType storage_et) {
+  if (gather_needs_fp32_promotion(storage_et)) {
+    return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
+  }
+  return storage_et;
+}
+
+static int invoke_gather_via_cpugate(const HipdnnCpuFbGatherDesc *d,
+                                    ONNXTensorElementDataType data_et,
+                                    ONNXTensorElementDataType ort_kernel_et,
+                                    bool promote_fp32) {
+  const int64_t idx_bytes = d->indices_element_size_bytes;
+
+  cpugate::Manager &gate = cpugate::Manager::instance();
+  Ort::Op *gather_op = gate.get_or_create_gather_op(
+      d->axis, ort_kernel_et, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  if (!gather_op) {
+    return -1;
+  }
+
+  std::vector<float> data_fp32;
+  std::vector<float> out_fp32;
+  void *data_ptr = const_cast<void *>(d->data_host);
+  void *out_ptr = d->output_host;
+  if (promote_fp32) {
+    try {
+      data_fp32.resize(static_cast<size_t>(d->data_num_elements));
+      out_fp32.resize(static_cast<size_t>(d->output_num_elements));
+    } catch (const std::bad_alloc &) {
+      LOG(ERROR) << "cpu_fallback Gather: fp32 promotion staging OOM";
+      return -1;
+    }
+    if (data_et == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+      const auto *src = static_cast<const Ort::Float16_t *>(d->data_host);
+      for (size_t i = 0; i < data_fp32.size(); ++i) {
+        data_fp32[i] = src[i].ToFloat();
+      }
+    } else {
+      const auto *src = static_cast<const Ort::BFloat16_t *>(d->data_host);
+      for (size_t i = 0; i < data_fp32.size(); ++i) {
+        data_fp32[i] = src[i].ToFloat();
+      }
+    }
+    data_ptr = data_fp32.data();
+    out_ptr = out_fp32.data();
+  }
+
+  std::vector<int64_t> data_shape_vec;
+  data_shape_vec.reserve(
+      static_cast<size_t>(std::max<int64_t>(0, d->data_rank)));
+  for (int64_t i = 0; i < d->data_rank; ++i) {
+    data_shape_vec.push_back(d->data_shape[i]);
+  }
+
+  std::vector<int64_t> indices_shape_vec;
+  indices_shape_vec.reserve(
+      static_cast<size_t>(std::max<int64_t>(0, d->indices_rank)));
+  for (int64_t i = 0; i < d->indices_rank; ++i) {
+    indices_shape_vec.push_back(d->indices_shape[i]);
+  }
+
+  Ort::Value in_indices = Ort::Value::CreateTensor(
+      Ort::AllocatorWithDefaultOptions(), indices_shape_vec.data(),
+      indices_shape_vec.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  int64_t *idx_mut = in_indices.GetTensorMutableData<int64_t>();
+  if (idx_bytes == 8) {
+    memcpy(idx_mut, d->indices_host,
+           static_cast<size_t>(d->indices_num_elements) * sizeof(int64_t));
+  } else {
+    const auto *src = static_cast<const int32_t *>(d->indices_host);
+    for (int64_t i = 0; i < d->indices_num_elements; ++i) {
+      idx_mut[i] = static_cast<int64_t>(src[i]);
+    }
+  }
+
+  Ort::MemoryInfo mi =
+      Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+  auto in_data = make_cpu_tensor(mi, data_ptr, data_shape_vec.data(),
+                                 static_cast<int64_t>(data_shape_vec.size()),
+                                 ort_kernel_et, d->data_num_elements);
+
+  std::vector<int64_t> onnx_out_shape;
+  const int64_t *out_shape = d->output_shape;
+  int64_t out_rank = d->output_rank;
+  if (gather_onnx_output_shape(d, onnx_out_shape)) {
+    out_shape = onnx_out_shape.data();
+    out_rank = static_cast<int64_t>(onnx_out_shape.size());
+  }
+
+  std::vector<int64_t> out_shape_vec;
+  out_shape_vec.reserve(static_cast<size_t>(std::max<int64_t>(0, out_rank)));
+  for (int64_t i = 0; i < out_rank; ++i) {
+    out_shape_vec.push_back(out_shape[i]);
+  }
+
+  auto out_tensor = make_cpu_tensor(mi, out_ptr, out_shape_vec.data(), out_rank,
+                                    ort_kernel_et, d->output_num_elements);
+  if (!in_data || !out_tensor) {
+    return -1;
+  }
+
+  Ort::Value in_data_val = std::move(*in_data);
+  Ort::Value out_val = std::move(*out_tensor);
+  const OrtValue *inputs[] = {in_data_val, in_indices};
+  OrtValue *outputs[] = {out_val};
+  gate.invoke(*gather_op, inputs, 2, outputs, 1);
+
+  if (promote_fp32) {
+    if (data_et == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+      auto *dst = static_cast<Ort::Float16_t *>(d->output_host);
+      for (size_t i = 0; i < out_fp32.size(); ++i) {
+        dst[i] = Ort::Float16_t(out_fp32[i]);
+      }
+    } else {
+      auto *dst = static_cast<Ort::BFloat16_t *>(d->output_host);
+      for (size_t i = 0; i < out_fp32.size(); ++i) {
+        dst[i] = Ort::BFloat16_t(out_fp32[i]);
+      }
+    }
+  }
+  return 0;
 }
 
 static int invoke_gather_cpu(const HipdnnCpuFbGatherDesc *d) {
@@ -291,13 +386,9 @@ static int invoke_gather_cpu(const HipdnnCpuFbGatherDesc *d) {
     }
 
     ONNXTensorElementDataType data_et = hip_dtype_to_onnx(d->data_hip_dtype);
-    ONNXTensorElementDataType indices_et =
-        hip_dtype_to_onnx(d->indices_hip_dtype);
-    if (data_et == ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED ||
-        indices_et == ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED) {
-      LOG(ERROR) << "cpu_fallback Gather: unsupported hip dtype pair (data="
-                 << d->data_hip_dtype << ", indices=" << d->indices_hip_dtype
-                 << ")";
+    if (data_et == ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED) {
+      LOG(ERROR) << "cpu_fallback Gather: unsupported data_hip_dtype="
+                 << d->data_hip_dtype;
       return -1;
     }
 
@@ -322,72 +413,24 @@ static int invoke_gather_cpu(const HipdnnCpuFbGatherDesc *d) {
       return -1;
     }
 
-    GatherCacheKey key{d->axis, d->data_hip_dtype, d->indices_hip_dtype};
-    GatherOnnxCpuSession *sess = acquire_gather_cpu_session(key);
-    if (!sess)
-      return -1;
-
-    // Copy shapes off the model.dll stack — `CreateTensor` stores the shape
-    // pointer internally; keep storage owned by this frame until Run returns.
-    std::vector<int64_t> data_shape_vec;
-    data_shape_vec.reserve(static_cast<size_t>(std::max<int64_t>(0, d->data_rank)));
-    for (int64_t i = 0; i < d->data_rank; ++i)
-      data_shape_vec.push_back(d->data_shape[i]);
-
-    std::vector<int64_t> indices_shape_vec;
-    indices_shape_vec.reserve(
-        static_cast<size_t>(std::max<int64_t>(0, d->indices_rank)));
-    for (int64_t i = 0; i < d->indices_rank; ++i)
-      indices_shape_vec.push_back(d->indices_shape[i]);
-
-    // Indices are tiny — allocate with ORT's default CPU allocator so the inner
-    // `Session::Run` never holds a view into our D2H staging buffer (nested EP
-    // runs have reproduced bogus Gather index reads with user-supplied tensor
-    // memory for int64 indices even after IoBinding fixes).
-    Ort::Value in_indices = Ort::Value::CreateTensor(
-        Ort::AllocatorWithDefaultOptions(), indices_shape_vec.data(),
-        indices_shape_vec.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
-    int64_t *idx_mut = in_indices.GetTensorMutableData<int64_t>();
-    if (idx_bytes == 8) {
-      memcpy(idx_mut, d->indices_host,
-             static_cast<size_t>(d->indices_num_elements) * sizeof(int64_t));
-    } else {
-      const auto *src = static_cast<const int32_t *>(d->indices_host);
-      for (int64_t i = 0; i < d->indices_num_elements; ++i)
-        idx_mut[i] = static_cast<int64_t>(src[i]);
+    if (reference_gather_on_host(d) == 0) {
+      return 0;
     }
 
-    Ort::MemoryInfo mi =
-        Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-    auto in_data = make_cpu_tensor(mi, const_cast<void *>(d->data_host),
-                                   data_shape_vec.data(),
-                                   static_cast<int64_t>(data_shape_vec.size()),
-                                   data_et, d->data_num_elements);
-
-    std::vector<int64_t> onnx_out_shape;
-    const int64_t *out_shape = d->output_shape;
-    int64_t out_rank = d->output_rank;
-    if (gather_onnx_output_shape(d, onnx_out_shape)) {
-      out_shape = onnx_out_shape.data();
-      out_rank = static_cast<int64_t>(onnx_out_shape.size());
-    }
-
-    std::vector<int64_t> out_shape_vec;
-    out_shape_vec.reserve(static_cast<size_t>(std::max<int64_t>(0, out_rank)));
-    for (int64_t i = 0; i < out_rank; ++i)
-      out_shape_vec.push_back(out_shape[i]);
-
-    auto out_tensor =
-        make_cpu_tensor(mi, d->output_host, out_shape_vec.data(), out_rank,
-                        data_et, d->output_num_elements);
-    if (!in_data || !out_tensor) {
+    const int64_t elem_size = hip_dtype_element_size_bytes(d->data_hip_dtype);
+    const int64_t data_bytes =
+        elem_size > 0 ? d->data_num_elements * elem_size : -1;
+    const ONNXTensorElementDataType ort_kernel_et =
+        gather_ort_kernel_dtype(data_et);
+    const bool promote_fp32 = ort_kernel_et != data_et;
+    if (promote_fp32 && data_bytes > kCpugateGatherMaxDataBytes) {
+      LOG(ERROR) << "cpu_fallback Gather: reference failed and CPUGate fp32 "
+                    "promotion skipped for large tensor (data_bytes="
+                 << data_bytes << ")";
       return -1;
     }
 
-    Ort::Value inputs[2] = {std::move(*in_data), std::move(in_indices)};
-    Ort::Value outputs[1] = {std::move(*out_tensor)};
-    sess->invoke(inputs, 2, outputs, 1);
-    return 0;
+    return invoke_gather_via_cpugate(d, data_et, ort_kernel_et, promote_fp32);
   } catch (const Ort::Exception &e) {
     LOG(ERROR) << "cpu_fallback Gather: ORT exception: " << e.what();
     return -1;
@@ -413,8 +456,8 @@ static int morphizen_cpu_fallback_invoke(void * /*user*/, RuntimeState * /*state
                << ") — rebuild model.dll after EP/runtime struct change";
     return -1;
   }
-  const auto *d = static_cast<const HipdnnCpuFbGatherDesc *>(detail);
-  return invoke_gather_cpu(d);
+  const auto *desc = static_cast<const HipdnnCpuFbGatherDesc *>(detail);
+  return invoke_gather_cpu(desc);
 }
 
 static hipdnn_cpu_fallback_iface_t g_iface{nullptr, morphizen_cpu_fallback_invoke};
