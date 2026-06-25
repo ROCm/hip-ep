@@ -115,56 +115,22 @@ void* ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator* this_,
 
   const int cls = SizeClassIndex(size);
 
-  // Fast path: reuse a pooled buffer with no driver call. For a size class,
-  // any buffer in that class fits (they are all the class capacity). For a
-  // large request (cls < 0), take the smallest free large buffer that is >=
-  // the request (best-fit) so a freed 32 MB buffer can still serve a later
-  // 31 MB request.
-  //
-  // Large buffers ARE pooled (for reuse performance) but the large free list
-  // is bounded: on a cold miss for a large request — i.e. when the model is
-  // about to grow the driver-side footprint — we first evict the smallest
-  // pooled large buffers (least likely to satisfy a growing model) until the
-  // list is back under kMaxLargeFreeBuffers. This caps the working set so an
-  // incrementally-growing largest transient can't pin an unbounded pile of
-  // near-size buffers in the free list. hipHostFree of evicted buffers is a
-  // heavyweight driver call, so we collect victims under the lock and release
-  // them after dropping it.
-  std::vector<void*> evicted;
-  {
+  // Fast path: reuse a pooled buffer with no driver call. Only requests that
+  // map to a size class (<= 4 MB) are pooled; any buffer in that class fits
+  // (they are all the class capacity). Large requests (cls < 0, > 4 MB) are
+  // never pooled — they are allocated at exact size and released straight back
+  // to the driver in FreeImpl, so a one-off huge transient can't pin memory.
+  if (cls >= 0) {
     std::lock_guard<std::mutex> lk(self->pool_mutex_);
-    if (cls >= 0) {
-      auto& fl = self->free_lists_[cls];
-      if (!fl.empty()) {
-        void* ptr = fl.back();
-        fl.pop_back();
-        return ptr;
-      }
-    } else {
-      auto it = self->large_free_.lower_bound(size);
-      if (it != self->large_free_.end()) {
-        void* ptr = it->second;
-        self->large_free_.erase(it);
-        return ptr;
-      }
-      // Cold miss for a large request: bound the large free list before we add
-      // a fresh buffer. Evict the smallest entries (multimap is size-ordered,
-      // so begin() is the smallest) down to the cap.
-      while (self->large_free_.size() >= kMaxLargeFreeBuffers) {
-        auto smallest = self->large_free_.begin();
-        evicted.push_back(smallest->second);
-        self->ptr_to_size_.erase(smallest->second);
-        self->large_free_.erase(smallest);
-      }
+    auto& fl = self->free_lists_[cls];
+    if (!fl.empty()) {
+      void* ptr = fl.back();
+      fl.pop_back();
+      return ptr;
     }
   }
 
   ScopedDevice _(self->device_id_);
-  if (!evicted.empty()) {
-    for (void* victim : evicted) {
-      (void)hipHostFree(victim);
-    }
-  }
 
   // Cold miss: allocate. Pooled requests are rounded up to the full class
   // capacity so the buffer is reusable by any later request in the same class;
@@ -211,26 +177,24 @@ void ORT_API_CALL HipGpuAllocator::FreeImpl(OrtAllocator* this_, void* p) {
     std::lock_guard<std::mutex> lk(self->pool_mutex_);
     auto it = self->ptr_to_size_.find(p);
     if (it != self->ptr_to_size_.end()) {
-      // Return to a free list for reuse; do NOT release to the driver here.
-      // Safe to reuse without a stream sync: see the pool comment in the
-      // header. The stored size is the class capacity for pooled buffers (so
+      // The stored size is the class capacity for pooled buffers (so
       // SizeClassIndex recovers the class) and the exact size for large ones.
-      // The pointer stays tracked in ptr_to_size_ either way so the destructor
-      // can release it (and AllocImpl can recover its size on eviction).
       const int cls = SizeClassIndex(it->second);
       if (cls >= 0) {
+        // Pooled small/medium buffer (<= 4 MB): return to its free list for
+        // reuse; do NOT release to the driver here. Stays tracked in
+        // ptr_to_size_ so the destructor can release it. Safe to reuse without
+        // a stream sync: see the pool comment in the header.
         self->free_lists_[cls].push_back(p);
-      } else {
-        // Large buffer: pool it (keyed by exact size for best-fit reuse). The
-        // large free list is kept bounded at allocation time — AllocImpl evicts
-        // the smallest entries on a cold miss — so it can't grow without limit.
-        self->large_free_.emplace(it->second, p);
+        return;
       }
-      return;
+      // Large buffer (> 4 MB): never pooled. Stop tracking it and release it
+      // to the driver below (outside the lock — hipHostFree is heavyweight).
+      self->ptr_to_size_.erase(it);
     }
+    // Fall through for a large buffer, or for a pointer we never handed out
+    // (defensive): in both cases release directly so we don't leak.
   }
-  // Defensive: a pointer we never handed out (should not happen). Release it
-  // directly so we don't leak, rather than pooling an unknown-size buffer.
   ScopedDevice _(self->device_id_);
   (void)hipHostFree(p);
 }
@@ -252,7 +216,6 @@ HipGpuAllocator::~HipGpuAllocator() {
   for (auto& fl : free_lists_) {
     fl.clear();
   }
-  large_free_.clear();
   ptr_to_size_.clear();
 }
 
