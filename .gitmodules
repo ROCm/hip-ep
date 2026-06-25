@@ -1,4 +1,4 @@
 [submodule "3rd-party/morphizen"]
 	path = 3rd-party/morphizen
-	url = ../MorphiZen
+	url = git@github.com:ROCm/MorphiZen.git
 	branch = main

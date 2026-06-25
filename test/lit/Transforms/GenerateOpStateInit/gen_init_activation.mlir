@@ -9,7 +9,7 @@
 // hip.sigmoid / hip.tanh / hip.softplus). The constructor takes no compile-time
 // args. The generated init must (1) allocate the slot array and (2) call
 // hipdnn_ep_op_state_construct_activation with slot 0, which stores the state
-// into op_states[0] itself and returns an i8 ok flag. See
+// into op_states[0] itself and returns an i8 status (vestigial, always 0). See
 // docs/design/op-state-slots-design.md.
 // ============================================================================
 

@@ -145,7 +145,8 @@ struct MatmulState : OpStateT<MatmulState> {
 
 extern "C" int8_t hipdnn_ep_op_state_construct_matmul(RuntimeState *state,
                                                       int32_t slot) {
-  return MatmulState::create(state, slot);
+  hipdnn_ep_op_state_set(state, slot, MatmulState::create().release());
+  return 0;
 }
 
 static MatmulCacheEntry *queryOrCreateMatmul(MatmulAlgoTable &table,
@@ -474,7 +475,7 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
                     (long long)elem_size, type_name,
                     (long long)(batch_count * M * N * elem_size));
 
-  MatmulState *ms = MatmulState::get_slot(state, op_state_slot);
+  MatmulState *ms = MatmulState::get_op_state(state, op_state_slot);
   if (!ms || !ms->table) {
     fprintf(stderr, "wrap_hipblasLtMatmul: missing op-state for slot %d\n",
             op_state_slot);

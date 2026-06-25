@@ -54,9 +54,9 @@ struct OpState {                 // base of every state struct
 
 template <class T> struct OpStateT : OpState {   // CRTP base each state derives from
   OpStateT() { deletor = [](OpState *p) { delete static_cast<T *>(p); }; }
-  static T   *get_slot(RuntimeState *, int slot);          // typed slot accessor
+  static T *get_op_state(RuntimeState *, int slot);        // typed slot accessor
   template <class... A>
-  static int8_t create(RuntimeState *, int32_t slot, A &&...);  // build + store into slot
+  static std::unique_ptr<T> create(A &&...);               // build an owning instance
 };
 
 struct RuntimeState {
@@ -98,10 +98,10 @@ ConvOp::generateOpStateInit(b, loc, statePtr, slot):
     ctor  = declare_extern("hipdnn_ep_op_state_construct_conv",
                            ret = i8, params = [ptr, i32, i64, i64])
     ok    = b.call(ctor, [ statePtr, const(slot), const(k), const(s) ])
-    return ok                                                # i8: store refused => 0
+    return ok                                                # i8: vestigial, always 0
 ```
 
-The runtime constructor takes those parameters, builds the state, and stores it into its slot via `OpStateT::create` (which calls the bounds-checked `hipdnn_ep_op_state_set` and frees the object if the store is refused, so the `RuntimeState` layout stays opaque and nothing leaks):
+The runtime constructor takes those parameters, builds the state with `OpStateT::create` (which returns an owning `std::unique_ptr<T>` with `deletor` already wired), and hands the released pointer to `hipdnn_ep_op_state_set`, which stores it into the slot. `_set` is plain C++ internal to the runtime bitcode (never called by generated IR) and has no failure path: the compiler always supplies a valid slot into an already-allocated array, so the `RuntimeState` layout stays opaque without bounds-check ceremony:
 
 ```cpp
 struct ConvState : OpStateT<ConvState> {
@@ -112,7 +112,9 @@ struct ConvState : OpStateT<ConvState> {
 extern "C" int8_t
 hipdnn_ep_op_state_construct_conv(RuntimeState *s, int32_t slot,
                                   int64_t kernel, int64_t stride) {
-  return ConvState::create(s, slot, kernel, stride);   // build + wire deletor + store
+  hipdnn_ep_op_state_set(s, slot,
+                         ConvState::create(kernel, stride).release());  // build + store
+  return 0;
 }
 ```
 
@@ -122,10 +124,10 @@ A value that is unknown until inference (an input's dynamic shape, a data pointe
 
 ### Access
 
-Inside an operator's runtime entry, reaching the state is one indexed load through the typed `OpStateT::get_slot` accessor. `slot` is the second argument (right after `RuntimeState *`) the lowering threads into the operator's `wrap_*` call:
+Inside an operator's runtime entry, reaching the state is one indexed load through the typed `OpStateT::get_op_state` accessor. `slot` is the second argument (right after `RuntimeState *`) the lowering threads into the operator's `wrap_*` call:
 
 ```cpp
-ConvState *c = ConvState::get_slot(state, slot);   // == static_cast<ConvState*>(op_states[slot])
+ConvState *c = ConvState::get_op_state(state, slot);   // == static_cast<ConvState*>(op_states[slot])
 ```
 
 ### Sharing is opt-in
@@ -146,8 +148,8 @@ Expired entries are not pruned, so the residual is `O(#distinct keys)` — fine 
 graph TD
   ATTRS["op attributes (compile-time)"] --> GENM["op.generateOpStateInit(builder, slot)"]
   GENM -->|emit| CALL["call construct_op(state, slot, p1, ...)"]
-  CALL -->|"create() stores via op_state_set"| ARR["RuntimeState.op_states"]
-  WRAP["wrap_op(state, slot, ...) at inference"] -->|"State::get_slot(state, slot)"| ARR
+  CALL -->|"set(slot, create().release())"| ARR["RuntimeState.op_states"]
+  WRAP["wrap_op(state, slot, ...) at inference"] -->|"State::get_op_state(state, slot)"| ARR
 ```
 
 The slot-assignment pass stamps each op with its slot and records the slot count on the module. The interface generator, while building the `inference_init` entry, calls each op's `generateOpStateInit` to weave the per-slot construction in after core state and pool init. The lowerings thread the slot index in as the second `wrap_*` argument (right after `RuntimeState *`). This count-then-consume shape mirrors the memory pool, where a pass computes a count and offsets that generated init consumes; see [pool-allocs-memory-planning.md](pool-allocs-memory-planning.md).
@@ -176,7 +178,7 @@ Two `conv` instances in one fused function, with different compile-time attribut
 %ok1 = llvm.call @hipdnn_ep_op_state_construct_conv(%state, %sl1, %k1, %s1)
 ```
 
-**3. Session init (runs once)** — constructors run with the baked-in arguments, each building an object and storing it into its own slot (via `OpStateT::create` -> `hipdnn_ep_op_state_set`):
+**3. Session init (runs once)** — constructors run with the baked-in arguments, each building an object with `OpStateT::create` and storing it into its own slot via `hipdnn_ep_op_state_set`:
 
 ```cpp
 construct_conv(state, /*slot=*/0, /*kernel=*/3, /*stride=*/1);   // op_states[0] = ConvState{3,1}
@@ -186,8 +188,8 @@ construct_conv(state, /*slot=*/1, /*kernel=*/5, /*stride=*/2);   // op_states[1]
 **4. Inference (per call)** — each conv reads its own slot; the two never collide:
 
 ```cpp
-wrap_conv(state, /*slot=*/0, ...);   // ConvState::get_slot(state, 0) -> kernel 3
-wrap_conv(state, /*slot=*/1, ...);   // ConvState::get_slot(state, 1) -> kernel 5
+wrap_conv(state, /*slot=*/0, ...);   // ConvState::get_op_state(state, 0) -> kernel 3
+wrap_conv(state, /*slot=*/1, ...);   // ConvState::get_op_state(state, 1) -> kernel 5
 ```
 
 The input spatial size is unknown at step 2, so it is not a constructor argument; if `conv` needs a workspace sized by it, it grows that workspace inside `wrap_conv` from the runtime arguments, stored in the per-slot state.
@@ -196,8 +198,8 @@ The input spatial size is unknown at step 2, so it is not a constructor argument
 
 1. Define a state struct deriving from `OpStateT<MyState>` (the base wires `deletor` automatically).
 2. Implement `OpStateOpInterface::generateOpStateInit` — read the op's attributes and call `mlir::hip::emitOpStateConstruct(builder, loc, statePtr, slot, "construct_symbol", {i64 args})`, returning the i8 ok result.
-3. Provide the matching `extern "C" int8_t` constructor `(RuntimeState *, int32_t slot, params...)` that returns `MyState::create(state, slot, params...)`; optionally fetch a shared value from a `WeakStore` inside `MyState`'s constructor.
-4. Reach the state in the runtime entry with `MyState::get_slot(state, slot)`.
+3. Provide the matching `extern "C" int8_t` constructor `(RuntimeState *, int32_t slot, params...)` that calls `hipdnn_ep_op_state_set(state, slot, MyState::create(params...).release())` and returns `0`; optionally fetch a shared value from a `WeakStore` inside `MyState`'s constructor.
+4. Reach the state in the runtime entry with `MyState::get_op_state(state, slot)`.
 
 Stateless operators declare nothing.
 

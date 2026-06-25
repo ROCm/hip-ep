@@ -175,7 +175,8 @@ struct OpTensorState : OpStateT<OpTensorState> {
 
 extern "C" int8_t hipdnn_ep_op_state_construct_optensor(RuntimeState *state,
                                                         int32_t slot) {
-  return OpTensorState::create(state, slot);
+  hipdnn_ep_op_state_set(state, slot, OpTensorState::create().release());
+  return 0;
 }
 
 /// Look up or create cached MIOpen tensor descriptors for an OpTensor shape.
@@ -634,7 +635,7 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
     }
   }
 
-  OpTensorState *os = OpTensorState::get_slot(state, op_state_slot);
+  OpTensorState *os = OpTensorState::get_op_state(state, op_state_slot);
   if (!os || !os->table) {
     fprintf(stderr, "wrap_miopenOpTensor: missing op-state for slot %d\n",
             op_state_slot);

@@ -21,7 +21,9 @@ include "mlir/IR/OpBase.td"
 // construct symbol and slot). The emitted construct symbol stores the built
 // state into op_states[slot] itself (via hipdnn_ep_op_state_set, called inside
 // the runtime construct fn -- not the slot array directly), keeping the
-// RuntimeState layout opaque to generated IR. It returns an i8 ok flag.
+// RuntimeState layout opaque to generated IR. It returns an i8 that is
+// vestigial (always 0): hipdnn_ep_op_state_set has no failure path, so the
+// init pass keeps the result for a stable signature but does not branch on it.
 def OpStateOpInterface : OpInterface<"OpStateOpInterface"> {
   let description = [{
     Marker + code-gen interface for stateful HIP ops. Implementers emit the IR
@@ -38,7 +40,8 @@ def OpStateOpInterface : OpInterface<"OpStateOpInterface"> {
         the op's own attributes, declare the construct symbol with whatever
         parameter types are needed, and emit the call passing `slot`. The
         construct symbol stores the built state into op_states[slot] itself and
-        returns an i8 ok flag (0 at runtime means the store was refused).
+        returns an i8 that is vestigial (always 0): the store has no failure
+        path, so the init pass does not branch on it.
       }],
       /*retTy=*/"::mlir::Value",
       /*methodName=*/"generateOpStateInit",
