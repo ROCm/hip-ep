@@ -78,7 +78,7 @@ done
 ```
 
 The added variants only need **fp16** — the build script and `setup_whisper_model.py`
-both default to fp16, and the per-variant smoke test runs fp16 only. (Pass
+both default to fp16, and the per-variant test legs run fp16 only. (Pass
 `--precision both` / `--fp32` if you ever want fp32 for one of these.) This halves
 build + disk + test work; large-v3 keeps its fp32 bundle for the cross-backend
 fp32-vs-fp32 benchmark (§6).
@@ -93,8 +93,9 @@ it builds the default set (`large-v3-turbo tiny base small medium`). See
 > but if you build turbo by some other means, expect an `IndexError: index 4 is
 > out of range`.
 
-Per-variant EP correctness is covered by
-`test/python/whisper/test_whisper_variant_smoke.py` — see [§4f](#4f-per-variant-smoke-turbo--small-sizes).
+Per-variant EP correctness + performance is covered by
+`test/python/whisper/test_whisper.py` (fp16 for every variant + fp32 for
+large-v3) — see [§4](#4-run-the-tests).
 
 ---
 
@@ -468,37 +469,24 @@ pytest test/numeric/tests/test_whisper_encoder_attention.py test/numeric/tests/t
 ctest --test-dir $ROOT/build -C Release -R MorphizenMLIRLitTests
 ```
 
-### 4f. Per-variant smoke (turbo + small sizes)
+### 4f. Per-variant coverage + the PERF line
 
-§4a–4e all target **large-v3**. The other five variants (turbo + tiny/base/small/
-medium) are covered by one parametrized smoke test that asserts **EP-GPU greedy
-tokens == ORT-CPU greedy tokens** on the *same* variant. (It does NOT assert
-verbatim text — the small models have low transcription accuracy, so EP-vs-CPU
-token equality is what isolates EP correctness from model quality.)
-
-First build + prepare the variants (see [Supported variants](#supported-variants)
-for the build-all loop), then run the whole set:
+There is **no separate variant smoke file** — `test_whisper_variant_smoke.py` was
+merged into `test_whisper.py`. §4a (e2e) and §4c (per-phase cosine) are already
+parametrized over **every variant** (fp16) **+ large-v3 (fp32)**, so a variant's
+encoder/prefill/decode correctness and GPU==CPU greedy-token check come for free
+there. Build the variants first (see [Supported variants](#supported-variants)),
+then narrow to one with the test-id substring, e.g.:
 
 ```bash
-pytest test/python/whisper/test_whisper_variant_smoke.py -v -s
+pytest "test/python/whisper/test_whisper.py::test_e2e_transcription_greedy" -k tiny -v -s
 ```
 
-…or one variant at a time:
-
-```bash
-pytest test/python/whisper/test_whisper_variant_smoke.py -k tiny -v -s
-```
-
-Each variant prints its GPU transcription and **passes** when it matches the CPU
-reference token-for-token. A variant that has not been built/prepared, or a host
-without the EP, **skips** cleanly. Verified on gfx1151: all five emit the verbatim
-JFK quote. (This smoke is now a fast subset of §4a/§4c, which also cover every
-variant; keep it for a quick standalone check.)
-
-It also prints a steady-state **PERF** line per variant (encoder ms / prefill ms /
-decode tok/s / RTF), measured on cached/already-compiled sessions, so the variant
-performance is recorded in CI logs alongside the correctness check. For an
-isolated measurement use `scripts/transcribe_whisper.py --variant <name>` (§5).
+`test_e2e_transcription_greedy` also prints a steady-state **PERF** line per
+(variant, precision) — encoder ms / prefill ms / decode tok/s / RTF, measured on
+cached (already-compiled) sessions — so variant performance is recorded in CI logs
+alongside the correctness check. For an isolated measurement use
+`scripts/transcribe_whisper.py --variant <name>` (§5).
 
 > **Both artifact formats are correct on a current EP build.** Default is the
 > in-process bitcode JIT; `HIPEP_ARTIFACT_FORMAT=NATIVE` (per-model DLL) is the
@@ -511,12 +499,12 @@ isolated measurement use `scripts/transcribe_whisper.py --variant <name>` (§5).
 ### Run everything at once
 
 ```
-pytest test/python/whisper/test_whisper.py -v -s                  # large-v3 full matrix
-pytest test/python/whisper/test_whisper_variant_smoke.py -v -s    # turbo + small sizes (§4f)
+pytest test/python/whisper/test_whisper.py -v -s    # all variants fp16 + large-v3 fp32 + perf/WER/librispeech
 ```
 
 The full `test_whisper.py` matrix (all variants fp16 + large-v3 fp32) runs in a
 single process on the 128 GB dev/CI host — no per-precision split needed (see §4c).
+The `-s` flag surfaces the per-variant `PERF` lines.
 
 ---
 
@@ -567,7 +555,7 @@ python scripts/transcribe_whisper.py test/python/data/whisper/jfk.wav --fp32
 
 **Any variant** via `--variant` (default `large-v3`; the others need a local OGA
 build, §3b). This is the standalone way to measure a variant's decode tok/s / RTF
-(the same metrics the §4f smoke prints in CI):
+(the same metrics the §4f `PERF` line prints in CI):
 
 ```
 python scripts/transcribe_whisper.py test/python/data/whisper/jfk.wav --variant large-v3-turbo
