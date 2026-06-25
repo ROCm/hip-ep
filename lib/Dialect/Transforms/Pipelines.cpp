@@ -49,48 +49,34 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm,
   //     the reference cases.
   pm.addPass(hip::createInferShapesPass());
 
-  // 1b''. Convert every `tensor.empty` into a `bufferization.alloc_tensor`
-  //       BEFORE the CSE below. `tensor.empty` is side-effect-free, so the CSE
-  //       pass merges all same-typed empties into a single SSA value. Each
-  //       per-op `tensor.empty` is that op's destination-passing-style (DPS)
-  //       `outs` init; merging N of them makes N distinct ops share one
-  //       destination buffer after bufferize, and the HIP DPS ops bufferize
-  //       in-place without copy insertion, so the ops clobber each other's
-  //       outputs (a silent miscompile — every op's result aliases the same
-  //       buffer, so all but the last reader gets garbage). `alloc_tensor`
-  //       carries allocation semantics ("always bufferizes to a NEW buffer")
-  //       and is NOT memory-effect-free, so CSE leaves it alone — each DPS op
-  //       keeps its own destination. The index/`tensor.dim` arithmetic the CSE
-  //       below is meant to dedup is unaffected (those ops stay side-effect-
-  //       free and CSE-able).
-  //
-  // Before (CSE-mergeable empties → shared dest):
-  //   %e  = tensor.empty() : tensor<MxNxf16>
-  //   %a  = hip.gemm ... outs(%e)     // %e
-  //   %b  = hip.gemm ... outs(%e)     // SAME %e -> aliases %a after bufferize
-  // After (distinct allocations, CSE-safe):
-  //   %e0 = bufferization.alloc_tensor() : tensor<MxNxf16>
-  //   %e1 = bufferization.alloc_tensor() : tensor<MxNxf16>
-  //   %a  = hip.gemm ... outs(%e0)
-  //   %b  = hip.gemm ... outs(%e1)
-  pm.addPass(bufferization::createEmptyTensorToAllocTensorPass());
-
-  // 1b'. Canonicalize + CSE immediately after shape inference. The dynamic-
-  //      shape op conversions (e.g. pool / reduce) size each dynamic result dim
-  //      by emitting `tensor.dim` of a (statically-typed) producer plus a
-  //      little index arithmetic, then build the destination init from those
-  //      values. InferShapes above has just tightened many of those producers
-  //      to static dims, so canonicalization now folds `tensor.dim` of a static
-  //      dim to a constant, collapses the dependent arithmetic, and DCEs the
-  //      dead shape computations; CSE dedups the identical per-dim
-  //      recomputations the per-op conversions emit independently. Both run
-  //      before bufferize so
+  // 1b'. Canonicalize immediately after shape inference. The dynamic-shape op
+  //      conversions (e.g. pool / reduce) size each dynamic result dim by
+  //      emitting `tensor.dim` of a (statically-typed) producer plus a little
+  //      index arithmetic, then build the `tensor.empty` destination init from
+  //      those values. InferShapes above has just tightened many of those
+  //      producers to static dims, so canonicalization now folds `tensor.dim`
+  //      of a static dim to a constant, collapses the dependent arithmetic, and
+  //      DCEs the dead shape computations — running before bufferize so
   //      `--hip-pool-allocs` sees folded constant dims instead of fragmented
-  //      `memref.dim` chains (un-folded chains split the pool and pessimize
-  //      buffer reuse). The 1b'' pass above keeps CSE from merging the DPS
-  //      destination buffers while still letting it dedup the shape math.
+  //      `memref.dim` chains.
+  //
+  //      NOTE: there is deliberately NO `cse` here. A `cse` at this point is a
+  //      silent miscompile: `tensor.empty` is side-effect-free, so CSE merges
+  //      all same-typed empties into ONE value — but each per-op `tensor.empty`
+  //      is that op's destination-passing-style `outs` init. Merging N of them
+  //      makes N distinct ops share one buffer after bufferize, and the HIP DPS
+  //      ops bufferize in-place without copy insertion, so they clobber each
+  //      other (e.g. Whisper encoder cosine ~0.6, fp16==fp32). Buffer reuse is
+  //      instead done correctly downstream by `one-shot-bufferize`'s empty-
+  //      tensor-elimination + the liveness-based `buffer-deallocation` /
+  //      `--hip-pool-allocs` (which DO honour liveness); the post-bufferize CSE
+  //      passes still dedup the `memref.dim` arithmetic for pool quality
+  //      without touching `tensor.empty`. Do NOT reintroduce a `cse` before
+  //      bufferize. (An earlier fix that ran `empty-tensor-to-alloc-tensor`
+  //      before the CSE to make it CSE-safe was reverted: `alloc_tensor`
+  //      disables empty-tensor- elimination, ~4x-ing the GPU pool on some
+  //      models, e.g. gemma3-4b.)
   pm.addPass(mlir::createCanonicalizerPass());
-  pm.addPass(mlir::createCSEPass());
 
   // 1c. Fold `tensor.dim` queries on `tensor.expand_shape` /
   //     `tensor.collapse_shape` chains into arithmetic on the chain
