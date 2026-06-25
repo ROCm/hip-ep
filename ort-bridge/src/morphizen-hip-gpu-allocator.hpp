@@ -24,24 +24,25 @@ namespace morphizen {
 // Fixed size-class boundaries (bytes). A request of N bytes is served from the
 // first class whose capacity is >= N, and the buffer is allocated at the full
 // class capacity so any later request mapping to the same class can reuse it.
-// Requests larger than the last class (> 4 MB) are NOT pooled: they are
+// Requests larger than the last class (> 16 MB) are NOT pooled: they are
 // allocated at their exact size and released straight back to the driver in
 // FreeImpl, so a one-off huge transient can never pin memory in a free list.
 //
-// The class boundaries are generated at compile time in three tiers, with the
+// The class boundaries are generated at compile time in four tiers, with the
 // tier edges de-duplicated where they meet:
-//   [128 B, 1 KB] : powers of two                  -> 128, 256, 512, 1024
-//   (1 KB, 1 MB]  : 4 steps per octave (3 inserts) -> base*{1, 1.25, 1.5, 1.75}
+//   [128 B, 1 KB] : powers of two                   -> 128, 256, 512, 1024
+//   (1 KB, 1 MB]  : 4 steps per octave (3 inserts)  -> base*{1, 1.25, 1.5, 1.75}
 //   (1 MB, 4 MB]  : 16 steps per octave (15 inserts) -> base*{1 + k/16}
+//   (4 MB, 16 MB] : 32 steps per octave (31 inserts) -> base*{1 + k/32}
 // This gives fine granularity for the small/medium transients a model churns
 // every Run while keeping the total class count modest.
 namespace detail {
 
-// Compile-time-built table of size classes. Capacity (128) is comfortably
-// above the ~76 classes the three tiers below actually produce; `count` is the
+// Compile-time-built table of size classes. Capacity (256) is comfortably
+// above the ~140 classes the four tiers below actually produce; `count` is the
 // number of valid leading entries in `data`.
 struct SizeClassTable {
-  size_t data[128];
+  size_t data[256];
   size_t count;
   // De-duplicating append (tier edges 1 KB and 1 MB are produced twice). A
   // constexpr member function is used instead of a local lambda because
@@ -77,7 +78,7 @@ constexpr SizeClassTable BuildSizeClasses() {
     }
   }
   t.Add(4 * kMB);
-  // Tier4: 4 MB .. 16 MB, sixty-fourth steps per octave (31 inserts/octave).
+  // Tier4: 4 MB .. 16 MB, thirty-second steps per octave (31 inserts/octave).
   for (size_t base = 4 * kMB; base < 16 * kMB; base *= 2) {
     for (size_t k = 0; k < 32; ++k) {
       t.Add(base + base * k / 32);
@@ -129,12 +130,12 @@ private:
   // every buffer within a class is interchangeable and any later request
   // mapping to the same class reuses it (100% hit rate after warmup, with at
   // most a few distinct class sizes regardless of how many dynamic shapes the
-  // model sees). Pooled (<= 4 MB) buffers are never returned to the driver in
+  // model sees). Pooled (<= 16 MB) buffers are never returned to the driver in
   // Free; they are released wholesale in the destructor — matching the
   // project's per-session "grow-on-demand, never shrink, free at cleanup"
   // memory contract.
   //
-  // Requests larger than the largest size class (> 4 MB) are NOT pooled: they
+  // Requests larger than the largest size class (> 16 MB) are NOT pooled: they
   // are allocated at their exact size and released straight back to the driver
   // in FreeImpl. A model's largest transients are few and shape-specific, so
   // pooling them buys little reuse while risking an unbounded pinned working
