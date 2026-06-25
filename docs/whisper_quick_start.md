@@ -7,40 +7,11 @@ Licensed under the MIT License.
 End-to-end guide for running **Whisper** speech-to-text (large-v3 + the
 turbo/tiny/base/small/medium variants) on the AMDGPU EP from a fresh checkout:
 build the EP, build + prepare the model, run the tests, transcribe your own audio,
-and compare against CPU / Vulkan.
+and compare against CPU.
 
-Whisper runs **fp16 by default** — it is both faster on GPU and bit-faithful: the
+Whisper runs **fp16 by default** : the
 fp16 build keeps the `lm_head` in fp32 while the body is fp16, so greedy decoding
-is argmax-lossless (verbatim transcription, prefill logit cosine 1.0 vs the
-fp16 CPU reference). An **fp32** variant is also available (`--fp32`). **Both
-precisions are downloaded automatically from the AMD Hugging Face repos on first
-use** — [`amd/whisper-large-v3-onnx-fp16`](https://huggingface.co/amd/whisper-large-v3-onnx-fp16)
-and [`amd/whisper-large-v3-onnx-fp32`](https://huggingface.co/amd/whisper-large-v3-onnx-fp32) —
-so the tests and `transcribe_whisper.py` work from a fresh checkout with no
-separate model step. Building the models locally is the **backup** (§3b). fp32 is
-selected at run time with `--fp32`; see §6 for fp16-vs-fp32 numbers.
-
-> **Shell:** commands in this guide are written for **Git Bash** (the repo's
-> convention, same as the main [Quick Start](quick_start.md) — launch it from an
-> "x64 Native Tools Command Prompt for VS"). The only commands that differ by
-> shell are the environment exports in §2, which give a PowerShell equivalent.
-> `pytest` / `git` / `python` commands work the same in either shell.
-
-> **Paths in this guide** route the build tree and the install prefix through a
-> single `$ROOT` you choose: the build tree at `$ROOT/build`, the install prefix
-> at `$ROOT/local`. The EP DLL + `morphizen_config.json` land in `$ROOT/local/bin/`;
-> the auto-downloaded TheRock SDK lives at `$ROOT/build/_therock/`. Set `$ROOT`
-> once per shell (§1 / §2) and every later command reuses it.
->
-> **Pick a SHORT `$ROOT` on Windows.** MSBuild's file tracker and the from-source
-> LLVM build generate paths deep under `$ROOT/build/_deps/llvm-project-build/...`
-> that bust the 260-char `MAX_PATH` limit if `$ROOT` is long — the failure is a
-> cryptic `FileTracker : error FTK1011: could not create ... .tlog` mid-build, not
-> a code error. A root like `C:\Users\you\work\hip-ep-workspace` (≈38 chars) is
-> safe; building inside a deeply-nested worktree path is not. (Alternatively,
-> enable Windows long-path support once as admin: `New-ItemProperty -Path
-> "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled
-> -Value 1 -PropertyType DWORD -Force`, then restart the shell.)
+is argmax-lossless. 
 
 ---
 
@@ -59,44 +30,6 @@ surgery; only shape params, n_mels, vocab, and special-token IDs differ):
 | tiny           | 80     | 4 / 4            | 6     | 51865 | local OGA build               |
 
 `head_dim` is 64 and the decoder context is 448 for every variant.
-
-Build + prepare a single non-large-v3 variant (large-v3 auto-downloads on first
-use; the others require a local OGA build):
-
-```bash
-python scripts/build_whisper_models.py --variant large-v3-turbo   # or tiny/base/small/medium (fp16)
-python scripts/setup_whisper_model.py --variant large-v3-turbo    # surgery + fix_shapes (fp16)
-```
-
-Or **build + prepare ALL five local variants at once** (large-v3 is fetched
-on-demand by the test, so it is not in this list):
-
-```bash
-python scripts/build_whisper_models.py                            # default set, fp16
-for v in large-v3-turbo tiny base small medium; do
-  python scripts/setup_whisper_model.py --variant "$v"            # surgery + fix_shapes
-done
-```
-
-The added variants only need **fp16** — the build script and `setup_whisper_model.py`
-both default to fp16, and the per-variant test legs run fp16 only. (Pass
-`--precision both` / `--fp32` if you ever want fp32 for one of these.) This halves
-build + disk + test work; large-v3 keeps its fp32 bundle for the cross-backend
-fp32-vs-fp32 benchmark (§6).
-
-`--variant` accepts a comma-separated list or multiple `--variant` flags; omitting
-it builds the default set (`large-v3-turbo tiny base small medium`). See
-`python scripts/build_whisper_models.py --list` for the full list.
-
-> **large-v3-turbo build note.** Turbo has an asymmetric encoder/decoder (32 / 4
-> layers); the stock OGA 0.13.1 builder crashes on it. `build_whisper_models.py`
-> monkeypatches the builder in its isolated venv to fix this — no action needed,
-> but if you build turbo by some other means, expect an `IndexError: index 4 is
-> out of range`.
-
-Per-variant EP correctness + performance is covered by
-`test/python/whisper/test_whisper.py` (fp16 for every variant + fp32 for
-large-v3) — see [§4](#4-run-the-tests).
 
 ---
 
@@ -128,8 +61,6 @@ jfk.wav ──► feature extraction ──► ENCODER ──► cross-KV
   reads the running self-KV + the fixed cross-KV, appends one self-KV slot,
   argmax → next token, until `<|endoftext|>` or the 448-slot self-KV cap.
 
-See §5 (`--metrics`) for the per-phase latency breakdown and RTF.
-
 ---
 
 ## 0. Prerequisites
@@ -157,17 +88,14 @@ see §1b, which is mandatory before the EP will load.
 
 ## 1. Build the EP (one-time)
 
-From the repo root. Choose a **short** `$ROOT` (see the MAX_PATH note above) and
+From the repo root. Choose a **short** `$ROOT`  and
 route the build trees + install prefixes through it. Run the LLVM step from an
 **x64 Native Tools Command Prompt for VS 2022** (Ninja needs the MSVC env).
 
 ### Step 1a — build LLVM into an `llvm-install` prefix (Tier-1, one-time)
 
 **Build the EP against a real `llvm-install` (Tier-1), not the from-source
-fallback.** On Windows a Tier-2 / FetchContent in-tree LLVM produces a `hipep.dll`
-whose in-process **bitcode** JIT crashes at session-create; CI builds and
-`find_package()`s a standalone `llvm-install`, and matching that locally is what
-makes the default bitcode path work. The recipe (pins live in
+fallback.**  The recipe (pins live in
 `.github/workflows/windows-build.yml`):
 
 ```bash
@@ -197,7 +125,7 @@ and `\`-separated paths.
 
 `build.py` resolves the remaining deps (Protobuf/FlatBuffers + ONNX Runtime
 auto-downloaded), the TheRock ROCm SDK, detects your GPU, and builds the compiler
-+ the EP backend (`hipep.dll`) into `$ROOT/local/`. See the main
+and the EP backend (`hipep.dll`) into `$ROOT/local/`. See the main
 [Quick Start](quick_start.md) for details and troubleshooting.
 
 After it finishes you should have `$ROOT/local/bin/hipep.dll`.
@@ -315,7 +243,7 @@ $env:Path = "$env:THEROCK_DIST\bin;$ROOT\local\bin;$env:Path"
 
 ---
 
-## 3. Get + prepare the model
+## 3a. Get + prepare the model
 
 **Sourcing differs by variant** — only large-v3 is published as a prebuilt ONNX:
 
@@ -347,8 +275,6 @@ for v in large-v3 large-v3-turbo tiny base small medium; do
 done
 ```
 
-> **Gated / rate-limited large-v3 download?** Run `hf auth login` with a token that
-> can read the repo and retry. If HF is unreachable, build large-v3 locally (§3b).
 
 Each prepared variant dir (`models/whisper-<variant>-onnx[-fp16]/`) holds:
 
@@ -358,13 +284,6 @@ Each prepared variant dir (`models/whisper-<variant>-onnx[-fp16]/`) holds:
   decoder_fixed_prefill.onnx (S=4), decoder_fixed_decode.onnx (S=1)                  (surgered + fixed-shape)
 ```
 
-> **First run per model is slower:** the EP JIT-compiles each `*_fixed*.onnx`
-> in-process at session load (ONNX → HIP → LLVM IR); there is no on-disk model
-> artifact to manage. After rebuilding the EP (runtime/kernel change) the next run
-> JITs the new code automatically. (The opt-in `HIPEP_ARTIFACT_FORMAT=NATIVE` path
-> instead writes a per-model DLL under `%TEMP%/morphizen_mlir_*`, which you clear
-> with `rm -f "$TEMP"/morphizen_mlir_*` after a runtime change; the default JIT
-> path needs no such step.)
 
 ---
 
@@ -399,14 +318,6 @@ First build per variant downloads the HF *weights* + builds (~a few min each);
 idempotent after. No manual `onnxruntime-genai-directml` install is needed and the
 OGA fork is never shadowed — the builder runs in its own isolated venv (see §0).
 
-### Precisions (fp16 default, fp32 opt-out)
-
-fp16 is the **default** precision — faster on GPU and bit-faithful (fp32 `lm_head`
-keeps greedy argmax-lossless). The default transcribe / test commands run fp16;
-add `--fp32` to use the fp32 model instead (§5, §6). Both the HF download (§3) and
-the local build (above) provide the same two bundles; `setup_whisper_model.py`
-(default) and `--fp32` apply the SAME surgery + `fix_shapes` to each.
-
 ---
 
 ## 4. Run the tests
@@ -420,22 +331,16 @@ is unreachable.
 reference of the same model). The per-op numeric tests (§4d) and MLIR LIT (§4e)
 are excluded here — they validate single ops / IR shapes, not whole-model accuracy.
 
-| Test (§) | Asserts | Models covered |
-|---|---|---|
-| `test_encoder_correctness` (4c) | encoder hidden cosine, GPU vs CPU | **all 6 variants** |
-| `test_decoder_prefill_correctness` (4c) | prefill logits cosine | **all 6 variants** |
-| `test_decoder_decode_correctness` (4c) | per-step decode logits cosine | **all 6 variants** |
-| `test_e2e_transcription_greedy` (4a) | greedy tokens GPU == CPU (verbatim) | **all 6 variants** |
-| `test_librispeech_gpu_vs_cpu` (4b) | 5 clips, GPU == CPU verbatim | **all 6 variants** |
-| `test_long_30s_gpu_vs_cpu` (4b) | 30 s clip, GPU == CPU | **all 6 variants** |
-| `test_librispeech_wer` (4b) | 5 clips, WER vs ground truth | large-v3 (see §4b) |
+| Test (§) | Asserts |
+|---|---|
+| `test_encoder_correctness` (4c) | encoder hidden cosine, GPU vs CPU |
+| `test_decoder_prefill_correctness` (4c) | prefill logits cosine |
+| `test_decoder_decode_correctness` (4c) | per-step decode logits cosine |
+| `test_e2e_transcription_greedy` (4a) | greedy tokens GPU == CPU (verbatim) |
+| `test_librispeech_gpu_vs_cpu` (4b) | 5 clips, GPU == CPU verbatim |
+| `test_long_30s_gpu_vs_cpu` (4b) | 30 s clip, GPU == CPU |
+| `test_librispeech_wer` (4b) | 5 clips, WER vs ground truth |
 
-"All 6 variants" = large-v3, large-v3-turbo, tiny, base, small, medium.
-**Precision:** every variant runs **fp16** (the default); large-v3 *additionally*
-runs **fp32** in the cosine / e2e tests (§4a/§4c) — see each subsection for the
-exact legs. `test_perf_decode_tps` (§6) is a perf test, not listed here. The
-per-variant decode tok/s / RTF come from the `PERF`
-line `test_e2e_transcription_greedy` prints (§4f).
 
 ### 4a. End-to-end transcription (the headline)
 
