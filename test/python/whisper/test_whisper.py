@@ -839,9 +839,20 @@ def test_e2e_transcription_greedy(variant_precision, capfd):
     cpu_text = _decode_text(cpu_tokens, tokenizer_id=var.hf_model_id, eot=var.eot)
     gc.collect()
 
+    # GPU: cache sessions so the compile/warmup run and the timed PERF run reuse
+    # the SAME compiled sessions (each MorphiZen session compiles its ONNX at
+    # creation; the cache makes the timed run steady-state, not cold).
+    _gpu_cache = {}
+
+    def gpu_factory(name):
+        if name not in _gpu_cache:
+            _gpu_cache[name] = _morphizen_session(name, model_dir)
+        return _gpu_cache[name]
+
+    # First run: compiles (JIT) + proves GPU dispatch; also warms the sessions.
     capfd.readouterr()
-    mz_tokens = _greedy_decode_morphizen(
-        audio, model_dir=model_dir, dtype=dtype, variant=var
+    mz_tokens = whisper_infer.greedy_decode_morphizen(
+        gpu_factory, audio, dtype=dtype, variant=var
     )
     stderr_text = "".join(capfd.readouterr())
     mz_text = _decode_text(mz_tokens, tokenizer_id=var.hf_model_id, eot=var.eot)
@@ -859,6 +870,24 @@ def test_e2e_transcription_greedy(variant_precision, capfd):
     # argmax-lossless (fp32 lm_head in both), so GPU == CPU token-for-token.
     assert mz_tokens == cpu_tokens, (
         f"{prec} transcription token mismatch:\n  cpu: {cpu_text!r}\n  mz : {mz_text!r}"
+    )
+
+    # Steady-state perf on the cached (already-compiled) sessions — emit a per-
+    # (variant, precision) PERF line so CI records performance next to accuracy.
+    # decode tok/s = decode_steps / decode_loop_wall; RTF = total compute / audio.
+    # (Standalone equivalent: scripts/transcribe_whisper.py --variant <name>.)
+    timings = {}
+    whisper_infer.greedy_decode_morphizen(
+        gpu_factory, audio, dtype=dtype, variant=var, timings=timings
+    )
+    audio_s = whisper_infer.audio_duration_s(_AUDIO)
+    enc, prefill = timings["enc_ms"], timings["prefill_ms"]
+    decode, n = timings["decode_ms"], timings["n_decode_steps"]
+    tps = n / (decode / 1e3) if decode > 0 else 0.0
+    rtf = ((enc + prefill + decode) / 1e3) / audio_s if audio_s > 0 else 0.0
+    print(
+        f"[e2e/{prec}] PERF: encoder={enc:.0f}ms prefill={prefill:.0f}ms "
+        f"decode={tps:.1f}tok/s ({n} steps) RTF={rtf:.3f}"
     )
 
 
