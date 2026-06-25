@@ -365,7 +365,7 @@ jobs:
                 done
           }
           stage_pass \
-            "$INSTALL"/lib/libhipep.so \
+            "$INSTALL"/lib/libhipgpu.so \
             "$INSTALL"/lib/libhip-compiler.so \
             "$INSTALL"/bin/hip-compiler \
             "$INSTALL"/bin/hip-onnx-runner \
@@ -458,7 +458,7 @@ jobs:
 
           cp "${{ github.workspace }}/etc/morphizen_config.json" staging/etc/
 
-          # Smoke: per-arch kernel SO must sit next to libhipep.so (the EP, named
+          # Smoke: per-arch kernel SO must sit next to libhipgpu.so (the EP, named
           # via morphizen_OUTPUT_NAME); the EP anchors dlopen via dladdr() + RPATH=$ORIGIN.
           KERNEL_SO="staging/lib/libcustom_kernels_gfx1151.so"
           if [ ! -f "$KERNEL_SO" ]; then
