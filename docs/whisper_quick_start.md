@@ -11,7 +11,7 @@ and compare against CPU.
 
 Whisper runs **fp16 by default** : the
 fp16 build keeps the `lm_head` in fp32 while the body is fp16, so greedy decoding
-is argmax-lossless. 
+is argmax-lossless.
 
 ---
 
