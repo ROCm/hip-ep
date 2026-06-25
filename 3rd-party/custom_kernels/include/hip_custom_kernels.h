@@ -1681,6 +1681,33 @@ HIP_KERNEL_API int hip_linear_attention_decode(
     int64_t beta_per_head,
     int64_t type);
 
+// Chunked-parallel gated-delta prefill kernel (single launch, processes the
+// whole sequence). Returns >0 (=1) when it declines the launch (caller must
+// fall back to the per-token decode loop); 0 on success; <0 on launch error.
+// Only the gated_delta rule with scalar log-decay (decay_per_key_dim==0) is
+// supported; other rules/layouts/oversized smem are declined.
+HIP_KERNEL_API int hip_linear_attention_prefill_chunked(
+    void* stream,
+    const void* query,
+    const void* key,
+    const void* value,
+    const void* decay,
+    const void* beta,
+    void* state,
+    void* output,
+    int64_t B,
+    int64_t seq_len,
+    int64_t Hq,
+    int64_t Hkv,
+    int64_t Nk,
+    int64_t dk,
+    int64_t dv,
+    float scale,
+    int64_t update_rule,
+    int64_t decay_per_key_dim,
+    int64_t beta_per_head,
+    int64_t type);
+
 // Max memref rank honoured by the strided memref.copy fast path
 // (hip_strided_copy) and the host per-row fallback in memrefCopy. Defined
 // once here so the kernel and the runtime helper cannot drift out of sync.
