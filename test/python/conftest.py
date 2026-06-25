@@ -36,38 +36,8 @@ os.environ.setdefault("HIPDNN_EP_STRICT", "1")
 NUM_WARMUP = 1
 NUM_RUNS = 3
 
-# The EP is now reached through the AMD GPU umbrella EP (amdgpu-ep.dll), which
-# loads hipep-backend.dll → hipep.dll (the renamed MorphiZen EP). The umbrella
-# selects the backend via the "profile" provider option (see EP_PROVIDER_OPTIONS).
-EP_DLL_NAME = "amdgpu-ep.dll"
-EP_REGISTRATION_NAME = "AMDGPUExecutionProvider"
-# OGA registers the umbrella under its short name (genai_config key).
-EP_OGA_NAME = "AMDGPU"
-# Provider option the umbrella forwards to pick the hipep backend.
-EP_PROVIDER_OPTIONS = {"profile": "llm"}
-
-# Optional artifact-format override (escape hatch). Production / CI use the
-# default in-process LLVM-IR (bitcode) JIT, so this is UNSET by default and the
-# tests run on bitcode. Set HIPEP_ARTIFACT_FORMAT=NATIVE to compile each model to
-# a per-model DLL (lld-link + LoadLibrary) instead. Normally not needed — build
-# the EP against a Tier-1 `llvm-install` (see docs/whisper_quick_start.md §1) and
-# bitcode works; NATIVE is just a fallback. The value rides through as a raw
-# `ep.hipep.*` session-config entry (NOT a provider option: ORT validates those
-# against the umbrella's declared set and rejects an unknown key; the umbrella
-# forwards non-umbrella-prefixed config entries to the backend verbatim). Mirrors
-# CI's `-C ep.hipep.artifact_format|NATIVE`.
-ARTIFACT_FORMAT_ENV = "HIPEP_ARTIFACT_FORMAT"
-
-
-def apply_artifact_format(so):
-    """Apply the optional HIPEP_ARTIFACT_FORMAT override to a SessionOptions.
-
-    No-op (bitcode default) when the env var is unset/empty.
-    """
-    fmt = os.environ.get(ARTIFACT_FORMAT_ENV, "").strip()
-    if fmt:
-        so.add_session_config_entry("ep.hipep.artifact_format", fmt)
-
+EP_DLL_NAME = "onnxruntime_morphizen_ep.dll"
+EP_REGISTRATION_NAME = "MorphiZenExecutionProvider"
 
 _morphizen_registered = False
 
@@ -77,16 +47,13 @@ def _ep_runtime_dirs(repo_root):
 
     Honours an out-of-tree install layout via env vars (set them when you build
     with a custom --install_dir / --build_dir, e.g. the quick-start $ROOT layout):
-      HIPEP_EP_BIN      -- dir holding the AMD GPU umbrella EP chain
-                           (amdgpu-ep.dll + hipep-backend.dll + hipep.dll)
+      MORPHIZEN_EP_BIN  -- dir holding onnxruntime_morphizen_ep.dll
                            (default <repo>/install/dist/bin)
       THEROCK_DIST      -- TheRock SDK root; its bin/ holds amdhip64*.dll etc.
                            (default <repo>/install/therock)
     Falls back to the legacy in-repo layout so existing setups keep working.
-    The legacy MORPHIZEN_EP_BIN name is still honoured as a fallback so older
-    local setups / scripts keep working during the rename.
     """
-    ep_env = os.environ.get("HIPEP_EP_BIN") or os.environ.get("MORPHIZEN_EP_BIN")
+    ep_env = os.environ.get("MORPHIZEN_EP_BIN")
     ep_bin = pathlib.Path(ep_env) if ep_env else repo_root / "install" / "dist" / "bin"
     therock_env = os.environ.get("THEROCK_DIST")
     therock_bin = (
@@ -500,12 +467,7 @@ def get_amd_dml_providers():
 
 
 def register_morphizen_ep(repo_root):
-    """Register the AMDGPU umbrella EP library with ONNX Runtime (once per process).
-
-    Registers ``amdgpu-ep.dll`` under ``AMDGPUExecutionProvider``; the umbrella
-    loads hipep-backend.dll → hipep.dll underneath. Returns the matching EP
-    devices (callers pass ``EP_PROVIDER_OPTIONS`` to ``add_provider_for_devices``).
-    """
+    """Register the MorphiZen EP library with ONNX Runtime (once per process)."""
     global _morphizen_registered
 
     dist_bin, therock_bin = _ep_runtime_dirs(repo_root)
@@ -1089,22 +1051,17 @@ def create_cpu_session(model_path):
 
 
 def create_ep_session(model_path, repo_root, provider_options=None):
-    """Create an AMDGPU-umbrella-EP InferenceSession.
+    """Create a MorphiZen-EP InferenceSession.
 
-    provider_options: optional dict forwarded to the EP. Defaults to
-    EP_PROVIDER_OPTIONS ({"profile": "llm"}) — the umbrella uses "profile" to
-    select the hipep backend. The backend compiles every model in
-    output-allocator mode (the 2-arg in-graph hip.alloc_output ABI) -- there is
-    no provider option to select a mode.
+    provider_options: optional dict forwarded to the EP. Defaults to {}. The EP
+    compiles every model in output-allocator mode (the 2-arg in-graph
+    hip.alloc_output ABI) -- there is no provider option to select a mode.
     """
     devices = register_morphizen_ep(repo_root)
     if not devices:
-        pytest.skip("AMDGPU EP not found — run build.py first")
+        pytest.skip("MorphiZen EP not found — run build.py first")
     so = ort.SessionOptions()
-    apply_artifact_format(
-        so
-    )  # bitcode by default; HIPEP_ARTIFACT_FORMAT=NATIVE opts in
-    so.add_provider_for_devices(devices, provider_options or dict(EP_PROVIDER_OPTIONS))
+    so.add_provider_for_devices(devices, provider_options or {})
     return ort.InferenceSession(model_path, sess_options=so)
 
 
@@ -1282,7 +1239,7 @@ def setup_oga_ep(repo_root):
     dist_bin, therock_bin = _ep_runtime_dirs(repo_root)
     ep_dll = dist_bin / EP_DLL_NAME
     if not ep_dll.exists():
-        pytest.skip("AMDGPU EP DLL not found — run build.py first")
+        pytest.skip("MorphiZen EP DLL not found — run build.py first")
 
     for d in [dist_bin, therock_bin]:
         if d.exists() and str(d) not in os.environ.get("PATH", ""):
@@ -1290,7 +1247,7 @@ def setup_oga_ep(repo_root):
 
     global _oga_ep_registered
     if not _oga_ep_registered:
-        og.register_execution_provider_library(EP_OGA_NAME, str(ep_dll))
+        og.register_execution_provider_library("MorphiZenEP", str(ep_dll))
         _oga_ep_registered = True
 
     return og, ep_dll
@@ -1304,7 +1261,7 @@ def patch_genai_config_for_morphizen(model_dir, ep_dll):
     shutil.copy2(config_path, backup_path)
     with open(config_path) as f:
         config = json.load(f)
-    morphizen_options = [{EP_OGA_NAME: dict(EP_PROVIDER_OPTIONS)}]
+    morphizen_options = [{"MorphiZenEP": {}}]
     config["model"]["decoder"]["session_options"]["provider_options"] = (
         morphizen_options
     )
