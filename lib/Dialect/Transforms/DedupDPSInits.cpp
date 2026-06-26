@@ -58,8 +58,8 @@
 //       per-dim extent of a 4-D `reshape(-1)` is a deep product/divsi tree of
 //       `hip.readback_scalar`s — pre-bufferize the readback is effect-free, so
 //       GVN/CSE fold it, but a fixed recursion depth exhausts on the tree and
-//       wrongly reports "not equal", leaving the buffers unmerged → pool blow-up
-//       on a VLM vision tower.)
+//       wrongly reports "not equal", leaving the buffers unmerged → pool
+//       blow-up on a VLM vision tower.)
 //
 // Before (two non-overlapping, same-size DPS consumers share one empty):
 //   %sz = ...                            // dynamic extent, shared SSA value
@@ -279,8 +279,7 @@ struct DedupDPSInitsPass
       if (!feedsDPS)
         continue;
 
-      empties.push_back(
-          {emptyOp, opIndex[&op], computeLastConsumer(emptyOp)});
+      empties.push_back({emptyOp, opIndex[&op], computeLastConsumer(emptyOp)});
     }
 
     if (empties.empty())
