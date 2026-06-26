@@ -176,7 +176,7 @@ module {
   // ONNX Where permits rank-0 tensors under NumPy-style multidirectional
   // broadcasting. The runtime kernel handles scalars through natural loop
   // degeneracy (see `hip_elementwise_where` in
-  // 3rd-party/custom_kernels/hip/elementwise_where_kernel.hip), and the
+  // lib/Runtime/Kernels/hip/elementwise_where_kernel.hip), and the
   // lowering uses `std::max(rank, 1)` for the alloca size so rank-0 stack
   // arrays remain valid. These cases exercise the conversion side: an empty
   // tensor.empty() plus a hip.where on rank-0 operands.
