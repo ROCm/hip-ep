@@ -61,6 +61,7 @@ target_link_libraries(HipDialectTransforms PUBLIC
   MLIRLinalgTransforms
   MLIRSCFToControlFlow
   MLIRInferTypeOpInterface
+  MLIRViewLikeInterface
   MLIRTensorDialect
   flatbuffers::flatbuffers
 )
