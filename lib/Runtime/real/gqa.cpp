@@ -23,7 +23,7 @@
 //     decomposed hipBLASLt pipeline gqa_forward_hipblaslt below. This is a
 //     verbatim port of the proven gqa_back.cpp strategy (the read-only backup
 //     stays out of the build); its fast decode kernels (hip_gqa_fused_decode /
-//     hip_gqa_flash_decode) live in the isolated gqa_kernel_legacy.hip so the
+//     hip_gqa_flash_decode) are folded into gqa_kernel.hip so the
 //     sliding-window / sink decode case keeps the legacy kernel's performance.
 //
 //   * Inputs NEITHER path supports (KV-cache quantization, attention bias,
@@ -57,10 +57,11 @@
 #define HIPBLAS_CHECK(cmd) HIPBLAS_CHECK_GOTO(cmd, cleanup)
 
 //===----------------------------------------------------------------------===//
-// Legacy fast-path decode kernels (defined in gqa_kernel_legacy.hip, an
-// isolated copy of the backup kernels). The current hip_custom_kernels.h no
-// longer declares these (the production fused path uses the _v2 kernels), so
-// declare them here for the decomposed-fallback fast decode path.
+// Legacy fast-path decode kernels (folded into gqa_kernel.hip as legacy_*
+// kernels, exposed via these two extern "C" entries). The current
+// hip_custom_kernels.h no longer declares these (the production fused path
+// uses the _v2 kernels), so declare them here for the decomposed-fallback
+// fast decode path.
 //===----------------------------------------------------------------------===//
 extern "C" int hip_gqa_fused_decode(void *stream, const void *Q,
                                     const void *Kcache, const void *Vcache,
