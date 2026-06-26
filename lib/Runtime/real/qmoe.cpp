@@ -298,7 +298,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       // returns -1 for every token -> 0/N experts active from layer ~3 on
       // -> garbage logits). Matches `convertZpToFp16`'s
       // `packed_cols = (groups_k + 1) / 2` in
-      // 3rd-party/custom_kernels/hip/matmul_nbits_kernel.hip and the
+      // lib/Runtime/Kernels/hip/matmul_nbits_kernel.hip and the
       // hard-coded `zp_elem_size = 1` we pass to hip_matmul_nbits below.
       const void *fc1_zp_e =
           fc1_zero_points ? static_cast<const char *>(fc1_zero_points) +
