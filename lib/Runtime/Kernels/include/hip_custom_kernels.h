@@ -617,10 +617,30 @@ HIP_KERNEL_API int hip_gqa_softmax_f32_to_f32(
     int input_batch_stride, int output_batch_stride,
     const void* head_sink, int num_heads, int use_smooth_softmax);
 
-/* [removed] hip_gqa_fused_decode: the legacy one-block-per-(batch,head_q)
- * decode kernel has been retired. Single-token decode now runs exclusively
- * through hip_gqa_flash_decode_v2 (FA-2 split-K; scalar templated for HpG in
- * {1,2,3,4,8,16} so it covers MHA + GQA, with WMMA layered on where it wins). */
+/* Legacy fast-path decode kernels (folded into gqa_kernel.hip with legacy_*
+ * device kernels). The production fused decode path uses hip_gqa_flash_decode_v2
+ * above; these two entries back gqa.cpp::gqa_forward_hipblaslt -- the decomposed
+ * hipBLASLt fallback -- for the cases the fused path does not cover. They MUST be
+ * exported (HIP_KERNEL_API) so the EP resolves them out of custom_kernels_<arch>
+ * at JIT link / native import (same as every other launcher here).
+ *
+ * hip_gqa_fused_decode: one-block-per-(batch,head_q) decode, d in {64,128,256},
+ * arbitrary HpG -- the general small-/odd-geometry decode used when flash is not
+ * eligible. */
+HIP_KERNEL_API int hip_gqa_fused_decode(
+    void* stream, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int H, int G, int d, int skv, int max_seq,
+    float scale, const void* seqlens_k);
+
+/* hip_gqa_flash_decode: FA-2 split-K (scalar|WMMA), HPG in {4,8}, with
+ * sliding-window + head-sink / smooth-softmax -- the fast windowed/sink decode
+ * the fallback uses. partials_workspace: float scratch B*H*K_SPLITS*(d+2). */
+HIP_KERNEL_API int hip_gqa_flash_decode(
+    void* stream, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, void* partials_workspace,
+    int B, int H, int G, int d, int max_seq, int K_SPLITS,
+    float scale, const void* seqlens_k, int local_window_size,
+    const void* head_sink, int use_smooth_softmax);
 
 /* Optimized fused GQA prefill (sq > 1, d in {64,128}, fp16, causal, GQA) --
  * Flash-Attention-2 with WMMA tile GEMMs and intra-wave online softmax. These
