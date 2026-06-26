@@ -42,7 +42,11 @@ from framework.onnx_utils import make_model_from_nodes
 NUM_HEADS = 20
 HEAD_DIM = 64
 HIDDEN = NUM_HEADS * HEAD_DIM  # 1280
-CACHE = 448  # Whisper decoder max KV buffer (BNSH dim 2)
+CACHE = 448  # Whisper decoder max KV buffer (BNSH dim 2) — same for every variant
+
+# num_heads for every supported variant (head_dim 64, cache 448 for all): tiny 6,
+# base 8, small 12, medium 16, large-v3 & turbo 20.
+VARIANT_HEADS = [6, 8, 12, 16, 20]
 
 
 def _make_self_mha_share_buffer_model(batch, seq_q, cache, num_heads, head_dim):
@@ -192,34 +196,36 @@ def _make_self_mha_plain_past_model(batch, seq_q, past, num_heads, head_dim):
 class TestWhisperSelfAttention:
     """9-input share-buffer MHA -> hip.gqa(no_causal=false), HPG=1, decode."""
 
+    @pytest.mark.parametrize("num_heads", VARIANT_HEADS)
     @pytest.mark.parametrize("past_seq_val", [1, 64, 256, 447])
-    def test_self_attention_decode(self, model_runner, past_seq_val):
-        """Whisper decoder self-attn decode (Sq=1) at various valid past lengths.
+    def test_self_attention_decode(self, model_runner, past_seq_val, num_heads):
+        """Whisper decoder self-attn decode (Sq=1) across variant num_heads.
 
         MorphiZen runs the 9-input share-buffer form (448-slot buffer, valid
         prefix = past_seq_val).  Reference = ORT CPU on the standard 8-input
         MHA-with-past whose past tensor is exactly the valid prefix.
         """
         batch, seq_q = 1, 1
+        hidden = num_heads * HEAD_DIM
 
-        rng = np.random.default_rng(past_seq_val)
-        q = rng.uniform(-1.0, 1.0, [batch, seq_q, HIDDEN]).astype(np.float16)
-        k = rng.uniform(-1.0, 1.0, [batch, seq_q, HIDDEN]).astype(np.float16)
-        v = rng.uniform(-1.0, 1.0, [batch, seq_q, HIDDEN]).astype(np.float16)
+        rng = np.random.default_rng(past_seq_val * 100 + num_heads)
+        q = rng.uniform(-1.0, 1.0, [batch, seq_q, hidden]).astype(np.float16)
+        k = rng.uniform(-1.0, 1.0, [batch, seq_q, hidden]).astype(np.float16)
+        v = rng.uniform(-1.0, 1.0, [batch, seq_q, hidden]).astype(np.float16)
 
         # Valid KV prefix shared by both models.
         pk_valid = rng.uniform(
-            -1.0, 1.0, [batch, NUM_HEADS, past_seq_val, HEAD_DIM]
+            -1.0, 1.0, [batch, num_heads, past_seq_val, HEAD_DIM]
         ).astype(np.float16)
         pv_valid = rng.uniform(
-            -1.0, 1.0, [batch, NUM_HEADS, past_seq_val, HEAD_DIM]
+            -1.0, 1.0, [batch, num_heads, past_seq_val, HEAD_DIM]
         ).astype(np.float16)
 
         # ---- MorphiZen: 9-input share-buffer form.  past_* is the 448-slot
         # buffer with the valid prefix in [0, past_seq_val) and garbage tail
         # (zeros) afterward; the kernel only reads [0, past_seq_val].
-        pk_buf = np.zeros([batch, NUM_HEADS, CACHE, HEAD_DIM], dtype=np.float16)
-        pv_buf = np.zeros([batch, NUM_HEADS, CACHE, HEAD_DIM], dtype=np.float16)
+        pk_buf = np.zeros([batch, num_heads, CACHE, HEAD_DIM], dtype=np.float16)
+        pv_buf = np.zeros([batch, num_heads, CACHE, HEAD_DIM], dtype=np.float16)
         pk_buf[:, :, :past_seq_val, :] = pk_valid
         pv_buf[:, :, :past_seq_val, :] = pv_valid
         # past_sequence_length = number of valid past tokens (GQA seqlens_k
@@ -227,7 +233,7 @@ class TestWhisperSelfAttention:
         past_seq = np.array([past_seq_val], dtype=np.int32)
 
         share_model = _make_self_mha_share_buffer_model(
-            batch, seq_q, CACHE, NUM_HEADS, HEAD_DIM
+            batch, seq_q, CACHE, num_heads, HEAD_DIM
         )
         sub = model_runner._next_subdir("share_buffer")
         share_path = str(sub / "model.onnx")
@@ -241,7 +247,7 @@ class TestWhisperSelfAttention:
         # past tensor == the valid prefix only.  ORT CPU rejects the 9-input
         # share-buffer form, so this equal-but-acceptable form is the reference.
         ref_model = _make_self_mha_plain_past_model(
-            batch, seq_q, past_seq_val, NUM_HEADS, HEAD_DIM
+            batch, seq_q, past_seq_val, num_heads, HEAD_DIM
         )
         _, ref_expected = model_runner.run_sample(
             ref_model,
