@@ -95,7 +95,10 @@ route the build trees + install prefixes through it. Run the LLVM step from an
 ### Step 1a — build LLVM into an `llvm-install` prefix (Tier-1, one-time)
 
 **Build the EP against a real `llvm-install` (Tier-1), not the from-source
-fallback.**  The recipe (pins live in
+fallback.** On Windows a Tier-2 / FetchContent in-tree LLVM produces a `hipgpu.dll`
+whose in-process **bitcode** JIT crashes at session-create; CI builds and
+`find_package()`s a standalone `llvm-install`, and matching that locally is what
+makes the default bitcode path work. The recipe (pins live in
 `.github/workflows/windows-build.yml`):
 
 ```bash
@@ -125,17 +128,17 @@ and `\`-separated paths.
 
 `build.py` resolves the remaining deps (Protobuf/FlatBuffers + ONNX Runtime
 auto-downloaded), the TheRock ROCm SDK, detects your GPU, and builds the compiler
-and the EP backend (`hipep.dll`) into `$ROOT/local/`. See the main
++ the EP backend (`hipgpu.dll`) into `$ROOT/local/`. See the main
 [Quick Start](quick_start.md) for details and troubleshooting.
 
-After it finishes you should have `$ROOT/local/bin/hipep.dll`.
+After it finishes you should have `$ROOT/local/bin/hipgpu.dll`.
 
 > **AMDGPU umbrella EP.** The tests reach the backend through the AMD GPU
 > umbrella EP — `amdgpu-ep.dll` (registration name `AMDGPUExecutionProvider`),
-> which loads `hipep-backend.dll` → `hipep.dll`. The umbrella + shim are built
+> which loads `hip-backend.dll` → `hipgpu.dll`. The umbrella + shim are built
 > from the `onnxruntime-ep-amdgpu` fork (see `.github/workflows/windows-build.yml`
 > for the pinned commit + `cmake -DUSE_AMDGPU=ON` recipe) and must sit next to
-> `hipep.dll` in `$ROOT/local/bin/`. The umbrella selects the hipep backend via
+> `hipgpu.dll` in `$ROOT/local/bin/`. The umbrella selects the hipgpu backend via
 > the `profile=llm` provider option.
 
 ---
@@ -634,7 +637,7 @@ EP comparison.
 | Changed a runtime `.cpp` / kernel, behavior didn't change | Cached model DLLs embed the old bitcode. Clear the cache after rebuilding (PowerShell `Remove-Item "$env:TEMP\morphizen_mlir_*"` / Git Bash `rm -f "$TEMP"/morphizen_mlir_*`). |
 | A test `skip`s with "audio unavailable" | The network can't reach github/HF for the test clips. Connect and re-run; the audio caches locally after the first fetch. |
 | Model setup fails / `Could not obtain the Whisper raw model` | The raw bundle download from `amd/whisper-large-v3-onnx-{fp16,fp32}` failed. If it's an auth / rate-limit error, run `hf auth login` and retry. If HF is unreachable, build the models locally instead (§3b: `python scripts/build_whisper_models.py`). |
-| Every test `skip`s with "AMDGPU EP not found — run build.py first" | The tests can't locate the EP DLL. For an out-of-tree install (`$ROOT/local`), set `HIPEP_EP_BIN` (§2). Verify `amdgpu-ep.dll` (+ `hipep-backend.dll` + `hipep.dll`) exist at `$ROOT/local/bin/`. |
+| Every test `skip`s with "AMDGPU EP not found — run build.py first" | The tests can't locate the EP DLL. For an out-of-tree install (`$ROOT/local`), set `HIPEP_EP_BIN` (§2). Verify `amdgpu-ep.dll` (+ `hip-backend.dll` + `hipgpu.dll`) exist at `$ROOT/local/bin/`. |
 | EP registration fails (`requested API version [N] is not available`) / access violation on session create | The pip `onnxruntime` version ≠ the ORT the EP links (`cmake/deps.txt`). PyPI's `onnxruntime-directml` often lags the pinned tag, so `pip install` alone won't fix it — build a matching ORT wheel from source and install it (see §1b). |
 
 For internals (how the ONNX surgery works, the `no_causal` GQA path, the fp32

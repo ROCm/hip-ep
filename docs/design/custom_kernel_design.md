@@ -11,13 +11,13 @@ The existing ops (Conv, Gemm, etc.) call ROCm library APIs (MIOpen, hipBLASLt) w
 ```mermaid
 flowchart TD
     subgraph buildTime ["Build Time (once, per arch)"]
-        HIP["custom_kernels/hip/*.hip"]
+        HIP["lib/Runtime/Kernels/hip/*.hip"]
         HIPCC["hipcc --offload-arch=gfxNNNN"]
         KSO["custom_kernels_gfxNNNN.{dll,so}"]
         HIP -->|"hipcc -c"| HIPCC --> KSO
 
         RT["lib/Runtime/real/gqa.cpp\nlib/Runtime/real/rotary_embedding.cpp"]
-        HDR["custom_kernels/include/\nhip_custom_kernels.h (pure C)"]
+        HDR["lib/Runtime/Kernels/include/\nhip_custom_kernels.h (pure C)"]
         BC["runtime.bc"]
         RT -->|"clang -emit-llvm\n(includes pure C header)"| BC
         HDR -.->|"#include"| RT
@@ -46,30 +46,30 @@ Key insight: The `.hip` files contain `__global__` kernels compiled by hipcc int
 
 ```
 onnx-hipdnn-ep/
-├── 3rd-party/custom_kernels/
-│   ├── CMakeLists.txt                # Builds .hip files into static lib + install rules
-│   ├── cmake/
-│   │   └── hip_utils.cmake           # hipcc compilation infrastructure
-│   ├── include/
-│   │   ├── hip_custom_kernels.h     # Pure C header (no HIP types)
-│   │   └── debug_log.h
-│   └── hip/
-│       ├── rope_kernel.hip           # RoPE __global__ kernel + host launcher
-│       ├── gqa_kernel.hip            # GQA __global__ kernel + host launcher
-│       └── ...                       # Additional op kernels
 ├── lib/Runtime/
+│   ├── Kernels/                          # GPU-arch-dependent kernels (this doc)
+│   │   ├── CMakeLists.txt                # Builds .hip files into per-arch shared libs + install rules
+│   │   ├── cmake/
+│   │   │   └── hip_utils.cmake           # hipcc compilation infrastructure
+│   │   ├── include/
+│   │   │   ├── hip_custom_kernels.h      # Pure C header (no HIP types)
+│   │   │   └── debug_log.h
+│   │   └── hip/
+│   │       ├── rope_kernel.hip           # RoPE __global__ kernel + host launcher
+│   │       ├── gqa_kernel.hip            # GQA __global__ kernel + host launcher
+│   │       └── ...                       # Additional op kernels
 │   ├── real/
-│   │   ├── rotary_embedding.cpp      # wrap_rotary_embedding -> calls C launchers
-│   │   └── gqa.cpp                   # wrap_group_query_attention -> calls C launchers
-│   └── CMakeLists.txt                # MODIFIED: Add new bitcode modules
+│   │   ├── rotary_embedding.cpp          # wrap_rotary_embedding -> calls C launchers
+│   │   └── gqa.cpp                       # wrap_group_query_attention -> calls C launchers
+│   └── CMakeLists.txt                    # Compiles runtime .cpp to bitcode; -I Kernels/include
 └── backend-mlir-compiler/custom-op-mlir/
-    ├── src/LlvmIrJit.cpp            # dlopens custom_kernels_<arch>.{dll,so} at JIT init
-    └── CMakeLists.txt                # add_dependencies on per-arch custom_kernels_<arch>
+    ├── src/LlvmIrJit.cpp                 # dlopens custom_kernels_<arch>.{dll,so} at JIT init
+    └── CMakeLists.txt                    # add_dependencies on per-arch custom_kernels_<arch>
 ```
 
 ## File Details
 
-### 1. `custom_kernels/cmake/hip_utils.cmake`
+### 1. `lib/Runtime/Kernels/cmake/hip_utils.cmake`
 
 Adapted from onnx-hipdnn-ep. Provides `hip_add_library()` function that:
 
@@ -78,7 +78,7 @@ Adapted from onnx-hipdnn-ep. Provides `hip_add_library()` function that:
 - Handles architecture flags (`--offload-arch=gfxNNNN`), MSVC ABI compatibility (`-fms-extensions`, `-fms-compatibility`), CRT flags (`/MT` static CRT), and Debug/Release configs
 - Finds HIP via `HIP_PATH`, `ROCM_PATH`, or `THEROCK_DIST` environment/CMake variables
 
-### 2. `custom_kernels/include/hip_custom_kernels.h`
+### 2. `lib/Runtime/Kernels/include/hip_custom_kernels.h`
 
 Pure C header with `extern "C"` declarations -- no HIP types, only `void*`, `int64_t`, `float`, etc. This is what the runtime `.cpp` files include (compiled by Clang to bitcode). Example interface:
 
@@ -118,14 +118,14 @@ int hip_gqa_forward(
 #endif
 ```
 
-### 3. `custom_kernels/hip/rope_kernel.hip`
+### 3. `lib/Runtime/Kernels/hip/rope_kernel.hip`
 
 Implements the RoPE HIP kernel:
 
 - `__global__ void rope_forward_kernel(...)` -- per-element rotary embedding: for each (batch, head, pos, dim_pair), applies cos/sin rotation
 - `extern "C" int hip_rope_forward(...)` -- host launcher that calculates grid/block dims and calls `hipLaunchKernelGGL`
 
-### 4. `custom_kernels/hip/gqa_kernel.hip`
+### 4. `lib/Runtime/Kernels/hip/gqa_kernel.hip`
 
 Implements GQA as a multi-step operation:
 
@@ -137,7 +137,7 @@ Implements GQA as a multi-step operation:
 - **Prefill**: `gqa_fused_prefill` (multi-token) computes Q·K^T, softmax, and `attn·V` against the assembled KV cache.
 - Can start with a straightforward implementation and optimize later (or swap in CK).
 
-### 5. `custom_kernels/CMakeLists.txt`
+### 5. `lib/Runtime/Kernels/CMakeLists.txt`
 
 Build one SHARED library per arch in `HIP_ARCHITECTURES`, each carrying a single fatbin slice for that arch. Install side-by-side with the EP binary so `LlvmIrJit` finds it via `GetModuleFileName` / `dladdr` anchoring. No static archive is produced.
 
@@ -180,13 +180,13 @@ After `cmake --install`, the install prefix contains one DLL/SO per requested ar
 - Windows: `<prefix>/bin/custom_kernels_gfx1100.dll`, `<prefix>/bin/custom_kernels_gfx1151.dll`, ...
 - Linux:   `<prefix>/lib/libcustom_kernels_gfx1100.so`, `<prefix>/lib/libcustom_kernels_gfx1151.so`, ...
 
-The header is intentionally NOT installed: the EP-side build always uses the in-tree header at `3rd-party/custom_kernels/include/hip_custom_kernels.h` so the host-side declarations stay in lockstep with the kernel TUs.
+The header is intentionally NOT installed: the EP-side build always uses the in-tree header at `lib/Runtime/Kernels/include/hip_custom_kernels.h` so the host-side declarations stay in lockstep with the kernel TUs.
 
 The top-level `CMakeLists.txt` adds the subdir on real-runtime EP builds (the per-arch SHARED targets are needed by `backend-mlir-compiler/custom-op-mlir/CMakeLists.txt` to register `add_dependencies`):
 
 ```cmake
 if(BUILD_EP AND NOT BUILD_MOCK_RUNTIME AND NOT _CUSTOM_KERNELS_SUBDIR_ADDED)
-    add_subdirectory(3rd-party/custom_kernels)
+    add_subdirectory(lib/Runtime/Kernels)
     set(_CUSTOM_KERNELS_SUBDIR_ADDED TRUE)
 endif()
 ```
@@ -210,14 +210,14 @@ compile_to_bitcode(real/rotary_embedding.cpp runtime_rotary_embedding.bc)
 compile_to_bitcode(real/gqa.cpp runtime_gqa.bc)
 ```
 
-Add them to `RUNTIME_BC_MODULES` list. Also add `-I${CMAKE_SOURCE_DIR}/custom_kernels/include` to the `compile_to_bitcode` macro's include flags so Clang can find `hip_custom_kernels.h`.
+Add them to `RUNTIME_BC_MODULES` list. Also add `-I${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/include` to the `compile_to_bitcode` macro's include flags so Clang can find `hip_custom_kernels.h`.
 
 ### 8. Consumer-side resolution in `LlvmIrJit::create`
 
 The compiler is no longer involved in linking against the kernel library — the per-model bitcode keeps external `hip_*` declarations and resolution happens at JIT init inside the EP DLL:
 
 ```cpp
-// 3rd-party/custom_kernels installs custom_kernels_<arch>.{dll,so} next
+// lib/Runtime/Kernels installs custom_kernels_<arch>.{dll,so} next
 // to the EP binary. LlvmIrJit picks the matching variant via gcnArchName.
 const std::string kernel_arch = detectCustomKernelArch();   // hipGetDeviceProperties
 const std::string basename =
@@ -244,9 +244,9 @@ After `cmake --install`, the install prefix contains:
 - Windows: `<prefix>/bin/onnxruntime_morphizen_ep.dll` (the EP) and `<prefix>/bin/custom_kernels_<arch>.dll` (one per requested arch) co-located.
 - Linux:   `<prefix>/lib/libonnxruntime_morphizen_ep.so` (the EP) and `<prefix>/lib/libcustom_kernels_<arch>.so` (one per requested arch) co-located. The EP `.so` is built with `RPATH=$ORIGIN`.
 
-CI workflows assert co-location by checking for `custom_kernels_gfx1151.dll` / `libcustom_kernels_gfx1151.so` in the staging step — failure here means the install rule in `3rd-party/custom_kernels/CMakeLists.txt` regressed.
+CI workflows assert co-location by checking for `custom_kernels_gfx1151.dll` / `libcustom_kernels_gfx1151.so` in the staging step — failure here means the install rule in `lib/Runtime/Kernels/CMakeLists.txt` regressed.
 
-### 10. `custom_kernels/hip/matmul_nbits_kernel.hip`
+### 10. `lib/Runtime/Kernels/hip/matmul_nbits_kernel.hip`
 
 Implements MatMulNBits — fused dequant + matmul for INT4 packed weights (FP16 activations). This is the dominant operator in INT4 LLM decode (~78% of GPU time for Llama 8B).
 

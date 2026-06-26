@@ -21,7 +21,7 @@ The feature extractor pads/truncates to Whisper's 30 s window; clips longer than
 
 Prerequisites (same as the tests — see docs/whisper_quick_start.md):
   * ``python build.py`` has produced the AMDGPU umbrella EP (amdgpu-ep.dll, which
-    loads hipep-backend.dll → hipep.dll) in the EP bin dir
+    loads hip-backend.dll → hipgpu.dll) in the EP bin dir
   * THEROCK_DIST + install/{therock,dist}/bin are on PATH (so the EP can link the
     model DLL). Without them the EP raises rather than silently falling back.
   * The Whisper model must already be BUILT LOCALLY first:

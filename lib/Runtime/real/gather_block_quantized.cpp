@@ -7,7 +7,7 @@
 //
 // Glue between the lowering ABI (`wrap_gather_block_quantized`, all i64
 // scalars + raw shape pointers) and the GPU kernel
-// (`hip_gather_block_quantized` in 3rd-party/custom_kernels) which only
+// (`hip_gather_block_quantized` in lib/Runtime/Kernels) which only
 // wants normalised axes, a packed enum dtype, and a few derived flags.
 //
 // Responsibilities of this wrapper:

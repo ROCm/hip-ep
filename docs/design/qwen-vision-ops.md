@@ -7,7 +7,7 @@ Licensed under the MIT License.
 This document captures the design rationale, runtime ABI conventions, and
 gotchas encountered while implementing 18 GPU runtime kernels for the
 Qwen3.5-35B-A3B vision encoder (`vision.onnx`). All 18 kernels live in
-`lib/Runtime/real/*.cpp` (host wrappers) and `3rd-party/custom_kernels/hip/*.hip`
+`lib/Runtime/real/*.cpp` (host wrappers) and `lib/Runtime/Kernels/hip/*.hip`
 (device code), and are dispatched from MLIR via `wrap_*` functions declared in
 `lib/Runtime/hipdnn_ep_runtime.h`.
 
@@ -340,8 +340,8 @@ times per kernel.
    CMake silently re-uses the same target — but it costs build time.
 
 4. **New `.hip` file requires CMakeLists.txt update.** Each new
-   `3rd-party/custom_kernels/hip/foo_kernel.hip` must be added to the
-   `HIP_KERNEL_SOURCES` list in `3rd-party/custom_kernels/CMakeLists.txt`
+   `lib/Runtime/Kernels/hip/foo_kernel.hip` must be added to the
+   `HIP_KERNEL_SOURCES` list in `lib/Runtime/Kernels/CMakeLists.txt`
    or it won't be linked into `custom_kernels.lib`.
 
 5. **PowerShell + commit messages.** Use `git commit -F <file>` with a
@@ -521,9 +521,9 @@ When adding the next op:
 5. Add the `.cpp` to **both** `compile_to_bitcode(...)` and
    `RUNTIME_BC_MODULES` in `lib/Runtime/CMakeLists.txt`. Add the
    `.hip` to `HIP_KERNEL_SOURCES` in
-   `3rd-party/custom_kernels/CMakeLists.txt`.
+   `lib/Runtime/Kernels/CMakeLists.txt`.
 6. Add the kernel header's prototype to
-   `3rd-party/custom_kernels/include/hip_custom_kernels.h`, **inside
+   `lib/Runtime/Kernels/include/hip_custom_kernels.h`, **inside
    the existing `extern "C"` block**.
 7. After building, `del %TEMP%\morphizen_mlir_*` before testing — the
    build helper does this, manual cmake runs don't.

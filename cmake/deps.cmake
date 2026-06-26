@@ -335,8 +335,8 @@ if(BUILD_EP)
 
   # MorphiZen EP build settings, forced before add_subdirectory consumes them.
   set(morphizen_ENABLE_RYZENAI_BIN_METADATA OFF CACHE BOOL "Disable ryzenai_bin_metadata" FORCE)
-  set(morphizen_OUTPUT_NAME "hipep" CACHE STRING "Set output name" FORCE)
-  set(MORPHIZEN_EP_REGISTRATION_NAME "hipep" CACHE STRING "EP registration name for ORT" FORCE)
+  set(morphizen_OUTPUT_NAME "hipgpu" CACHE STRING "Set output name" FORCE)
+  set(MORPHIZEN_EP_REGISTRATION_NAME "hipgpu" CACHE STRING "EP registration name for ORT" FORCE)
   set(MORPHIZEN_JSON_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/etc/morphizen_config.json")
 
   # ONNX Runtime resolution (find_package first, official release zip fallback).
@@ -433,7 +433,7 @@ if(BUILD_EP)
   #     which means find_package(hip) needs HIP_PLATFORM seeded *before*
   #     add_subdirectory(3rd-party/morphizen) below; otherwise TheRock's
   #     hip-config.cmake errors out with "Unexpected HIP_PLATFORM:".
-  #     (3rd-party/custom_kernels/cmake/hip_utils.cmake seeds it too, but
+  #     (lib/Runtime/Kernels/cmake/hip_utils.cmake seeds it too, but
   #     that subdir is added later in the top-level CMakeLists.txt.)
   #     Morphizen's option default is already ON, so we don't have to FORCE
   #     it -- but we don't actively turn it off either.
