@@ -15,26 +15,12 @@ Licensed under the MIT License.
 
 - [Problem](#problem)
 - [Solution Overview](#solution-overview)
-- [Attribute Definition](#attribute-definition)
+- [Design](#design)
   - [Memory Space Attribute](#memory-space-attribute)
-  - [Default Memory Space](#default-memory-space)
-  - [LLVM Address Space Mapping](#llvm-address-space-mapping)
-- [Pipeline Enforcement](#pipeline-enforcement)
-  - [Bufferization (Slot 2)](#bufferization-slot-2)
-  - [Strided Operand Promotion (Slot 6a)](#strided-operand-promotion-slot-6a)
-  - [Pool Allocation (Slot 6+)](#pool-allocation-slot-6)
-  - [Converters](#converters)
-- [Memory Space Tracking](#memory-space-tracking)
-  - [Custom Type Constraints](#custom-type-constraints)
-  - [Using Type Constraints in Operations](#using-type-constraints-in-operations)
-  - [Verification Examples](#verification-examples)
-- [Memory Transfer Operations](#memory-transfer-operations)
-- [Synchronization Optimization](#synchronization-optimization)
-  - [Current State](#current-state)
-  - [Sync Coalescing](#sync-coalescing)
-  - [Sync Elimination Pass](#sync-elimination-pass)
-  - [Memory Effects](#memory-effects)
-  - [Migration / Removal Ordering](#migration--removal-ordering)
+  - [Type Constraints](#type-constraints)
+  - [Transfer Operations](#transfer-operations)
+  - [Pass Pipeline](#pass-pipeline)
+- [Design Validation Examples](#design-validation-examples)
 - [Related Documents](#related-documents)
 
 ---
@@ -69,596 +55,497 @@ On true device memory (gfx1151), host load of device memory crashes.
 
 On UMA architectures, this accidentally works, masking the bug.
 
-### Consequence 2: Manual Synchronization That Cannot Be Minimized
+### Consequence 2: Manual Synchronization
 
-Converters must remember to insert the device-to-host copy by hand:
+Converters must manually insert D2H transfers:
 
 ```cpp
 // In RangeConversion.cpp - manual readback
 Value limit = readbackScalarToHost(builder, loc, ctx, limitTensor);
 ```
 
-- Nothing enforces it. A direct `tensor.extract` compiles but reads stale or invalid data at runtime.
-- Because the compiler does not know which buffers are device and which are host, it cannot place the synchronization only where it is needed. It must either synchronize conservatively after every potentially-device op, or risk a crash.
+Problems:
+- Nothing enforces this - easy to forget
+- Direct `tensor.extract` compiles but crashes at runtime
+- Cannot optimize sync placement - compiler doesn't know what's device vs host
+
+### Consequence 3: Cannot Minimize Synchronization
+
+Without knowing which memrefs are device vs host, must sync conservatively after every potentially-device operation, or risk SEGFAULT.
+
+Cannot optimize sync barriers to actual device→host crossings only.
 
 ---
 
 ## Solution Overview
 
-Use memory space attributes on memref types to track device vs host placement.
+Use memory space attributes on memref types to enforce host/device memory boundaries at compile time.
 
-**Core idea:**
-```mlir
-// The type records where the buffer lives.
-%device = hip.get_pool(%ctx, %size) : memref<?xi8, #hip.mem<device>>
+### Three-Step Solution: Correct by Construction
 
-// A small scalar that the host must read/write is placed in host memory:
-%shape = memref.alloc() : memref<i64, #hip.mem<host>>
+**1. Enforce Memory Space on All Operations**
 
-memref.store %value, %shape[%c0]      // fine: %shape is host memory
-// memref.store %value, %device[%c0]  // would be wrong: %device is GPU memory,
-//                                     // not host-writable on a real-device GPU
+Revise all hip operations to require explicit memory space attributes. Every memref type must specify `#hip.mem<device>`, `#hip.mem<host>`, `#hip.mem<pinned>`, or `#hip.mem<managed>`.
+
+```tablegen
+// GPU kernel operations - require device memory
+def Hip_PadOp : Hip_Op<"pad"> {
+  let arguments = (ins
+    Hip_TensorOrDeviceMemRef:$input,   // Only accepts device memory
+    Hip_TensorOrDeviceMemRef:$output
+  );
+}
+
+// Pool operation - returns device memory
+def Hip_GetPoolOp : Hip_Op<"get_pool"> {
+  let results = (outs DeviceMemRef:$pool);  // Always device memory
+}
 ```
 
-**How it solves the problem:**
-- The type carries placement, so it no longer has to be guessed from the surrounding ops.
-- HIP ops constrain their operands to the space they need, so an operand in the wrong space is caught at compile time.
-- A pass can insert device-to-host copies only where the space actually changes.
-- Synchronization can be limited to those crossings instead of after every op.
+**2. OnnxToHip Converters Insert Intentional Transfers**
 
-**Key components:**
-1. A memory space attribute (`#hip.mem<device|host>`).
-2. Device is the default space; host is requested explicitly.
-3. HIP ops constrain operands and results to the space they require.
-4. Lowering dispatches on the space.
+When ONNX operation semantics require host/device boundary crossing, converters insert explicit transfers. Primary source: shape inference needing to inspect device data.
+
+```mlir
+// ONNX NonZero: GPU computes condition, CPU must count true elements
+// Converter inserts intentional D2H transfer for shape calculation:
+%cond_device = hip.greater(%ctx) ins(%a, %b)
+               -> memref<?x?xi1, #hip.mem<device>>
+
+// Shape inference needs CPU access - insert explicit transfer
+%cond_host = memref.alloc() : memref<?x?xi1, #hip.mem<pinned>>
+hip.memcpy_d2h_async %ctx, %cond_host, %cond_device
+hip.stream_sync %ctx
+
+// Now safe - count on host, allocate output with correct shape
+%count = /* count true elements in cond_host */
+%output = memref.alloc(%count) : memref<?x2xi64, #hip.mem<device>>
+```
+
+Operations requiring shape inference transfers:
+
+| Operation | Why CPU Access Needed |
+|-----------|-----------------------|
+| NonZero   | Count true elements to allocate output |
+| TopK      | Read k value if dynamic |
+| Reshape   | Read shape tensor for dynamic reshape |
+| Expand    | Read shape tensor |
+| Tile      | Read repeats if dynamic |
+| Range     | Read start/limit/delta for output size |
+| Compress  | Count condition elements |
+| Unique    | Count unique elements |
+
+**3. Type System Prevents Violations at Compile Time**
+
+With explicit memory spaces, MLIR type system catches invalid code before it's generated:
+
+```mlir
+// ❌ WRONG - Compile-time error, GPU kernel with host memory
+%host = memref.alloc() : memref<i64, #hip.mem<host>>
+hip.pad(%ctx) outs(%host)
+// Error: operand type 'memref<i64, #hip.mem<host>>' doesn't match
+//        constraint 'Hip_TensorOrDeviceMemRef' (requires device memory)
+
+// ✅ RIGHT - Converter ensures correct memory space from start
+%device = memref.alloc() : memref<i64, #hip.mem<device>>
+hip.pad(%ctx) outs(%device)  // Type-correct, no fix-up needed
+```
+
+**Key principle:** No illegal MLIR code generated. Converters and bufferization produce type-correct IR from the start. No fix-up passes needed to correct type violations.
+
+### Implementation Pipeline
+
+```
+Slot 1:  OnnxToHip Conversion
+           ↓ Converters insert explicit transfers when ONNX semantics require
+           → For shape inference: D2H transfers for dynamic shape calculation
+Slot 2:  One-Shot-Bufferize
+           ↓ Operations specify memory space via getBufferType()
+           → Creates memref.alloc with #hip.mem<device> or #hip.mem<host>
+Slot 6a: PromoteStridedHipOperands
+           ↓ Preserve memory space when creating contiguous copies
+Slot 6b: ShapeInference (CRITICAL)
+           ↓ Detect operations requiring dynamic shape calculation from device data
+           → Insert hip.memcpy_d2h_async + hip.stream_sync + pinned host buffer
+           → Examples: NonZero (count), TopK (k value), Reshape (shape tensor)
+Slot 6c: EliminateStreamSyncBarriers
+           ↓ Analyze MemoryEffectsOpInterface (similar to MLIR's EliminateBarriers)
+           → Consolidate multiple syncs into minimum necessary barriers
+Slot 6+: PoolAllocs
+           → Pool device memory allocations into hip.get_pool
+```
+
+### Key Properties
+
+**Correct by construction:**
+- Type system enforces memory space constraints
+- Invalid accesses caught at compile time, not runtime SEGV
+- No pattern matching - TableGen constraints verify automatically
+- No fix-up passes - converters and bufferization generate type-correct IR from the start
+
+**Performance:**
+- Shape inference inserts transfers only when semantically required (e.g., dynamic shape calculation)
+- Synchronization minimized via barrier elimination
+- Explicit async operations allow overlap optimization
+
+**Systematic Review Required:**
+
+The codebase has ~70 HIP operations. Each needs review to ensure:
+- `getBufferType()` returns correct memory space for results
+- OnnxToHip converters respect operation type constraints
+- Converters insert intentional transfers when ONNX semantics require (primarily shape inference)
+- Type system prevents accidental violations
+
+This is correct-by-construction design, not detect-and-fix.
+
+**Note on LLVM Lowering:**
+
+Before lowering to LLVM, we don't need to design anything for address space handling. MLIR's standard MemRefToLLVM conversion automatically maps `#hip.mem<device>` → LLVM address space 1 and `#hip.mem<host>` → LLVM address space 0. This is infrastructure that already exists; our solution is entirely at MLIR level.
 
 ---
 
-## Attribute Definition
+## Design
+
+This section explains the four key abstractions that implement the 3-step solution overview.
 
 ### Memory Space Attribute
 
-The kind is an enum attribute, so `#hip.mem<device>` / `#hip.mem<host>` parse directly:
+The foundation is a custom MLIR attribute that annotates memref types with explicit memory space:
 
-```tablegen
-def HIP_Device : I32EnumAttrCase<"Device", 0, "device">;
-def HIP_Host   : I32EnumAttrCase<"Host",   1, "host">;
-
-def HIP_MemorySpaceKind
-    : I32EnumAttr<"MemorySpaceKind", "HIP memory space kind",
-                  [HIP_Device, HIP_Host]> {
-  let cppNamespace = "::mlir::hip";
-}
-
-def HIP_MemorySpaceAttr : AttrDef<HIP_Dialect, "MemorySpace"> {
-  let mnemonic = "mem";
-  let summary = "HIP memory space attribute";
-  let description = [{
-    Where a HIP buffer lives:
-    - `device`: GPU memory (`hip.get_pool`, backed by hipMalloc)
-    - `host`:   host-mapped memory (`hip.get_host_scratch`, backed by hipHostMalloc)
-
-    Syntax: `#hip.mem<device>` or `#hip.mem<host>`.
-  }];
-  let parameters = (ins EnumParameter<HIP_MemorySpaceKind>:$kind);
-  let assemblyFormat = "`<` $kind `>`";
-}
-```
-
-The `I32EnumAttr` generates the matching `MemorySpaceKind` C++ enum (`Device`, `Host`)
-in the `mlir::hip` namespace.
-
-### Default Memory Space
-
-The default space is **device**. Bufferization gives every buffer it creates the
-device space (see [Bufferization](#bufferization-slot-2)), because the GPU pool is the
-common case. Host memory is the exception and is asked for explicitly:
-
+**Syntax:**
 ```mlir
-%d = memref.alloc() : memref<i64, #hip.mem<device>>  // device (the default)
-%h = memref.alloc() : memref<i64, #hip.mem<host>>    // host (explicit)
+memref<i64, #hip.mem<host>>      // Pageable host (malloc/stack)
+memref<i64, #hip.mem<device>>    // GPU VRAM (hipMalloc)
+memref<i64, #hip.mem<pinned>>    // Pinned host (hipHostMalloc)
+memref<i64, #hip.mem<managed>>   // Unified memory (hipMallocManaged)
 ```
 
-Device-by-default keeps the design simple and does not fight the upstream MLIR passes
-that create plain `memref<...>` temporaries with no space.
+Four memory spaces mapping to HIP allocation methods:
+- `#hip.mem<host>`: Pageable host memory (malloc/stack), CPU-only access
+- `#hip.mem<device>`: GPU VRAM (hipMalloc), device-only access, highest bandwidth
+- `#hip.mem<pinned>`: Pinned host memory (hipHostMalloc), two usage patterns:
+  1. Transfer mode: ~3x faster hipMemcpyAsync bandwidth
+  2. Zero-copy mode: direct GPU access without copy (no page faults)
+- `#hip.mem<managed>`: Unified memory (hipMallocManaged), automatic migration with page faults
 
-### LLVM Address Space Mapping
+**Rationale for four spaces:**
 
-The generated `inference_compute` / `main_graph` is **host (CPU) code, not a GPU
-kernel**. It calls `hipMalloc`, MIOpen / hipBLASLt, and the runtime `wrap_*` /
-`hipdnn_ep_*` helpers (all `void *` C ABI); the memref "pointers" are device
-addresses held as plain host values. So the memory space is a **compile-time
-placement tag** the passes read to decide where to insert D2H copies — not a
-hardware address space in the generated code.
+Cannot merge pinned and managed due to different performance characteristics:
+- hipHostMalloc zero-copy: No page faults, deterministic latency
+- hipMallocManaged: Page faults on access, migration overhead
+- Evidence: "Pinned system memory performs consistently better" for write-once-read-once (Performance Evaluation)
 
-**Both spaces lower to LLVM address space 0.** The type converter maps
-`#hip.mem<device>` and `#hip.mem<host>` to 0, so no `addrspacecast` is added and
-device pointers reach the `void *` runtime ABI unchanged. This matches the
-current lowering: `getMemRefAddressSpace` returns 0 for every memref, and
-`AllocOpLowering` only inserts an `addrspacecast` for a non-zero space
-(`lib/Conversion/HipToLLVM/MemoryLowering.cpp`).
+Maps to Solution Step 1: Enforce memory space on all operations - operations declare memory space requirements via type constraints.
 
-**Type Converter Setup.** Register the mapping with `addTypeAttributeConversion`;
-the callback returns the numeric space as an `IntegerAttr`:
+### Type Constraints
 
-```cpp
-// Device and host both collapse to AS 0.
-converter.addTypeAttributeConversion(
-  [](BaseMemRefType memref, hip::MemorySpaceAttr space) -> IntegerAttr {
-    return IntegerAttr::get(IntegerType::get(memref.getContext(), 64), 0);
-  });
-```
+TableGen type constraints verify memory spaces automatically at IR construction time:
 
----
-
-## Pipeline Enforcement
-
-Every pass that creates or transforms memrefs must generate valid memory spaces.
-
-### Bufferization (Slot 2)
-
-Two complementary mechanisms:
-
-**1. Default space (covers most ops).** Set `defaultMemorySpaceFn = device` on the
-`OneShotBufferize` options. This applies to every leaf (allocs, `tensor.empty`,
-function boundaries) and, because the default `getBufferType` makes a DPS result
-follow its tied `outs` operand, keeps result/operand buffer types equal with no
-per-op code:
-
-```cpp
-opts.defaultMemorySpaceFn = [](TensorType) -> std::optional<Attribute> {
-  return MemorySpaceAttr::get(/*ctx*/, MemorySpaceKind::Device);
-};
-```
-
-**2. Per-op `getBufferType` (only ops that deviate from the default).** Some ops must
-place a result in a *specific* space regardless of the default — e.g. an op that
-always produces host-staged output. Override `getBufferType` on that op's
-bufferization model:
-
-```cpp
-FailureOr<bufferization::BufferLikeType>
-getBufferType(Operation *op, Value value,
-              const bufferization::BufferizationOptions &options,
-              const bufferization::BufferizationState &state,
-              SmallVectorImpl<Value> &invocationStack) const {
-  auto t = cast<RankedTensorType>(value.getType());
-  auto space = MemorySpaceAttr::get(op->getContext(), /*this op's space*/);
-  return cast<bufferization::BufferLikeType>(MemRefType::get(
-      t.getShape(), t.getElementType(), /*layout=*/{}, space));
-}
-```
-
-Use the override sparingly — only where the op's space differs from `device`. A DPS
-op that overrides its result space must ensure its tied `outs` operand resolves to the
-same space, or bufferization will see mismatched buffer types.
-
-### Strided Operand Promotion (Slot 6a)
-
-Preserve memory space when creating contiguous copies:
-
-```cpp
-// PromoteStridedHipOperands.cpp
-auto deviceSpace = srcType.getMemorySpace();  // Inherit from source
-auto contiguousType = MemRefType::get(srcType.getShape(),
-                                      srcType.getElementType(),
-                                      AffineMap(),
-                                      deviceSpace);
-auto allocOp = memref::AllocOp::create(builder, loc, contiguousType, dynSizes);
-```
-
-Temporary allocations inherit source memory space.
-
-### Pool Allocation (Slot 6+)
-
-Mark pool buffer with device space:
-
-```cpp
-// PoolAllocs.cpp
-auto deviceSpace = MemorySpaceAttr::get(context, MemorySpaceKind::Device);
-auto poolType = MemRefType::get({ShapedType::kDynamic},
-                                builder.getIntegerType(8),
-                                AffineMap(),
-                                deviceSpace);
-```
-
-Pool is always device memory. All `memref.view` operations inherit device space.
-
-### Converters
-
-Explicitly allocate host memory when needed:
-
-```cpp
-// RangeConversion.cpp - scalar needs host access
-auto hostSpace = MemorySpaceAttr::get(context, MemorySpaceKind::Host);
-auto scalarType = MemRefType::get({}, builder.getI64Type(),
-                                  AffineMap(), hostSpace);
-auto hostAlloc = memref::AllocOp::create(builder, loc, scalarType, {});
-```
-
-No heuristics. The space is explicit at the allocation site.
-
----
-## Memory Space Tracking
-
-Operations enforce memory space requirements using TableGen type constraints.
-
-### Custom Type Constraints
-
-HIP ops are defined once but carry **tensor** types before bufferization (Slot 2)
-and **memref** types after it — this is exactly why operands today use
-`Hip_TensorOrMemRef` (`AnyTypeOf<[AnyRankedTensor, AnyMemRef]>`). The memory-space
-attribute only exists on the memref form, so the space constraints must follow the
-same dual shape: accept any ranked tensor (pre-bufferization, no space yet) **or** a
-memref carrying the required space (post-bufferization).
-
-Define the memref-with-space predicates, then wrap them so a ranked tensor also
-satisfies the constraint:
-
+**Pure memref constraints:**
 ```tablegen
-// In HipBase.td
-
-// memref whose memory space is #hip.mem<device>
-def Hip_DeviceMemRef : Type<
-  CPred<"::llvm::isa<::mlir::MemRefType>($_self) && "
-        "::llvm::cast<::mlir::MemRefType>($_self).getMemorySpace() && "
-        "::llvm::isa<::mlir::hip::MemorySpaceAttr>("
-        "::llvm::cast<::mlir::MemRefType>($_self).getMemorySpace()) && "
-        "::llvm::cast<::mlir::hip::MemorySpaceAttr>("
-        "::llvm::cast<::mlir::MemRefType>($_self).getMemorySpace()).getKind() == "
-        "::mlir::hip::MemorySpaceKind::Device">,
-  "device memref (#hip.mem<device>)"
->;
-
-// memref whose memory space is #hip.mem<host>. Identical to Hip_DeviceMemRef
-// above, except the final getKind() check compares against MemorySpaceKind::Host.
-def Hip_HostMemRef : Type<CPred<"/* same as Hip_DeviceMemRef, Kind == Host */">,
-  "host memref (#hip.mem<host>)">;
-
-// Pre-bufferization tensor OR post-bufferization device/host memref.
-// Mirrors Hip_TensorOrMemRef so the same op definition verifies in both phases.
-def Hip_TensorOrDeviceMemref : AnyTypeOf<[AnyRankedTensor, Hip_DeviceMemRef],
-                             "ranked tensor or device memref (#hip.mem<device>)">;
-
-def Hip_TensorOrHostMemRef : AnyTypeOf<[AnyRankedTensor, Hip_HostMemRef],
-                           "ranked tensor or host memref (#hip.mem<host>)">;
-
-def AnyHipMemRef : AnyTypeOf<[Hip_TensorOrDeviceMemref, Hip_TensorOrHostMemRef], "HIP tensor or memref">;
+HostMemRef      // Accepts: memref<..., #hip.mem<host>>
+DeviceMemRef    // Accepts: memref<..., #hip.mem<device>>
+PinnedMemRef    // Accepts: memref<..., #hip.mem<pinned>>
+ManagedMemRef   // Accepts: memref<..., #hip.mem<managed>>
 ```
 
-Use the `Hip_TensorOr*` forms on op operands (they accept a tensor before
-bufferization and a space-tagged memref after). Use the plain `Hip_DeviceMemRef` /
-`Hip_HostMemRef` forms where the value is always a memref (for example the result of
-`hip.get_pool`). The space is only checked once the type is a memref, so converters
-build ops before bufferization exactly as they do with `Hip_TensorOrMemRef` today.
-
-### Using Type Constraints in Operations
-
-**Device-only operations** (GPU kernels):
-
+**Composite constraints for operations:**
 ```tablegen
-def Hip_PadOp : Hip_Op<"pad"> {
+Hip_TensorOrDeviceMemRef   // Accepts: tensor<...> OR memref<..., #hip.mem<device>>
+Hip_TensorOrPinnedMemRef   // Accepts: tensor<...> OR memref<..., #hip.mem<pinned>>
+Hip_TensorOrManagedMemRef  // Accepts: tensor<...> OR memref<..., #hip.mem<managed>>
+```
+
+**Why composite:** Operations work on tensors before bufferization and memrefs after bufferization. Constraints must accept both.
+
+**Example operations with different memory space requirements:**
+```tablegen
+// Data arguments - must be device memory for GPU kernel access
+def Hip_MatmulOp : Hip_Op<"matmul"> {
   let arguments = (ins
     Hip_ContextType:$ctx,
-    Hip_TensorOrDeviceMemref:$input,   // device
-    AnyHipMemRef:$pads,
-    Hip_TensorOrDeviceMemref:$output   // device
+    Hip_TensorOrDeviceMemRef:$a,      // Device - GPU kernel reads
+    Hip_TensorOrDeviceMemRef:$b,      // Device - GPU kernel reads
+    Hip_TensorOrDeviceMemRef:$c       // Device - GPU kernel writes
+  );
+}
+
+// Transfer operations - explicit memory space boundaries
+def Hip_MemcpyD2HAsyncOp : Hip_Op<"memcpy_d2h_async"> {
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    PinnedMemRef:$dst,    // Must be pinned (for fast transfers)
+    DeviceMemRef:$src     // Must be device
+  );
+}
+
+// Prefetch operation for managed memory
+def Hip_MemPrefetchAsyncOp : Hip_Op<"mem_prefetch_async"> {
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    ManagedMemRef:$ptr,   // Must be managed
+    I64:$count,
+    I32:$device_id
   );
 }
 ```
 
-A GPU op constrains its operands to device memory.
+**Memory space selection guide:**
 
-**Transfer operation** (cross-boundary): `hip.memcpy_d2h_async` has a host destination
-and a device source — see [The Copy Op (D2H only)](#the-copy-op-d2h-only). It is the only
-transfer op; the other direction (H2D) is a `memref.memory_space_cast`, not a copy.
+| Use Case | Memory Space | Rationale |
+|----------|--------------|-----------|
+| Large data tensors (activations, weights in VRAM) | `#hip.mem<device>` | >40x faster GPU access vs pinned zero-copy |
+| Model weights (>VRAM, oversubscription) | `#hip.mem<managed>` | Only option vs OOM, auto-migration |
+| Dynamic shape outputs (NonZero, TopK, Where) | `#hip.mem<pinned>` | GPU writes once, CPU reads once, no page faults |
+| Streaming pipeline inputs | `#hip.mem<pinned>` | Fast async transfers, overlap copy+compute |
+| Kernel arguments (small scalars/arrays) | Pass by value | No allocation, fastest |
+| CPU-only data | `#hip.mem<host>` | Pageable, no GPU access |
 
-**Pool operations:**
+**Memory space assignment principle:**
 
+- **Data arguments** (large tensors that GPU kernels read/write): `Hip_TensorOrDeviceMemRef`
+  - Must be device memory for GPU kernel access
+  - Examples: input images, weight matrices, output tensors
+- **Shape arguments** (scalars/1D tensors for dimension calculation): Depends on size and GPU kernel usage
+  - Large or variable-length arrays: Use device memory (`Hip_TensorOrDeviceMemRef`)
+    - Examples: shape tensor for dynamic reshaping, large index arrays
+  - Small fixed/bounded arrays used by GPU kernel: Pass as kernel arguments by value
+    - Kernel arguments go via constant memory or registers (fastest)
+    - No memory allocation, no pointer dereference, no hipMemcpy overhead
+    - Examples: pads (≤16 ints), axes (≤8 ints), repeats (≤8 ints)
+    - Constraint: Total kernel arguments typically limited to 4KB
+  - Shape arguments only for CPU-side computation: Use host memory (`Hip_TensorOrHostMemRef`)
+    - For bufferization/allocation only, not passed to GPU kernels
+    - Avoids D2H synchronization overhead
+- **Small scalar constants**: Should be passed as kernel argument values, not pointers
+  - Inefficient to allocate device memory and dereference pointers for single scalars
+  - Examples: start, limit, delta in `hip.range` (currently device pointers - design flaw)
+  - Pass directly as i64, f32, etc. in kernel signature
+
+**Current implementation issues - systematic review needed:**
+
+The codebase has ~70 HIP operations, each with a runtime wrapper function. Many operations have inconsistent or suboptimal memory space handling for shape arguments:
+
+Examples of design flaws:
+- `hip.pad` - pads, axes are device pointers, runtime does hipMemcpyAsync D2H copy before kernel launch
+  - Problem: Worst of both worlds - device pointer allocation + D2H copy overhead
+  - Better: Pass pads (≤16 ints, 64 bytes) as kernel argument struct via constant memory
+- `hip.range` - start, limit, delta are device pointers for 3 scalar values
+  - Problem: Allocates device memory + pointer dereference for 3 integers
+  - Better: Pass as i64 scalar arguments directly
+- `hip.tile` - repeats is device pointer but runtime ignores it entirely (confusing API)
+- `hip.expand` - shape is device pointer but runtime ignores it entirely (confusing API)
+
+Better design:
+- Small arrays for GPU kernels (pads, axes, repeats): Pass as kernel argument values (via constant memory)
+  - Kernel signature: `__global__ void padKernel(..., PadConfig config)` where `struct PadConfig { int pads[8]; int rank; }`
+  - Faster than hipMemcpy, no allocation overhead, no pointer dereference
+  - Constraint: Fits within 4KB kernel argument limit (easily satisfied for these cases)
+- Small scalars (start, limit, delta): Pass as scalar values (i64, f32, etc.)
+- Large/variable arrays: Device memory (`Hip_TensorOrDeviceMemRef`) only if too large for kernel arguments
+- Data tensors: Device memory (`Hip_TensorOrDeviceMemRef`)
+
+**Scope of work required:**
+
+Each of the ~70 HIP operations needs individual review to determine:
+- Which arguments are data (device memory) vs. shape (kernel arguments or host memory)
+- Whether small arrays/scalars should be passed as kernel argument values instead of pointers
+- Whether type constraints match runtime wrapper expectations
+- Whether runtime wrappers have unnecessary D2H copies
+- Kernel argument size budget (total < 4KB for all arguments combined)
+
+This is significant refactoring work across:
+- Operation definitions (TableGen constraints)
+- Runtime wrapper signatures
+- HipToLLVM lowering code
+- OnnxToHip converters (bufferization logic)
+
+This design document establishes the principle. The systematic operation-by-operation review and fixes are future work.
+
+Maps to Solution Step 1 & 3: Type system should enforce memory space constraints matching the semantic role of each argument. Current implementation has inconsistencies requiring systematic review.
+
+### Transfer Operations
+
+Explicit operations for moving data across host/device boundary:
+
+**Device to host:**
 ```tablegen
-def Hip_GetPoolOp : Hip_Op<"get_pool"> {
-  let arguments = (ins Hip_ContextType:$ctx, Index:$size);
-  let results = (outs Hip_DeviceMemRef:$pool);  // always device memory
-}
-```
-
-`hip.get_pool` is created after bufferization, so its result is always a memref —
-hence `Hip_DeviceMemRef`, not the tensor-or-memref form. Its lowering allocates the
-device pool via `hipdnn_ep_get_pool_base` (which is `hipMalloc`-backed, grow-on-demand).
-
-### Verification Examples
-
-**Correct usage:**
-```mlir
-// Device memory for a GPU op
-%device = hip.get_pool(%ctx, %size) : memref<?xi8, #hip.mem<device>>
-hip.pad(%ctx) ins(%input) outs(%device)  // ok: device space matches
-
-// Host memory for a scalar
-%host = memref.alloc() : memref<i64, #hip.mem<host>>
-memref.store %value, %host[]             // ok: host store into host memory
-```
-
-**Compile-time errors:**
-```mlir
-// Wrong space on a HIP op result (get_pool must be device)
-%bad = hip.get_pool(%ctx, %size) : memref<?xi8, #hip.mem<host>>
-// error: result type 'memref<?xi8, #hip.mem<host>>' doesn't match constraint 'Hip_DeviceMemRef'
-
-// Wrong space on a HIP op operand
-%host = memref.alloc() : memref<i64, #hip.mem<host>>
-hip.pad(%ctx) outs(%host)
-// error: operand type 'memref<i64, #hip.mem<host>>' doesn't match constraint 'Hip_TensorOrDeviceMemref'
-```
-
-These errors come from the operand/result type constraints, checked automatically by
-TableGen-generated code — no hand-written `verify()` method, and the message names the
-expected constraint. (Builtin `memref.load` / `memref.store` are not space-checked this
-way; a host access of a device buffer is handled by the transfer pass below, not by a
-verifier.)
-
----
-
-## Memory Transfer Operations
-
-The two directions are not the same. Reading a device value back to the host (D2H) needs
-a copy and a wait. Handing host data to the GPU (H2D) needs neither on a shared-memory
-(UMA) GPU. So there is one copy op (for D2H) plus `hip.stream_sync`, and H2D is a free
-cast. This replaces the old `hip.readback_scalar` / `hip.readback_dim`.
-
-### Why Not `hip.readback_scalar` / `hip.readback_dim`
-
-```mlir
-%value = hip.readback_scalar(%ctx, %device_scalar) : tensor<i64> -> i64
-```
-
-`hip.readback_scalar` and its `index`-typed sibling `hip.readback_dim` share two problems:
-
-- They only handle a single scalar.
-- They do the copy and the wait in one op, so the wait cannot be moved or removed later.
-
-### The Copy Op (D2H only)
-
-D2H is the one direction that needs a copy op. `hip.memcpy_d2h_async` copies a device
-buffer to a host buffer and returns right away; a separate `hip.stream_sync` makes the
-host wait for it. Both carry `MemoryEffectsOpInterface` so the
-[Sync Elimination Pass](#sync-elimination-pass) can reason about them. Operand order is
-`ctx, dst, src`.
-
-```tablegen
-def Hip_MemcpyD2HAsyncOp : Hip_Op<"memcpy_d2h_async", [
-    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
-  let summary = "Copy device memory to host without blocking";
+def Hip_MemcpyD2HAsyncOp : Hip_Op<"memcpy_d2h_async"> {
   let arguments = (ins
     Hip_ContextType:$ctx,
-    Hip_TensorOrHostMemRef:$dst,    // host destination
-    Hip_TensorOrDeviceMemref:$src   // device source
+    HostMemRef:$dst,        // Must be host
+    DeviceMemRef:$src       // Must be device
   );
 }
 ```
 
-The operand types fix the direction, so a wrong-direction copy is rejected at compile
-time. The op lowers to `hipMemcpyAsync` with no wait; all work runs on one HIP stream,
-so stream order is implicit and no completion token is needed.
-
-### H2D Needs No Copy
-
-Handing host data to the GPU goes the other way, and on a shared-memory (UMA) GPU it is
-free. Host scratch (`hip.get_host_scratch`) is already GPU-readable, so the GPU reads it
-in place — the "copy" is just a `memref.memory_space_cast` that changes the type, not the
-bytes. No wait is needed: the kernel that reads the buffer runs on the same stream as
-whatever filled it, so the stream already orders them. A real H2D copy only comes back on
-a discrete-VRAM GPU, and even then the host does not wait.
-
-### Usage Pattern
-
-**Read a device value on the host (D2H)** — copy, wait, then load:
-
-```mlir
-%host = memref.alloc() : memref<i64, #hip.mem<host>>
-hip.memcpy_d2h_async %ctx, %host, %device     // copies, does not wait
-hip.stream_sync %ctx                          // wait before the host read
-%value = memref.load %host[] : memref<i64, #hip.mem<host>>
-```
-
-**Hand host data to a kernel (H2D)** — just a cast, no copy and no wait:
-
-```mlir
-%host = memref.alloc() : memref<i64, #hip.mem<host>>
-memref.store %value, %host[]                  // host fills it
-%device = memref.memory_space_cast %host
-        : memref<i64, #hip.mem<host>> to memref<i64, #hip.mem<device>>
-hip.some_kernel(%ctx) ins(%device)            // GPU reads it in place
-```
-
-### Automatic Insertion Pass
-
-**Pass:** `MaterializeDeviceLoadsPass`
-
-**Pipeline position:** After bufferization (Slot 2), before pool allocation (Slot 6+)
-
-Specifically: Slot 6c, after `MaterializeHostScalarsPass`.
-
-```
-Slot 2:  One-Shot-Bufferize        → creates memref.alloc, memref.load
-Slot 6a: PromoteStridedHipOperands → may create more memref.load
-Slot 6b: MaterializeHostScalars    → redirects host-fed scalar allocs out of the device pool
-Slot 6c: MaterializeDeviceLoads    → turns host loads of device memory into copy + load
-Slot 6+: PoolAllocs                → pools all allocations
-```
-
-**Transformation:**
-
-Before:
-```mlir
-%device = memref<i64, #hip.mem<device>>
-%value = memref.load %device[] : memref<i64, #hip.mem<device>>
-// crashes: the host cannot read device memory on a real-device GPU
-```
-
-After:
-```mlir
-%device = memref<i64, #hip.mem<device>>
-
-// the pass inserts:
-%host = memref.alloc() : memref<i64, #hip.mem<host>>
-hip.memcpy_d2h_async %ctx, %host, %device
-hip.stream_sync %ctx
-
-%value = memref.load %host[] : memref<i64, #hip.mem<host>>
-// safe: reads from host memory
-```
-
-**Algorithm:**
-1. Walk all `memref.load` operations.
-2. Read the loaded memref's memory space attribute; act only when it is `#hip.mem<device>` (host memrefs are left alone).
-3. Allocate a host buffer with the same element type.
-4. Insert `hip.memcpy_d2h_async` before the load.
-5. Insert `hip.stream_sync` before the load (one per host read site).
-6. Point the load at the host buffer.
-
-This one pass inserts both the copy and the synchronization, so no separate sync pass
-is needed. Converters just emit a plain `memref.load`; the pass does the rest. Any
-synchronization it adds that turns out to be unnecessary is removed by the
-[Sync Elimination Pass](#sync-elimination-pass).
-
-**Why this position:**
-- After bufferization: the `memref.load` ops exist.
-- After strided promotion: all loads have been created.
-- Before pool allocation: the new host buffers are pooled correctly.
-
----
-
-## Synchronization Optimization
-
-### Current State
-
-Today each host read of a device scalar goes through `hip.readback_scalar` (or
-`hip.readback_dim`), which copies and waits in one step. Several reads mean several waits:
-
-```mlir
-// Range needs start/limit/delta on host
-%start = hip.readback_scalar(%ctx, %device_start) : ... -> i64  // hipMemcpyAsync + hipStreamSynchronize
-%limit = hip.readback_scalar(%ctx, %device_limit) : ... -> i64  // hipMemcpyAsync + hipStreamSynchronize
-%delta = hip.readback_scalar(%ctx, %device_delta) : ... -> i64  // hipMemcpyAsync + hipStreamSynchronize
-```
-
-`hipStreamSynchronize` appears in many runtime call sites. The separate
-`wrap_hipMemcpyD2H` runtime helper exists but is dead — no caller; the live D2H path
-is `hipdnn_ep_readback_*`.
-
-Runtime implementation (`lib/Runtime/real/memory.cpp`, `hipdnn_ep_readback_scalar`):
-```cpp
-void hipdnn_ep_readback_scalar(RuntimeState *state, void *host_dst,
-                               const void *device_scalar, int64_t num_bytes) {
-  // hipMemcpyDefault (not DeviceToHost): the source may be host-accessible
-  // (host-mapped scratch or a UMA pool), where an explicit D2H fails.
-  hipMemcpyAsync(host_dst, device_scalar, num_bytes,
-                 hipMemcpyDefault, stream);
-  hipStreamSynchronize(stream);  // Blocks host thread
+**Host to device:**
+```tablegen
+def Hip_MemcpyH2DAsyncOp : Hip_Op<"memcpy_h2d_async"> {
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    DeviceMemRef:$dst,      // Must be device
+    HostMemRef:$src         // Must be host
+  );
 }
 ```
 
-### Sync Coalescing
-
-The goal is many copies but one wait. The `Range` reads above are three copies and three
-waits; grouped, they become three copies and one wait:
-
-```mlir
-hip.memcpy_d2h_async %ctx, %host_start, %device_start   // copy, no wait
-hip.memcpy_d2h_async %ctx, %host_limit, %device_limit   // copy, no wait
-hip.memcpy_d2h_async %ctx, %host_delta, %device_delta   // copy, no wait
-hip.stream_sync %ctx                                    // one wait for all three
-```
-
-Reaching this is an active step, not automatic. In this design `MaterializeDeviceLoads`
-does it at insertion time: it emits the async copies grouped, then one shared
-`hip.stream_sync` (keeping copy and sync as separate ops). The
-[Sync Elimination Pass](#sync-elimination-pass) then drops any waits left over. A general
-pass that reorders copies from any source to widen this is future work; because the copy
-and sync stay separate ops, it can build on the same IR without changes here.
-
-### Sync Elimination Pass
-
-`MaterializeDeviceLoads` already pairs each `hip.memcpy_d2h_async` with a
-`hip.stream_sync` before the host read, so the only remaining job is removing the
-synchronizations that turn out to be unnecessary.
-
-**Pass:** `EliminateStreamSyncsPass`
-
-**Pipeline position:** after MaterializeDeviceLoads (Slot 6c), before PoolAllocs (Slot 6+).
-
-```
-Slot 6c: MaterializeDeviceLoads     → inserts hip.memcpy_d2h_async + hip.stream_sync
-Slot 6d: EliminateStreamSyncs       → custom pass (see below)
-Slot 6+: PoolAllocs                 → pools all allocations
-```
-
-This needs a custom pass, `-hip-eliminate-stream-syncs`. MLIR's
-[`-eliminate-gpu-barriers`](https://mlir.llvm.org/doxygen/EliminateBarriers_8cpp_source.html)
-**cannot** be reused: it matches only `gpu::BarrierOp` (its pattern is
-`OpRewritePattern<gpu::BarrierOp>`), so it never sees `hip.stream_sync`. It uses
-`MemoryEffectsOpInterface` only to analyze the ops *around* a barrier — not to decide
-what counts as a barrier — and offers no trait or interface to opt a custom sync op in.
-
-The custom pass follows the same idea — drop a sync when no memory access around it
-actually needs the ordering it enforces (for example, an adjacent sync already covers it):
-
-1. Match each `hip.stream_sync`.
-2. Via `MemoryEffectsOpInterface`, collect the memory effects of the ops before and
-   after it, stopping at the neighboring syncs.
-3. Erase the sync if no before/after pair conflicts — i.e. no two accesses to aliasing
-   memory where at least one is a write.
-
-### Memory Effects
-
-The elimination pass needs memory effects on the sync op and the async copy op.
-
-**hip.stream_sync** (the barrier) acts as a full barrier — it reads and writes all
-memory:
-
+**Synchronization:**
 ```tablegen
-def Hip_StreamSyncOp : Hip_Op<"stream_sync", [
-    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
-  let summary = "Block until all work on the HIP stream completes";
+def Hip_StreamSyncOp : Hip_Op<"stream_sync"> {
   let arguments = (ins Hip_ContextType:$ctx);
 }
 ```
 
-```cpp
-void StreamSyncOp::getEffects(EffectsVector &effects) {
-  effects.emplace_back(MemoryEffects::Read::get(),  DefaultResource::get());
-  effects.emplace_back(MemoryEffects::Write::get(), DefaultResource::get());
-}
+Type constraints enforce correct transfer direction automatically. Cannot accidentally copy device→device or host→host using these operations.
+
+Maps to Solution Step 2: OnnxToHip converters and shape inference use these operations to insert intentional transfers when ONNX semantics require host/device boundary crossing.
+
+### Pass Pipeline
+
+Three passes coordinate to enforce memory spaces and optimize synchronization:
+
+**1. Bufferization (Slot 2):**
+- Each operation implements `BufferizableOpInterface::getBufferType()`
+- Explicitly declares `#hip.mem<device>`, `#hip.mem<host>`, `#hip.mem<pinned>`, or `#hip.mem<managed>` for each result
+- Converts tensors to memrefs with correct memory space
+- Output is type-correct by construction - no violations to fix later
+
+**2. ShapeInference (Slot 6b) - Intentional Transfer Insertion:**
+- Detects operations requiring dynamic shape calculation from device data
+- Examples: NonZero (count true elements), TopK (read k), Reshape (read shape tensor)
+- For each shape-dependent operation:
+  - Allocate pinned host buffer
+  - Insert `hip.memcpy_d2h_async` + `hip.stream_sync`
+  - Perform shape calculation on host copy
+  - Use calculated shape for subsequent allocations
+- This is not fixing violations - these transfers are semantically required by ONNX operations
+
+**3. EliminateStreamSyncBarriers (Slot 6c):**
+- Custom pass (similar to MLIR's EliminateBarriers, but for `hip.stream_sync`)
+- Analyzes `MemoryEffectsOpInterface` to find conflicting memory effects
+- Removes redundant `hip.stream_sync` operations
+- Consolidates multiple syncs into minimum necessary barriers
+
+Maps to Solution Step 3: Type system guarantees no access violations at compile time. No fix-up passes needed - code is correct from the start.
+
+**Pipeline flow:**
+```
+Slot 1:  OnnxToHip Conversion       → converters respect type constraints
+Slot 2:  One-Shot-Bufferize         → tensor to memref with explicit space
+Slot 6a: PromoteStridedHipOperands  → preserve space in contiguous copies
+Slot 6b: ShapeInference             → insert transfers for dynamic shape calculation
+Slot 6c: EliminateStreamSyncBarriers → minimize synchronization overhead
+Slot 6+: PoolAllocs                 → pool device memory allocations
 ```
 
-**The copy op** already carries the trait in its definition above. It reads its `src`
-operand and writes its `dst` operand (operand order `ctx, dst, src`, so `dst` is operand
-1 and `src` is operand 2):
+---
 
-```cpp
-void MemcpyD2HAsyncOp::getEffects(EffectsVector &effects) {
-  effects.emplace_back(MemoryEffects::Read::get(),
-                       &getOperation()->getOpOperand(2),   // src (device)
-                       DefaultResource::get());
-  effects.emplace_back(MemoryEffects::Write::get(),
-                       &getOperation()->getOpOperand(1),   // dst (host)
-                       DefaultResource::get());
-}
+## Design Validation Examples
+
+This section contrasts wrong (type violations) vs right (correct-by-construction) approaches.
+
+### Example 1: GPU Kernel with Host Memory
+
+❌ **WRONG** - Type violation (should not compile):
+```mlir
+// Bufferization incorrectly returns host memory for GPU operation result
+%host = hip.pad(%ctx) ins(%input, %pads) outs(%output)
+        -> memref<?x?xf16, #hip.mem<host>>  // WRONG - GPU writes to host?
+// Type mismatch: GPU kernel result cannot be host memory
+// Error: operation 'hip.pad' result type incompatible with device memory semantics
 ```
 
-`memref.load` / `memref.store` already carry Read/Write effects, and DPS compute ops
-get theirs from the shared `emitDpsMemoryEffects` helper.
+✅ **RIGHT** - Correct from start:
+```mlir
+// getBufferType() correctly declares device memory
+%device = hip.pad(%ctx) ins(%input, %pads) outs(%output)
+          -> memref<?x?xf16, #hip.mem<device>>  // Correct - GPU writes to device
+// Type-correct, no fix-up needed
+```
 
-### Migration / Removal Ordering
+### Example 2: Host Load from Device Memory
 
-Retire `hip.readback_scalar` / `hip.readback_dim` in this order, so correctness never
-depends on guessed memory placement:
+❌ **WRONG** - Runtime SEGV (should not compile):
+```mlir
+%device = hip.greater(%ctx) ins(%a, %b)
+          -> memref<?x?xi1, #hip.mem<device>>
+%val = memref.load %device[%c0, %c0]  // CPU reads device memory → SEGV!
+// This code should not exist - type constraint violation
+```
 
-1. Split D2H readback into `hip.memcpy_d2h_async` + `hip.stream_sync`.
-2. Add sync coalescing and the [Sync Elimination Pass](#sync-elimination-pass).
-3. Remove the fused readback ops last, once the memory-space attributes and op memory
-   effects are solid.
+✅ **RIGHT** - Shape inference inserts transfer:
+```mlir
+%device = hip.greater(%ctx) ins(%a, %b)
+          -> memref<?x?xi1, #hip.mem<device>>
+// Shape inference detects CPU needs to count elements
+// Inserts intentional transfer:
+%host = memref.alloc() : memref<?x?xi1, #hip.mem<pinned>>
+hip.memcpy_d2h_async %ctx, %host, %device
+hip.stream_sync %ctx
+%val = memref.load %host[%c0, %c0]  // Safe - reading from host memory
+```
+
+### Example 3: Dynamic Shape Calculation (NonZero)
+
+❌ **WRONG** - Cannot count without transfer:
+```mlir
+%cond = hip.greater(%ctx) ins(%a, %b)
+        -> memref<?x?xi1, #hip.mem<device>>
+// How to count true elements for NonZero output allocation?
+// Cannot read %cond from CPU without transfer!
+%count = ???  // Stuck - need CPU access to device data
+```
+
+✅ **RIGHT** - Converter inserts transfer for shape calculation:
+```mlir
+%cond = hip.greater(%ctx) ins(%a, %b)
+        -> memref<?x?xi1, #hip.mem<device>>
+// Shape inference inserts transfer for counting
+%cond_host = memref.alloc() : memref<?x?xi1, #hip.mem<pinned>>
+hip.memcpy_d2h_async %ctx, %cond_host, %cond
+hip.stream_sync %ctx
+// Now CPU can count to allocate output
+%count = /* count true elements in cond_host */
+%indices = memref.alloc(%count, %c2) : memref<?x2xi64, #hip.mem<device>>
+// GPU writes output indices
+hip.nonzero(%ctx) ins(%cond) outs(%indices)
+```
+
+### Example 4: Small Scalars Passed by Value
+
+❌ **WRONG** - Device pointer for 3 integers:
+```mlir
+// Current hip.range implementation - device pointers for scalars
+%start_dev = memref.alloc() : memref<i64, #hip.mem<device>>
+%limit_dev = memref.alloc() : memref<i64, #hip.mem<device>>
+%delta_dev = memref.alloc() : memref<i64, #hip.mem<device>>
+hip.range(%ctx) ins(%start_dev, %limit_dev, %delta_dev)
+// Problem: 3 device allocations + pointer dereferences for 3 integers
+```
+
+✅ **RIGHT** - Pass scalars by value:
+```tablegen
+// Better design - kernel arguments by value
+def Hip_RangeOp : Hip_Op<"range"> {
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    I64:$start,    // Scalar value, not pointer
+    I64:$limit,    // Scalar value, not pointer
+    I64:$delta     // Scalar value, not pointer
+  );
+}
+```
+```mlir
+hip.range(%ctx) ins(%start, %limit, %delta)  // No allocation, fastest
+```
+
+### Key Takeaways
+
+- **No type violations generated** - `getBufferType()` returns correct memory space from start
+- **Intentional transfers only** - shape inference inserts D2H transfers when ONNX semantics require
+- **Type system enforces correctness** - cannot compile invalid host/device access patterns
+- **70+ operations need review** - ensure each operation's `getBufferType()` and converters are correct
 
 ---
 
@@ -666,8 +553,5 @@ depends on guessed memory placement:
 
 - [hip-shape-inference.md](hip-shape-inference.md) - Dynamic shape inference for HIP operations
 - [pool-allocs-memory-planning.md](pool-allocs-memory-planning.md) - Memory pooling algorithm and graph coloring
+- [AMDGPU Backend User Guide](https://llvm.org/docs/AMDGPUUsage.html) - LLVM address space mapping for AMDGPU
 - [MLIR GPU Dialect](https://mlir.llvm.org/docs/Dialects/GPU/) - Standard GPU dialect memory space patterns
-- [MLIR Constraints](https://mlir.llvm.org/docs/DefiningDialects/Constraints/) - TableGen CPred constraint documentation
-- [MLIR Operation Definition](https://mlir.llvm.org/docs/DefiningDialects/Operations/) - ODS operation definition guide
-- [Aliasing guarantees on memrefs from different memory spaces](https://discourse.llvm.org/t/aliasing-guarantees-on-memrefs-from-different-memory-spaces/61154) - LLVM Discourse discussion on memory space semantics
-- [Defining constraint on ops with CPred](https://discourse.llvm.org/t/defining-constraint-on-ops-with-cpred/4217) - LLVM Discourse example of custom CPred constraints
