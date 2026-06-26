@@ -31,7 +31,7 @@ import pytest
 from onnx import TensorProto, helper
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-# AMDGPU umbrella EP (loads hipep-backend.dll → hipep.dll underneath).
+# AMDGPU umbrella EP (loads hip-backend.dll → hipgpu.dll underneath).
 EP_DLL = REPO_ROOT / "install" / "dist" / "bin" / "amdgpu-ep.dll"
 
 # Symbolic name carried by the output's data-dependent dim. Intentionally on no
