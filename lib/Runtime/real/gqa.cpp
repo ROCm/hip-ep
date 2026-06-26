@@ -58,23 +58,11 @@
 
 //===----------------------------------------------------------------------===//
 // Legacy fast-path decode kernels (folded into gqa_kernel.hip as legacy_*
-// kernels, exposed via these two extern "C" entries). The current
-// hip_custom_kernels.h no longer declares these (the production fused path
-// uses the _v2 kernels), so declare them here for the decomposed-fallback
-// fast decode path.
+// device kernels) back the decomposed hipBLASLt fallback below. Their entries
+// hip_gqa_fused_decode / hip_gqa_flash_decode are declared (and HIP_KERNEL_API
+// exported) in hip_custom_kernels.h, so the EP resolves them out of
+// custom_kernels_<arch> at JIT link / native import.
 //===----------------------------------------------------------------------===//
-extern "C" int hip_gqa_fused_decode(void *stream, const void *Q,
-                                    const void *Kcache, const void *Vcache,
-                                    void *O, int B, int H, int G, int d,
-                                    int skv, int max_seq, float scale,
-                                    const void *seqlens_k);
-
-extern "C" int
-hip_gqa_flash_decode(void *stream, const void *Q, const void *Kcache,
-                     const void *Vcache, void *O, void *partials_workspace,
-                     int B, int H, int G, int d, int max_seq, int K_SPLITS,
-                     float scale, const void *seqlens_k, int local_window_size,
-                     const void *head_sink, int use_smooth_softmax);
 
 //===----------------------------------------------------------------------===//
 // Dispatch helpers (shared by the fused and decomposed paths)
