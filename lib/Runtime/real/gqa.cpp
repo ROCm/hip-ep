@@ -64,18 +64,16 @@
 //===----------------------------------------------------------------------===//
 extern "C" int hip_gqa_fused_decode(void *stream, const void *Q,
                                     const void *Kcache, const void *Vcache,
-                                    void *O, int B, int H, int G, int d, int skv,
-                                    int max_seq, float scale,
+                                    void *O, int B, int H, int G, int d,
+                                    int skv, int max_seq, float scale,
                                     const void *seqlens_k);
 
-extern "C" int hip_gqa_flash_decode(void *stream, const void *Q,
-                                    const void *Kcache, const void *Vcache,
-                                    void *O, void *partials_workspace, int B,
-                                    int H, int G, int d, int max_seq,
-                                    int K_SPLITS, float scale,
-                                    const void *seqlens_k, int local_window_size,
-                                    const void *head_sink,
-                                    int use_smooth_softmax);
+extern "C" int
+hip_gqa_flash_decode(void *stream, const void *Q, const void *Kcache,
+                     const void *Vcache, void *O, void *partials_workspace,
+                     int B, int H, int G, int d, int max_seq, int K_SPLITS,
+                     float scale, const void *seqlens_k, int local_window_size,
+                     const void *head_sink, int use_smooth_softmax);
 
 //===----------------------------------------------------------------------===//
 // Dispatch helpers (shared by the fused and decomposed paths)
@@ -592,7 +590,7 @@ static constexpr int kFlashDecodeKSplits = 8;
 // HPG=8 (d == 64). Distinct from flash_decode_geometry_ok above, which gates
 // the optimized _v2 decode kernel (HpG in {1,2,3,4,8,16}).
 static inline bool legacy_flash_decode_geometry_ok(int64_t H, int64_t G,
-                                                    int64_t d) {
+                                                   int64_t d) {
   if (G <= 0)
     return false;
   int64_t hpg = H / G;
@@ -801,13 +799,12 @@ cache_done:
 //===----------------------------------------------------------------------===//
 static int gqa_forward_hipblaslt(
     RuntimeState *state, hipStream_t stream, hipblasLtHandle_t ltHandle,
-    const void *query, const void *key, const void *value,
-    const void *past_key, const void *past_value, const void *seqlens_k_ptr,
-    const void *cos_cache, const void *sin_cache, void *head_sink,
-    bool use_smooth_softmax, void *output, void *present_key,
-    void *present_value, int64_t B, int64_t sq, int64_t skv,
-    int64_t past_buf_seq, int64_t H, int64_t G, int64_t d, float scale,
-    int64_t do_rotary, int64_t local_window_size, bool no_causal,
+    const void *query, const void *key, const void *value, const void *past_key,
+    const void *past_value, const void *seqlens_k_ptr, const void *cos_cache,
+    const void *sin_cache, void *head_sink, bool use_smooth_softmax,
+    void *output, void *present_key, void *present_value, int64_t B, int64_t sq,
+    int64_t skv, int64_t past_buf_seq, int64_t H, int64_t G, int64_t d,
+    float scale, int64_t do_rotary, int64_t local_window_size, bool no_causal,
     int64_t element_size_bytes, int op_state_slot) {
 
   int64_t HPG = H / G;
