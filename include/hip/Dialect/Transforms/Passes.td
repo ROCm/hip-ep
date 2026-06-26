@@ -765,4 +765,27 @@ def ResolveExternConstantsPass
   ];
 }
 
+def DedupDPSInitsPass
+    : Pass<"hip-dedup-dps-inits", "mlir::func::FuncOp"> {
+  let summary = "Liveness-safe deduplication of tensor.empty DPS inits";
+  let description = [{
+    Merges `tensor.empty` ops that feed DPS `outs` operands when their
+    consumers have non-overlapping live ranges. This replaces the unsafe
+    pre-bufferize CSE which merges ALL same-typed empties regardless of
+    liveness, causing silent buffer aliasing when two DPS ops are
+    simultaneously live (e.g. Whisper encoder cosine ~0.6).
+
+    The pass groups `tensor.empty` ops by result type, computes a simple
+    live interval `[empty_index, dps_consumer_index]` for each, and
+    greedily replaces later empties with earlier ones whose intervals do
+    not overlap.
+
+    Pipeline placement: after `--hip-infer-shapes` + `--canonicalize`,
+    before `one-shot-bufferize`.
+  }];
+  let dependentDialects = [
+    "mlir::tensor::TensorDialect"
+  ];
+}
+
 #endif // HIP_PASSES

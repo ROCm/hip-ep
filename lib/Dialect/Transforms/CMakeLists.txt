@@ -7,6 +7,7 @@ add_library(HipDialectTransforms STATIC
   AddHipContextArg.cpp
   AssignOpStateSlots.cpp
   BufferUtils.cpp
+  DedupDPSInits.cpp
   FixLoopAccumulatorOffset.cpp
   GenerateInterface.cpp
   GenerateOpStateInit.cpp
