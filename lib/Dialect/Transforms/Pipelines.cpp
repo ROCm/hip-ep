@@ -60,15 +60,10 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm,
   //      regardless of liveness — each is a DPS `outs` init, so merging
   //      simultaneously-live empties makes their DPS ops share one output
   //      buffer after bufferize and clobber each other (Whisper encoder:
-  //      cosine ~0.6). The dedup pass merges two empties only when (a) their
-  //      DPS consumers' live ranges are disjoint AND (b) their sizes are
-  //      provably equal via global value numbering (so per-layer dynamic
-  //      extents recomputed with distinct SSA values still unify, the way a
-  //      stock CSE folds them — but with the liveness guard CSE lacks). This is
-  //      required for BOTH correctness (no aliasing miscompile) and memory: the
-  //      later `--hip-pool-allocs` buckets only by SSA-IDENTICAL extents, so
-  //      without this merge cross-layer activation buffers (e.g. a VLM vision
-  //      tower) never reuse and the pool blows up. See DedupDPSInits.cpp.
+  //      cosine ~0.6). The dedup pass only merges empties whose DPS consumers
+  //      have non-overlapping live ranges, keeping simultaneously-live empties
+  //      distinct. This preserves the buffer-reuse benefit on deep sequential
+  //      models (e.g. gemma3-4b) while preventing the aliasing miscompile.
   pm.addPass(mlir::createCanonicalizerPass());
   pm.addNestedPass<func::FuncOp>(hip::createDedupDPSInitsPass());
 
