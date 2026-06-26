@@ -14,9 +14,11 @@
 // bufferize the DPS ops share one buffer and clobber each other when
 // simultaneously live (Whisper encoder: cosine ~0.6). Removing CSE entirely
 // is safe for correctness but prevents buffer reuse across transformer
-// layers, inflating the GPU pool ~5× on deep models, and ~140× on a VLM
-// vision tower (gemma3 vision: 0.2 → 30 GB) where per-layer attention
-// buffers each land in their own pool domain with no cross-layer reuse.
+// layers, so the GPU activation pool grows several-fold on deep models and
+// by more than an order of magnitude on a VLM vision tower, where each
+// layer's attention buffers land in their own pool domain with no
+// cross-layer reuse (gemma3 vision, 1 image: ~30 GB without this dedup vs
+// ~1.2 GB with — matching the CSE-on baseline).
 //
 // This pass replaces that unsafe CSE with two independent safety conditions,
 // BOTH of which must hold before two empties are merged:
@@ -285,8 +287,11 @@ struct DedupDPSInitsPass
       return;
 
     // Two empties may share a buffer only if their (statically known) result
-    // types match AND their dynamic-size operands are SSA-identical. Grouping
-    // by type is necessary but not sufficient for `tensor<?x…>`.
+    // types match AND their dynamic-size operands are PROVABLY EQUAL via the
+    // GVN above — NOT merely SSA-identical, so a per-layer recomputed extent
+    // (a fresh SSA value that is structurally identical to the rep's) still
+    // unifies. Grouping by type is necessary but not sufficient for
+    // `tensor<?x…>`.
     auto sameDynSizes = [&vn](tensor::EmptyOp a, tensor::EmptyOp b) {
       ValueRange da = a.getDynamicSizes();
       ValueRange db = b.getDynamicSizes();
