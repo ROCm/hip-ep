@@ -12,13 +12,14 @@
 // `tensor.empty` as its destination-passing-style init. `tensor.empty` is
 // side-effect-free, so a stock CSE merges ALL same-typed empties — after
 // bufferize the DPS ops share one buffer and clobber each other when
-// simultaneously live (Whisper encoder: cosine ~0.6). Removing CSE entirely
-// is safe for correctness but prevents buffer reuse across transformer
-// layers, so the GPU activation pool grows several-fold on deep models and
-// by more than an order of magnitude on a VLM vision tower, where each
-// layer's attention buffers land in their own pool domain with no
-// cross-layer reuse (gemma3 vision, 1 image: ~30 GB without this dedup vs
-// ~1.2 GB with — matching the CSE-on baseline).
+// simultaneously live (an attention encoder with parallel same-typed temps
+// then miscompiles: near-zero cosine). Removing CSE entirely is safe for
+// correctness but prevents buffer reuse across transformer layers, so the
+// GPU activation pool grows several-fold on deep models and by more than an
+// order of magnitude on a deep vision encoder, where each layer's attention
+// buffers land in their own pool domain with no cross-layer reuse (one
+// measured case: ~30 GB without this dedup vs ~1.2 GB with — matching the
+// CSE-on baseline).
 //
 // This pass replaces that unsafe CSE with two independent safety conditions,
 // BOTH of which must hold before two empties are merged:
@@ -32,17 +33,17 @@
 //       "last direct user of the DPS result" underestimates this — a result
 //       consumed by an `insert_slice`/view whose own result is read much
 //       later keeps the buffer live until that later read — and merging on
-//       the underestimate clobbers a still-live buffer (gemma3 vision: a
-//       slice's `axes` staging buffer was reused while live → garbage axis
-//       value → runtime abort). We therefore walk the buffer's alias set
+//       the underestimate clobbers a still-live buffer (observed: a slice's
+//       `axes` staging buffer was reused while live → garbage axis value →
+//       runtime abort). We therefore walk the buffer's alias set
 //       transitively and take the max index over all of its users.
 //
 //   (2) Dynamic-size operands must be PROVABLY EQUAL. Grouping by result type
 //       alone is unsafe for `tensor<?x…>`: two empties of the same static type
 //       can have different dynamic-extent operands and thus different runtime
 //       sizes. Merging them aliases a consumer onto a buffer that may be too
-//       small → out-of-bounds (gemma3 vision: a same-typed dynamic empty was
-//       merged onto a differently-sized one → garbage/abort at runtime). SSA
+//       small → out-of-bounds (observed: a same-typed dynamic empty merged
+//       onto a differently-sized one → garbage/abort at runtime). SSA
 //       identity is too strict: each transformer layer recomputes its extent
 //       with a fresh SSA value that is *structurally identical* (same function
 //       of the symbolic batch/seq dim). We therefore prove extent-equality with
@@ -59,7 +60,7 @@
 //       `hip.readback_scalar`s — pre-bufferize the readback is effect-free, so
 //       GVN/CSE fold it, but a fixed recursion depth exhausts on the tree and
 //       wrongly reports "not equal", leaving the buffers unmerged → pool
-//       blow-up on a VLM vision tower.)
+//       blow-up on a deep vision encoder.)
 //
 // Before (two non-overlapping, same-size DPS consumers share one empty):
 //   %sz = ...                            // dynamic extent, shared SSA value
