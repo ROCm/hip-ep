@@ -197,7 +197,7 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
         list(APPEND COMPILE_FLAGS "-I" "${CMAKE_CURRENT_SOURCE_DIR}/real")
 
         # Add custom_kernels include directory
-        list(APPEND COMPILE_FLAGS "-I" "${CMAKE_SOURCE_DIR}/3rd-party/custom_kernels/include")
+        list(APPEND COMPILE_FLAGS "-I" "${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/include")
 
         # Add ROCm includes
         if(THEROCK_DIST)
@@ -210,7 +210,7 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
             ${CMAKE_CURRENT_SOURCE_DIR}/real/runtime_types.h
             ${CMAKE_CURRENT_SOURCE_DIR}/real/cache_utils.h
             ${CMAKE_CURRENT_SOURCE_DIR}/real/zp_unpack_cache.h
-            ${CMAKE_SOURCE_DIR}/3rd-party/custom_kernels/include/hip_custom_kernels.h)
+            ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/include/hip_custom_kernels.h)
     else()
         list(APPEND COMPILE_FLAGS "-I" "${CMAKE_CURRENT_SOURCE_DIR}/mock")
         list(APPEND IMPL_DEPS

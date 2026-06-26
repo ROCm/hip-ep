@@ -203,7 +203,7 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
     endforeach()
 
     # Flip HIP_KERNEL_API to `__declspec(dllexport)` for the per-arch kernel
-    # DLL build (see 3rd-party/custom_kernels/include/hip_custom_kernels.h).
+    # DLL build (see lib/Runtime/Kernels/include/hip_custom_kernels.h).
     # Harmless on static libs / executables -- nothing in this tree ships
     # the kernel symbols outside a SHARED `custom_kernels_<arch>` build.
     set(define_flags "-DHIP_CUSTOM_KERNELS_EXPORTS")
