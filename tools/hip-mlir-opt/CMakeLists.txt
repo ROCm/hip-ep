@@ -8,6 +8,7 @@ add_executable(hip-mlir-opt hip-mlir-opt.cpp)
 add_dependencies(hip-mlir-opt
   HipDialectIncGen
   HipTypesIncGen
+  HipAttributesIncGen
   HipOpsIncGen
   HipPassesIncGen
 )

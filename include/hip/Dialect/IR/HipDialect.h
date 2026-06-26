@@ -21,6 +21,14 @@
 #define GET_TYPEDEF_CLASSES
 #include "hip/Dialect/IR/HipTypes.h.inc"
 
+// HIP memory-space enum + attribute (#hip.mem<device|host|pinned|managed>).
+// The enum header must precede the attribute header: the generated
+// MemorySpaceAttr class references the MemorySpaceKind enum.
+#include "hip/Dialect/IR/HipEnums.h.inc"
+
+#define GET_ATTRDEF_CLASSES
+#include "hip/Dialect/IR/HipAttributes.h.inc"
+
 // Generated header for the `HipDpsOp` C++ interface class (TableGen def
 // `HipDpsOpInterface`). Must precede HipOps.h.inc — every Hip_DpsOp's
 // generated declaration references `HipDpsOp::Trait`.
@@ -44,6 +52,20 @@ namespace hip {
                                    ::mlir::Location loc, ::mlir::Value statePtr,
                                    int32_t slot, ::llvm::StringRef ctorSymbol,
                                    ::llvm::ArrayRef<int64_t> i64Args);
+
+/// Memory-space operand predicates backing the Hip_TensorOrDeviceMemRef /
+/// Hip_TensorOrHostMemRef type constraints (see HipOps.td).
+///
+/// `isDeviceCompatibleMemRef` is true for a memref carrying
+/// `#hip.mem<device>` (likewise `host` for `isHostCompatibleMemRef`).
+///
+/// TRANSITIONAL: the current pipeline does not yet stamp a `#hip.mem<...>`
+/// space onto memrefs, so a memref with NO hip memory space currently
+/// satisfies BOTH predicates. This leniency is controlled by a single toggle
+/// (`kAcceptUnspecifiedMemorySpace` in HipDialect.cpp); flip it to enforce that
+/// every constrained operand carries an explicit space.
+bool isDeviceCompatibleMemRef(::mlir::Type type);
+bool isHostCompatibleMemRef(::mlir::Type type);
 } // namespace hip
 } // namespace mlir
 

@@ -13,6 +13,16 @@ mlir_tablegen(HipTypes.h.inc -gen-typedef-decls -typedefs-dialect=hip)
 mlir_tablegen(HipTypes.cpp.inc -gen-typedef-defs -typedefs-dialect=hip)
 add_public_tablegen_target(HipTypesIncGen)
 
+# Memory-space attribute (#hip.mem<device|host|pinned|managed>) and its backing
+# enum. One target emits both the enum (decls/defs) and the AttrDef
+# (decls/defs); HipDialect.h includes the enum header before the attr header.
+set(LLVM_TARGET_DEFINITIONS HipAttributes.td)
+mlir_tablegen(HipEnums.h.inc -gen-enum-decls)
+mlir_tablegen(HipEnums.cpp.inc -gen-enum-defs)
+mlir_tablegen(HipAttributes.h.inc -gen-attrdef-decls -attrdefs-dialect=hip)
+mlir_tablegen(HipAttributes.cpp.inc -gen-attrdef-defs -attrdefs-dialect=hip)
+add_public_tablegen_target(HipAttributesIncGen)
+
 # HipDpsOpInterface: shared reify default for HIP DPS ops. Generated
 # before HipOps so ops can reference the interface in their TableGen
 # trait list. The `.h.inc` carries the interface class declaration and

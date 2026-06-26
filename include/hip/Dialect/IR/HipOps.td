@@ -225,6 +225,39 @@ class Hip_DpsOp_Broadcast<string mnemonic, list<string> operandGetters,
 def Hip_TensorOrMemRef : AnyTypeOf<[AnyRankedTensor, AnyMemRef],
                                     "ranked tensor or memref">;
 
+// Memory-space-aware operand/result constraints.
+//
+// Pre-bufferization an operand is a ranked tensor (which has no memory space);
+// both constraints accept any ranked tensor in that form. Post-bufferization
+// it is a memref, and the predicate enforces the required HIP memory space
+// (`#hip.mem<device>` for device operands, `#hip.mem<host>` for host operands).
+//
+// TRANSITIONAL: today the pipeline emits memrefs with NO hip memory space, so
+// the C++ predicates also accept an unspecified space (single toggle
+// `kAcceptUnspecifiedMemorySpace` in HipDialect.cpp). When spaces are stamped
+// everywhere, flipping that toggle makes these constraints strict — no .td or
+// op-definition change needed.
+def Hip_TensorOrDeviceMemRef : Type<
+    Or<[AnyRankedTensor.predicate,
+        CPred<"::mlir::hip::isDeviceCompatibleMemRef($_self)">]>,
+    "ranked tensor or device memref">;
+
+def Hip_TensorOrHostMemRef : Type<
+    Or<[AnyRankedTensor.predicate,
+        CPred<"::mlir::hip::isHostCompatibleMemRef($_self)">]>,
+    "ranked tensor or host memref">;
+
+// Scalar (0-D) device operand. Used for ONNX scalar inputs (e.g. the
+// `Pad.constant_value`), whose spec shape is a single scalar — constraining the
+// hip op operand to rank-0 makes that contract explicit at the op level. The
+// rank check is safe: the And short-circuits, so it only runs once the operand
+// is known to be a ranked tensor or a (ranked) device memref. The converter is
+// responsible for normalizing a producer's single-element tensor to 0-D.
+def Hip_ScalarTensorOrDeviceMemRef : Type<
+    And<[Hip_TensorOrDeviceMemRef.predicate,
+         CPred<"::llvm::cast<::mlir::ShapedType>($_self).getRank() == 0">]>,
+    "0-D (scalar) ranked tensor or device memref">;
+
 def Hip_AllocOp : Hip_Op<"alloc",
     [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Allocate device memory";
@@ -3051,13 +3084,18 @@ def Hip_PadOp : Hip_DpsOp<"pad",
     ```
   }];
 
+  // Pilot op for the memory-space type system, exercising BOTH spaces: the
+  // payload tensors (`data`, `output`) are GPU buffers (device), while the
+  // small shape-control tensors (`pads`, `axes`) are consumed host-side
+  // (host). `constant_value` is a device scalar (0-D), matching the ONNX
+  // `Pad.constant_value` scalar spec.
   let arguments = (ins
     Hip_ContextType:$ctx,
-    Hip_TensorOrMemRef:$data,
-    Hip_TensorOrMemRef:$pads,
-    Optional<Hip_TensorOrMemRef>:$constant_value,
-    Optional<Hip_TensorOrMemRef>:$axes,
-    Hip_TensorOrMemRef:$output,
+    Hip_TensorOrDeviceMemRef:$data,
+    Hip_TensorOrHostMemRef:$pads,
+    Optional<Hip_ScalarTensorOrDeviceMemRef>:$constant_value,
+    Optional<Hip_TensorOrHostMemRef>:$axes,
+    Hip_TensorOrDeviceMemRef:$output,
     DefaultValuedAttr<StrAttr, "\"constant\"">:$mode
   );
 

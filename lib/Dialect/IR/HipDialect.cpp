@@ -10,6 +10,7 @@
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/SymbolTable.h"
@@ -26,6 +27,10 @@ void HipDialect::initialize() {
 #define GET_TYPEDEF_LIST
 #include "hip/Dialect/IR/HipTypes.cpp.inc"
       >();
+  addAttributes<
+#define GET_ATTRDEF_LIST
+#include "hip/Dialect/IR/HipAttributes.cpp.inc"
+      >();
   addOperations<
 #define GET_OP_LIST
 #include "hip/Dialect/IR/HipOps.cpp.inc"
@@ -34,6 +39,49 @@ void HipDialect::initialize() {
 
 #define GET_TYPEDEF_CLASSES
 #include "hip/Dialect/IR/HipTypes.cpp.inc"
+
+// MemorySpaceKind enum (stringify/symbolize) — must precede the attribute defs,
+// whose generated parser/printer call the enum symbolize/stringify functions.
+#include "hip/Dialect/IR/HipEnums.cpp.inc"
+
+#define GET_ATTRDEF_CLASSES
+#include "hip/Dialect/IR/HipAttributes.cpp.inc"
+
+//===----------------------------------------------------------------------===//
+// Memory-space operand predicates (see HipDialect.h for the contract)
+//===----------------------------------------------------------------------===//
+
+// TRANSITIONAL TOGGLE — the single point of control for memory-space leniency.
+//
+// While the bufferization / pool-allocation pipeline does not yet stamp a
+// `#hip.mem<...>` space onto memrefs, an operand with NO hip memory space must
+// still satisfy the device/host constraints (otherwise every existing op would
+// fail verification). When the pipeline materializes spaces everywhere, set
+// this to `false` to make an unspecified space a hard verification error — that
+// single edit flips the dialect from "lenient" to "strict".
+static constexpr bool kAcceptUnspecifiedMemorySpace = true;
+
+static bool memRefMatchesSpace(::mlir::Type type,
+                               ::mlir::hip::MemorySpaceKind expected) {
+  auto memref = ::mlir::dyn_cast<::mlir::MemRefType>(type);
+  if (!memref)
+    return false;
+  ::mlir::Attribute space = memref.getMemorySpace();
+  if (auto hipSpace =
+          ::mlir::dyn_cast_or_null<::mlir::hip::MemorySpaceAttr>(space))
+    return hipSpace.getKind() == expected;
+  // No hip memory space (null, or a plain IntegerAttr from upstream passes):
+  // accepted only under the transitional toggle.
+  return kAcceptUnspecifiedMemorySpace;
+}
+
+bool ::mlir::hip::isDeviceCompatibleMemRef(::mlir::Type type) {
+  return memRefMatchesSpace(type, ::mlir::hip::MemorySpaceKind::Device);
+}
+
+bool ::mlir::hip::isHostCompatibleMemRef(::mlir::Type type) {
+  return memRefMatchesSpace(type, ::mlir::hip::MemorySpaceKind::Host);
+}
 
 //===----------------------------------------------------------------------===//
 // Non-DPS ops: memory effect declarations

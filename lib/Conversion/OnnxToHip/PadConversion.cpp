@@ -228,6 +228,27 @@ struct PadToHip : public mlir::RewritePattern {
     if (op->getNumOperands() > 3 && !isNone(op->getOperand(3)))
       axes = op->getOperand(3);
 
+    // ONNX `Pad.constant_value` is a scalar, and hip.pad constrains the operand
+    // to 0-D (`Hip_ScalarTensorOrDeviceMemRef`). Some producers emit it as a
+    // redundant single-element 1-D tensor, so normalize such a value to rank-0
+    // here (a zero-cost reshape) to satisfy the op contract.
+    //
+    // Before: %cv : tensor<1xf32>
+    // After:  %cv = tensor.collapse_shape %0 [] : tensor<1xf32> into tensor<f32>
+    if (constantValue) {
+      if (auto cvTy =
+              mlir::dyn_cast<mlir::RankedTensorType>(constantValue.getType())) {
+        if (cvTy.getRank() != 0 && cvTy.hasStaticShape() &&
+            cvTy.getNumElements() == 1) {
+          auto scalarTy =
+              mlir::RankedTensorType::get({}, cvTy.getElementType());
+          llvm::SmallVector<mlir::ReassociationIndices> noReassoc;
+          constantValue = mlir::tensor::CollapseShapeOp::create(
+              rewriter, loc, scalarTy, constantValue, noReassoc);
+        }
+      }
+    }
+
     auto resultType =
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 

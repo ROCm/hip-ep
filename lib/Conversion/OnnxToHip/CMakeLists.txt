@@ -82,6 +82,7 @@ add_library(OnnxToHip STATIC
 add_dependencies(OnnxToHip
   HipDialectIncGen
   HipTypesIncGen
+  HipAttributesIncGen
   HipOpsIncGen
   HipPassesIncGen
 )

@@ -55,6 +55,7 @@ add_library(HipToLLVM STATIC
 add_dependencies(HipToLLVM
   HipDialectIncGen
   HipTypesIncGen
+  HipAttributesIncGen
   HipOpsIncGen
   HipPassesIncGen
 )

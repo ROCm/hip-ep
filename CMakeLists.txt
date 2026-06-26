@@ -181,6 +181,9 @@ if(BUILD_HIP_TOOLS)
 
     # Runtime unit tests (GPU-free; native against mock types)
     add_subdirectory(test/runtime)
+
+    # Dialect unit tests (GPU-free; native against the HIP dialect library)
+    add_subdirectory(test/unit)
   endif()
 endif()
 

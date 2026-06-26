@@ -31,6 +31,19 @@ module {
   // CHECK-LABEL: func.func @pad_constant_with_cval
   // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<3x4xf32>, tensor<4xi64>) cval({{.*}} : tensor<f32>) outs({{.*}} : tensor<5x6xf32>)
 
+  // A producer may emit constant_value as a redundant single-element 1-D
+  // tensor. hip.pad requires a 0-D operand, so the converter collapses it to
+  // rank-0 before building the op.
+  func.func @pad_constant_cval_1d(%data: tensor<3x4xf32>, %pads: tensor<4xi64>, %cval: tensor<1xf32>) -> tensor<5x6xf32> {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %r = "onnx.Pad"(%data, %pads, %cval, %none) {mode = "constant"} : (tensor<3x4xf32>, tensor<4xi64>, tensor<1xf32>, none) -> tensor<5x6xf32>
+    return %r : tensor<5x6xf32>
+  }
+
+  // CHECK-LABEL: func.func @pad_constant_cval_1d
+  // CHECK: %[[CV:.*]] = tensor.collapse_shape %{{.*}} [] : tensor<1xf32> into tensor<f32>
+  // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<3x4xf32>, tensor<4xi64>) cval(%[[CV]] : tensor<f32>) outs({{.*}} : tensor<5x6xf32>)
+
   // Reflect mode is non-default, so it stays in the attr-dict.
   func.func @pad_reflect(%data: tensor<3x4xf32>, %pads: tensor<4xi64>) -> tensor<5x6xf32> {
     %none = "onnx.NoValue"() {value} : () -> none
