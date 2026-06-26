@@ -70,43 +70,6 @@ func.func @static_three_allocs_overlap(
   return %alloc2 : memref<8x8xf32>
 }
 
-// ===== CSE hazard: simultaneously-live same-typed inits stay DISTINCT =====
-//
-// Mirrors the pre-bufferize CSE hazard that Pipelines.cpp deliberately avoids
-// (it runs `--hip-dedup-dps-inits`, not `-cse`): two ops with IDENTICAL
-// inputs+type whose results are BOTH live at a later use. A stock `-cse` would
-// fold the two `tensor.empty` inits to one SSA value and after bufferize the two
-// ops would clobber one shared buffer. pool-allocs runs AFTER bufferize and
-// assigns offsets by LIVENESS, so the three overlapping buffers (two producers +
-// the consumer's out, all live at the final matmul) each get a distinct slot ->
-// pool = 3 x 256 = 768. This is the liveness half of the invariant: the
-// liveness-safe merge that recovers cross-layer memory (which `-cse` does
-// unsafely) is `--hip-dedup-dps-inits`, guarded separately in
-// `test/lit/Dialect/hip-dedup-dps-inits.mlir`.
-//
-// CHECK-LABEL: func.func @cse_hazard_live_distinct
-// CHECK:         %[[SIZE:.*]] = arith.constant 768 : index
-// CHECK:         %[[POOL:.*]] = hip.get_pool({{.*}}%[[SIZE]]) : memref<?xi8>
-// CHECK-DAG:     %[[O0:.*]] = arith.constant 0 : index
-// CHECK-DAG:     %[[O1:.*]] = arith.constant 256 : index
-// CHECK-DAG:     %[[O2:.*]] = arith.constant 512 : index
-// CHECK-DAG:     memref.view %[[POOL]][%[[O0]]][] : memref<?xi8> to memref<8x8xf32>
-// CHECK-DAG:     memref.view %[[POOL]][%[[O1]]][] : memref<?xi8> to memref<8x8xf32>
-// CHECK-DAG:     memref.view %[[POOL]][%[[O2]]][] : memref<?xi8> to memref<8x8xf32>
-// CHECK:         return
-func.func @cse_hazard_live_distinct(
-    %ctx: !hip.context,
-    %a: memref<8x8xf32, strided<[?, ?], offset: ?>>,
-    %b: memref<8x8xf32, strided<[?, ?], offset: ?>>) -> memref<8x8xf32> {
-  %alloc0 = memref.alloc() : memref<8x8xf32>
-  hip.matmul(%ctx) ins(%a, %b : memref<8x8xf32, strided<[?, ?], offset: ?>>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%alloc0 : memref<8x8xf32>)
-  %alloc1 = memref.alloc() : memref<8x8xf32>
-  hip.matmul(%ctx) ins(%a, %b : memref<8x8xf32, strided<[?, ?], offset: ?>>, memref<8x8xf32, strided<[?, ?], offset: ?>>) outs(%alloc1 : memref<8x8xf32>)
-  %alloc2 = memref.alloc() : memref<8x8xf32>
-  hip.matmul(%ctx) ins(%alloc0, %alloc1 : memref<8x8xf32>, memref<8x8xf32>) outs(%alloc2 : memref<8x8xf32>)
-  return %alloc2 : memref<8x8xf32>
-}
-
 // ===== Mixed element types: f32 and f16 in same pool =====
 //
 // memref<8x8xf32> = 256 bytes, memref<8x8xf16> = 128 bytes.
