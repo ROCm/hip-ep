@@ -6,7 +6,19 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 
+#include <cstdio>
+
 #include "hip_custom_kernels.h"
+
+// This kernel's only call site uses the legacy RDNA 3 WMMA builtin
+// `__builtin_amdgcn_wmma_f32_16x16x16_f16_w32` (v16f16 operands). When
+// HIPCK_RDNA4_WMMA is set by CMake (no RDNA 3 arch in HIP_ARCHITECTURES),
+// the entire compute body is dropped and the extern "C" entrypoint becomes
+// a trap-stub. The function symbol is preserved so downstream linkers
+// (model.dll / EP) don't see an undefined reference; the body traps to
+// make sure nobody is silently reaching this on a non-RDNA-3 GPU — at the
+// time of writing nothing in lib/Runtime/ calls hip_gemm_wmma_fp16 anyway.
+#if defined(HIPCK_RDNA3_WMMA)
 
 typedef _Float16 half16 __attribute__((ext_vector_type(16)));
 typedef float float8 __attribute__((ext_vector_type(8)));
@@ -101,3 +113,20 @@ int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
         (const _Float16*)A, (const _Float16*)B, (_Float16*)C, M, K, N);
     return hipGetLastError() == hipSuccess ? 0 : -1;
 }
+
+#elif defined(HIPCK_RDNA4_WMMA)
+
+extern "C"
+int hip_gemm_wmma_fp16(void* /*stream*/, const void* /*A*/, const void* /*B*/,
+                       void* /*C*/, int /*M*/, int /*K*/, int /*N*/) {
+    fprintf(stderr,
+            "[custom_kernels] hip_gemm_wmma_fp16: built with HIPCK_RDNA4_WMMA "
+            "(RDNA 3 WMMA kernel not ported). No caller in lib/Runtime/ "
+            "exercises this entry today — if you hit this, the dispatcher "
+            "regressed.\n");
+    return -1;
+}
+
+#else
+#error "Define exactly one of HIPCK_RDNA3_WMMA or HIPCK_RDNA4_WMMA"
+#endif

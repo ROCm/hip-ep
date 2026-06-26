@@ -124,6 +124,12 @@ After extraction, `<workspace>/prebuilt/$RUN_ID/` matches the
 build-from-source `install/` layout (`bin/` — which also carries the bundled
 clang/lld — `lib/`, and `etc/`).
 
+## If you want to test for another Architecture
+if you want to build for gfx1201 ( rx 9070xt), you need modify below place before you build
+1. in  .github/workflows/linux-build.yml, change value of THEROCK_VERSION & HIP_ARCHITECTURES, as comments specified.
+2. in docker/build.sh, change value of THEROCK_VERSION & HIP_ARCHITECTURES
+3. in docker/run.sh, change value of HIP_ARCHITECTURES
+
 ## Open a container shell and set `$ROOT`
 
 If you built/ran natively (no Docker), skip the container and just set

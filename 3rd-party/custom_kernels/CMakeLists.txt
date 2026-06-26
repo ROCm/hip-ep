@@ -27,6 +27,47 @@ if(NOT HIP_ARCHITECTURES)
 endif()
 message(STATUS "[custom_kernels] Using HIP_ARCHITECTURES: ${HIP_ARCHITECTURES}")
 
+# Detect whether ANY architecture in HIP_ARCHITECTURES uses the RDNA 3 WMMA F16
+# instruction in its legacy form. The Clang builtin
+# `__builtin_amdgcn_wmma_f32_16x16x16_f16_w32` only matches the gfx11 variant
+# (operand vectors <16 x half>); RDNA 4 (gfx12) implements the same operation
+# with <8 x half> operands so the same builtin call fails ISel during the gfx12
+# codegen pass with:
+#   fatal error: error in backend: Cannot select: intrinsic
+#       %llvm.amdgcn.wmma.f32.16x16x16.f16
+# Detected arch families:
+#   gfx1100 / gfx1101 / gfx1102 / gfx1103  — RDNA 3 dGPU (7900 series etc.)
+#   gfx1150 / gfx1151                      — Strix Halo / Strix Point APU
+# Anything else (gfx12xx RDNA 4, MI series CDNA, older gfx10xx, ...) gets
+# HIPCK_RDNA4_WMMA=1 so matmul_nbits selects the half8 + `_gfx12` builtin
+# variant. gemm_wmma_fp16 and the GQA fused-prefill WMMA kernel remain
+# trap-stubs on non-RDNA-3 builds (no caller in lib/Runtime/ today).
+# In a mixed multi-arch build (e.g. "gfx1151;gfx1201") even ONE RDNA 3 entry
+# keeps HIPCK_RDNA3_WMMA — gfx12 device code still wouldn't ISel-select the
+# legacy intrinsic, so multi-arch builds that include any gfx12 entry will FAIL
+# at custom_kernels compile until per-arch object splitting lands.
+set(_hipck_wmma_arch "")
+foreach(_arch IN LISTS HIP_ARCHITECTURES)
+    if(_arch MATCHES "^gfx110[0-3]$" OR _arch MATCHES "^gfx115[01]$")
+        set(_hipck_wmma_arch "rdna3")
+    endif()
+endforeach()
+
+set(_hipck_kernel_compile_opts "")
+if(_hipck_wmma_arch STREQUAL "rdna3")
+    message(STATUS
+        "[custom_kernels] RDNA 3 arch detected in HIP_ARCHITECTURES "
+        "(${HIP_ARCHITECTURES}) — HIPCK_RDNA3_WMMA=1.")
+    list(APPEND _hipck_kernel_compile_opts -DHIPCK_RDNA3_WMMA=1)
+else()
+    message(STATUS
+        "[custom_kernels] no RDNA 3 arch in HIP_ARCHITECTURES "
+        "(${HIP_ARCHITECTURES}) — HIPCK_RDNA4_WMMA=1 (matmul_nbits WMMA "
+        "uses the `_gfx12` builtin; gemm_wmma_fp16 and GQA fused-prefill "
+        "WMMA remain trap-stubs).")
+    list(APPEND _hipck_kernel_compile_opts -DHIPCK_RDNA4_WMMA=1)
+endif()
+
 set(_kernel_sources
     hip/rope_kernel.hip
     hip/gqa_kernel.hip
@@ -73,6 +114,8 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
     hip_add_library(${_target} SHARED ${_kernel_sources}
         INCLUDE_DIRECTORIES
             ${CMAKE_CURRENT_SOURCE_DIR}/include
+        COMPILE_OPTIONS
+            ${_hipck_kernel_compile_opts}
         OFFLOAD_ARCHS
             ${_arch}
     )
@@ -80,6 +123,11 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
         OUTPUT_NAME custom_kernels_${_arch}
         FOLDER "custom_kernels"
     )
+    if(_hipck_wmma_arch STREQUAL "rdna3")
+        target_compile_definitions(${_target} PUBLIC HIPCK_RDNA3_WMMA=1)
+    else()
+        target_compile_definitions(${_target} PUBLIC HIPCK_RDNA4_WMMA=1)
+    endif()
     install(TARGETS ${_target}
         RUNTIME DESTINATION bin   # Windows .dll co-located with EP .dll
         LIBRARY DESTINATION lib   # Linux .so co-located with EP .so

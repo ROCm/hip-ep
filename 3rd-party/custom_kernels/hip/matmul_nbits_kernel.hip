@@ -1135,6 +1135,10 @@ static int getOrTuneGemvConfigI8(
  * Each thread processes 8 nibbles (= 4 bytes) from one N row.
  * ======================================================================= */
 
+// N goes on blockIdx.x (NOT blockIdx.y) for the same reason as the ZP
+// unpack kernels below — large N (e.g. lm_head vocab > 100k) would otherwise
+// exceed the effective grid_y cap on some HIP runtimes and produce
+// `hipErrorInvalidConfiguration` at launch. K is split across blockIdx.y.
 __global__ void dequant_u4_to_fp16(
     const unsigned char* __restrict__ B_packed,
     const _Float16* __restrict__ scales,
@@ -1142,8 +1146,8 @@ __global__ void dequant_u4_to_fp16(
     _Float16* __restrict__ B_fp16,
     int N, int K, int group_size, int num_groups_k)
 {
-    int n   = static_cast<int>(blockIdx.y);
-    int k8  = (static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x) * 8;
+    int n   = static_cast<int>(blockIdx.x);
+    int k8  = (static_cast<int>(blockIdx.y) * blockDim.x + threadIdx.x) * 8;
     if (n >= N || k8 >= K) return;
 
     int grp = k8 / group_size;
@@ -1173,6 +1177,12 @@ __global__ void dequant_u4_to_fp16(
  * ======================================================================= */
 
 typedef _Float16 half16 __attribute__((ext_vector_type(16)));
+// half8 is the per-lane A/B fragment for the RDNA 4 WMMA builtin
+// `__builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12` (V8fV8hV8hV8f). RDNA 3's
+// builtin took half16 because lanes 0..15 / 16..31 had to hold duplicate data;
+// RDNA 4 dropped that requirement, halving per-lane VGPR pressure on A and B.
+// `float8` is unchanged across both architectures (C/D fragments).
+typedef _Float16 half8  __attribute__((ext_vector_type(8)));
 typedef float    float8 __attribute__((ext_vector_type(8)));
 
 #define WMMA_TILE 16
@@ -1400,11 +1410,59 @@ void GemmFp16U4Impl(
         }
     };
 
+    // Dual-path WMMA inner loop:
+    //   - RDNA 4: half8 per-lane fragments, builtin has _gfx12 suffix, each
+    //     lane holds a half-K-strip of its row (sub=0 → K=0..7, sub=1 → K=8..15
+    //     within the 16-wide WMMA tile).
+    //   - RDNA 3: half16 per-lane fragments, original builtin, each lane holds
+    //     the full 16-wide K-strip with lanes 0..15 / 16..31 duplicated.
+    // The shared-memory layout (smA[buf][M][K], smB[buf][N][K]) is identical
+    // for both architectures — only the per-lane slicing of the K dimension
+    // changes. The acc[] accumulator type (float8) is unchanged.
     auto computeWMMA = [&](int buf) __attribute__((always_inline))
     {
 #pragma unroll
         for(int ks = 0; ks < K_STEPS; ks++)
         {
+#if defined(HIPCK_RDNA4_WMMA)
+            // RDNA 4 path. Per-lane load is 4 uint32 (= 8 fp16 = half8) starting
+            // at K offset `ks*16 + sub*8`. The two halves of a wave32 (lanes
+            // 0..15 and 16..31) cooperate to cover the full 16 K-elements that
+            // one WMMA tile needs; the hardware does the cross-lane gather.
+            half8 b_frag[WT_N];
+#pragma unroll
+            for(int wn = 0; wn < WT_N; wn++)
+            {
+                int noff              = (wcol * WT_N + wn) * WMMA_TILE;
+                uint32_t* dst         = reinterpret_cast<uint32_t*>(&b_frag[wn]);
+                const uint32_t* src   = reinterpret_cast<const uint32_t*>(
+                    &smB[buf][noff + lane][ks * WMMA_TILE + sub * 8]);
+#pragma unroll
+                for(int i = 0; i < 4; i++)
+                    dst[i] = src[i];
+            }
+#pragma unroll
+            for(int wm = 0; wm < WT_M; wm++)
+            {
+                int moff              = (wrow * WT_M + wm) * WMMA_TILE;
+                half8 a_frag;
+                uint32_t* dst         = reinterpret_cast<uint32_t*>(&a_frag);
+                const uint32_t* src   = reinterpret_cast<const uint32_t*>(
+                    &smA[buf][moff + lane][ks * WMMA_TILE + sub * 8]);
+#pragma unroll
+                for(int i = 0; i < 4; i++)
+                    dst[i] = src[i];
+
+#pragma unroll
+                for(int wn = 0; wn < WT_N; wn++)
+                    acc[wm][wn] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(
+                        a_frag, b_frag[wn], acc[wm][wn]);
+            }
+#elif defined(HIPCK_RDNA3_WMMA)
+            // RDNA 3 path (original). Per-lane load is 8 uint32 (= 16 fp16 =
+            // half16). Lanes 0..15 and 16..31 within a wave end up with
+            // bit-identical fragment data — that duplication is what the RDNA 3
+            // WMMA hardware expects.
             half16 b_frag[WT_N];
 #pragma unroll
             for(int wn = 0; wn < WT_N; wn++)
@@ -1434,6 +1492,9 @@ void GemmFp16U4Impl(
                     acc[wm][wn] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
                         a_frag, b_frag[wn], acc[wm][wn]);
             }
+#else
+#error "Define exactly one of HIPCK_RDNA3_WMMA or HIPCK_RDNA4_WMMA"
+#endif
         }
     };
 
@@ -1464,7 +1525,27 @@ void GemmFp16U4Impl(
 #pragma unroll
             for(int e = 0; e < 8; e++)
             {
+                // C/D fragment-to-output mapping. Column is always `lane`
+                // (= lid % 16) for both architectures. The ROW mapping
+                // is the part that changed:
+                //
+                //   RDNA 3 — row-interleaved across the wave32 sub-halves:
+                //     sub=0 → even rows (e=0..7 → row 0,2,4,6,8,10,12,14)
+                //     sub=1 → odd  rows (e=0..7 → row 1,3,5,7,9,11,13,15)
+                //   RDNA 4 — row-block across the wave32 sub-halves:
+                //     sub=0 → rows 0..7  (contiguous)
+                //     sub=1 → rows 8..15 (contiguous)
+                //
+                // Getting this wrong corrupts every row pair in the output
+                // tile and produces a silent failure (build passes, model
+                // output goes wrong by a deterministic permutation).
+#if defined(HIPCK_RDNA4_WMMA)
+                int r = e + sub * 8;
+#elif defined(HIPCK_RDNA3_WMMA)
                 int r = e * 2 + sub;
+#else
+#error "Define exactly one of HIPCK_RDNA3_WMMA or HIPCK_RDNA4_WMMA"
+#endif
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
                         C[(mbase + r) * ldc + nbase + lane] =
@@ -1608,7 +1689,9 @@ static void launchDequant(
 {
     constexpr int DQ_THR = 256;
     int k_groups = (K + DQ_THR * 8 - 1) / (DQ_THR * 8);
-    dim3 dq_grid(static_cast<unsigned>(k_groups), static_cast<unsigned>(N));
+    // grid_x = N (large for lm_head), grid_y = k_groups (small). See the
+    // comment on dequant_u4_to_fp16's kernel definition for the rationale.
+    dim3 dq_grid(static_cast<unsigned>(N), static_cast<unsigned>(k_groups));
     dim3 dq_block(DQ_THR);
     hipLaunchKernelGGL(dequant_u4_to_fp16, dq_grid, dq_block, 0, stream,
                        B_packed, scales, zeros, B_fp16, N, K, gs, ngk);
@@ -2304,9 +2387,44 @@ void GemmFp16I8Impl(
         }
     };
 
+    // Dual-path WMMA inner loop — semantics identical to the int4
+    // GemmFp16U4Impl version above (only the B-side dequant in storeToShared
+    // differs between int4 and int8). See that function for the layout
+    // rationale.
     auto computeWMMA = [&](int buf) __attribute__((always_inline)) {
 #pragma unroll
         for (int ks = 0; ks < K_STEPS; ks++) {
+#if defined(HIPCK_RDNA4_WMMA)
+            // RDNA 4 path: half8 fragments, half-K-strip per lane.
+            half8 b_frag[WT_N];
+#pragma unroll
+            for (int wn = 0; wn < WT_N; wn++) {
+                int noff              = (wcol * WT_N + wn) * WMMA_TILE;
+                uint32_t* dst         = reinterpret_cast<uint32_t*>(&b_frag[wn]);
+                const uint32_t* src   = reinterpret_cast<const uint32_t*>(
+                    &smB[buf][noff + lane][ks * WMMA_TILE + sub * 8]);
+#pragma unroll
+                for (int i = 0; i < 4; i++)
+                    dst[i] = src[i];
+            }
+#pragma unroll
+            for (int wm = 0; wm < WT_M; wm++) {
+                int moff              = (wrow * WT_M + wm) * WMMA_TILE;
+                half8 a_frag;
+                uint32_t* dst         = reinterpret_cast<uint32_t*>(&a_frag);
+                const uint32_t* src   = reinterpret_cast<const uint32_t*>(
+                    &smA[buf][moff + lane][ks * WMMA_TILE + sub * 8]);
+#pragma unroll
+                for (int i = 0; i < 4; i++)
+                    dst[i] = src[i];
+
+#pragma unroll
+                for (int wn = 0; wn < WT_N; wn++)
+                    acc[wm][wn] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(
+                        a_frag, b_frag[wn], acc[wm][wn]);
+            }
+#elif defined(HIPCK_RDNA3_WMMA)
+            // RDNA 3 path (original): half16 fragments, full duplicated K-strip.
             half16 b_frag[WT_N];
 #pragma unroll
             for (int wn = 0; wn < WT_N; wn++) {
@@ -2334,6 +2452,9 @@ void GemmFp16I8Impl(
                     acc[wm][wn] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
                         a_frag, b_frag[wn], acc[wm][wn]);
             }
+#else
+#error "Define exactly one of HIPCK_RDNA3_WMMA or HIPCK_RDNA4_WMMA"
+#endif
         }
     };
 
@@ -2360,7 +2481,16 @@ void GemmFp16I8Impl(
             int nbase = col0 + (wcol * WT_N + wn) * WMMA_TILE;
 #pragma unroll
             for (int e = 0; e < 8; e++) {
+                // C/D row mapping: see GemmFp16U4Impl above for the full
+                // RDNA 3 (e*2 + sub, interleaved) vs RDNA 4 (e + sub*8, block)
+                // explanation. Column mapping `lane` is unchanged.
+#if defined(HIPCK_RDNA4_WMMA)
+                int r = e + sub * 8;
+#elif defined(HIPCK_RDNA3_WMMA)
                 int r = e * 2 + sub;
+#else
+#error "Define exactly one of HIPCK_RDNA3_WMMA or HIPCK_RDNA4_WMMA"
+#endif
                 if constexpr (BOUNDS_CHECK) {
                     if (mbase + r < M && nbase + lane < N)
                         C[(mbase + r) * ldc + nbase + lane] =
@@ -2624,13 +2754,23 @@ __global__ void matmul_nbits_add_bias_rowmajor(
  * Output FP16 format: [N, groups_k]
  * ======================================================================= */
 
+// IMPORTANT: N (the output-channel count, e.g. vocab_size in an lm_head)
+// is mapped to blockIdx.x — NOT blockIdx.y. On some HIP runtimes / GPU
+// architectures the effective maximum for grid_y/grid_z is tighter than
+// the documented 2^31-1 (some drivers still inherit a legacy 65535 cap),
+// while grid_x is uniformly 2^31-1. Putting an N up to ~200k (typical for
+// modern LLM vocabs) on grid_y causes `hipErrorInvalidConfiguration` at
+// launch — and because this unpack runs before the GEMV launch with no
+// intermediate error check, the sticky error gets blamed on the next
+// `hipGetLastError()`, i.e. the GEMV launch. The packed_cols dimension
+// (small: groups_k/2, e.g. 16) goes on grid_y instead.
 __global__ void unpack_zp_u8_to_fp16_kernel(
     const unsigned char* __restrict__ zp_packed,
     _Float16* __restrict__ zp_fp16,
     int N, int groups_k, int packed_cols)
 {
-    int n  = static_cast<int>(blockIdx.y);
-    int g2 = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int n  = static_cast<int>(blockIdx.x);
+    int g2 = static_cast<int>(blockIdx.y) * blockDim.x + threadIdx.x;
     if (n >= N || g2 >= packed_cols) return;
 
     unsigned char packed = zp_packed[n * packed_cols + g2];
@@ -2644,14 +2784,16 @@ __global__ void unpack_zp_u8_to_fp16_kernel(
 
 /* Unpack packed nibble ZPs [N, ceil(k_blocks/2)] → [N, k_blocks] uint8,
  * one byte per zero_point (0-15). Needed because the GEMV row-major and
- * naive kernels index zp[n * k_blocks + grp], expecting one value per byte. */
+ * naive kernels index zp[n * k_blocks + grp], expecting one value per byte.
+ * See the grid-mapping comment on unpack_zp_u8_to_fp16_kernel above for
+ * why N goes on blockIdx.x rather than blockIdx.y. */
 __global__ void unpack_zp_nibbles_to_u8_kernel(
     const uint8_t* __restrict__ packed,
     uint8_t* __restrict__ out,
     int N, int k_blocks, int packed_cols)
 {
-    int n  = static_cast<int>(blockIdx.y);
-    int g2 = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int n  = static_cast<int>(blockIdx.x);
+    int g2 = static_cast<int>(blockIdx.y) * blockDim.x + threadIdx.x;
     if (n >= N || g2 >= packed_cols) return;
 
     uint8_t p = packed[n * packed_cols + g2];
@@ -2671,8 +2813,10 @@ extern "C" void hip_matmul_nbits_unpack_zp_u8(
 {
     int packed_cols = (groups_k + 1) / 2;
     constexpr int THR = 256;
-    dim3 grid(static_cast<unsigned>((packed_cols + THR - 1) / THR),
-              static_cast<unsigned>(N));
+    // grid_x = N (can be very large for an lm_head — vocab_size > 100k is
+    // common); grid_y = ceil(packed_cols/THR) is small. See kernel comment.
+    dim3 grid(static_cast<unsigned>(N),
+              static_cast<unsigned>((packed_cols + THR - 1) / THR));
     dim3 block(THR);
     hipLaunchKernelGGL(unpack_zp_nibbles_to_u8_kernel,
                        grid, block, 0, static_cast<hipStream_t>(stream),
@@ -2686,8 +2830,9 @@ extern "C" void hip_matmul_nbits_convert_zp_fp16(
 {
     int packed_cols = (groups_k + 1) / 2;
     constexpr int THR = 256;
-    dim3 grid(static_cast<unsigned>((packed_cols + THR - 1) / THR),
-              static_cast<unsigned>(N));
+    // Same grid-mapping rationale as hip_matmul_nbits_unpack_zp_u8 above.
+    dim3 grid(static_cast<unsigned>(N),
+              static_cast<unsigned>((packed_cols + THR - 1) / THR));
     dim3 block(THR);
     hipLaunchKernelGGL(unpack_zp_u8_to_fp16_kernel,
                        grid, block, 0, static_cast<hipStream_t>(stream),
@@ -2768,6 +2913,12 @@ extern "C" int hip_matmul_nbits(
     // the kernel. Common quantization (gs in {32, 64, 128}) satisfies it.
     constexpr int kI8GemvMinBs = 16;
     const bool wmma_data_format = (batch_count == 1) && (K % 32 == 0);
+    // Both RDNA 3 and RDNA 4 builds re-enable the WMMA-i8 fast path because
+    // GemmFp16I8Impl's WMMA inner loop is now dual-architecture (selects the
+    // half16+gfx11 vs half8+gfx12 variant at compile time via
+    // HIPCK_RDNA{3,4}_WMMA inside the kernel). Earlier this flag also gated the
+    // dispatcher to force GEMV — that gate is gone now that the kernel itself
+    // is portable.
     const bool use_wmma_i8 =
         wmma_data_format && (M >= kBlockDim) &&
         (block_size >= 32) && (block_size % 32 == 0);
@@ -2901,6 +3052,10 @@ extern "C" int hip_matmul_nbits(
    * ------------------------------------------------------------------- */
   bool wmma_data_format = (batch_count == 1) && (K % 32 == 0);
 
+  // WMMA fast path is enabled on every architecture the kernel TU was built
+  // for. The kernel's inner loop and writeback now dual-path on
+  // HIPCK_RDNA{3,4}_WMMA at compile time, so the host dispatcher no longer
+  // needs to special-case non-RDNA-3 builds here.
   if (wmma_data_format && M >= kBlockDim) {
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_matmul_nbits: WMMA fast path M=%lld N=%lld "

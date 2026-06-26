@@ -1100,11 +1100,61 @@ fused_gqa_decode_kernel(
     O[(batch * H + head_q) * d + tid] = __float2half(O_acc);
 }
 
+// Fused decode launcher -- dispatches to the template matching d.
+// IMPORTANT: this launcher lives OUTSIDE the HIPCK_RDNA{3,4}_WMMA guard
+// below, because `fused_gqa_decode_kernel` is a per-thread shfl-reduction
+// kernel that does NOT use any WMMA intrinsic. Moving it inside the guard
+// (as an earlier revision accidentally did) drops the symbol on non-RDNA-3
+// builds and causes lld to fail every compiled model.dll with
+// `undefined symbol: hip_gqa_fused_decode`, since lib/Runtime/real/gqa.cpp
+// dispatches to this launcher on the decode (sq==1) hot path.
+extern "C" int hip_gqa_fused_decode(
+    void* stream_ptr, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int H, int G, int d, int skv, int max_seq,
+    float scale, const void* seqlens_k) {
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  dim3 grid(B * H, 1);
+  const __half* hQ = static_cast<const __half*>(Q);
+  const __half* hK = static_cast<const __half*>(Kcache);
+  const __half* hV = static_cast<const __half*>(Vcache);
+  __half* hO = static_cast<__half*>(O);
+  const int* iSeqlensK = static_cast<const int*>(seqlens_k);
+  (void)hipGetLastError();  // clear stale error for correct attribution
+  switch (d) {
+    case 64:
+      fused_gqa_decode_kernel<64><<<grid, 64, 0, stream>>>(
+          hQ, hK, hV, hO, H, G, d, skv, max_seq, scale, iSeqlensK);
+      break;
+    case 128:
+      fused_gqa_decode_kernel<128><<<grid, 128, 0, stream>>>(
+          hQ, hK, hV, hO, H, G, d, skv, max_seq, scale, iSeqlensK);
+      break;
+    case 256:
+      fused_gqa_decode_kernel<256><<<grid, 256, 0, stream>>>(
+          hQ, hK, hV, hO, H, G, d, skv, max_seq, scale, iSeqlensK);
+      break;
+    default:
+      fprintf(stderr, "hip_gqa_fused_decode: unsupported d=%d "
+              "(must be 64, 128, or 256)\n", d);
+      return -1;
+  }
+  GQA_RETURN_LAUNCH_STATUS();
+}
+
 //===----------------------------------------------------------------------===//
 // Fused GQA Prefill Kernel (sq > 1, Flash Attention 2 with WMMA)
 //===----------------------------------------------------------------------===//
 // Grid: (num_q_tiles * B, H). Block: 128 threads = 4 waves of 32.
 // WMMA 16x16x16 tile GEMMs, online softmax with exp2f, double-buffered KV.
+//
+// HIPCK_RDNA{3,4}_WMMA gate: nothing in lib/Runtime/real/gqa.cpp dispatches
+// to `hip_gqa_fused_prefill` today (the prefill path is decomposed
+// hipBLASLt + softmax, see the note around gqa.cpp:520). The fused
+// prefill kernel here is preserved only for an eventual port to GPU
+// families where the legacy 16x16x16 F16 WMMA builtin does not lower.
+// On HIPCK_RDNA4_WMMA builds, the kernel + launcher are dropped and a
+// trap-stub launcher is provided so undefined references don't break linking.
+#if defined(HIPCK_RDNA3_WMMA)
 
 static constexpr int PREFILL_BQ   = 32;
 static constexpr int PREFILL_D    = 128;
@@ -1339,40 +1389,6 @@ fused_gqa_prefill_kernel(
     }
 }
 
-// Fused decode launcher -- dispatches to the template matching d
-extern "C" int hip_gqa_fused_decode(
-    void* stream_ptr, const void* Q, const void* Kcache, const void* Vcache,
-    void* O, int B, int H, int G, int d, int skv, int max_seq,
-    float scale, const void* seqlens_k) {
-  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
-  dim3 grid(B * H, 1);
-  const __half* hQ = static_cast<const __half*>(Q);
-  const __half* hK = static_cast<const __half*>(Kcache);
-  const __half* hV = static_cast<const __half*>(Vcache);
-  __half* hO = static_cast<__half*>(O);
-  const int* iSeqlensK = static_cast<const int*>(seqlens_k);
-  (void)hipGetLastError();  // clear stale error for correct attribution
-  switch (d) {
-    case 64:
-      fused_gqa_decode_kernel<64><<<grid, 64, 0, stream>>>(
-          hQ, hK, hV, hO, H, G, d, skv, max_seq, scale, iSeqlensK);
-      break;
-    case 128:
-      fused_gqa_decode_kernel<128><<<grid, 128, 0, stream>>>(
-          hQ, hK, hV, hO, H, G, d, skv, max_seq, scale, iSeqlensK);
-      break;
-    case 256:
-      fused_gqa_decode_kernel<256><<<grid, 256, 0, stream>>>(
-          hQ, hK, hV, hO, H, G, d, skv, max_seq, scale, iSeqlensK);
-      break;
-    default:
-      fprintf(stderr, "hip_gqa_fused_decode: unsupported d=%d "
-              "(must be 64, 128, or 256)\n", d);
-      return -1;
-  }
-  GQA_RETURN_LAUNCH_STATUS();
-}
-
 // Fused prefill launcher
 extern "C" int hip_gqa_fused_prefill(
     void* stream_ptr, const void* Q, const void* Kcache, const void* Vcache,
@@ -1394,6 +1410,30 @@ extern "C" int hip_gqa_fused_prefill(
       B, H, G, sq, skv, max_seq, past_len, scale);
   return hipGetLastError();
 }
+
+#elif defined(HIPCK_RDNA4_WMMA)
+
+// Trap-stub: keeps the extern "C" symbol so the EP / model.dll link
+// closure stays satisfied. No caller in lib/Runtime/real/gqa.cpp
+// reaches this today — if somebody adds a fused-prefill dispatch in
+// the future without porting the kernel to gfx12 first, the early
+// return signals "not implemented on this build" to the caller.
+extern "C" int hip_gqa_fused_prefill(
+    void* /*stream_ptr*/, const void* /*Q*/, const void* /*Kcache*/,
+    const void* /*Vcache*/, void* /*O*/, int /*B*/, int /*H*/, int /*G*/,
+    int /*sq*/, int /*skv*/, int /*max_seq*/, int /*past_len*/,
+    float /*scale*/) {
+  fprintf(stderr,
+          "[custom_kernels] hip_gqa_fused_prefill: built with HIPCK_RDNA4_WMMA "
+          "(RDNA 3 WMMA kernel not ported). lib/Runtime/real/gqa.cpp uses "
+          "the decomposed hipBLASLt path for prefill — if you hit this, "
+          "that dispatcher regressed.\n");
+  return -1;
+}
+
+#else
+#error "Define exactly one of HIPCK_RDNA3_WMMA or HIPCK_RDNA4_WMMA"
+#endif
 
 //===----------------------------------------------------------------------===//
 // FA-2 Split-K GQA Decode Kernel (Phase 1)
