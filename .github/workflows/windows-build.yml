@@ -697,7 +697,7 @@ jobs:
       pull-requests: write
 
     env:
-      THEROCK_VERSION: therock-dist-windows-gfx1151-7.11.0
+      THEROCK_VERSION: therock-dist-windows-gfx1151-7.13.0
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
 
     steps:
