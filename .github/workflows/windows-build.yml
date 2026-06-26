@@ -292,14 +292,14 @@ jobs:
       # -----------------------------------------------------------------------
 
       # -----------------------------------------------------------------------
-      # Build the AMD GPU umbrella EP (onnxruntime-ep-amdgpu) + hipep-backend
+      # Build the AMD GPU umbrella EP (onnxruntime-ep-amdgpu) + hip-backend
       # shim from the fork's PR branch. USE_AMDGPU forces DML/MIGraphX off and
-      # HIPEP on (no MIGraphX SDK needed); the shim loads hipep.dll (the
+      # HIPGPU on (no MIGraphX SDK needed); the shim loads hipgpu.dll (the
       # morphizen EP, renamed via cmake/deps.cmake). Built against ort-install.
       # Commit is pinned; bump it (and the cache key below) when the fork moves.
       #
       # Built BEFORE onnx-hipdnn-ep so its wheel target can bundle amdgpu-ep.dll
-      # + hipep-backend.dll (HIPEP_WHEEL_EXTRA_DLLS below). amdgpu-ep only
+      # + hip-backend.dll (HIP_WHEEL_EXTRA_DLLS below). amdgpu-ep only
       # links ort-install, so it has no dependency on the onnx-hipdnn-ep build.
       # -----------------------------------------------------------------------
       - name: Cache amdgpu-ep build
@@ -307,18 +307,18 @@ jobs:
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/build-amdgpu
-          # amdgpu-ep/hipep-backend link against the patched ort-install, so the
+          # amdgpu-ep/hip-backend link against the patched ort-install, so the
           # key folds in the pinned fork commit + ORT version/PR list; bumping
           # any of them forces a rebuild. On a hit the checkout + build below are
           # skipped and the staging step finds the cached DLLs in build-amdgpu.
-          key: dep-amdgpu-19dc45a-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
+          key: dep-amdgpu-daa120c-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
 
       - name: Checkout amdgpu-ep
         if: steps.cache-amdgpu.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: zz002/onnxruntime-ep-amdgpu
-          ref: 19dc45af58bf3b2775d87fe80455a2543c7b24fb
+          ref: daa120c415b00d52a59add8a7328221b4d25f4ff
           path: source-amdgpu
           fetch-depth: 1
           show-progress: false
@@ -339,7 +339,7 @@ jobs:
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-          "$CMAKE" --build "${{ runner.workspace }}/build-amdgpu" --target amdgpu-ep hipep-ep
+          "$CMAKE" --build "${{ runner.workspace }}/build-amdgpu" --target amdgpu-ep hip-ep
 
       # -----------------------------------------------------------------------
       # Build onnx-hipdnn-ep via the cross-platform build.py (same driver
@@ -350,25 +350,25 @@ jobs:
       # (repo.parent), matching what the later staging step expects. The LIT tests
       # run inside build.py after install.
       #
-      # HIPEP_WHEEL_EXTRA_DLLS feeds the wheel target the amdgpu-ep.dll +
-      # hipep-backend.dll built above, so the morphizen wheel ships the whole
-      # AMD GPU umbrella chain in onnxruntime/capi/ next to hipep.dll.
+      # HIP_WHEEL_EXTRA_DLLS feeds the wheel target the amdgpu-ep.dll +
+      # hip-backend.dll built above, so the morphizen wheel ships the whole
+      # AMD GPU umbrella chain in onnxruntime/capi/ next to hipgpu.dll.
       # -----------------------------------------------------------------------
       - name: Build onnx-hipdnn-ep
         shell: bash
         run: |
           AMDGPU_BUILD="${{ runner.workspace }}/build-amdgpu"
           AMDGPU_EP=$(find "$AMDGPU_BUILD" -name "amdgpu-ep.dll" -type f | head -1)
-          HIPEP_BACKEND=$(find "$AMDGPU_BUILD" -name "hipep-backend.dll" -type f | head -1)
+          HIP_BACKEND=$(find "$AMDGPU_BUILD" -name "hip-backend.dll" -type f | head -1)
           echo "amdgpu-ep.dll:     $AMDGPU_EP"
-          echo "hipep-backend.dll: $HIPEP_BACKEND"
+          echo "hip-backend.dll: $HIP_BACKEND"
           python build.py \
             --config Release \
             --cmake_generator Ninja \
             --hip_arch gfx1151 \
             --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install" \
             --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON \
-            --cmake_extra_defines "HIPEP_WHEEL_EXTRA_DLLS=$AMDGPU_EP;$HIPEP_BACKEND"
+            --cmake_extra_defines "HIP_WHEEL_EXTRA_DLLS=$AMDGPU_EP;$HIP_BACKEND"
 
       # -----------------------------------------------------------------------
       # Build OGA (onnxruntime-genai) for model_benchmark.exe
@@ -542,23 +542,23 @@ jobs:
           cp "${{ runner.workspace }}/install/bin/"*.dll staging/bin/ 2>/dev/null || true
           cp "${{ runner.workspace }}/install/bin/"*.exe staging/bin/ 2>/dev/null || true
 
-          # AMD GPU umbrella EP + hipep-backend shim (built from the fork PR
-          # above). The umbrella loads hipep-backend.dll, which loads hipep.dll
+          # AMD GPU umbrella EP + hip-backend shim (built from the fork PR
+          # above). The umbrella loads hip-backend.dll, which loads hipgpu.dll
           # (the morphizen EP, already copied from install/bin). All three sit
           # together in staging/bin so the load chain resolves.
           AMDGPU_BUILD="${{ runner.workspace }}/build-amdgpu"
           AMDGPU_EP=$(find "$AMDGPU_BUILD" -name "amdgpu-ep.dll" -type f | head -1)
-          HIPEP_BACKEND=$(find "$AMDGPU_BUILD" -name "hipep-backend.dll" -type f | head -1)
-          if [ -z "$AMDGPU_EP" ] || [ -z "$HIPEP_BACKEND" ]; then
-            echo "ERROR: amdgpu-ep.dll or hipep-backend.dll not found in $AMDGPU_BUILD"
+          HIP_BACKEND=$(find "$AMDGPU_BUILD" -name "hip-backend.dll" -type f | head -1)
+          if [ -z "$AMDGPU_EP" ] || [ -z "$HIP_BACKEND" ]; then
+            echo "ERROR: amdgpu-ep.dll or hip-backend.dll not found in $AMDGPU_BUILD"
             exit 1
           fi
           cp "$AMDGPU_EP" staging/bin/
-          cp "$HIPEP_BACKEND" staging/bin/
+          cp "$HIP_BACKEND" staging/bin/
 
           # Smoke: the per-arch kernel DLL must be present in staging/bin/
           # for the gpu-test job to load it. Failure here means the install
-          # rule in 3rd-party/custom_kernels/CMakeLists.txt regressed.
+          # rule in lib/Runtime/Kernels/CMakeLists.txt regressed.
           KERNEL_DLL="staging/bin/custom_kernels_gfx1151.dll"
           if [ ! -f "$KERNEL_DLL" ]; then
             echo "ERROR: $KERNEL_DLL missing from install (HIP_ARCHITECTURES=gfx1151)"
@@ -658,7 +658,7 @@ jobs:
           OGA_WHEEL=$(find "${{ runner.workspace }}/oga-artifacts" \
             -name "onnxruntime_genai_directml-*.whl" -type f | head -1)
           EP_WHEEL=$(find "../build/$(basename "$PWD")/python/dist" \
-            -name "onnxruntime_ep_hipep-*.whl" -type f | head -1)
+            -name "onnxruntime_ep_hip-*.whl" -type f | head -1)
           if [ -z "$ORT_WHEEL" ] || [ -z "$OGA_WHEEL" ] || [ -z "$EP_WHEEL" ]; then
             echo "ERROR: wheel(s) missing"
             echo "  ORT=$ORT_WHEEL OGA=$OGA_WHEEL EP=$EP_WHEEL"
@@ -673,7 +673,7 @@ jobs:
       - name: Upload Python wheel package
         uses: actions/upload-artifact@v4
         with:
-          name: hipep-python-package
+          name: hip-python-package
           path: wheelpkg/
           retention-days: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release_')) && 14 || 3 }}
 
@@ -724,7 +724,7 @@ jobs:
       - name: Download Python wheel package
         uses: actions/download-artifact@v4
         with:
-          name: hipep-python-package
+          name: hip-python-package
           path: wheelpkg
 
       # TheRock DLLs are required at runtime on the GPU machine.
@@ -768,8 +768,8 @@ jobs:
           for /r "%MODEL_DIR%" %%M in (*seq128.onnx) do (
             echo === Testing %%~nxM ===
             onnxruntime_perf_test.exe ^
-              --plugin_ep_libs "hipep|hipep.dll" ^
-              --plugin_eps "hipep" ^
+              --plugin_ep_libs "hipgpu|hipgpu.dll" ^
+              --plugin_eps "hipgpu" ^
               --plugin_ep_options "config_file|..\morphizen_config.json" ^
               -C "session.disable_cpu_ep_fallback|1" ^
               -t 30 -c 1 -s ^
@@ -780,7 +780,7 @@ jobs:
           exit /b %FAILED%
 
       # ----------------------------------------------------------------------
-      # Native artifact smoke test (artifact_format=NATIVE), direct hipep EP.
+      # Native artifact smoke test (artifact_format=NATIVE), direct hipgpu EP.
       # Exercises the dual-format path: CompilerDriver emits a per-model .dll
       # (lld-link in-process), InferenceState loads it via morphizen::Plugin
       # (LoadLibrary). LLVM IR stays the production default; native is opt-in.
@@ -814,8 +814,8 @@ jobs:
           )
           echo === Native smoke %SMOKE_MODEL% ===
           onnxruntime_perf_test.exe ^
-            --plugin_ep_libs "hipep|hipep.dll" ^
-            --plugin_eps "hipep" ^
+            --plugin_ep_libs "hipgpu|hipgpu.dll" ^
+            --plugin_eps "hipgpu" ^
             --plugin_ep_options "config_file|..\morphizen_config.json artifact_format|NATIVE" ^
             -C "session.disable_cpu_ep_fallback|1" ^
             -r 1 -c 1 -s ^
@@ -828,11 +828,11 @@ jobs:
 
       # ----------------------------------------------------------------------
       # AMD GPU umbrella NATIVE smoke test: same NATIVE compile/link/load path,
-      # but driven through the amdgpu-ep umbrella instead of the hipep EP
+      # but driven through the amdgpu-ep umbrella instead of the hipgpu EP
       # directly. profile=llm (an umbrella option, ep.amdgpuexecutionprovider.
-      # prefix) selects the hipep backend; the umbrella forwards non-umbrella
+      # prefix) selects the hipgpu backend; the umbrella forwards non-umbrella
       # session-config entries verbatim, so artifact_format is passed as a raw
-      # ep.hipep.* entry to reach the backend. Real gate (no exit /b 0).
+      # ep.hipgpu.* entry to reach the backend. Real gate (no exit /b 0).
       # ----------------------------------------------------------------------
       - name: Run AMD GPU umbrella native smoke test (GPU)
         if: always()
@@ -860,7 +860,7 @@ jobs:
             --plugin_eps "AMDGPUExecutionProvider" ^
             --plugin_ep_options "profile|llm" ^
             -C "session.disable_cpu_ep_fallback|1" ^
-            -C "ep.hipep.artifact_format|NATIVE" ^
+            -C "ep.hipgpu.artifact_format|NATIVE" ^
             -r 1 -c 1 -s ^
             "%SMOKE_MODEL%" > "..\results-amdgpu-native\smoke.txt" 2>&1
           set RC=%ERRORLEVEL%
@@ -909,8 +909,8 @@ jobs:
 
             Write-Host "=== EPContext export: $($m.Name) ==="
             & .\onnxruntime_perf_test.exe `
-              --plugin_ep_libs "hipep|hipep.dll" `
-              --plugin_eps "hipep" `
+              --plugin_ep_libs "hipgpu|hipgpu.dll" `
+              --plugin_eps "hipgpu" `
               --plugin_ep_options "config_file|..\morphizen_config.json" `
               -C "session.disable_cpu_ep_fallback|1 ep.context_enable|1 ep.context_embed_mode|0 ep.context_file_path|$ctxPath" `
               -t 5 -c 1 -s -I `
@@ -929,8 +929,8 @@ jobs:
 
             Write-Host "=== EPContext import: $($m.Name) ==="
             & .\onnxruntime_perf_test.exe `
-              --plugin_ep_libs "hipep|hipep.dll" `
-              --plugin_eps "hipep" `
+              --plugin_ep_libs "hipgpu|hipgpu.dll" `
+              --plugin_eps "hipgpu" `
               --plugin_ep_options "config_file|..\morphizen_config.json" `
               -C "session.disable_cpu_ep_fallback|1" `
               -t 30 -c 1 -s -I `
@@ -1061,7 +1061,7 @@ jobs:
           if (-not (Test-Path $model)) { Write-Host "[SKIP] model not found: $model"; exit 0 }
 
           # The morphizen wheel now bundles the whole AMD GPU umbrella chain
-          # (amdgpu-ep.dll + hipep-backend.dll + hipep.dll + hip-compiler +
+          # (amdgpu-ep.dll + hip-backend.dll + hipgpu.dll + hip-compiler +
           # custom_kernels) into onnxruntime/capi/, next to onnxruntime.dll where
           # OGA discovers the EP. No DLL injection needed — exercise the wheel
           # path end-to-end.
@@ -1075,7 +1075,7 @@ jobs:
           Push-Location "$pkg\wheels"
           & $py -m pip install --quiet `
             (Get-Item onnxruntime_directml-*.whl).Name `
-            (Get-Item onnxruntime_ep_hipep-*.whl).Name `
+            (Get-Item onnxruntime_ep_hip-*.whl).Name `
             (Get-Item onnxruntime_genai_directml-*.whl).Name `
             --extra-index-url https://repo.amd.com/rocm/whl/gfx1151/ `
             psutil tqdm pandas
@@ -1103,9 +1103,9 @@ jobs:
         run: |
           setlocal enabledelayedexpansion
           set PATH=%CD%\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
-          rem The EP DLL is now hipep.dll; hip-onnx-runner's legacy default name
+          rem The EP DLL is now hipgpu.dll; hip-onnx-runner's legacy default name
           rem is onnxruntime_morphizen_ep.dll, so point it at the new DLL.
-          set MORPHIZEN_EP_LIB=%CD%\gpu-test-package\bin\hipep.dll
+          set MORPHIZEN_EP_LIB=%CD%\gpu-test-package\bin\hipgpu.dll
           set L2_MODEL_DIR=${{ runner.workspace }}\l2-test-models
           if not exist "%L2_MODEL_DIR%" (
             echo [SKIP] L2 model directory not found: %L2_MODEL_DIR%

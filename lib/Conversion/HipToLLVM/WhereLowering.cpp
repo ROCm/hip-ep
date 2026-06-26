@@ -46,7 +46,7 @@ namespace {
 //
 // If a future MLIR upgrade switches to bit-packed `i1` memrefs (multiple
 // bools per byte), both this lowering and
-// `3rd-party/custom_kernels/hip/elementwise_where_kernel.hip` must be
+// `lib/Runtime/Kernels/hip/elementwise_where_kernel.hip` must be
 // updated together; otherwise the kernel will read wrong offsets
 // silently. See the matching comment block at the top of that .hip file.
 struct WhereOpLowering : public ConvertOpToLLVMPattern<WhereOp> {
@@ -105,7 +105,7 @@ struct WhereOpLowering : public ConvertOpToLLVMPattern<WhereOp> {
     //
     // Keep this list in sync with `hipdnn_to_hip_dtype_where` in
     // lib/Runtime/real/where.cpp and the dtype switch in
-    // 3rd-party/custom_kernels/hip/elementwise_where_kernel.hip. We do NOT
+    // lib/Runtime/Kernels/hip/elementwise_where_kernel.hip. We do NOT
     // extend the runtime/kernel dtype set as part of this lowering; if a
     // new dtype is needed, add it in all three places together.
     bool dtypeSupported = outElemTy.isF32() || outElemTy.isF16() ||

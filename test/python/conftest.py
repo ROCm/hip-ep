@@ -37,13 +37,13 @@ NUM_WARMUP = 1
 NUM_RUNS = 3
 
 # The EP is now reached through the AMD GPU umbrella EP (amdgpu-ep.dll), which
-# loads hipep-backend.dll → hipep.dll (the renamed MorphiZen EP). The umbrella
+# loads hip-backend.dll → hipgpu.dll (the renamed MorphiZen EP). The umbrella
 # selects the backend via the "profile" provider option (see EP_PROVIDER_OPTIONS).
 EP_DLL_NAME = "amdgpu-ep.dll"
 EP_REGISTRATION_NAME = "AMDGPUExecutionProvider"
 # OGA registers the umbrella under its short name (genai_config key).
 EP_OGA_NAME = "AMDGPU"
-# Provider option the umbrella forwards to pick the hipep backend.
+# Provider option the umbrella forwards to pick the hipgpu backend.
 EP_PROVIDER_OPTIONS = {"profile": "llm"}
 
 # Optional artifact-format override (escape hatch). Production / CI use the
@@ -52,10 +52,10 @@ EP_PROVIDER_OPTIONS = {"profile": "llm"}
 # a per-model DLL (lld-link + LoadLibrary) instead. Normally not needed — build
 # the EP against a Tier-1 `llvm-install` (see docs/whisper_quick_start.md §1) and
 # bitcode works; NATIVE is just a fallback. The value rides through as a raw
-# `ep.hipep.*` session-config entry (NOT a provider option: ORT validates those
+# `ep.hipgpu.*` session-config entry (NOT a provider option: ORT validates those
 # against the umbrella's declared set and rejects an unknown key; the umbrella
 # forwards non-umbrella-prefixed config entries to the backend verbatim). Mirrors
-# CI's `-C ep.hipep.artifact_format|NATIVE`.
+# CI's `-C ep.hipgpu.artifact_format|NATIVE`.
 ARTIFACT_FORMAT_ENV = "HIPEP_ARTIFACT_FORMAT"
 
 
@@ -66,7 +66,7 @@ def apply_artifact_format(so):
     """
     fmt = os.environ.get(ARTIFACT_FORMAT_ENV, "").strip()
     if fmt:
-        so.add_session_config_entry("ep.hipep.artifact_format", fmt)
+        so.add_session_config_entry("ep.hipgpu.artifact_format", fmt)
 
 
 _morphizen_registered = False
@@ -78,7 +78,7 @@ def _ep_runtime_dirs(repo_root):
     Honours an out-of-tree install layout via env vars (set them when you build
     with a custom --install_dir / --build_dir, e.g. the quick-start $ROOT layout):
       HIPEP_EP_BIN      -- dir holding the AMD GPU umbrella EP chain
-                           (amdgpu-ep.dll + hipep-backend.dll + hipep.dll)
+                           (amdgpu-ep.dll + hip-backend.dll + hipgpu.dll)
                            (default <repo>/install/dist/bin)
       THEROCK_DIST      -- TheRock SDK root; its bin/ holds amdhip64*.dll etc.
                            (default <repo>/install/therock)
@@ -503,7 +503,7 @@ def register_morphizen_ep(repo_root):
     """Register the AMDGPU umbrella EP library with ONNX Runtime (once per process).
 
     Registers ``amdgpu-ep.dll`` under ``AMDGPUExecutionProvider``; the umbrella
-    loads hipep-backend.dll → hipep.dll underneath. Returns the matching EP
+    loads hip-backend.dll → hipgpu.dll underneath. Returns the matching EP
     devices (callers pass ``EP_PROVIDER_OPTIONS`` to ``add_provider_for_devices``).
     """
     global _morphizen_registered
@@ -1261,7 +1261,7 @@ def create_ep_session(model_path, repo_root, provider_options=None):
 
     provider_options: optional dict forwarded to the EP. Defaults to
     EP_PROVIDER_OPTIONS ({"profile": "llm"}) — the umbrella uses "profile" to
-    select the hipep backend. The backend compiles every model in
+    select the hipgpu backend. The backend compiles every model in
     output-allocator mode (the 2-arg in-graph hip.alloc_output ABI) -- there is
     no provider option to select a mode.
     """

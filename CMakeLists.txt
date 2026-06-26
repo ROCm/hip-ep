@@ -72,11 +72,16 @@ if(HIPDNN_EP_LOAD_KERNEL_DLLS AND NOT HIPDNN_EP_LINK_HIP_HOST)
 endif()
 
 if(BUILD_EP)
-  # Add custom_kernels here so the per-arch custom_kernels_<arch> SHARED
-  # targets exist for custom-op-mlir to depend on. The guard prevents a
-  # duplicate add_subdirectory when BUILD_HIP_TOOLS re-includes it below.
+  # Add the GPU kernels subdirectory (lib/Runtime/Kernels) here -- driven from
+  # the top-level lists, NOT from lib/Runtime/CMakeLists.txt -- so the per-arch
+  # custom_kernels_<arch> SHARED targets exist before backend-mlir-compiler
+  # (custom-op-mlir) declares its dependency on them. lib/Runtime is only
+  # traversed later via add_subdirectory(lib) in the BUILD_HIP_TOOLS block, so
+  # nesting the add there would create the targets too late for this path. The
+  # guard makes a combined BUILD_EP + BUILD_HIP_TOOLS configure add it exactly
+  # once (the block below is the BUILD_HIP_TOOLS-only fallback).
   if(NOT BUILD_MOCK_RUNTIME AND NOT _CUSTOM_KERNELS_SUBDIR_ADDED)
-    add_subdirectory(3rd-party/custom_kernels)
+    add_subdirectory(lib/Runtime/Kernels)
     set(_CUSTOM_KERNELS_SUBDIR_ADDED TRUE)
   endif()
 
@@ -126,9 +131,12 @@ if(BUILD_HIP_TOOLS)
   # FlatBuffers schemas (GenerateInterface pass metadata)
   add_subdirectory(schemas)
 
-  # Real-runtime GPU kernels (guarded against the early BUILD_EP add above).
+  # Real-runtime GPU kernels (lib/Runtime/Kernels) for a tools-only build
+  # (BUILD_HIP_TOOLS without BUILD_EP). The guard skips this when the BUILD_EP
+  # block above already added the subdirectory, so a combined configure wires
+  # it exactly once.
   if(NOT BUILD_MOCK_RUNTIME AND NOT _CUSTOM_KERNELS_SUBDIR_ADDED)
-    add_subdirectory(3rd-party/custom_kernels)
+    add_subdirectory(lib/Runtime/Kernels)
     set(_CUSTOM_KERNELS_SUBDIR_ADDED TRUE)
   endif()
 

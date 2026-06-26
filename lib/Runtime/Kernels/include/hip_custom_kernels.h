@@ -140,7 +140,7 @@ HIP_KERNEL_API int hip_elementwise_where(
  *
  * Per-op launchers for the 5 ONNX unary ops added for the Qwen3.5 vision
  * model. All five share a single .hip translation unit
- * (3rd-party/custom_kernels/hip/elementwise_unary_kernel.hip).
+ * (lib/Runtime/Kernels/hip/elementwise_unary_kernel.hip).
  *
  * Supported hip_dtype (per op, may differ):
  *   Neg/Sign  : FLOAT16, INT32, INT64 (+ FLOAT32 for free)
@@ -196,7 +196,7 @@ HIP_KERNEL_API int hip_elementwise_not(
  * =========================================================================
  *
  * Same-shape binary elementwise ops. All eight share one translation unit:
- * 3rd-party/custom_kernels/hip/elementwise_binary_kernel.hip.
+ * lib/Runtime/Kernels/hip/elementwise_binary_kernel.hip.
  *
  * Mul / Add / Min / Max are reached from wrap_miopenOpTensor when MIOpen's
  * miopenOpTensor rejects the element type (notably INT32/INT64). Float
@@ -1660,6 +1660,33 @@ HIP_KERNEL_API int hip_qmoe_decode_fused(
  * Returns: 0 on success, non-zero on failure
  */
 HIP_KERNEL_API int hip_linear_attention_decode(
+    void* stream,
+    const void* query,
+    const void* key,
+    const void* value,
+    const void* decay,
+    const void* beta,
+    void* state,
+    void* output,
+    int64_t B,
+    int64_t seq_len,
+    int64_t Hq,
+    int64_t Hkv,
+    int64_t Nk,
+    int64_t dk,
+    int64_t dv,
+    float scale,
+    int64_t update_rule,
+    int64_t decay_per_key_dim,
+    int64_t beta_per_head,
+    int64_t type);
+
+// Chunked-parallel gated-delta prefill kernel (single launch, processes the
+// whole sequence). Returns >0 (=1) when it declines the launch (caller must
+// fall back to the per-token decode loop); 0 on success; <0 on launch error.
+// Only the gated_delta rule with scalar log-decay (decay_per_key_dim==0) is
+// supported; other rules/layouts/oversized smem are declined.
+HIP_KERNEL_API int hip_linear_attention_prefill_chunked(
     void* stream,
     const void* query,
     const void* key,

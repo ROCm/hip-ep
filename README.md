@@ -129,7 +129,7 @@ These operations are handled through standard MLIR transformations without requi
 - **HIP → LLVM Lowering** (`lib/Conversion/HipToLLVM/`) — lowers HIP ops to runtime C API calls
 - **Compiler Driver** (`lib/Compiler/`) — orchestrates the full compilation pipeline
 - **Runtime** (`lib/Runtime/`) — real (GPU) and mock (CPU) backends
-- **Custom HIP Kernels** (`3rd-party/custom_kernels/`) — handwritten `.hip` kernels for GQA, RoPE, etc.
+- **Custom HIP Kernels** (`lib/Runtime/Kernels/`) — handwritten `.hip` kernels for GQA, RoPE, etc.
 - **Compiler DLL** (`dll/`) — `hip-compiler.dll` exposing the C API
 - **Schemas** (`schemas/`) — FlatBuffers definitions for model metadata and compilation options
 - **Tools** — `hip-mlir-opt`, `hip-compiler`, `hip-onnx-runner`, `hip-inspect`, `hip-test`
