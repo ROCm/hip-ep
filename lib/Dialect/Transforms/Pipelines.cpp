@@ -64,6 +64,18 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm,
   //      buffer reuse).
   pm.addPass(mlir::createCanonicalizerPass());
   pm.addPass(mlir::createCSEPass());
+  // 1b''. Repair the one unsafe consequence of the CSE above: when it merges
+  //       the seed `tensor.empty`s of two init operands of the SAME op, the
+  //       tied results bufferize into one buffer and an op that reads back its
+  //       own outputs (e.g. `hip.gqa` present_key/present_value) miscompiles.
+  //       This re-points each such duplicate at a fresh, non-aliasing
+  //       `bufferization.alloc_tensor`. It MUST run after the CSE that creates
+  //       the duplication and before `one-shot-bufferize` locks in the shared
+  //       buffer; it is the surgical alternative to a blanket
+  //       `empty-tensor-to-alloc-tensor` (which would also undo the benign
+  //       merges the CSE above is here to make). See
+  //       SplitDuplicateDpsInits.cpp.
+  pm.addNestedPass<func::FuncOp>(hip::createSplitDuplicateDpsInitsPass());
 
   // 1c. Fold `tensor.dim` queries on `tensor.expand_shape` /
   //     `tensor.collapse_shape` chains into arithmetic on the chain
