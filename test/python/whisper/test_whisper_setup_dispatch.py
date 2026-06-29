@@ -24,6 +24,42 @@ def test_whisper_model_dir_convention():
     assert p32.name == "whisper-tiny-onnx"
 
 
+def test_whisper_hf_repo_mapping():
+    # Every variant has an fp16 AMD repo; only large-v3 ships fp32.
+    for name in conftest.WHISPER_VARIANTS:
+        assert conftest.whisper_hf_repo(name, "fp16") == f"amd/whisper-{name}-onnx-fp16"
+    assert conftest.whisper_hf_repo("large-v3", "fp32") == "amd/whisper-large-v3-onnx-fp32"
+    # The large-v3 back-compat aliases must agree with the resolver.
+    assert conftest.WHISPER_HF_REPO_FP16 == conftest.whisper_hf_repo("large-v3", "fp16")
+    assert conftest.WHISPER_HF_REPO_FP32 == conftest.whisper_hf_repo("large-v3", "fp32")
+
+
+def test_ensure_whisper_raw_downloads_all_fp16_variants(monkeypatch):
+    # fp16 of any variant must route to its AMD repo download (not the
+    # local-build hint that was the pre-change behavior for non-large-v3).
+    calls = {}
+    monkeypatch.setattr(
+        conftest,
+        "_ensure_whisper_raw_downloaded",
+        lambda model_dir, repo: calls.setdefault("repo", repo),
+    )
+    # Pretend the raw files are absent so the download branch is taken.
+    monkeypatch.setattr(conftest.pathlib.Path, "exists", lambda self: False)
+    for name in ("tiny", "base", "small", "medium", "large-v3-turbo"):
+        calls.clear()
+        conftest._ensure_whisper_raw(name, conftest.whisper_model_dir(name, "fp16"), "fp16")
+        assert calls["repo"] == f"amd/whisper-{name}-onnx-fp16"
+
+
+def test_ensure_whisper_raw_fp32_non_large_v3_uses_local_hint(monkeypatch):
+    # fp32 has no AMD repo for non-large-v3 variants -> local-build hint.
+    monkeypatch.setattr(conftest.pathlib.Path, "exists", lambda self: False)
+    import pytest
+
+    with pytest.raises(FileNotFoundError, match="No AMD HF fp32 repo"):
+        conftest._ensure_whisper_raw("tiny", conftest.whisper_model_dir("tiny", "fp32"), "fp32")
+
+
 def test_setup_variant_threads_n_text_ctx(monkeypatch):
     calls = {}
 

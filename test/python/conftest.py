@@ -711,8 +711,31 @@ def resolve_whisper_variant(name) -> "WhisperVariant":
 # pre-populates the dir so the download is skipped. The fp32 LOCAL dir is
 # `models/whisper-large-v3-onnx` (no -fp32 suffix) but its HF repo carries the
 # -fp32 suffix — the download targets whatever model_dir the caller passes.
-WHISPER_HF_REPO_FP32 = "amd/whisper-large-v3-onnx-fp32"
-WHISPER_HF_REPO_FP16 = "amd/whisper-large-v3-onnx-fp16"
+#
+# EVERY variant has an fp16 AMD repo (amd/whisper-{name}-onnx-fp16); only large-v3
+# additionally ships an fp32 repo (for the cross-backend fp32-vs-fp32 benchmark).
+# Each repo ships BOTH the raw OGA bundle (encoder/decoder.onnx + .data) AND the
+# pre-surgered/fixed files (decoder_surgery.onnx, encoder_fixed.onnx,
+# decoder_fixed_{prefill,decode}.onnx) — so a downloaded snapshot satisfies
+# _apply_whisper_surgery_and_fix_shapes with no surgery actually running (every
+# step gates on its output existing). These repos are GATED: `hf auth login` is
+# required (same as the gpt-oss-120b AMD repo).
+
+
+def whisper_hf_repo(name: str, precision: str) -> str:
+    """AMD HF repo id for a (variant, precision).
+
+    Convention: ``amd/whisper-{name}-onnx-{fp16|fp32}``. fp16 exists for every
+    variant; fp32 exists only for large-v3 (callers must not request fp32 for
+    other variants — _ensure_whisper_raw routes those to the local-build hint).
+    """
+    suffix = "fp16" if precision == "fp16" else "fp32"
+    return f"amd/whisper-{name}-onnx-{suffix}"
+
+
+# Back-compat aliases for the large-v3-specific wrappers (setup_whisper_*_dir).
+WHISPER_HF_REPO_FP32 = whisper_hf_repo("large-v3", "fp32")
+WHISPER_HF_REPO_FP16 = whisper_hf_repo("large-v3", "fp16")
 
 
 def whisper_model_dir(name: str, precision: str) -> pathlib.Path:
@@ -729,21 +752,25 @@ def whisper_model_dir(name: str, precision: str) -> pathlib.Path:
 def _ensure_whisper_raw(name: str, model_dir: pathlib.Path, precision: str) -> None:
     """Ensure model_dir/{encoder,decoder}.onnx exist.
 
-    large-v3 downloads from its AMD HF repo (existing behavior); all other
-    variants are LOCAL-BUILD primary (no AMD repo) — raises FileNotFoundError
-    with a build hint if absent.
+    Primary source for EVERY variant is its AMD HF repo (fp16:
+    amd/whisper-{name}-onnx-fp16, for all variants; fp32: only large-v3). A local
+    build (scripts/build_whisper_models.py) that pre-populated model_dir is the
+    backup — the existence check below short-circuits the download in that case.
+
+    fp32 of a non-large-v3 variant has no AMD repo, so it falls back to the
+    local-build hint (the test matrix only runs fp32 on large-v3).
     """
     if (model_dir / "encoder.onnx").exists() and (model_dir / "decoder.onnx").exists():
         return
-    if name == "large-v3":
-        repo = WHISPER_HF_REPO_FP16 if precision == "fp16" else WHISPER_HF_REPO_FP32
-        _ensure_whisper_raw_downloaded(model_dir, repo)
+    # fp16 exists for all variants; fp32 only for large-v3.
+    if precision == "fp16" or name == "large-v3":
+        _ensure_whisper_raw_downloaded(model_dir, whisper_hf_repo(name, precision))
         return
     raise FileNotFoundError(
         f"Whisper {name} {precision} raw model not found at {model_dir}.\n"
+        f"  No AMD HF fp32 repo exists for {name} (only large-v3 ships fp32).\n"
         f"  Build it locally: python scripts/build_whisper_models.py "
-        f"--variant {name} --precision {precision}\n"
-        f"  (or: python scripts/build_whisper_models.py --variant {name})"
+        f"--variant {name} --precision {precision}"
     )
 
 
@@ -752,9 +779,12 @@ def setup_whisper_variant(
 ) -> "tuple[pathlib.Path, WhisperVariant]":
     """Idempotent prep for ANY Whisper variant.
 
-    Ensures the raw OGA bundle (local build primary; large-v3 may download from
-    the AMD HF repo), then runs surgery + fix_shapes using the variant's
-    n_text_ctx. Returns (model_dir, WhisperVariant).
+    Ensures the raw OGA bundle (downloads from the variant's AMD HF repo —
+    amd/whisper-{name}-onnx-fp16 — with a local scripts/build_whisper_models.py
+    build as the backup), then runs surgery + fix_shapes using the variant's
+    n_text_ctx. Surgery is a no-op when the downloaded snapshot already carries
+    the fixed files (every step gates on its output). Returns
+    (model_dir, WhisperVariant).
     """
     var = resolve_whisper_variant(name)
     model_dir = whisper_model_dir(name, precision)
@@ -784,11 +814,15 @@ def _ensure_whisper_raw_downloaded(model_dir: pathlib.Path, hf_repo: str) -> Non
     if (model_dir / "encoder.onnx").exists() and (model_dir / "decoder.onnx").exists():
         return
 
+    # Derive the variant name from the model dir so the build-backup hint names the
+    # right --variant (dir convention: whisper-{name}-onnx[-fp16]).
+    variant_hint = model_dir.name.removeprefix("whisper-").removesuffix("-fp16")
+    variant_hint = variant_hint.removesuffix("-onnx") or "large-v3"
     hint = (
         f"Could not obtain the Whisper raw model for {model_dir}.\n"
         f"  - Primary: it auto-downloads from https://huggingface.co/{hf_repo} "
-        "(run `hf auth login` if the repo needs auth / you are rate-limited).\n"
-        "  - Backup:  build it locally with `python scripts/build_whisper_models.py --variant large-v3`."
+        "(the AMD repos are GATED — run `hf auth login` if you hit auth / rate limits).\n"
+        f"  - Backup:  build it locally with `python scripts/build_whisper_models.py --variant {variant_hint}`."
     )
     try:
         from huggingface_hub import snapshot_download
