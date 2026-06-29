@@ -138,8 +138,10 @@ def main() -> int:
     _step(f"audio: {audio_path}  ({audio_s:.1f} s, expects 16 kHz mono)")
 
     # --- Model -------------------------------------------------------------
-    _step(f"preparing model (downloads from amd/whisper-{args.variant}-onnx-{prec} "
-          "on first run) ...")
+    _step(
+        f"preparing model (downloads from amd/whisper-{args.variant}-onnx-{prec} "
+        "on first run) ..."
+    )
     try:
         model_dir, variant = setup_whisper_variant(args.variant, precision=prec)
     except (FileNotFoundError, KeyError) as e:
@@ -154,8 +156,11 @@ def main() -> int:
         _step("running ORT CPU reference (fp32 dynamic graph) ...")
         cpu_factory = whisper_infer.make_cpu_session_factory(model_dir)
         cpu_tokens = whisper_infer.greedy_decode_cpu(
-            cpu_factory, audio_fp, max_length=args.max_length,
-            dtype=dtype, variant=variant,
+            cpu_factory,
+            audio_fp,
+            max_length=args.max_length,
+            dtype=dtype,
+            variant=variant,
         )
         cpu_text = whisper_infer.decode_text(
             cpu_tokens, tokenizer_id=variant.hf_model_id, eot=variant.eot
@@ -180,8 +185,12 @@ def main() -> int:
     timings = {}
     t0 = time.perf_counter()
     gpu_tokens = whisper_infer.greedy_decode_morphizen(
-        gpu_factory, audio_fp, max_length=args.max_length,
-        timings=timings, dtype=dtype, variant=variant,
+        gpu_factory,
+        audio_fp,
+        max_length=args.max_length,
+        timings=timings,
+        dtype=dtype,
+        variant=variant,
     )
     wall_s = time.perf_counter() - t0
     gpu_text = whisper_infer.decode_text(
@@ -224,8 +233,11 @@ def _print_metrics(t, audio_s, wall_s, label):
     print(f"  total compute     : {total:9.1f} ms")
     print(f"  decode throughput : {tps:9.1f} tok/s")
     if rtf > 0:
-        print(f"  real-time factor  : {rtf:9.3f}   ({1 / rtf:.1f}x faster than real time)"
-              if rtf < 1 else f"  real-time factor  : {rtf:9.3f}")
+        print(
+            f"  real-time factor  : {rtf:9.3f}   ({1 / rtf:.1f}x faster than real time)"
+            if rtf < 1
+            else f"  real-time factor  : {rtf:9.3f}"
+        )
     print("=" * 64)
 
 
