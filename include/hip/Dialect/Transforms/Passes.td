@@ -431,6 +431,44 @@ def MaterializeHostScalarsPass
   ];
 }
 
+def PoolHostTransfersPass
+    : Pass<"hip-pool-host-transfers", "mlir::func::FuncOp"> {
+  let summary = "Pack #hip.mem<host> memref.alloc ops into one pageable host pool";
+  let description = [{
+    Walks `memref.alloc` ops whose result type carries the `#hip.mem<host>`
+    memory space (produced by bufferizing `hip.transfer ... to host`, e.g.
+    the D2H destination of `hip.pad`'s pads/axes) and packs them into a single
+    per-function `hip.get_host_mem(%ctx, %total)` PAGEABLE host buffer. Each
+    candidate is replaced with a `memref.view` at its own 64-byte-aligned
+    offset; the original `memref.dealloc`s are erased (the pool is
+    runtime-owned, freed in `hipdnn_ep_state_cleanup`).
+
+    This is the dedicated, separate sibling of `hip-materialize-host-scalars`
+    (which targets tiny host-fed scalars and uses the PINNED `get_host_scratch`
+    pool). Keeping the pools separate ensures a pageable `host` buffer is never
+    mislabelled as `pinned`. Runs adjacent to `hip-materialize-host-scalars`
+    (after `hip-promote-strided-hip-operands`, before `hip-pool-allocs`) so
+    these host allocs never reach the GPU pool — a `#hip.mem<host>` alloc that
+    reached `MemRefAllocOpLowering` would lower to the undefined
+    `hip_device_malloc`.
+
+    Before:
+      %a = memref.alloc() : memref<8xi64, #hip.mem<host>>
+      hip.memcpy_d2h_async(%ctx, %a, %dev : ..., ...)
+      memref.dealloc %a : memref<8xi64, #hip.mem<host>>
+    After:
+      %hm  = hip.get_host_mem(%ctx, %c64) : memref<?xi8, #hip.mem<host>>
+      %a   = memref.view %hm[%c0][] : memref<?xi8, #hip.mem<host>>
+                 to memref<8xi64, #hip.mem<host>>
+      hip.memcpy_d2h_async(%ctx, %a, %dev : ..., ...)
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
 def LowerAllocsPass : Pass<"hip-lower-allocs", "mlir::func::FuncOp"> {
   let summary = "Lower memref.alloc to hip.alloc and insert hip.free";
   let description = [{

@@ -8,8 +8,10 @@
 #include "hip/Dialect/IR/HipDialect.h"
 #include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
 #include "mlir/Dialect/Bufferization/IR/DstBufferizableOpInterfaceImpl.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/OperationSupport.h"
+#include "llvm/ADT/Sequence.h"
 
 namespace mlir {
 namespace hip {
@@ -102,6 +104,129 @@ struct HipReadbackBufferizableModel
   }
 };
 
+// Bufferization model for hip.transfer (added in parallel to the readback
+// models above; it does not touch them). hip.transfer is a value-preserving
+// tensor->tensor op whose `target` attribute names the destination HIP memory
+// space. It bufferizes to a fresh allocation in that space plus an explicit
+// async memcpy and a stream sync:
+//
+//   Before:  %h = hip.transfer(%ctx, %pads : tensor<8xi64>) to #hip.mem<host>
+//                   -> tensor<8xi64>
+//   After:   %dst = memref.alloc() : memref<8xi64, #hip.mem<host>>
+//            hip.memcpy_d2h_async(%ctx, %dst, %srcBuf : ..., ...)
+//            hip.stream_sync(%ctx)
+//            // uses of %h replaced by %dst
+//
+// The result is a NEW buffer (bufferizesToAllocation = true, no aliasing of the
+// src operand); the src operand is read-only. Direction is chosen from the
+// explicit memory spaces: device->{host,pinned} = D2H, {host,pinned}->device =
+// H2D (the pad pilot only exercises D2H). An unspecified src space is treated
+// as device (the transitional default).
+//
+// The trailing hip.stream_sync is emitted ONLY for D2H: the host reads the
+// destination next (e.g. a tensor.extract / CPU-side kernel argument), so it
+// must wait for the async copy to land. H2D omits the sync -- the device
+// destination is consumed by later GPU work enqueued on the SAME stream, which
+// stream ordering already sequences after the copy, so a host barrier would
+// only stall the host (the host source is a session-lived pooled buffer that
+// outlives the in-flight copy).
+struct HipTransferBufferizableModel
+    : public bufferization::BufferizableOpInterface::ExternalModel<
+          HipTransferBufferizableModel, TransferOp> {
+
+  bool bufferizesToAllocation(Operation *, Value) const { return true; }
+
+  bool bufferizesToMemoryRead(Operation *op, OpOperand &opOperand,
+                              const bufferization::AnalysisState &) const {
+    // Only the `src` tensor operand is read; `ctx` is not a tensor.
+    return opOperand.get() == cast<TransferOp>(op).getSrc();
+  }
+  bool bufferizesToMemoryWrite(Operation *, OpOperand &,
+                               const bufferization::AnalysisState &) const {
+    return false;
+  }
+  bufferization::AliasingValueList
+  getAliasingValues(Operation *, OpOperand &,
+                    const bufferization::AnalysisState &) const {
+    // Result is a fresh allocation, never an alias of an operand.
+    return {};
+  }
+
+  FailureOr<bufferization::BufferLikeType>
+  getBufferType(Operation *op, Value /*value*/,
+                const bufferization::BufferizationOptions &options,
+                const bufferization::BufferizationState & /*state*/,
+                SmallVector<Value> & /*invocationStack*/) const {
+    auto transfer = cast<TransferOp>(op);
+    auto tensorTy = cast<TensorType>(transfer.getResult().getType());
+    // Result buffer lives in the target space with a static identity layout
+    // (so the pad lowering's contiguous-ptr extraction and PoolHostTransfers'
+    // view rewrite both see a dense buffer).
+    BaseMemRefType bt = bufferization::getMemRefTypeWithStaticIdentityLayout(
+        tensorTy, transfer.getTargetAttr());
+    return cast<bufferization::BufferLikeType>(bt);
+  }
+
+  LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
+                          const bufferization::BufferizationOptions &options,
+                          bufferization::BufferizationState &state) const {
+    auto transfer = cast<TransferOp>(op);
+    Location loc = op->getLoc();
+
+    FailureOr<Value> srcBuf =
+        getBuffer(rewriter, transfer.getSrc(), options, state);
+    if (failed(srcBuf))
+      return failure();
+    auto srcTy = cast<MemRefType>(srcBuf->getType());
+
+    auto resultTensorTy = cast<TensorType>(transfer.getResult().getType());
+    auto dstTy = cast<MemRefType>(
+        bufferization::getMemRefTypeWithStaticIdentityLayout(
+            resultTensorTy, transfer.getTargetAttr()));
+
+    // Dynamic dst dims mirror the src buffer's dims.
+    SmallVector<Value> dynDims;
+    for (int64_t i : llvm::seq<int64_t>(dstTy.getRank()))
+      if (dstTy.isDynamicDim(i))
+        dynDims.push_back(memref::DimOp::create(rewriter, loc, *srcBuf, i));
+    Value dst = memref::AllocOp::create(rewriter, loc, dstTy, dynDims);
+
+    // Pick the copy direction from the explicit memory spaces. An unspecified
+    // src space is treated as device (today's transitional default).
+    MemorySpaceKind dstKind = transfer.getTarget().getKind();
+    MemorySpaceKind srcKind = MemorySpaceKind::Device;
+    if (auto sp = dyn_cast_or_null<MemorySpaceAttr>(srcTy.getMemorySpace()))
+      srcKind = sp.getKind();
+
+    bool srcIsHost =
+        srcKind == MemorySpaceKind::Host || srcKind == MemorySpaceKind::Pinned;
+    bool dstIsHost =
+        dstKind == MemorySpaceKind::Host || dstKind == MemorySpaceKind::Pinned;
+
+    Value ctx = transfer.getCtx();
+    if (srcKind == MemorySpaceKind::Device && dstIsHost) {
+      MemcpyD2HAsyncOp::create(rewriter, loc, ctx, dst, *srcBuf);
+      // D2H only: the host reads `dst` next (a tensor.extract / CPU-side kernel
+      // arg), so the async copy must complete before that host load -- emit a
+      // stream sync. H2D below needs NO host sync: the device `dst` is consumed
+      // by later GPU work on the SAME stream, which stream ordering already
+      // sequences after this copy (a sync would just stall the host); the host
+      // source is a session-lived pooled buffer that outlives the in-flight
+      // copy.
+      StreamSyncOp::create(rewriter, loc, ctx);
+    } else if (srcIsHost && dstKind == MemorySpaceKind::Device) {
+      MemcpyH2DAsyncOp::create(rewriter, loc, ctx, dst, *srcBuf);
+    } else {
+      return op->emitError(
+          "hip.transfer: unsupported memory-space direction (only "
+          "device<->host/pinned is implemented today)");
+    }
+
+    bufferization::replaceOpWithBufferizedValues(rewriter, op, dst);
+    return success();
+  }
+};
+
 inline void
 registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *ctx, HipDialect *) {
@@ -109,6 +234,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
         *ctx);
     ReadbackScalarOp::attachInterface<
         HipReadbackBufferizableModel<ReadbackScalarOp>>(*ctx);
+    TransferOp::attachInterface<HipTransferBufferizableModel>(*ctx);
     ConvOp::attachInterface<HipDstBufferizableModel<ConvOp>>(*ctx);
     ConvTransposeOp::attachInterface<HipDstBufferizableModel<ConvTransposeOp>>(
         *ctx);

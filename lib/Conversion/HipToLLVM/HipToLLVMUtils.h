@@ -41,11 +41,25 @@ inline constexpr const char *kHipFree = "hip_device_free";
 inline constexpr const char *kHipGetPoolBase = "hipdnn_ep_get_pool_base";
 inline constexpr const char *kHipGetHostScratch =
     "hipdnn_ep_get_host_scratch_base";
+// Pageable host-memory pool base (backs hip.get_host_mem). Sibling of the
+// pinned hipdnn_ep_get_host_scratch_base; plain malloc/realloc, never
+// hipHostMalloc — see hipdnn_ep_runtime_state.cpp.
+inline constexpr const char *kHipGetHostMem = "hipdnn_ep_get_host_mem_base";
 inline constexpr const char *kHipAllocOutput = "hipdnn_ep_alloc_output";
 
 inline constexpr const char *kWrapHipMemcpyAsync = "wrap_hipMemcpyAsync";
 inline constexpr const char *kWrapHipMemcpy2DAsync = "wrap_hipMemcpy2DAsync";
 inline constexpr const char *kWrapStridedCopy = "wrap_strided_copy";
+// hip.memcpy_h2d_async / hip.memcpy_d2h_async / hip.stream_sync lower to these
+// existing async wrappers (they call hipMemcpyAsync / hipStreamSynchronize on
+// the runtime stream). They take the STREAM pointer (from
+// hipdnn_ep_state_get_stream), not the RuntimeState — hence the stream-getter
+// const below.
+inline constexpr const char *kWrapHipMemcpyH2D = "wrap_hipMemcpyH2D";
+inline constexpr const char *kWrapHipMemcpyD2H = "wrap_hipMemcpyD2H";
+inline constexpr const char *kWrapHipStreamSynchronize =
+    "wrap_hipStreamSynchronize";
+inline constexpr const char *kHipGetStream = "hipdnn_ep_state_get_stream";
 
 inline constexpr const char *kMiopenConvolutionForward =
     "wrap_miopenConvolutionForward";
@@ -457,6 +471,11 @@ void populateReadbackDimLoweringPatterns(const LLVMTypeConverter &converter,
 // scalar of arbitrary element type (the i64/f32/f16 sibling of readback_dim).
 void populateReadbackScalarLoweringPatterns(const LLVMTypeConverter &converter,
                                             RewritePatternSet &patterns);
+// hip.memcpy_h2d_async / hip.memcpy_d2h_async / hip.stream_sync: explicit
+// cross-memory-space transfer ops (the bufferized form of hip.transfer). Reuse
+// the existing async wrap_hipMemcpy{H2D,D2H} / wrap_hipStreamSynchronize.
+void populateTransferLoweringPatterns(const LLVMTypeConverter &converter,
+                                      RewritePatternSet &patterns);
 void populateSizeLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateLoopLoweringPatterns(const LLVMTypeConverter &converter,

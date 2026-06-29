@@ -10,6 +10,7 @@ include "hip/Dialect/IR/HipDialect.td"
 include "hip/Dialect/IR/HipDpsOpInterface.td"
 include "hip/Dialect/IR/HipOpStateInterface.td"
 include "hip/Dialect/IR/HipTypes.td"
+include "hip/Dialect/IR/HipAttributes.td"
 include "mlir/Interfaces/DestinationStyleOpInterface.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
@@ -261,6 +262,28 @@ def Hip_TensorOrManagedMemRef : Type<
         CPred<"::mlir::hip::isManagedCompatibleMemRef($_self)">]>,
     "ranked tensor or managed memref">;
 
+// Pure memref constraints (no tensor form). Used by the post-bufferization
+// memref-phase transfer ops (hip.memcpy_*_async), whose operands only ever
+// exist as memrefs — they are synthesised during bufferization of
+// hip.transfer, never in tensor form. Same `#hip.mem<...>` predicates as the
+// Hip_TensorOr*MemRef family above, minus the AnyRankedTensor alternative.
+// Subject to the same transitional `kAcceptUnspecifiedMemorySpace` leniency.
+def Hip_DeviceMemRef : Type<
+    CPred<"::mlir::hip::isDeviceCompatibleMemRef($_self)">, "device memref">;
+def Hip_HostMemRef : Type<
+    CPred<"::mlir::hip::isHostCompatibleMemRef($_self)">, "host memref">;
+def Hip_PinnedMemRef : Type<
+    CPred<"::mlir::hip::isPinnedCompatibleMemRef($_self)">, "pinned memref">;
+
+// The host side of an H2D / D2H copy: either pageable host or pinned host.
+// `hipMemcpyHostToDevice` / `DeviceToHost` is the SAME hipMemcpyKind for both
+// (they differ only in allocation + DMA-async behaviour, not direction), so a
+// single op pair accepts both on the host side. This is deliberately NOT a
+// device-to-device copy: D2D would be incorrect on discrete GPUs and only
+// "works" on UMA via the mapped device pointer.
+def Hip_HostOrPinnedMemRef : AnyTypeOf<[Hip_HostMemRef, Hip_PinnedMemRef],
+                                       "host or pinned memref">;
+
 def Hip_AllocOp : Hip_Op<"alloc",
     [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Allocate device memory";
@@ -334,6 +357,34 @@ def Hip_GetHostScratchOp : Hip_Op<"get_host_scratch",
   let arguments = (ins Hip_ContextType:$ctx, Index:$scratch_size);
   let results = (outs AnyMemRef:$scratch);
   let assemblyFormat = "`(` $ctx `,` $scratch_size `)` attr-dict `:` type($scratch)";
+}
+
+def Hip_GetHostMemOp : Hip_Op<"get_host_mem",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Get the runtime-owned PAGEABLE host memory pool (grow-on-demand)";
+  let description = [{
+    Returns a reference to the runtime-managed PAGEABLE host memory buffer
+    (plain `malloc`/`realloc`, NOT `hipHostMalloc`). It is the dedicated
+    backing pool for `#hip.mem<host>` allocations produced by `hip.transfer`
+    (the D2H destination of a device->host transfer, read CPU-side and never
+    accessed by the GPU). The result memref normally carries `#hip.mem<host>`.
+
+    This is a deliberate sibling of `hip.get_host_scratch` (which is pinned,
+    `hipHostMalloc(hipHostMallocMapped)`, host-writable AND GPU-readable, and
+    backs hip-materialize-host-scalars' tiny host-fed scalars). The two pools
+    are kept separate so a pageable `host` buffer is never mislabelled as
+    `pinned`. Grow-on-demand semantics mirror `hip.get_pool` /
+    `hip.get_host_scratch`; the buffer is per-session and never shrinks.
+
+    Example:
+    ```mlir
+    %host = hip.get_host_mem(%ctx, %size) : memref<?xi8, #hip.mem<host>>
+    ```
+  }];
+
+  let arguments = (ins Hip_ContextType:$ctx, Index:$size);
+  let results = (outs AnyMemRef:$host_mem);
+  let assemblyFormat = "`(` $ctx `,` $size `)` attr-dict `:` type($host_mem)";
 }
 
 def Hip_AllocOutputOp : Hip_Op<"alloc_output",
@@ -3841,5 +3892,103 @@ def Hip_ReadbackScalarOp : Hip_Op<"readback_scalar",
   let assemblyFormat = [{
     `(` $ctx `,` $scalar `:` type($scalar) `)` attr-dict `->` type($value)
   }];
+}
+
+// ===== Explicit memory transfers =============================================
+//
+// `hip.transfer` (+ the memref-phase `hip.memcpy_*_async` / `hip.stream_sync`
+// ops it bufferizes into) is an explicit, IR-level data-movement mechanism
+// across HIP memory spaces, added IN PARALLEL to the existing readback
+// (`hip.readback_scalar` / `hip.readback_dim`) and host-scratch
+// (`hip.get_host_scratch` / hip-materialize-host-scalars) machinery. Both of
+// those are retained unchanged; `hip.transfer` is currently exercised only by
+// `hip.pad` (which brings its `pads` / `axes` into `#hip.mem<host>`). See
+// docs/design/memory-space-design.md.
+
+// hip.transfer : move a value-preserving copy of `src` into the `target`
+// memory space. Pre-bufferization this is a tensor->tensor op (tensors carry
+// no memory space, so the target is recorded in the `target` attribute);
+// after bufferization it becomes a `#hip.mem<target>` allocation plus the
+// concrete `hip.memcpy_*_async` + `hip.stream_sync` ops (see HipBufferize.h).
+//
+// Before (tensor form, after convert-onnx-to-hip):
+//   %h = hip.transfer(%ctx, %pads : tensor<8xi64>) to #hip.mem<host>
+//          -> tensor<8xi64>
+// After bufferize (device->host: alloc host dst, copy, sync):
+//   %dst = memref.alloc() : memref<8xi64, #hip.mem<host>>
+//   hip.memcpy_d2h_async(%ctx, %dst, %src
+//          : memref<8xi64, #hip.mem<host>>, memref<8xi64>)
+//   hip.stream_sync(%ctx)
+//   // uses of the transfer result are replaced by %dst
+def Hip_TransferOp : Hip_Op<"transfer", []> {
+  let summary = "Explicit value-preserving transfer into a HIP memory space";
+  let description = [{
+    Produces a value-preserving copy of `src` residing in the `target` HIP
+    memory space (`#hip.mem<device|host|pinned|managed>`). The result has the
+    same shape and element type as `src`.
+
+    Tensor-phase indicator: in tensor form the result is just a tensor (no
+    memory space), and the destination space is carried by the `target`
+    attribute. Bufferization (HipTransferBufferizableModel) realises the
+    crossing as a target-space `memref.alloc` plus `hip.memcpy_*_async` +
+    `hip.stream_sync`. Making the crossing explicit in the IR is what enables
+    later sync-barrier optimisation; today only `hip.pad` emits it.
+  }];
+
+  let arguments = (ins Hip_ContextType:$ctx,
+                       Hip_TensorOrMemRef:$src,
+                       HIP_MemorySpaceAttr:$target);
+  let results = (outs Hip_TensorOrMemRef:$result);
+
+  let assemblyFormat = [{
+    `(` $ctx `,` $src `:` type($src) `)` `to` $target attr-dict
+    `->` type($result)
+  }];
+}
+
+// hip.memcpy_h2d_async : asynchronous host->device copy on the runtime stream.
+// `dst` is device memory, `src` is host (pageable) or pinned memory; both must
+// have the same element type and element count. Async-ness is conveyed by the
+// op name and must be paired with a `hip.stream_sync` before any host read of
+// a dependent result. (Wired for symmetry; the pad pilot only uses D2H.)
+def Hip_MemcpyH2DAsyncOp : Hip_Op<"memcpy_h2d_async",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Asynchronous host->device memcpy on the runtime stream";
+  let arguments = (ins Hip_ContextType:$ctx,
+                       Hip_DeviceMemRef:$dst,
+                       Hip_HostOrPinnedMemRef:$src);
+  let assemblyFormat = [{
+    `(` $ctx `,` $dst `,` $src `:` type($dst) `,` type($src) `)` attr-dict
+  }];
+  let hasVerifier = 1;
+}
+
+// hip.memcpy_d2h_async : asynchronous device->host copy on the runtime stream.
+// `dst` is host (pageable) or pinned memory, `src` is device memory; both must
+// have the same element type and element count. This is the only direction the
+// hip.pad pilot needs (bring device-resident pads/axes to host). Pair with a
+// following `hip.stream_sync` before the host reads `dst`.
+def Hip_MemcpyD2HAsyncOp : Hip_Op<"memcpy_d2h_async",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Asynchronous device->host memcpy on the runtime stream";
+  let arguments = (ins Hip_ContextType:$ctx,
+                       Hip_HostOrPinnedMemRef:$dst,
+                       Hip_DeviceMemRef:$src);
+  let assemblyFormat = [{
+    `(` $ctx `,` $dst `,` $src `:` type($dst) `,` type($src) `)` attr-dict
+  }];
+  let hasVerifier = 1;
+}
+
+// hip.stream_sync : block until all previously-enqueued async work on the
+// runtime stream has completed. It carries a generic Write side effect (no
+// associated value) so it is neither DCE'd nor reordered relative to the
+// async memcpys it follows. Lowers to wrap_hipStreamSynchronize (a plain
+// stream sync, NOT hipdnn_ep_stream_sync).
+def Hip_StreamSyncOp : Hip_Op<"stream_sync",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Synchronize the runtime stream (host-side barrier)";
+  let arguments = (ins Hip_ContextType:$ctx);
+  let assemblyFormat = "`(` $ctx `)` attr-dict";
 }
 #endif // HIP_OPS

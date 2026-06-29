@@ -18,6 +18,7 @@ add_library(HipDialectTransforms STATIC
   MaterializeHostScalars.cpp
   OptimizeMemRefs.cpp
   Pipelines.cpp
+  PoolHostTransfers.cpp
   PoolAllocs.cpp
   PromoteStridedHipOperands.cpp
   RelaxMultiDynExpandShape.cpp

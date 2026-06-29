@@ -152,6 +152,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->workspace_size = 0;
   state->host_scratch_base = nullptr;
   state->host_scratch_size = 0;
+  state->host_mem_base = nullptr;
+  state->host_mem_size = 0;
   // No allocator installed by default (null context + callback). The EP
   // overwrites this via hipdnn_ep_set_output_allocator; the classic pipeline
   // leaves it null and never calls hipdnn_ep_alloc_output.
@@ -744,6 +746,15 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     HIP_CLEANUP(hipHostFree(state->host_scratch_base));
   }
 
+  // Free the pageable host-memory pool (plain malloc) backing hip.get_host_mem.
+  // The stream sync at the top of cleanup has drained any in-flight D2H that
+  // may still be writing into it, so free() is safe here.
+  if (state->host_mem_base) {
+    free(state->host_mem_base);
+    state->host_mem_base = nullptr;
+    state->host_mem_size = 0;
+  }
+
   // Free memory pools (if allocated) — one hipFree per non-null domain — then
   // the per-domain arrays themselves.
   if (state->pool_base) {
@@ -1116,6 +1127,36 @@ void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size) {
     state->host_scratch_size = needed_size;
   }
   return state->host_scratch_base;
+}
+
+void *hipdnn_ep_get_host_mem_base(RuntimeState *state, size_t needed_size) {
+  if (!state) {
+    fprintf(stderr, "Invalid state parameter to hipdnn_ep_get_host_mem_base\n");
+    return nullptr;
+  }
+  // Dedicated PAGEABLE host-memory pool backing hip.get_host_mem (the D2H
+  // destination of hip.transfer-lowered pads/axes). Unlike
+  // hipdnn_ep_get_host_scratch_base this uses plain malloc/realloc, NOT
+  // hipHostMalloc: the buffer is read CPU-side only and never accessed by the
+  // GPU, so pinned/host-mapped memory would be wasteful. Grow-on-demand: one
+  // allocation per function for all #hip.mem<host> transfers routed here by
+  // hip-pool-host-transfers; grown only when a shape change increases demand;
+  // never shrinks. The stream is synced before growing so any in-flight D2H
+  // targeting the old buffer has finished before realloc may move it.
+  if (needed_size > state->host_mem_size) {
+    if (state->host_mem_base && state->stream)
+      HIP_CLEANUP(hipStreamSynchronize(state->stream));
+    void *new_base = realloc(state->host_mem_base, needed_size);
+    if (!new_base) {
+      fprintf(stderr,
+              "hipdnn_ep_get_host_mem_base: realloc failed (%zu -> %zu bytes)\n",
+              state->host_mem_size, needed_size);
+      return nullptr;
+    }
+    state->host_mem_base = new_base;
+    state->host_mem_size = needed_size;
+  }
+  return state->host_mem_base;
 }
 
 //===----------------------------------------------------------------------===//

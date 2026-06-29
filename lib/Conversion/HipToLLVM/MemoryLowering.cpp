@@ -215,6 +215,63 @@ struct GetHostScratchOpLowering
   }
 };
 
+// --- GetHostMemOp: hip.get_host_mem(%ctx, %size) : memref<?xi8, #hip.mem<host>>
+//     -> llvm.call @hipdnn_ep_get_host_mem_base(state, size) + descriptor.
+// Mirrors GetHostScratchOpLowering EXACTLY, but calls the PAGEABLE host-pool
+// base (plain malloc/realloc) instead of the pinned host-scratch base. The
+// returned buffer is CPU-only (the D2H destination of a hip.transfer). Its
+// result type carries #hip.mem<host>, which the type converter maps to a
+// distinct non-default address space (host = AS 1); the runtime's generic
+// (AS 0) pointer is addrspace-cast up to it below via getMemRefAddressSpace.
+// (Host-scratch above is a space-less memref<?xi8>, so it stays AS 0.) The
+// host target flattens these spaces for codegen, so CPU loads/stores on the
+// returned buffer remain valid.
+struct GetHostMemOpLowering : public ConvertOpToLLVMPattern<GetHostMemOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(GetHostMemOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+    MemRefType memRefType = cast<MemRefType>(op.getHostMem().getType());
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kHipGetHostMem, {ptrType, i64Type}, ptrType);
+    if (failed(funcOp))
+      return failure();
+
+    Value size = adaptor.getSize();
+    Value rawPtr =
+        LLVM::CallOp::create(rewriter, loc, *funcOp,
+                             ValueRange{adaptor.getCtx(), size})
+            .getResult();
+
+    FailureOr<unsigned> addrSpace =
+        getTypeConverter()->getMemRefAddressSpace(memRefType);
+    if (failed(addrSpace))
+      return failure();
+
+    Value hostPtr = rawPtr;
+    if (cast<LLVM::LLVMPointerType>(rawPtr.getType()).getAddressSpace() !=
+        *addrSpace)
+      hostPtr = LLVM::AddrSpaceCastOp::create(
+          rewriter, loc,
+          LLVM::LLVMPointerType::get(rewriter.getContext(), *addrSpace),
+          rawPtr);
+
+    Value stride1 = LLVM::ConstantOp::create(
+        rewriter, loc, rewriter.getI64Type(), rewriter.getI64IntegerAttr(1));
+
+    MemRefDescriptor desc = createMemRefDescriptor(
+        loc, memRefType, hostPtr, hostPtr, {size}, {stride1}, rewriter);
+    rewriter.replaceOp(op, {desc});
+    return success();
+  }
+};
+
 // --- AllocOutputOp: hip.alloc_output(%ctx, %dyn...) {out_idx} : memref<...>
 //     -> llvm.call @hipdnn_ep_alloc_output(state, out_idx, shape, rank,
 //        elem_size) + a memref descriptor over the returned device pointer.
@@ -362,8 +419,10 @@ struct GetConstantOpLowering : public ConvertOpToLLVMPattern<GetConstantOp> {
     SmallVector<Value, 2> args = {adaptor.getCtx(), adaptor.getIndex()};
     auto callOp = LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 
-    // The runtime always returns a generic pointer (AS 0).  Cast to the
-    // memref's address space (e.g. AS 1 = AMDGPU global memory) if needed.
+    // The runtime always returns a generic pointer (AS 0). Cast to the memref's
+    // address space if it differs. Constants are device memory (device = AS 0
+    // under the per-kind memory-space numbering), so this cast is normally a
+    // no-op; it fires only if a constant is ever placed in a non-default space.
     FailureOr<unsigned> addrSpace =
         getTypeConverter()->getMemRefAddressSpace(memRefType);
     if (failed(addrSpace))
@@ -779,9 +838,9 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
 void populateMemoryLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns) {
   patterns.add<AllocOpLowering, FreeOpLowering, GetPoolOpLowering,
-               GetHostScratchOpLowering, AllocOutputOpLowering,
-               GetConstantOpLowering, MemRefAllocOpLowering,
-               MemRefDeallocOpLowering>(converter);
+               GetHostScratchOpLowering, GetHostMemOpLowering,
+               AllocOutputOpLowering, GetConstantOpLowering,
+               MemRefAllocOpLowering, MemRefDeallocOpLowering>(converter);
   patterns.add<MemRefCopyOpLowering>(converter);
 }
 

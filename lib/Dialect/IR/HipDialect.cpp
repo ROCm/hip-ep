@@ -119,6 +119,81 @@ void GetHostScratchOp::getEffects(
                        SideEffects::DefaultResource::get());
 }
 
+void GetHostMemOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  // Same ownership model as GetHostScratchOp / GetPoolOp: the returned buffer
+  // is a runtime-managed pool, modelled as an Allocate on the result.
+  effects.emplace_back(MemoryEffects::Allocate::get(),
+                       getOperation()->getResult(0),
+                       SideEffects::DefaultResource::get());
+}
+
+//===----------------------------------------------------------------------===//
+// Explicit memory transfer ops: effects + verifiers
+//===----------------------------------------------------------------------===//
+
+// Shared verifier for the memref-phase async memcpy ops: dst and src must have
+// the same element type, and the same number of elements when both shapes are
+// fully static (dynamic dims can only be checked at runtime).
+static LogicalResult verifyMemcpyShapes(Operation *op, Value dst, Value src) {
+  auto dstTy = dyn_cast<MemRefType>(dst.getType());
+  auto srcTy = dyn_cast<MemRefType>(src.getType());
+  if (!dstTy || !srcTy)
+    return op->emitOpError("dst and src must both be memrefs");
+  if (dstTy.getElementType() != srcTy.getElementType())
+    return op->emitOpError("dst/src element type mismatch: ")
+           << dstTy.getElementType() << " vs " << srcTy.getElementType();
+  if (dstTy.hasStaticShape() && srcTy.hasStaticShape() &&
+      dstTy.getNumElements() != srcTy.getNumElements())
+    return op->emitOpError("dst/src element count mismatch: ")
+           << dstTy.getNumElements() << " vs " << srcTy.getNumElements();
+  return success();
+}
+
+void MemcpyH2DAsyncOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  // Write the device dst (operand 1), Read the host src (operand 2). The
+  // Write keeps the copy alive even though it has no SSA result.
+  effects.emplace_back(MemoryEffects::Write::get(),
+                       &getOperation()->getOpOperand(1),
+                       SideEffects::DefaultResource::get());
+  effects.emplace_back(MemoryEffects::Read::get(),
+                       &getOperation()->getOpOperand(2),
+                       SideEffects::DefaultResource::get());
+}
+
+LogicalResult MemcpyH2DAsyncOp::verify() {
+  return verifyMemcpyShapes(getOperation(), getDst(), getSrc());
+}
+
+void MemcpyD2HAsyncOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  // Write the host dst (operand 1), Read the device src (operand 2).
+  effects.emplace_back(MemoryEffects::Write::get(),
+                       &getOperation()->getOpOperand(1),
+                       SideEffects::DefaultResource::get());
+  effects.emplace_back(MemoryEffects::Read::get(),
+                       &getOperation()->getOpOperand(2),
+                       SideEffects::DefaultResource::get());
+}
+
+LogicalResult MemcpyD2HAsyncOp::verify() {
+  return verifyMemcpyShapes(getOperation(), getDst(), getSrc());
+}
+
+void StreamSyncOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  // Generic Write (no associated value) — like AllocOutputOp: marks the
+  // host-side barrier as side-effecting so DCE never drops it and CSE never
+  // merges two syncs, and it cannot be reordered across the async memcpys.
+  effects.emplace_back(MemoryEffects::Write::get(),
+                       SideEffects::DefaultResource::get());
+}
+
 void FreeOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
