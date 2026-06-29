@@ -1,4 +1,4 @@
-# Cursor Rules for onnx-hipdnn-ep
+# Cursor Rules for onnx-hip-ep
 
 ## CRITICAL: HIP Architecture Detection
 
@@ -24,7 +24,7 @@ $THEROCK_DIST/bin/hipInfo | grep gcnArchName
 ALWAYS include `-DHIP_ARCHITECTURES=<detected-arch>` when configuring:
 
 ```bash
-cmake -B ../build/onnx-hipdnn-ep -S . \
+cmake -B ../build/onnx-hip-ep -S . \
   -DTHEROCK_DIST=$THEROCK_DIST \
   -DCMAKE_PREFIX_PATH=$PWD/../local \
   -DCMAKE_INSTALL_PREFIX=$PWD/../local \

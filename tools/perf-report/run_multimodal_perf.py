@@ -35,8 +35,8 @@ import sys
 # ===================== EDIT THESE PATHS PER MACHINE =====================
 # Each may also be set via the env var in [brackets]; the env var wins.
 REPO_ROOT = os.environ.get(
-    "HIPDNN_EP_ROOT", r"C:\Users\Administrator\workspace\onnx-hipdnn-ep"
-)  # onnx-hipdnn-ep checkout (contains install/)
+    "HIPDNN_EP_ROOT", r"C:\Users\Administrator\workspace\onnx-hip-ep"
+)  # onnx-hip-ep checkout (contains install/)
 THEROCK = os.environ.get(
     "THEROCK_DIST", r"C:\Users\Administrator\workspace\therock-7.11"
 )  # TheRock ROCm SDK dir
@@ -45,7 +45,7 @@ OGA_DIR = os.environ.get(
 )  # onnxruntime_genai package dir
 DML_DLL = os.environ.get(
     "HIPDNN_EP_DML",
-    r"C:\Users\Administrator\workspace\onnx-hipdnn-ep\install\oga-build\RelWithDebInfo\_deps\dmllib-src\bin\x64-win\DirectML.dll",
+    r"C:\Users\Administrator\workspace\onnx-hip-ep\install\oga-build\RelWithDebInfo\_deps\dmllib-src\bin\x64-win\DirectML.dll",
 )  # x64 DirectML.dll
 MODEL_DIR = os.environ.get("HIPDNN_EP_MODEL", r"")  # OGA model dir (or pass -i)
 IMAGE_PATH = os.environ.get("HIPDNN_EP_IMAGE", r"")  # test image (or pass --image_path)

@@ -41,7 +41,7 @@ ctest --test-dir ../build/$(basename $PWD) -R OrtIntegration --verbose
 
 ```bash
 # Single LIT test via llvm-lit
-llvm-lit -v onnx-hipdnn-ep/test/lit/Conversion/onnx-to-hip/test_gemm_basic.mlir
+llvm-lit -v onnx-hip-ep/test/lit/Conversion/onnx-to-hip/test_gemm_basic.mlir
 ```
 
 ## Prerequisites

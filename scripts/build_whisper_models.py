@@ -22,7 +22,7 @@ is still available via --precision (large-v3 keeps its fp32-vs-fp32 cross-backen
 benchmark, sourced by download in conftest).
 
 Run:
-    conda activate hipdnn-ep
+    conda activate hip-ep
     python scripts/build_whisper_models.py            # build default variants (fp16)
     python scripts/build_whisper_models.py --precision both   # fp32 + fp16
     python scripts/build_whisper_models.py --list     # show what would be built

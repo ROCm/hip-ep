@@ -113,7 +113,7 @@ def create_two_layer_conv_model():
     graph = helper.make_graph(nodes, "two_layer_conv", inputs, outputs, initializers)
 
     # Create the model
-    model = helper.make_model(graph, producer_name="onnx-hipdnn-ep-test")
+    model = helper.make_model(graph, producer_name="onnx-hip-ep-test")
     model.opset_import[0].version = 13
 
     # Check model validity

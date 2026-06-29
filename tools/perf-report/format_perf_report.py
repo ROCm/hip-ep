@@ -3,7 +3,7 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
 #
-"""Format a HIPDNN EP OGA model_benchmark log into a structured profiling report.
+"""Format a HIP EP OGA model_benchmark log into a structured profiling report.
 
 The report is the locked-down rendering of three independent measurement streams
 that the EP + OGA emit into a single log when ``HIPDNN_EP_PERF=1`` is set:
@@ -421,7 +421,7 @@ def render_banner(
     model: str, run_params: dict, perf: PerfSummary, indent: str
 ) -> list[str]:
     bar = "═" * (74 + len(indent))
-    bits = [f"HIPDNN EP profile  ·  {model}"]
+    bits = [f"HIP EP profile  ·  {model}"]
     # Show shape only when it's worth flagging. "dynamic" is the default for
     # every OGA log this script handles (run_bench.sh rejects --oga --shape
     # static), and even if the formatter is later wired to perftest dynamic
@@ -898,7 +898,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("log", type=Path, help="Path to a HIPDNN EP / OGA bench log")
+    p.add_argument("log", type=Path, help="Path to a HIP EP / OGA bench log")
     p.add_argument(
         "--ascii",
         action="store_true",

@@ -2,7 +2,7 @@
 Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 Licensed under the MIT License.
 -->
-# HIPDNN EP Profiling Report Formatter
+# HIP EP Profiling Report Formatter
 
 This directory holds three cooperating tools that turn a single
 `HIPDNN_EP_PERF=1` bench run into a structured, section-stable profiling
@@ -12,7 +12,7 @@ report:
 |---|---|---|
 | [`format_perf_report.py`](format_perf_report.py) | Parses a captured log and renders the four-section report. The value-add tool. | Pure Python 3, stdlib only — any platform with Python ≥ 3.10. |
 | [`run_bench.sh`](run_bench.sh) | Bench driver. Runs `onnxruntime_perf_test` (default), `model_benchmark` (`--oga`), or `model_mm` (`--mm`, multimodal/VLM) against a model under `$WORKSPACE/oga_models/<dir>` and captures the log under `tools/perf-report/_perf_logs/`. The `--oga` path pipes the log through `format_perf_report.py`; `--mm` surfaces `model_mm`'s headline timing line inline and (under `--mode perf`) renders the per-op breakdown via `perf_multimodal_report.py`; the perftest path prints its own grep-based summary inline. | Linux + AMD GPU + the in-container build artefacts at `$WORKSPACE/install/{bin,lib}`. |
-| [`docker_run_bench.sh`](docker_run_bench.sh) | Thin host-side wrapper that runs `run_bench.sh` (or any other repo-relative bench script via `REL_BENCH=...`) inside the `hipdnn-ep-build` Docker image as a `docker run --rm` one-shot — no interactive shell needed. | Linux + Docker + an AMD GPU exposed via `/dev/kfd` and `/dev/dri/renderD*`. |
+| [`docker_run_bench.sh`](docker_run_bench.sh) | Thin host-side wrapper that runs `run_bench.sh` (or any other repo-relative bench script via `REL_BENCH=...`) inside the `hip-ep-build` Docker image as a `docker run --rm` one-shot — no interactive shell needed. | Linux + Docker + an AMD GPU exposed via `/dev/kfd` and `/dev/dri/renderD*`. |
 
 > **Scope: Linux Docker build.** The bench-side examples below use the
 > Linux paths (`$ROOT/bin/`, `$ROOT/lib/libonnxruntime_morphizen_ep.so`)
@@ -189,7 +189,7 @@ verbatim from a live `-l 128 -g 128 -r 3 -w 1` run:
 
 ```
 ══════════════════════════════════════════════════════════════════════════
-  HIPDNN EP profile  ·  <model-name>  ·  prompt=128 gen=128  ·  inferences=639
+  HIP EP profile  ·  <model-name>  ·  prompt=128 gen=128  ·  inferences=639
 ══════════════════════════════════════════════════════════════════════════
 
   § 1  HEADLINE  —  model_benchmark (batch=1, prompt=128, gen=128)
@@ -248,8 +248,8 @@ intended for CI / regression-bot consumption.
 | Tool | Required by | Notes |
 |---|---|---|
 | Python ≥ 3.10 | `format_perf_report.py` | Standard library only; no third-party packages. |
-| Bash + `git` + `python3` | `run_bench.sh` | All present in the `hipdnn-ep-build` image. `git` is used only for the PR #212 reachability check, which silently no-ops if `git` is unavailable. |
+| Bash + `git` + `python3` | `run_bench.sh` | All present in the `hip-ep-build` image. `git` is used only for the PR #212 reachability check, which silently no-ops if `git` is unavailable. |
 | `$WORKSPACE/install/{bin,lib}` populated | `run_bench.sh` | `libonnxruntime_morphizen_ep.so` + `model_benchmark` (for `--oga`) + `onnxruntime_perf_test` (for the default path). Produced by `./docker/run.sh build` ([`docs/quick_start_linux.md`](../../docs/quick_start_linux.md)). |
 | `$WORKSPACE/oga_models/<dir>/` staged | `run_bench.sh` | Model directory with `model.onnx`, `model.onnx.data`, `tokenizer.*`, `genai_config_MorphiZenEP.json`. `run_bench.sh` does NOT download — see the "Models are not downloaded" callout above. |
 | Bash + `docker` CLI | `docker_run_bench.sh` | Tested with Docker Engine on Linux. Rootless Docker works as long as the engine can mount `/dev/kfd` and `/dev/dri/renderD*`. |
-| AMDGPU driver + `hipdnn-ep-build` image | `docker_run_bench.sh` | The image is the one built by `./docker/run.sh image` ([`docs/quick_start_linux.md`](../../docs/quick_start_linux.md)); image tag is overridable via `IMAGE`. |
+| AMDGPU driver + `hip-ep-build` image | `docker_run_bench.sh` | The image is the one built by `./docker/run.sh image` ([`docs/quick_start_linux.md`](../../docs/quick_start_linux.md)); image tag is overridable via `IMAGE`. |

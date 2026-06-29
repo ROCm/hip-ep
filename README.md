@@ -2,9 +2,9 @@
 Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 Licensed under the MIT License.
 -->
-# ONNX HIP DNN Execution Provider
+# ONNX HIP Execution Provider
 
-An implementation of HIP DNN operations in the MorphiZen framework.
+An implementation of HIP operations in the MorphiZen framework.
 
 This project demonstrates the integration of HIP (Heterogeneous-compute Interface for Portability) DNN operations within the MorphiZen optimization framework for ONNX Runtime.
 

@@ -26,7 +26,7 @@ implements:
 
 Shapes are kept small for fast iteration plus one Llama-style shape sanity
 case (batch=1, S=128, num_heads=32, head_dim=128 -> hidden=4096) to match
-the LIT e2e test in onnx-hipdnn-ep.
+the LIT e2e test in onnx-hip-ep.
 """
 
 import numpy as np

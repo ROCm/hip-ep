@@ -84,7 +84,7 @@ This contract is implemented by [MorphiZen
 PR #228](https://github.com/ROCm/MorphiZen/pull/228) (`fix(mlir-imp,
 ort-bridge): preserve unranked tensors at the ORT boundary`).
 
-### EP side: this repo (`onnx-hipdnn-ep`)
+### EP side: this repo (`onnx-hip-ep`)
 
 - The EP **does not run an ONNX-level shape inference pass.** ONNX op
   semantics are upstream's responsibility — duplicating per-op shape

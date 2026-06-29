@@ -22,7 +22,7 @@ What this does (idempotent, .ok sentinels per stage, repo-local install/_cache/)
   4. download Whisper-large-v3 GGUF (f16) from HF ggerganov/whisper.cpp
 
 Run:
-    conda activate hipdnn-ep
+    conda activate hip-ep
     python scripts/build_whisper_vulkan.py            # build + download model
     python scripts/build_whisper_vulkan.py --run      # build + run jfk.wav bench
 
@@ -313,7 +313,7 @@ def build_whispercpp():
     _ensure_msvc_env()
     for tool in ("cmake", "ninja"):
         if not shutil.which(tool):
-            log(f"  ERROR: {tool} not found. Run: conda activate hipdnn-ep")
+            log(f"  ERROR: {tool} not found. Run: conda activate hip-ep")
             sys.exit(1)
 
     # Make the SDK visible to CMake's FindVulkan via the standard env var.

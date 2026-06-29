@@ -71,7 +71,7 @@ deps the Whisper tests need (`onnxruntime`, `transformers`, `soundfile`, etc.):
 
 ```bash
 conda env create -f environment.yml     # one-time
-conda activate hipdnn-ep
+conda activate hip-ep
 ```
 
 The test audio is fetched from public URLs at runtime (no `datasets` / `jiwer`
@@ -79,7 +79,7 @@ dependency), and the Whisper models are **downloaded from Hugging Face** on firs
 use (§3) via `huggingface_hub` (already in `environment.yml`). The optional local
 model build (`python scripts/build_whisper_models.py`, §3b) installs its pinned
 builder deps into a **dedicated isolated venv** (`install/whisper-builder-venv/`),
-so it never touches the `hipdnn-ep` env or shadows the OGA fork.
+so it never touches the `hip-ep` env or shadows the OGA fork.
 
 The one pip package you **do** need at a specific version is `onnxruntime` —
 see §1b, which is mandatory before the EP will load.
@@ -215,7 +215,7 @@ tests where the EP DLL is — **required when you installed out-of-tree** (the
 
 ```bash
 cd <repo-root>
-conda activate hipdnn-ep
+conda activate hip-ep
 export ROOT=/c/Users/$USER/work/hip-ep-workspace   # same short path as §1
 export THEROCK_DIST="$ROOT/build/_therock"
 export HIPEP_EP_BIN="$ROOT/local/bin"
@@ -226,7 +226,7 @@ export PATH="$THEROCK_DIST/bin:$ROOT/local/bin:$PATH"
 
 ```powershell
 cd <repo-root>
-conda activate hipdnn-ep
+conda activate hip-ep
 $ROOT = "C:\Users\$env:USERNAME\work\hip-ep-workspace"   # same short path as §1
 $env:THEROCK_DIST = "$ROOT\build\_therock"
 $env:HIPEP_EP_BIN = "$ROOT\local\bin"

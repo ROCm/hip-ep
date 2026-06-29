@@ -24,7 +24,7 @@ The suite has four Python dependencies: `numpy`, `onnx`,
 `onnxruntime`, and `pytest`. Two paths:
 
 - **Already on the repo's canonical conda env** (set up via
-  `conda env create -f environment.yml && conda activate hipdnn-ep`,
+  `conda env create -f environment.yml && conda activate hip-ep`,
   see [CLAUDE.md](../../CLAUDE.md)) -- nothing to install,
   `environment.yml` already pulls in all four (as a superset, with
   `onnxruntime-directml` instead of plain `onnxruntime`).

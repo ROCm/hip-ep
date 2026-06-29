@@ -233,7 +233,7 @@ jobs:
       # prefixes and cmake/deps.cmake source-builds the rest. The LIT tests run
       # inside build.py after install.
       # -----------------------------------------------------------------------
-      - name: Build onnx-hipdnn-ep (mock)
+      - name: Build onnx-hip-ep (mock)
         shell: bash
         run: |
           python build.py \
