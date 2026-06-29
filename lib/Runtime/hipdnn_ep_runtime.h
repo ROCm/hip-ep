@@ -1385,9 +1385,12 @@ int wrap_cumsum(RuntimeState *state, void *x, void *axis, void *y,
                 int64_t exclusive, int64_t reverse);
 
 // Pad operation wrapper (constant / reflect / edge / wrap modes).
-// pads:           int64 1-D tensor [2 * num_axes]
+// pads:           int64 1-D tensor [2 * num_axes] in GPU memory
 //                 -- formatted as [x1_begin, ..., x1_end, ...]
-// constant_value: nullable scalar tensor (only used when mode_id == 0)
+// constant_value: nullable HOST pointer to the scalar fill value (passed by
+//                 value via a stack slot, NOT a device buffer); element_size
+//                 bytes of `data_type`. Only used when mode_id == 0. Read with
+//                 a plain memcpy -- no D2H copy.
 // axes:           nullable int64 1-D tensor selecting axes; nullptr/empty
 //                 means "all axes"
 // mode_id:        0=constant, 1=reflect, 2=edge, 3=wrap

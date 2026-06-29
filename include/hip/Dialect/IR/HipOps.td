@@ -229,8 +229,12 @@ def Hip_TensorOrMemRef : AnyTypeOf<[AnyRankedTensor, AnyMemRef],
 //
 // Pre-bufferization an operand is a ranked tensor (which has no memory space);
 // both constraints accept any ranked tensor in that form. Post-bufferization
-// it is a memref, and the predicate enforces the required HIP memory space
-// (`#hip.mem<device>` for device operands, `#hip.mem<host>` for host operands).
+// it is a memref, and the predicate enforces the required HIP memory space —
+// one constraint per `#hip.mem<...>` kind:
+//   - Hip_TensorOrDeviceMemRef  : `#hip.mem<device>`  (GPU VRAM)
+//   - Hip_TensorOrHostMemRef    : `#hip.mem<host>`    (pageable host)
+//   - Hip_TensorOrPinnedMemRef  : `#hip.mem<pinned>`  (pinned host, zero-copy)
+//   - Hip_TensorOrManagedMemRef : `#hip.mem<managed>` (unified, auto-migrate)
 //
 // TRANSITIONAL: today the pipeline emits memrefs with NO hip memory space, so
 // the C++ predicates also accept an unspecified space (single toggle
@@ -247,16 +251,15 @@ def Hip_TensorOrHostMemRef : Type<
         CPred<"::mlir::hip::isHostCompatibleMemRef($_self)">]>,
     "ranked tensor or host memref">;
 
-// Scalar (0-D) device operand. Used for ONNX scalar inputs (e.g. the
-// `Pad.constant_value`), whose spec shape is a single scalar — constraining the
-// hip op operand to rank-0 makes that contract explicit at the op level. The
-// rank check is safe: the And short-circuits, so it only runs once the operand
-// is known to be a ranked tensor or a (ranked) device memref. The converter is
-// responsible for normalizing a producer's single-element tensor to 0-D.
-def Hip_ScalarTensorOrDeviceMemRef : Type<
-    And<[Hip_TensorOrDeviceMemRef.predicate,
-         CPred<"::llvm::cast<::mlir::ShapedType>($_self).getRank() == 0">]>,
-    "0-D (scalar) ranked tensor or device memref">;
+def Hip_TensorOrPinnedMemRef : Type<
+    Or<[AnyRankedTensor.predicate,
+        CPred<"::mlir::hip::isPinnedCompatibleMemRef($_self)">]>,
+    "ranked tensor or pinned memref">;
+
+def Hip_TensorOrManagedMemRef : Type<
+    Or<[AnyRankedTensor.predicate,
+        CPred<"::mlir::hip::isManagedCompatibleMemRef($_self)">]>,
+    "ranked tensor or managed memref">;
 
 def Hip_AllocOp : Hip_Op<"alloc",
     [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
@@ -3078,7 +3081,7 @@ def Hip_PadOp : Hip_DpsOp<"pad",
     Example:
     ```mlir
     hip.pad(%ctx) ins(%data, %pads : memref<3x2xf32, 1>, memref<4xi64, 1>)
-                  cval(%cval : memref<f32, 1>)
+                  cval(%cval : f32)
                   axes(%axes : memref<2xi64, 1>)
                   outs(%out : memref<3x4xf32, 1>) {mode = "constant"}
     ```
@@ -3087,13 +3090,17 @@ def Hip_PadOp : Hip_DpsOp<"pad",
   // Pilot op for the memory-space type system, exercising BOTH spaces: the
   // payload tensors (`data`, `output`) are GPU buffers (device), while the
   // small shape-control tensors (`pads`, `axes`) are consumed host-side
-  // (host). `constant_value` is a device scalar (0-D), matching the ONNX
-  // `Pad.constant_value` scalar spec.
+  // (host). `constant_value` is a single scalar fill value passed BY VALUE
+  // (a plain float/integer SSA value, not a buffer) — so it carries no memory
+  // space at all: the converter resolves the ONNX `Pad.constant_value` scalar
+  // to a host value (constant-fold or synchronized readback), and the runtime
+  // receives it directly with no device allocation or D2H copy.
   let arguments = (ins
     Hip_ContextType:$ctx,
     Hip_TensorOrDeviceMemRef:$data,
     Hip_TensorOrHostMemRef:$pads,
-    Optional<Hip_ScalarTensorOrDeviceMemRef>:$constant_value,
+    Optional<AnyTypeOf<[AnyFloat, AnySignlessInteger],
+                       "scalar float or integer">>:$constant_value,
     Optional<Hip_TensorOrHostMemRef>:$axes,
     Hip_TensorOrDeviceMemRef:$output,
     DefaultValuedAttr<StrAttr, "\"constant\"">:$mode

@@ -228,13 +228,19 @@ struct PadToHip : public mlir::RewritePattern {
     if (op->getNumOperands() > 3 && !isNone(op->getOperand(3)))
       axes = op->getOperand(3);
 
-    // ONNX `Pad.constant_value` is a scalar, and hip.pad constrains the operand
-    // to 0-D (`Hip_ScalarTensorOrDeviceMemRef`). Some producers emit it as a
-    // redundant single-element 1-D tensor, so normalize such a value to rank-0
-    // here (a zero-cost reshape) to satisfy the op contract.
+    // ONNX `Pad.constant_value` is a scalar; hip.pad takes it BY VALUE as a
+    // plain float/integer SSA value (no buffer, no memory space). Resolve the
+    // 0-D constant_value tensor to a host scalar: `readbackScalarToHost` folds
+    // a compile-time constant (the overwhelmingly common pad value, e.g. 0.0)
+    // to an `arith.constant` with zero device traffic, and otherwise emits a
+    // synchronized `hip.readback_scalar`. First normalize a producer's
+    // redundant single-element 1-D tensor to rank-0 (a zero-cost reshape) so
+    // the readback helper sees the expected 0-D operand.
     //
     // Before: %cv : tensor<1xf32>
-    // After:  %cv = tensor.collapse_shape %0 [] : tensor<1xf32> into tensor<f32>
+    // After:  %cv0 = tensor.collapse_shape %cv [] : tensor<1xf32> into tensor<f32>
+    //         %s   = arith.constant <val> : f32   // constant fold, or
+    //         %s   = hip.readback_scalar(%ctx, %cv0 : tensor<f32>) -> f32
     if (constantValue) {
       if (auto cvTy =
               mlir::dyn_cast<mlir::RankedTensorType>(constantValue.getType())) {
@@ -247,6 +253,8 @@ struct PadToHip : public mlir::RewritePattern {
               rewriter, loc, scalarTy, constantValue, noReassoc);
         }
       }
+      constantValue =
+          readbackScalarToHost(rewriter, loc, context, constantValue);
     }
 
     auto resultType =

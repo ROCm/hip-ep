@@ -2,28 +2,30 @@
 // Licensed under the MIT License.
 
 // Pins the memory-space operand constraints on the pilot op:
-//   * hip.pad     : data / constant_value / output device; pads / axes host.
+//   * hip.pad     : data / output device; pads / axes host; constant_value is
+//                   a by-value scalar (no memory space at all).
 // Covers the positive (correctly-spaced) form, the negative (wrong-space)
-// diagnostics, and the TRANSITIONAL acceptance of memrefs that carry no hip
-// memory space (plain, or a legacy integer space) — the form the current
-// pipeline still emits.
+// diagnostics, the by-value-scalar contract on constant_value, and the
+// TRANSITIONAL acceptance of memrefs that carry no hip memory space (plain, or
+// a legacy integer space) — the form the current pipeline still emits.
 
 // RUN: hip-mlir-opt --split-input-file --verify-diagnostics %s | FileCheck %s
 
 // -----
 
-// Aspect D (positive): hip.pad with device payload (data/cval/output) and host
-// shape-control tensors (pads/axes) verifies.
+// Aspect D (positive): hip.pad with device payload (data/output), host
+// shape-control tensors (pads/axes), and a by-value scalar constant_value
+// (plain f32, no memory space) verifies.
 // CHECK-LABEL: func.func @pad_spaces_ok
 // CHECK:         hip.pad
 func.func @pad_spaces_ok(%ctx: !hip.context,
                          %data: memref<3x4xf32, #hip.mem<device>>,
                          %pads: memref<4xi64, #hip.mem<host>>,
-                         %cval: memref<f32, #hip.mem<device>>,
+                         %cval: f32,
                          %axes: memref<2xi64, #hip.mem<host>>,
                          %out: memref<5x6xf32, #hip.mem<device>>) {
   hip.pad(%ctx) ins(%data, %pads : memref<3x4xf32, #hip.mem<device>>, memref<4xi64, #hip.mem<host>>)
-                cval(%cval : memref<f32, #hip.mem<device>>)
+                cval(%cval : f32)
                 axes(%axes : memref<2xi64, #hip.mem<host>>)
                 outs(%out : memref<5x6xf32, #hip.mem<device>>) {mode = "constant"}
   return
@@ -57,17 +59,17 @@ func.func @pad_pads_wrong_space(%ctx: !hip.context,
 
 // -----
 
-// Aspect D (negative, scalar slot): a non-scalar (1-D) device constant_value is
-// rejected. ONNX Pad.constant_value is a scalar, so hip.pad requires 0-D even
-// though the space (device) is correct.
-func.func @pad_cval_not_scalar(%ctx: !hip.context,
-                               %data: memref<3x4xf32, #hip.mem<device>>,
-                               %pads: memref<4xi64, #hip.mem<host>>,
-                               %cval: memref<2xf32, #hip.mem<device>>,
-                               %out: memref<5x6xf32, #hip.mem<device>>) {
-  // expected-error @+1 {{0-D (scalar) ranked tensor or device memref}}
+// Aspect D (negative, scalar slot): constant_value is a by-value scalar, so a
+// buffer (memref) in that slot is rejected — even a 0-D device memref (the old
+// form). The value must be a plain float/integer SSA scalar.
+func.func @pad_cval_must_be_scalar(%ctx: !hip.context,
+                                   %data: memref<3x4xf32, #hip.mem<device>>,
+                                   %pads: memref<4xi64, #hip.mem<host>>,
+                                   %cval: memref<f32, #hip.mem<device>>,
+                                   %out: memref<5x6xf32, #hip.mem<device>>) {
+  // expected-error @+1 {{scalar float or integer}}
   hip.pad(%ctx) ins(%data, %pads : memref<3x4xf32, #hip.mem<device>>, memref<4xi64, #hip.mem<host>>)
-                cval(%cval : memref<2xf32, #hip.mem<device>>)
+                cval(%cval : memref<f32, #hip.mem<device>>)
                 outs(%out : memref<5x6xf32, #hip.mem<device>>) {mode = "constant"}
   return
 }

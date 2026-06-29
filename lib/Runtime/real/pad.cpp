@@ -10,17 +10,21 @@
 // Source: onnxruntime/core/providers/cuda/tensor/pad_impl.cu @ v1.22.2
 //         (_PadKernel; ONNX `wrap` mode added on top).
 //
-// Inputs that live in GPU memory (`pads`, `constant_value`, `axes`) are
-// D2H-read once per call. This adds one or two hipStreamSynchronize stalls
-// per Pad invocation -- acceptable because:
+// `pads` and `axes` live in GPU memory and are D2H-read once per call (one
+// hipStreamSynchronize stall per Pad invocation). This is acceptable because:
 //  - `pads` and `axes` are typically constant or initialiser-fed in vision
 //    graphs; the compile pipeline lowers them via the constants blob,
 //    so the D2H is from a stable device pointer.
 //  - Pad usually appears few times per graph.
 //
-// If the EP ever wants to avoid the stall, the right fix is to detect the
-// "pads is a graph-time constant" case in the OnnxToHip conversion and
-// fold the values into a host-side attribute (the way Reshape's shape
+// `constant_value` is NOT in GPU memory: the compiler passes the scalar fill
+// value BY VALUE through a host stack slot (see PadLowering / PadConversion),
+// so it is read with a plain host memcpy -- no device allocation, no D2H copy,
+// no contribution to the stream sync.
+//
+// If the EP ever wants to avoid the pads/axes stall too, the right fix is to
+// detect the "pads is a graph-time constant" case in the OnnxToHip conversion
+// and fold the values into a host-side attribute (the way Reshape's shape
 // tensor is folded today). That's outside this op's scope.
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
@@ -28,6 +32,7 @@
 #include "hip_custom_kernels.h"
 
 #include <cstdio>
+#include <cstring>
 #include <hip/hip_runtime.h>
 #include <vector>
 
@@ -132,18 +137,14 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
     }
   }
 
-  // constant_value: 0-D scalar of `data_type`. Read into a local 8-byte
-  // buffer so we can pass a typed pointer to the kernel launcher.
+  // constant_value: a by-value scalar of `data_type` passed by the generated
+  // code through a HOST stack slot (not a device buffer), so read it directly
+  // -- no D2H copy and no contribution to the stream sync below. Copy into a
+  // local 8-byte buffer so we can hand a typed pointer to the kernel launcher.
   alignas(8) unsigned char cv_buf[8] = {};
   bool have_cv = false;
   if (constant_value && mode_id == 0) {
-    err = hipMemcpyAsync(cv_buf, constant_value, element_size,
-                         hipMemcpyDeviceToHost, hip_stream);
-    if (err != hipSuccess) {
-      fprintf(stderr, "[REAL] wrap_pad: constant_value D2H failed: %s\n",
-              hipGetErrorString(err));
-      return -1;
-    }
+    memcpy(cv_buf, constant_value, element_size);
     have_cv = true;
   }
 

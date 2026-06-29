@@ -4,16 +4,17 @@
  */
 
 //===----------------------------------------------------------------------===//
-// GPU-free unit test for the HIP memory-space attribute and the device/host
+// GPU-free unit test for the HIP memory-space attribute and the per-space
 // operand predicates (lib/Dialect/IR/HipDialect.cpp).
 //
 // LIT covers the textual parse/print round-trip and the op-verifier
 // diagnostics; this test exercises the parts LIT cannot reach directly:
-//   * the C++ attribute API (MemorySpaceAttr::get / getKind)
+//   * the C++ attribute API (MemorySpaceAttr::get / getKind) for all 4 spaces
 //   * mlir::parseAttribute of "#hip.mem<...>" and print-back
-//   * isDeviceCompatibleMemRef / isHostCompatibleMemRef across device, host,
-//     no-space (transitional), legacy integer-space (transitional), and
-//     non-memref inputs.
+//   * the 4 predicates is{Device,Host,Pinned,Managed}CompatibleMemRef across
+//     each explicit space (exact match + cross-rejection), no-space
+//     (transitional), legacy integer-space (transitional), and non-memref
+//     inputs.
 //===----------------------------------------------------------------------===//
 
 #include "hip/Dialect/IR/HipDialect.h"
@@ -83,41 +84,61 @@ int main() {
   if (auto p = dyn_cast_or_null<MemorySpaceAttr>(parsed))
     CHECK(p.getKind() == MemorySpaceKind::Managed);
 
-  // --- Predicates: explicit device / host --------------------------------
-  auto devMR = MemRefType::get({4}, f32, /*layout=*/MemRefLayoutAttrInterface{},
-                               deviceAttr);
-  auto hostMR = MemRefType::get({4}, f32, /*layout=*/MemRefLayoutAttrInterface{},
-                                hostAttr);
+  // --- Predicates: each explicit space (exact match + cross-rejection) ---
+  // One memref per space; each predicate must accept ONLY its own space.
+  auto mk = [&](MemorySpaceAttr s) {
+    return MemRefType::get({4}, f32, /*layout=*/MemRefLayoutAttrInterface{}, s);
+  };
+  auto devMR = mk(deviceAttr);
+  auto hostMR = mk(hostAttr);
+  auto pinnedMR = mk(pinnedAttr);
+  auto managedMR = mk(managedAttr);
+
   CHECK(isDeviceCompatibleMemRef(devMR));
   CHECK(!isHostCompatibleMemRef(devMR));
+  CHECK(!isPinnedCompatibleMemRef(devMR));
+  CHECK(!isManagedCompatibleMemRef(devMR));
+
   CHECK(isHostCompatibleMemRef(hostMR));
   CHECK(!isDeviceCompatibleMemRef(hostMR));
+  CHECK(!isPinnedCompatibleMemRef(hostMR));
+  CHECK(!isManagedCompatibleMemRef(hostMR));
 
-  // A pinned/managed space is neither device nor host.
-  auto pinnedMR = MemRefType::get(
-      {4}, f32, /*layout=*/MemRefLayoutAttrInterface{}, pinnedAttr);
+  CHECK(isPinnedCompatibleMemRef(pinnedMR));
   CHECK(!isDeviceCompatibleMemRef(pinnedMR));
   CHECK(!isHostCompatibleMemRef(pinnedMR));
+  CHECK(!isManagedCompatibleMemRef(pinnedMR));
+
+  CHECK(isManagedCompatibleMemRef(managedMR));
+  CHECK(!isDeviceCompatibleMemRef(managedMR));
+  CHECK(!isHostCompatibleMemRef(managedMR));
+  CHECK(!isPinnedCompatibleMemRef(managedMR));
 
   // --- Predicates: transitional (no hip space) ---------------------------
-  // Plain memref with no memory space — accepted by BOTH while the pipeline
-  // has not yet stamped spaces (kAcceptUnspecifiedMemorySpace == true).
+  // Plain memref with no memory space — accepted by ALL four while the
+  // pipeline has not yet stamped spaces (kAcceptUnspecifiedMemorySpace).
   auto plainMR = MemRefType::get({4}, f32);
   CHECK(isDeviceCompatibleMemRef(plainMR));
   CHECK(isHostCompatibleMemRef(plainMR));
+  CHECK(isPinnedCompatibleMemRef(plainMR));
+  CHECK(isManagedCompatibleMemRef(plainMR));
 
-  // Legacy integer memory space (the `, 1` form) — also accepted by both.
+  // Legacy integer memory space (the `, 1` form) — also accepted by all four.
   auto intMR = MemRefType::get({4}, f32, /*layout=*/MemRefLayoutAttrInterface{},
                                b.getI64IntegerAttr(1));
   CHECK(isDeviceCompatibleMemRef(intMR));
   CHECK(isHostCompatibleMemRef(intMR));
+  CHECK(isPinnedCompatibleMemRef(intMR));
+  CHECK(isManagedCompatibleMemRef(intMR));
 
   // --- Predicates: non-memref inputs are never compatible ----------------
-  CHECK(!isDeviceCompatibleMemRef(f32));
-  CHECK(!isHostCompatibleMemRef(f32));
   auto tensorTy = RankedTensorType::get({4}, f32);
-  CHECK(!isDeviceCompatibleMemRef(tensorTy));
-  CHECK(!isHostCompatibleMemRef(tensorTy));
+  for (Type t : {f32, static_cast<Type>(tensorTy)}) {
+    CHECK(!isDeviceCompatibleMemRef(t));
+    CHECK(!isHostCompatibleMemRef(t));
+    CHECK(!isPinnedCompatibleMemRef(t));
+    CHECK(!isManagedCompatibleMemRef(t));
+  }
 
   if (g_failures == 0) {
     std::fprintf(stderr, "test_memory_space: all checks passed\n");

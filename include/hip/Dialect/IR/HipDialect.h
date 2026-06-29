@@ -53,19 +53,24 @@ namespace hip {
                                    int32_t slot, ::llvm::StringRef ctorSymbol,
                                    ::llvm::ArrayRef<int64_t> i64Args);
 
-/// Memory-space operand predicates backing the Hip_TensorOrDeviceMemRef /
-/// Hip_TensorOrHostMemRef type constraints (see HipOps.td).
+/// Memory-space operand predicates backing the Hip_TensorOr{Device,Host,
+/// Pinned,Managed}MemRef type constraints (see HipOps.td). One predicate per
+/// `#hip.mem<...>` kind:
 ///
-/// `isDeviceCompatibleMemRef` is true for a memref carrying
-/// `#hip.mem<device>` (likewise `host` for `isHostCompatibleMemRef`).
+/// - `isDeviceCompatibleMemRef`  : memref carrying `#hip.mem<device>`
+/// - `isHostCompatibleMemRef`    : memref carrying `#hip.mem<host>`
+/// - `isPinnedCompatibleMemRef`  : memref carrying `#hip.mem<pinned>`
+/// - `isManagedCompatibleMemRef` : memref carrying `#hip.mem<managed>`
 ///
 /// TRANSITIONAL: the current pipeline does not yet stamp a `#hip.mem<...>`
 /// space onto memrefs, so a memref with NO hip memory space currently
-/// satisfies BOTH predicates. This leniency is controlled by a single toggle
-/// (`kAcceptUnspecifiedMemorySpace` in HipDialect.cpp); flip it to enforce that
-/// every constrained operand carries an explicit space.
+/// satisfies ALL four predicates. This leniency is controlled by a single
+/// toggle (`kAcceptUnspecifiedMemorySpace` in HipDialect.cpp); flip it to
+/// enforce that every constrained operand carries an explicit space.
 bool isDeviceCompatibleMemRef(::mlir::Type type);
 bool isHostCompatibleMemRef(::mlir::Type type);
+bool isPinnedCompatibleMemRef(::mlir::Type type);
+bool isManagedCompatibleMemRef(::mlir::Type type);
 } // namespace hip
 } // namespace mlir
 

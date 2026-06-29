@@ -21,7 +21,10 @@ module {
   // CHECK: tensor.empty() : tensor<5x6xf32>
   // CHECK: hip.pad(%[[CTX]]) ins(%[[D]], %[[P]] : tensor<3x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<5x6xf32>)
 
-  // Constant pad with explicit constant_value scalar.
+  // Constant pad with explicit constant_value scalar. hip.pad takes the fill
+  // value BY VALUE (a scalar `f32`, no buffer): a non-constant cval (here a
+  // function arg) is read to a host scalar via a synchronized
+  // hip.readback_scalar.
   func.func @pad_constant_with_cval(%data: tensor<3x4xf32>, %pads: tensor<4xi64>, %cval: tensor<f32>) -> tensor<5x6xf32> {
     %none = "onnx.NoValue"() {value} : () -> none
     %r = "onnx.Pad"(%data, %pads, %cval, %none) {mode = "constant"} : (tensor<3x4xf32>, tensor<4xi64>, tensor<f32>, none) -> tensor<5x6xf32>
@@ -29,11 +32,13 @@ module {
   }
 
   // CHECK-LABEL: func.func @pad_constant_with_cval
-  // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<3x4xf32>, tensor<4xi64>) cval({{.*}} : tensor<f32>) outs({{.*}} : tensor<5x6xf32>)
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[D:.*]]: tensor<3x4xf32>, %[[P:.*]]: tensor<4xi64>, %[[CVT:.*]]: tensor<f32>)
+  // CHECK: %[[CV:.*]] = hip.readback_scalar(%[[CTX]], %[[CVT]] : tensor<f32>) -> f32
+  // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<3x4xf32>, tensor<4xi64>) cval(%[[CV]] : f32) outs({{.*}} : tensor<5x6xf32>)
 
   // A producer may emit constant_value as a redundant single-element 1-D
-  // tensor. hip.pad requires a 0-D operand, so the converter collapses it to
-  // rank-0 before building the op.
+  // tensor. The converter collapses it to rank-0, then resolves it to a host
+  // scalar (here via readback, since the value is a function arg).
   func.func @pad_constant_cval_1d(%data: tensor<3x4xf32>, %pads: tensor<4xi64>, %cval: tensor<1xf32>) -> tensor<5x6xf32> {
     %none = "onnx.NoValue"() {value} : () -> none
     %r = "onnx.Pad"(%data, %pads, %cval, %none) {mode = "constant"} : (tensor<3x4xf32>, tensor<4xi64>, tensor<1xf32>, none) -> tensor<5x6xf32>
@@ -41,8 +46,9 @@ module {
   }
 
   // CHECK-LABEL: func.func @pad_constant_cval_1d
-  // CHECK: %[[CV:.*]] = tensor.collapse_shape %{{.*}} [] : tensor<1xf32> into tensor<f32>
-  // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<3x4xf32>, tensor<4xi64>) cval(%[[CV]] : tensor<f32>) outs({{.*}} : tensor<5x6xf32>)
+  // CHECK: %[[CV0:.*]] = tensor.collapse_shape %{{.*}} [] : tensor<1xf32> into tensor<f32>
+  // CHECK: %[[CV:.*]] = hip.readback_scalar({{.*}}, %[[CV0]] : tensor<f32>) -> f32
+  // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<3x4xf32>, tensor<4xi64>) cval(%[[CV]] : f32) outs({{.*}} : tensor<5x6xf32>)
 
   // Reflect mode is non-default, so it stays in the attr-dict.
   func.func @pad_reflect(%data: tensor<3x4xf32>, %pads: tensor<4xi64>) -> tensor<5x6xf32> {

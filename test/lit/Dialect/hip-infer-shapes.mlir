@@ -605,13 +605,13 @@ func.func @refine_reduce_mean_keepdims_constant_axes(%ctx: !hip.context,
 func.func @refine_pad_dps_out_fallback(%ctx: !hip.context,
                                        %data: tensor<3x2xf32>,
                                        %pads: tensor<4xi64>,
-                                       %cval: tensor<f32>,
+                                       %cval: f32,
                                        %d0: index, %d1: index)
     -> tensor<?x?xf32> {
   %e = tensor.empty(%d0, %d1) : tensor<?x?xf32>
   %y = hip.pad(%ctx)
     ins(%data, %pads : tensor<3x2xf32>, tensor<4xi64>)
-    cval(%cval : tensor<f32>)
+    cval(%cval : f32)
     outs(%e : tensor<?x?xf32>)
     {mode = "constant"}
     : tensor<?x?xf32>
@@ -633,14 +633,14 @@ func.func @refine_pad_dps_out_fallback(%ctx: !hip.context,
 // CHECK:         tensor.cast %[[Y]] : tensor<5x8xf32> to tensor<?x?xf32>
 func.func @refine_pad_tier1_constant_pads(%ctx: !hip.context,
                                           %data: tensor<3x4xf32>,
-                                          %cval: tensor<f32>,
+                                          %cval: f32,
                                           %d0: index, %d1: index)
     -> tensor<?x?xf32> {
   %pads = arith.constant dense<[1, 2, 1, 2]> : tensor<4xi64>
   %e = tensor.empty(%d0, %d1) : tensor<?x?xf32>
   %y = hip.pad(%ctx)
     ins(%data, %pads : tensor<3x4xf32>, tensor<4xi64>)
-    cval(%cval : tensor<f32>)
+    cval(%cval : f32)
     outs(%e : tensor<?x?xf32>)
     {mode = "constant"}
     : tensor<?x?xf32>

@@ -83,6 +83,14 @@ bool ::mlir::hip::isHostCompatibleMemRef(::mlir::Type type) {
   return memRefMatchesSpace(type, ::mlir::hip::MemorySpaceKind::Host);
 }
 
+bool ::mlir::hip::isPinnedCompatibleMemRef(::mlir::Type type) {
+  return memRefMatchesSpace(type, ::mlir::hip::MemorySpaceKind::Pinned);
+}
+
+bool ::mlir::hip::isManagedCompatibleMemRef(::mlir::Type type) {
+  return memRefMatchesSpace(type, ::mlir::hip::MemorySpaceKind::Managed);
+}
+
 //===----------------------------------------------------------------------===//
 // Non-DPS ops: memory effect declarations
 //===----------------------------------------------------------------------===//
