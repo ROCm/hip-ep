@@ -283,7 +283,7 @@ def _assert_no_silent_fallback(stderr_text):
 
     The model DLL prints ``[REAL] wrap_*`` lines to stderr (FD level) when
     ``HIPDNN_EP_DEBUG=1``. Whisper attention must route to
-    ``wrap_group_query_attention`` (hip.gqa's runtime entry, the ``no_causal``
+    ``wrap_gqa_flash`` (hip.gqa's runtime entry, the ``no_causal``
     path), the conv front-end to ``wrap_miopenConvolutionForward`` (rank-3 Conv
     reshapes to the shared 2D conv — there is no dedicated conv1d runtime), and
     the legacy ``wrap_multi_head_attention`` runtime entry must NOT appear.
@@ -296,10 +296,10 @@ def _assert_no_silent_fallback(stderr_text):
     assert "[REAL] wrap_miopenConvolutionForward" in stderr_text, (
         "no [REAL] wrap_miopenConvolutionForward — Conv ran on CPU (silent fallback)"
     )
-    # hip.gqa lowers to the runtime symbol wrap_group_query_attention (NOT a
+    # hip.gqa lowers to the runtime symbol wrap_gqa_flash (NOT a
     # symbol literally named wrap_gqa).
-    assert "[REAL] wrap_group_query_attention" in stderr_text, (
-        "no [REAL] wrap_group_query_attention — attention ran on CPU (silent fallback)"
+    assert "[REAL] wrap_gqa_flash" in stderr_text, (
+        "no [REAL] wrap_gqa_flash — attention ran on CPU (silent fallback)"
     )
     assert "[REAL] wrap_multi_head_attention" not in stderr_text, (
         "wrap_multi_head_attention should NOT appear — all Whisper attention "
@@ -441,15 +441,15 @@ def test_decoder_prefill_correctness(variant_precision, capfd):
     # come from the model DLL's private static CRT, which capfd captures only
     # partially/unreliably (CLAUDE.md gotcha). So: the negative check (no legacy
     # MHA path) is asserted whenever any [REAL] line is seen, but the positive
-    # wrap_group_query_attention presence is informational only.
+    # wrap_gqa_flash presence is informational only.
     if "[REAL] wrap_" in stderr_text:
         assert "[REAL] wrap_multi_head_attention" not in stderr_text, (
             "wrap_multi_head_attention should not appear — all Whisper attention "
             "routes through hip.gqa"
         )
-        if "[REAL] wrap_group_query_attention" not in stderr_text:
+        if "[REAL] wrap_gqa_flash" not in stderr_text:
             print(
-                "[prefill] note: wrap_group_query_attention not in the captured "
+                "[prefill] note: wrap_gqa_flash not in the captured "
                 "DLL stderr (partial static-CRT capture); GPU dispatch is still "
                 "proven by the compile tripwire + the kernel-correct cosine."
             )

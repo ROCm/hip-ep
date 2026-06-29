@@ -105,7 +105,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     Value kQuantType = createI64Const(quantTypeToEnum(op.getKQuantType()));
     Value vQuantType = createI64Const(quantTypeToEnum(op.getVQuantType()));
 
-    // no_causal: emit as i32 (matches wrap_group_query_attention signature).
+    // no_causal: emit as i32 (matches wrap_gqa_flash signature).
     Value noCausal = LLVM::ConstantOp::create(
         rewriter, loc, i32Type,
         rewriter.getI32IntegerAttr(op.getNoCausal() ? 1 : 0));
@@ -184,7 +184,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
 
     Value elemSizeVal = createI64Const(elementSizeBytes);
 
-    // Function signature matches wrap_group_query_attention() in gqa.cpp
+    // Function signature matches wrap_gqa_flash() in gqa.cpp
     SmallVector<Type, 39> paramTypes = {
         ptrType, // state
         i32Type, // op_state_slot
