@@ -3,7 +3,7 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
 #
-"""Transcribe a 16 kHz wav with any Whisper variant on the MorphiZen EP (GPU).
+"""Transcribe a 16 kHz wav with Whisper-large-v3 on the MorphiZen EP (GPU).
 
 A standalone driver around the shared greedy-decode harness in
 ``test/python/whisper/whisper_infer.py`` — no pytest, no ``python -c``. Runs identically
@@ -25,7 +25,7 @@ Prerequisites (same as the tests — see docs/whisper_quick_start.md):
   * THEROCK_DIST + install/{therock,dist}/bin are on PATH (so the EP can link the
     model DLL). Without them the EP raises rather than silently falling back.
   * The Whisper model must already be BUILT LOCALLY first:
-        python scripts/build_whisper_models.py
+        python build.py --build-whisper-models
     This script only PREPARES (surgery + fix_shapes) and transcribes — it does
     NOT download or build the model. If the raw bundle is absent it exits with a
     build hint rather than a raw traceback.
@@ -47,10 +47,13 @@ sys.path.insert(0, str(REPO_ROOT / "test" / "python" / "whisper"))
 
 import whisper_infer  # noqa: E402
 from conftest import (  # noqa: E402
-    WHISPER_VARIANTS,
     setup_jfk_sample,
-    setup_whisper_variant,
+    setup_whisper_fp16_model_dir,
+    setup_whisper_model_dir,
 )
+
+MODEL_DIR = REPO_ROOT / "models" / "whisper-large-v3-onnx"
+MODEL_DIR_FP16 = REPO_ROOT / "models" / "whisper-large-v3-onnx-fp16"
 
 # Canonical location of the bundled jfk.wav demo clip (the path shown in the
 # quick-start). It is gitignored and fetched on demand, so a fresh checkout that
@@ -61,19 +64,10 @@ JFK_SAMPLE = REPO_ROOT / "test" / "python" / "data" / "whisper" / "jfk.wav"
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Transcribe a 16 kHz wav with any Whisper variant "
-        "(--variant, default large-v3) on the MorphiZen EP (GPU)."
+        description="Transcribe a 16 kHz wav with Whisper-large-v3 on the "
+        "MorphiZen EP (GPU)."
     )
     ap.add_argument("audio", help="path to a 16 kHz mono wav (<= 30 s)")
-    ap.add_argument(
-        "--variant",
-        default="large-v3",
-        choices=sorted(WHISPER_VARIANTS),
-        help="Whisper variant (default large-v3). The small sizes "
-        "(tiny/base/small/medium) + turbo are local OGA builds "
-        "(python scripts/build_whisper_models.py --variant <name>); large-v3 "
-        "auto-downloads. All share one decoder surgery + greedy harness.",
-    )
     # Backend selection. Default (no flag) = GPU only. The two flags are mutually
     # exclusive: --cpu runs ONLY the CPU EP; --compare runs BOTH and prints a
     # CPU: and a GPU: line for an apples-to-apples check.
@@ -101,7 +95,7 @@ def main() -> int:
         "fp16 model (body fp16, lm_head fp32 so greedy is argmax-lossless) — it is "
         "faster than fp32 on GPU. The raw model auto-downloads from "
         "huggingface.co/amd/whisper-large-v3-onnx-{fp16,fp32} on first use; a local "
-        "'python scripts/build_whisper_models.py' is the backup "
+        "'python build.py --build-whisper-models' is the backup "
         "(see docs/whisper_quick_start.md).",
     )
     ap.add_argument(
@@ -136,27 +130,29 @@ def main() -> int:
         return 1
 
     # Precision selection: fp16 (DEFAULT) or fp32 (--fp32). Both are built locally
-    # via the OGA DML builder (python scripts/build_whisper_models.py). dtype
+    # via the OGA DML builder (python build.py --build-whisper-models). dtype
     # drives the KV/audio cast; lm_head stays fp32 in both so greedy argmax is
     # lossless. fp16 is the default because it is faster on GPU and bit-faithful.
     use_fp16 = not args.fp32
     prec = "fp16" if use_fp16 else "fp32"
     dtype = np.float16 if use_fp16 else np.float32
+    model_dir = MODEL_DIR_FP16 if use_fp16 else MODEL_DIR
 
-    # setup_whisper_variant runs the shared surgery + fix_shapes for ANY variant
-    # and returns (model_dir, WhisperVariant). large-v3 auto-downloads; the others
-    # need a local OGA build (it raises FileNotFoundError with a build hint). The
-    # variant carries the per-model layers/heads/n_mels/start-tokens/eot the greedy
-    # harness threads through.
-    print(f"[transcribe] preparing {args.variant} {prec} model")
+    # The setup helpers auto-download the raw model from HF on first use (backup:
+    # python build.py --build-whisper-models) and raise FileNotFoundError if
+    # neither source is reachable.
+    print(f"[transcribe] preparing {prec} model at {model_dir}")
     try:
-        model_dir, variant = setup_whisper_variant(args.variant, precision=prec)
+        if use_fp16:
+            setup_whisper_fp16_model_dir(model_dir)
+        else:
+            setup_whisper_model_dir(model_dir)
     except FileNotFoundError as e:
         print(f"[transcribe] ERROR: {e}")
         return 1
 
     print(f"[transcribe] loading audio features from {audio_path}")
-    audio_fp = whisper_infer.load_audio_features(audio_path, variant=variant)
+    audio_fp = whisper_infer.load_audio_features(audio_path)
 
     run_cpu = args.cpu or args.compare
     run_gpu = not args.cpu  # default + --compare run GPU; --cpu skips it
@@ -172,11 +168,8 @@ def main() -> int:
             max_length=args.max_length,
             timings=cpu_timings,
             dtype=dtype,
-            variant=variant,
         )
-        print(
-            f"CPU: {whisper_infer.decode_text(cpu_tokens, tokenizer_id=variant.hf_model_id, eot=variant.eot)!r}"
-        )
+        print(f"CPU: {whisper_infer.decode_text(cpu_tokens)!r}")
         if args.metrics:
             _print_metrics(cpu_timings, audio_s, label=f"CPU EP ({prec})")
 
@@ -200,11 +193,7 @@ def main() -> int:
         if args.warmup:
             print("[transcribe] warmup pass (discarded) ...")
             whisper_infer.greedy_decode_morphizen(
-                gpu_factory,
-                audio_fp,
-                max_length=args.max_length,
-                dtype=dtype,
-                variant=variant,
+                gpu_factory, audio_fp, max_length=args.max_length, dtype=dtype
             )
         timings = {} if args.metrics else None
         gpu_tokens = whisper_infer.greedy_decode_morphizen(
@@ -213,11 +202,8 @@ def main() -> int:
             max_length=args.max_length,
             timings=timings,
             dtype=dtype,
-            variant=variant,
         )
-        print(
-            f"GPU: {whisper_infer.decode_text(gpu_tokens, tokenizer_id=variant.hf_model_id, eot=variant.eot)!r}"
-        )
+        print(f"GPU: {whisper_infer.decode_text(gpu_tokens)!r}")
         if args.metrics:
             _print_metrics(timings, audio_s, label=f"MorphiZen EP ({prec}, GPU)")
 

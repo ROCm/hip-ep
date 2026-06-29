@@ -38,13 +38,6 @@ HIDDEN = 1280
 NUM_HEADS = 20
 HEAD_DIM = HIDDEN // NUM_HEADS  # 64
 
-# (hidden, num_heads) for every supported Whisper variant; head_dim == 64 for all
-# (tiny 384/6, base 512/8, small 768/12, medium 1024/16, large-v3 & turbo
-# 1280/20 — turbo shares large-v3's geometry, so 5 unique shapes). The attention
-# kernel is shape-agnostic, so covering each variant's d_model/num_heads proves
-# the per-variant GEMM/softmax shapes dispatch correctly.
-VARIANT_SHAPES = [(384, 6), (512, 8), (768, 12), (1024, 16), (1280, 20)]
-
 
 def _make_encoder_attention_model(
     batch, seq_len, hidden, num_heads, seed=0xA77, np_dtype=np.float16
@@ -82,7 +75,7 @@ def _make_encoder_attention_model(
         numpy_helper.from_array(qkv_b, name="qkv_b"),
     ]
 
-    scale = float(1.0 / np.sqrt(hidden // num_heads))
+    scale = float(1.0 / np.sqrt(HEAD_DIM))
     # 7-input form (input, weights, bias, then 4 empty optional slots) matching
     # the Whisper encoder node and the LIT test test_whisper_encoder_attention.
     node = helper.make_node(
@@ -160,35 +153,31 @@ def _bidirectional_mha_ref(x, qkv_w, qkv_b, num_heads):
 class TestWhisperEncoderAttention:
     """com.microsoft.Attention (fused QKV, bidirectional) -> hip.gqa(no_causal)."""
 
-    @pytest.mark.parametrize("hidden,num_heads", VARIANT_SHAPES)
     @pytest.mark.parametrize("seq_len", [16, 64, 256])
-    def test_encoder_self_attention(self, model_runner, seq_len, hidden, num_heads):
-        """Whisper encoder self-attn across every variant's d_model/num_heads.
+    def test_encoder_self_attention(self, model_runner, seq_len):
+        """Whisper encoder self-attn at d_model=1280, num_heads=20.
 
         Bidirectional (unidirectional=0).  Compared against an fp32 numpy
         reference (see module docstring for why ORT CPU is unsuitable here).
         """
         batch = 1
         model, qkv_w, qkv_b = _make_encoder_attention_model(
-            batch, seq_len, hidden, num_heads
+            batch, seq_len, HIDDEN, NUM_HEADS
         )
 
-        rng = np.random.default_rng(seq_len * 1000 + hidden)
-        x = (rng.standard_normal((batch, seq_len, hidden)) * 0.5).astype(np.float16)
+        rng = np.random.default_rng(seq_len)
+        x = (rng.standard_normal((batch, seq_len, HIDDEN)) * 0.5).astype(np.float16)
 
         # Drive MorphiZen directly; CPU-on-same-model would mis-interpret the
         # weight layout (see module docstring).  session.disable_cpu_ep_fallback
         # is set by the backend, so this run also proves GPU dispatch.
         actual = model_runner.backend.run(_persist(model_runner, model), [x])
-        expected = [_bidirectional_mha_ref(x, qkv_w, qkv_b, num_heads)]
+        expected = [_bidirectional_mha_ref(x, qkv_w, qkv_b, NUM_HEADS)]
 
         compare_outputs(actual, expected, atol=2e-2, rtol=2e-2, cos_threshold=0.999)
 
-    @pytest.mark.parametrize("hidden,num_heads", VARIANT_SHAPES)
     @pytest.mark.parametrize("seq_len", [16, 64, 256])
-    def test_encoder_self_attention_fp32(
-        self, model_runner, seq_len, hidden, num_heads
-    ):
+    def test_encoder_self_attention_fp32(self, model_runner, seq_len):
         """fp32 variant: drives the fp32 decomposed GQA path (elem_size=4).
 
         Same geometry as the fp16 test but fp32 inputs/weights. The fp32 path
@@ -198,14 +187,14 @@ class TestWhisperEncoderAttention:
         """
         batch = 1
         model, qkv_w, qkv_b = _make_encoder_attention_model(
-            batch, seq_len, hidden, num_heads, np_dtype=np.float32
+            batch, seq_len, HIDDEN, NUM_HEADS, np_dtype=np.float32
         )
 
-        rng = np.random.default_rng(seq_len * 1000 + hidden)
-        x = (rng.standard_normal((batch, seq_len, hidden)) * 0.5).astype(np.float32)
+        rng = np.random.default_rng(seq_len)
+        x = (rng.standard_normal((batch, seq_len, HIDDEN)) * 0.5).astype(np.float32)
 
         actual = model_runner.backend.run(_persist(model_runner, model), [x])
-        expected = [_bidirectional_mha_ref(x, qkv_w, qkv_b, num_heads)]
+        expected = [_bidirectional_mha_ref(x, qkv_w, qkv_b, NUM_HEADS)]
 
         compare_outputs(actual, expected, atol=2e-3, rtol=2e-3, cos_threshold=0.9999)
 

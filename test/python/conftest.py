@@ -598,113 +598,6 @@ class WhisperModelConfig:
     n_vocab: int = 51866
 
 
-# ── Whisper variant registry + config/token derivation ───────────────────────
-#
-# Per-variant shape params (state, layers, heads, n_mels, vocab) are DERIVED from
-# each model's transformers WhisperConfig (whisper_model_config_from_hf_config) —
-# we do NOT maintain a hardcoded dimension table. The registry pins only the HF
-# model id + revision so the source weights are reproducible. head_dim is 64,
-# n_text_ctx is 448, n_audio_ctx is 1500 for every Whisper variant.
-WHISPER_VARIANTS = {
-    # name            (hf_model_id,                    revision)
-    "large-v3": ("openai/whisper-large-v3", "06f233fe06e710322aca913c1bc4249a0d71fce1"),
-    "large-v3-turbo": ("openai/whisper-large-v3-turbo", "main"),
-    "tiny": ("openai/whisper-tiny", "main"),
-    "base": ("openai/whisper-base", "main"),
-    "small": ("openai/whisper-small", "main"),
-    "medium": ("openai/whisper-medium", "main"),
-}
-
-
-def whisper_model_config_from_hf_config(c) -> "WhisperModelConfig":
-    """Map a transformers WhisperConfig (or any object exposing the same attrs)
-    to our WhisperModelConfig. This is the single source of per-variant shape
-    params — the OGA builder reads the same WhisperConfig, so the ONNX and our
-    test config can never disagree."""
-    return WhisperModelConfig(
-        n_audio_state=c.d_model,
-        n_audio_layer=c.encoder_layers,
-        n_audio_head=c.encoder_attention_heads,
-        n_audio_ctx=c.max_source_positions,
-        n_text_state=c.d_model,
-        n_text_layer=c.decoder_layers,
-        n_text_head=c.decoder_attention_heads,
-        n_text_ctx=c.max_target_positions,
-        n_mels=c.num_mel_bins,
-        n_vocab=c.vocab_size,
-    )
-
-
-# Forced-start specials for transcription (English, no timestamps). The IDs are
-# READ from the tokenizer per variant — large-v3's 51866 layout added a language
-# vs the 51865 multilingual layout, which shifts <|transcribe|>/<|notimestamps|>
-# by one, so these MUST NOT be hardcoded.
-WHISPER_SPECIAL_TOKENS = (
-    "<|startoftranscript|>",
-    "<|en|>",
-    "<|transcribe|>",
-    "<|notimestamps|>",
-)
-
-
-def whisper_start_tokens(tokenizer):
-    """Derive (start_tokens, eot) from a tokenizer exposing
-    convert_tokens_to_ids(str) -> int. Returns (list[int], int)."""
-    start = [tokenizer.convert_tokens_to_ids(t) for t in WHISPER_SPECIAL_TOKENS]
-    eot = tokenizer.convert_tokens_to_ids("<|endoftext|>")
-    return start, eot
-
-
-@dataclass
-class WhisperVariant:
-    """A fully-resolved Whisper variant: pinned source + derived shape config +
-    derived forced-start tokens. head_dim / n_layers / n_heads / self_kv_slots
-    are read off cfg so callers never recompute them."""
-
-    name: str
-    hf_model_id: str
-    revision: str
-    cfg: "WhisperModelConfig"
-    start_tokens: list
-    eot: int
-
-    @property
-    def n_layers(self) -> int:
-        return self.cfg.n_text_layer
-
-    @property
-    def n_heads(self) -> int:
-        return self.cfg.n_text_head
-
-    @property
-    def head_dim(self) -> int:
-        return self.cfg.n_text_state // self.cfg.n_text_head
-
-    @property
-    def self_kv_slots(self) -> int:
-        return self.cfg.n_text_ctx
-
-
-def resolve_whisper_variant(name) -> "WhisperVariant":
-    """Resolve a variant name to a WhisperVariant. Reads the HF WhisperConfig +
-    tokenizer (network/cache) for shapes and forced-start tokens. Raises KeyError
-    for an unknown name."""
-    if name not in WHISPER_VARIANTS:
-        raise KeyError(
-            f"unknown Whisper variant {name!r}; known: {sorted(WHISPER_VARIANTS)}"
-        )
-    hf_id, rev = WHISPER_VARIANTS[name]
-    from transformers import WhisperConfig, WhisperTokenizer
-
-    cfg = whisper_model_config_from_hf_config(
-        WhisperConfig.from_pretrained(hf_id, revision=rev)
-    )
-    start, eot = whisper_start_tokens(
-        WhisperTokenizer.from_pretrained(hf_id, revision=rev)
-    )
-    return WhisperVariant(name, hf_id, rev, cfg, start, eot)
-
-
 # Canonical AMD-hosted raw OGA bundles (encoder/decoder + tokenizer + config).
 # These are the default model source: the setup helpers below download them on
 # first use; a local build (scripts/build_whisper_models.py) is the backup that
@@ -713,63 +606,6 @@ def resolve_whisper_variant(name) -> "WhisperVariant":
 # -fp32 suffix — the download targets whatever model_dir the caller passes.
 WHISPER_HF_REPO_FP32 = "amd/whisper-large-v3-onnx-fp32"
 WHISPER_HF_REPO_FP16 = "amd/whisper-large-v3-onnx-fp16"
-
-
-def whisper_model_dir(name: str, precision: str) -> pathlib.Path:
-    """Return the model directory for a (variant, precision) pair.
-
-    Naming convention: models/whisper-{name}-onnx[-fp16]. MUST match
-    build_whisper_models.whisper_output_dirs so both the builder and the test
-    infra resolve to the same on-disk location.
-    """
-    suffix = "-fp16" if precision == "fp16" else ""
-    return REPO_ROOT / "models" / f"whisper-{name}-onnx{suffix}"
-
-
-def _ensure_whisper_raw(name: str, model_dir: pathlib.Path, precision: str) -> None:
-    """Ensure model_dir/{encoder,decoder}.onnx exist.
-
-    large-v3 downloads from its AMD HF repo (existing behavior); all other
-    variants are LOCAL-BUILD primary (no AMD repo) — raises FileNotFoundError
-    with a build hint if absent.
-    """
-    if (model_dir / "encoder.onnx").exists() and (model_dir / "decoder.onnx").exists():
-        return
-    if name == "large-v3":
-        repo = WHISPER_HF_REPO_FP16 if precision == "fp16" else WHISPER_HF_REPO_FP32
-        _ensure_whisper_raw_downloaded(model_dir, repo)
-        return
-    raise FileNotFoundError(
-        f"Whisper {name} {precision} raw model not found at {model_dir}.\n"
-        f"  Build it locally: python scripts/build_whisper_models.py "
-        f"--variant {name} --precision {precision}\n"
-        f"  (or: python scripts/build_whisper_models.py --variant {name})"
-    )
-
-
-def setup_whisper_variant(
-    name: str, precision: str = "fp16"
-) -> "tuple[pathlib.Path, WhisperVariant]":
-    """Idempotent prep for ANY Whisper variant.
-
-    Ensures the raw OGA bundle (local build primary; large-v3 may download from
-    the AMD HF repo), then runs surgery + fix_shapes using the variant's
-    n_text_ctx. Returns (model_dir, WhisperVariant).
-    """
-    var = resolve_whisper_variant(name)
-    model_dir = whisper_model_dir(name, precision)
-    _ensure_whisper_raw(name, model_dir, precision)
-    # Defense-in-depth: _ensure_whisper_raw guarantees both files on success today,
-    # but re-check so a future change there can't silently proceed with a half-built dir.
-    for fname in ("encoder.onnx", "decoder.onnx"):
-        if not (model_dir / fname).exists():
-            raise FileNotFoundError(
-                f"Whisper {name} {precision} incomplete at {model_dir} "
-                f"(missing {fname}); build with "
-                f"python scripts/build_whisper_models.py --variant {name}"
-            )
-    _apply_whisper_surgery_and_fix_shapes(model_dir, var.cfg.n_text_ctx)
-    return model_dir, var
 
 
 def _ensure_whisper_raw_downloaded(model_dir: pathlib.Path, hf_repo: str) -> None:
@@ -788,7 +624,7 @@ def _ensure_whisper_raw_downloaded(model_dir: pathlib.Path, hf_repo: str) -> Non
         f"Could not obtain the Whisper raw model for {model_dir}.\n"
         f"  - Primary: it auto-downloads from https://huggingface.co/{hf_repo} "
         "(run `hf auth login` if the repo needs auth / you are rate-limited).\n"
-        "  - Backup:  build it locally with `python scripts/build_whisper_models.py --variant large-v3`."
+        "  - Backup:  build it locally with `python build.py --build-whisper-models`."
     )
     try:
         from huggingface_hub import snapshot_download
@@ -826,14 +662,12 @@ def setup_whisper_model_dir(model_dir: pathlib.Path) -> None:
             raise FileNotFoundError(
                 f"Whisper raw model incomplete at {model_dir} (missing {fname}). "
                 f"Download from https://huggingface.co/{WHISPER_HF_REPO_FP32} or "
-                "build it: python scripts/build_whisper_models.py --variant large-v3"
+                "build it: python build.py --build-whisper-models"
             )
     _apply_whisper_surgery_and_fix_shapes(model_dir)
 
 
-def _apply_whisper_surgery_and_fix_shapes(
-    model_dir: pathlib.Path, n_text_ctx: int = 448
-) -> None:
+def _apply_whisper_surgery_and_fix_shapes(model_dir: pathlib.Path) -> None:
     """Surgery + fix_shapes on a locally-built Whisper bundle (fp32 OR fp16).
 
     Consumes ``model_dir/{encoder,decoder}.onnx`` (+ ``.data`` sidecars) and emits
@@ -863,8 +697,8 @@ def _apply_whisper_surgery_and_fix_shapes(
             {
                 "batch_size": 1,
                 "sequence_length": 4,
-                "past_sequence_length": n_text_ctx,
-                "total_sequence_length": n_text_ctx,
+                "past_sequence_length": 448,
+                "total_sequence_length": 448,
             },
         )
 
@@ -876,8 +710,8 @@ def _apply_whisper_surgery_and_fix_shapes(
             {
                 "batch_size": 1,
                 "sequence_length": 1,
-                "past_sequence_length": n_text_ctx,
-                "total_sequence_length": n_text_ctx,
+                "past_sequence_length": 448,
+                "total_sequence_length": 448,
             },
         )
 
@@ -898,7 +732,7 @@ def setup_whisper_fp16_model_dir(model_dir: pathlib.Path) -> None:
             raise FileNotFoundError(
                 f"Whisper fp16 raw model incomplete at {model_dir} (missing {fname}). "
                 f"Download from https://huggingface.co/{WHISPER_HF_REPO_FP16} or "
-                "build it: python scripts/build_whisper_models.py --variant large-v3"
+                "build it: python build.py --build-whisper-models"
             )
     _apply_whisper_surgery_and_fix_shapes(model_dir)
 
@@ -922,12 +756,10 @@ def make_whisper_inputs(audio_path: pathlib.Path, cfg: WhisperModelConfig) -> di
     import soundfile as sf
     from transformers import WhisperFeatureExtractor
 
-    # Pick the feature extractor by mel count. All openai 80-mel Whisper models
-    # (tiny/base/small/medium) share one preprocessor config (80 mels, 16 kHz,
-    # same mel filterbank, 30 s window), so whisper-tiny is just a lightweight
-    # representative for the whole 80-mel family; large-v3/turbo use 128 mels.
-    fe_id = "openai/whisper-large-v3" if cfg.n_mels == 128 else "openai/whisper-tiny"
-    fe = WhisperFeatureExtractor.from_pretrained(fe_id)
+    # The processor config (mel filterbanks, target sample rate, n_mels)
+    # is the same across whisper-large-v3 variants — use the openai original
+    # so we don't depend on the built ONNX bundle shipping a processor.
+    fe = WhisperFeatureExtractor.from_pretrained("openai/whisper-large-v3")
 
     audio, sr = sf.read(str(audio_path))
     # soundfile returns shape (N,) for mono, (N, C) for multi-channel.
