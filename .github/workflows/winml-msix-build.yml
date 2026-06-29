@@ -1,0 +1,201 @@
+name: WinML MSIX Build
+
+# Standalone workflow that packages the AMD GPU EP into a signed Windows ML MSIX.
+# It does NOT build the EP: it pulls the gpu-test-package artifact produced by the
+# latest successful windows-build.yml run on a chosen branch (main / release_*),
+# merges the ROCm runtime DLLs (vendored under .github/winml-msix/), and runs the
+# MSIX packaging tool.
+# Build-only: the .msix is uploaded as an artifact (no install / no validation).
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: "Branch whose latest successful windows-build.yml run to pull gpu-test-package from"
+        type: string
+        default: main
+  push:
+    branches:
+      - ci/winml-msix-build
+
+jobs:
+  build-msix:
+    runs-on: StrixHalo
+    env:
+      ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
+      # MSIX packaging tool (ships its own x64\makeappx.exe + signtool.exe).
+      TOOL_URL: https://mkmartifactory.amd.com:8443/artifactory/SW-MLArtfactory-DEV-LOCAL/WindowsML/msix_packaging_script/msix_packaging_script.zip
+      PROVIDER_NAME: MIGraphXExecutionProvider
+      PROVIDER_PATH: amdgpu-ep.dll
+      PACKAGE_NAME: MicrosoftCorporationII.WinML.AMD.GPU.EP
+      SEMANTIC_VERSION: "1.8"
+      PACKAGE_VERSION: 1.8.90.22
+
+    steps:
+      - name: Checkout (for the vendored ROCm runtime zip)
+        uses: actions/checkout@v4
+
+      - name: Clean workspace
+        shell: cmd
+        run: |
+          if exist msix-gpu-test-package rd /s /q msix-gpu-test-package
+          if exist rocm-bin rd /s /q rocm-bin
+          if exist msix-tool rd /s /q msix-tool
+          if exist msix-stage rd /s /q msix-stage
+          if exist msix-out rd /s /q msix-out
+
+      # Pull the gpu-test-package built by windows-build.yml on the chosen branch
+      # (defaults to main; release_* also works). Uses the latest *successful* run.
+      - name: Download gpu-test-package (from ${{ github.event.inputs.source_branch || 'main' }})
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: windows-build.yml
+          branch: ${{ github.event.inputs.source_branch || 'main' }}
+          workflow_conclusion: success
+          name: gpu-test-package
+          path: msix-gpu-test-package
+
+      - name: Extract vendored ROCm runtime (rocm_7.11/bin)
+        shell: pwsh
+        run: |
+          $dist = "$PWD\rocm-bin"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Expand-Archive -Path ".github\winml-msix\rocm_7.11_bin.zip" -DestinationPath $dist -Force
+
+      - name: Build signed MSIX
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $bin     = "$PWD\msix-gpu-test-package\bin"
+          $rocmBin = "$PWD\rocm-bin"
+          if (-not (Test-Path $bin))     { throw "gpu-test-package bin not found: $bin" }
+          if (-not (Test-Path $rocmBin)) { throw "rocm-bin not found: $rocmBin" }
+
+          # --- obtain packaging tool (ships its own x64\makeappx.exe + signtool.exe) ---
+          $toolDir = "$PWD\msix-tool"
+          curl.exe -fsSL -o msix_packaging_script.zip "$env:TOOL_URL"
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path msix_packaging_script.zip)) {
+            throw "tool download failed (need AMD network access to $env:TOOL_URL)"
+          }
+          Expand-Archive -Path msix_packaging_script.zip -DestinationPath $toolDir -Force
+          $buildScriptItem = Get-ChildItem $toolDir -Recurse -Filter "Build-MSIXPackage.ps1" | Select-Object -First 1
+          if (-not $buildScriptItem) { throw "Build-MSIXPackage.ps1 not found after extracting tool zip" }
+          $msixScriptDir = $buildScriptItem.Directory.FullName
+          $buildScript   = $buildScriptItem.FullName
+
+          # The stock tool copies the ExecutionProvider source with `Get-ChildItem -File`
+          # (top-level only), dropping data subdirs (rocblas\library, hipblaslt\library).
+          # Patch it to copy recursively so those Tensile kernel data dirs survive.
+          $bs = Get-Content $buildScript -Raw
+          if ($bs -match 'Get-ChildItem \$ExecutionProviderPath -File') {
+            $bs = $bs -replace 'Get-ChildItem \$ExecutionProviderPath -File', 'Get-ChildItem $ExecutionProviderPath'
+            $bs = $bs -replace 'Copy-Item \$file\.FullName \$epTarget -Force', 'Copy-Item $file.FullName $epTarget -Force -Recurse'
+            Set-Content $buildScript -Value $bs -Encoding UTF8
+            Write-Host "patched tool: ExecutionProvider copy is now recursive (keeps data dirs)"
+          }
+
+          # --- stage EP chain (from gpu-test-package/bin) + ROCm runtime (vendored) ---
+          $stage = "$PWD\msix-stage"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          $epPatterns = @("amdgpu-ep.dll","hip-backend.dll","hipgpu.dll","hip-compiler.dll","custom_kernels_*.dll")
+          foreach ($pat in $epPatterns) {
+            Get-ChildItem $bin -File -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
+              Copy-Item $_.FullName $stage -Force; Write-Host "  + [ep]   $($_.Name)"
+            }
+          }
+          # ROCm runtime DLLs (overwrites duplicates such as amdhip64_7.dll)
+          Get-ChildItem $rocmBin -File -Filter *.dll | ForEach-Object {
+            Copy-Item $_.FullName $stage -Force
+          }
+          # ROCm data directories (rocblas\library, hipblaslt\library Tensile data)
+          # copied with structure so the dlls find their data next to them at runtime.
+          Get-ChildItem $rocmBin -Directory | ForEach-Object {
+            Copy-Item $_.FullName (Join-Path $stage $_.Name) -Recurse -Force
+          }
+
+          if (-not (Test-Path (Join-Path $stage $env:PROVIDER_PATH))) {
+            throw "Entry provider dll '$env:PROVIDER_PATH' not staged - check gpu-test-package bin contents."
+          }
+          $allFiles = Get-ChildItem $stage -Recurse -File
+          $mb = [math]::Round((($allFiles | Measure-Object Length -Sum).Sum / 1MB), 1)
+          Write-Host "staged $($allFiles.Count) files, $mb MB -> $stage"
+
+          # --- single AMD GPU EP extension manifest (back up original once) ---
+          $tmpl = Join-Path $msixScriptDir "AppxManifestTemplate.xml"
+          $bak  = "$tmpl.orig"
+          if ((Test-Path $tmpl) -and -not (Test-Path $bak)) { Copy-Item $tmpl $bak -Force }
+          @'
+          <?xml version="1.0" encoding="utf-8"?>
+          <Package
+            xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+            xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+            xmlns:uap15="http://schemas.microsoft.com/appx/manifest/uap/windows10/15"
+            xmlns:uap17="http://schemas.microsoft.com/appx/manifest/uap/windows10/17"
+            IgnorableNamespaces="uap uap17">
+
+            <Identity
+              Name="@PACKAGE_NAME@.@SEMANTIC_VERSION@"
+              Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+              Version="@PACKAGE_VERSION@"
+              ProcessorArchitecture="@PACKAGE_ARCH@" />
+
+            <Properties>
+              <DisplayName>Windows ML Runtime Execution Provider</DisplayName>
+              <PublisherDisplayName>Microsoft Corporation</PublisherDisplayName>
+              <Logo>Images\StoreLogo.png</Logo>
+              <uap15:DependencyTarget>true</uap15:DependencyTarget>
+            </Properties>
+
+            <Dependencies>
+              <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.22000.0" MaxVersionTested="10.0.26100.0" />
+              <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.22000.0" MaxVersionTested="10.0.26100.0" />
+            </Dependencies>
+
+            <Extensions>
+              <uap17:Extension Category="windows.packageExtension">
+                <uap17:PackageExtension Name="com.microsoft.windowsmlruntime.executionprovider"
+                    Id="AMDGPUEP"
+                    DisplayName="Windows ML Runtime AMD GPU Execution Provider"
+                    PublicFolder="ExecutionProvider"
+                    Description="Windows ML Runtime AMD GPU Execution Provider">
+                  <uap17:Properties>
+                    <ProviderName>@PROVIDER_NAME@</ProviderName>
+                    <ProviderPath>@PROVIDER_PATH@</ProviderPath>
+                  </uap17:Properties>
+                </uap17:PackageExtension>
+              </uap17:Extension>
+            </Extensions>
+
+          </Package>
+          '@ | Set-Content $tmpl -Encoding UTF8
+          Write-Host "wrote single AMD GPU EP extension template"
+
+          # --- pack + sign (self-signed; no -Install so no admin / cert-store needed) ---
+          $out = "$PWD\msix-out"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $params = @{
+            ProviderName          = $env:PROVIDER_NAME
+            ExecutionProviderPath = $stage
+            ProviderPath          = $env:PROVIDER_PATH
+            PackageName           = $env:PACKAGE_NAME
+            SemanticVersion       = $env:SEMANTIC_VERSION
+            PackageVersion        = $env:PACKAGE_VERSION
+            OutputPath            = $out
+          }
+          Push-Location $msixScriptDir
+          try { & $buildScript @params -Sign }
+          finally { Pop-Location }
+
+          $msix = Get-ChildItem $out -Recurse -Filter *.msix | Select-Object -First 1
+          if (-not $msix) { throw "No .msix produced under $out" }
+          $size = [math]::Round($msix.Length / 1MB, 1)
+          Write-Host "MSIX: $($msix.FullName) ($size MB)"
+
+      - name: Upload MSIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: winml-amdgpu-ep-msix
+          path: msix-out/*.msix
+          retention-days: 14
