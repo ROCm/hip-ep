@@ -2,17 +2,15 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
 #
-"""End-to-end Whisper correctness on the MorphiZen EP — all variants (fp16) + large-v3 (fp32).
+"""End-to-end Whisper-large-v3 correctness on the MorphiZen EP (fp16 + fp32).
 
 fp16 is the DEFAULT running precision (OGA DML build: body fp16 + fp32 lm_head —
-faster on GPU, argmax-lossless). The four core correctness tests run over the
-``variant_precision`` fixture: **fp16 for every variant** (large-v3, large-v3-turbo,
-tiny, base, small, medium) **plus a single fp32 leg on large-v3** (the cross-
-precision guard — only large-v3 ships fp32). A variant whose fp16 bundle is absent
-SKIPS cleanly. The whole matrix runs in ONE pytest process (the host is 128 GB; the
-old "split fp16/fp32 to save memory" guidance was a misdiagnosis of a bitcode-JIT
-crash — see CLAUDE.md). The slower LibriSpeech suites run at a SINGLE
-``default_precision`` on large-v3 so the 5-clip GPU sweeps don't double in wall-clock.
+faster on GPU, argmax-lossless); fp32 is the native build and stays fully tested.
+The four core correctness tests run for BOTH precisions via the ``precision``
+fixture (fp16 first). The fp16 leg SKIPS cleanly if the OGA-built bundle is
+absent, so a machine without the builder still gets full fp32 coverage. The
+slower LibriSpeech suites run at a SINGLE ``default_precision`` (fp16 if built,
+else fp32) so the 5-clip GPU sweeps don't double in wall-clock.
 
   * ``test_encoder_correctness``         — encoder hidden_states cosine, GPU vs
                                             CPU dynamic, per precision
@@ -77,12 +75,10 @@ from conftest import (  # noqa: E402
     get_amd_dml_providers,
     make_whisper_inputs,
     register_morphizen_ep,
-    resolve_whisper_variant,
     setup_jfk_sample,
     setup_librispeech_samples,
     setup_whisper_fp16_model_dir,
     setup_whisper_model_dir,
-    setup_whisper_variant,
 )
 
 # The greedy-decode harness + Whisper constants live in whisper_infer (shared
@@ -96,8 +92,6 @@ from whisper_infer import (  # noqa: E402
     N_LAYERS as _N_LAYERS,
     SELF_KV_SLOTS as _SELF_KV_SLOTS,
     START_TOKENS as _START_TOKENS,
-    CaptureFD as _CaptureFD,
-    assert_compiled_on_gpu as _assert_compiled_on_gpu,
     decode_text as _decode_text,
     encoder_cross_kv as _encoder_cross_kv,
     zeroed_self_past as _zeroed_self_past,
@@ -175,48 +169,33 @@ def _prepare_fp16_model_dir():
     return _MODEL_DIR_FP16
 
 
-# The four core correctness tests run fp16 across EVERY variant (turbo + the
-# small sizes + large-v3) PLUS a single fp32 leg on large-v3 — fp16 is the
-# default running precision and the broad coverage, while fp32 is the narrow
-# cross-precision guard (only large-v3 ships fp32 for the cross-backend
-# benchmark). ((variant, "fp16") for all) + (("large-v3", "fp32"),).
-_CORE_VARIANTS = ["large-v3", "large-v3-turbo", "tiny", "base", "small", "medium"]
-_VARIANT_PRECISION_PARAMS = [(n, "fp16") for n in _CORE_VARIANTS] + [
-    ("large-v3", "fp32")
-]
+@pytest.fixture(scope="module", params=["fp16", "fp32"])
+def precision(request):
+    """Parametrize a test across BOTH precisions — fp16 FIRST (the default path).
 
+    Yields ``(model_dir, np_dtype, label)``:
+      * fp16 → the OGA DML bundle (body fp16 + fp32 lm_head), auto-downloaded
+        from ``amd/whisper-large-v3-onnx-fp16`` on first use (backup: ``python
+        build.py --build-whisper-models``). If it can be neither downloaded nor
+        found, the fp16 parametrization SKIPS cleanly (the fp32 leg still runs,
+        so an offline machine keeps full fp32 coverage).
+      * fp32 → the native-fp32 bundle (set up by the autouse ``_setup``
+        fixture; downloaded from ``amd/whisper-large-v3-onnx-fp32`` if absent).
 
-@pytest.fixture(
-    scope="module", params=_VARIANT_PRECISION_PARAMS, ids=lambda p: f"{p[0]}-{p[1]}"
-)
-def variant_precision(request):
-    """Parametrize a test over (variant, precision).
-
-    Yields ``(model_dir, variant, np_dtype, label)``:
-      * fp16 legs (one per variant) → the OGA DML bundle (body fp16 + fp32
-        lm_head). large-v3 auto-downloads from ``amd/whisper-large-v3-onnx-fp16``;
-        the others are local OGA builds (``python scripts/build_whisper_models.py
-        --variant <name>``). A variant whose fp16 bundle can be neither built nor
-        found SKIPS cleanly so the rest still run.
-      * fp32 leg (large-v3 only) → the native-fp32 bundle (set up by the autouse
-        ``_setup`` fixture; downloaded from ``amd/whisper-large-v3-onnx-fp32``).
-
-    ``variant`` is the ``WhisperVariant`` (layers/heads/head_dim/cfg/start_tokens/
-    eot); tests thread it through the shared whisper_infer harness.
+    fp16 is listed first so it is the primary, default-precision leg.
     """
-    name, prec = request.param
-    var = resolve_whisper_variant(name)
-    if prec == "fp32":
-        # large-v3 native fp32 bundle (set up by the autouse _setup fixture).
-        return _MODEL_DIR, var, np.float32, f"{name}-fp32"
-    try:
-        model_dir, var = setup_whisper_variant(name, precision="fp16")
-    except Exception as e:  # noqa: BLE001 — download/build/surgery error → skip
-        pytest.skip(
-            f"{name} fp16 Whisper bundle unavailable: {e!r} "
-            f"(build: python scripts/build_whisper_models.py --variant {name})"
-        )
-    return model_dir, var, np.float16, f"{name}-fp16"
+    label = request.param
+    if label == "fp16":
+        try:
+            model_dir = _prepare_fp16_model_dir()
+        except Exception as e:  # noqa: BLE001 — download/build/surgery error → skip
+            pytest.skip(
+                f"fp16 Whisper model unavailable: {e!r} (auto-downloads from "
+                "huggingface.co/amd/whisper-large-v3-onnx-fp16; backup: "
+                "python build.py --build-whisper-models)"
+            )
+        return model_dir, np.float16, "fp16"
+    return _MODEL_DIR, np.float32, "fp32"
 
 
 @pytest.fixture(scope="module")
@@ -307,13 +286,34 @@ def _assert_no_silent_fallback(stderr_text):
     )
 
 
+def _assert_compiled_on_gpu(stderr_text):
+    """Hard tripwire: the MorphiZen MLIR backend MUST NOT report a compile
+    failure. ``MlirCompiler.cpp ... Compilation failed`` (FD-level stderr from
+    the EP) means the model fell back to CPU silently — at which point any
+    GPU-vs-CPU cosine is meaningless (it becomes CPU-vs-CPU == 1.0 and hides
+    kernel bugs).
+
+    This signal IS visible to ``capfd`` (it is emitted by the EP host, which
+    shares the Python process CRT, not the model DLL's private CRT), so it is a
+    more reliable tripwire than the ``[REAL]`` lines (which the model DLL prints
+    via its own CRT and capfd may miss).
+    """
+    assert "MLIR compilation failed" not in stderr_text and (
+        "Compilation failed" not in stderr_text
+    ), (
+        "MorphiZen MLIR compilation FAILED → silent CPU fallback. The cosine "
+        "below would be a CPU-vs-CPU artifact, NOT a kernel result. Fix the "
+        "compiler before trusting accuracy. Captured stderr:\n" + stderr_text[-2000:]
+    )
+
+
 # ── Tests ────────────────────────────────────────────────────────────────────
 
 
-def test_encoder_correctness(variant_precision, capfd):
-    """Encoder hidden_states cosine: MorphiZen(GPU) vs CPU, per (variant, precision).
+def test_encoder_correctness(precision, capfd):
+    """Encoder hidden_states cosine: MorphiZen(GPU) vs CPU, per precision.
 
-    Runs fp16 across all variants + fp32 large-v3 via ``variant_precision``. GPU runs
+    Runs for BOTH fp16 (default) and fp32 via the ``precision`` fixture. GPU runs
     the fixed ``encoder_fixed.onnx``; the reference is the original dynamic
     ``encoder.onnx`` on the CPU EP. Both are the same model at the fixture's
     precision (only batch_size is pinned), so the cosine is ~1.0 when every op
@@ -321,13 +321,12 @@ def test_encoder_correctness(variant_precision, capfd):
     dispatches on the GPU. The compile-failure + per-op tripwires below catch the
     silent-CPU-fallback case independently of the numeric threshold.
     """
-    model_dir, var, dtype, prec = variant_precision
-    prec_kind = "fp32" if dtype == np.float32 else "fp16"
-    audio = make_whisper_inputs(_AUDIO, var.cfg)["audio_features"].astype(dtype)
+    model_dir, dtype, prec = precision
+    audio = make_whisper_inputs(_AUDIO, _CFG)["audio_features"].astype(dtype)
 
     # CPU reference: the original dynamic encoder at this precision.
     cpu = _cpu_session("encoder.onnx", model_dir)
-    cpu_hidden, _ = _encoder_cross_kv(cpu, audio, dtype=dtype, variant=var)
+    cpu_hidden, _ = _encoder_cross_kv(cpu, audio, dtype=dtype)
     del cpu
     gc.collect()
 
@@ -339,7 +338,7 @@ def test_encoder_correctness(variant_precision, capfd):
 
     mz = _morphizen_session("encoder_fixed.onnx", model_dir)
     t0 = time.perf_counter()
-    mz_hidden, _ = _encoder_cross_kv(mz, audio, dtype=dtype, variant=var)
+    mz_hidden, _ = _encoder_cross_kv(mz, audio, dtype=dtype)
     elapsed = time.perf_counter() - t0
     captured = capfd.readouterr()
     stderr_text = captured.err + captured.out
@@ -366,14 +365,14 @@ def test_encoder_correctness(variant_precision, capfd):
             "tripwire + cosine threshold above."
         )
 
-    thresh = _ENC_COS_BY_PREC[prec_kind]
+    thresh = _ENC_COS_BY_PREC[prec]
     assert cos >= thresh, f"encoder/{prec} hidden_states cosine = {cos} < {thresh}"
 
 
-def test_decoder_prefill_correctness(variant_precision, capfd):
-    """First decoder step (S start tokens, empty self-past): logits cosine.
+def test_decoder_prefill_correctness(precision, capfd):
+    """First decoder step (S=4 start tokens, empty self-past): logits cosine.
 
-    Runs fp16 across all variants + fp32 large-v3 via ``variant_precision``. KERNEL
+    Runs for BOTH fp16 (default) and fp32 via the ``precision`` fixture. KERNEL
     correctness is GPU (static 448-slot shared buffer) vs CPU of the DYNAMIC
     (pre-surgery, empty-past) decoder. The dynamic decoder is the correct
     reference: ORT's com.microsoft.MultiHeadAttention IGNORES
@@ -383,45 +382,41 @@ def test_decoder_prefill_correctness(variant_precision, capfd):
     reference. The MorphiZen runtime DOES honor seqlens_k, so GPU-static must
     match CPU-DYNAMIC (empty past).
     """
-    model_dir, var, dtype, prec = variant_precision
-    prec_kind = "fp32" if dtype == np.float32 else "fp16"
-    n_layers, n_heads, head_dim, _slots, start_tokens, _eot, _ = (
-        whisper_infer._runtime_params(var)
-    )
-    audio = make_whisper_inputs(_AUDIO, var.cfg)["audio_features"].astype(dtype)
-    s0 = len(start_tokens)
+    model_dir, dtype, prec = precision
+    audio = make_whisper_inputs(_AUDIO, _CFG)["audio_features"].astype(dtype)
+    s0 = len(_START_TOKENS)
 
     # Shared cross-KV from the CPU encoder so the decoder compare is isolated
     # from any encoder GPU/CPU drift.
     cpu_enc = _cpu_session("encoder.onnx", model_dir)
-    _, cross = _encoder_cross_kv(cpu_enc, audio, dtype=dtype, variant=var)
+    _, cross = _encoder_cross_kv(cpu_enc, audio, dtype=dtype)
     del cpu_enc
 
     # ── CPU reference: DYNAMIC decoder, empty (0-slot) past ──────────────────
     cpu_dec = _cpu_session("decoder.onnx", model_dir)
     cpu_names = [o.name for o in cpu_dec.get_outputs()]
-    cpu_feed = {"input_ids": np.array([start_tokens], dtype=np.int32), **cross}
-    for i in range(n_layers):
+    cpu_feed = {"input_ids": np.array([_START_TOKENS], dtype=np.int32), **cross}
+    for i in range(_N_LAYERS):
         cpu_feed[f"past_key_self_{i}"] = np.zeros(
-            (1, n_heads, 0, head_dim), dtype=dtype
+            (1, _N_HEADS, 0, _HEAD_DIM), dtype=dtype
         )
         cpu_feed[f"past_value_self_{i}"] = np.zeros(
-            (1, n_heads, 0, head_dim), dtype=dtype
+            (1, _N_HEADS, 0, _HEAD_DIM), dtype=dtype
         )
     cpu_logits = dict(zip(cpu_names, cpu_dec.run(None, cpu_feed)))["logits"]
     del cpu_dec, cpu_feed
     gc.collect()
 
-    # ── MorphiZen GPU: static shared-buffer prefill ──────────────────────────
+    # ── MorphiZen GPU: static 448-slot shared-buffer prefill ─────────────────
     # int64 ids (surgered decoder re-types input_ids to int64 for the GPU token-
     # embed Gather). past_sequence_length uses the total-1 convention (= S-1 at
     # prefill). position_ids = [0 .. S-1] (real_past=0 at prefill).
     feed = {
-        "input_ids": np.array([start_tokens], dtype=np.int64),
+        "input_ids": np.array([_START_TOKENS], dtype=np.int64),
         "past_sequence_length": np.array([s0 - 1], dtype=np.int32),
         "position_ids": np.arange(s0, dtype=np.int64),
         **cross,
-        **_zeroed_self_past(dtype, variant=var),
+        **_zeroed_self_past(dtype),
     }
     capfd.readouterr()  # clear before the captured window (compile happens here)
     mz_dec = _morphizen_session("decoder_fixed_prefill.onnx", model_dir)
@@ -454,14 +449,14 @@ def test_decoder_prefill_correctness(variant_precision, capfd):
                 "proven by the compile tripwire + the kernel-correct cosine."
             )
 
-    thresh = _DEC_COS_BY_PREC[prec_kind]
+    thresh = _DEC_COS_BY_PREC[prec]
     assert cos >= thresh, f"prefill/{prec} GPU vs CPU cosine = {cos} < {thresh}"
 
 
-def test_decoder_decode_correctness(variant_precision):
+def test_decoder_decode_correctness(precision):
     """N sequential decode steps (S=1): per-step logits cosine, GPU vs CPU.
 
-    Runs fp16 across all variants + fp32 large-v3 via ``variant_precision``. KERNEL
+    Runs for BOTH fp16 (default) and fp32 via the ``precision`` fixture. KERNEL
     correctness check: GPU runs the static 448-slot shared-buffer decode decoder;
     the reference is the DYNAMIC (pre-surgery, growing-past) decoder on the CPU
     EP. The dynamic decoder is the correct reference (ORT MHA ignores
@@ -470,17 +465,13 @@ def test_decoder_decode_correctness(variant_precision):
     token trajectory (driven by the CPU reference argmax) so the per-step cosine is
     a clean kernel comparison, not two divergent greedy walks.
     """
-    model_dir, var, dtype, prec = variant_precision
-    prec_kind = "fp32" if dtype == np.float32 else "fp16"
-    n_layers, _n_heads, _head_dim, slots, start_tokens, eot, _ = (
-        whisper_infer._runtime_params(var)
-    )
+    model_dir, dtype, prec = precision
     n_steps = 24
-    audio = make_whisper_inputs(_AUDIO, var.cfg)["audio_features"].astype(dtype)
+    audio = make_whisper_inputs(_AUDIO, _CFG)["audio_features"].astype(dtype)
 
     # Shared cross-KV from the CPU encoder (isolate the decoder).
     cpu_enc = _cpu_session("encoder.onnx", model_dir)
-    _, cross = _encoder_cross_kv(cpu_enc, audio, dtype=dtype, variant=var)
+    _, cross = _encoder_cross_kv(cpu_enc, audio, dtype=dtype)
     del cpu_enc
     gc.collect()
 
@@ -488,12 +479,12 @@ def test_decoder_decode_correctness(variant_precision):
     cpu_dec = _cpu_session("decoder.onnx", model_dir)
     cpu_dec_out = [o.name for o in cpu_dec.get_outputs()]
     cpu_self = {}
-    for i in range(n_layers):
+    for i in range(_N_LAYERS):
         cpu_self[f"past_key_self_{i}"] = np.zeros(
-            (1, _n_heads, 0, _head_dim), dtype=dtype
+            (1, _N_HEADS, 0, _HEAD_DIM), dtype=dtype
         )
         cpu_self[f"past_value_self_{i}"] = np.zeros(
-            (1, _n_heads, 0, _head_dim), dtype=dtype
+            (1, _N_HEADS, 0, _HEAD_DIM), dtype=dtype
         )
     cpu_pref = dict(
         zip(
@@ -501,20 +492,20 @@ def test_decoder_decode_correctness(variant_precision):
             cpu_dec.run(
                 None,
                 {
-                    "input_ids": np.array([start_tokens], np.int32),
+                    "input_ids": np.array([_START_TOKENS], np.int32),
                     **cpu_self,
                     **cross,
                 },
             ),
         )
     )
-    for i in range(n_layers):
+    for i in range(_N_LAYERS):
         cpu_self[f"past_key_self_{i}"] = cpu_pref[f"present_key_self_{i}"]
         cpu_self[f"past_value_self_{i}"] = cpu_pref[f"present_value_self_{i}"]
 
-    # ── GPU: static shared-buffer prefill ───────────────────────────────────
-    mz_self = _zeroed_self_past(dtype, variant=var)
-    s0 = len(start_tokens)
+    # ── GPU: static 448-slot shared-buffer prefill ──────────────────────────
+    mz_self = _zeroed_self_past(dtype)
+    s0 = len(_START_TOKENS)
     mz_pref_dec = _morphizen_session("decoder_fixed_prefill.onnx", model_dir)
     mz_pref_out = [o.name for o in mz_pref_dec.get_outputs()]
     mz_pref = dict(
@@ -523,7 +514,7 @@ def test_decoder_decode_correctness(variant_precision):
             mz_pref_dec.run(
                 None,
                 {
-                    "input_ids": np.array([start_tokens], np.int64),
+                    "input_ids": np.array([_START_TOKENS], np.int64),
                     "past_sequence_length": np.array([s0 - 1], np.int32),
                     "position_ids": np.arange(s0, dtype=np.int64),
                     **mz_self,
@@ -532,7 +523,7 @@ def test_decoder_decode_correctness(variant_precision):
             ),
         )
     )
-    for i in range(n_layers):
+    for i in range(_N_LAYERS):
         mz_self[f"past_key_self_{i}"] = mz_pref[f"present_key_self_{i}"]
         mz_self[f"past_value_self_{i}"] = mz_pref[f"present_value_self_{i}"]
 
@@ -545,7 +536,7 @@ def test_decoder_decode_correctness(variant_precision):
     cosines = []
     next_tok = int(np.argmax(np.asarray(cpu_pref["logits"][0, -1, :], np.float32)))
     for _step in range(n_steps):
-        if next_tok == eot or total >= slots:
+        if next_tok == _EOT or total >= _SELF_KV_SLOTS:
             break
 
         # CPU dynamic ref: int32 ids, growing past, no position_ids/seqlens_k.
@@ -583,7 +574,7 @@ def test_decoder_decode_correctness(variant_precision):
             _cosine(cpu_step["logits"][0, -1, :], mz_step["logits"][0, -1, :])
         )
 
-        for i in range(n_layers):
+        for i in range(_N_LAYERS):
             cpu_self[f"past_key_self_{i}"] = cpu_step[f"present_key_self_{i}"]
             cpu_self[f"past_value_self_{i}"] = cpu_step[f"present_value_self_{i}"]
             mz_self[f"past_key_self_{i}"] = mz_step[f"present_key_self_{i}"]
@@ -597,7 +588,7 @@ def test_decoder_decode_correctness(variant_precision):
         f"\n[decode/{prec}] {len(cosines)} steps, per-step logits cosine (GPU vs "
         f"CPU) min={lo:.6f} max={hi:.6f} mean={np.mean(cosines):.6f}"
     )
-    thresh = _DEC_COS_BY_PREC[prec_kind]
+    thresh = _DEC_COS_BY_PREC[prec]
     assert lo >= thresh, (
         f"decode/{prec} per-step GPU-vs-CPU cosine dropped to {lo} < {thresh}"
     )
@@ -607,26 +598,24 @@ def test_decoder_decode_correctness(variant_precision):
 
 
 def _greedy_decode_cpu(
-    audio_fp, max_length=200, model_dir=_MODEL_DIR, dtype=np.float32, variant=None
+    audio_fp, max_length=200, model_dir=_MODEL_DIR, dtype=np.float32
 ):
     """CPU greedy reference — thin wrapper over the shared harness.
 
     Logic lives in ``whisper_infer.greedy_decode_cpu``; here we just bind the
     pytest-skip-aware ``_cpu_session`` factory. ``model_dir`` / ``dtype`` select
-    the fp32 (default) or fp16 model; ``variant`` (None → large-v3) selects the
-    per-variant layer/head/token params.
+    the fp32 (default) or fp16 model.
     """
     return whisper_infer.greedy_decode_cpu(
         lambda name: _cpu_session(name, model_dir),
         audio_fp,
         max_length=max_length,
         dtype=dtype,
-        variant=variant,
     )
 
 
 def _greedy_decode_morphizen(
-    audio_fp, max_length=200, model_dir=_MODEL_DIR, dtype=np.float32, variant=None
+    audio_fp, max_length=200, model_dir=_MODEL_DIR, dtype=np.float32
 ):
     """GPU greedy decode — thin wrapper over the shared harness.
 
@@ -634,15 +623,13 @@ def _greedy_decode_morphizen(
     convention, the three correctness fixes) lives in
     ``whisper_infer.greedy_decode_morphizen``; here we bind the pytest-skip-aware
     ``_morphizen_session`` factory so a missing EP skips cleanly. ``model_dir`` /
-    ``dtype`` select the fp32 (default) or fp16 model; ``variant`` (None →
-    large-v3) selects the per-variant layer/head/token params.
+    ``dtype`` select the fp32 (default) or fp16 model.
     """
     return whisper_infer.greedy_decode_morphizen(
         lambda name: _morphizen_session(name, model_dir),
         audio_fp,
         max_length=max_length,
         dtype=dtype,
-        variant=variant,
     )
 
 
@@ -804,10 +791,10 @@ def _greedy_decode_morphizen_iobinding(
     return tokens
 
 
-def test_e2e_transcription_greedy(variant_precision, capfd):
-    """GPU greedy transcription of jfk.wav == CPU quote, per (variant, precision).
+def test_e2e_transcription_greedy(precision, capfd):
+    """GPU greedy transcription of jfk.wav == CPU quote, per precision.
 
-    Runs fp16 across all variants + fp32 large-v3 via ``variant_precision``. THE
+    Runs for BOTH fp16 (default) and fp32 via the ``precision`` fixture. THE
     HEADLINE: with conv1d + gqa + gemm + layernorm all dual-dtype, the encoder +
     decoder GPU-dispatch end-to-end and produce the correct, argmax-stable JFK
     quote VERBATIM. fp32 is not lossy on the 51866-wide lm_head; fp16 keeps
@@ -830,32 +817,17 @@ def test_e2e_transcription_greedy(variant_precision, capfd):
     harness feeds past_sequence_length = (past_tokens + S) - 1. position_ids is
     fed separately = [real_past .. real_past + S - 1].
     """
-    model_dir, var, dtype, prec = variant_precision
-    audio = make_whisper_inputs(_AUDIO, var.cfg)["audio_features"].astype(dtype)
+    model_dir, dtype, prec = precision
+    audio = make_whisper_inputs(_AUDIO, _CFG)["audio_features"].astype(dtype)
 
-    cpu_tokens = _greedy_decode_cpu(
-        audio, model_dir=model_dir, dtype=dtype, variant=var
-    )
-    cpu_text = _decode_text(cpu_tokens, tokenizer_id=var.hf_model_id, eot=var.eot)
+    cpu_tokens = _greedy_decode_cpu(audio, model_dir=model_dir, dtype=dtype)
+    cpu_text = _decode_text(cpu_tokens)
     gc.collect()
 
-    # GPU: cache sessions so the compile/warmup run and the timed PERF run reuse
-    # the SAME compiled sessions (each MorphiZen session compiles its ONNX at
-    # creation; the cache makes the timed run steady-state, not cold).
-    _gpu_cache = {}
-
-    def gpu_factory(name):
-        if name not in _gpu_cache:
-            _gpu_cache[name] = _morphizen_session(name, model_dir)
-        return _gpu_cache[name]
-
-    # First run: compiles (JIT) + proves GPU dispatch; also warms the sessions.
     capfd.readouterr()
-    mz_tokens = whisper_infer.greedy_decode_morphizen(
-        gpu_factory, audio, dtype=dtype, variant=var
-    )
+    mz_tokens = _greedy_decode_morphizen(audio, model_dir=model_dir, dtype=dtype)
     stderr_text = "".join(capfd.readouterr())
-    mz_text = _decode_text(mz_tokens, tokenizer_id=var.hf_model_id, eot=var.eot)
+    mz_text = _decode_text(mz_tokens)
 
     print(f"\n[e2e/{prec}] CPU : {cpu_text!r}")
     print(f"[e2e/{prec}] GPU : {mz_text!r}")
@@ -870,24 +842,6 @@ def test_e2e_transcription_greedy(variant_precision, capfd):
     # argmax-lossless (fp32 lm_head in both), so GPU == CPU token-for-token.
     assert mz_tokens == cpu_tokens, (
         f"{prec} transcription token mismatch:\n  cpu: {cpu_text!r}\n  mz : {mz_text!r}"
-    )
-
-    # Steady-state perf on the cached (already-compiled) sessions — emit a per-
-    # (variant, precision) PERF line so CI records performance next to accuracy.
-    # decode tok/s = decode_steps / decode_loop_wall; RTF = total compute / audio.
-    # (Standalone equivalent: scripts/transcribe_whisper.py --variant <name>.)
-    timings = {}
-    whisper_infer.greedy_decode_morphizen(
-        gpu_factory, audio, dtype=dtype, variant=var, timings=timings
-    )
-    audio_s = whisper_infer.audio_duration_s(_AUDIO)
-    enc, prefill = timings["enc_ms"], timings["prefill_ms"]
-    decode, n = timings["decode_ms"], timings["n_decode_steps"]
-    tps = n / (decode / 1e3) if decode > 0 else 0.0
-    rtf = ((enc + prefill + decode) / 1e3) / audio_s if audio_s > 0 else 0.0
-    print(
-        f"[e2e/{prec}] PERF: encoder={enc:.0f}ms prefill={prefill:.0f}ms "
-        f"decode={tps:.1f}tok/s ({n} steps) RTF={rtf:.3f}"
     )
 
 
@@ -1116,6 +1070,55 @@ def _bench_backend(run_one):
     decode_tps = float(np.mean(tps_vals)) if tps_vals else 0.0
     n_steps = keep[-1][4]
     return tokens, enc_ms, prefill_ms, decode_tps, n_steps
+
+
+class _CaptureFD:
+    """Capture FD-level stderr+stdout into a temp file for a bounded `with` block.
+
+    Used ONLY around MorphiZen session creation + one warmup decode, to grab the
+    EP's compile-failure / [REAL] wrap_* signal for the silent-CPU-fallback
+    tripwire — then it is torn down so the TIMED decode loop runs at full FD
+    speed.
+
+    Why not pytest's ``capfd`` fixture: merely DECLARING ``capfd`` on a test
+    installs FD-level capture for the test's entire lifetime, and even
+    ``capfd.disabled()`` (suspend/resume) leaves residual overhead — measured
+    ~41 tok/s for fp16 vs ~48 when the test never touches capfd at all (verified
+    by an isolated in-pytest bench). This helper instead does the FD redirect
+    ourselves, scoped to exactly the compile window, so the timed region is
+    byte-for-byte the same FD state as scripts/transcribe_whisper.py → the
+    in-suite number matches the isolated ~48 tok/s.
+    """
+
+    def __init__(self):
+        self._tmp = None
+        self._saved_out = None
+        self._saved_err = None
+        self.text = ""
+
+    def __enter__(self):
+        import tempfile
+
+        sys.stdout.flush()
+        sys.stderr.flush()
+        self._tmp = tempfile.TemporaryFile(mode="w+b")
+        self._saved_out = os.dup(1)
+        self._saved_err = os.dup(2)
+        os.dup2(self._tmp.fileno(), 1)
+        os.dup2(self._tmp.fileno(), 2)
+        return self
+
+    def __exit__(self, *exc):
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.dup2(self._saved_out, 1)
+        os.dup2(self._saved_err, 2)
+        os.close(self._saved_out)
+        os.close(self._saved_err)
+        self._tmp.seek(0)
+        self.text = self._tmp.read().decode("utf-8", errors="replace")
+        self._tmp.close()
+        return False  # do not suppress exceptions
 
 
 def _perf_one_precision(audio, precision, model_dir, dtype, results):
@@ -1409,22 +1412,12 @@ _SAMPLE_IDS = [f"sample_{i}.wav" for i in range(5)]
 
 @pytest.mark.parametrize("clip", _SAMPLE_IDS)
 def test_librispeech_gpu_vs_cpu(librispeech, default_precision, capfd, clip):
-    """GPU greedy == CPU greedy VERBATIM for each LibriSpeech clip (large-v3).
+    """MorphiZen GPU greedy == CPU greedy VERBATIM for each LibriSpeech clip.
 
-    The strong faithfulness bar on diverse real speech. Runs at the default
-    precision (fp16 if built, else fp32) — a single leg, so the 5-clip sweep
-    doesn't double.
-
-    LARGE-V3 ONLY — by design. Exact token-equality is reliable only on a
-    high-confidence model: on the small variants, a low-confidence decode step can
-    be a near-tie between two tokens (e.g. an optional comma), and true-fp16 GPU vs
-    ORT-CPU's fp16-in-fp32 rounding flip the argmax — a one-token divergence that is
-    NOT an EP bug (the per-step logits cosine is ~0.999999). So small-variant EP
-    correctness is checked at the logits level by `test_decoder_decode_correctness`
-    (cosine, all variants), and exact whole-sequence token-equality is asserted
-    where it is meaningful: large-v3 here, and the confident jfk clip in
-    `test_e2e_transcription_greedy` (all variants). Same model-confidence rationale
-    as `test_librispeech_wer`.
+    The strong faithfulness bar: independent of the audio content, the EP's greedy
+    transcription must reproduce the CPU greedy transcription exactly. Runs at the
+    default precision (fp16 if built, else fp32) — a SINGLE leg, not the fp16×fp32
+    matrix, so the 5-clip GPU sweep does not double in wall-clock.
     """
     model_dir, dtype, prec = default_precision
     refs, data_dir = librispeech
@@ -1465,18 +1458,6 @@ def test_librispeech_wer(librispeech, default_precision, capfd, clip):
     always printed so a real regression (e.g. 50 % WER) is distinguishable from
     normalization noise (~10 %). Runs at the default precision (fp16 if built,
     else fp32).
-
-    LARGE-V3 ONLY — intentionally NOT parametrized over variants. WER is measured
-    against the GROUND-TRUTH transcript, so it is a MODEL-QUALITY metric. The small
-    variants (tiny/base/small) genuinely transcribe worse — a `_WER_THRESHOLD`
-    tuned for large-v3 would fail on them, and a per-variant relaxed threshold
-    would be arbitrary and brittle. A small model's WER reflects the MODEL, not the
-    EP, so it adds no EP-correctness signal; per-variant EP correctness is covered
-    at the logits level by `test_decoder_decode_correctness` (cosine, all variants)
-    + the jfk e2e token-equality. Keeping WER on large-v3 keeps it a meaningful
-    accuracy gate. (The other two large-v3-only suites — `*_gpu_vs_cpu` /
-    `long_30s` — are large-v3-only for the related reason that exact token-equality
-    is unreliable on low-confidence small models; see their docstrings.)
     """
     model_dir, dtype, prec = default_precision
     refs, data_dir = librispeech
@@ -1502,17 +1483,12 @@ def test_librispeech_wer(librispeech, default_precision, capfd, clip):
 def test_long_30s_gpu_vs_cpu(librispeech, default_precision, capfd):
     """Long (~24 s) concatenated clip: GPU greedy == CPU greedy all the way down.
 
-    THE KEY DEEP-DECODE COVERAGE. ~24 s of audio drives the decode loop a few
-    hundred tokens deep toward the 448-slot self-KV cap, so this stresses whether
-    the decode stays correct late in the sequence (KV buffer filling, position_ids
+    THE KEY NEW COVERAGE. ~24 s of audio drives the decode loop a few hundred
+    tokens deep toward the 448-slot self-KV cap, so this stresses whether the
+    decode stays correct late in the sequence (KV buffer filling, position_ids
     advancing). Asserts verbatim GPU==CPU; also reports WER vs the concatenated
-    reference (informational — concatenation seams can cause minor errors). Runs at
-    the default precision (fp16 if built, else fp32).
-
-    LARGE-V3 ONLY — same reason as `test_librispeech_gpu_vs_cpu`: exact
-    token-equality is reliable only on a high-confidence model. Small variants'
-    deep-decode correctness is covered at the logits level by
-    `test_decoder_decode_correctness` (cosine, all variants).
+    reference (lenient — concatenation seams can cause minor errors). Runs at the
+    default precision (fp16 if built, else fp32).
     """
     model_dir, dtype, prec = default_precision
     refs, data_dir = librispeech
@@ -1533,7 +1509,7 @@ def test_long_30s_gpu_vs_cpu(librispeech, default_precision, capfd):
     gpu_text = _decode_text(gpu_tokens)
     _assert_compiled_on_gpu(stderr_text)
 
-    # Decode-step count = tokens beyond the forced-start tokens.
+    # Decode-step count = tokens beyond the 4 forced-start tokens.
     n_decode = len(gpu_tokens) - len(_START_TOKENS)
     print(f"\n[long/{prec}] decode tokens (GPU) = {n_decode}")
     print(f"[long/{prec}] CPU : {cpu_text!r}")
