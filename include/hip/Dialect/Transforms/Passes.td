@@ -765,49 +765,4 @@ def ResolveExternConstantsPass
   ];
 }
 
-def SplitDuplicateDpsInitsPass
-    : Pass<"hip-split-duplicate-dps-inits", "mlir::func::FuncOp"> {
-  let summary = "De-alias DPS init operands of an op that CSE merged onto one "
-                "tensor.empty";
-  let description = [{
-    `tensor.empty` is `Pure`, so CSE deduplicates same-typed empties. That is
-    harmless for single-use scratch, but WRONG when one merged empty feeds two
-    or more *init* (DPS-out) operands of the SAME op: bufferization then aliases
-    those results into one buffer, and an op whose kernel reads back its own
-    outputs -- e.g. `hip.gqa` reading K from `present_key` and V from
-    `present_value` -- consumes the same bytes for both and silently
-    miscompiles. One-Shot Bufferize separates such inits only when the tied
-    results are live; for dead scratch results it keeps them merged.
-
-    For each `DestinationStyleOpInterface` op, this pass re-points every init
-    operand after the first occurrence of a shared `tensor.empty` at its own
-    fresh `bufferization.alloc_tensor` (CSE-immune, documented to not alias any
-    other buffer). Only `tensor.empty` seeds are rewritten -- their contents are
-    undefined, so the substitution is value-preserving; non-empty inits, which
-    may carry contents the op reads, are left untouched. Single-use scratch
-    empties are unaffected and stay CSE-mergeable, so pool packing is preserved.
-
-    This is the surgical counterpart to running `empty-tensor-to-alloc-tensor`
-    over every empty (the upstream blanket approach), which also blocks benign
-    merges and inflates the buffer / pool-domain count on activation-heavy
-    graphs. Runs after CSE (which creates the duplication) and before
-    one-shot-bufferize (which would otherwise lock in the shared buffer).
-
-    Before (post-CSE; one %e feeds both present_* inits):
-
-        %e = tensor.empty() : tensor<AxBxCxDxf16>
-        hip.gqa(...) outs(%out, %e, %e : ...)   // present_key aliases present_value
-
-    After:
-
-        %e  = tensor.empty()               : tensor<AxBxCxDxf16>
-        %e2 = bufferization.alloc_tensor() : tensor<AxBxCxDxf16>
-        hip.gqa(...) outs(%out, %e, %e2 : ...)  // distinct buffers
-  }];
-  let dependentDialects = [
-    "mlir::bufferization::BufferizationDialect",
-    "mlir::tensor::TensorDialect"
-  ];
-}
-
 #endif // HIP_PASSES

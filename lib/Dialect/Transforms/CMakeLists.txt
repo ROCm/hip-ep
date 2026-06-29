@@ -23,7 +23,6 @@ add_library(HipDialectTransforms STATIC
   RelaxMultiDynExpandShape.cpp
   ResolveExternConstants.cpp
   ResolveTensorDims.cpp
-  SplitDuplicateDpsInits.cpp
   UseOutputAllocator.cpp
 )
 
