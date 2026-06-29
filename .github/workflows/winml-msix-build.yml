@@ -20,7 +20,7 @@ on:
 
 jobs:
   build-msix:
-    runs-on: StrixHalo
+    runs-on: gfx1151
     env:
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
       # MSIX packaging tool (ships its own x64\makeappx.exe + signtool.exe).
@@ -62,27 +62,20 @@ jobs:
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
           Expand-Archive -Path ".github\winml-msix\rocm_7.11_bin.zip" -DestinationPath $dist -Force
 
-      - name: Build signed MSIX
+      - name: Download MSIX packaging tool
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $bin     = "$PWD\msix-gpu-test-package\bin"
-          $rocmBin = "$PWD\rocm-bin"
-          if (-not (Test-Path $bin))     { throw "gpu-test-package bin not found: $bin" }
-          if (-not (Test-Path $rocmBin)) { throw "rocm-bin not found: $rocmBin" }
-
-          # --- obtain packaging tool (ships its own x64\makeappx.exe + signtool.exe) ---
+          # tool ships its own x64\makeappx.exe + signtool.exe
           $toolDir = "$PWD\msix-tool"
           curl.exe -fsSL -o msix_packaging_script.zip "$env:TOOL_URL"
           if ($LASTEXITCODE -ne 0 -or -not (Test-Path msix_packaging_script.zip)) {
             throw "tool download failed (need AMD network access to $env:TOOL_URL)"
           }
           Expand-Archive -Path msix_packaging_script.zip -DestinationPath $toolDir -Force
-          $buildScriptItem = Get-ChildItem $toolDir -Recurse -Filter "Build-MSIXPackage.ps1" | Select-Object -First 1
-          if (-not $buildScriptItem) { throw "Build-MSIXPackage.ps1 not found after extracting tool zip" }
-          $msixScriptDir = $buildScriptItem.Directory.FullName
-          $buildScript   = $buildScriptItem.FullName
+          $buildScript = (Get-ChildItem $toolDir -Recurse -Filter "Build-MSIXPackage.ps1" | Select-Object -First 1).FullName
+          if (-not $buildScript) { throw "Build-MSIXPackage.ps1 not found after extracting tool zip" }
 
           # The stock tool copies the ExecutionProvider source with `Get-ChildItem -File`
           # (top-level only), dropping data subdirs (rocblas\library, hipblaslt\library).
@@ -95,8 +88,16 @@ jobs:
             Write-Host "patched tool: ExecutionProvider copy is now recursive (keeps data dirs)"
           }
 
-          # --- stage EP chain (from gpu-test-package/bin) + ROCm runtime (vendored) ---
-          $stage = "$PWD\msix-stage"
+      - name: Stage EP chain + ROCm runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $bin     = "$PWD\msix-gpu-test-package\bin"
+          $rocmBin = "$PWD\rocm-bin"
+          $stage   = "$PWD\msix-stage"
+          if (-not (Test-Path $bin))     { throw "gpu-test-package bin not found: $bin" }
+          if (-not (Test-Path $rocmBin)) { throw "rocm-bin not found: $rocmBin" }
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
           $epPatterns = @("amdgpu-ep.dll","hip-backend.dll","hipgpu.dll","hip-compiler.dll","custom_kernels_*.dll")
@@ -122,7 +123,14 @@ jobs:
           $mb = [math]::Round((($allFiles | Measure-Object Length -Sum).Sum / 1MB), 1)
           Write-Host "staged $($allFiles.Count) files, $mb MB -> $stage"
 
-          # --- single AMD GPU EP extension manifest (back up original once) ---
+      - name: Write AMD GPU EP manifest
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msixScriptDir = (Get-ChildItem "$PWD\msix-tool" -Recurse -Filter "Build-MSIXPackage.ps1" | Select-Object -First 1).Directory.FullName
+          if (-not $msixScriptDir) { throw "msix-tool not extracted (run the download step first)" }
+
+          # single AMD GPU EP extension manifest (back up original once)
           $tmpl = Join-Path $msixScriptDir "AppxManifestTemplate.xml"
           $bak  = "$tmpl.orig"
           if ((Test-Path $tmpl) -and -not (Test-Path $bak)) { Copy-Item $tmpl $bak -Force }
@@ -172,8 +180,18 @@ jobs:
           '@ | Set-Content $tmpl -Encoding UTF8
           Write-Host "wrote single AMD GPU EP extension template"
 
-          # --- pack + sign (self-signed; no -Install so no admin / cert-store needed) ---
-          $out = "$PWD\msix-out"
+      - name: Pack and sign MSIX
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $buildScriptItem = Get-ChildItem "$PWD\msix-tool" -Recurse -Filter "Build-MSIXPackage.ps1" | Select-Object -First 1
+          if (-not $buildScriptItem) { throw "msix-tool not extracted (run the download step first)" }
+          $msixScriptDir = $buildScriptItem.Directory.FullName
+          $buildScript   = $buildScriptItem.FullName
+
+          # pack + sign (self-signed; no -Install so no admin / cert-store needed)
+          $stage = "$PWD\msix-stage"
+          $out   = "$PWD\msix-out"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
           $params = @{
             ProviderName          = $env:PROVIDER_NAME
