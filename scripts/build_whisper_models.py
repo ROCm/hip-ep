@@ -5,6 +5,13 @@
 #
 """Standalone builder for Whisper variant ONNX models (fp32 + fp16).
 
+PRIMARY SOURCE NOTE: the tests + demo + transcribe scripts now AUTO-DOWNLOAD every
+variant from its AMD HF repo (amd/whisper-<variant>-onnx-fp16; large-v3 also has
+fp32). This builder is the REPRODUCIBILITY BACKUP — use it to rebuild a bundle
+from pinned upstream weights when you can't/don't want to pull the AMD snapshot
+(e.g. offline, or to verify the AMD artifact). A local build pre-populates
+models/whisper-<variant>-onnx[-fp16] so the download is skipped.
+
 Both precisions are produced by the SAME pinned OGA DirectML model builder, so
 pinning the builder deps + the HF model revision makes both models reproducible.
 This REPLACES the old external fp32 download (tonythethompson/whisper-large-v3-genai),
