@@ -20,7 +20,7 @@ on:
 
 jobs:
   build-msix:
-    runs-on: [self-hosted, windows, gfx1151]
+    runs-on: [windows, gfx1151]
     env:
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
       PROVIDER_NAME: MIGraphXExecutionProvider
