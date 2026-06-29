@@ -122,7 +122,7 @@ def main() -> int:
         )
         return 1
 
-    _banner(f"Whisper demo — {args.variant} ({prec}) on the AMD GPU")
+    _banner(f"Whisper demo - {args.variant} ({prec}) on the AMD GPU")
 
     # --- Audio -------------------------------------------------------------
     audio_path = pathlib.Path(args.audio)
@@ -215,7 +215,7 @@ def _print_metrics(t, audio_s, wall_s, label):
     total = enc + prefill + decode
     tps = n / (decode / 1e3) if decode > 0 else 0.0
     rtf = wall_s / audio_s if audio_s > 0 else 0.0
-    _banner(f"Performance — {label}")
+    _banner(f"Performance - {label}")
     print(f"  audio length      : {audio_s:9.2f} s")
     print(f"  encoder           : {enc:9.1f} ms")
     print(f"  prefill (TTFT)    : {enc + prefill:9.1f} ms")
