@@ -24,11 +24,11 @@ Prerequisites (same as the tests — see docs/whisper_quick_start.md):
     loads hip-backend.dll → hipgpu.dll) in the EP bin dir
   * THEROCK_DIST + install/{therock,dist}/bin are on PATH (so the EP can link the
     model DLL). Without them the EP raises rather than silently falling back.
-  * The Whisper model must already be BUILT LOCALLY first:
-        python scripts/build_whisper_models.py
-    This script only PREPARES (surgery + fix_shapes) and transcribes — it does
-    NOT download or build the model. If the raw bundle is absent it exits with a
-    build hint rather than a raw traceback.
+  * The Whisper model auto-downloads from its AMD HF repo on first use
+    (amd/whisper-<variant>-onnx-fp16; the repos are gated — `hf auth login`).
+    A local `python scripts/build_whisper_models.py` is the reproducibility
+    backup. This script then PREPARES (surgery + fix_shapes, a no-op when the
+    downloaded snapshot already ships the fixed files) and transcribes.
 """
 
 import argparse
@@ -69,10 +69,10 @@ def main() -> int:
         "--variant",
         default="large-v3",
         choices=sorted(WHISPER_VARIANTS),
-        help="Whisper variant (default large-v3). The small sizes "
-        "(tiny/base/small/medium) + turbo are local OGA builds "
-        "(python scripts/build_whisper_models.py --variant <name>); large-v3 "
-        "auto-downloads. All share one decoder surgery + greedy harness.",
+        help="Whisper variant (default large-v3). Every variant auto-downloads "
+        "from its AMD HF repo (amd/whisper-<variant>-onnx-fp16); a local "
+        "python scripts/build_whisper_models.py build is the backup. All share "
+        "one decoder surgery + greedy harness.",
     )
     # Backend selection. Default (no flag) = GPU only. The two flags are mutually
     # exclusive: --cpu runs ONLY the CPU EP; --compare runs BOTH and prints a

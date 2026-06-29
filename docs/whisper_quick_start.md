@@ -20,16 +20,26 @@ is argmax-lossless.
 The EP supports these Whisper variants (all share one architecture + decoder
 surgery; only shape params, n_mels, vocab, and special-token IDs differ):
 
-| Variant        | n_mels | enc / dec layers | heads | vocab | source                        |
-|----------------|--------|------------------|-------|-------|-------------------------------|
-| large-v3       | 128    | 32 / 32          | 20    | 51866 | AMD HF (auto-download)        |
-| large-v3-turbo | 128    | 32 / 4           | 20    | 51866 | local OGA build               |
-| medium         | 80     | 24 / 24          | 16    | 51865 | local OGA build               |
-| small          | 80     | 12 / 12          | 12    | 51865 | local OGA build               |
-| base           | 80     | 6 / 6            | 8     | 51865 | local OGA build               |
-| tiny           | 80     | 4 / 4            | 6     | 51865 | local OGA build               |
+| Variant        | n_mels | enc / dec layers | heads | vocab | source (HF repo)                                    |
+|----------------|--------|------------------|-------|-------|-----------------------------------------------------|
+| large-v3       | 128    | 32 / 32          | 20    | 51866 | `amd/whisper-large-v3-onnx-fp16` (+ `-fp32`)        |
+| large-v3-turbo | 128    | 32 / 4           | 20    | 51866 | `amd/whisper-large-v3-turbo-onnx-fp16`              |
+| medium         | 80     | 24 / 24          | 16    | 51865 | `amd/whisper-medium-onnx-fp16`                      |
+| small          | 80     | 12 / 12          | 12    | 51865 | `amd/whisper-small-onnx-fp16`                       |
+| base           | 80     | 6 / 6            | 8     | 51865 | `amd/whisper-base-onnx-fp16`                        |
+| tiny           | 80     | 4 / 4            | 6     | 51865 | `amd/whisper-tiny-onnx-fp16`                        |
+
+Every variant **auto-downloads** from its AMD HF repo on first use (the repos are
+gated — run `hf auth login` once). A local build
+(`python scripts/build_whisper_models.py`, §3b) is the reproducibility backup.
+fp16 exists for every variant; only large-v3 additionally ships fp32 (for the
+cross-backend fp32-vs-fp32 benchmark).
 
 `head_dim` is 64 and the decoder context is 448 for every variant.
+
+> **Just want to run it?** See [whisper_demo.md](whisper_demo.md) for the
+> one-command demo (`python scripts/whisper_demo.py`) and a minimal
+> "run Whisper from Python" snippet.
 
 ---
 
@@ -248,29 +258,29 @@ $env:Path = "$env:THEROCK_DIST\bin;$ROOT\local\bin;$env:Path"
 
 ## 3a. Get + prepare the model
 
-**Sourcing differs by variant** — only large-v3 is published as a prebuilt ONNX:
+**Every variant is published as a prebuilt ONNX on AMD HF and auto-downloads:**
 
 | Variant | Source | Precisions |
 |---|---|---|
-| large-v3 | auto-download (AMD HF) | fp16 + fp32 |
-| large-v3-turbo, tiny, base, small, medium | local OGA build (§3b) | fp16 |
+| large-v3 | auto-download `amd/whisper-large-v3-onnx-{fp16,fp32}` | fp16 + fp32 |
+| large-v3-turbo, tiny, base, small, medium | auto-download `amd/whisper-<variant>-onnx-fp16` | fp16 |
 
-**You normally don't run anything here** — the tests (§4) and
-`transcribe_whisper.py` (§5) prepare the model on demand. To prepare ahead of time,
-run the consume-only setup wrapper for a variant. It applies the EP surgery
+**You normally don't run anything here** — the tests (§4), `whisper_demo.py`, and
+`transcribe_whisper.py` (§5) prepare the model on demand. The AMD repos are gated,
+so run `hf auth login` once. To prepare ahead of time, run the consume-only setup
+wrapper for a variant. It downloads the raw bundle from HF (and the pre-surgered /
+fixed files AMD ships alongside it), then applies the EP surgery
 (`past_sequence_length` input + position-/token-embed fixes for the static
-shared-buffer KV cache) + `fix_shapes`; for large-v3 it first downloads the raw
-bundle from HF (~3–6 GB/precision), for the other variants it consumes the bundle
-you built in §3b. Idempotent.
+shared-buffer KV cache) + `fix_shapes` — a no-op when the downloaded snapshot
+already carries the fixed files. Idempotent.
 
 ```
-python scripts/setup_whisper_model.py --variant large-v3          # fp16 (default), auto-downloads
-python scripts/setup_whisper_model.py --variant large-v3 --fp32   # fp32, auto-downloads
-python scripts/setup_whisper_model.py --variant tiny              # fp16; build it first (§3b)
+python scripts/setup_whisper_model.py --variant large-v3          # fp16 (default)
+python scripts/setup_whisper_model.py --variant large-v3 --fp32   # fp32 (large-v3 only)
+python scripts/setup_whisper_model.py --variant tiny              # fp16
 ```
 
-`--variant` defaults to `large-v3`. Prepare all six at once (after building the
-five local ones, §3b):
+`--variant` defaults to `large-v3`. Prepare all six at once:
 
 ```bash
 for v in large-v3 large-v3-turbo tiny base small medium; do
@@ -290,13 +300,15 @@ Each prepared variant dir (`models/whisper-<variant>-onnx[-fp16]/`) holds:
 
 ---
 
-## 3b. Build the variants locally
+## 3b. (Optional) Build the variants locally — reproducibility backup
 
-The five non-large-v3 variants (turbo + tiny/base/small/medium) are **not
-published** — build them with the pinned OGA DirectML model builder (runs in an
-isolated venv from `openai/whisper-<size>` at a pinned HF revision; the builder
-also patches OGA's asymmetric-layer bug so turbo's 32-enc/4-dec model builds).
-Default precision is **fp16** (all the per-variant tests run fp16):
+All variants auto-download from AMD HF (§3a), so you normally **skip this
+section**. Build locally only when you can't/don't want to pull the AMD snapshot
+(offline, gated-repo access issues) or to verify/reproduce an artifact from pinned
+upstream weights. The pinned OGA DirectML model builder runs in an isolated venv
+from `openai/whisper-<size>` at a pinned HF revision (and patches OGA's
+asymmetric-layer bug so turbo's 32-enc/4-dec model builds). Default precision is
+**fp16**:
 
 ```
 python scripts/build_whisper_models.py                          # default set: turbo + tiny/base/small/medium (fp16)
@@ -304,7 +316,10 @@ python scripts/build_whisper_models.py --variant tiny,base      # specific varia
 python scripts/build_whisper_models.py --list                   # show variant -> output dir
 ```
 
-Then prepare each (surgery + `fix_shapes`, §3):
+A local build writes the same `models/whisper-<variant>-onnx[-fp16]/` dirs the
+download targets, so a later `setup_whisper_model.py` / test / demo sees the
+bundle present and skips the download. Then prepare each (surgery + `fix_shapes`,
+§3):
 
 ```bash
 for v in large-v3-turbo tiny base small medium; do
@@ -312,11 +327,8 @@ for v in large-v3-turbo tiny base small medium; do
 done
 ```
 
-large-v3 normally downloads (§3); to **reproduce it locally** instead (e.g. HF
-unreachable, or to rebuild the fp32 bundle the §6 benchmark needs), pass
-`--variant large-v3 --precision both`. The build writes the same
-`models/whisper-large-v3-onnx{,-fp16}/` dirs the download targets, so a later
-`setup_whisper_model.py` / test sees the bundle present and skips the download.
+To reproduce **large-v3 fp32** locally (the §6 cross-backend benchmark) pass
+`--variant large-v3 --precision both`.
 First build per variant downloads the HF *weights* + builds (~a few min each);
 idempotent after. No manual `onnxruntime-genai-directml` install is needed and the
 OGA fork is never shadowed — the builder runs in its own isolated venv (see §0).
@@ -636,7 +648,7 @@ EP comparison.
 | Transcription is garbage / a "GPU" run is suspiciously slow | Silent CPU fallback. Set the env (§2), clear the model cache (PowerShell `Remove-Item "$env:TEMP\morphizen_mlir_*"` / Git Bash `rm -f "$TEMP"/morphizen_mlir_*`), and re-run. Confirm GPU dispatch with `HIPDNN_EP_DEBUG=1` (look for `[REAL] wrap_*` lines on stderr). |
 | Changed a runtime `.cpp` / kernel, behavior didn't change | Cached model DLLs embed the old bitcode. Clear the cache after rebuilding (PowerShell `Remove-Item "$env:TEMP\morphizen_mlir_*"` / Git Bash `rm -f "$TEMP"/morphizen_mlir_*`). |
 | A test `skip`s with "audio unavailable" | The network can't reach github/HF for the test clips. Connect and re-run; the audio caches locally after the first fetch. |
-| Model setup fails / `Could not obtain the Whisper raw model` | The raw bundle download from `amd/whisper-large-v3-onnx-{fp16,fp32}` failed. If it's an auth / rate-limit error, run `hf auth login` and retry. If HF is unreachable, build the models locally instead (§3b: `python scripts/build_whisper_models.py`). |
+| Model setup fails / `Could not obtain the Whisper raw model` | The raw bundle download from `amd/whisper-<variant>-onnx-fp16` (the AMD repos are gated) failed. If it's an auth / rate-limit error, run `hf auth login` and retry. If HF is unreachable, build the models locally instead (§3b: `python scripts/build_whisper_models.py --variant <name>`). |
 | Every test `skip`s with "AMDGPU EP not found — run build.py first" | The tests can't locate the EP DLL. For an out-of-tree install (`$ROOT/local`), set `HIPEP_EP_BIN` (§2). Verify `amdgpu-ep.dll` (+ `hip-backend.dll` + `hipgpu.dll`) exist at `$ROOT/local/bin/`. |
 | EP registration fails (`requested API version [N] is not available`) / access violation on session create | The pip `onnxruntime` version ≠ the ORT the EP links (`cmake/deps.txt`). PyPI's `onnxruntime-directml` often lags the pinned tag, so `pip install` alone won't fix it — build a matching ORT wheel from source and install it (see §1b). |
 

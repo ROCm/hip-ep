@@ -194,10 +194,10 @@ def variant_precision(request):
 
     Yields ``(model_dir, variant, np_dtype, label)``:
       * fp16 legs (one per variant) → the OGA DML bundle (body fp16 + fp32
-        lm_head). large-v3 auto-downloads from ``amd/whisper-large-v3-onnx-fp16``;
-        the others are local OGA builds (``python scripts/build_whisper_models.py
-        --variant <name>``). A variant whose fp16 bundle can be neither built nor
-        found SKIPS cleanly so the rest still run.
+        lm_head). EVERY variant auto-downloads from its AMD HF repo
+        ``amd/whisper-{name}-onnx-fp16`` (a local ``scripts/build_whisper_models.py``
+        build is the backup). A variant whose fp16 bundle can be neither
+        downloaded nor found SKIPS cleanly so the rest still run.
       * fp32 leg (large-v3 only) → the native-fp32 bundle (set up by the autouse
         ``_setup`` fixture; downloaded from ``amd/whisper-large-v3-onnx-fp32``).
 
