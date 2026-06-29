@@ -101,57 +101,28 @@ see §1b, which is mandatory before the EP will load.
 ## 1. Build the EP (one-time)
 
 From the repo root. Choose a **short** `$ROOT` (see the MAX_PATH note above) and
-route the build trees + install prefixes through it. Run the LLVM step from an
-**x64 Native Tools Command Prompt for VS 2022** (Ninja needs the MSVC env).
+route both the build tree and the install prefix through it.
 
-### Step 1a — build LLVM into an `llvm-install` prefix (Tier-1, one-time)
-
-**Build the EP against a real `llvm-install` (Tier-1), not the from-source
-fallback.** On Windows a Tier-2 / FetchContent in-tree LLVM produces a `hipgpu.dll`
-whose in-process **bitcode** JIT crashes at session-create; CI builds and
-`find_package()`s a standalone `llvm-install`, and matching that locally is what
-makes the default bitcode path work. The recipe (pins live in
-`.github/workflows/windows-build.yml`):
+**Git Bash:**
 
 ```bash
 ROOT=/c/Users/$USER/work/hip-ep-workspace   # pick a SHORT path; see note above
-git clone --depth 1 -b llvmorg-22.1.0 https://github.com/llvm/llvm-project.git "$ROOT/llvm-src"
-cmake -G Ninja -S "$ROOT/llvm-src/llvm" -B "$ROOT/build-llvm" \
-  -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
-  -DLLVM_TARGETS_TO_BUILD=X86 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
-  -DCMAKE_INSTALL_PREFIX="$ROOT/llvm-install" -DLLVM_ENABLE_RTTI=ON \
-  -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF \
-  -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF \
-  -DLLVM_BUILD_TOOLS=ON -DLLVM_INSTALL_UTILS=ON \
-  -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-cmake --build "$ROOT/build-llvm" --target install
+python build.py --build_dir "$ROOT/build" --install_dir "$ROOT/local" --cmake_prefix_path "$ROOT/local"
 ```
 
-Multi-hour the first time; reusable forever after — point every `build.py` at it.
+**PowerShell:**
 
-### Step 1b — build the EP against `llvm-install`
-
-```bash
-python build.py --build_dir "$ROOT/build" --install_dir "$ROOT/local" --cmake_prefix_path "$ROOT/llvm-install"
+```powershell
+$ROOT = "C:\Users\$env:USERNAME\work\hip-ep-workspace"   # pick a SHORT path; see note above
+python build.py --build_dir "$ROOT\build" --install_dir "$ROOT\local" --cmake_prefix_path "$ROOT\local"
 ```
 
-PowerShell: same commands with `$ROOT = "C:\Users\$env:USERNAME\work\hip-ep-workspace"`
-and `\`-separated paths.
+This resolves the LLVM/MLIR/Protobuf/FlatBuffers + ONNX Runtime deps (auto-downloaded
+unless `--cmake_prefix_path` points at prebuilt ones) + the TheRock ROCm SDK,
+detects your GPU, and builds the compiler + MorphiZen EP into `$ROOT/local/`. See the
+main [Quick Start](quick_start.md) for details and troubleshooting.
 
-`build.py` resolves the remaining deps (Protobuf/FlatBuffers + ONNX Runtime
-auto-downloaded), the TheRock ROCm SDK, detects your GPU, and builds the compiler
-+ the EP backend (`hipgpu.dll`) into `$ROOT/local/`. See the main
-[Quick Start](quick_start.md) for details and troubleshooting.
-
-After it finishes you should have `$ROOT/local/bin/hipgpu.dll`.
-
-> **AMDGPU umbrella EP.** The tests reach the backend through the AMD GPU
-> umbrella EP — `amdgpu-ep.dll` (registration name `AMDGPUExecutionProvider`),
-> which loads `hip-backend.dll` → `hipgpu.dll`. The umbrella + shim are built
-> from the `onnxruntime-ep-amdgpu` fork (see `.github/workflows/windows-build.yml`
-> for the pinned commit + `cmake -DUSE_AMDGPU=ON` recipe) and must sit next to
-> `hipgpu.dll` in `$ROOT/local/bin/`. The umbrella selects the hipgpu backend via
-> the `profile=llm` provider option.
+After it finishes you should have `$ROOT/local/bin/onnxruntime_morphizen_ep.dll`.
 
 ---
 
@@ -218,10 +189,10 @@ Run this in every shell before any Whisper command.
 
 Use the same `$ROOT` you built with in §1. The auto-downloaded TheRock SDK lives
 under the build dir (`$ROOT/build/_therock`); if you passed your own
-`-DTHEROCK_DIST`, point at that instead. `HIPEP_EP_BIN` tells the Python
+`-DTHEROCK_DIST`, point at that instead. `MORPHIZEN_EP_BIN` tells the Python
 tests where the EP DLL is — **required when you installed out-of-tree** (the
 `$ROOT/local` layout here); the tests otherwise look in the legacy in-repo
-`install/dist/bin` and `skip` with "AMDGPU EP not found".
+`install/dist/bin` and `skip` with "MorphiZen EP not found".
 
 **Git Bash** (the convention for the rest of this guide):
 
@@ -230,7 +201,7 @@ cd <repo-root>
 conda activate hipdnn-ep
 export ROOT=/c/Users/$USER/work/hip-ep-workspace   # same short path as §1
 export THEROCK_DIST="$ROOT/build/_therock"
-export HIPEP_EP_BIN="$ROOT/local/bin"
+export MORPHIZEN_EP_BIN="$ROOT/local/bin"
 export PATH="$THEROCK_DIST/bin:$ROOT/local/bin:$PATH"
 ```
 
@@ -241,20 +212,15 @@ cd <repo-root>
 conda activate hipdnn-ep
 $ROOT = "C:\Users\$env:USERNAME\work\hip-ep-workspace"   # same short path as §1
 $env:THEROCK_DIST = "$ROOT\build\_therock"
-$env:HIPEP_EP_BIN = "$ROOT\local\bin"
+$env:MORPHIZEN_EP_BIN = "$ROOT\local\bin"
 $env:Path = "$env:THEROCK_DIST\bin;$ROOT\local\bin;$env:Path"
 ```
 
 > **Why this matters:** without `THEROCK_DIST` / `PATH`, the EP fails to link the
 > model DLL (`amdhip64_7.dll missing` / `Failed to link DLL`) and silently falls
 > back to CPU. If a "GPU" run is suspiciously slow or wrong, check this first.
-> Without `HIPEP_EP_BIN` (out-of-tree install), the tests can't find the EP
+> Without `MORPHIZEN_EP_BIN` (out-of-tree install), the tests can't find the EP
 > DLL and `skip` instead of running.
-
-> **Optional — `HIPEP_ARTIFACT_FORMAT=NATIVE` (escape hatch):** the tests default
-> to the production bitcode (in-process LLVM-IR JIT) path, which works once you
-> build against the Tier-1 `llvm-install` (Step 1a). `HIPEP_ARTIFACT_FORMAT=NATIVE`
-> forces a per-model DLL instead; leave it unset for normal runs and in CI.
 
 ---
 
@@ -345,14 +311,12 @@ is unreachable.
 Runs the full pipeline on GPU and asserts the transcription matches the ORT CPU
 fp32 reference **verbatim**:
 
-Clear the compiled-model cache to force a real compile, then run the test
-(parametrized across fp16 + fp32 — split per precision on tight memory, see §4c):
+Clear the compiled-model cache to force a real compile, then run the test:
 
 ```
 # PowerShell:  Remove-Item "$env:TEMP\morphizen_mlir_*" -ErrorAction Ignore
 # Git Bash:    rm -f "$TEMP"/morphizen_mlir_*
-pytest test/python/whisper/test_whisper.py::test_e2e_transcription_greedy -k fp16 -v -s
-pytest test/python/whisper/test_whisper.py::test_e2e_transcription_greedy -k fp32 -v -s
+pytest test/python/whisper/test_whisper.py::test_e2e_transcription_greedy -v -s
 ```
 
 Expected: both the GPU and CPU runs print
@@ -371,33 +335,19 @@ pytest test/python/whisper/test_whisper.py -k "librispeech or long_30s" -v -s
 
 ### 4c. Per-step correctness
 
-These three tests are parametrized across **both** precisions (`fp16` + `fp32`).
-On memory-constrained machines, run each precision in its **own pytest process**
-(`-k "... and fp16"`, then `-k "... and fp32"`) so the first precision's GPU
-memory is fully reclaimed before the second starts:
+(Single line — runs the same in PowerShell and Git Bash. Use `-k` to select the
+three correctness tests.)
 
-```bash
-SEL="encoder_correctness or decoder_prefill_correctness or decoder_decode_correctness"
-pytest test/python/whisper/test_whisper.py -k "($SEL) and fp16" -v -s
-pytest test/python/whisper/test_whisper.py -k "($SEL) and fp32" -v -s
 ```
-
-> **Why split by precision?** The MorphiZen runtime keeps two **process-global**
-> GPU caches that are NOT freed on `InferenceSession` destruction — the transient
-> GPU buffer pool (`g_gpu_buffer_pool`) and the hipBLASLt autotune cache
-> (`g_gemm_algo_cache`) — they live until the process exits. Running fp16 + fp32
-> in one process therefore accumulates both precisions' GPU footprint (the fp32
-> constants blob is ~2× the fp16 one). On a 32 GB UMA part this drives the peak
-> high; splitting into one process per precision caps it at a single precision's
-> footprint. To run both in one process anyway (plenty of memory), drop the
-> `and fp16`/`and fp32` filters.
+pytest test/python/whisper/test_whisper.py -k "encoder_correctness or decoder_prefill_correctness or decoder_decode_correctness" -v -s
+```
 
 ### 4d. Per-op numeric tests (vs ORT CPU)
 
 Conv1d, attention, and LayerNorm, both fp16 and fp32 (one line):
 
 ```
-pytest test/numeric/tests/test_whisper_encoder_attention.py test/numeric/tests/test_whisper_cross_attention.py test/numeric/tests/test_whisper_self_attention.py test/numeric/tests/test_conv1d.py test/numeric/tests/test_layer_norm.py --backend ort_ep --ep-name AMDGPUExecutionProvider --ep-dll $ROOT/local/bin/amdgpu-ep.dll --ep-option profile=llm --ep-option config_file=$ROOT/local/bin/morphizen_config.json -v
+pytest test/numeric/tests/test_whisper_encoder_attention.py test/numeric/tests/test_whisper_cross_attention.py test/numeric/tests/test_whisper_self_attention.py test/numeric/tests/test_conv1d.py test/numeric/tests/test_layer_norm.py --backend ort_ep --ep-name MorphiZenExecutionProvider --ep-dll $ROOT/local/bin/onnxruntime_morphizen_ep.dll --ep-option config_file=$ROOT/local/bin/morphizen_config.json -v
 ```
 
 ### 4e. MLIR conversion (LIT)
@@ -411,9 +361,6 @@ ctest --test-dir $ROOT/build -C Release -R MorphizenMLIRLitTests
 ```
 pytest test/python/whisper/test_whisper.py -v -s
 ```
-
-On a 32 GB UMA machine, prefer running the precision-parametrized tests one
-precision at a time (see §4c) instead of the all-at-once command above.
 
 ---
 
@@ -575,7 +522,7 @@ EP comparison.
 | Changed a runtime `.cpp` / kernel, behavior didn't change | Cached model DLLs embed the old bitcode. Clear the cache after rebuilding (PowerShell `Remove-Item "$env:TEMP\morphizen_mlir_*"` / Git Bash `rm -f "$TEMP"/morphizen_mlir_*`). |
 | A test `skip`s with "audio unavailable" | The network can't reach github/HF for the test clips. Connect and re-run; the audio caches locally after the first fetch. |
 | Model setup fails / `Could not obtain the Whisper raw model` | The raw bundle download from `amd/whisper-large-v3-onnx-{fp16,fp32}` failed. If it's an auth / rate-limit error, run `hf auth login` and retry. If HF is unreachable, build the models locally instead (§3b: `python scripts/build_whisper_models.py`). |
-| Every test `skip`s with "AMDGPU EP not found — run build.py first" | The tests can't locate the EP DLL. For an out-of-tree install (`$ROOT/local`), set `HIPEP_EP_BIN` (§2). Verify `amdgpu-ep.dll` (+ `hip-backend.dll` + `hipgpu.dll`) exist at `$ROOT/local/bin/`. |
+| Every test `skip`s with "MorphiZen EP not found — run build.py first" | The tests can't locate the EP DLL. For an out-of-tree install (`$ROOT/local`), set `MORPHIZEN_EP_BIN` (§2). Verify the DLL exists at `$ROOT/local/bin/onnxruntime_morphizen_ep.dll`. |
 | EP registration fails (`requested API version [N] is not available`) / access violation on session create | The pip `onnxruntime` version ≠ the ORT the EP links (`cmake/deps.txt`). PyPI's `onnxruntime-directml` often lags the pinned tag, so `pip install` alone won't fix it — build a matching ORT wheel from source and install it (see §1b). |
 
 For internals (how the ONNX surgery works, the `no_causal` GQA path, the fp32
