@@ -611,7 +611,7 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
   return 0;
 }
 
-int wrap_group_query_attention(
+int wrap_gqa_flash(
     RuntimeState *state, int op_state_slot,
     // Inputs 1-7 (core GQA)
     void *query, void *key, void *value, void *past_key, void *past_value,
@@ -633,7 +633,7 @@ int wrap_group_query_attention(
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes) {
   if (!state) {
-    fprintf(stderr, "Invalid state in wrap_group_query_attention\n");
+    fprintf(stderr, "Invalid state in wrap_gqa_flash\n");
     return -1;
   }
   (void)op_state_slot;
@@ -655,7 +655,7 @@ int wrap_group_query_attention(
   (void)present_key;
   (void)present_value;
 
-  MOCK_PRINT("[MOCK] wrap_group_query_attention(\n");
+  MOCK_PRINT("[MOCK] wrap_gqa_flash(\n");
   MOCK_PRINT("[MOCK]   num_heads=%lld, kv_num_heads=%lld,\n",
              (long long)num_heads, (long long)kv_num_heads);
   MOCK_PRINT("[MOCK]   scale=%f, softcap=%f,\n", (double)scale,
