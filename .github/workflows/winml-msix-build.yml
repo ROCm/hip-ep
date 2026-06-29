@@ -20,11 +20,9 @@ on:
 
 jobs:
   build-msix:
-    runs-on: gfx1151
+    runs-on: [self-hosted, windows, gfx1151]
     env:
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
-      # MSIX packaging tool (ships its own x64\makeappx.exe + signtool.exe).
-      TOOL_URL: https://mkmartifactory.amd.com:8443/artifactory/SW-MLArtfactory-DEV-LOCAL/WindowsML/msix_packaging_script/msix_packaging_script.zip
       PROVIDER_NAME: MIGraphXExecutionProvider
       PROVIDER_PATH: amdgpu-ep.dll
       PACKAGE_NAME: MicrosoftCorporationII.WinML.AMD.GPU.EP
@@ -44,6 +42,29 @@ jobs:
           if exist msix-stage rd /s /q msix-stage
           if exist msix-out rd /s /q msix-out
 
+      # Extract the vendored MSIX packaging tool first (fail fast). It ships its
+      # own x64\makeappx.exe + signtool.exe, and is vendored under .github/winml-msix/
+      # because the AMD Artifactory is not reachable from the CI runner.
+      - name: Extract MSIX packaging tool
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $toolDir = "$PWD\msix-tool"
+          Expand-Archive -Path ".github\winml-msix\msix_packaging_script.zip" -DestinationPath $toolDir -Force
+          $buildScript = (Get-ChildItem $toolDir -Recurse -Filter "Build-MSIXPackage.ps1" | Select-Object -First 1).FullName
+          if (-not $buildScript) { throw "Build-MSIXPackage.ps1 not found after extracting tool zip" }
+
+          # The stock tool copies the ExecutionProvider source with `Get-ChildItem -File`
+          # (top-level only), dropping data subdirs (rocblas\library, hipblaslt\library).
+          # Patch it to copy recursively so those Tensile kernel data dirs survive.
+          $bs = Get-Content $buildScript -Raw
+          if ($bs -match 'Get-ChildItem \$ExecutionProviderPath -File') {
+            $bs = $bs -replace 'Get-ChildItem \$ExecutionProviderPath -File', 'Get-ChildItem $ExecutionProviderPath'
+            $bs = $bs -replace 'Copy-Item \$file\.FullName \$epTarget -Force', 'Copy-Item $file.FullName $epTarget -Force -Recurse'
+            Set-Content $buildScript -Value $bs -Encoding UTF8
+            Write-Host "patched tool: ExecutionProvider copy is now recursive (keeps data dirs)"
+          }
+
       # Pull the gpu-test-package built by windows-build.yml on the chosen branch
       # (defaults to main; release_* also works). Uses the latest *successful* run.
       - name: Download gpu-test-package (from ${{ github.event.inputs.source_branch || 'main' }})
@@ -61,32 +82,6 @@ jobs:
           $dist = "$PWD\rocm-bin"
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
           Expand-Archive -Path ".github\winml-msix\rocm_7.11_bin.zip" -DestinationPath $dist -Force
-
-      - name: Download MSIX packaging tool
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          # tool ships its own x64\makeappx.exe + signtool.exe
-          $toolDir = "$PWD\msix-tool"
-          curl.exe -fsSL -o msix_packaging_script.zip "$env:TOOL_URL"
-          if ($LASTEXITCODE -ne 0 -or -not (Test-Path msix_packaging_script.zip)) {
-            throw "tool download failed (need AMD network access to $env:TOOL_URL)"
-          }
-          Expand-Archive -Path msix_packaging_script.zip -DestinationPath $toolDir -Force
-          $buildScript = (Get-ChildItem $toolDir -Recurse -Filter "Build-MSIXPackage.ps1" | Select-Object -First 1).FullName
-          if (-not $buildScript) { throw "Build-MSIXPackage.ps1 not found after extracting tool zip" }
-
-          # The stock tool copies the ExecutionProvider source with `Get-ChildItem -File`
-          # (top-level only), dropping data subdirs (rocblas\library, hipblaslt\library).
-          # Patch it to copy recursively so those Tensile kernel data dirs survive.
-          $bs = Get-Content $buildScript -Raw
-          if ($bs -match 'Get-ChildItem \$ExecutionProviderPath -File') {
-            $bs = $bs -replace 'Get-ChildItem \$ExecutionProviderPath -File', 'Get-ChildItem $ExecutionProviderPath'
-            $bs = $bs -replace 'Copy-Item \$file\.FullName \$epTarget -Force', 'Copy-Item $file.FullName $epTarget -Force -Recurse'
-            Set-Content $buildScript -Value $bs -Encoding UTF8
-            Write-Host "patched tool: ExecutionProvider copy is now recursive (keeps data dirs)"
-          }
 
       - name: Stage EP chain + ROCm runtime
         shell: pwsh
