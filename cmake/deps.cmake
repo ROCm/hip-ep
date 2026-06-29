@@ -111,14 +111,14 @@ if(_HIPDNN_NEED_TOOLCHAIN)
       endif()
       set(THEROCK_DIST "${_therock_root}"
           CACHE PATH "TheRock ROCm SDK distribution path" FORCE)
-      message(STATUS "[onnx-hipdnn-ep] TheRock auto-downloaded into ${THEROCK_DIST}")
+      message(STATUS "[onnx-hip-ep] TheRock auto-downloaded into ${THEROCK_DIST}")
     endif()
 
     # Add to CMAKE_PREFIX_PATH so find_package(hip) resolves it -- single point
     # for both the explicitly-provided path and the auto-downloaded SDK.
     if(THEROCK_DIST)
       string(STRIP "${THEROCK_DIST}" THEROCK_DIST)
-      message(STATUS "[onnx-hipdnn-ep] THEROCK_DIST: ${THEROCK_DIST}")
+      message(STATUS "[onnx-hip-ep] THEROCK_DIST: ${THEROCK_DIST}")
       list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}")
       list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}/lib/cmake")
     endif()
@@ -293,9 +293,9 @@ if(BUILD_EP)
     message(STATUS "FindPackage Version info: ${ARG_COMPONENT}=${TMP_GIT_COMMIT} ${TMP_VERSION}")
   endfunction()
 
-  # Collect version info for onnx-hipdnn-ep
+  # Collect version info for onnx-hip-ep
   set(VERSION_LIST
-      onnx-hipdnn-ep=onnx-hipdnn-ep)
+      onnx-hip-ep=onnx-hip-ep)
   set(VERSION_INFO "")
   foreach(COMP_PAIR IN LISTS VERSION_LIST)
     string(FIND "${COMP_PAIR}" "=" pos)

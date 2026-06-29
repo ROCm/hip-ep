@@ -15,7 +15,7 @@ Licensed under the MIT License.
 
 ## Decision
 
-`onnx-hipdnn-ep` supports **two** per-model artifact formats behind a single
+`onnx-hip-ep` supports **two** per-model artifact formats behind a single
 compile option (`artifact_format` / `CompilationOptions.output_mode`):
 
 **LLVM IR (default, production).**

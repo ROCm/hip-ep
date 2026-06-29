@@ -269,12 +269,4 @@ examples/
   main_attention.cpp      C++ driver for attention.hip.mlir
   main_e2e.cpp            C++ driver for end-to-end test
 
-scripts/
-  env.bat                          Shared environment config (edit paths here)
-  run_full_pipeline_hipblaslt.bat        Matmul: hip-compiler + cl.exe driver
-  run_full_pipeline_miopen_add.bat       Add: hip-compiler + cl.exe driver
-  run_full_pipeline_miopen_mul.bat       Mul: hip-compiler + cl.exe driver
-  run_full_pipeline_miopen_rms_norm.bat  RMS Norm: hip-compiler + cl.exe driver
-  run_full_pipeline_miopen_softmax.bat   Softmax: hip-compiler + cl.exe driver
-  run_full_pipeline_attention.bat        Attention: hip-compiler + ORT reference
 ```

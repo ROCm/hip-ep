@@ -89,14 +89,14 @@ ssh user@host "taskkill /F /IM model_benchmark.exe"
 On a typical remote setup, **two Python interpreters** coexist on PATH:
 
 1. The miniforge/conda BASE Python (usually `C:\tools\miniforge3\python.exe` or similar)
-2. The project conda env Python (e.g. `C:\Users\<user>\envs\hipdnn-ep\python.exe`)
+2. The project conda env Python (e.g. `C:\Users\<user>\envs\hip-ep\python.exe`)
 
 `build.py` requires the project env Python (its dependencies live there). If the BASE Python sits earlier in PATH, a bare `python build.py` over SSH silently runs the wrong interpreter and dies on missing imports.
 
 **Always invoke the env Python by absolute path** when running over SSH:
 
 ```bash
-ssh user@host "cd /d C:\\path\\to\\repo && C:\\Users\\<user>\\envs\\hipdnn-ep\\python.exe build.py"
+ssh user@host "cd /d C:\\path\\to\\repo && C:\\Users\\<user>\\envs\\hip-ep\\python.exe build.py"
 ```
 
 Sub-tools that the env adds to PATH (lit, ninja, sccache, gh, ctest) work without a prefix because they're env-installed and not shadowed by BASE.

@@ -57,7 +57,7 @@ jobs:
 
     steps:
       # ROCm/MorphiZen is a private repo. A read-only deploy key is stored as
-      # MORPHIZEN_DEPLOY_KEY in ROCm/onnx-hipdnn-ep secrets, and the matching
+      # MORPHIZEN_DEPLOY_KEY in ROCm/onnx-hip-ep secrets, and the matching
       # public key is added to ROCm/MorphiZen deploy keys. The git URL rewrite
       # below redirects the HTTPS submodule URL to SSH at clone time so that
       # .gitmodules can stay as HTTPS.
@@ -143,7 +143,7 @@ jobs:
 
       # -----------------------------------------------------------------------
       # Build ONNX Runtime from source and install into ort-install.
-      # Produces both the ORT shared library (build-time dep for onnx-hipdnn-ep)
+      # Produces both the ORT shared library (build-time dep for onnx-hip-ep)
       # and onnxruntime_perf_test.exe (GPU test tool).
       # Requires MSVC env; placed after Setup MSVC (same pattern as GTest).
       # Clone and build are skipped when the ORT build cache hits.
@@ -298,9 +298,9 @@ jobs:
       # morphizen EP, renamed via cmake/deps.cmake). Built against ort-install.
       # Commit is pinned; bump it (and the cache key below) when the fork moves.
       #
-      # Built BEFORE onnx-hipdnn-ep so its wheel target can bundle amdgpu-ep.dll
+      # Built BEFORE onnx-hip-ep so its wheel target can bundle amdgpu-ep.dll
       # + hip-backend.dll (HIP_WHEEL_EXTRA_DLLS below). amdgpu-ep only
-      # links ort-install, so it has no dependency on the onnx-hipdnn-ep build.
+      # links ort-install, so it has no dependency on the onnx-hip-ep build.
       # -----------------------------------------------------------------------
       - name: Cache amdgpu-ep build
         id: cache-amdgpu
@@ -342,7 +342,7 @@ jobs:
           "$CMAKE" --build "${{ runner.workspace }}/build-amdgpu" --target amdgpu-ep hip-ep
 
       # -----------------------------------------------------------------------
-      # Build onnx-hipdnn-ep via the cross-platform build.py (same driver
+      # Build onnx-hip-ep via the cross-platform build.py (same driver
       # as the Linux CI and docs/quick_start.md). Cached LLVM/ORT prefixes are
       # injected; protobuf/flatbuffers build from source and TheRock auto-downloads
       # via cmake/deps.cmake. build.py's default build/install dirs resolve to
@@ -354,7 +354,7 @@ jobs:
       # hip-backend.dll built above, so the morphizen wheel ships the whole
       # AMD GPU umbrella chain in onnxruntime/capi/ next to hipgpu.dll.
       # -----------------------------------------------------------------------
-      - name: Build onnx-hipdnn-ep
+      - name: Build onnx-hip-ep
         shell: bash
         run: |
           AMDGPU_BUILD="${{ runner.workspace }}/build-amdgpu"

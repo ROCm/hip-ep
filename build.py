@@ -3,7 +3,7 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
 #
-"""Native cross-platform build driver for onnx-hipdnn-ep.
+"""Native cross-platform build driver for onnx-hip-ep.
 
 Structured after ONNX Runtime's tools/ci_build/build.py (logging, run_subprocess,
 update_submodules, --config/--cmake_generator/--cmake_extra_defines/
@@ -49,7 +49,7 @@ PROJECT_NAME = REPO.name
 IS_WINDOWS = os.name == "nt"
 
 logging.basicConfig(format="[build] %(message)s", level=logging.INFO)
-log = logging.getLogger("hipdnn-ep.build")
+log = logging.getLogger("hip-ep.build")
 
 
 # ---------------------------------------------------------------------------

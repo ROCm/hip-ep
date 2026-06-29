@@ -238,7 +238,7 @@ jobs:
       # are resolved from source and TheRock auto-downloaded by cmake/deps.cmake.
       # Runtime .so bundling + closure happen in a later step (not in build.py).
       # -----------------------------------------------------------------------
-      - name: Build onnx-hipdnn-ep
+      - name: Build onnx-hip-ep
         run: |
           set -euo pipefail
           python3 build.py \
@@ -350,7 +350,7 @@ jobs:
           set -euo pipefail
           INSTALL="${{ runner.workspace }}/install"
           ORT="${{ runner.workspace }}/ort-install"
-          THEROCK="${{ runner.workspace }}/build/onnx-hipdnn-ep/_therock"
+          THEROCK="${{ runner.workspace }}/build/onnx-hip-ep/_therock"
           stage_pass() {
             LD_LIBRARY_PATH="$THEROCK/lib:$ORT/lib:$INSTALL/lib" ldd "$@" 2>/dev/null \
               | awk -v p="$ORT" 'index($3, p) == 1 {print $3}' | sort -u \

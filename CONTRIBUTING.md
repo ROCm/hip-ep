@@ -3,7 +3,7 @@ Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 Licensed under the MIT License.
 -->
 
-# Contributing to onnx-hipdnn-ep
+# Contributing to onnx-hip-ep
 
 This repo follows two contribution policies adopted from the LLVM
 project, with small adaptations noted below. Every PR is expected to

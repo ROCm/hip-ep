@@ -1,4 +1,4 @@
-# CODEOWNERS for ROCm/onnx-hipdnn-ep
+# CODEOWNERS for ROCm/onnx-hip-ep
 #
 # Format: <pattern> <owner1> <owner2> ...
 # Last-matching pattern wins. See:

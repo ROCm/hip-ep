@@ -22,7 +22,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 # ==============================================================================
 
 project(
-  onnx-hipdnn-ep
+  onnx-hip-ep
   VERSION 1.0.0
   LANGUAGES C CXX)
 
