@@ -62,6 +62,10 @@
 //    and destroyed at function exit so only one shape's resident state is live
 //    at a time. The expensive part (Find) is still amortized via the cache.
 //
+//    A/B toggle: HIPDNN_EP_CONV_ALGO_CACHE=0 disables the cache (every call
+//    re-runs Find, nothing is stored) so the Find cost and its memory impact
+//    can be measured against the cached path. Default ON.
+//
 //    Sources:
 //    - https://rocm.docs.amd.com/projects/MIOpen/en/latest/how-to/find-and-immediate.html
 //    - https://docs.pytorch.org/docs/stable/notes/cuda.html
@@ -274,12 +278,20 @@ int wrap_miopenConvolutionForward(
   // Look up the per-shape Find result FIRST, before creating any descriptors.
   // This must precede the descriptor-creation MIOPEN_CHECKs below: those
   // `goto cleanup` on failure, and C++ forbids a goto from bypassing the
-  // initialization of an in-scope variable (conv_cache/conv_key/cache_it). Only
-  // the (algo, workspace_size) pair is cached -- the descriptors are NOT (see
-  // cache header).
-  if (!state->conv_fwd_cache)
-    state->conv_fwd_cache = new ConvFwdCache();
-  ConvFwdCache *conv_cache = static_cast<ConvFwdCache *>(state->conv_fwd_cache);
+  // initialization of an in-scope variable. Only the (algo, workspace_size)
+  // pair is cached -- the descriptors are NOT (see cache header).
+  //
+  // The cache is an A/B toggle: HIPDNN_EP_CONV_ALGO_CACHE=0 disables it
+  // entirely (every call Finds + never stores) so the per-shape Find cost and
+  // its peak-memory impact can be compared against the cached path. When
+  // disabled we don't even allocate the cache object.
+  const bool cache_enabled = hipdnn_ep_conv_algo_cache_enabled();
+  ConvFwdCache *conv_cache = nullptr;
+  if (cache_enabled) {
+    if (!state->conv_fwd_cache)
+      state->conv_fwd_cache = new ConvFwdCache();
+    conv_cache = static_cast<ConvFwdCache *>(state->conv_fwd_cache);
+  }
   ConvFwdKey conv_key{(int64_t)miopen_dt,
                       input_n,
                       input_c,
@@ -300,8 +312,17 @@ int wrap_miopenConvolutionForward(
                       dilation_w,
                       group,
                       bias ? 1 : 0};
-  auto cache_it = conv_cache->entries.find(conv_key);
-  bool cache_hit = (cache_it != conv_cache->entries.end());
+  // Copy the hit entry into a function-scope local so the hit branch below does
+  // not deref a map iterator across the `goto cleanup` scope.
+  bool cache_hit = false;
+  ConvFwdCacheEntry cached_entry{};
+  if (cache_enabled) {
+    auto cache_it = conv_cache->entries.find(conv_key);
+    if (cache_it != conv_cache->entries.end()) {
+      cache_hit = true;
+      cached_entry = cache_it->second;
+    }
+  }
 
   // Create + set the tensor descriptors with explicit NCHW layout. The dtype is
   // taken from the caller (data_type) — the previous hardcoded miopenFloat
@@ -344,8 +365,8 @@ int wrap_miopenConvolutionForward(
   if (cache_hit) {
     // HIT: reuse the cached algorithm + its actual workspace size; skip both
     // GetWorkSpaceSize and the expensive Find.
-    algo = cache_it->second.algo;
-    workspace_size = cache_it->second.algo_workspace_size;
+    algo = cached_entry.algo;
+    workspace_size = cached_entry.algo_workspace_size;
     if (workspace_size > 0) {
       if (hipdnn_ep_state_ensure_conv_scratch(state, workspace_size) != 0) {
         fprintf(stderr,
@@ -395,8 +416,11 @@ int wrap_miopenConvolutionForward(
     }
     algo = perf_results[0].fwd_algo;
     workspace_size = perf_results[0].memory; // actual workspace for forward
-    conv_cache->entries.emplace(conv_key,
-                                ConvFwdCacheEntry{algo, workspace_size});
+    // Store only when the cache is enabled; with HIPDNN_EP_CONV_ALGO_CACHE=0
+    // every call lands here and re-runs Find (the A/B "off" arm).
+    if (cache_enabled)
+      conv_cache->entries.emplace(conv_key,
+                                  ConvFwdCacheEntry{algo, workspace_size});
   }
   // Perform convolution using the (cached) algorithm + its workspace size.
   MIOPEN_CHECK(miopenConvolutionForward(
