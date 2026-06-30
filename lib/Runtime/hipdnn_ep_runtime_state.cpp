@@ -163,6 +163,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->qmoe_host_scratch_size = 0;
   state->conv_scratch = nullptr;
   state->conv_scratch_size = 0;
+  state->conv_fwd_cache = nullptr;
   state->zp_unpack_cache = nullptr;
   state->op_profile = hipdnn_ep_perf_enabled() ? op_profile_create() : nullptr;
   state->device_error_flag = nullptr;
@@ -696,6 +697,15 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   }
   if (state->qmoe_host_scratch) {
     HIP_CLEANUP(hipHostFree(state->qmoe_host_scratch));
+  }
+
+  // Destroy the per-shape forward-conv descriptor/algorithm cache before
+  // freeing the workspace pool it benchmarked against. The descriptors are
+  // pure CPU-side MIOpen handles; the stream sync above drained any in-flight
+  // conv that may still be reading the workspace.
+  if (state->conv_fwd_cache) {
+    hipdnn_ep_conv_fwd_cache_destroy(state->conv_fwd_cache);
+    state->conv_fwd_cache = nullptr;
   }
 
   // Free the MIOpen convolution workspace pool (if allocated). The stream
