@@ -205,6 +205,9 @@ struct HipTransferBufferizableModel
     } else if (srcIsHost && dstKind == MemorySpaceKind::Device) {
       MemcpyH2DAsyncOp::create(rewriter, loc, ctx, dst, *srcBuf);
     } else {
+      // hip.transfer is a host<->device crossing indicator. A same-space
+      // transfer (e.g. device->device) is not a crossing and most likely
+      // signals a converter bug, so reject it rather than silently eliding it.
       return op->emitError(
           "hip.transfer: unsupported memory-space direction (only "
           "device<->host/pinned is implemented today)");

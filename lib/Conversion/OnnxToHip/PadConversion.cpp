@@ -8,6 +8,7 @@
 
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/Sequence.h"
 
 namespace mlir {
 namespace hip {
@@ -134,7 +135,7 @@ static mlir::FailureOr<mlir::Value> buildPadOutputInit(
           op, "dynamic `axes` operand is not supported by Pad conversion");
   }
   if (axesVec.empty())
-    for (int64_t i = 0; i < rank; ++i)
+    for (int64_t i : llvm::seq<int64_t>(0, rank))
       axesVec.push_back(i);
   for (int64_t &a : axesVec)
     if (a < 0)
@@ -157,7 +158,7 @@ static mlir::FailureOr<mlir::Value> buildPadOutputInit(
   bool padsAreConst = static_cast<int64_t>(padsConst.size()) == 2 * nPadded;
 
   llvm::SmallVector<mlir::Value> dynSizes;
-  for (int64_t i = 0; i < resultType.getRank(); ++i) {
+  for (int64_t i : llvm::seq<int64_t>(0, resultType.getRank())) {
     if (!resultType.isDynamicDim(i))
       continue;
 
