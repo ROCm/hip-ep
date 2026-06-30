@@ -943,6 +943,147 @@ static int getOrTuneGemvConfig(
 }
 
 /* -----------------------------------------------------------------------
+ * GEMV Online Autotune (single-token decode, M==1 row-major path)
+ *
+ * tuneGemvConfig above benchmarks every config in a HOT tight loop: it
+ * launches the same (A,B,sc,zp) buffers ITERS times back-to-back, so the
+ * weight matrix B is resident in L2/MALL after the first launch and all
+ * timed iterations read HOT weights. Real single-token decode is the
+ * opposite: each layer's weights are read exactly ONCE, cold from DRAM,
+ * before the model moves on to the next layer's different weights. For
+ * these memory-bound GEMVs the hot-loop ranking mis-orders TILE_N — with
+ * cached weights it favours a large TILE_N (fewer, bigger blocks, low
+ * launch overhead), but cold DRAM streaming wants a SMALLER TILE_N (more
+ * blocks → higher occupancy to hide load latency and saturate bandwidth).
+ *
+ * This online tuner instead samples the REAL decode launches round-robin
+ * (one candidate per call, bracketed with events), discards a warmup sweep,
+ * averages a few sample sweeps, then locks the min-mean config — so the
+ * measurement reflects the cold-cache reality the kernel actually runs in.
+ * Keyed by (M,N,K,bs,col_major,has_zp); dims are model-static so there is
+ * one tuning window per shape, after which it is a pure cache lookup. All
+ * candidate configs are numerically identical, so output is correct
+ * throughout the window. (Mirrors the qmoe fc1/fc2 online tuner.)
+ * ----------------------------------------------------------------------- */
+
+static constexpr int kGemvWarmupRounds = 1;  // discarded cold-start sweep(s)
+static constexpr int kGemvSampleRounds = 4;  // accumulated sweeps
+
+struct GemvOnlineState {
+    bool   done = false;
+    int    best_id = 8;                   // {64,16}; only returned once done
+    double ms[kNumGemvConfigs] = {};      // summed time per candidate slot
+    int    n[kNumGemvConfigs]  = {};      // sample count per candidate slot
+    int    candidates[kNumGemvConfigs];   // applicable config ids for this N
+    int    num_candidates = 0;
+    int    cursor = 0;                    // next candidate slot to sample
+    int    rounds = 0;                    // completed full sweeps
+};
+
+static std::unordered_map<std::string, GemvOnlineState> g_gemv_online;
+// Serialized with the existing gemv_tune_mutex (kernels are stateless).
+
+// Applicable configs for this N, using the same width thresholds as the
+// offline tuner (wide tiles only pay off at large N).
+static void buildGemvOnlineCandidates(GemvOnlineState& st, int64_t N) {
+    st.num_candidates = 0;
+    for (int cid = 0; cid < kNumGemvConfigs; cid++) {
+        const auto& cfg = kGemvConfigs[cid];
+        if (cfg.tile_n >= 64 && N < 2048) continue;
+        if (cfg.tile_n >= 32 && cfg.tile_n < 64 && N < 1024) continue;
+        st.candidates[st.num_candidates++] = cid;
+    }
+    if (st.num_candidates == 0) st.candidates[st.num_candidates++] = 8;
+}
+
+// Pick the config to launch this call. While tuning, returns the candidate
+// being sampled and sets *sample_slot >= 0 (caller times the launch and feeds
+// the result to gemvOnlineRecord). Once locked, returns best, *sample_slot=-1.
+static int gemvOnlinePick(const std::string& key, int64_t N, int* sample_slot) {
+    std::lock_guard<std::mutex> lock(gemv_tune_mutex);
+    GemvOnlineState& st = g_gemv_online[key];
+    if (st.num_candidates == 0) buildGemvOnlineCandidates(st, N);
+    if (st.done) {
+        *sample_slot = -1;
+        return st.best_id;
+    }
+    *sample_slot = st.cursor;
+    return st.candidates[st.cursor];
+}
+
+// Record one measured cold-call sample, advance the round-robin cursor, and
+// lock the min-mean config once enough sample sweeps have completed.
+static void gemvOnlineRecord(const std::string& key, int sample_slot, float ms,
+                             int64_t M, int64_t N, int64_t K, int64_t bs) {
+    std::lock_guard<std::mutex> lock(gemv_tune_mutex);
+    auto it = g_gemv_online.find(key);
+    if (it == g_gemv_online.end()) return;
+    GemvOnlineState& st = it->second;
+    if (st.done || sample_slot != st.cursor) return;  // stale (raced to done)
+    if (st.rounds >= kGemvWarmupRounds) {
+        st.ms[sample_slot] += ms;
+        st.n[sample_slot]  += 1;
+    }
+    if (++st.cursor >= st.num_candidates) {
+        st.cursor = 0;
+        if (++st.rounds >= kGemvWarmupRounds + kGemvSampleRounds) {
+            double best_mean = 1e30;
+            int    best      = st.candidates[0];
+            for (int i = 0; i < st.num_candidates; i++) {
+                if (st.n[i] == 0) continue;
+                double mean = st.ms[i] / st.n[i];
+                if (mean < best_mean) {
+                    best_mean = mean;
+                    best      = st.candidates[i];
+                }
+            }
+            st.best_id = best;
+            st.done    = true;
+            CUSTOM_KERNELS_DEBUG_LOG(
+                "[custom_kernels] GEMV online-autotune M=%lld N=%lld K=%lld "
+                "bs=%lld -> config[%d] threads=%d tile_n=%d (%.4f ms)\n",
+                (long long)M, (long long)N, (long long)K, (long long)bs, best,
+                kGemvConfigs[best].threads, kGemvConfigs[best].tile_n, best_mean);
+        }
+    }
+}
+
+// Pick + launch the row-major GEMV; while tuning, time the real launch and
+// feed it back to the online tuner. Returns the launch's hipError_t as int.
+static int launchGemvOnline(
+    hipStream_t stream, const std::string& key,
+    const __half* A, const uint8_t* B,
+    const __half* sc, const uint8_t* zp,
+    const __half* bi, __half* out,
+    int64_t M, int64_t N, int64_t K, int64_t batch, int64_t bs) {
+    int sample_slot = -1;
+    int cid = gemvOnlinePick(key, N, &sample_slot);
+
+    hipEvent_t e0 = nullptr, e1 = nullptr;
+    if (sample_slot >= 0) {
+        hipEventCreate(&e0);
+        hipEventCreate(&e1);
+        hipEventRecord(e0, stream);
+    }
+
+    launchGemvConfig(cid, stream, A, B, sc, zp, bi, out,
+                     M, N, K, batch, bs, /*col_major=*/false);
+    hipError_t err = hipGetLastError();
+
+    if (sample_slot >= 0) {
+        hipEventRecord(e1, stream);
+        hipEventSynchronize(e1);
+        float ms = 0.0f;
+        hipEventElapsedTime(&ms, e0, e1);
+        hipEventDestroy(e0);
+        hipEventDestroy(e1);
+        if (err == hipSuccess)
+            gemvOnlineRecord(key, sample_slot, ms, M, N, K, bs);
+    }
+    return static_cast<int>(err);
+}
+
+/* -----------------------------------------------------------------------
  * GEMV (int8) Autotune: dispatch, benchmark, cache
  *
  * Reuses kGemvConfigs (28 configs of BLOCK_SIZE x TILE_N) and the same
@@ -3076,15 +3217,16 @@ extern "C" int hip_matmul_nbits(
     const auto* b_h = static_cast<const __half*>(bias);
     auto*       o_h = static_cast<__half*>(output);
 
-    int config_id = getOrTuneGemvConfig(
-        hip_stream, a_h, b_u, s_h, z_u, b_h, o_h,
-        M, N, K, batch_count, block_size);
-
-    launchGemvConfig(config_id, hip_stream,
-                     a_h, b_u, s_h, z_u, b_h, o_h,
-                     M, N, K, batch_count, block_size);
-
-    hipError_t err = hipGetLastError();
+    // Online (cold-cache) autotune: single-token decode reads each layer's
+    // weights once, cold from DRAM, so we sample real launches instead of the
+    // offline hot tight loop (which mis-ranks TILE_N for cold-streamed
+    // weights). col_major=false here (row-major M==1 path).
+    std::string gemv_key = gemvCacheKey(M, N, K, block_size,
+                                        /*col_major=*/false,
+                                        /*has_zp=*/z_u != nullptr);
+    hipError_t err = static_cast<hipError_t>(launchGemvOnline(
+        hip_stream, gemv_key, a_h, b_u, s_h, z_u, b_h, o_h,
+        M, N, K, batch_count, block_size));
     if (err != hipSuccess) {
       fprintf(stderr,
               "[custom_kernels] hip_matmul_nbits GEMV launch failed: %s\n",
