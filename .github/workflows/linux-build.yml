@@ -257,7 +257,7 @@ jobs:
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/oga-artifacts
-          key: linux-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
+          key: linux-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-am-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
 
       # Checkout + build are skipped on an OGA cache hit (step-level gate); the
       # install-copy below always runs so the
@@ -274,9 +274,12 @@ jobs:
           show-progress: false
 
       # Fetch and apply microsoft/onnxruntime-genai PR patches listed in
-      # OGA_PR_PATCHES (env), mirroring the ONNX Runtime PR patch step. Fresh
-      # checkout => patches apply directly; the OGA cache key includes the PR
-      # list, so editing it forces a rebuild.
+      # OGA_PR_PATCHES (env). pull/<n>.patch is a multi-commit mbox; `git am`
+      # replays each commit in order, so a PR that adds -> modifies -> renames
+      # the same path within its own series (e.g. #2194: morphizen_ep/* ->
+      # amdgpu/*) applies cleanly. `git apply` pre-checks every hunk against the
+      # base tree at once and self-conflicts on such a series. The OGA cache key
+      # includes the PR list, so editing it forces a rebuild.
       - name: Apply OGA PR patches
         if: steps.cache-oga.outputs.cache-hit != 'true'
         working-directory: onnxruntime-genai
@@ -289,12 +292,15 @@ jobs:
             echo "OGA_PR_PATCHES is empty; nothing to apply"
             exit 0
           fi
+          # git am needs a committer identity on a bare runner.
+          git config user.email "ci@onnx-hipdnn-ep.local"
+          git config user.name "onnx-hipdnn-ep CI"
           for pr in $prs; do
             url="https://github.com/microsoft/onnxruntime-genai/pull/${pr}.patch"
             echo "Fetching $url"
             curl -fsSL "$url" -o "/tmp/oga-pr-${pr}.patch"
             echo "Applying PR #${pr}"
-            git apply --whitespace=nowarn "/tmp/oga-pr-${pr}.patch"
+            git am --whitespace=nowarn "/tmp/oga-pr-${pr}.patch"
           done
 
       - name: Build OGA
@@ -351,6 +357,11 @@ jobs:
           INSTALL="${{ runner.workspace }}/install"
           ORT="${{ runner.workspace }}/ort-install"
           THEROCK="${{ runner.workspace }}/build/onnx-hipdnn-ep/_therock"
+          # The renamed AMDGPU OGA integration dlopen's libamdgpu-ep.so; the
+          # project still builds the EP as libhipgpu.so. Ship the expected
+          # filename so the genai auto-loader resolves it (deps + closure below
+          # then cover the copy too).
+          cp -a "$INSTALL/lib/libhipgpu.so" "$INSTALL/lib/libamdgpu-ep.so"
           stage_pass() {
             LD_LIBRARY_PATH="$THEROCK/lib:$ORT/lib:$INSTALL/lib" ldd "$@" 2>/dev/null \
               | awk -v p="$ORT" 'index($3, p) == 1 {print $3}' | sort -u \
