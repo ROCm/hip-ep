@@ -217,15 +217,10 @@ struct GetHostScratchOpLowering
 
 // --- GetHostMemOp: hip.get_host_mem(%ctx, %size) : memref<?xi8, #hip.mem<host>>
 //     -> llvm.call @hipdnn_ep_get_host_mem_base(state, size) + descriptor.
-// Mirrors GetHostScratchOpLowering EXACTLY, but calls the PAGEABLE host-pool
-// base (plain malloc/realloc) instead of the pinned host-scratch base. The
-// returned buffer is CPU-only (the D2H destination of a hip.transfer). Its
-// result type carries #hip.mem<host>, which the type converter maps to a
-// distinct non-default address space (host = AS 1); the runtime's generic
-// (AS 0) pointer is addrspace-cast up to it below via getMemRefAddressSpace.
-// (Host-scratch above is a space-less memref<?xi8>, so it stays AS 0.) The
-// host target flattens these spaces for codegen, so CPU loads/stores on the
-// returned buffer remain valid.
+// Mirrors GetHostScratchOpLowering but calls the PAGEABLE host-pool base (plain
+// malloc/realloc) instead of the pinned scratch base. The result's
+// #hip.mem<host> space maps to a non-default LLVM AS, so the runtime's AS-0
+// pointer is addrspace-cast up to it below (host-scratch is space-less, AS 0).
 struct GetHostMemOpLowering : public ConvertOpToLLVMPattern<GetHostMemOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 

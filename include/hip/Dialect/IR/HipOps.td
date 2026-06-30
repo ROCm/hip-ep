@@ -383,7 +383,11 @@ def Hip_GetHostMemOp : Hip_Op<"get_host_mem",
   }];
 
   let arguments = (ins Hip_ContextType:$ctx, Index:$size);
-  let results = (outs AnyMemRef:$host_mem);
+  // Always yields a `#hip.mem<host>` buffer (the `Hip_HostMemRef` predicate
+  // also accepts a still-unspecified space during the bufferization
+  // transition). Distinct from `hip.get_host_scratch`, whose result is
+  // deliberately space-less (`AnyMemRef`).
+  let results = (outs Hip_HostMemRef:$host_mem);
   let assemblyFormat = "`(` $ctx `,` $size `)` attr-dict `:` type($host_mem)";
 }
 
@@ -3933,17 +3937,31 @@ def Hip_TransferOp : Hip_Op<"transfer", []> {
     crossing as a target-space `memref.alloc` plus `hip.memcpy_*_async` +
     `hip.stream_sync`. Making the crossing explicit in the IR is what enables
     later sync-barrier optimisation; today only `hip.pad` emits it.
+
+    The `target` attribute admits any HIP memory space for forward
+    compatibility, but bufferization currently realises only the
+    device <-> `host`/`pinned` crossings (the device->host D2H path is the
+    sole one exercised today). A `managed` target, or a same-space (e.g.
+    device->device) transfer, has no lowering yet and makes
+    HipTransferBufferizableModel emit an error rather than silently
+    miscompiling. Narrow the accepted set here (or extend bufferization)
+    before relying on those directions.
   }];
 
   let arguments = (ins Hip_ContextType:$ctx,
                        Hip_TensorOrMemRef:$src,
-                       HIP_MemorySpaceAttr:$target);
+                       Hip_MemorySpaceAttr:$target);
   let results = (outs Hip_TensorOrMemRef:$result);
 
   let assemblyFormat = [{
     `(` $ctx `,` $src `:` type($src) `)` `to` $target attr-dict
     `->` type($result)
   }];
+
+  // hip.transfer is value-preserving: `result` must have the SAME shape and
+  // element type as `src` (only the memory space differs -- that is the whole
+  // point of the op, so the verifier deliberately does NOT compare spaces).
+  let hasVerifier = 1;
 }
 
 // hip.memcpy_h2d_async : asynchronous host->device copy on the runtime stream.

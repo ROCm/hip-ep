@@ -296,29 +296,21 @@ void ConvertHipToLLVMPass::runOnOperation() {
     return LLVM::LLVMPointerType::get(ctx, 0);
   });
 
-  // Map each HIP memory space (#hip.mem<device|host|pinned|managed>) to a
-  // DISTINCT LLVM address space, numbered by the MemorySpaceKind enum:
-  //   device = 0, host = 1, pinned = 2, managed = 3.
-  // Device deliberately stays AS 0 so the dominant GPU data path (model
-  // params, activations, the device pool, all kernel/GEMM operands) and the
-  // flat bare-pointer runtime ABI are byte-unchanged; only the rarer
-  // host/pinned/managed boundary buffers move to a non-default space. Keeping
-  // the space distinct in the lowered LLVM type makes D2H/H2D boundaries
-  // self-describing and lets address-space-based alias reasoning treat device
-  // vs host pointers as non-aliasing.
+  // Map each HIP memory space to a distinct LLVM address space, numbered by the
+  // MemorySpaceKind enum (device=0, host=1, pinned=2, managed=3). Device stays
+  // AS 0 so the dominant GPU data path and the flat bare-pointer runtime ABI are
+  // byte-unchanged; only host/pinned/managed boundary buffers move off the
+  // default space, which keeps D2H/H2D boundaries self-describing and lets alias
+  // reasoning treat device vs host pointers as non-aliasing.
   //
-  //   memref<8xi64, #hip.mem<host>>  ->  !llvm.ptr<1> in the descriptor
-  //   memref<8xi64, #hip.mem<device>> (or no space)  ->  !llvm.ptr<0>
+  //   memref<8xi64, #hip.mem<host>>   -> !llvm.ptr<1>
+  //   memref<8xi64, #hip.mem<device>> -> !llvm.ptr<0>  (same as no space)
   //
-  // Every per-op lowering resolves the space via
-  // getTypeConverter()->getMemRefAddressSpace() and addrspace-casts the
-  // runtime's generic (AS 0) pointer up to it / back down at the call boundary
-  // (see MemoryLowering.cpp and unpackMemRefStructWithAddrCast), so runtime
-  // declarations stay AS-0 `!llvm.ptr`. The host target collapses all these
-  // spaces to one flat space for codegen, so CPU loads/stores on the
-  // host/pinned/managed buffers (e.g. tensor.extract after a D2H transfer)
-  // remain valid. Without this hook the LLVM type converter rejects any memref
-  // carrying a non-integer memory space and the whole conversion fails.
+  // Per-op lowerings cast the runtime's generic AS-0 pointer to/from these
+  // spaces at the call boundary (see extractMemRefDataPtr), so runtime decls
+  // stay AS-0; the host target flattens the spaces for codegen, so CPU
+  // loads/stores stay valid. Without this hook the type converter rejects any
+  // non-integer memory space and conversion fails.
   typeConverter.addTypeAttributeConversion(
       [ctx](BaseMemRefType, MemorySpaceAttr attr)
           -> TypeConverter::AttributeConversionResult {

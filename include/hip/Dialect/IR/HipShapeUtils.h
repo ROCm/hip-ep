@@ -17,6 +17,18 @@
 namespace mlir {
 namespace hip {
 
+/// Byte size of a single element of `elemType` for HIP buffer sizing.
+///
+/// `index` is treated as 64 bits (the runtime/ABI pointer-sized width used
+/// by lowered descriptors); every other int/float type uses its own bit
+/// width rounded up to whole bytes (e.g. i1 -> 1, f16 -> 2, i64 -> 8).
+///
+/// Single source of truth for the `(bits + 7) / 8` + index-special-case
+/// logic shared by the host-pool / host-scalar passes and the memcpy
+/// lowering's byte-count computation. `elemType` must be an int, float, or
+/// index type.
+int64_t elementByteSize(Type elemType);
+
 /// Compute the shape of `A @ B` for matmul with NumPy-style batch broadcast
 /// over the leading dims. Last two dims of `aShape` are `[M, K]`; last two
 /// dims of `bShape` are `[K, N]`. Leading dims are broadcast (right-aligned,

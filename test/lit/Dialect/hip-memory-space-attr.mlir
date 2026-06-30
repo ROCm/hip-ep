@@ -38,7 +38,7 @@ func.func @attr_as_discardable() attributes {hipdnn.space = #hip.mem<pinned>} {
 // Aspect C: an unknown kind keyword is a parse error (the enum parser and the
 // attribute parser each emit a diagnostic).
 // expected-error @+2 {{to be one of: device, host, pinned, managed}}
-// expected-error @+1 {{failed to parse HIP_MemorySpaceAttr parameter 'kind'}}
+// expected-error @+1 {{failed to parse Hip_MemorySpaceAttr parameter 'kind'}}
 func.func @bad_kind(%x: memref<4xf32, #hip.mem<bogus>>) {
   return
 }

@@ -61,23 +61,17 @@ extractIntVector(mlir::Value v, llvm::SmallVectorImpl<int64_t> &out) {
   return mlir::success();
 }
 
-/// Read entry `[idx]` from the HOST copy of the 1-D `pads` tensor and return an
-/// `index`-typed value.
+/// Read entry `[idx]` from `padsHost` (the host copy of `pads`) as an `index`.
 ///
-/// `padsHost` is the result of `hip.transfer(%pads) to <host>` (which bufferizes
-/// to a `#hip.mem<host>` alloc + `hip.memcpy_d2h_async` + `hip.stream_sync`).
-/// Extracting from it is a SYNCHRONIZED host read -- unlike a bare
-/// `tensor.extract` of the original device `pads`, which would bufferize to an
-/// unsynchronized host `memref.load` of the device-resident constants blob and
-/// SEGV on targets where that blob is true device memory (canonical case: an
-/// externalized constant `pads`, whose inline value is stripped so the
-/// compile-time fold misses and this runtime path is taken). We only reach here
-/// when `pads` is genuinely runtime; the compile-time path uses literal pad
-/// amounts and never extracts.
+/// `padsHost` comes from `hip.transfer(%pads) to <host>`, so this extract is a
+/// SYNCHRONIZED host read. A bare `tensor.extract` of the original device
+/// `pads` would instead bufferize to an unsynchronized host load of the
+/// device-resident constants blob and SEGV where that blob is true device
+/// memory. Only reached on the genuinely-runtime path (the compile-time path
+/// uses literal pad amounts and never extracts).
 ///
 /// Before:  %e = tensor.extract %pads_device[%idx]   // unsynchronized D load
-/// After:   %i = arith.constant idx : index
-///          %e = tensor.extract %padsHost[%i]         // synchronized host load
+/// After:   %e = tensor.extract %padsHost[%idx]       // synchronized host load
 static mlir::Value extractAsIndex(mlir::PatternRewriter &rewriter,
                                   mlir::Location loc, mlir::Value padsHost,
                                   int64_t idx) {
@@ -101,15 +95,12 @@ static mlir::Value extractAsIndex(mlir::PatternRewriter &rewriter,
 /// `axes` would make the per-dim pad lookup data-dependent, which we
 /// can't express with `tensor.empty` dynsizes.
 ///
-/// `padsAttr` / `axesAttr` carry the compile-time `pads` / `axes` values when
-/// the pre-lowering `PadShapeFold` stamped them onto the op (the common case:
-/// the operand was an inline constant before externalization). When present we
-/// use them directly -- no operand read. When absent (genuinely runtime-dynamic
-/// `pads`) we read the per-axis amounts from `padsHost` -- the host copy
-/// produced by the explicit `hip.transfer` (see extractAsIndex) -- a
-/// synchronized host read, not an unsynchronized device load. `pads` (the
-/// original device operand) is still passed for the compile-time inline-constant
-/// fold attempt below; `padsHost` is used only on the runtime path.
+/// `padsAttr` / `axesAttr` carry compile-time `pads` / `axes` stamped by the
+/// pre-lowering `PadShapeFold` (the common case); when present we use them
+/// directly. Otherwise we try an inline-constant `pads` operand, and finally
+/// fall back to a synchronized read of `padsHost` (see extractAsIndex). So
+/// `pads` is the device operand (used only for the inline-constant fold) and
+/// `padsHost` is its host copy (used only on the runtime path).
 static mlir::FailureOr<mlir::Value> buildPadOutputInit(
     mlir::PatternRewriter &rewriter, mlir::Location loc, mlir::Operation *op,
     mlir::RankedTensorType resultType, mlir::Value data, mlir::Value pads,
@@ -244,23 +235,15 @@ struct PadToHip : public mlir::RewritePattern {
     auto hostSpace =
         MemorySpaceAttr::get(rewriter.getContext(), MemorySpaceKind::Host);
 
-    // ONNX `Pad.constant_value` is a scalar; hip.pad takes it BY VALUE as a
-    // plain float/integer SSA value (no buffer, no memory space). Two cases:
-    //
-    //   * compile-time constant (the overwhelmingly common pad value, e.g. 0.0):
-    //     fold directly to an `arith.constant` scalar -- zero device traffic,
-    //     no transfer.
-    //   * genuinely runtime fill value: bring it to the host via the SAME
-    //     explicit transfer mechanism used for pads/axes -- a `hip.transfer`
-    //     that bufferizes to a #hip.mem<host> alloc + hip.memcpy_d2h_async +
-    //     hip.stream_sync -- then read the host copy by value with
-    //     `tensor.extract`. The extract is safe (NOT an unsynchronized device
-    //     load) precisely because its operand is the transfer's host result,
-    //     produced after the stream sync.
+    // ONNX `Pad.constant_value` is a scalar; hip.pad takes it BY VALUE (no
+    // buffer). A compile-time constant folds to an `arith.constant`; a runtime
+    // fill value is brought to the host via the same `hip.transfer` used for
+    // pads/axes, then read by value with `tensor.extract` (safe -- its operand
+    // is the post-sync host result, not a device buffer).
     //
     // Before: %cv : tensor<f32>   (runtime, non-constant)
     // After:  %cvH = hip.transfer(%ctx, %cv : tensor<f32>) to <host> -> tensor<f32>
-    //         %s   = tensor.extract %cvH[] : tensor<f32>            // -> f32
+    //         %s   = tensor.extract %cvH[] : tensor<f32>
     // (constant case folds instead to:  %s = arith.constant <val> : f32)
     if (constantValue) {
       auto cvTy = mlir::cast<mlir::RankedTensorType>(constantValue.getType());
@@ -313,23 +296,17 @@ struct PadToHip : public mlir::RewritePattern {
       hasAxesAttr = true;
     }
 
-    // Bring `pads` (and `axes`) into host memory ONCE via the explicit transfer
-    // mechanism. wrap_pad reads these vectors CPU-side to build the per-axis pad
-    // descriptor, so they must be host-resident at the kernel call -- AND, when
-    // the output shape is dynamic and `pads` is genuinely runtime,
-    // buildPadOutputInit below reads the per-axis pad amounts from this SAME host
-    // copy (via tensor.extract; see extractAsIndex). So the device->host crossing
-    // is a single explicit hip.transfer shared by both, with NO
-    // hip.readback_scalar -- instead of one transfer for the kernel operand plus
-    // a separate readback per dynamic dim. It bufferizes to a #hip.mem<host>
-    // alloc + hip.memcpy_d2h_async + hip.stream_sync (pooled by
-    // hip-pool-host-transfers). (`hostSpace` is declared above, shared with the
-    // constant_value runtime transfer.)
+    // Bring `pads` (and `axes`) to host ONCE via hip.transfer: wrap_pad reads
+    // them CPU-side to build the pad descriptor, and (on the dynamic-output
+    // runtime path) buildPadOutputInit reads the same host copy via
+    // tensor.extract (see extractAsIndex). One shared transfer instead of a
+    // kernel-operand transfer plus a per-dim hip.readback_scalar; bufferizes to
+    // a #hip.mem<host> alloc + memcpy_d2h_async + stream_sync (pooled by
+    // hip-pool-host-transfers).
     //
     // Before: %pads : tensor<4xi64>   (device operand)
     // After:  %ph = hip.transfer(%ctx, %pads : tensor<4xi64>) to <host>
     //                 -> tensor<4xi64>
-    //         (dyn-dim path) %e = tensor.extract %ph[%i] : tensor<4xi64>
     mlir::Value padsHost = TransferOp::create(rewriter, loc, pads.getType(),
                                               context, pads, hostSpace)
                                .getResult();

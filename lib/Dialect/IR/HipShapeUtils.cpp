@@ -52,6 +52,13 @@ std::string formatShape(ArrayRef<int64_t> shape) {
 
 } // namespace
 
+int64_t mlir::hip::elementByteSize(Type elemType) {
+  // `index` lowers to a 64-bit (pointer-sized) ABI quantity; every other
+  // int/float type uses its declared bit width rounded up to whole bytes.
+  unsigned bits = elemType.isIndex() ? 64 : elemType.getIntOrFloatBitWidth();
+  return static_cast<int64_t>((bits + 7) / 8);
+}
+
 SmallVector<int64_t>
 mlir::hip::inferMatmulShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
                             function_ref<InFlightDiagnostic()> emitError) {

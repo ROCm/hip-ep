@@ -14,14 +14,14 @@ include "mlir/IR/EnumAttr.td"
 // Memory space kind enum
 //===----------------------------------------------------------------------===//
 
-def HIP_Device  : I32EnumAttrCase<"Device",  0, "device">;
-def HIP_Host    : I32EnumAttrCase<"Host",    1, "host">;
-def HIP_Pinned  : I32EnumAttrCase<"Pinned",  2, "pinned">;
-def HIP_Managed : I32EnumAttrCase<"Managed", 3, "managed">;
+def Hip_Device  : I32EnumAttrCase<"Device",  0, "device">;
+def Hip_Host    : I32EnumAttrCase<"Host",    1, "host">;
+def Hip_Pinned  : I32EnumAttrCase<"Pinned",  2, "pinned">;
+def Hip_Managed : I32EnumAttrCase<"Managed", 3, "managed">;
 
-def HIP_MemorySpaceKind : I32EnumAttr<"MemorySpaceKind",
+def Hip_MemorySpaceKind : I32EnumAttr<"MemorySpaceKind",
     "HIP memory space kind",
-    [HIP_Device, HIP_Host, HIP_Pinned, HIP_Managed]> {
+    [Hip_Device, Hip_Host, Hip_Pinned, Hip_Managed]> {
   let cppNamespace = "::mlir::hip";
   // We wrap the enum in the custom MemorySpaceAttr below (so the syntax is
   // `#hip.mem<device>`, not a bare enum attribute); do not emit a specialized
@@ -33,7 +33,7 @@ def HIP_MemorySpaceKind : I32EnumAttr<"MemorySpaceKind",
 // Memory space attribute  (#hip.mem<device|host|pinned|managed>)
 //===----------------------------------------------------------------------===//
 
-def HIP_MemorySpaceAttr : AttrDef<Hip_Dialect, "MemorySpace"> {
+def Hip_MemorySpaceAttr : AttrDef<Hip_Dialect, "MemorySpace"> {
   let mnemonic = "mem";
   let summary = "HIP memory space attribute";
   let description = [{
@@ -49,7 +49,7 @@ def HIP_MemorySpaceAttr : AttrDef<Hip_Dialect, "MemorySpace"> {
 
     See `docs/design/memory-space-design.md`.
   }];
-  let parameters = (ins EnumParameter<HIP_MemorySpaceKind>:$kind);
+  let parameters = (ins EnumParameter<Hip_MemorySpaceKind>:$kind);
   let assemblyFormat = "`<` $kind `>`";
 }
 

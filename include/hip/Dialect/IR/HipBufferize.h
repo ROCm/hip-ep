@@ -104,32 +104,19 @@ struct HipReadbackBufferizableModel
   }
 };
 
-// Bufferization model for hip.transfer (added in parallel to the readback
-// models above; it does not touch them). hip.transfer is a value-preserving
-// tensor->tensor op whose `target` attribute names the destination HIP memory
-// space. It bufferizes to a fresh allocation in that space plus an explicit
-// async memcpy and a stream sync:
+// Bufferization model for hip.transfer: a value-preserving tensor->tensor op
+// whose `target` attribute names the destination HIP memory space. Bufferizes
+// to a fresh, non-aliasing allocation in that space + an explicit async memcpy
+// (+ a stream sync for D2H; see the bufferize() body for why H2D omits it).
+// The src operand is read-only. Copy direction is derived from the operands'
+// spaces -- device<->{host,pinned} (pad only exercises D2H); an unspecified
+// src space is treated as device (the transitional default).
 //
 //   Before:  %h = hip.transfer(%ctx, %pads : tensor<8xi64>) to #hip.mem<host>
 //                   -> tensor<8xi64>
 //   After:   %dst = memref.alloc() : memref<8xi64, #hip.mem<host>>
-//            hip.memcpy_d2h_async(%ctx, %dst, %srcBuf : ..., ...)
-//            hip.stream_sync(%ctx)
-//            // uses of %h replaced by %dst
-//
-// The result is a NEW buffer (bufferizesToAllocation = true, no aliasing of the
-// src operand); the src operand is read-only. Direction is chosen from the
-// explicit memory spaces: device->{host,pinned} = D2H, {host,pinned}->device =
-// H2D (the pad pilot only exercises D2H). An unspecified src space is treated
-// as device (the transitional default).
-//
-// The trailing hip.stream_sync is emitted ONLY for D2H: the host reads the
-// destination next (e.g. a tensor.extract / CPU-side kernel argument), so it
-// must wait for the async copy to land. H2D omits the sync -- the device
-// destination is consumed by later GPU work enqueued on the SAME stream, which
-// stream ordering already sequences after the copy, so a host barrier would
-// only stall the host (the host source is a session-lived pooled buffer that
-// outlives the in-flight copy).
+//            hip.memcpy_d2h_async(%ctx, %dst, %srcBuf)
+//            hip.stream_sync(%ctx)            // uses of %h replaced by %dst
 struct HipTransferBufferizableModel
     : public bufferization::BufferizableOpInterface::ExternalModel<
           HipTransferBufferizableModel, TransferOp> {
@@ -179,10 +166,15 @@ struct HipTransferBufferizableModel
       return failure();
     auto srcTy = cast<MemRefType>(srcBuf->getType());
 
-    auto resultTensorTy = cast<TensorType>(transfer.getResult().getType());
-    auto dstTy = cast<MemRefType>(
-        bufferization::getMemRefTypeWithStaticIdentityLayout(
-            resultTensorTy, transfer.getTargetAttr()));
+    // Single source of truth for the destination buffer type: defer to the
+    // framework, which calls our getBufferType() hook above. Recomputing
+    // getMemRefTypeWithStaticIdentityLayout() here would risk drifting from
+    // the declared buffer type if the layout/space policy ever changes.
+    FailureOr<bufferization::BufferLikeType> dstTyOr =
+        bufferization::getBufferType(transfer.getResult(), options, state);
+    if (failed(dstTyOr))
+      return failure();
+    auto dstTy = cast<MemRefType>(*dstTyOr);
 
     // Dynamic dst dims mirror the src buffer's dims.
     SmallVector<Value> dynDims;
@@ -206,13 +198,9 @@ struct HipTransferBufferizableModel
     Value ctx = transfer.getCtx();
     if (srcKind == MemorySpaceKind::Device && dstIsHost) {
       MemcpyD2HAsyncOp::create(rewriter, loc, ctx, dst, *srcBuf);
-      // D2H only: the host reads `dst` next (a tensor.extract / CPU-side kernel
-      // arg), so the async copy must complete before that host load -- emit a
-      // stream sync. H2D below needs NO host sync: the device `dst` is consumed
-      // by later GPU work on the SAME stream, which stream ordering already
-      // sequences after this copy (a sync would just stall the host); the host
-      // source is a session-lived pooled buffer that outlives the in-flight
-      // copy.
+      // D2H: the host reads `dst` next, so wait for the async copy. (H2D needs
+      // no host sync -- the device `dst` is consumed by later GPU work on the
+      // same stream, and the host src outlives the in-flight copy.)
       StreamSyncOp::create(rewriter, loc, ctx);
     } else if (srcIsHost && dstKind == MemorySpaceKind::Device) {
       MemcpyH2DAsyncOp::create(rewriter, loc, ctx, dst, *srcBuf);

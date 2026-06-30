@@ -119,6 +119,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/IR/HipShapeUtils.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -272,10 +273,7 @@ void MaterializeHostScalarsPass::runOnOperation() {
   int64_t total = 0;
   for (memref::AllocOp allocOp : candidates) {
     MemRefType ty = allocOp.getType();
-    Type elemTy = ty.getElementType();
-    unsigned bits = elemTy.isIndex() ? 64 : elemTy.getIntOrFloatBitWidth();
-    int64_t elemBytes = static_cast<int64_t>((bits + 7) / 8);
-    int64_t bytes = ty.getNumElements() * elemBytes;
+    int64_t bytes = ty.getNumElements() * elementByteSize(ty.getElementType());
     if (bytes == 0)
       bytes = 1; // rank-0 with i1 etc. — never zero-sized
     int64_t off = roundUp(total, kAlign);

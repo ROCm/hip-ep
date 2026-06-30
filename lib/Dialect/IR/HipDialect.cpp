@@ -154,13 +154,13 @@ static LogicalResult verifyMemcpyShapes(Operation *op, Value dst, Value src) {
 void MemcpyH2DAsyncOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  // Write the device dst (operand 1), Read the host src (operand 2). The
-  // Write keeps the copy alive even though it has no SSA result.
-  effects.emplace_back(MemoryEffects::Write::get(),
-                       &getOperation()->getOpOperand(1),
+  // Write the device `dst`, Read the host `src`. Bound to the named operands
+  // (not magic operand indices) so the effects stay correct if the operand
+  // order ever changes. The Write keeps the copy alive even though it has no
+  // SSA result.
+  effects.emplace_back(MemoryEffects::Write::get(), &getDstMutable(),
                        SideEffects::DefaultResource::get());
-  effects.emplace_back(MemoryEffects::Read::get(),
-                       &getOperation()->getOpOperand(2),
+  effects.emplace_back(MemoryEffects::Read::get(), &getSrcMutable(),
                        SideEffects::DefaultResource::get());
 }
 
@@ -171,17 +171,34 @@ LogicalResult MemcpyH2DAsyncOp::verify() {
 void MemcpyD2HAsyncOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  // Write the host dst (operand 1), Read the device src (operand 2).
-  effects.emplace_back(MemoryEffects::Write::get(),
-                       &getOperation()->getOpOperand(1),
+  // Write the host `dst`, Read the device `src`. Bound to the named operands
+  // (not magic operand indices) so the effects stay correct if the operand
+  // order ever changes.
+  effects.emplace_back(MemoryEffects::Write::get(), &getDstMutable(),
                        SideEffects::DefaultResource::get());
-  effects.emplace_back(MemoryEffects::Read::get(),
-                       &getOperation()->getOpOperand(2),
+  effects.emplace_back(MemoryEffects::Read::get(), &getSrcMutable(),
                        SideEffects::DefaultResource::get());
 }
 
 LogicalResult MemcpyD2HAsyncOp::verify() {
   return verifyMemcpyShapes(getOperation(), getDst(), getSrc());
+}
+
+// hip.transfer is value-preserving: `src` and `result` must share shape and
+// element type. The memory SPACE is deliberately NOT compared -- the transfer
+// exists precisely to move the value into a different space. Works in both the
+// tensor phase (tensor->tensor) and, transiently, the memref phase.
+LogicalResult TransferOp::verify() {
+  auto srcTy = dyn_cast<ShapedType>(getSrc().getType());
+  auto resTy = dyn_cast<ShapedType>(getResult().getType());
+  if (!srcTy || !resTy)
+    return emitOpError("src and result must both be shaped (tensor or memref)");
+  if (srcTy.getElementType() != resTy.getElementType())
+    return emitOpError("src/result element type mismatch: ")
+           << srcTy.getElementType() << " vs " << resTy.getElementType();
+  if (srcTy.getShape() != resTy.getShape())
+    return emitOpError("src/result shape mismatch");
+  return success();
 }
 
 void StreamSyncOp::getEffects(

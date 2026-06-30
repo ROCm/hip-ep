@@ -5,6 +5,8 @@
 
 #include "HipToLLVMUtils.h"
 
+#include "hip/Dialect/IR/HipShapeUtils.h"
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -29,8 +31,7 @@ static Value getStream(Value statePtr, ModuleOp module,
 static Value byteCount(MemRefType type, Value descriptor,
                        ConversionPatternRewriter &rewriter, Location loc) {
   Type i64Type = rewriter.getI64Type();
-  unsigned bits = type.getElementType().getIntOrFloatBitWidth();
-  int64_t elemBytes = static_cast<int64_t>((bits + 7) / 8);
+  int64_t elemBytes = elementByteSize(type.getElementType());
   Value numElems = computeNumElements(type, descriptor, rewriter, loc);
   Value elemBytesVal = LLVM::ConstantOp::create(
       rewriter, loc, i64Type, rewriter.getI64IntegerAttr(elemBytes));
