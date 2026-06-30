@@ -217,21 +217,6 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm,
   //     test/lit/Pipelines/ asserts this ordering does not regress.
   pm.addNestedPass<func::FuncOp>(hip::createMaterializeHostScalarsPass());
 
-  // 6b2. Pack #hip.mem<host> allocs (bufferized `hip.transfer ... to host`,
-  //      e.g. hip.pad's pads/axes D2H destination) into a dedicated, separate
-  //      PAGEABLE host pool via hip.get_host_mem. Distinct from 6b's pinned
-  //      get_host_scratch (a pageable `host` buffer must never be mislabelled
-  //      as `pinned`).
-  //
-  //      Placement is load-bearing: MUST run BEFORE PoolAllocs so these host
-  //      allocs are removed from its input set — a surviving #hip.mem<host>
-  //      alloc reaching MemRefAllocOpLowering would lower to the undefined
-  //      hip_device_malloc. PoolAllocs also defensively skips host-space
-  //      allocs. MaterializeHostScalars (6b) is unaffected: its scalar
-  //      classifier never matches these (users are hip.memcpy_d2h_async /
-  //      hip.pad, not memref.store/load).
-  pm.addNestedPass<func::FuncOp>(hip::createPoolHostTransfersPass());
-
   // 6c. Hoist speculatable size arithmetic feeding `memref.alloc` dynamic
   //     operands above the earliest dynamic alloc in the entry block.
   //     PoolAllocs's single-block dominator-emit phase requires every

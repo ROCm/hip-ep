@@ -9,7 +9,6 @@
 //   hip.memcpy_h2d_async -> wrap_hipMemcpyH2D
 //   hip.stream_sync      -> wrap_hipStreamSynchronize (plain sync, NOT
 //                           hipdnn_ep_stream_sync)
-//   hip.get_host_mem     -> hipdnn_ep_get_host_mem_base (the one new symbol)
 // Every memcpy/sync first resolves the stream via hipdnn_ep_state_get_stream.
 // ============================================================================
 
@@ -43,15 +42,5 @@ func.func @h2d(%ctx: !hip.context,
                %src: memref<4xi32, #hip.mem<host>>) {
   hip.memcpy_h2d_async(%ctx, %dst, %src
       : memref<4xi32, #hip.mem<device>>, memref<4xi32, #hip.mem<host>>)
-  return
-}
-
-// -----
-
-// hip.get_host_mem -> hipdnn_ep_get_host_mem_base + a memref descriptor.
-// CHECK-LABEL: llvm.func @host_mem
-// CHECK:         llvm.call @hipdnn_ep_get_host_mem_base({{.*}})
-func.func @host_mem(%ctx: !hip.context, %sz: index) {
-  %m = hip.get_host_mem(%ctx, %sz) : memref<?xi8, #hip.mem<host>>
   return
 }

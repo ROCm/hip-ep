@@ -84,16 +84,6 @@ struct RuntimeState {
   void *host_scratch_base;
   size_t host_scratch_size;
 
-  // Dedicated PAGEABLE host-memory pool backing hip.get_host_mem (the D2H
-  // destination of hip.transfer-lowered pads/axes). Plain malloc/realloc — NOT
-  // hipHostMalloc — because this buffer is read CPU-side only and never
-  // accessed by the GPU (deliberately kept separate from the pinned
-  // host_scratch above so a pageable `host` buffer is never mislabelled as
-  // `pinned`). Grow-on-demand via hipdnn_ep_get_host_mem_base(); never shrinks;
-  // free()'d in cleanup.
-  void *host_mem_base;
-  size_t host_mem_size;
-
   // Output allocator installed by the EP before inference_compute via
   // hipdnn_ep_set_output_allocator. hipdnn_ep_alloc_output forwards to
   // allocate(self, ...). Borrowed: `self` is EP-owned, never freed here.

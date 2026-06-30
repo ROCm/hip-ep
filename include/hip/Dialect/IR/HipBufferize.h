@@ -112,9 +112,20 @@ struct HipReadbackBufferizableModel
 // spaces -- device<->{host,pinned} (pad only exercises D2H); an unspecified
 // src space is treated as device (the transitional default).
 //
+// A host/pinned destination is a small, static buffer that the host reads
+// immediately after the synchronized D2H, so it is a STACK `memref.alloca`
+// (no runtime allocator, no pooling). `memref.alloca` must live in the default
+// LLVM stack address space, but #hip.mem<host> maps to a non-zero LLVM address
+// space -- so the alloca is space-less and a `memref.memory_space_cast` lifts it
+// to the target space for the typed memcpy operand (the cast lowers to a plain
+// addrspacecast of the stack pointer). A device destination (H2D) stays a heap
+// `memref.alloc` that hip-pool-allocs folds into the GPU pool.
+//
 //   Before:  %h = hip.transfer(%ctx, %pads : tensor<8xi64>) to #hip.mem<host>
 //                   -> tensor<8xi64>
-//   After:   %dst = memref.alloc() : memref<8xi64, #hip.mem<host>>
+//   After:   %slot = memref.alloca() : memref<8xi64>
+//            %dst  = memref.memory_space_cast %slot
+//                      : memref<8xi64> to memref<8xi64, #hip.mem<host>>
 //            hip.memcpy_d2h_async(%ctx, %dst, %srcBuf)
 //            hip.stream_sync(%ctx)            // uses of %h replaced by %dst
 struct HipTransferBufferizableModel
@@ -147,8 +158,7 @@ struct HipTransferBufferizableModel
     auto transfer = cast<TransferOp>(op);
     auto tensorTy = cast<TensorType>(transfer.getResult().getType());
     // Result buffer lives in the target space with a static identity layout
-    // (so the pad lowering's contiguous-ptr extraction and PoolHostTransfers'
-    // view rewrite both see a dense buffer).
+    // (so the pad lowering's contiguous-ptr extraction sees a dense buffer).
     BaseMemRefType bt = bufferization::getMemRefTypeWithStaticIdentityLayout(
         tensorTy, transfer.getTargetAttr());
     return cast<bufferization::BufferLikeType>(bt);
@@ -176,13 +186,6 @@ struct HipTransferBufferizableModel
       return failure();
     auto dstTy = cast<MemRefType>(*dstTyOr);
 
-    // Dynamic dst dims mirror the src buffer's dims.
-    SmallVector<Value> dynDims;
-    for (int64_t i : llvm::seq<int64_t>(dstTy.getRank()))
-      if (dstTy.isDynamicDim(i))
-        dynDims.push_back(memref::DimOp::create(rewriter, loc, *srcBuf, i));
-    Value dst = memref::AllocOp::create(rewriter, loc, dstTy, dynDims);
-
     // Pick the copy direction from the explicit memory spaces. An unspecified
     // src space is treated as device (today's transitional default).
     MemorySpaceKind dstKind = transfer.getTarget().getKind();
@@ -194,6 +197,29 @@ struct HipTransferBufferizableModel
         srcKind == MemorySpaceKind::Host || srcKind == MemorySpaceKind::Pinned;
     bool dstIsHost =
         dstKind == MemorySpaceKind::Host || dstKind == MemorySpaceKind::Pinned;
+
+    // Dynamic dst dims mirror the src buffer's dims.
+    SmallVector<Value> dynDims;
+    for (int64_t i : llvm::seq<int64_t>(dstTy.getRank()))
+      if (dstTy.isDynamicDim(i))
+        dynDims.push_back(memref::DimOp::create(rewriter, loc, *srcBuf, i));
+
+    // A host/pinned destination is a small, immediately-consumed buffer, so it
+    // is a STACK alloca rather than a heap/pool allocation. `memref.alloca`
+    // must use the default LLVM stack address space, so allocate space-less and
+    // `memory_space_cast` up to the target space for the typed memcpy operand
+    // (the cast lowers to a plain addrspacecast of the stack pointer). A device
+    // destination (H2D) stays a heap alloc that hip-pool-allocs folds into the
+    // GPU pool.
+    Value dst;
+    if (dstIsHost) {
+      auto slotTy =
+          MemRefType::get(dstTy.getShape(), dstTy.getElementType());
+      Value slot = memref::AllocaOp::create(rewriter, loc, slotTy, dynDims);
+      dst = memref::MemorySpaceCastOp::create(rewriter, loc, dstTy, slot);
+    } else {
+      dst = memref::AllocOp::create(rewriter, loc, dstTy, dynDims);
+    }
 
     Value ctx = transfer.getCtx();
     if (srcKind == MemorySpaceKind::Device && dstIsHost) {

@@ -207,14 +207,12 @@ func.func @host_scalar_as_reshape_shape(%ctx: !hip.context, %x: i64,
   return %r : memref<?x?xf16>
 }
 
-// --- Alloc carrying an explicit #hip.mem<host> space: this is a
-//     `hip.transfer ... to host` destination, owned by the SEPARATE pageable
-//     host pool (hip-pool-host-transfers). It is a small integer alloc with a
-//     memref.load user — otherwise indistinguishable from a host-staged scalar
-//     — but MUST be left for the other pass: redirecting it here would build a
-//     memref.view whose #hip.mem<host> result mismatches the space-less
-//     scratch base and fail the verifier. Regression for the pad runtime-cval
-//     transfer crash. ---
+// --- Alloc carrying an explicit #hip.mem<host> space: this looks like a
+//     `hip.transfer ... to host` destination — a small integer alloc with a
+//     memref.load user, otherwise indistinguishable from a host-staged scalar
+//     — but MUST be left alone: redirecting it here would build a memref.view
+//     whose #hip.mem<host> result mismatches the space-less scratch base and
+//     fail the verifier. Regression for the pad runtime-cval transfer crash. ---
 // CHECK-LABEL: func.func @host_space_alloc_left_alone
 // CHECK-NOT:   hip.get_host_scratch
 // CHECK:       memref.alloc() : memref<i32, #hip.mem<host>>

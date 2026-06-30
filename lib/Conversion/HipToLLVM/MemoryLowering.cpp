@@ -215,58 +215,6 @@ struct GetHostScratchOpLowering
   }
 };
 
-// --- GetHostMemOp: hip.get_host_mem(%ctx, %size) : memref<?xi8, #hip.mem<host>>
-//     -> llvm.call @hipdnn_ep_get_host_mem_base(state, size) + descriptor.
-// Mirrors GetHostScratchOpLowering but calls the PAGEABLE host-pool base (plain
-// malloc/realloc) instead of the pinned scratch base. The result's
-// #hip.mem<host> space maps to a non-default LLVM AS, so the runtime's AS-0
-// pointer is addrspace-cast up to it below (host-scratch is space-less, AS 0).
-struct GetHostMemOpLowering : public ConvertOpToLLVMPattern<GetHostMemOp> {
-  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
-
-  LogicalResult
-  matchAndRewrite(GetHostMemOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    Location loc = op.getLoc();
-    ModuleOp module = op->getParentOfType<ModuleOp>();
-    Type ptrType = getPtrType();
-    Type i64Type = rewriter.getI64Type();
-    MemRefType memRefType = cast<MemRefType>(op.getHostMem().getType());
-
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kHipGetHostMem, {ptrType, i64Type}, ptrType);
-    if (failed(funcOp))
-      return failure();
-
-    Value size = adaptor.getSize();
-    Value rawPtr =
-        LLVM::CallOp::create(rewriter, loc, *funcOp,
-                             ValueRange{adaptor.getCtx(), size})
-            .getResult();
-
-    FailureOr<unsigned> addrSpace =
-        getTypeConverter()->getMemRefAddressSpace(memRefType);
-    if (failed(addrSpace))
-      return failure();
-
-    Value hostPtr = rawPtr;
-    if (cast<LLVM::LLVMPointerType>(rawPtr.getType()).getAddressSpace() !=
-        *addrSpace)
-      hostPtr = LLVM::AddrSpaceCastOp::create(
-          rewriter, loc,
-          LLVM::LLVMPointerType::get(rewriter.getContext(), *addrSpace),
-          rawPtr);
-
-    Value stride1 = LLVM::ConstantOp::create(
-        rewriter, loc, rewriter.getI64Type(), rewriter.getI64IntegerAttr(1));
-
-    MemRefDescriptor desc = createMemRefDescriptor(
-        loc, memRefType, hostPtr, hostPtr, {size}, {stride1}, rewriter);
-    rewriter.replaceOp(op, {desc});
-    return success();
-  }
-};
-
 // --- AllocOutputOp: hip.alloc_output(%ctx, %dyn...) {out_idx} : memref<...>
 //     -> llvm.call @hipdnn_ep_alloc_output(state, out_idx, shape, rank,
 //        elem_size) + a memref descriptor over the returned device pointer.
@@ -833,9 +781,9 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
 void populateMemoryLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns) {
   patterns.add<AllocOpLowering, FreeOpLowering, GetPoolOpLowering,
-               GetHostScratchOpLowering, GetHostMemOpLowering,
-               AllocOutputOpLowering, GetConstantOpLowering,
-               MemRefAllocOpLowering, MemRefDeallocOpLowering>(converter);
+               GetHostScratchOpLowering, AllocOutputOpLowering,
+               GetConstantOpLowering, MemRefAllocOpLowering,
+               MemRefDeallocOpLowering>(converter);
   patterns.add<MemRefCopyOpLowering>(converter);
 }
 

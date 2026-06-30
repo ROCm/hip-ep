@@ -366,16 +366,6 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state, int domain_id,
 // Returns: host-mapped base pointer (NULL on allocation failure)
 void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size);
 
-// Get the dedicated PAGEABLE host-memory pool base, growing it if needed.
-// Called from hip.get_host_mem (emitted by hip-pool-host-transfers) to back the
-// D2H destination of hip.transfer-lowered buffers (e.g. hip.pad's pads/axes).
-// Distinct from hipdnn_ep_get_host_scratch_base: this uses plain malloc/realloc
-// (NOT hipHostMalloc) because the buffer is read CPU-side only and never
-// accessed by the GPU. Per-session, grow-on-demand (stream-synced realloc),
-// never shrinks; free()'d in cleanup.
-// Returns: pageable host base pointer (NULL on allocation failure)
-void *hipdnn_ep_get_host_mem_base(RuntimeState *state, size_t needed_size);
-
 // Shared workspace management (lazily grown, reused across MatMul/GQA/Conv)
 void *hipdnn_ep_state_get_workspace(RuntimeState *state);
 size_t hipdnn_ep_state_get_workspace_size(RuntimeState *state);

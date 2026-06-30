@@ -359,38 +359,6 @@ def Hip_GetHostScratchOp : Hip_Op<"get_host_scratch",
   let assemblyFormat = "`(` $ctx `,` $scratch_size `)` attr-dict `:` type($scratch)";
 }
 
-def Hip_GetHostMemOp : Hip_Op<"get_host_mem",
-    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
-  let summary = "Get the runtime-owned PAGEABLE host memory pool (grow-on-demand)";
-  let description = [{
-    Returns a reference to the runtime-managed PAGEABLE host memory buffer
-    (plain `malloc`/`realloc`, NOT `hipHostMalloc`). It is the dedicated
-    backing pool for `#hip.mem<host>` allocations produced by `hip.transfer`
-    (the D2H destination of a device->host transfer, read CPU-side and never
-    accessed by the GPU). The result memref normally carries `#hip.mem<host>`.
-
-    This is a deliberate sibling of `hip.get_host_scratch` (which is pinned,
-    `hipHostMalloc(hipHostMallocMapped)`, host-writable AND GPU-readable, and
-    backs hip-materialize-host-scalars' tiny host-fed scalars). The two pools
-    are kept separate so a pageable `host` buffer is never mislabelled as
-    `pinned`. Grow-on-demand semantics mirror `hip.get_pool` /
-    `hip.get_host_scratch`; the buffer is per-session and never shrinks.
-
-    Example:
-    ```mlir
-    %host = hip.get_host_mem(%ctx, %size) : memref<?xi8, #hip.mem<host>>
-    ```
-  }];
-
-  let arguments = (ins Hip_ContextType:$ctx, Index:$size);
-  // Always yields a `#hip.mem<host>` buffer (the `Hip_HostMemRef` predicate
-  // also accepts a still-unspecified space during the bufferization
-  // transition). Distinct from `hip.get_host_scratch`, whose result is
-  // deliberately space-less (`AnyMemRef`).
-  let results = (outs Hip_HostMemRef:$host_mem);
-  let assemblyFormat = "`(` $ctx `,` $size `)` attr-dict `:` type($host_mem)";
-}
-
 def Hip_AllocOutputOp : Hip_Op<"alloc_output",
     [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Obtain a graph-output buffer from the EP output allocator";
@@ -3918,8 +3886,10 @@ def Hip_ReadbackScalarOp : Hip_Op<"readback_scalar",
 // Before (tensor form, after convert-onnx-to-hip):
 //   %h = hip.transfer(%ctx, %pads : tensor<8xi64>) to #hip.mem<host>
 //          -> tensor<8xi64>
-// After bufferize (device->host: alloc host dst, copy, sync):
-//   %dst = memref.alloc() : memref<8xi64, #hip.mem<host>>
+// After bufferize (device->host: stack host dst, copy, sync):
+//   %slot = memref.alloca() : memref<8xi64>
+//   %dst  = memref.memory_space_cast %slot
+//             : memref<8xi64> to memref<8xi64, #hip.mem<host>>
 //   hip.memcpy_d2h_async(%ctx, %dst, %src
 //          : memref<8xi64, #hip.mem<host>>, memref<8xi64>)
 //   hip.stream_sync(%ctx)
@@ -3934,9 +3904,12 @@ def Hip_TransferOp : Hip_Op<"transfer", []> {
     Tensor-phase indicator: in tensor form the result is just a tensor (no
     memory space), and the destination space is carried by the `target`
     attribute. Bufferization (HipTransferBufferizableModel) realises the
-    crossing as a target-space `memref.alloc` plus `hip.memcpy_*_async` +
-    `hip.stream_sync`. Making the crossing explicit in the IR is what enables
-    later sync-barrier optimisation; today only `hip.pad` emits it.
+    crossing as a destination buffer plus `hip.memcpy_*_async` +
+    `hip.stream_sync` (a host/pinned destination is a stack `memref.alloca`
+    lifted to the target space via `memref.memory_space_cast`; a device
+    destination is a heap `memref.alloc`). Making the crossing explicit in the
+    IR is what enables later sync-barrier optimisation; today only `hip.pad`
+    emits it.
 
     The `target` attribute admits any HIP memory space for forward
     compatibility, but bufferization currently realises only the

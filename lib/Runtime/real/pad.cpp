@@ -11,9 +11,8 @@
 //         (_PadKernel; ONNX `wrap` mode added on top).
 //
 // `pads` and `axes` arrive as HOST (pageable) pointers: PadConversion wraps
-// them with `hip.transfer ... to host`, which bufferizes to a #hip.mem<host>
-// alloc + `hip.memcpy_d2h_async` + `hip.stream_sync` (the host pool is backed
-// by hipdnn_ep_get_host_mem_base and packed by hip-pool-host-transfers). So by
+// them with `hip.transfer ... to host`, which bufferizes to a stack
+// #hip.mem<host> buffer + `hip.memcpy_d2h_async` + `hip.stream_sync`. So by
 // the time wrap_pad runs, the pads/axes bytes are already host-resident and
 // the device->host crossing has been synchronized in the IR -- wrap_pad just
 // reads them with a plain memcpy, no internal D2H and no stream sync of its

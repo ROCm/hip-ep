@@ -8,10 +8,12 @@
 // test (hip-memory-space-pipeline.mlir) drives a full onnx.Pad through
 // bufferize but asserts only that hip.pad reaches memref form. This test
 // pins the device->host lowering ARTIFACTS directly: a tensor-phase
-// hip.transfer to #hip.mem<host> must become
-//   memref.alloc #hip.mem<host>  +  hip.memcpy_d2h_async  +  hip.stream_sync
-// (the host alloc is what hip-pool-host-transfers later packs; the trailing
-// stream_sync is required because the host reads `dst` next).
+// hip.transfer to #hip.mem<host> must become a STACK alloca lifted to the host
+// space via memory_space_cast, plus hip.memcpy_d2h_async and hip.stream_sync:
+//   memref.alloca (default space)
+//     + memref.memory_space_cast -> #hip.mem<host>
+//     + hip.memcpy_d2h_async  +  hip.stream_sync
+// (the trailing stream_sync is required because the host reads `dst` next).
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt %s --one-shot-bufferize="bufferize-function-boundaries" \
@@ -22,7 +24,8 @@
 // function boundary -- keeps the test focused on the transfer artifacts.
 
 // CHECK-LABEL: func.func @transfer_d2h_bufferize
-// CHECK:         %[[DST:.*]] = memref.alloc() : memref<8xi64, #hip.mem<host>>
+// CHECK:         %[[SLOT:.*]] = memref.alloca() : memref<8xi64>
+// CHECK:         %[[DST:.*]] = memref.memory_space_cast %[[SLOT]] : memref<8xi64> to memref<8xi64, #hip.mem<host>>
 // CHECK:         hip.memcpy_d2h_async(%{{.*}}, %[[DST]], %{{.*}} : memref<8xi64, #hip.mem<host>>,
 // CHECK:         hip.stream_sync(%{{.*}})
 // CHECK:         memref.load %[[DST]]

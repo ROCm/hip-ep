@@ -119,16 +119,6 @@ void GetHostScratchOp::getEffects(
                        SideEffects::DefaultResource::get());
 }
 
-void GetHostMemOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
-        &effects) {
-  // Same ownership model as GetHostScratchOp / GetPoolOp: the returned buffer
-  // is a runtime-managed pool, modelled as an Allocate on the result.
-  effects.emplace_back(MemoryEffects::Allocate::get(),
-                       getOperation()->getResult(0),
-                       SideEffects::DefaultResource::get());
-}
-
 //===----------------------------------------------------------------------===//
 // Explicit memory transfer ops: effects + verifiers
 //===----------------------------------------------------------------------===//

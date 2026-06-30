@@ -603,10 +603,10 @@ void PoolAllocsPass::runOnOperation() {
     auto allocOp = dyn_cast<memref::AllocOp>(op);
     if (!allocOp)
       continue;
-    // Defensive: #hip.mem<host> allocs belong to the dedicated pageable host
-    // pool (hip-pool-host-transfers), not the GPU pool. They are normally
-    // consumed before this pass runs; skip any that slip through so a host
-    // buffer is never absorbed into device pool memory.
+    // Defensive: a #hip.mem<host> heap alloc is CPU-only memory and must never
+    // be absorbed into the GPU pool (that would lower to the undefined
+    // hip_device_malloc). Host transfer destinations are stack allocas today,
+    // so none should reach here; skip any that slip through.
     if (auto sp = dyn_cast_or_null<MemorySpaceAttr>(
             allocOp.getType().getMemorySpace()))
       if (sp.getKind() == MemorySpaceKind::Host)

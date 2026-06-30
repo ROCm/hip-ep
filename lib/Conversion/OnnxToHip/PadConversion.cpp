@@ -302,8 +302,7 @@ struct PadToHip : public mlir::RewritePattern {
     // runtime path) buildPadOutputInit reads the same host copy via
     // tensor.extract (see extractAsIndex). One shared transfer instead of a
     // kernel-operand transfer plus a per-dim hip.readback_scalar; bufferizes to
-    // a #hip.mem<host> alloc + memcpy_d2h_async + stream_sync (pooled by
-    // hip-pool-host-transfers).
+    // a stack #hip.mem<host> buffer + memcpy_d2h_async + stream_sync.
     //
     // Before: %pads : tensor<4xi64>   (device operand)
     // After:  %ph = hip.transfer(%ctx, %pads : tensor<4xi64>) to <host>

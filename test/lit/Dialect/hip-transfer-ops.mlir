@@ -6,7 +6,6 @@
 //   hip.transfer (tensor-phase, value-preserving)
 //   hip.memcpy_h2d_async / hip.memcpy_d2h_async (memref-phase async copy)
 //   hip.stream_sync (host-side barrier)
-//   hip.get_host_mem (dedicated pageable host pool accessor)
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt %s 2>&1 | FileCheck %s
@@ -17,14 +16,6 @@
 func.func @transfer_to_host(%ctx: !hip.context, %pads: tensor<8xi64>) -> tensor<8xi64> {
   %h = hip.transfer(%ctx, %pads : tensor<8xi64>) to #hip.mem<host> -> tensor<8xi64>
   return %h : tensor<8xi64>
-}
-
-// --- hip.get_host_mem: pageable host pool, rank-1 i8 in #hip.mem<host>. ---
-// CHECK-LABEL: func.func @get_host_mem
-// CHECK: hip.get_host_mem(%{{.*}}, %{{.*}}) : memref<?xi8, #hip.mem<host>>
-func.func @get_host_mem(%ctx: !hip.context, %sz: index) {
-  %m = hip.get_host_mem(%ctx, %sz) : memref<?xi8, #hip.mem<host>>
-  return
 }
 
 // --- hip.memcpy_d2h_async: device src -> host dst (the pad pilot direction). ---

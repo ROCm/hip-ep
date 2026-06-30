@@ -47,8 +47,8 @@ module {
   // Constant pad with a RUNTIME (non-constant) constant_value scalar (here a
   // function arg). hip.pad still takes it BY VALUE: the converter brings the
   // runtime scalar to the host via the SAME explicit transfer mechanism used
-  // for pads/axes (hip.transfer -> #hip.mem<host> alloc + memcpy_d2h + sync at
-  // bufferization), then reads it by value with tensor.extract.
+  // for pads/axes (hip.transfer -> stack #hip.mem<host> buffer + memcpy_d2h +
+  // sync at bufferization), then reads it by value with tensor.extract.
   func.func @pad_constant_with_cval(%data: tensor<3x4xf32>, %pads: tensor<4xi64>, %cval: tensor<f32>) -> tensor<5x6xf32> {
     %none = "onnx.NoValue"() {value} : () -> none
     %r = "onnx.Pad"(%data, %pads, %cval, %none) {mode = "constant"} : (tensor<3x4xf32>, tensor<4xi64>, tensor<f32>, none) -> tensor<5x6xf32>

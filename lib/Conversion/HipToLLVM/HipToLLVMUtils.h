@@ -41,10 +41,6 @@ inline constexpr const char *kHipFree = "hip_device_free";
 inline constexpr const char *kHipGetPoolBase = "hipdnn_ep_get_pool_base";
 inline constexpr const char *kHipGetHostScratch =
     "hipdnn_ep_get_host_scratch_base";
-// Pageable host-memory pool base (backs hip.get_host_mem). Sibling of the
-// pinned hipdnn_ep_get_host_scratch_base; plain malloc/realloc, never
-// hipHostMalloc — see hipdnn_ep_runtime_state.cpp.
-inline constexpr const char *kHipGetHostMem = "hipdnn_ep_get_host_mem_base";
 inline constexpr const char *kHipAllocOutput = "hipdnn_ep_alloc_output";
 
 inline constexpr const char *kWrapHipMemcpyAsync = "wrap_hipMemcpyAsync";

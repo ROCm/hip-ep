@@ -61,9 +61,9 @@ static LogicalResult lowerMemcpy(OpTy op, Value dstDesc, MemRefType dstTy,
   Type i32Type = rewriter.getI32Type();
   Type i64Type = rewriter.getI64Type();
 
-  // Offset-aware data pointers: PoolHostTransfers rewrites the host buffer to a
-  // memref.view into the pageable host pool with a non-zero descriptor offset,
-  // so we must honor the offset (extractMemRefDataPtr), not just alignedPtr.
+  // Offset-aware data pointers: a memcpy operand may carry a non-zero
+  // descriptor offset (e.g. a memref.view/subview into a larger buffer), so we
+  // must honor the offset (extractMemRefDataPtr), not just alignedPtr.
   Value dstPtr =
       extractMemRefDataPtr(dstDesc, dstTy, typeConverter, rewriter, loc);
   Value srcPtr =

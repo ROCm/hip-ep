@@ -95,13 +95,12 @@
 //   - Floating-point element types: rare on the host-fed scalar path,
 //     almost always GPU-consumed in flight, where the GPU pool is the
 //     right home.
-//   - Allocs carrying an explicit `#hip.mem<>` memory space: these are owned
-//     by the EXPLICIT transfer mechanism (the pageable host pool packed by
-//     `hip-pool-host-transfers`), a deliberately separate pool. A
-//     `hip.transfer ... to host` destination is a small `#hip.mem<host>`
-//     integer alloc with a `memref.load` user, otherwise indistinguishable
-//     from a host-staged scalar — grabbing it here would build a `memref.view`
-//     whose host-space result mismatches the space-less scratch base.
+//   - Allocs/allocas carrying an explicit `#hip.mem<>` memory space: these are
+//     owned by the EXPLICIT transfer mechanism (a `hip.transfer ... to host`
+//     destination is a small `#hip.mem<host>` buffer, otherwise
+//     indistinguishable from a host-staged scalar). Grabbing one here would
+//     build a `memref.view` whose host-space result mismatches the space-less
+//     scratch base, so the explicit-space filter leaves them alone.
 //   - Functions whose arg 0 is not `!hip.context`: silently skipped.
 //     Utility functions and pre-context-arg passes don't have access to
 //     the runtime scratch handle; the pass is a best-effort mitigation,
@@ -209,15 +208,12 @@ static bool isHostScalarCandidate(memref::AllocOp allocOp) {
   MemRefType type = allocOp.getType();
   if (!type.hasStaticShape())
     return false;
-  // Explicit #hip.mem<> allocs belong to the EXPLICIT transfer mechanism (the
-  // pageable host pool packed by hip-pool-host-transfers), never to this
-  // pinned host_scratch pool — the two pools are deliberately disjoint. In
-  // particular a `hip.transfer ... to host` destination is a small
-  // #hip.mem<host> integer alloc with a memref.load user, which otherwise
+  // Explicit #hip.mem<> allocs belong to the EXPLICIT transfer mechanism, not
+  // to this pinned host_scratch pool. In particular a `hip.transfer ... to
+  // host` destination is a small #hip.mem<host> integer buffer that otherwise
   // looks exactly like a host-staged scalar; grabbing it here would emit a
   // memref.view whose #hip.mem<host> result mismatches the space-less scratch
-  // base (memref<?xi8>) and fail the memref.view verifier. Leave it for
-  // hip-pool-host-transfers, which builds a host-space base that matches.
+  // base (memref<?xi8>) and fail the memref.view verifier. Leave it alone.
   if (dyn_cast_or_null<MemorySpaceAttr>(type.getMemorySpace()))
     return false;
   if (type.getNumElements() > 16)
