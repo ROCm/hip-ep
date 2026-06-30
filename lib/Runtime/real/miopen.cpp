@@ -46,12 +46,13 @@
 //    the Find-selected algorithm + its actual workspace size are cached once
 //    per shape in RuntimeState::conv_fwd_cache (see ConvFwdCache below). On a
 //    cache hit the call skips miopenConvolutionForwardGetWorkSpaceSize AND
-//    miopenFindConvolutionForwardAlgorithm. MIOpen docs: "miopenFindConvolution*()
-//    is expensive in terms of run time and required workspace, so it's highly
-//    recommended to reserve the required algorithm and workspace to reuse them
-//    later." (PyTorch's torch.backends.cudnn.benchmark does the same.) For
-//    dynamic shapes the hit rate drops with shape variation, but the cache is
-//    never wrong: a new shape simply Finds + caches a new entry.
+//    miopenFindConvolutionForwardAlgorithm. MIOpen docs:
+//    "miopenFindConvolution*() is expensive in terms of run time and required
+//    workspace, so it's highly recommended to reserve the required algorithm
+//    and workspace to reuse them later." (PyTorch's
+//    torch.backends.cudnn.benchmark does the same.) For dynamic shapes the hit
+//    rate drops with shape variation, but the cache is never wrong: a new shape
+//    simply Finds + caches a new entry.
 //
 //    The MIOpen descriptors are deliberately NOT cached: Find/forward make
 //    MIOpen attach per-problem GPU-resident state (compiled solvers, pre-
@@ -67,7 +68,8 @@
 //    can be measured against the cached path. Default ON.
 //
 //    Sources:
-//    - https://rocm.docs.amd.com/projects/MIOpen/en/latest/how-to/find-and-immediate.html
+//    -
+//    https://rocm.docs.amd.com/projects/MIOpen/en/latest/how-to/find-and-immediate.html
 //    - https://docs.pytorch.org/docs/stable/notes/cuda.html
 //
 // 3. WORKSPACE POOLING (implemented)
@@ -292,26 +294,11 @@ int wrap_miopenConvolutionForward(
       state->conv_fwd_cache = new ConvFwdCache();
     conv_cache = static_cast<ConvFwdCache *>(state->conv_fwd_cache);
   }
-  ConvFwdKey conv_key{(int64_t)miopen_dt,
-                      input_n,
-                      input_c,
-                      input_h,
-                      input_w,
-                      weights_k,
-                      kernel_h,
-                      kernel_w,
-                      output_h,
-                      output_w,
-                      stride_h,
-                      stride_w,
-                      pad_top,
-                      pad_left,
-                      pad_bottom,
-                      pad_right,
-                      dilation_h,
-                      dilation_w,
-                      group,
-                      bias ? 1 : 0};
+  ConvFwdKey conv_key{
+      (int64_t)miopen_dt, input_n,    input_c,    input_h,  input_w,
+      weights_k,          kernel_h,   kernel_w,   output_h, output_w,
+      stride_h,           stride_w,   pad_top,    pad_left, pad_bottom,
+      pad_right,          dilation_h, dilation_w, group,    bias ? 1 : 0};
   // Copy the hit entry into a function-scope local so the hit branch below does
   // not deref a map iterator across the `goto cleanup` scope.
   bool cache_hit = false;
@@ -327,7 +314,8 @@ int wrap_miopenConvolutionForward(
   // Create + set the tensor descriptors with explicit NCHW layout. The dtype is
   // taken from the caller (data_type) — the previous hardcoded miopenFloat
   // produced silent fp16-stride-as-fp32 corruption on fp16 models.
-  // miopenSet4dTensorDescriptor leaves layout UNKNOWN which warns in MIOpen 7.12+.
+  // miopenSet4dTensorDescriptor leaves layout UNKNOWN which warns in
+  // MIOpen 7.12+.
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&input_desc));
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&weights_desc));
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&output_desc));
