@@ -341,9 +341,13 @@ static bool load_flow(Flow &flow, const char *dll) {
 
 int main(int argc, char **argv) {
   int iters = 50;
-  for (int i = 1; i < argc; ++i)
+  const char *only = nullptr; // run only cases whose name contains this substr
+  for (int i = 1; i < argc; ++i) {
     if (!std::strcmp(argv[i], "--iters") && i + 1 < argc)
       iters = std::atoi(argv[++i]);
+    else if (!std::strcmp(argv[i], "--only") && i + 1 < argc)
+      only = argv[++i];
+  }
 
   Flow neu{"NEW"}, bak{"BACK"};
   if (!load_flow(neu, "gqa_new.dll") || !load_flow(bak, "gqa_back.dll"))
@@ -418,6 +422,15 @@ int main(int argc, char **argv) {
       {"decode  HpG8 d128     ", 1, 64, 8, 128, 1, 2048, 2, -1, 0, 0},
       {"decode  HpG16 d128    ", 1, 32, 2, 128, 1, 2048, 2, -1, 0, 0},
       {"decode  batch B4 d64  ", 4, 32, 8, 64, 1, 2048, 2, -1, 0, 0},
+      // ---- llama-3.1-8b d128 skv threshold sweep (min_skv=256 boundary) ----
+      // BACK: skv<256 -> fused_decode (serial), skv>=256 -> flash_decode.
+      // NEW : always flash_decode_v2.  Expect NEW win only for skv<=255.
+      {"decode  l31-8b skv128 ", 1, 32, 8, 128, 1, 127, 2, -1, 0, 0},
+      {"decode  l31-8b skv192 ", 1, 32, 8, 128, 1, 191, 2, -1, 0, 0},
+      {"decode  l31-8b skv255 ", 1, 32, 8, 128, 1, 254, 2, -1, 0, 0},
+      {"decode  l31-8b skv256 ", 1, 32, 8, 128, 1, 255, 2, -1, 0, 0},
+      {"decode  l31-8b skv257 ", 1, 32, 8, 128, 1, 256, 2, -1, 0, 0},
+      {"decode  l31-8b skv512 ", 1, 32, 8, 128, 1, 511, 2, -1, 0, 0},
       // ---- fallback: sliding-window size sweep ----
       {"decode  WIN64 d64     ", 1, 64, 8, 64, 1, 2048, 2, 64, 0, 0},
       {"decode  WIN256 d64    ", 1, 64, 8, 64, 1, 2048, 2, 256, 0, 0},
@@ -459,6 +472,8 @@ int main(int argc, char **argv) {
 
   int fails = 0;
   for (const auto &c : cases) {
+    if (only && !std::strstr(c.name, only))
+      continue;
     const int total = c.past + c.sq;
     const float scale = 1.0f / std::sqrt((float)c.D);
     const size_t qn = (size_t)c.B * c.sq * c.H * c.D;
