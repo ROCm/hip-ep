@@ -207,6 +207,24 @@ func.func @host_scalar_as_reshape_shape(%ctx: !hip.context, %x: i64,
   return %r : memref<?x?xf16>
 }
 
+// --- Alloc carrying an explicit #hip.mem<host> space: a small integer alloc
+//     with a memref.load user (e.g. a cross-space copy destination), otherwise
+//     indistinguishable from a host-staged scalar — but MUST be left alone:
+//     redirecting it here would build a memref.view whose #hip.mem<host> result
+//     mismatches the space-less scratch base and fail the verifier. ---
+// CHECK-LABEL: func.func @host_space_alloc_left_alone
+// CHECK-NOT:   hip.get_host_scratch
+// CHECK:       memref.alloc() : memref<i32, #hip.mem<host>>
+func.func @host_space_alloc_left_alone(%ctx: !hip.context,
+                                       %src: memref<i32>) -> i32 {
+  %a = memref.alloc() : memref<i32, #hip.mem<host>>
+  hip.memcpy_d2h_async(%ctx, %a, %src : memref<i32, #hip.mem<host>>, memref<i32>)
+  hip.stream_sync(%ctx)
+  %v = memref.load %a[] : memref<i32, #hip.mem<host>>
+  memref.dealloc %a : memref<i32, #hip.mem<host>>
+  return %v : i32
+}
+
 // --- Function whose arg 0 is NOT a !hip.context: the pass silently leaves
 //     it alone (best-effort mitigation; utility funcs without runtime
 //     access don't have a context to call hip.get_host_scratch on). The

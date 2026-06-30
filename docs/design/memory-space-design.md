@@ -200,7 +200,13 @@ This is correct-by-construction design, not detect-and-fix.
 
 **Note on LLVM Lowering:**
 
-Before lowering to LLVM, we don't need to design anything for address space handling. MLIR's standard MemRefToLLVM conversion automatically maps `#hip.mem<device>` → LLVM address space 1 and `#hip.mem<host>` → LLVM address space 0. This is infrastructure that already exists; our solution is entirely at MLIR level.
+`ConvertHipToLLVMPass` registers a type-attribute conversion (`addTypeAttributeConversion`) that maps each `#hip.mem<...>` space to a distinct LLVM address space, numbered by the `MemorySpaceKind` enum (**device = 0, host = 1, pinned = 2, managed = 3**):
+
+- **Device stays AS 0**, so the dominant GPU data path (params, activations, the device pool, all kernel/GEMM operands) and the flat bare-pointer runtime ABI are byte-unchanged — only the rarer host/pinned/managed boundary buffers leave the default space.
+- Each per-op lowering resolves the space via `getMemRefAddressSpace()` and addrspace-casts the runtime's generic AS-0 pointer up to it (and back at the call boundary), so runtime declarations stay AS-0 `!llvm.ptr` (see `MemoryLowering.cpp` / `unpackMemRefStructWithAddrCast`).
+- The host target collapses every space back to one flat space, so CPU access to host/pinned/managed buffers (e.g. `tensor.extract` after a D2H `hip.transfer`) stays valid.
+
+Without this hook, the stock `MemRefToLLVM` conversion — which only understands integer memory spaces — rejects any memref carrying the non-integer `MemorySpaceAttr` and conversion fails.
 
 ---
 
@@ -373,7 +379,7 @@ Explicit operations for moving data across host/device boundary:
 def Hip_MemcpyD2HAsyncOp : Hip_Op<"memcpy_d2h_async"> {
   let arguments = (ins
     Hip_ContextType:$ctx,
-    HostMemRef:$dst,        // Must be host
+    HostMemRef:$dst,        // Must be host (impl: host OR pinned — same hipMemcpyKind)
     DeviceMemRef:$src       // Must be device
   );
 }
@@ -385,7 +391,7 @@ def Hip_MemcpyH2DAsyncOp : Hip_Op<"memcpy_h2d_async"> {
   let arguments = (ins
     Hip_ContextType:$ctx,
     DeviceMemRef:$dst,      // Must be device
-    HostMemRef:$src         // Must be host
+    HostMemRef:$src         // Must be host (impl: host OR pinned — same hipMemcpyKind)
   );
 }
 ```

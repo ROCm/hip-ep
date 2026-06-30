@@ -296,6 +296,20 @@ void ConvertHipToLLVMPass::runOnOperation() {
     return LLVM::LLVMPointerType::get(ctx, 0);
   });
 
+  // Map each HIP memory space to a distinct LLVM address space, numbered by the
+  // MemorySpaceKind enum (device=0, host=1, pinned=2, managed=3). Device stays
+  // AS 0, so the dominant GPU path and the flat bare-pointer runtime ABI are
+  // byte-unchanged; only host/pinned/managed boundary buffers leave AS 0. Per-op
+  // lowerings addrspace-cast the runtime's generic AS-0 pointer at the call
+  // boundary (see extractMemRefDataPtr), so runtime decls stay AS-0. Without this
+  // hook the type converter rejects the non-integer MemorySpaceAttr.
+  typeConverter.addTypeAttributeConversion(
+      [ctx](BaseMemRefType, MemorySpaceAttr attr)
+          -> TypeConverter::AttributeConversionResult {
+        return IntegerAttr::get(IntegerType::get(ctx, 64),
+                                static_cast<int64_t>(attr.getKind()));
+      });
+
   RewritePatternSet patterns(ctx);
 
   // HIP dialect-specific lowerings
@@ -340,6 +354,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateNonZeroLoweringPatterns(typeConverter, patterns);
   populateReadbackDimLoweringPatterns(typeConverter, patterns);
   populateReadbackScalarLoweringPatterns(typeConverter, patterns);
+  populateMemcpyLoweringPatterns(typeConverter, patterns);
   populateSizeLoweringPatterns(typeConverter, patterns);
   populatePoolLoweringPatterns(typeConverter, patterns);
   populateResizeLoweringPatterns(typeConverter, patterns);

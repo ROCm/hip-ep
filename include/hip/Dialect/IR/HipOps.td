@@ -10,6 +10,7 @@ include "hip/Dialect/IR/HipDialect.td"
 include "hip/Dialect/IR/HipDpsOpInterface.td"
 include "hip/Dialect/IR/HipOpStateInterface.td"
 include "hip/Dialect/IR/HipTypes.td"
+include "hip/Dialect/IR/HipAttributes.td"
 include "mlir/Interfaces/DestinationStyleOpInterface.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
@@ -224,6 +225,30 @@ class Hip_DpsOp_Broadcast<string mnemonic, list<string> operandGetters,
 // Accepts both ranked tensor (pre-bufferization) and memref (post-bufferization).
 def Hip_TensorOrMemRef : AnyTypeOf<[AnyRankedTensor, AnyMemRef],
                                     "ranked tensor or memref">;
+
+// Pure memref constraints (no tensor form), one per `#hip.mem<...>` kind. The
+// predicates also accept an unspecified space via the transitional
+// `kAcceptUnspecifiedMemorySpace` toggle in HipDialect.cpp.
+def Hip_DeviceMemRef : Type<
+    CPred<"::mlir::hip::isDeviceCompatibleMemRef($_self)">, "device memref">;
+def Hip_HostMemRef : Type<
+    CPred<"::mlir::hip::isHostCompatibleMemRef($_self)">, "host memref">;
+def Hip_PinnedMemRef : Type<
+    CPred<"::mlir::hip::isPinnedCompatibleMemRef($_self)">, "pinned memref">;
+def Hip_ManagedMemRef : Type<
+    CPred<"::mlir::hip::isManagedCompatibleMemRef($_self)">, "managed memref">;
+
+// Memory-space-aware operand/result constraints: a ranked tensor (pre-
+// bufferization, which has no memory space) OR a memref in the named HIP space.
+// Built by reusing the pure memref types above.
+def Hip_TensorOrDeviceMemRef : AnyTypeOf<[AnyRankedTensor, Hip_DeviceMemRef],
+                                         "ranked tensor or device memref">;
+def Hip_TensorOrHostMemRef : AnyTypeOf<[AnyRankedTensor, Hip_HostMemRef],
+                                       "ranked tensor or host memref">;
+def Hip_TensorOrPinnedMemRef : AnyTypeOf<[AnyRankedTensor, Hip_PinnedMemRef],
+                                         "ranked tensor or pinned memref">;
+def Hip_TensorOrManagedMemRef : AnyTypeOf<[AnyRankedTensor, Hip_ManagedMemRef],
+                                          "ranked tensor or managed memref">;
 
 def Hip_AllocOp : Hip_Op<"alloc",
     [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
@@ -3796,5 +3821,55 @@ def Hip_ReadbackScalarOp : Hip_Op<"readback_scalar",
   let assemblyFormat = [{
     `(` $ctx `,` $scalar `:` type($scalar) `)` attr-dict `->` type($value)
   }];
+}
+
+// ===== Explicit memory transfers =============================================
+//
+// The memref-phase `hip.memcpy_*_async` / `hip.stream_sync` ops: an explicit,
+// IR-level crossing between HIP memory spaces, parallel to the existing
+// readback / host-scratch machinery (both retained unchanged). See
+// docs/design/memory-space-design.md.
+
+// hip.memcpy_h2d_async : async host->device copy on the runtime stream (dst
+// device, src host/pinned; same element type + count). Wired for symmetry with
+// the D2H direction; D2H is the primary direction exercised today.
+def Hip_MemcpyH2DAsyncOp : Hip_Op<"memcpy_h2d_async",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Asynchronous host->device memcpy on the runtime stream";
+  let arguments = (ins Hip_ContextType:$ctx,
+                       Hip_DeviceMemRef:$dst,
+                       AnyTypeOf<[Hip_HostMemRef, Hip_PinnedMemRef],
+                                 "host or pinned memref">:$src);
+  let assemblyFormat = [{
+    `(` $ctx `,` $dst `,` $src `:` type($dst) `,` type($src) `)` attr-dict
+  }];
+  let hasVerifier = 1;
+}
+
+// hip.memcpy_d2h_async : async device->host copy on the runtime stream (dst
+// host/pinned, src device; same element type + count). Pair with a following
+// `hip.stream_sync` before the host reads `dst`. This is the primary direction
+// (reading device-computed results back to the host).
+def Hip_MemcpyD2HAsyncOp : Hip_Op<"memcpy_d2h_async",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Asynchronous device->host memcpy on the runtime stream";
+  let arguments = (ins Hip_ContextType:$ctx,
+                       AnyTypeOf<[Hip_HostMemRef, Hip_PinnedMemRef],
+                                 "host or pinned memref">:$dst,
+                       Hip_DeviceMemRef:$src);
+  let assemblyFormat = [{
+    `(` $ctx `,` $dst `,` $src `:` type($dst) `,` type($src) `)` attr-dict
+  }];
+  let hasVerifier = 1;
+}
+
+// hip.stream_sync : block until prior async work on the runtime stream
+// completes. Carries a generic Write effect so it is not DCE'd or reordered
+// past the async memcpys. Lowers to wrap_hipStreamSynchronize.
+def Hip_StreamSyncOp : Hip_Op<"stream_sync",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Synchronize the runtime stream (host-side barrier)";
+  let arguments = (ins Hip_ContextType:$ctx);
+  let assemblyFormat = "`(` $ctx `)` attr-dict";
 }
 #endif // HIP_OPS

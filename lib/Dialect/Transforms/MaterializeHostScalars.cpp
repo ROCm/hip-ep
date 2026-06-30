@@ -95,6 +95,12 @@
 //   - Floating-point element types: rare on the host-fed scalar path,
 //     almost always GPU-consumed in flight, where the GPU pool is the
 //     right home.
+//   - Allocs/allocas carrying an explicit `#hip.mem<>` memory space: these
+//     carry a deliberate space attribute (e.g. a `#hip.mem<host>` destination
+//     for a cross-space copy) and are otherwise indistinguishable from a
+//     host-staged scalar. Grabbing one here would build a `memref.view` whose
+//     host-space result mismatches the space-less scratch base, so the
+//     explicit-space filter leaves them alone.
 //   - Functions whose arg 0 is not `!hip.context`: silently skipped.
 //     Utility functions and pre-context-arg passes don't have access to
 //     the runtime scratch handle; the pass is a best-effort mitigation,
@@ -200,6 +206,14 @@ static bool classifyHostScalarUsers(Value memrefVal, bool &sawHostIO) {
 static bool isHostScalarCandidate(memref::AllocOp allocOp) {
   MemRefType type = allocOp.getType();
   if (!type.hasStaticShape())
+    return false;
+  // Allocs carrying an explicit #hip.mem<> space are not candidates for this
+  // pinned host_scratch pool. In particular a small #hip.mem<host> integer
+  // buffer (e.g. a cross-space copy destination) otherwise looks exactly like a
+  // host-staged scalar; grabbing it here would emit a memref.view whose
+  // #hip.mem<host> result mismatches the space-less scratch base (memref<?xi8>)
+  // and fail the memref.view verifier. Leave it alone.
+  if (dyn_cast_or_null<MemorySpaceAttr>(type.getMemorySpace()))
     return false;
   if (type.getNumElements() > 16)
     return false;
