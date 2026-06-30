@@ -103,7 +103,9 @@ jobs:
           # numpy/wheel/setuptools/packaging are needed at ORT configure time:
           # --build_wheel makes onnxruntime_python.cmake run find_package(Python
           # ... NumPy), which fails the generate step if numpy is absent.
-          python3 -m pip install cmake ninja lit numpy wheel setuptools packaging
+          # requests: OGA build.py's util.dependency_resolver imports it at
+          # module load (the pinned Python 3.14 has no preinstalled requests).
+          python3 -m pip install cmake ninja lit numpy wheel setuptools packaging requests
           cmake --version
           ninja --version
 
