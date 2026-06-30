@@ -193,7 +193,10 @@ jobs:
           for pr in $prs; do
             url="https://github.com/microsoft/onnxruntime/pull/${pr}.patch"
             echo "Fetching $url"
-            curl -fsSL "$url" -o "/tmp/ort-pr-${pr}.patch"
+            # github.com throttles raw .patch fetches with HTTP 429; retry with
+            # backoff (--retry-all-errors covers 429/5xx) to ride out the limit.
+            curl -fsSL --retry 6 --retry-delay 10 --retry-all-errors \
+              "$url" -o "/tmp/ort-pr-${pr}.patch"
             echo "Applying PR #${pr}"
             git apply --whitespace=nowarn "/tmp/ort-pr-${pr}.patch"
           done
@@ -313,7 +316,10 @@ jobs:
           for pr in $prs; do
             url="https://github.com/microsoft/onnxruntime-genai/pull/${pr}.patch"
             echo "Fetching $url"
-            curl -fsSL "$url" -o "/tmp/oga-pr-${pr}.patch"
+            # github.com throttles raw .patch fetches with HTTP 429; retry with
+            # backoff (--retry-all-errors covers 429/5xx) to ride out the limit.
+            curl -fsSL --retry 6 --retry-delay 10 --retry-all-errors \
+              "$url" -o "/tmp/oga-pr-${pr}.patch"
             echo "Applying PR #${pr}"
             git am --whitespace=nowarn "/tmp/oga-pr-${pr}.patch"
           done
