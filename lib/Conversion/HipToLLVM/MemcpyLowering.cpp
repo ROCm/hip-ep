@@ -18,8 +18,8 @@ namespace {
 // After:  llvm.call @wrap_hipMemcpyD2HAsync(%state, %dstPtr, %srcPtr, %size)
 template <typename OpTy>
 static LogicalResult lowerMemcpy(OpTy op, Value dstDesc, MemRefType dstTy,
-                                 Value srcDesc, MemRefType srcTy, Value statePtr,
-                                 const char *wrapSym,
+                                 Value srcDesc, MemRefType srcTy,
+                                 Value statePtr, const char *wrapSym,
                                  const TypeConverter *typeConverter,
                                  ConversionPatternRewriter &rewriter) {
   Location loc = op.getLoc();
