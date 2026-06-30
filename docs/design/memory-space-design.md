@@ -204,7 +204,7 @@ This is correct-by-construction design, not detect-and-fix.
 
 - **Device stays AS 0**, so the dominant GPU data path (params, activations, the device pool, all kernel/GEMM operands) and the flat bare-pointer runtime ABI are byte-unchanged — only the rarer host/pinned/managed boundary buffers leave the default space.
 - Each per-op lowering resolves the space via `getMemRefAddressSpace()` and addrspace-casts the runtime's generic AS-0 pointer up to it (and back at the call boundary), so runtime declarations stay AS-0 `!llvm.ptr` (see `MemoryLowering.cpp` / `unpackMemRefStructWithAddrCast`).
-- The host target collapses every space back to one flat space, so CPU access to host/pinned/managed buffers (e.g. `tensor.extract` after a D2H `hip.transfer`) stays valid.
+- The host target collapses every space back to one flat space, so CPU access to host/pinned/managed buffers (e.g. `tensor.extract` after a D2H `hip.memcpy_d2h_async` + `hip.stream_sync`) stays valid.
 
 Without this hook, the stock `MemRefToLLVM` conversion — which only understands integer memory spaces — rejects any memref carrying the non-integer `MemorySpaceAttr` and conversion fails.
 
