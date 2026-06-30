@@ -94,7 +94,10 @@ jobs:
             build-essential ninja-build git ca-certificates curl
           # backend-mlir-compiler needs cmake >= 3.29; pip cmake wins over apt's.
           python3 -m pip install --upgrade pip
-          python3 -m pip install cmake ninja lit
+          # numpy/wheel/setuptools/packaging are needed at ORT configure time:
+          # --build_wheel makes onnxruntime_python.cmake run find_package(Python
+          # ... NumPy), which fails the generate step if numpy is absent.
+          python3 -m pip install cmake ninja lit numpy wheel setuptools packaging
           cmake --version
           ninja --version
 
