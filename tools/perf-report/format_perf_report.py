@@ -499,9 +499,7 @@ def render_section_1_headline(head: OgaHeadline, indent: str) -> list[str]:
     return lines
 
 
-def render_section_2_breakdown(
-    bd: DecodeBreakdown, indent: str
-) -> list[str]:
+def render_section_2_breakdown(bd: DecodeBreakdown, indent: str) -> list[str]:
     """# 2 STEADY-STATE DECODE BREAKDOWN - drawn as an actual tree.
 
     Source:        ``DecodeBreakdown`` -> joined OgaHeadline + PerfSummary +
