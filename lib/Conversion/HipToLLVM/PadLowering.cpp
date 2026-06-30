@@ -17,6 +17,12 @@ namespace {
 //               pads_num_elements, axes_num_elements,
 //               data_type, mode_id)
 //
+// `cval` is a by-value scalar (a plain float/integer SSA value, no buffer): we
+// stage it in a HOST stack slot (llvm.alloca + llvm.store) and pass that host
+// pointer as `cval_ptr`, so wrap_pad reads the fill value directly with no
+// device allocation and no D2H copy. `data`/`pads`/`axes`/`output` remain
+// device buffers passed by pointer.
+//
 // `mode_id` encodes the string attribute as a small enum:
 //   0 = constant, 1 = reflect, 2 = edge, 3 = wrap.
 struct PadOpLowering : public ConvertOpToLLVMPattern<PadOp> {
@@ -57,8 +63,6 @@ struct PadOpLowering : public ConvertOpToLLVMPattern<PadOp> {
     Value outPtr =
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
-    Value cvalPtr =
-        extractOptionalMemRefPtr(adaptor.getConstantValue(), rewriter, loc);
     Value axesPtr = extractOptionalMemRefPtr(adaptor.getAxes(), rewriter, loc);
 
     auto createI64Const = [&](int64_t v) {
@@ -66,6 +70,20 @@ struct PadOpLowering : public ConvertOpToLLVMPattern<PadOp> {
                                       rewriter.getI64IntegerAttr(v));
     };
     Value one = createI64Const(1);
+
+    // constant_value is a by-value scalar (mode B): no device buffer. Stage it
+    // in an 8-byte host stack slot and pass the pointer; wrap_pad reads
+    // element_size bytes from it (no D2H). Absent -> null pointer.
+    Value cvalPtr;
+    if (op.getConstantValue()) {
+      Value cval = adaptor.getConstantValue();
+      Value slot =
+          LLVM::AllocaOp::create(rewriter, loc, ptrType, i64Type, one, 8);
+      LLVM::StoreOp::create(rewriter, loc, cval, slot);
+      cvalPtr = slot;
+    } else {
+      cvalPtr = LLVM::ZeroOp::create(rewriter, loc, ptrType);
+    }
     auto emitShapeArray = [&](MemRefType type, Value descriptor) -> Value {
       int rank = type.getRank();
       int arrLen = std::max(rank, 1);

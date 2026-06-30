@@ -333,10 +333,14 @@ def Hip_MemPrefetchAsyncOp : Hip_Op<"mem_prefetch_async"> {
 
 The codebase has ~70 HIP operations, each with a runtime wrapper function. Many operations have inconsistent or suboptimal memory space handling for shape arguments:
 
-Examples of design flaws:
-- `hip.pad` - pads, axes are device pointers, runtime does hipMemcpyAsync D2H copy before kernel launch
-  - Problem: Worst of both worlds - device pointer allocation + D2H copy overhead
-  - Better: Pass pads (≤16 ints, 64 bytes) as kernel argument struct via constant memory
+Realized example of the by-value principle — `hip.pad`'s `constant_value`:
+- Passed **by value**: a plain `f32`/`i32`/... SSA operand, not a device pointer.
+- The converter resolves it **fold-first, then-transfer** — a compile-time-constant fill (the common case, e.g. `0.0`) folds to an `arith.constant` with zero device traffic; a runtime fill rides the same `hip.transfer ... to host` as `pads`/`axes` (detailed in the pad-pilot section below) and is read with `tensor.extract`.
+- The lowering stages the scalar in a host stack slot; the runtime reads it with a plain `memcpy` — no device allocation, no implicit D2H.
+
+This is the pattern the remaining flaws below should follow.
+
+Examples of remaining design flaws:
 - `hip.range` - start, limit, delta are device pointers for 3 scalar values
   - Problem: Allocates device memory + pointer dereference for 3 integers
   - Better: Pass as i64 scalar arguments directly
@@ -407,6 +411,24 @@ def Hip_StreamSyncOp : Hip_Op<"stream_sync"> {
 Type constraints enforce correct transfer direction automatically. Cannot accidentally copy device→device or host→host using these operations.
 
 Maps to Solution Step 2: OnnxToHip converters and shape inference use these operations to insert intentional transfers when an ONNX op requires crossing the host/device boundary.
+
+#### Implementation status: `hip.transfer` as a parallel mechanism (pad pilot)
+
+The transfer machinery above is now **partially implemented as a parallel mechanism** alongside the two pre-existing host-access mechanisms. All three coexist; the new one does not replace either:
+
+| Mechanism | Phase | Used by | Status |
+|-----------|-------|---------|--------|
+| `hip.readback_scalar` / `hip.readback_dim` | tensor → bufferized D2H + sync | Range bounds, Loop trip count, dynamic Reshape/Expand **output-shape** arithmetic, FixLoopAccumulatorOffset (memref-phase) | unchanged; every op keeps using it. **Pad no longer uses it** — it reads pad amounts from its `hip.transfer` host copy instead |
+| `get_host_scratch` (pinned) + `MaterializeHostScalars` | memref-phase host-mapped scratch | `tensor.from_elements` host-scalar staging (e.g. GQA `seqlens_k`) | unchanged; 100% untouched |
+| **`hip.transfer` (+ `hip.memcpy_{h2d,d2h}_async` / `hip.stream_sync`)** | **tensor-phase explicit transfer**, bufferizes to memref-phase async memcpy + sync | **`hip.pad` only** (its `pads`/`axes` buffers) | **new; pilot** |
+
+**`hip.transfer`** is the tensor-phase, value-preserving boundary-crossing op (`hip.transfer %ctx, %src to <host> -> ...`). Its `BufferizableOpInterface` model allocates the destination in the target space, emits the matching async memcpy, and replaces the result. The trailing `hip.stream_sync` is emitted **only for D2H** (the host reads the destination next, so it must wait); **H2D omits it**, because the device destination is consumed by later GPU work on the same stream, which already orders it after the copy. This is the tensor-phase counterpart the original design lacked — converters emit it before bufferization instead of hand-writing memref-phase memcpy/sync.
+
+**Pad pilot (the one wired op).** `PadConversion` wraps `pads` (and `axes`, when present) in `hip.transfer ... to host`; `wrap_pad` then reads them with a plain `memcpy` instead of an internal `hipMemcpyAsync` D2H + `hipStreamSynchronize`. Two consequences:
+- **Sync count is unchanged** — the D2H + sync moved out of the runtime and became explicit in the IR, the prerequisite for a future `EliminateStreamSyncBarriers` pass to coalesce crossings.
+- **No `hip.readback_scalar`** — the output-shape arithmetic (`data_dim + pads_begin + pads_end`) reads the amounts from that *same* host copy via `tensor.extract`, so the single transfer of `pads` serves both the kernel operand and the dynamic-dim computation. This is the first op fully off readback for its host-scalar reads; the other readback users (Range/Reshape/Expand/Loop, and memref-phase FixLoopAccumulatorOffset) are unchanged.
+
+**Deferred (still future work):** migrating readback / host-scratch / other ops onto `hip.transfer`; the H2D direction (`hip.memcpy_h2d_async` is lowered for symmetry but unused by the pad pilot); a pinned-backed transfer destination; the `ShapeInference`-insertion and `EliminateStreamSyncBarriers` passes; and flipping the unspecified-memory-space acceptance to strict.
 
 ### Pass Pipeline
 

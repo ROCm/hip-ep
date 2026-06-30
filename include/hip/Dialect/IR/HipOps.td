@@ -3070,19 +3070,28 @@ def Hip_PadOp : Hip_DpsOp<"pad",
     Example:
     ```mlir
     hip.pad(%ctx) ins(%data, %pads : memref<3x2xf32, 1>, memref<4xi64, 1>)
-                  cval(%cval : memref<f32, 1>)
+                  cval(%cval : f32)
                   axes(%axes : memref<2xi64, 1>)
                   outs(%out : memref<3x4xf32, 1>) {mode = "constant"}
     ```
   }];
 
+  // Pilot op for the memory-space type system, exercising BOTH spaces: the
+  // payload tensors (`data`, `output`) are GPU buffers (device), while the
+  // small shape-control tensors (`pads`, `axes`) are consumed host-side
+  // (host). `constant_value` is a single scalar fill value passed BY VALUE
+  // (a plain float/integer SSA value, not a buffer) — so it carries no memory
+  // space at all: the converter resolves the ONNX `Pad.constant_value` scalar
+  // to a host value (constant-fold or synchronized readback), and the runtime
+  // receives it directly with no device allocation or D2H copy.
   let arguments = (ins
     Hip_ContextType:$ctx,
-    Hip_TensorOrMemRef:$data,
-    Hip_TensorOrMemRef:$pads,
-    Optional<Hip_TensorOrMemRef>:$constant_value,
-    Optional<Hip_TensorOrMemRef>:$axes,
-    Hip_TensorOrMemRef:$output,
+    Hip_TensorOrDeviceMemRef:$data,
+    Hip_TensorOrHostMemRef:$pads,
+    Optional<AnyTypeOf<[AnyFloat, AnySignlessInteger],
+                       "scalar float or integer">>:$constant_value,
+    Optional<Hip_TensorOrHostMemRef>:$axes,
+    Hip_TensorOrDeviceMemRef:$output,
     DefaultValuedAttr<StrAttr, "\"constant\"">:$mode
   );
 

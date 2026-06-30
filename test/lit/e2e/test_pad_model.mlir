@@ -4,6 +4,11 @@
 // CHECK-SAME: hipdnn.input_count = 2
 // CHECK-SAME: hipdnn.output_count = 1
 // CHECK: llvm.func @wrap_pad
+// pads are routed to host via hip.transfer: the pipeline lowers that to a stack
+// host buffer + an async D2H + a plain stream sync (NOT the internal wrap_pad
+// D2H that the old runtime did).
+// CHECK-DAG: llvm.func @wrap_hipMemcpyD2H
+// CHECK-DAG: llvm.func @wrap_hipStreamSynchronize
 // CHECK: llvm.func @inference_init
 // CHECK: llvm.func @inference_compute
 // CHECK: llvm.func @inference_cleanup
