@@ -158,7 +158,7 @@ jobs:
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/ort-install
-          key: linux-ort-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}
+          key: linux-ort-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}-whl
 
       - name: Checkout ONNX Runtime v${{ env.ONNXRUNTIME_VERSION }}
         if: steps.cache-ort.outputs.cache-hit != 'true'
@@ -209,6 +209,7 @@ jobs:
             --build_dir "${{ runner.workspace }}/build-onnxruntime" \
             --skip_tests \
             --cmake_generator Ninja \
+            --build_wheel \
             --cmake_extra_defines \
               CMAKE_C_COMPILER_LAUNCHER=sccache \
               CMAKE_CXX_COMPILER_LAUNCHER=sccache
@@ -228,6 +229,17 @@ jobs:
           fi
           mkdir -p "${{ runner.workspace }}/ort-install/bin"
           cp "$PERF" "${{ runner.workspace }}/ort-install/bin/"
+          # Cache the ORT Python wheel inside ort-install so it rides the same
+          # cache key. Output: build-onnxruntime/Release/dist/onnxruntime-<ver>-cp<py>-linux_x86_64.whl
+          ORT_WHEEL=$(find "${{ runner.workspace }}/build-onnxruntime" \
+            -name "onnxruntime-*.whl" -type f | head -1)
+          if [ -z "$ORT_WHEEL" ]; then
+            echo "ERROR: onnxruntime wheel not found in build tree (need --build_wheel)"
+            exit 1
+          fi
+          mkdir -p "${{ runner.workspace }}/ort-install/wheels"
+          cp "$ORT_WHEEL" "${{ runner.workspace }}/ort-install/wheels/"
+          echo "Cached ORT wheel: $(basename "$ORT_WHEEL")"
 
       # TheRock is auto-downloaded fresh by cmake/deps.cmake during the configure
       # (not cached).
@@ -257,7 +269,7 @@ jobs:
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/oga-artifacts
-          key: linux-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-am-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
+          key: linux-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-am-whl-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
 
       # Checkout + build are skipped on an OGA cache hit (step-level gate); the
       # install-copy below always runs so the
@@ -320,13 +332,13 @@ jobs:
           fi
           cp -a "$ORT_PREFIX"/lib/libonnxruntime.so* "$ORT_HOME/lib/" 2>/dev/null || true
           cp -a "$ORT_PREFIX"/lib/libonnxruntime_providers_shared.so* "$ORT_HOME/lib/" 2>/dev/null || true
-          # --skip_wheel: the OGA python wheel needs an ORT python wheel at
-          # import time, which we don't build; the C++ artifacts are enough.
+          # Build the OGA python wheel too: it pairs with the ORT python wheel
+          # (built above with --build_wheel) so the pair is pip-installable.
           python3 onnxruntime-genai/build.py \
             --config Release \
             --cmake_generator Ninja \
             --ort_home "$ORT_HOME" \
-            --skip_tests --skip_examples --skip_wheel \
+            --skip_tests --skip_examples \
             --parallel \
             --build_dir "${{ runner.workspace }}/build-oga" \
             --cmake_extra_defines \
@@ -335,6 +347,15 @@ jobs:
           mkdir -p "$ART"
           cp "${{ runner.workspace }}/build-oga/Release/benchmark/c/model_benchmark" "$ART/"
           cp -a "${{ runner.workspace }}/build-oga/Release"/libonnxruntime-genai.so* "$ART/"
+          # Cache the OGA python wheel alongside the other OGA artifacts.
+          OGA_WHEEL=$(find "${{ runner.workspace }}/build-oga" \
+            -name "onnxruntime_genai-*.whl" -type f | head -1)
+          if [ -z "$OGA_WHEEL" ]; then
+            echo "ERROR: onnxruntime_genai wheel not found in build tree"
+            exit 1
+          fi
+          cp "$OGA_WHEEL" "$ART/"
+          echo "Cached OGA wheel: $(basename "$OGA_WHEEL")"
 
       - name: Install OGA artifacts into install/
         run: |
@@ -485,6 +506,21 @@ jobs:
                 staging/lib/libzstd.a
           rm -rf staging/lib/pkgconfig
           rm -f staging/bin/morphizen_config.json
+
+          # Python wheels (ORT + OGA) under staging/wheels/. Both are cached
+          # inside ort-install/wheels and oga-artifacts, so cache hits restore
+          # them without rebuilding ORT / OGA.
+          mkdir -p staging/wheels
+          ORT_WHEEL=$(find "${{ runner.workspace }}/ort-install/wheels" \
+            -name "onnxruntime-*.whl" -type f | head -1)
+          OGA_WHEEL=$(find "${{ runner.workspace }}/oga-artifacts" \
+            -name "onnxruntime_genai-*.whl" -type f | head -1)
+          if [ -z "$ORT_WHEEL" ] || [ -z "$OGA_WHEEL" ]; then
+            echo "ERROR: wheel(s) missing"
+            echo "  ORT=$ORT_WHEEL OGA=$OGA_WHEEL"
+            exit 1
+          fi
+          cp "$ORT_WHEEL" "$OGA_WHEEL" staging/wheels/
 
           chmod +x staging/bin/* 2>/dev/null || true
 
