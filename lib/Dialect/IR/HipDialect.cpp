@@ -175,6 +175,23 @@ LogicalResult MemcpyD2HAsyncOp::verify() {
   return verifyMemcpyShapes(getOperation(), getDst(), getSrc());
 }
 
+// hip.transfer is value-preserving: `src` and `result` must share shape and
+// element type. The memory SPACE is deliberately NOT compared -- the transfer
+// exists precisely to move the value into a different space. Works in both the
+// tensor phase (tensor->tensor) and, transiently, the memref phase.
+LogicalResult TransferOp::verify() {
+  auto srcTy = dyn_cast<ShapedType>(getSrc().getType());
+  auto resTy = dyn_cast<ShapedType>(getResult().getType());
+  if (!srcTy || !resTy)
+    return emitOpError("src and result must both be shaped (tensor or memref)");
+  if (srcTy.getElementType() != resTy.getElementType())
+    return emitOpError("src/result element type mismatch: ")
+           << srcTy.getElementType() << " vs " << resTy.getElementType();
+  if (srcTy.getShape() != resTy.getShape())
+    return emitOpError("src/result shape mismatch");
+  return success();
+}
+
 void StreamSyncOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {

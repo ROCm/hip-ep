@@ -3825,10 +3825,38 @@ def Hip_ReadbackScalarOp : Hip_Op<"readback_scalar",
 
 // ===== Explicit memory transfers =============================================
 //
-// The memref-phase `hip.memcpy_*_async` / `hip.stream_sync` ops: an explicit,
-// IR-level crossing between HIP memory spaces, parallel to the existing
-// readback / host-scratch mechanisms (both kept unchanged). See
-// docs/design/memory-space-design.md.
+// `hip.transfer` (tensor phase) + the memref-phase `hip.memcpy_*_async` /
+// `hip.stream_sync` ops it bufferizes into: an explicit, IR-level crossing
+// between HIP memory spaces, parallel to the existing readback / host-scratch
+// machinery (both retained unchanged). Today only `hip.pad` emits it (for its
+// `pads` / `axes`). See docs/design/memory-space-design.md and HipBufferize.h.
+def Hip_TransferOp : Hip_Op<"transfer", []> {
+  let summary = "Explicit value-preserving transfer into a HIP memory space";
+  let description = [{
+    Produces a value-preserving copy of `src` (same shape + element type) in the
+    `target` HIP memory space. Pre-bufferization it is a tensor->tensor op with
+    the destination space carried by `target`; bufferization
+    (HipTransferBufferizableModel) realises the crossing as a destination buffer
+    + `hip.memcpy_*_async` + `hip.stream_sync`.
+
+    `target` admits any space for forward-compatibility, but bufferization only
+    implements the device <-> host/pinned crossings (D2H is the one exercised
+    today). A `managed` or same-space target is rejected, not miscompiled.
+  }];
+
+  let arguments = (ins Hip_ContextType:$ctx,
+                       Hip_TensorOrMemRef:$src,
+                       Hip_MemorySpaceAttr:$target);
+  let results = (outs Hip_TensorOrMemRef:$result);
+
+  let assemblyFormat = [{
+    `(` $ctx `,` $src `:` type($src) `)` `to` $target attr-dict
+    `->` type($result)
+  }];
+
+  // Value-preserving: verifier checks shape + element type, NOT memory space.
+  let hasVerifier = 1;
+}
 
 // hip.memcpy_h2d_async : async host->device copy on the runtime stream (dst
 // device, src host/pinned; same element type + count). Wired for symmetry with
