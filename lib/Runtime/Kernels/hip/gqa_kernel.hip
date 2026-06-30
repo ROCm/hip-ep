@@ -1685,8 +1685,10 @@ static inline void launchFlashDecodeConfig(
 // Candidate split counts, clamped to [1, cap] and to the useful range for skv
 // (no point launching more splits than there are 16-key tiles). Deduplicated.
 static void flashDecodeCandidateSplits(int skv, int max_splits,
-                                       int (&out)[5], int& n) {
-  static const int kBase[5] = {8, 16, 32, 48, 64};
+                                       int (&out)[7], int& n) {
+  // Small counts {2,4} added so short contexts can pick a leaner reduce (fewer
+  // partial rows -> smaller reduce launch) instead of being forced to >=8.
+  static const int kBase[7] = {2, 4, 8, 16, 32, 48, 64};
   int cap = max_splits < kFlashDecodeMaxSplits ? max_splits : kFlashDecodeMaxSplits;
   if (cap < 1) cap = 1;
   int eff = skv > 0 ? skv : 1;
@@ -1700,14 +1702,24 @@ static void flashDecodeCandidateSplits(int skv, int max_splits,
   }
 }
 
-static std::unordered_map<std::string, FlashDecodeCfg> g_flash_decode_cache;
+static std::unordered_map<uint64_t, FlashDecodeCfg> g_flash_decode_cache;
 static std::mutex g_flash_decode_mutex;
 
-static std::string flashDecodeKey(int B, int H, int G, int d, int skv) {
-  int bucket = 1;
-  while (bucket < skv) bucket <<= 1;
-  return std::to_string(B) + "_" + std::to_string(H) + "_" + std::to_string(G) +
-         "_" + std::to_string(d) + "_" + std::to_string(bucket);
+// Packed integer key (no heap alloc on the hot path -- the old std::string key
+// did 5x to_string + concat + a malloc on EVERY decode token). NOTE: this is
+// host-CPU hygiene only -- it does NOT move the dispatch-bench numbers, because
+// that bench enqueues thousands of async calls and the host runs far ahead, so
+// the per-call CPU cost overlaps GPU execution. It matters in *host-bound* real
+// decode (per-token host sync / sampling between steps drains the queue, so the
+// CPU cost is on the critical path). skv is bucketed to its next-power-of-two
+// exponent. Layout: B[34..41] H[24..33] G[14..23] d[6..13] log2bucket[0..5].
+static uint64_t flashDecodeKey(int B, int H, int G, int d, int skv) {
+  int blog = 0;
+  uint32_t bucket = 1;
+  while (bucket < (uint32_t)skv) { bucket <<= 1; ++blog; }
+  return ((uint64_t)(uint32_t)B << 34) | ((uint64_t)(uint32_t)H << 24) |
+         ((uint64_t)(uint32_t)G << 14) | ((uint64_t)(uint32_t)d << 6) |
+         (uint64_t)(uint32_t)blog;
 }
 
 // Benchmark all (impl, splits) candidates on the actual device buffers and pick
@@ -1719,7 +1731,7 @@ static FlashDecodeCfg tuneFlashDecode(
     int B, int H, int G, int d, int hpg, int skv, int max_seq, int max_splits,
     float scale, const int* iSeq, int local_window_size,
     const __half* hSink, int use_smooth_softmax) {
-  int split_set[5]; int n_splits = 0;
+  int split_set[7]; int n_splits = 0;
   flashDecodeCandidateSplits(skv, max_splits, split_set, n_splits);
   const bool impls[2] = {false, true};  // {scalar, WMMA}; geometry is identical
 
@@ -1847,7 +1859,7 @@ extern "C" int hip_gqa_flash_decode_v2(
   if (const char* e = getenv("HIPDNN_GQA_DECODE_NOAUTOTUNE")) no_autotune = (atoi(e) != 0);
 
   if (!forced && !no_autotune) {
-    const std::string key = flashDecodeKey(B, H, G, d, tune_len);
+    const uint64_t key = flashDecodeKey(B, H, G, d, tune_len);
     std::lock_guard<std::mutex> lock(g_flash_decode_mutex);
     auto it = g_flash_decode_cache.find(key);
     if (it != g_flash_decode_cache.end()) {
@@ -1858,9 +1870,9 @@ extern "C" int hip_gqa_flash_decode_v2(
                             local_window_size, hSink, use_smooth_softmax);
       g_flash_decode_cache[key] = cfg;
       CUSTOM_KERNELS_DEBUG_LOG(
-          "[custom_kernels] flash_decode autotune: key=\"%s\" -> impl=%s splits=%d "
+          "[custom_kernels] flash_decode autotune: key=0x%llx -> impl=%s splits=%d "
           "(cache size=%zu)\n",
-          key.c_str(), cfg.use_wmma ? "wmma" : "scalar", cfg.splits,
+          (unsigned long long)key, cfg.use_wmma ? "wmma" : "scalar", cfg.splits,
           g_flash_decode_cache.size());
     }
   }
