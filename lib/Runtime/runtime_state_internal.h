@@ -133,6 +133,20 @@ struct RuntimeState {
   void *conv_scratch;
   size_t conv_scratch_size;
 
+  // Per-shape MIOpen forward-conv descriptor + algorithm cache.
+  //
+  // wrap_miopenConvolutionForward previously rebuilt 4 MIOpen descriptors and
+  // ran the (GPU-benchmarking) Find API on EVERY call. For static-shape models
+  // the (dt, NCHW, weights, output, stride/pad/dilation/group, has_bias) tuple
+  // is invariant per layer across all Compute() calls, so we cache the
+  // descriptors + chosen algorithm + its workspace size once per shape. Find
+  // (and miopenConvolutionForwardGetWorkSpaceSize) then run only on the first
+  // call for each distinct shape. Opaque ConvFwdCache* owned by
+  // real/miopen.cpp; freed in hipdnn_ep_state_cleanup via
+  // hipdnn_ep_conv_fwd_cache_destroy. Single-session, stream-serialised access
+  // (same contract as conv_scratch above) -- no locking needed.
+  void *conv_fwd_cache;
+
   // NOTE: the GQA GEMM descriptor cache (GqaGemmCache) formerly lived here as
   // gqa_gemm_cache. It is now per-op-instance: each gqa instance owns one in
   // its GqaState op-state slot (see op_states below and

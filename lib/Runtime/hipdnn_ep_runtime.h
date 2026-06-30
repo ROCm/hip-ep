@@ -637,6 +637,10 @@ void *hipdnn_ep_state_get_op_profile(RuntimeState *state);
 // matmul_nbits keeps a per-instance cache in its op-state slot).
 void hipdnn_ep_zp_unpack_cache_destroy(void *cache);
 
+// Destroys the per-shape forward-conv descriptor/algorithm cache (ConvFwdCache)
+// owned by real/miopen.cpp and stored in RuntimeState::conv_fwd_cache.
+void hipdnn_ep_conv_fwd_cache_destroy(void *cache);
+
 // TensorBuffer Field Accessors (Opaque Pattern)
 //===----------------------------------------------------------------------===//
 //
