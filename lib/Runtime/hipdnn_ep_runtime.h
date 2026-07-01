@@ -212,11 +212,11 @@ typedef struct RuntimeState RuntimeState;
 // Output Allocator Contract
 //===----------------------------------------------------------------------===//
 //
-// The EP installs an output allocator before inference_compute; the generated
-// main_graph obtains each graph-output buffer from it at the point the output
-// shape is known (lowered from hip.alloc_output -> hipdnn_ep_alloc_output).
+// The EP sets an output allocator before inference_compute; the generated
+// main_graph gets each output buffer from it once the output shape is known
+// (this is what hip.alloc_output -> hipdnn_ep_alloc_output does).
 //
-// Call flow (allocator mode):
+// Call flow:
 //   MlirCustomOp::Compute
 //     -> hipdnn_ep_set_output_allocator(state, &alloc)   (EP installs)
 //     -> inference_compute(state, inputs)                (2-arg, no out span)
@@ -485,8 +485,8 @@ enum {
 // Represents a tensor with data pointer and shape information.
 //
 // Memory ownership: caller-owned. `memory_type` selects the data pointer's
-// placement (see the enum above) and tells prepare_input/finalize_output
-// whether to copy H2D/D2H or alias the caller's GPU-accessible buffer.
+// placement (see the enum above) and tells the runtime whether to copy
+// H2D/D2H or alias the caller's GPU-accessible buffer.
 //
 // tensor_t is the wire-protocol ABI between three components that are
 // intentionally kept decoupled (compiler-emitted bitcode, EP runtime,
@@ -535,9 +535,8 @@ typedef struct {
   size_t size_bytes;  // Buffer size
   bool is_pooled;     // Internal: true if from pool, false if allocated
   // Internal: true if gpu_ptr aliases caller's GPU-accessible memory
-  // (tensor_t.memory_type == TENSOR_MEMORY_GPU). When set, finalize_output
-  // skips the D2H copy and free_input skips pool_release/hipFree because
-  // the memory is owned by the caller, not by us.
+  // (tensor_t.memory_type == TENSOR_MEMORY_GPU). When set, free_input skips
+  // pool_release/hipFree because the memory is owned by the caller, not by us.
   bool is_aliased;
 } TensorBuffer;
 
@@ -575,30 +574,6 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
                                    size_t index, size_t expected_rank,
                                    TensorBuffer *out_buffer);
 
-// Prepare output tensor: parse, validate, get/allocate GPU buffer (no H2D)
-//
-// Parameters: same as prepare_input
-int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
-                                    size_t index, size_t expected_rank,
-                                    TensorBuffer *out_buffer);
-
-// Finalize output tensor: D2H transfer, sync, release buffer
-//
-// The runtime handles buffer release internally (free, return to pool, or keep
-// if pre-allocated).
-//
-// Parameters:
-//   state: Runtime state
-//   buffer: TensorBuffer from prepare_output
-//
-// Return codes:
-//   HIPDNN_EP_SUCCESS (0) = success
-//   HIPDNN_EP_ERR_D2H_TRANSFER_FAILED = D2H transfer failed
-//   HIPDNN_EP_ERR_STREAM_SYNC_FAILED = stream sync failed
-//
-// Note: Buffer is released even on error (best-effort cleanup)
-int hipdnn_ep_tensor_finalize_output(RuntimeState *state, TensorBuffer *buffer);
-
 // Release input tensor buffer (no D2H transfer needed)
 //
 // Parameters:
@@ -607,7 +582,7 @@ int hipdnn_ep_tensor_finalize_output(RuntimeState *state, TensorBuffer *buffer);
 void hipdnn_ep_tensor_free_input(RuntimeState *state, TensorBuffer *buffer);
 
 // Synchronize the GPU stream and print PERF/profile timing (if enabled).
-// Called by generated code after finalize_output, before free_input.
+// Called by generated code after compute, before free_input.
 int hipdnn_ep_stream_sync(RuntimeState *state);
 
 // Per-operator profiling state accessor (OpProfileState*, gated on

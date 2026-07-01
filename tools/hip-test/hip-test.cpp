@@ -13,6 +13,14 @@
 #include "hip/Support/DiskFileSystem.h"
 #include "hip/artifact_abi.h" // hipdnn::abi symbol names
 #include <memory>
+// Real (GPU) builds link hip::host, so the output-allocator callback hands the
+// model.dll a genuine device buffer (the GPU kernels write into it) and copies
+// it back D2H for validation -- mirroring the EP's output_allocate_cb. Mock
+// builds run CPU stubs that write host memory directly, so the callback returns
+// a plain host buffer and no HIP dependency is pulled in.
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+#include <hip/hip_runtime.h>
+#endif
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable : 4244) // Conversion warnings in LLVM JSON.h
@@ -66,6 +74,81 @@ typedef struct {
   tensor_t *data; // Array of tensors
   size_t count;   // Number of tensors
 } span_t;
+
+// Local mirror of `hipdnn_output_allocator_t` (lib/Runtime/hipdnn_ep_runtime.h)
+// / `output_allocator_t` (custom_op_mlir.hpp). Layout MUST match: the runtime
+// setter does a plain struct copy across the model.dll <-> caller boundary. See
+// those headers for the ABI contract.
+typedef struct {
+  void *self; // opaque caller context (borrowed; runtime never owns/frees)
+  void *(*allocate)(void *self, int64_t out_idx, const int64_t *shape,
+                    int64_t rank, int64_t elem_size);
+} output_allocator_t;
+
+static_assert(offsetof(output_allocator_t, self) == 0,
+              "output_allocator_t.self must remain the first field");
+
+// One graph output produced in-graph via hip.alloc_output -> the callback
+// below. Owns the buffer the model.dll writes into (device memory in real
+// builds, host memory in mock builds) plus a host-side copy used for
+// validation.
+struct OutputSlot {
+  std::vector<int64_t> shape;
+  size_t elem_size = 0;
+  size_t nbytes = 0;
+  std::vector<uint8_t> host; // validation copy (== the write buffer in mock)
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+  void *gpu = nullptr; // device buffer the model.dll writes into
+#endif
+};
+
+// Context threaded through output_allocator_t.self. In allocator mode the DLL
+// calls back once per graph output (indexed by out_idx) as each output's shape
+// becomes known in-graph; we allocate a write buffer here and return it.
+struct OutputAllocatorCtx {
+  std::vector<OutputSlot> outs; // indexed by compiler-order out_idx
+};
+
+// output_allocator_t.allocate: allocate the buffer for graph output `out_idx`
+// at the DLL's in-graph shape and return the pointer the DLL writes into. On a
+// real build that must be device memory (the GPU kernels target it); on a mock
+// build a host buffer suffices. Never returns null (the DLL builds a memref
+// from the pointer -- a null would segfault with no diagnostic).
+static void *hip_test_allocate(void *self, int64_t out_idx,
+                               const int64_t *shape, int64_t rank,
+                               int64_t elem_size) {
+  auto *ctx = static_cast<OutputAllocatorCtx *>(self);
+  if (out_idx < 0) {
+    std::cerr << "ERROR: output allocator got negative out_idx " << out_idx
+              << "\n";
+    std::abort();
+  }
+  if (static_cast<size_t>(out_idx) >= ctx->outs.size())
+    ctx->outs.resize(static_cast<size_t>(out_idx) + 1);
+  OutputSlot &slot = ctx->outs[static_cast<size_t>(out_idx)];
+  slot.shape.assign(shape, shape + rank);
+  slot.elem_size = static_cast<size_t>(elem_size);
+  size_t nelem = 1;
+  for (int64_t i = 0; i < rank; ++i)
+    nelem *= static_cast<size_t>(shape[i]);
+  slot.nbytes = nelem * static_cast<size_t>(elem_size);
+  slot.host.assign(slot.nbytes, 0);
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+  if (slot.gpu) {
+    (void)hipFree(slot.gpu);
+    slot.gpu = nullptr;
+  }
+  hipError_t e = hipMalloc(&slot.gpu, slot.nbytes ? slot.nbytes : 1);
+  if (e != hipSuccess || !slot.gpu) {
+    std::cerr << "ERROR: hipMalloc(" << slot.nbytes << ") for output "
+              << out_idx << " failed: " << hipGetErrorString(e) << "\n";
+    std::abort();
+  }
+  return slot.gpu;
+#else
+  return slot.host.data();
+#endif
+}
 
 // Parse --input-shape arguments: "0=8,3,224,224;1=8,512"
 std::map<int, std::vector<int64_t>>
@@ -343,18 +426,27 @@ int main(int argc, char **argv) {
 
   auto init_func =
       artifact->get_method<int, void **, void *>(hipdnn::abi::kInferenceInit);
-  auto compute_func = artifact->get_method<int, void *, void *, void *>(
-      hipdnn::abi::kInferenceCompute);
+  // Output-allocator ABI: 2-arg inference_compute(state, inputs). Graph outputs
+  // are allocated in-graph via the callback installed through
+  // hipdnn_ep_set_output_allocator -- there is no outputs span.
+  auto compute_func =
+      artifact->get_method<int, void *, void *>(hipdnn::abi::kInferenceCompute);
+  auto set_alloc_func =
+      artifact->get_method<void, void *, const output_allocator_t *>(
+          hipdnn::abi::kSetOutputAllocator);
   auto cleanup_func =
       artifact->get_method<int, void *>(hipdnn::abi::kInferenceCleanup);
   auto get_metadata_func = artifact->get_method<const char *>(
       hipdnn::abi::kInferenceGetMetadataJson);
 
-  if (!init_func || !compute_func || !cleanup_func || !get_metadata_func) {
+  if (!init_func || !compute_func || !set_alloc_func || !cleanup_func ||
+      !get_metadata_func) {
     std::cerr << "ERROR: Missing required interface functions\n";
     std::cerr << "  inference_init: " << (init_func ? "OK" : "MISSING") << "\n";
     std::cerr << "  inference_compute: " << (compute_func ? "OK" : "MISSING")
               << "\n";
+    std::cerr << "  hipdnn_ep_set_output_allocator: "
+              << (set_alloc_func ? "OK" : "MISSING") << "\n";
     std::cerr << "  inference_cleanup: " << (cleanup_func ? "OK" : "MISSING")
               << "\n";
     std::cerr << "  inference_get_metadata_json: "
@@ -405,31 +497,16 @@ int main(int argc, char **argv) {
     }
   }
 
-  // Prepare output shapes
-  std::vector<std::vector<int64_t>> output_shapes;
-  for (size_t i = 0; i < num_outputs; i++) {
-    std::vector<int64_t> shape = output_metas[i].shape;
-    resolveShape(shape);
-    output_shapes.push_back(shape);
+  // Output shapes are NOT pre-computed here: in output-allocator mode the
+  // model.dll sizes each graph output in-graph and requests its buffer via the
+  // callback below (hip_test_allocate), passing the concrete shape at that
+  // point. `output_metas` is still parsed above for the output count / logging.
 
-    if (verbose) {
-      std::cout << "  Output " << i << " shape: [";
-      for (size_t j = 0; j < shape.size(); j++) {
-        std::cout << shape[j];
-        if (j + 1 < shape.size())
-          std::cout << ", ";
-      }
-      std::cout << "]\n";
-    }
-  }
-
-  // Element sizes from metadata
+  // Element sizes from metadata (inputs only; output element sizes arrive via
+  // the allocator callback's elem_size argument).
   std::vector<size_t> input_elem_sizes;
   for (size_t i = 0; i < num_inputs; i++)
     input_elem_sizes.push_back(input_metas[i].element_size);
-  std::vector<size_t> output_elem_sizes;
-  for (size_t i = 0; i < num_outputs; i++)
-    output_elem_sizes.push_back(output_metas[i].element_size);
 
   // Allocate input buffers and generate test data
   std::vector<std::vector<uint8_t>> input_buffers;
@@ -456,29 +533,15 @@ int main(int argc, char **argv) {
   inputs_span.data = input_tensors.data();
   inputs_span.count = input_tensors.size();
 
-  // Allocate output buffers
-  std::vector<std::vector<uint8_t>> output_buffers;
-  std::vector<std::vector<int64_t>> output_shape_storage;
-  std::vector<tensor_t> output_tensors;
-  for (size_t i = 0; i < output_shapes.size(); i++) {
-    size_t count = elementCount(output_shapes[i]);
-    size_t sizeBytes = count * output_elem_sizes[i];
-    std::vector<uint8_t> buffer(sizeBytes);
-    output_buffers.push_back(std::move(buffer));
-    output_shape_storage.push_back(output_shapes[i]);
-
-    tensor_t tensor;
-    tensor.data = output_buffers.back().data();
-    tensor.shape = output_shape_storage.back().data();
-    tensor.rank = output_shape_storage.back().size();
-    tensor.element_size = output_elem_sizes[i];
-    tensor.memory_type = TENSOR_MEMORY_CPU; // host buffers, runtime does D2H
-    output_tensors.push_back(tensor);
-  }
-
-  span_t outputs_span;
-  outputs_span.data = output_tensors.data();
-  outputs_span.count = output_tensors.size();
+  // Output-allocator context: the model.dll's in-graph hip.alloc_output calls
+  // back through this to obtain each graph-output buffer once its shape is
+  // known. Reserve num_outputs slots up front so a graph that produces them out
+  // of order still lands each at its compiler-order index.
+  OutputAllocatorCtx octx;
+  octx.outs.resize(num_outputs);
+  output_allocator_t alloc;
+  alloc.self = &octx;
+  alloc.allocate = &hip_test_allocate;
 
   // Initialize inference context
   if (verbose)
@@ -493,15 +556,20 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  // Install the output allocator so the model.dll can request output buffers
+  // in-graph. Cleared after the run so a stale `self` can never be used.
+  set_alloc_func(state, &alloc);
+
   // Run inference
   if (verbose)
     std::cout << "Running inference (" << iterations << " iteration(s))...\n";
 
   for (int iter = 0; iter < iterations; iter++) {
-    ret = compute_func(state, &inputs_span, &outputs_span);
+    ret = compute_func(state, &inputs_span);
     if (ret != 0) {
       std::cerr << "ERROR: inference_compute failed with code " << ret
                 << " at iteration " << iter << "\n";
+      set_alloc_func(state, nullptr);
       cleanup_func(state);
       return 1;
     }
@@ -510,16 +578,54 @@ int main(int argc, char **argv) {
       std::cout << "  Iteration " << (iter + 1) << "/" << iterations << "\n";
   }
 
+  set_alloc_func(state, nullptr);
+
+  if (verbose) {
+    for (size_t i = 0; i < octx.outs.size(); i++) {
+      std::cout << "  Output " << i << " shape: [";
+      for (size_t j = 0; j < octx.outs[i].shape.size(); j++) {
+        std::cout << octx.outs[i].shape[j];
+        if (j + 1 < octx.outs[i].shape.size())
+          std::cout << ", ";
+      }
+      std::cout << "]\n";
+    }
+  }
+
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+  // Copy each device output back into its host validation buffer. The 2-arg
+  // inference_compute already stream-synced, so a blocking hipMemcpy is safe.
+  for (auto &slot : octx.outs) {
+    if (!slot.gpu || slot.nbytes == 0)
+      continue;
+    hipError_t e = hipMemcpy(slot.host.data(), slot.gpu, slot.nbytes,
+                             hipMemcpyDeviceToHost);
+    if (e != hipSuccess) {
+      std::cerr << "ERROR: D2H copy of output failed: " << hipGetErrorString(e)
+                << "\n";
+      cleanup_func(state);
+      return 1;
+    }
+  }
+#endif
+
   // Validate outputs
   if (validate) {
     if (verbose)
       std::cout << "\nValidating outputs...\n";
     bool all_valid = true;
-    for (size_t i = 0; i < output_buffers.size(); i++) {
+    for (size_t i = 0; i < octx.outs.size(); i++) {
       if (verbose)
         std::cout << "Output " << i << ":\n";
-      if (!validateOutput(output_buffers[i].data(), output_buffers[i].size(),
-                          output_elem_sizes[i], verbose)) {
+      const OutputSlot &slot = octx.outs[i];
+      if (slot.elem_size == 0) {
+        std::cerr << "VALIDATION FAILED: output " << i
+                  << " was never produced by the model\n";
+        all_valid = false;
+        continue;
+      }
+      if (!validateOutput(slot.host.data(), slot.host.size(), slot.elem_size,
+                          verbose)) {
         all_valid = false;
       }
     }
@@ -540,6 +646,12 @@ int main(int argc, char **argv) {
   if (ret != 0) {
     std::cerr << "WARNING: inference_cleanup failed with code " << ret << "\n";
   }
+
+#ifdef HIPDNN_EP_LINK_HIP_HOST
+  for (auto &slot : octx.outs)
+    if (slot.gpu)
+      (void)hipFree(slot.gpu);
+#endif
 
   std::cout << "SUCCESS: Model executed successfully\n";
   return 0;
