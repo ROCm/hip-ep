@@ -39,10 +39,16 @@ namespace {
 /// nothing added to the pass manager. Pipeline construction cost is
 /// effectively unchanged in that case, which is the common case.
 //
-// Note on ::hip: Pipelines.cpp pulls in `using namespace mlir;`, so
-// unqualified `hip` resolves to `mlir::hip` (this file's own
-// namespace). The plugin registry lives in `::hip::compiler`, so we
-// always need the leading `::` here.
+// Note on `hip` name lookup: this TU does `using namespace mlir;` AND
+// includes "hip/Compiler/PluginRegistry.h", which declares the global
+// `::hip::compiler`. So both `mlir::hip` (the dialect) and `::hip` (the
+// plugin/compiler infra) are in scope, and an *unqualified* `hip::` is
+// AMBIGUOUS -- it does not silently resolve to `mlir::hip`. Every dialect
+// pass call here must therefore be spelled `mlir::hip::create...Pass()`,
+// and every plugin-registry reference `::hip::compiler::...` with the
+// leading `::`. A bare `hip::` compiles on main (where PluginRegistry.h
+// is not included, so `::hip` is not visible) but breaks the moment this
+// file sees it -- keep new pass calls fully qualified.
 void addPluginPassesForSlot(OpPassManager &pm,
                             ::hip::compiler::PipelineSlot slot) {
   auto passNames = ::hip::compiler::pluginPassesForSlot(slot);
@@ -121,7 +127,7 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm,
   //       `empty-tensor-to-alloc-tensor` (which would also undo the benign
   //       merges the CSE above is here to make). See
   //       SplitDuplicateDpsInits.cpp.
-  pm.addNestedPass<func::FuncOp>(hip::createSplitDuplicateDpsInitsPass());
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createSplitDuplicateDpsInitsPass());
 
   // 1c. Fold `tensor.dim` queries on `tensor.expand_shape` /
   //     `tensor.collapse_shape` chains into arithmetic on the chain
