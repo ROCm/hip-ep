@@ -77,7 +77,7 @@ struct Case {
 };
 
 // Mirror of gqa.cpp's decode-geometry gate (flash_decode_geometry_ok): the
-// optimized flash_decode kernel is templated for HpG in {1,2,3,4,8,16} and
+// optimized flash_decode kernel is templated for HpG in {1,2,3,4,5,8,16} and
 // head_dim in {64,128}.
 static bool geometry_ok(int H, int G, int D) {
   if (D != 64 && D != 128)
@@ -85,7 +85,8 @@ static bool geometry_ok(int H, int G, int D) {
   if (G <= 0 || H % G != 0)
     return false;
   const int hpg = H / G;
-  return hpg == 1 || hpg == 2 || hpg == 3 || hpg == 4 || hpg == 8 || hpg == 16;
+  return hpg == 1 || hpg == 2 || hpg == 3 || hpg == 4 || hpg == 5 || hpg == 8 ||
+         hpg == 16;
 }
 
 // Mirror of gqa.cpp::wrap_gqa_flash path selection: true => the optimized
@@ -431,6 +432,13 @@ int main(int argc, char **argv) {
       {"decode  l31-8b skv256 ", 1, 32, 8, 128, 1, 255, 2, -1, 0, 0},
       {"decode  l31-8b skv257 ", 1, 32, 8, 128, 1, 256, 2, -1, 0, 0},
       {"decode  l31-8b skv512 ", 1, 32, 8, 128, 1, 511, 2, -1, 0, 0},
+      // ---- qwen2.5-14b 40:8 (HpG=5) d128: now fused flash_decode_v2 ----
+      // BACK has no HpG=5 flash decode (legacy gate = HpG 4/8 only) -> it runs
+      // the slow decomposed hipBLASLt pipeline, so NEW should win big here.
+      {"decode  qwen14b skv256", 1, 40, 8, 128, 1, 255, 2, -1, 0, 0},
+      {"decode  qwen14b skv1k ", 1, 40, 8, 128, 1, 1023, 2, -1, 0, 0},
+      {"decode  qwen14b skv2k ", 1, 40, 8, 128, 1, 2047, 2, -1, 0, 0},
+      {"prefill qwen14b s512  ", 1, 40, 8, 128, 512, 0, 2, -1, 0, 0},
       // ---- fallback: sliding-window size sweep ----
       {"decode  WIN64 d64     ", 1, 64, 8, 64, 1, 2048, 2, 64, 0, 0},
       {"decode  WIN256 d64    ", 1, 64, 8, 64, 1, 2048, 2, 256, 0, 0},
@@ -444,8 +452,9 @@ int main(int argc, char **argv) {
       {"decode  d80 odd-dim   ", 1, 32, 8, 80, 1, 2048, 2, -1, 0, 0},
       {"prefill d80 odd-dim   ", 1, 32, 8, 80, 512, 0, 2, -1, 0, 0},
       {"decode  d256 big-dim  ", 1, 16, 4, 256, 1, 2048, 2, -1, 0, 0},
-      // ---- fallback: untemplated decode geometry sweep (HpG 5,6,12) ----
-      {"decode  HpG5 odd-geom ", 1, 20, 4, 64, 1, 2048, 2, -1, 0, 0},
+      // ---- untemplated decode geometry sweep (HpG 6,12 still fallback; HpG5
+      //      is now fused via flash_decode_v2, kept here as a d64 cross-check) --
+      {"decode  HpG5 d64      ", 1, 20, 4, 64, 1, 2048, 2, -1, 0, 0},
       {"decode  HpG6 odd-geom ", 1, 24, 4, 64, 1, 2048, 2, -1, 0, 0},
       {"decode  HpG12 odd-geom", 1, 24, 2, 64, 1, 2048, 2, -1, 0, 0},
       // ---- fallback: smooth/sink extra geometries ----

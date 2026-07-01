@@ -1605,6 +1605,10 @@ struct FlashDecodeCfg { bool use_wmma; int splits; };
 static inline bool flash_decode_wmma_supported(int d, int hpg) {
   if (hpg == 4) return d == 64 || d == 128;
   if (hpg == 8) return d == 64;
+  // NOTE: HpG=5 (Qwen2.5-14B 40:8) deliberately has NO WMMA path. Packing only
+  // 5 of the 16 M-tile rows wastes 11 lanes and measured 3-4x SLOWER than the
+  // scalar kernel across skv (even losing to the legacy decode at skv=2k), so
+  // HpG=5 runs the HpG-generic scalar decode exclusively.
   return false;
 }
 
@@ -1664,6 +1668,7 @@ static inline void launchFlashDecodeConfig(
       case 2:  LAUNCH_SCALAR(2);  break;
       case 3:  LAUNCH_SCALAR(3);  break;
       case 4:  LAUNCH_SCALAR(4);  break;
+      case 5:  LAUNCH_SCALAR(5);  break;
       case 8:  LAUNCH_SCALAR(8);  break;
       case 16: LAUNCH_SCALAR(16); break;
       default: break;  // unsupported HpG is rejected in hip_gqa_flash_decode_v2
@@ -1686,20 +1691,33 @@ static inline void launchFlashDecodeConfig(
 // (no point launching more splits than there are 16-key tiles). Deduplicated.
 static void flashDecodeCandidateSplits(int skv, int max_splits,
                                        int (&out)[7], int& n) {
-  // Small counts {2,4} added so short contexts can pick a leaner reduce (fewer
-  // partial rows -> smaller reduce launch) instead of being forced to >=8.
+  // Small counts {2,4} let short contexts pick a leaner reduce (fewer partial
+  // rows -> smaller reduce launch). But a small split at LARGE skv makes each
+  // block serial-scan skv/splits keys, which is a hard cliff (measured at
+  // skv=2048: splits=2 -> 0.175ms, splits=4 -> 0.0075ms, vs splits>=8 ->
+  // ~0.0045ms). The autotune only times 10 iters, so at us scale it can noisily
+  // mis-pick a catastrophic small split. Guard it structurally: never offer a
+  // split whose per-block KV scan exceeds kMaxKeysPerSplit. This keeps {2,4}
+  // available exactly where they help (short contexts) and also raises the
+  // floor at huge skv so the tuner can't land on an under-filled config.
   static const int kBase[7] = {2, 4, 8, 16, 32, 48, 64};
+  constexpr int kMaxKeysPerSplit = 256;
   int cap = max_splits < kFlashDecodeMaxSplits ? max_splits : kFlashDecodeMaxSplits;
   if (cap < 1) cap = 1;
   int eff = skv > 0 ? skv : 1;
   int max_useful = (eff + 15) / 16; if (max_useful < 1) max_useful = 1;
+  int min_splits = (eff + kMaxKeysPerSplit - 1) / kMaxKeysPerSplit;
+  if (min_splits < 1) min_splits = 1;
+  if (min_splits > cap) min_splits = cap;
   n = 0;
   for (int s : kBase) {
     int v = s; if (v > cap) v = cap; if (v > max_useful) v = max_useful;
+    if (v < min_splits) continue;  // too few splits for this skv -> skip
     bool dup = false;
     for (int i = 0; i < n; ++i) if (out[i] == v) dup = true;
     if (!dup) out[n++] = v;
   }
+  if (n == 0) { out[0] = min_splits; n = 1; }  // safety: always >=1 candidate
 }
 
 static std::unordered_map<uint64_t, FlashDecodeCfg> g_flash_decode_cache;
@@ -1798,9 +1816,9 @@ extern "C" int hip_gqa_flash_decode_v2(
     const void* head_sink,
     int use_smooth_softmax) {
   // HPG = heads-per-group (Q heads sharing one KV head). The kernels are
-  // instantiated for HPG=4 (Llama-3.x family at d=64 and d=128) and HPG=8
-  // (gpt-oss-20b at d=64). HPG=8 with d=128 is rejected to keep template
-  // bloat bounded; no current model needs it.
+  // instantiated for HPG=4 (Llama-3.x family at d=64 and d=128), HPG=5
+  // (Qwen2.5-14B's 40:8 at d=128) and HPG=8 (gpt-oss-20b at d=64). HPG=8 with
+  // d=128 is rejected to keep template bloat bounded; no current model needs it.
   if (G <= 0 || H % G != 0) {
     fprintf(stderr, "hip_gqa_flash_decode_v2: H=%d not divisible by G=%d\n", H, G);
     return -1;
@@ -1808,10 +1826,11 @@ extern "C" int hip_gqa_flash_decode_v2(
   const int hpg = H / G;
   // Scalar decode is templated for these HpG (GQA + MHA); WMMA is layered on
   // top where flash_decode_wmma_supported() says so. Anything else is rejected.
-  if (hpg != 1 && hpg != 2 && hpg != 3 && hpg != 4 && hpg != 8 && hpg != 16) {
+  if (hpg != 1 && hpg != 2 && hpg != 3 && hpg != 4 && hpg != 5 && hpg != 8 &&
+      hpg != 16) {
     fprintf(stderr,
-            "hip_gqa_flash_decode_v2: unsupported HPG=%d (must be 1/2/3/4/8/16; "
-            "H=%d, G=%d)\n",
+            "hip_gqa_flash_decode_v2: unsupported HPG=%d (must be "
+            "1/2/3/4/5/8/16; H=%d, G=%d)\n",
             hpg, H, G);
     return -1;
   }

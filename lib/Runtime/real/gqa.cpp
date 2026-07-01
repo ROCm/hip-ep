@@ -113,9 +113,10 @@ static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
 static constexpr int kFlashDecodeMaxSplits = 64;
 
 // Geometry gate for the flash_decode kernel template instantiations. The scalar
-// decode kernel is templated for HpG in {1,2,3,4,8,16} (so it covers MHA and
-// the common GQA ratios) at d in {64,128}; WMMA is layered on top inside the
-// kernel where it helps. Anything outside this set has no decode kernel.
+// decode kernel is templated for HpG in {1,2,3,4,5,8,16} (so it covers MHA and
+// the common GQA ratios, incl. Qwen2.5-14B's 40:8=5) at d in {64,128}; WMMA is
+// layered on top inside the kernel where it helps. Anything outside this set
+// has no decode kernel.
 static inline bool flash_decode_geometry_ok(int64_t H, int64_t G, int64_t d) {
   if (G <= 0)
     return false;
@@ -124,7 +125,8 @@ static inline bool flash_decode_geometry_ok(int64_t H, int64_t G, int64_t d) {
   int64_t hpg = H / G;
   if (hpg * G != H)
     return false;
-  return hpg == 1 || hpg == 2 || hpg == 3 || hpg == 4 || hpg == 8 || hpg == 16;
+  return hpg == 1 || hpg == 2 || hpg == 3 || hpg == 4 || hpg == 5 || hpg == 8 ||
+         hpg == 16;
 }
 
 //===----------------------------------------------------------------------===//
@@ -276,7 +278,7 @@ static int gqa_forward_fused(
     if (!flash_decode_geometry_ok(H, G, d)) {
       fprintf(stderr,
               "gqa_forward_fused (decode): unsupported geometry H=%lld G=%lld "
-              "d=%lld (HpG must be 1/2/3/4/8/16 and d 64 or 128)\n",
+              "d=%lld (HpG must be 1/2/3/4/5/8/16 and d 64 or 128)\n",
               (long long)H, (long long)G, (long long)d);
       return -1;
     }
