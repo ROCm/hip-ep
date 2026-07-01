@@ -95,12 +95,13 @@
 //   - Floating-point element types: rare on the host-fed scalar path,
 //     almost always GPU-consumed in flight, where the GPU pool is the
 //     right home.
-//   - Allocs/allocas carrying an explicit `#hip.mem<>` memory space: these
-//     carry a deliberate space attribute (e.g. a `#hip.mem<host>` destination
-//     for a cross-space copy) and otherwise look exactly like a
-//     host-staged scalar. Grabbing one here would build a `memref.view` whose
-//     host-space result mismatches the space-less scratch base, so the
-//     explicit-space filter leaves them alone.
+//   - Allocs that already carry an explicit `#hip.mem<>` space: skipped.
+//     A tiny `#hip.mem<host>` integer buffer (say, the destination of a
+//     device-to-host copy) reads just like a host-staged scalar, but it was
+//     tagged with that space on purpose. Our scratch buffer has no space
+//     (`memref<?xi8>`), so a `memref.view` of it into a `#hip.mem<host>`
+//     result would mismatch spaces and the `memref.view` verifier would
+//     reject it. Leave these allocs where they are.
 //   - Functions whose arg 0 is not `!hip.context`: silently skipped.
 //     Utility functions and pre-context-arg passes don't have access to
 //     the runtime scratch handle; the pass is a best-effort mitigation,
@@ -207,12 +208,12 @@ static bool isHostScalarCandidate(memref::AllocOp allocOp) {
   MemRefType type = allocOp.getType();
   if (!type.hasStaticShape())
     return false;
-  // Allocs carrying an explicit #hip.mem<> space are not candidates for this
-  // pinned host_scratch pool. In particular a small #hip.mem<host> integer
-  // buffer (e.g. a cross-space copy destination) otherwise looks exactly like a
-  // host-staged scalar; grabbing it here would emit a memref.view whose
-  // #hip.mem<host> result mismatches the space-less scratch base (memref<?xi8>)
-  // and fail the memref.view verifier. Leave it alone.
+  // Skip allocs that already carry an explicit #hip.mem<> space. A small
+  // #hip.mem<host> integer buffer (say, the destination of a device-to-host
+  // copy) reads just like a host-staged scalar, but it was tagged with that
+  // space on purpose. The scratch buffer has no space (memref<?xi8>), so
+  // viewing it into a #hip.mem<host> result would mismatch spaces and fail the
+  // memref.view verifier. Leave it alone.
   if (dyn_cast_or_null<MemorySpaceAttr>(type.getMemorySpace()))
     return false;
   if (type.getNumElements() > 16)

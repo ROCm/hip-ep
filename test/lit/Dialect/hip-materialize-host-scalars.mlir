@@ -207,11 +207,11 @@ func.func @host_scalar_as_reshape_shape(%ctx: !hip.context, %x: i64,
   return %r : memref<?x?xf16>
 }
 
-// --- Alloc carrying an explicit #hip.mem<host> space: a small integer alloc
-//     with a memref.load user (e.g. a cross-space copy destination), which
-//     otherwise looks exactly like a host-staged scalar — but MUST be left alone:
-//     redirecting it here would build a memref.view whose #hip.mem<host> result
-//     mismatches the space-less scratch base and fail the verifier. ---
+// --- Alloc that already carries an explicit #hip.mem<host> space: a small
+//     integer alloc with a memref.load user (say, a device-to-host copy
+//     destination) reads just like a host-staged scalar, but MUST be left
+//     alone. The scratch buffer has no space, so viewing it into a
+//     #hip.mem<host> result would mismatch spaces and fail the verifier. ---
 // CHECK-LABEL: func.func @host_space_alloc_left_alone
 // CHECK-NOT:   hip.get_host_scratch
 // CHECK:       memref.alloc() : memref<i32, #hip.mem<host>>
