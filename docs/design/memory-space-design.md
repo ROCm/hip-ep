@@ -430,6 +430,40 @@ The transfer machinery above is now **partially implemented as a parallel mechan
 
 **Deferred (still future work):** migrating readback / host-scratch / other ops onto `hip.transfer`; the H2D direction (`hip.memcpy_h2d_async` is lowered for symmetry but unused by the pad pilot); a pinned-backed transfer destination; the `ShapeInference`-insertion and `EliminateStreamSyncBarriers` passes; and flipping the unspecified-memory-space acceptance to strict.
 
+### Pad output buffer: device space via `bufferization.alloc_tensor`
+
+`hip.pad`'s `output` operand is `Hip_TensorOrDeviceMemRef`, so once bufferized it MUST be `#hip.mem<device>` (the pad kernel writes it on the GPU). Rather than a custom `getBufferType()` override on `hip.pad` (which fights DPS: the op's result buffer type is *tied* to its init operand's buffer type, so forcing a different space on the result creates a bufferization type/equivalence conflict), we drive the space from the **DPS init** — the canonical MLIR idiom.
+
+`PadConversion::buildPadOutputInit` builds the init with `bufferization.alloc_tensor {memory_space = #hip.mem<device>}` instead of `tensor.empty`:
+
+```mlir
+// tensor phase (after convert-onnx-to-hip)
+%init = bufferization.alloc_tensor() {memory_space = #hip.mem<device>} : tensor<5x6xf32>
+%r    = hip.pad(%ctx) ins(%data, %pads) outs(%init : tensor<5x6xf32>) : tensor<5x6xf32>
+```
+
+`one-shot-bufferize` reads `alloc_tensor`'s `memory_space` and materializes an **identity-layout `#hip.mem<device>` `memref.alloc`**; DPS then ties `hip.pad`'s result buffer to that init, so both the `outs` operand and the result are device-typed — satisfying the type constraint by construction, no fix-up pass:
+
+```mlir
+// after one-shot-bufferize
+%a = memref.alloc() : memref<5x6xf32, #hip.mem<device>>
+hip.pad(%ctx) ins(...) outs(%a : memref<5x6xf32, #hip.mem<device>>)
+```
+
+**PoolAllocs reconciliation (space-less view + relabel cast).** `hip-pool-allocs` folds every device `memref.alloc` into the one grow-on-demand GPU pool (`hip.get_pool : memref<?xi8>`, deliberately space-less so the pool machinery stays uniform). But `memref.view` requires its result and its source to share a memory space, and the pool base has none — so the view is created **space-less**, then relabeled back to the alloc's declared space with a `memref.memory_space_cast`:
+
+```mlir
+// after hip-pool-allocs
+%pool = hip.get_pool(%ctx, %sz) : memref<?xi8>
+%v    = memref.view %pool[%off][] : memref<?xi8> to memref<5x6xf32>
+%a    = memref.memory_space_cast %v : memref<5x6xf32> to memref<5x6xf32, #hip.mem<device>>
+hip.pad(%ctx) ins(...) outs(%a : memref<5x6xf32, #hip.mem<device>>)
+```
+
+The cast is a pure relabel — device maps to LLVM AS 0 (the default), so it lowers to a no-op — and it is emitted **only** for allocs that already carry a space, leaving the common space-less pooled allocations byte-identical. Coverage: `test/lit/Dialect/hip-pad-bufferize.mlir` (bufferize + pool artifacts), `test/lit/Dialect/hip-memory-space-pipeline.mlir` (device output at the op boundary end-to-end), `test/lit/e2e/test_pad_model.mlir`.
+
+**Why not make `hip.get_pool` device-typed and skip the cast?** It is technically possible with no runtime change — `GetPoolOpLowering` already derives the pool's address space from its memref type, and device maps to AS 0 (a no-op addrspace-cast). But it is not better *while the migration is partial*: `memref.view` requires the view and pool base to share a space, so a device-typed base forces **every** view device-typed — and today the pooled set is dominated by transitional un-annotated (space-less) GPU allocs, with a device space on only a handful of ops (currently just `hip.pad`'s output). A device base would therefore move the cast onto that space-less majority (strictly worse) or require reinterpreting all of them as device in one premature bulk change. The space-less pool + targeted cast is the minimal correct step; the "device pool, no casts" end-state arrives for free once **every** pooled alloc is device-typed, at which point the pool base flips to `#hip.mem<device>` and the per-alloc cast in `PoolAllocs.cpp` is deleted (base == view == device for all). See the `FUTURE (remove this cast)` note there.
+
 ### Pass Pipeline
 
 Three passes coordinate to enforce memory spaces and optimize synchronization:
@@ -487,7 +521,9 @@ This section contrasts wrong (type violations) vs right (correct-by-construction
 
 ✅ **RIGHT** - Correct from start:
 ```mlir
-// getBufferType() correctly declares device memory
+// The DPS init is a device-space bufferization.alloc_tensor, so one-shot-bufferize
+// materializes a #hip.mem<device> memref.alloc and DPS ties the result to it.
+// (See "Pad output buffer: device space via bufferization.alloc_tensor" above.)
 %device = hip.pad(%ctx) ins(%input, %pads) outs(%output)
           -> memref<?x?xf16, #hip.mem<device>>  // Correct - GPU writes to device
 // Type-correct, no fix-up needed

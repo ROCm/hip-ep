@@ -19,11 +19,13 @@ module {
   // CHECK-LABEL: func.func @pad_constant_default
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[D:.*]]: tensor<3x4xf32>, %[[P:.*]]: tensor<4xi64>)
   // pads are brought to host via the explicit transfer mechanism (emitted before
-  // the output tensor.empty, since the dynamic-shape path reads pad amounts from
+  // the output init, since the dynamic-shape path reads pad amounts from
   // this same host copy); hip.pad reads the host copy (wrap_pad consumes pads
-  // CPU-side).
+  // CPU-side). The output init is a DEVICE-space bufferization.alloc_tensor (the
+  // pad kernel writes device memory), so hip.pad's output buffer is device-typed
+  // after bufferization.
   // CHECK: %[[PH:.*]] = hip.transfer(%[[CTX]], %[[P]] : tensor<4xi64>) to <host> -> tensor<4xi64>
-  // CHECK: tensor.empty() : tensor<5x6xf32>
+  // CHECK: bufferization.alloc_tensor() {memory_space = #hip.mem<device>} : tensor<5x6xf32>
   // CHECK: hip.pad(%[[CTX]]) ins(%[[D]], %[[PH]] : tensor<3x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<5x6xf32>)
 
   // Constant pad with a COMPILE-TIME-CONSTANT fill value (the common case, e.g.
@@ -132,7 +134,7 @@ module {
   // CHECK-DAG: %[[E0:.*]] = arith.constant 2 : index
   // CHECK: %[[S0:.*]] = arith.addi %[[D0]], %[[B0]] : index
   // CHECK: %[[OUT0:.*]] = arith.addi %[[S0]], %[[E0]] : index
-  // CHECK: tensor.empty(%[[OUT0]]) : tensor<?x6xf32>
+  // CHECK: bufferization.alloc_tensor(%[[OUT0]]) {memory_space = #hip.mem<device>} : tensor<?x6xf32>
   // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<?x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<?x6xf32>)
 
   // Dynamic output with `pads` supplied as an onnx.Constant -- the form that
@@ -155,7 +157,7 @@ module {
   // tensor.dim of the data plus arith.constant pad amounts.
   // CHECK-NOT: hip.readback_scalar
   // CHECK-NOT: tensor.extract_slice
-  // CHECK: tensor.empty({{.*}}) : tensor<?x6xf32>
+  // CHECK: bufferization.alloc_tensor({{.*}}) {memory_space = #hip.mem<device>} : tensor<?x6xf32>
   // CHECK: hip.pad({{.*}}) ins({{.*}} : tensor<?x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<?x6xf32>)
 
   // Dynamic output dims with a non-constant `pads` (function arg): `pads` is
@@ -182,6 +184,6 @@ module {
   // CHECK-NOT: hip.readback_scalar
   // CHECK: tensor.extract %[[PH]]{{\[}}%{{.*}}] : tensor<4xi64>
   // CHECK: arith.index_cast %{{.*}} : i64 to index
-  // CHECK: tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?xf32>
+  // CHECK: bufferization.alloc_tensor(%{{.*}}, %{{.*}}) {memory_space = #hip.mem<device>} : tensor<?x?xf32>
   // CHECK: hip.pad
 }

@@ -873,12 +873,45 @@ void PoolAllocsPass::runOnOperation() {
         bufferOffsets[pos] = -1;
 
       builder.setInsertionPoint(info->allocOp);
-      MemRefType viewType = info->allocOp.getType();
+      MemRefType allocType = info->allocOp.getType();
       auto dynSizes = info->allocOp.getDynamicSizes();
-      auto view =
+      // memref.view requires the view result and the pool base to share a
+      // memory space, and the pool base is space-less (`memref<?xi8>`). So the
+      // view is always created SPACE-LESS. If the original allocation carried
+      // an explicit memory space (e.g. hip.pad's #hip.mem<device> output),
+      // relabel the space-less view back to that space with a
+      // memory_space_cast so consumers still see the declared type. The cast is
+      // a pure relabel (device -> default LLVM AS is a no-op) and, being scoped
+      // to allocs that already carry a space, leaves the common space-less
+      // allocations byte-identical (no cast emitted).
+      //
+      //   Before:  %a = memref.alloc() : memref<NxT, #hip.mem<device>>
+      //   After:   %v = memref.view %pool[%off][] : memref<?xi8> to memref<NxT>
+      //            %a = memref.memory_space_cast %v
+      //                   : memref<NxT> to memref<NxT, #hip.mem<device>>
+      //
+      // FUTURE (remove this cast): the pool base is space-less only because the
+      // memory-space migration is partial -- today almost every pooled alloc is
+      // un-annotated, with a device space on just a handful of ops (currently
+      // hip.pad's output). Once EVERY pooled alloc is device-typed, make the
+      // pool base #hip.mem<device> and drop this cast -- GetPoolOpLowering
+      // already maps device -> AS 0, so views become device-typed directly.
+      // Full rationale: memory-space-design.md ("Why not make hip.get_pool
+      // device-typed and skip the cast?").
+      Attribute space = allocType.getMemorySpace();
+      MemRefType viewType = space ? MemRefType::get(allocType.getShape(),
+                                                    allocType.getElementType(),
+                                                    allocType.getLayout())
+                                  : allocType;
+      Value pooled =
           memref::ViewOp::create(builder, info->allocOp.getLoc(), viewType,
-                                 pool, offset, SmallVector<Value>(dynSizes));
-      info->allocOp.replaceAllUsesWith(view.getResult());
+                                 pool, offset, SmallVector<Value>(dynSizes))
+              .getResult();
+      if (space)
+        pooled = memref::MemorySpaceCastOp::create(
+                     builder, info->allocOp.getLoc(), allocType, pooled)
+                     .getResult();
+      info->allocOp.replaceAllUsesWith(pooled);
       info->allocOp.erase();
       ++NumAllocsPooled;
     }
