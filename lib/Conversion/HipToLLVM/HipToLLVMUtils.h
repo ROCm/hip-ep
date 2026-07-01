@@ -46,6 +46,15 @@ inline constexpr const char *kHipAllocOutput = "hipdnn_ep_alloc_output";
 inline constexpr const char *kWrapHipMemcpyAsync = "wrap_hipMemcpyAsync";
 inline constexpr const char *kWrapHipMemcpy2DAsync = "wrap_hipMemcpy2DAsync";
 inline constexpr const char *kWrapStridedCopy = "wrap_strided_copy";
+// hip.memcpy_{h2d,d2h}_async lower to these state-based wrappers: like
+// wrap_hipMemcpyAsync they take the RuntimeState* (ctx) and resolve the stream
+// internally. Distinct from the stream-taking wrap_hipMemcpy{H2D,D2H}.
+inline constexpr const char *kWrapHipMemcpyH2DAsync = "wrap_hipMemcpyH2DAsync";
+inline constexpr const char *kWrapHipMemcpyD2HAsync = "wrap_hipMemcpyD2HAsync";
+// hip.stream_sync lowers here: plain blocking sync (NOT hipdnn_ep_stream_sync),
+// also state-based.
+inline constexpr const char *kWrapHipStreamSynchronize =
+    "wrap_hipStreamSynchronize";
 
 inline constexpr const char *kMiopenConvolutionForward =
     "wrap_miopenConvolutionForward";
@@ -457,6 +466,12 @@ void populateReadbackDimLoweringPatterns(const LLVMTypeConverter &converter,
 // scalar of arbitrary element type (the i64/f32/f16 sibling of readback_dim).
 void populateReadbackScalarLoweringPatterns(const LLVMTypeConverter &converter,
                                             RewritePatternSet &patterns);
+// hip.memcpy_h2d_async / hip.memcpy_d2h_async / hip.stream_sync: the explicit
+// memref-phase cross-memory-space copy ops. Lower to the state-based
+// wrap_hipMemcpy{H2D,D2H}Async / wrap_hipStreamSynchronize wrappers, which
+// resolve the runtime stream from the RuntimeState* internally.
+void populateMemcpyLoweringPatterns(const LLVMTypeConverter &converter,
+                                    RewritePatternSet &patterns);
 void populateSizeLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateLoopLoweringPatterns(const LLVMTypeConverter &converter,

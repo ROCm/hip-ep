@@ -447,6 +447,8 @@ private:
         {"wrap_hipMemcpyH2D", i32, {ptr, ptr, i64, ptr}},
         {"wrap_hipMemcpyD2H", i32, {ptr, ptr, i64, ptr}},
         {"wrap_hipStreamSynchronize", i32, {ptr}},
+        {"wrap_hipMemcpyH2DAsync", i32, {ptr, ptr, ptr, i64}},
+        {"wrap_hipMemcpyD2HAsync", i32, {ptr, ptr, ptr, i64}},
         {"hipdnn_ep_state_get_stream", ptr, {ptr}},
         {"hipdnn_ep_pool_init", i32, {ptr, i64, ptr, i64}},
         {"hipdnn_ep_get_buffer_from_pool", ptr, {ptr, i64}},

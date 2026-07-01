@@ -1553,8 +1553,15 @@ int wrap_hipMemcpyH2D(void *dst, const void *src, int64_t size, void *stream);
 // HIP memory copy device-to-host wrapper
 int wrap_hipMemcpyD2H(void *dst, const void *src, int64_t size, void *stream);
 
-// HIP stream synchronization wrapper
-int wrap_hipStreamSynchronize(void *stream);
+// State-based wrappers for the explicit memref-phase cross-space copy / stream
+// ops (hip.memcpy_{h2d,d2h}_async, hip.stream_sync). Like wrap_hipMemcpyAsync,
+// the caller passes the RuntimeState* (ctx) and the wrapper resolves the stream
+// internally.
+int wrap_hipStreamSynchronize(RuntimeState *state);
+int wrap_hipMemcpyH2DAsync(RuntimeState *state, void *dst, const void *src,
+                           int64_t size);
+int wrap_hipMemcpyD2HAsync(RuntimeState *state, void *dst, const void *src,
+                           int64_t size);
 
 #ifdef __cplusplus
 }
