@@ -3827,7 +3827,7 @@ def Hip_ReadbackScalarOp : Hip_Op<"readback_scalar",
 //
 // The memref-phase `hip.memcpy_*_async` / `hip.stream_sync` ops: an explicit,
 // IR-level crossing between HIP memory spaces, parallel to the existing
-// readback / host-scratch machinery (both retained unchanged). See
+// readback / host-scratch mechanisms (both kept unchanged). See
 // docs/design/memory-space-design.md.
 
 // hip.memcpy_h2d_async : async host->device copy on the runtime stream (dst

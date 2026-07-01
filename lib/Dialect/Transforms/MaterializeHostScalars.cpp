@@ -97,7 +97,7 @@
 //     right home.
 //   - Allocs/allocas carrying an explicit `#hip.mem<>` memory space: these
 //     carry a deliberate space attribute (e.g. a `#hip.mem<host>` destination
-//     for a cross-space copy) and are otherwise indistinguishable from a
+//     for a cross-space copy) and otherwise look exactly like a
 //     host-staged scalar. Grabbing one here would build a `memref.view` whose
 //     host-space result mismatches the space-less scratch base, so the
 //     explicit-space filter leaves them alone.

@@ -64,7 +64,7 @@ namespace hip {
 ///
 /// TRANSITIONAL: the current pipeline does not yet stamp a `#hip.mem<...>`
 /// space onto memrefs, so a memref with NO hip memory space currently
-/// satisfies ALL four predicates. This leniency is controlled by a single
+/// satisfies ALL four predicates. This relaxed check is controlled by a single
 /// toggle (`kAcceptUnspecifiedMemorySpace` in HipDialect.cpp); flip it to
 /// enforce that every constrained operand carries an explicit space.
 bool isDeviceCompatibleMemRef(::mlir::Type type);

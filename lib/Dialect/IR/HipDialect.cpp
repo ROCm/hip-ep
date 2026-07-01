@@ -51,14 +51,15 @@ void HipDialect::initialize() {
 // Memory-space operand predicates (see HipDialect.h for the contract)
 //===----------------------------------------------------------------------===//
 
-// TRANSITIONAL TOGGLE — the single point of control for memory-space leniency.
+// TRANSITIONAL TOGGLE — the single switch controlling memory-space strictness.
 //
 // While the bufferization / pool-allocation pipeline does not yet stamp a
 // `#hip.mem<...>` space onto memrefs, an operand with NO hip memory space must
 // still satisfy the device/host constraints (otherwise every existing op would
 // fail verification). When the pipeline materializes spaces everywhere, set
 // this to `false` to make an unspecified space a hard verification error — that
-// single edit flips the dialect from "lenient" to "strict".
+// single edit switches the dialect from accepting any space to requiring an
+// explicit one.
 static constexpr bool kAcceptUnspecifiedMemorySpace = true;
 
 static bool memRefMatchesSpace(::mlir::Type type,
@@ -145,7 +146,7 @@ void MemcpyH2DAsyncOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   // Write the device `dst`, Read the host `src`. Bound to the named operands
-  // (not magic operand indices) so the effects stay correct if the operand
+  // (not hard-coded operand indices) so the effects stay correct if the operand
   // order ever changes. The Write keeps the copy alive even though it has no
   // SSA result.
   effects.emplace_back(MemoryEffects::Write::get(), &getDstMutable(),
@@ -162,7 +163,7 @@ void MemcpyD2HAsyncOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   // Write the host `dst`, Read the device `src`. Bound to the named operands
-  // (not magic operand indices) so the effects stay correct if the operand
+  // (not hard-coded operand indices) so the effects stay correct if the operand
   // order ever changes.
   effects.emplace_back(MemoryEffects::Write::get(), &getDstMutable(),
                        SideEffects::DefaultResource::get());
