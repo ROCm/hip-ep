@@ -44,6 +44,14 @@ set(HIPDNN_EP_COMPILER_PLUGINS "" CACHE STRING
 the host (empty = none). Each id must be registered by a plugin package via \
 hipdnn_ep_compiler_plugin_register().")
 
+set(HIPDNN_EP_COMPILER_PLUGIN_PATHS "" CACHE STRING
+    "Semicolon-separated list of out-of-tree plugin source directories to add \
+to this build. Each must contain a CMakeLists.txt that defines a plugin \
+static-lib target and calls hipdnn_ep_compiler_plugin_register(). Use together \
+with HIPDNN_EP_COMPILER_PLUGINS, which selects which registered ids get linked. \
+This lets a downstream co-build its plugin from its own repo without vendoring \
+it into this tree.")
+
 define_property(GLOBAL PROPERTY HIPDNN_EP_REGISTERED_PLUGIN_IDS
     BRIEF_DOCS "Ids of all available (registered) compiler plugins"
     FULL_DOCS "Populated by hipdnn_ep_compiler_plugin_register(); the subset \
@@ -70,11 +78,31 @@ function(hipdnn_ep_compiler_plugin_register)
   set_property(GLOBAL APPEND PROPERTY HIPDNN_EP_REGISTERED_PLUGIN_TARGETS "${ARG_TARGET}")
 endfunction()
 
+# hipdnn_ep_add_external_plugins()
+#
+# add_subdirectory() every directory in HIPDNN_EP_COMPILER_PLUGIN_PATHS so its
+# CMakeLists can define its plugin target and register it. Each external dir is
+# built under ${CMAKE_BINARY_DIR}/external-plugins/<name> (an out-of-tree source
+# dir needs an explicit binary dir). Call ONCE, before
+# hipdnn_ep_finalize_static_plugins() so the registrations are visible to it.
+function(hipdnn_ep_add_external_plugins)
+  foreach(_dir ${HIPDNN_EP_COMPILER_PLUGIN_PATHS})
+    get_filename_component(_dir "${_dir}" ABSOLUTE)
+    if(NOT EXISTS "${_dir}/CMakeLists.txt")
+      message(FATAL_ERROR
+        "HIPDNN_EP_COMPILER_PLUGIN_PATHS entry has no CMakeLists.txt: ${_dir}")
+    endif()
+    get_filename_component(_name "${_dir}" NAME)
+    message(STATUS "Adding out-of-tree compiler-plugin dir: ${_dir}")
+    add_subdirectory("${_dir}" "${CMAKE_BINARY_DIR}/external-plugins/${_name}")
+  endforeach()
+endfunction()
+
 # hipdnn_ep_finalize_static_plugins()
 #
 # Generate the StaticLinkedPlugins.inc registrar include and link the selected
 # plugin static libs into LibHipCompiler. Call ONCE, after all plugin packages
-# have registered (i.e. after their add_subdirectory calls).
+# (in-tree and out-of-tree) have registered.
 function(hipdnn_ep_finalize_static_plugins)
   get_property(_ids GLOBAL PROPERTY HIPDNN_EP_REGISTERED_PLUGIN_IDS)
   get_property(_tgts GLOBAL PROPERTY HIPDNN_EP_REGISTERED_PLUGIN_TARGETS)

@@ -8,9 +8,9 @@
 //
 // At configure time CMake builds this source as `hip_ep_sample_lib`
 // (a static library, .lib on Windows / .a on Linux). The sample
-// plugin's RegisterCallbacks then hands the library's parent
-// directory to `addLibraryPath` and its bare name (`hip_ep_sample_lib`)
-// to `addLibrary`. CompilerDriver::discoverLibraries appends both to
+// plugin's registration then hands the library's parent directory to
+// `addLibraryPath` and its bare name (`hip_ep_sample_lib`) to
+// `addLibrary`. CompilerDriver::discoverLibraries appends both to
 // the lld-link argument vector.
 //
 // The library exposes a single uniquely-named symbol so it cannot

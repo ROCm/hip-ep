@@ -3,33 +3,26 @@
 # ** Licensed under the MIT License.
 ##
 #
-# onnx-hipdnn-ep plugin SDK package config.
+# onnx-hipdnn-ep package config for consumers of a PREBUILT install tree.
 #
-# Consumed by a downstream plugin via:
 #   find_package(HipDnnEp CONFIG REQUIRED)   # -DHipDnnEp_DIR=<prefix>/lib/cmake/HipDnnEp
 #
 # Provides:
-#   HipDnnEp::plugin_headers - INTERFACE target carrying the public include dir
-#                              (hip/Compiler/PluginAPI.h, PluginRegistry.h).
 #   HipDnnEp::hip-compiler   - IMPORTED executable: the ONNX MLIR -> LLVM/native
 #                              compiler CLI.
 #   HipDnnEp::hip-mlir-opt   - IMPORTED executable: the MLIR pass driver.
+#   HipDnnEp::plugin_headers - INTERFACE target carrying the public plugin-surface
+#                              include dir (hip/Compiler/PluginAPI.h,
+#                              PluginRegistry.h), for inspecting the surface.
 #
-# Linkage model: compiler plugins are linked STATICALLY (see
-# docs/design/plugin-interface.md, "Linkage model"). A plugin builds a static
-# library that defines `hipEpRegisterPlugin_<id>` and is linked into the host at
-# configure time via -DHIPDNN_EP_COMPILER_PLUGINS=<id>. Because plugins and host
-# share one binary (and one GPU-arch / kernel build), a downstream builds
-# onnx-hipdnn-ep itself and adds its plugin to that build -- there is no
-# dlopen and no symbol export.
-#
-# A plugin TU compiles against HipDnnEp::plugin_headers for the plugin surface
-# and ALSO needs MLIR headers (for mlir::PassRegistration<> etc.). MLIR is
-# intentionally NOT re-exported here: call find_package(MLIR CONFIG) yourself
-# against the SAME MLIR build the tools were compiled with, and link the plugin
-# to MLIR HEADERS ONLY (do NOT link the MLIR libraries -- the plugin's MLIR
-# symbols stay undefined in the static lib and resolve at the final host link;
-# see docs/plugin_authoring.md). The build-time MLIR_DIR / LLVM_DIR are recorded
+# NOTE: this config is NOT how you build a compiler plugin. Plugins are linked
+# STATICALLY into the host (see docs/design/plugin-interface.md, "Linkage
+# model"): a plugin is a static library that defines `hipEpRegisterPlugin_<id>`
+# and is CO-BUILT into onnx-hipdnn-ep -- add its directory with
+# -DHIPDNN_EP_COMPILER_PLUGIN_PATHS=<dir> and select it with
+# -DHIPDNN_EP_COMPILER_PLUGINS=<id>. In that (supported) flow the plugin gets
+# the surface headers and MLIR toolchain from the host build directly and does
+# not use this package config. The build-time MLIR_DIR / LLVM_DIR are recorded
 # below as convenience hints.
 set(HipDnnEp_MLIR_DIR_HINT "@MLIR_DIR@")
 set(HipDnnEp_LLVM_DIR_HINT "@LLVM_DIR@")

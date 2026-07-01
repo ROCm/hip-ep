@@ -7,9 +7,9 @@
 # See docs/design/plugin-interface.md for the broader context.
 
 # ============================================================================
-# Embed a tiny LLVM bitcode buffer in the plugin DLL.
+# Embed a tiny LLVM bitcode buffer in the plugin static library.
 #
-# The plugin's RegisterCallbacks hands this buffer to hip-compiler via
+# The plugin's registration hands this buffer to hip-compiler via
 # HipEpPluginRegistry::addRuntimeBitcode; LLVMBackend::linkRuntimeModule
 # then links it into the model module with Linker::Flags::OverrideFromSrc.
 # The mechanism mirrors lib/Runtime/CMakeLists.txt's "compile-to-bitcode +

@@ -289,7 +289,7 @@ bool CompilerDriver::runMLIRPasses(
     }
     if (anySlotRequested) {
       llvm::errs()
-          << "[plugin-loader] WARNING: HIPDNN_EP_PIPELINE is set, so the "
+          << "[plugin] WARNING: HIPDNN_EP_PIPELINE is set, so the "
              "built-in pipeline is bypassed and plugin requestPipelineSlot() "
              "injections do NOT run. Name the plugin pass directly in the "
              "HIPDNN_EP_PIPELINE string to run it under the override.\n";

@@ -17,8 +17,8 @@ namespace mlir {
 class DialectRegistry;
 } // namespace mlir
 
-// Public registry passed to a plugin's RegisterCallbacks. It exposes the
-// contributions a plugin can make:
+// Public registry passed to a plugin's registration entry
+// (`hipEpRegisterPlugin_<id>`). It exposes the contributions a plugin can make:
 //
 //   * registerPass<T>()        -- add a pass to MLIR's pass registry so the
 //                                 pipeline can instantiate it by name at a
@@ -94,7 +94,7 @@ enum class PipelineSlot {
   AfterGenerateInterface,
 };
 
-/// Public registry passed to plugins' RegisterCallbacks.
+/// Public registry passed to a plugin's registration entry.
 ///
 /// The plugin sees only inline thunks that dispatch through a
 /// function-pointer table the host populates. See the file-level
@@ -103,20 +103,23 @@ class HipEpPluginRegistry {
 public:
   /// Function-pointer table the host fills in when constructing a
   /// registry. Plugins do not construct registries directly; they
-  /// receive one by reference from the host's RegisterCallbacks
-  /// dispatch and call methods on it.
+  /// receive one by reference from the host's static registrar
+  /// (`dispatchPluginRegistrationsOnce`) and call methods on it.
   ///
-  /// Stable layout:
+  /// Layout:
   ///   - Pure-C signatures (no llvm::StringRef, no PipelineSlot -- `int`
-  ///     instead) so a plugin built against a newer header can load into an
-  ///     older host without C++ ABI accidents.
+  ///     instead), which keeps the plugin's dependency on this header a plain
+  ///     function-pointer shape. (Under static linking plugin and host are one
+  ///     build, so this is no longer needed to survive cross-version loading --
+  ///     it is kept because it is harmless and minimal.)
   ///   - Each function takes the `self` opaque pointer first.
-  ///   - Append-only across `HIP_EP_PLUGIN_API_VERSION` bumps.
+  ///   - Append-only.
   ///
   /// IMPORTANT for maintainers: any change to this struct (a new function
-  /// pointer or a changed signature) MUST bump `HIP_EP_PLUGIN_API_VERSION` in
-  /// PluginAPI.h. The static_assert below is the tripwire -- growing the
-  /// layout without updating the size sentinel fails the build.
+  /// pointer or a changed signature) should bump `HIP_EP_PLUGIN_API_VERSION` in
+  /// PluginAPI.h (a source/versioning marker; not a runtime gate under static
+  /// linking). The static_assert below is the tripwire -- growing the layout
+  /// without updating the size sentinel fails the build.
   struct VTable {
     void (*requestPipelineSlot)(void *self, int slot, const char *name,
                                 std::size_t nameLen);
@@ -135,7 +138,7 @@ public:
                                    void (*registerFn)(mlir::DialectRegistry &));
   };
 
-  /// Tripwire: the V2 vtable layout has exactly five function pointers.
+  /// Tripwire: the current vtable layout has exactly five function pointers.
   /// Any change to `VTable` makes this assertion fire; the compiler
   /// error is your reminder to bump `HIP_EP_PLUGIN_API_VERSION` in
   /// PluginAPI.h before the new layout ships.
@@ -214,7 +217,7 @@ public:
   /// runtime bitcode.
   ///
   /// Buffer ownership: the host copies the bytes during this call, so the
-  /// plugin's pointer need not outlive `RegisterCallbacks` -- a stack or
+  /// plugin's pointer need not outlive the registration entry -- a stack or
   /// transient buffer is fine. The copy is a one-time, startup cost.
   ///
   /// `sizeBytes == 0` is a no-op (with a one-line stderr warning) so a plugin
@@ -251,13 +254,13 @@ private:
 };
 
 /// Process-wide plugin registry. Constructed lazily on first call;
-/// every plugin's RegisterCallbacks is dispatched against the same
+/// every plugin's registration entry is dispatched against the same
 /// instance, so the recorded state is one process-wide view.
 ///
 /// Used by:
 ///   - `dispatchPluginRegistrationsOnce` (StaticPlugins.cpp) -- as
 ///     the registry passed to each statically-linked plugin's registration.
-///   - The unit test in `test/plugin/test_plugin_loader.cpp`.
+///   - The unit test in `test/plugin/test_static_plugins.cpp`.
 HipEpPluginRegistry &getProcessPluginRegistry();
 
 /// Invoke every statically-linked plugin's registration entry
@@ -278,7 +281,7 @@ HipEpPluginRegistry &getProcessPluginRegistry();
 /// the host's single MLIR pass registry (no shared-library caveat).
 void dispatchPluginRegistrationsOnce();
 
-/// Read the (slot, passName) pairs recorded by every loaded plugin's
+/// Read the (slot, passName) pairs recorded by every registered plugin's
 /// `requestPipelineSlot` call, filtered by `slot`. The returned vector
 /// references storage owned by the per-process plugin registry; each
 /// `StringRef` is stable for the lifetime of the process.
@@ -288,8 +291,8 @@ void dispatchPluginRegistrationsOnce();
 /// global pass registry and add them to the active `PassManager`.
 llvm::SmallVector<llvm::StringRef> pluginPassesForSlot(PipelineSlot slot);
 
-/// Read the dialect-registration callbacks recorded by every loaded plugin's
-/// `addDialectRegistration` call, in the order they were registered.
+/// Read the dialect-registration callbacks recorded by every registered
+/// plugin's `addDialectRegistration` call, in the order they were registered.
 ///
 /// Used by `hip::compiler::loadAllDialects` (`include/hip/InitAllPasses.h`):
 /// after the in-tree dialects are registered, each callback is invoked on the
@@ -309,7 +312,7 @@ struct PluginBitcodeBuffer {
   std::size_t sizeBytes;
 };
 
-/// Read the bitcode buffers recorded by every loaded plugin's
+/// Read the bitcode buffers recorded by every registered plugin's
 /// `addRuntimeBitcode` call, in the order they were registered.
 /// Each `data` pointer is host-owned and stable for the lifetime of
 /// the process.
@@ -322,7 +325,7 @@ struct PluginBitcodeBuffer {
 /// semantics.
 llvm::SmallVector<PluginBitcodeBuffer> pluginBitcodeBuffers();
 
-/// Read the library search paths recorded by every loaded plugin's
+/// Read the library search paths recorded by every registered plugin's
 /// `addLibraryPath` call, in the order they were registered.
 ///
 /// Returns owning `std::string` copies (rather than `StringRef`s
@@ -340,7 +343,7 @@ llvm::SmallVector<PluginBitcodeBuffer> pluginBitcodeBuffers();
 llvm::SmallVector<std::string> pluginLibraryPaths();
 
 /// Read the library names (or full library paths) recorded by every
-/// loaded plugin's `addLibrary` call, in the order they were
+/// registered plugin's `addLibrary` call, in the order they were
 /// registered. Returns owning `std::string` copies; see
 /// `pluginLibraryPaths` for the rationale.
 ///
