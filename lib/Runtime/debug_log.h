@@ -57,6 +57,26 @@ inline bool hipdnn_ep_perf_isolate_enabled() {
   return enabled;
 }
 
+// Convolution Find-algorithm cache toggle (A/B diagnostic). Default ON; set
+// HIPDNN_EP_CONV_ALGO_CACHE=0 to disable, forcing a fresh
+// miopenFindConvolutionForwardAlgorithm on every conv call. Latched once per
+// process like the other flags.
+inline bool hipdnn_ep_conv_algo_cache_enabled() {
+  static const bool enabled = [] {
+#ifdef _WIN32
+    char buf[8];
+    unsigned long n =
+        GetEnvironmentVariableA("HIPDNN_EP_CONV_ALGO_CACHE", buf, sizeof(buf));
+    // Unset -> default ON; explicit "0" -> off.
+    return !(n > 0 && buf[0] == '0');
+#else
+    const char *v = std::getenv("HIPDNN_EP_CONV_ALGO_CACHE");
+    return !(v && v[0] == '0');
+#endif
+  }();
+  return enabled;
+}
+
 inline bool hipdnn_ep_perf_enabled() {
   // PERF intentionally does NOT inherit from HIPDNN_EP_DEBUG: enabling PERF
   // forces a hipStreamSynchronize on every inference (so hipEventElapsedTime

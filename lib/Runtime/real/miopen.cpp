@@ -5,11 +5,13 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
+#include "../runtime_state_internal.h"
+#include "cache_utils.h"
 #include "error_check_macros.h"
 #include "runtime_types.h"
 
 #include <cstdio>
-
+#include <unordered_map>
 // Convenience wrappers for goto cleanup pattern (all functions use 'cleanup'
 // label)
 #define MIOPEN_CHECK(cmd) MIOPEN_CHECK_GOTO(cmd, cleanup)
@@ -38,66 +40,43 @@
 //    -
 //    https://docs.nvidia.com/deeplearning/performance/dl-performance-convolutional/
 //
-// 2. NO DESCRIPTOR CACHING
-//    Why don't we cache tensor/convolution descriptors?
+// 2. PER-SHAPE ALGORITHM CACHE (implemented; descriptors NOT cached)
+//    The (dtype, input/weights/output shape, stride/pad/dilation/group,
+//    has_bias) tuple is invariant per conv layer for a static-shape model, so
+//    the Find-selected algorithm + its actual workspace size are cached once
+//    per shape in RuntimeState::conv_fwd_cache (see ConvFwdCache below). On a
+//    cache hit the call skips miopenConvolutionForwardGetWorkSpaceSize AND
+//    miopenFindConvolutionForwardAlgorithm. MIOpen docs:
+//    "miopenFindConvolution*() is expensive in terms of run time and required
+//    workspace, so it's highly recommended to reserve the required algorithm
+//    and workspace to reuse them later." (PyTorch's
+//    torch.backends.cudnn.benchmark does the same.) For dynamic shapes the hit
+//    rate drops with shape variation, but the cache is never wrong: a new shape
+//    simply Finds + caches a new entry.
 //
-//    - No evidence descriptor creation is expensive (likely just CPU struct
-//    alloc)
-//    - PyTorch/TensorFlow don't cache descriptors - they cache algorithm
-//    selection
-//    - PyTorch achieves 30-40% speedup from algorithm caching alone (not
-//    descriptors)
-//    - For dynamic shapes, descriptors change frequently anyway
-//    - Descriptor overhead is negligible vs algorithm finding
+//    The MIOpen descriptors are deliberately NOT cached: Find/forward make
+//    MIOpen attach per-problem GPU-resident state (compiled solvers, pre-
+//    transformed weights, solver scratch) to the live descriptors, and keeping
+//    one descriptor set alive per distinct shape made all of those coexist for
+//    the whole session -- inflating peak GPU memory by hundreds of MB on
+//    conv-heavy models. Descriptors are rebuilt per call (cheap CPU structs)
+//    and destroyed at function exit so only one shape's resident state is live
+//    at a time. The expensive part (Find) is still amortized via the cache.
 //
-//    Source:
+//    A/B toggle: HIPDNN_EP_CONV_ALGO_CACHE=0 disables the cache (every call
+//    re-runs Find, nothing is stored) so the Find cost and its memory impact
+//    can be measured against the cached path. Default ON.
+//
+//    Sources:
+//    -
+//    https://rocm.docs.amd.com/projects/MIOpen/en/latest/how-to/find-and-immediate.html
 //    - https://docs.pytorch.org/docs/stable/notes/cuda.html
 //
-// 3. PERFORMANCE OPTIMIZATION OPPORTUNITIES (TODOs below):
-//    ✅ Cache algorithm finding results (HIGH PRIORITY - documented as
-//    expensive) ✅ Pool workspace memory (eliminate malloc/free from hot path)
-//    ❌ Cache descriptors (NOT recommended - negligible benefit, added
-//    complexity)
+// 3. WORKSPACE POOLING (implemented)
+//    The conv workspace is drawn from the per-RuntimeState conv_scratch pool
+//    (grow-on-demand, never shrinks), not a per-call hipMalloc/hipFree.
 //
 //===----------------------------------------------------------------------===//
-
-// TODO: Cache miopenFindConvolutionForwardAlgorithm() results
-//
-// RATIONALE: Algorithm finding is expensive (benchmarks multiple algorithms on
-// GPU). MIOpen documentation explicitly states: "miopenFindConvolution*() is
-// expensive in terms of run time and required workspace, so it's highly
-// recommended to reserve the required algorithm and workspace to reuse them
-// later."
-//
-// PyTorch achieves 30-40% speedup by caching algorithm selection via
-// torch.backends.cudnn.benchmark = True.
-//
-// IMPLEMENTATION: Store in RuntimeState as AlgorithmCache keyed by:
-//   (input_shape, weights_shape, output_shape, pad_h, pad_w, stride_h,
-//   stride_w,
-//    dilation_h, dilation_w)
-//
-// For dynamic shapes: Cache hit rate depends on shape variation. If shapes
-// change frequently, cache effectiveness is reduced (PyTorch docs warn about
-// this).
-//
-// Sources:
-// -
-// https://rocm.docs.amd.com/projects/MIOpen/en/latest/how-to/find-and-immediate.html
-// - https://docs.pytorch.org/docs/stable/notes/cuda.html
-
-// TODO: Pool workspace memory instead of malloc/free every call
-//
-// RATIONALE: GPU memory allocation (hipMalloc) is expensive - involves kernel
-// launch, synchronization, and memory manager overhead. Current code allocates
-// and frees workspace on every inference call (lines 95, 107).
-//
-// IMPLEMENTATION: Add WorkspacePool to RuntimeState that:
-//   - Pre-allocates workspace of maximum required size
-//   - Reuses across multiple calls
-//   - Grows dynamically if larger workspace needed
-//
-// BENEFIT: Eliminates malloc/free from hot path.
 
 // Map HIPDNN_EP_DATATYPE_* to miopenDataType_t for the conv tensor
 // descriptors. Mirrors hipdnn_ep_to_miopen_type in elementwise.cpp /
@@ -134,6 +113,100 @@ static miopenDataType_t conv_to_miopen_type(int64_t data_type, bool &ok) {
 // embedding). MIOpen then read out-of-bounds bytes as the second-half stride
 // for every row, producing NaN/Inf at fp16-max in the output and cascading
 // NaN through the rest of the network.
+
+//===----------------------------------------------------------------------===//
+// Per-shape MIOpen forward-conv ALGORITHM cache (descriptors NOT cached).
+//
+// The (dt, NCHW input, weights, output, stride/pad/dilation/group, has_bias)
+// tuple is invariant per conv layer across all Compute() calls of a static-
+// shape model. miopenFindConvolutionForwardAlgorithm is documented-expensive
+// (it launches candidate kernels on the GPU and synchronizes), so we cache its
+// result (the chosen algorithm + that algorithm's actual workspace size) once
+// per shape. On a hit the call skips miopenConvolutionForwardGetWorkSpaceSize
+// AND Find.
+//
+// We deliberately do NOT cache the MIOpen tensor/convolution descriptors. Find
+// and forward make MIOpen attach per-problem GPU-resident state (compiled
+// solver programs, pre-transformed/packed weight buffers, solver scratch) to
+// the live descriptors; keeping a descriptor set alive per distinct shape made
+// all of those coexist for the whole session, inflating peak GPU memory by
+// (num_distinct_conv_shapes * per-solution-resident-bytes) -- hundreds of MB on
+// conv-heavy models. Rebuilding the descriptors per call (cheap CPU structs)
+// and destroying them at function exit lets MIOpen release that per-problem
+// state between calls, so only one shape's resident state is live at a time.
+// The expensive part (Find) is still amortized via the algorithm cache.
+//===----------------------------------------------------------------------===//
+namespace {
+
+struct ConvFwdKey {
+  int64_t dt; // miopenDataType_t value
+  int64_t input_n, input_c, input_h, input_w;
+  int64_t weights_k, kernel_h, kernel_w;
+  int64_t output_h, output_w;
+  int64_t stride_h, stride_w;
+  int64_t pad_top, pad_left, pad_bottom, pad_right;
+  int64_t dilation_h, dilation_w, group;
+  int64_t has_bias;
+
+  bool operator==(const ConvFwdKey &o) const {
+    return dt == o.dt && input_n == o.input_n && input_c == o.input_c &&
+           input_h == o.input_h && input_w == o.input_w &&
+           weights_k == o.weights_k && kernel_h == o.kernel_h &&
+           kernel_w == o.kernel_w && output_h == o.output_h &&
+           output_w == o.output_w && stride_h == o.stride_h &&
+           stride_w == o.stride_w && pad_top == o.pad_top &&
+           pad_left == o.pad_left && pad_bottom == o.pad_bottom &&
+           pad_right == o.pad_right && dilation_h == o.dilation_h &&
+           dilation_w == o.dilation_w && group == o.group &&
+           has_bias == o.has_bias;
+  }
+};
+
+struct ConvFwdKeyHash {
+  size_t operator()(const ConvFwdKey &k) const {
+    size_t h = 0;
+    hash_combine_val(h, k.dt);
+    hash_combine_val(h, k.input_n);
+    hash_combine_val(h, k.input_c);
+    hash_combine_val(h, k.input_h);
+    hash_combine_val(h, k.input_w);
+    hash_combine_val(h, k.weights_k);
+    hash_combine_val(h, k.kernel_h);
+    hash_combine_val(h, k.kernel_w);
+    hash_combine_val(h, k.output_h);
+    hash_combine_val(h, k.output_w);
+    hash_combine_val(h, k.stride_h);
+    hash_combine_val(h, k.stride_w);
+    hash_combine_val(h, k.pad_top);
+    hash_combine_val(h, k.pad_left);
+    hash_combine_val(h, k.pad_bottom);
+    hash_combine_val(h, k.pad_right);
+    hash_combine_val(h, k.dilation_h);
+    hash_combine_val(h, k.dilation_w);
+    hash_combine_val(h, k.group);
+    hash_combine_val(h, k.has_bias);
+    return h;
+  }
+};
+
+// Only the Find result is cached -- no MIOpen descriptors (see header above).
+// Presence of the entry in the map == "Find has run for this shape".
+struct ConvFwdCacheEntry {
+  miopenConvFwdAlgorithm_t algo;
+  size_t algo_workspace_size; // perf_results[0].memory from the original Find
+};
+
+struct ConvFwdCache {
+  std::unordered_map<ConvFwdKey, ConvFwdCacheEntry, ConvFwdKeyHash> entries;
+};
+
+} // namespace
+
+extern "C" void hipdnn_ep_conv_fwd_cache_destroy(void *cache_ptr) {
+  // Entries hold only POD (algo + size) -- no MIOpen handles to destroy.
+  delete static_cast<ConvFwdCache *>(cache_ptr);
+}
+
 int wrap_miopenConvolutionForward(
     RuntimeState *state, const void *input, int64_t input_n, int64_t input_c,
     int64_t input_h, int64_t input_w, const void *weights, int64_t weights_k,
@@ -184,7 +257,10 @@ int wrap_miopenConvolutionForward(
   hipStream_t hip_stream =
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
 
-  // Initialize all resource pointers to nullptr for safe cleanup
+  // Per-call locals. The input/weights/output/conv descriptors are rebuilt
+  // every call and destroyed at `cleanup` so MIOpen releases the per-problem
+  // GPU-resident state it attaches to them between calls (see cache header
+  // above). Only the Find result (algorithm + workspace size) is cached.
   miopenTensorDescriptor_t input_desc = nullptr;
   miopenTensorDescriptor_t weights_desc = nullptr;
   miopenTensorDescriptor_t output_desc = nullptr;
@@ -201,16 +277,48 @@ int wrap_miopenConvolutionForward(
   float alpha = 1.0f;
   float beta = 0.0f;
 
-  // Create tensor descriptors
+  // Look up the per-shape Find result FIRST, before creating any descriptors.
+  // This must precede the descriptor-creation MIOPEN_CHECKs below: those
+  // `goto cleanup` on failure, and C++ forbids a goto from bypassing the
+  // initialization of an in-scope variable. Only the (algo, workspace_size)
+  // pair is cached -- the descriptors are NOT (see cache header).
+  //
+  // The cache is an A/B toggle: HIPDNN_EP_CONV_ALGO_CACHE=0 disables it
+  // entirely (every call Finds + never stores) so the per-shape Find cost and
+  // its peak-memory impact can be compared against the cached path. When
+  // disabled we don't even allocate the cache object.
+  const bool cache_enabled = hipdnn_ep_conv_algo_cache_enabled();
+  ConvFwdCache *conv_cache = nullptr;
+  if (cache_enabled) {
+    if (!state->conv_fwd_cache)
+      state->conv_fwd_cache = new ConvFwdCache();
+    conv_cache = static_cast<ConvFwdCache *>(state->conv_fwd_cache);
+  }
+  ConvFwdKey conv_key{
+      (int64_t)miopen_dt, input_n,    input_c,    input_h,  input_w,
+      weights_k,          kernel_h,   kernel_w,   output_h, output_w,
+      stride_h,           stride_w,   pad_top,    pad_left, pad_bottom,
+      pad_right,          dilation_h, dilation_w, group,    bias ? 1 : 0};
+  // Copy the hit entry into a function-scope local so the hit branch below does
+  // not deref a map iterator across the `goto cleanup` scope.
+  bool cache_hit = false;
+  ConvFwdCacheEntry cached_entry{};
+  if (cache_enabled) {
+    auto cache_it = conv_cache->entries.find(conv_key);
+    if (cache_it != conv_cache->entries.end()) {
+      cache_hit = true;
+      cached_entry = cache_it->second;
+    }
+  }
+
+  // Create + set the tensor descriptors with explicit NCHW layout. The dtype is
+  // taken from the caller (data_type) — the previous hardcoded miopenFloat
+  // produced silent fp16-stride-as-fp32 corruption on fp16 models.
+  // miopenSet4dTensorDescriptor leaves layout UNKNOWN which warns in
+  // MIOpen 7.12+.
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&input_desc));
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&weights_desc));
   MIOPEN_CHECK(miopenCreateTensorDescriptor(&output_desc));
-
-  // Set tensor descriptors with explicit NCHW layout. The dtype is taken
-  // from the caller (data_type) — the previous hardcoded `miopenFloat`
-  // produced silent fp16-stride-as-fp32 corruption on fp16 models.
-  // miopenSet4dTensorDescriptor leaves layout as UNKNOWN which triggers
-  // warnings in MIOpen 7.12+.
   {
     int in_dims[] = {(int)input_n, (int)input_c, (int)input_h, (int)input_w};
     MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
@@ -219,9 +327,9 @@ int wrap_miopenConvolutionForward(
     // For grouped/depthwise convolution the weight tensor's input-channel dim
     // is input_c / group (e.g. depthwise conv: weights [C,1,kh,kw], group=C).
     // Using input_c here would describe the wrong filter shape to MIOpen and
-    // produce silently incorrect results. group=1 reduces to input_c. The
-    // `group ? group : 1` guard only defends against a malformed group==0
-    // (ONNX requires group>=1) so we never divide by zero.
+    // produce silently incorrect results. group=1 reduces to input_c; the
+    // `group ? group : 1` guard only defends against a malformed group==0 so we
+    // never divide by zero.
     int w_dims[] = {(int)weights_k, (int)(input_c / (group ? group : 1)),
                     (int)kernel_h, (int)kernel_w};
     MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
@@ -233,68 +341,79 @@ int wrap_miopenConvolutionForward(
         output_desc, miopen_dt, miopenTensorNCHW, out_dims, 4));
   }
 
-  // Create convolution descriptor
-  // Note: MIOpen padding is per-side, but if pad_top==pad_bottom and
-  // pad_left==pad_right, we use the symmetric version
   MIOPEN_CHECK(miopenCreateConvolutionDescriptor(&conv_desc));
   MIOPEN_CHECK(miopenInitConvolutionDescriptor(
       conv_desc, miopenConvolution, pad_top, pad_left, stride_h, stride_w,
       dilation_h, dilation_w));
-
-  // Set group count for grouped convolutions (e.g., depthwise convolution)
-  // group=1 for standard convolution, group=C for depthwise convolution
+  // group=1 for standard convolution, group=C for depthwise convolution.
   if (group > 1) {
     MIOPEN_CHECK(miopenSetConvolutionGroupCount(conv_desc, group));
   }
 
-  // Workspace: query the worst-case size MIOpen needs for this conv config,
-  // then grow the per-RuntimeState conv_scratch pool to fit. The same buffer
-  // serves both the Find API and the forward call. This replaces the old
-  // per-call hipMalloc(10MB)/hipFree pattern -- the pool is reused across all
-  // conv calls in the session (encoder front-end runs it once per prefill).
-  MIOPEN_CHECK(miopenConvolutionForwardGetWorkSpaceSize(
-      miopen_handle, weights_desc, input_desc, conv_desc, output_desc,
-      &workspace_size));
-
-  if (workspace_size > 0) {
-    if (hipdnn_ep_state_ensure_conv_scratch(state, workspace_size) != 0) {
-      fprintf(stderr,
-              "wrap_miopenConvolutionForward: failed to grow conv_scratch to "
-              "%zu bytes\n",
-              workspace_size);
+  if (cache_hit) {
+    // HIT: reuse the cached algorithm + its actual workspace size; skip both
+    // GetWorkSpaceSize and the expensive Find.
+    algo = cached_entry.algo;
+    workspace_size = cached_entry.algo_workspace_size;
+    if (workspace_size > 0) {
+      if (hipdnn_ep_state_ensure_conv_scratch(state, workspace_size) != 0) {
+        fprintf(stderr,
+                "wrap_miopenConvolutionForward: failed to grow conv_scratch to "
+                "%zu bytes\n",
+                workspace_size);
+        result = -1;
+        goto cleanup;
+      }
+      workspace = hipdnn_ep_state_get_conv_scratch(state);
+    }
+  } else {
+    // MISS: query the worst-case workspace (upper bound) so Find has room to
+    // benchmark candidate algorithms, run Find once, then cache the chosen algo
+    // and its ACTUAL workspace size (perf_results[0].memory, usually smaller
+    // than the upper bound). The conv_scratch pool is reused across all conv
+    // calls in the session (replaces the old per-call hipMalloc/hipFree).
+    MIOPEN_CHECK(miopenConvolutionForwardGetWorkSpaceSize(
+        miopen_handle, weights_desc, input_desc, conv_desc, output_desc,
+        &workspace_size));
+    if (workspace_size > 0) {
+      if (hipdnn_ep_state_ensure_conv_scratch(state, workspace_size) != 0) {
+        fprintf(stderr,
+                "wrap_miopenConvolutionForward: failed to grow conv_scratch to "
+                "%zu bytes\n",
+                workspace_size);
+        result = -1;
+        goto cleanup;
+      }
+      workspace = hipdnn_ep_state_get_conv_scratch(state);
+    }
+    // MIOpen 3.x API: returns an array of performance results.
+    MIOPEN_CHECK(miopenFindConvolutionForwardAlgorithm(
+        miopen_handle, input_desc, input, weights_desc, weights, conv_desc,
+        output_desc, output,
+        1,                    // requestAlgoCount - ask for 1 algorithm
+        &returned_algo_count, // returnedAlgoCount - how many actually returned
+        perf_results,         // perfResults - array to receive results
+        workspace,            // workspace for algorithm testing
+        workspace_size,       // workspaceSize (upper bound)
+        false));
+    if (returned_algo_count < 1) {
+      fprintf(stderr, "wrap_miopenConvolutionForward: MIOpen Find returned no "
+                      "algorithms\n");
       result = -1;
       goto cleanup;
     }
-    workspace = hipdnn_ep_state_get_conv_scratch(state);
+    algo = perf_results[0].fwd_algo;
+    workspace_size = perf_results[0].memory; // actual workspace for forward
+    // Store only when the cache is enabled; with HIPDNN_EP_CONV_ALGO_CACHE=0
+    // every call lands here and re-runs Find (the A/B "off" arm).
+    if (cache_enabled)
+      conv_cache->entries.emplace(conv_key,
+                                  ConvFwdCacheEntry{algo, workspace_size});
   }
-
-  // Find best algorithm
-  // MIOpen 3.x API: returns array of performance results instead of single
-  // algorithm
-  MIOPEN_CHECK(miopenFindConvolutionForwardAlgorithm(
-      miopen_handle, input_desc, input, weights_desc, weights, conv_desc,
-      output_desc, output,
-      1,                    // requestAlgoCount - ask for 1 algorithm
-      &returned_algo_count, // returnedAlgoCount - how many actually returned
-      perf_results,         // perfResults - array to receive results
-      workspace,            // workspace for algorithm testing
-      workspace_size,       // workspaceSize
-      false));
-  if (returned_algo_count < 1) {
-    fprintf(stderr, "wrap_miopenConvolutionForward: MIOpen Find returned no "
-                    "algorithms\n");
-    result = -1;
-    goto cleanup;
-  }
-
-  // Extract algorithm from performance results
-  algo = perf_results[0].fwd_algo;
-
-  // Perform convolution
+  // Perform convolution using the (cached) algorithm + its workspace size.
   MIOPEN_CHECK(miopenConvolutionForward(
       miopen_handle, &alpha, input_desc, input, weights_desc, weights,
       conv_desc, algo, &beta, output_desc, output, workspace, workspace_size));
-
   // Add per-channel bias via miopenOpTensor (TensorOpAdd):
   //   C = alpha1*A + alpha2*B + beta*C  with A=C=output, B=bias, beta=0
   //   -> output = output + bias  (broadcast from [1, weights_k, 1, 1])
@@ -316,6 +435,10 @@ int wrap_miopenConvolutionForward(
 
 cleanup:
   // Workspace is owned by RuntimeState->conv_scratch; do NOT hipFree here.
+  // Destroy all per-call descriptors so MIOpen releases the per-problem
+  // GPU-resident state attached to them (the whole point of NOT caching them --
+  // see cache header). Only the (algo, workspace_size) pair persists, in
+  // RuntimeState->conv_fwd_cache.
   if (bias_desc) {
     miopenDestroyTensorDescriptor(bias_desc);
   }
@@ -331,7 +454,6 @@ cleanup:
   if (conv_desc) {
     miopenDestroyConvolutionDescriptor(conv_desc);
   }
-
   return result;
 }
 
