@@ -48,14 +48,18 @@ class DialectRegistry;
 // older plugin keeps loading as long as new methods follow the inline-thunk
 // pattern below.
 //
-// Why a vtable rather than direct method calls: hip-compiler is linked as a
-// static library into a host process (the EP DLL, hip-mlir-opt, etc.), not
-// shipped as its own shared library, so a plugin has no hip-compiler import
-// library to resolve method symbols against. The registry instead holds a
-// function-pointer table the host populates (see PluginRegistry.cpp); the
-// methods below are inline thunks that dispatch through it. A plugin therefore
-// depends only on this header (fully inline) plus MLIR (for the definition of
-// `mlir::PassRegistration<T>`), and on no symbol from hip-compiler's source.
+// Plugins are linked STATICALLY into the host (see cmake/HipEpPlugins.cmake and
+// docs/design/plugin-interface.md, "Linkage model"): the plugin's static lib
+// and the host are one binary, so the plugin and host share MLIR's process
+// state by construction (one pass registry, one set of op TypeIDs) with no
+// symbol export.
+//
+// The registry still dispatches through a function-pointer table (see
+// PluginRegistry.cpp) rather than calling storage directly. That indirection is
+// retained -- it is harmless under static linking and keeps the plugin's
+// dependency surface to this header (fully inline) plus MLIR (for the
+// definition of `mlir::PassRegistration<T>`), so a plugin TU compiles against
+// only public headers.
 //
 // See docs/design/plugin-interface.md.
 
@@ -153,18 +157,14 @@ public:
   /// Registers `PassT` so the pipeline can instantiate it by name (via
   /// `parsePassPipeline`) at a requested `PipelineSlot`.
   ///
-  /// Constraint: the registration writes MLIR's process-global pass registry,
-  /// so the pass is only visible to the host when the host and the plugin
-  /// share a single MLIR instance (one shared MLIR library). If each links
-  /// MLIR statically, the plugin writes its own copy of the registry, the
-  /// host's `parsePassPipeline` cannot find the pass, and the slot dispatch
-  /// emits a `[plugin-loader] WARNING: pass '...' not registered` line. The
-  /// other contributions (bitcode, libraries) are unaffected because they do
-  /// not cross MLIR's global state. See docs/design/plugin-interface.md.
+  /// The registration writes MLIR's process-global pass registry. Because the
+  /// plugin is linked statically into the host (one binary, one MLIR
+  /// instance), the pass lands in the SAME registry `parsePassPipeline` reads,
+  /// so it resolves by name -- no shared-library / split-registry caveat.
   ///
   /// Defined inline because the template must be instantiated in the plugin;
-  /// the plugin links MLIR for the definition of `mlir::PassRegistration<T>`
-  /// and needs no hip-compiler symbol.
+  /// the plugin gets `mlir::PassRegistration<T>` from MLIR headers and needs no
+  /// hip-compiler symbol.
   template <typename PassT> void registerPass() {
     mlir::PassRegistration<PassT>();
   }
@@ -190,12 +190,11 @@ public:
   /// });
   /// ```
   ///
-  /// Constraint: same as `registerPass` -- the dialect's op TypeIDs and any
-  /// attached interface models live in MLIR's per-context registries, so the
-  /// plugin and host must share one MLIR build (one shared MLIR library, the
-  /// static+export host model). `registerFn` must be a non-capturing function
-  /// (a `+[]` lambda or a free function) so it converts to a plain function
-  /// pointer.
+  /// Same one-MLIR-instance basis as `registerPass`: the dialect's op TypeIDs
+  /// and attached interface models live in MLIR's per-context registries, and
+  /// static linking puts the plugin and host in one binary sharing them.
+  /// `registerFn` must be a non-capturing function (a `+[]` lambda or a free
+  /// function) so it converts to a plain function pointer.
   void addDialectRegistration(void (*registerFn)(mlir::DialectRegistry &)) {
     vtable_->addDialectRegistration(self_, registerFn);
   }
@@ -257,10 +256,28 @@ private:
 /// instance, so the recorded state is one process-wide view.
 ///
 /// Used by:
-///   - `dispatchPluginRegistrationsOnce` (PluginLoader.cpp) -- as
-///     the registry passed to each plugin's `RegisterCallbacks`.
+///   - `dispatchPluginRegistrationsOnce` (StaticPlugins.cpp) -- as
+///     the registry passed to each statically-linked plugin's registration.
 ///   - The unit test in `test/plugin/test_plugin_loader.cpp`.
 HipEpPluginRegistry &getProcessPluginRegistry();
+
+/// Invoke every statically-linked plugin's registration entry
+/// (`hipEpRegisterPlugin_<id>`) against the per-process registry, exactly once
+/// per process (`std::call_once`). Defined in `lib/Compiler/StaticPlugins.cpp`,
+/// which CMake generates the plugin list into (see cmake/HipEpPlugins.cmake).
+///
+/// No-op when no plugins were selected (`HIPDNN_EP_COMPILER_PLUGINS` empty).
+/// Idempotent, so it is safe to call from every entry point that might run
+/// before pipelines are built (the `hip-compiler` driver, `hip-mlir-opt`
+/// main, etc.). A throwing plugin is contained (logged + skipped), matching
+/// the earlier dynamic loader's degrade-and-continue posture.
+///
+/// After this returns, every selected plugin's `requestPipelineSlot` /
+/// `addRuntimeBitcode` / `addLibrary` / `addDialectRegistration` /
+/// `registerPass<T>()` calls have run and are queryable via the accessors
+/// below. Because the plugin is statically linked, `registerPass<T>()` lands in
+/// the host's single MLIR pass registry (no shared-library caveat).
+void dispatchPluginRegistrationsOnce();
 
 /// Read the (slot, passName) pairs recorded by every loaded plugin's
 /// `requestPipelineSlot` call, filtered by `slot`. The returned vector

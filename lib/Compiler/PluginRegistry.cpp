@@ -5,8 +5,6 @@
 
 #include "hip/Compiler/PluginRegistry.h"
 
-#include "hip/Compiler/PluginLoader.h"
-
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
@@ -26,13 +24,13 @@ namespace hip::compiler {
 // dependency.
 //
 // Concurrency: plugin registration is one-shot. dispatchPluginRegis-
-// trationsOnce() runs every plugin's RegisterCallbacks behind a
-// std::call_once, which serializes all writes. Reads (passesForSlot
-// and the bitcode / library accessors below) happen after that completes,
-// and each accessor calls dispatchPluginRegistrationsOnce() itself
-// as a defensive idempotent step, so a future caller that bypasses
-// CompilerDriver::compile (a new tool, a unit test, etc.) still
-// sees plugin-contributed state.
+// trationsOnce() (StaticPlugins.cpp) runs every statically-linked plugin's
+// registration entry behind a std::call_once, which serializes all writes.
+// Reads (passesForSlot and the bitcode / library accessors below) happen after
+// that completes, and each accessor calls dispatchPluginRegistrationsOnce()
+// itself as a defensive idempotent step, so a future caller that bypasses
+// CompilerDriver::compile (a new tool, a unit test, etc.) still sees
+// plugin-contributed state.
 // ============================================================================
 
 namespace {

@@ -3,25 +3,24 @@
  * Licensed under the MIT License.
  */
 
-// Public sample plugin used by hip-compiler's plugin loader and
+// Sample static plugin used by hip-compiler's plugin registrar and
 // pipeline-slot tests.
 //
-// The point of this DLL is to exercise the public ABI surface declared
-// in `include/hip/Compiler/PluginAPI.h` and `PluginRegistry.h`
+// The point of this static lib is to exercise the public plugin surface
+// declared in `include/hip/Compiler/PluginAPI.h` and `PluginRegistry.h`
 // end-to-end in CI:
 //
-//   1. The DLL exports `hipEpGetPluginInfo` under its unmangled C name.
-//   2. The struct it returns satisfies the version + name + version
-//      contract that `HipEpPluginLoader::Load` validates.
-//   3. The `RegisterCallbacks` function pointer fires correctly across
-//      the DLL boundary with a `HipEpPluginRegistry &`.
-//   4. The plugin's pass (`SamplePrintFunctionsPass`) is registered in
+//   1. It defines the per-id entry point `hipEpRegisterPlugin_sample`
+//      (via HIP_EP_DEFINE_PLUGIN(sample)); the CMake-generated registrar
+//      (StaticPlugins.cpp) calls it once per process.
+//   2. The plugin's pass (`SamplePrintFunctionsPass`) is registered in
 //      MLIR's global pass registry and runs when requested by name
-//      via the `AfterConvertOnnxToHip` slot.
-//   5. the plugin contributes a tiny LLVM bitcode buffer
+//      via the `AfterConvertOnnxToHip` slot. Because the plugin is linked
+//      statically, the registration lands in the host's single registry.
+//   3. the plugin contributes a tiny LLVM bitcode buffer
 //      (compiled at build time from `sample_plugin_runtime.cpp`)
 //      through `addRuntimeBitcode`.
-//   6. the plugin contributes a tiny static library (the
+//   4. the plugin contributes a tiny static library (the
 //      sibling `hip_ep_sample_lib` target, compiled from
 //      `sample_lib.cpp`) through `addLibraryPath` + `addLibrary`.
 //      Vendor-side: this is the same shape downstream plugins will
@@ -71,7 +70,13 @@ struct SamplePrintFunctionsPass
   }
 };
 
-void registerCallbacks(::hip::compiler::HipEpPluginRegistry &R) {
+} // namespace
+
+// Per-id registration entry point. HIP_EP_DEFINE_PLUGIN(sample) expands to
+// `extern "C" void hipEpRegisterPlugin_sample(HipEpPluginRegistry &R)`, which
+// the host's generated registrar (StaticPlugins.cpp) calls once per process
+// when `sample` is in HIPDNN_EP_COMPILER_PLUGINS.
+HIP_EP_DEFINE_PLUGIN(sample) {
   // Hand the pass to MLIR's global pass registry.
   R.registerPass<SamplePrintFunctionsPass>();
 
@@ -107,20 +112,4 @@ void registerCallbacks(::hip::compiler::HipEpPluginRegistry &R) {
   // declares any plugin functions.
   R.addLibraryPath(HIP_EP_SAMPLE_LIB_DIR);
   R.addLibrary(HIP_EP_SAMPLE_LIB_NAME);
-}
-
-} // namespace
-
-// LLVM_ATTRIBUTE_WEAK is a no-op on Windows; the CMake target sets
-// `WINDOWS_EXPORT_ALL_SYMBOLS ON` so this symbol is exported under
-// its unmangled C name. On non-Windows the weak attribute lets the
-// same source link statically into a tool if we ever want to.
-extern "C" ::hip::compiler::HipEpPluginLibraryInfo LLVM_ATTRIBUTE_WEAK
-hipEpGetPluginInfo() {
-  return {
-      HIP_EP_PLUGIN_API_VERSION,
-      "HipEpSamplePlugin",
-      "0.4.0",
-      &registerCallbacks,
-  };
 }

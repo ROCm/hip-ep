@@ -2,29 +2,25 @@
 // Licensed under the MIT License.
 //
 //===----------------------------------------------------------------------===//
-// REQUIRES: hip_plugins_enabled
+// REQUIRES: hip_static_plugins
 //
-// Validates the pipeline-SLOT half of the plugin ABI end-to-end: the sample
-// plugin's RegisterCallbacks calls
+// Validates the pipeline-SLOT half of the plugin surface end-to-end: the sample
+// plugin's hipEpRegisterPlugin_sample calls
 //   requestPipelineSlot(AfterConvertOnnxToHip, "hip-ep-sample-print-functions")
-// so when the production --hipdnn-pipeline runs with the plugin loaded,
-// lib/Dialect/Transforms/Pipelines.cpp::addPluginPassesForSlot resolves that
-// pass by name and inserts it at the slot. The pass then fires on @main_graph,
-// proving BOTH that the slot request was honored AND that the plugin-registered
-// pass resolves in the host registry (via the HIPDNN_ENABLE_PLUGINS symbol
-// export). The companion test sample_plugin_pass.mlir invokes the pass directly
-// (--hip-ep-sample-print-functions); this one proves the slot wiring.
+// so when the production --hipdnn-pipeline runs, lib/Dialect/Transforms/
+// Pipelines.cpp::addPluginPassesForSlot resolves that pass by name and inserts
+// it at the slot. The pass then fires on @main_graph, proving BOTH that the slot
+// request was honored AND that the plugin-registered pass resolves in the host
+// registry (the plugin is statically linked, so it shares the host's single
+// registry). The companion test sample_plugin_pass.mlir invokes the pass
+// directly (--hip-ep-sample-print-functions); this one proves the slot wiring.
 //
-// hip_plugins_enabled is an explicit opt-in (CMake -DHIPDNN_PLUGIN_LIT_TESTS=ON,
-// default OFF) because the symbol export only works when the host is built
-// against a plugin-capable LLVM (shared / default-visibility); against a static,
-// hidden-visibility LLVM the plugin fails to load. Without the opt-in this test
-// is UNSUPPORTED rather than failing.
+// hip_static_plugins is set when the build selected the sample plugin
+// (-DHIPDNN_EP_COMPILER_PLUGINS=sample). The default build selects no plugins,
+// so this test is UNSUPPORTED there rather than failing.
 //===----------------------------------------------------------------------===//
 
-// RUN: env HIP_EP_PLUGINS=%hip-ep-sample-plugin \
-// RUN:   hip-mlir-opt %s --hipdnn-pipeline 2>&1 \
-// RUN:   | FileCheck %s
+// RUN: hip-mlir-opt %s --hipdnn-pipeline 2>&1 | FileCheck %s
 
 // CHECK: [hip-ep-sample] visited main_graph
 module {

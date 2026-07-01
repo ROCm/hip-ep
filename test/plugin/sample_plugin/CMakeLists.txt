@@ -3,7 +3,7 @@
 # ** Licensed under the MIT License.
 ##
 
-# Sample plugin DLL exercising the public plugin ABI surface in CI.
+# Sample static plugin exercising the public plugin surface in CI.
 # See docs/design/plugin-interface.md for the broader context.
 
 # ============================================================================
@@ -100,7 +100,7 @@ set_target_properties(hip_ep_sample_lib PROPERTIES
   FOLDER "mlir/Test/Plugin"
 )
 
-add_library(hip_ep_sample_plugin SHARED
+add_library(hip_ep_sample_plugin STATIC
   sample_plugin.cpp
   ${SAMPLE_PLUGIN_BITCODE_SRC}
 )
@@ -115,73 +115,49 @@ target_compile_definitions(hip_ep_sample_plugin PRIVATE
   "HIP_EP_SAMPLE_LIB_NAME=\"hip_ep_sample_lib\""
 )
 
-# MLIR linkage -- platform-dependent, because the shared-registry model is
-# platform-dependent (see docs/design/plugin-interface.md "Linkage
-# requirement"):
+# MLIR linkage under STATIC plugins: the plugin is a static lib linked into the
+# host (when `sample` is in HIPDNN_EP_COMPILER_PLUGINS -> pulled into
+# LibHipCompiler by hipdnn_ep_finalize_static_plugins, then into hip-mlir-opt /
+# hip-compiler / the EP DLL). Because plugin and host are ONE binary sharing one
+# MLIR instance, the registration lands in the host's single MLIR registry with
+# no symbol export, identically on Windows and Linux.
 #
-# * Non-Windows (ELF): link MLIR HEADERS ONLY, NOT the libraries. The plugin's
-#   MLIR symbols (PassRegistration<>, the pass registry, op TypeIDs) stay
-#   UNDEFINED in the .so and bind to the symbol-exporting host (built with
-#   HIPDNN_ENABLE_PLUGINS -> export_executable_symbols_for_plugins / -rdynamic)
-#   at dlopen, so the registration lands in the host's single registry. This is
-#   the headers-only rule a real downstream plugin follows (the HipDnnEpConfig
-#   package and the hip-ep-plugin example), so the sample is a faithful
-#   template. Linking the MLIR libraries here would give the plugin its own
-#   registry copy the host never reads -- the split-registry failure documented
-#   in docs/plugin_authoring.md "section 4".
-#
-# * Windows (PE/COFF): a DLL must resolve every symbol at link time -- it cannot
-#   leave mlir::registerPass undefined -- and there is no host import library to
-#   bind against, so the DLL must link the MLIR libraries. That gives it a
-#   private registry, so plugin-PASS registration does not cross the DLL
-#   boundary on Windows with this static-MLIR model (it would need a shared
-#   libMLIR build). The plugin-pass LIT tests gate on this via lit.cfg.py
-#   `hip_plugins_enabled` -- non-Windows and an explicit opt-in
-#   (-DHIPDNN_PLUGIN_LIT_TESTS=ON, default OFF, for the host LLVM-visibility
-#   requirement); the loader / slot-recording / bitcode / library halves are
-#   pure C ABI and work on Windows (unit test).
-#
-# In neither case does the plugin link LibHipCompiler: a vendor plugin is a
-# downstream consumer of the public hip-compiler artefact, not an internal
-# component.
-#
-# The plugin uses public hip-compiler headers (PluginAPI.h, PluginRegistry.h,
-# on the global include path) plus MLIR / LLVM headers (the *_INCLUDE_DIRS).
+# The plugin declares the MLIR libraries it references (PUBLIC) so that on a
+# static link they follow the plugin archive on the command line -- otherwise
+# the plugin's references to mlir:: symbols (PassRegistration, the Pass vtable,
+# op accessors) are seen AFTER the MLIR archives already passed and fail to
+# resolve. This is a link-ORDER requirement of static archives; it does NOT give
+# the plugin a private MLIR instance (the whole host is one binary). It links no
+# hip-compiler symbol.
 target_include_directories(hip_ep_sample_plugin PRIVATE
   ${MLIR_INCLUDE_DIRS}
   ${LLVM_INCLUDE_DIRS}
 )
-if(WIN32)
-  target_link_libraries(hip_ep_sample_plugin PRIVATE
-    MLIRPass
-    MLIRIR
-    MLIRSupport
-    MLIRFuncDialect
-  )
-endif()
+target_link_libraries(hip_ep_sample_plugin PUBLIC
+  MLIRPass
+  MLIRIR
+  MLIRSupport
+  MLIRFuncDialect
+)
 
-# Windows: export hipEpGetPluginInfo without a .def file.
 set_target_properties(hip_ep_sample_plugin PROPERTIES
-  WINDOWS_EXPORT_ALL_SYMBOLS ON
   FOLDER "mlir/Test/Plugin"
-  # Keep the file name predictable for the test runner; cmake's
-  # default would prepend "lib" on non-Windows.
-  PREFIX ""
-  OUTPUT_NAME "hip_ep_sample_plugin"
+  # Linked into LibHipCompiler, which is itself linked into the EP DLL (a shared
+  # library), so the objects must be position-independent on ELF.
+  POSITION_INDEPENDENT_CODE ON
 )
 
 # C++17 to match the rest of the tree.
 target_compile_features(hip_ep_sample_plugin PRIVATE cxx_std_17)
 
-# Build the plugin with RTTI OFF on ELF, matching LLVM/MLIR's default no-RTTI
-# ABI. The headers-only plugin (above) resolves its MLIR symbols against the
-# host at dlopen; if it is compiled with RTTI on it emits references to RTTI
-# typeinfo (e.g. `typeinfo for mlir::Pass`, _ZTIN4mlir4PassE) that a no-RTTI
-# host -- the LLVM default, and what CI ships -- does not export, so the load
-# fails with an undefined-symbol error. The plugin needs no RTTI of its own:
-# MLIR provides TypeID without it (MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID).
-# Windows links the MLIR libraries and gates the plugin-pass tests off, so it
-# keeps the toolchain default there.
+# Build with RTTI OFF on ELF to match LLVM/MLIR's default no-RTTI ABI (the same
+# setting the host tools use). MLIR provides TypeID without RTTI
+# (MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID), so the plugin needs none.
+# Windows keeps the toolchain default (matched by the host there).
 if(NOT WIN32)
   target_compile_options(hip_ep_sample_plugin PRIVATE -fno-rtti)
 endif()
+
+# Make this plugin AVAILABLE to the static registrar. It is only LINKED when
+# `sample` is listed in HIPDNN_EP_COMPILER_PLUGINS (see cmake/HipEpPlugins.cmake).
+hipdnn_ep_compiler_plugin_register(PLUGIN_ID sample TARGET hip_ep_sample_plugin)

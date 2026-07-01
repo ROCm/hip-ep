@@ -88,54 +88,12 @@ tools = [
 ]
 llvm_config.add_tool_substitutions(tools, hip_tools_dirs + [config.llvm_tools_dir])
 
-# Sample plugin DLL substitution.
-#
-# %hip-ep-sample-plugin resolves to the absolute path of the in-tree
-# sample plugin built by test/plugin/sample_plugin/CMakeLists.txt.
-# Tests that exercise the public plugin ABI (HIP_EP_PLUGINS) point
-# at this path so the cross-DLL load path is covered in CI without
-# any external artefact.
-plugin_search_dirs = [
-    os.path.join(
-        config.hip_build_dir, "test", "plugin", "sample_plugin", config.hip_build_mode
-    ),
-    os.path.join(config.hip_build_dir, "test", "plugin", "sample_plugin"),
-]
-plugin_filename = (
-    "hip_ep_sample_plugin.dll" if os.name == "nt" else "hip_ep_sample_plugin.so"
-)
-sample_plugin_path = ""
-for d in plugin_search_dirs:
-    candidate = os.path.join(d, plugin_filename)
-    if os.path.isfile(candidate):
-        sample_plugin_path = candidate
-        break
-if not sample_plugin_path:
-    # Fall back to the first candidate so the substitution string
-    # exists; the test will fail with an obvious "plugin not found"
-    # error from HIP_EP_PLUGINS rather than a missing-substitution
-    # LIT error.
-    sample_plugin_path = os.path.join(plugin_search_dirs[0], plugin_filename)
-config.substitutions.append(
-    ("%hip-ep-sample-plugin", sample_plugin_path.replace("\\", "/"))
-)
-
-# `hip_plugins_enabled` feature: gates the Plugin/ pass tests, which dlopen a
-# plugin into hip-mlir-opt and require the plugin's mlir::PassRegistration to
-# bind to the host's single pass registry. Two conditions must both hold, so the
-# feature is an explicit opt-in (CMake HIPDNN_PLUGIN_LIT_TESTS, default OFF, which
-# drives config.hip_plugins_enabled):
-#   1. The host must EXPORT its mlir:: symbols, which only happens when it was
-#      built against a plugin-capable LLVM (shared / default-visibility). A
-#      static, hidden-visibility LLVM (e.g. the CI cache) cannot export them, so
-#      the plugin's undefined MLIR refs never resolve to the host -> load fails.
-#      CMake cannot detect the LLVM's visibility, hence the manual opt-in.
-#   2. The binding mechanism is ELF-only (-rdynamic / export_executable_symbols_-
-#      for_plugins lets the host's definitions interpose the plugin's undefined
-#      refs at load). On Windows a plugin DLL must link the MLIR libraries to
-#      resolve at link time, so it gets its OWN registry and the host never sees
-#      the registration -- hence the feature is also restricted to non-Windows.
-# The loader / slot-recording / bitcode / library paths are pure C ABI, work
-# everywhere, and are covered by the unit test rather than these LIT tests.
-if getattr(config, "hip_plugins_enabled", False) and os.name != "nt":
-    config.available_features.add("hip_plugins_enabled")
+# `hip_static_plugins` feature: gates the Plugin/ pass tests. The sample plugin
+# is linked STATICALLY into hip-mlir-opt when the build selected it (`sample` in
+# HIPDNN_EP_COMPILER_PLUGINS); config.hip_static_plugins carries that from CMake.
+# Static linking needs no symbol export and puts the plugin in the host's single
+# MLIR registry, so this works identically on Windows and Linux -- no platform
+# restriction. The slot-recording / bitcode / library contributions are also
+# covered GPU-free by the PluginLoader unit test (test/plugin/test_plugin_loader).
+if getattr(config, "hip_static_plugins", False):
+    config.available_features.add("hip_static_plugins")

@@ -4,7 +4,7 @@
  */
 
 #include "CrashHandler.h"
-#include "hip/Compiler/PluginLoader.h"
+#include "hip/Compiler/PluginRegistry.h"
 #include "hip/Dialect/IR/HipBufferize.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
@@ -84,12 +84,11 @@ int main(int argc, char **argv) {
   mlir::registerFinalizeMemRefToLLVMConversionPass();
   mlir::registerConvertControlFlowToLLVMPass();
 
-  // Plugin DLLs listed in HIP_EP_PLUGINS get loaded here and have
-  // their RegisterCallbacks invoked before MlirOptMain parses the
-  // command line. That way `--<plugin-pass>` is recognised by the CL
-  // parser, and `--onnx-to-hip-pipeline` will see plugin slot
-  // requests when it builds its pass manager.
-  // No-op when HIP_EP_PLUGINS is unset.
+  // Run every statically-linked plugin's registration before MlirOptMain
+  // parses the command line, so `--<plugin-pass>` is recognised by the CL
+  // parser and `--hipdnn-pipeline` sees plugin slot requests when it builds
+  // its pass manager. No-op when no plugins were selected at configure time
+  // (HIPDNN_EP_COMPILER_PLUGINS empty). See cmake/HipEpPlugins.cmake.
   hip::compiler::dispatchPluginRegistrationsOnce();
 
   return mlir::asMainReturnCode(mlir::MlirOptMain(

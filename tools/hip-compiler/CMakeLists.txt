@@ -25,16 +25,10 @@ target_include_directories(hip-compiler PRIVATE
   ${CMAKE_BINARY_DIR}/schemas
 )
 
-# Export this executable's statically-linked MLIR symbols so a plugin loaded
-# via HIP_EP_PLUGINS (dlopen'd into the hip-compiler process) binds to THIS
-# host's single MLIR pass registry. Without it, the plugin's
-# mlir::PassRegistration writes a private registry the host never reads (the
-# in-tree XFAIL). This is the exact mechanism mlir-opt uses
-# (mlir/tools/mlir-opt/CMakeLists.txt). Gated by HIPDNN_ENABLE_PLUGINS, which
-# sets LLVM_ENABLE_PLUGINS so this call takes effect.
-if(HIPDNN_ENABLE_PLUGINS)
-  export_executable_symbols_for_plugins(hip-compiler)
-endif()
+# Plugins are linked STATICALLY (see cmake/HipEpPlugins.cmake), so no symbol
+# export is needed -- a statically-linked plugin shares this binary's MLIR
+# instance by construction. Selected plugin ids are pulled in transitively
+# through LibHipCompiler.
 
 # EXPORT HipDnnEpTargets: emit an IMPORTED HipDnnEp::hip-compiler target in the
 # installed package config so downstream plugins can locate the compiler via

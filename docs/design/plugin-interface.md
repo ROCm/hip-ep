@@ -4,21 +4,21 @@ Licensed under the MIT License.
 -->
 # Plugin interface
 
-How an out-of-tree shared library contributes compiler passes, runtime
-bitcode, and link libraries to `hip-compiler` at load time -- with no
-recompile of the host compiler -- and what a downstream team has to write
-to ship one.
+How an out-of-tree static library contributes compiler passes, custom
+dialects/ops, runtime bitcode, and link libraries to `hip-compiler` -- linked
+into the host at configure time (IREE's compiler-plugin model) -- and what a
+downstream team has to write to ship one.
 
 ## Table of contents
 
 - [Motivation](#motivation)
 - [Overview](#overview)
 - [The plugin ABI](#the-plugin-abi)
-  - [Entry point and info struct](#entry-point-and-info-struct)
+  - [Entry point](#entry-point)
   - [The registry](#the-registry)
   - [Pipeline slots](#pipeline-slots)
-- [How the host loads and dispatches plugins](#how-the-host-loads-and-dispatches-plugins)
-- [Linkage requirement](#linkage-requirement)
+- [How the host dispatches plugins](#how-the-host-dispatches-plugins)
+- [Linkage model](#linkage-model)
 - [What a downstream team does](#what-a-downstream-team-does)
 - [Component layout](#component-layout)
 - [Custom ops: a plugin-owned dialect end-to-end](#custom-ops-a-plugin-owned-dialect-end-to-end)
@@ -41,10 +41,11 @@ for a downstream team that needs to:
    re-merging on every change to `main`.
 
 The plugin interface provides a stable boundary for exactly that subset. A
-downstream team builds a shared library that the compiler loads at compile
-time; the library registers passes, asks for them to run at named points in
-the pipeline, and contributes the runtime bitcode and link libraries its
-ops need. The public repo is consumed as a binary dependency, and the only
+downstream team builds a static library and selects it into its own build of
+the host (which it already builds to target its GPU arch); the library
+registers passes, asks for them to run at named points in the pipeline, and
+contributes the runtime bitcode and link libraries its ops need. The public
+repo is consumed as a source dependency built alongside the plugin, and the only
 footprint a deployment carries is one environment variable.
 
 A downstream team may use the plugin interface for any reason -- an
@@ -58,17 +59,17 @@ improvements to it.
 
 ## Overview
 
-A plugin is a shared library (`.so` / `.dll`) listed in the
-`HIP_EP_PLUGINS` environment variable. When the compiler starts, it loads
-each library, validates its API version, and invokes a single registration
-callback. Through the registry handed to that callback, the plugin makes its
+A plugin is a **static library** selected into the host at configure time with
+`-DHIPDNN_EP_COMPILER_PLUGINS=<id>`. It defines one registration entry point,
+`hipEpRegisterPlugin_<id>`; a CMake-generated registrar calls it once per
+process. Through the registry handed to that entry point, the plugin makes its
 contributions, each consumed at a fixed point in the existing compile flow:
 
 ```text
-HIP_EP_PLUGINS=vendor.so
+-DHIPDNN_EP_COMPILER_PLUGINS=vendor   (statically linked into the host)
   |
-  v   (each plugin library is loaded once, at compiler start-up)
-Plugin loader  -->  HipEpPluginRegistry
+  v   (registrar calls each selected plugin's hipEpRegisterPlugin_<id> once)
+Static registrar  -->  HipEpPluginRegistry
   |
   |   the registry routes each contribution to a fixed point in the
   |   compile flow; all of them feed the final model.dll:
@@ -101,35 +102,35 @@ The public surface a plugin compiles against is two headers:
 [include/hip/Compiler/PluginRegistry.h](../../include/hip/Compiler/PluginRegistry.h)
 (the registry the callback uses).
 
-### Entry point and info struct
+### Entry point
 
-The host looks up one symbol, `hipEpGetPluginInfo`, by name and calls it to
-obtain a small info struct returned by value:
+A plugin defines one `extern "C"` registration function, named after the
+plugin's id:
 
 ```cpp
-#define HIP_EP_PLUGIN_API_VERSION 2
-
-extern "C" {
-struct HipEpPluginLibraryInfo {
-  uint32_t    APIVersion;       // == HIP_EP_PLUGIN_API_VERSION at build time
-  const char *PluginName;       // logged on load
-  const char *PluginVersion;    // vendor's own string; not parsed
-  void (*RegisterCallbacks)(HipEpPluginRegistry &);  // called once on load
-};
+// PluginAPI.h provides the convenience macro; `myvendor` is the plugin id.
+HIP_EP_DEFINE_PLUGIN(myvendor) {   // extern "C" void hipEpRegisterPlugin_myvendor(HipEpPluginRegistry &R)
+  R.registerPass<MyPass>();
+  R.requestPipelineSlot(PipelineSlot::AfterConvertOnnxToHip, "my-pass");
+  R.addRuntimeBitcode(my_bc, my_bc_size);
+  R.addLibrary("vendor_kernels");
 }
-
-extern "C" ::hip::compiler::HipEpPluginLibraryInfo LLVM_ATTRIBUTE_WEAK
-hipEpGetPluginInfo();
 ```
 
-`APIVersion` is incremented for any ABI-breaking change to the struct; the
-loader rejects any version it does not equal. `RegisterCallbacks` may be
-`nullptr` for a placeholder plugin; the load still succeeds.
+The plugin is a **static library** selected into the host at configure time
+(`-DHIPDNN_EP_COMPILER_PLUGINS=myvendor`). CMake generates a registrar
+([lib/Compiler/StaticPlugins.cpp](../../lib/Compiler/StaticPlugins.cpp)) that
+calls each selected plugin's `hipEpRegisterPlugin_<id>` exactly once per process.
+There is no runtime version handshake: plugin and host are built and linked
+together, so an ABI mismatch is a build error, not a load-time surprise.
+`HIP_EP_PLUGIN_API_VERSION` remains a source-level marker for the registry
+surface only. This replaces the earlier dynamic `hipEpGetPluginInfo` + `dlopen`
+model (see "Linkage model" below for why).
 
 ### The registry
 
-`HipEpPluginRegistry` is passed by reference to `RegisterCallbacks` and
-exposes the contributions:
+`HipEpPluginRegistry` is passed by reference to the plugin's
+`hipEpRegisterPlugin_<id>` entry and exposes the contributions:
 
 ```cpp
 class HipEpPluginRegistry {
@@ -158,19 +159,13 @@ public:
 };
 ```
 
-Capabilities live on this class rather than as extra fields in the C
-struct, so a future capability is added by extending the class -- the C
-entry point stays at a single callback and older plugins keep loading.
-
-Internally the registry is a value handle over a function-pointer table the
-host fills in (see
-[lib/Compiler/PluginRegistry.cpp](../../lib/Compiler/PluginRegistry.cpp)).
-`hip-compiler` is linked as a static library into a host process (the EP
-DLL, `hip-mlir-opt`, etc.) rather than shipped as its own shared library,
-so a plugin has no `hip-compiler` import library to resolve method symbols
-against; the table-of-function-pointers indirection bridges that boundary.
-A plugin therefore depends only on these headers plus MLIR (for the
-definition of `registerPass<T>()`'s `mlir::PassRegistration`).
+Capabilities live on this class rather than as free function pointers, so a
+future capability is added by extending the class. The registry is a value
+handle over a function-pointer table the host fills in (see
+[lib/Compiler/PluginRegistry.cpp](../../lib/Compiler/PluginRegistry.cpp)); the
+indirection is retained (harmless under static linking) so a plugin TU depends
+only on these headers plus MLIR (for `registerPass<T>()`'s
+`mlir::PassRegistration`), never on a hip-compiler symbol.
 
 ### Pipeline slots
 
@@ -206,158 +201,91 @@ pass registry (the same lookup a `--pass=name` flag uses) and adds it to the
 active pass manager. A name that does not resolve produces a one-line
 warning rather than a silent miss.
 
-## How the host loads and dispatches plugins
+## How the host dispatches plugins
 
-The loader lives in
-[include/hip/Compiler/PluginLoader.h](../../include/hip/Compiler/PluginLoader.h)
-and [lib/Compiler/PluginLoader.cpp](../../lib/Compiler/PluginLoader.cpp).
-`dispatchPluginRegistrationsOnce()` is the production entry point; it is
-idempotent (guarded by `std::call_once`) and called from each host that
-builds a pipeline (`hip-compiler`, `hip-mlir-opt`).
-
-```
-HIP_EP_PLUGINS=/opt/vendor/lib/vendor.so;/opt/other/plugin.so
-```
-
-The list is semicolon-separated on every platform (a colon would clash with
-Windows drive letters). For each entry the loader:
-
-1. Loads the library permanently into the process.
-2. Looks up `hipEpGetPluginInfo` and calls it.
-3. Rejects the plugin if `APIVersion` does not match, or if the name /
-   version pointers are null -- with a single-line `[plugin-loader]
-   WARNING:` to stderr, then continues with the next entry.
-4. Invokes `RegisterCallbacks` against the per-process registry, inside a
-   `try/catch` so an exception escaping a plugin built against a different
-   C++ runtime is contained rather than crashing the host.
+Selected plugins are linked statically into the host; the CMake-generated
+registrar [lib/Compiler/StaticPlugins.cpp](../../lib/Compiler/StaticPlugins.cpp)
+calls each one's `hipEpRegisterPlugin_<id>` against the per-process registry.
+`dispatchPluginRegistrationsOnce()` (declared in `PluginRegistry.h`) is the
+production entry point; it is idempotent (`std::call_once`) and called from each
+host that builds a pipeline (`hip-compiler`, `hip-mlir-opt`, the EP DLL). A
+plugin whose registration throws is contained (logged + skipped) rather than
+crashing the host. When no plugins were selected, dispatch is a no-op.
 
 After dispatch, the host reads back what the plugins contributed through the
 accessors in `PluginRegistry.h` -- `pluginPassesForSlot`,
 `pluginDialectRegistrations`, `pluginBitcodeBuffers`, `pluginLibraryPaths`,
-`pluginLibraries` -- at the four hook sites.
+`pluginLibraries` -- at the hook sites.
 
 ### Multiple plugins
 
-`HIP_EP_PLUGINS` may list several libraries (semicolon-separated); they load
-in listed order, with duplicates removed, and each `RegisterCallbacks` runs
-once. Contributions compose by load order:
+`HIPDNN_EP_COMPILER_PLUGINS` may list several ids; each plugin's
+`hipEpRegisterPlugin_<id>` runs once, in list order. Contributions compose by
+that order:
 
-- **Slots:** passes requested for the same slot run in plugin load order.
+- **Slots:** passes requested for the same slot run in registration order.
 - **Pass names:** a pass is resolved by its registered name, so two plugins
   must not register the same name -- prefix plugin pass names to keep them
   unique.
 - **Bitcode / library symbols:** a symbol defined by more than one source
-  resolves to the last contributor in load order (bitcode is linked with
-  `OverrideFromSrc`; libraries follow link search order). Prefix vendor
-  symbols so cross-plugin collisions cannot happen by accident.
+  resolves to the last contributor (bitcode is linked with `OverrideFromSrc`;
+  libraries follow link search order). Prefix vendor symbols so cross-plugin
+  collisions cannot happen by accident.
 
-## Linkage requirement
+## Linkage model
 
-`registerPass<T>()` writes MLIR's process-global pass registry. For a
-plugin-registered pass to be visible to the host, the plugin's registration
-must land in **the host's** copy of that registry. The host (`hip-compiler` /
-`hip-mlir-opt`) links MLIR statically, so this is achieved exactly the way
-upstream LLVM tools do it -- the host **exports its statically-linked MLIR
-symbols**, and the plugin leaves its MLIR symbols **undefined** so they bind to
-the host at `dlopen` time:
+Plugins are linked **statically** into the host at configure time (IREE's
+compiler-plugin model), selected via `-DHIPDNN_EP_COMPILER_PLUGINS=<id;...>`
+(default empty). The machinery is in
+[cmake/HipEpPlugins.cmake](../../cmake/HipEpPlugins.cmake): a plugin package
+calls `hipdnn_ep_compiler_plugin_register(PLUGIN_ID <id> TARGET <static-lib>)`
+to make itself available; `hipdnn_ep_finalize_static_plugins()` then generates
+the registrar include for the selected ids and links their static libs into
+`LibHipCompiler` (which every host links).
 
-- **Host side:** built with `HIPDNN_ENABLE_PLUGINS` (default ON), which calls
-  `export_executable_symbols_for_plugins()` on the tool executables -- the same
-  call `mlir-opt` makes (`mlir/tools/mlir-opt/CMakeLists.txt`). On Linux this
-  takes the `ENABLE_EXPORTS` / `-rdynamic` path. LLVM is already linked as the
-  shared `libLLVM`, so only the MLIR symbols are exported.
-- **Plugin side:** links MLIR **headers only** (no MLIR libraries), so its
-  registry/op references are undefined and resolve to the host's single copy.
-  A plugin that statically links MLIR gets its own registry; the host's lookup
-  then misses and the slot dispatch warns.
+Why static rather than a dlopen'd DLL: an MLIR-contributing plugin (a pass, a
+dialect/op, an interface model) must share the host's process-global MLIR state
+-- one pass registry, one set of op `TypeID`s. Static linking makes the plugin
+and host **one binary**, so they share MLIR by construction, with **no symbol
+export and no dlopen** -- identical on Windows and Linux. This is what the MLIR
+ecosystem does (IREE's `-DIREE_COMPILER_PLUGINS=`; the rest -- torch-mlir,
+onnx-mlir, stablehlo -- link MLIR-coupled code statically / monolithically).
 
-This is the model the public build ships. (An alternative -- routing MLIR
-through a shared `libMLIR.so` dylib so host and plugin both link it -- also
-works and is what a non-executable host, e.g. an EP DLL, would need; it is not
-how the CLI tools are built.) ROCm's `libamd_comgr.so` references no MLIR
-symbols and resolves its LLVM from the same shared `libLLVM`, so exporting the
-host's MLIR symbols does not perturb comgr.
+The dynamic alternative was rejected on measured evidence. Making a dlopen'd,
+MLIR-C++ plugin work needs the host to export its `mlir::` symbols; that surface
+is ~133K symbols, **more than 2x the Windows PE 65,535 export-table cap**, so it
+cannot fit on Windows (and a single shared `libMLIR.dll` hits the same cap). A
+per-plugin scoped export fits but reintroduces a build-order inversion and
+per-plugin `.def` machinery with no upstream analog. Static linking avoids all
+of it. See the plan `.cursor/plans/plugin-extension-api.plan.md` (§0) for the
+full derivation and the measurements.
 
-**Platform support (important):** the "leave MLIR undefined, bind to the host"
-mechanism is ELF-specific. A Linux shared object may carry undefined symbols and
-resolve them at `dlopen` against the `-rdynamic` host. A **Windows** DLL cannot:
-the linker must resolve every symbol at link time, and there is no host import
-library to bind against, so a plugin DLL has to link the MLIR libraries -- which
-gives it its own pass registry that the host never reads. **So plugin-pass
-registration (and the dialect/op extension, which shares the same registries) is
-supported on Linux but not on Windows with the static-MLIR build.** Making it
-work on Windows would require the shared-`libMLIR` dylib model above. The
-consequences in-tree: the sample plugin links the MLIR libraries only on Windows
-(so it still builds), and the plugin-pass LIT tests are gated via the
-`hip_plugins_enabled` feature -- non-Windows *and* an explicit opt-in
-(`-DHIPDNN_PLUGIN_LIT_TESTS=ON`, default OFF) for the LLVM-visibility requirement
-covered in "LLVM build configuration the plugin host needs" below. The loader /
-pipeline-slot recording / bitcode / library contributions are pure C ABI and work
-on every platform (covered by the plugin-loader unit test).
+**Correctness note:** the registrar calls each `hipEpRegisterPlugin_<id>`
+**explicitly** -- registration must never rely on a static initializer in the
+plugin lib, or `--gc-sections` / `/OPT:REF` would drop the unreferenced object
+and silently discard the registration.
 
-The bitcode and library contributions do not cross MLIR's global state, so
-they work regardless of this -- the symbol-export requirement applies
-specifically to the pass (and, for the planned dialect/op extension, the
-dialect and type registries).
+The bitcode and library contributions (`addRuntimeBitcode`, `addLibrary`) are
+pure C-ABI and cross no MLIR state; they are unaffected by linkage and are the
+one class of contribution that also works dynamically into a prebuilt host.
 
-### LLVM build configuration the plugin host needs
+### Deploying plugins with a prebuilt host
 
-Whether a plugin that contributes MLIR (a pass or a custom dialect/op) can load
-**depends on how the LLVM/MLIR that `hip-compiler` / `hip-mlir-opt` were built
-against was configured** -- specifically, whether the host can export its
-`mlir::` symbols. Two configurations behave differently, and only one hosts
-plugins:
-
-- **Shared `libLLVM` + default-visibility MLIR** (e.g. a distro LLVM, which the
-  standard build container uses). The host links the shared `libLLVM` while the
-  static MLIR libraries keep default visibility, so `-rdynamic` exports the
-  `mlir::` symbols and a plugin's references resolve at `dlopen`. comgr is
-  unaffected because there is a single shared `libLLVM` for everything to bind
-  to. **Plugins load.** This is the configuration this document describes and
-  the one the project is verified against.
-- **Static, hidden-visibility LLVM** (e.g. a from-source LLVM built with
-  `CMAKE_CXX_VISIBILITY_PRESET=hidden`, as the CI cache is). Hidden visibility is
-  required there to keep the statically-linked `llvm::` symbols out of the
-  dynamic symbol table -- otherwise ROCm's `libamd_comgr.so` binds its own
-  versioned `llvm::` references to that copy and **segfaults** during device-code
-  compilation. But hidden visibility also hides `mlir::`, so the host cannot
-  export it, and an MLIR-contributing plugin **fails to load** (unresolved
-  `mlir::` symbols). Pure bitcode / library plugins still work (no MLIR symbols
-  to resolve).
-
-Practical consequences for a downstream team:
-
-- **Build `onnx-hipdnn-ep` against a shared / default-visibility LLVM** if you
-  intend to ship pass or custom-op plugins. The standard build container does
-  this; a from-source static + hidden-visibility LLVM does not.
-- **A plugin that references any `mlir::` symbol fails to load as a whole on a
-  non-exporting host** -- `dlopen` stops at the first unresolved symbol, so even
-  that plugin's bitcode / library contributions never run. A plugin that must
-  work against a non-exporting host has to stay free of MLIR code (bitcode /
-  library only).
-- The underlying tension -- `mlir::` must be exported for plugins, while `llvm::`
-  must stay private for comgr when LLVM is static -- is only fully resolved by a
-  host build that exports `mlir::` while keeping `llvm::` hidden (e.g. a shared
-  `libMLIR` build, or a curated export list scoped to the `mlir::` namespace). A
-  future prebuilt `hip-compiler` distribution intended to host plugins must be
-  built that way; until then, plugin authors build `onnx-hipdnn-ep` themselves
-  against a plugin-capable LLVM (which also lets them target their own GPU arch).
-
-In-tree, the plugin-pass LIT tests (`test/lit/Plugin/`) encode exactly this
-dependency: CMake cannot detect the host LLVM's visibility, so running them is an
-explicit opt-in via `-DHIPDNN_PLUGIN_LIT_TESTS=ON` (default OFF). A builder on a
-plugin-capable LLVM turns it on to exercise the MLIR-contributing path; the
-default static / hidden-visibility build (the CI cache) leaves it off, where the
-tests are `UNSUPPORTED` rather than spuriously failing. `HIPDNN_ENABLE_PLUGINS`
-is independent and stays on -- the sample plugin still builds and the host still
-emits the export flag; the opt-in only controls whether the load-dependent tests
-run.
+Because static plugins are chosen at the host's configure time, a downstream
+builds `onnx-hipdnn-ep` itself (which it already does to target its GPU arch and
+per-target kernels) and adds its plugin id to `HIPDNN_EP_COMPILER_PLUGINS`.
+There is no runtime drop-in of an MLIR plugin into an already-shipped host; that
+capability, if ever required, is a separate C-ABI tier over the MLIR C API (the
+C API export surface is ~1.3K symbols, which *does* fit the Windows cap) -- see
+the plan's §0.5 "Hot-swap tiers". Kernel-level customization (a custom `wrap_*`
+for an op) is already hot-swappable today via the bitcode / library
+contributions.
 
 ## What a downstream team does
 
-A downstream team builds its plugin in a separate repo that consumes a
-released `hip-compiler` install tree. No fork of the public repo is
-required. The files a full-stack plugin (custom op + kernel) writes:
+A downstream team builds its plugin as a static library alongside its own
+build of `onnx-hipdnn-ep` (no fork of the public repo is required). The files a
+full-stack plugin (custom op + kernel) writes:
 
 | File | Role |
 |---|---|
@@ -365,39 +293,34 @@ required. The files a full-stack plugin (custom op + kernel) writes:
 | `MyLowering.cpp` | Lowers the op to a `wrap_*` runtime call |
 | `runtime/wrap_my_op.cpp` | C-ABI runtime wrapper, compiled to bitcode and embedded |
 | `runtime/my_kernel.hip` | Device kernel(s), built into a vendor library |
-| `plugin_main.cpp` | `hipEpGetPluginInfo` + `RegisterCallbacks` |
-| `CMakeLists.txt` | Builds the plugin shared library + vendor kernel library |
+| `plugin_main.cpp` | `HIP_EP_DEFINE_PLUGIN(<id>)` registration entry |
+| `CMakeLists.txt` | Builds the plugin static library + vendor kernel library; calls `hipdnn_ep_compiler_plugin_register` |
 
 A pass-only or lowering-only plugin writes a subset (no kernel / no runtime
 wrapper).
 
-> Prerequisite for pass-contributing plugins: a plugin pass only takes effect
-> when the host (`hip-compiler` / `hip-mlir-opt`) was built with
-> `HIPDNN_ENABLE_PLUGINS` (default ON) so it exports its MLIR symbols, and the
-> plugin links MLIR headers only (see
-> [Linkage requirement](#linkage-requirement)). The bitcode and library
-> contributions do not depend on this and work regardless.
+> A plugin pass only takes effect because the plugin is statically linked into
+> the host (one binary, one MLIR pass registry — see
+> [Linkage model](#linkage-model)). The bitcode and library contributions work
+> regardless of linkage.
 
-### 1. Consume the public install tree
+### 1. Build alongside the host
 
-The public build installs the plugin headers, the compiler binaries, and a
-CMake package config under a prefix:
+A plugin is built in the same CMake build as `onnx-hipdnn-ep` and uses its
+public headers:
 
 ```
-<prefix>/include/hip/Compiler/PluginAPI.h
-<prefix>/include/hip/Compiler/PluginRegistry.h
-<prefix>/include/hip/Compiler/PluginLoader.h
-<prefix>/bin/hip-compiler, hip-mlir-opt
-<prefix>/lib/cmake/HipDnnEp/HipDnnEpConfig.cmake
+include/hip/Compiler/PluginAPI.h        # HIP_EP_DEFINE_PLUGIN, entry contract
+include/hip/Compiler/PluginRegistry.h   # the registry the entry uses
+cmake/HipEpPlugins.cmake                 # HIPDNN_EP_COMPILER_PLUGINS + register fn
 ```
 
-The plugin's CMake does `find_package(HipDnnEp CONFIG REQUIRED)` (with
-`-DHipDnnEp_DIR=<prefix>/lib/cmake/HipDnnEp`), which provides the
-`HipDnnEp::plugin_headers` INTERFACE target (the include path) and the
-`HipDnnEp::hip-compiler` / `HipDnnEp::hip-mlir-opt` IMPORTED executables. It
-also `find_package(MLIR CONFIG)`s the same MLIR build and links MLIR
-**headers only** (see [Linkage requirement](#linkage-requirement)). The plugin
-links no symbol from `hip-compiler` itself.
+The plugin's CMake `find_package(MLIR CONFIG)`s the same MLIR build, compiles
+against the plugin surface + MLIR headers, and declares the MLIR libraries it
+references (so static link order resolves — see [Linkage model](#linkage-model)).
+It calls `hipdnn_ep_compiler_plugin_register(PLUGIN_ID <id> TARGET <lib>)` and is
+selected with `-DHIPDNN_EP_COMPILER_PLUGINS=<id>`. The plugin links no symbol
+from `hip-compiler` itself.
 
 ### 2. Write the pass
 
@@ -425,37 +348,29 @@ struct MyLoweringPass
 
 ### 3. Write the entry point
 
-`RegisterCallbacks` is the entire compiler-facing surface. It registers the
-pass, asks for a slot, and contributes the runtime bitcode and kernel
-library:
+The `hipEpRegisterPlugin_<id>` function is the entire compiler-facing surface.
+It registers the pass, asks for a slot, and contributes the runtime bitcode and
+kernel library. `HIP_EP_DEFINE_PLUGIN(<id>)` (from `PluginAPI.h`) expands to the
+correctly-named `extern "C"` signature:
 
 ```cpp
 // plugin_main.cpp
 extern "C" const unsigned char my_wrap_bc[];   // embedded at build time
 extern "C" const std::size_t   my_wrap_bc_size;
 
-extern "C" ::hip::compiler::HipEpPluginLibraryInfo LLVM_ATTRIBUTE_WEAK
-hipEpGetPluginInfo() {
-  return {
-      HIP_EP_PLUGIN_API_VERSION,
-      "MyVendorPlugin",
-      "1.0.0",
-      [](::hip::compiler::HipEpPluginRegistry &R) {
-        R.registerPass<MyLoweringPass>();
-        R.requestPipelineSlot(
-            ::hip::compiler::PipelineSlot::AfterConvertOnnxToHip,
-            "my-vendor-lowering");        // == MyLoweringPass::getArgument()
-        if (my_wrap_bc_size != 0)
-          R.addRuntimeBitcode(my_wrap_bc, my_wrap_bc_size);
-        R.addLibraryPath("/opt/vendor/lib");
-        R.addLibrary("vendor_kernels");
-      }};
+// `myvendor` must match the id in hipdnn_ep_compiler_plugin_register(...) and
+// -DHIPDNN_EP_COMPILER_PLUGINS=myvendor.
+HIP_EP_DEFINE_PLUGIN(myvendor) {
+  R.registerPass<MyLoweringPass>();
+  R.requestPipelineSlot(
+      ::hip::compiler::PipelineSlot::AfterConvertOnnxToHip,
+      "my-vendor-lowering");        // == MyLoweringPass::getArgument()
+  if (my_wrap_bc_size != 0)
+    R.addRuntimeBitcode(my_wrap_bc, my_wrap_bc_size);
+  R.addLibraryPath("/opt/vendor/lib");
+  R.addLibrary("vendor_kernels");
 }
 ```
-
-On Windows, `LLVM_ATTRIBUTE_WEAK` is a no-op: export the definition with
-`__declspec(dllexport)`, or set `WINDOWS_EXPORT_ALL_SYMBOLS` on the plugin
-target.
 
 ### 4. Write the runtime wrapper and kernel
 
@@ -489,69 +404,73 @@ void launch_my_kernel(void *stream, const void *in, void *out, int64_t n) {
 The wrapper bitcode is linked into the generated `model.dll` after the
 in-tree runtime; the kernel library is added to the native link.
 
-### 5. Build the plugin
+### 5. Build the plugin (a static library selected into the host build)
+
+The plugin is built as part of the same CMake build as `onnx-hipdnn-ep` (a
+downstream adds its plugin directory to that build, or builds the host as a
+subproject). It builds a **static** library, registers it as available, and is
+selected with `-DHIPDNN_EP_COMPILER_PLUGINS=myvendor`.
 
 ```cmake
-# CMakeLists.txt (downstream repo). Consume the public install tree's package
-# config; MLIR must be the same build the host was compiled against.
-#   -DHipDnnEp_DIR=<prefix>/lib/cmake/HipDnnEp
-find_package(HipDnnEp CONFIG REQUIRED)
-find_package(MLIR CONFIG REQUIRED)
+# CMakeLists.txt (in the downstream's build of onnx-hipdnn-ep).
+find_package(MLIR CONFIG REQUIRED)   # the SAME MLIR the host is built against
 
-# (a) Compile the runtime wrapper to LLVM bitcode and embed it as a byte
-#     array (my_wrap_bc / my_wrap_bc_size), e.g. clang -emit-llvm then an
-#     xxd-style codegen step -> ${EMBEDDED_BC_SRC}.
+# (a) Compile the runtime wrapper to LLVM bitcode and embed it as a byte array
+#     (my_wrap_bc / my_wrap_bc_size), e.g. clang -emit-llvm + an xxd-style step.
 # (b) Build the device kernels into a vendor library.
 add_library(vendor_kernels STATIC runtime/my_kernel.hip)
 
-# (c) Build the plugin shared library. Link the plugin ABI headers + MLIR
-#     HEADERS ONLY (no MLIR libraries) so the plugin's MLIR symbols bind to the
-#     symbol-exporting host at load (see Linkage requirement); link no
-#     hip-compiler symbol.
-add_library(my_vendor_plugin SHARED
+# (c) Build the plugin STATIC library. It uses the plugin surface headers +
+#     MLIR headers, and declares the MLIR libraries it references (so they
+#     follow it in static link order). It is linked into the host only when
+#     selected; it links no hip-compiler symbol.
+add_library(my_vendor_plugin STATIC
   plugin_main.cpp MyLoweringPass.cpp ${EMBEDDED_BC_SRC})
 target_include_directories(my_vendor_plugin PRIVATE ${MLIR_INCLUDE_DIRS})
-target_link_libraries(my_vendor_plugin PRIVATE HipDnnEp::plugin_headers)
-set_target_properties(my_vendor_plugin PROPERTIES
-  WINDOWS_EXPORT_ALL_SYMBOLS ON                          # export hipEpGetPluginInfo
-  PREFIX "")
+target_link_libraries(my_vendor_plugin PUBLIC MLIRPass MLIRIR MLIRSupport)
+set_target_properties(my_vendor_plugin PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# Make it available to the static registrar; selected via
+# -DHIPDNN_EP_COMPILER_PLUGINS=myvendor.
+hipdnn_ep_compiler_plugin_register(PLUGIN_ID myvendor TARGET my_vendor_plugin)
 ```
 
 ### 6. Deploy
 
-Point the compiler at the plugin and run as usual:
+Configure the host build with the plugin selected, then run as usual:
 
 ```
-HIP_EP_PLUGINS=/opt/vendor/lib/my_vendor_plugin.so \
-THEROCK_DIST=<therock> \
-hip-compiler model.mlir -o model.dll
+cmake -S onnx-hipdnn-ep -B build -DHIPDNN_EP_COMPILER_PLUGINS=myvendor ...
+cmake --build build
+THEROCK_DIST=<therock> hip-compiler model.mlir -o model.dll
 ```
 
-The same variable is read by `hip-mlir-opt` for pass-level testing.
+The plugin is compiled into `hip-compiler` / `hip-mlir-opt` / the EP DLL; there
+is no runtime plugin path to set.
 
 ### 7. Test the plugin
 
 A plugin is testable with the same tools the in-tree sample uses, and the
 compile-side checks need no GPU:
 
-- A **unit test** that loads the plugin and asserts its name, version, and
-  contributions round-trip across the ABI boundary. Use
+- A **unit test** that runs the static registrar and asserts the plugin's
+  contributions were recorded. Use
   [test/plugin/test_plugin_loader.cpp](../../test/plugin/test_plugin_loader.cpp)
   as the template.
-- A **LIT test** that runs the pass at a pipeline point. Use the textual
-  pipeline form (`--pass-pipeline=`) rather than the generated `--<pass>`
-  flag shorthand, which is unreliable for a plugin-contributed pass:
+- A **LIT test** that runs the pass at a pipeline point, built with the plugin
+  selected. Because the plugin is statically linked, the pass is registered by
+  name -- no per-test environment needed:
 
 ```
-// RUN: env HIP_EP_PLUGINS=%my-plugin \
-// RUN:   hip-mlir-opt \
+// RUN: hip-mlir-opt \
 // RUN:     --pass-pipeline='builtin.module(func.func(my-vendor-lowering))' \
 // RUN:     %s | FileCheck %s
 ```
 
-The pass half of both tests requires the shared-MLIR host build (see the
-prerequisite above); the loader / bitcode / library round-trip in the unit
-test does not.
+These run identically on Windows and Linux (static linking, no symbol export).
+Because a selected plugin is active for every compile in that build, run
+plugin LIT tests in a plugin-enabled build scoped to the plugin's test
+directory rather than mixed with tests that assume no plugin.
 
 ## Component layout
 
@@ -559,10 +478,10 @@ In-tree, the mechanism is:
 
 | File | Role |
 |---|---|
-| [include/hip/Compiler/PluginAPI.h](../../include/hip/Compiler/PluginAPI.h) | C entry point + info struct |
-| [include/hip/Compiler/PluginRegistry.h](../../include/hip/Compiler/PluginRegistry.h) | Registry class + `PipelineSlot` enum + accessors |
-| [include/hip/Compiler/PluginLoader.h](../../include/hip/Compiler/PluginLoader.h) | Loader + `dispatchPluginRegistrationsOnce` |
-| [lib/Compiler/PluginLoader.cpp](../../lib/Compiler/PluginLoader.cpp) | `HIP_EP_PLUGINS` parsing, load, version check, dispatch |
+| [include/hip/Compiler/PluginAPI.h](../../include/hip/Compiler/PluginAPI.h) | `hipEpRegisterPlugin_<id>` entry contract + `HIP_EP_DEFINE_PLUGIN` |
+| [include/hip/Compiler/PluginRegistry.h](../../include/hip/Compiler/PluginRegistry.h) | Registry class + `PipelineSlot` enum + accessors + `dispatchPluginRegistrationsOnce` |
+| [cmake/HipEpPlugins.cmake](../../cmake/HipEpPlugins.cmake) | `HIPDNN_EP_COMPILER_PLUGINS`, `hipdnn_ep_compiler_plugin_register`, generated registrar |
+| [lib/Compiler/StaticPlugins.cpp](../../lib/Compiler/StaticPlugins.cpp) | Static registrar: calls each selected plugin's entry once |
 | [lib/Compiler/PluginRegistry.cpp](../../lib/Compiler/PluginRegistry.cpp) | Host-side function-pointer table + contribution storage |
 | [lib/Dialect/Transforms/Pipelines.cpp](../../lib/Dialect/Transforms/Pipelines.cpp) | Slot hook (`addPluginPassesForSlot`) |
 | [include/hip/InitAllPasses.h](../../include/hip/InitAllPasses.h) | Dialect hook (`loadAllDialects` applies plugin dialect registrations) |
