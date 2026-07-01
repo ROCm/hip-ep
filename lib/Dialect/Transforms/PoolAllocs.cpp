@@ -603,16 +603,6 @@ void PoolAllocsPass::runOnOperation() {
     auto allocOp = dyn_cast<memref::AllocOp>(op);
     if (!allocOp)
       continue;
-    // Defensive: only device-space allocations belong in the GPU pool.
-    // Absorbing any explicit non-device space (host/pinned/managed) would
-    // lower to the undefined hip_device_malloc. (Unspecified / legacy integer
-    // spaces are transitional and still pooled.) Non-device transfer buffers
-    // are stack allocas today, so none should reach here; skip any that slip
-    // through.
-    if (auto sp = dyn_cast_or_null<MemorySpaceAttr>(
-            allocOp.getType().getMemorySpace()))
-      if (sp.getKind() != MemorySpaceKind::Device)
-        continue;
     Value result = allocOp.getResult();
     if (result.use_empty())
       continue;
