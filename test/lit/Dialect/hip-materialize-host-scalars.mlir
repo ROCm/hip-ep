@@ -216,9 +216,10 @@ func.func @host_scalar_as_reshape_shape(%ctx: !hip.context, %x: i64,
 // CHECK-NOT:   hip.get_host_scratch
 // CHECK:       memref.alloc() : memref<i32, #hip.mem<host>>
 func.func @host_space_alloc_left_alone(%ctx: !hip.context,
-                                       %src: memref<i32>) -> i32 {
+                                       %src: memref<i32, #hip.mem<device>>) -> i32 {
   %a = memref.alloc() : memref<i32, #hip.mem<host>>
-  hip.memcpy_d2h_async(%ctx, %a, %src : memref<i32, #hip.mem<host>>, memref<i32>)
+  hip.memcpy_d2h_async(%ctx, %a, %src
+      : memref<i32, #hip.mem<host>>, memref<i32, #hip.mem<device>>)
   hip.stream_sync(%ctx)
   %v = memref.load %a[] : memref<i32, #hip.mem<host>>
   memref.dealloc %a : memref<i32, #hip.mem<host>>
