@@ -58,9 +58,8 @@ void addPluginPassesForSlot(OpPassManager &pm,
     // `func.func(<arg>)`, not the bare `<arg>`).
     if (failed(parsePassPipeline(passName, pm))) {
       llvm::errs()
-          << "[plugin-loader] WARNING: could not add pass pipeline '"
-          << passName << "' requested for pipeline slot "
-          << static_cast<int>(slot)
+          << "[plugin] WARNING: could not add pass pipeline '" << passName
+          << "' requested for pipeline slot " << static_cast<int>(slot)
           << ". Check that the plugin registered the pass (registerPass<>() + "
              "the host built with plugin symbol export) and that the string "
              "carries the right anchor nesting (e.g. func.func(<arg>) for a "

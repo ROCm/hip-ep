@@ -110,7 +110,7 @@ private:
                  std::string &error_message);
 
   /// Discover GPU runtime libraries from THEROCK_DIST environment
-  /// variable plus libraries contributed by loaded plugins.
+  /// variable plus libraries contributed by statically-linked plugins.
   /// Plugin contributions are appended after the in-tree libraries
   /// so command-line link order keeps in-tree symbols winning.
   /// Covers the per-arch custom-kernels import lib and the hipDNN graph

@@ -275,34 +275,35 @@ practical authoring guide is
 [`docs/plugin_authoring.md`](docs/plugin_authoring.md). Three points worth
 knowing as a contributor:
 
-1. **Plugins are loaded via `HIP_EP_PLUGINS`** (semicolon-separated list of
-   plugin library paths). The public ABI sits at
-   [`include/hip/Compiler/PluginAPI.h`](include/hip/Compiler/PluginAPI.h)
-   and [`include/hip/Compiler/PluginRegistry.h`](include/hip/Compiler/PluginRegistry.h);
-   a working sample plugin lives at `test/plugin/sample_plugin/` and is
-   exercised by the plugin-loader unit test
-   [`test/plugin/test_plugin_loader.cpp`](test/plugin/test_plugin_loader.cpp).
+1. **Plugins are linked STATICALLY into the host**, selected at configure time
+   with `-DHIPDNN_EP_COMPILER_PLUGINS=<id>` (and, for an out-of-tree plugin repo,
+   `-DHIPDNN_EP_COMPILER_PLUGIN_PATHS=<dir>`). The machinery is in
+   [`cmake/HipEpPlugins.cmake`](cmake/HipEpPlugins.cmake); the public surface sits
+   at [`include/hip/Compiler/PluginAPI.h`](include/hip/Compiler/PluginAPI.h)
+   and [`include/hip/Compiler/PluginRegistry.h`](include/hip/Compiler/PluginRegistry.h).
+   A working sample plugin lives at `test/plugin/sample_plugin/` and is exercised
+   by [`test/plugin/test_static_plugins.cpp`](test/plugin/test_static_plugins.cpp).
    The sample exercises `registerPass<>`, `requestPipelineSlot`,
-   `addRuntimeBitcode`, `addLibraryPath`, and `addLibrary`. The remaining
-   method, `addDialectRegistration` (contribute a custom dialect + op), is
-   documented in the design doc's "Custom ops" section.
+   `addRuntimeBitcode`, `addLibraryPath`, `addLibrary`, and
+   `addDialectRegistration` (a custom dialect + op), documented in the design
+   doc's "Custom ops" section.
 2. **Improvements that need not live out of tree go upstream, not into a
    plugin.** A down-stream team may use the plugin for any reason, but a
    generic op, bug fix, or non-target-specific pass is still best contributed
    upstream through the normal flow. See the design doc for the
    plugin-vs-upstream guidance.
-3. **Editing `HipEpPluginRegistry` is editing public ABI.** Adding a new
-   method requires (a) appending an entry to the `VTable` struct in
+3. **Editing `HipEpPluginRegistry` is editing a public surface.** Adding a new
+   capability requires (a) appending an entry to the `VTable` struct in
    `PluginRegistry.h`, (b) implementing it in
    `lib/Compiler/PluginRegistry.cpp`, (c) wiring at most one host site to read
    the recorded state, and (d) a unit-test assertion that exercises the
-   round-trip. Do **not** remove or reorder existing `VTable` entries; that is
-   an ABI break that bumps `HIP_EP_PLUGIN_API_VERSION`.
+   round-trip. Do **not** remove or reorder existing `VTable` entries; that is a
+   breaking change that bumps `HIP_EP_PLUGIN_API_VERSION`.
 
-The ABI is **not yet frozen** (treat `HIP_EP_PLUGIN_API_VERSION` as
-provisional), and a contributed MLIR pass only runs when the host and plugin
-share one MLIR instance (the shared MLIR library) -- see the linkage
-requirement in the design doc.
+Because plugins are statically linked, a contributed MLIR pass shares the host's
+one MLIR instance by construction (no symbol export, no dynamic loading) and an
+ABI mismatch is a build error, not a load-time surprise -- see the "Linkage
+model" in the design doc.
 
 ---
 

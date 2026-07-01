@@ -75,7 +75,7 @@ Source files:
   the build rules. Mirror this in your own plugin repo.
 
 The unit test
-[`test/plugin/test_plugin_loader.cpp`](../test/plugin/test_plugin_loader.cpp)
+[`test/plugin/test_static_plugins.cpp`](../test/plugin/test_static_plugins.cpp)
 runs the static registrar and asserts every public contract.
 
 To build and exercise the sample end-to-end, select it into the build:
@@ -88,7 +88,7 @@ cmake --build build/onnx-hipdnn-ep --config Release
 # The plugin is now statically linked into hip-compiler / hip-mlir-opt. Run the
 # plugin LIT tests (scoped to the Plugin dir) and the unit test:
 lit -sv build/onnx-hipdnn-ep/test/lit/Plugin
-build/onnx-hipdnn-ep/bin/test_plugin_loader
+build/onnx-hipdnn-ep/bin/test_static_plugins
 ```
 
 Note: a selected plugin is active for every compile in that build, so run the
@@ -115,23 +115,30 @@ HIP_EP_DEFINE_PLUGIN(myvendor) {
 }
 ```
 
-CMake — build the plugin as a static library alongside the host and register it:
+CMake — this `CMakeLists.txt` is `add_subdirectory()`d into the host build (via
+`-DHIPDNN_EP_COMPILER_PLUGIN_PATHS=<this dir>`), so the host's MLIR toolchain,
+plugin-surface include path, and `hipdnn_ep_compiler_plugin_register()` helper
+are already in scope. Guard on the helper so a stray standalone configure fails
+with a clear message:
 
 ```cmake
-# The SAME MLIR build the host (hip-compiler) is compiled with.
-find_package(MLIR CONFIG REQUIRED)
+if(NOT COMMAND hipdnn_ep_compiler_plugin_register)
+  message(FATAL_ERROR
+    "co-build this plugin into onnx-hipdnn-ep via "
+    "-DHIPDNN_EP_COMPILER_PLUGIN_PATHS=<this dir>; it is not standalone.")
+endif()
 
 add_library(my_vendor_plugin STATIC my_plugin.cpp)
 
-# Use the plugin surface headers + MLIR headers. Declare the MLIR libraries the
-# plugin references (PUBLIC) so they follow the plugin archive in static link
-# order -- otherwise the plugin's mlir:: references are seen after the MLIR
-# archives already passed and fail to resolve. This does NOT give the plugin a
-# private MLIR instance: plugin and host are one binary. Link no hip-compiler
-# symbol.
+# The plugin surface headers (hip/Compiler/PluginAPI.h, PluginRegistry.h) are on
+# the host's include path, inherited here; add MLIR headers. Declare the MLIR
+# libraries the plugin references (PUBLIC) so they follow the plugin archive in
+# static link order -- otherwise the plugin's mlir:: references are seen after
+# the MLIR archives already passed on the host's link line and fail to resolve.
+# This does NOT give the plugin a private MLIR instance: plugin and host are one
+# binary. Link no hip-compiler symbol.
 target_include_directories(my_vendor_plugin PRIVATE ${MLIR_INCLUDE_DIRS})
-target_link_libraries(my_vendor_plugin PUBLIC HipDnnEp::plugin_headers
-  MLIRPass MLIRIR MLIRSupport)
+target_link_libraries(my_vendor_plugin PUBLIC MLIRPass MLIRIR MLIRSupport)
 target_compile_features(my_vendor_plugin PRIVATE cxx_std_17)
 set_target_properties(my_vendor_plugin PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
@@ -147,11 +154,11 @@ Requirements that are easy to miss:
   and Linux.
 - **Declare the MLIR libraries you reference** (PUBLIC) so static link order is
   satisfied; the host links MLIR too, so no duplicate MLIR instance results.
-- **Use the SAME MLIR build as the host.** The registry/op types are ABI
-  objects: the plugin's MLIR must match the host's MLIR version and
-  `LLVM_ENABLE_RTTI` setting (guaranteed here since both are one build).
-- **The plugin links `HipDnnEp::plugin_headers`, not `LibHipCompiler`.** The
-  plugin reaches the host purely through the inline thunks in `PluginRegistry.h`;
+- **Use the SAME MLIR build as the host.** Because the plugin co-builds with the
+  host, this is automatic: the registry/op types are ABI-compatible by
+  construction.
+- **The plugin links no `LibHipCompiler` symbol.** It reaches the host purely
+  through the inline thunks in `PluginRegistry.h` (on the host include path);
   its `hipEpRegisterPlugin_<id>` is called by the host's generated registrar.
 
 ---
@@ -203,14 +210,14 @@ needs to run.
 > `builtin.module`, so a non-module pass must be requested with its anchor
 > (`func.func(<arg>)`, `func.func(<region-pass>)`, ...), exactly as you would
 > write it for `--pass-pipeline`. A bare `<arg>` for a `func.func` pass fails
-> to add and the pipeline prints a `[plugin-loader] WARNING` at compile time.
+> to add and the pipeline prints a `[plugin] WARNING` at compile time.
 
 > **Why the pass resolves:** a contributed pass is visible because the plugin is
 > statically linked into the host — one binary, one MLIR pass registry — so the
 > plugin's `mlir::PassRegistration<>()` writes the same registry the pipeline
 > reads. No symbol export, no dlopen, and this works identically on Windows and
 > Linux. (If a pass name still does not resolve, `requestPipelineSlot` records
-> the request but the pipeline prints a `[plugin-loader] WARNING` and skips it —
+> the request but the pipeline prints a `[plugin] WARNING` and skips it —
 > check the pass's `getArgument()` string and the `func.func(...)` nesting.)
 
 ---
@@ -275,7 +282,7 @@ current behaviour is a starting point, not a final decision.
   fine. The sample plugin uses a `static const unsigned char[]` only because
   that is the simplest way to embed a build-time-generated C array.
 - **Empty buffers are a no-op.** `addRuntimeBitcode(nullptr, 0)`
-  emits a `[plugin-loader] WARNING: ...` line and returns. You do
+  emits a `[plugin] WARNING: ...` line and returns. You do
   not need to gate the call on `if (kVendorBitcodeSize != 0)` —
   the `if` check in the snippet above is illustrative, not
   required.
@@ -462,7 +469,7 @@ Before shipping a plugin to consumers:
 - [ ] The entry point is `HIP_EP_DEFINE_PLUGIN(<id>)` and `<id>` matches the
       registration + selection.
 - [ ] The static registrar dispatches your entry end-to-end without crashing
-      (assert with a unit test modeled on `test_plugin_loader.cpp`).
+      (assert with a unit test modeled on `test_static_plugins.cpp`).
 - [ ] Every bitcode buffer you pass to `addRuntimeBitcode` parses
       with `llvm::parseBitcodeFile` against the target host's LLVM
       version. The first four bytes must be the bitcode magic

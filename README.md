@@ -229,16 +229,21 @@ For prerequisites, environment setup, and step-by-step build instructions, see
 
 ## Plugin extension API
 
-`hip-compiler` ships a public plugin loader (`HIP_EP_PLUGINS` env var,
-semicolon-separated paths) that lets a down-stream shared library contribute
-MLIR passes, a custom dialect + op, runtime LLVM bitcode, and external
-libraries without forking this repo. The design and downstream-usage guide lives in
+`hip-compiler` supports **statically-linked** compiler plugins that let a
+down-stream library contribute MLIR passes, a custom dialect + op, runtime LLVM
+bitcode, and external libraries without forking this repo. A plugin is a static
+library co-built into the host and selected at configure time
+(`-DHIPDNN_EP_COMPILER_PLUGINS=<id>`, plus `-DHIPDNN_EP_COMPILER_PLUGIN_PATHS=<dir>`
+for an out-of-tree plugin repo); because plugin and host become one binary, the
+plugin shares the host's MLIR state with no symbol export and no dynamic loading,
+identically on every platform. The design and downstream-usage guide lives in
 [docs/design/plugin-interface.md](docs/design/plugin-interface.md); the
 practical authoring guide is
 [docs/plugin_authoring.md](docs/plugin_authoring.md). A working in-tree
 example sits under `test/plugin/sample_plugin/`.
 
-The ABI is not yet frozen; treat `HIP_EP_PLUGIN_API_VERSION` as provisional.
+The plugin surface is not yet frozen; treat `HIP_EP_PLUGIN_API_VERSION` as
+provisional.
 
 ---
 

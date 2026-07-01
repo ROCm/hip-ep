@@ -94,6 +94,6 @@ llvm_config.add_tool_substitutions(tools, hip_tools_dirs + [config.llvm_tools_di
 # Static linking needs no symbol export and puts the plugin in the host's single
 # MLIR registry, so this works identically on Windows and Linux -- no platform
 # restriction. The slot-recording / bitcode / library contributions are also
-# covered GPU-free by the PluginLoader unit test (test/plugin/test_plugin_loader).
+# covered GPU-free by the StaticPlugins unit test (test/plugin/test_static_plugins).
 if getattr(config, "hip_static_plugins", False):
     config.available_features.add("hip_static_plugins")

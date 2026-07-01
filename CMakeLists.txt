@@ -238,9 +238,14 @@ if(BUILD_HIP_TOOLS)
     add_subdirectory(test/plugin)
   endif()
 
+  # Out-of-tree plugin dirs (HIPDNN_EP_COMPILER_PLUGIN_PATHS): add each so it can
+  # register its plugin. Must run before finalize (below).
+  hipdnn_ep_add_external_plugins()
+
   # Finalize static compiler plugins: generate the registrar include and link
   # the selected plugin static libs into LibHipCompiler. Must run after every
-  # plugin package (in-tree: test/plugin) has registered.
+  # plugin package (in-tree: test/plugin; out-of-tree: the paths above) has
+  # registered.
   hipdnn_ep_finalize_static_plugins()
 endif()
 

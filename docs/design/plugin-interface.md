@@ -432,10 +432,17 @@ hipdnn_ep_compiler_plugin_register(PLUGIN_ID myvendor TARGET my_vendor_plugin)
 
 ### 6. Deploy
 
-Configure the host build with the plugin selected, then run as usual:
+Configure the host build with the plugin's directory on the plugin path and its
+id selected, then build and run as usual. `HIPDNN_EP_COMPILER_PLUGIN_PATHS` is a
+semicolon-separated list of out-of-tree plugin source dirs — each is
+`add_subdirectory()`d into the host build so its `CMakeLists.txt` can register
+its id; `HIPDNN_EP_COMPILER_PLUGINS` then selects which registered ids to link:
 
 ```
-cmake -S onnx-hipdnn-ep -B build -DHIPDNN_EP_COMPILER_PLUGINS=myvendor ...
+cmake -S onnx-hipdnn-ep -B build \
+  -DBUILD_HIP_TOOLS=ON \
+  -DHIPDNN_EP_COMPILER_PLUGIN_PATHS=<your plugin repo> \
+  -DHIPDNN_EP_COMPILER_PLUGINS=myvendor ...
 cmake --build build
 THEROCK_DIST=<therock> hip-compiler model.mlir -o model.dll
 ```
@@ -450,7 +457,7 @@ compile-side checks need no GPU:
 
 - A **unit test** that runs the static registrar and asserts the plugin's
   contributions were recorded. Use
-  [test/plugin/test_plugin_loader.cpp](../../test/plugin/test_plugin_loader.cpp)
+  [test/plugin/test_static_plugins.cpp](../../test/plugin/test_static_plugins.cpp)
   as the template.
 - A **LIT test** that runs the pass at a pipeline point, built with the plugin
   selected. Because the plugin is statically linked, the pass is registered by
@@ -483,7 +490,7 @@ In-tree, the mechanism is:
 | [lib/Target/LLVM/LLVMBackend.cpp](../../lib/Target/LLVM/LLVMBackend.cpp) | Links plugin bitcode into the model module |
 | [lib/Compiler/CompilerDriver.cpp](../../lib/Compiler/CompilerDriver.cpp) | Appends plugin link paths / libraries |
 | [test/plugin/sample_plugin/](../../test/plugin/sample_plugin/) | Worked example exercised in CI |
-| [test/plugin/test_plugin_loader.cpp](../../test/plugin/test_plugin_loader.cpp) | Loader / round-trip unit test |
+| [test/plugin/test_static_plugins.cpp](../../test/plugin/test_static_plugins.cpp) | Static-registrar round-trip unit test |
 
 The sample plugin is built behind a CMake option and exercised by the unit
 test and a LIT test, so the ABI stays exercised in CI even before any

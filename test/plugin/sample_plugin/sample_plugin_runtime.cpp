@@ -5,11 +5,11 @@
 
 // Tiny "vendor runtime" stand-in for the sample plugin.
 //
-// This source file is *not* part of the plugin DLL's normal C++
+// This source file is *not* part of the plugin's normal C++
 // build. CMake compiles it separately to LLVM bitcode (via clang
 // -emit-llvm) and then embeds the resulting `.bc` bytes into the
-// plugin DLL as a static byte array (see sample_plugin/CMakeLists.txt).
-// The plugin's RegisterCallbacks hands that buffer to hip-compiler
+// plugin as a static byte array (see sample_plugin/CMakeLists.txt).
+// The plugin's registration hands that buffer to hip-compiler
 // through `HipEpPluginRegistry::addRuntimeBitcode`, which links it
 // into the model module after the in-tree runtime with
 // `Linker::Flags::OverrideFromSrc`.

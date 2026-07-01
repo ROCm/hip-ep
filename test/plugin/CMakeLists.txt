@@ -26,11 +26,11 @@ add_subdirectory(sample_plugin)
 
 # Plain main()-driven test (no GTest dependency), so it has no dependency the
 # public configure does not already provide.
-add_executable(test_plugin_loader test_plugin_loader.cpp)
+add_executable(test_static_plugins test_static_plugins.cpp)
 
-target_compile_features(test_plugin_loader PRIVATE cxx_std_17)
+target_compile_features(test_static_plugins PRIVATE cxx_std_17)
 
-target_link_libraries(test_plugin_loader PRIVATE
+target_link_libraries(test_static_plugins PRIVATE
   LibHipCompiler
 )
 
@@ -38,15 +38,15 @@ target_link_libraries(test_plugin_loader PRIVATE
 # (i.e. selected via HIPDNN_EP_COMPILER_PLUGINS). dispatchPluginRegistrationsOnce
 # comes from LibHipCompiler, which links the sample only when selected.
 if("sample" IN_LIST HIPDNN_EP_COMPILER_PLUGINS)
-  target_compile_definitions(test_plugin_loader PRIVATE HIP_EP_EXPECT_SAMPLE=1)
+  target_compile_definitions(test_static_plugins PRIVATE HIP_EP_EXPECT_SAMPLE=1)
 else()
-  target_compile_definitions(test_plugin_loader PRIVATE HIP_EP_EXPECT_SAMPLE=0)
+  target_compile_definitions(test_static_plugins PRIVATE HIP_EP_EXPECT_SAMPLE=0)
 endif()
 
-set_target_properties(test_plugin_loader PROPERTIES FOLDER "mlir/Test/Plugin")
+set_target_properties(test_static_plugins PROPERTIES FOLDER "mlir/Test/Plugin")
 
 # Register with CTest.
-add_test(NAME PluginLoader
-  COMMAND test_plugin_loader
-  WORKING_DIRECTORY $<TARGET_FILE_DIR:test_plugin_loader>
+add_test(NAME StaticPlugins
+  COMMAND test_static_plugins
+  WORKING_DIRECTORY $<TARGET_FILE_DIR:test_static_plugins>
 )

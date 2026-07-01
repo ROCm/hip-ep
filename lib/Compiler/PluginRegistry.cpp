@@ -75,7 +75,8 @@ struct Storage {
   // Dialect-registration callbacks contributed by plugin
   // addDialectRegistration calls. Plain function pointers (the public API
   // requires non-capturing callbacks), so no ownership concern -- they point
-  // into the plugin DLL's code, which stays mapped for the process lifetime.
+  // into the plugin's code (linked into the host binary), which is mapped for
+  // the process lifetime.
   std::vector<void (*)(mlir::DialectRegistry &)> dialectRegistrations;
 };
 
@@ -86,23 +87,22 @@ Storage &storage() {
 
 void requestPipelineSlotImpl(void * /*self*/, int slot, const char *name,
                              std::size_t nameLen) {
-  // Reject out-of-range slots loudly. A plugin built against a
-  // newer header that defines additional slots will pass an int
-  // we don't know how to dispatch; recording it would be a silent
-  // miss because pluginPassesForSlot() filters by slot equality.
+  // Defensively reject an out-of-range slot loudly rather than record a value
+  // pluginPassesForSlot() would silently never match. With static linking the
+  // plugin and host share this header, so this should not happen -- an
+  // out-of-range value here means a plugin bug (a bad cast or uninitialized
+  // slot), which is worth surfacing.
   if (slot < 0 || slot >= kPipelineSlotCount) {
-    llvm::errs() << "[plugin-loader] WARNING: requestPipelineSlot(slot=" << slot
+    llvm::errs() << "[plugin] WARNING: requestPipelineSlot(slot=" << slot
                  << ", name='";
     llvm::errs().write(name, nameLen);
     llvm::errs() << "') -- slot value is out of range [0, "
-                 << kPipelineSlotCount
-                 << "). The plugin was likely built against a newer "
-                 << "PluginRegistry.h. Dropping this request.\n";
+                 << kPipelineSlotCount << "). Dropping this request.\n";
     return;
   }
   // We own the std::string copy because the plugin's StringRef may
-  // point into the plugin DLL's read-only data, and the registry must
-  // outlive any individual RegisterCallbacks call.
+  // point into the plugin's read-only data, and the registry must
+  // outlive any individual plugin registration call.
   storage().slotRequests.emplace_back(static_cast<PipelineSlot>(slot),
                                       std::string(name, nameLen));
 }
@@ -116,7 +116,7 @@ void addRuntimeBitcodeImpl(void * /*self*/, const void *data,
   // -- a confusing failure mode for a plugin author who simply has
   // no bitcode to contribute on this build.
   if (sizeBytes == 0 || data == nullptr) {
-    llvm::errs() << "[plugin-loader] WARNING: addRuntimeBitcode called with an "
+    llvm::errs() << "[plugin] WARNING: addRuntimeBitcode called with an "
                  << "empty buffer (size=" << sizeBytes
                  << "); skipping. Wrap the "
                  << "addRuntimeBitcode call in `if (size != 0)` if your plugin "
@@ -152,7 +152,7 @@ void addLibraryImpl(void * /*self*/, const char *name, std::size_t nameLen) {
 void addDialectRegistrationImpl(void * /*self*/,
                                 void (*registerFn)(mlir::DialectRegistry &)) {
   if (registerFn == nullptr) {
-    llvm::errs() << "[plugin-loader] WARNING: addDialectRegistration called "
+    llvm::errs() << "[plugin] WARNING: addDialectRegistration called "
                  << "with a null callback; skipping.\n";
     return;
   }
