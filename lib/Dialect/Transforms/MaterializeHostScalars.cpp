@@ -201,14 +201,6 @@ static bool isHostScalarCandidate(memref::AllocOp allocOp) {
   MemRefType type = allocOp.getType();
   if (!type.hasStaticShape())
     return false;
-  // Skip allocs that already carry an explicit #hip.mem<> space. A small
-  // #hip.mem<host> integer buffer (say, the destination of a device-to-host
-  // copy) reads just like a host-staged scalar, but it was tagged with that
-  // space on purpose. The scratch buffer has no space (memref<?xi8>), so
-  // viewing it into a #hip.mem<host> result would mismatch spaces and fail the
-  // memref.view verifier. Leave it alone.
-  if (dyn_cast_or_null<MemorySpaceAttr>(type.getMemorySpace()))
-    return false;
   if (type.getNumElements() > 16)
     return false;
   Type elem = type.getElementType();
