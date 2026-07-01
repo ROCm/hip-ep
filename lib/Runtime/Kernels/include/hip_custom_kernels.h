@@ -1803,28 +1803,49 @@ HIP_KERNEL_API int hip_causal_conv_prefill(
  * WMMA GEMM (Small-M Matrix Multiply via Wave Matrix Multiply-Accumulate)
  * =========================================================================
  *
- * Computes C[M,N] = A[M,K] * B[K,N] using RDNA 3+ WMMA instructions.
+ * Standard ONNX Gemm op, computed with RDNA 3+ WMMA instructions:
+ *
+ *     output[M,N] = alpha * op(A) * op(B) + beta * C
+ *
  * FP16 inputs, FP32 accumulation, FP16 output. All matrices row-major.
  *
  * Designed for M <= 512 where hipBLASLt's register-heavy tiling (256 VGPRs,
  * 4/16 occupancy) underperforms. This kernel targets ~30 VGPRs and 16/16
  * occupancy via 16x16 WMMA tiles.
  *
- * Requires K and N to be multiples of 16.
+ * The CALLER only needs to guarantee K % 16 == 0 and N % 16 == 0 (and that the
+ * data is fp16). All remaining ONNX Gemm semantics (transA / transB / alpha /
+ * beta / the shape of C) are validated INSIDE this function: if the requested
+ * configuration is not supported by the WMMA kernel it returns a positive code
+ * so the caller can fall back to a general GEMM (e.g. hipBLASLt). Currently
+ * supported: transA == 0, alpha == 1, beta == 1, and C is either absent or a
+ * row-broadcast bias ([N] / [1,N], i.e. cDim0 == 1 && cDim1 == N). transB may
+ * be 0 or 1.
  *
- * Parameters:
+ * Parameters (mirror the ONNX Gemm attributes / wrap_gemm):
  *   stream - hipStream_t cast to void*
- *   A      - GPU pointer to activation matrix [M, K] row-major (fp16)
- *   B      - GPU pointer to weight matrix [K, N] row-major (fp16)
- *   C      - GPU pointer to output matrix [M, N] (fp16)
- *   M      - number of rows in A / output
- *   K      - inner dimension (reduction axis), must be multiple of 16
- *   N      - number of columns in B / output, must be multiple of 16
+ *   A      - GPU pointer to matrix A, row-major fp16. op(A) is [M, K].
+ *   B      - GPU pointer to matrix B, row-major fp16. op(B) is [K, N].
+ *   C      - GPU pointer to the optional bias/C tensor (fp16), or NULL.
+ *   output - GPU pointer to output matrix [M, N] (fp16).
+ *   M, N, K- GEMM dimensions of op(A)[M,K] * op(B)[K,N] = output[M,N].
+ *   alpha  - output scale (only 1.0f supported; else falls back).
+ *   beta   - C scale     (only 1.0f supported; else falls back).
+ *   transA - transpose flag for A (only 0 supported; else falls back).
+ *   transB - transpose flag for B (0 -> B[K,N], 1 -> B[N,K]); both supported.
+ *   cDim0,
+ *   cDim1  - the (broadcast-normalized) 2D shape of C, used to decide whether C
+ *            is a supported row-broadcast bias. Ignored when C is NULL.
  *
- * Returns: 0 on success, non-zero on failure
+ * Returns:
+ *    0  : computed by the WMMA kernel.
+ *   >0  : configuration not supported by WMMA; caller should fall back.
+ *   <0  : kernel launch error; caller should fall back.
  */
 HIP_KERNEL_API int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
-                       void* C, int M, int K, int N);
+                       const void* C, void* output, int M, int N, int K,
+                       float alpha, float beta, int transA, int transB,
+                       int cDim0, int cDim1);
 
 #ifdef __cplusplus
 }
