@@ -104,9 +104,10 @@ Read EPContext bytes (per-model .bc) → LlvmIrJit::create
                                               ↓
                                        inference_init(&state, fs)
                                               ↓
-Marshal ORT tensors → span_t → inference_compute(state, in, out)
+Marshal ORT inputs → span_t → inference_compute(state, inputs)
                                               ↓
-                              Unmarshal span_t → ORT tensors
+                        DLL allocates each output itself via the
+                        output-allocator callback → ORT buffers
 ```
 
 ### Integration Flow
@@ -126,7 +127,7 @@ Marshal ORT tensors → span_t → inference_compute(state, in, out)
 2. CustomOp parses metadata JSON, reads artifact bytes from EPContext
 3. CustomOp hands the bitcode to `LlvmIrJit::create`, which adds `model_compiled` and the EP-DLL-embedded `runtime.bc` into a single LLJIT JITDylib (one shared `LLVMContext`); ORC's `IRCompileLayer` codegens lazily on first symbol lookup
 4. CustomOp resolves and calls `inference_init(&state, fs)` to allocate GPU handles and upload constants
-5. Per inference: CustomOp marshals ORT tensors to `span_t`, calls `inference_compute(state, inputs, outputs)`
+5. Per inference: CustomOp sets an output-allocator callback on the RuntimeState for this call, marshals ORT inputs into `span_t`, and calls the 2-arg `inference_compute(state, inputs)`. The DLL allocates each graph output itself (`hip.alloc_output`), which calls back to get the ORT buffer for that output
 6. Session end: Destructor calls `inference_cleanup(state)`, then `~LlvmIrJit()` runs JIT-registered atexit/`__cxa_atexit` handlers and tears down LLJIT
 
 ### Tensor Interface
@@ -147,11 +148,10 @@ struct span_t {
 ```
 
 **Marshaling Contract:**
-- CustomOp extracts raw pointers from ORT tensors
-- Input tensors: Copy data/shape pointers to `tensor_t` array
-- Output tensors: Allocate via `GetOutput(index, shape)`, extract mutable pointers
-- Pass `span_t` containing tensor array to `inference_compute()`
-- Lifetime: Stack-allocated per invocation, destroyed after compute returns
+- CustomOp takes the raw pointers from the ORT input tensors
+- Inputs: copy data/shape pointers into a `tensor_t` array and pass that `span_t` to the 2-arg `inference_compute(state, inputs)`
+- Outputs: NOT pre-allocated and NOT passed in. The DLL allocates each output itself via `hip.alloc_output`, which calls the output-allocator callback; the callback passes the DLL's shape straight to ORT's `GetOutput(index, shape)` and returns the buffer
+- Lifetime: the input `span_t` lives on the stack for one call and is freed after compute returns; the callback is set before compute and cleared right after
 
 ### Configuration
 

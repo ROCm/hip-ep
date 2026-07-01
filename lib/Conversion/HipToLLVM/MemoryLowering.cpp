@@ -261,7 +261,11 @@ struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
     Type elemType = memRefType.getElementType();
     if (!elemType.isIntOrFloat())
       return rewriter.notifyMatchFailure(op, "unsupported element type");
-    int64_t elemSizeBytes = elemType.getIntOrFloatBitWidth() / 8;
+    // Round bits up to whole bytes so sub-byte types report >= 1 byte. The
+    // canonical case is a boolean output (`i1`): ORT stores bool one byte per
+    // element, and the EP callback uses this size only to size the host-output
+    // D2H scratch (nelem * elem_size), so i1 must map to 1, not 1/8 == 0.
+    int64_t elemSizeBytes = (elemType.getIntOrFloatBitWidth() + 7) / 8;
     if (elemSizeBytes <= 0)
       return rewriter.notifyMatchFailure(op, "unsupported element bit width");
 

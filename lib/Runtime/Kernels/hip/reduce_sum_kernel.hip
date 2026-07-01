@@ -244,6 +244,49 @@ __global__ void reduce_sum_f16_kernel(
 }
 
 // =============================================================================
+// FP32 reduction
+// =============================================================================
+
+// Parallel sum reduction for fp32. Same one-block-per-output layout as the fp16
+// kernel, but it adds and stores in float. Real models run in fp16, so this is
+// only used for f32 inputs (e.g. the hip-test e2e/numeric tests, which make f32
+// tensors).
+__global__ void reduce_sum_f32_kernel(
+    const float* __restrict__ data,
+    float* __restrict__ output,
+    int64_t reduce_size,
+    int64_t inner,
+    int64_t num_output_elements) {
+  extern __shared__ float sdata_f32[];
+
+  int64_t out_idx = blockIdx.x;
+  if (out_idx >= num_output_elements) return;
+
+  int64_t oo = out_idx / inner;
+  int64_t ii = out_idx - oo * inner;
+  const float* slice = data + oo * reduce_size * inner + ii;
+  int tid = threadIdx.x;
+
+  float sum = 0.0f;
+  for (int64_t i = tid; i < reduce_size; i += blockDim.x) {
+    sum += slice[i * inner];
+  }
+  sdata_f32[tid] = sum;
+  __syncthreads();
+
+  for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+    if (static_cast<unsigned int>(tid) < s) {
+      sdata_f32[tid] += sdata_f32[tid + s];
+    }
+    __syncthreads();
+  }
+
+  if (tid == 0) {
+    output[out_idx] = sdata_f32[0];
+  }
+}
+
+// =============================================================================
 // Host launcher
 // =============================================================================
 
@@ -359,6 +402,26 @@ extern "C" int hip_reduce_sum(
                        shared_mem, hip_stream,
                        static_cast<const __half*>(data),
                        static_cast<__half*>(output),
+                       reduce_size, inner_size, num_output_elements);
+      break;
+    }
+    case HIP_DTYPE_FLOAT32: {
+      int block_size = pick_block_size();
+      size_t shared_mem = block_size * sizeof(float);
+
+      CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_reduce_sum: dtype=FLOAT32, "
+              "input=%lld, output=%lld, reduce_size=%lld, "
+              "grid=%lld, block=%d, smem=%zu\n",
+              (long long)num_input_elements, (long long)num_output_elements,
+              (long long)reduce_size, (long long)num_output_elements,
+              block_size, shared_mem);
+
+      hipLaunchKernelGGL(reduce_sum_f32_kernel,
+                       dim3(static_cast<unsigned>(num_output_elements)),
+                       dim3(block_size),
+                       shared_mem, hip_stream,
+                       static_cast<const float*>(data),
+                       static_cast<float*>(output),
                        reduce_size, inner_size, num_output_elements);
       break;
     }

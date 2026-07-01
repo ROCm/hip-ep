@@ -64,14 +64,10 @@ public:
   InferenceState(InferenceState &&) = delete;
   InferenceState &operator=(InferenceState &&) = delete;
 
-  // Execute inference computation (classic 3-arg ABI).
-  int compute(span_t *inputs, span_t *outputs) const;
-
-  // Output-allocator mode: 2-arg inference_compute (state, inputs). Graph
-  // outputs are allocated in-graph via the callback installed by
-  // set_output_allocator(); there is no outputs span. The artifact exports
-  // exactly one arity, fixed at compile time by use_output_allocator.
-  int compute_with_output_allocator(span_t *inputs) const;
+  // Execute inference computation: 2-arg inference_compute (state, inputs).
+  // Graph outputs are allocated in-graph via the callback installed by
+  // set_output_allocator(); there is no outputs span.
+  int compute(span_t *inputs) const;
 
   // Install (allocator != nullptr) or clear (nullptr) the output allocator on
   // the loaded artifact's RuntimeState before compute_with_output_allocator().
@@ -128,12 +124,9 @@ private:
   // (tens of microseconds per token at 32-layer LLM decode). A missing symbol
   // leaves the pointer null; the error surfaces at first use (compute() /
   // ~InferenceState()) rather than at session creation.
-  using ComputeFn = int (*)(void *, span_t *, span_t *);
-  using ComputeAllocFn = int (*)(void *,
-                                 span_t *); // 2-arg output-allocator ABI
+  using ComputeFn = int (*)(void *, span_t *); // 2-arg output-allocator ABI
   using CleanupFn = int (*)(void *);
   ComputeFn compute_fn_;
-  ComputeAllocFn compute_alloc_fn_;
   CleanupFn cleanup_fn_;
 
   // Cached so begin_compute() is a single indirect call on the decode hot
@@ -142,8 +135,7 @@ private:
   BeginComputeFn begin_compute_fn_;
 
   // Cached hipdnn_ep_set_output_allocator (resolved once in the ctor, like
-  // begin_compute_fn_). Null when the model.dll predates the export (classic
-  // DLLs); only used in output-allocator mode.
+  // begin_compute_fn_). Null when the model.dll predates the export.
   using SetOutputAllocatorFn = void (*)(void *, const output_allocator_t *);
   SetOutputAllocatorFn set_output_allocator_fn_;
 

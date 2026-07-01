@@ -4,21 +4,24 @@
 // ============================================================================
 // TEST: GenerateInterface pass creates C-ABI wrapper functions.
 //
-// Input: HIP dialect IR with @main_graph using !hip.context and memref types.
+// Input: HIP dialect IR with an output-allocator @main_graph using
+// !hip.context and memref types. Outputs are allocated in-graph via
+// hip.alloc_output (2-arg ABI); there are no output out-params.
 // The hip-to-llvm-pipeline lowers this through:
 //   1. convert-hip-to-llvm (func/memref → LLVM, transformMainFunction wraps
-//      the expanded memref signature back to 3-pointer C ABI)
+//      the expanded memref signature to the 2-pointer (ctx, inputs) C ABI)
 //   2. generate-interface (creates inference_init/compute/cleanup wrappers)
 //
 // Verifies:
 //   1. Four wrapper functions are generated.
 //   2. inference_init calls hipdnn_ep_state_init_with_fs.
-//   3. inference_compute calls tensor prepare / main_graph / finalize.
+//   3. inference_compute calls input staging + main_graph (outputs allocated
+//      in-graph) -- NO prepare_output / finalize_output staging calls.
 //   4. inference_cleanup calls hipdnn_ep_state_cleanup.
 //   5. Metadata blob is embedded as a global constant.
 // ============================================================================
 
-// RUN: hip-mlir-opt --hip-to-llvm-pipeline %s 2>&1 | FileCheck %s
+// RUN: hip-mlir-opt --hip-to-llvm-pipeline %s 2>&1 | FileCheck --implicit-check-not="llvm.call @hipdnn_ep_tensor_prepare_output" --implicit-check-not="llvm.call @hipdnn_ep_tensor_finalize_output" %s
 
 // --- Metadata blob embedded ---
 // CHECK: llvm.mlir.global internal constant @__metadata_blob
@@ -28,13 +31,11 @@
 // CHECK-SAME:  -> i32
 // CHECK:   llvm.call @hipdnn_ep_state_init_with_fs
 
-// --- inference_compute calls tensor helpers and main_graph ---
+// --- inference_compute stages inputs and calls main_graph (2-arg ABI) ---
 // CHECK-LABEL: llvm.func @inference_compute
 // CHECK-SAME:  -> i32
 // CHECK:   llvm.call @hipdnn_ep_tensor_prepare_input
-// CHECK:   llvm.call @hipdnn_ep_tensor_prepare_output
 // CHECK:   llvm.call @main_graph
-// CHECK:   llvm.call @hipdnn_ep_tensor_finalize_output
 // CHECK:   llvm.call @hipdnn_ep_stream_sync
 // CHECK:   llvm.call @hipdnn_ep_state_read_and_clear_error_flag
 
@@ -59,9 +60,8 @@ module attributes {
   hipdnn.buffer_count = 0 : i64
 } {
   func.func @main_graph(%ctx: !hip.context,
-                        %in: memref<8xf32>,
-                        %out: memref<8xf32>) -> i32 {
-    %zero = arith.constant 0 : i32
-    return %zero : i32
+                        %in: memref<8xf32>) -> memref<8xf32> {
+    %out = hip.alloc_output(%ctx) {out_idx = 0 : i64} : memref<8xf32>
+    return %out : memref<8xf32>
   }
 }

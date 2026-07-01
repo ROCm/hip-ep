@@ -4,54 +4,59 @@
  */
 //===- UseOutputAllocator.cpp - returned allocs -> hip.alloc_output -------===//
 //
-// Rewrites each graph-output `memref.alloc` (a buffer returned by func.return,
-// directly or through a single shape-adjusting `memref.cast`) into a
-// `hip.alloc_output`, so output buffers are obtained from the EP output
-// allocator (EP/runtime-owned) instead of being deallocated / pooled like
-// intermediates. `out_idx` is the operand position in func.return (= graph
-// output index); the alloc's dynamic-size operands are reused verbatim. When
-// the buffer is returned through a `memref.cast` (the cast widens an
-// in-graph-static dim back to the ONNX-declared dynamic output dim), the cast
-// is left in place feeding the return; only the alloc becomes alloc_output.
+// Every graph output must come from the EP's output allocator, so the runtime
+// (not the model) owns its buffer. This pass makes sure that is true for every
+// value the graph returns.
 //
-// Scope: ONLY public (graph-entry) functions are rewritten. Private helpers --
-// e.g. outlined `onnx.Loop` bodies -- also carry a `!hip.context` arg 0 and
-// return `memref.alloc`s, but their results are DLL-internal, never EP outputs;
-// rewriting them would emit an `out_idx` colliding with the real graph outputs.
-// Functions lacking `!hip.context` as argument 0 are likewise skipped (no
-// runtime handle to build the new op). Intermediates (allocs NOT returned) and
-// true passthrough outputs (returns whose value traces to neither a
-// memref.alloc nor a memref.cast-of-alloc, e.g. block args / views) are left
-// untouched. The function signature and the
-// `func.return` terminator are intentionally NOT modified -- `convert-hip-to-
-// llvm` synthesizes the `-> i32` entry wrapper in a later phase.
+// `hip.alloc_output` is the op that asks the EP for an output buffer. Its
+// `out_idx` is the output's position in `func.return` (= the graph output
+// index). Any dynamic sizes it needs are passed as operands.
 //
-// The pass also stamps `hipdnn.use_output_allocator = true` on the parent
-// module -- the marker that later phases (`convert-hip-to-llvm`,
-// `generate-interface`) read to select the allocator ABI. It is a typed bool,
-// not a presence-only UnitAttr, so readers test the VALUE (absence and
-// `= false` both mean classic). The stamp is UNCONDITIONAL -- mode is decided
-// by this pass running (it is scheduled only in allocator mode), not by whether
-// a returned alloc was found, so a zero-output graph is still marked. A FuncOp
-// pass writing its parent module relaxes MLIR's pass-isolation contract; safe
-// here because it is an idempotent set of the same value (same precedent as
-// PoolAllocs stamping hipdnn.pool_size).
+// The pass runs in two steps:
+//
+//   Step 1 (ReplaceOutputAllocPattern): if a returned buffer is a plain
+//   `memref.alloc` (returned directly, or through one `memref.cast` that only
+//   re-labels a dim as dynamic to match the ONNX output type), turn that alloc
+//   into a `hip.alloc_output` and drop any dealloc of it. The cast, if present,
+//   stays and keeps feeding the return.
+//
+//   Step 2 (serveUnbackedOutputs): every OTHER returned value is not backed by
+//   its own output buffer yet -- e.g. a returned function input (passthrough),
+//   a reshape/collapse/expand view, a constant, or the same buffer returned at
+//   more than one index. For each of these, make a fresh `hip.alloc_output` for
+//   that output index and `memref.copy` the value into it. Without this the EP
+//   allocator callback would never fire for that output and the runtime aborts
+//   (it checks that every output index is served exactly once).
+//
+// Scope: only public (graph-entry) functions are touched. Private helpers (e.g.
+// outlined `onnx.Loop` bodies) also take a `!hip.context` arg 0 and return
+// allocs, but their buffers stay inside the DLL and are never EP outputs, so
+// rewriting them would hand out a wrong `out_idx`. Functions without a
+// `!hip.context` first argument are skipped too (no runtime handle to build the
+// op). Allocs that are not returned (intermediates) are left alone. The
+// function signature and the number of `func.return` operands are not changed
+// here -- `convert-hip-to-llvm` builds the `-> i32` entry wrapper later.
 //
 // Before:
-//   func.func @main_graph(%ctx: !hip.context, ...) -> memref<?x?xf16> {
-//     %out = memref.alloc(%M, %N) : memref<?x?xf16>      // returned output
-//     hip.sigmoid(%ctx) ins(%t) outs(%out)
-//     return %out : memref<?x?xf16>
+//   func.func @main_graph(%ctx: !hip.context, %in: memref<?x?xf16>)
+//       -> (memref<?x?xf16>, memref<?x?xf16>) {
+//     %out = memref.alloc(%M, %N) : memref<?x?xf16>      // computed output 0
+//     hip.sigmoid(%ctx) ins(%in) outs(%out)
+//     return %out, %in : memref<?x?xf16>, memref<?x?xf16> // out 1 == input
 //   }
 //
 // After:
-//   module attributes {hipdnn.use_output_allocator = true} {
-//     func.func @main_graph(%ctx: !hip.context, ...) -> memref<?x?xf16> {
-//       %out = hip.alloc_output(%ctx, %M, %N) {out_idx = 0 : i64}
-//            : memref<?x?xf16>                            // EP-owned output
-//       hip.sigmoid(%ctx) ins(%t) outs(%out)
-//       return %out : memref<?x?xf16>
-//     }
+//   func.func @main_graph(%ctx: !hip.context, %in: memref<?x?xf16>)
+//       -> (memref<?x?xf16>, memref<?x?xf16>) {
+//     %out = hip.alloc_output(%ctx, %M, %N) {out_idx = 0 : i64}  // Step 1
+//          : memref<?x?xf16>
+//     hip.sigmoid(%ctx) ins(%in) outs(%out)
+//     %d0 = memref.dim %in, %c0 ; %d1 = memref.dim %in, %c1       // Step 2:
+//     %pt = hip.alloc_output(%ctx, %d0, %d1) {out_idx = 1 : i64}  //
+//     passthrough
+//         : memref<?x?xf16>
+//     memref.copy %in, %pt
+//     return %out, %pt : memref<?x?xf16>, memref<?x?xf16>
 //   }
 //
 //===----------------------------------------------------------------------===//
@@ -67,6 +72,7 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/Sequence.h"
 
 #define DEBUG_TYPE "hip-use-output-allocator"
 
@@ -78,26 +84,25 @@ namespace hip {
 
 namespace {
 
-// Rewrites a returned `memref.alloc` (in a public function with a
-// `!hip.context` arg 0) into a `hip.alloc_output`, dropping any dealloc of the
-// buffer (the EP owns it). An alloc returned at more than one operand position
-// (aliased multi-output) matches once and is rewritten with its FIRST return
-// index -- the one-match-per-alloc structure of the pattern is what dedupes it.
+// Step 1: turn a returned `memref.alloc` (in a public function with a
+// `!hip.context` arg 0) into a `hip.alloc_output`, and drop any dealloc of it
+// (the EP owns the buffer now). If the same alloc is returned at more than one
+// index, this matches it once and uses its FIRST return index; one match per
+// alloc is what keeps it from being rewritten twice.
 struct ReplaceOutputAllocPattern : public OpRewritePattern<memref::AllocOp> {
   using OpRewritePattern::OpRewritePattern;
 
   LogicalResult matchAndRewrite(memref::AllocOp allocOp,
                                 PatternRewriter &rewriter) const override {
-    // Find if this alloc is returned (graph output) and at which index. The
-    // buffer may be returned DIRECTLY, or through a single `memref.cast` that
-    // adjusts the static/dynamic-ness of a dim to match the declared output
-    // type (e.g. a matmul whose middle dim is statically known by in-graph
-    // shape inference, `memref<?x256x2560>`, returned as the ONNX-declared
-    // `memref<?x?x2560>`). The cast is a pure descriptor reinterpretation, so
-    // the alloc is still the real graph-output buffer and must become a
-    // `hip.alloc_output`; otherwise the buffer is pooled/deallocated and the
-    // EP's allocator callback is never invoked for that output (runtime FATAL:
-    // "output ... was never allocated by the model.dll").
+    // Is this alloc returned (a graph output), and at which index? It may be
+    // returned DIRECTLY, or through one `memref.cast` that only re-labels a dim
+    // as dynamic to match the ONNX output type (e.g. a matmul whose middle dim
+    // is known to be 256 in-graph, `memref<?x256x2560>`, but declared
+    // `memref<?x?x2560>` in the ONNX output). The cast only changes the shape
+    // label, not the data, so the alloc is still the real output buffer and
+    // must become a `hip.alloc_output`. If we miss it, the buffer gets pooled
+    // or freed and the EP allocator callback never fires for that output
+    // (runtime aborts: "output ... was never allocated by the model.dll").
     func::ReturnOp returnOp = nullptr;
     int64_t outIdx = -1;
     for (OpOperand &use : allocOp->getUses()) {
@@ -105,7 +110,7 @@ struct ReplaceOutputAllocPattern : public OpRewritePattern<memref::AllocOp> {
       if (auto ret = dyn_cast<func::ReturnOp>(owner)) {
         returnOp = ret;
         outIdx = use.getOperandNumber();
-        break; // first occurrence (aliased outputs share one rewrite)
+        break; // first use wins (same buffer returned twice shares one rewrite)
       }
       if (auto castOp = dyn_cast<memref::CastOp>(owner)) {
         for (OpOperand &castUse : castOp->getUses()) {
@@ -123,9 +128,9 @@ struct ReplaceOutputAllocPattern : public OpRewritePattern<memref::AllocOp> {
       return failure(); // not a graph output
 
     auto func = allocOp->getParentOfType<func::FuncOp>();
-    // Only public (graph-entry) functions own EP outputs. Private helpers (e.g.
-    // outlined onnx.Loop bodies) also carry a !hip.context arg 0 and return
-    // memref.allocs, but their outputs are DLL-internal -> skip non-public.
+    // Only public (graph-entry) functions have EP outputs. Private helpers
+    // (e.g. outlined onnx.Loop bodies) also take a !hip.context arg 0 and
+    // return allocs, but their buffers stay inside the DLL -> skip non-public.
     if (!func || !func.isPublic())
       return failure();
 
@@ -150,21 +155,72 @@ struct ReplaceOutputAllocPattern : public OpRewritePattern<memref::AllocOp> {
   }
 };
 
+// Step 2: give an output buffer to every returned value that Step 1 did not
+// already handle (Step 1 only rewrites returned `memref.alloc`s). For each such
+// `func.return` operand, make a fresh `hip.alloc_output` for that output index,
+// `memref.copy` the returned value into it, and point the return at the new
+// buffer. This covers a returned input (passthrough), a reshape/collapse/expand
+// view, a constant, and the same buffer returned at a second index. Does
+// nothing when every output already has its own matching-index
+// `hip.alloc_output` (the common case).
+static void serveUnbackedOutputs(func::FuncOp func) {
+  // Only public (graph-entry) functions have EP outputs; need !hip.context arg
+  // 0 to build hip.alloc_output. Same check as Step 1.
+  if (!func.isPublic() || func.getNumArguments() == 0 ||
+      !isa<ContextType>(func.getArgument(0).getType()))
+    return;
+  Value ctx = func.getArgument(0);
+
+  func.walk([&](func::ReturnOp ret) {
+    // Snapshot operands first: the loop mutates the return in place.
+    SmallVector<Value> operands(ret.getOperands());
+    OpBuilder b(ret);
+    for (auto [i, val] : llvm::enumerate(operands)) {
+      auto memTy = dyn_cast<MemRefType>(val.getType());
+      if (!memTy)
+        continue; // graph outputs are always memrefs; defensively skip others
+      // Already has its own matching-index alloc_output? Then leave it be. This
+      // covers Step 1's direct rewrite AND its cast path: when the output is
+      // returned through a `memref.cast`, Step 1 turns the alloc under the cast
+      // into alloc_output and keeps the cast feeding the return, so look
+      // through one leading cast before checking. If we skip this look-through
+      // we make a SECOND alloc_output for the same output index (the cast
+      // result is not itself an alloc_output), and the runtime aborts because
+      // it sees that output filled twice.
+      Value backing = val;
+      if (auto castOp = backing.getDefiningOp<memref::CastOp>())
+        backing = castOp.getSource();
+      if (auto ao = backing.getDefiningOp<AllocOutputOp>())
+        if (ao.getOutIdx() == static_cast<int64_t>(i))
+          continue;
+
+      // Dynamic output extents come from the returned value itself (its type
+      // equals the function result type at this index, so dims line up).
+      SmallVector<Value> dynSizes;
+      for (int64_t d : llvm::seq<int64_t>(0, memTy.getRank()))
+        if (memTy.isDynamicDim(d))
+          dynSizes.push_back(memref::DimOp::create(b, ret.getLoc(), val, d));
+
+      auto out = AllocOutputOp::create(b, ret.getLoc(), memTy, ctx, dynSizes,
+                                       b.getI64IntegerAttr(i));
+      memref::CopyOp::create(b, ret.getLoc(), val, out.getResult());
+      ret.setOperand(static_cast<unsigned>(i), out.getResult());
+    }
+  });
+}
+
 struct UseOutputAllocatorPass
     : impl::UseOutputAllocatorPassBase<UseOutputAllocatorPass> {
   void runOnOperation() override {
+    // Step 1: returned memref.alloc -> hip.alloc_output.
     RewritePatternSet patterns(&getContext());
     patterns.add<ReplaceOutputAllocPattern>(&getContext());
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
       signalPassFailure();
 
-    // Stamp the allocator-mode marker (typed bool, value = true) on the parent
-    // module. UNCONDITIONAL -- see the file header for why this must run even
-    // when nothing was rewritten. Readers test the value, so absence and
-    // `= false` both read as classic mode.
-    if (auto module = getOperation()->getParentOfType<ModuleOp>())
-      module->setAttr("hipdnn.use_output_allocator",
-                      BoolAttr::get(&getContext(), true));
+    // Step 2: give every remaining output (passthrough / view / shared) its own
+    // alloc_output + copy.
+    serveUnbackedOutputs(getOperation());
   }
 };
 

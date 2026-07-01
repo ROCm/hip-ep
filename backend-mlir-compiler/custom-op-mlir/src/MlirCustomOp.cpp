@@ -202,72 +202,6 @@ static std::vector<int> build_output_index_map(
   return map;
 }
 
-// Marshal output tensors from ORT context using metadata outputs.
-// output_index_map maps from metadata output index (= DLL output index) to
-// the ORT kernel context output index.
-//
-// Classic ABI only (use_output_allocator=0): every output shape in the
-// metadata is fully static. Dynamic output dims (and the runtime DimSource
-// resolution / OGA shared-KV-buffer override that classic mode once used to
-// size them) were removed when the output-allocator ABI became the default --
-// allocator mode sizes dynamic outputs in-graph via output_allocate_cb and
-// never calls this function. The compiler rejects a dynamic output dim in
-// classic mode at build time (see build_metadata_json), so a -1 surviving to
-// here indicates a metadata/compiler bug and aborts.
-TensorData marshal_output_tensors(
-    OrtKernelContext *context,
-    const google::protobuf::RepeatedPtrField<mlir_metadata::Output> &outputs,
-    const std::vector<int> &output_index_map) {
-  if (outputs.size() == 0) {
-    LOG(FATAL) << "No output shapes in metadata";
-  }
-
-  Ort::KernelContext ctx(context);
-  MY_LOG(2) << "Marshaling " << outputs.size() << " output tensors";
-
-  TensorData data;
-  data.tensors.resize(outputs.size());
-  data.shapes.resize(outputs.size());
-
-  for (int i = 0; i < outputs.size(); ++i) {
-    const auto &output_meta = outputs[i];
-    data.shapes[i].assign(output_meta.shape().begin(),
-                          output_meta.shape().end());
-
-    for (int d = 0; d < static_cast<int>(data.shapes[i].size()); ++d) {
-      CHECK(data.shapes[i][d] >= 0)
-          << "Output '" << output_meta.name() << "' dim " << d
-          << " is dynamic (-1) in classic ABI metadata. Classic mode supports "
-          << "only static output shapes; this model must be compiled with the "
-          << "output allocator (the default ABI).";
-    }
-
-    int ort_idx = output_index_map[i];
-    auto output_tensor = ctx.GetOutput(ort_idx, data.shapes[i]);
-
-    data.tensors[i].data = output_tensor.GetTensorMutableRawData();
-    data.tensors[i].shape = data.shapes[i].data();
-    data.tensors[i].rank = data.shapes[i].size();
-    data.tensors[i].element_size = onnx_elem_type_size(output_meta.elem_type());
-    // Same memory-type carry-over as inputs (lets finalize_output skip the
-    // per-inference D2H when ORT pre-allocated the output OrtValue in our
-    // morphizen GPU-mapped memory; matters for present_key/value sharing
-    // buffers with past_key/value under past_present_share_buffer=true).
-    data.tensors[i].memory_type =
-        static_cast<int>(output_tensor.GetTensorMemoryInfo().GetDeviceType());
-
-    MY_LOG(3) << "Output[" << i << "] (ort_idx=" << ort_idx
-              << "): rank=" << data.tensors[i].rank
-              << " element_size=" << data.tensors[i].element_size
-              << " memory_type=" << data.tensors[i].memory_type;
-  }
-
-  data.span.data = data.tensors.data();
-  data.span.count = data.tensors.size();
-
-  return data;
-}
-
 namespace {
 
 // Parse metadata from JSON string in MetaDefProto
@@ -482,9 +416,9 @@ PerfCollector g_perf_collector;
 PerfCollector &perf_collector() { return g_perf_collector; }
 
 #ifdef HIPDNN_EP_LINK_HIP_HOST
-// Per-Compute() HIPDNN_EP_PERF timer, shared by the classic and
-// output-allocator dispatch paths so the event lifecycle and PerfSample
-// assembly live in one place. Brackets the GPU work with a session-lifetime
+// Per-Compute() HIPDNN_EP_PERF timer for the output-allocator dispatch so the
+// event lifecycle and PerfSample assembly live in one place. Brackets the GPU
+// work with a session-lifetime
 // event pair (owned by MlirCustomOp, lazily created here, released in its
 // destructor) and times the host phases with steady_clock.
 //
@@ -571,9 +505,9 @@ struct PerfSummaryPrinter {
 PerfSummaryPrinter g_perf_printer;
 
 // ===========================================================================
-// Output-allocator mode (2-arg inference_compute) plumbing.
+// Output-allocator (2-arg inference_compute) plumbing.
 //
-// In allocator mode the DLL receives no pre-filled outputs span. Instead
+// The DLL receives no pre-filled outputs span. Instead
 // main_graph calls hipdnn_ep_alloc_output(out_idx, shape, rank, elem_size) for
 // each graph output once its runtime shape is known; the runtime forwards to
 // the callback the EP installed. The callback maps out_idx -> ORT output, asks
@@ -712,9 +646,6 @@ MlirCustomOp::MlirCustomOp(
 
   // Parse metadata from JSON
   metadata_ = parse_metadata_from_metadef(context, meta_def);
-  // Dispatch mode travels with the artifact's metadata (not a live provider
-  // option), so it always matches the loaded DLL's ABI.
-  use_output_allocator_ = metadata_.use_output_allocator();
   // Precompute index mappings (compiler order -> ORT kernel context order)
   input_index_map_ = build_input_index_map(*meta_def);
   output_index_map_ = build_output_index_map(metadata_.outputs(), *meta_def);
@@ -731,8 +662,8 @@ MlirCustomOp::MlirCustomOp(
 
 MlirCustomOp::~MlirCustomOp() {
 #ifdef HIPDNN_EP_LINK_HIP_HOST
-  // Free the allocator-mode host-output GPU scratch (one buffer per output
-  // index). No-op in classic mode (the vector stays empty).
+  // Free the host-output GPU scratch (one buffer per host output index).
+  // No-op when every output was GPU-aliased (the vector stays empty).
   for (const HostOutputScratch &slot : host_out_scratch_)
     if (slot.ptr)
       (void)hipFree(slot.ptr);
@@ -765,13 +696,11 @@ void MlirCustomOp::compute_with_output_allocator(
   MY_LOG(2) << "MlirCustomOp::compute_with_output_allocator()";
 
 #ifdef HIPDNN_EP_LINK_HIP_HOST
-  // Allocator mode is a separate dispatch that returns before the classic
-  // Compute() perf block, so it must emit its own PerfSample (§4 per-call
-  // distribution) and per-op flush (§3 GPU table) here. Without this an
-  // output-allocator session -- every KV-cache model, the default ABI --
-  // produces no EP-side [PERF]/[PERF SUMMARY] lines under HIPDNN_EP_PERF=1.
-  // Unlike the classic path there is no marshal-out pre-pass (outputs are
-  // allocated in-graph via output_allocate_cb), so marshal_out_ms is 0.
+  // This dispatch emits its own PerfSample (§4 per-call distribution) and
+  // per-op flush (§3 GPU table) here, so under HIPDNN_EP_PERF=1 a session
+  // produces EP-side [PERF]/[PERF SUMMARY] lines. There is no marshal-out
+  // pre-pass (outputs are allocated in-graph via output_allocate_cb), so
+  // marshal_out_ms is 0.
   const bool perf = perf_enabled();
   std::optional<EpPerfTimer> timer;
   EpPerfTimer::clock::time_point t_after_in{};
@@ -804,7 +733,7 @@ void MlirCustomOp::compute_with_output_allocator(
     timer->record_start();
 #endif
 
-  int ret = inference_state_->compute_with_output_allocator(&inputs.span);
+  int ret = inference_state_->compute(&inputs.span);
 
 #ifdef HIPDNN_EP_LINK_HIP_HOST
   if (perf)
@@ -877,70 +806,12 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
   // leaving it on the fast path costs ~1 ns.
   inference_state_->begin_compute();
 
-  if (use_output_allocator_) {
-    // Allocator mode owns its output staging (no pre-filled outputs span) and
-    // its own post-compute host D2H; it runs its OWN HIPDNN_EP_PERF timing +
-    // per-op flush internally (see compute_with_output_allocator) rather than
-    // the classic perf block below.
-    compute_with_output_allocator(context);
-    MY_LOG(2) << "Compute completed successfully (allocator mode)";
-    return;
-  }
-
-  if (!perf_enabled()) {
-    // --- Fast path: original behaviour, no timing overhead. ---
-    auto inputs = marshal_input_tensors(context, input_index_map_);
-    auto outputs =
-        marshal_output_tensors(context, metadata_.outputs(), output_index_map_);
-
-    int ret = inference_state_->compute(&inputs.span, &outputs.span);
-    if (ret != 0) {
-      LOG(ERROR) << "inference_compute() failed with code: " << ret;
-      // TODO: Throw ORT exception
-    }
-
-    MY_LOG(2) << "Compute completed successfully";
-    return;
-  }
-
-#ifdef HIPDNN_EP_LINK_HIP_HOST
-  // --- HIPDNN_EP_PERF path: wall + per-phase + GPU timing. ---
-  // The stream may be the default stream (hipStream_t(0)); hipEvent APIs
-  // accept that fine.
-  EpPerfTimer timer(
-      ep_perf_ev_start_, ep_perf_ev_stop_,
-      static_cast<hipStream_t>(inference_state_->get_stream_raw()));
-
-  auto inputs = marshal_input_tensors(context, input_index_map_);
-  const auto t_after_in = EpPerfTimer::clock::now();
-  auto outputs =
-      marshal_output_tensors(context, metadata_.outputs(), output_index_map_);
-  const auto t_after_out = EpPerfTimer::clock::now();
-
-  timer.record_start();
-  const int ret = inference_state_->compute(&inputs.span, &outputs.span);
-  timer.record_stop();
-
-  if (ret != 0) {
-    LOG(ERROR) << "inference_compute() failed with code: " << ret;
-    // TODO: Throw ORT exception
-  }
-
-  PerfSample s;
-  s.marshal_in_ms = EpPerfTimer::ms(timer.t_enter(), t_after_in);
-  s.marshal_out_ms = EpPerfTimer::ms(t_after_in, t_after_out);
-  s.compute_cpu_ms = EpPerfTimer::ms(t_after_out, timer.t_after_compute());
-  timer.finish(s);
-
-  // Resolve the per-op table AFTER the timing window closes. The resolve
-  // (one hipEventElapsedTime per recorded op + std::map aggregation + a
-  // per-row fprintf) costs ~1 ms/Compute on a typical decoder graph -- large
-  // enough that keeping it inside the window measurably inflated wall_ms.
-  // See the flush_op_profile() contract in InferenceState.h.
-  inference_state_->flush_op_profile();
-
+  // The allocator dispatch owns its input marshaling, in-graph output
+  // allocation (via the output allocator callback), post-compute host D2H,
+  // and -- when HIPDNN_EP_PERF is set -- its own wall/per-phase/GPU timing +
+  // per-op profile flush (see compute_with_output_allocator).
+  compute_with_output_allocator(context);
   MY_LOG(2) << "Compute completed successfully";
-#endif // HIPDNN_EP_LINK_HIP_HOST
 }
 
 } // namespace mlir_compilation

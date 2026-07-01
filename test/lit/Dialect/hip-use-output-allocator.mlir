@@ -4,20 +4,15 @@
 //===----------------------------------------------------------------------===//
 // FileCheck tests for --hip-use-output-allocator.
 //
-// Verifies that the pass rewrites graph-output memref.alloc ops (values
-// returned by func.return) into hip.alloc_output, reusing the alloc's dynamic
-// sizes and setting out_idx to the return position, while leaving intermediates,
-// passthrough outputs, private helpers, and context-less functions untouched.
-// The pass also stamps the hipdnn.use_output_allocator BoolAttr (= true) on the
-// enclosing module -- the allocator-mode marker that convert-hip-to-llvm and
-// generate-interface read by value.
+// Checks two things. Step 1: a returned memref.alloc becomes a hip.alloc_output
+// that reuses the alloc's dynamic sizes and gets out_idx = its return position.
+// Step 2: every OTHER returned value (a returned input, or the same buffer
+// returned at a second index) gets its own hip.alloc_output + memref.copy, so
+// the allocator callback fires exactly once per output index. Intermediates,
+// private helpers, and functions without a !hip.context arg are left alone.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt --hip-use-output-allocator %s 2>&1 | FileCheck %s
-
-// The module-level allocator-mode marker is stamped as a typed bool (= true),
-// not a presence-only unit attr, so downstream readers can test its value.
-// CHECK: module attributes {hipdnn.use_output_allocator = true}
 
 // --- Dynamic-shape output: replaced, reusing the alloc's %M, %N. ---
 // CHECK-LABEL: func.func @dynamic_output
@@ -66,10 +61,16 @@ func.func @static_output(%ctx: !hip.context) -> memref<4x8xf16> {
   return %out : memref<4x8xf16>
 }
 
-// --- Passthrough output (return a memref block-arg): left unchanged. ---
+// --- Passthrough output (return a memref block-arg): Step 2 makes a fresh
+//     alloc_output for the output index and copies the input into it. Without
+//     this the EP allocator callback would never fire for this output and the
+//     runtime aborts. ---
 // CHECK-LABEL: func.func @passthrough
-// CHECK-NOT:     hip.alloc_output
-// CHECK:         return %{{.*}} : memref<?xf16>
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context, %[[X:.*]]: memref<?xf16>)
+// CHECK:         %[[D:.*]] = memref.dim %[[X]]
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]], %[[D]]) {out_idx = 0 : i64} : memref<?xf16>
+// CHECK:         memref.copy %[[X]], %[[OUT]]
+// CHECK:         return %[[OUT]]
 func.func @passthrough(%ctx: !hip.context, %x: memref<?xf16>) -> memref<?xf16> {
   return %x : memref<?xf16>
 }
@@ -94,12 +95,14 @@ func.func @returned_alloc_with_dealloc(%ctx: !hip.context, %M: index) -> memref<
   return %out : memref<?xf16>
 }
 
-// --- Aliased multi-output (same alloc returned twice): exactly one
-//     hip.alloc_output (dedupe / no double-erase), both results alias it. ---
+// --- Same buffer returned twice: Step 1 rewrites the alloc once (at its
+//     first-seen return index); Step 2 then gives the OTHER index its own
+//     alloc_output + a copy, so each output index is filled exactly once (two
+//     separate EP buffers with the same content). ---
 // CHECK-LABEL: func.func @aliased_output
-// CHECK-COUNT-1: hip.alloc_output
-// CHECK-NOT:     hip.alloc_output
-// CHECK:         return %[[OUT:.*]], %[[OUT]]
+// CHECK-DAG:     hip.alloc_output(%{{.*}}) {out_idx = 1 : i64} : memref<?xf16>
+// CHECK-DAG:     hip.alloc_output(%{{.*}}) {out_idx = 0 : i64} : memref<?xf16>
+// CHECK:         memref.copy
 func.func @aliased_output(%ctx: !hip.context, %M: index) -> (memref<?xf16>, memref<?xf16>) {
   %a = memref.alloc(%M) : memref<?xf16>
   return %a, %a : memref<?xf16>, memref<?xf16>
