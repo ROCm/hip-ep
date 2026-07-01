@@ -14,14 +14,18 @@ include "mlir/IR/EnumAttr.td"
 // Memory space kind enum
 //===----------------------------------------------------------------------===//
 
-def Hip_Device  : I32EnumAttrCase<"Device",  0, "device">;
-def Hip_Host    : I32EnumAttrCase<"Host",    1, "host">;
+// Values follow the AMDGPU/MLIR address-space convention: host is the
+// generic/flat AS 0, device is the global AS 1 (pinned = 2, managed = 3). The
+// HipToLLVM type-attribute conversion maps each kind's value straight to that
+// LLVM address space -- see docs/design/memory-space-design.md.
+def Hip_Host    : I32EnumAttrCase<"Host",    0, "host">;
+def Hip_Device  : I32EnumAttrCase<"Device",  1, "device">;
 def Hip_Pinned  : I32EnumAttrCase<"Pinned",  2, "pinned">;
 def Hip_Managed : I32EnumAttrCase<"Managed", 3, "managed">;
 
 def Hip_MemorySpaceKind : I32EnumAttr<"MemorySpaceKind",
     "HIP memory space kind",
-    [Hip_Device, Hip_Host, Hip_Pinned, Hip_Managed]> {
+    [Hip_Host, Hip_Device, Hip_Pinned, Hip_Managed]> {
   let cppNamespace = "::mlir::hip";
   // We wrap the enum in the custom MemorySpaceAttr below (so the syntax is
   // `#hip.mem<device>`, not a bare enum attribute); do not emit a specialized

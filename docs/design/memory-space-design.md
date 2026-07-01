@@ -200,10 +200,11 @@ This is correct-by-construction design, not detect-and-fix.
 
 **Note on LLVM Lowering:**
 
-`ConvertHipToLLVMPass` registers a type-attribute conversion (`addTypeAttributeConversion`) that maps each `#hip.mem<...>` space to a distinct LLVM address space, numbered by the `MemorySpaceKind` enum (**device = 0, host = 1, pinned = 2, managed = 3**):
+`ConvertHipToLLVMPass` registers a type-attribute conversion (`addTypeAttributeConversion`) that maps each `#hip.mem<...>` space to a distinct LLVM address space, numbered by the `MemorySpaceKind` enum (**host = 0, device = 1, pinned = 2, managed = 3**).
 
-- **Device stays AS 0**, so the dominant GPU data path (params, activations, the device pool, all kernel/GEMM operands) and the flat bare-pointer runtime ABI are byte-unchanged — only the rarer host/pinned/managed boundary buffers leave the default space.
-- Each per-op lowering resolves the space via `getMemRefAddressSpace()` and addrspace-casts the runtime's generic AS-0 pointer up to it (and back at the call boundary), so runtime declarations stay AS-0 `!llvm.ptr` (see `MemoryLowering.cpp` / `unpackMemRefStructWithAddrCast`).
+This follows the **AMDGPU/MLIR convention**: host is the generic/flat AS 0, device is the global AS 1. The address spaces are a compile-time type-system label only, not the AMDGPU backend's hardware spaces — the JIT target is the host, which flattens every space back to one flat pointer space (see the last bullet), so the casts below are no-ops at runtime and the generated model code passes device pointers to the runtime as plain opaque values.
+
+- The runtime C ABI is flat AS-0 `!llvm.ptr`. Each per-op lowering resolves the operand space via `getMemRefAddressSpace()` and addrspace-casts the device (AS 1) pointer down to AS 0 at the call boundary (see `extractMemRefDataPtr` / `MemoryLowering.cpp`), so runtime declarations stay AS-0.
 - The host target collapses every space back to one flat space, so CPU access to host/pinned/managed buffers (e.g. `tensor.extract` after a D2H `hip.memcpy_d2h_async` + `hip.stream_sync`) stays valid.
 
 Without this hook, the stock `MemRefToLLVM` conversion — which only understands integer memory spaces — rejects any memref carrying the non-integer `MemorySpaceAttr` and conversion fails.

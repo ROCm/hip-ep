@@ -363,9 +363,9 @@ struct GetConstantOpLowering : public ConvertOpToLLVMPattern<GetConstantOp> {
     auto callOp = LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 
     // The runtime always returns a generic pointer (AS 0). Cast to the memref's
-    // address space if it differs. Constants are device memory (device = AS 0
-    // under the per-kind memory-space numbering), so this cast is normally a
-    // no-op; it fires only if a constant is ever placed in a non-default space.
+    // address space if it differs. Constants live in device memory (device =
+    // AS 1 under the per-kind numbering), so a #hip.mem<device> result takes
+    // this cast to AS 0; a space-less constant memref (AS 0) makes it a no-op.
     FailureOr<unsigned> addrSpace =
         getTypeConverter()->getMemRefAddressSpace(memRefType);
     if (failed(addrSpace))
