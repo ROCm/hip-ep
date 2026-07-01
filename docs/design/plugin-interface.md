@@ -6,8 +6,8 @@ Licensed under the MIT License.
 
 How an out-of-tree static library contributes compiler passes, custom
 dialects/ops, runtime bitcode, and link libraries to `hip-compiler` -- linked
-into the host at configure time (IREE's compiler-plugin model) -- and what a
-downstream team has to write to ship one.
+into the host at configure time -- and what a downstream team has to write to
+ship one.
 
 ## Table of contents
 
@@ -145,8 +145,7 @@ public:
   // Contribute a dialect-registration callback. The host runs it against the
   // DialectRegistry it builds the pipeline's MLIRContext from, so the callback
   // can registry.insert<VendorDialect>() and registry.addExtension(...) to
-  // attach the op's bufferization and HIP->LLVM-lowering interface models --
-  // the same thing the upstream mlirGetDialectPluginInfo callback does.
+  // attach the op's bufferization and HIP->LLVM-lowering interface models.
   void addDialectRegistration(void (*registerFn)(mlir::DialectRegistry &));
 
   // Contribute LLVM bitcode linked into the model module after the in-tree
@@ -234,31 +233,28 @@ that order:
 
 ## Linkage model
 
-Plugins are linked **statically** into the host at configure time (IREE's
-compiler-plugin model), selected via `-DHIPDNN_EP_COMPILER_PLUGINS=<id;...>`
-(default empty). The machinery is in
+Plugins are linked **statically** into the host at configure time, selected via
+`-DHIPDNN_EP_COMPILER_PLUGINS=<id;...>` (default empty). The machinery is in
 [cmake/HipEpPlugins.cmake](../../cmake/HipEpPlugins.cmake): a plugin package
 calls `hipdnn_ep_compiler_plugin_register(PLUGIN_ID <id> TARGET <static-lib>)`
 to make itself available; `hipdnn_ep_finalize_static_plugins()` then generates
 the registrar include for the selected ids and links their static libs into
 `LibHipCompiler` (which every host links).
 
-Why static rather than a dlopen'd DLL: an MLIR-contributing plugin (a pass, a
-dialect/op, an interface model) must share the host's process-global MLIR state
--- one pass registry, one set of op `TypeID`s. Static linking makes the plugin
-and host **one binary**, so they share MLIR by construction, with **no symbol
-export and no dlopen** -- identical on Windows and Linux. This is what the MLIR
-ecosystem does (IREE's `-DIREE_COMPILER_PLUGINS=`; the rest -- torch-mlir,
-onnx-mlir, stablehlo -- link MLIR-coupled code statically / monolithically).
+Why static rather than a runtime-loaded shared library: an MLIR-contributing
+plugin (a pass, a dialect/op, an interface model) must share the host's
+process-global MLIR state -- one pass registry, one set of op `TypeID`s. Static
+linking makes the plugin and host **one binary**, so they share that state by
+construction, with **no symbol export and no dynamic loader** -- identical on
+every platform.
 
-The dynamic alternative was rejected on measured evidence. Making a dlopen'd,
-MLIR-C++ plugin work needs the host to export its `mlir::` symbols; that surface
-is ~133K symbols, **more than 2x the Windows PE 65,535 export-table cap**, so it
-cannot fit on Windows (and a single shared `libMLIR.dll` hits the same cap). A
-per-plugin scoped export fits but reintroduces a build-order inversion and
-per-plugin `.def` machinery with no upstream analog. Static linking avoids all
-of it. See the plan `.cursor/plans/plugin-extension-api.plan.md` (§0) for the
-full derivation and the measurements.
+The dynamic alternative does not hold up. Sharing MLIR state across a
+dynamic-load boundary would require the host to export its entire `mlir::`
+symbol surface -- on the order of a hundred thousand symbols, which exceeds the
+export-table capacity some object formats impose, so it cannot be built on every
+platform. A per-plugin scoped export is possible but inverts the build
+dependency (the host link would depend on each plugin's objects) and adds
+per-plugin export-list machinery. Static linking avoids all of it.
 
 **Correctness note:** the registrar calls each `hipEpRegisterPlugin_<id>`
 **explicitly** -- registration must never rely on a static initializer in the
@@ -274,12 +270,11 @@ one class of contribution that also works dynamically into a prebuilt host.
 Because static plugins are chosen at the host's configure time, a downstream
 builds `onnx-hipdnn-ep` itself (which it already does to target its GPU arch and
 per-target kernels) and adds its plugin id to `HIPDNN_EP_COMPILER_PLUGINS`.
-There is no runtime drop-in of an MLIR plugin into an already-shipped host; that
-capability, if ever required, is a separate C-ABI tier over the MLIR C API (the
-C API export surface is ~1.3K symbols, which *does* fit the Windows cap) -- see
-the plan's §0.5 "Hot-swap tiers". Kernel-level customization (a custom `wrap_*`
-for an op) is already hot-swappable today via the bitcode / library
-contributions.
+There is no runtime drop-in of an MLIR plugin into an already-shipped host: that
+would require the dynamic-load boundary this design deliberately avoids.
+Kernel-level customization (a custom `wrap_*` for an op) does not need it -- it
+is already possible against a prebuilt host through the bitcode / library
+contributions, which cross a pure C boundary.
 
 ## What a downstream team does
 
@@ -512,8 +507,8 @@ the op must survive:
 The first-class path lets a plugin contribute its **own dialect op** that lives
 across the whole pipeline -- introduced from a model op, bufferized like an
 in-tree op, and lowered to a vendor kernel -- entirely from out-of-tree code, via
-three idiomatic MLIR seams that ride the same [linkage](#linkage-requirement) as
-a plugin pass (no shared `libMLIR` dylib):
+three idiomatic MLIR seams that ride the same [linkage](#linkage-model) as a
+plugin pass:
 
 1. **Dialect + op + interface models** -- `addDialectRegistration(fn)` hands the
    host a callback it runs against the `DialectRegistry` the pipeline's
@@ -582,7 +577,7 @@ parts; the first two **ship today**, the third is planned.
   register a pipeline *builder* that receives a context (the filesystem and
   pipeline options) and composes passes -- including in-tree stage builders --
   in C++. This is the full-fidelity path; it would share the
-  [linkage requirement](#linkage-requirement).
+  [linkage model](#linkage-model).
 - **Guardrails** *(shipped, partial)*. The load-bearing ordering invariants
   (host-scalar materialization before pool allocation; output-allocator after
   buffer deallocation; affine lowering after strided-metadata expansion; the
@@ -596,6 +591,6 @@ not a frozen cross-release contract -- a plugin that composes by name pins to
 a release. (Renaming a pass is a documented breaking change for such plugins.)
 
 The custom-op path and the pipeline-composition extension share the
-[linkage requirement](#linkage-requirement): the dialect, type, and pass
+[linkage model](#linkage-model): the dialect, type, and pass
 registries are process-global MLIR state, so any plugin-registered op, pass,
 or pipeline needs the host and plugin to share one MLIR instance.

@@ -173,8 +173,7 @@ public:
   /// Contribute a dialect-registration callback. The host invokes `registerFn`
   /// against the `mlir::DialectRegistry` it uses to build the pipeline's
   /// MLIRContext (`hip::compiler::loadAllDialects`), so the callback is the
-  /// place to do everything the upstream `mlirGetDialectPluginInfo` callback
-  /// does:
+  /// place to insert the vendor dialect and attach its interface models:
   ///
   /// ```
   /// R.addDialectRegistration(+[](mlir::DialectRegistry &registry) {

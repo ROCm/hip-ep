@@ -4,14 +4,15 @@
 ##
 
 # ============================================================================
-# Static compiler-plugin registration (IREE-style).
+# Static compiler-plugin registration.
 #
-# MLIR-contributing plugins (passes, dialects/ops, lowering + bufferization
-# interface models) are linked STATICALLY into the host at configure time --
-# NOT dlopen'd. This is the model the MLIR ecosystem converges on (IREE's
-# `-DIREE_COMPILER_PLUGINS=`) and it works identically on Windows and Linux:
-# no `-rdynamic`, no per-plugin `.def`, no PE export-table cap, no symbol
-# export at all. See docs/design/plugin-interface.md, "Linkage model".
+# A plugin that contributes MLIR (a pass, a dialect/op, an interface model) must
+# land its registration in the host's process-global MLIR state -- one pass
+# registry, one set of op TypeIDs. The only robust way to guarantee that is to
+# make the plugin and host ONE binary: plugins are linked STATICALLY into the
+# host at configure time, not loaded at runtime. This needs no symbol export and
+# no dynamic loader, so it behaves identically on every platform. See
+# docs/design/plugin-interface.md, "Linkage model".
 #
 # Mechanism:
 #   * `HIPDNN_EP_COMPILER_PLUGINS` (cache) is the semicolon-separated list of
@@ -28,15 +29,14 @@
 #     selected plugin static libs into `LibHipCompiler`.
 #   * `lib/Compiler/StaticPlugins.cpp` (in LibHipCompiler) includes that .inc
 #     twice: once to `extern "C"`-declare each `hipEpRegisterPlugin_<id>`, once
-#     to CALL each. The explicit call is what keeps the linker from GC-dropping
-#     the plugin object (`--gc-sections` / `/OPT:REF`) -- never rely on a static
-#     initializer for registration.
+#     to CALL each. The explicit call is essential: it is the reference that
+#     keeps the linker's dead-code elimination (`--gc-sections` / `/OPT:REF`)
+#     from discarding the plugin object -- registration must never depend on a
+#     static initializer, which such a collected object would silently drop.
 #
 # A plugin's per-id entry point is a single extern "C" function:
 #
 #     extern "C" void hipEpRegisterPlugin_<id>(hip::compiler::HipEpPluginRegistry &R);
-#
-# (the static-linking analogue of the old dynamic `hipEpGetPluginInfo`).
 # ============================================================================
 
 set(HIPDNN_EP_COMPILER_PLUGINS "" CACHE STRING

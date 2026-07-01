@@ -49,12 +49,12 @@ option(BUILD_MOCK_RUNTIME "Build mock runtime (no GPU required)" ON)
 option(BUILD_HIP_UNIT_TESTS "Build and register LIT and E2E tests with CTest" ON)
 option(BUILD_PYTHON_WHEEL "Configure the 'wheel' target that packages the EP as a Python wheel" OFF)
 
-# Compiler plugins are linked STATICALLY into the host at configure time (IREE
-# model; see cmake/HipEpPlugins.cmake and docs/design/plugin-interface.md).
-# Select which plugins to link with -DHIPDNN_EP_COMPILER_PLUGINS=<id;...>
-# (default empty). No symbol export, no dlopen, identical on Windows and Linux.
-# HipEpPlugins.cmake is included in the BUILD_HIP_TOOLS block below (it needs the
-# LLVM/MLIR toolchain resolved first) and defines HIPDNN_EP_COMPILER_PLUGINS.
+# Compiler plugins are linked STATICALLY into the host at configure time (see
+# cmake/HipEpPlugins.cmake and docs/design/plugin-interface.md). Select which
+# plugins to link with -DHIPDNN_EP_COMPILER_PLUGINS=<id;...> (default empty). No
+# symbol export, no dynamic loader, identical on every platform. HipEpPlugins.cmake
+# is included in the BUILD_HIP_TOOLS block below (it needs the LLVM/MLIR toolchain
+# resolved first) and defines HIPDNN_EP_COMPILER_PLUGINS.
 
 # Centralized dependency resolution. Always included; internally partitions by
 # BUILD_EP / BUILD_HIP_TOOLS so a tools-only tree (BUILD_EP=OFF) still gets the

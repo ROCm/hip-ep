@@ -11,13 +11,12 @@ ONNX ops, custom kernels, or MLIR passes on top of `onnx-hipdnn-ep`.
 `HIP_EP_PLUGIN_API_VERSION` as a moving target and rebuild plugins when it
 changes (they are built with the host, so a mismatch is a build error).
 
-**Linkage:** plugins are linked **statically** into the host at configure time
-(IREE's compiler-plugin model). Because plugin and host are one binary, they
-share MLIR's process-global state, so passes, custom dialects/ops, and pipeline
-composition all work — identically on **Windows and Linux**, with no symbol
-export and no dlopen. Select a plugin with `-DHIPDNN_EP_COMPILER_PLUGINS=<id>`.
-See the design doc's "Linkage model" for the rationale (and why the earlier
-dlopen model was dropped).
+**Linkage:** plugins are linked **statically** into the host at configure time.
+Because plugin and host are one binary, they share MLIR's process-global state,
+so passes, custom dialects/ops, and pipeline composition all work — identically
+on **Windows and Linux**, with no symbol export and no dynamic loader. Select a
+plugin with `-DHIPDNN_EP_COMPILER_PLUGINS=<id>`. See the design doc's "Linkage
+model" for the rationale.
 
 This guide is the practical companion to
 [`docs/design/plugin-interface.md`](design/plugin-interface.md): it covers
@@ -28,8 +27,7 @@ the rationale.
 
 ## 1. Mental model
 
-A plugin is a **static library** (linked into the host at configure time,
-IREE's compiler-plugin model — see
+A plugin is a **static library** (linked into the host at configure time — see
 [docs/design/plugin-interface.md](design/plugin-interface.md), "Linkage model")
 that:
 
@@ -346,9 +344,8 @@ static linking guarantees (section 3), built against the host's MLIR.
 
 `addDialectRegistration` hands the host a callback it runs against the
 `mlir::DialectRegistry` the pipeline's `MLIRContext` is built from. Make it a
-non-capturing function (so it converts to a plain function pointer). It does
-exactly what an upstream `mlirGetDialectPluginInfo` callback does: insert the
-dialect, and attach the op's interface models via `DialectExtension`s.
+non-capturing function (so it converts to a plain function pointer). It inserts
+the dialect and attaches the op's interface models via `DialectExtension`s.
 
 ```cpp
 static void registerVendorDialect(mlir::DialectRegistry &registry) {
@@ -396,12 +393,12 @@ void registerCallbacks(::hip::compiler::HipEpPluginRegistry &R) {
 `hip-ep-plugin` defines its single op by hand (a plain C++ class registered
 with `addOperations`) to avoid a TableGen build step. That is reasonable for one
 trivial op; a real dialect with several ops should use ODS (a `.td` file with
-`mlir_tablegen`), as the in-tree HIP dialect and the upstream `standalone`
-example do — ODS generates the builders, verifiers, accessors, and interface
-glue that are tedious and error-prone to write by hand.
+`mlir_tablegen`), as the in-tree HIP dialect does — ODS generates the builders,
+verifiers, accessors, and interface glue that are tedious and error-prone to
+write by hand.
 
-See the upstream design doc's "Custom ops: a plugin-owned dialect end-to-end"
-section for the same flow from the architecture side.
+See the design doc's "Custom ops: a plugin-owned dialect end-to-end" section for
+the same flow from the architecture side.
 
 ## 8. Composing a custom pipeline
 
