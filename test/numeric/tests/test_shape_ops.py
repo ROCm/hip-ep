@@ -306,9 +306,7 @@ class TestPad:
         pads = [1, 1, 1, 1]
         tp = np_to_onnx_type(dtype)
         X = helper.make_tensor_value_info("X", tp, list(shape))
-        pads_init = numpy_helper.from_array(
-            np.array(pads, dtype=np.int64), name="pads"
-        )
+        pads_init = numpy_helper.from_array(np.array(pads, dtype=np.int64), name="pads")
         # Rank-0 scalar graph input -> runtime constant_value.
         CV = helper.make_tensor_value_info("constant_value", tp, [])
         rank = len(shape)
@@ -317,9 +315,7 @@ class TestPad:
         node = helper.make_node(
             "Pad", ["X", "pads", "constant_value"], ["Y"], mode="constant"
         )
-        model = make_model_from_nodes(
-            [node], [X, CV], [Y], initializers=[pads_init]
-        )
+        model = make_model_from_nodes([node], [X, CV], [Y], initializers=[pads_init])
         rng = np.random.default_rng(405)
         if np.issubdtype(dtype, np.integer):
             x = rng.integers(-10, 10, shape, dtype=dtype)

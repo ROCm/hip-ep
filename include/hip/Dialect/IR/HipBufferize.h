@@ -196,13 +196,12 @@ struct HipTransferBufferizableModel
       if (dstTy.isDynamicDim(i))
         dynDims.push_back(memref::DimOp::create(rewriter, loc, *srcBuf, i));
 
-    // Host/pinned dst: stack alloca + memory_space_cast to the target space (see
-    // the header comment for why). Device dst (H2D): heap alloc that
+    // Host/pinned dst: stack alloca + memory_space_cast to the target space
+    // (see the header comment for why). Device dst (H2D): heap alloc that
     // hip-pool-allocs later folds into the GPU pool.
     Value dst;
     if (dstIsHost) {
-      auto slotTy =
-          MemRefType::get(dstTy.getShape(), dstTy.getElementType());
+      auto slotTy = MemRefType::get(dstTy.getShape(), dstTy.getElementType());
       Value slot = memref::AllocaOp::create(rewriter, loc, slotTy, dynDims);
       dst = memref::MemorySpaceCastOp::create(rewriter, loc, dstTy, slot);
     } else {
