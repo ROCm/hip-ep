@@ -8,9 +8,9 @@
 
 // Plugin extension entry point for hip-compiler.
 //
-// Plugins are linked STATICALLY into the host at configure time (IREE model;
-// see cmake/HipEpPlugins.cmake and docs/design/plugin-interface.md). A plugin
-// is a static library that defines ONE registration entry point:
+// Plugins are linked STATICALLY into the host at configure time (see
+// cmake/HipEpPlugins.cmake and docs/design/plugin-interface.md). A plugin is a
+// static library that defines ONE registration entry point:
 //
 //   extern "C" void hipEpRegisterPlugin_<id>(hip::compiler::HipEpPluginRegistry
 //   &R);
@@ -19,17 +19,16 @@
 // host's CMake-generated registrar (StaticPlugins.cpp) declares and CALLS this
 // function once per process; the body uses the supplied registry to register
 // passes, dialects/ops, pipeline-slot requests, runtime bitcode, and link
-// libraries -- exactly the same registry surface the old dynamic
-// `RegisterCallbacks` used.
+// libraries.
 //
-// Why static (not a dlopen'd DLL exporting `hipEpGetPluginInfo`): an
-// MLIR-contributing plugin must share the host's process-global MLIR state
-// (one pass registry, one set of op TypeIDs). Achieving that across a dynamic
-// boundary requires exporting the host's `mlir::` symbols, which is a ~133K-
-// symbol surface that does not fit the Windows PE 65,535 export-table cap.
-// Static linking makes the plugin and host one binary, so they share MLIR by
-// construction, with no export -- identical on Windows and Linux. This matches
-// what the MLIR ecosystem does (IREE's `-DIREE_COMPILER_PLUGINS=`).
+// Why static rather than a runtime-loaded shared library: an MLIR-contributing
+// plugin must share the host's process-global MLIR state (one pass registry,
+// one set of op TypeIDs). Sharing that across a dynamic-load boundary would
+// require the host to export its entire `mlir::` symbol surface, which exceeds
+// the export-table capacity some object formats impose. Static linking
+// sidesteps the question entirely: the plugin and host become one binary that
+// shares MLIR by construction, with no symbol export and identical behavior on
+// every platform.
 //
 // There is no runtime version handshake: because the plugin and host are built
 // and linked together, an ABI mismatch is a build error, not a load-time

@@ -10,7 +10,7 @@
 #include <exception>
 #include <mutex>
 
-// Static compiler-plugin dispatch (IREE-style; see cmake/HipEpPlugins.cmake).
+// Static compiler-plugin dispatch (see cmake/HipEpPlugins.cmake).
 //
 // Statically-linked plugins are selected at configure time via
 // `HIPDNN_EP_COMPILER_PLUGINS`; CMake generates
@@ -19,10 +19,11 @@
 // per-id registration entry, once to CALL it. When no plugins are selected the
 // include is empty and `dispatchPluginRegistrationsOnce()` is a no-op.
 //
-// Correctness: the registration MUST be an explicit call (below), never a
-// static initializer in the plugin lib -- the linker (`--gc-sections`,
-// `/OPT:REF`) drops an object whose symbols are otherwise unreferenced, which
-// would silently discard the registration.
+// Correctness: the registration MUST be the explicit call below, never a static
+// initializer in the plugin lib. The linker's dead-code elimination
+// (`--gc-sections`, `/OPT:REF`) discards an object whose symbols are otherwise
+// unreferenced; the explicit call is the reference that keeps the plugin's
+// registration object alive.
 
 namespace hip::compiler {
 
