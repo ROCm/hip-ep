@@ -95,13 +95,6 @@
 //   - Floating-point element types: rare on the host-fed scalar path,
 //     almost always GPU-consumed in flight, where the GPU pool is the
 //     right home.
-//   - Allocs that already carry an explicit `#hip.mem<>` space: skipped.
-//     A tiny `#hip.mem<host>` integer buffer (say, the destination of a
-//     device-to-host copy) reads just like a host-staged scalar, but it was
-//     tagged with that space on purpose. Our scratch buffer has no space
-//     (`memref<?xi8>`), so a `memref.view` of it into a `#hip.mem<host>`
-//     result would mismatch spaces and the `memref.view` verifier would
-//     reject it. Leave these allocs where they are.
 //   - Functions whose arg 0 is not `!hip.context`: silently skipped.
 //     Utility functions and pre-context-arg passes don't have access to
 //     the runtime scratch handle; the pass is a best-effort mitigation,
