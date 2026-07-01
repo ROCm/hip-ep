@@ -78,9 +78,9 @@ struct Case {
 
 // Mirror of gqa.cpp's decode-geometry gate (flash_decode_geometry_ok): the
 // optimized flash_decode kernel is templated for HpG in {1,2,3,4,5,8,16} and
-// head_dim in {64,128}.
+// head_dim in {64,128,256} (d=256 covers Qwen3-family 16:4).
 static bool geometry_ok(int H, int G, int D) {
-  if (D != 64 && D != 128)
+  if (D != 64 && D != 128 && D != 256)
     return false;
   if (G <= 0 || H % G != 0)
     return false;
@@ -91,11 +91,14 @@ static bool geometry_ok(int H, int G, int D) {
 
 // Mirror of gqa.cpp::wrap_gqa_flash path selection: true => the optimized
 // fused/flash kernels handle it (our_*); false => routed to the legacy
-// decomposed fallback (ori_*).
+// decomposed fallback (ori_*). Both prefill (v7 WMMA) and decode now cover
+// d in {64,128,256}; decode geometry is additionally gated by geometry_ok.
 static bool fused_supported(const Case &c) {
-  const bool decode_geometry_ok = (c.sq != 1) || geometry_ok(c.H, c.G, c.D);
+  const bool is_decode = (c.sq == 1);
+  const bool decode_geometry_ok = !is_decode || geometry_ok(c.H, c.G, c.D);
+  const bool head_dim_ok = (c.D == 64 || c.D == 128 || c.D == 256);
   return c.elem == 2 && c.window <= 0 && c.smooth != 1 && c.sink == 0 &&
-         (c.D == 64 || c.D == 128) && decode_geometry_ok;
+         head_dim_ok && decode_geometry_ok;
 }
 
 static double rel_l2(const std::vector<float> &a, const std::vector<float> &b) {
@@ -439,6 +442,14 @@ int main(int argc, char **argv) {
       {"decode  qwen14b skv1k ", 1, 40, 8, 128, 1, 1023, 2, -1, 0, 0},
       {"decode  qwen14b skv2k ", 1, 40, 8, 128, 1, 2047, 2, -1, 0, 0},
       {"prefill qwen14b s512  ", 1, 40, 8, 128, 512, 0, 2, -1, 0, 0},
+      // ---- qwen3-9b 16:4 (HpG=4) d256: now fused flash_decode_v2 (scalar) ----
+      // BACK rejects d=256 (gate = d in {64,128}) -> slow decomposed pipeline,
+      // so NEW should win. Scalar decode is D-generic; d=256 uses BKV=16, EPT=8.
+      {"decode  qwen3-9b skv256", 1, 16, 4, 256, 1, 255, 2, -1, 0, 0},
+      {"decode  qwen3-9b skv1k ", 1, 16, 4, 256, 1, 1023, 2, -1, 0, 0},
+      {"decode  qwen3-9b skv2k ", 1, 16, 4, 256, 1, 2047, 2, -1, 0, 0},
+      {"decode  qwen3-9b skv8k ", 1, 16, 4, 256, 1, 8192, 2, -1, 0, 0},
+      {"decode  qwen3-9b B4    ", 4, 16, 4, 256, 1, 2047, 2, -1, 0, 0},
       // ---- fallback: sliding-window size sweep ----
       {"decode  WIN64 d64     ", 1, 64, 8, 64, 1, 2048, 2, 64, 0, 0},
       {"decode  WIN256 d64    ", 1, 64, 8, 64, 1, 2048, 2, 256, 0, 0},
@@ -451,7 +462,20 @@ int main(int argc, char **argv) {
       // ---- fallback: odd head_dim sweep (d=80 phi-style, d=128 ok but HpG odd) ----
       {"decode  d80 odd-dim   ", 1, 32, 8, 80, 1, 2048, 2, -1, 0, 0},
       {"prefill d80 odd-dim   ", 1, 32, 8, 80, 512, 0, 2, -1, 0, 0},
+      // decode + prefill d256 are both now fused (decode: scalar flash-decode;
+      // prefill: v7 WMMA, D-generic). BACK rejects d=256 -> decomposed, so NEW
+      // should win on both.
       {"decode  d256 big-dim  ", 1, 16, 4, 256, 1, 2048, 2, -1, 0, 0},
+      {"prefill d256 s128     ", 1, 16, 4, 256, 128, 0, 2, -1, 0, 0},
+      {"prefill d256 s512     ", 1, 16, 4, 256, 512, 0, 2, -1, 0, 0},
+      {"prefill d256 s1024    ", 1, 16, 4, 256, 1024, 0, 2, -1, 0, 0},
+      {"prefill d256 s2048    ", 1, 16, 4, 256, 2048, 0, 2, -1, 0, 0},
+      // apples-to-apples d128 (same 16:4 geometry) to compare speedup vs d256.
+      {"decode  d128 16:4 2k  ", 1, 16, 4, 128, 1, 2048, 2, -1, 0, 0},
+      {"prefill d128 16:4 s128", 1, 16, 4, 128, 128, 0, 2, -1, 0, 0},
+      {"prefill d128 16:4 s512", 1, 16, 4, 128, 512, 0, 2, -1, 0, 0},
+      {"prefill d128 16:4 1024", 1, 16, 4, 128, 1024, 0, 2, -1, 0, 0},
+      {"prefill d128 16:4 2048", 1, 16, 4, 128, 2048, 0, 2, -1, 0, 0},
       // ---- untemplated decode geometry sweep (HpG 6,12 still fallback; HpG5
       //      is now fused via flash_decode_v2, kept here as a d64 cross-check) --
       {"decode  HpG5 d64      ", 1, 20, 4, 64, 1, 2048, 2, -1, 0, 0},
