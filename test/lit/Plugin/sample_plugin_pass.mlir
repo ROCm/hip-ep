@@ -2,32 +2,25 @@
 // Licensed under the MIT License.
 //
 //===----------------------------------------------------------------------===//
-// REQUIRES: hip_plugins_enabled
+// REQUIRES: hip_static_plugins
 //
-// Validates the pass-instance half of the public plugin ABI end-to-end: a
-// plugin loaded via HIP_EP_PLUGINS registers an MLIR pass with
-// mlir::PassRegistration<>(), and the host resolves + runs it by name.
+// Validates the pass-instance half of the plugin surface end-to-end: the sample
+// plugin registers an MLIR pass with mlir::PassRegistration<>() from its
+// hipEpRegisterPlugin_sample entry, and the host resolves + runs it by name.
 //
-// This works because the tools are built with HIPDNN_ENABLE_PLUGINS, which
-// makes hip-mlir-opt export its statically-linked MLIR symbols (LLVM's
-// export_executable_symbols_for_plugins, the same call mlir-opt makes). The
-// plugin's MLIR registry references then bind to the host's single copy at
-// dlopen time, so the plugin's registration lands in the registry the host
-// reads. (Built WITHOUT that export, host and plugin would have separate
-// static MLIR registries and the lookup would miss -- hence the
-// hip_plugins_enabled gate.) The slot-recording / bitcode / library halves of
-// the ABI work regardless and are covered by test/plugin/test_plugin_loader.
+// The sample plugin is linked STATICALLY into hip-mlir-opt (via the static
+// registrar, cmake/HipEpPlugins.cmake), so its registration lands in the host's
+// single MLIR pass registry -- no symbol export, no dlopen. hip-mlir-opt's main
+// runs dispatchPluginRegistrationsOnce() before parsing the command line, so
+// --hip-ep-sample-print-functions is a recognised pass name.
 //
-// hip_plugins_enabled is an explicit opt-in (CMake -DHIPDNN_PLUGIN_LIT_TESTS=ON,
-// default OFF) because the symbol export above only actually works when the host
-// is built against a plugin-capable LLVM (shared / default-visibility); against
-// a static, hidden-visibility LLVM the export is empty and the plugin fails to
-// load. Without the opt-in this test is UNSUPPORTED rather than failing.
+// hip_static_plugins is set when the build selected the sample plugin
+// (-DHIPDNN_EP_COMPILER_PLUGINS=sample). The default build selects no plugins,
+// so this test is UNSUPPORTED there rather than failing. Unlike the previous
+// dlopen model, this works identically on Windows and Linux.
 //===----------------------------------------------------------------------===//
 
-// RUN: env HIP_EP_PLUGINS=%hip-ep-sample-plugin \
-// RUN:   hip-mlir-opt --hip-ep-sample-print-functions %s 2>&1 \
-// RUN:   | FileCheck %s
+// RUN: hip-mlir-opt --hip-ep-sample-print-functions %s 2>&1 | FileCheck %s
 
 // CHECK: [hip-ep-sample] visited f
 func.func @f(%arg0 : i32) -> i32 {

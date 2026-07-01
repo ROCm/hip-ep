@@ -49,15 +49,12 @@ option(BUILD_MOCK_RUNTIME "Build mock runtime (no GPU required)" ON)
 option(BUILD_HIP_UNIT_TESTS "Build and register LIT and E2E tests with CTest" ON)
 option(BUILD_PYTHON_WHEEL "Configure the 'wheel' target that packages the EP as a Python wheel" OFF)
 
-# Export the hip-compiler / hip-mlir-opt executables' statically-linked MLIR
-# symbols so plugins loaded via HIP_EP_PLUGINS (dlopen'd into the tool process)
-# bind to the host's single MLIR pass registry. This mirrors upstream LLVM's
-# export_executable_symbols_for_plugins (the call mlir-opt makes). LLVM itself
-# is linked as the shared libLLVM, so the export covers only MLIR symbols; ROCm's
-# libamd_comgr.so references no MLIR symbols (it resolves its LLVM from the same
-# shared libLLVM), so the export does not perturb comgr.
-option(HIPDNN_ENABLE_PLUGINS
-       "Export tool symbols so HIP_EP_PLUGINS plugins share the host MLIR registry" ON)
+# Compiler plugins are linked STATICALLY into the host at configure time (IREE
+# model; see cmake/HipEpPlugins.cmake and docs/design/plugin-interface.md).
+# Select which plugins to link with -DHIPDNN_EP_COMPILER_PLUGINS=<id;...>
+# (default empty). No symbol export, no dlopen, identical on Windows and Linux.
+# HipEpPlugins.cmake is included in the BUILD_HIP_TOOLS block below (it needs the
+# LLVM/MLIR toolchain resolved first) and defines HIPDNN_EP_COMPILER_PLUGINS.
 
 # Centralized dependency resolution. Always included; internally partitions by
 # BUILD_EP / BUILD_HIP_TOOLS so a tools-only tree (BUILD_EP=OFF) still gets the
@@ -136,16 +133,11 @@ if(BUILD_HIP_TOOLS)
   include(AddLLVM)
   include(AddMLIR)
 
-  # export_executable_symbols_for_plugins() (called on the tool targets in
-  # tools/hip-compiler and tools/hip-mlir-opt) only exports when one of LLVM's
-  # plugin gate variables is set. Set LLVM_ENABLE_PLUGINS (NOT
-  # LLVM_EXPORT_SYMBOLS_FOR_PLUGINS) so the export takes the ENABLE_EXPORTS /
-  # -rdynamic path, which does not require the LLVM source tree's
-  # utils/extract_symbols.py (absent in a prebuilt LLVM). Set before
-  # add_subdirectory(tools) so the tool CMakeLists see it.
-  if(HIPDNN_ENABLE_PLUGINS)
-    set(LLVM_ENABLE_PLUGINS ON)
-  endif()
+  # Static compiler-plugin machinery: HIPDNN_EP_COMPILER_PLUGINS cache var +
+  # hipdnn_ep_compiler_plugin_register() + hipdnn_ep_finalize_static_plugins().
+  # Included here (after the LLVM/MLIR toolchain is resolved) and before
+  # add_subdirectory(lib)/(tools)/(test) so plugin packages can register.
+  include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/HipEpPlugins.cmake)
 
   llvm_map_components_to_libnames(llvm_libs Support Core)
 
@@ -241,10 +233,15 @@ if(BUILD_HIP_TOOLS)
     # Runtime unit tests (GPU-free; native against mock types)
     add_subdirectory(test/runtime)
 
-    # Plugin loader unit tests (PR 1 of the plugin extension API).
+    # Static compiler-plugin tests (sample plugin + unit test).
     # See docs/design/plugin-interface.md.
     add_subdirectory(test/plugin)
   endif()
+
+  # Finalize static compiler plugins: generate the registrar include and link
+  # the selected plugin static libs into LibHipCompiler. Must run after every
+  # plugin package (in-tree: test/plugin) has registered.
+  hipdnn_ep_finalize_static_plugins()
 endif()
 
 # Python wheel packaging (opt-in; defines the 'wheel' target). Added last so

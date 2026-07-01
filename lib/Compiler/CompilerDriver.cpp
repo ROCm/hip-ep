@@ -4,7 +4,6 @@
  */
 
 #include "hip/Compiler/CompilerDriver.h"
-#include "hip/Compiler/PluginLoader.h"
 #include "hip/Compiler/PluginRegistry.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Pipelines.h"
@@ -52,8 +51,8 @@ bool CompilerDriver::compile(llvm::StringRef input_mlir,
                              const mlir::hip::CompilationOptionsT &options,
                              std::string &error_message) {
   hip::compiler::registerAllPasses();
-  // Load any HIP_EP_PLUGINS-listed DLLs and run their RegisterCallbacks
-  // (idempotent across compile() calls). Plugin passes must land in
+  // Run every statically-linked plugin's registration (idempotent across
+  // compile() calls; no-op when none were selected). Plugin passes must land in
   // MLIR's pass registry BEFORE buildOnnxToHipPipeline / buildHipToLLVMPipeline
   // run, otherwise their slot lookups will silently miss.
   hip::compiler::dispatchPluginRegistrationsOnce();

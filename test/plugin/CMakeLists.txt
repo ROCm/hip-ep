@@ -4,18 +4,24 @@
 ##
 
 #=============================================================================
-# Plugin loader tests
+# Static compiler-plugin tests
 #=============================================================================
-# Builds a small sample plugin DLL exposing the public ABI from
-# include/hip/Compiler/PluginAPI.h, and a unit test that loads it and
-# validates the loader's behaviour.
+# Builds the sample static plugin (available to the registrar) and a unit test
+# that runs the static registrar and validates the recorded registry state.
+#
+# The sample is LINKED into the host only when `sample` is in
+# HIPDNN_EP_COMPILER_PLUGINS (see cmake/HipEpPlugins.cmake); the unit test is
+# told which case it is in via HIP_EP_EXPECT_SAMPLE and asserts either the
+# sample's contributions (selected) or a clean no-op (not selected). This means
+# the test passes in the default build (no plugins) and in a plugin-enabled
+# build alike.
 #
 # See docs/design/plugin-interface.md for the broader context.
 
-message(STATUS "Configuring plugin loader tests")
+message(STATUS "Configuring static compiler-plugin tests")
 
-# Sample plugin DLL — built unconditionally so CTest can always run
-# the loader test.
+# Sample static plugin — always built (available to the registrar); linked only
+# when selected.
 add_subdirectory(sample_plugin)
 
 # Plain main()-driven test (no GTest dependency), so it has no dependency the
@@ -28,20 +34,18 @@ target_link_libraries(test_plugin_loader PRIVATE
   LibHipCompiler
 )
 
-# Pass the absolute path of the sibling sample plugin into the test
-# at compile time so it does not depend on cwd / PATH at run time.
-target_compile_definitions(test_plugin_loader PRIVATE
-  "HIP_EP_SAMPLE_PLUGIN_PATH=\"$<TARGET_FILE:hip_ep_sample_plugin>\""
-)
-
-# Make sure the sample plugin is built before the test runs.
-add_dependencies(test_plugin_loader hip_ep_sample_plugin)
+# Tell the test whether the sample plugin is statically linked into this build
+# (i.e. selected via HIPDNN_EP_COMPILER_PLUGINS). dispatchPluginRegistrationsOnce
+# comes from LibHipCompiler, which links the sample only when selected.
+if("sample" IN_LIST HIPDNN_EP_COMPILER_PLUGINS)
+  target_compile_definitions(test_plugin_loader PRIVATE HIP_EP_EXPECT_SAMPLE=1)
+else()
+  target_compile_definitions(test_plugin_loader PRIVATE HIP_EP_EXPECT_SAMPLE=0)
+endif()
 
 set_target_properties(test_plugin_loader PROPERTIES FOLDER "mlir/Test/Plugin")
 
-# Register with CTest. WORKING_DIRECTORY is the build directory of the
-# test exe so the sample plugin DLL sits next to it on Windows (where
-# the loader resolves dependent DLLs from the EXE's directory by default).
+# Register with CTest.
 add_test(NAME PluginLoader
   COMMAND test_plugin_loader
   WORKING_DIRECTORY $<TARGET_FILE_DIR:test_plugin_loader>

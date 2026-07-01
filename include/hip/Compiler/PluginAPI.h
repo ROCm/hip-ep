@@ -6,111 +6,72 @@
 #ifndef HIP_COMPILER_PLUGIN_API_H
 #define HIP_COMPILER_PLUGIN_API_H
 
-#include "llvm/Support/Compiler.h"
-#include <cstdint>
-
-// Plugin extension ABI for hip-compiler.
+// Plugin extension entry point for hip-compiler.
 //
-// This is the public C ABI surface that vendor plugins compile against. A
-// plugin is a shared library that exports `hipEpGetPluginInfo()`; the
-// compiler loads it, validates the API version, and invokes its single
-// registration callback. See docs/design/plugin-interface.md for the
-// design rationale.
+// Plugins are linked STATICALLY into the host at configure time (IREE model;
+// see cmake/HipEpPlugins.cmake and docs/design/plugin-interface.md). A plugin
+// is a static library that defines ONE registration entry point:
 //
-// The struct layout is not yet frozen, so treat `HIP_EP_PLUGIN_API_VERSION`
-// as provisional until the design is ratified.
+//   extern "C" void hipEpRegisterPlugin_<id>(hip::compiler::HipEpPluginRegistry
+//   &R);
+//
+// where `<id>` matches the plugin's id in `HIPDNN_EP_COMPILER_PLUGINS`. The
+// host's CMake-generated registrar (StaticPlugins.cpp) declares and CALLS this
+// function once per process; the body uses the supplied registry to register
+// passes, dialects/ops, pipeline-slot requests, runtime bitcode, and link
+// libraries -- exactly the same registry surface the old dynamic
+// `RegisterCallbacks` used.
+//
+// Why static (not a dlopen'd DLL exporting `hipEpGetPluginInfo`): an
+// MLIR-contributing plugin must share the host's process-global MLIR state
+// (one pass registry, one set of op TypeIDs). Achieving that across a dynamic
+// boundary requires exporting the host's `mlir::` symbols, which is a ~133K-
+// symbol surface that does not fit the Windows PE 65,535 export-table cap.
+// Static linking makes the plugin and host one binary, so they share MLIR by
+// construction, with no export -- identical on Windows and Linux. This matches
+// what the MLIR ecosystem does (IREE's `-DIREE_COMPILER_PLUGINS=`).
+//
+// There is no runtime version handshake: because the plugin and host are built
+// and linked together, an ABI mismatch is a build error, not a load-time
+// surprise. HIP_EP_PLUGIN_API_VERSION remains only as a documentation / source
+// marker for the registry surface.
 
 namespace hip::compiler {
 class HipEpPluginRegistry;
 } // namespace hip::compiler
 
-namespace hip::compiler {
-
-/// API version understood by this plugin.
-///
-/// Incremented for ANY ABI-breaking change to the HipEpPluginLibraryInfo
-/// struct (a callback added, removed, or reordered) OR to the
-/// HipEpPluginRegistry::VTable layout (a registry capability added or
-/// reordered). There is no major/minor split: the loader rejects any version
-/// it does not equal.
+/// Source-level marker for the plugin registry surface (see PluginRegistry.h).
+/// Bumped when the HipEpPluginRegistry method set changes. Not consulted at
+/// runtime -- static linking guarantees plugin and host agree by construction.
 ///
 /// History:
-///   1 -- initial: registerPass, requestPipelineSlot, addRuntimeBitcode,
+///   1 -- registerPass, requestPipelineSlot, addRuntimeBitcode,
 ///        addLibraryPath, addLibrary.
-///   2 -- added addDialectRegistration (vtable entry 5) for out-of-tree
-///        dialect + op + bufferization/lowering-interface contribution.
-#define HIP_EP_PLUGIN_API_VERSION 2
+///   2 -- added addDialectRegistration (dialect + op + bufferization/lowering
+///        interface contribution).
+///   3 -- static linkage model: per-id `hipEpRegisterPlugin_<id>` entry point
+///        replaces the dynamic `hipEpGetPluginInfo` + `HipEpPluginLibraryInfo`.
+#define HIP_EP_PLUGIN_API_VERSION 3
 
-extern "C" {
-
-/// Plugin info struct returned by hipEpGetPluginInfo().
-///
-/// Returned **by value** so the plugin owns no allocations the host
-/// would have to free. The string fields point at static storage in
-/// the plugin DLL and remain valid for the lifetime of the loaded
-/// plugin (i.e., until the host calls dlclose / FreeLibrary, which
-/// hip-compiler does not do today — plugins are loaded permanently
-/// for the lifetime of the process).
-struct HipEpPluginLibraryInfo {
-  /// API version understood by this plugin. Should equal
-  /// HIP_EP_PLUGIN_API_VERSION at the time the plugin was built.
-  uint32_t APIVersion;
-
-  /// Human-readable plugin name, used in load-time logging.
-  /// E.g., "AMDInternalAcceleratorPlugin".
-  const char *PluginName;
-
-  /// Vendor's own version string, e.g., "1.2.3" or a git SHA.
-  /// Used for diagnostic logging only; the host does not parse it.
-  const char *PluginVersion;
-
-  /// The single registration callback. The plugin uses the supplied
-  /// registry to register passes, request pipeline-slot insertions,
-  /// contribute runtime bitcode, and contribute external libraries.
-  /// Called exactly once at plugin load.
-  ///
-  /// Set this to nullptr if the plugin has no registrations to make
-  /// (e.g., a placeholder plugin used only for ABI smoke testing);
-  /// the loader will still consider the load successful.
-  void (*RegisterCallbacks)(HipEpPluginRegistry &);
-};
-
-} // extern "C"
-
-} // namespace hip::compiler
-
-/// Public entry point for a hip-compiler plugin.
-///
-/// The host looks up this symbol by name in the plugin library and calls it
-/// to obtain the plugin info struct.
-///
-/// `LLVM_ATTRIBUTE_WEAK` lets the same source be either statically linked
-/// into a tool (symbol resolved at link time) or dynamically loaded. It is a
-/// no-op on Windows, where the plugin must export the *definition*
-/// explicitly: annotate it with `__declspec(dllexport)`, or set
-/// `WINDOWS_EXPORT_ALL_SYMBOLS` on the plugin's CMake target.
-///
-/// Example plugin implementation:
+/// Convenience macro for a plugin's registration entry point. Expands to the
+/// correctly-named `extern "C"` function signature; follow it with a body.
 ///
 /// ```
-/// extern "C" ::hip::compiler::HipEpPluginLibraryInfo LLVM_ATTRIBUTE_WEAK
-/// hipEpGetPluginInfo() {
-///   return {
-///       HIP_EP_PLUGIN_API_VERSION,
-///       "MyVendorPlugin",
-///       "0.1.0",
-///       [](::hip::compiler::HipEpPluginRegistry &R) {
-///         R.registerPass<MyPass>();
-///         R.requestPipelineSlot(
-///             ::hip::compiler::PipelineSlot::AfterConvertOnnxToHip,
-///             "my-pass");
-///         R.addRuntimeBitcode(my_bc, my_bc_size);
-///         R.addLibraryPath("/path/to/libs");
-///         R.addLibrary("vendor_kernels");
-///       }};
+/// HIP_EP_DEFINE_PLUGIN(myvendor) {
+///   R.registerPass<MyPass>();
+///   R.requestPipelineSlot(
+///       ::hip::compiler::PipelineSlot::AfterConvertOnnxToHip, "my-pass");
+///   R.addRuntimeBitcode(my_bc, my_bc_size);
+///   R.addLibraryPath("/path/to/libs");
+///   R.addLibrary("vendor_kernels");
 /// }
 /// ```
-extern "C" ::hip::compiler::HipEpPluginLibraryInfo LLVM_ATTRIBUTE_WEAK
-hipEpGetPluginInfo();
+///
+/// The `<id>` (here `myvendor`) must match the id passed to
+/// `hipdnn_ep_compiler_plugin_register(PLUGIN_ID myvendor ...)` and listed in
+/// `HIPDNN_EP_COMPILER_PLUGINS`.
+#define HIP_EP_DEFINE_PLUGIN(id)                                               \
+  extern "C" void hipEpRegisterPlugin_##id(                                    \
+      ::hip::compiler::HipEpPluginRegistry &R)
 
 #endif // HIP_COMPILER_PLUGIN_API_H
