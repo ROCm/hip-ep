@@ -114,13 +114,14 @@ static constexpr int kFlashDecodeMaxSplits = 64;
 
 // Geometry gate for the flash_decode kernel template instantiations. The scalar
 // decode kernel is templated for HpG in {1,2,3,4,5,8,16} (so it covers MHA and
-// the common GQA ratios, incl. Qwen2.5-14B's 40:8=5) at d in {64,128}; WMMA is
-// layered on top inside the kernel where it helps. Anything outside this set
-// has no decode kernel.
+// the common GQA ratios, incl. Qwen2.5-14B's 40:8=5) at d in {64,128,256}
+// (d=256 covers Qwen3-family 16:4 heads); WMMA is layered on top inside the
+// kernel where it helps (d<=128 only). Anything outside this set has no decode
+// kernel.
 static inline bool flash_decode_geometry_ok(int64_t H, int64_t G, int64_t d) {
   if (G <= 0)
     return false;
-  if (d != 64 && d != 128)
+  if (d != 64 && d != 128 && d != 256)
     return false;
   int64_t hpg = H / G;
   if (hpg * G != H)
@@ -278,7 +279,7 @@ static int gqa_forward_fused(
     if (!flash_decode_geometry_ok(H, G, d)) {
       fprintf(stderr,
               "gqa_forward_fused (decode): unsupported geometry H=%lld G=%lld "
-              "d=%lld (HpG must be 1/2/3/4/5/8/16 and d 64 or 128)\n",
+              "d=%lld (HpG must be 1/2/3/4/5/8/16 and d 64/128/256)\n",
               (long long)H, (long long)G, (long long)d);
       return -1;
     }
@@ -1446,13 +1447,19 @@ int wrap_gqa_flash(
   // that path is not slower than the original. The common fp16 causal case
   // still takes the fast fused path here.
   //===------------------------------------------------------------------===//
+  const bool is_decode = (seq_len_q == 1);
   const bool decode_geometry_ok =
-      (seq_len_q != 1) ||
-      flash_decode_geometry_ok(num_heads, kv_num_heads, head_dim);
-  const bool fused_supported =
-      element_size_bytes == 2 && no_causal == 0 && local_window_size <= 0 &&
-      head_sink == nullptr && smooth_softmax != 1 &&
-      (head_dim == 64 || head_dim == 128) && decode_geometry_ok;
+      !is_decode || flash_decode_geometry_ok(num_heads, kv_num_heads, head_dim);
+  // head_dim gate: the fused WMMA prefill (v7) and the scalar flash-decode
+  // kernels both cover d in {64,128,256} now (d=256 for Qwen3-family 16:4). For
+  // decode, flash_decode_geometry_ok already validates d; for prefill we clamp
+  // to the templated set here.
+  const bool head_dim_ok =
+      is_decode ? true : (head_dim == 64 || head_dim == 128 || head_dim == 256);
+  const bool fused_supported = element_size_bytes == 2 && no_causal == 0 &&
+                               local_window_size <= 0 && head_sink == nullptr &&
+                               smooth_softmax != 1 && head_dim_ok &&
+                               decode_geometry_ok;
 
   if (!fused_supported) {
     hipblasLtHandle_t ltHandle = static_cast<hipblasLtHandle_t>(

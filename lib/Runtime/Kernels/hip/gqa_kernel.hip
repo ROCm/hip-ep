@@ -1004,7 +1004,8 @@ typedef float    float8 __attribute__((ext_vector_type(8)));
 //   - HPG=8  (gpt-oss-20b at d=64; 64 q heads / 8 kv heads)
 //
 // Constraints (asserted at launcher):
-//   - D must be 64 or 128.
+//   - D must be 64, 128 or 256 (EPT = D/32 in 1..8; D=256 -> BKV=16 to keep
+//     the LDS tile ~16KB). The scalar kernel is otherwise D-generic.
 //   - RDNA wave32 (uses __shfl_xor across 32 lanes).
 //===----------------------------------------------------------------------===//
 
@@ -1031,13 +1032,14 @@ gqa_flash_decode_kernel(
   // Keep the K+V LDS tile at ~16KB/block (4 blocks resident per 64KB-LDS CU)
   // regardless of D, so DRAM latency stays hidden. At BKV=64,D=128 the tile
   // would be 32KB -> only 2 resident blocks -> latency-bound (decode stalls
-  // ~1.6x). 2*BKV*D*2 bytes: D=128 -> BKV=32 (16KB), D=64 -> BKV=64 (16KB).
-  constexpr int BKV = (D == 128) ? 32 : FLASH_DECODE_BKV;
+  // ~1.6x). 2*BKV*D*2 bytes: D=256 -> BKV=16 (16KB), D=128 -> BKV=32 (16KB),
+  // D=64 -> BKV=64 (16KB).
+  constexpr int BKV = (D >= 256) ? 16 : (D == 128) ? 32 : FLASH_DECODE_BKV;
   constexpr int THREADS = HPG * WAVE_SIZE;  // total threads in block
   constexpr int EPT = D / WAVE_SIZE;  // elements-per-thread along d
 
   static_assert(D % WAVE_SIZE == 0, "D must be a multiple of WAVE_SIZE");
-  static_assert(EPT >= 1 && EPT <= 4, "EPT must be 1..4");
+  static_assert(EPT >= 1 && EPT <= 8, "EPT must be 1..8");
 
   const int batch     = __builtin_amdgcn_readfirstlane(blockIdx.x / G);
   const int head_kv   = __builtin_amdgcn_readfirstlane(blockIdx.x % G);
@@ -1652,7 +1654,12 @@ static inline void launchFlashDecodeConfig(
     // and MHA (HpG==1) alike; we just instantiate every supported HpG.
     #define LAUNCH_SCALAR(HPG_)                                                \
       do {                                                                     \
-        if (d == 128)                                                          \
+        if (d == 256)                                                          \
+          gqa_flash_decode_kernel<256, HPG_>                                   \
+              <<<grid_main, (HPG_) * WAVE_SIZE, 0, stream>>>(                  \
+                  hQ, hK, hV, hP, H, G, max_seq, scale, iSeq,                  \
+                  local_window_size, splits);                                  \
+        else if (d == 128)                                                     \
           gqa_flash_decode_kernel<128, HPG_>                                   \
               <<<grid_main, (HPG_) * WAVE_SIZE, 0, stream>>>(                  \
                   hQ, hK, hV, hP, H, G, max_seq, scale, iSeq,                  \
@@ -1679,7 +1686,10 @@ static inline void launchFlashDecodeConfig(
   // Reduce: one block per query head, block dim D. seqlens_k / sliding-window /
   // head_sink / smooth_softmax are all folded in here (not the partials).
   dim3 grid_reduce(B * H);
-  if (d == 128)
+  if (d == 256)
+    gqa_flash_decode_reduce_kernel<256><<<grid_reduce, 256, 0, stream>>>(
+        hP, hO, H, hSink, H, use_smooth_softmax, splits);
+  else if (d == 128)
     gqa_flash_decode_reduce_kernel<128><<<grid_reduce, 128, 0, stream>>>(
         hP, hO, H, hSink, H, use_smooth_softmax, splits);
   else
@@ -1730,13 +1740,14 @@ static std::mutex g_flash_decode_mutex;
 // the per-call CPU cost overlaps GPU execution. It matters in *host-bound* real
 // decode (per-token host sync / sampling between steps drains the queue, so the
 // CPU cost is on the critical path). skv is bucketed to its next-power-of-two
-// exponent. Layout: B[34..41] H[24..33] G[14..23] d[6..13] log2bucket[0..5].
+// exponent. Layout: B[40..51] H[28..39] G[16..27] d[6..15] log2bucket[0..5].
+// d gets a full 10 bits so d=256 (Qwen3 16:4) does not spill into G.
 static uint64_t flashDecodeKey(int B, int H, int G, int d, int skv) {
   int blog = 0;
   uint32_t bucket = 1;
   while (bucket < (uint32_t)skv) { bucket <<= 1; ++blog; }
-  return ((uint64_t)(uint32_t)B << 34) | ((uint64_t)(uint32_t)H << 24) |
-         ((uint64_t)(uint32_t)G << 14) | ((uint64_t)(uint32_t)d << 6) |
+  return ((uint64_t)(uint32_t)B << 40) | ((uint64_t)(uint32_t)H << 28) |
+         ((uint64_t)(uint32_t)G << 16) | ((uint64_t)(uint32_t)d << 6) |
          (uint64_t)(uint32_t)blog;
 }
 
@@ -1834,9 +1845,10 @@ extern "C" int hip_gqa_flash_decode_v2(
             hpg, H, G);
     return -1;
   }
-  if (d != 64 && d != 128) {
+  if (d != 64 && d != 128 && d != 256) {
     fprintf(stderr,
-            "hip_gqa_flash_decode_v2: unsupported d=%d (must be 64 or 128)\n", d);
+            "hip_gqa_flash_decode_v2: unsupported d=%d (must be 64/128/256)\n",
+            d);
     return -1;
   }
 
@@ -1906,12 +1918,15 @@ extern "C" int hip_gqa_flash_decode_v2(
 }
 
 //===----------------------------------------------------------------------===//
-// Fused FA-2 WMMA prefill kernels (v5 d64 / v7 d128)
+// Fused FA-2 WMMA prefill kernels (v5 d64 / v7 d128 / v8 d256)
 //
-// Merged in from the former standalone gqa_flash_prefill_v5.hip /
-// gqa_flash_prefill_v7.hip. fp16 in/out, fp32 accumulate, D in {64,128},
-// causal, GQA. Q [B,sq,Hq,D]; K/V cache [B,G,max_seq,D]. Each launcher
-// self-tunes its config per (d,sq,skv,Hq,G) shape on first use.
+// fp16 in/out, fp32 accumulate, causal, GQA. Q [B,sq,Hq,D]; K/V cache
+// [B,G,max_seq,D]. Each launcher self-tunes its config per (d,sq,skv,Hq,G)
+// shape on first use. The unified hip_gqa_flash_prefill_v2 entry selects:
+//   d==64  -> v5 (warp-private, register-resident)
+//   d==128 -> v7 (M-register-blocked, K streamed from global)
+//   d==256 -> v8 (output-D split across ND waves + secondary score
+//                 reduction; halves per-wave Q_reg/O_h to lift occupancy)
 //===----------------------------------------------------------------------===//
 namespace {
 typedef _Float16 half16_t __attribute__((ext_vector_type(16)));
@@ -2323,7 +2338,10 @@ gqa_flash_prefill_v7_kernel(
 
     // ---- Q in registers: Q_reg[mt][tk], row = row_base + mt*16 + wmma_lane.
     //      (Tried Q->LDS to free VGPRs -- net loss: occupancy didn't rise but the
-    //       per-WMMA LDS re-reads hit the LDS port; registers win here.) ----
+    //       per-WMMA LDS re-reads hit the LDS port; registers win here. Also
+    //       tried streaming Q from global at D=256 to shed the resident
+    //       Q_reg[MT][16] -- also a net loss: the per-KV-tile Q reloads (xnum_tiles)
+    //       cost more than the spill they avoid.) ----
     half16_t Q_reg[MT][D_TILES];
     #pragma unroll
     for (int mt = 0; mt < MT; ++mt) {
@@ -2552,8 +2570,9 @@ static inline void dispatchPrefillV7(
             }                                                                   \
         } while (0)
 
-    if (d == 64) DISPATCH_V7_D(64);
-    else         DISPATCH_V7_D(128);
+    if (d == 64)       DISPATCH_V7_D(64);
+    else if (d == 128) DISPATCH_V7_D(128);
+    else               DISPATCH_V7_D(256);
     #undef DISPATCH_V7_D
     #undef LAUNCH_V7
 }
@@ -2630,7 +2649,410 @@ static int tunePrefillV7Cfg(
     return cands[best].mt * 1000000 + cands[best].nw * 1000 + cands[best].bkv;
 }
 
-}  // namespace (fused prefill v5/v7)
+// =====================================================================
+// Prefill v8: D=256-specialized "output-D split + score reduction".
+//
+// A block runs ND waves that share the SAME query rows but each owns
+// D_TILES/ND output-D tiles. The score needs the full-D contraction, so
+// each wave computes a PARTIAL score over its own D slice; the partials
+// are summed across waves through LDS (the secondary reduction) to form
+// the full score. Every wave then runs an identical online softmax and a
+// value GEMM for its own (disjoint) output-D tiles. Halving each wave's
+// Q_reg/O_h footprint is what lifts occupancy at D=256 (the bottleneck
+// that capped v7); the smaller ROWS also spawns more blocks, filling the
+// GPU better on short prompts.
+// Grid: (num_q_tiles*B, Hq). Block: ND*32.
+// =====================================================================
+template <int ND, int MT, int BKV, int D>
+__global__ void __launch_bounds__(ND * 32)
+gqa_flash_prefill_v8_kernel(
+    const _Float16* __restrict__ Q,       // [B, sq, Hq, D]
+    const _Float16* __restrict__ Kcache,  // [B, G, max_seq, D]
+    const _Float16* __restrict__ Vcache,  // [B, G, max_seq, D]
+    _Float16* __restrict__ O,             // [B, sq, Hq, D]
+    int B_count, int Hq, int G, int sq, int skv, int max_seq, int past_len,
+    float scale, int ablate)
+{
+    const int abl = __builtin_amdgcn_readfirstlane(ablate);
+    constexpr int kWmmaTile = 16;
+    constexpr int ROWS      = MT * kWmmaTile;
+    constexpr int S_TILES_J = BKV / kWmmaTile;
+    constexpr int D_TILES   = D / kWmmaTile;
+    constexpr int DPG       = D_TILES / ND;    // D-tiles owned per wave
+    constexpr int P_STR     = BKV + 2;
+    constexpr int KV_STR    = D + 2;
+    constexpr int SP_STR    = BKV;             // partial-score LDS row stride
+    constexpr float kLog2e  = 1.4426950408889634f;
+
+    const int num_q_tiles = (sq + ROWS - 1) / ROWS;
+    const int q_tile_idx  = __builtin_amdgcn_readfirstlane(blockIdx.x % num_q_tiles);
+    const int batch       = __builtin_amdgcn_readfirstlane(blockIdx.x / num_q_tiles);
+    const int head_q      = __builtin_amdgcn_readfirstlane(blockIdx.y);
+    const int head_kv     = __builtin_amdgcn_readfirstlane(head_q / (Hq / G));
+
+    const int tid       = threadIdx.x;
+    const int group     = __builtin_amdgcn_readfirstlane(tid / 32);   // 0..ND-1
+    const int lane_id   = tid % 32;
+    const int wmma_lane = lane_id % kWmmaTile;
+    const int pair      = lane_id / kWmmaTile;
+    const int dt_base   = group * DPG;         // this wave's first D-tile
+    const int q_start   = q_tile_idx * ROWS;
+
+    extern __shared__ char smem_v8[];
+    _Float16* V_lds  = reinterpret_cast<_Float16*>(smem_v8);
+    float*    Sp_lds = reinterpret_cast<float*>(
+        smem_v8 + (size_t)BKV * KV_STR * sizeof(_Float16));
+    _Float16* P_lds  = reinterpret_cast<_Float16*>(
+        Sp_lds + (size_t)ND * ROWS * SP_STR);
+
+    const size_t kv_base =
+        (static_cast<size_t>(batch) * G + head_kv) * max_seq * D;
+
+    // ---- Q in registers: only THIS wave's D slice (DPG tiles) ----
+    half16_t Q_reg[MT][DPG];
+    #pragma unroll
+    for (int mt = 0; mt < MT; ++mt) {
+        const int q_pos = q_start + mt * kWmmaTile + wmma_lane;
+        const bool valid = q_pos < sq;
+        const size_t q_row_base =
+            (static_cast<size_t>(batch * sq + (valid ? q_pos : 0)) * Hq + head_q) * D;
+        #pragma unroll
+        for (int tk = 0; tk < DPG; ++tk)
+            Q_reg[mt][tk] = valid
+                ? HALF16_LOAD(&Q[q_row_base + (dt_base + tk) * 16]) : half16_t{};
+    }
+
+    half8_t O_h[MT][DPG] = {};
+    float   m_reg[MT][8];
+    float   l_reg[MT][8];
+    #pragma unroll
+    for (int mt = 0; mt < MT; ++mt)
+        #pragma unroll
+        for (int e = 0; e < 8; ++e) { m_reg[mt][e] = -INFINITY; l_reg[mt][e] = 0.0f; }
+
+    const int kv_max    = (skv - 1 < past_len + q_start + ROWS - 1)
+                              ? (skv - 1) : (past_len + q_start + ROWS - 1);
+    const int num_tiles = kv_max / BKV + 1;
+
+    for (int t = 0; t < num_tiles; ++t) {
+        const int kv0 = t * BKV;
+
+        // ---- cooperative V staging (all ND waves), row-major V[kv][d] ----
+        if (!(abl & 8)) {
+            for (int i = tid; i < BKV * D_TILES; i += ND * 32) {
+                const int kv_local = i / D_TILES;
+                const int dt       = i % D_TILES;
+                const int kv_pos   = kv0 + kv_local;
+                const bool kvalid  = kv_pos < skv;
+                const size_t off   = kv_base + (size_t)(kvalid ? kv_pos : 0) * D + dt * 16;
+                half16_t vv = kvalid ? HALF16_LOAD(&Vcache[off]) : half16_t{};
+                *reinterpret_cast<half16_t*>(&V_lds[kv_local * KV_STR + dt * 16]) = vv;
+            }
+        }
+
+        // ---- partial score GEMM over THIS wave's D slice (K from global) ----
+        float8_t S_reg[MT][S_TILES_J];
+        #pragma unroll
+        for (int mt = 0; mt < MT; ++mt)
+            #pragma unroll
+            for (int sj = 0; sj < S_TILES_J; ++sj) S_reg[mt][sj] = float8_t{};
+        if (!(abl & 4)) {
+            #pragma unroll
+            for (int sj = 0; sj < S_TILES_J; ++sj) {
+                const int key = kv0 + sj * 16 + wmma_lane;
+                const bool kvalid = key < skv;
+                const size_t k_row = kv_base + (size_t)(kvalid ? key : 0) * D;
+                #pragma unroll
+                for (int tk = 0; tk < DPG; ++tk) {
+                    half16_t k_frag = (kvalid && !(abl & 16))
+                        ? HALF16_LOAD(&Kcache[k_row + (dt_base + tk) * 16]) : half16_t{};
+                    #pragma unroll
+                    for (int mt = 0; mt < MT; ++mt)
+                        S_reg[mt][sj] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+                            Q_reg[mt][tk], k_frag, S_reg[mt][sj]);
+                }
+            }
+        }
+
+        // ---- secondary reduction: publish partials, then sum across waves ----
+        #pragma unroll
+        for (int mt = 0; mt < MT; ++mt)
+            #pragma unroll
+            for (int sj = 0; sj < S_TILES_J; ++sj)
+                #pragma unroll
+                for (int e = 0; e < 8; ++e) {
+                    const int rl  = e * 2 + pair;
+                    const int col = sj * 16 + wmma_lane;
+                    Sp_lds[((size_t)group * ROWS + mt * 16 + rl) * SP_STR + col] =
+                        S_reg[mt][sj][e];
+                }
+        __syncthreads();   // b_a: partials + V staging visible
+        #pragma unroll
+        for (int mt = 0; mt < MT; ++mt)
+            #pragma unroll
+            for (int sj = 0; sj < S_TILES_J; ++sj)
+                #pragma unroll
+                for (int e = 0; e < 8; ++e) {
+                    const int rl  = e * 2 + pair;
+                    const int col = sj * 16 + wmma_lane;
+                    float acc = 0.0f;
+                    #pragma unroll
+                    for (int g = 0; g < ND; ++g)
+                        acc += Sp_lds[((size_t)g * ROWS + mt * 16 + rl) * SP_STR + col];
+                    S_reg[mt][sj][e] = acc * scale * kLog2e;
+                }
+
+        // ---- online softmax on full S (identical across waves) ----
+        // Only group 0 stores P (all waves would write identical values);
+        // b_b then publishes it to every wave for the value GEMM.
+        if (!(abl & 1)) {
+            #pragma unroll
+            for (int mt = 0; mt < MT; ++mt) {
+                float corr_e[8];
+                #pragma unroll
+                for (int e = 0; e < 8; ++e) {
+                    const int rl    = e * 2 + pair;
+                    const int q_pos = q_start + mt * 16 + rl;
+                    float rmax = -INFINITY;
+                    #pragma unroll
+                    for (int sj = 0; sj < S_TILES_J; ++sj) {
+                        const int kv_pos = kv0 + sj * 16 + wmma_lane;
+                        if (kv_pos >= skv || kv_pos > past_len + q_pos)
+                            S_reg[mt][sj][e] = -INFINITY;
+                        rmax = fmaxf(rmax, S_reg[mt][sj][e]);
+                    }
+                    rmax = fmaxf(rmax, __shfl_xor(rmax, 1));
+                    rmax = fmaxf(rmax, __shfl_xor(rmax, 2));
+                    rmax = fmaxf(rmax, __shfl_xor(rmax, 4));
+                    rmax = fmaxf(rmax, __shfl_xor(rmax, 8));
+
+                    const float m_old = m_reg[mt][e];
+                    const float m_new = fmaxf(m_old, rmax);
+                    const float corr  = exp2f(m_old - m_new);
+                    corr_e[e]         = corr;
+
+                    float rsum = 0.0f;
+                    #pragma unroll
+                    for (int sj = 0; sj < S_TILES_J; ++sj) {
+                        const float p = exp2f(S_reg[mt][sj][e] - m_new);
+                        rsum += p;
+                        if (group == 0)
+                            P_lds[(mt * 16 + rl) * P_STR + sj * 16 + wmma_lane] =
+                                static_cast<_Float16>(p);
+                    }
+                    rsum += __shfl_xor(rsum, 1);
+                    rsum += __shfl_xor(rsum, 2);
+                    rsum += __shfl_xor(rsum, 4);
+                    rsum += __shfl_xor(rsum, 8);
+
+                    m_reg[mt][e] = m_new;
+                    l_reg[mt][e] = corr * l_reg[mt][e] + rsum;
+                }
+                // rescale this wave's owned O tiles by the correction
+                #pragma unroll
+                for (int tj = 0; tj < DPG; ++tj)
+                    #pragma unroll
+                    for (int e = 0; e < 8; ++e)
+                        O_h[mt][tj][e] =
+                            static_cast<_Float16>((float)O_h[mt][tj][e] * corr_e[e]);
+            }
+        }
+        __syncthreads();   // b_b: P_lds visible for the value GEMM
+
+        // ---- value GEMM: this wave's owned D tiles only ----
+        if (!(abl & 2))
+        for (int tj = 0; tj < DPG; ++tj) {
+            const int d_tile = dt_base + tj;
+            float8_t Of[MT];
+            #pragma unroll
+            for (int mt = 0; mt < MT; ++mt)
+                #pragma unroll
+                for (int e = 0; e < 8; ++e) Of[mt][e] = (float)O_h[mt][tj][e];
+            #pragma unroll
+            for (int tk = 0; tk < S_TILES_J; ++tk) {
+                half16_t v_frag;
+                #pragma unroll
+                for (int e = 0; e < 16; ++e)
+                    v_frag[e] = V_lds[(tk * 16 + e) * KV_STR + d_tile * 16 + wmma_lane];
+                #pragma unroll
+                for (int mt = 0; mt < MT; ++mt) {
+                    half16_t p_frag = HALF16_LOAD(
+                        &P_lds[(mt * 16 + wmma_lane) * P_STR + tk * 16]);
+                    Of[mt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+                        p_frag, v_frag, Of[mt]);
+                }
+            }
+            #pragma unroll
+            for (int mt = 0; mt < MT; ++mt)
+                #pragma unroll
+                for (int e = 0; e < 8; ++e)
+                    O_h[mt][tj][e] = static_cast<_Float16>(Of[mt][e]);
+        }
+        __syncthreads();   // b_c: WAR -- V_lds/Sp_lds/P_lds reused next tile
+    }
+
+    // ---- Epilogue: this wave writes its owned D tiles ----
+    #pragma unroll
+    for (int mt = 0; mt < MT; ++mt)
+        #pragma unroll
+        for (int tj = 0; tj < DPG; ++tj) {
+            const int c = (dt_base + tj) * 16 + wmma_lane;
+            #pragma unroll
+            for (int e = 0; e < 8; ++e) {
+                const int rl    = e * 2 + pair;
+                const int q_pos = q_start + mt * 16 + rl;
+                if (q_pos < sq && c < D) {
+                    const float l_val   = fmaxf(l_reg[mt][e], 1e-6f);
+                    const float out_val = (float)O_h[mt][tj][e] / l_val;
+                    O[(static_cast<size_t>(batch * sq + q_pos) * Hq + head_q) * D + c] =
+                        static_cast<_Float16>(out_val);
+                }
+            }
+        }
+}
+
+// ---------------------------------------------------------------------
+// v8 host: LDS sizing, dispatch, autotune (ND x MT x BKV at D=256).
+// ---------------------------------------------------------------------
+static inline size_t prefillV8SmemBytes(int nd, int mt, int bkv, int d) {
+    const int rows = mt * 16;
+    const size_t v_lds  = (size_t)bkv * (d + 2) * sizeof(_Float16);
+    const size_t sp_lds = (size_t)nd * rows * bkv * sizeof(float);
+    const size_t p_lds  = (size_t)rows * (bkv + 2) * sizeof(_Float16);
+    return v_lds + sp_lds + p_lds;
+}
+static constexpr size_t kPrefillV8MaxSmem = 65536;
+static int g_v8_ablate = 0;
+
+static inline void dispatchPrefillV8(
+    int nd, int mt, int bkv, int d, hipStream_t stream,
+    const _Float16* Q, const _Float16* Kcache, const _Float16* Vcache,
+    _Float16* O, int B, int Hq, int G, int sq, int skv, int max_seq,
+    int past_len, float scale)
+{
+    const int rows = mt * 16;
+    const int num_q_tiles = (sq + rows - 1) / rows;
+    dim3 grid(num_q_tiles * B, Hq);
+    const size_t smem = prefillV8SmemBytes(nd, mt, bkv, d);
+    const int ablate = g_v8_ablate;
+
+    #define LAUNCH_V8(ND_, MT_, BKV_)                                           \
+        gqa_flash_prefill_v8_kernel<ND_, MT_, BKV_, 256>                        \
+            <<<grid, ND_ * 32, smem, stream>>>(                                 \
+                Q, Kcache, Vcache, O, B, Hq, G, sq, skv, max_seq, past_len,     \
+                scale, ablate)
+
+    if      (nd == 2 && mt == 1 && bkv == 32) LAUNCH_V8(2, 1, 32);
+    else if (nd == 2 && mt == 2 && bkv == 32) LAUNCH_V8(2, 2, 32);
+    else if (nd == 2 && mt == 1 && bkv == 64) LAUNCH_V8(2, 1, 64);
+    else if (nd == 2 && mt == 2 && bkv == 64) LAUNCH_V8(2, 2, 64);
+    else if (nd == 4 && mt == 1 && bkv == 32) LAUNCH_V8(4, 1, 32);
+    else if (nd == 4 && mt == 2 && bkv == 32) LAUNCH_V8(4, 2, 32);
+    else                                      LAUNCH_V8(2, 1, 32);
+    #undef LAUNCH_V8
+}
+
+struct PrefillV8Cfg { int nd; int mt; int bkv; };
+static inline int prefillV8Candidates(int d, PrefillV8Cfg* out) {
+    static const PrefillV8Cfg kAll[] = {
+        {2, 1, 32}, {2, 2, 32}, {2, 1, 64}, {2, 2, 64}, {4, 1, 32}, {4, 2, 32}};
+    int n = 0;
+    for (const PrefillV8Cfg& c : kAll)
+        if (prefillV8SmemBytes(c.nd, c.mt, c.bkv, d) <= kPrefillV8MaxSmem)
+            out[n++] = c;
+    return n;
+}
+
+static std::unordered_map<std::string, int> g_v8_cfg_cache;
+static std::mutex g_v8_cfg_mutex;
+static char g_v8_tune_info[128] = "gqa_flash_prefill_v8 cfg=?";
+
+static int tunePrefillV8Cfg(
+    int d, hipStream_t stream,
+    const _Float16* Q, const _Float16* Kcache, const _Float16* Vcache,
+    _Float16* O, int B, int Hq, int G, int sq, int skv, int max_seq,
+    int past_len, float scale)
+{
+    PrefillV8Cfg cands[8];
+    const int nc = prefillV8Candidates(d, cands);
+    constexpr int kWarmup = 30, kRounds = 4, kIters = 30;
+
+    auto launch_cfg = [&](const PrefillV8Cfg& c) {
+        dispatchPrefillV8(c.nd, c.mt, c.bkv, d, stream, Q, Kcache, Vcache, O,
+                          B, Hq, G, sq, skv, max_seq, past_len, scale);
+    };
+
+    for (int w = 0; w < kWarmup; ++w) launch_cfg(cands[w % nc]);
+    (void)hipDeviceSynchronize();
+
+    hipEvent_t ev0, ev1;
+    (void)hipEventCreate(&ev0);
+    (void)hipEventCreate(&ev1);
+    float best_ms[8];
+    for (int i = 0; i < nc; ++i) best_ms[i] = 1.0e30f;
+    for (int r = 0; r < kRounds; ++r) {
+        for (int idx = 0; idx < nc; ++idx) {
+            launch_cfg(cands[idx]);
+            (void)hipEventRecord(ev0, stream);
+            for (int i = 0; i < kIters; ++i) launch_cfg(cands[idx]);
+            (void)hipEventRecord(ev1, stream);
+            (void)hipEventSynchronize(ev1);
+            float ms = 0.0f;
+            (void)hipEventElapsedTime(&ms, ev0, ev1);
+            if (ms < best_ms[idx]) best_ms[idx] = ms;
+        }
+    }
+    (void)hipEventDestroy(ev0);
+    (void)hipEventDestroy(ev1);
+
+    if (getenv("HIPDNN_PREFILL_TUNE_DEBUG")) {
+        for (int i = 0; i < nc; ++i)
+            fprintf(stderr,
+                "[prefill-v8-tune] d=%d sq=%d skv=%d  ND=%d MT=%d BKV=%-3d : "
+                "%.5f ms/call\n",
+                d, sq, skv, cands[i].nd, cands[i].mt, cands[i].bkv,
+                best_ms[i] / kIters);
+    }
+
+    int best = 0;
+    for (int i = 1; i < nc; ++i) if (best_ms[i] < best_ms[best]) best = i;
+    return cands[best].nd * 1000000 + cands[best].mt * 1000 + cands[best].bkv;
+}
+
+// Namespace-internal entry: cache + tune + dispatch. Called by the unified
+// prefill_v2 entry for D=256.
+static int runPrefillV8(
+    hipStream_t stream,
+    const _Float16* Q, const _Float16* Kcache, const _Float16* Vcache,
+    _Float16* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
+    int past_len, float scale)
+{
+    if (d != 256) return -1;
+    std::string key = std::to_string(d) + "_" + std::to_string(sq) + "_" +
+                      std::to_string(skv) + "_" + std::to_string(Hq) + "_" +
+                      std::to_string(G);
+    int cfg;
+    {
+        std::lock_guard<std::mutex> lk(g_v8_cfg_mutex);
+        auto it = g_v8_cfg_cache.find(key);
+        if (it != g_v8_cfg_cache.end()) {
+            cfg = it->second;
+        } else {
+            cfg = tunePrefillV8Cfg(d, stream, Q, Kcache, Vcache, O,
+                                   B, Hq, G, sq, skv, max_seq, past_len, scale);
+            g_v8_cfg_cache[key] = cfg;
+            snprintf(g_v8_tune_info, sizeof(g_v8_tune_info),
+                     "gqa_flash_prefill_v8 cfg=ND%d_MT%d_BKV%d",
+                     cfg / 1000000, (cfg / 1000) % 1000, cfg % 1000);
+        }
+    }
+    const int nd = cfg / 1000000, mt = (cfg / 1000) % 1000, bkv = cfg % 1000;
+    dispatchPrefillV8(nd, mt, bkv, d, stream, Q, Kcache, Vcache, O,
+                      B, Hq, G, sq, skv, max_seq, past_len, scale);
+    return 0;
+}
+
+}  // namespace (fused prefill v5/v7/v8)
 
 
 extern "C" const char* hip_gqa_flash_prefill_v5_last_tune_info() {
@@ -2695,7 +3117,7 @@ extern "C" int hip_gqa_flash_prefill_v7_v2(
     int B, int Hq, int G, int sq, int skv, int d, int max_seq, int past_len,
     float scale)
 {
-    if (d != 64 && d != 128) return -1;
+    if (d != 64 && d != 128 && d != 256) return -1;
 
     hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
     const _Float16* Q_ptr = static_cast<const _Float16*>(Q);
@@ -2728,10 +3150,20 @@ extern "C" int hip_gqa_flash_prefill_v7_v2(
 }
 
 
-// Unified fused flash-prefill entry. The v5/v7 kernel-selection strategy lives
-// here (in the kernel TU) instead of in the runtime dispatcher: v5 wins at
-// d==64 (warp-private register-resident), v7 wins at d==128 (M-register-blocked
-// with global-streamed K). The runtime only has to call this one symbol for any
+extern "C" const char* hip_gqa_flash_prefill_v8_last_tune_info() {
+    return g_v8_tune_info;
+}
+
+extern "C" void hip_gqa_flash_prefill_v8_set_ablate(int mask) {
+    g_v8_ablate = mask;
+}
+
+
+// Unified fused flash-prefill entry. The kernel-selection strategy lives here
+// (in the kernel TU) instead of in the runtime dispatcher: v5 wins at d==64
+// (warp-private register-resident), v7 at d==128 (M-register-blocked with
+// global-streamed K), v8 at d==256 (output-D split + secondary score reduction
+// to lift occupancy). The runtime only has to call this one symbol for any
 // eligible (fp16, causal, GQA) prefill and gets the right kernel automatically.
 // Returns -1 for unsupported head dims so the caller can fall back.
 extern "C" int hip_gqa_flash_prefill_v2(
@@ -2745,7 +3177,22 @@ extern "C" int hip_gqa_flash_prefill_v2(
                                         B, Hq, G, sq, skv, d, max_seq, past_len,
                                         scale);
     }
-    if (d == 128) {
+    if (d == 256) {
+        // v8 splits the output-D across ND waves (halved Q_reg/O_h -> higher
+        // occupancy) with a secondary score reduction; the winning D=256 path.
+        // Falls back to v7 if v8 declines (it shouldn't for d=256).
+        hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+        int rc = runPrefillV8(stream,
+                              static_cast<const _Float16*>(Q),
+                              static_cast<const _Float16*>(Kcache),
+                              static_cast<const _Float16*>(Vcache),
+                              static_cast<_Float16*>(O),
+                              B, Hq, G, sq, skv, d, max_seq, past_len, scale);
+        if (rc == 0) return 0;
+        // fall through to v7
+    }
+    if (d == 128 || d == 256) {
+        // v7 is D-generic (M-register-blocked, K streamed from global).
         return hip_gqa_flash_prefill_v7_v2(stream_ptr, Q, Kcache, Vcache, O,
                                         B, Hq, G, sq, skv, d, max_seq, past_len,
                                         scale);
