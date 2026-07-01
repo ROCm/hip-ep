@@ -19,10 +19,10 @@
 
 static constexpr int kBlock = 256;
 static constexpr int kMaxK = 16;
-// topk_routing runs one block per token with this many threads; experts are
-// staged in a static shared array of this size (covers gpt-oss 32 / Qwen 256).
+// topk_routing runs one block per token with this many threads; per-expert exp
+// values are staged in dynamic shared memory sized num_experts at launch, so
+// there is no compile-time cap on the expert count.
 static constexpr int kRoutingBlock = 256;
-static constexpr int kMaxRoutingExperts = 256;
 
 // ---------------------------------------------------------------------------
 // Top-k routing (fp16 only): for each token, find top-k experts by
@@ -50,8 +50,8 @@ __global__ void topk_routing_kernel(
   const int ik = static_cast<int>(k < kMaxK ? k : kMaxK);
   const int ne = static_cast<int>(num_experts);
 
-  __shared__ float s_exp[kMaxRoutingExperts];  // exp(logit - max) per expert
-  __shared__ float s_red[kRoutingBlock];       // reduction scratch
+  extern __shared__ float s_exp[];        // [num_experts] exp(logit - max)
+  __shared__ float s_red[kRoutingBlock];  // reduction scratch
   __shared__ int s_idx[kRoutingBlock];
 
   // Pass 1: stash logits, block-reduce the max (numerically-stable softmax).
@@ -334,20 +334,13 @@ extern "C" int hip_qmoe_topk_routing(
             (long long)element_size_bytes);
     return -1;
   }
-  // The block-parallel kernel stages experts in a static shared array sized
-  // kMaxRoutingExperts; bail clearly rather than overflow it.
-  if (num_experts > kMaxRoutingExperts) {
-    fprintf(stderr,
-            "[custom_kernels] hip_qmoe_topk_routing: num_experts %lld exceeds "
-            "max %d\n",
-            (long long)num_experts, kMaxRoutingExperts);
-    return -1;
-  }
-
   // One block per token, kRoutingBlock threads cooperating over experts.
+  // Dynamic shared memory holds num_experts fp32 exp values (no expert cap;
+  // e.g. 256 experts = 1 KB, well within the per-block shared limit).
+  const size_t shmem = static_cast<size_t>(num_experts) * sizeof(float);
   hipLaunchKernelGGL(topk_routing_kernel,
                      dim3(static_cast<unsigned>(num_tokens)),
-                     dim3(kRoutingBlock), 0, s,
+                     dim3(kRoutingBlock), shmem, s,
                      static_cast<const __half*>(router_probs),
                      static_cast<int32_t*>(expert_indices),
                      static_cast<__half*>(expert_weights), num_tokens,
