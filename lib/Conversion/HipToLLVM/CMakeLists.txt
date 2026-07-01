@@ -67,7 +67,8 @@ target_link_libraries(HipToLLVM PUBLIC
   MLIRMemRefDialect
   MLIRTransforms
   MLIRArithTransforms
-  # populateConversionTargetFromOperation: collects ConvertToLLVMPatternInterface
-  # lowerings from out-of-tree (plugin) dialects used in the module.
+  # ConvertToLLVMPatternInterface: convert-hip-to-llvm walks the module and
+  # collects HIP->LLVM lowerings from out-of-tree (plugin) dialects that
+  # implement this interface. See the guarded walk in HipToLLVM.cpp.
   MLIRConvertToLLVMInterface
 )

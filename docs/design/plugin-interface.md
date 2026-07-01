@@ -528,12 +528,20 @@ plugin pass:
    buffer form, exactly like an in-tree HIP op. (A custom op with memref
    operands must also carry `MemoryEffectOpInterface`, or the ownership-based
    buffer-deallocation pass rejects it with "unknown memory side effects".)
-3. **HIP -> LLVM lowering** -- `convert-hip-to-llvm` calls
-   `populateConversionTargetFromOperation`, which walks the module, collects
-   every dialect implementing `ConvertToLLVMPatternInterface`, and lets each
-   add its lowering patterns and mark its ops illegal. The vendor op lowers to
-   a call into the vendor runtime wrapper (contributed via `addRuntimeBitcode`),
-   which launches the vendor kernel (contributed via `addLibrary`).
+3. **HIP -> LLVM lowering** -- `convert-hip-to-llvm` walks the bufferized
+   module and, for every dialect that *registers* `ConvertToLLVMPatternInterface`,
+   lets it add its lowering patterns and mark its ops illegal. This is the body
+   of upstream's `populateConversionTargetFromOperation`, inlined so the interface
+   lookup can be guarded by `Dialect::hasPromisedInterface`: several in-tree
+   upstream dialects present after bufferization (`memref`/`func`/`arith`/`cf`)
+   *promise* `ConvertToLLVMPatternInterface` but never register it (we lower those
+   ops via the explicit `populate*ToLLVM` calls instead), and an unguarded
+   `dyn_cast` onto such a dialect `report_fatal_error`s in an assertions-enabled
+   MLIR build. The guard skips promised-but-unregistered dialects and touches only
+   genuine implementors (a plugin vendor dialect, whose promise is resolved when
+   its extension is added). The vendor op lowers to a call into the vendor runtime
+   wrapper (contributed via `addRuntimeBitcode`), which launches the vendor kernel
+   (contributed via `addLibrary`).
 
 A vendor pass (registered + slotted as above, typically at
 `AfterSimplifyOnnx`) introduces the op from a model op -- e.g. rewriting
