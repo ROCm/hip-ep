@@ -45,6 +45,10 @@ endif()
 if(NOT BUILD_MOCK_RUNTIME)
   find_package(hip CONFIG REQUIRED)
   target_link_libraries(hip-test PRIVATE hip::host)
+  # Signals the output-allocator callback to hand the model.dll real device
+  # memory (hipMalloc) and copy it back D2H for validation. Mock builds omit
+  # this and the callback returns host buffers the CPU stubs write directly.
+  target_compile_definitions(hip-test PRIVATE HIPDNN_EP_LINK_HIP_HOST=1)
 endif()
 
 target_include_directories(hip-test
