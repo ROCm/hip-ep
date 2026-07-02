@@ -98,9 +98,9 @@ path is unchanged.
 
 The public surface a plugin compiles against is two headers:
 [include/hip/Compiler/PluginAPI.h](../../include/hip/Compiler/PluginAPI.h)
-(the C entry point and info struct) and
+(the `extern "C"` entry-point contract and the `HIP_EP_DEFINE_PLUGIN` macro) and
 [include/hip/Compiler/PluginRegistry.h](../../include/hip/Compiler/PluginRegistry.h)
-(the registry the callback uses).
+(the registry the entry point uses).
 
 ### Entry point
 
@@ -124,8 +124,8 @@ calls each selected plugin's `hipEpRegisterPlugin_<id>` exactly once per process
 There is no runtime version handshake: plugin and host are built and linked
 together, so an ABI mismatch is a build error, not a load-time surprise.
 `HIP_EP_PLUGIN_API_VERSION` remains a source-level marker for the registry
-surface only. This replaces the earlier dynamic `hipEpGetPluginInfo` + `dlopen`
-model (see "Linkage model" below for why).
+surface only. (See "Linkage model" below for why a plugin is statically linked
+rather than loaded from a shared library at runtime.)
 
 ### The registry
 
@@ -558,7 +558,8 @@ This is exercised end-to-end (compile + GPU run + numeric check) by the
 
 Beyond inserting at a fixed slot, a downstream may want to see the full pass
 set and compose -- or fully replace -- the pass order. The design has four
-parts; the first two **ship today**, the third is planned.
+parts; three **ship today** (name exposure and the textual override fully,
+guardrails partially) and the registered pipeline builder is planned.
 
 - **Expose all passes by name** *(shipped)*. Every production pipeline pass is
   registered with a stable command-line name (`getArgument()`) in the registry

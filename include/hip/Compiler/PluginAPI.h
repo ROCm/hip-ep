@@ -48,8 +48,8 @@ class HipEpPluginRegistry;
 ///        addLibraryPath, addLibrary.
 ///   2 -- added addDialectRegistration (dialect + op + bufferization/lowering
 ///        interface contribution).
-///   3 -- static linkage model: per-id `hipEpRegisterPlugin_<id>` entry point
-///        replaces the dynamic `hipEpGetPluginInfo` + `HipEpPluginLibraryInfo`.
+///   3 -- static linkage model: one per-id `hipEpRegisterPlugin_<id>` entry
+///        point, statically linked into the host (no runtime dynamic load).
 #define HIP_EP_PLUGIN_API_VERSION 3
 
 /// Convenience macro for a plugin's registration entry point. Expands to the

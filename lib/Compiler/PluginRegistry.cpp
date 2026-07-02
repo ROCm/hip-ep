@@ -23,14 +23,14 @@ namespace hip::compiler {
 // storage lives in this TU so the header has no std::vector
 // dependency.
 //
-// Concurrency: plugin registration is one-shot. dispatchPluginRegis-
-// trationsOnce() (StaticPlugins.cpp) runs every statically-linked plugin's
-// registration entry behind a std::call_once, which serializes all writes.
-// Reads (passesForSlot and the bitcode / library accessors below) happen after
-// that completes, and each accessor calls dispatchPluginRegistrationsOnce()
-// itself as a defensive idempotent step, so a future caller that bypasses
-// CompilerDriver::compile (a new tool, a unit test, etc.) still sees
-// plugin-contributed state.
+// Concurrency: plugin registration is one-shot.
+// dispatchPluginRegistrationsOnce() (StaticPlugins.cpp) runs every
+// statically-linked plugin's registration entry behind a std::call_once, which
+// serializes all writes. Reads (passesForSlot and the bitcode / library
+// accessors below) happen after that completes, and each accessor calls
+// dispatchPluginRegistrationsOnce() itself as a defensive idempotent step, so a
+// future caller that bypasses CompilerDriver::compile (a new tool, a unit test,
+// etc.) still sees plugin-contributed state.
 // ============================================================================
 
 namespace {
