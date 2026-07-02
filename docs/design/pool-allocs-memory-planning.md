@@ -51,8 +51,8 @@ Several passes cooperate to produce the final pooled IR. The relevant stretch of
     → hip-infer-shapes                       (1b: refine `?` dims via ReifyRankedShapedTypeOpInterface)
     → hip-resolve-tensor-dims                (1c: fold `tensor.dim` via upstream reify patterns)
     → one-shot-bufferize                     (tensor → memref)
-    → buffer-results-to-out-params           (function results → out-param memrefs)
     → buildBufferDeallocationPipeline        (insert ownership-based deallocs)
+    → hip-use-output-allocator               (returned memref.alloc → hip.alloc_output)
     → CSE → canonicalize
     → hip-optimize-memrefs                   (HIP-specific buffer cleanup)
     → hip-promote-strided-hip-operands       (6a: contiguous temporaries for HIP-op operands)
