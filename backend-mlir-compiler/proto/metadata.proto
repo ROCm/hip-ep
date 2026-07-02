@@ -10,12 +10,10 @@ message Metadata {
   string artifact_filename = 1;
   repeated Output outputs = 2;
   repeated Input inputs = 3;
-  // True when the artifact was compiled in output-allocator mode: the DLL's
-  // inference_compute takes (state, inputs) only and allocates graph outputs
-  // in-graph via the EP's output-allocator callback. The EP reads this to
-  // choose its dispatch arity. Travels with the artifact, so a reused
-  // EPContext always reports the mode matching its own DLL ABI.
-  bool use_output_allocator = 4;
+  // NOTE: field number 4 is retired. It was `use_output_allocator`, which
+  // stopped meaning anything once the output-allocator ABI became the only
+  // mode. Kept reserved so the number is never reused.
+  reserved 4;
   // Per-model artifact format, mirrors CompilationOptions.output_mode.
   // Read by the EP before loading the artifact to select the loader:
   //   "LLVM_IR" (default / empty) -> LlvmIrJit (in-process ORC JIT)
@@ -34,11 +32,11 @@ message Output {
   string name = 1;
   int32 rank = 2;
   int32 elem_type = 3;
-  // Static dims carry their extent; dynamic dims carry -1. In output-allocator
-  // mode (the default) the DLL sizes dynamic outputs in-graph via the
-  // EP's output-allocator callback, so no per-dim resolution metadata is
-  // needed. Classic mode (use_output_allocator=0) supports only fully-static
-  // output shapes.
-  // NOTE: field number 5 is intentionally retired (was `dim_sources`).
+  // Static dims carry their size; dynamic dims carry -1. The DLL works out the
+  // size of a dynamic output at runtime through the EP's output-allocator
+  // callback, so no extra per-dim metadata is needed.
+  // NOTE: field number 5 is retired (it was `dim_sources`). Kept reserved so
+  // the number is never reused.
+  reserved 5;
   repeated int64 shape = 4;
 }
