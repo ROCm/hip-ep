@@ -186,7 +186,7 @@ struct MyVendorPass
   }
 };
 
-void registerCallbacks(::hip::compiler::HipEpPluginRegistry &R) {
+HIP_EP_DEFINE_PLUGIN(myvendor) {
   R.registerPass<MyVendorPass>();
   // The slot string is resolved with mlir::parsePassPipeline into the slot's
   // MODULE-level pass manager, so it follows --pass-pipeline syntax: a
@@ -235,7 +235,7 @@ Pattern:
 extern "C" const unsigned char kVendorBitcode[];
 extern "C" const std::size_t kVendorBitcodeSize;
 
-void registerCallbacks(::hip::compiler::HipEpPluginRegistry &R) {
+HIP_EP_DEFINE_PLUGIN(myvendor) {
   if (kVendorBitcodeSize != 0) {
     R.addRuntimeBitcode(kVendorBitcode, kVendorBitcodeSize);
   }
@@ -305,7 +305,7 @@ generated code) that the model module references at link time.
 Pattern:
 
 ```cpp
-void registerCallbacks(::hip::compiler::HipEpPluginRegistry &R) {
+HIP_EP_DEFINE_PLUGIN(myvendor) {
   R.addLibraryPath("/abs/path/to/dir/containing/libfoo");
   R.addLibrary("foo"); // matches libfoo.a or foo.lib
 }
@@ -367,7 +367,7 @@ static void registerVendorDialect(mlir::DialectRegistry &registry) {
   });
 }
 
-void registerCallbacks(::hip::compiler::HipEpPluginRegistry &R) {
+HIP_EP_DEFINE_PLUGIN(myvendor) {
   R.addDialectRegistration(&registerVendorDialect);
   R.registerPass<ConvertOnnxAddToVendorPass>();   // introduces the op
   R.requestPipelineSlot(::hip::compiler::PipelineSlot::AfterSimplifyOnnx,
