@@ -12,7 +12,7 @@
 // CHECK-SAME: hipdnn.input_count = 3
 // CHECK-SAME: hipdnn.output_count = 1
 // CHECK: llvm.func @wrap_multi_head_attention
-// CHECK: llvm.func private @main_graph(%{{.*}}: !llvm.ptr, %{{.*}}: !llvm.ptr, %{{.*}}: !llvm.ptr) -> i32
+// CHECK: llvm.func private @main_graph(%{{.*}}: !llvm.ptr, %{{.*}}: !llvm.ptr) -> i32
 // CHECK: llvm.call @wrap_multi_head_attention
 // CHECK: llvm.func @inference_init
 // CHECK: llvm.func @inference_compute
