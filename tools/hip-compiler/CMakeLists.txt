@@ -25,13 +25,4 @@ target_include_directories(hip-compiler PRIVATE
   ${CMAKE_BINARY_DIR}/schemas
 )
 
-# Plugins are linked STATICALLY (see cmake/HipEpPlugins.cmake), so no symbol
-# export is needed -- a statically-linked plugin shares this binary's MLIR
-# instance by construction. Selected plugin ids are pulled in transitively
-# through LibHipCompiler.
-
-# EXPORT HipDnnEpTargets: emit an IMPORTED HipDnnEp::hip-compiler target in the
-# installed package config so downstream plugins can locate the compiler via
-# find_package(HipDnnEp). install(EXPORT HipDnnEpTargets) is in the top-level
-# CMakeLists after add_subdirectory(tools).
-install(TARGETS hip-compiler EXPORT HipDnnEpTargets RUNTIME DESTINATION bin)
+install(TARGETS hip-compiler RUNTIME DESTINATION bin)

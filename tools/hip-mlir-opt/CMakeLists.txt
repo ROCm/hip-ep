@@ -55,15 +55,7 @@ target_link_libraries(hip-mlir-opt PRIVATE
   ${llvm_libs}
 )
 
-# Plugins are linked STATICALLY (see cmake/HipEpPlugins.cmake), so no symbol
-# export is needed -- a statically-linked plugin shares this binary's MLIR
-# instance by construction. Any plugin ids selected via HIPDNN_EP_COMPILER_-
-# PLUGINS are pulled in transitively through LibHipCompiler.
-
-# Install target. EXPORT HipDnnEpTargets emits an IMPORTED HipDnnEp::hip-mlir-opt
-# target in the installed package config (install(EXPORT ...) is in the
-# top-level CMakeLists after add_subdirectory(tools)).
+# Install target
 install(TARGETS hip-mlir-opt
-  EXPORT HipDnnEpTargets
   RUNTIME DESTINATION bin
 )

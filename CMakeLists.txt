@@ -171,44 +171,6 @@ if(BUILD_HIP_TOOLS)
   # Executable targets
   add_subdirectory(tools)
 
-  # ----------------------------------------------------------------------------
-  # Installed CMake package config so a downstream plugin consumes the tools +
-  # plugin ABI headers via find_package(HipDnnEp). hip-compiler / hip-mlir-opt
-  # are associated with the HipDnnEpTargets export set in their own
-  # CMakeLists (install(TARGETS ... EXPORT HipDnnEpTargets)); here we add the
-  # header-only INTERFACE target and emit the config + version files. See
-  # docs/plugin_authoring.md for the consumer recipe.
-  # ----------------------------------------------------------------------------
-  include(CMakePackageConfigHelpers)
-
-  # INTERFACE target exposing the public include dir to plugins (no link deps;
-  # MLIR headers come from the downstream's own find_package(MLIR)).
-  add_library(hipdnn-ep-plugin-headers INTERFACE)
-  target_include_directories(hipdnn-ep-plugin-headers INTERFACE
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>)
-  set_target_properties(hipdnn-ep-plugin-headers PROPERTIES
-    EXPORT_NAME plugin_headers)
-  install(TARGETS hipdnn-ep-plugin-headers EXPORT HipDnnEpTargets)
-
-  install(EXPORT HipDnnEpTargets
-    FILE HipDnnEpTargets.cmake
-    NAMESPACE HipDnnEp::
-    DESTINATION lib/cmake/HipDnnEp)
-
-  configure_package_config_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/HipDnnEpConfig.cmake.in
-    ${CMAKE_CURRENT_BINARY_DIR}/HipDnnEpConfig.cmake
-    INSTALL_DESTINATION lib/cmake/HipDnnEp)
-  write_basic_package_version_file(
-    ${CMAKE_CURRENT_BINARY_DIR}/HipDnnEpConfigVersion.cmake
-    VERSION ${PROJECT_VERSION}
-    COMPATIBILITY SameMajorVersion)
-  install(FILES
-    ${CMAKE_CURRENT_BINARY_DIR}/HipDnnEpConfig.cmake
-    ${CMAKE_CURRENT_BINARY_DIR}/HipDnnEpConfigVersion.cmake
-    DESTINATION lib/cmake/HipDnnEp)
-
   # ==============================================================================
   # HIP Unit Tests (LIT + E2E)
   # ==============================================================================
