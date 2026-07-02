@@ -117,6 +117,7 @@ Options use MLIR's pipeline-option syntax:
 | `outline-onnx-to-hipdnn` | module | Outline subgraphs targeted at hipDNN graph compilation. |
 | `convert-onnx-to-hip` | module | Pattern-match ONNX ops by name → HIP dialect; externalize large constants. |
 | `hip-infer-shapes` | module | Refine `?` dims on HIP DPS result types via `ReifyRankedShapedTypeOpInterface`. |
+| `hip-split-duplicate-dps-inits` | func.func | De-alias DPS init operands that CSE merged onto one `tensor.empty`, so an op that reads back its own outputs (e.g. `hip.gqa` present K/V) does not share a buffer (pre-bufferize). |
 | `hip-resolve-tensor-dims` | func.func | Fold `tensor.dim` of reshape chains into root-dim arithmetic (pre-bufferize). |
 | `hip-loop-body-to-out-params` | module | Promote outlined loop bodies to the out-param ABI. |
 | `hip-use-output-allocator` | func.func | Rewrite returned `memref.alloc` → `hip.alloc_output`; stamp the allocator-mode module attribute. |
@@ -129,6 +130,8 @@ Options use MLIR's pipeline-option syntax:
 | `hip-lower-allocs` | func.func | Replace `memref.alloc`/`dealloc` with `hip.alloc`/`hip.free`. |
 | `hip-relax-multi-dyn-expand-shape` | func.func | Rewrite multi-dynamic-per-group `memref.expand_shape` → `reinterpret_cast` before strided-metadata expansion. |
 | `hip-resolve-extern-constants` | module | Resolve extern constants → `memref.view` into the constants-blob argument. |
+| `assign-op-state-slots` | module | Assign one op-state slot per stateful op instance (op-state-slots design). No-op without stateful ops. |
+| `generate-op-state-init` | module | Emit `@hipdnn_ep_op_states_init_fn` from each stateful op's `generateOpStateInit`. No-op without stateful ops. |
 | `convert-hip-to-llvm` | module | Lower HIP ops to runtime C-API calls / LLVM dialect. Reads the allocator-mode attribute. |
 
 ### Standard MLIR passes the pipeline interleaves
@@ -184,6 +187,7 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   «slot: AfterConvertOnnxToHip»
   hip-infer-shapes
   canonicalize ; cse
+  func.func(hip-split-duplicate-dps-inits)
   func.func(hip-resolve-tensor-dims)
   «slot: BeforeBufferization»
   one-shot-bufferize
@@ -211,6 +215,8 @@ HIP → LLVM  (buildHipToLLVMPipeline)
   «slot: BeforeConvertHipToLLVM»
   expand-strided-metadata
   lower-affine
+  assign-op-state-slots
+  generate-op-state-init
   convert-scf-to-cf
   reconcile-unrealized-casts
   convert-hip-to-llvm

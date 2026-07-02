@@ -16,8 +16,8 @@
 //
 // hip_static_plugins is set when the build selected the sample plugin
 // (-DHIPDNN_EP_COMPILER_PLUGINS=sample). The default build selects no plugins,
-// so this test is UNSUPPORTED there rather than failing. Unlike the previous
-// dlopen model, this works identically on Windows and Linux.
+// so this test is UNSUPPORTED there rather than failing. Static linking (no
+// symbol export, no dlopen) means this works identically on Windows and Linux.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt --hip-ep-sample-print-functions %s 2>&1 | FileCheck %s

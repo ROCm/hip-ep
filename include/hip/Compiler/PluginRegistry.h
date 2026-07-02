@@ -271,8 +271,8 @@ HipEpPluginRegistry &getProcessPluginRegistry();
 /// No-op when no plugins were selected (`HIPDNN_EP_COMPILER_PLUGINS` empty).
 /// Idempotent, so it is safe to call from every entry point that might run
 /// before pipelines are built (the `hip-compiler` driver, `hip-mlir-opt`
-/// main, etc.). A throwing plugin is contained (logged + skipped), matching
-/// the earlier dynamic loader's degrade-and-continue posture.
+/// main, etc.). A throwing plugin is contained (logged + skipped) rather than
+/// crashing the host.
 ///
 /// After this returns, every selected plugin's `requestPipelineSlot` /
 /// `addRuntimeBitcode` / `addLibrary` / `addDialectRegistration` /
