@@ -110,7 +110,9 @@ static_assert(offsetof(output_allocator_t, self) == 0,
 // Lifecycle contract:
 //   void* state = nullptr;
 //   init_fn(&state, fs);        // once: allocates GPU handles, uploads weights
-//   compute_fn(state, in, out); // N times: H2D → compute → D2H → stream sync
+//   compute_fn(state, in);      // N times: H2D → compute → D2H → stream sync
+//                               //          (outputs allocated in-graph via
+//                               //           the EP output allocator callback)
 //   cleanup_fn(state);          // once: releases all GPU resources
 //
 // All functions return 0 on success, non-zero on failure.
