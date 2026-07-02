@@ -43,12 +43,9 @@ void *runInit(const LoadedArtifact &artifact, morphizen::FileSystem *fs) {
 // Resolve the hot-path entry points from the loaded artifact; LoadedArtifact
 // exposes one get_method form over either backend.
 void InferenceState::resolveEntryPoints(const LoadedArtifact &artifact) {
-  // inference_compute is exported with exactly one arity (fixed at compile
-  // time by use_output_allocator); we cache both typed pointers to the same
-  // symbol and call only the one matching the artifact's mode.
-  compute_fn_ = artifact.get_method<int, void *, span_t *, span_t *>(
-      hipdnn::abi::kInferenceCompute);
-  compute_alloc_fn_ = artifact.get_method<int, void *, span_t *>(
+  // inference_compute has the 2-arg output-allocator ABI (state, inputs);
+  // graph outputs are allocated in-graph via the output allocator callback.
+  compute_fn_ = artifact.get_method<int, void *, span_t *>(
       hipdnn::abi::kInferenceCompute);
   cleanup_fn_ =
       artifact.get_method<int, void *>(hipdnn::abi::kInferenceCleanup);
@@ -64,9 +61,8 @@ void InferenceState::resolveEntryPoints(const LoadedArtifact &artifact) {
 InferenceState::InferenceState(PrivateTag, void *state,
                                std::unique_ptr<LoadedArtifact> artifact)
     : state_(state), artifact_(std::move(artifact)), compute_fn_(nullptr),
-      compute_alloc_fn_(nullptr), cleanup_fn_(nullptr),
-      begin_compute_fn_(nullptr), set_output_allocator_fn_(nullptr),
-      flush_op_profile_fn_(nullptr) {
+      cleanup_fn_(nullptr), begin_compute_fn_(nullptr),
+      set_output_allocator_fn_(nullptr), flush_op_profile_fn_(nullptr) {
   resolveEntryPoints(*artifact_);
 
   MY_LOG(2) << "begin_compute symbol "
@@ -161,24 +157,12 @@ InferenceState::~InferenceState() {
                "next";
 }
 
-int InferenceState::compute(span_t *inputs, span_t *outputs) const {
+int InferenceState::compute(span_t *inputs) const {
   if (!compute_fn_) {
     LOG(ERROR) << "inference_compute symbol not resolved in loaded artifact";
     return -1;
   }
-  return compute_fn_(state_, inputs, outputs);
-}
-
-int InferenceState::compute_with_output_allocator(span_t *inputs) const {
-  // Cached 2-arg view of inference_compute (resolved in resolveEntryPoints for
-  // whichever loader owns the artifact). Only valid against an allocator-mode
-  // artifact, which the EP selects via use_output_allocator metadata.
-  if (!compute_alloc_fn_) {
-    LOG(ERROR) << "inference_compute (2-arg allocator ABI) not resolved in "
-                  "loaded artifact";
-    return -1;
-  }
-  return compute_alloc_fn_(state_, inputs);
+  return compute_fn_(state_, inputs);
 }
 
 void InferenceState::set_output_allocator(
@@ -188,8 +172,7 @@ void InferenceState::set_output_allocator(
     // hip.alloc_output returning null -> guaranteed crash. Fail loudly with an
     // actionable message instead. Clearing (nullptr) on such a DLL is a no-op.
     if (allocator) {
-      LOG(FATAL) << "Model was compiled in output-allocator mode but the "
-                    "loaded model.dll does not export "
+      LOG(FATAL) << "Loaded model.dll does not export "
                     "hipdnn_ep_set_output_allocator. The DLL is stale; delete "
                     "%TEMP%/morphizen_mlir_* (or regenerate the EPContext) and "
                     "rebuild so the linked runtime exports the setter.";

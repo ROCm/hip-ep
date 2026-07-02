@@ -19,22 +19,20 @@ static constexpr size_t kDefaultElementSize = 4;
 //===----------------------------------------------------------------------===//
 // Per-Inference Performance Measurement (gated on HIPDNN_EP_PERF)
 //===----------------------------------------------------------------------===//
-// Records hipEvents on the GPU stream at phase boundaries to measure:
-//   H2D  = time for all host-to-device async copies
-//   Compute = time for main_graph GPU kernel dispatches
-//   D2H  = time for all device-to-host async copies + stream sync
+// Records hipEvents on the GPU stream to measure the coarse per-inference
+// window and accumulate H2D byte volume:
+//   prepare_input(0) -> window start (h2d_start)
+//   stream_sync()    -> window end   (d2h_end), then log results
 //
-// Phase boundaries are detected by tracking the first call to each function
-// type in the per-inference sequence:
-//   prepare_input(0)  -> H2D start
-//   prepare_output(0) -> H2D end / compute start
-//   finalize_output(0)-> compute end / D2H start
-//   stream_sync()     -> D2H end, then log results
+// This is the DLL-internal coarse [PERF] line. The fine-grained H2D /
+// Compute / D2H phase split is measured EP-side by EpPerfTimer in
+// MlirCustomOp (which brackets the 2-arg inference_compute call and the
+// post-compute host D2H); the DLL cannot bracket compute-vs-D2H itself
+// because in the output-allocator ABI main_graph allocates its outputs
+// in-graph (hip.alloc_output) with no distinct output-staging call to hook.
 
 struct PerfState {
   hipEvent_t h2d_start = nullptr;
-  hipEvent_t h2d_end = nullptr;
-  hipEvent_t d2h_start = nullptr;
   hipEvent_t d2h_end = nullptr;
   size_t h2d_bytes = 0;
   size_t h2d_count = 0;
@@ -50,13 +48,9 @@ static void perf_ensure_events() {
     return;
   // hipEventDisableSystemFence: see op_profile.cpp
   // (op_profile_acquire_event_pair) for the canonical rationale and the
-  // "never set without a following sync" guardrail. Safe here -- these phase
+  // "never set without a following sync" guardrail. Safe here -- these
   // events are read via hipEventElapsedTime only after hipStreamSynchronize.
   if (hipEventCreateWithFlags(&g_perf.h2d_start, hipEventDisableSystemFence) !=
-          hipSuccess ||
-      hipEventCreateWithFlags(&g_perf.h2d_end, hipEventDisableSystemFence) !=
-          hipSuccess ||
-      hipEventCreateWithFlags(&g_perf.d2h_start, hipEventDisableSystemFence) !=
           hipSuccess ||
       hipEventCreateWithFlags(&g_perf.d2h_end, hipEventDisableSystemFence) !=
           hipSuccess) {
@@ -65,14 +59,6 @@ static void perf_ensure_events() {
     if (g_perf.h2d_start) {
       (void)hipEventDestroy(g_perf.h2d_start);
       g_perf.h2d_start = nullptr;
-    }
-    if (g_perf.h2d_end) {
-      (void)hipEventDestroy(g_perf.h2d_end);
-      g_perf.h2d_end = nullptr;
-    }
-    if (g_perf.d2h_start) {
-      (void)hipEventDestroy(g_perf.d2h_start);
-      g_perf.d2h_start = nullptr;
     }
     if (g_perf.d2h_end) {
       (void)hipEventDestroy(g_perf.d2h_end);
@@ -142,8 +128,8 @@ static void check_gcnarch(const char *location) {
 // in practice (e.g. KV-cache `past_key_values.*.key/value` with shape
 // [B, H, 0, D] on the first prefill step when past_sequence_length==0;
 // OGA VLM decode supplies image_features as [0, hidden_size] every step
-// after the prompt has been processed). The prepare_input / prepare_output
-// path treats size_bytes==0 as a successful empty pass-through; this helper
+// after the prompt has been processed). The prepare_input path treats
+// size_bytes==0 as a successful empty pass-through; this helper
 // therefore must return 0 silently for zero-sized dims rather than logging
 // "Invalid dimension" to stderr, which (a) is misleading because the input
 // is correct, and (b) used to spam once per zero-dim tensor per inference
@@ -359,8 +345,8 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
   // This is the path that eliminates the per-decode 2 GB KV-cache H2D copy
   // when OGA's MorphiZenEP device interface allocated KV cache via our
   // hipHostMalloc(Mapped|Coherent) allocator (path A). The caller still owns
-  // the buffer; finalize_output / free_input must skip pool_release in
-  // this case (gated by TensorBuffer.is_aliased).
+  // the buffer; free_input must skip pool_release in this case (gated by
+  // TensorBuffer.is_aliased).
   //
   // Other memory_type values (CPU / FPGA / NPU) fall through to the legacy
   // host H2D path below — preserves behaviour for hip-test,
@@ -382,27 +368,29 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
   }
 
   // PERF: at the start of each new inference, flush the previous inference's
-  // timing breakdown (one line, easy to grep) and open a new window. We
+  // coarse timing (one line, easy to grep) and open a new window. We
   // piggy-back on prepare_input(0) instead of using a dedicated sync hook
   // because main_graph IR doesn't emit one.
   //
   // PERF mode trade-off (intentional, not a bug): the hipStreamSynchronize
-  // below is *required* to make hipEventElapsedTime return valid per-phase
-  // numbers (the H2D / Compute / D2H events are async-recorded on the GPU
-  // stream and only become measurable once the stream has drained). The
-  // cost is that each inference's stream is forced to fully serialise
-  // before the next inference can submit work, which kills the natural
-  // pipeline overlap between consecutive inferences and *artificially
-  // lowers the measured TPS* compared to a normal run. So:
+  // below is *required* to make hipEventElapsedTime return valid numbers
+  // (the window events are async-recorded on the GPU stream and only become
+  // measurable once the stream has drained). The cost is that each
+  // inference's stream is forced to fully serialise before the next
+  // inference can submit work, which kills the natural pipeline overlap
+  // between consecutive inferences and *artificially lowers the measured
+  // TPS* compared to a normal run. So:
   //
-  //   * HIPDNN_EP_PERF=1 -- accurate per-phase breakdown, sub-real TPS.
-  //     Use when you need the H2D / Compute / D2H split.
+  //   * HIPDNN_EP_PERF=1 -- coarse total window, sub-real TPS.
   //   * HIPDNN_EP_DEBUG=1 -- log-only, no sync, real-throughput TPS.
-  //     Use when you want traces but care about wall-clock perf.
   //
   // PERF intentionally no longer inherits from DEBUG (see
   // hipdnn_ep_perf_enabled() in debug_log.h) so adding debug printfs
   // doesn't silently re-impose the sync penalty.
+  //
+  // The fine-grained H2D / Compute / D2H split is measured EP-side by
+  // EpPerfTimer; this DLL-internal line reports only the coarse
+  // prepare_input(0) -> stream_sync window plus H2D byte volume.
   if (hipdnn_ep_perf_enabled() && index == 0) {
     perf_ensure_events();
     // Flush the previous inference's window (if any). inference_num > 0
@@ -412,17 +400,13 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
     // alias fast path and accumulate zero H2D bytes.
     if (g_perf.initialized && g_perf.inference_num > 0) {
       (void)hipStreamSynchronize(static_cast<hipStream_t>(state->stream));
-      float h2d_ms = 0, compute_ms = 0, d2h_ms = 0;
-      (void)hipEventElapsedTime(&h2d_ms, g_perf.h2d_start, g_perf.h2d_end);
-      (void)hipEventElapsedTime(&compute_ms, g_perf.h2d_end, g_perf.d2h_start);
-      (void)hipEventElapsedTime(&d2h_ms, g_perf.d2h_start, g_perf.d2h_end);
-      const float total_ms = h2d_ms + compute_ms + d2h_ms;
-      RUNTIME_PERF_LOG("[PERF] #%u: H2D %zut/%.1fMB/%.2fms | Compute %.2fms | "
-                       "D2H %zut/%.1fMB/%.2fms | Total %.2fms\n",
+      float total_ms = 0;
+      (void)hipEventElapsedTime(&total_ms, g_perf.h2d_start, g_perf.d2h_end);
+      RUNTIME_PERF_LOG("[PERF] #%u: H2D %zut/%.1fMB | "
+                       "D2H %zut/%.1fMB | Total %.2fms\n",
                        g_perf.inference_num, g_perf.h2d_count,
-                       g_perf.h2d_bytes / 1048576.0, h2d_ms, compute_ms,
-                       g_perf.d2h_count, g_perf.d2h_bytes / 1048576.0, d2h_ms,
-                       total_ms);
+                       g_perf.h2d_bytes / 1048576.0, g_perf.d2h_count,
+                       g_perf.d2h_bytes / 1048576.0, total_ms);
     }
     g_perf.h2d_bytes = 0;
     g_perf.h2d_count = 0;
@@ -464,207 +448,7 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
   return HIPDNN_EP_SUCCESS;
 }
 
-// Prepare output tensor: parse, validate, allocate GPU buffer (no H2D)
-int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
-                                    size_t index, size_t expected_rank,
-                                    TensorBuffer *out_buffer) {
-  // Validate arguments
-  if (!state) {
-    fprintf(stderr, "hipdnn_ep_tensor_prepare_output: null state\n");
-    return HIPDNN_EP_ERR_NULL_POINTER;
-  }
-  if (!outputs) {
-    fprintf(stderr, "hipdnn_ep_tensor_prepare_output: null outputs\n");
-    return HIPDNN_EP_ERR_NULL_POINTER;
-  }
-  if (!out_buffer) {
-    fprintf(stderr, "hipdnn_ep_tensor_prepare_output: null out_buffer\n");
-    return HIPDNN_EP_ERR_NULL_POINTER;
-  }
-
-  // Validate index bounds
-  if (index >= outputs->count) {
-    fprintf(stderr,
-            "hipdnn_ep_tensor_prepare_output: index %zu out of bounds "
-            "(count=%zu)\n",
-            index, outputs->count);
-    return HIPDNN_EP_ERR_INDEX_OUT_OF_BOUNDS;
-  }
-
-  // Extract tensor from span
-  tensor_t *tensor = &outputs->data[index];
-
-  // Shape must be present (or rank==0 for scalars).
-  if (!tensor->shape && tensor->rank != 0) {
-    fprintf(stderr,
-            "hipdnn_ep_tensor_prepare_output: tensor[%zu].shape is null\n",
-            index);
-    return HIPDNN_EP_ERR_NULL_POINTER;
-  }
-
-  // Validate rank
-  if (tensor->rank != expected_rank) {
-    fprintf(stderr,
-            "hipdnn_ep_tensor_prepare_output: rank mismatch (expected %zu, got "
-            "%zu)\n",
-            expected_rank, tensor->rank);
-    return HIPDNN_EP_ERR_RANK_MISMATCH;
-  }
-
-  // Read element size from tensor struct (set by EP caller)
-  size_t element_size = tensor->element_size;
-  if (element_size == 0) {
-    fprintf(stderr,
-            "hipdnn_ep_tensor_prepare_output: tensor[%zu].element_size is 0, "
-            "defaulting to %zu\n",
-            index, kDefaultElementSize);
-    element_size = kDefaultElementSize;
-  }
-
-  // Calculate buffer size
-  size_t size_bytes =
-      calculateTensorSize(tensor->shape, tensor->rank, element_size);
-
-  // Empty output tensors (any dim == 0) are legitimate -- e.g. an op
-  // producing a slice with a zero-length dim.  Skip allocation and return
-  // success with a zero-size buffer.  Compiled kernels never dereference
-  // gpu_ptr when the corresponding dim is zero (the iteration range is
-  // empty).
-  if (size_bytes == 0) {
-    out_buffer->gpu_ptr = nullptr;
-    out_buffer->host_ptr = tensor->data;
-    out_buffer->shape_ptr = tensor->shape;
-    out_buffer->rank = tensor->rank;
-    out_buffer->size_bytes = 0;
-    out_buffer->is_pooled = false;
-    out_buffer->is_aliased = false;
-    return HIPDNN_EP_SUCCESS;
-  }
-
-  // Non-empty: data must be non-null now.
-  if (!tensor->data) {
-    fprintf(stderr,
-            "hipdnn_ep_tensor_prepare_output: tensor[%zu].data is null but "
-            "size_bytes=%zu (rank=%zu)\n",
-            index, size_bytes, tensor->rank);
-    return HIPDNN_EP_ERR_NULL_POINTER;
-  }
-
-  RUNTIME_DEBUG_LOG(
-      "[Runtime DEBUG] prepare_output[%zu]: rank=%zu element_size=%zu "
-      "size_bytes=%zu memory_type=%d\n",
-      index, tensor->rank, element_size, size_bytes, tensor->memory_type);
-
-  // PERF: record H2D end on first output alloc (after all H2D copies queued)
-  if (hipdnn_ep_perf_enabled() && index == 0 && g_perf.initialized) {
-    (void)hipEventRecord(g_perf.h2d_end,
-                         static_cast<hipStream_t>(state->stream));
-  }
-
-  // Fast path: caller's output OrtValue is in GPU-accessible memory, alias
-  // it so the kernel writes directly into the caller's buffer and we can
-  // skip both the pool_alloc here and the D2H copy in finalize_output. For
-  // OGA path A this hits on present_key/present_value tensors that share
-  // buffers with past_key/past_value (past_present_share_buffer=true).
-  const bool alias_caller_buffer = (tensor->memory_type == TENSOR_MEMORY_GPU);
-  void *gpu_ptr = nullptr;
-  if (alias_caller_buffer) {
-    gpu_ptr = tensor->data;
-  } else {
-    // Allocate GPU buffer (pool reuses across inferences)
-    gpu_ptr = pool_alloc(size_bytes);
-    if (!gpu_ptr) {
-      fprintf(stderr,
-              "hipdnn_ep_tensor_prepare_output: failed to allocate %zu bytes\n",
-              size_bytes);
-      return HIPDNN_EP_ERR_GPU_ALLOC_FAILED;
-    }
-  }
-
-  // Populate output buffer
-  out_buffer->gpu_ptr = gpu_ptr;
-  out_buffer->host_ptr = tensor->data;
-  out_buffer->shape_ptr = tensor->shape;
-  out_buffer->rank = tensor->rank;
-  out_buffer->size_bytes = size_bytes;
-  out_buffer->is_pooled = false;
-  out_buffer->is_aliased = alias_caller_buffer;
-
-  return HIPDNN_EP_SUCCESS;
-}
-
-// Finalize output tensor: D2H transfer, sync, release buffer
-int hipdnn_ep_tensor_finalize_output(RuntimeState *state,
-                                     TensorBuffer *buffer) {
-  if (!state) {
-    fprintf(stderr, "hipdnn_ep_tensor_finalize_output: null state\n");
-    return HIPDNN_EP_ERR_NULL_POINTER;
-  }
-  if (!buffer) {
-    fprintf(stderr, "hipdnn_ep_tensor_finalize_output: null buffer\n");
-    return HIPDNN_EP_ERR_NULL_POINTER;
-  }
-
-  // Empty output (zero-sized dim): nothing to copy, nothing to release.
-  // prepare_output set gpu_ptr=nullptr and size_bytes=0 in this case.
-  if (buffer->size_bytes == 0) {
-    return HIPDNN_EP_SUCCESS;
-  }
-
-  int result = HIPDNN_EP_SUCCESS;
-
-  // PERF: record D2H start on first output finalize (after all compute).
-  // We always record, even on the alias fast path, so the [PERF] D2H window
-  // is well-defined; aliased outputs just don't add bytes to the accumulator.
-  if (hipdnn_ep_perf_enabled() && g_perf.d2h_count == 0 && g_perf.initialized) {
-    (void)hipEventRecord(g_perf.d2h_start,
-                         static_cast<hipStream_t>(state->stream));
-  }
-
-  // D2H transfer (async -- sync happens once after all outputs).
-  // Skipped on the alias fast path: gpu_ptr already points into the caller's
-  // GPU-accessible host_ptr (same physical pages on AMD APU mapped pinned
-  // memory), so the kernel has already written the result; no copy needed.
-  if (!buffer->is_aliased) {
-    if (hipMemcpyAsync(buffer->host_ptr, buffer->gpu_ptr, buffer->size_bytes,
-                       hipMemcpyDeviceToHost,
-                       static_cast<hipStream_t>(state->stream)) != hipSuccess) {
-      fprintf(stderr,
-              "hipdnn_ep_tensor_finalize_output: D2H transfer failed\n");
-      result = HIPDNN_EP_ERR_D2H_TRANSFER_FAILED;
-      // Continue to cleanup even on error (best-effort)
-    }
-
-    // PERF: accumulate D2H bytes (only the actual copies, not aliased)
-    if (hipdnn_ep_perf_enabled()) {
-      g_perf.d2h_bytes += buffer->size_bytes;
-      g_perf.d2h_count++;
-    }
-  }
-
-  // PERF: re-record d2h_end after every finalize_output (aliased or not).
-  // The "real" last call wins; in-between records are cheap and let us avoid
-  // having to know which finalize_output is the last one (the MLIR-emitted
-  // main_graph does not signal end-of-inference back to us, see
-  // prepare_input flush logic).
-  if (hipdnn_ep_perf_enabled() && g_perf.initialized) {
-    (void)hipEventRecord(g_perf.d2h_end,
-                         static_cast<hipStream_t>(state->stream));
-  }
-
-  // Return buffer to pool only if we own it. Aliased buffers are owned by
-  // the caller (e.g. OGA's KV cache OrtValue under path A); freeing them
-  // would corrupt the caller's allocation.
-  if (!buffer->is_aliased) {
-    pool_release(buffer->gpu_ptr, buffer->size_bytes);
-  }
-  buffer->gpu_ptr = nullptr;
-  buffer->is_aliased = false;
-
-  return result;
-}
-
-// Synchronize GPU stream once (called after all finalize_output calls).
+// Synchronize GPU stream once (called after compute, before free_input).
 int hipdnn_ep_stream_sync(RuntimeState *state) {
   // Per-Compute entry trace; gated on HIPDNN_EP_DEBUG to keep the hot path
   // silent (fires once per Compute -> tens of thousands of lines on a
@@ -675,7 +459,13 @@ int hipdnn_ep_stream_sync(RuntimeState *state) {
     return HIPDNN_EP_ERR_NULL_POINTER;
   }
 
-  // PERF: record D2H end event (after all D2H copies queued)
+  // PERF: record the window-end event (after all D2H copies queued). The
+  // coarse [PERF] line for this window is emitted on the NEXT inference's
+  // prepare_input(0) (once the stream has drained so hipEventElapsedTime is
+  // valid). Per-op resolve+print is driven separately by the EP via
+  // hipdnn_ep_runtime_flush_op_profile() after its wall_ms window closes, so
+  // the N x hipEventElapsedTime + std::map + fprintf cost no longer inflates
+  // the Compute() latency that drives TPS measurements.
   if (hipdnn_ep_perf_enabled() && g_perf.initialized) {
     (void)hipEventRecord(g_perf.d2h_end,
                          static_cast<hipStream_t>(state->stream));
@@ -685,34 +475,6 @@ int hipdnn_ep_stream_sync(RuntimeState *state) {
       hipSuccess) {
     fprintf(stderr, "hipdnn_ep_stream_sync: stream sync failed\n");
     return HIPDNN_EP_ERR_STREAM_SYNC_FAILED;
-  }
-
-  // PERF: compute and log timing breakdown
-  if (hipdnn_ep_perf_enabled() && g_perf.initialized) {
-    float h2d_ms = 0, compute_ms = 0, d2h_ms = 0;
-    (void)hipEventElapsedTime(&h2d_ms, g_perf.h2d_start, g_perf.h2d_end);
-    (void)hipEventElapsedTime(&compute_ms, g_perf.h2d_end, g_perf.d2h_start);
-    (void)hipEventElapsedTime(&d2h_ms, g_perf.d2h_start, g_perf.d2h_end);
-    float total_ms = h2d_ms + compute_ms + d2h_ms;
-
-    g_perf.inference_num++;
-    fprintf(stderr,
-            "[PERF] inference #%u:\n"
-            "  H2D:     %zu tensors, %zu bytes (%.1f MB), %.2f ms\n"
-            "  Compute: %.2f ms\n"
-            "  D2H:     %zu tensors, %zu bytes (%.1f MB), %.2f ms\n"
-            "  Total:   %.2f ms  (H2D %.1f%% | Compute %.1f%% | D2H %.1f%%)\n",
-            g_perf.inference_num, g_perf.h2d_count, g_perf.h2d_bytes,
-            (double)g_perf.h2d_bytes / (1024.0 * 1024.0), h2d_ms, compute_ms,
-            g_perf.d2h_count, g_perf.d2h_bytes,
-            (double)g_perf.d2h_bytes / (1024.0 * 1024.0), d2h_ms, total_ms,
-            total_ms > 0 ? (h2d_ms / total_ms * 100.0) : 0.0,
-            total_ms > 0 ? (compute_ms / total_ms * 100.0) : 0.0,
-            total_ms > 0 ? (d2h_ms / total_ms * 100.0) : 0.0);
-    // Per-op resolve+print was moved out of the hot path -- the EP now
-    // calls hipdnn_ep_runtime_flush_op_profile() after its wall_ms window
-    // closes, so the N x hipEventElapsedTime + std::map + fprintf cost no
-    // longer inflates the Compute() latency that drives TPS measurements.
   }
 
   return HIPDNN_EP_SUCCESS;
