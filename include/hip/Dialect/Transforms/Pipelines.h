@@ -64,17 +64,6 @@ struct OnnxToHipPipelineOptions
       llvm::cl::desc("Skip writing constant data to constants.bin (metadata "
                      "only). Used for ORT EP live-compile path."),
       llvm::cl::init(false)};
-  Option<bool> useOutputAllocator{
-      *this, "use-output-allocator",
-      llvm::cl::desc(
-          "Allocator pipeline: replace buffer-results-to-out-params with "
-          "hip-use-output-allocator so graph outputs are allocated in-graph "
-          "via "
-          "hip.alloc_output (and the hipdnn.use_output_allocator module "
-          "attribute is "
-          "set for the LLVM half to read) (default: false = classic "
-          "out-params)"),
-      llvm::cl::init(false)};
 };
 
 /// Pipeline options for the HIP-to-LLVM lowering pipeline.
@@ -86,11 +75,6 @@ struct HipToLLVMPipelineOptions
       llvm::cl::desc(
           "Constants filename embedded in metadata (default: constants.bin)"),
       llvm::cl::init("constants.bin")};
-  // No use-output-allocator option here: convert-hip-to-llvm and
-  // generate-interface read the `hipdnn.use_output_allocator` module attribute
-  // set by hip-use-output-allocator in the ONNX-to-HIP half. When this pipeline
-  // is invoked standalone in allocator mode, the input IR must already carry
-  // that attribute.
 };
 
 /// Build the ONNX-to-HIP compilation pipeline.
@@ -145,16 +129,6 @@ struct HipdnnPipelineOptions
       llvm::cl::desc(
           "Minimum number of tensor elements to externalize (0 = disabled)"),
       llvm::cl::init(0)};
-  Option<bool> useOutputAllocator{
-      *this, "use-output-allocator",
-      llvm::cl::desc(
-          "Allocator pipeline: route the ONNX-to-HIP half through "
-          "hip-use-output-allocator, which sets the "
-          "hipdnn.use_output_allocator "
-          "module attribute; convert-hip-to-llvm + generate-interface then "
-          "read "
-          "that attribute (default: false = classic out-params)"),
-      llvm::cl::init(false)};
 };
 
 /// Build the complete HIPDNN pipeline: ONNX→HIP→LLVM→Interface.

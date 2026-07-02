@@ -261,7 +261,9 @@ struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
     Type elemType = memRefType.getElementType();
     if (!elemType.isIntOrFloat())
       return rewriter.notifyMatchFailure(op, "unsupported element type");
-    int64_t elemSizeBytes = elemType.getIntOrFloatBitWidth() / 8;
+    // Round bits up to whole bytes so sub-byte types report >= 1 byte: a
+    // bool (`i1`) output must be 1 byte, not 1/8 == 0.
+    int64_t elemSizeBytes = (elemType.getIntOrFloatBitWidth() + 7) / 8;
     if (elemSizeBytes <= 0)
       return rewriter.notifyMatchFailure(op, "unsupported element bit width");
 
