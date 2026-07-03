@@ -70,10 +70,10 @@ public:
   int compute(span_t *inputs) const;
 
   // Install (allocator != nullptr) or clear (nullptr) the output allocator on
-  // the loaded artifact's RuntimeState before compute_with_output_allocator().
-  // Resolved once in the ctor. Fatal if called with a non-null allocator but
-  // the artifact does not export the setter (a stale allocator-mode artifact
-  // would otherwise crash with a null output buffer).
+  // the loaded artifact's RuntimeState before compute(). Resolved once in the
+  // ctor. Fatal if called with a non-null allocator but the artifact does not
+  // export the setter (a stale artifact would otherwise crash with a null
+  // output buffer).
   void set_output_allocator(const output_allocator_t *allocator) const;
 
   // Invokes the optional `hipdnn_ep_runtime_begin_compute` hook to invalidate

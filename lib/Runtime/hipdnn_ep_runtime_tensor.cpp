@@ -19,17 +19,16 @@ static constexpr size_t kDefaultElementSize = 4;
 //===----------------------------------------------------------------------===//
 // Per-Inference Performance Measurement (gated on HIPDNN_EP_PERF)
 //===----------------------------------------------------------------------===//
-// Records hipEvents on the GPU stream to measure the coarse per-inference
-// window and accumulate H2D byte volume:
+// Records two hipEvents on the GPU stream to time the whole inference and
+// count H2D bytes:
 //   prepare_input(0) -> window start (h2d_start)
-//   stream_sync()    -> window end   (d2h_end), then log results
+//   stream_sync()    -> window end   (d2h_end), then log the [PERF] line
 //
-// This is the DLL-internal coarse [PERF] line. The fine-grained H2D /
-// Compute / D2H phase split is measured EP-side by EpPerfTimer in
-// MlirCustomOp (which brackets the 2-arg inference_compute call and the
-// post-compute host D2H); the DLL cannot bracket compute-vs-D2H itself
-// because in the output-allocator ABI main_graph allocates its outputs
-// in-graph (hip.alloc_output) with no distinct output-staging call to hook.
+// This is the DLL's coarse [PERF] line. The finer H2D / Compute / D2H split is
+// timed EP-side by EpPerfTimer in MlirCustomOp (it brackets the 2-arg
+// inference_compute call and the host D2H afterwards). The DLL can't split
+// compute from D2H itself: main_graph allocates its outputs in-graph
+// (hip.alloc_output), so there is no separate output-staging call to hook.
 
 struct PerfState {
   hipEvent_t h2d_start = nullptr;
@@ -47,9 +46,9 @@ static void perf_ensure_events() {
   if (g_perf.initialized)
     return;
   // hipEventDisableSystemFence: see op_profile.cpp
-  // (op_profile_acquire_event_pair) for the canonical rationale and the
-  // "never set without a following sync" guardrail. Safe here -- these
-  // events are read via hipEventElapsedTime only after hipStreamSynchronize.
+  // (op_profile_acquire_event_pair) for the full rationale and the "never use
+  // without a following sync" rule. Safe here: we only read these events with
+  // hipEventElapsedTime after hipStreamSynchronize.
   if (hipEventCreateWithFlags(&g_perf.h2d_start, hipEventDisableSystemFence) !=
           hipSuccess ||
       hipEventCreateWithFlags(&g_perf.d2h_end, hipEventDisableSystemFence) !=
@@ -368,29 +367,27 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
   }
 
   // PERF: at the start of each new inference, flush the previous inference's
-  // coarse timing (one line, easy to grep) and open a new window. We
-  // piggy-back on prepare_input(0) instead of using a dedicated sync hook
-  // because main_graph IR doesn't emit one.
+  // coarse timing (one grep-friendly line) and open a new window. We hook
+  // prepare_input(0) instead of a dedicated sync point because main_graph IR
+  // doesn't emit one.
   //
-  // PERF mode trade-off (intentional, not a bug): the hipStreamSynchronize
-  // below is *required* to make hipEventElapsedTime return valid numbers
-  // (the window events are async-recorded on the GPU stream and only become
-  // measurable once the stream has drained). The cost is that each
-  // inference's stream is forced to fully serialise before the next
-  // inference can submit work, which kills the natural pipeline overlap
-  // between consecutive inferences and *artificially lowers the measured
-  // TPS* compared to a normal run. So:
+  // Trade-off (intentional, not a bug): the hipStreamSynchronize below is
+  // required for hipEventElapsedTime to return valid numbers -- the window
+  // events are recorded asynchronously on the GPU stream and only become
+  // measurable once the stream has drained. But that sync forces each
+  // inference to finish before the next can start, which removes the normal
+  // overlap between inferences and so *lowers the measured TPS* below what a
+  // normal run reaches. So:
   //
-  //   * HIPDNN_EP_PERF=1 -- coarse total window, sub-real TPS.
-  //   * HIPDNN_EP_DEBUG=1 -- log-only, no sync, real-throughput TPS.
+  //   * HIPDNN_EP_PERF=1  -- coarse total window; measured TPS is below real.
+  //   * HIPDNN_EP_DEBUG=1 -- log only, no sync; TPS is real.
   //
-  // PERF intentionally no longer inherits from DEBUG (see
-  // hipdnn_ep_perf_enabled() in debug_log.h) so adding debug printfs
-  // doesn't silently re-impose the sync penalty.
+  // PERF no longer inherits from DEBUG (see hipdnn_ep_perf_enabled() in
+  // debug_log.h), so adding debug printfs won't silently re-impose the sync.
   //
-  // The fine-grained H2D / Compute / D2H split is measured EP-side by
-  // EpPerfTimer; this DLL-internal line reports only the coarse
-  // prepare_input(0) -> stream_sync window plus H2D byte volume.
+  // The finer H2D / Compute / D2H split is timed EP-side by EpPerfTimer; this
+  // DLL line reports only the coarse prepare_input(0) -> stream_sync window
+  // plus H2D byte volume.
   if (hipdnn_ep_perf_enabled() && index == 0) {
     perf_ensure_events();
     // Flush the previous inference's window (if any). inference_num > 0
@@ -459,13 +456,13 @@ int hipdnn_ep_stream_sync(RuntimeState *state) {
     return HIPDNN_EP_ERR_NULL_POINTER;
   }
 
-  // PERF: record the window-end event (after all D2H copies queued). The
-  // coarse [PERF] line for this window is emitted on the NEXT inference's
-  // prepare_input(0) (once the stream has drained so hipEventElapsedTime is
-  // valid). Per-op resolve+print is driven separately by the EP via
-  // hipdnn_ep_runtime_flush_op_profile() after its wall_ms window closes, so
-  // the N x hipEventElapsedTime + std::map + fprintf cost no longer inflates
-  // the Compute() latency that drives TPS measurements.
+  // PERF: record the window-end event here (after all D2H copies are queued).
+  // The coarse [PERF] line for this window is printed on the NEXT inference's
+  // prepare_input(0) -- by then the stream has drained, so hipEventElapsedTime
+  // is valid. Per-op resolve+print is done separately by the EP via
+  // hipdnn_ep_runtime_flush_op_profile() after its timing window closes, so the
+  // N x hipEventElapsedTime + std::map + fprintf cost no longer inflates the
+  // Compute() latency that TPS measurements depend on.
   if (hipdnn_ep_perf_enabled() && g_perf.initialized) {
     (void)hipEventRecord(g_perf.d2h_end,
                          static_cast<hipStream_t>(state->stream));

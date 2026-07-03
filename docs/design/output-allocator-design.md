@@ -26,7 +26,7 @@ Let `main_graph` allocate each output **at the point where its shape is computed
 
 ### Usage
 
-The output-allocator ABI is the **only** compile/runtime path — there is no provider option and no alternate out-param mode. Every model compiles with the 2-arg in-graph `hip.alloc_output` ABI; nothing needs to be passed:
+Every model compiles with the 2-arg in-graph `hip.alloc_output` ABI, and there is nothing to configure — a plain session just works:
 
 Pure ORT (Python):
 ```python
@@ -49,12 +49,12 @@ Dynamic output shapes are computed **inside** the graph (e.g. `M = memref.dim %i
 
 ```mermaid
 graph TD
-    A[one-shot-bufferize] --> E2[buffer-deallocation]
-    E2 --> D2[hip-use-output-allocator]
-    D2 --> F2[hip-pool-allocs]
-    F2 --> G2[convert-hip-to-llvm]
-    G2 --> H2[generate-interface]
-    H2 --> O2["→ main_graph(state, inputs)"]
+    A[one-shot-bufferize] --> B[buffer-deallocation]
+    B --> C[hip-use-output-allocator]
+    C --> D[hip-pool-allocs]
+    D --> E[convert-hip-to-llvm]
+    E --> F[generate-interface]
+    F --> G["→ main_graph(state, inputs)"]
 ```
 
 `hip-use-output-allocator` rewrites each returned `memref.alloc` → `hip.alloc_output`. `convert-hip-to-llvm` and `generate-interface` always emit the 2-arg ABI.
@@ -207,7 +207,7 @@ int inference_compute(void *state, span_t *inputs) {
   // main_graph(state, inputs_array)
 }
 ```
-There is no `outputs` parameter, no `outputs_array`, and no per-output `prepare_output`/`finalize_output` staging — every output is allocated in-graph via the allocator callback, which creates OrtValues directly.
+**No output arguments.** `inference_compute` takes only `(state, inputs)`. Each output is created inside `main_graph`: once its shape is known, the graph calls the allocator callback, which makes the `OrtValue` and hands back its buffer. The EP never passes output buffers in.
 
 **`main_graph` arity check.** `convert-hip-to-llvm` runs *before* interface generation and verifies `main_graph`'s arity: each memref unpacks to `3 + 2*rank` LLVM params, a returned memref adds none, so the expected count is context + inputs — emitting an error on mismatch.
 
@@ -293,14 +293,14 @@ Note the `main_graph` / `main_graph_internal` split (from `convert-hip-to-llvm`)
 
 **Key design points (as built):**
 
-1. **The callback is `noexcept` across the C ABI.** `output_allocate_cb` is invoked from the model.dll's C runtime; a C++ exception unwinding through those frames is UB. The body is wrapped in `try/catch` and any failure (out-of-range `out_idx`, ORT throw, scratch `hipMalloc` failure) ends in `LOG(FATAL)` — it never returns null, because the lowering builds a memref from the returned pointer and a null write would segfault with no diagnostic.
+1. **The callback is `noexcept` across the C ABI.** `output_allocate_cb` is invoked from the model.dll's C runtime; a C++ exception unwinding through those frames is UB. The body is wrapped in `try/catch`, and any failure (out-of-range `out_idx`, an ORT throw, a scratch `hipMalloc` failure) ends in `LOG(FATAL)` — it never returns null, because the lowering builds a memref from the returned pointer and a null write would segfault with no diagnostic. This does **not** contradict the DLL-side `hipdnn_ep_alloc_output` forwarder returning null (above): the forwarder returns null only when *no* callback was installed — which never happens in a real session. Once the EP installs `output_allocate_cb`, the callback always returns a valid pointer.
 
 2. **Allocator returns a GPU device pointer** (Phase 3 contract). GPU outputs (EP `hipHostMalloc` allocator or OGA device memory: `memory_type == TENSOR_MEMORY_GPU`) zero-copy ORT's buffer. Host (CPU) outputs get an EP-owned GPU scratch pointer; the DLL writes there and the EP D2H-copies into ORT's host buffer after compute.
 
 3. **Host-output D2H is EP-side and real-build-only.** The GPU scratch (one buffer per output index, grow-on-demand, reused across `Compute()`, freed in the dtor) and the `hipMemcpy` are under `#ifndef BUILD_MOCK_RUNTIME` (the EP only links `hip::host` in non-mock builds; mock writes host memory directly). The generated 2-arg `inference_compute` already ends in `hipdnn_ep_stream_sync`, so writes are complete on return and a plain **blocking** `hipMemcpy` D2H suffices — no extra stream sync.
 
-4. **KV cache share-buffer needs no special case in the callback.** `output_allocate_cb` passes the DLL's in-graph `shape` to `GetOutput` verbatim — every output is acquired the same way. The shape is already right because `hip.alloc_output`'s dynamic dims come from its producer's operands: a `present.*` output is sized from `memref.dim %past_key` (the past input buffer's actual extent), which under OGA `past_present_share_buffer` already **is** the `max_length` capacity buffer. So `GetOutput` returns the pre-bound shared `OrtValue` and the `past == present` pointer identity is preserved. Pinned by `test/lit/e2e/test_gqa_output_allocator_present_dim.mlir`. (`build_metadata_json` emits each output shape verbatim — static extent or `-1`; the retired `DimSource` message and `Output.dim_sources` field keep field number 5 reserved.)
+4. **KV cache share-buffer needs no special case in the callback.** `output_allocate_cb` passes the DLL's in-graph `shape` to `GetOutput` verbatim — every output is acquired the same way. The shape is already right because `hip.alloc_output`'s dynamic dims come from its producer's operands: a `present.*` output is sized from `memref.dim %past_key` (the past input buffer's actual extent), which under OGA `past_present_share_buffer` already **is** the `max_length` capacity buffer. So `GetOutput` returns the pre-bound shared `OrtValue` and the `past == present` pointer identity is preserved. Pinned by `test/lit/e2e/test_gqa_output_allocator_present_dim.mlir`. (`build_metadata_json` emits each output shape verbatim — static extent or `-1`.)
 
-5. **Output-completeness guard.** Every declared output must be produced in-graph (one `hip.alloc_output` → one callback). After `compute_with_output_allocator` returns, the EP asserts every metadata output index was served, else `LOG(FATAL)` naming the missing one. This turns the two unsupported graph shapes (passthrough output that returns a graph input; deduped aliased output) into a clear error instead of an unfilled ORT output. None of the target models have them.
+5. **Output-completeness guard.** Every declared output must be created in-graph, so each one should trigger exactly one `hip.alloc_output` → callback. Right after the inference call returns, the EP checks that every output index in the metadata was served; if one was skipped it `LOG(FATAL)`s and names it. This catches the two graph shapes we don't support yet — an output that just passes a graph input straight through, and two outputs that share (alias) one buffer — and turns them into a clear error instead of handing ORT an unfilled buffer. None of the target models have either shape.
 
 6. **Per-Compute allocator install/clear.** The `OutputAllocatorCtx` lives on `MlirCustomOp::compute_with_output_allocator`'s stack; the allocator is installed (with `self = &ctx`) before `InferenceState::compute` and cleared (`set_output_allocator(nullptr)`) immediately after, so `self` can never dangle into a later `Compute()`.

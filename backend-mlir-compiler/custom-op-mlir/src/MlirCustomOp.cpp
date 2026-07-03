@@ -416,18 +416,17 @@ PerfCollector g_perf_collector;
 PerfCollector &perf_collector() { return g_perf_collector; }
 
 #ifdef HIPDNN_EP_LINK_HIP_HOST
-// Per-Compute() HIPDNN_EP_PERF timer for the output-allocator dispatch so the
-// event lifecycle and PerfSample assembly live in one place. Brackets the GPU
-// work with a session-lifetime
-// event pair (owned by MlirCustomOp, lazily created here, released in its
-// destructor) and times the host phases with steady_clock.
+// Per-Compute() timer for HIPDNN_EP_PERF, keeping all the event handling and
+// PerfSample assembly in one place. It times the GPU work with a
+// session-lifetime hipEvent pair (owned by MlirCustomOp, created lazily here
+// and released in its destructor) and the host phases with steady_clock.
 //
-// Usage: construct after begin-of-Compute, record_start() right before the
-// inference dispatch, record_stop() right after it returns, then populate the
-// host-phase fields on a PerfSample (they differ per path) and call finish(),
-// which fences the device, reads GPU elapsed time, fills wall/gpu/
-// fence_residual, and records the sample. Only construct when perf is enabled
-// (the disabled path must stay allocation- and timing-free).
+// Usage: construct it after Compute() begins, call record_start() just before
+// the inference dispatch and record_stop() just after it returns, fill in the
+// host-phase fields on a PerfSample, then call finish() -- which fences the
+// device, reads the GPU elapsed time, fills in wall/gpu/fence_residual, and
+// records the sample. Only construct it when perf is enabled; the disabled
+// path must do no allocation and no timing.
 class EpPerfTimer {
 public:
   using clock = std::chrono::steady_clock;
@@ -507,9 +506,9 @@ PerfSummaryPrinter g_perf_printer;
 // ===========================================================================
 // Output-allocator (2-arg inference_compute) plumbing.
 //
-// The DLL receives no pre-filled outputs span. Instead
-// main_graph calls hipdnn_ep_alloc_output(out_idx, shape, rank, elem_size) for
-// each graph output once its runtime shape is known; the runtime forwards to
+// The DLL receives no pre-filled outputs span. Instead, main_graph calls
+// hipdnn_ep_alloc_output(out_idx, shape, rank, elem_size) for each graph
+// output once its runtime shape is known; the runtime forwards to
 // the callback the EP installed. The callback maps out_idx -> ORT output, asks
 // ORT for the buffer at the DLL's in-graph shape, and returns a pointer the DLL
 // writes into:
@@ -748,19 +747,18 @@ void MlirCustomOp::compute_with_output_allocator(
     LOG(ERROR) << "inference_compute (allocator) failed with code: " << ret;
   }
 
-  // Output-completeness guard. Allocator mode requires every declared output to
-  // be produced in-graph (each yields a hip.alloc_output -> callback). A
-  // missing one means a passthrough / aliased output the DLL never allocates --
-  // unsupported today. Fail loudly rather than hand ORT an uninitialized buffer
-  // (which can silently pass a CPU-vs-CPU comparison).
+  // Output-completeness guard. Every declared output must be produced in-graph
+  // (each yields a hip.alloc_output -> callback). A missing one means a
+  // passthrough / aliased output the DLL never allocates -- unsupported today.
+  // Fail loudly rather than hand ORT an uninitialized buffer (which can
+  // silently pass a CPU-vs-CPU comparison).
   for (size_t i = 0; i < octx.allocated.size(); ++i) {
     if (!octx.allocated[i]) {
       LOG(FATAL) << "output allocator: output '"
                  << metadata_.outputs()[static_cast<int>(i)].name() << "' (idx "
                  << i
                  << ") was never allocated by the model.dll. Passthrough / "
-                    "aliased outputs are not supported in output-allocator "
-                    "mode yet.";
+                    "aliased outputs are not supported yet.";
     }
   }
 
@@ -781,7 +779,7 @@ void MlirCustomOp::compute_with_output_allocator(
     // fence_residual_ms capture host-visible completion.
     PerfSample s;
     s.marshal_in_ms = EpPerfTimer::ms(timer->t_enter(), t_after_in);
-    s.marshal_out_ms = 0.0; // allocator mode: outputs allocated in-graph
+    s.marshal_out_ms = 0.0; // outputs are allocated in-graph, not marshaled
     s.compute_cpu_ms = EpPerfTimer::ms(t_after_in, timer->t_after_compute());
     timer->finish(s);
     // Resolve the per-op table AFTER the timing window closes (see the

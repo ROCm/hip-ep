@@ -79,9 +79,9 @@ struct span_t {
 };
 
 // EP-side mirror of `hipdnn_output_allocator_t`
-// (lib/Runtime/hipdnn_ep_runtime.h). In output-allocator mode the EP installs
-// one of these on the model.dll's RuntimeState (via
-// hipdnn_ep_set_output_allocator) before the 2-arg inference_compute; the DLL's
+// (lib/Runtime/hipdnn_ep_runtime.h). The EP installs one of these on the
+// model.dll's RuntimeState (via hipdnn_ep_set_output_allocator) before the
+// 2-arg inference_compute; the DLL's
 // in-graph hip.alloc_output ops call back through `allocate` to obtain each
 // graph-output buffer at the point its shape is known. Re-declared here (not
 // shared) for the same decoupling reason as tensor_t.

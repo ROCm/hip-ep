@@ -237,14 +237,9 @@ survives into the compiled `model.dll`. It carries the same shape
 information used at runtime by `MlirCustomOp::Compute()`.
 
 **Dynamic output dims** are not resolved from session-creation metadata.
-The DLL sizes dynamic outputs **in-graph at runtime** via the
-output-allocator ABI (the EP's `output_allocate_cb` passes the DLL's
-computed shape to `GetOutput` verbatim). The earlier `DimSource` /
-`dim_params_map` mechanism that resolved each dynamic output dim from a
-matching input dim was removed — the `DimSource` ProtoBuf message and
-`Output.dim_sources` field have been retired (field number 5 reserved in
-`metadata.proto`). The output-allocator ABI is the only compile/runtime
-path — there is no provider option and no out-param alternative.
+The DLL sizes each dynamic output **in-graph at runtime**: the EP's
+`output_allocate_cb` receives the shape the DLL computed and passes it to
+`GetOutput` verbatim, so no per-dim metadata is needed.
 
 **Why two channels.** The FlatBuffer format avoids a ProtoBuf dependency
 in `model.dll`, which is loaded into the inferencing process and must
