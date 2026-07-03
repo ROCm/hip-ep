@@ -1384,6 +1384,22 @@ HIP_KERNEL_API int hip_matmul_nbits(
     const void* pre_unpacked_zp_u8,
     const void* pre_unpacked_zp_fp16);
 
+/* QMoE-prefill autotune-mode selector for hip_matmul_nbits (thread-local).
+ *
+ * QMoE prefill dispatches hip_matmul_nbits once per expert; experts routed a
+ * single token land in the small-M (M==1) GEMV path, which by default uses the
+ * ONLINE sampler. The online sampler blocks the host on hipEventSynchronize
+ * per call across several sweeps until it locks a config; if that convergence
+ * window outlasts the harness warmup it leaks per-call syncs into the measured
+ * prefill iterations and destabilises TTFT. With MoE mode ON, that path uses
+ * the OFFLINE tune-once-then-cache tuner instead, so one warmup prefill fully
+ * populates the cache and measured iterations are pure cache hits.
+ *
+ * Scope it tightly around the QMoE per-expert loop via the RAII guard in
+ * lib/Runtime/real/qmoe.cpp; dense matmul (flag off) keeps the online sampler,
+ * which is the better cold-cache choice for single-token decode. */
+HIP_KERNEL_API void hip_matmul_nbits_set_moe_mode(int on);
+
 /* Stand-alone launchers for the zero_points unpack/convert kernels, used by
  * the asym matmul_nbits cache in lib/Runtime/real/matmul_nbits.cpp.
  *

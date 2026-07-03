@@ -897,6 +897,26 @@ static int tuneGemvConfig(
 static std::unordered_map<std::string, int> gemv_cache;
 static std::mutex gemv_tune_mutex;
 
+// QMoE-prefill mode selector for hip_matmul_nbits (see
+// hip_matmul_nbits_set_moe_mode in hip_custom_kernels.h). QMoE prefill calls
+// hip_matmul_nbits once per expert; the count==1 experts land in the small-M
+// GEMV path, which by default uses the ONLINE sampler (launchGemvOnline). The
+// online sampler blocks the host on hipEventSynchronize for every call until it
+// has locked a config (several sweeps); when that convergence window spills past
+// the harness warmup it leaks per-call syncs into the measured iterations and
+// makes prefill TTFT fluctuate. In MoE mode this path instead uses the OFFLINE
+// tuner, which tunes once on the first call for a shape and caches it, so a
+// single warmup prefill fully populates the cache and measured iterations are
+// pure cache hits (the pre-online baseline behaviour). Dense matmul (flag off)
+// keeps the online sampler, which is the better cold-cache choice for the
+// single-token decode it serves. thread_local so concurrent sessions on other
+// threads are unaffected; set only around the QMoE per-expert loop (wrap_qmoe).
+static thread_local bool g_matmul_nbits_moe_mode = false;
+
+extern "C" void hip_matmul_nbits_set_moe_mode(int on) {
+    g_matmul_nbits_moe_mode = (on != 0);
+}
+
 static std::string gemvCacheKey(int64_t M, int64_t N, int64_t K, int64_t bs,
                                 bool col_major, bool has_zp) {
     // has_zp must be in the key: the asym path executes one extra read_zp +
@@ -3216,6 +3236,29 @@ extern "C" int hip_matmul_nbits(
     const auto* z_u = static_cast<const uint8_t*>(zp_for_u8_paths);
     const auto* b_h = static_cast<const __half*>(bias);
     auto*       o_h = static_cast<__half*>(output);
+
+    // QMoE prefill: use the OFFLINE tuner (tune-once-then-cache). The online
+    // sampler's multi-sweep convergence window can leak per-call
+    // hipEventSynchronize into measured prefill iterations and make TTFT
+    // fluctuate; offline resolves fully during warmup. Only the QMoE
+    // per-expert count==1 shapes reach here in MoE mode. col_major=false
+    // (row-major M==1 path); getOrTuneGemvConfig treats M==1 as col-major
+    // agnostic. See g_matmul_nbits_moe_mode.
+    if (g_matmul_nbits_moe_mode) {
+      int cfg = getOrTuneGemvConfig(hip_stream, a_h, b_u, s_h, z_u, b_h, o_h,
+                                    M, N, K, batch_count, block_size,
+                                    /*col_major=*/false);
+      launchGemvConfig(cfg, hip_stream, a_h, b_u, s_h, z_u, b_h, o_h,
+                       M, N, K, batch_count, block_size, /*col_major=*/false);
+      hipError_t err = hipGetLastError();
+      if (err != hipSuccess) {
+        fprintf(stderr,
+                "[custom_kernels] hip_matmul_nbits GEMV(offline) launch "
+                "failed: %s\n",
+                hipGetErrorString(err));
+      }
+      return static_cast<int>(err);
+    }
 
     // Online (cold-cache) autotune: single-token decode reads each layer's
     // weights once, cold from DRAM, so we sample real launches instead of the
