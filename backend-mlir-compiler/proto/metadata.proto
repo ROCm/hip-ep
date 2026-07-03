@@ -10,15 +10,11 @@ message Metadata {
   string artifact_filename = 1;
   repeated Output outputs = 2;
   repeated Input inputs = 3;
-  // NOTE: field number 4 is retired. It was `use_output_allocator`, which
-  // stopped meaning anything once the output-allocator ABI became the only
-  // mode. Kept reserved so the number is never reused.
-  reserved 4;
   // Per-model artifact format, mirrors CompilationOptions.output_mode.
   // Read by the EP before loading the artifact to select the loader:
   //   "LLVM_IR" (default / empty) -> LlvmIrJit (in-process ORC JIT)
   //   "NATIVE"                    -> morphizen::Plugin (LoadLibrary/dlopen)
-  string artifact_format = 5;
+  string artifact_format = 4;
 }
 
 message Input {
@@ -35,8 +31,5 @@ message Output {
   // Static dims carry their size; dynamic dims carry -1. The DLL works out the
   // size of a dynamic output at runtime through the EP's output-allocator
   // callback, so no extra per-dim metadata is needed.
-  // NOTE: field number 5 is retired (it was `dim_sources`). Kept reserved so
-  // the number is never reused.
-  reserved 5;
   repeated int64 shape = 4;
 }

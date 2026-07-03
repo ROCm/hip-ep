@@ -151,7 +151,7 @@ static int64_t normalizeDim(int64_t dim) {
 // Step 5: Build metadata JSON from graph inputs and outputs.
 // Output shapes are emitted verbatim (static extent or -1 for dynamic dims);
 // the DLL sizes dynamic outputs in-graph at runtime via the output-allocator
-// callback (the only ABI).
+// callback.
 static std::string build_metadata_json(const CompilationArtifact &artifact,
                                        Graph &graph) {
   mlir_metadata::Metadata metadata;

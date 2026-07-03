@@ -152,9 +152,9 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->workspace_size = 0;
   state->host_scratch_base = nullptr;
   state->host_scratch_size = 0;
-  // No allocator installed by default (null context + callback). The EP
-  // overwrites this via hipdnn_ep_set_output_allocator before the first
-  // inference_compute; hipdnn_ep_alloc_output forwards to it.
+  // Start with no output allocator (null context + callback). The EP installs
+  // one via hipdnn_ep_set_output_allocator before the first inference_compute,
+  // and hipdnn_ep_alloc_output then forwards each graph-output request to it.
   state->output_allocator.self = nullptr;
   state->output_allocator.allocate = nullptr;
   state->qmoe_scratch = nullptr;

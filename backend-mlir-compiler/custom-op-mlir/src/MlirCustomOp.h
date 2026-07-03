@@ -18,9 +18,9 @@ class Model;
 
 namespace mlir_compilation {
 
-// One grow-on-demand GPU scratch buffer for a host (CPU) graph output in
-// output-allocator mode. Keeping the pointer and its capacity together (vs two
-// parallel vectors) means the two can never fall out of sync on resize.
+// One grow-on-demand GPU scratch buffer for a host (CPU) graph output.
+// Keeping the pointer and its capacity together (vs two parallel vectors)
+// means the two can never fall out of sync on resize.
 struct HostOutputScratch {
   void *ptr = nullptr; // device buffer the DLL writes into (nullptr = unset)
   size_t capacity = 0; // bytes currently allocated at ptr
