@@ -10,20 +10,17 @@
 // Source: onnxruntime/core/providers/cuda/tensor/pad_impl.cu @ v1.22.2
 //         (_PadKernel; ONNX `wrap` mode added on top).
 //
-// `pads` and `axes` arrive as HOST (pageable) pointers: PadConversion wraps
-// them with `hip.transfer ... to host`, which bufferizes to a stack
-// #hip.mem<host> buffer + `hip.memcpy_d2h_async` + `hip.stream_sync`. So by
-// the time wrap_pad runs, the pads/axes bytes are already host-resident and
-// the device->host crossing has been synchronized in the IR -- wrap_pad just
-// reads them with a plain memcpy, no internal D2H and no stream sync of its
-// own. Making the crossing explicit in the IR (rather than hidden here) is the
-// point of the transfer pilot: it exposes the sync to later barrier-elimination
-// passes. The net sync count is unchanged from the old implicit-D2H design.
+// `pads` and `axes` arrive as HOST pointers: PadConversion wraps them with
+// `hip.transfer_to_host` (bufferizes to a host buffer + async D2H + stream
+// sync), so the bytes are already host-resident and synced by the time wrap_pad
+// runs -- it just reads them with a plain memcpy (no D2H, no sync here). Doing
+// the crossing in the IR instead of hiding it here is the point of the transfer
+// pilot; the total sync count is the same as the old implicit-D2H version.
 //
-// `constant_value` is likewise NOT in GPU memory: the compiler passes the
-// scalar fill value BY VALUE through a host stack slot (see PadLowering /
-// PadConversion), so it is read with a plain host memcpy -- no device
-// allocation, no D2H copy.
+// `constant_value` is also not in GPU memory: the compiler passes the scalar
+// fill value BY VALUE through a host stack slot (see PadLowering /
+// PadConversion), so it too is read with a plain memcpy -- no device alloc, no
+// D2H.
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -106,8 +103,8 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
     return -1;
   }
 
-  // pads/axes are HOST-resident (brought over by hip.transfer -> a preceding
-  // hip.memcpy_d2h_async + hip.stream_sync in the IR), so read them with a
+  // pads/axes are HOST-resident (brought over by hip.transfer_to_host -> a
+  // preceding hip.memcpy_d2h_async + hip.stream_sync in the IR), so read with a
   // plain memcpy -- no internal D2H, no stream sync here.
   // ONNX-18 pads layout: [begin_0, begin_1, ..., begin_K-1, end_0, ...,
   // end_K-1] where K = num_axes_padded (= data_rank if axes is omitted).

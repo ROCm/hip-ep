@@ -6,8 +6,8 @@
 //   - memref-phase async memcpy: dst/src must agree on element type and (when
 //     both static) element count, and the dst/src operand memory spaces must
 //     match the copy direction.
-//   - tensor-phase hip.transfer: value-preserving, so src/result element type
-//     and shape must match (only the target memory space may differ).
+//   - tensor-phase hip.transfer_to_host: value-preserving, so src/result
+//     element type and shape must match (only the memory space may differ).
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt --split-input-file --verify-diagnostics %s
@@ -75,23 +75,23 @@ func.func @memcpy_h2d_dst_not_device(%ctx: !hip.context,
 
 // -----
 
-// hip.transfer is value-preserving: src/result element type must match.
+// hip.transfer_to_host is value-preserving: src/result element type must match.
 func.func @transfer_elem_type_mismatch(%ctx: !hip.context,
                                        %src: tensor<8xi64>) {
   // expected-error @+1 {{src/result element type mismatch}}
-  %h = hip.transfer(%ctx, %src : tensor<8xi64>) to #hip.mem<host>
+  %h = hip.transfer_to_host(%ctx, %src : tensor<8xi64>)
          -> tensor<8xi32>
   return
 }
 
 // -----
 
-// hip.transfer is value-preserving: src/result shape must match (only the
-// memory space may differ).
+// hip.transfer_to_host is value-preserving: src/result shape must match (only
+// the memory space may differ).
 func.func @transfer_shape_mismatch(%ctx: !hip.context,
                                    %src: tensor<8xi64>) {
   // expected-error @+1 {{src/result shape mismatch}}
-  %h = hip.transfer(%ctx, %src : tensor<8xi64>) to #hip.mem<host>
+  %h = hip.transfer_to_host(%ctx, %src : tensor<8xi64>)
          -> tensor<4xi64>
   return
 }

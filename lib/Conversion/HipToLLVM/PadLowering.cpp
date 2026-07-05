@@ -71,9 +71,9 @@ struct PadOpLowering : public ConvertOpToLLVMPattern<PadOp> {
     };
     Value one = createI64Const(1);
 
-    // constant_value is a by-value scalar (mode B): no device buffer. Stage it
-    // in an 8-byte host stack slot and pass the pointer; wrap_pad reads
-    // element_size bytes from it (no D2H). Absent -> null pointer.
+    // constant_value is a by-value scalar: no device buffer. Stage it in an
+    // 8-byte host stack slot and pass the pointer; wrap_pad reads element_size
+    // bytes from it (no D2H). Absent -> null pointer.
     Value cvalPtr;
     if (op.getConstantValue()) {
       Value cval = adaptor.getConstantValue();

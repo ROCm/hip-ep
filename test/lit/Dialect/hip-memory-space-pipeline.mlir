@@ -2,26 +2,16 @@
 // Licensed under the MIT License.
 //
 //===----------------------------------------------------------------------===//
-// Aspect G: pipeline non-regression + device-space OUTPUT for hip.pad.
+// onnx.Pad through convert-onnx-to-hip + one-shot-bufferize: the op still
+// verifies and reaches memref form, AND its OUTPUT bufferizes to
+// #hip.mem<device>. PadConversion builds the DPS init as a device-space
+// bufferization.alloc_tensor, so one-shot-bufferize materializes a device
+// memref.alloc and DPS ties hip.pad's outs/result to it -- device-typed by
+// construction, not via the transitional space-less acceptance.
 //
-// This test drives onnx.Pad through
-//   convert-onnx-to-hip -> one-shot-bufferize
-// and confirms two things:
-//  1. the op still verifies and reaches memref form (the memory-space operand
-//     constraints did not break the lowering path); and
-//  2. hip.pad's OUTPUT bufferizes to #hip.mem<device> memory. PadConversion
-//     builds the DPS init as a device-space bufferization.alloc_tensor, so
-//     one-shot-bufferize materializes a #hip.mem<device> memref.alloc and the
-//     DPS default ties hip.pad's `outs` (and result) to it -- the op's output
-//     buffer is device-typed by construction, not via the transitional
-//     space-less acceptance.
-//
-// (bufferize-function-boundaries is intentionally omitted: it types a returned
-// value as a fully-dynamic-strided function result, which the device-space
-// alloc_tensor cannot lower to as a bare return. The production pipeline never
-// bare-returns a device buffer -- graph outputs go through out-params / the
-// output allocator -- so the realistic bufferization is the boundary-preserving
-// form checked here; the pad result stays a tensor bridged by to_tensor.)
+// (bufferize-function-boundaries is omitted on purpose: it would type the
+// returned value as a fully-dynamic-strided result the device alloc_tensor
+// can't bare-return. The real pipeline never bare-returns a device buffer.)
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip \

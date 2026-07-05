@@ -104,32 +104,32 @@ struct HipReadbackBufferizableModel
   }
 };
 
-// Bufferization model for hip.transfer: a value-preserving tensor->tensor op
-// whose `target` attribute names the destination HIP memory space. Bufferizes
-// to a fresh, non-aliasing allocation in that space + an async memcpy (+ a
-// stream sync for D2H only; H2D is ordered by later GPU work on the stream).
-// Direction comes from the operand spaces; an unspecified src space is treated
-// as device (the transitional default). A host/pinned dst is a STACK
+// Bufferization model for hip.transfer_to_host: a tensor->tensor op that copies
+// `src` (a device tensor) into HOST memory. It bufferizes to a host STACK
 // `memref.alloca` (space-less, since alloca must live in the default LLVM stack
-// AS) lifted to the target space by `memref.memory_space_cast`; a device dst is
-// a heap `memref.alloc` that hip-pool-allocs folds into the GPU pool.
+// address space) relabeled to `#hip.mem<host>`, then an async D2H copy + a
+// stream sync (the host reads the result next). Stack-only, so use it for SMALL
+// data (shape/param vectors, scalars); the alloca frees itself at function
+// scope, needs no dealloc, and is skipped by hip-pool-allocs and
+// hip-materialize-host-scalars.
 //
-//   Before:  %h = hip.transfer(%ctx, %pads : tensor<8xi64>) to #hip.mem<host>
+//   Before:  %h = hip.transfer_to_host(%ctx, %pads : tensor<8xi64>)
+//                   -> tensor<8xi64>
 //   After:   %slot = memref.alloca() : memref<8xi64>
 //            %dst  = memref.memory_space_cast %slot
 //                      : memref<8xi64> to memref<8xi64, #hip.mem<host>>
 //            hip.memcpy_d2h_async(%ctx, %dst, %srcBuf)
 //            hip.stream_sync(%ctx)            // uses of %h replaced by %dst
-struct HipTransferBufferizableModel
+struct HipTransferToHostBufferizableModel
     : public bufferization::BufferizableOpInterface::ExternalModel<
-          HipTransferBufferizableModel, TransferOp> {
+          HipTransferToHostBufferizableModel, TransferToHostOp> {
 
   bool bufferizesToAllocation(Operation *, Value) const { return true; }
 
   bool bufferizesToMemoryRead(Operation *op, OpOperand &opOperand,
                               const bufferization::AnalysisState &) const {
     // Only the `src` tensor operand is read; `ctx` is not a tensor.
-    return opOperand.get() == cast<TransferOp>(op).getSrc();
+    return opOperand.get() == cast<TransferToHostOp>(op).getSrc();
   }
   bool bufferizesToMemoryWrite(Operation *, OpOperand &,
                                const bufferization::AnalysisState &) const {
@@ -144,51 +144,40 @@ struct HipTransferBufferizableModel
 
   FailureOr<bufferization::BufferLikeType>
   getBufferType(Operation *op, Value /*value*/,
-                const bufferization::BufferizationOptions &options,
+                const bufferization::BufferizationOptions & /*options*/,
                 const bufferization::BufferizationState & /*state*/,
                 SmallVector<Value> & /*invocationStack*/) const {
-    auto transfer = cast<TransferOp>(op);
+    auto transfer = cast<TransferToHostOp>(op);
     auto tensorTy = cast<TensorType>(transfer.getResult().getType());
-    // Result buffer lives in the target space with a static identity layout
-    // (so the pad lowering's contiguous-ptr extraction sees a dense buffer).
+    // Result buffer is HOST memory with a static identity layout (so the pad
+    // lowering sees a dense buffer). The op is host-only, so the space is fixed
+    // here, not read from an attribute.
+    auto hostSpace =
+        MemorySpaceAttr::get(op->getContext(), MemorySpaceKind::Host);
     BaseMemRefType bt = bufferization::getMemRefTypeWithStaticIdentityLayout(
-        tensorTy, transfer.getTargetAttr());
+        tensorTy, hostSpace);
     return cast<bufferization::BufferLikeType>(bt);
   }
 
   LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
                           const bufferization::BufferizationOptions &options,
                           bufferization::BufferizationState &state) const {
-    auto transfer = cast<TransferOp>(op);
+    auto transfer = cast<TransferToHostOp>(op);
     Location loc = op->getLoc();
 
     FailureOr<Value> srcBuf =
         getBuffer(rewriter, transfer.getSrc(), options, state);
     if (failed(srcBuf))
       return failure();
-    auto srcTy = cast<MemRefType>(srcBuf->getType());
 
-    // Single source of truth for the destination buffer type: defer to the
-    // framework, which calls our getBufferType() hook above. Recomputing
-    // getMemRefTypeWithStaticIdentityLayout() here would risk drifting from
-    // the declared buffer type if the layout/space policy ever changes.
+    // Get the destination buffer type from the framework (it calls our
+    // getBufferType() hook above: host space, static identity layout).
+    // Computing it again here could drift from that declared type.
     FailureOr<bufferization::BufferLikeType> dstTyOr =
         bufferization::getBufferType(transfer.getResult(), options, state);
     if (failed(dstTyOr))
       return failure();
     auto dstTy = cast<MemRefType>(*dstTyOr);
-
-    // Pick the copy direction from the explicit memory spaces. An unspecified
-    // src space is treated as device (today's transitional default).
-    MemorySpaceKind dstKind = transfer.getTarget().getKind();
-    MemorySpaceKind srcKind = MemorySpaceKind::Device;
-    if (auto sp = dyn_cast_or_null<MemorySpaceAttr>(srcTy.getMemorySpace()))
-      srcKind = sp.getKind();
-
-    bool srcIsHost =
-        srcKind == MemorySpaceKind::Host || srcKind == MemorySpaceKind::Pinned;
-    bool dstIsHost =
-        dstKind == MemorySpaceKind::Host || dstKind == MemorySpaceKind::Pinned;
 
     // Dynamic dst dims mirror the src buffer's dims.
     SmallVector<Value> dynDims;
@@ -196,35 +185,17 @@ struct HipTransferBufferizableModel
       if (dstTy.isDynamicDim(i))
         dynDims.push_back(memref::DimOp::create(rewriter, loc, *srcBuf, i));
 
-    // Host/pinned dst: stack alloca + memory_space_cast to the target space
-    // (see the header comment for why). Device dst (H2D): heap alloc that
-    // hip-pool-allocs later folds into the GPU pool.
-    Value dst;
-    if (dstIsHost) {
-      auto slotTy = MemRefType::get(dstTy.getShape(), dstTy.getElementType());
-      Value slot = memref::AllocaOp::create(rewriter, loc, slotTy, dynDims);
-      dst = memref::MemorySpaceCastOp::create(rewriter, loc, dstTy, slot);
-    } else {
-      dst = memref::AllocOp::create(rewriter, loc, dstTy, dynDims);
-    }
+    // Host dst is ALWAYS a stack alloca (space-less, since alloca must live in
+    // the default LLVM stack AS) lifted to #hip.mem<host>. See header comment.
+    auto slotTy = MemRefType::get(dstTy.getShape(), dstTy.getElementType());
+    Value slot = memref::AllocaOp::create(rewriter, loc, slotTy, dynDims);
+    Value dst = memref::MemorySpaceCastOp::create(rewriter, loc, dstTy, slot);
 
+    // Device -> host copy, then sync: the host reads `dst` next, so wait for
+    // the async copy to complete before the op's uses observe the buffer.
     Value ctx = transfer.getCtx();
-    if (srcKind == MemorySpaceKind::Device && dstIsHost) {
-      MemcpyD2HAsyncOp::create(rewriter, loc, ctx, dst, *srcBuf);
-      // D2H: the host reads `dst` next, so wait for the async copy. (H2D needs
-      // no host sync -- the device `dst` is consumed by later GPU work on the
-      // same stream, and the host src outlives the in-flight copy.)
-      StreamSyncOp::create(rewriter, loc, ctx);
-    } else if (srcIsHost && dstKind == MemorySpaceKind::Device) {
-      MemcpyH2DAsyncOp::create(rewriter, loc, ctx, dst, *srcBuf);
-    } else {
-      // hip.transfer is a host<->device crossing indicator. A same-space
-      // transfer (e.g. device->device) is not a crossing and most likely
-      // signals a converter bug, so reject it rather than silently eliding it.
-      return op->emitError(
-          "hip.transfer: unsupported memory-space direction (only "
-          "device<->host/pinned is implemented today)");
-    }
+    MemcpyD2HAsyncOp::create(rewriter, loc, ctx, dst, *srcBuf);
+    StreamSyncOp::create(rewriter, loc, ctx);
 
     bufferization::replaceOpWithBufferizedValues(rewriter, op, dst);
     return success();
@@ -238,7 +209,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
         *ctx);
     ReadbackScalarOp::attachInterface<
         HipReadbackBufferizableModel<ReadbackScalarOp>>(*ctx);
-    TransferOp::attachInterface<HipTransferBufferizableModel>(*ctx);
+    TransferToHostOp::attachInterface<HipTransferToHostBufferizableModel>(*ctx);
     ConvOp::attachInterface<HipDstBufferizableModel<ConvOp>>(*ctx);
     ConvTransposeOp::attachInterface<HipDstBufferizableModel<ConvTransposeOp>>(
         *ctx);

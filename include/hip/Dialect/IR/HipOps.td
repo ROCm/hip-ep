@@ -3076,14 +3076,12 @@ def Hip_PadOp : Hip_DpsOp<"pad",
     ```
   }];
 
-  // Pilot op for the memory-space type system, exercising BOTH spaces: the
-  // payload tensors (`data`, `output`) are GPU buffers (device), while the
-  // small shape-control tensors (`pads`, `axes`) are consumed host-side
-  // (host). `constant_value` is a single scalar fill value passed BY VALUE
-  // (a plain float/integer SSA value, not a buffer) — so it carries no memory
-  // space at all: the converter resolves the ONNX `Pad.constant_value` scalar
-  // to a host value (constant-fold or synchronized readback), and the runtime
-  // receives it directly with no device allocation or D2H copy.
+  // Pilot op for the memory-space type system. It uses BOTH spaces: the big
+  // data tensors (`data`, `output`) are device buffers, the small shape tensors
+  // (`pads`, `axes`) are host. `constant_value` is one scalar fill value passed
+  // BY VALUE (a plain SSA value, not a buffer), so it has no space: the converter
+  // makes it a host value (constant-fold or a synced read) and the runtime uses
+  // it directly -- no device alloc, no D2H.
   let arguments = (ins
     Hip_ContextType:$ctx,
     Hip_TensorOrDeviceMemRef:$data,
@@ -3834,33 +3832,33 @@ def Hip_ReadbackScalarOp : Hip_Op<"readback_scalar",
 
 // ===== Explicit memory transfers =============================================
 //
-// `hip.transfer` (tensor phase) + the memref-phase `hip.memcpy_*_async` /
-// `hip.stream_sync` ops it bufferizes into: an explicit, IR-level crossing
-// between HIP memory spaces, parallel to the existing readback / host-scratch
-// machinery (both retained unchanged). Today only `hip.pad` emits it (for its
-// `pads` / `axes`). See docs/design/memory-space-design.md and HipBufferize.h.
-def Hip_TransferOp : Hip_Op<"transfer", []> {
-  let summary = "Explicit value-preserving transfer into a HIP memory space";
+// `hip.transfer_to_host` (tensor phase) and the memref-phase ops it bufferizes
+// into (`hip.memcpy_*_async` / `hip.stream_sync`) make a device->host crossing
+// explicit in the IR. Runs alongside the existing readback / host-scratch
+// helpers (both unchanged). Today only `hip.pad` emits it (for `pads` / `axes`
+// and a runtime `constant_value`). See docs/design/memory-space-design.md and
+// HipBufferize.h.
+def Hip_TransferToHostOp : Hip_Op<"transfer_to_host", []> {
+  let summary = "Copy a tensor into host memory (device -> host)";
   let description = [{
-    Produces a value-preserving copy of `src` (same shape + element type) in the
-    `target` HIP memory space. Pre-bufferization it is a tensor->tensor op with
-    the destination space carried by `target`; bufferization
-    (HipTransferBufferizableModel) realises the crossing as a destination buffer
-    + `hip.memcpy_*_async` + `hip.stream_sync`.
+    Copies `src` into HOST memory, same shape and element type. Before
+    bufferization it is a plain tensor->tensor op; bufferization turns it into a
+    host stack `memref.alloca` (relabeled `#hip.mem<host>`) + async D2H copy +
+    stream sync (the host reads the result right after, so it waits for the copy).
 
-    `target` admits any space for forward-compatibility, but bufferization only
-    implements the device <-> host/pinned crossings (D2H is the one exercised
-    today). A `managed` or same-space target is rejected, not miscompiled.
+    Direction is always device -> host: `src` is a device tensor (or, while the
+    memory-space migration is partial, one with no space yet) and the result is
+    host. The host buffer is always on the stack, so use this only for SMALL data
+    (shape/param vectors, scalars). The reverse (host -> device) is handled at the
+    memref phase by `hip.memcpy_h2d_async`.
   }];
 
   let arguments = (ins Hip_ContextType:$ctx,
-                       Hip_TensorOrMemRef:$src,
-                       Hip_MemorySpaceAttr:$target);
+                       Hip_TensorOrMemRef:$src);
   let results = (outs Hip_TensorOrMemRef:$result);
 
   let assemblyFormat = [{
-    `(` $ctx `,` $src `:` type($src) `)` `to` $target attr-dict
-    `->` type($result)
+    `(` $ctx `,` $src `:` type($src) `)` attr-dict `->` type($result)
   }];
 
   // Value-preserving: verifier checks shape + element type, NOT memory space.

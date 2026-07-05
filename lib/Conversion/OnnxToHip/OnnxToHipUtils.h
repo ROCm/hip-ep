@@ -100,14 +100,12 @@ inline mlir::Value createEmptyTensor(mlir::OpBuilder &builder,
 /// Create a DPS init as `bufferization.alloc_tensor {memory_space = <space>}`.
 ///
 /// Use instead of `tensor.empty` when the consuming op needs its output buffer
-/// in a specific space -- e.g. a GPU-kernel op whose output is constrained
-/// `Hip_TensorOrDeviceMemRef` (needs `#hip.mem<device>`). one-shot-bufferize
-/// reads the `memory_space` attr and materializes a `memref.alloc` in that
-/// space; for a DPS consumer the result buffer is tied to this init, so the
-/// `outs` operand and result inherit the space -- which is why the space goes
-/// on the init, not a `getBufferType` override (the DPS result aliases the init
-/// and cannot carry a different space; see HipBufferize.h). `space` generalizes
-/// to host / pinned / managed for future ops.
+/// in a specific space -- e.g. a GPU-kernel op whose output must be
+/// `#hip.mem<device>`. one-shot-bufferize reads the `memory_space` attr and
+/// makes a `memref.alloc` in that space; a DPS consumer then ties its `outs`
+/// and result to this init, so they inherit the space. That is why the space
+/// goes on the init and not a `getBufferType` override (a DPS result aliases
+/// the init and can't carry a different space; see HipBufferize.h).
 ///
 /// \p dynSizes  one Value per dynamic dim of \p resultType (empty if static).
 inline mlir::Value createAllocTensorInSpace(mlir::OpBuilder &builder,

@@ -875,17 +875,14 @@ void PoolAllocsPass::runOnOperation() {
       builder.setInsertionPoint(info->allocOp);
       MemRefType allocType = info->allocOp.getType();
       auto dynSizes = info->allocOp.getDynamicSizes();
-      // memref.view requires the view result and the pool base to share a
-      // memory space, and the pool base is space-less (`memref<?xi8>`). So the
-      // view is always created SPACE-LESS. If the original allocation carried
-      // an explicit memory space (e.g. hip.pad's #hip.mem<device> output),
-      // relabel the space-less view back to that space with a
-      // memory_space_cast so consumers still see the declared type. The cast
-      // lowers to an addrspacecast between the space-less view (LLVM AS 0) and
-      // the device space (LLVM AS 1); the host JIT target flattens every space
-      // to one flat pointer space, so it is a runtime no-op. Being scoped to
-      // allocs that already carry a space, it leaves the common space-less
-      // allocations byte-identical (no cast emitted).
+      // memref.view requires the view and the pool base to share a space, and
+      // the pool base is space-less (`memref<?xi8>`), so the view is always
+      // created SPACE-LESS. If the original alloc had an explicit space (e.g.
+      // hip.pad's #hip.mem<device> output), relabel the view back to that space
+      // with a memory_space_cast so consumers still see the declared type. The
+      // cast is an AS0->AS1 addrspacecast that the host JIT flattens to a
+      // no-op, and it is emitted only for allocs that already carry a space --
+      // so the common space-less allocs stay byte-identical.
       //
       //   Before:  %a = memref.alloc() : memref<NxT, #hip.mem<device>>
       //   After:   %v = memref.view %pool[%off][] : memref<?xi8> to memref<NxT>
@@ -893,14 +890,11 @@ void PoolAllocsPass::runOnOperation() {
       //                   : memref<NxT> to memref<NxT, #hip.mem<device>>
       //
       // FUTURE (remove this cast): the pool base is space-less only because the
-      // memory-space migration is partial -- today almost every pooled alloc is
-      // un-annotated, with a device space on just a handful of ops (currently
-      // hip.pad's output). Once EVERY pooled alloc is device-typed, make the
-      // pool base #hip.mem<device> and drop this cast -- GetPoolOpLowering
-      // derives the pool base's address space from its memref type, so a
-      // device-typed base makes every view device-typed directly.
-      // Full rationale: memory-space-design.md ("Why not make hip.get_pool
-      // device-typed and skip the cast?").
+      // memory-space migration is partial -- most pooled allocs have no space,
+      // only a few ops set device (currently hip.pad's output). Once every
+      // pooled alloc is device-typed, make the pool base #hip.mem<device> and
+      // drop this cast (GetPoolOpLowering already derives the base's address
+      // space from its type). Full rationale: memory-space-design.md.
       Attribute space = allocType.getMemorySpace();
       MemRefType viewType = space ? MemRefType::get(allocType.getShape(),
                                                     allocType.getElementType(),
@@ -920,18 +914,17 @@ void PoolAllocsPass::runOnOperation() {
     }
   }
 
-  // Erase deallocs that now target pooled buffers — the pool is owned by the
-  // runtime state (not this function), so no pool dealloc is inserted. A pooled
-  // buffer is either a `memref.view` over the pool (the common space-less case)
-  // or a `memref.memory_space_cast` of that view (when the original alloc
-  // carried an explicit space, e.g. hip.pad's #hip.mem<device> output — see the
-  // pooling loop above). Both alias pool memory and must not be freed; peel the
-  // optional cast so the space-carrying case is caught too.
+  // Erase deallocs that now target pooled buffers -- the pool is owned by the
+  // runtime state, so no pool dealloc is inserted. A pooled buffer is either a
+  // `memref.view` over the pool (common) or a `memref.memory_space_cast` of
+  // that view (when the alloc had an explicit space, e.g. hip.pad's device
+  // output). Both alias pool memory and must not be freed; peel the optional
+  // cast so the space-carrying case is caught too.
   //
   //   Before:  %v = memref.view %pool[%off][] : memref<?xi8> to memref<NxT>
   //            %d = memref.memory_space_cast %v
   //                   : memref<NxT> to memref<NxT, #hip.mem<device>>
-  //            memref.dealloc %d          // would lower to free() of pool mem
+  //            memref.dealloc %d          // would free() pool memory
   //   After:   (dealloc erased)
   SmallVector<memref::DeallocOp> orphanedDeallocs;
   funcOp.walk([&](memref::DeallocOp op) {

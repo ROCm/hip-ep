@@ -18,20 +18,15 @@ module {
 
   // CHECK-LABEL: func.func @pad_constant_default
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[D:.*]]: tensor<3x4xf32>, %[[P:.*]]: tensor<4xi64>)
-  // pads are brought to host via the explicit transfer mechanism (emitted before
-  // the output init, since the dynamic-shape path reads pad amounts from
-  // this same host copy); hip.pad reads the host copy (wrap_pad consumes pads
-  // CPU-side). The output init is a DEVICE-space bufferization.alloc_tensor (the
-  // pad kernel writes device memory), so hip.pad's output buffer is device-typed
-  // after bufferization.
-  // CHECK: %[[PH:.*]] = hip.transfer(%[[CTX]], %[[P]] : tensor<4xi64>) to <host> -> tensor<4xi64>
+  // pads are brought to host via hip.transfer_to_host; the output init is a
+  // device-space bufferization.alloc_tensor (the kernel writes device memory).
+  // CHECK: %[[PH:.*]] = hip.transfer_to_host(%[[CTX]], %[[P]] : tensor<4xi64>) -> tensor<4xi64>
   // CHECK: bufferization.alloc_tensor() {memory_space = #hip.mem<device>} : tensor<5x6xf32>
   // CHECK: hip.pad(%[[CTX]]) ins(%[[D]], %[[PH]] : tensor<3x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<5x6xf32>)
 
-  // Constant pad with a COMPILE-TIME-CONSTANT fill value (the common case, e.g.
-  // 0.0). hip.pad takes the fill value BY VALUE (a scalar `f32`, no buffer):
-  // the converter folds the constant straight to an arith.constant scalar --
-  // zero device traffic, NO transfer and NO readback for the cval.
+  // Compile-time-constant fill value (common case): hip.pad takes cval BY VALUE,
+  // so the converter folds it to an arith.constant scalar -- no transfer, no
+  // readback.
   func.func @pad_constant_cval_const(%data: tensor<3x4xf32>, %pads: tensor<4xi64>) -> tensor<5x6xf32> {
     %cval = "onnx.Constant"() {value = dense<0.0> : tensor<f32>} : () -> tensor<f32>
     %none = "onnx.NoValue"() {value} : () -> none
@@ -46,11 +41,8 @@ module {
   // CHECK: %[[CV:.*]] = arith.constant {{.*}} : f32
   // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<3x4xf32>, tensor<4xi64>) cval(%[[CV]] : f32) outs({{.*}} : tensor<5x6xf32>)
 
-  // Constant pad with a RUNTIME (non-constant) constant_value scalar (here a
-  // function arg). hip.pad still takes it BY VALUE: the converter brings the
-  // runtime scalar to the host via the SAME explicit transfer mechanism used
-  // for pads/axes (hip.transfer -> stack #hip.mem<host> buffer + memcpy_d2h +
-  // sync at bufferization), then reads it by value with tensor.extract.
+  // Runtime (non-constant) cval scalar: still BY VALUE, but the converter brings
+  // it to host via hip.transfer_to_host + tensor.extract (same path as pads).
   func.func @pad_constant_with_cval(%data: tensor<3x4xf32>, %pads: tensor<4xi64>, %cval: tensor<f32>) -> tensor<5x6xf32> {
     %none = "onnx.NoValue"() {value} : () -> none
     %r = "onnx.Pad"(%data, %pads, %cval, %none) {mode = "constant"} : (tensor<3x4xf32>, tensor<4xi64>, tensor<f32>, none) -> tensor<5x6xf32>
@@ -59,14 +51,13 @@ module {
 
   // CHECK-LABEL: func.func @pad_constant_with_cval
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[D:.*]]: tensor<3x4xf32>, %[[P:.*]]: tensor<4xi64>, %[[CVT:.*]]: tensor<f32>)
-  // CHECK: %[[CVH:.*]] = hip.transfer(%[[CTX]], %[[CVT]] : tensor<f32>) to <host> -> tensor<f32>
+  // CHECK: %[[CVH:.*]] = hip.transfer_to_host(%[[CTX]], %[[CVT]] : tensor<f32>) -> tensor<f32>
   // CHECK: %[[CV:.*]] = tensor.extract %[[CVH]][] : tensor<f32>
-  // CHECK: hip.transfer(%[[CTX]], %{{.*}} : tensor<4xi64>) to <host> -> tensor<4xi64>
+  // CHECK: hip.transfer_to_host(%[[CTX]], %{{.*}} : tensor<4xi64>) -> tensor<4xi64>
   // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<3x4xf32>, tensor<4xi64>) cval(%[[CV]] : f32) outs({{.*}} : tensor<5x6xf32>)
 
-  // A producer may emit constant_value as a redundant single-element 1-D
-  // tensor. For a RUNTIME value the converter collapses it to rank-0, then
-  // brings it to host via transfer + tensor.extract (here a function arg).
+  // A producer may emit cval as a 1-element 1-D tensor: for a runtime value the
+  // converter collapses it to rank-0, then transfers + extracts.
   func.func @pad_constant_cval_1d(%data: tensor<3x4xf32>, %pads: tensor<4xi64>, %cval: tensor<1xf32>) -> tensor<5x6xf32> {
     %none = "onnx.NoValue"() {value} : () -> none
     %r = "onnx.Pad"(%data, %pads, %cval, %none) {mode = "constant"} : (tensor<3x4xf32>, tensor<4xi64>, tensor<1xf32>, none) -> tensor<5x6xf32>
@@ -75,9 +66,9 @@ module {
 
   // CHECK-LABEL: func.func @pad_constant_cval_1d
   // CHECK: %[[CV0:.*]] = tensor.collapse_shape %{{.*}} [] : tensor<1xf32> into tensor<f32>
-  // CHECK: %[[CVH:.*]] = hip.transfer({{.*}}, %[[CV0]] : tensor<f32>) to <host> -> tensor<f32>
+  // CHECK: %[[CVH:.*]] = hip.transfer_to_host({{.*}}, %[[CV0]] : tensor<f32>) -> tensor<f32>
   // CHECK: %[[CV:.*]] = tensor.extract %[[CVH]][] : tensor<f32>
-  // CHECK: hip.transfer({{.*}}, %{{.*}} : tensor<4xi64>) to <host> -> tensor<4xi64>
+  // CHECK: hip.transfer_to_host({{.*}}, %{{.*}} : tensor<4xi64>) -> tensor<4xi64>
   // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<3x4xf32>, tensor<4xi64>) cval(%[[CV]] : f32) outs({{.*}} : tensor<5x6xf32>)
 
   // Reflect mode is non-default, so it stays in the attr-dict.
@@ -88,7 +79,7 @@ module {
   }
 
   // CHECK-LABEL: func.func @pad_reflect
-  // CHECK: hip.transfer({{.*}}, %{{.*}} : tensor<4xi64>) to <host> -> tensor<4xi64>
+  // CHECK: hip.transfer_to_host({{.*}}, %{{.*}} : tensor<4xi64>) -> tensor<4xi64>
   // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<3x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<5x6xf32>) {mode = "reflect"}
 
   func.func @pad_edge(%data: tensor<3x4xf32>, %pads: tensor<4xi64>) -> tensor<5x6xf32> {
@@ -109,8 +100,8 @@ module {
 
   // CHECK-LABEL: func.func @pad_axes
   // Both pads AND axes are transferred to host (both consumed CPU-side by wrap_pad).
-  // CHECK-DAG: hip.transfer({{.*}}, %{{.*}} : tensor<2xi64>) to <host> -> tensor<2xi64>
-  // CHECK-DAG: hip.transfer({{.*}}, %{{.*}} : tensor<1xi64>) to <host> -> tensor<1xi64>
+  // CHECK-DAG: hip.transfer_to_host({{.*}}, %{{.*}} : tensor<2xi64>) -> tensor<2xi64>
+  // CHECK-DAG: hip.transfer_to_host({{.*}}, %{{.*}} : tensor<1xi64>) -> tensor<1xi64>
   // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<3x4xf32>, tensor<2xi64>) axes({{.*}} : tensor<1xi64>) outs({{.*}} : tensor<3x6xf32>)
 
   // Dynamic output dims with a compile-time constant `pads`: the
@@ -161,14 +152,10 @@ module {
   // CHECK: hip.pad({{.*}}) ins({{.*}} : tensor<?x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<?x6xf32>)
 
   // Dynamic output dims with a non-constant `pads` (function arg): `pads` is
-  // brought to host ONCE via hip.transfer (the same host copy wrap_pad consumes
-  // CPU-side), and each padded axis's two pad entries are read from THAT host
-  // copy with a synchronized tensor.extract -- NOT a bare tensor.extract of the
-  // device `pads` and NOT hip.readback_scalar. A bare device extract bufferizes
-  // to an unsynchronized host load of the device-resident pads buffer and SEGVs
-  // when `pads` is an externalized constant on a true-device-memory target;
-  // extracting from the post-sync host transfer copy is safe. See
-  // PadConversion.cpp's extractAsIndex.
+  // brought to host ONCE via hip.transfer_to_host, and each padded axis's two
+  // pad entries are read from that host copy with tensor.extract -- NOT a bare
+  // extract of the device `pads` (which would SEGV: an unsynchronized host load
+  // of the device constants blob) and NOT hip.readback_scalar. See extractAsIndex.
   func.func @pad_dyn_output_dyn_pads(%data: tensor<?x?xf32>, %pads: tensor<4xi64>) -> tensor<?x?xf32> {
     %none = "onnx.NoValue"() {value} : () -> none
     %r = "onnx.Pad"(%data, %pads, %none, %none) {mode = "constant"} : (tensor<?x?xf32>, tensor<4xi64>, none, none) -> tensor<?x?xf32>
@@ -179,8 +166,8 @@ module {
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[D:.*]]: tensor<?x?xf32>, %[[P:.*]]: tensor<4xi64>)
   // `pads` is transferred to host once; the per-axis pad entries are read from
   // that host copy via tensor.extract (no readback, no extract_slice). The
-  // index_cast results feed the addi chain into tensor.empty.
-  // CHECK: %[[PH:.*]] = hip.transfer(%[[CTX]], %[[P]] : tensor<4xi64>) to <host> -> tensor<4xi64>
+  // index_cast results feed the addi chain into the device alloc_tensor.
+  // CHECK: %[[PH:.*]] = hip.transfer_to_host(%[[CTX]], %[[P]] : tensor<4xi64>) -> tensor<4xi64>
   // CHECK-NOT: hip.readback_scalar
   // CHECK: tensor.extract %[[PH]]{{\[}}%{{.*}}] : tensor<4xi64>
   // CHECK: arith.index_cast %{{.*}} : i64 to index

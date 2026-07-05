@@ -294,13 +294,11 @@ class TestPad:
 
     @pytest.mark.parametrize("dtype", [np.float32, np.float16, np.int32])
     def test_pad_constant_runtime_cval(self, model_runner, dtype):
-        """constant_value supplied as a graph INPUT (runtime, non-constant).
+        """Runtime (non-constant) constant_value via a graph input.
 
-        A non-constant fill value can't be folded, so the converter brings it
-        to the host via the explicit hip.transfer mechanism (a #hip.mem<host>
-        alloc + async D2H + stream sync at bufferization) and reads it by value
-        with tensor.extract. This exercises that cval-transfer path end-to-end
-        on the GPU EP (the constant-cval tests above only hit the fold path).
+        A non-constant fill can't be folded, so the converter brings it to host
+        via hip.transfer_to_host + tensor.extract. Exercises that cval-transfer
+        path on the GPU EP (the constant-cval tests above only hit the fold path).
         """
         shape = [2, 3]
         pads = [1, 1, 1, 1]
