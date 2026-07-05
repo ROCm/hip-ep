@@ -43,13 +43,17 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t axes_num_elements, int64_t data_type,
                     int64_t keepdims, int64_t noop_with_empty_axes,
                     int64_t inner_size) {
-  OP_PROFILE(
+  OP_PROFILE_BYTES(
       "reduce_sum",
       [&] {
         char b[64];
         snprintf(b, sizeof(b), "%lld->%lld", (long long)data_num_elements,
                  (long long)output_num_elements);
         return std::string(b);
+      },
+      [&] {
+        return (data_num_elements + output_num_elements) *
+               hipdnn_ep_datatype_size(data_type);
       },
       state);
   if (!state || !data || !output) {

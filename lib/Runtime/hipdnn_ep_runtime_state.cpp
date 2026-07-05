@@ -372,8 +372,12 @@ static int bulk_load_constants(RuntimeState *state, morphizen::FileSystem *fs,
     return 1;
   }
 
-  TIMING_LOG("[Session] hipMemcpy H2D bulk: %.3fs (%zu bytes)\n",
-             record_elapsed(t_prev), total_size);
+  double _uploadS = record_elapsed(t_prev);
+  TIMING_LOG("[Session] hipMemcpy H2D bulk: %.3fs (%zu bytes)\n", _uploadS,
+             total_size);
+  // Cold-start phase timer (emitted once per session, load-path only).
+  fprintf(stderr, "[COLDSTART] weight_upload=%.3f s (%zu bytes)\n", _uploadS,
+          total_size);
 
   free(cpu_buf); // no-op when mmap was used
   return 0;

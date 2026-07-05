@@ -215,7 +215,7 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, int op_state_slot,
                                     int64_t input_num_elements,
                                     int64_t gamma_num_elements,
                                     int64_t element_size_bytes, float epsilon) {
-  OP_PROFILE(
+  OP_PROFILE_BYTES(
       "skip_layernorm",
       [&] {
         char b[64];
@@ -225,6 +225,11 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, int op_state_slot,
                                  : 0),
                  (long long)gamma_num_elements);
         return std::string(b);
+      },
+      [&] {
+        // read input + skip, write output (+ skip-sum); gamma small.
+        return (3 * input_num_elements + gamma_num_elements) *
+               element_size_bytes;
       },
       state);
   if (!state || !input || !skip || !gamma || !output) {

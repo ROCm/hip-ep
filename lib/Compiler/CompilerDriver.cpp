@@ -316,6 +316,9 @@ bool CompilerDriver::runMLIRPasses(
     }
   }
 
+  const bool coldstartTimers = !hip_get_env("HIPDNN_EP_PERF").empty() ||
+                               !hip_get_env("HIPDNN_EP_COLDSTART").empty();
+  auto _csCompileStart = std::chrono::steady_clock::now();
   if (mlir::failed(pm.run(module))) {
     error_message = "MLIR pass pipeline failed";
     if (options.verbose) {
@@ -340,6 +343,13 @@ bool CompilerDriver::runMLIRPasses(
       std::abort();
     }
     return false;
+  }
+  if (coldstartTimers) {
+    double ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - _csCompileStart)
+                    .count();
+    llvm::errs() << "[COLDSTART] mlir_compile_pipeline=" << (ms / 1000.0)
+                 << " s\n";
   }
 
   if (options.verbose)

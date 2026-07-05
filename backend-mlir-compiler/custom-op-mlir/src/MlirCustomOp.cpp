@@ -421,11 +421,16 @@ public:
     std::lock_guard<std::mutex> g(mu_);
     samples_.push_back(s);
     const size_t idx = samples_.size();
+    // launch_gap = wall - gpu: host-side dispatch/launch overhead + inter-kernel
+    // gaps NOT hidden behind GPU work. Large gap => decode is launch-bound
+    // (fusion/launch-reduction helps); ~0 => GPU-compute-bound.
+    const double launch_gap = s.wall_ms - s.gpu_ms;
     std::fprintf(stderr,
                  "[PERF] #%zu wall=%.3f marshal_in=%.3f marshal_out=%.3f "
-                 "compute_cpu=%.3f gpu=%.3f fence_residual=%.3f (ms)\n",
+                 "compute_cpu=%.3f gpu=%.3f fence_residual=%.3f "
+                 "launch_gap=%.3f (ms)\n",
                  idx, s.wall_ms, s.marshal_in_ms, s.marshal_out_ms,
-                 s.compute_cpu_ms, s.gpu_ms, s.fence_residual_ms);
+                 s.compute_cpu_ms, s.gpu_ms, s.fence_residual_ms, launch_gap);
     std::fflush(stderr);
   }
 

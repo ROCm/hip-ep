@@ -6,6 +6,7 @@
 #include "op_profile.h"
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <string>
 #include <vector>
@@ -16,6 +17,7 @@ struct OpProfileState {
     double gpuMs = 0;
     double cpuMs = 0;
     int64_t count = 0;
+    int64_t bytes = 0; // total data footprint across calls (0 = unknown)
   };
   struct OpEntry {
     std::string name;
@@ -24,12 +26,14 @@ struct OpProfileState {
     double totalGpuMs = 0;
     double totalCpuMs = 0;
     int64_t totalCount = 0;
+    int64_t totalBytes = 0;
   };
   struct PendingEvent {
     std::string name;
     std::string shape;
     int eventIndex;
     double cpuMs;
+    int64_t bytes;
   };
 
   // Pre-allocated event pool: each pair is (start, stop).
@@ -105,10 +109,22 @@ hipEvent_t op_profile_get_stop_event(OpProfileState *ps, int index) {
 
 void op_profile_add_pending(OpProfileState *ps, const std::string &name,
                             const std::string &shape, int eventIndex,
-                            double cpuMs) {
+                            double cpuMs, int64_t bytes) {
   if (!ps)
     return;
-  ps->pending.push_back({name, shape, eventIndex, cpuMs});
+  ps->pending.push_back({name, shape, eventIndex, cpuMs, bytes});
+}
+
+double op_profile_roofline_gbps() {
+  static double gbps = [] {
+    if (const char *e = std::getenv("HIPDNN_EP_ROOFLINE_GBPS")) {
+      double v = atof(e);
+      if (v > 0)
+        return v;
+    }
+    return 256.0; // Strix Halo LPDDR5X default
+  }();
+  return gbps;
 }
 
 void op_profile_add_cpu(OpProfileState *ps, const std::string &name,
@@ -143,9 +159,11 @@ void op_profile_resolve_and_print(OpProfileState *ps) {
     sh.gpuMs += gpuMs;
     sh.cpuMs += ev.cpuMs;
     sh.count++;
+    sh.bytes += ev.bytes;
     op.totalGpuMs += gpuMs;
     op.totalCpuMs += ev.cpuMs;
     op.totalCount++;
+    op.totalBytes += ev.bytes;
   }
   ps->pending.clear();
 
@@ -158,6 +176,7 @@ void op_profile_resolve_and_print(OpProfileState *ps) {
     double totalGpuMs;
     double totalCpuMs;
     int64_t totalCount;
+    int64_t totalBytes;
     std::vector<OpProfileState::ShapeEntry> shapes;
   };
 
@@ -170,6 +189,7 @@ void op_profile_resolve_and_print(OpProfileState *ps) {
     row.totalGpuMs = op.totalGpuMs;
     row.totalCpuMs = op.totalCpuMs;
     row.totalCount = op.totalCount;
+    row.totalBytes = op.totalBytes;
     if ((int)row.name.size() > maxNameLen)
       maxNameLen = (int)row.name.size();
     for (auto &[_, sh] : op.shapes) {
@@ -200,21 +220,41 @@ void op_profile_resolve_and_print(OpProfileState *ps) {
     grandTotalCpuMs += r.totalCpuMs;
   }
 
-  int lineWidth = maxNameLen + 2 + 5 + 1 + 9 + 1 + 9 + 1 + 6;
+  const double peakGbps = op_profile_roofline_gbps();
+  // Achieved bandwidth (GB/s) and % of the memory roofline for a (bytes, ms)
+  // pair; empty strings when bytes are unknown (op not byte-instrumented).
+  auto fmtBw = [peakGbps](int64_t bytes, double ms, char *mbBuf, char *gbBuf,
+                          char *pkBuf, size_t n) {
+    if (bytes > 0 && ms > 0) {
+      double gbps = (double)bytes / 1e9 / (ms / 1000.0);
+      snprintf(mbBuf, n, "%.1f", (double)bytes / 1e6);
+      snprintf(gbBuf, n, "%.0f", gbps);
+      snprintf(pkBuf, n, "%.0f%%", 100.0 * gbps / peakGbps);
+    } else {
+      snprintf(mbBuf, n, "%s", "-");
+      snprintf(gbBuf, n, "%s", "-");
+      snprintf(pkBuf, n, "%s", "-");
+    }
+  };
+  char mbBuf[24], gbBuf[24], pkBuf[24];
+
+  int lineWidth = maxNameLen + 2 + 5 + 1 + 9 + 1 + 9 + 1 + 6 + 1 + 9 + 1 + 8 + 1 + 6;
   fprintf(stderr, "\n[PERF] ");
   for (int i = 0; i < lineWidth; ++i)
     fputc('=', stderr);
   fputc('\n', stderr);
-  fprintf(stderr, "[PERF]  %-*s %5s %9s %9s %6s\n", maxNameLen, "", "calls",
-          "gpu (ms)", "cpu (ms)", "gpu %");
+  fprintf(stderr, "[PERF]  %-*s %5s %9s %9s %6s %9s %8s %6s   (roofline %.0f GB/s)\n",
+          maxNameLen, "", "calls", "gpu (ms)", "cpu (ms)", "gpu %", "MB",
+          "GB/s", "%pk", peakGbps);
 
   for (auto &r : rows) {
     if (r.hasGpu) {
       double pct =
           grandTotalGpuMs > 0 ? r.totalGpuMs / grandTotalGpuMs * 100 : 0;
-      fprintf(stderr, "[PERF]  %-*s %5lld %9.1f %9.1f %5.1f%%\n", maxNameLen,
-              r.name.c_str(), (long long)r.totalCount, r.totalGpuMs,
-              r.totalCpuMs, pct);
+      fmtBw(r.totalBytes, r.totalGpuMs, mbBuf, gbBuf, pkBuf, sizeof(mbBuf));
+      fprintf(stderr, "[PERF]  %-*s %5lld %9.1f %9.1f %5.1f%% %9s %8s %6s\n",
+              maxNameLen, r.name.c_str(), (long long)r.totalCount, r.totalGpuMs,
+              r.totalCpuMs, pct, mbBuf, gbBuf, pkBuf);
     } else {
       fprintf(stderr, "[PERF]  %-*s %5lld %9s %9.1f %6s\n", maxNameLen,
               r.name.c_str(), (long long)r.totalCount, "n/a", r.totalCpuMs,
@@ -227,9 +267,10 @@ void op_profile_resolve_and_print(OpProfileState *ps) {
         if (sh.shape.empty())
           continue;
         double pct = grandTotalGpuMs > 0 ? sh.gpuMs / grandTotalGpuMs * 100 : 0;
-        fprintf(stderr, "[PERF]    %-*s %5lld %9.1f %9.1f %5.1f%%\n",
+        fmtBw(sh.bytes, sh.gpuMs, mbBuf, gbBuf, pkBuf, sizeof(mbBuf));
+        fprintf(stderr, "[PERF]    %-*s %5lld %9.1f %9.1f %5.1f%% %9s %8s %6s\n",
                 maxNameLen - 2, sh.shape.c_str(), (long long)sh.count, sh.gpuMs,
-                sh.cpuMs, pct);
+                sh.cpuMs, pct, mbBuf, gbBuf, pkBuf);
       }
     }
   }
