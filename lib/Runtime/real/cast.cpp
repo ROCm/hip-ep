@@ -37,12 +37,16 @@ static int hipdnn_to_hip_dtype(int64_t hipdnn_type) {
 int wrap_cast(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t src_data_type,
               int64_t dst_data_type) {
-  OP_PROFILE(
+  OP_PROFILE_BYTES(
       "cast",
       [&] {
         char b[64];
         snprintf(b, sizeof(b), "n=%lld", (long long)num_elements);
         return std::string(b);
+      },
+      [&] {
+        return num_elements * (hipdnn_ep_datatype_size(src_data_type) +
+                               hipdnn_ep_datatype_size(dst_data_type));
       },
       state);
   if (!state || !input || !output) {

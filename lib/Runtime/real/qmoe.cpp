@@ -36,7 +36,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
               int64_t swiglu_fusion, int64_t activation_type,
               float activation_alpha, float activation_beta, float swiglu_limit,
               int64_t normalize_routing_weights, int64_t elem_size) {
-  OP_PROFILE(
+  OP_PROFILE_BYTES(
       "qmoe",
       [&] {
         char b[64];
@@ -44,6 +44,24 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                  (long long)hidden_size, (long long)inter_size,
                  (long long)num_experts);
         return std::string(b);
+      },
+      [&] {
+        // Footprint = (distinct activated experts) x per-expert weight+scale
+        // bytes + activation I/O. Decode (1 token, top-k) reads k experts;
+        // prefill saturates toward num_experts.
+        int64_t bits = expert_weight_bits > 0 ? expert_weight_bits : 4;
+        int64_t bs = block_size > 0 ? block_size : 32;
+        int64_t fc1_cols = 2 * inter_size; // swiglu-fused fc1
+        int64_t fc1_w = hidden_size * fc1_cols * bits / 8;
+        int64_t fc2_w = inter_size * hidden_size * bits / 8;
+        int64_t fc1_sc = fc1_cols * ((hidden_size + bs - 1) / bs) * 2;
+        int64_t fc2_sc = hidden_size * ((inter_size + bs - 1) / bs) * 2;
+        int64_t per_expert = fc1_w + fc2_w + fc1_sc + fc2_sc;
+        int64_t active = k * num_tokens;
+        if (num_experts > 0 && active > num_experts)
+          active = num_experts;
+        int64_t act_io = 2LL * num_tokens * hidden_size * 2;
+        return active * per_expert + act_io;
       },
       state);
   if (router_weights) {

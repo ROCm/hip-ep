@@ -255,13 +255,17 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
                         int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
                         int64_t out_n, int64_t out_c, int64_t out_h,
                         int64_t out_w, int64_t data_type, int64_t tensor_op) {
-  OP_PROFILE(
+  OP_PROFILE_BYTES(
       "elementwise",
       [&] {
         char b[64];
         snprintf(b, sizeof(b), "%lldx%lldx%lldx%lld", (long long)out_n,
                  (long long)out_c, (long long)out_h, (long long)out_w);
         return std::string(b);
+      },
+      [&] {
+        return 3 * out_n * out_c * out_h * out_w *
+               hipdnn_ep_datatype_size(data_type); // 2 reads + 1 write
       },
       state);
   if (!state || !lhs || !rhs || !output) {
@@ -696,13 +700,17 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
                          int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
                          int64_t out_n, int64_t out_c, int64_t out_h,
                          int64_t out_w, int64_t data_type) {
-  OP_PROFILE(
+  OP_PROFILE_BYTES(
       "sub",
       [&] {
         char b[64];
         snprintf(b, sizeof(b), "%lldx%lldx%lldx%lld", (long long)out_n,
                  (long long)out_c, (long long)out_h, (long long)out_w);
         return std::string(b);
+      },
+      [&] {
+        return 3 * out_n * out_c * out_h * out_w *
+               hipdnn_ep_datatype_size(data_type);
       },
       state);
   if (!state || !lhs || !rhs || !output) {

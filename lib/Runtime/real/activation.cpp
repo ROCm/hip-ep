@@ -217,13 +217,14 @@ int wrap_miopenActivationForward(RuntimeState *state, int op_state_slot,
                                  void *input, void *output,
                                  int64_t num_elements, int64_t data_type,
                                  int64_t activation_mode) {
-  OP_PROFILE(
+  OP_PROFILE_BYTES(
       "activation",
       [&] {
         char b[64];
         snprintf(b, sizeof(b), "n=%lld", (long long)num_elements);
         return std::string(b);
       },
+      [&] { return 2 * num_elements * hipdnn_ep_datatype_size(data_type); },
       state);
   if (!state || !input || !output) {
     fprintf(stderr, "wrap_miopenActivationForward: null argument\n");
@@ -373,13 +374,14 @@ extern "C" int hip_miopen_softmax(void *state, const void *input, void *output,
 
 int wrap_gelu(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t data_type, int64_t approximate) {
-  OP_PROFILE(
+  OP_PROFILE_BYTES(
       "gelu",
       [&] {
         char b[64];
         snprintf(b, sizeof(b), "n=%lld", (long long)num_elements);
         return std::string(b);
       },
+      [&] { return 2 * num_elements * hipdnn_ep_datatype_size(data_type); },
       state);
   if (!state || !input || !output) {
     fprintf(stderr, "[REAL] wrap_gelu: null argument\n");
@@ -420,13 +422,14 @@ int wrap_gelu(RuntimeState *state, void *input, void *output,
 
 int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
                     int64_t num_elements, int64_t data_type, double alpha) {
-  OP_PROFILE(
+  OP_PROFILE_BYTES(
       "leaky_relu",
       [&] {
         char b[64];
         snprintf(b, sizeof(b), "n=%lld", (long long)num_elements);
         return std::string(b);
       },
+      [&] { return 2 * num_elements * hipdnn_ep_datatype_size(data_type); },
       state);
   if (!state || !input || !output) {
     fprintf(stderr, "[REAL] wrap_leaky_relu: null argument\n");

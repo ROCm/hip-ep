@@ -148,13 +148,23 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
                       int64_t K, int64_t batch_count, int64_t bits,
                       int64_t block_size, int64_t elem_size,
                       int64_t zp_elem_size) {
-  OP_PROFILE(
+  OP_PROFILE_BYTES(
       "matmul_nbits",
       [&] {
         char b[64];
         snprintf(b, sizeof(b), "m=%lld,n=%lld,k=%lld", (long long)M,
                  (long long)N, (long long)K);
         return std::string(b);
+      },
+      [&] {
+        // GEMV footprint: quantized weights + scales + activations + output.
+        int64_t es = elem_size > 0 ? elem_size : 2;
+        int64_t weights = N * K * bits / 8;
+        int64_t scales =
+            block_size > 0 ? N * ((K + block_size - 1) / block_size) * es : 0;
+        int64_t act = M * K * es;
+        int64_t out = M * N * es;
+        return (weights + scales + act + out) * (batch_count > 0 ? batch_count : 1);
       },
       state);
   if (!state || !A || !B || !scales || !output) {

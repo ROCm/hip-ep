@@ -188,7 +188,7 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, int op_state_slot,
                                   int64_t scale_num_elements,
                                   int64_t element_size_bytes, int64_t axis,
                                   float epsilon, int64_t stash_type) {
-  OP_PROFILE(
+  OP_PROFILE_BYTES(
       "layernorm",
       [&] {
         char b[64];
@@ -198,6 +198,10 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, int op_state_slot,
                                  : 0),
                  (long long)scale_num_elements);
         return std::string(b);
+      },
+      [&] {
+        return (2 * input_num_elements + scale_num_elements) *
+               element_size_bytes;
       },
       state);
   if (!state || !input || !scale || !output) {

@@ -14,7 +14,7 @@ int wrap_transpose(RuntimeState *state, const void *input, void *output,
                    int64_t rank, const int64_t *input_shape,
                    const int64_t *perm, int64_t num_elements,
                    int64_t element_size_bytes) {
-  OP_PROFILE(
+  OP_PROFILE_BYTES(
       "transpose",
       [&] {
         char b[64];
@@ -22,6 +22,7 @@ int wrap_transpose(RuntimeState *state, const void *input, void *output,
                  (long long)rank);
         return std::string(b);
       },
+      [&] { return 2 * num_elements * element_size_bytes; },
       state);
   // Empty transpose is a no-op (NonZero count=0 → [3,0] indices in embedding).
   if (num_elements <= 0)
