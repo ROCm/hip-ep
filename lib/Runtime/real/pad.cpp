@@ -10,24 +10,24 @@
 // Source: onnxruntime/core/providers/cuda/tensor/pad_impl.cu @ v1.22.2
 //         (_PadKernel; ONNX `wrap` mode added on top).
 //
-// Inputs that live in GPU memory (`pads`, `constant_value`, `axes`) are
-// D2H-read once per call. This adds one or two hipStreamSynchronize stalls
-// per Pad invocation -- acceptable because:
-//  - `pads` and `axes` are typically constant or initialiser-fed in vision
-//    graphs; the compile pipeline lowers them via the constants blob,
-//    so the D2H is from a stable device pointer.
-//  - Pad usually appears few times per graph.
+// `pads` and `axes` arrive as HOST pointers: PadConversion wraps them with
+// `hip.transfer_to_host` (bufferizes to a host buffer + async D2H + stream
+// sync), so the bytes are already host-resident and synced by the time wrap_pad
+// runs -- it just reads them with a plain memcpy (no D2H, no sync here). Doing
+// the crossing in the IR instead of hiding it here is the point of the transfer
+// pilot; the total sync count is the same as the old implicit-D2H version.
 //
-// If the EP ever wants to avoid the stall, the right fix is to detect the
-// "pads is a graph-time constant" case in the OnnxToHip conversion and
-// fold the values into a host-side attribute (the way Reshape's shape
-// tensor is folded today). That's outside this op's scope.
+// `constant_value` is also not in GPU memory: the compiler passes the scalar
+// fill value BY VALUE through a host stack slot (see PadLowering /
+// PadConversion), so it too is read with a plain memcpy -- no device alloc, no
+// D2H.
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
 #include "hip_custom_kernels.h"
 
 #include <cstdio>
+#include <cstring>
 #include <hip/hip_runtime.h>
 #include <vector>
 
@@ -103,55 +103,29 @@ int wrap_pad(RuntimeState *state, void *data, void *pads, void *constant_value,
     return -1;
   }
 
-  hipStream_t hip_stream =
-      static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
-
-  // D2H the pads (always int64) and optionally axes / constant_value.
+  // pads/axes are HOST-resident (brought over by hip.transfer_to_host -> a
+  // preceding hip.memcpy_d2h_async + hip.stream_sync in the IR), so read with a
+  // plain memcpy -- no internal D2H, no stream sync here.
   // ONNX-18 pads layout: [begin_0, begin_1, ..., begin_K-1, end_0, ...,
   // end_K-1] where K = num_axes_padded (= data_rank if axes is omitted).
   std::vector<int64_t> pads_host(pads_num_elements);
-  hipError_t err = hipMemcpyAsync(pads_host.data(), pads,
-                                  pads_num_elements * sizeof(int64_t),
-                                  hipMemcpyDeviceToHost, hip_stream);
-  if (err != hipSuccess) {
-    fprintf(stderr, "[REAL] wrap_pad: pads D2H failed: %s\n",
-            hipGetErrorString(err));
-    return -1;
-  }
+  memcpy(pads_host.data(), pads, pads_num_elements * sizeof(int64_t));
 
   std::vector<int64_t> axes_host;
   if (axes && axes_num_elements > 0) {
     axes_host.resize(axes_num_elements);
-    err = hipMemcpyAsync(axes_host.data(), axes,
-                         axes_num_elements * sizeof(int64_t),
-                         hipMemcpyDeviceToHost, hip_stream);
-    if (err != hipSuccess) {
-      fprintf(stderr, "[REAL] wrap_pad: axes D2H failed: %s\n",
-              hipGetErrorString(err));
-      return -1;
-    }
+    memcpy(axes_host.data(), axes, axes_num_elements * sizeof(int64_t));
   }
 
-  // constant_value: 0-D scalar of `data_type`. Read into a local 8-byte
-  // buffer so we can pass a typed pointer to the kernel launcher.
+  // constant_value: a by-value scalar of `data_type` passed by the generated
+  // code through a HOST stack slot (not a device buffer), so read it directly.
+  // Copy into a local 8-byte buffer so we can hand a typed pointer to the
+  // kernel launcher.
   alignas(8) unsigned char cv_buf[8] = {};
   bool have_cv = false;
   if (constant_value && mode_id == 0) {
-    err = hipMemcpyAsync(cv_buf, constant_value, element_size,
-                         hipMemcpyDeviceToHost, hip_stream);
-    if (err != hipSuccess) {
-      fprintf(stderr, "[REAL] wrap_pad: constant_value D2H failed: %s\n",
-              hipGetErrorString(err));
-      return -1;
-    }
+    memcpy(cv_buf, constant_value, element_size);
     have_cv = true;
-  }
-
-  err = hipStreamSynchronize(hip_stream);
-  if (err != hipSuccess) {
-    fprintf(stderr, "[REAL] wrap_pad: stream sync after D2H failed: %s\n",
-            hipGetErrorString(err));
-    return -1;
   }
 
   // Build per-axis lower_pads[data_rank], defaulting to 0. If `axes` is
