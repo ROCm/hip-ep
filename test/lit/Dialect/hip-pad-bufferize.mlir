@@ -16,8 +16,9 @@
 //  POOL (+ hip-pool-allocs): hip-pool-allocs folds that device alloc into the
 //       space-less GPU pool. memref.view requires the view and pool base to
 //       share a space, so the view is created SPACE-LESS over memref<?xi8> and
-//       relabeled back to #hip.mem<device> with a memory_space_cast (a no-op
-//       relabel at LLVM level). hip.pad's `outs` stays device-typed.
+//       relabeled back to #hip.mem<device> with a memory_space_cast (lowers to
+//       an addrspacecast AS 0 -> AS 1 that the host JIT flattens to a no-op).
+//       hip.pad's `outs` stays device-typed.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt %s --one-shot-bufferize \
