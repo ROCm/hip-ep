@@ -12,6 +12,7 @@
 #include "model_metadata_generated.h"
 #include "morphizen-foundation/file_io.hpp"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -329,6 +330,7 @@ static int hipmalloc_and_fixup(RuntimeState *state,
 static int bulk_load_constants(RuntimeState *state, morphizen::FileSystem *fs,
                                const char *constants_filename) {
   auto t_prev = timing_now();
+  auto _csUploadStart = std::chrono::steady_clock::now();
 
   auto reader = fs->create_reader_template(constants_filename);
   if (!reader) {
@@ -372,10 +374,12 @@ static int bulk_load_constants(RuntimeState *state, morphizen::FileSystem *fs,
     return 1;
   }
 
-  double _uploadS = record_elapsed(t_prev);
-  TIMING_LOG("[Session] hipMemcpy H2D bulk: %.3fs (%zu bytes)\n", _uploadS,
-             total_size);
-  // Cold-start phase timer (emitted once per session, load-path only).
+  TIMING_LOG("[Session] hipMemcpy H2D bulk: %.3fs (%zu bytes)\n",
+             record_elapsed(t_prev), total_size);
+  // Cold-start phase timer (bulk-blob path). Independent chrono timer.
+  double _uploadS = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - _csUploadStart)
+                        .count();
   fprintf(stderr, "[COLDSTART] weight_upload=%.3f s (%zu bytes)\n", _uploadS,
           total_size);
 
@@ -551,6 +555,7 @@ static int per_entry_load_constants(RuntimeState *state,
                                     morphizen::FileSystem *fs,
                                     const char *constants_filename) {
   auto t_prev = timing_now();
+  auto _csUploadStart = std::chrono::steady_clock::now();
 
   auto *constants = meta->constants();
   int64_t count = constants ? (int64_t)constants->size() : 0;
@@ -669,6 +674,14 @@ static int per_entry_load_constants(RuntimeState *state,
 
   TIMING_LOG("[Session] per_entry upload: %.3fs (%lld constants)\n",
              record_elapsed(t_prev), (long long)count);
+  // Cold-start phase timer (streaming/per-entry constants path). Uses an
+  // independent chrono timer -- timing_now()/record_elapsed are no-ops unless
+  // the TIMING build flag is set.
+  double _uploadS = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - _csUploadStart)
+                        .count();
+  fprintf(stderr, "[COLDSTART] weight_upload=%.3f s (%lld constants, streaming)\n",
+          _uploadS, (long long)count);
 
   free(staging);
   fref_cache_release(&fcache);

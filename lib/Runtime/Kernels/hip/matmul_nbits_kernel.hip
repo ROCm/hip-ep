@@ -41,6 +41,7 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <cstdint>
+#include <chrono>
 #include <cstdio>
 #include <mutex>
 #include <string>
@@ -930,8 +931,15 @@ static int getOrTuneGemvConfig(
     if (it != gemv_cache.end())
         return it->second;
 
+    auto _tuneStart = std::chrono::steady_clock::now();
     int best = tuneGemvConfig(stream, A, B, sc, zp, bi, out,
                                M, N, K, batch, bs, col_major);
+    double _tuneMs = std::chrono::duration<double, std::milli>(
+                         std::chrono::steady_clock::now() - _tuneStart)
+                         .count();
+    // Cold-start autotune cost (first time this shape is seen). Analyzer sums.
+    fprintf(stderr, "[COLDSTART] autotune=%.3f s (int4 M=%lld,N=%lld,K=%lld)\n",
+            _tuneMs / 1000.0, (long long)M, (long long)N, (long long)K);
     gemv_cache[key] = best;
 
     CUSTOM_KERNELS_DEBUG_LOG(

@@ -80,7 +80,7 @@ _PERF_ROW = re.compile(
     r"(?:\s+(\S+)\s+(\S+)\s+(\S+))?\s*$")
 _PERF_TOTAL = re.compile(r"^\[PERF\]\s+TOTAL\s+([\d.]+)\s+([\d.]+)")
 _PERF_WALL = re.compile(r"^\[PERF\]\s+#\d+\s+wall=([\d.]+).*?gpu=([\d.]+)(?:.*?launch_gap=([\d.]+))?")
-_COLDSTART = re.compile(r"^\[COLDSTART\]\s+(\S+)=([\d.]+)")
+_COLDSTART = re.compile(r"^\[COLDSTART\]\s+(\S+?)=([0-9.eE+-]+)")
 
 
 def parse_perf_tables(text):
@@ -149,6 +149,19 @@ def parse_singleop_gpu(text):
 
 
 _SHAPE_NK = re.compile(r"m=(\d+),n=(\d+),k=(\d+)")
+
+
+def _pick_prefill_table(tables):
+    """The prefill Compute is the one whose matmul_nbits shapes have m>1
+    (prompt tokens); decode Computes are all m=1. Fall back to the first table."""
+    for t in tables:
+        mm = t["ops"].get("matmul_nbits")
+        if mm:
+            for label in mm.get("shapes", {}):
+                sm = _SHAPE_NK.search(label)
+                if sm and int(sm.group(1)) > 1:
+                    return t
+    return tables[0] if tables else None
 
 
 # ---------------------------------------------------------------------------
@@ -278,13 +291,28 @@ def build_report(probe_dir: Path):
     lb = find(lambda r: r.get("type") == "launch_blocking")
     L.append("## E. Launch critical-path A/B (p128 decode)")
     L.append("")
-    # EP-measured per-Compute launch gap (wall - gpu) from the decode profile.
+    # EP-measured launch_gap (wall - gpu) distribution across decode Computes.
+    # This is the definitive GPU-bound vs launch-bound signal (median gap
+    # fraction): high => launch/dispatch on the critical path (fuse), low =>
+    # GPU-compute-bound (tune kernels).
     if dp:
         _t = parse_perf_tables(logtext(dp[0]["log"]))
-        if _t and _t[-1].get("launch_gap") is not None and _t[-1].get("wall"):
-            w = _t[-1]["wall"]; g = _t[-1]["launch_gap"]
-            L.append(f"- EP per-Compute (profiled): wall={w:.2f} ms, launch_gap (wall-gpu)={g:.2f} ms "
-                     f"({100.0*g/w:.0f}% of wall is host launch/dispatch not hidden by GPU).")
+        gaps = [(x["wall"], x["launch_gap"]) for x in _t
+                if x.get("launch_gap") is not None and x.get("wall")]
+        # decode-token gaps: drop the first (prefill) sample if present.
+        if len(gaps) > 1:
+            gaps = gaps[1:]
+        if gaps:
+            fracs = sorted(100.0 * g / w for w, g in gaps if w > 0)
+            med = fracs[len(fracs) // 2]
+            L.append(f"- EP launch_gap (wall-gpu) over {len(gaps)} decode Computes: "
+                     f"median {med:.0f}% of wall is host launch/dispatch not hidden by GPU "
+                     f"(range {fracs[0]:.0f}-{fracs[-1]:.0f}%).")
+            if med >= 25:
+                L.append("  => launch/dispatch IS on the critical path -> fusion / launch-reduction helps.")
+            else:
+                L.append("  => GPU-compute-bound -> prioritize kernel efficiency over fusion.")
+            j["sections"]["launch_gap_median_pct"] = med
             L.append("")
     if ln and lb:
         mn = parse_model_benchmark(logtext(ln[0]["log"]))
@@ -317,8 +345,25 @@ def build_report(probe_dir: Path):
     if headline:
         L.append("- TTFT vs prompt (from section A): "
                  + ", ".join(f"p{p}={headline[p].get('ttft_s', float('nan')):.2f}s" for p in sorted(headline)))
-        L.append("- Long-prompt TTFT is dominated by qmoe (most experts activated) + the huge-vocab lm_head. "
-                 "Per-op prefill attribution needs a prefill-phase [PERF] capture (Phase 2).")
+        L.append("")
+    # Prefill per-op attribution: the first Compute table (prompt tokens, m>1).
+    if dp:
+        ptables = parse_perf_tables(logtext(dp[0]["log"]))
+        pref = _pick_prefill_table(ptables)
+        if pref:
+            ptot = pref.get("total_gpu") or sum(o["gpu"] for o in pref["ops"].values())
+            L.append(f"- Prefill Compute per-op GPU breakdown (total {ptot:.1f} ms):")
+            L.append("")
+            L.append("| op | calls | gpu ms | % prefill |")
+            L.append("|---|---|---|---|")
+            for name, op in sorted(pref["ops"].items(), key=lambda kv: kv[1]["gpu"], reverse=True)[:8]:
+                L.append(f"| {name} | {op['calls']} | {op['gpu']:.1f} | {op['pct']:.1f}% |")
+                csv_rows.append(["prefill_op", "", name, op["calls"], op["gpu"], op["pct"], "", "", "", ""])
+            j["sections"]["prefill"] = {"total_gpu_ms": ptot,
+                                        "ops": [{"op": n, "gpu": o["gpu"], "pct": o["pct"]}
+                                                for n, o in pref["ops"].items()]}
+        else:
+            L.append("- (No prefill Compute table found -- run needs a captured prompt-phase [PERF] table.)")
     L.append("")
 
     # --- G. Cold start ---
@@ -329,14 +374,20 @@ def build_report(probe_dir: Path):
         L.append(f"- Minimal-run (l=8,g=1) process wall: {cs[0].get('wall_ms', 0)/1000.0:.1f} s "
                  "(model load + compile + weight upload + first-inference autotune, load-dominated).")
         # EP-measured [COLDSTART] phase timers (any log may carry them).
+        # Cold-start lines are emitted once per process load. Parse a SINGLE
+        # log (the coldstart run) to avoid multi-counting across battery runs.
         phases = {}
-        for r in runs:
-            for mm in _COLDSTART.finditer(logtext(r["log"])):
-                phases.setdefault(mm.group(1), float(mm.group(2)))
+        counts = {}
+        for line in logtext(cs[0]["log"]).splitlines():
+            mm = _COLDSTART.match(line)
+            if mm:
+                k = mm.group(1)
+                phases[k] = phases.get(k, 0.0) + float(mm.group(2))
+                counts[k] = counts.get(k, 0) + 1
         if phases:
-            L.append("- EP phase timers (measured):")
-            for k, v in phases.items():
-                L.append(f"  - {k}: {v:.3f} s")
+            L.append("- EP phase timers (measured, summed over cold-start events):")
+            for k, v in sorted(phases.items(), key=lambda kv: kv[1], reverse=True):
+                L.append(f"  - {k}: {v:.3f} s (n={counts[k]})")
             j["sections"]["coldstart_phases"] = phases
         else:
             L.append("- (No [COLDSTART] phase lines found -- rebuild with Phase 2 instrumentation.)")
