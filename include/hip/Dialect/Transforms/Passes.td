@@ -532,8 +532,7 @@ def LoopBodyToOutParamsPass
     : Pass<"hip-loop-body-to-out-params", "mlir::ModuleOp"> {
   let summary = "Promote outlined hip.loop body returns to out-param ABI";
   let description = [{
-    Runs AFTER `one-shot-bufferize` and BEFORE `buffer-deallocation` in
-    both classic and allocator pipelines.
+    Runs AFTER `one-shot-bufferize` and BEFORE `buffer-deallocation`.
 
     `onnx-loop-outline` emits each `hip.loop` body as a private
     `func.func` named `*_loop_body_*`. After bufferization those helpers
@@ -541,12 +540,12 @@ def LoopBodyToOutParamsPass
     LoopLowering expects the out-param ABI (`v_in` + `v_out` per
     loop-carried value, with `{bufferize.result}` on each out-param).
 
-    Module-level `buffer-results-to-out-params` promotes `@main_graph` in
-    the classic pipeline but skips private functions; the allocator
-    pipeline skips module-level out-params on `@main_graph` entirely.
-    This pass closes the gap by calling MLIR's
-    `promoteBufferResultsToOutParams` with `modifyPublicFunctions = false`
-    and a filter on `*_loop_body_*` only.
+    This is the loop-body out-param ABI, which is INTERNAL to the DLL and
+    unrelated to the graph-entry output allocator ABI. `@main_graph`
+    outputs are handled by `hip-use-output-allocator` (`hip.alloc_output`
+    + EP callback); this pass only promotes the private `*_loop_body_*`
+    helpers by calling MLIR's `promoteBufferResultsToOutParams` with
+    `modifyPublicFunctions = false` and a filter on `*_loop_body_*` only.
 
     Example (one loop-carried memref):
       Before:  private @body(..., %v_in) -> memref<16xf32> { return %out }
@@ -574,14 +573,7 @@ def UseOutputAllocatorPass
     they are left unchanged.  Functions lacking !hip.context as argument 0 are
     likewise skipped.
 
-    The pass also stamps the `hipdnn.use_output_allocator` BoolAttr (value =
-    true) on the parent module -- the allocator-mode marker that downstream
-    convert-hip-to-llvm and generate-interface read to select the allocator ABI.
-    It is a typed bool, not a presence-only UnitAttr, so readers test the VALUE
-    (absence and `= false` both mean classic mode).  It is stamped even when no
-    alloc is rewritten, because the mode is decided by the pass being run, not by
-    the IR contents (a zero-output graph must still be marked).  Leaves the
-    function signature and func.return untouched.
+    Leaves the function signature and func.return untouched.
   }];
   let dependentDialects = [
     "mlir::hip::HipDialect",

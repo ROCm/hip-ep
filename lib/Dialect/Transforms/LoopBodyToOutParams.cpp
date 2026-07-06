@@ -13,15 +13,14 @@
 // LoopLowering expects the out-param ABI: one extra memref argument per
 // loop-carried value (`v_in` + `v_out`, tagged `{bufferize.result}`).
 //
-// The module-level `buffer-results-to-out-params` pass closes this gap for
-// `@main_graph` in the classic pipeline (`modifyPublicFunctions = true`) but
-// skips private helpers. The allocator pipeline skips module-level out-params
-// on `@main_graph` entirely (outputs are handled later by
-// `hip-use-output-allocator`). Neither path promotes outlined loop bodies.
+// `@main_graph`'s own outputs are handled by `hip-use-output-allocator`
+// (`hip.alloc_output` + the EP callback); that path never touches the private
+// outlined loop bodies. This loop-body out-param ABI is INTERNAL to the DLL
+// and unrelated to the graph-entry output allocator ABI.
 //
 // Fix. Invoke MLIR's `promoteBufferResultsToOutParams` with
 // `modifyPublicFunctions = false` and a name filter that selects only
-// `*_loop_body_*` functions. Runs in both classic and allocator pipelines.
+// `*_loop_body_*` functions.
 //
 // Before:
 //   func.func private @main_loop_body_n0(..., %v_in: memref<...>)

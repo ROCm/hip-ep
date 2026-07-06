@@ -26,17 +26,6 @@
 // `func.return` terminator are intentionally NOT modified -- `convert-hip-to-
 // llvm` synthesizes the `-> i32` entry wrapper in a later phase.
 //
-// The pass also stamps `hipdnn.use_output_allocator = true` on the parent
-// module -- the marker that later phases (`convert-hip-to-llvm`,
-// `generate-interface`) read to select the allocator ABI. It is a typed bool,
-// not a presence-only UnitAttr, so readers test the VALUE (absence and
-// `= false` both mean classic). The stamp is UNCONDITIONAL -- mode is decided
-// by this pass running (it is scheduled only in allocator mode), not by whether
-// a returned alloc was found, so a zero-output graph is still marked. A FuncOp
-// pass writing its parent module relaxes MLIR's pass-isolation contract; safe
-// here because it is an idempotent set of the same value (same precedent as
-// PoolAllocs stamping hipdnn.pool_size).
-//
 // Before:
 //   func.func @main_graph(%ctx: !hip.context, ...) -> memref<?x?xf16> {
 //     %out = memref.alloc(%M, %N) : memref<?x?xf16>      // returned output
@@ -45,13 +34,11 @@
 //   }
 //
 // After:
-//   module attributes {hipdnn.use_output_allocator = true} {
-//     func.func @main_graph(%ctx: !hip.context, ...) -> memref<?x?xf16> {
-//       %out = hip.alloc_output(%ctx, %M, %N) {out_idx = 0 : i64}
-//            : memref<?x?xf16>                            // EP-owned output
-//       hip.sigmoid(%ctx) ins(%t) outs(%out)
-//       return %out : memref<?x?xf16>
-//     }
+//   func.func @main_graph(%ctx: !hip.context, ...) -> memref<?x?xf16> {
+//     %out = hip.alloc_output(%ctx, %M, %N) {out_idx = 0 : i64}
+//          : memref<?x?xf16>                            // EP-owned output
+//     hip.sigmoid(%ctx) ins(%t) outs(%out)
+//     return %out : memref<?x?xf16>
 //   }
 //
 //===----------------------------------------------------------------------===//
@@ -157,14 +144,6 @@ struct UseOutputAllocatorPass
     patterns.add<ReplaceOutputAllocPattern>(&getContext());
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
       signalPassFailure();
-
-    // Stamp the allocator-mode marker (typed bool, value = true) on the parent
-    // module. UNCONDITIONAL -- see the file header for why this must run even
-    // when nothing was rewritten. Readers test the value, so absence and
-    // `= false` both read as classic mode.
-    if (auto module = getOperation()->getParentOfType<ModuleOp>())
-      module->setAttr("hipdnn.use_output_allocator",
-                      BoolAttr::get(&getContext(), true));
   }
 };
 

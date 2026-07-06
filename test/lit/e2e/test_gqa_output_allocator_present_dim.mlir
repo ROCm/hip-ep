@@ -16,10 +16,8 @@
 // past_key_values input.
 //===----------------------------------------------------------------------===//
 
-// RUN: hip-mlir-opt %s --onnx-to-hip-pipeline=use-output-allocator=true 2>&1 | FileCheck %s
+// RUN: hip-mlir-opt %s --onnx-to-hip-pipeline 2>&1 | FileCheck %s
 
-// CHECK: module attributes {
-// CHECK-SAME: hipdnn.use_output_allocator = true
 // CHECK-LABEL: func.func @main_graph
 // CHECK-SAME:    %[[PK:[a-zA-Z0-9_]+]]: memref<1x8x?x128xf16> {onnx.name = "past_key_values.0.key"}
 // CHECK-SAME:    %[[PV:[a-zA-Z0-9_]+]]: memref<1x8x?x128xf16> {onnx.name = "past_key_values.0.value"}
