@@ -45,6 +45,8 @@ set(_kernel_sources
     hip/elementwise_sqrt_kernel.hip
     hip/elementwise_gelu_kernel.hip
     hip/leaky_relu_kernel.hip
+    hip/activation_kernel.hip
+    hip/skip_rms_norm_kernel.hip
     hip/elementwise_where_kernel.hip
     hip/elementwise_unary_kernel.hip
     hip/elementwise_binary_kernel.hip  # Mul/Add/Min/Max/Div/Mod/Equal/Less
@@ -63,6 +65,7 @@ set(_kernel_sources
     hip/global_pool_kernel.hip
     hip/matmul_nbits_kernel.hip
     hip/qmoe_kernel.hip
+    hip/qmoe_grouped_kernel.hip
     hip/linear_attention_kernel.hip
     hip/transpose_kernel.hip
     hip/causal_conv_step_kernel.hip

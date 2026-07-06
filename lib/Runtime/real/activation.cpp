@@ -12,6 +12,7 @@
 #include "runtime_types.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -240,6 +241,32 @@ int wrap_miopenActivationForward(RuntimeState *state, int op_state_slot,
       "total_size=%lld bytes\n",
       act_name, (long long)num_elements, type_name, (long long)data_type,
       (long long)elem_size, (long long)(num_elements * elem_size));
+
+  // Custom-kernel fast path: MIOpen's activation forward has high per-call
+  // overhead on gfx1151 (same reason elementwise bypasses miopenOpTensor), and
+  // these run on tiny decode tensors (~180 calls/token). Route f16/f32
+  // sigmoid/relu/tanh/softplus to a plain HIP kernel; fall back to MIOpen for
+  // bf16 or any unmapped mode. Same math => numerically equivalent.
+  if (std::getenv("HIPDNN_EP_MIOPEN_ACT") == nullptr) {
+    int cmode = -1;
+    switch (activation_mode) {
+    case HIPDNN_EP_ACTIVATION_SIGMOID: cmode = 0; break;
+    case HIPDNN_EP_ACTIVATION_RELU: cmode = 1; break;
+    case HIPDNN_EP_ACTIVATION_TANH: cmode = 2; break;
+    case HIPDNN_EP_ACTIVATION_SOFTPLUS: cmode = 3; break;
+    default: cmode = -1; break;
+    }
+    int hip_dtype = (data_type == HIPDNN_EP_DATATYPE_HALF)    ? HIP_DTYPE_FLOAT16
+                    : (data_type == HIPDNN_EP_DATATYPE_FLOAT) ? HIP_DTYPE_FLOAT32
+                                                              : -1;
+    if (cmode >= 0 && hip_dtype >= 0) {
+      void *stream = hipdnn_ep_state_get_stream(state);
+      int rc = hip_activation(stream, input, output, num_elements, hip_dtype,
+                              cmode);
+      if (rc != -2)
+        return rc; // handled (0 ok, other = launch error); -2 => fall to MIOpen
+    }
+  }
 
   miopenHandle_t handle =
       static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));

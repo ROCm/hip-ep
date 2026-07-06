@@ -10,6 +10,7 @@
 #include <hip/hip_runtime.h>
 
 #include <cstdio>
+#include <cstdlib>
 
 // Map HIPDNN_EP_DATATYPE_* → hip_dtype_t for custom kernels.
 // The two enum systems use different orderings (e.g. bf16=2 vs 5, i64=4 vs 2).
@@ -59,6 +60,25 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
+
+  // Diagnostic (HIPDNN_EP_CAST_DIAG): tally same-dtype (redundant) vs real
+  // conversions to size the #5 cast-elimination opportunity. Printed every N.
+  if (std::getenv("HIPDNN_EP_CAST_DIAG") != nullptr) {
+    static int64_t s_same = 0, s_conv = 0, s_same_ip = 0;
+    if (src_data_type == dst_data_type) {
+      s_same++;
+      if (input == output) s_same_ip++;
+    } else {
+      s_conv++;
+    }
+    if (((s_same + s_conv) % 2000) == 0)
+      fprintf(stderr,
+              "[CAST-DIAG] same_dtype=%lld (in-place=%lld) conversions=%lld "
+              "src->dst last=%lld->%lld n=%lld\n",
+              (long long)s_same, (long long)s_same_ip, (long long)s_conv,
+              (long long)src_data_type, (long long)dst_data_type,
+              (long long)num_elements);
+  }
 
   // Same-dtype fast-path: ONNX exporters (notably the Qwen3.5-VL vision
   // encoder) sometimes emit redundant `Cast(x, to=src_dtype)` nodes that

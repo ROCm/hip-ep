@@ -427,6 +427,22 @@ HIP_KERNEL_API int hip_bw_probe(void* stream, double* copy_gbps,
  *
  * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure
  */
+/* Unary activation (0=sigmoid,1=relu,2=tanh,3=softplus) via custom HIP kernel.
+ * Returns -2 for unsupported dtype (caller falls back to MIOpen). */
+HIP_KERNEL_API int hip_activation(void* stream, const void* input, void* output,
+                                  int64_t num_elements, int hip_dtype, int mode);
+
+/* Fused SkipSimplifiedLayerNormalization (RMSNorm): output =
+ * (input+skip[+bias]) * rsqrt(mean(sq)+eps) * gamma; optional skip_sum = the
+ * pre-norm sum. f16 only, hidden<=16384. Returns -2 if unsupported (caller
+ * falls back to MIOpen). */
+HIP_KERNEL_API int hip_skip_rms_norm(void* stream, const void* input,
+                                     const void* skip, const void* gamma,
+                                     const void* bias, void* output,
+                                     void* skip_sum, int64_t num_rows,
+                                     int64_t hidden, int64_t element_size_bytes,
+                                     float eps);
+
 HIP_KERNEL_API int hip_leaky_relu(
     void* stream,
     const void* input,
@@ -1533,6 +1549,39 @@ HIP_KERNEL_API int hip_qmoe_bucket_tokens(
     int64_t num_experts,
     int64_t k,
     int64_t element_size_bytes);
+
+/* Streaming grouped int4 GEMV (see qmoe_grouped_kernel.hip): one launch does,
+ * per expert e, C_e = A_e x dequant(W_e) over that expert's bucket-sorted rows.
+ * A device tile schedule (tile_expert/tile_localm; grid.y=max_m_tiles, actual in
+ * total_m_tiles) drives per-expert BM-row tiles. Per-expert W/S/Z/bias bases =
+ * *_base + e*stride. zeros = PACKED nibbles (raw QMoE layout) or null. bias/null.
+ * A=[total_rows,K], C=[total_rows,N]. group_size%16==0, K%32==0. BM must match
+ * the schedule's bm (=8). */
+HIP_KERNEL_API int hip_qmoe_stream_gemm(
+    void* stream, const void* A, const void* Wbase, const void* Sbase,
+    const void* Zbase, const void* Bbase, void* C, int64_t N, int64_t K,
+    int64_t group_size, int64_t max_m_tiles, const void* tile_expert,
+    const void* tile_localm, const void* expert_offsets,
+    const void* expert_counts, const void* total_m_tiles);
+
+/* Device-side tile schedule build (no host sync): per-expert ceil(count_e/bm)
+ * (expert, local-m-tile) pairs -> tile_expert/tile_localm + count in total_out
+ * (device int32). */
+HIP_KERNEL_API int hip_qmoe_build_schedule(
+    void* stream, const void* counts, int64_t num_experts, int64_t bm,
+    void* tile_expert, void* tile_localm, void* total_out);
+
+/* Batched QMoE prefill plumbing (see qmoe_grouped_kernel.hip).
+ * Weighted atomic scatter-add into an fp32 accumulator:
+ *   output_accum[token_ids[i], :] += weights[i] * expert_out[i, :]
+ * fp32 accum because a token routes to k experts (concurrent writes). */
+HIP_KERNEL_API int hip_qmoe_scatter_add_atomic(
+    void* stream, void* output_accum, const void* expert_out,
+    const void* token_ids, const void* weights, int64_t width, int64_t count);
+
+/* fp32 accumulator -> fp16 output cast. */
+HIP_KERNEL_API int hip_qmoe_cast_f32_f16(void* stream, const void* in,
+                                         void* out, int64_t n);
 
 /* -------------------------------------------------------------------------
  * Fully fused MoE decode (num_tokens == 1).

@@ -11,8 +11,10 @@
 #include "zp_unpack_cache.h"
 
 #include <algorithm>
+#include <cmath>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <utility>
 #include <vector>
@@ -128,8 +130,13 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   // gather / fc1 / swiglu / fc2 / scatter / bucket / host-sync split of the
   // qmoe serial per-expert loop -- the TTFT driver. Sums across experts.
   const bool qmoe_prof = hipdnn_ep_perf_isolate_enabled();
+  // Coarse whole-call qmoe timer (no per-phase syncs -> true qmoe GPU time,
+  // unlike PERF_ISOLATE which syncs per phase and inflates the absolute time).
+  const bool qmoe_coarse = (std::getenv("HIPDNN_EP_QMOE_COARSE") != nullptr);
+  std::chrono::steady_clock::time_point qc_t0;
   double qs_bucket = 0, qs_sync = 0, qs_gather = 0, qs_fc1 = 0, qs_swiglu = 0,
          qs_fc2 = 0, qs_scatter = 0;
+  int64_t active_experts = 0; // set in the prefill path; used by [QMOE-ROOFLINE]
   std::chrono::steady_clock::time_point _qt;
 #define QP_START()                                                             \
   do {                                                                         \
@@ -151,6 +158,21 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   int64_t blob_size_fc1 = block_size / 2;
   int64_t k_blocks_fc2 = (inter_size + block_size - 1) / block_size;
   int64_t blob_size_fc2 = block_size / 2;
+
+  // Batched prefill path (num_tokens > 1): one gather -> ALL fc1 matmuls ->
+  // one SwiGLU -> ALL fc2 matmuls -> one weighted atomic scatter -> one cast,
+  // on the bucket-sorted layout. Breaks the serial per-expert dependency chain
+  // (gather->fc1->swiglu->fc2->scatter serialized across experts) so the
+  // independent per-expert matmuls can overlap. Keeps the autotuned per-expert
+  // hip_matmul_nbits. Flag-gated; serial loop is the fallback.
+  const bool use_grouped =
+      (std::getenv("HIPDNN_EP_QMOE_GROUPED") != nullptr) && num_tokens > 1;
+  const bool use_parity =
+      use_grouped && (std::getenv("HIPDNN_EP_QMOE_PARITY") != nullptr);
+  int64_t total_rows = num_tokens * k;
+  const int64_t kGroupedBM = 4; // must match hip_qmoe_stream_gemm BM
+  int64_t max_tiles =
+      (total_rows + kGroupedBM - 1) / kGroupedBM + num_experts; // upper bound
 
   // Per-state grow-on-demand scratch in place of 8 hipMalloc/8 hipFree per
   // call. Sub-buffers are 64-byte aligned (matches GPU pool alignment, gives
@@ -178,6 +200,25 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   size_t sz_expert_offsets = align_up_64((num_experts + 1) * sizeof(int32_t));
   size_t sz_sorted_token_ids = align_up_64(num_tokens * k * sizeof(int32_t));
   size_t sz_sorted_weights = align_up_64(num_tokens * k * elem_size);
+  // Grouped-path buffers (sized only when active): sorted-layout activation
+  // buffers over total_rows rows + an fp32 output accumulator for the scatter.
+  size_t sz_A_sorted =
+      use_grouped ? align_up_64(total_rows * hidden_size * elem_size) : 0;
+  size_t sz_fc1_sorted =
+      use_grouped ? align_up_64(total_rows * fusion_inter * elem_size) : 0;
+  size_t sz_act_sorted =
+      use_grouped ? align_up_64(total_rows * inter_size * elem_size) : 0;
+  size_t sz_fc2_sorted =
+      use_grouped ? align_up_64(total_rows * hidden_size * elem_size) : 0;
+  size_t sz_output_accum =
+      use_grouped ? align_up_64(num_tokens * hidden_size * sizeof(float)) : 0;
+  size_t sz_tile_expert =
+      use_grouped ? align_up_64(max_tiles * sizeof(int32_t)) : 0;
+  size_t sz_tile_localm =
+      use_grouped ? align_up_64(max_tiles * sizeof(int32_t)) : 0;
+  size_t sz_total_tiles = use_grouped ? align_up_64(sizeof(int32_t)) : 0;
+  size_t sz_parity_buf =
+      use_parity ? align_up_64(num_tokens * hidden_size * elem_size) : 0;
 
   size_t off_expert_indices = 0;
   size_t off_expert_weights = off_expert_indices + sz_expert_indices;
@@ -189,7 +230,16 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   size_t off_expert_offsets = off_expert_counts + sz_expert_counts;
   size_t off_sorted_token_ids = off_expert_offsets + sz_expert_offsets;
   size_t off_sorted_weights = off_sorted_token_ids + sz_sorted_token_ids;
-  size_t total_scratch = off_sorted_weights + sz_sorted_weights;
+  size_t off_A_sorted = off_sorted_weights + sz_sorted_weights;
+  size_t off_fc1_sorted = off_A_sorted + sz_A_sorted;
+  size_t off_act_sorted = off_fc1_sorted + sz_fc1_sorted;
+  size_t off_fc2_sorted = off_act_sorted + sz_act_sorted;
+  size_t off_output_accum = off_fc2_sorted + sz_fc2_sorted;
+  size_t off_tile_expert = off_output_accum + sz_output_accum;
+  size_t off_tile_localm = off_tile_expert + sz_tile_expert;
+  size_t off_total_tiles = off_tile_localm + sz_tile_localm;
+  size_t off_parity_buf = off_total_tiles + sz_total_tiles;
+  size_t total_scratch = off_parity_buf + sz_parity_buf;
 
   if (hipdnn_ep_state_ensure_qmoe_scratch(state, total_scratch) != 0) {
     fprintf(stderr, "wrap_qmoe: ensure_qmoe_scratch(%zu) failed\n",
@@ -211,6 +261,23 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   int32_t *d_sorted_token_ids =
       reinterpret_cast<int32_t *>(scratch_base + off_sorted_token_ids);
   char *d_sorted_weights = scratch_base + off_sorted_weights;
+  char *d_A_sorted = use_grouped ? scratch_base + off_A_sorted : nullptr;
+  char *d_fc1_sorted = use_grouped ? scratch_base + off_fc1_sorted : nullptr;
+  char *d_act_sorted = use_grouped ? scratch_base + off_act_sorted : nullptr;
+  char *d_fc2_sorted = use_grouped ? scratch_base + off_fc2_sorted : nullptr;
+  float *d_output_accum =
+      use_grouped ? reinterpret_cast<float *>(scratch_base + off_output_accum)
+                  : nullptr;
+  int32_t *d_tile_expert =
+      use_grouped ? reinterpret_cast<int32_t *>(scratch_base + off_tile_expert)
+                  : nullptr;
+  int32_t *d_tile_localm =
+      use_grouped ? reinterpret_cast<int32_t *>(scratch_base + off_tile_localm)
+                  : nullptr;
+  int32_t *d_total_tiles =
+      use_grouped ? reinterpret_cast<int32_t *>(scratch_base + off_total_tiles)
+                  : nullptr;
+  void *d_parity_buf = use_parity ? scratch_base + off_parity_buf : nullptr;
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: topk_routing(tokens=%lld, experts=%lld, "
                     "k=%lld, normalize=%lld)\n",
@@ -251,6 +318,12 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     //   directly. No per-expert H2D; the active-expert loop uses pointer
     //   arithmetic into the on-device sorted buffers populated by
     //   bucket_tokens.
+    // Coarse timer: drain prior work, then time all qmoe kernels with a single
+    // sync at the end (true qmoe GPU time, no per-phase sync inflation).
+    if (qmoe_coarse) {
+      hipStreamSynchronize(hip_stream);
+      qc_t0 = std::chrono::steady_clock::now();
+    }
     auto align_up_64h = [](size_t s) -> size_t {
       return (s + 63) & ~size_t(63);
     };
@@ -296,7 +369,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     HIP_CHECK(hipMemsetAsync(output, 0, num_tokens * hidden_size * elem_size,
                              hip_stream));
 
-    int64_t active_experts = 0;
+    active_experts = 0;
     for (int64_t e = 0; e < num_experts; e++) {
       if (h_counts[e] > 0) {
         active_experts++;
@@ -312,7 +385,71 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     hipdnn_ep_real::ZpUnpackCache *zpc =
         hipdnn_ep_real::get_or_create_zp_cache(state);
 
-    for (int64_t e = 0; e < num_experts; e++) {
+    // ---- Batched (grouped) prefill path -------------------------------------
+    // One gather -> ALL fc1 matmuls -> one SwiGLU -> ALL fc2 matmuls -> one
+    // weighted atomic scatter (fp32) -> one cast. Breaks the per-expert
+    // dependency chain so the independent matmuls overlap. Keeps the autotuned
+    // per-expert hip_matmul_nbits. Writes grouped result into `output`.
+    if (use_grouped) {
+      // Device tile schedule (no host sync): per-expert BM-row tiles.
+      HIP_CHECK(hip_qmoe_build_schedule(stream, d_expert_counts, num_experts,
+                                        kGroupedBM, d_tile_expert, d_tile_localm,
+                                        d_total_tiles));
+      QP_START();
+      HIP_CHECK(hip_qmoe_gather_tokens(stream, input, d_A_sorted,
+                                       d_sorted_token_ids, hidden_size,
+                                       total_rows, elem_size));
+      QP_END(qs_gather);
+
+      // fc1: one streaming grouped GEMV over all experts (weights streamed once
+      // per expert, reused across BM rows). Raw packed-nibble zp (in-kernel).
+      QP_START();
+      HIP_CHECK(hip_qmoe_stream_gemm(
+          stream, d_A_sorted, fc1_weights, fc1_scales, fc1_zero_points,
+          fc1_bias, d_fc1_sorted, fusion_inter, hidden_size, block_size,
+          max_tiles, d_tile_expert, d_tile_localm, d_expert_offsets,
+          d_expert_counts, d_total_tiles));
+      QP_END(qs_fc1);
+
+      QP_START();
+      HIP_CHECK(hip_qmoe_swiglu(stream, d_fc1_sorted, d_act_sorted, total_rows,
+                                inter_size, activation_alpha, activation_beta,
+                                swiglu_limit, elem_size));
+      QP_END(qs_swiglu);
+
+      // fc2: one streaming grouped GEMV.
+      QP_START();
+      HIP_CHECK(hip_qmoe_stream_gemm(
+          stream, d_act_sorted, fc2_weights, fc2_scales, fc2_zero_points,
+          fc2_bias, d_fc2_sorted, hidden_size, inter_size, block_size,
+          max_tiles, d_tile_expert, d_tile_localm, d_expert_offsets,
+          d_expert_counts, d_total_tiles));
+      QP_END(qs_fc2);
+
+      QP_START();
+      HIP_CHECK(hipMemsetAsync(d_output_accum, 0,
+                               static_cast<size_t>(num_tokens) * hidden_size *
+                                   sizeof(float),
+                               hip_stream));
+      HIP_CHECK(hip_qmoe_scatter_add_atomic(stream, d_output_accum, d_fc2_sorted,
+                                            d_sorted_token_ids, d_sorted_weights,
+                                            hidden_size, total_rows));
+      HIP_CHECK(hip_qmoe_cast_f32_f16(
+          stream, d_output_accum, output,
+          static_cast<int64_t>(num_tokens) * hidden_size));
+      QP_END(qs_scatter);
+
+      if (use_parity) {
+        // Stash grouped result, then run the serial loop below into `output`
+        // for a cosine comparison (serial result is what we return).
+        HIP_CHECK(hipMemcpyAsync(d_parity_buf, output,
+                                 static_cast<size_t>(num_tokens) * hidden_size *
+                                     elem_size,
+                                 hipMemcpyDeviceToDevice, hip_stream));
+      }
+    }
+
+    for (int64_t e = 0; (!use_grouped || use_parity) && e < num_experts; e++) {
       int64_t count = static_cast<int64_t>(h_counts[e]);
       if (count == 0) {
         continue;
@@ -457,6 +594,35 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                                      d_wts_e, hidden_size, count, elem_size));
       QP_END(qs_scatter);
     }
+
+    if (qmoe_coarse) {
+      hipStreamSynchronize(hip_stream);
+      double ms = std::chrono::duration<double, std::milli>(
+                      std::chrono::steady_clock::now() - qc_t0)
+                      .count();
+      double we = (double)fusion_inter * k_blocks_fc1 * blob_size_fc1 +
+                  (double)hidden_size * k_blocks_fc2 * blob_size_fc2;
+      double se = (double)fusion_inter * k_blocks_fc1 * elem_size +
+                  (double)hidden_size * k_blocks_fc2 * elem_size;
+      double ze = (double)fusion_inter * ((k_blocks_fc1 + 1) / 2) +
+                  (double)hidden_size * ((k_blocks_fc2 + 1) / 2);
+      double weight_bytes = (double)active_experts * (we + se + ze);
+      double peak_bw = 240.0;
+      if (const char *e = std::getenv("HIPDNN_EP_ROOFLINE_GBPS")) {
+        double v = atof(e);
+        if (v > 0) peak_bw = v;
+      }
+      double gbps = ms > 0 ? weight_bytes / (ms * 1e-3) / 1e9 : 0;
+      double floor_ms = weight_bytes / (peak_bw * 1e9) * 1e3;
+      fprintf(stderr,
+              "[QMOE-COARSE] tokens=%lld active=%lld/%lld: qmoe=%.2fms "
+              "weights=%.1fMB -> %.1f GB/s (%.0f%% of %.0f) | mem_floor=%.2fms "
+              "(%.1fx headroom)\n",
+              (long long)num_tokens, (long long)active_experts,
+              (long long)num_experts, ms, weight_bytes / 1e6, gbps,
+              100.0 * gbps / peak_bw, peak_bw, floor_ms,
+              floor_ms > 0 ? ms / floor_ms : 0);
+    }
   }
 
   if (qmoe_prof) {
@@ -466,6 +632,94 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
             "fc1+fc2=%.2f)\n",
             (long long)num_tokens, (long long)num_experts, qs_bucket, qs_sync,
             qs_gather, qs_fc1, qs_swiglu, qs_fc2, qs_scatter, qs_fc1 + qs_fc2);
+
+    // Roofline attribution for the qmoe prefill (per layer/call). QMoE prefill
+    // is memory-bound: each active expert's int4 weights (+scales/zp) are read
+    // ONCE regardless of token count, so the theoretical floor = weight_bytes /
+    // peak_BW, ~independent of prompt length. This line reports the ACHIEVED
+    // weight-read bandwidth of the fc1/fc2 matmuls vs that floor, so we can see
+    // whether qmoe is at the memory roofline or far below it (launch/latency-
+    // bound). peak_BW/peak_TF overridable via HIPDNN_EP_ROOFLINE_GBPS/_TFLOPS.
+    double peak_bw = 240.0, peak_tf = 59.4; // gfx1151 measured BW, fp16 WMMA peak
+    if (const char *e = std::getenv("HIPDNN_EP_ROOFLINE_GBPS")) {
+      double v = atof(e);
+      if (v > 0) peak_bw = v;
+    }
+    if (const char *e = std::getenv("HIPDNN_EP_ROOFLINE_TFLOPS")) {
+      double v = atof(e);
+      if (v > 0) peak_tf = v;
+    }
+    // Per-expert int4 weight + fp16 scale + packed-nibble zp bytes (read once).
+    double we = (double)fusion_inter * k_blocks_fc1 * blob_size_fc1 +
+                (double)hidden_size * k_blocks_fc2 * blob_size_fc2;
+    double se = (double)fusion_inter * k_blocks_fc1 * elem_size +
+                (double)hidden_size * k_blocks_fc2 * elem_size;
+    double ze = (double)fusion_inter * ((k_blocks_fc1 + 1) / 2) +
+                (double)hidden_size * ((k_blocks_fc2 + 1) / 2);
+    double per_expert_bytes = we + se + ze;
+    double weight_bytes = (double)active_experts * per_expert_bytes;
+    int64_t total_rows = num_tokens * k;
+    // MACs: fc1 [rows,hidden]x[hidden,fusion_inter] + fc2 [rows,inter]x[inter,hidden].
+    double flops = (double)total_rows * 2.0 *
+                   ((double)hidden_size * fusion_inter +
+                    (double)inter_size * hidden_size);
+    // Activation (plumbing) traffic: gather r+w, fc1 w, swiglu r+w, fc2 w,
+    // scatter r+rmw. Dwarfed by weights at small N but included for the total.
+    double act_bytes =
+        (double)total_rows * elem_size *
+        (2.0 * hidden_size + fusion_inter + (fusion_inter + inter_size) +
+         hidden_size + 2.0 * hidden_size);
+    double mm_ms = qs_fc1 + qs_fc2;
+    double tot_ms = qs_bucket + qs_sync + qs_gather + qs_fc1 + qs_swiglu +
+                    qs_fc2 + qs_scatter;
+    double mm_gbps = mm_ms > 0 ? weight_bytes / (mm_ms * 1e-3) / 1e9 : 0;
+    double mm_tf = mm_ms > 0 ? flops / (mm_ms * 1e-3) / 1e12 : 0;
+    double tot_gbps =
+        tot_ms > 0 ? (weight_bytes + act_bytes) / (tot_ms * 1e-3) / 1e9 : 0;
+    double mem_floor_ms = weight_bytes / (peak_bw * 1e9) * 1e3;
+    fprintf(stderr,
+            "[QMOE-ROOFLINE] active=%lld/%lld rows=%lld AI=%.1f FLOP/B | "
+            "weights=%.1fMB fc1+fc2=%.2fms -> %.1f GB/s (%.0f%% of %.0f) "
+            "%.2f TFLOP/s (%.0f%% of %.1f) | qmoe_total=%.2fms -> %.1f GB/s "
+            "(%.0f%% BW) | mem_floor=%.2fms (%.1fx headroom)\n",
+            (long long)active_experts, (long long)num_experts,
+            (long long)total_rows,
+            weight_bytes > 0 ? flops / weight_bytes : 0, weight_bytes / 1e6,
+            mm_ms, mm_gbps, 100.0 * mm_gbps / peak_bw, peak_bw, mm_tf,
+            100.0 * mm_tf / peak_tf, peak_tf, tot_ms, tot_gbps,
+            100.0 * tot_gbps / peak_bw, mem_floor_ms,
+            mem_floor_ms > 0 ? tot_ms / mem_floor_ms : 0);
+  }
+
+  if (use_parity && result == 0) {
+    // Compare grouped (d_parity_buf) vs serial (output): fp16 cosine + max diff.
+    HIP_CHECK(hipStreamSynchronize(hip_stream));
+    size_t n = static_cast<size_t>(num_tokens) * hidden_size;
+    std::vector<uint16_t> hs(n), hg(n);
+    HIP_CHECK(hipMemcpy(hs.data(), output, n * elem_size, hipMemcpyDeviceToHost));
+    HIP_CHECK(hipMemcpy(hg.data(), d_parity_buf, n * elem_size,
+                        hipMemcpyDeviceToHost));
+    auto h2f = [](uint16_t h) -> float {
+      uint32_t sign = static_cast<uint32_t>(h & 0x8000) << 16;
+      uint32_t exp = (h >> 10) & 0x1F, mant = h & 0x3FF, f;
+      if (exp == 0) {
+        if (mant == 0) f = sign;
+        else { int e = -1; do { e++; mant <<= 1; } while (!(mant & 0x400));
+          mant &= 0x3FF; f = sign | ((uint32_t)(127 - 15 - e) << 23) | (mant << 13); }
+      } else if (exp == 0x1F) f = sign | 0x7F800000u | (mant << 13);
+      else f = sign | ((exp - 15 + 127) << 23) | (mant << 13);
+      float o; std::memcpy(&o, &f, 4); return o;
+    };
+    double dot = 0, na = 0, nb = 0, maxad = 0;
+    for (size_t i = 0; i < n; i++) {
+      float a = h2f(hs[i]), b = h2f(hg[i]);
+      dot += (double)a * b; na += (double)a * a; nb += (double)b * b;
+      double ad = std::abs((double)a - b); if (ad > maxad) maxad = ad;
+    }
+    double denom = std::sqrt(na) * std::sqrt(nb);
+    fprintf(stderr,
+            "[QMOE-PARITY] tokens=%lld: cosine=%.6f max_abs_diff=%.4g\n",
+            (long long)num_tokens, denom > 0 ? dot / denom : 1.0, maxad);
   }
 
 cleanup:

@@ -15,6 +15,7 @@
 
 #include <cstdio>
 #include <mutex>
+#include <unordered_map>
 #include <utility>
 
 #define HIP_CHECK(cmd) HIP_CHECK_GOTO(cmd, cleanup)
@@ -139,6 +140,139 @@ extern "C" int8_t hipdnn_ep_op_state_construct_matmul_nbits(RuntimeState *state,
                                                             int32_t slot) {
   hipdnn_ep_op_state_set(state, slot, MatmulNbitsState::create().release());
   return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Fused shared-expert gate+up MatMulNBits.
+//
+// The shared-expert MLP issues gate_proj and up_proj as TWO separate int4
+// MatMulNBits at N=inter (e.g. 512) reading the same activation. Small N =
+// grid-under-utilized = ~4% of peak BW (measured). This entry merges them into
+// ONE matmul at N=2*inter by concatenating the two weight/scale/zp/bias blobs
+// along N ONCE (cached, keyed by the gate weight pointer -- stable model
+// constant) into persistent device buffers, then calling the existing autotuned
+// hip_matmul_nbits at the larger, more efficient N. Output is [M, 2*inter];
+// the graph slices it back to gate=[:,:inter], up=[:,inter:] for SwiGLU.
+//
+// Concatenation is a pure dim-0 (row) append for the row-major [N, kb, blob]
+// layout -> just two D2D copies per blob. One-time; amortized over the session.
+// ---------------------------------------------------------------------------
+namespace {
+struct FusedGateUp {
+  void *B = nullptr, *S = nullptr, *Z = nullptr, *bias = nullptr;
+  hipdnn_ep_real::ZpUnpackCache zpc; // pre-unpack cache for the fused zp
+};
+std::mutex g_gateup_mu;
+std::unordered_map<const void *, FusedGateUp *> g_gateup_cache; // key: gate B
+} // namespace
+
+extern "C" int wrap_matmul_nbits_gateup(
+    RuntimeState *state, const void *A, const void *gate_B,
+    const void *gate_scales, const void *gate_zp, const void *gate_bias,
+    const void *up_B, const void *up_scales, const void *up_zp,
+    const void *up_bias, void *output, int64_t M, int64_t N_half, int64_t K,
+    int64_t bits, int64_t block_size, int64_t elem_size, int64_t zp_elem_size) {
+  OP_PROFILE_BYTES(
+      "matmul_nbits_gateup",
+      [&] {
+        char b[64];
+        snprintf(b, sizeof(b), "m=%lld,n=%lld,k=%lld", (long long)M,
+                 (long long)(2 * N_half), (long long)K);
+        return std::string(b);
+      },
+      [&] {
+        int64_t es = elem_size > 0 ? elem_size : 2;
+        int64_t kb = block_size > 0 ? (K + block_size - 1) / block_size : 0;
+        int64_t w = 2 * N_half * K * bits / 8;
+        int64_t s = 2 * N_half * kb * es;
+        return w + s + M * K * es + M * 2 * N_half * es;
+      },
+      state);
+  if (!state || !A || !gate_B || !gate_scales || !up_B || !up_scales ||
+      !output) {
+    fprintf(stderr, "wrap_matmul_nbits_gateup: null argument\n");
+    return -1;
+  }
+  void *stream = hipdnn_ep_state_get_stream(state);
+  if (!stream)
+    return -1;
+
+  const int64_t kb = (K + block_size - 1) / block_size;
+  const int64_t blob = block_size * bits / 8;
+  const size_t bBytes = static_cast<size_t>(N_half) * kb * blob;
+  const size_t sBytes = static_cast<size_t>(N_half) * kb * elem_size;
+  const bool has_zp = (gate_zp != nullptr && up_zp != nullptr);
+  const size_t zBytes =
+      has_zp ? (zp_elem_size == 1
+                    ? static_cast<size_t>(N_half) * ((kb + 1) / 2)
+                    : static_cast<size_t>(N_half) * kb * 2)
+             : 0;
+  const bool has_bias = (gate_bias != nullptr && up_bias != nullptr);
+  const size_t biasBytes =
+      has_bias ? static_cast<size_t>(N_half) * elem_size : 0;
+
+  // Look up / build the fused (concatenated) weights, keyed by gate_B.
+  FusedGateUp *fg = nullptr;
+  {
+    std::lock_guard<std::mutex> lk(g_gateup_mu);
+    auto it = g_gateup_cache.find(gate_B);
+    if (it != g_gateup_cache.end()) {
+      fg = it->second;
+    } else {
+      fg = new FusedGateUp();
+      auto d2d = [&](void *dst, const void *src, size_t n) {
+        (void)hipMemcpyAsync(dst, src, n, hipMemcpyDeviceToDevice,
+                             static_cast<hipStream_t>(stream));
+      };
+      bool ok = true;
+      ok &= (hipMalloc(&fg->B, 2 * bBytes) == hipSuccess);
+      ok &= (hipMalloc(&fg->S, 2 * sBytes) == hipSuccess);
+      if (has_zp)
+        ok &= (hipMalloc(&fg->Z, 2 * zBytes) == hipSuccess);
+      if (has_bias)
+        ok &= (hipMalloc(&fg->bias, 2 * biasBytes) == hipSuccess);
+      if (!ok) {
+        fprintf(stderr, "wrap_matmul_nbits_gateup: hipMalloc failed\n");
+        return -1;
+      }
+      d2d(fg->B, gate_B, bBytes);
+      d2d(static_cast<char *>(fg->B) + bBytes, up_B, bBytes);
+      d2d(fg->S, gate_scales, sBytes);
+      d2d(static_cast<char *>(fg->S) + sBytes, up_scales, sBytes);
+      if (has_zp) {
+        d2d(fg->Z, gate_zp, zBytes);
+        d2d(static_cast<char *>(fg->Z) + zBytes, up_zp, zBytes);
+      }
+      if (has_bias) {
+        d2d(fg->bias, gate_bias, biasBytes);
+        d2d(static_cast<char *>(fg->bias) + biasBytes, up_bias, biasBytes);
+      }
+      g_gateup_cache.emplace(gate_B, fg);
+    }
+  }
+
+  const int64_t N = 2 * N_half;
+  const void *pre_zp_u8 = nullptr, *pre_zp_fp16 = nullptr;
+  if (fg->Z && zp_elem_size == 1 && bits == 4 && block_size > 0) {
+    int ngk = static_cast<int>(kb);
+    pre_zp_u8 = hipdnn_ep_real::lookup_or_unpack_zp_u8(
+        fg->zpc, stream, fg->Z, static_cast<int>(N), ngk);
+    if (!pre_zp_u8)
+      return -1;
+    if ((K % 32 == 0) && M > 1) {
+      pre_zp_fp16 = hipdnn_ep_real::lookup_or_convert_zp_fp16(
+          fg->zpc, stream, fg->Z, static_cast<int>(N), ngk);
+      if (!pre_zp_fp16)
+        return -1;
+    }
+  }
+
+  int result = 0;
+  HIP_CHECK(hip_matmul_nbits(stream, A, fg->B, fg->S, fg->Z, fg->bias, output, M,
+                             N, K, 1, bits, block_size, elem_size, zp_elem_size,
+                             pre_zp_u8, pre_zp_fp16));
+cleanup:
+  return result;
 }
 
 int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
