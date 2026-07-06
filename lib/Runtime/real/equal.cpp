@@ -10,6 +10,7 @@
 //
 // Source: onnxruntime/core/providers/cuda/math/binary_elementwise_ops_impl.cu
 //         @ v1.22.2 (BINARY_OP_NAME_EXPR2(Equal, (a == b)))
+#include "../cpu_fallback_invoke.h"
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -86,6 +87,15 @@ int wrap_equal(RuntimeState *state, void *a, void *b, void *output,
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
+  {
+    const int fb_rc = hipdnn_cpu_fb_try_binary_1d(
+        state, stream, "Equal", a, b, output, out_num_elements, data_type,
+        HIPDNN_EP_DATATYPE_UINT8);
+    if (fb_rc == 0)
+      return 0;
+    if (fb_rc < 0)
+      return -1;
+  }
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_equal: a_num=%lld, b_num=%lld, out=%lld, input_type=%s "
       "-> hip_elementwise_equal\n",

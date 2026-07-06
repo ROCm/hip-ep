@@ -12,6 +12,7 @@
 // Type coverage restricted to FP16 + INT32 + INT64 to match what
 // vision.onnx actually exercises (plus FP32 as a free side benefit of
 // the C++ template instantiation).
+#include "../cpu_fallback_invoke.h"
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -65,6 +66,14 @@ int wrap_neg(RuntimeState *state, void *input, void *output,
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
+  {
+    const int fb_rc = hipdnn_cpu_fb_try_unary_1d(state, stream, "Neg", input,
+                                                 output, num_elements, data_type);
+    if (fb_rc == 0)
+      return 0;
+    if (fb_rc < 0)
+      return -1;
+  }
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_neg: num=%lld, data_type=%s -> hip_elementwise_neg\n",
       (long long)num_elements, hipdnn_ep_datatype_name(data_type));

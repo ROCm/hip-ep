@@ -11,6 +11,7 @@
 //
 // The data_type argument is logged but otherwise ignored -- the kernel
 // always treats input/output as 1-byte streams (matching ORT's bool spec).
+#include "../cpu_fallback_invoke.h"
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -45,6 +46,16 @@ int wrap_not(RuntimeState *state, void *input, void *output,
   (void)data_type;
 
   void *stream = hipdnn_ep_state_get_stream(state);
+  {
+    const int64_t bool_dtype = HIPDNN_EP_DATATYPE_UINT8;
+    const int fb_rc =
+        hipdnn_cpu_fb_try_unary_1d(state, stream, "Not", input, output,
+                                   num_elements, bool_dtype);
+    if (fb_rc == 0)
+      return 0;
+    if (fb_rc < 0)
+      return -1;
+  }
   RUNTIME_DEBUG_LOG("[REAL] wrap_not: num=%lld, data_type=%s "
                     "(treated as 1-byte bool) -> hip_elementwise_not\n",
                     (long long)num_elements,

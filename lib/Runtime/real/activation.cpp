@@ -2,6 +2,7 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
+#include "../cpu_fallback_invoke.h"
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -405,6 +406,26 @@ int wrap_gelu(RuntimeState *state, void *input, void *output,
                     mode_name, (long long)approximate, (long long)elem_size,
                     (long long)(num_elements * elem_size));
 
+  {
+    int64_t shape[1] = {num_elements};
+    HipdnnCpuFbGenericDesc fb{};
+    fb.op_name = "Gelu";
+    fb.opset = 20;
+    fb.num_inputs = 1;
+    fb.num_outputs = 1;
+    fb.inputs[0] = {input, 1, shape, num_elements, data_type};
+    fb.outputs[0] = {output, 1, shape, num_elements, data_type};
+    fb.num_attrs = 1;
+    fb.attrs[0] = {"approximate", HIPDNN_CPU_FB_ATTR_INT, approximate, nullptr,
+                   0, 0.f};
+    const int fb_rc =
+        hipdnn_cpu_fallback_try_generic(state, stream, "Gelu", &fb);
+    if (fb_rc == 0)
+      return 0;
+    if (fb_rc < 0)
+      return -1;
+  }
+
   // Call custom HIP kernel with approximate mode
   int result = hip_elementwise_gelu(stream, input, output, num_elements,
                                     hip_dtype, approximate);
@@ -446,6 +467,26 @@ int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
                     "data_type=%s(%lld), alpha=%f\n",
                     (long long)num_elements, hipdnn_ep_datatype_name(data_type),
                     (long long)data_type, alpha);
+
+  {
+    int64_t shape[1] = {num_elements};
+    HipdnnCpuFbGenericDesc fb{};
+    fb.op_name = "LeakyRelu";
+    fb.opset = 16;
+    fb.num_inputs = 1;
+    fb.num_outputs = 1;
+    fb.inputs[0] = {input, 1, shape, num_elements, data_type};
+    fb.outputs[0] = {output, 1, shape, num_elements, data_type};
+    fb.num_attrs = 1;
+    fb.attrs[0] = {"alpha", HIPDNN_CPU_FB_ATTR_FLOAT, 0, nullptr, 0,
+                   static_cast<float>(alpha)};
+    const int fb_rc =
+        hipdnn_cpu_fallback_try_generic(state, stream, "LeakyRelu", &fb);
+    if (fb_rc == 0)
+      return 0;
+    if (fb_rc < 0)
+      return -1;
+  }
 
   int result =
       hip_leaky_relu(stream, input, output, num_elements, hip_dtype, alpha);

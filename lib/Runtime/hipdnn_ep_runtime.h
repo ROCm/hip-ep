@@ -202,28 +202,7 @@ typedef struct RuntimeState RuntimeState;
 // debug-cpu-fallback-plan.md). Intended for development only.
 //===----------------------------------------------------------------------===//
 
-#define HIPDNN_CPU_FB_OP_GATHER 1
-
-typedef struct HipdnnCpuFbGatherDesc {
-  int64_t axis;
-  int64_t data_hip_dtype;
-  int64_t indices_hip_dtype;
-  /** 4 = int32 indices, 8 = int64 (from `wrap_gather`; ORT path may widen 4→8). */
-  int64_t indices_element_size_bytes;
-  int64_t data_rank;
-  const int64_t *data_shape;
-  const void *data_host;
-  int64_t indices_rank;
-  const int64_t *indices_shape;
-  const void *indices_host;
-  int64_t output_rank;
-  const int64_t *output_shape;
-  void *output_host;
-  /* Element counts from wrap_gather (trusted); EP validates shape product. */
-  int64_t data_num_elements;
-  int64_t indices_num_elements;
-  int64_t output_num_elements;
-} HipdnnCpuFbGatherDesc;
+#define HIPDNN_CPU_FB_OP_GENERIC 1
 
 typedef int (*HipdnnCpuFallbackInvokeFn)(void *user, RuntimeState *state,
                                          int32_t op_kind, const void *detail,

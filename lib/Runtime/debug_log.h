@@ -94,68 +94,78 @@ inline bool hipdnn_ep_perf_enabled() {
   return enabled;
 }
 
-// HIPDNN_EP_DEBUG_CPU_FALLBACK_OPS: comma-separated names (e.g. "Gather").
-// Matching is case-insensitive on whole trimmed tokens. Read once per process
-// on first use — intended for debug-only paths, not hot-tuned production.
+// HIPDNN_EP_DEBUG_CPU_FALLBACK_OPS: comma-separated ONNX op names (e.g.
+// "Gather,Where") or "*" / "all" for every op. Case-insensitive whole-token
+// match. Parsed once per process.
 inline bool hipdnn_ep_debug_cpu_fallback_ops_contains(const char *token) {
-  static const int kUnknown = -1;
-  static const int kFalse = 0;
-  static const int kTrue = 1;
-  static int cached = kUnknown;
-  static char storage[2048];
-  if (cached != kUnknown)
-    return cached == kTrue;
-#ifdef _WIN32
-  unsigned long n = 0;
-  const char *list =
-      detail::read_env_string_into(storage, sizeof(storage),
-                                     "HIPDNN_EP_DEBUG_CPU_FALLBACK_OPS", &n);
-  if (!list || !list[0]) {
-    cached = kFalse;
-    return false;
-  }
-#else
-  const char *list = std::getenv("HIPDNN_EP_DEBUG_CPU_FALLBACK_OPS");
-  if (!list || !list[0]) {
-    cached = kFalse;
-    return false;
-  }
-#endif
-  const size_t tok_len = std::strlen(token);
-  const char *p = list;
-  while (*p) {
-    while (*p == ',' || *p == ' ' || *p == '\t')
-      ++p;
-    if (!*p)
-      break;
-    const char *start = p;
-    while (*p && *p != ',')
-      ++p;
-    const char *end = p;
-    while (end > start && (end[-1] == ' ' || end[-1] == '\t'))
-      --end;
-    size_t seg_len = static_cast<size_t>(end - start);
-    if (seg_len == tok_len) {
-      size_t i = 0;
-      for (; i < tok_len; ++i) {
-        char a = start[i];
-        char b = token[i];
-        if (a >= 'A' && a <= 'Z')
-          a = static_cast<char>(a - 'A' + 'a');
-        if (b >= 'A' && b <= 'Z')
-          b = static_cast<char>(b - 'A' + 'a');
-        if (a != b)
-          break;
-      }
-      if (i == tok_len) {
-        cached = kTrue;
-        return true;
-      }
+  static bool parsed = false;
+  static bool wildcard = false;
+  static char tokens[64][48];
+  static int token_count = 0;
+
+  auto fold_eq = [](const char *a, const char *b) {
+    for (; *a && *b; ++a, ++b) {
+      char ca = *a;
+      char cb = *b;
+      if (ca >= 'A' && ca <= 'Z')
+        ca = static_cast<char>(ca - 'A' + 'a');
+      if (cb >= 'A' && cb <= 'Z')
+        cb = static_cast<char>(cb - 'A' + 'a');
+      if (ca != cb)
+        return false;
     }
-    if (*p == ',')
-      ++p;
+    return *a == '\0' && *b == '\0';
+  };
+
+  if (!parsed) {
+    parsed = true;
+    static char storage[2048];
+    const char *list = nullptr;
+#ifdef _WIN32
+    unsigned long n = 0;
+    list = detail::read_env_string_into(storage, sizeof(storage),
+                                       "HIPDNN_EP_DEBUG_CPU_FALLBACK_OPS", &n);
+#else
+    list = std::getenv("HIPDNN_EP_DEBUG_CPU_FALLBACK_OPS");
+#endif
+    if (!list || !list[0])
+      return false;
+    const char *p = list;
+    while (*p && token_count < 64) {
+      while (*p == ',' || *p == ' ' || *p == '\t')
+        ++p;
+      if (!*p)
+        break;
+      const char *start = p;
+      while (*p && *p != ',')
+        ++p;
+      const char *end = p;
+      while (end > start && (end[-1] == ' ' || end[-1] == '\t'))
+        --end;
+      const size_t seg_len = static_cast<size_t>(end - start);
+      if (seg_len > 0 && seg_len < sizeof(tokens[0])) {
+        for (size_t i = 0; i < seg_len; ++i)
+          tokens[token_count][i] = start[i];
+        tokens[token_count][seg_len] = '\0';
+        if (fold_eq(tokens[token_count], "*") ||
+            fold_eq(tokens[token_count], "all")) {
+          wildcard = true;
+        }
+        ++token_count;
+      }
+      if (*p == ',')
+        ++p;
+    }
   }
-  cached = kFalse;
+
+  if (wildcard)
+    return true;
+  if (!token || !token[0])
+    return false;
+  for (int i = 0; i < token_count; ++i) {
+    if (fold_eq(tokens[i], token))
+      return true;
+  }
   return false;
 }
 

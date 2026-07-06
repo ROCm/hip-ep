@@ -2,6 +2,7 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
+#include "../cpu_fallback_invoke.h"
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -782,6 +783,32 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
         "dtype=%s\n",
         (long long)out_n, (long long)out_c, (long long)out_h, (long long)out_w,
         hipdnn_ep_datatype_name(data_type));
+  }
+
+  {
+    const int64_t lhs_shape[4] = {lhs_eq_out ? lhs_n : out_n,
+                                  lhs_eq_out ? lhs_c : out_c,
+                                  lhs_eq_out ? lhs_h : out_h,
+                                  lhs_eq_out ? lhs_w : out_w};
+    const int64_t rhs_shape[4] = {rhs_eq_out ? rhs_n : out_n,
+                                  rhs_eq_out ? rhs_c : out_c,
+                                  rhs_eq_out ? rhs_h : out_h,
+                                  rhs_eq_out ? rhs_w : out_w};
+    const int64_t out_shape[4] = {out_n, out_c, out_h, out_w};
+    HipdnnCpuFbGenericDesc fb{};
+    fb.op_name = "Sub";
+    fb.opset = 13;
+    fb.num_inputs = 2;
+    fb.num_outputs = 1;
+    fb.inputs[0] = {lhs_use, 4, lhs_shape, out_vol, data_type};
+    fb.inputs[1] = {rhs_use, 4, rhs_shape, out_vol, data_type};
+    fb.outputs[0] = {output, 4, out_shape, out_vol, data_type};
+    const int fb_rc =
+        hipdnn_cpu_fallback_try_generic(state, stream, "Sub", &fb);
+    if (fb_rc == 0)
+      return 0;
+    if (fb_rc < 0)
+      return -1;
   }
 
   return hip_elementwise_sub(stream, lhs_use, rhs_use, output, out_vol,
