@@ -17,6 +17,9 @@
 #include <cstdlib>
 #include <cstring>
 
+// Roofline-calibration bandwidth probe (custom_kernels DLL, extern "C").
+extern "C" int hip_bw_probe(void *stream, double *copy_gbps, double *read_gbps);
+
 // Forward decl of static helpers defined later in this file.
 static int initialize_state_handles(RuntimeState **out_state);
 static int prepare_constants_array(RuntimeState *state,
@@ -203,6 +206,18 @@ static int initialize_state_handles(RuntimeState **out_state) {
   }
 
   TIMING_LOG("[Session] hipStreamCreate: %.3fs\n", record_elapsed(t_prev));
+
+  // Optional roofline calibration: measure real device bandwidth once instead
+  // of assuming a spec peak. Gated on HIPDNN_EP_BW_PROBE to keep init fast.
+  if (std::getenv("HIPDNN_EP_BW_PROBE")) {
+    double copy_gbps = 0, read_gbps = 0;
+    if (hip_bw_probe(state->stream, &copy_gbps, &read_gbps) == 0) {
+      fprintf(stderr,
+              "[BW-PROBE] device bandwidth: copy=%.0f GB/s (read+write), "
+              "read=%.0f GB/s\n",
+              copy_gbps, read_gbps);
+    }
+  }
 
   if (miopenCreate(&state->miopen_handle) != miopenStatusSuccess) {
     fprintf(stderr, "Failed to create MIOpen handle\n");

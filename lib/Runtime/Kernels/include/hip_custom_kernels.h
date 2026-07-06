@@ -402,6 +402,15 @@ HIP_KERNEL_API int hip_elementwise_gelu(
     int64_t approximate);
 
 /* =========================================================================
+ * Memory-bandwidth microbenchmark (roofline calibration)
+ * =========================================================================
+ * Measures device copy (read+write) and read-only bandwidth on a large buffer.
+ * Returns GB/s via the out-params. Returns 0 on success.
+ */
+HIP_KERNEL_API int hip_bw_probe(void* stream, double* copy_gbps,
+                                double* read_gbps);
+
+/* =========================================================================
  * LeakyRelu Activation
  * =========================================================================
  *

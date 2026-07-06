@@ -50,6 +50,11 @@ def bits_for(n, k):
     return BITS_BY_NK.get((n, k), 4)
 
 
+def matmul_flops(m, n, k):
+    """MAC-based FLOPs for a GEMM/GEMV: 2*M*N*K."""
+    return 2.0 * m * n * k
+
+
 # ---------------------------------------------------------------------------
 # Parsers
 # ---------------------------------------------------------------------------
@@ -181,16 +186,28 @@ def load(probe_dir: Path):
     return manifest, runs, logtext, find
 
 
+_BW_PROBE = re.compile(r"\[BW-PROBE\].*?read=([\d.]+)\s*GB/s")
+
+
 def build_report(probe_dir: Path):
     manifest, runs, logtext, find = load(probe_dir)
     peak = float(manifest.get("peak_gbps", 256.0))
+    # Prefer a MEASURED peak (STREAM read BW from the [BW-PROBE] line) over the
+    # assumed spec number, so roofline % reflects real achievable bandwidth.
+    peak_measured = None
+    for r in runs:
+        for mm in _BW_PROBE.finditer(logtext(r["log"])):
+            peak_measured = max(peak_measured or 0.0, float(mm.group(1)))
+    if peak_measured:
+        peak = peak_measured
     L = []  # markdown lines
     csv_rows = []
     j = {"model": manifest["model_name"], "peak_gbps": peak, "sections": {}}
 
     L.append(f"# Bottleneck report -- {manifest['model_name']}")
     L.append("")
-    L.append(f"Probe dir: `{probe_dir.name}`  |  roofline peak: {peak:.0f} GB/s  |  "
+    L.append(f"Probe dir: `{probe_dir.name}`  |  roofline peak: {peak:.0f} GB/s "
+             f"({'measured (BW-probe read)' if peak_measured else 'assumed'})  |  "
              f"gen={manifest['gen']} reps={manifest['reps']} warmup={manifest['warmup']}")
     L.append("")
     L.append("> Phase 1 report: per-op GB/s and % peak are shape-model ESTIMATES (marked est). "
@@ -382,6 +399,34 @@ def build_report(probe_dir: Path):
             j["sections"]["prefill"] = {"total_gpu_ms": ptot,
                                         "ops": [{"op": n, "gpu": o["gpu"], "pct": o["pct"]}
                                                 for n, o in pref["ops"].items()]}
+            # Compute (FLOP) roofline for prefill -- matmul is compute-bound at
+            # M>1, so the BW roofline understates its ceiling. Achieved TFLOP/s
+            # is measured; %peak uses an ASSUMED peak (confirm for gfx1151).
+            peak_tf = float(manifest.get("peak_tflops", 59.0))
+            mm = pref["ops"].get("matmul_nbits")
+            # Use the CLEAN prefill time (TTFT) scaled by matmul's share of
+            # prefill GPU -- the profiled per-op gpu is inflated by profiling
+            # sync and would understate TFLOP/s badly.
+            pp = dp[0].get("prompt")
+            ttft_s = (headline.get(pp) or {}).get("ttft_s")
+            if mm and mm.get("shapes") and ttft_s and mm.get("pct", 0) > 0:
+                flops = 0.0
+                for label, rec in mm["shapes"].items():
+                    sm = _SHAPE_NK.search(label)
+                    if sm:
+                        flops += matmul_flops(int(sm.group(1)), int(sm.group(2)),
+                                              int(sm.group(3))) * rec["calls"]
+                mm_time_s = ttft_s * (mm["pct"] / 100.0)
+                if flops > 0 and mm_time_s > 0:
+                    tfs = (flops / 1e12) / mm_time_s
+                    L.append("")
+                    L.append(f"- Prefill matmul_nbits compute roofline (p{pp}): {flops/1e9:.1f} GFLOP "
+                             f"over ~{mm_time_s*1000:.0f} ms (TTFT {ttft_s:.2f}s x {mm['pct']:.0f}% matmul) "
+                             f"= ~{tfs:.1f} TFLOP/s = ~{100.0*tfs/peak_tf:.0f}% of ~{peak_tf:.0f} TFLOP/s peak "
+                             f"(peak ASSUMED -- confirm gfx1151 fp16 WMMA).")
+                    j["sections"]["prefill_compute"] = {
+                        "gflop": flops / 1e9, "achieved_tflops": tfs,
+                        "peak_tflops_assumed": peak_tf}
         else:
             L.append("- (No prefill Compute table found -- run needs a captured prompt-phase [PERF] table.)")
     L.append("")
