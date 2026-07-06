@@ -18,9 +18,9 @@ class Model;
 
 namespace mlir_compilation {
 
-// One grow-on-demand GPU scratch buffer for a host (CPU) graph output in
-// output-allocator mode. Keeping the pointer and its capacity together (vs two
-// parallel vectors) means the two can never fall out of sync on resize.
+// One grow-on-demand GPU scratch buffer for a host (CPU) graph output.
+// Keeping the pointer and its capacity together (vs two parallel vectors)
+// means the two can never fall out of sync on resize.
 struct HostOutputScratch {
   void *ptr = nullptr; // device buffer the DLL writes into (nullptr = unset)
   size_t capacity = 0; // bytes currently allocated at ptr
@@ -46,8 +46,7 @@ public:
 private:
   // Output-allocator dispatch (2-arg inference_compute). Installs a per-Compute
   // callback that allocates each graph output in-graph, then performs any
-  // host-output device->host copies. Selected in Compute() when
-  // use_output_allocator_ is true.
+  // host-output device->host copies.
   void compute_with_output_allocator(OrtKernelContext *context) const;
 
   // Inference state owns the artifact (clear ownership via unique_ptr)
@@ -66,20 +65,12 @@ private:
   // between the metadata (DLL-order) and the fused node (ORT-order).
   std::vector<int> output_index_map_;
 
-  // True when the compiled DLL was built in output-allocator mode (2-arg
-  // inference_compute; graph outputs allocated via the EP callback). Read from
-  // the embedded metadata in the ctor so it always matches the loaded DLL's
-  // ABI -- even when the artifact came from a reused EPContext. Selects the
-  // dispatch path in Compute().
-  bool use_output_allocator_ = false;
-
-  // Allocator-mode host-output GPU scratch: one device buffer per output index,
+  // Host-output GPU scratch: one device buffer per output index,
   // grow-on-demand, reused across Compute() and freed in the dtor. Only
-  // populated when use_output_allocator_ is true and an output lands in host
-  // (CPU) memory -- the DLL writes GPU results here and Compute() D2H-copies
-  // into the ORT host buffer. mutable: Compute() is const but this is a runtime
-  // cache, not observable state. Left empty (no allocation) in classic mode and
-  // in mock builds.
+  // populated when an output lands in host (CPU) memory -- the DLL writes GPU
+  // results here and Compute() D2H-copies into the ORT host buffer. mutable:
+  // Compute() is const but this is a runtime cache, not observable state. Left
+  // empty (no allocation) in mock builds.
   mutable std::vector<HostOutputScratch> host_out_scratch_;
 
   // HIPDNN_EP_PERF wall-clock event pair. Created lazily on the first
