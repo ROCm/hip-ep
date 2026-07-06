@@ -43,6 +43,7 @@
 #include <cstdint>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -875,7 +876,16 @@ static void logGemvOccupancy(int config_id, int64_t M, int64_t N, int64_t K,
     hipDeviceProp_t prop{};
     hipGetDeviceProperties(&prop, 0);
     int maxThreadsCU = prop.maxThreadsPerMultiProcessor;
-    int cu = prop.multiProcessorCount;
+    // NOTE: prop.multiProcessorCount is UNRELIABLE on gfx1151 (reports 16, but
+    // the part has 40 physical CUs). Prefer HIPDNN_EP_CU_COUNT when set so the
+    // grid-vs-CU utilization figure reflects real hardware.
+    int hip_mp = prop.multiProcessorCount;
+    int cu = hip_mp;
+    if (const char *e = std::getenv("HIPDNN_EP_CU_COUNT")) {
+        int v = atoi(e);
+        if (v > 0)
+            cu = v;
+    }
     double occ = maxThreadsCU > 0
                      ? 100.0 * (double)maxBlocks * c.threads / maxThreadsCU
                      : 0.0;
@@ -883,10 +893,11 @@ static void logGemvOccupancy(int config_id, int64_t M, int64_t N, int64_t K,
         (long long)((N + c.tile_n - 1) / c.tile_n) * (M > 0 ? M : 1);
     fprintf(stderr,
             "[PERF-OCC] gemv M=%lld N=%lld K=%lld cfg[%d] thr=%d tile_n=%d: "
-            "occ~%.0f%% (%d blk/CU), grid=%lld blk over %d CUs, regs=%d "
+            "occ~%.0f%% (%d blk/CU), grid=%lld blk over %d CUs "
+            "(hip_mp=%d, set HIPDNN_EP_CU_COUNT to override), regs=%d "
             "lds=%zu B\n",
             (long long)M, (long long)N, (long long)K, config_id, c.threads,
-            c.tile_n, occ, maxBlocks, gridBlocks, cu, fa.numRegs,
+            c.tile_n, occ, maxBlocks, gridBlocks, cu, hip_mp, fa.numRegs,
             (size_t)fa.sharedSizeBytes);
 }
 
