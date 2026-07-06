@@ -35,6 +35,8 @@ bool op_profile_is_active(OpProfileState *ps);
 int op_profile_acquire_event_pair(OpProfileState *ps);
 hipEvent_t op_profile_get_start_event(OpProfileState *ps, int index);
 hipEvent_t op_profile_get_stop_event(OpProfileState *ps, int index);
+// One-time diagnostic for HIP-event failures on the profiling path.
+void op_profile_note_event_error(const char *phase, int err);
 
 struct OpProfileCpuScope {
   OpProfileState *ps;
@@ -76,11 +78,22 @@ struct OpProfileScope {
     if (hipdnn_ep_perf_isolate_enabled())
       hipStreamSynchronize(stream);
     cpuStart = std::chrono::steady_clock::now();
-    hipEventRecord(op_profile_get_start_event(ps, eventIndex), stream);
+    hipError_t _e = hipEventRecord(op_profile_get_start_event(ps, eventIndex), stream);
+    if (_e != hipSuccess)
+      op_profile_note_event_error("record_start", _e);
+    // On this ROCm build hipEventRecord can leave sticky error state even when
+    // it returns hipSuccess; consume it so the next kernel wrapper that calls
+    // hipGetLastError() (hip_reduce_sum / elementwise) doesn't misreport it as
+    // its own "invalid resource handle" launch failure. The per-op timing is
+    // unaffected (events still record correctly).
+    (void)hipGetLastError();
   }
 
   ~OpProfileScope() {
-    hipEventRecord(op_profile_get_stop_event(ps, eventIndex), stream);
+    hipError_t _e = hipEventRecord(op_profile_get_stop_event(ps, eventIndex), stream);
+    if (_e != hipSuccess)
+      op_profile_note_event_error("record_stop", _e);
+    (void)hipGetLastError(); // consume hipEventRecord sticky artifact (see ctor)
     if (hipdnn_ep_perf_isolate_enabled())
       hipStreamSynchronize(stream);
     double ms = std::chrono::duration<double, std::milli>(
