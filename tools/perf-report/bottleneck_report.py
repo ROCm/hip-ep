@@ -228,8 +228,10 @@ def build_report(probe_dir: Path):
             L.append("| op | calls | gpu ms | % decode | bytes (MB, est) | GB/s (est) | % peak (est) |")
             L.append("|---|---|---|---|---|---|---|")
             ops_sorted = sorted(t["ops"].items(), key=lambda kv: kv[1]["gpu"], reverse=True)
+            total_mb = 0.0
             for name, op in ops_sorted:
                 mb, gbps, pctpeak = _op_bytes(name, op, block=32, peak=peak)
+                total_mb += mb or 0.0
                 mbs = f"{mb:.1f}" if mb else "-"
                 gs = f"{gbps:.0f}" if gbps else "-"
                 pp = f"{pctpeak:.0f}%" if pctpeak else "-"
@@ -238,6 +240,24 @@ def build_report(probe_dir: Path):
                 decode_rows.append({"op": name, "calls": op["calls"], "gpu": op["gpu"],
                                     "pct": op["pct"], "mb": mb, "gbps": gbps, "pct_peak": pctpeak})
             L.append("")
+            # Top-down aggregate memory roofline -- PROFILER-INDEPENDENT: byte
+            # counts are correct even on degraded runs; multiply by the CLEAN
+            # decode tok/s to get achieved aggregate bandwidth vs peak. This is
+            # the roofline check that survives the profiling-path instability.
+            dtps = (headline.get(128) or headline.get(512) or {}).get("decode_tps")
+            if total_mb > 0 and dtps:
+                ach = (total_mb / 1000.0) * dtps  # GB/s = (GB/token) * tok/s
+                cov = 100.0 * sum(1 for d in decode_rows if d["mb"]) / max(1, len(decode_rows))
+                L.append(f"- Top-down aggregate memory roofline (profiler-independent): "
+                         f"~{total_mb/1000.0:.2f} GB/token (byte-model, ~{cov:.0f}% of ops covered) "
+                         f"x {dtps:.1f} tok/s = ~{ach:.0f} GB/s achieved = ~{100.0*ach/peak:.0f}% of {peak:.0f} GB/s peak.")
+                L.append(f"  Memory-roofline decode ceiling ~= {peak/(total_mb/1000.0):.0f} tok/s "
+                         f"(peak/bytes-per-token); measured {dtps:.1f} tok/s.")
+                L.append("")
+                j["sections"]["aggregate_roofline"] = {
+                    "gb_per_token": total_mb / 1000.0, "achieved_gbps": ach,
+                    "pct_peak": 100.0 * ach / peak, "ceiling_tps": peak / (total_mb / 1000.0),
+                    "ops_covered_pct": cov}
             # C. matmul_nbits per-shape
             if "matmul_nbits" in t["ops"] and t["ops"]["matmul_nbits"]["shapes"]:
                 L.append("## C. matmul_nbits per-shape roofline (est)")
