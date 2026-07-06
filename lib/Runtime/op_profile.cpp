@@ -73,10 +73,34 @@ void op_profile_reset(OpProfileState *ps) {
 
 bool op_profile_is_active(OpProfileState *ps) { return ps && ps->active; }
 
+// One-time diagnostic sink for HIP-event failures on the profiling path.
+// Prints the first few failures with the hipError string + phase so we can
+// pinpoint the "invalid resource handle" root cause instead of guessing.
+static int g_opProfEventErrs = 0;
+void op_profile_note_event_error(const char *phase, int err) {
+  if (g_opProfEventErrs < 8) {
+    ++g_opProfEventErrs;
+    fprintf(stderr, "[PERF-DIAG] hipEvent %s failed: %s (%d)\n", phase,
+            hipGetErrorString(static_cast<hipError_t>(err)), err);
+  }
+}
+
+// Whether to create profiler events with hipEventDisableSystemFence. Defaults
+// to OFF (plain hipEventCreate) -- the disable-fence flag is the prime suspect
+// for the profiling-path "invalid resource handle". Opt back in with
+// HIPDNN_EP_PERF_FENCE_EVENTS=1 to A/B it.
+static bool op_profile_use_disable_fence() {
+  static bool v = [] {
+    const char *e = std::getenv("HIPDNN_EP_PERF_FENCE_EVENTS");
+    return e && (e[0] == '1' || e[0] == 'y' || e[0] == 'Y');
+  }();
+  return v;
+}
+
 int op_profile_acquire_event_pair(OpProfileState *ps) {
   int idx = ps->nextEventIndex++;
   if (idx >= (int)ps->eventPool.size()) {
-    OpProfileState::EventPair ep;
+    OpProfileState::EventPair ep{};
     // Canonical rationale for hipEventDisableSystemFence across the profiler
     // (other call sites reference this comment): hipEventRecord issues a
     // system-scope acquire/release fence by default, which is wasted work for
@@ -92,8 +116,18 @@ int op_profile_acquire_event_pair(OpProfileState *ps) {
     //
     // Pool slots are created once and reused across inferences, so creation
     // cost is paid during warmup and every later record is free.
-    hipEventCreateWithFlags(&ep.start, hipEventDisableSystemFence);
-    hipEventCreateWithFlags(&ep.stop, hipEventDisableSystemFence);
+    unsigned flags =
+        op_profile_use_disable_fence() ? hipEventDisableSystemFence : hipEventDefault;
+    hipError_t e1 = hipEventCreateWithFlags(&ep.start, flags);
+    hipError_t e2 = hipEventCreateWithFlags(&ep.stop, flags);
+    if (e1 != hipSuccess || e2 != hipSuccess) {
+      op_profile_note_event_error("create", e1 != hipSuccess ? e1 : e2);
+      // Fall back to plain default events.
+      if (e1 == hipSuccess) hipEventDestroy(ep.start);
+      if (e2 == hipSuccess) hipEventDestroy(ep.stop);
+      hipEventCreate(&ep.start);
+      hipEventCreate(&ep.stop);
+    }
     ps->eventPool.push_back(ep);
   }
   return idx;
@@ -147,8 +181,13 @@ void op_profile_resolve_and_print(OpProfileState *ps) {
 
   for (auto &ev : ps->pending) {
     float gpuMs = 0.0f;
-    hipEventElapsedTime(&gpuMs, ps->eventPool[ev.eventIndex].start,
-                        ps->eventPool[ev.eventIndex].stop);
+    hipError_t elErr = hipEventElapsedTime(
+        &gpuMs, ps->eventPool[ev.eventIndex].start,
+        ps->eventPool[ev.eventIndex].stop);
+    if (elErr != hipSuccess) {
+      op_profile_note_event_error("elapsed", elErr);
+      gpuMs = 0.0f;
+    }
     auto &op = ps->profile[ev.name];
     if (op.name.empty())
       op.name = ev.name;
@@ -166,6 +205,13 @@ void op_profile_resolve_and_print(OpProfileState *ps) {
     op.totalBytes += ev.bytes;
   }
   ps->pending.clear();
+
+  // Consume any sticky HIP error introduced by the profiler's own event calls
+  // (e.g. a hipEventElapsedTime on a not-fully-ready event). Otherwise the next
+  // Compute's first kernel wrapper that calls hipGetLastError() (hip_reduce_sum,
+  // the generic elementwise path) misattributes it as its own launch failure --
+  // the root cause of the "invalid resource handle" seen only under profiling.
+  (void)hipGetLastError();
 
   if (ps->profile.empty())
     return;
