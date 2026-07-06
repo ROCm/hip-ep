@@ -1,14 +1,12 @@
 // Bench-only shim, force-included (clang `-include`) when the dispatch bench
 // compiles the ARCHIVED lib/Runtime/real/gqa_back.cpp into gqa_back.dll.
 //
-// Production renamed the runtime entry symbol `wrap_group_query_attention` ->
-// `wrap_gqa_flash`, so hipdnn_ep_runtime.h no longer declares the legacy name.
-// gqa_back.cpp's wrapper definition used to inherit C linkage from that header
-// declaration; without it the definition would be C++-mangled and the BACK
-// export shim could not resolve it. This forward declaration (injected before
-// gqa_back.cpp's own includes) restores the extern "C" linkage -- WITHOUT
-// modifying the archived gqa_back.cpp or adding the legacy name to the
-// production runtime header.
+// The runtime entry symbol is `wrap_group_query_attention`. gqa_back.cpp's
+// wrapper definition inherits C linkage from the header declaration; without it
+// the definition would be C++-mangled and the BACK export shim could not resolve
+// it. This forward declaration (injected before gqa_back.cpp's own includes)
+// guarantees the extern "C" linkage -- WITHOUT modifying the archived
+// gqa_back.cpp.
 #pragma once
 
 #include <cstdint>

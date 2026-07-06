@@ -7,8 +7,8 @@
 // GQA runtime wrapper (self-contained: optimized fused fast path + legacy
 // decomposed hipBLASLt fallback).
 //
-// The generated IR calls `wrap_gqa_flash` (39-arg ABI, unchanged so the
-// HipToLLVM lowering keeps resolving). Path selection:
+// The generated IR calls `wrap_group_query_attention` (39-arg ABI, unchanged so
+// the HipToLLVM lowering keeps resolving). Path selection:
 //
 //   * Common fp16 causal GQA (head_dim in {64,128}, templated decode geometry,
 //     no sliding window / sink / smooth) -> optimized fused custom kernels:
@@ -500,9 +500,9 @@ static int gqa_forward_fused(
 
 //===----------------------------------------------------------------------===//
 // Legacy decomposed hipBLASLt pipeline (verbatim port of gqa_back.cpp's
-// strategy). Reached from wrap_gqa_flash for every case the optimized fused
-// path does not implement. The read-only backup gqa_back.cpp stays out of the
-// build; this is the production copy.
+// strategy). Reached from wrap_group_query_attention for every case the
+// optimized fused path does not implement. The read-only backup gqa_back.cpp
+// stays out of the build; this is the production copy.
 //===----------------------------------------------------------------------===//
 
 // Env-var gate for the group-batched "no-expand" hipBLASLt GQA pipeline.
@@ -1339,9 +1339,9 @@ extern "C" int8_t hipdnn_ep_op_state_construct_gqa(RuntimeState *state,
 
 //===----------------------------------------------------------------------===//
 // Public wrapper called by generated IR. ABI MUST stay identical to the
-// HipToLLVM lowering (kWrapGQA = "wrap_gqa_flash", 39 params).
+// HipToLLVM lowering (kWrapGQA = "wrap_group_query_attention", 39 params).
 //===----------------------------------------------------------------------===//
-int wrap_gqa_flash(
+int wrap_group_query_attention(
     RuntimeState *state, int op_state_slot,
     // Inputs 1-7 (core GQA)
     void *query, void *key, void *value, void *past_key, void *past_value,
@@ -1373,16 +1373,16 @@ int wrap_gqa_flash(
       state);
 
   if (!state) {
-    fprintf(stderr, "wrap_gqa_flash: null state\n");
+    fprintf(stderr, "wrap_group_query_attention: null state\n");
     return -1;
   }
   if (!query || !output) {
-    fprintf(stderr, "wrap_gqa_flash: null required argument\n");
+    fprintf(stderr, "wrap_group_query_attention: null required argument\n");
     return -1;
   }
   if (kv_num_heads <= 0 || num_heads % kv_num_heads != 0) {
     fprintf(stderr,
-            "wrap_gqa_flash: num_heads (%lld) must be divisible "
+            "wrap_group_query_attention: num_heads (%lld) must be divisible "
             "by kv_num_heads (%lld)\n",
             (long long)num_heads, (long long)kv_num_heads);
     return -1;
@@ -1396,25 +1396,26 @@ int wrap_gqa_flash(
   // legacy decomposed pipeline reads/writes them as the BNSD KV cache).
   //===------------------------------------------------------------------===//
   if (position_ids != nullptr) {
-    fprintf(stderr, "wrap_gqa_flash: position_ids not supported\n");
+    fprintf(stderr, "wrap_group_query_attention: position_ids not supported\n");
     return -1;
   }
   if (attention_bias != nullptr) {
-    fprintf(stderr, "wrap_gqa_flash: attention_bias not supported\n");
+    fprintf(stderr,
+            "wrap_group_query_attention: attention_bias not supported\n");
     return -1;
   }
   if (k_scale != nullptr || v_scale != nullptr || k_quant_type != 0 ||
       v_quant_type != 0) {
-    fprintf(stderr, "wrap_gqa_flash: KV cache quantization not "
+    fprintf(stderr, "wrap_group_query_attention: KV cache quantization not "
                     "supported\n");
     return -1;
   }
   if (output_qk != nullptr || qk_output != 0) {
-    fprintf(stderr, "wrap_gqa_flash: qk_output not supported\n");
+    fprintf(stderr, "wrap_group_query_attention: qk_output not supported\n");
     return -1;
   }
   if (!present_key || !present_value) {
-    fprintf(stderr, "wrap_gqa_flash: GQA requires "
+    fprintf(stderr, "wrap_group_query_attention: GQA requires "
                     "present_key/present_value KV cache\n");
     return -1;
   }
@@ -1422,7 +1423,7 @@ int wrap_gqa_flash(
   hipStream_t stream =
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
   if (!stream) {
-    fprintf(stderr, "wrap_gqa_flash: null stream\n");
+    fprintf(stderr, "wrap_group_query_attention: null stream\n");
     return -1;
   }
 
@@ -1465,13 +1466,14 @@ int wrap_gqa_flash(
     hipblasLtHandle_t ltHandle = static_cast<hipblasLtHandle_t>(
         hipdnn_ep_state_get_hipblas_handle(state));
     if (!ltHandle) {
-      fprintf(stderr, "wrap_gqa_flash: null hipblas handle\n");
+      fprintf(stderr, "wrap_group_query_attention: null hipblas handle\n");
       return -1;
     }
     const bool has_smooth_softmax =
         (head_sink != nullptr || smooth_softmax == 1);
     RUNTIME_DEBUG_LOG(
-        "[REAL] wrap_gqa_flash: routing to legacy decomposed pipeline "
+        "[REAL] wrap_group_query_attention: routing to legacy decomposed "
+        "pipeline "
         "(elem=%lld no_causal=%d window=%lld sink=%d smooth=%lld d=%lld "
         "sq=%lld geom_ok=%d)\n",
         (long long)element_size_bytes, static_cast<int>(no_causal),
@@ -1486,13 +1488,14 @@ int wrap_gqa_flash(
         local_window_size, no_causal != 0, element_size_bytes, op_state_slot);
     if (lrc != 0)
       fprintf(stderr,
-              "wrap_gqa_flash: legacy decomposed pipeline failed (rc=%d)\n",
+              "wrap_group_query_attention: legacy decomposed pipeline failed "
+              "(rc=%d)\n",
               lrc);
     return lrc;
   }
 
   RUNTIME_DEBUG_LOG(
-      "[REAL] wrap_gqa_flash (slim/fused): batch=%lld seq_q=%lld "
+      "[REAL] wrap_group_query_attention (slim/fused): batch=%lld seq_q=%lld "
       "seq_kv=%lld H=%lld G=%lld d=%lld do_rotary=%lld packed_qkv=%d\n",
       (long long)batch_size, (long long)seq_len_q, (long long)seq_len_kv,
       (long long)num_heads, (long long)kv_num_heads, (long long)head_dim,
@@ -1506,7 +1509,7 @@ int wrap_gqa_flash(
                              kv_num_heads, head_dim, scale, do_rotary);
   if (rc != 0)
     fprintf(stderr,
-            "wrap_gqa_flash: gqa_forward_fused failed "
+            "wrap_group_query_attention: gqa_forward_fused failed "
             "(rc=%d)\n",
             rc);
   return rc;
