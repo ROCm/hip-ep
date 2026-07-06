@@ -87,8 +87,8 @@ struct RuntimeState {
   // Output allocator installed by the EP before inference_compute via
   // hipdnn_ep_set_output_allocator. hipdnn_ep_alloc_output forwards to
   // allocate(self, ...). Borrowed: `self` is EP-owned, never freed here.
-  // allocate == nullptr means no allocator is installed (the classic pipeline
-  // never calls alloc_output); zero-initialized in initialize_state_handles.
+  // allocate == nullptr means no allocator has been installed yet;
+  // zero-initialized in initialize_state_handles.
   hipdnn_output_allocator_t output_allocator;
 
   // Per-session scratch buffer for wrap_qmoe transient device buffers
