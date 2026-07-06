@@ -11,6 +11,7 @@
 // The axis input is a GPU scalar; we D2H-read it once per call. The lowering
 // already passes data_shape as a host int64 array, so the outer/axis/inner
 // decomposition is done on the host without inspecting GPU tensors.
+#include "../cpu_fallback_invoke.h"
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -141,6 +142,32 @@ int wrap_cumsum(RuntimeState *state, void *x, void *axis, void *y,
       (long long)axis_value, (long long)outer, (long long)axis_size,
       (long long)inner, hipdnn_ep_datatype_name(data_type),
       (long long)exclusive, (long long)reverse);
+
+  {
+    int64_t computed_num_elements = 1;
+    for (int64_t d = 0; d < data_rank; ++d)
+      computed_num_elements *= data_shape[d];
+    HipdnnCpuFbGenericDesc fb{};
+    fb.op_name = "CumSum";
+    fb.opset = 14;
+    fb.num_inputs = 2;
+    fb.num_outputs = 1;
+    fb.inputs[0] = {x, data_rank, data_shape, computed_num_elements, data_type};
+    fb.inputs[1] = {axis, 0, nullptr, 1, axis_dtype};
+    fb.outputs[0] = {y, data_rank, data_shape, computed_num_elements,
+                     data_type};
+    fb.num_attrs = 2;
+    fb.attrs[0] = {"exclusive", HIPDNN_CPU_FB_ATTR_INT, exclusive, nullptr, 0,
+                   0.f};
+    fb.attrs[1] = {"reverse", HIPDNN_CPU_FB_ATTR_INT, reverse, nullptr, 0,
+                   0.f};
+    const int fb_rc =
+        hipdnn_cpu_fallback_try_generic(state, stream, "CumSum", &fb);
+    if (fb_rc == 0)
+      return 0;
+    if (fb_rc < 0)
+      return -1;
+  }
 
   return hip_cumsum(stream, x, y, outer, axis_size, inner, hip_dtype,
                     exclusive ? 1 : 0, reverse ? 1 : 0);

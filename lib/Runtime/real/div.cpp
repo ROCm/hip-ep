@@ -10,6 +10,7 @@
 // hip_expand materialises the broadcast into the per-session workspace,
 // then hip_elementwise_div runs on same-shape buffers. Div is not
 // commutative -- operands are never swapped.
+#include "../cpu_fallback_invoke.h"
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -121,6 +122,16 @@ int wrap_div(RuntimeState *state, void *lhs, void *rhs, void *output,
         "[REAL] wrap_div: same-shape out=[%lld,%lld,%lld,%lld], dtype=%s\n",
         (long long)out_n, (long long)out_c, (long long)out_h, (long long)out_w,
         hipdnn_ep_datatype_name(data_type));
+  }
+
+  {
+    const int fb_rc = hipdnn_cpu_fb_try_binary_1d(
+        state, stream, "Div", lhs_use, rhs_use, output, out_vol, data_type,
+        data_type);
+    if (fb_rc == 0)
+      return 0;
+    if (fb_rc < 0)
+      return -1;
   }
 
   return hip_elementwise_div(stream, lhs_use, rhs_use, output, out_vol,

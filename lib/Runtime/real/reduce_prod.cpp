@@ -12,6 +12,7 @@
 //
 // Source: onnxruntime/core/providers/cuda/reduction/reduction_ops.cc /
 //         reduction_functions.cu @ v1.22.2.
+#include "../cpu_fallback_invoke.h"
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -93,6 +94,18 @@ int wrap_reduce_prod(RuntimeState *state, void *data, void *axes, void *output,
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
+
+  {
+    const int fb_rc = hipdnn_cpu_fb_try_reduce_flat(
+        state, stream, "ReduceProd", data, axes, output, data_num_elements,
+        axes_num_elements, output_num_elements, data_type, keepdims,
+        noop_with_empty_axes);
+    if (fb_rc == 0)
+      return 0;
+    if (fb_rc < 0)
+      return -1;
+  }
+
   RUNTIME_DEBUG_LOG("[REAL] wrap_reduce_prod: data_num=%lld, output_num=%lld, "
                     "data_type=%s, hip_dtype=%d -> hip_reduce_prod\n",
                     (long long)data_num_elements,

@@ -59,7 +59,7 @@ llvm_map_components_to_libnames(bitcode_jit_llvm_libs
 # Create custom op library
 set(LIB_NAME morphizen-custom-op-mlir)
 
-# Gather CPU-fallback: CPUGate shell ONNX (Quark-style inner Session) + Ort::Op.
+# CPUGate shell ONNX (Quark-style inner Session) + Ort::Op for all fallback ops.
 set(_HIPDNN_CPUGATE_SHELL_ONNX
     ${CMAKE_CURRENT_SOURCE_DIR}/onnx/cpugate_shell.onnx)
 set(_HIPDNN_CPUGATE_SHELL_GEN_INC
@@ -134,7 +134,7 @@ endif()
 # Include directories
 target_include_directories(${LIB_NAME} PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
-  ${CMAKE_CURRENT_BINARY_DIR} # cpugate_shell_onnx_data.inc (CPU fallback CPUGate)
+  ${CMAKE_CURRENT_BINARY_DIR} # *.inc (CPUGate shell embed)
   ${CMAKE_CURRENT_BINARY_DIR}/..  # For generated protobuf headers (metadata.pb.h)
   ${CMAKE_SOURCE_DIR}/include     # Shared project headers (timing.h, etc.)
   ${LLVM_INCLUDE_DIRS}            # LLVM ORC headers consumed by LlvmIrJit.cpp

@@ -5,8 +5,8 @@
 
 //===----------------------------------------------------------------------===//
 // Debug-only CPU fallback: model.dll calls back with host-staged tensors; the EP
-// runs a host reference Gather (large / fp16 tensors) or CPUGate + Ort::Op for
-// small exotic cases. See docs/design/debug-cpu-fallback-plan.md.
+// runs ORT CPU kernels via CPUGate + Ort::Op::Invoke on the gate thread.
+// See docs/design/debug-cpu-fallback-plan.md.
 //
 // Do not use MorphiZen `model_proto_serialize_as_string` or `OpInvoker` here —
 // MLIR serialization is not ONNX protobuf; OpInvoker mis-handles `Ort::OpAttr`.
@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "cpu_fallback_cpugate.h"
+#include "cpu_fallback_invoke.h"
 #include "hipdnn_ep_runtime.h"
 
 #include <glog/logging.h>
@@ -23,7 +24,6 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
-#include <new>
 #include <optional>
 #include <vector>
 
@@ -43,37 +43,39 @@ static int64_t product_dims(const int64_t *shape, int64_t rank) {
   return p;
 }
 
-static bool gather_onnx_output_shape(const HipdnnCpuFbGatherDesc *d,
-                                     std::vector<int64_t> &out_shape) {
-  out_shape.clear();
-  if (!d->data_shape || d->data_rank <= 0 || d->indices_rank < 0 ||
-      d->axis < 0 || d->axis >= d->data_rank)
-    return false;
-  if (d->indices_rank > 0 && !d->indices_shape)
-    return false;
-  for (int64_t i = 0; i < d->indices_rank; ++i)
-    out_shape.push_back(d->indices_shape[i]);
-  for (int64_t i = d->axis + 1; i < d->data_rank; ++i)
-    out_shape.push_back(d->data_shape[i]);
-  const int64_t po =
-      product_dims(out_shape.data(), static_cast<int64_t>(out_shape.size()));
-  return po >= 0 && po == d->output_num_elements;
+static int64_t gather_axis_attr(const HipdnnCpuFbGenericHostDesc *d) {
+  for (int32_t i = 0; i < d->num_attrs; ++i) {
+    if (d->attrs[i].name && std::strcmp(d->attrs[i].name, "axis") == 0 &&
+        d->attrs[i].kind == HIPDNN_CPU_FB_ATTR_INT) {
+      return d->attrs[i].i;
+    }
+  }
+  return -1;
 }
 
-static bool gather_shapes_match_elements(const HipdnnCpuFbGatherDesc *d) {
-  if (!d->data_shape && d->data_rank > 0)
+// ONNX Gather output rank = indices_rank + (data_rank - 1); may differ from the
+// MLIR memref rank when layouts are linearly equivalent.
+static bool gather_onnx_output_shape(const HipdnnCpuFbGenericHostDesc *d,
+                                     int64_t axis,
+                                     std::vector<int64_t> &out_shape) {
+  out_shape.clear();
+  if (d->num_inputs < 2 || d->num_outputs < 1)
     return false;
-  if (!d->indices_shape && d->indices_rank > 0)
+  const auto &data = d->inputs[0];
+  const auto &indices = d->inputs[1];
+  const auto &output = d->outputs[0];
+  if (!data.shape || data.rank <= 0 || indices.rank < 0 || axis < 0 ||
+      axis >= data.rank)
     return false;
-  if (!d->output_shape && d->output_rank > 0)
+  if (indices.rank > 0 && !indices.shape)
     return false;
-  const int64_t pd = product_dims(d->data_shape, d->data_rank);
-  const int64_t pi = product_dims(d->indices_shape, d->indices_rank);
-  const int64_t po = product_dims(d->output_shape, d->output_rank);
-  if (pd < 0 || pi < 0 || po < 0)
-    return false;
-  return pd == d->data_num_elements && pi == d->indices_num_elements &&
-         po == d->output_num_elements;
+  for (int64_t i = 0; i < indices.rank; ++i)
+    out_shape.push_back(indices.shape[i]);
+  for (int64_t i = axis + 1; i < data.rank; ++i)
+    out_shape.push_back(data.shape[i]);
+  const int64_t po =
+      product_dims(out_shape.data(), static_cast<int64_t>(out_shape.size()));
+  return po >= 0 && po == output.num_elements;
 }
 
 static ONNXTensorElementDataType hip_dtype_to_onnx(int64_t hip_ty) {
@@ -100,17 +102,18 @@ static ONNXTensorElementDataType hip_dtype_to_onnx(int64_t hip_ty) {
 }
 
 static std::optional<Ort::Value>
-make_cpu_tensor(const Ort::MemoryInfo &mi, void *base, const int64_t *shape,
-                int64_t rank, ONNXTensorElementDataType et,
-                int64_t expected_num_elements) {
+make_cpu_tensor(const char *op_name, const Ort::MemoryInfo &mi, void *base,
+                const int64_t *shape, int64_t rank,
+                ONNXTensorElementDataType et, int64_t expected_num_elements) {
   const int64_t nelem = product_dims(shape, rank);
   if (nelem < 0) {
-    LOG(ERROR) << "cpu_fallback Gather: invalid shape (negative dim or "
-                  "overflow in product)";
+    LOG(ERROR) << "cpu_fallback " << (op_name ? op_name : "?")
+               << ": invalid shape (negative dim or overflow in product)";
     return std::nullopt;
   }
   if (nelem != expected_num_elements) {
-    LOG(ERROR) << "cpu_fallback Gather: shape product " << nelem
+    LOG(ERROR) << "cpu_fallback " << (op_name ? op_name : "?")
+               << ": shape product " << nelem
                << " != expected_num_elements " << expected_num_elements;
     return std::nullopt;
   }
@@ -142,322 +145,184 @@ make_cpu_tensor(const Ort::MemoryInfo &mi, void *base, const int64_t *shape,
   case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
     return Ort::Value::CreateTensor<double>(
         mi, reinterpret_cast<double *>(base), n, sh, r);
+  case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:
+    return Ort::Value::CreateTensor<bool>(
+        mi, reinterpret_cast<bool *>(base), n, sh, r);
   default:
-    LOG(ERROR) << "cpu_fallback Gather: unsupported ONNX element type "
-               << static_cast<int>(et);
+    LOG(ERROR) << "cpu_fallback " << (op_name ? op_name : "?")
+               << ": unsupported ONNX element type " << static_cast<int>(et);
     return std::nullopt;
   }
 }
 
-static int64_t hip_dtype_element_size_bytes(int64_t hip_ty) {
-  switch (hip_ty) {
-  case HIPDNN_EP_DATATYPE_HALF:
-  case HIPDNN_EP_DATATYPE_BFLOAT16:
-    return 2;
-  case HIPDNN_EP_DATATYPE_FLOAT:
-  case HIPDNN_EP_DATATYPE_INT32:
-    return 4;
-  case HIPDNN_EP_DATATYPE_INT64:
-  case HIPDNN_EP_DATATYPE_DOUBLE:
-    return 8;
-  case HIPDNN_EP_DATATYPE_INT8:
-  case HIPDNN_EP_DATATYPE_UINT8:
-    return 1;
-  default:
-    return -1;
+static ONNXTensorElementDataType onnx_type_for_io(const char *op_name,
+                                                  int32_t io_index,
+                                                  int32_t num_inputs,
+                                                  int64_t hip_dtype) {
+  if (op_name && std::strcmp(op_name, "Gather") == 0 && io_index == 1) {
+    return ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
   }
-}
-
-static int64_t read_gather_index(const void *indices_host, int64_t i,
-                                 int64_t idx_bytes) {
-  if (idx_bytes == 8) {
-    return static_cast<const int64_t *>(indices_host)[i];
-  }
-  return static_cast<int64_t>(
-      static_cast<const int32_t *>(indices_host)[i]);
-}
-
-// Host reference for ONNX Gather on dense row-major buffers. Matches the GPU
-// gather_kernel layout ([outer, axis_size, inner]) and index rules (negative
-// index += axis_size; OOB -> zero).
-static int reference_gather_on_host(const HipdnnCpuFbGatherDesc *d) {
-  if (!d->data_host || !d->indices_host || !d->output_host || !d->data_shape ||
-      d->data_rank <= 0) {
-    return -1;
-  }
-  if (d->axis < 0 || d->axis >= d->data_rank) {
-    return -1;
-  }
-
-  const int64_t elem_size = hip_dtype_element_size_bytes(d->data_hip_dtype);
-  if (elem_size <= 0) {
-    return -1;
-  }
-  if (d->indices_element_size_bytes != 4 &&
-      d->indices_element_size_bytes != 8) {
-    return -1;
-  }
-
-  int64_t inner = 1;
-  for (int64_t i = d->axis + 1; i < d->data_rank; ++i) {
-    inner *= d->data_shape[i];
-  }
-  int64_t outer = 1;
-  for (int64_t i = 0; i < d->axis; ++i) {
-    outer *= d->data_shape[i];
-  }
-  const int64_t axis_dim = d->data_shape[d->axis];
-  const int64_t indices_num = d->indices_num_elements;
-  if (inner <= 0 || axis_dim <= 0 || indices_num < 0) {
-    return -1;
-  }
-  if (d->output_num_elements != outer * indices_num * inner) {
-    LOG(ERROR) << "cpu_fallback Gather: reference layout mismatch "
-               << "output_num=" << d->output_num_elements << " expected "
-               << (outer * indices_num * inner);
-    return -1;
-  }
-
-  const auto *data = static_cast<const char *>(d->data_host);
-  auto *out = static_cast<char *>(d->output_host);
-  const size_t slice_bytes = static_cast<size_t>(inner * elem_size);
-
-  for (int64_t o = 0; o < outer; ++o) {
-    for (int64_t i = 0; i < indices_num; ++i) {
-      int64_t ix =
-          read_gather_index(d->indices_host, i, d->indices_element_size_bytes);
-      if (ix < 0) {
-        ix += axis_dim;
-      }
-      char *out_slice =
-          out + static_cast<size_t>((o * indices_num + i) * inner * elem_size);
-      if (ix < 0 || ix >= axis_dim) {
-        std::memset(out_slice, 0, slice_bytes);
-        continue;
-      }
-      const char *data_slice = data + static_cast<size_t>(
-                                           (o * axis_dim + ix) * inner *
-                                           elem_size);
-      std::memcpy(out_slice, data_slice, slice_bytes);
+  if (op_name && io_index >= num_inputs) {
+    if (std::strcmp(op_name, "Equal") == 0 || std::strcmp(op_name, "Less") == 0) {
+      return ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL;
     }
   }
-  return 0;
-}
-
-// CPUGate path only for small tensors (avoids fp16->fp32 full-table promotion).
-static constexpr int64_t kCpugateGatherMaxDataBytes = 64 * 1024 * 1024;
-
-static bool gather_needs_fp32_promotion(ONNXTensorElementDataType et) {
-  return et == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 ||
-         et == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
-}
-
-static ONNXTensorElementDataType gather_ort_kernel_dtype(
-    ONNXTensorElementDataType storage_et) {
-  if (gather_needs_fp32_promotion(storage_et)) {
-    return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
+  if (op_name && std::strcmp(op_name, "Where") == 0 && io_index == 0) {
+    return ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL;
   }
-  return storage_et;
+  return hip_dtype_to_onnx(hip_dtype);
 }
 
-static int invoke_gather_via_cpugate(const HipdnnCpuFbGatherDesc *d,
-                                    ONNXTensorElementDataType data_et,
-                                    ONNXTensorElementDataType ort_kernel_et,
-                                    bool promote_fp32) {
-  const int64_t idx_bytes = d->indices_element_size_bytes;
-
+static int invoke_generic_cpu(const HipdnnCpuFbGenericHostDesc *d) {
+  if (!d || !d->op_name) {
+    return -1;
+  }
   cpugate::Manager &gate = cpugate::Manager::instance();
-  Ort::Op *gather_op = gate.get_or_create_gather_op(
-      d->axis, ort_kernel_et, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
-  if (!gather_op) {
-    return -1;
-  }
 
-  std::vector<float> data_fp32;
-  std::vector<float> out_fp32;
-  void *data_ptr = const_cast<void *>(d->data_host);
-  void *out_ptr = d->output_host;
-  if (promote_fp32) {
-    try {
-      data_fp32.resize(static_cast<size_t>(d->data_num_elements));
-      out_fp32.resize(static_cast<size_t>(d->output_num_elements));
-    } catch (const std::bad_alloc &) {
-      LOG(ERROR) << "cpu_fallback Gather: fp32 promotion staging OOM";
-      return -1;
-    }
-    if (data_et == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
-      const auto *src = static_cast<const Ort::Float16_t *>(d->data_host);
-      for (size_t i = 0; i < data_fp32.size(); ++i) {
-        data_fp32[i] = src[i].ToFloat();
-      }
-    } else {
-      const auto *src = static_cast<const Ort::BFloat16_t *>(d->data_host);
-      for (size_t i = 0; i < data_fp32.size(); ++i) {
-        data_fp32[i] = src[i].ToFloat();
-      }
-    }
-    data_ptr = data_fp32.data();
-    out_ptr = out_fp32.data();
-  }
-
-  std::vector<int64_t> data_shape_vec;
-  data_shape_vec.reserve(
-      static_cast<size_t>(std::max<int64_t>(0, d->data_rank)));
-  for (int64_t i = 0; i < d->data_rank; ++i) {
-    data_shape_vec.push_back(d->data_shape[i]);
-  }
-
-  std::vector<int64_t> indices_shape_vec;
-  indices_shape_vec.reserve(
-      static_cast<size_t>(std::max<int64_t>(0, d->indices_rank)));
-  for (int64_t i = 0; i < d->indices_rank; ++i) {
-    indices_shape_vec.push_back(d->indices_shape[i]);
-  }
-
-  Ort::Value in_indices = Ort::Value::CreateTensor(
-      Ort::AllocatorWithDefaultOptions(), indices_shape_vec.data(),
-      indices_shape_vec.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
-  int64_t *idx_mut = in_indices.GetTensorMutableData<int64_t>();
-  if (idx_bytes == 8) {
-    memcpy(idx_mut, d->indices_host,
-           static_cast<size_t>(d->indices_num_elements) * sizeof(int64_t));
-  } else {
-    const auto *src = static_cast<const int32_t *>(d->indices_host);
-    for (int64_t i = 0; i < d->indices_num_elements; ++i) {
-      idx_mut[i] = static_cast<int64_t>(src[i]);
-    }
-  }
-
-  Ort::MemoryInfo mi =
+  const Ort::MemoryInfo mi =
       Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-  auto in_data = make_cpu_tensor(mi, data_ptr, data_shape_vec.data(),
-                                 static_cast<int64_t>(data_shape_vec.size()),
-                                 ort_kernel_et, d->data_num_elements);
 
-  std::vector<int64_t> onnx_out_shape;
-  const int64_t *out_shape = d->output_shape;
-  int64_t out_rank = d->output_rank;
-  if (gather_onnx_output_shape(d, onnx_out_shape)) {
-    out_shape = onnx_out_shape.data();
-    out_rank = static_cast<int64_t>(onnx_out_shape.size());
+  const bool is_gather = std::strcmp(d->op_name, "Gather") == 0;
+  const int64_t gather_axis = is_gather ? gather_axis_attr(d) : -1;
+
+  std::vector<Ort::Value> input_values;
+  std::vector<Ort::Value> output_values;
+  std::vector<ONNXTensorElementDataType> input_ort_types;
+  std::vector<int64_t> indices_shape_storage;
+  input_values.reserve(static_cast<size_t>(d->num_inputs));
+  input_ort_types.reserve(static_cast<size_t>(d->num_inputs));
+
+  for (int32_t i = 0; i < d->num_inputs; ++i) {
+    const auto &t = d->inputs[i];
+    const ONNXTensorElementDataType et =
+        onnx_type_for_io(d->op_name, i, d->num_inputs, t.hip_dtype);
+    if (et == ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED) {
+      LOG(ERROR) << "cpu_fallback " << d->op_name << ": unsupported input dtype";
+      return -1;
+    }
+    input_ort_types.push_back(et);
+
+    if (is_gather && i == 1 &&
+        t.hip_dtype == HIPDNN_EP_DATATYPE_INT32) {
+      indices_shape_storage.assign(t.shape, t.shape + t.rank);
+      Ort::Value in_indices = Ort::Value::CreateTensor(
+          Ort::AllocatorWithDefaultOptions(), indices_shape_storage.data(),
+          indices_shape_storage.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+      int64_t *idx_mut = in_indices.GetTensorMutableData<int64_t>();
+      const auto *src = static_cast<const int32_t *>(t.host);
+      for (int64_t j = 0; j < t.num_elements; ++j) {
+        idx_mut[j] = static_cast<int64_t>(src[j]);
+      }
+      input_values.push_back(std::move(in_indices));
+      continue;
+    }
+
+    auto v = make_cpu_tensor(d->op_name, mi, const_cast<void *>(t.host), t.shape,
+                             t.rank, et, t.num_elements);
+    if (!v) {
+      return -1;
+    }
+    input_values.push_back(std::move(*v));
   }
 
-  std::vector<int64_t> out_shape_vec;
-  out_shape_vec.reserve(static_cast<size_t>(std::max<int64_t>(0, out_rank)));
-  for (int64_t i = 0; i < out_rank; ++i) {
-    out_shape_vec.push_back(out_shape[i]);
+  std::vector<int64_t> gather_out_shape;
+  for (int32_t i = 0; i < d->num_outputs; ++i) {
+    const auto &t = d->outputs[i];
+    const ONNXTensorElementDataType et = onnx_type_for_io(
+        d->op_name, d->num_inputs + i, d->num_inputs, t.hip_dtype);
+    if (et == ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED) {
+      LOG(ERROR) << "cpu_fallback " << d->op_name
+                 << ": unsupported output dtype";
+      return -1;
+    }
+    const int64_t *out_shape = t.shape;
+    int64_t out_rank = t.rank;
+    if (is_gather && gather_axis >= 0 &&
+        gather_onnx_output_shape(d, gather_axis, gather_out_shape)) {
+      out_shape = gather_out_shape.data();
+      out_rank = static_cast<int64_t>(gather_out_shape.size());
+    }
+    auto v = make_cpu_tensor(d->op_name, mi, t.host_mut, out_shape, out_rank, et,
+                             t.num_elements);
+    if (!v) {
+      return -1;
+    }
+    output_values.push_back(std::move(*v));
   }
 
-  auto out_tensor = make_cpu_tensor(mi, out_ptr, out_shape_vec.data(), out_rank,
-                                    ort_kernel_et, d->output_num_elements);
-  if (!in_data || !out_tensor) {
+  std::vector<Ort::OpAttr> owned_attrs;
+  owned_attrs.reserve(static_cast<size_t>(d->num_attrs));
+  for (int32_t i = 0; i < d->num_attrs; ++i) {
+    const auto &a = d->attrs[i];
+    if (!a.name) {
+      continue;
+    }
+    switch (a.kind) {
+    case HIPDNN_CPU_FB_ATTR_INT:
+      owned_attrs.emplace_back(a.name, &a.i, 1, OrtOpAttrType::ORT_OP_ATTR_INT);
+      break;
+    case HIPDNN_CPU_FB_ATTR_INTS:
+      owned_attrs.emplace_back(a.name, a.ints,
+                               static_cast<size_t>(a.ints_len),
+                               OrtOpAttrType::ORT_OP_ATTR_INTS);
+      break;
+    case HIPDNN_CPU_FB_ATTR_FLOAT:
+      owned_attrs.emplace_back(a.name, &a.f, 1, OrtOpAttrType::ORT_OP_ATTR_FLOAT);
+      break;
+    default:
+      LOG(ERROR) << "cpu_fallback " << d->op_name << ": bad attr kind";
+      return -1;
+    }
+  }
+
+  const Ort::OpAttr *attrs_ptr =
+      owned_attrs.empty() ? nullptr : owned_attrs.data();
+
+  Ort::Op *op = gate.get_or_create_onnx_op(
+      d->op_name, d->domain, d->opset, input_ort_types.data(),
+      input_ort_types.size(), static_cast<size_t>(d->num_inputs),
+      static_cast<size_t>(d->num_outputs), attrs_ptr, owned_attrs.size());
+  if (!op) {
     return -1;
   }
 
-  Ort::Value in_data_val = std::move(*in_data);
-  Ort::Value out_val = std::move(*out_tensor);
-  const OrtValue *inputs[] = {in_data_val, in_indices};
-  OrtValue *outputs[] = {out_val};
-  gate.invoke(*gather_op, inputs, 2, outputs, 1);
-
-  if (promote_fp32) {
-    if (data_et == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
-      auto *dst = static_cast<Ort::Float16_t *>(d->output_host);
-      for (size_t i = 0; i < out_fp32.size(); ++i) {
-        dst[i] = Ort::Float16_t(out_fp32[i]);
-      }
-    } else {
-      auto *dst = static_cast<Ort::BFloat16_t *>(d->output_host);
-      for (size_t i = 0; i < out_fp32.size(); ++i) {
-        dst[i] = Ort::BFloat16_t(out_fp32[i]);
-      }
-    }
+  std::vector<const OrtValue *> in_ptrs;
+  std::vector<OrtValue *> out_ptrs;
+  in_ptrs.reserve(input_values.size());
+  out_ptrs.reserve(output_values.size());
+  for (auto &v : input_values) {
+    in_ptrs.push_back(v);
   }
-  return 0;
-}
+  for (auto &v : output_values) {
+    out_ptrs.push_back(v);
+  }
 
-static int invoke_gather_cpu(const HipdnnCpuFbGatherDesc *d) {
   try {
-    if (!gather_shapes_match_elements(d)) {
-      LOG(ERROR) << "cpu_fallback Gather: shape metadata does not match element "
-                    "counts (stale model.dll vs EP, or bad IR — rebuild cached "
-                    "DLL or check lowering)";
-      return -1;
-    }
-
-    ONNXTensorElementDataType data_et = hip_dtype_to_onnx(d->data_hip_dtype);
-    if (data_et == ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED) {
-      LOG(ERROR) << "cpu_fallback Gather: unsupported data_hip_dtype="
-                 << d->data_hip_dtype;
-      return -1;
-    }
-
-    const int64_t idx_bytes = d->indices_element_size_bytes;
-    if (idx_bytes != 4 && idx_bytes != 8) {
-      LOG(ERROR) << "cpu_fallback Gather: bad indices_element_size_bytes="
-                 << idx_bytes << " (expected 4 or 8)";
-      return -1;
-    }
-    if (idx_bytes == 4 &&
-        d->indices_hip_dtype != HIPDNN_EP_DATATYPE_INT32) {
-      LOG(ERROR) << "cpu_fallback Gather: indices_element_size_bytes=4 but "
-                    "indices_hip_dtype="
-                 << d->indices_hip_dtype;
-      return -1;
-    }
-    if (idx_bytes == 8 &&
-        d->indices_hip_dtype != HIPDNN_EP_DATATYPE_INT64) {
-      LOG(ERROR) << "cpu_fallback Gather: indices_element_size_bytes=8 but "
-                    "indices_hip_dtype="
-                 << d->indices_hip_dtype;
-      return -1;
-    }
-
-    if (reference_gather_on_host(d) == 0) {
-      return 0;
-    }
-
-    const int64_t elem_size = hip_dtype_element_size_bytes(d->data_hip_dtype);
-    const int64_t data_bytes =
-        elem_size > 0 ? d->data_num_elements * elem_size : -1;
-    const ONNXTensorElementDataType ort_kernel_et =
-        gather_ort_kernel_dtype(data_et);
-    const bool promote_fp32 = ort_kernel_et != data_et;
-    if (promote_fp32 && data_bytes > kCpugateGatherMaxDataBytes) {
-      LOG(ERROR) << "cpu_fallback Gather: reference failed and CPUGate fp32 "
-                    "promotion skipped for large tensor (data_bytes="
-                 << data_bytes << ")";
-      return -1;
-    }
-
-    return invoke_gather_via_cpugate(d, data_et, ort_kernel_et, promote_fp32);
+    gate.invoke(*op, in_ptrs.data(), in_ptrs.size(), out_ptrs.data(),
+                out_ptrs.size());
   } catch (const Ort::Exception &e) {
-    LOG(ERROR) << "cpu_fallback Gather: ORT exception: " << e.what();
+    LOG(ERROR) << "cpu_fallback " << d->op_name << ": ORT exception: " << e.what();
     return -1;
   } catch (const std::exception &e) {
-    LOG(ERROR) << "cpu_fallback Gather: " << e.what();
-    return -1;
-  } catch (...) {
-    LOG(ERROR) << "cpu_fallback Gather: unknown exception";
+    LOG(ERROR) << "cpu_fallback " << d->op_name << ": " << e.what();
     return -1;
   }
+  return 0;
 }
 
 static int morphizen_cpu_fallback_invoke(void * /*user*/, RuntimeState * /*state*/,
                                          int32_t op_kind, const void *detail,
                                          size_t detail_size) {
-  if (op_kind != HIPDNN_CPU_FB_OP_GATHER) {
+  if (op_kind != HIPDNN_CPU_FB_OP_GENERIC) {
     LOG(ERROR) << "cpu_fallback: unknown op_kind " << op_kind;
     return -1;
   }
-  if (!detail || detail_size != sizeof(HipdnnCpuFbGatherDesc)) {
-    LOG(ERROR) << "cpu_fallback Gather: bad descriptor (size=" << detail_size
-               << ", expected=" << sizeof(HipdnnCpuFbGatherDesc)
-               << ") — rebuild model.dll after EP/runtime struct change";
+  if (!detail || detail_size != sizeof(HipdnnCpuFbGenericHostDesc)) {
+    LOG(ERROR) << "cpu_fallback: bad descriptor (size=" << detail_size
+               << ", expected=" << sizeof(HipdnnCpuFbGenericHostDesc) << ")";
     return -1;
   }
-  const auto *desc = static_cast<const HipdnnCpuFbGatherDesc *>(detail);
-  return invoke_gather_cpu(desc);
+  return invoke_generic_cpu(static_cast<const HipdnnCpuFbGenericHostDesc *>(detail));
 }
 
 static hipdnn_cpu_fallback_iface_t g_iface{nullptr, morphizen_cpu_fallback_invoke};

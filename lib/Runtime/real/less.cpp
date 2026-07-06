@@ -10,6 +10,7 @@
 //
 // Same same-shape constraint as Equal / Div / Mod (broadcasting via
 // upstream Expand).
+#include "../cpu_fallback_invoke.h"
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -62,6 +63,15 @@ int wrap_less(RuntimeState *state, void *a, void *b, void *output,
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
+  {
+    const int fb_rc = hipdnn_cpu_fb_try_binary_1d(
+        state, stream, "Less", a, b, output, num_elements, data_type,
+        HIPDNN_EP_DATATYPE_UINT8);
+    if (fb_rc == 0)
+      return 0;
+    if (fb_rc < 0)
+      return -1;
+  }
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_less: num=%lld, input_type=%s -> hip_elementwise_less\n",
       (long long)num_elements, hipdnn_ep_datatype_name(data_type));

@@ -2,6 +2,7 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
+#include "../cpu_fallback_invoke.h"
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -11,8 +12,6 @@
 
 #include <cstdint>
 #include <cstdio>
-#include <new>
-#include <vector>
 
 int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
                 int64_t axis, int64_t data_num_elements,
@@ -38,20 +37,8 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
 
   void *stream = hipdnn_ep_state_get_stream(state);
 
-  RUNTIME_DEBUG_LOG(
-      "[REAL] wrap_gather: axis=%lld, data_num=%lld, indices_num=%lld, "
-      "output_num=%lld, axis_size=%lld, inner=%lld, elem_size=%lld, "
-      "idx_elem_size=%lld -> calling hip_gather\n",
-      (long long)axis, (long long)data_num_elements,
-      (long long)indices_num_elements, (long long)output_num_elements,
-      (long long)axis_size, (long long)inner_size,
-      (long long)element_size_bytes, (long long)indices_element_size_bytes);
-
-  const bool want_cpu_fb =
-      state->cpu_fallback.invoke &&
-      hipdnn_ep_debug_cpu_fallback_ops_contains("Gather");
-
-  if (want_cpu_fb) {
+  if (state->cpu_fallback.invoke &&
+      hipdnn_ep_debug_cpu_fallback_ops_contains("Gather")) {
     auto shape_dims_ok = [](const int64_t *shape, int64_t rank) -> bool {
       if (rank <= 0)
         return true;
@@ -63,108 +50,31 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
       }
       return true;
     };
-    if (!shape_dims_ok(data_shape, data_rank) ||
-        !shape_dims_ok(indices_shape, indices_rank) ||
-        !shape_dims_ok(output_shape, output_rank)) {
-      RUNTIME_DEBUG_LOG(
-          "[REAL] wrap_gather: invalid shape (negative dim); skip CPU "
-          "fallback\n");
-    } else if (wrap_hipStreamSynchronize(stream) != 0) {
-      return -1;
-    } else {
-      const int64_t data_bytes = data_num_elements * element_size_bytes;
-      const int64_t indices_bytes =
-          indices_num_elements * indices_element_size_bytes;
-      const int64_t output_bytes = output_num_elements * element_size_bytes;
-      if (data_bytes < 0 || indices_bytes < 0 || output_bytes < 0) {
-        RUNTIME_DEBUG_LOG("[REAL] wrap_gather: negative byte size (cpu fb)\n");
+    if (shape_dims_ok(data_shape, data_rank) &&
+        shape_dims_ok(indices_shape, indices_rank) &&
+        shape_dims_ok(output_shape, output_rank)) {
+      const int fb = hipdnn_cpu_fb_try_gather(
+          state, stream, data, indices, output, axis, data_rank, data_shape,
+          data_num_elements, indices_rank, indices_shape, indices_num_elements,
+          output_rank, output_shape, output_num_elements, data_hip_dtype,
+          indices_hip_dtype);
+      if (fb == 0) {
+        return 0;
+      }
+      if (fb < 0) {
         return -1;
-      }
-
-      std::vector<char> host_data;
-      std::vector<char> host_output;
-      std::vector<int64_t> host_indices_i64;
-      std::vector<int32_t> host_indices_i32;
-      std::vector<char> host_indices_raw;
-      void *indices_host = nullptr;
-      bool staging_ok = true;
-      try {
-        if (data_bytes > 0) {
-          host_data.resize(static_cast<size_t>(data_bytes));
-        }
-        if (output_bytes > 0) {
-          host_output.resize(static_cast<size_t>(output_bytes));
-        }
-        if (indices_element_size_bytes == 8) {
-          if (indices_num_elements > 0) {
-            host_indices_i64.resize(
-                static_cast<size_t>(indices_num_elements));
-          }
-          indices_host = host_indices_i64.data();
-        } else if (indices_element_size_bytes == 4) {
-          if (indices_num_elements > 0) {
-            host_indices_i32.resize(
-                static_cast<size_t>(indices_num_elements));
-          }
-          indices_host = host_indices_i32.data();
-        } else if (indices_bytes > 0) {
-          host_indices_raw.resize(static_cast<size_t>(indices_bytes));
-          indices_host = host_indices_raw.data();
-        }
-      } catch (const std::bad_alloc &) {
-        RUNTIME_DEBUG_LOG(
-            "[REAL] wrap_gather: CPU fallback host staging OOM "
-            "(data_bytes=%lld indices_bytes=%lld output_bytes=%lld); "
-            "using GPU kernel\n",
-            (long long)data_bytes, (long long)indices_bytes,
-            (long long)output_bytes);
-        staging_ok = false;
-      }
-
-      if (staging_ok) {
-        if (wrap_hipMemcpyD2H(host_data.data(), data, data_bytes, stream) != 0)
-          return -1;
-        if (wrap_hipMemcpyD2H(indices_host, indices, indices_bytes, stream) !=
-            0)
-          return -1;
-        if (wrap_hipStreamSynchronize(stream) != 0)
-          return -1;
-
-        HipdnnCpuFbGatherDesc desc{};
-        desc.axis = axis;
-        desc.data_hip_dtype = data_hip_dtype;
-        desc.indices_hip_dtype = indices_hip_dtype;
-        desc.indices_element_size_bytes = indices_element_size_bytes;
-        desc.data_rank = data_rank;
-        desc.data_shape = data_shape;
-        desc.data_host = host_data.data();
-        desc.indices_rank = indices_rank;
-        desc.indices_shape = indices_shape;
-        desc.indices_host = indices_host;
-        desc.output_rank = output_rank;
-        desc.output_shape = output_shape;
-        desc.output_host = host_output.data();
-        desc.data_num_elements = data_num_elements;
-        desc.indices_num_elements = indices_num_elements;
-        desc.output_num_elements = output_num_elements;
-
-        const int fb_rc = state->cpu_fallback.invoke(
-            state->cpu_fallback.user, state, HIPDNN_CPU_FB_OP_GATHER, &desc,
-            sizeof(desc));
-        if (fb_rc != 0) {
-          fprintf(stderr,
-                  "[REAL] wrap_gather: CPU fallback invoke failed rc=%d; "
-                  "falling back to GPU kernel\n",
-                  fb_rc);
-        } else {
-          if (wrap_hipMemcpyH2D(output, host_output.data(), output_bytes,
-                                stream) != 0)
-            return -1;
-          return 0;
-        }
       }
     }
   }
+
+  RUNTIME_DEBUG_LOG(
+      "[REAL] wrap_gather: axis=%lld, data_num=%lld, indices_num=%lld, "
+      "output_num=%lld, axis_size=%lld, inner=%lld, elem_size=%lld, "
+      "idx_elem_size=%lld -> calling hip_gather\n",
+      (long long)axis, (long long)data_num_elements,
+      (long long)indices_num_elements, (long long)output_num_elements,
+      (long long)axis_size, (long long)inner_size,
+      (long long)element_size_bytes, (long long)indices_element_size_bytes);
 
   return hip_gather(stream, data, indices, output, axis, data_num_elements,
                     indices_num_elements, output_num_elements, axis_size,

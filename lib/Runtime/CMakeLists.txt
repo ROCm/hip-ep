@@ -261,6 +261,7 @@ compile_to_bitcode(output_allocator.cpp runtime_output_allocator.bc)
 # so the same TU serves both the real and mock runtimes.
 compile_to_bitcode(op_state.cpp runtime_op_state.bc)
 compile_to_bitcode(cpu_fallback.cpp runtime_cpu_fallback.bc)
+compile_to_bitcode(cpu_fallback_invoke.cpp runtime_cpu_fallback_invoke.bc)
 
 # Compile implementation-specific files
 if(NOT BUILD_MOCK_RUNTIME)
@@ -327,6 +328,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_output_allocator.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_cpu_fallback.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_cpu_fallback_invoke.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_memory.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_hip.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_miopen.bc
@@ -398,6 +400,7 @@ else()
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_state_stubs.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_cpu_fallback.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_cpu_fallback_invoke.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_memory.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_mock.bc
         ${CMAKE_CURRENT_BINARY_DIR}/test_hip_from_dll.bc
