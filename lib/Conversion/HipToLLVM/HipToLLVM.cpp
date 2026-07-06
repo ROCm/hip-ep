@@ -5,6 +5,10 @@
 
 #include "HipToLLVMUtils.h"
 
+#include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"
+#include "mlir/IR/Dialect.h"
+#include "llvm/ADT/DenseSet.h"
+
 namespace mlir {
 namespace hip {
 
@@ -296,6 +300,68 @@ void ConvertHipToLLVMPass::runOnOperation() {
   target.addIllegalDialect<HipDialect>();
   target.addIllegalOp<memref::AllocOp, memref::DeallocOp>();
   target.addLegalOp<ModuleOp>();
+
+  // Out-of-tree dialects (e.g. a plugin-contributed vendor dialect) inject
+  // their HIP->LLVM lowering through the standard upstream mechanism: for every
+  // dialect in use that implements ConvertToLLVMPatternInterface, let it add
+  // conversion patterns AND mark its own ops illegal on `target`.
+  //
+  // This is the body of upstream's populateConversionTargetFromOperation,
+  // inlined so we can guard the interface lookup with hasPromisedInterface().
+  // The upstream helper dyn_casts every walked dialect to the interface
+  // unconditionally, and a dyn_cast onto a Dialect routes through
+  // Dialect::getRegisteredInterface -> handleUseOfUndefinedPromisedInterface,
+  // which report_fatal_errors (in an assertions-enabled MLIR build) for any
+  // dialect that *promised* the interface but never registered its extension.
+  // The blanket walk is therefore NOT a no-op for in-tree dialects: after
+  // bufferization the module contains memref/func/arith/cf/..., all of which
+  // declarePromisedInterface<ConvertToLLVMPatternInterface> upstream, and on an
+  // assertions-enabled LLVM the blanket call aborts the entire compile ("LLVM
+  // ERROR: checking for an interface ... promised by dialect 'memref' but never
+  // implemented") for essentially every model.
+  //
+  // We cannot fix this by *fulfilling* the promises (registering the in-tree
+  // ConvertMemRef/Func/Arith/CFToLLVM interface extensions the way upstream's
+  // -convert-to-llvm pass does via LoadDependentDialectExtension): this pass
+  // deliberately hand-rolls the standard-dialect lowering through the explicit
+  // populate*ToLLVM calls above, so also driving it through the interface would
+  // populate those patterns twice and mark the same ops illegal twice. Instead
+  // we skip the interface for any dialect that only promised it.
+  // hasPromisedInterface() is a plain set-membership check compiled into every
+  // build (release and assertions alike), so the guard is safe everywhere and
+  // preserves the intended behavior: a plugin vendor dialect that genuinely
+  // implements the interface has its promise resolved when the extension is
+  // added (hasPromisedInterface() == false), so it passes the guard and still
+  // contributes its patterns. See docs/design/plugin-interface.md "Custom-op
+  // lowering".
+  //
+  // Before (upstream blanket walk -- aborts on memref's unfulfilled promise):
+  //   populateConversionTargetFromOperation(module, target, tc, patterns);
+  // After (skip promised-but-unregistered, keep genuine implementors):
+  //   for each unique dialect D reached from the module:
+  //     if D promised the interface but did not register it -> skip
+  //     else if D implements it -> add D's ConvertToLLVM patterns
+  {
+    llvm::DenseSet<Dialect *> seenDialects;
+    module.walk([&](Operation *op) {
+      Dialect *dialect = op->getDialect();
+      if (!dialect || !seenDialects.insert(dialect).second)
+        return;
+      // A dialect that only *promised* the interface (memref/func/arith/cf and
+      // friends after bufferization) would fatal under dyn_cast in an
+      // assertions build. Their lowering is the explicit populate* calls above,
+      // so skip them here.
+      if (dialect->hasPromisedInterface(
+              dialect->getTypeID(),
+              ConvertToLLVMPatternInterface::getInterfaceID()))
+        return;
+      auto *iface = dyn_cast<ConvertToLLVMPatternInterface>(dialect);
+      if (!iface)
+        return;
+      iface->populateConvertToLLVMConversionPatterns(target, typeConverter,
+                                                     patterns);
+    });
+  }
 
   if (failed(applyPartialConversion(module, target, std::move(patterns))))
     signalPassFailure();
