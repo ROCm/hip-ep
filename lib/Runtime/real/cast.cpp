@@ -2,6 +2,7 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
+#include "../cpu_fallback_invoke.h"
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -107,6 +108,16 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
             "[REAL] wrap_cast: unsupported data type src=%lld dst=%lld\n",
             (long long)src_data_type, (long long)dst_data_type);
     return -1;
+  }
+
+  {
+    const int fb_rc = hipdnn_cpu_fb_try_cast(state, stream, input, output,
+                                             num_elements, src_data_type,
+                                             dst_data_type);
+    if (fb_rc == 0)
+      return 0;
+    if (fb_rc < 0)
+      return -1;
   }
 
   RUNTIME_DEBUG_LOG(

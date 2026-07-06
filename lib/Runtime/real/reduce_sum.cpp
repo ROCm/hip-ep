@@ -2,6 +2,7 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
+#include "../cpu_fallback_invoke.h"
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -80,6 +81,17 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
+
+  {
+    const int fb_rc = hipdnn_cpu_fb_try_reduce_flat(
+        state, stream, "ReduceSum", data, axes, output, data_num_elements,
+        axes_num_elements, output_num_elements, data_type, keepdims,
+        noop_with_empty_axes);
+    if (fb_rc == 0)
+      return 0;
+    if (fb_rc < 0)
+      return -1;
+  }
 
   int hip_dtype = hipdnn_to_hip_dtype(data_type);
   if (hip_dtype < 0) {

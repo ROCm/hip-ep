@@ -17,6 +17,7 @@
 //         reduction_functions.cu @ v1.22.2 (CudaT type-min initializer +
 //         max operator) -- simplified to the block-per-output pattern that
 //         reduce_sum_kernel.hip already establishes.
+#include "../cpu_fallback_invoke.h"
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -55,7 +56,6 @@ int wrap_reduce_max(RuntimeState *state, void *data, void *axes, void *output,
       },
       state);
 
-  (void)axes;
   (void)keepdims;
 
   if (!state || !data || !output) {
@@ -99,6 +99,18 @@ int wrap_reduce_max(RuntimeState *state, void *data, void *axes, void *output,
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
+
+  {
+    const int fb_rc = hipdnn_cpu_fb_try_reduce_flat(
+        state, stream, "ReduceMax", data, axes, output, data_num_elements,
+        axes_num_elements, output_num_elements, data_type, keepdims,
+        noop_with_empty_axes);
+    if (fb_rc == 0)
+      return 0;
+    if (fb_rc < 0)
+      return -1;
+  }
+
   RUNTIME_DEBUG_LOG("[REAL] wrap_reduce_max: data_num=%lld, output_num=%lld, "
                     "data_type=%s, hip_dtype=%d -> hip_reduce_max\n",
                     (long long)data_num_elements,

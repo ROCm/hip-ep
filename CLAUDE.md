@@ -290,7 +290,7 @@ set PATH=%CD%\install\therock\bin;%PATH%
 install\dist\bin\hip-onnx-runner.exe -m models\Llama-3.2-1B-Instruct\model_q4f16_fixed.onnx
 ```
 
-**Important:** `hip-onnx-runner` fills inputs with random data by default. For models with GQA, this produces garbage `seqlens_k` values and GQA failures. Use `-i <dir>` to provide valid binary input files (see `test/python/` for how the perf tests generate correct inputs).
+**Important:** `hip-onnx-runner` fills inputs with random data by default. For models with GQA, this produces garbage `seqlens_k` values and GQA failures. Use `-i <dir>` to provide valid binary input files (see `test/python/` for how the perf tests generate correct inputs). For `input_ids` (name `input_ids` or suffix `input_ids`), INT32/INT64 random fill is **bounded to `[0, --token-vocab)`** (default `32000`) so embedding `Gather` stays in-range — ORT's CPU Gather (used by `HIPDNN_EP_DEBUG_CPU_FALLBACK_OPS=Gather`) rejects out-of-range indices, while the GPU `gather_kernel` clamps them silently. Pass `--token-vocab 0` to restore legacy full-range int64 stress fill.
 
 ## Python Performance Tests
 
@@ -431,6 +431,8 @@ When disabled (default), profiling is zero-overhead: `hipdnn_ep_perf_enabled()` 
 **Before chasing a perf-regression hypothesis with new instrumentation, RE-MEASURE without `HIPDNN_EP_PERF` first.** A full session was once spent adding phase markers and per-layer GPU markers to localize a 1-3 ms/Compute "penalty" — the penalty was the profiler itself, and the suspected slow path was actually faster than the baseline once profiling was off. If a perf gap is small (≤ 5% of per-Compute total) and points the wrong way, do the clean re-measure before writing one line of instrumentation.
 
 **GPU benchmark hygiene.** (1) **never** launch a benchmark with `run_in_background: true` from Claude Code — always foreground with a long enough timeout; (2) before starting any GPU benchmark, verify the GPU is idle (`tasklist | findstr /I model_benchmark` on Windows) and kill stragglers with `taskkill /F /IM model_benchmark.exe` if anything appears; (3) `TaskStop` on a backgrounded bash task does NOT free the GPU — it signals the bash wrapper but the child `model_benchmark.exe` keeps running on the GPU.
+
+**Debug-only ORT CPU fallback (development; not a Release product feature).** When `HIPDNN_EP_DEBUG_CPU_FALLBACK_OPS` lists an ONNX op name (comma-separated), or `*` / `all` for every wired op, matching `wrap_*` paths may sync, D2H, invoke the EP callback, then H2D. **All fallback ops use ORT CPU kernels** via `HipdnnCpuFbGenericDesc` + `cpu_fallback_bridge.cpp` → CPUGate (Quark pattern): queue `Ort::Op::Create` on `pending_inits_`, run inside `on_kernel_constructed` during shell Session load; `Ort::Op::Invoke` on gate thread in `CpuGate::Compute` only. Wired today: Gather, most elementwise/unary/binary ops, Cast, Where, Sub, Transpose, Range, CumSum, Reduce*, Gelu, LeakyRelu; **not** custom EP ops (GQA, QMoE, MatMulNBits, Conv, Gemm/MatMul, rotary, etc.). Failures soft-fall back to GPU. Rebuild EP + runtime bitcode; `del %TEMP%\morphizen_mlir_*`. Design: [docs/design/debug-cpu-fallback-plan.md](docs/design/debug-cpu-fallback-plan.md).
 
 ### Architecture
 

@@ -91,6 +91,10 @@ struct RuntimeState {
   // never calls alloc_output); zero-initialized in initialize_state_handles.
   hipdnn_output_allocator_t output_allocator;
 
+  // Optional EP-installed debug path: ONNX CPU reference per op (see
+  // hipdnn_ep_set_cpu_fallback). Null invoke means disabled.
+  hipdnn_cpu_fallback_iface_t cpu_fallback;
+
   // Per-session scratch buffer for wrap_qmoe transient device buffers
   // (expert_indices, expert_weights, gather_buf, fc1_buf, act_buf, fc2_buf,
   // token_ids, token_wts -- 8 sub-buffers laid out at fixed offsets).

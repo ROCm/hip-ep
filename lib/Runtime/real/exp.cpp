@@ -4,6 +4,7 @@
  */
 
 // Exp: y = exp(x) (element-wise natural exponential).
+#include "../cpu_fallback_invoke.h"
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -52,6 +53,14 @@ int wrap_exp(RuntimeState *state, void *input, void *output,
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
+  {
+    const int fb_rc = hipdnn_cpu_fb_try_unary_1d(state, stream, "Exp", input,
+                                                 output, num_elements, data_type);
+    if (fb_rc == 0)
+      return 0;
+    if (fb_rc < 0)
+      return -1;
+  }
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_exp: num=%lld, data_type=%s -> hip_elementwise_exp\n",
       (long long)num_elements, hipdnn_ep_datatype_name(data_type));

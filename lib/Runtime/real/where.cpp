@@ -2,11 +2,21 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
+#include "../cpu_fallback_invoke.h"
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
 
 #include <cstdio>
+
+static int64_t where_shape_volume(const int64_t *shape, int64_t rank) {
+  if (rank <= 0)
+    return 1;
+  int64_t n = 1;
+  for (int64_t i = 0; i < rank; ++i)
+    n *= shape[i];
+  return n;
+}
 
 // Map HIPDNN_EP_DATATYPE_* to hip_dtype_t (X/Y element type for Where).
 // The condition tensor is always 1-byte bool; only the X/Y dtype is needed
@@ -67,6 +77,29 @@ int wrap_where(RuntimeState *state, void *condition, void *x, void *y,
     dump_shape("x", x_shape, x_rank);
     dump_shape("y", y_shape, y_rank);
     dump_shape("output", out_shape, out_rank);
+  }
+
+  {
+    const int64_t cond_num = where_shape_volume(cond_shape, cond_rank);
+    const int64_t x_num = where_shape_volume(x_shape, x_rank);
+    const int64_t y_num = where_shape_volume(y_shape, y_rank);
+    const int64_t out_num = where_shape_volume(out_shape, out_rank);
+    HipdnnCpuFbGenericDesc fb{};
+    fb.op_name = "Where";
+    fb.opset = 16;
+    fb.num_inputs = 3;
+    fb.num_outputs = 1;
+    fb.inputs[0] = {condition, cond_rank, cond_shape, cond_num,
+                    HIPDNN_EP_DATATYPE_UINT8};
+    fb.inputs[1] = {x, x_rank, x_shape, x_num, data_type};
+    fb.inputs[2] = {y, y_rank, y_shape, y_num, data_type};
+    fb.outputs[0] = {output, out_rank, out_shape, out_num, data_type};
+    const int fb_rc =
+        hipdnn_cpu_fallback_try_generic(state, stream, "Where", &fb);
+    if (fb_rc == 0)
+      return 0;
+    if (fb_rc < 0)
+      return -1;
   }
 
   return hip_elementwise_where(stream, condition, x, y, output, cond_shape,

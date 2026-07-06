@@ -6,6 +6,7 @@
 
 #include "LoadedArtifact.h"
 #include "hip/artifact_abi.h"
+#include "hipdnn_ep_runtime.h"
 #include "hip/timing.h"
 #include "morphizen/env_config.hpp"
 #include "morphizen/morphizen.hpp"
@@ -20,6 +21,8 @@ DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND) >= n)
 
 namespace mlir_compilation::customop {
+
+const hipdnn_cpu_fallback_iface_t *morphizen_ep_cpu_fallback_iface();
 
 namespace {
 // Resolve inference_init from the loaded artifact, call it, and return the
@@ -59,6 +62,8 @@ void InferenceState::resolveEntryPoints(const LoadedArtifact &artifact) {
           hipdnn::abi::kSetOutputAllocator);
   flush_op_profile_fn_ =
       artifact.get_method<void, void *>(hipdnn::abi::kRuntimeFlushOpProfile);
+  set_cpu_fallback_fn_ = artifact.get_method<void, void *, const void *>(
+      hipdnn::abi::kSetCpuFallback);
 }
 
 InferenceState::InferenceState(PrivateTag, void *state,
@@ -66,7 +71,7 @@ InferenceState::InferenceState(PrivateTag, void *state,
     : state_(state), artifact_(std::move(artifact)), compute_fn_(nullptr),
       compute_alloc_fn_(nullptr), cleanup_fn_(nullptr),
       begin_compute_fn_(nullptr), set_output_allocator_fn_(nullptr),
-      flush_op_profile_fn_(nullptr) {
+      flush_op_profile_fn_(nullptr), set_cpu_fallback_fn_(nullptr) {
   resolveEntryPoints(*artifact_);
 
   MY_LOG(2) << "begin_compute symbol "
@@ -75,6 +80,12 @@ InferenceState::InferenceState(PrivateTag, void *state,
             << (set_output_allocator_fn_ ? "resolved" : "not exported (no-op)");
   MY_LOG(2) << "flush_op_profile symbol "
             << (flush_op_profile_fn_ ? "resolved" : "not exported (no-op)");
+  MY_LOG(2) << "set_cpu_fallback symbol "
+            << (set_cpu_fallback_fn_ ? "resolved" : "not exported (no-op)");
+  if (set_cpu_fallback_fn_ && state_) {
+    set_cpu_fallback_fn_(state_,
+                         static_cast<const void *>(morphizen_ep_cpu_fallback_iface()));
+  }
 
   // Without begin_compute, the GQA seqlens_k cache survives across
   // forward passes and decode returns token-1 values for tokens 2..N
@@ -141,6 +152,9 @@ InferenceState::create(const std::vector<uint8_t> &artifact_bytes,
 
 InferenceState::~InferenceState() {
   MY_LOG(1) << "InferenceState destructor: cleaning up state";
+  if (state_ && set_cpu_fallback_fn_) {
+    set_cpu_fallback_fn_(state_, nullptr);
+  }
   if (state_) {
     if (cleanup_fn_) {
       int ret = cleanup_fn_(state_);

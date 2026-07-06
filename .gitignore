@@ -43,6 +43,7 @@ dist/
 *.onnx
 !backend-mlir-compiler/test/models/*.onnx
 !examples/*.onnx
+!backend-mlir-compiler/custom-op-mlir/onnx/*.onnx
 *.dat
 test_output/
 

@@ -47,14 +47,15 @@ module {
   }
 }
 
-// All three variants lower to the same 12-parameter wrap_gather call:
-// 4 pointers (state, data, indices, output) + 8 i64 (axis, data_num, indices_num, output_num, axis_size, inner_size, elem_size, indices_elem_size)
+// All three variants lower to the same wrap_gather call:
+// 4 pointers + 16 i64 (axis, counts, axis_size, inner, elem sizes,
+// 3 shape ptrs + 3 ranks, 2 dtype ids) — see GatherLowering.cpp.
 
 // CHECK-LABEL: llvm.func @test_gather_multi_index
-// CHECK: llvm.call @wrap_gather({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK: llvm.call @wrap_gather({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64) -> i32
 
 // CHECK-LABEL: llvm.func @test_gather_scalar_index
-// CHECK: llvm.call @wrap_gather({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK: llvm.call @wrap_gather({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64) -> i32
 
 // CHECK-LABEL: llvm.func @test_gather_embedding
-// CHECK: llvm.call @wrap_gather({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK: llvm.call @wrap_gather({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64) -> i32
