@@ -834,6 +834,62 @@ static void launchGemvConfig(
 #undef GEMV_CASE
 }
 
+// Windows-friendly rocprof substitute for the occupancy dimension: query the
+// theoretical occupancy of a GEMV config via
+// hipOccupancyMaxActiveBlocksPerMultiprocessor (+ hipFuncGetAttributes for
+// registers/LDS). Logged once per shape ([PERF-OCC]) so we can tell whether a
+// GEMV shape is occupancy-limited vs launch/latency-limited (m=1 small-N is the
+// latter -- few-flops-per-launch -- which this makes explicit).
+static void logGemvOccupancy(int config_id, int64_t M, int64_t N, int64_t K,
+                             bool col_major) {
+    const auto &c = kGemvConfigs[config_id];
+    const void *fn = nullptr;
+#define OCC_CASE(ID, BS, TN)                                                    \
+    case ID:                                                                    \
+        fn = col_major ? reinterpret_cast<const void *>(                        \
+                             &matmul_nbits_gemv_kernel<BS, TN, true>)           \
+                       : reinterpret_cast<const void *>(                        \
+                             &matmul_nbits_gemv_kernel<BS, TN, false>);         \
+        break
+    switch (config_id) {
+        OCC_CASE(0,32,1); OCC_CASE(1,32,2); OCC_CASE(2,32,4); OCC_CASE(3,32,8);
+        OCC_CASE(4,64,1); OCC_CASE(5,64,2); OCC_CASE(6,64,4); OCC_CASE(7,64,8);
+        OCC_CASE(8,64,16); OCC_CASE(9,128,1); OCC_CASE(10,128,2);
+        OCC_CASE(11,128,4); OCC_CASE(12,128,8); OCC_CASE(13,128,16);
+        OCC_CASE(14,256,1); OCC_CASE(15,256,2); OCC_CASE(16,256,4);
+        OCC_CASE(17,256,8); OCC_CASE(18,256,16); OCC_CASE(19,512,1);
+        OCC_CASE(20,512,2); OCC_CASE(21,512,4); OCC_CASE(22,512,8);
+        OCC_CASE(23,512,16); OCC_CASE(24,1024,1); OCC_CASE(25,1024,2);
+        OCC_CASE(26,1024,4); OCC_CASE(27,1024,8); OCC_CASE(28,1024,16);
+        OCC_CASE(29,64,32); OCC_CASE(30,128,32); OCC_CASE(31,256,32);
+        OCC_CASE(32,64,64); OCC_CASE(33,128,64); OCC_CASE(34,256,64);
+        default: return;
+    }
+#undef OCC_CASE
+    int maxBlocks = 0;
+    if (hipOccupancyMaxActiveBlocksPerMultiprocessor(&maxBlocks, fn, c.threads,
+                                                     0) != hipSuccess)
+        return;
+    hipFuncAttributes fa{};
+    hipFuncGetAttributes(&fa, fn);
+    hipDeviceProp_t prop{};
+    hipGetDeviceProperties(&prop, 0);
+    int maxThreadsCU = prop.maxThreadsPerMultiProcessor;
+    int cu = prop.multiProcessorCount;
+    double occ = maxThreadsCU > 0
+                     ? 100.0 * (double)maxBlocks * c.threads / maxThreadsCU
+                     : 0.0;
+    long long gridBlocks =
+        (long long)((N + c.tile_n - 1) / c.tile_n) * (M > 0 ? M : 1);
+    fprintf(stderr,
+            "[PERF-OCC] gemv M=%lld N=%lld K=%lld cfg[%d] thr=%d tile_n=%d: "
+            "occ~%.0f%% (%d blk/CU), grid=%lld blk over %d CUs, regs=%d "
+            "lds=%zu B\n",
+            (long long)M, (long long)N, (long long)K, config_id, c.threads,
+            c.tile_n, occ, maxBlocks, gridBlocks, cu, fa.numRegs,
+            (size_t)fa.sharedSizeBytes);
+}
+
 static int tuneGemvConfig(
     hipStream_t stream,
     const __half* A, const uint8_t* B,
@@ -892,6 +948,7 @@ static int tuneGemvConfig(
         best_id, kGemvConfigs[best_id].threads,
         kGemvConfigs[best_id].tile_n, best_ms / ITERS);
 
+    logGemvOccupancy(best_id, M, N, K, col_major);
     return best_id;
 }
 
