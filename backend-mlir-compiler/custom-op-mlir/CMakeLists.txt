@@ -84,6 +84,10 @@ target_link_libraries(${LIB_NAME} PRIVATE
   glog::glog
   mlir_compilation_proto  # Shared protobuf metadata library
   ${bitcode_jit_llvm_libs}  # LLVM ORC stack for LlvmIrJit
+  # LlvmIrJit reads the plugin registry (pluginBitcodeBuffers / pluginLibraries)
+  # to add plugin bitcode + libraries to the JITDylib on the default JIT path.
+  # Defined in lib/Compiler; no dependency cycle (it never links this lib).
+  LibHipCompiler
 )
 # Native current-stream accessor: LlvmIrJit registers hipdnn_ep_get/set_current_
 # stream as absolute JIT symbols, so the host must define them. The reference in
