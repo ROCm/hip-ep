@@ -153,9 +153,8 @@ onnx-to-hip-pipeline
     one-shot-bufferize             (tensor → memref)
     hip-loop-body-to-out-params    (outlined onnx.Loop bodies → out-param ABI)
     buffer-deallocation            (ownership-based)
-    hip-use-output-allocator       (default ABI; outputs allocated in-graph via
-                                    EP callback. classic builds instead run
-                                    buffer-results-to-out-params before dealloc)
+    hip-use-output-allocator       (graph outputs allocated in-graph via the
+                                    EP's output-allocator callback)
     hip-fix-loop-accumulator-offset (onnx.Loop growing-accumulator offsets)
     convert-linalg-to-loops        (lower any residual linalg.* to scf + stores)
     hip-optimize-memrefs           (liveness-based buffer reuse)
@@ -205,11 +204,10 @@ No OS toolchain at inference time (LLVM_IR JITs in-process;
 the LLVM ORC engine ships inside the EP)
 ```
 
-> **Output-allocator ABI.** By default the EP compiles every model to the
+> **Output-allocator ABI.** The EP compiles every model to the
 > 2-arg `inference_compute(state, inputs)` form: graph outputs are allocated
 > *in-graph* at runtime via the EP's output-allocator callback (`hip.alloc_output`),
-> selected by the `hip-use-output-allocator` pass stamping a module attribute.
-> The classic 3-arg out-param ABI remains for the `hip-compiler` CLI / LIT tests.
+> emitted by the `hip-use-output-allocator` pass, which runs unconditionally.
 
 > **Artifact format.** Selected by the single compile option `artifact_format`
 > (`LLVM_IR` default, `NATIVE` opt-in) and recorded in the EPContext metadata,
