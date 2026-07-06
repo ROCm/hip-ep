@@ -39,6 +39,7 @@ set(_kernel_sources
     hip/rope_kernel.hip
     hip/gqa_kernel.hip
     hip/gemm_wmma_kernel.hip
+    hip/bw_probe_kernel.hip
     hip/elementwise_sub_kernel.hip
     hip/elementwise_reciprocal_kernel.hip
     hip/elementwise_sqrt_kernel.hip

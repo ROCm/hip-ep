@@ -11,6 +11,7 @@
 #include "zp_unpack_cache.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <utility>
@@ -121,6 +122,29 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
   int result = 0;
+
+  // Internal per-phase profiling (diagnostic; gated on HIPDNN_EP_PERF_ISOLATE
+  // since it stream-syncs after each phase to attribute GPU time). Reveals the
+  // gather / fc1 / swiglu / fc2 / scatter / bucket / host-sync split of the
+  // qmoe serial per-expert loop -- the TTFT driver. Sums across experts.
+  const bool qmoe_prof = hipdnn_ep_perf_isolate_enabled();
+  double qs_bucket = 0, qs_sync = 0, qs_gather = 0, qs_fc1 = 0, qs_swiglu = 0,
+         qs_fc2 = 0, qs_scatter = 0;
+  std::chrono::steady_clock::time_point _qt;
+#define QP_START()                                                             \
+  do {                                                                         \
+    if (qmoe_prof)                                                             \
+      _qt = std::chrono::steady_clock::now();                                  \
+  } while (0)
+#define QP_END(acc)                                                            \
+  do {                                                                         \
+    if (qmoe_prof) {                                                           \
+      hipStreamSynchronize(hip_stream);                                        \
+      (acc) += std::chrono::duration<double, std::milli>(                      \
+                   std::chrono::steady_clock::now() - _qt)                     \
+                   .count();                                                   \
+    }                                                                          \
+  } while (0)
 
   int64_t fusion_inter = 2 * inter_size;
   int64_t k_blocks_fc1 = (hidden_size + block_size - 1) / block_size;
@@ -245,18 +269,22 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     // Bucket tokens on the device: count per expert (atomicAdd), exclusive
     // prefix sum into d_expert_offsets, scatter (token_id, weight) pairs
     // into d_sorted_token_ids / d_sorted_weights ordered by expert.
-    HIP_CHECK(hip_qmoe_bucket_tokens(stream, d_expert_indices, d_expert_weights,
-                                     d_expert_counts, d_expert_offsets,
-                                     d_sorted_token_ids, d_sorted_weights,
-                                     num_tokens, num_experts, k, elem_size));
+  QP_START();
+  HIP_CHECK(hip_qmoe_bucket_tokens(stream, d_expert_indices, d_expert_weights,
+                                   d_expert_counts, d_expert_offsets,
+                                   d_sorted_token_ids, d_sorted_weights,
+                                   num_tokens, num_experts, k, elem_size));
+  QP_END(qs_bucket);
 
     // Only readback the counts (num_experts * int32, e.g. 32*4 = 128 bytes)
     // to drive the host-side per-expert dispatch loop. Offsets are computed
     // on the host from the prefix sum of counts (cheap, avoids a second D2H).
+    QP_START();
     HIP_CHECK(hipMemcpyAsync(h_counts, d_expert_counts,
                              num_experts * sizeof(int32_t),
                              hipMemcpyDeviceToHost, hip_stream));
     HIP_CHECK(hipStreamSynchronize(hip_stream));
+    QP_END(qs_sync);
 
     // Recompute offsets on the host (mirrors the on-device prefix sum); used
     // for pointer arithmetic into the sorted device buffers below.
@@ -299,8 +327,10 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
 
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: %lld tokens - gather\n",
                         (long long)e, (long long)count);
+      QP_START();
       HIP_CHECK(hip_qmoe_gather_tokens(stream, input, d_gather_buf, d_ids_e,
                                        hidden_size, count, elem_size));
+      QP_END(qs_gather);
 
       const char *fc1_w_e = static_cast<const char *>(fc1_weights) +
                             e * fusion_inter * k_blocks_fc1 * blob_size_fc1;
@@ -356,19 +386,23 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                         "[%lld x %lld] -> [%lld x %lld]\n",
                         (long long)e, (long long)count, (long long)hidden_size,
                         (long long)count, (long long)fusion_inter);
+      QP_START();
       HIP_CHECK(
           hip_matmul_nbits(stream, d_gather_buf, fc1_w_e, fc1_s_e, fc1_zp_e,
                            fc1_b_e, d_fc1_buf, count, fusion_inter, hidden_size,
                            1, expert_weight_bits, block_size, elem_size,
                            /*zp_elem_size=*/1, fc1_pre_zp_u8, fc1_pre_zp_fp16));
+      QP_END(qs_fc1);
 
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: swiglu(alpha=%.3f, "
                         "beta=%.3f, limit=%.1f)\n",
                         (long long)e, (double)activation_alpha,
                         (double)activation_beta, (double)swiglu_limit);
+      QP_START();
       HIP_CHECK(hip_qmoe_swiglu(stream, d_fc1_buf, d_act_buf, count, inter_size,
                                 activation_alpha, activation_beta, swiglu_limit,
                                 elem_size));
+      QP_END(qs_swiglu);
 
       const char *fc2_w_e = static_cast<const char *>(fc2_weights) +
                             e * hidden_size * k_blocks_fc2 * blob_size_fc2;
@@ -409,16 +443,29 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                         "[%lld x %lld] -> [%lld x %lld]\n",
                         (long long)e, (long long)count, (long long)inter_size,
                         (long long)count, (long long)hidden_size);
+      QP_START();
       HIP_CHECK(hip_matmul_nbits(
           stream, d_act_buf, fc2_w_e, fc2_s_e, fc2_zp_e, fc2_b_e, d_fc2_buf,
           count, hidden_size, inter_size, 1, expert_weight_bits, block_size,
           elem_size, /*zp_elem_size=*/1, fc2_pre_zp_u8, fc2_pre_zp_fp16));
+      QP_END(qs_fc2);
 
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: scatter_add\n",
                         (long long)e);
+      QP_START();
       HIP_CHECK(hip_qmoe_scatter_add(stream, output, d_fc2_buf, d_ids_e,
                                      d_wts_e, hidden_size, count, elem_size));
+      QP_END(qs_scatter);
     }
+  }
+
+  if (qmoe_prof) {
+    fprintf(stderr,
+            "[QMOE-SPLIT] tokens=%lld experts=%lld: bucket=%.2f host_sync=%.2f "
+            "gather=%.2f fc1=%.2f swiglu=%.2f fc2=%.2f scatter=%.2f (ms; "
+            "fc1+fc2=%.2f)\n",
+            (long long)num_tokens, (long long)num_experts, qs_bucket, qs_sync,
+            qs_gather, qs_fc1, qs_swiglu, qs_fc2, qs_scatter, qs_fc1 + qs_fc2);
   }
 
 cleanup:

@@ -113,8 +113,10 @@ if (Test-Path $SingleOpDir) {
   Write-Host "[probe]   single_op dir not found: $SingleOpDir (skipping per-shape roofline)"
 }
 
-# --- Battery 5: coarse cold-start (minimal load-dominated run) ---
-$r = Invoke-Battery "coldstart" "$mb -i `"$Model`" -l 8 -g 1 -r 1 -w 0" "coldstart.log" -AllowKernelErr
+# --- Battery 5: coarse cold-start (minimal load-dominated run) + BW probe ---
+# HIPDNN_EP_BW_PROBE=1 runs a STREAM-style bandwidth microbench once at load to
+# CALIBRATE the roofline peak instead of assuming a spec number.
+$r = Invoke-Battery "coldstart+bw" "set HIPDNN_EP_BW_PROBE=1&& $mb -i `"$Model`" -l 8 -g 1 -r 1 -w 0" "coldstart.log" -AllowKernelErr
 $r.type = "coldstart"; $r.prompt = 8
 $manifest.runs += $r
 

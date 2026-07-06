@@ -33,7 +33,7 @@ extern "C" int wrap_linear_attention(
     int64_t decay_per_key_dim, int64_t beta_per_head, float scale,
     int64_t chunk_size, int64_t update_rule, int64_t B, int64_t seq_len,
     int64_t dk, int64_t dv, int64_t type) {
-  OP_PROFILE(
+  OP_PROFILE_BYTES(
       "linear_attention",
       [&] {
         char b[64];
@@ -42,6 +42,14 @@ extern "C" int wrap_linear_attention(
                  (long long)B, (long long)seq_len, (long long)Hq,
                  (long long)Hkv, (long long)dk, (long long)dv);
         return std::string(b);
+      },
+      [&] {
+        // q + k + v + o token traffic + recurrent state read/write (per kv head).
+        int64_t es = hipdnn_ep_datatype_size(type);
+        int64_t qkvo = B * seq_len *
+                       (Hq * dk + Nk * dk + Hkv * dv + Hq * dv) * es;
+        int64_t st = 2 * Hkv * dk * dv * es;
+        return qkvo + st;
       },
       state);
 
