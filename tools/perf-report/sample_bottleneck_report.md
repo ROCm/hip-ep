@@ -33,6 +33,9 @@ Probe dir: `probe_20260705_212700`  |  roofline peak: 256 GB/s  |  gen=128 reps=
 | gather | 9 | 0.1 | 0.3% | - | - | - |
 | sub | 1 | 0.0 | 0.0% | - | - | - |
 
+- Top-down aggregate memory roofline (profiler-independent): ~1.68 GB/token (byte-model, ~56% of ops covered) x 37.8 tok/s = ~63 GB/s achieved = ~25% of 256 GB/s peak.
+  Memory-roofline decode ceiling ~= 153 tok/s (peak/bytes-per-token); measured 37.8 tok/s.
+
 ## C. matmul_nbits per-shape roofline (est)
 
 | shape | calls | gpu ms | % decode | bits | bytes (MB) | GB/s | % peak | class |
