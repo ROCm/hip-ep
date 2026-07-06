@@ -2,8 +2,9 @@
 // DLL export shims for the GQA dispatch harness.
 //
 // Each flow's wrapper and op-state constructor (`hipdnn_ep_op_state_construct_gqa`)
-// have distinct names across the two flows: the NEW (slim) flow exports
-// `wrap_gqa_flash`, the BACK (legacy) flow exports `wrap_group_query_attention`.
+// share the entry symbol `wrap_group_query_attention` across the two flows (the
+// NEW slim flow in gqa.cpp and the BACK legacy flow in gqa_back.cpp). Because
+// each flow is compiled into its own DLL, there is no symbol collision.
 // We re-export each flow's entry under stable, distinct names (`gqa_dispatch` /
 // `gqa_construct`) that the harness resolves via GetProcAddress. This file is
 // compiled once per DLL with GQA_WRAPPER set to the wrapper that DLL contains

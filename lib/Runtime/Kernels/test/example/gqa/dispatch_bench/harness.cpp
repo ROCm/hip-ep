@@ -89,7 +89,7 @@ static bool geometry_ok(int H, int G, int D) {
          hpg == 16;
 }
 
-// Mirror of gqa.cpp::wrap_gqa_flash path selection: true => the optimized
+// Mirror of gqa.cpp::wrap_group_query_attention path selection: true => the optimized
 // fused/flash kernels handle it (our_*); false => routed to the legacy
 // decomposed fallback (ori_*). Both prefill (v7 WMMA) and decode now cover
 // d in {64,128,256}; decode geometry is additionally gated by geometry_ok.

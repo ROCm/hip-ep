@@ -826,7 +826,7 @@ int wrap_hipblasLtMatmul(
 // packed QKV paths, optional RoPE, KV cache management, local window
 // attention (local_window_size), and smooth softmax (head_sink /
 // smooth_softmax).
-int wrap_gqa_flash(
+int wrap_group_query_attention(
     RuntimeState *state,
     int op_state_slot, // per-instance op-state slot (GEMM descriptor cache)
     // Inputs 1-7 (core GQA)

@@ -79,7 +79,7 @@ inline constexpr const char *kWrapRange = "wrap_range";
 inline constexpr const char *kWrapReduceSum = "wrap_reduce_sum";
 inline constexpr const char *kWrapReduceMean = "wrap_reduce_mean";
 inline constexpr const char *kWrapReduceMax = "wrap_reduce_max";
-inline constexpr const char *kWrapGQA = "wrap_gqa_flash";
+inline constexpr const char *kWrapGQA = "wrap_group_query_attention";
 inline constexpr const char *kWrapMultiHeadAttention =
     "wrap_multi_head_attention";
 inline constexpr const char *kWrapMatMulNBits = "wrap_matmul_nbits";
