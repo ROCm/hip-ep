@@ -49,6 +49,13 @@ option(BUILD_MOCK_RUNTIME "Build mock runtime (no GPU required)" ON)
 option(BUILD_HIP_UNIT_TESTS "Build and register LIT and E2E tests with CTest" ON)
 option(BUILD_PYTHON_WHEEL "Configure the 'wheel' target that packages the EP as a Python wheel" OFF)
 
+# Compiler plugins are linked STATICALLY into the host at configure time (see
+# cmake/HipEpPlugins.cmake and docs/design/plugin-interface.md). Select which
+# plugins to link with -DHIPDNN_EP_COMPILER_PLUGINS=<id;...> (default empty). No
+# symbol export, no dynamic loader, identical on every platform. HipEpPlugins.cmake
+# is included in the BUILD_HIP_TOOLS block below (it needs the LLVM/MLIR toolchain
+# resolved first) and defines HIPDNN_EP_COMPILER_PLUGINS.
+
 # Centralized dependency resolution. Always included; internally partitions by
 # BUILD_EP / BUILD_HIP_TOOLS so a tools-only tree (BUILD_EP=OFF) still gets the
 # shared toolchain (LLVM/MLIR/LLD, flatbuffers, cpptrace, TheRock) without the
@@ -126,6 +133,12 @@ if(BUILD_HIP_TOOLS)
   include(AddLLVM)
   include(AddMLIR)
 
+  # Static compiler-plugin machinery: HIPDNN_EP_COMPILER_PLUGINS cache var +
+  # hipdnn_ep_compiler_plugin_register() + hipdnn_ep_finalize_static_plugins().
+  # Included here (after the LLVM/MLIR toolchain is resolved) and before
+  # add_subdirectory(lib)/(tools)/(test) so plugin packages can register.
+  include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/HipEpPlugins.cmake)
+
   llvm_map_components_to_libnames(llvm_libs Support Core)
 
   # FlatBuffers schemas (GenerateInterface pass metadata)
@@ -182,6 +195,16 @@ if(BUILD_HIP_TOOLS)
     # Runtime unit tests (GPU-free; native against mock types)
     add_subdirectory(test/runtime)
   endif()
+
+  # Out-of-tree plugin dirs (HIPDNN_EP_COMPILER_PLUGIN_PATHS): add each so it can
+  # register its plugin. Must run before finalize (below).
+  hipdnn_ep_add_external_plugins()
+
+  # Finalize static compiler plugins: generate the registrar include and link
+  # the selected plugin static libs into LibHipCompiler. Must run after every
+  # plugin package (in-tree: test/plugin; out-of-tree: the paths above) has
+  # registered.
+  hipdnn_ep_finalize_static_plugins()
 endif()
 
 # Python wheel packaging (opt-in; defines the 'wheel' target). Added last so
