@@ -79,6 +79,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | Expand | Custom HIP Kernel |
 | GatherND | Custom HIP Kernel |
 | ScatterND | Custom HIP Kernel (reductions: none / add / mul / min / max) |
+| ScatterElements | Custom HIP Kernel (reductions: none / add / mul / min / max) |
 | Range | Custom HIP kernel |
 | Size | Custom HIP Kernel (folds to a constant for static shapes) |
 | NonZero | Custom HIP Kernel |

@@ -1572,6 +1572,42 @@ def Hip_CompressOp : Hip_DpsOp<"compress", /*traits=*/[],
   }];
 }
 
+def Hip_ScatterElementsOp : Hip_DpsOp<"scatter_elements", /*traits=*/[],
+                                      /*outsAccessor=*/"Output",
+                                      /*autoReify=*/1,
+                                      /*autoInfer=*/1,
+                                      /*declareInfer=*/1> {
+  let summary = "Scatter updates along an axis using same-rank indices";
+  let description = [{
+    Implements ONNX ScatterElements: produce an `output` tensor with the
+    same shape as `data` by copying `data`, then writing `updates` at
+    positions specified by `indices` along `axis`. Supports the same
+    `reduction` modes as ScatterND (`none`, `add`, `mul`, `min`, `max`).
+
+    Example:
+    ```mlir
+    hip.scatter_elements(%ctx)
+        ins(%data, %indices, %updates :
+            memref<2x2xf32, 1>, memref<2x2xi32, 1>, memref<2x2xf32, 1>)
+        outs(%output : memref<2x2xf32, 1>) {axis = 1 : i64, reduction = "none"}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$indices,
+    Hip_TensorOrMemRef:$updates,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "0">:$axis,
+    DefaultValuedAttr<StrAttr, "\"none\"">:$reduction
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `,` $indices `,` $updates `:` type($data) `,` type($indices) `,` type($updates) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_GatherElementsOp : Hip_DpsOp<"gather_elements", /*traits=*/[],
                                       /*outsAccessor=*/"Output",
                                       /*autoReify=*/0,

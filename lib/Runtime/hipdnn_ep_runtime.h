@@ -936,6 +936,14 @@ int wrap_gather_elements(RuntimeState *state, void *data, void *indices,
                          int64_t element_size_bytes,
                          int64_t indices_element_size_bytes);
 
+int wrap_scatter_elements(RuntimeState *state, void *data, void *indices,
+                          void *updates, void *output, int64_t axis,
+                          int64_t reduction_id, int64_t rank,
+                          const int64_t *data_shape,
+                          const int64_t *indices_shape, int64_t num_updates,
+                          int64_t element_size_bytes,
+                          int64_t indices_element_size_bytes);
+
 int wrap_compress(RuntimeState *state, void *input, void *condition,
                   void *output, int64_t flatten, int64_t axis,
                   int64_t input_rank, int64_t output_rank,

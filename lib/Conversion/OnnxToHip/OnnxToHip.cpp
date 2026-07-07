@@ -480,6 +480,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateCompressConversionPatterns(patterns, ctx);
   populateOneHotConversionPatterns(patterns, ctx);
   populateGatherElementsConversionPatterns(patterns, ctx);
+  populateScatterElementsConversionPatterns(patterns, ctx);
   populateShapeConversionPatterns(patterns, ctx);
   populateConvConversionPatterns(patterns, ctx);
   populateConvTransposeConversionPatterns(patterns, ctx);
