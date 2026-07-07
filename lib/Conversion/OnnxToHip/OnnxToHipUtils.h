@@ -376,6 +376,8 @@ void populateReduceProdConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
 void populateLessConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+void populateGreaterConversionPatterns(RewritePatternSet &patterns,
+                                       MLIRContext *ctx);
 void populateGreaterOrEqualConversionPatterns(RewritePatternSet &patterns,
                                               MLIRContext *ctx);
 void populateLessOrEqualConversionPatterns(RewritePatternSet &patterns,
