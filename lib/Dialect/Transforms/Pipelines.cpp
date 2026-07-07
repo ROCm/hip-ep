@@ -259,8 +259,8 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   // TODO(unranked-import-contract): the unranked-import contract on
   // the importer side ships in MorphiZen PR #228
   // (https://github.com/ROCm/MorphiZen/pull/228). Until that PR is
-  // merged AND the `3rd-party/morphizen` submodule here is bumped
-  // past the merge, the importer still emits `tensor<>` (rank-0) for
+  // merged AND the `morphizen` subtree here is updated past the
+  // merge, the importer still emits `tensor<>` (rank-0) for
   // values it has no shape for, which `--convert-onnx-to-hip` will
   // misinterpret as a genuine scalar on Loop-heavy models (any
   // `onnx.Concat` / `onnx.Add` etc. inside an outlined body whose

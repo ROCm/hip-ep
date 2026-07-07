@@ -41,7 +41,7 @@ jobs:
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
 
     steps:
-      # MorphiZen is vendored in-tree as a git subtree under 3rd-party/morphizen,
+      # MorphiZen is vendored in-tree as a git subtree under morphizen,
       # so no deploy key or submodule initialization is needed.
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

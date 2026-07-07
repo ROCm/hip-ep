@@ -261,7 +261,7 @@ endif()  # _HIPDNN_NEED_TOOLCHAIN (shared toolchain)
 
 # ===========================================================================
 # EP-only deps (BUILD_EP): morphizen build setup, ONNX Runtime, protobuf, then
-# add_subdirectory(3rd-party/morphizen). protobuf/ORT are resolved before the
+# add_subdirectory(morphizen). protobuf/ORT are resolved before the
 # subdirectory so morphizen reuses the same targets.
 # ===========================================================================
 
@@ -323,11 +323,11 @@ if(BUILD_EP)
   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/version.txt" "${VERSION_INFO}")
   set(MORPHIZEN_VERSION_INFO_FILE "${CMAKE_CURRENT_BINARY_DIR}/version.txt")
 
-  ## MorphiZen is vendored in-tree as a git subtree under 3rd-party/morphizen.
-  if(NOT EXISTS "${CMAKE_SOURCE_DIR}/3rd-party/morphizen/CMakeLists.txt")
-    message(FATAL_ERROR "MorphiZen sources not found under 3rd-party/morphizen (expected as an in-tree git subtree).")
+  ## MorphiZen is vendored in-tree as a git subtree under morphizen.
+  if(NOT EXISTS "${CMAKE_SOURCE_DIR}/morphizen/CMakeLists.txt")
+    message(FATAL_ERROR "MorphiZen sources not found under morphizen (expected as an in-tree git subtree).")
   endif()
-  message(STATUS "Using MorphiZen subtree: 3rd-party/morphizen")
+  message(STATUS "Using MorphiZen subtree: morphizen")
 
   # Force static linking for glog to avoid runtime library conflicts
   set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libraries" FORCE)
@@ -342,7 +342,7 @@ if(BUILD_EP)
   # ONNX Runtime resolution (find_package first, official release zip fallback).
   #
   # The EP links onnxruntime::onnxruntime (headers + import lib). We resolve it
-  # here, BEFORE add_subdirectory(3rd-party/morphizen), so morphizen's
+  # here, BEFORE add_subdirectory(morphizen), so morphizen's
   # find_onnxruntime.cmake -- guarded by `if(NOT TARGET onnxruntime::onnxruntime)`
   # -- reuses our target instead of running its own find_package.
   #
@@ -431,7 +431,7 @@ if(BUILD_EP)
   #
   #   * Real build (BUILD_MOCK_RUNTIME=OFF): we want morphizen's HIP allocator,
   #     which means find_package(hip) needs HIP_PLATFORM seeded *before*
-  #     add_subdirectory(3rd-party/morphizen) below; otherwise TheRock's
+  #     add_subdirectory(morphizen) below; otherwise TheRock's
   #     hip-config.cmake errors out with "Unexpected HIP_PLATFORM:".
   #     (lib/Runtime/Kernels/cmake/hip_utils.cmake seeds it too, but
   #     that subdir is added later in the top-level CMakeLists.txt.)
@@ -453,7 +453,7 @@ if(BUILD_EP)
     endif()
   endif()
 
-  add_subdirectory(3rd-party/morphizen)
+  add_subdirectory(morphizen)
 endif()  # BUILD_EP
 
 # ===========================================================================

@@ -257,7 +257,7 @@ What each piece does:
 - **`--ep-option config_file=...`** -- forwards the key/value into
   ORT's `provider_options` dict for this EP. **`config_file` is
   MorphiZen's own convention** (the EP's
-  [`config_reader.cpp`](../../3rd-party/morphizen/morphizen-core/src/binary/config_reader.cpp)
+  [`config_reader.cpp`](../../morphizen/morphizen-core/src/binary/config_reader.cpp)
   reads this key, treats the value as a path to a protobuf-JSON
   config, and uses it to drive its pass pipeline). Other EPs use
   different keys -- e.g. CUDA/DirectML expose `device_id`, TensorRT
