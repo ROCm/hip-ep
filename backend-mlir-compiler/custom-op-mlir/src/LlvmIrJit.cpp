@@ -10,6 +10,7 @@
 #include <hip/hip_runtime_api.h>
 #endif
 
+#include <llvm/ADT/ArrayRef.h>
 #include <llvm/ADT/SmallString.h>
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/ExecutionEngine/JITSymbol.h>
@@ -249,7 +250,7 @@ std::string detectCustomKernelArch() {
 // addLibraryPath() dirs using the platform's library naming (mirroring what the
 // native lld-link path resolves). Empty string when nothing matches.
 std::string resolvePluginLibrary(llvm::StringRef nameOrPath,
-                                 const std::vector<std::string> &searchPaths) {
+                                 llvm::ArrayRef<std::string> searchPaths) {
   if (llvm::sys::fs::exists(nameOrPath))
     return nameOrPath.str();
 
@@ -352,9 +353,8 @@ bool installSearchGenerators(llvm::orc::LLJIT &jit) {
   // plugin symbol is preferred over a coincidental process-image look-alike.
   // No-op when no plugin contributed a library.
   {
-    auto searchPathsSV = ::hip::compiler::pluginLibraryPaths();
-    std::vector<std::string> searchPaths(searchPathsSV.begin(),
-                                         searchPathsSV.end());
+    // SmallVector<std::string> binds to the ArrayRef parameter directly.
+    auto searchPaths = ::hip::compiler::pluginLibraryPaths();
     for (llvm::StringRef lib : ::hip::compiler::pluginLibraries()) {
       std::string file = resolvePluginLibrary(lib, searchPaths);
       if (file.empty()) {
