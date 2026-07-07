@@ -29,39 +29,26 @@ using namespace mlir;
 
 namespace {
 
-/// Append every plugin pass requested for `slot` to `pm`. Resolves
-/// each pass by name through MLIR's pass registry (the same path
-/// `--pass=foo` takes inside hip-mlir-opt), so a typo in a plugin's
-/// requestPipelineSlot call surfaces as an audible warning rather
-/// than a silent miss.
-///
-/// Cost when no plugins are loaded: one StringRef vector lookup,
-/// nothing added to the pass manager. Pipeline construction cost is
-/// effectively unchanged in that case, which is the common case.
+/// Append every plugin pass requested for `slot` to `pm`, resolving each by
+/// name through MLIR's pass registry (the same path `--pass=foo` takes), so a
+/// typo in a plugin's requestPipelineSlot surfaces as a warning, not a silent
+/// miss. No-op (one vector lookup) when no plugin requested this slot.
 //
-// Note on `hip` name lookup: this TU does `using namespace mlir;` AND
-// includes "hip/Compiler/PluginRegistry.h", which declares the global
-// `::hip::compiler`. So both `mlir::hip` (the dialect) and `::hip` (the
-// plugin/compiler infra) are in scope, and an *unqualified* `hip::` is
-// AMBIGUOUS -- it does not silently resolve to `mlir::hip`. Every dialect
-// pass call here must therefore be spelled `mlir::hip::create...Pass()`,
-// and every plugin-registry reference `::hip::compiler::...` with the
-// leading `::`. A bare `hip::` compiles on main (where PluginRegistry.h
-// is not included, so `::hip` is not visible) but breaks the moment this
-// file sees it -- keep new pass calls fully qualified.
+// Name-lookup caveat: this TU has `using namespace mlir;` AND includes
+// PluginRegistry.h, so both `mlir::hip` (the dialect) and `::hip` (plugin
+// infra) are visible -- an unqualified `hip::` is AMBIGUOUS here. Spell dialect
+// passes `mlir::hip::create...Pass()` and registry calls
+// `::hip::compiler::...`. (A bare `hip::` compiles on main, where
+// PluginRegistry.h is absent, but not here.)
 void addPluginPassesForSlot(OpPassManager &pm,
                             ::hip::compiler::PipelineSlot slot) {
   auto passNames = ::hip::compiler::pluginPassesForSlot(slot);
   if (passNames.empty())
     return;
   for (llvm::StringRef passName : passNames) {
-    // parsePassPipeline resolves the string into this (module-level) pass
-    // manager, exactly like --pass-pipeline. Two common failure causes: the
-    // pass is not registered (the plugin did not registerPass<>(), or the
-    // host did not export its MLIR symbols so the plugin's registration is in
-    // a separate registry), OR the string omits the anchor nesting a non-
-    // module pass needs (a func.func pass must be requested as
-    // `func.func(<arg>)`, not the bare `<arg>`).
+    // Resolve into this (module-level) pass manager, exactly like
+    // --pass-pipeline; warn rather than silently skip on failure (causes
+    // below).
     if (failed(parsePassPipeline(passName, pm))) {
       llvm::errs()
           << "[plugin] WARNING: could not add pass pipeline '" << passName
