@@ -1,0 +1,165 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
+#include "OnnxToHipUtils.h"
+#include "ReadbackScalar.h"
+
+namespace mlir {
+namespace hip {
+namespace {
+
+static mlir::Value getTopKAxisExtent(mlir::PatternRewriter &rewriter,
+                                     mlir::Location loc, mlir::Value ctx,
+                                     mlir::Value k, int64_t axis,
+                                     mlir::RankedTensorType resultType) {
+  if (!resultType.isDynamicDim(axis)) {
+    return mlir::arith::ConstantIndexOp::create(
+        rewriter, loc, resultType.getDimSize(axis));
+  }
+
+  auto kType = mlir::cast<mlir::RankedTensorType>(k.getType());
+  if (kType.getRank() == 0) {
+    mlir::Value kScalar = readbackScalarToHost(rewriter, loc, ctx, k);
+    return mlir::arith::IndexCastOp::create(
+        rewriter, loc, rewriter.getIndexType(), kScalar);
+  }
+
+  if (kType.getRank() == 1) {
+    if (kType.hasStaticShape() && kType.getDimSize(0) == 1) {
+      mlir::Value collapsed = mlir::tensor::CollapseShapeOp::create(
+          rewriter, loc, k, mlir::ReassociationIndices{{0}});
+      mlir::Value kScalar = readbackScalarToHost(rewriter, loc, ctx, collapsed);
+      return mlir::arith::IndexCastOp::create(
+          rewriter, loc, rewriter.getIndexType(), kScalar);
+    }
+    mlir::Value c0 = rewriter.create<mlir::arith::ConstantIndexOp>(loc, 0);
+    return mlir::tensor::DimOp::create(rewriter, loc, k, c0);
+  }
+
+  return mlir::Value{};
+}
+
+static mlir::Value
+createTopKEmpty(mlir::PatternRewriter &rewriter, mlir::Location loc,
+                mlir::RankedTensorType resultType, mlir::Value source,
+                mlir::Value ctx, mlir::Value k, int64_t axis) {
+  llvm::SmallVector<mlir::Value> dynSizes;
+  for (int64_t i : llvm::seq<int64_t>(0, resultType.getRank())) {
+    if (!resultType.isDynamicDim(i))
+      continue;
+    if (i == axis) {
+      mlir::Value axisExtent =
+          getTopKAxisExtent(rewriter, loc, ctx, k, axis, resultType);
+      if (!axisExtent)
+        return mlir::Value{};
+      dynSizes.push_back(axisExtent);
+    } else {
+      mlir::Value dim =
+          mlir::tensor::DimOp::create(rewriter, loc, source, i);
+      dynSizes.push_back(dim);
+    }
+  }
+
+  return mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                       resultType.getElementType(), dynSizes);
+}
+
+/// onnx.TopK -> hip.top_k
+struct TopKToHip : public mlir::RewritePattern {
+  TopKToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.TopK", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult
+TopKToHip::matchAndRewrite(mlir::Operation *op,
+                           mlir::PatternRewriter &rewriter) const {
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return rewriter.notifyMatchFailure(op, "missing context argument");
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+  if (op->getNumOperands() != 2 || op->getNumResults() != 2)
+    return rewriter.notifyMatchFailure(op, "expected 2 inputs and 2 outputs");
+
+  mlir::Value x = op->getOperand(0);
+  mlir::Value k = op->getOperand(1);
+  auto xType = mlir::cast<mlir::RankedTensorType>(x.getType());
+
+  int64_t axis = -1;
+  if (auto axisAttr = op->getAttrOfType<mlir::IntegerAttr>("axis"))
+    axis = axisAttr.getSInt();
+  if (axis < 0)
+    axis += xType.getRank();
+
+  bool largest = true;
+  if (auto largestAttr = op->getAttrOfType<mlir::BoolAttr>("largest"))
+    largest = largestAttr.getValue();
+
+  bool sorted = true;
+  if (auto sortedAttr = op->getAttrOfType<mlir::BoolAttr>("sorted"))
+    sorted = sortedAttr.getValue();
+
+  auto valuesType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  auto indicesType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(1).getType());
+
+  mlir::Value valuesInit =
+      createTopKEmpty(rewriter, loc, valuesType, x, context, k, axis);
+  if (!valuesInit)
+    return rewriter.notifyMatchFailure(op, "failed to build values init");
+
+  mlir::Value indicesInit =
+      createTopKEmpty(rewriter, loc, indicesType, x, context, k, axis);
+  if (!indicesInit)
+    return rewriter.notifyMatchFailure(op, "failed to build indices init");
+
+  llvm::SmallVector<mlir::Value> operands;
+  operands.push_back(context);
+  operands.push_back(x);
+  operands.push_back(k);
+  operands.push_back(valuesInit);
+  operands.push_back(indicesInit);
+
+  llvm::SmallVector<mlir::Type> resultTypes;
+  resultTypes.push_back(valuesType);
+  resultTypes.push_back(indicesType);
+
+  llvm::SmallVector<mlir::NamedAttribute> attrs;
+  attrs.push_back(
+      rewriter.getNamedAttr("axis", rewriter.getI64IntegerAttr(axis)));
+  attrs.push_back(
+      rewriter.getNamedAttr("largest", rewriter.getBoolAttr(largest)));
+  attrs.push_back(
+      rewriter.getNamedAttr("sorted", rewriter.getBoolAttr(sorted)));
+
+  llvm::SmallVector<int32_t> segmentSizes = {1, 1, 1, 2};
+
+  mlir::OperationState state(loc, "hip.top_k");
+  state.addOperands(operands);
+  state.addAttributes(attrs);
+  state.addTypes(resultTypes);
+  state.addAttribute("operand_segment_sizes",
+                     rewriter.getDenseI32ArrayAttr(segmentSizes));
+
+  mlir::Operation *hipOp = rewriter.create(state);
+  rewriter.replaceOp(op, hipOp->getResults());
+  return mlir::success();
+}
+
+} // namespace
+
+void populateTopKConversionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx) {
+  patterns.add<TopKToHip>(ctx);
+}
+
+} // namespace hip
+} // namespace mlir

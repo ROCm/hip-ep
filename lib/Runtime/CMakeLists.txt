@@ -283,6 +283,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/range.cpp runtime_range.bc)
     compile_to_bitcode(real/gather.cpp runtime_gather.bc)
     compile_to_bitcode(real/gather_elements.cpp runtime_gather_elements.bc)
+    compile_to_bitcode(real/top_k.cpp runtime_top_k.bc)
     compile_to_bitcode(real/scatter_elements.cpp runtime_scatter_elements.bc)
     compile_to_bitcode(real/compress.cpp runtime_compress.bc)
     compile_to_bitcode(real/one_hot.cpp runtime_one_hot.bc)
@@ -355,6 +356,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_range.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather_elements.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_top_k.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_scatter_elements.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_compress.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_one_hot.bc

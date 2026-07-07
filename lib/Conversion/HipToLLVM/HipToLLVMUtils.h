@@ -64,6 +64,7 @@ inline constexpr const char *kMiopenSoftmax = "hip_miopen_softmax";
 inline constexpr const char *kWrapTranspose = "wrap_transpose";
 inline constexpr const char *kWrapGather = "wrap_gather";
 inline constexpr const char *kWrapGatherElements = "wrap_gather_elements";
+inline constexpr const char *kWrapTopK = "wrap_top_k";
 inline constexpr const char *kWrapScatterElements = "wrap_scatter_elements";
 inline constexpr const char *kWrapCompress = "wrap_compress";
 inline constexpr const char *kWrapOneHot = "wrap_one_hot";
@@ -403,6 +404,8 @@ void populateGatherLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns);
 void populateGatherElementsLoweringPatterns(const LLVMTypeConverter &converter,
                                             RewritePatternSet &patterns);
+void populateTopKLoweringPatterns(const LLVMTypeConverter &converter,
+                                RewritePatternSet &patterns);
 void populateScatterElementsLoweringPatterns(const LLVMTypeConverter &converter,
                                              RewritePatternSet &patterns);
 void populateCompressLoweringPatterns(const LLVMTypeConverter &converter,

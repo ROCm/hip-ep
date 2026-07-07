@@ -85,6 +85,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | NonZero | Custom HIP Kernel |
 | Gather | Custom HIP Kernel |
 | GatherElements | Custom HIP Kernel |
+| TopK | Custom HIP Kernel |
 | Compress | Custom HIP Kernel |
 | OneHot | Custom HIP Kernel |
 | LayerNormalization | Custom HIP Kernel |
