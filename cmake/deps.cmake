@@ -323,11 +323,11 @@ if(BUILD_EP)
   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/version.txt" "${VERSION_INFO}")
   set(MORPHIZEN_VERSION_INFO_FILE "${CMAKE_CURRENT_BINARY_DIR}/version.txt")
 
-  ## Use morphizen from git submodule
+  ## MorphiZen is vendored in-tree as a git subtree under 3rd-party/morphizen.
   if(NOT EXISTS "${CMAKE_SOURCE_DIR}/3rd-party/morphizen/CMakeLists.txt")
-    message(FATAL_ERROR "MorphiZen submodule not found. Run: git submodule update --init --recursive")
+    message(FATAL_ERROR "MorphiZen sources not found under 3rd-party/morphizen (expected as an in-tree git subtree).")
   endif()
-  message(STATUS "Using MorphiZen from git submodule: 3rd-party/morphizen")
+  message(STATUS "Using MorphiZen subtree: 3rd-party/morphizen")
 
   # Force static linking for glog to avoid runtime library conflicts
   set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libraries" FORCE)
