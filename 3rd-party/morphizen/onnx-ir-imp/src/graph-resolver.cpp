@@ -21,8 +21,8 @@ DEF_ENV_PARAM_2(MORPHIZEN_DEBUG_GRAPH_RESOLVER_DUMP_DIR, "", std::string);
 namespace morphizen {
 
 // Helper function to dump an ONNX graph proto to a file
-static void dump_onnx_model(const morphizen_onnx::GraphProto& graph_proto,
-                            const std::filesystem::path& filename) {
+static void dump_onnx_model(const morphizen_onnx::GraphProto &graph_proto,
+                            const std::filesystem::path &filename) {
   try {
     // Create a temporary model proto to wrap the graph proto
     morphizen_onnx::ModelProto model_proto;
@@ -31,12 +31,12 @@ static void dump_onnx_model(const morphizen_onnx::GraphProto& graph_proto,
     model_proto.set_producer_version("1.0");
 
     // Add standard ONNX opset import
-    auto* opset_import = model_proto.add_opset_import();
+    auto *opset_import = model_proto.add_opset_import();
     opset_import->set_domain("");  // Default domain
     opset_import->set_version(17); // ONNX opset version
 
     // Copy the graph proto into the model
-    auto* graph_copy = model_proto.mutable_graph();
+    auto *graph_copy = model_proto.mutable_graph();
     graph_copy->CopyFrom(graph_proto);
 
     // Ensure the directory exists
@@ -56,7 +56,7 @@ static void dump_onnx_model(const morphizen_onnx::GraphProto& graph_proto,
     } else {
       MY_LOG(1) << "Failed to open output file: " << filename.string();
     }
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     MY_LOG(1) << "Exception while saving ONNX model to " << filename.string()
               << ": " << e.what();
   }
@@ -70,7 +70,7 @@ GraphResolver::~GraphResolver() {
   // Empty destructor implementation
 }
 
-void GraphResolver::initialize_private_variables(Graph& graph,
+void GraphResolver::initialize_private_variables(Graph &graph,
                                                  GraphId new_graph_id) {
   // Initialize basic graph pointers and ID
   origin_graph_ = &graph;
@@ -86,7 +86,7 @@ void GraphResolver::initialize_private_variables(Graph& graph,
   // graph
   CHECK(staging_graph_ != nullptr)
       << "Staging graph must be set before resolving.";
-  const auto& origin_proto = origin_graph_->get_graph_proto();
+  const auto &origin_proto = origin_graph_->get_graph_proto();
   initializer_deleted_flags_.assign(origin_proto.initializer_size(), false);
   node_deleted_flags_.assign(origin_proto.node_size(), false);
 
@@ -96,8 +96,8 @@ void GraphResolver::initialize_private_variables(Graph& graph,
 }
 
 morphizen_onnx::GraphProto
-GraphResolver::resolve(Graph& graph, GraphId new_graph_id,
-                       std::unordered_map<std::string, int>& opset) {
+GraphResolver::resolve(Graph &graph, GraphId new_graph_id,
+                       std::unordered_map<std::string, int> &opset) {
   CHECK(graph.need_resolve())
       << "Graph does not need resolution, cannot resolve.";
   // Initialize all private variables
@@ -160,11 +160,11 @@ void GraphResolver::resolve_name() {
   MY_LOG(1) << "GraphResolver::resolve_name() - Starting name resolution";
 
   // Copy the name from the original graph proto
-  const auto& orig_proto = origin_graph_->get_graph_proto();
+  const auto &orig_proto = origin_graph_->get_graph_proto();
   resolved_graph_proto_.set_name(orig_proto.name());
 
   // If staging graph has a different name, use that instead
-  const auto& staging_proto = staging_graph_->get_graph_proto();
+  const auto &staging_proto = staging_graph_->get_graph_proto();
   if (!staging_proto.name().empty() &&
       staging_proto.name() != orig_proto.name()) {
     MY_LOG(2) << "Using staging graph name: " << staging_proto.name();
@@ -180,11 +180,11 @@ void GraphResolver::resolve_doc_string() {
       << "GraphResolver::resolve_doc_string() - Starting doc string resolution";
 
   // Copy the doc string from the original graph proto
-  const auto& orig_proto = origin_graph_->get_graph_proto();
+  const auto &orig_proto = origin_graph_->get_graph_proto();
   resolved_graph_proto_.set_doc_string(orig_proto.doc_string());
 
   // If staging graph has a different doc string, use that instead
-  const auto& staging_proto = staging_graph_->get_graph_proto();
+  const auto &staging_proto = staging_graph_->get_graph_proto();
   if (!staging_proto.doc_string().empty() &&
       staging_proto.doc_string() != orig_proto.doc_string()) {
     MY_LOG(2) << "Using staging graph doc_string: "
@@ -198,11 +198,11 @@ void GraphResolver::resolve_doc_string() {
 void GraphResolver::resolve_inputs() {
   // just use the staging graph inputs, because when staging graph is
   // created, it already has the inputs from the original graph
-  const auto& staging_proto = staging_graph_->get_graph_proto();
+  const auto &staging_proto = staging_graph_->get_graph_proto();
   resolved_graph_proto_.mutable_input()->Assign(staging_proto.input().begin(),
                                                 staging_proto.input().end());
   auto input_index = -1;
-  for (const auto& input : resolved_graph_proto_.input()) {
+  for (const auto &input : resolved_graph_proto_.input()) {
     input_index = input_index + 1;
     // Add to node_args_map for tracking
     node_args_map_[input.name()] =
@@ -213,11 +213,11 @@ void GraphResolver::resolve_inputs() {
 void GraphResolver::resolve_outputs() {
   // just use the staging graph outputs, because when staging graph is
   // created, it already has the outputs from the original graph
-  const auto& staging_proto = staging_graph_->get_graph_proto();
+  const auto &staging_proto = staging_graph_->get_graph_proto();
   resolved_graph_proto_.mutable_output()->Assign(staging_proto.output().begin(),
                                                  staging_proto.output().end());
   auto output_index = -1;
-  for (const auto& output : resolved_graph_proto_.output()) {
+  for (const auto &output : resolved_graph_proto_.output()) {
     output_index = output_index + 1;
     // Add to node_args_map for tracking
     node_args_map_[output.name()] =
@@ -230,8 +230,8 @@ void GraphResolver::resolve_constant_initializers() {
                "initializer resolution";
 
   // Copy all initializers from the original graph proto
-  const auto& orig_proto = origin_graph_->get_graph_proto();
-  for (const auto& initializer : orig_proto.initializer()) {
+  const auto &orig_proto = origin_graph_->get_graph_proto();
+  for (const auto &initializer : orig_proto.initializer()) {
     // when initializer has no name, it is deleted
     if (initializer.name().empty()) {
       MY_LOG(2) << "Skipping initializer with empty name";
@@ -241,22 +241,22 @@ void GraphResolver::resolve_constant_initializers() {
       MY_LOG(2) << "Skipping deleted initializer: " << initializer.name();
       continue;
     }
-    auto* new_initializer = resolved_graph_proto_.add_initializer();
+    auto *new_initializer = resolved_graph_proto_.add_initializer();
     new_initializer->Swap(
-        const_cast<morphizen_onnx::TensorProto*>(&initializer));
+        const_cast<morphizen_onnx::TensorProto *>(&initializer));
   }
 
   // Merge any additional initializers from staging graph
-  const auto& staging_proto = staging_graph_->get_graph_proto();
-  for (const auto& staging_init : staging_proto.initializer()) {
+  const auto &staging_proto = staging_graph_->get_graph_proto();
+  for (const auto &staging_init : staging_proto.initializer()) {
     // Check if this initializer already exists in resolved graph
     MY_LOG(2) << "Adding new initializer from staging: " << staging_init.name();
-    auto* new_initializer = resolved_graph_proto_.add_initializer();
+    auto *new_initializer = resolved_graph_proto_.add_initializer();
     new_initializer->Swap(
-        const_cast<morphizen_onnx::TensorProto*>(&staging_init));
+        const_cast<morphizen_onnx::TensorProto *>(&staging_init));
   }
   auto initializer_index = -1;
-  for (auto& initializer : resolved_graph_proto_.initializer()) {
+  for (auto &initializer : resolved_graph_proto_.initializer()) {
     initializer_index = initializer_index + 1;
     // Ensure the initializer has a name
     if (initializer.name().empty()) {
@@ -274,17 +274,17 @@ void GraphResolver::resolve_constant_initializers() {
 
 void GraphResolver::troubleshooting(int staging_node_index,
                                     int origin_node_index) const {
-  auto find_all = [](const std::string& name, int index,
-                     const morphizen_onnx::GraphProto& graph) -> bool {
-    for (auto& output : graph.node(index).output()) {
+  auto find_all = [](const std::string &name, int index,
+                     const morphizen_onnx::GraphProto &graph) -> bool {
+    for (auto &output : graph.node(index).output()) {
       if (output == name) {
         return true;
       }
     }
     return false;
   };
-  auto search_in_graph = [&](const std::string& name, int index,
-                             const morphizen_onnx::GraphProto& graph) -> int {
+  auto search_in_graph = [&](const std::string &name, int index,
+                             const morphizen_onnx::GraphProto &graph) -> int {
     for (int i = index + 1; i < graph.node_size(); ++i) {
       if (find_all(name, i, graph)) {
         return i;
@@ -293,11 +293,11 @@ void GraphResolver::troubleshooting(int staging_node_index,
     return -1;
   };
 
-  auto& staging_graph_proto = staging_graph_->get_graph_proto();
-  auto& origin_graph_proto = origin_graph_->get_graph_proto();
+  auto &staging_graph_proto = staging_graph_->get_graph_proto();
+  auto &origin_graph_proto = origin_graph_->get_graph_proto();
   auto search_for_node = [&](int index,
-                             const morphizen_onnx::GraphProto& graph) {
-    for (auto& input : graph.node(index).input()) {
+                             const morphizen_onnx::GraphProto &graph) {
+    for (auto &input : graph.node(index).input()) {
       LOG(INFO) << "searching for input: " << input
                 << " in graph node: " << graph.node(index).name()
                 << " at index: " << index;
@@ -326,7 +326,7 @@ void GraphResolver::troubleshooting(int staging_node_index,
   LOG(INFO) << "searching for origin node";
   search_for_node(origin_node_index, origin_graph_proto);
 }
-static std::string proto_debug_string(const morphizen_onnx::NodeProto& node) {
+static std::string proto_debug_string(const morphizen_onnx::NodeProto &node) {
   auto ss = std::ostringstream();
   ss << node.name() << " (" << node.op_type() << ")";
   if (!node.domain().empty()) {
@@ -334,7 +334,7 @@ static std::string proto_debug_string(const morphizen_onnx::NodeProto& node) {
   }
   ss << "input: [";
   int c = 0;
-  for (const auto& input : node.input()) {
+  for (const auto &input : node.input()) {
     if (c++ != 0) {
       ss << ",";
     }
@@ -344,7 +344,7 @@ static std::string proto_debug_string(const morphizen_onnx::NodeProto& node) {
   c = 0;
   ss << "outputs: [";
 
-  for (const auto& output : node.output()) {
+  for (const auto &output : node.output()) {
     if (c++ != 0) {
       ss << ",";
     }
@@ -358,7 +358,7 @@ void GraphResolver::resolve_nodes() {
   auto output_node_args = origin_graph_->get_outputs_unsafe();
   auto output_nodes = std::vector<NodeIndex>{};
   output_nodes.reserve(output_node_args.size());
-  for (auto& output_node_arg : output_node_args) {
+  for (auto &output_node_arg : output_node_args) {
     auto node_index = output_node_arg.get_producer_node();
     // the graph output maybe is a graph_initializer, not a node's output
     // test case : PSI_v3_0
@@ -375,13 +375,13 @@ void GraphResolver::resolve_nodes() {
 
   origin_graph_->reverse_dfs_from_preemp(
       output_nodes, /*enter*/
-      [this](const NodeIndex& node) {
+      [this](const NodeIndex &node) {
         MY_LOG(1) << "enter :" << proto_debug_string(node.get_node_proto());
         return false;
       },
-      [this](const NodeIndex& node) -> bool {
+      [this](const NodeIndex &node) -> bool {
         auto graph_id = node.get_graph_id();
-        auto& node_proto = node.get_node_proto();
+        auto &node_proto = node.get_node_proto();
 
         if (graph_id.is_staging()) {
           MY_LOG(1) << "merge from staging graph node: " << node.to_string()
@@ -394,9 +394,9 @@ void GraphResolver::resolve_nodes() {
                     << proto_debug_string(node_proto);
         }
         resolved_graph_proto_.add_node()->Swap(
-            const_cast<morphizen_onnx::NodeProto*>(&node_proto));
+            const_cast<morphizen_onnx::NodeProto *>(&node_proto));
         auto outputs = node.get_output_node_args();
-        for (auto& output_node_arg_index : outputs) {
+        for (auto &output_node_arg_index : outputs) {
           if (output_node_arg_index.is_node_output()) {
             // Add to node_args_map for tracking
             *resolved_graph_proto_.mutable_value_info()->Add() =
@@ -476,12 +476,12 @@ void GraphResolver::resolve_value_info() {
 
 void GraphResolver::print_log_message() {
   MY_LOG(1) << "GraphResolver::print_log_message() - Printing log messages";
-  for (auto& log_message : staging_graph_->log_messages_) {
+  for (auto &log_message : staging_graph_->log_messages_) {
     MY_LOG(1) << "  -- " << log_message;
   }
 }
 
-bool GraphResolver::is_meta_node(const morphizen_onnx::NodeProto& node) {
+bool GraphResolver::is_meta_node(const morphizen_onnx::NodeProto &node) {
   // Check if the node has the graph meta domain, indicating it's a meta node
   // used for graph manipulation operations (like deletion, fusion, etc.)
   return node.domain() == GRAPH_META_DOMAIN;
@@ -489,13 +489,13 @@ bool GraphResolver::is_meta_node(const morphizen_onnx::NodeProto& node) {
 
 // Node resolution helper methods
 bool GraphResolver::all_input_is_availabele(
-    const morphizen_onnx::NodeProto& node,
-    const std::unordered_map<std::string, NodeArgIndex>& node_args_map) {
+    const morphizen_onnx::NodeProto &node,
+    const std::unordered_map<std::string, NodeArgIndex> &node_args_map) {
   // check if all inputs for the node are available in
   // node_args_map
   MY_LOG(3) << "Checking if all inputs are available for node: " << node.name();
 
-  for (const auto& input : node.input()) {
+  for (const auto &input : node.input()) {
     if (input.empty()) {
       // Empty input names are allowed (optional inputs)
       continue;
@@ -511,19 +511,19 @@ bool GraphResolver::all_input_is_availabele(
   return true;
 }
 
-void GraphResolver::add_node(const morphizen_onnx::NodeProto& node_v,
-                             const Graph* source) {
+void GraphResolver::add_node(const morphizen_onnx::NodeProto &node_v,
+                             const Graph *source) {
   // Add a node to the resolved graph and update
   // node_args_map
   MY_LOG(3) << "Adding node to resolved graph: " << node_v.DebugString();
 
   // Add the node to the resolved graph proto
-  auto* new_node = resolved_graph_proto_.add_node();
-  new_node->Swap(const_cast<morphizen_onnx::NodeProto*>(&node_v));
+  auto *new_node = resolved_graph_proto_.add_node();
+  new_node->Swap(const_cast<morphizen_onnx::NodeProto *>(&node_v));
 
   // Update node_args_map with the node's outputs
   for (int output_idx = 0; output_idx < new_node->output_size(); ++output_idx) {
-    const auto& output_name = new_node->output(output_idx);
+    const auto &output_name = new_node->output(output_idx);
     if (output_name.empty()) {
       // Empty output names are allowed (optional outputs)
       continue;
@@ -548,7 +548,7 @@ void GraphResolver::add_node(const morphizen_onnx::NodeProto& node_v,
   }
 }
 
-bool GraphResolver::is_node_deleted(const morphizen_onnx::NodeProto& node,
+bool GraphResolver::is_node_deleted(const morphizen_onnx::NodeProto &node,
                                     int index) {
   // Check if the node is marked for deletion using the index
   MY_LOG(3) << "Checking if node is deleted: " << node.name() << " at index "
@@ -567,7 +567,7 @@ bool GraphResolver::is_node_deleted(const morphizen_onnx::NodeProto& node,
   // Check if all outputs of the node is either empty or found on the staging
   // graph
   return std::all_of(node.output().begin(), node.output().end(),
-                     [this](const std::string& output) {
+                     [this](const std::string &output) {
                        // Empty output names are allowed (optional outputs)
                        if (output.empty()) {
                          return true;
@@ -590,12 +590,12 @@ void GraphResolver::collect_staging_graph_names() {
     return;
   }
 
-  const auto& staging_proto = staging_graph_->get_graph_proto();
+  const auto &staging_proto = staging_graph_->get_graph_proto();
 
   // Iterate through all nodes in the staging graph to collect output names
-  for (const auto& node : staging_proto.node()) {
+  for (const auto &node : staging_proto.node()) {
     // Add all output names from this node to the set
-    for (const auto& output : node.output()) {
+    for (const auto &output : node.output()) {
       if (!output.empty()) { // Skip empty output names (optional outputs)
         name_on_staging_graph_.insert(output);
       }
@@ -604,7 +604,7 @@ void GraphResolver::collect_staging_graph_names() {
 
   // Iterate through all initializers in the staging graph to collect their
   // names
-  for (const auto& initializer : staging_proto.initializer()) {
+  for (const auto &initializer : staging_proto.initializer()) {
     if (!initializer.name().empty()) { // Skip initializers with empty names
       name_on_staging_graph_.insert(initializer.name());
     }
@@ -617,17 +617,17 @@ void GraphResolver::collect_staging_graph_names() {
 
 void GraphResolver::process_meta_node_delete() {
   // Mark nodes for deletion based on meta nodes in the staging graph
-  const auto& staging_proto = staging_graph_->get_graph_proto();
+  const auto &staging_proto = staging_graph_->get_graph_proto();
 
   // Look for meta nodes with "delete" op_type in the staging graph
   for (int i = 0; i < staging_proto.node_size(); ++i) {
-    const auto& node = staging_proto.node(i);
+    const auto &node = staging_proto.node(i);
 
     // Check if this is a meta node for deletion
     if (is_meta_node(node)) {
       if (node.op_type() == "delete_node") {
         // Find the target_node_index attribute
-        for (const auto& attr : node.attribute()) {
+        for (const auto &attr : node.attribute()) {
           if (attr.name() == "target_node_index" &&
               attr.type() == morphizen_onnx::AttributeProto::INT) {
             int64_t target_index = attr.i();
@@ -647,7 +647,7 @@ void GraphResolver::process_meta_node_delete() {
         }
       } else if (node.op_type() == "remove_initializer") {
         // Handle initializer deletion
-        for (const auto& attr : node.attribute()) {
+        for (const auto &attr : node.attribute()) {
           if (attr.name() == "index" &&
               attr.type() == morphizen_onnx::AttributeProto::INT) {
             int64_t index = attr.i();
@@ -672,9 +672,9 @@ void GraphResolver::process_meta_node_delete() {
 void GraphResolver::maybe_mark_delete_initializers() {
   // Mark all initializers whose names are found in name_on_staging_graph_ as
   // deleted on original graph
-  const auto& orig_proto = origin_graph_->get_graph_proto();
+  const auto &orig_proto = origin_graph_->get_graph_proto();
   for (int i = 0; i < orig_proto.initializer_size(); ++i) {
-    const auto& initializer = orig_proto.initializer(i);
+    const auto &initializer = orig_proto.initializer(i);
     if (name_on_staging_graph_.count(initializer.name())) {
       // Check bounds before marking for deletion
       CHECK(i >= 0 && i < static_cast<int>(initializer_deleted_flags_.size()))
@@ -688,14 +688,14 @@ void GraphResolver::maybe_mark_delete_initializers() {
   }
 }
 
-void GraphResolver::resolve_opset(std::unordered_map<std::string, int>& opset) {
+void GraphResolver::resolve_opset(std::unordered_map<std::string, int> &opset) {
   MY_LOG(1) << "GraphResolver::resolve_opset() - Starting opset resolution";
 
   // Note: GraphProto does not contain opset_import fields directly.
   // Opset imports are typically stored at the ModelProto level.
   // however we can iterate through all nodes and check their opset
   // information if needed, and since_version
-  for (auto& node : staging_graph_->get_graph_proto().node()) {
+  for (auto &node : staging_graph_->get_graph_proto().node()) {
     // Check if the node has an opset_version attribute
     auto version =
         1; // this is not a good design, let's fix it when it is broken.

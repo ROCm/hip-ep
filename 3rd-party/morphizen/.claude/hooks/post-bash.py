@@ -83,7 +83,11 @@ def main():
                 )
 
             # Push without -u and no tracking - warn
-            elif not re.search(r"-u|--set-upstream", command) and branch != "main" and not has_upstream_tracking():
+            elif (
+                not re.search(r"-u|--set-upstream", command)
+                and branch != "main"
+                and not has_upstream_tracking()
+            ):
                 messages.append(
                     f"⚠️ WARNING: Pushed without setting upstream tracking!\n\nFix it now:\ngit branch --set-upstream-to=fork/{branch}\n\nNext time use: git push -u fork {branch}"
                 )

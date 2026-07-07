@@ -16,12 +16,12 @@
 
 // Determine default backend based on compile-time configuration
 #if MORPHIZEN_ENABLE_ONNX_BACKEND
-#  define MORPHIZEN_DEFAULT_BACKEND morphizen::kONNXIRBackend
+#define MORPHIZEN_DEFAULT_BACKEND morphizen::kONNXIRBackend
 #elif MORPHIZEN_ENABLE_MLIR_BACKEND
-#  define MORPHIZEN_DEFAULT_BACKEND morphizen::kMLIRBackend
+#define MORPHIZEN_DEFAULT_BACKEND morphizen::kMLIRBackend
 #else
-#  error                                                                       \
-      "At least one backend must be enabled: MORPHIZEN_ENABLE_ONNX_BACKEND or MORPHIZEN_ENABLE_MLIR_BACKEND"
+#error                                                                         \
+    "At least one backend must be enabled: MORPHIZEN_ENABLE_ONNX_BACKEND or MORPHIZEN_ENABLE_MLIR_BACKEND"
 #endif
 
 DEF_ENV_PARAM_2(
@@ -42,14 +42,14 @@ namespace morphizen {
  * @param graph_viewer The ORT graph wrapper to iterate through nodes
  * @return std::vector<const OrtNode*> List of supported nodes
  */
-static std::vector<const OrtNode*>
-get_supported_nodes(const morphizen::ExecutionProvider& ep,
-                    OrtGraphWrapper& graph_viewer);
+static std::vector<const OrtNode *>
+get_supported_nodes(const morphizen::ExecutionProvider &ep,
+                    OrtGraphWrapper &graph_viewer);
 
-MorphiZenEP::MorphiZenEP(ApiPtrs apis, const std::string& name,
-                         const OrtKeyValuePairs* const* ep_metadata,
-                         const OrtSessionOptions& session_options,
-                         const OrtLogger& logger)
+MorphiZenEP::MorphiZenEP(ApiPtrs apis, const std::string &name,
+                         const OrtKeyValuePairs *const *ep_metadata,
+                         const OrtSessionOptions &session_options,
+                         const OrtLogger &logger)
     : OrtEp{}, ApiPtrs(apis), name_{name}, logger_{logger} {
   // OrtEp{} above zero-inits all C-API callback function pointers (incl.
   // optional ones we don't override like GetKernelRegistry / CanRunConcurrent).
@@ -92,18 +92,18 @@ MorphiZenEP::MorphiZenEP(ApiPtrs apis, const std::string& name,
 MorphiZenEP::~MorphiZenEP() {}
 
 void MorphiZenEP::update_provider_options_from_session_config(
-    const OrtSessionOptions& session_options) {
+    const OrtSessionOptions &session_options) {
   MY_LOG(2) << "Extracting provider options and session configs from session "
                "configuration";
 
   {
-    OrtKeyValuePairs* kvps = nullptr;
+    OrtKeyValuePairs *kvps = nullptr;
     throw_if_error(
         ort_api.GetSessionOptionsConfigEntries(&session_options, &kvps));
-    std::unique_ptr<OrtKeyValuePairs, void (*)(OrtKeyValuePairs*)>
+    std::unique_ptr<OrtKeyValuePairs, void (*)(OrtKeyValuePairs *)>
         config_entries(kvps, ort_api.ReleaseKeyValuePairs);
-    const char* const* keys = nullptr;
-    const char* const* values = nullptr;
+    const char *const *keys = nullptr;
+    const char *const *values = nullptr;
     size_t num_keys = 0;
     // Get keys and values from the config entries
     ort_api.GetKeyValuePairs(config_entries.get(), &keys, &values, &num_keys);
@@ -211,10 +211,10 @@ void MorphiZenEP::update_provider_options_from_session_config(
 }
 
 void MorphiZenEP::update_provider_options_from_ep_metadata(
-    const OrtKeyValuePairs* const* ep_metadata) {
+    const OrtKeyValuePairs *const *ep_metadata) {
   if (ep_metadata && *ep_metadata) {
-    const char* const* keys = nullptr;
-    const char* const* values = nullptr;
+    const char *const *keys = nullptr;
+    const char *const *values = nullptr;
     size_t num_keys = 0;
 
     // Get keys and values from the metadata
@@ -246,17 +246,17 @@ void MorphiZenEP::update_provider_options_from_ep_metadata(
   }
 }
 
-const char* ORT_API_CALL
-MorphiZenEP::GetNameImpl(const OrtEp* this_ptr) noexcept {
-  const auto* ep = static_cast<const MorphiZenEP*>(this_ptr);
+const char *ORT_API_CALL
+MorphiZenEP::GetNameImpl(const OrtEp *this_ptr) noexcept {
+  const auto *ep = static_cast<const MorphiZenEP *>(this_ptr);
   return ep->name_.c_str();
 }
 
-OrtStatus* ORT_API_CALL MorphiZenEP::GetCapabilityImpl(
-    OrtEp* this_ptr, const OrtGraph* graph,
-    OrtEpGraphSupportInfo* graph_support_info) noexcept {
+OrtStatus *ORT_API_CALL MorphiZenEP::GetCapabilityImpl(
+    OrtEp *this_ptr, const OrtGraph *graph,
+    OrtEpGraphSupportInfo *graph_support_info) noexcept {
 
-  MorphiZenEP* self = static_cast<MorphiZenEP*>(this_ptr);
+  MorphiZenEP *self = static_cast<MorphiZenEP *>(this_ptr);
 
   if (self->ir_converter == nullptr) {
     MY_LOG(1) << " no available IR converter.";
@@ -268,24 +268,24 @@ OrtStatus* ORT_API_CALL MorphiZenEP::GetCapabilityImpl(
   return nullptr;
 }
 
-OrtStatus* ORT_API_CALL MorphiZenEP::CompileImpl(
-    OrtEp* this_ptr, const OrtGraph** graphs, const OrtNode** fused_nodes,
-    size_t count, OrtNodeComputeInfo** node_compute_infos,
-    OrtNode** ep_context_nodes) noexcept {
-  MorphiZenEP* self = static_cast<MorphiZenEP*>(this_ptr);
+OrtStatus *ORT_API_CALL MorphiZenEP::CompileImpl(
+    OrtEp *this_ptr, const OrtGraph **graphs, const OrtNode **fused_nodes,
+    size_t count, OrtNodeComputeInfo **node_compute_infos,
+    OrtNode **ep_context_nodes) noexcept {
+  MorphiZenEP *self = static_cast<MorphiZenEP *>(this_ptr);
   return self->Compile(graphs, fused_nodes, count, node_compute_infos,
                        ep_context_nodes);
 }
 void ORT_API_CALL MorphiZenEP::ReleaseNodeComputeInfosImpl(
-    OrtEp* this_ptr, OrtNodeComputeInfo** node_compute_infos,
+    OrtEp *this_ptr, OrtNodeComputeInfo **node_compute_infos,
     size_t num_node_compute_infos) noexcept {
-  MorphiZenEP* self = static_cast<MorphiZenEP*>(this_ptr);
+  MorphiZenEP *self = static_cast<MorphiZenEP *>(this_ptr);
   self->ReleaseNodeComputeInfos(node_compute_infos, num_node_compute_infos);
 }
 
-const char* ORT_API_CALL MorphiZenEP::GetCompiledModelCompatibilityInfoImpl(
-    OrtEp* this_ptr, const OrtGraph* graph) noexcept {
-  MorphiZenEP* self = static_cast<MorphiZenEP*>(this_ptr);
+const char *ORT_API_CALL MorphiZenEP::GetCompiledModelCompatibilityInfoImpl(
+    OrtEp *this_ptr, const OrtGraph *graph) noexcept {
+  MorphiZenEP *self = static_cast<MorphiZenEP *>(this_ptr);
   if (!self->execution_providers_ || (*self->execution_providers_)->empty()) {
     return nullptr;
   }
@@ -293,11 +293,11 @@ const char* ORT_API_CALL MorphiZenEP::GetCompiledModelCompatibilityInfoImpl(
       (*self->execution_providers_).get(), graph);
 }
 
-OrtStatus*
-MorphiZenEP::GetCapability(OrtGraphWrapper& graph_viewer,
-                           OrtEpGraphSupportInfo& graph_support_info) {
+OrtStatus *
+MorphiZenEP::GetCapability(OrtGraphWrapper &graph_viewer,
+                           OrtEpGraphSupportInfo &graph_support_info) {
   auto is_subgraph = graph_viewer.is_subgraph();
-  const char* gname_for_log = nullptr;
+  const char *gname_for_log = nullptr;
   try {
     gname_for_log = graph_viewer.name();
   } catch (...) {
@@ -327,7 +327,7 @@ MorphiZenEP::GetCapability(OrtGraphWrapper& graph_viewer,
   // setup API environment
   // Use compile-time default backend, but allow override via environment
   // variable
-  const char* backend_ir = MORPHIZEN_DEFAULT_BACKEND;
+  const char *backend_ir = MORPHIZEN_DEFAULT_BACKEND;
   auto env_backend = ENV_PARAM(MORPHIZEN_ORT_BRIDGE_BACKEND);
   if (!env_backend.empty()) {
     // Environment variable is set, use it to override the default
@@ -357,15 +357,15 @@ MorphiZenEP::GetCapability(OrtGraphWrapper& graph_viewer,
   MY_LOG(2) << "IRConverter external_data_threshold: "
             << ir_config.external_data_threshold;
   auto ir_model = ir_converter(*this, graph_viewer.get(), ir_config);
-  auto& graph = MORPHIZEN_ORT_API(model_main_graph)(*ir_model);
+  auto &graph = MORPHIZEN_ORT_API(model_main_graph)(*ir_model);
   auto model_path = MORPHIZEN_ORT_API(get_model_path)(graph);
-  OrtStatus* status = nullptr;
+  OrtStatus *status = nullptr;
   execution_providers_ =
       std::make_unique<my_ep_t>(compile_onnx_model_morphizen_ep_v4(
           model_path.u8string(), graph, provider_options_, session_configs_,
-          (void*)&status,
-          [](void* status, int code, const char* error_message) {
-            OrtStatus** ort_status = static_cast<OrtStatus**>(status);
+          (void *)&status,
+          [](void *status, int code, const char *error_message) {
+            OrtStatus **ort_status = static_cast<OrtStatus **>(status);
             *ort_status =
                 Ort::GetApi().CreateStatus((OrtErrorCode)code, error_message);
           },
@@ -379,12 +379,12 @@ MorphiZenEP::GetCapability(OrtGraphWrapper& graph_viewer,
   OrtNodeFusionOptions node_fusion_options = {};
   node_fusion_options.ort_version_supported = ORT_API_VERSION;
   node_fusion_options.drop_constant_initializers = true;
-  auto supported_node_groups = std::vector<std::vector<const OrtNode*>>();
-  for (auto& ep : **execution_providers_) {
+  auto supported_node_groups = std::vector<std::vector<const OrtNode *>>();
+  for (auto &ep : **execution_providers_) {
     CHECK(ep.get() != nullptr);
     supported_node_groups.emplace_back(get_supported_nodes(*ep, graph_viewer));
   }
-  for (auto& supported_nodes : supported_node_groups) {
+  for (auto &supported_nodes : supported_node_groups) {
     auto status1 = ep_api.EpGraphSupportInfo_AddNodesToFuse(
         &graph_support_info, supported_nodes.data(), supported_nodes.size(),
         &node_fusion_options);
@@ -398,15 +398,15 @@ MorphiZenEP::GetCapability(OrtGraphWrapper& graph_viewer,
 }
 
 static void update_argument_indice(
-    const google::protobuf::RepeatedPtrField<std::string>& meta_def_args,
-    google::protobuf::RepeatedField<int32_t>* argument_indices,
-    const std::vector<const OrtValueInfo*>& node_value_infos) {
+    const google::protobuf::RepeatedPtrField<std::string> &meta_def_args,
+    google::protobuf::RepeatedField<int32_t> *argument_indices,
+    const std::vector<const OrtValueInfo *> &node_value_infos) {
   CHECK_LE(meta_def_args.size(), node_value_infos.size());
   argument_indices->Clear();
   argument_indices->Reserve(meta_def_args.size());
   int size = meta_def_args.size();
   for (int j = 0; j < size; ++j) {
-    auto& meta_def_name = meta_def_args[(int)j];
+    auto &meta_def_name = meta_def_args[(int)j];
     bool found = false;
     for (size_t i = 0; i < node_value_infos.size(); ++i) {
       auto name = Ort::ConstValueInfo(node_value_infos[i]).GetName();
@@ -433,18 +433,18 @@ static void update_argument_indice(
   }
 }
 void MorphiZenEP::update_input_output_argument_indice(
-    morphizen::ExecutionProvider& ep, const OrtNode* node) {
-  auto ep_ext = dynamic_cast<morphizen::ExecutionProviderConcrete*>(&ep);
+    morphizen::ExecutionProvider &ep, const OrtNode *node) {
+  auto ep_ext = dynamic_cast<morphizen::ExecutionProviderConcrete *>(&ep);
   CHECK(ep_ext != nullptr) << "Execution provider does not support "
                               "ExecutionProviderExt interface.";
-  auto& meta_def = ep_ext->get_meta_def();
-  std::vector<const OrtValueInfo*> inputs = {};
+  auto &meta_def = ep_ext->get_meta_def();
+  std::vector<const OrtValueInfo *> inputs = {};
   size_t num_of_inputs = 0;
   throw_if_error(ort_api.Node_GetNumInputs(node, &num_of_inputs));
   inputs.resize(num_of_inputs);
   throw_if_error(ort_api.Node_GetInputs(node, inputs.data(), num_of_inputs));
 
-  std::vector<const OrtValueInfo*> outputs = {};
+  std::vector<const OrtValueInfo *> outputs = {};
   size_t num_of_outputs = 0;
   throw_if_error(ort_api.Node_GetNumOutputs(node, &num_of_outputs));
   outputs.resize(num_of_outputs);
@@ -454,10 +454,10 @@ void MorphiZenEP::update_input_output_argument_indice(
   update_argument_indice(meta_def.outputs(),
                          meta_def.mutable_output_argument_indice(), outputs);
 }
-OrtStatus* MorphiZenEP::Compile(const OrtGraph** graphs,
-                                const OrtNode** fused_nodes, size_t count,
-                                OrtNodeComputeInfo** node_compute_infos,
-                                OrtNode** ep_context_nodes) {
+OrtStatus *MorphiZenEP::Compile(const OrtGraph **graphs,
+                                const OrtNode **fused_nodes, size_t count,
+                                OrtNodeComputeInfo **node_compute_infos,
+                                OrtNode **ep_context_nodes) {
   CHECK(execution_providers_ != nullptr)
       << "Execution providers are not initialized.";
   CHECK_EQ((*execution_providers_)->size(), count)
@@ -469,7 +469,7 @@ OrtStatus* MorphiZenEP::Compile(const OrtGraph** graphs,
     // here we assume that the execution_providers_ are in the same order as
     // the nodes in the graph. this is the tight coupling between the
     // execution providers and the graph nodes.
-    auto& ep_ptr = (**execution_providers_)[index];
+    auto &ep_ptr = (**execution_providers_)[index];
     CHECK(ep_ptr.get() != nullptr)
         << "Execution provider at index " << index << " is null.";
     auto status =
@@ -484,20 +484,20 @@ OrtStatus* MorphiZenEP::Compile(const OrtGraph** graphs,
   }
   return nullptr;
 }
-OrtStatus*
-MorphiZenEP::ReleaseNodeComputeInfos(OrtNodeComputeInfo** node_compute_infos,
+OrtStatus *
+MorphiZenEP::ReleaseNodeComputeInfos(OrtNodeComputeInfo **node_compute_infos,
                                      size_t num_node_compute_infos) {
   for (auto i = 0u; i < num_node_compute_infos; ++i) {
-    delete static_cast<MorphiZenEP_ComputeInfo*>(node_compute_infos[i]);
+    delete static_cast<MorphiZenEP_ComputeInfo *>(node_compute_infos[i]);
   }
   return nullptr;
 }
 
-OrtStatus* MorphiZenEP::CompileSubgraph(const morphizen::ExecutionProvider& ep,
-                                        const OrtGraph* graph,
-                                        const OrtNode* fused_node,
-                                        OrtNodeComputeInfo*& node_compute_info,
-                                        OrtNode*& ep_context_node) {
+OrtStatus *MorphiZenEP::CompileSubgraph(const morphizen::ExecutionProvider &ep,
+                                        const OrtGraph *graph,
+                                        const OrtNode *fused_node,
+                                        OrtNodeComputeInfo *&node_compute_info,
+                                        OrtNode *&ep_context_node) {
   (void)graph;
   (void)fused_node;
   (void)ep_context_node; // TODO implement EP context.
@@ -520,37 +520,37 @@ OrtStatus* MorphiZenEP::CompileSubgraph(const morphizen::ExecutionProvider& ep,
     node_compute_info = morphizen_node_compute_info;
     morphizen_node_compute_info->ort_version_supported = ORT_API_VERSION;
     morphizen_node_compute_info->morphizen_ep =
-        const_cast<morphizen::ExecutionProvider*>(&ep);
+        const_cast<morphizen::ExecutionProvider *>(&ep);
     morphizen_node_compute_info->CreateState =
-        [](OrtNodeComputeInfo* this_ptr, OrtNodeComputeContext* compute_context,
-           void** compute_state) -> OrtStatus* {
+        [](OrtNodeComputeInfo *this_ptr, OrtNodeComputeContext *compute_context,
+           void **compute_state) -> OrtStatus * {
       (void)compute_context;
-      auto self = static_cast<MorphiZenEP_ComputeInfo*>(this_ptr);
-      auto* p = self->morphizen_ep->compile().release();
+      auto self = static_cast<MorphiZenEP_ComputeInfo *>(this_ptr);
+      auto *p = self->morphizen_ep->compile().release();
       *compute_state = p;
       return nullptr;
     };
     morphizen_node_compute_info->ReleaseState =
-        [](OrtNodeComputeInfo* this_ptr, void* compute_state) -> void {
-      auto self = static_cast<MorphiZenEP_ComputeInfo*>(this_ptr);
+        [](OrtNodeComputeInfo *this_ptr, void *compute_state) -> void {
+      auto self = static_cast<MorphiZenEP_ComputeInfo *>(this_ptr);
       (void)self;
       if (compute_state) {
-        delete static_cast<morphizen::CustomOp*>(compute_state);
+        delete static_cast<morphizen::CustomOp *>(compute_state);
       }
     };
     morphizen_node_compute_info->Compute =
-        [](OrtNodeComputeInfo* this_ptr, void* compute_state,
-           OrtKernelContext* kernel_context) -> OrtStatus* {
-      auto self = static_cast<MorphiZenEP_ComputeInfo*>(this_ptr);
+        [](OrtNodeComputeInfo *this_ptr, void *compute_state,
+           OrtKernelContext *kernel_context) -> OrtStatus * {
+      auto self = static_cast<MorphiZenEP_ComputeInfo *>(this_ptr);
       (void)self;
-      static_cast<morphizen::CustomOp*>(compute_state)
+      static_cast<morphizen::CustomOp *>(compute_state)
           ->Compute(&Ort::GetApi(), kernel_context);
       return nullptr;
     };
     MY_LOG(2) << "CompileSubgraph: Successfully compiled subgraph";
     return nullptr;
 
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     MY_LOG(1) << "CompileSubgraph: Exception caught: " << e.what();
     return Ort::GetApi().CreateStatus(
         ORT_FAIL,
@@ -564,10 +564,10 @@ OrtStatus* MorphiZenEP::CompileSubgraph(const morphizen::ExecutionProvider& ep,
 }
 
 static bool morphizen_names_are_contained_in_ort_names(
-    std::set<std::string>& morphizen_names, std::set<std::string>& ort_names) {
-  auto join = [](const auto& set) {
+    std::set<std::string> &morphizen_names, std::set<std::string> &ort_names) {
+  auto join = [](const auto &set) {
     std::ostringstream oss;
-    for (const auto& name : set) {
+    for (const auto &name : set) {
       if (!oss.str().empty()) {
         oss << ", ";
       }
@@ -577,7 +577,7 @@ static bool morphizen_names_are_contained_in_ort_names(
   };
   // Check if all morphizen_names are contained in ort_names
   auto ret = std::all_of(morphizen_names.begin(), morphizen_names.end(),
-                         [&ort_names](const std::string& name) {
+                         [&ort_names](const std::string &name) {
                            return ort_names.count(name) > 0;
                          });
   if (!ret) {
@@ -591,10 +591,10 @@ static bool morphizen_names_are_contained_in_ort_names(
   }
   return ret;
 }
-OrtNode* MorphiZenEP::convert_morphizen_node_to_ort_node(
-    const OrtModelEditorApi* model_editor_api,
-    const onnxruntime::Node* morphizen_node, //
-    const OrtNode* fused_node) const {
+OrtNode *MorphiZenEP::convert_morphizen_node_to_ort_node(
+    const OrtModelEditorApi *model_editor_api,
+    const onnxruntime::Node *morphizen_node, //
+    const OrtNode *fused_node) const {
   if (!morphizen_node) {
     return nullptr;
   }
@@ -604,7 +604,7 @@ OrtNode* MorphiZenEP::convert_morphizen_node_to_ort_node(
       MORPHIZEN_ORT_API(node_get_output_node_args_unsafe)(*morphizen_node);
   std::vector<std::string> input_names;
   std::set<std::string> morphizen_input_names;
-  for (const auto& arg : *input_node_args) {
+  for (const auto &arg : *input_node_args) {
     auto name = MORPHIZEN_ORT_API(node_arg_get_name_unsafe)(*arg.node_arg);
     input_names.push_back(name);
     morphizen_input_names.insert(name);
@@ -612,34 +612,34 @@ OrtNode* MorphiZenEP::convert_morphizen_node_to_ort_node(
   std::vector<std::string> output_names;
   std::set<std::string> morphizen_output_names;
   output_names.reserve(output_node_args->size());
-  for (const auto& arg : *output_node_args) {
+  for (const auto &arg : *output_node_args) {
     auto name = MORPHIZEN_ORT_API(node_arg_get_name_unsafe)(*arg);
     output_names.push_back(name);
     morphizen_output_names.insert(name);
   }
-  auto& morphizen_attributes = MORPHIZEN_ORT_API(node_get_attributes)(
-      const_cast<onnxruntime::Node&>(*morphizen_node));
-  auto attributes = std::unique_ptr<std::vector<OrtOpAttr*>,
-                                    void (*)(std::vector<OrtOpAttr*>*)>(
-      new std::vector<OrtOpAttr*>(), [](std::vector<OrtOpAttr*>* ptr) {
-        for (auto& attr : *ptr) {
+  auto &morphizen_attributes = MORPHIZEN_ORT_API(node_get_attributes)(
+      const_cast<onnxruntime::Node &>(*morphizen_node));
+  auto attributes = std::unique_ptr<std::vector<OrtOpAttr *>,
+                                    void (*)(std::vector<OrtOpAttr *> *)>(
+      new std::vector<OrtOpAttr *>(), [](std::vector<OrtOpAttr *> *ptr) {
+        for (auto &attr : *ptr) {
           Ort::GetApi().ReleaseOpAttr(attr);
         }
         delete ptr;
       });
   auto keys = MORPHIZEN_ORT_API(node_attributes_get_keys)(morphizen_attributes);
   attributes->reserve(keys->size());
-  for (const auto& name : *keys) {
+  for (const auto &name : *keys) {
     auto proto1 =
         MORPHIZEN_ORT_API(node_attributes_get)(morphizen_attributes, name);
     CHECK(proto1 != nullptr) << "Attribute proto is null for name: " << name;
-    auto& proto = *proto1;
+    auto &proto = *proto1;
     auto type = MORPHIZEN_ORT_API(attr_proto_get_type)(proto);
     switch (type) {
     case ONNX_NAMESPACE::AttributeProto_AttributeType::
         AttributeProto_AttributeType_INT: {
       int64_t value = MORPHIZEN_ORT_API(attr_proto_get_int)(proto);
-      OrtOpAttr* ort_attr = nullptr;
+      OrtOpAttr *ort_attr = nullptr;
       throw_if_error(ort_api.CreateOpAttr(
           name.c_str(), &value, 1, OrtOpAttrType::ORT_OP_ATTR_INT, &ort_attr));
       attributes->push_back(ort_attr);
@@ -648,7 +648,7 @@ OrtNode* MorphiZenEP::convert_morphizen_node_to_ort_node(
     case ONNX_NAMESPACE::AttributeProto_AttributeType::
         AttributeProto_AttributeType_STRING: {
       std::string value = MORPHIZEN_ORT_API(attr_proto_get_string)(proto);
-      OrtOpAttr* ort_attr = nullptr;
+      OrtOpAttr *ort_attr = nullptr;
       MY_LOG(1) << " add " << name << " size = " << value.size();
       throw_if_error(ort_api.CreateOpAttr(
           name.c_str(), value.data(), static_cast<int>(value.size()),
@@ -667,10 +667,10 @@ OrtNode* MorphiZenEP::convert_morphizen_node_to_ort_node(
   auto domain = MORPHIZEN_ORT_API(node_op_domain)(*morphizen_node);
 
   // NOTE: we must use the fused_node name, see graph_partitioner.cc:898
-  const char* ort_node_name = nullptr;
-  std::vector<const OrtValueInfo*> fused_node_inputs;
+  const char *ort_node_name = nullptr;
+  std::vector<const OrtValueInfo *> fused_node_inputs;
   size_t num_of_inputs = 0;
-  std::vector<const OrtValueInfo*> fused_node_outputs;
+  std::vector<const OrtValueInfo *> fused_node_outputs;
   size_t num_of_outputs = 0;
   throw_if_error(ort_api.Node_GetName(fused_node, &ort_node_name));
   throw_if_error(ort_api.Node_GetNumInputs(fused_node, &num_of_inputs));
@@ -685,12 +685,12 @@ OrtNode* MorphiZenEP::convert_morphizen_node_to_ort_node(
   std::vector<std::string> output_names_2;
   std::transform(fused_node_inputs.begin(), fused_node_inputs.end(),
                  std::back_inserter(input_names_2),
-                 [](const OrtValueInfo* input) {
+                 [](const OrtValueInfo *input) {
                    return Ort::ConstValueInfo(input).GetName();
                  });
   std::transform(fused_node_outputs.begin(), fused_node_outputs.end(),
                  std::back_inserter(output_names_2),
-                 [](const OrtValueInfo* output) {
+                 [](const OrtValueInfo *output) {
                    return Ort::ConstValueInfo(output).GetName();
                  });
   std::set<std::string> ort_input_names(input_names_2.begin(),
@@ -703,17 +703,17 @@ OrtNode* MorphiZenEP::convert_morphizen_node_to_ort_node(
   CHECK(morphizen_names_are_contained_in_ort_names(morphizen_output_names,
                                                    ort_output_names))
       << "MorphiZen EP and ORT have different output names: ";
-  std::vector<const char*> input_names_c;
-  std::vector<const char*> output_names_c;
+  std::vector<const char *> input_names_c;
+  std::vector<const char *> output_names_c;
   input_names_c.reserve(input_names_2.size());
   output_names_c.reserve(output_names_2.size());
   std::transform(input_names_2.begin(), input_names_2.end(),
                  std::back_inserter(input_names_c),
-                 [](const std::string& name) { return name.c_str(); });
+                 [](const std::string &name) { return name.c_str(); });
   std::transform(output_names_2.begin(), output_names_2.end(),
                  std::back_inserter(output_names_c),
-                 [](const std::string& name) { return name.c_str(); });
-  OrtNode* ort_added_node = nullptr;
+                 [](const std::string &name) { return name.c_str(); });
+  OrtNode *ort_added_node = nullptr;
   auto status = model_editor_api->CreateNode(
       "EPContext", "com.microsoft", ort_node_name, input_names_c.data(),
       input_names_c.size(), output_names_c.data(), output_names_c.size(),
@@ -727,13 +727,13 @@ OrtNode* MorphiZenEP::convert_morphizen_node_to_ort_node(
 
   return ort_added_node;
 }
-OrtStatus* MorphiZenEP::CreateEpContextNodes(const OrtNode** fused_nodes,
-                                             OrtNode** ep_context_nodes,
+OrtStatus *MorphiZenEP::CreateEpContextNodes(const OrtNode **fused_nodes,
+                                             OrtNode **ep_context_nodes,
                                              size_t count) const {
   if (!enable_ep_context_) {
     return nullptr;
   }
-  morphizen::DllSafe<std::vector<onnxruntime::Node*>>
+  morphizen::DllSafe<std::vector<onnxruntime::Node *>>
       morphizen_ep_context_nodes;
   auto error_code = create_ep_context_nodes(**execution_providers_,
                                             &morphizen_ep_context_nodes);
@@ -745,7 +745,7 @@ OrtStatus* MorphiZenEP::CreateEpContextNodes(const OrtNode** fused_nodes,
   CHECK_EQ(count, morphizen_ep_context_nodes->size())
       << "Count of EP context nodes does not match the expected count";
 
-  const OrtModelEditorApi* model_editor_api = ort_api.GetModelEditorApi();
+  const OrtModelEditorApi *model_editor_api = ort_api.GetModelEditorApi();
   if (!model_editor_api) {
     LOG(ERROR) << "Model editor API is not available";
     return ort_api.CreateStatus(ORT_FAIL, "Model editor API is not available");
@@ -765,11 +765,11 @@ OrtStatus* MorphiZenEP::CreateEpContextNodes(const OrtNode** fused_nodes,
  * @param graph_viewer The ORT graph wrapper to iterate through nodes
  * @return std::vector<const OrtNode*> List of supported nodes
  */
-static std::vector<const OrtNode*>
-get_supported_nodes(const morphizen::ExecutionProvider& ep,
-                    OrtGraphWrapper& graph_viewer) {
+static std::vector<const OrtNode *>
+get_supported_nodes(const morphizen::ExecutionProvider &ep,
+                    OrtGraphWrapper &graph_viewer) {
 
-  std::vector<const OrtNode*> supported_nodes;
+  std::vector<const OrtNode *> supported_nodes;
 
   try {
     auto meta_def_outputs =
@@ -784,13 +784,13 @@ get_supported_nodes(const morphizen::ExecutionProvider& ep,
               << " node outputs";
     // Iterate through all nodes in the graph
     auto nodes = graph_viewer.nodes();
-    for (const OrtNode* node : nodes) {
+    for (const OrtNode *node : nodes) {
       if (!node)
         continue;
 
       try {
         // Get node outputs using ORT API
-        std::vector<const OrtValueInfo*> outputs;
+        std::vector<const OrtValueInfo *> outputs;
         size_t num_outputs = 0;
         graph_viewer.throw_if_error(
             graph_viewer.ort_api.Node_GetNumOutputs(node, &num_outputs));
@@ -802,7 +802,7 @@ get_supported_nodes(const morphizen::ExecutionProvider& ep,
         auto outputs_span = gsl::span(outputs);
         bool node_supported = false;
 
-        for (const OrtValueInfo* output : outputs_span) {
+        for (const OrtValueInfo *output : outputs_span) {
           if (!output)
             continue;
 
@@ -825,7 +825,7 @@ get_supported_nodes(const morphizen::ExecutionProvider& ep,
           supported_nodes.push_back(node);
         }
 
-      } catch (const std::exception& e) {
+      } catch (const std::exception &e) {
         MY_LOG(3) << "Exception while processing node: " << e.what();
         // Continue with next node
       }
@@ -836,7 +836,7 @@ get_supported_nodes(const morphizen::ExecutionProvider& ep,
     CHECK_EQ(supported_nodes.size(), ep_supported_outputs.size())
         << "Mismatch between supported nodes count and EP meta definition "
            "size";
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     MY_LOG(1) << "Exception in get_supported_nodes: " << e.what();
     // Return empty vector on error
   }
@@ -844,10 +844,10 @@ get_supported_nodes(const morphizen::ExecutionProvider& ep,
   return supported_nodes;
 }
 
-OrtStatus* MorphiZenEP::GetSessionConfigEntryOrDefault(
-    const OrtSessionOptions& session_options, const char* config_key,
-    const std::string& default_val,
-    /*out*/ std::string& config_val) {
+OrtStatus *MorphiZenEP::GetSessionConfigEntryOrDefault(
+    const OrtSessionOptions &session_options, const char *config_key,
+    const std::string &default_val,
+    /*out*/ std::string &config_val) {
   int has_config = 0;
   throw_if_error(
       ort_api.HasSessionConfigEntry(&session_options, config_key, &has_config));

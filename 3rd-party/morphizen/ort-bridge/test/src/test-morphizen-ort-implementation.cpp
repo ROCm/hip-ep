@@ -19,10 +19,10 @@ DEF_ENV_PARAM_2(MORPHIZEN_ORT_BRIDGE_UNITTEST_COVERAGE, "", std::string)
 namespace morphizen {
 namespace test {
 
-std::string vec_to_string(const std::vector<int64_t>& vec) {
+std::string vec_to_string(const std::vector<int64_t> &vec) {
   std::ostringstream oss;
   oss << "{ ";
-  for (const auto& elem : vec) {
+  for (const auto &elem : vec) {
     oss << elem << " ";
   }
   oss << "}";
@@ -83,7 +83,7 @@ protected:
   void ComprehensiveCoverageReport();
   void DetailedCoverageAnalysis();
   void DeleteSimpleConvReluModel();
-  morphizen::Model* simple_conv_relu_model_ = nullptr;
+  morphizen::Model *simple_conv_relu_model_ = nullptr;
 };
 
 // ============================================================================
@@ -148,7 +148,7 @@ void MorphizenOrtApiTest::Test02_TestIsolationVerificationSecond() {
     std::filesystem::path temp_path =
         std::filesystem::temp_directory_path() / "isolation_test.onnx";
     std::vector<std::pair<std::string, int64_t>> opset = {{"", 11}};
-    auto* model = wrapped_api_->create_empty_model(temp_path, opset);
+    auto *model = wrapped_api_->create_empty_model(temp_path, opset);
     ASSERT_TRUE(model != nullptr) << "Failed to create empty model";
     wrapped_api_->model_delete(model);
   } catch (...) {
@@ -174,7 +174,7 @@ void MorphizenOrtApiTest::Test03_ModelLoadAndDelete() {
     if (backend_ == morphizen::kMLIRBackend) {
       test_model_path = RESNET_50_MLIR_PATH;
     }
-    auto* model = wrapped_api_->model_load(test_model_path.u8string());
+    auto *model = wrapped_api_->model_load(test_model_path.u8string());
     ASSERT_TRUE(model != nullptr) << "Failed to load model from file";
     // auto* morphizen_model = reinterpret_cast<morphizen::Model*>(model);
     // ASSERT_TRUE(morphizen_model->is_valid())
@@ -199,7 +199,7 @@ void MorphizenOrtApiTest::Test04_ModelMetaDataOperations() {
         std::filesystem::temp_directory_path() / "test_model.onnx";
     std::vector<std::pair<std::string, int64_t>> opset = {{"", 11}};
 
-    auto* model = wrapped_api_->create_empty_model(temp_path, opset);
+    auto *model = wrapped_api_->create_empty_model(temp_path, opset);
     ASSERT_TRUE(model != nullptr) << "Failed to create empty model";
     wrapped_api_->model_set_meta_data(*model, "test_key", "test_value");
     int has_meta = wrapped_api_->model_has_meta_data(*model, "test_key");
@@ -209,7 +209,7 @@ void MorphizenOrtApiTest::Test04_ModelMetaDataOperations() {
         << "Model metadata value for 'test_key' should be 'test_value'";
 
     // Test model cloning
-    auto* cloned_model = wrapped_api_->model_clone(*model, 1024);
+    auto *cloned_model = wrapped_api_->model_clone(*model, 1024);
     // Note: model_clone may return nullptr in current implementation
     if (cloned_model) {
       wrapped_api_->model_delete(cloned_model);
@@ -234,14 +234,14 @@ void MorphizenOrtApiTest::Test05_GraphBasicOperations() {
         CMAKE_CURRENT_BINARY_PATH /
         "Test07_create_simple_conv_relu_model.onnx.graph.onnx";
 
-    auto* model = wrapped_api_->model_load(test07_output_model.u8string());
+    auto *model = wrapped_api_->model_load(test07_output_model.u8string());
     ASSERT_TRUE(model != nullptr) << "Failed to load model for graph tests";
 
-    auto& graph = wrapped_api_->model_main_graph(*model);
+    auto &graph = wrapped_api_->model_main_graph(*model);
     ASSERT_TRUE(&graph != nullptr) << "Main graph should not be null";
 
     // Test basic graph operations
-    const std::string& graph_name = wrapped_api_->graph_get_name(graph);
+    const std::string &graph_name = wrapped_api_->graph_get_name(graph);
     LOG(INFO) << "Graph name: " << graph_name;
     ASSERT_FALSE(graph_name.empty()) << "Graph name should not be empty";
 
@@ -249,7 +249,7 @@ void MorphizenOrtApiTest::Test05_GraphBasicOperations() {
     //     wrapped_api_->graph_get_model(graph); // Test node and I/O operations
 
     // Test graph_get_model
-    const auto& model_ref = wrapped_api_->graph_get_model(graph);
+    const auto &model_ref = wrapped_api_->graph_get_model(graph);
     ASSERT_TRUE(&model_ref != nullptr)
         << "Graph model reference should not be null";
 
@@ -281,21 +281,21 @@ void MorphizenOrtApiTest::Test05_GraphBasicOperations() {
     ASSERT_GT(nodes->size(), 1)
         << "Expected more than 1 node in the graph, got: " << nodes->size();
     LOG(INFO) << "Graph has " << nodes->size() << " nodes";
-    const auto& node = wrapped_api_->graph_get_node(
+    const auto &node = wrapped_api_->graph_get_node(
         graph, wrapped_api_->node_get_index(*(*nodes)[0]));
     ASSERT_TRUE(node != nullptr) << "First node should not be null";
     ASSERT_TRUE(node == (*nodes)[0]) << "First node should not be null";
-    const std::string& node_name = wrapped_api_->node_get_name(*node);
+    const std::string &node_name = wrapped_api_->node_get_name(*node);
     LOG(INFO) << "First node name: " << node_name;
-    const std::string& op_domain = wrapped_api_->node_op_domain(*node);
+    const std::string &op_domain = wrapped_api_->node_op_domain(*node);
     LOG(INFO) << "First node op domain: " << op_domain;
-    const std::string& op_type = wrapped_api_->node_op_type(*node);
+    const std::string &op_type = wrapped_api_->node_op_type(*node);
     LOG(INFO) << "First node op_type: " << op_type;
 
     // Test graph_get_node_arg - try to get a node argument by name
     auto first_input_name =
         wrapped_api_->node_arg_get_name_unsafe(*(*inputs)[0]);
-    const auto* node_arg =
+    const auto *node_arg =
         wrapped_api_->graph_get_node_arg(graph, first_input_name);
     // Note: node_arg may be null depending on implementation
 
@@ -306,7 +306,7 @@ void MorphizenOrtApiTest::Test05_GraphBasicOperations() {
               << consumer_nodes->size();
 
     // Test initialized tensors
-    const auto& tensors =
+    const auto &tensors =
         wrapped_api_->graph_get_all_initialized_tensors(graph);
     // Check that we have some initialized tensors (weights, biases, etc.)
     ASSERT_GE(tensors.size(), 0)
@@ -329,11 +329,11 @@ void MorphizenOrtApiTest::Test06_GraphAdvancedOperations() {
     if (backend_ == morphizen::kMLIRBackend) {
       test_model_path = RESNET_50_MLIR_PATH;
     }
-    auto* model = wrapped_api_->model_load(test_model_path.u8string());
+    auto *model = wrapped_api_->model_load(test_model_path.u8string());
     ASSERT_TRUE(model != nullptr) << "Failed to load model for graph tests";
-    auto& graph = wrapped_api_->model_main_graph(*model);
+    auto &graph = wrapped_api_->model_main_graph(*model);
     // Test model path
-    const auto& model_path = wrapped_api_->get_model_path(graph);
+    const auto &model_path = wrapped_api_->get_model_path(graph);
     EXPECT_EQ(model_path, test_model_path.u8string())
         << "Model path should match the loaded model path";
     // Test graph name setting
@@ -343,7 +343,7 @@ void MorphizenOrtApiTest::Test06_GraphAdvancedOperations() {
         << "Graph name should be set to 'test_graph_name'";
 
     // Test DFS traversal (with empty lambda functions)
-    std::vector<const morphizen::Node*> leaf_nodes;
+    std::vector<const morphizen::Node *> leaf_nodes;
     auto output_node_args = wrapped_api_->graph_get_outputs_unsafe(graph);
     for (auto node_arg : *output_node_args) {
       ASSERT_TRUE(node_arg != nullptr);
@@ -352,12 +352,12 @@ void MorphizenOrtApiTest::Test06_GraphAdvancedOperations() {
       ASSERT_TRUE(producer_node);
       leaf_nodes.push_back(producer_node);
     }
-    auto nodes_entering = std::vector<const morphizen::Node*>{};
-    auto nodes_leaving = std::vector<const morphizen::Node*>{};
+    auto nodes_entering = std::vector<const morphizen::Node *>{};
+    auto nodes_leaving = std::vector<const morphizen::Node *>{};
     auto verbose_log = 0;
     wrapped_api_->graph_reverse_dfs_from(
-        graph, gsl::span<const morphizen::Node* const>(leaf_nodes),
-        [this, &nodes_entering, verbose_log](const morphizen::Node* node) {
+        graph, gsl::span<const morphizen::Node *const>(leaf_nodes),
+        [this, &nodes_entering, verbose_log](const morphizen::Node *node) {
           auto op_type = wrapped_api_->node_op_type(*node);
           if (op_type == "Constant") {
             LOG_IF(INFO, verbose_log)
@@ -370,7 +370,7 @@ void MorphizenOrtApiTest::Test06_GraphAdvancedOperations() {
               << "  --- entering node: "
               << "\"" << wrapped_api_->node_get_name(*node) << "\""; /* enter */
         },
-        [this, &nodes_leaving, verbose_log](const morphizen::Node* node) {
+        [this, &nodes_leaving, verbose_log](const morphizen::Node *node) {
           auto op_type = wrapped_api_->node_op_type(*node);
           if (op_type == "Constant") {
             LOG_IF(INFO, verbose_log)
@@ -383,30 +383,30 @@ void MorphizenOrtApiTest::Test06_GraphAdvancedOperations() {
               << "  --- leaving node: "
               << "\"" << wrapped_api_->node_get_name(*node) << "\""; /* leave */
         },
-        [](const morphizen::Node*, const morphizen::Node*) {
+        [](const morphizen::Node *, const morphizen::Node *) {
           return false; /* stop */
         });
     ASSERT_TRUE(!nodes_entering.empty())
         << "Expected at least one node to be entered during DFS traversal";
     ASSERT_TRUE(!nodes_leaving.empty())
         << "Expected at least one node to be left during DFS traversal";
-    for (const auto* node : nodes_entering) {
+    for (const auto *node : nodes_entering) {
       LOG_IF(INFO, verbose_log)
           << "Entered node: "
           << "\"" << wrapped_api_->node_get_name(*node) << "\"";
     }
-    for (const auto* node : nodes_leaving) {
+    for (const auto *node : nodes_leaving) {
       LOG_IF(INFO, verbose_log)
           << "Left node: "
           << "\"" << wrapped_api_->node_get_name(*node) << "\"";
     }
-    auto nodes_entering2 = std::vector<const morphizen::Node*>{};
-    auto nodes_leaving2 = std::vector<const morphizen::Node*>{};
+    auto nodes_entering2 = std::vector<const morphizen::Node *>{};
+    auto nodes_leaving2 = std::vector<const morphizen::Node *>{};
     // test graph_reverse_dfs_from_preemp similiar to above
     wrapped_api_->graph_reverse_dfs_from_preemp(
-        graph, gsl::span<const morphizen::Node* const>(leaf_nodes),
+        graph, gsl::span<const morphizen::Node *const>(leaf_nodes),
         [this, &nodes_entering2,
-         verbose_log](const morphizen::Node* node) -> bool {
+         verbose_log](const morphizen::Node *node) -> bool {
           auto op_type = wrapped_api_->node_op_type(*node);
           if (op_type == "Constant") {
             LOG_IF(INFO, verbose_log)
@@ -421,7 +421,7 @@ void MorphizenOrtApiTest::Test06_GraphAdvancedOperations() {
           return false;
         },
         [this, &nodes_leaving2,
-         verbose_log](const morphizen::Node* node) -> bool {
+         verbose_log](const morphizen::Node *node) -> bool {
           auto op_type = wrapped_api_->node_op_type(*node);
           if (op_type == "Constant") {
             LOG_IF(INFO, verbose_log)
@@ -436,7 +436,7 @@ void MorphizenOrtApiTest::Test06_GraphAdvancedOperations() {
           return false;
         },
         nullptr,
-        [](const morphizen::Node*, const morphizen::Node*) -> bool {
+        [](const morphizen::Node *, const morphizen::Node *) -> bool {
           return false; /* stop */
         });
     EXPECT_EQ(nodes_entering.size(), nodes_entering2.size())
@@ -467,20 +467,20 @@ void MorphizenOrtApiTest::Test08_NodeOperations() {
       LOG(INFO) << "No model available for fuse test, creating one first...";
       Test07_create_simple_conv_relu_model();
     }
-    auto* model = simple_conv_relu_model_;
+    auto *model = simple_conv_relu_model_;
     ASSERT_TRUE(model != nullptr);
     {
-      auto& graph = wrapped_api_->model_main_graph(*model);
+      auto &graph = wrapped_api_->model_main_graph(*model);
       auto nodes = wrapped_api_->graph_nodes_unsafe(graph);
 
       // Test node operations on each node (if any exist)
-      for (const auto* node : *nodes) {
+      for (const auto *node : *nodes) {
         if (node) {
-          const std::string& name = wrapped_api_->node_get_name(*node);
-          const std::string& desc = wrapped_api_->node_description(*node);
+          const std::string &name = wrapped_api_->node_get_name(*node);
+          const std::string &desc = wrapped_api_->node_description(*node);
           size_t index = wrapped_api_->node_get_index(*node);
-          const std::string& op_type = wrapped_api_->node_op_type(*node);
-          const std::string& op_domain = wrapped_api_->node_op_domain(*node);
+          const std::string &op_type = wrapped_api_->node_op_type(*node);
+          const std::string &op_domain = wrapped_api_->node_op_domain(*node);
 
           auto inputs = wrapped_api_->node_get_inputs_unsafe(*node);
           auto outputs = wrapped_api_->node_get_output_node_args_unsafe(*node);
@@ -488,13 +488,13 @@ void MorphizenOrtApiTest::Test08_NodeOperations() {
           bool is_fused = wrapped_api_->node_type_is_fused(*node);
 
           // Test getting attributes (const version, so we can't modify)
-          auto& attrs = wrapped_api_->node_get_attributes(
-              *const_cast<morphizen::Node*>(node));
+          auto &attrs = wrapped_api_->node_get_attributes(
+              *const_cast<morphizen::Node *>(node));
 
           // Test node_get_function_body (may return null for non-function
           // nodes)
           try {
-            const auto& function_body =
+            const auto &function_body =
                 wrapped_api_->node_get_function_body(*node);
             // If we get here, the node has a function body
           } catch (...) {
@@ -523,18 +523,18 @@ void MorphizenOrtApiTest::Test09_NodeArgOperations() {
       Test07_create_simple_conv_relu_model();
     }
 
-    auto* model = simple_conv_relu_model_;
+    auto *model = simple_conv_relu_model_;
     ASSERT_TRUE(model != nullptr) << "Failed to load model for NodeArg tests";
     {
-      auto& graph = wrapped_api_->model_main_graph(*model);
+      auto &graph = wrapped_api_->model_main_graph(*model);
 
       // Create a new NodeArg for testing
       std::vector<int64_t> shape = {1, 3, 224, 224};
-      auto& new_node_arg = wrapped_api_->node_arg_new(graph, "test_input",
+      auto &new_node_arg = wrapped_api_->node_arg_new(graph, "test_input",
                                                       &shape, 1); // FLOAT type
 
       // Test NodeArg operations
-      const std::string& name =
+      const std::string &name =
           wrapped_api_->node_arg_get_name_unsafe(new_node_arg);
       ASSERT_TRUE(name == "test_input")
           << "Expected node arg name to be 'test_input', got: " << name;
@@ -574,7 +574,7 @@ void MorphizenOrtApiTest::Test09_NodeArgOperations() {
 
       // Test get_const_data_as_tensor (may throw for non-constant args)
       if (wrapped_api_->node_arg_is_constant(graph, new_node_arg)) {
-        const auto& tensor_data =
+        const auto &tensor_data =
             wrapped_api_->node_arg_get_const_data_as_tensor(graph,
                                                             new_node_arg);
       }
@@ -595,13 +595,13 @@ void MorphizenOrtApiTest::Test09_NodeArgOperations() {
 
 void MorphizenOrtApiTest::Test10_NodeAttributesOperations() {
   // Test NodeAttributes operations
-  auto* attrs = wrapped_api_->node_attributes_new();
+  auto *attrs = wrapped_api_->node_attributes_new();
   ASSERT_NE(attrs, nullptr);
 
   // Create some test attributes
-  auto* int_attr = wrapped_api_->attr_proto_new_int("test_int", 42);
-  auto* float_attr = wrapped_api_->attr_proto_new_float("test_float", 3.14f);
-  auto* string_attr =
+  auto *int_attr = wrapped_api_->attr_proto_new_int("test_int", 42);
+  auto *float_attr = wrapped_api_->attr_proto_new_float("test_float", 3.14f);
+  auto *string_attr =
       wrapped_api_->attr_proto_new_string("test_string", "hello");
 
   if (int_attr && float_attr && string_attr) {
@@ -611,11 +611,11 @@ void MorphizenOrtApiTest::Test10_NodeAttributesOperations() {
     wrapped_api_->node_attributes_add(*attrs, std::move(*string_attr));
 
     // Get attributes
-    const auto* retrieved_int =
+    const auto *retrieved_int =
         wrapped_api_->node_attributes_get(*attrs, "test_int");
-    const auto* retrieved_float =
+    const auto *retrieved_float =
         wrapped_api_->node_attributes_get(*attrs, "test_float");
-    const auto* retrieved_string =
+    const auto *retrieved_string =
         wrapped_api_->node_attributes_get(*attrs, "test_string");
 
     // Get keys
@@ -634,9 +634,9 @@ void MorphizenOrtApiTest::Test11_AttributeProtoOperations() {
   // Test various attribute creation and manipulation
   {
     // Test integer attributes
-    auto* int_attr = wrapped_api_->attr_proto_new_int("int_attr", 123);
+    auto *int_attr = wrapped_api_->attr_proto_new_int("int_attr", 123);
     ASSERT_TRUE(int_attr);
-    const std::string& name = wrapped_api_->attr_proto_get_name(*int_attr);
+    const std::string &name = wrapped_api_->attr_proto_get_name(*int_attr);
     EXPECT_EQ(name, "int_attr");
 
     int type = wrapped_api_->attr_proto_get_type(*int_attr);
@@ -647,7 +647,7 @@ void MorphizenOrtApiTest::Test11_AttributeProtoOperations() {
     EXPECT_EQ(value, 123);
 
     // Test cloning
-    auto* cloned_attr = wrapped_api_->attr_proto_clone(*int_attr);
+    auto *cloned_attr = wrapped_api_->attr_proto_clone(*int_attr);
     int type_cloned = wrapped_api_->attr_proto_get_type(*cloned_attr);
     EXPECT_EQ(type_cloned,
               ONNX_NAMESPACE::AttributeProto_AttributeType::
@@ -655,7 +655,7 @@ void MorphizenOrtApiTest::Test11_AttributeProtoOperations() {
 
     value = wrapped_api_->attr_proto_get_int(*cloned_attr);
     EXPECT_EQ(value, 123);
-    const std::string& name_cloned =
+    const std::string &name_cloned =
         wrapped_api_->attr_proto_get_name(*cloned_attr);
     EXPECT_EQ(name_cloned, "int_attr");
 
@@ -665,7 +665,7 @@ void MorphizenOrtApiTest::Test11_AttributeProtoOperations() {
   }
   {
     // Test float attributes
-    auto* float_attr = wrapped_api_->attr_proto_new_float("float_attr", 2.718f);
+    auto *float_attr = wrapped_api_->attr_proto_new_float("float_attr", 2.718f);
     ASSERT_TRUE(float_attr != nullptr);
     float value = wrapped_api_->attr_proto_get_float(*float_attr);
     EXPECT_NEAR(value, 2.718f, 0.001f);
@@ -674,10 +674,10 @@ void MorphizenOrtApiTest::Test11_AttributeProtoOperations() {
 
   {
     // Test string attributes
-    auto* string_attr =
+    auto *string_attr =
         wrapped_api_->attr_proto_new_string("string_attr", "test_value");
     ASSERT_TRUE(string_attr != nullptr);
-    const std::string& value =
+    const std::string &value =
         wrapped_api_->attr_proto_get_string(*string_attr);
     EXPECT_EQ(value, "test_value");
 
@@ -690,7 +690,7 @@ void MorphizenOrtApiTest::Test11_AttributeProtoOperations() {
   {
     // Test array attributes
     std::vector<int64_t> int_values = {1, 2, 3, 4, 5};
-    auto* ints_attr =
+    auto *ints_attr =
         wrapped_api_->attr_proto_new_ints("ints_attr", int_values);
     ASSERT_TRUE(ints_attr != nullptr);
     auto retrieved_ints = wrapped_api_->attr_proto_get_ints(*ints_attr);
@@ -703,7 +703,7 @@ void MorphizenOrtApiTest::Test11_AttributeProtoOperations() {
   {
 
     std::vector<float> float_values = {1.1f, 2.2f, 3.3f};
-    auto* floats_attr =
+    auto *floats_attr =
         wrapped_api_->attr_proto_new_floats("floats_attr", float_values);
     ASSERT_TRUE(floats_attr != nullptr);
     auto retrieved_floats = wrapped_api_->attr_proto_get_floats(*floats_attr);
@@ -716,7 +716,7 @@ void MorphizenOrtApiTest::Test11_AttributeProtoOperations() {
   {
 
     std::vector<std::string> string_values = {"a", "b", "c"};
-    auto* strings_attr =
+    auto *strings_attr =
         wrapped_api_->attr_proto_new_strings("strings_attr", string_values);
     ASSERT_TRUE(strings_attr != nullptr);
     auto retrieved_strings =
@@ -738,7 +738,7 @@ void MorphizenOrtApiTest::Test11_AttributeProtoOperations() {
     std::vector<float> tensor_data = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
     auto tensor_proto = wrapped_api_->tensor_proto_new_floats(
         "tensor_attr", shape, tensor_data);
-    auto* tensor_attr =
+    auto *tensor_attr =
         wrapped_api_->attr_proto_new_tensor("tensor_attr", *tensor_proto);
     ASSERT_TRUE(tensor_attr != nullptr);
     EXPECT_EQ(wrapped_api_->attr_proto_get_name(*tensor_attr), "tensor_attr");
@@ -764,7 +764,7 @@ void MorphizenOrtApiTest::Test11_AttributeProtoOperations() {
     std::vector<float> data_a = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
     auto tensor_proto_a =
         wrapped_api_->tensor_proto_new_floats("value", shape_a, data_a);
-    auto* attr_a =
+    auto *attr_a =
         wrapped_api_->attr_proto_new_tensor("value", *tensor_proto_a);
     ASSERT_TRUE(attr_a != nullptr);
 
@@ -772,7 +772,7 @@ void MorphizenOrtApiTest::Test11_AttributeProtoOperations() {
     std::vector<float> data_b = {10.0f, 20.0f, 30.0f, 40.0f};
     auto tensor_proto_b =
         wrapped_api_->tensor_proto_new_floats("value", shape_b, data_b);
-    auto* attr_b =
+    auto *attr_b =
         wrapped_api_->attr_proto_new_tensor("value", *tensor_proto_b);
     ASSERT_TRUE(attr_b != nullptr);
     EXPECT_NE(attr_a, attr_b);
@@ -792,12 +792,12 @@ void MorphizenOrtApiTest::Test11_AttributeProtoOperations() {
     std::vector<int64_t> bf16_shape = {2, 3};
     std::vector<int16_t> bf16_data = {0x3c00, 0x4000, 0x4200,
                                       0x4400, 0x4500, 0x4600};
-    auto* bf16_proto =
+    auto *bf16_proto =
         wrapped_api_->tensor_proto_new_bf16("value", bf16_shape, bf16_data);
     ASSERT_TRUE(bf16_proto != nullptr);
     EXPECT_DEATH(
         {
-          auto* attr =
+          auto *attr =
               wrapped_api_->attr_proto_new_tensor("value", *bf16_proto);
           (void)attr;
         },
@@ -816,10 +816,10 @@ void MorphizenOrtApiTest::Test12_TensorProtoOperations() {
 
   // Test float tensors
   std::vector<float> float_data = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
-  auto* float_tensor =
+  auto *float_tensor =
       wrapped_api_->tensor_proto_new_floats("float_tensor", shape, float_data);
   if (float_tensor) {
-    const std::string& name =
+    const std::string &name =
         wrapped_api_->tensor_proto_get_name(*float_tensor);
     EXPECT_EQ(name, "float_tensor");
     auto tensor_shape =
@@ -837,7 +837,7 @@ void MorphizenOrtApiTest::Test12_TensorProtoOperations() {
 
   // Test integer tensors
   std::vector<int64_t> int64_data = {10, 20, 30, 40, 50, 60};
-  auto* int64_tensor =
+  auto *int64_tensor =
       wrapped_api_->tensor_proto_new_i64("int64_tensor", shape, int64_data);
   if (int64_tensor) {
     auto data_type = wrapped_api_->tensor_proto_data_type(*int64_tensor);
@@ -848,7 +848,7 @@ void MorphizenOrtApiTest::Test12_TensorProtoOperations() {
   }
 
   std::vector<int32_t> int32_data = {1, 2, 3, 4, 5, 6};
-  auto* int32_tensor =
+  auto *int32_tensor =
       wrapped_api_->tensor_proto_new_i32("int32_tensor", shape, int32_data);
   if (int32_tensor) {
     auto data_type = wrapped_api_->tensor_proto_data_type(*int32_tensor);
@@ -859,7 +859,7 @@ void MorphizenOrtApiTest::Test12_TensorProtoOperations() {
   }
 
   std::vector<int16_t> int16_data = {1, 2, 3, 4, 5, 6};
-  auto* int16_tensor =
+  auto *int16_tensor =
       wrapped_api_->tensor_proto_new_i16("int16_tensor", shape, int16_data);
   if (int16_tensor) {
     auto data_type = wrapped_api_->tensor_proto_data_type(*int16_tensor);
@@ -870,7 +870,7 @@ void MorphizenOrtApiTest::Test12_TensorProtoOperations() {
   }
 
   std::vector<int8_t> int8_data = {1, 2, 3, 4, 5, 6};
-  auto* int8_tensor =
+  auto *int8_tensor =
       wrapped_api_->tensor_proto_new_i8("int8_tensor", shape, int8_data);
   if (int8_tensor) {
     auto data_type = wrapped_api_->tensor_proto_data_type(*int8_tensor);
@@ -882,7 +882,7 @@ void MorphizenOrtApiTest::Test12_TensorProtoOperations() {
 
   // Test unsigned integer tensors
   std::vector<uint64_t> uint64_data = {10, 20, 30, 40, 50, 60};
-  auto* uint64_tensor =
+  auto *uint64_tensor =
       wrapped_api_->tensor_proto_new_u64("uint64_tensor", shape, uint64_data);
   if (uint64_tensor) {
     auto data_type = wrapped_api_->tensor_proto_data_type(*uint64_tensor);
@@ -893,7 +893,7 @@ void MorphizenOrtApiTest::Test12_TensorProtoOperations() {
   }
 
   std::vector<uint32_t> uint32_data = {1, 2, 3, 4, 5, 6};
-  auto* uint32_tensor =
+  auto *uint32_tensor =
       wrapped_api_->tensor_proto_new_u32("uint32_tensor", shape, uint32_data);
   if (uint32_tensor) {
     auto data_type = wrapped_api_->tensor_proto_data_type(*uint32_tensor);
@@ -904,7 +904,7 @@ void MorphizenOrtApiTest::Test12_TensorProtoOperations() {
   }
 
   std::vector<uint16_t> uint16_data = {1, 2, 3, 4, 5, 6};
-  auto* uint16_tensor =
+  auto *uint16_tensor =
       wrapped_api_->tensor_proto_new_u16("uint16_tensor", shape, uint16_data);
   if (uint16_tensor) {
     auto data_type = wrapped_api_->tensor_proto_data_type(*uint16_tensor);
@@ -915,7 +915,7 @@ void MorphizenOrtApiTest::Test12_TensorProtoOperations() {
   }
 
   std::vector<uint8_t> uint8_data = {1, 2, 3, 4, 5, 6};
-  auto* uint8_tensor =
+  auto *uint8_tensor =
       wrapped_api_->tensor_proto_new_u8("uint8_tensor", shape, uint8_data);
   if (uint8_tensor) {
     auto data_type = wrapped_api_->tensor_proto_data_type(*uint8_tensor);
@@ -927,7 +927,7 @@ void MorphizenOrtApiTest::Test12_TensorProtoOperations() {
 
   // Test double tensors
   std::vector<double> double_data = {1.1, 2.2, 3.3, 4.4, 5.5, 6.6};
-  auto* double_tensor = wrapped_api_->tensor_proto_new_doubles(
+  auto *double_tensor = wrapped_api_->tensor_proto_new_doubles(
       "double_tensor", shape, double_data);
   if (double_tensor) {
     auto data_type = wrapped_api_->tensor_proto_data_type(*double_tensor);
@@ -940,7 +940,7 @@ void MorphizenOrtApiTest::Test12_TensorProtoOperations() {
   // Test half precision tensors (stored as int16)
   std::vector<int16_t> fp16_data = {0x3c00, 0x4000, 0x4200,
                                     0x4400, 0x4500, 0x4600}; // FP16 values
-  auto* fp16_tensor =
+  auto *fp16_tensor =
       wrapped_api_->tensor_proto_new_fp16("fp16_tensor", shape, fp16_data);
   if (fp16_tensor) {
     auto data_type = wrapped_api_->tensor_proto_data_type(*fp16_tensor);
@@ -950,7 +950,7 @@ void MorphizenOrtApiTest::Test12_TensorProtoOperations() {
     wrapped_api_->tensor_proto_delete(fp16_tensor);
   }
 
-  auto* bf16_tensor =
+  auto *bf16_tensor =
       wrapped_api_->tensor_proto_new_bf16("bf16_tensor", shape, fp16_data);
   if (bf16_tensor) {
     auto data_type = wrapped_api_->tensor_proto_data_type(*bf16_tensor);
@@ -962,7 +962,7 @@ void MorphizenOrtApiTest::Test12_TensorProtoOperations() {
 
   // Test 4-bit tensors
   std::vector<int8_t> i4_data = {1, 2, 3, 4, 5, 6};
-  auto* i4_tensor =
+  auto *i4_tensor =
       wrapped_api_->tensor_proto_new_i4("i4_tensor", shape, i4_data);
   if (i4_tensor) {
     auto data_type = wrapped_api_->tensor_proto_data_type(*i4_tensor);
@@ -973,7 +973,7 @@ void MorphizenOrtApiTest::Test12_TensorProtoOperations() {
   }
 
   std::vector<uint8_t> u4_data = {1, 2, 3, 4, 5, 6};
-  auto* u4_tensor =
+  auto *u4_tensor =
       wrapped_api_->tensor_proto_new_u4("u4_tensor", shape, u4_data);
   if (u4_tensor) {
     auto data_type = wrapped_api_->tensor_proto_data_type(*u4_tensor);
@@ -1000,8 +1000,8 @@ void MorphizenOrtApiTest::Test13_ExtendedApiOperations() { // Test library
   LOG(INFO) << "Library Name: " << *lib_name;
 
   // Test session option configuration (dummy test)
-  void* dummy_mmap = nullptr;
-  void* dummy_session_option = nullptr;
+  void *dummy_mmap = nullptr;
+  void *dummy_session_option = nullptr;
   wrapped_api_->session_option_configuration(dummy_mmap, dummy_session_option,
                                              nullptr);
 
@@ -1019,12 +1019,12 @@ void MorphizenOrtApiTest::Test13_ExtendedApiOperations() { // Test library
       LOG(INFO) << "No model available for fuse test, creating one first...";
       Test07_create_simple_conv_relu_model();
     }
-    auto* model = simple_conv_relu_model_;
+    auto *model = simple_conv_relu_model_;
     ASSERT_TRUE(model != nullptr);
     {
       // the API model_to__proto and model_proto_serialize_as_string only for
       // fallback_cpu not implement in MLIR backend
-      auto* model_proto = wrapped_api_->model_to_proto(*model);
+      auto *model_proto = wrapped_api_->model_to_proto(*model);
       if (model_proto) {
         auto serialized =
             wrapped_api_->model_proto_serialize_as_string(*model_proto);
@@ -1032,9 +1032,9 @@ void MorphizenOrtApiTest::Test13_ExtendedApiOperations() { // Test library
       }
 
       // Test graph proto operations
-      auto& graph = wrapped_api_->model_main_graph(*model);
+      auto &graph = wrapped_api_->model_main_graph(*model);
       // The API graph_to_graph_proto will be obsolete soon
-      auto* graph_proto = wrapped_api_->graph_to_graph_proto(graph);
+      auto *graph_proto = wrapped_api_->graph_to_graph_proto(graph);
       if (graph_proto) {
         wrapped_api_->graph_proto_delete(graph_proto);
       }
@@ -1054,14 +1054,14 @@ void MorphizenOrtApiTest::Test14_GraphTensorOperations() {
         std::filesystem::temp_directory_path() / "test_tensors.onnx";
     std::vector<std::pair<std::string, int64_t>> opset = {{"", 11}};
 
-    auto* model = wrapped_api_->create_empty_model(temp_path, opset);
+    auto *model = wrapped_api_->create_empty_model(temp_path, opset);
     if (model) {
-      auto& graph = wrapped_api_->model_main_graph(*model);
+      auto &graph = wrapped_api_->model_main_graph(*model);
 
       // Create a tensor to add to the graph
       std::vector<int64_t> shape = {3, 3};
       std::vector<float> data = {1, 2, 3, 4, 5, 6, 7, 8, 9};
-      auto* tensor =
+      auto *tensor =
           wrapped_api_->tensor_proto_new_floats("test_tensor", shape, data);
 
       if (tensor) {
@@ -1100,12 +1100,12 @@ void MorphizenOrtApiTest::Test16_GraphFuseOperations() {
 
     // Clone the model for testing
     LOG(INFO) << "Cloning model for graph fuse operations...";
-    auto* cloned_model = wrapped_api_->model_clone(
+    auto *cloned_model = wrapped_api_->model_clone(
         *simple_conv_relu_model_, std::numeric_limits<size_t>::max());
     ASSERT_TRUE(cloned_model != nullptr) << "Failed to clone model";
 
     // Get the graph from the cloned model
-    auto& graph = wrapped_api_->model_main_graph(*cloned_model);
+    auto &graph = wrapped_api_->model_main_graph(*cloned_model);
 
     // Get nodes from the cloned graph
     auto nodes = wrapped_api_->graph_nodes_unsafe(graph);
@@ -1135,7 +1135,7 @@ void MorphizenOrtApiTest::Test16_GraphFuseOperations() {
       std::vector<std::string> fuse_constants =
           {}; // No constants for this test
 
-      auto& fused_node = wrapped_api_->graph_fuse(
+      auto &fused_node = wrapped_api_->graph_fuse(
           graph, "fused_conv_relu", "FusedConvRelu", nodes_to_fuse, fuse_inputs,
           fuse_outputs, fuse_constants);
 
@@ -1143,7 +1143,7 @@ void MorphizenOrtApiTest::Test16_GraphFuseOperations() {
                 << wrapped_api_->node_get_name(fused_node);
       LOG(INFO) << "Graph fuse operation completed successfully";
 
-    } catch (const std::exception& e) {
+    } catch (const std::exception &e) {
       LOG(INFO) << "Graph fuse test completed with exception (expected with "
                    "simple implementation): "
                 << e.what();
@@ -1162,7 +1162,7 @@ void MorphizenOrtApiTest::Test16_GraphFuseOperations() {
     wrapped_api_->model_delete(cloned_model);
     LOG(INFO) << "Test16_GraphFuseOperations completed successfully";
 
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     LOG(ERROR) << "Test16_GraphFuseOperations failed with exception: "
                << e.what();
     FAIL() << "Test16_GraphFuseOperations failed with exception: " << e.what();
@@ -1192,12 +1192,12 @@ void MorphizenOrtApiTest::Test17_GraphNodeRemovalOperations() {
 
     // Clone the model for testing (so we don't modify the original)
     LOG(INFO) << "Cloning model for graph node removal operations...";
-    auto* cloned_model = wrapped_api_->model_clone(
+    auto *cloned_model = wrapped_api_->model_clone(
         *simple_conv_relu_model_, std::numeric_limits<size_t>::max());
     ASSERT_TRUE(cloned_model != nullptr) << "Failed to clone model";
 
     // Get the graph from the cloned model
-    auto& graph = wrapped_api_->model_main_graph(*cloned_model);
+    auto &graph = wrapped_api_->model_main_graph(*cloned_model);
 
     // Get nodes from the cloned graph
     auto nodes = wrapped_api_->graph_nodes_unsafe(graph);
@@ -1221,7 +1221,7 @@ void MorphizenOrtApiTest::Test17_GraphNodeRemovalOperations() {
 
     wrapped_api_->graph_set_outputs(
         graph,
-        gsl::span<const morphizen::NodeArg* const>({(*conv_node_outputs)[0]}));
+        gsl::span<const morphizen::NodeArg *const>({(*conv_node_outputs)[0]}));
 
     LOG(INFO) << "Now delete the ReLU node (node at index 1)";
     // Delete the ReLU node
@@ -1250,7 +1250,7 @@ void MorphizenOrtApiTest::Test17_GraphNodeRemovalOperations() {
     wrapped_api_->model_delete(cloned_model);
     LOG(INFO) << "Test17_GraphNodeRemovalOperations completed successfully";
 
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     LOG(ERROR) << "Test17_GraphNodeRemovalOperations failed with exception: "
                << e.what();
     FAIL() << "Test17_GraphNodeRemovalOperations failed with exception: "
@@ -1282,8 +1282,8 @@ void MorphizenOrtApiTest::Test18_MissingApisCoverage() {
 
     // Test graph_get_model
     LOG(INFO) << "Testing graph_get_model...";
-    auto& graph = wrapped_api_->model_main_graph(*simple_conv_relu_model_);
-    const auto& model_ref = wrapped_api_->graph_get_model(graph);
+    auto &graph = wrapped_api_->model_main_graph(*simple_conv_relu_model_);
+    const auto &model_ref = wrapped_api_->graph_get_model(graph);
     ASSERT_TRUE(&model_ref != nullptr)
         << "graph_get_model should return valid reference";
 
@@ -1293,7 +1293,7 @@ void MorphizenOrtApiTest::Test18_MissingApisCoverage() {
     if (inputs.get() && !inputs->empty()) {
       auto first_input_name =
           wrapped_api_->node_arg_get_name_unsafe(*(*inputs)[0]);
-      const auto* node_arg =
+      const auto *node_arg =
           wrapped_api_->graph_get_node_arg(graph, first_input_name);
       LOG(INFO) << "graph_get_node_arg for '" << first_input_name
                 << "' returned: " << (node_arg ? "valid pointer" : "null");
@@ -1312,7 +1312,7 @@ void MorphizenOrtApiTest::Test18_MissingApisCoverage() {
 
     // Test model_clone
     LOG(INFO) << "Testing model_clone...";
-    auto* cloned_model =
+    auto *cloned_model =
         wrapped_api_->model_clone(*simple_conv_relu_model_, 1024);
     if (cloned_model) {
       LOG(INFO) << "model_clone succeeded";
@@ -1326,17 +1326,17 @@ void MorphizenOrtApiTest::Test18_MissingApisCoverage() {
     LOG(INFO) << "Testing node_get_attributes and node_get_function_body...";
     auto nodes = wrapped_api_->graph_nodes_unsafe(graph);
     if (nodes.get() && !nodes->empty()) {
-      for (const auto* node : *nodes) {
+      for (const auto *node : *nodes) {
         if (node) {
           // Test node_get_attributes
-          auto& attrs = wrapped_api_->node_get_attributes(
-              *const_cast<morphizen::Node*>(node));
+          auto &attrs = wrapped_api_->node_get_attributes(
+              *const_cast<morphizen::Node *>(node));
           LOG(INFO) << "Got attributes for node: "
                     << wrapped_api_->node_get_name(*node);
 
           // Test node_get_function_body (may throw for non-function nodes)
           try {
-            const auto& function_body =
+            const auto &function_body =
                 wrapped_api_->node_get_function_body(*node);
             LOG(INFO) << "Got function body for node: "
                       << wrapped_api_->node_get_name(*node);
@@ -1363,7 +1363,7 @@ void MorphizenOrtApiTest::Test18_MissingApisCoverage() {
           // Test node_arg_get_const_data_as_tensor (may throw for non-constant
           // args)
           if (wrapped_api_->node_arg_is_constant(graph, *node_arg)) {
-            const auto& tensor_data =
+            const auto &tensor_data =
                 wrapped_api_->node_arg_get_const_data_as_tensor(graph,
                                                                 *node_arg);
           }
@@ -1374,7 +1374,7 @@ void MorphizenOrtApiTest::Test18_MissingApisCoverage() {
     // Test node_arg_external_location
     LOG(INFO) << "Testing node_arg_external_location...";
     if (outputs.get() && !outputs->empty()) {
-      for (auto* node_arg : *outputs) {
+      for (auto *node_arg : *outputs) {
         if (node_arg) {
           std::string external_file;
           size_t offset = 0, size = 0, checksum = 0;
@@ -1388,8 +1388,8 @@ void MorphizenOrtApiTest::Test18_MissingApisCoverage() {
     // Test session_option_configuration and is_profiling_enabled
     LOG(INFO)
         << "Testing session_option_configuration and is_profiling_enabled...";
-    void* dummy_mmap = nullptr;
-    void* dummy_session_option = nullptr;
+    void *dummy_mmap = nullptr;
+    void *dummy_session_option = nullptr;
     wrapped_api_->session_option_configuration(dummy_mmap, dummy_session_option,
                                                nullptr);
     bool profiling_enabled =
@@ -1398,14 +1398,14 @@ void MorphizenOrtApiTest::Test18_MissingApisCoverage() {
 
     // Test graph_proto_delete and graph_infer_shapes
     LOG(INFO) << "Testing graph_proto_delete and graph_infer_shapes...";
-    auto* graph_proto = wrapped_api_->graph_to_graph_proto(graph);
+    auto *graph_proto = wrapped_api_->graph_to_graph_proto(graph);
     if (graph_proto) {
       wrapped_api_->graph_proto_delete(graph_proto);
       LOG(INFO) << "graph_proto_delete called successfully";
     }
 
     // Test graph_infer_shapes with model proto
-    auto* model_proto = wrapped_api_->model_to_proto(*simple_conv_relu_model_);
+    auto *model_proto = wrapped_api_->model_to_proto(*simple_conv_relu_model_);
     ASSERT_TRUE(model_proto);
     wrapped_api_->graph_infer_shapes(*model_proto);
     LOG(INFO) << "graph_infer_shapes called successfully";
@@ -1419,7 +1419,7 @@ void MorphizenOrtApiTest::Test18_MissingApisCoverage() {
         auto cloned_for_fuse =
             wrapped_api_->model_clone(*simple_conv_relu_model_, 1024);
         if (cloned_for_fuse) {
-          auto& fuse_graph = wrapped_api_->model_main_graph(*cloned_for_fuse);
+          auto &fuse_graph = wrapped_api_->model_main_graph(*cloned_for_fuse);
           auto fuse_inputs = wrapped_api_->graph_get_inputs_unsafe(fuse_graph);
           auto fuse_outputs =
               wrapped_api_->graph_get_outputs_unsafe(fuse_graph);
@@ -1437,7 +1437,7 @@ void MorphizenOrtApiTest::Test18_MissingApisCoverage() {
                 wrapped_api_->node_arg_get_name_unsafe(*(*fuse_outputs)[0])};
             std::vector<std::string> fuse_constants = {};
 
-            auto& fused_node = wrapped_api_->graph_fuse(
+            auto &fused_node = wrapped_api_->graph_fuse(
                 fuse_graph, "test_fused_node", "TestFuse", nodes_to_fuse,
                 fuse_input_names, fuse_output_names, fuse_constants);
 
@@ -1454,7 +1454,7 @@ void MorphizenOrtApiTest::Test18_MissingApisCoverage() {
 
     LOG(INFO) << "Test18_MissingApisCoverage completed successfully";
 
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     LOG(INFO) << "Test18_MissingApisCoverage completed with exception (some "
                  "APIs may not be fully implemented): "
               << e.what();
@@ -1480,12 +1480,12 @@ void MorphizenOrtApiTest::Test19_add_sin_op_before_relu_op() {
 
     // Clone the model for testing
     LOG(INFO) << "Cloning model for Sin->Cos operations...";
-    auto* cloned_model = wrapped_api_->model_clone(
+    auto *cloned_model = wrapped_api_->model_clone(
         *simple_conv_relu_model_, std::numeric_limits<size_t>::max());
     ASSERT_TRUE(cloned_model != nullptr) << "Failed to clone model";
 
     // Get the graph from the cloned model
-    auto& graph = wrapped_api_->model_main_graph(*cloned_model);
+    auto &graph = wrapped_api_->model_main_graph(*cloned_model);
     {
       LOG(INFO) << "DFS the unresolved graph to ensure all nodes are connected";
       auto topo_node_indices =
@@ -1508,8 +1508,8 @@ void MorphizenOrtApiTest::Test19_add_sin_op_before_relu_op() {
     LOG(INFO) << "Graph has " << nodes->size() << " nodes before modification";
 
     // Get the Conv node output (which currently goes to ReLU)
-    const auto* conv_node = (*nodes)[0]; // Conv node
-    const auto* relu_node = (*nodes)[1]; // ReLU node
+    const auto *conv_node = (*nodes)[0]; // Conv node
+    const auto *relu_node = (*nodes)[1]; // ReLU node
 
     auto conv_outputs =
         wrapped_api_->node_get_output_node_args_unsafe(*conv_node);
@@ -1521,7 +1521,7 @@ void MorphizenOrtApiTest::Test19_add_sin_op_before_relu_op() {
         << "ReLU node should have at least one input";
 
     // Get the intermediate tensor (conv_output) that connects Conv to ReLU
-    const auto* conv_output_arg = (*conv_outputs)[0];
+    const auto *conv_output_arg = (*conv_outputs)[0];
     std::string conv_output_name =
         wrapped_api_->node_arg_get_name_unsafe(*conv_output_arg);
 
@@ -1533,41 +1533,41 @@ void MorphizenOrtApiTest::Test19_add_sin_op_before_relu_op() {
 
     // Create intermediate tensor between Conv and Sin
     // sin_input_arg is as same as conv_output_arg, but with a new name
-    auto& sin_input_arg = *conv_output_arg;
+    auto &sin_input_arg = *conv_output_arg;
 
     // Create intermediate tensor between Sin and Cos
-    auto& sin_output_arg = wrapped_api_->node_arg_new(
+    auto &sin_output_arg = wrapped_api_->node_arg_new(
         graph, "sin_output", conv_output_shape.get(), 1); // FLOAT type
 
     // Create intermediate tensor between Cos and ReLU
-    auto& cos_output_arg = wrapped_api_->node_arg_new(
+    auto &cos_output_arg = wrapped_api_->node_arg_new(
         graph, "cos_output", conv_output_shape.get(), 1); // FLOAT type
 
     // Create Sin node attributes (Sin doesn't need specific attributes)
-    auto* sin_attrs = wrapped_api_->node_attributes_new();
+    auto *sin_attrs = wrapped_api_->node_attributes_new();
     ASSERT_TRUE(sin_attrs != nullptr) << "Failed to create Sin node attributes";
 
     // Create Sin node inputs and outputs
-    std::vector<const morphizen::NodeArg*> sin_inputs = {&sin_input_arg};
-    std::vector<const morphizen::NodeArg*> sin_outputs = {&sin_output_arg};
+    std::vector<const morphizen::NodeArg *> sin_inputs = {&sin_input_arg};
+    std::vector<const morphizen::NodeArg *> sin_outputs = {&sin_output_arg};
 
     // Add Sin node to the graph
     LOG(INFO) << "Adding Sin node to graph...";
-    auto& sin_node =
+    auto &sin_node =
         wrapped_api_->graph_add_node(graph, "sin_node", "Sin", "Sin operation",
                                      sin_inputs, sin_outputs, *sin_attrs, "");
 
     // Create Cos node attributes (Cos doesn't need specific attributes)
-    auto* cos_attrs = wrapped_api_->node_attributes_new();
+    auto *cos_attrs = wrapped_api_->node_attributes_new();
     ASSERT_TRUE(cos_attrs != nullptr) << "Failed to create Cos node attributes";
 
     // Create Cos node inputs and outputs
-    std::vector<const morphizen::NodeArg*> cos_inputs = {&sin_output_arg};
-    std::vector<const morphizen::NodeArg*> cos_outputs = {&cos_output_arg};
+    std::vector<const morphizen::NodeArg *> cos_inputs = {&sin_output_arg};
+    std::vector<const morphizen::NodeArg *> cos_outputs = {&cos_output_arg};
 
     // Add Cos node to the graph
     LOG(INFO) << "Adding Cos node to graph...";
-    auto& cos_node =
+    auto &cos_node =
         wrapped_api_->graph_add_node(graph, "cos_node", "Cos", "Cos operation",
                                      cos_inputs, cos_outputs, *cos_attrs, "");
 
@@ -1585,16 +1585,17 @@ void MorphizenOrtApiTest::Test19_add_sin_op_before_relu_op() {
         << "ReLU node should have at least one output";
     auto relu_output_arg = (*relu_outputs)[0];
     // Create new ReLU node with cos_output as input
-    auto* new_relu_attrs = wrapped_api_->node_attributes_new();
+    auto *new_relu_attrs = wrapped_api_->node_attributes_new();
     ASSERT_TRUE(new_relu_attrs != nullptr)
         << "Failed to create new ReLU node attributes";
 
-    std::vector<const morphizen::NodeArg*> new_relu_inputs = {&cos_output_arg};
-    std::vector<const morphizen::NodeArg*> new_relu_outputs = {relu_output_arg};
+    std::vector<const morphizen::NodeArg *> new_relu_inputs = {&cos_output_arg};
+    std::vector<const morphizen::NodeArg *> new_relu_outputs = {
+        relu_output_arg};
 
     // Add new ReLU node to the graph
     LOG(INFO) << "Adding new ReLU node with modified connections...";
-    auto& new_relu_node = wrapped_api_->graph_add_node(
+    auto &new_relu_node = wrapped_api_->graph_add_node(
         graph, "new_relu_node", "Relu", "ReLU activation operation",
         new_relu_inputs, new_relu_outputs, *new_relu_attrs, "");
     wrapped_api_->graph_remove_node(graph, {relu_node, nullptr});
@@ -1620,7 +1621,7 @@ void MorphizenOrtApiTest::Test19_add_sin_op_before_relu_op() {
 
     LOG(INFO) << "Test19_add_sin_op_before_relu_op completed successfully";
 
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     LOG(ERROR) << "Test19_add_sin_op_before_relu_op failed with exception: "
                << e.what();
     FAIL() << "Test19_add_sin_op_before_relu_op failed with exception: "
@@ -1646,12 +1647,12 @@ void MorphizenOrtApiTest::Test20_conv_relu_fuse_conv2d_nchw() {
 
     // Clone the model for testing
     LOG(INFO) << "Cloning model for Conv-ReLU fuse operations...";
-    auto* cloned_model = wrapped_api_->model_clone(
+    auto *cloned_model = wrapped_api_->model_clone(
         *simple_conv_relu_model_, std::numeric_limits<size_t>::max());
     ASSERT_TRUE(cloned_model != nullptr) << "Failed to clone model";
 
     // Get the graph from the cloned model
-    auto& graph = wrapped_api_->model_main_graph(*cloned_model);
+    auto &graph = wrapped_api_->model_main_graph(*cloned_model);
     {
       LOG(INFO) << "DFS the unresolved graph to ensure all nodes are connected";
       auto topo_node_indices =
@@ -1674,16 +1675,16 @@ void MorphizenOrtApiTest::Test20_conv_relu_fuse_conv2d_nchw() {
     LOG(INFO) << "Graph has " << nodes->size() << " nodes before modification";
 
     // Get the Conv node output (which currently goes to ReLU)
-    const auto* conv_node = wrapped_api_->graph_get_node(
+    const auto *conv_node = wrapped_api_->graph_get_node(
         graph, wrapped_api_->node_get_index(*(*nodes)[0])); // Conv node
-    const auto* relu_node = wrapped_api_->graph_get_node(
+    const auto *relu_node = wrapped_api_->graph_get_node(
         graph, wrapped_api_->node_get_index(*(*nodes)[1])); // ReLU node
 
     // Get Conv inputs as new Conv2D NCHW node inputs
     auto conv_inputs = wrapped_api_->node_get_inputs_unsafe(*conv_node);
     // Get Conv node attributes, for cloning to new Conv2D NCHW node
-    auto& conv_attrs = wrapped_api_->node_get_attributes(
-        *const_cast<morphizen::Node*>(conv_node));
+    auto &conv_attrs = wrapped_api_->node_get_attributes(
+        *const_cast<morphizen::Node *>(conv_node));
 
     // Relu outputs will be used as Conv2D NCHW node outputs
     auto relu_outputs =
@@ -1692,30 +1693,30 @@ void MorphizenOrtApiTest::Test20_conv_relu_fuse_conv2d_nchw() {
     //    wrapped_api_->node_arg_get_shape_i64_unsafe(*(*relu_outputs)[0]);
 
     // new inputs and outputs
-    std::vector<const morphizen::NodeArg*> new_conv2d_input_args;
+    std::vector<const morphizen::NodeArg *> new_conv2d_input_args;
     new_conv2d_input_args.reserve(conv_inputs->size());
-    for (const auto& input_arg : *conv_inputs) {
+    for (const auto &input_arg : *conv_inputs) {
       ASSERT_TRUE(input_arg.node_arg != nullptr)
           << "Conv node input should not be null";
       new_conv2d_input_args.push_back(input_arg.node_arg);
     }
-    std::vector<const morphizen::NodeArg*> new_conv2d_output_args = {
+    std::vector<const morphizen::NodeArg *> new_conv2d_output_args = {
         (*relu_outputs)[0]};
 
     // new attributes
-    auto* new_conv2d_attrs = wrapped_api_->node_attributes_new();
+    auto *new_conv2d_attrs = wrapped_api_->node_attributes_new();
     ASSERT_TRUE(new_conv2d_attrs != nullptr)
         << "Failed to create new Conv2D node attributes";
     auto attrs_keys = wrapped_api_->node_attributes_get_keys(conv_attrs);
-    for (const auto& key : *attrs_keys) {
-      auto* attr = wrapped_api_->node_attributes_get(conv_attrs, key);
+    for (const auto &key : *attrs_keys) {
+      auto *attr = wrapped_api_->node_attributes_get(conv_attrs, key);
       auto new_attr = wrapped_api_->attr_proto_clone(*attr);
       LOG(INFO) << "clone attribute: " << key;
       wrapped_api_->node_attributes_add(*new_conv2d_attrs,
                                         std::move(*new_attr));
     }
 
-    auto& new_conv2d_node = wrapped_api_->graph_add_node(
+    auto &new_conv2d_node = wrapped_api_->graph_add_node(
         graph, "new_conv_relu", "conv2d_nchw", "Conv2D NCHW operation",
         new_conv2d_input_args, new_conv2d_output_args, *new_conv2d_attrs,
         "com.xilinx");
@@ -1772,7 +1773,7 @@ void MorphizenOrtApiTest::Test20_conv_relu_fuse_conv2d_nchw() {
     wrapped_api_->model_delete(cloned_model);
     LOG(INFO) << "Test20_conv_relu_fuse_conv2d_nchw completed successfully";
 
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     LOG(ERROR) << "Test20_conv_relu_fuse_conv2d_nchw failed with exception: "
                << e.what();
     FAIL() << "Test20_conv_relu_fuse_conv2d_nchw failed with exception: "
@@ -1794,13 +1795,13 @@ void MorphizenOrtApiTest::Test21_fuse_relu_q() {
     if (backend_ == morphizen::kMLIRBackend) {
       test_model_path = RESNET_50_MLIR_PATH;
     }
-    auto* model = wrapped_api_->model_load(test_model_path.u8string());
+    auto *model = wrapped_api_->model_load(test_model_path.u8string());
     ASSERT_TRUE(model != nullptr) << "Failed to load ResNet-50 model";
 
-    auto* cloned_model =
+    auto *cloned_model =
         wrapped_api_->model_clone(*model, std::numeric_limits<size_t>::max());
     ASSERT_TRUE(cloned_model != nullptr) << "Failed to clone ResNet-50 model";
-    auto& graph = wrapped_api_->model_main_graph(*cloned_model);
+    auto &graph = wrapped_api_->model_main_graph(*cloned_model);
     // morphizen::graph_resolve(graph, true);
 
     // create pattern
@@ -1843,7 +1844,7 @@ void MorphizenOrtApiTest::Test21_fuse_relu_q() {
           auto b_q_node = (*bind)[pattern_q->get_id()];
           ASSERT_TRUE(b_relu_node.node != nullptr && b_q_node.node != nullptr)
               << "Pattern binding failed for Relu or QuantizeLinear node";
-          ASSERT_TRUE((void*)b_q_node.node == (void*)q_node)
+          ASSERT_TRUE((void *)b_q_node.node == (void *)q_node)
               << "Pattern binding QuantizeLinear node does not match current "
                  "node";
 
@@ -1898,7 +1899,7 @@ void MorphizenOrtApiTest::Test21_fuse_relu_q() {
     if (model) {
       wrapped_api_->model_delete(model);
     }
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     LOG(ERROR) << "Test21_fuse_relu_q failed with exception: " << e.what();
     FAIL() << "Test21_fuse_relu_q failed with exception: " << e.what();
   } catch (...) {
@@ -1914,21 +1915,21 @@ void MorphizenOrtApiTest::Test22_create_initializer_node_arg() {
         std::filesystem::temp_directory_path() / "test_new_initializer.onnx";
     std::vector<std::pair<std::string, int64_t>> opset = {{"", 11}};
 
-    auto* model = wrapped_api_->create_empty_model(temp_path, opset);
+    auto *model = wrapped_api_->create_empty_model(temp_path, opset);
     if (model) {
-      auto& graph = wrapped_api_->model_main_graph(*model);
+      auto &graph = wrapped_api_->model_main_graph(*model);
 
       // Create a tensor to add to the graph
       std::vector<int64_t> shape = {3, 3};
       std::vector<float> data = {1, 2, 3, 4, 5, 6, 7, 8, 9};
       auto tensor_name = "test_tensor";
-      auto* tensor =
+      auto *tensor =
           wrapped_api_->tensor_proto_new_floats(tensor_name, shape, data);
       ASSERT_TRUE(tensor != nullptr) << "Failed to create tensor";
 
       // Add initialized tensor
       wrapped_api_->graph_add_initialized_tensor(graph, *tensor);
-      auto& initializer_node_arg =
+      auto &initializer_node_arg =
           wrapped_api_->node_arg_new(graph, tensor_name, &shape, 1);
       wrapped_api_->tensor_proto_delete(tensor);
       wrapped_api_->model_delete(model);
@@ -1949,9 +1950,9 @@ void MorphizenOrtApiTest::Test23_try_fuse_and_fuse() {
     ASSERT_TRUE(simple_conv_relu_model_ != nullptr)
         << "Failed to get model for Conv-ReLU fuse test";
 
-    auto* cloned_model = wrapped_api_->model_clone(
+    auto *cloned_model = wrapped_api_->model_clone(
         *simple_conv_relu_model_, std::numeric_limits<size_t>::max());
-    auto& graph = wrapped_api_->model_main_graph(*cloned_model);
+    auto &graph = wrapped_api_->model_main_graph(*cloned_model);
 
     // graph_resolve the graph to ensure all nodes are connected
     int resolution_result = wrapped_api_->graph_resolve(graph, true);
@@ -1988,7 +1989,7 @@ void MorphizenOrtApiTest::Test23_try_fuse_and_fuse() {
       auto node_name = wrapped_api_->node_get_name(*node);
       auto inputs = std::vector<std::string>();
       inputs.reserve(conv_inputs->size());
-      for (const auto& input : *conv_inputs) {
+      for (const auto &input : *conv_inputs) {
         ASSERT_TRUE(input.node_arg != nullptr)
             << "Conv node input should not be null";
         inputs.push_back(
@@ -1996,7 +1997,7 @@ void MorphizenOrtApiTest::Test23_try_fuse_and_fuse() {
       }
       auto outputs = std::vector<std::string>();
       outputs.reserve(conv_outputs->size());
-      for (const auto& output : *conv_outputs) {
+      for (const auto &output : *conv_outputs) {
         ASSERT_TRUE(output != nullptr) << "Conv node output should not be null";
         outputs.push_back(wrapped_api_->node_arg_get_name_unsafe(*output));
       }
@@ -2005,9 +2006,9 @@ void MorphizenOrtApiTest::Test23_try_fuse_and_fuse() {
           pass->try_fuse(graph, "fuse_" + node_name, inputs, outputs,
                          const_initializers, "TEST_FUSE");
       CHECK(meta_def != nullptr) << "Failed to fuse node: " << node_name;
-      auto& fuse_node = pass->fuse(graph, std::move(*meta_def));
+      auto &fuse_node = pass->fuse(graph, std::move(*meta_def));
 
-      auto& function_body = wrapped_api_->node_get_function_body(fuse_node);
+      auto &function_body = wrapped_api_->node_get_function_body(fuse_node);
       ASSERT_TRUE(&function_body != nullptr)
           << "Function body for fused node should not be null";
       auto fuse_node_order =
@@ -2024,7 +2025,7 @@ void MorphizenOrtApiTest::Test23_try_fuse_and_fuse() {
       }
     }
 
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     LOG(ERROR) << "Test23_try_fuse_and_fuse failed with exception: "
                << e.what();
     FAIL() << "Test23_try_fuse_and_fuse failed with exception: " << e.what();
@@ -2049,15 +2050,15 @@ void MorphizenOrtApiTest::Test24_convert_initializer_to_const_op() {
 
     // Clone the model for testing
     LOG(INFO) << "Cloning model for Initializer to Const operations...";
-    auto* cloned_model = wrapped_api_->model_clone(
+    auto *cloned_model = wrapped_api_->model_clone(
         *simple_conv_relu_model_, std::numeric_limits<size_t>::max());
     ASSERT_TRUE(cloned_model != nullptr) << "Failed to clone model";
 
     // Get the graph from the cloned model
-    auto& graph = wrapped_api_->model_main_graph(*cloned_model);
+    auto &graph = wrapped_api_->model_main_graph(*cloned_model);
 
     // foreach initializer node args
-    const auto& initializer_tensors =
+    const auto &initializer_tensors =
         wrapped_api_->graph_get_all_initialized_tensors(graph);
     ASSERT_TRUE(initializer_tensors.size() > 0)
         << "No initializer tensors found in the graph";
@@ -2066,7 +2067,7 @@ void MorphizenOrtApiTest::Test24_convert_initializer_to_const_op() {
     for (auto constant_tensor : initializer_tensors) {
       LOG(INFO) << "Converting initializer tensor: " << constant_tensor.first
                 << " to Const Op";
-      const auto* node_arg =
+      const auto *node_arg =
           wrapped_api_->graph_get_node_arg(graph, constant_tensor.first);
       ASSERT_TRUE(node_arg != nullptr)
           << "Node arg for initializer tensor " << constant_tensor.first
@@ -2124,7 +2125,7 @@ void MorphizenOrtApiTest::Test24_convert_initializer_to_const_op() {
       } else {
         attrs.add("shape", std::vector<int64_t>{});
       }
-      auto& const_node = wrapped_api_->graph_add_node(
+      auto &const_node = wrapped_api_->graph_add_node(
           graph, "const_" + constant_tensor.first, op_type,
           "Const operation for initializer tensor", {}, {node_arg},
           *attrs.build(), "com.xilinx");
@@ -2182,7 +2183,7 @@ void MorphizenOrtApiTest::Test24_convert_initializer_to_const_op() {
     LOG(INFO) << "Graph resolved after converting initializers to Const Ops";
     wrapped_api_->model_delete(cloned_model);
 
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     LOG(ERROR)
         << "Test24_convert_initializer_to_const_op failed with exception: "
         << e.what();
@@ -2224,16 +2225,16 @@ void MorphizenOrtApiTest::ComprehensiveCoverageReport() {
 
   if (!missing_apis.empty()) {
     LOG(INFO) << "=== Missing APIs (" << missing_apis.size() << ") ===";
-    for (const auto& api : missing_apis) {
+    for (const auto &api : missing_apis) {
       LOG(INFO) << "  - " << api;
     }
   }
 
   // Count APIs by category using the helper
   auto api_categories = get_morphizen_ort_api_by_category();
-  for (const auto& [category, api_list] : api_categories) {
+  for (const auto &[category, api_list] : api_categories) {
     size_t called_in_category = 0;
-    for (const auto& api : api_list) {
+    for (const auto &api : api_list) {
       if (stats.find(api) != stats.end() && stats.at(api) > 0) {
         called_in_category++;
       }
@@ -2250,7 +2251,7 @@ void MorphizenOrtApiTest::ComprehensiveCoverageReport() {
   std::vector<std::pair<std::string, size_t>> sorted_stats(stats.begin(),
                                                            stats.end());
   std::sort(sorted_stats.begin(), sorted_stats.end(),
-            [](const auto& a, const auto& b) { return a.second > b.second; });
+            [](const auto &a, const auto &b) { return a.second > b.second; });
 
   for (size_t i = 0; i < std::min(size_t(10), sorted_stats.size()); ++i) {
     LOG(INFO) << "  " << sorted_stats[i].first << ": " << sorted_stats[i].second
@@ -2268,9 +2269,9 @@ void MorphizenOrtApiTest::ComprehensiveCoverageReport() {
 
   // Ensure each major category has some coverage
   size_t categories_with_coverage = 0;
-  for (const auto& [category, api_list] : api_categories) {
+  for (const auto &[category, api_list] : api_categories) {
     bool has_coverage = false;
-    for (const auto& api : api_list) {
+    for (const auto &api : api_list) {
       if (stats.find(api) != stats.end() && stats.at(api) > 0) {
         has_coverage = true;
         break;
@@ -2301,8 +2302,8 @@ void MorphizenOrtApiTest::DetailedCoverageAnalysis() {
   auto api_categories = get_morphizen_ort_api_by_category();
   std::map<std::string, std::vector<std::string>> missing_by_category;
 
-  for (const auto& missing_api : missing_apis) {
-    for (const auto& [category, api_list] : api_categories) {
+  for (const auto &missing_api : missing_apis) {
+    for (const auto &[category, api_list] : api_categories) {
       if (std::find(api_list.begin(), api_list.end(), missing_api) !=
           api_list.end()) {
         missing_by_category[category].push_back(missing_api);
@@ -2311,11 +2312,11 @@ void MorphizenOrtApiTest::DetailedCoverageAnalysis() {
     }
   }
 
-  for (const auto& [category, missing_list] : missing_by_category) {
+  for (const auto &[category, missing_list] : missing_by_category) {
     if (!missing_list.empty()) {
       LOG(INFO) << "Missing " << category << " APIs (" << missing_list.size()
                 << "):";
-      for (const auto& api : missing_list) {
+      for (const auto &api : missing_list) {
         LOG(INFO) << "  - " << api;
       }
     }
@@ -2355,9 +2356,9 @@ void MorphizenOrtApiTest::Test07_create_simple_conv_relu_model() {
     std::vector<std::pair<std::string, int64_t>> opset = {{"", 11}};
 
     // Create an empty model
-    auto* model = wrapped_api_->create_empty_model(temp_path, opset);
+    auto *model = wrapped_api_->create_empty_model(temp_path, opset);
     ASSERT_TRUE(model != nullptr) << "Failed to create empty model";
-    auto& graph = wrapped_api_->model_main_graph(*model);
+    auto &graph = wrapped_api_->model_main_graph(*model);
     LOG(INFO) << " the default graph name is "
               << wrapped_api_->graph_get_name(graph);
 
@@ -2368,17 +2369,17 @@ void MorphizenOrtApiTest::Test07_create_simple_conv_relu_model() {
     // Create input tensor (NCHW format: batch=1, channels=3, height=224,
     // width=224)
     std::vector<int64_t> input_shape = {1, 3, 224, 224};
-    auto& input_arg = wrapped_api_->node_arg_new(graph, "input", &input_shape,
+    auto &input_arg = wrapped_api_->node_arg_new(graph, "input", &input_shape,
                                                  1); // FLOAT type
     CHECK(&input_arg != nullptr);
     wrapped_api_->graph_set_inputs(
-        graph, gsl::span<const morphizen::NodeArg* const>({&input_arg}));
+        graph, gsl::span<const morphizen::NodeArg *const>({&input_arg}));
     // Create convolution weights (output_channels=64, input_channels=3,
     // kernel_h=3, kernel_w=3)
     std::vector<int64_t> weight_shape = {64, 3, 3, 3};
     std::vector<float> weight_data(64 * 3 * 3 * 3,
                                    0.1f); // Initialize with small values
-    auto* weight_tensor = wrapped_api_->tensor_proto_new_floats(
+    auto *weight_tensor = wrapped_api_->tensor_proto_new_floats(
         "conv_weight", weight_shape, weight_data);
     ASSERT_TRUE(weight_tensor != nullptr) << "Failed to create weight tensor";
 
@@ -2388,7 +2389,7 @@ void MorphizenOrtApiTest::Test07_create_simple_conv_relu_model() {
     // Create bias tensor (64 output channels)
     std::vector<int64_t> bias_shape = {64};
     std::vector<float> bias_data(64, 0.0f); // Initialize with zeros
-    auto* bias_tensor = wrapped_api_->tensor_proto_new_floats(
+    auto *bias_tensor = wrapped_api_->tensor_proto_new_floats(
         "conv_bias", bias_shape, bias_data);
     ASSERT_TRUE(bias_tensor != nullptr) << "Failed to create bias tensor";
 
@@ -2398,22 +2399,22 @@ void MorphizenOrtApiTest::Test07_create_simple_conv_relu_model() {
     // Create intermediate tensor for conv output (will be input to ReLU)
     std::vector<int64_t> conv_output_shape = {
         1, 64, 222, 222}; // Assuming no padding, stride=1
-    auto& conv_output_arg =
+    auto &conv_output_arg =
         wrapped_api_->node_arg_new(graph, "conv_output", &conv_output_shape, 1);
 
     // Create final output tensor (same shape as conv output since ReLU doesn't
     // change shape)
     std::vector<int64_t> final_output_shape = {1, 64, 222, 222};
-    auto& final_output_arg =
+    auto &final_output_arg =
         wrapped_api_->node_arg_new(graph, "output", &final_output_shape, 1);
 
     // Create Conv node attributes
-    auto* conv_attrs = wrapped_api_->node_attributes_new();
+    auto *conv_attrs = wrapped_api_->node_attributes_new();
     ASSERT_TRUE(conv_attrs != nullptr) << "Failed to create node attributes";
 
     // Add kernel_shape attribute [3, 3]
     std::vector<int64_t> kernel_shape = {3, 3};
-    auto* kernel_shape_attr =
+    auto *kernel_shape_attr =
         wrapped_api_->attr_proto_new_ints("kernel_shape", kernel_shape);
     if (kernel_shape_attr) {
       wrapped_api_->node_attributes_add(*conv_attrs,
@@ -2422,14 +2423,14 @@ void MorphizenOrtApiTest::Test07_create_simple_conv_relu_model() {
 
     // Add strides attribute [1, 1]
     std::vector<int64_t> strides = {1, 1};
-    auto* strides_attr = wrapped_api_->attr_proto_new_ints("strides", strides);
+    auto *strides_attr = wrapped_api_->attr_proto_new_ints("strides", strides);
     if (strides_attr) {
       wrapped_api_->node_attributes_add(*conv_attrs, std::move(*strides_attr));
     }
 
     // Add pads attribute [0, 0, 0, 0] (no padding)
     std::vector<int64_t> pads = {0, 0, 0, 0};
-    auto* pads_attr = wrapped_api_->attr_proto_new_ints("pads", pads);
+    auto *pads_attr = wrapped_api_->attr_proto_new_ints("pads", pads);
     if (pads_attr) {
       wrapped_api_->node_attributes_add(*conv_attrs, std::move(*pads_attr));
     }
@@ -2441,37 +2442,37 @@ void MorphizenOrtApiTest::Test07_create_simple_conv_relu_model() {
     ASSERT_TRUE(bias_arg != nullptr);
 
     // Create Conv node inputs and outputs
-    std::vector<const morphizen::NodeArg*> conv_inputs = {&input_arg,
-                                                          weight_arg, bias_arg};
-    std::vector<const morphizen::NodeArg*> conv_outputs = {&conv_output_arg};
+    std::vector<const morphizen::NodeArg *> conv_inputs = {
+        &input_arg, weight_arg, bias_arg};
+    std::vector<const morphizen::NodeArg *> conv_outputs = {&conv_output_arg};
 
     // Add Conv node to the graph
     LOG(INFO) << "Adding Conv node to graph...";
-    auto& conv_node = wrapped_api_->graph_add_node(
+    auto &conv_node = wrapped_api_->graph_add_node(
         graph, "conv_node", "Conv", "Convolution operation", conv_inputs,
         conv_outputs, *conv_attrs, "");
 
     // Create ReLU node attributes (ReLU doesn't need specific attributes)
-    auto* relu_attrs = wrapped_api_->node_attributes_new();
+    auto *relu_attrs = wrapped_api_->node_attributes_new();
     ASSERT_TRUE(relu_attrs != nullptr)
         << "Failed to create ReLU node attributes";
 
     // Create ReLU node inputs and outputs
-    std::vector<const morphizen::NodeArg*> relu_inputs = {&conv_output_arg};
-    std::vector<const morphizen::NodeArg*> relu_outputs = {&final_output_arg};
+    std::vector<const morphizen::NodeArg *> relu_inputs = {&conv_output_arg};
+    std::vector<const morphizen::NodeArg *> relu_outputs = {&final_output_arg};
 
     // Add ReLU node to the graph
     LOG(INFO) << "Adding ReLU node to graph...";
-    auto& relu_node = wrapped_api_->graph_add_node(
+    auto &relu_node = wrapped_api_->graph_add_node(
         graph, "relu_node", "Relu", "ReLU activation operation", relu_inputs,
         relu_outputs, *relu_attrs, "");
 
     // Set graph inputs and outputs
-    std::vector<const morphizen::NodeArg*> graph_inputs = {&input_arg};
-    std::vector<const morphizen::NodeArg*> graph_outputs = {&final_output_arg};
+    std::vector<const morphizen::NodeArg *> graph_inputs = {&input_arg};
+    std::vector<const morphizen::NodeArg *> graph_outputs = {&final_output_arg};
 
     wrapped_api_->graph_set_outputs(
-        graph, gsl::span<const morphizen::NodeArg* const>(graph_outputs));
+        graph, gsl::span<const morphizen::NodeArg *const>(graph_outputs));
 
     LOG(INFO) << "Created model structure:";
     LOG(INFO) << "  - Input: "
@@ -2529,7 +2530,7 @@ void MorphizenOrtApiTest::Test07_create_simple_conv_relu_model() {
     LOG(INFO) << "Test07_create_simple_conv_relu_model: Conv+ReLU model "
                  "creation completed successfully";
 
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     LOG(ERROR) << "Test07_create_simple_conv_relu_model failed with exception: "
                << e.what();
     FAIL() << "Test07_create_simple_conv_relu_model failed with exception: "

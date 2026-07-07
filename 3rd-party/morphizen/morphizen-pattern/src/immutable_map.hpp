@@ -30,8 +30,8 @@ public:
   using value_type = std::pair<const key_type, mapped_type>;
 
   using NodePtr = std::shared_ptr<const Node<Key, T, Compare>>;
-  Node(Color color, const NodePtr& left, const value_type& value,
-       const NodePtr& right)
+  Node(Color color, const NodePtr &left, const value_type &value,
+       const NodePtr &right)
       : color(color), left(left), value(value), right(right) {}
 
 private:
@@ -44,12 +44,12 @@ private:
   static const NodePtr nil;
   friend class ImmutableMap<Key, T, Compare>;
 
-  static NodePtr make_node(Color color, const NodePtr& left,
-                           const value_type& value, const NodePtr& right) {
+  static NodePtr make_node(Color color, const NodePtr &left,
+                           const value_type &value, const NodePtr &right) {
     return std::make_shared<Node>(Node{color, left, value, right});
   }
 
-  static NodePtr ins(const NodePtr& x, const value_type& value) {
+  static NodePtr ins(const NodePtr &x, const value_type &value) {
     Compare less;
     if (x == nil) {
       return make_node(RED, nil, value, nil);
@@ -72,7 +72,7 @@ private:
     balance B a x (T R b y (T R c z d)) = T R (T B a x b) y (T B c z d)
     balance color a x b = T color a x b
   */
-  static NodePtr balance(const NodePtr& node) {
+  static NodePtr balance(const NodePtr &node) {
     if (node->color == BLACK) {
       if (node->left && node->left->left && node->left->color == RED &&
           node->left->left->color == RED) {
@@ -111,11 +111,11 @@ private:
     return node;
   }
 
-  static NodePtr insert(const NodePtr& x, const value_type& value) {
+  static NodePtr insert(const NodePtr &x, const value_type &value) {
     auto tree = ins(x, value);
     return make_node(BLACK, tree->left, tree->value, tree->right);
   }
-  static mapped_type* find(const NodePtr& x, key_type key) {
+  static mapped_type *find(const NodePtr &x, key_type key) {
     Compare less;
     if (x == nil) {
       return nullptr;
@@ -124,12 +124,12 @@ private:
     } else if (less(key, x->value.first)) {
       return find(x->left, key);
     } else {
-      return const_cast<mapped_type*>(&x->value.second);
+      return const_cast<mapped_type *>(&x->value.second);
     }
   }
   template <typename key_type, typename mapped_type>
-  friend std::ostream& operator<<(std::ostream& str,
-                                  const Node<key_type, mapped_type>* node) {
+  friend std::ostream &operator<<(std::ostream &str,
+                                  const Node<key_type, mapped_type> *node) {
     if (node == nullptr) {
       str << "nil";
     } else {
@@ -163,13 +163,13 @@ public:
   using size_type = std::size_t;
   using difference_type = std::ptrdiff_t;
   using key_compare = Compare;
-  using reference = value_type&;
-  using const_reference = const value_type&;
+  using reference = value_type &;
+  using const_reference = const value_type &;
   using node_type = Node<key_type, mapped_type>;
   struct constant_iterator {
   public:
-    constant_iterator(const node_type* node)
-        : stack_{std::make_unique<std::vector<const node_type*>>()} {
+    constant_iterator(const node_type *node)
+        : stack_{std::make_unique<std::vector<const node_type *>>()} {
       stack_->reserve(10);
       for (auto p = node; p != nullptr; p = p->left.get()) {
         stack_->push_back(p);
@@ -182,8 +182,8 @@ public:
     constant_iterator() : stack_{nullptr} {}
 
   public:
-    const value_type& operator*() const {
-      const value_type* ret = nullptr;
+    const value_type &operator*() const {
+      const value_type *ret = nullptr;
       if (stack_ && !stack_->empty()) {
         ret = &this->stack_->back()->value;
       }
@@ -191,11 +191,11 @@ public:
       return *ret;
     }
 
-    bool operator!=(const constant_iterator& other) const {
+    bool operator!=(const constant_iterator &other) const {
       return stack_ != other.stack_;
     }
 
-    constant_iterator& operator++() {
+    constant_iterator &operator++() {
       if (this->stack_) {
         auto p = stack_->back();
         stack_->pop_back();
@@ -210,7 +210,7 @@ public:
     }
 
   private:
-    std::unique_ptr<std::vector<const node_type*>> stack_;
+    std::unique_ptr<std::vector<const node_type *>> stack_;
   };
   /**
    * @brief Default constructor.
@@ -225,7 +225,7 @@ public:
    * @param value The key-value pair to be inserted.
    * @return A new immutable map with the key-value pair inserted.
    */
-  ImmutableMap insert(const value_type& value) const {
+  ImmutableMap insert(const value_type &value) const {
     return ImmutableMap(node_type::insert(root_, value), size() + 1);
   }
 
@@ -236,7 +236,7 @@ public:
    * @return mapped_type* A pointer to the value associated with the key, or
    * nullptr if the key is not found.
    */
-  mapped_type* find(key_type key) const { return node_type::find(root_, key); }
+  mapped_type *find(key_type key) const { return node_type::find(root_, key); }
 
   constant_iterator begin() const { return root_.get(); }
   constant_iterator end() const { return node_type::nil.get(); }
@@ -252,8 +252,8 @@ public:
    * ImmutableMap.
    */
   template <typename K2, typename T2>
-  friend std::ostream& operator<<(std::ostream& str,
-                                  const ImmutableMap<K2, T2>& x) {
+  friend std::ostream &operator<<(std::ostream &str,
+                                  const ImmutableMap<K2, T2> &x) {
     str << x.root_.get();
     return str;
   }
@@ -265,7 +265,7 @@ private:
    *
    * @param root The root node of the ImmutableMap.
    */
-  ImmutableMap(const typename node_type::NodePtr& root, size_type size)
+  ImmutableMap(const typename node_type::NodePtr &root, size_type size)
       : root_(root), size_(size) {}
 
 private:

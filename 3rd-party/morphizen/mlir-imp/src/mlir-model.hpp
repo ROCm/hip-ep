@@ -34,20 +34,20 @@ public:
   // Static factory method to create an empty MLIRModel with optional path and
   // opset
   static std::unique_ptr<MLIRModel>
-  create_empty(const std::filesystem::path& path = {},
-               const std::vector<std::pair<std::string, int64_t>>& opset = {});
+  create_empty(const std::filesystem::path &path = {},
+               const std::vector<std::pair<std::string, int64_t>> &opset = {});
 
-  static std::unique_ptr<MLIRModel> load(const std::string& filename);
+  static std::unique_ptr<MLIRModel> load(const std::string &filename);
 
   std::unique_ptr<MLIRModel> clone(int64_t external_data_threshold) const;
 
-  MLIRGraph& main_graph() const;
+  MLIRGraph &main_graph() const;
 
-  void set_metadata_prop(const std::string& key, const std::string& value);
+  void set_metadata_prop(const std::string &key, const std::string &value);
 
-  std::string get_metadata_prop(const std::string& key) const;
+  std::string get_metadata_prop(const std::string &key) const;
 
-  bool has_metadata_prop(const std::string& key) const;
+  bool has_metadata_prop(const std::string &key) const;
 
   mlir::ModuleOp getModule() const;
 
@@ -56,11 +56,11 @@ public:
 private:
   // Private static helper function to create main graph
   static std::unique_ptr<MLIRGraph>
-  create_main_graph(MLIRModel& model, mlir::OpBuilder& builder,
-                    mlir::ModuleOp& module, const std::string& graph_name);
+  create_main_graph(MLIRModel &model, mlir::OpBuilder &builder,
+                    mlir::ModuleOp &module, const std::string &graph_name);
 
   // Private member function to dump MLIR for debugging
-  void maybe_dump_mlir(const std::filesystem::path& path) const;
+  void maybe_dump_mlir(const std::filesystem::path &path) const;
 
   mlir::OwningOpRef<mlir::ModuleOp> module_;
   mutable std::map<std::string, std::string> metadata_;

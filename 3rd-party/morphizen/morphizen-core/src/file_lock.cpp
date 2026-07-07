@@ -27,7 +27,7 @@ WithFileLock::WithFileLock(std::filesystem::path filename) {
     lock_.lock();
     MY_LOG(1) << "get boost file lock success, filename : "
               << filename.u8string() << " lock : " << &lock_;
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     std::cerr << "exception occurs : " << e.what() << "\n";
   }
 }
@@ -35,12 +35,12 @@ WithFileLock::~WithFileLock() {
   try {
     MY_LOG(1) << "unlock boost file lock ... " << &lock_;
     lock_.unlock();
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     std::cerr << "exception occurs : " << e.what() << "\n";
   }
 }
 #else
-static std::mutex& get_mutex_lock() {
+static std::mutex &get_mutex_lock() {
   MY_LOG(1) << "get std::mutex lock ... ";
   static std::mutex mutex;
   MY_LOG(1) << "get std::mutex lock success ... ";

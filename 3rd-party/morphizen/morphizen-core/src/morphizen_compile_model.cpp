@@ -53,18 +53,18 @@ DEF_ENV_PARAM_2(XLNX_VAIML_LEVEL_1_NAME, "morphizen-pass_vaiml_partition",
                 std::string)
 
 #ifdef _WIN32
-#  ifdef ENABLE_PYTHON
+#ifdef ENABLE_PYTHON
 // Python is only enabled for VAIML compilation on Windows, which requires
 // this threshold to be set to a large value so all constants are cloned for the
 // compilation.
 DEF_ENV_PARAM_2(XLNX_model_clone_external_data_threshold, "17179869184",
                 int64_t)
 
-#  else
+#else
 // Set the threshold to small value to save memory usage for Windows runtime
 // package
 DEF_ENV_PARAM_2(XLNX_model_clone_external_data_threshold, "128", int64_t)
-#  endif
+#endif
 #else
 // Set the threshold to a large value nn Linux for VAIML compilation
 DEF_ENV_PARAM_2(XLNX_model_clone_external_data_threshold, "17179869184",
@@ -78,8 +78,8 @@ template <>
 int64_t PassContext::get_provier_option_with_class<
     ENV_PARAM_XLNX_model_clone_external_data_threshold>() const {
   using env_name = ENV_PARAM_XLNX_model_clone_external_data_threshold;
-  const char* name = env_name::get_name();
-  const char* defvalue = env_name::get_default_value();
+  const char *name = env_name::get_name();
+  const char *defvalue = env_name::get_default_value();
   auto p = get_provider_option(std::string(name), std::string(defvalue));
   using helper = typename morphizen::foundation::env_config_helper<
       decltype(env_name::value)>;
@@ -105,26 +105,26 @@ DEF_ENV_PARAM_2(XLNX_MD5_SIG_SKIP_OPS, "QuantizeLinear,DequantizeLinear",
   LOG_IF(INFO, ENV_PARAM(XLNX_ONNX_EP_VERBOSE) >= n)                           \
       << "[XLNX_ONNX_EP_VERBOSE] "
 #ifdef ENABLE_PYTHON
-#  include <pybind11/pybind11.h>
+#include <pybind11/pybind11.h>
 namespace py = pybind11;
 #endif
 using namespace onnxruntime;
 
 namespace morphizen {
 
-static inline void remove_encryption(ConfigProto& /*proto*/) {
+static inline void remove_encryption(ConfigProto & /*proto*/) {
   // encryption_key removed from ConfigProto (Issue #004)
   // Now read from provider_options directly when needed
 }
 
-static void print_device_subgraph(const PassContextImp& context) {
+static void print_device_subgraph(const PassContextImp &context) {
   LOG_VERBOSE(2) << "dpu subgraph: " << context.context_proto.meta_def_size();
 }
 
 static void update_cache(std::shared_ptr<PassContextImp> context,
-                         onnxruntime::Graph& graph) {
+                         onnxruntime::Graph &graph) {
   auto deferred_write = std::shared_ptr<void>(
-      nullptr, [context](void* /*p*/) { context->save_context_json(); });
+      nullptr, [context](void * /*p*/) { context->save_context_json(); });
   auto measure_update_cache = context->measure("update_cache");
   auto effective_passes = context->compute_effective_passes();
   auto passes = IPass::create_passes(context, effective_passes);
@@ -136,7 +136,7 @@ void read_cache(std::shared_ptr<PassContextImp> context) {
   context->update_pass_context_from_context_json_in_cache();
 }
 
-bool check_cache_hit(PassContextImp& context) {
+bool check_cache_hit(PassContextImp &context) {
   auto measure_check_cache_hit = context.measure("check_cache_hit");
   auto prebuild_cache_context_name =
       context.get_provider_option("prebuild_cache_context");
@@ -158,8 +158,8 @@ bool check_cache_hit(PassContextImp& context) {
   return false;
 }
 
-static int64_t compute_model_clone_threshold(const ConfigProto& config_proto,
-                                             PassContext* context) {
+static int64_t compute_model_clone_threshold(const ConfigProto &config_proto,
+                                             PassContext *context) {
   // Check provider option first (user override)
   auto po_threshold =
       context->get_provider_option("XLNX_model_clone_external_data_threshold");
@@ -169,7 +169,7 @@ static int64_t compute_model_clone_threshold(const ConfigProto& config_proto,
 
   // Check if VAIML plugin is enabled - VAIML needs all constants cloned
   // (effectively disables the optimization by using very large threshold)
-  for (auto& pass : config_proto.passes()) {
+  for (auto &pass : config_proto.passes()) {
     if (pass.plugin() == ENV_PARAM(XLNX_VAIML_LEVEL_1_NAME)) {
       return 17179869184; // Large threshold for VAIML
     }
@@ -180,14 +180,14 @@ static int64_t compute_model_clone_threshold(const ConfigProto& config_proto,
 }
 
 void compile_onnx_model_2(std::shared_ptr<PassContextImp> context,
-                          const Graph& onnx_graph) {
+                          const Graph &onnx_graph) {
   bool cache_hit = check_cache_hit(*context);
   if (!cache_hit) {
-    auto& model = morphizen_cxx::GraphConstRef(onnx_graph).model();
+    auto &model = morphizen_cxx::GraphConstRef(onnx_graph).model();
     int64_t threshold = compute_model_clone_threshold(
         context->get_config_proto(), context.get());
     auto cloned_model = morphizen::model_clone(model, threshold);
-    auto& cloned_graph = morphizen::model_main_graph(*cloned_model);
+    auto &cloned_graph = morphizen::model_main_graph(*cloned_model);
     update_cache(context, cloned_graph);
   } else {
     MY_LOG(1) << "==== cache hit ====";
@@ -196,7 +196,7 @@ void compile_onnx_model_2(std::shared_ptr<PassContextImp> context,
   read_cache(context);
 }
 
-static std::string get_dump_md5_file(const std::string& suffix) {
+static std::string get_dump_md5_file(const std::string &suffix) {
   auto ret = ENV_PARAM(DEBUG_MD5_SIG);
   if (!ret.empty()) {
     ret = ret + suffix;
@@ -205,12 +205,12 @@ static std::string get_dump_md5_file(const std::string& suffix) {
 }
 struct MD5Sig {
 public:
-  MD5Sig(const std::string& suffix)
+  MD5Sig(const std::string &suffix)
       : dump_md5_file{get_dump_md5_file(suffix)} {}
-  void add(const void* data, size_t numBytes) {
+  void add(const void *data, size_t numBytes) {
     md5.add(data, numBytes);
     if (str) {
-      CHECK(str->write((const char*)data, numBytes).good())
+      CHECK(str->write((const char *)data, numBytes).good())
           << "failed to write to dump_md5_file " << dump_md5_file;
     }
   }
@@ -230,10 +230,10 @@ public:
 };
 
 static std::string
-get_model_signature_with_graph_inputs_and_outputs(const Graph& onnx_graph) {
+get_model_signature_with_graph_inputs_and_outputs(const Graph &onnx_graph) {
   auto md5 = MD5Sig("_with_io.data");
   auto inputs = morphizen_cxx::GraphConstRef(onnx_graph).inputs();
-  for (auto& input : inputs) {
+  for (auto &input : inputs) {
     auto input_name = input.name();
     md5.add(input_name.data(), input_name.size());
 
@@ -243,7 +243,7 @@ get_model_signature_with_graph_inputs_and_outputs(const Graph& onnx_graph) {
     }
   }
   auto outputs = morphizen_cxx::GraphConstRef(onnx_graph).outputs();
-  for (auto& output : outputs) {
+  for (auto &output : outputs) {
     auto output_name = output.name();
     md5.add(output_name.data(), output_name.size());
 
@@ -255,21 +255,21 @@ get_model_signature_with_graph_inputs_and_outputs(const Graph& onnx_graph) {
   return md5.getHash();
 }
 
-static std::string get_model_signature(const Graph& onnx_graph) {
+static std::string get_model_signature(const Graph &onnx_graph) {
   auto md5 = MD5Sig(".data");
   auto graph_ref = morphizen_cxx::GraphConstRef(onnx_graph);
-  for (auto& node_ref : graph_ref.nodes_in_topological_order()) {
+  for (auto &node_ref : graph_ref.nodes_in_topological_order()) {
     auto op_type = node_ref.op_type();
-    const auto& skip_op = ENV_PARAM(XLNX_MD5_SIG_SKIP_OPS);
+    const auto &skip_op = ENV_PARAM(XLNX_MD5_SIG_SKIP_OPS);
     if (std::find(skip_op.begin(), skip_op.end(), op_type) != skip_op.end()) {
       continue;
     }
     auto output = node_ref.outputs();
-    for (auto& node_arg_opt : output) {
+    for (auto &node_arg_opt : output) {
       if (!node_arg_opt.has_value()) {
         continue;
       }
-      auto& node_arg = node_arg_opt.value();
+      auto &node_arg = node_arg_opt.value();
       auto node_arg_name = node_arg.name();
       md5.add(node_arg_name.data(), node_arg_name.size());
 
@@ -282,9 +282,9 @@ static std::string get_model_signature(const Graph& onnx_graph) {
   return md5.getHash();
 }
 
-static std::string get_signature(const std::string& model_path,
-                                 const Graph& onnx_graph,
-                                 const ConfigProto& /*proto*/) {
+static std::string get_signature(const std::string &model_path,
+                                 const Graph &onnx_graph,
+                                 const ConfigProto & /*proto*/) {
   auto md5_file_base =
       model_path.empty() ? "" : morphizen::get_md5_of_file(model_path);
   auto md5_in_memory_a = get_model_signature(onnx_graph);
@@ -305,10 +305,10 @@ static std::string get_signature(const std::string& model_path,
 }
 
 std::shared_ptr<PassContextImp> initialize_context(
-    const std::string& model_path, const Graph& onnx_graph,
-    const std::vector<morphizen_cxx::NodeConstRef>& ep_context_nodes,
-    const onnxruntime::ProviderOptions& options,
-    const std::map<std::string, std::string>& session_configs,
+    const std::string &model_path, const Graph &onnx_graph,
+    const std::vector<morphizen_cxx::NodeConstRef> &ep_context_nodes,
+    const onnxruntime::ProviderOptions &options,
+    const std::map<std::string, std::string> &session_configs,
     std::unique_ptr<LoggerAdapter> logger_adapter) {
 
   std::shared_ptr<PassContextImp> context =
@@ -326,7 +326,7 @@ std::shared_ptr<PassContextImp> initialize_context(
     context->model_path = model_path;
   }
   context->is_ep_context_model = !ep_context_nodes.empty();
-  auto& model = morphizen_cxx::GraphConstRef(onnx_graph).model();
+  auto &model = morphizen_cxx::GraphConstRef(onnx_graph).model();
   auto md5 =
       get_signature(context->model_path.string(), onnx_graph, context->config_);
 
@@ -364,19 +364,19 @@ std::shared_ptr<PassContextImp> initialize_context(
   }
   return context;
 }
-static void get_ep_cache_context_common(PassContextImp& context,
-                                        std::ostream& dst) {
+static void get_ep_cache_context_common(PassContextImp &context,
+                                        std::ostream &dst) {
   auto measure_get_ep_cache_context_embed_mode =
       context.measure("get_ep_cache_context_common");
   auto reader_temp = context_cache_files_to_tar_stream(context);
-  std::istream& reader = *reader_temp;
+  std::istream &reader = *reader_temp;
 
   auto encryption_key = context.get_provider_option("encryption_key", "");
   if (!encryption_key.empty()) {
     auto filtered = stream_filter(
         reader,
-        [](std::istream& src, std::ostream& dst,
-           const std::string& encryption_key) {
+        [](std::istream &src, std::ostream &dst,
+           const std::string &encryption_key) {
           morphizen_encryption::aes_encryption(src, dst, encryption_key);
         },
         encryption_key);
@@ -386,7 +386,7 @@ static void get_ep_cache_context_common(PassContextImp& context,
   }
 }
 
-std::string get_ep_cache_context_embed_mode(PassContextImp& context) {
+std::string get_ep_cache_context_embed_mode(PassContextImp &context) {
   auto measure_get_ep_cache_context_embed_mode =
       context.measure("get_ep_cache_context_embed_mode");
   if (context.tar_file_ != nullptr) {
@@ -407,7 +407,7 @@ std::string get_ep_cache_context_embed_mode(PassContextImp& context) {
   }
 }
 
-static std::string get_ep_cache_context_nonembed_mode(PassContextImp& context) {
+static std::string get_ep_cache_context_nonembed_mode(PassContextImp &context) {
   auto measure_get_ep_cache_context_embed_mode =
       context.measure("get_ep_cache_context_nonembed_mode");
   auto OrtSessionOptionEpContextFilePath_binay = std::filesystem::path();
@@ -436,7 +436,7 @@ static std::string get_ep_cache_context_nonembed_mode(PassContextImp& context) {
   return binary_name;
 }
 
-static std::string get_ep_cache_context(PassContextImp& context,
+static std::string get_ep_cache_context(PassContextImp &context,
                                         bool embed_mode) {
   auto ret = std::string();
   LOG_IF(INFO, ENV_PARAM(DEBUG_EP_CONTEXT))
@@ -450,7 +450,7 @@ static std::string get_ep_cache_context(PassContextImp& context,
 }
 
 #if MORPHIZEN_ORT_API_MAJOR < 6
-static std::string escape_json(const std::string& s) {
+static std::string escape_json(const std::string &s) {
   std::ostringstream o;
   for (auto c = s.cbegin(); c != s.cend(); c++) {
     if (*c == '"' || *c == '\\' || ('\x00' <= *c && *c <= '\x1f')) {
@@ -462,7 +462,7 @@ static std::string escape_json(const std::string& s) {
   }
   return o.str();
 }
-static std::string get_nodes(PassContextImp& context) {
+static std::string get_nodes(PassContextImp &context) {
   std::ostringstream o;
   auto log_dir = context.get_log_dir();
   auto cache_dir = log_dir.parent_path().u8string();
@@ -476,22 +476,22 @@ static std::string get_nodes(PassContextImp& context) {
   return o.str();
 }
 #endif
-template <typename T> static std::string combine_outputs_name(T& collection) {
+template <typename T> static std::string combine_outputs_name(T &collection) {
   std::ostringstream oss;
   auto sorted_names =
       std::set<std::string>(collection.begin(), collection.end());
-  for (auto& name : sorted_names) {
+  for (auto &name : sorted_names) {
     oss << " " << name;
   }
   return oss.str();
 }
 static std::vector<std::optional<morphizen_cxx::NodeArgConstRef>>
 convert_to_node_arg_const_ref(morphizen_cxx::GraphRef g,
-                              const std::vector<std::string>& names) {
+                              const std::vector<std::string> &names) {
   auto ret = std::vector<std::optional<morphizen_cxx::NodeArgConstRef>>();
   std::transform(
       names.begin(), names.end(), std::back_inserter(ret),
-      [&g](const std::string& name)
+      [&g](const std::string &name)
           -> std::optional<morphizen_cxx::NodeArgConstRef> {
         if (name.empty()) {
           return std::nullopt;
@@ -508,12 +508,12 @@ convert_to_node_arg_const_ref(morphizen_cxx::GraphRef g,
   return ret;
 }
 
-static onnxruntime::Node*
-create_ep_context_node(morphizen::ExecutionProviderConcrete* ep, int index) {
+static onnxruntime::Node *
+create_ep_context_node(morphizen::ExecutionProviderConcrete *ep, int index) {
   CHECK(ep != nullptr);
-  auto p_context = dynamic_cast<PassContextImp*>(ep->get_context().get());
+  auto p_context = dynamic_cast<PassContextImp *>(ep->get_context().get());
   CHECK(p_context != nullptr);
-  auto& context = *p_context;
+  auto &context = *p_context;
 
   if (ENV_PARAM(DEBUG_EP_CONTEXT) >= 2) {
     LOG(INFO) << "create ep context node , index=" << index;
@@ -571,8 +571,8 @@ create_ep_context_node(morphizen::ExecutionProviderConcrete* ep, int index) {
   attrs.add("enable_encryption", (int64_t)enable_encryption);
   // Always use cache_key prefix - only store the prefix itself
   attrs.add("cache_file_prefix", context.get_context_proto().cache_key());
-  auto& version_infos = context.get_context_proto().version();
-  for (const auto& version_info : version_infos.version_infos()) {
+  auto &version_infos = context.get_context_proto().version();
+  for (const auto &version_info : version_infos.version_infos()) {
     auto lib_name = "version_of_" + version_info.package_name();
     attrs.add(lib_name, version_info.version());
     lib_name = "version_id_of_" + version_info.package_name();
@@ -609,13 +609,13 @@ create_ep_context_node(morphizen::ExecutionProviderConcrete* ep, int index) {
   return ret.ptr();
 }
 static void init_ep_context_model_inputs(
-    const std::vector<std::unique_ptr<morphizen::ExecutionProvider>>& eps) {
+    const std::vector<std::unique_ptr<morphizen::ExecutionProvider>> &eps) {
   // guess graph input
   std::set<std::string> all_ep_inputs;
   std::set<std::string> all_ep_outputs;
-  for (const auto& ep : eps) {
+  for (const auto &ep : eps) {
     auto ep_concrete =
-        dynamic_cast<const morphizen::ExecutionProviderConcrete*>(ep.get());
+        dynamic_cast<const morphizen::ExecutionProviderConcrete *>(ep.get());
     if (ep_concrete) {
       auto inputs = ep_concrete->get_meta_def_inputs();
       all_ep_inputs.insert(inputs->begin(), inputs->end());
@@ -630,10 +630,10 @@ static void init_ep_context_model_inputs(
                       all_ep_outputs.begin(), all_ep_outputs.end(),
                       std::back_inserter(graph_inputs));
   // set graph input
-  if (auto ep = dynamic_cast<morphizen::ExecutionProviderConcrete*>(
+  if (auto ep = dynamic_cast<morphizen::ExecutionProviderConcrete *>(
           eps.front().get())) {
     if (auto p_context =
-            dynamic_cast<PassContextImp*>(ep->get_context().get())) {
+            dynamic_cast<PassContextImp *>(ep->get_context().get())) {
       if (!p_context->ep_context_model_) {
         p_context->ep_context_model_ = morphizen_cxx::Model::create(
             p_context->model_path, {{"ai.onnx", 21}});
@@ -642,7 +642,7 @@ static void init_ep_context_model_inputs(
       auto optional_inputs =
           convert_to_node_arg_const_ref(ep_context_graph, graph_inputs);
       std::vector<morphizen_cxx::NodeArgConstRef> actual_inputs;
-      for (const auto& opt_input : optional_inputs) {
+      for (const auto &opt_input : optional_inputs) {
         if (opt_input.has_value()) {
           actual_inputs.push_back(opt_input.value());
         }
@@ -653,32 +653,33 @@ static void init_ep_context_model_inputs(
 }
 extern "C" MORPHIZEN_DLL_SPEC int create_ep_context_nodes(
 #if MORPHIZEN_ORT_API_MAJOR < 6
-    onnxruntime::Graph& /*ep_context_graph unused to deleted*/,
+    onnxruntime::Graph & /*ep_context_graph unused to deleted*/,
 #endif
-    const std::vector<std::unique_ptr<morphizen::ExecutionProvider>>& eps,
-    morphizen::DllSafe<std::vector<Node*>>* ret_value) {
-  std::vector<Node*> ret;
+    const std::vector<std::unique_ptr<morphizen::ExecutionProvider>> &eps,
+    morphizen::DllSafe<std::vector<Node *>> *ret_value) {
+  std::vector<Node *> ret;
   if (eps.empty()) {
     *ret_value =
-        morphizen::DllSafe<std::vector<Node*>>(new std::vector<Node*>());
+        morphizen::DllSafe<std::vector<Node *>>(new std::vector<Node *>());
     return 1;
   }
   auto ep =
-      dynamic_cast<morphizen::ExecutionProviderConcrete*>(eps.front().get());
+      dynamic_cast<morphizen::ExecutionProviderConcrete *>(eps.front().get());
 
-  auto p_context = dynamic_cast<PassContextImp*>(ep->get_context().get());
+  auto p_context = dynamic_cast<PassContextImp *>(ep->get_context().get());
   CHECK(p_context != nullptr);
   if (p_context->is_ep_context_model) {
     // cannot create a ep context model when it is already a ep context
     *ret_value =
-        morphizen::DllSafe<std::vector<Node*>>(new std::vector<Node*>());
+        morphizen::DllSafe<std::vector<Node *>>(new std::vector<Node *>());
     return 1;
   }
-  auto& context = *p_context;
-  auto deferred_write = std::shared_ptr<void>(nullptr, [&context](void* /*p*/) {
-    if (0)
-      context.save_context_json();
-  });
+  auto &context = *p_context;
+  auto deferred_write =
+      std::shared_ptr<void>(nullptr, [&context](void * /*p*/) {
+        if (0)
+          context.save_context_json();
+      });
   auto measure_create_ep_context_nodes =
       context.measure("create_ep_context_nodes");
   // Inputs need to be set beforehand because the MLIR workflow requires them to
@@ -686,13 +687,13 @@ extern "C" MORPHIZEN_DLL_SPEC int create_ep_context_nodes(
   init_ep_context_model_inputs(eps);
   ret.reserve(eps.size());
   auto ep_index = 0;
-  for (auto& ep_1 : eps) {
+  for (auto &ep_1 : eps) {
     ret.push_back(create_ep_context_node(
-        dynamic_cast<morphizen::ExecutionProviderConcrete*>(ep_1.get()),
+        dynamic_cast<morphizen::ExecutionProviderConcrete *>(ep_1.get()),
         ep_index++));
   }
-  *ret_value = morphizen::DllSafe<std::vector<Node*>>(
-      new std::vector<Node*>(std::move(ret)));
+  *ret_value = morphizen::DllSafe<std::vector<Node *>>(
+      new std::vector<Node *>(std::move(ret)));
   return 0;
 }
 
@@ -712,7 +713,7 @@ get_ep_context_nodes(morphizen_cxx::GraphConstRef onnx_graph) {
 }
 
 static void update_meta_def_from_ep_node(morphizen_cxx::NodeConstRef node,
-                                         MetaDefProto& meta_def) {
+                                         MetaDefProto &meta_def) {
   // There are legacy issues, and it's unclear why metadef inputs and outputs
   // were changed. The inputs/outputs order between ORT FuseNode (EPContext
   // node) and metadef may not match. Test case: running PSI ctx model with
@@ -749,7 +750,7 @@ static void update_meta_def_from_ep_node(morphizen_cxx::NodeConstRef node,
   return;
 }
 static std::optional<morphizen_cxx::NodeConstRef> get_main_ep_context_node(
-    std::vector<morphizen_cxx::NodeConstRef>& ep_context_nodes) {
+    std::vector<morphizen_cxx::NodeConstRef> &ep_context_nodes) {
   std::optional<morphizen_cxx::NodeConstRef> ret = std::nullopt;
   auto count_main_context = 0;
   for (auto node : ep_context_nodes) {
@@ -767,7 +768,7 @@ static std::optional<morphizen_cxx::NodeConstRef> get_main_ep_context_node(
 }
 
 static void
-store_cache_directory_from_main_node(PassContextImp& context,
+store_cache_directory_from_main_node(PassContextImp &context,
                                      morphizen_cxx::NodeConstRef main_node) {
   int64_t enable_encryption = main_node.get_attr_int("enable_encryption", 0);
   int64_t ep_embed_mode = main_node.get_attr_int("embed_mode", 1);
@@ -779,7 +780,7 @@ store_cache_directory_from_main_node(PassContextImp& context,
 #if MORPHIZEN_ORT_API_MAJOR >= 12
   auto ep_cache_context = main_node.release_attr_string("ep_cache_context");
 #else
-#  error "not supported any more"
+#error "not supported any more"
 #endif
   auto ep_context_size = ep_cache_context->size();
 
@@ -800,8 +801,8 @@ store_cache_directory_from_main_node(PassContextImp& context,
     // Decrypt using stream_filter (returns std::unique_ptr<std::istream>)
     auto decrypted_reader = stream_filter(
         encrypted_src,
-        [](std::istream& src, std::ostream& dst,
-           const std::string& encryption_key) {
+        [](std::istream &src, std::ostream &dst,
+           const std::string &encryption_key) {
           morphizen_encryption::aes_decryption(src, dst, encryption_key);
         },
         encryption_key);
@@ -829,7 +830,7 @@ store_cache_directory_from_main_node(PassContextImp& context,
   }
 }
 
-static int64_t get_ep_context_index(const morphizen_cxx::NodeConstRef& node) {
+static int64_t get_ep_context_index(const morphizen_cxx::NodeConstRef &node) {
   CHECK(node.has_attr("index"))
       << "EPContext Node has no index attr, EPContext node : " << node;
   return node.get_attr_int("index");
@@ -845,8 +846,8 @@ create_execution_providers_from_ep_context_nodes(
   ret.reserve(size);
 
   std::sort(ep_context_nodes.begin(), ep_context_nodes.end(),
-            [](const morphizen_cxx::NodeConstRef& a,
-               const morphizen_cxx::NodeConstRef& b) {
+            [](const morphizen_cxx::NodeConstRef &a,
+               const morphizen_cxx::NodeConstRef &b) {
               return get_ep_context_index(a) < get_ep_context_index(b);
             });
   for (auto idx = 0u; idx < size; ++idx) {
@@ -855,7 +856,7 @@ create_execution_providers_from_ep_context_nodes(
     CHECK_EQ(index, idx) << "EPContext Node index mismatch, EPContext node : "
                          << node;
     auto meta_def_index = idx;
-    auto& meta_def = *context->context_proto.mutable_meta_def(meta_def_index);
+    auto &meta_def = *context->context_proto.mutable_meta_def(meta_def_index);
     update_meta_def_from_ep_node(node, meta_def);
     auto device = meta_def.device();
     auto plugin_name = std::string("morphizen_custom_op_") + device;
@@ -880,7 +881,7 @@ restore_execution_providers_from_ep_context_model(
   if (main_node.has_value()) {
     std::vector<std::string> attr_names = {
         "ProductVersion", "onnx_model_filename", "cache_file_prefix"};
-    for (auto& attr_name : attr_names) {
+    for (auto &attr_name : attr_names) {
       if (main_node.value().has_attr(attr_name)) {
         MY_LOG(1) << "main_node attr " << attr_name << " = "
                   << main_node.value().get_attr_string(attr_name);
@@ -921,22 +922,22 @@ restore_execution_providers_from_ep_context_model(
   return create_execution_providers_from_ep_context_nodes(context,
                                                           ep_context_nodes);
 }
-static void log_stat_subgraph(const ContextProto& context_proto) {
+static void log_stat_subgraph(const ContextProto &context_proto) {
   auto stat = std::map<std::string, int>{};
-  for (auto& meta_def : context_proto.meta_def()) {
+  for (auto &meta_def : context_proto.meta_def()) {
     stat[meta_def.device()]++;
   }
   // as per AIESW-11754 request, use LOG(INFO) instead of std::cout
   LOG(INFO) << "[MorphiZen EP] No. of Subgraphs supported by MorphiZen EP:";
-  for (const auto& subgraph_stat : stat) {
+  for (const auto &subgraph_stat : stat) {
     LOG(INFO) << std::setw(6) << subgraph_stat.first << std::setw(6)
               << subgraph_stat.second << " ";
   }
 }
 static std::vector<std::unique_ptr<ExecutionProvider>>
 compile_onnx_model_internal(
-    const Graph& onnx_graph,
-    const std::vector<morphizen_cxx::NodeConstRef>& ep_context_nodes,
+    const Graph &onnx_graph,
+    const std::vector<morphizen_cxx::NodeConstRef> &ep_context_nodes,
     std::shared_ptr<PassContextImp> context) {
   auto measure_compile_onnx_model_internal =
       context->measure("compile_onnx_model_internal");
@@ -954,7 +955,7 @@ compile_onnx_model_internal(
     measure_after_compile_onnx_model_2 =
         context->measure("after_compile_onnx_model_internal");
     ret.reserve(context->context_proto.meta_def_size());
-    for (auto& meta_def : *context->context_proto.mutable_meta_def()) {
+    for (auto &meta_def : *context->context_proto.mutable_meta_def()) {
       std::string device = meta_def.device();
       auto plugin_name = std::string("morphizen_custom_op_") + device;
       ret.emplace_back(
@@ -971,7 +972,7 @@ static std::vector<std::string> GetStackTrace() {
 
 struct GlogFatalException : public std::exception {
 public:
-  virtual const char* what() const throw() { return m.c_str(); }
+  virtual const char *what() const throw() { return m.c_str(); }
   std::string m;
   std::vector<std::string> stacks;
 };
@@ -979,14 +980,14 @@ public:
 static void compile_fatal_func() {
   GlogFatalException e;
   e.stacks = GetStackTrace();
-  for (auto&& t : e.stacks) {
+  for (auto &&t : e.stacks) {
     e.m += std::string(t) + "\n";
   }
   throw e;
 }
 
-static std::ostream& operator<<(std::ostream& s,
-                                const std::vector<int64_t>& v) {
+static std::ostream &operator<<(std::ostream &s,
+                                const std::vector<int64_t> &v) {
   s << "[";
   for (auto c = 0u; c < v.size(); ++c) {
     if (c != 0) {
@@ -997,7 +998,7 @@ static std::ostream& operator<<(std::ostream& s,
   s << "]";
   return s;
 }
-static bool is_cpu_only_inference(const PassContextImp& context) {
+static bool is_cpu_only_inference(const PassContextImp &context) {
   auto ret = false;
   if (context.context_proto.meta_def_size() == 0) {
     ret = true;
@@ -1005,7 +1006,7 @@ static bool is_cpu_only_inference(const PassContextImp& context) {
   return ret;
 }
 
-static void print_graph_input_and_output(const Graph& onnx_graph) {
+static void print_graph_input_and_output(const Graph &onnx_graph) {
 #ifdef _WIN32
   _setmaxstdio(8192);
 #endif
@@ -1016,7 +1017,7 @@ static void print_graph_input_and_output(const Graph& onnx_graph) {
 
   LOG(INFO) << "MorphiZen EP Load ONNX Model Success";
   LOG(INFO) << "Graph Input Node Name/Shape (" << graph_inputs.size() << ")";
-  for (auto& input : graph_inputs) {
+  for (auto &input : graph_inputs) {
     auto shape = input.shape();
     if (shape != nullptr) {
       LOG(INFO) << "\t " << input.name() << " : " << *(shape.get());
@@ -1025,7 +1026,7 @@ static void print_graph_input_and_output(const Graph& onnx_graph) {
     }
   }
   LOG(INFO) << "Graph Output Node Name/Shape (" << graph_outputs.size() << ")";
-  for (auto& output : graph_outputs) {
+  for (auto &output : graph_outputs) {
     auto shape = output.shape();
     if (shape != nullptr) {
       LOG(INFO) << "\t " << output.name() << " : " << *(shape.get());
@@ -1036,11 +1037,11 @@ static void print_graph_input_and_output(const Graph& onnx_graph) {
 }
 // Internal helper that accepts logger_adapter for lifetime management
 std::vector<std::unique_ptr<ExecutionProvider>> compile_onnx_model_3_internal(
-    const std::string& model_path, const Graph& onnx_graph,
-    const onnxruntime::ProviderOptions& options,
-    const std::map<std::string, std::string>& session_configs,
+    const std::string &model_path, const Graph &onnx_graph,
+    const onnxruntime::ProviderOptions &options,
+    const std::map<std::string, std::string> &session_configs,
     std::unique_ptr<LoggerAdapter> logger_adapter,
-    std::function<void(int, const char*)> set_ort_status) {
+    std::function<void(int, const char *)> set_ort_status) {
   print_graph_input_and_output(onnx_graph);
   static std::mutex mtx;
   std::lock_guard<std::mutex> t_lock(mtx);
@@ -1062,8 +1063,8 @@ std::vector<std::unique_ptr<ExecutionProvider>> compile_onnx_model_3_internal(
   }
   try {
     ret = compile_onnx_model_internal(onnx_graph, ep_context_nodes, context);
-  } catch (const GlogFatalException& e) {
-    for (auto&& s : e.stacks) {
+  } catch (const GlogFatalException &e) {
+    for (auto &&s : e.stacks) {
       context->context_proto.add_stacks(s);
     }
     LOG(INFO) << "Catch fatal exception, skip this subgraph. Set "
@@ -1071,7 +1072,7 @@ std::vector<std::unique_ptr<ExecutionProvider>> compile_onnx_model_3_internal(
               << e.what();
   }
 #ifdef ENABLE_PYTHON
-  catch (py::error_already_set& e) {
+  catch (py::error_already_set &e) {
     (void)e; // suppress unused variable
     if (ENV_PARAM(XLNX_ENABLE_SKIP_FATAL)) {
       LOG(INFO) << " catch pybind11 exception, skip this subgraph:  maybe not "
@@ -1085,12 +1086,12 @@ std::vector<std::unique_ptr<ExecutionProvider>> compile_onnx_model_3_internal(
     }
   }
 #endif
-  catch (const morphizen_encryption::EncryptionError& e) {
+  catch (const morphizen_encryption::EncryptionError &e) {
     if (set_ort_status) {
       set_ort_status(1, e.what());
     }
     return {};
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     if (ENV_PARAM(XLNX_ENABLE_SKIP_FATAL)) {
       LOG(INFO) << " catch other exception, skip this subgraph: " << e.what();
     } else {
@@ -1133,31 +1134,31 @@ std::vector<std::unique_ptr<ExecutionProvider>> compile_onnx_model_3_internal(
 
 // Public API - calls internal version without logger
 std::vector<std::unique_ptr<ExecutionProvider>>
-compile_onnx_model_3(const std::string& model_path, const Graph& onnx_graph,
-                     const onnxruntime::ProviderOptions& options,
-                     const std::map<std::string, std::string>& session_configs,
-                     std::function<void(int, const char*)> set_ort_status) {
+compile_onnx_model_3(const std::string &model_path, const Graph &onnx_graph,
+                     const onnxruntime::ProviderOptions &options,
+                     const std::map<std::string, std::string> &session_configs,
+                     std::function<void(int, const char *)> set_ort_status) {
   return compile_onnx_model_3_internal(model_path, onnx_graph, options,
                                        session_configs, nullptr,
                                        set_ort_status);
 }
 
-thread_local const void* g_state = nullptr;
+thread_local const void *g_state = nullptr;
 thread_local morphizen::DllSafe<std::string> (*g_get_config_entry)(
-    const void* state, const char* entry_name) = nullptr;
+    const void *state, const char *entry_name) = nullptr;
 
 int morphizen_ep_on_run_start(
-    const std::vector<std::unique_ptr<morphizen::ExecutionProvider>>& eps,
-    const void* state,
+    const std::vector<std::unique_ptr<morphizen::ExecutionProvider>> &eps,
+    const void *state,
     morphizen::DllSafe<std::string> (*get_config_entry)(
-        const void* state, const char* entry_name)) {
+        const void *state, const char *entry_name)) {
   if (eps.empty()) {
     return 0;
   }
   auto ep =
-      dynamic_cast<morphizen::ExecutionProviderConcrete*>(eps.front().get());
+      dynamic_cast<morphizen::ExecutionProviderConcrete *>(eps.front().get());
   auto p_context =
-      dynamic_cast<morphizen::PassContextImp*>(ep->get_context().get());
+      dynamic_cast<morphizen::PassContextImp *>(ep->get_context().get());
   CHECK(p_context != nullptr);
   g_state = state;
   g_get_config_entry = get_config_entry;
@@ -1165,15 +1166,15 @@ int morphizen_ep_on_run_start(
 }
 
 int morphizen_ep_set_ep_dynamic_options(
-    const std::vector<std::unique_ptr<morphizen::ExecutionProvider>>& eps,
-    const char* const* keys, const char* const* values, size_t kv_len) {
+    const std::vector<std::unique_ptr<morphizen::ExecutionProvider>> &eps,
+    const char *const *keys, const char *const *values, size_t kv_len) {
   if (eps.empty()) {
     return 1;
   }
   auto ep =
-      dynamic_cast<morphizen::ExecutionProviderConcrete*>(eps.front().get());
+      dynamic_cast<morphizen::ExecutionProviderConcrete *>(eps.front().get());
   auto p_context =
-      dynamic_cast<morphizen::PassContextImp*>(ep->get_context().get());
+      dynamic_cast<morphizen::PassContextImp *>(ep->get_context().get());
   CHECK(p_context != nullptr);
   std::lock_guard<std::mutex> lock(p_context->ep_dynamic_options_lock);
   for (size_t i = 0; i < kv_len; i++) {
@@ -1187,16 +1188,16 @@ int morphizen_ep_set_ep_dynamic_options(
 } // namespace morphizen
 
 extern "C" MORPHIZEN_DLL_SPEC int morphizen_ep_on_run_start(
-    const std::vector<std::unique_ptr<morphizen::ExecutionProvider>>& eps,
-    const void* state,
+    const std::vector<std::unique_ptr<morphizen::ExecutionProvider>> &eps,
+    const void *state,
     morphizen::DllSafe<std::string> (*get_config_entry)(
-        const void* state, const char* entry_name)) {
+        const void *state, const char *entry_name)) {
   return morphizen::morphizen_ep_on_run_start(eps, state, get_config_entry);
 }
 
 extern "C" MORPHIZEN_DLL_SPEC int morphizen_ep_set_ep_dynamic_options(
-    const std::vector<std::unique_ptr<morphizen::ExecutionProvider>>& eps,
-    const char* const* keys, const char* const* values, size_t kv_len) {
+    const std::vector<std::unique_ptr<morphizen::ExecutionProvider>> &eps,
+    const char *const *keys, const char *const *values, size_t kv_len) {
   return morphizen::morphizen_ep_set_ep_dynamic_options(eps, keys, values,
                                                         kv_len);
 }

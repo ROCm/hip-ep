@@ -11,6 +11,6 @@
 namespace morphizen {
 MORPHIZEN_DLL_SPEC
 std::vector<std::pair<std::vector<size_t>, std::vector<size_t>>>
-guess_reshape(const std::vector<int64_t>& shape_1,
-              const std::vector<int64_t>& shape_2);
+guess_reshape(const std::vector<int64_t> &shape_1,
+              const std::vector<int64_t> &shape_2);
 } // namespace morphizen

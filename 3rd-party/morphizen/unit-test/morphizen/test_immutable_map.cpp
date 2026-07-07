@@ -39,13 +39,13 @@ TEST_F(ImmutableMapTest, InsertMultipleNodes) {
     maps.push_back(maps.back().insert({c++, x}));
   }
   c = 0;
-  for (auto& m : maps) {
+  for (auto &m : maps) {
     LOG(INFO) << "m[" << c << "]"
               << " = " << m << std::endl;
   }
   LOG(INFO) << "maps.back().size() = " << maps.back().size() << std::endl;
   EXPECT_EQ(maps.back().size(), 16);
-  auto& m3 = maps[3];
+  auto &m3 = maps[3];
   auto v3 = m3.find(3);
   EXPECT_EQ(m3.size(), 3);
   ASSERT_TRUE(v3 != nullptr);

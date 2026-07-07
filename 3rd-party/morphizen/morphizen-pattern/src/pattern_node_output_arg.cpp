@@ -13,14 +13,14 @@
 #include "./pattern_log.hpp"
 
 #ifdef _MSC_VER
-#  pragma warning(push)
-#  pragma warning(disable : 4946)
+#pragma warning(push)
+#pragma warning(disable : 4946)
 #endif
 
 #include "morphizen/pattern.pb.h"
 
 #ifdef _MSC_VER
-#  pragma warning(pop)
+#pragma warning(pop)
 #endif
 
 namespace morphizen {
@@ -33,9 +33,9 @@ PatternNodeOutputArg::PatternNodeOutputArg(
 PatternNodeOutputArg::~PatternNodeOutputArg() {}
 
 BinderBuilderPtr
-PatternNodeOutputArg::match_uncached(const onnxruntime::Graph& graph,
-                                     const NodeInput& node_input,
-                                     const BinderBuilder& binder) const {
+PatternNodeOutputArg::match_uncached(const onnxruntime::Graph &graph,
+                                     const NodeInput &node_input,
+                                     const BinderBuilder &binder) const {
   // Step 1: Verify this is an output of a node (has a producer)
   if (node_input.node == nullptr) {
     auto node_arg_ref = morphizen_cxx::NodeArgConstRef::from_node_arg(
@@ -45,14 +45,14 @@ PatternNodeOutputArg::match_uncached(const onnxruntime::Graph& graph,
   }
 
   // Step 2: Get the producer node and its outputs
-  auto& node = *node_input.node;
+  auto &node = *node_input.node;
   auto node_ref = morphizen_cxx::NodeConstRef::from_node(graph, node);
   auto output_args_vec = node_ref.outputs();
-  std::vector<const morphizen::NodeArg*> output_args;
-  for (auto& opt_arg : output_args_vec) {
+  std::vector<const morphizen::NodeArg *> output_args;
+  for (auto &opt_arg : output_args_vec) {
     output_args.push_back(
         opt_arg.has_value()
-            ? &(static_cast<const morphizen::NodeArg&>(opt_arg.value()))
+            ? &(static_cast<const morphizen::NodeArg &>(opt_arg.value()))
             : nullptr);
   }
   CHECK_GE(output_args.size(), 1u)
@@ -106,8 +106,8 @@ std::string PatternNodeOutputArg::debug_string() const {
   return ret;
 }
 
-void PatternNodeOutputArg::dump_to_proto_imp(RootPatternProto& pattern_proto,
-                                             PatternProto& this_proto) const {
+void PatternNodeOutputArg::dump_to_proto_imp(RootPatternProto &pattern_proto,
+                                             PatternProto &this_proto) const {
   auto proto = this_proto.mutable_node_output_arg();
   auto node_pattern_proto = node_pattern_->dump_to_proto(pattern_proto);
 

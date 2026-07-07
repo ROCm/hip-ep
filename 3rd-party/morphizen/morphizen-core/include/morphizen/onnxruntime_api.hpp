@@ -8,19 +8,19 @@
 /// require ORT C++ API types, not in public headers to avoid dependency spread
 
 #ifndef ORT_API_MANUAL_INIT
-#  define ORT_API_MANUAL_INIT 1
+#define ORT_API_MANUAL_INIT 1
 #endif
 #ifdef __GNUC__
-#  pragma GCC diagnostic push
-#  pragma GCC diagnostic ignored "-Wpedantic"
-#  pragma GCC diagnostic ignored "-Wconversion"
-#  pragma GCC diagnostic ignored "-Wsign-compare"
-#  pragma GCC diagnostic ignored "-Wunused-variable"
-#  pragma GCC diagnostic ignored "-Wunused-but-set-variable"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#pragma GCC diagnostic ignored "-Wconversion"
+#pragma GCC diagnostic ignored "-Wsign-compare"
+#pragma GCC diagnostic ignored "-Wunused-variable"
+#pragma GCC diagnostic ignored "-Wunused-but-set-variable"
 #endif
 #include <onnxruntime_c_api.h>
 #include <onnxruntime_cxx_api.h>
 #ifdef __GNUC__
-#  pragma GCC diagnostic pop
+#pragma GCC diagnostic pop
 #endif
 #undef ORT_API_MANUAL_INIT

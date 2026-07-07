@@ -14,18 +14,18 @@
 #include "./pattern_log.hpp"
 
 #ifdef _MSC_VER
-#  pragma warning(push)
-#  pragma warning(disable : 4946)
+#pragma warning(push)
+#pragma warning(disable : 4946)
 #endif
 
 #include "morphizen/pattern.pb.h"
 
 #ifdef _MSC_VER
-#  pragma warning(pop)
+#pragma warning(pop)
 #endif
 namespace morphizen {
-PatternNode::PatternNode(int id, const std::string& op_type,
-                         const std::string& op_domain,
+PatternNode::PatternNode(int id, const std::string &op_type,
+                         const std::string &op_domain,
                          std::vector<std::shared_ptr<Pattern>> args,
                          std::vector<bool> is_args_optional)
     : Pattern(id), op_type_(op_type), op_domain_(normalize_domain(op_domain)),
@@ -40,16 +40,16 @@ PatternNode::PatternNode(int id, const std::string& op_type,
 PatternNode::~PatternNode() {}
 
 BinderBuilderPtr
-PatternNode::match_uncached(const onnxruntime::Graph& graph,
-                            const NodeInput& node_input,
-                            const BinderBuilder& binder) const {
+PatternNode::match_uncached(const onnxruntime::Graph &graph,
+                            const NodeInput &node_input,
+                            const BinderBuilder &binder) const {
   if (node_input.node == nullptr) {
     auto node_arg_ref = morphizen_cxx::NodeArgConstRef::from_node_arg(
         graph, *node_input.node_arg);
     MATCH_FAILED << " not a node: " << node_arg_ref.to_string();
     return nullptr;
   }
-  auto& node = *node_input.node;
+  auto &node = *node_input.node;
   auto node_ref = morphizen_cxx::NodeConstRef::from_node(graph, node);
   auto domain = normalize_domain(node_ref.op_domain());
   auto op_type = node_ref.op_type();
@@ -120,8 +120,8 @@ std::string PatternNode::debug_string() const {
   ret += std::string(")");
   return ret;
 }
-void PatternNode::dump_to_proto_imp(RootPatternProto& pattern_proto,
-                                    PatternProto& this_proto) const {
+void PatternNode::dump_to_proto_imp(RootPatternProto &pattern_proto,
+                                    PatternProto &this_proto) const {
   auto proto = this_proto.mutable_call_node();
   proto->set_op_type(this->op_type_);
   proto->set_op_domain(this->op_domain_);
@@ -135,7 +135,7 @@ void PatternNode::dump_to_proto_imp(RootPatternProto& pattern_proto,
   }
 }
 void PatternNode::fill_ops_name(
-    std::vector<std::string>& list_of_ops_name) const {
+    std::vector<std::string> &list_of_ops_name) const {
   for (auto arg : args_) {
     arg->fill_ops_name(list_of_ops_name);
   }

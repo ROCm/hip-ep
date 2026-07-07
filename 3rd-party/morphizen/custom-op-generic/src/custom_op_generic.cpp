@@ -15,13 +15,13 @@ namespace morphizen {
 namespace custom_op_generic {
 using namespace morphizen;
 MyCustomOp::MyCustomOp(std::shared_ptr<const PassContext> context,
-                       const std::shared_ptr<MetaDefProto>& meta_def,
-                       onnxruntime::Model* model)
+                       const std::shared_ptr<MetaDefProto> &meta_def,
+                       onnxruntime::Model *model)
     : CustomOpImp(context, meta_def, model) {
   MY_LOG(1) << "MyCustomOp ctor: ";
 }
 MyCustomOp::~MyCustomOp() { MY_LOG(1) << "MyCustomOp dtor: "; }
-void MyCustomOp::Compute(const OrtApi* api, OrtKernelContext* context) const {
+void MyCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
   // this->ComputeCpu(api, context);
 }
 } // namespace custom_op_generic

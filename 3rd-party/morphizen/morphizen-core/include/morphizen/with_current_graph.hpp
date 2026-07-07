@@ -7,17 +7,18 @@
 namespace morphizen {
 class WithCurrentGraph {
 public:
-  WithCurrentGraph(Graph* graph, IPass* pass) {
+  WithCurrentGraph(Graph *graph, IPass *pass) {
     graph_ = graph;
     pass_ = pass;
   }
   ~WithCurrentGraph() {
     pass_->add_context_resource(
-        "__current_graph", std::shared_ptr<void>((void*)graph_, [](void*) {}));
+        "__current_graph",
+        std::shared_ptr<void>((void *)graph_, [](void *) {}));
   }
 
 private:
-  Graph* graph_;
-  IPass* pass_;
+  Graph *graph_;
+  IPass *pass_;
 };
 } // namespace morphizen

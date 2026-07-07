@@ -10,14 +10,14 @@
 
 namespace morphizen {
 MORPHIZEN_DLL_SPEC void
-AttributeProtoDeleter::operator()(AttributeProto* p) const {
+AttributeProtoDeleter::operator()(AttributeProto *p) const {
   MORPHIZEN_ORT_API(attr_proto_delete)(p);
 }
 MORPHIZEN_DLL_SPEC void
-NodeAttributesDeleter::operator()(NodeAttributes* p) const {
+NodeAttributesDeleter::operator()(NodeAttributes *p) const {
   MORPHIZEN_ORT_API(node_attributes_delete)(p);
 }
-std::string attr_proto_as_string(const AttributeProto& /*attr*/) {
+std::string attr_proto_as_string(const AttributeProto & /*attr*/) {
   return "TODO";
 }
 std::string data_type_to_string(int elem_type) {
@@ -68,37 +68,37 @@ std::string data_type_to_string(int elem_type) {
   return ret;
 }
 
-NodeAttr::NodeAttr(const std::string& name, int64_t value)
+NodeAttr::NodeAttr(const std::string &name, int64_t value)
     : attribute_proto_{AttributeProtoPtr(
           MORPHIZEN_ORT_API(attr_proto_new_int)(name, value))} {}
 
-NodeAttr::NodeAttr(const std::string& name, float value)
+NodeAttr::NodeAttr(const std::string &name, float value)
     : attribute_proto_{MORPHIZEN_ORT_API(attr_proto_new_float)(name, value)} {}
 
-NodeAttr::NodeAttr(const std::string& name, const std::string& value)
+NodeAttr::NodeAttr(const std::string &name, const std::string &value)
     : attribute_proto_{MORPHIZEN_ORT_API(attr_proto_new_string)(name, value)} {}
 
-NodeAttr::NodeAttr(const std::string& name, const TensorProto& value)
+NodeAttr::NodeAttr(const std::string &name, const TensorProto &value)
     : attribute_proto_{MORPHIZEN_ORT_API(attr_proto_new_tensor)(name, value)} {}
 
-NodeAttr::NodeAttr(const std::string& name, const std::vector<int64_t>& value)
+NodeAttr::NodeAttr(const std::string &name, const std::vector<int64_t> &value)
     : attribute_proto_{MORPHIZEN_ORT_API(attr_proto_new_ints)(name, value)} {}
 
-NodeAttr::NodeAttr(const std::string& name, const std::vector<float>& value)
+NodeAttr::NodeAttr(const std::string &name, const std::vector<float> &value)
     : attribute_proto_{MORPHIZEN_ORT_API(attr_proto_new_floats)(name, value)} {}
 
-NodeAttr::NodeAttr(const std::string& name,
-                   const std::vector<std::string>& value)
+NodeAttr::NodeAttr(const std::string &name,
+                   const std::vector<std::string> &value)
     : attribute_proto_{MORPHIZEN_ORT_API(attr_proto_new_strings)(name, value)} {
 }
 
-NodeAttr::NodeAttr(const std::string& name, AttributeProtoPtr ptr)
+NodeAttr::NodeAttr(const std::string &name, AttributeProtoPtr ptr)
     : attribute_proto_{std::move(ptr)} {
   MORPHIZEN_ORT_API(attr_proto_set_name)(attribute_proto_.get(), name);
 }
 
-AttributeProto& NodeAttr::get() { return *attribute_proto_; }
-const AttributeProto& NodeAttr::get() const { return *attribute_proto_; }
+AttributeProto &NodeAttr::get() { return *attribute_proto_; }
+const AttributeProto &NodeAttr::get() const { return *attribute_proto_; }
 
 NodeAttributesBuilder::NodeAttributesBuilder(size_t capacity) : attrs_{} {
   attrs_.reserve(capacity);
@@ -106,31 +106,31 @@ NodeAttributesBuilder::NodeAttributesBuilder(size_t capacity) : attrs_{} {
 
 NodeAttributesPtr NodeAttributesBuilder::build() {
   auto ret = NodeAttributesPtr(MORPHIZEN_ORT_API(node_attributes_new)());
-  for (auto& node_attr : attrs_) {
-    AttributeProto& attr_proto = node_attr.get();
+  for (auto &node_attr : attrs_) {
+    AttributeProto &attr_proto = node_attr.get();
     MORPHIZEN_ORT_API(node_attributes_add)(*ret, std::move(attr_proto));
   }
   attrs_.clear();
   return ret;
 }
 
-void NodeAttributesBuilder::merge_into(Node& node) {
+void NodeAttributesBuilder::merge_into(Node &node) {
   merge_into(MORPHIZEN_ORT_API(node_get_attributes)(node));
 }
 
-void NodeAttributesBuilder::merge_into(NodeAttributes& attrs) {
-  for (auto& attr : attrs_) {
-    AttributeProto& attr_proto = attr.get();
+void NodeAttributesBuilder::merge_into(NodeAttributes &attrs) {
+  for (auto &attr : attrs_) {
+    AttributeProto &attr_proto = attr.get();
     MORPHIZEN_ORT_API(node_attributes_add)(attrs, std::move(attr_proto));
   }
 }
 MORPHIZEN_DLL_SPEC AttributeProtoPtr
-attr_proto_clone(const AttributeProto& attr) {
+attr_proto_clone(const AttributeProto &attr) {
   return AttributeProtoPtr(MORPHIZEN_ORT_API(attr_proto_clone)(attr));
 }
 
 MORPHIZEN_DLL_SPEC AttributeProtoPtr attr_proto_new_ints(
-    const std::string& name, const std::vector<int64_t>& value) {
+    const std::string &name, const std::vector<int64_t> &value) {
   return AttributeProtoPtr(MORPHIZEN_ORT_API(attr_proto_new_ints)(name, value));
 }
 

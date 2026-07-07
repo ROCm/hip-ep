@@ -18,15 +18,15 @@ CustomOp::CustomOp() {}
 CustomOp::~CustomOp() {}
 
 ExecutionProviderConcrete::ExecutionProviderConcrete(
-    std::shared_ptr<const PassContext> context, const MetaDefProto& meta_def)
+    std::shared_ptr<const PassContext> context, const MetaDefProto &meta_def)
     : context_{context}, meta_def_{std::make_shared<MetaDefProto>(meta_def)} {}
 
 ExecutionProviderConcrete::~ExecutionProviderConcrete() {}
 
 template <typename T, typename = void> struct CustomOp_InitSession_t {
   static Ort::Session
-  CustomOp_InitSession(const T* api, onnxruntime::Model* model,
-                       const std::shared_ptr<MetaDefProto>& meta_def) {
+  CustomOp_InitSession(const T *api, onnxruntime::Model *model,
+                       const std::shared_ptr<MetaDefProto> &meta_def) {
     if (meta_def->fallback_cpu()) {
       LOG(FATAL) << "Set fallback_cpu to true. your onnxruntime does not "
                     "support model_to_proto";
@@ -37,10 +37,10 @@ template <typename T, typename = void> struct CustomOp_InitSession_t {
 
 template <typename T>
 struct CustomOp_InitSession_t<
-    T, std::void_t<decltype(std::declval<T&>().model_to_proto)>> {
+    T, std::void_t<decltype(std::declval<T &>().model_to_proto)>> {
   static Ort::Session
-  CustomOp_InitSession(const T* api, onnxruntime::Model* model,
-                       const std::shared_ptr<MetaDefProto>& meta_def) {
+  CustomOp_InitSession(const T *api, onnxruntime::Model *model,
+                       const std::shared_ptr<MetaDefProto> &meta_def) {
     if (meta_def->fallback_cpu()) {
       CHECK(model);
       Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "MorphiZen_CustomOp");
@@ -57,23 +57,23 @@ struct CustomOp_InitSession_t<
   }
 };
 CustomOpImp::CustomOpImp(std::shared_ptr<const PassContext> context,
-                         const std::shared_ptr<MetaDefProto>& meta_def,
-                         onnxruntime::Model* model)
+                         const std::shared_ptr<MetaDefProto> &meta_def,
+                         onnxruntime::Model *model)
     : context_{context}, meta_def_{meta_def},
       session_{CustomOp_InitSession_t<
           morphizen::OrtApiForMorphizen>::CustomOp_InitSession(morphizen::api(),
                                                                model,
                                                                meta_def)} {}
 CustomOpImp::~CustomOpImp() {}
-void CustomOpImp::ComputeCpu(const OrtApi* api,
-                             OrtKernelContext* context) const {
+void CustomOpImp::ComputeCpu(const OrtApi *api,
+                             OrtKernelContext *context) const {
   Ort::KernelContext ctx(context);
   Ort::AllocatorWithDefaultOptions allocator;
   CHECK(session_);
-  std::vector<const OrtValue*> input_values;
-  std::vector<OrtValue*> output_values;
-  std::vector<const char*> input_names;
-  std::vector<const char*> output_names;
+  std::vector<const OrtValue *> input_values;
+  std::vector<OrtValue *> output_values;
+  std::vector<const char *> input_names;
+  std::vector<const char *> output_names;
   std::vector<Ort::AllocatedStringPtr> string_ptr;
   for (auto idx = 0u; idx < ctx.GetInputCount(); ++idx) {
     input_values.push_back(ctx.GetInput(idx));
@@ -94,15 +94,15 @@ void CustomOpImp::ComputeCpu(const OrtApi* api,
                              output_names.data(), output_names.size(),
                              output_values.data()));
 }
-Ort::ConstValue CustomOpImp::ctxGetInput(Ort::KernelContext& ctx,
+Ort::ConstValue CustomOpImp::ctxGetInput(Ort::KernelContext &ctx,
                                          int index) const {
   if (!meta_def_->input_argument_indice().empty()) {
     index = meta_def_->input_argument_indice(index);
   }
   return ctx.GetInput(index);
 }
-Ort::UnownedValue CustomOpImp::ctxGetOutput(Ort::KernelContext& ctx, int index,
-                                            const int64_t* dim_values,
+Ort::UnownedValue CustomOpImp::ctxGetOutput(Ort::KernelContext &ctx, int index,
+                                            const int64_t *dim_values,
                                             size_t dim_count) const {
   if (!meta_def_->output_argument_indice().empty()) {
     index = meta_def_->output_argument_indice(index);

@@ -11,14 +11,14 @@
 #include "./pattern_log.hpp"
 
 #ifdef _MSC_VER
-#  pragma warning(push)
-#  pragma warning(disable : 4946)
+#pragma warning(push)
+#pragma warning(disable : 4946)
 #endif
 
 #include "morphizen/pattern.pb.h"
 
 #ifdef _MSC_VER
-#  pragma warning(pop)
+#pragma warning(pop)
 #endif
 
 namespace morphizen {
@@ -40,9 +40,9 @@ std::string PatternGraphInput::virtualize_label() const {
 }
 
 BinderBuilderPtr
-PatternGraphInput::match_uncached(const onnxruntime::Graph& graph,
-                                  const NodeInput& node_input,
-                                  const BinderBuilder& binder) const {
+PatternGraphInput::match_uncached(const onnxruntime::Graph &graph,
+                                  const NodeInput &node_input,
+                                  const BinderBuilder &binder) const {
   auto ret = BinderBuilderPtr();
   if (node_input.node == nullptr) {
     auto inputs = graph_get_inputs(graph);
@@ -72,8 +72,8 @@ PatternGraphInput::match_uncached(const onnxruntime::Graph& graph,
   }
   return ret;
 }
-void PatternGraphInput::dump_to_proto_imp(RootPatternProto& /*pattern_proto*/,
-                                          PatternProto& this_proto) const {
+void PatternGraphInput::dump_to_proto_imp(RootPatternProto & /*pattern_proto*/,
+                                          PatternProto &this_proto) const {
   this_proto.mutable_graph_input();
 }
 } // namespace morphizen

@@ -7,7 +7,7 @@
 namespace morphizen {
 
 // Empty implementation - placeholder for future node argument operations
-void* NodeArg::get_const_data_as_tensor(const Graph& /*graph*/) const {
+void *NodeArg::get_const_data_as_tensor(const Graph & /*graph*/) const {
   // Placeholder implementation - returns nullptr
   return nullptr;
 }

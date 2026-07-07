@@ -6,17 +6,17 @@
 
 namespace morphizen {
 
-OrtGraphWrapper::OrtGraphWrapper(const ApiPtrs& api_ptrs, const OrtGraph& graph)
+OrtGraphWrapper::OrtGraphWrapper(const ApiPtrs &api_ptrs, const OrtGraph &graph)
     : ApiPtrs(api_ptrs), B(&graph) {}
-const OrtGraph& OrtGraphWrapper::get() const {
+const OrtGraph &OrtGraphWrapper::get() const {
   // Return the underlying graph pointer
-  return *static_cast<const OrtGraph*>(this->p_);
+  return *static_cast<const OrtGraph *>(this->p_);
 }
 bool OrtGraphWrapper::is_subgraph() const {
   return Ort::ConstGraph(p_).GetParentNode() != nullptr;
 }
-const char* OrtGraphWrapper::name() const {
-  const char* ret = nullptr;
+const char *OrtGraphWrapper::name() const {
+  const char *ret = nullptr;
   throw_if_error(ort_api.Graph_GetName(p_, &ret));
   return ret;
 }
@@ -30,8 +30,8 @@ Ort::ModelMetadata OrtGraphWrapper::get_model_metadata() const {
   return Ort::ConstGraph(this->p_).GetModelMetadata();
 }
 // Convenience methods that copy to vector
-std::vector<const OrtNode*> OrtGraphWrapper::nodes() const {
-  auto ret = std::vector<const OrtNode*>{};
+std::vector<const OrtNode *> OrtGraphWrapper::nodes() const {
+  auto ret = std::vector<const OrtNode *>{};
   size_t num_nodes = 0;
   throw_if_error(ort_api.Graph_GetNumNodes(p_, &num_nodes));
   ret.resize(num_nodes);
@@ -39,8 +39,8 @@ std::vector<const OrtNode*> OrtGraphWrapper::nodes() const {
   return ret;
 }
 
-std::vector<const OrtValueInfo*> OrtGraphWrapper::inputs() const {
-  auto ret = std::vector<const OrtValueInfo*>{};
+std::vector<const OrtValueInfo *> OrtGraphWrapper::inputs() const {
+  auto ret = std::vector<const OrtValueInfo *>{};
   size_t num_inputs = 0;
   throw_if_error(ort_api.Graph_GetNumInputs(p_, &num_inputs));
   ret.resize(num_inputs);
@@ -48,8 +48,8 @@ std::vector<const OrtValueInfo*> OrtGraphWrapper::inputs() const {
   return ret;
 }
 
-std::vector<const OrtValueInfo*> OrtGraphWrapper::outputs() const {
-  auto ret = std::vector<const OrtValueInfo*>{};
+std::vector<const OrtValueInfo *> OrtGraphWrapper::outputs() const {
+  auto ret = std::vector<const OrtValueInfo *>{};
   size_t num_outputs = 0;
   throw_if_error(ort_api.Graph_GetNumOutputs(p_, &num_outputs));
   ret.resize(num_outputs);
@@ -57,8 +57,8 @@ std::vector<const OrtValueInfo*> OrtGraphWrapper::outputs() const {
   return ret;
 }
 
-std::vector<const OrtValueInfo*> OrtGraphWrapper::initializers() const {
-  auto ret = std::vector<const OrtValueInfo*>{};
+std::vector<const OrtValueInfo *> OrtGraphWrapper::initializers() const {
+  auto ret = std::vector<const OrtValueInfo *>{};
   size_t num_initializers = 0;
   throw_if_error(ort_api.Graph_GetNumInitializers(p_, &num_initializers));
   ret.resize(num_initializers);
@@ -68,8 +68,8 @@ std::vector<const OrtValueInfo*> OrtGraphWrapper::initializers() const {
 
 std::map<std::string, int> OrtGraphWrapper::guess_opset() const {
   auto opset = std::map<std::string, int>{};
-  for (const OrtNode* node_in_c : nodes()) {
-    const char* domain = nullptr;
+  for (const OrtNode *node_in_c : nodes()) {
+    const char *domain = nullptr;
     int since_version = 0;
     throw_if_error(ort_api.Node_GetDomain(node_in_c, &domain));
     throw_if_error(ort_api.Node_GetSinceVersion(node_in_c, &since_version));

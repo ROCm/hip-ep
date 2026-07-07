@@ -7,8 +7,8 @@
 #include "morphizen/op_invoker.hpp"
 #include <gtest/gtest.h>
 
-static bool HasValue(const Ort::Value& value) {
-  return static_cast<const OrtValue*>(value) && value.HasValue();
+static bool HasValue(const Ort::Value &value) {
+  return static_cast<const OrtValue *>(value) && value.HasValue();
 }
 
 struct ValueCreater {
@@ -19,14 +19,15 @@ struct ValueCreater {
 
 public:
   template <typename T>
-  Ort::Value add_tensor_value(const std::vector<int64_t>& shape) {
+  Ort::Value add_tensor_value(const std::vector<int64_t> &shape) {
     size_t total_size = 1;
     for (auto d : shape)
       total_size *= d;
 
     data_buffers.emplace_back(total_size * sizeof(T));
 
-    return Ort::Value::CreateTensor<T>(mem_info, (T*)data_buffers.back().data(),
+    return Ort::Value::CreateTensor<T>(mem_info,
+                                       (T *)data_buffers.back().data(),
                                        total_size, shape.data(), shape.size());
   }
 };
@@ -92,7 +93,7 @@ TEST(OpInvokerTest, CreateAndInvoke) {
         ONNXTensorElementDataType::
             ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, // cos_cache
         ONNXTensorElementDataType::
-            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT  // sin_cache
+            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT // sin_cache
     };
 
     // output type values
@@ -102,7 +103,7 @@ TEST(OpInvokerTest, CreateAndInvoke) {
         ONNXTensorElementDataType::
             ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, // present_key
         ONNXTensorElementDataType::
-            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT  // present_value
+            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT // present_value
     };
 
     op_invoker = morphizen::OpInvoker::Create(

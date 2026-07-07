@@ -5,6 +5,6 @@
 #pragma once
 namespace morphizen {
 namespace onnx_ir_imp {
-const morphizen::OrtApiForMorphizen* get_morphizen_ort_api();
+const morphizen::OrtApiForMorphizen *get_morphizen_ort_api();
 }
 } // namespace morphizen

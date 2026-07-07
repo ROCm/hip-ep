@@ -24,7 +24,7 @@ public:
    * @param graph The parent graph
    * @return void* Pointer to tensor data (currently returns nullptr)
    */
-  void* get_const_data_as_tensor(const Graph& graph) const;
+  void *get_const_data_as_tensor(const Graph &graph) const;
 };
 
 } // namespace morphizen

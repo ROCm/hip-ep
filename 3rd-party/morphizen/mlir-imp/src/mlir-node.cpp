@@ -21,10 +21,10 @@ namespace mlir_impl {
 // that should not leak outside MLIRNode -- consumers go through
 // MLIRNode::get/set/backupAndClear/restore methods.
 namespace {
-constexpr const char* MORPHIZEN_NODE_INPUTS = "morphizen.node_inputs";
-constexpr const char* MORPHIZEN_NODE_IMPLICIT_INPUTS =
+constexpr const char *MORPHIZEN_NODE_INPUTS = "morphizen.node_inputs";
+constexpr const char *MORPHIZEN_NODE_IMPLICIT_INPUTS =
     "morphizen.node_implicit_inputs";
-constexpr const char* MORPHIZEN_NODE_OUTPUTS = "morphizen.node_outputs";
+constexpr const char *MORPHIZEN_NODE_OUTPUTS = "morphizen.node_outputs";
 } // namespace
 
 // === Property Accessors ===
@@ -109,12 +109,12 @@ std::vector<MLIRNodeArgIndex> decode_node_arg_array_attr(mlir::Attribute attr) {
 // Encode a vector of indices into an ArrayAttr of i64 IntegerAttrs for the
 // matching attribute slot.
 mlir::ArrayAttr
-encode_node_arg_array_attr(mlir::MLIRContext* ctx,
+encode_node_arg_array_attr(mlir::MLIRContext *ctx,
                            llvm::ArrayRef<MLIRNodeArgIndex> args) {
   mlir::OpBuilder builder(ctx);
   llvm::SmallVector<mlir::Attribute> entries;
   entries.reserve(args.size());
-  for (const auto& a : args) {
+  for (const auto &a : args) {
     entries.push_back(
         builder.getI64IntegerAttr(static_cast<int64_t>(a.to_uint64())));
   }
@@ -156,12 +156,12 @@ MLIRNode::backupAndClearMorphizenAttrs() {
   llvm::SmallVector<mlir::NamedAttribute> snapshot;
   // Collect first, then remove: removeAttr invalidates the attr-dict
   // iteration order.
-  for (auto& named : (*this)->getAttrs()) {
+  for (auto &named : (*this)->getAttrs()) {
     if (named.getName().strref().starts_with("morphizen.")) {
       snapshot.push_back(named);
     }
   }
-  for (auto& named : snapshot) {
+  for (auto &named : snapshot) {
     (*this)->removeAttr(named.getName());
   }
   return snapshot;
@@ -169,7 +169,7 @@ MLIRNode::backupAndClearMorphizenAttrs() {
 
 void MLIRNode::restoreMorphizenAttrs(
     llvm::ArrayRef<mlir::NamedAttribute> snapshot) {
-  for (auto& named : snapshot) {
+  for (auto &named : snapshot) {
     (*this)->setAttr(named.getName(), named.getValue());
   }
 }
@@ -179,14 +179,14 @@ bool MLIRNode::isFused() const {
   return mlir::isa<mlir::func::CallOp>(*this);
 }
 
-const MLIRGraph* MLIRNode::getFunctionBody() {
+const MLIRGraph *MLIRNode::getFunctionBody() {
   if (auto call_op = mlir::dyn_cast<mlir::func::CallOp>(getOperation())) {
     auto callee_name = call_op.getCallee().str();
-    if (auto* graph = GraphStore::get_graph_by_symbol_name(callee_name)) {
+    if (auto *graph = GraphStore::get_graph_by_symbol_name(callee_name)) {
       return graph;
     }
-    auto& graph = const_cast<MLIRGraph&>(getOutputNodeArgs()[0].get_graph());
-    auto& model = const_cast<MLIRModel&>(graph.get_model());
+    auto &graph = const_cast<MLIRGraph &>(getOutputNodeArgs()[0].get_graph());
+    auto &model = const_cast<MLIRModel &>(graph.get_model());
     auto func_ops = model.getModule().getOps<mlir::func::FuncOp>();
     for (auto func_op : func_ops) {
       if (func_op.getSymName() == callee_name) {

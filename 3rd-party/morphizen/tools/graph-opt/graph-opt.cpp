@@ -16,8 +16,8 @@ using namespace morphizen;
 using namespace std;
 
 // Validate file path to mitigate path traversal risks
-static bool validate_path(const std::string& path,
-                          const std::string& param_name) {
+static bool validate_path(const std::string &path,
+                          const std::string &param_name) {
   if (path.empty()) {
     return true; // Empty paths are handled by subsequent checks
   }
@@ -39,7 +39,7 @@ static bool validate_path(const std::string& path,
   return true;
 }
 
-int main(int argc, char* argv[]) {
+int main(int argc, char *argv[]) {
   try {
     // Define command line options
     po::options_description desc("Allowed options");
@@ -86,9 +86,9 @@ int main(int argc, char* argv[]) {
 
     auto protos = std::vector<std::unique_ptr<PassProto>>{};
     auto passes = std::vector<std::shared_ptr<morphizen::IPass>>{};
-    for (auto& opt_pass_i : opt_pass) {
+    for (auto &opt_pass_i : opt_pass) {
       protos.emplace_back(std::make_unique<PassProto>());
-      auto& pass_proto = *protos.back();
+      auto &pass_proto = *protos.back();
       pass_proto.set_name("test");
       pass_proto.set_plugin(opt_pass_i);
       passes.emplace_back(IPass::create_pass(context, pass_proto));
@@ -97,7 +97,7 @@ int main(int argc, char* argv[]) {
     auto model = morphizen::model_load(opt_input_file);
     auto model_ref = morphizen_cxx::ModelConstRef(*model);
     auto graph_ref = model_ref.main_graph();
-    auto& graph = graph_ref;
+    auto &graph = graph_ref;
     graph_resolve(graph);
 
     IPass::run_passes(passes, graph);
@@ -111,7 +111,7 @@ int main(int argc, char* argv[]) {
       LOG(INFO) << "write output file to " << opt_output_txt_file;
       morphizen::dump_graph(graph, opt_output_txt_file);
     }
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     std::cerr << "exception occurs : " << e.what() << "\n";
   }
 

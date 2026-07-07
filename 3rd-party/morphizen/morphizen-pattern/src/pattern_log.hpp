@@ -12,8 +12,8 @@
 #define MY_LOG(n) LOG_IF(INFO, false)
 #define MATCH_FAILED MY_LOG(1) << "MATCH FAILED. ID=" << get_id() << ";"
 namespace morphizen {
-[[maybe_unused]] static std::string node_input_as_string(const Graph& graph,
-                                                         const NodeInput& ni) {
+[[maybe_unused]] static std::string node_input_as_string(const Graph &graph,
+                                                         const NodeInput &ni) {
   if (ni.node) {
     return morphizen_cxx::NodeConstRef::from_node(graph, *ni.node).to_string();
   } else if (ni.node_arg) {
@@ -22,7 +22,7 @@ namespace morphizen {
   }
   return "nil";
 }
-inline std::string normalize_domain(const std::string& domain) {
+inline std::string normalize_domain(const std::string &domain) {
   return (domain == "ai.onnx") || (domain == "onnx") ? "" : domain;
 }
 } // namespace morphizen

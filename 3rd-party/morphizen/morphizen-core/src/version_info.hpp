@@ -27,4 +27,4 @@ const std::string get_dll_product_version();
 const std::string get_dll_file_description();
 
 } // namespace morphizen
-extern "C" const char* morphizen_get_build_info();
+extern "C" const char *morphizen_get_build_info();

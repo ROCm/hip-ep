@@ -11,12 +11,12 @@
 #include <morphizen/morphizen_ort_api.h>
 #include <sstream>
 #ifdef _WIN32
-#  pragma warning(push)
-#  pragma warning(disable : 4251)
+#pragma warning(push)
+#pragma warning(disable : 4251)
 #endif
 #include <google/protobuf/text_format.h>
 #ifdef _WIN32
-#  pragma warning(pop)
+#pragma warning(pop)
 #endif
 
 #include "./pass_imp.hpp"
@@ -25,11 +25,11 @@ DEF_ENV_PARAM(DEBUG_ANCHOR_POINT, "0")
 
 namespace morphizen_imp {
 
-AnchorPointImp::AnchorPointImp(const AnchorPointProto& proto) : proto_{proto} {}
+AnchorPointImp::AnchorPointImp(const AnchorPointProto &proto) : proto_{proto} {}
 
 AnchorPointImp::~AnchorPointImp() {}
 
-const AnchorPointProto& AnchorPointImp::get_proto() const { return proto_; }
+const AnchorPointProto &AnchorPointImp::get_proto() const { return proto_; }
 
 } // namespace morphizen_imp
 
@@ -37,12 +37,12 @@ namespace morphizen {
 
 using namespace morphizen_imp;
 
-std::unique_ptr<AnchorPoint> AnchorPoint::identity(const IPass& pass,
-                                                   const NodeArg& node_arg) {
+std::unique_ptr<AnchorPoint> AnchorPoint::identity(const IPass &pass,
+                                                   const NodeArg &node_arg) {
   return AnchorPoint::identity(pass, node_arg_get_name(node_arg));
 }
 std::unique_ptr<AnchorPoint>
-AnchorPoint::identity(const IPass& pass, const std::string& node_arg_name) {
+AnchorPoint::identity(const IPass &pass, const std::string &node_arg_name) {
   auto next = find_anchor_point(pass, node_arg_name);
   auto proto = AnchorPointProto();
   proto.set_op_type(AnchorPoint::IDENTITY_OP);
@@ -58,9 +58,9 @@ AnchorPoint::identity(const IPass& pass, const std::string& node_arg_name) {
 }
 
 std::unique_ptr<AnchorPoint>
-AnchorPoint::find_anchor_point(const IPass& pass, const std::string& name) {
-  auto& context = dynamic_cast<const PassContextImp&>(*pass.get_context());
-  const auto& origin_nodes = context.context_proto.origin_nodes();
+AnchorPoint::find_anchor_point(const IPass &pass, const std::string &name) {
+  auto &context = dynamic_cast<const PassContextImp &>(*pass.get_context());
+  const auto &origin_nodes = context.context_proto.origin_nodes();
   auto it = origin_nodes.find(name);
   auto ret = std::unique_ptr<AnchorPoint>{};
   if (it != origin_nodes.end()) {
@@ -70,8 +70,8 @@ AnchorPoint::find_anchor_point(const IPass& pass, const std::string& name) {
 }
 
 std::unique_ptr<AnchorPoint>
-AnchorPoint::find_anchor_point(IPass& pass, const Graph& graph,
-                               const std::string& name) {
+AnchorPoint::find_anchor_point(IPass &pass, const Graph &graph,
+                               const std::string &name) {
   auto ret = find_anchor_point(pass, name);
   if (ret == nullptr) {
     auto graph_ref = morphizen_cxx::GraphConstRef(graph);

@@ -13,8 +13,8 @@ DEF_ENV_PARAM(MORPHIZEN_DEBUG_EP_CONTEXT_SHARED_WORKSPACE, "0")
 
 namespace morphizen {
 struct path_equal_to {
-  bool operator()(const std::filesystem::path& p1,
-                  const std::filesystem::path& p2) const {
+  bool operator()(const std::filesystem::path &p1,
+                  const std::filesystem::path &p2) const {
     return std::filesystem::equivalent(p1, p2);
   }
 };
@@ -22,14 +22,14 @@ using store_t =
     std::unordered_map<std::filesystem::path,
                        std::unique_ptr<SharedContextContextWorkspace>,
                        std::hash<std::filesystem::path>, path_equal_to>;
-static store_t& the_store() {
+static store_t &the_store() {
   static store_t g_store;
   static bool inialized = false;
   if (!inialized) {
     // Register cleanup function to close all workspaces on exit
     add_cleanup_function(std::string(__FILE__) + ":" + std::to_string(__LINE__),
                          []() {
-                           for (auto& [_, workspace] : g_store) {
+                           for (auto &[_, workspace] : g_store) {
                              workspace->close_workspace();
                            }
                            g_store.clear();
@@ -39,14 +39,14 @@ static store_t& the_store() {
   return g_store;
 }
 
-SharedContextContextWorkspace&
+SharedContextContextWorkspace &
 SharedContextContextWorkspace::create_workspace_or_get(
-    const std::filesystem::path& ep_context_binary_file) {
+    const std::filesystem::path &ep_context_binary_file) {
   auto directory = ep_context_binary_file.has_parent_path()
                        ? ep_context_binary_file.parent_path()
                        : std::filesystem::u8path(".");
   auto filename = ep_context_binary_file.filename().u8string();
-  auto& store = the_store();
+  auto &store = the_store();
   auto it = store.find(directory);
   if (it == store.end()) {
     // Create a new workspace if it does not exist
@@ -67,7 +67,7 @@ SharedContextContextWorkspace::create_workspace_or_get(
 }
 
 SharedContextContextWorkspace::SharedContextContextWorkspace(
-    const PrivateTag&, const std::filesystem::path& ep_context_binary_file)
+    const PrivateTag &, const std::filesystem::path &ep_context_binary_file)
     : ep_context_binary_file_(ep_context_binary_file) {
   // Constructor logic can be added here if needed
 }
@@ -75,7 +75,7 @@ void SharedContextContextWorkspace::close_workspace() {
   // Cleanup logic can be added here if needed
   MY_LOG(1) << "Closing workspace for EP context binary file: "
             << ep_context_binary_file_;
-  auto& store = the_store();
+  auto &store = the_store();
   auto directory = ep_context_binary_file_.has_parent_path()
                        ? ep_context_binary_file_.parent_path()
                        : std::filesystem::u8path(".");

@@ -18,11 +18,11 @@
 
 #ifdef _WIN32
 
-#  include <cstdio>
-#  include <io.h>
-#  include <iostream>
-#  include <string>
-#  include <windows.h>
+#include <cstdio>
+#include <io.h>
+#include <iostream>
+#include <string>
+#include <windows.h>
 
 // Helper to get error message
 std::string GetLastErrorAsString() {
@@ -52,7 +52,7 @@ void test_handle_extraction() {
   std::cout << "=== Test 1: Extract HANDLE from tmpfile() ===" << std::endl;
 
   // Create tmpfile
-  FILE* tmp_file = tmpfile();
+  FILE *tmp_file = tmpfile();
   if (!tmp_file) {
     std::cerr << "Failed to create tmpfile" << std::endl;
     return;
@@ -60,7 +60,7 @@ void test_handle_extraction() {
   std::cout << "tmpfile created: FILE*=" << tmp_file << std::endl;
 
   // Write some data
-  const char* test_data = "Hello, World! This is test data for mmap.";
+  const char *test_data = "Hello, World! This is test data for mmap.";
   fwrite(test_data, 1, strlen(test_data), tmp_file);
   fflush(tmp_file);
   std::cout << "Wrote " << strlen(test_data) << " bytes" << std::endl;
@@ -97,14 +97,14 @@ void test_mmap_from_tmpfile() {
             << std::endl;
 
   // Create tmpfile
-  FILE* tmp_file = tmpfile();
+  FILE *tmp_file = tmpfile();
   if (!tmp_file) {
     std::cerr << "Failed to create tmpfile" << std::endl;
     return;
   }
 
   // Write test data
-  const char* test_data =
+  const char *test_data =
       "MMAP TEST DATA: The quick brown fox jumps over the lazy dog.";
   size_t data_len = strlen(test_data);
   fwrite(test_data, 1, data_len, tmp_file);
@@ -132,7 +132,7 @@ void test_mmap_from_tmpfile() {
             << std::dec << std::endl;
 
   // Map view of file
-  void* mapped_base =
+  void *mapped_base =
       MapViewOfFile(map_handle, FILE_MAP_READ, 0, 0, // Map from beginning
                     0                                // Map entire file
       );
@@ -147,7 +147,7 @@ void test_mmap_from_tmpfile() {
   std::cout << "MapViewOfFile succeeded: " << mapped_base << std::endl;
 
   // Read data via mmap
-  std::string mapped_data(static_cast<const char*>(mapped_base), data_len);
+  std::string mapped_data(static_cast<const char *>(mapped_base), data_len);
   std::cout << "Data read via mmap: \"" << mapped_data << "\"" << std::endl;
 
   // Verify data
@@ -169,13 +169,13 @@ void test_lifetime_order() {
             << std::endl;
 
   // Test scenario: Close FILE* first, then cleanup mmap
-  FILE* tmp_file = tmpfile();
+  FILE *tmp_file = tmpfile();
   if (!tmp_file) {
     std::cerr << "Failed to create tmpfile" << std::endl;
     return;
   }
 
-  const char* test_data = "Lifetime test data";
+  const char *test_data = "Lifetime test data";
   fwrite(test_data, 1, strlen(test_data), tmp_file);
   fflush(tmp_file);
 
@@ -185,7 +185,7 @@ void test_lifetime_order() {
   // Create mapping
   HANDLE map_handle =
       CreateFileMappingW(handle, nullptr, PAGE_READONLY, 0, 0, nullptr);
-  void* mapped_base = MapViewOfFile(map_handle, FILE_MAP_READ, 0, 0, 0);
+  void *mapped_base = MapViewOfFile(map_handle, FILE_MAP_READ, 0, 0, 0);
 
   if (!mapped_base) {
     std::cerr << "Failed to create mmap" << std::endl;
@@ -203,7 +203,7 @@ void test_lifetime_order() {
 
   // Try to access mapped data AFTER FILE* is closed
   try {
-    std::string mapped_data(static_cast<const char*>(mapped_base),
+    std::string mapped_data(static_cast<const char *>(mapped_base),
                             strlen(test_data));
     std::cout << "Data after FILE* closed: \"" << mapped_data << "\""
               << std::endl;

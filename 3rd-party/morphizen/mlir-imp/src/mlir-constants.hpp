@@ -34,11 +34,11 @@ namespace attr_names {
 
 // Attribute names defined in morphizen-mlir framework
 // "onnx.graph.name" to represent GraphProto.name
-constexpr const char* ONNX_GRAPH_NAME = "onnx.graph.name";
+constexpr const char *ONNX_GRAPH_NAME = "onnx.graph.name";
 // "node.outputs" to represent NodeProto.output (outputs NodeArg Name)
-constexpr const char* NODE_OUTPUTS = "node.outputs";
+constexpr const char *NODE_OUTPUTS = "node.outputs";
 // "morphizen.placeholder" for placeholder operations in attributes
-constexpr const char* MORPHIZEN_PLACEHOLDER = "morphizen.placeholder";
+constexpr const char *MORPHIZEN_PLACEHOLDER = "morphizen.placeholder";
 
 // Note: `morphizen.node_inputs` / `morphizen.node_implicit_inputs` /
 // `morphizen.node_outputs` are MLIRNode-internal and live as file-private
@@ -55,8 +55,8 @@ constexpr const char* MORPHIZEN_PLACEHOLDER = "morphizen.placeholder";
 // information lives in Node.op_type / Node.domain. They must never be
 // re-emitted as user-visible ONNX node attributes (see
 // MLIRNode::getOpType / getDomain for the reverse-decode).
-constexpr const char* CUSTOM_OP_FUNCTION_NAME = "function_name";
-constexpr const char* CUSTOM_OP_DOMAIN_NAME = "domain_name";
+constexpr const char *CUSTOM_OP_FUNCTION_NAME = "function_name";
+constexpr const char *CUSTOM_OP_DOMAIN_NAME = "domain_name";
 
 // Attribute names defined in onnx-mlir project
 // The "onnx_node_name"  attribute to represent NodeProto.name
@@ -67,7 +67,7 @@ constexpr const char* CUSTOM_OP_DOMAIN_NAME = "domain_name";
 //                        {..., onnx_node_name = "QuantizeLinear_2"}
 // Implementation:
 //   - Set by `Operation.setAttr("onnx_node_name", ...)`
-constexpr const char* ONNX_NODE_NAME = "onnx_node_name";
+constexpr const char *ONNX_NODE_NAME = "onnx_node_name";
 //===--------------------------------------===//
 // The "onnx.name" attribute
 // This attribute is attached to function arguments and results in the onnx-mlir
@@ -81,7 +81,7 @@ constexpr const char* ONNX_NODE_NAME = "onnx_node_name";
 //   - Set on arguments via `func().setArgAttr(i, "onnx.name", ...)`
 //   - Set on results via  `func().setResultAttr(i, "onnx.name", ...)`
 //===--------------------------------------===//
-constexpr const char* ONNX_NAME = "onnx.name";
+constexpr const char *ONNX_NAME = "onnx.name";
 
 } // namespace attr_names
 
@@ -91,29 +91,29 @@ namespace onnx_mlir {
 // thin air; values must either be operation results or graph inputs. The
 // onnx.NoValue operation is adopted from the onnx-mlir project to handle
 // optional operands consistently.
-constexpr const char* ONNX_NONE = "onnx.NoValue";
+constexpr const char *ONNX_NONE = "onnx.NoValue";
 
 // "onnx.Return" is the function return operation in the ONNX dialect.
 // It terminates a func::FuncOp in the ONNX dialect and is semantically
 // equivalent to func::ReturnOp but allows shape refinement between operands
 // and function signature result types. This is adopted from onnx-mlir for
 // compatibility with onnx-mlir's MLIR representation.
-constexpr const char* ONNX_RETURN = "onnx.Return";
+constexpr const char *ONNX_RETURN = "onnx.Return";
 
 // "onnx.Yield" is the region terminator used inside If/Loop/Scan op regions
 // in onnx-mlir style. ONNX itself has no Yield op (subgraph outputs are
 // declared via GraphProto.output[]), but MLIR requires every region to end
 // with a terminator op; onnx-mlir introduced ONNXYieldOp for this purpose.
-constexpr const char* ONNX_YIELD = "onnx.Yield";
+constexpr const char *ONNX_YIELD = "onnx.Yield";
 
 // Helper function to check if an operation is an onnx.Return operation
-inline bool isOnnxReturn(mlir::Operation* op) {
+inline bool isOnnxReturn(mlir::Operation *op) {
   return op && op->getName().getStringRef() == ONNX_RETURN;
 }
 
 // Helper function to check if an operation is either onnx.Return or func.return
 // This is useful for transitional code that may encounter either terminator
-inline bool isReturnOp(mlir::Operation* op) {
+inline bool isReturnOp(mlir::Operation *op) {
   if (!op)
     return false;
   auto name = op->getName().getStringRef();
@@ -124,7 +124,7 @@ inline bool isReturnOp(mlir::Operation* op) {
 // and subgraph (onnx.Yield) MLIRGraph instances. Used by set_outputs and any
 // other code path that needs to identify either kind of terminator without
 // caring which.
-inline bool isReturnOrYieldOp(mlir::Operation* op) {
+inline bool isReturnOrYieldOp(mlir::Operation *op) {
   if (!op)
     return false;
   auto name = op->getName().getStringRef();
@@ -137,7 +137,7 @@ inline bool isReturnOrYieldOp(mlir::Operation* op) {
 // and similar element-type-only spots; tensor-shaped values should go through
 // onnxElementTypeToMlirType below.
 mlir::Type onnxElementTypeToMlirElementType(int element_type,
-                                            mlir::OpBuilder& builder);
+                                            mlir::OpBuilder &builder);
 
 // Convert an ONNX TensorProto element type + shape to an MLIR tensor type.
 //   shape == nullptr   -> mlir::UnrankedTensorType (tensor<*xT>); used for
@@ -150,8 +150,8 @@ mlir::Type onnxElementTypeToMlirElementType(int element_type,
 // form (any dynamic dims represented as mlir::ShapedType::kDynamic). ONNX ↔
 // MLIR sentinel translation happens at the api boundary (see to_mlir_dims /
 // to_onnx_dims in morphizen-ort-api.cpp).
-mlir::Type onnxElementTypeToMlirType(int element_type, mlir::OpBuilder& builder,
-                                     const llvm::SmallVector<int64_t>* shape);
+mlir::Type onnxElementTypeToMlirType(int element_type, mlir::OpBuilder &builder,
+                                     const llvm::SmallVector<int64_t> *shape);
 
 } // namespace mlir_impl
 } // namespace morphizen

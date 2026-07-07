@@ -9,11 +9,11 @@ namespace morphizen {
 // create a memory map file
 class MemFile {
 public:
-  static std::unique_ptr<MemFile> create(const std::filesystem::path& path);
+  static std::unique_ptr<MemFile> create(const std::filesystem::path &path);
 
 public:
   virtual ~MemFile();
-  virtual void* base() = 0;
+  virtual void *base() = 0;
   virtual size_t size() const = 0;
 };
 } // namespace morphizen

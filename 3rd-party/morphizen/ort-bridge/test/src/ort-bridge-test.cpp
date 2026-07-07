@@ -6,19 +6,19 @@
 #include <gtest/gtest.h>
 
 #ifdef __GNUC__
-#  pragma GCC diagnostic ignored "-Wpedantic"
-#  pragma GCC diagnostic ignored "-Wconversion"
-#  pragma GCC diagnostic ignored "-Wsign-compare"
-#  pragma GCC diagnostic ignored "-Wunused-variable"
-#  pragma GCC diagnostic ignored "-Wunused-but-set-variable"
+#pragma GCC diagnostic ignored "-Wpedantic"
+#pragma GCC diagnostic ignored "-Wconversion"
+#pragma GCC diagnostic ignored "-Wsign-compare"
+#pragma GCC diagnostic ignored "-Wunused-variable"
+#pragma GCC diagnostic ignored "-Wunused-but-set-variable"
 #endif
 #include <glog/logging.h>
 #define ORT_API_MANUAL_INIT 1
 #include <onnxruntime_cxx_api.h>
 #if _WIN32
-#  ifdef _DEBUG
-#    include <crtdbg.h>
-#  endif
+#ifdef _DEBUG
+#include <crtdbg.h>
+#endif
 #endif
 #include "./test-environment.hpp"
 namespace gtest_example {
@@ -32,24 +32,24 @@ TEST(GTest, hello) {
 } // namespace gtest_example
 static void show_test_case() {
   // Get the unit test singleton
-  const ::testing::UnitTest& unit_test = *::testing::UnitTest::GetInstance();
+  const ::testing::UnitTest &unit_test = *::testing::UnitTest::GetInstance();
 
   // Iterate over all test suites
   for (int i = 0; i < unit_test.total_test_suite_count(); ++i) {
-    const ::testing::TestSuite* test_suite = unit_test.GetTestSuite(i);
+    const ::testing::TestSuite *test_suite = unit_test.GetTestSuite(i);
 
     std::cout << test_suite->name() << "." << std::endl;
 
     // Iterate over all test infos in the suite
     for (int j = 0; j < test_suite->total_test_count(); ++j) {
-      const ::testing::TestInfo* test_info = test_suite->GetTestInfo(j);
+      const ::testing::TestInfo *test_info = test_suite->GetTestInfo(j);
 
       std::cout << "  " << test_info->name() << " " << test_info->file() << ":"
                 << test_info->line() << std::endl;
     }
   }
 }
-bool arg_get(int argc, const char* argv[], const char* name) {
+bool arg_get(int argc, const char *argv[], const char *name) {
   for (int i = 0; i < argc; ++i) {
     if (strcmp(argv[i], name) == 0) {
       return true;
@@ -58,9 +58,9 @@ bool arg_get(int argc, const char* argv[], const char* name) {
   return false;
 }
 
-int main(int argc, const char* argv[]) {
+int main(int argc, const char *argv[]) {
   Ort::InitApi();
-  testing::InitGoogleTest(&argc, (char**)argv);
+  testing::InitGoogleTest(&argc, (char **)argv);
   if (arg_get(argc, argv, "--gtest_list_test_cases")) {
     std::cout << "List all test cases:" << std::endl;
     show_test_case();

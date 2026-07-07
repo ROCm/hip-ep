@@ -14,21 +14,21 @@
 
 namespace morphizen_e2e_test {
 
-static std::vector<uint8_t> ReadBinaryFile(const std::string& file_path) {
+static std::vector<uint8_t> ReadBinaryFile(const std::string &file_path) {
   std::ifstream file(file_path, std::ios::binary | std::ios::ate);
   std::streamsize size = file.tellg();
   file.seekg(0, std::ios::beg);
 
   std::vector<uint8_t> buffer(size);
-  if (file.read(reinterpret_cast<char*>(buffer.data()), size)) {
+  if (file.read(reinterpret_cast<char *>(buffer.data()), size)) {
     return buffer;
   } else {
     throw std::runtime_error("Failed to read model file");
   }
 }
 static std::unique_ptr<Ort::Session>
-create_session(const std::filesystem::path& model_path, Ort::Env& env,
-               Ort::SessionOptions& session_options, bool use_memory_model) {
+create_session(const std::filesystem::path &model_path, Ort::Env &env,
+               Ort::SessionOptions &session_options, bool use_memory_model) {
 
   std::unique_ptr<Ort::Session> p_session;
   auto create_session_start_time = std::chrono::steady_clock::now();
@@ -41,7 +41,7 @@ create_session(const std::filesystem::path& model_path, Ort::Env& env,
       p_session = std::make_unique<Ort::Session>(
           env, PathToString<ORTCHAR_T>()(model_path).c_str(), session_options);
     }
-  } catch (Ort::Exception& e) {
+  } catch (Ort::Exception &e) {
     std::cout << "Catched Ort Exception: " << e.what() << std::endl;
     exit(1);
   }
@@ -55,8 +55,8 @@ create_session(const std::filesystem::path& model_path, Ort::Env& env,
 }
 
 static std::optional<std::string>
-get_session_config_option(const Ort::SessionOptions& session_options,
-                          const std::string& key) {
+get_session_config_option(const Ort::SessionOptions &session_options,
+                          const std::string &key) {
   if (session_options.HasConfigEntry(key.c_str())) {
     return session_options.GetConfigEntry(key.c_str());
   }
@@ -64,8 +64,8 @@ get_session_config_option(const Ort::SessionOptions& session_options,
 }
 
 static std::filesystem::path
-get_ctx_model_path(const Ort::SessionOptions& session_options,
-                   const std::filesystem::path& model_path) {
+get_ctx_model_path(const Ort::SessionOptions &session_options,
+                   const std::filesystem::path &model_path) {
   auto ctx_path_name =
       model_path.stem().string() + "_ctx" + model_path.extension().string();
   auto ctx_path = model_path.parent_path() / ctx_path_name;
@@ -77,17 +77,17 @@ get_ctx_model_path(const Ort::SessionOptions& session_options,
   return ctx_path;
 }
 
-static void del_ctx_model(const std::filesystem::path& model_path) {
+static void del_ctx_model(const std::filesystem::path &model_path) {
   try {
     std::filesystem::remove(model_path);
-  } catch (std::exception& e) {
+  } catch (std::exception &e) {
     std::cerr << "Exception: " << e.what() << std::endl;
   }
 }
 
-E2ETestSession::E2ETestSession(Ort::Env& env,
-                               Ort::SessionOptions& session_options,
-                               const E2ETestSessionProto& session_proto)
+E2ETestSession::E2ETestSession(Ort::Env &env,
+                               Ort::SessionOptions &session_options,
+                               const E2ETestSessionProto &session_proto)
     : env_(env), session_options_(session_options),
       session_proto_(session_proto) {
 
@@ -137,7 +137,7 @@ E2ETestSession::E2ETestSession(Ort::Env& env,
 }
 
 void E2ETestSession::run() {
-  for (auto& session : ort_sessions_) {
+  for (auto &session : ort_sessions_) {
     run_session(*session, session_proto_.run());
   }
 }

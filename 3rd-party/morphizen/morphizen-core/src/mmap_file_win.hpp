@@ -9,22 +9,22 @@
 namespace morphizen {
 // create a memory map file
 class MemFileWin : public MemFile {
-  using handle_t = void*; // NOLINT
+  using handle_t = void *; // NOLINT
 public:
-  static std::unique_ptr<MemFile> create(const std::filesystem::path& path);
+  static std::unique_ptr<MemFile> create(const std::filesystem::path &path);
 
 public:
-  MemFileWin(handle_t handle, handle_t map_handle, size_t size, void* base);
+  MemFileWin(handle_t handle, handle_t map_handle, size_t size, void *base);
   virtual ~MemFileWin();
 
 private:
-  virtual void* base() override final;
+  virtual void *base() override final;
   virtual size_t size() const override final;
 
 private:
   handle_t m_handle;
   handle_t m_map_handle;
   size_t m_size;
-  void* m_base;
+  void *m_base;
 };
 } // namespace morphizen

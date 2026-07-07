@@ -29,16 +29,16 @@ public:
   virtual std::unique_ptr<CustomOp> compile() const = 0;
 
 public:
-  inline void set_fused_node(const onnxruntime::Node* fused_node) {
+  inline void set_fused_node(const onnxruntime::Node *fused_node) {
     fused_node_ = fused_node;
   }
-  inline const onnxruntime::Node* get_fused_node() const { return fused_node_; }
-  inline void set_model(onnxruntime::Model* model) { model_ = model; }
-  inline onnxruntime::Model* get_model() const { return model_; }
+  inline const onnxruntime::Node *get_fused_node() const { return fused_node_; }
+  inline void set_model(onnxruntime::Model *model) { model_ = model; }
+  inline onnxruntime::Model *get_model() const { return model_; }
 
 private:
-  const onnxruntime::Node* fused_node_ = nullptr;
-  onnxruntime::Model* model_ = nullptr;
+  const onnxruntime::Node *fused_node_ = nullptr;
+  onnxruntime::Model *model_ = nullptr;
 };
 
 class CustomOp {
@@ -47,7 +47,7 @@ public:
   MORPHIZEN_DLL_SPEC virtual ~CustomOp();
 
 public:
-  virtual void Compute(const OrtApi* api, OrtKernelContext* context) const = 0;
+  virtual void Compute(const OrtApi *api, OrtKernelContext *context) const = 0;
 };
 
 } // namespace morphizen

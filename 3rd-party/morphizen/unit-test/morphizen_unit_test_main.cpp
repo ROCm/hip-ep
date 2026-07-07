@@ -9,24 +9,24 @@
 #define ORT_API_MANUAL_INIT 1
 #include <onnxruntime_cxx_api.h>
 #if _WIN32
-#  ifdef _DEBUG
-#    include <crtdbg.h>
-#  endif
+#ifdef _DEBUG
+#include <crtdbg.h>
+#endif
 #endif
 #include "morphizen-utils/morphizen_plugin.hpp"
 #include "morphizen/morphizen-ort-api-ext.hpp"
-template <typename... Args> void* morphizen_main_cmd(Args... args) {
+template <typename... Args> void *morphizen_main_cmd(Args... args) {
   auto ep_dll = morphizen::Plugin::get("onnxruntime_morphizen_ep");
   if (ep_dll == nullptr) {
     LOG(ERROR) << "Failed to load MorphiZen EP";
     return nullptr;
   }
-  const char* argv[] = {
+  const char *argv[] = {
       args...,
   };
   int argc = (int)(sizeof(argv) / sizeof(argv[0]));
-  return ep_dll->get_method<void*, int, const char*[]>("morphizen_main")(argc,
-                                                                         argv);
+  return ep_dll->get_method<void *, int, const char *[]>("morphizen_main")(
+      argc, argv);
 }
 
 namespace gtest_example {
@@ -34,24 +34,24 @@ TEST(GTest, hello) { LOG(INFO) << "Hello GTest"; }
 } // namespace gtest_example
 static void show_test_case() {
   // Get the unit test singleton
-  const ::testing::UnitTest& unit_test = *::testing::UnitTest::GetInstance();
+  const ::testing::UnitTest &unit_test = *::testing::UnitTest::GetInstance();
 
   // Iterate over all test suites
   for (int i = 0; i < unit_test.total_test_suite_count(); ++i) {
-    const ::testing::TestSuite* test_suite = unit_test.GetTestSuite(i);
+    const ::testing::TestSuite *test_suite = unit_test.GetTestSuite(i);
 
     std::cout << test_suite->name() << "." << std::endl;
 
     // Iterate over all test infos in the suite
     for (int j = 0; j < test_suite->total_test_count(); ++j) {
-      const ::testing::TestInfo* test_info = test_suite->GetTestInfo(j);
+      const ::testing::TestInfo *test_info = test_suite->GetTestInfo(j);
 
       std::cout << "  " << test_info->name() << " " << test_info->file() << ":"
                 << test_info->line() << std::endl;
     }
   }
 }
-bool arg_get(int argc, const char* argv[], const char* name) {
+bool arg_get(int argc, const char *argv[], const char *name) {
   for (int i = 0; i < argc; ++i) {
     if (strcmp(argv[i], name) == 0) {
       return true;
@@ -60,9 +60,9 @@ bool arg_get(int argc, const char* argv[], const char* name) {
   return false;
 }
 
-int main(int argc, const char* argv[]) {
+int main(int argc, const char *argv[]) {
 #if _WIN32
-#  ifdef _DEBUG
+#ifdef _DEBUG
   auto env_ci = getenv("CI");
   auto ci = std::string(env_ci ? env_ci : "");
   if (ci == "1") {
@@ -75,11 +75,11 @@ int main(int argc, const char* argv[]) {
     _CrtSetReportFile(_CRT_WARN, _CRTDBG_FILE_STDERR);
     morphizen_main_cmd("disable_crt_diag");
   }
-#  endif
+#endif
 #endif
   auto ret = 0;
   {
-    testing::InitGoogleTest(&argc, (char**)argv);
+    testing::InitGoogleTest(&argc, (char **)argv);
     if (arg_get(argc, argv, "--gtest_list_test_cases")) {
       std::cout << "List all test cases:" << std::endl;
       show_test_case();
@@ -94,11 +94,11 @@ int main(int argc, const char* argv[]) {
     // Enable text MLIR output mode for unit tests to allow verification of
     // MLIR content (e.g., checking for onnx.Return, onnx.Custom, etc.)
     // This must be set before any MLIR operations are performed.
-#  ifdef _WIN32
+#ifdef _WIN32
     _putenv("MORPHIZEN_SAVE_MLIR_AS_TEXT=1");
-#  else
-    putenv(const_cast<char*>("MORPHIZEN_SAVE_MLIR_AS_TEXT=1"));
-#  endif
+#else
+    putenv(const_cast<char *>("MORPHIZEN_SAVE_MLIR_AS_TEXT=1"));
+#endif
 
     morphizen::setup_global_morphizen_ort_api(morphizen::kMLIRBackend);
     LOG(INFO) << "Global MorphiZen ORT API initialized with MLIR backend";

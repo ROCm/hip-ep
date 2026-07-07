@@ -32,8 +32,8 @@ DEF_ENV_PARAM(DEBUG_MORPHIZEN_PASS, "0")
 
 namespace morphizen {
 
-void IPass::attach_meta_def_param(MetaDefProto& meta_def,
-                                  const char* json_param) const {
+void IPass::attach_meta_def_param(MetaDefProto &meta_def,
+                                  const char *json_param) const {
   if (json_param == nullptr) {
     return;
   }
@@ -47,7 +47,7 @@ void IPass::attach_meta_def_param(MetaDefProto& meta_def,
   meta_def.mutable_param()->CopyFrom(struct_proto);
 }
 
-static bool can_be_dumped(const std::shared_ptr<PassContext>& proto) {
+static bool can_be_dumped(const std::shared_ptr<PassContext> &proto) {
   static bool warned = false;
   bool can_be_dumped = proto->get_provider_option("encryption_key", "") == "";
   if (!can_be_dumped && warned == false) {
@@ -62,7 +62,7 @@ struct BreakOnModifed {
 };
 IPass::action_t
 create_action_from_node_action(IPass::node_action_t node_action) {
-  return [node_action](IPass& self, Graph& graph) {
+  return [node_action](IPass &self, Graph &graph) {
     int modified = 0;
     auto counter = 0;
     auto last_match_idx = -1;
@@ -73,15 +73,15 @@ create_action_from_node_action(IPass::node_action_t node_action) {
 #if MORPHIZEN_ORT_API_MAJOR >= 14
       auto leaf_nodes_cxx = morphizen_cxx::GraphConstRef(graph).output_nodes();
       // Convert to raw pointers for the API
-      auto leaf_nodes = std::vector<const Node*>();
+      auto leaf_nodes = std::vector<const Node *>();
       leaf_nodes.reserve(leaf_nodes_cxx.size());
-      for (auto& n : leaf_nodes_cxx) {
+      for (auto &n : leaf_nodes_cxx) {
         leaf_nodes.push_back(n.ptr());
       }
       MORPHIZEN_ORT_API(graph_reverse_dfs_from_preemp)
       (
           graph, leaf_nodes, nullptr,
-          [&](const Node* node) {
+          [&](const Node *node) {
             auto node_ref =
                 morphizen_cxx::NodeConstRef::from_node(graph, *node);
             auto node_idx = node_ref.index();
@@ -92,7 +92,7 @@ create_action_from_node_action(IPass::node_action_t node_action) {
             return modified;
           },
           nullptr,
-          [&modified](const Node* /*from*/, const Node* /*to*/) {
+          [&modified](const Node * /*from*/, const Node * /*to*/) {
             return modified;
           });
 #else
@@ -133,8 +133,8 @@ create_action_from_node_action(IPass::node_action_t node_action) {
   };
 } // namespace morphizen
 
-Pass::Pass(std::shared_ptr<PassContextImp> context, const PassProto& pass_proto,
-           const PassInfo& pass_info)
+Pass::Pass(std::shared_ptr<PassContextImp> context, const PassProto &pass_proto,
+           const PassInfo &pass_info)
     : context_(context), pass_proto_{pass_proto}, sequence_no_{g_sequence_no++},
       pass_info_{pass_info}, state_{} {
   if (pass_info.init) {
@@ -142,7 +142,7 @@ Pass::Pass(std::shared_ptr<PassContextImp> context, const PassProto& pass_proto,
     if (pass_info.deinit) {
       state_ = std::shared_ptr<void>(self, pass_info.deinit);
     } else {
-      state_ = std::shared_ptr<void>(self, [](void*) {});
+      state_ = std::shared_ptr<void>(self, [](void *) {});
     }
   }
   MY_LOG(1) << "create pass: " << name() << " " << pass_info.size
@@ -151,22 +151,22 @@ Pass::Pass(std::shared_ptr<PassContextImp> context, const PassProto& pass_proto,
     this->add_action(pass_info.get_action(i));
   }
   LOG_IF(INFO, ENV_PARAM(DEBUG_MORPHIZEN_PASS))
-      << "pass is created: " << (void*)this << " name=" << this->name();
+      << "pass is created: " << (void *)this << " name=" << this->name();
 }
 Pass::~Pass() {
   LOG_IF(INFO, ENV_PARAM(DEBUG_MORPHIZEN_PASS))
-      << "pass is decontructed: " << (void*)this << " name=" << this->name();
+      << "pass is decontructed: " << (void *)this << " name=" << this->name();
 }
-void Pass::apply(Graph& graph_old) {
-  Graph* graph = &graph_old;
+void Pass::apply(Graph &graph_old) {
+  Graph *graph = &graph_old;
   int action_index = 0;
   if (pass_info_.preprocess) {
     pass_info_.preprocess(this->get_state(), *this, *graph);
   }
-  for (auto& action : action_) {
+  for (auto &action : action_) {
     action(*this, *graph);
     graph =
-        (Graph*)get_context()->get_context_resource("__current_graph").get();
+        (Graph *)get_context()->get_context_resource("__current_graph").get();
     maybe_dump_txt(action_index, *graph);
     maybe_dump_mlir(action_index, *graph);
     morphizen_cxx::GraphRef(*graph).resolve();
@@ -182,33 +182,33 @@ void Pass::apply(Graph& graph_old) {
   }
 }
 
-const std::string& Pass::name() const { return get_pass_proto().name(); }
+const std::string &Pass::name() const { return get_pass_proto().name(); }
 
-void Pass::run_all_passes(std::vector<std::shared_ptr<IPass>>& all_pass,
-                          Graph& graph) {
+void Pass::run_all_passes(std::vector<std::shared_ptr<IPass>> &all_pass,
+                          Graph &graph) {
   MY_LOG(1) << "start to run passes, " << all_pass.size() << " in total";
   auto __all_pass_start_time = std::chrono::steady_clock::now();
-  PassContextImp* ctx = nullptr;
-  for (auto& pass_interface : all_pass) {
-    auto pass = dynamic_cast<Pass*>(pass_interface.get());
+  PassContextImp *ctx = nullptr;
+  for (auto &pass_interface : all_pass) {
+    auto pass = dynamic_cast<Pass *>(pass_interface.get());
     CHECK(pass != nullptr) << "dynamic_cast failed";
     if (ctx == nullptr) {
       ctx = pass->context_.get();
       pass->add_context_resource(
           "__current_graph",
-          std::shared_ptr<void>((void*)&graph, [](void*) {}));
+          std::shared_ptr<void>((void *)&graph, [](void *) {}));
     }
     auto label = std::to_string(pass->sequence_no_) + "-" + pass->name() + "@" +
                  pass->get_pass_proto().plugin();
     auto measure = ctx->measure(label);
-    auto current_graph = (Graph*)pass->get_context()
+    auto current_graph = (Graph *)pass->get_context()
                              ->get_context_resource("__current_graph")
                              .get();
     auto __pass1_start_time = std::chrono::steady_clock::now();
     MY_LOG(1) << "begin pass :"
               << "run pass [" << pass->seq_num_as_string()
-              << "]: " << pass->name()                                       //
-              << " plugin=" << pass->get_pass_proto().plugin()               //
+              << "]: " << pass->name()                         //
+              << " plugin=" << pass->get_pass_proto().plugin() //
               << " enable_log="
               << (pass->get_pass_proto().enable_log() ? "true" : "false")    //
               << " log_verbosity=" << pass->get_pass_proto().log_verbosity() //
@@ -235,7 +235,7 @@ void Pass::run_all_passes(std::vector<std::shared_ptr<IPass>>& all_pass,
             << " ms elapse. ";
 }
 
-void Pass::maybe_dump_txt(int action_index, const Graph& graph) const {
+void Pass::maybe_dump_txt(int action_index, const Graph &graph) const {
   if ((!ENV_PARAM(ENABLE_SAVE_GRAPH_TXT)) || (!can_be_dumped(context_))) {
     return;
   }
@@ -249,7 +249,7 @@ void Pass::maybe_dump_txt(int action_index, const Graph& graph) const {
   dump_graph(graph, filepath.u8string());
 }
 
-void Pass::maybe_dump_mlir(int action_index, const Graph& graph) const {
+void Pass::maybe_dump_mlir(int action_index, const Graph &graph) const {
   if ((!ENV_PARAM(ENABLE_SAVE_GRAPH_MLIR)) || (!can_be_dumped(context_))) {
     return;
   }
@@ -282,7 +282,7 @@ void Pass::maybe_dump_mlir(int action_index, const Graph& graph) const {
 }
 
 // onnx graph_save to onnx model maybe has bugs
-void Pass::maybe_dump_onnx(int action_index, const Graph& graph) const {
+void Pass::maybe_dump_onnx(int action_index, const Graph &graph) const {
   if ((!ENV_PARAM(ENABLE_SAVE_ONNX_MODEL)) || (!can_be_dumped(context_))) {
     return;
   }
@@ -312,25 +312,25 @@ void Pass::maybe_dump_onnx(int action_index, const Graph& graph) const {
   );
 }
 
-void Pass::maybe_gc(Graph& graph) const {
+void Pass::maybe_gc(Graph &graph) const {
   if (pass_proto_.enable_gc()) {
     morphizen_cxx::GraphRef(graph).gc();
   }
 }
 
-void* Pass::get_state() { return state_.get(); }
+void *Pass::get_state() { return state_.get(); }
 
-const ConfigProto& Pass::get_config_proto() const { return context_->config_; }
+const ConfigProto &Pass::get_config_proto() const { return context_->config_; }
 std::map<std::string, std::string> Pass::get_all_provider_options() const {
   return context_->get_all_provider_options();
 }
 
-void Pass::add_subgraph_device_count(const std::string& device, int count) {
+void Pass::add_subgraph_device_count(const std::string &device, int count) {
   context_->context_proto.mutable_device_subgraph_count()->insert(
       google::protobuf::MapPair<std::string, int>{device, count});
 }
 
-const PassProto& Pass::get_pass_proto() const { return pass_proto_; }
+const PassProto &Pass::get_pass_proto() const { return pass_proto_; }
 
 std::string Pass::get_pass_generic_param() const {
   auto json_str = std::string();
@@ -342,8 +342,8 @@ std::string Pass::get_pass_generic_param() const {
   return json_str;
 }
 
-std::vector<AttributeProtoPtr>& Pass::node_extra_attrs(const char* name) {
-  auto& node_extra_attrs = context_->node_extra_attrs;
+std::vector<AttributeProtoPtr> &Pass::node_extra_attrs(const char *name) {
+  auto &node_extra_attrs = context_->node_extra_attrs;
   auto it = node_extra_attrs.find(std::string(name));
   if (it == node_extra_attrs.end()) {
     std::tie(it, std::ignore) = node_extra_attrs.emplace(
@@ -355,7 +355,7 @@ std::vector<AttributeProtoPtr>& Pass::node_extra_attrs(const char* name) {
   return it->second;
 }
 
-const Node& Pass::level_2_fuse(Graph& graph, const MetaDefProto& meta_def) {
+const Node &Pass::level_2_fuse(Graph &graph, const MetaDefProto &meta_def) {
   auto name = meta_def.id();
   auto op_type = std::string("not_used_op");
   auto inputs = std::vector<std::string>{meta_def.inputs().begin(),
@@ -368,7 +368,7 @@ const Node& Pass::level_2_fuse(Graph& graph, const MetaDefProto& meta_def) {
   auto nodes = std::vector<size_t>();
   nodes.reserve(meta_def.nodes_size());
   auto graph_ref = morphizen_cxx::GraphConstRef(graph);
-  for (auto& first_node_arg_name : meta_def.nodes()) {
+  for (auto &first_node_arg_name : meta_def.nodes()) {
     auto node_arg_opt = graph_ref.find_node_arg(first_node_arg_name);
     CHECK(node_arg_opt.has_value())
         << "cannot find node arg: " << first_node_arg_name;
@@ -377,35 +377,35 @@ const Node& Pass::level_2_fuse(Graph& graph, const MetaDefProto& meta_def) {
         << "cannot find producer node: " << first_node_arg_name;
     nodes.push_back(node_opt.value().index());
   }
-  const Node& ret = morphizen::graph_fuse(graph, name, op_type, nodes, inputs,
+  const Node &ret = morphizen::graph_fuse(graph, name, op_type, nodes, inputs,
                                           outputs, constant_initializers);
   morphizen_cxx::GraphRef(graph).resolve();
   return ret;
 }
 
-const Node& Pass::fuse(Graph& graph, MetaDefProto&& meta_def) {
+const Node &Pass::fuse(Graph &graph, MetaDefProto &&meta_def) {
   auto context = this->context_;
   auto new_meta_def = context->context_proto.mutable_meta_def()->Add();
   *new_meta_def = std::move(meta_def);
   return level_2_fuse(graph, *new_meta_def);
 }
-MetaDefProto& Pass::fuse(Graph& graph, const std::string& name,
-                         const std::string& op_type,
-                         const std::vector<size_t>& nodes,
-                         const std::vector<std::string>& inputs,
-                         const std::vector<std::string>& outputs,
-                         const std::vector<std::string>& constant_initializers,
-                         const std::string& device) {
+MetaDefProto &Pass::fuse(Graph &graph, const std::string &name,
+                         const std::string &op_type,
+                         const std::vector<size_t> &nodes,
+                         const std::vector<std::string> &inputs,
+                         const std::vector<std::string> &outputs,
+                         const std::vector<std::string> &constant_initializers,
+                         const std::string &device) {
   auto context = this->context_;
   auto meta_def = context->context_proto.mutable_meta_def()->Add();
   meta_def->set_id(name);
-  for (auto& input : inputs) {
+  for (auto &input : inputs) {
     meta_def->add_inputs(input);
   }
-  for (auto& output : outputs) {
+  for (auto &output : outputs) {
     meta_def->add_outputs(output);
   }
-  for (auto& constant_initializer : constant_initializers) {
+  for (auto &constant_initializer : constant_initializers) {
     meta_def->add_constant_initializers(constant_initializer);
   }
   auto graph_ref = morphizen_cxx::GraphConstRef(graph);
@@ -424,7 +424,7 @@ const std::shared_ptr<PassContext> Pass::get_context() const {
 }
 std::shared_ptr<PassContext> Pass::get_context() { return context_; }
 
-void Pass::add_context_resource(const std::string& name,
+void Pass::add_context_resource(const std::string &name,
                                 std::shared_ptr<void> resource) {
   context_->add_context_resource(name, resource);
 }
@@ -436,14 +436,14 @@ void Pass::add_action(action_t action) { action_.push_back(action); }
 
 MORPHIZEN_DLL_SPEC std::unique_ptr<IPass>
 IPass::create_pass(std::shared_ptr<PassContext> context,
-                   const PassProto& pass_proto) {
-  auto& plugin = pass_proto.plugin();
+                   const PassProto &pass_proto) {
+  auto &plugin = pass_proto.plugin();
   auto plugin_holder = Plugin::get(plugin);
   if (plugin_holder == nullptr) {
     LOG(FATAL) << "cannot find plugin: " << plugin
                << " enable env MORPHIZEN_DEBUG_PLUGIN=1 to see more details";
   }
-  auto& pass_info = *plugin_holder->invoke<PassInfo*>("morphizen_pass_info");
+  auto &pass_info = *plugin_holder->invoke<PassInfo *>("morphizen_pass_info");
   auto context_ptr =
       std::dynamic_pointer_cast<morphizen::PassContextImp>(context);
   CHECK(context_ptr != nullptr);
@@ -452,7 +452,7 @@ IPass::create_pass(std::shared_ptr<PassContext> context,
 
 MORPHIZEN_DLL_SPEC std::unique_ptr<IPass>
 IPass::create_pass(std::shared_ptr<PassContext> context,
-                   const struct PassInfo& pass_info) {
+                   const struct PassInfo &pass_info) {
   auto context_ptr =
       std::dynamic_pointer_cast<morphizen::PassContextImp>(context);
   CHECK(context_ptr != nullptr);
@@ -465,10 +465,10 @@ IPass::create_pass(std::shared_ptr<PassContext> context,
 
 std::vector<std::shared_ptr<IPass>>
 IPass::create_passes(std::shared_ptr<PassContext> context,
-                     const std::vector<PassProto>& passes) {
+                     const std::vector<PassProto> &passes) {
   auto ret = std::vector<std::shared_ptr<IPass>>();
   ret.reserve(passes.size());
-  for (const auto& pass_proto : passes) {
+  for (const auto &pass_proto : passes) {
     if (pass_proto.disabled()) {
       continue;
     }
@@ -478,7 +478,7 @@ IPass::create_passes(std::shared_ptr<PassContext> context,
 }
 
 MORPHIZEN_DLL_SPEC void
-IPass::run_passes(std::vector<std::shared_ptr<IPass>> passes, Graph& graph) {
+IPass::run_passes(std::vector<std::shared_ptr<IPass>> passes, Graph &graph) {
   Pass::run_all_passes(passes, graph);
 }
 
@@ -490,7 +490,7 @@ std::string Pass::seq_num_as_string() const {
   return index_s;
 }
 std::filesystem::path Pass::get_dump_file_name(size_t action_index,
-                                               const std::string& ext) const {
+                                               const std::string &ext) const {
   auto index_s = seq_num_as_string();
   // TODO: Dump directory (temp/morphizen_dumps/cache_key) is used ONLY for
   // debugging/troubleshooting output files. It is NOT a cache directory.

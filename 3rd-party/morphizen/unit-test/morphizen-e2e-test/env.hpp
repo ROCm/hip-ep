@@ -11,24 +11,24 @@ namespace morphizen_e2e_test {
 
 class E2ETestEnv {
 public:
-  explicit E2ETestEnv(const E2ETestEnvProto& env_proto);
+  explicit E2ETestEnv(const E2ETestEnvProto &env_proto);
   ~E2ETestEnv();
 
-  E2ETestEnv(const E2ETestEnv&) = delete;
-  E2ETestEnv& operator=(const E2ETestEnv&) = delete;
+  E2ETestEnv(const E2ETestEnv &) = delete;
+  E2ETestEnv &operator=(const E2ETestEnv &) = delete;
 
   std::vector<std::unique_ptr<E2ETestSessionOptions>>
   create_e2e_test_session_options();
 
 public:
-  const E2ETestEnvProto& proto() const { return env_proto_; }
-  Ort::Env& env() const { return *ort_env_; }
-  const std::vector<Ort::ConstEpDevice>& selected_devices() const {
+  const E2ETestEnvProto &proto() const { return env_proto_; }
+  Ort::Env &env() const { return *ort_env_; }
+  const std::vector<Ort::ConstEpDevice> &selected_devices() const {
     return selected_devices_;
   }
 
 private:
-  const E2ETestEnvProto& env_proto_;
+  const E2ETestEnvProto &env_proto_;
   std::unique_ptr<Ort::Env> ort_env_;
   std::vector<Ort::ConstEpDevice> selected_devices_;
 };

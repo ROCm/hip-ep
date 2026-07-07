@@ -7,7 +7,9 @@ import sys
 import pathlib
 import re
 
-CURRENT_DIR = pathlib.Path(__file__).parent.resolve()  # Get the current directory of the script
+CURRENT_DIR = pathlib.Path(
+    __file__
+).parent.resolve()  # Get the current directory of the script
 # Define the test executable path
 test_executable = sys.argv[1]  # Get the test executable from command line arguments
 

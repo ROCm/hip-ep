@@ -6,16 +6,16 @@
 #include <filesystem>
 #include <gtest/gtest.h>
 #ifndef PYTHON_EXE_STR
-#  define PYTHON_EXE_STR "python"
+#define PYTHON_EXE_STR "python"
 #endif
 #ifndef TEST_CWD_STR
-#  define TEST_CWD_STR "."
+#define TEST_CWD_STR "."
 #endif
 #ifndef MORPHIZEN_TAR_EXE_STR
-#  define MORPHIZEN_TAR_EXE_STR "morphizen-tar"
+#define MORPHIZEN_TAR_EXE_STR "morphizen-tar"
 #endif
 #ifndef TEST_SRC_DIR_STR
-#  define TEST_SRC_DIR_STR "."
+#define TEST_SRC_DIR_STR "."
 #endif
 
 static const std::filesystem::path PYTHON_EXE =
@@ -35,7 +35,7 @@ static const std::filesystem::path ENV_CONFIG_JSON_PATH =
 // BAZEL_CURRENT_REPOSITORY is injected by Bazel only when
 // @bazel_tools//tools/cpp/runfiles is in deps, so this guard is reliable.
 #ifdef BAZEL_CURRENT_REPOSITORY
-#  include "tools/cpp/runfiles/runfiles.h"
+#include "tools/cpp/runfiles/runfiles.h"
 static const std::filesystem::path MORPHIZEN_MORPHIZEN_EP = []() {
   std::string err;
   auto rf = bazel::tools::cpp::runfiles::Runfiles::CreateForTest(

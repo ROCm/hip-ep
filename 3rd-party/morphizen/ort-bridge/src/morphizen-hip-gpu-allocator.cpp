@@ -31,8 +31,8 @@ namespace {
 
 // Convert a non-success hipError_t into an OrtStatus*. The caller owns the
 // returned status (must release via ort_api.ReleaseStatus).
-inline OrtStatus* MakeHipStatus(const OrtApi& api, hipError_t err,
-                                const char* what) {
+inline OrtStatus *MakeHipStatus(const OrtApi &api, hipError_t err,
+                                const char *what) {
   std::string msg = std::string("[MorphiZen HIP] ") + what +
                     " failed: " + hipGetErrorString(err) + " (" +
                     std::to_string(static_cast<int>(err)) + ")";
@@ -74,7 +74,7 @@ int SizeClassIndex(size_t size) noexcept {
   return -1;
 }
 
-int TryGetDeviceId(const OrtMemoryInfo* memory_info) noexcept {
+int TryGetDeviceId(const OrtMemoryInfo *memory_info) noexcept {
   if (memory_info == nullptr) {
     return -1;
   }
@@ -86,7 +86,7 @@ int TryGetDeviceId(const OrtMemoryInfo* memory_info) noexcept {
     // Ort::Exception. Ort::api was wired up by Ort::InitApi() in ort-bridge.cpp
     // at DLL load.
     return Ort::ConstMemoryInfo(memory_info).GetDeviceId();
-  } catch (const Ort::Exception&) {
+  } catch (const Ort::Exception &) {
     return -1;
   }
 }
@@ -95,8 +95,8 @@ int TryGetDeviceId(const OrtMemoryInfo* memory_info) noexcept {
 
 // =============== HipGpuAllocator ===============
 
-HipGpuAllocator::HipGpuAllocator(const OrtMemoryInfo* memory_info,
-                                 const OrtApi& /*api*/)
+HipGpuAllocator::HipGpuAllocator(const OrtMemoryInfo *memory_info,
+                                 const OrtApi & /*api*/)
     : memory_info_{memory_info}, device_id_{TryGetDeviceId(memory_info)} {
   version = ORT_API_VERSION;
   Alloc = AllocImpl;
@@ -106,12 +106,12 @@ HipGpuAllocator::HipGpuAllocator(const OrtMemoryInfo* memory_info,
   GetStats = nullptr;
 }
 
-void* ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator* this_,
+void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
                                               size_t size) {
   if (size == 0) {
     return nullptr;
   }
-  auto* self = static_cast<HipGpuAllocator*>(this_);
+  auto *self = static_cast<HipGpuAllocator *>(this_);
 
   const int cls = SizeClassIndex(size);
 
@@ -122,9 +122,9 @@ void* ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator* this_,
   // to the driver in FreeImpl, so a one-off huge transient can't pin memory.
   if (cls >= 0) {
     std::lock_guard<std::mutex> lk(self->pool_mutex_);
-    auto& fl = self->free_lists_[cls];
+    auto &fl = self->free_lists_[cls];
     if (!fl.empty()) {
-      void* ptr = fl.back();
+      void *ptr = fl.back();
       fl.pop_back();
       return ptr;
     }
@@ -152,7 +152,7 @@ void* ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator* this_,
   // stop aliasing p_cpu_ = p_device_ and instead route Zero / CopyDeviceToCpu
   // / CopyCpuToDevice through the HIP runtime. Tracked separately because
   // the OGA-side change cuts across the smartptrs / DeviceBuffer abstraction.
-  void* ptr = nullptr;
+  void *ptr = nullptr;
   hipError_t err = hipHostMalloc(&ptr, alloc_size,
                                  hipHostMallocMapped | hipHostMallocCoherent);
   if (err != hipSuccess) {
@@ -168,11 +168,11 @@ void* ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator* this_,
   return ptr;
 }
 
-void ORT_API_CALL HipGpuAllocator::FreeImpl(OrtAllocator* this_, void* p) {
+void ORT_API_CALL HipGpuAllocator::FreeImpl(OrtAllocator *this_, void *p) {
   if (p == nullptr) {
     return;
   }
-  auto* self = static_cast<HipGpuAllocator*>(this_);
+  auto *self = static_cast<HipGpuAllocator *>(this_);
   {
     std::lock_guard<std::mutex> lk(self->pool_mutex_);
     auto it = self->ptr_to_size_.find(p);
@@ -206,25 +206,25 @@ HipGpuAllocator::~HipGpuAllocator() {
   // also released instead of leaked.
   ScopedDevice _(device_id_);
   std::lock_guard<std::mutex> lk(pool_mutex_);
-  for (const auto& kv : ptr_to_size_) {
+  for (const auto &kv : ptr_to_size_) {
     hipError_t err = hipHostFree(kv.first);
     if (err != hipSuccess) {
       LOG(WARNING) << "[MorphiZen HIP] hipHostFree failed (device "
                    << device_id_ << "): " << hipGetErrorString(err);
     }
   }
-  for (auto& fl : free_lists_) {
+  for (auto &fl : free_lists_) {
     fl.clear();
   }
   ptr_to_size_.clear();
 }
 
-const OrtMemoryInfo* ORT_API_CALL
-HipGpuAllocator::InfoImpl(const OrtAllocator* this_) {
-  return static_cast<const HipGpuAllocator*>(this_)->memory_info_;
+const OrtMemoryInfo *ORT_API_CALL
+HipGpuAllocator::InfoImpl(const OrtAllocator *this_) {
+  return static_cast<const HipGpuAllocator *>(this_)->memory_info_;
 }
 
-void* ORT_API_CALL HipGpuAllocator::ReserveImpl(OrtAllocator* this_,
+void *ORT_API_CALL HipGpuAllocator::ReserveImpl(OrtAllocator *this_,
                                                 size_t size) {
   // No special reservation strategy; behave like Alloc.
   return AllocImpl(this_, size);
@@ -232,7 +232,7 @@ void* ORT_API_CALL HipGpuAllocator::ReserveImpl(OrtAllocator* this_,
 
 // =============== HipDataTransferImpl ===============
 
-HipDataTransferImpl::HipDataTransferImpl(const OrtApi& ort_api_in)
+HipDataTransferImpl::HipDataTransferImpl(const OrtApi &ort_api_in)
     : ort_api{ort_api_in}, ep_api{*ort_api_in.GetEpApi()} {
   ort_version_supported = ORT_API_VERSION;
   CanCopy = CanCopyImpl;
@@ -241,10 +241,10 @@ HipDataTransferImpl::HipDataTransferImpl(const OrtApi& ort_api_in)
 }
 
 bool HipDataTransferImpl::CanCopyImpl(
-    const OrtDataTransferImpl* this_ptr,
-    const OrtMemoryDevice* src_memory_device,
-    const OrtMemoryDevice* dst_memory_device) noexcept {
-  const auto& impl = *static_cast<const HipDataTransferImpl*>(this_ptr);
+    const OrtDataTransferImpl *this_ptr,
+    const OrtMemoryDevice *src_memory_device,
+    const OrtMemoryDevice *dst_memory_device) noexcept {
+  const auto &impl = *static_cast<const HipDataTransferImpl *>(this_ptr);
 
   OrtMemoryInfoDeviceType src_type =
       impl.ep_api.MemoryDevice_GetDeviceType(src_memory_device);
@@ -277,35 +277,35 @@ bool HipDataTransferImpl::CanCopyImpl(
           dst_type == OrtMemoryInfoDeviceType_GPU);
 }
 
-OrtStatus* HipDataTransferImpl::CopyTensorsImpl(OrtDataTransferImpl* this_ptr,
-                                                const OrtValue** src_tensors,
-                                                OrtValue** dst_tensors,
-                                                OrtSyncStream** streams,
+OrtStatus *HipDataTransferImpl::CopyTensorsImpl(OrtDataTransferImpl *this_ptr,
+                                                const OrtValue **src_tensors,
+                                                OrtValue **dst_tensors,
+                                                OrtSyncStream **streams,
                                                 size_t num_tensors) noexcept {
-  auto& impl = *static_cast<HipDataTransferImpl*>(this_ptr);
+  auto &impl = *static_cast<HipDataTransferImpl *>(this_ptr);
   bool need_stream_sync = false;
 
   for (size_t idx = 0; idx < num_tensors; ++idx) {
-    const OrtValue* src_tensor = src_tensors[idx];
-    OrtValue* dst_tensor = dst_tensors[idx];
-    OrtSyncStream* stream = streams ? streams[idx] : nullptr;
+    const OrtValue *src_tensor = src_tensors[idx];
+    OrtValue *dst_tensor = dst_tensors[idx];
+    OrtSyncStream *stream = streams ? streams[idx] : nullptr;
 
-    const OrtMemoryDevice* src_device =
+    const OrtMemoryDevice *src_device =
         impl.ep_api.Value_GetMemoryDevice(src_tensor);
-    const OrtMemoryDevice* dst_device =
+    const OrtMemoryDevice *dst_device =
         impl.ep_api.Value_GetMemoryDevice(dst_tensor);
 
     size_t bytes = 0;
-    if (auto* st = impl.ort_api.GetTensorSizeInBytes(src_tensor, &bytes)) {
+    if (auto *st = impl.ort_api.GetTensorSizeInBytes(src_tensor, &bytes)) {
       return st;
     }
 
-    const void* src_data = nullptr;
-    void* dst_data = nullptr;
-    if (auto* st = impl.ort_api.GetTensorData(src_tensor, &src_data)) {
+    const void *src_data = nullptr;
+    void *dst_data = nullptr;
+    if (auto *st = impl.ort_api.GetTensorData(src_tensor, &src_data)) {
       return st;
     }
-    if (auto* st = impl.ort_api.GetTensorMutableData(dst_tensor, &dst_data)) {
+    if (auto *st = impl.ort_api.GetTensorMutableData(dst_tensor, &dst_data)) {
       return st;
     }
 
@@ -417,7 +417,7 @@ OrtStatus* HipDataTransferImpl::CopyTensorsImpl(OrtDataTransferImpl* this_ptr,
 }
 
 void HipDataTransferImpl::ReleaseImpl(
-    OrtDataTransferImpl* /*this_ptr*/) noexcept {
+    OrtDataTransferImpl * /*this_ptr*/) noexcept {
   // The factory owns the single shared instance; nothing to release here.
 }
 

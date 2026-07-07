@@ -16,14 +16,14 @@ using namespace morphizen;
 using namespace morphizen_cxx;
 
 struct Level1Dummy {
-  Level1Dummy(IPass& self) : self_{self} {}
-  std::unique_ptr<Rule> create_rule(IPass* self) {
+  Level1Dummy(IPass &self) : self_{self} {}
+  std::unique_ptr<Rule> create_rule(IPass *self) {
     std::shared_ptr<Pattern> pattern_ =
         morphizen::PatternBuilder().create_by_json(
-            std::string((const char*)relu_dq_json));
+            std::string((const char *)relu_dq_json));
     CHECK(pattern_ != nullptr) << "Pattern merge_conv_relu_maxpool not found";
     return Rule::create_rule(
-        pattern_, [=](onnxruntime::Graph* graph, binder_t& binder) -> bool {
+        pattern_, [=](onnxruntime::Graph *graph, binder_t &binder) -> bool {
           // CHECK(*binder["127"].node_arg != nullptr) << "input node is null";
           // CHECK(*binder["131"].node_arg != nullptr) << "output node is null";
           auto input = morphizen_cxx::NodeArgConstRef::from_node_arg(
@@ -72,9 +72,9 @@ struct Level1Dummy {
           return true; // return true if graph is modified.
         });
   }
-  void process(IPass& self, Graph& graph) { create_rule(&self)->apply(&graph); }
+  void process(IPass &self, Graph &graph) { create_rule(&self)->apply(&graph); }
 
-  IPass& self_;
+  IPass &self_;
 };
 } // namespace
 

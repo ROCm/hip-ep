@@ -9,12 +9,12 @@
 namespace morphizen {
 namespace mlir_impl {
 
-MLIRContextManager& MLIRContextManager::getInstance() {
+MLIRContextManager &MLIRContextManager::getInstance() {
   static MLIRContextManager instance;
   return instance;
 }
 
-mlir::MLIRContext& MLIRContextManager::getContext() { return context_; }
+mlir::MLIRContext &MLIRContextManager::getContext() { return context_; }
 
 MLIRContextManager::MLIRContextManager() {
   // Initialize MLIR context with necessary dialects

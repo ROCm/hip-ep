@@ -54,17 +54,17 @@ TEST_F(ModelTest, ImplicitConversion) {
   auto model = morphizen_cxx::Model::load(RESNET_50_PATH);
 
   // Implicit conversion to onnxruntime::Model reference
-  onnxruntime::Model& ortModel = *model;
+  onnxruntime::Model &ortModel = *model;
 
   // Implicit conversion to const onnxruntime::Model reference
-  const onnxruntime::Model& constOrtModel = *model;
+  const onnxruntime::Model &constOrtModel = *model;
 
   // Perform assertions or further operations on the converted models
   // ...
   auto name = MORPHIZEN_ORT_API(graph_get_name)(
       MORPHIZEN_ORT_API(model_main_graph)(*model));
-  LOG(INFO) << "model: " << name << " is loaded. ptr=" << (void*)&constOrtModel
-            << " " << (void*)&ortModel;
+  LOG(INFO) << "model: " << name << " is loaded. ptr=" << (void *)&constOrtModel
+            << " " << (void *)&ortModel;
 }
 
 TEST_F(ModelTest, ModelCreationTest) {

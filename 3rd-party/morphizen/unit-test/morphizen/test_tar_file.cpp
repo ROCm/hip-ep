@@ -7,7 +7,7 @@
 #include "morphizen/dll_safe.h"
 #include "test_environment.hpp"
 #ifdef MORPHIZEN_ENABLE_BOOST
-#  include <boost/process.hpp>
+#include <boost/process.hpp>
 #endif
 #include <cerrno>
 #include <cstring>
@@ -20,7 +20,7 @@ TEST(TarFileTest, ReadFrom) {
       tarFileName, std::ios::binary | std::ios::in);
   auto tar_file_obj = morphizen::TarFile::create(std::move(tarStream));
   ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
-  for (auto& entry : tar_file_obj->entries()) {
+  for (auto &entry : tar_file_obj->entries()) {
     LOG(INFO) << "entry: " << entry->path()
               << (entry->real_path()
                       ? std::string("->") + entry->real_path().value()
@@ -39,11 +39,11 @@ TEST(TarFileTest, DoubleRead) {
       << " Error opening file: " << std::strerror(errno);
   auto tar_file_obj = morphizen::TarFile::create(std::move(tarStream));
   ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
-  auto& entries = tar_file_obj->entries();
+  auto &entries = tar_file_obj->entries();
   ASSERT_TRUE(!entries.empty()) << "Failed to read tar entries";
   ASSERT_EQ(entries.size(), 2) << "Expected two tar entries";
   // read first entry twice
-  auto& entry = entries[0];
+  auto &entry = entries[0];
   auto name = entry->path();
   // 1
   auto stream = tar_file_obj->open_for_read(name);
@@ -87,11 +87,11 @@ static void test_write_override(bool write_same_data) {
           << " Error opening file: " << std::strerror(errno);
       auto tar_file_obj = morphizen::TarFile::create(std::move(tarStream));
       ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
-      auto& entries = tar_file_obj->entries();
+      auto &entries = tar_file_obj->entries();
       ASSERT_TRUE(!entries.empty()) << "Failed to read tar entries";
       ASSERT_EQ(entries.size(), 2) << "Expected two tar entries";
       // read first entry twice
-      auto& entry = entries[0];
+      auto &entry = entries[0];
       auto name = entry->path();
       if (write_same_data) {
         // read the data into const_test_content
@@ -113,7 +113,7 @@ static void test_write_override(bool write_same_data) {
       stream->flush();
       stream.reset();
       // show
-      for (auto& entry_1 : entries) {
+      for (auto &entry_1 : entries) {
         auto name_1 = entry_1->path();
         auto size = entry_1->size();
         // use LOG(INFO) print all entry name and size
@@ -135,7 +135,7 @@ static void test_write_override(bool write_same_data) {
           << " Error opening file: " << std::strerror(errno);
       auto tar_file_obj = morphizen::TarFile::create(std::move(tarStream));
       ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
-      auto& entries = tar_file_obj->entries();
+      auto &entries = tar_file_obj->entries();
       ASSERT_TRUE(!entries.empty()) << "Failed to read tar entries";
 
       ASSERT_EQ(entries.size(), 3);
@@ -184,8 +184,8 @@ TEST(TarFileTest, WriteOverride) {
   LOG(INFO) << " ======== test write override, write different data ========";
   test_write_override(false);
 }
-static void write_to_stream(const std::string& file, morphizen::TarFile& tar,
-                            const std::string& data) {
+static void write_to_stream(const std::string &file, morphizen::TarFile &tar,
+                            const std::string &data) {
   LOG(INFO) << " start to write to stream. file=" << file;
   auto stream = tar.open_for_write(file);
   ASSERT_TRUE(stream) << " cannot create stream";
@@ -196,8 +196,8 @@ static void write_to_stream(const std::string& file, morphizen::TarFile& tar,
   ASSERT_TRUE(*stream) << "Failed to write to entry: a.txt";
   LOG(INFO) << "after writing " << file << ", stream pos " << stream->tellp();
 }
-static void read_and_check(const std::string& file, morphizen::TarFile& tar,
-                           const std::string& data) {
+static void read_and_check(const std::string &file, morphizen::TarFile &tar,
+                           const std::string &data) {
   LOG(INFO) << " start to read from stream. file=" << file;
   auto stream = tar.open_for_read(file);
   ASSERT_TRUE(stream) << " cannot create stream";
@@ -212,16 +212,16 @@ static void read_and_check(const std::string& file, morphizen::TarFile& tar,
   LOG(INFO) << " read from stream. file=" << file << " done";
 }
 template <typename T>
-bool ExpectEqualAndReturn(const T& val1, const T& val2,
-                          const std::string& comment) {
+bool ExpectEqualAndReturn(const T &val1, const T &val2,
+                          const std::string &comment) {
   bool result = (val1 == val2);
   EXPECT_EQ(val1, val2) << comment;
   return result;
 }
 
-static void expect_tar_entry(const morphizen::TarEntryInputStream& entry,
-                             const std::string& path,
-                             const std::optional<std::string>& real_path,
+static void expect_tar_entry(const morphizen::TarEntryInputStream &entry,
+                             const std::string &path,
+                             const std::optional<std::string> &real_path,
                              size_t size, int block_begin, int block_end,
                              int data_begin, int data_end) {
   auto ok = true;
@@ -255,9 +255,9 @@ static void expect_tar_entry(const morphizen::TarEntryInputStream& entry,
   }
 }
 
-static void check_entries(
-    const std::vector<std::unique_ptr<morphizen::TarEntryInputStream>>&
-        entries) {
+static void
+check_entries(const std::vector<std::unique_ptr<morphizen::TarEntryInputStream>>
+                  &entries) {
   ASSERT_EQ(entries.size(), 5)
       << "Expected five tar entries, but got " << entries.size();
   // clang-format off
@@ -286,13 +286,13 @@ md5                                      size   blk-begin     blk-end  data-begi
                    std::string("_data/08cf82251c975a5e9734699fadf5e9c0"), //
                    6, 16896, 17408, 16384, 16390);
 }
-static void check_abc(morphizen::TarFile& tar_file_obj) {
+static void check_abc(morphizen::TarFile &tar_file_obj) {
   check_entries(tar_file_obj.entries());
   { read_and_check("a.txt", tar_file_obj, "world!"); }
   { read_and_check("b.txt", tar_file_obj, "hello"); }
   { read_and_check("c.txt", tar_file_obj, "hello"); }
 }
-static void test_abc(morphizen::TarFile& tar_file_obj) {
+static void test_abc(morphizen::TarFile &tar_file_obj) {
   LOG(INFO) << " ====== begin to write to tar file. ==== ";
   { write_to_stream("a.txt", tar_file_obj, "hello"); }
   { write_to_stream("b.txt", tar_file_obj, "hello"); }

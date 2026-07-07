@@ -93,7 +93,7 @@ inline constexpr SizeClassTable kSizeClassTable = BuildSizeClasses();
 
 } // namespace detail
 
-inline constexpr const size_t* kSizeClasses = detail::kSizeClassTable.data;
+inline constexpr const size_t *kSizeClasses = detail::kSizeClassTable.data;
 inline constexpr size_t kNumSizeClasses = detail::kSizeClassTable.count;
 
 // hipHostMalloc(Mapped|Coherent) backed OrtAllocator. One instance is created
@@ -108,17 +108,17 @@ struct HipGpuAllocator : OrtAllocator {
   // factory serving multiple AMD GPUs keeps each allocator pinned to the
   // GPU that the OrtEpDevice actually represents (instead of always hitting
   // device 0).
-  HipGpuAllocator(const OrtMemoryInfo* memory_info, const OrtApi& api);
+  HipGpuAllocator(const OrtMemoryInfo *memory_info, const OrtApi &api);
   // Frees every pinned buffer this allocator ever handed out (both the
   // currently-free pool entries and any still checked out). Called by the
   // factory's ReleaseAllocator at session teardown.
   ~HipGpuAllocator();
 
 private:
-  static void* ORT_API_CALL AllocImpl(OrtAllocator* this_, size_t size);
-  static void ORT_API_CALL FreeImpl(OrtAllocator* this_, void* p);
-  static const OrtMemoryInfo* ORT_API_CALL InfoImpl(const OrtAllocator* this_);
-  static void* ORT_API_CALL ReserveImpl(OrtAllocator* this_, size_t size);
+  static void *ORT_API_CALL AllocImpl(OrtAllocator *this_, size_t size);
+  static void ORT_API_CALL FreeImpl(OrtAllocator *this_, void *p);
+  static const OrtMemoryInfo *ORT_API_CALL InfoImpl(const OrtAllocator *this_);
+  static void *ORT_API_CALL ReserveImpl(OrtAllocator *this_, size_t size);
 
   // Fixed size-class caching allocator. hipHostMalloc is a heavyweight
   // (page-pinning) call: ORT re-allocates the per-Run input device-copy
@@ -150,16 +150,16 @@ private:
   // already drained before it can be handed back out.
   std::mutex pool_mutex_;
   // Index i holds reusable buffers each exactly kSizeClasses[i] bytes.
-  std::array<std::vector<void*>, kNumSizeClasses> free_lists_;
+  std::array<std::vector<void *>, kNumSizeClasses> free_lists_;
   // Every pointer hipHostMalloc'd by this allocator that is still outstanding
   // -> its allocated byte size (the rounded-up class capacity for pooled
   // buffers, the exact size for large ones). Pooled buffers stay tracked for
   // the allocator's lifetime (Free only moves them onto a free list) so the
   // destructor can release them; a large buffer is erased from this map in
   // FreeImpl when it is freed back to the driver.
-  std::unordered_map<void*, size_t> ptr_to_size_;
+  std::unordered_map<void *, size_t> ptr_to_size_;
 
-  const OrtMemoryInfo* memory_info_;
+  const OrtMemoryInfo *memory_info_;
   // Cached at construction time. -1 means "couldn't read it from memory_info"
   // (e.g. degenerate / fake OrtMemoryInfo); AllocImpl falls back to the
   // current HIP device in that case rather than failing the allocation.
@@ -169,23 +169,23 @@ private:
 // hipMemcpy / hipMemcpyAsync based OrtDataTransferImpl. A single shared
 // instance lives in the factory for the whole process lifetime.
 struct HipDataTransferImpl : OrtDataTransferImpl {
-  explicit HipDataTransferImpl(const OrtApi& ort_api_in);
+  explicit HipDataTransferImpl(const OrtApi &ort_api_in);
 
 private:
-  static bool CanCopyImpl(const OrtDataTransferImpl* this_ptr,
-                          const OrtMemoryDevice* src_memory_device,
-                          const OrtMemoryDevice* dst_memory_device) noexcept;
+  static bool CanCopyImpl(const OrtDataTransferImpl *this_ptr,
+                          const OrtMemoryDevice *src_memory_device,
+                          const OrtMemoryDevice *dst_memory_device) noexcept;
 
-  static OrtStatus* CopyTensorsImpl(OrtDataTransferImpl* this_ptr,
-                                    const OrtValue** src_tensors,
-                                    OrtValue** dst_tensors,
-                                    OrtSyncStream** streams,
+  static OrtStatus *CopyTensorsImpl(OrtDataTransferImpl *this_ptr,
+                                    const OrtValue **src_tensors,
+                                    OrtValue **dst_tensors,
+                                    OrtSyncStream **streams,
                                     size_t num_tensors) noexcept;
 
-  static void ReleaseImpl(OrtDataTransferImpl* this_ptr) noexcept;
+  static void ReleaseImpl(OrtDataTransferImpl *this_ptr) noexcept;
 
-  const OrtApi& ort_api;
-  const OrtEpApi& ep_api;
+  const OrtApi &ort_api;
+  const OrtEpApi &ep_api;
 };
 
 } // namespace morphizen

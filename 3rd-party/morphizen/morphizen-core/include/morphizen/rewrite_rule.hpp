@@ -11,10 +11,10 @@ namespace morphizen {
 class BaseRule {
 public:
   MORPHIZEN_DLL_SPEC static std::unique_ptr<BaseRule>
-  create_rule_chain(std::vector<std::unique_ptr<BaseRule>>&& chain);
-  MORPHIZEN_DLL_SPEC void apply(onnxruntime::Graph* graph);
-  virtual bool apply_once(onnxruntime::Graph* graph,
-                          const onnxruntime::Node* node) = 0;
+  create_rule_chain(std::vector<std::unique_ptr<BaseRule>> &&chain);
+  MORPHIZEN_DLL_SPEC void apply(onnxruntime::Graph *graph);
+  virtual bool apply_once(onnxruntime::Graph *graph,
+                          const onnxruntime::Node *node) = 0;
   MORPHIZEN_DLL_SPEC virtual ~BaseRule();
 };
 
@@ -22,8 +22,8 @@ class Rule : public BaseRule {
 public:
   MORPHIZEN_DLL_SPEC static std::unique_ptr<Rule> create_rule(
       std::shared_ptr<Pattern> pattern,
-      const std::function<bool(onnxruntime::Graph* graph, binder_t& binder)>&
-          action);
+      const std::function<bool(onnxruntime::Graph *graph, binder_t &binder)>
+          &action);
 
 public:
   explicit Rule() = default;
@@ -31,15 +31,15 @@ public:
 
 private:
   /// return true if graph is modified, false otherwise.
-  virtual bool action(onnxruntime::Graph* graph, binder_t& binder) const = 0;
-  virtual const Pattern* pattern() const = 0;
+  virtual bool action(onnxruntime::Graph *graph, binder_t &binder) const = 0;
+  virtual const Pattern *pattern() const = 0;
 
 private:
   // it must be MORPHIZEN_DLL_SPEC because all derived classes in other DLLs
   // need put this function into vtable.
   MORPHIZEN_DLL_SPEC virtual bool
-  apply_once(onnxruntime::Graph* graph,
-             const onnxruntime::Node* node) override final;
+  apply_once(onnxruntime::Graph *graph,
+             const onnxruntime::Node *node) override final;
 };
 
 } // namespace morphizen

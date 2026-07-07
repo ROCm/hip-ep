@@ -8,9 +8,9 @@
 #include "./custom_op_generic.hpp"
 #include "morphizen/morphizen.hpp"
 
-static morphizen::ExecutionProvider* create_execution_provider_imp(
-    std::shared_ptr<const morphizen::PassContext>& context,
-    const morphizen::MetaDefProto& meta_def) {
+static morphizen::ExecutionProvider *create_execution_provider_imp(
+    std::shared_ptr<const morphizen::PassContext> &context,
+    const morphizen::MetaDefProto &meta_def) {
   return new morphizen::ExecutionProviderImp<
       morphizen::custom_op_generic::MyCustomOp>(context, meta_def);
 }
@@ -18,5 +18,5 @@ static morphizen::ExecutionProvider* create_execution_provider_imp(
 namespace {
 static ::morphizen::StaticPluginRegister
     __register("morphizen_custom_op_GENERIC", "create_execution_provider",
-               (void*)&create_execution_provider_imp);
+               (void *)&create_execution_provider_imp);
 } // namespace

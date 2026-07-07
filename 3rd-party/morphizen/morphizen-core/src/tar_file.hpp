@@ -16,7 +16,7 @@ namespace morphizen {
 class TarFile {
 public:
   MORPHIZEN_DLL_SPEC static std::unique_ptr<TarFile>
-  create(std::unique_ptr<std::iostream>&& stream);
+  create(std::unique_ptr<std::iostream> &&stream);
 
   /**
    * @brief Creates a TarFile instance from the specified file path.
@@ -31,7 +31,7 @@ public:
    * @return A unique pointer to the created TarFile instance.
    */
   static std::unique_ptr<TarFile>
-  create_from_path(const std::filesystem::path& path, bool enable_mmap = true);
+  create_from_path(const std::filesystem::path &path, bool enable_mmap = true);
 
   /**
    * @brief Creates a TarFile instance from a temporary file.
@@ -52,7 +52,7 @@ public:
    * @return A unique pointer to the created TarFile instance.
    */
   static std::unique_ptr<TarFile>
-  create_from_buffer(std::vector<char>&& buffer);
+  create_from_buffer(std::vector<char> &&buffer);
 
   /**
    * @brief Creates a TarFile instance from a string buffer.
@@ -64,23 +64,23 @@ public:
    * @param enable_mmap If true, attempt to use memory mapping for reads
    * @return A unique pointer to the created TarFile instance.
    */
-  static std::unique_ptr<TarFile> create_from_buffer(std::string&& buffer,
+  static std::unique_ptr<TarFile> create_from_buffer(std::string &&buffer,
                                                      bool enable_mmap = true);
 
 private:
   struct PrivateTag {
   }; // PrivateTag pattern - see docs/technical/privatetag-factory-pattern.md
 public:
-  TarFile(PrivateTag, std::unique_ptr<std::iostream>&& stream);
+  TarFile(PrivateTag, std::unique_ptr<std::iostream> &&stream);
 
   MORPHIZEN_DLL_SPEC
-  bool has_file(const std::string& filename) const;
+  bool has_file(const std::string &filename) const;
   MORPHIZEN_DLL_SPEC
-  const std::vector<std::unique_ptr<TarEntryInputStream>>& entries() const;
+  const std::vector<std::unique_ptr<TarEntryInputStream>> &entries() const;
   // user must not close this stream.
   // stream->close() is a noop.
   MORPHIZEN_DLL_SPEC
-  TarEntryInputStream* open_for_read(const std::string& filename);
+  TarEntryInputStream *open_for_read(const std::string &filename);
   // user must close this stream
   // NOTE: there should be only one writer, otherwise return nullptr;
   //
@@ -100,7 +100,7 @@ public:
   //
   // NOTE: the stream is not thread safe.
   MORPHIZEN_DLL_SPEC
-  std::unique_ptr<std::ostream> open_for_write(const std::string& filename);
+  std::unique_ptr<std::ostream> open_for_write(const std::string &filename);
   /**
    * @brief Returns the current size of the object.
    *
@@ -128,7 +128,7 @@ public:
    * @note if the size is less than the current size of the tar file, it results
    * in a corrupted tar file
    */
-  bool dump_to(char* data, size_t size) const;
+  bool dump_to(char *data, size_t size) const;
 
 private:
   /// Adds a regular file entry to the tar archive.
@@ -141,8 +141,8 @@ private:
   /// @param block_begin_pos - Start position of tar block (including header)
   /// @param block_end_pos - End position of tar block (including padding)
   /// @return Reference to the created entry input stream
-  TarEntryInputStream&
-  add_regular_entry(const std::string& path, // path of the entry
+  TarEntryInputStream &
+  add_regular_entry(const std::string &path, // path of the entry
                     std::streambuf::pos_type data_begin_pos,
                     std::streambuf::pos_type data_end_pos,
                     std::streambuf::pos_type block_begin_pos,
@@ -158,9 +158,9 @@ private:
   /// @param block_begin_pos - Start position of tar block (including header)
   /// @param block_end_pos - End position of tar block (including padding)
   /// @return Pointer to the created entry input stream, or nullptr on failure
-  TarEntryInputStream*
-  add_symlink_entry(const std::string& symlink_name,
-                    const std::string& real_path_name,
+  TarEntryInputStream *
+  add_symlink_entry(const std::string &symlink_name,
+                    const std::string &real_path_name,
                     std::streambuf::pos_type block_begin_pos,
                     std::streambuf::pos_type block_end_pos);
   /**
@@ -175,8 +175,8 @@ private:
    *         or nullptr if the entry cannot be found.
    */
 
-  TarEntryInputStream*
-  find_real_entry(const std::string& real_path // link name of the entry
+  TarEntryInputStream *
+  find_real_entry(const std::string &real_path // link name of the entry
   );
 
   /**
@@ -188,9 +188,9 @@ private:
    * @param stream A shared pointer to the input stream to read from.
    * @return A unique pointer to a TarEntryInputStreamBuffer object.
    */
-  TarEntryInputStream* read_tar_entry(std::shared_ptr<std::istream> stream);
-  TarEntryInputStream* add_entry(const std::string& path, // name of the entry
-                                 const std::optional<std::string>& real_path, //
+  TarEntryInputStream *read_tar_entry(std::shared_ptr<std::istream> stream);
+  TarEntryInputStream *add_entry(const std::string &path, // name of the entry
+                                 const std::optional<std::string> &real_path, //
                                  std::streambuf::pos_type data_begin_pos,
                                  std::streambuf::pos_type data_end_pos,
                                  std::streambuf::pos_type block_begin_pos,
@@ -200,13 +200,13 @@ private:
   /// Removes any existing entry with the given path (TAR last-wins semantics).
   /// Uses standard erase-remove idiom.
   /// @param path - Entry path to remove duplicates for
-  void remove_duplicate_entry(const std::string& path);
+  void remove_duplicate_entry(const std::string &path);
 
   std::shared_ptr<std::iostream> stream_;
   // it is nullptr if stream_ is not a
   // memory map file. it is stream_.get() if
   // stream_ is a memory map file.
-  MemStream<MemFile>* mem_stream_;
+  MemStream<MemFile> *mem_stream_;
   std::vector<std::unique_ptr<TarEntryInputStream>> entries_;
   bool is_writing_{false};
   int padding_count_{0};

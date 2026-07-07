@@ -7,7 +7,7 @@
 #include <string>
 namespace morphizen {
 // NOTE: this function cannot be shared between DLLs
-void add_cleanup_function(const std::string& name,
+void add_cleanup_function(const std::string &name,
                           std::function<void()> cleanup_function);
 void cleanup_all();
 } // namespace morphizen

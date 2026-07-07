@@ -34,58 +34,58 @@
 #include <ostream>
 namespace morphizen {
 
-MORPHIZEN_DLL_SPEC bool node_arg_exists(const NodeArg& node_arg);
-MORPHIZEN_DLL_SPEC const std::string&
-node_arg_get_name(const NodeArg& node_arg);
+MORPHIZEN_DLL_SPEC bool node_arg_exists(const NodeArg &node_arg);
+MORPHIZEN_DLL_SPEC const std::string &
+node_arg_get_name(const NodeArg &node_arg);
 MORPHIZEN_DLL_SPEC std::unique_ptr<std::vector<int64_t>>
-node_arg_get_shape_i64(const NodeArg& node_arg);
+node_arg_get_shape_i64(const NodeArg &node_arg);
 MORPHIZEN_DLL_SPEC std::unique_ptr<std::vector<std::string>>
-node_arg_get_denotation(const NodeArg& node_arg);
-MORPHIZEN_DLL_SPEC int node_arg_get_element_type(const NodeArg& node_arg);
-MORPHIZEN_DLL_SPEC bool node_arg_is_unknown_shape(const NodeArg& node_arg);
-MORPHIZEN_DLL_SPEC bool node_arg_is_scalar(const NodeArg& node_arg);
-MORPHIZEN_DLL_SPEC bool node_arg_is_zero_shape(const NodeArg& node_arg);
-MORPHIZEN_DLL_SPEC bool node_arg_is_dynamic_shape(const NodeArg& node_arg);
-MORPHIZEN_DLL_SPEC const TensorProto&
-node_arg_get_const_data_as_tensor(const Graph& graph, const NodeArg& node_arg);
+node_arg_get_denotation(const NodeArg &node_arg);
+MORPHIZEN_DLL_SPEC int node_arg_get_element_type(const NodeArg &node_arg);
+MORPHIZEN_DLL_SPEC bool node_arg_is_unknown_shape(const NodeArg &node_arg);
+MORPHIZEN_DLL_SPEC bool node_arg_is_scalar(const NodeArg &node_arg);
+MORPHIZEN_DLL_SPEC bool node_arg_is_zero_shape(const NodeArg &node_arg);
+MORPHIZEN_DLL_SPEC bool node_arg_is_dynamic_shape(const NodeArg &node_arg);
+MORPHIZEN_DLL_SPEC const TensorProto &
+node_arg_get_const_data_as_tensor(const Graph &graph, const NodeArg &node_arg);
 MORPHIZEN_DLL_SPEC float
-node_arg_get_const_data_as_float(const Graph& graph, const NodeArg& node_arg);
+node_arg_get_const_data_as_float(const Graph &graph, const NodeArg &node_arg);
 MORPHIZEN_DLL_SPEC uint8_t
-node_arg_get_const_data_as_u8(const Graph& graph, const NodeArg& node_arg);
+node_arg_get_const_data_as_u8(const Graph &graph, const NodeArg &node_arg);
 MORPHIZEN_DLL_SPEC int8_t
-node_arg_get_const_data_as_i8(const Graph& graph, const NodeArg& node_arg);
+node_arg_get_const_data_as_i8(const Graph &graph, const NodeArg &node_arg);
 MORPHIZEN_DLL_SPEC int32_t
-node_arg_get_const_data_as_i32(const Graph& graph, const NodeArg& node_arg);
+node_arg_get_const_data_as_i32(const Graph &graph, const NodeArg &node_arg);
 MORPHIZEN_DLL_SPEC uint16_t
-node_arg_get_const_data_as_u16(const Graph& graph, const NodeArg& node_arg);
+node_arg_get_const_data_as_u16(const Graph &graph, const NodeArg &node_arg);
 MORPHIZEN_DLL_SPEC int16_t
-node_arg_get_const_data_as_bf16(const Graph& graph, const NodeArg& node_arg);
+node_arg_get_const_data_as_bf16(const Graph &graph, const NodeArg &node_arg);
 MORPHIZEN_DLL_SPEC int16_t
-node_arg_get_const_data_as_fp16(const Graph& graph, const NodeArg& node_arg);
+node_arg_get_const_data_as_fp16(const Graph &graph, const NodeArg &node_arg);
 MORPHIZEN_DLL_SPEC gsl::span<const uint8_t>
-node_arg_get_const_data_as_u4s(const Graph& graph, const NodeArg& node_arg);
+node_arg_get_const_data_as_u4s(const Graph &graph, const NodeArg &node_arg);
 MORPHIZEN_DLL_SPEC gsl::span<const int8_t>
-node_arg_get_const_data_as_i4s(const Graph& graph, const NodeArg& node_arg);
+node_arg_get_const_data_as_i4s(const Graph &graph, const NodeArg &node_arg);
 MORPHIZEN_DLL_SPEC gsl::span<const uint8_t>
-node_arg_get_const_data_as_u8s(const Graph& graph, const NodeArg& node_arg);
+node_arg_get_const_data_as_u8s(const Graph &graph, const NodeArg &node_arg);
 MORPHIZEN_DLL_SPEC gsl::span<const int8_t>
-node_arg_get_const_data_as_i8s(const Graph& graph, const NodeArg& node_arg);
+node_arg_get_const_data_as_i8s(const Graph &graph, const NodeArg &node_arg);
 MORPHIZEN_DLL_SPEC gsl::span<const uint16_t>
-node_arg_get_const_data_as_u16s(const Graph& graph, const NodeArg& node_arg);
+node_arg_get_const_data_as_u16s(const Graph &graph, const NodeArg &node_arg);
 MORPHIZEN_DLL_SPEC gsl::span<const int16_t>
-node_arg_get_const_data_as_i16s(const Graph& graph, const NodeArg& node_arg);
+node_arg_get_const_data_as_i16s(const Graph &graph, const NodeArg &node_arg);
 MORPHIZEN_DLL_SPEC gsl::span<const float>
-node_arg_get_const_data_as_floats(const Graph& graph, const NodeArg& node_arg);
+node_arg_get_const_data_as_floats(const Graph &graph, const NodeArg &node_arg);
 MORPHIZEN_DLL_SPEC gsl::span<const int32_t>
-node_arg_get_const_data_as_i32s(const Graph& graph, const NodeArg& node_arg);
+node_arg_get_const_data_as_i32s(const Graph &graph, const NodeArg &node_arg);
 MORPHIZEN_DLL_SPEC gsl::span<const int64_t>
-node_arg_get_const_data_as_i64s(const Graph& graph, const NodeArg& node_arg);
+node_arg_get_const_data_as_i64s(const Graph &graph, const NodeArg &node_arg);
 MORPHIZEN_DLL_SPEC gsl::span<const int16_t>
-node_arg_get_const_data_as_bf16s(const Graph& graph, const NodeArg& node_arg);
+node_arg_get_const_data_as_bf16s(const Graph &graph, const NodeArg &node_arg);
 MORPHIZEN_DLL_SPEC gsl::span<const int16_t>
-node_arg_get_const_data_as_fp16s(const Graph& graph, const NodeArg& node_arg);
-MORPHIZEN_DLL_SPEC bool node_arg_is_constant(const Graph& graph,
-                                             const NodeArg& node_arg);
+node_arg_get_const_data_as_fp16s(const Graph &graph, const NodeArg &node_arg);
+MORPHIZEN_DLL_SPEC bool node_arg_is_constant(const Graph &graph,
+                                             const NodeArg &node_arg);
 
 /** @brief Create a new node argument in the graph
  *
@@ -95,12 +95,12 @@ MORPHIZEN_DLL_SPEC bool node_arg_is_constant(const Graph& graph,
  * @param element_type Data type of the tensor
  * @return Reference to the created node argument
  */
-MORPHIZEN_DLL_SPEC NodeArg& node_arg_new(Graph& graph, const std::string& name,
-                                         const std::vector<int64_t>* shape,
+MORPHIZEN_DLL_SPEC NodeArg &node_arg_new(Graph &graph, const std::string &name,
+                                         const std::vector<int64_t> *shape,
                                          int element_type);
 
 // Internal helper function (not exported) - used by C++ wrapper inline methods
-std::string node_arg_as_string_internal(const NodeArg& node_arg);
+std::string node_arg_as_string_internal(const NodeArg &node_arg);
 
 } // namespace morphizen
 namespace morphizen_cxx {
@@ -127,22 +127,22 @@ class MORPHIZEN_DLL_SPEC NodeArgConstRef {
   friend class NodeInput;
 
 protected:
-  NodeArgConstRef(const morphizen::Graph& graph, const morphizen::NodeArg& self)
+  NodeArgConstRef(const morphizen::Graph &graph, const morphizen::NodeArg &self)
       : graph_{graph}, self_{self} {}
 
 public:
-  static NodeArgConstRef from_node_arg(const morphizen::Graph& graph,
-                                       const morphizen::NodeArg& self) {
+  static NodeArgConstRef from_node_arg(const morphizen::Graph &graph,
+                                       const morphizen::NodeArg &self) {
     return NodeArgConstRef{graph, self};
   }
-  operator const morphizen::NodeArg&() const { return self_; }
-  const morphizen::NodeArg* ptr() const { return &self_; }
+  operator const morphizen::NodeArg &() const { return self_; }
+  const morphizen::NodeArg *ptr() const { return &self_; }
   /**
    * @brief Gets the name of the NodeArg.
    *
    * @return The name of the NodeArg.
    * */
-  const std::string& name() const {
+  const std::string &name() const {
     return morphizen::node_arg_get_name(self_);
   }
   /**
@@ -152,10 +152,10 @@ public:
    * @param other The NodeArgConstRef object to compare with.
    * @return true if the two objects are identical pointers, false otherwise.
    */
-  bool operator==(const NodeArgConstRef& other) const {
+  bool operator==(const NodeArgConstRef &other) const {
     return &self_ == &other.self_;
   }
-  bool operator<(const NodeArgConstRef& other) const {
+  bool operator<(const NodeArgConstRef &other) const {
     return &self_ < &other.self_;
   }
   /**
@@ -498,20 +498,20 @@ public:
    * @param self The node argument to be printed.
    * @return The output stream.
    */
-  friend std::ostream& operator<<(std::ostream& str,
-                                  const NodeArgConstRef& self) {
+  friend std::ostream &operator<<(std::ostream &str,
+                                  const NodeArgConstRef &self) {
     return str << self.to_string();
   }
 
 private:
-  const morphizen::Graph& graph_;
-  const morphizen::NodeArg& self_;
+  const morphizen::Graph &graph_;
+  const morphizen::NodeArg &self_;
 };
 class MORPHIZEN_DLL_SPEC NodeArgRef : public NodeArgConstRef {
   friend class GraphRef;
 
 private:
-  NodeArgRef(morphizen::Graph& graph, morphizen::NodeArg& self)
+  NodeArgRef(morphizen::Graph &graph, morphizen::NodeArg &self)
       : NodeArgConstRef{graph, self} {}
 };
 } // namespace morphizen_cxx

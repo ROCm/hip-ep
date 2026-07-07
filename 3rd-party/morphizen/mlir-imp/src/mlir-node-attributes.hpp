@@ -38,13 +38,13 @@ public:
   /**
    * @brief Construct an empty MLIRNodeAttributes object
    */
-  static mlir::Operation* Create();
-  bool has_attribute(const std::string& name) const;
+  static mlir::Operation *Create();
+  bool has_attribute(const std::string &name) const;
   /**
    * @brief Add an attribute using MLIRNamedAttribute
    * @param named_attr MLIRNamedAttribute containing name and value
    */
-  void add(const mlir::NamedAttribute& named_attr);
+  void add(const mlir::NamedAttribute &named_attr);
 
   /**
    * @brief Get all attribute names (excludes internal ones)
@@ -57,7 +57,7 @@ public:
    * @param name Attribute name
    * @return MLIR attribute or nullptr if not found
    */
-  const MLIRNamedAttribute& get_mlir_attribute(const std::string& name) const;
+  const MLIRNamedAttribute &get_mlir_attribute(const std::string &name) const;
 
   /**
    * @brief Get all MLIR attributes as a dictionary
@@ -66,7 +66,7 @@ public:
   mlir::DictionaryAttr get_mlir_dictionary() const;
 
   std::vector<std::string>
-  get_attribute_as_strings(const std::string& name) const;
+  get_attribute_as_strings(const std::string &name) const;
 };
 
 } // namespace mlir_impl

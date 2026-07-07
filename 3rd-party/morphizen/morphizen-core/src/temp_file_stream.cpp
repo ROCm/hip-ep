@@ -9,7 +9,7 @@
 namespace morphizen {
 
 TempFileStream::TempFileStream() {
-  FILE* file = create_tmpfile();
+  FILE *file = create_tmpfile();
   CHECK(file != nullptr) << "Failed to create temporary file";
 
   // FileStream takes ownership and will close file in destructor
@@ -25,14 +25,14 @@ size_t TempFileStream::get_size() {
   return static_cast<size_t>(size);
 }
 
-std::istream& TempFileStream::get_read_stream() {
+std::istream &TempFileStream::get_read_stream() {
   stream_->flush();
   stream_->seekg(0, std::ios::beg);
   return *stream_;
 }
 
-std::ostream& TempFileStream::get_write_stream() { return *stream_; }
+std::ostream &TempFileStream::get_write_stream() { return *stream_; }
 
-std::iostream& TempFileStream::get_stream() { return *stream_; }
+std::iostream &TempFileStream::get_stream() { return *stream_; }
 
 } // namespace morphizen

@@ -26,7 +26,7 @@ public:
    * @param graph_id The ID of the graph to retrieve
    * @return Pointer to the graph, or nullptr if not found
    */
-  static Graph* get_graph_by_id(uint32_t graph_id);
+  static Graph *get_graph_by_id(uint32_t graph_id);
 
   /**
    * @brief Allocate a new graph ID for a graph instance
@@ -34,7 +34,7 @@ public:
    * @param proposed_graph_index Preferred graph ID (0 means auto-assign)
    * @return The allocated graph ID
    */
-  static uint32_t allocate_graph_id(Graph* graph,
+  static uint32_t allocate_graph_id(Graph *graph,
                                     uint32_t proposed_graph_index = 0);
 
   /**
@@ -42,7 +42,7 @@ public:
    * @param graph Pointer to the graph instance
    * @param old_graph_id The graph ID to release
    */
-  static void release_graph_id(Graph* graph, uint32_t old_graph_id);
+  static void release_graph_id(Graph *graph, uint32_t old_graph_id);
 
   /**
    * @brief Get a string representation of all cached graph IDs for debugging
@@ -55,7 +55,7 @@ private:
    * @brief Get reference to the global graphs cache
    * @return Reference to the vector storing graph pointers
    */
-  static std::vector<Graph*>& get_graphs_cache();
+  static std::vector<Graph *> &get_graphs_cache();
 };
 
 } // namespace morphizen

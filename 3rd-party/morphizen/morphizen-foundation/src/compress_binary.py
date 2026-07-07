@@ -38,16 +38,22 @@ def get_compression_info(size, support_compression):
 def generate_map(embedded_resource_file, support_compression):
     meta_info_list = []
     if os.path.isfile(embedded_resource_file):
-        print(f"-- load meta info from {embedded_resource_file} with {support_compression}")
+        print(
+            f"-- load meta info from {embedded_resource_file} with {support_compression}"
+        )
         f = open(embedded_resource_file, "r", encoding="utf-8")
         meta_info_list = ast.literal_eval(f.read())
     else:
-        print("-- embbed resource file not found, please set -DMORPHIZEN_EMBEDDED_RESOURCE_PATH=<>")
+        print(
+            "-- embbed resource file not found, please set -DMORPHIZEN_EMBEDDED_RESOURCE_PATH=<>"
+        )
     data_str = ""
     map_str = "static std::unordered_map<std::string, CompressionInfo> binary_map = {"
 
     for meta_info in meta_info_list:
-        normalized_rel_path = meta_info["name"].replace("/", os.sep).replace("\\", os.sep)
+        normalized_rel_path = (
+            meta_info["name"].replace("/", os.sep).replace("\\", os.sep)
+        )
         filename = os.path.basename(normalized_rel_path)
         compression = meta_info["compression"] and support_compression
         print(f"-- add binary file {filename} with compression = {compression}")
@@ -61,7 +67,9 @@ def generate_map(embedded_resource_file, support_compression):
         byte_str = ""
         compressed_size = 0
         origin_size = 0
-        byte_str, compressed_size, origin_size = to_compressed_byte(path) if compression else to_byte(path)
+        byte_str, compressed_size, origin_size = (
+            to_compressed_byte(path) if compression else to_byte(path)
+        )
 
         data_str += f"static const uint8_t {variable_name}[] = "
         data_str += "{" + byte_str + "};\n"

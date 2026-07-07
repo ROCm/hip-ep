@@ -14,17 +14,17 @@ namespace morphizen {
 template <typename T> class MemBuffer : public std::streambuf {
 public:
   static std::unique_ptr<MemBuffer<T>>
-  create(const void* base, std::size_t size, std::unique_ptr<T>&& owner) {
+  create(const void *base, std::size_t size, std::unique_ptr<T> &&owner) {
     return std::make_unique<MemBuffer<T>>(base, size, std::move(owner));
   }
 
 public:
-  explicit MemBuffer(const void* base, std::size_t size,
+  explicit MemBuffer(const void *base, std::size_t size,
                      std::unique_ptr<T> owner)
-      : base_((const char*)base), size_(size), owner_(std::move(owner)) {
+      : base_((const char *)base), size_(size), owner_(std::move(owner)) {
     my_setg(base_);
     // disable put
-    setp((char_type*)base_, (char_type*)base_);
+    setp((char_type *)base_, (char_type *)base_);
   }
 
   virtual ~MemBuffer() {}
@@ -61,12 +61,12 @@ public:
     // optionally call seekoff() here to centralize logic
     return seekoff(pos, std::ios_base::beg, which);
   }
-  const char* base() const { return base_; }
+  const char *base() const { return base_; }
 
 private:
   static constexpr size_t PAGE_SIZE = 4096u;
   static constexpr uintptr_t PAGE_SIZE_MASK = PAGE_SIZE - 1;
-  void my_setg(const char* cur) {
+  void my_setg(const char *cur) {
     uintptr_t beg = ((uintptr_t)cur) & ~PAGE_SIZE_MASK;
     /* setg() // set pointers for read buffer
      *_IGfirst = _First;
@@ -80,11 +80,11 @@ private:
                         static_cast<uintptr_t>(std::numeric_limits<int>::max());
     uintptr_t end_intented = beg + size_;
     uintptr_t end = std::min(end_intented, end_max);
-    setg((char*)beg, (char*)cur, (char*)end);
+    setg((char *)beg, (char *)cur, (char *)end);
   }
 
 private:
-  const char* base_;
+  const char *base_;
 
   size_t size_;
   std::unique_ptr<T> owner_;
@@ -100,7 +100,7 @@ public:
       : std::iostream(sb.get()), buffer_{sb} {}
 
 public:
-  const char* offset(std::streamoff offset) const {
+  const char *offset(std::streamoff offset) const {
     return buffer_->base() + offset;
   }
 
@@ -115,7 +115,7 @@ private:
  */
 class MemoryOutputStreambuf : public std::streambuf {
 public:
-  explicit MemoryOutputStreambuf(std::vector<char>& buffer) : buffer_(buffer) {}
+  explicit MemoryOutputStreambuf(std::vector<char> &buffer) : buffer_(buffer) {}
 
 protected:
   int_type overflow(int_type c) override {
@@ -125,13 +125,13 @@ protected:
     return c;
   }
 
-  std::streamsize xsputn(const char* s, std::streamsize n) override {
+  std::streamsize xsputn(const char *s, std::streamsize n) override {
     buffer_.insert(buffer_.end(), s, s + n);
     return n;
   }
 
 private:
-  std::vector<char>& buffer_;
+  std::vector<char> &buffer_;
 };
 
 } // namespace morphizen

@@ -16,7 +16,7 @@ namespace morphizen {
  * Loads configuration from provider options, with "config_file" option
  * taking precedence over embedded defaults.
  */
-std::string get_config_json_str(const onnxruntime::ProviderOptions& options);
-Ort::SessionOptions*
-get_session_option(const onnxruntime::ProviderOptions& options);
+std::string get_config_json_str(const onnxruntime::ProviderOptions &options);
+Ort::SessionOptions *
+get_session_option(const onnxruntime::ProviderOptions &options);
 } // namespace morphizen

@@ -32,7 +32,7 @@ static std::string GetLastErrorAsString() {
 
   return message;
 }
-std::unique_ptr<MemFile> MemFileWin::create(const std::filesystem::path& path) {
+std::unique_ptr<MemFile> MemFileWin::create(const std::filesystem::path &path) {
   static_assert(sizeof(HANDLE) == sizeof(MemFileWin::handle_t), "64-bit only");
   auto handle = CreateFileW(
       path.wstring().c_str(),
@@ -71,7 +71,7 @@ std::unique_ptr<MemFile> MemFileWin::create(const std::filesystem::path& path) {
   return std::make_unique<MemFileWin>(handle, map_handle, size, base);
 }
 MemFileWin::MemFileWin(handle_t handle, handle_t map_handle, size_t size,
-                       void* base)
+                       void *base)
     : m_handle(handle),         //
       m_map_handle(map_handle), //
       m_size{size},             //
@@ -89,6 +89,6 @@ MemFileWin::~MemFileWin() {
     CloseHandle(m_handle);
   }
 }
-void* MemFileWin::base() { return m_base; }
+void *MemFileWin::base() { return m_base; }
 size_t MemFileWin::size() const { return m_size; }
 } // namespace morphizen

@@ -5,7 +5,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include "./tar_file.hpp"
 #ifdef _WIN32
-#  include "./mmap_file_tmphandle_win.hpp"
+#include "./mmap_file_tmphandle_win.hpp"
 #endif
 #include "./tar_header.hpp"
 #include "morphizen/env_config.hpp"
@@ -21,11 +21,11 @@ DEF_ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE, "0")
 namespace morphizen {
 
 std::unique_ptr<TarFile>
-TarFile::create(std::unique_ptr<std::iostream>&& stream) {
+TarFile::create(std::unique_ptr<std::iostream> &&stream) {
   return std::make_unique<TarFile>(PrivateTag{}, std::move(stream));
 }
 std::unique_ptr<TarFile>
-TarFile::create_from_path(const std::filesystem::path& path, bool enable_mmap) {
+TarFile::create_from_path(const std::filesystem::path &path, bool enable_mmap) {
   auto create_with_regular_stream = [&]() -> std::unique_ptr<TarFile> {
     auto stream =
         std::make_unique<std::fstream>(path, std::ios::binary | std::ios::in);
@@ -54,7 +54,7 @@ TarFile::create_from_path(const std::filesystem::path& path, bool enable_mmap) {
     auto stream = std::make_unique<MemStream<MemFile>>(
         MemBuffer<MemFile>::create(base, size, std::move(mem_file)));
     return TarFile::create(std::move(stream));
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     MY_LOG(1) << "Failed to create MMapFile object: " << e.what();
   }
   return create_with_regular_stream();
@@ -85,17 +85,17 @@ std::unique_ptr<TarFile> TarFile::create_from_tmpfile() {
   return create(std::move(stream));
 }
 std::unique_ptr<TarFile>
-TarFile::create_from_buffer(std::vector<char>&& buffer) {
+TarFile::create_from_buffer(std::vector<char> &&buffer) {
   auto owner = std::make_unique<std::vector<char>>(std::move(buffer));
   auto base = owner->data();
   auto size = owner->size();
   auto stream = std::make_unique<MemStream<std::vector<char>>>(
       MemBuffer<std::vector<char>>::create(base, size, std::move(owner)));
   LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
-      << " create a tar file from memory " << (void*)base << " " << size;
+      << " create a tar file from memory " << (void *)base << " " << size;
   return create(std::move(stream));
 }
-std::unique_ptr<TarFile> TarFile::create_from_buffer(std::string&& buffer0,
+std::unique_ptr<TarFile> TarFile::create_from_buffer(std::string &&buffer0,
                                                      bool enable_mmap) {
   std::unique_ptr<std::iostream> stream;
   auto file = create_tmpfile();
@@ -138,7 +138,7 @@ std::unique_ptr<TarFile> TarFile::create_from_buffer(std::string&& buffer0,
           MY_LOG(1) << "mmap creation failed, falling back to FileStream";
           stream = std::make_unique<FileStream>(file);
         }
-      } catch (const std::exception& e) {
+      } catch (const std::exception &e) {
         MY_LOG(1) << "mmap creation exception: " << e.what()
                   << ", falling back to FileStream";
         stream = std::make_unique<FileStream>(file);
@@ -170,7 +170,7 @@ std::unique_ptr<TarFile> TarFile::create_from_buffer(std::string&& buffer0,
   return create(std::move(stream));
 }
 
-TarFile::TarFile(PrivateTag, std::unique_ptr<std::iostream>&& stream)
+TarFile::TarFile(PrivateTag, std::unique_ptr<std::iostream> &&stream)
     : stream_(std::move(stream)),
       mem_stream_{dynamic_cast<decltype(mem_stream_)>(stream_.get())} {
   CHECK(stream_->seekg(0, std::ios::beg).good())
@@ -180,8 +180,8 @@ TarFile::TarFile(PrivateTag, std::unique_ptr<std::iostream>&& stream)
   } while (read_tar_entry(stream_));
 }
 
-bool TarFile::has_file(const std::string& filename) const {
-  for (auto& entry : entries()) {
+bool TarFile::has_file(const std::string &filename) const {
+  for (auto &entry : entries()) {
     if (entry->path() == filename) {
       MY_LOG(1) << " has_file: Found entry=" << entry->to_string() //
                 << " stream_pos=" << entry->tellg()                //
@@ -204,7 +204,7 @@ size_t TarFile::current_size() const {
   return size;
 }
 
-bool TarFile::dump_to(char* data, size_t size) const {
+bool TarFile::dump_to(char *data, size_t size) const {
   auto expected_size = current_size();
   if (size < expected_size) {
     MY_LOG(1)
@@ -224,13 +224,13 @@ bool TarFile::dump_to(char* data, size_t size) const {
   return true;
 }
 
-const std::vector<std::unique_ptr<TarEntryInputStream>>&
+const std::vector<std::unique_ptr<TarEntryInputStream>> &
 TarFile::entries() const {
   return entries_;
 }
-TarEntryInputStream* TarFile::open_for_read(const std::string& filename) {
+TarEntryInputStream *TarFile::open_for_read(const std::string &filename) {
   MY_LOG(1) << " open_for_read: search for file \"" << filename << "\"";
-  for (auto& entry : entries_) {
+  for (auto &entry : entries_) {
     if (entry->path() == filename) {
       if (entry->data_begin_pos() == std::streampos(-1)) {
         // ================================================================
@@ -265,11 +265,11 @@ TarEntryInputStream* TarFile::open_for_read(const std::string& filename) {
                     << "\" not found in the tar file";
           return nullptr;
         }
-        const_cast<std::streampos&>(entry->buf_->data_begin_pos_) =
+        const_cast<std::streampos &>(entry->buf_->data_begin_pos_) =
             real_entry->data_begin_pos();
-        const_cast<std::streampos&>(entry->buf_->data_end_pos_) =
+        const_cast<std::streampos &>(entry->buf_->data_end_pos_) =
             real_entry->data_end_pos();
-        const_cast<std::streampos&>(entry->buf_->buffer_pos_) =
+        const_cast<std::streampos &>(entry->buf_->buffer_pos_) =
             real_entry->data_begin_pos();
         return entry.get();
       }
@@ -290,7 +290,7 @@ TarEntryInputStream* TarFile::open_for_read(const std::string& filename) {
 }
 
 std::unique_ptr<std::ostream>
-TarFile::open_for_write(const std::string& filename) {
+TarFile::open_for_write(const std::string &filename) {
   if (mem_stream_) {
     // mem_stream_ is not nullptr, it means tar file is created in memory, it is
     // readonly, we cannot expand the size of memroy dynamically
@@ -299,16 +299,16 @@ TarFile::open_for_write(const std::string& filename) {
   return TarEntryOutputStream::create(*this, filename);
 }
 
-void TarFile::remove_duplicate_entry(const std::string& path) {
+void TarFile::remove_duplicate_entry(const std::string &path) {
   entries_.erase(std::remove_if(entries_.begin(), entries_.end(),
-                                [&path](const auto& entry) {
+                                [&path](const auto &entry) {
                                   return entry->path() == path;
                                 }),
                  entries_.end());
 }
 
-TarEntryInputStream&
-TarFile::add_regular_entry(const std::string& path, // name of the entry
+TarEntryInputStream &
+TarFile::add_regular_entry(const std::string &path, // name of the entry
                            std::streambuf::pos_type data_begin_pos,
                            std::streambuf::pos_type data_end_pos,
                            std::streambuf::pos_type block_begin_pos,
@@ -324,12 +324,12 @@ TarFile::add_regular_entry(const std::string& path, // name of the entry
   return *ret;
 }
 
-TarEntryInputStream*
-TarFile::find_real_entry(const std::string& real_path // link name of the entry
+TarEntryInputStream *
+TarFile::find_real_entry(const std::string &real_path // link name of the entry
 ) {
   auto it = std::find_if(
       entries_.rbegin(), entries_.rend(),
-      [&real_path](const auto& entry) { return entry->path() == real_path; });
+      [&real_path](const auto &entry) { return entry->path() == real_path; });
   MY_LOG(1) << " find_real_entry: search for symlink \"" << real_path << "\"";
   if (it != entries_.rend()) {
     if ((*it)->real_path()) {
@@ -354,15 +354,15 @@ TarFile::find_real_entry(const std::string& real_path // link name of the entry
   return nullptr;
 }
 
-TarEntryInputStream*
-TarFile::add_symlink_entry(const std::string& symlink_name,
-                           const std::string& real_path_name,
+TarEntryInputStream *
+TarFile::add_symlink_entry(const std::string &symlink_name,
+                           const std::string &real_path_name,
                            std::streambuf::pos_type block_begin_pos,
                            std::streambuf::pos_type block_end_pos) {
   // Remove any existing entry with the same path (TAR last-wins semantics)
   remove_duplicate_entry(symlink_name);
 
-  TarEntryInputStream* ret = nullptr;
+  TarEntryInputStream *ret = nullptr;
   auto real_entry = find_real_entry(real_path_name);
   if (real_entry) {
     ret = add_entry(symlink_name, real_path_name, real_entry->data_begin_pos(),
@@ -378,8 +378,8 @@ TarFile::add_symlink_entry(const std::string& symlink_name,
   }
   return ret;
 }
-static bool is_padding_header(const TarHeader& header) {
-  auto is_special_name = [](const std::string& name) {
+static bool is_padding_header(const TarHeader &header) {
+  auto is_special_name = [](const std::string &name) {
     static const char prefix[] = "_data/padding_";
     return std::memcmp(name.data(), prefix,
                        std::min(sizeof(prefix) - 1u, name.size())) == 0;
@@ -390,7 +390,7 @@ static bool is_padding_header(const TarHeader& header) {
   ret = ret && is_special_name(header.path());
   return ret;
 }
-TarEntryInputStream*
+TarEntryInputStream *
 TarFile::read_tar_entry(std::shared_ptr<std::istream> stream) {
   auto tar_header = TarHeader::read_header(*stream);
   while (tar_header && is_padding_header(*tar_header)) {
@@ -401,7 +401,7 @@ TarFile::read_tar_entry(std::shared_ptr<std::istream> stream) {
     stream_->clear(); // clear the eof flag
     return nullptr;
   }
-  TarEntryInputStream* ret = nullptr;
+  TarEntryInputStream *ret = nullptr;
   if (tar_header->real_path()) {
     MY_LOG(1) << " read symlink entry: " << tar_header->to_string();
     ret = add_symlink_entry(tar_header->path(),              //
@@ -421,9 +421,9 @@ TarFile::read_tar_entry(std::shared_ptr<std::istream> stream) {
   }
   return ret;
 }
-TarEntryInputStream*
-TarFile::add_entry(const std::string& path, // name of the entry
-                   const std::optional<std::string>& real_path,
+TarEntryInputStream *
+TarFile::add_entry(const std::string &path, // name of the entry
+                   const std::optional<std::string> &real_path,
                    std::streambuf::pos_type data_begin_pos,
                    std::streambuf::pos_type data_end_pos,
                    std::streambuf::pos_type block_begin_pos,

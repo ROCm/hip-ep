@@ -28,20 +28,20 @@ class NodeArgProducer;
  */
 class NodeArgProducerProxy {
 public:
-  NodeArgProducerProxy(NodeArgProducer& producer_map,
+  NodeArgProducerProxy(NodeArgProducer &producer_map,
                        const NodeArgIndex node_arg_index);
 
   // Assignment operator - calls set_producer when assigned to
-  NodeArgProducerProxy& operator=(const NodeIndex& producer_index);
+  NodeArgProducerProxy &operator=(const NodeIndex &producer_index);
 
   // Conversion operator - allows reading the current value
   operator NodeIndex() const;
 
   // Copy assignment from another proxy
-  NodeArgProducerProxy& operator=(const NodeArgProducerProxy& other);
+  NodeArgProducerProxy &operator=(const NodeArgProducerProxy &other);
 
 private:
-  NodeArgProducer& producer_map_;
+  NodeArgProducer &producer_map_;
   const NodeArgIndex node_arg_index_;
 };
 
@@ -100,22 +100,22 @@ public:
   /**
    * @brief Copy constructor
    */
-  NodeArgProducer(const NodeArgProducer& other) = default;
+  NodeArgProducer(const NodeArgProducer &other) = default;
 
   /**
    * @brief Move constructor
    */
-  NodeArgProducer(NodeArgProducer&& other) noexcept = default;
+  NodeArgProducer(NodeArgProducer &&other) noexcept = default;
 
   /**
    * @brief Copy assignment operator
    */
-  NodeArgProducer& operator=(const NodeArgProducer& other) = default;
+  NodeArgProducer &operator=(const NodeArgProducer &other) = default;
 
   /**
    * @brief Move assignment operator
    */
-  NodeArgProducer& operator=(NodeArgProducer&& other) noexcept = default;
+  NodeArgProducer &operator=(NodeArgProducer &&other) noexcept = default;
 
   /**
    * @brief Destructor
@@ -137,7 +137,7 @@ public:
    * NodeIndex producer = producer_map[node_arg_index];
    * @endcode
    */
-  NodeIndex operator[](const NodeArgIndex& node_arg_index) const;
+  NodeIndex operator[](const NodeArgIndex &node_arg_index) const;
 
   /**
    * @brief Get/set the producer node for a given node argument (mutable access)
@@ -157,7 +157,7 @@ public:
    * NodeIndex producer = producer_map[node_arg_index];   // Reading
    * @endcode
    */
-  NodeArgProducerProxy operator[](const NodeArgIndex& node_arg_index);
+  NodeArgProducerProxy operator[](const NodeArgIndex &node_arg_index);
 
   /**
    * @brief Reserves memory for node arguments and graph outputs.
@@ -209,8 +209,8 @@ private:
    * @note For graph inputs and initializers, this method will log a warning
    *       as they typically don't have producer nodes.
    */
-  void set_producer(const NodeArgIndex& node_arg_index,
-                    const NodeIndex& producer_index);
+  void set_producer(const NodeArgIndex &node_arg_index,
+                    const NodeIndex &producer_index);
 
   /**
    * @brief Get the producer node for a given node argument (internal use)
@@ -221,7 +221,7 @@ private:
    * and initializers, this will always return an invalid NodeIndex since they
    * don't have producer nodes.
    */
-  NodeIndex get_producer(const NodeArgIndex& node_arg_index) const;
+  NodeIndex get_producer(const NodeArgIndex &node_arg_index) const;
 
   /**
    * @brief Ensure the node output vector has sufficient capacity for the given

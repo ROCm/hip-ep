@@ -16,17 +16,17 @@ namespace morphizen {
  *
  * Return trace data to onnxruntime.
  */
-typedef void (*profiler_collect_t)(std::vector<EventInfo>& api_events,
-                                   std::vector<EventInfo>& kernel_events);
+typedef void (*profiler_collect_t)(std::vector<EventInfo> &api_events,
+                                   std::vector<EventInfo> &kernel_events);
 
 MORPHIZEN_DLL_SPEC void
-profiler_collect(std::vector<EventInfo>& api_events,
-                 std::vector<EventInfo>& kernel_events) {
+profiler_collect(std::vector<EventInfo> &api_events,
+                 std::vector<EventInfo> &kernel_events) {
 
   auto profiler_collect_ptrs =
       morphizen::Plugin::get_all_symbols("profiler_collect_real");
 
-  for (const auto& profiler_collect_ptr : profiler_collect_ptrs) {
+  for (const auto &profiler_collect_ptr : profiler_collect_ptrs) {
     MY_LOG(1) << " running " << profiler_collect_ptr.first
               << "::profiler_collect_real";
     auto profiler_collect_func =

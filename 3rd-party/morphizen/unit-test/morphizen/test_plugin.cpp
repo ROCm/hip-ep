@@ -8,15 +8,15 @@
 #include <gtest/gtest.h>
 TEST(PluginTest, StaticHelloPlugin) {
   {
-    const char* (*func)() = []() -> const char* {
+    const char *(*func)() = []() -> const char * {
       LOG(INFO) << "Hello, world!";
       return "hello, world!";
     };
     ::morphizen::StaticPluginRegister RegisterPlugin("hello_plugin",
-                                                     "say_hello", (void*)func);
+                                                     "say_hello", (void *)func);
     auto plugin = morphizen::Plugin::get("hello_plugin");
     ASSERT_TRUE(plugin != nullptr);
-    auto fp = plugin->get_method<const char*>("say_hello");
+    auto fp = plugin->get_method<const char *>("say_hello");
     ASSERT_TRUE(fp != nullptr) << "no such function";
     auto result = fp();
     ASSERT_STREQ(result, "hello, world!");
@@ -32,7 +32,7 @@ TEST(PluginTest, DynamicHelloPlugin) {
   {
     auto plugin = morphizen::Plugin::get("hello_plugin_dll");
     ASSERT_TRUE(plugin != nullptr);
-    auto fp = plugin->get_method<const char*>("say_hello");
+    auto fp = plugin->get_method<const char *>("say_hello");
     ASSERT_TRUE(fp != nullptr) << "no such function";
     auto result = fp();
     ASSERT_STREQ(result, "hello, world!");

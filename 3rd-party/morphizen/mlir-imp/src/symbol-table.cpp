@@ -9,13 +9,13 @@
 
 namespace mlir_impl {
 
-bool MLIRSymbolTable::insert(const std::string& name, mlir::Value value) {
+bool MLIRSymbolTable::insert(const std::string &name, mlir::Value value) {
   // Check if name already exists
   if (name_to_value_.find(name) != name_to_value_.end()) {
     return false;
   }
 
-  void* opaque_ptr = getOpaquePointer(value);
+  void *opaque_ptr = getOpaquePointer(value);
 
   // Insert both mappings
   name_to_value_[name] = value;
@@ -25,7 +25,7 @@ bool MLIRSymbolTable::insert(const std::string& name, mlir::Value value) {
 }
 
 std::optional<mlir::Value>
-MLIRSymbolTable::lookup(const std::string& name) const {
+MLIRSymbolTable::lookup(const std::string &name) const {
   auto it = name_to_value_.find(name);
   if (it != name_to_value_.end()) {
     return it->second;
@@ -34,7 +34,7 @@ MLIRSymbolTable::lookup(const std::string& name) const {
 }
 
 std::optional<std::string> MLIRSymbolTable::lookup(mlir::Value value) const {
-  void* opaque_ptr = getOpaquePointer(value);
+  void *opaque_ptr = getOpaquePointer(value);
   auto it = value_to_name_.find(opaque_ptr);
   if (it != value_to_name_.end()) {
     return it->second;
@@ -42,7 +42,7 @@ std::optional<std::string> MLIRSymbolTable::lookup(mlir::Value value) const {
   return std::nullopt;
 }
 
-mlir::Value MLIRSymbolTable::getValue(const std::string& name) const {
+mlir::Value MLIRSymbolTable::getValue(const std::string &name) const {
   auto result = lookup(name);
   if (!result) {
     throw std::runtime_error("Symbol not found: " + name);
@@ -58,19 +58,19 @@ std::string MLIRSymbolTable::getName(mlir::Value value) const {
   return *result;
 }
 
-bool MLIRSymbolTable::contains(const std::string& name) const {
+bool MLIRSymbolTable::contains(const std::string &name) const {
   return name_to_value_.find(name) != name_to_value_.end();
 }
 
 bool MLIRSymbolTable::contains(mlir::Value value) const {
-  void* opaque_ptr = getOpaquePointer(value);
+  void *opaque_ptr = getOpaquePointer(value);
   return value_to_name_.find(opaque_ptr) != value_to_name_.end();
 }
 
 bool MLIRSymbolTable::replace(mlir::Value old_value, mlir::Value new_value) {
   old_value.replaceAllUsesWith(new_value);
   // CHECK(result.succeeded()) << "Failed to replace old value with new value";
-  void* old_opaque_ptr = getOpaquePointer(old_value);
+  void *old_opaque_ptr = getOpaquePointer(old_value);
   auto it = value_to_name_.find(old_opaque_ptr);
   CHECK(it != value_to_name_.end()) << "Old value not found in symbol table";
   std::string old_name = it->second;
@@ -81,14 +81,14 @@ bool MLIRSymbolTable::replace(mlir::Value old_value, mlir::Value new_value) {
   return insert(old_name, new_value);
 }
 
-bool MLIRSymbolTable::erase(const std::string& name) {
+bool MLIRSymbolTable::erase(const std::string &name) {
   auto it = name_to_value_.find(name);
   if (it == name_to_value_.end()) {
     return false;
   }
 
   // Remove from both maps
-  void* opaque_ptr = getOpaquePointer(it->second);
+  void *opaque_ptr = getOpaquePointer(it->second);
   value_to_name_.erase(opaque_ptr);
   name_to_value_.erase(it);
 
@@ -96,14 +96,14 @@ bool MLIRSymbolTable::erase(const std::string& name) {
 }
 
 bool MLIRSymbolTable::erase(mlir::Value value) {
-  void* opaque_ptr = getOpaquePointer(value);
+  void *opaque_ptr = getOpaquePointer(value);
   auto it = value_to_name_.find(opaque_ptr);
   if (it == value_to_name_.end()) {
     return false;
   }
 
   // Remove from both maps
-  const std::string& name = it->second;
+  const std::string &name = it->second;
   name_to_value_.erase(name);
   value_to_name_.erase(it);
 
@@ -119,7 +119,7 @@ size_t MLIRSymbolTable::size() const { return name_to_value_.size(); }
 
 bool MLIRSymbolTable::empty() const { return name_to_value_.empty(); }
 
-void* MLIRSymbolTable::getOpaquePointer(mlir::Value value) const {
+void *MLIRSymbolTable::getOpaquePointer(mlir::Value value) const {
   return value.getAsOpaquePointer();
 }
 

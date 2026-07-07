@@ -7,7 +7,7 @@
 // Include the base ONNX protobuf definitions first
 #include <onnx/onnx_pb.h>
 #ifdef ONNX_NAMESPACE
-#  undef ONNX_NAMESPACE // for some unknown reasons, we have to redefine it.
+#undef ONNX_NAMESPACE // for some unknown reasons, we have to redefine it.
 #endif
 #define ONNX_NAMESPACE morphizen_onnx
 

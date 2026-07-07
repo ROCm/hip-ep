@@ -21,29 +21,29 @@ DEF_ENV_PARAM_2(MORPHIZEN_DEBUG_IR_CONVERTER_OUTPUT_FILE,
 namespace morphizen {
 
 // Constructor definition
-IRConverterImp::IRConverterImp(const ApiPtrs& api_ptrs, const OrtGraph& graph,
-                               const IRConverterConfig& config)
+IRConverterImp::IRConverterImp(const ApiPtrs &api_ptrs, const OrtGraph &graph,
+                               const IRConverterConfig &config)
     : ApiPtrs(api_ptrs), graph_(*this, graph), config_(config) {}
 
-ModelUniquePtr IRConverterImp::to_onnx_model(const ApiPtrs& api_ptrs,
-                                             const OrtGraph& graph,
-                                             const IRConverterConfig& config) {
+ModelUniquePtr IRConverterImp::to_onnx_model(const ApiPtrs &api_ptrs,
+                                             const OrtGraph &graph,
+                                             const IRConverterConfig &config) {
   // Forward call to instance method
-  const ORTCHAR_T* api_model_path = nullptr;
+  const ORTCHAR_T *api_model_path = nullptr;
   api_ptrs.throw_if_error(
       api_ptrs.ort_api.Graph_GetModelPath(&graph, &api_model_path));
   auto model_path = std::filesystem::path(api_model_path);
   MY_LOG(1) << "Converting ORT graph to ONNX model at: " << model_path;
   auto opset_imports = std::vector<std::pair<std::string, int64_t>>();
   auto graph_wrapper = OrtGraphWrapper(api_ptrs, graph);
-  for (const auto& [domain, version] : graph_wrapper.guess_opset()) {
+  for (const auto &[domain, version] : graph_wrapper.guess_opset()) {
     opset_imports.emplace_back(domain, (int64_t)version);
     MY_LOG(3) << "Add opset: " << domain << " with version: " << version;
   }
   // Use MORPHIZEN_ORT_API for model creation
   auto model = ModelUniquePtr(
       MORPHIZEN_ORT_API(create_empty_model)(model_path, opset_imports),
-      [](onnxruntime::Model* model) {
+      [](onnxruntime::Model *model) {
         MORPHIZEN_ORT_API(model_delete)(model);
       });
   IRConverterImp converter(api_ptrs, graph, config);
@@ -51,9 +51,9 @@ ModelUniquePtr IRConverterImp::to_onnx_model(const ApiPtrs& api_ptrs,
   return model;
 }
 
-OrtStatus* IRConverterImp::convert_to_model(morphizen::Model& model) const {
+OrtStatus *IRConverterImp::convert_to_model(morphizen::Model &model) const {
   MY_LOG(1) << "graph name =" << graph_.name();
-  auto& main_graph = MORPHIZEN_ORT_API(model_main_graph)(model);
+  auto &main_graph = MORPHIZEN_ORT_API(model_main_graph)(model);
 
   throw_if_error(convert_metadata(main_graph, model));
   throw_if_error(convert_graph(main_graph));
@@ -66,7 +66,7 @@ OrtStatus* IRConverterImp::convert_to_model(morphizen::Model& model) const {
   // Format: "name1:p0,p1;name2:p0,p1,p2;..." (parsed by parse_dim_params_map)
   if (!dim_params_map_.empty()) {
     std::string encoded;
-    for (const auto& [name, params] : dim_params_map_) {
+    for (const auto &[name, params] : dim_params_map_) {
       if (!encoded.empty())
         encoded += ';';
       encoded += name + ':';
@@ -84,12 +84,12 @@ OrtStatus* IRConverterImp::convert_to_model(morphizen::Model& model) const {
 
   return nullptr;
 }
-OrtStatus* IRConverterImp::convert_metadata(morphizen::Graph& /*graph*/,
-                                            morphizen::Model& model) const {
+OrtStatus *IRConverterImp::convert_metadata(morphizen::Graph & /*graph*/,
+                                            morphizen::Model &model) const {
   Ort::AllocatorWithDefaultOptions allocator;
   auto metadata = graph_.get_model_metadata();
   auto customized_keys = metadata.GetCustomMetadataMapKeysAllocated(allocator);
-  for (auto& key : customized_keys) {
+  for (auto &key : customized_keys) {
     auto value =
         metadata.LookupCustomMetadataMapAllocated(key.get(), allocator);
     auto cxx_key = std::string(key.get());
@@ -100,7 +100,7 @@ OrtStatus* IRConverterImp::convert_metadata(morphizen::Graph& /*graph*/,
 }
 
 void IRConverterImp::save_model_for_debugging(
-    const morphizen::Model& model) const {
+    const morphizen::Model &model) const {
   // Save converted model to file if debug level > 4 and output file is
   // specified
   if (ENV_PARAM(MORPHIZEN_DEBUG_IR_CONVERTER) > 4) {
@@ -108,8 +108,8 @@ void IRConverterImp::save_model_for_debugging(
         ENV_PARAM(MORPHIZEN_DEBUG_IR_CONVERTER_OUTPUT_FILE);
     if (!output_file.empty()) {
       MY_LOG(4) << "Saving converted ONNX model to: " << output_file;
-      auto& main_graph = MORPHIZEN_ORT_API(model_main_graph)(
-          const_cast<morphizen::Model&>(model));
+      auto &main_graph = MORPHIZEN_ORT_API(model_main_graph)(
+          const_cast<morphizen::Model &>(model));
       morphizen_cxx::GraphConstRef(main_graph)
           .save(output_file, output_file + ".dat",
                 std::numeric_limits<size_t>::max());
@@ -121,7 +121,7 @@ void IRConverterImp::save_model_for_debugging(
   }
 }
 
-OrtStatus* IRConverterImp::convert_graph(morphizen::Graph& graph) const {
+OrtStatus *IRConverterImp::convert_graph(morphizen::Graph &graph) const {
   MY_LOG(2) << "Converting ORT graph '" << graph_.name() << "' to ONNX graph";
   // Set basic graph properties
   morphizen_cxx::GraphRef(graph).set_name(graph_.name());
@@ -140,17 +140,17 @@ OrtStatus* IRConverterImp::convert_graph(morphizen::Graph& graph) const {
   return nullptr;
 }
 
-OrtStatus* IRConverterImp::convert_graph_inputs(morphizen::Graph& graph) const {
+OrtStatus *IRConverterImp::convert_graph_inputs(morphizen::Graph &graph) const {
   MY_LOG(2) << "Converting graph inputs to ONNX format";
   // Get inputs from the ORT graph
   auto inputs = graph_.inputs();
-  auto new_inputs = std::vector<morphizen::NodeArg*>();
+  auto new_inputs = std::vector<morphizen::NodeArg *>();
   new_inputs.reserve(inputs.size());
-  for (const OrtValueInfo* input : inputs) {
+  for (const OrtValueInfo *input : inputs) {
     // Create ValueInfo wrapper for the input
     auto value_info =
         Ort::ConstValueInfo(input); // Create ONNX ValueInfoProto for the input
-    morphizen::NodeArg* node_arg = nullptr;
+    morphizen::NodeArg *node_arg = nullptr;
     throw_if_error(convert_value_info_proto(value_info, graph, &node_arg));
     CHECK(node_arg != nullptr);
     new_inputs.push_back(node_arg);
@@ -161,9 +161,9 @@ OrtStatus* IRConverterImp::convert_graph_inputs(morphizen::Graph& graph) const {
   return nullptr;
 }
 
-std::vector<morphizen::NodeArg*>
-IRConverterImp::guess_missing_output(std::vector<morphizen::NodeArg*> outputs,
-                                     morphizen::Graph& graph) const {
+std::vector<morphizen::NodeArg *>
+IRConverterImp::guess_missing_output(std::vector<morphizen::NodeArg *> outputs,
+                                     morphizen::Graph &graph) const {
 
   auto nodes = graph_.nodes();
 
@@ -172,8 +172,8 @@ IRConverterImp::guess_missing_output(std::vector<morphizen::NodeArg*> outputs,
   // with stable OrtValueInfo* identity matching outer producers' outputs.
   // So walking top-level nodes' GetInputs() + GetImplicitInputs() gives
   // the complete consumed set -- no need to descend into body subgraphs.
-  std::unordered_set<const OrtValueInfo*> consumed;
-  for (auto& node : nodes) {
+  std::unordered_set<const OrtValueInfo *> consumed;
+  for (auto &node : nodes) {
     Ort::ConstNode wrap(node);
     for (auto in : wrap.GetInputs()) {
       if (in) {
@@ -186,7 +186,7 @@ IRConverterImp::guess_missing_output(std::vector<morphizen::NodeArg*> outputs,
       }
     }
   }
-  auto output_is_consumed = [&](const OrtValueInfo* vi) -> bool {
+  auto output_is_consumed = [&](const OrtValueInfo *vi) -> bool {
     return consumed.count(vi) > 0;
   };
 
@@ -194,8 +194,8 @@ IRConverterImp::guess_missing_output(std::vector<morphizen::NodeArg*> outputs,
   // other node (explicitly or implicitly via a body) and are not already
   // in the output list. Skip optional intermediates from multi-output
   // ops where at least one sibling result IS consumed.
-  for (auto& node : nodes) {
-    std::vector<const OrtValueInfo*> node_outputs = {};
+  for (auto &node : nodes) {
+    std::vector<const OrtValueInfo *> node_outputs = {};
     size_t num_of_outputs = 0;
     throw_if_error(ort_api.Node_GetNumOutputs(node, &num_of_outputs));
     node_outputs.resize(num_of_outputs);
@@ -223,7 +223,7 @@ IRConverterImp::guess_missing_output(std::vector<morphizen::NodeArg*> outputs,
           }
           // Create ValueInfo wrapper for the output
           auto value_info = Ort::ConstValueInfo(output);
-          morphizen::NodeArg* node_arg = nullptr;
+          morphizen::NodeArg *node_arg = nullptr;
           throw_if_error(
               convert_value_info_proto(value_info, graph, &node_arg));
           CHECK(node_arg != nullptr);
@@ -239,18 +239,18 @@ IRConverterImp::guess_missing_output(std::vector<morphizen::NodeArg*> outputs,
   return outputs;
 }
 
-OrtStatus*
-IRConverterImp::convert_graph_outputs(morphizen::Graph& graph) const {
+OrtStatus *
+IRConverterImp::convert_graph_outputs(morphizen::Graph &graph) const {
   MY_LOG(2) << "Converting graph outputs to ONNX format";
   // Get outputs from the ORT graph
   auto outputs = graph_.outputs();
-  auto new_outputs = std::vector<morphizen::NodeArg*>();
+  auto new_outputs = std::vector<morphizen::NodeArg *>();
   new_outputs.reserve(outputs.size());
-  for (const OrtValueInfo* output : outputs) {
+  for (const OrtValueInfo *output : outputs) {
     // Create ValueInfo wrapper for the output
     auto value_info = Ort::ConstValueInfo(
         output); // Create ONNX ValueInfoProto for the output
-    morphizen::NodeArg* node_arg = nullptr;
+    morphizen::NodeArg *node_arg = nullptr;
     throw_if_error(convert_value_info_proto(value_info, graph, &node_arg));
     CHECK(node_arg != nullptr);
     new_outputs.push_back(node_arg);
@@ -264,13 +264,13 @@ IRConverterImp::convert_graph_outputs(morphizen::Graph& graph) const {
   return nullptr;
 }
 
-OrtStatus*
-IRConverterImp::convert_graph_initializers(morphizen::Graph& graph) const {
+OrtStatus *
+IRConverterImp::convert_graph_initializers(morphizen::Graph &graph) const {
   MY_LOG(2) << "Converting graph initializers to ONNX format";
 
   // Get the model path so we can resolve relative external-data paths
   // returned by OrtApi to absolute paths that downstream passes can fopen.
-  const ORTCHAR_T* api_model_path = nullptr;
+  const ORTCHAR_T *api_model_path = nullptr;
   throw_if_error(ort_api.Graph_GetModelPath(&graph_.get(), &api_model_path));
   std::filesystem::path model_path = api_model_path
                                          ? std::filesystem::path(api_model_path)
@@ -280,7 +280,7 @@ IRConverterImp::convert_graph_initializers(morphizen::Graph& graph) const {
 
   // Get initializers from the ORT graph
   auto initializers = graph_.initializers();
-  for (const OrtValueInfo* initializer : initializers) {
+  for (const OrtValueInfo *initializer : initializers) {
     // Create ValueInfo wrapper for the initializer
     auto value_info =
         Ort::ConstValueInfo(initializer); // Create ONNX ValueInfoProto
@@ -297,7 +297,7 @@ IRConverterImp::convert_graph_initializers(morphizen::Graph& graph) const {
       throw_if_error(ext_status.release());
     }
 
-    morphizen::TensorProto* raw_proto = nullptr;
+    morphizen::TensorProto *raw_proto = nullptr;
 
     if (ext_info && static_cast<size_t>(ext_info.GetByteSize()) >
                         config_.external_data_threshold) {
@@ -320,7 +320,7 @@ IRConverterImp::convert_graph_initializers(morphizen::Graph& graph) const {
       // bytes here, but the call API still expects an OrtValue handle.
       // (Retrieving type info via a separate API would be cleaner; this
       // matches the existing wrapper surface area for now.)
-      const OrtValue* ort_value = nullptr;
+      const OrtValue *ort_value = nullptr;
       throw_if_error(
           ort_api.ValueInfo_GetInitializerValue(value_info, &ort_value));
       if (ort_value == nullptr) {
@@ -356,7 +356,7 @@ IRConverterImp::convert_graph_initializers(morphizen::Graph& graph) const {
       // released as soon as compile_mlir() returns. The mem-addr pointer
       // we record into the transfer file would then be dangling by the
       // time pass_main streams it into hipMemcpy.
-      const OrtValue* ort_value = nullptr;
+      const OrtValue *ort_value = nullptr;
       throw_if_error(
           ort_api.ValueInfo_GetInitializerValue(value_info, &ort_value));
       if (ort_value == nullptr) {
@@ -370,7 +370,7 @@ IRConverterImp::convert_graph_initializers(morphizen::Graph& graph) const {
       auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
       auto element_type = tensor_info.GetElementType();
       auto shape = tensor_info.GetShape();
-      const void* tensor_data = tensor_value.GetTensorRawData();
+      const void *tensor_data = tensor_value.GetTensorRawData();
       size_t data_size = tensor_value.GetTensorSizeInBytes();
 
       if (data_size > config_.external_data_threshold) {
@@ -402,10 +402,10 @@ IRConverterImp::convert_graph_initializers(morphizen::Graph& graph) const {
   MY_LOG(2) << "Converted " << initializers.size() << " initializers";
   return nullptr;
 }
-OrtStatus*
-IRConverterImp::convert_value_info_proto(const Ort::ConstValueInfo& value_info,
-                                         morphizen::Graph& graph,
-                                         morphizen::NodeArg** node_arg) const {
+OrtStatus *
+IRConverterImp::convert_value_info_proto(const Ort::ConstValueInfo &value_info,
+                                         morphizen::Graph &graph,
+                                         morphizen::NodeArg **node_arg) const {
   MY_LOG(3) << "Converting ORT ValueInfo to ONNX ValueInfoProto";
   // Get type information and convert it
   auto type_info = value_info.TypeInfo();
@@ -418,7 +418,7 @@ IRConverterImp::convert_value_info_proto(const Ort::ConstValueInfo& value_info,
   // rank-0 scalars; HasShape() is the only signal that disambiguates them.
   // Feed nullptr to node_arg_new for unranked, per its contract that
   // "nullptr shape = unknown rank" (mapped to UnrankedTensorType downstream).
-  const std::vector<int64_t>* shape_for_api = &shape;
+  const std::vector<int64_t> *shape_for_api = &shape;
   if (type_info.GetONNXType() == ONNX_TYPE_TENSOR &&
       !type_info.GetTensorTypeAndShapeInfo().HasShape()) {
     shape_for_api = nullptr;
@@ -428,7 +428,7 @@ IRConverterImp::convert_value_info_proto(const Ort::ConstValueInfo& value_info,
       morphizen_cxx::GraphConstRef(graph).find_node_arg(name);
   if (existing_node_arg_opt.has_value()) {
     *node_arg =
-        const_cast<morphizen::NodeArg*>(existing_node_arg_opt.value().ptr());
+        const_cast<morphizen::NodeArg *>(existing_node_arg_opt.value().ptr());
   } else {
     *node_arg =
         &morphizen::node_arg_new(graph, name, shape_for_api, element_type);
@@ -445,7 +445,7 @@ IRConverterImp::convert_value_info_proto(const Ort::ConstValueInfo& value_info,
     std::vector<std::string> dim_params;
     dim_params.reserve(symbolic_dims.size());
     bool has_any = false;
-    for (const char* s : symbolic_dims) {
+    for (const char *s : symbolic_dims) {
       if (s && s[0] != '\0') {
         dim_params.emplace_back(s);
         has_any = true;
@@ -460,10 +460,10 @@ IRConverterImp::convert_value_info_proto(const Ort::ConstValueInfo& value_info,
 
   return nullptr;
 };
-OrtStatus*
-IRConverterImp::convert_type_proto(const Ort::ConstTypeInfo& type_info,
-                                   int* element_type,
-                                   std::vector<int64_t>* shape) const {
+OrtStatus *
+IRConverterImp::convert_type_proto(const Ort::ConstTypeInfo &type_info,
+                                   int *element_type,
+                                   std::vector<int64_t> *shape) const {
   MY_LOG(3) << "Converting ORT TypeInfo to ONNX TypeProto";
 
   try {
@@ -503,21 +503,21 @@ IRConverterImp::convert_type_proto(const Ort::ConstTypeInfo& type_info,
 
     MY_LOG(3) << "TypeProto conversion completed";
     return nullptr;
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     return ort_api.CreateStatus(ORT_RUNTIME_EXCEPTION, e.what());
   }
 }
 
-static int64_t get_attr_value_int(const OrtApi& ort_api,
-                                  const OrtOpAttr* attr) {
+static int64_t get_attr_value_int(const OrtApi &ort_api,
+                                  const OrtOpAttr *attr) {
   int64_t value = 0;
   size_t out = {};
   Ort::ThrowOnError(ort_api.ReadOpAttr(attr, OrtOpAttrType::ORT_OP_ATTR_INT,
                                        &value, sizeof(value), &out));
   return value;
 }
-static std::vector<int64_t> get_attr_value_ints(const OrtApi& ort_api,
-                                                const OrtOpAttr* attr) {
+static std::vector<int64_t> get_attr_value_ints(const OrtApi &ort_api,
+                                                const OrtOpAttr *attr) {
   int64_t i = {};
   size_t out = {};
   // first call to get the bytes needed
@@ -544,16 +544,16 @@ static std::vector<int64_t> get_attr_value_ints(const OrtApi& ort_api,
     return {i};
   }
 }
-static float get_attr_value_float(const OrtApi& ort_api,
-                                  const OrtOpAttr* attr) {
+static float get_attr_value_float(const OrtApi &ort_api,
+                                  const OrtOpAttr *attr) {
   float value = 0.0f;
   size_t out = {};
   Ort::ThrowOnError(ort_api.ReadOpAttr(attr, OrtOpAttrType::ORT_OP_ATTR_FLOAT,
                                        &value, sizeof(value), &out));
   return value;
 }
-static std::vector<float> get_attr_value_floats(const OrtApi& ort_api,
-                                                const OrtOpAttr* attr) {
+static std::vector<float> get_attr_value_floats(const OrtApi &ort_api,
+                                                const OrtOpAttr *attr) {
   float f = {};
   size_t out = {};
   auto status = ort_api.ReadOpAttr(attr, OrtOpAttrType::ORT_OP_ATTR_FLOATS, &f,
@@ -571,8 +571,8 @@ static std::vector<float> get_attr_value_floats(const OrtApi& ort_api,
     return {f};
   }
 }
-static std::string get_attr_value_string(const OrtApi& ort_api,
-                                         const OrtOpAttr* attr) {
+static std::string get_attr_value_string(const OrtApi &ort_api,
+                                         const OrtOpAttr *attr) {
   char c = {};
   size_t out = {};
   // first call to get the bytes needed
@@ -587,8 +587,8 @@ static std::string get_attr_value_string(const OrtApi& ort_api,
     return {c};
   }
 }
-static std::vector<std::string> get_attr_value_strings(const OrtApi& ort_api,
-                                                       const OrtOpAttr* attr) {
+static std::vector<std::string> get_attr_value_strings(const OrtApi &ort_api,
+                                                       const OrtOpAttr *attr) {
   char c = {};
   size_t out = {};
   auto status = ort_api.ReadOpAttr(attr, OrtOpAttrType::ORT_OP_ATTR_STRINGS, &c,
@@ -598,8 +598,8 @@ static std::vector<std::string> get_attr_value_strings(const OrtApi& ort_api,
     Ort::ThrowOnError(ort_api.ReadOpAttr(
         attr, OrtOpAttrType::ORT_OP_ATTR_STRINGS, chars.data(), out, &out));
     std::vector<std::string> strings;
-    char* char_st = chars.data();
-    char* char_ed = char_st + out;
+    char *char_st = chars.data();
+    char *char_ed = char_st + out;
     while (char_st < char_ed) {
       strings.emplace_back(char_st);
       while (*char_st != '\0') {
@@ -617,13 +617,13 @@ static std::vector<std::string> get_attr_value_strings(const OrtApi& ort_api,
 }
 
 morphizen::AttributeProtoPtr
-IRConverterImp::make_subgraph_attribute(morphizen::Graph& parent_graph,
-                                        const OrtNode& node,
-                                        const std::string& attr_name) const {
+IRConverterImp::make_subgraph_attribute(morphizen::Graph &parent_graph,
+                                        const OrtNode &node,
+                                        const std::string &attr_name) const {
   // OpAttr surface exposes name + type for GRAPH attributes but not the
   // embedded sub graph; resolve it via Node_GetSubgraphs.
-  const OrtGraph* ort_sub = nullptr;
-  for (const auto& p : Ort::ConstNode(&node).GetSubgraphs()) {
+  const OrtGraph *ort_sub = nullptr;
+  for (const auto &p : Ort::ConstNode(&node).GetSubgraphs()) {
     if (p.attr_name == attr_name) {
       ort_sub = p.sub_graph;
       break;
@@ -634,7 +634,7 @@ IRConverterImp::make_subgraph_attribute(morphizen::Graph& parent_graph,
         ORT_INVALID_ARGUMENT,
         "GRAPH attribute has no matching subgraph from Node_GetSubgraphs"));
   }
-  morphizen::Graph& sub =
+  morphizen::Graph &sub =
       MORPHIZEN_ORT_API_EXT(graph_new_subgraph)(parent_graph);
   IRConverterConfig sub_config = config_;
   sub_config.external_data_threshold = std::numeric_limits<size_t>::max();
@@ -644,23 +644,23 @@ IRConverterImp::make_subgraph_attribute(morphizen::Graph& parent_graph,
       MORPHIZEN_ORT_API_EXT(attr_proto_new_graph)(attr_name, sub));
 }
 
-OrtStatus* IRConverterImp::convert_graph_nodes(morphizen::Graph& graph) const {
+OrtStatus *IRConverterImp::convert_graph_nodes(morphizen::Graph &graph) const {
   MY_LOG(2) << "Converting graph nodes to ONNX format";
   // Get nodes from the ORT graph
   auto nodes = graph_.nodes();
 
-  for (const OrtNode* node : nodes) {
+  for (const OrtNode *node : nodes) {
     // Get node information from ORT API
-    const char* op_type = nullptr;
-    const char* name = nullptr;
-    const char* domain = nullptr;
-    const char* description = nullptr;
-    std::vector<const OrtValueInfo*> inputs = {};
+    const char *op_type = nullptr;
+    const char *name = nullptr;
+    const char *domain = nullptr;
+    const char *description = nullptr;
+    std::vector<const OrtValueInfo *> inputs = {};
     size_t num_of_inputs = 0;
     throw_if_error(ort_api.Node_GetNumInputs(node, &num_of_inputs));
     inputs.resize(num_of_inputs);
     throw_if_error(ort_api.Node_GetInputs(node, inputs.data(), num_of_inputs));
-    std::vector<const OrtValueInfo*> outputs = {};
+    std::vector<const OrtValueInfo *> outputs = {};
     size_t num_of_outputs = 0;
     throw_if_error(ort_api.Node_GetNumOutputs(node, &num_of_outputs));
     outputs.resize(num_of_outputs);
@@ -673,20 +673,20 @@ OrtStatus* IRConverterImp::convert_graph_nodes(morphizen::Graph& graph) const {
     description = ""; // Default to empty string if not available
     throw_if_error(ort_api.Node_GetDomain(node, &domain));
     throw_if_error(ort_api.Node_GetId(node, &node_id));
-    auto node_inputs = std::vector<const morphizen::NodeArg*>();
+    auto node_inputs = std::vector<const morphizen::NodeArg *>();
     node_inputs.reserve(inputs.size());
     for (auto input : inputs) {
-      morphizen::NodeArg* node_arg = nullptr;
+      morphizen::NodeArg *node_arg = nullptr;
       if (input != nullptr) { // input == nullptr mean optionsl argument.
         throw_if_error(convert_value_info_proto(Ort::ConstValueInfo(input),
                                                 graph, &node_arg));
       }
       node_inputs.push_back(node_arg);
     }
-    auto node_outputs = std::vector<const morphizen::NodeArg*>();
+    auto node_outputs = std::vector<const morphizen::NodeArg *>();
     node_outputs.reserve(outputs.size());
     for (auto output : outputs) {
-      morphizen::NodeArg* node_arg = nullptr;
+      morphizen::NodeArg *node_arg = nullptr;
       if (output != nullptr) { // output == nullptr mean optionsl argument.
         throw_if_error(convert_value_info_proto(Ort::ConstValueInfo(output),
                                                 graph, &node_arg));
@@ -696,15 +696,15 @@ OrtStatus* IRConverterImp::convert_graph_nodes(morphizen::Graph& graph) const {
 
     morphizen::NodeAttributesBuilder attrs_builder;
 
-    std::vector<const OrtOpAttr*> api_node_attributes;
+    std::vector<const OrtOpAttr *> api_node_attributes;
     size_t num_of_attributes = 0;
     throw_if_error(ort_api.Node_GetNumAttributes(node, &num_of_attributes));
     api_node_attributes.resize(num_of_attributes);
     throw_if_error(ort_api.Node_GetAttributes(node, api_node_attributes.data(),
                                               api_node_attributes.size()));
 
-    for (const OrtOpAttr* attr : api_node_attributes) {
-      const char* attr_name = nullptr;
+    for (const OrtOpAttr *attr : api_node_attributes) {
+      const char *attr_name = nullptr;
       OrtOpAttrType attr_type = OrtOpAttrType::ORT_OP_ATTR_UNDEFINED;
       throw_if_error(ort_api.OpAttr_GetName(attr, &attr_name));
       throw_if_error(ort_api.OpAttr_GetType(attr, &attr_type));
@@ -757,7 +757,7 @@ OrtStatus* IRConverterImp::convert_graph_nodes(morphizen::Graph& graph) const {
         // copy path in convert_initializers above: extract shape /
         // element_type / raw bytes, build a morphizen TensorProto, attach it
         // as the attribute, then free both the TensorProto and the OrtValue.
-        OrtValue* raw_tensor = nullptr;
+        OrtValue *raw_tensor = nullptr;
         throw_if_error(
             ort_api.OpAttr_GetTensorAttributeAsOrtValue(attr, &raw_tensor));
         Ort::Value tensor_value{raw_tensor}; // takes ownership
@@ -765,10 +765,10 @@ OrtStatus* IRConverterImp::convert_graph_nodes(morphizen::Graph& graph) const {
         auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
         auto element_type = tensor_info.GetElementType();
         auto shape = tensor_info.GetShape();
-        const void* tensor_data = tensor_value.GetTensorRawData();
+        const void *tensor_data = tensor_value.GetTensorRawData();
         size_t data_size = tensor_value.GetTensorSizeInBytes();
 
-        morphizen::TensorProto* raw_proto =
+        morphizen::TensorProto *raw_proto =
             MORPHIZEN_ORT_API_EXT(tensor_proto_new_raw_data)(
                 attr_name, shape, element_type, tensor_data, data_size);
         MY_LOG(3) << "Attribute " << attr_name
@@ -790,18 +790,18 @@ OrtStatus* IRConverterImp::convert_graph_nodes(morphizen::Graph& graph) const {
 
     auto node_attributes = attrs_builder.build();
 #ifdef _MSC_VER
-#  pragma warning(push)
-#  pragma warning(disable : 4996) // deprecated declaration
+#pragma warning(push)
+#pragma warning(disable : 4996) // deprecated declaration
 #else
-#  pragma GCC diagnostic push
-#  pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #endif
     morphizen::graph_add_node(graph, name, op_type, description, node_inputs,
                               node_outputs, std::move(node_attributes), domain);
 #ifdef _MSC_VER
-#  pragma warning(pop)
+#pragma warning(pop)
 #else
-#  pragma GCC diagnostic pop
+#pragma GCC diagnostic pop
 #endif
     MY_LOG(3) << "Added node: " << name << " (op_type: " << op_type << ")";
   }

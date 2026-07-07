@@ -127,13 +127,17 @@ END
 def get_dir_version_info(path):
     try:
         print(f"CWD={path}")
-        git_hash = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=path, text=True).strip()
+        git_hash = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=path, text=True
+        ).strip()
     except subprocess.CalledProcessError:
         print(f"Error while getting morphizen git hash {path}")
         return "N/A", "N/A"
 
     try:
-        git_branch = subprocess.check_output(["git", "branch", "--show-current"], cwd=path, text=True).strip()
+        git_branch = subprocess.check_output(
+            ["git", "branch", "--show-current"], cwd=path, text=True
+        ).strip()
     except subprocess.CalledProcessError:
         print(f"Error while getting morphizen git branch {path}")
         return "N/A", "N/A"
@@ -156,10 +160,16 @@ def main2(workspace_directory):
                 continue
             project_directory = workspace_directory / project
             print(f"Processing {project_directory}")
-            git_commit_id = os.popen(f"cd {project_directory} && git rev-parse HEAD").read().strip()
+            git_commit_id = (
+                os.popen(f"cd {project_directory} && git rev-parse HEAD").read().strip()
+            )
             project_name = project
             project_version_id = (
-                os.popen(f"cd {project_directory} &&git describe --tags --abbrev=1 HEAD").read().strip()
+                os.popen(
+                    f"cd {project_directory} &&git describe --tags --abbrev=1 HEAD"
+                )
+                .read()
+                .strip()
             )
             output = f"""
                 {{"{project_name}", "{git_commit_id}", "{project_version_id}"}},
@@ -201,9 +211,13 @@ def main(release_file):
                 {{"vai-rt", "{project_commit_id}", "{project_version_id}"}},
             """
             f_out.write(project_out)
-        ORT_CORE_PROVIDERS_MORPHIZEN_INCLUDE_DIR = os.environ.get("ORT_CORE_PROVIDERS_MORPHIZEN_INCLUDE_DIR", "N/A")
+        ORT_CORE_PROVIDERS_MORPHIZEN_INCLUDE_DIR = os.environ.get(
+            "ORT_CORE_PROVIDERS_MORPHIZEN_INCLUDE_DIR", "N/A"
+        )
         if ORT_CORE_PROVIDERS_MORPHIZEN_INCLUDE_DIR != "N/A":
-            ort_branch, ort_git_hash = get_dir_version_info(ORT_CORE_PROVIDERS_MORPHIZEN_INCLUDE_DIR)
+            ort_branch, ort_git_hash = get_dir_version_info(
+                ORT_CORE_PROVIDERS_MORPHIZEN_INCLUDE_DIR
+            )
             project_out = f"""
                 {{"onnxruntime", "{ort_git_hash}", "{ort_branch}"}},
             """

@@ -6,13 +6,13 @@
 #pragma once
 
 #ifdef _WIN32
-#  pragma warning(push)
-#  pragma warning(                                                             \
-          disable : 4946 4267) // reinterpret_cast / size_t→int in protobuf
+#pragma warning(push)
+#pragma warning(                                                               \
+        disable : 4946 4267) // reinterpret_cast / size_t→int in protobuf
 #endif
 #include "morphizen/pass_context.pb.h"
 #ifdef _WIN32
-#  pragma warning(pop)
+#pragma warning(pop)
 #endif
 
 #include <filesystem>
@@ -47,7 +47,7 @@ using CacheFileWriter = FileWriter;
 class QoSUpdateInterface {
 public:
   virtual ~QoSUpdateInterface() = default;
-  virtual void update_qos(const std::string& perf_pref_value) = 0;
+  virtual void update_qos(const std::string &perf_pref_value) = 0;
 };
 
 class PassContext {
@@ -62,7 +62,7 @@ public:
    * an empty optional if the option does not exist.
    */
   virtual std::optional<std::string>
-  get_provider_option(const std::string& option_name) const = 0;
+  get_provider_option(const std::string &option_name) const = 0;
   /**
    * Retrieves the value of a session config based on the given option name.
    *
@@ -71,7 +71,7 @@ public:
    * an empty optional if the option does not exist.
    */
   virtual std::optional<std::string>
-  get_session_config(const std::string& option_name) const = 0;
+  get_session_config(const std::string &option_name) const = 0;
   /**
    * Retrieves the value of a provider option.
    *
@@ -85,8 +85,8 @@ public:
    * @return The value of the option if found, otherwise the default value.
    */
   virtual std::string
-  get_provider_option(const std::string& option_name,
-                      const std::string& default_value) const = 0;
+  get_provider_option(const std::string &option_name,
+                      const std::string &default_value) const = 0;
   virtual bool cache_in_mem() const = 0;
 /**
  * @brief Helper macro to get provider option with class.
@@ -150,11 +150,11 @@ public:
    * @return The value of the option if found, otherwise the default value.
    */
   virtual std::string
-  get_session_config(const std::string& option_name,
-                     const std::string& default_value) const = 0;
+  get_session_config(const std::string &option_name,
+                     const std::string &default_value) const = 0;
   virtual std::string
-  get_run_option(const std::string& option_name,
-                 const std::string& default_value) const = 0;
+  get_run_option(const std::string &option_name,
+                 const std::string &default_value) const = 0;
   /**
    * @brief Retrieves the meta definition parameter from the given MetaDefProto
    * object.
@@ -164,15 +164,15 @@ public:
    * @return A string representing the meta definition parameter.
    */
   virtual std::string
-  get_meta_def_param(const MetaDefProto& meta_def) const = 0;
+  get_meta_def_param(const MetaDefProto &meta_def) const = 0;
   virtual std::string
-  get_ep_dynamic_option(const std::string& option_name,
-                        const std::string& default_value) const = 0;
+  get_ep_dynamic_option(const std::string &option_name,
+                        const std::string &default_value) const = 0;
 
-  virtual void remove_QosUpdater(QoSUpdateInterface* updater) = 0;
+  virtual void remove_QosUpdater(QoSUpdateInterface *updater) = 0;
   virtual void
-  add_QosUpdater(const std::shared_ptr<QoSUpdateInterface>& updater) const = 0;
-  virtual void update_all_qos(const std::string& workload_type) const = 0;
+  add_QosUpdater(const std::shared_ptr<QoSUpdateInterface> &updater) const = 0;
+  virtual void update_all_qos(const std::string &workload_type) const = 0;
   /**
    * @brief Retrieves the configuration protobuf object.
    *
@@ -186,7 +186,7 @@ public:
    * @note this is the low level configuration, it is not recommended to use it,
    * please use `get_log_dir` or `get_provider_options` if possible.
    */
-  virtual const ConfigProto& get_config_proto() const = 0;
+  virtual const ConfigProto &get_config_proto() const = 0;
 
   /**
    * @brief Pure virtual function to retrieve the context protobuf object.
@@ -196,11 +196,11 @@ public:
    *
    * @return A constant reference to the ContextProto object.
    */
-  virtual const ContextProto& get_context_proto() const = 0;
-  virtual ContextProto& get_context_proto() = 0;
+  virtual const ContextProto &get_context_proto() const = 0;
+  virtual ContextProto &get_context_proto() = 0;
   // @brief DO NOT USE THIS FUNCTION
   virtual std::shared_ptr<void>
-  get_context_resource(const std::string& name) const = 0;
+  get_context_resource(const std::string &name) const = 0;
 
   virtual std::filesystem::path get_model_path() const = 0;
   /**
@@ -225,15 +225,15 @@ public:
    *
    */
   virtual std::optional<std::vector<char>>
-  read_file_c8(const std::string& filename) const = 0;
+  read_file_c8(const std::string &filename) const = 0;
 
   virtual std::optional<std::vector<uint8_t>>
-  read_file_u8(const std::string& filename) const = 0;
+  read_file_u8(const std::string &filename) const = 0;
 
   virtual std::unique_ptr<CacheFileReader>
-  open_file_for_read(const std::string& filename) const = 0;
+  open_file_for_read(const std::string &filename) const = 0;
   virtual std::unique_ptr<CacheFileWriter>
-  open_file_for_write(const std::string& filename) = 0;
+  open_file_for_write(const std::string &filename) = 0;
 
   /**
    * @brief Saves the filename and its data into in-memory cache files
@@ -243,7 +243,7 @@ public:
    * @return True if the file was successfully written, false otherwise.
    *
    */
-  virtual bool write_file(const std::string& filename,
+  virtual bool write_file(const std::string &filename,
                           gsl::span<const char> data) = 0;
 
   /**
@@ -252,7 +252,7 @@ public:
    * @param filename The name of the cache file to check.
    * @return True if the cache file exists, false otherwise.
    */
-  virtual bool has_cache_file(const std::string& filename) const = 0;
+  virtual bool has_cache_file(const std::string &filename) const = 0;
 
   /**
    * Retrieves the names of cache files associated with the given filename.
@@ -272,7 +272,7 @@ public:
    * @brief collect time for profiling.
    */
   virtual std::unique_ptr<PassContextTimer>
-  measure(const std::string& label) = 0;
+  measure(const std::string &label) = 0;
   /**
    * Saves the context to `get_log_dir()/context.json`
    */
@@ -300,8 +300,8 @@ public:
    *
    */
   virtual void append_compiled_model_compatibility_info(
-      const std::string& backend_name,
-      const std::string& compatibility_info) = 0;
+      const std::string &backend_name,
+      const std::string &compatibility_info) = 0;
   /**
    * @brief Retrieves the compiled model compatibility information.
    * This method returns a const reference to the map of all backend names
@@ -312,7 +312,7 @@ public:
    *         and the corresponding value is its compatibility information
    * string. The reference remains valid as long as the PassContext exists.
    */
-  virtual const std::map<std::string, std::string>&
+  virtual const std::map<std::string, std::string> &
   get_compiled_model_compatibility_info() const = 0;
 
   virtual void disable_delete_tar_file_in_session_created() = 0;

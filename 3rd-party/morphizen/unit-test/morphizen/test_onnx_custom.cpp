@@ -12,7 +12,7 @@
 
 // Helper function to check if MLIR backend is being used at runtime
 static bool isMLIRBackendActive() {
-  auto* api = morphizen::get_the_global_api_unsafe();
+  auto *api = morphizen::get_the_global_api_unsafe();
   if (!api || !api->get_lib_name) {
     return false;
   }
@@ -25,7 +25,7 @@ static bool isMLIRBackendActive() {
 
 // Helper function to check if MLIR output is in text format (not bytecode)
 // MLIR bytecode starts with magic bytes: 'M' 'L' 0xEF 'R'
-static bool isMLIRTextFormat(const std::string& mlir_output) {
+static bool isMLIRTextFormat(const std::string &mlir_output) {
   if (mlir_output.size() < 4) {
     return true; // Too short to be bytecode, assume text
   }
@@ -35,7 +35,7 @@ static bool isMLIRTextFormat(const std::string& mlir_output) {
       mlir_output[3] == 'R') {
     return false; // This is bytecode
   }
-  return true;    // Assume text format
+  return true; // Assume text format
 }
 
 class OnnxCustomTest : public ::testing::Test {};

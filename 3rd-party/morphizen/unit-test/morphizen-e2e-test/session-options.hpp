@@ -14,27 +14,27 @@ namespace morphizen_e2e_test {
 class E2ETestSessionOptions {
 public:
   E2ETestSessionOptions(
-      const E2ETestSessionOptionsProto& proto, Ort::Env& env,
-      const std::vector<Ort::ConstEpDevice>& selected_devices);
+      const E2ETestSessionOptionsProto &proto, Ort::Env &env,
+      const std::vector<Ort::ConstEpDevice> &selected_devices);
 
   // delete copy constructor and assignment operator
-  E2ETestSessionOptions(const E2ETestSessionOptions&) = delete;
-  E2ETestSessionOptions& operator=(const E2ETestSessionOptions&) = delete;
+  E2ETestSessionOptions(const E2ETestSessionOptions &) = delete;
+  E2ETestSessionOptions &operator=(const E2ETestSessionOptions &) = delete;
   ~E2ETestSessionOptions() = default;
 
   std::vector<std::unique_ptr<E2ETestSession>> create_e2e_test_sessions();
 
-  Ort::SessionOptions& get_ort_session_options() {
+  Ort::SessionOptions &get_ort_session_options() {
     return *ort_session_options_;
   }
 
 public:
-  const E2ETestSessionOptionsProto& proto() const { return proto_; }
-  Ort::Env& env() const { return env_; }
+  const E2ETestSessionOptionsProto &proto() const { return proto_; }
+  Ort::Env &env() const { return env_; }
 
 private:
-  const E2ETestSessionOptionsProto& proto_;
-  Ort::Env& env_;
+  const E2ETestSessionOptionsProto &proto_;
+  Ort::Env &env_;
 
   std::unique_ptr<Ort::SessionOptions> ort_session_options_;
 };

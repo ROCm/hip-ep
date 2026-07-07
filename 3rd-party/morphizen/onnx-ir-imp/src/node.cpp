@@ -8,16 +8,16 @@
 namespace morphizen {
 
 // Factory method implementation
-Node Node::create_node(const NodeIndex& self,
-                       const std::vector<NodeArgIndex>& inputs,
-                       const std::vector<NodeArgIndex>& outputs) {
+Node Node::create_node(const NodeIndex &self,
+                       const std::vector<NodeArgIndex> &inputs,
+                       const std::vector<NodeArgIndex> &outputs) {
   return Node(PrivateTag{}, self, inputs, outputs);
 }
 
 // Constructor implementation
-Node::Node(PrivateTag /*tag*/, const NodeIndex& self,
-           const std::vector<NodeArgIndex>& inputs,
-           const std::vector<NodeArgIndex>& outputs)
+Node::Node(PrivateTag /*tag*/, const NodeIndex &self,
+           const std::vector<NodeArgIndex> &inputs,
+           const std::vector<NodeArgIndex> &outputs)
     : self_(self), inputs_(inputs), outputs_(outputs) {
   // Empty implementation for now - placeholder for future node operations
 }
@@ -26,10 +26,10 @@ Node::Node(PrivateTag /*tag*/, const NodeIndex& self,
 
 // Accessor method implementations
 
-const NodeIndex& Node::get_self() const { return self_; }
+const NodeIndex &Node::get_self() const { return self_; }
 
-const std::vector<NodeArgIndex>& Node::get_inputs() const { return inputs_; }
+const std::vector<NodeArgIndex> &Node::get_inputs() const { return inputs_; }
 
-const std::vector<NodeArgIndex>& Node::get_outputs() const { return outputs_; }
+const std::vector<NodeArgIndex> &Node::get_outputs() const { return outputs_; }
 
 } // namespace morphizen

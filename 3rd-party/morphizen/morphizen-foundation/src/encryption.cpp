@@ -11,10 +11,10 @@
 #include <memory>
 #include <vector>
 #ifdef WITH_OPENSSL
-#  include <openssl/aes.h>
-#  include <openssl/conf.h>
-#  include <openssl/err.h>
-#  include <openssl/evp.h>
+#include <openssl/aes.h>
+#include <openssl/conf.h>
+#include <openssl/err.h>
+#include <openssl/evp.h>
 #endif
 namespace morphizen_encryption {
 int has_encryption_support() {
@@ -25,8 +25,8 @@ int has_encryption_support() {
 #endif
 }
 
-void aes_encryption(std::istream& src, std::ostream& dst,
-                    [[maybe_unused]] const std::string& key) {
+void aes_encryption(std::istream &src, std::ostream &dst,
+                    [[maybe_unused]] const std::string &key) {
 #ifdef WITH_OPENSSL
   // key
   std::array<char, 32> aes_256_key = {'\0'};
@@ -41,13 +41,14 @@ void aes_encryption(std::istream& src, std::ostream& dst,
   }
 
   const size_t READ_SIZE = 1024;
-  EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+  EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
   if (!ctx) {
     throw EncryptionError("encryption creating context failed");
   }
 
   if (1 != EVP_EncryptInit_ex(ctx, EVP_aes_256_ecb(), NULL,
-                              (const unsigned char*)aes_256_key.data(), NULL)) {
+                              (const unsigned char *)aes_256_key.data(),
+                              NULL)) {
     EVP_CIPHER_CTX_free(ctx);
     throw EncryptionError("encryption initialization failed");
   }
@@ -61,8 +62,8 @@ void aes_encryption(std::istream& src, std::ostream& dst,
     if (read_size == 0)
       break;
 
-    if (1 != EVP_EncryptUpdate(ctx, (unsigned char*)buffer_out, &len,
-                               (const unsigned char*)buffer_in.data(),
+    if (1 != EVP_EncryptUpdate(ctx, (unsigned char *)buffer_out, &len,
+                               (const unsigned char *)buffer_in.data(),
                                (int)read_size)) {
       EVP_CIPHER_CTX_free(ctx);
       throw EncryptionError("encryption update failed");
@@ -75,7 +76,7 @@ void aes_encryption(std::istream& src, std::ostream& dst,
   }
 
   char evp_cipher_block[AES_BLOCK_SIZE];
-  if (1 != EVP_EncryptFinal_ex(ctx, (unsigned char*)evp_cipher_block, &len)) {
+  if (1 != EVP_EncryptFinal_ex(ctx, (unsigned char *)evp_cipher_block, &len)) {
     EVP_CIPHER_CTX_free(ctx);
     throw EncryptionError("encryption finalization failed");
   }
@@ -90,8 +91,8 @@ void aes_encryption(std::istream& src, std::ostream& dst,
   }
 #endif
 }
-void aes_decryption(std::istream& src, std::ostream& dst,
-                    [[maybe_unused]] const std::string& key) {
+void aes_decryption(std::istream &src, std::ostream &dst,
+                    [[maybe_unused]] const std::string &key) {
 #ifdef WITH_OPENSSL
   // key
   std::array<char, 32> aes_256_key = {'\0'};
@@ -106,13 +107,14 @@ void aes_decryption(std::istream& src, std::ostream& dst,
   }
 
   const size_t READ_SIZE = 1024;
-  EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+  EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
   if (!ctx) {
     throw EncryptionError("decryption creating context failed");
   }
 
   if (1 != EVP_DecryptInit_ex(ctx, EVP_aes_256_ecb(), NULL,
-                              (const unsigned char*)aes_256_key.data(), NULL)) {
+                              (const unsigned char *)aes_256_key.data(),
+                              NULL)) {
     EVP_CIPHER_CTX_free(ctx);
     throw EncryptionError("decryption initialization failed");
   }
@@ -126,8 +128,8 @@ void aes_decryption(std::istream& src, std::ostream& dst,
     if (read_size == 0)
       break;
 
-    if (1 != EVP_DecryptUpdate(ctx, (unsigned char*)buffer_out, &len,
-                               (const unsigned char*)buffer_in.data(),
+    if (1 != EVP_DecryptUpdate(ctx, (unsigned char *)buffer_out, &len,
+                               (const unsigned char *)buffer_in.data(),
                                (int)read_size)) {
       EVP_CIPHER_CTX_free(ctx);
       throw EncryptionError("decryption update failed");
@@ -140,7 +142,7 @@ void aes_decryption(std::istream& src, std::ostream& dst,
   }
 
   char evp_cipher_block[AES_BLOCK_SIZE];
-  if (1 != EVP_DecryptFinal_ex(ctx, (unsigned char*)evp_cipher_block, &len)) {
+  if (1 != EVP_DecryptFinal_ex(ctx, (unsigned char *)evp_cipher_block, &len)) {
     EVP_CIPHER_CTX_free(ctx);
     throw EncryptionError("decryption finalization failed, maybe the "
                           "encryption key is incorrect.");

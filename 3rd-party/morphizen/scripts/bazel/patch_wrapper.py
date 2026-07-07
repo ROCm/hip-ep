@@ -24,19 +24,27 @@ import pathlib
 
 def main1():
     if len(sys.argv) < 2:
-        print("Usage: python patch.py <patch_file> [<source_file> <destination_directory>] ... -- <options for patch>")
+        print(
+            "Usage: python patch.py <patch_file> [<source_file> <destination_directory>] ... -- <options for patch>"
+        )
         sys.exit(1)
     patch_file = sys.argv[1]
     print(f"input argv: {sys.argv}")
     for i in range(2, len(sys.argv) - 1, 2):
         if sys.argv[i] == "--":
             break
-        print(f"Processing source file: {sys.argv[i]} and destination directory: {sys.argv[i + 1]}")
+        print(
+            f"Processing source file: {sys.argv[i]} and destination directory: {sys.argv[i + 1]}"
+        )
         source_file = pathlib.Path(sys.argv[i])
         destination_directory = pathlib.Path(sys.argv[i + 1])
         print(f"Copying {source_file} to {destination_directory}")
 
-        parent_directory = destination_directory.parent if destination_directory.is_file() else destination_directory
+        parent_directory = (
+            destination_directory.parent
+            if destination_directory.is_file()
+            else destination_directory
+        )
         # Ensure the destination directory exists
         print(f"Ensuring directory exists: {parent_directory}")
         parent_directory.mkdir(parents=True, exist_ok=True)

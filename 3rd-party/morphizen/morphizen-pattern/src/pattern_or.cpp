@@ -25,14 +25,14 @@ std::string PatternOr::debug_string() const {
   return ret;
 }
 
-BinderBuilderPtr PatternOr::match_uncached(const onnxruntime::Graph& graph,
-                                           const NodeInput& node_input,
-                                           const BinderBuilder& binder) const {
+BinderBuilderPtr PatternOr::match_uncached(const onnxruntime::Graph &graph,
+                                           const NodeInput &node_input,
+                                           const BinderBuilder &binder) const {
 
   auto ret = BinderBuilderPtr();
   auto index = 0u;
   auto size = or_patterns_.size();
-  for (auto& p : or_patterns_) {
+  for (auto &p : or_patterns_) {
     ret = p->match_cached(graph, node_input, binder);
     if (ret) {
       MY_LOG(1) << "MATCH OK. ID=" << get_id() << " " << index << "/" << size

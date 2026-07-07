@@ -14,9 +14,9 @@ namespace mlir_impl {
 // MLIR Context singleton for the implementation
 class MLIRContextManager {
 public:
-  static MLIRContextManager& getInstance();
+  static MLIRContextManager &getInstance();
 
-  mlir::MLIRContext& getContext();
+  mlir::MLIRContext &getContext();
 
 private:
   MLIRContextManager();

@@ -31,7 +31,7 @@ void LoadSchemasFromGeneratedCode() {
     LoadSchemasFromGeneratedCode();                                            \
   } while (0)
 
-const OpSchema* GetOpSchema(const std::string& key, const std::string& domain) {
+const OpSchema *GetOpSchema(const std::string &key, const std::string &domain) {
   ENSURE_INITIALIZAED;
   return OpSchemaRegistry::Schema(key, domain);
 }

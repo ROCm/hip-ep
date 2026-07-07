@@ -9,26 +9,26 @@
 namespace morphizen {
 
 struct OrtStatusException : public std::exception {
-  OrtStatusException(const OrtApi& api, OrtStatus* status);
+  OrtStatusException(const OrtApi &api, OrtStatus *status);
 
   // Move constructor
-  OrtStatusException(OrtStatusException&& other) noexcept;
+  OrtStatusException(OrtStatusException &&other) noexcept;
 
   // Move assignment operator
-  OrtStatusException& operator=(OrtStatusException&& other) noexcept;
+  OrtStatusException &operator=(OrtStatusException &&other) noexcept;
 
   ~OrtStatusException();
 
-  const char* what() const noexcept override;
+  const char *what() const noexcept override;
 
   // Prevent copying to avoid double-free of status
-  OrtStatusException(const OrtStatusException&) = delete;
-  OrtStatusException& operator=(const OrtStatusException&) = delete;
+  OrtStatusException(const OrtStatusException &) = delete;
+  OrtStatusException &operator=(const OrtStatusException &) = delete;
 
 private:
-  const OrtApi& ort_api_;
-  OrtStatus* status_;
-  const char* error_msg_ = nullptr;
+  const OrtApi &ort_api_;
+  OrtStatus *status_;
+  const char *error_msg_ = nullptr;
 };
 
 } // namespace morphizen

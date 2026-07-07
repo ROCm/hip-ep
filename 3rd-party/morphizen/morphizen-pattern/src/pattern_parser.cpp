@@ -17,11 +17,11 @@ using pos_t = std::string::size_type;
 
 template <typename T> class Parser {
 public:
-  Parser(PatternBuilder& builder, const std::string& pattern, pos_t pos,
-         T&& result)
+  Parser(PatternBuilder &builder, const std::string &pattern, pos_t pos,
+         T &&result)
       : builder_{builder}, pattern_{pattern}, pos_{pos},
         result_{std::forward<T>(result)} {}
-  Parser(PatternBuilder& builder, const std::string& pattern, pos_t pos)
+  Parser(PatternBuilder &builder, const std::string &pattern, pos_t pos)
       : builder_{builder}, pattern_{pattern}, pos_{pos}, result_{std::nullopt} {
   }
   void error(const std::string msg);
@@ -33,7 +33,7 @@ public:
   void check_eof();
 
 protected:
-  template <typename U, typename V> Parser<U> ok(V&& result, pos_t next_pos) {
+  template <typename U, typename V> Parser<U> ok(V &&result, pos_t next_pos) {
     return Parser<U>(builder_, pattern_, next_pos, std::forward<V>(result));
   }
   template <typename U> Parser<U> fail(pos_t next_pos = std::string::npos) {
@@ -41,8 +41,8 @@ protected:
   }
 
 public:
-  PatternBuilder& builder_;
-  const std::string& pattern_;
+  PatternBuilder &builder_;
+  const std::string &pattern_;
   const pos_t pos_;
   std::optional<T> result_;
 };

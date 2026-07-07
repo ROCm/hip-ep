@@ -16,8 +16,8 @@
 #include <sstream>
 #include <vector>
 #if _WIN32
-#  include <codecvt>
-#  include <locale>
+#include <codecvt>
+#include <locale>
 using convert_t = std::codecvt_utf8<wchar_t>;
 std::wstring_convert<convert_t, wchar_t> strconverter;
 #endif
@@ -67,14 +67,14 @@ const std::string kRegistrationName = "VitisAIExecutionProvider";
     CHECK(_tmp_status.IsOK()) << _tmp_status;                                  \
   } while (0)
 
-static int calculate_product(const std::vector<int64_t>& v) {
+static int calculate_product(const std::vector<int64_t> &v) {
   int total = 1;
-  for (auto& i : v)
+  for (auto &i : v)
     total *= (int)i;
   return total;
 }
 
-std::vector<std::string> split(const std::string& str, char delimiter) {
+std::vector<std::string> split(const std::string &str, char delimiter) {
   std::vector<std::string> result;
   std::string temp;
   for (char ch : str) {
@@ -93,7 +93,7 @@ std::vector<std::string> split(const std::string& str, char delimiter) {
   return result;
 }
 
-int log_level_to_int(const std::string& log_level, int default_level) {
+int log_level_to_int(const std::string &log_level, int default_level) {
   const int kVERBOSE = 0;
   const int kINFO = 1;
   const int kWARNING = 2;
@@ -138,13 +138,13 @@ size_t get_data_type_size(ONNXTensorElementDataType type) {
   }
 }
 
-std::vector<uint8_t> ReadBinaryFile(const std::string& file_path) {
+std::vector<uint8_t> ReadBinaryFile(const std::string &file_path) {
   std::ifstream file(file_path, std::ios::binary | std::ios::ate);
   std::streamsize size = file.tellg();
   file.seekg(0, std::ios::beg);
 
   std::vector<uint8_t> buffer(size);
-  if (file.read(reinterpret_cast<char*>(buffer.data()), size)) {
+  if (file.read(reinterpret_cast<char *>(buffer.data()), size)) {
     return buffer;
   } else {
     throw std::runtime_error("Failed to read model file");
@@ -152,9 +152,9 @@ std::vector<uint8_t> ReadBinaryFile(const std::string& file_path) {
 }
 
 Ort::SessionOptions
-get_session_option(std::string& external_session_configs,
-                   const std::vector<std::string>& customops,
-                   const std::filesystem::path& model_path, int ort_opt_level,
+get_session_option(std::string &external_session_configs,
+                   const std::vector<std::string> &customops,
+                   const std::filesystem::path &model_path, int ort_opt_level,
                    bool enable_profiler) {
   auto session_options = Ort::SessionOptions();
   std::string log_level = ENV_PARAM(ORT_LOG_LEVEL);
@@ -178,7 +178,7 @@ get_session_option(std::string& external_session_configs,
     session_options.SetGraphOptimizationLevel(
         static_cast<GraphOptimizationLevel>(ort_opt_level));
   }
-  for (auto& customop : customops) {
+  for (auto &customop : customops) {
 #if _WIN32
     session_options.RegisterCustomOpsLibrary(
         std::wstring(customop.begin(), customop.end()).c_str());
@@ -218,8 +218,8 @@ get_session_option(std::string& external_session_configs,
 }
 
 std::unordered_map<std::string, std::string>
-get_provider_options(const std::string& encryption_key,
-                     const std::string& external_provider_options) {
+get_provider_options(const std::string &encryption_key,
+                     const std::string &external_provider_options) {
   auto options = std::unordered_map<std::string, std::string>{};
 
   // parse external provider options
@@ -272,7 +272,7 @@ get_provider_options(const std::string& encryption_key,
   return options;
 }
 
-void del_ctx_model(const std::filesystem::path& model_path) {
+void del_ctx_model(const std::filesystem::path &model_path) {
   // delete EP cache_context onnx file when exit
   try {
     if (!ENV_PARAM(CACHE_CONTEXT_FILE_PATH).empty()) {
@@ -283,14 +283,14 @@ void del_ctx_model(const std::filesystem::path& model_path) {
       auto ctx_path = model_path.parent_path() / ctx_path_name;
       std::filesystem::remove(ctx_path);
     }
-  } catch (std::exception& e) {
+  } catch (std::exception &e) {
     std::cerr << "Exception: " << e.what() << std::endl;
   }
 }
 
 std::unique_ptr<Ort::Session>
-create_session(const std::filesystem::path& model_path, Ort::Env& env,
-               const Ort::SessionOptions& session_options) {
+create_session(const std::filesystem::path &model_path, Ort::Env &env,
+               const Ort::SessionOptions &session_options) {
   std::unique_ptr<Ort::Session> p_session;
   auto create_session_start_time = std::chrono::steady_clock::now();
   try {
@@ -307,7 +307,7 @@ create_session(const std::filesystem::path& model_path, Ort::Env& env,
           env, model_path.u8string().data(), session_options);
 #endif
     }
-  } catch (Ort::Exception& e) {
+  } catch (Ort::Exception &e) {
     std::cout << "Catched Ort Exception: " << e.what() << std::endl;
     exit(1);
   }
@@ -320,17 +320,17 @@ create_session(const std::filesystem::path& model_path, Ort::Env& env,
   return p_session;
 }
 
-void run_session(const std::filesystem::path& model_path, Ort::Env& env,
-                 const Ort::SessionOptions& session_options, int batch_number) {
+void run_session(const std::filesystem::path &model_path, Ort::Env &env,
+                 const Ort::SessionOptions &session_options, int batch_number) {
   Ort::AllocatorWithDefaultOptions allocator;
   std::unique_ptr<Ort::Session> p_session =
       create_session(model_path, env, session_options);
 
-  auto& session = *p_session;
+  auto &session = *p_session;
   auto input_count = session.GetInputCount();
   auto input_shapes = std::vector<std::vector<int64_t>>();
   auto input_names_ptr = std::vector<Ort::AllocatedStringPtr>();
-  auto input_names = std::vector<const char*>();
+  auto input_names = std::vector<const char *>();
   input_shapes.reserve(input_count);
   input_names_ptr.reserve(input_count);
   input_names.reserve(input_count);
@@ -346,7 +346,7 @@ void run_session(const std::filesystem::path& model_path, Ort::Env& env,
   auto output_count = session.GetOutputCount();
   auto output_shapes = std::vector<std::vector<int64_t>>();
   auto output_names_ptr = std::vector<Ort::AllocatedStringPtr>();
-  auto output_names = std::vector<const char*>();
+  auto output_names = std::vector<const char *>();
   output_shapes.reserve(output_count);
   output_names_ptr.reserve(output_count);
   output_names.reserve(output_count);
@@ -425,14 +425,14 @@ void run_session(const std::filesystem::path& model_path, Ort::Env& env,
       auto output_tensor_shape =
           output_tensors[i].GetTensorTypeAndShapeInfo().GetShape();
     }
-  } catch (const Ort::Exception& exception) {
+  } catch (const Ort::Exception &exception) {
     std::cout << "ERROR running model inference: " << exception.what()
               << std::endl;
     exit(-1);
   }
 }
 
-int main(int argc, char* argv[]) {
+int main(int argc, char *argv[]) {
   try {
     // Define command line options
     po::options_description desc("Allowed options");
@@ -533,7 +533,7 @@ int main(int argc, char* argv[]) {
           std::string("RegisterExecutionProviderLibrary failed: status = ") +
               Ort::GetApi().GetErrorMessage(status));
 
-    for (const auto& device : env.GetEpDevices()) {
+    for (const auto &device : env.GetEpDevices()) {
       if (device.EpName() == kRegistrationName) {
         std::cout << "Selected EP device: " << device.EpName()
                   << " from vendor: " << device.EpVendor() << std::endl;
@@ -568,7 +568,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Unregistered EP library: " << ENV_PARAM(MORPHIZEN_VITISAI_EP)
               << std::endl;
 
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     std::cerr << "Exception: " << e.what() << std::endl;
     return 1;
   }

@@ -13,14 +13,14 @@
 namespace vitis {
 namespace ai {
 template <typename T> struct env_config_helper {
-  static inline T from_string(const std::string& s);
+  static inline T from_string(const std::string &s);
 };
-std::string my_getenv_s(const char* name,
-                        const std::string& default_value = "");
+std::string my_getenv_s(const char *name,
+                        const std::string &default_value = "");
 template <typename T, typename env_name> struct env_config {
   static T init() {
-    const char* name = env_name::get_name();
-    const char* defvalue = env_name::get_default_value();
+    const char *name = env_name::get_name();
+    const char *defvalue = env_name::get_default_value();
     auto p = my_getenv_s(name, defvalue);
     const T tmp_value = env_config_helper<T>::from_string(p);
     return tmp_value;
@@ -31,7 +31,7 @@ template <typename T, typename env_name>
 T env_config<T, env_name>::value = env_config<T, env_name>::init();
 
 template <typename T>
-inline T env_config_helper<T>::from_string(const std::string& s) {
+inline T env_config_helper<T>::from_string(const std::string &s) {
   T ret = T();
   parse_value(s, ret);
   return ret;
@@ -39,17 +39,17 @@ inline T env_config_helper<T>::from_string(const std::string& s) {
 
 template <>
 inline std::string
-env_config_helper<std::string>::from_string(const std::string& s) {
+env_config_helper<std::string>::from_string(const std::string &s) {
   return s;
 }
 
 template <typename T> struct env_config_helper<std::vector<T>> {
-  static inline std::vector<T> from_string(const std::string& s);
+  static inline std::vector<T> from_string(const std::string &s);
 };
 
 template <typename T>
 inline std::vector<T>
-env_config_helper<std::vector<T>>::from_string(const std::string& s) {
+env_config_helper<std::vector<T>>::from_string(const std::string &s) {
   const char delim = ',';
   auto list = std::vector<T>();
   auto ss = std::istringstream(std::string(s));
@@ -66,8 +66,8 @@ env_config_helper<std::vector<T>>::from_string(const std::string& s) {
 #define DEF_ENV_PARAM_2(param_name, defvalue1, type)                           \
   struct ENV_PARAM_##param_name                                                \
       : public ::vitis::ai::env_config<type, ENV_PARAM_##param_name> {         \
-    static const char* get_name() { return #param_name; }                      \
-    static const char* get_default_value() { return defvalue1; }               \
+    static const char *get_name() { return #param_name; }                      \
+    static const char *get_default_value() { return defvalue1; }               \
   };
 
 #define ENV_PARAM(param_name) (ENV_PARAM_##param_name::value)

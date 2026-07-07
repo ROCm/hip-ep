@@ -5,13 +5,13 @@
 
 #pragma once
 #ifdef _WIN32
-#  pragma warning(push)
-#  pragma warning(disable : 4946) // reinterpret_cast between related classes in
-                                  // protobuf
+#pragma warning(push)
+#pragma warning(disable : 4946) // reinterpret_cast between related classes in
+                                // protobuf
 #endif
 #include "morphizen/capability.pb.h"
 #ifdef _WIN32
-#  pragma warning(pop)
+#pragma warning(pop)
 #endif
 #include "morphizen/pass_context.hpp"
 #include "morphizen/plugin.hpp"
@@ -27,14 +27,14 @@ class ExecutionProviderConcrete
     : public ExecutionProvider,
       public WithPlugin<ExecutionProviderConcrete,
                         std::shared_ptr<const PassContext>,
-                        const MetaDefProto&> {
+                        const MetaDefProto &> {
 public:
   static constexpr char entry_point[] = "create_execution_provider";
 
 public:
   MORPHIZEN_DLL_SPEC
   ExecutionProviderConcrete(std::shared_ptr<const PassContext> context,
-                            const MetaDefProto& meta_def);
+                            const MetaDefProto &meta_def);
   virtual ~ExecutionProviderConcrete();
 
   //
@@ -43,7 +43,7 @@ public:
   }
 
   // do not use this function, it is a workaround for ORT new EP ABI.
-  MetaDefProto& get_meta_def() { return *meta_def_; }
+  MetaDefProto &get_meta_def() { return *meta_def_; }
 
 protected:
   std::shared_ptr<const PassContext> context_;
@@ -53,17 +53,17 @@ protected:
 template <typename T, typename CustomOpImp, typename = void>
 struct CustomOp_compile_t {
   static std::unique_ptr<CustomOp>
-  CustomOp_compile(const T* self, std::shared_ptr<const PassContext> context,
+  CustomOp_compile(const T *self, std::shared_ptr<const PassContext> context,
                    std::shared_ptr<MetaDefProto> meta_def) {
     auto ret = std::make_unique<CustomOpImp>(context, meta_def, nullptr);
-    const_cast<PassContext*>(context.get())->on_custom_op_create_end();
+    const_cast<PassContext *>(context.get())->on_custom_op_create_end();
     return ret;
   }
 };
 
 template <typename T, typename CustomOpImp>
 struct CustomOp_compile_t<
-    T, CustomOpImp, std::void_t<decltype(std::declval<T&>().get_model())>> {
+    T, CustomOpImp, std::void_t<decltype(std::declval<T &>().get_model())>> {
   // this code is activated when MORPHIZEN_ORT_API_MAJOR >= 10 see
   // MorphiZen/morphizen#3504 for more details. T is ExecutionProviderImp
   // always. ExecutionProviderImp::get_mode() is added in
@@ -87,7 +87,7 @@ struct CustomOp_compile_t<
 */
   // clang-format on
   static std::unique_ptr<CustomOp>
-  CustomOp_compile(const T* self, std::shared_ptr<const PassContext> context,
+  CustomOp_compile(const T *self, std::shared_ptr<const PassContext> context,
                    std::shared_ptr<MetaDefProto> meta_def) {
     // transfer the model from ExecutionProviderImp to CustomOpImp, so that
     // CustomOpImp<XXX> can access the model
@@ -131,8 +131,8 @@ struct CustomOp_compile_t<
 
     auto ret =
         std::make_unique<CustomOpImp>(context, meta_def, self->get_model());
-    const_cast<T*>(self)->set_model(nullptr);
-    const_cast<PassContext*>(context.get())->on_custom_op_create_end();
+    const_cast<T *>(self)->set_model(nullptr);
+    const_cast<PassContext *>(context.get())->on_custom_op_create_end();
     return ret;
   }
 };
@@ -141,7 +141,7 @@ template <class CustomOpImp>
 class ExecutionProviderImp : public ExecutionProviderConcrete {
 public:
   ExecutionProviderImp(std::shared_ptr<const PassContext> context,
-                       const MetaDefProto& meta_def)
+                       const MetaDefProto &meta_def)
       : ExecutionProviderConcrete{context, meta_def} {}
   virtual ~ExecutionProviderImp() {}
   virtual DllSafe<std::vector<std::string>>
@@ -180,18 +180,18 @@ public:
 class CustomOpImp : public CustomOp {
 public:
   MORPHIZEN_DLL_SPEC CustomOpImp(std::shared_ptr<const PassContext> context,
-                                 const std::shared_ptr<MetaDefProto>& meta_def,
-                                 onnxruntime::Model* model);
+                                 const std::shared_ptr<MetaDefProto> &meta_def,
+                                 onnxruntime::Model *model);
   MORPHIZEN_DLL_SPEC virtual ~CustomOpImp();
 
 protected:
-  Ort::ConstValue ctxGetInput(Ort::KernelContext& ctx, int index) const;
-  Ort::UnownedValue ctxGetOutput(Ort::KernelContext& ctx, int index,
-                                 const int64_t* dim_values,
+  Ort::ConstValue ctxGetInput(Ort::KernelContext &ctx, int index) const;
+  Ort::UnownedValue ctxGetOutput(Ort::KernelContext &ctx, int index,
+                                 const int64_t *dim_values,
                                  size_t dim_count) const;
 
 public:
-  virtual void Compute(const OrtApi* api, OrtKernelContext* context) const = 0;
+  virtual void Compute(const OrtApi *api, OrtKernelContext *context) const = 0;
   /*
   How to use?
   1. After try_fuse, in meta_def, set_fallback_cpu(true)
@@ -201,8 +201,8 @@ public:
   2. In custom_op.cpp, if you need to fall back to CPU, call ComputeCpu(api,
   context);
   */
-  MORPHIZEN_DLL_SPEC void ComputeCpu(const OrtApi* api,
-                                     OrtKernelContext* context) const;
+  MORPHIZEN_DLL_SPEC void ComputeCpu(const OrtApi *api,
+                                     OrtKernelContext *context) const;
   std::shared_ptr<PassContext> get_context() const {
     return std::const_pointer_cast<PassContext>(context_);
   }

@@ -61,11 +61,11 @@ public:
   // gets
   int64_t get_int() const;
   double get_float() const;
-  const std::string& get_string() const;
+  const std::string &get_string() const;
   std::vector<int64_t> get_ints() const;
-  const std::vector<float>& get_floats() const;
+  const std::vector<float> &get_floats() const;
   std::vector<std::string> get_strings() const;
-  MLIRGraph* get_subgraph_ref() const;
+  MLIRGraph *get_subgraph_ref() const;
 
   /**
    * @brief Get the ONNX attribute type for this MLIR attribute
@@ -74,7 +74,7 @@ public:
   int get_onnx_type() const;
 
   // sets
-  void set_name(const std::string& name);
+  void set_name(const std::string &name);
 };
 
 } // namespace mlir_impl

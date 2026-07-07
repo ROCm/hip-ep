@@ -16,8 +16,8 @@ using std::cout;
 using std::endl;
 
 // Validate file path to mitigate path traversal risks
-static bool validate_path(const std::string& path,
-                          const std::string& param_name) {
+static bool validate_path(const std::string &path,
+                          const std::string &param_name) {
   if (path.empty()) {
     return false;
   }
@@ -39,12 +39,12 @@ static bool validate_path(const std::string& path,
   return true;
 }
 
-template <typename T> static std::string get_readable_path(const T& entry) {
+template <typename T> static std::string get_readable_path(const T &entry) {
   return (entry.path() + (!entry.is_symlink() ? std::string("")
                                               : std::string(" -> ") +
                                                     entry.real_path().value()));
 }
-static int list_tar(const char* file) {
+static int list_tar(const char *file) {
   auto tar_path = std::filesystem::u8path(file);
   auto tar_file_obj = morphizen::TarFile::create_from_path(tar_path);
   if (tar_file_obj == nullptr) {
@@ -63,8 +63,8 @@ static int list_tar(const char* file) {
             << std::left                        //
             << std::setw(30) << " path"         // Set width for "Path"
             << std::endl;
-  auto& entries = tar_file_obj->entries();
-  for (const auto& entry : entries) {
+  auto &entries = tar_file_obj->entries();
+  for (const auto &entry : entries) {
     auto md5 = entry->md5();
     auto name = get_readable_path(*entry);
     std::cout << std::left                         // Align fields to the left
@@ -72,11 +72,11 @@ static int list_tar(const char* file) {
               << std::right                        // Align fields to the right
               << std::setw(width) << entry->size() // File size
               << std::setw(width)
-              << entry->block_begin_pos()          // Block begin position
+              << entry->block_begin_pos() // Block begin position
               << std::setw(width)
-              << entry->block_end_pos()            // Block end position
+              << entry->block_end_pos() // Block end position
               << std::setw(width)
-              << entry->data_begin_pos()           // Data begin position
+              << entry->data_begin_pos() // Data begin position
               << std::setw(width) << entry->data_end_pos() // Data end position
               << std::left    // Align fields to the left
               << std::setw(0) // File path
@@ -85,7 +85,7 @@ static int list_tar(const char* file) {
   }
   return 0;
 }
-static int list_header_tar(const char* file) {
+static int list_header_tar(const char *file) {
   auto tar_path = std::filesystem::u8path(file);
   auto stream =
       std::make_unique<std::fstream>(tar_path, std::ios::binary | std::ios::in);
@@ -106,11 +106,11 @@ static int list_header_tar(const char* file) {
               << std::right                        // Align fields to the right
               << std::setw(width) << entry->size() // File size
               << std::setw(width)
-              << entry->block_begin_pos()          // Block begin position
+              << entry->block_begin_pos() // Block begin position
               << std::setw(width)
-              << entry->block_end_pos()            // Block end position
+              << entry->block_end_pos() // Block end position
               << std::setw(width)
-              << entry->data_begin_pos()           // Data begin position
+              << entry->data_begin_pos() // Data begin position
               << std::setw(width) << entry->data_end_pos() // Data end position
               << std::left    // Align fields to the left
               << std::setw(0) // File path
@@ -125,7 +125,7 @@ static int list_header_tar(const char* file) {
   cout << " file size: " << file_size << endl;
   return 0;
 }
-int main(int argc, char* argv[]) {
+int main(int argc, char *argv[]) {
   // Define command line options
   po::options_description desc("Allowed options");
   desc.add_options()("help", "produce help message")(

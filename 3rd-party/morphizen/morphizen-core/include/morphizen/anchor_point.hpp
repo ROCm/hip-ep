@@ -8,11 +8,11 @@
 #include <morphizen/morphizen_gsl.h>
 #include <morphizen/my_ort.h>
 #ifdef _WIN32
-#  pragma warning(push, 0)
+#pragma warning(push, 0)
 #endif
 #include "morphizen/anchor_point.pb.h"
 #ifdef _WIN32
-#  pragma warning(pop)
+#pragma warning(pop)
 #endif
 #include "morphizen/pass.hpp"
 #include <memory>
@@ -20,14 +20,14 @@ namespace morphizen {
 class AnchorPoint {
 public:
   struct Description {
-    Description(const std::string& op);
-    Description(const AnchorPointProto& anchor_point);
-    Description(const std::string& op, const AnchorPointTransposeOpAttr& order);
-    Description(const std::string& op, const AnchorPointFixAttr& attr);
-    Description(const std::string& op, const AnchorPointPadOpAttr& attr);
+    Description(const std::string &op);
+    Description(const AnchorPointProto &anchor_point);
+    Description(const std::string &op, const AnchorPointTransposeOpAttr &order);
+    Description(const std::string &op, const AnchorPointFixAttr &attr);
+    Description(const std::string &op, const AnchorPointPadOpAttr &attr);
 
   public:
-    static Description create_by_json(const std::string& anchor_point_json);
+    static Description create_by_json(const std::string &anchor_point_json);
 
   public:
     AnchorPointProto proto_;
@@ -42,28 +42,28 @@ public:
    * is idenitical to the origin node on the ogirinal graph.
    */
   MORPHIZEN_DLL_SPEC static std::unique_ptr<AnchorPoint>
-  identity(const IPass& pass, const NodeArg& node_arg);
+  identity(const IPass &pass, const NodeArg &node_arg);
   MORPHIZEN_DLL_SPEC static std::unique_ptr<AnchorPoint>
-  identity(const IPass& pass, const std::string& node_arg);
+  identity(const IPass &pass, const std::string &node_arg);
   /** @brief create an alias anchor point.
    *
    * @experimental this function is not encourage to be used, because the
    * caller must make sure the new_name is unique.
    */
   MORPHIZEN_DLL_SPEC static std::unique_ptr<AnchorPoint>
-  alias1(const IPass& pass, const Graph& graph, const std::string& origin_name,
-         const std::string& new_name);
+  alias1(const IPass &pass, const Graph &graph, const std::string &origin_name,
+         const std::string &new_name);
   /** @brief create an identity anchor point via description.
    *
    * create an anchor point from a node arg. node_arg might be on an
    * intermediate graph.
    */
   MORPHIZEN_DLL_SPEC static std::unique_ptr<AnchorPoint>
-  create(const IPass& pass, const NodeArg& node_arg,
-         const Description& desciption);
+  create(const IPass &pass, const NodeArg &node_arg,
+         const Description &desciption);
   MORPHIZEN_DLL_SPEC static std::unique_ptr<AnchorPoint>
-  create(const IPass& pass, const std::string& node_arg,
-         const Description& desciption);
+  create(const IPass &pass, const std::string &node_arg,
+         const Description &desciption);
 
   /** @brief create new anchor point on top of another.
    *
@@ -71,12 +71,12 @@ public:
    * caller must make sure the new_name is unique.
    */
   MORPHIZEN_DLL_SPEC static std::unique_ptr<AnchorPoint>
-  create(const IPass& pass, const AnchorPointProto& proto,
-         const std::string& name, const Description& desciption);
+  create(const IPass &pass, const AnchorPointProto &proto,
+         const std::string &name, const Description &desciption);
 
   /** @brief create a new anchor point from a AnchorPointProto */
   MORPHIZEN_DLL_SPEC static std::unique_ptr<AnchorPoint>
-  create(const AnchorPointProto& proto);
+  create(const AnchorPointProto &proto);
   // clang-format off
   /** @brief create a new anchor point from a SISO path
    *
@@ -99,15 +99,15 @@ public:
    * */
   // clang-format on
   MORPHIZEN_DLL_SPEC static std::unique_ptr<AnchorPoint>
-  create_from_siso_path(const IPass& pass, const Graph& graph,
-                        const std::vector<const Node*>& path);
+  create_from_siso_path(const IPass &pass, const Graph &graph,
+                        const std::vector<const Node *> &path);
   // for debugging purpose and testing.
   MORPHIZEN_DLL_SPEC static std::unique_ptr<AnchorPointProto> create_proto();
 
 private: // TODO: expose this API?
   MORPHIZEN_DLL_SPEC static std::unique_ptr<AnchorPoint>
-  append(const std::string& node_arg, const std::string& origin_node_name,
-         const Description& desciption);
+  append(const std::string &node_arg, const std::string &origin_node_name,
+         const Description &desciption);
 
 public:
   /** @brief find an anchor point in the current context.
@@ -116,7 +116,7 @@ public:
    */
 
   MORPHIZEN_DLL_SPEC static std::unique_ptr<AnchorPoint>
-  find_anchor_point(const IPass& pass, const std::string& name);
+  find_anchor_point(const IPass &pass, const std::string &name);
   /** @brief find an anchor point in the current context.
    *
    * find an anchor point in the current context, if not found, create
@@ -129,7 +129,7 @@ public:
    */
 
   MORPHIZEN_DLL_SPEC static std::unique_ptr<AnchorPoint>
-  find_anchor_point(IPass& pass, const Graph& graph, const std::string& name);
+  find_anchor_point(IPass &pass, const Graph &graph, const std::string &name);
 
 public:
   MORPHIZEN_DLL_SPEC AnchorPoint();
@@ -148,10 +148,10 @@ public:
    */
   virtual bool is_identity(bool test_all) const;
 
-  virtual const AnchorPointProto& get_proto() const = 0;
+  virtual const AnchorPointProto &get_proto() const = 0;
   // find the op in the chain;
   // to avoid DLL issue, make it virtual and final.
-  virtual const AnchorPointProto* find_op(const std::string& op) const;
+  virtual const AnchorPointProto *find_op(const std::string &op) const;
 
   /** @brief find an anchor point in the current context.
    *
@@ -159,7 +159,7 @@ public:
    * found by `::identity` or `::create`
    *
    */
-  virtual void insert_into_context(IPass& pass) const;
+  virtual void insert_into_context(IPass &pass) const;
 
   /** @brief append a new element in the anchor point list.
    *
@@ -185,21 +185,21 @@ public:
   // NOTE: We need MORPHIZEN_DLL_SPEC because there virtual functions are no
   // longer virtual functions in the DLL, due to the `final` keyword.
   MORPHIZEN_DLL_SPEC std::unique_ptr<AnchorPoint>
-  append(const IPass& pass, const std::string& origin_node_name,
-         const Description& desciption) const;
+  append(const IPass &pass, const std::string &origin_node_name,
+         const Description &desciption) const;
 
   MORPHIZEN_DLL_SPEC std::unique_ptr<AnchorPoint>
-  append(const IPass& pass, const AnchorPoint& rest) const;
+  append(const IPass &pass, const AnchorPoint &rest) const;
 
   /** @brief anchor point optimization
    */
   MORPHIZEN_DLL_SPEC std::unique_ptr<AnchorPoint>
-  optimize(const IPass& pass) const;
+  optimize(const IPass &pass) const;
 
   /** @brief iterate over anchor point
    */
   MORPHIZEN_DLL_SPEC void
-  for_each(const std::function<void(const AnchorPointProto&)>& func) const;
+  for_each(const std::function<void(const AnchorPointProto &)> &func) const;
 };
 
 } // namespace morphizen

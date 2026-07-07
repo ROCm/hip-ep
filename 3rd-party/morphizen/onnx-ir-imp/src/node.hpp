@@ -25,18 +25,18 @@ private: // Private tag to prevent direct construction
   std::vector<NodeArgIndex> outputs_;
 
 public: // Factory method to create a Node instance
-  static Node create_node(const NodeIndex& self,
-                          const std::vector<NodeArgIndex>& inputs = {},
-                          const std::vector<NodeArgIndex>& outputs = {});
+  static Node create_node(const NodeIndex &self,
+                          const std::vector<NodeArgIndex> &inputs = {},
+                          const std::vector<NodeArgIndex> &outputs = {});
   // Constructor is private to enforce use of factory methods
-  Node(PrivateTag /*tag*/, const NodeIndex& self,
-       const std::vector<NodeArgIndex>& inputs,
-       const std::vector<NodeArgIndex>& outputs);
+  Node(PrivateTag /*tag*/, const NodeIndex &self,
+       const std::vector<NodeArgIndex> &inputs,
+       const std::vector<NodeArgIndex> &outputs);
 
 public: // Node API methods
-  const NodeIndex& get_self() const;
-  const std::vector<NodeArgIndex>& get_inputs() const;
-  const std::vector<NodeArgIndex>& get_outputs() const;
+  const NodeIndex &get_self() const;
+  const std::vector<NodeArgIndex> &get_inputs() const;
+  const std::vector<NodeArgIndex> &get_outputs() const;
 
   // Empty class for now - placeholder for future node operations
 };

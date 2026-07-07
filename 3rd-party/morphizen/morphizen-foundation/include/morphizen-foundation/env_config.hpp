@@ -11,7 +11,7 @@
 #include <vector>
 
 // C function declaration
-extern "C" const char* vitis_ai_getenv_s(const char* name);
+extern "C" const char *vitis_ai_getenv_s(const char *name);
 
 namespace morphizen::foundation {
 
@@ -27,7 +27,7 @@ template <typename T> struct env_config_helper {
    * @param s String to convert
    * @return Converted value of type T
    */
-  static inline T from_string(const std::string& s);
+  static inline T from_string(const std::string &s);
 };
 
 /**
@@ -36,8 +36,8 @@ template <typename T> struct env_config_helper {
  * @param default_value Default value if environment variable is not set
  * @return Environment variable value or default
  */
-std::string get_env_string(const char* name,
-                           const std::string& default_value = "");
+std::string get_env_string(const char *name,
+                           const std::string &default_value = "");
 
 /**
  * @brief Alternative function name for compatibility
@@ -45,8 +45,8 @@ std::string get_env_string(const char* name,
  * @param default_value Default value if environment variable is not set
  * @return Environment variable value or default
  */
-std::string my_getenv_s(const char* name,
-                        const std::string& default_value = "");
+std::string my_getenv_s(const char *name,
+                        const std::string &default_value = "");
 
 /**
  * @brief Template for type-safe environment configuration
@@ -64,8 +64,8 @@ template <typename T, typename env_name> struct env_config {
    * @return Initialized value
    */
   static T init() {
-    const char* name = env_name::get_name();
-    const char* defvalue = env_name::get_default_value();
+    const char *name = env_name::get_name();
+    const char *defvalue = env_name::get_default_value();
     auto env_value = get_env_string(name, defvalue);
     return env_config_helper<T>::from_string(env_value);
   }
@@ -81,7 +81,7 @@ T env_config<T, env_name>::value = env_config<T, env_name>::init();
 // Template specializations for common types
 
 template <typename T>
-inline T env_config_helper<T>::from_string(const std::string& s) {
+inline T env_config_helper<T>::from_string(const std::string &s) {
   T ret = T();
   parse_value(s, ret); // Uses ADL to find parse_value in morphizen::utils
   return ret;
@@ -89,7 +89,7 @@ inline T env_config_helper<T>::from_string(const std::string& s) {
 
 template <>
 inline std::string
-env_config_helper<std::string>::from_string(const std::string& s) {
+env_config_helper<std::string>::from_string(const std::string &s) {
   return s;
 }
 
@@ -100,12 +100,12 @@ env_config_helper<std::string>::from_string(const std::string& s) {
  * parsed into std::vector<T>.
  */
 template <typename T> struct env_config_helper<std::vector<T>> {
-  static inline std::vector<T> from_string(const std::string& s);
+  static inline std::vector<T> from_string(const std::string &s);
 };
 
 template <typename T>
 inline std::vector<T>
-env_config_helper<std::vector<T>>::from_string(const std::string& s) {
+env_config_helper<std::vector<T>>::from_string(const std::string &s) {
   constexpr char delim = ',';
   std::vector<T> list;
   std::istringstream ss(s);
@@ -131,8 +131,8 @@ env_config_helper<std::vector<T>>::from_string(const std::string& s) {
   struct ENV_PARAM_##param_name                                                \
       : public ::morphizen::foundation::env_config<type,                       \
                                                    ENV_PARAM_##param_name> {   \
-    static const char* get_name() { return #param_name; }                      \
-    static const char* get_default_value() { return defvalue; }                \
+    static const char *get_name() { return #param_name; }                      \
+    static const char *get_default_value() { return defvalue; }                \
   };
 
 /**

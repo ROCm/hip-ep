@@ -12,9 +12,9 @@ namespace morphizen {
 struct OrtGraphWrapper;
 
 struct ApiPtrs {
-  const OrtApi& ort_api;
-  const OrtEpApi& ep_api; // Method declarations
-  void throw_if_error(OrtStatus* status) const;
-  void throw_error(const std::string& message) const;
+  const OrtApi &ort_api;
+  const OrtEpApi &ep_api; // Method declarations
+  void throw_if_error(OrtStatus *status) const;
+  void throw_error(const std::string &message) const;
 };
 } // namespace morphizen

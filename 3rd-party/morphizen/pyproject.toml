@@ -1,7 +1,0 @@
-# Minimal configuration for ruff linter (used by pre-commit hooks)
-# Project uses CMake/Bazel for builds, not Python packaging
-
-[tool.ruff]
-# Default ruff configuration
-line-length = 120
-target-version = "py38"

@@ -8,7 +8,7 @@
 namespace morphizen {
 PatternWhere::PatternWhere(
     std::unique_ptr<Pattern> pattern,
-    std::function<bool(const NodeInput&)> condition_on_node_input)
+    std::function<bool(const NodeInput &)> condition_on_node_input)
     : Pattern(pattern->get_id()), pattern_(std::move(pattern)),
       condition_on_node_input_(condition_on_node_input) {}
 
@@ -25,9 +25,9 @@ std::string PatternWhere::debug_string() const {
 }
 
 BinderBuilderPtr
-PatternWhere::match_uncached(const onnxruntime::Graph& graph,
-                             const NodeInput& node_input,
-                             const BinderBuilder& binder) const {
+PatternWhere::match_uncached(const onnxruntime::Graph &graph,
+                             const NodeInput &node_input,
+                             const BinderBuilder &binder) const {
   if (condition_on_node_input_(node_input)) {
     return pattern_->match_cached(graph, node_input, binder);
   }

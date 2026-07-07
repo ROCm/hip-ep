@@ -31,7 +31,7 @@ TEST(ConfigTest, Simple) {
   //
   auto pass_context =
       morphizen::PassContextImp::create_pass_context(config_proto);
-  auto& config_proto_in_context = pass_context->get_config_proto();
+  auto &config_proto_in_context = pass_context->get_config_proto();
   // Verify pass context created successfully
   EXPECT_TRUE(pass_context != nullptr);
   // root field enable_cache_file_io_in_mem is obsoleted.
@@ -65,14 +65,14 @@ TEST(ConfigTest, SessionConfigs) {
       {"ep.shared_context", "1"},
   };
   // dirty hack for testing
-  auto api = const_cast<morphizen::OrtApiForMorphizen*>(morphizen::api());
+  auto api = const_cast<morphizen::OrtApiForMorphizen *>(morphizen::api());
   auto old_session_option_configuration = api->session_option_configuration;
   api->session_option_configuration =
-      [](void* mmap, void* session_option,
-         void (*push)(void* mmap, const char* name, const char* value)) {
-        auto self = reinterpret_cast<std::map<std::string, std::string>*>(
+      [](void *mmap, void *session_option,
+         void (*push)(void *mmap, const char *name, const char *value)) {
+        auto self = reinterpret_cast<std::map<std::string, std::string> *>(
             session_option);
-        for (auto& [key, value] : *self) {
+        for (auto &[key, value] : *self) {
           push(mmap, key.c_str(), value.c_str());
         }
       };
@@ -81,17 +81,17 @@ TEST(ConfigTest, SessionConfigs) {
       {"log_level", "info"},
       {"dump_dir", "hello1"},
       {"session_options",
-       std::to_string((uintptr_t)(static_cast<void*>(&session_configs)))},
+       std::to_string((uintptr_t)(static_cast<void *>(&session_configs)))},
   };
   auto pass_context =
       morphizen::PassContextImp::create_pass_context(options, session_configs);
-  auto& config_proto = pass_context->get_config_proto();
+  auto &config_proto = pass_context->get_config_proto();
   // cache_dir removed - dump_dir accessed via get_dump_directory()
   auto dump_dir = pass_context->get_dump_directory();
   EXPECT_EQ("hello1", dump_dir.string());
   LOG(INFO) << "config: " << config_proto.DebugString();
   // Session configs now passed separately and accessed via get_session_config()
-  for (auto& [key, value] : session_configs) {
+  for (auto &[key, value] : session_configs) {
     LOG(INFO) << "session_configs: " << key << " = " << value;
     auto sc_value = pass_context->get_session_config(key);
     ASSERT_TRUE(sc_value.has_value());

@@ -7,16 +7,16 @@
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 #ifndef PYTHON_EXE_STR
-#  define PYTHON_EXE_STR "python"
+#define PYTHON_EXE_STR "python"
 #endif
 #ifndef TEST_CWD_STR
-#  define TEST_CWD_STR "."
+#define TEST_CWD_STR "."
 #endif
 #ifndef MORPHIZEN_TAR_EXE_STR
-#  define MORPHIZEN_TAR_EXE_STR "morphizen-tar"
+#define MORPHIZEN_TAR_EXE_STR "morphizen-tar"
 #endif
 #ifndef TEST_SRC_DIR_STR
-#  define TEST_SRC_DIR_STR "."
+#define TEST_SRC_DIR_STR "."
 #endif
 
 static const std::filesystem::path PYTHON_EXE =
@@ -32,14 +32,14 @@ static const std::filesystem::path CMAKE_CURRENT_SOURCE_PATH =
 // ── Bazel build ──────────────────────────────────────────────────────────────
 // BAZEL_CURRENT_REPOSITORY is injected only when
 // @bazel_tools//tools/cpp/runfiles is in deps, so this guard is reliable.
-#  include "tools/cpp/runfiles/runfiles.h"
+#include "tools/cpp/runfiles/runfiles.h"
 
 // TEST_CWD is the per-invocation writable scratch directory provided by the
 // Bazel test runner (TEST_TMPDIR).  All files generated during the test (ORT
 // EP context models, tar archives, …) must go here — never into the runfiles
 // tree, which is read-only on Linux sandboxed builds.
 static const std::filesystem::path TEST_CWD = []() {
-  const char* d = std::getenv("TEST_TMPDIR");
+  const char *d = std::getenv("TEST_TMPDIR");
   CHECK(d != nullptr) << "TEST_TMPDIR not set — must run under bazel test";
   return std::filesystem::u8path(d);
 }();
@@ -55,16 +55,16 @@ static const std::filesystem::path RESNET_50_PATH = []() {
   auto rf = bazel::tools::cpp::runfiles::Runfiles::CreateForTest(
       BAZEL_CURRENT_REPOSITORY, &err);
   CHECK(rf != nullptr) << "Runfiles not available: " << err;
-#  ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
   // The MLIR backend's Model::load() parses MLIR text, not binary ONNX.
   // pt_resnet50.onnx.mlir lives in ort-bridge/test/src/ and is exported
   // via exports_files for use here.
   auto p = rf->Rlocation("_main/ort-bridge/test/src/pt_resnet50.onnx.mlir");
   CHECK(!p.empty()) << "pt_resnet50.onnx.mlir not found in runfiles";
-#  else
+#else
   auto p = rf->Rlocation("_main/unit-test/data/pt_resnet50.onnx");
   CHECK(!p.empty()) << "pt_resnet50.onnx not found in runfiles";
-#  endif
+#endif
   return std::filesystem::u8path(p);
 }();
 
@@ -102,13 +102,13 @@ static const std::filesystem::path ENV_CONFIG_JSON_PATH =
 static const std::filesystem::path TEST_CWD =
     std::filesystem::u8path(TEST_CWD_STR);
 static const std::filesystem::path CMAKE_CURRENT_BINARY_PATH = TEST_CWD;
-#  ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
+#ifdef MORPHIZEN_ENABLE_MLIR_BACKEND
 static const std::filesystem::path RESNET_50_PATH =
     TEST_CWD / "pt_resnet50.onnx.mlir";
-#  else
+#else
 static const std::filesystem::path RESNET_50_PATH =
     TEST_CWD / "pt_resnet50.onnx";
-#  endif
+#endif
 static const std::filesystem::path SAMPLE_SRC_TAR_PATH =
     TEST_CWD / "sample.src.tar";
 static const std::filesystem::path ENV_CONFIG_JSON_PATH =

@@ -9,10 +9,10 @@
 #include "gtest/gtest.h"
 #include <glog/logging.h>
 
-static void del_ctx_model(const std::filesystem::path& model_path) {
+static void del_ctx_model(const std::filesystem::path &model_path) {
   try {
     std::filesystem::remove(model_path);
-  } catch (std::exception& e) {
+  } catch (std::exception &e) {
     std::cerr << "Exception: " << e.what() << std::endl;
   }
 }
@@ -55,7 +55,7 @@ TEST_F(HelloEpTest, CreateSession) {
   // Skip this test - target auto-discovery failure (see Issue #031)
   GTEST_SKIP()
       << "Test skipped: Target auto-discovery failure (see Issue #031)";
-  const OrtApi* c_api = &Ort::GetApi();
+  const OrtApi *c_api = &Ort::GetApi();
   Ort::SessionOptions session_options;
   auto ep_devices = ort_env->GetEpDevices();
   if (ep_devices.size() == 0) {
@@ -65,7 +65,7 @@ TEST_F(HelloEpTest, CreateSession) {
   }
   std::vector<Ort::ConstEpDevice> selected_devices =
       {}; // Select the first device for testing
-  for (const auto& device : ep_devices) {
+  for (const auto &device : ep_devices) {
     LOG(INFO) << "Found EP device: " << device.EpName();
     if (device.EpName() == registration_name) {
       LOG(INFO) << "Selected EP device: " << device.EpName();

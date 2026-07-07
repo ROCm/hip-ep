@@ -97,8 +97,8 @@ public:
    * @return Pointer to the MLIRGraph representing the function body, or nullptr
    * if none
    */
-  const MLIRGraph* getFunctionBody();
+  const MLIRGraph *getFunctionBody();
 };
-static_assert(sizeof(MLIRNode) == sizeof(mlir::Operation*));
+static_assert(sizeof(MLIRNode) == sizeof(mlir::Operation *));
 } // namespace mlir_impl
 } // namespace morphizen

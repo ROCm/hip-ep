@@ -11,7 +11,7 @@
 #include <fstream>
 
 std::vector<std::unique_ptr<E2ETestConfig>>
-E2ETestConfig::create(const std::filesystem::path& config_path) {
+E2ETestConfig::create(const std::filesystem::path &config_path) {
 
   // Read the JSON file into a string
   std::ifstream config_file(config_path);
@@ -57,5 +57,5 @@ E2ETestConfig::create(const std::filesystem::path& config_path) {
   return ret;
 }
 
-E2ETestConfig::E2ETestConfig(const E2ETestConfigProto& proto)
+E2ETestConfig::E2ETestConfig(const E2ETestConfigProto &proto)
     : config_proto_(std::move(proto)) {}

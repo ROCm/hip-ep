@@ -15,11 +15,11 @@ DEF_ENV_PARAM(MORPHIZEN_DEBUG_ORT_MODEL, "0")
 namespace morphizen {
 
 std::unique_ptr<Model>
-Model::create_model(morphizen_onnx::ModelProto&& model_proto) {
+Model::create_model(morphizen_onnx::ModelProto &&model_proto) {
   return std::make_unique<Model>(PrivateTag{}, std::move(model_proto));
 }
 
-std::unique_ptr<Model> Model::load(const std::string& file) {
+std::unique_ptr<Model> Model::load(const std::string &file) {
   auto model_proto = morphizen_onnx::ModelProto();
 
   // First, try to parse as binary protobuf
@@ -75,7 +75,7 @@ std::unique_ptr<Model> Model::load(const std::string& file) {
   if (!model->is_valid()) {
     LOG(ERROR) << "Invalid model loaded from file: " << file;
     auto errors = model->get_validation_errors();
-    for (const auto& error : errors) {
+    for (const auto &error : errors) {
       LOG(ERROR) << "Validation error: " << error;
     }
     return nullptr;
@@ -84,12 +84,12 @@ std::unique_ptr<Model> Model::load(const std::string& file) {
   return model;
 }
 
-Model::Model(PrivateTag /*tag*/, morphizen_onnx::ModelProto&& model_proto)
+Model::Model(PrivateTag /*tag*/, morphizen_onnx::ModelProto &&model_proto)
     : model_proto_(std::move(model_proto)) {
   initialize();
 }
 
-Model::Model(Model&& other) noexcept
+Model::Model(Model &&other) noexcept
     : model_proto_(std::move(other.model_proto_)),
       main_graph_(std::move(other.main_graph_)),
       opset_imports_(std::move(other.opset_imports_)),
@@ -97,7 +97,7 @@ Model::Model(Model&& other) noexcept
       model_path_(std::move(other.model_path_)),
       subgraphs_(std::move(other.subgraphs_)) {}
 
-Model& Model::operator=(Model&& other) noexcept {
+Model &Model::operator=(Model &&other) noexcept {
   if (this != &other) {
     model_proto_ = std::move(other.model_proto_);
     main_graph_ = std::move(other.main_graph_);
@@ -118,55 +118,55 @@ void Model::initialize() {
 
   // Build opset imports cache
   for (int i = 0; i < model_proto_.opset_import_size(); ++i) {
-    const auto& opset = model_proto_.opset_import(i);
+    const auto &opset = model_proto_.opset_import(i);
     opset_imports_[opset.domain()] = (int)opset.version();
   }
 
   // Build metadata properties cache
   for (int i = 0; i < model_proto_.metadata_props_size(); ++i) {
-    const auto& prop = model_proto_.metadata_props(i);
+    const auto &prop = model_proto_.metadata_props(i);
     metadata_props_[prop.key()] = prop.value();
   }
 }
 
-const std::unordered_map<std::string, int>& Model::get_opset_imports() const {
+const std::unordered_map<std::string, int> &Model::get_opset_imports() const {
   return opset_imports_;
 }
-std::unordered_map<std::string, int>& Model::get_opset_imports() {
+std::unordered_map<std::string, int> &Model::get_opset_imports() {
   return opset_imports_;
 }
 
-int64_t Model::get_opset_version(const std::string& domain) const {
+int64_t Model::get_opset_version(const std::string &domain) const {
   auto it = opset_imports_.find(domain);
   return (it != opset_imports_.end()) ? it->second : -1;
 }
 
-bool Model::has_opset_import(const std::string& domain) const {
+bool Model::has_opset_import(const std::string &domain) const {
   return opset_imports_.find(domain) != opset_imports_.end();
 }
 
-const std::map<std::string, std::string>& Model::get_metadata_props() const {
+const std::map<std::string, std::string> &Model::get_metadata_props() const {
   return metadata_props_;
 }
 
-std::string Model::get_metadata_prop(const std::string& key) const {
+std::string Model::get_metadata_prop(const std::string &key) const {
   auto it = metadata_props_.find(key);
   return (it != metadata_props_.end()) ? it->second : std::string();
 }
 
-bool Model::has_metadata_prop(const std::string& key) const {
+bool Model::has_metadata_prop(const std::string &key) const {
   return metadata_props_.find(key) != metadata_props_.end();
 }
 
-void Model::set_metadata_prop(const std::string& key,
-                              const std::string& value) {
+void Model::set_metadata_prop(const std::string &key,
+                              const std::string &value) {
   // Update the cache
   metadata_props_[key] = value;
 
   // Update the actual ModelProto
   // Find existing property or create new one
   for (int i = 0; i < model_proto_.metadata_props_size(); ++i) {
-    auto* prop = model_proto_.mutable_metadata_props(i);
+    auto *prop = model_proto_.mutable_metadata_props(i);
     if (prop->key() == key) {
       prop->set_value(value);
       return;
@@ -174,12 +174,12 @@ void Model::set_metadata_prop(const std::string& key,
   }
 
   // Property doesn't exist, add new one
-  auto* new_prop = model_proto_.add_metadata_props();
+  auto *new_prop = model_proto_.add_metadata_props();
   new_prop->set_key(key);
   new_prop->set_value(value);
 }
 
-bool Model::remove_metadata_prop(const std::string& key) {
+bool Model::remove_metadata_prop(const std::string &key) {
   // Remove from cache
   auto cache_it = metadata_props_.find(key);
   if (cache_it == metadata_props_.end()) {
@@ -188,7 +188,7 @@ bool Model::remove_metadata_prop(const std::string& key) {
   metadata_props_.erase(cache_it);
 
   // Remove from ModelProto
-  auto* metadata_props = model_proto_.mutable_metadata_props();
+  auto *metadata_props = model_proto_.mutable_metadata_props();
   for (int i = 0; i < metadata_props->size(); ++i) {
     if (metadata_props->Get(i).key() == key) {
       metadata_props->erase(metadata_props->begin() + i);
@@ -212,7 +212,7 @@ bool Model::is_valid() const {
   }
 
   // Basic graph validation - check if main graph has nodes
-  const auto& main_graph = graph();
+  const auto &main_graph = graph();
   if (main_graph.node_size() == 0) {
     return false;
   }
@@ -243,7 +243,7 @@ std::vector<std::string> Model::get_validation_errors() const {
     errors.push_back("Model has no graph");
   } else {
     // Check if graph has nodes
-    const auto& main_graph = graph();
+    const auto &main_graph = graph();
     if (main_graph.node_size() == 0) {
       errors.push_back("Graph has no nodes");
     }
@@ -288,7 +288,7 @@ std::unique_ptr<Model> Model::clone(int64_t external_data_threshold) const {
   return cloned_model;
 }
 
-const morphizen::Graph& Model::main_graph() const {
+const morphizen::Graph &Model::main_graph() const {
   if (!model_proto_.has_graph()) {
     throw std::runtime_error("Model has no graph");
   }
@@ -297,23 +297,23 @@ const morphizen::Graph& Model::main_graph() const {
   if (!main_graph_) {
     // We need to cast away const to create the Graph wrapper since
     // Graph::create_main_graph expects a non-const reference
-    auto& non_const_proto =
-        const_cast<morphizen_onnx::ModelProto&>(model_proto_);
+    auto &non_const_proto =
+        const_cast<morphizen_onnx::ModelProto &>(model_proto_);
     main_graph_ = morphizen::Graph::create_main_graph(non_const_proto, this);
   }
 
   return *main_graph_;
 }
 
-const morphizen_onnx::GraphProto& Model::graph() const {
+const morphizen_onnx::GraphProto &Model::graph() const {
   if (!model_proto_.has_graph()) {
     throw std::runtime_error("Model has no graph");
   }
   return model_proto_.graph();
 }
 
-GraphId Model::create_subgraph(const Graph& parent_graph,
-                               morphizen_onnx::GraphProto& subgraph_proto) {
+GraphId Model::create_subgraph(const Graph &parent_graph,
+                               morphizen_onnx::GraphProto &subgraph_proto) {
   auto graph_index = static_cast<int>(subgraphs_.size());
   if (0)
     std::cout << "subgraph is \n" << subgraph_proto.DebugString() << std::endl;

@@ -17,15 +17,15 @@ DEF_ENV_PARAM(MORPHIZEN_DEBUG_PLUGIN, "0")
 namespace morphizen {
 
 struct Plugin_Func_Set {
-  std::pair<plugin_t, bool> (*open_plugin)(const std::string& name,
+  std::pair<plugin_t, bool> (*open_plugin)(const std::string &name,
                                            scope_t scope);
-  void* (*plugin_sym)(plugin_t plugin, const std::string& name);
+  void *(*plugin_sym)(plugin_t plugin, const std::string &name);
   void (*close_plugin)(plugin_t plugin);
 };
 
-static std::pair<plugin_t, bool> open_plugin_static(const std::string& name,
+static std::pair<plugin_t, bool> open_plugin_static(const std::string &name,
                                                     scope_t scope);
-static void* plugin_sym_static(plugin_t plugin, const std::string& symbol);
+static void *plugin_sym_static(plugin_t plugin, const std::string &symbol);
 static void close_plugin_static(plugin_t plugin);
 
 Plugin_Func_Set g_static_plugin_func_set = {
@@ -35,12 +35,12 @@ Plugin_Func_Set g_dynamic_plugin_func_set = {morphizen::open_plugin_dyn,
                                              morphizen::plugin_sym_dyn,
                                              morphizen::close_plugin_dyn};
 
-static Plugin_Func_Set* g_static_plugin_func_set_ptr =
+static Plugin_Func_Set *g_static_plugin_func_set_ptr =
     &g_static_plugin_func_set;
-static Plugin_Func_Set* g_dynamic_plugin_func_set_ptr =
+static Plugin_Func_Set *g_dynamic_plugin_func_set_ptr =
     &g_dynamic_plugin_func_set;
 
-std::string Plugin::guess_name(const char* name) {
+std::string Plugin::guess_name(const char *name) {
   std::string name_str(name);
 #ifdef _WIN32
   // Only add .dll if not already present
@@ -67,15 +67,15 @@ std::string Plugin::guess_name(const char* name) {
 }
 
 // Factory method - returns nullptr if loading fails
-std::unique_ptr<Plugin> Plugin::create(const char* name) {
+std::unique_ptr<Plugin> Plugin::create(const char *name) {
   std::string name_str(name);
   std::string so_name = guess_name(name);
 
-  void* plugin = nullptr;
+  void *plugin = nullptr;
   bool owned = false;
-  Plugin_Func_Set* func_set = nullptr;
+  Plugin_Func_Set *func_set = nullptr;
 
-  auto try_load = [&](const std::string& tag, Plugin_Func_Set* fs) -> bool {
+  auto try_load = [&](const std::string &tag, Plugin_Func_Set *fs) -> bool {
     MY_LOG(1) << "trying load from " << tag;
     std::tie(plugin, owned) = fs->open_plugin(so_name, scope_t::PUBLIC);
     if (plugin) {
@@ -102,8 +102,8 @@ std::unique_ptr<Plugin> Plugin::create(const char* name) {
 }
 
 // Constructor - only callable via factory method (requires PrivateTag)
-Plugin::Plugin(PrivateTag, const char* name, void* plugin,
-               Plugin_Func_Set* func_set, bool owned)
+Plugin::Plugin(PrivateTag, const char *name, void *plugin,
+               Plugin_Func_Set *func_set, bool owned)
     : name_{name}, so_name_{guess_name(name)}, func_set_{func_set},
       plugin_{plugin}, owned_{owned} {
   // Invariant: plugin_ is never nullptr (enforced by factory method)
@@ -112,17 +112,17 @@ Plugin::Plugin(PrivateTag, const char* name, void* plugin,
 Plugin::~Plugin() {
   if (func_set_ && owned_) {
     MY_LOG(1) << "  -- close plugin: " << name_ << " " << so_name_
-              << " this=" << (void*)this;
+              << " this=" << (void *)this;
     func_set_->close_plugin((plugin_t)plugin_);
   } else {
     MY_LOG(1) << "  -- do not close plugin because it is owned handled: "
-              << name_ << " " << so_name_ << " this=" << (void*)this;
+              << name_ << " " << so_name_ << " this=" << (void *)this;
   }
 }
 // TODO: for now all Plugin::get store loaded plugin in a global
 // store. it is not a good solution, it is possible to put all plugin
 // into pass_context?
-static std::unordered_map<std::string, std::shared_ptr<Plugin>>&
+static std::unordered_map<std::string, std::shared_ptr<Plugin>> &
 get_global_plugin_store() {
   static std::unordered_map<std::string, std::shared_ptr<Plugin>> store_;
   static bool init = false;
@@ -134,8 +134,8 @@ get_global_plugin_store() {
   return store_;
 }
 
-Plugin* Plugin::get(const std::string& plugin_name) {
-  auto& store_ = get_global_plugin_store();
+Plugin *Plugin::get(const std::string &plugin_name) {
+  auto &store_ = get_global_plugin_store();
   auto it = store_.find(plugin_name);
   if (it == store_.end()) {
     store_[plugin_name] =
@@ -151,23 +151,25 @@ Plugin* Plugin::get(const std::string& plugin_name) {
   }
   return it->second.get();
 }
-void* Plugin::my_plugin_sym(void* handle, const char* name) const {
+void *Plugin::my_plugin_sym(void *handle, const char *name) const {
   if (!func_set_)
     return nullptr;
   return func_set_->plugin_sym((plugin_t)handle, name);
 }
 
-static std::unordered_map<std::string, std::unordered_map<std::string, void*>>&
+static std::unordered_map<std::string,
+                          std::unordered_map<std::string, void *>> &
 get_store() {
-  static std::unordered_map<std::string, std::unordered_map<std::string, void*>>
+  static std::unordered_map<std::string,
+                            std::unordered_map<std::string, void *>>
       store_;
   return store_;
 }
 
-std::vector<std::pair<std::string, void*>>
-Plugin::get_all_symbols(const char* name) {
-  auto& store = get_store();
-  auto ret = std::vector<std::pair<std::string, void*>>();
+std::vector<std::pair<std::string, void *>>
+Plugin::get_all_symbols(const char *name) {
+  auto &store = get_store();
+  auto ret = std::vector<std::pair<std::string, void *>>();
   for (auto it = store.begin(); it != store.end(); ++it) {
     for (auto it_sym = it->second.begin(); it_sym != it->second.end();
          ++it_sym) {
@@ -179,14 +181,14 @@ Plugin::get_all_symbols(const char* name) {
   return ret;
 }
 
-static std::pair<plugin_t, bool> open_plugin_static(const std::string& name,
+static std::pair<plugin_t, bool> open_plugin_static(const std::string &name,
                                                     scope_t /*scope*/) {
-  auto& store = get_store();
+  auto &store = get_store();
   auto it = store.find(name);
   if (it == store.end()) {
     MY_LOG(1) << " open_plugin_static cannot find plugin: " << name;
     MY_LOG(1) << " valid plugins are: ";
-    for (auto& x : store) {
+    for (auto &x : store) {
       MY_LOG(1) << "  plugin=" << x.first << " " << x.second.size()
                 << " symbols";
     }
@@ -196,16 +198,16 @@ static std::pair<plugin_t, bool> open_plugin_static(const std::string& name,
   return {reinterpret_cast<plugin_t>(new std::string(name)), true};
 }
 
-static void* plugin_sym_static(plugin_t plugin, const std::string& symbol) {
-  auto& name = *reinterpret_cast<std::string*>(plugin);
-  auto& store = get_store();
+static void *plugin_sym_static(plugin_t plugin, const std::string &symbol) {
+  auto &name = *reinterpret_cast<std::string *>(plugin);
+  auto &store = get_store();
   auto it_lib = store.find(name);
   if (it_lib == store.end()) {
     MY_LOG(1) << "cannot find lib:" << name;
     MY_LOG(1) << "usually this should not happened, did you forget to register "
                  "the plugin?";
     MY_LOG(1) << "valid libs are: ";
-    for (auto& x : store) {
+    for (auto &x : store) {
       MY_LOG(1) << "  libs=" << x.first << "\n";
     }
     return nullptr;
@@ -214,7 +216,7 @@ static void* plugin_sym_static(plugin_t plugin, const std::string& symbol) {
   if (it_sym == it_lib->second.end()) {
     MY_LOG(1) << "cannot find symbol " << symbol << " in " << name;
     MY_LOG(1) << "valid symbols are: ";
-    for (auto& x : it_lib->second) {
+    for (auto &x : it_lib->second) {
       MY_LOG(1) << "  symbols=" << x.first << "\n";
     }
     return nullptr;
@@ -223,19 +225,19 @@ static void* plugin_sym_static(plugin_t plugin, const std::string& symbol) {
 }
 
 static void close_plugin_static(plugin_t plugin) {
-  delete reinterpret_cast<std::string*>(plugin);
+  delete reinterpret_cast<std::string *>(plugin);
 }
 
 std::string plugin_error_static(plugin_t /*plugin*/) { return "N/A"; }
 
-void register_plugin_static(const std::string& name, const std::string& symbol,
-                            void* addr) {
+void register_plugin_static(const std::string &name, const std::string &symbol,
+                            void *addr) {
   MY_LOG(1) << "register: " << name << " " << symbol << " " << addr;
   get_store()[name][symbol] = addr;
 }
 
-void unregister_plugin_static(const std::string& name,
-                              const std::string& symbol, void* addr) {
+void unregister_plugin_static(const std::string &name,
+                              const std::string &symbol, void *addr) {
   MY_LOG(1) << "unregister: " << name << " " << symbol << " " << addr;
   auto it = get_store().find(name);
   if (it == get_store().end()) {
@@ -251,8 +253,8 @@ void unregister_plugin_static(const std::string& name,
   return;
 }
 
-StaticPluginRegister::StaticPluginRegister(const char* name, const char* symbol,
-                                           void* addr)
+StaticPluginRegister::StaticPluginRegister(const char *name, const char *symbol,
+                                           void *addr)
     : name_(name), symbol_(symbol), addr_(addr) {
 #if _WIN32
   std::string lib_name = std::string(name) + ".dll";
@@ -268,25 +270,25 @@ StaticPluginRegister::StaticPluginRegister(const char* name, const char* symbol,
 }
 StaticPluginRegister::~StaticPluginRegister() {}
 
-extern "C" void morphizen_register_static_plugin(const char* name,
-                                                 const char* symbol,
-                                                 void* addr) {
+extern "C" void morphizen_register_static_plugin(const char *name,
+                                                 const char *symbol,
+                                                 void *addr) {
   register_plugin_static(name, symbol, addr);
 }
 
 void StaticPluginRegister::sync_static_plugin_into_module(
-    const char* module_name) {
+    const char *module_name) {
   // this function try to sync with onnxruntime_vitisai_ep.dll
   auto morphizen_register_static_plugin_func =
       Plugin::get(module_name)
-          ->get_method<void, const char*, const char*, void*>(
+          ->get_method<void, const char *, const char *, void *>(
               "morphizen_register_static_plugin");
   CHECK(morphizen_register_static_plugin_func)
       << "cannot find morphizen_register_static_plugin in module: "
       << module_name;
-  auto& store = get_store();
-  for (auto& x : store) {
-    for (auto& y : x.second) {
+  auto &store = get_store();
+  for (auto &x : store) {
+    for (auto &y : x.second) {
       morphizen_register_static_plugin_func(x.first.c_str(), y.first.c_str(),
                                             y.second);
     }

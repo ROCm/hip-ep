@@ -9,7 +9,9 @@ from onnx import helper, TensorProto
 
 def create_sample_onnx_model_with_multiple_outputs():
     # define the input tensors
-    input1 = helper.make_tensor_value_info("input1", TensorProto.FLOAT, [1, 224, 224, 3])
+    input1 = helper.make_tensor_value_info(
+        "input1", TensorProto.FLOAT, [1, 224, 224, 3]
+    )
     input2 = helper.make_tensor_value_info("input2", TensorProto.FLOAT, [1, 16, 3])
 
     # define the output tensors

@@ -5,11 +5,11 @@
 #include "./mmap_file_tmphandle_win.hpp"
 
 #ifdef _WIN32
-#  include <glog/logging.h>
-#  include <io.h>
-#  include <memory>
-#  include <string>
-#  include <windows.h>
+#include <glog/logging.h>
+#include <io.h>
+#include <memory>
+#include <string>
+#include <windows.h>
 
 namespace morphizen {
 
@@ -36,7 +36,7 @@ static std::string GetLastErrorAsString() {
   return message;
 }
 
-std::unique_ptr<MemFile> MemFileTmpHandle::create(FILE* file) {
+std::unique_ptr<MemFile> MemFileTmpHandle::create(FILE *file) {
   static_assert(sizeof(HANDLE) == sizeof(MemFileTmpHandle::handle_t),
                 "64-bit only");
 
@@ -90,7 +90,7 @@ std::unique_ptr<MemFile> MemFileTmpHandle::create(FILE* file) {
   }
 
   // Map view of file into memory
-  void* base = MapViewOfFile(map_handle,
+  void *base = MapViewOfFile(map_handle,
                              FILE_MAP_READ, // Read-only access
                              0, 0,          // Map from beginning
                              0);            // Map entire file
@@ -111,7 +111,7 @@ std::unique_ptr<MemFile> MemFileTmpHandle::create(FILE* file) {
 }
 
 MemFileTmpHandle::MemFileTmpHandle(handle_t file_handle, handle_t map_handle,
-                                   size_t size, void* base)
+                                   size_t size, void *base)
     : m_file_handle(file_handle), // Not owned, just for reference
       m_map_handle(map_handle),   // Owned
       m_size{size},               //
@@ -134,7 +134,7 @@ MemFileTmpHandle::~MemFileTmpHandle() {
   // The original FILE* (if not already closed) or the OS will clean it up
 }
 
-void* MemFileTmpHandle::base() { return m_base; }
+void *MemFileTmpHandle::base() { return m_base; }
 
 size_t MemFileTmpHandle::size() const { return m_size; }
 
@@ -144,20 +144,20 @@ size_t MemFileTmpHandle::size() const { return m_size; }
 
 namespace morphizen {
 
-std::unique_ptr<MemFile> MemFileTmpHandle::create(FILE* file) {
+std::unique_ptr<MemFile> MemFileTmpHandle::create(FILE *file) {
   // Not implemented on non-Windows platforms
   (void)file;
   return nullptr;
 }
 
 MemFileTmpHandle::MemFileTmpHandle(handle_t file_handle, handle_t map_handle,
-                                   size_t size, void* base)
+                                   size_t size, void *base)
     : m_file_handle(file_handle), m_map_handle(map_handle), m_size{size},
       m_base{base} {}
 
 MemFileTmpHandle::~MemFileTmpHandle() {}
 
-void* MemFileTmpHandle::base() { return nullptr; }
+void *MemFileTmpHandle::base() { return nullptr; }
 
 size_t MemFileTmpHandle::size() const { return 0; }
 

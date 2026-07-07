@@ -45,11 +45,11 @@ GraphId GraphId::from_raw(uint32_t value) { return GraphId(value); }
 
 bool GraphId::is_staging() const { return fields_.is_staging_; }
 
-Graph* GraphId::get_graph() const {
+Graph *GraphId::get_graph() const {
   return GraphStore::get_graph_by_id(get_index());
 }
 
-const morphizen_onnx::GraphProto* GraphId::get_graph_proto() const {
+const morphizen_onnx::GraphProto *GraphId::get_graph_proto() const {
   auto graph = get_graph();
   if (graph) {
     if (!is_staging()) {
@@ -68,27 +68,27 @@ uint32_t GraphId::get_index() const { return fields_.index_; }
 
 uint32_t GraphId::get_raw() const { return value_; }
 
-bool GraphId::operator==(const GraphId& other) const {
+bool GraphId::operator==(const GraphId &other) const {
   return value_ == other.value_;
 }
 
-bool GraphId::operator!=(const GraphId& other) const {
+bool GraphId::operator!=(const GraphId &other) const {
   return value_ != other.value_;
 }
 
-bool GraphId::operator<(const GraphId& other) const {
+bool GraphId::operator<(const GraphId &other) const {
   return value_ < other.value_;
 }
 
-bool GraphId::operator<=(const GraphId& other) const {
+bool GraphId::operator<=(const GraphId &other) const {
   return value_ <= other.value_;
 }
 
-bool GraphId::operator>(const GraphId& other) const {
+bool GraphId::operator>(const GraphId &other) const {
   return value_ > other.value_;
 }
 
-bool GraphId::operator>=(const GraphId& other) const {
+bool GraphId::operator>=(const GraphId &other) const {
   return value_ >= other.value_;
 }
 
@@ -97,7 +97,7 @@ bool GraphId::operator>=(const GraphId& other) const {
 // Hash specialization implementation
 namespace std {
 size_t
-hash<morphizen::GraphId>::operator()(const morphizen::GraphId& graph_id) const {
+hash<morphizen::GraphId>::operator()(const morphizen::GraphId &graph_id) const {
   return hash<uint32_t>()(graph_id.get_raw());
 }
 } // namespace std

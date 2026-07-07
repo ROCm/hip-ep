@@ -14,15 +14,15 @@ DEF_ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE, "0")
 // On Windows MSVC (LLP64), `long` is 32-bit, so std::ftell / std::fseek can
 // only handle files up to 2 GB. Use platform-specific 64-bit variants instead.
 #ifdef _WIN32
-#  define FTELL64(f) _ftelli64(f)
-#  define FSEEK64(f, o, w) _fseeki64(f, o, w)
+#define FTELL64(f) _ftelli64(f)
+#define FSEEK64(f, o, w) _fseeki64(f, o, w)
 #else
-#  define FTELL64(f) ftello(f)
-#  define FSEEK64(f, o, w) fseeko(f, o, w)
+#define FTELL64(f) ftello(f)
+#define FSEEK64(f, o, w) fseeko(f, o, w)
 #endif
 
 namespace morphizen {
-FileBuf::FileBuf(FILE* file, std::size_t buffer_size) {
+FileBuf::FileBuf(FILE *file, std::size_t buffer_size) {
   // Constructor to initialize the file stream buffer
   // and set up the read and write buffers.
   file_ = file;
@@ -31,7 +31,7 @@ FileBuf::FileBuf(FILE* file, std::size_t buffer_size) {
   }
   get_buffer_.resize(buffer_size);
   put_buffer_.resize(
-      buffer_size);         // overflow() needs one more ch to be written.
+      buffer_size); // overflow() needs one more ch to be written.
   setg(get_buffer_.data(), get_buffer_.data(),
        get_buffer_.data()); // Set read buffer
   setp(
@@ -47,7 +47,7 @@ FileBuf::FileBuf(FILE* file, std::size_t buffer_size) {
 }
 
 FileBuf::~FileBuf() {
-  sync();          // Ensure all data is flushed before destruction
+  sync(); // Ensure all data is flushed before destruction
   if (file_) {
     fclose(file_); // Close the file if it was opened
   }
@@ -61,7 +61,7 @@ std::streambuf::int_type FileBuf::underflow() {
     return traits_type::eof(); // Error in getting position
   }
   auto restore_old_pos =
-      std::shared_ptr<void>(nullptr, [old_pos, this](void* /*p*/) {
+      std::shared_ptr<void>(nullptr, [old_pos, this](void * /*p*/) {
         auto r = FSEEK64(file_, old_pos, SEEK_SET);
         CHECK(r == 0) << " conner case: fseek fail";
       });
@@ -92,7 +92,7 @@ std::streambuf::int_type FileBuf::overflow(int_type ch) {
     return traits_type::eof(); // Error in getting position
   }
   auto restore_old_pos =
-      std::shared_ptr<void>(nullptr, [old_pos, this](void* /*p*/) {
+      std::shared_ptr<void>(nullptr, [old_pos, this](void * /*p*/) {
         auto r = FSEEK64(file_, old_pos, SEEK_SET);
         CHECK(r == 0) << " conner case: fseek fail";
       });
@@ -139,7 +139,7 @@ std::streampos FileBuf::seekoff_in(std::streamoff offset,
       return -1;
     }
     auto restore_old_pos =
-        std::shared_ptr<void>(nullptr, [old_pos, this](void* /*p*/) {
+        std::shared_ptr<void>(nullptr, [old_pos, this](void * /*p*/) {
           auto r = FSEEK64(file_, old_pos, SEEK_SET);
           CHECK(r == 0) << " conner case: fseek fail";
         });
@@ -175,7 +175,7 @@ std::streampos FileBuf::seekoff_out(std::streamoff offset,
       return -1;
     }
     auto restore_old_pos =
-        std::shared_ptr<void>(nullptr, [old_pos, this](void* /*p*/) {
+        std::shared_ptr<void>(nullptr, [old_pos, this](void * /*p*/) {
           auto r = FSEEK64(file_, old_pos, SEEK_SET);
           CHECK(r == 0) << " conner case: fseek fail";
         });
@@ -209,7 +209,7 @@ bool FileBuf::flush_buffer() {
     return false;
   }
   auto restore_old_pos =
-      std::shared_ptr<void>(nullptr, [old_pos, this](void* /*p*/) {
+      std::shared_ptr<void>(nullptr, [old_pos, this](void * /*p*/) {
         auto r = FSEEK64(file_, old_pos, SEEK_SET);
         CHECK(r == 0) << " conner case: fseek fail";
       });
@@ -227,7 +227,7 @@ bool FileBuf::flush_buffer() {
   }
   return true;
 }
-FileStream::FileStream(FILE* file, size_t bufferSize)
+FileStream::FileStream(FILE *file, size_t bufferSize)
     : std::iostream(&buf_), buf_(file, bufferSize) {
   // Constructor to initialize the FileStream with a FILE*
   if (!file) {

@@ -19,8 +19,8 @@
 #include <filesystem>
 #include <fstream>
 #ifdef ENABLE_PYTHON
-#  include <pybind11/embed.h>
-#  include <pybind11/pybind11.h>
+#include <pybind11/embed.h>
+#include <pybind11/pybind11.h>
 namespace py = pybind11;
 #endif
 
@@ -28,8 +28,8 @@ DEF_ENV_PARAM(DEBUG_MORPHIZEN_UTIL, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(DEBUG_MORPHIZEN_UTIL) >= n)
 
 namespace morphizen {
-MORPHIZEN_DLL_SPEC void dump_graph(const Graph& graph,
-                                   const std::string& filename) {
+MORPHIZEN_DLL_SPEC void dump_graph(const Graph &graph,
+                                   const std::string &filename) {
   std::ofstream out(filename);
   auto text = morphizen_cxx::GraphConstRef(graph).to_string();
   out << text;
@@ -44,16 +44,16 @@ MORPHIZEN_DLL_SPEC std::unique_ptr<int> scale_to_fix_point(float scale) {
     return std::make_unique<int>();
 }
 
-static std::vector<std::string> split_path(const char* env_name) {
+static std::vector<std::string> split_path(const char *env_name) {
   std::string path;
 #ifdef _WIN32
-#  pragma warning(push)
-#  pragma warning(disable : 4996)
+#pragma warning(push)
+#pragma warning(disable : 4996)
 #endif
   auto env_value = getenv(env_name);
   path = env_value != nullptr ? env_value : "";
 #ifdef _WIN32
-#  pragma warning(pop)
+#pragma warning(pop)
 #endif
   auto ret = std::vector<std::string>();
 #ifdef _MSC_VER
@@ -74,11 +74,11 @@ static std::vector<std::string> split_path(const char* env_name) {
   return ret;
 }
 
-std::string find_file_in_path(const std::string& file, const char* env_name,
+std::string find_file_in_path(const std::string &file, const char *env_name,
                               bool required) {
   auto path = split_path(env_name);
   namespace fs = std::filesystem;
-  for (auto& p : path) {
+  for (auto &p : path) {
     auto dir_path = fs::path(p);
     auto file_path = dir_path / fs::path(file);
     MY_LOG(1) << "for vai_config.json trying " << file_path;
@@ -89,7 +89,7 @@ std::string find_file_in_path(const std::string& file, const char* env_name,
   std::ostringstream str;
   if (required) {
     str << "cannot find file " << file << " after searching following path\n";
-    for (auto& p : path) {
+    for (auto &p : path) {
       auto dir_path = fs::path(p);
       auto file_path = dir_path / fs::path(file);
       str << "\t" << file_path << "\n";
@@ -100,10 +100,10 @@ std::string find_file_in_path(const std::string& file, const char* env_name,
   return std::string();
 }
 
-std::string slurp(const char* filename) {
+std::string slurp(const char *filename) {
   return slurp(std::filesystem::u8path(std::string(filename)));
 }
-MORPHIZEN_DLL_SPEC std::string slurp(const std::filesystem::path& path) {
+MORPHIZEN_DLL_SPEC std::string slurp(const std::filesystem::path &path) {
   std::ifstream in;
   in.open(path, std::ifstream::in);
   std::stringstream sstr;
@@ -111,7 +111,7 @@ MORPHIZEN_DLL_SPEC std::string slurp(const std::filesystem::path& path) {
   in.close();
   return sstr.str();
 }
-std::string slurp_if_exists(const std::filesystem::path& path) {
+std::string slurp_if_exists(const std::filesystem::path &path) {
   if (std::filesystem::exists(path))
     return slurp(path);
   else
@@ -125,8 +125,8 @@ std::shared_ptr<void> init_interpreter() {
   std::lock_guard<std::mutex> lock(mtx);
   if (!Py_IsInitialized()) {
     static py::scoped_interpreter inter{};
-    auto p = static_cast<void*>(&inter);
-    ret = std::shared_ptr<void>(p, [](void* /*p*/) {});
+    auto p = static_cast<void *>(&inter);
+    ret = std::shared_ptr<void>(p, [](void * /*p*/) {});
     py_interpreter_holder = ret;
   }
   if (!ret) {
@@ -135,7 +135,7 @@ std::shared_ptr<void> init_interpreter() {
   return ret;
 }
 
-MORPHIZEN_DLL_SPEC void eval_python_code(const std::string& code) {
+MORPHIZEN_DLL_SPEC void eval_python_code(const std::string &code) {
   auto inter = init_interpreter();
   py::gil_scoped_acquire acquire;
   py::eval(code);
@@ -156,7 +156,7 @@ std::string dos2unix(const gsl::span<const char> input) {
 template <typename T> struct binary_io {
   using char_type = T;
   static std::vector<char_type>
-  slurp_binary(const std::filesystem::path& filename) {
+  slurp_binary(const std::filesystem::path &filename) {
     std::ifstream is(filename, std::ios::binary);
     CHECK(is.good()) << "cannot open file " << filename;
     CHECK(is.seekg(0, std::ios_base::end).good());
@@ -164,39 +164,39 @@ template <typename T> struct binary_io {
     CHECK_NE(size, -1);
     CHECK(is.seekg(0, std::ios_base::beg).good());
     auto buffer = std::vector<char_type>((size_t)size / sizeof(char_type));
-    CHECK(is.read(reinterpret_cast<char*>(buffer.data()), size).good());
+    CHECK(is.read(reinterpret_cast<char *>(buffer.data()), size).good());
     return buffer;
   }
 
-  static bool dump_binary(const std::filesystem::path& filename,
+  static bool dump_binary(const std::filesystem::path &filename,
                           gsl::span<const char_type> data) {
     std::ofstream out(filename, std::ios::binary);
-    CHECK(out.write(reinterpret_cast<const char*>(data.data()),
+    CHECK(out.write(reinterpret_cast<const char *>(data.data()),
                     data.size() * sizeof(char_type))
               .good());
     return true;
   }
 };
 
-std::vector<uint8_t> slurp_binary_u8(const std::filesystem::path& filename) {
+std::vector<uint8_t> slurp_binary_u8(const std::filesystem::path &filename) {
   return binary_io<uint8_t>::slurp_binary(filename);
 }
-std::vector<int8_t> slurp_binary_i8(const std::filesystem::path& filename) {
+std::vector<int8_t> slurp_binary_i8(const std::filesystem::path &filename) {
   return binary_io<int8_t>::slurp_binary(filename);
 }
-std::vector<char> slurp_binary_c8(const std::filesystem::path& filename) {
+std::vector<char> slurp_binary_c8(const std::filesystem::path &filename) {
   return binary_io<char>::slurp_binary(filename);
 }
 
-bool dump_binary(const std::filesystem::path& filename,
+bool dump_binary(const std::filesystem::path &filename,
                  gsl::span<const uint8_t> data) {
   return binary_io<uint8_t>::dump_binary(filename, data);
 }
-bool dump_binary(const std::filesystem::path& filename,
+bool dump_binary(const std::filesystem::path &filename,
                  gsl::span<const int8_t> data) {
   return binary_io<int8_t>::dump_binary(filename, data);
 }
-bool dump_binary(const std::filesystem::path& filename,
+bool dump_binary(const std::filesystem::path &filename,
                  gsl::span<const char> data) {
   return binary_io<char>::dump_binary(filename, data);
 }
@@ -214,8 +214,8 @@ private:
 } // namespace
 
 std::unique_ptr<std::istream>
-context_cache_files_to_tar_stream(PassContext& context) {
-  auto& ctx_imp = dynamic_cast<PassContextImp&>(context);
+context_cache_files_to_tar_stream(PassContext &context) {
+  auto &ctx_imp = dynamic_cast<PassContextImp &>(context);
   CHECK(ctx_imp.tar_file_ != nullptr) << "tar_file_ should exist";
 
   auto size = ctx_imp.tar_file_->current_size();
@@ -226,12 +226,12 @@ context_cache_files_to_tar_stream(PassContext& context) {
   return std::make_unique<std::istringstream>(*buffer, std::ios::binary);
 }
 
-std::string get_md5_of_buffer(const char* buffer, size_t size) {
+std::string get_md5_of_buffer(const char *buffer, size_t size) {
   auto MD5_computer = MD5();
   MD5_computer.add(buffer, size);
   return MD5_computer.getHash();
 }
-std::string get_md5_of_file(const std::filesystem::path& path) {
+std::string get_md5_of_file(const std::filesystem::path &path) {
   if (!std::filesystem::exists(path))
     return "";
   std::ifstream file(path, std::ios::binary);

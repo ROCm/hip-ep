@@ -14,19 +14,19 @@ namespace morphizen_e2e_test {
 
 class E2ETestSession {
 public:
-  explicit E2ETestSession(Ort::Env& env, Ort::SessionOptions& session_options,
-                          const E2ETestSessionProto& session_proto);
+  explicit E2ETestSession(Ort::Env &env, Ort::SessionOptions &session_options,
+                          const E2ETestSessionProto &session_proto);
 
   ~E2ETestSession() = default;
-  E2ETestSession(const E2ETestSession&) = delete;
-  E2ETestSession& operator=(const E2ETestSession&) = delete;
+  E2ETestSession(const E2ETestSession &) = delete;
+  E2ETestSession &operator=(const E2ETestSession &) = delete;
 
   void run();
 
 private:
-  const E2ETestSessionProto& session_proto_;
-  Ort::Env& env_;
-  Ort::SessionOptions& session_options_;
+  const E2ETestSessionProto &session_proto_;
+  Ort::Env &env_;
+  Ort::SessionOptions &session_options_;
 
   std::vector<std::unique_ptr<Ort::Session>> ort_sessions_;
 };

@@ -93,55 +93,55 @@ public:
   using value_t = std::variant<mlir::Value, TensorDesc>;
 
   // Non-copyable but movable
-  MLIRNodeArg(const MLIRNodeArg&) = delete;
-  MLIRNodeArg& operator=(const MLIRNodeArg&) = delete;
-  MLIRNodeArg(MLIRNodeArg&&) = default;
-  MLIRNodeArg& operator=(MLIRNodeArg&&) = default;
+  MLIRNodeArg(const MLIRNodeArg &) = delete;
+  MLIRNodeArg &operator=(const MLIRNodeArg &) = delete;
+  MLIRNodeArg(MLIRNodeArg &&) = default;
+  MLIRNodeArg &operator=(MLIRNodeArg &&) = default;
 
   /// Constructor for tensor argument (no data). nullptr shape signals an
   /// unranked tensor (mapped to tensor<*xT>); non-null shape is taken as-is
   /// (empty = rank-0 scalar, non-empty = ranked).
-  MLIRNodeArg(const std::string& name, const shape_t* shape, int element_type);
+  MLIRNodeArg(const std::string &name, const shape_t *shape, int element_type);
 
   /// Constructor for tensor argument (external data)
-  MLIRNodeArg(const std::string& name, const shape_t& shape, int element_type,
-              const std::string& loc, size_t offset, size_t size);
+  MLIRNodeArg(const std::string &name, const shape_t &shape, int element_type,
+              const std::string &loc, size_t offset, size_t size);
 
   /// Constructor for concrete tensor (with data)
-  MLIRNodeArg(const std::string& name, const shape_t& shape, int element_type,
-              const void* data, size_t data_size);
+  MLIRNodeArg(const std::string &name, const shape_t &shape, int element_type,
+              const void *data, size_t data_size);
 
   /// Constructor from MLIR Value (extracts shape and type from value)
-  MLIRNodeArg(const std::string& name, mlir::Value value);
+  MLIRNodeArg(const std::string &name, mlir::Value value);
 
   /// Get the argument name
-  const std::string& getName() const;
+  const std::string &getName() const;
 
   /// Get the shape. Mirrors Ort::TensorTypeAndShapeInfo: nullopt for unranked
   /// tensors (mapped to tensor<*xT> at the ORT boundary), Some({}) for
   /// rank-0 scalars, Some({dims...}) for ranked tensors.
   std::optional<shape_t> getShape() const;
 
-  void setShape(const shape_t& shape);
+  void setShape(const shape_t &shape);
 
   /// Get the element type
   int getElementType() const;
   void setElementType(int data_type);
 
   /// Get the MLIR value (mutable)
-  const mlir::Value& getValue() const;
-  mlir::Value& getValue();
+  const mlir::Value &getValue() const;
+  mlir::Value &getValue();
 
   /// Set the MLIR value (mutable)
   void setValue(mlir::Value value) const;
 
   /// Get the MLIR type based on element type or value type
-  mlir::Type getType(mlir::OpBuilder& builder) const;
+  mlir::Type getType(mlir::OpBuilder &builder) const;
 
   // === Data access methods (for concrete tensors) ===
 
   /// Get raw data pointer (returns nullptr for tensor arguments)
-  const void* getData() const;
+  const void *getData() const;
 
   /// Get data size in bytes
   size_t getDataSize() const;
@@ -165,9 +165,9 @@ public:
   // === Template methods for typed data access ===
 
   // === Structured access ===
-  const TensorDesc& getDesc() const;
-  const TensorMeta& getMeta() const;
-  const ExternalRef* getExternalRef() const;
+  const TensorDesc &getDesc() const;
+  const TensorMeta &getMeta() const;
+  const ExternalRef *getExternalRef() const;
 
 private:
   std::string name_;

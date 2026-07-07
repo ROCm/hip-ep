@@ -30,7 +30,7 @@ namespace morphizen {
  *   // mem_file remains valid for reading via mmap
  */
 class MemFileTmpHandle : public MemFile {
-  using handle_t = void*; // Windows HANDLE
+  using handle_t = void *; // Windows HANDLE
 
 public:
   /**
@@ -43,15 +43,15 @@ public:
    * @note This is Windows-only functionality (returns nullptr on other
    * platforms)
    */
-  static std::unique_ptr<MemFile> create(FILE* file);
+  static std::unique_ptr<MemFile> create(FILE *file);
 
 public:
   MemFileTmpHandle(handle_t file_handle, handle_t map_handle, size_t size,
-                   void* base);
+                   void *base);
   virtual ~MemFileTmpHandle();
 
 private:
-  virtual void* base() override final;
+  virtual void *base() override final;
   virtual size_t size() const override final;
 
 private:
@@ -59,7 +59,7 @@ private:
       m_file_handle;     // Extracted from FILE*, NOT owned (just for debugging)
   handle_t m_map_handle; // Created by CreateFileMapping, owned
   size_t m_size;
-  void* m_base;
+  void *m_base;
 };
 
 } // namespace morphizen

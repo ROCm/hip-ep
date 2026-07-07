@@ -78,8 +78,8 @@ class MORPHIZEN_DLL_SPEC Binder {
 
 private:
   Binder() = delete;
-  Binder(const Binder&) = delete;
-  Binder(Binder&&) = delete;
+  Binder(const Binder &) = delete;
+  Binder(Binder &&) = delete;
 
 public:
   /**
@@ -113,7 +113,7 @@ public:
     if (!name_to_ids_)
       return std::nullopt; // Check if the map is valid
 
-    for (const auto& pair : *name_to_ids_) {
+    for (const auto &pair : *name_to_ids_) {
       if (pair.second == value) {
         return pair.first; // Found the corresponding string
       }
@@ -131,13 +131,13 @@ public:
    * recommended to use a unique name for each pattern. Patten with the same
    * name shaddow the previous one.
    */
-  NodeInput operator[](const std::string& pattern_name) const {
+  NodeInput operator[](const std::string &pattern_name) const {
     auto it = name_to_ids_->find(pattern_name);
     return it == name_to_ids_->end() ? NodeInput{nullptr, nullptr}
                                      : (*this)[it->second];
   }
   std::optional<morphizen_cxx::NodeInput>
-  operator()(const std::string& pattern_name) const;
+  operator()(const std::string &pattern_name) const;
   /**
    * Returns an iterator pointing to the beginning of the map.
    *
@@ -166,7 +166,7 @@ public:
 
 private:
   explicit Binder(
-      std::map<int, NodeInput>&& store,
+      std::map<int, NodeInput> &&store,
       std::shared_ptr<std::unordered_map<std::string, int>> name_to_ids,
       morphizen_cxx::GraphConstRef graph)
       : store_(store), name_to_ids_(name_to_ids), graph_{graph} {}
@@ -192,13 +192,12 @@ public:
   ~BinderBuilder();
 
 private:
-  BinderBuilder(const void* map, morphizen_cxx::GraphConstRef graph)
+  BinderBuilder(const void *map, morphizen_cxx::GraphConstRef graph)
       : map_{map}, graph_{graph} {};
   BinderBuilder() = delete;
-  binder_ptr_t build(
-      const std::shared_ptr<std::unordered_map<std::string, int>>& name_to_ids)
-      const;
-  BinderBuilderPtr add(int id, const NodeInput& node_input) const;
+  binder_ptr_t build(const std::shared_ptr<std::unordered_map<std::string, int>>
+                         &name_to_ids) const;
+  BinderBuilderPtr add(int id, const NodeInput &node_input) const;
   BinderBuilderPtr clone() const;
   NodeInput find(int id) const;
   friend class Pattern;
@@ -214,7 +213,7 @@ private:
   friend class PatternGraphOutput;
 
 private:
-  const void* map_;
+  const void *map_;
   morphizen_cxx::GraphConstRef graph_;
 };
 
@@ -274,8 +273,8 @@ public:
    * @return A `binder_ptr_t` object representing the match result. It is
    * nullptr if pattern is not matched.
    */
-  MORPHIZEN_DLL_SPEC binder_ptr_t match(const onnxruntime::Graph& graph,
-                                        const onnxruntime::Node& node) const;
+  MORPHIZEN_DLL_SPEC binder_ptr_t match(const onnxruntime::Graph &graph,
+                                        const onnxruntime::Node &node) const;
   /**
    * @brief Matches the pattern against a NodeConstRef.
    * @param node The node to match against.
@@ -352,9 +351,9 @@ protected:
    * @return A `BinderBuilderPtr` object representing the matched binder, or
    * `nullptr` if no match is found.
    */
-  BinderBuilderPtr match_cached(const onnxruntime::Graph& graph,
-                                const NodeInput& node_input,
-                                const BinderBuilder& cached_binder) const;
+  BinderBuilderPtr match_cached(const onnxruntime::Graph &graph,
+                                const NodeInput &node_input,
+                                const BinderBuilder &cached_binder) const;
 
   /**
    * @brief Generates a virtual label for the pattern.
@@ -371,17 +370,17 @@ protected:
    * @return A `binder_ptr_t` object representing the match result.
    */
   virtual BinderBuilderPtr
-  match_uncached(const onnxruntime::Graph& graph, const NodeInput& node_input,
-                 const BinderBuilder& cached_binder) const = 0;
+  match_uncached(const onnxruntime::Graph &graph, const NodeInput &node_input,
+                 const BinderBuilder &cached_binder) const = 0;
 
 private:
-  PatternProto* dump_to_proto(RootPatternProto& pattern_proto) const;
-  virtual void dump_to_proto_imp(RootPatternProto& pattern_proto,
-                                 PatternProto& this_proto) const;
-  virtual void fill_ops_name(std::vector<std::string>& list_of_ops_name) const;
+  PatternProto *dump_to_proto(RootPatternProto &pattern_proto) const;
+  virtual void dump_to_proto_imp(RootPatternProto &pattern_proto,
+                                 PatternProto &this_proto) const;
+  virtual void fill_ops_name(std::vector<std::string> &list_of_ops_name) const;
 
 private:
-  int id_;                      // The ID of the pattern.
+  int id_; // The ID of the pattern.
   std::shared_ptr<std::unordered_map<std::string, int>>
       name_to_ids_;             // A shared pointer to a map of names to IDs.
   friend struct PatternBuilder; // Friend struct for pattern building.
@@ -419,7 +418,7 @@ struct PatternBuilder {
    * @return std::shared_ptr<Pattern> The created pattern.
    */
   MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern>
-  create_by_json(const std::string& pattern);
+  create_by_json(const std::string &pattern);
 
   /**
    * @brief Creates a pattern from a Python string.
@@ -428,7 +427,7 @@ struct PatternBuilder {
    * @return std::shared_ptr<Pattern> The created pattern.
    */
   MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern>
-  create_by_py(const std::string& pattern);
+  create_by_py(const std::string &pattern);
 
   /**
    * @brief Creates a Pattern object from binary data.
@@ -441,7 +440,7 @@ struct PatternBuilder {
    * @return A shared pointer to the created Pattern object.
    */
   MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern>
-  create_from_binary(const char* data, size_t size);
+  create_from_binary(const char *data, size_t size);
 
   /**
    * @brief Creates a wildcard pattern.
@@ -459,8 +458,8 @@ struct PatternBuilder {
    * @return std::shared_ptr<Pattern> The created node pattern.
    */
   MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern>
-  node2(const std::string& op_type_and_domain,
-        const std::vector<std::shared_ptr<Pattern>>& args);
+  node2(const std::string &op_type_and_domain,
+        const std::vector<std::shared_ptr<Pattern>> &args);
 
   /**
    * @brief Creates a pattern for matching nodes with exactly 3 input arguments.
@@ -485,9 +484,9 @@ struct PatternBuilder {
    * @see Pattern class for more details on pattern matching capabilities
    */
   MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern>
-  node2_with_optional_domain(const std::string& op_type,
-                             const std::vector<std::shared_ptr<Pattern>>& args,
-                             const std::string& op_domain = "");
+  node2_with_optional_domain(const std::string &op_type,
+                             const std::vector<std::shared_ptr<Pattern>> &args,
+                             const std::string &op_domain = "");
   /**
    * @brief Creates a node pattern with three arguments.
    *
@@ -499,9 +498,9 @@ struct PatternBuilder {
    * @return std::shared_ptr<Pattern> The created node pattern.
    */
   MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern>
-  node3(const std::string& op_type_and_domain,
-        const std::vector<std::shared_ptr<Pattern>>& args,
-        const std::vector<bool>& optional_args);
+  node3(const std::string &op_type_and_domain,
+        const std::vector<std::shared_ptr<Pattern>> &args,
+        const std::vector<bool> &optional_args);
 
   /**
    * @brief Creates a pattern node with specified operation type and arguments.
@@ -516,10 +515,10 @@ struct PatternBuilder {
    * node
    */
   MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern>
-  node3_with_optional_domain(const std::string& op_type,
-                             const std::vector<std::shared_ptr<Pattern>>& args,
-                             const std::vector<bool>& optional_args,
-                             const std::string& op_domain = "");
+  node3_with_optional_domain(const std::string &op_type,
+                             const std::vector<std::shared_ptr<Pattern>> &args,
+                             const std::vector<bool> &optional_args,
+                             const std::string &op_domain = "");
 
 #if MORPHIZEN_HAS_ONNX_SCHEMA_SUPPORT
   /**
@@ -555,9 +554,9 @@ struct PatternBuilder {
    * node3) to avoid ONNX dependency.
    */
   MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern> node_with_named_args(
-      const std::string& op_type,
-      const std::map<std::string, std::shared_ptr<Pattern>>& named_args,
-      const std::string& op_domain = "");
+      const std::string &op_type,
+      const std::map<std::string, std::shared_ptr<Pattern>> &named_args,
+      const std::string &op_domain = "");
 #endif // MORPHIZEN_HAS_ONNX_SCHEMA_SUPPORT
 
   /**
@@ -621,10 +620,10 @@ struct PatternBuilder {
    * @endcode
    */
   MORPHIZEN_DLL_SPEC std::vector<std::shared_ptr<Pattern>>
-  node_with_multiple_outputs(const std::string& op_type,
-                             const std::vector<std::shared_ptr<Pattern>>& args,
-                             const std::vector<bool>& optional_args,
-                             const std::string& op_domain,
+  node_with_multiple_outputs(const std::string &op_type,
+                             const std::vector<std::shared_ptr<Pattern>> &args,
+                             const std::vector<bool> &optional_args,
+                             const std::string &op_domain,
                              const size_t num_of_outputs);
 
   /**
@@ -660,7 +659,7 @@ struct PatternBuilder {
    *
    */
   MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern>
-  commutable_node(const std::string& op_type, std::shared_ptr<Pattern> arg1,
+  commutable_node(const std::string &op_type, std::shared_ptr<Pattern> arg1,
                   std::shared_ptr<Pattern> arg2);
   /**
    * @brief Creates a pattern by combining multiple patterns with an OR
@@ -671,7 +670,7 @@ struct PatternBuilder {
    * @exprimental DO NOT USE THIS METHOD
    */
   MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern>
-  Or(const std::vector<std::shared_ptr<Pattern>>& args);
+  Or(const std::vector<std::shared_ptr<Pattern>> &args);
 
   /**
    * @brief Creates a constant pattern.
@@ -722,7 +721,7 @@ struct PatternBuilder {
    * which often have different optimization or preservation requirements.
    */
   MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern>
-  is_graph_output(const std::shared_ptr<Pattern>& arg);
+  is_graph_output(const std::shared_ptr<Pattern> &arg);
 
   /**
    * @brief Creates a pattern that matches a node at a specific graph output
@@ -764,7 +763,7 @@ struct PatternBuilder {
    * applying different quantization schemes to different outputs.
    */
   MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern>
-  is_graph_output(const std::shared_ptr<Pattern>& arg,
+  is_graph_output(const std::shared_ptr<Pattern> &arg,
                   size_t graph_output_index);
 
   /**
@@ -806,8 +805,8 @@ struct PatternBuilder {
    * well-defined output names, as it's immune to changes in output ordering.
    */
   MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern>
-  is_graph_output(const std::shared_ptr<Pattern>& arg,
-                  const std::string& graph_output_name);
+  is_graph_output(const std::shared_ptr<Pattern> &arg,
+                  const std::string &graph_output_name);
 
   /**
    * Creates a pattern that represents a sequence of other patterns.
@@ -857,8 +856,8 @@ struct PatternBuilder {
    * @param name The name to bind the pattern to.
    * @param pat The pattern to be bound.
    */
-  MORPHIZEN_DLL_SPEC void bind(const std::string& name,
-                               const std::shared_ptr<Pattern>& pat);
+  MORPHIZEN_DLL_SPEC void bind(const std::string &name,
+                               const std::shared_ptr<Pattern> &pat);
 
   /**
    * @brief Gets the ID of a pattern by its name.
@@ -866,7 +865,7 @@ struct PatternBuilder {
    * @param name The name of the pattern.
    * @return int The ID of the pattern.
    */
-  MORPHIZEN_DLL_SPEC int get_id(const std::string& name) const;
+  MORPHIZEN_DLL_SPEC int get_id(const std::string &name) const;
 
   /**
    * @brief Gets a pattern by its name.
@@ -875,7 +874,7 @@ struct PatternBuilder {
    * @return std::shared_ptr<Pattern> The pattern with the specified name.
    */
   MORPHIZEN_DLL_SPEC std::shared_ptr<Pattern>
-  get_pattern(const std::string& name) const;
+  get_pattern(const std::string &name) const;
 
   /**
    * @brief Gets a pattern by its ID.
@@ -901,7 +900,7 @@ private:
    * @return std::shared_ptr<Pattern> The created pattern.
    */
   std::shared_ptr<Pattern>
-  create_internal(const std::function<Pattern*(int id)>& f);
+  create_internal(const std::function<Pattern *(int id)> &f);
 
   /**
    * @brief Creates a pattern that matches a specific output of a multi-output
@@ -926,7 +925,7 @@ private:
    * operators to avoid ambiguity about which output is being matched.
    */
   std::shared_ptr<Pattern>
-  get_node_output_arg_by_index(const std::shared_ptr<Pattern>& arg,
+  get_node_output_arg_by_index(const std::shared_ptr<Pattern> &arg,
                                size_t output_arg_index);
 
 private:

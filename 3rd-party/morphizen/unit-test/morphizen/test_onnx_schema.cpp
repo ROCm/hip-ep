@@ -23,7 +23,7 @@ protected:
 
 TEST_F(OnnxSchemaTest, TestEPContextOpSchema) {
   // Test that EPContext is registered in com.microsoft domain
-  const auto* schema = GetOpSchema("EPContext", "com.microsoft");
+  const auto *schema = GetOpSchema("EPContext", "com.microsoft");
   ASSERT_NE(schema, nullptr)
       << "EPContext schema should be registered in com.microsoft domain";
 

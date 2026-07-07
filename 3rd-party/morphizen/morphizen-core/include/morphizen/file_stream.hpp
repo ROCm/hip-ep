@@ -12,7 +12,7 @@ namespace morphizen {
 class FileBuf : public std::streambuf {
 
 public:
-  MORPHIZEN_DLL_SPEC explicit FileBuf(FILE* file,
+  MORPHIZEN_DLL_SPEC explicit FileBuf(FILE *file,
                                       std::size_t bufferSize = 4 * 1024 * 1024);
   virtual ~FileBuf();
   // Handles reading from FILE*
@@ -33,7 +33,7 @@ public:
 private:
   bool flush_buffer();
 
-  FILE* file_;
+  FILE *file_;
   std::streambuf::off_type get_pos_ = 0;
   std::streambuf::off_type put_pos_ = 0;
   std::vector<char_type> get_buffer_;
@@ -43,7 +43,7 @@ private:
 // Utility class for stream interface
 class FileStream : public std::iostream {
 public:
-  MORPHIZEN_DLL_SPEC explicit FileStream(FILE* file,
+  MORPHIZEN_DLL_SPEC explicit FileStream(FILE *file,
                                          size_t bufferSize = 4 * 1024 * 1024);
 
 private:

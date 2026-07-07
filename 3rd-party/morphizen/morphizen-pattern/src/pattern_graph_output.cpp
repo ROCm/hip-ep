@@ -14,14 +14,14 @@
 #include "./pattern_log.hpp"
 
 #ifdef _MSC_VER
-#  pragma warning(push)
-#  pragma warning(disable : 4946)
+#pragma warning(push)
+#pragma warning(disable : 4946)
 #endif
 
 #include "morphizen/pattern.pb.h"
 
 #ifdef _MSC_VER
-#  pragma warning(pop)
+#pragma warning(pop)
 #endif
 
 namespace morphizen {
@@ -34,15 +34,15 @@ PatternGraphOutput::PatternGraphOutput(int id, std::shared_ptr<Pattern> arg,
     : Pattern(id), arg_(arg), graph_output_index_(graph_output_index) {}
 
 PatternGraphOutput::PatternGraphOutput(int id, std::shared_ptr<Pattern> arg,
-                                       const std::string& graph_output_name)
+                                       const std::string &graph_output_name)
     : Pattern(id), arg_(arg), graph_output_name_(graph_output_name) {}
 
 PatternGraphOutput::~PatternGraphOutput() {}
 
 BinderBuilderPtr
-PatternGraphOutput::match_uncached(const onnxruntime::Graph& graph,
-                                   const NodeInput& node_input,
-                                   const BinderBuilder& binder) const {
+PatternGraphOutput::match_uncached(const onnxruntime::Graph &graph,
+                                   const NodeInput &node_input,
+                                   const BinderBuilder &binder) const {
   // Get the list of graph outputs (model outputs)
   auto graph_output_args = graph_get_outputs(graph);
 
@@ -85,7 +85,7 @@ PatternGraphOutput::match_uncached(const onnxruntime::Graph& graph,
     // Search for graph output with matching name
     auto it = std::find_if(
         graph_output_args.begin(), graph_output_args.end(),
-        [&](const NodeArg* arg) -> bool {
+        [&](const NodeArg *arg) -> bool {
           return (arg && node_arg_exists(*arg) &&
                   morphizen_cxx::NodeArgConstRef::from_node_arg(graph, *arg)
                           .name() == graph_output_name);
@@ -114,7 +114,7 @@ PatternGraphOutput::match_uncached(const onnxruntime::Graph& graph,
   else {
     // Search if node_input is any of the graph outputs
     auto it = std::find_if(graph_output_args.begin(), graph_output_args.end(),
-                           [&](const NodeArg* arg) -> bool {
+                           [&](const NodeArg *arg) -> bool {
                              return (arg && node_arg_exists(*arg) &&
                                      node_input.node_arg == arg);
                            });
@@ -154,8 +154,8 @@ std::string PatternGraphOutput::debug_string() const {
   return ret;
 }
 
-void PatternGraphOutput::dump_to_proto_imp(RootPatternProto& pattern_proto,
-                                           PatternProto& this_proto) const {
+void PatternGraphOutput::dump_to_proto_imp(RootPatternProto &pattern_proto,
+                                           PatternProto &this_proto) const {
   auto proto = this_proto.mutable_graph_output();
   auto arg_proto = arg_->dump_to_proto(pattern_proto);
 

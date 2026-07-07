@@ -18,8 +18,8 @@ public:
   virtual ~TarEntryInputStreamBuffer();
 
 public:
-  MORPHIZEN_DLL_SPEC const std::string& path() const;
-  MORPHIZEN_DLL_SPEC const std::optional<std::string>& real_path() const;
+  MORPHIZEN_DLL_SPEC const std::string &path() const;
+  MORPHIZEN_DLL_SPEC const std::optional<std::string> &real_path() const;
   MORPHIZEN_DLL_SPEC std::streambuf::pos_type data_begin_pos() const;
   MORPHIZEN_DLL_SPEC std::streambuf::pos_type data_end_pos() const;
   MORPHIZEN_DLL_SPEC std::streambuf::pos_type block_begin_pos() const;
@@ -33,13 +33,13 @@ public: // make std::unique_ptr happy
   // Assuming `stream` is a valid pointer to a std::istream object,
   // and current read position is at the beginning of a tar header.
   MORPHIZEN_DLL_SPEC explicit TarEntryInputStreamBuffer(
-      const std::string& name,                     // name of the entry
-      const std::optional<std::string>& real_path, // link name of the entry
+      const std::string &name,                     // name of the entry
+      const std::optional<std::string> &real_path, // link name of the entry
       std::streambuf::pos_type data_begin_pos,     // beginning of the data.
       std::streambuf::pos_type data_end_pos,       // end of the data.
-      std::streambuf::pos_type block_begin_pos,  // beginning of the tar entry.
-      std::streambuf::pos_type block_end_pos,    // end of the tar entry.
-      std::shared_ptr<std::istream> stream,      //
+      std::streambuf::pos_type block_begin_pos, // beginning of the tar entry.
+      std::streambuf::pos_type block_end_pos,   // end of the tar entry.
+      std::shared_ptr<std::istream> stream,     //
 
       std::size_t bufferSize = 4 * 1024 * 1024); // 4 MB: small buffers cause
                                                  // excessive syscalls for
@@ -83,7 +83,7 @@ public:
   TarEntryInputStream() = delete;
   // Assuming `stream` is a valid pointer to a std::istream object,
   // and current read position is at the beginning of a tar header.
-  MORPHIZEN_DLL_SPEC const std::string& path() const;
+  MORPHIZEN_DLL_SPEC const std::string &path() const;
   /** @brief  */
   /**
    * @brief Retrieves the real path associated with the tar entry, if available.
@@ -95,7 +95,7 @@ public:
    * @return A constant reference to an `std::optional<std::string>`
    * representing the real path of the tar entry.
    */
-  MORPHIZEN_DLL_SPEC const std::optional<std::string>& real_path() const;
+  MORPHIZEN_DLL_SPEC const std::optional<std::string> &real_path() const;
   // starting point of real data
   // size of real data
   MORPHIZEN_DLL_SPEC size_t size() const;
@@ -114,43 +114,43 @@ public:
    */
   MORPHIZEN_DLL_SPEC std::string md5(); // MD5 checksum of the content
   std::string to_string() const;        // for logging
-  void* mmap();
+  void *mmap();
 
 public: // only for uniqute_ptr
   explicit TarEntryInputStream(std::unique_ptr<TarEntryInputStreamBuffer> buf,
-                               MemStream<MemFile>* mem_file);
+                               MemStream<MemFile> *mem_file);
 
 private:
   std::unique_ptr<TarEntryInputStreamBuffer> buf_;
-  MemStream<MemFile>* mem_buf_;
+  MemStream<MemFile> *mem_buf_;
   friend class TarFile;
 };
 // TarEntryOutputStream is used to write a tar entry to a tar file.
 class TarEntryOutputStream : public std::ostream {
 public:
   MORPHIZEN_DLL_SPEC static std::unique_ptr<TarEntryOutputStream>
-  create(class TarFile& tar_file, const std::string& name);
+  create(class TarFile &tar_file, const std::string &name);
 
 public:
-  TarEntryOutputStream(const std::string& name,            // name of the entry
+  TarEntryOutputStream(const std::string &name,            // name of the entry
                        std::streambuf::pos_type begin_pos, // beginning of the
-                       class TarFile& tar_file);
+                       class TarFile &tar_file);
   virtual ~TarEntryOutputStream();
 
 private:
   TarEntryOutputStream() = delete;
   static std::streampos
-  calculate_tar_append_pos(const TarEntryInputStream& last_entry);
+  calculate_tar_append_pos(const TarEntryInputStream &last_entry);
   std::optional<std::string> get_content_check_sum();
-  TarEntryInputStream* find_prev_entry_for_md5(const std::string& md5);
-  TarEntryInputStream* find_prev_entry_for_path(const std::string& name);
-  TarEntryInputStream& add_entry_for_new_data(const std::string& md5);
-  void add_symlink_for_existing_entry(const std::string& md5);
+  TarEntryInputStream *find_prev_entry_for_md5(const std::string &md5);
+  TarEntryInputStream *find_prev_entry_for_path(const std::string &name);
+  TarEntryInputStream &add_entry_for_new_data(const std::string &md5);
+  void add_symlink_for_existing_entry(const std::string &md5);
   void add_1024_padding();
-  static void maybe_add_4k_align(class TarFile& tar_file,
-                                 const std::string& name);
-  static void add_padding_block_for_4k(class TarFile& tar_file,
-                                       const std::string& name, int block_idx);
+  static void maybe_add_4k_align(class TarFile &tar_file,
+                                 const std::string &name);
+  static void add_padding_block_for_4k(class TarFile &tar_file,
+                                       const std::string &name, int block_idx);
 
 private:
   const std::string name_; // name of the entry
@@ -158,7 +158,7 @@ private:
       begin_pos_;          // beginning of the tar entry, point to the data.
   std::streampos end_pos_; // point to  end of the data.
   std::streampos size_;    // size of data
-  class TarFile&
-      tar_file_; // tar file to write to, use to reset TarFile::is_writing_
+  class TarFile
+      &tar_file_; // tar file to write to, use to reset TarFile::is_writing_
 };
 } // namespace morphizen

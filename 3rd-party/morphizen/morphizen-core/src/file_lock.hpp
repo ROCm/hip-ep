@@ -5,8 +5,8 @@
 #pragma once
 #include <filesystem>
 #ifdef ENABLE_BOOST
-#  include <boost/interprocess/sync/file_lock.hpp>
-#  include <boost/interprocess/sync/scoped_lock.hpp>
+#include <boost/interprocess/sync/file_lock.hpp>
+#include <boost/interprocess/sync/scoped_lock.hpp>
 namespace morphizen {
 class WithFileLock {
 public:
@@ -17,7 +17,7 @@ private:
   boost::interprocess::file_lock lock_;
 };
 #else
-#  include <mutex>
+#include <mutex>
 namespace morphizen {
 class WithFileLock {
 public:

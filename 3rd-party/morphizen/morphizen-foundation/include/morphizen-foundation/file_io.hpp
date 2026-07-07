@@ -64,8 +64,8 @@ namespace morphizen {
 class FileReader {
 public:
   FileReader() = default;
-  FileReader(const FileReader&) = delete;
-  FileReader& operator=(const FileReader&) = delete;
+  FileReader(const FileReader &) = delete;
+  FileReader &operator=(const FileReader &) = delete;
   virtual ~FileReader() = default;
 
   /**
@@ -106,7 +106,7 @@ public:
    * When the read position reaches the end of the file, subsequent calls
    * return 0 until rewind() is called.
    */
-  virtual std::size_t fread(void* buffer, std::size_t size) const = 0;
+  virtual std::size_t fread(void *buffer, std::size_t size) const = 0;
 
   /**
    * @brief Provides direct memory-mapped access to file contents (optional)
@@ -129,7 +129,7 @@ public:
    * Always provide a fallback to fread() when mmap() returns nullptr,
    * as not all implementations support memory mapping.
    */
-  virtual void* mmap() { return nullptr; }
+  virtual void *mmap() { return nullptr; }
 };
 
 /**
@@ -182,8 +182,8 @@ public:
 class FileWriter {
 public:
   FileWriter() = default;
-  FileWriter(const FileWriter&) = delete;
-  FileWriter& operator=(const FileWriter&) = delete;
+  FileWriter(const FileWriter &) = delete;
+  FileWriter &operator=(const FileWriter &) = delete;
   virtual ~FileWriter() = default;
 
   /**
@@ -212,7 +212,7 @@ public:
    * Implementations may buffer writes internally for performance.
    * Ensure data is flushed before the FileWriter is destroyed.
    */
-  virtual std::size_t fwrite(const void* buffer, std::size_t size) const = 0;
+  virtual std::size_t fwrite(const void *buffer, std::size_t size) const = 0;
 };
 
 /**
@@ -263,8 +263,8 @@ public:
 class FileSystem {
 public:
   FileSystem() = default;
-  FileSystem(const FileSystem&) = delete;
-  FileSystem& operator=(const FileSystem&) = delete;
+  FileSystem(const FileSystem &) = delete;
+  FileSystem &operator=(const FileSystem &) = delete;
   virtual ~FileSystem() = default;
 
   /**
@@ -275,7 +275,7 @@ public:
    *         Caller must pass the returned pointer to destroy_reader() when
    *         done.
    */
-  virtual FileReader* create_reader(const char* path) = 0;
+  virtual FileReader *create_reader(const char *path) = 0;
 
   /**
    * @brief Creates a FileWriter for the given path
@@ -285,7 +285,7 @@ public:
    *         Caller must pass the returned pointer to destroy_writer() when
    *         done.
    */
-  virtual FileWriter* create_writer(const char* path) = 0;
+  virtual FileWriter *create_writer(const char *path) = 0;
 
   /**
    * @brief Destroys a FileReader previously returned by create_reader()
@@ -295,7 +295,7 @@ public:
    *
    * @param reader Pointer to destroy (nullptr is safely ignored)
    */
-  virtual void destroy_reader(FileReader* reader) = 0;
+  virtual void destroy_reader(FileReader *reader) = 0;
 
   /**
    * @brief Destroys a FileWriter previously returned by create_writer()
@@ -305,11 +305,11 @@ public:
    *
    * @param writer Pointer to destroy (nullptr is safely ignored)
    */
-  virtual void destroy_writer(FileWriter* writer) = 0;
+  virtual void destroy_writer(FileWriter *writer) = 0;
 
   template <typename T> struct Deleter {
-    FileSystem* fs;
-    void operator()(T* ptr) const {
+    FileSystem *fs;
+    void operator()(T *ptr) const {
       if constexpr (std::is_same_v<T, FileReader>)
         fs->destroy_reader(ptr);
       else
@@ -318,12 +318,12 @@ public:
   };
 
   std::unique_ptr<FileReader, Deleter<FileReader>>
-  create_reader_template(const char* path) {
+  create_reader_template(const char *path) {
     return {create_reader(path), {this}};
   }
 
   std::unique_ptr<FileWriter, Deleter<FileWriter>>
-  create_writer_template(const char* path) {
+  create_writer_template(const char *path) {
     return {create_writer(path), {this}};
   }
 };

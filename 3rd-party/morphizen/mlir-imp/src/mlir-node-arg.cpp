@@ -103,7 +103,7 @@ int mlirElementTypeToOnnxType(mlir::Type elementType) {
   return 1; // TensorProto_DataType_FLOAT
 }
 
-MLIRNodeArg::MLIRNodeArg(const std::string& name, const shape_t* shape,
+MLIRNodeArg::MLIRNodeArg(const std::string &name, const shape_t *shape,
                          int element_type)
     : name_{name},
       value_{TensorDesc{{name,
@@ -113,16 +113,16 @@ MLIRNodeArg::MLIRNodeArg(const std::string& name, const shape_t* shape,
   validateElementType(element_type);
 }
 
-MLIRNodeArg::MLIRNodeArg(const std::string& name, const shape_t& shape,
-                         int element_type, const std::string& loc,
+MLIRNodeArg::MLIRNodeArg(const std::string &name, const shape_t &shape,
+                         int element_type, const std::string &loc,
                          size_t offset, size_t size)
     : name_{name}, value_{TensorDesc{{name, shape, element_type},
                                      data_t{ExternalRef{loc, offset, size}}}} {
   validateElementType(element_type);
 }
 
-MLIRNodeArg::MLIRNodeArg(const std::string& name, const shape_t& shape,
-                         int element_type, const void* data, size_t data_size)
+MLIRNodeArg::MLIRNodeArg(const std::string &name, const shape_t &shape,
+                         int element_type, const void *data, size_t data_size)
     : name_{name},
       value_{TensorDesc{{name, shape, element_type}, std::nullopt}} {
   CHECK(!name.empty()) << "Argument name cannot be empty";
@@ -135,22 +135,22 @@ MLIRNodeArg::MLIRNodeArg(const std::string& name, const shape_t& shape,
   }
 }
 
-MLIRNodeArg::MLIRNodeArg(const std::string& name, mlir::Value value)
+MLIRNodeArg::MLIRNodeArg(const std::string &name, mlir::Value value)
     : name_{name}, value_{value} {
   CHECK(!name.empty()) << "Argument name cannot be empty";
   validateElementType(extractElementTypeFromValue(value));
 }
 
-const std::string& MLIRNodeArg::getName() const { return name_; }
+const std::string &MLIRNodeArg::getName() const { return name_; }
 
 std::optional<MLIRNodeArg::shape_t> MLIRNodeArg::getShape() const {
-  if (auto* desc = std::get_if<TensorDesc>(&value_))
+  if (auto *desc = std::get_if<TensorDesc>(&value_))
     return desc->meta.shape;
   return extractShapeFromValue(std::get<mlir::Value>(value_));
 }
 
-void MLIRNodeArg::setShape(const MLIRNodeArg::shape_t& shape) {
-  if (auto* val = std::get_if<mlir::Value>(&value_); val && *val) {
+void MLIRNodeArg::setShape(const MLIRNodeArg::shape_t &shape) {
+  if (auto *val = std::get_if<mlir::Value>(&value_); val && *val) {
     LOG(FATAL) << "Currently , Once the Operation created , the shape can not "
                   "be changed";
   }
@@ -158,13 +158,13 @@ void MLIRNodeArg::setShape(const MLIRNodeArg::shape_t& shape) {
 }
 
 int MLIRNodeArg::getElementType() const {
-  if (auto* desc = std::get_if<TensorDesc>(&value_))
+  if (auto *desc = std::get_if<TensorDesc>(&value_))
     return desc->meta.element_type;
   return extractElementTypeFromValue(std::get<mlir::Value>(value_));
 }
 
 void MLIRNodeArg::setElementType(int data_type) {
-  if (auto* val = std::get_if<mlir::Value>(&value_); val && *val) {
+  if (auto *val = std::get_if<mlir::Value>(&value_); val && *val) {
     LOG(FATAL)
         << "Currently , Once the Operation created , the element type can not "
            "be changed";
@@ -172,15 +172,15 @@ void MLIRNodeArg::setElementType(int data_type) {
   std::get<TensorDesc>(value_).meta.element_type = data_type;
 }
 
-const mlir::Value& MLIRNodeArg::getValue() const {
-  if (auto* val = std::get_if<mlir::Value>(&value_))
+const mlir::Value &MLIRNodeArg::getValue() const {
+  if (auto *val = std::get_if<mlir::Value>(&value_))
     return *val;
   static const mlir::Value null_value{nullptr};
   return null_value;
 }
 
-mlir::Value& MLIRNodeArg::getValue() {
-  if (auto* val = std::get_if<mlir::Value>(&value_))
+mlir::Value &MLIRNodeArg::getValue() {
+  if (auto *val = std::get_if<mlir::Value>(&value_))
     return *val;
   value_ = mlir::Value(nullptr);
   return std::get<mlir::Value>(value_);
@@ -188,8 +188,8 @@ mlir::Value& MLIRNodeArg::getValue() {
 
 void MLIRNodeArg::setValue(mlir::Value value) const { value_ = value; }
 
-mlir::Type MLIRNodeArg::getType(mlir::OpBuilder& builder) const {
-  if (auto* val = std::get_if<mlir::Value>(&value_)) {
+mlir::Type MLIRNodeArg::getType(mlir::OpBuilder &builder) const {
+  if (auto *val = std::get_if<mlir::Value>(&value_)) {
     if (*val)
       return val->getType();
   }
@@ -201,19 +201,19 @@ mlir::Type MLIRNodeArg::getType(mlir::OpBuilder& builder) const {
                                    shape ? &*shape : nullptr);
 }
 
-const void* MLIRNodeArg::getData() const {
-  if (auto* desc = std::get_if<TensorDesc>(&value_)) {
+const void *MLIRNodeArg::getData() const {
+  if (auto *desc = std::get_if<TensorDesc>(&value_)) {
     if (desc->data.has_value()) {
-      auto& data_var = desc->data.value();
-      if (auto* ext = std::get_if<ExternalRef>(&data_var))
-        return reinterpret_cast<void*>(ext->offset);
-      if (auto* vec = std::get_if<std::vector<uint8_t>>(&data_var))
+      auto &data_var = desc->data.value();
+      if (auto *ext = std::get_if<ExternalRef>(&data_var))
+        return reinterpret_cast<void *>(ext->offset);
+      if (auto *vec = std::get_if<std::vector<uint8_t>>(&data_var))
         return vec->data();
     }
     return nullptr;
   }
 
-  auto& val = std::get<mlir::Value>(value_);
+  auto &val = std::get<mlir::Value>(value_);
   if (val) {
     if (auto defining_op = val.getDefiningOp()) {
       if (defining_op->getName().getStringRef() == "onnx.Constant") {
@@ -231,18 +231,18 @@ const void* MLIRNodeArg::getData() const {
 }
 
 size_t MLIRNodeArg::getDataSize() const {
-  if (auto* desc = std::get_if<TensorDesc>(&value_)) {
+  if (auto *desc = std::get_if<TensorDesc>(&value_)) {
     if (desc->data.has_value()) {
-      auto& data_var = desc->data.value();
-      if (auto* ext = std::get_if<ExternalRef>(&data_var))
+      auto &data_var = desc->data.value();
+      if (auto *ext = std::get_if<ExternalRef>(&data_var))
         return ext->size;
-      if (auto* vec = std::get_if<std::vector<uint8_t>>(&data_var))
+      if (auto *vec = std::get_if<std::vector<uint8_t>>(&data_var))
         return vec->size();
     }
     return 0;
   }
 
-  auto& val = std::get<mlir::Value>(value_);
+  auto &val = std::get<mlir::Value>(value_);
   if (val) {
     if (auto defining_op = val.getDefiningOp()) {
       if (defining_op->getName().getStringRef() == "onnx.Constant") {
@@ -260,10 +260,10 @@ size_t MLIRNodeArg::getDataSize() const {
 }
 
 bool MLIRNodeArg::hasData() const {
-  if (auto* desc = std::get_if<TensorDesc>(&value_))
+  if (auto *desc = std::get_if<TensorDesc>(&value_))
     return desc->data.has_value();
 
-  auto& val = std::get<mlir::Value>(value_);
+  auto &val = std::get<mlir::Value>(value_);
   if (val) {
     if (auto defining_op = val.getDefiningOp())
       return defining_op->getName().getStringRef() == "onnx.Constant";
@@ -272,11 +272,11 @@ bool MLIRNodeArg::hasData() const {
 }
 
 bool MLIRNodeArg::isExternalData() const {
-  if (auto* desc = std::get_if<TensorDesc>(&value_)) {
+  if (auto *desc = std::get_if<TensorDesc>(&value_)) {
     return desc->data.has_value() &&
            std::holds_alternative<ExternalRef>(desc->data.value());
   }
-  if (auto* val = std::get_if<mlir::Value>(&value_); val && *val) {
+  if (auto *val = std::get_if<mlir::Value>(&value_); val && *val) {
     if (auto defining_op = val->getDefiningOp())
       return defining_op->getName().getStringRef() == "onnx.Constant" &&
              defining_op->hasAttrOfType<mlir::StringAttr>("location");
@@ -293,7 +293,7 @@ int64_t MLIRNodeArg::getElementCount() const {
 }
 
 bool MLIRNodeArg::isConstantValue() const {
-  if (auto* val = std::get_if<mlir::Value>(&value_)) {
+  if (auto *val = std::get_if<mlir::Value>(&value_)) {
     if (!*val)
       return false;
     if (auto defining_op = val->getDefiningOp())
@@ -303,16 +303,16 @@ bool MLIRNodeArg::isConstantValue() const {
   return hasData();
 }
 
-const MLIRNodeArg::TensorDesc& MLIRNodeArg::getDesc() const {
+const MLIRNodeArg::TensorDesc &MLIRNodeArg::getDesc() const {
   return std::get<TensorDesc>(value_);
 }
 
-const MLIRNodeArg::TensorMeta& MLIRNodeArg::getMeta() const {
+const MLIRNodeArg::TensorMeta &MLIRNodeArg::getMeta() const {
   return std::get<TensorDesc>(value_).meta;
 }
 
-const MLIRNodeArg::ExternalRef* MLIRNodeArg::getExternalRef() const {
-  if (auto* desc = std::get_if<TensorDesc>(&value_)) {
+const MLIRNodeArg::ExternalRef *MLIRNodeArg::getExternalRef() const {
+  if (auto *desc = std::get_if<TensorDesc>(&value_)) {
     if (desc->data.has_value())
       return std::get_if<ExternalRef>(&desc->data.value());
   }

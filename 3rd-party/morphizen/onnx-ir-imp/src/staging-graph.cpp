@@ -16,15 +16,15 @@ DEF_ENV_PARAM(MORPHIZEN_DEBUG_GRAPH, "0");
 
 namespace morphizen {
 std::unique_ptr<StagingGraph>
-StagingGraph::create_from_graph(const Graph& main_graph) {
+StagingGraph::create_from_graph(const Graph &main_graph) {
   auto staging_graph = std::make_unique<StagingGraph>(PrivateTag{}, main_graph);
   return staging_graph;
 }
-StagingGraph::StagingGraph(PrivateTag, const Graph& main_graph)
+StagingGraph::StagingGraph(PrivateTag, const Graph &main_graph)
     : main_graph_(main_graph), producer_map_{GraphId::create_staging_graph(
                                    main_graph.get_graph_id().get_index())} {
   graph_proto_.Clear();
-  auto& proto = main_graph.get_graph_proto();
+  auto &proto = main_graph.get_graph_proto();
   *graph_proto_.mutable_input() = proto.input();
   *graph_proto_.mutable_output() = proto.output();
   node_args_map_.clear();
@@ -39,12 +39,12 @@ GraphId StagingGraph::get_graph_id() const {
   return GraphId::create_staging_graph(main_graph_.get_graph_id().get_index());
 }
 
-const Graph& StagingGraph::get_main_graph() const { return main_graph_; }
+const Graph &StagingGraph::get_main_graph() const { return main_graph_; }
 
-const morphizen_onnx::GraphProto& StagingGraph::get_graph_proto() const {
+const morphizen_onnx::GraphProto &StagingGraph::get_graph_proto() const {
   return graph_proto_;
 }
-morphizen_onnx::GraphProto& StagingGraph::get_graph_proto() {
+morphizen_onnx::GraphProto &StagingGraph::get_graph_proto() {
   return graph_proto_;
 }
 void StagingGraph::remove_node(NodeIndex node_index) {
@@ -68,8 +68,8 @@ void StagingGraph::remove_node(NodeIndex node_index) {
         << "Staging graph nodes size mismatch with graph_proto_ node size: "
         << graph_proto_.node_size();
     // find node index on the original graph.
-    auto& staging_node_proto = graph_proto_.node(node_index.get_index());
-    auto& output = staging_node_proto.output();
+    auto &staging_node_proto = graph_proto_.node(node_index.get_index());
+    auto &output = staging_node_proto.output();
     CHECK(!output.empty())
         << "Output of the node to be deleted must not be empty: "
         << node_index.to_string();
@@ -90,11 +90,11 @@ void StagingGraph::remove_node(NodeIndex node_index) {
       << "NodeIndex graph ID mismatch: "
       << node_index.get_graph_id().to_string() << " vs "
       << main_graph_.get_graph_id().to_string();
-  auto& node_proto = main_graph_.get_graph_proto().node(node_index.get_index());
+  auto &node_proto = main_graph_.get_graph_proto().node(node_index.get_index());
   // Log the deletion operation
   log_remove_node(node_index, node_proto);
   // Create a meta node in staging graph to mark deletion
-  auto* delete_node = graph_proto_.add_node();
+  auto *delete_node = graph_proto_.add_node();
 
   // Set meta node properties for deletion
   delete_node->set_name("__delete_" + node_index.to_string());
@@ -107,7 +107,7 @@ void StagingGraph::remove_node(NodeIndex node_index) {
   // Add outputs matching the deleted node's outputs
   *delete_node->mutable_output() = node_proto.output();
   // Add a special attribute to identify which node to delete
-  auto* delete_attr = delete_node->add_attribute();
+  auto *delete_attr = delete_node->add_attribute();
   delete_attr->set_name("target_node_index");
   delete_attr->set_type(morphizen_onnx::AttributeProto::INT);
   delete_attr->set_i(static_cast<int64_t>(node_index.get_index()));
@@ -118,7 +118,7 @@ void StagingGraph::remove_node(NodeIndex node_index) {
   }
 }
 void StagingGraph::add_initialized_tensor(
-    const morphizen_onnx::TensorProto& tensor) {
+    const morphizen_onnx::TensorProto &tensor) {
   // Add the tensor to the staging graph
   auto name = tensor.name();
   if (name.empty()) {
@@ -133,11 +133,11 @@ void StagingGraph::add_initialized_tensor(
     // tensor into the graph this is not a good design, but we need to do it for
     // now
     LOG(WARNING) << "Replacing existing initializer tensor: " << name;
-    const_cast<morphizen_onnx::TensorProto&>(*it->second)
-        .Swap(const_cast<morphizen_onnx::TensorProto*>(&tensor));
+    const_cast<morphizen_onnx::TensorProto &>(*it->second)
+        .Swap(const_cast<morphizen_onnx::TensorProto *>(&tensor));
   } else {
-    auto* new_tensor = graph_proto_.add_initializer();
-    new_tensor->Swap(const_cast<morphizen_onnx::TensorProto*>(&tensor));
+    auto *new_tensor = graph_proto_.add_initializer();
+    new_tensor->Swap(const_cast<morphizen_onnx::TensorProto *>(&tensor));
     // Store the tensor in the staging graph's initializers_map_ for quick
     // access
     auto index = static_cast<unsigned int>(graph_proto_.initializer_size() - 1);
@@ -150,21 +150,21 @@ void StagingGraph::add_initialized_tensor(
 }
 
 void StagingGraph::remove_initialized_tensor(unsigned int index,
-                                             const std::string& tensor_name) {
+                                             const std::string &tensor_name) {
 
   log_remove_initialized_tensor(index, tensor_name);
   // create a new meta node to mark the removal
-  auto* remove_initialized_tensor = graph_proto_.add_node();
+  auto *remove_initialized_tensor = graph_proto_.add_node();
   remove_initialized_tensor->set_name("__remove_initializer_" + tensor_name);
   remove_initialized_tensor->set_op_type("remove_initializer");
   remove_initialized_tensor->set_domain(GRAPH_META_DOMAIN);
   // add attribute["index"] = index
-  auto* attr = remove_initialized_tensor->add_attribute();
+  auto *attr = remove_initialized_tensor->add_attribute();
   attr->set_name("index");
   attr->set_type(morphizen_onnx::AttributeProto::INT);
   attr->set_i(static_cast<int64_t>(index));
   // add attribute["name"] = name
-  auto* name_attr = remove_initialized_tensor->add_attribute();
+  auto *name_attr = remove_initialized_tensor->add_attribute();
   name_attr->set_name("name");
   name_attr->set_type(morphizen_onnx::AttributeProto::STRING);
   name_attr->set_s(tensor_name);
@@ -176,8 +176,8 @@ void StagingGraph::remove_initialized_tensor(unsigned int index,
 }
 
 void StagingGraph::log_add_initialized_tensor(
-    const morphizen_onnx::TensorProto& tensor) {
-  auto& tensor_name = tensor.name();
+    const morphizen_onnx::TensorProto &tensor) {
+  auto &tensor_name = tensor.name();
   // Log the addition of an initialized tensor
   std::ostringstream log_stream;
   log_stream << "Adding initialized tensor: " << tensor_name
@@ -225,12 +225,12 @@ void StagingGraph::log_add_initialized_tensor(
 }
 
 void StagingGraph::log_remove_initialized_tensor(
-    unsigned int index, const std::string& tensor_name) {
+    unsigned int index, const std::string &tensor_name) {
   // Log the removal of an initialized tensor
   std::ostringstream log_stream;
   log_stream << "Removing initialized tensor: " << tensor_name
              << " from staging graph ID: " << get_graph_id().to_string();
-  auto& tensor = main_graph_.get_graph_proto().initializer(index);
+  auto &tensor = main_graph_.get_graph_proto().initializer(index);
   // Add element type information
   log_stream << " | element_type: " << tensor.data_type();
 
@@ -280,7 +280,7 @@ void StagingGraph::set_inputs(gsl::span<NodeArgIndex> inputs) {
   // is one of inputs.
   for (auto it = node_args_map_.begin(); it != node_args_map_.end();) {
     if (std::find_if(inputs.begin(), inputs.end(),
-                     [&it](const NodeArgIndex& input) {
+                     [&it](const NodeArgIndex &input) {
                        return it->first == *input.get_name_unsafe();
                      }) != inputs.end()) {
       // Remove the node arg index from the map
@@ -300,7 +300,7 @@ void StagingGraph::set_inputs(gsl::span<NodeArgIndex> inputs) {
                  << input.to_string();
       continue;
     }
-    auto* name = input.get_name_unsafe();
+    auto *name = input.get_name_unsafe();
     if (name == nullptr || name->empty()) {
       LOG(FATAL) << "NodeArgIndex name cannot be empty when setting inputs";
       continue;
@@ -321,7 +321,7 @@ void StagingGraph::set_outputs(gsl::span<const NodeArgIndex> outputs) {
   // is one of outputs.
   for (auto it = node_args_map_.begin(); it != node_args_map_.end();) {
     if (std::find_if(outputs.begin(), outputs.end(),
-                     [&it](const NodeArgIndex& output) {
+                     [&it](const NodeArgIndex &output) {
                        return it->first == *output.get_name_unsafe();
                      }) != outputs.end()) {
       // Remove the node arg index from the map
@@ -334,15 +334,15 @@ void StagingGraph::set_outputs(gsl::span<const NodeArgIndex> outputs) {
   }
   // Iterate through the provided outputs
   unsigned int output_index = 0;
-  for (const auto& output : outputs) {
+  for (const auto &output : outputs) {
     output_index = output_index + 1;
     CHECK(output.is_valid())
         << "Invalid NodeArgIndex provided for output: " << output.to_string();
-    const auto* name = output.get_name_unsafe();
+    const auto *name = output.get_name_unsafe();
     CHECK(name != nullptr && !name->empty())
         << "NodeArgIndex name cannot be empty when setting outputs: "
         << output.to_string();
-    auto* go = graph_proto_.add_output();
+    auto *go = graph_proto_.add_output();
     *go = output.get_value_info();
     auto graph_id = get_graph_id();
     auto new_node_arg_index =
@@ -377,7 +377,7 @@ void StagingGraph::log_set_inputs(gsl::span<const NodeArgIndex> inputs) {
     // Ensure the input is valid
     CHECK(input.is_valid())
         << "Invalid NodeArgIndex provided for input: " << input.to_string();
-    auto* name = input.get_name_unsafe();
+    auto *name = input.get_name_unsafe();
     CHECK(name != nullptr && !name->empty())
         << "NodeArgIndex name cannot be empty when setting inputs: "
         << input.to_string();
@@ -391,11 +391,11 @@ void StagingGraph::log_set_outputs(gsl::span<const NodeArgIndex> outputs) {
   std::ostringstream oss;
   oss << "Setting outputs for graph ID: " << get_graph_id().to_string()
       << " with outputs: [";
-  for (const auto& output : outputs) {
+  for (const auto &output : outputs) {
     // Ensure the output is valid
     CHECK(output.is_valid())
         << "Invalid NodeArgIndex provided for output: " << output.to_string();
-    const auto* name = output.get_name_unsafe();
+    const auto *name = output.get_name_unsafe();
     CHECK(name != nullptr && !name->empty())
         << "NodeArgIndex name cannot be empty when setting outputs: "
         << output.to_string();
@@ -405,7 +405,7 @@ void StagingGraph::log_set_outputs(gsl::span<const NodeArgIndex> outputs) {
   log_messages_.push_back(oss.str());
 }
 void StagingGraph::log_remove_node(
-    const NodeIndex& node_index, const morphizen_onnx::NodeProto& node_proto) {
+    const NodeIndex &node_index, const morphizen_onnx::NodeProto &node_proto) {
   // Log the deletion operation
   std::ostringstream log_stream;
   log_stream << "Marking node for deletion: " << node_index.to_string()
@@ -413,22 +413,22 @@ void StagingGraph::log_remove_node(
              << " op_type: " << node_proto.op_type()
              << " domain: " << node_proto.domain();
   log_stream << " inputs: [";
-  for (const auto& input : node_proto.input()) {
+  for (const auto &input : node_proto.input()) {
     log_stream << input << " ";
   }
   log_stream << "], outputs: [";
-  for (const auto& output : node_proto.output()) {
+  for (const auto &output : node_proto.output()) {
     log_stream << output << " ";
   }
   log_stream << "]";
   log_messages_.push_back(log_stream.str());
 }
-void StagingGraph::log_add_node(const std::string& name,
-                                const std::string& op_type,
-                                const std::string& description,
-                                const std::string& domain,
-                                const std::vector<NodeArgIndex>& input_args,
-                                const std::vector<NodeArgIndex>& output_args) {
+void StagingGraph::log_add_node(const std::string &name,
+                                const std::string &op_type,
+                                const std::string &description,
+                                const std::string &domain,
+                                const std::vector<NodeArgIndex> &input_args,
+                                const std::vector<NodeArgIndex> &output_args) {
   // This function generates detailed log messages for node additions.
   // Sample outputs:
   // "Adding node: conv1 (op_type: Conv) with 2 inputs and 1 outputs in
@@ -480,17 +480,17 @@ void StagingGraph::log_add_node(const std::string& name,
 }
 
 NodeIndex StagingGraph::add_node(
-    const std::string& name, const std::string& op_type,
-    const std::string& description, const std::vector<NodeArgIndex>& input_args,
-    const std::vector<NodeArgIndex>& output_args,
-    ::google::protobuf::RepeatedPtrField<morphizen_onnx::AttributeProto>*
-        attributes,
-    const std::string& domain) {
+    const std::string &name, const std::string &op_type,
+    const std::string &description, const std::vector<NodeArgIndex> &input_args,
+    const std::vector<NodeArgIndex> &output_args,
+    ::google::protobuf::RepeatedPtrField<morphizen_onnx::AttributeProto>
+        *attributes,
+    const std::string &domain) {
   // 3. Log the operation
   log_add_node(name, op_type, description, domain, input_args, output_args);
 
   // 4. Create and configure the node
-  auto* new_node = graph_proto_.add_node();
+  auto *new_node = graph_proto_.add_node();
   configure_node_proto(new_node, name, op_type, description, domain,
                        attributes);
 
@@ -521,7 +521,7 @@ void StagingGraph::update_producers_for_new_node(
   // exists on the staging graph, i.e. the consumer node is created before the
   // producer node, the the consumer map is updated by
   // update_consumers_for_new_node.
-  for (const auto& output_arg : output_node_args) {
+  for (const auto &output_arg : output_node_args) {
     NodeIndex producer = producer_map_[output_arg];
     CHECK(!producer.is_valid())
         << "Overwriting existing producer for output node arg: "
@@ -576,11 +576,11 @@ void StagingGraph::update_consumers_for_new_node(
   }*/
 }
 void StagingGraph::configure_node_proto(
-    morphizen_onnx::NodeProto* new_node, const std::string& name,
-    const std::string& op_type, const std::string& description,
-    const std::string& domain,
-    ::google::protobuf::RepeatedPtrField<morphizen_onnx::AttributeProto>*
-        attributes) const {
+    morphizen_onnx::NodeProto *new_node, const std::string &name,
+    const std::string &op_type, const std::string &description,
+    const std::string &domain,
+    ::google::protobuf::RepeatedPtrField<morphizen_onnx::AttributeProto>
+        *attributes) const {
   new_node->set_name(name);
   new_node->set_op_type(op_type);
 
@@ -596,10 +596,10 @@ void StagingGraph::configure_node_proto(
   }
 }
 void StagingGraph::process_input_arguments(
-    morphizen_onnx::NodeProto* new_node,
-    const std::vector<NodeArgIndex>& input_args) {
+    morphizen_onnx::NodeProto *new_node,
+    const std::vector<NodeArgIndex> &input_args) {
   std::vector<NodeArgIndex> input_node_arg_indices;
-  for (const auto& input_arg : input_args) {
+  for (const auto &input_arg : input_args) {
     // input_arg might be on the original graph or the staging graph,
     // or it is an optional input
     std::string input_name;
@@ -621,11 +621,11 @@ void StagingGraph::process_input_arguments(
   return;
 }
 void StagingGraph::process_output_arguments(
-    morphizen_onnx::NodeProto* new_node,
-    const std::vector<NodeArgIndex>& output_args) {
+    morphizen_onnx::NodeProto *new_node,
+    const std::vector<NodeArgIndex> &output_args) {
   std::vector<NodeArgIndex> output_node_arg_indices;
 
-  for (const auto& output_arg : output_args) {
+  for (const auto &output_arg : output_args) {
     // Resolve NodeArgIndex to actual name
     std::string output_name = "";
     // If the output_arg is valid, it must have a name
@@ -648,9 +648,9 @@ void StagingGraph::process_output_arguments(
 }
 
 NodeIndex StagingGraph::update_staging_nodes_structures(
-    const std::vector<NodeArgIndex>& input_node_arg_indices,
-    std::vector<NodeArgIndex>& output_node_arg_indices) {
-  for (auto& output_node_arg_index : output_node_arg_indices) {
+    const std::vector<NodeArgIndex> &input_node_arg_indices,
+    std::vector<NodeArgIndex> &output_node_arg_indices) {
+  for (auto &output_node_arg_index : output_node_arg_indices) {
     CHECK(output_node_arg_index.is_valid_node_output() ||
           output_node_arg_index.is_valid_graph_output() ||
           output_node_arg_index.is_initializer())
@@ -732,8 +732,8 @@ NodeIndex StagingGraph::update_staging_nodes_structures(
   return node_index;
 }
 
-NodeArgIndex StagingGraph::node_arg_new(const std::string& name,
-                                        const std::vector<int64_t>* shape,
+NodeArgIndex StagingGraph::node_arg_new(const std::string &name,
+                                        const std::vector<int64_t> *shape,
                                         int element_type) {
   // check if the name already exists in the staging graph
   auto it = node_args_map_.find(name);
@@ -767,18 +767,18 @@ NodeArgIndex StagingGraph::node_arg_new(const std::string& name,
   }
   log_node_arg_new(name, shape, element_type);
   // Create a new value_info entry in staging graph
-  auto* value_info = graph_proto_.add_value_info();
+  auto *value_info = graph_proto_.add_value_info();
   value_info->set_name(name);
 
   // Set up the type information if provided
   if (shape != nullptr) {
-    auto* type = value_info->mutable_type();
-    auto* tensor_type = type->mutable_tensor_type();
+    auto *type = value_info->mutable_type();
+    auto *tensor_type = type->mutable_tensor_type();
     tensor_type->set_elem_type(element_type);
 
-    auto* tensor_shape = tensor_type->mutable_shape();
+    auto *tensor_shape = tensor_type->mutable_shape();
     for (int64_t dim : *shape) {
-      auto* dimension = tensor_shape->add_dim();
+      auto *dimension = tensor_shape->add_dim();
       dimension->set_dim_value(dim);
     }
   }
@@ -799,8 +799,8 @@ NodeArgIndex StagingGraph::node_arg_new(const std::string& name,
   node_args_map_[name] = node_arg_index;
   return node_arg_index;
 }
-void StagingGraph::log_node_arg_new(const std::string& name,
-                                    const std::vector<int64_t>* shape,
+void StagingGraph::log_node_arg_new(const std::string &name,
+                                    const std::vector<int64_t> *shape,
                                     int element_type) {
   // Log the creation of a new NodeArg
   std::ostringstream log_stream;
@@ -822,10 +822,10 @@ void StagingGraph::log_node_arg_new(const std::string& name,
 
   log_messages_.push_back(log_stream.str());
 }
-int StagingGraph::get_graph_output_index(const std::string& name) const {
-  auto& output = graph_proto_.output();
+int StagingGraph::get_graph_output_index(const std::string &name) const {
+  auto &output = graph_proto_.output();
   auto it = std::find_if(output.begin(), output.end(),
-                         [&name](const morphizen_onnx::ValueInfoProto& output) {
+                         [&name](const morphizen_onnx::ValueInfoProto &output) {
                            return output.name() == name;
                          });
   if (it == output.end()) {

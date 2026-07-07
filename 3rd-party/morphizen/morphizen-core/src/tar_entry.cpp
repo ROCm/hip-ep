@@ -17,22 +17,22 @@ namespace morphizen {
 static constexpr auto BLOCKSIZE = 512;
 
 TarEntryInputStreamBuffer::TarEntryInputStreamBuffer(
-    const std::string& name,                     //
-    const std::optional<std::string>& real_path, //
+    const std::string &name,                     //
+    const std::optional<std::string> &real_path, //
     std::streambuf::pos_type data_begin_pos,     // beginning of the data.
     std::streambuf::pos_type data_end_pos,       // end of the data.
     std::streambuf::pos_type block_begin_pos,    // beginning of the tar entry.
     std::streambuf::pos_type block_end_pos,      // end of the tar entry.
     std::shared_ptr<std::istream> stream,        //
     std::size_t bufferSize)
-    : path_{name},                               //
-      real_path_{real_path},                     //
-      data_begin_pos_{data_begin_pos},           //
-      data_end_pos_{data_end_pos},               //
-      block_begin_pos_{block_begin_pos},         //
-      block_end_pos_{block_end_pos},             //
-      buffer_pos_{block_begin_pos},              //
-      stream_{stream},                           //
+    : path_{name},                       //
+      real_path_{real_path},             //
+      data_begin_pos_{data_begin_pos},   //
+      data_end_pos_{data_end_pos},       //
+      block_begin_pos_{block_begin_pos}, //
+      block_end_pos_{block_end_pos},     //
+      buffer_pos_{block_begin_pos},      //
+      stream_{stream},                   //
       buffer_(std::min(bufferSize, static_cast<size_t>(std::max<std::streamoff>(
                                        1, data_end_pos - data_begin_pos)))) {
   setg(buffer_.data(), buffer_.data(), buffer_.data());
@@ -44,8 +44,8 @@ TarEntryInputStreamBuffer::TarEntryInputStreamBuffer(
 
 TarEntryInputStreamBuffer::~TarEntryInputStreamBuffer() {}
 
-const std::string& TarEntryInputStreamBuffer::path() const { return path_; }
-const std::optional<std::string>& TarEntryInputStreamBuffer::real_path() const {
+const std::string &TarEntryInputStreamBuffer::path() const { return path_; }
+const std::optional<std::string> &TarEntryInputStreamBuffer::real_path() const {
   return real_path_;
 }
 std::streambuf::pos_type TarEntryInputStreamBuffer::data_begin_pos() const {
@@ -150,13 +150,13 @@ TarEntryInputStreamBuffer::seekpos(std::streampos sp,
 }
 
 TarEntryInputStream::TarEntryInputStream(
-    std::unique_ptr<TarEntryInputStreamBuffer> buf, MemStream<MemFile>* mem_buf)
+    std::unique_ptr<TarEntryInputStreamBuffer> buf, MemStream<MemFile> *mem_buf)
     : std::istream(buf.get()), buf_{nullptr}, mem_buf_{mem_buf} {
   buf_ = std::move(buf);
 }
 
-const std::string& TarEntryInputStream::path() const { return buf_->path(); }
-const std::optional<std::string>& TarEntryInputStream::real_path() const {
+const std::string &TarEntryInputStream::path() const { return buf_->path(); }
+const std::optional<std::string> &TarEntryInputStream::real_path() const {
   return buf_->real_path();
 }
 size_t TarEntryInputStream::size() const { return buf_->size(); }
@@ -181,8 +181,8 @@ std::string TarEntryInputStream::md5() {
   if (!this->good()) {
     MY_LOG(1) << "seekg failed. begin_pos=" << 0 << "size=" << size() //
               << " stream " << this->tellg() << "stream.fail() " << this->fail()
-              << " "                                                  //
-              << "stream.bad() " << this->bad() << " "                //
+              << " "                                   //
+              << "stream.bad() " << this->bad() << " " //
         ;
     return "";
   }
@@ -203,9 +203,9 @@ std::string TarEntryInputStream::md5() {
   return ret.getHash();
 }
 
-void* TarEntryInputStream::mmap() {
+void *TarEntryInputStream::mmap() {
   if (mem_buf_) {
-    return (void*)mem_buf_->offset(buf_->data_begin_pos());
+    return (void *)mem_buf_->offset(buf_->data_begin_pos());
   }
   return nullptr;
 }
@@ -213,9 +213,9 @@ std::string TarEntryInputStream::to_string() const {
   return std::string("TarEntryInputStream{buf=") + buf_->to_string() + "}";
 }
 TarEntryOutputStream::TarEntryOutputStream(
-    const std::string& name,            // name of the entry
+    const std::string &name,            // name of the entry
     std::streambuf::pos_type begin_pos, // beginning of the
-    class TarFile& tar_file)
+    class TarFile &tar_file)
     : std::ostream(tar_file.stream_->rdbuf()), name_{name},
       begin_pos_{begin_pos}, tar_file_{tar_file} {
   MY_LOG(2) << " assume the write position is set by "
@@ -223,12 +223,12 @@ TarEntryOutputStream::TarEntryOutputStream(
             << " begin_pos " << begin_pos_ << " " //
             << " stream_pos: " << tellp() << " ";
 }
-static std::string calculate_md5(std::istream& str, std::streampos begin_pos,
+static std::string calculate_md5(std::istream &str, std::streampos begin_pos,
                                  std::streamsize size) {
   // calculate md5 sum of the stream
   str.seekg(begin_pos);
   CHECK(str.good()) << "seekg failed. begin_pos=" << begin_pos
-                    << "size=" << size                     //
+                    << "size=" << size //
                     << " stream " << str.tellg() << "stream.fail() "
                     << str.fail() << " "                   //
                     << "stream.bad() " << str.bad() << " " //
@@ -301,11 +301,11 @@ std::optional<std::string> TarEntryOutputStream::get_content_check_sum() {
   return ret;
 }
 
-TarEntryInputStream*
-TarEntryOutputStream::find_prev_entry_for_md5(const std::string& md5) {
+TarEntryInputStream *
+TarEntryOutputStream::find_prev_entry_for_md5(const std::string &md5) {
   auto data_file_name = std::string("_data/") + md5;
 
-  for (auto& entry : tar_file_.entries_) {
+  for (auto &entry : tar_file_.entries_) {
     if (entry->path() == data_file_name) {
       MY_LOG(1) << " duplicated data found for entry "  //
                 << entry->to_string()                   //
@@ -318,9 +318,9 @@ TarEntryOutputStream::find_prev_entry_for_md5(const std::string& md5) {
 }
 
 // FIXME , the param "name" is not used
-TarEntryInputStream*
-TarEntryOutputStream::find_prev_entry_for_path(const std::string& /*name*/) {
-  for (auto& entry : tar_file_.entries_) {
+TarEntryInputStream *
+TarEntryOutputStream::find_prev_entry_for_path(const std::string & /*name*/) {
+  for (auto &entry : tar_file_.entries_) {
     if (entry->path() == name_) {
       MY_LOG(1) << " duplicated file found for entry " //
                 << entry->to_string()                  //
@@ -330,8 +330,8 @@ TarEntryOutputStream::find_prev_entry_for_path(const std::string& /*name*/) {
   }
   return nullptr;
 }
-TarEntryInputStream&
-TarEntryOutputStream::add_entry_for_new_data(const std::string& md5) {
+TarEntryInputStream &
+TarEntryOutputStream::add_entry_for_new_data(const std::string &md5) {
   auto data_file_name = std::string("_data/") + md5;
   MY_LOG(1) << " " << data_file_name << " does not exists, create a new entry";
   seekp(begin_pos_ - static_cast<std::streamoff>(512));
@@ -351,7 +351,7 @@ TarEntryOutputStream::add_entry_for_new_data(const std::string& md5) {
     MY_LOG(1) << " write header for " << data_file_name << " size=" << size_
               << " OK. header=" << header.to_string();
   }
-  auto& ret = tar_file_.add_regular_entry(data_file_name,           //
+  auto &ret = tar_file_.add_regular_entry(data_file_name,           //
                                           header.data_begin_pos(),  //
                                           header.data_end_pos(),    //
                                           header.block_begin_pos(), //
@@ -377,7 +377,7 @@ TarEntryOutputStream::add_entry_for_new_data(const std::string& md5) {
 }
 
 void TarEntryOutputStream::add_symlink_for_existing_entry(
-    const std::string& md5) {
+    const std::string &md5) {
   auto data_file_name = std::string("_data/") + md5;
   // ignore the written data, probably garbage after 1024 bytes
   seekp(begin_pos_ - static_cast<std::streampos>(512));
@@ -417,8 +417,8 @@ void TarEntryOutputStream::add_1024_padding() {
   }
   this->flush();
 }
-void TarEntryOutputStream::maybe_add_4k_align(TarFile& tar_file,
-                                              const std::string& name) {
+void TarEntryOutputStream::maybe_add_4k_align(TarFile &tar_file,
+                                              const std::string &name) {
   static const auto const_512 = std::streamoff(512);
   static const auto const_4k = std::streamoff(4096);
   auto current_pos = tar_file.stream_->tellp();
@@ -439,8 +439,8 @@ void TarEntryOutputStream::maybe_add_4k_align(TarFile& tar_file,
   }
   return;
 }
-void TarEntryOutputStream::add_padding_block_for_4k(TarFile& tar_file,
-                                                    const std::string& name,
+void TarEntryOutputStream::add_padding_block_for_4k(TarFile &tar_file,
+                                                    const std::string &name,
                                                     int /*block_idx*/) {
   auto short_name = name.size() < 50u ? name : name.substr(0, 50);
   auto data_file_name = std::string("_data/") + "padding_" +
@@ -496,7 +496,7 @@ TarEntryOutputStream::~TarEntryOutputStream() {
 }
 
 std::streampos TarEntryOutputStream::calculate_tar_append_pos(
-    const TarEntryInputStream& last_entry) {
+    const TarEntryInputStream &last_entry) {
   // calculate the tar append position
   // the tar file end is 1024 bytes, so we need to add 512 bytes for the
   // header and padding
@@ -521,7 +521,7 @@ std::streampos TarEntryOutputStream::calculate_tar_append_pos(
   return append_pos;
 }
 std::unique_ptr<TarEntryOutputStream>
-TarEntryOutputStream::create(class TarFile& tar_file, const std::string& name) {
+TarEntryOutputStream::create(class TarFile &tar_file, const std::string &name) {
   if (tar_file.is_writing_) {
     MY_LOG(1) << "TarFile is already in writing mode";
     return nullptr;

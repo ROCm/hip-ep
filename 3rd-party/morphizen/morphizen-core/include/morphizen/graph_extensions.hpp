@@ -40,11 +40,11 @@ namespace morphizen_cxx {
  * MetaDefProto can be passed to GraphRef::fuse() to change the actual graph.
  */
 std::pair<std::unique_ptr<morphizen::MetaDefProto>, morphizen::TryFuseError>
-graph_try_fuse(const GraphConstRef& graph, const std::string& name,
-               const std::vector<std::string>& inputs,
-               const std::vector<std::string>& outputs,
-               const std::vector<std::string>& constant_initializers,
-               const std::string& device);
+graph_try_fuse(const GraphConstRef &graph, const std::string &name,
+               const std::vector<std::string> &inputs,
+               const std::vector<std::string> &outputs,
+               const std::vector<std::string> &constant_initializers,
+               const std::string &device);
 
 /**
  * @brief Fuses the subgraph based on the given meta definition.
@@ -56,8 +56,8 @@ graph_try_fuse(const GraphConstRef& graph, const std::string& name,
  * @param meta_def The meta definition used for fusing the subgraph.
  * @return The fused subgraph as a Subgraph object.
  */
-Subgraph graph_virtual_fuse(const GraphConstRef& graph,
-                            const morphizen::MetaDefProto& meta_def);
+Subgraph graph_virtual_fuse(const GraphConstRef &graph,
+                            const morphizen::MetaDefProto &meta_def);
 
 /**
  * @brief Fuses the given meta_def into the graph.
@@ -69,7 +69,7 @@ Subgraph graph_virtual_fuse(const GraphConstRef& graph,
  * @param meta_def The MetaDefProto to fuse.
  * @return The fused NodeRef.
  */
-NodeRef graph_fuse(GraphRef& graph, const morphizen::MetaDefProto& meta_def);
+NodeRef graph_fuse(GraphRef &graph, const morphizen::MetaDefProto &meta_def);
 
 /**
  * @brief Creates a NodeBuilder object.
@@ -80,7 +80,7 @@ NodeRef graph_fuse(GraphRef& graph, const morphizen::MetaDefProto& meta_def);
  * @param pass The pass object to use for building the node.
  * @return The created NodeBuilder object.
  */
-morphizen::NodeBuilder graph_node_builder(GraphRef& graph,
-                                          morphizen::IPass& pass);
+morphizen::NodeBuilder graph_node_builder(GraphRef &graph,
+                                          morphizen::IPass &pass);
 
 } // namespace morphizen_cxx

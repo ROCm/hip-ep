@@ -16,9 +16,9 @@ public:
   ~LoggerAdapter();
 
 private:
-  void send(google::LogSeverity severity, const char* full_filename,
-            const char* base_filename, int line, const struct ::tm* tm_time,
-            const char* message, size_t message_len) override final;
+  void send(google::LogSeverity severity, const char *full_filename,
+            const char *base_filename, int line, const struct ::tm *tm_time,
+            const char *message, size_t message_len) override final;
 
 private:
   std::unique_ptr<Ort::Logger> logger_;

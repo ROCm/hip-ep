@@ -11,7 +11,7 @@ struct MorphizenOrtApi2 {
 #define DECL_MORPHIZEN_ORT_OPTIONAL_API_1(ret_type, field)                     \
   template <typename T, class = void>                                          \
   struct field##_t : public std::false_type {                                  \
-    template <typename... Args> static ret_type field(Args&&...) {             \
+    template <typename... Args> static ret_type field(Args &&...) {            \
       std::cerr << "MorphizenOrtApi::" << #field                               \
                 << " is not implemented, please upgrade onnxruntime or apply " \
                    "patches.";                                                 \
@@ -19,11 +19,11 @@ struct MorphizenOrtApi2 {
     }                                                                          \
   };                                                                           \
   template <typename T>                                                        \
-  struct field##_t<T, std::void_t<decltype(std::declval<T&>().field)>>         \
+  struct field##_t<T, std::void_t<decltype(std::declval<T &>().field)>>        \
       : public std::true_type {                                                \
-    template <typename... Args> static ret_type field(Args&&... args) {        \
-      auto api =                                                               \
-          static_cast<const T*>(static_cast<const void*>(::morphizen::api())); \
+    template <typename... Args> static ret_type field(Args &&...args) {        \
+      auto api = static_cast<const T *>(                                       \
+          static_cast<const void *>(::morphizen::api()));                      \
       if (api->field == nullptr) {                                             \
         std::cerr << "MorphizenOrtApi::" << #field << " is nullptr";           \
         std::abort();                                                          \
@@ -36,7 +36,7 @@ struct MorphizenOrtApi2 {
 
 #define DECL_MORPHIZEN_ORT_OPTIONAL_API(ret_type, field)                       \
   DECL_MORPHIZEN_ORT_OPTIONAL_API_1(ret_type, field)                           \
-  template <typename... Args> static ret_type field(Args&&... args) {          \
+  template <typename... Args> static ret_type field(Args &&...args) {          \
     return field##_t<::morphizen::OrtApiForMorphizen>::field(                  \
         std::forward<Args>(args)...);                                          \
   }
@@ -46,7 +46,7 @@ struct MorphizenOrtApi2 {
   template <typename... Args> static ret_type field
 
   DECL_MORPHIZEN_ORT_OPTIONAL_API_with_fallback(void, graph_set_name)(
-      Graph& graph, const std::string& name) {
+      Graph &graph, const std::string &name) {
     if (has_graph_set_name) {
       return graph_set_name_t<::morphizen::OrtApiForMorphizen>::graph_set_name(
           graph, name.c_str());
@@ -58,8 +58,8 @@ struct MorphizenOrtApi2 {
   }
   DECL_MORPHIZEN_ORT_OPTIONAL_API(morphizen::DllSafe<std::string>,
                                   attr_proto_release_string)
-  DECL_MORPHIZEN_ORT_OPTIONAL_API(TensorProto*, tensor_proto_new_u4)
-  DECL_MORPHIZEN_ORT_OPTIONAL_API(TensorProto*, tensor_proto_new_i4)
+  DECL_MORPHIZEN_ORT_OPTIONAL_API(TensorProto *, tensor_proto_new_u4)
+  DECL_MORPHIZEN_ORT_OPTIONAL_API(TensorProto *, tensor_proto_new_i4)
   DECL_MORPHIZEN_ORT_OPTIONAL_API(bool, is_profiling_enabled)
   DECL_MORPHIZEN_ORT_OPTIONAL_API_with_fallback(void, cleanup_morphizen)() {
     // do nothing.
