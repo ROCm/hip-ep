@@ -89,6 +89,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | OneHot | Custom HIP Kernel |
 | LayerNormalization | Custom HIP Kernel |
 | SkipLayerNormalization (com.microsoft) | Decomposed → Add (MIOpen) + LayerNormalization (Custom HIP Kernel) |
+| RMSNormalization | MIOpen |
 | SimplifiedLayerNormalization | MIOpen |
 | SkipSimplifiedLayerNormalization (com.microsoft) | MIOpen |
 | LpNormalization | Decomposed → Mul / ReduceSum / Sqrt / Div |
