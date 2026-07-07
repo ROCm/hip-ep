@@ -857,6 +857,20 @@ void BiasGeluOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// FastGeluOp: ins(input, [bias]), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange FastGeluOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void FastGeluOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // LeakyReluOp: ins(input), outs(output)
 //===----------------------------------------------------------------------===//
 

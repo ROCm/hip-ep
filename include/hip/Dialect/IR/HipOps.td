@@ -1754,6 +1754,42 @@ def Hip_BiasGeluOp : Hip_DpsOp<"bias_gelu", /*traits=*/[],
   }];
 }
 
+def Hip_FastGeluOp : Hip_DpsOp<"fast_gelu", [AttrSizedOperandSegments],
+                               /*outsAccessor=*/"Output",
+                               /*autoReify=*/1,
+                               /*autoInfer=*/1,
+                               /*declareInfer=*/1> {
+  let summary = "Fast GELU (tanh approx) with optional 1D bias broadcast";
+  let description = [{
+    Computes FastGelu(x [+ broadcast(bias)]) using the tanh approximation.
+    Implements com.microsoft.FastGelu. When bias is omitted, applies FastGelu
+    to the input directly.
+
+    Example:
+    ```mlir
+    hip.fast_gelu(%ctx) ins(%x : tensor<1x128x768xf16>)
+                        outs(%y : tensor<1x128x768xf16>)
+    hip.fast_gelu(%ctx) ins(%x : tensor<1x128x768xf16>)
+                        bias(%b : tensor<768xf16>)
+                        outs(%y : tensor<1x128x768xf16>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Optional<Hip_TensorOrMemRef>:$bias,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    (`bias` `(` $bias^ `:` type($bias) `)`)?
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_LeakyReluOp : Hip_DpsOp<"leaky_relu"> {
   let summary = "LeakyRelu activation: y = x >= 0 ? x : alpha * x";
   let description = [{

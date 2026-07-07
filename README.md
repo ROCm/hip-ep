@@ -40,6 +40,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | Softplus | MIOpen |
 | Gelu | Custom HIP kernel |
 | BiasGelu (com.microsoft) | Custom HIP kernel |
+| FastGelu (com.microsoft) | Custom HIP kernel |
 | Reciprocal | Custom HIP kernel |
 | Sqrt | Custom HIP kernel |
 | Exp | Custom HIP Kernel |

@@ -13,6 +13,7 @@ add_library(OnnxToHip STATIC
   PowerConversion.cpp
   ActivationConversion.cpp
   BiasGeluConversion.cpp
+  FastGeluConversion.cpp
   CastConversion.cpp
   ReduceSumConversion.cpp
   ReduceMeanConversion.cpp
