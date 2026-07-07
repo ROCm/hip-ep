@@ -186,3 +186,69 @@ func.func @return_order(%ctx: !hip.context, %M: index) -> (memref<4xf16>, memref
   %b = memref.alloc() : memref<4xf16>
   return %b, %a : memref<4xf16>, memref<?xf16>
 }
+
+// --- Output returned through memref.collapse_shape: the alloc still becomes
+//     hip.alloc_output, and the collapse_shape stays in place feeding the
+//     return. Models a reshaped output such as a rank-4 conv result flattened
+//     to rank-2 before the return, so the buffer is owned by the EP rather than
+//     pooled. ---
+// CHECK-LABEL: func.func @collapse_output
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context)
+// CHECK-NOT:     memref.alloc
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]]) {out_idx = 0 : i64} : memref<1x64x56x56xf32>
+// CHECK:         %[[C:.*]] = memref.collapse_shape %[[OUT]]
+// CHECK:         return %[[C]]
+func.func @collapse_output(%ctx: !hip.context) -> memref<1x200704xf32> {
+  %x = memref.alloc() : memref<1x64x56x56xf32>
+  %out = memref.collapse_shape %x [[0], [1, 2, 3]]
+       : memref<1x64x56x56xf32> into memref<1x200704xf32>
+  return %out : memref<1x200704xf32>
+}
+
+// --- Output returned through memref.expand_shape: handled the same way as
+//     collapse_shape (the analysis follows both). ---
+// CHECK-LABEL: func.func @expand_output
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context)
+// CHECK-NOT:     memref.alloc
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]]) {out_idx = 0 : i64} : memref<1x200704xf32>
+// CHECK:         %[[E:.*]] = memref.expand_shape %[[OUT]]
+// CHECK:         return %[[E]]
+func.func @expand_output(%ctx: !hip.context) -> memref<1x64x56x56xf32> {
+  %x = memref.alloc() : memref<1x200704xf32>
+  %out = memref.expand_shape %x [[0], [1, 2, 3]]
+       output_shape [1, 64, 56, 56]
+       : memref<1x200704xf32> into memref<1x64x56x56xf32>
+  return %out : memref<1x64x56x56xf32>
+}
+
+// --- A chain of view ops (collapse_shape -> cast) before the return: the alloc
+//     is still converted, exactly once. Shows that multi-op view chains are
+//     followed, not just a single view op. ---
+// CHECK-LABEL: func.func @chain_output
+// CHECK-NOT:     memref.alloc
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%{{.*}}) {out_idx = 0 : i64} : memref<2x4xf32>
+// CHECK:         %[[COL:.*]] = memref.collapse_shape %[[OUT]]
+// CHECK:         %[[CST:.*]] = memref.cast %[[COL]]
+// CHECK:         return %[[CST]]
+func.func @chain_output(%ctx: !hip.context) -> memref<?xf32> {
+  %x = memref.alloc() : memref<2x4xf32>
+  %col = memref.collapse_shape %x [[0, 1]]
+       : memref<2x4xf32> into memref<8xf32>
+  %cast = memref.cast %col : memref<8xf32> to memref<?xf32>
+  return %cast : memref<?xf32>
+}
+
+// --- Output returned through memref.subview: the parent alloc becomes
+//     hip.alloc_output; the subview is left in place feeding the return. ---
+// CHECK-LABEL: func.func @subview_output
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context)
+// CHECK-NOT:     memref.alloc
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]]) {out_idx = 0 : i64} : memref<4x8xf32>
+// CHECK:         %[[S:.*]] = memref.subview %[[OUT]]
+// CHECK:         return %[[S]]
+func.func @subview_output(%ctx: !hip.context) -> memref<2x4xf32, strided<[8, 1]>> {
+  %x = memref.alloc() : memref<4x8xf32>
+  %s = memref.subview %x[0, 0] [2, 4] [1, 1]
+     : memref<4x8xf32> to memref<2x4xf32, strided<[8, 1]>>
+  return %s : memref<2x4xf32, strided<[8, 1]>>
+}

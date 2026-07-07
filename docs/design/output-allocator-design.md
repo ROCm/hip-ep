@@ -95,7 +95,7 @@ Introduce `hip.alloc_output` — an operation that allocates output buffers via 
 
 **Placement in pipeline:** *after* `buffer-deallocation`, *before* `hip-pool-allocs` (so pooling skips the EP-owned buffer). `hip-use-output-allocator` is FuncOp-scoped: it rewrites returned allocs (leaving each signature + `return` intact). The after-dealloc order is load-bearing — see [§2](#the-pipeline).
 
-The `hip-use-output-allocator` pass replaces the returned `memref.alloc` for each graph output with `hip.alloc_output`, reusing the alloc's dynamic-size operands.
+The `hip-use-output-allocator` pass replaces the returned `memref.alloc` for each graph output with `hip.alloc_output`, reusing the alloc's dynamic-size operands. An alloc counts as a graph output when `func.return` hands it back — either directly, or after it passes through view ops (`memref.cast`, `memref.collapse_shape`, `memref.expand_shape`, `memref.subview`, any number of them). The pass uses `BufferViewFlowAnalysis` to check this: an alloc is an output if any value made from it via those view ops is returned. This handles reshaped / cast / subview'd outputs without special-casing each op, and the view ops between the alloc and the return are left in place.
 
 **Example: Add → MatMul → Sigmoid**
 
