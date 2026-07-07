@@ -51,18 +51,14 @@ struct Storage {
   std::vector<std::pair<PipelineSlot, std::string>> slotRequests;
 
   // Bitcode buffers contributed by plugin addRuntimeBitcode calls. Host-owned:
-  // the bytes live in `bitcodeStorage`, and `bitcodeBuffers[i].data` is
+  // the bytes live in `bitcodeStorage`, and `bitcodeBuffers[i].data` points at
   // `bitcodeStorage[i].data()`.
   //
-  // Type choice: `std::vector<unsigned char>` (rather than
-  // `std::string`) avoids the small-string-optimization trap: when
-  // the outer vector grows past its capacity, every inner element
-  // is move-constructed into the new buffer. For an SSO-sized
-  // `std::string` the moved-into copy lives in a different memory
-  // address, invalidating any `data()` pointer we saved earlier.
-  // `std::vector` of any size is always heap-backed, so move just
-  // steals the heap pointer and the bytes never relocate -- the
-  // `data()` we recorded in `bitcodeBuffers` remains valid.
+  // `std::vector<unsigned char>` (not `std::string`) is deliberate: growing the
+  // outer vector move-constructs each element, and an SSO-sized `std::string`
+  // would relocate its bytes, invalidating a `data()` pointer saved earlier. A
+  // heap-backed `std::vector` move just steals the pointer, so the bytes -- and
+  // the recorded `data()` -- never move.
   std::vector<std::vector<unsigned char>> bitcodeStorage;
   std::vector<PluginBitcodeBuffer> bitcodeBuffers;
 
@@ -124,14 +120,9 @@ void addRuntimeBitcodeImpl(void * /*self*/, const void *data,
     return;
   }
 
-  // Copy the bytes. The plugin's pointer/lifetime guarantees are
-  // hard to enforce across a DLL boundary (a stack buffer, a
-  // dlclose'd plugin, an aliased view, etc. are all possible
-  // misuses), so the host owns the copy. Vendor runtime bitcode
-  // is typically 100 kB-1 MB and the copy happens once per process
-  // at startup, well below noise -- earlier versions of this code
-  // borrowed the pointer and the safety risk was not worth the
-  // savings.
+  // Copy the bytes: the plugin's pointer/lifetime is hard to enforce across the
+  // registration boundary (stack buffer, aliased view, ...), so the host owns
+  // the copy. A one-time startup cost of ~100 kB-1 MB.
   auto &store = storage();
   const auto *bytes = static_cast<const unsigned char *>(data);
   store.bitcodeStorage.emplace_back(bytes, bytes + sizeBytes);
@@ -178,10 +169,6 @@ HipEpPluginRegistry &getProcessPluginRegistry() {
 }
 
 llvm::SmallVector<llvm::StringRef> pluginPassesForSlot(PipelineSlot slot) {
-  // Defensive: ensure plugin registrations have run before reading
-  // out their results. dispatchPluginRegistrationsOnce is
-  // std::call_once-guarded so this is essentially free after the
-  // first call.
   dispatchPluginRegistrationsOnce();
   llvm::SmallVector<llvm::StringRef> result;
   for (const auto &[s, name] : storage().slotRequests) {
@@ -193,43 +180,25 @@ llvm::SmallVector<llvm::StringRef> pluginPassesForSlot(PipelineSlot slot) {
 
 llvm::SmallVector<PluginBitcodeBuffer> pluginBitcodeBuffers() {
   dispatchPluginRegistrationsOnce();
-  // Copy out a SmallVector view of the buffers. Buffers are tiny
-  // (struct of 16 bytes on x64) and there are typically 0-2 of
-  // them, so the copy is negligible and saves callers from worrying
-  // about mutation between the call and use.
-  llvm::SmallVector<PluginBitcodeBuffer> result;
-  result.reserve(storage().bitcodeBuffers.size());
-  for (const auto &buf : storage().bitcodeBuffers)
-    result.push_back(buf);
-  return result;
+  // Return a value copy so callers cannot alias internal storage; the buffers
+  // are tiny and there are typically 0-2 of them.
+  return llvm::to_vector(storage().bitcodeBuffers);
 }
 
 llvm::SmallVector<std::string> pluginLibraryPaths() {
   dispatchPluginRegistrationsOnce();
-  llvm::SmallVector<std::string> result;
-  result.reserve(storage().libraryPaths.size());
-  for (const auto &p : storage().libraryPaths)
-    result.push_back(p);
-  return result;
+  return llvm::to_vector(storage().libraryPaths);
 }
 
 llvm::SmallVector<std::string> pluginLibraries() {
   dispatchPluginRegistrationsOnce();
-  llvm::SmallVector<std::string> result;
-  result.reserve(storage().libraries.size());
-  for (const auto &l : storage().libraries)
-    result.push_back(l);
-  return result;
+  return llvm::to_vector(storage().libraries);
 }
 
 llvm::SmallVector<void (*)(mlir::DialectRegistry &)>
 pluginDialectRegistrations() {
   dispatchPluginRegistrationsOnce();
-  llvm::SmallVector<void (*)(mlir::DialectRegistry &)> result;
-  result.reserve(storage().dialectRegistrations.size());
-  for (auto fn : storage().dialectRegistrations)
-    result.push_back(fn);
-  return result;
+  return llvm::to_vector(storage().dialectRegistrations);
 }
 
 } // namespace hip::compiler
