@@ -2187,6 +2187,38 @@ def Hip_ExpOp : Hip_DpsOp<"exp"> {
   }];
 }
 
+def Hip_LogOp : Hip_DpsOp<"log"> {
+  let summary = "Element-wise natural logarithm: y = log(x)";
+  let description = [{
+    Computes the natural logarithm of each element.
+    Implements the standard ONNX Log operator.
+
+    Formula: Y = log(X)
+
+    Lowered via the unified unary elementwise path (wrap_log).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.log(%ctx) ins(%x : memref<1x128x512xf32, 1>)
+                  outs(%y : memref<1x128x512xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_AbsOp : Hip_DpsOp<"abs", /*traits=*/[],
                           /*outsAccessor=*/"Y",
                           /*autoReify=*/1,

@@ -44,6 +44,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | Reciprocal | Custom HIP kernel |
 | Sqrt | Custom HIP kernel |
 | Exp | Custom HIP Kernel |
+| Log | Custom HIP Kernel |
 | Pow | Decomposed → Mul / Sqrt / Reciprocal for constant scalar exponents |
 | Sub | Custom HIP Kernel |
 | Cast | Custom HIP Kernel |
