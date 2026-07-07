@@ -294,6 +294,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/gemm.cpp runtime_gemm.bc)
     compile_to_bitcode(real/where.cpp runtime_where.bc)
     compile_to_bitcode(real/equal.cpp runtime_equal.bc)
+    compile_to_bitcode(real/or.cpp runtime_or.bc)
     compile_to_bitcode(real/and.cpp runtime_and.bc)
     compile_to_bitcode(real/div.cpp runtime_div.bc)
     compile_to_bitcode(real/linear_attention.cpp runtime_linear_attention.bc)
@@ -358,6 +359,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gemm.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_where.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_equal.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_or.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_and.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_div.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_linear_attention.bc

@@ -1985,6 +1985,38 @@ def Hip_AndOp : Hip_DpsOp_Broadcast<"and", /*operandGetters=*/["Lhs", "Rhs"]> {
   }];
 }
 
+def Hip_OrOp : Hip_DpsOp_Broadcast<"or", /*operandGetters=*/["Lhs", "Rhs"]> {
+  let summary = "Element-wise logical OR: c = a || b";
+  let description = [{
+    Computes element-wise logical OR of two boolean tensors (i1).
+    Implements the standard ONNX Or operator.
+
+    Supports multidirectional (NumPy-style) broadcasting between `lhs`
+    and `rhs`. Both inputs and the output have boolean (i1) element type.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.or(%ctx) ins(%a, %b : memref<3x4xi1, 1>, memref<3x4xi1, 1>)
+                 outs(%c : memref<3x4xi1, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$lhs,
+    Hip_TensorOrMemRef:$rhs,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_NotOp : Hip_DpsOp<"not", /*traits=*/[],
                           /*outsAccessor=*/"Y",
                           /*autoReify=*/1,

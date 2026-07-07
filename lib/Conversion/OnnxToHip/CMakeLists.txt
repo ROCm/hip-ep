@@ -68,6 +68,7 @@ add_library(OnnxToHip STATIC
   SliceConversion.cpp
   ScatterNDConversion.cpp
   IdentityConversion.cpp
+  OrConversion.cpp
   AndConversion.cpp
   AbsConversion.cpp
   SizeConversion.cpp

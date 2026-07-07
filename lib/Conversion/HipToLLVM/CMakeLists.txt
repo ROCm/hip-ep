@@ -31,6 +31,7 @@ add_library(HipToLLVM STATIC
   GemmLowering.cpp
   WhereLowering.cpp
   EqualLowering.cpp
+  OrLowering.cpp
   AndLowering.cpp
   DivLowering.cpp
   LinearAttentionLowering.cpp

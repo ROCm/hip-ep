@@ -1293,6 +1293,8 @@ int wrap_equal(RuntimeState *state, void *a, void *b, void *output,
 // stub: the function returns success without computing anything so models
 // that include And can still link and lower end-to-end while a real
 // element-wise AND kernel is being built.
+int wrap_or(RuntimeState *state, void *a, void *b, void *output,
+            int64_t num_elements, int64_t data_type);
 int wrap_and(RuntimeState *state, void *a, void *b, void *output,
              int64_t num_elements, int64_t data_type);
 

@@ -52,6 +52,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | Equal | Custom HIP Kernel |
 | Not | Custom HIP Kernel |
 | And | Custom HIP Kernel |
+| Or | Custom HIP Kernel |
 | Abs | Custom HIP Kernel |
 | Cos | Custom HIP Kernel |
 | Sin | Custom HIP Kernel |

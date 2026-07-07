@@ -1432,6 +1432,18 @@ void NotOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// OrOp: ins(lhs, rhs), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange OrOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void OrOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // AndOp: ins(lhs, rhs), outs(output)
 //===----------------------------------------------------------------------===//
 

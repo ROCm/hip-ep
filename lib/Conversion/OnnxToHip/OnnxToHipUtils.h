@@ -392,6 +392,8 @@ void populateScatterNDConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
 void populateIdentityConversionPatterns(RewritePatternSet &patterns,
                                         MLIRContext *ctx);
+void populateOrConversionPatterns(RewritePatternSet &patterns,
+                                  MLIRContext *ctx);
 void populateAndConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateAbsConversionPatterns(RewritePatternSet &patterns,

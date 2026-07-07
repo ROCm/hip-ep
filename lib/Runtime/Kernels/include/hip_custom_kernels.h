@@ -321,6 +321,10 @@ HIP_KERNEL_API int hip_elementwise_less(
 /* And over bool (1-byte) tensors. No hip_dtype: bool is the only supported
  * input/output type (mirrors ORT v1.22.2 SPECIALIZED_BINARY_ELEMENTWISE_IMPL(And, bool)).
  */
+HIP_KERNEL_API int hip_elementwise_or(
+    void *stream, const void *lhs, const void *rhs, void *output,
+    int64_t num_elements);
+
 HIP_KERNEL_API int hip_elementwise_and(
     void* stream,
     const void* lhs,
