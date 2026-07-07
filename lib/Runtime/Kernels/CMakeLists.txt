@@ -59,6 +59,7 @@ set(_kernel_sources
     hip/range_kernel.hip
     hip/gather_kernel.hip
     hip/gather_elements_kernel.hip
+    hip/top_k_kernel.hip
     hip/scatter_elements_kernel.hip
     hip/compress_kernel.hip
     hip/one_hot_kernel.hip

@@ -814,6 +814,20 @@ void GatherElementsOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// TopKOp: ins(x, k), outs(values, indices)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange TopKOp::getDpsInitsMutable() {
+  return getOutputsMutable();
+}
+
+void TopKOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // RangeOp: ins(start, limit, delta), outs(output)
 //===----------------------------------------------------------------------===//
 

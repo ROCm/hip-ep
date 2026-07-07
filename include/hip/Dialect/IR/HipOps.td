@@ -1640,6 +1640,49 @@ def Hip_GatherElementsOp : Hip_DpsOp<"gather_elements", /*traits=*/[],
   }];
 }
 
+def Hip_TopKOp : Hip_DpsOp<"top_k",
+    [AttrSizedOperandSegments, OpStateOpInterface],
+    /*outsAccessor=*/"Outputs",
+    /*autoReify=*/0,
+    /*autoInfer=*/0,
+    /*declareInfer=*/0> {
+  let summary = "Retrieve top-K values and indices along an axis";
+  let description = [{
+    Implements the ONNX TopK operator: along `axis`, select the top `K`
+    elements from the input and return their values and indices.
+
+    Inputs:
+      x - data tensor
+      k - scalar or 1-element int64 tensor giving K
+
+    DPS outputs (always 2):
+      outputs[0] = values (same element type as x)
+      outputs[1] = indices (int64)
+
+    Example:
+    ```mlir
+    hip.top_k(%ctx)
+        ins(%x, %k : memref<3x4xf32, 1>, memref<i64, 1>)
+        outs(%values, %indices : memref<3x2xf32, 1>, memref<3x2xi64, 1>)
+        {axis = 1 : i64, largest = true, sorted = true}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$k,
+    Variadic<Hip_TensorOrMemRef>:$outputs,
+    DefaultValuedAttr<I64Attr, "-1">:$axis,
+    DefaultValuedAttr<BoolAttr, "true">:$largest,
+    DefaultValuedAttr<BoolAttr, "true">:$sorted
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `,` $k `:` type($x) `,` type($k) `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_RangeOp : Hip_DpsOp<"range", /*traits=*/[],
                             /*outsAccessor=*/"Output",
                             /*autoReify=*/0,
