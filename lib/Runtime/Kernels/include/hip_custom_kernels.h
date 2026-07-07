@@ -791,6 +791,23 @@ HIP_KERNEL_API int hip_gather_elements(
     int element_size_bytes,
     int indices_element_size_bytes);
 
+HIP_KERNEL_API int hip_compress(
+    void* stream,
+    const void* input,
+    const void* condition,
+    void* output,
+    int64_t flatten,
+    int64_t axis,
+    int64_t input_rank,
+    int64_t output_rank,
+    const int64_t* input_shape,
+    const int64_t* output_shape,
+    int64_t condition_len,
+    int64_t num_output_elements,
+    void* workspace,
+    size_t workspace_bytes,
+    int element_size_bytes);
+
 /* =========================================================================
  * ReduceSum (Parallel Sum Reduction)
  * =========================================================================
