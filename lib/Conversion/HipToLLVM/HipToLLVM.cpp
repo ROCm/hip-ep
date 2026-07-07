@@ -234,6 +234,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateElementwiseLoweringPatterns(typeConverter, patterns);
   populatePowerLoweringPatterns(typeConverter, patterns);
   populateActivationLoweringPatterns(typeConverter, patterns);
+  populateBiasGeluLoweringPatterns(typeConverter, patterns);
   populateNormLoweringPatterns(typeConverter, patterns);
   populateGatherLoweringPatterns(typeConverter, patterns);
   populateRangeLoweringPatterns(typeConverter, patterns);

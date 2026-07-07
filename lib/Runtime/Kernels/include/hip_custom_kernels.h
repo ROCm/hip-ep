@@ -402,6 +402,16 @@ HIP_KERNEL_API int hip_elementwise_gelu(
     int64_t approximate);
 
 /* =========================================================================
+ * BiasGelu (fused bias-add + erf GELU)
+ * =========================================================================
+ *
+ * output[i] = Gelu_erf(data[i] + bias[i % bias_len])
+ */
+HIP_KERNEL_API int hip_bias_gelu(void *stream, const void *data, const void *bias,
+                                 void *output, int64_t num_elements,
+                                 int64_t bias_len, int hip_dtype);
+
+/* =========================================================================
  * LeakyRelu Activation
  * =========================================================================
  *

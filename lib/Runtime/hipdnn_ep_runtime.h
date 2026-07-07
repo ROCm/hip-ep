@@ -999,6 +999,11 @@ int wrap_miopenActivationForward(RuntimeState *state, int op_state_slot,
 int wrap_gelu(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t data_type, int64_t approximate);
 
+// Fused com.microsoft.BiasGelu: Gelu_erf(data + broadcast(bias)).
+// data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16, DOUBLE)
+int wrap_bias_gelu(RuntimeState *state, void *data, void *bias, void *output,
+                   int64_t num_elements, int64_t bias_len, int64_t data_type);
+
 // LeakyRelu activation wrapper (uses custom HIP kernel).
 // data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, DOUBLE)
 // alpha: slope for negative values (default 0.01 per ONNX spec)

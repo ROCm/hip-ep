@@ -12,6 +12,7 @@ add_library(HipToLLVM STATIC
   ElementwiseLowering.cpp
   PowerLowering.cpp
   ActivationLowering.cpp
+  BiasGeluLowering.cpp
   NormLowering.cpp
   GatherLowering.cpp
   RangeLowering.cpp
