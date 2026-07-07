@@ -519,6 +519,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateSliceConversionPatterns(patterns, ctx);
   populateScatterNDConversionPatterns(patterns, ctx);
   populateIdentityConversionPatterns(patterns, ctx);
+  populateOrConversionPatterns(patterns, ctx);
   populateAndConversionPatterns(patterns, ctx);
   populateAbsConversionPatterns(patterns, ctx);
   populateSizeConversionPatterns(patterns, ctx);

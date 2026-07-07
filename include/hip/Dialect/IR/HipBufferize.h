@@ -166,6 +166,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     EqualOp::attachInterface<HipDstBufferizableModel<EqualOp>>(*ctx);
     DivOp::attachInterface<HipDstBufferizableModel<DivOp>>(*ctx);
     NotOp::attachInterface<HipDstBufferizableModel<NotOp>>(*ctx);
+    OrOp::attachInterface<HipDstBufferizableModel<OrOp>>(*ctx);
     AndOp::attachInterface<HipDstBufferizableModel<AndOp>>(*ctx);
     CosOp::attachInterface<HipDstBufferizableModel<CosOp>>(*ctx);
     SinOp::attachInterface<HipDstBufferizableModel<SinOp>>(*ctx);
