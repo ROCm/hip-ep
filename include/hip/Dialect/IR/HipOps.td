@@ -1722,6 +1722,38 @@ def Hip_GeluOp : Hip_DpsOp<"gelu", /*traits=*/[],
   }];
 }
 
+def Hip_BiasGeluOp : Hip_DpsOp<"bias_gelu", /*traits=*/[],
+                               /*outsAccessor=*/"Output",
+                               /*autoReify=*/1,
+                               /*autoInfer=*/1,
+                               /*declareInfer=*/1> {
+  let summary = "Fused bias-add + GELU (erf) activation";
+  let description = [{
+    Computes Gelu(data + bias) where bias is a 1D tensor broadcast along the
+    last dimension of data. Implements com.microsoft.BiasGelu with the exact
+    (erf-based) Gelu formula.
+
+    Example:
+    ```mlir
+    hip.bias_gelu(%ctx) ins(%data, %bias : tensor<1x128x768xf16>, tensor<768xf16>)
+                        outs(%out : tensor<1x128x768xf16>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$bias,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `,` $bias `:` type($data) `,` type($bias) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_LeakyReluOp : Hip_DpsOp<"leaky_relu"> {
   let summary = "LeakyRelu activation: y = x >= 0 ? x : alpha * x";
   let description = [{

@@ -67,6 +67,7 @@ inline constexpr const char *kHipSilu = "hip_silu";
 inline constexpr const char *kWrapMiopenActivationForward =
     "wrap_miopenActivationForward";                   // hip.sigmoid
 inline constexpr const char *kWrapGelu = "wrap_gelu"; // hip.gelu
+inline constexpr const char *kWrapBiasGelu = "wrap_bias_gelu"; // hip.bias_gelu
 inline constexpr const char *kWrapLeakyRelu =
     "wrap_leaky_relu"; // hip.leaky_relu
 inline constexpr const char *kWrapElementwiseSub = "wrap_elementwise_sub";
@@ -382,6 +383,8 @@ void populatePowerLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateActivationLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns);
+void populateBiasGeluLoweringPatterns(const LLVMTypeConverter &converter,
+                                      RewritePatternSet &patterns);
 void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateGatherLoweringPatterns(const LLVMTypeConverter &converter,
