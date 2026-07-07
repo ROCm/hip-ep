@@ -394,7 +394,14 @@ jobs:
           set -euo pipefail
           INSTALL="${{ runner.workspace }}/install"
           ORT="${{ runner.workspace }}/ort-install"
-          THEROCK="${{ runner.workspace }}/build/onnx-hipdnn-ep/_therock"
+          # build.py builds into <workspace>/build/<checkout-dir-name>/ (REPO.parent
+          # / build / REPO.name), so derive _therock from the checkout dir name
+          # instead of hardcoding it -- otherwise a repo rename (onnx-hipdnn-ep ->
+          # hip-ep) silently points this at an empty dir and the closure check below
+          # fails with "libamdhip64.so.7 => not found". This step runs in the default
+          # cwd (github.workspace = the checkout), matching windows-build.yml's
+          # `$(basename "$PWD")` idiom.
+          THEROCK="${{ runner.workspace }}/build/$(basename "$PWD")/_therock"
           # The renamed AMDGPU OGA integration dlopen's libamdgpu-ep.so; the
           # project still builds the EP as libhipgpu.so. Ship the expected
           # filename so the genai auto-loader resolves it (deps + closure below
