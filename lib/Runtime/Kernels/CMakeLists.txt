@@ -58,6 +58,7 @@ set(_kernel_sources
     hip/cast_kernel.hip
     hip/range_kernel.hip
     hip/gather_kernel.hip
+    hip/gather_elements_kernel.hip
     hip/reduce_sum_kernel.hip
     hip/pool_kernel.hip
     hip/resize_kernel.hip

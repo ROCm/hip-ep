@@ -1504,6 +1504,38 @@ def Hip_GatherOp : Hip_DpsOp<"gather", /*traits=*/[],
   }];
 }
 
+def Hip_GatherElementsOp : Hip_DpsOp<"gather_elements", /*traits=*/[],
+                                      /*outsAccessor=*/"Output",
+                                      /*autoReify=*/0,
+                                      /*autoInfer=*/1,
+                                      /*declareInfer=*/1> {
+  let summary = "Gather elements along an axis using same-rank indices";
+  let description = [{
+    Gathers values from the data tensor at positions specified by the
+    indices tensor along the given axis. Output shape matches indices shape.
+    Implements the ONNX GatherElements operator.
+
+    Example:
+    ```mlir
+    hip.gather_elements(%ctx)
+        ins(%data, %indices : memref<2x2xf32, 1>, memref<2x2xi32, 1>)
+        outs(%output : memref<2x2xf32, 1>) {axis = 1 : i64}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$indices,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "0">:$axis
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `,` $indices `:` type($data) `,` type($indices) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_RangeOp : Hip_DpsOp<"range", /*traits=*/[],
                             /*outsAccessor=*/"Output",
                             /*autoReify=*/0,

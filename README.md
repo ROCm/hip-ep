@@ -83,6 +83,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | Size | Custom HIP Kernel (folds to a constant for static shapes) |
 | NonZero | Custom HIP Kernel |
 | Gather | Custom HIP Kernel |
+| GatherElements | Custom HIP Kernel |
 | LayerNormalization | Custom HIP Kernel |
 | SkipLayerNormalization (com.microsoft) | Decomposed → Add (MIOpen) + LayerNormalization (Custom HIP Kernel) |
 | SimplifiedLayerNormalization | MIOpen |
