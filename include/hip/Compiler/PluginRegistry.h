@@ -55,12 +55,10 @@ class DialectRegistry;
 // state by construction (one pass registry, one set of op TypeIDs) with no
 // symbol export.
 //
-// The registry still dispatches through a function-pointer table (see
-// PluginRegistry.cpp) rather than calling storage directly. That indirection is
-// retained -- it is harmless under static linking and keeps the plugin's
-// dependency surface to this header (fully inline) plus MLIR (for the
-// definition of `mlir::PassRegistration<T>`), so a plugin TU compiles against
-// only public headers.
+// Dispatch still goes through a function-pointer table (see PluginRegistry.cpp)
+// rather than calling storage directly: harmless under static linking, and it
+// keeps a plugin TU's dependency surface to this (fully inline) header plus
+// MLIR for `mlir::PassRegistration<T>`.
 //
 // See docs/design/plugin-interface.md.
 
@@ -102,25 +100,16 @@ enum class PipelineSlot {
 /// comment for the rationale.
 class HipEpPluginRegistry {
 public:
-  /// Function-pointer table the host fills in when constructing a
-  /// registry. Plugins do not construct registries directly; they
-  /// receive one by reference from the host's static registrar
-  /// (`dispatchPluginRegistrationsOnce`) and call methods on it.
+  /// Function-pointer table the host fills in; the inline thunk methods below
+  /// dispatch through it. Plugins receive a registry by reference from the
+  /// static registrar (`dispatchPluginRegistrationsOnce`) and never construct
+  /// one.
   ///
-  /// Layout:
-  ///   - Pure-C signatures (no llvm::StringRef, no PipelineSlot -- `int`
-  ///     instead), which keeps the plugin's dependency on this header a plain
-  ///     function-pointer shape. (Under static linking plugin and host are one
-  ///     build, so this is no longer needed to survive cross-version loading --
-  ///     it is kept because it is harmless and minimal.)
-  ///   - Each function takes the `self` opaque pointer first.
-  ///   - Append-only.
-  ///
-  /// IMPORTANT for maintainers: any change to this struct (a new function
-  /// pointer or a changed signature) should bump `HIP_EP_PLUGIN_API_VERSION` in
-  /// PluginAPI.h (a source/versioning marker; not a runtime gate under static
-  /// linking). The static_assert below is the tripwire -- growing the layout
-  /// without updating the size sentinel fails the build.
+  /// Signatures are plain-C (`int` slot, `char*`/len rather than PipelineSlot /
+  /// StringRef) and append-only, each taking the opaque `self` first. Any
+  /// layout change should bump `HIP_EP_PLUGIN_API_VERSION` (a source marker,
+  /// not a runtime gate under static linking); the static_assert below is the
+  /// tripwire.
   struct VTable {
     void (*requestPipelineSlot)(void *self, int slot, const char *name,
                                 std::size_t nameLen);
@@ -158,17 +147,12 @@ public:
   HipEpPluginRegistry &operator=(const HipEpPluginRegistry &) = delete;
 
   // ---------- MLIR passes ---------------------------------------------
-  /// Registers `PassT` so the pipeline can instantiate it by name (via
-  /// `parsePassPipeline`) at a requested `PipelineSlot`.
-  ///
-  /// The registration writes MLIR's process-global pass registry. Because the
-  /// plugin is linked statically into the host (one binary, one MLIR
-  /// instance), the pass lands in the SAME registry `parsePassPipeline` reads,
-  /// so it resolves by name -- no shared-library / split-registry caveat.
-  ///
-  /// Defined inline because the template must be instantiated in the plugin;
-  /// the plugin gets `mlir::PassRegistration<T>` from MLIR headers and needs no
-  /// hip-compiler symbol.
+  /// Register `PassT` in MLIR's global pass registry so the pipeline can
+  /// instantiate it by name (via `parsePassPipeline`) at a requested
+  /// `PipelineSlot`. Static linking puts the pass in the same registry
+  /// `parsePassPipeline` reads (no split-registry caveat). Inline so the
+  /// template is instantiated in the plugin against MLIR's own headers, needing
+  /// no hip-compiler symbol.
   template <typename PassT> void registerPass() {
     mlir::PassRegistration<PassT>();
   }
@@ -214,25 +198,18 @@ public:
   }
 
   // ---------- Runtime bitcode and link libraries ----------------------
-  /// Contribute LLVM bitcode linked into the model module, after the in-tree
-  /// runtime bitcode.
+  /// Contribute LLVM bitcode linked into the model module after the in-tree
+  /// runtime bitcode. The host copies the bytes during this call, so a stack or
+  /// transient buffer is fine. `sizeBytes == 0` is a no-op (with a stderr
+  /// warning), so a plugin that produces bitcode conditionally can still call
+  /// this unconditionally.
   ///
-  /// Buffer ownership: the host copies the bytes during this call, so the
-  /// plugin's pointer need not outlive the registration entry -- a stack or
-  /// transient buffer is fine. The copy is a one-time, startup cost.
-  ///
-  /// `sizeBytes == 0` is a no-op (with a one-line stderr warning) so a plugin
-  /// that produces bitcode conditionally does not break the link with an
-  /// opaque bitcode-parse error.
-  ///
-  /// Symbol-override semantics (CAVEAT): the link uses
-  /// `Linker::Flags::OverrideFromSrc`, which is unconditional and
-  /// all-or-nothing -- every name collision with an in-tree symbol resolves
-  /// to the plugin's definition, with no per-symbol opt-in. A plugin symbol
-  /// that happens to share a name with an in-tree symbol therefore silently
-  /// shadows it. Vendors should prefix their symbols (e.g.
-  /// `amd_internal_wrap_alloc` rather than `wrap_alloc`). See
-  /// docs/plugin_authoring.md, "Symbol naming and override semantics."
+  /// CAVEAT -- symbol override: the link uses `Linker::Flags::OverrideFromSrc`,
+  /// which is all-or-nothing -- every name collision with an in-tree symbol
+  /// resolves to the plugin's definition, with no per-symbol opt-in, so a
+  /// same-named plugin symbol silently shadows the in-tree one. Vendors should
+  /// prefix their symbols (e.g. `amd_internal_wrap_alloc`, not `wrap_alloc`).
+  /// See docs/plugin_authoring.md, "Symbol naming and override semantics."
   void addRuntimeBitcode(const void *data, std::size_t sizeBytes) {
     vtable_->addRuntimeBitcode(self_, data, sizeBytes);
   }
@@ -266,20 +243,14 @@ HipEpPluginRegistry &getProcessPluginRegistry();
 
 /// Invoke every statically-linked plugin's registration entry
 /// (`hipEpRegisterPlugin_<id>`) against the per-process registry, exactly once
-/// per process (`std::call_once`). Defined in `lib/Compiler/StaticPlugins.cpp`,
-/// which CMake generates the plugin list into (see cmake/HipEpPlugins.cmake).
+/// (`std::call_once`). Defined in `lib/Compiler/StaticPlugins.cpp`, into which
+/// CMake generates the selected-plugin list (see cmake/HipEpPlugins.cmake).
 ///
-/// No-op when no plugins were selected (`HIPDNN_EP_COMPILER_PLUGINS` empty).
-/// Idempotent, so it is safe to call from every entry point that might run
-/// before pipelines are built (the `hip-compiler` driver, `hip-mlir-opt`
-/// main, etc.). A throwing plugin is contained (logged + skipped) rather than
-/// crashing the host.
-///
-/// After this returns, every selected plugin's `requestPipelineSlot` /
-/// `addRuntimeBitcode` / `addLibrary` / `addDialectRegistration` /
-/// `registerPass<T>()` calls have run and are queryable via the accessors
-/// below. Because the plugin is statically linked, `registerPass<T>()` lands in
-/// the host's single MLIR pass registry (no shared-library caveat).
+/// No-op when no plugins were selected. Idempotent, so it is safe to call from
+/// any entry point that might run before pipelines are built (the
+/// `hip-compiler` driver, `hip-mlir-opt` main). A throwing plugin is contained
+/// (logged + skipped), not fatal. After it returns, every plugin contribution
+/// is queryable via the accessors below.
 void dispatchPluginRegistrationsOnce();
 
 /// Read the (slot, passName) pairs recorded by every registered plugin's
@@ -302,60 +273,39 @@ llvm::SmallVector<llvm::StringRef> pluginPassesForSlot(PipelineSlot slot);
 llvm::SmallVector<void (*)(mlir::DialectRegistry &)>
 pluginDialectRegistrations();
 
-/// One bitcode buffer contributed by a plugin's `addRuntimeBitcode`
-/// call. The bytes are owned by the per-process plugin registry
-/// (the host copies the plugin's data during the
-/// `addRuntimeBitcode` call) and remain valid for the lifetime of
-/// the process. `data` is stable across the lifetime of the
-/// returned buffer view.
+/// One bitcode buffer contributed by a plugin's `addRuntimeBitcode` call. The
+/// bytes are host-owned (copied during the call) and stable for the process
+/// lifetime.
 struct PluginBitcodeBuffer {
   const void *data;
   std::size_t sizeBytes;
 };
 
-/// Read the bitcode buffers recorded by every registered plugin's
-/// `addRuntimeBitcode` call, in the order they were registered.
-/// Each `data` pointer is host-owned and stable for the lifetime of
-/// the process.
+/// Bitcode buffers from every plugin's `addRuntimeBitcode` call, in
+/// registration order. Each `data` pointer is host-owned and stable for the
+/// process lifetime.
 ///
-/// Used by `lib/Target/LLVM/LLVMBackend.cpp::linkRuntimeModule` to
-/// link plugin-contributed bitcode into the model module after the
-/// in-tree runtime, with `Linker::Flags::OverrideFromSrc` so vendor
-/// definitions shadow in-tree ones. See `addRuntimeBitcode` for the
-/// caveat on what "shadow" means in that flag's actual LLVM
-/// semantics.
+/// Used by `LLVMBackend::linkRuntimeModule` to link plugin bitcode into the
+/// model module after the in-tree runtime with `Linker::Flags::OverrideFromSrc`
+/// (see `addRuntimeBitcode` for that flag's override caveat).
 llvm::SmallVector<PluginBitcodeBuffer> pluginBitcodeBuffers();
 
-/// Read the library search paths recorded by every registered plugin's
-/// `addLibraryPath` call, in the order they were registered.
+/// Library search paths from every plugin's `addLibraryPath` call, in
+/// registration order. Returns owning `std::string` copies so callers cannot
+/// alias internal storage (negligible -- typically 0-2 entries).
 ///
-/// Returns owning `std::string` copies (rather than `StringRef`s
-/// into the per-process registry) so callers cannot accidentally
-/// alias internal storage. The cost is one short-string copy per
-/// entry, which is negligible -- there are typically 0-2 entries
-/// per process.
-///
-/// Used by `lib/Compiler/CompilerDriver.cpp::discoverLibraries` to
-/// extend the `library_paths` argument vector handed to lld-link
-/// (rendered as one `/LIBPATH:<path>` per entry on Windows; `-L<path>`
-/// on Linux). Paths are appended *after* the in-tree paths so that
-/// in-tree libraries continue to resolve from their canonical
-/// location.
+/// Used by `CompilerDriver::discoverLibraries` to extend the `library_paths`
+/// handed to lld-link (`/LIBPATH:<path>` on Windows, `-L<path>` on Linux),
+/// appended *after* the in-tree paths so in-tree libraries resolve first.
 llvm::SmallVector<std::string> pluginLibraryPaths();
 
-/// Read the library names (or full library paths) recorded by every
-/// registered plugin's `addLibrary` call, in the order they were
-/// registered. Returns owning `std::string` copies; see
-/// `pluginLibraryPaths` for the rationale.
+/// Library names (or full paths) from every plugin's `addLibrary` call, in
+/// registration order. Owning copies; see `pluginLibraryPaths`.
 ///
-/// Used by `lib/Compiler/CompilerDriver.cpp::discoverLibraries` to
-/// extend the `libraries` argument vector handed to lld-link.
-/// Entries are appended *after* the in-tree libraries; lld-link
-/// command-line search order means a plugin lib later in the list
-/// only contributes new symbols, it does not shadow in-tree ones.
-/// Vendors who need to override an in-tree symbol should use the
-/// bitcode mechanism (`addRuntimeBitcode`) instead -- see the
-/// caveat on its symbol override semantics.
+/// Used by `CompilerDriver::discoverLibraries` to extend the `libraries` handed
+/// to lld-link, appended *after* the in-tree libraries. Link search order means
+/// a later plugin lib only contributes new symbols -- it cannot shadow an
+/// in-tree one; to override an in-tree symbol use `addRuntimeBitcode` instead.
 llvm::SmallVector<std::string> pluginLibraries();
 
 } // namespace hip::compiler
