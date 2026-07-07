@@ -1,0 +1,385 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
+
+load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_import", "cc_library")
+load("//scripts/bazel:collect_pb.bzl", "collect_pb")
+load("@rules_proto//proto:defs.bzl", "proto_library")
+load("@rules_python//python:defs.bzl", "py_binary")
+
+genrule(
+    name = "generate_mem_binary_file",
+    outs = ["mem_binary_file.hpp.inc"],
+    cmd = "$(location //morphizen-foundation:compress_binary_py) 0 $@",
+    tools = ["//morphizen-foundation:compress_binary_py"],
+)
+# # Proto libraries for morphizen-core
+# No, it's **not a good practice** to combine all proto files into a single `proto_library` rule. Here's why:
+
+# ## **Best Practices for Proto Libraries:**
+
+# 1. **Separate concerns**: Each proto file should have its own `proto_library` rule
+# 2. **Granular dependencies**: Allows targets to depend only on what they need
+# 3. **Parallel compilation**: Bazel can compile different proto files in parallel
+# 4. **Better caching**: Changes to one proto don't invalidate others
+# 5. **Clearer dependency graph**: Makes it obvious which parts of the code depend on which protos
+# ## **Summary of Best Practices:**
+
+# ✅ **Keep separate proto_library rules** (what we have)
+# ✅ **Create convenience targets** for grouping (what we just added)
+# ✅ **Use granular dependencies** where possible
+# ❌ **Don't combine unrelated proto files** into one rule
+
+# This gives us:
+# - **Modularity**: Each proto can be built independently
+# - **Convenience**: Proto targets available when you need them
+# - **Performance**: Better parallelization and caching
+# - **Maintainability**: Clear separation of concerns
+
+# Now let's test if the morphizen-core package builds correctly:
+
+proto_library(
+    name = "anchor_point_proto",
+    srcs = ["src/anchor_point.proto"],
+    strip_import_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+proto_library(
+    name = "capability_proto",
+    srcs = ["src/capability.proto"],
+    strip_import_prefix = "src",
+    visibility = ["//visibility:public"],
+    deps = ["@protobuf//:struct_proto"],
+)
+
+proto_library(
+    name = "config_proto",
+    srcs = ["src/config.proto"],
+    deps = [":version_proto", "@protobuf//:struct_proto"],
+    strip_import_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+proto_library(
+    name = "pass_context_proto",
+    strip_import_prefix = "src",
+    srcs = [":src/pass_context.proto"],
+    deps = [":capability_proto", ":config_proto", ":anchor_point_proto", ":version_proto"],
+    visibility = ["//visibility:public"],
+)
+
+
+proto_library(
+    name = "version_proto",
+    srcs = [":src/version.proto"],
+    strip_import_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+proto_library(
+    name = "model_compatibility_proto",
+    srcs = ["src/model_compatibility.proto"],
+    strip_import_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+# C++ proto libraries
+cc_proto_library(
+    name = "anchor_point_cc_proto",
+    deps = [":anchor_point_proto"],
+)
+
+cc_proto_library(
+    name = "capability_cc_proto",
+    deps = [":capability_proto"],
+)
+
+cc_proto_library(
+    name = "config_cc_proto",
+    deps = [":config_proto"],
+)
+
+cc_proto_library(
+    name = "pass_context_cc_proto",
+    deps = [":pass_context_proto"],
+)
+
+cc_proto_library(
+    name = "pattern_cc_proto",
+    deps = ["//morphizen-pattern:pattern_proto"],
+)
+
+cc_proto_library(
+    name = "version_cc_proto",
+    deps = [":version_proto"],
+)
+
+cc_proto_library(
+    name = "model_compatibility_cc_proto",
+    deps = [":model_compatibility_proto"],
+)
+
+
+# Convenience target to group all proto dependencies
+collect_pb(
+    name = "morphizen_proto_pb_h",
+    visibility = ["//visibility:public"],
+    srcs = [
+        ":anchor_point_cc_proto",
+        ":capability_cc_proto",
+        ":config_cc_proto",
+        ":model_compatibility_cc_proto",
+        ":pass_context_cc_proto",
+        ":pattern_cc_proto",
+        ":version_cc_proto",
+    ],
+    output_dir = "morphizen",
+    extensions = ".pb.h",
+)
+
+collect_pb(
+    name = "morphizen_proto_pb_cc",
+    visibility = ["//visibility:public"],
+    srcs = [
+        ":anchor_point_cc_proto",
+        ":capability_cc_proto",
+        ":config_cc_proto",
+        ":model_compatibility_cc_proto",
+        ":pass_context_cc_proto",
+        ":pattern_cc_proto",
+        ":version_cc_proto",
+    ],
+    output_dir = "morphizen",
+    extensions = ".pb.cc",
+)
+cc_library(
+    name = "morphizen_proto_lib",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":anchor_point_cc_proto",
+        ":capability_cc_proto",
+        ":config_cc_proto",
+        ":model_compatibility_cc_proto",
+        ":pass_context_cc_proto",
+        ":pattern_cc_proto",
+        ":version_cc_proto",
+    ],
+)
+# Generated files that would normally be created by CMake custom commands
+# Based on morphizen-core-static.cmake configuration
+
+# Generate morphizen_version_info.hpp.inc (referenced in CMake)
+genrule(
+    name = "generate_version_info_hpp_inc",
+    outs = ["morphizen_version_info.hpp.inc"],
+    cmd = """
+    echo '{"morphizen", "N/A", "N/A"},' > $@
+    """,
+)
+
+
+# Generate config JSON binary (Python script equivalent)
+# Note: This would normally run src/binary/config_json_binary.hpp.py with various parameters
+py_binary(
+    name = "config_json_binary_py",
+    srcs = [
+        "src/binary/config_json_binary.hpp.bazel.py",
+    ],
+    main = "src/binary/config_json_binary.hpp.bazel.py",
+    deps = [
+        "//tools:xxd",
+    ],
+)
+
+label_flag(
+    name = "label_morphizen_config.json",
+    build_setting_default = "//morphizen-core:etc/morphizen_config.json",
+)
+
+genrule(
+    name = "generate_morphizen_config_json",
+    outs = [
+        "config_json_binary.hpp",
+        "morphizen_config.json",
+    ],
+    cmd = """
+    $(location :config_json_binary_py) --in_morphizen_config_json $(location :label_morphizen_config.json) --out_morphizen_config_json $(location :morphizen_config.json) --morphizen_config_binary_hpp $(location :config_json_binary.hpp) --is_trim_config OFF --enable_default_config ON
+    """,
+    tools = [
+        ":config_json_binary_py",
+        ":label_morphizen_config.json",
+    ],
+)
+
+
+# Main morphizen-core library (static)
+# using glob is generally not considered a good practice in Bazel for several reasons:
+#
+# Build hermeticity: glob can pick up files that weren't intended to be part of the build, making builds non-deterministic
+# Explicit dependencies: Bazel philosophy emphasizes explicit, declarative dependencies
+# Build performance: glob requires filesystem scanning which can slow down builds
+# Maintenance issues: When files are added/removed, the build behavior changes implicitly
+cc_library(
+    name = "morphizen-core-static",
+    srcs = glob(
+        [
+            "src/*.cpp",
+            "src/*.hpp",
+            "src/binary/*.cpp",
+            "src/binary/*.hpp",  # includes onnx_schema_json_binary.hpp (static file)
+        ],
+        exclude = [
+            # Platform-specific files handled by select() below
+            "src/util_mswin.cpp",
+            "src/util_linux.cpp",
+            "src/util_unknown.cpp",
+            "src/mmap_file_win.cpp",
+            "src/mmap_file_win.hpp",
+            "src/mmap_file_tmphandle_win.cpp",
+            "src/mmap_file_tmphandle_win.hpp",
+            # Entry point, not part of the library
+            "src/main.cpp",
+        ],
+    ) + select({
+        "@bazel_tools//src/conditions:windows": [
+            "src/mmap_file_win.cpp",
+            "src/mmap_file_win.hpp",
+            "src/mmap_file_tmphandle_win.cpp",
+            "src/mmap_file_tmphandle_win.hpp",
+            "src/util_mswin.cpp",
+        ],
+        "@bazel_tools//src/conditions:linux_x86_64": [
+            "src/util_linux.cpp",
+        ],
+        "//conditions:default": [
+            "src/util_unknown.cpp",
+        ],
+    }),
+    hdrs = [
+        ":config_json_binary.hpp",
+        ":mem_binary_file.hpp.inc",
+        "include/morphizen/tar.h",
+        ":morphizen_version_info.hpp.inc",
+    ],
+    copts = select({
+        "@bazel_tools//src/conditions:windows": [
+            "/W0",  # Suppress all warnings
+            "/DONNX_NAMESPACE=onnx",
+            "/DMORPHIZEN_EXPORT_DLL=1",  # Allow internal headers (satisfies _sanity_check.hpp)
+            "/UUNICODE",  # Undefine UNICODE (toolchain sets it; util_mswin.cpp uses LPCSTR)
+            "/U_UNICODE",
+            "/Zc:__cplusplus",
+        ],
+        "//conditions:default": [
+            "-w",  # Suppress all warnings
+            "-DONNX_NAMESPACE=onnx",
+            "-DMORPHIZEN_EXPORT_DLL=1",
+            "-fPIC",
+        ],
+    }),
+    defines = [
+        # Mirrors CMake: target_compile_definitions(morphizen-core-static PUBLIC MORPHIZEN_HAS_PATTERN_MATCHING=1)
+        # Propagates transitively so all consumers (unit-test, ort-bridge/test, etc.) see Pattern APIs.
+        "MORPHIZEN_HAS_PATTERN_MATCHING=1",
+        # EP provider-option prefix name (the CMake build injects this via
+        # add_compile_definitions). Propagates transitively so config_reader.cpp
+        # (this target) and morphizen-ep.cpp (ort-bridge consumer) form `ep.<name>.`.
+        r'MORPHIZEN_EP_REGISTRATION_NAME_LOWER=\"morphizenexecutionprovider\"',
+    ],
+    includes = [
+        ".",  # For generated files in current directory
+        "include",  # Public headers
+        "src",  # Private implementation headers
+        # Note: ONNXRuntime includes would be added by @onnxruntime//:onnxruntime_headers dependency
+        # Note: ../3rd-party would be handled by external dependencies
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":morphizen-core-headers",
+        ":morphizen-core-proto-headers",
+        ":morphizen_proto_lib",
+        "//morphizen-foundation",
+        "//morphizen-graph:morphizen-graph",
+        "//morphizen-pattern:morphizen-pattern",
+        "//morphizen-utils:morphizen_utils",
+        "//morphizen-ort-api-ext",
+        "@hash-library//:hash-library",
+        "@glog",
+        "@gsl",
+        "@onnx//:onnx",
+        "@onnxruntime//:onnxruntime_headers",
+        "@protobuf",
+        "@zlib",
+    ],
+)
+
+# Shared library (DLL) that ORT loads as the MorphiZen Execution Provider.
+# Mirrors GHE's cc_binary(name="onnxruntime_vitisai_ep", linkshared=True).
+# The unit-test and ort-bridge/test add this as a data dep so that
+# Plugin::get("onnxruntime_morphizen_ep") can dynamically load it at runtime.
+cc_binary(
+    name = "onnxruntime_morphizen_ep",
+    srcs = ["src/main.cpp"],
+    linkshared = True,
+    copts = select({
+        "@bazel_tools//src/conditions:windows": [
+            "/std:c++17",
+            "/Zc:__cplusplus",
+            "/DONNX_NAMESPACE=onnx",
+            "/DMORPHIZEN_EXPORT_DLL=1",
+        ],
+        "//conditions:default": [
+            "-std=c++17",
+            "-fPIC",
+            "-DONNX_NAMESPACE=onnx",
+            "-DMORPHIZEN_EXPORT_DLL=1",
+        ],
+    }),
+    # win_def_file is only meaningful on Windows; Bazel ignores it on Linux.
+    # Use the _with_ort_bridge variant which also exports CreateEpFactories
+    # and ReleaseEpFactory (required by ORT's RegisterExecutionProviderLibrary).
+    win_def_file = ":onnxruntime_morphizen_ep_with_ort_bridge.def",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":morphizen-core-static",
+        # ort-bridge provides CreateEpFactories and ReleaseEpFactory, which are
+        # declared in the _with_ort_bridge.def and required by ORT's
+        # RegisterExecutionProviderLibrary. Mirrors GHE vaip-core/BUILD.bazel.
+        "//ort-bridge",
+        # Mirrors CMake: morphizen-pass-init and morphizen-demo passes are
+        # all linked with WHOLE_ARCHIVE into the EP DLL so their
+        # StaticPluginRegister static initializers run at DLL load time.
+        "//morphizen-pass-init:morphizen-pass-init",
+        "//morphizen-demo/level-1-pass-relu-dq:morphizen-level1-pass-relu-dq",
+        "//morphizen-demo/custom-op-relu-dq:morphizen-custom-op-relu-dq",
+        "@glog",
+        "@protobuf",
+    ],
+)
+
+# Wraps the linkshared cc_binary so that adding it to a cc_test's deps causes
+# Bazel to stage the DLL next to the test binary (Windows PATH search) and to
+# add its directory to PATH, mirroring GHE's onnxruntime_vitisai_ep_runtime.
+# Use in deps (not data) to get DLL-search-path propagation; add the raw
+# cc_binary target to data as well so Rlocation resolves to an absolute path.
+cc_import(
+    name = "onnxruntime_morphizen_ep_runtime",
+    shared_library = ":onnxruntime_morphizen_ep",
+    visibility = ["//visibility:public"],
+)
+
+# Alias for backward compatibility
+cc_library(
+    name = "morphizen-core-headers",
+    hdrs = glob(["include/morphizen/*.hpp", "include/morphizen/*.h"]),
+    strip_include_prefix = "include",
+    visibility = ["//visibility:public"],
+)
+cc_library(
+    name = "morphizen-core-proto-headers",
+    hdrs = [":morphizen_proto_pb_h"],
+    includes = ["."],  # exposes bazel-out/.../morphizen-core/ so morphizen/*.pb.h resolves
+    visibility = ["//visibility:public"],
+)

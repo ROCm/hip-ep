@@ -1,0 +1,15 @@
+cc_binary(
+    name = "test_onnxruntime",
+    srcs = ["test_onnxruntime.cpp"],
+    deps = [
+        "@onnxruntime//:onnxruntime_headers",
+        "//3rd-party/onnxruntime-morphizen-headers",
+    ],
+    copts = select({
+        "@bazel_tools//src/conditions:windows": ["/std:c++17"],
+        "//conditions:default": ["-std=c++17"],
+    }),
+    # Requires linked ORT (cmake build); exclude from wildcard //... builds
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+)
