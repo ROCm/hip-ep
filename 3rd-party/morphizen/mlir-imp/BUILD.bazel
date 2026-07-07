@@ -1,0 +1,42 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "mlir-imp",
+    srcs = glob(["src/*.cpp", "src/*.hpp"]),
+    copts = select({
+        "@bazel_tools//src/conditions:windows": [
+            "/W0",
+            "/wd4946",  # MLIR uses reinterpret_cast between opaque types by design
+            "/wd4702",  # unreachable code from LLVM/MLIR headers
+            "/DONNX_NAMESPACE=onnx",
+            "/Zc:__cplusplus",
+        ],
+        "//conditions:default": [
+            "-w",
+            "-DONNX_NAMESPACE=onnx",
+            "-fPIC",
+        ],
+    }),
+    # alwayslink: static plugin registration via StaticPluginRegister must not
+    # be stripped by the linker (equivalent to CMake WHOLE_ARCHIVE).
+    alwayslink = True,
+    visibility = ["//visibility:public"],
+    deps = [
+        "//morphizen-ort-api-ext",
+        "//morphizen-utils:morphizen_utils",
+        "@gsl",
+        "@llvm-project-overlay//mlir:IR",
+        "@llvm-project-overlay//mlir:ArithDialect",
+        "@llvm-project-overlay//mlir:FuncDialect",
+        "@llvm-project-overlay//mlir:Parser",
+        "@llvm-project-overlay//mlir:BytecodeWriter",
+        "@llvm-project-overlay//mlir:Support",
+        "@llvm-project-overlay//mlir:TensorDialect",
+        "@llvm-project-overlay//mlir:TransformUtils",
+    ],
+)

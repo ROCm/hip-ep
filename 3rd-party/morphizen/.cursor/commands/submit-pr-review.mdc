@@ -1,0 +1,57 @@
+---
+description: Submit a pull request review
+triggers:
+  - submit review
+  - approve pr
+  - pr approve
+---
+
+# Submit Pull Request Review
+
+Submit your review for a GitHub pull request with approval, change requests, or comments.
+
+## Usage
+
+```powershell
+# Run from project root
+tools/pr-review/submit_review.ps1 <PR_NUMBER> <STATUS>
+
+# Status options: approve, changes, comment
+
+# Examples
+tools/pr-review/submit_review.ps1 437 approve
+tools/pr-review/submit_review.ps1 555 changes
+tools/pr-review/submit_review.ps1 789 comment
+```
+
+## What This Does
+
+The script will:
+1. Check for existing review file (pr<NUMBER>_review.md)
+2. If not found, prompt for review message (see docs/workflows/pr-workflow.md for guidelines)
+3. Let you edit the review
+4. Submit via GitHub CLI
+5. Optionally clean up the review file
+
+## Quick Approve (One-liner)
+
+For simple approvals without detailed review:
+```powershell
+gh pr review <PR_NUMBER> --approve --body "LGTM! ✅"
+```
+
+## Review Template
+
+The template includes:
+- Summary and changes reviewed
+- Key improvements/issues
+- Strengths and weaknesses
+- Code quality assessment
+- Recommendations
+- PR description compliance check
+- Final verdict
+
+## Documentation
+
+- PR Workflow Guide: `docs/workflows/pr-workflow.md`
+- Review Guidelines: See "Reviewing a Pull Request" section in PR workflow guide

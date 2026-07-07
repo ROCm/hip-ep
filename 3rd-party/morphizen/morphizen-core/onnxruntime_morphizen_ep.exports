@@ -1,0 +1,22 @@
+# Linker version script for libonnxruntime_morphizen_ep.so (Linux).
+#
+# Export only this library's own API; localize the statically-linked LLVM
+# symbols. If they leak into the global scope, ROCm's libamd_comgr.so binds its
+# own version-tagged (@LLVM_22.0) llvm:: references to our ABI-incompatible
+# upstream-LLVM copy and its in-process device-code compile segfaults. Hidden
+# ELF visibility is insufficient (LLVM marks parts of its public API
+# default-visible). No llvm:: name contains "morphizen"/"mlir_compilation", so
+# the globs never keep a conflicting symbol. Windows uses the .def instead.
+{
+  global:
+    *morphizen*;
+    *mlir_compilation*;
+    create_ep_context_nodes;
+    profiler_collect;
+    get_compiled_model_compatibility_info;
+    validate_compiled_model_compatibility_info;
+    CreateEpFactories;
+    ReleaseEpFactory;
+  local:
+    *;
+};
