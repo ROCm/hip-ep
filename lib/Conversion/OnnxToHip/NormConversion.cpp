@@ -12,6 +12,7 @@
 //
 // Currently implemented:
 //   - onnx.Custom(SimplifiedLayerNormalization)         -> hip.rms_norm
+//   - onnx.RMSNormalization (standard, opset 23+)       -> hip.rms_norm
 //   - onnx.Custom(SkipSimplifiedLayerNormalization)     -> hip.skip_rms_norm
 //   - onnx.Custom(SkipLayerNormalization)               -> add + layer_norm
 //   - onnx.LayerNormalization (standard, opset 17+)     -> hip.layer_norm
@@ -112,6 +113,62 @@ mlir::LogicalResult SimplifiedLayerNormToHip::matchAndRewrite(
   auto hipOp =
       mlir::hip::RmsNormOp::create(rewriter, loc, context, input, scale, init,
                                    axisI64Attr, epsilonAttr, stashTypeI64Attr);
+
+  rewriter.replaceOp(op, hipOp->getResult(0));
+  return mlir::success();
+}
+
+/// onnx.RMSNormalization -> hip.rms_norm
+///
+/// Standard ONNX RMSNormalization (opset 23+) is semantically identical to
+/// com.microsoft SimplifiedLayerNormalization: RMS over the trailing axes
+/// followed by a broadcast multiply with scale.
+struct RMSNormalizationToHip : public mlir::RewritePattern {
+  RMSNormalizationToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.RMSNormalization", /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override;
+};
+
+mlir::LogicalResult RMSNormalizationToHip::matchAndRewrite(
+    mlir::Operation *op, mlir::PatternRewriter &rewriter) const {
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return rewriter.notifyMatchFailure(op, "missing context argument");
+  mlir::Value context = *ctxOrFailure;
+
+  mlir::Location loc = op->getLoc();
+
+  if (op->getNumOperands() != 2)
+    return rewriter.notifyMatchFailure(
+        op, "expected 2 operands for RMSNormalization");
+
+  mlir::Value input = op->getOperand(0);
+  mlir::Value scale = op->getOperand(1);
+
+  int64_t axis = -1;
+  if (auto axisAttr = op->getAttrOfType<mlir::IntegerAttr>("axis"))
+    axis = axisAttr.getSInt();
+
+  llvm::APFloat epsValue(9.99999974E-6f);
+  if (auto epsilonAttr = op->getAttrOfType<mlir::FloatAttr>("epsilon"))
+    epsValue = epsilonAttr.getValue();
+
+  int64_t stashType = 1;
+  if (auto stashTypeAttr = op->getAttrOfType<mlir::IntegerAttr>("stash_type"))
+    stashType = stashTypeAttr.getSInt();
+
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+
+  auto hipOp = mlir::hip::RmsNormOp::create(
+      rewriter, loc, context, input, scale, init,
+      rewriter.getI64IntegerAttr(axis),
+      rewriter.getF32FloatAttr(epsValue.convertToFloat()),
+      rewriter.getI64IntegerAttr(stashType));
 
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
@@ -578,8 +635,9 @@ LayerNormToHip::matchAndRewrite(mlir::Operation *op,
 
 void populateNormConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx) {
-  patterns.add<SimplifiedLayerNormToHip, SkipSimplifiedLayerNormToHip,
-               SkipLayerNormToHip, LayerNormToHip>(ctx);
+  patterns.add<SimplifiedLayerNormToHip, RMSNormalizationToHip,
+               SkipSimplifiedLayerNormToHip, SkipLayerNormToHip,
+               LayerNormToHip>(ctx);
 }
 
 } // namespace hip
