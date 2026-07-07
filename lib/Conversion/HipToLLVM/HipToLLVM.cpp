@@ -301,39 +301,26 @@ void ConvertHipToLLVMPass::runOnOperation() {
   target.addIllegalOp<memref::AllocOp, memref::DeallocOp>();
   target.addLegalOp<ModuleOp>();
 
-  // Out-of-tree dialects (e.g. a plugin-contributed vendor dialect) inject
-  // their HIP->LLVM lowering through the standard upstream mechanism: for every
-  // dialect in use that implements ConvertToLLVMPatternInterface, let it add
-  // conversion patterns AND mark its own ops illegal on `target`.
+  // Out-of-tree dialects (e.g. a plugin vendor dialect) inject their HIP->LLVM
+  // lowering the standard upstream way: every dialect in use that implements
+  // ConvertToLLVMPatternInterface adds its conversion patterns AND marks its
+  // own ops illegal on `target`.
   //
-  // This is the body of upstream's populateConversionTargetFromOperation,
-  // inlined so we can guard the interface lookup with hasPromisedInterface().
-  // The upstream helper dyn_casts every walked dialect to the interface
-  // unconditionally, and a dyn_cast onto a Dialect routes through
-  // Dialect::getRegisteredInterface -> handleUseOfUndefinedPromisedInterface,
-  // which report_fatal_errors (in an assertions-enabled MLIR build) for any
-  // dialect that *promised* the interface but never registered its extension.
-  // The blanket walk is therefore NOT a no-op for in-tree dialects: after
-  // bufferization the module contains memref/func/arith/cf/..., all of which
-  // declarePromisedInterface<ConvertToLLVMPatternInterface> upstream, and on an
-  // assertions-enabled LLVM the blanket call aborts the entire compile ("LLVM
-  // ERROR: checking for an interface ... promised by dialect 'memref' but never
-  // implemented") for essentially every model.
-  //
-  // We cannot fix this by *fulfilling* the promises (registering the in-tree
-  // ConvertMemRef/Func/Arith/CFToLLVM interface extensions the way upstream's
-  // -convert-to-llvm pass does via LoadDependentDialectExtension): this pass
-  // deliberately hand-rolls the standard-dialect lowering through the explicit
-  // populate*ToLLVM calls above, so also driving it through the interface would
-  // populate those patterns twice and mark the same ops illegal twice. Instead
-  // we skip the interface for any dialect that only promised it.
-  // hasPromisedInterface() is a plain set-membership check compiled into every
-  // build (release and assertions alike), so the guard is safe everywhere and
-  // preserves the intended behavior: a plugin vendor dialect that genuinely
-  // implements the interface has its promise resolved when the extension is
-  // added (hasPromisedInterface() == false), so it passes the guard and still
-  // contributes its patterns. See docs/design/plugin-interface.md "Custom-op
-  // lowering".
+  // This inlines upstream's populateConversionTargetFromOperation but
+  // guards the interface lookup with hasPromisedInterface(). Upstream
+  // dyn_casts every walked dialect unconditionally, which report_fatal_errors
+  // (assertions build) for a dialect that only *promised* the interface but
+  // never registered it. After bufferization the module is full of such
+  // dialects (memref, func, arith, cf), so the blanket walk would abort
+  // essentially every compile. We can't fulfill those promises instead:
+  // this pass hand-rolls standard-dialect lowering via the explicit
+  // populate*ToLLVM calls above, so routing it through the interface too
+  // would populate them twice. So skip any dialect that only promised the
+  // interface -- hasPromisedInterface() is a cheap set check on every build.
+  // A plugin dialect that genuinely implements it has its promise resolved
+  // when its extension is added (hasPromisedInterface() == false), so it
+  // still passes the guard and contributes its patterns. See
+  // docs/design/plugin-interface.md "Custom-op lowering".
   //
   // Before (upstream blanket walk -- aborts on memref's unfulfilled promise):
   //   populateConversionTargetFromOperation(module, target, tc, patterns);
@@ -347,10 +334,8 @@ void ConvertHipToLLVMPass::runOnOperation() {
       Dialect *dialect = op->getDialect();
       if (!dialect || !seenDialects.insert(dialect).second)
         return;
-      // A dialect that only *promised* the interface (memref/func/arith/cf and
-      // friends after bufferization) would fatal under dyn_cast in an
-      // assertions build. Their lowering is the explicit populate* calls above,
-      // so skip them here.
+      // Promised-but-unregistered dialects would fatal under dyn_cast in an
+      // assertions build; skip them (their lowering is the populate* above).
       if (dialect->hasPromisedInterface(
               dialect->getTypeID(),
               ConvertToLLVMPatternInterface::getInterfaceID()))
