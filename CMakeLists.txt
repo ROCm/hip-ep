@@ -205,6 +205,17 @@ if(BUILD_HIP_TOOLS)
   # plugin package (in-tree: test/plugin; out-of-tree: the paths above) has
   # registered.
   hipdnn_ep_finalize_static_plugins()
+
+  # Hide the statically-absorbed LLVM/MLIR symbols from each host executable's
+  # dynamic table so they cannot interpose ROCm comgr's private libLLVM at HIP
+  # init (see hipdnn_ep_harden_comgr_safe() in cmake/HipEpPlugins.cmake). Applied
+  # unconditionally, not just when a plugin is selected: the tools link LLVM/MLIR
+  # statically regardless, so the interposition hazard is latent in every build.
+  foreach(_host_exe hip-test hip-compiler hip-mlir-opt hip-onnx-runner hip-inspect)
+    if(TARGET ${_host_exe})
+      hipdnn_ep_harden_comgr_safe(${_host_exe})
+    endif()
+  endforeach()
 endif()
 
 # Python wheel packaging (opt-in; defines the 'wheel' target). Added last so

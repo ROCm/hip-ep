@@ -174,3 +174,30 @@ function(hipdnn_ep_finalize_static_plugins)
       "(HIPDNN_EP_COMPILER_PLUGINS='${HIPDNN_EP_COMPILER_PLUGINS}')")
   endif()
 endfunction()
+
+# hipdnn_ep_harden_comgr_safe(<executable-target>)
+#
+# The static-linkage model above absorbs LLVM/MLIR -- and any plugin that
+# references them -- into the host binary. On ELF that is not sufficient on its
+# own: if the shared aggregate libLLVM.so ever becomes DT_NEEDED (it is dragged
+# in transitively by an MLIR imported target's interface deps), the linker
+# unifies definitions and promotes the binary's statically-absorbed
+# llvm::/mlir:: symbols into .dynsym with default visibility. Those exported
+# symbols then INTERPOSE the private libLLVM that ROCm's comgr dlopen()s at HIP
+# init: comgr's global constructors bind to our (different-build, different-ABI)
+# LLVM and crash the process before any kernel runs. A plugin that pulls in MLIR
+# is the canonical trigger; a plugin-free build is only accidentally safe
+# because --as-needed drops the shared libLLVM.
+#
+# The DLLs are already protected by their --version-script (local: *); the tool
+# executables have no such script, so hide every static-archive symbol from the
+# dynamic table here. This matches the idiom LLVM uses on its own tools and does
+# not affect JIT symbol resolution (LlvmIrJit resolves runtime symbols from the
+# JIT'd runtime bitcode + absoluteSymbols + DT_NEEDED shared libs, never from the
+# executable's own .dynsym). No-op off ELF -- Mach-O/PE have no cross-module
+# symbol interposition and neither linker supports --exclude-libs.
+function(hipdnn_ep_harden_comgr_safe _target)
+  if(UNIX AND NOT APPLE)
+    target_link_options(${_target} PRIVATE "LINKER:--exclude-libs,ALL")
+  endif()
+endfunction()
