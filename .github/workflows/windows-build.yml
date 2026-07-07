@@ -747,11 +747,18 @@ jobs:
       # (those are NATIVE-only, set in the native smoke steps below).
       # Output is tee'd to results/ for QPS extraction. Non-zero exit code
       # sets FAILED but continues so all models are tested.
+      #
+      # GPU-test asset dirs (model/, amdgpu-oga-models/, l2-test-models/) resolve
+      # under ${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}: set the repo/org
+      # Actions variable GPU_TEST_ASSET_ROOT to a stable path (and stage the dirs
+      # there) so persistent assets need not live under the repo-name-derived
+      # _work/<repo>/, which strands them on a repo rename. Unset => runner.workspace
+      # (unchanged from today).
       - name: Run onnxruntime_perf_test (GPU)
         shell: cmd
         run: |
           set PATH=%CD%\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
-          set MODEL_DIR=${{ runner.workspace }}\model
+          set MODEL_DIR=${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\model
           if not exist "%MODEL_DIR%" (
             echo [ERROR] MODEL_DIR not found: %MODEL_DIR%
             exit /b 1
@@ -795,7 +802,7 @@ jobs:
           set THEROCK_DIST=%CD%\therock-dist
           set PATH=%CD%\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;%CD%\therock-dist\lib
-          set MODEL_DIR=${{ runner.workspace }}\model
+          set MODEL_DIR=${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\model
           if not exist "%MODEL_DIR%" (
             echo [SKIP] MODEL_DIR not found: %MODEL_DIR%
             exit /b 0
@@ -841,7 +848,7 @@ jobs:
           set THEROCK_DIST=%CD%\therock-dist
           set PATH=%CD%\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;%CD%\therock-dist\lib
-          set MODEL_DIR=${{ runner.workspace }}\model
+          set MODEL_DIR=${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\model
           if not exist "%MODEL_DIR%" (
             echo [SKIP] MODEL_DIR not found: %MODEL_DIR%
             exit /b 0
@@ -883,7 +890,7 @@ jobs:
           $pkgBin = Join-Path $PWD "gpu-test-package\bin"
           $env:PATH = "$PWD\therock-dist\bin;$pkgBin;$env:PATH"
 
-          $modelDir = "${{ runner.workspace }}\model"
+          $modelDir = "${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\model"
           if (-not (Test-Path $modelDir)) {
             Write-Host "[SKIP] MODEL_DIR not found: $modelDir"
             exit 0
@@ -963,7 +970,7 @@ jobs:
           # generated once on the GPU runner and persists across runs, so just
           # consume it here (no re-copy / no config rewrite). It must be present
           # -- treat its absence as an error, not a skip.
-          $ogaModelRoot = "${{ runner.workspace }}\amdgpu-oga-models"
+          $ogaModelRoot = "${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\amdgpu-oga-models"
           if (-not (Test-Path $ogaModelRoot)) {
             Write-Host "[ERROR] AMDGPU OGA model directory not found: $ogaModelRoot"
             exit 1
@@ -1057,7 +1064,7 @@ jobs:
           $ErrorActionPreference = 'Continue'
           $PSNativeCommandUseErrorActionPreference = $false
 
-          $model = "${{ runner.workspace }}\amdgpu-oga-models\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml"
+          $model = "${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\amdgpu-oga-models\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml"
           if (-not (Test-Path $model)) { Write-Host "[SKIP] model not found: $model"; exit 0 }
 
           # The morphizen wheel now bundles the whole AMD GPU umbrella chain
@@ -1106,7 +1113,7 @@ jobs:
           rem The EP DLL is now hipgpu.dll; hip-onnx-runner's legacy default name
           rem is onnxruntime_morphizen_ep.dll, so point it at the new DLL.
           set MORPHIZEN_EP_LIB=%CD%\gpu-test-package\bin\hipgpu.dll
-          set L2_MODEL_DIR=${{ runner.workspace }}\l2-test-models
+          set L2_MODEL_DIR=${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\l2-test-models
           if not exist "%L2_MODEL_DIR%" (
             echo [SKIP] L2 model directory not found: %L2_MODEL_DIR%
             exit /b 0
