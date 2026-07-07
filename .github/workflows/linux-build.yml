@@ -381,7 +381,7 @@ jobs:
           set -euo pipefail
           INSTALL="${{ runner.workspace }}/install"
           ORT="${{ runner.workspace }}/ort-install"
-          THEROCK="${{ runner.workspace }}/build/onnx-hipdnn-ep/_therock"
+          THEROCK="${{ runner.workspace }}/build/$(basename "$GITHUB_WORKSPACE")/_therock"
           # The renamed AMDGPU OGA integration dlopen's libamdgpu-ep.so; the
           # project still builds the EP as libhipgpu.so. Ship the expected
           # filename so the genai auto-loader resolves it (deps + closure below
