@@ -16,7 +16,7 @@ from comments in `lib/Conversion/OnnxToHip/LoopOutline.cpp`,
 
 > **TODO (in-flight)**: the importer-side half of this contract ships
 > in [MorphiZen PR #228](https://github.com/ROCm/MorphiZen/pull/228).
-> Until that PR is merged and the `3rd-party/morphizen` submodule is
+> Until that PR is merged and the `morphizen` submodule is
 > bumped past the merge, the importer in this repo still emits
 > `tensor<>` (rank-0) for values whose shape it could not derive,
 > not `tensor<*xT>`. The EP-side cleanup (deletion of
@@ -64,7 +64,7 @@ breaks every downstream pass that does rank-aware reasoning (the
 
 ## What each side owns
 
-### Importer side: morphizen (`3rd-party/morphizen`)
+### Importer side: morphizen (`morphizen`)
 
 - **`mlir-imp/src/mlir-constants.cpp::onnxElementTypeToMlirType`** is
   the boundary that picks the MLIR type from an ONNX element-type +

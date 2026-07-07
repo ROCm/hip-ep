@@ -18,7 +18,7 @@ if(HIPDNN_EP_LINK_HIP_HOST)
 endif()
 
 # Re-import LLVM into this scope (already resolved transitively via
-# 3rd-party/morphizen) so llvm_map_components_to_libnames works here.
+# morphizen) so llvm_map_components_to_libnames works here.
 find_package(LLVM REQUIRED CONFIG)
 list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
 include(AddLLVM)

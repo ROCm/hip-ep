@@ -38,8 +38,8 @@ if(TARGET morphizen-core-static)
   target_link_libraries(hip-inspect PRIVATE morphizen::morphizen-core-static)
   target_include_directories(hip-inspect
     PRIVATE
-    ${CMAKE_SOURCE_DIR}/3rd-party/morphizen/morphizen-core/include        # morphizen/plugin.hpp
-    ${CMAKE_SOURCE_DIR}/3rd-party/morphizen/morphizen-foundation/include  # morphizen-foundation
+    ${CMAKE_SOURCE_DIR}/morphizen/morphizen-core/include        # morphizen/plugin.hpp
+    ${CMAKE_SOURCE_DIR}/morphizen/morphizen-foundation/include  # morphizen-foundation
   )
 endif()
 

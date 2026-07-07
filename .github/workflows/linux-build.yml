@@ -46,7 +46,7 @@ jobs:
     # No draft-PR gate: the cache-priming strategy needs every PR push.
     runs-on: ubuntu-latest
     steps:
-      # MorphiZen is vendored in-tree as a git subtree under 3rd-party/morphizen,
+      # MorphiZen is vendored in-tree as a git subtree under morphizen,
       # so no deploy key or submodule initialization is needed.
       #
       # Checkout at the workspace root. build/, install/, llvm-install/,
