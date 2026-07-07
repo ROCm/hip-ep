@@ -2119,6 +2119,42 @@ def Hip_ExpOp : Hip_DpsOp<"exp"> {
   }];
 }
 
+def Hip_AbsOp : Hip_DpsOp<"abs", /*traits=*/[],
+                          /*outsAccessor=*/"Y",
+                          /*autoReify=*/1,
+                          /*autoInfer=*/1,
+                          /*declareInfer=*/1> {
+  let summary = "Element-wise absolute value: y = abs(x)";
+  let description = [{
+    Computes the absolute value of each element.
+    Implements the standard ONNX Abs operator.
+
+    Formula: Y = abs(X)
+
+    Lowered via the unified unary elementwise path (wrap_abs).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.abs(%ctx) ins(%x : memref<3x4xf32, 1>)
+                  outs(%y : memref<3x4xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_NegOp : Hip_DpsOp<"neg", /*traits=*/[],
                           /*outsAccessor=*/"Y",
                           /*autoReify=*/1,

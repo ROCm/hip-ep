@@ -1423,6 +1423,18 @@ int wrap_div(RuntimeState *state, void *lhs, void *rhs, void *output,
   return 0;
 }
 
+int wrap_abs(RuntimeState *state, void *input, void *output,
+             int64_t num_elements, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_abs\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_abs(num_elements=%lld, data_type=%s(%lld))\n",
+             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
+             (long long)data_type);
+  return 0;
+}
+
 int wrap_neg(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type) {
   if (!state) {
