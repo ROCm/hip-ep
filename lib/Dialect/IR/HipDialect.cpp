@@ -758,6 +758,20 @@ void GatherOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// OneHotOp: ins(indices, depth, values), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange OneHotOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void OneHotOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // CompressOp: ins(input, condition), outs(output)
 //===----------------------------------------------------------------------===//
 

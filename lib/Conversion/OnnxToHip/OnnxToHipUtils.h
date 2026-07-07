@@ -330,6 +330,8 @@ void populateGatherConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
 void populateCompressConversionPatterns(RewritePatternSet &patterns,
                                         MLIRContext *ctx);
+void populateOneHotConversionPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
 void populateGatherElementsConversionPatterns(RewritePatternSet &patterns,
                                               MLIRContext *ctx);
 void populateShapeConversionPatterns(RewritePatternSet &patterns,
