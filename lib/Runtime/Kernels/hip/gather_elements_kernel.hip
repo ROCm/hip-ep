@@ -138,15 +138,15 @@ extern "C" int hip_gather_elements(
 
   switch (element_size_bytes) {
   case 2:
-    return launch_gather_elements<__half>(
+    return launch_gather_elements<uint16_t>(
         stream, data, indices, output, num_elements, geom,
         indices_element_size_bytes);
   case 4:
-    return launch_gather_elements<float>(
+    return launch_gather_elements<uint32_t>(
         stream, data, indices, output, num_elements, geom,
         indices_element_size_bytes);
   case 8:
-    return launch_gather_elements<double>(
+    return launch_gather_elements<uint64_t>(
         stream, data, indices, output, num_elements, geom,
         indices_element_size_bytes);
   default:

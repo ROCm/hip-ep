@@ -19,8 +19,9 @@ struct GatherElementsToHip : public mlir::RewritePattern {
                   mlir::PatternRewriter &rewriter) const override;
 };
 
-mlir::LogicalResult GatherElementsToHip::matchAndRewrite(
-    mlir::Operation *op, mlir::PatternRewriter &rewriter) const {
+mlir::LogicalResult
+GatherElementsToHip::matchAndRewrite(mlir::Operation *op,
+                                     mlir::PatternRewriter &rewriter) const {
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
     return rewriter.notifyMatchFailure(op, "missing context argument");

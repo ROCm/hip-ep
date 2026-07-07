@@ -13,7 +13,8 @@ namespace {
 ///
 /// Element-wise logical OR of two boolean tensors with NumPy-style
 /// broadcasting. Dynamic output dims are resolved via
-/// `createBroadcastEmptyTensor` so each axis picks the non-broadcasting operand.
+/// `createBroadcastEmptyTensor` so each axis picks the non-broadcasting
+/// operand.
 struct OrToHip : public mlir::RewritePattern {
   OrToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Or", /*benefit=*/1, ctx) {}

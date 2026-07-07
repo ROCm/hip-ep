@@ -26,8 +26,7 @@ int wrap_gather_elements(RuntimeState *state, void *data, void *indices,
       },
       state);
 
-  if (!state || !data || !indices || !output || !data_shape ||
-      !indices_shape) {
+  if (!state || !data || !indices || !output || !data_shape || !indices_shape) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_gather_elements: null argument\n");
     return -1;
   }
@@ -38,8 +37,8 @@ int wrap_gather_elements(RuntimeState *state, void *data, void *indices,
       "hip_gather_elements\n",
       (long long)axis, (long long)rank, (long long)num_elements);
 
-  return hip_gather_elements(
-      stream, data, indices, output, axis, rank, data_shape, indices_shape,
-      num_elements, static_cast<int>(element_size_bytes),
-      static_cast<int>(indices_element_size_bytes));
+  return hip_gather_elements(stream, data, indices, output, axis, rank,
+                             data_shape, indices_shape, num_elements,
+                             static_cast<int>(element_size_bytes),
+                             static_cast<int>(indices_element_size_bytes));
 }

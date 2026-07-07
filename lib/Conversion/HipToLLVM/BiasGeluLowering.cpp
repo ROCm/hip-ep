@@ -59,7 +59,8 @@ struct BiasGeluOpLowering : public ConvertOpToLLVMPattern<BiasGeluOp> {
     int64_t dataType = getHipdnnDataType(elemType);
     if (dataType < 0 || (dataType > 2 && dataType != 6)) {
       return rewriter.notifyMatchFailure(
-          op, "unsupported element type for BiasGelu (expected f32/f16/bf16/f64)");
+          op,
+          "unsupported element type for BiasGelu (expected f32/f16/bf16/f64)");
     }
 
     Value dataTypeVal = createI64Const(dataType);
@@ -71,9 +72,8 @@ struct BiasGeluOpLowering : public ConvertOpToLLVMPattern<BiasGeluOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 7> args = {statePtr,   dataPtr,      biasPtr,
-                                  outputPtr,  numElements,  biasLen,
-                                  dataTypeVal};
+    SmallVector<Value, 7> args = {statePtr,    dataPtr, biasPtr,    outputPtr,
+                                  numElements, biasLen, dataTypeVal};
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
     return success();

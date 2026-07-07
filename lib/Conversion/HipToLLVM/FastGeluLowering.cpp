@@ -61,7 +61,8 @@ struct FastGeluOpLowering : public ConvertOpToLLVMPattern<FastGeluOp> {
     int64_t dataType = getHipdnnDataType(elemType);
     if (dataType < 0 || (dataType > 2 && dataType != 6)) {
       return rewriter.notifyMatchFailure(
-          op, "unsupported element type for FastGelu (expected f32/f16/bf16/f64)");
+          op,
+          "unsupported element type for FastGelu (expected f32/f16/bf16/f64)");
     }
 
     Value dataTypeVal = createI64Const(dataType);
@@ -73,9 +74,8 @@ struct FastGeluOpLowering : public ConvertOpToLLVMPattern<FastGeluOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 7> args = {statePtr,   inputPtr,     biasPtr,
-                                  outputPtr,  numElements,  biasLen,
-                                  dataTypeVal};
+    SmallVector<Value, 7> args = {statePtr,    inputPtr, biasPtr,    outputPtr,
+                                  numElements, biasLen,  dataTypeVal};
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
     return success();

@@ -35,8 +35,8 @@ HIPDNN_EP_RT_EXPORT int wrap_fast_gelu(RuntimeState *state, void *input,
       "fast_gelu",
       [&] {
         char b[96];
-        snprintf(b, sizeof(b), "n=%lld,bias=%lld",
-                 (long long)num_elements, (long long)bias_len);
+        snprintf(b, sizeof(b), "n=%lld,bias=%lld", (long long)num_elements,
+                 (long long)bias_len);
         return std::string(b);
       },
       state);
@@ -80,8 +80,8 @@ HIPDNN_EP_RT_EXPORT int wrap_fast_gelu(RuntimeState *state, void *input,
                     (long long)num_elements, (long long)bias_len,
                     hipdnn_ep_datatype_name(data_type), (long long)data_type);
 
-  int result = hip_fast_gelu(stream, input, bias, output, num_elements, bias_len,
-                             hip_dtype);
+  int result = hip_fast_gelu(stream, input, bias, output, num_elements,
+                             bias_len, hip_dtype);
   if (result != 0) {
     fprintf(stderr, "[REAL] wrap_fast_gelu: kernel launch failed (%d)\n",
             result);

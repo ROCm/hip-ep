@@ -15,8 +15,8 @@ namespace {
 /// operands in the opposite order when one side is rank-1. When both ranks are
 /// known at compile time, pick the higher-rank tensor as data and the rank-1
 /// tensor as bias; otherwise keep schema order.
-static std::pair<mlir::Value, mlir::Value>
-resolveDataAndBias(mlir::Value op0, mlir::Value op1) {
+static std::pair<mlir::Value, mlir::Value> resolveDataAndBias(mlir::Value op0,
+                                                              mlir::Value op1) {
   auto type0 = mlir::dyn_cast<mlir::RankedTensorType>(op0.getType());
   auto type1 = mlir::dyn_cast<mlir::RankedTensorType>(op1.getType());
   if (!type0 || !type1)
@@ -79,8 +79,8 @@ BiasGeluToHip::matchAndRewrite(mlir::Operation *op,
     return rewriter.notifyMatchFailure(op, "bias must be a 1D tensor");
 
   mlir::Value init = createEmptyTensor(rewriter, loc, resultType, data);
-  auto hipOp = mlir::hip::BiasGeluOp::create(rewriter, loc, context, data, bias,
-                                            init);
+  auto hipOp =
+      mlir::hip::BiasGeluOp::create(rewriter, loc, context, data, bias, init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
