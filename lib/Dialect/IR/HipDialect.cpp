@@ -786,6 +786,20 @@ void CompressOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// ScatterElementsOp: ins(data, indices, updates), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ScatterElementsOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ScatterElementsOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // GatherElementsOp: ins(data, indices), outs(output)
 //===----------------------------------------------------------------------===//
 

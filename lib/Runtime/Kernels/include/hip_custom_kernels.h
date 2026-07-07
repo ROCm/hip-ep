@@ -791,6 +791,21 @@ HIP_KERNEL_API int hip_gather_elements(
     int element_size_bytes,
     int indices_element_size_bytes);
 
+HIP_KERNEL_API int hip_scatter_elements(
+    void* stream,
+    const void* data,
+    const void* indices,
+    const void* updates,
+    void* output,
+    int64_t axis,
+    int64_t reduction_id,
+    int64_t rank,
+    const int64_t* data_shape,
+    const int64_t* indices_shape,
+    int64_t num_updates,
+    int element_size_bytes,
+    int indices_element_size_bytes);
+
 HIP_KERNEL_API int hip_compress(
     void* stream,
     const void* input,
@@ -807,6 +822,23 @@ HIP_KERNEL_API int hip_compress(
     void* workspace,
     size_t workspace_bytes,
     int element_size_bytes);
+
+HIP_KERNEL_API int hip_one_hot(
+    void* stream,
+    const void* indices,
+    const void* depth,
+    const void* values,
+    void* output,
+    int64_t axis,
+    int64_t indices_rank,
+    int64_t output_rank,
+    const int64_t* indices_shape,
+    const int64_t* output_shape,
+    int64_t num_indices,
+    int64_t num_output_elements,
+    int64_t depth_scalar,
+    int element_size_bytes,
+    int indices_element_size_bytes);
 
 /* =========================================================================
  * ReduceSum (Parallel Sum Reduction)

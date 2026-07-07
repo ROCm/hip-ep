@@ -126,6 +126,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     GatherOp::attachInterface<HipDstBufferizableModel<GatherOp>>(*ctx);
     GatherElementsOp::attachInterface<
         HipDstBufferizableModel<GatherElementsOp>>(*ctx);
+    ScatterElementsOp::attachInterface<
+        HipDstBufferizableModel<ScatterElementsOp>>(*ctx);
     CompressOp::attachInterface<HipDstBufferizableModel<CompressOp>>(*ctx);
     OneHotOp::attachInterface<HipDstBufferizableModel<OneHotOp>>(*ctx);
     RangeOp::attachInterface<HipDstBufferizableModel<RangeOp>>(*ctx);

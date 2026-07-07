@@ -902,6 +902,32 @@ int wrap_compress(RuntimeState *state, void *input, void *condition, void *outpu
   return 0;
 }
 
+int wrap_scatter_elements(RuntimeState *state, void *data, void *indices,
+                          void *updates, void *output, int64_t axis,
+                          int64_t reduction_id, int64_t rank,
+                          const int64_t *data_shape,
+                          const int64_t *indices_shape, int64_t num_updates,
+                          int64_t element_size_bytes,
+                          int64_t indices_element_size_bytes) {
+  (void)data;
+  (void)indices;
+  (void)updates;
+  (void)output;
+  (void)data_shape;
+  (void)indices_shape;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_scatter_elements\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_scatter_elements(axis=%lld, reduction=%lld, "
+             "rank=%lld, num_updates=%lld, element_size=%lld, "
+             "indices_element_size=%lld)\n",
+             (long long)axis, (long long)reduction_id, (long long)rank,
+             (long long)num_updates, (long long)element_size_bytes,
+             (long long)indices_element_size_bytes);
+  return 0;
+}
+
 int wrap_gather_elements(RuntimeState *state, void *data, void *indices,
                          void *output, int64_t axis, int64_t rank,
                          const int64_t *data_shape,
