@@ -203,6 +203,11 @@ static int initialize_state_handles(RuntimeState **out_state) {
 
   TIMING_LOG("[Session] hipStreamCreate: %.3fs\n", record_elapsed(t_prev));
 
+  // Skip vendor-handle creation when the vendor BLAS/DNN backends are disabled:
+  // the stubbed miopenCreate/hipblasLtCreate would fail and abort session
+  // creation even for a model that never dispatches a vendor op. Handles stay
+  // null; cleanup is already null-guarded.
+#ifndef HIPDNN_EP_DISABLE_VENDOR_BLAS
   if (miopenCreate(&state->miopen_handle) != miopenStatusSuccess) {
     fprintf(stderr, "Failed to create MIOpen handle\n");
     if (state->stream)
@@ -231,6 +236,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
     free(state);
     return 9;
   }
+#endif // HIPDNN_EP_DISABLE_VENDOR_BLAS
 
   TIMING_LOG("[Session] hipBLASLt init: %.3fs\n", record_elapsed(t_prev));
 
