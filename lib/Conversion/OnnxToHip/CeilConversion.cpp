@@ -32,7 +32,7 @@ struct CeilToHip : public mlir::RewritePattern {
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
     mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
     auto hipOp = mlir::hip::CeilOp::create(rewriter, loc, resultType, context,
-                                            input, init);
+                                           input, init);
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }

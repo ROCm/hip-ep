@@ -46,6 +46,7 @@ struct GatherElementsOpLowering
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
     Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
     Type i64Type = rewriter.getI64Type();
 
     auto createI64Const = [&](int64_t value) -> Value {
@@ -96,16 +97,15 @@ struct GatherElementsOpLowering
         ptrType, ptrType,                   // data_shape, indices_shape
         i64Type, i64Type, i64Type};         // num_elements, elem, idx_elem
 
-    FailureOr<LLVM::LLVMFuncOp> funcOp =
-        LLVM::lookupOrCreateFn(rewriter, module, kWrapGatherElements,
-                               paramTypes, i32Type);
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapGatherElements, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 11> args = {
-        statePtr,        dataPtr,           indicesPtr,      outputPtr,
-        axisVal,         rankVal,           dataShapeArr,  indicesShapeArr,
-        numElements,     elemSizeVal,       indicesElemSizeVal};
+    SmallVector<Value, 11> args = {statePtr,     dataPtr,           indicesPtr,
+                                   outputPtr,    axisVal,           rankVal,
+                                   dataShapeArr, indicesShapeArr,   numElements,
+                                   elemSizeVal,  indicesElemSizeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -115,8 +115,8 @@ struct GatherElementsOpLowering
 
 } // namespace
 
-void populateGatherElementsLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+void populateGatherElementsLoweringPatterns(const LLVMTypeConverter &converter,
+                                            RewritePatternSet &patterns) {
   patterns.add<GatherElementsOpLowering>(converter);
 }
 

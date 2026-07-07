@@ -66,8 +66,8 @@ inline constexpr const char *kWrapGather = "wrap_gather";
 inline constexpr const char *kWrapGatherElements = "wrap_gather_elements";
 inline constexpr const char *kHipSilu = "hip_silu";
 inline constexpr const char *kWrapMiopenActivationForward =
-    "wrap_miopenActivationForward";                   // hip.sigmoid
-inline constexpr const char *kWrapGelu = "wrap_gelu"; // hip.gelu
+    "wrap_miopenActivationForward";                            // hip.sigmoid
+inline constexpr const char *kWrapGelu = "wrap_gelu";          // hip.gelu
 inline constexpr const char *kWrapBiasGelu = "wrap_bias_gelu"; // hip.bias_gelu
 inline constexpr const char *kWrapFastGelu = "wrap_fast_gelu"; // hip.fast_gelu
 inline constexpr const char *kWrapLeakyRelu =
@@ -398,8 +398,8 @@ void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateGatherLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns);
-void populateGatherElementsLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns);
+void populateGatherElementsLoweringPatterns(const LLVMTypeConverter &converter,
+                                            RewritePatternSet &patterns);
 void populateRangeLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateCastLoweringPatterns(const LLVMTypeConverter &converter,
@@ -437,7 +437,7 @@ void populateLinearAttentionLoweringPatterns(const LLVMTypeConverter &converter,
 void populateEqualLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateOrLoweringPatterns(const LLVMTypeConverter &converter,
-                              RewritePatternSet &patterns);
+                                RewritePatternSet &patterns);
 void populateAndLoweringPatterns(const LLVMTypeConverter &converter,
                                  RewritePatternSet &patterns);
 void populateDivLoweringPatterns(const LLVMTypeConverter &converter,

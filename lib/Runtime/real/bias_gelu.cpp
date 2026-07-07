@@ -34,8 +34,8 @@ HIPDNN_EP_RT_EXPORT int wrap_bias_gelu(RuntimeState *state, void *data,
       "bias_gelu",
       [&] {
         char b[96];
-        snprintf(b, sizeof(b), "n=%lld,bias=%lld",
-                 (long long)num_elements, (long long)bias_len);
+        snprintf(b, sizeof(b), "n=%lld,bias=%lld", (long long)num_elements,
+                 (long long)bias_len);
         return std::string(b);
       },
       state);
@@ -45,14 +45,16 @@ HIPDNN_EP_RT_EXPORT int wrap_bias_gelu(RuntimeState *state, void *data,
     return -1;
   }
   if (num_elements <= 0 || bias_len <= 0) {
-    fprintf(stderr, "[REAL] wrap_bias_gelu: invalid shape num_elements=%lld "
-                    "bias_len=%lld\n",
+    fprintf(stderr,
+            "[REAL] wrap_bias_gelu: invalid shape num_elements=%lld "
+            "bias_len=%lld\n",
             (long long)num_elements, (long long)bias_len);
     return -1;
   }
   if (num_elements % bias_len != 0) {
-    fprintf(stderr, "[REAL] wrap_bias_gelu: num_elements (%lld) must be a "
-                    "multiple of bias_len (%lld)\n",
+    fprintf(stderr,
+            "[REAL] wrap_bias_gelu: num_elements (%lld) must be a "
+            "multiple of bias_len (%lld)\n",
             (long long)num_elements, (long long)bias_len);
     return -1;
   }

@@ -5,7 +5,8 @@
 
 // Or: y = a || b (element-wise logical OR on bool tensors).
 //
-// Source: onnxruntime/core/providers/cuda/math/binary_elementwise_ops_impl.{h,cu}
+// Source:
+// onnxruntime/core/providers/cuda/math/binary_elementwise_ops_impl.{h,cu}
 //         @ v1.22.2 (BINARY_OP_NAME_EXPR(Or, (a | b)),
 //                    SPECIALIZED_BINARY_ELEMENTWISE_IMPL(Or, bool))
 #include "../debug_log.h"
@@ -36,9 +37,9 @@ int wrap_or(RuntimeState *state, void *a, void *b, void *output,
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
-  RUNTIME_DEBUG_LOG(
-      "[REAL] wrap_or: num=%lld, data_type=%s "
-      "(treated as 1-byte bool) -> hip_elementwise_or\n",
-      (long long)num_elements, hipdnn_ep_datatype_name(data_type));
+  RUNTIME_DEBUG_LOG("[REAL] wrap_or: num=%lld, data_type=%s "
+                    "(treated as 1-byte bool) -> hip_elementwise_or\n",
+                    (long long)num_elements,
+                    hipdnn_ep_datatype_name(data_type));
   return hip_elementwise_or(stream, a, b, output, num_elements);
 }

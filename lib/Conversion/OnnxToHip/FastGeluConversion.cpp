@@ -19,8 +19,8 @@ static mlir::Value getOptionalOperand(mlir::Operation *op, size_t idx) {
 }
 
 /// Resolve (data, bias) when an optional 1D bias operand is present.
-static std::pair<mlir::Value, mlir::Value>
-resolveDataAndBias(mlir::Value op0, mlir::Value op1) {
+static std::pair<mlir::Value, mlir::Value> resolveDataAndBias(mlir::Value op0,
+                                                              mlir::Value op1) {
   auto type0 = mlir::dyn_cast<mlir::RankedTensorType>(op0.getType());
   auto type1 = mlir::dyn_cast<mlir::RankedTensorType>(op1.getType());
   if (!type0 || !type1)
@@ -54,8 +54,7 @@ FastGeluToHip::matchAndRewrite(mlir::Operation *op,
         op, "domain must be com.microsoft for FastGelu");
 
   if (op->getNumOperands() < 1 || op->getNumOperands() > 2)
-    return rewriter.notifyMatchFailure(
-        op, "FastGelu expects 1 or 2 inputs");
+    return rewriter.notifyMatchFailure(op, "FastGelu expects 1 or 2 inputs");
 
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
