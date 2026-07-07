@@ -852,6 +852,34 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
   return 0;
 }
 
+int wrap_one_hot(RuntimeState *state, void *indices, void *depth, void *values,
+                 void *output, int64_t axis, int64_t indices_rank,
+                 int64_t output_rank, const int64_t *indices_shape,
+                 const int64_t *output_shape, int64_t num_indices,
+                 int64_t num_output_elements, int64_t element_size_bytes,
+                 int64_t indices_element_size_bytes,
+                 int64_t depth_element_size_bytes) {
+  (void)indices;
+  (void)depth;
+  (void)values;
+  (void)output;
+  (void)indices_shape;
+  (void)output_shape;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_one_hot\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_one_hot(axis=%lld, idx_rank=%lld, out_rank=%lld, "
+             "num_idx=%lld, num_out=%lld, elem=%lld, idx_elem=%lld, "
+             "depth_elem=%lld)\n",
+             (long long)axis, (long long)indices_rank, (long long)output_rank,
+             (long long)num_indices, (long long)num_output_elements,
+             (long long)element_size_bytes,
+             (long long)indices_element_size_bytes,
+             (long long)depth_element_size_bytes);
+  return 0;
+}
+
 int wrap_compress(RuntimeState *state, void *input, void *condition, void *output,
                   int64_t flatten, int64_t axis, int64_t input_rank,
                   int64_t output_rank, const int64_t *input_shape,

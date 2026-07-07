@@ -60,6 +60,7 @@ set(_kernel_sources
     hip/gather_kernel.hip
     hip/gather_elements_kernel.hip
     hip/compress_kernel.hip
+    hip/one_hot_kernel.hip
     hip/reduce_sum_kernel.hip
     hip/pool_kernel.hip
     hip/resize_kernel.hip

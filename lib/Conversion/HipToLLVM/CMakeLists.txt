@@ -18,6 +18,7 @@ add_library(HipToLLVM STATIC
   GatherLowering.cpp
   GatherElementsLowering.cpp
   CompressLowering.cpp
+  OneHotLowering.cpp
   RangeLowering.cpp
   CastLowering.cpp
   ReduceLowering.cpp

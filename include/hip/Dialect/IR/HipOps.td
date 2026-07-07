@@ -1504,6 +1504,40 @@ def Hip_GatherOp : Hip_DpsOp<"gather", /*traits=*/[],
   }];
 }
 
+def Hip_OneHotOp : Hip_DpsOp<"one_hot", /*traits=*/[],
+                             /*outsAccessor=*/"Output",
+                             /*autoReify=*/0,
+                             /*autoInfer=*/1,
+                             /*declareInfer=*/1> {
+  let summary = "Expand indices into a one-hot tensor along an axis";
+  let description = [{
+    Implements ONNX OneHot: inserts a `depth`-sized axis into the output
+    and writes `on_value` at index positions from `indices`, filling all
+    other slots with `off_value` from the 2-element `values` tensor.
+
+    Example:
+    ```mlir
+    hip.one_hot(%ctx)
+        ins(%indices, %depth, %values :
+            memref<2x2xi64, 1>, memref<i64, 1>, memref<2xf32, 1>)
+        outs(%output : memref<2x2x10xf32, 1>) {axis = -1 : i64}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$indices,
+    Hip_TensorOrMemRef:$depth,
+    Hip_TensorOrMemRef:$values,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "-1">:$axis
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $indices `,` $depth `,` $values `:` type($indices) `,` type($depth) `,` type($values) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_CompressOp : Hip_DpsOp<"compress", /*traits=*/[],
                                /*outsAccessor=*/"Output",
                                /*autoReify=*/0,
