@@ -282,6 +282,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/cast.cpp runtime_cast.bc)
     compile_to_bitcode(real/range.cpp runtime_range.bc)
     compile_to_bitcode(real/gather.cpp runtime_gather.bc)
+    compile_to_bitcode(real/gather_elements.cpp runtime_gather_elements.bc)
     compile_to_bitcode(real/reduce_sum.cpp runtime_reduce_sum.bc)
     compile_to_bitcode(real/reduce_mean.cpp runtime_reduce_mean.bc)
     compile_to_bitcode(real/reduce_max.cpp runtime_reduce_max.bc)
@@ -350,6 +351,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_cast.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_range.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather_elements.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_sum.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_mean.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_max.bc

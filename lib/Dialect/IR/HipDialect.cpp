@@ -758,6 +758,20 @@ void GatherOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// GatherElementsOp: ins(data, indices), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GatherElementsOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void GatherElementsOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // RangeOp: ins(start, limit, delta), outs(output)
 //===----------------------------------------------------------------------===//
 

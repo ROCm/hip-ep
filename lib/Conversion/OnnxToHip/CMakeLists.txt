@@ -29,6 +29,7 @@ add_library(OnnxToHip STATIC
   AttentionConversion.cpp
   HipGqaBuilder.cpp
   GatherConversion.cpp
+  GatherElementsConversion.cpp
   GatherShapeFold.cpp
   ReshapeShapeFold.cpp
   PadShapeFold.cpp

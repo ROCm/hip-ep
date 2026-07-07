@@ -328,6 +328,8 @@ void populateAttentionConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
 void populateGatherConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
+void populateGatherElementsConversionPatterns(RewritePatternSet &patterns,
+                                              MLIRContext *ctx);
 void populateShapeConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populateReshapeConversionPatterns(RewritePatternSet &patterns,

@@ -852,6 +852,30 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
   return 0;
 }
 
+int wrap_gather_elements(RuntimeState *state, void *data, void *indices,
+                         void *output, int64_t axis, int64_t rank,
+                         const int64_t *data_shape,
+                         const int64_t *indices_shape, int64_t num_elements,
+                         int64_t element_size_bytes,
+                         int64_t indices_element_size_bytes) {
+  (void)data;
+  (void)indices;
+  (void)output;
+  (void)data_shape;
+  (void)indices_shape;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_gather_elements\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_gather_elements(axis=%lld, rank=%lld, "
+             "num_elements=%lld, element_size=%lld, "
+             "indices_element_size=%lld)\n",
+             (long long)axis, (long long)rank, (long long)num_elements,
+             (long long)element_size_bytes,
+             (long long)indices_element_size_bytes);
+  return 0;
+}
+
 int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
                void *output, int64_t output_num_elements, int64_t hip_dtype) {
   if (!state) {

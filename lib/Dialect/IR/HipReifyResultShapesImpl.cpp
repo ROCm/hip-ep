@@ -18,6 +18,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Value.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 
 using namespace mlir;
 using namespace mlir::hip;
@@ -413,6 +414,22 @@ GatherOp::reifyResultShapes(OpBuilder &b,
   if (dims.empty())
     return failure();
   reifiedReturnShapes.assign({std::move(dims)});
+  return success();
+}
+
+LogicalResult
+GatherElementsOp::reifyResultShapes(OpBuilder &b,
+                                    ReifiedRankedShapedTypeDims &reified) {
+  if (getNumResults() == 0)
+    return failure();
+  auto indicesType = dyn_cast<RankedTensorType>(getIndices().getType());
+  if (!indicesType)
+    return failure();
+
+  SmallVector<OpFoldResult> dims;
+  for (auto i : llvm::seq<int64_t>(0, indicesType.getRank()))
+    dims.push_back(tensor::getMixedSize(b, getLoc(), getIndices(), i));
+  reified.assign({std::move(dims)});
   return success();
 }
 
