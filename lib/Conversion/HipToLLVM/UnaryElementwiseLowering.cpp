@@ -99,6 +99,8 @@ void populateUnaryElementwiseLoweringPatterns(
                                                      "cos");
   patterns.insert<UnaryElementwiseOpLowering<SinOp>>(converter, kWrapSin,
                                                      "sin");
+  patterns.insert<UnaryElementwiseOpLowering<CeilOp>>(converter, kWrapCeil,
+                                                      "ceil");
   patterns.insert<UnaryElementwiseOpLowering<ExpOp>>(converter, kWrapExp,
                                                      "exp");
   patterns.insert<UnaryElementwiseOpLowering<SignOp>>(converter, kWrapSign,
