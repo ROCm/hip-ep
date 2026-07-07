@@ -880,11 +880,12 @@ int wrap_one_hot(RuntimeState *state, void *indices, void *depth, void *values,
   return 0;
 }
 
-int wrap_compress(RuntimeState *state, void *input, void *condition, void *output,
-                  int64_t flatten, int64_t axis, int64_t input_rank,
-                  int64_t output_rank, const int64_t *input_shape,
-                  const int64_t *output_shape, int64_t condition_len,
-                  int64_t num_output_elements, int64_t element_size_bytes) {
+int wrap_compress(RuntimeState *state, void *input, void *condition,
+                  void *output, int64_t flatten, int64_t axis,
+                  int64_t input_rank, int64_t output_rank,
+                  const int64_t *input_shape, const int64_t *output_shape,
+                  int64_t condition_len, int64_t num_output_elements,
+                  int64_t element_size_bytes) {
   (void)input;
   (void)condition;
   (void)output;

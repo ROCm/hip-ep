@@ -132,8 +132,9 @@ struct RMSNormalizationToHip : public mlir::RewritePattern {
                   mlir::PatternRewriter &rewriter) const override;
 };
 
-mlir::LogicalResult RMSNormalizationToHip::matchAndRewrite(
-    mlir::Operation *op, mlir::PatternRewriter &rewriter) const {
+mlir::LogicalResult
+RMSNormalizationToHip::matchAndRewrite(mlir::Operation *op,
+                                       mlir::PatternRewriter &rewriter) const {
   auto ctxOrFailure = getContextArg(op, rewriter);
   if (mlir::failed(ctxOrFailure))
     return rewriter.notifyMatchFailure(op, "missing context argument");
@@ -635,9 +636,10 @@ LayerNormToHip::matchAndRewrite(mlir::Operation *op,
 
 void populateNormConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx) {
-  patterns.add<SimplifiedLayerNormToHip, RMSNormalizationToHip,
-               SkipSimplifiedLayerNormToHip, SkipLayerNormToHip,
-               LayerNormToHip>(ctx);
+  patterns
+      .add<SimplifiedLayerNormToHip, RMSNormalizationToHip,
+           SkipSimplifiedLayerNormToHip, SkipLayerNormToHip, LayerNormToHip>(
+          ctx);
 }
 
 } // namespace hip

@@ -405,7 +405,7 @@ void populateGatherLoweringPatterns(const LLVMTypeConverter &converter,
 void populateGatherElementsLoweringPatterns(const LLVMTypeConverter &converter,
                                             RewritePatternSet &patterns);
 void populateTopKLoweringPatterns(const LLVMTypeConverter &converter,
-                                RewritePatternSet &patterns);
+                                  RewritePatternSet &patterns);
 void populateScatterElementsLoweringPatterns(const LLVMTypeConverter &converter,
                                              RewritePatternSet &patterns);
 void populateCompressLoweringPatterns(const LLVMTypeConverter &converter,

@@ -76,8 +76,8 @@ struct CompressOpLowering : public ConvertOpToLLVMPattern<CompressOp> {
     Value outputShapeArr =
         buildShapeArray(outputType, adaptor.getOutput(), loc, rewriter);
 
-    Value conditionLen =
-        getMemRefDimSize(conditionType, 0, adaptor.getCondition(), rewriter, loc);
+    Value conditionLen = getMemRefDimSize(
+        conditionType, 0, adaptor.getCondition(), rewriter, loc);
     Value numOutputElements =
         computeNumElements(outputType, adaptor.getOutput(), rewriter, loc);
 
@@ -107,9 +107,9 @@ struct CompressOpLowering : public ConvertOpToLLVMPattern<CompressOp> {
       return failure();
 
     SmallVector<Value, 12> args = {
-        statePtr,         inputPtr,         conditionPtr, outputPtr,
-        flattenVal,       axisVal,          inputRankVal, outputRankVal,
-        inputShapeArr,    outputShapeArr,   conditionLen, numOutputElements,
+        statePtr,      inputPtr,       conditionPtr, outputPtr,
+        flattenVal,    axisVal,        inputRankVal, outputRankVal,
+        inputShapeArr, outputShapeArr, conditionLen, numOutputElements,
         elemSizeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);

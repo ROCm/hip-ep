@@ -53,9 +53,11 @@ OneHotToHip::matchAndRewrite(mlir::Operation *op,
     if (outDim == normAxis) {
       auto depthType = mlir::cast<mlir::RankedTensorType>(depth.getType());
       if (depthType.getRank() == 0)
-        dynSizes.push_back(mlir::arith::ConstantIndexOp::create(rewriter, loc, 1));
+        dynSizes.push_back(
+            mlir::arith::ConstantIndexOp::create(rewriter, loc, 1));
       else
-        dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, depth, 0));
+        dynSizes.push_back(
+            mlir::tensor::DimOp::create(rewriter, loc, depth, 0));
     } else {
       dynSizes.push_back(
           mlir::tensor::DimOp::create(rewriter, loc, indices, inDim++));
@@ -66,9 +68,9 @@ OneHotToHip::matchAndRewrite(mlir::Operation *op,
       mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
                                     resultType.getElementType(), dynSizes);
 
-  auto oneHotOp = mlir::hip::OneHotOp::create(
-      rewriter, loc, context, indices, depth, values, init,
-      rewriter.getI64IntegerAttr(axis));
+  auto oneHotOp = mlir::hip::OneHotOp::create(rewriter, loc, context, indices,
+                                              depth, values, init,
+                                              rewriter.getI64IntegerAttr(axis));
 
   rewriter.replaceOp(op, oneHotOp->getResult(0));
   return mlir::success();

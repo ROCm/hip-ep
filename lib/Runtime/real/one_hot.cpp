@@ -68,8 +68,8 @@ int wrap_one_hot(RuntimeState *state, void *indices, void *depth, void *values,
   if (err != hipSuccess)
     return static_cast<int>(err);
 
-  int64_t depth_host =
-      read_depth_scalar(depth_bytes, static_cast<int>(depth_element_size_bytes));
+  int64_t depth_host = read_depth_scalar(
+      depth_bytes, static_cast<int>(depth_element_size_bytes));
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_one_hot: axis=%lld, depth=%lld, idx_rank=%lld -> "

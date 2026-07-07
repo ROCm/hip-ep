@@ -98,10 +98,11 @@ struct ScatterElementsOpLowering
         indicesType.getElementType().getIntOrFloatBitWidth() / 8;
 
     SmallVector<Type, 12> paramTypes = {
-        ptrType, ptrType, ptrType, ptrType, ptrType, // state, data, idx, upd, out
-        i64Type, i64Type, i64Type,                   // axis, reduction, rank
-        ptrType, ptrType,                            // data_shape, idx_shape
-        i64Type, i64Type, i64Type};                  // num_upd, elem, idx_elem
+        ptrType, ptrType, ptrType,
+        ptrType, ptrType,           // state, data, idx, upd, out
+        i64Type, i64Type, i64Type,  // axis, reduction, rank
+        ptrType, ptrType,           // data_shape, idx_shape
+        i64Type, i64Type, i64Type}; // num_upd, elem, idx_elem
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapScatterElements, paramTypes, i32Type);
@@ -109,10 +110,19 @@ struct ScatterElementsOpLowering
       return failure();
 
     SmallVector<Value, 12> args = {
-        statePtr,     dataPtr,      indicesPtr,   updatesPtr, outputPtr,
-        createI64Const(axisAttr), createI64Const(reductionIdFromString(op.getReduction())),
-        createI64Const(rank), dataShapeArr, indicesShapeArr, numUpdates,
-        createI64Const(elementSizeBytes), createI64Const(indicesElemBytes)};
+        statePtr,
+        dataPtr,
+        indicesPtr,
+        updatesPtr,
+        outputPtr,
+        createI64Const(axisAttr),
+        createI64Const(reductionIdFromString(op.getReduction())),
+        createI64Const(rank),
+        dataShapeArr,
+        indicesShapeArr,
+        numUpdates,
+        createI64Const(elementSizeBytes),
+        createI64Const(indicesElemBytes)};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

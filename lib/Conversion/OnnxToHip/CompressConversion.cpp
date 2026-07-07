@@ -60,8 +60,7 @@ CompressToHip::matchAndRewrite(mlir::Operation *op,
 
   auto compressOp = mlir::hip::CompressOp::create(
       rewriter, loc, context, input, condition, init,
-      rewriter.getI64IntegerAttr(axis),
-      rewriter.getBoolAttr(flatten));
+      rewriter.getI64IntegerAttr(axis), rewriter.getBoolAttr(flatten));
 
   rewriter.replaceOp(op, compressOp->getResult(0));
   return mlir::success();

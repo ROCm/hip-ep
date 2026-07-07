@@ -57,9 +57,8 @@ int wrap_scatter_elements(RuntimeState *state, void *data, void *indices,
       (long long)axis, reduction_name(reduction_id), (long long)rank,
       (long long)num_updates);
 
-  return hip_scatter_elements(
-      stream, data, indices, updates, output, axis, reduction_id, rank,
-      data_shape, indices_shape, num_updates,
-      static_cast<int>(element_size_bytes),
-      static_cast<int>(indices_element_size_bytes));
+  return hip_scatter_elements(stream, data, indices, updates, output, axis,
+                              reduction_id, rank, data_shape, indices_shape,
+                              num_updates, static_cast<int>(element_size_bytes),
+                              static_cast<int>(indices_element_size_bytes));
 }

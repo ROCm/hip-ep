@@ -19,8 +19,9 @@ struct ScatterElementsToHip : public mlir::RewritePattern {
                   mlir::PatternRewriter &rewriter) const override;
 };
 
-mlir::LogicalResult ScatterElementsToHip::matchAndRewrite(
-    mlir::Operation *op, mlir::PatternRewriter &rewriter) const {
+mlir::LogicalResult
+ScatterElementsToHip::matchAndRewrite(mlir::Operation *op,
+                                      mlir::PatternRewriter &rewriter) const {
   if (op->getNumOperands() != 3 || op->getNumResults() != 1)
     return rewriter.notifyMatchFailure(
         op, "expected 3 inputs (data, indices, updates), 1 output");

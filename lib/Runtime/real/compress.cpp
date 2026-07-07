@@ -10,18 +10,18 @@
 
 #include <cstdio>
 
-int wrap_compress(RuntimeState *state, void *input, void *condition, void *output,
-                  int64_t flatten, int64_t axis, int64_t input_rank,
-                  int64_t output_rank, const int64_t *input_shape,
-                  const int64_t *output_shape, int64_t condition_len,
-                  int64_t num_output_elements, int64_t element_size_bytes) {
+int wrap_compress(RuntimeState *state, void *input, void *condition,
+                  void *output, int64_t flatten, int64_t axis,
+                  int64_t input_rank, int64_t output_rank,
+                  const int64_t *input_shape, const int64_t *output_shape,
+                  int64_t condition_len, int64_t num_output_elements,
+                  int64_t element_size_bytes) {
   OP_PROFILE(
       "compress",
       [&] {
         char b[64];
-        snprintf(b, sizeof(b), "flat=%lld:axis=%lld:n=%lld",
-                 (long long)flatten, (long long)axis,
-                 (long long)num_output_elements);
+        snprintf(b, sizeof(b), "flat=%lld:axis=%lld:n=%lld", (long long)flatten,
+                 (long long)axis, (long long)num_output_elements);
         return std::string(b);
       },
       state);
@@ -35,8 +35,9 @@ int wrap_compress(RuntimeState *state, void *input, void *condition, void *outpu
   if (condition_len <= 0 || num_output_elements <= 0)
     return 0;
 
-  size_t workspace_bytes = static_cast<size_t>(condition_len) * sizeof(int64_t) +
-                           sizeof(unsigned long long);
+  size_t workspace_bytes =
+      static_cast<size_t>(condition_len) * sizeof(int64_t) +
+      sizeof(unsigned long long);
   if (hipdnn_ep_state_ensure_workspace(state, workspace_bytes) != 0) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_compress: ensure_workspace failed\n");
     return -1;

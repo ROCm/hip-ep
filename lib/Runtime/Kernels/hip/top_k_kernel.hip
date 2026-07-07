@@ -7,6 +7,7 @@
 #include "debug_log.h"
 
 #include <hip/hip_runtime.h>
+#include <hip/hip_fp16.h>
 #include <cstdint>
 #include <cstdio>
 
@@ -25,30 +26,24 @@ struct TopKGeom {
   int64_t axis_size;
 };
 
-template <typename T>
-__device__ float topk_elem_to_float(T v) {
-  if constexpr (sizeof(T) == 2) {
-    __half h = __ushort_as_half(static_cast<unsigned short>(v));
-    return __half2float(h);
-  }
-  if constexpr (sizeof(T) == 4)
-    return static_cast<float>(v);
-  if constexpr (sizeof(T) == 8)
-    return static_cast<float>(v);
-  return 0.0f;
+__device__ float topk_elem_to_float(float v) { return v; }
+
+__device__ float topk_elem_to_float(double v) {
+  return static_cast<float>(v);
 }
 
-template <typename T>
-__device__ T topk_float_to_elem(float v) {
-  if constexpr (sizeof(T) == 2) {
-    __half h = __float2half(v);
-    return static_cast<T>(__half_as_ushort(h));
-  }
-  if constexpr (sizeof(T) == 4)
-    return static_cast<T>(v);
-  if constexpr (sizeof(T) == 8)
-    return static_cast<T>(v);
-  return T(0);
+__device__ float topk_elem_to_float(__half v) { return __half2float(v); }
+
+__device__ void topk_store_value(float *values, int64_t offset, float v) {
+  values[offset] = v;
+}
+
+__device__ void topk_store_value(double *values, int64_t offset, float v) {
+  values[offset] = static_cast<double>(v);
+}
+
+__device__ void topk_store_value(__half *values, int64_t offset, float v) {
+  values[offset] = __float2half(v);
 }
 
 template <typename T>
@@ -57,14 +52,10 @@ __device__ bool topk_better(float candidate, float best, bool largest) {
 }
 
 template <typename T>
-__global__ void top_k_kernel(const T *__restrict__ data, T *__restrict__ values,
-                             int64_t *__restrict__ indices, TopKGeom geom,
-                             int largest, int sorted) {
-  int64_t row_id =
-      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (row_id >= geom.num_rows)
-    return;
-
+__device__ void topk_row(const T *__restrict__ data, T *__restrict__ values,
+                         int64_t *__restrict__ indices, TopKGeom geom,
+                         int64_t row_id, int largest, int sorted) {
+  (void)sorted;
   int64_t coords[kMaxRank] = {0};
   int64_t rem = row_id;
   for (int64_t d = geom.rank - 1; d >= 0; --d) {
@@ -110,7 +101,7 @@ __global__ void top_k_kernel(const T *__restrict__ data, T *__restrict__ values,
         continue;
 
       T elem = data[base_offset + i * geom.in_stride[geom.axis]];
-      float candidate = topk_elem_to_float<T>(elem);
+      float candidate = topk_elem_to_float(elem);
       if (!found || topk_better<T>(candidate, best_val, largest != 0)) {
         best_val = candidate;
         best_idx = i;
@@ -126,19 +117,25 @@ __global__ void top_k_kernel(const T *__restrict__ data, T *__restrict__ values,
     ++picked_count;
   }
 
-  if (!sorted) {
-    // Order is unspecified when sorted=false; the selection order above is
-    // still a valid top-k result.
-  }
-
   for (int64_t j = 0; j < picked_count; ++j) {
     coords[geom.axis] = j;
     int64_t out_offset = 0;
     for (int64_t d = 0; d < geom.rank; ++d)
       out_offset += coords[d] * geom.out_stride[d];
-    values[out_offset] = topk_float_to_elem<T>(picked_val[j]);
+    topk_store_value(values, out_offset, picked_val[j]);
     indices[out_offset] = picked_idx[j];
   }
+}
+
+template <typename T>
+__global__ void top_k_kernel(const T *__restrict__ data, T *__restrict__ values,
+                             int64_t *__restrict__ indices, TopKGeom geom,
+                             int largest, int sorted) {
+  int64_t row_id =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (row_id >= geom.num_rows)
+    return;
+  topk_row(data, values, indices, geom, row_id, largest, sorted);
 }
 
 template <typename T>
@@ -232,9 +229,9 @@ extern "C" int hip_top_k(void *stream, const void *data, void *values,
 
   switch (element_size_bytes) {
   case 2:
-    return launch_top_k<uint16_t>(stream, data, values, indices, geom,
-                                  static_cast<int>(largest),
-                                  static_cast<int>(sorted));
+    return launch_top_k<__half>(stream, data, values, indices, geom,
+                                static_cast<int>(largest),
+                                static_cast<int>(sorted));
   case 4:
     return launch_top_k<float>(stream, data, values, indices, geom,
                                static_cast<int>(largest),
