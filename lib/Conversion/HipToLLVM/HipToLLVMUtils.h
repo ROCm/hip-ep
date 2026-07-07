@@ -64,6 +64,7 @@ inline constexpr const char *kMiopenSoftmax = "hip_miopen_softmax";
 inline constexpr const char *kWrapTranspose = "wrap_transpose";
 inline constexpr const char *kWrapGather = "wrap_gather";
 inline constexpr const char *kWrapGatherElements = "wrap_gather_elements";
+inline constexpr const char *kWrapCompress = "wrap_compress";
 inline constexpr const char *kHipSilu = "hip_silu";
 inline constexpr const char *kWrapMiopenActivationForward =
     "wrap_miopenActivationForward";                            // hip.sigmoid
@@ -400,6 +401,8 @@ void populateGatherLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns);
 void populateGatherElementsLoweringPatterns(const LLVMTypeConverter &converter,
                                             RewritePatternSet &patterns);
+void populateCompressLoweringPatterns(const LLVMTypeConverter &converter,
+                                      RewritePatternSet &patterns);
 void populateRangeLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateCastLoweringPatterns(const LLVMTypeConverter &converter,

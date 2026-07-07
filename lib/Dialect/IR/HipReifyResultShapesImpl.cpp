@@ -433,6 +433,40 @@ GatherElementsOp::reifyResultShapes(OpBuilder &b,
   return success();
 }
 
+LogicalResult
+CompressOp::reifyResultShapes(OpBuilder &b,
+                              ReifiedRankedShapedTypeDims &reified) {
+  if (getNumResults() == 0)
+    return failure();
+  auto inputType = dyn_cast<RankedTensorType>(getInput().getType());
+  auto conditionType = dyn_cast<RankedTensorType>(getCondition().getType());
+  if (!inputType || !conditionType || conditionType.getRank() != 1)
+    return failure();
+
+  OpFoldResult condLen =
+      tensor::getMixedSize(b, getLoc(), getCondition(), 0);
+
+  if (getFlatten()) {
+    reified.assign({SmallVector<OpFoldResult>{condLen}});
+    return success();
+  }
+
+  int64_t rank = inputType.getRank();
+  int64_t axis = getAxis();
+  if (axis < 0)
+    axis += rank;
+
+  SmallVector<OpFoldResult> dims;
+  for (int64_t i : llvm::seq<int64_t>(0, rank)) {
+    if (i == axis)
+      dims.push_back(condLen);
+    else
+      dims.push_back(tensor::getMixedSize(b, getLoc(), getInput(), i));
+  }
+  reified.assign({std::move(dims)});
+  return success();
+}
+
 LogicalResult GatherNDOp::reifyResultShapes(
     OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
   if (getNumResults() == 0)

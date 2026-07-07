@@ -936,6 +936,13 @@ int wrap_gather_elements(RuntimeState *state, void *data, void *indices,
                          int64_t element_size_bytes,
                          int64_t indices_element_size_bytes);
 
+int wrap_compress(RuntimeState *state, void *input, void *condition,
+                  void *output, int64_t flatten, int64_t axis,
+                  int64_t input_rank, int64_t output_rank,
+                  const int64_t *input_shape, const int64_t *output_shape,
+                  int64_t condition_len, int64_t num_output_elements,
+                  int64_t element_size_bytes);
+
 // Range operation wrapper
 int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
                void *output, int64_t output_num_elements, int64_t hip_dtype);

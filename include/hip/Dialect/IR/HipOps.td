@@ -1504,6 +1504,40 @@ def Hip_GatherOp : Hip_DpsOp<"gather", /*traits=*/[],
   }];
 }
 
+def Hip_CompressOp : Hip_DpsOp<"compress", /*traits=*/[],
+                               /*outsAccessor=*/"Output",
+                               /*autoReify=*/0,
+                               /*autoInfer=*/1,
+                               /*declareInfer=*/1> {
+  let summary = "Select slices or elements where a 1-D condition is true";
+  let description = [{
+    Implements ONNX Compress: along `axis`, keep only slices whose
+    corresponding `condition` entry is true. When `flatten` is true the
+    input is treated as a 1-D tensor before selection (no `axis` attribute
+    on the ONNX op).
+
+    Example:
+    ```mlir
+    hip.compress(%ctx)
+        ins(%input, %condition : memref<3x2xf32, 1>, memref<3xi1, 1>)
+        outs(%output : memref<2x2xf32, 1>) {axis = 0 : i64, flatten = false}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$condition,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "0">:$axis,
+    DefaultValuedAttr<BoolAttr, "false">:$flatten
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $condition `:` type($input) `,` type($condition) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_GatherElementsOp : Hip_DpsOp<"gather_elements", /*traits=*/[],
                                       /*outsAccessor=*/"Output",
                                       /*autoReify=*/0,

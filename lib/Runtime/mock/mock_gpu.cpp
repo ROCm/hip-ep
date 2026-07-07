@@ -852,6 +852,28 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
   return 0;
 }
 
+int wrap_compress(RuntimeState *state, void *input, void *condition, void *output,
+                  int64_t flatten, int64_t axis, int64_t input_rank,
+                  int64_t output_rank, const int64_t *input_shape,
+                  const int64_t *output_shape, int64_t condition_len,
+                  int64_t num_output_elements, int64_t element_size_bytes) {
+  (void)input;
+  (void)condition;
+  (void)output;
+  (void)input_shape;
+  (void)output_shape;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_compress\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_compress(flatten=%lld, axis=%lld, in_rank=%lld, "
+             "out_rank=%lld, cond_len=%lld, num_out=%lld, elem=%lld)\n",
+             (long long)flatten, (long long)axis, (long long)input_rank,
+             (long long)output_rank, (long long)condition_len,
+             (long long)num_output_elements, (long long)element_size_bytes);
+  return 0;
+}
+
 int wrap_gather_elements(RuntimeState *state, void *data, void *indices,
                          void *output, int64_t axis, int64_t rank,
                          const int64_t *data_shape,
