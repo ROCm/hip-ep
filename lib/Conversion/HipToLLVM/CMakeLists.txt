@@ -13,6 +13,7 @@ add_library(HipToLLVM STATIC
   PowerLowering.cpp
   ActivationLowering.cpp
   BiasGeluLowering.cpp
+  FastGeluLowering.cpp
   NormLowering.cpp
   GatherLowering.cpp
   RangeLowering.cpp

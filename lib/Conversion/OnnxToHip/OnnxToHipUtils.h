@@ -298,6 +298,8 @@ void populateActivationConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
 void populateBiasGeluConversionPatterns(RewritePatternSet &patterns,
                                         MLIRContext *ctx);
+void populateFastGeluConversionPatterns(RewritePatternSet &patterns,
+                                        MLIRContext *ctx);
 void populateCastConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateReduceSumConversionPatterns(RewritePatternSet &patterns,

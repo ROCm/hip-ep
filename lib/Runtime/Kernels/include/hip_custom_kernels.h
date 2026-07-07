@@ -411,6 +411,10 @@ HIP_KERNEL_API int hip_bias_gelu(void *stream, const void *data, const void *bia
                                  void *output, int64_t num_elements,
                                  int64_t bias_len, int hip_dtype);
 
+HIP_KERNEL_API int hip_fast_gelu(void *stream, const void *data, const void *bias,
+                                 void *output, int64_t num_elements,
+                                 int64_t bias_len, int hip_dtype);
+
 /* =========================================================================
  * LeakyRelu Activation
  * =========================================================================

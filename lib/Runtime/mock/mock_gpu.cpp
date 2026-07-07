@@ -1058,6 +1058,22 @@ int wrap_bias_gelu(RuntimeState *state, void *data, void *bias, void *output,
   return 0;
 }
 
+int wrap_fast_gelu(RuntimeState *state, void *input, void *bias, void *output,
+                   int64_t num_elements, int64_t bias_len, int64_t data_type) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_fast_gelu\n");
+    return -1;
+  }
+
+  MOCK_PRINT("[MOCK] wrap_fast_gelu(num_elements=%lld, bias_len=%lld, "
+             "data_type=%s(%lld), bias=%s)\n",
+             (long long)num_elements, (long long)bias_len,
+             hipdnn_ep_datatype_name(data_type), (long long)data_type,
+             bias ? "yes" : "null");
+
+  return 0;
+}
+
 int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
                     int64_t num_elements, int64_t data_type, double alpha) {
   if (!state) {
