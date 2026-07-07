@@ -46,12 +46,9 @@ jobs:
     # No draft-PR gate: the cache-priming strategy needs every PR push.
     runs-on: ubuntu-latest
     steps:
-      # ROCm/MorphiZen is private — needs the deploy key.
-      - name: Setup SSH key for MorphiZen submodule
-        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555 # v0.10.0
-        with:
-          ssh-private-key: ${{ secrets.MORPHIZEN_DEPLOY_KEY }}
-
+      # MorphiZen is vendored in-tree as a git subtree under 3rd-party/morphizen,
+      # so no deploy key or submodule initialization is needed.
+      #
       # Checkout at the workspace root. build/, install/, llvm-install/,
       # ort-install/ live under ${{ runner.workspace }}
       # (the repo's parent), which is the WORKSPACE build.py derives.
@@ -62,16 +59,6 @@ jobs:
           submodules: false
           fetch-depth: 1
           show-progress: false
-
-      # Initialize submodules on the HOST with ssh-agent loaded so the private
-      # MorphiZen repo is populated; build.py then sees them present
-      # and skips its own submodule update (needs no SSH).
-      - name: Checkout MorphiZen submodule
-        run: |
-          set -euo pipefail
-          git config --global url."git@github.com:ROCm/MorphiZen.git".insteadOf \
-            "https://github.com/ROCm/MorphiZen.git"
-          git submodule update --init --recursive --depth 1
 
       # ubuntu-latest ships ~14 GB usable SSD; the from-source LLVM build + ORT
       # need much more. Reclaim ~30 GB by pruning preinstalled toolchains.

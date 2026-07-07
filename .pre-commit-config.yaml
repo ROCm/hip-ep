@@ -5,6 +5,11 @@
 
 # See https://pre-commit.com for more information
 # See https://pre-commit.com/hooks.html for more hooks
+
+# MorphiZen is vendored as a git subtree under 3rd-party/; keep it byte-identical
+# to upstream (its formatting is enforced in the MorphiZen repo) by excluding it
+# from every hook here, matching .lintrunner.toml's own 3rd-party/** exclude.
+exclude: '^3rd-party/'
 repos:
 -   repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
