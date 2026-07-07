@@ -1754,7 +1754,7 @@ def Hip_BiasGeluOp : Hip_DpsOp<"bias_gelu", /*traits=*/[],
   }];
 }
 
-def Hip_FastGeluOp : Hip_DpsOp<"fast_gelu", [AttrSizedOperandSegments],
+def Hip_FastGeluOp : Hip_DpsOp<"fast_gelu", /*traits=*/[],
                                /*outsAccessor=*/"Output",
                                /*autoReify=*/1,
                                /*autoInfer=*/1,

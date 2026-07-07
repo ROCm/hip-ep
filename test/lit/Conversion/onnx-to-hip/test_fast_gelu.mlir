@@ -66,5 +66,5 @@ module {
 // CHECK-NOT: onnx.Custom
 
 // CHECK-LABEL: func.func @swapped
-// CHECK: hip.fast_gelu(%{{.*}}) ins(%{{.*}}, %{{.*}} : tensor<1x128x768xf16>, tensor<768xf16>)
+// CHECK: hip.fast_gelu(%{{.*}}) ins(%{{.*}} : tensor<1x128x768xf16>) bias(%{{.*}} : tensor<768xf16>)
 // CHECK-NOT: onnx.Custom

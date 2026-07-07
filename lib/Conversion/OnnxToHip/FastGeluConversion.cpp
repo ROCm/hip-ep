@@ -87,21 +87,8 @@ FastGeluToHip::matchAndRewrite(mlir::Operation *op,
     operands.push_back(bias);
   operands.push_back(init);
 
-  mlir::OperationState state(loc, "hip.fast_gelu");
-  state.addOperands(operands);
-  state.addTypes(resultType);
-  if (bias) {
-    state.addAttribute("operand_segment_sizes",
-                       rewriter.getDenseI32ArrayAttr(
-                           llvm::ArrayRef<int32_t>{1, 1, 1, 1}));
-  } else {
-    state.addAttribute("operand_segment_sizes",
-                       rewriter.getDenseI32ArrayAttr(
-                           llvm::ArrayRef<int32_t>{1, 1, 0, 1}));
-  }
-
-  mlir::Operation *hipOp = rewriter.create(state);
-  rewriter.replaceOp(op, hipOp->getResult(0));
+  auto hipOp = mlir::hip::FastGeluOp::create(rewriter, loc, operands);
+  rewriter.replaceOp(op, hipOp.getResult(0));
   return mlir::success();
 }
 
