@@ -31,44 +31,44 @@
 #include <optional>
 #include <vector>
 namespace morphizen {
-std::vector<const NodeArg*> node_get_input_node_args(const Node& node);
-std::vector<const AttributeProto*> node_get_attributes(const Node& node);
-MORPHIZEN_DLL_SPEC const NodeAttributes&
-node_get_attributes_ref(const Node& node);
-std::vector<int64_t> node_get_output_shape(const Node& node, int index);
+std::vector<const NodeArg *> node_get_input_node_args(const Node &node);
+std::vector<const AttributeProto *> node_get_attributes(const Node &node);
+MORPHIZEN_DLL_SPEC const NodeAttributes &
+node_get_attributes_ref(const Node &node);
+std::vector<int64_t> node_get_output_shape(const Node &node, int index);
 
 // Node input/output accessors
-std::vector<NodeInput> node_get_inputs(const Node& node);
-const NodeArg& node_get_output_node_arg(const Node& node);
-std::vector<const NodeArg*> node_get_output_node_args(const Node& node);
-const std::string& node_get_first_output_name(const Node& node);
+std::vector<NodeInput> node_get_inputs(const Node &node);
+const NodeArg &node_get_output_node_arg(const Node &node);
+std::vector<const NodeArg *> node_get_output_node_args(const Node &node);
+const std::string &node_get_first_output_name(const Node &node);
 
-MORPHIZEN_DLL_SPEC const std::string& node_get_output_name(const Node& node);
-MORPHIZEN_DLL_SPEC bool node_is_op(const Node& node, const std::string& op_type,
-                                   const std::string& domain);
-MORPHIZEN_DLL_SPEC int node_get_output_element_type(const Node& node);
-MORPHIZEN_DLL_SPEC const AttributeProto* node_get_attr(const Node& node,
-                                                       const std::string& name);
-MORPHIZEN_DLL_SPEC bool node_has_attr(const Node& node,
-                                      const std::string& name);
+MORPHIZEN_DLL_SPEC const std::string &node_get_output_name(const Node &node);
+MORPHIZEN_DLL_SPEC bool node_is_op(const Node &node, const std::string &op_type,
+                                   const std::string &domain);
+MORPHIZEN_DLL_SPEC int node_get_output_element_type(const Node &node);
+MORPHIZEN_DLL_SPEC const AttributeProto *node_get_attr(const Node &node,
+                                                       const std::string &name);
+MORPHIZEN_DLL_SPEC bool node_has_attr(const Node &node,
+                                      const std::string &name);
 
 // Node attribute getters
-MORPHIZEN_DLL_SPEC int64_t node_get_attr_int(const Node& node,
-                                             const std::string& name);
+MORPHIZEN_DLL_SPEC int64_t node_get_attr_int(const Node &node,
+                                             const std::string &name);
 MORPHIZEN_DLL_SPEC gsl::span<const int64_t>
-node_get_attr_ints(const Node& node, const std::string& name);
+node_get_attr_ints(const Node &node, const std::string &name);
 
 // Node string representation
-std::string node_as_string(const Node& node);
+std::string node_as_string(const Node &node);
 
 // Node op type and domain
-MORPHIZEN_DLL_SPEC const std::string& node_op_type(const Node& node);
-MORPHIZEN_DLL_SPEC const std::string& node_op_domain(const Node& node);
+MORPHIZEN_DLL_SPEC const std::string &node_op_type(const Node &node);
+MORPHIZEN_DLL_SPEC const std::string &node_op_domain(const Node &node);
 
-MORPHIZEN_DLL_SPEC const AttributeProto*
-node_attributes_get(const NodeAttributes& attributes, const std::string& name);
+MORPHIZEN_DLL_SPEC const AttributeProto *
+node_attributes_get(const NodeAttributes &attributes, const std::string &name);
 
-MORPHIZEN_DLL_SPEC NodeAttributesPtr node_clone_attributes(const Node& node);
+MORPHIZEN_DLL_SPEC NodeAttributesPtr node_clone_attributes(const Node &node);
 
 } // namespace morphizen
 
@@ -91,13 +91,13 @@ class MORPHIZEN_DLL_SPEC NodeConstRef {
   friend class NodeInput;
 
 public:
-  static NodeConstRef from_node(const morphizen::Graph& graph,
-                                const morphizen::Node& node) {
+  static NodeConstRef from_node(const morphizen::Graph &graph,
+                                const morphizen::Node &node) {
     return NodeConstRef(graph, node);
   }
 
   NodeConstRef() = delete;
-  NodeConstRef& operator=(const NodeConstRef&) = default;
+  NodeConstRef &operator=(const NodeConstRef &) = default;
   /**
    * @brief Checks if this NodeConstRef is equal to another NodeConstRef.
    *
@@ -107,10 +107,10 @@ public:
    * @param other The NodeConstRef to compare with.
    * @return True if the NodeConstRef objects are equal, false otherwise.
    */
-  bool operator==(const NodeConstRef& other) const {
+  bool operator==(const NodeConstRef &other) const {
     return self_ == other.self_;
   }
-  bool operator<(const NodeConstRef& other) const {
+  bool operator<(const NodeConstRef &other) const {
     return self_ < other.self_;
   }
   /**
@@ -123,7 +123,7 @@ public:
    * diagnostic purposes. It most likely is not as same as the name of it's
    * first output node arg.
    */
-  const std::string& name() const;
+  const std::string &name() const;
   /**
    * @brief Returns a vector of constant references to NodeArg objects,
    * representing the inputs to the node.
@@ -171,7 +171,7 @@ public:
    *
    * the op type is the name of the operation that the node represents
    */
-  const std::string& op_type() const;
+  const std::string &op_type() const;
 
   /**
    * @brief Gets the operation domain of the node.
@@ -179,7 +179,7 @@ public:
    *
    * the op domain is the domain of the operation that the node represents
    */
-  const std::string& op_domain() const;
+  const std::string &op_domain() const;
 
   /**
    * Checks if the node has the specified attribute.
@@ -187,14 +187,14 @@ public:
    * @param attr_name The name of the attribute to check.
    * @return True if the node has the attribute, false otherwise.
    */
-  bool has_attr(const std::string& attr_name) const;
+  bool has_attr(const std::string &attr_name) const;
   /**
    * Retrieves the integer value of the specified attribute.
    *
    * @param attr_name The name of the attribute.
    * @return The integer value of the attribute.
    */
-  int64_t get_attr_int(const std::string& attr_name) const;
+  int64_t get_attr_int(const std::string &attr_name) const;
   /**
    * Retrieves the value of an attribute as an integer.
    *
@@ -208,7 +208,7 @@ public:
    * @return The value of the attribute as an integer, or the `default_value` if
    * the attribute does not exist or cannot be converted.
    */
-  int64_t get_attr_int(const std::string& attr_name,
+  int64_t get_attr_int(const std::string &attr_name,
                        int64_t default_value) const;
   /**
    * Retrieves a span of `int64_t` values associated with the specified
@@ -217,7 +217,7 @@ public:
    * @param attr_name The name of the attribute.
    * @return A `gsl::span<int64_t>` containing the attribute values.
    */
-  gsl::span<const int64_t> get_attr_ints(const std::string& attr_name) const;
+  gsl::span<const int64_t> get_attr_ints(const std::string &attr_name) const;
   /**
    * Retrieves the attribute values as a span of int64_t values.
    *
@@ -227,15 +227,15 @@ public:
    * @return A span of int64_t values representing the attribute values.
    */
   gsl::span<const int64_t>
-  get_attr_ints(const std::string& attr_name,
-                const std::vector<int64_t>& default_value) const;
+  get_attr_ints(const std::string &attr_name,
+                const std::vector<int64_t> &default_value) const;
   /**
    * Retrieves the value of the specified attribute as a float.
    *
    * @param attr_name The name of the attribute to retrieve.
    * @return The value of the attribute as a float.
    */
-  float get_attr_float(const std::string& attr_name) const;
+  float get_attr_float(const std::string &attr_name) const;
   /**
    * Retrieves the value of the specified attribute as a float.
    *
@@ -245,7 +245,7 @@ public:
    * @return The value of the attribute as a float, or the default value if the
    * attribute is not found.
    */
-  float get_attr_float(const std::string& attr_name, float default_value) const;
+  float get_attr_float(const std::string &attr_name, float default_value) const;
 
   /**
    * Retrieves the attribute values as a span of constant floats.
@@ -253,7 +253,7 @@ public:
    * @param attr_name The name of the attribute.
    * @return A gsl::span<const float> containing the attribute values.
    */
-  gsl::span<const float> get_attr_floats(const std::string& attr_name) const;
+  gsl::span<const float> get_attr_floats(const std::string &attr_name) const;
   /**
    * Retrieves the attribute values as a span of constant floats.
    *
@@ -263,8 +263,8 @@ public:
    * @return A span of constant floats representing the attribute values.
    */
   gsl::span<const float>
-  get_attr_floats(const std::string& attr_name,
-                  const std::vector<float>& default_value) const;
+  get_attr_floats(const std::string &attr_name,
+                  const std::vector<float> &default_value) const;
 
   /**
    * Retrieves the attribute value as a string.
@@ -272,7 +272,7 @@ public:
    * @param name The name of the attribute.
    * @return The attribute value as a string.
    */
-  const std::string& get_attr_string(const std::string& name) const;
+  const std::string &get_attr_string(const std::string &name) const;
   /**
    * Retrieves the value of the specified attribute as a string.
    *
@@ -282,16 +282,16 @@ public:
    * @return The value of the attribute as a string, or the default value if the
    * attribute is not found.
    */
-  const std::string& get_attr_string(const std::string& name,
-                                     const std::string& default_value) const;
+  const std::string &get_attr_string(const std::string &name,
+                                     const std::string &default_value) const;
 
   morphizen::DllSafe<std::string>
-  release_attr_string(const std::string& name) const;
+  release_attr_string(const std::string &name) const;
 
-  std::vector<std::string> get_attr_strings(const std::string& name) const;
+  std::vector<std::string> get_attr_strings(const std::string &name) const;
   std::vector<std::string>
-  get_attr_strings(const std::string& name,
-                   const std::vector<std::string>& default_value) const;
+  get_attr_strings(const std::string &name,
+                   const std::vector<std::string> &default_value) const;
   /**
    * @brief Returns a vector of constant references to NodeArg objects,
    * representing the outputs of the node.
@@ -308,7 +308,7 @@ public:
    *
    * Checks that the node has at least one output. Throws if no outputs exist.
    */
-  const morphizen::NodeArg& first_output_node_arg() const;
+  const morphizen::NodeArg &first_output_node_arg() const;
 
   /**
    *@brief Return the function body of the node.
@@ -324,19 +324,19 @@ public:
    * @return const morphizen::Node& A constant reference to the underlying
    * morphizen::Node object.
    */
-  operator const morphizen::Node&() const { return *self_; }
+  operator const morphizen::Node &() const { return *self_; }
   /**
    * Returns a pointer to the underlying `morphizen::Node` object.
    *
    * @return A const pointer to the `morphizen::Node` object.
    */
-  const morphizen::Node* ptr() const { return self_; }
+  const morphizen::Node *ptr() const { return self_; }
   /**
    * Returns a reference to the graph associated with this node.
    *
    * @return A const reference to the graph.
    */
-  const morphizen::Graph& graph() const { return *graph_; }
+  const morphizen::Graph &graph() const { return *graph_; }
   /**
    * @brief Converts the node's state or relevant information into a string
    * representation. Useful for debugging, logging, or any scenario where a
@@ -353,40 +353,40 @@ public:
    * @return std::ostream& The output stream, enabling the chaining of output
    * operations.
    */
-  MORPHIZEN_DLL_SPEC friend std::ostream& operator<<(std::ostream& os,
-                                                     const NodeConstRef& ref);
+  MORPHIZEN_DLL_SPEC friend std::ostream &operator<<(std::ostream &os,
+                                                     const NodeConstRef &ref);
 
 protected:
-  NodeConstRef(const morphizen::Graph& graph, const morphizen::Node& self)
+  NodeConstRef(const morphizen::Graph &graph, const morphizen::Node &self)
       : graph_{&graph}, self_{&self} {}
 
 protected:
-  const morphizen::Graph* graph_;
-  const morphizen::Node* self_;
+  const morphizen::Graph *graph_;
+  const morphizen::Node *self_;
 };
 class NodeRef : public NodeConstRef {
   friend class GraphRef;
   friend class NodeArgRef;
 
 public:
-  static NodeRef from_node(morphizen::Graph& graph, morphizen::Node& node) {
+  static NodeRef from_node(morphizen::Graph &graph, morphizen::Node &node) {
     return NodeRef(graph, node);
   }
-  operator morphizen::Node&() const {
-    return const_cast<morphizen::Node&>(*self_);
+  operator morphizen::Node &() const {
+    return const_cast<morphizen::Node &>(*self_);
   }
   /**
    * Returns a pointer to the underlying `morphizen::Node` object.
    *
    * @return A const pointer to the `morphizen::Node` object.
    */
-  morphizen::Node* ptr() { return &(operator morphizen::Node&()); }
+  morphizen::Node *ptr() { return &(operator morphizen::Node &()); }
 
 private:
-  NodeRef(morphizen::Graph& graph, morphizen::Node& self)
+  NodeRef(morphizen::Graph &graph, morphizen::Node &self)
       : NodeConstRef(graph, self) {}
-  morphizen::Graph& graph() {
-    return const_cast<morphizen::Graph&>(this->graph());
+  morphizen::Graph &graph() {
+    return const_cast<morphizen::Graph &>(this->graph());
   }
 };
 } // namespace morphizen_cxx

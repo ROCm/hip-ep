@@ -74,7 +74,9 @@ if __name__ == "__main__":
             schema_type_constraint_allowed_type_strs = []
             for t in c.allowed_type_strs:
                 schema_type_constraint_allowed_type_strs.append(str(t))
-            schema_type_constraint_obj["allowed_type_strs"] = schema_type_constraint_allowed_type_strs
+            schema_type_constraint_obj["allowed_type_strs"] = (
+                schema_type_constraint_allowed_type_strs
+            )
 
             schema_type_constraints.append(schema_type_constraint_obj)
         schema_obj["type_constraints"] = schema_type_constraints

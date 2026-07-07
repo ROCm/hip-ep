@@ -12,7 +12,12 @@ def escape_string(s):
     if not s:
         return '""'
     # Escape backslashes and quotes
-    s = s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
+    s = (
+        s.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+    )
     return f'"{s}"'
 
 
@@ -82,7 +87,10 @@ def generate_schema_registration(schema, counter):
 
     # Start the registration
     lines = []
-    lines.append(f"  if (OpSchemaRegistry::Schema({name}, {since_version}, {domain}) == nullptr) " + "{")
+    lines.append(
+        f"  if (OpSchemaRegistry::Schema({name}, {since_version}, {domain}) == nullptr) "
+        + "{"
+    )
     lines.append(f"      RegisterSchema(OpSchema({name}, {file}, {line})")
 
     # Add domain and version
@@ -152,7 +160,9 @@ def main():
     # Generate C++ header file
     with open(output_file, "w", encoding="utf-8") as f:
         f.write("/*\n")
-        f.write(" * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.\n")
+        f.write(
+            " * Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.\n"
+        )
         f.write(" * Licensed under the MIT License.\n")
         f.write(" */\n")
         f.write("\n")

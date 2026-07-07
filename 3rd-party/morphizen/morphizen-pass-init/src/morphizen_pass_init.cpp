@@ -11,8 +11,8 @@ using namespace morphizen;
 DEF_ENV_PARAM(XLNX_ENABLE_DUMP_ONNX_MODEL, "0")
 
 struct InitPass {
-  InitPass(IPass& /*self*/) {}
-  void process(IPass& self, Graph& graph) {
+  InitPass(IPass & /*self*/) {}
+  void process(IPass &self, Graph &graph) {
     if (ENV_PARAM(XLNX_ENABLE_DUMP_ONNX_MODEL) ||
         self.get_context()->get_provider_option("pass.init.enable_dump", "0") ==
             "1") {

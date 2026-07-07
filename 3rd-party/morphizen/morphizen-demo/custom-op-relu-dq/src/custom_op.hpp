@@ -16,14 +16,14 @@ using namespace morphizen;
 class MyCustomOp : public CustomOpImp {
 public:
   MyCustomOp(std::shared_ptr<const PassContext> context,
-             const std::shared_ptr<MetaDefProto>& meta_def,
-             onnxruntime::Model* model);
+             const std::shared_ptr<MetaDefProto> &meta_def,
+             onnxruntime::Model *model);
 
   virtual ~MyCustomOp();
 
 private:
-  virtual void Compute(const OrtApi* api,
-                       OrtKernelContext* context) const override final;
+  virtual void Compute(const OrtApi *api,
+                       OrtKernelContext *context) const override final;
 
 private:
   ReluDqParamProto relu_dq_proto_;

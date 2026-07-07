@@ -6,14 +6,14 @@
 
 namespace morphizen {
 
-OrtStatusException::OrtStatusException(const OrtApi& api, OrtStatus* status)
+OrtStatusException::OrtStatusException(const OrtApi &api, OrtStatus *status)
     : ort_api_{api}, status_{status} {
   // Get error message from status
   error_msg_ = ort_api_.GetErrorMessage(status_);
 }
 
 // Move constructor
-OrtStatusException::OrtStatusException(OrtStatusException&& other) noexcept
+OrtStatusException::OrtStatusException(OrtStatusException &&other) noexcept
     : ort_api_{other.ort_api_}, status_{other.status_},
       error_msg_{other.error_msg_} {
   other.status_ = nullptr; // Transfer ownership
@@ -21,8 +21,8 @@ OrtStatusException::OrtStatusException(OrtStatusException&& other) noexcept
 }
 
 // Move assignment operator
-OrtStatusException&
-OrtStatusException::operator=(OrtStatusException&& other) noexcept {
+OrtStatusException &
+OrtStatusException::operator=(OrtStatusException &&other) noexcept {
   if (this != &other) {
     // Clean up current resources
     if (status_) {
@@ -43,7 +43,7 @@ OrtStatusException::~OrtStatusException() {
   }
 }
 
-const char* OrtStatusException::what() const noexcept {
+const char *OrtStatusException::what() const noexcept {
   return error_msg_ ? error_msg_ : "Unknown ORT error";
 }
 

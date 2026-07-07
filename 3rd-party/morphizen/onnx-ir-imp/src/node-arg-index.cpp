@@ -28,7 +28,7 @@ NodeArgIndex::NodeArgIndex(unsigned int index, Type type, GraphId graph_id)
 // Method implementations
 bool NodeArgIndex::is_valid() const { return get_type() != Type::INVALID; }
 
-bool NodeArgIndex::is_valid(const Graph& graph) const {
+bool NodeArgIndex::is_valid(const Graph &graph) const {
   if (get_type() == Type::INVALID) {
     return false; // Invalid type
   }
@@ -91,11 +91,11 @@ bool NodeArgIndex::is_valid_graph_output() const {
   return ret;
 }
 
-bool NodeArgIndex::operator==(const NodeArgIndex& other) const {
+bool NodeArgIndex::operator==(const NodeArgIndex &other) const {
   return this->value_ == other.value_;
 }
 
-bool NodeArgIndex::operator!=(const NodeArgIndex& other) const {
+bool NodeArgIndex::operator!=(const NodeArgIndex &other) const {
   return !(*this == other);
 }
 
@@ -123,12 +123,12 @@ bool NodeArgIndex::exists() const {
          is_valid_node_output() || is_valid_graph_output();
 }
 
-std::vector<int64_t>* NodeArgIndex::extract_shape_from_tensor_type(
-    const morphizen_onnx::TensorShapeProto& shape) {
+std::vector<int64_t> *NodeArgIndex::extract_shape_from_tensor_type(
+    const morphizen_onnx::TensorShapeProto &shape) {
   auto result = std::make_unique<std::vector<int64_t>>();
   result->reserve(shape.dim_size());
   for (int i = 0; i < shape.dim_size(); ++i) {
-    const auto& dim = shape.dim(i);
+    const auto &dim = shape.dim(i);
     if (dim.has_dim_value()) {
       result->push_back(dim.dim_value());
     } else {
@@ -138,22 +138,22 @@ std::vector<int64_t>* NodeArgIndex::extract_shape_from_tensor_type(
   return result.release();
 }
 
-std::vector<int64_t>* NodeArgIndex::extract_shape_from_value_info(
-    const morphizen_onnx::ValueInfoProto& value_info) {
+std::vector<int64_t> *NodeArgIndex::extract_shape_from_value_info(
+    const morphizen_onnx::ValueInfoProto &value_info) {
   CHECK(value_info.has_type())
       << "ValueInfo must have type information: " << value_info.DebugString();
   CHECK(value_info.type().has_tensor_type())
       << "Only tensor_type is supported for shape extraction";
 
   if (value_info.type().tensor_type().has_shape()) {
-    const auto& shape = value_info.type().tensor_type().shape();
+    const auto &shape = value_info.type().tensor_type().shape();
     return extract_shape_from_tensor_type(shape);
   }
   return nullptr; // No shape information available, please run shape inference
 }
 
-std::vector<int64_t>* NodeArgIndex::extract_shape_from_initializer(
-    const morphizen_onnx::TensorProto& initializer) {
+std::vector<int64_t> *NodeArgIndex::extract_shape_from_initializer(
+    const morphizen_onnx::TensorProto &initializer) {
   auto result = std::make_unique<std::vector<int64_t>>();
   result->reserve(initializer.dims_size());
   for (int i = 0; i < initializer.dims_size(); ++i) {
@@ -162,7 +162,7 @@ std::vector<int64_t>* NodeArgIndex::extract_shape_from_initializer(
   return result.release();
 }
 
-std::vector<int64_t>* NodeArgIndex::get_shape_i64_unsafe() const {
+std::vector<int64_t> *NodeArgIndex::get_shape_i64_unsafe() const {
   // Check if this NodeArgIndex is valid and exists
   if (!exists()) {
     return nullptr; // Return nullptr if invalid
@@ -174,7 +174,7 @@ std::vector<int64_t>* NodeArgIndex::get_shape_i64_unsafe() const {
   }
 
   // Get the graph proto from the graph
-  const auto& graph_proto = *graph_proto_ptr;
+  const auto &graph_proto = *graph_proto_ptr;
   // Based on the type, look in different places for shape information
   switch (get_type()) {
   case Type::GRAPH_INPUT: {
@@ -183,7 +183,7 @@ std::vector<int64_t>* NodeArgIndex::get_shape_i64_unsafe() const {
              static_cast<unsigned int>(graph_proto.input_size()))
         << "Graph input index " << fields_.index_
         << " is out of bounds (size: " << graph_proto.input_size() << ")";
-    const auto& input = graph_proto.input(fields_.index_);
+    const auto &input = graph_proto.input(fields_.index_);
     return extract_shape_from_value_info(input);
   }
   case Type::INITIALIZER: {
@@ -192,7 +192,7 @@ std::vector<int64_t>* NodeArgIndex::get_shape_i64_unsafe() const {
              static_cast<unsigned int>(graph_proto.initializer_size()))
         << "Initializer index " << fields_.index_
         << " is out of bounds (size: " << graph_proto.initializer_size() << ")";
-    const auto& initializer = graph_proto.initializer(fields_.index_);
+    const auto &initializer = graph_proto.initializer(fields_.index_);
     return extract_shape_from_initializer(initializer);
   }
   case Type::NODE_OUTPUT: {
@@ -202,7 +202,7 @@ std::vector<int64_t>* NodeArgIndex::get_shape_i64_unsafe() const {
              static_cast<unsigned int>(graph_proto.value_info_size()))
         << "Value info index " << fields_.index_
         << " is out of bounds (size: " << graph_proto.value_info_size() << ")";
-    const auto& value_info = graph_proto.value_info(fields_.index_);
+    const auto &value_info = graph_proto.value_info(fields_.index_);
     return extract_shape_from_value_info(value_info);
   }
   case Type::GRAPH_OUTPUT: {
@@ -211,7 +211,7 @@ std::vector<int64_t>* NodeArgIndex::get_shape_i64_unsafe() const {
              static_cast<unsigned int>(graph_proto.output_size()))
         << "Graph output index " << fields_.index_
         << " is out of bounds (size: " << graph_proto.output_size() << ")";
-    const auto& output = graph_proto.output(fields_.index_);
+    const auto &output = graph_proto.output(fields_.index_);
     return extract_shape_from_value_info(output);
   }
   case Type::INVALID:
@@ -223,7 +223,7 @@ std::vector<int64_t>* NodeArgIndex::get_shape_i64_unsafe() const {
   return nullptr;
 }
 
-const std::string* NodeArgIndex::get_name_unsafe() const {
+const std::string *NodeArgIndex::get_name_unsafe() const {
   // Check if this NodeArgIndex is valid and exists
   if (!exists()) {
     return nullptr; // Return nullptr if invalid
@@ -234,7 +234,7 @@ const std::string* NodeArgIndex::get_name_unsafe() const {
   }
 
   // Get the graph proto from the graph
-  const auto& graph_proto = *graph_proto_ptr;
+  const auto &graph_proto = *graph_proto_ptr;
 
   // Based on the type, look in different places for name information
   switch (get_type()) {
@@ -244,7 +244,7 @@ const std::string* NodeArgIndex::get_name_unsafe() const {
              static_cast<unsigned int>(graph_proto.input_size()))
         << "Graph input index " << fields_.index_
         << " is out of bounds (size: " << graph_proto.input_size() << ")";
-    const auto& input = graph_proto.input(fields_.index_);
+    const auto &input = graph_proto.input(fields_.index_);
     return &input.name();
   }
   case Type::INITIALIZER: {
@@ -253,7 +253,7 @@ const std::string* NodeArgIndex::get_name_unsafe() const {
              static_cast<unsigned int>(graph_proto.initializer_size()))
         << "Initializer index " << fields_.index_
         << " is out of bounds (size: " << graph_proto.initializer_size() << ")";
-    const auto& initializer = graph_proto.initializer(fields_.index_);
+    const auto &initializer = graph_proto.initializer(fields_.index_);
     return &initializer.name();
   }
   case Type::NODE_OUTPUT: {
@@ -263,7 +263,7 @@ const std::string* NodeArgIndex::get_name_unsafe() const {
              static_cast<unsigned int>(graph_proto.value_info_size()))
         << "Value info index " << fields_.index_
         << " is out of bounds (size: " << graph_proto.value_info_size() << ")";
-    const auto& value_info = graph_proto.value_info(fields_.index_);
+    const auto &value_info = graph_proto.value_info(fields_.index_);
     return &value_info.name();
   }
   case Type::GRAPH_OUTPUT: {
@@ -272,7 +272,7 @@ const std::string* NodeArgIndex::get_name_unsafe() const {
              static_cast<unsigned int>(graph_proto.output_size()))
         << "Graph output index " << fields_.index_
         << " is out of bounds (size: " << graph_proto.output_size() << ")";
-    const auto& output = graph_proto.output(fields_.index_);
+    const auto &output = graph_proto.output(fields_.index_);
     return &output.name();
   }
   case Type::INVALID: {
@@ -361,7 +361,7 @@ NodeArgIndex NodeArgIndex::graph_output(unsigned int index, GraphId graph_id) {
   return NodeArgIndex(index, Type::GRAPH_OUTPUT, graph_id);
 }
 
-NodeArgIndex NodeArgIndex::from_morphizen_core_node_arg_ptr(const void* ptr) {
+NodeArgIndex NodeArgIndex::from_morphizen_core_node_arg_ptr(const void *ptr) {
   auto ret = NodeArgIndex::invalid();
   if (ptr == nullptr) {
     return ret; // Return invalid index if pointer is null
@@ -383,10 +383,10 @@ NodeIndex NodeArgIndex::get_producer_node() const {
   // it is possible to add a new node to replace the constant initializer and
   // graph input
   auto graph_id = get_graph_id();
-  const auto* graph = graph_id.get_graph();
+  const auto *graph = graph_id.get_graph();
   CHECK(graph != nullptr) << "Graph not found for NodeArgIndex";
-  for (const auto* g = graph; g != nullptr; g = g->parent_graph_) {
-    auto* staging_graph = g->get_staging_graph();
+  for (const auto *g = graph; g != nullptr; g = g->parent_graph_) {
+    auto *staging_graph = g->get_staging_graph();
     if (staging_graph) {
       NodeIndex node_index = staging_graph->producer_map_[*this];
       if (node_index.is_valid()) {
@@ -401,15 +401,15 @@ NodeIndex NodeArgIndex::get_producer_node() const {
   return NodeIndex::invalid();
 }
 
-const void* NodeArgIndex::to_morphizen_core_node_arg_ptr() const {
+const void *NodeArgIndex::to_morphizen_core_node_arg_ptr() const {
   if (!exists()) {
     return nullptr;
   }
   // Convert the value back to a pointer
   // This reverses the mapping done in from_morphizen_core_node_arg_ptr
-  return reinterpret_cast<const void*>(static_cast<uintptr_t>(value_));
+  return reinterpret_cast<const void *>(static_cast<uintptr_t>(value_));
 }
-const morphizen_onnx::ValueInfoProto& NodeArgIndex::get_value_info() const {
+const morphizen_onnx::ValueInfoProto &NodeArgIndex::get_value_info() const {
   if (!is_valid()) {
     throw std::runtime_error("Invalid NodeArgIndex");
   }
@@ -420,8 +420,8 @@ const morphizen_onnx::ValueInfoProto& NodeArgIndex::get_value_info() const {
                << " (graph_id: " << get_graph_id().to_string() << ")";
     throw std::runtime_error("Graph does not exist for NodeArgIndex");
   }
-  auto& graph_proto = *graph_proto_ptr;
-  const morphizen_onnx::ValueInfoProto* ret = nullptr;
+  auto &graph_proto = *graph_proto_ptr;
+  const morphizen_onnx::ValueInfoProto *ret = nullptr;
   if (is_graph_input()) {
     // Graph input
     CHECK_LT(fields_.index_,
@@ -457,21 +457,21 @@ const morphizen_onnx::ValueInfoProto& NodeArgIndex::get_value_info() const {
   }
   return *ret;
 }
-std::vector<std::string>* NodeArgIndex::extract_denotation_from_value_info(
-    const morphizen_onnx::ValueInfoProto& value_info) {
+std::vector<std::string> *NodeArgIndex::extract_denotation_from_value_info(
+    const morphizen_onnx::ValueInfoProto &value_info) {
   // Check if the value_info has type and tensor_type information
   if (!value_info.has_type() || !value_info.type().has_tensor_type()) {
     return nullptr; // No tensor type information available
   }
 
-  const auto& tensor_type = value_info.type().tensor_type();
+  const auto &tensor_type = value_info.type().tensor_type();
 
   // Check if tensor_type has shape information
   if (!tensor_type.has_shape()) {
     return nullptr;
   }
 
-  const auto& shape = tensor_type.shape();
+  const auto &shape = tensor_type.shape();
 
   // Create result vector to store denotations
   auto result = std::make_unique<std::vector<std::string>>();
@@ -479,7 +479,7 @@ std::vector<std::string>* NodeArgIndex::extract_denotation_from_value_info(
 
   // Extract denotation from each dimension
   for (int i = 0; i < shape.dim_size(); ++i) {
-    const auto& dim = shape.dim(i);
+    const auto &dim = shape.dim(i);
     if (dim.has_denotation() && !dim.denotation().empty()) {
       result->push_back(dim.denotation());
     } else {
@@ -489,7 +489,7 @@ std::vector<std::string>* NodeArgIndex::extract_denotation_from_value_info(
   return result.release();
 }
 
-std::vector<std::string>* NodeArgIndex::get_denotation_unsafe() const {
+std::vector<std::string> *NodeArgIndex::get_denotation_unsafe() const {
   // Check if this NodeArgIndex is valid and exists
   if (!is_valid()) {
     return nullptr; // Return nullptr if invalid
@@ -501,7 +501,7 @@ std::vector<std::string>* NodeArgIndex::get_denotation_unsafe() const {
   }
 
   // Get the graph proto from the graph
-  const auto& graph_proto = *graph_proto_ptr;
+  const auto &graph_proto = *graph_proto_ptr;
 
   // Based on the type, look in different places for denotation information
   switch (get_type()) {
@@ -511,7 +511,7 @@ std::vector<std::string>* NodeArgIndex::get_denotation_unsafe() const {
              static_cast<unsigned int>(graph_proto.input_size()))
         << "Graph input index " << fields_.index_
         << " is out of bounds (size: " << graph_proto.input_size() << ")";
-    const auto& input = graph_proto.input(fields_.index_);
+    const auto &input = graph_proto.input(fields_.index_);
     return extract_denotation_from_value_info(input);
   }
   case Type::INITIALIZER: {
@@ -519,7 +519,7 @@ std::vector<std::string>* NodeArgIndex::get_denotation_unsafe() const {
              static_cast<unsigned int>(graph_proto.initializer_size()))
         << "Initializer index " << fields_.index_
         << " is out of bounds (size: " << graph_proto.initializer_size() << ")";
-    const auto& initializer = graph_proto.initializer(fields_.index_);
+    const auto &initializer = graph_proto.initializer(fields_.index_);
     auto result = std::make_unique<std::vector<std::string>>();
     result->reserve(initializer.dims_size());
     for (int i = 0; i < initializer.dims_size(); ++i) {
@@ -534,7 +534,7 @@ std::vector<std::string>* NodeArgIndex::get_denotation_unsafe() const {
              static_cast<unsigned int>(graph_proto.value_info_size()))
         << "Value info index " << fields_.index_
         << " is out of bounds (size: " << graph_proto.value_info_size() << ")";
-    const auto& value_info = graph_proto.value_info(fields_.index_);
+    const auto &value_info = graph_proto.value_info(fields_.index_);
     return extract_denotation_from_value_info(value_info);
   }
   case Type::GRAPH_OUTPUT: {
@@ -543,7 +543,7 @@ std::vector<std::string>* NodeArgIndex::get_denotation_unsafe() const {
              static_cast<unsigned int>(graph_proto.output_size()))
         << "Graph output index " << fields_.index_
         << " is out of bounds (size: " << graph_proto.output_size() << ")";
-    const auto& output = graph_proto.output(fields_.index_);
+    const auto &output = graph_proto.output(fields_.index_);
     return extract_denotation_from_value_info(output);
   }
   case Type::INVALID:
@@ -567,7 +567,7 @@ int NodeArgIndex::get_element_type() const {
   }
 
   // Get the graph proto from the graph
-  const auto& graph_proto = *graph_proto_ptr;
+  const auto &graph_proto = *graph_proto_ptr;
 
   // Based on the type, look in different places for element type information
   switch (get_type()) {
@@ -576,7 +576,7 @@ int NodeArgIndex::get_element_type() const {
              static_cast<unsigned int>(graph_proto.input_size()))
         << "Graph input index " << fields_.index_
         << " is out of bounds (size: " << graph_proto.input_size() << ")";
-    const auto& input = graph_proto.input(fields_.index_);
+    const auto &input = graph_proto.input(fields_.index_);
     return input.type().tensor_type().elem_type();
   }
   case Type::INITIALIZER: {
@@ -584,7 +584,7 @@ int NodeArgIndex::get_element_type() const {
              static_cast<unsigned int>(graph_proto.initializer_size()))
         << "Initializer index " << fields_.index_
         << " is out of bounds (size: " << graph_proto.initializer_size() << ")";
-    const auto& initializer = graph_proto.initializer(fields_.index_);
+    const auto &initializer = graph_proto.initializer(fields_.index_);
     return initializer.data_type();
   }
   case Type::NODE_OUTPUT: {
@@ -592,7 +592,7 @@ int NodeArgIndex::get_element_type() const {
              static_cast<unsigned int>(graph_proto.value_info_size()))
         << "Value info index " << fields_.index_
         << " is out of bounds (size: " << graph_proto.value_info_size() << ")";
-    const auto& value_info = graph_proto.value_info(fields_.index_);
+    const auto &value_info = graph_proto.value_info(fields_.index_);
     return value_info.type().tensor_type().elem_type();
   }
   case Type::GRAPH_OUTPUT: {
@@ -600,7 +600,7 @@ int NodeArgIndex::get_element_type() const {
              static_cast<unsigned int>(graph_proto.output_size()))
         << "Graph output index " << fields_.index_
         << " is out of bounds (size: " << graph_proto.output_size() << ")";
-    const auto& output = graph_proto.output(fields_.index_);
+    const auto &output = graph_proto.output(fields_.index_);
     return output.type().tensor_type().elem_type();
   }
   case Type::INVALID:
@@ -612,20 +612,20 @@ int NodeArgIndex::get_element_type() const {
   return -1;
 }
 
-void NodeArgIndex::set_shape_i64(const std::vector<int64_t>& shape) {
+void NodeArgIndex::set_shape_i64(const std::vector<int64_t> &shape) {
   // Check if this NodeArgIndex is valid and exists
   if (!is_valid()) {
     throw std::runtime_error("Invalid NodeArgIndex");
   }
 
   auto graph_id = get_graph_id();
-  auto* graph = graph_id.get_graph();
+  auto *graph = graph_id.get_graph();
   if (graph == nullptr) {
     throw std::runtime_error("Graph not found for NodeArgIndex");
   }
 
   // Get the graph proto from the graph
-  auto& graph_proto = graph->get_graph_proto();
+  auto &graph_proto = graph->get_graph_proto();
 
   // Based on the type, set the shape in different places
   switch (get_type()) {
@@ -634,11 +634,11 @@ void NodeArgIndex::set_shape_i64(const std::vector<int64_t>& shape) {
              static_cast<unsigned int>(graph_proto.input_size()))
         << "Graph input index " << fields_.index_
         << " is out of bounds (size: " << graph_proto.input_size() << ")";
-    auto* input = graph_proto.mutable_input(fields_.index_);
-    auto* shape_proto =
+    auto *input = graph_proto.mutable_input(fields_.index_);
+    auto *shape_proto =
         input->mutable_type()->mutable_tensor_type()->mutable_shape();
     shape_proto->clear_dim(); // Clear existing dimensions first
-    for (const auto& dim : shape) {
+    for (const auto &dim : shape) {
       shape_proto->add_dim()->set_dim_value(dim);
     }
     // Ensure the graph is in an inconsistent state to trigger updates
@@ -660,11 +660,11 @@ void NodeArgIndex::set_shape_i64(const std::vector<int64_t>& shape) {
              static_cast<unsigned int>(graph_proto.value_info_size()))
         << "Value info index " << fields_.index_
         << " is out of bounds (size: " << graph_proto.value_info_size() << ")";
-    auto* value_info = graph_proto.mutable_value_info(fields_.index_);
-    auto* shape_proto =
+    auto *value_info = graph_proto.mutable_value_info(fields_.index_);
+    auto *shape_proto =
         value_info->mutable_type()->mutable_tensor_type()->mutable_shape();
     shape_proto->clear_dim(); // Clear existing dimensions first
-    for (const auto& dim : shape) {
+    for (const auto &dim : shape) {
       shape_proto->add_dim()->set_dim_value(dim);
     }
     LOG(WARNING) << "Setting shape for node outputs is not recommended, the "
@@ -677,11 +677,11 @@ void NodeArgIndex::set_shape_i64(const std::vector<int64_t>& shape) {
              static_cast<unsigned int>(graph_proto.output_size()))
         << "Graph output index " << fields_.index_
         << " is out of bounds (size: " << graph_proto.output_size() << ")";
-    auto* output = graph_proto.mutable_output(fields_.index_);
-    auto* shape_proto =
+    auto *output = graph_proto.mutable_output(fields_.index_);
+    auto *shape_proto =
         output->mutable_type()->mutable_tensor_type()->mutable_shape();
     shape_proto->clear_dim(); // Clear existing dimensions first
-    for (const auto& dim : shape) {
+    for (const auto &dim : shape) {
       shape_proto->add_dim()->set_dim_value(dim);
     }
     LOG(WARNING) << "Setting shape for graph outputs is not recommended, the "
@@ -695,20 +695,20 @@ void NodeArgIndex::set_shape_i64(const std::vector<int64_t>& shape) {
   }
 }
 
-void NodeArgIndex::set_denotation(const std::vector<std::string>& denotation) {
+void NodeArgIndex::set_denotation(const std::vector<std::string> &denotation) {
   // Check if this NodeArgIndex is valid and exists
   if (!is_valid()) {
     throw std::runtime_error("Invalid NodeArgIndex");
   }
 
   auto graph_id = get_graph_id();
-  auto* graph = graph_id.get_graph();
+  auto *graph = graph_id.get_graph();
   if (graph == nullptr) {
     throw std::runtime_error("Graph not found for NodeArgIndex");
   }
 
   // Get the graph proto from the graph
-  auto& graph_proto = graph->get_graph_proto();
+  auto &graph_proto = graph->get_graph_proto();
 
   // Based on the type, set the denotation in different places
   switch (get_type()) {
@@ -717,8 +717,8 @@ void NodeArgIndex::set_denotation(const std::vector<std::string>& denotation) {
              static_cast<unsigned int>(graph_proto.input_size()))
         << "Graph input index " << fields_.index_
         << " is out of bounds (size: " << graph_proto.input_size() << ")";
-    auto* input = graph_proto.mutable_input(fields_.index_);
-    auto* shape_proto =
+    auto *input = graph_proto.mutable_input(fields_.index_);
+    auto *shape_proto =
         input->mutable_type()->mutable_tensor_type()->mutable_shape();
 
     // Ensure we have the right number of dimensions
@@ -748,8 +748,8 @@ void NodeArgIndex::set_denotation(const std::vector<std::string>& denotation) {
              static_cast<unsigned int>(graph_proto.value_info_size()))
         << "Value info index " << fields_.index_
         << " is out of bounds (size: " << graph_proto.value_info_size() << ")";
-    auto* value_info = graph_proto.mutable_value_info(fields_.index_);
-    auto* shape_proto =
+    auto *value_info = graph_proto.mutable_value_info(fields_.index_);
+    auto *shape_proto =
         value_info->mutable_type()->mutable_tensor_type()->mutable_shape();
 
     // Ensure we have the right number of dimensions
@@ -771,8 +771,8 @@ void NodeArgIndex::set_denotation(const std::vector<std::string>& denotation) {
              static_cast<unsigned int>(graph_proto.output_size()))
         << "Graph output index " << fields_.index_
         << " is out of bounds (size: " << graph_proto.output_size() << ")";
-    auto* output = graph_proto.mutable_output(fields_.index_);
-    auto* shape_proto =
+    auto *output = graph_proto.mutable_output(fields_.index_);
+    auto *shape_proto =
         output->mutable_type()->mutable_tensor_type()->mutable_shape();
 
     // Ensure we have the right number of dimensions
@@ -795,8 +795,8 @@ void NodeArgIndex::set_denotation(const std::vector<std::string>& denotation) {
   }
 }
 
-int NodeArgIndex::external_location(std::string& external_file, size_t& offset,
-                                    size_t& size, size_t& checksum) const {
+int NodeArgIndex::external_location(std::string &external_file, size_t &offset,
+                                    size_t &size, size_t &checksum) const {
 
   // Check if this NodeArgIndex is valid and exists
   if (!is_valid_initializer()) {
@@ -809,8 +809,8 @@ int NodeArgIndex::external_location(std::string& external_file, size_t& offset,
   }
 
   // Get the graph proto from the graph
-  const auto& graph_proto = *graph_proto_ptr;
-  const auto& initializer = graph_proto.initializer(fields_.index_);
+  const auto &graph_proto = *graph_proto_ptr;
+  const auto &initializer = graph_proto.initializer(fields_.index_);
   // Extract external file, offset, size, and checksum
   if (!initializer.has_data_location()) {
     return 0; // No data location specified
@@ -820,10 +820,10 @@ int NodeArgIndex::external_location(std::string& external_file, size_t& offset,
     return 0; // Not an external data location
   }
   auto ret = 0;
-  auto& external_data = initializer.external_data();
+  auto &external_data = initializer.external_data();
   auto external_data_size = external_data.size();
   for (auto i = 0; i < external_data_size; ++i) {
-    const auto& entry = external_data.Get(i);
+    const auto &entry = external_data.Get(i);
     if (entry.has_key() && entry.key() == "location") {
       external_file = entry.value();
       ret = 1;
@@ -838,8 +838,8 @@ int NodeArgIndex::external_location(std::string& external_file, size_t& offset,
   return ret;
 }
 
-const morphizen_onnx::TensorProto*
-NodeArgIndex::get_const_data_as_tensor(const Graph& g) const {
+const morphizen_onnx::TensorProto *
+NodeArgIndex::get_const_data_as_tensor(const Graph &g) const {
 
   // Check if this NodeArgIndex is valid
   if (!is_valid(g)) {
@@ -852,7 +852,7 @@ NodeArgIndex::get_const_data_as_tensor(const Graph& g) const {
     return nullptr;
   }
   // Get the graph proto from the graph
-  const auto& graph_proto = g.get_graph_proto();
+  const auto &graph_proto = g.get_graph_proto();
 
   // Check bounds
   if (fields_.index_ >=

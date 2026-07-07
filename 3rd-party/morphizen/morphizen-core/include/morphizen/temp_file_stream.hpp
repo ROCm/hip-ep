@@ -18,9 +18,9 @@ public:
   TempFileStream();
   ~TempFileStream() = default;
 
-  std::iostream& get_stream();
-  std::ostream& get_write_stream();
-  std::istream& get_read_stream();
+  std::iostream &get_stream();
+  std::ostream &get_write_stream();
+  std::istream &get_read_stream();
   size_t get_size();
 
 private:

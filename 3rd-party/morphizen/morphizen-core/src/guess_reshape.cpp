@@ -16,7 +16,7 @@ DEF_ENV_PARAM(DEBUG_GUESS_RESHAPE, "0")
 namespace morphizen {
 
 struct ShapeConsumer {
-  ShapeConsumer(const std::vector<int64_t>& shape)
+  ShapeConsumer(const std::vector<int64_t> &shape)
       : shape_{shape}, value_{1}, idx_{0u}, indice_{} {}
   void maybe_consume() {
     if (idx_ != shape_.size()) {
@@ -38,24 +38,24 @@ struct ShapeConsumer {
 };
 
 static std::string
-show_mapping(std::vector<std::pair<std::vector<size_t>, std::vector<size_t>>>&
-                 mappings) {
+show_mapping(std::vector<std::pair<std::vector<size_t>, std::vector<size_t>>>
+                 &mappings) {
   std::ostringstream str;
   str << "{";
   auto i = 0;
-  for (auto& map : mappings) {
+  for (auto &map : mappings) {
     str << (i ? "," : "");
     i++;
     str << " {first:[";
     auto j = 0;
-    for (auto& f : map.first) {
+    for (auto &f : map.first) {
       str << (j ? "," : "");
       j++;
       str << f;
     }
     str << "], second:[";
     j = 0;
-    for (auto& s : map.second) {
+    for (auto &s : map.second) {
       str << (j ? "," : "");
       j++;
       str << s;
@@ -68,11 +68,11 @@ show_mapping(std::vector<std::pair<std::vector<size_t>, std::vector<size_t>>>&
 
 MORPHIZEN_DLL_SPEC
 std::vector<std::pair<std::vector<size_t>, std::vector<size_t>>>
-guess_reshape(const std::vector<int64_t>& shape_1,
-              const std::vector<int64_t>& shape_2) {
+guess_reshape(const std::vector<int64_t> &shape_1,
+              const std::vector<int64_t> &shape_2) {
   assert(!shape_1.empty());
   assert(!shape_2.empty());
-  auto check_shape = [](const std::vector<int64_t>& shape) {
+  auto check_shape = [](const std::vector<int64_t> &shape) {
     return std::any_of(shape.begin(), shape.end(),
                        [](int64_t dim) { return dim < 0; });
   };

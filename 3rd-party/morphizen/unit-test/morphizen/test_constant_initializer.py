@@ -20,7 +20,9 @@ def create_sample_onnx_model_with_all_constant_initializers():
         helper.make_tensor("const_int64_scalar", TensorProto.INT64, [], [-7]),
         helper.make_tensor("const_uint64_scalar", TensorProto.UINT64, [], [8]),
         helper.make_tensor("const_float_scalar", TensorProto.FLOAT, [], [1.0]),
-        helper.make_tensor("const_double_scalar", TensorProto.DOUBLE, [], [np.float64(2.0)]),
+        helper.make_tensor(
+            "const_double_scalar", TensorProto.DOUBLE, [], [np.float64(2.0)]
+        ),
         # helper.make_tensor("const_bool_scalar", TensorProto.BOOL, [], [True]),
         # helper.make_tensor("const_string_scalar", TensorProto.STRING, [], ["hello"]),
         helper.make_tensor("const_uint8", TensorProto.UINT8, [2], [3, 4]),
@@ -83,7 +85,9 @@ def create_sample_onnx_model_with_all_constant_initializers():
     )
 
     # Create the model
-    model = helper.make_model(graph, producer_name="sample_model_with_all_constant_initializers")
+    model = helper.make_model(
+        graph, producer_name="sample_model_with_all_constant_initializers"
+    )
     # onnx.checker.check_model(model)
 
     # Save the model to a file

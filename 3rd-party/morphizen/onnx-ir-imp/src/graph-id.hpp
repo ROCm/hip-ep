@@ -69,8 +69,8 @@ public:
    * @return true if staging graph, false otherwise
    */
   bool is_staging() const;
-  Graph* get_graph() const;
-  const morphizen_onnx::GraphProto* get_graph_proto() const;
+  Graph *get_graph() const;
+  const morphizen_onnx::GraphProto *get_graph_proto() const;
   /**
    * @brief Get the graph index (lower 31 bits)
    * @return The graph index
@@ -90,12 +90,12 @@ public:
   std::string to_string() const;
 
   // Comparison operators
-  bool operator==(const GraphId& other) const;
-  bool operator!=(const GraphId& other) const;
-  bool operator<(const GraphId& other) const;
-  bool operator<=(const GraphId& other) const;
-  bool operator>(const GraphId& other) const;
-  bool operator>=(const GraphId& other) const;
+  bool operator==(const GraphId &other) const;
+  bool operator!=(const GraphId &other) const;
+  bool operator<(const GraphId &other) const;
+  bool operator<=(const GraphId &other) const;
+  bool operator>(const GraphId &other) const;
+  bool operator>=(const GraphId &other) const;
 
 private:
   /**
@@ -117,6 +117,6 @@ private:
 // Hash specialization for std::unordered_map
 namespace std {
 template <> struct hash<morphizen::GraphId> {
-  size_t operator()(const morphizen::GraphId& graph_id) const;
+  size_t operator()(const morphizen::GraphId &graph_id) const;
 };
 } // namespace std

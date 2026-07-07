@@ -9,14 +9,14 @@
 
 // From onnxruntime/core/graph/constants.h
 namespace onnxruntime {
-constexpr const char* kMSDomain = "com.microsoft";
+constexpr const char *kMSDomain = "com.microsoft";
 } // namespace onnxruntime
 
 // Suppress a warning: global initializer calls a non-constexpr function
 // 'symbol' which is from ONNX_OPERATOR_SET_SCHEMA_EX macro and only happens in
 // debug build
 #if defined(_WIN32) && !defined(NDEBUG)
-#  pragma warning(disable : 26426)
+#pragma warning(disable : 26426)
 #endif
 
 namespace onnxruntime {
@@ -26,7 +26,7 @@ using namespace ONNX_NAMESPACE;
 using ONNX_NAMESPACE::AttributeProto;
 using ONNX_NAMESPACE::OpSchema;
 void RegisterContribSchemas() {
-  auto& domainToVersionRangeInstance =
+  auto &domainToVersionRangeInstance =
       ONNX_NAMESPACE::OpSchemaRegistry::DomainToVersionRange::Instance();
   if (domainToVersionRangeInstance.Map().find(onnxruntime::kMSDomain) ==
       domainToVersionRangeInstance.Map().end()) {

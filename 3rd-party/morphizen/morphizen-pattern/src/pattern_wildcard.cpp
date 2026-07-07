@@ -9,14 +9,14 @@
 #include "morphizen/node_arg.hpp"
 
 #ifdef _MSC_VER
-#  pragma warning(push)
-#  pragma warning(disable : 4946)
+#pragma warning(push)
+#pragma warning(disable : 4946)
 #endif
 
 #include "morphizen/pattern.pb.h"
 
 #ifdef _MSC_VER
-#  pragma warning(pop)
+#pragma warning(pop)
 #endif
 namespace morphizen {
 PatternWildcard::PatternWildcard(int id) : Pattern(id) {}
@@ -30,9 +30,9 @@ std::string PatternWildcard::debug_string() const {
 }
 
 BinderBuilderPtr
-PatternWildcard::match_uncached(const onnxruntime::Graph& graph,
-                                const NodeInput& node_input,
-                                const BinderBuilder& binder) const {
+PatternWildcard::match_uncached(const onnxruntime::Graph &graph,
+                                const NodeInput &node_input,
+                                const BinderBuilder &binder) const {
   MY_LOG(1) << "MATCH OK. ID=" << get_id() << ", wildcard matched: "
             << (node_input.node != nullptr
                     ? morphizen_cxx::NodeConstRef::from_node(graph,
@@ -43,8 +43,8 @@ PatternWildcard::match_uncached(const onnxruntime::Graph& graph,
                           .to_string());
   return binder.add(this->get_id(), node_input);
 }
-void PatternWildcard::dump_to_proto_imp(RootPatternProto& /*pattern_proto*/,
-                                        PatternProto& this_proto) const {
+void PatternWildcard::dump_to_proto_imp(RootPatternProto & /*pattern_proto*/,
+                                        PatternProto &this_proto) const {
   this_proto.mutable_wildcard();
 }
 } // namespace morphizen

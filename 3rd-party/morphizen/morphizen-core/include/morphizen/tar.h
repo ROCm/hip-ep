@@ -7,9 +7,9 @@
 
 /* Cross-platform alignment macro */
 #if defined(_WIN32)
-#  define PACKED(x) __declspec(align(x))
+#define PACKED(x) __declspec(align(x))
 #else
-#  define PACKED(x) __attribute__((packed, aligned(x)))
+#define PACKED(x) __attribute__((packed, aligned(x)))
 #endif
 
 /* POSIX ustar constants */

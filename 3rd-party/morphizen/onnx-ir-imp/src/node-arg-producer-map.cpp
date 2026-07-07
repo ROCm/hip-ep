@@ -12,12 +12,12 @@ DEF_ENV_PARAM(MORPHIZEN_DEBUG_NODE_PRODUCER, "0");
 namespace morphizen {
 
 // Implementation of NodeArgProducerProxy methods
-NodeArgProducerProxy::NodeArgProducerProxy(NodeArgProducer& producer_map,
+NodeArgProducerProxy::NodeArgProducerProxy(NodeArgProducer &producer_map,
                                            const NodeArgIndex node_arg_index)
     : producer_map_(producer_map), node_arg_index_(node_arg_index) {}
 
-NodeArgProducerProxy&
-NodeArgProducerProxy::operator=(const NodeIndex& producer_index) {
+NodeArgProducerProxy &
+NodeArgProducerProxy::operator=(const NodeIndex &producer_index) {
   producer_map_.set_producer(node_arg_index_, producer_index);
   return *this;
 }
@@ -26,8 +26,8 @@ NodeArgProducerProxy::operator NodeIndex() const {
   return producer_map_.get_producer(node_arg_index_);
 }
 
-NodeArgProducerProxy&
-NodeArgProducerProxy::operator=(const NodeArgProducerProxy& other) {
+NodeArgProducerProxy &
+NodeArgProducerProxy::operator=(const NodeArgProducerProxy &other) {
   producer_map_.set_producer(node_arg_index_, other);
   return *this;
 }
@@ -39,8 +39,8 @@ NodeArgProducer::NodeArgProducer(GraphId graph_id) : graph_id_(graph_id) {
   // Vectors will grow automatically as needed
 }
 
-void NodeArgProducer::set_producer(const NodeArgIndex& node_arg_index,
-                                   const NodeIndex& producer_index) {
+void NodeArgProducer::set_producer(const NodeArgIndex &node_arg_index,
+                                   const NodeIndex &producer_index) {
   // Validate input parameters
   CHECK(producer_index.is_valid())
       << "Setting invalid producer for node argument";
@@ -132,7 +132,7 @@ void NodeArgProducer::set_producer(const NodeArgIndex& node_arg_index,
 }
 
 NodeIndex
-NodeArgProducer::get_producer(const NodeArgIndex& node_arg_index) const {
+NodeArgProducer::get_producer(const NodeArgIndex &node_arg_index) const {
   auto node_arg_graph_id = node_arg_index.get_graph_id();
   if (node_arg_graph_id.get_index() != graph_id_.get_index()) {
     LOG(WARNING) << "NodeArgIndex graph ID (" << node_arg_graph_id.to_string()
@@ -154,7 +154,7 @@ NodeArgProducer::get_producer(const NodeArgIndex& node_arg_index) const {
   if (graph_id_.is_staging() && !node_arg_graph_id.is_staging()) {
     auto it = node_arg_producer_map_.find(node_arg_index);
     if (it != node_arg_producer_map_.end()) {
-      return it->second;           // Return the producer NodeIndex
+      return it->second; // Return the producer NodeIndex
     } else {
       return NodeIndex::invalid(); // Invalid NodeIndex
     }
@@ -219,12 +219,12 @@ void NodeArgProducer::ensure_graph_output_capacity(size_t index) {
 }
 
 NodeIndex
-NodeArgProducer::operator[](const NodeArgIndex& node_arg_index) const {
+NodeArgProducer::operator[](const NodeArgIndex &node_arg_index) const {
   return get_producer(node_arg_index);
 }
 
 NodeArgProducerProxy
-NodeArgProducer::operator[](const NodeArgIndex& node_arg_index) {
+NodeArgProducer::operator[](const NodeArgIndex &node_arg_index) {
   return NodeArgProducerProxy(*this, node_arg_index);
 }
 

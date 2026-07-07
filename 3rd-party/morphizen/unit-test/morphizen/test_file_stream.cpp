@@ -10,14 +10,14 @@
 #include <morphizen/file_stream.hpp>
 TEST(FileStreamTest, HelloWorld) {
   { // Test the FileBuf class
-    FILE* file = std::fopen("test.txt", "w+");
+    FILE *file = std::fopen("test.txt", "w+");
     ASSERT_NE(file, nullptr);
     morphizen::FileBuf fileBuf(file, 1024);
     std::ostream os(&fileBuf);
     os << "Hello, World!";
   }
   { // Test the FileStream class
-    FILE* file = std::fopen("test.txt", "r");
+    FILE *file = std::fopen("test.txt", "r");
     ASSERT_NE(file, nullptr);
     morphizen::FileStream fileStream(file);
     std::string line;
@@ -25,7 +25,7 @@ TEST(FileStreamTest, HelloWorld) {
     ASSERT_EQ(line, "Hello, World!");
   }
   { // Test the FileStream class with a different buffer size
-    FILE* file = std::fopen("test.txt", "r");
+    FILE *file = std::fopen("test.txt", "r");
     ASSERT_NE(file, nullptr);
     morphizen::FileStream fileStream(file, 2048);
     std::string line;

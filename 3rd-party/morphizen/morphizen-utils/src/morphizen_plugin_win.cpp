@@ -13,20 +13,20 @@
 #include <sstream>
 #include <string>
 namespace morphizen {
-using plugin_t = void*;
+using plugin_t = void *;
 enum class scope_t { PUBLIC, PRIVATE };
-static std::wstring s2ws(const std::string& s) {
+static std::wstring s2ws(const std::string &s) {
   int len;
   int slength = (int)s.length() + 1;
   len = MultiByteToWideChar(CP_ACP, 0, s.c_str(), slength, 0, 0);
-  wchar_t* buf = new wchar_t[len];
+  wchar_t *buf = new wchar_t[len];
   MultiByteToWideChar(CP_ACP, 0, s.c_str(), slength, buf, len);
   std::wstring r(buf);
   delete[] buf;
   return r;
 }
 
-std::pair<plugin_t, bool> open_plugin_dyn(const std::string& name,
+std::pair<plugin_t, bool> open_plugin_dyn(const std::string &name,
                                           scope_t /*scope*/) {
   static_assert(sizeof(plugin_t) == sizeof(HMODULE));
   auto handle = reinterpret_cast<HMODULE>(GetModuleHandleW(s2ws(name).c_str()));
@@ -36,7 +36,7 @@ std::pair<plugin_t, bool> open_plugin_dyn(const std::string& name,
   return {LoadLibraryW(s2ws(name).c_str()), true};
 }
 
-void* plugin_sym_dyn(plugin_t plugin, const std::string& name) {
+void *plugin_sym_dyn(plugin_t plugin, const std::string &name) {
   return GetProcAddress((HMODULE)plugin, name.c_str());
 }
 std::string plugin_error_dyn(plugin_t /*plugin*/) {

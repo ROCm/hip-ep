@@ -11,11 +11,11 @@
 #include <string>
 
 namespace morphizen {
-MORPHIZEN_DLL_SPEC ModelPtr model_load(const std::string& filename);
-MORPHIZEN_DLL_SPEC void model_set_meta_data(Model& model,
-                                            const std::string& key,
-                                            const std::string& value);
-MORPHIZEN_DLL_SPEC ModelPtr model_clone(const Model& model,
+MORPHIZEN_DLL_SPEC ModelPtr model_load(const std::string &filename);
+MORPHIZEN_DLL_SPEC void model_set_meta_data(Model &model,
+                                            const std::string &key,
+                                            const std::string &value);
+MORPHIZEN_DLL_SPEC ModelPtr model_clone(const Model &model,
                                         int64_t external_data_threshold = 64);
 
 } // namespace morphizen
@@ -33,7 +33,7 @@ public:
    *
    * @param model A constant reference to a morphizen::Model object.
    */
-  ModelConstRef(const morphizen::Model& model);
+  ModelConstRef(const morphizen::Model &model);
   /**
    * @brief Implicit conversion operator to retrieve the underlying
    * onnxruntime::Model object.
@@ -44,20 +44,20 @@ public:
    *
    * @return Reference to the underlying onnxruntime::Model object.
    */
-  operator const onnxruntime::Model&() { return self_; }
+  operator const onnxruntime::Model &() { return self_; }
 
   /** @brief the name of model
    *
    * @return the name of the main graph
    */
-  const std::string& name() const;
+  const std::string &name() const;
   /**
    * Retrieves the metadata value associated with the given name.
    *
    * @param name The name of the metadata to retrieve.
    * @return The metadata value associated with the given name.
    */
-  std::string get_metadata(const std::string& name) const;
+  std::string get_metadata(const std::string &name) const;
 
   /**
    * @brief Checks if the specified metadata exists.
@@ -68,7 +68,7 @@ public:
    * @param name The name of the metadata to check.
    * @return `true` if the metadata exists, `false` otherwise.
    */
-  bool has_metadata(const std::string& name) const;
+  bool has_metadata(const std::string &name) const;
   /**
    * @brief Retrieves the main graph of the model.
    *
@@ -94,7 +94,7 @@ public:
   std::filesystem::path model_path() const;
 
 private:
-  const morphizen::Model& self_;
+  const morphizen::Model &self_;
 };
 class MORPHIZEN_DLL_SPEC Model {
 public:
@@ -114,13 +114,13 @@ public:
    * @return A unique pointer to the created Model instance.
    */
   static std::unique_ptr<Model>
-  create(const std::filesystem::path& model_path,
-         const std::vector<std::pair<std::string, int64_t>>& opset);
+  create(const std::filesystem::path &model_path,
+         const std::vector<std::pair<std::string, int64_t>> &opset);
   /** @brief the name of model
    *
    * @return a Model object
    */
-  static std::unique_ptr<Model> load(const std::filesystem::path& model_path);
+  static std::unique_ptr<Model> load(const std::filesystem::path &model_path);
 
   /**
    * @brief Sets the metadata for the model.
@@ -132,7 +132,7 @@ public:
    * @param value The value of the metadata.
    * @return A reference to the updated Model object.
    */
-  Model& set_metadata(const std::string& name, const std::string& value);
+  Model &set_metadata(const std::string &name, const std::string &value);
 
   /**
    * @brief Implicit conversion operator to retrieve the underlying
@@ -144,7 +144,7 @@ public:
    *
    * @return Reference to the underlying onnxruntime::Model object.
    */
-  operator onnxruntime::Model&() { return *self_.get(); }
+  operator onnxruntime::Model &() { return *self_.get(); }
   ModelConstRef ref() const { return ModelConstRef(*self_.get()); }
 
   /**
@@ -155,7 +155,7 @@ public:
   GraphRef main_graph();
 
 private:
-  Model(morphizen::ModelPtr&& ptr);
+  Model(morphizen::ModelPtr &&ptr);
 
 private:
   morphizen::ModelPtr self_;

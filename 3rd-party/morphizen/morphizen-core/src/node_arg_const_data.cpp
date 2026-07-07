@@ -13,162 +13,162 @@
 namespace morphizen {
 
 MORPHIZEN_DLL_SPEC int8_t
-node_arg_get_const_data_as_i8(const Graph& graph, const NodeArg& node_arg) {
+node_arg_get_const_data_as_i8(const Graph &graph, const NodeArg &node_arg) {
   CHECK(node_arg_exists(node_arg)) << "node_arg doesn't exist!";
   return tensor_proto_as_i8(graph,
                             node_arg_get_const_data_as_tensor(graph, node_arg));
 }
 MORPHIZEN_DLL_SPEC uint8_t
-node_arg_get_const_data_as_u8(const Graph& graph, const NodeArg& node_arg) {
+node_arg_get_const_data_as_u8(const Graph &graph, const NodeArg &node_arg) {
   CHECK(node_arg_exists(node_arg)) << "node_arg doesn't exist!";
   return tensor_proto_as_u8(graph,
                             node_arg_get_const_data_as_tensor(graph, node_arg));
 }
 MORPHIZEN_DLL_SPEC int16_t
-node_arg_get_const_data_as_i16(const Graph& graph, const NodeArg& node_arg) {
+node_arg_get_const_data_as_i16(const Graph &graph, const NodeArg &node_arg) {
   CHECK(node_arg_exists(node_arg)) << "node_arg doesn't exist!";
   return tensor_proto_as_i16(
       graph, node_arg_get_const_data_as_tensor(graph, node_arg));
 }
 MORPHIZEN_DLL_SPEC uint16_t
-node_arg_get_const_data_as_u16(const Graph& graph, const NodeArg& node_arg) {
+node_arg_get_const_data_as_u16(const Graph &graph, const NodeArg &node_arg) {
   CHECK(node_arg_exists(node_arg)) << "node_arg doesn't exist!";
   return tensor_proto_as_u16(
       graph, node_arg_get_const_data_as_tensor(graph, node_arg));
 }
 MORPHIZEN_DLL_SPEC int32_t
-node_arg_get_const_data_as_i32(const Graph& graph, const NodeArg& node_arg) {
+node_arg_get_const_data_as_i32(const Graph &graph, const NodeArg &node_arg) {
   CHECK(node_arg_exists(node_arg)) << "node_arg doesn't exist!";
   return tensor_proto_as_i32(
       graph, node_arg_get_const_data_as_tensor(graph, node_arg));
 }
 MORPHIZEN_DLL_SPEC uint32_t
-node_arg_get_const_data_as_u32(const Graph& graph, const NodeArg& node_arg) {
+node_arg_get_const_data_as_u32(const Graph &graph, const NodeArg &node_arg) {
   CHECK(node_arg_exists(node_arg)) << "node_arg doesn't exist!";
   return tensor_proto_as_u32(
       graph, node_arg_get_const_data_as_tensor(graph, node_arg));
 }
 MORPHIZEN_DLL_SPEC int64_t
-node_arg_get_const_data_as_i64(const Graph& graph, const NodeArg& node_arg) {
+node_arg_get_const_data_as_i64(const Graph &graph, const NodeArg &node_arg) {
   CHECK(node_arg_exists(node_arg)) << "node_arg doesn't exist!";
   return tensor_proto_as_i64(
       graph, node_arg_get_const_data_as_tensor(graph, node_arg));
 }
 MORPHIZEN_DLL_SPEC uint64_t
-node_arg_get_const_data_as_u64(const Graph& graph, const NodeArg& node_arg) {
+node_arg_get_const_data_as_u64(const Graph &graph, const NodeArg &node_arg) {
   CHECK(node_arg_exists(node_arg)) << "node_arg doesn't exist!";
   return tensor_proto_as_u64(
       graph, node_arg_get_const_data_as_tensor(graph, node_arg));
 }
 MORPHIZEN_DLL_SPEC float
-node_arg_get_const_data_as_float(const Graph& graph, const NodeArg& node_arg) {
+node_arg_get_const_data_as_float(const Graph &graph, const NodeArg &node_arg) {
   CHECK(node_arg_exists(node_arg)) << "node_arg doesn't exist!";
   return tensor_proto_as_float(
       graph, node_arg_get_const_data_as_tensor(graph, node_arg));
 }
 MORPHIZEN_DLL_SPEC double
-node_arg_get_const_data_as_double(const Graph& graph, const NodeArg& node_arg) {
+node_arg_get_const_data_as_double(const Graph &graph, const NodeArg &node_arg) {
   CHECK(node_arg_exists(node_arg)) << "node_arg doesn't exist!";
   return tensor_proto_as_double(
       graph, node_arg_get_const_data_as_tensor(graph, node_arg));
 }
 MORPHIZEN_DLL_SPEC int16_t
-node_arg_get_const_data_as_bf16(const Graph& graph, const NodeArg& node_arg) {
+node_arg_get_const_data_as_bf16(const Graph &graph, const NodeArg &node_arg) {
   CHECK(node_arg_exists(node_arg)) << "node_arg doesn't exist!";
   return tensor_proto_as_bf16(
       graph, node_arg_get_const_data_as_tensor(graph, node_arg));
 }
 
 MORPHIZEN_DLL_SPEC int16_t
-node_arg_get_const_data_as_fp16(const Graph& graph, const NodeArg& node_arg) {
+node_arg_get_const_data_as_fp16(const Graph &graph, const NodeArg &node_arg) {
   CHECK(node_arg_exists(node_arg)) << "node_arg doesn't exist!";
   return tensor_proto_as_fp16(
       graph, node_arg_get_const_data_as_tensor(graph, node_arg));
 }
 
 MORPHIZEN_DLL_SPEC gsl::span<const uint8_t>
-node_arg_get_const_data_as_u4s(const Graph& graph, const NodeArg& node_arg) {
+node_arg_get_const_data_as_u4s(const Graph &graph, const NodeArg &node_arg) {
   CHECK(node_arg_exists(node_arg)) << "node_arg doesn't exist!";
   return tensor_proto_as_u4s(
       graph, node_arg_get_const_data_as_tensor(graph, node_arg));
 }
 MORPHIZEN_DLL_SPEC gsl::span<const int8_t>
-node_arg_get_const_data_as_i4s(const Graph& graph, const NodeArg& node_arg) {
+node_arg_get_const_data_as_i4s(const Graph &graph, const NodeArg &node_arg) {
   CHECK(node_arg_exists(node_arg)) << "node_arg doesn't exist!";
   return tensor_proto_as_i4s(
       graph, node_arg_get_const_data_as_tensor(graph, node_arg));
 }
 
 MORPHIZEN_DLL_SPEC gsl::span<const uint8_t>
-node_arg_get_const_data_as_u8s(const Graph& graph, const NodeArg& node_arg) {
+node_arg_get_const_data_as_u8s(const Graph &graph, const NodeArg &node_arg) {
   CHECK(node_arg_exists(node_arg)) << "node_arg doesn't exist!";
   return tensor_proto_as_u8s(
       graph, node_arg_get_const_data_as_tensor(graph, node_arg));
 }
 MORPHIZEN_DLL_SPEC gsl::span<const int8_t>
-node_arg_get_const_data_as_i8s(const Graph& graph, const NodeArg& node_arg) {
+node_arg_get_const_data_as_i8s(const Graph &graph, const NodeArg &node_arg) {
   CHECK(node_arg_exists(node_arg)) << "node_arg doesn't exist!";
   return tensor_proto_as_i8s(
       graph, node_arg_get_const_data_as_tensor(graph, node_arg));
 }
 MORPHIZEN_DLL_SPEC gsl::span<const uint16_t>
-node_arg_get_const_data_as_u16s(const Graph& graph, const NodeArg& node_arg) {
+node_arg_get_const_data_as_u16s(const Graph &graph, const NodeArg &node_arg) {
   CHECK(node_arg_exists(node_arg)) << "node_arg doesn't exist!";
   return tensor_proto_as_u16s(
       graph, node_arg_get_const_data_as_tensor(graph, node_arg));
 }
 MORPHIZEN_DLL_SPEC gsl::span<const int16_t>
-node_arg_get_const_data_as_i16s(const Graph& graph, const NodeArg& node_arg) {
+node_arg_get_const_data_as_i16s(const Graph &graph, const NodeArg &node_arg) {
   CHECK(node_arg_exists(node_arg)) << "node_arg doesn't exist!";
   return tensor_proto_as_i16s(
       graph, node_arg_get_const_data_as_tensor(graph, node_arg));
 }
 MORPHIZEN_DLL_SPEC gsl::span<const int32_t>
-node_arg_get_const_data_as_i32s(const Graph& graph, const NodeArg& node_arg) {
+node_arg_get_const_data_as_i32s(const Graph &graph, const NodeArg &node_arg) {
   CHECK(node_arg_exists(node_arg)) << "node_arg doesn't exist!";
   return tensor_proto_as_i32s(
       graph, node_arg_get_const_data_as_tensor(graph, node_arg));
 }
 MORPHIZEN_DLL_SPEC gsl::span<const uint32_t>
-node_arg_get_const_data_as_u32s(const Graph& graph, const NodeArg& node_arg) {
+node_arg_get_const_data_as_u32s(const Graph &graph, const NodeArg &node_arg) {
   CHECK(node_arg_exists(node_arg)) << "node_arg doesn't exist!";
   return tensor_proto_as_u32s(
       graph, node_arg_get_const_data_as_tensor(graph, node_arg));
 }
 MORPHIZEN_DLL_SPEC gsl::span<const int64_t>
-node_arg_get_const_data_as_i64s(const Graph& graph, const NodeArg& node_arg) {
+node_arg_get_const_data_as_i64s(const Graph &graph, const NodeArg &node_arg) {
   CHECK(node_arg_exists(node_arg)) << "node_arg doesn't exist!";
   return tensor_proto_as_i64s(
       graph, node_arg_get_const_data_as_tensor(graph, node_arg));
 }
 MORPHIZEN_DLL_SPEC gsl::span<const uint64_t>
-node_arg_get_const_data_as_u64s(const Graph& graph, const NodeArg& node_arg) {
+node_arg_get_const_data_as_u64s(const Graph &graph, const NodeArg &node_arg) {
   CHECK(node_arg_exists(node_arg)) << "node_arg doesn't exist!";
   return tensor_proto_as_u64s(
       graph, node_arg_get_const_data_as_tensor(graph, node_arg));
 }
 MORPHIZEN_DLL_SPEC gsl::span<const float>
-node_arg_get_const_data_as_floats(const Graph& graph, const NodeArg& node_arg) {
+node_arg_get_const_data_as_floats(const Graph &graph, const NodeArg &node_arg) {
   CHECK(node_arg_exists(node_arg)) << "node_arg doesn't exist!";
   return tensor_proto_as_floats(
       graph, node_arg_get_const_data_as_tensor(graph, node_arg));
 }
 MORPHIZEN_DLL_SPEC gsl::span<const double>
-node_arg_get_const_data_as_doubles(const Graph& graph,
-                                   const NodeArg& node_arg) {
+node_arg_get_const_data_as_doubles(const Graph &graph,
+                                   const NodeArg &node_arg) {
   CHECK(node_arg_exists(node_arg)) << "node_arg doesn't exist!";
   return tensor_proto_as_doubles(
       graph, node_arg_get_const_data_as_tensor(graph, node_arg));
 }
 MORPHIZEN_DLL_SPEC gsl::span<const int16_t>
-node_arg_get_const_data_as_bf16s(const Graph& graph, const NodeArg& node_arg) {
+node_arg_get_const_data_as_bf16s(const Graph &graph, const NodeArg &node_arg) {
   CHECK(node_arg_exists(node_arg)) << "node_arg doesn't exist!";
   return tensor_proto_as_bf16s(
       graph, node_arg_get_const_data_as_tensor(graph, node_arg));
 }
 
 MORPHIZEN_DLL_SPEC gsl::span<const int16_t>
-node_arg_get_const_data_as_fp16s(const Graph& graph, const NodeArg& node_arg) {
+node_arg_get_const_data_as_fp16s(const Graph &graph, const NodeArg &node_arg) {
   CHECK(node_arg_exists(node_arg)) << "node_arg doesn't exist!";
   return tensor_proto_as_fp16s(
       graph, node_arg_get_const_data_as_tensor(graph, node_arg));

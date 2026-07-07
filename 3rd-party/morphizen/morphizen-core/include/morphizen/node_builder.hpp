@@ -30,14 +30,14 @@ public:
    * @param graph The graph to which the node belongs.
    * @param pass The pass to which the node belongs.
    */
-  MORPHIZEN_DLL_SPEC explicit NodeBuilder(Graph& graph, IPass& pass);
+  MORPHIZEN_DLL_SPEC explicit NodeBuilder(Graph &graph, IPass &pass);
 
   /**
    * @brief Builds and returns the constructed node.
    *
    * @return The constructed node.
    */
-  MORPHIZEN_DLL_SPEC const Node& build();
+  MORPHIZEN_DLL_SPEC const Node &build();
 
   /**
    * @brief Builds and returns the constructed node as a constant reference.
@@ -52,7 +52,7 @@ public:
    * @param node The node to clone.
    * @return A reference to the NodeBuilder object.
    */
-  MORPHIZEN_DLL_SPEC NodeBuilder& clone_node(const Node& node);
+  MORPHIZEN_DLL_SPEC NodeBuilder &clone_node(const Node &node);
 
   /**
    * @brief Clones the operation type of the given node and sets it as the
@@ -61,7 +61,7 @@ public:
    * @param node The node from which to clone the operation type.
    * @return A reference to the NodeBuilder object.
    */
-  MORPHIZEN_DLL_SPEC NodeBuilder& clone_op_type(const Node& node);
+  MORPHIZEN_DLL_SPEC NodeBuilder &clone_op_type(const Node &node);
 
   /**
    * @brief Sets the operation type of the current node being built.
@@ -70,9 +70,9 @@ public:
    * @param domain The domain of the operation type (default: "com.xilinx").
    * @return A reference to the NodeBuilder object.
    */
-  MORPHIZEN_DLL_SPEC NodeBuilder&
-  set_op_type(const std::string& op_type,
-              const std::string& domain = "com.xilinx");
+  MORPHIZEN_DLL_SPEC NodeBuilder &
+  set_op_type(const std::string &op_type,
+              const std::string &domain = "com.xilinx");
 
   /**
    * @brief Clones the inputs of the given node and sets them as the inputs of
@@ -81,7 +81,7 @@ public:
    * @param node The node from which to clone the inputs.
    * @return A reference to the NodeBuilder object.
    */
-  MORPHIZEN_DLL_SPEC NodeBuilder& clone_inputs(const Node& node);
+  MORPHIZEN_DLL_SPEC NodeBuilder &clone_inputs(const Node &node);
 
   /**
    * @brief Sets the input nodes of the current node being built.
@@ -89,8 +89,8 @@ public:
    * @param input_nodes The input nodes.
    * @return A reference to the NodeBuilder object.
    */
-  MORPHIZEN_DLL_SPEC NodeBuilder&
-  set_input_nodes(const std::vector<const Node*>& input_nodes);
+  MORPHIZEN_DLL_SPEC NodeBuilder &
+  set_input_nodes(const std::vector<const Node *> &input_nodes);
 
   /**
    * @brief Sets the input node arguments of the current node being built.
@@ -98,8 +98,8 @@ public:
    * @param input_args The input node arguments.
    * @return A reference to the NodeBuilder object.
    */
-  MORPHIZEN_DLL_SPEC NodeBuilder&
-  set_input_node_args(const std::vector<const NodeArg*>& input_args);
+  MORPHIZEN_DLL_SPEC NodeBuilder &
+  set_input_node_args(const std::vector<const NodeArg *> &input_args);
 
   /**
    * @brief Sets the input node arguments for the NodeBuilder.
@@ -111,15 +111,15 @@ public:
    * input node arguments.
    * @return A reference to the NodeBuilder object.
    */
-  MORPHIZEN_DLL_SPEC NodeBuilder& set_input_node_args_ex(
-      const std::vector<morphizen_cxx::NodeArgConstRef>& input_args);
+  MORPHIZEN_DLL_SPEC NodeBuilder &set_input_node_args_ex(
+      const std::vector<morphizen_cxx::NodeArgConstRef> &input_args);
   /**
    * @brief Appends the given node as an input to the current node being built.
    *
    * @param node The node to append as an input.
    * @return A reference to the NodeBuilder object.
    */
-  MORPHIZEN_DLL_SPEC NodeBuilder& append_input(const Node& node);
+  MORPHIZEN_DLL_SPEC NodeBuilder &append_input(const Node &node);
 
   /**
    * @brief Clones the attributes of the given node and sets them as the
@@ -128,7 +128,7 @@ public:
    * @param node The node from which to clone the attributes.
    * @return A reference to the NodeBuilder object.
    */
-  MORPHIZEN_DLL_SPEC NodeBuilder& clone_attrs(const Node& node);
+  MORPHIZEN_DLL_SPEC NodeBuilder &clone_attrs(const Node &node);
 
   /**
    * @brief Returns the NodeAttributesBuilder object for modifying the
@@ -136,7 +136,7 @@ public:
    *
    * @return The NodeAttributesBuilder object.
    */
-  MORPHIZEN_DLL_SPEC NodeAttributesBuilder& get_attrs_builder();
+  MORPHIZEN_DLL_SPEC NodeAttributesBuilder &get_attrs_builder();
 
   /**
    * @brief Clones the shape of the given node and sets it as the shape of the
@@ -145,7 +145,7 @@ public:
    * @param node The node from which to clone the shape.
    * @return A reference to the NodeBuilder object.
    */
-  MORPHIZEN_DLL_SPEC NodeBuilder& clone_shape(const Node& node);
+  MORPHIZEN_DLL_SPEC NodeBuilder &clone_shape(const Node &node);
 
   /**
    * @brief Sets the shape of the current node being built.
@@ -153,8 +153,8 @@ public:
    * @param shape The shape of the node.
    * @return A reference to the NodeBuilder object.
    */
-  MORPHIZEN_DLL_SPEC NodeBuilder&
-  set_shape(const gsl::span<const int64_t>& shape);
+  MORPHIZEN_DLL_SPEC NodeBuilder &
+  set_shape(const gsl::span<const int64_t> &shape);
 
   /**
    * @brief Clones the shape of the given node argument and sets it as the shape
@@ -163,7 +163,7 @@ public:
    * @param node_arg The node argument from which to clone the shape.
    * @return A reference to the NodeBuilder object.
    */
-  MORPHIZEN_DLL_SPEC NodeBuilder& clone_shape(const NodeArg& node_arg);
+  MORPHIZEN_DLL_SPEC NodeBuilder &clone_shape(const NodeArg &node_arg);
 
   /**
    * @brief Clones the data type of the given node and sets it as the data type
@@ -172,7 +172,7 @@ public:
    * @param node The node from which to clone the data type.
    * @return A reference to the NodeBuilder object.
    */
-  MORPHIZEN_DLL_SPEC NodeBuilder& clone_data_type(const Node& node);
+  MORPHIZEN_DLL_SPEC NodeBuilder &clone_data_type(const Node &node);
 
   /**
    * @brief Clones the data type of the given node argument and sets it as the
@@ -181,7 +181,7 @@ public:
    * @param node_arg The node argument from which to clone the data type.
    * @return A reference to the NodeBuilder object.
    */
-  MORPHIZEN_DLL_SPEC NodeBuilder& clone_data_type(const NodeArg& node);
+  MORPHIZEN_DLL_SPEC NodeBuilder &clone_data_type(const NodeArg &node);
 
   /**
    * @brief Sets the data type of the current node being built.
@@ -189,7 +189,7 @@ public:
    * @param data_type The data type.
    * @return A reference to the NodeBuilder object.
    */
-  MORPHIZEN_DLL_SPEC NodeBuilder& set_data_type(const std::string& data_type);
+  MORPHIZEN_DLL_SPEC NodeBuilder &set_data_type(const std::string &data_type);
 
   /**
    * @brief Sets the anchor point of the current node being built to the given
@@ -198,7 +198,7 @@ public:
    * @param node The node to set as the anchor point.
    * @return A reference to the NodeBuilder object.
    */
-  MORPHIZEN_DLL_SPEC NodeBuilder& set_anchor_point1(const Node& node);
+  MORPHIZEN_DLL_SPEC NodeBuilder &set_anchor_point1(const Node &node);
 
   /**
    * @brief Sets the anchor point of the current node being built to the given
@@ -207,7 +207,7 @@ public:
    * @param node_arg The node argument to set as the anchor point.
    * @return A reference to the NodeBuilder object.
    */
-  MORPHIZEN_DLL_SPEC NodeBuilder& set_anchor_point1(const NodeArg& node);
+  MORPHIZEN_DLL_SPEC NodeBuilder &set_anchor_point1(const NodeArg &node);
 
   /**
    * @brief Sets the anchor point of the current node being built to the given
@@ -217,9 +217,9 @@ public:
    * @param description The description of the anchor point.
    * @return A reference to the NodeBuilder object.
    */
-  MORPHIZEN_DLL_SPEC NodeBuilder&
-  set_anchor_point2(const NodeArg& node_arg,
-                    const AnchorPoint::Description& description);
+  MORPHIZEN_DLL_SPEC NodeBuilder &
+  set_anchor_point2(const NodeArg &node_arg,
+                    const AnchorPoint::Description &description);
 
   /**
    * @brief Sets the anchor point of the current node being built to the given
@@ -230,10 +230,10 @@ public:
    * @param shape The shape of the anchor point.
    * @return A reference to the NodeBuilder object.
    */
-  MORPHIZEN_DLL_SPEC NodeBuilder&
-  set_anchor_point3(const NodeArg& node_arg,
-                    const AnchorPoint::Description& description,
-                    const std::vector<int64_t>& shape);
+  MORPHIZEN_DLL_SPEC NodeBuilder &
+  set_anchor_point3(const NodeArg &node_arg,
+                    const AnchorPoint::Description &description,
+                    const std::vector<int64_t> &shape);
 
   /**
    * @brief Sets the anchor point of the current node being built to the given
@@ -245,9 +245,9 @@ public:
    * @param data_type The data type of the anchor point.
    * @return A reference to the NodeBuilder object.
    */
-  MORPHIZEN_DLL_SPEC NodeBuilder& set_anchor_point4(
-      const NodeArg& node_arg, const AnchorPoint::Description& description,
-      const std::vector<int64_t>& shape, const std::string& data_type);
+  MORPHIZEN_DLL_SPEC NodeBuilder &set_anchor_point4(
+      const NodeArg &node_arg, const AnchorPoint::Description &description,
+      const std::vector<int64_t> &shape, const std::string &data_type);
 
   /**
    * @brief Adds an attribute with the given name and value to the current node
@@ -258,7 +258,7 @@ public:
    * @param value The value of the attribute.
    * @return A reference to the NodeBuilder object.
    */
-  template <typename T> NodeBuilder& add(const std::string& name, T&& value) {
+  template <typename T> NodeBuilder &add(const std::string &name, T &&value) {
     if (name == "data_type" || name == "shape") {
       assert(false &&
              "data_type and shape are deprecated, please use set_anchor_point, "
@@ -273,21 +273,21 @@ public:
    *
    * @return A reference to the NodeBuilder object.
    */
-  MORPHIZEN_DLL_SPEC NodeBuilder& add_output();
+  MORPHIZEN_DLL_SPEC NodeBuilder &add_output();
 
   /**
    * @brief Skips the optional output of the current node being built.
    *
    * @return A reference to the NodeBuilder object.
    */
-  MORPHIZEN_DLL_SPEC NodeBuilder& skip_optional_output();
+  MORPHIZEN_DLL_SPEC NodeBuilder &skip_optional_output();
 
 private:
-  Graph& graph_;
-  IPass* pass_;
+  Graph &graph_;
+  IPass *pass_;
   std::string op_type_;
   std::string description_;
-  std::vector<const NodeArg*> input_args_;
+  std::vector<const NodeArg *> input_args_;
   NodeAttributesPtr attrs_;
   NodeAttributesBuilder attrs_builder_;
   std::string domain_;

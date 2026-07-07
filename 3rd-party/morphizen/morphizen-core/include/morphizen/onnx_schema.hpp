@@ -8,7 +8,7 @@
 
 // Define ONNX namespace and include schema definitions
 #ifdef ONNX_NAMESPACE
-#  undef ONNX_NAMESPACE
+#undef ONNX_NAMESPACE
 #endif
 #define ONNX_NAMESPACE morphizen_onnx
 #include <onnx/defs/schema.h>
@@ -35,8 +35,8 @@ using OpSchema = ONNX_NAMESPACE::OpSchema;
  * @note The returned pointer should not be deleted as it points to a statically
  *       managed schema registry entry.
  */
-const OpSchema*
-GetOpSchema(const std::string& op_type,
-            const std::string& op_domain = ONNX_NAMESPACE::ONNX_DOMAIN);
+const OpSchema *
+GetOpSchema(const std::string &op_type,
+            const std::string &op_domain = ONNX_NAMESPACE::ONNX_DOMAIN);
 
 } // namespace morphizen

@@ -50,14 +50,14 @@ namespace {
 using namespace morphizen;
 struct NodePattern {
 public:
-  NodePattern(const NodeInput& node_input, const std::string& hint,
+  NodePattern(const NodeInput &node_input, const std::string &hint,
               const std::shared_ptr<Pattern> pattern,
-              const std::string& cxx_name,
-              const std::vector<std::shared_ptr<NodePattern>>& inputs)
+              const std::string &cxx_name,
+              const std::vector<std::shared_ptr<NodePattern>> &inputs)
       : node_input_(node_input), hint_(hint), pattern_(pattern),
         cxx_name_(cxx_name), inputs_(inputs) {}
   const std::shared_ptr<Pattern> pattern() const { return pattern_; }
-  const std::string& node_arg_name() const {
+  const std::string &node_arg_name() const {
     return node_arg_get_name(*node_input_.node_arg);
   }
   /**
@@ -74,10 +74,10 @@ public:
       str << "builder.wildcard()";
     } else {
       CHECK(node_input_.node != nullptr) << "hint_= " << hint_;
-      auto& node = *node_input_.node;
+      auto &node = *node_input_.node;
       auto pattern_op_type = std::string();
-      auto& op_type = node_op_type(node);
-      auto& op_domain = node_op_domain(node);
+      auto &op_type = node_op_type(node);
+      auto &op_domain = node_op_domain(node);
       if (op_domain.empty()) {
         pattern_op_type = op_type;
       } else {
@@ -86,7 +86,7 @@ public:
       str << "builder.node2(\"" << pattern_op_type << "\"";
       str << ",{";
       auto sep = std::string("");
-      for (auto& i : inputs_) {
+      for (auto &i : inputs_) {
         str << sep << i->cxx_name_;
         sep = ",";
       }
@@ -102,7 +102,7 @@ public:
    * @return The string representing a mermaid node.
    */
   const std::string
-  mmd_build_self(const std::vector<std::string>& outputs) const {
+  mmd_build_self(const std::vector<std::string> &outputs) const {
     std::ostringstream str;
     auto indent = "    ";
 
@@ -138,7 +138,7 @@ public:
       }
       str << "]";
       str << std::endl;
-      for (auto& ni : inputs_) {
+      for (auto &ni : inputs_) {
         auto draw_it = true;
         if (ENV_PARAM(IGNORE_CONSTANT)) {
           if (ni->hint_ == "constant") {
@@ -166,8 +166,8 @@ public:
    * @param ni The NodeInput object used in the node label.
    * @return The generated node label.
    */
-  std::string node_label(const std::string format, const std::string& cxx_name,
-                         int pattern_id, const NodeInput& ni) const {
+  std::string node_label(const std::string format, const std::string &cxx_name,
+                         int pattern_id, const NodeInput &ni) const {
     auto ret = format;
     auto str_pattern_id = std::to_string(pattern_id);
     auto str_node_arg = node_arg_as_string(*ni.node_arg);
@@ -201,8 +201,8 @@ public:
    * @param cxx_name The name of the C++ class.
    * @param str The output stream to write the generated class definitions.
    */
-  void maybe_class_defs(const std::string& hint, const std::string& cxx_name,
-                        std::ostream& str) const {
+  void maybe_class_defs(const std::string &hint, const std::string &cxx_name,
+                        std::ostream &str) const {
     static const std::unordered_map<std::string, std::string> class_defs = {
         // Light Blue Fill with Dark Blue Stroke
         {"input", "fill:#add8e6,stroke:#00008b,stroke-width:2px;"},
@@ -323,11 +323,11 @@ public:
    * @param node The node to build the pattern for.
    * @return A shared pointer to the built node pattern.
    */
-  std::shared_ptr<NodePattern> build_node(const Node& node) {
+  std::shared_ptr<NodePattern> build_node(const Node &node) {
     auto hint = get_hint(node);
     auto cxx_name = new_unique_name(hint);
     auto node_inputs = node_get_inputs(node);
-    auto& node_arg = node_get_first_output_node_arg(node);
+    auto &node_arg = node_get_first_output_node_arg(node);
     auto ni_name = node_arg_get_name(node_arg);
     auto pattern_args = std::vector<std::shared_ptr<Pattern>>{};
     auto node_pattern_inputs = std::vector<std::shared_ptr<NodePattern>>{};
@@ -364,7 +364,7 @@ public:
       pattern_op_type = op_domain + ":" + op_type;
     }
     auto pattern = builder_.node2(pattern_op_type, pattern_args);
-    auto& node_arg_name = node_arg_get_name(node_arg);
+    auto &node_arg_name = node_arg_get_name(node_arg);
     builder_.bind(node_arg_name, pattern);
     return push_back_build_node_pattern({&node, &node_arg}, hint, pattern,
                                         cxx_name, node_pattern_inputs);
@@ -375,8 +375,8 @@ public:
    * @param node_arg The NodeArg for which the constant pattern is built.
    * @return A shared pointer to the built NodePattern.
    */
-  std::shared_ptr<NodePattern> build_constant_pattern(const NodeArg& node_arg) {
-    auto& node_arg_name = node_arg_get_name(node_arg);
+  std::shared_ptr<NodePattern> build_constant_pattern(const NodeArg &node_arg) {
+    auto &node_arg_name = node_arg_get_name(node_arg);
     LOG(INFO) << "create constant for " << node_arg_name;
     if (ENV_PARAM(ENABLE_CONSTANT_SHARING)) {
       auto it = map_node_patterns_.find(node_arg_name);
@@ -401,8 +401,8 @@ public:
    * @param node_arg The input node argument.
    * @return A shared pointer to the built node pattern.
    */
-  std::shared_ptr<NodePattern> build_input_pattern(const NodeArg& node_arg) {
-    auto& node_arg_name = node_arg_get_name(node_arg);
+  std::shared_ptr<NodePattern> build_input_pattern(const NodeArg &node_arg) {
+    auto &node_arg_name = node_arg_get_name(node_arg);
     auto it = map_node_patterns_.find(node_arg_name);
     if (it != map_node_patterns_.end()) {
       return it->second;
@@ -432,10 +432,10 @@ public:
    * @param inputs The vector of shared pointers to NodePattern objects.
    */
   std::shared_ptr<NodePattern> push_back_build_node_pattern(
-      const NodeInput& node_input, const std::string& hint,
-      const std::shared_ptr<Pattern> pattern, const std::string& cxx_name,
-      const std::vector<std::shared_ptr<NodePattern>>& inputs) {
-    auto& node_arg_name = node_arg_get_name(*node_input.node_arg);
+      const NodeInput &node_input, const std::string &hint,
+      const std::shared_ptr<Pattern> pattern, const std::string &cxx_name,
+      const std::vector<std::shared_ptr<NodePattern>> &inputs) {
+    auto &node_arg_name = node_arg_get_name(*node_input.node_arg);
     auto ret = std::make_shared<NodePattern>(node_input, hint, pattern,
                                              cxx_name, inputs);
     vector_node_patterns_.push_back(ret);
@@ -454,8 +454,8 @@ public:
    * @param node The node for which to generate the hint.
    * @return The hint for the given node.
    */
-  std::string get_hint(const Node& node) {
-    auto to_cxx_id = [](const std::string& v_name) -> std::string {
+  std::string get_hint(const Node &node) {
+    auto to_cxx_id = [](const std::string &v_name) -> std::string {
       auto name = v_name;
       std::transform(
           name.begin(), name.end(), name.begin(),
@@ -476,7 +476,7 @@ public:
    * @param hint The hint for the new unique name.
    * @return The new unique name.
    */
-  std::string new_unique_name(const std::string& hint) {
+  std::string new_unique_name(const std::string &hint) {
     auto c = name_counter_[hint];
     auto ret = hint + "_" + std::to_string(c);
     name_counter_[hint] = c + 1;
@@ -495,7 +495,7 @@ public:
    */
   std::shared_ptr<morphizen::Pattern>
   test(morphizen_cxx::GraphConstRef graph,
-       const std::vector<std::string>& outputs) {
+       const std::vector<std::string> &outputs) {
     auto patterns = std::vector<std::shared_ptr<morphizen::Pattern>>{};
     patterns.reserve(outputs.size());
     auto first_node = std::optional<morphizen_cxx::NodeConstRef>();
@@ -553,22 +553,22 @@ public:
    * @param opt_cxx_file A string representing the optional C++ file to write
    * the generated code to.
    */
-  void generate_cxx_code(const std::vector<std::string>& opt_inputs,
-                         const std::vector<std::string>& opt_outputs,
+  void generate_cxx_code(const std::vector<std::string> &opt_inputs,
+                         const std::vector<std::string> &opt_outputs,
                          const std::string opt_onnx_file,
-                         const std::string& opt_cxx_file) const {
+                         const std::string &opt_cxx_file) const {
     std::ostringstream cxx_src_stream;
-    cxx_src_stream                                                           //
+    cxx_src_stream //
         << "/** generated by the following command:\n"
         << "env \\\n"                                                        //
         << " IGNORE_CONSTANT=" << ENV_PARAM(IGNORE_CONSTANT) << " \\\n"      //
         << " ENABLE_CONSTNAT_SHARING=" << ENV_PARAM(ENABLE_CONSTANT_SHARING) //
         << " \\\n"                                                           //
         << " $BUILD/morphizen/onnxruntime_morphizen_ep/onnx_pattern_gen \\\n";
-    for (auto& input : opt_inputs) {
+    for (auto &input : opt_inputs) {
       cxx_src_stream << " -i " << input << " \\\n";
     }
-    for (auto& output : opt_outputs) {
+    for (auto &output : opt_outputs) {
       cxx_src_stream << " -o " << output << " \\\n";
     }
     cxx_src_stream << " -f " << opt_onnx_file << "\\\n";
@@ -614,10 +614,10 @@ public:
    * @param opt_mmd_file A string representing the path to the output Mermaid
    * file.
    */
-  void generate_mmd_code(const std::vector<std::string>& /*opt_inputs*/,
-                         const std::vector<std::string>& opt_outputs,
+  void generate_mmd_code(const std::vector<std::string> & /*opt_inputs*/,
+                         const std::vector<std::string> &opt_outputs,
                          const std::string /*opt_onnx_file*/,
-                         const std::string& opt_mmd_file) const {
+                         const std::string &opt_mmd_file) const {
     std::ostringstream mmd_stream;
     mmd_stream << "flowchart TB" << std::endl;
     for (auto np : vector_node_patterns_) {
@@ -631,10 +631,10 @@ public:
     LOG(INFO) << "write generated mermaid diagram to " << inc;
   }
 
-  void dump_subgraph_to_onnx(morphizen_cxx::GraphRef& graph_ref,
-                             const std::vector<std::string>& opt_inputs,
-                             const std::vector<std::string>& opt_outputs,
-                             const std::string& out_onnx) {
+  void dump_subgraph_to_onnx(morphizen_cxx::GraphRef &graph_ref,
+                             const std::vector<std::string> &opt_inputs,
+                             const std::vector<std::string> &opt_outputs,
+                             const std::string &out_onnx) {
     graph_ref.resolve();
     auto [meta_def, error] = graph_ref.try_fuse("onnx_pattern_gen", opt_inputs,
                                                 opt_outputs, {}, "no_device");
@@ -674,12 +674,12 @@ private:
  */
 template <typename T>
 std::vector<morphizen_cxx::NodeConstRef>
-get_nodes(morphizen_cxx::GraphConstRef graph, const T& node_output_names) {
+get_nodes(morphizen_cxx::GraphConstRef graph, const T &node_output_names) {
   std::vector<morphizen_cxx::NodeConstRef> nodes;
   nodes.reserve(node_output_names.size());
   for (auto it = node_output_names.rbegin(); it != node_output_names.rend();
        ++it) {
-    const auto& name = *it;
+    const auto &name = *it;
     auto node = graph.find_node(name);
     if (node == std::nullopt) {
       LOG(FATAL) << "cannot find node:" << name;
@@ -687,7 +687,7 @@ get_nodes(morphizen_cxx::GraphConstRef graph, const T& node_output_names) {
     nodes.push_back(*node);
   }
   std::sort(nodes.begin(), nodes.end(),
-            [](const auto& a, const auto& b) { return a.index() < b.index(); });
+            [](const auto &a, const auto &b) { return a.index() < b.index(); });
   return nodes;
 }
 
@@ -696,7 +696,7 @@ get_nodes(morphizen_cxx::GraphConstRef graph, const T& node_output_names) {
 // clang-format off
 // $BUILD/morphizen/onnxruntime_morphizen_ep/onnx_pattern_gen -i 38 -o 62 -f $BUILD/../morphizen_regression/5/Resnet18_int.onnx
 // clang-format on
-int main(int argc, char* argv[]) {
+int main(int argc, char *argv[]) {
   try {
     // Define command line options
     po::options_description desc("Allowed options");
@@ -809,7 +809,7 @@ int main(int argc, char* argv[]) {
       std::cout << " generate spilt onnx model: " << opt_onnx_output_file
                 << std::endl;
     }
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     std::cerr << "exception occurs : " << e.what() << "\n";
   }
 

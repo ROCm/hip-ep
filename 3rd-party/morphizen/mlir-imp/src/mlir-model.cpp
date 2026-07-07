@@ -38,7 +38,7 @@ MLIRModel::MLIRModel(PrivateTag, mlir::OwningOpRef<mlir::ModuleOp> module)
     MY_LOG(1) << "Found main_graph FuncOp: " << mainFunc.getName().str();
     // Initialize main_graph_ with the main_graph FuncOp found
     main_graph_ =
-        std::make_unique<MLIRGraph>(const_cast<MLIRModel&>(*this), mainFunc);
+        std::make_unique<MLIRGraph>(const_cast<MLIRModel &>(*this), mainFunc);
   } else {
     LOG(ERROR) << "No FuncOp with sym_name 'main_graph' found in the module";
     throw std::runtime_error(
@@ -53,9 +53,9 @@ MLIRModel::create(mlir::OwningOpRef<mlir::ModuleOp> module) {
 }
 
 std::unique_ptr<MLIRModel> MLIRModel::create_empty(
-    const std::filesystem::path& path,
-    const std::vector<std::pair<std::string, int64_t>>& opset) {
-  auto& context = MLIRContextManager::getInstance().getContext();
+    const std::filesystem::path &path,
+    const std::vector<std::pair<std::string, int64_t>> &opset) {
+  auto &context = MLIRContextManager::getInstance().getContext();
   mlir::OpBuilder builder(&context);
 
   // Create an empty MLIR module
@@ -84,7 +84,7 @@ std::unique_ptr<MLIRModel> MLIRModel::create_empty(
 
   // Set opset information as metadata
   if (!opset.empty()) {
-    for (const auto& [domain, version] : opset) {
+    for (const auto &[domain, version] : opset) {
       std::string key = "opset." + domain;
       model->set_metadata_prop(key, std::to_string(version));
     }
@@ -95,8 +95,8 @@ std::unique_ptr<MLIRModel> MLIRModel::create_empty(
   return model;
 }
 
-std::unique_ptr<MLIRModel> MLIRModel::load(const std::string& filename) {
-  auto& context = MLIRContextManager::getInstance().getContext();
+std::unique_ptr<MLIRModel> MLIRModel::load(const std::string &filename) {
+  auto &context = MLIRContextManager::getInstance().getContext();
 
   // Check if this is an ONNX file
   std::filesystem::path path(filename);
@@ -117,7 +117,7 @@ std::unique_ptr<MLIRModel> MLIRModel::load(const std::string& filename) {
 
 std::unique_ptr<MLIRModel>
 MLIRModel::clone(int64_t /*external_data_threshold*/) const {
-  auto* cloned_op = module_.get()->clone();
+  auto *cloned_op = module_.get()->clone();
   auto cloned_module = mlir::cast<mlir::ModuleOp>(cloned_op);
   auto clonedModel =
       MLIRModel::create(mlir::OwningOpRef<mlir::ModuleOp>(cloned_module));
@@ -125,25 +125,25 @@ MLIRModel::clone(int64_t /*external_data_threshold*/) const {
   return clonedModel;
 }
 
-MLIRGraph& MLIRModel::main_graph() const { return *main_graph_; }
+MLIRGraph &MLIRModel::main_graph() const { return *main_graph_; }
 
-void MLIRModel::set_metadata_prop(const std::string& key,
-                                  const std::string& value) {
+void MLIRModel::set_metadata_prop(const std::string &key,
+                                  const std::string &value) {
   metadata_[key] = value;
 }
 
-std::string MLIRModel::get_metadata_prop(const std::string& key) const {
+std::string MLIRModel::get_metadata_prop(const std::string &key) const {
   auto it = metadata_.find(key);
   return (it != metadata_.end()) ? it->second : "";
 }
 
-bool MLIRModel::has_metadata_prop(const std::string& key) const {
+bool MLIRModel::has_metadata_prop(const std::string &key) const {
   return metadata_.find(key) != metadata_.end();
 }
 
 mlir::ModuleOp MLIRModel::getModule() const { return *module_; }
 
-void MLIRModel::maybe_dump_mlir(const std::filesystem::path& path) const {
+void MLIRModel::maybe_dump_mlir(const std::filesystem::path &path) const {
   if (ENV_PARAM(MORPHIZEN_DEBUG_MLIR_MODEL) > 5) {
     std::string debug_path = "debug_empty_module.mlir";
     if (!path.empty()) {
@@ -165,17 +165,17 @@ void MLIRModel::maybe_dump_mlir(const std::filesystem::path& path) const {
         LOG(WARNING) << "Debug: Failed to open file for writing: "
                      << debug_path;
       }
-    } catch (const std::exception& e) {
+    } catch (const std::exception &e) {
       LOG(WARNING) << "Debug: Failed to save empty MLIR module: " << e.what();
     }
   }
 }
 
 std::unique_ptr<MLIRGraph>
-MLIRModel::create_main_graph(MLIRModel& model, mlir::OpBuilder& builder,
-                             mlir::ModuleOp& module,
-                             const std::string& graph_name) {
-  const std::string& name = "main_graph";
+MLIRModel::create_main_graph(MLIRModel &model, mlir::OpBuilder &builder,
+                             mlir::ModuleOp &module,
+                             const std::string &graph_name) {
+  const std::string &name = "main_graph";
   auto mainFunc = mlir::func::FuncOp::create(
       builder.getUnknownLoc(), name,
       /*type=*/builder.getFunctionType({}, {}), /*attrs=*/{});

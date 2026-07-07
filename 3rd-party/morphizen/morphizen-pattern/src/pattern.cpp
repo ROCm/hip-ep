@@ -6,14 +6,14 @@
 #include "morphizen/pattern.hpp"
 
 #ifdef _MSC_VER
-#  pragma warning(push)
-#  pragma warning(disable : 4946)
+#pragma warning(push)
+#pragma warning(disable : 4946)
 #endif
 
 #include "morphizen/pattern.pb.h"
 
 #ifdef _MSC_VER
-#  pragma warning(pop)
+#pragma warning(pop)
 #endif
 
 #include <algorithm>
@@ -38,15 +38,15 @@
 #include "morphizen/node_arg.hpp"
 
 #ifdef ENABLE_PYTHON
-#  include <pybind11/embed.h>
-#  include <pybind11/pybind11.h>
+#include <pybind11/embed.h>
+#include <pybind11/pybind11.h>
 namespace py = pybind11;
 #endif
 #include "./immutable_map.hpp"
 // NOTE: onnx-schema.hpp must be included last as it redefines ONNX_NAMESPACE
 // to morphizen_onnx to prevent naming conflicts.
 #if MORPHIZEN_HAS_ONNX_SCHEMA_SUPPORT
-#  include "morphizen/onnx_schema.hpp"
+#include "morphizen/onnx_schema.hpp"
 #endif
 namespace morphizen {
 std::optional<morphizen_cxx::NodeInput>
@@ -62,7 +62,7 @@ Binder::operator()(size_t pattern_id) const {
   return create_morphizen_cxx_node_input((*this)[pattern_id]);
 }
 std::optional<morphizen_cxx::NodeInput>
-Binder::operator()(const std::string& pattern_name) const {
+Binder::operator()(const std::string &pattern_name) const {
   return create_morphizen_cxx_node_input((*this)[pattern_name]);
 }
 
@@ -101,8 +101,8 @@ void Pattern::enable_trace(int n) {
 Pattern::Pattern(int id) : id_{id} {}
 Pattern::~Pattern() {}
 
-binder_ptr_t Pattern::match(const onnxruntime::Graph& graph,
-                            const onnxruntime::Node& node) const {
+binder_ptr_t Pattern::match(const onnxruntime::Graph &graph,
+                            const onnxruntime::Node &node) const {
   // if node has no output, it does not match any pattern.
   // node is useless if it has no output.
   auto node_ref = morphizen_cxx::NodeConstRef::from_node(graph, node);
@@ -111,8 +111,8 @@ binder_ptr_t Pattern::match(const onnxruntime::Graph& graph,
     if (!outputs[i].has_value())
       continue; // Skip optional outputs
     auto init = BinderBuilderPtr(new BinderBuilder(new Map(), graph));
-    const morphizen::NodeArg* output_arg =
-        &(static_cast<const morphizen::NodeArg&>(outputs[i].value()));
+    const morphizen::NodeArg *output_arg =
+        &(static_cast<const morphizen::NodeArg &>(outputs[i].value()));
     auto ret = this->match_cached(graph, {&node, output_arg}, *init);
     if (ret != nullptr) {
       return ret->build(name_to_ids_);
@@ -125,9 +125,9 @@ binder_ptr_t Pattern::match(morphizen_cxx::NodeConstRef node) const {
   return match(node.graph(), node);
 }
 
-BinderBuilderPtr Pattern::match_cached(const onnxruntime::Graph& graph,
-                                       const NodeInput& node_input,
-                                       const BinderBuilder& binder) const {
+BinderBuilderPtr Pattern::match_cached(const onnxruntime::Graph &graph,
+                                       const NodeInput &node_input,
+                                       const BinderBuilder &binder) const {
   auto id = this->get_id();
   auto ret = BinderBuilderPtr();
   auto matched_node_input = binder.find(id);
@@ -187,20 +187,20 @@ std::vector<std::string> Pattern::get_ops_list_name() const {
 }
 
 void Pattern::fill_ops_name(
-    std::vector<std::string>& /*list_of_ops_name*/) const {
+    std::vector<std::string> & /*list_of_ops_name*/) const {
   return;
 }
 
-PatternProto* Pattern::dump_to_proto(RootPatternProto& pattern_proto) const {
-  PatternProto* found = nullptr;
+PatternProto *Pattern::dump_to_proto(RootPatternProto &pattern_proto) const {
+  PatternProto *found = nullptr;
   auto id = std::to_string(get_id());
-  for (auto& name_to_id : *name_to_ids_) {
+  for (auto &name_to_id : *name_to_ids_) {
     if (name_to_id.second == get_id()) {
       id = name_to_id.first;
       break;
     }
   }
-  for (auto& pat : *pattern_proto.mutable_patterns()) {
+  for (auto &pat : *pattern_proto.mutable_patterns()) {
     if (pat.id() == id) {
       found = &pat;
       break;
@@ -215,8 +215,8 @@ PatternProto* Pattern::dump_to_proto(RootPatternProto& pattern_proto) const {
   dump_to_proto_imp(pattern_proto, *new_pattern);
   return new_pattern;
 }
-void Pattern::dump_to_proto_imp(RootPatternProto& /*pattern_proto*/,
-                                PatternProto& /*this_proto*/) const {
+void Pattern::dump_to_proto_imp(RootPatternProto & /*pattern_proto*/,
+                                PatternProto & /*this_proto*/) const {
   LOG(FATAL) << "not implemented.";
 }
 
@@ -231,7 +231,7 @@ std::string Pattern::virtualize_label() const {
 namespace {
 // Helper function to parse op_type_and_domain string
 std::pair<std::string, std::string>
-parse_op_type_and_domain(const std::string& op_type_and_domain) {
+parse_op_type_and_domain(const std::string &op_type_and_domain) {
   auto colon_pos = op_type_and_domain.find(':');
   if (colon_pos != std::string::npos) {
     return {op_type_and_domain.substr(0, colon_pos),
@@ -243,22 +243,22 @@ parse_op_type_and_domain(const std::string& op_type_and_domain) {
 } // anonymous namespace
 
 struct PatternBuilderHelper {
-  static std::shared_ptr<Pattern> create(PatternBuilder* self,
-                                         const PatternProto& pattern_proto);
+  static std::shared_ptr<Pattern> create(PatternBuilder *self,
+                                         const PatternProto &pattern_proto);
 
   static std::shared_ptr<Pattern>
-  build_arg(PatternBuilder* self,
-            const morphizen::PatternCallNodeArgProto& arg);
+  build_arg(PatternBuilder *self,
+            const morphizen::PatternCallNodeArgProto &arg);
 
   static std::vector<std::shared_ptr<Pattern>>
-  build_args(PatternBuilder* self,
+  build_args(PatternBuilder *self,
              const google::protobuf::RepeatedPtrField<
-                 morphizen::PatternCallNodeArgProto>& args);
+                 morphizen::PatternCallNodeArgProto> &args);
 };
 
 std::shared_ptr<Pattern>
-PatternBuilderHelper::create(PatternBuilder* self,
-                             const PatternProto& pattern_proto) {
+PatternBuilderHelper::create(PatternBuilder *self,
+                             const PatternProto &pattern_proto) {
   auto ret = std::shared_ptr<Pattern>();
   switch (pattern_proto.type_case()) {
   case PatternProto::kWildcard:
@@ -287,13 +287,13 @@ PatternBuilderHelper::create(PatternBuilder* self,
                                            op_domain);
   } break;
   case PatternProto::kNodeOutputArg: {
-    auto& node_output_arg_proto = pattern_proto.node_output_arg();
+    auto &node_output_arg_proto = pattern_proto.node_output_arg();
     auto call_node_pattern = build_arg(self, node_output_arg_proto.call_node());
     ret = self->get_node_output_arg_by_index(
         call_node_pattern, node_output_arg_proto.output_arg_index());
   } break;
   case PatternProto::kGraphOutput: {
-    auto& graph_output_proto = pattern_proto.graph_output();
+    auto &graph_output_proto = pattern_proto.graph_output();
     auto node_arg_pattern = build_arg(self, graph_output_proto.node_arg());
     if (graph_output_proto.has_graph_output_index()) {
       ret = self->is_graph_output(node_arg_pattern,
@@ -315,8 +315,8 @@ PatternBuilderHelper::create(PatternBuilder* self,
 }
 
 std::shared_ptr<Pattern>
-PatternBuilderHelper::build_arg(PatternBuilder* self,
-                                const morphizen::PatternCallNodeArgProto& arg) {
+PatternBuilderHelper::build_arg(PatternBuilder *self,
+                                const morphizen::PatternCallNodeArgProto &arg) {
   auto ret = std::shared_ptr<Pattern>();
   switch (arg.arg_case()) {
   case PatternCallNodeArgProto::kName:
@@ -333,11 +333,12 @@ PatternBuilderHelper::build_arg(PatternBuilder* self,
 }
 
 std::vector<std::shared_ptr<Pattern>> PatternBuilderHelper::build_args(
-    PatternBuilder* self, const google::protobuf::RepeatedPtrField<
-                              morphizen::PatternCallNodeArgProto>& args) {
+    PatternBuilder *self,
+    const google::protobuf::RepeatedPtrField<morphizen::PatternCallNodeArgProto>
+        &args) {
   auto ret = std::vector<std::shared_ptr<Pattern>>{};
   ret.reserve(args.size());
-  for (auto& arg : args) {
+  for (auto &arg : args) {
     ret.push_back(build_arg(self, arg));
   }
   return ret;
@@ -347,7 +348,7 @@ PatternBuilder::PatternBuilder()
     : id_map_{std::make_shared<std::unordered_map<std::string, int>>()} {}
 
 std::shared_ptr<Pattern>
-PatternBuilder::create_by_json(const std::string& pattern_json) {
+PatternBuilder::create_by_json(const std::string &pattern_json) {
   RootPatternProto pattern_proto;
   auto status =
       google::protobuf::util::JsonStringToMessage(pattern_json, &pattern_proto);
@@ -357,7 +358,7 @@ PatternBuilder::create_by_json(const std::string& pattern_json) {
   }
   auto ret = std::shared_ptr<Pattern>{};
   auto last = std::shared_ptr<Pattern>{};
-  for (auto& p : pattern_proto.patterns()) {
+  for (auto &p : pattern_proto.patterns()) {
     last = PatternBuilderHelper::create(this, p);
     if (p.is_root()) {
       ret = last;
@@ -369,14 +370,14 @@ PatternBuilder::create_by_json(const std::string& pattern_json) {
   return ret;
 }
 
-std::shared_ptr<Pattern> PatternBuilder::create_from_binary(const char* data,
+std::shared_ptr<Pattern> PatternBuilder::create_from_binary(const char *data,
                                                             size_t size) {
   RootPatternProto pattern_proto;
   auto ok = pattern_proto.ParseFromArray(data, (int)size);
   CHECK(ok) << "cannot parse  protobuf data";
   auto ret = std::shared_ptr<Pattern>{};
   auto last = std::shared_ptr<Pattern>{};
-  for (auto& p : pattern_proto.patterns()) {
+  for (auto &p : pattern_proto.patterns()) {
     last = PatternBuilderHelper::create(this, p);
     if (p.is_root()) {
       ret = last;
@@ -390,7 +391,7 @@ std::shared_ptr<Pattern> PatternBuilder::create_from_binary(const char* data,
 
 #ifdef ENABLE_PYTHON
 std::shared_ptr<Pattern>
-PatternBuilder::create_by_py(const std::string& pattern) {
+PatternBuilder::create_by_py(const std::string &pattern) {
   auto inter = init_interpreter();
   try {
     py::gil_scoped_acquire acquire;
@@ -411,7 +412,7 @@ PatternBuilder::create_by_py(const std::string& pattern) {
 
     std::string json_string = py::cast<std::string>(py_pattern);
     return create_by_json(json_string);
-  } catch (py::error_already_set& e) {
+  } catch (py::error_already_set &e) {
     LOG(FATAL) << e.what();
   }
   return nullptr;
@@ -423,32 +424,32 @@ std::shared_ptr<Pattern> PatternBuilder::wildcard() {
 }
 
 std::shared_ptr<Pattern>
-PatternBuilder::node2(const std::string& op_type_and_domain,
-                      const std::vector<std::shared_ptr<Pattern>>& args) {
+PatternBuilder::node2(const std::string &op_type_and_domain,
+                      const std::vector<std::shared_ptr<Pattern>> &args) {
   auto [op_domain, op_type] = parse_op_type_and_domain(op_type_and_domain);
   return node2_with_optional_domain(op_type, args, op_domain);
 }
 
 std::shared_ptr<Pattern> PatternBuilder::node2_with_optional_domain(
-    const std::string& op_type,
-    const std::vector<std::shared_ptr<Pattern>>& args,
-    const std::string& op_domain) {
+    const std::string &op_type,
+    const std::vector<std::shared_ptr<Pattern>> &args,
+    const std::string &op_domain) {
   auto is_args_optional = std::vector<bool>(args.size(), false);
   return node3_with_optional_domain(op_type, args, is_args_optional, op_domain);
 }
 
 std::shared_ptr<Pattern>
-PatternBuilder::node3(const std::string& op_type_and_domain,
-                      const std::vector<std::shared_ptr<Pattern>>& args,
-                      const std::vector<bool>& optional_args) {
+PatternBuilder::node3(const std::string &op_type_and_domain,
+                      const std::vector<std::shared_ptr<Pattern>> &args,
+                      const std::vector<bool> &optional_args) {
   auto [op_domain, op_type] = parse_op_type_and_domain(op_type_and_domain);
   return node3_with_optional_domain(op_type, args, optional_args, op_domain);
 }
 
 std::shared_ptr<Pattern> PatternBuilder::node3_with_optional_domain(
-    const std::string& op_type,
-    const std::vector<std::shared_ptr<Pattern>>& args,
-    const std::vector<bool>& optional_args, const std::string& op_domain) {
+    const std::string &op_type,
+    const std::vector<std::shared_ptr<Pattern>> &args,
+    const std::vector<bool> &optional_args, const std::string &op_domain) {
   return create_internal([=](int id) {
     return new PatternNode(id, op_type, op_domain, std::move(args),
                            std::move(optional_args));
@@ -457,11 +458,11 @@ std::shared_ptr<Pattern> PatternBuilder::node3_with_optional_domain(
 
 #if MORPHIZEN_HAS_ONNX_SCHEMA_SUPPORT
 std::shared_ptr<Pattern> PatternBuilder::node_with_named_args(
-    const std::string& op_type,
-    const std::map<std::string, std::shared_ptr<Pattern>>& named_args,
-    const std::string& op_domain) {
+    const std::string &op_type,
+    const std::map<std::string, std::shared_ptr<Pattern>> &named_args,
+    const std::string &op_domain) {
   // Get the OpSchema to understand input names and their positions
-  const auto* schema = morphizen::GetOpSchema(
+  const auto *schema = morphizen::GetOpSchema(
       op_type, op_domain); // Use high version number to get latest schema
 
   if (!schema) {
@@ -481,7 +482,7 @@ std::shared_ptr<Pattern> PatternBuilder::node_with_named_args(
 
   // Fill arguments based on schema input order
   for (size_t i = 0; i < inputs.size(); ++i) {
-    const auto& input = inputs[i];
+    const auto &input = inputs[i];
     std::string input_name = input.GetName();
 
     // Look for exact match first
@@ -514,7 +515,7 @@ std::shared_ptr<Pattern> PatternBuilder::node_with_named_args(
   }
 
   // Handle any extra named arguments that don't match schema inputs
-  for (const auto& [name, pattern] : named_args) {
+  for (const auto &[name, pattern] : named_args) {
     std::string clean_name = name;
     if (!clean_name.empty() && clean_name.back() == '*') {
       clean_name.pop_back();
@@ -541,9 +542,9 @@ std::shared_ptr<Pattern> PatternBuilder::node_with_named_args(
 
 std::vector<std::shared_ptr<Pattern>>
 PatternBuilder::node_with_multiple_outputs(
-    const std::string& op_type,
-    const std::vector<std::shared_ptr<Pattern>>& args,
-    const std::vector<bool>& optional_args, const std::string& op_domain,
+    const std::string &op_type,
+    const std::vector<std::shared_ptr<Pattern>> &args,
+    const std::vector<bool> &optional_args, const std::string &op_domain,
     const size_t num_of_outputs) {
   auto node =
       node3_with_optional_domain(op_type, args, optional_args, op_domain);
@@ -557,7 +558,7 @@ PatternBuilder::node_with_multiple_outputs(
 }
 
 std::shared_ptr<Pattern>
-PatternBuilder::commutable_node(const std::string& op_type_and_domain,
+PatternBuilder::commutable_node(const std::string &op_type_and_domain,
                                 std::shared_ptr<Pattern> arg1,
                                 std::shared_ptr<Pattern> arg2) {
   auto [op_domain, op_type] = parse_op_type_and_domain(op_type_and_domain);
@@ -573,7 +574,7 @@ PatternBuilder::sequence(gsl::span<const std::shared_ptr<Pattern>> patterns) {
 }
 
 std::shared_ptr<Pattern>
-PatternBuilder::Or(const std::vector<std::shared_ptr<Pattern>>& args) {
+PatternBuilder::Or(const std::vector<std::shared_ptr<Pattern>> &args) {
   return create_internal([=](int id) { return new PatternOr(id, args); });
 }
 
@@ -586,13 +587,13 @@ std::shared_ptr<Pattern> PatternBuilder::graph_input() {
 }
 
 std::shared_ptr<Pattern>
-PatternBuilder::is_graph_output(const std::shared_ptr<Pattern>& arg) {
+PatternBuilder::is_graph_output(const std::shared_ptr<Pattern> &arg) {
   return create_internal(
       [=](int id) { return new PatternGraphOutput(id, arg); });
 }
 
 std::shared_ptr<Pattern>
-PatternBuilder::is_graph_output(const std::shared_ptr<Pattern>& arg,
+PatternBuilder::is_graph_output(const std::shared_ptr<Pattern> &arg,
                                 size_t graph_output_index) {
   return create_internal([=](int id) {
     return new PatternGraphOutput(id, arg, graph_output_index);
@@ -600,8 +601,8 @@ PatternBuilder::is_graph_output(const std::shared_ptr<Pattern>& arg,
 }
 
 std::shared_ptr<Pattern>
-PatternBuilder::is_graph_output(const std::shared_ptr<Pattern>& arg,
-                                const std::string& graph_output_name) {
+PatternBuilder::is_graph_output(const std::shared_ptr<Pattern> &arg,
+                                const std::string &graph_output_name) {
   return create_internal([=](int id) {
     return new PatternGraphOutput(id, arg, graph_output_name);
   });
@@ -611,12 +612,12 @@ std::shared_ptr<Pattern> PatternBuilder::xir_const_op() {
   return node2("com.xilinx:const", {});
 }
 
-void PatternBuilder::bind(const std::string& name,
-                          const std::shared_ptr<Pattern>& pat) {
+void PatternBuilder::bind(const std::string &name,
+                          const std::shared_ptr<Pattern> &pat) {
   (*id_map_)[name] = pat->get_id();
 }
 
-int PatternBuilder::get_id(const std::string& name) const {
+int PatternBuilder::get_id(const std::string &name) const {
   auto it = id_map_->find(name);
   auto ret = -1;
   if (it != id_map_->end()) {
@@ -626,7 +627,7 @@ int PatternBuilder::get_id(const std::string& name) const {
 }
 
 std::shared_ptr<Pattern>
-PatternBuilder::get_pattern(const std::string& name) const {
+PatternBuilder::get_pattern(const std::string &name) const {
   auto it = id_map_->find(name);
   auto ret = std::shared_ptr<Pattern>{};
   if (it != id_map_->end()) {
@@ -636,7 +637,7 @@ PatternBuilder::get_pattern(const std::string& name) const {
 }
 
 std::shared_ptr<Pattern>
-PatternBuilder::create_internal(const std::function<Pattern*(int id)>& f) {
+PatternBuilder::create_internal(const std::function<Pattern *(int id)> &f) {
   auto id = (int)patterns_.size();
   auto ret = std::shared_ptr<Pattern>(f(id));
   patterns_.push_back(ret);
@@ -645,7 +646,7 @@ PatternBuilder::create_internal(const std::function<Pattern*(int id)>& f) {
 }
 
 std::shared_ptr<Pattern> PatternBuilder::get_node_output_arg_by_index(
-    const std::shared_ptr<Pattern>& arg, size_t output_arg_index) {
+    const std::shared_ptr<Pattern> &arg, size_t output_arg_index) {
   CHECK(std::dynamic_pointer_cast<PatternNode>(arg))
       << " get_node_output_arg_by_index only accepts parameter of type "
          "PatternNode";
@@ -659,32 +660,32 @@ std::unordered_map<std::string, int> PatternBuilder::bindings() const {
 }
 
 BinderBuilder::~BinderBuilder() {
-  auto p = (Map*)map_;
+  auto p = (Map *)map_;
   CHECK(p != nullptr);
   delete p;
 }
 
 binder_ptr_t BinderBuilder::build(
-    const std::shared_ptr<std::unordered_map<std::string, int>>& name_to_ids)
+    const std::shared_ptr<std::unordered_map<std::string, int>> &name_to_ids)
     const {
-  const auto& map = *(Map*)map_;
+  const auto &map = *(Map *)map_;
   MY_LOG(1) << "build binder results: " << map;
   auto store = std::map<int, NodeInput>();
-  for (auto& x : map) {
+  for (auto &x : map) {
     store.emplace(x);
   }
   return std::unique_ptr<Binder>(
       new Binder(std::move(store), name_to_ids, graph_));
 }
 
-BinderBuilderPtr BinderBuilder::add(int id, const NodeInput& node_input) const {
-  const auto& map = *(Map*)map_;
+BinderBuilderPtr BinderBuilder::add(int id, const NodeInput &node_input) const {
+  const auto &map = *(Map *)map_;
   return BinderBuilderPtr(
       new BinderBuilder(new Map(map.insert({id, node_input})), graph_));
 }
 
 NodeInput BinderBuilder::find(int id) const {
-  const auto& map = *(Map*)map_;
+  const auto &map = *(Map *)map_;
   auto ret = NodeInput{nullptr, nullptr};
   auto it = map.find(id);
   MY_LOG(3) << "build binder results: " << map;
@@ -695,7 +696,7 @@ NodeInput BinderBuilder::find(int id) const {
 }
 
 BinderBuilderPtr BinderBuilder::clone() const {
-  const auto& map = *(Map*)map_;
+  const auto &map = *(Map *)map_;
   return BinderBuilderPtr(new BinderBuilder(new Map(map), graph_));
 }
 

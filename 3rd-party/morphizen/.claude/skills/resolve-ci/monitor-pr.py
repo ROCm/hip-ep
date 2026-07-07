@@ -64,7 +64,9 @@ if os.name == "nt":
 
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description="Monitor PR for /resolve-ci skill")
-parser.add_argument("--attempt", type=int, default=1, help="Retry attempt number (default: 1)")
+parser.add_argument(
+    "--attempt", type=int, default=1, help="Retry attempt number (default: 1)"
+)
 parser.add_argument(
     "--pr-number",
     type=int,
@@ -263,7 +265,9 @@ def cleanup_after_merge(branch):
 
 def get_pr_info(branch):
     """Get PR info for current branch."""
-    output = run_command(f'gh pr list --head "{branch}" --json number,state,isDraft,title', check=False)
+    output = run_command(
+        f'gh pr list --head "{branch}" --json number,state,isDraft,title', check=False
+    )
     if not output:
         return None
     try:
@@ -313,7 +317,9 @@ def run_precommit_fix(branch):
     print("🔧 Pre-commit failure detected - auto-fixing...")
 
     # Run pre-commit
-    result = subprocess.run("pre-commit run --all-files", shell=True, capture_output=True)
+    result = subprocess.run(
+        "pre-commit run --all-files", shell=True, capture_output=True
+    )
 
     if result.returncode == 0:
         print("✅ Pre-commit passed after auto-fix")
@@ -417,7 +423,9 @@ def main():
 
     # Validate if --pr-number was explicitly provided
     if args.pr_number and args.pr_number != pr_number:
-        print(f"⚠️  Warning: Provided PR #{args.pr_number} doesn't match detected PR #{pr_number}")
+        print(
+            f"⚠️  Warning: Provided PR #{args.pr_number} doesn't match detected PR #{pr_number}"
+        )
         print(f"Using auto-detected PR #{pr_number} from branch {current_branch}")
         print("")
 
@@ -481,7 +489,8 @@ def main():
         failed_checks = [
             check
             for check in status_checks
-            if check.get("conclusion") and check.get("conclusion") not in ["SUCCESS", "SKIPPED"]
+            if check.get("conclusion")
+            and check.get("conclusion") not in ["SUCCESS", "SKIPPED"]
         ]
 
         if failed_checks:
@@ -494,7 +503,9 @@ def main():
             # run the formatter, commit, and push without AI intervention.
             # Complex failures (build errors, test failures) need AI analysis.
             precommit_failed = any(
-                check.get("name") == "pre-commit" and check.get("conclusion") == "FAILURE" for check in status_checks
+                check.get("name") == "pre-commit"
+                and check.get("conclusion") == "FAILURE"
+                for check in status_checks
             )
 
             if precommit_failed:
@@ -508,7 +519,11 @@ def main():
             sys.exit(0)
 
         # Check if CI is still running
-        pending_checks = [check for check in status_checks if check.get("status") in ["IN_PROGRESS", "QUEUED"]]
+        pending_checks = [
+            check
+            for check in status_checks
+            if check.get("status") in ["IN_PROGRESS", "QUEUED"]
+        ]
 
         if pending_checks:
             print("⏳ CI still running:")

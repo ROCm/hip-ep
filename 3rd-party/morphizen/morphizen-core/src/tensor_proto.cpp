@@ -26,7 +26,7 @@
 
 namespace morphizen {
 MORPHIZEN_DLL_SPEC std::vector<int64_t>
-tensor_proto_get_shape(const TensorProto& tensor_proto) {
+tensor_proto_get_shape(const TensorProto &tensor_proto) {
   auto shape = MORPHIZEN_ORT_API(tensor_proto_get_shape_unsafe)(tensor_proto);
   CHECK(shape.get() != nullptr)
       << "tensor_proto_get_shape_unsafe should not return null shape";
@@ -34,89 +34,89 @@ tensor_proto_get_shape(const TensorProto& tensor_proto) {
 }
 
 MORPHIZEN_DLL_SPEC TensorProtoPtr tensor_proto_new_floats(
-    const std::string& name, const std::vector<int64_t>& shape,
-    const std::vector<float>& data) {
+    const std::string &name, const std::vector<int64_t> &shape,
+    const std::vector<float> &data) {
   return TensorProtoPtr(
       MORPHIZEN_ORT_API(tensor_proto_new_floats)(name, shape, data));
 }
 #if MORPHIZEN_ORT_API_MAJOR >= 3
 
 MORPHIZEN_DLL_SPEC
-TensorProtoPtr tensor_proto_new_doubles(const std::string& name,
-                                        const std::vector<int64_t>& shape,
-                                        const std::vector<double>& data) {
+TensorProtoPtr tensor_proto_new_doubles(const std::string &name,
+                                        const std::vector<int64_t> &shape,
+                                        const std::vector<double> &data) {
   return TensorProtoPtr(
       MORPHIZEN_ORT_API(tensor_proto_new_doubles)(name, shape, data));
 }
 
 MORPHIZEN_DLL_SPEC TensorProtoPtr tensor_proto_new_bf16(
-    const std::string& name, const std::vector<int64_t>& shape,
-    const std::vector<int16_t>& data) {
+    const std::string &name, const std::vector<int64_t> &shape,
+    const std::vector<int16_t> &data) {
   return TensorProtoPtr(
       MORPHIZEN_ORT_API(tensor_proto_new_bf16)(name, shape, data));
 }
 
 MORPHIZEN_DLL_SPEC TensorProtoPtr tensor_proto_new_fp16(
-    const std::string& name, const std::vector<int64_t>& shape,
-    const std::vector<int16_t>& data) {
+    const std::string &name, const std::vector<int64_t> &shape,
+    const std::vector<int16_t> &data) {
   return TensorProtoPtr(
       MORPHIZEN_ORT_API(tensor_proto_new_fp16)(name, shape, data));
 }
 #endif
 
 MORPHIZEN_DLL_SPEC
-TensorProtoPtr tensor_proto_new_i32(const std::string& name,
-                                    const std::vector<int64_t>& shape,
-                                    const std::vector<int32_t>& data) {
+TensorProtoPtr tensor_proto_new_i32(const std::string &name,
+                                    const std::vector<int64_t> &shape,
+                                    const std::vector<int32_t> &data) {
   return TensorProtoPtr(
       MORPHIZEN_ORT_API(tensor_proto_new_i32)(name, shape, data));
 }
 MORPHIZEN_DLL_SPEC TensorProtoPtr
-tensor_proto_new_i64(const std::string& name, const std::vector<int64_t>& shape,
-                     const std::vector<int64_t>& data) {
+tensor_proto_new_i64(const std::string &name, const std::vector<int64_t> &shape,
+                     const std::vector<int64_t> &data) {
   return TensorProtoPtr(
       MORPHIZEN_ORT_API(tensor_proto_new_i64)(name, shape, data));
 }
 MORPHIZEN_DLL_SPEC TensorProtoPtr
-tensor_proto_new_i8(const std::string& name, const std::vector<int64_t>& shape,
-                    const std::vector<int8_t>& data) {
+tensor_proto_new_i8(const std::string &name, const std::vector<int64_t> &shape,
+                    const std::vector<int8_t> &data) {
   return TensorProtoPtr(
       MORPHIZEN_ORT_API(tensor_proto_new_i8)(name, shape, data));
 }
 
 #if MORPHIZEN_ORT_API_MAJOR >= 3
 MORPHIZEN_DLL_SPEC
-TensorProtoPtr tensor_proto_new_i16(const std::string& name,
-                                    const std::vector<int64_t>& shape,
-                                    const std::vector<int16_t>& data) {
+TensorProtoPtr tensor_proto_new_i16(const std::string &name,
+                                    const std::vector<int64_t> &shape,
+                                    const std::vector<int16_t> &data) {
   return TensorProtoPtr(
       MORPHIZEN_ORT_API(tensor_proto_new_i16)(name, shape, data));
 }
 
 MORPHIZEN_DLL_SPEC TensorProtoPtr
-tensor_proto_new_u8(const std::string& name, const std::vector<int64_t>& shape,
-                    const std::vector<uint8_t>& data) {
+tensor_proto_new_u8(const std::string &name, const std::vector<int64_t> &shape,
+                    const std::vector<uint8_t> &data) {
   return TensorProtoPtr(
       MORPHIZEN_ORT_API(tensor_proto_new_u8)(name, shape, data));
 }
 
 MORPHIZEN_DLL_SPEC TensorProtoPtr
-tensor_proto_new_u16(const std::string& name, const std::vector<int64_t>& shape,
-                     const std::vector<uint16_t>& data) {
+tensor_proto_new_u16(const std::string &name, const std::vector<int64_t> &shape,
+                     const std::vector<uint16_t> &data) {
   return TensorProtoPtr(
       MORPHIZEN_ORT_API(tensor_proto_new_u16)(name, shape, data));
 }
 
 MORPHIZEN_DLL_SPEC TensorProtoPtr
-tensor_proto_new_u32(const std::string& name, const std::vector<int64_t>& shape,
-                     const std::vector<uint32_t>& data) {
+tensor_proto_new_u32(const std::string &name, const std::vector<int64_t> &shape,
+                     const std::vector<uint32_t> &data) {
   return TensorProtoPtr(
       MORPHIZEN_ORT_API(tensor_proto_new_u32)(name, shape, data));
 }
 
 MORPHIZEN_DLL_SPEC TensorProtoPtr
-tensor_proto_new_u64(const std::string& name, const std::vector<int64_t>& shape,
-                     const std::vector<uint64_t>& data) {
+tensor_proto_new_u64(const std::string &name, const std::vector<int64_t> &shape,
+                     const std::vector<uint64_t> &data) {
   return TensorProtoPtr(
       MORPHIZEN_ORT_API(tensor_proto_new_u64)(name, shape, data));
 }
@@ -124,33 +124,33 @@ tensor_proto_new_u64(const std::string& name, const std::vector<int64_t>& shape,
 #endif
 
 MORPHIZEN_DLL_SPEC
-TensorProtoPtr tensor_proto_new_i4(const std::string& name,
-                                   const std::vector<int64_t>& shape,
-                                   const std::vector<int8_t>& data) {
+TensorProtoPtr tensor_proto_new_i4(const std::string &name,
+                                   const std::vector<int64_t> &shape,
+                                   const std::vector<int8_t> &data) {
   return TensorProtoPtr(
       MorphizenOrtApi2::tensor_proto_new_i4(name, shape, data));
 }
 
 MORPHIZEN_DLL_SPEC TensorProtoPtr
-tensor_proto_new_u4(const std::string& name, const std::vector<int64_t>& shape,
-                    const std::vector<uint8_t>& data) {
+tensor_proto_new_u4(const std::string &name, const std::vector<int64_t> &shape,
+                    const std::vector<uint8_t> &data) {
   return TensorProtoPtr(
       MorphizenOrtApi2::tensor_proto_new_u4(name, shape, data));
 }
 
 #if MORPHIZEN_ORT_API_MAJOR >= 19
 MORPHIZEN_DLL_SPEC
-TensorProtoPtr tensor_proto_new_bool(const std::string& name,
-                                     const std::vector<int64_t>& shape,
-                                     const std::vector<uint8_t>& data) {
+TensorProtoPtr tensor_proto_new_bool(const std::string &name,
+                                     const std::vector<int64_t> &shape,
+                                     const std::vector<uint8_t> &data) {
   return TensorProtoPtr(
       MORPHIZEN_ORT_API(tensor_proto_new_bool)(name, shape, data));
 }
 #endif
 
 MORPHIZEN_DLL_SPEC gsl::span<const char>
-tensor_proto_as_raw(const onnxruntime::Graph& graph,
-                    const TensorProto& tensor_proto) {
+tensor_proto_as_raw(const onnxruntime::Graph &graph,
+                    const TensorProto &tensor_proto) {
 #if MORPHIZEN_ORT_API_MAJOR >= 9
   auto raw_data = MORPHIZEN_ORT_API(tensor_proto_as_raw)(graph, tensor_proto);
 #else
@@ -160,21 +160,21 @@ tensor_proto_as_raw(const onnxruntime::Graph& graph,
 }
 
 template <typename T>
-static gsl::span<const T> tensor_proto_as(const onnxruntime::Graph& graph,
-                                          const TensorProto& tensor_proto,
+static gsl::span<const T> tensor_proto_as(const onnxruntime::Graph &graph,
+                                          const TensorProto &tensor_proto,
                                           int data_type) {
 
   auto tensor_data_type =
       MORPHIZEN_ORT_API(tensor_proto_data_type)(tensor_proto);
   CHECK_EQ(tensor_data_type, data_type);
   auto raw_data = tensor_proto_as_raw(graph, tensor_proto);
-  auto p = reinterpret_cast<const T*>(raw_data.data());
+  auto p = reinterpret_cast<const T *>(raw_data.data());
   auto num_of_element = raw_data.size() / sizeof(T);
   return gsl::span<const T>(p, p + num_of_element);
 }
 
-MORPHIZEN_DLL_SPEC float tensor_proto_as_float(const onnxruntime::Graph& graph,
-                                               const TensorProto& tensor) {
+MORPHIZEN_DLL_SPEC float tensor_proto_as_float(const onnxruntime::Graph &graph,
+                                               const TensorProto &tensor) {
   auto v = tensor_proto_as_floats(graph, tensor);
   auto shape = tensor_proto_get_shape(tensor);
   // CHECK(shape.empty()) << "tensor proto is not float";
@@ -183,8 +183,8 @@ MORPHIZEN_DLL_SPEC float tensor_proto_as_float(const onnxruntime::Graph& graph,
 }
 
 MORPHIZEN_DLL_SPEC double
-tensor_proto_as_double(const onnxruntime::Graph& graph,
-                       const TensorProto& tensor) {
+tensor_proto_as_double(const onnxruntime::Graph &graph,
+                       const TensorProto &tensor) {
   auto v = tensor_proto_as_doubles(graph, tensor);
   auto shape = tensor_proto_get_shape(tensor);
   CHECK(shape.empty()) << "tensor proto is not double";
@@ -192,8 +192,8 @@ tensor_proto_as_double(const onnxruntime::Graph& graph,
   return v[0];
 }
 
-MORPHIZEN_DLL_SPEC int16_t tensor_proto_as_bf16(const onnxruntime::Graph& graph,
-                                                const TensorProto& tensor) {
+MORPHIZEN_DLL_SPEC int16_t tensor_proto_as_bf16(const onnxruntime::Graph &graph,
+                                                const TensorProto &tensor) {
   auto v = tensor_proto_as_bf16s(graph, tensor);
   auto shape = tensor_proto_get_shape(tensor);
   CHECK(shape.empty()) << "tensor proto is not bf16";
@@ -201,8 +201,8 @@ MORPHIZEN_DLL_SPEC int16_t tensor_proto_as_bf16(const onnxruntime::Graph& graph,
   return v[0];
 }
 
-MORPHIZEN_DLL_SPEC int16_t tensor_proto_as_fp16(const onnxruntime::Graph& graph,
-                                                const TensorProto& tensor) {
+MORPHIZEN_DLL_SPEC int16_t tensor_proto_as_fp16(const onnxruntime::Graph &graph,
+                                                const TensorProto &tensor) {
   auto v = tensor_proto_as_fp16s(graph, tensor);
   auto shape = tensor_proto_get_shape(tensor);
   CHECK(shape.empty()) << "tensor proto is not fp16";
@@ -210,16 +210,16 @@ MORPHIZEN_DLL_SPEC int16_t tensor_proto_as_fp16(const onnxruntime::Graph& graph,
   return v[0];
 }
 
-MORPHIZEN_DLL_SPEC int8_t tensor_proto_as_i8(const onnxruntime::Graph& graph,
-                                             const TensorProto& tensor) {
+MORPHIZEN_DLL_SPEC int8_t tensor_proto_as_i8(const onnxruntime::Graph &graph,
+                                             const TensorProto &tensor) {
   auto v = tensor_proto_as_i8s(graph, tensor);
   auto shape = tensor_proto_get_shape(tensor);
   CHECK(shape.empty()) << "tensor proto is not i8s";
   CHECK_EQ(v.size(), 1u);
   return v[0];
 }
-MORPHIZEN_DLL_SPEC uint8_t tensor_proto_as_u8(const onnxruntime::Graph& graph,
-                                              const TensorProto& tensor) {
+MORPHIZEN_DLL_SPEC uint8_t tensor_proto_as_u8(const onnxruntime::Graph &graph,
+                                              const TensorProto &tensor) {
   auto v = tensor_proto_as_u8s(graph, tensor);
   auto shape = tensor_proto_get_shape(tensor);
   CHECK(shape.empty()) << "tensor proto is not u8s";
@@ -227,8 +227,8 @@ MORPHIZEN_DLL_SPEC uint8_t tensor_proto_as_u8(const onnxruntime::Graph& graph,
   return v[0];
 }
 
-MORPHIZEN_DLL_SPEC int16_t tensor_proto_as_i16(const onnxruntime::Graph& graph,
-                                               const TensorProto& tensor) {
+MORPHIZEN_DLL_SPEC int16_t tensor_proto_as_i16(const onnxruntime::Graph &graph,
+                                               const TensorProto &tensor) {
   auto v = tensor_proto_as_i16s(graph, tensor);
   auto shape = tensor_proto_get_shape(tensor);
   CHECK(shape.empty()) << "tensor proto is not i16s";
@@ -236,8 +236,8 @@ MORPHIZEN_DLL_SPEC int16_t tensor_proto_as_i16(const onnxruntime::Graph& graph,
   return v[0];
 }
 
-MORPHIZEN_DLL_SPEC uint16_t tensor_proto_as_u16(const onnxruntime::Graph& graph,
-                                                const TensorProto& tensor) {
+MORPHIZEN_DLL_SPEC uint16_t tensor_proto_as_u16(const onnxruntime::Graph &graph,
+                                                const TensorProto &tensor) {
   auto v = tensor_proto_as_u16s(graph, tensor);
   auto shape = tensor_proto_get_shape(tensor);
   CHECK(shape.empty()) << "tensor proto is not u16s";
@@ -245,8 +245,8 @@ MORPHIZEN_DLL_SPEC uint16_t tensor_proto_as_u16(const onnxruntime::Graph& graph,
   return v[0];
 }
 
-MORPHIZEN_DLL_SPEC int32_t tensor_proto_as_i32(const onnxruntime::Graph& graph,
-                                               const TensorProto& tensor) {
+MORPHIZEN_DLL_SPEC int32_t tensor_proto_as_i32(const onnxruntime::Graph &graph,
+                                               const TensorProto &tensor) {
   auto v = tensor_proto_as_i32s(graph, tensor);
   auto shape = tensor_proto_get_shape(tensor);
   CHECK(shape.empty()) << "tensor proto is not i32s";
@@ -254,8 +254,8 @@ MORPHIZEN_DLL_SPEC int32_t tensor_proto_as_i32(const onnxruntime::Graph& graph,
   return v[0];
 }
 
-MORPHIZEN_DLL_SPEC uint32_t tensor_proto_as_u32(const onnxruntime::Graph& graph,
-                                                const TensorProto& tensor) {
+MORPHIZEN_DLL_SPEC uint32_t tensor_proto_as_u32(const onnxruntime::Graph &graph,
+                                                const TensorProto &tensor) {
   auto v = tensor_proto_as_u32s(graph, tensor);
   auto shape = tensor_proto_get_shape(tensor);
   CHECK(shape.empty()) << "tensor proto is not u32s";
@@ -263,8 +263,8 @@ MORPHIZEN_DLL_SPEC uint32_t tensor_proto_as_u32(const onnxruntime::Graph& graph,
   return v[0];
 }
 
-MORPHIZEN_DLL_SPEC int64_t tensor_proto_as_i64(const onnxruntime::Graph& graph,
-                                               const TensorProto& tensor) {
+MORPHIZEN_DLL_SPEC int64_t tensor_proto_as_i64(const onnxruntime::Graph &graph,
+                                               const TensorProto &tensor) {
   auto v = tensor_proto_as_i64s(graph, tensor);
   auto shape = tensor_proto_get_shape(tensor);
   CHECK(shape.empty()) << "tensor proto is not i64";
@@ -272,8 +272,8 @@ MORPHIZEN_DLL_SPEC int64_t tensor_proto_as_i64(const onnxruntime::Graph& graph,
   return v[0];
 }
 
-MORPHIZEN_DLL_SPEC uint64_t tensor_proto_as_u64(const onnxruntime::Graph& graph,
-                                                const TensorProto& tensor) {
+MORPHIZEN_DLL_SPEC uint64_t tensor_proto_as_u64(const onnxruntime::Graph &graph,
+                                                const TensorProto &tensor) {
   auto v = tensor_proto_as_u64s(graph, tensor);
   auto shape = tensor_proto_get_shape(tensor);
   CHECK(shape.empty()) << "tensor proto is not u64";
@@ -281,7 +281,7 @@ MORPHIZEN_DLL_SPEC uint64_t tensor_proto_as_u64(const onnxruntime::Graph& graph,
   return v[0];
 }
 
-void TensorProtoDeleter::operator()(TensorProto* p) const {
+void TensorProtoDeleter::operator()(TensorProto *p) const {
   MORPHIZEN_ORT_API(tensor_proto_delete)(p);
 }
 
@@ -313,95 +313,95 @@ uint8_t get_uint4_value(gsl::span<const uint8_t> data, size_t idx) {
 }
 
 MORPHIZEN_DLL_SPEC
-gsl::span<const int8_t> tensor_proto_as_i4s(const onnxruntime::Graph& graph,
-                                            const TensorProto& tensor) {
+gsl::span<const int8_t> tensor_proto_as_i4s(const onnxruntime::Graph &graph,
+                                            const TensorProto &tensor) {
   return tensor_proto_as<int8_t>(graph, tensor,
 
                                  onnx::TensorProto_DataType_INT4);
 }
 MORPHIZEN_DLL_SPEC
-gsl::span<const uint8_t> tensor_proto_as_u4s(const onnxruntime::Graph& graph,
-                                             const TensorProto& tensor) {
+gsl::span<const uint8_t> tensor_proto_as_u4s(const onnxruntime::Graph &graph,
+                                             const TensorProto &tensor) {
   return tensor_proto_as<uint8_t>(graph, tensor,
                                   onnx::TensorProto_DataType_UINT4);
 }
 
 MORPHIZEN_DLL_SPEC
-gsl::span<const int8_t> tensor_proto_as_i8s(const onnxruntime::Graph& graph,
-                                            const TensorProto& tensor) {
+gsl::span<const int8_t> tensor_proto_as_i8s(const onnxruntime::Graph &graph,
+                                            const TensorProto &tensor) {
   return tensor_proto_as<int8_t>(graph, tensor,
                                  onnx::TensorProto_DataType_INT8);
 }
 MORPHIZEN_DLL_SPEC
-gsl::span<const uint8_t> tensor_proto_as_u8s(const onnxruntime::Graph& graph,
-                                             const TensorProto& tensor) {
+gsl::span<const uint8_t> tensor_proto_as_u8s(const onnxruntime::Graph &graph,
+                                             const TensorProto &tensor) {
   return tensor_proto_as<uint8_t>(graph, tensor,
                                   onnx::TensorProto_DataType_UINT8);
 }
 MORPHIZEN_DLL_SPEC
-gsl::span<const uint16_t> tensor_proto_as_u16s(const onnxruntime::Graph& graph,
-                                               const TensorProto& tensor) {
+gsl::span<const uint16_t> tensor_proto_as_u16s(const onnxruntime::Graph &graph,
+                                               const TensorProto &tensor) {
   return tensor_proto_as<uint16_t>(graph, tensor,
                                    onnx::TensorProto_DataType_UINT16);
 }
 MORPHIZEN_DLL_SPEC
-gsl::span<const int16_t> tensor_proto_as_i16s(const onnxruntime::Graph& graph,
-                                              const TensorProto& tensor) {
+gsl::span<const int16_t> tensor_proto_as_i16s(const onnxruntime::Graph &graph,
+                                              const TensorProto &tensor) {
   return tensor_proto_as<int16_t>(graph, tensor,
                                   onnx::TensorProto_DataType_INT16);
 }
 
 MORPHIZEN_DLL_SPEC
-gsl::span<const int32_t> tensor_proto_as_i32s(const onnxruntime::Graph& graph,
-                                              const TensorProto& tensor) {
+gsl::span<const int32_t> tensor_proto_as_i32s(const onnxruntime::Graph &graph,
+                                              const TensorProto &tensor) {
   return tensor_proto_as<int32_t>(graph, tensor,
                                   onnx::TensorProto_DataType_INT32);
 }
 
 MORPHIZEN_DLL_SPEC
-gsl::span<const uint32_t> tensor_proto_as_u32s(const onnxruntime::Graph& graph,
-                                               const TensorProto& tensor) {
+gsl::span<const uint32_t> tensor_proto_as_u32s(const onnxruntime::Graph &graph,
+                                               const TensorProto &tensor) {
   return tensor_proto_as<uint32_t>(graph, tensor,
                                    onnx::TensorProto_DataType_UINT32);
 }
 
 MORPHIZEN_DLL_SPEC
-gsl::span<const int64_t> tensor_proto_as_i64s(const onnxruntime::Graph& graph,
-                                              const TensorProto& tensor) {
+gsl::span<const int64_t> tensor_proto_as_i64s(const onnxruntime::Graph &graph,
+                                              const TensorProto &tensor) {
   return tensor_proto_as<int64_t>(graph, tensor,
                                   onnx::TensorProto_DataType_INT64);
 }
 MORPHIZEN_DLL_SPEC
-gsl::span<const uint64_t> tensor_proto_as_u64s(const onnxruntime::Graph& graph,
-                                               const TensorProto& tensor) {
+gsl::span<const uint64_t> tensor_proto_as_u64s(const onnxruntime::Graph &graph,
+                                               const TensorProto &tensor) {
   return tensor_proto_as<uint64_t>(graph, tensor,
                                    onnx::TensorProto_DataType_UINT64);
 }
 
 MORPHIZEN_DLL_SPEC
-gsl::span<const float> tensor_proto_as_floats(const onnxruntime::Graph& graph,
-                                              const TensorProto& tensor) {
+gsl::span<const float> tensor_proto_as_floats(const onnxruntime::Graph &graph,
+                                              const TensorProto &tensor) {
   return tensor_proto_as<float>(graph, tensor,
                                 onnx::TensorProto_DataType_FLOAT);
 }
 
 MORPHIZEN_DLL_SPEC
-gsl::span<const double> tensor_proto_as_doubles(const onnxruntime::Graph& graph,
-                                                const TensorProto& tensor) {
+gsl::span<const double> tensor_proto_as_doubles(const onnxruntime::Graph &graph,
+                                                const TensorProto &tensor) {
   return tensor_proto_as<double>(graph, tensor,
                                  onnx::TensorProto_DataType_DOUBLE);
 }
 
 MORPHIZEN_DLL_SPEC
-gsl::span<const int16_t> tensor_proto_as_bf16s(const onnxruntime::Graph& graph,
-                                               const TensorProto& tensor) {
+gsl::span<const int16_t> tensor_proto_as_bf16s(const onnxruntime::Graph &graph,
+                                               const TensorProto &tensor) {
   return tensor_proto_as<int16_t>(graph, tensor,
                                   onnx::TensorProto_DataType_BFLOAT16);
 }
 
 MORPHIZEN_DLL_SPEC
-gsl::span<const int16_t> tensor_proto_as_fp16s(const onnxruntime::Graph& graph,
-                                               const TensorProto& tensor) {
+gsl::span<const int16_t> tensor_proto_as_fp16s(const onnxruntime::Graph &graph,
+                                               const TensorProto &tensor) {
   return tensor_proto_as<int16_t>(graph, tensor,
                                   onnx::TensorProto_DataType_FLOAT16);
 }

@@ -23,9 +23,9 @@
 // These forward to MORPHIZEN_ORT_API and handle f32/f64 naming differences
 namespace {
 #define DEFINE_TENSOR_PROTO_NEW_WRAPPER(type, cxx_type)                        \
-  inline morphizen::TensorProto* tensor_proto_new_##type(                      \
-      const std::string& name, const std::vector<int64_t>& shape,              \
-      const std::vector<cxx_type>& data) {                                     \
+  inline morphizen::TensorProto *tensor_proto_new_##type(                      \
+      const std::string &name, const std::vector<int64_t> &shape,              \
+      const std::vector<cxx_type> &data) {                                     \
     return MORPHIZEN_ORT_API(tensor_proto_new_##type)(name, shape, data);      \
   }
 
@@ -39,30 +39,30 @@ DEFINE_TENSOR_PROTO_NEW_WRAPPER(i64, int64_t)
 DEFINE_TENSOR_PROTO_NEW_WRAPPER(u64, uint64_t)
 
 // bf16/fp16 use int16_t in MORPHIZEN_ORT_API
-inline morphizen::TensorProto*
-tensor_proto_new_bf16(const std::string& name,
-                      const std::vector<int64_t>& shape,
-                      const std::vector<int16_t>& data) {
+inline morphizen::TensorProto *
+tensor_proto_new_bf16(const std::string &name,
+                      const std::vector<int64_t> &shape,
+                      const std::vector<int16_t> &data) {
   return MORPHIZEN_ORT_API(tensor_proto_new_bf16)(name, shape, data);
 }
 
-inline morphizen::TensorProto*
-tensor_proto_new_fp16(const std::string& name,
-                      const std::vector<int64_t>& shape,
-                      const std::vector<int16_t>& data) {
+inline morphizen::TensorProto *
+tensor_proto_new_fp16(const std::string &name,
+                      const std::vector<int64_t> &shape,
+                      const std::vector<int16_t> &data) {
   return MORPHIZEN_ORT_API(tensor_proto_new_fp16)(name, shape, data);
 }
 
 // Special cases: MORPHIZEN_ORT_API uses "floats"/"doubles", not "f32"/"f64"
-inline morphizen::TensorProto*
-tensor_proto_new_f32(const std::string& name, const std::vector<int64_t>& shape,
-                     const std::vector<float>& data) {
+inline morphizen::TensorProto *
+tensor_proto_new_f32(const std::string &name, const std::vector<int64_t> &shape,
+                     const std::vector<float> &data) {
   return MORPHIZEN_ORT_API(tensor_proto_new_floats)(name, shape, data);
 }
 
-inline morphizen::TensorProto*
-tensor_proto_new_f64(const std::string& name, const std::vector<int64_t>& shape,
-                     const std::vector<double>& data) {
+inline morphizen::TensorProto *
+tensor_proto_new_f64(const std::string &name, const std::vector<int64_t> &shape,
+                     const std::vector<double> &data) {
   return MORPHIZEN_ORT_API(tensor_proto_new_doubles)(name, shape, data);
 }
 
@@ -81,21 +81,21 @@ DEFINE_TENSOR_PROTO_NEW_WRAPPER(bool, uint8_t)
 
 namespace morphizen {
 
-MORPHIZEN_DLL_SPEC Node&
-graph_add_node(Graph& graph, const std::string& name,
-               const std::string& op_type, const std::string& description,
-               const std::vector<const NodeArg*>& input_args,
-               const std::vector<const NodeArg*>& output_args,
-               NodeAttributesPtr attributes, const std::string& domain) {
-  auto& ret = MORPHIZEN_ORT_API(graph_add_node)(
+MORPHIZEN_DLL_SPEC Node &
+graph_add_node(Graph &graph, const std::string &name,
+               const std::string &op_type, const std::string &description,
+               const std::vector<const NodeArg *> &input_args,
+               const std::vector<const NodeArg *> &output_args,
+               NodeAttributesPtr attributes, const std::string &domain) {
+  auto &ret = MORPHIZEN_ORT_API(graph_add_node)(
       graph, name, op_type, description, input_args, output_args,
       *attributes.get(), domain);
   return ret;
 }
 
-MORPHIZEN_DLL_SPEC std::vector<const NodeArg*>
-node_inputs_2_node_args(const std::vector<NodeInput>& inputs) {
-  auto input_args = std::vector<const NodeArg*>();
+MORPHIZEN_DLL_SPEC std::vector<const NodeArg *>
+node_inputs_2_node_args(const std::vector<NodeInput> &inputs) {
+  auto input_args = std::vector<const NodeArg *>();
   input_args.resize(inputs.size());
   for (auto i = 0u; i < inputs.size(); ++i) {
     input_args[i] = inputs[i].node_arg;
@@ -103,38 +103,38 @@ node_inputs_2_node_args(const std::vector<NodeInput>& inputs) {
   return input_args;
 }
 
-void graph_set_name(Graph& graph, const std::string& name) {
+void graph_set_name(Graph &graph, const std::string &name) {
   MORPHIZEN_ORT_API(graph_set_name)(graph, name.c_str());
 }
 
 MORPHIZEN_DLL_SPEC void
-graph_add_initialized_tensor(Graph& graph, const TensorProto& tensor) {
+graph_add_initialized_tensor(Graph &graph, const TensorProto &tensor) {
   MORPHIZEN_ORT_API(graph_add_initialized_tensor)(graph, tensor);
 }
 
-MORPHIZEN_DLL_SPEC void graph_set_inputs(Graph& graph,
-                                         const std::vector<NodeArg*>& inputs) {
+MORPHIZEN_DLL_SPEC void graph_set_inputs(Graph &graph,
+                                         const std::vector<NodeArg *> &inputs) {
   MORPHIZEN_ORT_API(graph_set_inputs)(graph, inputs);
 }
 
 MORPHIZEN_DLL_SPEC void
-graph_set_outputs(Graph& graph, const std::vector<NodeArg*>& outputs) {
+graph_set_outputs(Graph &graph, const std::vector<NodeArg *> &outputs) {
   MORPHIZEN_ORT_API(graph_set_outputs)(graph, outputs);
 }
 
-MORPHIZEN_DLL_SPEC void graph_save(Graph& graph, const std::string& model_path,
-                                   const std::string& external_data_path,
+MORPHIZEN_DLL_SPEC void graph_save(Graph &graph, const std::string &model_path,
+                                   const std::string &external_data_path,
                                    size_t threshold) {
   MORPHIZEN_ORT_API(graph_save)
   (graph, model_path, external_data_path, threshold);
 }
 
-MORPHIZEN_DLL_SPEC std::vector<const Node*>
-graph_get_output_nodes(const Graph& graph) {
+MORPHIZEN_DLL_SPEC std::vector<const Node *>
+graph_get_output_nodes(const Graph &graph) {
   auto graph_outputs = morphizen_cxx::GraphConstRef(graph).outputs();
-  auto leaf_nodes = std::vector<const Node*>();
+  auto leaf_nodes = std::vector<const Node *>();
   leaf_nodes.reserve(graph_outputs.size());
-  for (auto& o : graph_outputs) {
+  for (auto &o : graph_outputs) {
     auto n = MORPHIZEN_ORT_API(graph_producer_node)(graph, o.name());
     if (n != nullptr) {
       leaf_nodes.push_back(n);
@@ -143,13 +143,13 @@ graph_get_output_nodes(const Graph& graph) {
   return leaf_nodes;
 }
 
-void graph_gc(Graph& graph) {
-  std::vector<const Node*> leaf_nodes;
+void graph_gc(Graph &graph) {
+  std::vector<const Node *> leaf_nodes;
   auto graph_ref = morphizen_cxx::GraphConstRef(graph);
   auto all_nodes_cxx = graph_ref.nodes();
-  auto all_nodes = std::vector<const Node*>();
+  auto all_nodes = std::vector<const Node *>();
   all_nodes.reserve(all_nodes_cxx.size());
-  for (auto& n : all_nodes_cxx) {
+  for (auto &n : all_nodes_cxx) {
     all_nodes.push_back(n.ptr());
   }
   auto graph_outputs = graph_ref.outputs();
@@ -159,9 +159,9 @@ void graph_gc(Graph& graph) {
     auto node_outputs = node_get_output_node_args(*n);
     auto found = std::any_of(
         node_outputs.begin(), node_outputs.end(),
-        [&graph_outputs](const NodeArg* x) {
+        [&graph_outputs](const NodeArg *x) {
           return std::any_of(graph_outputs.begin(), graph_outputs.end(),
-                             [x](const auto& out) { return out.ptr() == x; });
+                             [x](const auto &out) { return out.ptr() == x; });
         });
     if (found) {
       leaf_nodes.push_back(n);
@@ -172,7 +172,7 @@ void graph_gc(Graph& graph) {
       graph,      //
       leaf_nodes, //
       nullptr,    //
-      [&all_nodes](const Node* n) mutable {
+      [&all_nodes](const Node *n) mutable {
         all_nodes.erase(std::remove(all_nodes.begin(), all_nodes.end(), n),
                         all_nodes.end());
       }, //
@@ -187,31 +187,31 @@ void graph_gc(Graph& graph) {
   }
 }
 
-MORPHIZEN_DLL_SPEC void graph_resolve(Graph& graph, bool force) {
+MORPHIZEN_DLL_SPEC void graph_resolve(Graph &graph, bool force) {
   auto status = MORPHIZEN_ORT_API(graph_resolve)(graph, force);
   CHECK(status == 0) << " resolve error: " << status;
   return;
 }
 
-const Model& graph_get_model(const Graph& graph) {
+const Model &graph_get_model(const Graph &graph) {
   return MORPHIZEN_ORT_API(graph_get_model)(graph);
 }
 
-std::vector<const Node*> graph_nodes(const Graph& graph) {
+std::vector<const Node *> graph_nodes(const Graph &graph) {
   return *MORPHIZEN_ORT_API(graph_nodes_unsafe)(graph);
 }
 
-std::vector<const NodeArg*> graph_get_inputs(const Graph& graph) {
+std::vector<const NodeArg *> graph_get_inputs(const Graph &graph) {
   return *MORPHIZEN_ORT_API(graph_get_inputs_unsafe)(graph);
 }
 
-MORPHIZEN_DLL_SPEC std::vector<const NodeArg*>
-graph_get_outputs(const Graph& graph) {
+MORPHIZEN_DLL_SPEC std::vector<const NodeArg *>
+graph_get_outputs(const Graph &graph) {
   return *MORPHIZEN_ORT_API(graph_get_outputs_unsafe)(graph);
 }
 
 MORPHIZEN_DLL_SPEC std::vector<size_t>
-graph_get_node_in_topoligical_order(const Graph& graph) {
+graph_get_node_in_topoligical_order(const Graph &graph) {
   std::vector<size_t> ret;
   auto output_nodes = graph_get_output_nodes(graph);
   MORPHIZEN_ORT_API(graph_reverse_dfs_from)
@@ -219,7 +219,7 @@ graph_get_node_in_topoligical_order(const Graph& graph) {
       graph,        //
       output_nodes, // leaf nodes, output
       nullptr,      // enter
-      [&ret](const Node* n) mutable {
+      [&ret](const Node *n) mutable {
         ret.push_back(MORPHIZEN_ORT_API(node_get_index)(*n));
       }, //
       nullptr);
@@ -230,15 +230,15 @@ static std::string indent(int level) {
   return std::string((size_t)(level * 4), ' ');
 }
 
-extern std::string node_arg_as_string_internal(const NodeArg& node_arg);
+extern std::string node_arg_as_string_internal(const NodeArg &node_arg);
 
 // Helper to convert C++ wrapper vector to string without raw pointer conversion
 static std::string node_args_as_string_cxx(
-    const std::vector<morphizen_cxx::NodeArgConstRef>& args) {
+    const std::vector<morphizen_cxx::NodeArgConstRef> &args) {
   int index = 0;
   std::ostringstream str;
   str << "[";
-  for (auto& arg : args) {
+  for (auto &arg : args) {
     if (index != 0) {
       str << ",";
     }
@@ -250,7 +250,7 @@ static std::string node_args_as_string_cxx(
   return str.str();
 }
 
-static std::string graph_as_string_subgraph(const Graph& graph, int level) {
+static std::string graph_as_string_subgraph(const Graph &graph, int level) {
   std::ostringstream str;
   auto graph_ref = morphizen_cxx::GraphConstRef(graph);
   str << indent(level) << "graph[name=" << graph_ref.name() << "] = {";
@@ -282,12 +282,12 @@ static std::string graph_as_string_subgraph(const Graph& graph, int level) {
   return str.str();
 }
 
-std::string graph_as_string(const Graph& graph) {
+std::string graph_as_string(const Graph &graph) {
   return graph_as_string_subgraph(graph, 0);
 }
 
-std::vector<const Node*>
-graph_get_consumer_nodes(const Graph& graph, const std::string& node_arg_name) {
+std::vector<const Node *>
+graph_get_consumer_nodes(const Graph &graph, const std::string &node_arg_name) {
   return *MORPHIZEN_ORT_API(graph_get_consumer_nodes_unsafe)(graph,
                                                              node_arg_name);
 }
@@ -295,31 +295,31 @@ graph_get_consumer_nodes(const Graph& graph, const std::string& node_arg_name) {
 // graph_replace_node_arg has been moved to morphizen-core
 // It depends on NodeBuilder which is now in morphizen-core
 
-const Node* graph_producer_node(const Graph& graph,
-                                const std::string& node_arg_name) {
+const Node *graph_producer_node(const Graph &graph,
+                                const std::string &node_arg_name) {
   return MORPHIZEN_ORT_API(graph_producer_node)(graph, node_arg_name);
 }
 
-const NodeArg* graph_get_node_arg(const Graph& graph, const std::string& name) {
+const NodeArg *graph_get_node_arg(const Graph &graph, const std::string &name) {
   return MORPHIZEN_ORT_API(graph_get_node_arg)(graph, name);
 }
 
-const std::string& graph_get_name(const Graph& graph) {
+const std::string &graph_get_name(const Graph &graph) {
   return MORPHIZEN_ORT_API(graph_get_name)(graph);
 }
 
 void graph_reverse_dfs_from(
-    const Graph& graph, size_t node_index,
-    const std::function<bool(const Node*)>& enter,
-    const std::function<void(const Node*)>& leave,
-    const std::function<bool(const Node*, const Node*)>& comp,
+    const Graph &graph, size_t node_index,
+    const std::function<bool(const Node *)> &enter,
+    const std::function<void(const Node *)> &leave,
+    const std::function<bool(const Node *, const Node *)> &comp,
     bool subgraph_sensitive) {
   (void)subgraph_sensitive; // unused parameter
   auto node = MORPHIZEN_ORT_API(graph_get_node)(graph, node_index);
-  std::vector<const Node*> nodes = {node};
-  auto stop = [](const Node*, const Node*) { return false; };
+  std::vector<const Node *> nodes = {node};
+  auto stop = [](const Node *, const Node *) { return false; };
   // Wrap leave callback to convert void return to bool
-  auto leave_wrapper = [&leave](const Node* n) -> bool {
+  auto leave_wrapper = [&leave](const Node *n) -> bool {
     leave(n);
     return false; // Return value doesn't matter for leave
   };
@@ -329,70 +329,72 @@ void graph_reverse_dfs_from(
 }
 
 void graph_reverse_dfs_from_multi(
-    const Graph& graph, gsl::span<const Node* const> from,
-    const std::function<void(const Node*)>& enter,
-    const std::function<void(const Node*)>& leave,
-    const std::function<bool(const Node*, const Node*)>& stop) {
+    const Graph &graph, gsl::span<const Node *const> from,
+    const std::function<void(const Node *)> &enter,
+    const std::function<void(const Node *)> &leave,
+    const std::function<bool(const Node *, const Node *)> &stop) {
   // Wrap callbacks to match MORPHIZEN_ORT_API signature (which expects bool
   // returns)
   auto enter_wrapper =
-      enter ? std::function<bool(const Node*)>([&enter](const Node* n) -> bool {
-        enter(n);
-        return false; // Continue traversal
-      })
-            : std::function<bool(const Node*)>(nullptr);
+      enter
+          ? std::function<bool(const Node *)>([&enter](const Node *n) -> bool {
+              enter(n);
+              return false; // Continue traversal
+            })
+          : std::function<bool(const Node *)>(nullptr);
 
   auto leave_wrapper =
-      leave ? std::function<bool(const Node*)>([&leave](const Node* n) -> bool {
-        leave(n);
-        return false; // Continue traversal
-      })
-            : std::function<bool(const Node*)>(nullptr);
+      leave
+          ? std::function<bool(const Node *)>([&leave](const Node *n) -> bool {
+              leave(n);
+              return false; // Continue traversal
+            })
+          : std::function<bool(const Node *)>(nullptr);
 
   MORPHIZEN_ORT_API(graph_reverse_dfs_from_preemp)
   (graph, from, enter_wrapper, leave_wrapper, nullptr, stop);
 }
 
-void graph_fuse(Graph& graph, const std::string& name,
-                const std::string& op_type,
-                const std::vector<const Node*>& nodes,
-                const std::vector<std::string>& inputs,
-                const std::vector<std::string>& outputs,
-                const std::vector<std::string>& constant_initializers) {
+void graph_fuse(Graph &graph, const std::string &name,
+                const std::string &op_type,
+                const std::vector<const Node *> &nodes,
+                const std::vector<std::string> &inputs,
+                const std::vector<std::string> &outputs,
+                const std::vector<std::string> &constant_initializers) {
   // Convert node pointers to node indices
   std::vector<size_t> node_indices;
   node_indices.reserve(nodes.size());
-  for (const auto* node : nodes) {
+  for (const auto *node : nodes) {
     node_indices.push_back(MORPHIZEN_ORT_API(node_get_index)(*node));
   }
   MORPHIZEN_ORT_API(graph_fuse)
   (graph, name, op_type, node_indices, inputs, outputs, constant_initializers);
 }
 
-Node& graph_fuse(Graph& graph, const std::string& name,
-                 const std::string& op_type, const std::vector<size_t>& nodes,
-                 const std::vector<std::string>& inputs,
-                 const std::vector<std::string>& outputs,
-                 const std::vector<std::string>& constant_initializers) {
+Node &graph_fuse(Graph &graph, const std::string &name,
+                 const std::string &op_type, const std::vector<size_t> &nodes,
+                 const std::vector<std::string> &inputs,
+                 const std::vector<std::string> &outputs,
+                 const std::vector<std::string> &constant_initializers) {
   return MORPHIZEN_ORT_API(graph_fuse)(graph, name, op_type, nodes, inputs,
                                        outputs, constant_initializers);
 }
 
 // Model operations
-Graph& model_main_graph(Model& model) {
+Graph &model_main_graph(Model &model) {
   return MORPHIZEN_ORT_API(model_main_graph)(model);
 }
 
-std::string model_get_meta_data(const Model& model, const std::string& key) {
+std::string model_get_meta_data(const Model &model, const std::string &key) {
   // Return by value to avoid dangling reference from temporary DllSafe<string>
   return *MORPHIZEN_ORT_API(model_get_meta_data)(model, key);
 }
 
-bool model_has_meta_data(const Model& model, const std::string& key) {
+bool model_has_meta_data(const Model &model, const std::string &key) {
   return MORPHIZEN_ORT_API(model_has_meta_data)(model, key);
 }
 
-Model* model_clone(const Model& model) {
+Model *model_clone(const Model &model) {
   // Use max int64_t as threshold to keep all data inline (no external file)
   return MORPHIZEN_ORT_API(model_clone)(model,
                                         std::numeric_limits<int64_t>::max());
@@ -401,12 +403,12 @@ Model* model_clone(const Model& model) {
 } // namespace morphizen
 
 namespace morphizen_cxx {
-const std::string& GraphConstRef::name() const {
+const std::string &GraphConstRef::name() const {
   return MORPHIZEN_ORT_API(graph_get_name)(*this);
 }
 GraphConstRef::~GraphConstRef() {}
 
-const std::filesystem::path& GraphConstRef::model_path() const {
+const std::filesystem::path &GraphConstRef::model_path() const {
   return MORPHIZEN_ORT_API(get_model_path)(*this);
 }
 
@@ -435,16 +437,16 @@ std::vector<NodeArgConstRef> GraphConstRef::outputs() const {
   return ret;
 }
 std::vector<NodeArgConstRef> GraphConstRef::constant_initializers() const {
-  auto& initializers =
+  auto &initializers =
       MORPHIZEN_ORT_API(graph_get_all_initialized_tensors)(*this);
   auto ret = std::vector<NodeArgConstRef>();
   ret.reserve(initializers.size());
   for (auto constant : initializers) {
-    auto& name = constant.first;
+    auto &name = constant.first;
     auto node_arg = MORPHIZEN_ORT_API(graph_get_node_arg)(*this, name);
     CHECK(node_arg != nullptr) << "cannot get node arg: name=" << name;
     auto node_arg_2 =
-        NodeArgConstRef(graph_, const_cast<morphizen::NodeArg&>(*node_arg));
+        NodeArgConstRef(graph_, const_cast<morphizen::NodeArg &>(*node_arg));
     ret.push_back(node_arg_2);
   }
   return ret;
@@ -463,13 +465,13 @@ std::vector<NodeConstRef> GraphConstRef::nodes() const {
   return ret;
 }
 
-void GraphConstRef::save(const std::filesystem::path& file_path) const {
+void GraphConstRef::save(const std::filesystem::path &file_path) const {
   MORPHIZEN_ORT_API(graph_save)
   (*this, file_path.u8string(), "", std::numeric_limits<size_t>::max());
 }
 
-void GraphConstRef::save(const std::filesystem::path& file_path,
-                         const std::filesystem::path& external_data_file,
+void GraphConstRef::save(const std::filesystem::path &file_path,
+                         const std::filesystem::path &external_data_file,
                          size_t threshold) const {
   MORPHIZEN_ORT_API(graph_save)
   (*this, file_path.u8string(), external_data_file.u8string(), threshold);
@@ -484,7 +486,7 @@ morphizen::DllSafe<std::string> GraphConstRef::save_string() const {
 }
 
 std::optional<NodeArgConstRef>
-GraphConstRef::find_node_arg(const std::string& name) const {
+GraphConstRef::find_node_arg(const std::string &name) const {
   auto node_arg = MORPHIZEN_ORT_API(graph_get_node_arg)(*this, name);
   if (node_arg != nullptr) {
     return NodeArgConstRef(graph_, *node_arg);
@@ -494,7 +496,7 @@ GraphConstRef::find_node_arg(const std::string& name) const {
 }
 
 std::vector<NodeConstRef>
-GraphConstRef::find_consumers(const std::string& name) const {
+GraphConstRef::find_consumers(const std::string &name) const {
   auto consumers = morphizen::graph_get_consumer_nodes(*this, name);
   auto ret = std::vector<NodeConstRef>();
   ret.reserve(consumers.size());
@@ -510,7 +512,7 @@ GraphConstRef::find_consumers(const std::string& name) const {
   return ret;
 }
 std::optional<NodeConstRef>
-GraphConstRef::find_node(const std::string& name) const {
+GraphConstRef::find_node(const std::string &name) const {
   auto node = MORPHIZEN_ORT_API(graph_producer_node)(graph_, name);
   if (node == nullptr) {
     return std::nullopt;
@@ -538,7 +540,7 @@ std::vector<NodeConstRef> GraphConstRef::nodes_in_topological_order() const {
   return ret;
 }
 
-const morphizen::Model& GraphConstRef::model() const {
+const morphizen::Model &GraphConstRef::model() const {
   return morphizen::graph_get_model(*this);
 }
 
@@ -546,7 +548,7 @@ std::vector<NodeConstRef> GraphConstRef::output_nodes() const {
   auto graph_outputs = this->outputs();
   auto ret = std::vector<NodeConstRef>();
   ret.reserve(graph_outputs.size());
-  for (auto& output : graph_outputs) {
+  for (auto &output : graph_outputs) {
     auto producer = this->find_node(output.name());
     if (producer.has_value()) {
       ret.push_back(producer.value());
@@ -558,24 +560,25 @@ std::vector<NodeConstRef> GraphConstRef::output_nodes() const {
 std::string GraphConstRef::to_string() const {
   return morphizen::graph_as_string(*this);
 }
-std::ostream& operator<<(std::ostream& os, const GraphConstRef& graph) {
+std::ostream &operator<<(std::ostream &os, const GraphConstRef &graph) {
   return os << graph.to_string();
 }
 
 void GraphConstRef::reverse_dfs_from(
-    size_t node_index, const std::function<bool(const morphizen::Node*)>& enter,
-    const std::function<void(const morphizen::Node*)>& leave,
-    const std::function<bool(const morphizen::Node*, const morphizen::Node*)>&
-        comp,
+    size_t node_index,
+    const std::function<bool(const morphizen::Node *)> &enter,
+    const std::function<void(const morphizen::Node *)> &leave,
+    const std::function<bool(const morphizen::Node *, const morphizen::Node *)>
+        &comp,
     bool subgraph_sensitive) const {
   morphizen::graph_reverse_dfs_from(*this, node_index, enter, leave, comp,
                                     subgraph_sensitive);
 }
 
-GraphRef::GraphRef(morphizen::Graph& graph) : GraphConstRef(graph) {}
+GraphRef::GraphRef(morphizen::Graph &graph) : GraphConstRef(graph) {}
 
 GraphRef::~GraphRef() {}
-void GraphRef::set_name(const std::string& name) {
+void GraphRef::set_name(const std::string &name) {
   morphizen::graph_set_name(*this, name);
 }
 bool GraphRef::resolve(bool force) {
@@ -585,54 +588,54 @@ bool GraphRef::resolve(bool force) {
 // They depend on MetaDefProto and NodeBuilder which are morphizen-core types
 void GraphRef::gc() { morphizen::graph_gc(*this); }
 
-void GraphRef::set_inputs(const std::vector<morphizen::NodeArg*>& inputs) {
+void GraphRef::set_inputs(const std::vector<morphizen::NodeArg *> &inputs) {
   morphizen::graph_set_inputs(*this, inputs);
 }
 
-void GraphRef::set_outputs(const std::vector<morphizen::NodeArg*>& outputs) {
+void GraphRef::set_outputs(const std::vector<morphizen::NodeArg *> &outputs) {
   morphizen::graph_set_outputs(*this, outputs);
 }
 
-void GraphRef::add_initialized_tensor(const morphizen::TensorProto& tensor) {
+void GraphRef::add_initialized_tensor(const morphizen::TensorProto &tensor) {
   morphizen::graph_add_initialized_tensor(*this, tensor);
 }
 
 void GraphConstRef::reverse_dfs_from_multi(
     gsl::span<const NodeConstRef> nodes,
-    const std::function<bool(NodeConstRef)>& enter,
-    const std::function<bool(NodeConstRef)>& leave,
-    const std::function<bool(NodeConstRef, NodeConstRef)>& comp,
-    const std::function<bool(NodeConstRef, NodeConstRef)>& stop) const {
+    const std::function<bool(NodeConstRef)> &enter,
+    const std::function<bool(NodeConstRef)> &leave,
+    const std::function<bool(NodeConstRef, NodeConstRef)> &comp,
+    const std::function<bool(NodeConstRef, NodeConstRef)> &stop) const {
   // Convert NodeConstRef vector to raw pointers for C-style API
-  auto nodes_raw = std::vector<const morphizen::Node*>();
+  auto nodes_raw = std::vector<const morphizen::Node *>();
   nodes_raw.reserve(nodes.size());
-  for (auto& n : nodes) {
+  for (auto &n : nodes) {
     nodes_raw.push_back(n.ptr());
   }
 
   // Wrap C++ wrapper callbacks to raw pointer callbacks for C-style API
   auto enter_void = enter
-                        ? std::function<void(const morphizen::Node*)>(
-                              [&enter, this](const morphizen::Node* n) {
+                        ? std::function<void(const morphizen::Node *)>(
+                              [&enter, this](const morphizen::Node *n) {
                                 enter(NodeConstRef::from_node(*this, *n));
                               })
-                        : std::function<void(const morphizen::Node*)>(nullptr);
+                        : std::function<void(const morphizen::Node *)>(nullptr);
   auto leave_void = leave
-                        ? std::function<void(const morphizen::Node*)>(
-                              [&leave, this](const morphizen::Node* n) {
+                        ? std::function<void(const morphizen::Node *)>(
+                              [&leave, this](const morphizen::Node *n) {
                                 leave(NodeConstRef::from_node(*this, *n));
                               })
-                        : std::function<void(const morphizen::Node*)>(nullptr);
-  auto stop_raw =
-      stop
-          ? std::function<bool(const morphizen::Node*, const morphizen::Node*)>(
-                [&stop, this](const morphizen::Node* from,
-                              const morphizen::Node* to) {
-                  return stop(NodeConstRef::from_node(*this, *from),
-                              NodeConstRef::from_node(*this, *to));
-                })
-          : std::function<bool(const morphizen::Node*, const morphizen::Node*)>(
-                nullptr);
+                        : std::function<void(const morphizen::Node *)>(nullptr);
+  auto stop_raw = stop
+                      ? std::function<bool(const morphizen::Node *,
+                                           const morphizen::Node *)>(
+                            [&stop, this](const morphizen::Node *from,
+                                          const morphizen::Node *to) {
+                              return stop(NodeConstRef::from_node(*this, *from),
+                                          NodeConstRef::from_node(*this, *to));
+                            })
+                      : std::function<bool(const morphizen::Node *,
+                                           const morphizen::Node *)>(nullptr);
 
   // Note: comp parameter is ignored as C-style API doesn't support it
   (void)comp;
@@ -642,8 +645,8 @@ void GraphConstRef::reverse_dfs_from_multi(
 }
 
 static std::string
-graph_ref_generate_unique_constant_initializer_name(const GraphConstRef& graph,
-                                                    const std::string& prefix) {
+graph_ref_generate_unique_constant_initializer_name(const GraphConstRef &graph,
+                                                    const std::string &prefix) {
   auto name = std::string();
   if (prefix.empty()) {
     name = std::string("morphizen_constant_initializer_") +
@@ -656,14 +659,14 @@ graph_ref_generate_unique_constant_initializer_name(const GraphConstRef& graph,
 #define MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(type, cxx_type,          \
                                                       tensor_data_type)        \
   NodeArgRef GraphRef::new_constant_initializer_##type(                        \
-      cxx_type value, const std::string& name_hint) {                          \
+      cxx_type value, const std::string &name_hint) {                          \
     const std::vector<int64_t> shape = {};                                     \
     const std::vector<cxx_type> values = {value};                              \
     auto name =                                                                \
         graph_ref_generate_unique_constant_initializer_name(*this, name_hint); \
     auto tensor = tensor_proto_new_##type(name, shape, values);                \
     MORPHIZEN_ORT_API(graph_add_initialized_tensor)(*this, *tensor);           \
-    auto& newly_create_node_arg = MORPHIZEN_ORT_API(node_arg_new)(             \
+    auto &newly_create_node_arg = MORPHIZEN_ORT_API(node_arg_new)(             \
         *this, name, &shape,                                                   \
         ONNX_NAMESPACE::TensorProto_DataType_##tensor_data_type);              \
     return NodeArgRef(*this, newly_create_node_arg);                           \
@@ -686,13 +689,13 @@ MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER(fp16, fp16_t, FLOAT16)
                                                            tensor_data_type)   \
   NodeArgRef GraphRef::new_constant_initializer_##type##_span(                 \
       gsl::span<const cxx_type> values_span,                                   \
-      const std::vector<int64_t>& shape, const std::string& name_hint) {       \
+      const std::vector<int64_t> &shape, const std::string &name_hint) {       \
     std::vector<cxx_type> values(values_span.begin(), values_span.end());      \
     auto name =                                                                \
         graph_ref_generate_unique_constant_initializer_name(*this, name_hint); \
     auto tensor = tensor_proto_new_##type(name, shape, values);                \
     MORPHIZEN_ORT_API(graph_add_initialized_tensor)(*this, *tensor);           \
-    auto& newly_create_node_arg = MORPHIZEN_ORT_API(node_arg_new)(             \
+    auto &newly_create_node_arg = MORPHIZEN_ORT_API(node_arg_new)(             \
         *this, name, &shape,                                                   \
         ONNX_NAMESPACE::TensorProto_DataType_##tensor_data_type);              \
     return NodeArgRef(*this, newly_create_node_arg);                           \
@@ -712,42 +715,42 @@ MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(f64, double, DOUBLE)
 MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(bf16, bf16_t, BFLOAT16)
 MORPHIZEN_CXX_DEFINE_NEW_CONSTANT_INITIALIZER_SPAN(fp16, fp16_t, FLOAT16)
 
-void GraphRef::set_inputs(const std::vector<NodeArgConstRef>& inputs) {
-  auto inputs_ptr = std::vector<const morphizen::NodeArg*>();
+void GraphRef::set_inputs(const std::vector<NodeArgConstRef> &inputs) {
+  auto inputs_ptr = std::vector<const morphizen::NodeArg *>();
   inputs_ptr.reserve(inputs.size());
-  for (auto& input : inputs) {
+  for (auto &input : inputs) {
     inputs_ptr.push_back(input.ptr());
   }
   MORPHIZEN_ORT_API(graph_set_inputs)(*this, inputs_ptr);
 }
-void GraphRef::set_outputs(const std::vector<NodeArgConstRef>& outputs) {
-  auto outputs_ptr = std::vector<const morphizen::NodeArg*>();
+void GraphRef::set_outputs(const std::vector<NodeArgConstRef> &outputs) {
+  auto outputs_ptr = std::vector<const morphizen::NodeArg *>();
   outputs_ptr.reserve(outputs.size());
-  for (auto& output : outputs) {
+  for (auto &output : outputs) {
     outputs_ptr.push_back(output.ptr());
   }
   MORPHIZEN_ORT_API(graph_set_outputs)(*this, outputs_ptr);
 }
 NodeArgConstRef
-GraphRef::new_node_arg(const std::string& name,
-                       const std::vector<int64_t>& shape,
+GraphRef::new_node_arg(const std::string &name,
+                       const std::vector<int64_t> &shape,
                        ONNX_NAMESPACE::TensorProto_DataType data_type) {
   return NodeArgConstRef::from_node_arg(
       self(), MORPHIZEN_ORT_API(node_arg_new)(*this, name, &shape, data_type));
 }
 NodeArgConstRef
-GraphRef::new_node_arg(const std::string& name,
+GraphRef::new_node_arg(const std::string &name,
                        ONNX_NAMESPACE::TensorProto_DataType data_type) {
   return NodeArgConstRef::from_node_arg(
       self(), MORPHIZEN_ORT_API(node_arg_new)(*this, name, nullptr, data_type));
 }
 NodeRef
-GraphRef::add_node(const std::string& name, const std::string& op_domain,
-                   const std::string& op_type, const std::string& description,
-                   const std::vector<std::optional<NodeArgConstRef>>& inputs,
-                   const std::vector<std::optional<NodeArgConstRef>>& outputs,
+GraphRef::add_node(const std::string &name, const std::string &op_domain,
+                   const std::string &op_type, const std::string &description,
+                   const std::vector<std::optional<NodeArgConstRef>> &inputs,
+                   const std::vector<std::optional<NodeArgConstRef>> &outputs,
                    morphizen::NodeAttributesPtr attributes) {
-  auto inputs_ptr = std::vector<const morphizen::NodeArg*>();
+  auto inputs_ptr = std::vector<const morphizen::NodeArg *>();
   inputs_ptr.reserve(inputs.size());
   // in onnxruntime, the node_arg with an empty name is used to
   // represent the optional node arg.
@@ -757,7 +760,7 @@ GraphRef::add_node(const std::string& name, const std::string& op_domain,
     the_optional_arg = &MORPHIZEN_ORT_API(node_arg_new)(
         *this, "", &shape, ONNX_NAMESPACE::TensorProto_DataType_FLOAT);
   }
-  for (auto& input : inputs) { // namespace morphizen_cxx
+  for (auto &input : inputs) { // namespace morphizen_cxx
     if (input) {
       inputs_ptr.push_back(input->ptr());
     } else {
@@ -765,9 +768,9 @@ GraphRef::add_node(const std::string& name, const std::string& op_domain,
     }
   }
 
-  auto outputs_ptr = std::vector<const morphizen::NodeArg*>();
+  auto outputs_ptr = std::vector<const morphizen::NodeArg *>();
   outputs_ptr.reserve(outputs.size());
-  for (auto& output : outputs) {
+  for (auto &output : outputs) {
     if (output) {
       outputs_ptr.push_back(output->ptr());
     } else {
@@ -775,13 +778,13 @@ GraphRef::add_node(const std::string& name, const std::string& op_domain,
     }
   }
 
-  auto& new_node = MORPHIZEN_ORT_API(graph_add_node)(
+  auto &new_node = MORPHIZEN_ORT_API(graph_add_node)(
       *this, name, op_type, description, inputs_ptr, outputs_ptr,
       *attributes.get(), op_domain);
   return NodeRef(*this, new_node);
 }
-void GraphRef::mut_save(const std::filesystem::path& file_path,
-                        const std::filesystem::path& external_data_file,
+void GraphRef::mut_save(const std::filesystem::path &file_path,
+                        const std::filesystem::path &external_data_file,
                         size_t threshold, bool filter_out_special_tensor) {
   if (filter_out_special_tensor) {
     prune_special_tensor_proto();
@@ -804,20 +807,20 @@ GraphRef::mut_save_string(bool filter_out_special_tensor) {
 }
 
 #if MORPHIZEN_ORT_API_MAJOR >= 7
-static GraphConstRef get_original_graph(const std::string& ptr) {
+static GraphConstRef get_original_graph(const std::string &ptr) {
   uintptr_t ptr1 = std::stoull(ptr);
-  return *reinterpret_cast<morphizen::Graph*>(ptr1);
+  return *reinterpret_cast<morphizen::Graph *>(ptr1);
 }
 #endif
-void revert_mem_tag_tensor(GraphRef target_graph, const std::string& name,
+void revert_mem_tag_tensor(GraphRef target_graph, const std::string &name,
                            const int element_type,
-                           const std::unique_ptr<std::vector<int64_t>>& shape,
+                           const std::unique_ptr<std::vector<int64_t>> &shape,
                            size_t ptr, size_t size) {
-  auto base = reinterpret_cast<void*>(ptr);
+  auto base = reinterpret_cast<void *>(ptr);
   std::vector<int64_t> empty = {};
 #define REVERT_MEM_TAG_DEF(type, cxx_type, tensor_data_type)                   \
   case ONNX_NAMESPACE::TensorProto_DataType_##tensor_data_type: {              \
-    auto beg = reinterpret_cast<cxx_type*>(base);                              \
+    auto beg = reinterpret_cast<cxx_type *>(base);                             \
     auto end = beg + (size / sizeof(cxx_type));                                \
     auto values = std::vector<cxx_type>(beg, end);                             \
     auto tensor =                                                              \
@@ -867,7 +870,7 @@ static void prune_special_tensor_proto_for_graph(GraphRef target_graph,
     prune_special_tensor_proto_for_graph(target_graph, new_original_graph,
                                          node_arg);
   } else if (!is_first_call) {
-    auto& original_tensor = morphizen::node_arg_get_const_data_as_tensor(
+    auto &original_tensor = morphizen::node_arg_get_const_data_as_tensor(
         original_graph, node_arg /*hopefully, only node arg name is used.*/);
     if (external_data && !location.empty() && (location.front() == '*')) {
       MORPHIZEN_ORT_API(graph_remove_initialized_tensor)

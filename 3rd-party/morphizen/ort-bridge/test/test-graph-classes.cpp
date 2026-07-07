@@ -44,7 +44,7 @@ TEST_F(GraphClassesTest, GraphClassPlaceholderExists) {
   graph_proto.set_name("test_graph");
 
   // Add a simple node: input -> Add -> output
-  auto* node = graph_proto.add_node();
+  auto *node = graph_proto.add_node();
   node->set_name("add_node");
   node->set_op_type("Add");
   node->add_input("input1");
@@ -52,13 +52,13 @@ TEST_F(GraphClassesTest, GraphClassPlaceholderExists) {
   node->add_output("output1");
 
   // Add graph inputs
-  auto* input1 = graph_proto.add_input();
+  auto *input1 = graph_proto.add_input();
   input1->set_name("input1");
-  auto* input2 = graph_proto.add_input();
+  auto *input2 = graph_proto.add_input();
   input2->set_name("input2");
 
   // Add graph output
-  auto* output = graph_proto.add_output();
+  auto *output = graph_proto.add_output();
   output->set_name("output1");
 
   // Create Graph instance
@@ -78,14 +78,14 @@ TEST_F(GraphClassesTest, GraphNodeLookup) {
   graph_proto.set_name("multi_node_graph");
 
   // Node 1: input1 -> Relu -> relu_out
-  auto* node1 = graph_proto.add_node();
+  auto *node1 = graph_proto.add_node();
   node1->set_name("relu_node");
   node1->set_op_type("Relu");
   node1->add_input("input1");
   node1->add_output("relu_out");
 
   // Node 2: relu_out + input2 -> Add -> output1
-  auto* node2 = graph_proto.add_node();
+  auto *node2 = graph_proto.add_node();
   node2->set_name("add_node");
   node2->set_op_type("Add");
   node2->add_input("relu_out");
@@ -93,28 +93,28 @@ TEST_F(GraphClassesTest, GraphNodeLookup) {
   node2->add_output("output1");
 
   // Add inputs and outputs
-  auto* input1 = graph_proto.add_input();
+  auto *input1 = graph_proto.add_input();
   input1->set_name("input1");
-  auto* input2 = graph_proto.add_input();
+  auto *input2 = graph_proto.add_input();
   input2->set_name("input2");
-  auto* output = graph_proto.add_output();
+  auto *output = graph_proto.add_output();
   output->set_name("output1");
 
   Graph graph(graph_proto);
 
   // Test node lookup
-  const auto* relu_node = graph.find_node("relu_node");
+  const auto *relu_node = graph.find_node("relu_node");
   ASSERT_NE(relu_node, nullptr);
   EXPECT_EQ(relu_node->name(), "relu_node");
   EXPECT_EQ(relu_node->op_type(), "Relu");
 
-  const auto* add_node = graph.find_node("add_node");
+  const auto *add_node = graph.find_node("add_node");
   ASSERT_NE(add_node, nullptr);
   EXPECT_EQ(add_node->name(), "add_node");
   EXPECT_EQ(add_node->op_type(), "Add");
 
   // Test non-existent node
-  const auto* missing_node = graph.find_node("missing_node");
+  const auto *missing_node = graph.find_node("missing_node");
   EXPECT_EQ(missing_node, nullptr);
 
   // Test getting all nodes
@@ -129,14 +129,14 @@ TEST_F(GraphClassesTest, GraphDependencyAnalysis) {
   graph_proto.set_name("dependency_graph");
 
   // Node 1: input1 -> Relu -> relu_out
-  auto* node1 = graph_proto.add_node();
+  auto *node1 = graph_proto.add_node();
   node1->set_name("relu_node");
   node1->set_op_type("Relu");
   node1->add_input("input1");
   node1->add_output("relu_out");
 
   // Node 2: relu_out + input2 -> Add -> output1
-  auto* node2 = graph_proto.add_node();
+  auto *node2 = graph_proto.add_node();
   node2->set_name("add_node");
   node2->set_op_type("Add");
   node2->add_input("relu_out");
@@ -144,11 +144,11 @@ TEST_F(GraphClassesTest, GraphDependencyAnalysis) {
   node2->add_output("output1");
 
   // Add inputs and outputs
-  auto* input1 = graph_proto.add_input();
+  auto *input1 = graph_proto.add_input();
   input1->set_name("input1");
-  auto* input2 = graph_proto.add_input();
+  auto *input2 = graph_proto.add_input();
   input2->set_name("input2");
-  auto* output = graph_proto.add_output();
+  auto *output = graph_proto.add_output();
   output->set_name("output1");
 
   Graph graph(graph_proto);
@@ -192,14 +192,14 @@ TEST_F(GraphClassesTest, GraphTopologicalSort) {
   graph_proto.set_name("topo_graph");
 
   // Node 1: input1 -> Relu -> relu_out
-  auto* node1 = graph_proto.add_node();
+  auto *node1 = graph_proto.add_node();
   node1->set_name("relu_node");
   node1->set_op_type("Relu");
   node1->add_input("input1");
   node1->add_output("relu_out");
 
   // Node 2: relu_out + input2 -> Add -> output1
-  auto* node2 = graph_proto.add_node();
+  auto *node2 = graph_proto.add_node();
   node2->set_name("add_node");
   node2->set_op_type("Add");
   node2->add_input("relu_out");
@@ -207,11 +207,11 @@ TEST_F(GraphClassesTest, GraphTopologicalSort) {
   node2->add_output("output1");
 
   // Add inputs and outputs
-  auto* input1 = graph_proto.add_input();
+  auto *input1 = graph_proto.add_input();
   input1->set_name("input1");
-  auto* input2 = graph_proto.add_input();
+  auto *input2 = graph_proto.add_input();
   input2->set_name("input2");
-  auto* output = graph_proto.add_output();
+  auto *output = graph_proto.add_output();
   output->set_name("output1");
 
   Graph graph(graph_proto);
@@ -234,13 +234,13 @@ TEST_F(GraphClassesTest, GraphWithInitializers) {
   graph_proto.set_name("init_graph");
 
   // Add an initializer
-  auto* init = graph_proto.add_initializer();
+  auto *init = graph_proto.add_initializer();
   init->set_name("weights");
   init->add_dims(3);
   init->add_dims(3);
 
   // Node: input1 + weights -> Add -> output1
-  auto* node = graph_proto.add_node();
+  auto *node = graph_proto.add_node();
   node->set_name("add_node");
   node->set_op_type("Add");
   node->add_input("input1");
@@ -248,9 +248,9 @@ TEST_F(GraphClassesTest, GraphWithInitializers) {
   node->add_output("output1");
 
   // Add inputs and outputs
-  auto* input1 = graph_proto.add_input();
+  auto *input1 = graph_proto.add_input();
   input1->set_name("input1");
-  auto* output = graph_proto.add_output();
+  auto *output = graph_proto.add_output();
   output->set_name("output1");
 
   Graph graph(graph_proto);
@@ -290,39 +290,39 @@ protected:
     model_proto.set_doc_string("Test model documentation");
 
     // Add opset imports
-    auto* opset = model_proto.add_opset_import();
+    auto *opset = model_proto.add_opset_import();
     opset->set_domain("ai.onnx");
     opset->set_version(17);
 
-    auto* custom_opset = model_proto.add_opset_import();
+    auto *custom_opset = model_proto.add_opset_import();
     custom_opset->set_domain("custom.domain");
     custom_opset->set_version(2);
 
     // Add metadata properties
-    auto* prop1 = model_proto.add_metadata_props();
+    auto *prop1 = model_proto.add_metadata_props();
     prop1->set_key("author");
     prop1->set_value("test_author");
 
-    auto* prop2 = model_proto.add_metadata_props();
+    auto *prop2 = model_proto.add_metadata_props();
     prop2->set_key("description");
     prop2->set_value("A test model");
 
     // Create a simple graph
-    auto* graph = model_proto.mutable_graph();
+    auto *graph = model_proto.mutable_graph();
     graph->set_name("test_graph");
 
     // Add a simple node: input -> Relu -> output
-    auto* node = graph->add_node();
+    auto *node = graph->add_node();
     node->set_name("relu_node");
     node->set_op_type("Relu");
     node->add_input("input1");
     node->add_output("output1");
 
     // Add graph inputs and outputs
-    auto* input = graph->add_input();
+    auto *input = graph->add_input();
     input->set_name("input1");
 
-    auto* output = graph->add_output();
+    auto *output = graph->add_output();
     output->set_name("output1");
 
     return model_proto;
@@ -353,7 +353,7 @@ TEST_F(ModelClassTest, GraphAccess) {
   // Test graph access
   EXPECT_TRUE(model.has_graph());
 
-  const auto* graph_proto = model.graph();
+  const auto *graph_proto = model.graph();
   ASSERT_NE(graph_proto, nullptr);
   EXPECT_EQ(graph_proto->name(), "test_graph");
   EXPECT_EQ(graph_proto->node_size(), 1);
@@ -364,7 +364,7 @@ TEST_F(ModelClassTest, GraphAccess) {
   EXPECT_EQ(model.graph_count(), 1);
 
   // Test graphs vector
-  const auto& graphs = model.graphs();
+  const auto &graphs = model.graphs();
   EXPECT_EQ(graphs.size(), 1);
   EXPECT_EQ(graphs[0], graph_proto);
 }
@@ -414,7 +414,7 @@ TEST_F(ModelClassTest, MetadataProperties) {
 TEST_F(ModelClassTest, Functions) {
   auto model_proto = create_simple_model();
   // Add a function to the model
-  auto* func = model_proto.add_functions();
+  auto *func = model_proto.add_functions();
   func->set_name("test_function");
   func->set_domain("test.domain");
 
@@ -428,13 +428,13 @@ TEST_F(ModelClassTest, Functions) {
   EXPECT_EQ(function_names[0], "test_function");
 
   // Test function lookup
-  const auto* found_func = model.find_function("test_function");
+  const auto *found_func = model.find_function("test_function");
   ASSERT_NE(found_func, nullptr);
   EXPECT_EQ(found_func->name(), "test_function");
   EXPECT_EQ(found_func->domain(), "test.domain");
 
   // Test non-existent function
-  const auto* missing_func = model.find_function("missing_function");
+  const auto *missing_func = model.find_function("missing_function");
   EXPECT_EQ(missing_func, nullptr);
 }
 
@@ -467,7 +467,7 @@ TEST_F(ModelClassTest, ModelValidationErrors) { // Create an invalid model
   bool has_no_opset_error = false;
   bool has_no_producer_error = false;
 
-  for (const auto& error : errors) {
+  for (const auto &error : errors) {
     if (error.find("IR version") != std::string::npos) {
       has_ir_version_error = true;
     }
@@ -533,16 +533,16 @@ TEST_F(ModelClassTest, MultipleGraphsWithFunctions) {
   auto model_proto = create_simple_model();
 
   // Add a function with a graph body
-  auto* func = model_proto.add_functions();
+  auto *func = model_proto.add_functions();
   func->set_name("test_function");
   func->set_domain("test.domain");
 
   // Create a graph body for the function
-  auto* func_graph = func->mutable_body();
+  auto *func_graph = func->mutable_body();
   func_graph->set_name("function_graph");
 
   // Add a simple node to the function graph
-  auto* func_node = func_graph->add_node();
+  auto *func_node = func_graph->add_node();
   func_node->set_name("func_node");
   func_node->set_op_type("Add");
   func_node->add_input("func_input1");
@@ -554,7 +554,7 @@ TEST_F(ModelClassTest, MultipleGraphsWithFunctions) {
   // Test that we have 2 graphs total (main + function)
   EXPECT_EQ(model.graph_count(), 2);
 
-  const auto& graphs = model.graphs();
+  const auto &graphs = model.graphs();
   EXPECT_EQ(graphs.size(), 2);
 
   // First graph should be the main graph

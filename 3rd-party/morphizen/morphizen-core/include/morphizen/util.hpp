@@ -14,21 +14,21 @@
 #include <sstream>
 #include <vector>
 #ifdef _WIN32
-#  define fseek64 _fseeki64
-#  define ftell64 _ftelli64
+#define fseek64 _fseeki64
+#define ftell64 _ftelli64
 #else
-#  define fseek64 fseeko
-#  define ftell64 ftello
+#define fseek64 fseeko
+#define ftell64 ftello
 #endif
 
 namespace morphizen {
-MORPHIZEN_DLL_SPEC void dump_graph(const Graph& graph,
-                                   const std::string& filename);
-template <typename T> std::string container_as_string(const T& container) {
+MORPHIZEN_DLL_SPEC void dump_graph(const Graph &graph,
+                                   const std::string &filename);
+template <typename T> std::string container_as_string(const T &container) {
   std::ostringstream str;
   str << "[";
   int c = 0;
-  for (auto& v : container) {
+  for (auto &v : container) {
     if (c != 0) {
       str << ",";
     }
@@ -39,21 +39,21 @@ template <typename T> std::string container_as_string(const T& container) {
   return str.str();
 }
 
-std::string find_file_in_path(const std::string& file, const char* env_name,
+std::string find_file_in_path(const std::string &file, const char *env_name,
                               bool required);
-std::string slurp(const char* filename);
-MORPHIZEN_DLL_SPEC std::string slurp(const std::filesystem::path& path);
-std::string slurp_if_exists(const std::filesystem::path& path);
+std::string slurp(const char *filename);
+MORPHIZEN_DLL_SPEC std::string slurp(const std::filesystem::path &path);
+std::string slurp_if_exists(const std::filesystem::path &path);
 
 MORPHIZEN_DLL_SPEC std::unique_ptr<int> scale_to_fix_point(float scale);
 #ifdef ENABLE_PYTHON
 MORPHIZEN_DLL_SPEC std::shared_ptr<void> init_interpreter();
-MORPHIZEN_DLL_SPEC void eval_python_code(const std::string& code);
+MORPHIZEN_DLL_SPEC void eval_python_code(const std::string &code);
 #endif
 MORPHIZEN_DLL_SPEC std::filesystem::path get_morphizen_path();
 
 #ifdef _WIN32
-#  include <cstdio>
+#include <cstdio>
 /**
  * Creates a temporary file with POSIX delete semantics for crash-resilient
  * cleanup.
@@ -73,7 +73,7 @@ MORPHIZEN_DLL_SPEC std::filesystem::path get_morphizen_path();
  *         The FILE* remains fully functional regardless of whether POSIX delete
  * was applied.
  */
-MORPHIZEN_DLL_SPEC FILE* tmpfile_with_posix_delete();
+MORPHIZEN_DLL_SPEC FILE *tmpfile_with_posix_delete();
 #endif // _WIN32
 
 /// Creates a temporary file using platform-specific tmpfile implementation.
@@ -81,7 +81,7 @@ MORPHIZEN_DLL_SPEC FILE* tmpfile_with_posix_delete();
 /// On other platforms, uses standard std::tmpfile().
 /// @return FILE* pointer to temporary file, or nullptr on failure.
 ///         Callers MUST check for nullptr and handle errors appropriately.
-inline FILE* create_tmpfile() {
+inline FILE *create_tmpfile() {
 #ifdef _WIN32
   return tmpfile_with_posix_delete();
 #else
@@ -108,11 +108,11 @@ MORPHIZEN_DLL_SPEC std::string dos2unix(const gsl::span<const char> input);
  * @return A vector of uint8_t containing the contents of the file.
  */
 MORPHIZEN_DLL_SPEC std::vector<uint8_t>
-slurp_binary_u8(const std::filesystem::path& filename);
+slurp_binary_u8(const std::filesystem::path &filename);
 MORPHIZEN_DLL_SPEC std::vector<int8_t>
-slurp_binary_i8(const std::filesystem::path& filename);
+slurp_binary_i8(const std::filesystem::path &filename);
 MORPHIZEN_DLL_SPEC std::vector<char>
-slurp_binary_c8(const std::filesystem::path& filename);
+slurp_binary_c8(const std::filesystem::path &filename);
 /**
  * Writes the binary data to the specified file.
  *
@@ -121,17 +121,17 @@ slurp_binary_c8(const std::filesystem::path& filename);
  *
  * @return true if the data was successfully dumped, false otherwise.
  */
-MORPHIZEN_DLL_SPEC bool dump_binary(const std::filesystem::path& filename,
+MORPHIZEN_DLL_SPEC bool dump_binary(const std::filesystem::path &filename,
                                     gsl::span<const uint8_t> data);
-MORPHIZEN_DLL_SPEC bool dump_binary(const std::filesystem::path& filename,
+MORPHIZEN_DLL_SPEC bool dump_binary(const std::filesystem::path &filename,
                                     gsl::span<const int8_t> data);
-MORPHIZEN_DLL_SPEC bool dump_binary(const std::filesystem::path& filename,
+MORPHIZEN_DLL_SPEC bool dump_binary(const std::filesystem::path &filename,
                                     gsl::span<const char> data);
 unsigned int get_tid();
 unsigned int get_pid();
 
 // Stream utility functions (for copying and filtering streams)
-inline void stream_copy(std::istream& src, std::ostream& dst,
+inline void stream_copy(std::istream &src, std::ostream &dst,
                         size_t buffer_size = 8192) {
   std::vector<char> buffer(buffer_size);
   while (src.read(buffer.data(), buffer_size) || src.gcount() > 0) {
@@ -151,7 +151,7 @@ private:
 
 template <typename F, typename... Args>
 inline std::unique_ptr<std::istream>
-stream_filter(std::istream& src, const F& filter, Args&&... args) {
+stream_filter(std::istream &src, const F &filter, Args &&...args) {
   auto temp = std::make_unique<TempFileStream>();
   filter(src, temp->get_write_stream(), std::forward<Args>(args)...);
   temp->get_write_stream().flush();
@@ -159,11 +159,11 @@ stream_filter(std::istream& src, const F& filter, Args&&... args) {
 }
 
 MORPHIZEN_DLL_SPEC std::unique_ptr<std::istream>
-context_cache_files_to_tar_stream(class PassContext& context);
+context_cache_files_to_tar_stream(class PassContext &context);
 
 // TODO: defined morphizen_compile_model.cpp
 MORPHIZEN_DLL_SPEC std::string
-get_md5_of_file(const std::filesystem::path& path);
-MORPHIZEN_DLL_SPEC std::string get_md5_of_buffer(const char* buffer,
+get_md5_of_file(const std::filesystem::path &path);
+MORPHIZEN_DLL_SPEC std::string get_md5_of_buffer(const char *buffer,
                                                  size_t size);
 } // namespace morphizen

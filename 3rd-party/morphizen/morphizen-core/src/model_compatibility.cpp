@@ -7,12 +7,12 @@
 #include "morphizen/custom_op_imp.hpp"
 #include "morphizen/env_config.hpp"
 #ifdef _MSC_VER
-#  pragma warning(push)
-#  pragma warning(disable : 4946)
+#pragma warning(push)
+#pragma warning(disable : 4946)
 #endif
 #include "morphizen/model_compatibility.pb.h"
 #ifdef _MSC_VER
-#  pragma warning(pop)
+#pragma warning(pop)
 #endif
 #include "morphizen/onnxruntime_morphizen_ep.hpp"
 #include "morphizen/plugin.hpp"
@@ -41,9 +41,9 @@ thread_local static std::string g_compiled_model_compatibility_info_result;
  *         The returned pointer is valid until the next call to this function or
  * EP destruction.
  */
-extern "C" MORPHIZEN_DLL_SPEC const char* get_compiled_model_compatibility_info(
-    const std::vector<std::unique_ptr<morphizen::ExecutionProvider>>* eps,
-    const void* graph_viewer) {
+extern "C" MORPHIZEN_DLL_SPEC const char *get_compiled_model_compatibility_info(
+    const std::vector<std::unique_ptr<morphizen::ExecutionProvider>> *eps,
+    const void *graph_viewer) {
   (void)graph_viewer; // May be used in future for graph-specific compatibility
                       // info
 
@@ -57,19 +57,19 @@ extern "C" MORPHIZEN_DLL_SPEC const char* get_compiled_model_compatibility_info(
   compatibility_info_proto.set_base64_encoding(false);
 
   if (eps && !eps->empty()) {
-    auto* ep_concrete =
-        dynamic_cast<morphizen::ExecutionProviderConcrete*>(eps->front().get());
+    auto *ep_concrete = dynamic_cast<morphizen::ExecutionProviderConcrete *>(
+        eps->front().get());
     if (ep_concrete) {
       auto pass_context = ep_concrete->get_context();
       if (pass_context) {
-        const auto& compatibility_info_map =
+        const auto &compatibility_info_map =
             pass_context->get_compiled_model_compatibility_info();
         if (compatibility_info_map.empty()) {
           MY_LOG(1) << " [MorphiZen EP][GetCompiledModelCompatibilityInfo] "
                        "Compatibility info map is empty. No backend "
                        "compatibility info is available.";
         }
-        for (const auto& entry : compatibility_info_map) {
+        for (const auto &entry : compatibility_info_map) {
           (*compatibility_info_proto
                 .mutable_backend_compatibility())[entry.first] = entry.second;
         }
@@ -243,9 +243,9 @@ extern "C" MORPHIZEN_DLL_SPEC const char* get_compiled_model_compatibility_info(
 // ═══════════════════════════════════════════════════════════════════════════════════════════
 // clang-format on
 extern "C" MORPHIZEN_DLL_SPEC int validate_compiled_model_compatibility_info(
-    const std::vector<std::unique_ptr<morphizen::ExecutionProvider>>* eps,
-    const char* compatibility_info, const void* const* devices,
-    size_t num_devices, int* model_compatibility) {
+    const std::vector<std::unique_ptr<morphizen::ExecutionProvider>> *eps,
+    const char *compatibility_info, const void *const *devices,
+    size_t num_devices, int *model_compatibility) {
   (void)eps; // May be used in future for EP-specific validation
 
   MY_LOG(1) << " [MorphiZen EP][ValidateCompiledModelCompatibilityInfo] "
@@ -297,7 +297,7 @@ extern "C" MORPHIZEN_DLL_SPEC int validate_compiled_model_compatibility_info(
   // clang-format on
   std::vector<int> compatibility_results;
   bool any_plugin_missing = false;
-  for (const auto& entry : compatibility_proto.backend_compatibility()) {
+  for (const auto &entry : compatibility_proto.backend_compatibility()) {
     MY_LOG(1) << " [MorphiZen EP][ValidateCompiledModelCompatibilityInfo] "
                  "Validating backend: "
               << entry.first << " with compatibility info: " << entry.second;
@@ -322,8 +322,9 @@ extern "C" MORPHIZEN_DLL_SPEC int validate_compiled_model_compatibility_info(
       continue;
     }
 
-    auto fp = plugin->get_method<int, const void* const*, size_t, const char*>(
-        "morphizen_OrtCompiledModelCompatibility");
+    auto fp =
+        plugin->get_method<int, const void *const *, size_t, const char *>(
+            "morphizen_OrtCompiledModelCompatibility");
 
     // if the fp is not found , it means that the backend has not properly
     // registered or implemented morphizen_OrtCompiledModelCompatibility.
@@ -349,7 +350,7 @@ extern "C" MORPHIZEN_DLL_SPEC int validate_compiled_model_compatibility_info(
                 << entry.first
                 << " compatibility check result: " << backend_compatibility;
       compatibility_results.push_back(backend_compatibility);
-    } catch (const std::exception& e) {
+    } catch (const std::exception &e) {
       LOG(ERROR) << "Exception in backend plugin " << entry.first
                  << " compatibility check: " << e.what()
                  << ". Using EP_NOT_APPLICABLE.";

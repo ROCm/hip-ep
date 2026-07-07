@@ -82,22 +82,22 @@ using onnxruntime::Node;
 using onnxruntime::NodeArg;
 using onnxruntime::NodeAttributes;
 struct ModelDeleter {
-  MORPHIZEN_DLL_SPEC void operator()(Model* tp) const;
+  MORPHIZEN_DLL_SPEC void operator()(Model *tp) const;
 };
 using ModelPtr = std::unique_ptr<Model, ModelDeleter>;
 struct AttributeProtoDeleter {
-  MORPHIZEN_DLL_SPEC void operator()(AttributeProto* p) const;
+  MORPHIZEN_DLL_SPEC void operator()(AttributeProto *p) const;
 };
 using AttributeProtoPtr =
     std::unique_ptr<AttributeProto, AttributeProtoDeleter>;
 
 struct TensorProtoDeleter {
-  MORPHIZEN_DLL_SPEC void operator()(TensorProto* tp) const;
+  MORPHIZEN_DLL_SPEC void operator()(TensorProto *tp) const;
 };
 using TensorProtoPtr = std::unique_ptr<TensorProto, TensorProtoDeleter>;
 
 struct NodeAttributesDeleter {
-  MORPHIZEN_DLL_SPEC void operator()(NodeAttributes* p) const;
+  MORPHIZEN_DLL_SPEC void operator()(NodeAttributes *p) const;
 };
 using NodeAttributesPtr =
     std::unique_ptr<NodeAttributes, NodeAttributesDeleter>;
@@ -117,14 +117,14 @@ struct NodeInput {
   ///
   /// 4. node != nullptr, node_arg == nullptr, never happen. invalid state.
 
-  const Node* node;
-  const NodeArg* node_arg;
+  const Node *node;
+  const NodeArg *node_arg;
   bool is_matched() const { return node_arg != nullptr; }
 };
 
 using InitializedTensorSet =
-    std::unordered_map<std::string, const TensorProto*>;
+    std::unordered_map<std::string, const TensorProto *>;
 
 using ModelMetaData = std::unordered_map<std::string, std::string>;
-using error_report_func = void (*)(void*, int, const char*);
+using error_report_func = void (*)(void *, int, const char *);
 } // namespace morphizen

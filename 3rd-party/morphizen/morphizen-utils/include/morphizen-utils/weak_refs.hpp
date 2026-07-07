@@ -29,7 +29,7 @@ template <typename T> struct WeakSingleton {
    * @param args Arguments to pass to T's constructor
    * @return Shared pointer to the singleton instance
    */
-  template <typename... Args> static std::shared_ptr<T> create(Args&&... args) {
+  template <typename... Args> static std::shared_ptr<T> create(Args &&...args) {
     std::shared_ptr<T> ret;
     if (the_instance_.expired()) {
       ret = std::make_shared<T>(std::forward<Args>(args)...);
@@ -84,7 +84,7 @@ using is_not_derived_from_with_injection =
  * - Otherwise, do nothing
  */
 template <typename T, class = void> struct invoke_initialize_if_possible {
-  static void initialize(T* /*t*/) {
+  static void initialize(T * /*t*/) {
     // Default: do nothing
   }
 };
@@ -92,7 +92,7 @@ template <typename T, class = void> struct invoke_initialize_if_possible {
 // Specialization for types derived from WithInjection
 template <typename T>
 struct invoke_initialize_if_possible<T, is_derived_from_with_injection<T>> {
-  static void initialize(T* /*t*/) {
+  static void initialize(T * /*t*/) {
     // WithInjection<T>::create(...) invokes initialize() already,
     // don't invoke it twice
   }
@@ -103,7 +103,7 @@ template <typename T>
 struct invoke_initialize_if_possible<
     T, std::enable_if_t<has_initialize_method<T>::value &&
                         !std::is_base_of_v<WithInjection<T>, T>>> {
-  static void initialize(T* t) { t->initialize(); }
+  static void initialize(T *t) { t->initialize(); }
 };
 
 /**
@@ -126,9 +126,9 @@ template <typename K, typename T> struct WeakStore {
    * @return Shared pointer to the object
    */
   template <typename... Args>
-  static std::shared_ptr<T> create(const K& key, Args&&... args) {
+  static std::shared_ptr<T> create(const K &key, Args &&...args) {
     std::shared_ptr<T> ret;
-    auto& weak_ref = the_store_[key];
+    auto &weak_ref = the_store_[key];
 
     if (weak_ref.expired()) {
       ret = create_impl(std::forward<Args>(args)...);
@@ -147,7 +147,7 @@ template <typename K, typename T> struct WeakStore {
    * @param key Key to look up
    * @return Shared pointer to object if it exists, nullptr otherwise
    */
-  static std::shared_ptr<T> get(const K& key) {
+  static std::shared_ptr<T> get(const K &key) {
     auto it = the_store_.find(key);
     if (it != the_store_.end() && !it->second.expired()) {
       return it->second.lock();
@@ -181,7 +181,7 @@ private:
   template <typename... Args>
   static std::enable_if_t<!std::is_constructible_v<T, Args...>,
                           std::shared_ptr<T>>
-  create_impl(Args&&... args) {
+  create_impl(Args &&...args) {
     return T::create(std::forward<Args>(args)...);
   }
 
@@ -189,7 +189,7 @@ private:
   template <typename... Args>
   static std::enable_if_t<std::is_constructible_v<T, Args...>,
                           std::shared_ptr<T>>
-  create_impl(Args&&... args) {
+  create_impl(Args &&...args) {
     return std::make_shared<T>(std::forward<Args>(args)...);
   }
 };

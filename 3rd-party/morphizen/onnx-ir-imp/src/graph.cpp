@@ -25,15 +25,15 @@ namespace morphizen {
 // this function create a main graph for a model proto, to represent in memory
 // the main graph of the model.
 std::unique_ptr<Graph>
-Graph::create_main_graph(morphizen_onnx::ModelProto& model_proto,
-                         const Model* parent_model) {
+Graph::create_main_graph(morphizen_onnx::ModelProto &model_proto,
+                         const Model *parent_model) {
   return create_graph(*model_proto.mutable_graph(), parent_model, 0, nullptr);
 }
 // this is the private constructor for creating a graph from a GraphProto.
 std::unique_ptr<Graph>
-Graph::create_graph(morphizen_onnx::GraphProto& graph_proto,
-                    const Model* parent_model, uint32_t proposed_graph_index,
-                    const Graph* parent_graph) {
+Graph::create_graph(morphizen_onnx::GraphProto &graph_proto,
+                    const Model *parent_model, uint32_t proposed_graph_index,
+                    const Graph *parent_graph) {
   if (parent_graph == nullptr) {
     // ignore shape inference for subgraphs, because many shape inference
     // functions for com.xilinx op are ready yet.
@@ -44,9 +44,9 @@ Graph::create_graph(morphizen_onnx::GraphProto& graph_proto,
                                  proposed_graph_index, parent_graph);
 }
 
-Graph::Graph(PrivateTag, morphizen_onnx::GraphProto& graph_proto,
-             const Model* parent_model, uint32_t proposed_graph_id,
-             const Graph* parent_graph)
+Graph::Graph(PrivateTag, morphizen_onnx::GraphProto &graph_proto,
+             const Model *parent_model, uint32_t proposed_graph_id,
+             const Graph *parent_graph)
     : graph_proto_(graph_proto), parent_model_(parent_model),
       parent_graph_(parent_graph),
       graph_index_(proposed_graph_id > 0
@@ -59,27 +59,27 @@ Graph::Graph(PrivateTag, morphizen_onnx::GraphProto& graph_proto,
 Graph::~Graph() { GraphStore::release_graph_id(this, graph_index_); }
 // === Graph API Method Implementations ===
 
-const std::string& Graph::get_name() const { return graph_proto_.name(); }
+const std::string &Graph::get_name() const { return graph_proto_.name(); }
 
-const Model& Graph::get_model() const {
+const Model &Graph::get_model() const {
   if (!parent_model_) {
     throw std::runtime_error("Graph has no parent model");
   }
   return *parent_model_;
 }
-const std::filesystem::path& Graph::get_model_path() const {
+const std::filesystem::path &Graph::get_model_path() const {
   return get_model().get_model_path();
 }
 GraphId Graph::get_graph_id() const {
   return GraphId::create_main_graph(graph_index_);
 }
 
-const morphizen_onnx::GraphProto& Graph::get_graph_proto() const {
+const morphizen_onnx::GraphProto &Graph::get_graph_proto() const {
   return graph_proto_;
 }
-morphizen_onnx::GraphProto& Graph::get_graph_proto() { return graph_proto_; }
+morphizen_onnx::GraphProto &Graph::get_graph_proto() { return graph_proto_; }
 // staging graph is mutable.
-StagingGraph* Graph::get_staging_graph() const { return staging_graph_.get(); }
+StagingGraph *Graph::get_staging_graph() const { return staging_graph_.get(); }
 
 std::vector<NodeIndex> Graph::nodes_unsafe() const {
   std::vector<NodeIndex> result;
@@ -95,12 +95,12 @@ std::vector<NodeArgIndex> Graph::get_inputs_unsafe() const {
   std::vector<NodeArgIndex> result;
 
   // Get the input count from the graph proto
-  const auto& inputs = graph_proto_.input();
+  const auto &inputs = graph_proto_.input();
   result.reserve(inputs.size());
 
   // Convert each input to a NodeArgIndex
   for (int i = 0; i < inputs.size(); ++i) {
-    const auto& input_name = inputs[i].name();
+    const auto &input_name = inputs[i].name();
     auto node_arg = get_node_arg(input_name);
     CHECK(node_arg.is_valid()) << "Input node_arg not found: " << input_name
                                << ", graph ID: " << get_graph_id().to_string();
@@ -116,14 +116,14 @@ std::vector<NodeArgIndex> Graph::get_outputs_unsafe() const {
   std::vector<NodeArgIndex> result;
 
   // Get the output count from the graph proto
-  const auto& outputs = staging_graph_ ? staging_graph_->graph_proto_.output()
+  const auto &outputs = staging_graph_ ? staging_graph_->graph_proto_.output()
                                        : graph_proto_.output();
   result.reserve(outputs.size());
 
   // Graph outputs are typically node outputs, so we use NODE_OUTPUT type
   // The index should map to the value_info or be resolved through the
   for (int i = 0; i < outputs.size(); ++i) {
-    const auto& output_name = outputs[i].name();
+    const auto &output_name = outputs[i].name();
     auto node_arg = get_node_arg(output_name);
     CHECK(node_arg.is_valid()) << "Output node_arg not found: " << output_name
                                << ", graph ID: " << get_graph_id().to_string();
@@ -140,11 +140,11 @@ std::vector<NodeArgIndex> Graph::get_outputs_unsafe() const {
   return result;
 }
 
-const NodeIndex Graph::producer_node(const std::string& node_arg_name) const {
+const NodeIndex Graph::producer_node(const std::string &node_arg_name) const {
   return get_node_arg(node_arg_name).get_producer_node();
 }
 
-const NodeArgIndex Graph::get_node_arg(const std::string& name) const {
+const NodeArgIndex Graph::get_node_arg(const std::string &name) const {
   // Check if the name exists in the node_args_map_
   if (staging_graph_) {
     auto it = staging_graph_->node_args_map_.find(name);
@@ -167,7 +167,7 @@ const NodeArgIndex Graph::get_node_arg(const std::string& name) const {
 
 // std::unordered_map<std::string, const TensorProto*> ==  const
 // morphizen::InitializedTensorSet&
-const std::unordered_map<std::string, const morphizen_onnx::TensorProto*>&
+const std::unordered_map<std::string, const morphizen_onnx::TensorProto *> &
 Graph::get_all_initialized_tensors() const {
   // Ensure the initializers map is populated
   return initializers_map_;
@@ -181,12 +181,12 @@ void Graph::remove_node(NodeIndex node_index) const {
 }
 
 NodeIndex Graph::add_node(
-    const std::string& name, const std::string& op_type,
-    const std::string& description, const std::vector<NodeArgIndex>& input_args,
-    const std::vector<NodeArgIndex>& output_args,
-    ::google::protobuf::RepeatedPtrField<morphizen_onnx::AttributeProto>*
-        attributes,
-    const std::string& domain) const {
+    const std::string &name, const std::string &op_type,
+    const std::string &description, const std::vector<NodeArgIndex> &input_args,
+    const std::vector<NodeArgIndex> &output_args,
+    ::google::protobuf::RepeatedPtrField<morphizen_onnx::AttributeProto>
+        *attributes,
+    const std::string &domain) const {
   // 1. Input validation
   validate_add_node_parameters(name, op_type, input_args, output_args);
 
@@ -197,7 +197,7 @@ NodeIndex Graph::add_node(
                                   output_args, attributes, domain);
 }
 
-void Graph::save(const std::string& filename, const std::string& dat_filename,
+void Graph::save(const std::string &filename, const std::string &dat_filename,
                  size_t external_data_threshold) const {
   // Create a temporary model proto containing this graph for saving
   morphizen_onnx::ModelProto temp_model;
@@ -208,7 +208,7 @@ void Graph::save(const std::string& filename, const std::string& dat_filename,
   temp_model.set_model_version(parent_model_->model_version());
 
   // Copy opset imports
-  for (const auto& opset_import : parent_model_->model_proto().opset_import()) {
+  for (const auto &opset_import : parent_model_->model_proto().opset_import()) {
     *temp_model.add_opset_import() = opset_import;
   }
 
@@ -241,7 +241,7 @@ std::string Graph::save_string() const {
   temp_model.set_domain(parent_model_->domain());
   temp_model.set_model_version(parent_model_->model_version());
   // Copy opset imports
-  for (const auto& opset_import : parent_model_->model_proto().opset_import()) {
+  for (const auto &opset_import : parent_model_->model_proto().opset_import()) {
     *temp_model.add_opset_import() = opset_import;
   }
   // Copy the graph
@@ -256,11 +256,11 @@ std::string Graph::save_string() const {
 }
 
 NodeIndex
-Graph::fuse(const std::string& name, const std::string& op_type,
-            const std::vector<size_t>& nodes,
-            const std::vector<std::string>& inputs,
-            const std::vector<std::string>& outputs,
-            const std::vector<std::string>& /*constant_initializers*/) {
+Graph::fuse(const std::string &name, const std::string &op_type,
+            const std::vector<size_t> &nodes,
+            const std::vector<std::string> &inputs,
+            const std::vector<std::string> &outputs,
+            const std::vector<std::string> & /*constant_initializers*/) {
   if (staging_graph_ != nullptr) {
     LOG(FATAL) << "Fusing nodes in staging graph, entering inconsistent state";
     // resolve(true); // Force resolve to ensure staging graph is consistent
@@ -284,26 +284,26 @@ Graph::fuse(const std::string& name, const std::string& op_type,
             << " outputs: " << outputs.size()
             << " into a new node with name: " << name
             << " and op_type: " << op_type;
-  for (const auto& input : inputs) {
+  for (const auto &input : inputs) {
     MY_LOG(1) << "Input " << input;
   }
-  for (const auto& output : outputs) {
+  for (const auto &output : outputs) {
     MY_LOG(1) << "Output " << output;
   }
   // exclude graph inputs
   auto input_set =
       std::unordered_set<std::string>(inputs.begin(), inputs.end());
-  morphizen_onnx::NodeProto* inserted_fused_node_proto = nullptr;
+  morphizen_onnx::NodeProto *inserted_fused_node_proto = nullptr;
   int fused_node_index = -1;
   auto find_insert_position =
       [&input_set, &inserted_fused_node_proto, &fused_node_index, &left_nodes](
-          const ::google::protobuf::RepeatedPtrField<std::string>& names)
+          const ::google::protobuf::RepeatedPtrField<std::string> &names)
       -> bool {
     if (inserted_fused_node_proto != nullptr) {
       // already inserted, no need to find position
       return true;
     }
-    for (auto& out : names) {
+    for (auto &out : names) {
       if (input_set.count(out) > 0) {
         input_set.erase(out);
         if (input_set.empty()) {
@@ -316,10 +316,10 @@ Graph::fuse(const std::string& name, const std::string& op_type,
   };
   auto convert_value_infos_to_strings =
       [](const ::google::protobuf::RepeatedPtrField<
-          morphizen_onnx::ValueInfoProto>& value_infos)
+          morphizen_onnx::ValueInfoProto> &value_infos)
       -> ::google::protobuf::RepeatedPtrField<std::string> {
     ::google::protobuf::RepeatedPtrField<std::string> result;
-    for (const auto& value_info : value_infos) {
+    for (const auto &value_info : value_infos) {
       *result.Add() = (value_info.name());
     }
     return result;
@@ -352,23 +352,23 @@ Graph::fuse(const std::string& name, const std::string& op_type,
   CHECK(inserted_fused_node_proto != nullptr)
       << "inserted_fused_node_proto must be set to a valid position in "
          "left_nodes";
-  auto& fused_node = *inserted_fused_node_proto;
+  auto &fused_node = *inserted_fused_node_proto;
   fused_node.mutable_input()->Assign(inputs.begin(), inputs.end());
   fused_node.mutable_output()->Assign(outputs.begin(), outputs.end());
   fused_graph.set_name(name);
-  for (auto& input : inputs) {
-    auto* input_arg = fused_graph.add_input();
+  for (auto &input : inputs) {
+    auto *input_arg = fused_graph.add_input();
     input_arg->CopyFrom(get_node_arg(input).get_value_info());
   }
-  for (auto& output : outputs) {
-    auto* output_arg = fused_graph.add_output();
+  for (auto &output : outputs) {
+    auto *output_arg = fused_graph.add_output();
     output_arg->CopyFrom(get_node_arg(output).get_value_info());
   }
   for (auto node_index : nodes) {
     auto ni = NodeIndex::from_morphizen_core_node_index(node_index);
     auto output_node_args = ni.get_output_node_args();
     for (auto node_arg : output_node_args) {
-      auto& value_info = node_arg.get_value_info();
+      auto &value_info = node_arg.get_value_info();
       auto is_output = std::find(outputs.begin(), outputs.end(),
                                  value_info.name()) != outputs.end();
       if (is_output) {
@@ -387,17 +387,17 @@ Graph::fuse(const std::string& name, const std::string& op_type,
   CHECK(!moved_nodes.empty());
   fused_graph.mutable_node()->Swap(&moved_nodes);
   attr->mutable_g()->Swap(&fused_graph);
-  auto fused_graph_id = const_cast<Model*>(parent_model_)
+  auto fused_graph_id = const_cast<Model *>(parent_model_)
                             ->create_subgraph(*this, *attr->mutable_g());
   // set attribute["fused_node_index"] to the index of the fused node
   // IMPORTANT: Must be done BEFORE swapping fused_node into the graph
-  auto* attr_fused_node_index = fused_node.add_attribute();
+  auto *attr_fused_node_index = fused_node.add_attribute();
   attr_fused_node_index->set_name("fused_node_index");
   attr_fused_node_index->set_type(morphizen_onnx::AttributeProto::INT);
   attr_fused_node_index->set_i(static_cast<int64_t>(fused_node_index));
   // IMPORTANT: Must be done BEFORE swapping fused_node into the graph
 
-  auto* attr_fused_graph_id = fused_node.add_attribute();
+  auto *attr_fused_graph_id = fused_node.add_attribute();
   attr_fused_graph_id->set_name("fused_graph_id");
   attr_fused_graph_id->set_type(morphizen_onnx::AttributeProto::INT);
   attr_fused_graph_id->set_i(static_cast<int64_t>(fused_graph_id.get_raw()));
@@ -443,7 +443,7 @@ int Graph::resolve(bool force) {
 
   auto resolved_proto =
       resolver.resolve(*this, new_graph_id,
-                       const_cast<Model*>(parent_model_)->get_opset_imports());
+                       const_cast<Model *>(parent_model_)->get_opset_imports());
   // we must reset graph_index after resolve, otherwise, we cannot get constant
   // initializers.
   graph_index_ = new_graph_index;
@@ -472,7 +472,7 @@ bool Graph::need_resolve() const {
 }
 
 std::vector<NodeIndex>
-Graph::get_consumer_nodes(const std::string& node_arg_name) const {
+Graph::get_consumer_nodes(const std::string &node_arg_name) const {
   auto node_arg_index = get_node_arg(node_arg_name);
   // find the node node index
   if (!node_arg_index.is_valid()) {
@@ -500,7 +500,7 @@ Graph::get_consumer_nodes(const std::string& node_arg_name) const {
 }
 
 void Graph::add_initialized_tensor(
-    const morphizen_onnx::TensorProto& tensor) const {
+    const morphizen_onnx::TensorProto &tensor) const {
   // Add the tensor to the staging graph
   auto name = tensor.name();
   if (name.empty()) {
@@ -522,7 +522,7 @@ void Graph::set_outputs(gsl::span<const NodeArgIndex> outputs) const {
   ensure_enter_into_inconsistent_state();
   return staging_graph_->set_outputs(outputs);
 }
-void Graph::remove_initialized_tensor(const std::string& tensor_name) const {
+void Graph::remove_initialized_tensor(const std::string &tensor_name) const {
   // it is only used by
   // morphizen_vaiml_common/graph_update_initializer.cpp:56:
   // actually `MORPHIZEN_ORT_API(graph_remove_node)(graph, {nullptr,
@@ -531,7 +531,7 @@ void Graph::remove_initialized_tensor(const std::string& tensor_name) const {
   // in morphizen pass, create-const-op, we need to remove original initializer
   // otherwise ORT graph resolver will fail because of duplicated node arg
   // names.
-  auto get_node_arg_local = [this](const std::string& name) -> NodeArgIndex {
+  auto get_node_arg_local = [this](const std::string &name) -> NodeArgIndex {
     auto it = node_args_map_.find(name);
     if (it != node_args_map_.end()) {
       return it->second; // Return the NodeArgIndex if found
@@ -569,22 +569,22 @@ void Graph::remove_initialized_tensor(const std::string& tensor_name) const {
 
 void Graph::reverse_dfs_from_preemp(
     gsl::span<const NodeIndex> from,
-    const std::function<bool(const NodeIndex&)>& enter,
-    const std::function<bool(const NodeIndex&)>& leave,
-    const std::function<bool(const NodeIndex&, const NodeIndex&)>& comp,
-    const std::function<bool(const NodeIndex&, const NodeIndex&)>& stop,
+    const std::function<bool(const NodeIndex &)> &enter,
+    const std::function<bool(const NodeIndex &)> &leave,
+    const std::function<bool(const NodeIndex &, const NodeIndex &)> &comp,
+    const std::function<bool(const NodeIndex &, const NodeIndex &)> &stop,
     bool include_staging_graph) const {
 
   // Call common implementation with sorting and return value handling
   reverse_dfs_from_impl(from, enter, leave, comp, stop, include_staging_graph);
 }
 
-void Graph::set_graph_name(const char* name) const {
+void Graph::set_graph_name(const char *name) const {
   graph_proto_.set_name(name);
 }
 
-void* Graph::node_arg_clone(const NodeArg& node_arg,
-                            const std::string& name) const {
+void *Graph::node_arg_clone(const NodeArg &node_arg,
+                            const std::string &name) const {
   // it is only used by this pass
   // to be removed.
   // clang-format off
@@ -600,8 +600,8 @@ morphizen_pass_graph_output_add_node/src/graph_output_add_node.cpp:71:          
   return nullptr; // Placeholder return value, should not reach here
 }
 
-NodeArgIndex Graph::node_arg_new(const std::string& name,
-                                 const std::vector<int64_t>* shape,
+NodeArgIndex Graph::node_arg_new(const std::string &name,
+                                 const std::vector<int64_t> *shape,
                                  int element_type) const {
 
   if (name.empty()) {
@@ -643,13 +643,13 @@ void Graph::initialize_map() {
     // Initialize value_info_map_ to map node_arg names to value_info indices
     // This is used to track the value_info for each node_arg
     unsigned int value_info_counter = 0;
-    for (auto& value_info : graph_proto_.value_info()) {
+    for (auto &value_info : graph_proto_.value_info()) {
       node_arg_name_to_value_info_index[value_info.name()] =
           value_info_counter++;
     }
   }
   auto find_value_info_index =
-      [&node_arg_name_to_value_info_index](const std::string& name) -> int {
+      [&node_arg_name_to_value_info_index](const std::string &name) -> int {
     auto it = node_arg_name_to_value_info_index.find(name);
     if (it == node_arg_name_to_value_info_index.end()) {
       MY_LOG(1)
@@ -662,9 +662,9 @@ void Graph::initialize_map() {
   };
   for (unsigned int node_index_0 = 0;
        node_index_0 < (unsigned int)graph_proto_.node_size(); ++node_index_0) {
-    auto& node = graph_proto_.node(node_index_0);
+    auto &node = graph_proto_.node(node_index_0);
     NodeIndex node_idx(node_index_0, get_graph_id());
-    for (auto& output : node.output()) {
+    for (auto &output : node.output()) {
       auto output_index = get_graph_output_index(output);
       NodeArgIndex node_arg_index = NodeArgIndex::invalid();
       if (output_index >= 0) {
@@ -692,7 +692,7 @@ void Graph::initialize_map() {
   for (unsigned int const_index_0 = 0u;
        const_index_0 < (unsigned int)graph_proto_.initializer_size();
        ++const_index_0) {
-    auto& initializer = graph_proto_.initializer(const_index_0);
+    auto &initializer = graph_proto_.initializer(const_index_0);
     NodeArgIndex index =
         NodeArgIndex::initializer(const_index_0, get_graph_id());
     node_args_map_[initializer.name()] = index;
@@ -711,14 +711,14 @@ void Graph::initialize_nodes() {
   nodes_.reserve((size_t)size);
   for (unsigned int i = 0; i < (unsigned int)size; ++i) {
     NodeIndex self(i, get_graph_id());
-    auto& node_proto = graph_proto_.node(i);
+    auto &node_proto = graph_proto_.node(i);
     auto input_args = std::vector<NodeArgIndex>();
     auto output_args = std::vector<NodeArgIndex>();
-    for (auto& node_input : node_proto.input()) {
+    for (auto &node_input : node_proto.input()) {
       auto node_arg = get_node_arg(node_input);
       input_args.push_back(node_arg);
     }
-    for (auto& node_output : node_proto.output()) {
+    for (auto &node_output : node_proto.output()) {
       auto node_arg = get_node_arg(node_output);
       output_args.push_back(node_arg);
     }
@@ -732,18 +732,18 @@ void Graph::initialize_consumer_map() {
   consumer_map_.clear();
 
   // Initialize empty vectors for all known node arguments
-  for (const auto& [name, node_arg_index] : node_args_map_) {
+  for (const auto &[name, node_arg_index] : node_args_map_) {
     consumer_map_[node_arg_index] = std::vector<NodeIndex>();
   }
 
   // Iterate through all nodes and populate consumer relationships
   for (unsigned int node_index_0 = 0;
        node_index_0 < (unsigned int)graph_proto_.node_size(); ++node_index_0) {
-    auto& node = graph_proto_.node(node_index_0);
+    auto &node = graph_proto_.node(node_index_0);
     NodeIndex node_idx(node_index_0, get_graph_id());
 
     // For each input of this node, mark this node as a consumer
-    for (const auto& input_name : node.input()) {
+    for (const auto &input_name : node.input()) {
       auto node_arg_index = get_node_arg(input_name);
 
       if (node_arg_index.is_valid()) {
@@ -765,10 +765,10 @@ void Graph::initialize_consumer_map() {
 
 void Graph::reverse_dfs_from_impl(
     gsl::span<const NodeIndex> from,
-    const std::function<bool(const NodeIndex&)>& enter,
-    const std::function<bool(const NodeIndex&)>& leave,
-    const std::function<bool(const NodeIndex&, const NodeIndex&)>& comp,
-    const std::function<bool(const NodeIndex&, const NodeIndex&)>& stop,
+    const std::function<bool(const NodeIndex &)> &enter,
+    const std::function<bool(const NodeIndex &)> &leave,
+    const std::function<bool(const NodeIndex &, const NodeIndex &)> &comp,
+    const std::function<bool(const NodeIndex &, const NodeIndex &)> &stop,
     bool include_staging_graph) const {
   constexpr bool use_return_values = true;
   using WorkEntry = std::pair<NodeIndex, bool>; // bool represents leave or not
@@ -776,7 +776,7 @@ void Graph::reverse_dfs_from_impl(
   stack.reserve(from.size());
 
   // Initialize stack with starting nodes
-  for (const auto& node_idx : from) {
+  for (const auto &node_idx : from) {
     stack.emplace_back(node_idx, false);
   }
 
@@ -787,7 +787,7 @@ void Graph::reverse_dfs_from_impl(
     const WorkEntry last_entry = stack.back();
     stack.pop_back();
 
-    const NodeIndex& node_idx = last_entry.first;
+    const NodeIndex &node_idx = last_entry.first;
 
     // Skip invalid nodes
     if (!node_idx.is_valid()) {
@@ -831,12 +831,12 @@ void Graph::reverse_dfs_from_impl(
 
     // Get the node and traverse its inputs
     if (node_idx.is_valid()) {
-      const auto& input_args = node_idx.get_input_node_args();
+      const auto &input_args = node_idx.get_input_node_args();
 
       // Collect producer nodes
       std::vector<NodeIndex> producer_nodes;
 
-      for (const auto& input_arg_idx : input_args) {
+      for (const auto &input_arg_idx : input_args) {
         if (!input_arg_idx.is_valid()) {
           // when input_arg_idex.is_valid() is false, it means an optional
           // argument.
@@ -897,11 +897,11 @@ void Graph::initialize_initializers() {
   initializers_map_.clear();
 
   // Get all initialized tensors from the graph proto
-  const auto& initializers = graph_proto_.initializer();
+  const auto &initializers = graph_proto_.initializer();
 
   // Populate the map with tensor name -> tensor proto pointer
   for (int i = 0; i < initializers.size(); ++i) {
-    const auto& tensor = initializers[i];
+    const auto &tensor = initializers[i];
     initializers_map_[tensor.name()] = &tensor;
   }
 }
@@ -918,10 +918,10 @@ void Graph::ensure_enter_into_inconsistent_state() const {
   staging_graph_ = StagingGraph::create_from_graph(*this);
 }
 
-int Graph::get_graph_output_index(const std::string& name) const {
-  auto& output = graph_proto_.output();
+int Graph::get_graph_output_index(const std::string &name) const {
+  auto &output = graph_proto_.output();
   auto it = std::find_if(output.begin(), output.end(),
-                         [&name](const morphizen_onnx::ValueInfoProto& output) {
+                         [&name](const morphizen_onnx::ValueInfoProto &output) {
                            return output.name() == name;
                          });
   if (it == output.end()) {
@@ -933,13 +933,13 @@ int Graph::get_graph_output_index(const std::string& name) const {
 // Helper method implementations for add_node refactoring
 
 void Graph::validate_add_node_parameters(
-    const std::string& name, const std::string& op_type,
-    const std::vector<NodeArgIndex>& input_args,
-    const std::vector<NodeArgIndex>& output_args) const {
+    const std::string &name, const std::string &op_type,
+    const std::vector<NodeArgIndex> &input_args,
+    const std::vector<NodeArgIndex> &output_args) const {
   (void)name;
   (void)op_type;
 
-  auto is_valid_node_arg_index = [this](const NodeArgIndex& arg) -> bool {
+  auto is_valid_node_arg_index = [this](const NodeArgIndex &arg) -> bool {
     auto id = arg.get_graph_id();
     auto ret = true;
     ret = ret && arg.is_valid();
@@ -950,7 +950,7 @@ void Graph::validate_add_node_parameters(
     return ret;
   };
 
-  for (const auto& input_arg : input_args) {
+  for (const auto &input_arg : input_args) {
     if (!input_arg.is_valid()) {
       continue; // invalid input arg means optional input.
     }
@@ -959,7 +959,7 @@ void Graph::validate_add_node_parameters(
                                input_arg.to_string());
     }
   }
-  for (const auto& output_arg : output_args) {
+  for (const auto &output_arg : output_args) {
     if (!output_arg.is_valid()) {
       continue; // invalid output arg means optional output.
     }

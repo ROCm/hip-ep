@@ -10,10 +10,10 @@
 #include <stdexcept>
 
 #ifdef _WIN32
-#  include <fcntl.h>
-#  include <io.h>
-#  include <share.h>
-#  include <sys/stat.h>
+#include <fcntl.h>
+#include <io.h>
+#include <share.h>
+#include <sys/stat.h>
 #endif
 
 #include "config.hpp"
@@ -38,7 +38,7 @@ DEF_ENV_PARAM(XLNX_ONNX_EP_VERBOSE, "0")
 namespace morphizen {
 
 /// struct WithPass
-PassContextImp::WithPass::WithPass(PassContextImp& context, IPass& pass)
+PassContextImp::WithPass::WithPass(PassContextImp &context, IPass &pass)
     : _context(&context) {
   _context->current_pass_stack.push_back(&pass);
 }
@@ -47,7 +47,7 @@ PassContextImp::WithPass::~WithPass() {
 }
 
 /// static
-static MemUsageProto convert_to_chrome_event(const MemUsageProto& mem_usage) {
+static MemUsageProto convert_to_chrome_event(const MemUsageProto &mem_usage) {
   auto ret = MemUsageProto();
   {
     std::stringstream stream;
@@ -61,15 +61,15 @@ static MemUsageProto convert_to_chrome_event(const MemUsageProto& mem_usage) {
   }
   return ret;
 }
-static FILE* write_to_tmp_file(gsl::span<const char> data) {
-  FILE* tmp_file = create_tmpfile();
+static FILE *write_to_tmp_file(gsl::span<const char> data) {
+  FILE *tmp_file = create_tmpfile();
   CHECK(tmp_file != nullptr) << "tmpfile creation error";
   auto write_size = std::fwrite(data.data(), 1, data.size(), tmp_file);
   CHECK_EQ((size_t)write_size, data.size());
   return tmp_file;
 }
 
-static std::string msg_to_json_string(const google::protobuf::Message& msg) {
+static std::string msg_to_json_string(const google::protobuf::Message &msg) {
   google::protobuf::util::JsonPrintOptions options;
   options.add_whitespace = true;
   auto json_str = std::string();
@@ -79,7 +79,7 @@ static std::string msg_to_json_string(const google::protobuf::Message& msg) {
   return json_str;
 }
 std::unique_ptr<PassContextImp>
-PassContextImp::create_pass_context(const ConfigProto& config_proto1) {
+PassContextImp::create_pass_context(const ConfigProto &config_proto1) {
   auto ret = std::make_unique<PassContextImp>(PrivateTag{},
                                               ConfigProto(config_proto1));
   Config::add_version_info(ret->context_proto);
@@ -87,10 +87,10 @@ PassContextImp::create_pass_context(const ConfigProto& config_proto1) {
   return ret;
 }
 std::unique_ptr<PassContextImp> PassContextImp::create_pass_context(
-    const onnxruntime::ProviderOptions& options,
-    const std::map<std::string, std::string>& session_configs) {
+    const onnxruntime::ProviderOptions &options,
+    const std::map<std::string, std::string> &session_configs) {
   auto json_config_string = get_config_json_str(options);
-  const char* json_config = json_config_string.c_str();
+  const char *json_config = json_config_string.c_str();
   auto config_proto = ConfigProto();
   if (json_config != nullptr && !std::string(json_config).empty()) {
     Config::merge_config_proto(config_proto, json_config);
@@ -108,7 +108,7 @@ int PassContextImp::allocate_suffix()
   return suffix_counter;
 }
 
-PassContextImp::WithPass PassContextImp::with_current_pass(IPass& pass) {
+PassContextImp::WithPass PassContextImp::with_current_pass(IPass &pass) {
   return WithPass(*this, pass);
 }
 
@@ -144,11 +144,11 @@ std::filesystem::path PassContextImp::get_dump_directory() const {
 
 template <typename T1, typename T2>
 std::optional<std::string>
-PassContextImp::get_provider_option_impl(const T1& option_names,
-                                         const T2& privider_options) const {
+PassContextImp::get_provider_option_impl(const T1 &option_names,
+                                         const T2 &privider_options) const {
   auto ret = std::optional<std::string>();
   if (privider_options) {
-    for (auto& option_name : option_names) {
+    for (auto &option_name : option_names) {
       auto it = privider_options->find(option_name);
       if (it != privider_options->end()) {
         ret = it->second;
@@ -160,7 +160,7 @@ PassContextImp::get_provider_option_impl(const T1& option_names,
 }
 template <typename T1, typename T, typename... T2>
 std::optional<std::string> PassContextImp::get_provider_option_impl(
-    const T1& option_names, const T& options1, const T2&... options) const {
+    const T1 &option_names, const T &options1, const T2 &...options) const {
   auto ret = get_provider_option_impl(option_names, options1);
   if (ret) {
     return ret;
@@ -170,7 +170,7 @@ std::optional<std::string> PassContextImp::get_provider_option_impl(
 
 template <typename T1, typename... T2>
 std::optional<std::string> PassContextImp::get_provider_option_with_priority(
-    const T1& option_names) const {
+    const T1 &option_names) const {
   // priority order:
   // 0. provider_option provided by user
   // 1. context_proto
@@ -205,13 +205,13 @@ std::vector<PassProto> PassContextImp::compute_effective_passes() const {
 
   // Build pass library map from ConfigProto.passes
   std::unordered_map<std::string, PassProto> pass_map;
-  for (const auto& pass : config_.passes()) {
+  for (const auto &pass : config_.passes()) {
     pass_map[pass.name()] = pass;
   }
 
   // Target-based pass selection
   if (target_proto_) {
-    for (const auto& pass_name : target_proto_->pass()) {
+    for (const auto &pass_name : target_proto_->pass()) {
       auto iter = pass_map.find(pass_name);
       CHECK(iter != pass_map.end())
           << "Pass not found in library: " << pass_name;
@@ -228,28 +228,28 @@ std::vector<PassProto> PassContextImp::compute_effective_passes() const {
 
 template <typename T>
 void PassContextImp::get_all_provider_option_impl(
-    std::map<std::string, std::string>& ret, const T& provider_options) const {
+    std::map<std::string, std::string> &ret, const T &provider_options) const {
   if (provider_options) {
-    for (auto& kv : *provider_options) {
+    for (auto &kv : *provider_options) {
       ret.insert({kv.first, kv.second});
     }
   };
 }
 template <typename T, typename... T1>
 void PassContextImp::get_all_provider_option_impl(
-    std::map<std::string, std::string>& ret, const T& options1,
-    const T1&... options) const {
+    std::map<std::string, std::string> &ret, const T &options1,
+    const T1 &...options) const {
   get_all_provider_option_impl(ret, options1);
   get_all_provider_option_impl(ret, options...);
 }
 
 std::optional<std::string>
-PassContextImp::get_provider_option(const std::string& option_name) const {
+PassContextImp::get_provider_option(const std::string &option_name) const {
   return get_provider_option_with_priority(
       std::array<std::string, 1>{option_name});
 }
 std::optional<std::string>
-PassContextImp::get_session_config(const std::string& option_name) const {
+PassContextImp::get_session_config(const std::string &option_name) const {
   auto it = session_configs_.find(option_name);
   if (it != session_configs_.end()) {
     return it->second;
@@ -257,8 +257,8 @@ PassContextImp::get_session_config(const std::string& option_name) const {
   return std::nullopt;
 }
 std::string
-PassContextImp::get_provider_option(const std::string& option_name,
-                                    const std::string& default_value) const {
+PassContextImp::get_provider_option(const std::string &option_name,
+                                    const std::string &default_value) const {
   auto option_value = get_provider_option(option_name);
   if (option_value.has_value()) {
     return option_value.value();
@@ -274,7 +274,7 @@ PassContextImp::~PassContextImp() {
   // No cleanup needed - tar_file_ cleans itself up
 }
 
-int64_t PassContextImp::get_provider_option_i64(const std::string& option_name,
+int64_t PassContextImp::get_provider_option_i64(const std::string &option_name,
                                                 int64_t default_value) const {
   auto config_value = get_provider_option(option_name);
   auto ret = default_value;
@@ -287,8 +287,8 @@ int64_t PassContextImp::get_provider_option_i64(const std::string& option_name,
 }
 
 std::string
-PassContextImp::get_session_config(const std::string& option_name,
-                                   const std::string& default_value) const {
+PassContextImp::get_session_config(const std::string &option_name,
+                                   const std::string &default_value) const {
   auto option_value = get_session_config(option_name);
   if (option_value.has_value()) {
     return option_value.value();
@@ -297,14 +297,14 @@ PassContextImp::get_session_config(const std::string& option_name,
 }
 
 std::string
-PassContextImp::get_run_option(const std::string& option_name,
-                               const std::string& default_value) const {
+PassContextImp::get_run_option(const std::string &option_name,
+                               const std::string &default_value) const {
   auto ret = default_value;
   if (get_run_options_) {
     // if the function exists. TODO, it might be a stale
     // function.
     std::shared_lock<std::shared_mutex> lock(
-        const_cast<PassContextImp*>(this)->rw_mutex_);
+        const_cast<PassContextImp *>(this)->rw_mutex_);
     auto maybe_value = get_run_options_(option_name);
     if (maybe_value) {
       ret = maybe_value.value();
@@ -313,7 +313,7 @@ PassContextImp::get_run_option(const std::string& option_name,
   return ret;
 }
 std::string
-PassContextImp::get_meta_def_param(const MetaDefProto& meta_def) const {
+PassContextImp::get_meta_def_param(const MetaDefProto &meta_def) const {
   auto json_str = std::string();
   auto status =
       google::protobuf::util::MessageToJsonString(meta_def.param(), &json_str);
@@ -323,8 +323,8 @@ PassContextImp::get_meta_def_param(const MetaDefProto& meta_def) const {
   return json_str;
 }
 std::string
-PassContextImp::get_ep_dynamic_option(const std::string& option_name,
-                                      const std::string& default_value) const {
+PassContextImp::get_ep_dynamic_option(const std::string &option_name,
+                                      const std::string &default_value) const {
   std::lock_guard<std::mutex> lock(this->ep_dynamic_options_lock);
   auto it = ep_dynamic_options.find(option_name);
   if (it == ep_dynamic_options.end()) {
@@ -334,25 +334,25 @@ PassContextImp::get_ep_dynamic_option(const std::string& option_name,
   }
 }
 
-void PassContextImp::remove_QosUpdater(QoSUpdateInterface* updater) {
+void PassContextImp::remove_QosUpdater(QoSUpdateInterface *updater) {
   qos_updaters_.erase(
       std::remove_if(
           qos_updaters_.begin(), qos_updaters_.end(),
-          [updater](const std::shared_ptr<QoSUpdateInterface>& item) {
+          [updater](const std::shared_ptr<QoSUpdateInterface> &item) {
             return item.get() == updater;
           }),
       qos_updaters_.end());
 }
 
 void PassContextImp::add_QosUpdater(
-    const std::shared_ptr<QoSUpdateInterface>& updater) const {
+    const std::shared_ptr<QoSUpdateInterface> &updater) const {
   CHECK(updater) << "Null QoS updater cannot be added to PassContext";
   qos_updaters_.push_back(updater);
 }
 
-void PassContextImp::update_all_qos(const std::string& workload_type) const {
+void PassContextImp::update_all_qos(const std::string &workload_type) const {
   if (workload_type == "Efficient" || workload_type == "Default") {
-    for (const auto& updater : qos_updaters_) {
+    for (const auto &updater : qos_updaters_) {
       CHECK(updater) << "Found null QoS updater in qos_updaters_";
       updater->update_qos(workload_type);
     }
@@ -363,7 +363,7 @@ void PassContextImp::update_all_qos(const std::string& workload_type) const {
 
 template <typename T>
 std::optional<std::vector<T>>
-PassContextImp::read_file_generic(const std::string& filename) const {
+PassContextImp::read_file_generic(const std::string &filename) const {
   std::optional<std::vector<T>> ret;
   auto stream = open_file_for_read(filename);
   if (stream == nullptr) {
@@ -484,23 +484,23 @@ std::filesystem::path PassContextImp::get_basename_of_ep_context_binary_file() {
 }
 
 std::optional<std::vector<char>>
-PassContextImp::read_file_c8(const std::string& filename) const {
+PassContextImp::read_file_c8(const std::string &filename) const {
   return read_file_generic<char>(filename);
 }
 
 std::optional<std::vector<uint8_t>>
-PassContextImp::read_file_u8(const std::string& filename) const {
+PassContextImp::read_file_u8(const std::string &filename) const {
   return read_file_generic<uint8_t>(filename);
 }
 
 std::unique_ptr<CacheFileReader>
-PassContextImp::open_file_for_read(const std::string& filename) const {
+PassContextImp::open_file_for_read(const std::string &filename) const {
   CHECK(tar_file_ != nullptr) << "tar_file_ should always exist";
   return open_file_for_read_with_tar_file(filename);
 }
 
 std::string
-PassContextImp::get_cache_filename(const std::string& filename) const {
+PassContextImp::get_cache_filename(const std::string &filename) const {
   auto cache_key = get_context_proto().cache_key();
   CHECK(!cache_key.empty()) << "cache_key required for cache file operations";
   return cache_key + "/" + filename;
@@ -508,7 +508,7 @@ PassContextImp::get_cache_filename(const std::string& filename) const {
 
 std::unique_ptr<CacheFileReader>
 PassContextImp::open_file_for_read_with_tar_file(
-    const std::string& filename1) const {
+    const std::string &filename1) const {
   auto filename = get_cache_filename(filename1);
   CHECK(tar_file_ != nullptr) << "tar_file_ is nullptr";
   auto stream = tar_file_->open_for_read(filename);
@@ -524,7 +524,7 @@ PassContextImp::open_file_for_read_with_tar_file(
 }
 std::unique_ptr<CacheFileWriter>
 PassContextImp::open_file_for_write_with_tar_file(
-    const std::string& filename1) {
+    const std::string &filename1) {
   auto filename = get_cache_filename(filename1);
   CHECK(tar_file_ != nullptr) << "tar_file_ is nullptr";
   auto stream = tar_file_->open_for_write(filename);
@@ -539,13 +539,13 @@ PassContextImp::open_file_for_write_with_tar_file(
                                                     std::move(stream));
 }
 std::unique_ptr<CacheFileWriter>
-PassContextImp::open_file_for_write(const std::string& filename) {
+PassContextImp::open_file_for_write(const std::string &filename) {
   CHECK(tar_file_ != nullptr) << "tar_file_ should always exist";
   return open_file_for_write_with_tar_file(filename);
 }
 
-bool write_to_cache_files(std::map<std::string, FILE*>& cache_files,
-                          const std::string& filename,
+bool write_to_cache_files(std::map<std::string, FILE *> &cache_files,
+                          const std::string &filename,
                           gsl::span<const char> data) {
   auto iter = cache_files.find(filename);
   if (iter != cache_files.end()) {
@@ -554,7 +554,7 @@ bool write_to_cache_files(std::map<std::string, FILE*>& cache_files,
   cache_files[filename] = write_to_tmp_file(data);
   return true;
 }
-bool PassContextImp::write_file(const std::string& filename,
+bool PassContextImp::write_file(const std::string &filename,
                                 gsl::span<const char> data) {
   bool ret = true;
   auto stream = open_file_for_write(filename);
@@ -570,7 +570,7 @@ bool PassContextImp::write_file(const std::string& filename,
   return ret;
 }
 
-bool PassContextImp::has_cache_file(const std::string& filename1) const {
+bool PassContextImp::has_cache_file(const std::string &filename1) const {
   auto filename = get_cache_filename(filename1);
   CHECK(tar_file_ != nullptr) << "tar_file_ should always exist";
   return tar_file_->has_file(filename);
@@ -579,20 +579,20 @@ bool PassContextImp::has_cache_file(const std::string& filename1) const {
 std::vector<std::string> PassContextImp::get_cache_file_names() const {
   CHECK(tar_file_ != nullptr) << "tar_file_ should always exist";
   auto ret = std::vector<std::string>{};
-  const auto& entries = tar_file_->entries();
+  const auto &entries = tar_file_->entries();
   ret.reserve(entries.size());
-  for (const auto& entry : entries) {
+  for (const auto &entry : entries) {
     if (entry && !entry->is_symlink()) {
       ret.push_back(entry->path());
     }
   }
   return ret;
 }
-const ConfigProto& PassContextImp::get_config_proto() const { return config_; }
-const ContextProto& PassContextImp::get_context_proto() const {
+const ConfigProto &PassContextImp::get_config_proto() const { return config_; }
+const ContextProto &PassContextImp::get_context_proto() const {
   return context_proto;
 }
-ContextProto& PassContextImp::get_context_proto() { return context_proto; }
+ContextProto &PassContextImp::get_context_proto() { return context_proto; }
 void PassContextImp::save_context_json() const {
   ContextProto proto;
   proto.CopyFrom(this->context_proto);
@@ -608,25 +608,25 @@ void PassContextImp::save_context_json() const {
     // CPU, and the GENERIC device is enabled for model compilation, it is a
     // bug. However, this combination is not in used for now. We can fix it
     // later.
-    for (auto& meta_def : *proto.mutable_meta_def()) {
+    for (auto &meta_def : *proto.mutable_meta_def()) {
       if (meta_def.device() == "GENERIC") {
         meta_def.set_fallback_cpu(true);
       }
     }
     auto json_str = msg_to_json_string(proto);
-    const_cast<PassContextImp*>(this)->write_file("context.json", json_str);
-  } catch (const std::exception& e) {
+    const_cast<PassContextImp *>(this)->write_file("context.json", json_str);
+  } catch (const std::exception &e) {
     std::cerr << "exception occurs : " << e.what() << "\n";
   }
 }
 
-void PassContextImp::add_context_resource(const std::string& name,
+void PassContextImp::add_context_resource(const std::string &name,
                                           std::shared_ptr<void> resource) {
   pass_resources[name] = resource;
 }
 
 std::shared_ptr<void>
-PassContextImp::get_context_resource(const std::string& name) const {
+PassContextImp::get_context_resource(const std::string &name) const {
   auto it = pass_resources.find(name);
   auto ret = std::shared_ptr<void>();
   if (it != pass_resources.end()) {
@@ -636,7 +636,7 @@ PassContextImp::get_context_resource(const std::string& name) const {
 }
 
 std::unique_ptr<PassContextTimer>
-PassContextImp::measure(const std::string& label) {
+PassContextImp::measure(const std::string &label) {
   return std::unique_ptr<PassContextTimer>(
       new PassContextTimerImp(label, *this));
 }
@@ -656,8 +656,8 @@ void PassContextImp::on_custom_op_create_end() {
   }
 }
 /// struct PassContextTimerImp
-PassContextTimerImp::PassContextTimerImp(const std::string& label,
-                                         PassContextImp& context)
+PassContextTimerImp::PassContextTimerImp(const std::string &label,
+                                         PassContextImp &context)
     : PassContextTimer(), label_{label}, context_{context},
       start_{std::chrono::steady_clock::now()}, mem_usage_{GetMemUsage()} {}
 PassContextTimerImp::~PassContextTimerImp() {
@@ -712,7 +712,7 @@ std::unique_ptr<PassContext> PassContext::create() {
 void PassContextImp::load_plugins() {
   auto str_backends = get_provider_option("backends", "");
 
-  auto split = [](const std::string& str,
+  auto split = [](const std::string &str,
                   char delimiter) -> std::vector<std::string> {
     std::vector<std::string> tokens;
     std::stringstream ss(str);
@@ -724,23 +724,23 @@ void PassContextImp::load_plugins() {
   };
   auto backends = split(str_backends, ';');
   auto plugins = new std::vector<std::shared_ptr<Plugin>>();
-  for (const auto& backend : backends) {
+  for (const auto &backend : backends) {
     auto plugin = load_plugin(backend);
     plugins->push_back(plugin);
   }
-  this->add_context_resource("__all_plugins__",
-                             std::shared_ptr<void>((void*)plugins, [](void* p) {
-                               delete (std::vector<std::shared_ptr<Plugin>>*)p;
-                             }));
+  this->add_context_resource(
+      "__all_plugins__", std::shared_ptr<void>((void *)plugins, [](void *p) {
+        delete (std::vector<std::shared_ptr<Plugin>> *)p;
+      }));
 }
 std::shared_ptr<Plugin>
-PassContextImp::load_plugin(const std::string& plugin_name) {
+PassContextImp::load_plugin(const std::string &plugin_name) {
   auto plugin = morphizen::WeakStore<std::string, Plugin>::create(
       plugin_name, plugin_name.c_str());
   return plugin;
 }
-CacheFileReaderImp::CacheFileReaderImp(bool in_mem, const std::string& filename,
-                                       FILE* fp)
+CacheFileReaderImp::CacheFileReaderImp(bool in_mem, const std::string &filename,
+                                       FILE *fp)
     : CacheFileReader(), in_mem_(in_mem), name_{filename}, fp_{fp} {
 
   std::rewind(fp);
@@ -757,7 +757,7 @@ CacheFileReaderImp::~CacheFileReaderImp() {
       << "close " << name_ << " for read";
 }
 
-std::size_t CacheFileReaderImp::fread(void* buffer, std::size_t size) const {
+std::size_t CacheFileReaderImp::fread(void *buffer, std::size_t size) const {
   auto ret = std::fread(buffer, 1u, size, fp_);
   return ret;
 }
@@ -766,9 +766,9 @@ size_t CacheFileReaderImp::size() const { return size_; }
 
 void CacheFileReaderImp::rewind() const { std::rewind(fp_); }
 
-CacheFileReaderStreamImp::CacheFileReaderStreamImp(const std::string& name,
+CacheFileReaderStreamImp::CacheFileReaderStreamImp(const std::string &name,
                                                    size_t size,
-                                                   TarEntryInputStream& stream)
+                                                   TarEntryInputStream &stream)
     : name_{name}, size_{size}, stream_{stream} {
   LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
       << "open " << name << " for read";
@@ -779,9 +779,9 @@ CacheFileReaderStreamImp::~CacheFileReaderStreamImp() {
       << "close " << name_ << " for read";
 }
 
-std::size_t CacheFileReaderStreamImp::fread(void* buffer,
+std::size_t CacheFileReaderStreamImp::fread(void *buffer,
                                             std::size_t size) const {
-  CHECK(!stream_.read(static_cast<char*>(buffer), size).bad())
+  CHECK(!stream_.read(static_cast<char *>(buffer), size).bad())
       << "failed to read " << name_;
   auto ret = stream_.gcount();
   LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE) >= 9)
@@ -790,7 +790,7 @@ std::size_t CacheFileReaderStreamImp::fread(void* buffer,
   return ret;
 }
 
-void* CacheFileReaderStreamImp::mmap() { return stream_.mmap(); }
+void *CacheFileReaderStreamImp::mmap() { return stream_.mmap(); }
 
 size_t CacheFileReaderStreamImp::size() const { return size_; }
 
@@ -799,8 +799,8 @@ void CacheFileReaderStreamImp::rewind() const {
       << "failed to seek to the beginning of the stream";
 }
 
-CacheFileWriterImp::CacheFileWriterImp(bool in_mem, const std::string& filename,
-                                       FILE* fp)
+CacheFileWriterImp::CacheFileWriterImp(bool in_mem, const std::string &filename,
+                                       FILE *fp)
     : CacheFileWriter(), in_mem_(in_mem), name_{filename}, fp_{fp} {
   LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
       << "open " << filename << " for write";
@@ -812,14 +812,14 @@ CacheFileWriterImp::~CacheFileWriterImp() {
   std::fflush(fp_);
 }
 
-std::size_t CacheFileWriterImp::fwrite(const void* buffer,
+std::size_t CacheFileWriterImp::fwrite(const void *buffer,
                                        std::size_t size) const {
   auto ret = std::fwrite(buffer, 1u, size, fp_);
   return ret;
 }
 
 CacheFileWriterStreamImp::CacheFileWriterStreamImp(
-    const std::string& name, std::unique_ptr<std::ostream> stream)
+    const std::string &name, std::unique_ptr<std::ostream> stream)
     : CacheFileWriter(), name_{name}, stream_{std::move(stream)} {
   LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
       << "open " << name_ << "for write";
@@ -832,10 +832,10 @@ CacheFileWriterStreamImp::~CacheFileWriterStreamImp() {
   stream_.reset();
 }
 
-std::size_t CacheFileWriterStreamImp::fwrite(const void* buffer,
+std::size_t CacheFileWriterStreamImp::fwrite(const void *buffer,
                                              std::size_t size) const {
   auto pos = stream_->tellp();
-  stream_->write(static_cast<const char*>(buffer), size);
+  stream_->write(static_cast<const char *>(buffer), size);
   if (stream_->bad()) {
     LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE))
         << "failed to write " << name_;
@@ -847,19 +847,19 @@ std::size_t CacheFileWriterStreamImp::fwrite(const void* buffer,
   return ret;
 }
 
-FileSystemImp::FileSystemImp(PassContext& context) : context_(context) {}
+FileSystemImp::FileSystemImp(PassContext &context) : context_(context) {}
 
-FileReader* FileSystemImp::create_reader(const char* path) {
+FileReader *FileSystemImp::create_reader(const char *path) {
   return context_.open_file_for_read(path).release();
 }
 
-FileWriter* FileSystemImp::create_writer(const char* path) {
+FileWriter *FileSystemImp::create_writer(const char *path) {
   return context_.open_file_for_write(path).release();
 }
 
-void FileSystemImp::destroy_reader(FileReader* reader) { delete reader; }
+void FileSystemImp::destroy_reader(FileReader *reader) { delete reader; }
 
-void FileSystemImp::destroy_writer(FileWriter* writer) { delete writer; }
+void FileSystemImp::destroy_writer(FileWriter *writer) { delete writer; }
 
 std::unique_ptr<FileSystem> PassContextImp::get_file_system() {
   return std::make_unique<FileSystemImp>(*this);
@@ -906,7 +906,7 @@ void PassContextImp::maybe_create_tar_file_for_write() {
         << "open tar file for write: " << ep_context_binary_file;
 
     if (is_shared_context_enabled) {
-      auto& shared_workspace =
+      auto &shared_workspace =
           SharedContextContextWorkspace::create_workspace_or_get(
               ep_context_binary_file);
       ep_context_binary_file = shared_workspace.get_ep_context_binary_file();
@@ -945,7 +945,7 @@ void PassContextImp::maybe_create_tar_file_for_write() {
     // Always use cache_key prefix for consistent behavior
   }
 }
-void PassContextImp::create_tar_file_for_read(std::string&& ep_context_binary,
+void PassContextImp::create_tar_file_for_read(std::string &&ep_context_binary,
                                               bool embed_mode) {
   // Check provider option for mmap enablement (applies to both modes)
   bool enable_mmap =
@@ -977,7 +977,7 @@ void PassContextImp::create_tar_file_for_read(std::string&& ep_context_binary,
 }
 
 void PassContextImp::create_tar_file_for_prebuild_cache(
-    std::vector<char>&& buffer) {
+    std::vector<char> &&buffer) {
   auto is_ep_context_enabled =
       get_session_config(kOrtSessionOptionEpContextEnable, "0") == "1";
   auto is_ep_context_embed_mode =
@@ -1018,14 +1018,14 @@ void PassContextImp::create_tar_file_for_prebuild_cache(
       << "tar file does not have " << prefix << "/context.json, "
       << "please check prebuild ep context generation";
 }
-void PassContextImp::print_version_info(const char* prefix) {
-  auto& context = get_context_proto();
+void PassContextImp::print_version_info(const char *prefix) {
+  auto &context = get_context_proto();
   for (auto version_info : context.version().version_infos()) {
     LOG_VERBOSE(1) << prefix << version_info.package_name() << " ("
                    << version_info.version() << ") :" + version_info.commit();
   }
-  auto print_kv = [](int level, const char* prefix,
-                     std::pair<const std::string, std::string>& kv) {
+  auto print_kv = [](int level, const char *prefix,
+                     std::pair<const std::string, std::string> &kv) {
     if (kv.first != "encryption_key") {
       LOG_VERBOSE(level) << prefix << ": " << kv.first << " = " << kv.second;
     } else {
@@ -1035,27 +1035,27 @@ void PassContextImp::print_version_info(const char* prefix) {
   };
   LOG_VERBOSE(1) << prefix << "cache_key: " << get_context_proto().cache_key();
   LOG_VERBOSE(1) << prefix << "dump_dir: " << get_dump_directory();
-  for (auto& kv : provider_option_origin_) {
+  for (auto &kv : provider_option_origin_) {
     print_kv(3, "provider_option_from_origin", kv);
   }
-  for (auto& kv :
+  for (auto &kv :
        // print sorted keys
        std::map<std::string, std::string>(config_.provider_options().begin(),
                                           config_.provider_options().end())) {
     print_kv(3, "provider_options_in_config", kv);
   }
   if (target_proto_) {
-    for (auto& kv : std::map<std::string, std::string>(
+    for (auto &kv : std::map<std::string, std::string>(
              target_proto_->provider_options().begin(),
              target_proto_->provider_options().end())) {
       print_kv(3, "provider_options_in_target_proto", kv);
     }
   }
-  for (auto& kv : session_configs_) {
+  for (auto &kv : session_configs_) {
     LOG_VERBOSE(3) << "session_config: " << kv.first << " = " << kv.second;
   }
   auto all_po = get_all_provider_options();
-  for (auto& kv : all_po) {
+  for (auto &kv : all_po) {
     print_kv(1, "provider_option", kv);
   }
 }
@@ -1094,7 +1094,7 @@ void PassContextImp::update_config_proto_root_field() {
   //  3. FOR BACKWARD COMPATIBILITY, NO MORE NEW FIELD PLEASE
   auto get_provider_option_local =
       [this](
-          const std::vector<std::string>& names) -> std::optional<std::string> {
+          const std::vector<std::string> &names) -> std::optional<std::string> {
     auto ret = std::optional<std::string>();
     return this->get_provider_option_with_priority(names);
   };
@@ -1108,7 +1108,7 @@ void PassContextImp::update_config_proto_root_field() {
 }
 template <typename T>
 static std::optional<std::string>
-get_provider_option_internal(const std::string& name, const T& options) {
+get_provider_option_internal(const std::string &name, const T &options) {
   auto it = options.find(name);
   if (it != options.end()) {
     return it->second;
@@ -1116,11 +1116,11 @@ get_provider_option_internal(const std::string& name, const T& options) {
   return std::nullopt;
 }
 
-const TargetProto*
-PassContextImp::find_target_proto(const std::string& target_name) {
-  auto& targets = config_.targets();
+const TargetProto *
+PassContextImp::find_target_proto(const std::string &target_name) {
+  auto &targets = config_.targets();
   auto it = std::find_if(targets.begin(), targets.end(),
-                         [&target_name](const TargetProto& target) {
+                         [&target_name](const TargetProto &target) {
                            return target.name() == target_name;
                          });
   if (it != targets.end()) {
@@ -1128,15 +1128,15 @@ PassContextImp::find_target_proto(const std::string& target_name) {
         << "Found target proto for target: " << target_name;
     return &(*it); // Return raw pointer to element in ConfigProto
   }
-  return nullptr;  // not found
+  return nullptr; // not found
 }
 
 std::string PassContextImp::get_valid_target_names() {
   std::ostringstream valid_names;
   int c = 0;
-  auto& targets = config_.targets();
+  auto &targets = config_.targets();
 
-  for (const auto& target : targets) {
+  for (const auto &target : targets) {
     if (c++ > 0) {
       valid_names << ", ";
     }
@@ -1151,7 +1151,7 @@ bool PassContextImp::has_user_config_file() const {
       .has_value();
 }
 
-bool PassContextImp::try_initialize_target_proto(const std::string& target_name,
+bool PassContextImp::try_initialize_target_proto(const std::string &target_name,
                                                  bool thorow_if_not_found) {
   target_proto_ = find_target_proto(target_name);
   if (target_proto_ == nullptr) {
@@ -1171,23 +1171,24 @@ bool PassContextImp::try_initialize_target_proto(const std::string& target_name,
   }
   return target_proto_ != nullptr;
 }
-static std::optional<std::string> discover_target(const ConfigProto& proto,
-                                                  const Model& model) {
-  typedef std::optional<std::string> (*discovery_function_t)(const ConfigProto&,
-                                                             const Model&);
+static std::optional<std::string> discover_target(const ConfigProto &proto,
+                                                  const Model &model) {
+  typedef std::optional<std::string> (*discovery_function_t)(
+      const ConfigProto &, const Model &);
   auto all_plugin_functions =
       morphizen::Plugin::get_all_symbols("morphizen_target_discovery");
-  std::sort(
-      all_plugin_functions.begin(), all_plugin_functions.end(),
-      [](const std::pair<std::string, void*>& a,
-         const std::pair<std::string, void*>& b) { return a.first < b.first; });
+  std::sort(all_plugin_functions.begin(), all_plugin_functions.end(),
+            [](const std::pair<std::string, void *> &a,
+               const std::pair<std::string, void *> &b) {
+              return a.first < b.first;
+            });
   LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
       << "discover_target: all_plugin_functions size: "
       << all_plugin_functions.size();
-  for (auto& plugin : all_plugin_functions) {
+  for (auto &plugin : all_plugin_functions) {
     LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
         << "discover_target: plugin name: " << plugin.first
-        << " model id:" << (void*)(&model) << " id: " << plugin.second;
+        << " model id:" << (void *)(&model) << " id: " << plugin.second;
     auto target_discovery_func = (discovery_function_t)plugin.second;
     auto target = target_discovery_func(proto, model);
     if (target.has_value()) {
@@ -1203,7 +1204,7 @@ static std::optional<std::string> discover_target(const ConfigProto& proto,
   }
   return std::nullopt;
 }
-void PassContextImp::target_auto_discovery(const Model& model) {
+void PassContextImp::target_auto_discovery(const Model &model) {
   bool using_builtin_config = !has_user_config_file();
 
   // Priority 1: User explicit override (both paths)
@@ -1234,7 +1235,7 @@ void PassContextImp::target_auto_discovery(const Model& model) {
     }
 
     // Priority 3: Fallback to built-in ConfigProto.target
-    auto& target_name = config_.target();
+    auto &target_name = config_.target();
     if (!target_name.empty()) {
       LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY))
           << "Auto-discovery failed, using built-in config default: "
@@ -1250,7 +1251,7 @@ void PassContextImp::target_auto_discovery(const Model& model) {
 
   } else {
     // Path B: User config file - use config target directly (no auto-discovery)
-    auto& target_name = config_.target();
+    auto &target_name = config_.target();
     if (target_name.empty()) {
       throw std::invalid_argument("User config file must specify target field");
     }
@@ -1264,7 +1265,7 @@ void PassContextImp::target_auto_discovery(const Model& model) {
 }
 
 void PassContextImp::append_compiled_model_compatibility_info(
-    const std::string& backend_name, const std::string& compatibility_info) {
+    const std::string &backend_name, const std::string &compatibility_info) {
   // Validate that compatibility_info is not empty
   if (compatibility_info.empty()) {
     LOG(WARNING) << "Backend '" << backend_name
@@ -1282,7 +1283,7 @@ void PassContextImp::append_compiled_model_compatibility_info(
   compiled_model_compatibility_info_[backend_name] = compatibility_info;
 }
 
-const std::map<std::string, std::string>&
+const std::map<std::string, std::string> &
 PassContextImp::get_compiled_model_compatibility_info() const {
   return compiled_model_compatibility_info_;
 }

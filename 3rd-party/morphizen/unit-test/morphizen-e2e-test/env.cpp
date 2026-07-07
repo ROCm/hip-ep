@@ -11,7 +11,7 @@
 
 namespace morphizen_e2e_test {
 
-static OrtLoggingLevel convert_log_level(const std::string& log_level) {
+static OrtLoggingLevel convert_log_level(const std::string &log_level) {
   if (log_level == "verbose") {
     return ORT_LOGGING_LEVEL_VERBOSE;
   } else if (log_level == "info") {
@@ -26,15 +26,15 @@ static OrtLoggingLevel convert_log_level(const std::string& log_level) {
   return ORT_LOGGING_LEVEL_WARNING; // Default to warning
 }
 
-E2ETestEnv::E2ETestEnv(const E2ETestEnvProto& env_proto)
+E2ETestEnv::E2ETestEnv(const E2ETestEnvProto &env_proto)
     : env_proto_(env_proto) {
   LOG(INFO) << "E2ETestEnv created with proto: " << env_proto_.DebugString();
   ort_env_ =
       std::make_unique<Ort::Env>(convert_log_level(env_proto_.ort_log_level()),
                                  env_proto_.ort_log_id().c_str());
 
-  const auto& registrations = env_proto_.registration();
-  for (const auto& registration : registrations) {
+  const auto &registrations = env_proto_.registration();
+  for (const auto &registration : registrations) {
     LOG(INFO) << "Registering: " << registration.name()
               << ", library: " << registration.library();
     auto status = Ort::GetApi().RegisterExecutionProviderLibrary(
@@ -57,12 +57,12 @@ E2ETestEnv::E2ETestEnv(const E2ETestEnvProto& env_proto)
 #endif
   std::unordered_set<std::string> registration_names;
   registration_names.reserve(registrations.size());
-  for (const auto& registration : registrations) {
+  for (const auto &registration : registrations) {
     registration_names.emplace(registration.name());
   }
   std::copy_if(ep_devices.begin(), ep_devices.end(),
                std::back_inserter(selected_devices_),
-               [&registration_names](const auto& device) {
+               [&registration_names](const auto &device) {
                  LOG(INFO) << "Checking device: " << device.EpName()
                            << " from vendor: " << device.EpVendor();
                  return registration_names.find(device.EpName()) !=
@@ -73,7 +73,7 @@ E2ETestEnv::E2ETestEnv(const E2ETestEnvProto& env_proto)
 E2ETestEnv::~E2ETestEnv() {
   LOG(INFO) << "E2ETestEnv being destroyed.";
   // Now it's safe to unregister execution providers
-  for (const auto& registration : env_proto_.registration()) {
+  for (const auto &registration : env_proto_.registration()) {
     LOG(INFO) << "Unregistering: " << registration.name();
     auto status = Ort::GetApi().UnregisterExecutionProviderLibrary(
         *ort_env_, registration.name().c_str());
@@ -86,7 +86,7 @@ E2ETestEnv::~E2ETestEnv() {
 std::vector<std::unique_ptr<E2ETestSessionOptions>>
 E2ETestEnv::create_e2e_test_session_options() {
   auto ret = std::vector<std::unique_ptr<E2ETestSessionOptions>>();
-  for (const auto& session_option_proto : env_proto_.session_options()) {
+  for (const auto &session_option_proto : env_proto_.session_options()) {
     ret.emplace_back(std::make_unique<E2ETestSessionOptions>(
         session_option_proto, *ort_env_, selected_devices_));
   }

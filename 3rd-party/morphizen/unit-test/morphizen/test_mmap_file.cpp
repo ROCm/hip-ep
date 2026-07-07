@@ -26,7 +26,7 @@ TEST(MMapfileTest, create) {
       << "MMapFile size should match source file size";
 #endif
 }
-template <typename T> static void show_entry(const T& entry) {
+template <typename T> static void show_entry(const T &entry) {
   LOG(INFO) << "entry: " << entry->path()
             << (entry->real_path()
                     ? std::string("->") + entry->real_path().value()
@@ -42,7 +42,7 @@ TEST(MMapfileTest, CreateTar) {
                              std::filesystem::copy_options::overwrite_existing);
   auto tar_file_obj = morphizen::TarFile::create_from_path(tarFileName2);
   ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
-  for (auto& entry : tar_file_obj->entries()) {
+  for (auto &entry : tar_file_obj->entries()) {
     show_entry(entry);
 #ifdef _WIN32
     auto mmap = entry->mmap();
@@ -61,7 +61,7 @@ TEST(MMapfileTest, CreateTarNoMMap) {
   auto tar_file_obj =
       morphizen::TarFile::create_from_path(tarFileName2, false /*enable mmap*/);
   ASSERT_TRUE(tar_file_obj) << "Failed to create TarFile object";
-  for (auto& entry : tar_file_obj->entries()) {
+  for (auto &entry : tar_file_obj->entries()) {
     show_entry(entry);
 #ifdef _WIN32
     auto mmap = entry->mmap();

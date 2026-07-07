@@ -16,9 +16,9 @@
 namespace morphizen {
 namespace mlir_impl {
 
-mlir::Operation* MLIRNodeAttributes::Create() {
+mlir::Operation *MLIRNodeAttributes::Create() {
   // Get the global MLIR context
-  auto& context = MLIRContextManager::getInstance().getContext();
+  auto &context = MLIRContextManager::getInstance().getContext();
   mlir::OpBuilder builder(&context);
   auto loc = builder.getUnknownLoc();
 
@@ -28,7 +28,7 @@ mlir::Operation* MLIRNodeAttributes::Create() {
 }
 
 // Scalar attribute getters
-bool MLIRNodeAttributes::has_attribute(const std::string& name) const {
+bool MLIRNodeAttributes::has_attribute(const std::string &name) const {
   return (*this)->hasAttr(name);
 }
 
@@ -60,16 +60,16 @@ std::vector<std::string> MLIRNodeAttributes::get_attribute_names() const {
   return names;
 }
 
-const MLIRNamedAttribute&
-MLIRNodeAttributes::get_mlir_attribute(const std::string& name) const {
+const MLIRNamedAttribute &
+MLIRNodeAttributes::get_mlir_attribute(const std::string &name) const {
   auto attrs = (*this)->getAttrs();
   for (auto it = attrs.begin(); it != attrs.end(); it++) {
     if (it->getName().str() == name) {
-      return static_cast<const MLIRNamedAttribute&>(*it);
+      return static_cast<const MLIRNamedAttribute &>(*it);
     }
   }
   CHECK(0) << "Should check whether it contains name: " << name;
-  return static_cast<const MLIRNamedAttribute&>(*attrs.begin());
+  return static_cast<const MLIRNamedAttribute &>(*attrs.begin());
 }
 
 mlir::DictionaryAttr MLIRNodeAttributes::get_mlir_dictionary() const {
@@ -79,13 +79,13 @@ mlir::DictionaryAttr MLIRNodeAttributes::get_mlir_dictionary() const {
   return mlir::DictionaryAttr{};
 }
 
-void MLIRNodeAttributes::add(const mlir::NamedAttribute& named_attr) {
+void MLIRNodeAttributes::add(const mlir::NamedAttribute &named_attr) {
   (*this)->setAttr(named_attr.getName(), named_attr.getValue());
 }
 
 std::vector<std::string>
-MLIRNodeAttributes::get_attribute_as_strings(const std::string& name) const {
-  auto& named_attr = (const MLIRNamedAttribute&)get_mlir_attribute(name);
+MLIRNodeAttributes::get_attribute_as_strings(const std::string &name) const {
+  auto &named_attr = (const MLIRNamedAttribute &)get_mlir_attribute(name);
   return named_attr.get_strings();
 }
 

@@ -22,7 +22,7 @@ namespace morphizen::foundation {
  * @param text String to parse
  * @param value Reference to store the parsed value
  */
-template <typename T> void parse_value(const std::string& text, T& value) {
+template <typename T> void parse_value(const std::string &text, T &value) {
   std::istringstream is(text);
   if (!(is >> value)) {
     assert(false && "Failed to parse value");
@@ -36,7 +36,7 @@ template <typename T> void parse_value(const std::string& text, T& value) {
 /**
  * @brief Specialization for long long with hex support
  */
-inline void parse_value(const std::string& text, long long& value) {
+inline void parse_value(const std::string &text, long long &value) {
   if (text.size() > 2 && text[0] == '0' && text[1] == 'x') {
     value = std::stoll(text.substr(2), 0, 16);
   } else {
@@ -47,7 +47,7 @@ inline void parse_value(const std::string& text, long long& value) {
 /**
  * @brief Specialization for uint32_t with hex support
  */
-inline void parse_value(const std::string& text, uint32_t& value) {
+inline void parse_value(const std::string &text, uint32_t &value) {
   if (text.size() > 2 && text[0] == '0' && text[1] == 'x') {
     value = static_cast<uint32_t>(std::stoul(text.substr(2), 0, 16));
   } else {
@@ -58,7 +58,7 @@ inline void parse_value(const std::string& text, uint32_t& value) {
 /**
  * @brief Specialization for uint64_t with hex support
  */
-inline void parse_value(const std::string& text, uint64_t& value) {
+inline void parse_value(const std::string &text, uint64_t &value) {
   if (text.size() > 2 && text[0] == '0' && text[1] == 'x') {
     value = std::stoull(text.substr(2), 0, 16);
   } else {
@@ -69,7 +69,7 @@ inline void parse_value(const std::string& text, uint64_t& value) {
 /**
  * @brief Specialization for long with hex support
  */
-inline void parse_value(const std::string& text, long& value) {
+inline void parse_value(const std::string &text, long &value) {
   if (text.size() > 2 && text[0] == '0' && text[1] == 'x') {
     value = std::stol(text.substr(2), 0, 16);
   } else {
@@ -80,7 +80,7 @@ inline void parse_value(const std::string& text, long& value) {
 /**
  * @brief Specialization for int with hex support
  */
-inline void parse_value(const std::string& text, int& value) {
+inline void parse_value(const std::string &text, int &value) {
   if (text.size() > 2 && text[0] == '0' && text[1] == 'x') {
     value = std::stoi(text.substr(2), 0, 16);
   } else {
@@ -94,7 +94,7 @@ inline void parse_value(const std::string& text, int& value) {
  * Accepts: "yes", "on", "enable", "true", "1" as true
  * Everything else is considered false
  */
-inline void parse_value(const std::string& text, bool& value) {
+inline void parse_value(const std::string &text, bool &value) {
   if (text == "yes" || text == "on" || text == "enable" || text == "true" ||
       text == "1") {
     value = true;

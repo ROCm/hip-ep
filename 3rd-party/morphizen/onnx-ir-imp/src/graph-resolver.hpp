@@ -12,7 +12,7 @@
 namespace morphizen {
 
 // String constants for graph meta operations
-static constexpr const char* GRAPH_META_DOMAIN = "com.morphizen.meta";
+static constexpr const char *GRAPH_META_DOMAIN = "com.morphizen.meta";
 
 // Forward declarations
 class Graph;
@@ -34,34 +34,34 @@ public:
   ~GraphResolver();
 
   // Copy constructor (deleted for now)
-  GraphResolver(const GraphResolver&) = delete;
+  GraphResolver(const GraphResolver &) = delete;
 
   // Copy assignment operator (deleted for now)
-  GraphResolver& operator=(const GraphResolver&) = delete;
+  GraphResolver &operator=(const GraphResolver &) = delete;
 
   // Move constructor (deleted for now)
-  GraphResolver(GraphResolver&&) = delete;
+  GraphResolver(GraphResolver &&) = delete;
 
   // Move assignment operator (deleted for now)
-  GraphResolver& operator=(GraphResolver&&) = delete;
+  GraphResolver &operator=(GraphResolver &&) = delete;
 
   // Main resolve method
   morphizen_onnx::GraphProto
-  resolve(Graph& graph, GraphId new_graph_id,
-          std::unordered_map<std::string, int>& opset);
+  resolve(Graph &graph, GraphId new_graph_id,
+          std::unordered_map<std::string, int> &opset);
 
   // Public static helper functions
-  static bool is_meta_node(const morphizen_onnx::NodeProto& node);
+  static bool is_meta_node(const morphizen_onnx::NodeProto &node);
 
 private:
-  void initialize_private_variables(Graph& graph, GraphId new_graph_id);
+  void initialize_private_variables(Graph &graph, GraphId new_graph_id);
 
   // Helper methods for graph resolution
   // Collects all node output names and initializer names from the staging graph
   void collect_staging_graph_names();
   void maybe_mark_delete_initializers();
   void resolve_name();
-  void resolve_opset(std::unordered_map<std::string, int>& opset);
+  void resolve_opset(std::unordered_map<std::string, int> &opset);
   void resolve_doc_string();
   void resolve_inputs();
   void resolve_outputs();
@@ -74,21 +74,21 @@ private:
 
   // Node resolution helper methods
   bool all_input_is_availabele(
-      const morphizen_onnx::NodeProto& node,
-      const std::unordered_map<std::string, NodeArgIndex>& node_args_map);
-  void add_node(const morphizen_onnx::NodeProto& node, const Graph* from);
-  bool is_node_deleted(const morphizen_onnx::NodeProto& node, int index);
-  std::optional<NodeArgIndex> find_node_arg_index(const std::string& name);
+      const morphizen_onnx::NodeProto &node,
+      const std::unordered_map<std::string, NodeArgIndex> &node_args_map);
+  void add_node(const morphizen_onnx::NodeProto &node, const Graph *from);
+  bool is_node_deleted(const morphizen_onnx::NodeProto &node, int index);
+  std::optional<NodeArgIndex> find_node_arg_index(const std::string &name);
   void process_meta_node_delete();
 
   // Private members
-  Graph* origin_graph_;         // Pointer to the original graph being resolved
-  StagingGraph* staging_graph_; // Pointer to the staging graph being resolved
+  Graph *origin_graph_;         // Pointer to the original graph being resolved
+  StagingGraph *staging_graph_; // Pointer to the staging graph being resolved
   GraphId new_graph_id_;        // New graph ID to assign to resolved graph
   std::unordered_map<std::string, NodeArgIndex>
-      node_args_map_;           // Map to track node args for resolution
+      node_args_map_; // Map to track node args for resolution
   morphizen_onnx::GraphProto
-      resolved_graph_proto_;    // Resolved graph proto after processing
+      resolved_graph_proto_; // Resolved graph proto after processing
   std::vector<bool> initializer_deleted_flags_; // Flags to track deleted nodes
   std::vector<bool> node_deleted_flags_;        // Flags to track deleted nodes
   std::unordered_set<std::string>

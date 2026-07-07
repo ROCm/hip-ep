@@ -102,7 +102,7 @@ void test_weak_store() {
   assert(conn1.get() == conn1_again.get());
   assert(conn1->get_value() == 300); // Original value preserved
   assert(conn2->get_value() == 400);
-  assert(conn1->is_initialized());   // Should be initialized
+  assert(conn1->is_initialized()); // Should be initialized
 
   std::cout << "Store test passed - same key returns same instance"
             << std::endl;
@@ -124,7 +124,7 @@ int main() {
 
     std::cout << "\n=== All Tests Passed! ===" << std::endl;
     return 0;
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     std::cerr << "Test failed with exception: " << e.what() << std::endl;
     return 1;
   }

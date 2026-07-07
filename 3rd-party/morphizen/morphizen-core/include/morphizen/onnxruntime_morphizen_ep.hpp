@@ -42,8 +42,8 @@ extern "C" {
  */
 MORPHIZEN_DLL_SPEC
 void initialize_onnxruntime_morphizen_ep(
-    morphizen::OrtApiForMorphizen* api,
-    std::vector<OrtCustomOpDomain*>& ret_domain);
+    morphizen::OrtApiForMorphizen *api,
+    std::vector<OrtCustomOpDomain *> &ret_domain);
 
 /**
  * @brief Deinitializes the MorphiZen Execution Provider for ONNX Runtime.
@@ -68,10 +68,10 @@ void deinitialize_onnxruntime_morphizen_ep();
  * @return Status code indicating success or failure.
  */
 MORPHIZEN_DLL_SPEC int morphizen_ep_on_run_start(
-    const std::vector<std::unique_ptr<morphizen::ExecutionProvider>>& eps,
-    const void* state,
+    const std::vector<std::unique_ptr<morphizen::ExecutionProvider>> &eps,
+    const void *state,
     morphizen::DllSafe<std::string> (*get_config_entry)(
-        const void* state, const char* entry_name));
+        const void *state, const char *entry_name));
 
 /**
  * @brief Set DynamicOptions for the MorphiZen Execution Provider.
@@ -99,8 +99,8 @@ MORPHIZEN_DLL_SPEC int morphizen_ep_on_run_start(
  * @return Status code indicating success or failure.
  */
 MORPHIZEN_DLL_SPEC int morphizen_ep_set_ep_dynamic_options(
-    const std::vector<std::unique_ptr<morphizen::ExecutionProvider>>& eps,
-    const char* const* keys, const char* const* values, size_t kv_len);
+    const std::vector<std::unique_ptr<morphizen::ExecutionProvider>> &eps,
+    const char *const *keys, const char *const *values, size_t kv_len);
 
 /**
  * @brief Compiles an ONNX model using the MorphiZen Execution Provider.
@@ -120,12 +120,12 @@ MORPHIZEN_DLL_SPEC int morphizen_ep_set_ep_dynamic_options(
  * @return Pointer to a vector of unique pointers to ExecutionProvider
  * instances.
  */
-MORPHIZEN_DLL_SPEC std::vector<std::unique_ptr<morphizen::ExecutionProvider>>*
+MORPHIZEN_DLL_SPEC std::vector<std::unique_ptr<morphizen::ExecutionProvider>> *
 compile_onnx_model_morphizen_ep_v4(
-    const std::string& model_path, const onnxruntime::Graph& graph,
-    const onnxruntime::ProviderOptions& options,
-    const std::map<std::string, std::string>& session_configs, void* status,
-    void (*func)(void*, int, const char*), const OrtLogger* ort_logger);
+    const std::string &model_path, const onnxruntime::Graph &graph,
+    const onnxruntime::ProviderOptions &options,
+    const std::map<std::string, std::string> &session_configs, void *status,
+    void (*func)(void *, int, const char *), const OrtLogger *ort_logger);
 
 /**
  * @brief Creates EPContxt Nodes for the MorphiZen Execution Provider.
@@ -163,10 +163,10 @@ compile_onnx_model_morphizen_ep_v4(
  */
 MORPHIZEN_DLL_SPEC int create_ep_context_nodes(
 #if MORPHIZEN_ORT_API_MAJOR < 6
-    onnxruntime::Graph& /*ep_context_graph unused to deleted*/,
+    onnxruntime::Graph & /*ep_context_graph unused to deleted*/,
 #endif
-    const std::vector<std::unique_ptr<morphizen::ExecutionProvider>>& eps,
-    morphizen::DllSafe<std::vector<onnxruntime::Node*>>* ret_value);
+    const std::vector<std::unique_ptr<morphizen::ExecutionProvider>> &eps,
+    morphizen::DllSafe<std::vector<onnxruntime::Node *>> *ret_value);
 
 /**
  * @brief Gets the compiled model compatibility information from execution
@@ -186,9 +186,9 @@ MORPHIZEN_DLL_SPEC int create_ep_context_nodes(
  *         The returned pointer is valid until the next call to this function or
  * EP destruction.
  */
-MORPHIZEN_DLL_SPEC const char* get_compiled_model_compatibility_info(
-    const std::vector<std::unique_ptr<morphizen::ExecutionProvider>>* eps,
-    const void* graph_viewer);
+MORPHIZEN_DLL_SPEC const char *get_compiled_model_compatibility_info(
+    const std::vector<std::unique_ptr<morphizen::ExecutionProvider>> *eps,
+    const void *graph_viewer);
 
 /**
  * @brief Validates the compiled model compatibility information.
@@ -215,9 +215,9 @@ MORPHIZEN_DLL_SPEC const char* get_compiled_model_compatibility_info(
  * @return 0 on success, non-zero on failure.
  */
 MORPHIZEN_DLL_SPEC int validate_compiled_model_compatibility_info(
-    const std::vector<std::unique_ptr<morphizen::ExecutionProvider>>* eps,
-    const char* compatibility_info, const void* const* devices,
-    size_t num_devices, int* model_compatibility);
+    const std::vector<std::unique_ptr<morphizen::ExecutionProvider>> *eps,
+    const char *compatibility_info, const void *const *devices,
+    size_t num_devices, int *model_compatibility);
 
 /**
  * @brief Retrieves the MorphiZen version as a 32-bit unsigned integer.
@@ -253,8 +253,8 @@ MORPHIZEN_DLL_SPEC uint32_t morphizen_get_version();
  * @param kernel_events Vector to store kernel event information.
  */
 MORPHIZEN_DLL_SPEC
-void profiler_collect(std::vector<EventInfo>& api_events,
-                      std::vector<EventInfo>& kernel_events);
+void profiler_collect(std::vector<EventInfo> &api_events,
+                      std::vector<EventInfo> &kernel_events);
 
 /**
  * @brief Retrieves the global API instance for MorphiZen Execution Provider.
@@ -269,8 +269,8 @@ void profiler_collect(std::vector<EventInfo>& api_events,
  *
  * @return Pointer to the OrtApiForMorphizen instance.
  */
-MORPHIZEN_DLL_SPEC const morphizen::OrtApiForMorphizen* get_the_global_api();
-MORPHIZEN_DLL_SPEC const morphizen::OrtApiForMorphizen*
+MORPHIZEN_DLL_SPEC const morphizen::OrtApiForMorphizen *get_the_global_api();
+MORPHIZEN_DLL_SPEC const morphizen::OrtApiForMorphizen *
 get_the_global_api_unsafe();
 
 /**
@@ -289,5 +289,5 @@ get_the_global_api_unsafe();
  * @return void* A function pointer to a deleter function for the specified
  * type.
  */
-MORPHIZEN_DLL_SPEC void* morphizen_get_execution_provider_deletor();
+MORPHIZEN_DLL_SPEC void *morphizen_get_execution_provider_deletor();
 }

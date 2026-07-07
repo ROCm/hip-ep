@@ -12,20 +12,20 @@ private:
   struct PrivateTag {}; // Private tag to prevent direct instantiation
   // Constructor has to be public for std::make_unique
 public:
-  static SharedContextContextWorkspace&
-  create_workspace_or_get(const std::filesystem::path& ep_context_binary_file);
+  static SharedContextContextWorkspace &
+  create_workspace_or_get(const std::filesystem::path &ep_context_binary_file);
 
 public:
   SharedContextContextWorkspace(
-      const PrivateTag&, const std::filesystem::path& ep_context_binary_file);
-  SharedContextContextWorkspace(const SharedContextContextWorkspace&) = delete;
-  SharedContextContextWorkspace&
-  operator=(const SharedContextContextWorkspace&) = delete;
-  SharedContextContextWorkspace(SharedContextContextWorkspace&&) = delete;
+      const PrivateTag &, const std::filesystem::path &ep_context_binary_file);
+  SharedContextContextWorkspace(const SharedContextContextWorkspace &) = delete;
+  SharedContextContextWorkspace &
+  operator=(const SharedContextContextWorkspace &) = delete;
+  SharedContextContextWorkspace(SharedContextContextWorkspace &&) = delete;
   void close_workspace();
 
   // Returns the full path to the EP context binary file
-  const std::filesystem::path& get_ep_context_binary_file() const {
+  const std::filesystem::path &get_ep_context_binary_file() const {
     return ep_context_binary_file_;
   }
 

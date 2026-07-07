@@ -11,7 +11,7 @@ namespace morphizen {
 
 template <typename T> struct WeakSingleton {
   static std::weak_ptr<T> the_instance_;
-  template <typename... Args> static std::shared_ptr<T> create(Args&&... args) {
+  template <typename... Args> static std::shared_ptr<T> create(Args &&...args) {
     std::shared_ptr<T> ret;
     if (the_instance_.expired()) {
       ret = std::make_shared<T>(std::forward<Args>(args)...);
@@ -27,7 +27,7 @@ template <typename T> std::weak_ptr<T> WeakSingleton<T>::the_instance_;
 // we don't support c++17 yet.
 template <class...> using my_void_t = void;
 template <typename T, class = void> struct invoke_initialize_if_possible {
-  static void initialize(T* /*t*/) {}
+  static void initialize(T * /*t*/) {}
 };
 template <typename T> struct WithInjection;
 template <typename T>
@@ -40,7 +40,7 @@ using is_not_derived_from_with_injection =
 
 template <typename T>
 struct invoke_initialize_if_possible<T, is_derived_from_with_injection<T>> {
-  static void initialize(T* t) {
+  static void initialize(T *t) {
     // with_injection<T>::create(...) invokes initialize() already,
     // void invoke it twice;
   }
@@ -51,13 +51,13 @@ struct invoke_initialize_if_possible<
     T, my_void_t<decltype(std::declval<T>().initialize()),
                  // see comment above, otherwise, ambigurous template defined.
                  is_not_derived_from_with_injection<T>>> {
-  static void initialize(T* t) { t->initialize(); }
+  static void initialize(T *t) { t->initialize(); }
 };
 
 template <typename K, typename T> struct WeakStore {
   static std::unordered_map<K, std::weak_ptr<T>> the_store_;
   template <typename... Args>
-  static std::shared_ptr<T> create(const K& key, Args&&... args) {
+  static std::shared_ptr<T> create(const K &key, Args &&...args) {
     std::shared_ptr<T> ret;
     if (the_store_[key].expired()) {
       ret = create_1(std::forward<Args>(args)...);
@@ -73,13 +73,13 @@ private:
   template <typename... Args>
   static typename std::enable_if<!std::is_constructible<T, Args...>::value,
                                  std::shared_ptr<T>>::type
-  create_1(Args&&... args) {
+  create_1(Args &&...args) {
     return T::create(std::forward<Args>(args)...);
   }
   template <typename... Args>
   static typename std::enable_if<std::is_constructible<T, Args...>::value,
                                  std::shared_ptr<T>>::type
-  create_1(Args&&... args) {
+  create_1(Args &&...args) {
     return std::make_shared<T>(std::forward<Args>(args)...);
   }
 };

@@ -12,7 +12,7 @@ namespace mlir_impl {
 // In onnx-mlir , all Tensor element type if is signed integer 8bit use `i8`
 // all attribute type if is signed Integer use `si64`
 mlir::Type onnxElementTypeToMlirElementType(int element_type,
-                                            mlir::OpBuilder& builder) {
+                                            mlir::OpBuilder &builder) {
   switch (element_type) {
   case 1: // TensorProto_DataType_FLOAT
     return builder.getF32Type();
@@ -67,8 +67,8 @@ mlir::Type onnxElementTypeToMlirElementType(int element_type,
   }
 }
 
-mlir::Type onnxElementTypeToMlirType(int element_type, mlir::OpBuilder& builder,
-                                     const llvm::SmallVector<int64_t>* shape) {
+mlir::Type onnxElementTypeToMlirType(int element_type, mlir::OpBuilder &builder,
+                                     const llvm::SmallVector<int64_t> *shape) {
   auto elementType = onnxElementTypeToMlirElementType(element_type, builder);
   if (!shape) {
     return mlir::UnrankedTensorType::get(elementType);

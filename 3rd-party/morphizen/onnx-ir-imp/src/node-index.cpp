@@ -20,7 +20,7 @@ NodeIndex::NodeIndex(unsigned int index, GraphId graph_id) {
 }
 
 // Method implementations
-bool NodeIndex::is_valid(const Graph& graph) const {
+bool NodeIndex::is_valid(const Graph &graph) const {
   if (!fields_.is_valid_) {
     return false; // Invalid flag is set
   }
@@ -33,7 +33,7 @@ bool NodeIndex::is_valid(const Graph& graph) const {
     return false; // Graph mismatch
   }
 
-  const morphizen_onnx::GraphProto* graph_proto = nullptr;
+  const morphizen_onnx::GraphProto *graph_proto = nullptr;
   if (graph_id.is_staging()) {
     if (graph_ptr->get_staging_graph() == nullptr) {
       return false; // Staging graph does not exist
@@ -66,13 +66,13 @@ bool NodeIndex::is_valid() const {
   return true;
 }
 
-bool NodeIndex::operator==(const NodeIndex& other) const {
+bool NodeIndex::operator==(const NodeIndex &other) const {
   static_assert(sizeof(*this) == sizeof(value_),
                 "NodeIndex fields size must match value size");
   return value_ == other.value_;
 }
 
-bool NodeIndex::operator!=(const NodeIndex& other) const {
+bool NodeIndex::operator!=(const NodeIndex &other) const {
   return !(*this == other);
 }
 
@@ -87,16 +87,16 @@ GraphId NodeIndex::get_graph_id() const {
   return GraphId::from_raw(fields_.graph_id_);
 }
 
-const morphizen_onnx::NodeProto& NodeIndex::get_node_proto() const {
+const morphizen_onnx::NodeProto &NodeIndex::get_node_proto() const {
   CHECK(is_valid()) << "NodeIndex is invalid, cannot get node proto: "
                     << to_string();
 
   auto graph_id = get_graph_id();
-  const morphizen_onnx::GraphProto* graph_proto = nullptr;
-  auto* graph = graph_id.get_graph();
+  const morphizen_onnx::GraphProto *graph_proto = nullptr;
+  auto *graph = graph_id.get_graph();
   CHECK(graph != nullptr) << "Graph not found for NodeIndex: " << to_string();
   if (graph_id.is_staging()) {
-    auto* staging_graph = graph->get_staging_graph();
+    auto *staging_graph = graph->get_staging_graph();
     CHECK(staging_graph != nullptr)
         << "Staging graph not found for NodeIndex: " << to_string();
     graph_proto = &staging_graph->get_graph_proto();
@@ -111,15 +111,15 @@ const morphizen_onnx::NodeProto& NodeIndex::get_node_proto() const {
   return graph_proto->node(fields_.index_);
 }
 
-const Node& NodeIndex::get_node() const {
+const Node &NodeIndex::get_node() const {
   CHECK(is_valid()) << "NodeIndex is invalid, cannot get node: " << to_string();
 
   auto graph_id = get_graph_id();
-  auto* graph = graph_id.get_graph();
+  auto *graph = graph_id.get_graph();
   CHECK(graph != nullptr) << "Graph not found for NodeIndex: " << to_string();
-  const Node* ret = nullptr;
+  const Node *ret = nullptr;
   if (graph_id.is_staging()) {
-    auto* staging_graph = graph->get_staging_graph();
+    auto *staging_graph = graph->get_staging_graph();
     CHECK(staging_graph != nullptr)
         << "Staging graph not found for NodeIndex: " << to_string();
     // check out of bounds of staging_graph->nodes_.size()
@@ -142,11 +142,11 @@ const Node& NodeIndex::get_node() const {
 }
 
 bool NodeIndex::is_fused_node() const {
-  const auto& node_proto = get_node_proto();
+  const auto &node_proto = get_node_proto();
   // Check if the node has a fused_node_index attribute
-  const auto& attributes = node_proto.attribute();
+  const auto &attributes = node_proto.attribute();
   auto it =
-      std::find_if(attributes.begin(), attributes.end(), [](const auto& attr) {
+      std::find_if(attributes.begin(), attributes.end(), [](const auto &attr) {
         return attr.name() == "fused_node_index";
       });
   if (it == attributes.end() || it->i() < 0) {
@@ -156,43 +156,43 @@ bool NodeIndex::is_fused_node() const {
 }
 NodeIndex NodeIndex::invalid() { return NodeIndex(); }
 
-const std::string& NodeIndex::get_node_op_type() const {
-  const auto& node_proto = get_node_proto();
+const std::string &NodeIndex::get_node_op_type() const {
+  const auto &node_proto = get_node_proto();
   return node_proto.op_type();
 }
 
-const std::string& NodeIndex::get_node_op_domain() const {
-  const auto& node_proto = get_node_proto();
+const std::string &NodeIndex::get_node_op_domain() const {
+  const auto &node_proto = get_node_proto();
   return node_proto.domain();
 }
 
-const std::string& NodeIndex::get_name() const {
-  const auto& node_proto = get_node_proto();
+const std::string &NodeIndex::get_name() const {
+  const auto &node_proto = get_node_proto();
   return node_proto.name();
 }
 
-const std::string& NodeIndex::get_description() const {
-  const auto& node_proto = get_node_proto();
+const std::string &NodeIndex::get_description() const {
+  const auto &node_proto = get_node_proto();
   return node_proto.doc_string();
 }
 
-const std::vector<NodeArgIndex>& NodeIndex::get_input_node_args() const {
-  const auto& node = get_node();
+const std::vector<NodeArgIndex> &NodeIndex::get_input_node_args() const {
+  const auto &node = get_node();
   return node.get_inputs();
 }
-const std::vector<NodeArgIndex>& NodeIndex::get_output_node_args() const {
-  const auto& node = get_node();
+const std::vector<NodeArgIndex> &NodeIndex::get_output_node_args() const {
+  const auto &node = get_node();
   return node.get_outputs();
 }
 
-const ::google::protobuf::RepeatedPtrField<::morphizen_onnx::AttributeProto>*
+const ::google::protobuf::RepeatedPtrField<::morphizen_onnx::AttributeProto> *
 NodeIndex::get_attributes() const {
   if (!is_valid()) {
     return nullptr; // Return nullptr if the node is not valid
   }
 
   try {
-    const auto& node_proto = get_node_proto();
+    const auto &node_proto = get_node_proto();
     return &node_proto.attribute();
   } catch (...) {
     // If any error occurs (graph not found, staging graph issues, etc.), return
@@ -210,12 +210,12 @@ std::string NodeIndex::to_string() const {
   return oss.str();
 }
 
-const void* NodeIndex::to_morphizen_core_node_ptr() const {
+const void *NodeIndex::to_morphizen_core_node_ptr() const {
   // Convert NodeIndex to morphizen::Node pointer
-  return reinterpret_cast<const void*>(static_cast<uintptr_t>(value_));
+  return reinterpret_cast<const void *>(static_cast<uintptr_t>(value_));
 }
 
-NodeIndex NodeIndex::from_morphizen_core_node_ptr(const void* ptr) {
+NodeIndex NodeIndex::from_morphizen_core_node_ptr(const void *ptr) {
   auto ret = NodeIndex::invalid();
   if (ptr == nullptr) {
     return ret;
@@ -234,37 +234,37 @@ NodeIndex NodeIndex::from_morphizen_core_node_index(size_t index) {
   return ret;
 }
 
-const Graph* NodeIndex::get_function_body() const {
+const Graph *NodeIndex::get_function_body() const {
   if (!is_valid()) {
     return nullptr; // Return nullptr if the node is not valid
   }
   try {
-    const auto& node_proto = get_node_proto();
-    const auto& attributes = node_proto.attribute();
+    const auto &node_proto = get_node_proto();
+    const auto &attributes = node_proto.attribute();
     auto it = std::find_if(
         attributes.begin(), attributes.end(),
-        [](const auto& attr) { return attr.name() == "fused_graph_id"; });
+        [](const auto &attr) { return attr.name() == "fused_graph_id"; });
     if (it == attributes.end()) {
       LOG(ERROR) << "No fused_graph_id attribute found in NodeIndex: "
                  << "node proto=\n"
                  << node_proto.DebugString() << " " << to_string();
       return nullptr; // No fused graph ID found
     }
-    auto& fused_graph_id_attr = *it;
+    auto &fused_graph_id_attr = *it;
     if (fused_graph_id_attr.type() != morphizen_onnx::AttributeProto::INT) {
       LOG(ERROR) << "Invalid fused_graph_id attribute type in NodeIndex: "
                  << to_string();
       return nullptr; // Invalid attribute type
     }
     auto fused_graph_id = GraphId::from_raw((uint32_t)fused_graph_id_attr.i());
-    const auto* graph = fused_graph_id.get_graph();
+    const auto *graph = fused_graph_id.get_graph();
     if (graph == nullptr) {
       LOG(ERROR) << "Graph not found for fused_graph_id: "
                  << fused_graph_id.to_string();
       return nullptr; // Graph not found
     }
     return graph;
-  } catch (std::exception& e) {
+  } catch (std::exception &e) {
     LOG(ERROR) << "Error getting function body for NodeIndex: " << to_string()
                << ", error: " << e.what();
     return nullptr;

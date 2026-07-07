@@ -26,20 +26,20 @@ struct OrtGraphWrapper
       Ort::detail::Base<Ort::detail::Unowned<const OrtGraph>> {
   using B = Ort::detail::Base<Ort::detail::Unowned<const OrtGraph>>;
 
-  OrtGraphWrapper(const ApiPtrs& api_ptrs, const OrtGraph& graph);
-  const OrtGraph& get() const;
+  OrtGraphWrapper(const ApiPtrs &api_ptrs, const OrtGraph &graph);
+  const OrtGraph &get() const;
 
   bool is_subgraph() const;
-  const char* name() const;
+  const char *name() const;
   int64_t ir_version() const;
 
   // Convenience methods that immediately copy to vector (for short-lived
   // access)
   Ort::ModelMetadata get_model_metadata() const;
-  std::vector<const OrtNode*> nodes() const;
-  std::vector<const OrtValueInfo*> inputs() const;
-  std::vector<const OrtValueInfo*> outputs() const;
-  std::vector<const OrtValueInfo*> initializers() const;
+  std::vector<const OrtNode *> nodes() const;
+  std::vector<const OrtValueInfo *> inputs() const;
+  std::vector<const OrtValueInfo *> outputs() const;
+  std::vector<const OrtValueInfo *> initializers() const;
   // Get the opset requirements for this graph
   std::map<std::string, int> guess_opset() const;
 };

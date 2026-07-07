@@ -6,7 +6,7 @@
 #include "morphizen/morphizen.hpp"
 #include "test_environment.hpp"
 #ifdef MORPHIZEN_ENABLE_BOOST
-#  include <boost/process.hpp>
+#include <boost/process.hpp>
 #endif
 #include <filesystem>
 #include <fstream>
@@ -23,20 +23,20 @@ TEST_F(GraphTest, LoadAndSave) {
   LOG(INFO) << "model: " << graph.name() << " is loaded" << std::endl;
   auto inputs = graph.inputs();
   LOG(INFO) << "graph inputs:";
-  for (auto& input : inputs) {
+  for (auto &input : inputs) {
     LOG(INFO) << "  " << input.name() << " => " << input;
   }
   auto outputs = graph.outputs();
   LOG(INFO) << "graph outputs:";
-  for (auto& output : outputs) {
+  for (auto &output : outputs) {
     LOG(INFO) << "  " << output.name() << " => " << output;
   }
   auto c = 0;
   LOG(INFO) << "first 10 initializers:";
-  for (auto& init : graph.constant_initializers()) {
+  for (auto &init : graph.constant_initializers()) {
     LOG(INFO) << " " << c++ << " " << init << std::endl;
   }
-  for (auto& init : graph.constant_initializers()) {
+  for (auto &init : graph.constant_initializers()) {
     // NOTE: constant_initializers is not ordered.
     LOG(INFO) << "  " << init.name() << " => " << init;
     EXPECT_EQ(init.is_constant(), true);
@@ -157,7 +157,7 @@ TEST_F(GraphTest, NodesInTopologicalOrder) {
   graph.resolve();
   LOG(INFO) << "model: " << graph.name() << " is loaded" << std::endl;
   auto nodes = graph.nodes_in_topological_order();
-  for (auto& node : nodes) {
+  for (auto &node : nodes) {
     LOG(INFO) << node;
     auto intputs = node.inputs();
     auto outputs = node.outputs();

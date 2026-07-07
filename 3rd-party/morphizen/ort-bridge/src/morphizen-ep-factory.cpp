@@ -14,7 +14,7 @@
 
 #if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
     MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
-#  include "./morphizen-hip-gpu-allocator.hpp"
+#include "./morphizen-hip-gpu-allocator.hpp"
 #endif
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_MORPHIZEN_EP_FACTORY, "0")
@@ -43,8 +43,8 @@ DEF_ENV_PARAM(MORPHIZEN_EP_ENABLE_CPU_DEVICE, "0")
   LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_MORPHIZEN_EP_FACTORY) >= n)
 namespace morphizen {
 
-MorphiZenEpFactory::MorphiZenEpFactory(const char* ep_name, ApiPtrs apis,
-                                       const OrtLogger& default_logger)
+MorphiZenEpFactory::MorphiZenEpFactory(const char *ep_name, ApiPtrs apis,
+                                       const OrtLogger &default_logger)
     : OrtEpFactory{}, // Ensure optional functions are default initialized to
                       // nullptr
       ApiPtrs(apis), default_logger_{default_logger}, ep_name_{ep_name},
@@ -67,34 +67,34 @@ MorphiZenEpFactory::MorphiZenEpFactory(const char* ep_name, ApiPtrs apis,
   IsStreamAware = IsStreamAwareImpl;
   CreateSyncStreamForDevice = CreateSyncStreamForDeviceImpl;
 }
-const char* ORT_API_CALL
-MorphiZenEpFactory::GetNameImpl(const OrtEpFactory* this_ptr) noexcept {
-  const auto* factory = static_cast<const MorphiZenEpFactory*>(this_ptr);
+const char *ORT_API_CALL
+MorphiZenEpFactory::GetNameImpl(const OrtEpFactory *this_ptr) noexcept {
+  const auto *factory = static_cast<const MorphiZenEpFactory *>(this_ptr);
   return factory->ep_name_.c_str();
 }
 
-const char* ORT_API_CALL
-MorphiZenEpFactory::GetVendorImpl(const OrtEpFactory* this_ptr) noexcept {
-  const auto* factory = static_cast<const MorphiZenEpFactory*>(this_ptr);
+const char *ORT_API_CALL
+MorphiZenEpFactory::GetVendorImpl(const OrtEpFactory *this_ptr) noexcept {
+  const auto *factory = static_cast<const MorphiZenEpFactory *>(this_ptr);
   return factory->vendor_.c_str();
 }
 uint32_t ORT_API_CALL
-MorphiZenEpFactory::GetVendorIdImpl(const OrtEpFactory* this_ptr) noexcept {
-  const auto* factory = static_cast<const MorphiZenEpFactory*>(this_ptr);
+MorphiZenEpFactory::GetVendorIdImpl(const OrtEpFactory *this_ptr) noexcept {
+  const auto *factory = static_cast<const MorphiZenEpFactory *>(this_ptr);
   return factory->vendor_id_;
 }
-const char* ORT_API_CALL
-MorphiZenEpFactory::GetVersionImpl(const OrtEpFactory* this_ptr) noexcept {
-  const auto* factory = static_cast<const MorphiZenEpFactory*>(this_ptr);
+const char *ORT_API_CALL
+MorphiZenEpFactory::GetVersionImpl(const OrtEpFactory *this_ptr) noexcept {
+  const auto *factory = static_cast<const MorphiZenEpFactory *>(this_ptr);
   return factory->ep_version_.c_str();
 }
 
-OrtStatus* ORT_API_CALL MorphiZenEpFactory::GetSupportedDevicesImpl(
-    OrtEpFactory* this_ptr, const OrtHardwareDevice* const* devices,
-    size_t num_devices, OrtEpDevice** ep_devices, size_t max_ep_devices,
-    size_t* p_num_ep_devices) noexcept {
-  size_t& num_ep_devices = *p_num_ep_devices;
-  auto* factory = static_cast<MorphiZenEpFactory*>(this_ptr);
+OrtStatus *ORT_API_CALL MorphiZenEpFactory::GetSupportedDevicesImpl(
+    OrtEpFactory *this_ptr, const OrtHardwareDevice *const *devices,
+    size_t num_devices, OrtEpDevice **ep_devices, size_t max_ep_devices,
+    size_t *p_num_ep_devices) noexcept {
+  size_t &num_ep_devices = *p_num_ep_devices;
+  auto *factory = static_cast<MorphiZenEpFactory *>(this_ptr);
 
   // ORT plugin EP V2 requires every OrtEpDevice registered by a single
   // factory to share the same OrtDeviceMemoryInfo. We therefore pick a single
@@ -104,7 +104,7 @@ OrtStatus* ORT_API_CALL MorphiZenEpFactory::GetSupportedDevicesImpl(
 
   for (size_t i = 0; i < num_devices && num_ep_devices < max_ep_devices; ++i) {
     // C API
-    const OrtHardwareDevice* hardware_device = devices[i];
+    const OrtHardwareDevice *hardware_device = devices[i];
     const std::uint32_t vendor_id =
         factory->ort_api.HardwareDevice_VendorId(hardware_device);
     const OrtHardwareDeviceType device_type =
@@ -125,23 +125,23 @@ OrtStatus* ORT_API_CALL MorphiZenEpFactory::GetSupportedDevicesImpl(
       }
     }
     // these can be returned as nullptr if you have nothing to add.
-    OrtKeyValuePairs* ep_metadata = nullptr;
-    OrtKeyValuePairs* ep_options = nullptr;
+    OrtKeyValuePairs *ep_metadata = nullptr;
+    OrtKeyValuePairs *ep_options = nullptr;
     factory->ort_api.CreateKeyValuePairs(&ep_metadata);
     factory->ort_api.CreateKeyValuePairs(&ep_options);
     factory->ep_metadata_ =
-        std::unique_ptr<OrtKeyValuePairs, void (*)(OrtKeyValuePairs*)>(
+        std::unique_ptr<OrtKeyValuePairs, void (*)(OrtKeyValuePairs *)>(
             ep_metadata, factory->ort_api.ReleaseKeyValuePairs);
     factory->ep_options_ =
-        std::unique_ptr<OrtKeyValuePairs, void (*)(OrtKeyValuePairs*)>(
+        std::unique_ptr<OrtKeyValuePairs, void (*)(OrtKeyValuePairs *)>(
             ep_options, factory->ort_api.ReleaseKeyValuePairs);
     if (num_ep_devices == max_ep_devices) {
       return factory->ort_api.CreateStatus(
           ORT_INVALID_ARGUMENT, "Not enough space to return EP devices.");
     }
     // OrtEpDevice copies ep_metadata and ep_options.
-    OrtEpDevice* registered_ep_device = nullptr;
-    auto* status = factory->ort_api.GetEpApi()->CreateEpDevice(
+    OrtEpDevice *registered_ep_device = nullptr;
+    auto *status = factory->ort_api.GetEpApi()->CreateEpDevice(
         factory, hardware_device, ep_metadata, ep_options,
         &registered_ep_device);
     if (status != nullptr) {
@@ -155,13 +155,13 @@ OrtStatus* ORT_API_CALL MorphiZenEpFactory::GetSupportedDevicesImpl(
     // describe where our allocator places tensors. ORT will later look these
     // up by OrtMemoryInfo and call CreateAllocator/CreateDataTransfer.
     if (!cpu_debug_mode) {
-      const OrtEpApi* ep_api_ptr = factory->ort_api.GetEpApi();
+      const OrtEpApi *ep_api_ptr = factory->ort_api.GetEpApi();
 
       // Lazily create the two OrtMemoryInfo instances on first use; reuse
       // them across subsequent factory invocations.
       if (!factory->gpu_memory_info_) {
-        OrtMemoryInfo* raw = nullptr;
-        auto* st = factory->ort_api.CreateMemoryInfo_V2(
+        OrtMemoryInfo *raw = nullptr;
+        auto *st = factory->ort_api.CreateMemoryInfo_V2(
             "MorphiZen", OrtMemoryInfoDeviceType_GPU,
             /*vendor*/ factory->vendor_id_,
             /*device_id*/ 0, OrtDeviceMemoryType_DEFAULT,
@@ -173,8 +173,8 @@ OrtStatus* ORT_API_CALL MorphiZenEpFactory::GetSupportedDevicesImpl(
             raw, factory->ort_api.ReleaseMemoryInfo);
       }
       if (!factory->gpu_host_accessible_memory_info_) {
-        OrtMemoryInfo* raw = nullptr;
-        auto* st = factory->ort_api.CreateMemoryInfo_V2(
+        OrtMemoryInfo *raw = nullptr;
+        auto *st = factory->ort_api.CreateMemoryInfo_V2(
             "MorphiZen host accessible", OrtMemoryInfoDeviceType_GPU,
             /*vendor*/ factory->vendor_id_,
             /*device_id*/ 0, OrtDeviceMemoryType_HOST_ACCESSIBLE,
@@ -187,11 +187,11 @@ OrtStatus* ORT_API_CALL MorphiZenEpFactory::GetSupportedDevicesImpl(
                 raw, factory->ort_api.ReleaseMemoryInfo);
       }
 
-      if (auto* st = ep_api_ptr->EpDevice_AddAllocatorInfo(
+      if (auto *st = ep_api_ptr->EpDevice_AddAllocatorInfo(
               registered_ep_device, factory->gpu_memory_info_.get())) {
         return st;
       }
-      if (auto* st = ep_api_ptr->EpDevice_AddAllocatorInfo(
+      if (auto *st = ep_api_ptr->EpDevice_AddAllocatorInfo(
               registered_ep_device,
               factory->gpu_host_accessible_memory_info_.get())) {
         return st;
@@ -202,14 +202,14 @@ OrtStatus* ORT_API_CALL MorphiZenEpFactory::GetSupportedDevicesImpl(
   return nullptr;
 }
 
-OrtStatus* ORT_API_CALL MorphiZenEpFactory::CreateEpImpl(
-    OrtEpFactory* this_ptr,
-    _In_reads_(num_devices) const OrtHardwareDevice* const* /*devices*/,
-    _In_reads_(num_devices) const OrtKeyValuePairs* const* ep_metadata,
-    _In_ size_t num_devices, _In_ const OrtSessionOptions* session_options,
-    _In_ const OrtLogger* logger, _Out_ OrtEp** ep) noexcept {
+OrtStatus *ORT_API_CALL MorphiZenEpFactory::CreateEpImpl(
+    OrtEpFactory *this_ptr,
+    _In_reads_(num_devices) const OrtHardwareDevice *const * /*devices*/,
+    _In_reads_(num_devices) const OrtKeyValuePairs *const *ep_metadata,
+    _In_ size_t num_devices, _In_ const OrtSessionOptions *session_options,
+    _In_ const OrtLogger *logger, _Out_ OrtEp **ep) noexcept {
   MY_LOG(1) << "CreateEpImpl: num_devices=" << num_devices;
-  auto* factory = static_cast<MorphiZenEpFactory*>(this_ptr);
+  auto *factory = static_cast<MorphiZenEpFactory *>(this_ptr);
   *ep = nullptr;
 
   // MorphiZen does not use the selected-device array: it compiles for and runs
@@ -232,18 +232,18 @@ OrtStatus* ORT_API_CALL MorphiZenEpFactory::CreateEpImpl(
   *ep = morphizen_ep.release();
   return nullptr;
 }
-void ORT_API_CALL MorphiZenEpFactory::ReleaseEpImpl(OrtEpFactory* /*this_ptr*/,
-                                                    OrtEp* ep) noexcept {
-  MorphiZenEP* morphizen_ep = static_cast<MorphiZenEP*>(ep);
+void ORT_API_CALL MorphiZenEpFactory::ReleaseEpImpl(OrtEpFactory * /*this_ptr*/,
+                                                    OrtEp *ep) noexcept {
+  MorphiZenEP *morphizen_ep = static_cast<MorphiZenEP *>(ep);
   delete morphizen_ep;
 }
 
-OrtStatus* ORT_API_CALL
+OrtStatus *ORT_API_CALL
 MorphiZenEpFactory::ValidateCompiledModelCompatibilityInfoImpl(
-    OrtEpFactory* this_ptr,
-    _In_reads_(num_devices) const OrtHardwareDevice* const* devices,
-    _In_ size_t num_devices, _In_ const char* compatibility_info,
-    _Out_ OrtCompiledModelCompatibility* model_compatibility) noexcept {
+    OrtEpFactory *this_ptr,
+    _In_reads_(num_devices) const OrtHardwareDevice *const *devices,
+    _In_ size_t num_devices, _In_ const char *compatibility_info,
+    _Out_ OrtCompiledModelCompatibility *model_compatibility) noexcept {
   // Note: this_ptr (MorphiZenEpFactory*) is not currently used for validation
   // Empty eps pointer since validation is based on compatibility_info and
   // devices eps may be used in future for EP-specific validation
@@ -251,7 +251,7 @@ MorphiZenEpFactory::ValidateCompiledModelCompatibilityInfoImpl(
   int compatibility_result = 0;
   int status = validate_compiled_model_compatibility_info(
       nullptr, // eps - not available in factory context
-      compatibility_info, reinterpret_cast<const void* const*>(devices),
+      compatibility_info, reinterpret_cast<const void *const *>(devices),
       num_devices, &compatibility_result);
 
   if (status != 0) {
@@ -266,17 +266,17 @@ MorphiZenEpFactory::ValidateCompiledModelCompatibilityInfoImpl(
   return nullptr;
 }
 
-OrtStatus* ORT_API_CALL MorphiZenEpFactory::CreateAllocatorImpl(
-    OrtEpFactory* this_ptr,
+OrtStatus *ORT_API_CALL MorphiZenEpFactory::CreateAllocatorImpl(
+    OrtEpFactory *this_ptr,
 #if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
     MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
-    const OrtMemoryInfo* memory_info,
+    const OrtMemoryInfo *memory_info,
 #else
-    const OrtMemoryInfo* /*memory_info*/,
+    const OrtMemoryInfo * /*memory_info*/,
 #endif
-    const OrtKeyValuePairs* /*allocator_options*/,
-    OrtAllocator** allocator) noexcept {
-  auto* factory = static_cast<MorphiZenEpFactory*>(this_ptr);
+    const OrtKeyValuePairs * /*allocator_options*/,
+    OrtAllocator **allocator) noexcept {
+  auto *factory = static_cast<MorphiZenEpFactory *>(this_ptr);
 
 #if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
     MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
@@ -293,11 +293,11 @@ OrtStatus* ORT_API_CALL MorphiZenEpFactory::CreateAllocatorImpl(
 }
 
 void ORT_API_CALL MorphiZenEpFactory::ReleaseAllocatorImpl(
-    OrtEpFactory* /*this*/, OrtAllocator* allocator) noexcept {
+    OrtEpFactory * /*this*/, OrtAllocator *allocator) noexcept {
 #if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
     MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
   if (allocator != nullptr) {
-    delete static_cast<HipGpuAllocator*>(allocator);
+    delete static_cast<HipGpuAllocator *>(allocator);
   }
 #else
   (void)allocator;
@@ -306,9 +306,9 @@ void ORT_API_CALL MorphiZenEpFactory::ReleaseAllocatorImpl(
 #endif
 }
 
-OrtStatus* ORT_API_CALL MorphiZenEpFactory::CreateDataTransferImpl(
-    OrtEpFactory* this_ptr, OrtDataTransferImpl** data_transfer) noexcept {
-  auto* factory = static_cast<MorphiZenEpFactory*>(this_ptr);
+OrtStatus *ORT_API_CALL MorphiZenEpFactory::CreateDataTransferImpl(
+    OrtEpFactory *this_ptr, OrtDataTransferImpl **data_transfer) noexcept {
+  auto *factory = static_cast<MorphiZenEpFactory *>(this_ptr);
 #if defined(MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR) &&                             \
     MORPHIZEN_ENABLE_HIP_GPU_ALLOCATOR
   if (!factory->data_transfer_impl_) {
@@ -325,15 +325,15 @@ OrtStatus* ORT_API_CALL MorphiZenEpFactory::CreateDataTransferImpl(
 }
 
 bool ORT_API_CALL MorphiZenEpFactory::IsStreamAwareImpl(
-    const OrtEpFactory* /*this_ptr*/) noexcept {
+    const OrtEpFactory * /*this_ptr*/) noexcept {
   return false;
 }
 
-OrtStatus* ORT_API_CALL MorphiZenEpFactory::CreateSyncStreamForDeviceImpl(
-    OrtEpFactory* this_ptr, const OrtMemoryDevice* /*memory_device*/,
-    const OrtKeyValuePairs* /*stream_options*/,
-    OrtSyncStreamImpl** stream) noexcept {
-  auto* factory = static_cast<MorphiZenEpFactory*>(this_ptr);
+OrtStatus *ORT_API_CALL MorphiZenEpFactory::CreateSyncStreamForDeviceImpl(
+    OrtEpFactory *this_ptr, const OrtMemoryDevice * /*memory_device*/,
+    const OrtKeyValuePairs * /*stream_options*/,
+    OrtSyncStreamImpl **stream) noexcept {
+  auto *factory = static_cast<MorphiZenEpFactory *>(this_ptr);
 
   *stream = nullptr;
   return factory->ort_api.CreateStatus(

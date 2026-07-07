@@ -30,14 +30,14 @@ DEF_ENV_PARAM(MORPHIZEN_SUPRRESS_DEPRECATED_WARNG, "1")
 DEF_ENV_PARAM(DEBUG_OP_REGISTER, "0")
 DEF_ENV_PARAM_2(DEBUG_LOG_LEVEL, "", std::string)
 
-static inline std::string to_lower(const std::string& str) {
+static inline std::string to_lower(const std::string &str) {
   std::string result = str;
   std::transform(result.begin(), result.end(), result.begin(),
                  [](unsigned char c) { return std::tolower(c); });
   return result;
 }
 
-static void SetGlogMinLogLevel(const std::string& log_level) {
+static void SetGlogMinLogLevel(const std::string &log_level) {
   std::string level_lower = to_lower(log_level);
 
   if (level_lower == "info") {
@@ -57,22 +57,22 @@ extern "C" {
 class OpHolder {
   struct Opdef {
     std::string domain;
-    OrtCustomOp* op_ptr; // we want call deleter instead of release()
-    void (*deleter)(OrtCustomOp*);
+    OrtCustomOp *op_ptr; // we want call deleter instead of release()
+    void (*deleter)(OrtCustomOp *);
   };
 
 public:
   ~OpHolder() {
     // 1. all_ops_
-    for (auto& ops : all_ops_) {
+    for (auto &ops : all_ops_) {
       ops.deleter(ops.op_ptr);
     }
     all_ops_.clear();
   }
 
   // caller code: add_op("com.xilinx", op.release(), ...);
-  void add_op(const char* domain1, OrtCustomOp* op,
-              void (*deleter)(OrtCustomOp*)) {
+  void add_op(const char *domain1, OrtCustomOp *op,
+              void (*deleter)(OrtCustomOp *)) {
     std::string custom_op_name = op->GetName(op);
     std::string domain = domain1;
     LOG_IF(INFO, ENV_PARAM(DEBUG_OP_REGISTER))
@@ -80,7 +80,7 @@ public:
         << ") ";
     if (all_ops_.end() !=
         std::find_if(all_ops_.begin(), all_ops_.end(),
-                     [domain, custom_op_name](const Opdef& op) {
+                     [domain, custom_op_name](const Opdef &op) {
                        return op.domain == domain &&
                               op.op_ptr->GetName(op.op_ptr) == custom_op_name;
                      })) {
@@ -92,16 +92,16 @@ public:
     if (domains.count(domain) == 0) {
       domains.emplace(domain, Ort::CustomOpDomain(domain1));
     }
-    auto& domain_obj = domains.at(domain);
+    auto &domain_obj = domains.at(domain);
     domain_obj.Add(
         op); // This does not take ownership of the op, simply registers it.
     // it is owned by all_ops_.
   }
-  OrtCustomOp* get_op(const std::string& domain,
-                      const std::string& custom_op_name) const {
+  OrtCustomOp *get_op(const std::string &domain,
+                      const std::string &custom_op_name) const {
     auto it =
         std::find_if(all_ops_.begin(), all_ops_.end(),
-                     [domain, custom_op_name](const Opdef& op) {
+                     [domain, custom_op_name](const Opdef &op) {
                        return op.domain == domain &&
                               op.op_ptr->GetName(op.op_ptr) == custom_op_name;
                      });
@@ -110,10 +110,10 @@ public:
     }
     return nullptr;
   }
-  std::vector<OrtCustomOpDomain*> get_domains() const {
-    std::vector<OrtCustomOpDomain*> ret;
+  std::vector<OrtCustomOpDomain *> get_domains() const {
+    std::vector<OrtCustomOpDomain *> ret;
     for (auto it = domains.begin(); it != domains.end(); it++) {
-      OrtCustomOpDomain* ptr = it->second;
+      OrtCustomOpDomain *ptr = it->second;
       ret.push_back(ptr);
     }
     return ret;
@@ -124,7 +124,7 @@ private:
   std::vector<Opdef> all_ops_;
 };
 
-static OpHolder& get_global_op_holder() {
+static OpHolder &get_global_op_holder() {
   static std::unique_ptr<OpHolder> opholder_instance = nullptr;
   if (!opholder_instance) {
     opholder_instance = std::make_unique<OpHolder>();
@@ -140,13 +140,13 @@ static OpHolder& get_global_op_holder() {
 }
 
 static void
-intialize_op_defs_old(std::vector<OrtCustomOpDomain*>& contrib_domains,
-                      std::vector<OrtCustomOpDomain*>& ret_domain) {
+intialize_op_defs_old(std::vector<OrtCustomOpDomain *> &contrib_domains,
+                      std::vector<OrtCustomOpDomain *> &ret_domain) {
   // This function is used to initialize the op_def_map
-  typedef morphizen::OpDefInfo* (*morphizen_op_def_info_t)();
+  typedef morphizen::OpDefInfo *(*morphizen_op_def_info_t)();
   auto op_def_info_ptrs =
       morphizen::Plugin::get_all_symbols("morphizen_op_def_info");
-  for (const auto& op_def_into_ptr : op_def_info_ptrs) {
+  for (const auto &op_def_into_ptr : op_def_info_ptrs) {
     LOG_IF(ERROR, ENV_PARAM(MORPHIZEN_SUPRRESS_DEPRECATED_WARNG))
         << " morphizen_op_def_info() is depreated, please update plugin \""
         << op_def_into_ptr.first << "\", there is potential memory leak";
@@ -155,7 +155,7 @@ intialize_op_defs_old(std::vector<OrtCustomOpDomain*>& contrib_domains,
     auto op_def_info = op_def_info_func();
     std::vector<Ort::CustomOpDomain> domains;
     op_def_info->get_domains(domains);
-    for (auto& domain : domains) {
+    for (auto &domain : domains) {
       // Memory leak, passing data across dlls
       contrib_domains.push_back(domain.release());
       ret_domain.push_back(*contrib_domains.rbegin());
@@ -171,13 +171,13 @@ intialize_op_defs_old(std::vector<OrtCustomOpDomain*>& contrib_domains,
   //  }
   //}
 }
-static void intialize_op_defs(std::vector<OrtCustomOpDomain*>& ret_domain) {
+static void intialize_op_defs(std::vector<OrtCustomOpDomain *> &ret_domain) {
   // This function is used to initialize the op_def_map
-  typedef void (*register_ops_t)(void*, add_op_t);
-  auto& op_holder = get_global_op_holder();
-  auto add_op = [](void* state, const char* domain, OrtCustomOp* op,
-                   void (*deleter)(OrtCustomOp*)) {
-    auto op_holder = static_cast<OpHolder*>(state);
+  typedef void (*register_ops_t)(void *, add_op_t);
+  auto &op_holder = get_global_op_holder();
+  auto add_op = [](void *state, const char *domain, OrtCustomOp *op,
+                   void (*deleter)(OrtCustomOp *)) {
+    auto op_holder = static_cast<OpHolder *>(state);
     op_holder->add_op(domain, op,
                       deleter); // op ownership has been transfer to op_holder.
   };
@@ -185,7 +185,7 @@ static void intialize_op_defs(std::vector<OrtCustomOpDomain*>& ret_domain) {
       morphizen::Plugin::get_all_symbols("morphizen_register_ops");
   LOG_IF(INFO, ENV_PARAM(DEBUG_OP_REGISTER))
       << " register op find " << register_ops_all.size() << " symbols";
-  for (const auto& register_ops : register_ops_all) {
+  for (const auto &register_ops : register_ops_all) {
     LOG_IF(INFO, ENV_PARAM(DEBUG_OP_REGISTER))
         << " ----------------------" << register_ops.first
         << "-------------------------- ";
@@ -197,8 +197,8 @@ static void intialize_op_defs(std::vector<OrtCustomOpDomain*>& ret_domain) {
   ret_domain.insert(ret_domain.end(), tmp.begin(), tmp.end());
 }
 MORPHIZEN_DLL_SPEC
-const ::OrtCustomOp* morphizen_get_registered_custom_op(const char* domain,
-                                                        const char* op_name) {
+const ::OrtCustomOp *morphizen_get_registered_custom_op(const char *domain,
+                                                        const char *op_name) {
   /* static auto plugin = morphizen::Plugin::get("onnxruntime_morphizen_ep");
    static auto func =
        plugin->get_method<const ::OrtCustomOp*, const char*, const char*>(
@@ -209,11 +209,11 @@ const ::OrtCustomOp* morphizen_get_registered_custom_op(const char* domain,
 // The interface exported below is used by onnxruntime_providers_morphizen.so
 MORPHIZEN_DLL_SPEC
 void initialize_onnxruntime_morphizen_ep(
-    morphizen::OrtApiForMorphizen* api,
-    std::vector<OrtCustomOpDomain*>& ret_domain) {
+    morphizen::OrtApiForMorphizen *api,
+    std::vector<OrtCustomOpDomain *> &ret_domain) {
   morphizen::set_the_global_api(api);
   {
-    static std::vector<OrtCustomOpDomain*> contrib_domains;
+    static std::vector<OrtCustomOpDomain *> contrib_domains;
     // contrib_domains is used to hold the raw pointers, however,there is no way
     // to to delete deconstruct objects, so the memory leak here.
     intialize_op_defs_old(contrib_domains, ret_domain);
@@ -232,15 +232,15 @@ void deinitialize_onnxruntime_morphizen_ep() {
 }
 
 MORPHIZEN_DLL_SPEC
-std::vector<std::unique_ptr<morphizen::ExecutionProvider>>*
+std::vector<std::unique_ptr<morphizen::ExecutionProvider>> *
 compile_onnx_model_morphizen_ep_v4(
-    const std::string& model_path, const onnxruntime::Graph& graph,
-    const onnxruntime::ProviderOptions& options,
-    const std::map<std::string, std::string>& session_configs,
-    [[maybe_unused]] void* status,
-    [[maybe_unused]] void (*func)(void*, int, const char*),
-    const OrtLogger* ort_logger) {
-  auto set_ort_status = [&](int error_code, const char* error_message) {
+    const std::string &model_path, const onnxruntime::Graph &graph,
+    const onnxruntime::ProviderOptions &options,
+    const std::map<std::string, std::string> &session_configs,
+    [[maybe_unused]] void *status,
+    [[maybe_unused]] void (*func)(void *, int, const char *),
+    const OrtLogger *ort_logger) {
+  auto set_ort_status = [&](int error_code, const char *error_message) {
     if (func != nullptr) {
       func(status, error_code, error_message);
     }
@@ -266,25 +266,25 @@ compile_onnx_model_morphizen_ep_v4(
 }
 
 MORPHIZEN_DLL_SPEC
-void profiler_collect(std::vector<EventInfo>& api_events,
-                      std::vector<EventInfo>& kernel_events) {
+void profiler_collect(std::vector<EventInfo> &api_events,
+                      std::vector<EventInfo> &kernel_events) {
   morphizen::profiler_collect(api_events, kernel_events);
 }
 MORPHIZEN_DLL_SPEC
-void* morphizen_get_execution_provider_deletor() {
-  void (*ret)(void*) = nullptr;
-  ret = [](void* p) {
+void *morphizen_get_execution_provider_deletor() {
+  void (*ret)(void *) = nullptr;
+  ret = [](void *p) {
     auto ep = reinterpret_cast<
-        std::vector<std::unique_ptr<morphizen::ExecutionProvider>>*>(p);
+        std::vector<std::unique_ptr<morphizen::ExecutionProvider>> *>(p);
     if (ep != nullptr) {
       delete ep;
     }
   };
-  return reinterpret_cast<void*>(ret);
+  return reinterpret_cast<void *>(ret);
 }
 }
 #if _WIN32
-#  include <windows.h>
+#include <windows.h>
 BOOL WINAPI DllMain(HINSTANCE /*hinstDLL*/, // handle to DLL module
                     DWORD fdwReason,        // reason for calling function
                     LPVOID lpvReserved)     // reserved

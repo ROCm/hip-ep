@@ -17,9 +17,9 @@
 #define TPFSZ 155
 
 #if defined(_WIN32)
-#  define PACKED(x) __declspec(align(x))
+#define PACKED(x) __declspec(align(x))
 #else
-#  define PACKED(x) __attribute__((packed, aligned(x)))
+#define PACKED(x) __attribute__((packed, aligned(x)))
 #endif
 
 typedef struct PACKED(1) {
@@ -48,14 +48,14 @@ template <typename T> static T round_up_to_block_size(T size) {
 }
 class TarHeader {
 public:
-  TarHeader(const std::string& name, size_t size);
+  TarHeader(const std::string &name, size_t size);
   ~TarHeader() = default;
 
 public:
-  void set_name(const std::string& name) { name_ = name; }
+  void set_name(const std::string &name) { name_ = name; }
   void set_size(size_t size) { size_ = size; }
-  void set_link_name(const std::string& real_path) { real_path_ = real_path; }
-  const std::string& path() const { return name_; }
+  void set_link_name(const std::string &real_path) { real_path_ = real_path; }
+  const std::string &path() const { return name_; }
   const std::optional<std::string> real_path() const { return real_path_; }
   bool is_symlink() const {
     return real_path_.has_value() && !real_path_->empty();
@@ -65,8 +65,8 @@ public:
   std::streampos data_end_pos() const { return data_end_pos_; }
   std::streampos block_begin_pos() const { return block_begin_pos_; }
   std::streampos block_end_pos() const { return block_end_pos_; }
-  bool write_header(std::ostream& os);
-  static std::optional<TarHeader> read_header(std::istream& is);
+  bool write_header(std::ostream &os);
+  static std::optional<TarHeader> read_header(std::istream &is);
 
   // for logging;
   std::string to_string() const;
@@ -78,24 +78,24 @@ private:
   void construct_header();
   void construct_long_name();
   void now();
-  HD_USTAR* get_header_for_long_name();
-  HD_USTAR* get_header_for_data();
-  void fill_name(HD_USTAR* header, const char* name, size_t n);
-  void fill_mode(HD_USTAR* header, int mode);
-  void fill_uid(HD_USTAR* header, int uid);
-  void fill_gid(HD_USTAR* header, int gid);
-  void fill_size(HD_USTAR* header, size_t size);
-  void fill_mtime(HD_USTAR* header);
-  void fill_chksum(HD_USTAR* header);
-  void fill_linkflag(HD_USTAR* header, char linkflag);
-  void fill_linkname(HD_USTAR* header, const char* linkname, size_t n);
-  void fill_magic(HD_USTAR* header);
-  void fill_version(HD_USTAR* header);
-  void fill_uname(HD_USTAR* header, const char* uname, size_t n);
-  void fill_gname(HD_USTAR* header, const char* gname, size_t n);
-  void fill_devmajor(HD_USTAR* header, int devmajor);
-  void fill_devminor(HD_USTAR* header, int devminor);
-  void fill_prefix(HD_USTAR* header, const char* prefix, size_t n);
+  HD_USTAR *get_header_for_long_name();
+  HD_USTAR *get_header_for_data();
+  void fill_name(HD_USTAR *header, const char *name, size_t n);
+  void fill_mode(HD_USTAR *header, int mode);
+  void fill_uid(HD_USTAR *header, int uid);
+  void fill_gid(HD_USTAR *header, int gid);
+  void fill_size(HD_USTAR *header, size_t size);
+  void fill_mtime(HD_USTAR *header);
+  void fill_chksum(HD_USTAR *header);
+  void fill_linkflag(HD_USTAR *header, char linkflag);
+  void fill_linkname(HD_USTAR *header, const char *linkname, size_t n);
+  void fill_magic(HD_USTAR *header);
+  void fill_version(HD_USTAR *header);
+  void fill_uname(HD_USTAR *header, const char *uname, size_t n);
+  void fill_gname(HD_USTAR *header, const char *gname, size_t n);
+  void fill_devmajor(HD_USTAR *header, int devmajor);
+  void fill_devminor(HD_USTAR *header, int devminor);
+  void fill_prefix(HD_USTAR *header, const char *prefix, size_t n);
 
 private:
   std::string name_ = "";

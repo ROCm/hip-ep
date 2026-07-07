@@ -14,10 +14,10 @@ using namespace morphizen;
 
 TEST(MemFileTmpHandleTest, CreateFromTmpFile) {
   // Create tmpfile and write test data
-  FILE* tmp = tmpfile();
+  FILE *tmp = tmpfile();
   ASSERT_NE(tmp, nullptr) << "tmpfile() failed";
 
-  const char* test_data = "Hello, mmap from tmpfile!";
+  const char *test_data = "Hello, mmap from tmpfile!";
   size_t data_len = strlen(test_data);
 
   size_t written = fwrite(test_data, 1, data_len, tmp);
@@ -32,18 +32,18 @@ TEST(MemFileTmpHandleTest, CreateFromTmpFile) {
   EXPECT_EQ(mem_file->size(), data_len);
 
   // Verify base pointer is valid
-  void* base = mem_file->base();
+  void *base = mem_file->base();
   ASSERT_NE(base, nullptr);
 
   // Verify data matches
-  std::string mapped_data(static_cast<const char*>(base), data_len);
+  std::string mapped_data(static_cast<const char *>(base), data_len);
   EXPECT_EQ(mapped_data, test_data);
 
   // Close FILE* - mmap should remain valid
   fclose(tmp);
 
   // Verify data still accessible after FILE* closed
-  std::string data_after_close(static_cast<const char*>(base), data_len);
+  std::string data_after_close(static_cast<const char *>(base), data_len);
   EXPECT_EQ(data_after_close, test_data);
 
   // mem_file destructor will cleanup the mapping
@@ -51,7 +51,7 @@ TEST(MemFileTmpHandleTest, CreateFromTmpFile) {
 
 TEST(MemFileTmpHandleTest, EmptyFile) {
   // Create empty tmpfile
-  FILE* tmp = tmpfile();
+  FILE *tmp = tmpfile();
   ASSERT_NE(tmp, nullptr);
   fflush(tmp);
 
@@ -69,7 +69,7 @@ TEST(MemFileTmpHandleTest, NullFilePointer) {
 }
 
 TEST(MemFileTmpHandleTest, LargeFile) {
-  FILE* tmp = tmpfile();
+  FILE *tmp = tmpfile();
   ASSERT_NE(tmp, nullptr);
 
   // Write 1MB of data
@@ -89,7 +89,7 @@ TEST(MemFileTmpHandleTest, LargeFile) {
   EXPECT_EQ(mem_file->size(), size);
 
   // Verify data integrity
-  const char* mapped = static_cast<const char*>(mem_file->base());
+  const char *mapped = static_cast<const char *>(mem_file->base());
   for (size_t i = 0; i < size; ++i) {
     EXPECT_EQ(mapped[i], data[i]) << "Data mismatch at offset " << i;
     if (mapped[i] != data[i]) {

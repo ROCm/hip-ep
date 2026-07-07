@@ -13,14 +13,14 @@
 class E2ETestConfig {
 public:
   static std::vector<std::unique_ptr<E2ETestConfig>>
-  create(const std::filesystem::path& config_path);
+  create(const std::filesystem::path &config_path);
 
 public:
-  const E2ETestConfigProto& proto() const { return config_proto_; }
+  const E2ETestConfigProto &proto() const { return config_proto_; }
 
 public:
-  explicit E2ETestConfig(const E2ETestConfigProto& proto);
-  E2ETestConfig(const E2ETestConfig&) = delete;
+  explicit E2ETestConfig(const E2ETestConfigProto &proto);
+  E2ETestConfig(const E2ETestConfig &) = delete;
   ~E2ETestConfig() = default;
 
 private:

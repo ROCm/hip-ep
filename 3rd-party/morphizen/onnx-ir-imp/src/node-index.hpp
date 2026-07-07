@@ -87,7 +87,7 @@ public:
    * @return NodeIndex corresponding to the legacy pointer
    * @note Used for backward compatibility with existing morphizen core APIs
    */
-  static NodeIndex from_morphizen_core_node_ptr(const void* ptr);
+  static NodeIndex from_morphizen_core_node_ptr(const void *ptr);
 
   /**
    * @brief Create NodeIndex from legacy morphizen core node index
@@ -119,10 +119,10 @@ public:
   explicit NodeIndex(unsigned int index, GraphId graph_id);
 
   // Rule of Five (copy/move semantics)
-  NodeIndex(const NodeIndex& other) = default;
-  NodeIndex(NodeIndex&& other) noexcept = default;
-  NodeIndex& operator=(const NodeIndex& other) = default;
-  NodeIndex& operator=(NodeIndex&& other) noexcept = default;
+  NodeIndex(const NodeIndex &other) = default;
+  NodeIndex(NodeIndex &&other) noexcept = default;
+  NodeIndex &operator=(const NodeIndex &other) = default;
+  NodeIndex &operator=(NodeIndex &&other) noexcept = default;
   ~NodeIndex() = default;
 
   // === Validity and Comparison ===
@@ -132,7 +132,7 @@ public:
    * @param graph The graph to validate against
    * @return true if index is valid and references a node in the graph
    */
-  bool is_valid(const Graph& graph) const;
+  bool is_valid(const Graph &graph) const;
 
   /**
    * @brief Check if this NodeIndex has valid internal state
@@ -145,14 +145,14 @@ public:
    * @param other NodeIndex to compare with
    * @return true if both index and graph_id match
    */
-  bool operator==(const NodeIndex& other) const;
+  bool operator==(const NodeIndex &other) const;
 
   /**
    * @brief Inequality comparison
    * @param other NodeIndex to compare with
    * @return true if either index or graph_id differs
    */
-  bool operator!=(const NodeIndex& other) const;
+  bool operator!=(const NodeIndex &other) const;
 
   /**
    * @brief Compute hash value for use in hash tables
@@ -187,32 +187,32 @@ public:
    * @return void pointer compatible with legacy morphizen core APIs
    * @note Used for backward compatibility
    */
-  const void* to_morphizen_core_node_ptr() const;
+  const void *to_morphizen_core_node_ptr() const;
 
   // === Node Property Access ===
   /**
    * @brief Get the operation type of this node
    * @return ONNX operation type (e.g., "Conv", "Relu", "MatMul")
    */
-  const std::string& get_node_op_type() const;
+  const std::string &get_node_op_type() const;
 
   /**
    * @brief Get the operation domain of this node
    * @return Domain string (e.g., "ai.onnx", "com.microsoft")
    */
-  const std::string& get_node_op_domain() const;
+  const std::string &get_node_op_domain() const;
 
   /**
    * @brief Get the name of this node
    * @return Node name as specified in the ONNX graph
    */
-  const std::string& get_name() const;
+  const std::string &get_name() const;
 
   /**
    * @brief Get the description/documentation of this node
    * @return Human-readable description from doc_string field
    */
-  const std::string& get_description() const;
+  const std::string &get_description() const;
 
   // === Node Relationship Access ===
 
@@ -221,14 +221,14 @@ public:
    * @return Vector of NodeArgIndex representing inputs
    * @note Returns empty vector if node has no inputs
    */
-  const std::vector<NodeArgIndex>& get_input_node_args() const;
+  const std::vector<NodeArgIndex> &get_input_node_args() const;
 
   /**
    * @brief Get all output node arguments produced by this node
    * @return Vector of NodeArgIndex representing outputs
    * @note Returns empty vector if node has no outputs
    */
-  const std::vector<NodeArgIndex>& get_output_node_args() const;
+  const std::vector<NodeArgIndex> &get_output_node_args() const;
 
   /**
    * @brief Get ONNX attributes associated with this node
@@ -237,7 +237,7 @@ public:
    * @note Attributes contain operation-specific parameters (e.g., kernel_size
    * for Conv)
    */
-  const ::google::protobuf::RepeatedPtrField<::morphizen_onnx::AttributeProto>*
+  const ::google::protobuf::RepeatedPtrField<::morphizen_onnx::AttributeProto> *
   get_attributes() const;
   /**
    * @brief Retrieves the function body associated with the current node.
@@ -245,7 +245,7 @@ public:
    * @return A pointer to the Graph object representing the function body,
    *         or nullptr if no function body is present.
    */
-  const Graph* get_function_body() const;
+  const Graph *get_function_body() const;
   // === Debug and String Representation ===
 
   /**
@@ -261,7 +261,7 @@ public:
    * @return Reference to the NodeProto for this node
    * @throws std::runtime_error if node index is invalid or graph not found
    */
-  const morphizen_onnx::NodeProto& get_node_proto() const;
+  const morphizen_onnx::NodeProto &get_node_proto() const;
 
 private:
   /**
@@ -269,7 +269,7 @@ private:
    * @return Reference to the Node for this node
    * @throws std::runtime_error if node index is invalid or graph not found
    */
-  const Node& get_node() const;
+  const Node &get_node() const;
 
   /**
    * @brief Compact storage for node index and metadata
@@ -291,7 +291,7 @@ private:
       unsigned int is_valid_ : 1;  // Validity flag (0=invalid, 1=valid)
       unsigned int graph_id_ : 32; // Graph ID for context identification
     } fields_;
-    uint64_t value_;               // Raw 64-bit value for fast operations
+    uint64_t value_; // Raw 64-bit value for fast operations
   };
 };
 
@@ -328,7 +328,7 @@ template <> struct hash<morphizen::NodeIndex> {
    * @param index NodeIndex to hash
    * @return Hash value suitable for hash table use
    */
-  std::size_t operator()(const morphizen::NodeIndex& index) const {
+  std::size_t operator()(const morphizen::NodeIndex &index) const {
     return index.hash();
   }
 };

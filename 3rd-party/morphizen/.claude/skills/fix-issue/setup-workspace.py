@@ -54,7 +54,9 @@ if sys.platform == "win32":
 
 def run(cmd, capture=False, check=True):
     """Run a shell command and optionally capture output."""
-    result = subprocess.run(cmd, shell=True, capture_output=capture, text=True, check=check)
+    result = subprocess.run(
+        cmd, shell=True, capture_output=capture, text=True, check=check
+    )
     if capture:
         return result.stdout.strip()
     return result.returncode == 0
@@ -190,7 +192,9 @@ def main():
     except subprocess.CalledProcessError as e:
         if "rejected" in str(e):
             print("\n❌ Push rejected - branch exists on fork despite check")
-            print("   This shouldn't happen. The branch may have been created between checks.")
+            print(
+                "   This shouldn't happen. The branch may have been created between checks."
+            )
             print(f"   Check: gh pr list --head {branch_name}")
         raise
 

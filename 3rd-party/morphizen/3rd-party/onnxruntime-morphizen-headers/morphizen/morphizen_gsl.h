@@ -3,7 +3,7 @@
 #pragma once
 
 #ifdef ONNXRUNTIME_VITISAI_EP_STUB
-#  include <gsl/gsl>
+#include <gsl/gsl>
 #else
-#  include <gsl/gsl>
+#include <gsl/gsl>
 #endif

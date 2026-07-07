@@ -18,10 +18,10 @@ Ort::MemoryInfo OpInvoker::CreateDefaultCpuMemInfo() {
 }
 
 std::unique_ptr<OpInvoker> OpInvoker::Create(
-    const char* op_name, const char* domain, int version,
-    const Ort::OpAttr* attr_values, size_t attr_count,
-    const ONNXTensorElementDataType* input_type_values, size_t input_count,
-    const ONNXTensorElementDataType* output_type_values, size_t output_count) {
+    const char *op_name, const char *domain, int version,
+    const Ort::OpAttr *attr_values, size_t attr_count,
+    const ONNXTensorElementDataType *input_type_values, size_t input_count,
+    const ONNXTensorElementDataType *output_type_values, size_t output_count) {
   Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "morphizen");
   Ort::SessionOptions options{nullptr};
   return OpInvoker::Create(env, options, op_name, domain, version, attr_values,
@@ -30,24 +30,24 @@ std::unique_ptr<OpInvoker> OpInvoker::Create(
 }
 
 std::unique_ptr<OpInvoker> OpInvoker::Create(
-    const Ort::Env& env, const Ort::SessionOptions& options,
-    const char* op_name, const char* domain, int version,
-    const Ort::OpAttr* attr_values, size_t attr_count,
-    const ONNXTensorElementDataType* input_type_values, size_t input_count,
-    const ONNXTensorElementDataType* output_type_values, size_t output_count) {
+    const Ort::Env &env, const Ort::SessionOptions &options,
+    const char *op_name, const char *domain, int version,
+    const Ort::OpAttr *attr_values, size_t attr_count,
+    const ONNXTensorElementDataType *input_type_values, size_t input_count,
+    const ONNXTensorElementDataType *output_type_values, size_t output_count) {
   return std::make_unique<OpInvoker>(PrivateTag{}, env, options, op_name,
                                      domain, version, attr_values, attr_count,
                                      input_type_values, input_count,
                                      output_type_values, output_count);
 }
 
-OpInvoker::OpInvoker(PrivateTag, const Ort::Env& env,
-                     const Ort::SessionOptions& options, const char* op_name,
-                     const char* domain, int version,
-                     const Ort::OpAttr* attr_values, size_t attr_count,
-                     const ONNXTensorElementDataType* input_type_values,
+OpInvoker::OpInvoker(PrivateTag, const Ort::Env &env,
+                     const Ort::SessionOptions &options, const char *op_name,
+                     const char *domain, int version,
+                     const Ort::OpAttr *attr_values, size_t attr_count,
+                     const ONNXTensorElementDataType *input_type_values,
                      size_t input_count,
-                     const ONNXTensorElementDataType* output_type_values,
+                     const ONNXTensorElementDataType *output_type_values,
                      size_t output_count) {
   // create model
   std::string model_name(op_name);
@@ -83,11 +83,11 @@ OpInvoker::OpInvoker(PrivateTag, const Ort::Env& env,
   morphizen::NodeAttributesPtr node_attrs =
       morphizen::NodeAttributesPtr(MORPHIZEN_ORT_API(node_attributes_new)());
 
-  const OrtOpAttr* const* ort_attr_values =
-      reinterpret_cast<const OrtOpAttr* const*>(attr_values);
+  const OrtOpAttr *const *ort_attr_values =
+      reinterpret_cast<const OrtOpAttr *const *>(attr_values);
   for (size_t i = 0; i < attr_count; ++i) {
-    const ONNX_NAMESPACE::AttributeProto* attr_proto =
-        reinterpret_cast<const ONNX_NAMESPACE::AttributeProto*>(
+    const ONNX_NAMESPACE::AttributeProto *attr_proto =
+        reinterpret_cast<const ONNX_NAMESPACE::AttributeProto *>(
             ort_attr_values[i]);
     morphizen::AttributeProtoPtr attr_proto_ptr =
         morphizen::attr_proto_clone(*attr_proto);
@@ -101,12 +101,12 @@ OpInvoker::OpInvoker(PrivateTag, const Ort::Env& env,
 
   // mark graph inputs/outputs
   std::vector<morphizen_cxx::NodeArgConstRef> inputs;
-  for (auto& arg : input_args) {
+  for (auto &arg : input_args) {
     inputs.push_back(arg.value());
   }
 
   std::vector<morphizen_cxx::NodeArgConstRef> outputs;
-  for (auto& arg : output_args) {
+  for (auto &arg : output_args) {
     outputs.push_back(arg.value());
   }
 
@@ -114,7 +114,7 @@ OpInvoker::OpInvoker(PrivateTag, const Ort::Env& env,
   graph.set_outputs(outputs);
 
   // create session
-  morphizen::ModelProto* model_proto =
+  morphizen::ModelProto *model_proto =
       MORPHIZEN_ORT_API(model_to_proto)(*model);
   morphizen::DllSafe<std::string> model_string =
       MORPHIZEN_ORT_API(model_proto_serialize_as_string)(*model_proto);
@@ -127,22 +127,22 @@ OpInvoker::OpInvoker(PrivateTag, const Ort::Env& env,
 
 OpInvoker::~OpInvoker() {}
 
-void OpInvoker::Invoke(const Ort::Value* input_values, size_t input_count,
-                       Ort::Value* output_values, size_t output_count) {
+void OpInvoker::Invoke(const Ort::Value *input_values, size_t input_count,
+                       Ort::Value *output_values, size_t output_count) {
   Ort::RunOptions run_options{nullptr};
-  const OrtMemoryInfo* const* mem_info_arr{nullptr};
+  const OrtMemoryInfo *const *mem_info_arr{nullptr};
   Invoke(run_options, input_values, input_count, output_values, output_count,
          mem_info_arr);
 }
 
-static bool HasValue(const Ort::Value& value) {
-  return static_cast<const OrtValue*>(value) && value.HasValue();
+static bool HasValue(const Ort::Value &value) {
+  return static_cast<const OrtValue *>(value) && value.HasValue();
 }
 
-void OpInvoker::Invoke(const Ort::RunOptions& run_options,
-                       const Ort::Value* input_values, size_t input_count,
-                       Ort::Value* output_values, size_t output_count,
-                       const OrtMemoryInfo* const* mem_info_arr) {
+void OpInvoker::Invoke(const Ort::RunOptions &run_options,
+                       const Ort::Value *input_values, size_t input_count,
+                       Ort::Value *output_values, size_t output_count,
+                       const OrtMemoryInfo *const *mem_info_arr) {
   std::vector<std::string> input_names = session_.GetInputNames();
   std::vector<std::string> output_names = session_.GetOutputNames();
 
@@ -186,7 +186,7 @@ void OpInvoker::Invoke(const Ort::RunOptions& run_options,
         output_values[i] = std::move(bound_output_values[i]);
       }
     }
-  } catch (const Ort::Exception& e) {
+  } catch (const Ort::Exception &e) {
     LOG(ERROR) << "Session Run Error: " << e.what() << "\n";
     throw e;
   }

@@ -7,9 +7,9 @@
 #include "./morphizen/morphizen-ort-api-ext.hpp"
 namespace morphizen {
 using GraphUniquePtr =
-    std::unique_ptr<onnxruntime::Graph, void (*)(onnxruntime::Graph*)>;
+    std::unique_ptr<onnxruntime::Graph, void (*)(onnxruntime::Graph *)>;
 using ModelUniquePtr =
-    std::unique_ptr<onnxruntime::Model, void (*)(onnxruntime::Model*)>;
+    std::unique_ptr<onnxruntime::Model, void (*)(onnxruntime::Model *)>;
 } // namespace morphizen
 
 namespace morphizen {
@@ -24,8 +24,8 @@ struct IRConverterConfig {
 class IRConverter {
 
 public:
-  static ModelUniquePtr to_onnx_model(const ApiPtrs& api_ptrs,
-                                      const OrtGraph& graph,
-                                      const IRConverterConfig& config = {});
+  static ModelUniquePtr to_onnx_model(const ApiPtrs &api_ptrs,
+                                      const OrtGraph &graph,
+                                      const IRConverterConfig &config = {});
 };
 } // namespace morphizen

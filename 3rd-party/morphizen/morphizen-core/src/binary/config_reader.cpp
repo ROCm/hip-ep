@@ -32,18 +32,18 @@ namespace config_default {
 #include "config_json_binary.hpp"
 }
 
-static const char* get_default_config() {
+static const char *get_default_config() {
   // `with_default_morphizen_config` and `config` are generated
   // automatically by
   // ${CMAKE_CURRENT_SOURCE_DIR}/src/binary/config_json_binary.hpp.py
   if (config_default::with_default_morphizen_config) {
-    return (const char*)&config_default::config[0];
+    return (const char *)&config_default::config[0];
   }
   return nullptr;
 }
 
-static void JsonFileToMessage(const std::string& file_path,
-                              google::protobuf::Message* message) {
+static void JsonFileToMessage(const std::string &file_path,
+                              google::protobuf::Message *message) {
   std::ifstream input(file_path);
   if (!input.is_open()) {
     std::string error_message = "Failed to open file: " + file_path;
@@ -66,9 +66,9 @@ static void JsonFileToMessage(const std::string& file_path,
 
   return; // Return the successful status
 }
-static void set_struct_value(google::protobuf::Struct& struct_value,
-                             const std::string& key1, const std::string& key2,
-                             const std::string& string_value) {
+static void set_struct_value(google::protobuf::Struct &struct_value,
+                             const std::string &key1, const std::string &key2,
+                             const std::string &string_value) {
   auto field1 = struct_value.mutable_fields()->find(key1);
   if (field1 == struct_value.mutable_fields()->end()) {
     field1 = struct_value.mutable_fields()->insert({key1, {}}).first;
@@ -81,7 +81,7 @@ static void set_struct_value(google::protobuf::Struct& struct_value,
   field2->second.set_string_value(string_value);
 }
 static std::unique_ptr<google::protobuf::Struct>
-get_protobuf_struct_from_config_file(const std::string& filename) {
+get_protobuf_struct_from_config_file(const std::string &filename) {
   std::ifstream f(filename);
   // parse the json file into Struct message
   auto config = std::make_unique<google::protobuf::Struct>();
@@ -93,9 +93,9 @@ get_protobuf_struct_from_config_file(const std::string& filename) {
 
 // Removed: update_num_dpu_runners - NPU-specific DPU runners configuration
 
-static void set_session_config(google::protobuf::Struct& ret,
-                               const std::string& key,
-                               const std::string& value) {
+static void set_session_config(google::protobuf::Struct &ret,
+                               const std::string &key,
+                               const std::string &value) {
   if (key.rfind(kEpProviderOptionPrefix, 0) == 0) {
     auto key2 = key.substr(sizeof(kEpProviderOptionPrefix) - 1);
     MY_LOG(1) << "convert " << key << " to " << key2 << " and set "
@@ -111,17 +111,17 @@ static void set_session_config(google::protobuf::Struct& ret,
   }
 }
 
-static void restore_session_options(google::protobuf::Struct& ret,
+static void restore_session_options(google::protobuf::Struct &ret,
                                     std::string entry_second) {
   std::map<std::string, std::string> session_config_options_entry_list = {};
 #if MORPHIZEN_ORT_API_MAJOR >= 10
-  auto options = reinterpret_cast<Ort::SessionOptions*>(
+  auto options = reinterpret_cast<Ort::SessionOptions *>(
       (uintptr_t)std::stoull(entry_second));
   MORPHIZEN_ORT_API(session_option_configuration)
   (&session_config_options_entry_list, options,
-   [](void* mmap, const char* name, const char* value) {
-     auto* map_ptr =
-         reinterpret_cast<std::map<std::string, std::string>*>(mmap);
+   [](void *mmap, const char *name, const char *value) {
+     auto *map_ptr =
+         reinterpret_cast<std::map<std::string, std::string> *>(mmap);
      map_ptr->insert({name, value});
    });
 #else
@@ -129,24 +129,24 @@ static void restore_session_options(google::protobuf::Struct& ret,
                << MORPHIZEN_ORT_API_MAJOR
                << ", session options will not be restored.";
 #endif
-  for (const auto& option : session_config_options_entry_list) {
+  for (const auto &option : session_config_options_entry_list) {
     set_session_config(ret, option.first, option.second);
   }
 }
 
 static google::protobuf::Struct
-get_config_json(const onnxruntime::ProviderOptions& options) {
+get_config_json(const onnxruntime::ProviderOptions &options) {
   google::protobuf::Struct ret;
   // update_log_level(options);
   auto morphizen_get_default_config_plugin =
       ::morphizen::Plugin::get(ENV_PARAM(MORPHIZEN_CONFIG_PROVIDER_BACKEND));
-  const char* default_config = get_default_config();
+  const char *default_config = get_default_config();
   if (default_config == nullptr) {
     if (morphizen_get_default_config_plugin) {
       MY_LOG(1) << "found plugin: "
                 << ENV_PARAM(MORPHIZEN_CONFIG_PROVIDER_BACKEND);
       auto morphizen_get_default_config =
-          morphizen_get_default_config_plugin->get_method<const char*>(
+          morphizen_get_default_config_plugin->get_method<const char *>(
               "morphizen_get_default_config");
       if (morphizen_get_default_config) {
         MY_LOG(1) << "found symbol: morphizen_get_default_config from "
@@ -213,7 +213,7 @@ get_config_json(const onnxruntime::ProviderOptions& options) {
   const std::string ort_session_config_prefix =
       std::string(kSessionConfig) + ".";
 
-  for (const auto& entry : options) {
+  for (const auto &entry : options) {
     MY_LOG(1) << "process provider_option[\"" << entry.first << "\"]= \""
               << entry.second << "\"";
     if (entry.first == kSessionOptionPtr) {
@@ -233,7 +233,7 @@ get_config_json(const onnxruntime::ProviderOptions& options) {
   }
   return ret;
 }
-extern "C" char** environ;
+extern "C" char **environ;
 static std::unordered_map<std::string, std::string>
 get_environment_variables() {
   std::unordered_map<std::string, std::string> env_map;
@@ -250,12 +250,12 @@ get_environment_variables() {
   return env_map;
 }
 static const onnxruntime::ProviderOptions get_provider_option_from_env_variable(
-    const onnxruntime::ProviderOptions& options) {
+    const onnxruntime::ProviderOptions &options) {
   // enumerate all environment variables and check if the variable name start
   // with "MORPHIZEN_EP_PROVIER_OPTION."
   const std::string prefix = "MORPHIZEN_EP_PROVIDER_OPTION_";
   onnxruntime::ProviderOptions ret = options;
-  for (const auto& entry : get_environment_variables()) {
+  for (const auto &entry : get_environment_variables()) {
     if (entry.first.rfind(prefix, 0) == 0) {
       // Extract the option name and value from the environment variable
       std::string option_name = entry.first.substr(prefix.size());
@@ -271,7 +271,7 @@ static const onnxruntime::ProviderOptions get_provider_option_from_env_variable(
   }
   return ret;
 }
-std::string get_config_json_str(const onnxruntime::ProviderOptions& options1) {
+std::string get_config_json_str(const onnxruntime::ProviderOptions &options1) {
   auto options = get_provider_option_from_env_variable(options1);
   try {
     auto data = morphizen::get_config_json(options);
@@ -285,19 +285,19 @@ std::string get_config_json_str(const onnxruntime::ProviderOptions& options1) {
       LOG(FATAL) << err_msg;
     }
     return ret;
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     LOG(FATAL) << "Error: " << e.what() << std::endl;
     return "";
   }
 }
 
-Ort::SessionOptions*
-get_session_option(const onnxruntime::ProviderOptions& options) {
+Ort::SessionOptions *
+get_session_option(const onnxruntime::ProviderOptions &options) {
   auto iter = options.find("session_options");
   if (iter == options.end()) {
     return nullptr;
   }
-  return reinterpret_cast<Ort::SessionOptions*>(
+  return reinterpret_cast<Ort::SessionOptions *>(
       (uintptr_t)std::stoull(iter->second));
 }
 } // namespace morphizen

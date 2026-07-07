@@ -12,17 +12,17 @@ DEF_ENV_PARAM(MORPHIZEN_DEBUG_ORT_EP_API, "0")
 
 extern "C" {
 
-OrtStatus* CreateEpFactories(const char* registration_name,
-                             const OrtApiBase* ort_api_base,
-                             const OrtLogger* default_logger,
-                             OrtEpFactory** factories, size_t max_factories,
-                             size_t* num_factories) {
-  const OrtApi* ort_api = ort_api_base->GetApi(ORT_API_VERSION);
+OrtStatus *CreateEpFactories(const char *registration_name,
+                             const OrtApiBase *ort_api_base,
+                             const OrtLogger *default_logger,
+                             OrtEpFactory **factories, size_t max_factories,
+                             size_t *num_factories) {
+  const OrtApi *ort_api = ort_api_base->GetApi(ORT_API_VERSION);
   // initialize the API in this dll.
   Ort::InitApi(ort_api);
-  const OrtEpApi* ort_ep_api = ort_api->GetEpApi();
+  const OrtEpApi *ort_ep_api = ort_api->GetEpApi();
   MY_LOG(1) << "ORT is initalized, ORT_API_VERSION=" << ORT_API_VERSION
-            << ", ptr=" << (void*)ort_ep_api << ", registration_name="
+            << ", ptr=" << (void *)ort_ep_api << ", registration_name="
             << "\"" << registration_name << "\"";
 
   // Factory could use registration_name or define its own EP name.
@@ -37,15 +37,15 @@ OrtStatus* CreateEpFactories(const char* registration_name,
         "Not enough space to return EP factory. Need at least one.");
   }
   factories[0] = factory.release();
-  MY_LOG(1) << "CreateEpFactories: this=" << (void*)factories[0]
+  MY_LOG(1) << "CreateEpFactories: this=" << (void *)factories[0]
             << ", ep_name=" << factories[0]->GetName(factories[0])
             << ", vendor=" << factories[0]->GetVendor(factories[0]);
   *num_factories = 1;
 
   return nullptr;
 }
-OrtStatus* ReleaseEpFactory(OrtEpFactory* factory) {
-  MY_LOG(1) << " ReleaseEpFactory: this=" << (void*)factory;
+OrtStatus *ReleaseEpFactory(OrtEpFactory *factory) {
+  MY_LOG(1) << " ReleaseEpFactory: this=" << (void *)factory;
   delete factory;
   return nullptr;
 }

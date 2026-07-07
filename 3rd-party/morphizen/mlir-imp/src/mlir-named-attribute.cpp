@@ -20,8 +20,7 @@
 // big-endian host would need an explicit byte-swap; fail the build there
 // rather than silently emit corrupted attributes.
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-#  error                                                                       \
-      "mlir-named-attribute.cpp assumes a little-endian host for ONNX raw_data"
+#error "mlir-named-attribute.cpp assumes a little-endian host for ONNX raw_data"
 #endif
 
 namespace morphizen {
@@ -34,10 +33,10 @@ static constexpr llvm::StringLiteral kSubgraphRefKey =
 
 // Factory method to create integer array attribute
 std::unique_ptr<mlir::NamedAttribute>
-MLIRNamedAttribute::create_int_array(const std::string& name,
-                                     const std::vector<int64_t>& data) {
+MLIRNamedAttribute::create_int_array(const std::string &name,
+                                     const std::vector<int64_t> &data) {
   // Get MLIR context from ContextManager
-  auto& context = MLIRContextManager::getInstance().getContext();
+  auto &context = MLIRContextManager::getInstance().getContext();
   mlir::OpBuilder builder(&context);
 
   // Convert vector to MLIR integer array attribute
@@ -54,9 +53,9 @@ MLIRNamedAttribute::create_int_array(const std::string& name,
 
 // Factory method to create float array attribute
 std::unique_ptr<mlir::NamedAttribute>
-MLIRNamedAttribute::create_float_array(const std::string& name,
-                                       const std::vector<float>& data) {
-  auto& context = MLIRContextManager::getInstance().getContext();
+MLIRNamedAttribute::create_float_array(const std::string &name,
+                                       const std::vector<float> &data) {
+  auto &context = MLIRContextManager::getInstance().getContext();
   mlir::OpBuilder builder(&context);
 
   llvm::SmallVector<mlir::Attribute> attrs;
@@ -71,14 +70,14 @@ MLIRNamedAttribute::create_float_array(const std::string& name,
 
 // Factory method to create string array attribute
 std::unique_ptr<mlir::NamedAttribute>
-MLIRNamedAttribute::create_string_array(const std::string& name,
-                                        const std::vector<std::string>& data) {
-  auto& context = MLIRContextManager::getInstance().getContext();
+MLIRNamedAttribute::create_string_array(const std::string &name,
+                                        const std::vector<std::string> &data) {
+  auto &context = MLIRContextManager::getInstance().getContext();
   mlir::OpBuilder builder(&context);
 
   llvm::SmallVector<mlir::Attribute> attrs;
   attrs.reserve(data.size());
-  for (const std::string& value : data) {
+  for (const std::string &value : data) {
     attrs.push_back(builder.getStringAttr(value));
   }
   mlir::ArrayAttr array_attr = builder.getArrayAttr(attrs);
@@ -88,8 +87,8 @@ MLIRNamedAttribute::create_string_array(const std::string& name,
 
 // Factory method to create single integer attribute
 std::unique_ptr<mlir::NamedAttribute>
-MLIRNamedAttribute::create_int(const std::string& name, int64_t value) {
-  auto& context = MLIRContextManager::getInstance().getContext();
+MLIRNamedAttribute::create_int(const std::string &name, int64_t value) {
+  auto &context = MLIRContextManager::getInstance().getContext();
   mlir::OpBuilder builder(&context);
   // In onnx-mlir,  all attribute type if is signed Integer use `si64`
   mlir::Type si64Type = builder.getIntegerType(64, /*isSigned=*/true);
@@ -99,8 +98,8 @@ MLIRNamedAttribute::create_int(const std::string& name, int64_t value) {
 
 // Factory method to create single float attribute
 std::unique_ptr<mlir::NamedAttribute>
-MLIRNamedAttribute::create_float(const std::string& name, float value) {
-  auto& context = MLIRContextManager::getInstance().getContext();
+MLIRNamedAttribute::create_float(const std::string &name, float value) {
+  auto &context = MLIRContextManager::getInstance().getContext();
   mlir::OpBuilder builder(&context);
 
   mlir::FloatAttr float_attr = builder.getF32FloatAttr(value);
@@ -109,9 +108,9 @@ MLIRNamedAttribute::create_float(const std::string& name, float value) {
 
 // Factory method to create single string attribute
 std::unique_ptr<mlir::NamedAttribute>
-MLIRNamedAttribute::create_string(const std::string& name,
-                                  const std::string& value) {
-  auto& context = MLIRContextManager::getInstance().getContext();
+MLIRNamedAttribute::create_string(const std::string &name,
+                                  const std::string &value) {
+  auto &context = MLIRContextManager::getInstance().getContext();
   mlir::OpBuilder builder(&context);
 
   mlir::StringAttr string_attr = builder.getStringAttr(value);
@@ -143,9 +142,9 @@ MLIRNamedAttribute::create_string(const std::string& name,
 // does NOT expose TENSOR attributes through the legacy `attr_proto_get_tensor`
 // -> `tensor_proto_*` proto API (see the fatal in `morphizen-ort-api.cpp`).
 std::unique_ptr<mlir::NamedAttribute>
-MLIRNamedAttribute::create_tensor(const std::string& name,
-                                  const MLIRNodeArg& tensor) {
-  auto& context = MLIRContextManager::getInstance().getContext();
+MLIRNamedAttribute::create_tensor(const std::string &name,
+                                  const MLIRNodeArg &tensor) {
+  auto &context = MLIRContextManager::getInstance().getContext();
   mlir::OpBuilder builder(&context);
 
   // The attribute path only ever receives data-carrying, inline tensors: every
@@ -165,7 +164,7 @@ MLIRNamedAttribute::create_tensor(const std::string& name,
   CHECK(shape.has_value()) << "tensor attribute has no rank: "
                            << tensor.getName();
 
-  const void* data = tensor.getData();
+  const void *data = tensor.getData();
   size_t data_size = tensor.getDataSize();
   llvm::SmallVector<int64_t> mlir_shape(shape->begin(), shape->end());
   mlir::Type elem_type =
@@ -193,18 +192,18 @@ MLIRNamedAttribute::create_tensor(const std::string& name,
   // Note: ONNX `raw_data` is little-endian; `getFromRawBuffer` reads the bytes
   // in host byte order -- correct on little-endian hosts (x86, ROCm GPU hosts);
   // a big-endian host would need an explicit byte-swap.
-  llvm::ArrayRef<char> raw(static_cast<const char*>(data), data_size);
+  llvm::ArrayRef<char> raw(static_cast<const char *>(data), data_size);
   mlir::DenseElementsAttr dense =
       mlir::DenseElementsAttr::getFromRawBuffer(tensor_type, raw);
   return std::make_unique<mlir::NamedAttribute>(name, dense);
 }
 
 std::unique_ptr<mlir::NamedAttribute>
-MLIRNamedAttribute::create_subgraph_ref(const std::string& name,
-                                        MLIRGraph& sub) {
-  static_assert(sizeof(void*) <= sizeof(int64_t),
+MLIRNamedAttribute::create_subgraph_ref(const std::string &name,
+                                        MLIRGraph &sub) {
+  static_assert(sizeof(void *) <= sizeof(int64_t),
                 "raw MLIRGraph* must fit in int64 to embed in IntegerAttr");
-  auto& context = MLIRContextManager::getInstance().getContext();
+  auto &context = MLIRContextManager::getInstance().getContext();
   auto i64_type = mlir::IntegerType::get(&context, 64);
   auto ptr_attr = mlir::IntegerAttr::get(
       i64_type, static_cast<int64_t>(reinterpret_cast<intptr_t>(&sub)));
@@ -215,7 +214,7 @@ MLIRNamedAttribute::create_subgraph_ref(const std::string& name,
       mlir::StringAttr::get(&context, name), ref_dict);
 }
 
-MLIRGraph* MLIRNamedAttribute::get_subgraph_ref() const {
+MLIRGraph *MLIRNamedAttribute::get_subgraph_ref() const {
   auto dict = mlir::dyn_cast<mlir::DictionaryAttr>(getValue());
   if (!dict) {
     return nullptr;
@@ -228,7 +227,8 @@ MLIRGraph* MLIRNamedAttribute::get_subgraph_ref() const {
   if (!int_attr) {
     return nullptr;
   }
-  return reinterpret_cast<MLIRGraph*>(static_cast<intptr_t>(int_attr.getInt()));
+  return reinterpret_cast<MLIRGraph *>(
+      static_cast<intptr_t>(int_attr.getInt()));
 }
 
 int64_t MLIRNamedAttribute::get_int() const {
@@ -245,7 +245,7 @@ double MLIRNamedAttribute::get_float() const {
   return 0.0f;
 }
 
-const std::string& MLIRNamedAttribute::get_string() const {
+const std::string &MLIRNamedAttribute::get_string() const {
   static thread_local std::string tmp;
   if (auto attr = mlir::dyn_cast<mlir::StringAttr>(getValue())) {
     tmp = attr.getValue().str();
@@ -266,7 +266,7 @@ std::vector<int64_t> MLIRNamedAttribute::get_ints() const {
   return result;
 }
 
-const std::vector<float>& MLIRNamedAttribute::get_floats() const {
+const std::vector<float> &MLIRNamedAttribute::get_floats() const {
   static thread_local std::vector<float> result;
   result.clear();
   if (auto array_attr = mlir::dyn_cast<mlir::ArrayAttr>(getValue())) {
@@ -346,7 +346,7 @@ int MLIRNamedAttribute::get_onnx_type() const {
   return 0; // UNDEFINED
 }
 
-void MLIRNamedAttribute::set_name(const std::string& n) {
+void MLIRNamedAttribute::set_name(const std::string &n) {
   setName(mlir::StringAttr::get(&MLIRContextManager::getInstance().getContext(),
                                 n));
 }

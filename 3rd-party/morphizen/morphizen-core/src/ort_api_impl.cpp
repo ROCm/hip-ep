@@ -14,11 +14,11 @@
 
 extern "C" {
 MORPHIZEN_DLL_SPEC
-const morphizen::OrtApiForMorphizen* get_the_global_api() {
+const morphizen::OrtApiForMorphizen *get_the_global_api() {
   // The test program is using this interface
   return morphizen::api();
 }
-const morphizen::OrtApiForMorphizen* get_the_global_api_unsafe() {
+const morphizen::OrtApiForMorphizen *get_the_global_api_unsafe() {
   // this is used by ort-bridge
   return morphizen::get_the_global_api_unsafe();
 }

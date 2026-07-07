@@ -12,28 +12,28 @@
 #include "mlir-model.hpp"
 #include "mlir-named-attribute.hpp"
 #include "mlir-node-attributes.hpp"
-#include "mlir/Bytecode/BytecodeWriter.h"  // for writeBytecodeToFile
+#include "mlir/Bytecode/BytecodeWriter.h" // for writeBytecodeToFile
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h" // for EmptyOp
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
-#include "mlir/IR/IRMapping.h"           // for IRMapping
+#include "mlir/IR/IRMapping.h" // for IRMapping
 #include "mlir/IR/Verifier.h"
 #include "mlir/Transforms/RegionUtils.h" // for getUsedValuesDefinedAbove
 #include "morphizen-foundation/env_config.hpp"
-#include "llvm/ADT/STLExtras.h"          // for map_range, to_vector
-#include "llvm/ADT/SetVector.h"          // for SetVector
-#include "llvm/ADT/SmallPtrSet.h"        // for SmallPtrSet
-#include "llvm/ADT/SmallSet.h"           // for SmallSet
-#include "llvm/ADT/SmallVector.h"        // for SmallVector
-#include "llvm/Support/raw_ostream.h"    // for raw_fd_ostream
-#include <algorithm>                     // for std::sort
+#include "llvm/ADT/STLExtras.h"       // for map_range, to_vector
+#include "llvm/ADT/SetVector.h"       // for SetVector
+#include "llvm/ADT/SmallPtrSet.h"     // for SmallPtrSet
+#include "llvm/ADT/SmallSet.h"        // for SmallSet
+#include "llvm/ADT/SmallVector.h"     // for SmallVector
+#include "llvm/Support/raw_ostream.h" // for raw_fd_ostream
+#include <algorithm>                  // for std::sort
 #include <glog/logging.h>
-#include <iomanip>                       // for std::setprecision
-#include <system_error>                  // for std::error_code
-#include <unordered_map>                 // for std::unordered_map
-#include <unordered_set>                 // for std::unordered_set
+#include <iomanip>       // for std::setprecision
+#include <system_error>  // for std::error_code
+#include <unordered_map> // for std::unordered_map
+#include <unordered_set> // for std::unordered_set
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_GRAPH, "0")
 DEF_ENV_PARAM(MORPHIZEN_SAVE_MLIR_AS_TEXT, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_MLIR_GRAPH) >= n)
@@ -42,13 +42,13 @@ namespace mlir_impl {
 
 // Resolve the MLIRContext for a (possibly orphan) Block. Orphan blocks
 // have no parent op; fall back to the shared MLIRContextManager singleton.
-static mlir::MLIRContext* context_for(mlir::Block& block) {
-  auto* parent_op = block.getParentOp();
+static mlir::MLIRContext *context_for(mlir::Block &block) {
+  auto *parent_op = block.getParentOp();
   return parent_op != nullptr ? parent_op->getContext()
                               : &MLIRContextManager::getInstance().getContext();
 }
 
-static mlir::Operation* get_or_create_terminator(mlir::Block& entryBlock,
+static mlir::Operation *get_or_create_terminator(mlir::Block &entryBlock,
                                                  bool is_subgraph) {
   if (entryBlock.mightHaveTerminator()) {
     return entryBlock.getTerminator();
@@ -63,11 +63,11 @@ static mlir::Operation* get_or_create_terminator(mlir::Block& entryBlock,
   return builder.create(state);
 }
 
-static mlir::Operation* get_or_create_none(mlir::Block& entryBlock) {
+static mlir::Operation *get_or_create_none(mlir::Block &entryBlock) {
   // First, try to find an existing NoneOp in the block (was func.walk).
   // Block::walk does not include the parent op, so we walk only block contents.
-  mlir::Operation* existing_none = nullptr;
-  entryBlock.walk([&](mlir::Operation* op) {
+  mlir::Operation *existing_none = nullptr;
+  entryBlock.walk([&](mlir::Operation *op) {
     if (op->getName().getStringRef() == onnx_mlir::ONNX_NONE) {
       existing_none = op;
       return mlir::WalkResult::interrupt();
@@ -87,7 +87,7 @@ static mlir::Operation* get_or_create_none(mlir::Block& entryBlock) {
   state.addAttribute("value", builder.getUnitAttr());
   return builder.create(state);
 }
-MLIRGraph::MLIRGraph(MLIRModel& model, mlir::func::FuncOp func,
+MLIRGraph::MLIRGraph(MLIRModel &model, mlir::func::FuncOp func,
                      uint32_t proposed_graph_id)
     : model_(model), entry_block_(&func.getBody().front()),
       graph_id_(proposed_graph_id > 0
@@ -99,7 +99,7 @@ MLIRGraph::MLIRGraph(MLIRModel& model, mlir::func::FuncOp func,
   initialize();
 }
 
-MLIRGraph::MLIRGraph(MLIRModel& model, mlir::Block& entry_block,
+MLIRGraph::MLIRGraph(MLIRModel &model, mlir::Block &entry_block,
                      uint32_t proposed_graph_id)
     : model_(model), entry_block_(&entry_block),
       graph_id_(proposed_graph_id > 0
@@ -118,9 +118,9 @@ MLIRGraph::MLIRGraph(MLIRModel& model, mlir::Block& entry_block,
   //      resolve(true).
 }
 
-MLIRGraph* MLIRGraph::parent_graph() const { return parent_graph_; }
+MLIRGraph *MLIRGraph::parent_graph() const { return parent_graph_; }
 
-void MLIRGraph::set_parent_graph(MLIRGraph* p) { parent_graph_ = p; }
+void MLIRGraph::set_parent_graph(MLIRGraph *p) { parent_graph_ = p; }
 
 mlir::func::FuncOp MLIRGraph::func() const {
   return llvm::dyn_cast<mlir::func::FuncOp>(entry_block_->getParentOp());
@@ -128,20 +128,20 @@ mlir::func::FuncOp MLIRGraph::func() const {
 
 bool MLIRGraph::is_subgraph() const { return parent_graph_ != nullptr; }
 
-mlir::Block* MLIRGraph::take_orphan_block() {
+mlir::Block *MLIRGraph::take_orphan_block() {
   CHECK(entry_block_->getParent() == nullptr)
       << "take_orphan_block: block is not orphan (already transplanted?)";
   return entry_block_;
 }
 
-MLIRGraph& MLIRGraph::new_subgraph() {
-  auto* orphan_block = new mlir::Block();
+MLIRGraph &MLIRGraph::new_subgraph() {
+  auto *orphan_block = new mlir::Block();
   // Block& ctor is private; std::make_unique cannot reach it.
   auto sub = std::unique_ptr<MLIRGraph>(new MLIRGraph(model_, *orphan_block));
   sub->set_parent_graph(this);
   // unique_ptr keeps MLIRGraph's address stable across vector growth, so
   // the raw pointer that attr_proto_new_graph encodes stays valid.
-  auto* raw = sub.get();
+  auto *raw = sub.get();
   add_subgraph(std::move(sub));
   return *raw;
 }
@@ -156,7 +156,7 @@ MLIRGraph::~MLIRGraph() {
   GraphStore::release_graph_id(this, graph_id_);
 }
 
-void MLIRGraph::register_captured_alias(const std::string& name,
+void MLIRGraph::register_captured_alias(const std::string &name,
                                         mlir::Value outer_value) {
   CHECK(is_subgraph()) << "register_captured_alias is subgraph-only";
   CHECK(outer_value) << "register_captured_alias: null Value for '" << name
@@ -244,7 +244,7 @@ void MLIRGraph::initialize_node_args_map() {
   MY_LOG(1) << "Initializing node args map and constant initializers";
   // Walk all operations and extract their results. Block::walk does not
   // include the parent op, so no need to skip the FuncOp self-visit anymore.
-  entry_block_->walk([&](mlir::Operation* op) {
+  entry_block_->walk([&](mlir::Operation *op) {
     // Skip return operations (terminators) - both onnx.Return and func.return
     if (onnx_mlir::isReturnOp(op)) {
       return;
@@ -280,7 +280,7 @@ void MLIRGraph::initialize_node_args_map() {
 void MLIRGraph::initialize_constant_initializers() {
   MY_LOG(1) << "Initializing constant initializers";
   // Filter operations by name to find all onnx.Constant
-  for (auto& op : entry_block_->getOperations()) {
+  for (auto &op : entry_block_->getOperations()) {
     if (op.getName().getStringRef() == "onnx.Constant") {
       // attr :  NODE_OUTPUTS
       // constant op has a single result
@@ -335,7 +335,7 @@ void MLIRGraph::initialize_graph_outputs() {
 
     for (auto operand : operands) {
       for (size_t i = 0; i < all_node_args_.size(); ++i) {
-        const auto& node_arg = all_node_args_[i];
+        const auto &node_arg = all_node_args_[i];
         if (node_arg && node_arg->getValue() == operand) {
           graph_outputs_.push_back(node_args_map_[node_arg->getName()]);
           if (!model_output_names_frozen_) {
@@ -362,7 +362,7 @@ void MLIRGraph::populate_node_arg_indexes() {
   };
 
   // Pre-order so the nested-region skip below can stop descent.
-  entry_block_->walk<mlir::WalkOrder::PreOrder>([&](mlir::Operation* op) {
+  entry_block_->walk<mlir::WalkOrder::PreOrder>([&](mlir::Operation *op) {
     // Skip return operations, constant operations, and our custom onnx.None
     // operations
     if (!onnx_mlir::isReturnOp(op) &&
@@ -416,7 +416,7 @@ void MLIRGraph::populate_node_arg_indexes() {
   MY_LOG(1) << "Completed populating NodeArg index attributes";
 }
 
-const std::string& MLIRGraph::get_name() const {
+const std::string &MLIRGraph::get_name() const {
   if (is_subgraph()) {
     // Regions have no name; parent op encodes the slot ("then_branch"/...).
     // Sentinel keeps log call sites that touch graph_.name() safe.
@@ -437,7 +437,7 @@ const std::string& MLIRGraph::get_name() const {
   return default_name;
 }
 
-void MLIRGraph::set_name(const char* name) {
+void MLIRGraph::set_name(const char *name) {
   if (is_subgraph()) {
     // No-op: subgraph regions have no FuncOp symbol to attach onnx.graph.name
     // to. ort-bridge calls set_name unconditionally inside convert_graph;
@@ -446,12 +446,12 @@ void MLIRGraph::set_name(const char* name) {
     return;
   }
   auto f = func();
-  auto* context = f->getContext();
+  auto *context = f->getContext();
   mlir::OpBuilder builder(context);
   f->setAttr(attr_names::ONNX_GRAPH_NAME, builder.getStringAttr(name));
   MY_LOG(1) << "Set graph name to: " << name;
 }
-const MLIRModel& MLIRGraph::get_model() const { return model_; }
+const MLIRModel &MLIRGraph::get_model() const { return model_; }
 
 std::string MLIRGraph::get_symbol_name() const {
   CHECK(!is_subgraph()) << "get_symbol_name is top-level only "
@@ -459,8 +459,8 @@ std::string MLIRGraph::get_symbol_name() const {
   return func().getSymName().str();
 }
 
-std::vector<mlir::Operation*> MLIRGraph::nodes_unsafe() const {
-  std::vector<mlir::Operation*> nodes;
+std::vector<mlir::Operation *> MLIRGraph::nodes_unsafe() const {
+  std::vector<mlir::Operation *> nodes;
 
   // Top-level only: matches ORT::Graph::Nodes() "this view only"
   // contract. Body ops of region-bearing nodes (Loop / If / Scan) live
@@ -468,7 +468,7 @@ std::vector<mlir::Operation*> MLIRGraph::nodes_unsafe() const {
   // Block::walk() is recursive in MLIR; using it here would surface
   // body ops as top-level fuse candidates and break the EP invariant
   // supported_nodes.size() == ep_supported_outputs.size().
-  for (mlir::Operation& op : *entry_block_) {
+  for (mlir::Operation &op : *entry_block_) {
     if (!onnx_mlir::isReturnOp(&op) &&
         op.getName().getStringRef() != "onnx.Constant" &&
         op.getName().getStringRef() != onnx_mlir::ONNX_NONE) {
@@ -489,13 +489,13 @@ llvm::SmallVector<MLIRNodeArgIndex> MLIRGraph::get_outputs() const {
 }
 
 void MLIRGraph::set_outputs(
-    const llvm::SmallVector<MLIRNodeArgIndex>& outputs) {
+    const llvm::SmallVector<MLIRNodeArgIndex> &outputs) {
   llvm::SmallVector<MLIRNodeArgIndex> valid_outputs;
   llvm::SmallVector<mlir::Value> mlir_outputs;
   valid_outputs.reserve(outputs.size());
   mlir_outputs.reserve(outputs.size());
-  for (const auto& output : outputs) {
-    auto* nodeArg = get_node_arg(output);
+  for (const auto &output : outputs) {
+    auto *nodeArg = get_node_arg(output);
     if (!nodeArg || !nodeArg->getValue() ||
         mlir::isa<mlir::NoneType>(nodeArg->getValue().getType())) {
       MY_LOG(1) << "Skipping NoneType output: " << output.get_name();
@@ -550,13 +550,13 @@ void MLIRGraph::set_outputs(
 
   // Update the FuncOp type to reflect the new output types.
   auto f = func();
-  auto* context = f->getContext();
+  auto *context = f->getContext();
   mlir::OpBuilder builder(context);
 
   auto argTypes = f.getArgumentTypes();
   llvm::SmallVector<mlir::Type> resultTypes;
   resultTypes.reserve(mlir_outputs.size());
-  for (const auto& output : mlir_outputs) {
+  for (const auto &output : mlir_outputs) {
     resultTypes.push_back(output.getType());
   }
 
@@ -571,7 +571,7 @@ void MLIRGraph::set_outputs(
             << " output types";
 }
 
-void MLIRGraph::set_inputs(const llvm::SmallVector<MLIRNodeArgIndex>& inputs) {
+void MLIRGraph::set_inputs(const llvm::SmallVector<MLIRNodeArgIndex> &inputs) {
   graph_inputs_ = inputs;
 
   if (is_subgraph()) {
@@ -581,7 +581,7 @@ void MLIRGraph::set_inputs(const llvm::SmallVector<MLIRNodeArgIndex>& inputs) {
     mlir::OpBuilder builder(context_for(*entry_block_));
     auto loc = builder.getUnknownLoc();
     for (size_t i = 0; i < inputs.size(); ++i) {
-      auto* nodeArg = get_node_arg(inputs[i]);
+      auto *nodeArg = get_node_arg(inputs[i]);
       CHECK(nodeArg != nullptr)
           << "subgraph set_inputs: null NodeArg at slot " << i;
       mlir::Value bound_value;
@@ -606,9 +606,9 @@ void MLIRGraph::set_inputs(const llvm::SmallVector<MLIRNodeArgIndex>& inputs) {
   }
   auto builder = mlir::OpBuilder(f.getContext());
   // Get the function's entry block and add arguments to it
-  auto& entryBlock = *entry_block_;
+  auto &entryBlock = *entry_block_;
   auto loc = builder.getUnknownLoc();
-  for (auto& input : inputs) {
+  for (auto &input : inputs) {
     // For inputs, we typically don't have shape information at this point
     // so we create unranked tensor types (empty shape)
     auto node_arg = get_node_arg(input);
@@ -630,17 +630,17 @@ void MLIRGraph::set_inputs(const llvm::SmallVector<MLIRNodeArgIndex>& inputs) {
   return;
 }
 
-const mlir::Operation* MLIRGraph::get_node(size_t index) const {
-  static_assert(sizeof(mlir::Operation*) == sizeof(size_t));
-  return reinterpret_cast<const mlir::Operation*>(index);
+const mlir::Operation *MLIRGraph::get_node(size_t index) const {
+  static_assert(sizeof(mlir::Operation *) == sizeof(size_t));
+  return reinterpret_cast<const mlir::Operation *>(index);
 }
 
-mlir::Operation*
-MLIRGraph::producer_node(const std::string& node_arg_name) const {
+mlir::Operation *
+MLIRGraph::producer_node(const std::string &node_arg_name) const {
   if (auto node_arg_index = get_node_arg_index(node_arg_name)) {
-    if (const auto* node_arg = get_node_arg(node_arg_index)) {
+    if (const auto *node_arg = get_node_arg(node_arg_index)) {
       auto value = node_arg->getValue();
-      if (mlir::Operation* defining_op = value.getDefiningOp()) {
+      if (mlir::Operation *defining_op = value.getDefiningOp()) {
         if (defining_op->getName().getStringRef() == "onnx.Constant") {
           // For constant initlalizer we skip it , for same with onnx
           return nullptr;
@@ -657,7 +657,7 @@ MLIRGraph::producer_node(const std::string& node_arg_name) const {
   return nullptr;
 }
 
-MLIRNodeArgIndex MLIRGraph::get_node_arg_index(const std::string& name) const {
+MLIRNodeArgIndex MLIRGraph::get_node_arg_index(const std::string &name) const {
   // Local hit: top-level graphs and subgraphs both go through this path
   // first.
   auto it = node_args_map_.find(name);
@@ -673,7 +673,7 @@ MLIRNodeArgIndex MLIRGraph::get_node_arg_index(const std::string& name) const {
     auto outer = parent_graph_->get_node_arg_index(name);
     if (outer.is_valid()) {
       auto outer_value = outer.get_node_arg().getValue();
-      const_cast<MLIRGraph*>(this)->register_captured_alias(name, outer_value);
+      const_cast<MLIRGraph *>(this)->register_captured_alias(name, outer_value);
       return node_args_map_.at(name);
     }
   }
@@ -681,8 +681,8 @@ MLIRNodeArgIndex MLIRGraph::get_node_arg_index(const std::string& name) const {
 }
 
 MLIRNodeArgIndex
-MLIRGraph::node_arg_new(const std::string& name,
-                        const llvm::SmallVector<int64_t>* shape,
+MLIRGraph::node_arg_new(const std::string &name,
+                        const llvm::SmallVector<int64_t> *shape,
                         int element_type) {
   // shape == nullptr signals an unranked tensor at the ORT boundary (ORT's
   // TensorTypeAndShapeInfo::HasShape() == false). Lowered to
@@ -696,7 +696,7 @@ MLIRGraph::node_arg_new(const std::string& name,
     // std::unordered_map<std::string, std::unique_ptr<NodeArg>> node_args_;
     // so it is OK if we create a node arg more than once for constant
     // intializers.
-    auto& node_arg = node_arg_index.get_node_arg();
+    auto &node_arg = node_arg_index.get_node_arg();
     auto existing_shape = node_arg.getShape();
     if (node_arg.isConstantValue() && shape != nullptr &&
         existing_shape.has_value() && *shape == *existing_shape &&
@@ -718,29 +718,29 @@ MLIRGraph::node_arg_new(const std::string& name,
   return ret;
 }
 
-const mlir::Operation*
-MLIRGraph::add_node(const std::string& name, const std::string& op_type,
-                    const std::string& description,
-                    const std::vector<MLIRNodeArgIndex>& input_args,
-                    const std::vector<MLIRNodeArgIndex>& output_args,
-                    const MLIRNodeAttributes& attributes,
-                    const std::string& domain) {
+const mlir::Operation *
+MLIRGraph::add_node(const std::string &name, const std::string &op_type,
+                    const std::string &description,
+                    const std::vector<MLIRNodeArgIndex> &input_args,
+                    const std::vector<MLIRNodeArgIndex> &output_args,
+                    const MLIRNodeAttributes &attributes,
+                    const std::string &domain) {
   (void)description; // description is not used in this implementation
 
   // Pick out the variant subgraph-ref markers; they encode the regions
   // to create and must not land on the real op's attribute dict.
   mlir::DictionaryAttr mlir_attrs_full = attributes.get_mlir_dictionary();
-  std::vector<std::pair<std::string, MLIRGraph*>> sub_refs;
-  for (const auto& na : mlir_attrs_full) {
-    if (auto* sub =
-            static_cast<const MLIRNamedAttribute&>(na).get_subgraph_ref()) {
+  std::vector<std::pair<std::string, MLIRGraph *>> sub_refs;
+  for (const auto &na : mlir_attrs_full) {
+    if (auto *sub =
+            static_cast<const MLIRNamedAttribute &>(na).get_subgraph_ref()) {
       sub_refs.emplace_back(na.getName().str(), sub);
     }
   }
   // DictionaryAttr is alphabetically sorted by name, but onnx.If wants
   // region(0)=then_branch, region(1)=else_branch -- force that order.
   if (op_type == "If") {
-    std::stable_partition(sub_refs.begin(), sub_refs.end(), [](const auto& p) {
+    std::stable_partition(sub_refs.begin(), sub_refs.end(), [](const auto &p) {
       return p.first == "then_branch";
     });
   }
@@ -759,13 +759,13 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
   // other ops among them changes the constant-streaming backend's results.
   // Loop/If/Scan body captures are folded in after transplant (below).
   {
-    mlir::Operation* anchor = nullptr;
-    for (const auto& arg : input_args) {
-      auto* input_node_arg = get_node_arg(arg);
+    mlir::Operation *anchor = nullptr;
+    for (const auto &arg : input_args) {
+      auto *input_node_arg = get_node_arg(arg);
       if (!input_node_arg)
         continue;
       mlir::Value value = input_node_arg->getValue();
-      mlir::Operation* def = value ? value.getDefiningOp() : nullptr;
+      mlir::Operation *def = value ? value.getDefiningOp() : nullptr;
       if (!def || def->getBlock() != entry_block_)
         continue;
       if (!anchor || anchor->isBeforeInBlock(def))
@@ -774,8 +774,8 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
     if (none_ && none_->getBlock() == entry_block_ &&
         (!anchor || anchor->isBeforeInBlock(none_)))
       anchor = none_;
-    mlir::Operation* lastConstantOp = nullptr;
-    for (auto& blockOp : entry_block_->getOperations()) {
+    mlir::Operation *lastConstantOp = nullptr;
+    for (auto &blockOp : entry_block_->getOperations()) {
       if (blockOp.getName().getStringRef() == "onnx.Constant")
         lastConstantOp = &blockOp;
     }
@@ -789,8 +789,8 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
 
   // Convert MLIRNodeArgIndex to mlir::Value for input arguments
   llvm::SmallVector<mlir::Value> mlir_input_args;
-  for (const auto& input : input_args) {
-    if (auto* input_node_arg = get_node_arg(input)) {
+  for (const auto &input : input_args) {
+    if (auto *input_node_arg = get_node_arg(input)) {
       if (auto mlir_value = input_node_arg->getValue()) {
         mlir_input_args.push_back(mlir_value);
         continue;
@@ -810,7 +810,7 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
       result_types.push_back(builder.getNoneType());
       continue;
     }
-    if (auto* output_node_arg = get_node_arg(output_args[idx])) {
+    if (auto *output_node_arg = get_node_arg(output_args[idx])) {
       result_types.push_back(output_node_arg->getType(builder));
     } else {
       result_types.push_back(builder.getNoneType());
@@ -829,8 +829,8 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
   } else {
     llvm::SmallVector<mlir::NamedAttribute> filtered;
     filtered.reserve(mlir_attrs_full.size() - sub_refs.size());
-    for (const auto& na : mlir_attrs_full) {
-      if (static_cast<const MLIRNamedAttribute&>(na).get_subgraph_ref()) {
+    for (const auto &na : mlir_attrs_full) {
+      if (static_cast<const MLIRNamedAttribute &>(na).get_subgraph_ref()) {
         continue;
       }
       filtered.push_back(na);
@@ -853,7 +853,7 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
       !domain.empty() && domain != "ai.onnx" && domain != "onnx";
   bool use_custom_op = is_custom_domain || unregistered_onnx_ops.count(op_type);
 
-  mlir::Operation* op = nullptr;
+  mlir::Operation *op = nullptr;
   if (use_custom_op) {
     // For custom domain operations (e.g., com.microsoft), use onnx.Custom
     // This follows the onnx-mlir convention for custom operators
@@ -873,13 +873,13 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
     llvm::SmallVector<mlir::NamedAttribute> attrs;
     attrs.push_back(
         builder.getNamedAttr("domain_name", builder.getStringAttr(domain)));
-    for (auto& attr : mlir_attrs) {
+    for (auto &attr : mlir_attrs) {
       attrs.push_back(attr);
     }
 
     // Set properties and attributes
     state.addAttribute("function_name", builder.getStringAttr(op_type));
-    for (auto& attr : attrs) {
+    for (auto &attr : attrs) {
       state.addAttribute(attr.getName(), attr.getValue());
     }
 
@@ -901,7 +901,7 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
       // The EP receives 'to' as an ONNX TensorProto_DataType enum (integer),
       // but the registered ONNX dialect in the compiler expects TypeAttr.
       llvm::SmallVector<mlir::NamedAttribute> new_attrs;
-      for (auto& attr : mlir_attrs) {
+      for (auto &attr : mlir_attrs) {
         if (attr.getName() == "to") {
           if (auto int_attr =
                   mlir::dyn_cast<mlir::IntegerAttr>(attr.getValue())) {
@@ -932,7 +932,7 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
 
   // Collect output names for the "node.outputs" attribute
   llvm::SmallVector<mlir::Attribute> outputNames;
-  for (const auto& output : output_args) {
+  for (const auto &output : output_args) {
     if (output.is_valid() && get_node_arg(output)) {
       outputNames.push_back(builder.getStringAttr(output.get_name()));
     } else {
@@ -949,12 +949,12 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
 
   // Register the operation results in the symbol table.
   mlir::IRRewriter rewriter(context_for(*entry_block_));
-  for (const auto& [output, result] :
+  for (const auto &[output, result] :
        llvm::zip(output_args, op->getResults())) {
     if (!output.is_valid() || !get_node_arg(output))
       continue;
-    auto& node_arg = output.get_node_arg();
-    if (auto& value = node_arg.getValue()) {
+    auto &node_arg = output.get_node_arg();
+    if (auto &value = node_arg.getValue()) {
       rewriter.replaceAllUsesWith(value, result);
     }
     node_arg.setValue(result);
@@ -972,11 +972,11 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
   // Transplant each sub's orphan block into the matching parent region
   // (slot i = sub_refs[i]). The sub is already owned by subgraphs_cache_.
   for (size_t i = 0; i < sub_refs.size(); ++i) {
-    MLIRGraph* sub = sub_refs[i].second;
+    MLIRGraph *sub = sub_refs[i].second;
     CHECK(sub != nullptr) << "subgraph-ref marker for attr '"
                           << sub_refs[i].first << "' decoded to null";
-    mlir::Region& region = op->getRegion(static_cast<unsigned>(i));
-    mlir::Block* orphan = sub->take_orphan_block();
+    mlir::Region &region = op->getRegion(static_cast<unsigned>(i));
+    mlir::Block *orphan = sub->take_orphan_block();
     region.push_back(orphan);
     sub->resolve(/*force=*/true);
   }
@@ -989,11 +989,11 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
   // past it to keep the body's use dominated.
   if (op->getNumRegions() > 0) {
     llvm::SetVector<mlir::Value> captured;
-    for (mlir::Region& region : op->getRegions())
+    for (mlir::Region &region : op->getRegions())
       mlir::getUsedValuesDefinedAbove(region, captured);
-    mlir::Operation* anchor = nullptr;
+    mlir::Operation *anchor = nullptr;
     for (mlir::Value value : captured) {
-      mlir::Operation* def = value.getDefiningOp();
+      mlir::Operation *def = value.getDefiningOp();
       if (!def || def->getBlock() != entry_block_)
         continue;
       if (!anchor || anchor->isBeforeInBlock(def))
@@ -1013,7 +1013,7 @@ MLIRGraph::add_node(const std::string& name, const std::string& op_type,
 }
 
 void MLIRGraph::add_constant_initialized_tensor(
-    const mlir_impl::MLIRNodeArg* tensor1) {
+    const mlir_impl::MLIRNodeArg *tensor1) {
   CHECK(tensor1 != nullptr) << "Cannot add null tensor to graph";
 
   std::string name = tensor1->getName();
@@ -1022,7 +1022,7 @@ void MLIRGraph::add_constant_initialized_tensor(
   auto node_arg_it = node_args_map_.find(name);
   if (node_arg_it == node_args_map_.end()) {
     auto node_arg_1 = std::make_unique<MLIRNodeArg>(
-        std::move(const_cast<mlir_impl::MLIRNodeArg&>(*tensor1)));
+        std::move(const_cast<mlir_impl::MLIRNodeArg &>(*tensor1)));
     all_node_args_.push_back(std::move(node_arg_1));
 
     auto node_arg_index =
@@ -1034,7 +1034,7 @@ void MLIRGraph::add_constant_initialized_tensor(
   }
   auto node_arg_ptr = node_arg_it->second;
   auto node_arg = get_node_arg(node_arg_ptr);
-  auto& node_arg_value = node_arg->getValue();
+  auto &node_arg_value = node_arg->getValue();
   CHECK(name == node_arg->getName());
   CHECK(!node_arg_value) << "node arg \"" << name << "\" is already in use";
   MY_LOG(1) << "Adding constant initialized tensor: " << name
@@ -1045,11 +1045,11 @@ void MLIRGraph::add_constant_initialized_tensor(
 
   // Find the last onnx.Constant operation to insert after it
   // Order should be: onnx.None -> onnx.Constant ops -> other ops -> return
-  auto& block = *entry_block_;
-  mlir::Operation* lastConstantOp = nullptr;
-  mlir::Operation* noneOp = nullptr;
+  auto &block = *entry_block_;
+  mlir::Operation *lastConstantOp = nullptr;
+  mlir::Operation *noneOp = nullptr;
 
-  for (auto& op : block.getOperations()) {
+  for (auto &op : block.getOperations()) {
     // Track onnx.None operation
     if (op.getName().getStringRef() == onnx_mlir::ONNX_NONE) {
       noneOp = &op;
@@ -1088,14 +1088,14 @@ void MLIRGraph::add_constant_initialized_tensor(
       LOG(FATAL) << "Expected ShapedType for constant tensor: " << name;
     }
   }
-  const void* data = node_arg->getData();
+  const void *data = node_arg->getData();
   size_t dataSize = node_arg->getDataSize();
 
   mlir::OperationState state(loc, "onnx.Constant");
   state.addTypes(shapedTensorType);
 
   if (node_arg->isExternalData()) {
-    auto* ext = node_arg->getExternalRef();
+    auto *ext = node_arg->getExternalRef();
     CHECK(ext) << "ExternalRef must exist for external data: " << name;
     state.addAttribute("location", builder.getStringAttr(ext->location));
     state.addAttribute(
@@ -1104,13 +1104,13 @@ void MLIRGraph::add_constant_initialized_tensor(
         "size", builder.getI64IntegerAttr(static_cast<int64_t>(ext->size)));
   } else {
     auto rawData =
-        llvm::ArrayRef<char>(static_cast<const char*>(data), dataSize);
+        llvm::ArrayRef<char>(static_cast<const char *>(data), dataSize);
     auto denseAttr =
         mlir::DenseElementsAttr::getFromRawBuffer(shapedTensorType, rawData);
     state.addAttribute("value", denseAttr);
   }
 
-  mlir::Operation* op = builder.create(state);
+  mlir::Operation *op = builder.create(state);
   op->setAttr(attr_names::NODE_OUTPUTS,
               builder.getArrayAttr({builder.getStringAttr(name)}));
   // update value in MLIRTensor object.
@@ -1119,13 +1119,13 @@ void MLIRGraph::add_constant_initialized_tensor(
   MY_LOG(1) << " constant op \"" << name
             << "\":" << node_arg->getValue().getAsOpaquePointer() << " = "
             << " result=" << op->getResult(0).getAsOpaquePointer()
-            << " op=" << (void*)op;
+            << " op=" << (void *)op;
   MY_LOG(1) << "node arg=" << MLIRNodeArgIndex(node_arg_ptr).to_string();
   MY_LOG(1) << "Successfully created constant tensor '" << name
             << "' as onnx.Constant operation";
 }
 
-const std::unordered_map<std::string, const void*>&
+const std::unordered_map<std::string, const void *> &
 MLIRGraph::get_all_initialized_tensors() const {
 
   MY_LOG(1) << "Retrieved " << initialized_tensors_cache_.size()
@@ -1133,8 +1133,8 @@ MLIRGraph::get_all_initialized_tensors() const {
   return initialized_tensors_cache_;
 }
 
-void MLIRGraph::save(const std::string& filename,
-                     const std::string& dat_filename,
+void MLIRGraph::save(const std::string &filename,
+                     const std::string &dat_filename,
                      size_t external_data_threshold) const {
   CHECK(!is_subgraph())
       << "save is top-level only "
@@ -1181,9 +1181,9 @@ std::string MLIRGraph::save_string() const {
   }
 
   std::vector<
-      std::pair<mlir::Operation*, llvm::SmallVector<mlir::NamedAttribute>>>
+      std::pair<mlir::Operation *, llvm::SmallVector<mlir::NamedAttribute>>>
       backups;
-  module.walk([&](mlir::Operation* op) {
+  module.walk([&](mlir::Operation *op) {
     if (mlir::isa<mlir::ModuleOp>(op) || mlir::isa<mlir::func::FuncOp>(op)) {
       return;
     }
@@ -1191,7 +1191,7 @@ std::string MLIRGraph::save_string() const {
   });
 
   auto restore_backups = [&]() {
-    for (auto& [op, snapshot] : backups) {
+    for (auto &[op, snapshot] : backups) {
       MLIRNode(op).restoreMorphizenAttrs(snapshot);
     }
   };
@@ -1223,7 +1223,7 @@ std::string MLIRGraph::save_string() const {
   return result;
 }
 
-const MLIRNodeArg*
+const MLIRNodeArg *
 MLIRGraph::get_node_arg(MLIRNodeArgIndex node_arg_index) const {
   if (!node_arg_index.is_valid())
     return nullptr;
@@ -1232,23 +1232,23 @@ MLIRGraph::get_node_arg(MLIRNodeArgIndex node_arg_index) const {
              : nullptr;
 }
 
-std::vector<const mlir::Operation*>
-MLIRGraph::get_consumer_nodes(const std::string& node_arg_name) const {
-  std::vector<const mlir::Operation*> consumers;
-  llvm::SmallPtrSet<const mlir::Operation*, 8> seen;
+std::vector<const mlir::Operation *>
+MLIRGraph::get_consumer_nodes(const std::string &node_arg_name) const {
+  std::vector<const mlir::Operation *> consumers;
+  llvm::SmallPtrSet<const mlir::Operation *, 8> seen;
   auto node_arg = get_node_arg(get_node_arg_index(node_arg_name));
 
   // Helper: lift op from nested region to entry_block_ level
   // Works for arbitrarily nested structures (e.g., Loop inside Loop body)
-  auto liftToEntryBlock = [this](mlir::Operation* op) -> mlir::Operation* {
-    mlir::Operation* topOp = op;
+  auto liftToEntryBlock = [this](mlir::Operation *op) -> mlir::Operation * {
+    mlir::Operation *topOp = op;
     while (topOp != nullptr && topOp->getBlock() != entry_block_) {
       topOp = topOp->getParentOp();
     }
     return topOp; // nullptr if outside this graph
   };
 
-  for (mlir::Operation* userOp : node_arg->getValue().getUsers()) {
+  for (mlir::Operation *userOp : node_arg->getValue().getUsers()) {
     // Skip main graph terminator (return in entry_block_)
     if (onnx_mlir::isReturnOp(userOp) && userOp->getBlock() == entry_block_) {
       continue;
@@ -1257,7 +1257,7 @@ MLIRGraph::get_consumer_nodes(const std::string& node_arg_name) const {
     // Lift nested region ops (Loop/If/Scan body) to top-level parent
     // Example: Gather in InnerLoop body -> InnerLoop -> OuterLoop
     // (entry_block_)
-    mlir::Operation* topOp = liftToEntryBlock(userOp);
+    mlir::Operation *topOp = liftToEntryBlock(userOp);
     if (topOp == nullptr) {
       continue; // used only outside this graph
     }
@@ -1272,33 +1272,33 @@ MLIRGraph::get_consumer_nodes(const std::string& node_arg_name) const {
 }
 
 void MLIRGraph::reverse_dfs_from_preemp(
-    gsl::span<const mlir::Operation* const> from,
-    const std::function<bool(const mlir::Operation*)>& enter,
-    const std::function<bool(const mlir::Operation*)>& leave,
-    const std::function<bool(const mlir::Operation*, const mlir::Operation*)>&
-        comp,
-    const std::function<bool(const mlir::Operation* /*from*/,
-                             const mlir::Operation* /*to*/)>& stop) const {
+    gsl::span<const mlir::Operation *const> from,
+    const std::function<bool(const mlir::Operation *)> &enter,
+    const std::function<bool(const mlir::Operation *)> &leave,
+    const std::function<bool(const mlir::Operation *, const mlir::Operation *)>
+        &comp,
+    const std::function<bool(const mlir::Operation * /*from*/,
+                             const mlir::Operation * /*to*/)> &stop) const {
 
   // Implement preemptive reverse DFS traversal for MLIR backend
   using WorkEntry =
-      std::pair<const mlir::Operation*, bool>; // bool represents leave or not
+      std::pair<const mlir::Operation *, bool>; // bool represents leave or not
   std::vector<WorkEntry> stack;
   stack.reserve(from.size());
 
   // Initialize stack with starting nodes
-  for (const auto* node_ptr : from) {
+  for (const auto *node_ptr : from) {
     stack.emplace_back(node_ptr, false);
   }
 
   // Track visited nodes to avoid cycles
-  std::unordered_set<const mlir::Operation*> visited;
+  std::unordered_set<const mlir::Operation *> visited;
 
   while (!stack.empty()) {
     const WorkEntry last_entry = stack.back();
     stack.pop_back();
 
-    const mlir::Operation* node_ptr = last_entry.first;
+    const mlir::Operation *node_ptr = last_entry.first;
 
     // Skip null operations
     if (!node_ptr) {
@@ -1340,15 +1340,15 @@ void MLIRGraph::reverse_dfs_from_preemp(
 
     // Use MLIR native interfaces to get input operands and their defining
     // operations This is more efficient than creating MLIRNode wrapper
-    std::vector<const mlir::Operation*> producer_nodes;
+    std::vector<const mlir::Operation *> producer_nodes;
     producer_nodes.reserve(
-        const_cast<mlir::Operation*>(node_ptr)->getNumOperands());
+        const_cast<mlir::Operation *>(node_ptr)->getNumOperands());
 
     // Iterate through all operands of the current operation
     for (mlir::Value operand :
-         const_cast<mlir::Operation*>(node_ptr)->getOperands()) {
+         const_cast<mlir::Operation *>(node_ptr)->getOperands()) {
       // Get the defining operation for this operand
-      mlir::Operation* producer_op = operand.getDefiningOp();
+      mlir::Operation *producer_op = operand.getDefiningOp();
 
       if (!producer_op) {
         // This operand is a block argument (graph input), skip it
@@ -1393,7 +1393,7 @@ void MLIRGraph::canonicalize_optional_outputs() {
   // that has no users (not consumed by other ops, not in onnx.Return) is an
   // unused optional output and should be typed as `none`.
   // This avoids allocating dummy buffers for unused intermediate values.
-  auto* ctx = entry_block_->getParentOp()->getContext();
+  auto *ctx = entry_block_->getParentOp()->getContext();
   auto noneType = mlir::NoneType::get(ctx);
   mlir::OpBuilder builder(ctx);
 
@@ -1404,9 +1404,9 @@ void MLIRGraph::canonicalize_optional_outputs() {
       terminator_operands.insert(operand);
   }
 
-  llvm::SmallVector<mlir::Operation*> ops_to_process;
+  llvm::SmallVector<mlir::Operation *> ops_to_process;
   // Block::walk does not visit the parent op, so no FuncOp self-skip needed.
-  entry_block_->walk([&](mlir::Operation* op) {
+  entry_block_->walk([&](mlir::Operation *op) {
     if (op == terminator_ || op == none_)
       return;
     if (op->getNumResults() <= 1)
@@ -1423,7 +1423,7 @@ void MLIRGraph::canonicalize_optional_outputs() {
       ops_to_process.push_back(op);
   });
 
-  for (auto* op : ops_to_process) {
+  for (auto *op : ops_to_process) {
     llvm::SmallVector<mlir::Type> newTypes;
     llvm::SmallVector<unsigned> unused_indices;
     for (unsigned i = 0; i < op->getNumResults(); ++i) {
@@ -1447,7 +1447,7 @@ void MLIRGraph::canonicalize_optional_outputs() {
     if (op->getPropertiesStorageSize())
       state.propertiesAttr = op->getPropertiesAsAttribute();
 
-    auto* newOp = builder.create(state);
+    auto *newOp = builder.create(state);
 
     // Replace all uses of old results with new results
     for (unsigned i = 0; i < op->getNumResults(); ++i)
@@ -1506,17 +1506,17 @@ int MLIRGraph::resolve(bool force) {
 
     MY_LOG(1) << "MLIRGraph::resolve completed successfully";
     return 0; // Success
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     LOG(FATAL) << "MLIRGraph::resolve failed with exception: " << e.what();
     return -1; // Error
   }
 }
-const MLIRGraph* MLIRGraph::add_subgraph(std::unique_ptr<MLIRGraph> graph) {
+const MLIRGraph *MLIRGraph::add_subgraph(std::unique_ptr<MLIRGraph> graph) {
   subgraphs_cache_.push_back(std::move(graph));
   return subgraphs_cache_.rbegin()->get();
 }
 
-void MLIRGraph::remove_node(mlir::Operation* op) {
+void MLIRGraph::remove_node(mlir::Operation *op) {
   if (op) {
     // Note: The operation will only be removed from the parent function, not
     // from all users.
@@ -1535,8 +1535,8 @@ void MLIRGraph::remove_node(mlir::Operation* op) {
   // Conv
 }
 
-void MLIRGraph::remove_initialized_tensor(const std::string& name) {
-  entry_block_->walk([&](mlir::Operation* op) -> mlir::WalkResult {
+void MLIRGraph::remove_initialized_tensor(const std::string &name) {
+  entry_block_->walk([&](mlir::Operation *op) -> mlir::WalkResult {
     if (op->getName().getStringRef() != "onnx.Constant") {
       return mlir::WalkResult::advance();
     }
@@ -1555,12 +1555,12 @@ void MLIRGraph::remove_initialized_tensor(const std::string& name) {
   });
 }
 
-mlir::Operation*
-MLIRGraph::fuse(const std::string& name, const std::string& /* op_type*/,
-                const std::vector<const mlir::Operation*>& nodes,
-                const std::vector<MLIRNodeArgIndex>& inputs,
-                const std::vector<MLIRNodeArgIndex>& outputs,
-                const std::vector<MLIRNodeArgIndex>& constant_initializers) {
+mlir::Operation *
+MLIRGraph::fuse(const std::string &name, const std::string & /* op_type*/,
+                const std::vector<const mlir::Operation *> &nodes,
+                const std::vector<MLIRNodeArgIndex> &inputs,
+                const std::vector<MLIRNodeArgIndex> &outputs,
+                const std::vector<MLIRNodeArgIndex> &constant_initializers) {
   CHECK(!is_subgraph()) << "fuse is top-level only "
                            "(EP partition does not descend into subgraphs)";
   // Core implementation of fusion operation: fuse multiple nodes into a single
@@ -1577,12 +1577,12 @@ MLIRGraph::fuse(const std::string& name, const std::string& /* op_type*/,
   return res;
 }
 
-std::pair<mlir::func::FuncOp, std::stack<mlir::Operation*>>
+std::pair<mlir::func::FuncOp, std::stack<mlir::Operation *>>
 MLIRGraph::create_func_func(
-    const std::vector<MLIRNodeArgIndex>& inputs,
-    const std::vector<MLIRNodeArgIndex>& outputs,
-    const std::vector<const mlir::Operation*>& nodes,
-    const std::vector<MLIRNodeArgIndex>& constant_initializers) {
+    const std::vector<MLIRNodeArgIndex> &inputs,
+    const std::vector<MLIRNodeArgIndex> &outputs,
+    const std::vector<const mlir::Operation *> &nodes,
+    const std::vector<MLIRNodeArgIndex> &constant_initializers) {
   CHECK(!is_subgraph()) << "create_func_func is top-level only";
   auto parent_func = func();
   auto context = parent_func->getContext();
@@ -1590,11 +1590,11 @@ MLIRGraph::create_func_func(
   auto loc = builder.getUnknownLoc();
 
   auto input_types =
-      llvm::to_vector(llvm::map_range(inputs, [&](const auto& input) {
+      llvm::to_vector(llvm::map_range(inputs, [&](const auto &input) {
         return input.get_node_arg().getValue().getType();
       }));
   auto output_types =
-      llvm::to_vector(llvm::map_range(outputs, [&](const auto& output) {
+      llvm::to_vector(llvm::map_range(outputs, [&](const auto &output) {
         return output.get_node_arg().getValue().getType();
       }));
 
@@ -1621,9 +1621,9 @@ MLIRGraph::create_func_func(
     module_builder.insert(temp_func);
   }
 
-  auto& block = temp_func.getBody().emplaceBlock();
+  auto &block = temp_func.getBody().emplaceBlock();
 
-  for (const auto& input_type : input_types) {
+  for (const auto &input_type : input_types) {
     block.addArgument(input_type, loc);
   }
 
@@ -1633,12 +1633,12 @@ MLIRGraph::create_func_func(
 
   // Map inputs to block arguments
   auto block_args = block.getArguments();
-  for (const auto& [input, block_arg] : llvm::zip(inputs, block_args)) {
+  for (const auto &[input, block_arg] : llvm::zip(inputs, block_args)) {
     value_mapping.map(input.get_node_arg().getValue(), block_arg);
   }
-  std::stack<mlir::Operation*> cloned_ops_cache;
+  std::stack<mlir::Operation *> cloned_ops_cache;
   // Clone constant initializers
-  for (const auto& const_node_arg : constant_initializers) {
+  for (const auto &const_node_arg : constant_initializers) {
     if (auto producer_node = const_node_arg.get_producer_node()) {
       builder.setInsertionPointToEnd(&block);
       if (const_node_arg.is_constant()) {
@@ -1647,24 +1647,24 @@ MLIRGraph::create_func_func(
       }
     }
   }
-  std::vector<mlir::Operation*> sorted_ops;
-  std::unordered_set<const mlir::Operation*> node_set(nodes.begin(),
-                                                      nodes.end());
+  std::vector<mlir::Operation *> sorted_ops;
+  std::unordered_set<const mlir::Operation *> node_set(nodes.begin(),
+                                                       nodes.end());
 
   // Walk through the function in order and collect operations that need to be
   // fused
-  parent_func.walk([&](mlir::Operation* walk_op) {
+  parent_func.walk([&](mlir::Operation *walk_op) {
     if (node_set.count(walk_op)) {
       sorted_ops.push_back(walk_op);
     }
   });
 
   // Clone operations
-  for (auto& op : sorted_ops) {
+  for (auto &op : sorted_ops) {
     // Handle missing constant dependencies
     for (auto operand : op->getOperands()) {
       if (!value_mapping.contains(operand)) {
-        if (auto* defining_op = operand.getDefiningOp()) {
+        if (auto *defining_op = operand.getDefiningOp()) {
           if (defining_op->getName().getStringRef() == "onnx.Constant") {
             builder.setInsertionPointToEnd(&block);
             cloned_ops_cache.push(defining_op);
@@ -1680,7 +1680,7 @@ MLIRGraph::create_func_func(
 
   // Create onnx.Return operation with mapped outputs
   auto output_values =
-      llvm::to_vector(llvm::map_range(outputs, [&](const auto& output) {
+      llvm::to_vector(llvm::map_range(outputs, [&](const auto &output) {
         return value_mapping.lookup(output.get_node_arg().getValue());
       }));
   mlir::OperationState returnState(builder.getUnknownLoc(),
@@ -1691,20 +1691,20 @@ MLIRGraph::create_func_func(
   return std::make_pair(temp_func, cloned_ops_cache);
 }
 
-mlir::Operation* MLIRGraph::create_func_call(
-    const std::string& name, const std::vector<MLIRNodeArgIndex>& inputs,
-    const std::vector<MLIRNodeArgIndex>& outputs, mlir::func::FuncOp fused_func,
-    const std::stack<mlir::Operation*>& /* cloned_ops_cache */) {
+mlir::Operation *MLIRGraph::create_func_call(
+    const std::string &name, const std::vector<MLIRNodeArgIndex> &inputs,
+    const std::vector<MLIRNodeArgIndex> &outputs, mlir::func::FuncOp fused_func,
+    const std::stack<mlir::Operation *> & /* cloned_ops_cache */) {
   CHECK(!is_subgraph()) << "create_func_call is top-level only";
   mlir::IRRewriter rewriter(func()->getContext());
 
   // Set insertion point based on inputs
-  mlir::Operation* latestInputOp = nullptr;
+  mlir::Operation *latestInputOp = nullptr;
   bool hasConstantInput = false;
 
-  for (const auto& input : inputs) {
+  for (const auto &input : inputs) {
     auto value = input.get_node_arg().getValue();
-    if (auto* definingOp = value.getDefiningOp()) {
+    if (auto *definingOp = value.getDefiningOp()) {
       if (definingOp->getName().getStringRef() == "onnx.Constant") {
         hasConstantInput = true;
       }
@@ -1718,10 +1718,10 @@ mlir::Operation* MLIRGraph::create_func_call(
   // If any input is from onnx.Constant, find the last onnx.Constant in the
   // block
   if (hasConstantInput) {
-    auto& entryBlock = func().getBody().front();
-    mlir::Operation* lastConstantOp = nullptr;
+    auto &entryBlock = func().getBody().front();
+    mlir::Operation *lastConstantOp = nullptr;
 
-    for (auto& op : entryBlock.getOperations()) {
+    for (auto &op : entryBlock.getOperations()) {
       if (op.getName().getStringRef() == "onnx.Constant") {
         lastConstantOp = &op;
       } else if (!onnx_mlir::isReturnOp(&op)) {
@@ -1742,11 +1742,11 @@ mlir::Operation* MLIRGraph::create_func_call(
   }
 
   auto mlir_input_args =
-      llvm::to_vector(llvm::map_range(inputs, [](const auto& input) {
+      llvm::to_vector(llvm::map_range(inputs, [](const auto &input) {
         return input.get_node_arg().getValue();
       }));
   auto result_types =
-      llvm::to_vector(llvm::map_range(outputs, [](const auto& output) {
+      llvm::to_vector(llvm::map_range(outputs, [](const auto &output) {
         return output.get_node_arg().getValue().getType();
       }));
 
@@ -1759,10 +1759,10 @@ mlir::Operation* MLIRGraph::create_func_call(
   auto calleeAttr = fused_func.getSymNameAttr();
   state.addAttribute("callee", mlir::FlatSymbolRefAttr::get(calleeAttr));
 
-  auto* fuse_node = rewriter.create(state);
+  auto *fuse_node = rewriter.create(state);
 
   auto output_names = llvm::to_vector(
-      llvm::map_range(outputs, [&](const auto& output) -> mlir::Attribute {
+      llvm::map_range(outputs, [&](const auto &output) -> mlir::Attribute {
         return rewriter.getStringAttr(output.get_name());
       }));
   fuse_node->setAttr(attr_names::NODE_OUTPUTS,
@@ -1772,18 +1772,18 @@ mlir::Operation* MLIRGraph::create_func_call(
   fused.setInputNodeArgs(inputs);
   fused.setOutputNodeArgs(outputs);
 
-  for (const auto& [output, result] :
+  for (const auto &[output, result] :
        llvm::zip(outputs, fuse_node->getResults())) {
     rewriter.replaceAllUsesWith(output.get_node_arg().getValue(), result);
     output.get_node_arg().setValue(result);
   }
 
   // After creating func.call, move all operations that use its outputs after it
-  llvm::SmallVector<mlir::Operation*> opsToMove;
-  llvm::SmallSet<mlir::Operation*, 16> visited;
+  llvm::SmallVector<mlir::Operation *> opsToMove;
+  llvm::SmallSet<mlir::Operation *, 16> visited;
 
-  std::function<void(mlir::Operation*)> collectDependentOps =
-      [&](mlir::Operation* userOp) {
+  std::function<void(mlir::Operation *)> collectDependentOps =
+      [&](mlir::Operation *userOp) {
         if (userOp == fuse_node || onnx_mlir::isReturnOp(userOp)) {
           return;
         }
@@ -1797,7 +1797,7 @@ mlir::Operation* MLIRGraph::create_func_call(
         // dominate the region-bearing op for the capture to be valid SSA.
         // Same idiom as
         // mlir/lib/Dialect/Transform/Interfaces/TransformInterfaces.cpp.
-        mlir::Operation* anchor =
+        mlir::Operation *anchor =
             fuse_node->getBlock()->findAncestorOpInBlock(*userOp);
         if (!anchor || anchor == fuse_node || visited.count(anchor)) {
           return;
@@ -1817,25 +1817,25 @@ mlir::Operation* MLIRGraph::create_func_call(
         // not userOp's, since transitive in-block users come through the
         // anchor in fuse_node's block.
         for (auto result : anchor->getResults()) {
-          for (auto& use : result.getUses()) {
+          for (auto &use : result.getUses()) {
             collectDependentOps(use.getOwner());
           }
         }
       };
 
   for (auto result : fuse_node->getResults()) {
-    for (auto& use : result.getUses()) {
+    for (auto &use : result.getUses()) {
       collectDependentOps(use.getOwner());
     }
   }
 
   std::sort(opsToMove.begin(), opsToMove.end(),
-            [](mlir::Operation* a, mlir::Operation* b) {
+            [](mlir::Operation *a, mlir::Operation *b) {
               return a->isBeforeInBlock(b);
             });
 
-  mlir::Operation* lastMovedOp = fuse_node;
-  for (auto* opToMove : opsToMove) {
+  mlir::Operation *lastMovedOp = fuse_node;
+  for (auto *opToMove : opsToMove) {
     opToMove->moveAfter(lastMovedOp);
     lastMovedOp = opToMove;
   }
@@ -1843,7 +1843,7 @@ mlir::Operation* MLIRGraph::create_func_call(
   return fuse_node;
 }
 void MLIRGraph::remove_func_ops(
-    std::stack<mlir::Operation*>& cloned_ops_cache) {
+    std::stack<mlir::Operation *> &cloned_ops_cache) {
   CHECK(!is_subgraph()) << "remove_func_ops is top-level only";
   // Delete cloned ops in LIFO order so later ops are erased before their
   // producers. dropAllReferences() is load-bearing for region-bearing
@@ -1852,7 +1852,7 @@ void MLIRGraph::remove_func_ops(
   // body and trips its use_empty assert. For region-less ops it is a
   // no-op.
   while (!cloned_ops_cache.empty()) {
-    mlir::Operation* op = cloned_ops_cache.top();
+    mlir::Operation *op = cloned_ops_cache.top();
     cloned_ops_cache.pop();
     if (op && op->use_empty()) {
       op->dropAllReferences();

@@ -185,12 +185,12 @@ get_morphizen_ort_api_by_category() {
  * missing APIs
  */
 inline std::pair<double, std::set<std::string>>
-check_api_coverage(const std::map<std::string, size_t>& call_stats) {
+check_api_coverage(const std::map<std::string, size_t> &call_stats) {
   auto all_apis = get_all_morphizen_ort_api_functions();
   std::set<std::string> all_api_set(all_apis.begin(), all_apis.end());
   std::set<std::string> called_api_set;
 
-  for (const auto& [api_name, count] : call_stats) {
+  for (const auto &[api_name, count] : call_stats) {
     if (count > 0) {
       called_api_set.insert(api_name);
     }

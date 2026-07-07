@@ -76,18 +76,26 @@ def main(args):
         ]
     )
     with open(args.morphizen_config_binary_hpp, "a") as f:
-        f.write(f"static bool with_default_morphizen_config = {1 if enable_default_config else 0};\n")
+        f.write(
+            f"static bool with_default_morphizen_config = {1 if enable_default_config else 0};\n"
+        )
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="generate morphizen_config_binary.hpp and morphizen_config.json")
+    parser = argparse.ArgumentParser(
+        description="generate morphizen_config_binary.hpp and morphizen_config.json"
+    )
     parser.add_argument(
         "--morphizen_config_binary_hpp",
         type=str,
         help="morphizen_config_binary.hpp save",
     )
-    parser.add_argument("--out_morphizen_config_json", type=str, help="morphizen_config.json to save")
-    parser.add_argument("--in_morphizen_config_json", type=str, help="morphizen_config.json to read")
+    parser.add_argument(
+        "--out_morphizen_config_json", type=str, help="morphizen_config.json to save"
+    )
+    parser.add_argument(
+        "--in_morphizen_config_json", type=str, help="morphizen_config.json to read"
+    )
     parser.add_argument(
         "--is_trim_config",
         type=str,

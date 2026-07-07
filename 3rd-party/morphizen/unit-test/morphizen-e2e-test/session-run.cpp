@@ -10,9 +10,9 @@
 
 namespace morphizen_e2e_test {
 std::mt19937 rng;
-static int calculate_product(const std::vector<int64_t>& v) {
+static int calculate_product(const std::vector<int64_t> &v) {
   int total = 1;
-  for (auto& i : v)
+  for (auto &i : v)
     total *= (int)i;
   return total;
 }
@@ -41,15 +41,15 @@ size_t get_data_type_size(ONNXTensorElementDataType type) {
   }
 }
 
-void run_session(Ort::Session& session,
-                 const E2ETestSessionRunProto& run_proto) {
+void run_session(Ort::Session &session,
+                 const E2ETestSessionRunProto &run_proto) {
   auto batch_number =
       run_proto.has_batch_number() ? run_proto.batch_number() : 1;
   Ort::AllocatorWithDefaultOptions allocator;
   auto input_count = session.GetInputCount();
   auto input_shapes = std::vector<std::vector<int64_t>>();
   auto input_names_ptr = std::vector<Ort::AllocatedStringPtr>();
-  auto input_names = std::vector<const char*>();
+  auto input_names = std::vector<const char *>();
   input_shapes.reserve(input_count);
   input_names_ptr.reserve(input_count);
   input_names.reserve(input_count);
@@ -65,7 +65,7 @@ void run_session(Ort::Session& session,
   auto output_count = session.GetOutputCount();
   auto output_shapes = std::vector<std::vector<int64_t>>();
   auto output_names_ptr = std::vector<Ort::AllocatedStringPtr>();
-  auto output_names = std::vector<const char*>();
+  auto output_names = std::vector<const char *>();
   output_shapes.reserve(output_count);
   output_names_ptr.reserve(output_count);
   output_names.reserve(output_count);
@@ -144,7 +144,7 @@ void run_session(Ort::Session& session,
       auto output_tensor_shape =
           output_tensors[i].GetTensorTypeAndShapeInfo().GetShape();
     }
-  } catch (const Ort::Exception& exception) {
+  } catch (const Ort::Exception &exception) {
     std::cout << "ERROR running model inference: " << exception.what()
               << std::endl;
     exit(-1);

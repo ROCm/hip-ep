@@ -18,10 +18,10 @@
 // clang-format on
 namespace morphizen {
 std::shared_ptr<PassContextImp> initialize_context(
-    const std::string& model_path, const onnxruntime::Graph& onnx_graph,
-    const std::vector<morphizen_cxx::NodeConstRef>& ep_context_nodes,
-    const onnxruntime::ProviderOptions& options,
-    const std::map<std::string, std::string>& session_configs,
+    const std::string &model_path, const onnxruntime::Graph &onnx_graph,
+    const std::vector<morphizen_cxx::NodeConstRef> &ep_context_nodes,
+    const onnxruntime::ProviderOptions &options,
+    const std::map<std::string, std::string> &session_configs,
     std::unique_ptr<LoggerAdapter> logger_adapter);
 }
 
@@ -64,7 +64,7 @@ protected:
     // Clean up any resources after each test
     passContext_.reset();
   }
-  void load_context_json(const std::filesystem::path& context_json_path) {
+  void load_context_json(const std::filesystem::path &context_json_path) {
     LOG(INFO) << "================== update context.json from "
               << context_json_path << " =======";
     auto stream = std::make_unique<std::ifstream>(context_json_path);
@@ -153,8 +153,8 @@ TEST_F(PassContextConfigTest, ProviderOptions) {
   EXPECT_EQ(all_provider_options["k2"], "value2_in_config");
   EXPECT_EQ(all_provider_options["k3"], "value3_in_target_proto");
   EXPECT_EQ(all_provider_options["k4"], "value4_in_target_proto");
-  for (auto& kv : all_provider_options) {
-    auto& [k, v] = kv;
+  for (auto &kv : all_provider_options) {
+    auto &[k, v] = kv;
     std::cout << "      all PO " << k << " = " << v << std::endl;
   }
   std::cout << "DONE" << std::endl;
@@ -167,7 +167,7 @@ TEST_F(PassContextConfigTest, TargetSpecifiedByEndUserNotValid) {
         {"target", "target-not-exists"},
     });
     ASSERT_TRUE(false) << "Should throw exception when target is not exists";
-  } catch (const std::invalid_argument& e) {
+  } catch (const std::invalid_argument &e) {
     std::string error_message = e.what();
     ASSERT_TRUE(error_message.find("not a valid target") != std::string::npos)
         << " Expected error message to contain 'not a valid target', but got: "
@@ -198,7 +198,7 @@ TEST_F(PassContextConfigTest, TargetInConfigFileNotValidTarget) {
              .u8string()},
     });
     ASSERT_TRUE(false) << "Should throw exception when target is not exists";
-  } catch (const std::invalid_argument& e) {
+  } catch (const std::invalid_argument &e) {
     std::string error_message = e.what();
     ASSERT_TRUE(error_message.find("not a valid target") != std::string::npos)
         << " Expected error message to contain 'not a valid target', but got: "
@@ -223,17 +223,17 @@ TEST_F(PassContextConfigTest, TargetInConfigFileValidTarget) {
 //
 // we must register this along with a pass or custom op, morphizen::core is not
 // build with WHOLE_ARCHIVE enabled. it would be removed by linker if not used.
-static std::string get_meta(const onnxruntime::Model& model,
-                            const std::string& key) {
+static std::string get_meta(const onnxruntime::Model &model,
+                            const std::string &key) {
   if (MORPHIZEN_ORT_API(model_has_meta_data)(model, key))
     return *(MORPHIZEN_ORT_API(model_get_meta_data)(model, key));
   return "";
 }
 static std::optional<std::string>
-relu_dq_centralized_target_discovery(const morphizen::ConfigProto& config,
-                                     const onnxruntime::Model& model) {
+relu_dq_centralized_target_discovery(const morphizen::ConfigProto &config,
+                                     const onnxruntime::Model &model) {
   auto graph = morphizen_cxx::GraphConstRef(MORPHIZEN_ORT_API(model_main_graph)(
-      const_cast<onnxruntime::Model&>(model)));
+      const_cast<onnxruntime::Model &>(model)));
   auto ret = std::optional<std::string>();
   auto relu_dq_target_name = get_meta(model, "relu_dq_target_name");
   if (!relu_dq_target_name.empty()) {
@@ -244,4 +244,4 @@ relu_dq_centralized_target_discovery(const morphizen::ConfigProto& config,
 static ::morphizen::StaticPluginRegister
     __plugin_register("99_relu_dq_centralized_target_discovery",
                       "morphizen_target_discovery",
-                      (void*)&relu_dq_centralized_target_discovery);
+                      (void *)&relu_dq_centralized_target_discovery);

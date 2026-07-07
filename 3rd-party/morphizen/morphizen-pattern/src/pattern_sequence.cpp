@@ -23,9 +23,9 @@ std::string PatternSequence::debug_string() const {
 }
 
 BinderBuilderPtr
-PatternSequence::match_uncached(const onnxruntime::Graph& graph1,
-                                const NodeInput& node_input,
-                                const BinderBuilder& binder) const {
+PatternSequence::match_uncached(const onnxruntime::Graph &graph1,
+                                const NodeInput &node_input,
+                                const BinderBuilder &binder) const {
   auto graph = morphizen_cxx::GraphConstRef(graph1);
   auto ret = patterns_.front()->match_cached(graph, node_input, binder);
   if (ret == nullptr) {

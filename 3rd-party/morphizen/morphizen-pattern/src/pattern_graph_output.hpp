@@ -15,19 +15,19 @@ public:
   explicit PatternGraphOutput(int id, std::shared_ptr<Pattern> arg,
                               size_t graph_output_index);
   explicit PatternGraphOutput(int id, std::shared_ptr<Pattern> arg,
-                              const std::string& graph_output_name);
+                              const std::string &graph_output_name);
 
   ~PatternGraphOutput();
 
 public:
   BinderBuilderPtr
-  match_uncached(const onnxruntime::Graph& graph, const NodeInput& node_input,
-                 const BinderBuilder& cached_binder) const override final;
+  match_uncached(const onnxruntime::Graph &graph, const NodeInput &node_input,
+                 const BinderBuilder &cached_binder) const override final;
 
   std::string debug_string() const override;
 
-  void dump_to_proto_imp(RootPatternProto& pattern_proto,
-                         PatternProto& this_proto) const override final;
+  void dump_to_proto_imp(RootPatternProto &pattern_proto,
+                         PatternProto &this_proto) const override final;
 
 private:
   std::shared_ptr<Pattern> arg_;

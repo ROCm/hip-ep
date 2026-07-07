@@ -16,19 +16,20 @@
 
 // Helper function to convert unique_ptr vector to raw pointer vector
 // while managing lifetime
-const std::vector<const E2ETestConfig*> get_test_configs() {
+const std::vector<const E2ETestConfig *> get_test_configs() {
   static const auto configs = E2ETestConfig::create(E2E_TEST_CONFIG_JSON_PATH);
-  std::vector<const E2ETestConfig*> raw_configs;
+  std::vector<const E2ETestConfig *> raw_configs;
   raw_configs.reserve(configs.size());
 
-  for (const auto& config : configs) {
+  for (const auto &config : configs) {
     raw_configs.push_back(config.get());
   }
 
   return raw_configs;
 }
 
-class MorphizenE2ETest : public ::testing::TestWithParam<const E2ETestConfig*> {
+class MorphizenE2ETest
+    : public ::testing::TestWithParam<const E2ETestConfig *> {
 protected:
   void SetUp() override {}
   void TearDown() override {
@@ -43,7 +44,7 @@ TEST_P(MorphizenE2ETest, RunE2ETests) {
   GTEST_SKIP() << "Test skipped: only enabled for Bazel builds (see Issue "
                   "#032, #033)";
 #endif
-  const auto* config = GetParam();
+  const auto *config = GetParam();
   LOG(INFO) << "Running E2E tests with " << config->proto().name()
             << " configurations.";
 
@@ -52,9 +53,9 @@ TEST_P(MorphizenE2ETest, RunE2ETests) {
 
   auto e2e_session_options = e2e_test_env->create_e2e_test_session_options();
 
-  for (const auto& session_option : e2e_session_options) {
+  for (const auto &session_option : e2e_session_options) {
     auto e2e_sessions = session_option->create_e2e_test_sessions();
-    for (auto& session : e2e_sessions) {
+    for (auto &session : e2e_sessions) {
       session->run();
     }
   }
@@ -65,6 +66,6 @@ TEST_P(MorphizenE2ETest, RunE2ETests) {
 INSTANTIATE_TEST_SUITE_P(
     MorphizenE2ETestSuite, MorphizenE2ETest,
     ::testing::ValuesIn(get_test_configs()),
-    [](const testing::TestParamInfo<const E2ETestConfig*>& info) {
+    [](const testing::TestParamInfo<const E2ETestConfig *> &info) {
       return info.param->proto().name();
     });

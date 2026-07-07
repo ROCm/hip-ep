@@ -5,12 +5,12 @@
 #include "./mmap_file.hpp"
 
 #ifdef _WIN32
-#  include "mmap_file_win.hpp"
+#include "mmap_file_win.hpp"
 #endif
 
 namespace morphizen {
 std::unique_ptr<MemFile>
-MemFile::create([[maybe_unused]] const std::filesystem::path& path) {
+MemFile::create([[maybe_unused]] const std::filesystem::path &path) {
 #ifdef _WIN32
   return MemFileWin::create(path);
 #else

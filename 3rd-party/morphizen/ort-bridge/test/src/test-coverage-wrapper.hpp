@@ -15,12 +15,12 @@
 
 // Determine default backend based on compile-time configuration
 #if MORPHIZEN_ENABLE_ONNX_BACKEND
-#  define MORPHIZEN_DEFAULT_BACKEND morphizen::kONNXIRBackend
+#define MORPHIZEN_DEFAULT_BACKEND morphizen::kONNXIRBackend
 #elif MORPHIZEN_ENABLE_MLIR_BACKEND
-#  define MORPHIZEN_DEFAULT_BACKEND morphizen::kMLIRBackend
+#define MORPHIZEN_DEFAULT_BACKEND morphizen::kMLIRBackend
 #else
-#  error                                                                       \
-      "At least one backend must be enabled: MORPHIZEN_ENABLE_ONNX_BACKEND or MORPHIZEN_ENABLE_MLIR_BACKEND"
+#error                                                                         \
+    "At least one backend must be enabled: MORPHIZEN_ENABLE_ONNX_BACKEND or MORPHIZEN_ENABLE_MLIR_BACKEND"
 #endif
 
 DEF_ENV_PARAM_2(
@@ -30,8 +30,8 @@ DEF_ENV_PARAM_2(
 
 namespace morphizen {
 // defined in onnx-ir-imp/src/morphizen-ort-api.cpp
-const morphizen::OrtApiForMorphizen*
-get_global_morphizen_ort_api(const char* ir_backend_name);
+const morphizen::OrtApiForMorphizen *
+get_global_morphizen_ort_api(const char *ir_backend_name);
 
 namespace test {
 
@@ -44,8 +44,8 @@ namespace test {
  * @param original_api The original OrtApiForMorphizen instance to wrap
  * @return OrtApiForMorphizen* Wrapped API instance for testing
  */
-morphizen::OrtApiForMorphizen* get_morphizen_ort_api_for_coverage_test(
-    morphizen::OrtApiForMorphizen* original_api);
+morphizen::OrtApiForMorphizen *get_morphizen_ort_api_for_coverage_test(
+    morphizen::OrtApiForMorphizen *original_api);
 
 /**
  * @brief Delete the test coverage wrapper
@@ -53,7 +53,7 @@ morphizen::OrtApiForMorphizen* get_morphizen_ort_api_for_coverage_test(
  * @param wrapped_api The wrapped API instance to delete
  */
 void delete_morphizen_ort_api_coverage_test(
-    morphizen::OrtApiForMorphizen* wrapped_api);
+    morphizen::OrtApiForMorphizen *wrapped_api);
 
 /**
  * @brief Get current API call statistics
@@ -80,7 +80,7 @@ protected:
       backend_ = env_backend;
     }
     // Get the original API
-    original_api_ = const_cast<morphizen::OrtApiForMorphizen*>(
+    original_api_ = const_cast<morphizen::OrtApiForMorphizen *>(
         morphizen::get_global_morphizen_ort_api(backend_.c_str()));
     // Create the coverage wrapper
     wrapped_api_ = get_morphizen_ort_api_for_coverage_test(original_api_);
@@ -97,8 +97,8 @@ protected:
   }
 
   std::string backend_;
-  morphizen::OrtApiForMorphizen* original_api_ = nullptr;
-  morphizen::OrtApiForMorphizen* wrapped_api_ = nullptr;
+  morphizen::OrtApiForMorphizen *original_api_ = nullptr;
+  morphizen::OrtApiForMorphizen *wrapped_api_ = nullptr;
 };
 } // namespace test
 } // namespace morphizen

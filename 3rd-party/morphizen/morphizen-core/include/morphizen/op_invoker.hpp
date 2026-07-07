@@ -39,10 +39,10 @@ public:
    * @return std::unique_ptr of an instance of OpInvoker.
    */
   static std::unique_ptr<OpInvoker>
-  Create(const char* op_name, const char* domain, int version,
-         const Ort::OpAttr* attr_values, size_t attr_count,
-         const ONNXTensorElementDataType* input_type_values, size_t input_count,
-         const ONNXTensorElementDataType* output_type_values,
+  Create(const char *op_name, const char *domain, int version,
+         const Ort::OpAttr *attr_values, size_t attr_count,
+         const ONNXTensorElementDataType *input_type_values, size_t input_count,
+         const ONNXTensorElementDataType *output_type_values,
          size_t output_count);
 
   /**
@@ -63,11 +63,11 @@ public:
    * @return std::unique_ptr of an instance of OpInvoker.
    */
   static std::unique_ptr<OpInvoker>
-  Create(const Ort::Env& env, const Ort::SessionOptions& options,
-         const char* op_name, const char* domain, int version,
-         const Ort::OpAttr* attr_values, size_t attr_count,
-         const ONNXTensorElementDataType* input_type_values, size_t input_count,
-         const ONNXTensorElementDataType* output_type_values,
+  Create(const Ort::Env &env, const Ort::SessionOptions &options,
+         const char *op_name, const char *domain, int version,
+         const Ort::OpAttr *attr_values, size_t attr_count,
+         const ONNXTensorElementDataType *input_type_values, size_t input_count,
+         const ONNXTensorElementDataType *output_type_values,
          size_t output_count);
 
   /**
@@ -80,8 +80,8 @@ public:
    * @param output_values Array of outputs
    * @param output_count Number of outputs
    */
-  void Invoke(const Ort::Value* input_values, size_t input_count,
-              Ort::Value* output_values, size_t output_count);
+  void Invoke(const Ort::Value *input_values, size_t input_count,
+              Ort::Value *output_values, size_t output_count);
 
   /**
    * @brief Invoke the OpInvoker created by OpInvoker::Create
@@ -100,21 +100,21 @@ public:
    * output_count. If nullptr is provided, the return value of
    * CreateDefaultCpuMemInfo will be used.
    */
-  void Invoke(const Ort::RunOptions& run_options,
-              const Ort::Value* input_values, size_t input_count,
-              Ort::Value* output_values, size_t output_count,
-              const OrtMemoryInfo* const* mem_info_arr = nullptr);
+  void Invoke(const Ort::RunOptions &run_options,
+              const Ort::Value *input_values, size_t input_count,
+              Ort::Value *output_values, size_t output_count,
+              const OrtMemoryInfo *const *mem_info_arr = nullptr);
 
   /**
    * @brief Constructor only accessible through Create() factory method
    */
-  explicit OpInvoker(PrivateTag, const Ort::Env& env,
-                     const Ort::SessionOptions& options, const char* op_name,
-                     const char* domain, int version,
-                     const Ort::OpAttr* attr_values, size_t attr_count,
-                     const ONNXTensorElementDataType* input_type_values,
+  explicit OpInvoker(PrivateTag, const Ort::Env &env,
+                     const Ort::SessionOptions &options, const char *op_name,
+                     const char *domain, int version,
+                     const Ort::OpAttr *attr_values, size_t attr_count,
+                     const ONNXTensorElementDataType *input_type_values,
                      size_t input_count,
-                     const ONNXTensorElementDataType* output_type_values,
+                     const ONNXTensorElementDataType *output_type_values,
                      size_t output_count);
 
   /**

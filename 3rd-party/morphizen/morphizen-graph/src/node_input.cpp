@@ -8,8 +8,8 @@
 
 namespace morphizen_cxx {
 NodeInput::NodeInput(const GraphConstRef graph,
-                     const morphizen::NodeArg& node_arg,
-                     const morphizen::Node* node)
+                     const morphizen::NodeArg &node_arg,
+                     const morphizen::Node *node)
     : graph_(graph), node_arg_(NodeArgConstRef(graph, node_arg)),
       node_(node == nullptr
                 ? std::nullopt

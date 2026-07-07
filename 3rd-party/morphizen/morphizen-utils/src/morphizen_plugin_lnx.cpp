@@ -10,19 +10,19 @@
 #include <utility>
 
 namespace morphizen {
-using plugin_t = void*;
+using plugin_t = void *;
 enum class scope_t { PUBLIC, PRIVATE };
 
-std::pair<plugin_t, bool> open_plugin_dyn(const std::string& name,
+std::pair<plugin_t, bool> open_plugin_dyn(const std::string &name,
                                           scope_t scope) {
   auto flag_public = (RTLD_LAZY | RTLD_GLOBAL);
   auto flag_private = (RTLD_LAZY | RTLD_LOCAL);
-  void* h = dlopen(name.c_str(),
+  void *h = dlopen(name.c_str(),
                    scope == scope_t::PUBLIC ? flag_public : flag_private);
   if (!h) {
     // Capture dlerror() before any other libc call: dlfcn state is per-thread
     // but any other dlfcn-touching code in the callback chain would clobber it.
-    const char* err = dlerror();
+    const char *err = dlerror();
     // Gate the print behind MORPHIZEN_DEBUG_PLUGIN to match the rest of the
     // plugin diagnostics (see MY_LOG in morphizen_plugin.cpp). Callers probe
     // optional plugins in a static-then-dynamic fallback chain, so the
@@ -30,14 +30,14 @@ std::pair<plugin_t, bool> open_plugin_dyn(const std::string& name,
     // be log spam. We use std::getenv directly rather than DEF_ENV_PARAM to
     // avoid ODR-redefining ENV_PARAM_MORPHIZEN_DEBUG_PLUGIN (already defined
     // in morphizen_plugin.cpp's TU).
-    const char* dbg = std::getenv("MORPHIZEN_DEBUG_PLUGIN");
+    const char *dbg = std::getenv("MORPHIZEN_DEBUG_PLUGIN");
     if (dbg && dbg[0] != '\0' && dbg[0] != '0')
       std::fprintf(stderr, "[morphizen] dlopen(\"%s\") failed: %s\n",
                    name.c_str(), err ? err : "(no dlerror)");
   }
   return {h, true};
 }
-void* plugin_sym_dyn(plugin_t plugin, const std::string& name) {
+void *plugin_sym_dyn(plugin_t plugin, const std::string &name) {
   dlerror(); // clean up error;
   return dlsym(plugin, name.c_str());
 }

@@ -15,7 +15,7 @@ static constexpr int DEFAULT_GID = 10585;
 static constexpr char DEFAULT_UNAME[] = "chunywan";
 static constexpr char DEFAULT_GNAME[] = "chunywan";
 
-TarHeader::TarHeader(const std::string& name, size_t size)
+TarHeader::TarHeader(const std::string &name, size_t size)
     : name_(name), size_(size) {}
 std::string TarHeader::to_string() const {
   std::ostringstream str;
@@ -27,7 +27,7 @@ std::string TarHeader::to_string() const {
       << ", data_begin_pos=" << data_begin_pos_                         //
       << ", data_end_pos=" << data_end_pos_                             //
       << ", size=" << size_
-      << " bytes"                                                       //
+      << " bytes" //
       // << ", mode=" << mode_ << ", uid=" << uid_ << ", gid=" << gid_
       // << ", mtime=" << mtime_ << ", checksum=" << checksum_
       // << ", linkflag=" << linkflag_ << ", magic=\"" << magic_ << "\""
@@ -71,7 +71,7 @@ void TarHeader::allocate_block() {
   }
   std::fill(std::begin(block_), std::end(block_), static_cast<char>(0));
 }
-bool TarHeader::write_header(std::ostream& os) {
+bool TarHeader::write_header(std::ostream &os) {
   construct_header();
   block_begin_pos_ = os.tellp();
   os.write(block_.data(), block_.size());
@@ -90,11 +90,11 @@ bool TarHeader::write_header(std::ostream& os) {
   }
   return os.good();
 }
-HD_USTAR* TarHeader::get_header_for_long_name() {
-  return reinterpret_cast<HD_USTAR*>(block_.data());
+HD_USTAR *TarHeader::get_header_for_long_name() {
+  return reinterpret_cast<HD_USTAR *>(block_.data());
 }
-HD_USTAR* TarHeader::get_header_for_data() {
-  auto ret = reinterpret_cast<HD_USTAR*>(&block_[block_.size() - BLOCKSIZE]);
+HD_USTAR *TarHeader::get_header_for_data() {
+  auto ret = reinterpret_cast<HD_USTAR *>(&block_[block_.size() - BLOCKSIZE]);
   return ret;
 }
 void TarHeader::construct_long_name() {
@@ -159,24 +159,24 @@ void TarHeader::now() {
   mtime_ =
       static_cast<unsigned long>(std::chrono::system_clock::to_time_t(now));
 }
-void TarHeader::fill_name(HD_USTAR* header, const char* name, size_t n) {
+void TarHeader::fill_name(HD_USTAR *header, const char *name, size_t n) {
   // NOTE: name is not null-terminated
   auto len = std::min(n, sizeof(header->name));
   std::copy(name, name + len, &header->name[0]);
 }
-void TarHeader::fill_mode(HD_USTAR* header, int mode) {
+void TarHeader::fill_mode(HD_USTAR *header, int mode) {
   snprintf(header->mode, sizeof(header->mode), "%07o", mode);
   header->mode[7] = '\0'; // Ensure null termination
 }
-void TarHeader::fill_uid(HD_USTAR* header, int uid) {
+void TarHeader::fill_uid(HD_USTAR *header, int uid) {
   snprintf(header->uid, sizeof(header->uid), "%07o", uid);
   header->uid[7] = '\0'; // Ensure null termination
 }
-void TarHeader::fill_gid(HD_USTAR* header, int gid) {
+void TarHeader::fill_gid(HD_USTAR *header, int gid) {
   snprintf(header->gid, sizeof(header->gid), "%07o", gid);
   header->gid[7] = '\0'; // Ensure null termination
 }
-void TarHeader::fill_size(HD_USTAR* header, size_t size) {
+void TarHeader::fill_size(HD_USTAR *header, size_t size) {
   if (size <= 077777777777ULL) {
     // Standard POSIX ustar: 11-digit octal, supports up to 8 GB
     snprintf(header->size, sizeof(header->size), "%011llo",
@@ -193,29 +193,29 @@ void TarHeader::fill_size(HD_USTAR* header, size_t size) {
     }
   }
 }
-void TarHeader::fill_mtime(HD_USTAR* header) {
+void TarHeader::fill_mtime(HD_USTAR *header) {
   snprintf(header->mtime, sizeof(header->mtime), "%011lo", mtime_);
   header->mtime[11] = '\0'; // Ensure null termination
 }
-void TarHeader::fill_chksum(HD_USTAR* header) {
+void TarHeader::fill_chksum(HD_USTAR *header) {
   auto spaces = std::string(sizeof(header->chksum), ' ');
   std::copy(spaces.begin(), spaces.end(), header->chksum);
   unsigned int checksum_value = 0;
-  const unsigned char* block = reinterpret_cast<const unsigned char*>(header);
+  const unsigned char *block = reinterpret_cast<const unsigned char *>(header);
   for (unsigned int i = 0; i < BLOCKSIZE; ++i) {
     checksum_value += block[i];
   }
   snprintf(header->chksum, sizeof(header->chksum), "%06o", checksum_value);
 }
-void TarHeader::fill_linkflag(HD_USTAR* header, char c) {
+void TarHeader::fill_linkflag(HD_USTAR *header, char c) {
   header->typeflag = c;
 }
-void TarHeader::fill_linkname(HD_USTAR* header, const char* name, size_t n) {
+void TarHeader::fill_linkname(HD_USTAR *header, const char *name, size_t n) {
   // NOTE: name is not null-terminated
   auto len = std::min(n, sizeof(header->linkname));
   std::copy(name, name + len, &header->linkname[0]);
 }
-void TarHeader::fill_magic(HD_USTAR* header) {
+void TarHeader::fill_magic(HD_USTAR *header) {
 
   // clang-format off
   /*
@@ -226,29 +226,29 @@ void TarHeader::fill_magic(HD_USTAR* header) {
   const char magic[] = "ustar  ";
   std::copy(&magic[0], &magic[0] + sizeof(magic), &header->magic[0]);
 }
-void TarHeader::fill_version(HD_USTAR* /*header*/) {
+void TarHeader::fill_version(HD_USTAR * /*header*/) {
   // const char version[] = "  ";
   // std::copy(&version[0], &version[0] + sizeof(version), &header->version[0]);
 }
-void TarHeader::fill_uname(HD_USTAR* header, const char* uname, size_t n) {
+void TarHeader::fill_uname(HD_USTAR *header, const char *uname, size_t n) {
   // NOTE: uname is not null-terminated
   auto len = std::min(n, sizeof(header->uname));
   std::copy(uname, uname + len, &header->uname[0]);
 }
-void TarHeader::fill_gname(HD_USTAR* header, const char* gname, size_t n) {
+void TarHeader::fill_gname(HD_USTAR *header, const char *gname, size_t n) {
   // NOTE: gname is not null-terminated
   auto len = std::min(n, sizeof(header->gname));
   std::copy(gname, gname + len, &header->gname[0]);
 }
-void TarHeader::fill_devmajor(HD_USTAR* header, int devmajor) {
+void TarHeader::fill_devmajor(HD_USTAR *header, int devmajor) {
   snprintf(header->devmajor, sizeof(header->devmajor), "%07o", devmajor);
   header->devmajor[7] = '\0'; // Ensure null termination
 }
-void TarHeader::fill_devminor(HD_USTAR* header, int devminor) {
+void TarHeader::fill_devminor(HD_USTAR *header, int devminor) {
   snprintf(header->devminor, sizeof(header->devminor), "%07o", devminor);
   header->devminor[7] = '\0'; // Ensure null termination
 }
-void TarHeader::fill_prefix(HD_USTAR* header, const char* prefix, size_t n) {
+void TarHeader::fill_prefix(HD_USTAR *header, const char *prefix, size_t n) {
   // NOTE: prefix is not null-terminated
   auto len = std::min(n, sizeof(header->prefix));
   std::copy(prefix, prefix + len, &header->prefix[0]);
@@ -269,11 +269,11 @@ void TarHeader::fill_prefix(HD_USTAR* header, const char* prefix, size_t n) {
  * corrupted TAR file)
  *         - 0  : The TAR header might be empty (unlikely but possible)
  */
-static int tar_checksum(HD_USTAR* header) {
+static int tar_checksum(HD_USTAR *header) {
   int unsigned_sum = 0; /* the POSIX one :-) */
   int signed_sum = 0;   /* the Sun one :-( */
   int recorded_sum;
-  char* p = (char*)header;
+  char *p = (char *)header;
 
   for (auto i = sizeof *header; i-- != 0;) {
     unsigned_sum += (unsigned char)*p;
@@ -304,7 +304,7 @@ static int tar_checksum(HD_USTAR* header) {
   return 1;
 }
 
-std::optional<TarHeader> TarHeader::read_header(std::istream& is) {
+std::optional<TarHeader> TarHeader::read_header(std::istream &is) {
   auto ret = std::make_optional<TarHeader>("", 0);
   MY_LOG(1) << " trying to read a tar block at " << is.tellg();
   char block[BLOCKSIZE];
@@ -321,7 +321,7 @@ std::optional<TarHeader> TarHeader::read_header(std::istream& is) {
     }
   }
   ret->block_begin_pos_ = is.tellg() - std::streampos(BLOCKSIZE);
-  auto header = reinterpret_cast<HD_USTAR*>(block);
+  auto header = reinterpret_cast<HD_USTAR *>(block);
   auto check_sum = tar_checksum(header);
   if (check_sum == -1) {
     MY_LOG(1) << "Invalid tar header checksum";
@@ -353,7 +353,7 @@ std::optional<TarHeader> TarHeader::read_header(std::istream& is) {
       MY_LOG(1) << "Empty tar header for long name: " << ret->name_;
       return std::nullopt;
     }
-    header = reinterpret_cast<HD_USTAR*>(block);
+    header = reinterpret_cast<HD_USTAR *>(block);
   } else {
     // header->name might not be null-terminated, however there must be a zero
     // in the header, so trucate the name;

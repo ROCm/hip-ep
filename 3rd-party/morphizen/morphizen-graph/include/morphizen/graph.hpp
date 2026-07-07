@@ -39,34 +39,34 @@ namespace morphizen {
 [[deprecated("This API will be removed in the future release version. Please "
              "use NodeBuilder instead.")]]
 #endif
-MORPHIZEN_DLL_SPEC Node&
-graph_add_node(Graph& graph, const std::string& name,
-               const std::string& op_type, const std::string& description,
-               const std::vector<const NodeArg*>& input_args,
-               const std::vector<const NodeArg*>& output_args,
-               NodeAttributesPtr attributes, const std::string& domain);
+MORPHIZEN_DLL_SPEC Node &
+graph_add_node(Graph &graph, const std::string &name,
+               const std::string &op_type, const std::string &description,
+               const std::vector<const NodeArg *> &input_args,
+               const std::vector<const NodeArg *> &output_args,
+               NodeAttributesPtr attributes, const std::string &domain);
 
-MORPHIZEN_DLL_SPEC std::vector<const NodeArg*>
-node_inputs_2_node_args(const std::vector<NodeInput>& inputs);
+MORPHIZEN_DLL_SPEC std::vector<const NodeArg *>
+node_inputs_2_node_args(const std::vector<NodeInput> &inputs);
 
-MORPHIZEN_DLL_SPEC std::vector<const NodeArg*>
-graph_get_outputs(const Graph& graph);
+MORPHIZEN_DLL_SPEC std::vector<const NodeArg *>
+graph_get_outputs(const Graph &graph);
 
-MORPHIZEN_DLL_SPEC void graph_set_name(Graph& graph, const std::string& name);
+MORPHIZEN_DLL_SPEC void graph_set_name(Graph &graph, const std::string &name);
 
 // NOTE: NodeBuilder has been moved to morphizen-core (node_builder.hpp)
 // It depends on IPass and AnchorPoint which are high-level morphizen-core
 // concepts. This file contains only low-level graph wrappers over
 // MORPHIZEN_ORT_API.
 
-const Model& graph_get_model(const Graph& graph);
+const Model &graph_get_model(const Graph &graph);
 
-std::vector<const Node*> graph_nodes(const Graph& graph);
+std::vector<const Node *> graph_nodes(const Graph &graph);
 
-std::vector<const NodeArg*> graph_get_inputs(const Graph& graph);
+std::vector<const NodeArg *> graph_get_inputs(const Graph &graph);
 
-MORPHIZEN_DLL_SPEC std::vector<const Node*>
-graph_get_output_nodes(const Graph& graph);
+MORPHIZEN_DLL_SPEC std::vector<const Node *>
+graph_get_output_nodes(const Graph &graph);
 
 /** @brief get indices of all nodes in topoligial order
  *
@@ -85,7 +85,7 @@ graph_get_output_nodes(const Graph& graph);
  *    }
  */
 MORPHIZEN_DLL_SPEC std::vector<size_t>
-graph_get_node_in_topoligical_order(const Graph& graph);
+graph_get_node_in_topoligical_order(const Graph &graph);
 
 /** @brief dump a graph as a string for debugging purpose
  *
@@ -100,10 +100,10 @@ graph_get_node_in_topoligical_order(const Graph& graph);
  *  2. it contains shape information.
  *
  */
-MORPHIZEN_DLL_SPEC std::string graph_as_string(const Graph& graph);
+MORPHIZEN_DLL_SPEC std::string graph_as_string(const Graph &graph);
 
-std::vector<const Node*>
-graph_get_consumer_nodes(const Graph& graph, const std::string& node_arg_name);
+std::vector<const Node *>
+graph_get_consumer_nodes(const Graph &graph, const std::string &node_arg_name);
 
 /** @brief garbage collection by removing dangling nodes.
  *
@@ -116,7 +116,7 @@ graph_get_consumer_nodes(const Graph& graph, const std::string& node_arg_name);
  *  Sometime it is useful to disable gc for troubleshooting.
  *
  */
-MORPHIZEN_DLL_SPEC void graph_gc(Graph& graph);
+MORPHIZEN_DLL_SPEC void graph_gc(Graph &graph);
 
 /** @brief rebuild graph data structure.
  *
@@ -137,7 +137,7 @@ MORPHIZEN_DLL_SPEC void graph_gc(Graph& graph);
  *  `Pass::apply(...)` and `Pass::fuse` invoke `graph_resolve`.
  *
  */
-MORPHIZEN_DLL_SPEC void graph_resolve(Graph& graph, bool force = false);
+MORPHIZEN_DLL_SPEC void graph_resolve(Graph &graph, bool force = false);
 
 // NOTE: graph_replace_node_arg has been moved to morphizen-core
 // It depends on IPass which is a morphizen-core type
@@ -150,8 +150,8 @@ MORPHIZEN_DLL_SPEC void graph_resolve(Graph& graph, bool force = false);
  *
  * Returns the node that produces the given node argument as output.
  */
-MORPHIZEN_DLL_SPEC const Node*
-graph_producer_node(const Graph& graph, const std::string& node_arg_name);
+MORPHIZEN_DLL_SPEC const Node *
+graph_producer_node(const Graph &graph, const std::string &node_arg_name);
 
 /** @brief Get a node argument by name
  *
@@ -159,15 +159,15 @@ graph_producer_node(const Graph& graph, const std::string& node_arg_name);
  * @param name Name of the node argument
  * @return Pointer to the node argument, or nullptr if not found
  */
-MORPHIZEN_DLL_SPEC const NodeArg* graph_get_node_arg(const Graph& graph,
-                                                     const std::string& name);
+MORPHIZEN_DLL_SPEC const NodeArg *graph_get_node_arg(const Graph &graph,
+                                                     const std::string &name);
 
 /** @brief Get the name of a graph
  *
  * @param graph The graph to query
  * @return The graph name
  */
-MORPHIZEN_DLL_SPEC const std::string& graph_get_name(const Graph& graph);
+MORPHIZEN_DLL_SPEC const std::string &graph_get_name(const Graph &graph);
 
 /** @brief Add an initialized tensor to the graph
  *
@@ -177,24 +177,24 @@ MORPHIZEN_DLL_SPEC const std::string& graph_get_name(const Graph& graph);
  * Adds a tensor as a constant initializer to the graph. This is used to add
  * constant weights and parameters to the model.
  */
-MORPHIZEN_DLL_SPEC void graph_add_initialized_tensor(Graph& graph,
-                                                     const TensorProto& tensor);
+MORPHIZEN_DLL_SPEC void graph_add_initialized_tensor(Graph &graph,
+                                                     const TensorProto &tensor);
 
 /** @brief Set graph inputs
  *
  * @param graph The graph to modify
  * @param inputs Vector of node arguments to set as graph inputs
  */
-MORPHIZEN_DLL_SPEC void graph_set_inputs(Graph& graph,
-                                         const std::vector<NodeArg*>& inputs);
+MORPHIZEN_DLL_SPEC void graph_set_inputs(Graph &graph,
+                                         const std::vector<NodeArg *> &inputs);
 
 /** @brief Set graph outputs
  *
  * @param graph The graph to modify
  * @param outputs Vector of node arguments to set as graph outputs
  */
-MORPHIZEN_DLL_SPEC void graph_set_outputs(Graph& graph,
-                                          const std::vector<NodeArg*>& outputs);
+MORPHIZEN_DLL_SPEC void
+graph_set_outputs(Graph &graph, const std::vector<NodeArg *> &outputs);
 
 /** @brief Save graph to file
  *
@@ -203,8 +203,8 @@ MORPHIZEN_DLL_SPEC void graph_set_outputs(Graph& graph,
  * @param external_data_path Path for external data file
  * @param threshold Threshold for external data
  */
-MORPHIZEN_DLL_SPEC void graph_save(Graph& graph, const std::string& model_path,
-                                   const std::string& external_data_path,
+MORPHIZEN_DLL_SPEC void graph_save(Graph &graph, const std::string &model_path,
+                                   const std::string &external_data_path,
                                    size_t threshold);
 
 /** @brief Perform reverse DFS traversal from a node
@@ -220,10 +220,10 @@ MORPHIZEN_DLL_SPEC void graph_save(Graph& graph, const std::string& model_path,
  * Traverses the graph in reverse DFS order starting from the given node.
  */
 MORPHIZEN_DLL_SPEC void graph_reverse_dfs_from(
-    const Graph& graph, size_t node_index,
-    const std::function<bool(const Node*)>& enter,
-    const std::function<void(const Node*)>& leave,
-    const std::function<bool(const Node*, const Node*)>& comp = nullptr,
+    const Graph &graph, size_t node_index,
+    const std::function<bool(const Node *)> &enter,
+    const std::function<void(const Node *)> &leave,
+    const std::function<bool(const Node *, const Node *)> &comp = nullptr,
     bool subgraph_sensitive = false);
 
 /** @brief Perform reverse DFS traversal from multiple nodes
@@ -238,10 +238,10 @@ MORPHIZEN_DLL_SPEC void graph_reverse_dfs_from(
  * This is a low-level wrapper used by morphizen-core for fusion analysis.
  */
 MORPHIZEN_DLL_SPEC void graph_reverse_dfs_from_multi(
-    const Graph& graph, gsl::span<const Node* const> from,
-    const std::function<void(const Node*)>& enter,
-    const std::function<void(const Node*)>& leave,
-    const std::function<bool(const Node*, const Node*)>& stop);
+    const Graph &graph, gsl::span<const Node *const> from,
+    const std::function<void(const Node *)> &enter,
+    const std::function<void(const Node *)> &leave,
+    const std::function<bool(const Node *, const Node *)> &stop);
 
 /** @brief Fuse nodes in the graph
  *
@@ -256,11 +256,11 @@ MORPHIZEN_DLL_SPEC void graph_reverse_dfs_from_multi(
  * Fuses multiple nodes into a single node, typically used for optimization.
  */
 MORPHIZEN_DLL_SPEC void
-graph_fuse(Graph& graph, const std::string& name, const std::string& op_type,
-           const std::vector<const Node*>& nodes,
-           const std::vector<std::string>& inputs,
-           const std::vector<std::string>& outputs,
-           const std::vector<std::string>& constant_initializers = {});
+graph_fuse(Graph &graph, const std::string &name, const std::string &op_type,
+           const std::vector<const Node *> &nodes,
+           const std::vector<std::string> &inputs,
+           const std::vector<std::string> &outputs,
+           const std::vector<std::string> &constant_initializers = {});
 
 /** @brief Fuse nodes in the graph (low-level wrapper)
  *
@@ -276,12 +276,12 @@ graph_fuse(Graph& graph, const std::string& name, const std::string& op_type,
  * This is a low-level wrapper that takes node indices instead of node pointers.
  * It directly wraps MORPHIZEN_ORT_API(graph_fuse) for use by morphizen-core.
  */
-MORPHIZEN_DLL_SPEC Node&
-graph_fuse(Graph& graph, const std::string& name, const std::string& op_type,
-           const std::vector<size_t>& nodes,
-           const std::vector<std::string>& inputs,
-           const std::vector<std::string>& outputs,
-           const std::vector<std::string>& constant_initializers);
+MORPHIZEN_DLL_SPEC Node &
+graph_fuse(Graph &graph, const std::string &name, const std::string &op_type,
+           const std::vector<size_t> &nodes,
+           const std::vector<std::string> &inputs,
+           const std::vector<std::string> &outputs,
+           const std::vector<std::string> &constant_initializers);
 
 // Model operations (wrappers for model-level MORPHIZEN_ORT_API calls)
 // These allow morphizen-core's Model class to use morphizen-graph wrappers
@@ -292,7 +292,7 @@ graph_fuse(Graph& graph, const std::string& name, const std::string& op_type,
  * @param model The model to query
  * @return Reference to the main graph
  */
-MORPHIZEN_DLL_SPEC Graph& model_main_graph(Model& model);
+MORPHIZEN_DLL_SPEC Graph &model_main_graph(Model &model);
 
 /** @brief Get metadata from a model
  *
@@ -300,8 +300,8 @@ MORPHIZEN_DLL_SPEC Graph& model_main_graph(Model& model);
  * @param key Metadata key
  * @return Metadata value (returned by value to avoid dangling reference)
  */
-MORPHIZEN_DLL_SPEC std::string model_get_meta_data(const Model& model,
-                                                   const std::string& key);
+MORPHIZEN_DLL_SPEC std::string model_get_meta_data(const Model &model,
+                                                   const std::string &key);
 
 /** @brief Check if model has metadata
  *
@@ -309,15 +309,15 @@ MORPHIZEN_DLL_SPEC std::string model_get_meta_data(const Model& model,
  * @param key Metadata key to check
  * @return true if metadata exists, false otherwise
  */
-MORPHIZEN_DLL_SPEC bool model_has_meta_data(const Model& model,
-                                            const std::string& key);
+MORPHIZEN_DLL_SPEC bool model_has_meta_data(const Model &model,
+                                            const std::string &key);
 
 /** @brief Clone a model
  *
  * @param model The model to clone
  * @return Pointer to the cloned model
  */
-MORPHIZEN_DLL_SPEC Model* model_clone(const Model& model);
+MORPHIZEN_DLL_SPEC Model *model_clone(const Model &model);
 
 } // namespace morphizen
 
@@ -337,7 +337,7 @@ public:
    *
    * @param graph The underlying `morphizen::Graph` object.
    */
-  GraphConstRef(const morphizen::Graph& graph) : graph_(graph) {}
+  GraphConstRef(const morphizen::Graph &graph) : graph_(graph) {}
 
   /**
    * @brief Destroys the `GraphConstRef` object.
@@ -351,7 +351,7 @@ public:
    * @param other The other GraphConstRef object to compare with.
    * @return true if the two GraphConstRef objects are equal, false otherwise.
    */
-  bool operator==(const GraphConstRef& other) const {
+  bool operator==(const GraphConstRef &other) const {
     return &graph_ == &other.graph_;
   }
   /**
@@ -359,21 +359,21 @@ public:
    *
    * @return The name of the graph.
    */
-  const std::string& name() const;
+  const std::string &name() const;
   /**
    * Returns the path to the model.
    *
    * @return An optional containing the path to the model, or an empty path
    * if model is loaded from memory.
    */
-  const std::filesystem::path& model_path() const;
+  const std::filesystem::path &model_path() const;
   /**
    * @brief Conversion operator to convert to a const reference of
    * `onnxruntime::Graph`.
    *
    * @return A const reference to the underlying `onnxruntime::Graph` object.
    */
-  operator const onnxruntime::Graph&() const { return graph_; }
+  operator const onnxruntime::Graph &() const { return graph_; }
 
   /**
    * @brief Returns a vector of NodeArg objects representing the inputs of the
@@ -411,7 +411,7 @@ public:
    * @brief Save the graph to a file.
    * @param filename The name of the file to save the graph to.
    */
-  void save(const std::filesystem::path& filename) const;
+  void save(const std::filesystem::path &filename) const;
   /**
    * @brief Save the graph to a ONNX model file with exteranl data.
    *
@@ -428,8 +428,8 @@ public:
    * Note : If the threshold is max size_t, all constant initializers will be
    * saved into ONNX model file.
    */
-  void save(const std::filesystem::path& filename,
-            const std::filesystem::path& external_data_file,
+  void save(const std::filesystem::path &filename,
+            const std::filesystem::path &external_data_file,
             size_t threshold) const;
   /**
    * @brief Save the graph to a string.
@@ -459,7 +459,7 @@ public:
    * @return A vector of NodeConstRef objects representing the consumers of the
    * current node.
    */
-  std::vector<NodeConstRef> find_consumers(const std::string& name) const;
+  std::vector<NodeConstRef> find_consumers(const std::string &name) const;
 
   /**
    * Finds a node with the given node arg name in the graph.
@@ -468,7 +468,7 @@ public:
    * @return An optional reference to the found node, or std::nullopt if the
    * node is not found.
    */
-  std::optional<NodeConstRef> find_node(const std::string& name) const;
+  std::optional<NodeConstRef> find_node(const std::string &name) const;
 
   /**
    * @brief Finds a node argument with the given name.
@@ -482,7 +482,7 @@ public:
    * @return An optional reference to the found node argument, or an empty
    * optional if not found.
    */
-  std::optional<NodeArgConstRef> find_node_arg(const std::string& name) const;
+  std::optional<NodeArgConstRef> find_node_arg(const std::string &name) const;
   // NOTE: try_fuse and virtual_fuse have been moved to morphizen-core
   // They depend on MetaDefProto and TryFuseError which are morphizen-core types
   /**
@@ -491,15 +491,15 @@ public:
    * @return The string representation of the graph.
    */
   std::string to_string() const;
-  MORPHIZEN_DLL_SPEC friend std::ostream&
-  operator<<(std::ostream& os, const GraphConstRef& graph);
+  MORPHIZEN_DLL_SPEC friend std::ostream &
+  operator<<(std::ostream &os, const GraphConstRef &graph);
 
   /**
    * @brief Gets the model that contains this graph
    *
    * @return Reference to the model
    */
-  const morphizen::Model& model() const;
+  const morphizen::Model &model() const;
 
   /**
    * @brief Gets the output nodes of the graph
@@ -526,10 +526,10 @@ public:
    */
   void reverse_dfs_from(
       size_t node_index,
-      const std::function<bool(const morphizen::Node*)>& enter,
-      const std::function<void(const morphizen::Node*)>& leave,
-      const std::function<bool(const morphizen::Node*, const morphizen::Node*)>&
-          comp = nullptr,
+      const std::function<bool(const morphizen::Node *)> &enter,
+      const std::function<void(const morphizen::Node *)> &leave,
+      const std::function<bool(const morphizen::Node *,
+                               const morphizen::Node *)> &comp = nullptr,
       bool subgraph_sensitive = false) const;
 
   /**
@@ -544,10 +544,10 @@ public:
    */
   void reverse_dfs_from_multi(
       gsl::span<const NodeConstRef> nodes,
-      const std::function<bool(NodeConstRef)>& enter,
-      const std::function<bool(NodeConstRef)>& leave,
-      const std::function<bool(NodeConstRef, NodeConstRef)>& comp,
-      const std::function<bool(NodeConstRef, NodeConstRef)>& stop) const;
+      const std::function<bool(NodeConstRef)> &enter,
+      const std::function<bool(NodeConstRef)> &leave,
+      const std::function<bool(NodeConstRef, NodeConstRef)> &comp,
+      const std::function<bool(NodeConstRef, NodeConstRef)> &stop) const;
 
 protected:
   /**
@@ -557,10 +557,12 @@ protected:
    * @return A non-const reference to the underlying `onnxruntime::Graph`
    * object.
    */
-  onnxruntime::Graph& self() { return const_cast<onnxruntime::Graph&>(graph_); }
+  onnxruntime::Graph &self() {
+    return const_cast<onnxruntime::Graph &>(graph_);
+  }
 
 private:
-  const morphizen::Graph& graph_;
+  const morphizen::Graph &graph_;
 };
 /**
  * @brief A mutable version of GraphConstRef
@@ -581,7 +583,7 @@ public:
    *
    * @param graph The underlying `onnxruntime::Graph` object.
    */
-  GraphRef(morphizen::Graph& graph);
+  GraphRef(morphizen::Graph &graph);
 
   /**
    * @brief Destroys the `Graph` object.
@@ -595,22 +597,22 @@ public:
    *
    * @param name The new name to be set for the graph.
    */
-  void set_name(const std::string& name);
+  void set_name(const std::string &name);
   /**
    * @brief Conversion operator to convert to a reference of
    * `onnxruntime::Graph`.
    *
    * @return A reference to the underlying `onnxruntime::Graph` object.
    */
-  operator onnxruntime::Graph&() { return self(); }
+  operator onnxruntime::Graph &() { return self(); }
   /**
    * @brief Conversion operator to convert to a const reference of
    * `onnxruntime::Graph`.
    *
    * @return A const reference to the underlying `onnxruntime::Graph` object.
    */
-  operator const onnxruntime::Graph&() const {
-    return GraphConstRef::operator const onnxruntime::Graph&();
+  operator const onnxruntime::Graph &() const {
+    return GraphConstRef::operator const onnxruntime::Graph &();
   }
 
   /**
@@ -642,8 +644,8 @@ public:
    * replaced with the regular tensor proto, i.e. revert the optimization of
    * model clone, i.e. no weights sharing.
    */
-  void mut_save(const std::filesystem::path& file_path,
-                const std::filesystem::path& external_data_file,
+  void mut_save(const std::filesystem::path &file_path,
+                const std::filesystem::path &external_data_file,
                 size_t threshold, bool filter_out_special_tensor);
 
   /** @brief save a graph to a string
@@ -670,7 +672,7 @@ public:
    * @return A NodeArgRef representing the new constant initializer.
    */
   NodeArgRef new_constant_initializer_i8(int8_t value,
-                                         const std::string& name = "");
+                                         const std::string &name = "");
   /**
    * Creates a new constant initializer with a uint8_t value.
    *
@@ -680,7 +682,7 @@ public:
    * @return A NodeArgRef representing the new constant initializer.
    */
   NodeArgRef new_constant_initializer_u8(uint8_t value,
-                                         const std::string& name = "");
+                                         const std::string &name = "");
 
   /**
    * Creates a new constant initializer with an int16_t value.
@@ -691,7 +693,7 @@ public:
    * @return A NodeArgRef representing the new constant initializer.
    */
   NodeArgRef new_constant_initializer_i16(int16_t value,
-                                          const std::string& name = "");
+                                          const std::string &name = "");
 
   /**
    * Creates a new constant initializer with a uint16_t value.
@@ -702,7 +704,7 @@ public:
    * @return A NodeArgRef representing the new constant initializer.
    */
   NodeArgRef new_constant_initializer_u16(uint16_t value,
-                                          const std::string& name = "");
+                                          const std::string &name = "");
 
   /**
    * Creates a new constant initializer with an int32_t value.
@@ -713,7 +715,7 @@ public:
    * @return A NodeArgRef representing the new constant initializer.
    */
   NodeArgRef new_constant_initializer_i32(int32_t value,
-                                          const std::string& name = "");
+                                          const std::string &name = "");
 
   /**
    * Creates a new constant initializer with a uint32_t value.
@@ -724,7 +726,7 @@ public:
    * @return A NodeArgRef representing the new constant initializer.
    */
   NodeArgRef new_constant_initializer_u32(uint32_t value,
-                                          const std::string& name = "");
+                                          const std::string &name = "");
 
   /**
    * Creates a new constant initializer with an int64_t value.
@@ -735,7 +737,7 @@ public:
    * @return A NodeArgRef representing the new constant initializer.
    */
   NodeArgRef new_constant_initializer_i64(int64_t value,
-                                          const std::string& name = "");
+                                          const std::string &name = "");
 
   /**
    * Creates a new constant initializer with a uint64_t value.
@@ -746,7 +748,7 @@ public:
    * @return A NodeArgRef representing the new constant initializer.
    */
   NodeArgRef new_constant_initializer_u64(uint64_t value,
-                                          const std::string& name = "");
+                                          const std::string &name = "");
 
   /**
    * Creates a new constant initializer with a float value.
@@ -757,7 +759,7 @@ public:
    * @return A NodeArgRef representing the new constant initializer.
    */
   NodeArgRef new_constant_initializer_f32(float value,
-                                          const std::string& name = "");
+                                          const std::string &name = "");
 
   /**
    * Creates a new constant initializer with a double value.
@@ -768,7 +770,7 @@ public:
    * @return A NodeArgRef representing the new constant initializer.
    */
   NodeArgRef new_constant_initializer_f64(double value,
-                                          const std::string& name = "");
+                                          const std::string &name = "");
 
   /**
    * Creates a new constant initializer with a bf16_t value.
@@ -781,7 +783,7 @@ public:
    * @return A reference to the created NodeArgRef object.
    */
   NodeArgRef new_constant_initializer_bf16(bf16_t value,
-                                           const std::string& name = "");
+                                           const std::string &name = "");
   /**
    * Creates a new constant initializer with a 16-bit floating-point value.
    *
@@ -794,7 +796,7 @@ public:
    * @return A reference to the created NodeArgRef object.
    */
   NodeArgRef new_constant_initializer_fp16(fp16_t value,
-                                           const std::string& name = "");
+                                           const std::string &name = "");
   // Function declarations for creating new constant initializers with gsl::span
   // for various data types
 
@@ -807,8 +809,8 @@ public:
    * @return NodeArgRef Reference to the created node argument.
    */
   NodeArgRef new_constant_initializer_i8_span(gsl::span<const int8_t> values,
-                                              const std::vector<int64_t>& shape,
-                                              const std::string& name = "");
+                                              const std::vector<int64_t> &shape,
+                                              const std::string &name = "");
 
   /**
    * @brief Creates a new constant initializer for uint8_t values.
@@ -818,8 +820,8 @@ public:
    * @return NodeArgRef Reference to the created node argument.
    */
   NodeArgRef new_constant_initializer_u8_span(gsl::span<const uint8_t> values,
-                                              const std::vector<int64_t>& shape,
-                                              const std::string& name = "");
+                                              const std::vector<int64_t> &shape,
+                                              const std::string &name = "");
 
   /**
    * @brief Creates a new constant initializer for int16_t values.
@@ -831,8 +833,8 @@ public:
 
   NodeArgRef
   new_constant_initializer_i16_span(gsl::span<const int16_t> values,
-                                    const std::vector<int64_t>& shape,
-                                    const std::string& name = "");
+                                    const std::vector<int64_t> &shape,
+                                    const std::string &name = "");
 
   /**
    * @brief Creates a new constant initializer for uint16_t values.
@@ -844,8 +846,8 @@ public:
    */
   NodeArgRef
   new_constant_initializer_u16_span(gsl::span<const uint16_t> values,
-                                    const std::vector<int64_t>& shape,
-                                    const std::string& name = "");
+                                    const std::vector<int64_t> &shape,
+                                    const std::string &name = "");
 
   /**
    * @brief Creates a new constant initializer for int32_t values.
@@ -857,8 +859,8 @@ public:
    */
   NodeArgRef
   new_constant_initializer_i32_span(gsl::span<const int32_t> values,
-                                    const std::vector<int64_t>& shape,
-                                    const std::string& name = "");
+                                    const std::vector<int64_t> &shape,
+                                    const std::string &name = "");
 
   /**
    * @brief Creates a new constant initializer for uint32_t values.
@@ -869,8 +871,8 @@ public:
    */
   NodeArgRef
   new_constant_initializer_u32_span(gsl::span<const uint32_t> values,
-                                    const std::vector<int64_t>& shape,
-                                    const std::string& name = "");
+                                    const std::vector<int64_t> &shape,
+                                    const std::string &name = "");
 
   /**
    * @brief Creates a new constant initializer for int64_t values.
@@ -881,8 +883,8 @@ public:
    */
   NodeArgRef
   new_constant_initializer_i64_span(gsl::span<const int64_t> values,
-                                    const std::vector<int64_t>& shape,
-                                    const std::string& name = "");
+                                    const std::vector<int64_t> &shape,
+                                    const std::string &name = "");
 
   /**
    * @brief Creates a new constant initializer for uint64_t values.
@@ -893,8 +895,8 @@ public:
    */
   NodeArgRef
   new_constant_initializer_u64_span(gsl::span<const uint64_t> values,
-                                    const std::vector<int64_t>& shape,
-                                    const std::string& name = "");
+                                    const std::vector<int64_t> &shape,
+                                    const std::string &name = "");
 
   /**
    * @brief Creates a new constant initializer for float values.
@@ -905,8 +907,8 @@ public:
    */
   NodeArgRef
   new_constant_initializer_f32_span(gsl::span<const float> values,
-                                    const std::vector<int64_t>& shape,
-                                    const std::string& name = "");
+                                    const std::vector<int64_t> &shape,
+                                    const std::string &name = "");
 
   /**
    * @brief Creates a new constant initializer for double values.
@@ -918,8 +920,8 @@ public:
    */
   NodeArgRef
   new_constant_initializer_f64_span(gsl::span<const double> values,
-                                    const std::vector<int64_t>& shape,
-                                    const std::string& name = "");
+                                    const std::vector<int64_t> &shape,
+                                    const std::string &name = "");
   /**
    * Creates a new constant initializer for a graph node with a span of bf16_t
    * values.
@@ -935,8 +937,8 @@ public:
    */
   NodeArgRef
   new_constant_initializer_bf16_span(gsl::span<const bf16_t> values,
-                                     const std::vector<int64_t>& shape,
-                                     const std::string& name = "");
+                                     const std::vector<int64_t> &shape,
+                                     const std::string &name = "");
   /**
    * Creates a new constant initializer for a graph node with a span of fp16_t
    * values.
@@ -952,8 +954,8 @@ public:
    */
   NodeArgRef
   new_constant_initializer_fp16_span(gsl::span<const fp16_t> values,
-                                     const std::vector<int64_t>& shape,
-                                     const std::string& name = "");
+                                     const std::vector<int64_t> &shape,
+                                     const std::string &name = "");
 
   /**
    * @brief Sets the inputs for the graph.
@@ -965,7 +967,7 @@ public:
    * @param inputs A vector of `NodeConstRef` objects representing the input
    * nodes of the graph.
    */
-  void set_inputs(const std::vector<NodeArgConstRef>& inputs);
+  void set_inputs(const std::vector<NodeArgConstRef> &inputs);
   /**
    * @brief Sets the outputs of the graph.
    *
@@ -975,7 +977,7 @@ public:
    *
    * @param outputs The vector of nodes to set as the outputs of the graph.
    */
-  void set_outputs(const std::vector<NodeArgConstRef>& outputs);
+  void set_outputs(const std::vector<NodeArgConstRef> &outputs);
   /**
    * Creates a new NodeArgRef object with the specified name, shape, and data
    * type.
@@ -985,8 +987,8 @@ public:
    * @param data_type The data type of the NodeArgRef object.
    * @return A NodeArgRef object with the specified name, shape, and data type.
    */
-  NodeArgConstRef new_node_arg(const std::string& name,
-                               const std::vector<int64_t>& shape,
+  NodeArgConstRef new_node_arg(const std::string &name,
+                               const std::vector<int64_t> &shape,
                                ONNX_NAMESPACE::TensorProto_DataType data_type);
   /**
    * Creates a new NodeArgRef object with the specified name, data type and
@@ -997,7 +999,7 @@ public:
    * @return A NodeArgRef object with the specified name, data type and unknown
    * shape.
    */
-  NodeArgConstRef new_node_arg(const std::string& name,
+  NodeArgConstRef new_node_arg(const std::string &name,
                                ONNX_NAMESPACE::TensorProto_DataType data_type);
   /**
    * Adds a node to the graph.
@@ -1011,10 +1013,10 @@ public:
    * @param attributes The attributes associated with the node.
    * @return A reference to the newly added node.
    */
-  NodeRef add_node(const std::string& name, const std::string& op_domain,
-                   const std::string& op_type, const std::string& description,
-                   const std::vector<std::optional<NodeArgConstRef>>& inputs,
-                   const std::vector<std::optional<NodeArgConstRef>>& outputs,
+  NodeRef add_node(const std::string &name, const std::string &op_domain,
+                   const std::string &op_type, const std::string &description,
+                   const std::vector<std::optional<NodeArgConstRef>> &inputs,
+                   const std::vector<std::optional<NodeArgConstRef>> &outputs,
                    morphizen::NodeAttributesPtr attributes);
 
   /** prune_special_tensor_proto
@@ -1026,35 +1028,35 @@ public:
    *
    * @param inputs Vector of node arguments to set as graph inputs
    */
-  void set_inputs(const std::vector<morphizen::NodeArg*>& inputs);
+  void set_inputs(const std::vector<morphizen::NodeArg *> &inputs);
 
   /**
    * @brief Sets the graph outputs
    *
    * @param outputs Vector of node arguments to set as graph outputs
    */
-  void set_outputs(const std::vector<morphizen::NodeArg*>& outputs);
+  void set_outputs(const std::vector<morphizen::NodeArg *> &outputs);
 
   /**
    * @brief Adds an initialized tensor to the graph
    *
    * @param tensor The tensor proto to add as an initializer
    */
-  void add_initialized_tensor(const morphizen::TensorProto& tensor);
+  void add_initialized_tensor(const morphizen::TensorProto &tensor);
 };
 class Subgraph {
 public:
-  Subgraph(const std::vector<NodeArgConstRef>& inputs,
-           const std::vector<NodeArgConstRef>& outputs,
-           const std::vector<NodeConstRef>& nodes,
-           const std::vector<NodeArgConstRef>& constant_initializers)
+  Subgraph(const std::vector<NodeArgConstRef> &inputs,
+           const std::vector<NodeArgConstRef> &outputs,
+           const std::vector<NodeConstRef> &nodes,
+           const std::vector<NodeArgConstRef> &constant_initializers)
       : inputs_(inputs), outputs_(outputs), nodes_(nodes),
         constant_initializers_(constant_initializers) {}
 
-  const std::vector<NodeArgConstRef>& inputs() const { return inputs_; }
-  const std::vector<NodeArgConstRef>& outputs() const { return outputs_; }
-  const std::vector<NodeConstRef>& nodes() const { return nodes_; }
-  const std::vector<NodeArgConstRef>& constant_initializers() const {
+  const std::vector<NodeArgConstRef> &inputs() const { return inputs_; }
+  const std::vector<NodeArgConstRef> &outputs() const { return outputs_; }
+  const std::vector<NodeConstRef> &nodes() const { return nodes_; }
+  const std::vector<NodeArgConstRef> &constant_initializers() const {
     return constant_initializers_;
   }
 

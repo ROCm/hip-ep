@@ -11,14 +11,14 @@
 #include "morphizen/node_arg.hpp"
 
 #ifdef _MSC_VER
-#  pragma warning(push)
-#  pragma warning(disable : 4946)
+#pragma warning(push)
+#pragma warning(disable : 4946)
 #endif
 
 #include "morphizen/pattern.pb.h"
 
 #ifdef _MSC_VER
-#  pragma warning(pop)
+#pragma warning(pop)
 #endif
 
 namespace morphizen {
@@ -39,9 +39,9 @@ std::string PatternConstant::virtualize_label() const {
 }
 
 BinderBuilderPtr
-PatternConstant::match_uncached(const onnxruntime::Graph& graph,
-                                const NodeInput& node_input,
-                                const BinderBuilder& binder) const {
+PatternConstant::match_uncached(const onnxruntime::Graph &graph,
+                                const NodeInput &node_input,
+                                const BinderBuilder &binder) const {
   auto ret = BinderBuilderPtr();
   if (node_input.node != nullptr) {
     auto node_ref =
@@ -76,8 +76,8 @@ PatternConstant::match_uncached(const onnxruntime::Graph& graph,
   }
   return ret;
 }
-void PatternConstant::dump_to_proto_imp(RootPatternProto& /*pattern_proto*/,
-                                        PatternProto& this_proto) const {
+void PatternConstant::dump_to_proto_imp(RootPatternProto & /*pattern_proto*/,
+                                        PatternProto &this_proto) const {
   this_proto.mutable_constant();
 }
 } // namespace morphizen

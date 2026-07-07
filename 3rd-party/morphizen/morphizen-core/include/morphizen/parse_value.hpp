@@ -8,7 +8,7 @@
 #include <sstream>
 namespace morphizen {
 
-template <typename T> void parse_value(const std::string& text, T& value) {
+template <typename T> void parse_value(const std::string &text, T &value) {
   std::istringstream is(text);
   if (!(is >> value)) {
     assert(false);
@@ -19,7 +19,7 @@ template <typename T> void parse_value(const std::string& text, T& value) {
   }
 }
 
-inline void parse_value(const std::string& text, long long& value) {
+inline void parse_value(const std::string &text, long long &value) {
   if (text.size() > 2 && text[0] == '0' && text[1] == 'x') {
     value = stoll(text.substr(2), 0, 16);
   } else {
@@ -27,7 +27,7 @@ inline void parse_value(const std::string& text, long long& value) {
   }
 }
 
-inline void parse_value(const std::string& text, uint32_t& value) {
+inline void parse_value(const std::string &text, uint32_t &value) {
   if (text.size() > 2 && text[0] == '0' && text[1] == 'x') {
     value = static_cast<uint32_t>(stoul(text.substr(2), 0, 16));
   } else {
@@ -35,7 +35,7 @@ inline void parse_value(const std::string& text, uint32_t& value) {
   }
 }
 
-inline void parse_value(const std::string& text, uint64_t& value) {
+inline void parse_value(const std::string &text, uint64_t &value) {
   if (text.size() > 2 && text[0] == '0' && text[1] == 'x') {
     value = stoull(text.substr(2), 0, 16);
   } else {
@@ -43,7 +43,7 @@ inline void parse_value(const std::string& text, uint64_t& value) {
   }
 }
 
-inline void parse_value(const std::string& text, long& value) {
+inline void parse_value(const std::string &text, long &value) {
   if (text.size() > 2 && text[0] == '0' && text[1] == 'x') {
     value = stol(text.substr(2), 0, 16);
   } else {
@@ -51,7 +51,7 @@ inline void parse_value(const std::string& text, long& value) {
   }
 }
 
-inline void parse_value(const std::string& text, bool& value) {
+inline void parse_value(const std::string &text, bool &value) {
   if (text == "yes" || text == "on" || text == "enable" || text == "true") {
     value = true;
   } else {

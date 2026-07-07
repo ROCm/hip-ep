@@ -10,17 +10,17 @@
 #include <vector>
 
 #ifndef PROJECT_GIT_COMMIT_ID
-#  define PROJECT_GIT_COMMIT_ID "N/A"
+#define PROJECT_GIT_COMMIT_ID "N/A"
 #endif
 
 // Include generated version header (for Linux and as fallback for Windows)
 #ifdef HAVE_VERSION_INFO_CONFIG
-#  include "version_info_config.h"
+#include "version_info_config.h"
 #endif
 
 #ifdef _WIN32
-#  include <windows.h>
-#  pragma comment(lib, "version.lib")
+#include <windows.h>
+#pragma comment(lib, "version.lib")
 #endif
 namespace morphizen {
 const std::string get_lib_name() {
@@ -41,27 +41,27 @@ const std::string get_lib_id() {
 // morphizen-core-static.lib
 #if 0
 unsigned int get_morphizen_version_major() {
-#  ifdef MORPHIZEN_ORT_API_MAJOR
+#ifdef MORPHIZEN_ORT_API_MAJOR
   return MORPHIZEN_ORT_API_MAJOR;
-#  else
+#else
   return 1;
-#  endif
+#endif
 }
 
 unsigned int get_morphizen_version_minor() {
-#  ifdef MORPHIZEN_ORT_API_MINOR
+#ifdef MORPHIZEN_ORT_API_MINOR
   return MORPHIZEN_ORT_API_MINOR;
-#  else
+#else
   return 0;
-#  endif
+#endif
 }
 
 unsigned int get_morphizen_version_patch() {
-#  ifdef MORPHIZEN_ORT_API_PATCH
+#ifdef MORPHIZEN_ORT_API_PATCH
   return MORPHIZEN_ORT_API_PATCH;
-#  else
+#else
   return 0;
-#  endif
+#endif
 }
 #endif
 
@@ -73,7 +73,7 @@ extern "C" uint32_t morphizen_get_version() {
 
 #ifdef _WIN32
 // Helper function to query version info string from DLL resource
-static std::string query_version_info(const char* value_name) {
+static std::string query_version_info(const char *value_name) {
   // Get the path of the current DLL
   HMODULE hModule = NULL;
   if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
@@ -104,11 +104,11 @@ static std::string query_version_info(const char* value_name) {
   struct LANGANDCODEPAGE {
     WORD wLanguage;
     WORD wCodePage;
-  }* lpTranslate;
+  } *lpTranslate;
 
   UINT cbTranslate;
   if (!VerQueryValueA(buffer.data(), "\\VarFileInfo\\Translation",
-                      (LPVOID*)&lpTranslate, &cbTranslate)) {
+                      (LPVOID *)&lpTranslate, &cbTranslate)) {
     return "N/A";
   }
 
@@ -120,7 +120,7 @@ static std::string query_version_info(const char* value_name) {
   LPVOID value;
   UINT value_len;
   if (VerQueryValueA(buffer.data(), sub_block, &value, &value_len)) {
-    return std::string((char*)value);
+    return std::string((char *)value);
   }
 
   return "N/A";
@@ -189,7 +189,7 @@ const std::string get_dll_file_description() {
 }
 
 } // namespace morphizen
-extern "C" const char* morphizen_get_build_info() {
+extern "C" const char *morphizen_get_build_info() {
   static char ret[2048] = {'\0'};
   if (ret[0] == '\0') {
     std::ostringstream str;
@@ -200,7 +200,7 @@ extern "C" const char* morphizen_get_build_info() {
         << "." << morphizen::get_morphizen_version_minor() << "."
         << morphizen::get_morphizen_version_patch() << "\n";
     str << "\tBUILD: " << PROJECT_GIT_COMMIT_ID << "\n";
-    for (auto& info : version_vec_tuple{
+    for (auto &info : version_vec_tuple{
 #include "morphizen_version_info.hpp.inc"
          }) {
       str << "\t" << std::get<0>(info) << ";" << std::get<1>(info) << ";"

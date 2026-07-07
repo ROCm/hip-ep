@@ -8,11 +8,11 @@
 #include "profile_utils.hpp"
 #include <glog/logging.h>
 #ifdef _WIN32
-#  include <Windows.h>
-#  include <psapi.h>
+#include <Windows.h>
+#include <psapi.h>
 #else
-#  include <sys/resource.h>
-#  include <sys/times.h>
+#include <sys/resource.h>
+#include <sys/times.h>
 #endif
 
 namespace morphizen {
@@ -55,8 +55,8 @@ MemUsageProto GetMemUsage() {
  * @param ft_b The second FILETIME value.
  * @return The difference between the two FILETIME values.
  */
-static std::uint64_t SubtractFILETIME(const FILETIME& ft_a,
-                                      const FILETIME& ft_b) {
+static std::uint64_t SubtractFILETIME(const FILETIME &ft_a,
+                                      const FILETIME &ft_b) {
   LARGE_INTEGER a, b;
   a.LowPart = ft_a.dwLowDateTime;
   a.HighPart = ft_a.dwHighDateTime;

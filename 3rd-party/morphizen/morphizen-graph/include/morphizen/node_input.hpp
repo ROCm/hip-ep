@@ -63,8 +63,8 @@ private:
    * @param node_arg The node argument associated with the input.
    * @param node The node that the input is connected to.
    */
-  NodeInput(const GraphConstRef graph, const morphizen::NodeArg& node_arg,
-            const morphizen::Node* node);
+  NodeInput(const GraphConstRef graph, const morphizen::NodeArg &node_arg,
+            const morphizen::Node *node);
 
 public:
   /**
@@ -97,8 +97,8 @@ public:
    * @param node_input The NodeInput object to be printed.
    * @return The output stream after writing the NodeInput object.
    */
-  friend std::ostream& operator<<(std::ostream& stream,
-                                  const NodeInput& node_input) {
+  friend std::ostream &operator<<(std::ostream &stream,
+                                  const NodeInput &node_input) {
     return stream << node_input.to_string();
   }
 
@@ -106,6 +106,6 @@ private:
   GraphConstRef graph_;      // The graph that the input belongs to.
   NodeArgConstRef node_arg_; // The node argument associated with the input.
   std::optional<NodeConstRef>
-      node_;                 // The node that the input is connected to, if any.
+      node_; // The node that the input is connected to, if any.
 };
 } // namespace morphizen_cxx

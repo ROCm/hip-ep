@@ -12,13 +12,13 @@ DEF_ENV_PARAM(MORPHIZEN_DEBUG_DEINITIALIZE, "0")
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_DEINITIALIZE) >= n)
 
 namespace morphizen {
-std::vector<std::pair<std::string, std::function<void()>>>&
+std::vector<std::pair<std::string, std::function<void()>>> &
 get_cleanup_registry() {
   static std::vector<std::pair<std::string, std::function<void()>>> g_at_exits;
   return g_at_exits;
 }
 
-void add_cleanup_function(const std::string& name,
+void add_cleanup_function(const std::string &name,
                           std::function<void()> cleanup_function) {
   get_cleanup_registry().emplace_back(name, cleanup_function);
 }
@@ -27,8 +27,8 @@ void cleanup_all() {
   // it is not safe to call glog() any longer
   // deinitialize_onnxruntime_morphizen_ep might be called again.
   MY_LOG(1) << "cleanup_all() called";
-  auto& cleanups = get_cleanup_registry();
-  for (auto& cleanup : cleanups) {
+  auto &cleanups = get_cleanup_registry();
+  for (auto &cleanup : cleanups) {
     MY_LOG(1) << "cleanup function: " << cleanup.first;
     cleanup.second();
   }

@@ -16,7 +16,7 @@
 #include <memory>
 using namespace morphizen;
 
-static std::string slurp_txt(const std::filesystem::path& filename) {
+static std::string slurp_txt(const std::filesystem::path &filename) {
   std::ifstream in;
   in.open(filename, std::ifstream::in);
   std::stringstream sstr;
@@ -33,7 +33,7 @@ static std::string slurp_txt(const std::filesystem::path& filename) {
 }
 
 static std::unique_ptr<AnchorPoint>
-create(const std::filesystem::path& filename) {
+create(const std::filesystem::path &filename) {
 
   auto text = slurp_txt(filename);
   // it is not safe to use AnchorPointProto directly across DLL boundary
@@ -53,8 +53,8 @@ create(const std::filesystem::path& filename) {
   return AnchorPoint::create(*anchor_point);
 }
 
-static void test_optimize1(const IPass& pass,
-                           const std::filesystem::path& filename) {
+static void test_optimize1(const IPass &pass,
+                           const std::filesystem::path &filename) {
   auto input = create(filename);
   LOG(INFO) << "input:\n"                               //
             << input->get_proto().DebugString() << "\n" //
@@ -62,8 +62,8 @@ static void test_optimize1(const IPass& pass,
             << input->optimize(pass)->get_proto().DebugString();
 }
 
-static void test_append(const IPass& pass, const std::string& f1,
-                        const std::string& f2) {
+static void test_append(const IPass &pass, const std::string &f1,
+                        const std::string &f2) {
   auto cwd =
       std::filesystem::path(__FILE__).parent_path() / "test_anchor_point.data";
   auto i1 = create(cwd / f1);
@@ -71,13 +71,13 @@ static void test_append(const IPass& pass, const std::string& f1,
   LOG(INFO) << "input:\n"                            //
             << i1->get_proto().DebugString() << "\n" //
             << i2->get_proto().DebugString() << "\n";
-  LOG(INFO) << "output\n"                            //
+  LOG(INFO) << "output\n" //
             << i1->append(pass, *i2)->get_proto().DebugString() << "\n";
 }
 
 class TestAnchorPoint : public ::testing::Test {
 public:
-  void test_optimize(const std::filesystem::path& file) {
+  void test_optimize(const std::filesystem::path &file) {
     auto cwd = std::filesystem::path(__FILE__).parent_path() /
                "test_anchor_point.data";
     std::shared_ptr<PassContext> context = PassContext::create();

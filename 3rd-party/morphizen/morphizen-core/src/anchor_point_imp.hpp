@@ -9,18 +9,18 @@ namespace morphizen_imp {
 using namespace morphizen;
 class AnchorPointImp : public AnchorPoint {
 public:
-  AnchorPointImp(const NodeArg& node_arg, const Description& desciption);
+  AnchorPointImp(const NodeArg &node_arg, const Description &desciption);
   virtual ~AnchorPointImp();
-  AnchorPointImp(const AnchorPointProto& proto);
+  AnchorPointImp(const AnchorPointProto &proto);
 
 private:
-  virtual const AnchorPointProto& get_proto() const override final;
+  virtual const AnchorPointProto &get_proto() const override final;
 
 public:
   AnchorPointImp();
 
 private:
-  AnchorPointProto merge_proto(const AnchorPointImp* other) const;
+  AnchorPointProto merge_proto(const AnchorPointImp *other) const;
 
 private:
   const AnchorPointProto proto_;

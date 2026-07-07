@@ -28,7 +28,9 @@ def convert_to_external_data(input_onnx_path, output_onnx_path, size_threshold=1
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
-        print("Usage: python convert_onnx_to_external_data_mode.py <input_onnx> <output_onnx>")
+        print(
+            "Usage: python convert_onnx_to_external_data_mode.py <input_onnx> <output_onnx>"
+        )
         sys.exit(1)
 
     input_onnx = sys.argv[1]

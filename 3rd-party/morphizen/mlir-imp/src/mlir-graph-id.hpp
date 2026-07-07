@@ -67,7 +67,7 @@ public:
    * @return true if staging graph, false otherwise
    */
   bool is_staging() const;
-  MLIRGraph* get_graph() const;
+  MLIRGraph *get_graph() const;
   /**
    * @brief Get the graph index (lower 31 bits)
    * @return The graph index
@@ -87,12 +87,12 @@ public:
   std::string to_string() const;
 
   // Comparison operators
-  bool operator==(const GraphId& other) const;
-  bool operator!=(const GraphId& other) const;
-  bool operator<(const GraphId& other) const;
-  bool operator<=(const GraphId& other) const;
-  bool operator>(const GraphId& other) const;
-  bool operator>=(const GraphId& other) const;
+  bool operator==(const GraphId &other) const;
+  bool operator!=(const GraphId &other) const;
+  bool operator<(const GraphId &other) const;
+  bool operator<=(const GraphId &other) const;
+  bool operator>(const GraphId &other) const;
+  bool operator>=(const GraphId &other) const;
 
 private:
   /**
@@ -115,6 +115,6 @@ private:
 // Hash specialization for std::unordered_map
 namespace std {
 template <> struct hash<morphizen::mlir_impl::GraphId> {
-  size_t operator()(const morphizen::mlir_impl::GraphId& graph_id) const;
+  size_t operator()(const morphizen::mlir_impl::GraphId &graph_id) const;
 };
 } // namespace std

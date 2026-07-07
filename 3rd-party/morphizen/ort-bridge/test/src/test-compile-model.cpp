@@ -18,8 +18,8 @@
 // Forward declarations for MorphiZen core functions
 namespace morphizen {
 struct OrtApiForMorphizen;
-const OrtApiForMorphizen* get_the_global_api_unsafe();
-void set_the_global_api(OrtApiForMorphizen* api);
+const OrtApiForMorphizen *get_the_global_api_unsafe();
+void set_the_global_api(OrtApiForMorphizen *api);
 } // namespace morphizen
 
 struct CompileModel : public ::morphizen::test::TestCoverageWrapperTest {
@@ -62,9 +62,9 @@ TEST_F(CompileModel, T0) {
       << "Failed to load IR model from file: " << test_model_path;
   // Get graph and model path
 
-  auto& graph = MORPHIZEN_ORT_API(model_main_graph)(*ir_model);
+  auto &graph = MORPHIZEN_ORT_API(model_main_graph)(*ir_model);
   auto model_path = MORPHIZEN_ORT_API(get_model_path)(graph);
-  OrtStatus* status = nullptr;
+  OrtStatus *status = nullptr;
   auto provider_options = std::unordered_map<std::string, std::string>{};
   provider_options["enable_cache_file_io_in_mem"] = "1";
   auto session_configs = std::map<std::string, std::string>{};
@@ -72,9 +72,9 @@ TEST_F(CompileModel, T0) {
       std::vector<std::unique_ptr<morphizen::ExecutionProvider>>>>(
       compile_onnx_model_morphizen_ep_v4(
           model_path.u8string(), graph, provider_options, session_configs,
-          (void*)&status,
-          [](void* status, int code, const char* error_message) {
-            OrtStatus** ort_status = static_cast<OrtStatus**>(status);
+          (void *)&status,
+          [](void *status, int code, const char *error_message) {
+            OrtStatus **ort_status = static_cast<OrtStatus **>(status);
             *ort_status =
                 Ort::GetApi().CreateStatus((OrtErrorCode)code, error_message);
           },

@@ -23,13 +23,17 @@ def create_sample_onnx():
     graph = helper.make_graph(
         nodes=[node],  # nodes
         name="SampleModelWithAllConstantInitializers",
-        inputs=[helper.make_tensor_value_info("input", TensorProto.FLOAT, [2])],  # inputs
+        inputs=[
+            helper.make_tensor_value_info("input", TensorProto.FLOAT, [2])
+        ],  # inputs
         outputs=[helper.make_tensor_value_info("output", TensorProto.FLOAT, [2])],
         initializer=[],  # initializers
     )
 
     # Create the model
-    model = helper.make_model(graph, producer_name="sample_model_with_all_constant_initializers")
+    model = helper.make_model(
+        graph, producer_name="sample_model_with_all_constant_initializers"
+    )
     # onnx.checker.check_model(model)
 
     # Save the model to a file

@@ -15,7 +15,7 @@
 // Runtime plugin EP specification and cannot change without breaking the plugin
 // EP mechanism.
 namespace onnxruntime {
-constexpr const char* kMorphiZenExecutionProvider =
+constexpr const char *kMorphiZenExecutionProvider =
     "MorphiZenExecutionProvider";
 }
 
@@ -68,9 +68,9 @@ LoggerAdapter::~LoggerAdapter() {
 }
 
 void LoggerAdapter::send(google::LogSeverity glog_severity,
-                         const char* /*full_filename */,
-                         const char* base_filename, int line,
-                         const struct ::tm* /*tm_time*/, const char* message,
+                         const char * /*full_filename */,
+                         const char *base_filename, int line,
+                         const struct ::tm * /*tm_time*/, const char *message,
                          size_t message_len) {
   auto ort_severity = logger_->GetLoggingSeverityLevel();
 
@@ -97,13 +97,13 @@ void LoggerAdapter::send(google::LogSeverity glog_severity,
 
                                 // file name
                                 */
-  const char* func_name = base_filename; // dirty hack, we assume glog
+  const char *func_name = base_filename; // dirty hack, we assume glog
                                          // base_filename is the function name.
   // we relie on the fact that message is null terminated by glog.
   // tm is missing
 
   // Convert base_filename to ORT_CHAR_T*
-  const ORTCHAR_T* ort_filename;
+  const ORTCHAR_T *ort_filename;
 #ifdef _WIN32
   std::wstring wide_filename;
   if (base_filename) {
@@ -117,7 +117,7 @@ void LoggerAdapter::send(google::LogSeverity glog_severity,
   ort_filename = base_filename;
 #endif
   if (message[message_len] == '\n') {
-    char* p = const_cast<char*>(message);
+    char *p = const_cast<char *>(message);
     p[message_len] =
         '\0'; // remove trailing '\n', it is glog::message::data_.message_text_,
               // it should be safe to modify it.

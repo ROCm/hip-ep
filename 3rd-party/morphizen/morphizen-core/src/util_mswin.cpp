@@ -23,13 +23,13 @@ namespace morphizen {
 
 // NT API structures and constants for POSIX delete
 #ifndef FILE_DISPOSITION_DELETE
-#  define FILE_DISPOSITION_DELETE 0x00000001
+#define FILE_DISPOSITION_DELETE 0x00000001
 #endif
 #ifndef FILE_DISPOSITION_POSIX_SEMANTICS
-#  define FILE_DISPOSITION_POSIX_SEMANTICS 0x00000002
+#define FILE_DISPOSITION_POSIX_SEMANTICS 0x00000002
 #endif
 #ifndef FileDispositionInformationEx
-#  define FileDispositionInformationEx 64
+#define FileDispositionInformationEx 64
 #endif
 
 typedef struct _FILE_DISPOSITION_INFORMATION_EX {
@@ -44,7 +44,7 @@ typedef struct _IO_STATUS_BLOCK {
   ULONG_PTR Information;
 } IO_STATUS_BLOCK, *PIO_STATUS_BLOCK;
 
-typedef NTSTATUS(WINAPI* NtSetInformationFileFunc)(
+typedef NTSTATUS(WINAPI *NtSetInformationFileFunc)(
     HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusBlock, PVOID FileInformation,
     ULONG Length, FILE_INFORMATION_CLASS FileInformationClass);
 
@@ -111,9 +111,9 @@ static std::string GetFilePathFromHandle(HANDLE h) {
   return path_utf8;
 }
 
-MORPHIZEN_DLL_SPEC FILE* tmpfile_with_posix_delete() {
+MORPHIZEN_DLL_SPEC FILE *tmpfile_with_posix_delete() {
   // Create temporary file using tmpfile_s
-  FILE* tmp_file = nullptr;
+  FILE *tmp_file = nullptr;
   errno_t err = tmpfile_s(&tmp_file);
   if (err != 0 || tmp_file == nullptr) {
     return tmp_file; // Return nullptr on failure
