@@ -298,6 +298,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/div.cpp runtime_div.bc)
     compile_to_bitcode(real/linear_attention.cpp runtime_linear_attention.bc)
     compile_to_bitcode(real/transpose.cpp runtime_transpose.bc)
+    compile_to_bitcode(real/abs.cpp runtime_abs.bc)
     compile_to_bitcode(real/neg.cpp runtime_neg.bc)
     compile_to_bitcode(real/not.cpp runtime_not.bc)
     compile_to_bitcode(real/cos.cpp runtime_cos.bc)
@@ -361,6 +362,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_div.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_linear_attention.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_transpose.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_abs.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_neg.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_not.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_cos.bc

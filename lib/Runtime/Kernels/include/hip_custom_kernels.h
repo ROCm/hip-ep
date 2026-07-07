@@ -150,6 +150,10 @@ HIP_KERNEL_API int hip_elementwise_where(
  *               hip_dtype)
  * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure.
  */
+HIP_KERNEL_API int hip_elementwise_abs(
+    void *stream, const void *input, void *output, int64_t num_elements,
+    int hip_dtype);
+
 HIP_KERNEL_API int hip_elementwise_neg(
     void* stream,
     const void* input,

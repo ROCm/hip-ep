@@ -1396,6 +1396,18 @@ void DivOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// AbsOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange AbsOp::getDpsInitsMutable() { return getYMutable(); }
+
+void AbsOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // NegOp: ins(x), outs(y)
 //===----------------------------------------------------------------------===//
 

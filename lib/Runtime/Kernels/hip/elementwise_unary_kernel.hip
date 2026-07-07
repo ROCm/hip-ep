@@ -26,6 +26,43 @@
 #include <cstdio>
 
 // =====================================================================
+// Abs: y = abs(x)
+// ORT: UNARY_OP_NAME_EXPR(Abs, abs(a)) over CSILHFD (we cover f16/i32/i64/f32).
+// =====================================================================
+
+template <typename T>
+__global__ void elementwise_abs_int_kernel(const T *__restrict__ input,
+                                           T *__restrict__ output,
+                                           int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    T a = input[idx];
+    output[idx] = static_cast<T>((a < T(0)) ? -a : a);
+  }
+}
+
+__global__ void elementwise_abs_f16_kernel(const __half *__restrict__ input,
+                                           __half *__restrict__ output,
+                                           int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    float a = __half2float(input[idx]);
+    output[idx] = __float2half(fabsf(a));
+  }
+}
+
+__global__ void elementwise_abs_f32_kernel(const float *__restrict__ input,
+                                           float *__restrict__ output,
+                                           int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements)
+    output[idx] = fabsf(input[idx]);
+}
+
+// =====================================================================
 // Neg: y = -x
 // ORT: UNARY_OP_NAME_EXPR(Neg, -a) over CSILHFD (we cover f16/i32/i64).
 // =====================================================================
@@ -424,6 +461,70 @@ extern "C" int hip_elementwise_sign(void *stream, const void *input,
   if (err != hipSuccess) {
     fprintf(stderr,
             "[custom_kernels] hip_elementwise_sign launch failed: %s\n",
+            hipGetErrorString(err));
+  }
+  return static_cast<int>(err);
+}
+
+extern "C" int hip_elementwise_abs(void *stream, const void *input,
+                                   void *output, int64_t num_elements,
+                                   int hip_dtype) {
+  if (num_elements <= 0)
+    return 0;
+
+  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+  constexpr int kBlockSize = 256;
+  int grid_size =
+      static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
+
+  switch (hip_dtype) {
+  case HIP_DTYPE_FLOAT16:
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_elementwise_abs: f16, num=%lld\n",
+        (long long)num_elements);
+    hipLaunchKernelGGL(elementwise_abs_f16_kernel, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const __half *>(input),
+                       static_cast<__half *>(output), num_elements);
+    break;
+  case HIP_DTYPE_FLOAT32:
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_elementwise_abs: f32, num=%lld\n",
+        (long long)num_elements);
+    hipLaunchKernelGGL(elementwise_abs_f32_kernel, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const float *>(input),
+                       static_cast<float *>(output), num_elements);
+    break;
+  case HIP_DTYPE_INT32:
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_elementwise_abs: i32, num=%lld\n",
+        (long long)num_elements);
+    hipLaunchKernelGGL(elementwise_abs_int_kernel<int32_t>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int32_t *>(input),
+                       static_cast<int32_t *>(output), num_elements);
+    break;
+  case HIP_DTYPE_INT64:
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_elementwise_abs: i64, num=%lld\n",
+        (long long)num_elements);
+    hipLaunchKernelGGL(elementwise_abs_int_kernel<int64_t>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int64_t *>(input),
+                       static_cast<int64_t *>(output), num_elements);
+    break;
+  default:
+    fprintf(stderr,
+            "[custom_kernels] hip_elementwise_abs: unsupported dtype=%d\n",
+            hip_dtype);
+    return -1;
+  }
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr,
+            "[custom_kernels] hip_elementwise_abs launch failed: %s\n",
             hipGetErrorString(err));
   }
   return static_cast<int>(err);

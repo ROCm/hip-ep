@@ -98,6 +98,7 @@ inline constexpr const char *kWrapCausalConvWithState =
 inline constexpr const char *kWrapWhere = "wrap_where";
 inline constexpr const char *kWrapEqual = "wrap_equal";
 inline constexpr const char *kWrapAnd = "wrap_and";
+inline constexpr const char *kWrapAbs = "wrap_abs";
 inline constexpr const char *kWrapNeg = "wrap_neg";
 inline constexpr const char *kWrapNot = "wrap_not";
 inline constexpr const char *kWrapCos = "wrap_cos";

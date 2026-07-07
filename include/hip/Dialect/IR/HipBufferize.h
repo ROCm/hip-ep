@@ -161,6 +161,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     LayerNormOp::attachInterface<HipDstBufferizableModel<LayerNormOp>>(*ctx);
     MinOp::attachInterface<HipDstBufferizableModel<MinOp>>(*ctx);
     MaxOp::attachInterface<HipDstBufferizableModel<MaxOp>>(*ctx);
+    AbsOp::attachInterface<HipDstBufferizableModel<AbsOp>>(*ctx);
     NegOp::attachInterface<HipDstBufferizableModel<NegOp>>(*ctx);
     EqualOp::attachInterface<HipDstBufferizableModel<EqualOp>>(*ctx);
     DivOp::attachInterface<HipDstBufferizableModel<DivOp>>(*ctx);
