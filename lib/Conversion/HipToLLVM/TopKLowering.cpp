@@ -52,16 +52,13 @@ struct TopKOpLowering : public ConvertOpToLLVMPattern<TopKOp> {
                                       rewriter.getI64IntegerAttr(value));
     };
 
-    if (op.getOutputs().size() != 2)
-      return rewriter.notifyMatchFailure(op, "expected 2 DPS outputs");
-
     Value statePtr = adaptor.getCtx();
     Value xPtr = extractContiguousMemRefPtr(adaptor.getX(), rewriter, loc);
     Value kPtr = extractContiguousMemRefPtr(adaptor.getK(), rewriter, loc);
     Value valuesPtr =
-        extractContiguousMemRefPtr(adaptor.getOutputs()[0], rewriter, loc);
+        extractContiguousMemRefPtr(adaptor.getValues(), rewriter, loc);
     Value indicesPtr =
-        extractContiguousMemRefPtr(adaptor.getOutputs()[1], rewriter, loc);
+        extractContiguousMemRefPtr(adaptor.getIndices(), rewriter, loc);
 
     auto xType = cast<MemRefType>(op.getX().getType());
     int rank = xType.getRank();
@@ -88,17 +85,16 @@ struct TopKOpLowering : public ConvertOpToLLVMPattern<TopKOp> {
     SmallVector<Type, 12> paramTypes = {
         ptrType, ptrType, ptrType, ptrType, ptrType, // state, x, k, values, idx
         i64Type, i64Type, i64Type,                   // axis, largest, sorted
-        i64Type, ptrType, i64Type, i64Type};           // rank, shape, num, elem
+        i64Type, ptrType, i64Type, i64Type};         // rank, shape, num, elem
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapTopK, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value> args = {
-        statePtr,     xPtr,         kPtr,         valuesPtr, indicesPtr,
-        axisVal,      largestVal,   sortedVal,    rankVal,
-        xShapeArr,    numElements,  elemSizeVal};
+    SmallVector<Value> args = {statePtr,   xPtr,      kPtr,        valuesPtr,
+                               indicesPtr, axisVal,   largestVal,  sortedVal,
+                               rankVal,    xShapeArr, numElements, elemSizeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
@@ -109,7 +105,7 @@ struct TopKOpLowering : public ConvertOpToLLVMPattern<TopKOp> {
 } // namespace
 
 void populateTopKLoweringPatterns(const LLVMTypeConverter &converter,
-                                RewritePatternSet &patterns) {
+                                  RewritePatternSet &patterns) {
   patterns.add<TopKOpLowering>(converter);
 }
 

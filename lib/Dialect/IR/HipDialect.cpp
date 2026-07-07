@@ -817,8 +817,10 @@ void GatherElementsOp::getEffects(
 // TopKOp: ins(x, k), outs(values, indices)
 //===----------------------------------------------------------------------===//
 
+// Operand order is (ctx, x, k, values, indices); the two DPS inits are the
+// trailing contiguous range.
 MutableOperandRange TopKOp::getDpsInitsMutable() {
-  return getOutputsMutable();
+  return MutableOperandRange(*this, /*start=*/3, /*length=*/2);
 }
 
 void TopKOp::getEffects(

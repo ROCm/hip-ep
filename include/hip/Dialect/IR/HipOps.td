@@ -1641,8 +1641,8 @@ def Hip_GatherElementsOp : Hip_DpsOp<"gather_elements", /*traits=*/[],
 }
 
 def Hip_TopKOp : Hip_DpsOp<"top_k",
-    [AttrSizedOperandSegments, OpStateOpInterface],
-    /*outsAccessor=*/"Outputs",
+    /*traits=*/[],
+    /*outsAccessor=*/"Values",
     /*autoReify=*/0,
     /*autoInfer=*/0,
     /*declareInfer=*/0> {
@@ -1656,8 +1656,8 @@ def Hip_TopKOp : Hip_DpsOp<"top_k",
       k - scalar or 1-element int64 tensor giving K
 
     DPS outputs (always 2):
-      outputs[0] = values (same element type as x)
-      outputs[1] = indices (int64)
+      values - same element type as x
+      indices - int64
 
     Example:
     ```mlir
@@ -1671,14 +1671,15 @@ def Hip_TopKOp : Hip_DpsOp<"top_k",
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$x,
     Hip_TensorOrMemRef:$k,
-    Variadic<Hip_TensorOrMemRef>:$outputs,
+    Hip_TensorOrMemRef:$values,
+    Hip_TensorOrMemRef:$indices,
     DefaultValuedAttr<I64Attr, "-1">:$axis,
     DefaultValuedAttr<BoolAttr, "true">:$largest,
     DefaultValuedAttr<BoolAttr, "true">:$sorted
   );
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $x `,` $k `:` type($x) `,` type($k) `)`
-    `outs` `(` $outputs `:` type($outputs) `)`
+    `outs` `(` $values `,` $indices `:` type($values) `,` type($indices) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
 }

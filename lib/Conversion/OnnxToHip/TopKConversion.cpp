@@ -15,15 +15,15 @@ static mlir::Value getTopKAxisExtent(mlir::PatternRewriter &rewriter,
                                      mlir::Value k, int64_t axis,
                                      mlir::RankedTensorType resultType) {
   if (!resultType.isDynamicDim(axis)) {
-    return mlir::arith::ConstantIndexOp::create(
-        rewriter, loc, resultType.getDimSize(axis));
+    return mlir::arith::ConstantIndexOp::create(rewriter, loc,
+                                                resultType.getDimSize(axis));
   }
 
   auto kType = mlir::cast<mlir::RankedTensorType>(k.getType());
   if (kType.getRank() == 0) {
     mlir::Value kScalar = readbackScalarToHost(rewriter, loc, ctx, k);
-    return mlir::arith::IndexCastOp::create(
-        rewriter, loc, rewriter.getIndexType(), kScalar);
+    return mlir::arith::IndexCastOp::create(rewriter, loc,
+                                            rewriter.getIndexType(), kScalar);
   }
 
   if (kType.getRank() == 1) {
@@ -31,8 +31,8 @@ static mlir::Value getTopKAxisExtent(mlir::PatternRewriter &rewriter,
       mlir::Value collapsed = mlir::tensor::CollapseShapeOp::create(
           rewriter, loc, k, mlir::ReassociationIndices{{0}});
       mlir::Value kScalar = readbackScalarToHost(rewriter, loc, ctx, collapsed);
-      return mlir::arith::IndexCastOp::create(
-          rewriter, loc, rewriter.getIndexType(), kScalar);
+      return mlir::arith::IndexCastOp::create(rewriter, loc,
+                                              rewriter.getIndexType(), kScalar);
     }
     mlir::Value c0 = rewriter.create<mlir::arith::ConstantIndexOp>(loc, 0);
     return mlir::tensor::DimOp::create(rewriter, loc, k, c0);
@@ -41,10 +41,11 @@ static mlir::Value getTopKAxisExtent(mlir::PatternRewriter &rewriter,
   return mlir::Value{};
 }
 
-static mlir::Value
-createTopKEmpty(mlir::PatternRewriter &rewriter, mlir::Location loc,
-                mlir::RankedTensorType resultType, mlir::Value source,
-                mlir::Value ctx, mlir::Value k, int64_t axis) {
+static mlir::Value createTopKEmpty(mlir::PatternRewriter &rewriter,
+                                   mlir::Location loc,
+                                   mlir::RankedTensorType resultType,
+                                   mlir::Value source, mlir::Value ctx,
+                                   mlir::Value k, int64_t axis) {
   llvm::SmallVector<mlir::Value> dynSizes;
   for (int64_t i : llvm::seq<int64_t>(0, resultType.getRank())) {
     if (!resultType.isDynamicDim(i))
@@ -56,8 +57,7 @@ createTopKEmpty(mlir::PatternRewriter &rewriter, mlir::Location loc,
         return mlir::Value{};
       dynSizes.push_back(axisExtent);
     } else {
-      mlir::Value dim =
-          mlir::tensor::DimOp::create(rewriter, loc, source, i);
+      mlir::Value dim = mlir::tensor::DimOp::create(rewriter, loc, source, i);
       dynSizes.push_back(dim);
     }
   }
@@ -121,35 +121,12 @@ TopKToHip::matchAndRewrite(mlir::Operation *op,
   if (!indicesInit)
     return rewriter.notifyMatchFailure(op, "failed to build indices init");
 
-  llvm::SmallVector<mlir::Value> operands;
-  operands.push_back(context);
-  operands.push_back(x);
-  operands.push_back(k);
-  operands.push_back(valuesInit);
-  operands.push_back(indicesInit);
+  // hip.top_k is multi-result (autoInfer=0): pass explicit result types.
+  auto hipOp = mlir::hip::TopKOp::create(
+      rewriter, loc, mlir::TypeRange{valuesType, indicesType}, context, x, k,
+      valuesInit, indicesInit, rewriter.getI64IntegerAttr(axis),
+      rewriter.getBoolAttr(largest), rewriter.getBoolAttr(sorted));
 
-  llvm::SmallVector<mlir::Type> resultTypes;
-  resultTypes.push_back(valuesType);
-  resultTypes.push_back(indicesType);
-
-  llvm::SmallVector<mlir::NamedAttribute> attrs;
-  attrs.push_back(
-      rewriter.getNamedAttr("axis", rewriter.getI64IntegerAttr(axis)));
-  attrs.push_back(
-      rewriter.getNamedAttr("largest", rewriter.getBoolAttr(largest)));
-  attrs.push_back(
-      rewriter.getNamedAttr("sorted", rewriter.getBoolAttr(sorted)));
-
-  llvm::SmallVector<int32_t> segmentSizes = {1, 1, 1, 2};
-
-  mlir::OperationState state(loc, "hip.top_k");
-  state.addOperands(operands);
-  state.addAttributes(attrs);
-  state.addTypes(resultTypes);
-  state.addAttribute("operand_segment_sizes",
-                     rewriter.getDenseI32ArrayAttr(segmentSizes));
-
-  mlir::Operation *hipOp = rewriter.create(state);
   rewriter.replaceOp(op, hipOp->getResults());
   return mlir::success();
 }

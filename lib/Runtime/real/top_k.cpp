@@ -33,8 +33,7 @@ int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
 
   int64_t k_val = 0;
   void *stream = hipdnn_ep_state_get_stream(state);
-  hipError_t err =
-      hipMemcpy(&k_val, k, sizeof(int64_t), hipMemcpyDeviceToHost);
+  hipError_t err = hipMemcpy(&k_val, k, sizeof(int64_t), hipMemcpyDeviceToHost);
   if (err != hipSuccess) {
     fprintf(stderr, "[REAL] wrap_top_k: failed to read K: %s\n",
             hipGetErrorString(err));

@@ -476,8 +476,7 @@ CompressOp::reifyResultShapes(OpBuilder &b,
   if (!inputType || !conditionType || conditionType.getRank() != 1)
     return failure();
 
-  OpFoldResult condLen =
-      tensor::getMixedSize(b, getLoc(), getCondition(), 0);
+  OpFoldResult condLen = tensor::getMixedSize(b, getLoc(), getCondition(), 0);
 
   if (getFlatten()) {
     reified.assign({SmallVector<OpFoldResult>{condLen}});
@@ -588,6 +587,29 @@ RangeOp::reifyResultShapes(OpBuilder &b,
     reifiedReturnShapes.assign({std::move(dims)});
     return success();
   }
+  return cast<HipDpsOp>(getOperation())
+      .reifyResultShapes(b, reifiedReturnShapes);
+}
+
+//===----------------------------------------------------------------------===//
+// TopKOp
+//
+// Two DPS results (values, indices) share the same extents; the axis dim is K.
+// Lift each init's runtime shape via the shared HipDpsOp default body.
+//
+// Before:
+//   %v, %idx = hip.top_k(%ctx) ins(%x, %k : ...)
+//                            outs(%values, %indices : ...)
+// After (reified result shapes):
+//   values dim i  -> tensor.dim %values, %ci  (or memref.dim)
+//   indices dim i -> tensor.dim %indices, %ci
+//===----------------------------------------------------------------------===//
+
+LogicalResult
+TopKOp::reifyResultShapes(OpBuilder &b,
+                          ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() == 0)
+    return failure();
   return cast<HipDpsOp>(getOperation())
       .reifyResultShapes(b, reifiedReturnShapes);
 }
