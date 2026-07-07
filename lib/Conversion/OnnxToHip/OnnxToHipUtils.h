@@ -364,6 +364,8 @@ void populateCeilConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateExpConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
+void populateLogConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
 void populateCumSumConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
 void populatePadConversionPatterns(RewritePatternSet &patterns,

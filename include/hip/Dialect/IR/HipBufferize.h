@@ -172,6 +172,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     SinOp::attachInterface<HipDstBufferizableModel<SinOp>>(*ctx);
     CeilOp::attachInterface<HipDstBufferizableModel<CeilOp>>(*ctx);
     ExpOp::attachInterface<HipDstBufferizableModel<ExpOp>>(*ctx);
+    LogOp::attachInterface<HipDstBufferizableModel<LogOp>>(*ctx);
     CumSumOp::attachInterface<HipDstBufferizableModel<CumSumOp>>(*ctx);
     PadOp::attachInterface<HipDstBufferizableModel<PadOp>>(*ctx);
     TileOp::attachInterface<HipDstBufferizableModel<TileOp>>(*ctx);

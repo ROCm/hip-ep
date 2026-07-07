@@ -103,6 +103,8 @@ void populateUnaryElementwiseLoweringPatterns(
                                                       "ceil");
   patterns.insert<UnaryElementwiseOpLowering<ExpOp>>(converter, kWrapExp,
                                                      "exp");
+  patterns.insert<UnaryElementwiseOpLowering<LogOp>>(converter, kWrapLog,
+                                                     "log");
   patterns.insert<UnaryElementwiseOpLowering<SignOp>>(converter, kWrapSign,
                                                       "sign");
 }

@@ -1504,6 +1504,18 @@ void ExpOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// LogOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange LogOp::getDpsInitsMutable() { return getYMutable(); }
+
+void LogOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // CumSumOp: ins(x, axis), outs(y)
 //===----------------------------------------------------------------------===//
 
