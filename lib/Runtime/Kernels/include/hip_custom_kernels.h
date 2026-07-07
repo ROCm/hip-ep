@@ -948,6 +948,8 @@ HIP_KERNEL_API int hip_global_pool(
  *
  * - hip_reduce_max  : Max op, init = -INF (FP) / TYPE_MIN (INT). NaN propagating
  *                     on the FP path (matches ORT _Max<float>).
+ * - hip_reduce_min  : Min op, init = +INF (FP) / TYPE_MAX (INT). NaN propagating
+ *                     on the FP path (matches ORT _Min<float>).
  * - hip_reduce_prod : Mul op, init = 1.
  *
  * Supported hip_dtypes: HIP_DTYPE_INT32, HIP_DTYPE_INT64, HIP_DTYPE_FLOAT16
@@ -955,6 +957,15 @@ HIP_KERNEL_API int hip_global_pool(
  */
 /* `inner_size`: see hip_reduce_sum (strided non-trailing-axis support). */
 HIP_KERNEL_API int hip_reduce_max(
+    void* stream,
+    const void* data,
+    void* output,
+    int64_t num_input_elements,
+    int64_t num_output_elements,
+    int64_t inner_size,
+    int hip_dtype);
+
+HIP_KERNEL_API int hip_reduce_min(
     void* stream,
     const void* data,
     void* output,

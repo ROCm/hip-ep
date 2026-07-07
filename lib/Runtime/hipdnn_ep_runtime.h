@@ -978,6 +978,14 @@ int wrap_reduce_max(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t keepdims, int64_t noop_with_empty_axes,
                     int64_t inner_size);
 
+// ReduceMin operation wrapper
+// data_type: HIPDNN_EP_DATATYPE_* enum value identifying the element type.
+int wrap_reduce_min(RuntimeState *state, void *data, void *axes, void *output,
+                    int64_t data_num_elements, int64_t output_num_elements,
+                    int64_t axes_num_elements, int64_t data_type,
+                    int64_t keepdims, int64_t noop_with_empty_axes,
+                    int64_t inner_size);
+
 // Cast operation wrapper (element type conversion)
 // src_data_type and dst_data_type are HIPDNN_EP_DATATYPE_* enum values.
 int wrap_cast(RuntimeState *state, void *input, void *output,
