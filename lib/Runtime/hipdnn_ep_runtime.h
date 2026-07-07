@@ -1358,6 +1358,8 @@ int wrap_cos(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
 int wrap_sin(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
+int wrap_ceil(RuntimeState *state, void *input, void *output,
+              int64_t num_elements, int64_t data_type);
 int wrap_exp(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
 
