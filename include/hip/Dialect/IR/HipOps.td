@@ -2374,6 +2374,41 @@ def Hip_ReduceMaxOp : Hip_DpsOp_Reduction<"reduce_max"> {
   }];
 }
 
+def Hip_ReduceMinOp : Hip_DpsOp_Reduction<"reduce_min"> {
+  let summary = "Reduce tensor by taking minimum along axes";
+  let description = [{
+    Computes the min of input tensor elements along the specified axes.
+    Implements the ONNX ReduceMin operator (opset 18+).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    When axes is not provided in ONNX, an empty tensor<0xi64> is passed.
+    Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
+    optional axes semantics while keeping all operands required.
+
+    Example:
+    ```mlir
+    hip.reduce_min(%ctx) ins(%data, %axes : memref<1x128xi64, 1>, memref<i64, 1>)
+                         outs(%output : memref<1x1xi64, 1>) {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$axes,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "1">:$keepdims,
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `,` $axes `:` type($data) `,` type($axes) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 // ===== Causal Conv with State ================================================
 
 def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",

@@ -517,6 +517,16 @@ __device__ inline float reduce_op_max<float>(float a, float b) {
   return (isnan(a) || isnan(b)) ? NAN : (a > b ? a : b);
 }
 
+template <typename T>
+__device__ inline T reduce_op_min(T a, T b) {
+  return a < b ? a : b;
+}
+
+template <>
+__device__ inline float reduce_op_min<float>(float a, float b) {
+  return (isnan(a) || isnan(b)) ? NAN : (a < b ? a : b);
+}
+
 template <typename T> __device__ inline T reduce_init_max();
 template <> __device__ inline int64_t reduce_init_max<int64_t>() {
   return INT64_MIN;
@@ -526,6 +536,17 @@ template <> __device__ inline int32_t reduce_init_max<int32_t>() {
 }
 template <> __device__ inline float reduce_init_max<float>() {
   return -INFINITY;
+}
+
+template <typename T> __device__ inline T reduce_init_min();
+template <> __device__ inline int64_t reduce_init_min<int64_t>() {
+  return INT64_MAX;
+}
+template <> __device__ inline int32_t reduce_init_min<int32_t>() {
+  return INT32_MAX;
+}
+template <> __device__ inline float reduce_init_min<float>() {
+  return INFINITY;
 }
 
 template <typename T>
@@ -543,12 +564,14 @@ template <> __device__ inline float reduce_init_prod<float>() { return 1.0f; }
 // (a pointer to a __device__ functor object) would be heavier than needed --
 // instead we pass the op as an enum and dispatch in-kernel.
 
-enum BlockReduceOp { OP_MAX = 0, OP_PROD = 1 };
+enum BlockReduceOp { OP_MAX = 0, OP_MIN = 1, OP_PROD = 2 };
 
 template <typename T, typename ACC, BlockReduceOp OP>
 __device__ inline ACC do_op(ACC a, ACC b) {
   if constexpr (OP == OP_MAX) {
     return reduce_op_max<ACC>(a, b);
+  } else if constexpr (OP == OP_MIN) {
+    return reduce_op_min<ACC>(a, b);
   } else {
     return reduce_op_prod<ACC>(a, b);
   }
@@ -558,6 +581,8 @@ template <typename T, typename ACC, BlockReduceOp OP>
 __device__ inline ACC init_val() {
   if constexpr (OP == OP_MAX) {
     return reduce_init_max<ACC>();
+  } else if constexpr (OP == OP_MIN) {
+    return reduce_init_min<ACC>();
   } else {
     return reduce_init_prod<ACC>();
   }
@@ -741,6 +766,16 @@ extern "C" int hip_reduce_max(void *stream, const void *data, void *output,
                                          num_input_elements,
                                          num_output_elements, inner_size,
                                          hip_dtype, "reduce_max");
+}
+
+extern "C" int hip_reduce_min(void *stream, const void *data, void *output,
+                              int64_t num_input_elements,
+                              int64_t num_output_elements, int64_t inner_size,
+                              int hip_dtype) {
+  return hip_block_reduce_launch<OP_MIN>(stream, data, output,
+                                         num_input_elements,
+                                         num_output_elements, inner_size,
+                                         hip_dtype, "reduce_min");
 }
 
 extern "C" int hip_reduce_prod(void *stream, const void *data, void *output,

@@ -65,6 +65,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | Max | MIOpen |
 | ReduceSum | Custom HIP Kernel |
 | ReduceMax | Custom HIP Kernel |
+| ReduceMin | Custom HIP Kernel |
 | ReduceProd | Custom HIP Kernel |
 | ReduceMean | Custom HIP Kernel |
 | CumSum | Custom HIP Kernel |
