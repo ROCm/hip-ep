@@ -561,17 +561,23 @@ def UseOutputAllocatorPass
     : Pass<"hip-use-output-allocator", "mlir::func::FuncOp"> {
   let summary = "Rewrite returned memref.alloc outputs to hip.alloc_output";
   let description = [{
-    Replaces each graph-output memref.alloc (a value returned by func.return)
-    with hip.alloc_output, reusing the alloc's dynamic-size operands and setting
-    out_idx to the return operand position.  Output buffers are then obtained
-    from the EP output allocator (EP/runtime-owned) instead of being deallocated
-    or pooled.
+    Replaces each graph-output memref.alloc with hip.alloc_output, reusing the
+    alloc's dynamic-size operands and setting out_idx to its position in
+    func.return.  Output buffers then come from the EP output allocator (the EP
+    owns and frees them) instead of being deallocated or pooled.
 
-    Scope: only public (graph-entry) functions are rewritten.  Private helpers
-    (e.g. outlined onnx.Loop bodies) carry a !hip.context arg 0 and return
-    memref.allocs too, but their results are DLL-internal, never EP outputs, so
-    they are left unchanged.  Functions lacking !hip.context as argument 0 are
-    likewise skipped.
+    An alloc counts as a graph output when func.return hands it back -- either
+    directly, or after it passes through view ops (memref.cast,
+    memref.collapse_shape, memref.expand_shape, memref.subview, any number of
+    them).  The pass uses BufferViewFlowAnalysis to check this: an alloc is an
+    output if any value made from it via those view ops is returned.  This
+    handles reshaped / cast / subview'd outputs without special-casing each op.
+    The view ops between the alloc and the return are left in place.
+
+    Only public (graph-entry) functions are rewritten.  Private helpers (e.g.
+    outlined onnx.Loop bodies) also take a !hip.context arg and return allocs,
+    but those buffers stay inside the DLL and are not EP outputs, so they are
+    left unchanged.  Functions whose arg 0 is not !hip.context are skipped too.
 
     Leaves the function signature and func.return untouched.
   }];
