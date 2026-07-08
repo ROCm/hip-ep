@@ -5,6 +5,10 @@
 
 #include "HipToLLVMUtils.h"
 
+#include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"
+#include "mlir/IR/Dialect.h"
+#include "llvm/ADT/DenseSet.h"
+
 namespace mlir {
 namespace hip {
 
@@ -296,6 +300,53 @@ void ConvertHipToLLVMPass::runOnOperation() {
   target.addIllegalDialect<HipDialect>();
   target.addIllegalOp<memref::AllocOp, memref::DeallocOp>();
   target.addLegalOp<ModuleOp>();
+
+  // Out-of-tree dialects (e.g. a plugin vendor dialect) inject their HIP->LLVM
+  // lowering the standard upstream way: every dialect in use that implements
+  // ConvertToLLVMPatternInterface adds its conversion patterns AND marks its
+  // own ops illegal on `target`.
+  //
+  // This inlines upstream's populateConversionTargetFromOperation but
+  // guards the interface lookup with hasPromisedInterface(). Upstream
+  // dyn_casts every walked dialect unconditionally, which report_fatal_errors
+  // (assertions build) for a dialect that only *promised* the interface but
+  // never registered it. After bufferization the module is full of such
+  // dialects (memref, func, arith, cf), so the blanket walk would abort
+  // essentially every compile. We can't fulfill those promises instead:
+  // this pass hand-rolls standard-dialect lowering via the explicit
+  // populate*ToLLVM calls above, so routing it through the interface too
+  // would populate them twice. So skip any dialect that only promised the
+  // interface -- hasPromisedInterface() is a cheap set check on every build.
+  // A plugin dialect that genuinely implements it has its promise resolved
+  // when its extension is added (hasPromisedInterface() == false), so it
+  // still passes the guard and contributes its patterns. See
+  // docs/design/plugin-interface.md "Custom-op lowering".
+  //
+  // Before (upstream blanket walk -- aborts on memref's unfulfilled promise):
+  //   populateConversionTargetFromOperation(module, target, tc, patterns);
+  // After (skip promised-but-unregistered, keep genuine implementors):
+  //   for each unique dialect D reached from the module:
+  //     if D promised the interface but did not register it -> skip
+  //     else if D implements it -> add D's ConvertToLLVM patterns
+  {
+    llvm::DenseSet<Dialect *> seenDialects;
+    module.walk([&](Operation *op) {
+      Dialect *dialect = op->getDialect();
+      if (!dialect || !seenDialects.insert(dialect).second)
+        return;
+      // Promised-but-unregistered dialects would fatal under dyn_cast in an
+      // assertions build; skip them (their lowering is the populate* above).
+      if (dialect->hasPromisedInterface(
+              dialect->getTypeID(),
+              ConvertToLLVMPatternInterface::getInterfaceID()))
+        return;
+      auto *iface = dyn_cast<ConvertToLLVMPatternInterface>(dialect);
+      if (!iface)
+        return;
+      iface->populateConvertToLLVMConversionPatterns(target, typeConverter,
+                                                     patterns);
+    });
+  }
 
   if (failed(applyPartialConversion(module, target, std::move(patterns))))
     signalPassFailure();
