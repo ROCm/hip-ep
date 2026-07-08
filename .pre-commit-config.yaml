@@ -33,11 +33,11 @@ repos:
     -   id: licenseheaders
         name: licenseheaders
         entry: python -m licenseheaders
-        # -x excludes paths from license-header insertion. lib/Runtime/Kernels/*
-        # (the hand-written GPU kernels) keeps its existing headers untouched, as
-        # it did under 3rd-party/ before the relocation; pair with the matching
-        # formatter exemptions in .lintrunner.toml.
-        args: [-t,./LICENSES/license.txt,-x,3rd-party/*,lib/Runtime/Kernels/*,-s,./LICENSES/settings.json,-f]
+        # -x excludes paths from license-header insertion. morphizen/* (the
+        # vendored subtree) keeps its own upstream copyright headers, and
+        # lib/Runtime/Kernels/* (the hand-written GPU kernels) keeps its existing
+        # headers untouched.
+        args: [-t,./LICENSES/license.txt,-x,morphizen/*,lib/Runtime/Kernels/*,-s,./LICENSES/settings.json,-f]
         language: python
         additional_dependencies: [licenseheaders==0.8.8]
         types: [file]

@@ -1,0 +1,69 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "ort-bridge",
+    srcs = glob(
+        ["src/*.cpp"],
+        exclude = ["src/morphizen-hip-gpu-allocator.cpp"],  # requires HIP SDK
+    ),
+    hdrs = glob(
+        ["src/*.hpp"],
+        exclude = ["src/morphizen-hip-gpu-allocator.hpp"],
+    ),
+    copts = select({
+        "@bazel_tools//src/conditions:windows": [
+            "/W0",  # Suppress all warnings for ONNX-related code
+            "/DWIN32_LEAN_AND_MEAN",
+            "/DNOMINMAX",
+            "/D_CRT_SECURE_NO_WARNINGS",
+            "/std:c++17",
+            # Must match morphizen-graph and morphizen-core-static (also private copts).
+            # Without this, ort-bridge.lib references symbols with a literal
+            # namespace named "ONNX_NAMESPACE" while the provider libs (morphizen-graph,
+            # morphizen-core-static) compile them under namespace "onnx", causing
+            # undefined-symbol link errors when building the EP DLL.
+            "/DONNX_NAMESPACE=onnx",
+        ],
+        "//conditions:default": [
+            "-w",  # Suppress all warnings
+            "-std=c++17",
+            "-fPIC",
+            "-DONNX_NAMESPACE=onnx",
+        ],
+    }),
+    local_defines = [
+        # MORPHIZEN_USER controls which headers morphizen.hpp exposes.
+        # These are PRIVATE to ort-bridge's own sources; consumers (e.g., ort-bridge/test)
+        # should NOT inherit them — they need MORPHIZEN_USER__PASS (the default).
+        # CMake never sets MORPHIZEN_USER for ort-bridge either, so this matches CMake.
+        "MORPHIZEN_USER=1",
+        "MORPHIZEN_USER__ORT_VITIS_AI_EP",
+        # Backend selection: PRIVATE to ort-bridge only (matches GHE local_defines pattern).
+        # These control which backend morphizen-ep.cpp selects via MORPHIZEN_DEFAULT_BACKEND.
+        # Must NOT propagate to consumers (defines would leak into mlir-imp, morphizen-core, etc.).
+        "MORPHIZEN_ENABLE_ONNX_BACKEND=0",
+        "MORPHIZEN_ENABLE_MLIR_BACKEND=1",  # enable mlir-imp backend
+    ],
+    includes = [
+        "src",
+    ],
+    linkstatic = True,
+    visibility = ["//visibility:public"],
+    deps = [
+        "//morphizen-ort-api-ext",
+        "//morphizen-utils:morphizen_utils",
+
+        "//morphizen-graph:morphizen-graph",
+        "//morphizen-core:morphizen-core-static",  # Complete morphizen-core library
+        "//mlir-imp:mlir-imp",  # mlir-imp backend (alwayslink — registers StaticPluginRegister)
+        "@glog",
+        "@gsl",
+        "@onnx//:onnx",  # ONNX C++ library
+        "@onnxruntime//:onnxruntime_headers",  # ONNXRuntime headers
+    ],
+)

@@ -1,0 +1,44 @@
+---
+description: Review a pull request
+triggers:
+  - review pr
+  - pr review
+---
+
+# Review Pull Request
+
+Analyze and review a GitHub pull request using the automated PR review toolkit.
+
+## Usage
+
+```powershell
+# Run from project root
+tools/pr-review/review_pr.ps1 <PR_NUMBER>
+
+# Example
+tools/pr-review/review_pr.ps1 437
+```
+
+## What This Does
+
+The script will:
+1. Fetch the PR branch
+2. Update origin/main
+3. Find the merge-base (common ancestor)
+4. Show commits in the PR
+5. Display file changes with statistics
+6. Check if PR needs rebasing
+7. Show visual commit graph
+8. Provide next-step commands
+
+## After Analysis
+
+Use the submit script to write and submit your review:
+```powershell
+tools/pr-review/submit_review.ps1 <PR_NUMBER> <approve|changes|comment>
+```
+
+## Documentation
+
+- PR Workflow Guide: `docs/workflows/pr-workflow.md`
+- Git Workflow: `docs/workflows/git-workflow.md`
