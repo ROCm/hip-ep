@@ -59,15 +59,9 @@ if(NOT BUILD_MOCK_RUNTIME)
   # this and the callback returns host buffers the CPU stubs write directly.
   target_compile_definitions(hip-test PRIVATE HIPDNN_EP_LINK_HIP_HOST=1)
 
-  # hip-test statically links this build's LLVM, then at runtime loads the HIP
-  # runtime (libamdhip64 -> libamd_comgr), which on some ROCm distributions pulls
-  # in its OWN (different) shared libLLVM. With both LLVMs in one process, the
-  # executable's statically-linked LLVM symbols are exported and preempt the
-  # shared libLLVM's, so its static initializers run against mismatched globals
-  # and can SIGSEGV before main(). --exclude-libs,ALL localizes (hides) all
-  # static-archive symbols from the dynamic symbol table -- the correct default
-  # for an executable -- so the shared libLLVM resolves against itself. GNU ld /
-  # lld only (MSVC's linker has no equivalent and does not export by default).
+  # Hide static-archive symbols so hip-test's statically-linked LLVM can't clash
+  # with a different shared libLLVM the HIP runtime may pull in at load time
+  # (which can SIGSEGV before main). GNU ld / lld only.
   if(NOT WIN32)
     target_link_options(hip-test PRIVATE "LINKER:--exclude-libs,ALL")
   endif()
