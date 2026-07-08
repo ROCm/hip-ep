@@ -103,18 +103,18 @@ createIfOutputInits(OpBuilder &b, Location loc, TypeRange resultTypes) {
     for (int64_t i : llvm::seq<int64_t>(0, rankedTy.getRank()))
       if (rankedTy.isDynamicDim(i))
         return failure();
-    Value empty = tensor::EmptyOp::create(b, loc, rankedTy.getShape(),
-                                          rankedTy.getElementType(),
-                                          ValueRange{});
+    Value empty = tensor::EmptyOp::create(
+        b, loc, rankedTy.getShape(), rankedTy.getElementType(), ValueRange{});
     inits.push_back(empty);
   }
   return inits;
 }
 
-static LogicalResult outlineBranch(
-    Region &region, Location loc, ModuleOp module, func::FuncOp parentFn,
-    llvm::StringRef suffix, unsigned &counter,
-    llvm::SetVector<Value> &capturesUnion, std::string &fnNameOut) {
+static LogicalResult outlineBranch(Region &region, Location loc,
+                                   ModuleOp module, func::FuncOp parentFn,
+                                   llvm::StringRef suffix, unsigned &counter,
+                                   llvm::SetVector<Value> &capturesUnion,
+                                   std::string &fnNameOut) {
   if (!region.hasOneBlock())
     return failure();
   Block &body = region.front();

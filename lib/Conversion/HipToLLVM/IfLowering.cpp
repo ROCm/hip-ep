@@ -53,8 +53,8 @@ static int64_t memrefRankFromStructType(Type structTy) {
 static LLVM::LLVMFuncOp
 createOrGetIfTrampoline(OpBuilder &b, ModuleOp module, Location loc,
                         StringRef bodyName, func::FuncOp bodyFuncFn,
-                        const LLVMTypeConverter &typeConverter,
-                        unsigned numCap, unsigned numOut) {
+                        const LLVMTypeConverter &typeConverter, unsigned numCap,
+                        unsigned numOut) {
   std::string trampolineName = (bodyName + "_trampoline").str();
   if (auto existing = module.lookupSymbol<LLVM::LLVMFuncOp>(trampolineName))
     return existing;
@@ -63,8 +63,7 @@ createOrGetIfTrampoline(OpBuilder &b, ModuleOp module, Location loc,
   Type ptrTy = LLVM::LLVMPointerType::get(ctx, 0);
   Type i32Ty = b.getI32Type();
 
-  auto trampType =
-      LLVM::LLVMFunctionType::get(i32Ty, {ptrTy, ptrTy, ptrTy});
+  auto trampType = LLVM::LLVMFunctionType::get(i32Ty, {ptrTy, ptrTy, ptrTy});
 
   OpBuilder::InsertionGuard guard(b);
   b.setInsertionPointToEnd(module.getBody());
@@ -158,20 +157,20 @@ struct IfOpLowering : public ConvertOpToLLVMPattern<IfOp> {
     LLVM::LLVMFuncOp elseTramp;
     {
       OpBuilder modBuilder(module.getBody(), module.getBody()->end());
-      thenTramp = createOrGetIfTrampoline(modBuilder, module, loc, thenName,
-                                          thenFuncFn, *getTypeConverter(),
-                                          numCap, numOut);
-      elseTramp = createOrGetIfTrampoline(modBuilder, module, loc, elseName,
-                                          elseFuncFn, *getTypeConverter(),
-                                          numCap, numOut);
+      thenTramp =
+          createOrGetIfTrampoline(modBuilder, module, loc, thenName, thenFuncFn,
+                                  *getTypeConverter(), numCap, numOut);
+      elseTramp =
+          createOrGetIfTrampoline(modBuilder, module, loc, elseName, elseFuncFn,
+                                  *getTypeConverter(), numCap, numOut);
       if (!thenTramp || !elseTramp)
         return failure();
     }
 
-    Value thenTrampPtr =
-        LLVM::AddressOfOp::create(rewriter, loc, ptrTy, thenTramp.getSymNameAttr());
-    Value elseTrampPtr =
-        LLVM::AddressOfOp::create(rewriter, loc, ptrTy, elseTramp.getSymNameAttr());
+    Value thenTrampPtr = LLVM::AddressOfOp::create(rewriter, loc, ptrTy,
+                                                   thenTramp.getSymNameAttr());
+    Value elseTrampPtr = LLVM::AddressOfOp::create(rewriter, loc, ptrTy,
+                                                   elseTramp.getSymNameAttr());
 
     Value oneI64 = LLVM::ConstantOp::create(rewriter, loc, i64Ty,
                                             rewriter.getI64IntegerAttr(1));
@@ -183,8 +182,8 @@ struct IfOpLowering : public ConvertOpToLLVMPattern<IfOp> {
                                             /*alignment=*/8);
       for (unsigned i = 0; i < n; ++i) {
         Value desc = descs[i];
-        Value descSlot = LLVM::AllocaOp::create(rewriter, loc, ptrTy, desc.getType(),
-                                              oneI64, /*alignment=*/8);
+        Value descSlot = LLVM::AllocaOp::create(
+            rewriter, loc, ptrTy, desc.getType(), oneI64, /*alignment=*/8);
         LLVM::StoreOp::create(rewriter, loc, desc, descSlot);
         Value idxVal = LLVM::ConstantOp::create(rewriter, loc, i64Ty,
                                                 rewriter.getI64IntegerAttr(i));
@@ -206,16 +205,16 @@ struct IfOpLowering : public ConvertOpToLLVMPattern<IfOp> {
         rewriter, loc, i32Ty,
         rewriter.getI32IntegerAttr(static_cast<int32_t>(numCap)));
 
-    SmallVector<Type, 8> paramTypes = {ptrTy, i1Ty, ptrTy, ptrTy,
+    SmallVector<Type, 8> paramTypes = {ptrTy, i1Ty,  ptrTy, ptrTy,
                                        i32Ty, i32Ty, ptrTy, ptrTy};
-    FailureOr<LLVM::LLVMFuncOp> runIfFn = LLVM::lookupOrCreateFn(
-        rewriter, module, kRunIf, paramTypes, i32Ty);
+    FailureOr<LLVM::LLVMFuncOp> runIfFn =
+        LLVM::lookupOrCreateFn(rewriter, module, kRunIf, paramTypes, i32Ty);
     if (failed(runIfFn))
       return failure();
 
-    SmallVector<Value, 8> args = {
-        adaptor.getCtx(),      cond,          thenTrampPtr, elseTrampPtr,
-        numOutConst,           numCapConst,   outArrayPtr,  capArrayPtr};
+    SmallVector<Value, 8> args = {adaptor.getCtx(), cond,        thenTrampPtr,
+                                  elseTrampPtr,     numOutConst, numCapConst,
+                                  outArrayPtr,      capArrayPtr};
     LLVM::CallOp::create(rewriter, loc, *runIfFn, args);
     rewriter.eraseOp(op);
     return success();

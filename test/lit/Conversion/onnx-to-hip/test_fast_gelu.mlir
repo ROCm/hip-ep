@@ -9,6 +9,10 @@
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
 
 module {
+  func.func @main_graph(%arg0: tensor<1x128x768xf16>) -> tensor<1x128x768xf16> {
+    return %arg0 : tensor<1x128x768xf16>
+  }
+
   func.func @no_bias(%data: tensor<1x128x768xf16>) -> tensor<1x128x768xf16> {
     %0 = "onnx.Custom"(%data) {
       function_name = "FastGelu",
