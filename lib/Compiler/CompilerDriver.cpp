@@ -529,9 +529,9 @@ void CompilerDriver::discoverInTreeLibraries(
 
   libraries.push_back("amdhip64");
 
-  // Skip -lMIOpen/-lhipblaslt when the vendor BLAS/DNN backends are disabled; the
-  // runtime's vendor wrappers are then error-returning stubs that reference no
-  // MIOpen/hipBLASLt symbols, so a model links without these libraries.
+  // Skip -lMIOpen/-lhipblaslt when the vendor BLAS/DNN backends are disabled;
+  // the runtime's vendor wrappers are then error-returning stubs that reference
+  // no MIOpen/hipBLASLt symbols, so a model links without these libraries.
 #ifndef HIPDNN_EP_DISABLE_VENDOR_BLAS
   libraries.push_back("MIOpen");
 
