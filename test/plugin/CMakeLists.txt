@@ -21,8 +21,21 @@ add_executable(test_static_plugins test_static_plugins.cpp)
 
 target_compile_features(test_static_plugins PRIVATE cxx_std_17)
 
+# The test now includes mlir/ headers directly (MLIRContext, Dialect, the
+# ConvertToLLVM interface) to exercise loadAllDialects() + the sample dialect's
+# hasPromisedInterface state.
+target_include_directories(test_static_plugins PRIVATE
+  ${MLIR_INCLUDE_DIRS}
+  ${LLVM_INCLUDE_DIRS}
+)
+
 target_link_libraries(test_static_plugins PRIVATE
   LibHipCompiler
+  # Direct references from the dialect-path checks; the in-tree dialects that
+  # loadAllDialects() registers come transitively via LibHipCompiler.
+  MLIRIR
+  MLIRSupport
+  MLIRConvertToLLVMInterface
 )
 
 # Tell the test whether the sample plugin is linked into this build.

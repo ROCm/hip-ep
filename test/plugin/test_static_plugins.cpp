@@ -9,12 +9,17 @@
 // StaticPlugins.cpp) and checks the recorded registry state. CMake sets
 // HIP_EP_EXPECT_SAMPLE:
 //   * 1 (sample selected): the registry records the sample's slot request,
-//     library + search path, and bitcode buffer (empty => degraded no-clang
-//     build, skipped).
+//     library + search path, bitcode buffer (empty => degraded no-clang build,
+//     skipped), and dialect registration (loaded here via loadAllDialects).
 //   * 0 (no plugins): dispatch is a clean no-op; the registry stays empty.
 // Either way dispatch must be safe + idempotent. Plain main() (no GTest).
 
 #include "hip/Compiler/PluginRegistry.h"
+#include "hip/InitAllPasses.h"
+
+#include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"
+#include "mlir/IR/Dialect.h"
+#include "mlir/IR/MLIRContext.h"
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
@@ -62,6 +67,7 @@ int main() {
   auto libs = pluginLibraries();
   auto libPaths = pluginLibraryPaths();
   auto bitcode = pluginBitcodeBuffers();
+  auto dialectRegs = pluginDialectRegistrations();
 
 #if HIP_EP_EXPECT_SAMPLE
   llvm::outs() << "Mode: sample plugin EXPECTED (statically linked)\n";
@@ -84,6 +90,34 @@ int main() {
                    bytes[2] == 0xC0 && bytes[3] == 0xDE;
     check(magicOk, "plugin bitcode carries the LLVM bitcode magic");
   }
+
+  // Dialect-registration path. The sample plugin contributes a minimal vendor
+  // dialect (hip_ep_sample) with a ConvertToLLVMPatternInterface. This is the
+  // only in-tree coverage of loadAllDialects()'s plugin loop and the
+  // convert-hip-to-llvm hasPromisedInterface guard, so exercise both here.
+  check(!dialectRegs.empty(),
+        "pluginDialectRegistrations() records the sample dialect callback");
+
+  mlir::MLIRContext context;
+  hip::compiler::loadAllDialects(context);
+  mlir::Dialect *sampleDialect = context.getLoadedDialect("hip_ep_sample");
+  check(sampleDialect != nullptr,
+        "loadAllDialects() loaded the plugin's hip_ep_sample dialect");
+  if (sampleDialect) {
+    // Mirror the convert-hip-to-llvm guard: a genuinely-registered interface
+    // (attached via DialectExtension, not just promised) has
+    // hasPromisedInterface() false AND dyn_casts, so its patterns are used.
+    bool onlyPromised = sampleDialect->hasPromisedInterface(
+        sampleDialect->getTypeID(),
+        mlir::ConvertToLLVMPatternInterface::getInterfaceID());
+    check(!onlyPromised,
+          "hip_ep_sample's ConvertToLLVM interface is registered, not just "
+          "promised (hasPromisedInterface == false)");
+    check(mlir::dyn_cast<mlir::ConvertToLLVMPatternInterface>(sampleDialect) !=
+              nullptr,
+          "hip_ep_sample implements ConvertToLLVMPatternInterface "
+          "(convert-hip-to-llvm guard admits it)");
+  }
 #else
   llvm::outs() << "Mode: NO plugins selected (dispatch must be a no-op)\n";
 
@@ -91,6 +125,7 @@ int main() {
   check(libs.empty(), "no plugin libraries recorded");
   check(libPaths.empty(), "no plugin library paths recorded");
   check(bitcode.empty(), "no plugin bitcode recorded");
+  check(dialectRegs.empty(), "no plugin dialect registrations recorded");
 #endif
 
   if (g_failures == 0) {
