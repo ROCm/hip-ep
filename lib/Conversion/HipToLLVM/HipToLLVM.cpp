@@ -257,6 +257,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateLinearAttentionLoweringPatterns(typeConverter, patterns);
   populateGraphLoweringPatterns(typeConverter, patterns);
   populateLoopLoweringPatterns(typeConverter, patterns);
+  populateIfLoweringPatterns(typeConverter, patterns);
   populateCausalConvWithStateLoweringPatterns(typeConverter, patterns);
   populateWhereLoweringPatterns(typeConverter, patterns);
   populateEqualLoweringPatterns(typeConverter, patterns);

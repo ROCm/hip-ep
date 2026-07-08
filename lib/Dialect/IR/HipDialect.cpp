@@ -212,6 +212,85 @@ LoopOp::inferReturnTypes(MLIRContext *context, std::optional<Location> location,
 }
 
 //===----------------------------------------------------------------------===//
+// IfOp: outlined then/else conditional (DPS)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange IfOp::getDpsInitsMutable() { return getOInitMutable(); }
+
+void IfOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  for (OpOperand &operand : getOInitMutable())
+    if (isa<MemRefType>(operand.get().getType()))
+      effects.emplace_back(MemoryEffects::Write::get(), &operand,
+                           SideEffects::DefaultResource::get());
+  for (OpOperand &operand : getCapturesMutable())
+    if (isa<MemRefType>(operand.get().getType()))
+      effects.emplace_back(MemoryEffects::Read::get(), &operand,
+                           SideEffects::DefaultResource::get());
+}
+
+LogicalResult IfOp::verify() {
+  uint32_t numOutputs = getNumOutputs();
+
+  if (numOutputs != getOInit().size())
+    return emitOpError("num_outputs (")
+           << numOutputs << ") must equal the o_init operand count ("
+           << getOInit().size() << ")";
+
+  bool tensorMode = true;
+  if (!getOInit().empty())
+    tensorMode = isa<RankedTensorType>(getOInit()[0].getType());
+
+  if (tensorMode) {
+    if (numOutputs != getNumResults())
+      return emitOpError("tensor mode: num_outputs (")
+             << numOutputs << ") must equal the result count ("
+             << getNumResults() << ")";
+    for (uint32_t i = 0; i < numOutputs; ++i)
+      if (getOInit()[i].getType() != getResult(i).getType())
+        return emitOpError("result type #")
+               << i << " (" << getResult(i).getType()
+               << ") must match o_init type #" << i << " ("
+               << getOInit()[i].getType() << ")";
+  } else {
+    if (getNumResults() != 0)
+      return emitOpError("memref mode must have zero results, got ")
+             << getNumResults();
+  }
+  return success();
+}
+
+LogicalResult IfOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  auto thenFn =
+      symbolTable.lookupNearestSymbolFrom<func::FuncOp>(*this, getThenFuncAttr());
+  if (!thenFn)
+    return emitOpError("then_func '")
+           << getThenFunc() << "' does not reference a func.func";
+  auto elseFn =
+      symbolTable.lookupNearestSymbolFrom<func::FuncOp>(*this, getElseFuncAttr());
+  if (!elseFn)
+    return emitOpError("else_func '")
+           << getElseFunc() << "' does not reference a func.func";
+  return success();
+}
+
+LogicalResult
+IfOp::inferReturnTypes(MLIRContext *context, std::optional<Location> location,
+                       ValueRange operands, DictionaryAttr attributes,
+                       OpaqueProperties properties, RegionRange regions,
+                       SmallVectorImpl<Type> &inferredReturnTypes) {
+  IfOpAdaptor adaptor(operands, attributes, properties, regions);
+  auto oInit = adaptor.getOInit();
+  inferredReturnTypes.reserve(oInit.size());
+  for (Value v : oInit) {
+    if (isa<RankedTensorType>(v.getType()))
+      inferredReturnTypes.push_back(v.getType());
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // Helpers for DPS compute ops (custom parse/print, verify, interfaces)
 //===----------------------------------------------------------------------===//
 

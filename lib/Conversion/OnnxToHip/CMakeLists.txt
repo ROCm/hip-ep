@@ -87,6 +87,7 @@ add_library(OnnxToHip STATIC
   GlobalPoolConversion.cpp
   FlattenConversion.cpp
   LoopOutline.cpp
+  IfOutline.cpp
   ReluConversion.cpp
   LeakyReluConversion.cpp
   ClipConversion.cpp

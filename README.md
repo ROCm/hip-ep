@@ -86,6 +86,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | Gather | Custom HIP Kernel |
 | GatherElements | Custom HIP Kernel |
 | TopK | Custom HIP Kernel |
+| If | Runtime branch dispatch (outlined then/else) |
 | Compress | Custom HIP Kernel |
 | OneHot | Custom HIP Kernel |
 | LayerNormalization | Custom HIP Kernel |
@@ -161,6 +162,7 @@ onnx-to-hip-pipeline
     simplify-onnx                  (CastLike → Cast, drop dead type-donor args)
     hip-add-context-arg
     onnx-loop-outline              (+ hip-infer-loop-body-shapes)
+    onnx-if-outline
     convert-onnx-to-hip            constants → .constants.bin
     hip-infer-shapes               (refine dynamic result dims)
     hip-resolve-tensor-dims

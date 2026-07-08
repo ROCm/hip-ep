@@ -55,8 +55,12 @@ namespace hip {
 
 namespace {
 
-static bool isOutlinedLoopBody(func::FuncOp *func) {
-  return func && func->getName().contains("_loop_body_");
+static bool isOutlinedControlFlowBody(func::FuncOp *func) {
+  if (!func)
+    return false;
+  StringRef name = func->getName();
+  return name.contains("_loop_body_") || name.contains("_if_then_") ||
+         name.contains("_if_else_");
 }
 
 struct LoopBodyToOutParamsPass
@@ -71,7 +75,7 @@ struct LoopBodyToOutParamsPass
     opts.hoistDynamicAllocs = true;
     opts.addResultAttribute = true;
     opts.modifyPublicFunctions = false;
-    opts.filterFn = isOutlinedLoopBody;
+    opts.filterFn = isOutlinedControlFlowBody;
 
     if (failed(bufferization::promoteBufferResultsToOutParams(getOperation(),
                                                               opts)))
