@@ -31,8 +31,25 @@ struct OpProfileState {
   struct PendingEvent {
     std::string name;
     std::string shape;
-    int eventIndex;
+    int eventIndex; // pair index (classic) OR marker index (timeline)
     double cpuMs;
+    int64_t bytes;
+    bool timeline;    // true => eventIndex is a marker index into markerPool
+    double cpuStartUs; // op start, us since inference CPU epoch (chrome trace)
+  };
+
+  // Chrome-trace timeline point (retained only when HIPDNN_EP_TRACE_FILE set).
+  struct TimelineEvent {
+    std::string name, shape;
+    double tsUs, durUs; // GPU track (epoch-anchored)
+    double cpuTsUs, cpuDurUs; // CPU track (wrapper wall time)
+    int64_t bytes;
+  };
+  // H2D / Compute / D2H phase span for the pipeline track (own tids).
+  struct IoSpan {
+    std::string name;
+    int tid;
+    double tsUs, durUs;
     int64_t bytes;
   };
 
@@ -45,12 +62,42 @@ struct OpProfileState {
   std::vector<EventPair> eventPool;
   int nextEventIndex = 0;
 
+  // Timeline (low-distortion) mode: a single fenceless marker event per op plus
+  // one per-inference epoch event. Per-op GPU time is derived by differencing
+  // consecutive markers against the epoch on the (in-order) stream, so we pay
+  // one fenceless record per op instead of a fenced start+stop pair.
+  hipEvent_t epoch = nullptr;
+  bool epochRecorded = false;
+  std::vector<hipEvent_t> markerPool;
+  int nextMarker = 0;
+
   std::map<std::string, OpEntry> profile;
   std::vector<PendingEvent> pending;
   bool active = false;
+
+  // Chrome trace (HIPDNN_EP_TRACE_FILE): CPU epoch for this inference, all
+  // retained timeline points across inferences, and the running wall offset that
+  // lays consecutive inferences end-to-end on one timeline.
+  double gpuEpochAbsUs = 0.0; // ABSOLUTE us (since the process-wide trace epoch)
+                              // at which this inference's GPU epoch was recorded
+  std::vector<TimelineEvent> timeline;
+  std::vector<IoSpan> ioSpans;
+  int sessionId = 0;          // distinguishes concurrent EP sessions (own file)
 };
 
-OpProfileState *op_profile_create() { return new OpProfileState; }
+// One process-wide absolute time base for the chrome trace: every EP session
+// (embedding, decoder, ...) and every inference share this axis, so traces align
+// and merge without per-track/per-inference epoch guessing. Real gaps between
+// inferences (idle) show up naturally because absolute time keeps advancing.
+static std::chrono::steady_clock::time_point g_traceEpoch;
+static bool g_traceEpochSet = false;
+static int g_nextSessionId = 0;
+
+OpProfileState *op_profile_create() {
+  auto *ps = new OpProfileState;
+  ps->sessionId = g_nextSessionId++;
+  return ps;
+}
 
 void op_profile_destroy(OpProfileState *ps) {
   if (!ps)
@@ -59,6 +106,10 @@ void op_profile_destroy(OpProfileState *ps) {
     hipEventDestroy(ep.start);
     hipEventDestroy(ep.stop);
   }
+  for (auto &m : ps->markerPool)
+    hipEventDestroy(m);
+  if (ps->epoch)
+    hipEventDestroy(ps->epoch);
   delete ps;
 }
 
@@ -68,7 +119,22 @@ void op_profile_reset(OpProfileState *ps) {
   ps->profile.clear();
   ps->pending.clear();
   ps->nextEventIndex = 0;
+  ps->nextMarker = 0;
+  ps->epochRecorded = false; // re-anchor the timeline at the next op
   ps->active = true;
+  ps->gpuEpochAbsUs = 0.0;
+  if (hipdnn_ep_trace_enabled() && !g_traceEpochSet) {
+    g_traceEpoch = std::chrono::steady_clock::now();
+    g_traceEpochSet = true;
+  }
+}
+
+double op_profile_cpu_now_us(OpProfileState *ps) {
+  if (!ps || !hipdnn_ep_trace_enabled() || !g_traceEpochSet)
+    return 0.0;
+  return std::chrono::duration<double, std::micro>(
+             std::chrono::steady_clock::now() - g_traceEpoch)
+      .count();
 }
 
 bool op_profile_is_active(OpProfileState *ps) { return ps && ps->active; }
@@ -141,12 +207,75 @@ hipEvent_t op_profile_get_stop_event(OpProfileState *ps, int index) {
   return ps->eventPool[index].stop;
 }
 
+// Timeline mode: markers are fenceless (hipEventDisableSystemFence). Their
+// elapsed time is read only after the per-inference stream sync, so the default
+// system fence is pure overhead here -- and dropping it is the whole point of
+// this low-distortion path. See the fence rationale in op_profile_acquire_event_pair.
+static hipEvent_t op_profile_make_marker() {
+  hipEvent_t e = nullptr;
+  hipError_t err = hipEventCreateWithFlags(&e, hipEventDisableSystemFence);
+  if (err != hipSuccess || !e) {
+    op_profile_note_event_error("create_marker", err);
+    hipEventCreate(&e); // fall back to a plain event
+  }
+  return e;
+}
+
+void op_profile_ensure_epoch(OpProfileState *ps, hipStream_t stream) {
+  if (!ps || ps->epochRecorded)
+    return;
+  if (!ps->epoch)
+    ps->epoch = op_profile_make_marker();
+  hipError_t e = hipEventRecord(ps->epoch, stream);
+  if (e != hipSuccess)
+    op_profile_note_event_error("record_epoch", e);
+  (void)hipGetLastError(); // consume hipEventRecord sticky artifact (see scope)
+  ps->epochRecorded = true;
+  // Absolute time (on the shared trace axis) at which the GPU epoch was
+  // recorded. Adding this to each op's GPU-elapsed offset places the GPU track
+  // on the same absolute clock as the CPU track -> aligned, no epoch guessing.
+  ps->gpuEpochAbsUs = op_profile_cpu_now_us(ps);
+}
+
+int op_profile_acquire_marker(OpProfileState *ps) {
+  int idx = ps->nextMarker++;
+  if (idx >= (int)ps->markerPool.size())
+    ps->markerPool.push_back(op_profile_make_marker());
+  return idx;
+}
+
+hipEvent_t op_profile_get_marker_event(OpProfileState *ps, int index) {
+  return ps->markerPool[index];
+}
+
 void op_profile_add_pending(OpProfileState *ps, const std::string &name,
                             const std::string &shape, int eventIndex,
-                            double cpuMs, int64_t bytes) {
+                            double cpuMs, int64_t bytes, bool timeline,
+                            double cpuStartUs) {
   if (!ps)
     return;
-  ps->pending.push_back({name, shape, eventIndex, cpuMs, bytes});
+  ps->pending.push_back(
+      {name, shape, eventIndex, cpuMs, bytes, timeline, cpuStartUs});
+}
+
+static void write_chrome_trace(OpProfileState *ps);
+
+void op_profile_add_io_spans(OpProfileState *ps, double h2dMs, int64_t h2dBytes,
+                             double computeMs, double d2hMs, int64_t d2hBytes) {
+  // Called from the tensor runtime's per-inference flush for the inference that
+  // just resolved. Placed on dedicated pipeline tracks (H2D/Compute/D2H) within
+  // that inference's window (from its GPU epoch). Placement is approximate -- the
+  // phase events use a different epoch than the per-op GPU track -- so treat
+  // these as the pipeline breakdown, not perfectly aligned to the op spans.
+  if (!ps || !hipdnn_ep_trace_enabled())
+    return;
+  double t = ps->gpuEpochAbsUs; // absolute start of the just-resolved inference
+  ps->ioSpans.push_back({"H2D", 2, t, h2dMs * 1000.0, h2dBytes});
+  t += h2dMs * 1000.0;
+  ps->ioSpans.push_back({"Compute", 4, t, computeMs * 1000.0, 0});
+  t += computeMs * 1000.0;
+  ps->ioSpans.push_back({"D2H", 3, t, d2hMs * 1000.0, d2hBytes});
+  write_chrome_trace(ps);
 }
 
 double op_profile_roofline_gbps() {
@@ -175,18 +304,122 @@ void op_profile_add_cpu(OpProfileState *ps, const std::string &name,
   op.totalCount++;
 }
 
+// Chrome trace writer (chrome://tracing / Perfetto). Emits one GPU track
+// (epoch-anchored, faithful in timeline mode) and one CPU track (wrapper wall
+// time) with shape/bytes/GB-s args. Rewrites the whole file each inference so
+// the trace stays valid mid-run; events from all inferences sit at their real
+// absolute times on the shared axis. Gated by HIPDNN_EP_TRACE_FILE.
+static void write_chrome_trace(OpProfileState *ps) {
+  const std::string &base = hipdnn_ep_trace_path();
+  if (base.empty())
+    return;
+  // Per-session file: insert ".sN" before the extension so concurrent EP
+  // sessions (embedding, decoder, ...) don't clobber one shared file. They all
+  // share the absolute time axis, so merge_traces.py aligns them exactly.
+  size_t dot = base.find_last_of('.');
+  std::string path = (dot == std::string::npos)
+                         ? base + ".s" + std::to_string(ps->sessionId)
+                         : base.substr(0, dot) + ".s" +
+                               std::to_string(ps->sessionId) + base.substr(dot);
+  FILE *f = fopen(path.c_str(), "w");
+  if (!f)
+    return;
+  fputs("{\"displayTimeUnit\":\"ns\",\"traceEvents\":[\n", f);
+  fprintf(f, "{\"name\":\"process_name\",\"ph\":\"M\",\"pid\":0,\"tid\":0,"
+             "\"args\":{\"name\":\"hipdnn-ep session %d\"}},\n", ps->sessionId);
+  fputs("{\"name\":\"thread_name\",\"ph\":\"M\",\"pid\":0,\"tid\":0,"
+        "\"args\":{\"name\":\"CPU (wrapper)\"}},\n", f);
+  fputs("{\"name\":\"thread_name\",\"ph\":\"M\",\"pid\":0,\"tid\":1,"
+        "\"args\":{\"name\":\"GPU (stream)\"}},\n", f);
+  fputs("{\"name\":\"thread_name\",\"ph\":\"M\",\"pid\":0,\"tid\":2,"
+        "\"args\":{\"name\":\"H2D\"}},\n", f);
+  fputs("{\"name\":\"thread_name\",\"ph\":\"M\",\"pid\":0,\"tid\":3,"
+        "\"args\":{\"name\":\"D2H\"}},\n", f);
+  fputs("{\"name\":\"thread_name\",\"ph\":\"M\",\"pid\":0,\"tid\":4,"
+        "\"args\":{\"name\":\"Compute (phase)\"}}", f);
+  const double peak = op_profile_roofline_gbps();
+  for (auto &s : ps->ioSpans) {
+    fprintf(f,
+            ",\n{\"name\":\"%s\",\"cat\":\"io\",\"ph\":\"X\",\"pid\":0,"
+            "\"tid\":%d,\"ts\":%.3f,\"dur\":%.3f,\"args\":{\"bytes\":%lld}}",
+            s.name.c_str(), s.tid, s.tsUs, s.durUs, (long long)s.bytes);
+  }
+  for (auto &e : ps->timeline) {
+    double gbps = (e.bytes > 0 && e.durUs > 0)
+                      ? (double)e.bytes / 1e3 / e.durUs
+                      : 0.0; // bytes / us = GB/s * 1e-... : bytes/(us)/1e3
+    // GPU span
+    fprintf(f,
+            ",\n{\"name\":\"%s\",\"cat\":\"gpu\",\"ph\":\"X\",\"pid\":0,"
+            "\"tid\":1,\"ts\":%.3f,\"dur\":%.3f,\"args\":{\"shape\":\"%s\","
+            "\"bytes\":%lld,\"GB/s\":%.0f,\"%%peak\":%.0f}}",
+            e.name.c_str(), e.tsUs, e.durUs, e.shape.c_str(),
+            (long long)e.bytes, gbps, peak > 0 ? 100.0 * gbps / peak : 0.0);
+    // CPU span (host-side wrapper time: launch overhead + setup)
+    fprintf(f,
+            ",\n{\"name\":\"%s\",\"cat\":\"cpu\",\"ph\":\"X\",\"pid\":0,"
+            "\"tid\":0,\"ts\":%.3f,\"dur\":%.3f,\"args\":{\"shape\":\"%s\"}}",
+            e.name.c_str(), e.cpuTsUs, e.cpuDurUs, e.shape.c_str());
+  }
+  fputs("\n]}\n", f);
+  fclose(f);
+}
+
 void op_profile_resolve_and_print(OpProfileState *ps) {
   if (!ps)
     return;
 
+  // Timeline mode: each op's GPU time is the gap between its marker and the
+  // previous marker (or the epoch for the first op) on the in-order stream.
+  // pending is in enqueue order, so cumulative-from-epoch differencing yields
+  // per-op durations without any per-op start event.
+  const bool traceOn = hipdnn_ep_trace_enabled();
+  double tlPrevMs = 0.0;
   for (auto &ev : ps->pending) {
     float gpuMs = 0.0f;
-    hipError_t elErr = hipEventElapsedTime(
-        &gpuMs, ps->eventPool[ev.eventIndex].start,
-        ps->eventPool[ev.eventIndex].stop);
-    if (elErr != hipSuccess) {
-      op_profile_note_event_error("elapsed", elErr);
-      gpuMs = 0.0f;
+    double gpuStartMs = -1.0; // epoch-relative start (timeline mode only)
+    if (ev.timeline) {
+      if (ps->epoch) {
+        float cumMs = 0.0f;
+        hipError_t elErr = hipEventElapsedTime(
+            &cumMs, ps->epoch, ps->markerPool[ev.eventIndex]);
+        if (elErr != hipSuccess) {
+          op_profile_note_event_error("elapsed_marker", elErr);
+          cumMs = (float)tlPrevMs;
+        }
+        gpuMs = (float)(cumMs - tlPrevMs);
+        if (gpuMs < 0.0f)
+          gpuMs = 0.0f; // guard against event resolution jitter
+        gpuStartMs = tlPrevMs; // op ran from prev marker to this one
+        tlPrevMs = cumMs;
+      }
+    } else {
+      hipError_t elErr = hipEventElapsedTime(
+          &gpuMs, ps->eventPool[ev.eventIndex].start,
+          ps->eventPool[ev.eventIndex].stop);
+      if (elErr != hipSuccess) {
+        op_profile_note_event_error("elapsed", elErr);
+        gpuMs = 0.0f;
+      }
+      // Epoch-anchored start for classic mode (faithful chrome-trace placement).
+      if (traceOn && ps->epoch) {
+        float st = 0.0f;
+        if (hipEventElapsedTime(&st, ps->epoch,
+                                ps->eventPool[ev.eventIndex].start) ==
+            hipSuccess)
+          gpuStartMs = st;
+      }
+    }
+    if (traceOn) {
+      // Absolute timestamps on the shared axis. GPU start = inference's GPU
+      // epoch (absolute) + this op's GPU-elapsed offset; CPU start = absolute
+      // wrapper-entry time. Both already share the process trace epoch, so no
+      // per-track/per-inference re-basing is needed.
+      double gTsUs = (gpuStartMs >= 0.0)
+                         ? ps->gpuEpochAbsUs + gpuStartMs * 1000.0
+                         : ev.cpuStartUs;
+      ps->timeline.push_back({ev.name, ev.shape, gTsUs, gpuMs * 1000.0,
+                              ev.cpuStartUs, ev.cpuMs * 1000.0, ev.bytes});
     }
     auto &op = ps->profile[ev.name];
     if (op.name.empty())
@@ -205,6 +438,9 @@ void op_profile_resolve_and_print(OpProfileState *ps) {
     op.totalBytes += ev.bytes;
   }
   ps->pending.clear();
+
+  if (traceOn)
+    write_chrome_trace(ps); // absolute-axis; per-session file (own sessionId)
 
   // Consume any sticky HIP error introduced by the profiler's own event calls
   // (e.g. a hipEventElapsedTime on a not-fully-ready event). Otherwise the next
