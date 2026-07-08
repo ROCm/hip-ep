@@ -194,6 +194,10 @@ if(BUILD_HIP_TOOLS)
 
     # Runtime unit tests (GPU-free; native against mock types)
     add_subdirectory(test/runtime)
+
+    # Static compiler-plugin tests (sample plugin + unit test).
+    # See docs/design/plugin-interface.md.
+    add_subdirectory(test/plugin)
   endif()
 
   # Out-of-tree plugin dirs (HIPDNN_EP_COMPILER_PLUGIN_PATHS): add each so it can
