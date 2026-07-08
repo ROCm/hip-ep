@@ -77,6 +77,7 @@ set_target_properties(hip_ep_sample_lib PROPERTIES
 
 add_library(hip_ep_sample_plugin STATIC
   sample_plugin.cpp
+  sample_dialect.cpp
   ${SAMPLE_PLUGIN_BITCODE_SRC}
 )
 add_dependencies(hip_ep_sample_plugin hip_ep_sample_lib)
@@ -101,6 +102,12 @@ target_link_libraries(hip_ep_sample_plugin PUBLIC
   MLIRIR
   MLIRSupport
   MLIRFuncDialect
+  # For sample_dialect.cpp: the minimal dialect's HIP->LLVM lowering interface
+  # (ConvertToLLVMPatternInterface + LLVMTypeConverter + DialectConversion).
+  MLIRLLVMDialect
+  MLIRLLVMCommonConversion
+  MLIRConvertToLLVMInterface
+  MLIRTransformUtils
 )
 
 set_target_properties(hip_ep_sample_plugin PROPERTIES
