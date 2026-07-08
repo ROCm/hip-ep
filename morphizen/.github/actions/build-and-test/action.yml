@@ -1,0 +1,79 @@
+##
+## Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+name: build-and-test
+
+inputs:
+  ort_hash_id:
+    description: 'The hash id of the ort repo'
+    required: true
+    type: string
+
+  token:
+    required: true
+    description: 'GitHub Personal Access Token for VitisAI/morphizen-demo'
+    type: string
+
+  onnxruntime_branch_name:
+    description: 'The branch name of the ort repo'
+    required: false
+    default: 'morphizen-ci'
+    type: string
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Cache installed ONNXRuntime and deps
+      id: cache-onnxruntime-and-deps
+      env:
+        NODE_TLS_REJECT_UNAUTHORIZED: 0
+      uses: actions/cache@v3
+      with:
+        path: ${{ env.VAI_RT_PREFIX }}
+        key: ${{ inputs.ort_hash_id }}
+
+    - name: Checkout VitisAI/morphizen-demo
+      uses: actions/checkout@v4
+      with:
+        repository: VitisAI/morphizen-demo
+        path: morphizen-demo
+        ref: dev
+        token: ${{ inputs.token }}
+        show-progress: false
+
+    - name: Checkout VitisAI/onnxruntime
+      uses: actions/checkout@v4
+      with:
+        repository: VitisAI/onnxruntime
+        path: onnxruntime
+        ref: ${{ inputs.onnxruntime_branch_name }}
+        token: ${{ inputs.token }}
+        show-progress: false
+
+    - name: Checkout onnx-mlir
+      run: |
+        # Get onnx-mlir repo URL and SHA1
+        $depsFile = "${{ github.workspace}}/cmake/deps.txt"
+        $onnxMlir = Select-String '^onnx-mlir;' $depsFile | ForEach-Object { $_.Line -split ';' }
+        if ($onnxMlir.Count -ge 3) {
+          $url, $hash = $onnxMlir[1], $onnxMlir[2]
+          echo "Checkout ONNX-MLIR $url at $hash"
+          git clone $url onnx-mlir
+          git -C onnx-mlir checkout $hash
+        } else {
+          echo "Error: Could not find ONNX-MLIR entry in deps.txt"
+          exit 1
+        }
+      shell: powershell
+
+    - name: build and test
+      run: |
+        echo "build and test morphizen-demo..."
+        . ${{ github.workspace }}/scripts/build/build_and_test.ps1
+      shell: powershell

@@ -58,7 +58,7 @@ onnxruntime_morphizen_ep.dll
 ORT uses the **EP V2 API** to discover and load execution providers. The EP DLL exports
 a standard entry point:
 
-**File:** `3rd-party/morphizen/ort-bridge/src/ort-bridge.cpp`
+**File:** `morphizen/ort-bridge/src/ort-bridge.cpp`
 ```cpp
 OrtStatus* CreateEpFactories(const char* registration_name,
                              const OrtApiBase* ort_api_base,
@@ -77,7 +77,7 @@ OrtStatus* CreateEpFactories(const char* registration_name,
 
 ORT then calls `MorphiZenEpFactory::CreateEpImpl` which constructs a `MorphiZenEP` instance:
 
-**File:** `3rd-party/morphizen/ort-bridge/src/morphizen-ep-factory.cpp`
+**File:** `morphizen/ort-bridge/src/morphizen-ep-factory.cpp`
 ```cpp
 OrtStatus* MorphiZenEpFactory::CreateEpImpl(..., OrtEp** ep) noexcept {
     auto morphizen_ep = std::make_unique<MorphiZenEP>(
@@ -733,9 +733,9 @@ time.
 | Concern | Path |
 |---------|------|
 | **EP Loading** | |
-| ORT EP factory exports (DEF file) | `3rd-party/morphizen/morphizen-core/onnxruntime_morphizen_ep_with_ort_bridge.def` |
-| `CreateEpFactories` implementation | `3rd-party/morphizen/ort-bridge/src/ort-bridge.cpp` |
-| EP factory / `CreateEpImpl` | `3rd-party/morphizen/ort-bridge/src/morphizen-ep-factory.cpp` |
+| ORT EP factory exports (DEF file) | `morphizen/morphizen-core/onnxruntime_morphizen_ep_with_ort_bridge.def` |
+| `CreateEpFactories` implementation | `morphizen/ort-bridge/src/ort-bridge.cpp` |
+| EP factory / `CreateEpImpl` | `morphizen/ort-bridge/src/morphizen-ep-factory.cpp` |
 | **Compilation** | |
 | Load `hip-compiler` plugin | `backend-mlir-compiler/level-1-pass/src/MlirCompiler.cpp` |
 | `hip_compile_with_fs` export | `lib/CInterface/CompilerAPI.cpp` |
