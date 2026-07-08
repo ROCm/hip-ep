@@ -10,7 +10,7 @@
 // underscores -- so "/model/MatMul_weights" becomes "model_MatMul_weights".
 //===----------------------------------------------------------------------===//
 
-// RUN: mkdir -p %t && hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip='externalize-min-num-elements=4 externalize-output-dir=%t' %s | FileCheck %s
+// RUN: mkdir -p %t && hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip --hip-externalize-constants='externalize-min-num-elements=4 externalize-output-dir=%t' %s | FileCheck %s
 
 // CHECK: memref.global "private" @hip_ext_constant_model_MatMul_weights_0 : memref<2x4xf32> {alignment = 64 : i64, hip.external_data = {index = 0 : i64, offset = 0 : i64, size = 32 : i64}}
 // CHECK: func.func @main_graph(%arg0: !hip.context) -> tensor<2x4xf32>

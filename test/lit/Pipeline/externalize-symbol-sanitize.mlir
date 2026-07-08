@@ -9,7 +9,7 @@
 // monotonic index suffix prevents collisions.
 //===----------------------------------------------------------------------===//
 
-// RUN: mkdir -p %t && hip-mlir-opt --convert-onnx-to-hip='externalize-min-num-elements=4 externalize-output-dir=%t' %s | FileCheck %s
+// RUN: mkdir -p %t && hip-mlir-opt --convert-onnx-to-hip --hip-externalize-constants='externalize-min-num-elements=4 externalize-output-dir=%t' %s | FileCheck %s
 
 // The node name "/model/layers.0/Constant" should become hip_ext_constant_model_layers_0_Constant_0
 // CHECK-DAG: memref.global "private" @hip_ext_constant_model_layers_0_Constant_0{{.*}}hip.external_data

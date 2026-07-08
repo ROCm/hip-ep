@@ -9,6 +9,10 @@
 #include <memory>
 #include <string>
 
+namespace morphizen {
+class FileSystem;
+} // namespace morphizen
+
 namespace mlir {
 namespace hip {
 
@@ -16,6 +20,15 @@ struct CompilationOptionsT;
 
 #define GEN_PASS_DECL
 #include "hip/Dialect/Transforms/Passes.h.inc"
+
+/// Create hip-externalize-constants with an EP-supplied FileSystem (writes the
+/// constants.bin into the EPContext tar) + the fs-mode threshold and
+/// skip-constant-data flag. The no-arg / options overloads (from GEN_PASS_DECL)
+/// use a DiskFileSystem rooted at externalize-output-dir.
+std::unique_ptr<mlir::Pass>
+createExternalizeConstantsPass(morphizen::FileSystem *fs,
+                               int64_t minNumElements,
+                               bool skipConstantData = false);
 
 #define GEN_PASS_REGISTRATION
 #include "hip/Dialect/Transforms/Passes.h.inc"

@@ -18,6 +18,7 @@
 #include "compilation_options_generated.h"
 #include "flatbuffers/flatbuffers.h"
 #include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/Transforms/ConstantMetadata.h"
 #include "hip/Dialect/Transforms/Passes.h"
 #include "hip/artifact_abi.h"
 #include "hip/debug_log.h"
@@ -68,79 +69,61 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
       module->getAttrOfType<IntegerAttr>("hipdnn.input_count");
   auto outputCountAttr =
       module->getAttrOfType<IntegerAttr>("hipdnn.output_count");
-  auto constantSizesAttr =
-      module->getAttrOfType<DenseI64ArrayAttr>("hipdnn.constant_sizes");
-  auto constantOffsetsAttr =
-      module->getAttrOfType<DenseI64ArrayAttr>("hipdnn.constant_offsets");
-
-  // Streaming-mode source descriptors. Present when OnnxToHip's finalize
-  // emitted per-constant source info (splat / file-ref / sidecar). Absent in
-  // full-sidecar mode (EPContext export), in which case every ConstantInfo
-  // keeps source = NONE and runtime falls back to the bulk constants_filename
-  // read. In hybrid mode (skipDataWrite=true with mem-addr entries) some
-  // constants carry SidecarSource pointing at a *partial* sidecar that holds
-  // only mem-addr bytes.
-  auto sourceKindsAttr =
-      module->getAttrOfType<DenseI32ArrayAttr>("hipdnn.constant_source_kinds");
-  auto splatValuesAttr = module->getAttrOfType<DenseI64ArrayAttr>(
-      "hipdnn.constant_splat_elem_values");
-  auto splatElemSizesAttr = module->getAttrOfType<DenseI64ArrayAttr>(
-      "hipdnn.constant_splat_elem_sizes");
-  auto filePathsAttr =
-      module->getAttrOfType<ArrayAttr>("hipdnn.constant_file_paths");
-  auto fileOffsetsAttr =
-      module->getAttrOfType<DenseI64ArrayAttr>("hipdnn.constant_file_offsets");
-  auto sidecarOffsetsAttr = module->getAttrOfType<DenseI64ArrayAttr>(
-      "hipdnn.constant_sidecar_offsets");
+  // Per-constant descriptors emitted by hip-externalize-constants: one
+  // self-describing DictionaryAttr per externalized constant, in index order.
+  // kind == None => bytes live in the bulk constants_filename at `offset`;
+  // the other kinds (splat / file-ref / sidecar) carry a source union. Absent
+  // entirely when nothing was externalized.
+  auto constantsAttr = module->getAttrOfType<ArrayAttr>(
+      mlir::hip::constant_meta::kConstantsAttr);
 
   mlir::hip::HipModelMetaInfoT meta;
   meta.version = 1;
   meta.constants_filename = constantsFile;
 
-  if (constantSizesAttr) {
-    auto sizes = constantSizesAttr.asArrayRef();
-    auto offsets = constantOffsetsAttr ? constantOffsetsAttr.asArrayRef()
-                                       : ArrayRef<int64_t>{};
-    auto kinds =
-        sourceKindsAttr ? sourceKindsAttr.asArrayRef() : ArrayRef<int32_t>{};
-    auto splatValues =
-        splatValuesAttr ? splatValuesAttr.asArrayRef() : ArrayRef<int64_t>{};
-    auto splatElemSizes = splatElemSizesAttr ? splatElemSizesAttr.asArrayRef()
-                                             : ArrayRef<int64_t>{};
-    auto fileOffsets =
-        fileOffsetsAttr ? fileOffsetsAttr.asArrayRef() : ArrayRef<int64_t>{};
-    auto sidecarOffsets = sidecarOffsetsAttr ? sidecarOffsetsAttr.asArrayRef()
-                                             : ArrayRef<int64_t>{};
-    for (auto i : llvm::seq<size_t>(0, sizes.size())) {
+  if (constantsAttr) {
+    namespace cm = mlir::hip::constant_meta;
+    for (Attribute entry : constantsAttr) {
+      auto dict = dyn_cast<DictionaryAttr>(entry);
+      if (!dict)
+        continue;
+      auto getI64 = [&](StringRef key) -> int64_t {
+        auto a = dict.getAs<IntegerAttr>(key);
+        return a ? a.getInt() : 0;
+      };
       auto ci = std::make_unique<mlir::hip::ConstantInfoT>();
-      ci->size = sizes[i];
-      ci->offset = (i < offsets.size()) ? offsets[i] : 0;
-      int32_t kind = (i < kinds.size()) ? kinds[i] : 0;
-      if (kind == 1) {
-        // Splat: extract the left-packed elem bytes out of the i64 carrier.
+      ci->size = getI64(cm::kSize);
+      ci->offset = getI64(cm::kOffset);
+      switch (static_cast<mlir::hip::ConstantSourceKind>(getI64(cm::kKind))) {
+      case mlir::hip::ConstantSourceKind::Splat: {
+        // Extract the left-packed elem bytes out of the i64 carrier.
         auto splat = std::make_unique<mlir::hip::SplatSourceT>();
-        int64_t elemSize = (i < splatElemSizes.size()) ? splatElemSizes[i] : 0;
-        size_t n = static_cast<size_t>(std::min<int64_t>(elemSize, 8));
-        const auto *base = reinterpret_cast<const uint8_t *>(&splatValues[i]);
+        int64_t packed = getI64(cm::kSplatValue);
+        size_t n = static_cast<size_t>(
+            std::min<int64_t>(getI64(cm::kSplatElemSize), 8));
+        const auto *base = reinterpret_cast<const uint8_t *>(&packed);
         splat->elem_bytes.assign(base, base + n);
         ci->source.Set(std::move(*splat));
-      } else if (kind == 2) {
+        break;
+      }
+      case mlir::hip::ConstantSourceKind::FileRef: {
         auto fref = std::make_unique<mlir::hip::FileRefSourceT>();
-        if (filePathsAttr && i < filePathsAttr.size()) {
-          if (auto s = dyn_cast<StringAttr>(filePathsAttr.getValue()[i]))
-            fref->path = s.getValue().str();
-        }
-        fref->file_offset = (i < fileOffsets.size()) ? fileOffsets[i] : 0;
+        if (auto p = dict.getAs<StringAttr>(cm::kFilePath))
+          fref->path = p.getValue().str();
+        fref->file_offset = getI64(cm::kFileOffset);
         ci->source.Set(std::move(*fref));
-      } else if (kind == 3) {
-        // Sidecar: mem-addr entry packed into
-        // HipModelMetaInfo.constants_filename at sidecar_offset by the
-        // OnnxToHip hybrid finalize. Runtime reads size bytes from that offset
-        // through the EP FileSystem.
+        break;
+      }
+      case mlir::hip::ConstantSourceKind::Sidecar: {
+        // mem-addr bytes packed into constants_filename at sidecar_offset by
+        // the hybrid finalize; the runtime reads `size` bytes from that offset.
         auto side = std::make_unique<mlir::hip::SidecarSourceT>();
-        side->sidecar_offset =
-            (i < sidecarOffsets.size()) ? sidecarOffsets[i] : 0;
+        side->sidecar_offset = getI64(cm::kSidecarOffset);
         ci->source.Set(std::move(*side));
+        break;
+      }
+      case mlir::hip::ConstantSourceKind::None:
+        break;
       }
       meta.constants.push_back(std::move(ci));
     }

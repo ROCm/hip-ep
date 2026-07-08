@@ -2,24 +2,23 @@
 // Licensed under the MIT License.
 //
 //===----------------------------------------------------------------------===//
-// Test: constant externalization emits hipdnn.constant_sizes/offsets and
+// Test: constant externalization emits the hipdnn.constants descriptor array and
 // hip.external_data with index field.
 //
 // Verifies:
 // - Large constants (splat and non-splat) are externalized to memref.global
 //   with hip.external_data containing index, offset, and size
-// - hipdnn.constant_sizes and hipdnn.constant_offsets module attributes
-//   are emitted
+// - a hipdnn.constants module attribute (one offset/size/kind descriptor per
+//   externalized constant) is emitted
 // - Small constants (below threshold) remain inline as arith.constant
 //===----------------------------------------------------------------------===//
 
-// RUN: mkdir -p %t && hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip='externalize-min-num-elements=4 externalize-output-dir=%t' %s | FileCheck %s
+// RUN: mkdir -p %t && hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip --hip-externalize-constants='externalize-min-num-elements=4 externalize-output-dir=%t' %s | FileCheck %s
 
 // Module-level: constants file, sizes, and offsets attributes.
 // CHECK: module attributes {
 // CHECK-SAME: hip.constants_file = "model.constants.bin"
-// CHECK-SAME: hipdnn.constant_offsets = array<i64:
-// CHECK-SAME: hipdnn.constant_sizes = array<i64:
+// CHECK-SAME: hipdnn.constants = [{kind = 0 : i64, offset = 0 : i64, size = 64 : i64}, {kind = 0 : i64, offset = 64 : i64, size = 32 : i64}]
 
 // Extern memref.global with index in hip.external_data.
 // Splat constant (4x4, 16 elements >= threshold) externalized as index 0.

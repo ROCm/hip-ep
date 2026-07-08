@@ -8,11 +8,11 @@
 // Verify the pass rejects it with a clear diagnostic.
 //===----------------------------------------------------------------------===//
 
-// RUN: not hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s 2>&1 | FileCheck %s
+// RUN: not hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip --hip-externalize-constants %s 2>&1 | FileCheck %s
 
-// CHECK: error: onnx.Constant mem-addr has null address
-// CHECK-NEXT: %0 = "onnx.Constant"() {location = "*/_ORT_MEM_ADDR_/*", offset = 0 : i64, size = 32 : i64} : () -> tensor<2x4xf32>
-// CHECK-NEXT: ^
+// convert-onnx-to-hip lowers to a hip.constant carrier; hip-externalize-constants
+// rejects the null mem-addr.
+// CHECK: error: hip.constant mem-addr has null address
 
 module {
   func.func @main_graph() -> tensor<2x4xf32> {
