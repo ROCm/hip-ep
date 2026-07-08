@@ -960,13 +960,9 @@ typedef _Float16 half16 __attribute__((ext_vector_type(16)));
 typedef float    float8 __attribute__((ext_vector_type(8)));
 #define HALF16(pointer) (reinterpret_cast<half16*>((void *)&(pointer))[0])
 
-// The 16x16x16 fp16 WMMA builtin is an RDNA3-family (wave32) intrinsic. On GPU
-// targets that do not provide it, this file must still COMPILE (it is built for
-// every configured arch), but the WMMA path must never silently produce wrong
-// results. Guard on __has_builtin (arch-agnostic -- no hard-coded arch name):
-// where the intrinsic is missing, forward to a shim that traps, so a WMMA launch
-// on an unsupported target aborts loudly instead of returning a zeroed tile. A
-// target that needs WMMA on such an arch must add a real implementation here.
+// The WMMA builtin below is RDNA3-family (wave32) only. Where __has_builtin
+// reports it absent, trap instead so this file still compiles and a WMMA
+// launch on an unsupported arch aborts loudly rather than returning garbage.
 #if !defined(__has_builtin) ||                                                  \
     !__has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_f16_w32)
 static __device__ __forceinline__ float8
