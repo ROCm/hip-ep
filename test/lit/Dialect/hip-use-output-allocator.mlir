@@ -260,6 +260,36 @@ func.func @long_chain_output(%ctx: !hip.context) -> memref<?x8xf32> {
   return %cast : memref<?x8xf32>
 }
 
+// --- An even longer 5-op view chain exercising every view-op kind the analysis
+//     handles (collapse_shape -> collapse_shape -> expand_shape -> subview ->
+//     cast): the root alloc is still converted exactly once and the full chain
+//     is preserved. Stresses that the backward alias walk terminates correctly
+//     no matter how deep the view chain is. ---
+// CHECK-LABEL: func.func @longer_chain_output
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context)
+// CHECK-NOT:     memref.alloc
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]]) {out_idx = 0 : i64} : memref<2x4x8xf32>
+// CHECK:         %[[C1:.*]] = memref.collapse_shape %[[OUT]]
+// CHECK:         %[[C2:.*]] = memref.collapse_shape %[[C1]]
+// CHECK:         %[[E:.*]] = memref.expand_shape %[[C2]]
+// CHECK:         %[[S:.*]] = memref.subview %[[E]]
+// CHECK:         %[[CST:.*]] = memref.cast %[[S]]
+// CHECK:         return %[[CST]]
+func.func @longer_chain_output(%ctx: !hip.context) -> memref<?x8xf32, strided<[8, 1]>> {
+  %x = memref.alloc() : memref<2x4x8xf32>
+  %c1 = memref.collapse_shape %x [[0, 1], [2]]
+      : memref<2x4x8xf32> into memref<8x8xf32>
+  %c2 = memref.collapse_shape %c1 [[0, 1]]
+      : memref<8x8xf32> into memref<64xf32>
+  %e = memref.expand_shape %c2 [[0, 1]] output_shape [8, 8]
+     : memref<64xf32> into memref<8x8xf32>
+  %s = memref.subview %e[0, 0] [4, 8] [1, 1]
+     : memref<8x8xf32> to memref<4x8xf32, strided<[8, 1]>>
+  %cast = memref.cast %s
+        : memref<4x8xf32, strided<[8, 1]>> to memref<?x8xf32, strided<[8, 1]>>
+  return %cast : memref<?x8xf32, strided<[8, 1]>>
+}
+
 // --- Output returned through memref.subview: the parent alloc becomes
 //     hip.alloc_output; the subview is left in place feeding the return. ---
 // CHECK-LABEL: func.func @subview_output
