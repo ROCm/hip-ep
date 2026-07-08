@@ -9,11 +9,11 @@
 // are absent.
 //===----------------------------------------------------------------------===//
 
-// RUN: not hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s 2>&1 | FileCheck %s
+// RUN: not hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip --hip-externalize-constants %s 2>&1 | FileCheck %s
 
-// CHECK: error: onnx.Constant with location attribute missing location/offset/size
-// CHECK-NEXT: %0 = "onnx.Constant"() {location = "*/_ORT_MEM_ADDR_/*"} : () -> tensor<2x4xf32>
-// CHECK-NEXT: ^
+// convert-onnx-to-hip lowers the malformed constant to a hip.constant carrier;
+// hip-externalize-constants emits the diagnostic when offset/size are absent.
+// CHECK: error: hip.constant with location missing location/offset/size
 
 module {
   func.func @main_graph() -> tensor<2x4xf32> {

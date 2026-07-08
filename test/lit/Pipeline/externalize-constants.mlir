@@ -11,20 +11,19 @@
 //
 // Also verifies module-level metadata:
 //   - hip.constants_file attribute
-//   - hipdnn.constant_sizes and hipdnn.constant_offsets arrays
+//   - hipdnn.constants (one per-constant descriptor: offset/size/kind)
 //   - hip.external_data includes index field
 //
 // All three constants are returned so they survive DCE in the greedy
 // pattern rewrite driver that runs as part of convertComputeOps.
 //===----------------------------------------------------------------------===//
 
-// RUN: mkdir -p %t && hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip='externalize-min-num-elements=4 externalize-output-dir=%t' %s | FileCheck %s
+// RUN: mkdir -p %t && hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip --hip-externalize-constants='externalize-min-num-elements=4 externalize-output-dir=%t' %s | FileCheck %s
 
 // Module-level: constants file attribute, sizes, and offsets.
 // CHECK: module attributes {
 // CHECK-SAME: hip.constants_file = "model.constants.bin"
-// CHECK-SAME: hipdnn.constant_offsets = array<i64:
-// CHECK-SAME: hipdnn.constant_sizes = array<i64:
+// CHECK-SAME: hipdnn.constants = [{kind = 0 : i64, offset = 0 : i64, size = 64 : i64}, {kind = 0 : i64, offset = 64 : i64, size = 32 : i64}]
 
 // Splat constant (4x4, 16 elements >= threshold) externalized as index 0.
 // CHECK-DAG: memref.global "private" @hip_ext_constant_0 : memref<4x4xf32>

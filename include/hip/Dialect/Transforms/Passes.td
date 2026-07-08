@@ -93,14 +93,6 @@ def ConvertOnnxToHipPass : Pass<"convert-onnx-to-hip", "mlir::ModuleOp"> {
       pattern (krnl.global + omMMapBinaryFile) adapted to standard MLIR ops.
       Splat constants are always kept inline regardless of size.
   }];
-  let options = [
-    Option<"externalizeOutputDir", "externalize-output-dir", "std::string",
-           /*default=*/"\"\"",
-           "Directory for sidecar .constants.bin/.json files (empty = cwd)">,
-    Option<"externalizeMinNumElements", "externalize-min-num-elements",
-           "int64_t", /*default=*/"0",
-           "Minimum number of tensor elements to externalize (0 = disabled)">
-  ];
   let dependentDialects = [
     "mlir::hip::HipDialect",
     "mlir::arith::ArithDialect",
@@ -760,6 +752,55 @@ def ResolveExternConstantsPass
     "mlir::arith::ArithDialect",
     "mlir::func::FuncDialect",
     "mlir::memref::MemRefDialect"
+  ];
+}
+
+def ExternalizeConstantsPass
+    : Pass<"hip-externalize-constants", "mlir::ModuleOp"> {
+  let summary = "Externalize hip.constant carriers to the constants.bin sidecar";
+  let description = [{
+    Standalone, dialect-agnostic constant externalization. Walks every
+    `hip.constant` op -- whether emitted by `convert-onnx-to-hip` (from
+    `onnx.Constant`) or contributed by a downstream plugin for its own weights
+    -- and, at/above the element-count threshold, replaces it with an extern
+    `memref.global` + `hip.external_data` + `bufferization.to_tensor` bridge
+    (the exact contract `hip-resolve-extern-constants` consumes), stamping
+    `hip.constants_file` + `hipdnn.constant_{sizes,offsets}` on the module.
+    Constants below the threshold fold to `arith.constant`.
+
+    Before:
+      %w = hip.constant {value = dense<...> : tensor<64x64xf16>}
+             : tensor<64x64xf16>
+    After (>= threshold):
+      memref.global "private" @hip_ext_constant_0 : memref<64x64xf16>
+        {hip.external_data = {index = 0 : i64, offset = 0 : i64,
+                              size = 8192 : i64}}
+      %g = memref.get_global @hip_ext_constant_0 : memref<64x64xf16>
+      %w = bufferization.to_tensor %g restrict
+             : memref<64x64xf16> to tensor<64x64xf16>
+
+    Must run after the `AfterConvertOnnxToHip` plugin slot (so plugin-emitted
+    `hip.constant`s are included) and before `one-shot-bufferize` and
+    `generate-interface`.
+  }];
+  let options = [
+    Option<"externalizeMinNumElements", "externalize-min-num-elements",
+           "int64_t", /*default=*/"1",
+           "Minimum number of tensor elements to externalize (0 = disabled)">,
+    Option<"externalizeOutputDir", "externalize-output-dir", "std::string",
+           /*default=*/"\"\"",
+           "Directory for sidecar .constants.bin/.json files (empty = cwd)">,
+    Option<"skipConstantData", "skip-constant-data", "bool",
+           /*default=*/"false",
+           "Skip writing constant data to constants.bin (metadata only). Used "
+           "for the ORT EP live-compile path.">
+  ];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::func::FuncDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::bufferization::BufferizationDialect"
   ];
 }
 

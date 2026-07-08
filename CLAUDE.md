@@ -187,7 +187,7 @@ ONNX (.onnx) → [onnx-to-hip-pipeline] → HIP dialect → [bufferize + optimiz
 
 Key passes in order:
 1. `hip-add-context-arg` — inject `!hip.context` argument
-2. `convert-onnx-to-hip` — ONNX ops to HIP dialect ops (externalizes large constants to `.constants.bin`)
+2. `convert-onnx-to-hip` — ONNX ops to HIP dialect ops; `onnx.Constant` → neutral `hip.constant` carriers (no externalization here). `hip-externalize-constants` runs immediately after (past the `AfterConvertOnnxToHip` plugin slot, so plugin-emitted `hip.constant` ops are serialized too): large → extern `memref.global` + `hip.external_data` → `.constants.bin`, small → inline `arith.constant`; stamps `hipdnn.constant_{sizes,offsets}`
 3. `one-shot-bufferize` — tensor semantics to memref (buffer) semantics
 4. `buffer-deallocation` + `hip-optimize-memrefs` — liveness-based buffer reuse
 5. `hip-pool-allocs` — pack all allocations into a single grow-on-demand GPU buffer

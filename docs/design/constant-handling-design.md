@@ -95,7 +95,12 @@ Runtime  (hip-compiler.dll NOT loaded)                                          
                                                                               EP tar cache ◀┘
 ```
 
-**Compile time**: the `OnnxToHip` pass calls
+**Compile time**: `convert-onnx-to-hip` lowers each `onnx.Constant` to a
+neutral `hip.constant` carrier (holding either an inline dense `value` or an
+ORT external-data `location`/`offset`/`size` reference). The standalone
+`hip-externalize-constants` pass — scheduled just after the
+`AfterConvertOnnxToHip` plugin slot, so it also serializes any `hip.constant`
+a downstream plugin emitted for its own weights — then calls
 `fs->create_writer(constants_filename)` to stream raw constant bytes into
 storage. `constants_filename` is the configured constants file
 (default: `constants.bin`, see [compilation-options.md](compilation-options.md)).
@@ -138,7 +143,9 @@ the buffer after a single bulk read.
         │ globalIndex (0,1,2,…)
         ▼
   ┌─────────────────────────────────────────┐  compile time
-  │ Step 1: OnnxToHip                       │
+  │ Step 1a: convert-onnx-to-hip            │
+  │  → hip.constant carriers                │
+  │ Step 1b: hip-externalize-constants      │
   │  → constants file (via fs)              │
   │  → hipdnn.constant_sizes                │
   │  → hipdnn.constant_offsets              │
@@ -165,13 +172,24 @@ the buffer after a single bulk read.
 
 `model_metadata` schema: [compiler-runtime-contract.md](compiler-runtime-contract.md).
 
-### Step 1 — Discover constants and assign index
+### Step 1 — Lower to `hip.constant`, then externalize
 
-The `OnnxToHip` pass (`lib/Conversion/OnnxToHip/OnnxToHip.cpp`) walks the ONNX
-functions, assigns each `onnx.Constant` op a sequential `globalIndex`
-(0, 1, 2, …), and computes its byte size. Layout order in the constants file
-may differ from index order (see [constants.bin Format](#constants.bin-format)
-above), but `hipdnn.constant_offsets` preserves the mapping.
+`convert-onnx-to-hip` (`lib/Conversion/OnnxToHip/OnnxToHip.cpp`) lowers each
+`onnx.Constant` to a neutral `hip.constant` carrier op (defined in
+`include/hip/Dialect/IR/HipOps.td`). A carrier holds either an inline dense
+`value` or an ORT external-data reference (`location`/`offset`/`size`) and is
+dialect-agnostic, so a downstream plugin can emit `hip.constant` for its own
+weights and have them serialized on the same footing as in-tree constants.
+
+`hip-externalize-constants`
+(`lib/Dialect/Transforms/ExternalizeConstants.cpp`) — scheduled just after the
+`AfterConvertOnnxToHip` plugin slot — walks every `hip.constant`, assigns each
+a sequential `globalIndex` (0, 1, 2, …), and computes its byte size. Constants
+at or above `externalize-min-num-elements` become an extern `memref.global`
+carrying `hip.external_data` (index/offset/size); smaller constants are inlined
+as `arith.constant`. Layout order in the constants file may differ from index
+order (see [constants.bin Format](#constants.bin-format) above), but
+`hipdnn.constant_offsets` preserves the mapping.
 
 The pass then writes raw constant bytes to the configured constants file via
 `fs`, and emits two module attributes:
@@ -181,7 +199,8 @@ The pass then writes raw constant bytes to the configured constants file via
   constants file, indexed by `globalIndex`.
 
 The constant count is derived from `hipdnn.constant_sizes`; no separate count
-attribute is emitted.
+attribute is emitted. (`hip-resolve-extern-constants` later rewrites each
+extern `memref.global` into a `memref.view` over the runtime constants blob.)
 
 ### Step 2 — Code generation: `GenerateInterface` pass
 

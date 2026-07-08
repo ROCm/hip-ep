@@ -114,7 +114,8 @@ Options use MLIR's pipeline-option syntax:
 | `onnx-loop-outline` | module | Outline `onnx.Loop` bodies into separate `func.func` ops. |
 | `hip-infer-loop-body-shapes` | module | Rank-establish unranked tensors inside outlined loop bodies. |
 | `outline-onnx-to-hipdnn` | module | Outline subgraphs targeted at hipDNN graph compilation. |
-| `convert-onnx-to-hip` | module | Pattern-match ONNX ops by name → HIP dialect; externalize large constants. |
+| `convert-onnx-to-hip` | module | Pattern-match ONNX ops by name → HIP dialect; `onnx.Constant` → neutral `hip.constant` carrier (externalization deferred to `hip-externalize-constants`). |
+| `hip-externalize-constants` | module | Serialize `hip.constant` carriers (in-tree + plugin-emitted) to `constants.bin`: large → extern `memref.global` + `hip.external_data`, small → inline `arith.constant`; stamp `hipdnn.constant_{sizes,offsets}`. |
 | `hip-infer-shapes` | module | Refine `?` dims on HIP DPS result types via `ReifyRankedShapedTypeOpInterface`. |
 | `hip-split-duplicate-dps-inits` | func.func | De-alias DPS init operands that CSE merged onto one `tensor.empty`, so an op that reads back its own outputs (e.g. `hip.gqa` present K/V) does not share a buffer (pre-bufferize). |
 | `hip-resolve-tensor-dims` | func.func | Fold `tensor.dim` of reshape chains into root-dim arithmetic (pre-bufferize). |
@@ -181,6 +182,7 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   [outline-onnx-to-hipdnn + compile-hipdnn-graphs]   (handle overload only)
   convert-onnx-to-hip
   «slot: AfterConvertOnnxToHip»
+  hip-externalize-constants
   hip-infer-shapes
   canonicalize ; cse
   func.func(hip-split-duplicate-dps-inits)
