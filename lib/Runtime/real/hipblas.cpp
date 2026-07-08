@@ -2,6 +2,36 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
+
+// HIPDNN_EP_DISABLE_VENDOR_BLAS: keep the wrapper symbol (so model code links)
+// but return an error and pull no vendor header. See vendor_blas_stub.cpp.
+#ifdef HIPDNN_EP_DISABLE_VENDOR_BLAS
+
+#include "../hipdnn_ep_runtime.h"
+
+#include <cstdint>
+#include <cstdio>
+
+int wrap_hipblasLtGemm(void *handle, void *stream, int64_t m, int64_t n,
+                       int64_t k, const void *alpha, const void *A,
+                       const void *B, const void *beta, void *C) {
+  (void)handle;
+  (void)stream;
+  (void)m;
+  (void)n;
+  (void)k;
+  (void)alpha;
+  (void)A;
+  (void)B;
+  (void)beta;
+  (void)C;
+  fprintf(stderr, "wrap_hipblasLtGemm: hipBLASLt disabled at build time "
+                  "(HIPDNN_EP_DISABLE_VENDOR_BLAS); GEMM is unavailable\n");
+  return -1;
+}
+
+#else // !HIPDNN_EP_DISABLE_VENDOR_BLAS
+
 #include "../hipdnn_ep_runtime.h"
 #include "error_check_macros.h"
 #include "runtime_types.h"
@@ -67,3 +97,5 @@ cleanup:
 
   return result;
 }
+
+#endif // HIPDNN_EP_DISABLE_VENDOR_BLAS
