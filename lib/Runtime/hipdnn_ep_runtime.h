@@ -1574,6 +1574,17 @@ int hipdnn_ep_run_loop(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
                        int32_t num_loop_carried, int32_t num_captures,
                        void **loop_carried_descs, void **capture_descs);
 
+// ONNX If driver. Dispatches to exactly one of the two branch trampolines
+// based on `cond`. Each trampoline writes branch outputs into the shared
+// `output_descs` buffers (DPS / out-param ABI).
+typedef int (*HipdnnEpIfBranchFn)(RuntimeState *state, void **output_descs,
+                                    void **capture_descs);
+
+int hipdnn_ep_run_if(RuntimeState *state, bool cond,
+                     HipdnnEpIfBranchFn then_fn, HipdnnEpIfBranchFn else_fn,
+                     int32_t num_outputs, int32_t num_captures,
+                     void **output_descs, void **capture_descs);
+
 //===----------------------------------------------------------------------===//
 // Low-Level HIP Wrappers
 //===----------------------------------------------------------------------===//

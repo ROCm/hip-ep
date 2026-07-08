@@ -409,6 +409,64 @@ def Hip_LoopOp : Hip_Op<"loop",
   let hasVerifier = 1;
 }
 
+def Hip_IfOp : Hip_Op<"if",
+    [AttrSizedOperandSegments,
+     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+     DeclareOpInterfaceMethods<DestinationStyleOpInterface,
+                               ["getDpsInitsMutable"]>,
+     DeclareOpInterfaceMethods<InferTypeOpInterface,
+                               ["inferReturnTypes"]>,
+     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Outlined then/else conditional";
+  let description = [{
+    Runtime-driven conditional with outlined then/else body functions.
+    Exactly one branch executes per invocation; its outputs are written
+    into the DPS `o_init` buffers (tensor mode) or returned via out-params
+    (memref mode post-bufferization).
+
+    Operand layout:
+      - `$ctx`: `!hip.context` (always first).
+      - `$cond`: `i1` — branch selector (true -> then, false -> else).
+      - `$o_init`: variadic, length must equal `$num_outputs` — destination
+        buffers for branch outputs; types must match the op's result types.
+      - `$captures`: variadic — outer-graph values used inside either
+        branch that are not subgraph block arguments.
+
+    Result types match `$o_init` types in tensor mode.
+
+    Example:
+    ```mlir
+    %out = hip.if(%ctx, %cond)
+               outs(%out_init : tensor<5xf32>)
+               then @main_if_then_n0 else @main_if_else_n0
+               {num_outputs = 1 : i32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    I1:$cond,
+    Variadic<Hip_TensorOrMemRef>:$o_init,
+    Variadic<AnyType>:$captures,
+    FlatSymbolRefAttr:$then_func,
+    FlatSymbolRefAttr:$else_func,
+    I32Attr:$num_outputs
+  );
+
+  let results = (outs Variadic<AnyRankedTensor>:$outputs);
+
+  let assemblyFormat = [{
+    `(` $ctx `,` $cond `)`
+    ( `outs` `(` $o_init^ `:` type($o_init) `)` )?
+    ( `captures` `(` $captures^ `:` type($captures) `)` )?
+    ( `->` `(` type($outputs)^ `)` )?
+    `then` $then_func `else` $else_func
+    attr-dict
+  }];
+
+  let hasVerifier = 1;
+}
+
 def Hip_FreeOp : Hip_Op<"free",
     [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Free device memory";
