@@ -32,6 +32,8 @@ jobs:
     steps:
       - name: Checkout (for the vendored ROCm runtime zip)
         uses: actions/checkout@v4
+        with:
+          lfs: true
 
       - name: Clean workspace
         shell: cmd
