@@ -1826,6 +1826,28 @@ HIP_KERNEL_API int hip_causal_conv_prefill(
 HIP_KERNEL_API int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
                        void* C, int M, int K, int N);
 
+/* =========================================================================
+ * AMDMLSS MHA fast path (sequence-length-based dispatch)
+ * =========================================================================
+ *
+ * Routes com.microsoft.MultiHeadAttention to a pre-tuned AMDMLSS gfx1151 CK
+ * WMMA attention kernel for small sequences, where it outperforms the EP's
+ * hipBLASLt pipeline (measured crossover ~seq 1024 on gfx1151; see
+ * AMDMLSS-main/docs/gfx1151_benchmark.md). Implemented in
+ * lib/Runtime/Kernels/hip/mlss_mha_shim.cpp; links the AMDMLSS C API and
+ * launches the emitted code object on the caller's stream.
+ *
+ * Q/K/V/out are fp16, contiguous [B, S, N*H] (== BSHD), unidirectional==0.
+ * Returns 0 on success (output written); non-zero => caller must fall back
+ * to the existing path (unsupported shape/config, threshold exceeded, or a
+ * launch error).
+ */
+HIP_KERNEL_API long long hipdnn_ep_amdmlss_max_seq(void);
+HIP_KERNEL_API int hipdnn_ep_amdmlss_mha(
+    void* stream, const void* q, const void* k, const void* v, void* out,
+    long long batch, long long num_heads, long long seq_q, long long seq_kv,
+    long long head_dim, float scale);
+
 #ifdef __cplusplus
 }
 #endif

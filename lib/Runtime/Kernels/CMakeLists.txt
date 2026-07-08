@@ -71,7 +71,33 @@ set(_kernel_sources
     hip/softmax_kernel.hip
     hip/nonzero_kernel.hip
     hip/strided_copy_kernel.hip
+    hip/mlss_mha_shim.cpp   # AMDMLSS MHA fast-path shim (host C++, links amdmlss)
 )
+
+# ----------------------------------------------------------------------------
+# AMDMLSS dependency (for the MHA fast-path shim). onnx-hipdnn-ep and
+# AMDMLSS-main are siblings in the workspace by default; override with
+# -DAMDMLSS_ROOT / -DAMDMLSS_BUILD as needed.
+# ----------------------------------------------------------------------------
+if(NOT AMDMLSS_ROOT)
+    set(AMDMLSS_ROOT "${CMAKE_SOURCE_DIR}/../AMDMLSS-main" CACHE PATH "AMDMLSS source root")
+endif()
+if(NOT AMDMLSS_BUILD)
+    set(AMDMLSS_BUILD "${AMDMLSS_ROOT}/build/ninja-release" CACHE PATH "AMDMLSS build dir")
+endif()
+find_library(AMDMLSS_LIB NAMES amdmlss PATHS "${AMDMLSS_BUILD}/modules/c_api" NO_DEFAULT_PATH)
+find_file(AMDMLSS_DLL NAMES amdmlss.dll PATHS "${AMDMLSS_BUILD}/modules/c_api" NO_DEFAULT_PATH)
+if(NOT AMDMLSS_LIB OR NOT AMDMLSS_DLL)
+    message(FATAL_ERROR
+        "[custom_kernels] AMDMLSS not found for the MHA shim.\n"
+        "  Looked in: ${AMDMLSS_BUILD}/modules/c_api\n"
+        "  Build it (workspace build_mlss.ps1) or pass -DAMDMLSS_BUILD=<dir>.")
+endif()
+set(AMDMLSS_INCLUDE_DIRS
+    "${AMDMLSS_ROOT}/modules/c_api/include"
+    "${AMDMLSS_ROOT}/modules/common/include"
+    "${AMDMLSS_BUILD}/modules/c_api/include")
+message(STATUS "[custom_kernels] AMDMLSS lib: ${AMDMLSS_LIB}")
 
 # One SHARED target per arch. Each builds a fatbin with that single slice;
 # OFFLOAD_ARCHS narrows the global list to one element so the resulting
@@ -81,6 +107,9 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
     hip_add_library(${_target} SHARED ${_kernel_sources}
         INCLUDE_DIRECTORIES
             ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${AMDMLSS_INCLUDE_DIRS}
+        LINK_LIBRARIES
+            ${AMDMLSS_LIB}
         OFFLOAD_ARCHS
             ${_arch}
     )
@@ -93,6 +122,8 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
         LIBRARY DESTINATION lib   # Linux .so co-located with EP .so
         ARCHIVE DESTINATION lib   # Windows import lib; unused by the EP but harmless
     )
+    # Co-locate amdmlss.dll (the shim's runtime dependency) with the EP DLLs.
+    install(FILES "${AMDMLSS_DLL}" DESTINATION bin)
     message(STATUS "[custom_kernels] Adding per-arch SHARED target: ${_target}")
 endforeach()
 

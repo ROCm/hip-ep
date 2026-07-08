@@ -464,6 +464,27 @@ extern "C" int wrap_multi_head_attention(
     fprintf(stderr, "[multi_head_attention] ERROR: failed to get HIP stream\n");
     return -1;
   }
+
+  // ---- AMDMLSS fast path ----
+  // The validation guards above already restrict execution to the fp16
+  // Q_K_V_BSNH subset the AMDMLSS gfx1151 attention kernel supports, and the
+  // query layout [B,Sq,N*H] is exactly the contiguous BSHD it expects (no
+  // transpose). Only non-causal attention is offered to the shim, which applies
+  // its own gates: decode (Sq==1 && Skv>=HIPDNN_MLSS_DECODE_MIN_KV, default on)
+  // -- where the compact per-head kernel beats the EP's decode path -- and an
+  // opt-in prefill gate (HIPDNN_MLSS_MAX_SEQ, default off). A non-zero return
+  // (not applicable / launch error) falls through to the hipBLASLt pipeline.
+  // See AMDMLSS-main/docs/gfx1151_benchmark.md.
+  if (unidirectional == 0) {
+    if (hipdnn_ep_amdmlss_mha(reinterpret_cast<void *>(stream), query, key, value,
+                              output, B, N, Sq, Skv, H, scale) == 0) {
+      RUNTIME_DEBUG_LOG("[multi_head_attention] served by AMDMLSS fast path "
+                        "(Sq=%lld Skv=%lld)\n",
+                        (long long)Sq, (long long)Skv);
+      return 0;
+    }
+  }
+
   hipblasLtHandle_t ltHandle = reinterpret_cast<hipblasLtHandle_t>(
       hipdnn_ep_state_get_hipblas_handle(state));
   if (!ltHandle) {
