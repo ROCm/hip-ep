@@ -195,6 +195,14 @@ miopenSetConvolutionGroupCount(miopenConvolutionDescriptor_t convDesc,
   (void)groupCount;
   return miopenStatusNotImplemented;
 }
+miopenStatus_t
+miopenSetTransposeConvOutputPadding(miopenConvolutionDescriptor_t convDesc,
+                                    int adj_h, int adj_w) {
+  (void)convDesc;
+  (void)adj_h;
+  (void)adj_w;
+  return miopenStatusNotImplemented;
+}
 miopenStatus_t miopenSetNdTensorDescriptorWithLayout(
     miopenTensorDescriptor_t tensorDesc, miopenDataType_t dataType,
     miopenTensorLayout_t tensorLayout, const int *lens, int num_lens) {
