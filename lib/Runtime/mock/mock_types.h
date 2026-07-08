@@ -5,6 +5,11 @@
 #ifndef HIPDNN_EP_RUNTIME_MOCK_TYPES_H
 #define HIPDNN_EP_RUNTIME_MOCK_TYPES_H
 
+// size_t is used in the hip* prototypes below. Most STL-carrying toolchains pull
+// it in transitively, but a freestanding bitcode compile (e.g. clang emitting
+// LLVM IR without the usual libstdc++ prelude) does not, so include it directly.
+#include <cstddef>
+
 // Mock type definitions for testing without GPU
 typedef void *hipStream_t;
 typedef void *hipEvent_t;
