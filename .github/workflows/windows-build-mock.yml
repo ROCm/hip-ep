@@ -220,8 +220,15 @@ jobs:
       # -----------------------------------------------------------------------
       # Build (mock) via the cross-platform build.py. --mock sets
       # BUILD_MOCK_RUNTIME=ON (no ROCm/TheRock); ORT + LLVM come from the cached
-      # prefixes and cmake/deps.cmake source-builds the rest. The LIT tests run
-      # inside build.py after install.
+      # prefixes and cmake/deps.cmake source-builds the rest. build.py runs the
+      # GPU-free test suites (LIT + the plugin-registrar and output-allocator
+      # unit tests) after install.
+      #
+      # This is a validation-only build (no artifacts are shipped), so it is
+      # where we select the sample compiler plugin: with it linked, the plugin
+      # registrar unit test runs its HIP_EP_EXPECT_SAMPLE=1 assertions, which
+      # exercise the addDialectRegistration -> loadAllDialects path and the
+      # convert-hip-to-llvm hasPromisedInterface guard.
       # -----------------------------------------------------------------------
       - name: Build onnx-hipdnn-ep (mock)
         shell: bash
@@ -230,4 +237,5 @@ jobs:
             --mock \
             --config Release \
             --cmake_generator Ninja \
-            --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install"
+            --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install" \
+            --cmake_extra_defines HIPDNN_EP_COMPILER_PLUGINS=sample
