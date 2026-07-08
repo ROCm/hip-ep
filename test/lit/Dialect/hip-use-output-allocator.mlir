@@ -238,6 +238,28 @@ func.func @chain_output(%ctx: !hip.context) -> memref<?xf32> {
   return %cast : memref<?xf32>
 }
 
+// --- A longer 3-op view chain (collapse_shape -> expand_shape -> cast), mixing
+//     all three view-op kinds before the return: the root alloc is still
+//     converted exactly once, and the whole chain is left in place. Proves the
+//     alias analysis follows arbitrary-length chains, not just one or two ops. ---
+// CHECK-LABEL: func.func @long_chain_output
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context)
+// CHECK-NOT:     memref.alloc
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]]) {out_idx = 0 : i64} : memref<2x4x8xf32>
+// CHECK:         %[[COL:.*]] = memref.collapse_shape %[[OUT]]
+// CHECK:         %[[EXP:.*]] = memref.expand_shape %[[COL]]
+// CHECK:         %[[CST:.*]] = memref.cast %[[EXP]]
+// CHECK:         return %[[CST]]
+func.func @long_chain_output(%ctx: !hip.context) -> memref<?x8xf32> {
+  %x = memref.alloc() : memref<2x4x8xf32>
+  %col = memref.collapse_shape %x [[0, 1, 2]]
+       : memref<2x4x8xf32> into memref<64xf32>
+  %exp = memref.expand_shape %col [[0, 1]] output_shape [8, 8]
+       : memref<64xf32> into memref<8x8xf32>
+  %cast = memref.cast %exp : memref<8x8xf32> to memref<?x8xf32>
+  return %cast : memref<?x8xf32>
+}
+
 // --- Output returned through memref.subview: the parent alloc becomes
 //     hip.alloc_output; the subview is left in place feeding the return. ---
 // CHECK-LABEL: func.func @subview_output
