@@ -54,8 +54,8 @@ endif()
 target_include_directories(hip-test
   BEFORE PRIVATE
   ${CMAKE_SOURCE_DIR}/include   # For hip/Support/DiskFileSystem.h (must precede local/include)
-  ${CMAKE_SOURCE_DIR}/3rd-party/morphizen/morphizen-foundation/include  # For morphizen-foundation/file_io.hpp
-  ${CMAKE_SOURCE_DIR}/3rd-party/morphizen/morphizen-core/include         # For morphizen/plugin.hpp (native loader)
+  ${CMAKE_SOURCE_DIR}/morphizen/morphizen-foundation/include  # For morphizen-foundation/file_io.hpp
+  ${CMAKE_SOURCE_DIR}/morphizen/morphizen-core/include         # For morphizen/plugin.hpp (native loader)
   ${CMAKE_SOURCE_DIR}/backend-mlir-compiler/custom-op-mlir/src           # For LlvmIrJit.h
 )
 

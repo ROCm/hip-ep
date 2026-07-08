@@ -1,0 +1,32 @@
+{
+    "passes": [
+        {
+            "name": "init",
+            "plugin": "morphizen-pass_init"
+        },
+        {
+            "name": "fuse-rele-dq",
+            "plugin": "morphizen-level1-pass-relu-dq"
+        }
+    ],
+    "target": "dummy-target",
+    "targets": [
+        {
+            "name": "relu-dq-target",
+            "pass": [
+                "init",
+                "fuse-rele-dq"
+            ]
+        },
+        {
+            "name": "dummy-target",
+            "pass": [
+                "init",
+                "fuse-rele-dq"
+            ],
+            "provider_options": {
+                "dummy_provier_option_for_test": "bingo"
+            }
+        }
+    ]
+}

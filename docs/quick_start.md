@@ -20,8 +20,8 @@ ONNX Runtime is built explicitly only if you need to modify it or build OGA
 | **MSVC 2022** | C++ compiler (Visual Studio Build Tools or full IDE) |
 | **Python 3** | LLVM/MLIR tools runtime |
 | **sccache** | Compiler cache (significantly speeds up rebuilds) |
-| **`gh` CLI** | Authenticating access to the private MorphiZen submodule (`gh auth login`) |
-| **Git** | Clone + submodules; from-source deps are fetched via git |
+| **`gh` CLI** | Authenticating access to the private ROCm repositories (`gh auth login`) |
+| **Git** | Clone the repo; from-source deps are fetched via git |
 
 **<span style="color:red">IMPORTANT</span> -- MSVC Environment Setup:**
 
@@ -51,8 +51,7 @@ winget install Mozilla.sccache
 winget install GitHub.cli
 winget install Git.Git
 
-# 3. Authenticate gh / set up an SSH key with access to the private
-#    ROCm/MorphiZen submodule (cloned by `git submodule update`).
+# 3. Authenticate gh for access to the private ROCm repositories.
 gh auth login
 ```
 
@@ -99,7 +98,6 @@ use `..` to reference sibling directories:
 cd <workspace>
 git clone https://github.com/ROCm/onnx-hipdnn-ep.git
 cd onnx-hipdnn-ep
-git submodule update --init --recursive
 ```
 
 All subsequent commands run from the `onnx-hipdnn-ep/` project root unless
@@ -155,7 +153,7 @@ ls ../build/onnxruntime/Release/dist/onnxruntime_directml-*.whl
 ### 2. Build onnx-hipdnn-ep
 
 `build.py` is the cross-platform build driver (the same one used on Linux
-and in CI): it ensures submodules, sets up the build, resolves every dependency
+and in CI): it sets up the build, resolves every dependency
 via `cmake/deps.cmake` (TheRock SDK + GPU arch auto-detected for real builds),
 and runs the cmake configure/build/install plus the LIT tests. A fresh tree needs
 no manual dependency setup; the cold from-source LLVM build is the long pole

@@ -100,6 +100,9 @@ def _check_python_version():
 
 
 def update_submodules():
+    # MorphiZen is vendored in-tree as a git subtree, so there are normally no
+    # submodules to initialize; this stays a generic no-op guard for any future
+    # submodule and returns early when none are uninitialized.
     log.info("Checking git submodules ...")
     r = subprocess.run(
         ["git", "submodule", "status", "--recursive"],
