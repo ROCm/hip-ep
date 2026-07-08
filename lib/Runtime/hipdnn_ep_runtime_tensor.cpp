@@ -423,6 +423,11 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
                        g_perf.h2d_bytes / 1048576.0, h2d_ms, compute_ms,
                        g_perf.d2h_count, g_perf.d2h_bytes / 1048576.0, d2h_ms,
                        total_ms);
+      // Chrome trace: add the just-closed inference's pipeline phase spans
+      // (H2D / Compute / D2H) on their own tracks. No-op unless tracing is on.
+      op_profile_add_io_spans(static_cast<OpProfileState *>(state->op_profile),
+                              h2d_ms, (int64_t)g_perf.h2d_bytes, compute_ms,
+                              d2h_ms, (int64_t)g_perf.d2h_bytes);
     }
     g_perf.h2d_bytes = 0;
     g_perf.h2d_count = 0;
