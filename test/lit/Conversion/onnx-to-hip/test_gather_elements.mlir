@@ -29,7 +29,7 @@ module {
   }
 
   // CHECK-LABEL: func.func @gather_elements_axis0
-  // CHECK: hip.gather_elements(%{{.*}}) ins({{.*}} : tensor<3x2xf32>, tensor<3x2xi64>) outs({{.*}} : tensor<3x2xf32>) {axis = 0 : i64}
+  // CHECK: hip.gather_elements(%{{.*}}) ins({{.*}} : tensor<3x2xf32>, tensor<3x2xi64>) outs({{.*}} : tensor<3x2xf32>) : tensor<3x2xf32>
 
   func.func @gather_elements_dynamic(
       %data: tensor<?x?xf16>, %indices: tensor<?x?xi32>) -> tensor<?x?xf16> {
@@ -45,5 +45,5 @@ module {
   // CHECK: %[[DIM0:.*]] = tensor.dim %[[IDX3]], %[[C0]]
   // CHECK: %[[DIM1:.*]] = tensor.dim %[[IDX3]], %[[C1]]
   // CHECK: %[[INIT:.*]] = tensor.empty(%[[DIM0]], %[[DIM1]]) : tensor<?x?xf16>
-  // CHECK: hip.gather_elements(%[[CTX3]]) ins(%[[DATA3]] : tensor<?x?xf16>, %[[IDX3]] : tensor<?x?xi32>) outs(%[[INIT]] : tensor<?x?xf16>) {axis = -1 : i64}
+  // CHECK: hip.gather_elements(%[[CTX3]]) ins(%[[DATA3]], %[[IDX3]] : tensor<?x?xf16>, tensor<?x?xi32>) outs(%[[INIT]] : tensor<?x?xf16>) {axis = -1 : i64} : tensor<?x?xf16>
 }

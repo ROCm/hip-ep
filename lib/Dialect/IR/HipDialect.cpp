@@ -262,13 +262,13 @@ LogicalResult IfOp::verify() {
 }
 
 LogicalResult IfOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
-  auto thenFn =
-      symbolTable.lookupNearestSymbolFrom<func::FuncOp>(*this, getThenFuncAttr());
+  auto thenFn = symbolTable.lookupNearestSymbolFrom<func::FuncOp>(
+      *this, getThenFuncAttr());
   if (!thenFn)
     return emitOpError("then_func '")
            << getThenFunc() << "' does not reference a func.func";
-  auto elseFn =
-      symbolTable.lookupNearestSymbolFrom<func::FuncOp>(*this, getElseFuncAttr());
+  auto elseFn = symbolTable.lookupNearestSymbolFrom<func::FuncOp>(
+      *this, getElseFuncAttr());
   if (!elseFn)
     return emitOpError("else_func '")
            << getElseFunc() << "' does not reference a func.func";

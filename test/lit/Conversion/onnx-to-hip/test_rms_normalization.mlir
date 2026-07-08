@@ -55,6 +55,6 @@ module {
   // CHECK: %{{.*}} = tensor.dim %[[IN2]], %[[C0]] : tensor<?x?xf16>
   // CHECK: %{{.*}} = tensor.dim %[[IN2]], %[[C1]] : tensor<?x?xf16>
   // CHECK: tensor.empty({{.*}}, {{.*}}) : tensor<?x?xf16>
-  // CHECK: hip.rms_norm(%[[CTX2]]) ins(%[[IN2]], %[[SC2]] : tensor<?x?xf16>, tensor<?xf16>) outs({{.*}} : tensor<?x?xf16>) {axis = -1 : i64, epsilon = 1.000000e-05 : f32, stash_type = 1 : i64}
+  // CHECK: hip.rms_norm(%[[CTX2]]) ins(%[[IN2]], %[[SC2]] : tensor<?x?xf16>, tensor<?xf16>) outs({{.*}} : tensor<?x?xf16>) {axis = -1 : i64, epsilon = 9.99999974E-6 : f32, stash_type = 1 : i64} : tensor<?x?xf16>
   // CHECK-NOT: onnx.RMSNormalization
 }
