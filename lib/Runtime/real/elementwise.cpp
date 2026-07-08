@@ -2,76 +2,6 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-
-// HIPDNN_EP_DISABLE_VENDOR_BLAS: keep the wrapper symbols (so model code links)
-// but return an error and pull no vendor header. See vendor_blas_stub.cpp.
-#ifdef HIPDNN_EP_DISABLE_VENDOR_BLAS
-
-#include "../hipdnn_ep_runtime.h"
-
-#include <cstdint>
-#include <cstdio>
-
-int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
-                        void *rhs, void *output, int64_t lhs_n, int64_t lhs_c,
-                        int64_t lhs_h, int64_t lhs_w, int64_t rhs_n,
-                        int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
-                        int64_t out_n, int64_t out_c, int64_t out_h,
-                        int64_t out_w, int64_t data_type, int64_t tensor_op) {
-  (void)state;
-  (void)op_state_slot;
-  (void)lhs;
-  (void)rhs;
-  (void)output;
-  (void)lhs_n;
-  (void)lhs_c;
-  (void)lhs_h;
-  (void)lhs_w;
-  (void)rhs_n;
-  (void)rhs_c;
-  (void)rhs_h;
-  (void)rhs_w;
-  (void)out_n;
-  (void)out_c;
-  (void)out_h;
-  (void)out_w;
-  (void)data_type;
-  (void)tensor_op;
-  fprintf(stderr, "wrap_miopenOpTensor: MIOpen disabled at build time "
-                  "(HIPDNN_EP_DISABLE_VENDOR_BLAS); op is unavailable\n");
-  return -1;
-}
-
-int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
-                         void *output, int64_t lhs_n, int64_t lhs_c,
-                         int64_t lhs_h, int64_t lhs_w, int64_t rhs_n,
-                         int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
-                         int64_t out_n, int64_t out_c, int64_t out_h,
-                         int64_t out_w, int64_t data_type) {
-  (void)state;
-  (void)lhs;
-  (void)rhs;
-  (void)output;
-  (void)lhs_n;
-  (void)lhs_c;
-  (void)lhs_h;
-  (void)lhs_w;
-  (void)rhs_n;
-  (void)rhs_c;
-  (void)rhs_h;
-  (void)rhs_w;
-  (void)out_n;
-  (void)out_c;
-  (void)out_h;
-  (void)out_w;
-  (void)data_type;
-  fprintf(stderr, "wrap_elementwise_sub: MIOpen disabled at build time "
-                  "(HIPDNN_EP_DISABLE_VENDOR_BLAS); op is unavailable\n");
-  return -1;
-}
-
-#else // !HIPDNN_EP_DISABLE_VENDOR_BLAS
-
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -857,5 +787,3 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
   return hip_elementwise_sub(stream, lhs_use, rhs_use, output, out_vol,
                              hip_dtype);
 }
-
-#endif // HIPDNN_EP_DISABLE_VENDOR_BLAS
