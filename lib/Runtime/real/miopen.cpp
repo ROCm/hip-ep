@@ -2,95 +2,6 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-
-// HIPDNN_EP_DISABLE_VENDOR_BLAS: keep the wrapper symbols (so model code links)
-// but return an error and pull no vendor header. See vendor_blas_stub.cpp.
-#ifdef HIPDNN_EP_DISABLE_VENDOR_BLAS
-
-#include "../hipdnn_ep_runtime.h"
-
-#include <cstdint>
-#include <cstdio>
-
-int wrap_miopenConvolutionForward(
-    RuntimeState *state, const void *input, int64_t input_n, int64_t input_c,
-    int64_t input_h, int64_t input_w, const void *weights, int64_t weights_k,
-    const void *bias, void *output, int64_t output_h, int64_t output_w,
-    int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
-    int64_t pad_top, int64_t pad_left, int64_t pad_bottom, int64_t pad_right,
-    int64_t dilation_h, int64_t dilation_w, int64_t group, int64_t data_type) {
-  (void)state;
-  (void)input;
-  (void)input_n;
-  (void)input_c;
-  (void)input_h;
-  (void)input_w;
-  (void)weights;
-  (void)weights_k;
-  (void)bias;
-  (void)output;
-  (void)output_h;
-  (void)output_w;
-  (void)kernel_h;
-  (void)kernel_w;
-  (void)stride_h;
-  (void)stride_w;
-  (void)pad_top;
-  (void)pad_left;
-  (void)pad_bottom;
-  (void)pad_right;
-  (void)dilation_h;
-  (void)dilation_w;
-  (void)group;
-  (void)data_type;
-  fprintf(stderr,
-          "wrap_miopenConvolutionForward: MIOpen disabled at build time "
-          "(HIPDNN_EP_DISABLE_VENDOR_BLAS); convolution is unavailable\n");
-  return -1;
-}
-
-int wrap_miopenConvolutionTranspose(
-    RuntimeState *state, const void *input, int64_t input_n, int64_t input_c,
-    int64_t input_h, int64_t input_w, const void *weights, const void *bias,
-    void *output, int64_t output_c, int64_t output_h, int64_t output_w,
-    int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
-    int64_t pad_top, int64_t pad_left, int64_t pad_bottom, int64_t pad_right,
-    int64_t dilation_h, int64_t dilation_w, int64_t output_padding_h,
-    int64_t output_padding_w, int64_t group, int64_t data_type) {
-  (void)state;
-  (void)input;
-  (void)input_n;
-  (void)input_c;
-  (void)input_h;
-  (void)input_w;
-  (void)weights;
-  (void)bias;
-  (void)output;
-  (void)output_c;
-  (void)output_h;
-  (void)output_w;
-  (void)kernel_h;
-  (void)kernel_w;
-  (void)stride_h;
-  (void)stride_w;
-  (void)pad_top;
-  (void)pad_left;
-  (void)pad_bottom;
-  (void)pad_right;
-  (void)dilation_h;
-  (void)dilation_w;
-  (void)output_padding_h;
-  (void)output_padding_w;
-  (void)group;
-  (void)data_type;
-  fprintf(stderr,
-          "wrap_miopenConvolutionTranspose: MIOpen disabled at build time "
-          "(HIPDNN_EP_DISABLE_VENDOR_BLAS); convolution is unavailable\n");
-  return -1;
-}
-
-#else // !HIPDNN_EP_DISABLE_VENDOR_BLAS
-
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
@@ -611,5 +522,3 @@ cleanup:
 
   return result;
 }
-
-#endif // HIPDNN_EP_DISABLE_VENDOR_BLAS
