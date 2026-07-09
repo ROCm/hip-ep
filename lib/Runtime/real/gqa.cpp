@@ -68,22 +68,60 @@
 // Dispatch helpers (shared by the fused and decomposed paths)
 //===----------------------------------------------------------------------===//
 
-// Per-Compute() seqlens_k D2H cache. Default on; explicit "0" disables.
+// Env-var gate to cache seqlens_k_val across the GQA layers in a single
+// forward pass. Default ON. Caching skips the per-layer
+// hipMemcpyAsync(D2H) + hipStreamSynchronize on both paths after the first
+// GQA call -- a 32-layer Llama decode then issues one D2H instead of 32,
+// eliminating ~30-45 ms/token of pipeline stalls on Strix Halo. Set
+// HIPDNN_EP_GQA_CACHE_SEQLENS=0 to disable (escape hatch for running against
+// an older per-model bitcode without the begin_compute export, or for A/B
+// measurement).
+//
+// Correctness depends on the EP-side MlirCustomOp::Compute() invoking
+// hipdnn_ep_runtime_begin_compute(state) at the start of each forward pass to
+// invalidate the cache. Older per-model bitcode without that symbol exported
+// is detected at session creation and produces a LOG(WARNING) directing the
+// user to set HIPDNN_EP_GQA_CACHE_SEQLENS=0 (otherwise the cache would survive
+// across forward passes and return stale total_seq values).
 static bool gqa_cache_seqlens_enabled() {
   static const bool enabled = [] {
     const char *v = std::getenv("HIPDNN_EP_GQA_CACHE_SEQLENS");
+    // Default on; explicit "0" disables.
     return !v || std::strcmp(v, "0") != 0;
   }();
   return enabled;
 }
 
-// Sentinel: pre-dispatch seqlens_k read not applicable / failed.
+// Sentinel returned by read_seqlens_k_for_dispatch when the pre-dispatch read
+// is not applicable (multi-batch or missing seqlens_k_ptr) or failed (D2H copy
+// / stream sync error). Outside the valid range of real seqlens_k values (-1 is
+// ORT's prefill sentinel; 0..max_seq are real). Callers must treat this as "no
+// pre-read available" and fall back to the legacy per-call D2H readback site
+// they already implement.
 static constexpr int32_t kSeqlensKNotRead = -2;
 
-// Read seqlens_k[0] once before dispatch (B==1 only), reusing the per-Compute()
-// cache when enabled so subsequent GQA layers in the same forward pass cost
-// zero D2H. Returns the raw device value (-1 is ORT's prefill sentinel) or
-// kSeqlensKNotRead when not applicable.
+// Read seqlens_k_val from device (or the per-Compute() cache when
+// HIPDNN_EP_GQA_CACHE_SEQLENS=1) once per call before the fused/decomposed
+// dispatch decision. Two purposes:
+//   1. Give the smart-dispatch heuristic access to total_seq for the decode
+//      case (sq == 1) so it can compare against gqa_fused_decode_max_t().
+//   2. Populate the per-Compute() cache for B == 1 so subsequent GQA layers
+//      within the same forward pass reuse the value with zero D2H.
+//
+// Applies to B == 1 regardless of sq (both prefill and decode share the same
+// seqlens_k pointer and benefit from caching). On B != 1 we return
+// kSeqlensKNotRead because per-batch validation in the multi-batch path
+// requires reading every entry; the legacy readback site there handles it.
+//
+// Behaviour:
+//   - cache enabled and hit:  zero D2H, return cached value.
+//   - cache enabled and miss: one D2H + sync, populate cache, return.
+//   - cache disabled:         one D2H + sync, return (no cache write).
+//   - B != 1, !seqlens_k_ptr, or D2H/sync failure: return kSeqlensKNotRead.
+//
+// The returned int32_t is the raw device value: -1 is ORT's prefill sentinel
+// (callers map it to total_seq=sq, past_len=0); 0..max_seq is the live
+// (total_seq - 1).
 static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
                                            const void *seqlens_k_ptr, int64_t B,
                                            RuntimeState *state) {
@@ -148,9 +186,17 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
                            bool no_causal = false, int skv = -1) {
   // no_causal (Whisper encoder / cross-attn): bidirectional, no past KV.
   // The KV to attend over is the FULL `new_key`/`new_value` (Skv tokens), not
-  // `sq` newly-appended tokens.
+  // `sq` newly-appended tokens. Two sub-cases distinguished by sq vs Skv:
+  //   * Cross-attn (sq != Skv): `key`/`value` arrive as rank-4 BNSD
+  //     [B, G, Skv, d] -- already in the present_key layout. A straight
+  //     device-to-device copy of all Skv tokens populates present_*.
+  //   * Encoder self-attn (sq == Skv): `key`/`value` are BSHD [B, Skv, G, d];
+  //     fall through to the append kernel below with past_len forced to 0 and
+  //     seqlens_k=nullptr so it transposes all Skv tokens to offset 0 WITHOUT
+  //     the +1 PAST-token convention.
   if (no_causal && skv >= 0 && skv != sq) {
     // Cross-attn: key/value arrive rank-4 BNSD [B,G,skv,d]; straight D2D copy.
+    // elem_sz is 2 (fp16) or 4 (fp32); the decomposed pipeline supports both.
     size_t bytes = static_cast<size_t>(B) * G * static_cast<size_t>(skv) * d *
                    static_cast<size_t>(elem_sz);
     if (hipMemcpyAsync(present_key, new_key, bytes, hipMemcpyDeviceToDevice,
@@ -506,8 +552,25 @@ static int gqa_forward_fused(
 //===----------------------------------------------------------------------===//
 
 // Env-var gate for the group-batched "no-expand" hipBLASLt GQA pipeline.
-// Default ON: the Score/Value GEMMs read K/V directly from the BNSD present
-// cache via strided-batched mode, eliminating the expand_kv kernels/scratch.
+// When HIPDNN_EP_GQA_NO_EXPAND=1 (default) the Score and Value GEMMs read
+// K and V directly from the BNSD [B, G, skv, d] present cache using
+// strided-batched mode with batch = B*G and per-operand batch strides:
+//   A (K or V):  stride = present_seq * d       (one BNSD group matrix)
+//   B (Q or S):  stride = HPG * sq * d          (score)
+//                         HPG * sq * total_seq  (value)
+//   C (S or O):  stride = HPG * sq * total_seq  (score)
+//                         HPG * sq * d          (value)
+// This eliminates the explicit expand_kv_k / expand_kv_v kernels and the
+// B*H*total_seq*d fp16 scratch buffers they wrote into.
+//
+// At sq == 1 (decode) BSHD [B, 1, H, d] and BNSD [B, H, 1, d] share the
+// same memory, so Q and O are also read / written in place (no
+// Q-transpose / O-transpose kernels). At sq > 1 (prefill) the Q-transpose
+// and O-transpose kernels still run because the two layouts diverge.
+//
+// Output is S / O bit-identical (modulo fp16 rounding in a different GEMM
+// tile schedule) to the expand + transpose path. Set
+// HIPDNN_EP_GQA_NO_EXPAND=0 to fall back fully for A/B testing.
 static bool gqa_no_expand_enabled() {
   static const bool enabled = [] {
     const char *v = std::getenv("HIPDNN_EP_GQA_NO_EXPAND");
@@ -517,7 +580,16 @@ static bool gqa_no_expand_enabled() {
 }
 
 // Env-var gate for enabling the no-expand path on prefill (sq > 1). Default
-// off: today only decode (sq == 1) takes the no-expand fast path.
+// off: today only decode (sq == 1) takes the no-expand fast path, matching the
+// verified pre-step-2 behaviour. Set HIPDNN_EP_GQA_NO_EXPAND_PREFILL=1 to opt
+// prefill into the same group-batched pipeline -- same strides as decode, but
+// with Q/O transpose kernels kept in place because BSHD and BNSD diverge at
+// sq > 1.
+//
+// Keeping this behind a separate flag lets us A/B just the new prefill
+// behaviour without touching decode. Once verified across model families
+// (Mistral / Llama / GPT-OSS / ...), this can be folded into the main
+// HIPDNN_EP_GQA_NO_EXPAND flag.
 static bool gqa_no_expand_prefill_enabled() {
   static const bool enabled = [] {
     const char *v = std::getenv("HIPDNN_EP_GQA_NO_EXPAND_PREFILL");
@@ -527,7 +599,11 @@ static bool gqa_no_expand_prefill_enabled() {
 }
 
 // Env-var gate to force decode through the decomposed hipBLASLt pipeline
-// instead of the fused custom kernel hip_gqa_fused_decode. Default off.
+// instead of the fused custom kernel hip_gqa_fused_decode. Default off
+// (fused path is preferred). Set HIPDNN_EP_GQA_DISABLE_FUSED_DECODE=1 to
+// A/B against decomposed at sq==1 -- useful for measuring whether the custom
+// fused kernel is actually faster than hipBLASLt's auto-tuned GEMMs at decode
+// shapes.
 static bool gqa_fused_decode_disabled() {
   static const bool disabled = [] {
     const char *v = std::getenv("HIPDNN_EP_GQA_DISABLE_FUSED_DECODE");
@@ -536,8 +612,12 @@ static bool gqa_fused_decode_disabled() {
   return disabled;
 }
 
-// Env-var gate for the FA-2 split-K flash_decode path. Default on; "0" falls
-// back to hip_gqa_fused_decode.
+// Env-var gate for the FA-2 split-K flash_decode path (legacy decode kernel).
+// HIPDNN_EP_GQA_FLASH_DECODE=0 disables it (falls back to
+// hip_gqa_fused_decode). flash_decode wins at high KV depth where the existing
+// one-block-per-head kernel is bandwidth-bound; below the threshold
+// (gqa_flash_decode_min_skv) its 2-kernel overhead may not pay back, so we keep
+// the existing fused_decode for short sequences.
 static bool gqa_flash_decode_enabled() {
   static const bool enabled = [] {
     const char *v = std::getenv("HIPDNN_EP_GQA_FLASH_DECODE");
@@ -546,9 +626,19 @@ static bool gqa_flash_decode_enabled() {
   return enabled;
 }
 
-// Smart-dispatch threshold for legacy fused decode (sq == 1). When total_seq
-// exceeds this and flash_decode is not eligible, route through the decomposed
-// hipBLASLt pipeline (the serial-over-time fused kernel loses on long seqs).
+// Smart-dispatch threshold for the legacy GQA decode (sq == 1). When total_seq
+// exceeds this value, dispatch routes through the decomposed hipBLASLt pipeline
+// instead of the fused custom kernel hip_gqa_fused_decode. The fused kernel
+// uses a serial-over-time scheme with cross-wave reductions on the critical
+// path of every iteration, so it loses to the GEMM-based decomposed path on
+// long sequences (measured ~12x slower at total_seq~=2048 on Strix Halo). When
+// flash_decode is eligible we keep the fused branch active even at long
+// total_seq -- flash_decode is exactly what this threshold was working around.
+//
+// Default 256 is a starter value pending a full threshold sweep. Set
+// HIPDNN_EP_GQA_FUSED_DECODE_MAX_T=N to override (or a very large value like
+// 999999 to effectively disable smart-dispatch and preserve the always-fused-
+// when-eligible behaviour for A/B testing).
 static int gqa_fused_decode_max_t() {
   static const int max_t = [] {
     const char *v = std::getenv("HIPDNN_EP_GQA_FUSED_DECODE_MAX_T");
@@ -563,7 +653,11 @@ static int gqa_fused_decode_max_t() {
   return max_t;
 }
 
-// Depth threshold for flash_decode eligibility (default skv >= 256).
+// Depth threshold for legacy flash_decode eligibility. flash_decode wins at
+// high KV depth; below this (default skv >= 256) the existing one-block-per-
+// head fused_decode amortizes its single-kernel cost better than flash_decode's
+// (split + reduce) launches. Set HIPDNN_EP_GQA_FLASH_DECODE_MIN_SKV=N to
+// override.
 static int gqa_flash_decode_min_skv() {
   static const int threshold = [] {
     const char *v = std::getenv("HIPDNN_EP_GQA_FLASH_DECODE_MIN_SKV");
@@ -578,9 +672,13 @@ static int gqa_flash_decode_min_skv() {
 // FA-2 split-K geometry (must match the legacy hip_gqa_flash_decode launcher).
 static constexpr int kFlashDecodeKSplits = 8;
 
-// Geometry gate for the legacy flash_decode kernel: HPG=4 (d in {64,128}) or
-// HPG=8 (d == 64). Distinct from flash_decode_geometry_ok above, which gates
-// the optimized _v2 decode kernel (HpG in {1,2,3,4,8,16}).
+// Geometry gate for the legacy flash_decode kernel. The launcher has template
+// instantiations for:
+//   - HPG=4, d in {64, 128}  (Llama-3.x family)
+//   - HPG=8, d == 64         (gpt-oss-20b)
+// Any other (HPG, d) combination must fall back to fused_decode / decomposed.
+// Distinct from flash_decode_geometry_ok above, which gates the optimized _v2
+// decode kernel (HpG in {1,2,3,4,5,8,16}, d in {64,128,256}).
 static inline bool legacy_flash_decode_geometry_ok(int64_t H, int64_t G,
                                                    int64_t d) {
   if (G <= 0)
@@ -613,13 +711,25 @@ static hipblasStatus_t setLayoutBatch(hipblasLtMatrixLayout_t layout,
 }
 
 //===----------------------------------------------------------------------===//
-// GQA GEMM descriptor cache (per-instance, keyed by GEMM shape)
+// GQA GEMM descriptor cache
 //===----------------------------------------------------------------------===//
+//
+// hipBLASLt descriptors and heuristic-selected algorithms are created once per
+// unique (m, n, k, batch, transA, ...) shape and reused for the process
+// lifetime. This avoids repeated descriptor creation and heuristic queries on
+// every GQA inference call in the decomposed (prefill) path.
 struct GqaGemmKey {
   int64_t m, n, k, batch;
+  // true = Score GEMM (K^T * Q); false = Value GEMM (V * S)
   bool transA;
+  // true = HIP_R_32F C/D layouts (Score GEMM always accumulates fp32)
   bool outputFp32;
+  // true = fp32 A/B inputs (Whisper no_causal); false = fp16
   bool inputFp32;
+  // Explicit per-operand batch strides (elements); 0 = default dense stride
+  // (m*k for A, n*k for B, n*m for C/D). Non-zero enables the no-expand layout
+  // where K/V are shared across HPG heads (stride = present_seq*d over G
+  // groups) while Q/O advance by HPG entries per group.
   int64_t strideA;
   int64_t strideB;
   int64_t strideC;
@@ -648,24 +758,37 @@ struct GqaGemmKeyHash {
   }
 };
 
+/// Cached hipBLASLt state for a single GEMM shape.
+/// Ownership: descriptors are created in queryOrCreateGemmState() and live for
+/// the process lifetime (destroyed together when the owning op-state slot is
+/// torn down, in GqaGemmCache's destructor).
 struct GqaGemmCacheEntry {
-  hipblasLtMatmulDesc_t desc;
-  hipblasLtMatrixLayout_t layA, layB, layC, layD;
-  hipblasLtMatmulAlgo_t algo;
-  size_t workspace_size;
+  hipblasLtMatmulDesc_t desc;                     // matmul operation descriptor
+  hipblasLtMatrixLayout_t layA, layB, layC, layD; // matrix layouts
+  hipblasLtMatmulAlgo_t algo; // heuristic-selected algorithm
+  size_t workspace_size;      // workspace bytes required by algo
 };
 
 struct GqaGemmCache {
   std::unordered_map<GqaGemmKey, GqaGemmCacheEntry, GqaGemmKeyHash> entries;
+  // Destroys every cached hipBLASLt descriptor/layout entry. Defined
+  // out-of-line below. Runs when the owning op-state slot is torn down
+  // (GqaState's deleter).
   ~GqaGemmCache();
 };
 
-// Per-instance GQA op-state: owns this instance's per-GEMM-shape hipBLASLt
-// descriptor/algorithm cache (see op-state-slots-design.md).
+// Per-instance GQA op-state (see op-state-slots-design.md): owns this
+// instance's per-GEMM-shape hipBLASLt descriptor/algorithm cache. Replaces the
+// former shared RuntimeState::gqa_gemm_cache, so concurrent sessions (and
+// distinct GQA layers) no longer share one descriptor map.
 struct GqaState : OpStateT<GqaState> {
   GqaGemmCache cache;
 };
 
+// Resolve this GQA instance's descriptor cache from its op-state slot. Returns
+// nullptr when the slot is unconstructed (init failure) -- callers propagate
+// the error rather than lazily allocating, since the slot is built at session
+// init.
 static GqaGemmCache *get_gemm_cache(RuntimeState *state, int op_state_slot) {
   GqaState *gs = GqaState::get_op_state(state, op_state_slot);
   return gs ? &gs->cache : nullptr;
@@ -717,6 +840,8 @@ static const GqaGemmCacheEntry *queryOrCreateGemmState(RuntimeState *state,
     int64_t strideB = key.strideB != 0 ? key.strideB : n * k;
     int64_t strideC = key.strideC != 0 ? key.strideC : n * m;
 
+    // Input operand element type: HIP_R_16F (fp16 GQA) or HIP_R_32F (fp32
+    // GQA, e.g. Whisper no_causal). Compute is HIPBLAS_COMPUTE_32F either way.
     hipDataType inType = key.inputFp32 ? HIP_R_32F : HIP_R_16F;
     int64_t a_rows = key.transA ? k : m;
     int64_t a_cols = key.transA ? m : k;
@@ -805,18 +930,45 @@ static int gqa_forward_hipblaslt(
   bool gemm_fp32 = (elem_sz == 4);
   bool need_rope = do_rotary && cos_cache && sin_cache;
 
+  // Pre-dispatch read of seqlens_k (or per-Compute() cache lookup for B==1
+  // when HIPDNN_EP_GQA_CACHE_SEQLENS=1). Applies to both prefill (sq>1) and
+  // decode (sq==1) for B==1 -- both share the same seqlens_k pointer and
+  // benefit from caching. The result is reused by the fused-path
+  // need_host_past_len block (eliminating its inline D2H) and the
+  // decomposed-path readback site (consumed unconditionally instead of issuing
+  // its own D2H). On B>1 this returns kSeqlensKNotRead and both downstream
+  // paths fall back to their legacy per-call reads. Stored in seqlens_k_pre;
+  // total_seq_pre is the derived total_seq (-1 means unknown / not applicable).
   int32_t seqlens_k_pre =
       read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state);
   int64_t total_seq_pre = -1;
   if (no_causal) {
+    // no_causal (Whisper encoder / cross-attn): seqlens_k = skv means "all skv
+    // keys valid", there is no past. total_seq is exactly skv -- do NOT apply
+    // the +1 decode convention (would over-count and trip the smart-dispatch
+    // size check / fused validation). See the matching exemption at the
+    // decomposed-path total_seq derivation below.
     total_seq_pre = skv;
   } else if (seqlens_k_pre != kSeqlensKNotRead) {
+    // -1 is ORT's prefill sentinel: total_seq=sq, past_len=0. Real values are
+    // 0..max_seq; total_seq = seqlens_k_val + 1.
     total_seq_pre =
         (seqlens_k_pre < 0) ? sq : static_cast<int64_t>(seqlens_k_pre) + 1;
   }
 
   bool fused_d = (d == 64 || d == 128 || d == 256);
 
+  // Smart dispatch: the legacy fused decode kernel (hip_gqa_fused_decode)
+  // serializes over the time dimension (cross-wave reduction tree on the
+  // critical path of every iteration). For total_seq above
+  // gqa_fused_decode_max_t() the GEMM-based decomposed path wins (~12x at
+  // total_seq=2048 on Strix Halo). The newer flash_decode kernel
+  // (hip_gqa_flash_decode) fixes that scaling via FA-2 split-K, so when it is
+  // eligible we keep the fused branch active even at long total_seq --
+  // flash_decode is exactly what the smart-dispatch threshold was working
+  // around. When we can't read total_seq (B>1, no seqlens_k, or D2H failure)
+  // default to permitting fused -- preserves bit-for-bit behaviour on workloads
+  // that pass the predicate today.
   bool flash_decode_eligible = gqa_flash_decode_enabled() &&
                                legacy_flash_decode_geometry_ok(H, G, d) &&
                                skv >= gqa_flash_decode_min_skv();
@@ -825,30 +977,87 @@ static int gqa_forward_hipblaslt(
       (total_seq_pre <= static_cast<int64_t>(gqa_fused_decode_max_t())) ||
       flash_decode_eligible;
 
+  // ONNX uses local_window_size=-1 for "no sliding window"; <= 0 means
+  // disabled. The original hip_gqa_fused_decode kernel does NOT support sliding
+  // window, but hip_gqa_flash_decode does (it clamps kv_lo to
+  // max(0, eff_skv - window) when local_window_size > 0). So we admit the fused
+  // branch with sliding window only when flash_decode is eligible -- the
+  // (use_flash_decode) check inside the branch then routes us correctly. This
+  // is what unlocks the gpt-oss-20b sliding-attention layers (12 of 24) at long
+  // context: they were previously rejected here and fell through to the
+  // decomposed path, which reads the full skv KV cache instead of just the
+  // 128-element window.
   bool sliding_ok_for_fused = (local_window_size <= 0) || flash_decode_eligible;
+  // head_sink / smooth_softmax: legacy hip_gqa_fused_decode does not support
+  // these, but hip_gqa_flash_decode now folds the sink term into the reduce
+  // kernel's denominator. Admit them only when flash_decode is the eligible
+  // dispatch -- the (use_flash_decode) check inside the branch then routes
+  // correctly. This is what unlocks gpt-oss-20b decode (all 24 GQA layers pass
+  // head_sink, which previously forced fall-through to the decomposed hipBLASLt
+  // path that scales linearly with skv).
   bool sink_ok_for_fused =
       (!head_sink && !use_smooth_softmax) || flash_decode_eligible;
+  // Packed-QKV inputs (gpt-oss-20b style: query is the [B,sq,(H+2G)*d]
+  // qkv_proj output, key and value are null) are supported by the fused branch
+  // by routing through hip_gqa_split_qkv into workspace before rope and
+  // KV-append. Only flash_decode is exercised by these models in practice
+  // (HPG=8, d=64), but split is correct for the legacy fused_decode branch too.
   bool fused_packed_qkv = (!key && !value);
   bool kv_inputs_ok = (key && value) || fused_packed_qkv;
+  // The fused (hip_gqa_fused_decode) and flash (hip_gqa_flash_decode) decode
+  // kernels are __half-only (their Q/K/V/O pointers are `const __half*`). They
+  // are correct for the fp16 causal decode of Llama / gpt-oss (elem_size==2).
+  // The fp32 GQA path (Whisper decoder self-attn, elem_size==4) must NOT reach
+  // them: feeding fp32 buffers to a __half kernel reinterprets the bytes and
+  // produces garbage. The decomposed hipBLASLt pipeline below IS fp32-capable,
+  // so route fp32 decode there. This is the decode-side analogue of the
+  // no_causal exemption (prefill sq>1 fp32 already used decomposed).
   bool fused_fp16 = (element_size_bytes == 2);
+  // no_causal (Whisper encoder / cross-attn) always takes the decomposed
+  // hipBLASLt path. The fused/flash decode kernels are decode-only (sq==1) and
+  // read seqlens_k with the +1 PAST-token convention, plus assume the KV cache
+  // is appended in BSHD->BNSD layout from `sq` new tokens. Neither holds for
+  // bidirectional no-past attention where `key` is the full Skv-length KV
+  // (cross-attn ships it as rank-4 BNSD with Skv != sq). Routing no_causal to
+  // the decomposed path keeps a single correct code path for these models.
   bool fused_predicate =
       (!gqa_fused_decode_disabled() && !no_causal && fused_fp16 && fused_d &&
        sq == 1 && kv_inputs_ok && present_key && present_value &&
        sliding_ok_for_fused && sink_ok_for_fused && size_ok_for_fused);
 
-  // Fused/flash decode branch (sq == 1). Collapses Steps 3 and 6-11 of the
-  // decomposed pipeline into a single kernel that reads Q (BSHD) + KV (BNSD
-  // cache) and writes O (BSHD). Steps 0 (split), 1-2 (RoPE) and 4-5 (KV cache
-  // update) still run as separate kernels below before the fused dispatch.
+  //===--------------------------------------------------------------------===//
+  // Fused / flash GQA decode path (sq == 1, d in {64,128,256}, KV cache on).
+  //
+  // Collapses Steps 3 and 6-11 of the decomposed pipeline into a single kernel
+  // that reads Q in BSHD and KV from the BNSD cache, producing O in BSHD.
+  // Steps 0 (split), 1-2 (RoPE) and 4-5 (KV cache update) still run as separate
+  // kernels below before the fused dispatch.
+  //
+  // When seqlens_k is provided, the device pointer is passed directly to each
+  // kernel so they can read the actual sequence length on-device, eliminating
+  // the D2H copy + hipStreamSynchronize stall entirely for the decode hot path.
+  //
+  // All prefill (sq > 1) goes through the decomposed hipBLASLt path below where
+  // auto-tuned GEMMs outperform fixed WMMA tiling and all ORT GQA features
+  // (sliding window, smooth softmax, head sink) are supported.
+  //===--------------------------------------------------------------------===//
   if (fused_predicate) {
     const void *qSrc = query;
     const void *kSrc = key;
     const void *vSrc = value;
 
+    // For fused decode, kernels read seqlens_k from device memory directly.
+    // past_len is only needed on host for the concat branch (separate buffers);
+    // for in-place caches (past_key == present_key) it is unused on host.
     int64_t past_len = 0;
     bool need_host_past_len =
         seqlens_k_ptr && past_key && past_key != present_key;
     if (need_host_past_len) {
+      // Reuse the value the pre-dispatch helper already read above. Fall back
+      // to a per-call D2H + sync only when the pre-read was not applicable
+      // (multi-batch, or copy/sync failure). For the asym Llama decode hot path
+      // (B==1, sq==1) the pre-read is always applicable, so this branch becomes
+      // pure host arithmetic.
       int32_t seqlens_k_val = 0;
       if (seqlens_k_pre != kSeqlensKNotRead) {
         seqlens_k_val = seqlens_k_pre;
@@ -862,6 +1071,9 @@ static int gqa_forward_hipblaslt(
         }
       }
 
+      // ORT prefill sentinel: when there is no past KV yet, the producer
+      // initialises seqlens_k[b] to -1 (so seqlens_k[b]+1 == 0). Treat that as
+      // a fresh prefill (past_len=0) instead of rejecting it as invalid.
       if (seqlens_k_val < 0) {
         past_len = 0;
       } else {
@@ -886,10 +1098,24 @@ static int gqa_forward_hipblaslt(
     if (past_len < 0)
       past_len = 0;
 
+    // Flash-decode path is taken when:
+    //   - depth threshold met (default skv >= 256)
+    //   - geometry matches a kernel template instantiation
+    //     (HPG=4 with d in {64,128}, or HPG=8 with d=64 for gpt-oss-20b)
+    //   - not disabled via env var
+    // Below threshold the existing one-block-per-head fused_decode is faster
+    // because its single-kernel cost amortizes better than flash_decode's
+    // (split + reduce) launches and per-call workspace setup.
     const bool use_flash_decode = gqa_flash_decode_enabled() &&
                                   legacy_flash_decode_geometry_ok(H, G, d) &&
                                   skv >= gqa_flash_decode_min_skv();
 
+    // Sum split + rope-temp + flash-partials in a single ensure_workspace call.
+    // ensure_workspace does NOT preserve data on grow (free + malloc), so one
+    // combined request avoids clobbering earlier writes; the offsets below
+    // match the call order so each step's input region stays live while
+    // consumed. Region order: split (Q/K/V), then rope-temp (Q/K), then
+    // flash-partials -- each present only when its feature is active.
     const size_t Q_full_bytes = static_cast<size_t>(B) * sq * H * d * elem_sz;
     const size_t K_full_bytes = static_cast<size_t>(B) * sq * G * d * elem_sz;
     const size_t split_bytes =
@@ -928,6 +1154,7 @@ static int gqa_forward_hipblaslt(
       vSrc = d_Vsplit;
     }
 
+    // ---- Steps 1-2: RoPE (optional) ----
     if (need_rope) {
       char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
       void *d_Qroped = ws + off_rope;
@@ -949,8 +1176,10 @@ static int gqa_forward_hipblaslt(
 
       qSrc = d_Qroped;
       kSrc = d_Kroped;
+      // vSrc is intentionally NOT updated: V is never RoPE'd.
     }
 
+    // ---- Steps 4-5: KV cache update ----
     if (update_kv_cache(
             stream, past_key, past_value, kSrc, vSrc, present_key,
             present_value, static_cast<int>(B), static_cast<int>(past_len),
@@ -978,6 +1207,11 @@ static int gqa_forward_hipblaslt(
           (long long)local_window_size, static_cast<int>(head_sink != nullptr),
           static_cast<int>(use_smooth_softmax));
     } else {
+      // The original hip_gqa_fused_decode kernel does not implement sliding
+      // window or head_sink/smooth_softmax. The predicate above only admits
+      // those features when flash_decode is eligible, so this branch should
+      // never see them -- assert defensively rather than silently producing
+      // wrong results.
       if (local_window_size > 0) {
         fprintf(stderr,
                 "gqa_forward_hipblaslt: BUG -- fused_decode (non-flash) cannot "
@@ -992,6 +1226,8 @@ static int gqa_forward_hipblaslt(
                 head_sink, static_cast<int>(use_smooth_softmax));
         return -1;
       }
+      // skv is passed as a fallback; kernel reads seqlens_k[b]+1 when
+      // available.
       if (hip_gqa_fused_decode(
               stream, qSrc, present_key, present_value, output,
               static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
@@ -1010,8 +1246,24 @@ static int gqa_forward_hipblaslt(
   // Decomposed hipBLASLt pipeline (all prefill sq > 1, unsupported d, or
   // features requiring sliding window / smooth softmax / head sink / fp32)
   //===--------------------------------------------------------------------===//
+
+  // D2H readback of seqlens_k is required here because hipBLASLt descriptor
+  // creation and workspace sizing are host-side APIs that need total_seq. For
+  // B == 1 the value was already read (and cached when
+  // HIPDNN_EP_GQA_CACHE_SEQLENS=1) by the pre-dispatch helper above; we just
+  // consume seqlens_k_pre. The B > 1 branch keeps the legacy per-call read
+  // because per-batch validation requires reading every entry and we have no
+  // validated multi-batch decode workload yet.
   int64_t total_seq = skv;
   int64_t past_len = skv - sq;
+  // no_causal (Whisper encoder self-attn + decoder cross-attn) is bidirectional
+  // with NO past KV: the converters emit a compile-time seqlens_k = skv meaning
+  // "all skv keys are valid". The ORT decode convention below (seqlens_k[b] =
+  // PAST tokens => total_seq = seqlens_k+1) does NOT apply here -- it would
+  // give total_seq = skv+1 > present_seq = skv -> rc=-1 -> zeroed output, and
+  // past_len = total_seq - sq is invalid when sq != skv (cross-attn has sq=1,
+  // skv=1500 => bogus past_len=1499). For no_causal there is no past, so
+  // total_seq = skv (== present_seq) and past_len = 0; skip the readback.
   if (no_causal) {
     total_seq = skv;
     past_len = 0;
@@ -1039,6 +1291,9 @@ static int gqa_forward_hipblaslt(
         }
       }
     } else {
+      // Defensive fallback for B == 1 when the pre-dispatch helper bailed out
+      // (D2H or sync failure). Rare path; not cached because the same failure
+      // mode would have prevented the helper from caching too.
       if (hipMemcpyAsync(&seqlens_k_val, seqlens_k_ptr, sizeof(int32_t),
                          hipMemcpyDeviceToHost, stream) != hipSuccess)
         return -1;
@@ -1046,6 +1301,9 @@ static int gqa_forward_hipblaslt(
         return -1;
     }
 
+    // ORT prefill sentinel: when there is no past KV yet, the producer
+    // initialises seqlens_k[b] to -1. Treat that as a fresh prefill
+    // (past_len=0, total_seq=sq) instead of rejecting it as invalid.
     if (seqlens_k_val < 0) {
       total_seq = sq;
       past_len = 0;
@@ -1069,13 +1327,50 @@ static int gqa_forward_hipblaslt(
 
   bool packed_qkv = (key == nullptr && value == nullptr);
 
+  //===--------------------------------------------------------------------===//
+  // Unified hipBLASLt GQA pipeline (shared by expand and no-expand paths).
+  //
+  // Two orthogonal knobs control the layout choices for the two GEMMs:
+  //
+  //   use_no_expand : when true, Score reads K and Value reads V directly from
+  //                   the BNSD cache (present_key / present_value) and both
+  //                   GEMMs use strided-batched mode with batch = B*G plus
+  //                   per-operand strides to broadcast each KV group across its
+  //                   HPG queries. When false (original path) expand_kv_*
+  //                   duplicates the G groups into H heads in d_Kexp / d_Vexp
+  //                   and both GEMMs run with dense batch = B*H. The no-expand
+  //                   flavour skips two kernels and two B*H*total_seq*d fp16
+  //                   scratch buffers.
+  //
+  //   need_transpose: true when sq > 1. The BSHD (Q, output) and BNSD
+  //                   (GEMM-native) layouts only coincide when sq == 1, so for
+  //                   prefill we still need a Q-transpose before Score and an
+  //                   O-transpose after Value. For decode (sq == 1) both
+  //                   transposes are pure pointer reinterpretations, skipped.
+  //
+  // Prefill (sq > 1) is additionally guarded by HIPDNN_EP_GQA_NO_EXPAND_PREFILL
+  // (default off) so the new behaviour can be verified in isolation.
+  //
+  // Pointer plumbing:
+  //   Score A (K):  use_no_expand ? present_key  : d_Kexp
+  //   Score B (Q):  need_transpose ? d_Qtrans    : qSrc  (BSHD == BNSD @sq=1)
+  //   Value A (V):  use_no_expand ? present_value: d_Vexp
+  //   Value C (O):  need_transpose ? d_O         : output
+  //===--------------------------------------------------------------------===//
   bool use_no_expand = gqa_no_expand_enabled() && present_key &&
                        present_value &&
                        (sq == 1 || gqa_no_expand_prefill_enabled());
   bool need_transpose = (sq > 1);
 
+  // GEMM descriptor keys. The no-expand flavour uses explicit per-operand
+  // strides (non-zero stride fields); the expand flavour leaves them zero so
+  // queryOrCreateGemmState falls back to the dense packed-batch defaults.
   GqaGemmKey scoreKey, valueKey;
   if (use_no_expand) {
+    // Score: C[total_seq, HPG*sq] = K^T[d,total_seq] * Q[d, HPG*sq] per (b, g)
+    // pair. strideA steps over the buffer page (present_seq*d) even though only
+    // the first total_seq tokens are read, keeping the descriptor stable across
+    // token steps.
     scoreKey = {/*m=*/total_seq,
                 /*n=*/HPG * sq,
                 /*k=*/d,
@@ -1086,6 +1381,9 @@ static int gqa_forward_hipblaslt(
                 /*strideA=*/present_seq * d,
                 /*strideB=*/HPG * sq * d,
                 /*strideC=*/HPG * sq * total_seq};
+    // Value: C[d, HPG*sq] = V[d, total_seq] * S[total_seq, HPG*sq] per (b, g)
+    // pair, writing into BNSD [B, G, HPG, sq, d] which at sq==1 coincides with
+    // BSHD [B, 1, H, d].
     valueKey = {/*m=*/d,
                 /*n=*/HPG * sq,
                 /*k=*/total_seq,
@@ -1123,6 +1421,19 @@ static int gqa_forward_hipblaslt(
   if (!valueState)
     return -1;
 
+  // ---- Workspace layout ----
+  // All temp buffers are packed contiguously into the shared workspace,
+  // followed by the GEMM workspace region. This eliminates per-call
+  // hipMalloc/hipFree -- after the first inference the workspace is already
+  // large enough and reuse is zero-cost.
+  //
+  // Region order: Qtrans?, Kexp?, Vexp?, S_f32, S_fp16, O?, Qroped?, Kroped?,
+  // Qsplit?, Ksplit?, Vsplit?, then the GEMM workspace. Optional (?) regions
+  // are omitted when their feature is inactive.
+  //
+  // Qtrans / O are only allocated when need_transpose is true.
+  // Kexp / Vexp are only allocated when use_no_expand is false.
+  // S_f32 and S_fp16 are always allocated (softmax is on every path).
   size_t Qtrans_bytes =
       need_transpose ? static_cast<size_t>(B) * H * sq * d * elem_sz : 0;
   size_t Kexp_bytes =
@@ -1142,6 +1453,7 @@ static int gqa_forward_hipblaslt(
   size_t off_O = off_S_fp16 + S_fp16_bytes;
   size_t temp_end = off_O + O_bytes;
 
+  // Optional RoPE buffers: allocated only when do_rotary is enabled.
   size_t off_Qroped = 0, off_Kroped = 0;
   if (need_rope) {
     size_t Q_bytes = static_cast<size_t>(B) * sq * H * d * elem_sz;
@@ -1151,6 +1463,10 @@ static int gqa_forward_hipblaslt(
     temp_end = off_Kroped + K_bytes;
   }
 
+  // Optional packed-QKV split buffers: allocated only when key/value are null
+  // (GPT-OSS style packed input). Placed AFTER the RoPE buffers so that split
+  // outputs remain live while RoPE reads from them and writes to the RoPE
+  // region (no overlap).
   size_t off_Qsplit = 0, off_Ksplit = 0, off_Vsplit = 0;
   if (packed_qkv) {
     size_t Q_bytes = static_cast<size_t>(B) * sq * H * d * elem_sz;
@@ -1163,6 +1479,7 @@ static int gqa_forward_hipblaslt(
 
   int result = 0;
 
+  // Single workspace allocation: temp buffers + GEMM workspace.
   {
     size_t gemm_ws =
         std::max(scoreState->workspace_size, valueState->workspace_size);
@@ -1184,6 +1501,10 @@ static int gqa_forward_hipblaslt(
     void *gemm_ws_ptr = ws + temp_end;
     size_t gemm_ws_bytes = ws_total - temp_end;
 
+    // Mutable source pointers: initially the raw inputs, redirected to
+    // workspace buffers as pipeline steps (split, RoPE) produce intermediate
+    // results. Downstream steps always read through these so they pick up the
+    // latest transformed data.
     const void *qSrc = query;
     const void *kSrc = key;
     const void *vSrc = value;
@@ -1293,6 +1614,11 @@ static int gqa_forward_hipblaslt(
           static_cast<int>(sq), scoreF32BatchStride, static_cast<int>(past_len),
           static_cast<int>(local_window_size)));
     }
+    // fp16 GQA: softmax writes fp16 probabilities for the fp16 Value GEMM.
+    // fp32 GQA (Whisper no_causal): softmax writes fp32 probabilities for the
+    // fp32 Value GEMM. d_S_fp16 is the probabilities buffer either way (sized
+    // by elem_sz above), so the name is fp16-specific but holds fp32 when
+    // gemm_fp32.
     if (gemm_fp32) {
       HIP_CHECK(hip_gqa_softmax_f32_to_f32(
           stream, d_S_f32, d_S_fp16, static_cast<int>(B * H * sq),
@@ -1458,7 +1784,8 @@ int wrap_group_query_attention(
     return -1;
   }
 
-  // ORT scale==0.0 sentinel -> auto 1/sqrt(head_dim).
+  // ORT uses scale == 0.0 as sentinel for "auto-compute 1/sqrt(head_size)"
+  // (gqa_attention_base.h: scale_ == 0.0f ? 1/sqrt(head_size) : scale_).
   if (scale == 0.0f && head_dim > 0)
     scale = 1.0f / sqrtf(static_cast<float>(head_dim));
 
@@ -1500,6 +1827,9 @@ int wrap_group_query_attention(
       fprintf(stderr, "wrap_group_query_attention: null hipblas handle\n");
       return -1;
     }
+    // Smooth softmax: activated when head_sink is provided OR the
+    // smooth_softmax attribute is explicitly 1, matching ORT behaviour
+    // (gqa_attention_base.h: use_smooth_softmax_ || head_sink != nullptr).
     const bool has_smooth_softmax =
         (head_sink != nullptr || smooth_softmax == 1);
     RUNTIME_DEBUG_LOG(
