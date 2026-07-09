@@ -486,6 +486,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateMatMulNBitsConversionPatterns(patterns, ctx);
   populateQMoEConversionPatterns(patterns, ctx);
   populateGatherBlockQuantizedConversionPatterns(patterns, ctx);
+  populateMsDequantizeLinearConversionPatterns(patterns, ctx);
   populateReshapeConversionPatterns(patterns, ctx);
   populateCausalConvWithStateConversionPatterns(patterns, ctx);
   populateGemmConversionPatterns(patterns, ctx);
@@ -777,6 +778,8 @@ void ConvertOnnxToHipPass::runOnOperation() {
         populateProjectorOpsRewritePatterns(preLoweringPatterns, ctx);
         populateLpNormalizationConversionPatterns(preLoweringPatterns, ctx);
         populatePowDecompositionPatterns(preLoweringPatterns, ctx);
+        // Fused DQ+MatMulNBits(bits=2)+Q must run BEFORE individual converters.
+        populateMsMatMulNBitsI2FusedConversionPatterns(preLoweringPatterns, ctx);
         ChangeFlagListener listener;
         mlir::GreedyRewriteConfig preLoweringConfig;
         preLoweringConfig.setStrictness(

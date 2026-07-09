@@ -1413,6 +1413,35 @@ HIP_KERNEL_API int hip_gather_block_quantized(
     int indices_is_int64,        // 1 = i64, 0 = i32
     int out_dtype);              // hip_dtype_t (FLOAT16 / FLOAT32 / BFLOAT16)
 
+HIP_KERNEL_API int hip_ms_dequantize_linear(void *stream, const void *input,
+    const void *scale, const void *zero_point, void *output,
+    int64_t n_elements, int64_t n_channels,
+    int64_t input_elem_size, int64_t scale_elem_size);
+
+HIP_KERNEL_API int hip_ms_quantize_linear(void *stream, const void *input,
+    const void *scale, const void *zero_point, void *output,
+    int64_t n_elements, int64_t n_channels,
+    int64_t input_elem_size, int64_t output_elem_size);
+
+// Fused DequantizeLinear + bits=2 MatMulNBits + QuantizeLinear GEMV.
+// Takes uint16 input, does DQ on-the-fly, 2-bit matmul, Q on output.
+// Eliminates two global memory roundtrips vs running DQ+MatMul+Q separately.
+// dq_scale/q_scale: float32 scalar pointers; dq_zp/q_zp: uint16 scalar (nullable).
+// w_zp: per-block uint8 weight zero points (nullable).
+HIP_KERNEL_API int hip_matmul_nbits_i2_fused(
+    void* stream,
+    const void*  A_u16,    // uint16 quantized input [M, K]
+    const void*  B,        // uint8 packed 2-bit weights [N, K/4]
+    const void*  w_scales, // float32 weight scales [N, k_blocks]
+    const void*  w_zp,     // uint8 weight zero points (nullable)
+    const void*  dq_scale, // float32 DQ scale scalar
+    const void*  dq_zp,    // uint16 DQ zero point scalar (nullable)
+    const void*  q_scale,  // float32 Q scale scalar
+    const void*  q_zp,     // uint16 Q zero point scalar (nullable)
+    void*        output,   // uint16 quantized output [M, N]
+    int64_t M, int64_t N, int64_t K,
+    int64_t block_size);
+
 /* =========================================================================
  * QMoE Sub-Kernels
  * =========================================================================

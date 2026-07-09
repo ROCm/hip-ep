@@ -204,6 +204,39 @@ __global__ void reduce_sum_i32_kernel(
 // FP16 reduction
 // =============================================================================
 
+// Parallel sum reduction for fp32.
+__global__ void reduce_sum_f32_kernel(
+    const float* __restrict__ data,
+    float* __restrict__ output,
+    int64_t reduce_size,
+    int64_t inner,
+    int64_t num_output_elements) {
+  extern __shared__ float sdata_f32[];
+
+  int64_t out_idx = blockIdx.x;
+  if (out_idx >= num_output_elements) return;
+
+  int64_t oo = out_idx / inner;
+  int64_t ii = out_idx - oo * inner;
+  const float* slice = data + oo * reduce_size * inner + ii;
+  int tid = threadIdx.x;
+
+  float sum = 0.0f;
+  for (int64_t i = tid; i < reduce_size; i += blockDim.x)
+    sum += slice[i * inner];
+  sdata_f32[tid] = sum;
+  __syncthreads();
+
+  for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+    if (static_cast<unsigned int>(tid) < s)
+      sdata_f32[tid] += sdata_f32[tid + s];
+    __syncthreads();
+  }
+
+  if (tid == 0)
+    output[out_idx] = sdata_f32[0];
+}
+
 // Parallel sum reduction for fp16. Accumulates in float to avoid the precision
 // loss / overflow that would occur with a half accumulator over long slices,
 // then narrows back to half for the final write. This mirrors how cuDNN/MIOpen
@@ -337,6 +370,18 @@ extern "C" int hip_reduce_sum(
                        shared_mem, hip_stream,
                        static_cast<const int32_t*>(data),
                        static_cast<int32_t*>(output),
+                       reduce_size, inner_size, num_output_elements);
+      break;
+    }
+    case HIP_DTYPE_FLOAT32: {
+      int block_size = pick_block_size();
+      size_t shared_mem = block_size * sizeof(float);
+      hipLaunchKernelGGL(reduce_sum_f32_kernel,
+                       dim3(static_cast<unsigned>(num_output_elements)),
+                       dim3(block_size),
+                       shared_mem, hip_stream,
+                       static_cast<const float*>(data),
+                       static_cast<float*>(output),
                        reduce_size, inner_size, num_output_elements);
       break;
     }
@@ -494,7 +539,7 @@ extern "C" int hip_reduce_mean(
 //   - Init value: -INF (max) / 1 (prod).
 //   - Reduction operator: max / multiply.
 //   - FP16 path accumulates in float (NaN-propagating max).
-//   - Per ORT _Max<float>: if (isnan(a) || isnan(b)) -> NaN. We follow that.
+//   - Per ORT _Max<float>: if (__builtin_isnan(a) || __builtin_isnan(b)) -> NaN. We follow that.
 //
 // Ported from onnxruntime/core/providers/cuda/reduction/reduction_ops.cc /
 // reduction_functions.cu @ v1.22.2 -- with the same block-reduce structure
@@ -514,7 +559,7 @@ __device__ inline float reduce_op_max<float>(float a, float b) {
   // build for MSVC 14.51 disables clang's implicit constexpr->__host__ __device__
   // promotion (see lib/Runtime/Kernels/cmake/hip_utils.cmake), which
   // would otherwise make this call host-only and break device compilation.
-  return (isnan(a) || isnan(b)) ? NAN : (a > b ? a : b);
+  return (__builtin_isnan(a) || __builtin_isnan(b)) ? NAN : (a > b ? a : b);
 }
 
 template <typename T> __device__ inline T reduce_init_max();

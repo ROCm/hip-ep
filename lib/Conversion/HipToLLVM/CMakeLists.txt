@@ -24,6 +24,8 @@ add_library(HipToLLVM STATIC
   MatMulNBitsLowering.cpp
   QMoELowering.cpp
   GatherBlockQuantizedLowering.cpp
+  MsDequantizeLinearLowering.cpp
+  MsMatMulNBitsI2FusedLowering.cpp
   GraphLowering.cpp
   CausalConvWithStateLowering.cpp
   GemmLowering.cpp

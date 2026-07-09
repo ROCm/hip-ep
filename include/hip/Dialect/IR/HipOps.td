@@ -929,6 +929,109 @@ def Hip_GatherBlockQuantizedOp : Hip_DpsOp<"gather_block_quantized"> {
   }];
 }
 
+// ===== com.microsoft DequantizeLinear =====
+
+def Hip_MsDequantizeLinearOp : Hip_DpsOp<"ms_dequantize_linear"> {
+  let summary = "com.microsoft DequantizeLinear: (quant, scale, zp) -> float";
+  let description = [{
+    Implements com.microsoft.DequantizeLinear: dequantizes each element of
+    `input` using per-channel or per-tensor `scale` and optional `zero_point`.
+    output[i] = (float(input[i]) - float(zp[i])) * scale[i]
+    When zero_point is absent, uses 0.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$scale,
+    Optional<Hip_TensorOrMemRef>:$zero_point,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$axis,
+    I64Attr:$input_elem_size,
+    I64Attr:$scale_elem_size
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $scale `:`
+        type($input) `,` type($scale) `)`
+    (`zero_point` `(` $zero_point^ `:` type($zero_point) `)`)?
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+// ===== com.microsoft QuantizeLinear =====
+
+def Hip_MsQuantizeLinearOp : Hip_DpsOp<"ms_quantize_linear"> {
+  let summary = "com.microsoft QuantizeLinear: float -> quant";
+  let description = [{
+    Implements com.microsoft.QuantizeLinear: quantizes each element of
+    `input` using per-channel or per-tensor `scale` and optional `zero_point`.
+    output[i] = clamp(round(input[i] / scale[i]) + zp[i], dtype_min, dtype_max)
+    When zero_point is absent, uses 0.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$scale,
+    Optional<Hip_TensorOrMemRef>:$zero_point,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$axis,
+    I64Attr:$input_elem_size,
+    I64Attr:$output_elem_size
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $scale `:`
+        type($input) `,` type($scale) `)`
+    (`zero_point` `(` $zero_point^ `:` type($zero_point) `)`)?
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+// ===== Fused ops =============================================================
+
+def Hip_MsMatMulNBitsI2FusedOp : Hip_DpsOp<"ms_matmul_nbits_i2_fused",
+    /*traits=*/[AttrSizedOperandSegments]> {
+  let summary = "Fused DQ + bits=2 MatMulNBits + Q (ORCA W2A8 pattern)";
+  let description = [{
+    Fused kernel: DequantizeLinear (uint16 to f32) plus MatMulNBits(bits=2)
+    plus QuantizeLinear (f32 to uint16) in a single GPU kernel. Eliminates
+    two global memory roundtrips versus running the three ops separately.
+    Targets the ORCA W2A8 activation quantization pattern.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,              // uint16 quantized input [M,K]
+    Hip_TensorOrMemRef:$B,                  // packed 2-bit weights [N,K/4]
+    Hip_TensorOrMemRef:$w_scales,           // float32 weight scales [N,k_blocks]
+    Optional<Hip_TensorOrMemRef>:$w_zp,    // uint8 weight zero points (nullable)
+    Hip_TensorOrMemRef:$dq_scale,           // float32 DQ scale scalar
+    Optional<Hip_TensorOrMemRef>:$dq_zp,   // uint16 DQ zero point (nullable)
+    Hip_TensorOrMemRef:$q_scale,            // float32 Q scale scalar
+    Optional<Hip_TensorOrMemRef>:$q_zp,    // uint16 Q zero point (nullable)
+    Hip_TensorOrMemRef:$output,             // uint16 quantized output [M,N]
+    I64Attr:$N,
+    I64Attr:$K,
+    I64Attr:$block_size
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $B `,` $w_scales `:`
+        type($input) `,` type($B) `,` type($w_scales) `)`
+    (`w_zp` `(` $w_zp^ `:` type($w_zp) `)`)?
+    `dq` `(` $dq_scale `:` type($dq_scale) `)`
+    (`dq_zp` `(` $dq_zp^ `:` type($dq_zp) `)`)?
+    `q` `(` $q_scale `:` type($q_scale) `)`
+    (`q_zp` `(` $q_zp^ `:` type($q_zp) `)`)?
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 // ===== MIOpen ops ============================================================
 
 def Hip_RmsNormOp : Hip_DpsOp<"rms_norm", /*traits=*/[OpStateOpInterface],

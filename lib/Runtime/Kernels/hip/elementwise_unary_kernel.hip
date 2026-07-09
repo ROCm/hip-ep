@@ -88,7 +88,7 @@ __global__ void elementwise_sign_f16_kernel(const __half *__restrict__ input,
   if (idx < num_elements) {
     float a = __half2float(input[idx]);
     float r;
-    if (isnan(a)) {
+    if (__builtin_isnan(a)) {
       r = a;
     } else {
       r = (0.0f < a) - (a < 0.0f);
@@ -104,7 +104,7 @@ __global__ void elementwise_sign_f32_kernel(const float *__restrict__ input,
       static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (idx < num_elements) {
     float a = input[idx];
-    output[idx] = isnan(a) ? a : ((0.0f < a) - (a < 0.0f));
+    output[idx] = __builtin_isnan(a) ? a : ((0.0f < a) - (a < 0.0f));
   }
 }
 

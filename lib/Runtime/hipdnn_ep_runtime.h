@@ -1147,6 +1147,40 @@ int wrap_matmul_nbits(
     int64_t elem_size,       // element size in bytes
     int64_t zp_elem_size);   // zero_points element size: 1=uint8 packed, 2=fp16
 
+// com.microsoft.DequantizeLinear: element-wise (quant - zp) * scale
+int wrap_ms_dequantize_linear(
+    RuntimeState *state,
+    const void *input, const void *scale, const void *zero_point,
+    void *output,
+    int64_t n_elements, int64_t axis, int64_t n_channels,
+    int64_t input_elem_size, int64_t scale_elem_size);
+
+// com.microsoft.QuantizeLinear: clamp(round(in/scale) + zp, min, max)
+int wrap_ms_quantize_linear(
+    RuntimeState *state,
+    const void *input, const void *scale, const void *zero_point,
+    void *output,
+    int64_t n_elements, int64_t axis, int64_t n_channels,
+    int64_t input_elem_size, int64_t output_elem_size);
+
+// Fused DequantizeLinear + MatMulNBits(bits=2) + QuantizeLinear.
+// Takes uint16 input, applies DQ on-the-fly inside the matmul kernel,
+// writes uint16 output (Q applied inside). Eliminates two buffer roundtrips.
+// dq_scale/q_scale: float32 scalar. dq_zp/q_zp: uint16 scalar (nullable).
+int wrap_ms_matmul_nbits_i2_fused(
+    RuntimeState *state,
+    const void *A_u16,    // uint16 quantized input [M, K]
+    const void *B,        // packed 2-bit weights [N, K/4]
+    const void *w_scales, // float32 weight scales [N, k_blocks]
+    const void *w_zp,     // uint8 weight zero points (nullable)
+    const void *dq_scale, // float32 DQ scale scalar pointer
+    const void *dq_zp,    // uint16 DQ zero point scalar pointer (nullable)
+    const void *q_scale,  // float32 Q scale scalar pointer
+    const void *q_zp,     // uint16 Q zero point scalar pointer (nullable)
+    void *output,         // uint16 quantized output [M, N]
+    int64_t M, int64_t N, int64_t K,
+    int64_t block_size);
+
 // GatherBlockQuantized operation wrapper (com.microsoft).
 // Gather + block-wise dequantize: gather rows from `data` along
 // `gather_axis` using `indices`, then dequantize the gathered rows using
