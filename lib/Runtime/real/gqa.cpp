@@ -193,9 +193,9 @@ static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
     return kSeqlensKNotRead;
   }
 
-  if (gqa_cache_seqlens_enabled() && state && state->seqlens_k_cached_valid &&
-      state->seqlens_k_cached_ptr == seqlens_k_ptr) {
-    return state->seqlens_k_cached_val;
+  if (gqa_cache_seqlens_enabled() && state && state->mm &&
+      state->mm->seqlens_k_cache_valid(seqlens_k_ptr)) {
+    return state->mm->seqlens_k_cached_val();
   }
 
   int32_t seqlens_k_val = 0;
@@ -207,10 +207,8 @@ static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
     return kSeqlensKNotRead;
   }
 
-  if (gqa_cache_seqlens_enabled() && state) {
-    state->seqlens_k_cached_val = seqlens_k_val;
-    state->seqlens_k_cached_ptr = seqlens_k_ptr;
-    state->seqlens_k_cached_valid = true;
+  if (gqa_cache_seqlens_enabled() && state && state->mm) {
+    state->mm->seqlens_k_cache_set(seqlens_k_ptr, seqlens_k_val);
   }
 
   return seqlens_k_val;

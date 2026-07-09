@@ -10,15 +10,16 @@
 // across RuntimeState (workspace, host_scratch, qmoe_scratch,
 // qmoe_host_scratch, conv_scratch, and the per-domain pool arrays).
 //
-// Phase 1 scope:
-//   - Wraps all six existing patterns behind a uniform typed API.
-//   - Uniform 1.5× amortized growth for all GPU buffers (fixes the pool's
-//     exact-growth bug).
-//   - seqlens_k cache (moved here from RuntimeState).
-//   - begin_compute() / end_compute() lifecycle hooks.
-//   - APU + discrete GPU backends fully wired from day one.
+// Phase 1: wrapped all six existing patterns behind a uniform typed API with
+//   1.5× amortized growth, seqlens_k cache, begin_compute()/end_compute()
+//   lifecycle hooks, and APU + discrete GPU backends.
 //
-// Future phases add: BlockPool (Phase 2), KvCacheManager (Phase 4), Tier-1
+// Phase 2: removed legacy RuntimeState alias fields (pool_base, pool_size,
+//   workspace, host_scratch, qmoe_scratch, conv_scratch, seqlens_k_cached_*).
+//   All callers now go through MemoryManager exclusively; fallback code paths
+//   deleted.
+//
+// Future phases add: BlockPool (Phase 3), KvCacheManager (Phase 4), Tier-1
 // CPU offload (Phase 5). The public API surface is kept stable across phases.
 //
 //===----------------------------------------------------------------------===//
@@ -98,11 +99,11 @@ public:
 
   // Called at the start of every Compute():
   //   - Invalidates the seqlens_k cache.
-  //   - (Phase 2+) resets the bump-pointer scratch arena.
+  //   - (Phase 3+) resets the bump-pointer scratch arena.
   void begin_compute();
 
-  // Called at the end of every Compute() (Phase 2+: releases scratch blocks).
-  // Safe to call in Phase 1 — it is a no-op for scratch until Phase 2.
+  // Called at the end of every Compute() (Phase 3+: releases scratch blocks).
+  // Currently a no-op for scratch until Phase 3.
   void end_compute();
 
   //-------------------------------------------------------------------

@@ -7,10 +7,9 @@
 //
 // See memory_manager.h for the design.
 //
-// Phase 1: wraps all six existing ensure_* patterns behind a typed API with
-// uniform 1.5× amortized growth. No behavior change — callers that used the
-// old direct RuntimeState fields now go through MM, which delegates to the
-// same underlying HIP calls (via HalAllocator or direct hipMalloc/hipFree).
+// Wraps all six existing ensure_* patterns behind a typed API with uniform
+// 1.5× amortized growth. All callers go through MM exclusively; the legacy
+// RuntimeState fields were removed in Phase 2.
 //
 //===----------------------------------------------------------------------===//
 
@@ -353,7 +352,7 @@ void MemoryManager::begin_compute() {
 }
 
 void MemoryManager::end_compute() {
-  // Phase 1: no-op. Phase 2 will reset the bump-pointer scratch arena here.
+  // No-op today. Phase 3 will reset the bump-pointer scratch arena here.
 }
 
 //===----------------------------------------------------------------------===//

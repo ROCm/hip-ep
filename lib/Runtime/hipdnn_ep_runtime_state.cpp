@@ -142,43 +142,20 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->gpu_constants_blob = nullptr;
   state->gpu_constants = nullptr;
   state->num_constants = 0;
-  // Unified Memory Manager — created before the pool/scratch fields so that
-  // the old extern C functions (hipdnn_ep_get_pool_base etc.) can delegate
-  // to it immediately. hal_create_for_device uses device 0 (set below).
-  // We create the MM with a temporary device_id=0; for multi-GPU support this
-  // would use the actual device. The stream is set after hipStreamCreate.
+  // Unified Memory Manager — owns all session-scoped GPU/host buffers.
+  // hal_create_for_device uses device 0 (set below); for multi-GPU support
+  // this would use the actual device. Stream is set after hipStreamCreate.
   state->mm = new MemoryManager(hal_create_for_device(0));
-  // Legacy transition fields — mm owns the actual data.
-  state->num_pool_domains = 0;
-  state->pool_base = nullptr;
-  state->pool_size = nullptr;
-  state->buffer_offsets = nullptr;
-  state->num_buffers = 0;
-  state->workspace = nullptr;
-  state->workspace_size = 0;
-  state->host_scratch_base = nullptr;
-  state->host_scratch_size = 0;
   // Start with no output allocator (null context + callback). The EP installs
   // one via hipdnn_ep_set_output_allocator before the first inference_compute,
   // and hipdnn_ep_alloc_output then forwards each graph-output request to it.
   state->output_allocator.self = nullptr;
   state->output_allocator.allocate = nullptr;
-  state->qmoe_scratch = nullptr;
-  state->qmoe_scratch_size = 0;
-  state->qmoe_host_scratch = nullptr;
-  state->qmoe_host_scratch_size = 0;
-  state->conv_scratch = nullptr;
-  state->conv_scratch_size = 0;
   state->zp_unpack_cache = nullptr;
   state->op_profile = hipdnn_ep_perf_enabled() ? op_profile_create() : nullptr;
   state->device_error_flag = nullptr;
   state->hipdnn_handle = nullptr;
   state->hipdnn_graph_registry = nullptr;
-  // seqlens_k cache lives in mm; legacy alias fields stay in sync via
-  // hipdnn_ep_runtime_begin_compute -> mm->begin_compute().
-  state->seqlens_k_cached_valid = false;
-  state->seqlens_k_cached_val = 0;
-  state->seqlens_k_cached_ptr = nullptr;
   state->loop_iter_cpu_buf = nullptr;
   state->loop_iter_capacity = 0;
   state->loop_iter_dev = nullptr;
@@ -704,29 +681,12 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     HIP_CLEANUP(hipStreamSynchronize(state->stream));
   }
 
-  // Destroy the Unified Memory Manager first (before stream teardown, because
-  // MM's destructor may need to sync the stream before freeing GPU pools).
-  // The MM destructor calls hip_free_gpu / hal_->free on all owned buffers.
+  // Destroy the Unified Memory Manager (frees all session-scoped GPU/host
+  // buffers: pool domains, shared workspace, host-scalar scratch, qmoe host
+  // scratch). Must happen before stream teardown because MM's destructor may
+  // need to sync the stream before freeing GPU pools.
   delete state->mm;
   state->mm = nullptr;
-
-  // Legacy fields were owned by mm in Phase 1; nothing to free here for them.
-  // qmoe_scratch / workspace / host_scratch_base are all null after mm delete.
-
-  // Free qmoe device scratch + pinned host mirror (if allocated directly,
-  // i.e. before MM was wired or for paths not yet migrated).
-  if (state->qmoe_scratch) {
-    HIP_CLEANUP(hipFree(state->qmoe_scratch));
-  }
-  if (state->qmoe_host_scratch) {
-    HIP_CLEANUP(hipHostFree(state->qmoe_host_scratch));
-  }
-
-  // Free the MIOpen convolution workspace pool (if allocated). The stream
-  // sync above has drained any in-flight conv that may still be reading it.
-  if (state->conv_scratch) {
-    HIP_CLEANUP(hipFree(state->conv_scratch));
-  }
 
   // Tear down per-op state slots. Each entry's deletor destroys its concrete
   // type; slots reference nothing in other slots, so order is irrelevant. The
@@ -761,30 +721,6 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
 
   if (state->device_error_flag) {
     HIP_CLEANUP(hipFree(state->device_error_flag));
-  }
-
-  // host_scratch_base, workspace, pool_base/pool_size/buffer_offsets are now
-  // owned by RuntimeState::mm (deleted above). Nothing to free here for them.
-  // Legacy: if somehow mm was not created (allocation failure at init), fall
-  // back to direct cleanup for safety.
-  if (state->host_scratch_base) {
-    HIP_CLEANUP(hipHostFree(state->host_scratch_base));
-  }
-  if (state->pool_base) {
-    for (int i = 0; i < state->num_pool_domains; ++i) {
-      if (state->pool_base[i])
-        HIP_CLEANUP(hipFree(state->pool_base[i]));
-    }
-    free(state->pool_base);
-    state->pool_base = nullptr;
-  }
-  if (state->pool_size) {
-    free(state->pool_size);
-    state->pool_size = nullptr;
-  }
-  state->num_pool_domains = 0;
-  if (state->buffer_offsets) {
-    free(state->buffer_offsets);
   }
 
   // Free the single constants blob and the pointer array.
@@ -890,17 +826,8 @@ extern "C"
     return;
   }
   // Delegate cache invalidation to the MemoryManager (single authoritative
-  // location for all per-forward-pass caches). Keep the legacy RuntimeState
-  // alias fields in sync for GQA code that still reads them directly.
-  if (state->mm) {
-    state->mm->begin_compute();
-    // Sync legacy alias fields so gqa.cpp reads are still correct.
-    state->seqlens_k_cached_valid = state->mm->seqlens_k_valid_;
-    state->seqlens_k_cached_ptr = state->mm->seqlens_k_ptr_;
-  } else {
-    state->seqlens_k_cached_valid = false;
-    state->seqlens_k_cached_ptr = nullptr;
-  }
+  // location for all per-forward-pass caches).
+  state->mm->begin_compute();
   // Publish the session stream for ABI-fixed helpers (memrefCopy) that run
   // before/within main_graph and otherwise default to stream 0.
   hipdnn_ep_set_current_stream(static_cast<void *>(state->stream));
@@ -928,45 +855,8 @@ extern "C"
 }
 
 //===----------------------------------------------------------------------===//
-// Memory Pooling Support
+// Memory Management — all delegates to MemoryManager (mm)
 //===----------------------------------------------------------------------===//
-
-// Grow the per-domain pool arrays so that index [needed_count - 1] is valid.
-// New slots are zero-filled (null base, size 0) so they behave exactly like the
-// fresh inline entries the fixed-size array used to provide. Mirrors the
-// grow-on-demand contract of the individual pools: never shrinks, and at steady
-// state (every domain already seen) this is a no-op. Returns false on OOM,
-// leaving the existing arrays intact. realloc-move is safe — callers re-derive
-// pool_base[domain_id] from state on every access, never caching element ptrs.
-static bool ensure_pool_domains(RuntimeState *state, int needed_count) {
-  if (needed_count <= state->num_pool_domains) {
-    return true;
-  }
-  auto *new_base = static_cast<void **>(
-      realloc(state->pool_base, sizeof(void *) * needed_count));
-  if (!new_base) {
-    fprintf(stderr, "Failed to grow pool_base array to %d domains\n",
-            needed_count);
-    return false;
-  }
-  state->pool_base = new_base;
-  auto *new_size = static_cast<size_t *>(
-      realloc(state->pool_size, sizeof(size_t) * needed_count));
-  if (!new_size) {
-    // pool_base already grew; leaving it larger than num_pool_domains is safe
-    // because num_pool_domains (updated below) still bounds every loop.
-    fprintf(stderr, "Failed to grow pool_size array to %d domains\n",
-            needed_count);
-    return false;
-  }
-  state->pool_size = new_size;
-  for (int i = state->num_pool_domains; i < needed_count; ++i) {
-    state->pool_base[i] = nullptr;
-    state->pool_size[i] = 0;
-  }
-  state->num_pool_domains = needed_count;
-  return true;
-}
 
 extern "C" {
 
@@ -976,68 +866,12 @@ int hipdnn_ep_pool_init(RuntimeState *state, size_t pool_size,
     fprintf(stderr, "Invalid state parameter to hipdnn_ep_pool_init\n");
     return 1;
   }
-
-  if (state->mm) {
-    // Delegate to the MemoryManager. load_pool_plan records the static pool
-    // plan; the actual hipMalloc is deferred to the first get_pool_base call.
-    state->mm->load_pool_plan(pool_size, buffer_offsets, num_buffers);
-    // Update legacy alias fields so code that reads state->num_buffers etc.
-    // still sees consistent values.
-    state->num_buffers = num_buffers;
-    return 0;
-  }
-
-  // Fallback: original implementation (reached only if mm creation failed).
-  if (!ensure_pool_domains(state, 1)) {
-    return 1;
-  }
-  if (pool_size > 0) {
-    if (hipMalloc(&state->pool_base[0], pool_size) != hipSuccess) {
-      fprintf(stderr, "Failed to allocate memory pool of size %zu bytes\n",
-              pool_size);
-      return 2;
-    }
-  } else {
-    state->pool_base[0] = nullptr;
-  }
-  state->pool_size[0] = pool_size;
-  state->num_buffers = num_buffers;
-  if (num_buffers > 0 && buffer_offsets) {
-    state->buffer_offsets = (size_t *)malloc(sizeof(size_t) * num_buffers);
-    if (!state->buffer_offsets) {
-      if (state->pool_base[0]) {
-        HIP_CLEANUP(hipFree(state->pool_base[0]));
-        state->pool_base[0] = nullptr;
-      }
-      return 1;
-    }
-    memcpy(state->buffer_offsets, buffer_offsets, sizeof(size_t) * num_buffers);
-  } else {
-    state->buffer_offsets = nullptr;
-  }
+  state->mm->load_pool_plan(pool_size, buffer_offsets, num_buffers);
   return 0;
 }
 
 void *hipdnn_ep_get_buffer_from_pool(RuntimeState *state, size_t index) {
-  if (state && state->mm)
-    return state->mm->get_buffer_from_pool(index);
-
-  // Fallback: original implementation.
-  if (!state || !state->pool_base || state->num_pool_domains < 1 ||
-      !state->pool_base[0]) {
-    fprintf(stderr, "Invalid state or pool not initialized\n");
-    return nullptr;
-  }
-
-  if (index >= state->num_buffers) {
-    fprintf(stderr, "Buffer index %zu out of range (num_buffers = %zu)\n",
-            index, state->num_buffers);
-    return nullptr;
-  }
-
-  char *pool_ptr = static_cast<char *>(state->pool_base[0]);
-  size_t offset = state->buffer_offsets[index];
-  return pool_ptr + offset;
+  return state ? state->mm->get_buffer_from_pool(index) : nullptr;
 }
 
 void *hipdnn_ep_get_pool_base(RuntimeState *state, int domain_id,
@@ -1053,36 +887,7 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state, int domain_id,
             domain_id);
     return nullptr;
   }
-  // Delegate to MemoryManager — provides 1.5× amortized growth.
-  if (state->mm)
-    return state->mm->get_pool_base(domain_id, needed_size);
-
-  // Fallback: original direct implementation (reached only if mm is null).
-  if (!ensure_pool_domains(state, domain_id + 1))
-    return nullptr;
-  if (needed_size == 0)
-    needed_size = 1;
-  if (needed_size > state->pool_size[domain_id]) {
-    if (state->pool_base[domain_id]) {
-      if (state->stream)
-        HIP_CLEANUP(hipStreamSynchronize(state->stream));
-      fprintf(stderr,
-              "hipdnn_ep_get_pool_base: growing pool[%d] %zu -> %zu bytes "
-              "(rare; first time this large input shape was seen)\n",
-              domain_id, state->pool_size[domain_id], needed_size);
-      fflush(stderr);
-      HIP_CLEANUP(hipFree(state->pool_base[domain_id]));
-    }
-    void *new_base = nullptr;
-    if (hipMalloc(&new_base, needed_size) != hipSuccess) {
-      state->pool_base[domain_id] = nullptr;
-      state->pool_size[domain_id] = 0;
-      return nullptr;
-    }
-    state->pool_base[domain_id] = new_base;
-    state->pool_size[domain_id] = needed_size;
-  }
-  return state->pool_base[domain_id];
+  return state->mm->get_pool_base(domain_id, needed_size);
 }
 
 void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size) {
@@ -1091,43 +896,15 @@ void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size) {
             "Invalid state parameter to hipdnn_ep_get_host_scratch_base\n");
     return nullptr;
   }
-  if (state->mm)
-    return state->mm->get_host_scratch(needed_size);
-
-  // Fallback: original implementation.
-  if (needed_size > state->host_scratch_size) {
-    if (state->host_scratch_base) {
-      if (state->stream)
-        HIP_CLEANUP(hipStreamSynchronize(state->stream));
-      HIP_CLEANUP(hipHostFree(state->host_scratch_base));
-    }
-    void *new_base = nullptr;
-    if (hipHostMalloc(&new_base, needed_size, hipHostMallocMapped) !=
-        hipSuccess) {
-      state->host_scratch_base = nullptr;
-      state->host_scratch_size = 0;
-      return nullptr;
-    }
-    state->host_scratch_base = new_base;
-    state->host_scratch_size = needed_size;
-  }
-  return state->host_scratch_base;
+  return state->mm->get_host_scratch(needed_size);
 }
 
-//===----------------------------------------------------------------------===//
-// Shared Workspace Support
-//===----------------------------------------------------------------------===//
-
 void *hipdnn_ep_state_get_workspace(RuntimeState *state) {
-  if (state && state->mm)
-    return state->mm->get_workspace();
-  return state ? state->workspace : nullptr;
+  return state ? state->mm->get_workspace() : nullptr;
 }
 
 size_t hipdnn_ep_state_get_workspace_size(RuntimeState *state) {
-  if (state && state->mm)
-    return state->mm->get_workspace_size();
-  return state ? state->workspace_size : 0;
+  return state ? state->mm->get_workspace_size() : 0;
 }
 
 int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
@@ -1135,74 +912,13 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
     return -1;
   if (needed_size == 0)
     return 0;
-  if (state->mm) {
-    return state->mm->ensure_workspace(needed_size) ? 0 : -1;
-  }
-  if (state->workspace_size >= needed_size)
-    return 0;
-
-  // Amortize growth: when enlarging an existing workspace, round the new
-  // size up to at least 1.5x the current buffer. Callers whose request
-  // size grows monotonically by a small increment per inference (e.g. the
-  // GQA decode path, which sizes S buffers to B*H*total_seq and adds B*H
-  // elements per token) would otherwise trigger a hipStreamSynchronize +
-  // hipFree + hipMalloc cycle on every decode step; with the 1.5x factor
-  // that drops to O(log N) reallocations over the whole generation.
-  // Cold-start (no existing workspace) keeps the exact requested size so
-  // warmup doesn't silently double large initial allocations.
-  size_t alloc_size = needed_size;
-  if (state->workspace_size > 0) {
-    size_t grown = state->workspace_size + state->workspace_size / 2; // 1.5x
-    if (grown > alloc_size)
-      alloc_size = grown;
-  }
-
-  // Grow: free old, allocate new.
-  // Sync the stream first to ensure no in-flight kernel is still using the
-  // old workspace buffer (prevents use-after-free on async GPU execution).
-  if (state->workspace) {
-    if (state->stream) {
-      HIP_CLEANUP(hipStreamSynchronize(state->stream));
-    }
-    HIP_CLEANUP(hipFree(state->workspace));
-    state->workspace = nullptr;
-    state->workspace_size = 0;
-  }
-
-  if (hipMalloc(&state->workspace, alloc_size) != hipSuccess) {
-    fprintf(
-        stderr,
-        "hipdnn_ep_state_ensure_workspace: hipMalloc failed for %zu bytes\n",
-        alloc_size);
-    std::abort();
-  }
-
-  state->workspace_size = alloc_size;
-  RUNTIME_DEBUG_LOG(
-      "[workspace] Allocated shared workspace: %zu bytes (requested %zu)\n",
-      alloc_size, needed_size);
-  return 0;
+  return state->mm->ensure_workspace(needed_size) ? 0 : -1;
 }
 
-//===----------------------------------------------------------------------===//
-// QMoE scratch helpers (device + pinned-host)
-//===----------------------------------------------------------------------===//
-//
-// Per-session grow-on-demand scratch shared by all qmoe instances. Single-
-// buffer reuse is safe because the HIP stream is serialised: the next qmoe
-// launches only after the previous one's kernels have consumed the buffer.
-// Both grow paths sync the stream BEFORE freeing the old buffer (hipFree on a
-// buffer with in-flight kernel reads is undefined behavior) and never shrink.
-//===----------------------------------------------------------------------===//
-
-// qmoe device scratch — now delegates to the shared MemoryManager workspace,
-// which provides the same grow-on-demand semantics with 1.5× amortization.
-// All qmoe instances share the same workspace slot because the HIP stream
-// serializes them (next qmoe only launches after previous kernels finish).
+// QMoE device scratch delegates to the shared MM workspace (all callers are
+// serialized on the same HIP stream so one buffer suffices).
 void *hipdnn_ep_state_get_qmoe_scratch(RuntimeState *state) {
-  if (state && state->mm)
-    return state->mm->get_workspace();
-  return state ? state->qmoe_scratch : nullptr;
+  return state ? state->mm->get_workspace() : nullptr;
 }
 
 int hipdnn_ep_state_ensure_qmoe_scratch(RuntimeState *state,
@@ -1211,37 +927,12 @@ int hipdnn_ep_state_ensure_qmoe_scratch(RuntimeState *state,
     return -1;
   if (needed_size == 0)
     return 0;
-  if (state->mm) {
-    return state->mm->ensure_workspace(needed_size) ? 0 : -1;
-  }
-  // Fallback: original implementation.
-  if (state->qmoe_scratch_size >= needed_size)
-    return 0;
-  size_t alloc_size = needed_size;
-  if (state->qmoe_scratch_size > 0) {
-    size_t grown = state->qmoe_scratch_size + state->qmoe_scratch_size / 2;
-    if (grown > alloc_size)
-      alloc_size = grown;
-  }
-  if (state->qmoe_scratch) {
-    if (state->stream)
-      HIP_CLEANUP(hipStreamSynchronize(state->stream));
-    HIP_CLEANUP(hipFree(state->qmoe_scratch));
-    state->qmoe_scratch = nullptr;
-    state->qmoe_scratch_size = 0;
-  }
-  if (hipMalloc(&state->qmoe_scratch, alloc_size) != hipSuccess) {
-    return -1;
-  }
-  state->qmoe_scratch_size = alloc_size;
-  return 0;
+  return state->mm->ensure_workspace(needed_size) ? 0 : -1;
 }
 
-// Pinned host mirror for qmoe D2H readback. Delegates to MM in Phase 1+.
+// QMoE pinned-host mirror for async D2H readback.
 void *hipdnn_ep_state_get_qmoe_host_scratch(RuntimeState *state) {
-  if (state && state->mm)
-    return state->mm->get_qmoe_host_scratch();
-  return state ? state->qmoe_host_scratch : nullptr;
+  return state ? state->mm->get_qmoe_host_scratch() : nullptr;
 }
 
 int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
@@ -1250,48 +941,12 @@ int hipdnn_ep_state_ensure_qmoe_host_scratch(RuntimeState *state,
     return -1;
   if (needed_size == 0)
     return 0;
-  if (state->mm) {
-    return state->mm->ensure_qmoe_host_scratch(needed_size) ? 0 : -1;
-  }
-  if (state->qmoe_host_scratch_size >= needed_size)
-    return 0;
-
-  size_t alloc_size = needed_size;
-  if (state->qmoe_host_scratch_size > 0) {
-    size_t grown =
-        state->qmoe_host_scratch_size + state->qmoe_host_scratch_size / 2;
-    if (grown > alloc_size)
-      alloc_size = grown;
-  }
-
-  if (state->qmoe_host_scratch) {
-    // Sync first: any in-flight hipMemcpyAsync(D2H) targeting this pinned
-    // buffer must complete before we free it. Cheap relative to alloc.
-    if (state->stream) {
-      HIP_CLEANUP(hipStreamSynchronize(state->stream));
-    }
-    HIP_CLEANUP(hipHostFree(state->qmoe_host_scratch));
-    state->qmoe_host_scratch = nullptr;
-    state->qmoe_host_scratch_size = 0;
-  }
-
-  if (hipHostMalloc(&state->qmoe_host_scratch, alloc_size,
-                    hipHostMallocDefault) != hipSuccess) {
-    fprintf(stderr,
-            "hipdnn_ep_state_ensure_qmoe_host_scratch: hipHostMalloc failed "
-            "for %zu bytes\n",
-            alloc_size);
-    return -1;
-  }
-  state->qmoe_host_scratch_size = alloc_size;
-  return 0;
+  return state->mm->ensure_qmoe_host_scratch(needed_size) ? 0 : -1;
 }
 
-// MIOpen conv workspace — now delegates to the shared MM workspace.
+// MIOpen conv workspace delegates to the shared MM workspace.
 void *hipdnn_ep_state_get_conv_scratch(RuntimeState *state) {
-  if (state && state->mm)
-    return state->mm->get_workspace();
-  return state ? state->conv_scratch : nullptr;
+  return state ? state->mm->get_workspace() : nullptr;
 }
 
 int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
@@ -1300,41 +955,7 @@ int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
     return -1;
   if (needed_size == 0)
     return 0;
-  if (state->mm) {
-    return state->mm->ensure_workspace(needed_size) ? 0 : -1;
-  }
-  if (state->conv_scratch_size >= needed_size)
-    return 0;
-
-  // 1.5x growth amortisation mirrors workspace / qmoe_scratch.
-  size_t alloc_size = needed_size;
-  if (state->conv_scratch_size > 0) {
-    size_t grown = state->conv_scratch_size + state->conv_scratch_size / 2;
-    if (grown > alloc_size)
-      alloc_size = grown;
-  }
-
-  if (state->conv_scratch) {
-    // Drain any in-flight conv that may still be reading the old workspace
-    // before we free it. Growth is rare (only on first call per new shape)
-    // so the sync cost is amortised away.
-    if (state->stream) {
-      hipStreamSynchronize(state->stream);
-    }
-    HIP_CLEANUP(hipFree(state->conv_scratch));
-    state->conv_scratch = nullptr;
-    state->conv_scratch_size = 0;
-  }
-
-  if (hipMalloc(&state->conv_scratch, alloc_size) != hipSuccess) {
-    fprintf(stderr,
-            "hipdnn_ep_state_ensure_conv_scratch: hipMalloc failed for %zu "
-            "bytes\n",
-            alloc_size);
-    return -1;
-  }
-  state->conv_scratch_size = alloc_size;
-  return 0;
+  return state->mm->ensure_workspace(needed_size) ? 0 : -1;
 }
 
 void *hipdnn_ep_state_get_error_flag_device_ptr(RuntimeState *state) {
