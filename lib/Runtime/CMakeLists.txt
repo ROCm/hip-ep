@@ -474,7 +474,7 @@ add_custom_target(RuntimeBitcode DEPENDS HipRuntime)
 # external functions: the host (EP DLL / hip-test / hip-inspect) defines them
 # (see LlvmIrJit absolute-symbol registration), and native model DLLs link
 # their own copy of this lib (CompilerDriver::discoverLibraries).
-add_library(hipdnn-ep-tls STATIC tls_stream.cpp)
+add_library(hipdnn-ep-tls STATIC tls_stream.cpp mm/kv_wrappers.cpp)
 set_target_properties(hipdnn-ep-tls PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(hipdnn-ep-tls PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 

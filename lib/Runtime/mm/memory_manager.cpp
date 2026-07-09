@@ -425,23 +425,6 @@ void MemoryManager::register_kv_buffer(void *ptr, size_t size) {
   kv_bytes_total_ += size;
 }
 
-// C-linkage wrappers so the allocator module (morphizen/ort-bridge) can call
-// register/unregister without including mm/memory_manager.h.
-extern "C" void hipdnn_ep_mm_register_kv_buffer(void *mm, void *ptr,
-                                                size_t size) {
-  if (mm)
-    static_cast<MemoryManager *>(mm)->register_kv_buffer(ptr, size);
-}
-
-extern "C" void hipdnn_ep_mm_unregister_kv_buffer(void *mm, void *ptr) {
-  if (mm)
-    static_cast<MemoryManager *>(mm)->unregister_kv_buffer(ptr);
-}
-
-extern "C" void *hipdnn_ep_mm_get_instance() {
-  return MemoryManager::get_instance();
-}
-
 void MemoryManager::unregister_kv_buffer(void *ptr) {
   if (!ptr)
     return;
