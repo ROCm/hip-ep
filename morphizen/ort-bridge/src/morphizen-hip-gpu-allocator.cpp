@@ -28,9 +28,12 @@
 // C-linkage helpers for KV cache buffer tracking (Phase 4a). Defined in
 // lib/Runtime/mm/memory_manager.cpp. The allocator calls these instead of
 // including mm/memory_manager.h to avoid a cross-module header dependency.
+// hipdnn_ep_mm_get_instance returns the process-level MemoryManager singleton
+// (set by initialize_state_handles after session init, cleared on cleanup).
 extern "C" {
 void hipdnn_ep_mm_register_kv_buffer(void *mm, void *ptr, size_t size);
 void hipdnn_ep_mm_unregister_kv_buffer(void *mm, void *ptr);
+void *hipdnn_ep_mm_get_instance();
 }
 
 namespace morphizen {
@@ -173,8 +176,10 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
     std::lock_guard<std::mutex> lk(self->pool_mutex_);
     self->ptr_to_size_[ptr] = alloc_size;
   }
-  if (cls < 0 && self->memory_manager_) {
-    hipdnn_ep_mm_register_kv_buffer(self->memory_manager_, ptr, alloc_size);
+  if (cls < 0) {
+    void *mm = hipdnn_ep_mm_get_instance();
+    if (mm)
+      hipdnn_ep_mm_register_kv_buffer(mm, ptr, alloc_size);
   }
   return ptr;
 }
@@ -201,8 +206,10 @@ void ORT_API_CALL HipGpuAllocator::FreeImpl(OrtAllocator *this_, void *p) {
       }
       // Large buffer (> 16 MB): never pooled. Unregister from MM's KV tracking
       // (if tracked), stop tracking, and release to the driver below.
-      if (self->memory_manager_) {
-        hipdnn_ep_mm_unregister_kv_buffer(self->memory_manager_, p);
+      {
+        void *mm = hipdnn_ep_mm_get_instance();
+        if (mm)
+          hipdnn_ep_mm_unregister_kv_buffer(mm, p);
       }
       self->ptr_to_size_.erase(it);
     }

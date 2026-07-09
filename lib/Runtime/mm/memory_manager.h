@@ -269,6 +269,13 @@ public:
   // initialize_state_handles after the stream is created so grow_gpu_buffer can
   // sync before realloc.
   void set_stream(void *stream) { stream_ = stream; }
+
+  // Process-level singleton for cross-module access. The allocator module
+  // (morphizen/ort-bridge) calls get_instance() to find the active MM without
+  // needing a direct reference. Set by initialize_state_handles after MM
+  // creation; cleared in cleanup. Single-session assumption.
+  static MemoryManager *get_instance();
+  static void set_instance(MemoryManager *mm);
 };
 
 #endif // HIPDNN_EP_RUNTIME_MM_MEMORY_MANAGER_H

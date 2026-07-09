@@ -146,6 +146,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   // hal_create_for_device uses device 0 (set below); for multi-GPU support
   // this would use the actual device. Stream is set after hipStreamCreate.
   state->mm = new MemoryManager(hal_create_for_device(0));
+  MemoryManager::set_instance(state->mm);
   // Start with no output allocator (null context + callback). The EP installs
   // one via hipdnn_ep_set_output_allocator before the first inference_compute,
   // and hipdnn_ep_alloc_output then forwards each graph-output request to it.
@@ -685,6 +686,7 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   // buffers: pool domains, shared workspace, host-scalar scratch, qmoe host
   // scratch). Must happen before stream teardown because MM's destructor may
   // need to sync the stream before freeing GPU pools.
+  MemoryManager::set_instance(nullptr);
   delete state->mm;
   state->mm = nullptr;
 

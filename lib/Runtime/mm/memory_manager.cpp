@@ -438,6 +438,10 @@ extern "C" void hipdnn_ep_mm_unregister_kv_buffer(void *mm, void *ptr) {
     static_cast<MemoryManager *>(mm)->unregister_kv_buffer(ptr);
 }
 
+extern "C" void *hipdnn_ep_mm_get_instance() {
+  return MemoryManager::get_instance();
+}
+
 void MemoryManager::unregister_kv_buffer(void *ptr) {
   if (!ptr)
     return;
@@ -466,3 +470,12 @@ size_t MemoryManager::gpu_bytes_used() const {
 size_t MemoryManager::cpu_bytes_used() const {
   return host_scratch_size_ + qmoe_host_scratch_size_;
 }
+
+//===----------------------------------------------------------------------===//
+// Process-level singleton
+//===----------------------------------------------------------------------===//
+
+static MemoryManager *g_mm_instance = nullptr;
+
+MemoryManager *MemoryManager::get_instance() { return g_mm_instance; }
+void MemoryManager::set_instance(MemoryManager *mm) { g_mm_instance = mm; }
