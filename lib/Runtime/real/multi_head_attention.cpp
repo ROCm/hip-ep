@@ -513,10 +513,10 @@ extern "C" int wrap_multi_head_attention(
   }
 
   RUNTIME_DEBUG_LOG(
-      "[multi_head_attention] workspace=%zu bytes (q=%zu k=%zu v=%zu "
+      "[multi_head_attention] scratch (q=%zu k=%zu v=%zu "
       "s=%zu p=%zu o=%zu gemm=%zu); need_q_trans=%d need_kv_trans=%d "
       "need_o_trans=%d\n",
-      total_ws, sz_q_bnsh, sz_k_bnsh, sz_v_bnsh, sz_s_f32, sz_p_f16, sz_o_bnsh,
+      sz_q_bnsh, sz_k_bnsh, sz_v_bnsh, sz_s_f32, sz_p_f16, sz_o_bnsh,
       sz_gemm_ws, (int)need_q_trans, (int)need_kv_trans, (int)need_o_trans);
 
   int result = 0;
