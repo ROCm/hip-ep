@@ -58,6 +58,13 @@ if(NOT BUILD_MOCK_RUNTIME)
   # memory (hipMalloc) and copy it back D2H for validation. Mock builds omit
   # this and the callback returns host buffers the CPU stubs write directly.
   target_compile_definitions(hip-test PRIVATE HIPDNN_EP_LINK_HIP_HOST=1)
+
+  # Hide static-archive symbols so hip-test's statically-linked LLVM can't clash
+  # with a different shared libLLVM the HIP runtime may pull in at load time
+  # (which can SIGSEGV before main). GNU ld / lld only.
+  if(NOT WIN32)
+    target_link_options(hip-test PRIVATE "LINKER:--exclude-libs,ALL")
+  endif()
 endif()
 
 target_include_directories(hip-test
