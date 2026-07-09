@@ -110,65 +110,35 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   int64_t k_blocks_fc2 = (inter_size + block_size - 1) / block_size;
   int64_t blob_size_fc2 = block_size / 2;
 
-  // Per-state grow-on-demand scratch in place of 8 hipMalloc/8 hipFree per
-  // call. Sub-buffers are 64-byte aligned (matches GPU pool alignment, gives
-  // each sub-buffer its own cache line). The buffer grows when num_tokens /
-  // sizes exceed the cached capacity, never shrinks; freed in state cleanup.
-  auto align_up_64 = [](size_t s) -> size_t { return (s + 63) & ~size_t(63); };
-  size_t sz_expert_indices = align_up_64(num_tokens * k * sizeof(int32_t));
-  size_t sz_expert_weights = align_up_64(num_tokens * k * elem_size);
-  size_t sz_gather_buf = align_up_64(num_tokens * hidden_size * elem_size);
-  size_t sz_fc1_buf = align_up_64(num_tokens * fusion_inter * elem_size);
-  // Fused decode (num_tokens == 1) reuses act_buf and fc2_buf as the [k,
-  // inter] activation slots and [k, hidden] per-expert output slots needed
-  // by hip_qmoe_decode_fused (gather/scatter happen inline inside the
-  // kernel, indexed by expert_indices). For num_tokens > 1 the multi-pass
-  // path uses [num_tokens, ...] sizing. Take the max so the per-state
-  // scratch is never under-sized regardless of which path runs.
   int64_t act_slots = std::max<int64_t>(num_tokens, k);
-  size_t sz_act_buf = align_up_64(act_slots * inter_size * elem_size);
-  size_t sz_fc2_buf = align_up_64(act_slots * hidden_size * elem_size);
-  // bucket_tokens outputs (Phase 2): per-expert counts + exclusive prefix sum
-  // offsets, plus tokens/weights re-grouped on-device into per-expert
-  // contiguous slices. Replaces the old per-expert host h_ids/h_wts_e build +
-  // H2D round-trip (2 hipMemcpyAsync per active expert per layer).
-  size_t sz_expert_counts = align_up_64(num_experts * sizeof(int32_t));
-  size_t sz_expert_offsets = align_up_64((num_experts + 1) * sizeof(int32_t));
-  size_t sz_sorted_token_ids = align_up_64(num_tokens * k * sizeof(int32_t));
-  size_t sz_sorted_weights = align_up_64(num_tokens * k * elem_size);
 
-  size_t off_expert_indices = 0;
-  size_t off_expert_weights = off_expert_indices + sz_expert_indices;
-  size_t off_gather_buf = off_expert_weights + sz_expert_weights;
-  size_t off_fc1_buf = off_gather_buf + sz_gather_buf;
-  size_t off_act_buf = off_fc1_buf + sz_fc1_buf;
-  size_t off_fc2_buf = off_act_buf + sz_act_buf;
-  size_t off_expert_counts = off_fc2_buf + sz_fc2_buf;
-  size_t off_expert_offsets = off_expert_counts + sz_expert_counts;
-  size_t off_sorted_token_ids = off_expert_offsets + sz_expert_offsets;
-  size_t off_sorted_weights = off_sorted_token_ids + sz_sorted_token_ids;
-  size_t total_scratch = off_sorted_weights + sz_sorted_weights;
+  void *d_expert_indices =
+      hipdnn_ep_scratch_alloc(state, num_tokens * k * sizeof(int32_t));
+  void *d_expert_weights =
+      hipdnn_ep_scratch_alloc(state, num_tokens * k * elem_size);
+  void *d_gather_buf =
+      hipdnn_ep_scratch_alloc(state, num_tokens * hidden_size * elem_size);
+  void *d_fc1_buf =
+      hipdnn_ep_scratch_alloc(state, num_tokens * fusion_inter * elem_size);
+  void *d_act_buf =
+      hipdnn_ep_scratch_alloc(state, act_slots * inter_size * elem_size);
+  void *d_fc2_buf =
+      hipdnn_ep_scratch_alloc(state, act_slots * hidden_size * elem_size);
+  int32_t *d_expert_counts = static_cast<int32_t *>(
+      hipdnn_ep_scratch_alloc(state, num_experts * sizeof(int32_t)));
+  int32_t *d_expert_offsets = static_cast<int32_t *>(
+      hipdnn_ep_scratch_alloc(state, (num_experts + 1) * sizeof(int32_t)));
+  int32_t *d_sorted_token_ids = static_cast<int32_t *>(
+      hipdnn_ep_scratch_alloc(state, num_tokens * k * sizeof(int32_t)));
+  char *d_sorted_weights = static_cast<char *>(
+      hipdnn_ep_scratch_alloc(state, num_tokens * k * elem_size));
 
-  if (hipdnn_ep_state_ensure_qmoe_scratch(state, total_scratch) != 0) {
-    fprintf(stderr, "wrap_qmoe: ensure_qmoe_scratch(%zu) failed\n",
-            total_scratch);
+  if (!d_expert_indices || !d_expert_weights || !d_gather_buf || !d_fc1_buf ||
+      !d_act_buf || !d_fc2_buf || !d_expert_counts || !d_expert_offsets ||
+      !d_sorted_token_ids || !d_sorted_weights) {
+    fprintf(stderr, "wrap_qmoe: scratch_alloc failed\n");
     return -1;
   }
-  char *scratch_base =
-      static_cast<char *>(hipdnn_ep_state_get_qmoe_scratch(state));
-  void *d_expert_indices = scratch_base + off_expert_indices;
-  void *d_expert_weights = scratch_base + off_expert_weights;
-  void *d_gather_buf = scratch_base + off_gather_buf;
-  void *d_fc1_buf = scratch_base + off_fc1_buf;
-  void *d_act_buf = scratch_base + off_act_buf;
-  void *d_fc2_buf = scratch_base + off_fc2_buf;
-  int32_t *d_expert_counts =
-      reinterpret_cast<int32_t *>(scratch_base + off_expert_counts);
-  int32_t *d_expert_offsets =
-      reinterpret_cast<int32_t *>(scratch_base + off_expert_offsets);
-  int32_t *d_sorted_token_ids =
-      reinterpret_cast<int32_t *>(scratch_base + off_sorted_token_ids);
-  char *d_sorted_weights = scratch_base + off_sorted_weights;
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: topk_routing(tokens=%lld, experts=%lld, "
                     "k=%lld, normalize=%lld)\n",

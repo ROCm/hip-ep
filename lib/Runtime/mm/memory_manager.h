@@ -19,8 +19,13 @@
 //   All callers now go through MemoryManager exclusively; fallback code paths
 //   deleted.
 //
-// Future phases add: BlockPool (Phase 3), KvCacheManager (Phase 4), Tier-1
-// CPU offload (Phase 5). The public API surface is kept stable across phases.
+// Phase 3: bump-pointer scratch arena backed by the shared workspace buffer.
+//   scratch_alloc(N) replaces manual offset arithmetic; begin_compute() resets
+//   the bump pointer. All callers migrated from ensure_workspace + manual
+//   offsets to scratch_alloc().
+//
+// Future phases add: KvCacheManager (Phase 4), Tier-1 CPU offload (Phase 5).
+// The public API surface is kept stable across phases.
 //
 //===----------------------------------------------------------------------===//
 
@@ -76,13 +81,29 @@ public:
   void *get_host_scratch(size_t needed_size);
 
   //-------------------------------------------------------------------
-  // Shared workspace (replaces hipdnn_ep_state_ensure_workspace,
-  //   hipdnn_ep_state_ensure_qmoe_scratch, hipdnn_ep_state_ensure_conv_scratch)
+  // Scratch arena (bump-pointer allocator over the shared workspace)
   //-------------------------------------------------------------------
 
-  // Single grow-on-demand GPU workspace shared by GQA, QMoE, conv, etc.
-  // All callers are serialized on the same HIP stream so one buffer suffices.
-  // Growth is 1.5× amortized. Returns nullptr on failure.
+  // Bump-allocate `size` bytes (64-byte aligned) from the scratch arena.
+  // Backed by the shared workspace buffer; grows it on demand (1.5×
+  // amortized). Returns nullptr on allocation failure. The bump pointer
+  // is reset by begin_compute() at the start of each Compute().
+  void *scratch_alloc(size_t size);
+
+  // Reset the bump pointer to 0 (called by begin_compute()).
+  void scratch_reset();
+
+  // Current bump pointer offset (for diagnostics and tests).
+  size_t scratch_offset() const { return scratch_offset_; }
+
+  //-------------------------------------------------------------------
+  // Shared workspace (low-level; prefer scratch_alloc for new code)
+  //-------------------------------------------------------------------
+
+  // Ensure the workspace buffer is at least `needed_size` bytes. Resets
+  // the scratch bump pointer (callers that use ensure_workspace want the
+  // whole buffer). Kept for gemm/matmul autotune which needs the raw
+  // buffer + its full size. Returns nullptr on failure.
   void *ensure_workspace(size_t needed_size);
   void *get_workspace() const;
   size_t get_workspace_size() const;
@@ -98,12 +119,12 @@ public:
   //-------------------------------------------------------------------
 
   // Called at the start of every Compute():
+  //   - Resets the scratch arena bump pointer.
   //   - Invalidates the seqlens_k cache.
-  //   - (Phase 3+) resets the bump-pointer scratch arena.
   void begin_compute();
 
-  // Called at the end of every Compute() (Phase 3+: releases scratch blocks).
-  // Currently a no-op for scratch until Phase 3.
+  // Called at the end of every Compute(). Currently a no-op; reserved for
+  // future phases that need end-of-inference cleanup.
   void end_compute();
 
   //-------------------------------------------------------------------
@@ -153,10 +174,11 @@ private:
   size_t num_buffers_ = 0;
 
   //-------------------------------------------------------------------
-  // Shared GPU workspace
+  // Shared GPU workspace + scratch arena bump pointer
   //-------------------------------------------------------------------
   void *workspace_ = nullptr;
   size_t workspace_size_ = 0;
+  size_t scratch_offset_ = 0; // bump pointer into workspace_
 
   //-------------------------------------------------------------------
   // Host-scalar scratch (hipHostMalloc Mapped+NonCoherent)

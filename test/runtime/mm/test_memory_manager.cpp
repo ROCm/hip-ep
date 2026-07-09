@@ -17,6 +17,7 @@
 #include "mm/memory_manager.h"
 
 #include <cassert>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 
@@ -288,6 +289,84 @@ static void test_num_pool_domains_grows_on_demand() {
 }
 
 //===----------------------------------------------------------------------===//
+// Scratch arena
+//===----------------------------------------------------------------------===//
+
+static void test_scratch_alloc_returns_aligned_pointer() {
+  auto mm = make_mm();
+  void *p = mm->scratch_alloc(100);
+  CHECK(p != nullptr);
+  CHECK((reinterpret_cast<uintptr_t>(p) % 64) == 0);
+  void *p2 = mm->scratch_alloc(33);
+  CHECK(p2 != nullptr);
+  CHECK((reinterpret_cast<uintptr_t>(p2) % 64) == 0);
+  delete mm;
+}
+
+static void test_scratch_alloc_sequential_non_overlapping() {
+  auto mm = make_mm();
+  void *a = mm->scratch_alloc(128);
+  void *b = mm->scratch_alloc(256);
+  CHECK(a != nullptr);
+  CHECK(b != nullptr);
+  auto a_end = reinterpret_cast<uintptr_t>(a) + 128;
+  auto b_start = reinterpret_cast<uintptr_t>(b);
+  CHECK(b_start >= a_end);
+  delete mm;
+}
+
+static void test_scratch_reset_reuses_memory() {
+  auto mm = make_mm();
+  void *p1 = mm->scratch_alloc(512);
+  CHECK(p1 != nullptr);
+  CHECK(mm->scratch_offset() > 0);
+  mm->scratch_reset();
+  CHECK(mm->scratch_offset() == 0);
+  void *p2 = mm->scratch_alloc(512);
+  CHECK(p2 == p1);
+  delete mm;
+}
+
+static void test_scratch_alloc_grows_workspace() {
+  auto mm = make_mm();
+  mm->scratch_alloc(1000);
+  size_t ws1 = mm->get_workspace_size();
+  CHECK(ws1 >= 1000);
+  mm->scratch_alloc(2000);
+  size_t ws2 = mm->get_workspace_size();
+  CHECK(ws2 >= 1000 + 2000);
+  delete mm;
+}
+
+static void test_begin_compute_resets_scratch() {
+  auto mm = make_mm();
+  mm->scratch_alloc(256);
+  CHECK(mm->scratch_offset() > 0);
+  mm->begin_compute();
+  CHECK(mm->scratch_offset() == 0);
+  delete mm;
+}
+
+static void test_ensure_workspace_resets_scratch() {
+  auto mm = make_mm();
+  mm->scratch_alloc(128);
+  CHECK(mm->scratch_offset() > 0);
+  mm->ensure_workspace(4096);
+  CHECK(mm->scratch_offset() == 0);
+  delete mm;
+}
+
+static void test_scratch_alloc_zero_returns_valid_ptr() {
+  auto mm = make_mm();
+  mm->scratch_alloc(64);
+  size_t off_before = mm->scratch_offset();
+  void *p = mm->scratch_alloc(0);
+  CHECK(mm->scratch_offset() == off_before);
+  CHECK(p != nullptr);
+  delete mm;
+}
+
+//===----------------------------------------------------------------------===//
 // main — runs all MM unit tests (HAL + MemoryManager)
 //===----------------------------------------------------------------------===//
 
@@ -321,6 +400,14 @@ int main() {
   test_seqlens_k_cache_ptr_keyed();
   test_seqlens_k_cache_set_replaces();
   test_end_compute_is_noop_in_phase1();
+
+  test_scratch_alloc_returns_aligned_pointer();
+  test_scratch_alloc_sequential_non_overlapping();
+  test_scratch_reset_reuses_memory();
+  test_scratch_alloc_grows_workspace();
+  test_begin_compute_resets_scratch();
+  test_ensure_workspace_resets_scratch();
+  test_scratch_alloc_zero_returns_valid_ptr();
 
   test_gpu_bytes_used_accounts_for_pool_and_workspace();
   test_cpu_bytes_used_accounts_for_host_scratch();

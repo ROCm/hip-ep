@@ -899,6 +899,10 @@ void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size) {
   return state->mm->get_host_scratch(needed_size);
 }
 
+void *hipdnn_ep_scratch_alloc(RuntimeState *state, size_t size) {
+  return state ? state->mm->scratch_alloc(size) : nullptr;
+}
+
 void *hipdnn_ep_state_get_workspace(RuntimeState *state) {
   return state ? state->mm->get_workspace() : nullptr;
 }

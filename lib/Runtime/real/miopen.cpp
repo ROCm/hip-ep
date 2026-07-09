@@ -257,15 +257,15 @@ int wrap_miopenConvolutionForward(
       &workspace_size));
 
   if (workspace_size > 0) {
-    if (hipdnn_ep_state_ensure_conv_scratch(state, workspace_size) != 0) {
+    workspace = hipdnn_ep_scratch_alloc(state, workspace_size);
+    if (!workspace) {
       fprintf(stderr,
-              "wrap_miopenConvolutionForward: failed to grow conv_scratch to "
+              "wrap_miopenConvolutionForward: scratch_alloc failed for "
               "%zu bytes\n",
               workspace_size);
       result = -1;
       goto cleanup;
     }
-    workspace = hipdnn_ep_state_get_conv_scratch(state);
   }
 
   // Find best algorithm

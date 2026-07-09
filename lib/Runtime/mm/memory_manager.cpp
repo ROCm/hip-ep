@@ -308,10 +308,36 @@ void *MemoryManager::get_host_scratch(size_t needed_size) {
 }
 
 //===----------------------------------------------------------------------===//
-// Shared GPU workspace
+// Scratch arena (bump-pointer allocator over the shared workspace)
+//===----------------------------------------------------------------------===//
+
+static constexpr size_t kScratchAlignment = 64;
+
+void *MemoryManager::scratch_alloc(size_t size) {
+  if (size == 0)
+    return workspace_ ? static_cast<char *>(workspace_) + scratch_offset_
+                      : nullptr;
+
+  size_t aligned = (size + kScratchAlignment - 1) & ~(kScratchAlignment - 1);
+  size_t needed = scratch_offset_ + aligned;
+  if (needed > workspace_size_) {
+    if (!grow_gpu_buffer(&workspace_, &workspace_size_, needed, "workspace"))
+      return nullptr;
+  }
+
+  void *ptr = static_cast<char *>(workspace_) + scratch_offset_;
+  scratch_offset_ += aligned;
+  return ptr;
+}
+
+void MemoryManager::scratch_reset() { scratch_offset_ = 0; }
+
+//===----------------------------------------------------------------------===//
+// Shared GPU workspace (low-level; prefer scratch_alloc for new code)
 //===----------------------------------------------------------------------===//
 
 void *MemoryManager::ensure_workspace(size_t needed_size) {
+  scratch_offset_ = 0;
   if (needed_size == 0)
     return workspace_;
   if (!grow_gpu_buffer(&workspace_, &workspace_size_, needed_size, "workspace"))
@@ -344,15 +370,13 @@ void *MemoryManager::get_qmoe_host_scratch() const {
 //===----------------------------------------------------------------------===//
 
 void MemoryManager::begin_compute() {
-  // Invalidate the seqlens_k cross-layer cache (same semantics as the old
-  // RuntimeState fields, just moved here so begin_compute() is the one
-  // authoritative place to invalidate all per-forward-pass caches).
+  scratch_reset();
   seqlens_k_valid_ = false;
   seqlens_k_ptr_ = nullptr;
 }
 
 void MemoryManager::end_compute() {
-  // No-op today. Phase 3 will reset the bump-pointer scratch arena here.
+  // Reserved for future phases that need end-of-inference cleanup.
 }
 
 //===----------------------------------------------------------------------===//
