@@ -11,6 +11,20 @@
 typedef _Float16 half16 __attribute__((ext_vector_type(16)));
 typedef float float8 __attribute__((ext_vector_type(8)));
 
+// The WMMA builtin below is RDNA3-family (wave32) only. Where __has_builtin
+// reports it absent, trap instead so this file still compiles and a WMMA
+// launch on an unsupported arch aborts loudly rather than returning garbage.
+#if !defined(__has_builtin) ||                                                  \
+    !__has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_f16_w32)
+static __device__ __forceinline__ float8
+hipdnn_wmma_f32_16x16x16_f16_w32_unavailable(half16, half16, float8 c) {
+  __builtin_trap();
+  return c;
+}
+#define __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c)                     \
+  hipdnn_wmma_f32_16x16x16_f16_w32_unavailable((a), (b), (c))
+#endif
+
 static constexpr int kWmmaTile = 16;  // RDNA 3 WMMA tile dimension (16x16x16)
 
 //===----------------------------------------------------------------------===//
