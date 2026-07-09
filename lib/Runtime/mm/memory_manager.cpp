@@ -337,7 +337,6 @@ void MemoryManager::scratch_reset() { scratch_offset_ = 0; }
 //===----------------------------------------------------------------------===//
 
 void *MemoryManager::ensure_workspace(size_t needed_size) {
-  scratch_offset_ = 0;
   if (needed_size == 0)
     return workspace_;
   if (!grow_gpu_buffer(&workspace_, &workspace_size_, needed_size, "workspace"))

@@ -347,12 +347,13 @@ static void test_begin_compute_resets_scratch() {
   delete mm;
 }
 
-static void test_ensure_workspace_resets_scratch() {
+static void test_ensure_workspace_preserves_scratch() {
   auto mm = make_mm();
   mm->scratch_alloc(128);
-  CHECK(mm->scratch_offset() > 0);
+  size_t off = mm->scratch_offset();
+  CHECK(off > 0);
   mm->ensure_workspace(4096);
-  CHECK(mm->scratch_offset() == 0);
+  CHECK(mm->scratch_offset() == off);
   delete mm;
 }
 
@@ -406,7 +407,7 @@ int main() {
   test_scratch_reset_reuses_memory();
   test_scratch_alloc_grows_workspace();
   test_begin_compute_resets_scratch();
-  test_ensure_workspace_resets_scratch();
+  test_ensure_workspace_preserves_scratch();
   test_scratch_alloc_zero_returns_valid_ptr();
 
   test_gpu_bytes_used_accounts_for_pool_and_workspace();

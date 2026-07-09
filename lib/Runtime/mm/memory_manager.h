@@ -107,10 +107,10 @@ public:
   // Shared workspace (low-level; prefer scratch_alloc for new code)
   //-------------------------------------------------------------------
 
-  // Ensure the workspace buffer is at least `needed_size` bytes. Resets
-  // the scratch bump pointer (callers that use ensure_workspace want the
-  // whole buffer). Kept for gemm/matmul autotune which needs the raw
-  // buffer + its full size. Returns nullptr on failure.
+  // Ensure the workspace buffer is at least `needed_size` bytes. Does NOT
+  // reset the scratch bump pointer (other ops may have active scratch
+  // allocations in the same Compute). Kept for gemm/matmul autotune which
+  // needs the raw buffer + its full size. Returns nullptr on failure.
   void *ensure_workspace(size_t needed_size);
   void *get_workspace() const;
   size_t get_workspace_size() const;
