@@ -15,6 +15,7 @@
 
 #include "hip/Conversion/OnnxToHip/ConstantsIO.h"
 #include "hip/Support/DiskFileSystem.h"
+#include "hip/debug_log.h"
 #include "hip/timing.h"
 #include "morphizen-foundation/file_io.hpp"
 
@@ -34,6 +35,7 @@
 #include <chrono>
 #include <cstring>
 #include <fstream>
+#include <map>
 #include <vector>
 
 #define DEBUG_TYPE "convert-onnx-to-hip"
@@ -886,6 +888,42 @@ void ConvertOnnxToHipPass::runOnOperation() {
   });
   for (auto *op : toErase)
     op->erase();
+
+  // Diagnostic: after conversion + dead-op DCE, any op still named `onnx.*`
+  // and still USED is an operator with no ONNX->HIP converter (or one whose
+  // matcher bailed out). These are the ops that will later make
+  // one-shot-bufferize abort with `op was not bufferized` — which is silent at
+  // the EP level (CPU fallback). Report them here, grouped by op name with a
+  // per-name count, so the missing converters are visible before bufferize.
+  // Gated on HIPDNN_EP_DEBUG=1 to avoid noise on normal compiles. `onnx.NoValue`
+  // is excluded — it is a legal placeholder consumed by later lowering, not an
+  // unconverted compute op.
+  if (hipdnn_ep_debug_enabled()) {
+    std::map<std::string, int64_t> unconverted;
+    module.walk([&](mlir::Operation *op) {
+      llvm::StringRef name = op->getName().getStringRef();
+      if (!name.starts_with("onnx.") || name == "onnx.NoValue" ||
+          op->use_empty())
+        return;
+      // onnx.Custom is a generic container: the actual op is selected by the
+      // `function_name` attribute (MatMulNBits / GroupQueryAttention /
+      // Attention / GatherBlockQuantized / ...). Reporting bare "onnx.Custom"
+      // would collapse distinct unconverted ops, so append the function name.
+      std::string key = name.str();
+      if (name == "onnx.Custom") {
+        if (auto fn = op->getAttrOfType<mlir::StringAttr>("function_name"))
+          key += "[" + fn.getValue().str() + "]";
+      }
+      ++unconverted[key];
+    });
+    if (!unconverted.empty()) {
+      llvm::errs() << "[convert-onnx-to-hip] " << unconverted.size()
+                   << " unconverted onnx op type(s) still live (no ONNX->HIP "
+                      "converter):\n";
+      for (auto &kv : unconverted)
+        llvm::errs() << "  " << kv.first << " x" << kv.second << "\n";
+    }
+  }
 
   // ONNX-MLIR tags func.func results with attributes (e.g. "onnx_node_name").
   // Downstream bufferization skips any result that still has attributes, which
