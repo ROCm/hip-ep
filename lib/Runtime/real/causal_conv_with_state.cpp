@@ -411,15 +411,16 @@ int wrap_causal_conv_with_state(RuntimeState *state, int op_state_slot,
   }
 
   void *virtual_buf = hipdnn_ep_scratch_alloc(state, virtual_size);
-  void *sigmoid_buf =
-      (activation == 1) ? hipdnn_ep_scratch_alloc(state, sigmoid_size) : nullptr;
+  void *sigmoid_buf = (activation == 1)
+                          ? hipdnn_ep_scratch_alloc(state, sigmoid_size)
+                          : nullptr;
   void *conv_workspace =
-      (conv_workspace_size > 0) ? hipdnn_ep_scratch_alloc(state, conv_workspace_size)
-                                : nullptr;
+      (conv_workspace_size > 0)
+          ? hipdnn_ep_scratch_alloc(state, conv_workspace_size)
+          : nullptr;
   if (!virtual_buf || (activation == 1 && !sigmoid_buf) ||
       (conv_workspace_size > 0 && !conv_workspace)) {
-    fprintf(stderr,
-            "wrap_causal_conv_with_state: scratch_alloc failed\n");
+    fprintf(stderr, "wrap_causal_conv_with_state: scratch_alloc failed\n");
     return -1;
   }
 

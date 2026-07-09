@@ -288,7 +288,8 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, int op_state_slot,
     skip_bytes = static_cast<size_t>(input_num_elements) * element_size_bytes;
   size_t rstd_bytes = static_cast<size_t>(num_rows) * sizeof(float);
 
-  void *skip_scratch = skip_bytes > 0 ? hipdnn_ep_scratch_alloc(state, skip_bytes) : nullptr;
+  void *skip_scratch =
+      skip_bytes > 0 ? hipdnn_ep_scratch_alloc(state, skip_bytes) : nullptr;
   void *rstd_buf = hipdnn_ep_scratch_alloc(state, rstd_bytes);
   if ((skip_bytes > 0 && !skip_scratch) || !rstd_buf) {
     fprintf(stderr,

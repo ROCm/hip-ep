@@ -1121,19 +1121,16 @@ static int gqa_forward_hipblaslt(
   size_t gemm_ws_needed =
       std::max(scoreState->workspace_size, valueState->workspace_size);
 
-  void *d_Qtrans = need_transpose
-                       ? hipdnn_ep_scratch_alloc(state, Qtrans_bytes)
-                       : nullptr;
-  void *d_Kexp = use_no_expand
-                     ? nullptr
-                     : hipdnn_ep_scratch_alloc(state, Kexp_bytes);
-  void *d_Vexp = use_no_expand
-                     ? nullptr
-                     : hipdnn_ep_scratch_alloc(state, Vexp_bytes);
+  void *d_Qtrans =
+      need_transpose ? hipdnn_ep_scratch_alloc(state, Qtrans_bytes) : nullptr;
+  void *d_Kexp =
+      use_no_expand ? nullptr : hipdnn_ep_scratch_alloc(state, Kexp_bytes);
+  void *d_Vexp =
+      use_no_expand ? nullptr : hipdnn_ep_scratch_alloc(state, Vexp_bytes);
   void *d_S_f32 = hipdnn_ep_scratch_alloc(state, S_f32_bytes);
   void *d_S_fp16 = hipdnn_ep_scratch_alloc(state, S_fp16_bytes);
-  void *d_O = need_transpose ? hipdnn_ep_scratch_alloc(state, O_bytes)
-                             : nullptr;
+  void *d_O =
+      need_transpose ? hipdnn_ep_scratch_alloc(state, O_bytes) : nullptr;
 
   void *d_Qroped_d = nullptr, *d_Kroped_d = nullptr;
   if (need_rope) {
@@ -1157,8 +1154,7 @@ static int gqa_forward_hipblaslt(
                           : nullptr;
   size_t gemm_ws_bytes = gemm_ws_needed;
 
-  if (!d_S_f32 || !d_S_fp16 ||
-      (need_transpose && (!d_Qtrans || !d_O)) ||
+  if (!d_S_f32 || !d_S_fp16 || (need_transpose && (!d_Qtrans || !d_O)) ||
       (!use_no_expand && (!d_Kexp || !d_Vexp)) ||
       (need_rope && (!d_Qroped_d || !d_Kroped_d)) ||
       (packed_qkv && (!d_Qsplit_d || !d_Ksplit_d || !d_Vsplit_d)) ||
@@ -1185,8 +1181,7 @@ static int gqa_forward_hipblaslt(
       HIP_CHECK(hip_gqa_split_qkv(
           stream, query, d_Qsplit_d, d_Ksplit_d, d_Vsplit_d,
           static_cast<int>(B), static_cast<int>(sq), static_cast<int>(H),
-          static_cast<int>(G), static_cast<int>(d),
-          static_cast<int>(elem_sz)));
+          static_cast<int>(G), static_cast<int>(d), static_cast<int>(elem_sz)));
       qSrc = d_Qsplit_d;
       kSrc = d_Ksplit_d;
       vSrc = d_Vsplit_d;

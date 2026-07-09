@@ -501,14 +501,14 @@ extern "C" int wrap_multi_head_attention(
   void *d_Vbnsh = sz_v_bnsh ? hipdnn_ep_scratch_alloc(state, sz_v_bnsh) : value;
   void *d_S_f32 = hipdnn_ep_scratch_alloc(state, sz_s_f32);
   void *d_P_f16 = hipdnn_ep_scratch_alloc(state, sz_p_f16);
-  void *d_O_bnsh = sz_o_bnsh ? hipdnn_ep_scratch_alloc(state, sz_o_bnsh) : output;
+  void *d_O_bnsh =
+      sz_o_bnsh ? hipdnn_ep_scratch_alloc(state, sz_o_bnsh) : output;
   void *gemm_ws = hipdnn_ep_scratch_alloc(state, sz_gemm_ws);
   const size_t gemm_ws_bytes = sz_gemm_ws;
-  if (!d_S_f32 || !d_P_f16 || !gemm_ws ||
-      (sz_q_bnsh && !d_Qbnsh) || (sz_k_bnsh && !d_Kbnsh) ||
-      (sz_v_bnsh && !d_Vbnsh) || (sz_o_bnsh && !d_O_bnsh)) {
-    fprintf(stderr,
-            "[multi_head_attention] ERROR: scratch_alloc failed\n");
+  if (!d_S_f32 || !d_P_f16 || !gemm_ws || (sz_q_bnsh && !d_Qbnsh) ||
+      (sz_k_bnsh && !d_Kbnsh) || (sz_v_bnsh && !d_Vbnsh) ||
+      (sz_o_bnsh && !d_O_bnsh)) {
+    fprintf(stderr, "[multi_head_attention] ERROR: scratch_alloc failed\n");
     return -1;
   }
 
