@@ -453,4 +453,3 @@ size_t MemoryManager::gpu_bytes_used() const {
 size_t MemoryManager::cpu_bytes_used() const {
   return host_scratch_size_ + qmoe_host_scratch_size_;
 }
-

@@ -269,7 +269,6 @@ public:
   // initialize_state_handles after the stream is created so grow_gpu_buffer can
   // sync before realloc.
   void set_stream(void *stream) { stream_ = stream; }
-
 };
 
 #endif // HIPDNN_EP_RUNTIME_MM_MEMORY_MANAGER_H

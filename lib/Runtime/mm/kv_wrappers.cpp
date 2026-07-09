@@ -45,8 +45,7 @@ extern "C" void hipdnn_ep_mm_register_kv_buffer(void * /*mm*/, void *ptr,
       return;
   }
   if (g_kv_count >= kMaxKvEntries) {
-    fprintf(stderr,
-            "hipdnn_ep_mm_register_kv_buffer: capacity exceeded (%d)\n",
+    fprintf(stderr, "hipdnn_ep_mm_register_kv_buffer: capacity exceeded (%d)\n",
             kMaxKvEntries);
     return;
   }
