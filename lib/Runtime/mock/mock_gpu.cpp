@@ -1167,6 +1167,58 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   return 0;
 }
 
+int wrap_ms_dequantize_linear(
+    RuntimeState *state,
+    const void *input, const void *scale, const void *zero_point,
+    void *output,
+    int64_t n_elements, int64_t axis, int64_t n_channels,
+    int64_t input_elem_size, int64_t scale_elem_size) {
+  if (!state || !input || !scale || !output) {
+    fprintf(stderr, "Invalid state in wrap_ms_dequantize_linear\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_ms_dequantize_linear(n=%lld ch=%lld in=%lld sc=%lld)\n",
+             (long long)n_elements, (long long)n_channels,
+             (long long)input_elem_size, (long long)scale_elem_size);
+  // Mock: copy input to output (identity for testing)
+  if (output != input)
+    memcpy(output, input, static_cast<size_t>(n_elements) * static_cast<size_t>(input_elem_size));
+  return 0;
+}
+
+int wrap_ms_quantize_linear(
+    RuntimeState *state,
+    const void *input, const void *scale, const void *zero_point,
+    void *output,
+    int64_t n_elements, int64_t axis, int64_t n_channels,
+    int64_t input_elem_size, int64_t output_elem_size) {
+  if (!state || !input || !scale || !output) {
+    fprintf(stderr, "Invalid state in wrap_ms_quantize_linear\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_ms_quantize_linear(n=%lld ch=%lld in=%lld out=%lld)\n",
+             (long long)n_elements, (long long)n_channels,
+             (long long)input_elem_size, (long long)output_elem_size);
+  // Mock: zero output
+  memset(output, 0, static_cast<size_t>(n_elements) * static_cast<size_t>(output_elem_size));
+  return 0;
+}
+
+int wrap_ms_matmul_nbits_i2_fused(
+    RuntimeState *state,
+    const void *A_u16, const void *B, const void *w_scales, const void *w_zp,
+    const void *dq_scale, const void *dq_zp, const void *q_scale, const void *q_zp,
+    void *output, int64_t M, int64_t N, int64_t K, int64_t block_size) {
+  if (!state || !A_u16 || !B || !w_scales || !output) {
+    fprintf(stderr, "Invalid state in wrap_ms_matmul_nbits_i2_fused\n");
+    return -1;
+  }
+  MOCK_PRINT("[MOCK] wrap_ms_matmul_nbits_i2_fused(M=%lld N=%lld K=%lld bs=%lld)\n",
+             (long long)M, (long long)N, (long long)K, (long long)block_size);
+  memset(output, 0, static_cast<size_t>(M) * static_cast<size_t>(N) * 2);
+  return 0;
+}
+
 int wrap_gather_block_quantized(
     RuntimeState *state, const void *data, const void *indices,
     const void *scales, const void *zero_points, void *output,

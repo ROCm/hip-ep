@@ -1648,7 +1648,7 @@ gqa_flash_decode_reduce_kernel(
   // sink term still defines a valid (zero) output: softmax over empty +
   // sink ⇒ all weight on the sink, which contributes 0 to V. We therefore
   // write a zero output here either way.
-  if (!isfinite(global_m)) {
+  if (!__builtin_isfinite(global_m)) {
     O[(batch * H + head_q) * D + tid] = __float2half(0.0f);
     return;
   }

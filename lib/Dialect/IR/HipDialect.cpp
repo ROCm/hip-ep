@@ -1064,6 +1064,48 @@ void GatherBlockQuantizedOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// MsDequantizeLinearOp: ins(input, scale, [zero_point]) outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MsDequantizeLinearOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void MsDequantizeLinearOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// MsQuantizeLinearOp: ins(input, scale, [zero_point]) outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MsQuantizeLinearOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void MsQuantizeLinearOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// MsMatMulNBitsI2FusedOp: fused DQ + bits=2 matmul + Q
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MsMatMulNBitsI2FusedOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void MsMatMulNBitsI2FusedOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // CausalConvWithStateOp: ins(input, weight, [bias], [past_state])
 //                        outs(output, present_state)
 //===----------------------------------------------------------------------===//

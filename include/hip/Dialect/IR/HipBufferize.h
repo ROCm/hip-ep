@@ -147,6 +147,12 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     QMoEOp::attachInterface<HipDstBufferizableModel<QMoEOp>>(*ctx);
     GatherBlockQuantizedOp::attachInterface<
         HipDstBufferizableModel<GatherBlockQuantizedOp>>(*ctx);
+    MsDequantizeLinearOp::attachInterface<
+        HipDstBufferizableModel<MsDequantizeLinearOp>>(*ctx);
+    MsQuantizeLinearOp::attachInterface<
+        HipDstBufferizableModel<MsQuantizeLinearOp>>(*ctx);
+    MsMatMulNBitsI2FusedOp::attachInterface<
+        HipDstBufferizableModel<MsMatMulNBitsI2FusedOp>>(*ctx);
     CausalConvWithStateOp::attachInterface<
         HipDstBufferizableModel<CausalConvWithStateOp>>(*ctx);
     HipDNNGraphOp::attachInterface<HipDstBufferizableModel<HipDNNGraphOp>>(

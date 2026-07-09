@@ -129,11 +129,11 @@ __device__ inline float apply_op(float cur, float upd, Op op) {
   case Op::Mul:
     return cur * upd;
   case Op::Min:
-    if (isnan(cur) || isnan(upd))
+    if (__builtin_isnan(cur) || __builtin_isnan(upd))
       return __builtin_nanf("");
     return cur < upd ? cur : upd;
   case Op::Max:
-    if (isnan(cur) || isnan(upd))
+    if (__builtin_isnan(cur) || __builtin_isnan(upd))
       return __builtin_nanf("");
     return cur > upd ? cur : upd;
   }

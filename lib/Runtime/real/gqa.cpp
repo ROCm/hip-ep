@@ -193,8 +193,14 @@ static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
     return kSeqlensKNotRead;
   }
 
-  if (gqa_cache_seqlens_enabled() && state && state->seqlens_k_cached_valid &&
-      state->seqlens_k_cached_ptr == seqlens_k_ptr) {
+  // Cache hit: same pointer (Llama/gpt-oss steady-state) OR any pointer
+  // after the first layer read within this Compute() — for models that
+  // allocate a new seqlens_k buffer every inference (e.g. ORCA W2A8 where
+  // past_seq_len is a Python numpy array), the pointer changes but the
+  // VALUE is the same for all 40 GQA layers within one forward pass.
+  // The cache is invalidated by begin_compute() at the start of each
+  // Compute(), so reusing the cached value across layers is safe.
+  if (gqa_cache_seqlens_enabled() && state && state->seqlens_k_cached_valid) {
     return state->seqlens_k_cached_val;
   }
 
@@ -620,9 +626,10 @@ static int gqa_forward_hipblaslt(
     total_seq_pre = skv;
   } else if (seqlens_k_pre != kSeqlensKNotRead) {
     // -1 is ORT's prefill sentinel: total_seq=sq, past_len=0. Real values
-    // are 0..max_seq; total_seq = seqlens_k_val + 1.
+    // are 0..max_seq. Convention: for decode (sq==1), total_seq=seqlens_k+1.
+    // For prefill (sq>1), total_seq=seqlens_k+sq (seqlens_k = past tokens).
     total_seq_pre =
-        (seqlens_k_pre < 0) ? sq : static_cast<int64_t>(seqlens_k_pre) + 1;
+        (seqlens_k_pre < 0) ? sq : static_cast<int64_t>(seqlens_k_pre) + sq;
   }
 
   bool fused_d = (d == 64 || d == 128 || d == 256);
@@ -737,7 +744,9 @@ static int gqa_forward_hipblaslt(
       if (seqlens_k_val < 0) {
         past_len = 0;
       } else {
-        int64_t total_seq = static_cast<int64_t>(seqlens_k_val) + 1;
+        // seqlens_k = number of past tokens already in the KV cache.
+        // total_seq = past_tokens + sq (decode: sq=1; prefill: sq>1).
+        int64_t total_seq = static_cast<int64_t>(seqlens_k_val) + sq;
         int64_t past_len_check = total_seq - sq;
         if (total_seq < 1 || past_len_check < 0 || total_seq > present_seq ||
             past_len_check > past_buf_seq) {
@@ -981,12 +990,13 @@ static int gqa_forward_hipblaslt(
       total_seq = sq;
       past_len = 0;
     } else {
-      total_seq = static_cast<int64_t>(seqlens_k_val) + 1;
+      // seqlens_k = past tokens; total_seq = past_tokens + sq.
+      total_seq = static_cast<int64_t>(seqlens_k_val) + sq;
       past_len = total_seq - sq;
       if (total_seq < 1 || past_len < 0 || total_seq > present_seq ||
           past_len > past_buf_seq) {
         fprintf(stderr,
-                "gqa_forward_hipblaslt: invalid seqlens_k[0]+1=%lld "
+                "gqa_forward_hipblaslt: invalid seqlens_k[0]+sq=%lld "
                 "(sq=%lld, past_len=%lld, present_seq=%lld, "
                 "past_buf_seq=%lld)\n",
                 (long long)total_seq, (long long)sq, (long long)past_len,
