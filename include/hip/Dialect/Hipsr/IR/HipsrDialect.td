@@ -6,7 +6,6 @@
 #ifndef HIPSR_DIALECT
 #define HIPSR_DIALECT
 
-include "mlir/IR/OpBase.td"
 include "mlir/IR/DialectBase.td"
 
 def Hipsr_Dialect : Dialect {
