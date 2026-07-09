@@ -90,6 +90,11 @@ public:
   // is reset by begin_compute() at the start of each Compute().
   void *scratch_alloc(size_t size);
 
+  // Pre-grow the workspace to at least `total` bytes without bumping the
+  // offset. Call before a sequence of scratch_alloc() to avoid mid-sequence
+  // growth that would invalidate earlier pointers. Returns false on failure.
+  bool scratch_reserve(size_t total);
+
   // Reset the bump pointer to 0 (called by begin_compute()).
   void scratch_reset();
 

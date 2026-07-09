@@ -497,6 +497,9 @@ extern "C" int wrap_multi_head_attention(
   const size_t sz_gemm_ws = kMaxWorkspaceBytes;
 
   hipdnn_ep_scratch_restore(state, 0);
+  hipdnn_ep_scratch_reserve(state, sz_q_bnsh + sz_k_bnsh + sz_v_bnsh +
+                                       sz_s_f32 + sz_p_f16 + sz_o_bnsh +
+                                       sz_gemm_ws + 7 * 64);
   void *d_Qbnsh = sz_q_bnsh ? hipdnn_ep_scratch_alloc(state, sz_q_bnsh) : query;
   void *d_Kbnsh = sz_k_bnsh ? hipdnn_ep_scratch_alloc(state, sz_k_bnsh) : key;
   void *d_Vbnsh = sz_v_bnsh ? hipdnn_ep_scratch_alloc(state, sz_v_bnsh) : value;

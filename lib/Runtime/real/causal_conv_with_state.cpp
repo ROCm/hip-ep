@@ -411,6 +411,8 @@ int wrap_causal_conv_with_state(RuntimeState *state, int op_state_slot,
   }
 
   hipdnn_ep_scratch_restore(state, 0);
+  hipdnn_ep_scratch_reserve(state, virtual_size + sigmoid_size +
+                                       conv_workspace_size + 3 * 64);
   void *virtual_buf = hipdnn_ep_scratch_alloc(state, virtual_size);
   void *sigmoid_buf = (activation == 1)
                           ? hipdnn_ep_scratch_alloc(state, sigmoid_size)

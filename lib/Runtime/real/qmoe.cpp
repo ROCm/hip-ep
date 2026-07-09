@@ -113,6 +113,24 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   int64_t act_slots = std::max<int64_t>(num_tokens, k);
 
   hipdnn_ep_scratch_restore(state, 0);
+  {
+    size_t total = 0;
+    auto align64 = [](size_t s) { return (s + 63) & ~size_t(63); };
+    total += align64(num_tokens * k * sizeof(int32_t));
+    total += align64(num_tokens * k * elem_size);
+    total += align64(num_tokens * hidden_size * elem_size);
+    total += align64(num_tokens * fusion_inter * elem_size);
+    total += align64(act_slots * inter_size * elem_size);
+    total += align64(act_slots * hidden_size * elem_size);
+    total += align64(num_experts * sizeof(int32_t));
+    total += align64((num_experts + 1) * sizeof(int32_t));
+    total += align64(num_tokens * k * sizeof(int32_t));
+    total += align64(num_tokens * k * elem_size);
+    if (hipdnn_ep_scratch_reserve(state, total) != 0) {
+      fprintf(stderr, "wrap_qmoe: scratch_reserve(%zu) failed\n", total);
+      return -1;
+    }
+  }
   void *d_expert_indices =
       hipdnn_ep_scratch_alloc(state, num_tokens * k * sizeof(int32_t));
   void *d_expert_weights =

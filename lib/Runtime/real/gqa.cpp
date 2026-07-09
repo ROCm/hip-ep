@@ -776,6 +776,15 @@ static int gqa_forward_hipblaslt(
                          : 0;
 
     hipdnn_ep_scratch_restore(state, 0);
+    {
+      size_t total = 0;
+      if (fused_packed_qkv)
+        total += Q_full_bytes + K_full_bytes + K_full_bytes + 3 * 64;
+      if (need_rope)
+        total += Q_full_bytes + K_full_bytes + 2 * 64;
+      total += flash_partials_bytes + 64;
+      hipdnn_ep_scratch_reserve(state, total);
+    }
     void *d_Qsplit = nullptr, *d_Ksplit = nullptr, *d_Vsplit = nullptr;
     void *d_Qroped = nullptr, *d_Kroped = nullptr;
     void *flash_partials = nullptr;
@@ -1121,6 +1130,15 @@ static int gqa_forward_hipblaslt(
       std::max(scoreState->workspace_size, valueState->workspace_size);
 
   hipdnn_ep_scratch_restore(state, 0);
+  {
+    size_t Q_rope = static_cast<size_t>(B) * sq * H * d * elem_sz;
+    size_t K_rope = static_cast<size_t>(B) * sq * G * d * elem_sz;
+    size_t total = Qtrans_bytes + Kexp_bytes + Vexp_bytes + S_f32_bytes +
+                   S_fp16_bytes + O_bytes + gemm_ws_needed +
+                   (need_rope ? Q_rope + K_rope : 0) +
+                   (packed_qkv ? Q_rope + K_rope + K_rope : 0) + 15 * 64;
+    hipdnn_ep_scratch_reserve(state, total);
+  }
   void *d_Qtrans =
       need_transpose ? hipdnn_ep_scratch_alloc(state, Qtrans_bytes) : nullptr;
   void *d_Kexp =

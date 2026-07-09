@@ -903,6 +903,12 @@ void *hipdnn_ep_scratch_alloc(RuntimeState *state, size_t size) {
   return state ? state->mm->scratch_alloc(size) : nullptr;
 }
 
+int hipdnn_ep_scratch_reserve(RuntimeState *state, size_t total) {
+  if (!state)
+    return -1;
+  return state->mm->scratch_reserve(total) ? 0 : -1;
+}
+
 size_t hipdnn_ep_scratch_save(RuntimeState *state) {
   return state ? state->mm->scratch_save() : 0;
 }

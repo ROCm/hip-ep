@@ -321,6 +321,10 @@ void *MemoryManager::scratch_alloc(size_t size) {
   size_t aligned = (size + kScratchAlignment - 1) & ~(kScratchAlignment - 1);
   size_t needed = scratch_offset_ + aligned;
   if (needed > workspace_size_) {
+    // Growth frees the old buffer and allocates a new one. Any pointers
+    // returned by prior scratch_alloc calls in this sequence become invalid.
+    // Callers must call scratch_reserve(total) up front to avoid mid-sequence
+    // growth, or re-derive all pointers after any alloc that might grow.
     if (!grow_gpu_buffer(&workspace_, &workspace_size_, needed, "workspace"))
       return nullptr;
   }
@@ -328,6 +332,12 @@ void *MemoryManager::scratch_alloc(size_t size) {
   void *ptr = static_cast<char *>(workspace_) + scratch_offset_;
   scratch_offset_ += aligned;
   return ptr;
+}
+
+bool MemoryManager::scratch_reserve(size_t total) {
+  if (total <= workspace_size_)
+    return true;
+  return grow_gpu_buffer(&workspace_, &workspace_size_, total, "workspace");
 }
 
 void MemoryManager::scratch_reset() { scratch_offset_ = 0; }

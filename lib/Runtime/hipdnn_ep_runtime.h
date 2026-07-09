@@ -370,6 +370,7 @@ void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size);
 // a 64-byte-aligned GPU pointer; grows the workspace on demand. The bump
 // pointer is reset at the start of each Compute() (begin_compute).
 void *hipdnn_ep_scratch_alloc(RuntimeState *state, size_t size);
+int hipdnn_ep_scratch_reserve(RuntimeState *state, size_t total);
 size_t hipdnn_ep_scratch_save(RuntimeState *state);
 void hipdnn_ep_scratch_restore(RuntimeState *state, size_t saved);
 
