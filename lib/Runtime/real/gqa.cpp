@@ -836,6 +836,10 @@ static int gqa_forward_hipblaslt(
        sq == 1 && kv_inputs_ok && present_key && present_value &&
        sliding_ok_for_fused && sink_ok_for_fused && size_ok_for_fused);
 
+  // Fused/flash decode branch (sq == 1). Collapses Steps 3 and 6-11 of the
+  // decomposed pipeline into a single kernel that reads Q (BSHD) + KV (BNSD
+  // cache) and writes O (BSHD). Steps 0 (split), 1-2 (RoPE) and 4-5 (KV cache
+  // update) still run as separate kernels below before the fused dispatch.
   if (fused_predicate) {
     const void *qSrc = query;
     const void *kSrc = key;
@@ -908,6 +912,7 @@ static int gqa_forward_hipblaslt(
     const size_t off_rope = off_split + split_bytes;
     const size_t off_partials = off_rope + rope_temp_bytes;
 
+    // ---- Step 0: Split packed QKV (if needed) ----
     if (fused_packed_qkv) {
       char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
       void *d_Qsplit = ws + off_split;
@@ -1183,6 +1188,9 @@ static int gqa_forward_hipblaslt(
     const void *kSrc = key;
     const void *vSrc = value;
 
+    // ---- Step 0: Split packed QKV (if needed) ----
+    // key/value null => query is packed [B, sq, (H+2G)*d]; split into Q/K/V
+    // workspace buffers and redirect qSrc/kSrc/vSrc to them.
     if (packed_qkv) {
       void *d_Qsplit = ws + off_Qsplit;
       void *d_Ksplit = ws + off_Ksplit;
@@ -1196,6 +1204,8 @@ static int gqa_forward_hipblaslt(
       vSrc = d_Vsplit;
     }
 
+    // ---- Steps 1-2: RoPE (optional) ----
+    // Reads qSrc/kSrc so packed-QKV split output feeds RoPE; V is never RoPE'd.
     if (need_rope) {
       int half_rot = static_cast<int>(d / 2);
       void *d_Qroped = ws + off_Qroped;
@@ -1216,12 +1226,18 @@ static int gqa_forward_hipblaslt(
       kSrc = d_Kroped;
     }
 
+    // ---- Step 3: Q Transpose BSHD [B,sq,H,d] -> BNSD [B,H,sq,d] ----
+    // Skipped at sq == 1: BSHD and BNSD share memory, so the Score GEMM reads
+    // qSrc directly.
     if (need_transpose) {
       HIP_CHECK(hip_gqa_transpose_mid_dims(
           stream, qSrc, d_Qtrans, static_cast<int>(B), static_cast<int>(sq),
           static_cast<int>(H), static_cast<int>(d), static_cast<int>(elem_sz)));
     }
 
+    // ---- Steps 4-5: KV Cache Update (concat/append into BNSD present) ----
+    // no-expand hands seqlens_k_ptr to the append kernel (on-device past_len,
+    // no D2H); the expand path already read total_seq host-side so passes null.
     if (present_key && present_value) {
       HIP_CHECK(update_kv_cache(
           stream, past_key, past_value, kSrc, vSrc, present_key, present_value,
@@ -1232,6 +1248,9 @@ static int gqa_forward_hipblaslt(
           static_cast<int>(elem_sz), no_causal, static_cast<int>(skv)));
     }
 
+    // ---- Steps 6-7: KV Expand [B*G,present_seq,d] -> [B*H,total_seq,d] ----
+    // Skipped in no-expand mode: the Score/Value GEMMs read K/V directly from
+    // the BNSD cache via per-operand batch strides instead.
     if (!use_no_expand) {
       const void *kCache = present_key ? present_key : key;
       const void *vCache = present_value ? present_value : value;
@@ -1249,6 +1268,9 @@ static int gqa_forward_hipblaslt(
                             expandCopy, static_cast<int>(elem_sz)));
     }
 
+    // ---- Step 8: Score GEMM (fp16/fp32 in, fp32 out) ----
+    // A = K: no-expand reads present_key directly, expand reads d_Kexp.
+    // B = Q: need_transpose reads d_Qtrans (BNSD), else qSrc (BSHD==BNSD@sq=1).
     const void *scoreA = use_no_expand ? present_key : d_Kexp;
     const void *scoreB = need_transpose ? d_Qtrans : qSrc;
     float scoreAlpha = scale;
@@ -1260,6 +1282,9 @@ static int gqa_forward_hipblaslt(
         scoreB, scoreState->layB, &beta, d_S_f32, scoreState->layC, d_S_f32,
         scoreState->layD, &sAlgo, gemm_ws_ptr, gemm_ws_bytes, stream));
 
+    // ---- Step 9: Causal Mask (fp32) + Softmax (fp32 -> fp16/fp32) ----
+    // S is treated as [B*H, sq, total_seq] (head stride sq*total_seq) by both
+    // GEMM flavours. softmax dtype follows gemm_fp32.
     int scoreF32BatchStride = static_cast<int>(sq * total_seq);
     int scoreFp16BatchStride = static_cast<int>(sq * total_seq);
     if ((sq > 1 || local_window_size > 0) && !no_causal) {
@@ -1282,6 +1307,10 @@ static int gqa_forward_hipblaslt(
           static_cast<int>(H), static_cast<int>(use_smooth_softmax)));
     }
 
+    // ---- Step 10: Value GEMM (fp16/fp32 in, fp16/fp32 out) ----
+    // A = V: no-expand reads present_value directly, expand reads d_Vexp.
+    // C = O: need_transpose writes d_O (BNSD, transposed below); at sq==1 the
+    //        GEMM writes straight to output (BSHD==BNSD).
     const void *valueA = use_no_expand ? present_value : d_Vexp;
     void *valueC = need_transpose ? d_O : output;
     float valAlpha = 1.0f;
@@ -1292,6 +1321,8 @@ static int gqa_forward_hipblaslt(
         d_S_fp16, valueState->layB, &beta, valueC, valueState->layC, valueC,
         valueState->layD, &vAlgo, gemm_ws_ptr, gemm_ws_bytes, stream));
 
+    // ---- Step 11: O Transpose BNSD [B,H,sq,d] -> BSHD [B,sq,H,d] ----
+    // Skipped at sq == 1: the Value GEMM already wrote into output.
     if (need_transpose) {
       HIP_CHECK(hip_gqa_transpose_mid_dims(
           stream, d_O, output, static_cast<int>(B), static_cast<int>(H),
