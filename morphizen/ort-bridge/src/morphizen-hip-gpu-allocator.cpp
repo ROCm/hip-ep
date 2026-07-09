@@ -25,6 +25,14 @@
 #include <cstring>
 #include <string>
 
+// C-linkage helpers for KV cache buffer tracking (Phase 4a). Defined in
+// lib/Runtime/mm/memory_manager.cpp. The allocator calls these instead of
+// including mm/memory_manager.h to avoid a cross-module header dependency.
+extern "C" {
+void hipdnn_ep_mm_register_kv_buffer(void *mm, void *ptr, size_t size);
+void hipdnn_ep_mm_unregister_kv_buffer(void *mm, void *ptr);
+}
+
 namespace morphizen {
 
 namespace {
@@ -165,6 +173,9 @@ void *ORT_API_CALL HipGpuAllocator::AllocImpl(OrtAllocator *this_,
     std::lock_guard<std::mutex> lk(self->pool_mutex_);
     self->ptr_to_size_[ptr] = alloc_size;
   }
+  if (cls < 0 && self->memory_manager_) {
+    hipdnn_ep_mm_register_kv_buffer(self->memory_manager_, ptr, alloc_size);
+  }
   return ptr;
 }
 
@@ -188,8 +199,11 @@ void ORT_API_CALL HipGpuAllocator::FreeImpl(OrtAllocator *this_, void *p) {
         self->free_lists_[cls].push_back(p);
         return;
       }
-      // Large buffer (> 16 MB): never pooled. Stop tracking it and release it
-      // to the driver below (outside the lock — hipHostFree is heavyweight).
+      // Large buffer (> 16 MB): never pooled. Unregister from MM's KV tracking
+      // (if tracked), stop tracking, and release to the driver below.
+      if (self->memory_manager_) {
+        hipdnn_ep_mm_unregister_kv_buffer(self->memory_manager_, p);
+      }
       self->ptr_to_size_.erase(it);
     }
     // Fall through for a large buffer, or for a pointer we never handed out

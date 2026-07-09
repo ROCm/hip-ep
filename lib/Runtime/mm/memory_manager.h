@@ -24,7 +24,11 @@
 //   the bump pointer. All callers migrated from ensure_workspace + manual
 //   offsets to scratch_alloc().
 //
-// Future phases add: KvCacheManager (Phase 4), Tier-1 CPU offload (Phase 5).
+// Phase 4a: KV cache buffer tracking. HipGpuAllocator routes large (KV-sized)
+//   allocations through MM so it can track KV cache memory usage separately
+//   from transients. Prepares for Phase 4b (paged KV).
+//
+// Future phases add: paged KV cache (Phase 4b), Tier-1 CPU offload (Phase 5).
 // The public API surface is kept stable across phases.
 //
 //===----------------------------------------------------------------------===//
@@ -153,6 +157,23 @@ public:
   void seqlens_k_cache_set(const void *ptr, int32_t val);
 
   //-------------------------------------------------------------------
+  // KV cache buffer tracking (Phase 4a)
+  //-------------------------------------------------------------------
+
+  // Register a buffer as KV cache. Tracks the pointer and size for memory
+  // accounting. Called by HipGpuAllocator for large (KV-sized) allocations.
+  void register_kv_buffer(void *ptr, size_t size);
+
+  // Unregister a KV cache buffer. Called from HipGpuAllocator::Free.
+  void unregister_kv_buffer(void *ptr);
+
+  // Total KV cache memory tracked.
+  size_t kv_bytes_used() const { return kv_bytes_total_; }
+
+  // Number of tracked KV buffers.
+  int kv_buffer_count() const { return kv_buffer_count_; }
+
+  //-------------------------------------------------------------------
   // Stats (for testing and diagnostics)
   //-------------------------------------------------------------------
 
@@ -203,6 +224,18 @@ private:
   //-------------------------------------------------------------------
   void *qmoe_host_scratch_ = nullptr;
   size_t qmoe_host_scratch_size_ = 0;
+
+  //-------------------------------------------------------------------
+  // KV cache buffer tracking (Phase 4a)
+  //-------------------------------------------------------------------
+  static constexpr int kMaxKvBuffers = 256; // 2 per layer × up to 128 layers
+  struct KvEntry {
+    void *ptr = nullptr;
+    size_t size = 0;
+  };
+  KvEntry kv_entries_[kMaxKvBuffers] = {};
+  int kv_buffer_count_ = 0;
+  size_t kv_bytes_total_ = 0;
 
   //-------------------------------------------------------------------
   // Hardware abstraction backend
