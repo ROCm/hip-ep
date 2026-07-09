@@ -25,6 +25,7 @@ endif()
 target_link_libraries(LibHipCompiler PUBLIC
   HipConversion
   HipDialectIR
+  HipsrDialectIR
   HipDialectTransforms
   HipTargetLLVM
   MLIRIR
