@@ -273,6 +273,7 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
     return -1;
   }
 
+  hipdnn_ep_scratch_restore(state, 0);
   const char *type_name = hipdnn_ep_datatype_name(data_type);
   const char *op_name = hipdnn_ep_tensor_op_name(tensor_op);
 
@@ -434,29 +435,22 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
     // must mirror the float-side broadcast handling below.
     void *lhs_use = lhs;
     void *rhs_use = rhs;
-    void *ws = nullptr;
     if (!lhs_eq_out_ints || !rhs_eq_out_ints) {
-      // We need workspace for any side(s) that need expansion. At most two
-      // (lhs to ws_a, rhs to ws_b) -- pack both back-to-back in the workspace.
       const size_t per_side = static_cast<size_t>(out_vol * elem_bytes);
-      const size_t needed =
-          per_side * static_cast<size_t>((!lhs_eq_out_ints ? 1 : 0) +
-                                         (!rhs_eq_out_ints ? 1 : 0));
-      if (hipdnn_ep_state_ensure_workspace(state, needed) != 0) {
-        fprintf(stderr,
-                "wrap_miopenOpTensor: integer fallback workspace ensure failed "
-                "(%zu bytes)\n",
-                needed);
-        return -1;
-      }
-      ws = hipdnn_ep_state_get_workspace(state);
-      uint8_t *ws_byte = static_cast<uint8_t *>(ws);
       const int64_t in_lhs[4] = {lhs_n, lhs_c, lhs_h, lhs_w};
       const int64_t in_rhs[4] = {rhs_n, rhs_c, rhs_h, rhs_w};
       const int64_t out_shape[4] = {out_n, out_c, out_h, out_w};
       if (!lhs_eq_out_ints) {
-        int rc = hip_expand(stream, lhs, ws_byte, in_lhs, 4, out_shape, 4,
-                            hip_dtype);
+        void *lhs_scratch = hipdnn_ep_scratch_alloc(state, per_side);
+        if (!lhs_scratch) {
+          fprintf(stderr,
+                  "wrap_miopenOpTensor: integer fallback scratch_alloc "
+                  "failed (%zu bytes)\n",
+                  per_side);
+          return -1;
+        }
+        int rc = hip_expand(stream, lhs, static_cast<uint8_t *>(lhs_scratch),
+                            in_lhs, 4, out_shape, 4, hip_dtype);
         if (rc != 0) {
           fprintf(stderr,
                   "wrap_miopenOpTensor: integer fallback hip_expand(lhs) "
@@ -464,12 +458,19 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
                   rc);
           return -1;
         }
-        lhs_use = ws_byte;
-        ws_byte += per_side;
+        lhs_use = lhs_scratch;
       }
       if (!rhs_eq_out_ints) {
-        int rc = hip_expand(stream, rhs, ws_byte, in_rhs, 4, out_shape, 4,
-                            hip_dtype);
+        void *rhs_scratch = hipdnn_ep_scratch_alloc(state, per_side);
+        if (!rhs_scratch) {
+          fprintf(stderr,
+                  "wrap_miopenOpTensor: integer fallback scratch_alloc "
+                  "failed (%zu bytes)\n",
+                  per_side);
+          return -1;
+        }
+        int rc = hip_expand(stream, rhs, static_cast<uint8_t *>(rhs_scratch),
+                            in_rhs, 4, out_shape, 4, hip_dtype);
         if (rc != 0) {
           fprintf(stderr,
                   "wrap_miopenOpTensor: integer fallback hip_expand(rhs) "
@@ -477,7 +478,7 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
                   rc);
           return -1;
         }
-        rhs_use = ws_byte;
+        rhs_use = rhs_scratch;
       }
     }
     int rc = -1;
@@ -574,14 +575,14 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
     const int64_t elem_bytes = hipdnn_ep_datatype_size(data_type);
     const int64_t out_vol = out_n * out_c * out_h * out_w;
     const size_t needed = static_cast<size_t>(out_vol * elem_bytes);
-    if (hipdnn_ep_state_ensure_workspace(state, needed) != 0) {
+    void *ws = hipdnn_ep_scratch_alloc(state, needed);
+    if (!ws) {
       fprintf(stderr,
-              "wrap_miopenOpTensor: failed to ensure workspace %zu bytes for "
+              "wrap_miopenOpTensor: scratch_alloc failed %zu bytes for "
               "broadcast expand\n",
               needed);
       return -1;
     }
-    void *ws = hipdnn_ep_state_get_workspace(state);
     void *stream = hipdnn_ep_state_get_stream(state);
 
     const int64_t in_shape[4] = {
@@ -722,6 +723,7 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
+  hipdnn_ep_scratch_restore(state, 0);
 
   const bool lhs_eq_out =
       (lhs_n == out_n && lhs_c == out_c && lhs_h == out_h && lhs_w == out_w);
@@ -734,40 +736,43 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
   if (!lhs_eq_out || !rhs_eq_out) {
     const int64_t elem_bytes = hipdnn_ep_datatype_size(data_type);
     const size_t per_side = static_cast<size_t>(out_vol * elem_bytes);
-    const size_t needed = per_side * static_cast<size_t>((!lhs_eq_out ? 1 : 0) +
-                                                         (!rhs_eq_out ? 1 : 0));
-    if (hipdnn_ep_state_ensure_workspace(state, needed) != 0) {
-      fprintf(stderr,
-              "wrap_elementwise_sub: workspace ensure failed (%zu bytes)\n",
-              needed);
-      return -1;
-    }
-    void *ws = hipdnn_ep_state_get_workspace(state);
-    uint8_t *ws_byte = static_cast<uint8_t *>(ws);
     const int64_t out_shape[4] = {out_n, out_c, out_h, out_w};
 
     if (!lhs_eq_out) {
+      void *lhs_scratch = hipdnn_ep_scratch_alloc(state, per_side);
+      if (!lhs_scratch) {
+        fprintf(stderr,
+                "wrap_elementwise_sub: scratch_alloc failed (%zu bytes)\n",
+                per_side);
+        return -1;
+      }
       const int64_t in_lhs[4] = {lhs_n, lhs_c, lhs_h, lhs_w};
-      int rc =
-          hip_expand(stream, lhs, ws_byte, in_lhs, 4, out_shape, 4, hip_dtype);
+      int rc = hip_expand(stream, lhs, static_cast<uint8_t *>(lhs_scratch),
+                          in_lhs, 4, out_shape, 4, hip_dtype);
       if (rc != 0) {
         fprintf(stderr, "wrap_elementwise_sub: hip_expand(lhs) failed (%d)\n",
                 rc);
         return -1;
       }
-      lhs_use = ws_byte;
-      ws_byte += per_side;
+      lhs_use = lhs_scratch;
     }
     if (!rhs_eq_out) {
+      void *rhs_scratch = hipdnn_ep_scratch_alloc(state, per_side);
+      if (!rhs_scratch) {
+        fprintf(stderr,
+                "wrap_elementwise_sub: scratch_alloc failed (%zu bytes)\n",
+                per_side);
+        return -1;
+      }
       const int64_t in_rhs[4] = {rhs_n, rhs_c, rhs_h, rhs_w};
-      int rc =
-          hip_expand(stream, rhs, ws_byte, in_rhs, 4, out_shape, 4, hip_dtype);
+      int rc = hip_expand(stream, rhs, static_cast<uint8_t *>(rhs_scratch),
+                          in_rhs, 4, out_shape, 4, hip_dtype);
       if (rc != 0) {
         fprintf(stderr, "wrap_elementwise_sub: hip_expand(rhs) failed (%d)\n",
                 rc);
         return -1;
       }
-      rhs_use = ws_byte;
+      rhs_use = rhs_scratch;
     }
 
     RUNTIME_DEBUG_LOG(

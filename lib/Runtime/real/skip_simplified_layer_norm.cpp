@@ -283,25 +283,22 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, int op_state_slot,
     return -1;
   }
 
-  // Shared workspace: pack [tmp_skip_buf (if needed) | rstd_buf]
-  // Align rstd_buf to 256 bytes for GPU memory access efficiency.
+  hipdnn_ep_scratch_restore(state, 0);
   size_t skip_bytes = 0;
   if (!input_skip_bias_sum)
     skip_bytes = static_cast<size_t>(input_num_elements) * element_size_bytes;
-  size_t skip_aligned =
-      (skip_bytes + kScratchAlignment - 1) & ~(kScratchAlignment - 1);
   size_t rstd_bytes = static_cast<size_t>(num_rows) * sizeof(float);
-  size_t total_ws = skip_aligned + rstd_bytes;
 
-  if (hipdnn_ep_state_ensure_workspace(state, total_ws) != 0) {
+  void *skip_scratch =
+      skip_bytes > 0 ? hipdnn_ep_scratch_alloc(state, skip_bytes) : nullptr;
+  void *rstd_buf = hipdnn_ep_scratch_alloc(state, rstd_bytes);
+  if ((skip_bytes > 0 && !skip_scratch) || !rstd_buf) {
     fprintf(stderr,
-            "wrap_skip_simplified_layer_norm: workspace allocation failed\n");
+            "wrap_skip_simplified_layer_norm: scratch allocation failed\n");
     return -1;
   }
-  char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
 
-  void *skip_buf = input_skip_bias_sum ? input_skip_bias_sum : ws;
-  void *rstd_buf = ws + skip_aligned;
+  void *skip_buf = input_skip_bias_sum ? input_skip_bias_sum : skip_scratch;
 
   int result = 0;
 

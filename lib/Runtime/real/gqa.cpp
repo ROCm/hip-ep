@@ -193,9 +193,9 @@ static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
     return kSeqlensKNotRead;
   }
 
-  if (gqa_cache_seqlens_enabled() && state && state->seqlens_k_cached_valid &&
-      state->seqlens_k_cached_ptr == seqlens_k_ptr) {
-    return state->seqlens_k_cached_val;
+  if (gqa_cache_seqlens_enabled() && state && state->mm &&
+      state->mm->seqlens_k_cache_valid(seqlens_k_ptr)) {
+    return state->mm->seqlens_k_cached_val();
   }
 
   int32_t seqlens_k_val = 0;
@@ -207,10 +207,8 @@ static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
     return kSeqlensKNotRead;
   }
 
-  if (gqa_cache_seqlens_enabled() && state) {
-    state->seqlens_k_cached_val = seqlens_k_val;
-    state->seqlens_k_cached_ptr = seqlens_k_ptr;
-    state->seqlens_k_cached_valid = true;
+  if (gqa_cache_seqlens_enabled() && state && state->mm) {
+    state->mm->seqlens_k_cache_set(seqlens_k_ptr, seqlens_k_val);
   }
 
   return seqlens_k_val;
@@ -770,48 +768,47 @@ static int gqa_forward_hipblaslt(
                                   flash_decode_geometry_ok(H, G, d) &&
                                   skv >= gqa_flash_decode_min_skv();
 
-    // Sum split + rope-temp + flash-partials in a single ensure_workspace
-    // call. ensure_workspace does NOT preserve data on grow (free + malloc),
-    // so any data written earlier into the workspace would be lost if a
-    // later request triggered a regrowth. One combined request avoids that
-    // hazard, and the offsets below match the call order so each step's
-    // input region stays live while it is consumed.
     const size_t Q_full_bytes = static_cast<size_t>(B) * sq * H * d * elem_sz;
     const size_t K_full_bytes = static_cast<size_t>(B) * sq * G * d * elem_sz;
-    const size_t split_bytes =
-        fused_packed_qkv ? (Q_full_bytes + K_full_bytes + K_full_bytes) : 0;
-    const size_t rope_temp_bytes =
-        need_rope ? (Q_full_bytes + K_full_bytes) : 0;
     const size_t flash_partials_bytes =
         use_flash_decode ? static_cast<size_t>(B) * H * kFlashDecodeKSplits *
                                (d + 2) * sizeof(float)
                          : 0;
-    const size_t total_ws_bytes =
-        split_bytes + rope_temp_bytes + flash_partials_bytes;
 
-    if (total_ws_bytes > 0) {
-      if (hipdnn_ep_state_ensure_workspace(state, total_ws_bytes) != 0)
+    hipdnn_ep_scratch_restore(state, 0);
+    {
+      size_t total = 0;
+      if (fused_packed_qkv)
+        total += Q_full_bytes + K_full_bytes + K_full_bytes + 3 * 64;
+      if (need_rope)
+        total += Q_full_bytes + K_full_bytes + 2 * 64;
+      total += flash_partials_bytes + 64;
+      hipdnn_ep_scratch_reserve(state, total);
+    }
+    void *d_Qsplit = nullptr, *d_Ksplit = nullptr, *d_Vsplit = nullptr;
+    void *d_Qroped = nullptr, *d_Kroped = nullptr;
+    void *flash_partials = nullptr;
+
+    if (fused_packed_qkv) {
+      d_Qsplit = hipdnn_ep_scratch_alloc(state, Q_full_bytes);
+      d_Ksplit = hipdnn_ep_scratch_alloc(state, K_full_bytes);
+      d_Vsplit = hipdnn_ep_scratch_alloc(state, K_full_bytes);
+      if (!d_Qsplit || !d_Ksplit || !d_Vsplit)
+        return -1;
+    }
+    if (need_rope) {
+      d_Qroped = hipdnn_ep_scratch_alloc(state, Q_full_bytes);
+      d_Kroped = hipdnn_ep_scratch_alloc(state, K_full_bytes);
+      if (!d_Qroped || !d_Kroped)
+        return -1;
+    }
+    if (flash_partials_bytes > 0) {
+      flash_partials = hipdnn_ep_scratch_alloc(state, flash_partials_bytes);
+      if (!flash_partials)
         return -1;
     }
 
-    // Layout: [Qsplit?, Ksplit?, Vsplit? | Qroped?, Kroped? | flash_partials?]
-    const size_t off_split = 0;
-    const size_t off_rope = off_split + split_bytes;
-    const size_t off_partials = off_rope + rope_temp_bytes;
-
-    // ---- Step 0: Split packed QKV (if needed) ----
-    // For the fused / flash decode branch the split outputs become the new
-    // qSrc / kSrc / vSrc and persist in workspace until rope (Q,K) and
-    // update_kv_cache (V) consume them. After update_kv_cache returns V is
-    // committed to present_value, so the split V slot can be safely reused
-    // by downstream callers — but here we never overwrite it again because
-    // flash_partials is placed strictly after rope_temp, which is placed
-    // strictly after split.
     if (fused_packed_qkv) {
-      char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
-      void *d_Qsplit = ws + off_split;
-      void *d_Ksplit = ws + off_split + Q_full_bytes;
-      void *d_Vsplit = ws + off_split + Q_full_bytes + K_full_bytes;
       if (hip_gqa_split_qkv(
               stream, query, d_Qsplit, d_Ksplit, d_Vsplit, static_cast<int>(B),
               static_cast<int>(sq), static_cast<int>(H), static_cast<int>(G),
@@ -823,10 +820,6 @@ static int gqa_forward_hipblaslt(
     }
 
     if (need_rope) {
-      char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
-      void *d_Qroped = ws + off_rope;
-      void *d_Kroped = ws + off_rope + Q_full_bytes;
-
       int half_rot = static_cast<int>(d / 2);
       if (hip_gqa_rope(stream, qSrc, d_Qroped, cos_cache, sin_cache,
                        static_cast<int>(B), static_cast<int>(sq),
@@ -855,10 +848,8 @@ static int gqa_forward_hipblaslt(
       return -1;
 
     if (use_flash_decode) {
-      char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
-      void *partials = ws + off_partials;
       if (hip_gqa_flash_decode(
-              stream, qSrc, present_key, present_value, output, partials,
+              stream, qSrc, present_key, present_value, output, flash_partials,
               static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
               static_cast<int>(d), static_cast<int>(present_seq),
               kFlashDecodeKSplits, scale, seqlens_k_ptr,
@@ -1135,61 +1126,63 @@ static int gqa_forward_hipblaslt(
   size_t O_bytes =
       need_transpose ? static_cast<size_t>(B) * H * sq * d * elem_sz : 0;
 
-  size_t off_Qtrans = 0;
-  size_t off_Kexp = off_Qtrans + Qtrans_bytes;
-  size_t off_Vexp = off_Kexp + Kexp_bytes;
-  size_t off_S_f32 = off_Vexp + Vexp_bytes;
-  size_t off_S_fp16 = off_S_f32 + S_f32_bytes;
-  size_t off_O = off_S_fp16 + S_fp16_bytes;
-  size_t temp_end = off_O + O_bytes;
+  size_t gemm_ws_needed =
+      std::max(scoreState->workspace_size, valueState->workspace_size);
 
-  // Optional RoPE buffers: allocated only when do_rotary is enabled.
-  size_t off_Qroped = 0, off_Kroped = 0;
+  hipdnn_ep_scratch_restore(state, 0);
+  {
+    size_t Q_rope = static_cast<size_t>(B) * sq * H * d * elem_sz;
+    size_t K_rope = static_cast<size_t>(B) * sq * G * d * elem_sz;
+    size_t total = Qtrans_bytes + Kexp_bytes + Vexp_bytes + S_f32_bytes +
+                   S_fp16_bytes + O_bytes + gemm_ws_needed +
+                   (need_rope ? Q_rope + K_rope : 0) +
+                   (packed_qkv ? Q_rope + K_rope + K_rope : 0) + 15 * 64;
+    hipdnn_ep_scratch_reserve(state, total);
+  }
+  void *d_Qtrans =
+      need_transpose ? hipdnn_ep_scratch_alloc(state, Qtrans_bytes) : nullptr;
+  void *d_Kexp =
+      use_no_expand ? nullptr : hipdnn_ep_scratch_alloc(state, Kexp_bytes);
+  void *d_Vexp =
+      use_no_expand ? nullptr : hipdnn_ep_scratch_alloc(state, Vexp_bytes);
+  void *d_S_f32 = hipdnn_ep_scratch_alloc(state, S_f32_bytes);
+  void *d_S_fp16 = hipdnn_ep_scratch_alloc(state, S_fp16_bytes);
+  void *d_O =
+      need_transpose ? hipdnn_ep_scratch_alloc(state, O_bytes) : nullptr;
+
+  void *d_Qroped_d = nullptr, *d_Kroped_d = nullptr;
   if (need_rope) {
     size_t Q_bytes = static_cast<size_t>(B) * sq * H * d * elem_sz;
     size_t K_bytes = static_cast<size_t>(B) * sq * G * d * elem_sz;
-    off_Qroped = temp_end;
-    off_Kroped = off_Qroped + Q_bytes;
-    temp_end = off_Kroped + K_bytes;
+    d_Qroped_d = hipdnn_ep_scratch_alloc(state, Q_bytes);
+    d_Kroped_d = hipdnn_ep_scratch_alloc(state, K_bytes);
   }
 
-  // Optional packed-QKV split buffers: allocated only when key/value are
-  // null (GPT-OSS style packed input).  These must be placed AFTER the RoPE
-  // buffers in the layout so that split outputs remain live while RoPE reads
-  // from them and writes to the RoPE region (no overlap).
-  size_t off_Qsplit = 0, off_Ksplit = 0, off_Vsplit = 0;
+  void *d_Qsplit_d = nullptr, *d_Ksplit_d = nullptr, *d_Vsplit_d = nullptr;
   if (packed_qkv) {
     size_t Q_bytes = static_cast<size_t>(B) * sq * H * d * elem_sz;
     size_t K_bytes = static_cast<size_t>(B) * sq * G * d * elem_sz;
-    off_Qsplit = temp_end;
-    off_Ksplit = off_Qsplit + Q_bytes;
-    off_Vsplit = off_Ksplit + K_bytes;
-    temp_end = off_Vsplit + K_bytes;
+    d_Qsplit_d = hipdnn_ep_scratch_alloc(state, Q_bytes);
+    d_Ksplit_d = hipdnn_ep_scratch_alloc(state, K_bytes);
+    d_Vsplit_d = hipdnn_ep_scratch_alloc(state, K_bytes);
+  }
+
+  void *gemm_ws_ptr = gemm_ws_needed > 0
+                          ? hipdnn_ep_scratch_alloc(state, gemm_ws_needed)
+                          : nullptr;
+  size_t gemm_ws_bytes = gemm_ws_needed;
+
+  if (!d_S_f32 || !d_S_fp16 || (need_transpose && (!d_Qtrans || !d_O)) ||
+      (!use_no_expand && (!d_Kexp || !d_Vexp)) ||
+      (need_rope && (!d_Qroped_d || !d_Kroped_d)) ||
+      (packed_qkv && (!d_Qsplit_d || !d_Ksplit_d || !d_Vsplit_d)) ||
+      (gemm_ws_needed > 0 && !gemm_ws_ptr)) {
+    return -1;
   }
 
   int result = 0;
 
-  // Single workspace allocation: temp buffers + GEMM workspace
   {
-    size_t gemm_ws =
-        std::max(scoreState->workspace_size, valueState->workspace_size);
-    size_t total_needed = temp_end + gemm_ws;
-    HIP_CHECK(hipdnn_ep_state_ensure_workspace(state, total_needed));
-  }
-
-  {
-    char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
-    size_t ws_total = hipdnn_ep_state_get_workspace_size(state);
-
-    void *d_Qtrans = need_transpose ? (ws + off_Qtrans) : nullptr;
-    void *d_Kexp = use_no_expand ? nullptr : (ws + off_Kexp);
-    void *d_Vexp = use_no_expand ? nullptr : (ws + off_Vexp);
-    void *d_S_f32 = ws + off_S_f32;
-    void *d_S_fp16 = ws + off_S_fp16;
-    void *d_O = need_transpose ? (ws + off_O) : nullptr;
-
-    void *gemm_ws_ptr = ws + temp_end;
-    size_t gemm_ws_bytes = ws_total - temp_end;
 
     // Mutable source pointers: initially point to the raw inputs, but get
     // redirected to workspace buffers as pipeline steps (split, RoPE) produce
@@ -1203,40 +1196,31 @@ static int gqa_forward_hipblaslt(
     // When key/value are null, query is a packed [B, S, (H+2G)*d] tensor.
     // Split into separate Q [B*S, H*d], K [B*S, G*d], V [B*S, G*d].
     if (packed_qkv) {
-      void *d_Qsplit = ws + off_Qsplit;
-      void *d_Ksplit = ws + off_Ksplit;
-      void *d_Vsplit = ws + off_Vsplit;
       HIP_CHECK(hip_gqa_split_qkv(
-          stream, query, d_Qsplit, d_Ksplit, d_Vsplit, static_cast<int>(B),
-          static_cast<int>(sq), static_cast<int>(H), static_cast<int>(G),
-          static_cast<int>(d), static_cast<int>(elem_sz)));
-      qSrc = d_Qsplit;
-      kSrc = d_Ksplit;
-      vSrc = d_Vsplit;
+          stream, query, d_Qsplit_d, d_Ksplit_d, d_Vsplit_d,
+          static_cast<int>(B), static_cast<int>(sq), static_cast<int>(H),
+          static_cast<int>(G), static_cast<int>(d), static_cast<int>(elem_sz)));
+      qSrc = d_Qsplit_d;
+      kSrc = d_Ksplit_d;
+      vSrc = d_Vsplit_d;
     }
 
-    // ---- Steps 1-2: RoPE (optional) ----
-    // Uses qSrc/kSrc (not raw query/key) so that packed-QKV split buffers
-    // are correctly fed into RoPE when both features are active.
     if (need_rope) {
       int half_rot = static_cast<int>(d / 2);
-      void *d_Qroped = ws + off_Qroped;
-      void *d_Kroped = ws + off_Kroped;
 
-      HIP_CHECK(hip_gqa_rope(stream, qSrc, d_Qroped, cos_cache, sin_cache,
+      HIP_CHECK(hip_gqa_rope(stream, qSrc, d_Qroped_d, cos_cache, sin_cache,
                              static_cast<int>(B), static_cast<int>(sq),
                              static_cast<int>(H), static_cast<int>(d), half_rot,
                              static_cast<int>(past_len), nullptr,
                              static_cast<int>(elem_sz)));
-      HIP_CHECK(hip_gqa_rope(stream, kSrc, d_Kroped, cos_cache, sin_cache,
+      HIP_CHECK(hip_gqa_rope(stream, kSrc, d_Kroped_d, cos_cache, sin_cache,
                              static_cast<int>(B), static_cast<int>(sq),
                              static_cast<int>(G), static_cast<int>(d), half_rot,
                              static_cast<int>(past_len), nullptr,
                              static_cast<int>(elem_sz)));
 
-      qSrc = d_Qroped;
-      kSrc = d_Kroped;
-      // vSrc is intentionally NOT updated: V is never RoPE'd.
+      qSrc = d_Qroped_d;
+      kSrc = d_Kroped_d;
     }
 
     // ---- Step 3: Q Transpose BSHD [B,S,H,d] -> BNSD [B,H,S,d] ----

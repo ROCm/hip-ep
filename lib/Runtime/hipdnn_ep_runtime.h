@@ -366,7 +366,17 @@ void *hipdnn_ep_get_pool_base(RuntimeState *state, int domain_id,
 // Returns: host-mapped base pointer (NULL on allocation failure)
 void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size);
 
-// Shared workspace management (lazily grown, reused across MatMul/GQA/Conv)
+// Bump-pointer scratch allocator over the shared workspace buffer. Returns
+// a 64-byte-aligned GPU pointer; grows the workspace on demand. The bump
+// pointer is reset at the start of each Compute() (begin_compute).
+void *hipdnn_ep_scratch_alloc(RuntimeState *state, size_t size);
+int hipdnn_ep_scratch_reserve(RuntimeState *state, size_t total);
+size_t hipdnn_ep_scratch_save(RuntimeState *state);
+void hipdnn_ep_scratch_restore(RuntimeState *state, size_t saved);
+
+// Shared workspace management (lazily grown, reused across MatMul/GQA/Conv).
+// Prefer hipdnn_ep_scratch_alloc for new code; ensure_workspace is kept for
+// callers that need the raw buffer + its full size (e.g. hipBLASLt autotune).
 void *hipdnn_ep_state_get_workspace(RuntimeState *state);
 size_t hipdnn_ep_state_get_workspace_size(RuntimeState *state);
 int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size);

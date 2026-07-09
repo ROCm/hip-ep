@@ -75,40 +75,43 @@ int wrap_div(RuntimeState *state, void *lhs, void *rhs, void *output,
   void *lhs_use = lhs;
   void *rhs_use = rhs;
 
+  hipdnn_ep_scratch_restore(state, 0);
   if (!lhs_eq_out || !rhs_eq_out) {
     const int64_t elem_bytes = hipdnn_ep_datatype_size(data_type);
     const size_t per_side = static_cast<size_t>(out_vol * elem_bytes);
-    const size_t needed = per_side * static_cast<size_t>((!lhs_eq_out ? 1 : 0) +
-                                                         (!rhs_eq_out ? 1 : 0));
-    if (hipdnn_ep_state_ensure_workspace(state, needed) != 0) {
-      fprintf(stderr, "[REAL] wrap_div: workspace ensure failed (%zu bytes)\n",
-              needed);
-      return -1;
-    }
-    void *ws = hipdnn_ep_state_get_workspace(state);
-    uint8_t *ws_byte = static_cast<uint8_t *>(ws);
     const int64_t out_shape[4] = {out_n, out_c, out_h, out_w};
 
     if (!lhs_eq_out) {
+      void *lhs_scratch = hipdnn_ep_scratch_alloc(state, per_side);
+      if (!lhs_scratch) {
+        fprintf(stderr, "[REAL] wrap_div: scratch_alloc failed (%zu bytes)\n",
+                per_side);
+        return -1;
+      }
       const int64_t in_lhs[4] = {lhs_n, lhs_c, lhs_h, lhs_w};
-      int rc =
-          hip_expand(stream, lhs, ws_byte, in_lhs, 4, out_shape, 4, hip_dtype);
+      int rc = hip_expand(stream, lhs, static_cast<uint8_t *>(lhs_scratch),
+                          in_lhs, 4, out_shape, 4, hip_dtype);
       if (rc != 0) {
         fprintf(stderr, "[REAL] wrap_div: hip_expand(lhs) failed (%d)\n", rc);
         return -1;
       }
-      lhs_use = ws_byte;
-      ws_byte += per_side;
+      lhs_use = lhs_scratch;
     }
     if (!rhs_eq_out) {
+      void *rhs_scratch = hipdnn_ep_scratch_alloc(state, per_side);
+      if (!rhs_scratch) {
+        fprintf(stderr, "[REAL] wrap_div: scratch_alloc failed (%zu bytes)\n",
+                per_side);
+        return -1;
+      }
       const int64_t in_rhs[4] = {rhs_n, rhs_c, rhs_h, rhs_w};
-      int rc =
-          hip_expand(stream, rhs, ws_byte, in_rhs, 4, out_shape, 4, hip_dtype);
+      int rc = hip_expand(stream, rhs, static_cast<uint8_t *>(rhs_scratch),
+                          in_rhs, 4, out_shape, 4, hip_dtype);
       if (rc != 0) {
         fprintf(stderr, "[REAL] wrap_div: hip_expand(rhs) failed (%d)\n", rc);
         return -1;
       }
-      rhs_use = ws_byte;
+      rhs_use = rhs_scratch;
     }
 
     RUNTIME_DEBUG_LOG(

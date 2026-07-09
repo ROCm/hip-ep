@@ -255,14 +255,14 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, int op_state_slot,
     return -1;
   }
 
-  // Use shared workspace for rstd scratch buffer (always f32)
+  hipdnn_ep_scratch_restore(state, 0);
   size_t rstd_bytes = static_cast<size_t>(num_rows) * sizeof(float);
-  if (hipdnn_ep_state_ensure_workspace(state, rstd_bytes) != 0) {
+  void *rstd_buf = hipdnn_ep_scratch_alloc(state, rstd_bytes);
+  if (!rstd_buf) {
     fprintf(stderr,
-            "wrap_miopenT5LayerNormForward: workspace allocation failed\n");
+            "wrap_miopenT5LayerNormForward: scratch allocation failed\n");
     return -1;
   }
-  void *rstd_buf = hipdnn_ep_state_get_workspace(state);
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_miopenT5LayerNormForward: calling miopenT5LayerNormForward"
