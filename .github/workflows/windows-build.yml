@@ -37,14 +37,15 @@ jobs:
       # resolves LLVM via find_package against this build, so that fallback is
       # unused.
       LLVM_TAG: llvmorg-22.1.0
-      ONNXRUNTIME_VERSION: "1.25.1"
+      ONNXRUNTIME_VERSION: "1.27.0"
       # Space-separated list of microsoft/onnxruntime PR numbers to fetch
       # from github.com/microsoft/onnxruntime/pull/<n>.patch and `git apply`
       # on top of the pinned ONNXRUNTIME_VERSION tag during the source-build
       # step. The PR list is also part of the ort-install cache key, so
       # editing this list auto-invalidates the cached ORT install prefix.
       # Remove a PR number once its fix is in the pinned ONNXRUNTIME_VERSION.
-      ONNXRUNTIME_PR_PATCHES: "28608"
+      # 28608 (Loop/If/Scan implicit inputs in MetaDef) landed in v1.27.0.
+      ONNXRUNTIME_PR_PATCHES: ""
       SCCACHE_GHA_ENABLED: "true"
       OGA_VERSION: "0.14.0"
       # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
@@ -259,7 +260,7 @@ jobs:
           cp "$DML_DLL" "${{ runner.workspace }}/ort-install/bin/"
           # Cache the cp314 ORT Python wheel inside ort-install so it
           # rides the same cache key as the rest of the ORT artifacts.
-          # Output path: build-onnxruntime/Release/dist/onnxruntime_directml-1.25.1-cp314-cp314-win_amd64.whl
+          # Output path: build-onnxruntime/Release/dist/onnxruntime_directml-1.27.0-cp314-cp314-win_amd64.whl
           ORT_WHEEL=$(find "${{ runner.workspace }}/build-onnxruntime" \
             -name "onnxruntime_directml-*.whl" -type f | head -1)
           if [ -z "$ORT_WHEEL" ]; then
