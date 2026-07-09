@@ -8,6 +8,7 @@
 #include "hip/Compiler/PluginRegistry.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/Passes.h"
+#include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 #include "hip/Dialect/IR/HipBufferize.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
@@ -69,6 +70,7 @@ inline void registerAllDialects(mlir::DialectRegistry &registry) {
   registry.insert<mlir::bufferization::BufferizationDialect>();
   registry.insert<mlir::LLVM::LLVMDialect>();
   registry.insert<mlir::hip::HipDialect>();
+  registry.insert<mlir::hipsr::HipsrDialect>();
   registry.insert<detail::OnnxStubDialect>();
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
   // The ownership-based buffer-deallocation pass walks arith ops (e.g.
