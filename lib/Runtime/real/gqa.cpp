@@ -775,8 +775,7 @@ static int gqa_forward_hipblaslt(
                                (d + 2) * sizeof(float)
                          : 0;
 
-    // Scratch sub-allocations (bump-pointer; each returns a 64-byte-aligned
-    // region and the arena grows on demand).
+    hipdnn_ep_scratch_restore(state, 0);
     void *d_Qsplit = nullptr, *d_Ksplit = nullptr, *d_Vsplit = nullptr;
     void *d_Qroped = nullptr, *d_Kroped = nullptr;
     void *flash_partials = nullptr;
@@ -1121,6 +1120,7 @@ static int gqa_forward_hipblaslt(
   size_t gemm_ws_needed =
       std::max(scoreState->workspace_size, valueState->workspace_size);
 
+  hipdnn_ep_scratch_restore(state, 0);
   void *d_Qtrans =
       need_transpose ? hipdnn_ep_scratch_alloc(state, Qtrans_bytes) : nullptr;
   void *d_Kexp =

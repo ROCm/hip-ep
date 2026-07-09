@@ -112,6 +112,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
 
   int64_t act_slots = std::max<int64_t>(num_tokens, k);
 
+  hipdnn_ep_scratch_restore(state, 0);
   void *d_expert_indices =
       hipdnn_ep_scratch_alloc(state, num_tokens * k * sizeof(int32_t));
   void *d_expert_weights =

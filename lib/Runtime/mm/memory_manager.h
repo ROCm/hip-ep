@@ -96,6 +96,13 @@ public:
   // Current bump pointer offset (for diagnostics and tests).
   size_t scratch_offset() const { return scratch_offset_; }
 
+  // Save/restore the bump pointer for scoped reuse. Ops that run multiple
+  // times per Compute() (e.g. GQA × 32 layers, QMoE × 24 layers) save the
+  // offset on entry and restore on exit so consecutive calls reuse the same
+  // arena region instead of each bumping past the previous.
+  size_t scratch_save() const { return scratch_offset_; }
+  void scratch_restore(size_t saved) { scratch_offset_ = saved; }
+
   //-------------------------------------------------------------------
   // Shared workspace (low-level; prefer scratch_alloc for new code)
   //-------------------------------------------------------------------

@@ -283,6 +283,7 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, int op_state_slot,
     return -1;
   }
 
+  hipdnn_ep_scratch_restore(state, 0);
   size_t skip_bytes = 0;
   if (!input_skip_bias_sum)
     skip_bytes = static_cast<size_t>(input_num_elements) * element_size_bytes;

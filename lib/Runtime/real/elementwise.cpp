@@ -273,6 +273,7 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
     return -1;
   }
 
+  hipdnn_ep_scratch_restore(state, 0);
   const char *type_name = hipdnn_ep_datatype_name(data_type);
   const char *op_name = hipdnn_ep_tensor_op_name(tensor_op);
 
@@ -722,6 +723,7 @@ int wrap_elementwise_sub(RuntimeState *state, void *lhs, void *rhs,
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
+  hipdnn_ep_scratch_restore(state, 0);
 
   const bool lhs_eq_out =
       (lhs_n == out_n && lhs_c == out_c && lhs_h == out_h && lhs_w == out_w);

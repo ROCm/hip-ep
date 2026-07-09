@@ -256,6 +256,7 @@ int wrap_miopenConvolutionForward(
       miopen_handle, weights_desc, input_desc, conv_desc, output_desc,
       &workspace_size));
 
+  hipdnn_ep_scratch_restore(state, 0);
   if (workspace_size > 0) {
     workspace = hipdnn_ep_scratch_alloc(state, workspace_size);
     if (!workspace) {

@@ -75,6 +75,7 @@ int wrap_div(RuntimeState *state, void *lhs, void *rhs, void *output,
   void *lhs_use = lhs;
   void *rhs_use = rhs;
 
+  hipdnn_ep_scratch_restore(state, 0);
   if (!lhs_eq_out || !rhs_eq_out) {
     const int64_t elem_bytes = hipdnn_ep_datatype_size(data_type);
     const size_t per_side = static_cast<size_t>(out_vol * elem_bytes);

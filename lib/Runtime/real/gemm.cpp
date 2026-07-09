@@ -693,6 +693,7 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
   }
 
   {
+    hipdnn_ep_scratch_restore(state, 0);
     void *ws_ptr = nullptr;
     size_t ws_size = 0;
     if (!cached.use_default_algo && cached.workspace_size > 0) {
