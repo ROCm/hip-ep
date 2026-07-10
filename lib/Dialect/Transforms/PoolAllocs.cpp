@@ -96,12 +96,13 @@ static bool lifetimesOverlap(const AllocInfo &a, const AllocInfo &b) {
   return !(a.lastUseIndex < b.defIndex || b.lastUseIndex < a.defIndex);
 }
 
-/// Byte size contributed by a dynamic-shaped memref's STATIC dims:
-/// elementBytes * product(static dims). The runtime byte size is this times
-/// product(dynOperands). Mirrors `staticFactor` in packDynamicAllocs; used by
-/// the fragmentation probe, which compares aligned dynamic groups in these
-/// units (the dynamic factor is common, and symbolic, within a group).
-static int64_t dynStaticFactorBytes(MemRefType type) {
+/// Byte size of a memref's STATIC dims: elementBytes * product(static dims).
+/// For a static memref this is the whole byte size; for a dynamic one it is the
+/// per-alloc `staticFactor` -- multiply by product(dynOperands) for the runtime
+/// byte size. Shared by the dynamic packer (as `staticFactor`) and the
+/// fragmentation probe (which compares aligned groups in these units, since the
+/// dynamic factor is common and symbolic within a group).
+static int64_t staticFactorBytes(MemRefType type) {
   int64_t staticElems = 1;
   for (int64_t dim : type.getShape())
     if (!ShapedType::isDynamic(dim))
@@ -549,13 +550,7 @@ static DynPacking packDynamicAllocs(MutableArrayRef<AllocInfo> dynamics,
   auto computeKey = [](AllocInfo &info) {
     MemRefType type = info.allocOp.getType();
     auto dynSizes = info.allocOp.getDynamicSizes();
-    int64_t totalBits = type.getElementTypeBitWidth();
-    int64_t staticFactor = 1;
-    for (int64_t dim : type.getShape())
-      if (!ShapedType::isDynamic(dim))
-        staticFactor *= dim;
-    staticFactor =
-        static_cast<int64_t>(llvm::divideCeil(staticFactor * totalBits, 8));
+    int64_t staticFactor = staticFactorBytes(type);
     SmallVector<Value, 2> dynOperands;
     unsigned dynIdx = 0;
     for (int64_t dim : type.getShape())
@@ -884,7 +879,7 @@ void PoolAllocsPass::runOnOperation() {
         dynSpanUnits += group.spanUnits;
         dynLbUnits += maxConcurrentLoad(members, [](const AllocInfo *i) {
           memref::AllocOp op = i->allocOp; // copy handle to drop constness
-          return dynStaticFactorBytes(op.getType());
+          return staticFactorBytes(op.getType());
         });
       }
       NumDynFragUnits += dynSpanUnits - dynLbUnits;
