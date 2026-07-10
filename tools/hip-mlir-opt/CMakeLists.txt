@@ -26,6 +26,7 @@ target_link_libraries(hip-mlir-opt PRIVATE
   MLIRPass
   MLIRTransforms
   MLIRAnalysis
+  MLIRAffineDialect
   MLIRArithDialect
   MLIRControlFlowDialect
   MLIRFuncDialect

@@ -11,6 +11,7 @@
 #include "hip/Dialect/Transforms/Pipelines.h"
 
 #include "mlir/Conversion/Passes.h"
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Transforms/BufferDeallocationOpInterfaceImpl.h"
 #include "mlir/Dialect/Arith/Transforms/BufferizableOpInterfaceImpl.h"
@@ -43,6 +44,7 @@ int main(int argc, char **argv) {
   hip::install_crash_handlers("hip-mlir-opt");
   mlir::DialectRegistry registry;
   registry.insert<mlir::BuiltinDialect>();
+  registry.insert<mlir::affine::AffineDialect>();
   registry.insert<mlir::arith::ArithDialect>();
   registry.insert<mlir::bufferization::BufferizationDialect>();
   registry.insert<mlir::cf::ControlFlowDialect>();
