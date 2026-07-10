@@ -42,9 +42,91 @@
 #include <hip/hip_fp16.h>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+
+/* -----------------------------------------------------------------------
+ * Shared disk-persistent autotune cache (GEMV int4 / int8 paths)
+ *
+ * WHY: the GEMV autotune (kGemvConfigs) picks the fastest (threads, tile_n)
+ * by on-device timing. Kept purely in-process, every process re-runs that
+ * timing and -- because several configs are within measurement noise of each
+ * other -- can settle on a DIFFERENT winner run-to-run, so single-token
+ * decode TPS swings run-to-run between otherwise-identical processes.
+ * Persisting the winning config to disk (keyed by problem shape + a build
+ * stamp) makes the first process prime the file and every later process load
+ * the SAME config -> deterministic decode. Mirrors the WMMA disk cache
+ * (getWmmaCachePath / loadWmmaCache / saveWmmaCache) further down this file.
+ *
+ * File format: first line = build stamp (invalidates the file on recompile),
+ * then "<key> <config_id>" per line. One file per GPU arch in %TEMP%.
+ * ----------------------------------------------------------------------- */
+static constexpr const char kTuneCacheBuildStamp[] = __DATE__ " " __TIME__;
+
+static std::string getTuneCachePath(const char *name) {
+    std::string tmp_dir;
+#ifdef _WIN32
+    char *v = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&v, &len, "TEMP") == 0 && v != nullptr) {
+        tmp_dir = v;
+        free(v);
+    }
+#else
+    const char *v = getenv("TEMP");
+    if (!v) v = getenv("TMPDIR");
+    if (!v) v = "/tmp";
+    tmp_dir = v;
+#endif
+    if (tmp_dir.empty()) return std::string();
+
+    hipDeviceProp_t prop;
+    if (hipGetDeviceProperties(&prop, 0) != hipSuccess ||
+        prop.gcnArchName[0] == '\0')
+        return std::string();
+
+    return tmp_dir + "/morphizen_" + name + "_cache_" + prop.gcnArchName +
+           ".txt";
+}
+
+static void loadTuneCacheFile(const std::string &path,
+                              std::unordered_map<std::string, int> &cache,
+                              int maxConfigId) {
+    if (path.empty()) return;
+    FILE *f = fopen(path.c_str(), "r");
+    if (!f) return;
+    // First line is the build stamp -- discard the cache if the binary was
+    // rebuilt (config ids / timings may have changed).
+    char ts_line[64];
+    if (!fgets(ts_line, sizeof(ts_line), f)) {
+        fclose(f);
+        return;
+    }
+    size_t ts_len = strlen(ts_line);
+    if (ts_len > 0 && ts_line[ts_len - 1] == '\n') ts_line[ts_len - 1] = '\0';
+    if (strcmp(ts_line, kTuneCacheBuildStamp) != 0) {
+        fclose(f);
+        return;
+    }
+    char key[128];
+    int cfg;
+    while (fscanf(f, "%127s %d", key, &cfg) == 2)
+        if (cfg >= 0 && cfg < maxConfigId) cache[key] = cfg;
+    fclose(f);
+}
+
+static void saveTuneCacheFile(const std::string &path,
+                              const std::unordered_map<std::string, int> &cache) {
+    if (path.empty()) return;
+    FILE *f = fopen(path.c_str(), "w");
+    if (!f) return;
+    fprintf(f, "%s\n", kTuneCacheBuildStamp);
+    for (const auto &e : cache) fprintf(f, "%s %d\n", e.first.c_str(), e.second);
+    fclose(f);
+}
 
 /* =======================================================================
  * Section 1: Naive fallback kernel (row-major, any alignment, batched)
@@ -896,6 +978,8 @@ static int tuneGemvConfig(
 
 static std::unordered_map<std::string, int> gemv_cache;
 static std::mutex gemv_tune_mutex;
+static std::once_flag gemv_cache_init_flag;
+static std::string gemv_cache_path;
 
 static std::string gemvCacheKey(int64_t M, int64_t N, int64_t K, int64_t bs,
                                 bool col_major, bool has_zp) {
@@ -924,6 +1008,13 @@ static int getOrTuneGemvConfig(
     std::string key = gemvCacheKey(M, N, K, bs, effective_col_major,
                                    /*has_zp=*/zp != nullptr);
 
+    // Load the disk-persisted cache once per process so repeated runs settle on
+    // the same config -> deterministic decode (see kTuneCacheBuildStamp above).
+    std::call_once(gemv_cache_init_flag, [] {
+        gemv_cache_path = getTuneCachePath("gemv");
+        loadTuneCacheFile(gemv_cache_path, gemv_cache, kNumGemvConfigs);
+    });
+
     std::lock_guard<std::mutex> lock(gemv_tune_mutex);
 
     auto it = gemv_cache.find(key);
@@ -933,6 +1024,7 @@ static int getOrTuneGemvConfig(
     int best = tuneGemvConfig(stream, A, B, sc, zp, bi, out,
                                M, N, K, batch, bs, col_major);
     gemv_cache[key] = best;
+    saveTuneCacheFile(gemv_cache_path, gemv_cache);
 
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] GEMV cache: stored key=\"%s\" -> config[%d] "
@@ -1075,6 +1167,8 @@ static int tuneGemvConfigI8(
 
 static std::unordered_map<std::string, int> gemv_i8_cache;
 static std::mutex gemv_i8_tune_mutex;
+static std::once_flag gemv_i8_cache_init_flag;
+static std::string gemv_i8_cache_path;
 
 static std::string gemvI8CacheKey(int64_t M, int64_t N, int64_t K,
                                    int64_t bs, bool has_zp) {
@@ -1096,6 +1190,11 @@ static int getOrTuneGemvConfigI8(
     const bool has_zp = (zp != nullptr);
     std::string key = gemvI8CacheKey(M, N, K, bs, has_zp);
 
+    std::call_once(gemv_i8_cache_init_flag, [] {
+        gemv_i8_cache_path = getTuneCachePath("gemv_i8");
+        loadTuneCacheFile(gemv_i8_cache_path, gemv_i8_cache, kNumGemvConfigs);
+    });
+
     std::lock_guard<std::mutex> lock(gemv_i8_tune_mutex);
 
     auto it = gemv_i8_cache.find(key);
@@ -1105,6 +1204,7 @@ static int getOrTuneGemvConfigI8(
     int best = tuneGemvConfigI8(stream, A, B, sc, zp, bi, out,
                                  M, N, K, batch, bs);
     gemv_i8_cache[key] = best;
+    saveTuneCacheFile(gemv_i8_cache_path, gemv_i8_cache);
 
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] GEMV-i8 cache: stored key=\"%s\" -> config[%d] "
