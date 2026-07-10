@@ -63,6 +63,7 @@
 STATISTIC(NumAllocsPooled, "Number of allocations pooled into byte buffer");
 STATISTIC(NumStaticPacked, "Number of static allocations packed");
 STATISTIC(NumDynBuckets, "Number of dynamic size buckets created");
+STATISTIC(NumDomains, "Number of dominance domains (separate pools) created");
 
 namespace mlir {
 namespace hip {
@@ -653,6 +654,7 @@ void PoolAllocsPass::runOnOperation() {
   // ----- Phase 1.5: partition allocs into dominance domains ------------
 
   SmallVector<Domain> domains = partitionByDominanceDomain(allInfos, block);
+  NumDomains += domains.size();
 
   // The domain count is unbounded — the runtime grows its per-domain pool
   // arrays on demand — so a high count is correct, just suspicious. Emit a
