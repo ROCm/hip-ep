@@ -64,6 +64,13 @@ STATISTIC(NumAllocsPooled, "Number of allocations pooled into byte buffer");
 STATISTIC(NumStaticPacked, "Number of static allocations packed");
 STATISTIC(NumDynBuckets, "Number of dynamic size buckets created");
 STATISTIC(NumDomains, "Number of dominance domains (separate pools) created");
+STATISTIC(NumStaticFragBytes,
+          "Static-pool bytes beyond the max-load lower bound (fragmentation)");
+STATISTIC(NumDynFragUnits,
+          "Aligned dynamic-group staticFactor bytes beyond the max-load lower "
+          "bound (per-group fragmentation, pre-scale by the dynamic factor)");
+STATISTIC(NumSmallBucketExcessBins,
+          "Small-bucket bins beyond the peak concurrent count");
 
 namespace mlir {
 namespace hip {
@@ -87,6 +94,42 @@ struct AllocInfo {
 /// True when two allocs' [def, lastUse] intervals overlap.
 static bool lifetimesOverlap(const AllocInfo &a, const AllocInfo &b) {
   return !(a.lastUseIndex < b.defIndex || b.lastUseIndex < a.defIndex);
+}
+
+/// Byte size contributed by a dynamic-shaped memref's STATIC dims:
+/// elementBytes * product(static dims). The runtime byte size is this times
+/// product(dynOperands). Mirrors `staticFactor` in packDynamicAllocs; used by
+/// the fragmentation probe, which compares aligned dynamic groups in these
+/// units (the dynamic factor is common, and symbolic, within a group).
+static int64_t dynStaticFactorBytes(MemRefType type) {
+  int64_t staticElems = 1;
+  for (int64_t dim : type.getShape())
+    if (!ShapedType::isDynamic(dim))
+      staticElems *= dim;
+  return static_cast<int64_t>(
+      llvm::divideCeil(staticElems * type.getElementTypeBitWidth(), 8));
+}
+
+/// Max-load lower bound: the peak sum of `sizeOf` over members live at a single
+/// point in time. No contiguous packing of these intervals can be smaller, so a
+/// packer's highwater minus this is its fragmentation. The load only rises when
+/// an interval starts, so the peak occurs at some member's def point; summing
+/// the members live AT each such point (not merely overlapping the anchor's
+/// interval -- two members can each overlap the anchor yet never coexist) is
+/// exact. O(n^2), fine here (n = allocs per domain, tens in practice).
+static int64_t
+maxConcurrentLoad(ArrayRef<const AllocInfo *> members,
+                  llvm::function_ref<int64_t(const AllocInfo *)> sizeOf) {
+  int64_t peak = 0;
+  for (const AllocInfo *anchor : members) {
+    unsigned point = anchor->defIndex;
+    int64_t load = 0;
+    for (const AllocInfo *other : members)
+      if (other->defIndex <= point && point <= other->lastUseIndex)
+        load += sizeOf(other); // live at `point` (includes anchor itself)
+    peak = std::max(peak, load);
+  }
+  return peak;
 }
 
 //===----------------------------------------------------------------------===//
@@ -812,6 +855,60 @@ void PoolAllocsPass::runOnOperation() {
     // F = product(dynOperands) per aligned group; emitted below (Phase 5) and
     // reused for both the pool-size and per-alloc offset arithmetic.
     SmallVector<Value> groupFactors(dynPacking.alignedGroups.size());
+
+    // Debug-only fragmentation probe. Reads the packing result (no IR emitted,
+    // no offsets changed) and compares each part of this domain's footprint to
+    // its max-load lower bound; the surplus is recoverable fragmentation. A
+    // zero surplus means best-fit reached the theoretical floor for that part.
+    // Static bytes and small-bucket bins are exact; aligned dynamic groups are
+    // compared in staticFactor units because the dynamic factor F is common
+    // (and symbolic) within a group, so the byte surplus is (unit surplus) * F.
+    // Runs unconditionally (accumulates statistics); only the per-domain remark
+    // is gated behind the emit-fragmentation-report option.
+    {
+      SmallVector<const AllocInfo *> members;
+      members.reserve(statics.size());
+      for (const AllocInfo &s : statics)
+        members.push_back(&s);
+      int64_t staticLb = maxConcurrentLoad(members, [&](const AllocInfo *i) {
+        return llvm::alignTo(i->staticByteSize, align);
+      });
+      int64_t staticFrag = staticPoolSize - staticLb;
+      NumStaticFragBytes += staticFrag;
+
+      int64_t dynSpanUnits = 0, dynLbUnits = 0;
+      for (const AlignedDynGroup &group : dynPacking.alignedGroups) {
+        members.clear();
+        for (const auto &[info, unitOffset] : group.assignments)
+          members.push_back(info);
+        dynSpanUnits += group.spanUnits;
+        dynLbUnits += maxConcurrentLoad(members, [](const AllocInfo *i) {
+          memref::AllocOp op = i->allocOp; // copy handle to drop constness
+          return dynStaticFactorBytes(op.getType());
+        });
+      }
+      NumDynFragUnits += dynSpanUnits - dynLbUnits;
+
+      int64_t smallBins = 0, smallMinBins = 0;
+      for (const DynBucket &bucket : dynPacking.smallBuckets) {
+        members.clear();
+        for (const auto &bin : bucket.bins)
+          members.append(bin.begin(), bin.end());
+        smallBins += static_cast<int64_t>(bucket.bins.size());
+        smallMinBins += maxConcurrentLoad(
+            members, [](const AllocInfo *) { return int64_t{1}; });
+      }
+      NumSmallBucketExcessBins += smallBins - smallMinBins;
+
+      if (emitFragmentationReport)
+        funcOp.emitRemark()
+            << "hip-pool-allocs fragmentation: domain " << domainId
+            << ": static " << staticPoolSize << "/" << staticLb << " B ("
+            << staticFrag << " frag); dyn-groups " << dynSpanUnits << "/"
+            << dynLbUnits << " units (" << (dynSpanUnits - dynLbUnits)
+            << " frag); small-buckets " << smallBins << "/" << smallMinBins
+            << " bins (" << (smallBins - smallMinBins) << " excess)";
+    }
 
     domainPoolStaticSizes.push_back(staticPoolSize);
 
