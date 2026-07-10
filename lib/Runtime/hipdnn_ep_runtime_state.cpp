@@ -152,9 +152,9 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->workspace_size = 0;
   state->host_scratch_base = nullptr;
   state->host_scratch_size = 0;
-  // No allocator installed by default (null context + callback). The EP
-  // overwrites this via hipdnn_ep_set_output_allocator; the classic pipeline
-  // leaves it null and never calls hipdnn_ep_alloc_output.
+  // Start with no output allocator (null context + callback). The EP installs
+  // one via hipdnn_ep_set_output_allocator before the first inference_compute,
+  // and hipdnn_ep_alloc_output then forwards each graph-output request to it.
   state->output_allocator.self = nullptr;
   state->output_allocator.allocate = nullptr;
   state->qmoe_scratch = nullptr;
@@ -203,6 +203,11 @@ static int initialize_state_handles(RuntimeState **out_state) {
 
   TIMING_LOG("[Session] hipStreamCreate: %.3fs\n", record_elapsed(t_prev));
 
+  // Skip vendor-handle creation when the vendor BLAS/DNN backends are disabled:
+  // the stubbed miopenCreate/hipblasLtCreate would fail and abort session
+  // creation even for a model that never dispatches a vendor op. Handles stay
+  // null; cleanup is already null-guarded.
+#ifndef HIPDNN_EP_DISABLE_VENDOR_BLAS
   if (miopenCreate(&state->miopen_handle) != miopenStatusSuccess) {
     fprintf(stderr, "Failed to create MIOpen handle\n");
     if (state->stream)
@@ -231,6 +236,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
     free(state);
     return 9;
   }
+#endif // HIPDNN_EP_DISABLE_VENDOR_BLAS
 
   TIMING_LOG("[Session] hipBLASLt init: %.3fs\n", record_elapsed(t_prev));
 

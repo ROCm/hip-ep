@@ -68,8 +68,7 @@ module {
 // CHECK: llvm.call @hipdnn_ep_state_init_with_fs
 // CHECK-LABEL: llvm.func @inference_compute
 // CHECK: llvm.call @hipdnn_ep_tensor_prepare_input
-// CHECK: llvm.call @hipdnn_ep_tensor_prepare_output
-// CHECK: llvm.call @hipdnn_ep_tensor_finalize_output
+// Outputs are allocated in-graph (2-arg ABI, no output staging).
 // CHECK-LABEL: llvm.func @inference_cleanup
 // CHECK: llvm.call @hipdnn_ep_state_cleanup
 // CHECK-LABEL: llvm.func @inference_get_metadata_json

@@ -532,8 +532,7 @@ def LoopBodyToOutParamsPass
     : Pass<"hip-loop-body-to-out-params", "mlir::ModuleOp"> {
   let summary = "Promote outlined hip.loop body returns to out-param ABI";
   let description = [{
-    Runs AFTER `one-shot-bufferize` and BEFORE `buffer-deallocation` in
-    both classic and allocator pipelines.
+    Runs AFTER `one-shot-bufferize` and BEFORE `buffer-deallocation`.
 
     `onnx-loop-outline` emits each `hip.loop` body as a private
     `func.func` named `*_loop_body_*`. After bufferization those helpers
@@ -541,12 +540,12 @@ def LoopBodyToOutParamsPass
     LoopLowering expects the out-param ABI (`v_in` + `v_out` per
     loop-carried value, with `{bufferize.result}` on each out-param).
 
-    Module-level `buffer-results-to-out-params` promotes `@main_graph` in
-    the classic pipeline but skips private functions; the allocator
-    pipeline skips module-level out-params on `@main_graph` entirely.
-    This pass closes the gap by calling MLIR's
-    `promoteBufferResultsToOutParams` with `modifyPublicFunctions = false`
-    and a filter on `*_loop_body_*` only.
+    This is the loop-body out-param ABI, which is INTERNAL to the DLL and
+    unrelated to the graph-entry output allocator ABI. `@main_graph`
+    outputs are handled by `hip-use-output-allocator` (`hip.alloc_output`
+    + EP callback); this pass only promotes the private `*_loop_body_*`
+    helpers by calling MLIR's `promoteBufferResultsToOutParams` with
+    `modifyPublicFunctions = false` and a filter on `*_loop_body_*` only.
 
     Example (one loop-carried memref):
       Before:  private @body(..., %v_in) -> memref<16xf32> { return %out }
@@ -562,26 +561,25 @@ def UseOutputAllocatorPass
     : Pass<"hip-use-output-allocator", "mlir::func::FuncOp"> {
   let summary = "Rewrite returned memref.alloc outputs to hip.alloc_output";
   let description = [{
-    Replaces each graph-output memref.alloc (a value returned by func.return)
-    with hip.alloc_output, reusing the alloc's dynamic-size operands and setting
-    out_idx to the return operand position.  Output buffers are then obtained
-    from the EP output allocator (EP/runtime-owned) instead of being deallocated
-    or pooled.
+    Replaces each graph-output memref.alloc with hip.alloc_output, reusing the
+    alloc's dynamic-size operands and setting out_idx to its position in
+    func.return.  Output buffers then come from the EP output allocator (the EP
+    owns and frees them) instead of being deallocated or pooled.
 
-    Scope: only public (graph-entry) functions are rewritten.  Private helpers
-    (e.g. outlined onnx.Loop bodies) carry a !hip.context arg 0 and return
-    memref.allocs too, but their results are DLL-internal, never EP outputs, so
-    they are left unchanged.  Functions lacking !hip.context as argument 0 are
-    likewise skipped.
+    An alloc counts as a graph output when func.return hands it back -- either
+    directly, or after it passes through view ops (memref.cast,
+    memref.collapse_shape, memref.expand_shape, memref.subview, any number of
+    them).  The pass uses BufferViewFlowAnalysis to check this: an alloc is an
+    output if any value made from it via those view ops is returned.  This
+    handles reshaped / cast / subview'd outputs without special-casing each op.
+    The view ops between the alloc and the return are left in place.
 
-    The pass also stamps the `hipdnn.use_output_allocator` BoolAttr (value =
-    true) on the parent module -- the allocator-mode marker that downstream
-    convert-hip-to-llvm and generate-interface read to select the allocator ABI.
-    It is a typed bool, not a presence-only UnitAttr, so readers test the VALUE
-    (absence and `= false` both mean classic mode).  It is stamped even when no
-    alloc is rewritten, because the mode is decided by the pass being run, not by
-    the IR contents (a zero-output graph must still be marked).  Leaves the
-    function signature and func.return untouched.
+    Only public (graph-entry) functions are rewritten.  Private helpers (e.g.
+    outlined onnx.Loop bodies) also take a !hip.context arg and return allocs,
+    but those buffers stay inside the DLL and are not EP outputs, so they are
+    left unchanged.  Functions whose arg 0 is not !hip.context are skipped too.
+
+    Leaves the function signature and func.return untouched.
   }];
   let dependentDialects = [
     "mlir::hip::HipDialect",

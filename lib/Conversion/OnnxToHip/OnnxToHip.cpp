@@ -874,11 +874,10 @@ void ConvertOnnxToHipPass::runOnOperation() {
   for (auto *op : toErase)
     op->erase();
 
-  // ONNX-MLIR attaches per-result attributes (e.g. "onnx_node_name") to
-  // func.func results. The downstream buffer-results-to-out-params pass
-  // skips any result that still carries attributes, leaving the function
-  // signature unconverted and causing later lowering failures. Clear all
-  // result attributes so every result is eligible for out-param conversion.
+  // ONNX-MLIR tags func.func results with attributes (e.g. "onnx_node_name").
+  // Downstream bufferization skips any result that still has attributes, which
+  // leaves the signature unconverted and breaks later lowering. Clear them so
+  // every result is handled.
   module.walk([&](mlir::func::FuncOp funcOp) {
     unsigned numResults = funcOp.getNumResults();
     if (numResults > 0) {

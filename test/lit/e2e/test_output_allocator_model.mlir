@@ -2,38 +2,21 @@
 // Licensed under the MIT License.
 //
 // ============================================================================
-// TEST: allocator vs classic output handling, end-to-end through
-// --hipdnn-pipeline on the same single-Sigmoid model.
+// TEST: output-allocator output handling, end-to-end through
+// --hipdnn-pipeline on a single-Sigmoid model.
 //
-// Allocator pipeline (use-output-allocator=true):
+// The output-allocator ABI is the only mode:
 //   - graph output is allocated in-graph: hip.alloc_output lowers to a
 //     llvm.call @hipdnn_ep_alloc_output (the EP output-allocator callback).
 //   - inference_compute has the 2-arg (state, inputs) ABI -- no outputs span.
-//   - NO output staging calls: prepare_output / finalize_output are skipped
-//     (the output buffer is EP-owned and written in place).
-//
-// Classic pipeline (default):
-//   - output is a caller-provided out-param: NO hipdnn_ep_alloc_output.
-//   - inference_compute has the 3-arg (state, inputs, outputs) ABI.
-//   - prepare_output + finalize_output calls stage the output buffer.
-//
-// The two modes are pinned against one input so the contrast cannot drift.
+//   - the output buffer is EP-owned and written in place (no output staging).
 // ============================================================================
 
-// RUN: hip-mlir-opt %s --hipdnn-pipeline='use-output-allocator=true' 2>&1 | FileCheck --check-prefix=ALLOC --implicit-check-not="llvm.call @hipdnn_ep_tensor_prepare_output" --implicit-check-not="llvm.call @hipdnn_ep_tensor_finalize_output" %s
-// RUN: hip-mlir-opt %s --hipdnn-pipeline 2>&1 | FileCheck --check-prefix=CLASSIC --implicit-check-not=hipdnn_ep_alloc_output --implicit-check-not=hipdnn.use_output_allocator %s
+// RUN: hip-mlir-opt %s --hipdnn-pipeline 2>&1 | FileCheck %s
 
-// --- Allocator: module attr (typed bool = true) is the single source of truth,
-//     then in-graph output allocation + 2-arg compute ABI. ---
-// ALLOC: hipdnn.use_output_allocator = true
-// ALLOC: llvm.call @hipdnn_ep_alloc_output
-// ALLOC: llvm.func @inference_compute(%{{[a-zA-Z0-9_]+}}: !llvm.ptr, %{{[a-zA-Z0-9_]+}}: !llvm.ptr) -> i32
-
-// --- Classic: NO module attr (implicit-check-not above), out-param 3-arg
-//     compute ABI + output staging calls. ---
-// CLASSIC: llvm.func @inference_compute(%{{[a-zA-Z0-9_]+}}: !llvm.ptr, %{{[a-zA-Z0-9_]+}}: !llvm.ptr, %{{[a-zA-Z0-9_]+}}: !llvm.ptr) -> i32
-// CLASSIC: llvm.call @hipdnn_ep_tensor_prepare_output
-// CLASSIC: llvm.call @hipdnn_ep_tensor_finalize_output
+// In-graph output allocation + 2-arg compute ABI.
+// CHECK: llvm.call @hipdnn_ep_alloc_output
+// CHECK: llvm.func @inference_compute(%{{[a-zA-Z0-9_]+}}: !llvm.ptr, %{{[a-zA-Z0-9_]+}}: !llvm.ptr) -> i32
 
 module {
   func.func @main_graph(%arg0: tensor<4x8xf16> {onnx.name = "input"}) -> (tensor<4x8xf16> {onnx.name = "output"}) {

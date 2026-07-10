@@ -1,0 +1,30 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "morphizen-ort-api-ext",
+    srcs = ["src/morphizen-ort-api-ext.cpp"],
+    hdrs = ["include/morphizen/morphizen-ort-api-ext.hpp"],
+    copts = select({
+        "@bazel_tools//src/conditions:windows": [
+            "/wd4251",  # class needs to have dll-interface warnings from ONNXRuntime
+            "/wd4275",  # non dll-interface class used as base warnings
+            "/wd4996",  # deprecated function warnings
+            "/W4",  # enable all warnings
+            "/WX",  # treat warnings as errors
+        ],
+        "//conditions:default": [
+            "-Wno-unused-parameter",
+            "-Wno-sign-compare",
+            "-Wno-unused-variable",
+        ],
+    }),
+    includes = ["include"],
+    strip_include_prefix = "include",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//morphizen-utils:morphizen_utils",  # Internal utility library
+        "@glog",  # Glog for logging
+        "@gsl",  # GSL for Guideline Support Library
+        "@onnxruntime//:onnxruntime_headers",  # ONNXRuntime headers-only target
+    ],
+)

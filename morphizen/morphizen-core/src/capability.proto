@@ -1,0 +1,86 @@
+// Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+/*
+ *     MorphiZen in this distribution is provided under the
+ * following free and permissive binary-only license, but are not provided in
+ * source code form.  While the following free and permissive license is similar
+ * to the BSD open source license, it is NOT the BSD open source license nor
+ * other OSI-approved open source license.
+ *
+ *      Copyright (C) 2022 Xilinx, Inc.
+ *      Copyright (C) 2023 – 2024 Advanced Micro Devices, Inc. All rights reserved.
+ *
+ *      Redistribution and use in binary form only, without modification, is
+ * permitted provided that the following conditions are met:
+ *
+ *      1. Redistributions must reproduce the above copyright notice, this list
+ * of conditions and the following disclaimer in the documentation and/or other
+ * materials provided with the distribution.
+ *
+ *      2. The name of Xilinx, Inc. may not be used to endorse or promote
+ * products redistributed with this software without specific prior written
+ * permission.
+ *
+ *      THIS SOFTWARE IS PROVIDED BY XILINX, INC. "AS IS" AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO
+ * EVENT SHALL XILINX, INC. BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+ *      PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+ * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+ * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+ * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
+ * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
+ */
+syntax = "proto3";
+import "google/protobuf/struct.proto";
+
+package morphizen;
+
+message StatProto {
+  repeated DeviceStatProto device_stat = 1;
+  repeated NodeStatProto node_stat = 2;
+  repeated ShapeInfoProto shape_info = 3;
+  repeated SubgraphInfoProto subgraph_stat = 4;
+}
+
+message ShapeInfoProto {
+  string name = 1;
+  repeated int64 shape = 2;
+  bool is_scalar = 3;
+  bool is_unknown = 4;
+}
+
+message SubgraphInfoProto {
+  string device = 1;
+  int32  count = 2;
+}
+
+message NodeStatProto {
+  repeated string output = 1;
+  repeated string input = 2;
+  string op_domain = 3;
+  string op_type = 4;
+  string comment = 5;
+  string device = 6;
+}
+
+message DeviceStatProto {
+  string name = 1;
+  int32 node_num = 2;
+  repeated string supported_op_type = 3;
+}
+
+message MetaDefProto {
+  string id = 1;
+  repeated string inputs = 2;
+  repeated string outputs = 3;
+  repeated string nodes = 4; // we use the first output node arg name to identify a node.
+  repeated string constant_initializers = 5;
+  string device = 6; // morphizen_custom_op_<device>
+  map<string, string> generic_param = 7;
+  bool fallback_CPU = 12;
+  google.protobuf.Struct param = 13;
+  repeated int32 input_argument_indice = 14;
+  repeated int32 output_argument_indice = 15;
+}
