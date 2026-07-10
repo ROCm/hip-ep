@@ -1,0 +1,73 @@
+##
+## Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+name: build-and-test-bazel
+
+on:
+  workflow_dispatch:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  merge_group:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
+
+permissions:
+  contents: read
+
+jobs:
+  bazel-test:
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
+    runs-on: [self-hosted, Windows, X64]
+    steps:
+      - name: Add git-lfs to PATH
+        # git-lfs.exe lives in C:\Program Files\Git\cmd which is not in the runner's
+        # system PATH (only C:\Program Files\Git\bin is). actions/checkout needs git-lfs
+        # as a standalone binary for lfs: true. GITHUB_PATH is job-scoped, no machine change.
+        shell: powershell
+        run: echo "C:\Program Files\Git\cmd" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          submodules: true
+          lfs: true
+          fetch-depth: 0
+          show-progress: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Smudge LFS files
+        # On persistent self-hosted runners, actions/checkout resets the workspace to the
+        # prior HEAD *before* installing the LFS smudge filter. When it then checks out the
+        # target SHA, git only smudges files that changed between the two commits — files
+        # like pt_resnet50.onnx that are identical in both are skipped, leaving LFS pointer
+        # files (134 bytes) on disk instead of the real content. This does not affect
+        # ephemeral GitHub-hosted runners where every checkout starts from an empty workspace.
+        # Fix: git lfs checkout force-smudges all pointer files regardless of what changed.
+        shell: powershell
+        run: git lfs checkout
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@8cb04a772ab4c1eb984e9c1b493a182e96c5e425 # 0.19.0
+        with:
+          # Download Bazelisk 1.x and add to PATH (runner does not have it pre-installed)
+          bazelisk-version: 1.x
+          # Cache Bazelisk binary based on .bazelversion
+          bazelisk-cache: true
+          # Explicitly disable repository-cache (default is true). The self-hosted runner
+          # has a persistent local disk cache at C:/bazel_cache/repository_cache
+          # (configured in .bazelrc). Restoring the GitHub Actions cache (~1.5 GB) over
+          # the network is slower than reading from local disk.
+          repository-cache: false
+
+      - name: bazel test (mlir-imp backend)
+        shell: powershell
+        run: bazel test --config=remote --test_output=errors //...
+        env:
+          MORPHIZEN_ORT_BRIDGE_BACKEND: mlir-backend
+          GITHUB_TOKEN: ${{ secrets.REGISTRY_GITHUB_TOKEN }}

@@ -87,3 +87,13 @@ tools = [
     "not",
 ]
 llvm_config.add_tool_substitutions(tools, hip_tools_dirs + [config.llvm_tools_dir])
+
+# `hip_static_plugins` feature: gates the Plugin/ pass tests. The sample plugin
+# is linked STATICALLY into hip-mlir-opt when the build selected it (`sample` in
+# HIPDNN_EP_COMPILER_PLUGINS); config.hip_static_plugins carries that from CMake.
+# Static linking needs no symbol export and puts the plugin in the host's single
+# MLIR registry, so this works identically on Windows and Linux -- no platform
+# restriction. The slot-recording / bitcode / library contributions are also
+# covered GPU-free by the StaticPlugins unit test (test/plugin/test_static_plugins).
+if getattr(config, "hip_static_plugins", False):
+    config.available_features.add("hip_static_plugins")

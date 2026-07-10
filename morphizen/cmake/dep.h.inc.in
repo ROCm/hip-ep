@@ -1,0 +1,8 @@
+           {"@MORPHIZEN_DEP_NAME@",
+            []() -> const std::string {
+            // return the git commit id
+              return "@MORPHIZEN_DEP@";
+            },
+            []() -> const std::string {
+            // the url as lib id
+            return "@MORPHIZEN_DEP_NAME@"; }},

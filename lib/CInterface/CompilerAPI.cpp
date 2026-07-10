@@ -31,9 +31,6 @@ static const char *COMPILER_VERSION = "1.0.0";
 //   constants_file     — externalized weights filename (default
 //                        "constants.bin")
 //   skip_constant_data — skip writing constant bytes (default false)
-//   use_output_allocator — compile in output-allocator mode: 2-arg
-//                        inference_compute + in-graph hip.alloc_output (default
-//                        false)
 //   output_mode        — LLVM_IR (default; OS-portable LLVM IR as .bc,
 //   JIT-loaded
 //                        by the EP) or Native (per-OS .dll/.so linked here and

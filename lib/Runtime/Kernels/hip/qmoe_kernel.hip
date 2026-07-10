@@ -14,9 +14,15 @@
 #include <hip/hip_fp16.h>
 #include <cstdint>
 #include <cstdio>
+#include <mutex>
+#include <unordered_map>
 
 static constexpr int kBlock = 256;
 static constexpr int kMaxK = 16;
+// topk_routing runs one block per token with this many threads; per-expert exp
+// values are staged in dynamic shared memory sized num_experts at launch, so
+// there is no compile-time cap on the expert count.
+static constexpr int kRoutingBlock = 256;
 
 // ---------------------------------------------------------------------------
 // Top-k routing (fp16 only): for each token, find top-k experts by
@@ -30,72 +36,102 @@ __global__ void topk_routing_kernel(
     int64_t num_experts,
     int64_t k,
     int64_t normalize) {
-  int64_t token = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  // One block per token; threads cooperate over experts. The previous design
+  // was one thread per token, so single-token decode left a lone thread to
+  // scan all experts serially (~30 us/layer for 256 experts). Block-parallel
+  // max / exp-sum reductions plus k rounds of block argmax cut that to a few us.
+  const int token = static_cast<int>(blockIdx.x);
   if (token >= num_tokens) return;
 
-  const __half* logits = router_probs + token * num_experts;
-  int ik = static_cast<int>(k < kMaxK ? k : kMaxK);
+  const __half* logits =
+      router_probs + static_cast<int64_t>(token) * num_experts;
+  const int tid = static_cast<int>(threadIdx.x);
+  const int nthreads = static_cast<int>(blockDim.x);
+  const int ik = static_cast<int>(k < kMaxK ? k : kMaxK);
+  const int ne = static_cast<int>(num_experts);
 
-  // Pass 1: find max logit for numerically stable softmax
-  float max_logit = -1e30f;
-  for (int64_t e = 0; e < num_experts; e++) {
-    float val = static_cast<float>(logits[e]);
-    if (val > max_logit) {
-      max_logit = val;
-    }
+  extern __shared__ float s_exp[];        // [num_experts] exp(logit - max)
+  __shared__ float s_red[kRoutingBlock];  // reduction scratch
+  __shared__ int s_idx[kRoutingBlock];
+
+  // Pass 1: stash logits, block-reduce the max (numerically-stable softmax).
+  float lmax = -1e30f;
+  for (int e = tid; e < ne; e += nthreads) {
+    float v = static_cast<float>(logits[e]);
+    s_exp[e] = v;
+    lmax = fmaxf(lmax, v);
   }
+  s_red[tid] = lmax;
+  __syncthreads();
+  for (int s = nthreads / 2; s > 0; s >>= 1) {
+    if (tid < s)
+      s_red[tid] = fmaxf(s_red[tid], s_red[tid + s]);
+    __syncthreads();
+  }
+  const float max_logit = s_red[0];
+  __syncthreads();
 
-  // Pass 2: compute softmax denominator and find top-k by logit value.
-  // Since exp() is monotonic, top-k by logit == top-k by probability.
-  float exp_sum = 0.0f;
-  float top_vals[kMaxK];
-  int32_t top_idx[kMaxK];
+  // Pass 2: exp in place, block-reduce the softmax denominator over all experts.
+  float lsum = 0.0f;
+  for (int e = tid; e < ne; e += nthreads) {
+    float ev = expf(s_exp[e] - max_logit);
+    s_exp[e] = ev;
+    lsum += ev;
+  }
+  s_red[tid] = lsum;
+  __syncthreads();
+  for (int s = nthreads / 2; s > 0; s >>= 1) {
+    if (tid < s)
+      s_red[tid] += s_red[tid + s];
+    __syncthreads();
+  }
+  const float exp_sum = s_red[0];
+  __syncthreads();
+
+  // Pass 3: k rounds of block argmax over s_exp (exp is monotonic in logit, so
+  // top-k by exp == top-k by logit). Ties resolve to the lower expert index to
+  // match the previous insertion-sort order. The winner is masked each round.
   for (int i = 0; i < ik; i++) {
-    top_vals[i] = -1e30f;
-    top_idx[i] = -1;
-  }
-
-  for (int64_t e = 0; e < num_experts; e++) {
-    float val = static_cast<float>(logits[e]);
-    exp_sum += expf(val - max_logit);
-
-    if (val > top_vals[ik - 1]) {
-      top_vals[ik - 1] = val;
-      top_idx[ik - 1] = static_cast<int32_t>(e);
-      for (int i = ik - 2; i >= 0; i--) {
-        if (top_vals[i + 1] > top_vals[i]) {
-          float tv = top_vals[i];
-          top_vals[i] = top_vals[i + 1];
-          top_vals[i + 1] = tv;
-          int32_t ti = top_idx[i];
-          top_idx[i] = top_idx[i + 1];
-          top_idx[i + 1] = ti;
+    float bv = -1e30f;
+    int bi = ne;
+    for (int e = tid; e < ne; e += nthreads) {
+      float v = s_exp[e];
+      if (v > bv || (v == bv && e < bi)) {
+        bv = v;
+        bi = e;
+      }
+    }
+    s_red[tid] = bv;
+    s_idx[tid] = bi;
+    __syncthreads();
+    for (int s = nthreads / 2; s > 0; s >>= 1) {
+      if (tid < s) {
+        if (s_red[tid + s] > s_red[tid] ||
+            (s_red[tid + s] == s_red[tid] && s_idx[tid + s] < s_idx[tid])) {
+          s_red[tid] = s_red[tid + s];
+          s_idx[tid] = s_idx[tid + s];
         }
       }
+      __syncthreads();
     }
+    if (tid == 0) {
+      const int win = s_idx[0];
+      expert_indices[token * k + i] = win;
+      expert_weights[token * k + i] = static_cast<__half>(s_red[0] / exp_sum);
+      s_exp[win] = -1e30f;
+    }
+    __syncthreads();
   }
 
-  // Convert top-k logit values to softmax probabilities
-  for (int i = 0; i < ik; i++) {
-    top_vals[i] = expf(top_vals[i] - max_logit) / exp_sum;
-  }
-
-  // Optionally re-normalize top-k weights to sum to 1
-  if (normalize) {
+  // Optional renormalization of the top-k weights to sum to 1 (thread 0).
+  if (normalize && tid == 0) {
     float sum = 0.0f;
-    for (int i = 0; i < ik; i++) {
-      sum += top_vals[i];
-    }
-    if (sum > 0.0f) {
-      for (int i = 0; i < ik; i++) {
-        top_vals[i] /= sum;
-      }
-    }
-  }
-
-  for (int i = 0; i < ik; i++) {
-    expert_indices[token * k + i] = top_idx[i];
-    expert_weights[token * k + i] = static_cast<__half>(top_vals[i]);
+    for (int i = 0; i < ik; i++)
+      sum += static_cast<float>(expert_weights[token * k + i]);
+    if (sum > 0.0f)
+      for (int i = 0; i < ik; i++)
+        expert_weights[token * k + i] = static_cast<__half>(
+            static_cast<float>(expert_weights[token * k + i]) / sum);
   }
 }
 
@@ -287,7 +323,6 @@ extern "C" int hip_qmoe_topk_routing(
   if (num_tokens <= 0) return 0;
 
   hipStream_t s = static_cast<hipStream_t>(stream);
-  int grid = static_cast<int>((num_tokens + kBlock - 1) / kBlock);
 
   // Only fp16 (__half, element_size_bytes==2) is supported. All QMoE sub-
   // kernels assume fp16 I/O; the target models use fp16 for router logits,
@@ -299,9 +334,14 @@ extern "C" int hip_qmoe_topk_routing(
             (long long)element_size_bytes);
     return -1;
   }
-
-  hipLaunchKernelGGL(topk_routing_kernel, dim3(grid), dim3(kBlock),
-                     0, s, static_cast<const __half*>(router_probs),
+  // One block per token, kRoutingBlock threads cooperating over experts.
+  // Dynamic shared memory holds num_experts fp32 exp values (no expert cap;
+  // e.g. 256 experts = 1 KB, well within the per-block shared limit).
+  const size_t shmem = static_cast<size_t>(num_experts) * sizeof(float);
+  hipLaunchKernelGGL(topk_routing_kernel,
+                     dim3(static_cast<unsigned>(num_tokens)),
+                     dim3(kRoutingBlock), shmem, s,
+                     static_cast<const __half*>(router_probs),
                      static_cast<int32_t*>(expert_indices),
                      static_cast<__half*>(expert_weights), num_tokens,
                      num_experts, k, normalize);
@@ -913,6 +953,205 @@ __global__ void qmoe_decode_reduce_kernel(
 // tiny per-shape autotune like matmul_nbits if needed).
 // ---------------------------------------------------------------------------
 
+// Candidate (BLOCK_SIZE, TILE_N) configs for the decode fc1/fc2 GEMV kernels.
+// num_u128 = K/32 work units split across BLOCK_SIZE threads; TILE_N output
+// columns per block (must be even for fc1 SwiGLU pairing). Used by the runtime
+// dispatch below to pick a config per shape.
+#define QMOE_CFG_LIST(X)                                                        \
+  X(32, 4) X(32, 8) X(32, 16) X(64, 4) X(64, 8) X(64, 16) X(128, 4)            \
+  X(128, 8) X(128, 16) X(256, 4) X(256, 8) X(256, 16)
+
+template <int BS, int TN>
+static hipError_t launch_qmoe_fc1(
+    hipStream_t s, int k, int fusion_inter, const void* input,
+    const void* expert_indices, const void* fc1_weights, const void* fc1_scales,
+    const void* fc1_zero_points, const void* fc1_bias, void* act_out,
+    int hidden_size, int n_blk_in, int block_size, float swiglu_alpha,
+    float swiglu_beta, float swiglu_limit) {
+  dim3 grid(static_cast<unsigned>((fusion_inter + TN - 1) / TN),
+            static_cast<unsigned>(k));
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_decode_fc1_kernel<BS, TN>), grid,
+                     dim3(BS), 0, s, static_cast<const __half*>(input),
+                     static_cast<const int32_t*>(expert_indices),
+                     static_cast<const uint8_t*>(fc1_weights),
+                     static_cast<const __half*>(fc1_scales),
+                     static_cast<const uint8_t*>(fc1_zero_points),
+                     static_cast<const __half*>(fc1_bias),
+                     static_cast<__half*>(act_out), hidden_size, fusion_inter,
+                     n_blk_in, block_size, swiglu_alpha, swiglu_beta,
+                     swiglu_limit);
+  return hipGetLastError();
+}
+
+template <int BS, int TN>
+static hipError_t launch_qmoe_fc2(
+    hipStream_t s, int k, const void* act_out, const void* expert_indices,
+    const void* expert_weights, const void* fc2_weights, const void* fc2_scales,
+    const void* fc2_zero_points, const void* fc2_bias, void* slot_buf,
+    int inter_size, int hidden_size, int n_blk_mid, int block_size) {
+  dim3 grid(static_cast<unsigned>((hidden_size + TN - 1) / TN),
+            static_cast<unsigned>(k));
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_decode_fc2_kernel<BS, TN>), grid,
+                     dim3(BS), 0, s, static_cast<const __half*>(act_out),
+                     static_cast<const int32_t*>(expert_indices),
+                     static_cast<const __half*>(expert_weights),
+                     static_cast<const uint8_t*>(fc2_weights),
+                     static_cast<const __half*>(fc2_scales),
+                     static_cast<const uint8_t*>(fc2_zero_points),
+                     static_cast<const __half*>(fc2_bias),
+                     static_cast<__half*>(slot_buf), inter_size, hidden_size,
+                     n_blk_mid, block_size);
+  return hipGetLastError();
+}
+
+static hipError_t dispatch_qmoe_fc1(
+    int bs, int tn, hipStream_t s, int k, int fusion_inter, const void* input,
+    const void* expert_indices, const void* fc1_weights, const void* fc1_scales,
+    const void* fc1_zero_points, const void* fc1_bias, void* act_out,
+    int hidden_size, int n_blk_in, int block_size, float swiglu_alpha,
+    float swiglu_beta, float swiglu_limit) {
+#define X(B, T)                                                                \
+  if (bs == (B) && tn == (T))                                                  \
+    return launch_qmoe_fc1<B, T>(                                              \
+        s, k, fusion_inter, input, expert_indices, fc1_weights, fc1_scales,    \
+        fc1_zero_points, fc1_bias, act_out, hidden_size, n_blk_in, block_size, \
+        swiglu_alpha, swiglu_beta, swiglu_limit);
+  QMOE_CFG_LIST(X)
+#undef X
+  return launch_qmoe_fc1<64, 8>(
+      s, k, fusion_inter, input, expert_indices, fc1_weights, fc1_scales,
+      fc1_zero_points, fc1_bias, act_out, hidden_size, n_blk_in, block_size,
+      swiglu_alpha, swiglu_beta, swiglu_limit);
+}
+
+static hipError_t dispatch_qmoe_fc2(
+    int bs, int tn, hipStream_t s, int k, const void* act_out,
+    const void* expert_indices, const void* expert_weights,
+    const void* fc2_weights, const void* fc2_scales,
+    const void* fc2_zero_points, const void* fc2_bias, void* slot_buf,
+    int inter_size, int hidden_size, int n_blk_mid, int block_size) {
+#define X(B, T)                                                                \
+  if (bs == (B) && tn == (T))                                                  \
+    return launch_qmoe_fc2<B, T>(s, k, act_out, expert_indices,                \
+                                 expert_weights, fc2_weights, fc2_scales,      \
+                                 fc2_zero_points, fc2_bias, slot_buf,          \
+                                 inter_size, hidden_size, n_blk_mid,           \
+                                 block_size);
+  QMOE_CFG_LIST(X)
+#undef X
+  return launch_qmoe_fc2<64, 8>(s, k, act_out, expert_indices, expert_weights,
+                                fc2_weights, fc2_scales, fc2_zero_points,
+                                fc2_bias, slot_buf, inter_size, hidden_size,
+                                n_blk_mid, block_size);
+}
+
+// Online per-shape autotune for the decode fc1/fc2 GEMV kernels. The optimal
+// (BLOCK_SIZE, TILE_N) depends on K/32 (work units per block) and N (grid
+// width): the hand-picked BS=64/TN=8 suits gpt-oss-20b (K=2880) but is slower
+// than BS=32 on Qwen3.5 (K=2048/512, fewer work units → BS=64 leaves threads
+// idle). A synthetic tight-loop benchmark mis-ranks TILE_N: it reuses one
+// expert set across all timed iters (hot cache), while in steady state each
+// layer reads cold weights, flipping the memory-bound ranking. So tune ONLINE
+// — sample each candidate on real decode calls (true cache regime), accumulate
+// GPU time, lock in the fastest after enough samples. Keyed by
+// (N, K, block_size, has_zp); dims are model-static so one tuning window per
+// shape. State/lock have process lifetime (kernels are stateless).
+struct QmoeCfg {
+  int bs;
+  int tn;
+};
+
+static constexpr QmoeCfg kQmoeCfgs[] = {
+#define X(B, T) {B, T},
+    QMOE_CFG_LIST(X)
+#undef X
+};
+static constexpr int kNumQmoeCfgs =
+    static_cast<int>(sizeof(kQmoeCfgs) / sizeof(kQmoeCfgs[0]));
+static constexpr int kQmoeDefaultCfg = 4;  // index of {64, 8}
+
+// One round = one full sweep of all candidates (one sample each, round-robin,
+// one per decode call). First kWarmupRounds sweeps are discarded (cold start);
+// the next kSampleRounds accumulate; then best = min mean and done.
+static constexpr int kQmoeWarmupRounds = 1;
+static constexpr int kQmoeSampleRounds = 8;
+
+struct QmoeTuneState {
+  bool done = false;
+  QmoeCfg best = kQmoeCfgs[kQmoeDefaultCfg];
+  double ms[kNumQmoeCfgs] = {};
+  int n[kNumQmoeCfgs] = {};
+  int cursor = 0;
+  int rounds = 0;
+};
+
+static std::unordered_map<uint64_t, QmoeTuneState> g_qmoe_fc1_state;
+static std::unordered_map<uint64_t, QmoeTuneState> g_qmoe_fc2_state;
+static std::mutex g_qmoe_tune_mutex;
+
+static uint64_t qmoe_cfg_key(int n, int k, int block_size, bool has_zp) {
+  return (static_cast<uint64_t>(static_cast<uint32_t>(n)) << 40) ^
+         (static_cast<uint64_t>(static_cast<uint32_t>(k)) << 16) ^
+         (static_cast<uint64_t>(static_cast<uint32_t>(block_size)) << 1) ^
+         (has_zp ? 1ull : 0ull);
+}
+
+
+// Pick the config for this call. While tuning, returns the candidate being
+// sampled and sets *sample_idx >= 0 (caller times this launch and reports via
+// qmoe_tune_record). Once done, returns best and *sample_idx = -1.
+static QmoeCfg qmoe_tune_pick(
+    std::unordered_map<uint64_t, QmoeTuneState>& states, uint64_t key,
+    int* sample_idx) {
+  std::lock_guard<std::mutex> lk(g_qmoe_tune_mutex);
+  QmoeTuneState& st = states[key];
+  if (st.done) {
+    *sample_idx = -1;
+    return st.best;
+  }
+  *sample_idx = st.cursor;
+  return kQmoeCfgs[st.cursor];
+}
+
+// Record one measured sample (real-call GPU time) for the candidate at
+// sample_idx, advance the round-robin cursor, and finalize once enough sample
+// rounds have completed. Warmup rounds are discarded (cold-start noise).
+static void qmoe_tune_record(
+    std::unordered_map<uint64_t, QmoeTuneState>& states, uint64_t key,
+    int sample_idx, float ms, const char* tag, int n, int kdim,
+    int block_size) {
+  std::lock_guard<std::mutex> lk(g_qmoe_tune_mutex);
+  QmoeTuneState& st = states[key];
+  if (st.done || sample_idx != st.cursor)
+    return;  // stale sample (shape raced to done)
+  if (st.rounds >= kQmoeWarmupRounds) {
+    st.ms[sample_idx] += ms;
+    st.n[sample_idx] += 1;
+  }
+  if (++st.cursor >= kNumQmoeCfgs) {
+    st.cursor = 0;
+    if (++st.rounds >= kQmoeWarmupRounds + kQmoeSampleRounds) {
+      double best_mean = 1e30;
+      int best = kQmoeDefaultCfg;
+      for (int i = 0; i < kNumQmoeCfgs; i++) {
+        if (st.n[i] == 0)
+          continue;
+        double mean = st.ms[i] / st.n[i];
+        if (mean < best_mean) {
+          best_mean = mean;
+          best = i;
+        }
+      }
+      st.best = kQmoeCfgs[best];
+      st.done = true;
+      CUSTOM_KERNELS_DEBUG_LOG(
+          "[custom_kernels] qmoe %s online-autotune N=%d K=%d block=%d -> "
+          "BS=%d TN=%d (%.1f us)\n",
+          tag, n, kdim, block_size, st.best.bs, st.best.tn, best_mean * 1000.0);
+    }
+  }
+}
+
 extern "C" int hip_qmoe_decode_fused(
     void* stream,
     const void* input,
@@ -954,67 +1193,88 @@ extern "C" int hip_qmoe_decode_fused(
   }
 
   hipStream_t s = static_cast<hipStream_t>(stream);
-  // BS=64 is the sweet spot here: K-tile count num_u128 = hidden/32 = 90
-  // for gpt-oss-20b. With BS=256 ~65% of threads do zero iterations of the
-  // main loop (only tid<90 enters the loop). BS=64 gives every thread 1-2
-  // iterations and fits 2 wave32 per block (no LDS preload needed; the
-  // cross-warp warp_sums array is only TILE_N*NUM_WARPS = 16 floats).
-  constexpr int BS = 64;
-  // TILE_N must be even for FC1 (gate/linear paired into SwiGLU). 8 keeps
-  // register pressure modest while computing 4 SwiGLU outputs/block.
-  constexpr int TN = 8;
   const int fusion_inter = static_cast<int>(2 * inter_size);
   const int n_blk_in  = static_cast<int>((hidden_size + block_size - 1) / block_size);
   const int n_blk_mid = static_cast<int>((inter_size  + block_size - 1) / block_size);
 
+  // FC1 config: N=fusion_inter, K=hidden. Online per-shape autotune.
+  int s1 = -1;
+  const uint64_t key1 =
+      qmoe_cfg_key(fusion_inter, static_cast<int>(hidden_size),
+                   static_cast<int>(block_size), fc1_zero_points != nullptr);
+  const QmoeCfg c1 = qmoe_tune_pick(g_qmoe_fc1_state, key1, &s1);
+
   // FC1 + SwiGLU fused: grid (fusion_inter/TN, k). Each block produces TN
   // matmul outputs internally and pair-wise SwiGLUs them down to TN/2
   // act_out elements. No dynamic LDS (input read straight from L2/MALL).
+  // While s1 >= 0 the shape is still tuning: bracket this real launch with
+  // events and feed its GPU time back to the online tuner.
   {
-    dim3 grid(static_cast<unsigned>((fusion_inter + TN - 1) / TN),
-              static_cast<unsigned>(k));
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_decode_fc1_kernel<BS, TN>),
-                       grid, dim3(BS), 0, s,
-                       static_cast<const __half*>(input),
-                       static_cast<const int32_t*>(expert_indices),
-                       static_cast<const uint8_t*>(fc1_weights),
-                       static_cast<const __half*>(fc1_scales),
-                       static_cast<const uint8_t*>(fc1_zero_points),
-                       static_cast<const __half*>(fc1_bias),
-                       static_cast<__half*>(act_out),
-                       static_cast<int>(hidden_size), fusion_inter,
-                       n_blk_in, static_cast<int>(block_size),
-                       swiglu_alpha, swiglu_beta, swiglu_limit);
-    hipError_t e = hipGetLastError();
+    hipEvent_t me0 = nullptr, me1 = nullptr;
+    if (s1 >= 0) {
+      hipEventCreate(&me0);
+      hipEventCreate(&me1);
+      hipEventRecord(me0, s);
+    }
+    hipError_t e = dispatch_qmoe_fc1(
+        c1.bs, c1.tn, s, static_cast<int>(k), fusion_inter, input,
+        expert_indices, fc1_weights, fc1_scales, fc1_zero_points, fc1_bias,
+        act_out, static_cast<int>(hidden_size), n_blk_in,
+        static_cast<int>(block_size), swiglu_alpha, swiglu_beta, swiglu_limit);
     if (e != hipSuccess) {
       fprintf(stderr, "[custom_kernels] qmoe_decode_fc1 failed: %s\n",
               hipGetErrorString(e));
       return static_cast<int>(e);
     }
+    if (s1 >= 0) {
+      hipEventRecord(me1, s);
+      hipEventSynchronize(me1);
+      float ms = 0;
+      hipEventElapsedTime(&ms, me0, me1);
+      hipEventDestroy(me0);
+      hipEventDestroy(me1);
+      qmoe_tune_record(g_qmoe_fc1_state, key1, s1, ms, "fc1", fusion_inter,
+                       static_cast<int>(hidden_size),
+                       static_cast<int>(block_size));
+    }
   }
+
+  // FC2 config: N=hidden, K=inter. Online per-shape autotune.
+  int s2 = -1;
+  const uint64_t key2 =
+      qmoe_cfg_key(static_cast<int>(hidden_size), static_cast<int>(inter_size),
+                   static_cast<int>(block_size), fc2_zero_points != nullptr);
+  const QmoeCfg c2 = qmoe_tune_pick(g_qmoe_fc2_state, key2, &s2);
 
   // FC2 + weighted write to slot_buf: grid (hidden/TN, k). No LDS preload.
   {
-    dim3 grid(static_cast<unsigned>((hidden_size + TN - 1) / TN),
-              static_cast<unsigned>(k));
-    hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_decode_fc2_kernel<BS, TN>),
-                       grid, dim3(BS), 0, s,
-                       static_cast<const __half*>(act_out),
-                       static_cast<const int32_t*>(expert_indices),
-                       static_cast<const __half*>(expert_weights),
-                       static_cast<const uint8_t*>(fc2_weights),
-                       static_cast<const __half*>(fc2_scales),
-                       static_cast<const uint8_t*>(fc2_zero_points),
-                       static_cast<const __half*>(fc2_bias),
-                       static_cast<__half*>(slot_buf),
-                       static_cast<int>(inter_size),
-                       static_cast<int>(hidden_size),
-                       n_blk_mid, static_cast<int>(block_size));
-    hipError_t e = hipGetLastError();
+    hipEvent_t me0 = nullptr, me1 = nullptr;
+    if (s2 >= 0) {
+      hipEventCreate(&me0);
+      hipEventCreate(&me1);
+      hipEventRecord(me0, s);
+    }
+    hipError_t e = dispatch_qmoe_fc2(
+        c2.bs, c2.tn, s, static_cast<int>(k), act_out, expert_indices,
+        expert_weights, fc2_weights, fc2_scales, fc2_zero_points, fc2_bias,
+        slot_buf, static_cast<int>(inter_size), static_cast<int>(hidden_size),
+        n_blk_mid, static_cast<int>(block_size));
     if (e != hipSuccess) {
       fprintf(stderr, "[custom_kernels] qmoe_decode_fc2 failed: %s\n",
               hipGetErrorString(e));
       return static_cast<int>(e);
+    }
+    if (s2 >= 0) {
+      hipEventRecord(me1, s);
+      hipEventSynchronize(me1);
+      float ms = 0;
+      hipEventElapsedTime(&ms, me0, me1);
+      hipEventDestroy(me0);
+      hipEventDestroy(me1);
+      qmoe_tune_record(g_qmoe_fc2_state, key2, s2, ms, "fc2",
+                       static_cast<int>(hidden_size),
+                       static_cast<int>(inter_size),
+                       static_cast<int>(block_size));
     }
   }
 

@@ -109,10 +109,21 @@ private:
                  const std::vector<std::string> &export_symbols,
                  std::string &error_message);
 
-  // Discover GPU runtime libraries (THEROCK_DIST), the per-arch custom-kernels
-  // import lib, and the hipDNN graph runtime, for the native link step.
+  /// Discover GPU runtime libraries from THEROCK_DIST environment
+  /// variable plus libraries contributed by statically-linked plugins.
+  /// Plugin contributions are appended after the in-tree libraries
+  /// so command-line link order keeps in-tree symbols winning.
+  /// Covers the per-arch custom-kernels import lib and the hipDNN graph
+  /// runtime as well as the core THEROCK_DIST libraries.
   void discoverLibraries(std::vector<std::string> &libraries,
                          std::vector<std::string> &library_paths);
+
+  /// Phase 1 of `discoverLibraries`: pure THEROCK_DIST + custom-
+  /// kernels + hipDNN-graph-runtime discovery, with no plugin
+  /// involvement. Pulled out so the parent function can run plugin
+  /// contributions even when THEROCK_DIST is unset.
+  void discoverInTreeLibraries(std::vector<std::string> &libraries,
+                               std::vector<std::string> &library_paths);
 
   // Remove intermediate .ll/.obj files left by the native path.
   void cleanupIntermediates(const std::string &basePath);

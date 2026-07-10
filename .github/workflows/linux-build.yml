@@ -46,12 +46,9 @@ jobs:
     # No draft-PR gate: the cache-priming strategy needs every PR push.
     runs-on: ubuntu-latest
     steps:
-      # ROCm/MorphiZen is private — needs the deploy key.
-      - name: Setup SSH key for MorphiZen submodule
-        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555 # v0.10.0
-        with:
-          ssh-private-key: ${{ secrets.MORPHIZEN_DEPLOY_KEY }}
-
+      # MorphiZen is vendored in-tree as a git subtree under morphizen,
+      # so no deploy key or submodule initialization is needed.
+      #
       # Checkout at the workspace root. build/, install/, llvm-install/,
       # ort-install/ live under ${{ runner.workspace }}
       # (the repo's parent), which is the WORKSPACE build.py derives.
@@ -63,15 +60,24 @@ jobs:
           fetch-depth: 1
           show-progress: false
 
-      # Initialize submodules on the HOST with ssh-agent loaded so the private
-      # MorphiZen repo is populated; build.py then sees them present
-      # and skips its own submodule update (needs no SSH).
-      - name: Checkout MorphiZen submodule
+      # -----------------------------------------------------------------------
+      # Regression guard for the HIPDNN_EP_DISABLE_VENDOR_BLAS build mode (build
+      # the real runtime without MIOpen/hipBLASLt). A source-only grep -- no
+      # configure, build, or SDK download -- so it costs ~0 CI time and fails
+      # fast if the flag's load-bearing pieces are removed or renamed.
+      # -----------------------------------------------------------------------
+      - name: Check HIPDNN_EP_DISABLE_VENDOR_BLAS wiring is intact
         run: |
           set -euo pipefail
-          git config --global url."git@github.com:ROCm/MorphiZen.git".insteadOf \
-            "../MorphiZen"
-          git submodule update --init --recursive --depth 1
+          fail=0
+          check() { grep -q "$1" "$2" || { echo "ERROR: missing '$1' in $2"; fail=1; }; }
+          check "option(HIPDNN_EP_DISABLE_VENDOR_BLAS" CMakeLists.txt
+          check "HIPDNN_EP_DISABLE_VENDOR_BLAS" lib/Runtime/CMakeLists.txt
+          check "ifndef HIPDNN_EP_DISABLE_VENDOR_BLAS" lib/Compiler/CompilerDriver.cpp
+          check "ifdef HIPDNN_EP_DISABLE_VENDOR_BLAS" lib/Runtime/real/vendor_blas_stub.cpp
+          check "vendor_blas_stub" lib/Runtime/CMakeLists.txt
+          [ "$fail" = 0 ] || { echo "HIPDNN_EP_DISABLE_VENDOR_BLAS wiring is broken"; exit 1; }
+          echo "HIPDNN_EP_DISABLE_VENDOR_BLAS wiring OK"
 
       # ubuntu-latest ships ~14 GB usable SSD; the from-source LLVM build + ORT
       # need much more. Reclaim ~30 GB by pruning preinstalled toolchains.
@@ -394,7 +400,14 @@ jobs:
           set -euo pipefail
           INSTALL="${{ runner.workspace }}/install"
           ORT="${{ runner.workspace }}/ort-install"
-          THEROCK="${{ runner.workspace }}/build/onnx-hipdnn-ep/_therock"
+          # build.py builds into <workspace>/build/<checkout-dir-name>/ (REPO.parent
+          # / build / REPO.name), so derive _therock from the checkout dir name
+          # instead of hardcoding it -- otherwise a repo rename (onnx-hipdnn-ep ->
+          # hip-ep) silently points this at an empty dir and the closure check below
+          # fails with "libamdhip64.so.7 => not found". This step runs in the default
+          # cwd (github.workspace = the checkout), matching windows-build.yml's
+          # `$(basename "$PWD")` idiom.
+          THEROCK="${{ runner.workspace }}/build/$(basename "$PWD")/_therock"
           # The renamed AMDGPU OGA integration dlopen's libamdgpu-ep.so; the
           # project still builds the EP as libhipgpu.so. Ship the expected
           # filename so the genai auto-loader resolves it (deps + closure below

@@ -58,7 +58,7 @@ onnxruntime_morphizen_ep.dll
 ORT uses the **EP V2 API** to discover and load execution providers. The EP DLL exports
 a standard entry point:
 
-**File:** `3rd-party/morphizen/ort-bridge/src/ort-bridge.cpp`
+**File:** `morphizen/ort-bridge/src/ort-bridge.cpp`
 ```cpp
 OrtStatus* CreateEpFactories(const char* registration_name,
                              const OrtApiBase* ort_api_base,
@@ -77,7 +77,7 @@ OrtStatus* CreateEpFactories(const char* registration_name,
 
 ORT then calls `MorphiZenEpFactory::CreateEpImpl` which constructs a `MorphiZenEP` instance:
 
-**File:** `3rd-party/morphizen/ort-bridge/src/morphizen-ep-factory.cpp`
+**File:** `morphizen/ort-bridge/src/morphizen-ep-factory.cpp`
 ```cpp
 OrtStatus* MorphiZenEpFactory::CreateEpImpl(..., OrtEp** ep) noexcept {
     auto morphizen_ep = std::make_unique<MorphiZenEP>(
@@ -158,26 +158,28 @@ JITted code on every inference request:
 
 ```
 ORT calls MlirCustomOp::Compute()
-  │  marshal ORT tensors → span_t (pointer + shape + size)
+  │  marshal ORT input tensors → span_t (pointer + shape + size)
+  │  install EP output allocator (hipdnn_ep_set_output_allocator)
   ▼
-InferenceState::compute(inputs, outputs)
-  │  calls inference_compute(state, &inputs, &outputs) (JITted symbol)
+InferenceState::compute(inputs)
+  │  calls inference_compute(state, &inputs) (JITted symbol)
   ▼
 JITted in-memory module  (per-model bitcode + runtime.bc, single LLJIT JITDylib)
   │  inference_compute:
   │    ├── hipdnn_ep_tensor_prepare_input   → hipMemcpyH2D (host → GPU)
-  │    ├── hipdnn_ep_tensor_prepare_output  → allocate GPU output buffer
   │    ├── main_graph():
   │    │     ├── hip.get_pool        → get pre-allocated GPU scratch memory
   │    │     ├── hip.get_constant(0) → conv weights on GPU
   │    │     ├── hip.get_constant(1) → matmul weights on GPU
   │    │     ├── hipdnn_graph_execute        → Conv via hipDNN backend
   │    │     ├── wrap_hipblasLtMatmul        → MatMul via hipBLASLt
-  │    │     └── wrap_miopenActivationForward → Sigmoid via MIOpen
-  │    ├── hipdnn_ep_tensor_finalize_output  → hipMemcpyD2H (GPU → host)
+  │    │     ├── wrap_miopenActivationForward → Sigmoid via MIOpen
+  │    │     └── hipdnn_ep_alloc_output       → EP allocator callback (in-graph output)
+  │    ├── hipdnn_ep_stream_sync             → all GPU writes complete
   │    └── hipdnn_ep_tensor_free_input       → cleanup
   ▼
-Results back to ORT
+EP copies any CPU-memory outputs from device to host into ORT's buffers
+(GPU-memory outputs are already in ORT's buffers, zero-copy)
 ```
 
 **File:** `backend-mlir-compiler/custom-op-mlir/src/InferenceState.cpp`
@@ -187,17 +189,19 @@ auto jit = LlvmIrJit::create(bitcode_bytes, "model_compiled");
 auto init_fn = jit->get_method<int, void**, void*>("inference_init");
 int ret = init_fn(&state, static_cast<void*>(fs));
 
-// Per-run — call inference_compute (JITted symbol)
-int InferenceState::compute(span_t* inputs, span_t* outputs) const {
+// Per-run — call inference_compute (JITted symbol, 2-arg output-allocator ABI)
+int InferenceState::compute(span_t* inputs) const {
     auto compute_fn =
-        jit_->get_method<int, void*, span_t*, span_t*>("inference_compute");
-    return compute_fn(state_, inputs, outputs);
+        jit_->get_method<int, void*, span_t*>("inference_compute");
+    return compute_fn(state_, inputs);
 }
 ```
 
 **File:** `backend-mlir-compiler/custom-op-mlir/src/MlirCustomOp.cpp`
-`marshal_input_tensors` / `marshal_output_tensors` convert ORT's `OrtKernelContext`
-tensors into `tensor_t` / `span_t` structs that the generated code expects.
+`marshal_input_tensors` converts ORT's `OrtKernelContext` input tensors into
+`tensor_t` / `span_t` structs that the generated code expects. Outputs are
+allocated in-graph via the EP's `output_allocate_cb` callback, which calls
+`ctx.GetOutput()` with the DLL's computed shape.
 
 ---
 
@@ -310,22 +314,26 @@ Key transformations:
 ### Stage 6: Bufferization (tensor → memref)
 
 `OneShotBufferize` converts tensor semantics to buffer (memref) semantics.
-Tensors become explicit memory allocations:
+Tensors become explicit memory allocations; the graph output stays a returned
+memref:
 
 ```mlir
-func.func @main_graph(%arg0: !hip.context, %arg1: memref<1x1x8x8xf32>,
-                       %arg2: memref<1x1x8x8xf32> {bufferize.result}) {
+func.func @main_graph(%arg0: !hip.context, %arg1: memref<1x1x8x8xf32>)
+    -> memref<1x1x8x8xf32> {
     %alloc = memref.alloc() : memref<1x1x8x8xf32>         // scratch for conv output
     hip.hipdnn_graph(%arg0) ... outs(%alloc)                // Conv writes to alloc
     %alloc_0 = memref.alloc() : memref<1x1x8x8xf32>       // scratch for matmul output
     hip.matmul(%arg0) ins(%alloc, %1) outs(%alloc_0)        // MatMul
-    hip.sigmoid(%arg0) ins(%alloc_0) outs(%arg2)            // Sigmoid writes to output param
-    return
+    %out = memref.alloc() : memref<1x1x8x8xf32>           // output buffer
+    hip.sigmoid(%arg0) ins(%alloc_0) outs(%out)             // Sigmoid writes to output
+    return %out
 }
 ```
 
-`BufferResultsToOutParams` converts the return value into an output parameter (`%arg2`).
-Buffer deallocation passes insert `memref.dealloc` for intermediate buffers.
+Buffer deallocation passes insert `memref.dealloc` for intermediate buffers
+(the returned `%out` is owned, so no clone). `hip-use-output-allocator` then
+rewrites the returned `memref.alloc` into `hip.alloc_output`, so the output is
+allocated in-graph via the EP callback rather than passed as an out-param.
 
 ### Stage 7: PoolAllocsPass (memory optimization)
 
@@ -386,11 +394,12 @@ Generates the three public entry points (`inference_init`, `inference_compute`,
   (creates HIP stream, MIOpen handle, hipBLASLt handle, loads constants to GPU)
 - Calls `hipdnn_ep_pool_init` to pre-allocate the GPU buffer pool (512 bytes here)
 
-**`inference_compute`:**
+**`inference_compute`** (2-arg output-allocator ABI):
 - Calls `hipdnn_ep_tensor_prepare_input` — copies host input to GPU (`hipMemcpyH2D`)
-- Calls `hipdnn_ep_tensor_prepare_output` — allocates GPU output buffer
-- Calls `main_graph(context, input_memref, output_memref)` — the compiled graph
-- Calls `hipdnn_ep_tensor_finalize_output` — copies GPU result to host (`hipMemcpyD2H`)
+- Calls `main_graph(context, input_memref)` — the compiled graph; each output is
+  allocated in-graph via `hip.alloc_output` → `hipdnn_ep_alloc_output` → the EP
+  allocator callback (zero-copy for GPU outputs)
+- Calls `hipdnn_ep_stream_sync` — ensures all GPU writes are complete on return
 - Calls `hipdnn_ep_tensor_free_input` — releases input staging buffer
 
 **`inference_cleanup`:**
@@ -724,9 +733,9 @@ time.
 | Concern | Path |
 |---------|------|
 | **EP Loading** | |
-| ORT EP factory exports (DEF file) | `3rd-party/morphizen/morphizen-core/onnxruntime_morphizen_ep_with_ort_bridge.def` |
-| `CreateEpFactories` implementation | `3rd-party/morphizen/ort-bridge/src/ort-bridge.cpp` |
-| EP factory / `CreateEpImpl` | `3rd-party/morphizen/ort-bridge/src/morphizen-ep-factory.cpp` |
+| ORT EP factory exports (DEF file) | `morphizen/morphizen-core/onnxruntime_morphizen_ep_with_ort_bridge.def` |
+| `CreateEpFactories` implementation | `morphizen/ort-bridge/src/ort-bridge.cpp` |
+| EP factory / `CreateEpImpl` | `morphizen/ort-bridge/src/morphizen-ep-factory.cpp` |
 | **Compilation** | |
 | Load `hip-compiler` plugin | `backend-mlir-compiler/level-1-pass/src/MlirCompiler.cpp` |
 | `hip_compile_with_fs` export | `lib/CInterface/CompilerAPI.cpp` |

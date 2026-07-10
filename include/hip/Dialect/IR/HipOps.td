@@ -393,7 +393,7 @@ def Hip_LoopOp : Hip_Op<"loop",
   );
 
   // v_final is non-empty only at the tensor level (DPS convention).
-  // After BufferResultsToOutParams / OneShotBufferize, the results are
+  // After bufferization + loop-body out-param promotion, the results are
   // eliminated and v_init carries the writes via its memref descriptors.
   let results = (outs Variadic<AnyRankedTensor>:$v_final);
 

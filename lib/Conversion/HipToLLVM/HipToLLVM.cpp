@@ -5,6 +5,10 @@
 
 #include "HipToLLVMUtils.h"
 
+#include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"
+#include "mlir/IR/Dialect.h"
+#include "llvm/ADT/DenseSet.h"
+
 namespace mlir {
 namespace hip {
 
@@ -64,38 +68,31 @@ private:
           loc, memrefStruct, ArrayRef<int64_t>{kStridesIdx, dim}));
   }
 
-  // Rewrite @main_graph from the convert-hip-to-llvm internal ABI into the
-  // runtime calling convention by splitting it into two functions:
+  // Split @main_graph into two functions so the runtime's simple (ctx, inputs)
+  // ABI can reach the graph body:
   //
-  //   main_graph_internal  the original graph body, keeping the MLIR memref
-  //     calling convention: a ranked-memref arg is NOT one struct parameter --
-  //     it is EXPLODED into its 3 + 2*rank descriptor fields
-  //     {allocatedPtr, alignedPtr, offset, sizes[rank], strides[rank]} as that
-  //     many separate scalar params. This flat form is what "unpacked memref
-  //     params" means throughout this file.
-  //   main_graph  a thin wrapper with the runtime's narrow ABI: the EP only
-  //     hands it (ctx, inputs[, outputs]) where inputs/outputs are C arrays of
-  //     pointers to memref descriptor structs. For each memref the wrapper
-  //     loads the descriptor and re-explodes it into scalars
-  //     (unpackMemRefStructWithAddrCast, which also addrspace-casts the two
-  //     ptrs back to addrspace(0)), then calls main_graph_internal with the
-  //     concatenated flat list. That re-explode is the "unpack" bridging the
-  //     two ABIs.
+  //   main_graph_internal  the graph body, unchanged. It keeps MLIR's memref
+  //     ABI: each memref arg is passed as its 3 + 2*rank scalar fields
+  //     {allocatedPtr, alignedPtr, offset, sizes[rank], strides[rank]}, not as
+  //     one struct. ("unpacked memref params" means this flat scalar form.)
+  //   main_graph  a thin wrapper (called by inference_compute, not the EP
+  //     directly) taking (ctx, inputs). Here `inputs` is a C array of pointers
+  //     to memref descriptor structs that inference_compute built from the
+  //     input tensors -- NOT the span_t the EP passes to inference_compute.
+  //     For each input it loads the descriptor and unpacks it back into the
+  //     scalar fields
+  //     (unpackMemRefStructWithAddrCast, which also casts the two ptrs to
+  //     addrspace(0)), then calls main_graph_internal. Outputs are NOT passed
+  //     in: the graph allocates them via hip.alloc_output (the EP callback) and
+  //     returns them by value, which the wrapper ignores.
   //
-  // Mode is read from the `hipdnn.use_output_allocator` module attribute (set
-  // by hip-use-output-allocator); the expected param count is then used only to
-  // verify @main_graph matches it. Classic main_graph has input AND output
-  // params; allocator main_graph has input params only and returns the
-  // in-graph-allocated output as a by-value memref result (which adds no
-  // param).
-  //
-  // Allocator mode, rank-1 input + in-graph-allocated output:
-  // Before (no output params; input already exploded into 5 = 3 + 2*1 scalars;
-  // main_graph returns the output descriptor):
+  // Example: 1 rank-1 input, 1 in-graph output.
+  // Before (input already flattened to 5 = 3 + 2*1 scalars; returns the output
+  // descriptor):
   //   llvm.func @main_graph(%ctx, %inAlloc, %inAligned, %inOff, %inSz, %inSt)
   //       -> !llvm.struct<(ptr,ptr,i64,array<1xi64>,array<1xi64>)> { ... }
-  // After (wrapper drops the outputs ptr and ignores the returned descriptor --
-  // the output reaches the EP via the hipdnn_ep_alloc_output callback):
+  // After (wrapper takes only (ctx, inputs); the returned descriptor is
+  // ignored, the output reaches the EP via the callback):
   //   llvm.func @main_graph_internal(<same 5 scalars>) -> !llvm.struct<...>
   //   llvm.func @main_graph(%ctx: ptr, %inputs: ptr) -> i32 {
   //     %sp = llvm.load (gep %inputs[0])       ; ptr to the descriptor
@@ -108,9 +105,6 @@ private:
   //     %_  = llvm.call @main_graph_internal(%ctx, %a, %al, %o, %s0, %t0)
   //     llvm.return %c0_i32
   //   }
-  // Classic mode is the same except the wrapper takes (%ctx, %inputs,
-  // %outputs), unpacks each output out-param the same way, and forwards the
-  // internal's i32/void result.
   LogicalResult transformMainFunction(ModuleOp module) {
     auto mainFunc = module.lookupSymbol<LLVM::LLVMFuncOp>("main_graph");
     if (!mainFunc)
@@ -140,18 +134,9 @@ private:
         (int64_t)outputShapesAttr.size() != outputCount)
       return module.emitError("Metadata mismatch: shapes array size != count");
 
-    // Mode comes from the attribute's VALUE, not its presence (see header):
-    // absent or `= false` => classic.
-    auto allocatorAttr =
-        module->getAttrOfType<BoolAttr>("hipdnn.use_output_allocator");
-    bool allocatorMode = allocatorAttr && allocatorAttr.getValue();
-
-    // Each memref unpacks to allocatedPtr + alignedPtr + offset + sizes[rank]
-    // + strides[rank] = 3 + 2*rank LLVM params. Both modes have the context +
-    // input params; only classic mode adds the output out-params (in allocator
-    // mode outputs are allocated in-graph and returned as a by-value struct,
-    // which adds no param) -- so the attr gates whether the output scope is
-    // counted.
+    // Each memref is 3 + 2*rank scalar params (allocatedPtr, alignedPtr,
+    // offset, sizes[rank], strides[rank]). @main_graph has context + inputs
+    // only; outputs are returned by value and add no param.
     constexpr unsigned kMemRefPtrs = 2;   // allocatedPtr + alignedPtr
     constexpr unsigned kMemRefOffset = 1; // offset scalar
     unsigned expectedParams = 1;          // context
@@ -159,44 +144,28 @@ private:
       int64_t rank = cast<DenseI64ArrayAttr>(shapeAttr).size();
       expectedParams += kMemRefPtrs + kMemRefOffset + rank + rank;
     }
-    if (!allocatorMode) {
-      for (auto shapeAttr : outputShapesAttr) {
-        int64_t rank = cast<DenseI64ArrayAttr>(shapeAttr).size();
-        expectedParams += kMemRefPtrs + kMemRefOffset + rank + rank;
-      }
-    }
 
     unsigned actualParams = mainFunc.getFunctionType().getNumParams();
     if (actualParams != expectedParams) {
       return module.emitError()
              << "[HipToLLVM] @main_graph parameter count mismatch: expected "
-             << expectedParams
-             << (allocatorMode ? " (allocator), got " : " (classic), got ")
-             << actualParams;
+             << expectedParams << ", got " << actualParams;
     }
 
     OpBuilder builder(module.getContext());
     Location loc = mainFunc.getLoc();
 
-    // Rename the original main_graph (with unpacked memref params) so we can
-    // create a new wrapper that takes the runtime calling convention --
-    // (ctx, inputs, outputs) in classic mode, or (ctx, inputs) in allocator
-    // mode (outputs are allocated in-graph) -- and unpacks the input (and, in
-    // classic mode, output) memref structs before forwarding the call.
+    // Rename the original main_graph so we can add a (ctx, inputs) wrapper that
+    // unpacks the input memref structs and forwards the call. No outputs arg.
     mainFunc.setName("main_graph_internal");
     mainFunc.setLinkage(LLVM::Linkage::Private);
 
     Type ptrType = LLVM::LLVMPointerType::get(builder.getContext(), 0);
     Type i32Type = builder.getI32Type();
-    // Allocator wrapper drops the trailing outputs pointer arg.
-    SmallVector<Type> newParamTypes =
-        allocatorMode ? SmallVector<Type>{ptrType, ptrType}
-                      : SmallVector<Type>{ptrType, ptrType, ptrType};
+    SmallVector<Type> newParamTypes{ptrType, ptrType}; // (ctx, inputs)
     auto newFuncType = LLVM::LLVMFunctionType::get(i32Type, newParamTypes);
 
-    // Create the new main_graph wrapper with the simplified runtime signature
-    // ((ctx, inputs, outputs) classic / (ctx, inputs) allocator) computed
-    // above.
+    // Create the (ctx, inputs) wrapper.
     builder.setInsertionPoint(mainFunc);
     auto newMainFunc =
         builder.create<LLVM::LLVMFuncOp>(loc, "main_graph", newFuncType);
@@ -230,56 +199,19 @@ private:
                                      mainInternalArgs);
     }
 
-    // Classic mode forwards each output out-param (unpacked memref struct) to
-    // the internal call. Allocator mode has no output args -- the internal
-    // main_graph allocates and returns the output via hip.alloc_output, so the
-    // outputs pointer is absent from the wrapper signature.
-    if (!allocatorMode) {
-      Value outputsArg = entryBlock->getArgument(2);
-      for (int64_t i : llvm::seq<int64_t>(0, outputCount)) {
-        int64_t rank = cast<DenseI64ArrayAttr>(outputShapesAttr[i]).size();
-        Value outputIdxVal = builder.create<LLVM::ConstantOp>(
-            loc, i32Type, builder.getI32IntegerAttr(i));
-        Value outputSlotPtr = builder.create<LLVM::GEPOp>(
-            loc, ptrType, ptrType, outputsArg, ValueRange{outputIdxVal});
-        Value outputStructPtr =
-            builder.create<LLVM::LoadOp>(loc, ptrType, outputSlotPtr);
-        Type memrefStructType = getMemRefStructType(builder, rank, 1);
-        Value outputMemref = builder.create<LLVM::LoadOp>(loc, memrefStructType,
-                                                          outputStructPtr);
-        unpackMemRefStructWithAddrCast(builder, loc, outputMemref, rank,
-                                       mainInternalArgs);
-      }
-    }
-
-    // Forward to the internal main_graph and return the i32 status:
-    //   - allocator mode: the internal returns a memref descriptor (by-value
-    //     struct) for the in-graph-allocated output. Call it, DISCARD the
-    //     struct result (the output reaches the EP through the
-    //     hipdnn_ep_alloc_output callback, not the return value), and return 0.
-    //   - classic void internal (real lowering): call, return 0.
-    //   - classic i32 internal (hand-written LIT shape): call, forward result.
-    auto internalRetTy = mainFunc.getFunctionType().getReturnType();
-    // The `allocatorMode` term is required: in allocator mode internalRetTy is
-    // the memref descriptor struct (neither void nor i32), so without it this
-    // would fall into the else branch and return that struct from the i32
-    // wrapper -- a type mismatch. The attr routes allocator mode to discard +
-    // return 0 instead.
-    if (allocatorMode || isa<LLVM::LLVMVoidType>(internalRetTy)) {
-      builder.create<LLVM::CallOp>(loc, mainFunc, mainInternalArgs);
-      Value zero = builder.create<LLVM::ConstantOp>(
-          loc, i32Type, builder.getI32IntegerAttr(0));
-      builder.create<LLVM::ReturnOp>(loc, zero);
-    } else {
-      auto callOp =
-          builder.create<LLVM::CallOp>(loc, mainFunc, mainInternalArgs);
-      builder.create<LLVM::ReturnOp>(loc, callOp.getResult());
-    }
+    // Call the internal graph and return 0. Outputs are not out-params: the
+    // graph allocates them via hip.alloc_output and returns them by value, so
+    // any returned descriptor is ignored (the output reaches the EP through the
+    // callback). A zero-output graph returns void, so there is nothing to
+    // ignore.
+    builder.create<LLVM::CallOp>(loc, mainFunc, mainInternalArgs);
+    Value zero = builder.create<LLVM::ConstantOp>(loc, i32Type,
+                                                  builder.getI32IntegerAttr(0));
+    builder.create<LLVM::ReturnOp>(loc, zero);
 
     COMPILER_DEBUG_LOG("[HipToLLVM] Transformed @main_graph signature: "
                        << actualParams << " params -> " << newParamTypes.size()
-                       << " params ("
-                       << (allocatorMode ? "allocator" : "classic") << ")\n");
+                       << " params\n");
     return success();
   }
 };
@@ -368,6 +300,53 @@ void ConvertHipToLLVMPass::runOnOperation() {
   target.addIllegalDialect<HipDialect>();
   target.addIllegalOp<memref::AllocOp, memref::DeallocOp>();
   target.addLegalOp<ModuleOp>();
+
+  // Out-of-tree dialects (e.g. a plugin vendor dialect) inject their HIP->LLVM
+  // lowering the standard upstream way: every dialect in use that implements
+  // ConvertToLLVMPatternInterface adds its conversion patterns AND marks its
+  // own ops illegal on `target`.
+  //
+  // This inlines upstream's populateConversionTargetFromOperation but
+  // guards the interface lookup with hasPromisedInterface(). Upstream
+  // dyn_casts every walked dialect unconditionally, which report_fatal_errors
+  // (assertions build) for a dialect that only *promised* the interface but
+  // never registered it. After bufferization the module is full of such
+  // dialects (memref, func, arith, cf), so the blanket walk would abort
+  // essentially every compile. We can't fulfill those promises instead:
+  // this pass hand-rolls standard-dialect lowering via the explicit
+  // populate*ToLLVM calls above, so routing it through the interface too
+  // would populate them twice. So skip any dialect that only promised the
+  // interface -- hasPromisedInterface() is a cheap set check on every build.
+  // A plugin dialect that genuinely implements it has its promise resolved
+  // when its extension is added (hasPromisedInterface() == false), so it
+  // still passes the guard and contributes its patterns. See
+  // docs/design/plugin-interface.md "Custom-op lowering".
+  //
+  // Before (upstream blanket walk -- aborts on memref's unfulfilled promise):
+  //   populateConversionTargetFromOperation(module, target, tc, patterns);
+  // After (skip promised-but-unregistered, keep genuine implementors):
+  //   for each unique dialect D reached from the module:
+  //     if D promised the interface but did not register it -> skip
+  //     else if D implements it -> add D's ConvertToLLVM patterns
+  {
+    llvm::DenseSet<Dialect *> seenDialects;
+    module.walk([&](Operation *op) {
+      Dialect *dialect = op->getDialect();
+      if (!dialect || !seenDialects.insert(dialect).second)
+        return;
+      // Promised-but-unregistered dialects would fatal under dyn_cast in an
+      // assertions build; skip them (their lowering is the populate* above).
+      if (dialect->hasPromisedInterface(
+              dialect->getTypeID(),
+              ConvertToLLVMPatternInterface::getInterfaceID()))
+        return;
+      auto *iface = dyn_cast<ConvertToLLVMPatternInterface>(dialect);
+      if (!iface)
+        return;
+      iface->populateConvertToLLVMConversionPatterns(target, typeConverter,
+                                                     patterns);
+    });
+  }
 
   if (failed(applyPartialConversion(module, target, std::move(patterns))))
     signalPassFailure();

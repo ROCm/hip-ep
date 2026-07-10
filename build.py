@@ -100,6 +100,9 @@ def _check_python_version():
 
 
 def update_submodules():
+    # MorphiZen is vendored in-tree as a git subtree, so there are normally no
+    # submodules to initialize; this stays a generic no-op guard for any future
+    # submodule and returns early when none are uninitialized.
     log.info("Checking git submodules ...")
     r = subprocess.run(
         ["git", "submodule", "status", "--recursive"],
@@ -321,7 +324,9 @@ def build_targets(args, build_dir):
 
 
 def run_tests(args, build_dir):
-    """Run the LIT suite (MLIR pass verification; no GPU needed)."""
+    """Run the GPU-free test suites (no device needed, so they run on the build
+    machine in every CI job): the MLIR LIT pass-verification suite plus the
+    compiler-plugin registrar and output-allocator ctest unit tests."""
     step("Test (check-hip-mlir-lit)")
     run_subprocess(
         [
@@ -332,6 +337,24 @@ def run_tests(args, build_dir):
             args.config,
             "--target",
             "check-hip-mlir-lit",
+        ]
+    )
+
+    # GPU-free ctest unit suites (built as part of the default target above).
+    # -R limits the run to these two -- the plugin registrar (compiler-only) and
+    # the output-allocator test (links the mock runtime) -- so the GPU / hip-test
+    # e2e ctest suites, which need a real device, are not invoked here.
+    step("Test (plugin registrar + output-allocator unit tests)")
+    run_subprocess(
+        [
+            "ctest",
+            "--test-dir",
+            str(build_dir),
+            "-C",
+            args.config,
+            "-R",
+            "StaticPlugins|OutputAllocator",
+            "--output-on-failure",
         ]
     )
 
