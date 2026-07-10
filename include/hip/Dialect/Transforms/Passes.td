@@ -528,6 +528,33 @@ def ResolveTensorDimsPass
   ];
 }
 
+def ResolveMemRefDimsPass
+    : Pass<"hip-resolve-memref-dims", "mlir::func::FuncOp"> {
+  let summary = "Fold `memref.dim` of view ops to root-buffer dims "
+                "(post-bufferize, before pooling)";
+  let description = [{
+    Post-bufferize twin of `--hip-resolve-tensor-dims`: re-applies the
+    reify-based `memref` dim folds plus the `memref.dim` canonicalisers so
+    `memref.dim` of a `memref.subview` / `expand_shape` / `collapse_shape` /
+    `view` folds to a dim of the root buffer (ultimately `memref.dim` of a
+    function argument).
+
+    The strided views that pin these queries are created during bufferization
+    and by `--hip-promote-strided-hip-operands`, i.e. after resolve-tensor-dims
+    ran, so the patterns had nothing to fold then. Re-rooting the size to a
+    block-top arg dim lets `--hip-hoist-alloc-size-arith` lift it, so
+    `--hip-pool-allocs` shares one pool across many allocs instead of splitting
+    a dominance domain per alloc. Placement: after promote-strided-operands /
+    materialize-host-scalars, before hoist-alloc-size-arith / pool-allocs.
+    Idempotent. See ResolveMemRefDims.cpp for the before/after IR.
+  }];
+  let dependentDialects = [
+    "mlir::affine::AffineDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
 def LoopBodyToOutParamsPass
     : Pass<"hip-loop-body-to-out-params", "mlir::ModuleOp"> {
   let summary = "Promote outlined hip.loop body returns to out-param ABI";
