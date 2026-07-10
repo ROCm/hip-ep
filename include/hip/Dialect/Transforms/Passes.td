@@ -257,7 +257,11 @@ def PoolAllocsPass : Pass<"hip-pool-allocs", "mlir::func::FuncOp"> {
   }];
   let options = [
     Option<"alignment", "alignment", "int64_t", /*default=*/"256",
-           "Sub-buffer byte offset alignment (must be power of 2)">
+           "Sub-buffer byte offset alignment (must be power of 2)">,
+    Option<"emitFragmentationReport", "emit-fragmentation-report", "bool",
+           /*default=*/"false",
+           "Debug-only: emit a per-domain remark comparing the packed pool "
+           "size to the max-load lower bound. No effect on generated code.">
   ];
   let dependentDialects = [
     "mlir::hip::HipDialect",
