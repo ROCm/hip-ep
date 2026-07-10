@@ -70,6 +70,8 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Debug.h"
 
+#include <cmath>
+
 #define DEBUG_TYPE "lpnormalization-decompose"
 
 STATISTIC(NumLpNormalizationRewrites,
@@ -134,6 +136,79 @@ struct LpNormalizationDecompose : public mlir::RewritePattern {
 
     mlir::Location loc = op->getLoc();
     mlir::MLIRContext *ctx = rewriter.getContext();
+
+    // --- Fused fast path -------------------------------------------------
+    // For p==2 normalizing over the trailing axis with a static extent N
+    // (the q/k L2-norm shape in gated-delta-net / linear-attention decoders),
+    // emit ONE fused RMS-norm instead of the Mul + ReduceSum + Sqrt + Div
+    // chain (~5 element/reduce kernels). Identity:
+    //
+    //   L2Norm(x) = x / sqrt(sum(x^2))
+    //             = x / sqrt(mean(x^2) + 0) * (1/sqrt(N))
+    //             = SimplifiedLayerNorm(x, scale = 1/sqrt(N), epsilon = 0)
+    //
+    // SimplifiedLayerNormalization is lowered to `hip.rms_norm` (FP32-
+    // accumulated sum-of-squares) by NormConversion in the later
+    // convertComputeOps stage, so the whole normalization collapses to a
+    // single kernel launch. Other cases (p==1, non-trailing axis, or a
+    // dynamic trailing extent) fall through to the generic decomposition
+    // below.
+    //
+    // Before:
+    //   %y = onnx.LpNormalization(%x) {axis = -1, p = 2}
+    //        : (tensor<?x16x128xf16>) -> tensor<?x16x128xf16>
+    // After:
+    //   %s = onnx.Constant dense<0.0883883> : tensor<128xf16>   // 1/sqrt(128)
+    //   %y = onnx.Custom(%x, %s)
+    //          {function_name = "SimplifiedLayerNormalization",
+    //           epsilon = 0.0 : f32, axis = -1 : si64, stash_type = 1 : si64}
+    //          : (tensor<?x16x128xf16>, tensor<128xf16>) ->
+    //          tensor<?x16x128xf16>
+    if (p == 2 && normAxis == rank - 1) {
+      int64_t n = inputType.getShape()[normAxis];
+      if (n != mlir::ShapedType::kDynamic && n > 0) {
+        // scale = splat(1/sqrt(N)) in the input element type.
+        float invSqrtN = 1.0f / std::sqrt(static_cast<float>(n));
+        llvm::APFloat scaleVal(invSqrtN);
+        bool losesInfo = false;
+        scaleVal.convert(
+            mlir::cast<mlir::FloatType>(elemType).getFloatSemantics(),
+            llvm::APFloat::rmNearestTiesToEven, &losesInfo);
+        auto scaleType = mlir::RankedTensorType::get({n}, elemType);
+        llvm::SmallVector<llvm::APFloat> scaleData(static_cast<size_t>(n),
+                                                   scaleVal);
+        auto scaleAttr = mlir::DenseElementsAttr::get(scaleType, scaleData);
+        mlir::OperationState scaleState(loc, "onnx.Constant");
+        scaleState.addTypes(scaleType);
+        scaleState.addAttribute("value", scaleAttr);
+        mlir::Value scale = rewriter.create(scaleState)->getResult(0);
+
+        // NormConversion reads axis / stash_type via getSInt(), so they must be
+        // SIGNED i64 attrs; epsilon is an f32 FloatAttr.
+        auto sintType =
+            mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Signed);
+        mlir::OperationState customState(loc, "onnx.Custom");
+        customState.addOperands({x, scale});
+        customState.addTypes(outputType);
+        customState.addAttribute(
+            "function_name",
+            rewriter.getStringAttr("SimplifiedLayerNormalization"));
+        customState.addAttribute("domain_name",
+                                 rewriter.getStringAttr("com.microsoft"));
+        customState.addAttribute("epsilon", rewriter.getF32FloatAttr(0.0f));
+        customState.addAttribute("axis", mlir::IntegerAttr::get(sintType, -1));
+        customState.addAttribute("stash_type",
+                                 mlir::IntegerAttr::get(sintType, 1));
+        mlir::Value result = rewriter.create(customState)->getResult(0);
+
+        rewriter.replaceOp(op, result);
+        ++NumLpNormalizationRewrites;
+        LLVM_DEBUG(llvm::dbgs()
+                   << "[" DEBUG_TYPE "] fused LpNormalization -> rms_norm "
+                   << inputType << " axis=" << normAxis << " N=" << n << "\n");
+        return mlir::success();
+      }
+    }
 
     // Reduced shape: same as input but with a `1` along the reduce axis
     // (keepdims=1). Dynamic dims on other axes pass through unchanged.
