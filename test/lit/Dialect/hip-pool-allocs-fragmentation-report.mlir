@@ -31,7 +31,7 @@
 // CHECK: hip.get_pool
 // CHECK-NOT: hip.get_pool
 
-// expected-remark@+1 {{static 768/768 B (0 frag); dyn-groups 0/0 units (0 frag)}}
+// expected-remark@+1 {{static 768/768 B (0 frag); dyn-pool 0/0 units (0 frag); small-buckets 0/0 bins (0 excess)}}
 func.func @frag_report_static(%ctx: !hip.context,
                               %arg: memref<1x128xf32>) -> memref<1x128xf32> {
   %a = memref.alloc() : memref<1x128xf32>
@@ -54,18 +54,18 @@ func.func @frag_report_static(%ctx: !hip.context,
 }
 
 //===----------------------------------------------------------------------===//
-// Aligned dynamic group: two allocs share dynamic dim %d but differ in static
-// width (staticFactor 32768 vs 16384, both 256-aligned) with disjoint
-// lifetimes, so they share one slab. spanUnits (32768) equals the peak
-// concurrent staticFactor sum -> 0 fragmentation, reported in staticFactor
-// units (the common dynamic factor F is symbolic).
+// Two dynamic allocs, same dynamic dim %d, different static width (staticFactor
+// 32768 vs 16384) with disjoint lifetimes. The two allocs share ONE slab sized
+// to the max, so the emitted dyn-pool coefficient is max(32768, 16384) = 32768
+// units (x F). The max-load lower bound over the disjoint pair is also 32768,
+// so best-fit reaches the floor -> 0 fragmentation.
 //===----------------------------------------------------------------------===//
 
 // CHECK-LABEL: func.func @frag_report_dyn
 // CHECK: hip.get_pool
 // CHECK-NOT: hip.get_pool
 
-// expected-remark@+1 {{static 0/0 B (0 frag); dyn-groups 32768/32768 units (0 frag)}}
+// expected-remark@+1 {{static 0/0 B (0 frag); dyn-pool 32768/32768 units (0 frag); small-buckets 0/0 bins (0 excess)}}
 func.func @frag_report_dyn(%ctx: !hip.context,
                            %arg: memref<?xf32>) -> memref<?xf32> {
   %c0 = arith.constant 0 : index

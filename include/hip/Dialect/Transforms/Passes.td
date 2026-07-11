@@ -261,7 +261,12 @@ def PoolAllocsPass : Pass<"hip-pool-allocs", "mlir::func::FuncOp"> {
     Option<"emitFragmentationReport", "emit-fragmentation-report", "bool",
            /*default=*/"false",
            "Debug-only: emit a per-domain remark comparing the packed pool "
-           "size to the max-load lower bound. No effect on generated code.">
+           "size to the max-load lower bound. No effect on generated code.">,
+    Option<"lifetimeOnly", "lifetime-only", "bool", /*default=*/"true",
+           "Default: pack dynamic allocs purely by lifetime -- any two "
+           "lifetime-disjoint allocs may share a pool slab regardless of their "
+           "dynamic dimensions. Set false to instead group by dynamic dimension "
+           "and best-fit-pack within a group before sharing across groups.">
   ];
   let dependentDialects = [
     "mlir::hip::HipDialect",
