@@ -2,20 +2,22 @@
 // Licensed under the MIT License.
 //
 //===----------------------------------------------------------------------===//
-// FileCheck test for --hip-pool-allocs dynamic binning (A'-refined).
+// FileCheck test for the fallback dynamic packing of --hip-pool-allocs
+// (lifetime-only=false).
 //
 // Two dynamic allocs with the SAME dynamic dim (%d) but DIFFERENT channel width
 // (8192 vs 4096 -> different, both 256-aligned, staticFactor) and DISJOINT
-// lifetimes. Grouping by dynOperands and best-fit-packing the staticFactors
-// lets them SHARE one slab (both at offset 0), sized to the larger -- whereas
-// the old {staticFactor, dynOperands} bucketing stacked them into two slabs.
+// lifetimes. The fallback groups by dynamic dim and best-fit-packs the integer
+// staticFactors within the group, so the two allocs share one slab (both at
+// offset 0), sized to the larger -- exercising the greedy best-fit path rather
+// than the cross-group lifetime coloring that the default relies on.
 //===----------------------------------------------------------------------===//
 
-// RUN: hip-mlir-opt --hip-pool-allocs %s | FileCheck %s
+// RUN: hip-mlir-opt --hip-pool-allocs='lifetime-only=false' %s | FileCheck %s
 
 // CHECK-LABEL: func.func @cross_width_share
-// One pool (single domain), sized to the LARGER width (max, not sum), and both
-// views share the same base offset -> they reuse one slab.
+// One pool (single domain), sized to the LARGER width, and both views share the
+// same base offset -> they reuse one slab.
 // CHECK: %[[POOL:[0-9a-z_]+]] = hip.get_pool
 // CHECK: memref.view %[[POOL]][%[[OFF:[0-9a-z_]+]]]
 // CHECK: memref.view %[[POOL]][%[[OFF]]]
