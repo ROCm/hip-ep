@@ -5,9 +5,91 @@
 
 #include "OnnxToHipUtils.h"
 
+#include <cstdlib>
+
 namespace mlir {
 namespace hip {
 namespace {
+
+/// Read a Transpose op's perm attribute, defaulting to the reverse permutation
+/// (ONNX spec) when absent. Returns false if the perm is malformed.
+static bool getTransposePerm(mlir::Operation *op, int64_t rank,
+                             llvm::SmallVectorImpl<int64_t> &perm) {
+  perm.clear();
+  if (auto permAttr = op->getAttrOfType<mlir::ArrayAttr>("perm")) {
+    if (static_cast<int64_t>(permAttr.size()) != rank)
+      return false;
+    for (mlir::Attribute a : permAttr) {
+      auto ia = mlir::dyn_cast<mlir::IntegerAttr>(a);
+      if (!ia)
+        return false;
+      perm.push_back(ia.getValue().getSExtValue());
+    }
+  } else {
+    for (int64_t i = rank - 1; i >= 0; --i)
+      perm.push_back(i);
+  }
+  return true;
+}
+
+/// HIPDNN_EP_FOLD_TRANSPOSE: collapse onnx.Transpose(onnx.Transpose(x)) into a
+/// single Transpose with the composed permutation, eliminating it entirely when
+/// the composition is the identity. Pure index remapping -> bit-exact. Higher
+/// benefit than TransposeToHip so it runs first while the producer is still an
+/// onnx.Transpose.
+struct TransposeFold : public mlir::RewritePattern {
+  TransposeFold(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.Transpose", /*benefit=*/2, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    const char *f = std::getenv("HIPDNN_EP_FOLD_TRANSPOSE");
+    if (!f || f[0] != '1')
+      return rewriter.notifyMatchFailure(op, "fold disabled");
+    if (op->getNumOperands() != 1 || op->getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected single in/out");
+
+    mlir::Operation *inner = op->getOperand(0).getDefiningOp();
+    if (!inner || inner->getName().getStringRef() != "onnx.Transpose")
+      return rewriter.notifyMatchFailure(op, "operand is not onnx.Transpose");
+
+    auto inTy = mlir::dyn_cast<mlir::RankedTensorType>(inner->getOperand(0).getType());
+    auto outTy = mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    if (!inTy || !outTy)
+      return rewriter.notifyMatchFailure(op, "need ranked tensors");
+    int64_t rank = inTy.getRank();
+
+    llvm::SmallVector<int64_t> pOuter, pInner;
+    if (!getTransposePerm(op, rank, pOuter) ||
+        !getTransposePerm(inner, rank, pInner))
+      return rewriter.notifyMatchFailure(op, "bad perm");
+
+    // composed[i] = pInner[pOuter[i]]  (apply inner then outer)
+    llvm::SmallVector<int64_t> composed(rank);
+    bool isIdentity = true;
+    for (int64_t i = 0; i < rank; ++i) {
+      composed[i] = pInner[pOuter[i]];
+      if (composed[i] != i)
+        isIdentity = false;
+    }
+
+    mlir::Value src = inner->getOperand(0);
+    if (isIdentity) {
+      // transpose(transpose(x)) == x
+      rewriter.replaceOp(op, src);
+      return mlir::success();
+    }
+
+    mlir::OperationState st(op->getLoc(), "onnx.Transpose");
+    st.addOperands(src);
+    st.addTypes(outTy);
+    st.addAttribute("perm", rewriter.getI64ArrayAttr(composed));
+    mlir::Operation *folded = rewriter.create(st);
+    rewriter.replaceOp(op, folded->getResult(0));
+    return mlir::success();
+  }
+};
 
 /// onnx.Transpose -> hip.transpose
 ///
@@ -102,6 +184,7 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
 
 void populateTransposeConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx) {
+  patterns.add<TransposeFold>(ctx);
   patterns.add<TransposeToHip>(ctx);
 }
 
