@@ -468,6 +468,17 @@ int hipdnn_ep_stream_sync(RuntimeState *state) {
                          static_cast<hipStream_t>(state->stream));
   }
 
+  // During HIP-graph capture the end-of-compute sync is both illegal (it aborts
+  // the capture) and unnecessary -- the graph replay provides synchronization.
+  // Skip it while the stream is actively capturing. Non-capture runs are
+  // unaffected. Standard capture-safe dispatch (cf. ORT CUDA plugin #28002).
+  hipStreamCaptureStatus capStatus = hipStreamCaptureStatusNone;
+  if (hipStreamIsCapturing(static_cast<hipStream_t>(state->stream),
+                           &capStatus) == hipSuccess &&
+      capStatus != hipStreamCaptureStatusNone) {
+    return HIPDNN_EP_SUCCESS;
+  }
+
   if (hipStreamSynchronize(static_cast<hipStream_t>(state->stream)) !=
       hipSuccess) {
     fprintf(stderr, "hipdnn_ep_stream_sync: stream sync failed\n");

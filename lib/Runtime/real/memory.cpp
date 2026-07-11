@@ -191,6 +191,18 @@ int32_t hipdnn_ep_readback_i32(RuntimeState *state, const void *device_scalar) {
   hipStream_t stream =
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
   int32_t host_val = 0;
+  // Decode-only sync-free fast path (HIPDNN_EP_DECODE_SKIP_SYNC): mirror
+  // readback_scalar. On a decoder single-token step the shape/dim scalar is
+  // resident in the UMA host-accessible buffer before the sync; read it
+  // directly, skipping hipStreamSynchronize (illegal during HIP-graph capture).
+  // Correctness is guarded by the greedy token-identity check: an async value
+  // would diverge.
+  static const bool decodeSkipSync =
+      std::getenv("HIPDNN_EP_DECODE_SKIP_SYNC") != nullptr;
+  if (decodeSkipSync && state->decode_hint) {
+    std::memcpy(&host_val, device_scalar, sizeof(int32_t));
+    return host_val;
+  }
   // hipMemcpyDefault (not DeviceToHost): the source may be host-accessible
   // memory (host-mapped scratch / UMA pool), where an explicit D2H fails
   // `invalid argument`. Direction is inferred from the pointer via UVA.

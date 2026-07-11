@@ -14,9 +14,12 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
+#include "../runtime_state_internal.h"
 #include "hip_custom_kernels.h"
 
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <hip/hip_runtime.h>
 
 static int cumsum_hipdnn_to_hip_dtype(int64_t hipdnn_type) {
@@ -78,37 +81,53 @@ int wrap_cumsum(RuntimeState *state, void *x, void *axis, void *y,
   // synchronously D2H-read it. This adds one stall per CumSum call --
   // acceptable because the op typically occurs once or twice per graph.
   int64_t axis_value = 0;
+  // Decode-only sync-free fast path (HIPDNN_EP_DECODE_SKIP_SYNC): the axis is a
+  // compile-time constant (resident), so on a decoder single-token step read it
+  // directly from the UMA host-accessible buffer, skipping the D2H +
+  // hipStreamSynchronize (illegal during HIP-graph capture). Guarded by greedy
+  // token-identity.
+  static const bool decodeSkipSync =
+      std::getenv("HIPDNN_EP_DECODE_SKIP_SYNC") != nullptr;
+  const bool skipSync = decodeSkipSync && state->decode_hint;
   if (axis_dtype == HIPDNN_EP_DATATYPE_INT32) {
     int32_t a32 = 0;
-    hipError_t err = hipMemcpyAsync(&a32, axis, sizeof(int32_t),
-                                    hipMemcpyDeviceToHost, hip_stream);
-    if (err != hipSuccess) {
-      fprintf(stderr, "[REAL] wrap_cumsum: D2H axis (int32) failed: %s\n",
-              hipGetErrorString(err));
-      return -1;
-    }
-    err = hipStreamSynchronize(hip_stream);
-    if (err != hipSuccess) {
-      fprintf(stderr,
-              "[REAL] wrap_cumsum: stream sync after D2H axis failed: %s\n",
-              hipGetErrorString(err));
-      return -1;
+    if (skipSync) {
+      std::memcpy(&a32, axis, sizeof(int32_t));
+    } else {
+      hipError_t err = hipMemcpyAsync(&a32, axis, sizeof(int32_t),
+                                      hipMemcpyDeviceToHost, hip_stream);
+      if (err != hipSuccess) {
+        fprintf(stderr, "[REAL] wrap_cumsum: D2H axis (int32) failed: %s\n",
+                hipGetErrorString(err));
+        return -1;
+      }
+      err = hipStreamSynchronize(hip_stream);
+      if (err != hipSuccess) {
+        fprintf(stderr,
+                "[REAL] wrap_cumsum: stream sync after D2H axis failed: %s\n",
+                hipGetErrorString(err));
+        return -1;
+      }
     }
     axis_value = static_cast<int64_t>(a32);
   } else if (axis_dtype == HIPDNN_EP_DATATYPE_INT64) {
-    hipError_t err = hipMemcpyAsync(&axis_value, axis, sizeof(int64_t),
-                                    hipMemcpyDeviceToHost, hip_stream);
-    if (err != hipSuccess) {
-      fprintf(stderr, "[REAL] wrap_cumsum: D2H axis (int64) failed: %s\n",
-              hipGetErrorString(err));
-      return -1;
-    }
-    err = hipStreamSynchronize(hip_stream);
-    if (err != hipSuccess) {
-      fprintf(stderr,
-              "[REAL] wrap_cumsum: stream sync after D2H axis failed: %s\n",
-              hipGetErrorString(err));
-      return -1;
+    if (skipSync) {
+      std::memcpy(&axis_value, axis, sizeof(int64_t));
+    } else {
+      hipError_t err = hipMemcpyAsync(&axis_value, axis, sizeof(int64_t),
+                                      hipMemcpyDeviceToHost, hip_stream);
+      if (err != hipSuccess) {
+        fprintf(stderr, "[REAL] wrap_cumsum: D2H axis (int64) failed: %s\n",
+                hipGetErrorString(err));
+        return -1;
+      }
+      err = hipStreamSynchronize(hip_stream);
+      if (err != hipSuccess) {
+        fprintf(stderr,
+                "[REAL] wrap_cumsum: stream sync after D2H axis failed: %s\n",
+                hipGetErrorString(err));
+        return -1;
+      }
     }
   } else {
     fprintf(stderr,
