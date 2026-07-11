@@ -112,6 +112,12 @@ private:
   // Resolve and cache the inference_* entry points from the loaded artifact.
   void resolveEntryPoints(const LoadedArtifact &artifact);
 
+#if defined(HIPDNN_EP_LINK_HIP_HOST)
+  // S1 capture-safety probe (see InferenceState.cpp). Only compiled when the
+  // backend links the HIP host runtime. Executes compute exactly once.
+  int computeWithCaptureProbe(span_t *inputs) const;
+#endif
+
   // Opaque handle returned by inference_init()
   void *state_;
   // Must outlive `state_`: `inference_init` returned a pointer into memory

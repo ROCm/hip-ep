@@ -14,8 +14,19 @@
 #include <glog/logging.h>
 #include <utility>
 
+#if defined(HIPDNN_EP_LINK_HIP_HOST)
+#include <hip/hip_runtime.h>
+#endif
+
 // Environment parameters (global scope, before namespace)
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND, "0")
+// S1: HIP-graph capture-safety probe. When >=1, compute() attempts a
+// hipStreamBeginCapture/EndCapture around compute_fn_ once (per process) to
+// learn whether the current decode is capture-clean, then either replays the
+// captured graph (success) or runs eager (failure). Off (0) => no behavior
+// change. Capture records but does NOT execute, so exactly one execution
+// happens on either branch (no double state update).
+DEF_ENV_PARAM(HIPDNN_EP_CAPTURE_PROBE, "0")
 
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_MLIR_BACKEND) >= n)
 
@@ -162,8 +173,97 @@ int InferenceState::compute(span_t *inputs) const {
     LOG(ERROR) << "inference_compute symbol not resolved in loaded artifact";
     return -1;
   }
+#if defined(HIPDNN_EP_LINK_HIP_HOST)
+  if (ENV_PARAM(HIPDNN_EP_CAPTURE_PROBE) >= 1) {
+    return computeWithCaptureProbe(inputs);
+  }
+#endif
   return compute_fn_(state_, inputs);
 }
+
+#if defined(HIPDNN_EP_LINK_HIP_HOST)
+// One-shot-per-process HIP-graph capture-safety probe (S1). Attempts to capture
+// the compute_fn_ call into a graph. hipStreamBeginCapture RECORDS but does NOT
+// execute kernels, so:
+//   - success: instantiate + launch the graph once  -> exactly one execution
+//   - failure: nothing executed during capture       -> run eager once
+// Either branch executes compute exactly once (no double state update). The
+// probe logs the verdict once, then stays out of the way (still runs each call,
+// but capture-clean decode would be the S4 path; here it is diagnostic).
+int InferenceState::computeWithCaptureProbe(span_t *inputs) const {
+  static bool logged = false;
+  static bool warned = false;
+  if (!warned) {
+    // Empirically (S1): if the decode still issues a mid-compute readback
+    // (hipStreamSynchronize / D2H), that sync is FATAL under an active
+    // hipStreamBeginCapture on HIP/Windows -- it crashes the process rather
+    // than returning a soft error. So this probe is only safe once the decode
+    // is capture-clean (readback_scalar==0, i.e. after S3). Enabling it before
+    // then is expected to crash; that crash IS the "not capture-clean" signal.
+    LOG(WARNING) << "[capture-probe] ENABLED: if the graph still has readbacks "
+                    "this will CRASH (expected pre-S3 signal, not a bug)";
+    warned = true;
+  }
+  void *raw = get_stream_raw();
+  if (raw == nullptr) {
+    if (!logged) {
+      LOG(WARNING) << "[capture-probe] no stream on state; running eager";
+      logged = true;
+    }
+    return compute_fn_(state_, inputs);
+  }
+  hipStream_t stream = reinterpret_cast<hipStream_t>(raw);
+  hipGraph_t graph = nullptr;
+  hipError_t berr =
+      hipStreamBeginCapture(stream, hipStreamCaptureModeThreadLocal);
+  if (berr != hipSuccess) {
+    if (!logged) {
+      LOG(WARNING) << "[capture-probe] hipStreamBeginCapture failed: "
+                   << hipGetErrorString(berr) << "; running eager";
+      logged = true;
+    }
+    return compute_fn_(state_, inputs);
+  }
+  int rc = compute_fn_(state_, inputs); // records only; does not execute
+  hipError_t eerr = hipStreamEndCapture(stream, &graph);
+  if (eerr == hipSuccess && graph != nullptr) {
+    hipGraphExec_t exec = nullptr;
+    hipError_t ierr = hipGraphInstantiate(&exec, graph, nullptr, nullptr, 0);
+    if (ierr == hipSuccess && exec != nullptr) {
+      hipGraphLaunch(exec, stream);
+      hipStreamSynchronize(stream);
+      hipGraphExecDestroy(exec);
+      hipGraphDestroy(graph);
+      if (!logged) {
+        LOG(INFO) << "[capture-probe] SUCCESS: decode IS capture-clean "
+                     "(graph captured + replayed)";
+        logged = true;
+      }
+      return rc;
+    }
+    hipGraphDestroy(graph);
+    if (!logged) {
+      LOG(WARNING) << "[capture-probe] EndCapture ok but Instantiate failed: "
+                   << hipGetErrorString(ierr) << "; running eager";
+      logged = true;
+    }
+    return compute_fn_(state_, inputs);
+  }
+  // Capture failed (e.g. a mid-compute readback/synchronize invalidated it).
+  // Nothing executed during capture -> safe to run eager exactly once.
+  if (graph != nullptr) {
+    hipGraphDestroy(graph);
+  }
+  if (!logged) {
+    LOG(INFO) << "[capture-probe] FAILED: decode is NOT capture-clean "
+                 "(EndCapture err="
+              << hipGetErrorString(eerr)
+              << ") -- expected while readbacks remain; running eager";
+    logged = true;
+  }
+  return compute_fn_(state_, inputs);
+}
+#endif
 
 void InferenceState::set_output_allocator(
     const output_allocator_t *allocator) const {
