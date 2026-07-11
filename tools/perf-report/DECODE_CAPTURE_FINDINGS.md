@@ -189,10 +189,21 @@ during-capture errors 2397 -> 1; first failing op moved
 CURRENT WALL: `hip_elementwise_equal` (a scalar i64==i64 control check feeding a
 `Where`) fails with "previous error during capture". The illegal op is NOT in
 the ~200 lines before it and is NOT a logged sync/alloc -- intervening
-`matmul_nbits` launches don't check `hipGetLastError`, so the invalidating op is
-undetected until the Equal. Most likely a silent **allocation** during capture
-(pool/output/intermediate `hipMalloc`), i.e. the allocation-stabilization piece,
-not another simple sync.
+`matmul_nbits`/`transpose`/`cast` launches don't check `hipGetLastError`, so the
+invalidating op is undetected until the Equal (first launcher that checks).
+
+RULED OUT via `hipStreamIsCapturing`-gated `[cap-detect]` probes (no hits during
+capture): matmul_nbits zp_u8/zp_fp16 `hipMalloc`, matmul_nbits GEMV autotune
+(`hipEventSynchronize`), gemm hipBLASLt autotune, pool grow (would log "growing
+pool"). So the culprit is a more obscure silent op: a blocking `hipMemcpy`, an
+`hipEventSynchronize` in the Loop / linear-attention / causal-conv paths, a
+stream-0 op, or a lazy allocation.
+
+NEXT DIAGNOSTIC (to pinpoint efficiently): add an entry-check to the kernel
+launchers on the pre-Equal path (`cast`, `transpose`, `matmul_nbits`,
+`elementwise`) -- `if (hipStreamIsCapturing && hipPeekAtLastError()!=success)
+log "[cap-pending] <kernel>"`. The FIRST launcher to report a pending error sits
+immediately after the illegal op; bisect from there.
 
 ## 8c. The two hard remaining pieces (multi-day/multi-week)
 
