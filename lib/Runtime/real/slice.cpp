@@ -37,10 +37,13 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
+#include "../runtime_state_internal.h"
 #include "hip_custom_kernels.h"
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <hip/hip_runtime.h>
 #include <vector>
 
@@ -169,16 +172,29 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
   std::vector<int64_t> axes_host;
   std::vector<int64_t> steps_host;
 
-  hipError_t err =
-      hipMemcpyAsync(starts_host.data(), starts, K * sizeof(int64_t),
-                     hipMemcpyDeviceToHost, hip_stream);
+  // Decode-only sync-free fast path (HIPDNN_EP_DECODE_SKIP_SYNC): on a decoder
+  // single-token step read the (tiny, resident, UMA host-accessible) index
+  // tensors directly and skip the D2H + hipStreamSynchronize (illegal during
+  // HIP-graph capture). Guarded by greedy token-identity: an async index value
+  // would diverge. hipMemcpyDefault-style host read via std::memcpy on UMA.
+  static const bool decodeSkipSync =
+      std::getenv("HIPDNN_EP_DECODE_SKIP_SYNC") != nullptr;
+  const bool skipSync = decodeSkipSync && state && state->decode_hint;
+  auto d2h = [&](void *dst, const void *src, size_t bytes) -> hipError_t {
+    if (skipSync) {
+      std::memcpy(dst, src, bytes);
+      return hipSuccess;
+    }
+    return hipMemcpyAsync(dst, src, bytes, hipMemcpyDeviceToHost, hip_stream);
+  };
+
+  hipError_t err = d2h(starts_host.data(), starts, K * sizeof(int64_t));
   if (err != hipSuccess) {
     fprintf(stderr, "[REAL] wrap_slice: starts D2H failed: %s\n",
             hipGetErrorString(err));
     return -1;
   }
-  err = hipMemcpyAsync(ends_host.data(), ends, K * sizeof(int64_t),
-                       hipMemcpyDeviceToHost, hip_stream);
+  err = d2h(ends_host.data(), ends, K * sizeof(int64_t));
   if (err != hipSuccess) {
     fprintf(stderr, "[REAL] wrap_slice: ends D2H failed: %s\n",
             hipGetErrorString(err));
@@ -194,8 +210,7 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
       return -1;
     }
     axes_host.resize(K);
-    err = hipMemcpyAsync(axes_host.data(), axes, K * sizeof(int64_t),
-                         hipMemcpyDeviceToHost, hip_stream);
+    err = d2h(axes_host.data(), axes, K * sizeof(int64_t));
     if (err != hipSuccess) {
       fprintf(stderr, "[REAL] wrap_slice: axes D2H failed: %s\n",
               hipGetErrorString(err));
@@ -212,8 +227,7 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
       return -1;
     }
     steps_host.resize(K);
-    err = hipMemcpyAsync(steps_host.data(), steps, K * sizeof(int64_t),
-                         hipMemcpyDeviceToHost, hip_stream);
+    err = d2h(steps_host.data(), steps, K * sizeof(int64_t));
     if (err != hipSuccess) {
       fprintf(stderr, "[REAL] wrap_slice: steps D2H failed: %s\n",
               hipGetErrorString(err));
@@ -221,11 +235,13 @@ int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
     }
   }
 
-  err = hipStreamSynchronize(hip_stream);
-  if (err != hipSuccess) {
-    fprintf(stderr, "[REAL] wrap_slice: stream sync after D2H failed: %s\n",
-            hipGetErrorString(err));
-    return -1;
+  if (!skipSync) {
+    err = hipStreamSynchronize(hip_stream);
+    if (err != hipSuccess) {
+      fprintf(stderr, "[REAL] wrap_slice: stream sync after D2H failed: %s\n",
+              hipGetErrorString(err));
+      return -1;
+    }
   }
 
   // Build per-input-axis (start, step) arrays. Axes not listed in `axes`
