@@ -431,6 +431,14 @@ int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state);
 // hipdnn_ep_runtime_begin_compute" -- greppable across logs and code.
 void hipdnn_ep_runtime_begin_compute(RuntimeState *state);
 
+// Optional per-Compute decode hint. The EP calls this after begin_compute when
+// the current forward pass is a decoder single-token step (seq==1). Sets
+// RuntimeState::decode_hint, which gates the decode-only sync-free readback fast
+// path (HIPDNN_EP_DECODE_SKIP_SYNC). Optional/backward-compatible like
+// begin_compute: older DLLs resolve it to null EP-side and the safe
+// (synchronized) path is always used.
+void hipdnn_ep_runtime_set_decode_hint(RuntimeState *state, int32_t is_decode);
+
 // Resolve and print the per-op profile table (HIPDNN_EP_PERF).
 //
 // Contract: the EP must invoke this AFTER the Compute() wall-clock window

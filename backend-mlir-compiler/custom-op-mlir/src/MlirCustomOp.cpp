@@ -804,6 +804,39 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
   // leaving it on the fast path costs ~1 ns.
   inference_state_->begin_compute();
 
+  // Decode-only sync-free readback hint (HIPDNN_EP_DECODE_SKIP_SYNC, off by
+  // default). Flag a decoder single-token step so the runtime can skip the
+  // per-step readback stream syncs (evidence: decode readback scalars are
+  // resident pre-sync; the async ones are all vision/prefill). Scoped: requires
+  // many inputs (the decoder, not the 2-input vision/embedding sessions) AND a
+  // rank-3 activation with seq==1 (excludes prefill). Set AFTER begin_compute,
+  // which resets the hint. Detection is host-side metadata only.
+  static const bool decodeSkipSync =
+      std::getenv("HIPDNN_EP_DECODE_SKIP_SYNC") != nullptr;
+  if (decodeSkipSync) {
+    bool is_decode = false;
+    Ort::KernelContext ctx(context);
+    size_t n = ctx.GetInputCount();
+    if (n > 5) {
+      // Identify the decoder's activation input `inputs_embeds`
+      // [batch, seq, hidden] by its rank-3 shape with a large trailing hidden
+      // dim (>= 512, excludes position_ids [3, batch, seq] and the small
+      // conv/recurrent state tensors). Decode == its seq (shape[1]) == 1;
+      // prefill has seq > 1. This must NOT match position_ids, whose shape[1]
+      // is the (always-1) batch dim -- that false match fired the fast path in
+      // prefill and corrupted the async prefill readbacks.
+      for (size_t i = 0; i < n; ++i) {
+        auto shp = ctx.GetInput(i).GetTensorTypeAndShapeInfo().GetShape();
+        if (shp.size() == 3 && shp[2] >= 512 && shp[1] == 1) {
+          is_decode = true;
+          break;
+        }
+      }
+    }
+    inference_state_->set_decode_hint(is_decode);
+    inference_state_->set_probe_decode(is_decode);
+  }
+
   // Does everything: input marshaling, in-graph output allocation via the
   // callback, post-compute host D2H, and (when HIPDNN_EP_PERF is set) its own
   // timing + per-op profile flush.

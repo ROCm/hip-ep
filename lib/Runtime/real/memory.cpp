@@ -5,10 +5,13 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
+#include "../runtime_state_internal.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 // GPU D2D memcpy via hipMemcpyAsync.
 // Follows opaque RuntimeState pattern - extracts stream internally
@@ -230,6 +233,20 @@ void hipdnn_ep_readback_scalar(RuntimeState *state, void *host_dst,
   }
   hipStream_t stream =
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+  // Decode-only sync-free fast path (HIPDNN_EP_DECODE_SKIP_SYNC, off by default).
+  // Evidence (HIPDNN_EP_RB_TRACE) showed decode-step readback scalars are already
+  // resident before the sync (pre==post), while the genuinely async ones are all
+  // in vision/prefill. When the EP has flagged a decoder single-token step
+  // (state->decode_hint), read the (UMA host-accessible) source directly with a
+  // plain host copy -- no stream op, no hipStreamSynchronize (the per-step sync
+  // that blocks HIP-graph capture). Scoped to decode; vision/prefill keep their
+  // synchronized path.
+  static const bool decodeSkipSync =
+      std::getenv("HIPDNN_EP_DECODE_SKIP_SYNC") != nullptr;
+  if (decodeSkipSync && state->decode_hint) {
+    std::memcpy(host_dst, device_scalar, static_cast<size_t>(num_bytes));
+    return;
+  }
   // hipMemcpyDefault (not DeviceToHost): the source may be host-accessible
   // memory (host-mapped scratch from the host-scalar materialization pass, or a
   // UMA pool), where an explicit D2H fails `invalid argument`. Direction is

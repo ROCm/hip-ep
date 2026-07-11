@@ -62,6 +62,9 @@ void InferenceState::resolveEntryPoints(const LoadedArtifact &artifact) {
       artifact.get_method<int, void *>(hipdnn::abi::kInferenceCleanup);
   begin_compute_fn_ =
       artifact.get_method<void, void *>(hipdnn::abi::kRuntimeBeginCompute);
+  set_decode_hint_fn_ =
+      artifact.get_method<void, void *, int32_t>(
+          hipdnn::abi::kRuntimeSetDecodeHint);
   set_output_allocator_fn_ =
       artifact.get_method<void, void *, const output_allocator_t *>(
           hipdnn::abi::kSetOutputAllocator);
@@ -73,7 +76,8 @@ InferenceState::InferenceState(PrivateTag, void *state,
                                std::unique_ptr<LoadedArtifact> artifact)
     : state_(state), artifact_(std::move(artifact)), compute_fn_(nullptr),
       cleanup_fn_(nullptr), begin_compute_fn_(nullptr),
-      set_output_allocator_fn_(nullptr), flush_op_profile_fn_(nullptr) {
+      set_decode_hint_fn_(nullptr), set_output_allocator_fn_(nullptr),
+      flush_op_profile_fn_(nullptr) {
   resolveEntryPoints(*artifact_);
 
   MY_LOG(2) << "begin_compute symbol "
@@ -174,8 +178,21 @@ int InferenceState::compute(span_t *inputs) const {
     return -1;
   }
 #if defined(HIPDNN_EP_LINK_HIP_HOST)
-  if (ENV_PARAM(HIPDNN_EP_CAPTURE_PROBE) >= 1) {
-    return computeWithCaptureProbe(inputs);
+  // Scope the capture probe to decoder single-token steps. Attempting capture on
+  // the vision/prefill sync path is fatal (S1); decode is the only candidate for
+  // a capture-clean graph (esp. with HIPDNN_EP_DECODE_SKIP_SYNC removing the 3
+  // readback syncs). Non-decode computes always run eager.
+  if (ENV_PARAM(HIPDNN_EP_CAPTURE_PROBE) >= 1 && probe_is_decode_) {
+    // Attempt capture only on a WARM decode step (after allocations/pool have
+    // stabilized over the first few decode steps). Capturing on a cold step
+    // hits hipMalloc (pool growth), which is illegal during capture. This
+    // mirrors the warmup-before-capture flow of CUDA/ORT graph capture. Single
+    // attempt to avoid repeated capture-invalidation poisoning the stream.
+    static int decodeCount = 0;
+    ++decodeCount;
+    if (decodeCount == 4) {
+      return computeWithCaptureProbe(inputs);
+    }
   }
 #endif
   return compute_fn_(state_, inputs);
@@ -287,6 +304,12 @@ void InferenceState::set_output_allocator(
 void InferenceState::begin_compute() const {
   if (begin_compute_fn_ && state_) {
     begin_compute_fn_(state_);
+  }
+}
+
+void InferenceState::set_decode_hint(bool is_decode) const {
+  if (set_decode_hint_fn_ && state_) {
+    set_decode_hint_fn_(state_, is_decode ? 1 : 0);
   }
 }
 

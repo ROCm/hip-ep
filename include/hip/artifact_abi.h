@@ -31,6 +31,11 @@ inline constexpr const char *kSetOutputAllocator =
     "hipdnn_ep_set_output_allocator";
 inline constexpr const char *kRuntimeFlushOpProfile =
     "hipdnn_ep_runtime_flush_op_profile";
+// Optional per-Compute decode hint: the EP sets this to 1 when the current
+// forward pass is a decoder single-token step (seq==1 with KV history), 0
+// otherwise. Lets the runtime take a decode-only, sync-free readback path.
+inline constexpr const char *kRuntimeSetDecodeHint =
+    "hipdnn_ep_runtime_set_decode_hint";
 
 // Per-op-state-slots C-ABI symbol names (see
 // docs/design/op-state-slots-design.md). kOpStatesInitFn is emitted by

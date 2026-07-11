@@ -197,6 +197,7 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
         hipdnn::abi::kInferenceGetMetadataJson,
         "test_hip_from_dll",
         hipdnn::abi::kRuntimeBeginCompute,
+        hipdnn::abi::kRuntimeSetDecodeHint,
         hipdnn::abi::kSetOutputAllocator,
         hipdnn::abi::kRuntimeFlushOpProfile};
     std::vector<std::string> libraries;

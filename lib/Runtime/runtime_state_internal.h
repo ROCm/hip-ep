@@ -202,6 +202,14 @@ struct RuntimeState {
   int32_t seqlens_k_cached_val;
   const void *seqlens_k_cached_ptr;
 
+  // Per-Compute() decode hint (set by the EP via hipdnn_ep_runtime_set_decode_hint
+  // from MlirCustomOp::Compute). True only for a decoder single-token step
+  // (seq==1). Gates the decode-only sync-free readback fast path in
+  // hipdnn_ep_readback_scalar (see HIPDNN_EP_DECODE_SKIP_SYNC). Reset to false by
+  // hipdnn_ep_runtime_begin_compute so a missing set defaults to the safe
+  // (synchronized) path.
+  bool decode_hint;
+
   // ONNX Loop driver state. Lazily allocated by hipdnn_ep_run_counted_loop /
   // hipdnn_ep_run_loop on first call; freed in hipdnn_ep_state_cleanup.
   //

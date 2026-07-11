@@ -81,6 +81,21 @@ public:
   // warns when the symbol is absent.
   void begin_compute() const;
 
+  // Invokes the optional `hipdnn_ep_runtime_set_decode_hint` hook (after
+  // begin_compute) to flag a decoder single-token step, enabling the decode-only
+  // sync-free readback fast path. No-op when the symbol is absent.
+  void set_decode_hint(bool is_decode) const;
+
+  // True when the artifact exported hipdnn_ep_runtime_set_decode_hint (i.e.
+  // set_decode_hint() is not a no-op). Diagnostic aid.
+  bool has_set_decode_hint() const { return set_decode_hint_fn_ != nullptr; }
+
+  // EP-side note of whether the current Compute is a decoder single-token step.
+  // Used to scope the S1 capture PROBE to decode (attempting capture on the
+  // vision/prefill sync path is fatal). Set by MlirCustomOp::Compute alongside
+  // set_decode_hint.
+  void set_probe_decode(bool d) const { probe_is_decode_ = d; }
+
   // Flush per-op profile (HIPDNN_EP_PERF). Called by the EP AFTER its
   // wall_ms timing window closes, so the resolve + std::map + fprintf cost
   // no longer pollutes Compute() latency. No-op when the model.dll predates
@@ -139,6 +154,15 @@ private:
   // path. Null when the module does not export the hook.
   using BeginComputeFn = void (*)(void *);
   BeginComputeFn begin_compute_fn_;
+
+  // Cached hipdnn_ep_runtime_set_decode_hint. Null when the symbol is absent
+  // (older DLLs); set_decode_hint() is then a no-op and decode falls back to the
+  // safe synchronized readback path.
+  using SetDecodeHintFn = void (*)(void *, int32_t);
+  SetDecodeHintFn set_decode_hint_fn_;
+
+  // EP-side decode flag for the S1 capture probe scoping (see set_probe_decode).
+  mutable bool probe_is_decode_ = false;
 
   // Cached hipdnn_ep_set_output_allocator (resolved once in the ctor, like
   // begin_compute_fn_). Null when the model.dll predates the export.
