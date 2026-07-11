@@ -199,11 +199,24 @@ pool"). So the culprit is a more obscure silent op: a blocking `hipMemcpy`, an
 `hipEventSynchronize` in the Loop / linear-attention / causal-conv paths, a
 stream-0 op, or a lazy allocation.
 
-NEXT DIAGNOSTIC (to pinpoint efficiently): add an entry-check to the kernel
-launchers on the pre-Equal path (`cast`, `transpose`, `matmul_nbits`,
-`elementwise`) -- `if (hipStreamIsCapturing && hipPeekAtLastError()!=success)
-log "[cap-pending] <kernel>"`. The FIRST launcher to report a pending error sits
-immediately after the illegal op; bisect from there.
+Bisection attempted (entry `hipStreamIsCapturing` checks on `cast`/`transpose`/
+`matmul_nbits`/`elementwise_equal`): NONE logged. Refined finding: once capture
+is invalidated, `hipStreamIsCapturing` returns an ERROR (hipErrorStreamCapture
+Invalidated), not `hipSuccess` with status=Invalidated -- so an entry check
+gated on `==hipSuccess` silently skips. The Equal's entry probe never fired even
+though its launch reports "previous error during capture" => capture is ALREADY
+invalidated at the Equal's entry, by an op BEFORE it (the `matmul_nbits`/
+`transpose`/`cast` before it in the trace are the PRIOR decode step's tail; the
+Equal is early-ish in the decode graph). The illegal op is a still-unidentified
+preamble/early op (Range/Expand/Where/Sub/Gather/ScatterND region, or a lazy
+prepare_input path).
+
+NEXT DIAGNOSTIC (corrected): instrument preamble kernels (range, expand,
+elementwise_where, elementwise_sub, gather, scatter_nd) at entry, and handle the
+invalidated-error return: `hipError_t st=hipStreamIsCapturing(s,&cs); if
+(st!=hipSuccess || cs!=None) log "<op> st=%d cs=%d"`. The Active->Invalidated
+transition across consecutive ops brackets the culprit (the last op seeing
+Active did the illegal call during its execution).
 
 ## 8c. The two hard remaining pieces (multi-day/multi-week)
 
