@@ -162,6 +162,52 @@ No OGA changes are committed (the static-mask experiment patch was reverted; ven
 
 ---
 
+## 8b. Step A / Step B implementation progress (branch perf/s0-measurement-harness)
+
+Env flag `HIPDNN_EP_DECODE_SKIP_SYNC` (off by default) + a per-Compute decode
+hint (`RuntimeState::decode_hint`, `decode_seqlens_k`) set by the EP
+(`MlirCustomOp::Compute` detects a decoder single-token step: >5 inputs, an
+`inputs_embeds` rank-3 hidden>=512 seq==1). All changes greedy-token-identity
+verified (SHA256 `08DA1990...` unchanged) and pushed.
+
+Decode capture blockers ELIMINATED (each a device->host sync removed in decode,
+host-sourced or capture-guarded):
+1. `readback_scalar` x3/token (Step A) -- host-read resident scalar.
+2. `readback_i32` -- host-read resident scalar.
+3. `cumsum` axis -- host-read constant.
+4. GQA `seqlens_k` (`read_seqlens_k_for_dispatch`) -- host-sourced from
+   `attention_mask.shape[1]-1` (batch==1 unpadded).
+5. `hipdnn_ep_stream_sync` end-of-compute sync -- skipped when
+   `hipStreamIsCapturing` (capture-only guard, not decode-gated).
+6. `slice` starts/ends/axes/steps -- host-read without sync.
+
+Capture-probe progress (HIPDNN_EP_CAPTURE_PROBE, decode-scoped, warm step 4):
+during-capture errors 2397 -> 1; first failing op moved
+`hip_matmul_nbits`(cold pool `hipMalloc`) -> `hip_gqa_kv_cache_append` ->
+`hip_elementwise_equal` (current).
+
+CURRENT WALL: `hip_elementwise_equal` (a scalar i64==i64 control check feeding a
+`Where`) fails with "previous error during capture". The illegal op is NOT in
+the ~200 lines before it and is NOT a logged sync/alloc -- intervening
+`matmul_nbits` launches don't check `hipGetLastError`, so the invalidating op is
+undetected until the Equal. Most likely a silent **allocation** during capture
+(pool/output/intermediate `hipMalloc`), i.e. the allocation-stabilization piece,
+not another simple sync.
+
+## 8c. The two hard remaining pieces (multi-day/multi-week)
+
+1. **Allocation stabilization**: no `hipMalloc` during capture. Requires all
+   pools fully pre-grown (warmup), output allocator reuse, and per-op workspaces
+   (matmul zp cache, GQA/qmoe scratch) warm/max-sized. This is the current wall.
+2. **Static decode shapes (THE crux, original S3)**: a captured graph bakes in
+   the current `total_sequence_length`. Correct replay across steps requires
+   fixed launch dims (max-buffer) + the varying length read on-device from a
+   scalar (`seqlens_k`), so the SAME graph is valid for every token. GQA fused
+   decode already does this; ALL decode ops must. Without it, a captured decode
+   is only valid for one sequence length.
+3. Then the S4 capture/replay machinery: warmup -> capture -> instantiate ->
+   replay on matching shapes, eager fallback, stable buffer addresses.
+
 ## 9. Bottom line
 
 - The static-KV precondition is already met; the model is capture-capable; DML proves it.
