@@ -12,9 +12,11 @@
 #include "../op_state.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
+#include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -302,6 +304,24 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, int op_state_slot,
 
   void *skip_buf = input_skip_bias_sum ? input_skip_bias_sum : ws;
   void *rstd_buf = ws + skip_aligned;
+
+  // Fused skip+RMSNorm fast path (HIPDNN_EP_FUSED_SKIPNORM=1): a single custom
+  // kernel replaces the MIOpen add(s) + T5 norm, removing the per-layer
+  // elementwise-add dispatch and its cache-flush barrier. skip_buf receives the
+  // pre-norm sum (= input_skip_bias_sum when requested), matching the MIOpen
+  // intermediate.
+  if (const char *f = std::getenv("HIPDNN_EP_FUSED_SKIPNORM");
+      f && f[0] == '1') {
+    int hd = (element_size_bytes == 2) ? HIP_DTYPE_FLOAT16 : HIP_DTYPE_FLOAT32;
+    int rc = hip_skip_rms_norm(hipdnn_ep_state_get_stream(state), input, skip,
+                               gamma, bias, output, skip_buf, num_rows,
+                               hidden_dim, epsilon, hd);
+    if (rc != 0)
+      fprintf(stderr,
+              "wrap_skip_simplified_layer_norm: fused kernel failed rc=%d\n",
+              rc);
+    return rc;
+  }
 
   int result = 0;
 

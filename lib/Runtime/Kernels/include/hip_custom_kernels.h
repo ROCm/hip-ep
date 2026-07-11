@@ -1218,6 +1218,34 @@ HIP_KERNEL_API int hip_layer_norm(
     int mean_dtype);
 
 /* =========================================================================
+ * Fused SkipSimplifiedLayerNormalization (com.microsoft)
+ * =========================================================================
+ *
+ *   skip_sum = input + skip [+ bias]      (also the input_skip_bias_sum output)
+ *   output   = RMSNorm(skip_sum) * gamma
+ *
+ * Single-kernel alternative to the MIOpen add + T5-norm composition. One block
+ * per row; FP16 accumulates in float. `skip_sum` must point at the caller's
+ * input_skip_bias_sum output when requested, else a scratch buffer of the same
+ * size; the kernel always writes the pre-norm sum there.
+ *
+ * Supported hip_dtype: HIP_DTYPE_FLOAT16, HIP_DTYPE_FLOAT32.
+ * Returns: 0 on success, -1 on bad args / unsupported dtype.
+ */
+HIP_KERNEL_API int hip_skip_rms_norm(
+    void* stream,
+    const void* input,
+    const void* skip,
+    const void* gamma,
+    const void* bias,         // optional
+    void* output,
+    void* skip_sum,
+    int64_t num_rows,
+    int64_t hidden,
+    float epsilon,
+    int hip_dtype);
+
+/* =========================================================================
  * Range (1-D sequence generation)
  * =========================================================================
  *
