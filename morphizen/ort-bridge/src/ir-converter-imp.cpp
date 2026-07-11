@@ -15,6 +15,11 @@
 #include <morphizen/node_attr.hpp>
 #include <unordered_set>
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_IR_CONVERTER, "0")
+// S2 repro: bind decode-static symbolic dims at import so the compiler
+// specializes on them. Used ONLY to reproduce/diagnose the 0xC0000094
+// integer-divide crash that static specialization triggers. Off by default.
+DEF_ENV_PARAM(HIPDNN_EP_DECODE_SEQ1, "0")
+DEF_ENV_PARAM(HIPDNN_EP_DECODE_BATCH1, "0")
 DEF_ENV_PARAM_2(MORPHIZEN_DEBUG_IR_CONVERTER_OUTPUT_FILE,
                 "MorphiZen-EP-IR-Converter.onnx", std::string)
 #define MY_LOG(n) LOG_IF(INFO, ENV_PARAM(MORPHIZEN_DEBUG_IR_CONVERTER) >= n)
@@ -413,6 +418,26 @@ IRConverterImp::convert_value_info_proto(const Ort::ConstValueInfo &value_info,
   auto name = value_info.GetName();
   int element_type = 0; // Placeholder for element type
   throw_if_error(convert_type_proto(type_info, &element_type, &shape));
+
+  // S2 repro (flag-gated): specialize decode symbolic dims to 1 at import.
+  if ((ENV_PARAM(HIPDNN_EP_DECODE_SEQ1) || ENV_PARAM(HIPDNN_EP_DECODE_BATCH1)) &&
+      type_info.GetONNXType() == ONNX_TYPE_TENSOR &&
+      type_info.GetTensorTypeAndShapeInfo().HasShape()) {
+    auto sdims = type_info.GetTensorTypeAndShapeInfo().GetSymbolicDimensions();
+    for (size_t i = 0; i < sdims.size() && i < shape.size(); ++i) {
+      if (!sdims[i] || sdims[i][0] == '\0')
+        continue;
+      std::string_view dn(sdims[i]);
+      if (ENV_PARAM(HIPDNN_EP_DECODE_SEQ1) && dn == "sequence_length") {
+        shape[i] = 1;
+        MY_LOG(2) << "decode-spec: " << name << " dim " << i << " (seq)->1";
+      }
+      if (ENV_PARAM(HIPDNN_EP_DECODE_BATCH1) && dn == "batch_size") {
+        shape[i] = 1;
+        MY_LOG(2) << "decode-spec: " << name << " dim " << i << " (batch)->1";
+      }
+    }
+  }
 
   // ORT's GetShape() returns an empty vector for both unranked tensors and
   // rank-0 scalars; HasShape() is the only signal that disambiguates them.
