@@ -193,6 +193,19 @@ static int32_t read_seqlens_k_for_dispatch(hipStream_t stream,
     return kSeqlensKNotRead;
   }
 
+  // Decode-only host-known seqlens_k (HIPDNN_EP_DECODE_SKIP_SYNC): the EP
+  // supplied total_sequence_length-1 (from attention_mask.shape[1]) for this
+  // batch==1 decode step. Return it directly, skipping the seqlens_k D2H +
+  // hipStreamSynchronize -- that sync is illegal during HIP-graph capture and
+  // is the next decode capture blocker after readback_scalar (Step B). Value-
+  // equivalent to the device read for an unpadded batch==1 mask.
+  static const bool decodeSkipSync =
+      std::getenv("HIPDNN_EP_DECODE_SKIP_SYNC") != nullptr;
+  if (decodeSkipSync && state && state->decode_hint &&
+      state->decode_seqlens_k >= 0) {
+    return state->decode_seqlens_k;
+  }
+
   if (gqa_cache_seqlens_enabled() && state && state->seqlens_k_cached_valid &&
       state->seqlens_k_cached_ptr == seqlens_k_ptr) {
     return state->seqlens_k_cached_val;

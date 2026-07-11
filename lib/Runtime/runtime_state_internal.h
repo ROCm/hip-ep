@@ -210,6 +210,14 @@ struct RuntimeState {
   // (synchronized) path.
   bool decode_hint;
 
+  // Host-known seqlens_k for the current decode step (= total_sequence_length -
+  // 1), supplied by the EP from attention_mask.shape[1]-1 when decode_hint is
+  // set (batch==1, no mask padding). Lets the GQA decode path skip its
+  // seqlens_k D2H + hipStreamSynchronize (read_seqlens_k_for_dispatch). -1 means
+  // "not supplied" -> fall back to the device read. Only consumed under
+  // HIPDNN_EP_DECODE_SKIP_SYNC + decode_hint.
+  int32_t decode_seqlens_k;
+
   // ONNX Loop driver state. Lazily allocated by hipdnn_ep_run_counted_loop /
   // hipdnn_ep_run_loop on first call; freed in hipdnn_ep_state_cleanup.
   //

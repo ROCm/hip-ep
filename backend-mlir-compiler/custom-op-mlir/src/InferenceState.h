@@ -84,7 +84,7 @@ public:
   // Invokes the optional `hipdnn_ep_runtime_set_decode_hint` hook (after
   // begin_compute) to flag a decoder single-token step, enabling the decode-only
   // sync-free readback fast path. No-op when the symbol is absent.
-  void set_decode_hint(bool is_decode) const;
+  void set_decode_hint(bool is_decode, int32_t seqlens_k) const;
 
   // True when the artifact exported hipdnn_ep_runtime_set_decode_hint (i.e.
   // set_decode_hint() is not a no-op). Diagnostic aid.
@@ -158,7 +158,7 @@ private:
   // Cached hipdnn_ep_runtime_set_decode_hint. Null when the symbol is absent
   // (older DLLs); set_decode_hint() is then a no-op and decode falls back to the
   // safe synchronized readback path.
-  using SetDecodeHintFn = void (*)(void *, int32_t);
+  using SetDecodeHintFn = void (*)(void *, int32_t, int32_t);
   SetDecodeHintFn set_decode_hint_fn_;
 
   // EP-side decode flag for the S1 capture probe scoping (see set_probe_decode).

@@ -437,7 +437,8 @@ void hipdnn_ep_runtime_begin_compute(RuntimeState *state);
 // path (HIPDNN_EP_DECODE_SKIP_SYNC). Optional/backward-compatible like
 // begin_compute: older DLLs resolve it to null EP-side and the safe
 // (synchronized) path is always used.
-void hipdnn_ep_runtime_set_decode_hint(RuntimeState *state, int32_t is_decode);
+void hipdnn_ep_runtime_set_decode_hint(RuntimeState *state, int32_t is_decode,
+                                       int32_t seqlens_k);
 
 // Resolve and print the per-op profile table (HIPDNN_EP_PERF).
 //

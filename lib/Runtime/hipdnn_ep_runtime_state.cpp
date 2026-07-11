@@ -171,6 +171,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->seqlens_k_cached_valid = false;
   state->seqlens_k_cached_val = 0;
   state->decode_hint = false;
+  state->decode_seqlens_k = -1;
   state->seqlens_k_cached_ptr = nullptr;
   state->loop_iter_cpu_buf = nullptr;
   state->loop_iter_capacity = 0;
@@ -889,10 +890,12 @@ extern "C"
     __declspec(dllexport)
 #endif
         void hipdnn_ep_runtime_set_decode_hint(RuntimeState *state,
-                                               int32_t is_decode) {
+                                               int32_t is_decode,
+                                               int32_t seqlens_k) {
   if (!state)
     return;
   state->decode_hint = (is_decode != 0);
+  state->decode_seqlens_k = state->decode_hint ? seqlens_k : -1;
 }
 
 // Per-op profile flush hook. Moved out of hipdnn_ep_stream_sync (which is on

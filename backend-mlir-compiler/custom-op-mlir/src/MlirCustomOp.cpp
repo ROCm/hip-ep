@@ -817,6 +817,7 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
     bool is_decode = false;
     Ort::KernelContext ctx(context);
     size_t n = ctx.GetInputCount();
+    int32_t seqlens_k = -1;
     if (n > 5) {
       // Identify the decoder's activation input `inputs_embeds`
       // [batch, seq, hidden] by its rank-3 shape with a large trailing hidden
@@ -825,15 +826,26 @@ void MlirCustomOp::Compute(const OrtApi *api, OrtKernelContext *context) const {
       // prefill has seq > 1. This must NOT match position_ids, whose shape[1]
       // is the (always-1) batch dim -- that false match fired the fast path in
       // prefill and corrupted the async prefill readbacks.
+      int64_t batch = -1, total_seq = -1;
       for (size_t i = 0; i < n; ++i) {
         auto shp = ctx.GetInput(i).GetTensorTypeAndShapeInfo().GetShape();
         if (shp.size() == 3 && shp[2] >= 512 && shp[1] == 1) {
           is_decode = true;
-          break;
+          batch = shp[0];
         }
+        // attention_mask [batch, total_sequence_length] is the rank-2 input;
+        // its width is the host-known total_sequence_length (no padding for a
+        // batch==1 greedy decode step).
+        if (shp.size() == 2)
+          total_seq = shp[1];
       }
+      // Host-known seqlens_k = total_sequence_length - 1, valid only for the
+      // batch==1, no-mask-padding decode step -- lets the GQA decode path skip
+      // its seqlens_k D2H + hipStreamSynchronize. Left -1 (device read) else.
+      if (is_decode && batch == 1 && total_seq > 0)
+        seqlens_k = static_cast<int32_t>(total_seq - 1);
     }
-    inference_state_->set_decode_hint(is_decode);
+    inference_state_->set_decode_hint(is_decode, seqlens_k);
     inference_state_->set_probe_decode(is_decode);
   }
 

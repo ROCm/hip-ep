@@ -63,7 +63,7 @@ void InferenceState::resolveEntryPoints(const LoadedArtifact &artifact) {
   begin_compute_fn_ =
       artifact.get_method<void, void *>(hipdnn::abi::kRuntimeBeginCompute);
   set_decode_hint_fn_ =
-      artifact.get_method<void, void *, int32_t>(
+      artifact.get_method<void, void *, int32_t, int32_t>(
           hipdnn::abi::kRuntimeSetDecodeHint);
   set_output_allocator_fn_ =
       artifact.get_method<void, void *, const output_allocator_t *>(
@@ -307,9 +307,9 @@ void InferenceState::begin_compute() const {
   }
 }
 
-void InferenceState::set_decode_hint(bool is_decode) const {
+void InferenceState::set_decode_hint(bool is_decode, int32_t seqlens_k) const {
   if (set_decode_hint_fn_ && state_) {
-    set_decode_hint_fn_(state_, is_decode ? 1 : 0);
+    set_decode_hint_fn_(state_, is_decode ? 1 : 0, seqlens_k);
   }
 }
 
