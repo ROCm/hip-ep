@@ -991,6 +991,35 @@ def Hip_MsQuantizeLinearOp : Hip_DpsOp<"ms_quantize_linear"> {
   }];
 }
 
+// ===== Fused ORCA RMSNorm (L2 form) =========================================
+
+def Hip_OrcaRmsNormL2Op : Hip_DpsOp<"orca_rmsnorm_l2"> {
+  let summary = "Fused RMSNorm-L2: weight * x / sqrt(sum(x^2)) over last axis";
+  let description = [{
+    Exact fused form of the ORCA decode graph's decomposed RMSNorm chain
+    (mul(x,x) -> reduce_sum -> sqrt -> reciprocal -> mul(x,.) -> mul(weight,.)).
+    The RMSNorm 1/N mean factor and epsilon were folded into `weight` at export,
+    so this uses sum (not mean) with no epsilon:
+        output[r,i] = weight[i] * input[r,i] / sqrt(sum_i input[r,i]^2)
+    All math in fp32; matches the decomposed ops up to reduction order.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$weight,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$axis
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $weight `:`
+        type($input) `,` type($weight) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 // ===== Fused ops =============================================================
 
 def Hip_MsMatMulNBitsI2FusedOp : Hip_DpsOp<"ms_matmul_nbits_i2_fused",

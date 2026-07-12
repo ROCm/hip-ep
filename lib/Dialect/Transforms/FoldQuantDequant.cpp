@@ -23,6 +23,7 @@
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
@@ -31,6 +32,7 @@
 
 STATISTIC(NumDQFolded, "Number of dequantize(quantize(x)) round-trips folded");
 STATISTIC(NumQErased, "Number of now-dead quantize ops erased");
+STATISTIC(NumRmsFused, "Number of decomposed RMSNorm-L2 chains fused");
 
 namespace mlir {
 namespace hip {
@@ -81,6 +83,92 @@ struct FoldQuantDequantPass
     }
     // Dead tensor.empty inits left by the erased ops are removed by the
     // canonicalize pass that follows in the pipeline.
+
+    fuseRmsNormL2(module);
+  }
+
+  // Phase 2: fuse the decomposed RMSNorm-L2 chain
+  //   sq = mul(a, a) -> reduce_sum -> sqrt -> reciprocal
+  //   norm = mul(a, reciprocal) -> out = mul(weight, norm)
+  // into a single hip.orca_rmsnorm_l2(a, weight). The 1/N mean factor and eps
+  // were folded into `weight` at export, so the fused op uses sum + no eps and
+  // is numerically exact (same fp32 ops, just fused into one kernel).
+  static void fuseRmsNormL2(ModuleOp module) {
+    SmallVector<ReduceSumOp> anchors;
+    module.walk([&](ReduceSumOp rs) { anchors.push_back(rs); });
+
+    for (ReduceSumOp rs : anchors) {
+      // data must be mul(a, a) with identical operands.
+      auto sq = rs.getData().getDefiningOp<MulOp>();
+      if (!sq)
+        continue;
+      Value a = sq.getLhs();
+      if (a != sq.getRhs())
+        continue;
+
+      Value rsRes = rs->getResult(0);
+      if (!rsRes.hasOneUse())
+        continue;
+      auto sqrtOp = dyn_cast<SqrtOp>(*rsRes.getUsers().begin());
+      if (!sqrtOp)
+        continue;
+      Value sqrtRes = sqrtOp->getResult(0);
+      if (!sqrtRes.hasOneUse())
+        continue;
+      auto recip = dyn_cast<ReciprocalOp>(*sqrtRes.getUsers().begin());
+      if (!recip)
+        continue;
+      Value recipRes = recip->getResult(0);
+      if (!recipRes.hasOneUse())
+        continue;
+      auto normMul = dyn_cast<MulOp>(*recipRes.getUsers().begin());
+      if (!normMul)
+        continue;
+      // normMul must be mul(a, recip) in either operand order.
+      Value other = (normMul.getLhs() == recipRes) ? normMul.getRhs()
+                    : (normMul.getRhs() == recipRes) ? normMul.getLhs()
+                                                     : Value();
+      if (other != a)
+        continue;
+      Value normRes = normMul->getResult(0);
+      if (!normRes.hasOneUse())
+        continue;
+      auto wMul = dyn_cast<MulOp>(*normRes.getUsers().begin());
+      if (!wMul)
+        continue;
+      // wMul = mul(weight, norm) in either order.
+      Value weight = (wMul.getLhs() == normRes) ? wMul.getRhs()
+                     : (wMul.getRhs() == normRes) ? wMul.getLhs()
+                                                  : Value();
+      if (!weight)
+        continue;
+
+      auto aTy = dyn_cast<RankedTensorType>(a.getType());
+      if (!aTy || aTy.getRank() < 1)
+        continue;
+      Value finalRes = wMul->getResult(0);
+      if (finalRes.getType() != a.getType())
+        continue; // fused output must have the input's shape/type
+
+      OpBuilder b(wMul);
+      Value ctx = sq.getCtx();
+      Value out = tensor::EmptyOp::create(b, wMul.getLoc(), aTy.getShape(),
+                                          aTy.getElementType());
+      auto fused = OrcaRmsNormL2Op::create(
+          b, wMul.getLoc(), TypeRange{finalRes.getType()}, ctx, a, weight, out,
+          b.getI64IntegerAttr(aTy.getRank() - 1));
+
+      finalRes.replaceAllUsesWith(fused->getResult(0));
+      // Erase the now-dead chain leaf-to-root (weight and `a` are preserved).
+      wMul.erase();
+      normMul.erase();
+      recip.erase();
+      sqrtOp.erase();
+      rs.erase();
+      if (sq->use_empty())
+        sq.erase();
+      ++NumRmsFused;
+    }
   }
 };
 

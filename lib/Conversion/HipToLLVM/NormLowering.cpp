@@ -109,6 +109,54 @@ struct RmsNormOpLowering : public ConvertOpToLLVMPattern<RmsNormOp> {
   }
 };
 
+// hip.orca_rmsnorm_l2(%ctx) ins(%input, %weight) outs(%output)
+//   -> wrap_orca_rmsnorm_l2(state, input, weight, output, outer, norm_size)
+// norm_size = weight num-elements (last dim); outer = input_num / norm_size.
+struct OrcaRmsNormL2OpLowering
+    : public ConvertOpToLLVMPattern<OrcaRmsNormL2Op> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(OrcaRmsNormL2Op op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+
+    Value statePtr = adaptor.getCtx();
+    Value inputPtr =
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value weightPtr =
+        extractContiguousMemRefPtr(adaptor.getWeight(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
+
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+    Value inputNumElements =
+        computeNumElements(inputType, adaptor.getInput(), rewriter, loc);
+    auto weightType = cast<MemRefType>(op.getWeight().getType());
+    Value normSize =
+        computeNumElements(weightType, adaptor.getWeight(), rewriter, loc);
+    Value outer =
+        LLVM::SDivOp::create(rewriter, loc, i64Type, inputNumElements, normSize);
+
+    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType,
+                                    ptrType, i64Type, i64Type};
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapOrcaRmsNormL2, paramTypes,
+        rewriter.getI32Type());
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value> args = {statePtr, inputPtr, weightPtr,
+                               outputPtr, outer, normSize};
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 // hip.skip_rms_norm lowering with dynamic shape support
 struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -307,8 +355,8 @@ struct LayerNormOpLowering : public ConvertOpToLLVMPattern<LayerNormOp> {
 
 void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns) {
-  patterns.add<RmsNormOpLowering, SkipRmsNormOpLowering, LayerNormOpLowering>(
-      converter);
+  patterns.add<RmsNormOpLowering, SkipRmsNormOpLowering, LayerNormOpLowering,
+               OrcaRmsNormL2OpLowering>(converter);
 }
 
 } // namespace hip

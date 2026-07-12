@@ -153,6 +153,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
         HipDstBufferizableModel<MsQuantizeLinearOp>>(*ctx);
     MsMatMulNBitsI2FusedOp::attachInterface<
         HipDstBufferizableModel<MsMatMulNBitsI2FusedOp>>(*ctx);
+    OrcaRmsNormL2Op::attachInterface<
+        HipDstBufferizableModel<OrcaRmsNormL2Op>>(*ctx);
     CausalConvWithStateOp::attachInterface<
         HipDstBufferizableModel<CausalConvWithStateOp>>(*ctx);
     HipDNNGraphOp::attachInterface<HipDstBufferizableModel<HipDNNGraphOp>>(
