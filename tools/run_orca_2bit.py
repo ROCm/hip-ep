@@ -73,10 +73,16 @@ class OrcaSplitSession:
             devices = register_morphizen_ep(ep_dll)
         self.devices = devices
 
-        print(f"Loading embedding model...", flush=True)
+        # Bug #4: the GPU GatherBlockQuantized (embeddings) kernel is broken
+        # ("scales tensor underflows the block grid") and returns corrupt hidden
+        # states -> garbage output (e.g. "!idthidth..."). The embeddings are just
+        # a quantized gather (negligible cost), so force them onto CPU and keep
+        # the transformer + lm_head on the GPU EP. A proper GPU gbq fix needs
+        # morphizen to represent UINT4 as packed uint8 (follow-up).
+        print(f"Loading embedding model (forced CPU: GPU gbq kernel broken)...", flush=True)
         self.emb_sess = make_session(
             str(model_dir / "orca_2bit_embeddings_w4a32.quant.onnx"),
-            devices, ep_dll)
+            None, None)
 
         # Use fixed-shape models:
         #   orca_2bit_1.onnx   -- decode (seq_len=1)
@@ -172,9 +178,17 @@ class OrcaSplitSession:
             padded = chunk + [0] * (prefill_len - len(chunk))
             ids = np.array([padded], dtype=np.int64)
 
+            # past_seq_len is the ABSOLUTE position of the LAST token in this
+            # (zero-padded) chunk, i.e. first_pos = past_seq_len - seq_len + 1.
+            # The chunk's real tokens start at absolute position `pos`, so the
+            # last position is pos + prefill_len - 1. Passing `past_len` (= pos)
+            # here made RoPE positions run pos-127..pos (negative on chunk 0),
+            # corrupting the hidden states -> garbage output. (Matches the
+            # reference ort_inference.py: past_seq_len = (k+1)*prefill_len - 1.)
+            prefill_pos = past_len + prefill_len - 1
             t0 = time.perf_counter()
             hidden = self.embed(ids)
-            hidden = self.prefill(hidden, past_len)
+            hidden = self.prefill(hidden, prefill_pos)
             t1 = time.perf_counter()
 
             if verbose:
@@ -260,12 +274,20 @@ def main():
 
     print_profiling_note()
 
-    # Tokenize (simple byte-level fallback if transformers not available)
+    # Tokenize. This is an instruct model: it MUST see the chat template's
+    # special tokens (<|im_start|>...<|im_sep|>...<|im_end|>) plus the assistant
+    # generation prompt. Feeding the raw string with tok.encode() puts the model
+    # off-distribution and yields degenerate repetition (e.g. "!idthidth..."),
+    # which looked like an EP accuracy bug but is a driver bug. Matches the
+    # authoritative reference (ort_inference.py).
     try:
         from transformers import AutoTokenizer
         tok = AutoTokenizer.from_pretrained(str(model_dir), trust_remote_code=True)
-        token_ids = tok.encode(args.prompt)
-        print(f"\nPrompt ({len(token_ids)} tokens): {args.prompt!r}")
+        messages = [{"role": "user", "content": args.prompt}]
+        chat_text = tok.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True)
+        token_ids = tok.encode(chat_text, add_special_tokens=False)
+        print(f"\nPrompt ({len(token_ids)} templated tokens): {args.prompt!r}")
     except Exception as e:
         print(f"WARNING: tokenizer unavailable ({e}), using dummy token IDs")
         token_ids = list(range(1, min(len(args.prompt) + 1, 10)))

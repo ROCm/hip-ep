@@ -62,7 +62,7 @@ static CompilationConfig load_config(PassContext *ctx) {
     //                          policy).
     // Unknown values are logged and coerced to LLVM_IR.
     std::string artifact_format_str =
-        ctx->get_provider_option("artifact_format", "LLVM_IR");
+        ctx->get_provider_option("artifact_format", "NATIVE");
     if (artifact_format_str == "NATIVE") {
       config.artifactFormat = ArtifactFormat::NATIVE;
     } else {
