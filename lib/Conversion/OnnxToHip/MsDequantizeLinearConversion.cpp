@@ -82,6 +82,13 @@ mlir::LogicalResult MsDequantizeLinearToHip::matchAndRewrite(
   // Axis attribute (default 1 for com.microsoft DequantizeLinear).
   auto axisIntAttr = op->getAttrOfType<mlir::IntegerAttr>("axis");
   int64_t axisVal = axisIntAttr ? axisIntAttr.getSInt() : 1;
+  // Per-tensor quant: a scalar (single-element) scale applies one scale to the
+  // whole tensor. Force axis out-of-range so the lowering emits n_channels=1.
+  // Without this, the default axis=1 treats the sequence dim as channels, which
+  // is correct only for M=1 (decode) but corrupts M>1 (prefill).
+  if (auto st = mlir::dyn_cast<mlir::RankedTensorType>(op->getOperand(1).getType()))
+    if (st.getNumElements() == 1)
+      axisVal = -1;
   auto axisAttr = rewriter.getI64IntegerAttr(axisVal);
 
   // Element sizes in bytes for input and scale.
@@ -178,6 +185,10 @@ mlir::LogicalResult MsQuantizeLinearToHip::matchAndRewrite(
 
   auto axisIntAttr = op->getAttrOfType<mlir::IntegerAttr>("axis");
   int64_t axisVal = axisIntAttr ? axisIntAttr.getSInt() : 1;
+  // Per-tensor quant (scalar scale): force n_channels=1 (see DequantizeLinear).
+  if (auto st = mlir::dyn_cast<mlir::RankedTensorType>(op->getOperand(1).getType()))
+    if (st.getNumElements() == 1)
+      axisVal = -1;
   auto axisAttr = rewriter.getI64IntegerAttr(axisVal);
 
   int64_t inputElemSize = 2; // default: fp16
