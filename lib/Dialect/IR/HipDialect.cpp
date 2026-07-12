@@ -1092,6 +1092,20 @@ void MsQuantizeLinearOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// OrcaRmsNormL2Op: ins(input, weight) outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange OrcaRmsNormL2Op::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void OrcaRmsNormL2Op::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // MsMatMulNBitsI2FusedOp: fused DQ + bits=2 matmul + Q
 //===----------------------------------------------------------------------===//
 

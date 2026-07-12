@@ -288,6 +288,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/gather_block_quantized.cpp runtime_gather_block_quantized.bc)
     compile_to_bitcode(real/ms_dequantize_linear.cpp runtime_ms_dequantize_linear.bc)
     compile_to_bitcode(real/ms_matmul_nbits_i2_fused.cpp runtime_ms_matmul_nbits_i2_fused.bc)
+    compile_to_bitcode(real/rmsnorm_l2_fused.cpp runtime_rmsnorm_l2_fused.bc)
     compile_to_bitcode(real/causal_conv_with_state.cpp runtime_causal_conv_with_state.bc)
     compile_to_bitcode(real/test_hip_from_dll.cpp test_hip_from_dll.bc)
     compile_to_bitcode(real/gemm.cpp runtime_gemm.bc)
@@ -382,6 +383,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather_block_quantized.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_ms_dequantize_linear.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_ms_matmul_nbits_i2_fused.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_rmsnorm_l2_fused.bc
     )
 else()
     # Mock runtime for testing without GPU

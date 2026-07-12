@@ -69,6 +69,7 @@ set(_kernel_sources
     hip/scatter_nd_kernel.hip
     hip/gather_block_quantized_kernel.hip
     hip/ms_quant_linear_kernel.hip
+    hip/rmsnorm_l2_fused_kernel.hip
     hip/softmax_kernel.hip
     hip/nonzero_kernel.hip
     hip/strided_copy_kernel.hip

@@ -1418,6 +1418,10 @@ HIP_KERNEL_API int hip_ms_dequantize_linear(void *stream, const void *input,
     int64_t n_elements, int64_t n_channels,
     int64_t input_elem_size, int64_t scale_elem_size);
 
+// Fused ORCA RMSNorm-L2: out[r,i] = weight[i]*x[r,i]/sqrt(sum_i x[r,i]^2), fp32.
+HIP_KERNEL_API int hip_rmsnorm_l2_fused(void *stream, const void *x,
+    const void *weight, void *out, int64_t outer, int64_t norm_size);
+
 HIP_KERNEL_API int hip_ms_quantize_linear(void *stream, const void *input,
     const void *scale, const void *zero_point, void *output,
     int64_t n_elements, int64_t n_channels,
