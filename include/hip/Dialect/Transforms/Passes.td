@@ -26,6 +26,28 @@ def HipAddContextArgPass : Pass<"hip-add-context-arg", "mlir::ModuleOp"> {
   ];
 }
 
+def FoldQuantDequantPass : Pass<"fold-quant-dequant", "mlir::ModuleOp"> {
+  let summary = "Fold hip.ms_dequantize_linear(hip.ms_quantize_linear(x)) -> x";
+  let description = [{
+    Removes activation fake-quantize round-trips. ORCA's QDQ-format graph
+    quantizes activations to ui16 and immediately dequantizes them back
+    (a `DequantizeLinear(QuantizeLinear(x))` pair sharing the same scale and
+    zero_point). At ui16 (16-bit) the round-trip error is ~1e-5, far below the
+    fp16 the model already runs in, so the pair is ~identity and each is a full
+    GPU kernel launch. Decode fires ~960 such DQ + ~720 Q per token; folding
+    them to `x` removes ~1700 tiny kernels/token with negligible numeric change.
+
+    Match conditions (all required, so real requantizes / weight DQs are safe):
+      * the DQ's input is produced by a hip.ms_quantize_linear,
+      * DQ and Q use the SAME scale and zero_point SSA values and axis,
+      * the Q's original input type equals the DQ's result type.
+    The DQ is replaced by the Q's pre-quantization input; a Q left with no
+    remaining uses is erased. Weight/param DQs (input is a constant, not a Q)
+    never match and are preserved.
+  }];
+  let dependentDialects = ["mlir::hip::HipDialect"];
+}
+
 def SimplifyOnnxPass : Pass<"simplify-onnx", "mlir::ModuleOp"> {
   let summary = "Pre-lowering simplification of ONNX-dialect graphs";
   let description = [{

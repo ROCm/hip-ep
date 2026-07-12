@@ -8,6 +8,7 @@ add_library(HipDialectTransforms STATIC
   AssignOpStateSlots.cpp
   BufferUtils.cpp
   FixLoopAccumulatorOffset.cpp
+  FoldQuantDequant.cpp
   GenerateInterface.cpp
   GenerateOpStateInit.cpp
   HoistAllocSizeArith.cpp
