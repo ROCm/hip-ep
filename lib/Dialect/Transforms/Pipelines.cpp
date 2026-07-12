@@ -34,6 +34,17 @@ using namespace mlir;
 /// See docs/design/output-allocator-design.md.
 static void buildOnnxToHipPipelineTail(OpPassManager &pm,
                                        bool useOutputAllocator) {
+  // 1a. Remove activation fake-quant round-trips:
+  //     ms_dequantize_linear(ms_quantize_linear(x)) -> x  (same scale/zp/axis).
+  //     ORCA's QDQ decode graph quantizes activations to ui16 then immediately
+  //     dequantizes them per matmul input; at ui16 the round-trip is ~identity
+  //     (~1e-5, below fp16) but each op is a separate kernel launch (~1700/token
+  //     in decode). Runs right after convert-onnx-to-hip while the Q producer is
+  //     still visible in tensor form; dead tensor.empty inits are cleaned by the
+  //     canonicalize at slot 1b'. Weight/param DQs and real requantizes never
+  //     match. See FoldQuantDequant.cpp.
+  pm.addPass(hip::createFoldQuantDequantPass());
+
   // 1b. Refine `?` (kDynamic) dims on HIP DPS op result types using each
   //     op's `ReifyRankedShapedTypeOpInterface` impl. Placed here so the
   //     refinements propagate through bufferize and into pool / alloc
