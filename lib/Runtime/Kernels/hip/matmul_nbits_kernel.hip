@@ -851,8 +851,24 @@ static int tuneGemvConfig(
     constexpr int WARMUP = 1;
     constexpr int ITERS  = 5;
 
+    // HIPDNN_EP_GEMV_MAX_TILEN: optionally cap TILE_N during autotune. This
+    // hot-cache microbenchmark ranks configs with weights resident in cache, so
+    // it favors large TILE_N (fewer blocks, more reuse). But on gfx1151 the int4
+    // GEMV kernel's VGPR use scales with TILE_N: TILE_N<=4 -> 16 waves/SIMD (full
+    // occupancy, no scratch), TILE_N=8/16 -> 12/9 waves, TILE_N=32/64 -> 8 waves
+    // AND register spill (356/1364 bytes/lane). In the real COLD-weight decode
+    // (M=1) the kernel is DRAM-latency-bound, where occupancy hides latency and
+    // spill adds traffic -- so the microbenchmark's large-TILE_N pick can be a
+    // net loss. Setting this env (e.g. 4 or 8) restricts the search to the
+    // higher-occupancy, non-spilling configs. Default 0 = unchanged (baseline).
+    static const int gemv_max_tilen = []{
+        const char* e = std::getenv("HIPDNN_EP_GEMV_MAX_TILEN");
+        return e ? atoi(e) : 0;
+    }();
+
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
         auto& cfg = kGemvConfigs[cid];
+        if (gemv_max_tilen > 0 && cfg.tile_n > gemv_max_tilen) continue;
         if (cfg.tile_n >= 64 && N < 2048) continue;
         if (cfg.tile_n >= 32 && cfg.tile_n < 64 && N < 1024) continue;
 
