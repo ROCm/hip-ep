@@ -182,6 +182,10 @@ if(_HIPDNN_NEED_TOOLCHAIN)
     set(LLVM_INCLUDE_EXAMPLES OFF CACHE BOOL "" FORCE)
     set(LLVM_INCLUDE_BENCHMARKS OFF CACHE BOOL "" FORCE)
     set(LLVM_INSTALL_UTILS ON CACHE BOOL "" FORCE)  # FileCheck/not/count for LIT
+    # ATL/DIA fix (docs/ORCA/run_model.md §2): the active MSVC toolset lacks the
+    # C++ ATL component (atlbase.h), which LLVM's DIA/PDB support needs. The EP
+    # does not use DIA, so disable it to avoid the C1083 atlbase.h build failure.
+    set(LLVM_ENABLE_DIA_SDK OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(llvm-project
       GIT_REPOSITORY ${DEP_URL_llvm}
       GIT_TAG ${DEP_HASH_llvm}

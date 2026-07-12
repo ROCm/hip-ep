@@ -158,6 +158,107 @@ __global__ void matmul_nbits_kernel_f32(
   output[batch * M * N + m * N + n] = acc;
 }
 
+/* ---------------------------------------------------------------------------
+ * Section 1a-f32: Optimized bits=4 GEMV for M=1 with fp32 activations (w4a32).
+ *
+ * The tuned bits=4 GEMV (getOrTuneGemvConfig/launchGemvConfig) only supports
+ * fp16 activations, so w4a32 shapes (e.g. the ORCA lm_head: M=1, N=100352,
+ * K=5120) fell through to the naive thread-per-output f32 kernel — which for
+ * M=1 uses ONE thread per output column, walking all of K serially with no
+ * coalescing (~55 ms/token, 2% of BW).
+ *
+ * This kernel keeps the exact fp32 math (no precision change) but parallelizes
+ * properly: one threadblock per output column n; BT threads split the K-blocks,
+ * read weights 16B-coalesced (uint4 = 32 packed 4-bit == one block_size=32
+ * group), and reduce in shared memory. Memory-bound instead of latency-bound.
+ * ------------------------------------------------------------------------- */
+// One WAVEFRONT per output column: lanes split the K-blocks, weights read
+// 16B-coalesced (uint4 == 32 packed 4-bit), reduced via warp shuffle (no
+// shared memory, no __syncthreads). WARPS_PER_BLOCK columns per block keeps
+// occupancy high (few, large blocks instead of N tiny ones). The activation
+// A[K] is tiny and reused by every column, so it stays L2-resident.
+__global__ void matmul_nbits_gemv_f32_m1_kernel(
+    const float*   __restrict__ A,       // [K]  (M == 1)
+    const uint8_t* __restrict__ B,       // [N, K/2]  packed 4-bit, row-major
+    const float*   __restrict__ scales,  // [N, k_blocks]
+    const uint8_t* __restrict__ zp,      // [N, k_blocks] or null (default 8)
+    const float*   __restrict__ bias,    // [N] or null
+    float*         __restrict__ output,  // [N]
+    int64_t N, int64_t K, int64_t block_size) {
+  const int lane      = threadIdx.x & (warpSize - 1);
+  const int warp_id   = threadIdx.x / warpSize;
+  const int warps_pb  = blockDim.x  / warpSize;
+  const int64_t n = static_cast<int64_t>(blockIdx.x) * warps_pb + warp_id;
+  if (n >= N) return;
+
+  const int64_t k_blocks  = (K + block_size - 1) / block_size;
+  const int64_t blob_size = block_size / 2;
+  const uint8_t* b_row = B + n * (K / 2);
+  const float*   s_row = scales + n * k_blocks;
+  const uint8_t* z_row = zp ? (zp + n * k_blocks) : nullptr;
+
+  float acc = 0.0f;
+  for (int64_t blk = lane; blk < k_blocks; blk += warpSize) {
+    const float   scale_val = s_row[blk];
+    const float   zp_val    = z_row ? static_cast<float>(z_row[blk]) : 8.0f;
+    const int64_t k_start   = blk * block_size;
+    int64_t       k_end     = k_start + block_size;
+    if (k_end > K) k_end = K;
+    const uint8_t* b_block  = b_row + blk * blob_size;
+    const int64_t  cnt      = k_end - k_start;    // weights in this block
+
+    int64_t i = 0;
+    // Vectorized: 16 bytes (uint4) == 32 packed 4-bit weights per iteration.
+    // (b_row and each block are 16B-aligned since K/2 and blob_size are.)
+    for (; i + 32 <= cnt; i += 32) {
+      uint4 w = *reinterpret_cast<const uint4*>(b_block + (i >> 1));
+      const unsigned words[4] = {w.x, w.y, w.z, w.w};
+      const float* a_ptr = A + k_start + i;
+      #pragma unroll
+      for (int wd = 0; wd < 4; ++wd) {
+        const unsigned W = words[wd];
+        #pragma unroll
+        for (int p = 0; p < 8; ++p) {
+          const float q = static_cast<float>((W >> (4 * p)) & 0xFu);
+          acc += a_ptr[wd * 8 + p] * (q - zp_val) * scale_val;
+        }
+      }
+    }
+    // Scalar tail (block_size not a multiple of 32, or ragged final block).
+    for (; i < cnt; ++i) {
+      const uint8_t packed = b_block[i >> 1];
+      const float q = (i & 1) ? static_cast<float>(packed >> 4)
+                              : static_cast<float>(packed & 0xF);
+      acc += A[k_start + i] * (q - zp_val) * scale_val;
+    }
+  }
+
+  // Warp-shuffle reduction across the wavefront (wave32 or wave64).
+  for (int o = warpSize >> 1; o > 0; o >>= 1)
+    acc += __shfl_down(acc, o);
+
+  if (lane == 0) {
+    if (bias) acc += bias[n];
+    output[n] = acc;
+  }
+}
+
+static void launch_gemv_f32_m1(
+    hipStream_t stream,
+    const float* A, const uint8_t* B, const float* scales,
+    const uint8_t* zp, const float* bias, float* output,
+    int64_t N, int64_t K, int64_t block_size) {
+  int dev = 0; hipGetDevice(&dev);
+  int warp = 64; hipDeviceGetAttribute(&warp, hipDeviceAttributeWarpSize, dev);
+  const int BT = 256;
+  const int warps_pb = BT / warp;
+  dim3 grid(static_cast<unsigned>((N + warps_pb - 1) / warps_pb));
+  dim3 block(BT);
+
+  hipLaunchKernelGGL(matmul_nbits_gemv_f32_m1_kernel, grid, block, 0,
+                     stream, A, B, scales, zp, bias, output, N, K, block_size);
+}
+
 /* =======================================================================
  * Section 1b-i2: Naive bits=2 fallback kernel (row-major, any alignment)
  *
@@ -5073,6 +5174,36 @@ extern "C" int hip_matmul_nbits(
     if (err != hipSuccess) {
       fprintf(stderr,
               "[custom_kernels] hip_matmul_nbits GEMV launch failed: %s\n",
+              hipGetErrorString(err));
+    }
+    return static_cast<int>(err);
+  }
+
+  /* -------------------------------------------------------------------
+   * Optimized bits=4 GEMV for M=1 with fp32 activations (w4a32, e.g. lm_head).
+   * One block per output column, K-blocks split across BT threads, 16B
+   * coalesced weight loads. Replaces the naive f32 path for this shape.
+   * ------------------------------------------------------------------- */
+  if (bits == 4 && batch_count == 1 && M == 1 && element_size_bytes == 4) {
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] hip_matmul_nbits: fp32 GEMV M=1 N=%lld K=%lld "
+        "bs=%lld zp=%s bias=%s\n",
+        (long long)N, (long long)K, (long long)block_size,
+        zero_points ? "yes" : "null", bias ? "yes" : "null");
+
+    (void)hipGetLastError();
+    launch_gemv_f32_m1(
+        hip_stream,
+        static_cast<const float*>(A), static_cast<const uint8_t*>(B),
+        static_cast<const float*>(scales),
+        static_cast<const uint8_t*>(zp_for_u8_paths),
+        static_cast<const float*>(bias), static_cast<float*>(output),
+        N, K, block_size);
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+      fprintf(stderr,
+              "[custom_kernels] hip_matmul_nbits fp32 GEMV launch failed: %s\n",
               hipGetErrorString(err));
     }
     return static_cast<int>(err);
