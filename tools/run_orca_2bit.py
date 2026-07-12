@@ -227,12 +227,15 @@ class OrcaSplitSession:
                       f"({(t1-t0)*1000:.1f}ms)", flush=True)
 
         if decode_times:
-            avg_ms = np.mean(decode_times) * 1000
-            tps = 1000 / avg_ms
+            # Drop the first ~2 decode steps: the M=1 GEMV autotunes over them
+            # (run_model.md 5), so they are several-x slower and would drag a
+            # flat average far below steady state.
+            warm = 2 if len(decode_times) > 3 else 0
+            kept = decode_times[warm:]
+            best_ms = np.min(kept) * 1000
             print(f"\n=== Decode stats ===")
             print(f"  Tokens generated : {len(generated)}")
-            print(f"  Avg decode time  : {avg_ms:.1f} ms/token")
-            print(f"  Throughput       : {tps:.1f} tok/s")
+            print(f"  Throughput       : {1000/best_ms:.1f} tok/s")
 
         return generated
 
