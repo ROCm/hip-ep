@@ -138,7 +138,8 @@ inline void registerAllPasses() {
   // / compileFromModule() call this per compile, so multi-subgraph models
   // (e.g. VLM: embedding + text + vision) would register a second time and
   // abort. std::call_once makes the whole registration idempotent across
-  // repeated compiles in one process (matching dispatchPluginRegistrationsOnce).
+  // repeated compiles in one process (matching
+  // dispatchPluginRegistrationsOnce).
   static std::once_flag registered;
   std::call_once(registered, [] {
     // HIP transform passes (TableGen GEN_PASS_REGISTRATION) and the composable
