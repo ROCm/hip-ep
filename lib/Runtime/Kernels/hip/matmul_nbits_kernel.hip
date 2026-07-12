@@ -262,6 +262,14 @@ __global__ void matmul_nbits_gemv_i2_kernel(
 
     const T* a_base = A + batch * M * K + m * K;
     const bool has_zp = (zp != nullptr);
+    // bits=2 zero_points are packed 4-per-byte along the k_blocks axis
+    // (row stride = ceil(k_blocks/4) bytes). Unpack the 2-bit field for
+    // block `gblk` of output row `nrow`.
+    const int64_t zp_row_bytes = (k_blocks + 3) / 4;
+    auto read_zp2 = [&](int64_t nrow, int gblk) -> float {
+        uint8_t b = zp[nrow * zp_row_bytes + (gblk >> 2)];
+        return static_cast<float>((b >> (2 * (gblk & 3))) & 0x3);
+    };
 
     const uint8_t* b_base_arr[TILE_N];
     const T*       s_rows[TILE_N];
@@ -324,7 +332,7 @@ __global__ void matmul_nbits_gemv_i2_kernel(
                        static_cast<float>((b_pk[tn].w >> (i * 2)) & 0x3), dot);
 
             if (has_zp) {
-                float zv = static_cast<float>(zp[n_idx[tn] * k_blocks + grp]);
+                float zv = read_zp2(n_idx[tn], grp);
                 partial[tn] += (dot - a_sum * zv) * sv[tn];
             } else {
                 partial[tn] += (dot - a_sum_x_def_zp) * sv[tn];
@@ -345,9 +353,7 @@ __global__ void matmul_nbits_gemv_i2_kernel(
                 int     crumb    = k & 3;
                 float   qval     = static_cast<float>(
                                        (b_base_arr[tn][byte_off] >> (crumb * 2)) & 0x3);
-                float   zv       = has_zp
-                                       ? static_cast<float>(zp[sn * k_blocks + grp])
-                                       : 2.0f;
+                float   zv       = has_zp ? read_zp2(sn, grp) : 2.0f;
                 float   sv_val   = static_cast<float>(s_rows[tn][grp]);
                 partial[tn]     += av * (qval - zv) * sv_val;
             }
@@ -4653,8 +4659,8 @@ extern "C" int hip_matmul_nbits(
           "K=%lld bs=%lld elem=%lld\n", (long long)M, (long long)N,
           (long long)K, (long long)block_size, (long long)element_size_bytes);
 
-      // Note: ZP for GEMV is left as nullptr (default ZP=2) because the packed
-      // 2-bit ZP format requires a different read pattern not yet supported in GEMV.
+      // ZP is the model's packed 2-bit zero_points (4-per-byte); the GEMV
+      // kernel unpacks it per block (read_zp2). nullptr => symmetric default 2.
       if (element_size_bytes == 4) {
         // fp32 activations + fp32 scales → fp32 output (ORCA W2A8).
         // For M=1 decode: use the LDS-cooperative kernel that loads A into
@@ -4664,7 +4670,7 @@ extern "C" int hip_matmul_nbits(
                      static_cast<const float*>(A),
                      static_cast<const uint8_t*>(B),
                      static_cast<const float*>(scales),
-                     nullptr,  // use default ZP=2 (packed ZP TBD)
+                     zp_for_i2_u8,
                      static_cast<const float*>(bias),
                      static_cast<float*>(output),
                      M, N, K, batch_count, block_size);
@@ -4674,35 +4680,33 @@ extern "C" int hip_matmul_nbits(
                      static_cast<const __half*>(A),
                      static_cast<const uint8_t*>(B),
                      static_cast<const __half*>(scales),
-                     nullptr,  // use default ZP=2
+                     zp_for_i2_u8,
                      static_cast<const __half*>(bias),
                      static_cast<__half*>(output),
                      M, N, K, batch_count, block_size);
       }
     } else {
-      // Naive fallback
+      // Larger-M fallback (e.g. prefill). Route through the correct 2-bit GEMV
+      // kernel (handles any M and the packed-2-bit ZP via read_zp2). The old
+      // naive fp32 launcher used the 4-bit kernel (matmul_nbits_kernel_f32),
+      // which is wrong for bits=2; and both branches dropped ZP (nullptr).
       CUSTOM_KERNELS_DEBUG_LOG(
-          "[custom_kernels] hip_matmul_nbits: bits=2 naive M=%lld N=%lld "
-          "K=%lld bs=%lld\n", (long long)M, (long long)N, (long long)K,
+          "[custom_kernels] hip_matmul_nbits: bits=2 fallback->gemv M=%lld "
+          "N=%lld K=%lld bs=%lld\n", (long long)M, (long long)N, (long long)K,
           (long long)block_size);
-
-      dim3 blk(kBlockDim, kBlockDim);
-      dim3 grd(static_cast<unsigned>((N + kBlockDim - 1) / kBlockDim),
-               static_cast<unsigned>((M + kBlockDim - 1) / kBlockDim),
-               static_cast<unsigned>(batch_count));
       (void)hipGetLastError();
       if (element_size_bytes == 4) {
-        hipLaunchKernelGGL(matmul_nbits_kernel_f32, grd, blk, 0, hip_stream,
+        launch_gemv_i2<float>(hip_stream,
             static_cast<const float*>(A), static_cast<const uint8_t*>(B),
-            static_cast<const float*>(scales), nullptr,
+            static_cast<const float*>(scales), zp_for_i2_u8,
             static_cast<const float*>(bias), static_cast<float*>(output),
-            M, N, K, block_size);
+            M, N, K, batch_count, block_size);
       } else {
-        hipLaunchKernelGGL(matmul_nbits_kernel_i2, grd, blk, 0, hip_stream,
+        launch_gemv_i2<__half>(hip_stream,
             static_cast<const __half*>(A), static_cast<const uint8_t*>(B),
-            static_cast<const __half*>(scales), nullptr,
+            static_cast<const __half*>(scales), zp_for_i2_u8,
             static_cast<const __half*>(bias), static_cast<__half*>(output),
-            M, N, K, block_size);
+            M, N, K, batch_count, block_size);
       }
     }
 
