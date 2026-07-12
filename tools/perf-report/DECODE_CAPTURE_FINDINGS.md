@@ -232,6 +232,54 @@ Active did the illegal call during its execution).
 3. Then the S4 capture/replay machinery: warmup -> capture -> instantiate ->
    replay on matching shapes, eager fallback, stable buffer addresses.
 
+## 8d. BREAKTHROUGH: Route A via a static-dim decode model (avoids the EP rework)
+
+Measured readback-site counts at compile (`HIPDNN_EP_LOG_READBACK`):
+- `text.onnx` (symbolic dims): **4** readback sites.
+- `text_seq1.onnx` (static dims: seq=1, past=128, batch=1, total=129): **0**.
+
+=> A decode ONNX with **static dims** folds EVERY shape-derived readback to a
+compile-time constant. Zero `readback_scalar` => the per-step host syncs (the
+whole Step B grind) **do not exist** and the decode is capture-clean AT THE EP
+LEVEL with **no EP-compiler change**. Static shapes also fix pool size (no
+per-step grow) and matmul shapes (no re-autotune), so the allocation/autotune
+capture blockers dissolve too.
+
+KEY distinction (explains the failed static-mask experiment in section 3): the
+EP folds on the ONNX graph's **static dims**, NOT runtime input shapes. Feeding
+a fixed-size mask to the *symbolic* `text.onnx` keeps the 3 readbacks (EP
+compiled symbolic once). A **static-dim graph** is required. `text_seq1.onnx`
+(a shape-specialized export of `text.onnx`, same weights) proves the builder /
+`onnxruntime.tools.make_dynamic_shape_fixed` can emit one; it is currently
+UNUSED by any genai_config.
+
+### Route A plan (revised, ~2-3 weeks, low risk)
+1. Produce a static-dim decode model: fix `text.onnx` dims (batch=1, seq=1,
+   past=MAX_CTX, total=MAX_CTX+1) via `make_dynamic_shape_fixed`. (~hours-1d.
+   `text_seq1.onnx` = the same with MAX_CTX=128, already 0 readbacks.)
+2. Confirm the EP compiles it capture-clean end-to-end (0 readbacks verified;
+   run a REAL capture probe on it -- needs OGA to drive it with valid MoE inputs,
+   since hip-onnx-runner random inputs div0 the MoE). (~1-2d)
+3. OGA wiring: use the static decode model for the decoder session + fixed-KV
+   (DefaultKeyValueCache #2166 auto-detect) + static mask + decoder-only capture
+   (mirror #2070). Build OGA locally (already proven buildable). (~1wk)
+4. HIP capture/replay machinery (warmup, capture, instantiate, replay, eager
+   fallback, stable buffers). (~3-5d)
+5. Validation: byte-identical greedy over long seqs, beam-search excluded,
+   RewindTo/multi-turn; perf A/B. (~3-5d)
+
+This REPLACES the section 8c "static max-buffer decode (1-2 weeks EP compiler
+rework)" crux with a model-build + OGA-wiring path -- the hard EP-compiler work
+is avoided because the builder already emits static-dim decode graphs.
+
+### Honest caveats
+- Capture COMPLETING is verified only as "0 readbacks"; a full capture+replay on
+  a real static-decode run is not yet done (runner MoE-crash blocks it).
+- Perf payoff remains unproven on this iGPU/MoE (standalone sync removal was
+  within noise; capture targets dispatch count, the real bottleneck -- but the
+  +20-45% is an analogy, not a measurement here).
+- MAX_CTX static buffer trades memory for capture (KV/mask sized to max).
+
 ## 9. Bottom line
 
 - The static-KV precondition is already met; the model is capture-capable; DML proves it.
