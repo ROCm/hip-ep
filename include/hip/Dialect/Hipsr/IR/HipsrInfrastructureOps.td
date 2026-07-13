@@ -30,7 +30,7 @@ def Hipsr_ShapeYieldOp : Hipsr_Op<"shape_yield", [Pure, Terminator]> {
 
     Example:
     ```mlir
-    hipsr.shape_yield %d0, %d1 : index, index
+    hipsr.shape_yield %d0, %d1
     ```
   }];
 
