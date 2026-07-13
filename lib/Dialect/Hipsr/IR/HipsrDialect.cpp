@@ -7,14 +7,30 @@
 
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
+#include "llvm/ADT/TypeSwitch.h"
+
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/DialectImplementation.h"
+
 using namespace mlir;
 using namespace mlir::hipsr;
 
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.cpp.inc"
 
+// Enum code first: the attribute's parser/printer below calls these
+// enum name<->value helpers.
+#include "hip/Dialect/Hipsr/IR/HipsrEnums.cpp.inc"
+
+#define GET_ATTRDEF_CLASSES
+#include "hip/Dialect/Hipsr/IR/HipsrAttributes.cpp.inc"
+
 void HipsrDialect::initialize() {
   addOperations<
 #define GET_OP_LIST
 #include "hip/Dialect/Hipsr/IR/HipsrOps.cpp.inc"
+      >();
+  addAttributes<
+#define GET_ATTRDEF_LIST
+#include "hip/Dialect/Hipsr/IR/HipsrAttributes.cpp.inc"
       >();
 }
