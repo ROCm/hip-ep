@@ -16,6 +16,9 @@ def Hipsr_Dialect : Dialect {
     declaratively and models dynamic shapes as first-class shape regions.
   }];
   let cppNamespace = "::mlir::hipsr";
+
+  // Lets the dialect parse/print `#hipsr.mem<...>`.
+  let useDefaultAttributePrinterParser = 1;
 }
 
 #endif // HIPSR_DIALECT
