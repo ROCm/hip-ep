@@ -268,6 +268,9 @@ def main():
     ap.add_argument("--max_tokens", type=int, default=20)
     ap.add_argument("--prefill_len",type=int, default=128,
                     help="Prefill chunk size (must match model: 128 or 1)")
+    ap.add_argument("--max_seq_len", type=int, default=1024,
+                    help="KV cache / attention total_seq_len. Must be >= "
+                         "prompt+max_tokens. Smaller = less attention work.")
     args = ap.parse_args()
 
     model_dir = Path(args.model_dir)
@@ -305,7 +308,7 @@ def main():
         print("\nEP: CPU (no EP DLL specified)")
 
     print(f"\nLoading ORCA 2-bit split-session model from {model_dir}")
-    sess = OrcaSplitSession(model_dir, ep_dll, max_seq_len=1024)
+    sess = OrcaSplitSession(model_dir, ep_dll, max_seq_len=args.max_seq_len)
 
     print(f"\n=== Running inference ===")
     print(f"  prompt_len={len(token_ids)}, max_new_tokens={args.max_tokens}, "
