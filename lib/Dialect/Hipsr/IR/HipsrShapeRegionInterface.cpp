@@ -5,7 +5,7 @@
 
 #include "hip/Dialect/Hipsr/IR/HipsrShapeRegionInterface.h"
 
-#include "hip/Dialect/Hipsr/IR/HipsrInfrastructureOps.h"
+#include "hip/Dialect/Hipsr/IR/HipsrShapeYieldOp.h"
 
 #include "llvm/ADT/DenseSet.h"
 
@@ -48,6 +48,9 @@ LogicalResult mlir::hipsr::verifyShapeRegionScoping(Operation *op) {
 
   auto walkResult = shapeRegion.walk([&](Operation *innerOp) -> WalkResult {
     for (Value operand : innerOp->getOperands()) {
+      // Block arguments (EndBarrier ops receive their results): fine.
+      if (isa<BlockArgument>(operand))
+        continue;
       // Values (op results or block arguments) defined inside the shape
       // region, directly or in a nested region (e.g. an scf.for used to
       // compute a dim), are always fine. This also covers the shape region's
