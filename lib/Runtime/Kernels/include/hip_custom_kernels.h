@@ -1526,22 +1526,6 @@ HIP_KERNEL_API int hip_gather_block_quantized(
     int out_dtype);              // hip_dtype_t (FLOAT16 / FLOAT32 / BFLOAT16)
 
 /* =========================================================================
- * QuantizeLinear / DequantizeLinear Kernels
- * ========================================================================= */
-
-HIP_KERNEL_API int hip_dequantize_linear(
-    void *stream, const void *x, const void *scale, const void *zero_point,
-    void *output, const int64_t *x_shape, int x_rank,
-    const int64_t *scale_shape, int scale_rank, int axis, int block_size,
-    int x_dtype, int scale_dtype, int out_dtype);
-
-HIP_KERNEL_API int hip_quantize_linear(
-    void *stream, const void *x, const void *scale, const void *zero_point,
-    void *output, const int64_t *x_shape, int x_rank,
-    const int64_t *scale_shape, int scale_rank, int axis, int block_size,
-    int x_dtype, int scale_dtype, int out_dtype);
-
-/* =========================================================================
  * QMoE Sub-Kernels
  * =========================================================================
  *

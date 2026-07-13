@@ -495,8 +495,6 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateMatMulNBitsConversionPatterns(patterns, ctx);
   populateQMoEConversionPatterns(patterns, ctx);
   populateGatherBlockQuantizedConversionPatterns(patterns, ctx);
-  populateDequantizeLinearConversionPatterns(patterns, ctx);
-  populateQuantizeLinearConversionPatterns(patterns, ctx);
   populateReshapeConversionPatterns(patterns, ctx);
   populateCausalConvWithStateConversionPatterns(patterns, ctx);
   populateGemmConversionPatterns(patterns, ctx);
