@@ -39,6 +39,24 @@ inline bool hipdnn_ep_debug_enabled() {
   return enabled;
 }
 
+// Opt-in W4A8 integer-dot-product (dp4a) path for matmul_nbits single-row
+// (M==1) decode GEMV. When set, eligible bits==4, K%32==0 fp16 decode GEMVs
+// dynamically quantize the activation to per-group int8 and use a
+// v_dot4_i32_iu8 dot product instead of the dequant-ALU-bound fp GEMV. Gated
+// (not default-on) until validated end-to-end on the target model; latched on
+// first read like the other flags here.
+inline bool hipdnn_ep_matmul_dp4a_enabled() {
+  static const bool enabled = [] {
+#ifdef _WIN32
+    return detail::check_env("HIPDNN_EP_MATMUL_DP4A");
+#else
+    const char *v = std::getenv("HIPDNN_EP_MATMUL_DP4A");
+    return v && v[0] >= '1';
+#endif
+  }();
+  return enabled;
+}
+
 // Sync-isolated profiling mode (HIPDNN_EP_PERF_ISOLATE=1). Inserts a
 // hipStreamSynchronize at every OP_PROFILE scope boundary so each op's
 // reported GPU time is its true standalone runtime, with no carry-over from
