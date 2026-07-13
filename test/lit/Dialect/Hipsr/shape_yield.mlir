@@ -14,8 +14,8 @@ func.func @shape_yield_dims() {
   "test.shape_region_holder"() ({
     %0 = arith.constant 2 : index
     %1 = arith.constant 512 : index
-    // CHECK: hipsr.shape_yield %{{.+}}, %{{.+}} : index, index
-    hipsr.shape_yield %0, %1 : index, index
+    // CHECK: hipsr.shape_yield %{{.+}}, %{{.+}}
+    hipsr.shape_yield %0, %1
   }) : () -> ()
   return
 }
