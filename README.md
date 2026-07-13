@@ -49,6 +49,8 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | Sub | Custom HIP Kernel |
 | Cast | Custom HIP Kernel |
 | CastLike | Decomposed → Cast |
+| DequantizeLinear | Custom HIP Kernel |
+| QuantizeLinear | Custom HIP Kernel |
 | Ceil | Custom HIP Kernel |
 | Neg | Custom HIP Kernel |
 | Equal | Custom HIP Kernel |

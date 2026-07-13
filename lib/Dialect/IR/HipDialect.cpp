@@ -1257,6 +1257,34 @@ void GatherBlockQuantizedOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// DequantizeLinearOp: ins(x, x_scale, [x_zero_point]) outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange DequantizeLinearOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void DequantizeLinearOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// QuantizeLinearOp: ins(x, y_scale, [y_zero_point]) outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange QuantizeLinearOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void QuantizeLinearOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // CausalConvWithStateOp: ins(input, weight, [bias], [past_state])
 //                        outs(output, present_state)
 //===----------------------------------------------------------------------===//
