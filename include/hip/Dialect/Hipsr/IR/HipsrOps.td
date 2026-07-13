@@ -8,6 +8,7 @@
 
 include "mlir/IR/OpBase.td"
 include "hip/Dialect/Hipsr/IR/HipsrDialect.td"
+include "hip/Dialect/Hipsr/IR/HipsrTypes.td"
 
 //===----------------------------------------------------------------------===//
 // Base op class
