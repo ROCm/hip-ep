@@ -631,7 +631,8 @@ int wrap_group_query_attention(
     int32_t no_causal,
     // Shape values (6)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
-    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes) {
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_group_query_attention\n");
     return -1;
@@ -639,7 +640,6 @@ int wrap_group_query_attention(
   (void)op_state_slot;
 
   (void)position_ids;
-  (void)attention_bias;
   (void)head_sink;
   (void)k_scale;
   (void)v_scale;
@@ -654,6 +654,8 @@ int wrap_group_query_attention(
   (void)past_buf_seq;
   (void)present_key;
   (void)present_value;
+  (void)attn_bias_batch;
+  (void)attn_bias_num_heads;
 
   MOCK_PRINT("[MOCK] wrap_group_query_attention(\n");
   MOCK_PRINT("[MOCK]   num_heads=%lld, kv_num_heads=%lld,\n",
@@ -662,6 +664,10 @@ int wrap_group_query_attention(
              (double)softcap);
   MOCK_PRINT("[MOCK]   do_rotary=%lld, rotary_interleaved=%lld,\n",
              (long long)do_rotary, (long long)rotary_interleaved);
+  MOCK_PRINT("[MOCK]   attention_bias=%p, attn_bias_batch=%lld, "
+             "attn_bias_num_heads=%lld,\n",
+             attention_bias, (long long)attn_bias_batch,
+             (long long)attn_bias_num_heads);
   MOCK_PRINT("[MOCK]   batch=%lld, seq_q=%lld, seq_kv=%lld, "
              "past_buf_seq=%lld, head_dim=%lld, elem_size=%lld)\n",
              (long long)batch_size, (long long)seq_len_q, (long long)seq_len_kv,

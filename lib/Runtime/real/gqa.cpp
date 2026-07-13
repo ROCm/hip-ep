@@ -482,10 +482,11 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
                            void *present_value, int B, int past_len, int sq,
                            int G, int d, int past_buf_seq, int present_seq,
                            const void *seqlens_k_ptr, int elem_sz,
-                           bool no_causal = false, int skv = -1) {
-  // no_causal (Whisper encoder / cross-attn): bidirectional, no past KV.
-  // The KV to attend over is the FULL `new_key`/`new_value` (Skv tokens), not
-  // `sq` newly-appended tokens. Two sub-cases distinguished by sq vs Skv:
+                           bool bidirectional_no_past = false, int skv = -1) {
+  // bidirectional_no_past (Whisper encoder / cross-attn): bidirectional, no
+  // past KV. The KV to attend over is the FULL `new_key`/`new_value` (Skv
+  // tokens), not `sq` newly-appended tokens. Two sub-cases distinguished by
+  // sq vs Skv:
   //   * Cross-attn (sq != Skv): `key`/`value` arrive as rank-4 BNSH
   //     [B, G, Skv, d] -- already in the present_key layout. A straight
   //     device-to-device copy of all Skv tokens populates present_*.
@@ -493,7 +494,7 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
   //     fall through to the append kernel below with past_len forced to 0 and
   //     seqlens_k=nullptr so it transposes all Skv tokens to offset 0 WITHOUT
   //     the +1 PAST-token convention.
-  if (no_causal && skv >= 0 && skv != sq) {
+  if (bidirectional_no_past && skv >= 0 && skv != sq) {
     // elem_sz is 2 (fp16) or 4 (fp32); the decomposed pipeline supports both.
     size_t bytes = static_cast<size_t>(B) * G * static_cast<size_t>(skv) * d *
                    static_cast<size_t>(elem_sz);
@@ -505,7 +506,7 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
       return -1;
     return 0;
   }
-  if (no_causal) {
+  if (bidirectional_no_past) {
     // Encoder self-attn: append all Skv (== sq) tokens at offset 0, bypassing
     // the seqlens_k +1 convention (pass nullptr so the kernel uses past_len=0).
     if (hip_gqa_kv_cache_append(stream, new_key, present_key, B, sq, G, d,
@@ -558,12 +559,20 @@ static int gqa_forward_hipblaslt(
     void *head_sink,         // [H] smooth softmax factor or null
     bool use_smooth_softmax, // true when smooth softmax is enabled (ORT:
                              // head_sink || smooth_softmax attr)
+    const void *attention_bias, // optional additive mask [B,H,S,T] or broadcast
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads,
     void *output,            // BSHD [B, sq, H, d]
     void *present_key,       // BNSD [B, G, present_buf_seq, d]
     void *present_value, int64_t B, int64_t sq, int64_t skv,
     int64_t past_buf_seq, int64_t H, int64_t G, int64_t d, float scale,
     int64_t do_rotary, int64_t local_window_size, bool no_causal,
     int64_t element_size_bytes, int op_state_slot) {
+
+  // Whisper bidirectional no-past path only when no_causal AND no external
+  // attention_bias. ONNX Attention with is_causal=0 still carries past KV and
+  // uses the standard decode seqlens_k convention.
+  const bool bidirectional_no_past =
+      no_causal && (attention_bias == nullptr);
 
   int64_t HPG = H / G;
   // present_seq is the buffer dimension of present_key (may be max_length
@@ -611,10 +620,10 @@ static int gqa_forward_hipblaslt(
   int32_t seqlens_k_pre =
       read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state);
   int64_t total_seq_pre = -1;
-  if (no_causal) {
-    // no_causal (Whisper encoder / cross-attn): seqlens_k = skv means "all skv
-    // keys valid", there is no past. total_seq is exactly skv -- do NOT apply
-    // the +1 decode convention (would over-count and trip the smart-dispatch
+  if (bidirectional_no_past) {
+    // bidirectional_no_past (Whisper encoder / cross-attn): seqlens_k = skv means
+    // "all skv keys valid", there is no past. total_seq is exactly skv -- do NOT
+    // apply the +1 decode convention (would over-count and trip the smart-dispatch
     // size check / fused validation). See the matching exemption at the
     // decomposed-path total_seq derivation below.
     total_seq_pre = skv;
@@ -694,9 +703,10 @@ static int gqa_forward_hipblaslt(
   // (cross-attn ships it as rank-4 BNSH with Skv != sq). Routing no_causal to
   // the decomposed path keeps a single correct code path for these models.
   bool fused_predicate =
-      (!gqa_fused_decode_disabled() && !no_causal && fused_fp16 && fused_d &&
-       sq == 1 && kv_inputs_ok && present_key && present_value &&
-       sliding_ok_for_fused && sink_ok_for_fused && size_ok_for_fused);
+      (!gqa_fused_decode_disabled() && !no_causal && !attention_bias &&
+       fused_fp16 && fused_d && sq == 1 && kv_inputs_ok && present_key &&
+       present_value && sliding_ok_for_fused && sink_ok_for_fused &&
+       size_ok_for_fused);
 
   if (fused_predicate) {
     const void *qSrc = query;
@@ -935,7 +945,7 @@ static int gqa_forward_hipblaslt(
   // sq != skv (cross-attn has sq=1, skv=1500 => bogus past_len=1499). For
   // no_causal there is no past, so total_seq = skv (== present_seq) and
   // past_len = 0; skip the seqlens_k readback entirely.
-  if (no_causal) {
+  if (bidirectional_no_past) {
     total_seq = skv;
     past_len = 0;
   } else if (seqlens_k_ptr) {
@@ -1259,16 +1269,18 @@ static int gqa_forward_hipblaslt(
     // decode step. The expand path has already consumed total_seq host-side
     // above, so it passes nullptr to preserve the pre-refactor behaviour.
     if (present_key && present_value) {
-      // For no_causal, never hand seqlens_k to the append kernel (it would
-      // apply the +1 PAST-token convention); update_kv_cache routes no_causal
-      // through its bidirectional copy/append branch using skv directly.
+      // bidirectional_no_past (Whisper encoder / cross-attn): never hand
+      // seqlens_k to the append kernel (it would apply the +1 convention).
+      // ONNX Attention with is_causal=0 + external mask keeps the standard
+      // decode KV path (bidirectional_no_past=false).
       HIP_CHECK(update_kv_cache(
           stream, past_key, past_value, kSrc, vSrc, present_key, present_value,
           static_cast<int>(B), static_cast<int>(past_len), static_cast<int>(sq),
           static_cast<int>(G), static_cast<int>(d),
           static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
-          (use_no_expand && !no_causal) ? seqlens_k_ptr : nullptr,
-          static_cast<int>(elem_sz), no_causal, static_cast<int>(skv)));
+          (use_no_expand && !bidirectional_no_past) ? seqlens_k_ptr : nullptr,
+          static_cast<int>(elem_sz), bidirectional_no_past,
+          static_cast<int>(skv)));
     }
 
     // ---- Steps 6-7: KV Expand [B*G, present_seq, d] -> [B*H, total_seq, d]
@@ -1307,13 +1319,24 @@ static int gqa_forward_hipblaslt(
         scoreB, scoreState->layB, &beta, d_S_f32, scoreState->layC, d_S_f32,
         scoreState->layD, &sAlgo, gemm_ws_ptr, gemm_ws_bytes, stream));
 
+    // ---- Step 8b: Add external attention bias (onnx.Attention attn_mask) ----
+    int scoreF32BatchStride = static_cast<int>(sq * total_seq);
+    if (attention_bias) {
+      HIP_CHECK(hip_gqa_add_attention_bias_f32(
+          stream, d_S_f32, const_cast<void *>(attention_bias),
+          static_cast<int>(B * H), static_cast<int>(H),
+          static_cast<int>(attn_bias_batch),
+          static_cast<int>(attn_bias_num_heads), static_cast<int>(sq),
+          static_cast<int>(total_seq), scoreF32BatchStride,
+          static_cast<int>(elem_sz)));
+    }
+
     // ---- Step 9: Causal Mask (fp32) + Softmax (fp32 -> fp16) ----
     // Both kernels treat S as [B*H, sq, total_seq] with head_stride
     // sq*total_seq, which is the layout produced by both GEMM flavours
     // (the no-expand strided-batched output lands in BNSD order too).
-    int scoreF32BatchStride = static_cast<int>(sq * total_seq);
     int scoreFp16BatchStride = static_cast<int>(sq * total_seq);
-    if ((sq > 1 || local_window_size > 0) && !no_causal) {
+    if ((sq > 1 || local_window_size > 0) && !no_causal && !attention_bias) {
       HIP_CHECK(hip_gqa_causal_mask_f32(
           stream, d_S_f32, static_cast<int>(B * H), static_cast<int>(total_seq),
           static_cast<int>(sq), scoreF32BatchStride, static_cast<int>(past_len),
@@ -1403,7 +1426,8 @@ int wrap_group_query_attention(
     // Shape values (6): past_buf_seq is the buffer dimension of past_key
     // (may differ from actual past token count for pre-allocated caches)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
-    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes) {
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads) {
   OP_PROFILE(
       "gqa",
       [&] {
@@ -1462,11 +1486,6 @@ int wrap_group_query_attention(
   if (position_ids != nullptr) {
     fprintf(stderr,
             "wrap_group_query_attention: position_ids not yet implemented\n");
-    return -1;
-  }
-  if (attention_bias != nullptr) {
-    fprintf(stderr,
-            "wrap_group_query_attention: attention_bias not yet implemented\n");
     return -1;
   }
   if (k_scale != nullptr || v_scale != nullptr) {
@@ -1536,7 +1555,8 @@ int wrap_group_query_attention(
 
   int rc = gqa_forward_hipblaslt(
       state, stream, ltHandle, query, key, value, past_key, past_value,
-      seqlens_k, cos_cache, sin_cache, head_sink, has_smooth_softmax, output,
+      seqlens_k, cos_cache, sin_cache, head_sink, has_smooth_softmax,
+      attention_bias, attn_bias_batch, attn_bias_num_heads, output,
       present_key, present_value, batch_size, seq_len_q, seq_len_kv,
       past_buf_seq, num_heads, kv_num_heads, head_dim, scale, do_rotary,
       local_window_size, no_causal != 0, element_size_bytes, op_state_slot);

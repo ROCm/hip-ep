@@ -612,6 +612,16 @@ HIP_KERNEL_API int hip_gqa_causal_mask_f32(
     int total_heads, int skv, int sq,
     int batch_stride, int past_len, int local_window_size);
 
+/* Add an attention bias onto the fp32 score matrix before softmax.
+ * scores layout: [total_heads, sq, total_seq] row-major with batch_stride
+ * = sq * total_seq per head.
+ * bias layout: [bias_batch, bias_heads, sq, total_seq], row-major.
+ * bias_batch / bias_heads may be 1 for ONNX-style broadcast. */
+HIP_KERNEL_API int hip_gqa_add_attention_bias_f32(
+    void* stream, void* scores, const void* bias,
+    int total_heads, int num_heads, int bias_batch, int bias_heads,
+    int sq, int total_seq, int score_batch_stride, int bias_element_size_bytes);
+
 /* Column-wise softmax in-place. One threadblock per (head, query).
  * Smooth softmax is activated when head_sink is non-null OR use_smooth_softmax
  * is set.  When head_sink is non-null, uses per-head sink factors:

@@ -27,6 +27,7 @@ add_library(OnnxToHip STATIC
   GqaConversion.cpp
   MultiHeadAttentionConversion.cpp
   AttentionConversion.cpp
+  OnnxAttentionConversion.cpp
   HipGqaBuilder.cpp
   GatherConversion.cpp
   GatherElementsConversion.cpp
