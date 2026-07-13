@@ -36,7 +36,9 @@ def Hipsr_ShapeYieldOp : Hipsr_Op<"shape_yield", [Pure, Terminator]> {
 
   let arguments = (ins Variadic<Index>:$dims);
 
-  let assemblyFormat = "attr-dict ($dims^ `:` type($dims))?";
+  // Operands are always `index` (Variadic<Index>), so the types are redundant
+  // and omitted from the assembly (cf. scf.yield / func.return practice).
+  let assemblyFormat = "attr-dict ($dims^)?";
 }
 
 #endif // HIPSR_INFRASTRUCTURE_OPS
