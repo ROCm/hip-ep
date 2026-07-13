@@ -312,6 +312,10 @@ void populateQMoEConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateGatherBlockQuantizedConversionPatterns(RewritePatternSet &patterns,
                                                     MLIRContext *ctx);
+void populateDequantizeLinearConversionPatterns(RewritePatternSet &patterns,
+                                                MLIRContext *ctx);
+void populateQuantizeLinearConversionPatterns(RewritePatternSet &patterns,
+                                              MLIRContext *ctx);
 void populateConvConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateConvTransposeConversionPatterns(RewritePatternSet &patterns,
