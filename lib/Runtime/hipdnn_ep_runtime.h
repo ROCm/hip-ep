@@ -1203,27 +1203,6 @@ int wrap_gather_block_quantized(
     int64_t indices_dtype, // INT32 / INT64
     int64_t scales_dtype); // FLOAT / HALF / BFLOAT16
 
-// DequantizeLinear: y = (x - x_zero_point) * x_scale
-// x_zero_point is nullable (defaults to 0).
-int wrap_dequantize_linear(
-    RuntimeState *state, const void *x, const void *x_scale,
-    const void *x_zero_point, void *output, const int64_t *x_shape,
-    int64_t x_rank, const int64_t *scale_shape, int64_t scale_rank,
-    const int64_t *output_shape, int64_t output_rank, int64_t axis,
-    int64_t block_size, int64_t output_dtype_attr, int64_t x_dtype,
-    int64_t scale_dtype, int64_t output_dtype);
-
-// QuantizeLinear: y = saturate(round_even(x / y_scale + y_zero_point))
-// y_zero_point is nullable (defaults to 0).
-int wrap_quantize_linear(
-    RuntimeState *state, const void *x, const void *y_scale,
-    const void *y_zero_point, void *output, const int64_t *x_shape,
-    int64_t x_rank, const int64_t *scale_shape, int64_t scale_rank,
-    const int64_t *output_shape, int64_t output_rank, int64_t axis,
-    int64_t block_size, int64_t output_dtype_attr, int64_t precision_attr,
-    int64_t saturate_attr, int64_t x_dtype, int64_t scale_dtype,
-    int64_t output_dtype);
-
 // QMoE operation wrapper (quantized Mixture-of-Experts)
 // Routes tokens to top-k experts, performs quantized MLP per expert,
 // applies activation (e.g. SwiGLU), and combines results.
