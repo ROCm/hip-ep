@@ -36,6 +36,7 @@
 #ifndef HIPDNN_EP_RUNTIME_MM_MEMORY_MANAGER_H
 #define HIPDNN_EP_RUNTIME_MM_MEMORY_MANAGER_H
 
+#include "block_pool.h"
 #include "hal.h"
 
 #include <cstddef>
@@ -174,6 +175,20 @@ public:
   int kv_buffer_count() const { return kv_buffer_count_; }
 
   //-------------------------------------------------------------------
+  // Paged KV cache block pool (Phase 4b)
+  //-------------------------------------------------------------------
+
+  // Initialise the block pool with a pre-determined number of physical blocks.
+  // Allocates the KV slab via the HAL. Returns false on failure.
+  // num_blocks is typically derived from: available_memory / block_bytes.
+  bool init_block_pool(size_t num_blocks, int block_size, int kv_num_heads,
+                       int head_dim, int elem_size);
+
+  // Access the block pool. Returns nullptr if init_block_pool was not called.
+  BlockPool *get_block_pool() { return block_pool_; }
+  const BlockPool *get_block_pool() const { return block_pool_; }
+
+  //-------------------------------------------------------------------
   // Stats (for testing and diagnostics)
   //-------------------------------------------------------------------
 
@@ -236,6 +251,11 @@ private:
   KvEntry kv_entries_[kMaxKvBuffers] = {};
   int kv_buffer_count_ = 0;
   size_t kv_bytes_total_ = 0;
+
+  //-------------------------------------------------------------------
+  // Paged KV cache block pool (Phase 4b)
+  //-------------------------------------------------------------------
+  BlockPool *block_pool_ = nullptr; // owned; created by init_block_pool
 
   //-------------------------------------------------------------------
   // Hardware abstraction backend

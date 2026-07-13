@@ -1866,6 +1866,121 @@ HIP_KERNEL_API int hip_causal_conv_prefill(
 HIP_KERNEL_API int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
                        void* C, int M, int K, int N);
 
+/* =========================================================================
+ * Paged Attention kernels (com.microsoft.PagedAttention, Phase 4b)
+ *
+ * KV cache layout (NHD, ORT-compatible):
+ *   key_cache / value_cache: [num_blocks, block_size, kv_num_heads, head_dim]
+ *
+ * Physical address for token (block_num, token_in_block, head_kv, d_i):
+ *   base + block_num * block_size * G * D
+ *        + token_in_block * G * D
+ *        + head_kv * D
+ *        + d_i
+ * =========================================================================
+ */
+
+/* hip_paged_kv_write — scatter new KV tokens into the paged cache.
+ *
+ * Reads new_key[num_tokens * G * D] and new_value (same shape) in BSHD order
+ * (token_idx, kv_head, d_elem) and scatters each token to its physical slot:
+ *   slot = slot_mapping[token_idx]          // = block_num * block_size + offset
+ *   block_num = slot / block_size
+ *   block_off = slot % block_size
+ *   dst[block_num, block_off, head, di] = src[token_idx, head, di]
+ *
+ * RoPE is applied to K before writing when cos_cache / sin_cache are non-null.
+ * past_lens[batch] is used to derive position = past_lens[b] + token_pos when
+ * cos_cache != NULL; set past_lens to NULL for non-RoPE paths.
+ *
+ * Parameters:
+ *   stream         — HIP stream
+ *   new_key        — [num_tokens, G, D]  fp16 BSHD-flattened new K tokens
+ *   new_value      — [num_tokens, G, D]  fp16 BSHD-flattened new V tokens
+ *   key_cache      — [num_blocks, block_size, G, D]  paged K slab (in-place)
+ *   value_cache    — same shape, V slab
+ *   slot_mapping   — [num_tokens]  int32 physical slot per token
+ *   num_tokens     — total new tokens across the batch
+ *   kv_num_heads   — G
+ *   head_dim       — D
+ *   block_size     — tokens per physical block (must be 16)
+ *   element_size_bytes — 2 (fp16) or 4 (fp32)
+ *   cos_cache      — [max_pos, D/2] optional RoPE cosines; NULL if no RoPE
+ *   sin_cache      — [max_pos, D/2] optional RoPE sines; NULL if no RoPE
+ *   past_lens      — [batch_size] int32 per-sequence past token count; used for
+ *                    RoPE position computation. NULL when cos_cache is NULL.
+ *   token_to_seq   — [num_tokens] int32 maps each token to its batch sequence
+ *                    index; NULL when cos_cache is NULL.
+ */
+HIP_KERNEL_API int hip_paged_kv_write(
+    void *stream,
+    const void *new_key,
+    const void *new_value,
+    void *key_cache,
+    void *value_cache,
+    const int *slot_mapping,
+    int num_tokens,
+    int kv_num_heads,
+    int head_dim,
+    int block_size,
+    int element_size_bytes,
+    const void *cos_cache,
+    const void *sin_cache,
+    const int *past_lens,
+    const int *token_to_seq);
+
+/* hip_paged_flash_decode — FA-2 split-K decode over a paged KV cache.
+ *
+ * Computes attention for sq=1 (decode) queries against a paged KV cache.
+ * Produces partial (m, l, O) results in `partials` [B, H, K_SPLITS, D+2].
+ * A second call to hip_paged_flash_decode_reduce combines the partials.
+ *
+ * Parameters:
+ *   stream         — HIP stream
+ *   Q_roped        — [B, 1, H, D]  query (already RoPE'd)
+ *   key_cache      — [num_blocks, block_size, G, D]  paged K slab
+ *   value_cache    — [num_blocks, block_size, G, D]  paged V slab
+ *   block_table    — [B, max_blocks_per_seq]  int32 physical block indices
+ *   sequence_lengths — [B]  int32 actual KV lengths per sequence
+ *   partials       — [B, H, K_SPLITS, D+2]  float scratch (from scratch_alloc)
+ *   B, H, G        — batch, num_heads, kv_num_heads
+ *   head_dim       — D (64 or 128)
+ *   max_blocks_per_seq — second dim of block_table
+ *   block_size     — 16
+ *   K_SPLITS       — split-K parallelism degree
+ *   scale          — attention scale (1/sqrt(D))
+ *   element_size_bytes — 2 (fp16)
+ */
+HIP_KERNEL_API int hip_paged_flash_decode(
+    void *stream,
+    const void *Q_roped,
+    const void *key_cache,
+    const void *value_cache,
+    const int *block_table,
+    const int *sequence_lengths,
+    float *partials,
+    int B, int H, int G,
+    int head_dim,
+    int max_blocks_per_seq,
+    int block_size,
+    int K_SPLITS,
+    float scale,
+    int element_size_bytes);
+
+/* hip_paged_flash_decode_reduce — merge K_SPLITS partials into final output.
+ *
+ * Same signature as the existing gqa_flash_decode_reduce_kernel launcher.
+ * Reads partials [B, H, K_SPLITS, D+2] and writes output [B, H, D] (BNHD).
+ */
+HIP_KERNEL_API int hip_paged_flash_decode_reduce(
+    void *stream,
+    const float *partials,
+    void *output,
+    int B, int H,
+    int head_dim,
+    int K_SPLITS,
+    int element_size_bytes);
+
 #ifdef __cplusplus
 }
 #endif

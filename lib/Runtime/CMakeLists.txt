@@ -281,6 +281,7 @@ compile_to_bitcode(mm/hal_igpu.cpp runtime_mm_hal_igpu.bc)
 compile_to_bitcode(mm/hal_discrete.cpp runtime_mm_hal_discrete.bc)
 compile_to_bitcode(mm/hal_factory.cpp runtime_mm_hal_factory.bc)
 compile_to_bitcode(mm/memory_manager.cpp runtime_mm_memory_manager.bc)
+compile_to_bitcode(mm/block_pool.cpp runtime_mm_block_pool.bc)
 
 # Compile shared implementation files
 compile_to_bitcode(hipdnn_ep_runtime_state.cpp runtime_state.bc)
