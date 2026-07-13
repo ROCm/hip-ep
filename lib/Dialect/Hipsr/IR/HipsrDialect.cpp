@@ -22,7 +22,7 @@ using namespace mlir::hipsr;
 #include "hip/Dialect/Hipsr/IR/HipsrEnums.cpp.inc"
 
 #define GET_ATTRDEF_CLASSES
-#include "hip/Dialect/Hipsr/IR/HipsrAttributes.cpp.inc"
+#include "hip/Dialect/Hipsr/IR/HipsrAttrs.cpp.inc"
 
 void HipsrDialect::initialize() {
   addOperations<
@@ -31,6 +31,6 @@ void HipsrDialect::initialize() {
       >();
   addAttributes<
 #define GET_ATTRDEF_LIST
-#include "hip/Dialect/Hipsr/IR/HipsrAttributes.cpp.inc"
+#include "hip/Dialect/Hipsr/IR/HipsrAttrs.cpp.inc"
       >();
 }

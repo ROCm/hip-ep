@@ -6,11 +6,13 @@
 add_library(HipsrDialectIR STATIC
   HipsrDialect.cpp
   HipsrOps.cpp
+  HipsrTypes.cpp
 )
 
 add_dependencies(HipsrDialectIR
   HipsrDialectIncGen
-  HipsrAttributesIncGen
+  HipsrEnumsIncGen
+  HipsrAttrsIncGen
 )
 
 target_link_libraries(HipsrDialectIR PUBLIC
