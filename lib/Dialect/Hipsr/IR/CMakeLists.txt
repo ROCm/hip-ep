@@ -10,6 +10,7 @@ add_library(HipsrDialectIR STATIC
 
 add_dependencies(HipsrDialectIR
   HipsrDialectIncGen
+  HipsrAttributesIncGen
 )
 
 target_link_libraries(HipsrDialectIR PUBLIC
