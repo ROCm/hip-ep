@@ -79,10 +79,10 @@ public:
   int elem_size() const { return elem_size_; }
 
 private:
-  HalBlock kv_block_ = {};      // GPU slab covering both K and V
-  size_t v_offset_ = 0;         // byte offset from kv_block_.gpu_ptr to V
+  HalBlock kv_block_ = {}; // GPU slab covering both K and V
+  size_t v_offset_ = 0;    // byte offset from kv_block_.gpu_ptr to V
   size_t num_blocks_ = 0;
-  size_t block_stride_ = 0;     // bytes per physical block in K (or V) slab
+  size_t block_stride_ = 0; // bytes per physical block in K (or V) slab
 
   int block_size_ = 0;
   int kv_num_heads_ = 0;

@@ -7,8 +7,8 @@
 
 #include "block_pool.h"
 
-#include <cstdlib>
 #include <cstdio>
+#include <cstdlib>
 
 BlockPool::~BlockPool() {
   if (kv_block_.gpu_ptr && hal_) {
@@ -45,8 +45,9 @@ bool BlockPool::init(HalAllocator *hal, size_t num_blocks, int block_size,
   size_t total = slab_each * 2;
   v_offset_ = slab_each;
 
-  // Allocate via HAL so the correct hipHostMalloc flags are used (Mapped+NonCoherent
-  // on APU for zero-copy GPU access; plain hipMalloc on discrete).
+  // Allocate via HAL so the correct hipHostMalloc flags are used
+  // (Mapped+NonCoherent on APU for zero-copy GPU access; plain hipMalloc on
+  // discrete).
   kv_block_ = hal->alloc(total, MemTier::GPU);
   if (!kv_block_.gpu_ptr) {
     fprintf(stderr,
@@ -57,8 +58,7 @@ bool BlockPool::init(HalAllocator *hal, size_t num_blocks, int block_size,
   }
 
   // Initialise the free list: push all block indices 0..num_blocks-1.
-  free_list_ =
-      static_cast<int *>(::malloc(sizeof(int) * num_blocks));
+  free_list_ = static_cast<int *>(::malloc(sizeof(int) * num_blocks));
   if (!free_list_) {
     fprintf(stderr, "BlockPool::init: malloc for free_list failed\n");
     hal->free(kv_block_);
