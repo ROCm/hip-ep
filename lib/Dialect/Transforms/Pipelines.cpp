@@ -246,6 +246,15 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
   //     test/lit/Pipelines/ asserts this ordering does not regress.
   pm.addNestedPass<func::FuncOp>(mlir::hip::createMaterializeHostScalarsPass());
 
+  // 6b'. Post-bufferize twin of slot 1c: fold `memref.dim` of view ops
+  //      (created by bufferization + PromoteStridedHipOperands, i.e. after
+  //      resolve-tensor-dims ran) back to the root/func-arg dim. Placement is
+  //      load-bearing -- AFTER the view-creating passes (6a, 6b) and BEFORE
+  //      HoistAllocSizeArith (6c), so the re-rooted size cones hoist and
+  //      PoolAllocs shares one pool instead of one domain per alloc. See
+  //      ResolveMemRefDims.cpp.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createResolveMemRefDimsPass());
+
   // 6c. Hoist speculatable size arithmetic feeding `memref.alloc` dynamic
   //     operands above the earliest dynamic alloc in the entry block.
   //     PoolAllocs's single-block dominator-emit phase requires every
