@@ -1631,6 +1631,29 @@ HIP_KERNEL_API int hip_qmoe_decode_fused(
     float swiglu_alpha, float swiglu_beta, float swiglu_limit,
     int64_t element_size_bytes);
 
+// W4A8 dp4a decode variant of hip_qmoe_decode_fused (env-gated via
+// HIPDNN_EP_MATMUL_DP4A). Additionally takes 4 scratch buffers: quantized
+// int8 activations + per-group scales for the fc1 input ([hidden]) and the
+// fc2 slot activations ([k, inter]). fp16 only; block_size a multiple of 32.
+HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a(
+    void* stream,
+    const void* input,
+    const void* expert_indices,
+    const void* expert_weights,
+    const void* fc1_weights, const void* fc1_scales,
+    const void* fc1_zero_points, const void* fc1_bias,
+    const void* fc2_weights, const void* fc2_scales,
+    const void* fc2_zero_points, const void* fc2_bias,
+    void* slot_buf,
+    void* act_out,
+    void* output,
+    void* a_qb_in, void* a_scale_in,
+    void* a_qb_mid, void* a_scale_mid,
+    int64_t hidden_size, int64_t inter_size,
+    int64_t k, int64_t block_size,
+    float swiglu_alpha, float swiglu_beta, float swiglu_limit,
+    int64_t element_size_bytes);
+
 /* =========================================================================
  * Linear Attention Decode (Single-Token Recurrence, Prefill-Friendly)
  * =========================================================================
