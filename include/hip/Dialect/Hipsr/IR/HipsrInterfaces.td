@@ -16,17 +16,17 @@ def ShapeRegionInterface : OpInterface<"ShapeRegionInterface"> {
   let cppNamespace = "::mlir::hipsr";
 
   let description = [{
-    Single source of truth for an op's output-shape computation.
+    Base interface for shape computation.
+    Provides populateShapeRegion() method - single source of truth.
 
     An implementing op carries a shape region (region 0) whose body computes
     the op's output dimensions and ends with a `hipsr.shape_yield`. The
     populate* methods emit that region; the get* accessors retrieve it.
 
     Operation categories (barrier markers are separate interfaces):
-    - Regular: no block arguments, one shape, depends on input shapes.
-    - StartBarrier: no block arguments, one shape, depends on input data.
-    - EndBarrier: has block arguments, two shapes (capacity + real), depends
-      on output data.
+    - Regular (MatMul, Add): no block arguments, one shape, depends on input shapes.
+    - StartBarrier (Expand): no block arguments, one shape, depends on input data.
+    - EndBarrier (NonZero): has block arguments, two shapes (capacity + real), depends on output data.
   }];
 
   let methods = [
