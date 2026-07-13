@@ -4,6 +4,7 @@
  */
 
 #include "../debug_log.h"
+#include "../dump_op.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
 #include "../op_state.h"
@@ -990,8 +991,16 @@ static int gqa_forward_hipblaslt(
       total_seq = sq;
       past_len = 0;
     } else {
-      // seqlens_k = past tokens; total_seq = past_tokens + sq.
-      total_seq = static_cast<int64_t>(seqlens_k_val) + sq;
+      // ORT convention: seqlens_k = total_seq - 1 (NOT "past tokens"). This
+      // matches read_seqlens_k_for_dispatch's doc and the RoPE/KV-append
+      // kernels (gqa_kernel.hip: eff_past_len = seqlens_k + 1 - sq). The old
+      // code did total_seq = seqlens_k + sq, which for prefill (sq>1) inflated
+      // total_seq by (sq-1) -> the causal mask opened over ~sq phantom zero-KV
+      // slots, diluting the attention output ~sq-fold and poisoning the KV
+      // cache (decode uses the fused kernel with the correct on-device
+      // convention, so only prefill broke). Fixes prefill GPU-vs-CPU hidden
+      // cosine 0.65 -> ~0.99.
+      total_seq = static_cast<int64_t>(seqlens_k_val) + 1;
       past_len = total_seq - sq;
       if (total_seq < 1 || past_len < 0 || total_seq > present_seq ||
           past_len > past_buf_seq) {
@@ -1425,6 +1434,11 @@ int wrap_group_query_attention(
         return std::string(b);
       },
       state);
+  // GQA attention output: [batch, seq_q, num_heads*head_dim], elem dtype
+  // element_size_bytes (fp16 for ORCA).
+  DUMP_OP("group_query_attention", output,
+          batch_size * seq_len_q * num_heads * head_dim, element_size_bytes,
+          state);
 
   if (!state) {
     fprintf(stderr, "wrap_group_query_attention: null state\n");
