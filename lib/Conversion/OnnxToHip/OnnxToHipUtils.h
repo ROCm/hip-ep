@@ -326,6 +326,8 @@ void populateMultiHeadAttentionConversionPatterns(RewritePatternSet &patterns,
                                                   MLIRContext *ctx);
 void populateAttentionConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
+void populateOnnxAttentionConversionPatterns(RewritePatternSet &patterns,
+                                             MLIRContext *ctx);
 void populateGatherConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
 void populateCompressConversionPatterns(RewritePatternSet &patterns,
