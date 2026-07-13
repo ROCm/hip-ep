@@ -6,4 +6,9 @@
 set(LLVM_TARGET_DEFINITIONS HipsrDialect.td)
 mlir_tablegen(HipsrDialect.h.inc -gen-dialect-decls -dialect=hipsr)
 mlir_tablegen(HipsrDialect.cpp.inc -gen-dialect-defs -dialect=hipsr)
+
+set(LLVM_TARGET_DEFINITIONS HipsrOps.td)
+mlir_tablegen(HipsrOps.h.inc -gen-op-decls)
+mlir_tablegen(HipsrOps.cpp.inc -gen-op-defs)
+
 add_public_tablegen_target(HipsrDialectIncGen)
