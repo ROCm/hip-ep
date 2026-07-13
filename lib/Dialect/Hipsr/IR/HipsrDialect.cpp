@@ -5,8 +5,8 @@
 
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 
-#include "hip/Dialect/Hipsr/IR/HipsrInfrastructureOps.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
+#include "hip/Dialect/Hipsr/IR/HipsrShapeYieldOp.h"
 
 using namespace mlir;
 using namespace mlir::hipsr;
@@ -16,7 +16,7 @@ using namespace mlir::hipsr;
 void HipsrDialect::initialize() {
   addOperations<
 #define GET_OP_LIST
-#include "hip/Dialect/Hipsr/IR/HipsrInfrastructureOps.cpp.inc"
+#include "hip/Dialect/Hipsr/IR/HipsrShapeYieldOp.cpp.inc"
       >();
   addOperations<
 #define GET_OP_LIST

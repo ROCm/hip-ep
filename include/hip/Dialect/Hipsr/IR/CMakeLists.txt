@@ -11,9 +11,9 @@ set(LLVM_TARGET_DEFINITIONS HipsrShapeRegionInterface.td)
 mlir_tablegen(HipsrShapeRegionInterface.h.inc -gen-op-interface-decls)
 mlir_tablegen(HipsrShapeRegionInterface.cpp.inc -gen-op-interface-defs)
 
-set(LLVM_TARGET_DEFINITIONS HipsrInfrastructureOps.td)
-mlir_tablegen(HipsrInfrastructureOps.h.inc -gen-op-decls)
-mlir_tablegen(HipsrInfrastructureOps.cpp.inc -gen-op-defs)
+set(LLVM_TARGET_DEFINITIONS HipsrShapeYieldOp.td)
+mlir_tablegen(HipsrShapeYieldOp.h.inc -gen-op-decls)
+mlir_tablegen(HipsrShapeYieldOp.cpp.inc -gen-op-defs)
 
 set(LLVM_TARGET_DEFINITIONS HipsrOps.td)
 mlir_tablegen(HipsrOps.h.inc -gen-op-decls)

@@ -2,13 +2,12 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 //
-// Infrastructure ops for the hipsr dialect: shape-region terminators and
-// other structural ops that are not compute kernels. Compute ops and the
-// shared Hipsr_Op base class live in HipsrOps.td.
+// The hipsr.shape_yield op: the terminator of a hipsr shape region. Compute
+// ops and the shared Hipsr_Op base class live in HipsrOps.td.
 //
 
-#ifndef HIPSR_INFRASTRUCTURE_OPS
-#define HIPSR_INFRASTRUCTURE_OPS
+#ifndef HIPSR_SHAPE_YIELD_OP
+#define HIPSR_SHAPE_YIELD_OP
 
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "hip/Dialect/Hipsr/IR/HipsrOps.td"
@@ -41,4 +40,4 @@ def Hipsr_ShapeYieldOp : Hipsr_Op<"shape_yield", [Pure, Terminator]> {
   let assemblyFormat = "attr-dict ($dims^)?";
 }
 
-#endif // HIPSR_INFRASTRUCTURE_OPS
+#endif // HIPSR_SHAPE_YIELD_OP

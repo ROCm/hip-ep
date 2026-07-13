@@ -6,7 +6,7 @@
 add_library(HipsrDialectIR STATIC
   HipsrDialect.cpp
   HipsrShapeRegionInterface.cpp
-  HipsrInfrastructureOps.cpp
+  HipsrShapeYieldOp.cpp
   HipsrOps.cpp
 )
 
