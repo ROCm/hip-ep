@@ -16,6 +16,10 @@
 #include "hip/Dialect/Hipsr/IR/HipsrEnums.h.inc"
 
 #define GET_ATTRDEF_CLASSES
-#include "hip/Dialect/Hipsr/IR/HipsrAttributes.h.inc"
+#include "hip/Dialect/Hipsr/IR/HipsrAttrs.h.inc"
+
+// Predicates for the Hipsr_*MemRef type constraints (used by op verifiers once
+// ops adopt them).
+#include "hip/Dialect/Hipsr/IR/HipsrTypes.h"
 
 #endif // HIPSR_DIALECT_H
