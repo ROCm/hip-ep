@@ -15,6 +15,19 @@ namespace hipsr {
 /// Verifies that every value used inside an op's shape region is either
 /// defined within the region, a block argument of the region, or one of the
 /// op's own operands. Referenced by ShapeRegionInterface's verifier.
+///
+/// Design note: we use custom scoping verification instead of the
+/// IsolatedFromAbove trait because shape regions need *selective* isolation:
+/// - IsolatedFromAbove: region cannot access ANY outer value (full isolation).
+/// - verifyShapeRegionScoping: region CAN access the op's operands, nothing
+///   else.
+///
+/// Shape regions must read the op's inputs to compute output shapes, e.g.
+/// `tensor.dim %input, %c0` where %input is the op's operand. Under
+/// IsolatedFromAbove that would require threading every such value through
+/// verbose region arguments. This design allows direct access to the op's
+/// operands for ergonomics while still preventing accidental capture of
+/// arbitrary outer-scope values.
 ::mlir::LogicalResult verifyShapeRegionScoping(::mlir::Operation *op);
 
 } // namespace hipsr
