@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-#include "hip/Dialect/Hipsr/IR/HipsrInterfaces.h"
+#include "hip/Dialect/Hipsr/IR/HipsrShapeRegionInterface.h"
 
 #include "llvm/ADT/DenseSet.h"
 
@@ -39,4 +39,4 @@ LogicalResult mlir::hipsr::verifyShapeRegionScoping(Operation *op) {
   return failure(walkResult.wasInterrupted());
 }
 
-#include "hip/Dialect/Hipsr/IR/HipsrInterfaces.cpp.inc"
+#include "hip/Dialect/Hipsr/IR/HipsrShapeRegionInterface.cpp.inc"

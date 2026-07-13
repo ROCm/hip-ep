@@ -3,8 +3,8 @@
  * Licensed under the MIT License.
  */
 
-#ifndef HIPSR_INTERFACES_H
-#define HIPSR_INTERFACES_H
+#ifndef HIPSR_SHAPE_REGION_INTERFACE_H
+#define HIPSR_SHAPE_REGION_INTERFACE_H
 
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/Support/LogicalResult.h"
@@ -33,6 +33,6 @@ namespace hipsr {
 } // namespace hipsr
 } // namespace mlir
 
-#include "hip/Dialect/Hipsr/IR/HipsrInterfaces.h.inc"
+#include "hip/Dialect/Hipsr/IR/HipsrShapeRegionInterface.h.inc"
 
-#endif // HIPSR_INTERFACES_H
+#endif // HIPSR_SHAPE_REGION_INTERFACE_H
