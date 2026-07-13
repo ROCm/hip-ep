@@ -48,15 +48,22 @@ LogicalResult mlir::hipsr::verifyShapeRegionScoping(Operation *op) {
 
   auto walkResult = shapeRegion.walk([&](Operation *innerOp) -> WalkResult {
     for (Value operand : innerOp->getOperands()) {
-      // Defined inside the shape region: always fine.
-      if (operand.getParentRegion() == &shapeRegion)
+      // Values (op results or block arguments) defined inside the shape
+      // region, directly or in a nested region (e.g. an scf.for used to
+      // compute a dim), are always fine. This also covers the shape region's
+      // own block arguments, which EndBarrier ops receive their results
+      // through; block arguments captured from an enclosing region are not an
+      // ancestor of the shape region and fall through to the operand check.
+      Region *definingRegion = operand.getParentRegion();
+      if (definingRegion && shapeRegion.isAncestor(definingRegion))
         continue;
-      // Block arguments (EndBarrier ops receive their results): fine.
-      if (isa<BlockArgument>(operand))
-        continue;
-      // Otherwise must be one of the op's operands.
-      if (!allowedValues.contains(operand))
-        return op->emitOpError("shape region uses disallowed outer value");
+      // Otherwise the value must be one of the op's own operands.
+      if (!allowedValues.contains(operand)) {
+        op->emitOpError("shape region references disallowed outer value")
+                .attachNote(innerOp->getLoc())
+            << "used here by '" << innerOp->getName() << "'";
+        return WalkResult::interrupt();
+      }
     }
     return WalkResult::advance();
   });
