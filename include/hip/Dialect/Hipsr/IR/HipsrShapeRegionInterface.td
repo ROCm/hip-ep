@@ -2,9 +2,12 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 //
+// ShapeRegionInterface. Other hipsr interfaces (barrier markers, ...) live in
+// their own per-interface files.
+//
 
-#ifndef HIPSR_INTERFACES
-#define HIPSR_INTERFACES
+#ifndef HIPSR_SHAPE_REGION_INTERFACE
+#define HIPSR_SHAPE_REGION_INTERFACE
 
 include "mlir/IR/OpBase.td"
 
@@ -77,4 +80,4 @@ def ShapeRegionInterface : OpInterface<"ShapeRegionInterface"> {
   }];
 }
 
-#endif // HIPSR_INTERFACES
+#endif // HIPSR_SHAPE_REGION_INTERFACE
