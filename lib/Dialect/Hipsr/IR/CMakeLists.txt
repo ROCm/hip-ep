@@ -5,6 +5,7 @@
 
 add_library(HipsrDialectIR STATIC
   HipsrDialect.cpp
+  HipsrOps.cpp
 )
 
 add_dependencies(HipsrDialectIR
