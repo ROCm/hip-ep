@@ -7,7 +7,15 @@
 #define HIPSR_DIALECT_H
 
 #include "mlir/IR/Dialect.h"
+// Needed by the generated attribute parser/printer.
+#include "mlir/IR/OpImplementation.h"
 
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h.inc"
+
+// Enum header first: MemorySpaceAttr uses MemorySpaceKind.
+#include "hip/Dialect/Hipsr/IR/HipsrEnums.h.inc"
+
+#define GET_ATTRDEF_CLASSES
+#include "hip/Dialect/Hipsr/IR/HipsrAttributes.h.inc"
 
 #endif // HIPSR_DIALECT_H
