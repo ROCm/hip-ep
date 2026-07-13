@@ -3797,4 +3797,69 @@ def Hip_ReadbackScalarOp : Hip_Op<"readback_scalar",
     `(` $ctx `,` $scalar `:` type($scalar) `)` attr-dict `->` type($value)
   }];
 }
+
+//===----------------------------------------------------------------------===//
+// Paged Attention op (com.microsoft.PagedAttention, Phase 4b)
+//
+// KV layout: NHD — key_cache/value_cache [num_blocks, block_size, G, D].
+// Decode only (num_tokens == batch_size). Prefill deferred.
+//
+// Before:
+//   %out = onnx.Custom<"com.microsoft", "PagedAttention">(
+//       %query, %key, %value, %key_cache, %value_cache,
+//       %block_table, %slot_mapping, %seq_lens)
+//
+// After:
+//   hip.paged_attention(ctx)
+//       ins(%query, %key, %value, %key_cache, %value_cache,
+//           %block_table, %slot_mapping, %seq_lens : ...)
+//       outs(%output : ...) { num_heads, kv_num_heads, scale, ... }
+//===----------------------------------------------------------------------===//
+def Hip_PagedAttentionOp : Hip_DpsOp<"paged_attention",
+    [AttrSizedOperandSegments]> {
+  let summary = "Paged Attention (com.microsoft.PagedAttention)";
+  let description = [{
+    Paged KV cache attention. Key/value blocks are stored in a slab with NHD
+    layout [num_blocks, block_size, kv_num_heads, head_dim] and addressed via
+    block_table. new K/V tokens are written into the slab using slot_mapping.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+
+    // Inputs
+    Hip_TensorOrMemRef:$query,            // [num_tokens, H*D] or packed
+    Optional<Hip_TensorOrMemRef>:$key,    // [num_tokens, G*D]; null if packed
+    Optional<Hip_TensorOrMemRef>:$value,  // [num_tokens, G*D]; null if packed
+    Hip_TensorOrMemRef:$key_cache,        // [num_blocks, block_size, G, D]
+    Hip_TensorOrMemRef:$value_cache,      // same
+    Hip_TensorOrMemRef:$block_table,      // [batch, max_blocks_per_seq] int32
+    Hip_TensorOrMemRef:$slot_mapping,     // [num_tokens] int32
+    Hip_TensorOrMemRef:$sequence_lengths, // [batch] int32
+
+    // Output buffer
+    Hip_TensorOrMemRef:$output,           // [num_tokens, H*D]
+
+    // Attributes
+    I64Attr:$num_heads,
+    I64Attr:$kv_num_heads,
+    F32Attr:$scale,
+    I64Attr:$do_rotary,
+    Optional<Hip_TensorOrMemRef>:$cos_cache,
+    Optional<Hip_TensorOrMemRef>:$sin_cache,
+
+    // Shape attributes
+    I64Attr:$num_tokens,
+    I64Attr:$batch_size,
+    I64Attr:$head_dim,
+    I64Attr:$element_size_bytes,
+    I64Attr:$block_size,
+    I64Attr:$max_blocks_per_seq
+  );
+
+  let results = (outs);
+
+  let hasVerifier = 0;
+}
+
 #endif // HIP_OPS
