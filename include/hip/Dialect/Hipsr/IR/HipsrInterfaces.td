@@ -36,7 +36,16 @@ def ShapeRegionInterface : OpInterface<"ShapeRegionInterface"> {
       (ins "::mlir::OpBuilder &":$builder, "::mlir::Region &":$shapeRegion)
     >,
     InterfaceMethod<
-      "Populate the capacity shape region (only EndBarrier ops override this).",
+      [{Populate the capacity shape region for EndBarrier operations.
+
+        Only EndBarrier operations override this method. Regular and
+        StartBarrier operations use the default no-op implementation.
+
+        PRECONDITION: the caller must verify the operation is an EndBarrier
+        (i.e. it has a capacity shape region, region 1) before calling this
+        method. The `Region &` parameter (reference, not pointer) assumes the
+        region is valid.
+      }],
       "void", "populateCapacityShapeRegion",
       (ins "::mlir::OpBuilder &":$builder,
            "::mlir::Region &":$capacityShapeRegion),
