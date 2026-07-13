@@ -318,6 +318,8 @@ void populateRotaryEmbeddingConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
 void populateGqaConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
+void populatePagedAttentionConversionPatterns(RewritePatternSet &patterns,
+                                              MLIRContext *ctx);
 void populateMultiHeadAttentionConversionPatterns(RewritePatternSet &patterns,
                                                   MLIRContext *ctx);
 void populateAttentionConversionPatterns(RewritePatternSet &patterns,

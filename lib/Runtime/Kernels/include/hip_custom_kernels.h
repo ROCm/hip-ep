@@ -617,27 +617,58 @@ HIP_KERNEL_API int hip_gqa_softmax_f32_to_f32(
     int input_batch_stride, int output_batch_stride,
     const void* head_sink, int num_heads, int use_smooth_softmax);
 
-/* Fused GQA decode (sq == 1, d in {64, 128, 256}): single-token attention
- * via cooperative dot product + online softmax in log2e space, one block
- * per (batch, head_q) with D threads (D == d).
- * Replaces steps 3, 6-11 of the decomposed pipeline.
- * Returns -1 for unsupported d values.
- * seqlens_k: optional device pointer [B] int32. When non-null, the kernel
- * reads total_seq = seqlens_k[b]+1 as the loop bound (instead of skv).
- * NOTE: assumes wave32 (RDNA); not portable to CDNA/wave64 without changes
- * to the warp shuffle reduction tree. */
+/* Legacy fast-path decode kernels (folded into gqa_kernel.hip with legacy_*
+ * device kernels). The production fused decode path uses hip_gqa_flash_decode_v2
+ * above; these two entries back gqa.cpp::gqa_forward_hipblaslt -- the decomposed
+ * hipBLASLt fallback -- for the cases the fused path does not cover. They MUST be
+ * exported (HIP_KERNEL_API) so the EP resolves them out of custom_kernels_<arch>
+ * at JIT link / native import (same as every other launcher here).
+ *
+ * hip_gqa_fused_decode: one-block-per-(batch,head_q) decode, d in {64,128,256},
+ * arbitrary HpG -- the general small-/odd-geometry decode used when flash is not
+ * eligible. */
 HIP_KERNEL_API int hip_gqa_fused_decode(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int H, int G, int d, int skv, int max_seq,
     float scale, const void* seqlens_k);
 
-/* Fused GQA prefill (sq > 1, d == 128): Flash Attention 2 with WMMA
- * tile GEMMs and online softmax. Double-buffered KV tiles, causal mask.
- * Replaces steps 3, 6-11 of the decomposed pipeline. */
-HIP_KERNEL_API int hip_gqa_fused_prefill(
+/* hip_gqa_flash_decode: FA-2 split-K (scalar|WMMA), HPG in {4,8}, with
+ * sliding-window + head-sink / smooth-softmax -- the fast windowed/sink decode
+ * the fallback uses. partials_workspace: float scratch B*H*K_SPLITS*(d+2). */
+HIP_KERNEL_API int hip_gqa_flash_decode(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
-    void* O, int B, int H, int G, int sq, int skv, int max_seq, int past_len,
-    float scale);
+    void* O, void* partials_workspace,
+    int B, int H, int G, int d, int max_seq, int K_SPLITS,
+    float scale, const void* seqlens_k, int local_window_size,
+    const void* head_sink, int use_smooth_softmax);
+
+/* Optimized fused GQA prefill (sq > 1, d in {64,128}, fp16, causal, GQA) --
+ * Flash-Attention-2 with WMMA tile GEMMs and intra-wave online softmax. These
+ * reproduce the gqa_compare TTFT-winning kernels (OPTIMIZATION.md ch.13):
+ *   v5: warp-private / register-resident (best at d == 64).
+ *   v7: M-register-blocked, global-streamed K (best at d == 128).
+ * Each self-tunes its launch config on the first call per (d,sq,skv,Hq,G)
+ * shape and caches the winner process-wide. Layout: Q [B,sq,Hq,d];
+ * K/V cache [B,G,max_seq,d] (post-RoPE, post-append). Returns 0 on success,
+ * -1 if d is unsupported. No seqlens_k / sliding-window / head-sink / smooth
+ * softmax / softcap -- caller must gate those out (use the decomposed path). */
+HIP_KERNEL_API int hip_gqa_flash_prefill_v5_v2(
+    void* stream, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
+    int past_len, float scale);
+
+HIP_KERNEL_API int hip_gqa_flash_prefill_v7_v2(
+    void* stream, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
+    int past_len, float scale);
+
+/* Unified fused flash-prefill entry: picks v5 (d==64) or v7 (d==128) internally
+ * so the runtime calls one symbol for any eligible prefill. Same layout /
+ * constraints as v5/v7 above. Returns 0 on success, -1 if d is unsupported. */
+HIP_KERNEL_API int hip_gqa_flash_prefill_v2(
+    void* stream, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
+    int past_len, float scale);
 
 /* FA-2 split-K GQA decode (sq == 1, d in {64, 128}, HPG=H/G==4):
  * GQA-aware kernel that loads K/V tiles into LDS once and reuses them
@@ -648,10 +679,19 @@ HIP_KERNEL_API int hip_gqa_fused_prefill(
  * Llama-3.x family shows large bandwidth headroom over the existing
  * one-block-per-head fused decode.
  *
- * Workspace: float scratch sized B*H*K_SPLITS*(d+2)*sizeof(float) bytes.
+ * Workspace: float scratch sized B*H*max_splits*(d+2)*sizeof(float) bytes.
  * Caller is responsible for allocating and passing it in.
  *
- * K_SPLITS: only 8 supported in V1. Returns -1 on unsupported (HPG, d, K_SPLITS).
+ * skv: current total KV length (host-known). Used only to autotune the split
+ * count / impl and key the per-shape cache; the kernels read seqlens_k for the
+ * exact per-batch length at runtime. Pass <= 0 to fall back to max_seq.
+ *
+ * max_splits: workspace capacity in splits. The launcher autotunes the actual
+ * split count (8..max_splits, capped at 64) and the scalar-vs-WMMA impl on the
+ * first call per (B,H,G,d, skv-bucket) shape, caches the winner in a
+ * process-wide map (matmul_nbits-style), and reuses it on later calls.
+ * Env overrides skip autotune: HIPDNN_GQA_DECODE_SCALAR / _WMMA (impl),
+ * HIPDNN_GQA_DECODE_SPLITS=N (count), HIPDNN_GQA_DECODE_NOAUTOTUNE=1 (fixed).
  *
  * seqlens_k: optional device pointer [B] int32. When non-null, total_seq
  * = seqlens_k[b]+1 is read on-device (no host sync).
@@ -667,12 +707,12 @@ HIP_KERNEL_API int hip_gqa_fused_prefill(
  * s_h = 0 for all heads. This is the gpt-oss-20b / Mistral-style attention
  * sink. The partials are unaffected; the term is folded in by the reduce
  * kernel. */
-HIP_KERNEL_API int hip_gqa_flash_decode(
+HIP_KERNEL_API int hip_gqa_flash_decode_v2(
     void* stream,
     const void* Q, const void* Kcache, const void* Vcache,
     void* O,
     void* partials_workspace,
-    int B, int H, int G, int d, int max_seq, int K_SPLITS,
+    int B, int H, int G, int d, int skv, int max_seq, int max_splits,
     float scale,
     const void* seqlens_k,
     int local_window_size,
@@ -1825,6 +1865,121 @@ HIP_KERNEL_API int hip_causal_conv_prefill(
  */
 HIP_KERNEL_API int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
                        void* C, int M, int K, int N);
+
+/* =========================================================================
+ * Paged Attention kernels (com.microsoft.PagedAttention, Phase 4b)
+ *
+ * KV cache layout (NHD, ORT-compatible):
+ *   key_cache / value_cache: [num_blocks, block_size, kv_num_heads, head_dim]
+ *
+ * Physical address for token (block_num, token_in_block, head_kv, d_i):
+ *   base + block_num * block_size * G * D
+ *        + token_in_block * G * D
+ *        + head_kv * D
+ *        + d_i
+ * =========================================================================
+ */
+
+/* hip_paged_kv_write — scatter new KV tokens into the paged cache.
+ *
+ * Reads new_key[num_tokens * G * D] and new_value (same shape) in BSHD order
+ * (token_idx, kv_head, d_elem) and scatters each token to its physical slot:
+ *   slot = slot_mapping[token_idx]          // = block_num * block_size + offset
+ *   block_num = slot / block_size
+ *   block_off = slot % block_size
+ *   dst[block_num, block_off, head, di] = src[token_idx, head, di]
+ *
+ * RoPE is applied to K before writing when cos_cache / sin_cache are non-null.
+ * past_lens[batch] is used to derive position = past_lens[b] + token_pos when
+ * cos_cache != NULL; set past_lens to NULL for non-RoPE paths.
+ *
+ * Parameters:
+ *   stream         — HIP stream
+ *   new_key        — [num_tokens, G, D]  fp16 BSHD-flattened new K tokens
+ *   new_value      — [num_tokens, G, D]  fp16 BSHD-flattened new V tokens
+ *   key_cache      — [num_blocks, block_size, G, D]  paged K slab (in-place)
+ *   value_cache    — same shape, V slab
+ *   slot_mapping   — [num_tokens]  int32 physical slot per token
+ *   num_tokens     — total new tokens across the batch
+ *   kv_num_heads   — G
+ *   head_dim       — D
+ *   block_size     — tokens per physical block (must be 16)
+ *   element_size_bytes — 2 (fp16) or 4 (fp32)
+ *   cos_cache      — [max_pos, D/2] optional RoPE cosines; NULL if no RoPE
+ *   sin_cache      — [max_pos, D/2] optional RoPE sines; NULL if no RoPE
+ *   past_lens      — [batch_size] int32 per-sequence past token count; used for
+ *                    RoPE position computation. NULL when cos_cache is NULL.
+ *   token_to_seq   — [num_tokens] int32 maps each token to its batch sequence
+ *                    index; NULL when cos_cache is NULL.
+ */
+HIP_KERNEL_API int hip_paged_kv_write(
+    void *stream,
+    const void *new_key,
+    const void *new_value,
+    void *key_cache,
+    void *value_cache,
+    const int *slot_mapping,
+    int num_tokens,
+    int kv_num_heads,
+    int head_dim,
+    int block_size,
+    int element_size_bytes,
+    const void *cos_cache,
+    const void *sin_cache,
+    const int *past_lens,
+    const int *token_to_seq);
+
+/* hip_paged_flash_decode — FA-2 split-K decode over a paged KV cache.
+ *
+ * Computes attention for sq=1 (decode) queries against a paged KV cache.
+ * Produces partial (m, l, O) results in `partials` [B, H, K_SPLITS, D+2].
+ * A second call to hip_paged_flash_decode_reduce combines the partials.
+ *
+ * Parameters:
+ *   stream         — HIP stream
+ *   Q_roped        — [B, 1, H, D]  query (already RoPE'd)
+ *   key_cache      — [num_blocks, block_size, G, D]  paged K slab
+ *   value_cache    — [num_blocks, block_size, G, D]  paged V slab
+ *   block_table    — [B, max_blocks_per_seq]  int32 physical block indices
+ *   sequence_lengths — [B]  int32 actual KV lengths per sequence
+ *   partials       — [B, H, K_SPLITS, D+2]  float scratch (from scratch_alloc)
+ *   B, H, G        — batch, num_heads, kv_num_heads
+ *   head_dim       — D (64 or 128)
+ *   max_blocks_per_seq — second dim of block_table
+ *   block_size     — 16
+ *   K_SPLITS       — split-K parallelism degree
+ *   scale          — attention scale (1/sqrt(D))
+ *   element_size_bytes — 2 (fp16)
+ */
+HIP_KERNEL_API int hip_paged_flash_decode(
+    void *stream,
+    const void *Q_roped,
+    const void *key_cache,
+    const void *value_cache,
+    const int *block_table,
+    const int *sequence_lengths,
+    float *partials,
+    int B, int H, int G,
+    int head_dim,
+    int max_blocks_per_seq,
+    int block_size,
+    int K_SPLITS,
+    float scale,
+    int element_size_bytes);
+
+/* hip_paged_flash_decode_reduce — merge K_SPLITS partials into final output.
+ *
+ * Same signature as the existing gqa_flash_decode_reduce_kernel launcher.
+ * Reads partials [B, H, K_SPLITS, D+2] and writes output [B, H, D] (BNHD).
+ */
+HIP_KERNEL_API int hip_paged_flash_decode_reduce(
+    void *stream,
+    const float *partials,
+    void *output,
+    int B, int H,
+    int head_dim,
+    int K_SPLITS,
+    int element_size_bytes);
 
 #ifdef __cplusplus
 }

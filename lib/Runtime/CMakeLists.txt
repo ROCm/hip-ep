@@ -180,6 +180,13 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
         list(APPEND COMPILE_FLAGS "-fPIC")
     endif()
 
+    # Propagate the vendor-BLAS opt-out into the bitcode compile so the
+    # MIOpen/hipBLASLt-backed wrappers (real/{miopen,hipblas,elementwise,gemm}.cpp)
+    # compile their stub branch instead of the vendor-backed one.
+    if(HIPDNN_EP_DISABLE_VENDOR_BLAS)
+        list(APPEND COMPILE_FLAGS "-DHIPDNN_EP_DISABLE_VENDOR_BLAS")
+    endif()
+
     # Always add root directory for public headers
     list(APPEND COMPILE_FLAGS "-I" "${CMAKE_CURRENT_SOURCE_DIR}")
 
@@ -274,6 +281,7 @@ compile_to_bitcode(mm/hal_igpu.cpp runtime_mm_hal_igpu.bc)
 compile_to_bitcode(mm/hal_discrete.cpp runtime_mm_hal_discrete.bc)
 compile_to_bitcode(mm/hal_factory.cpp runtime_mm_hal_factory.bc)
 compile_to_bitcode(mm/memory_manager.cpp runtime_mm_memory_manager.bc)
+compile_to_bitcode(mm/block_pool.cpp runtime_mm_block_pool.bc)
 
 # Compile shared implementation files
 compile_to_bitcode(hipdnn_ep_runtime_state.cpp runtime_state.bc)
@@ -291,6 +299,11 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/hip.cpp runtime_hip.bc)
     compile_to_bitcode(real/miopen.cpp runtime_miopen.bc)
     compile_to_bitcode(real/hipblas.cpp runtime_hipblas.bc)
+    # Vendor-symbol stubs so a model links without libMIOpen / libhipblaslt (see
+    # real/vendor_blas_stub.cpp).
+    if(HIPDNN_EP_DISABLE_VENDOR_BLAS)
+        compile_to_bitcode(real/vendor_blas_stub.cpp runtime_vendor_blas_stub.bc)
+    endif()
     compile_to_bitcode(real/memory.cpp runtime_memory.bc)
     compile_to_bitcode(real/elementwise.cpp runtime_elementwise.bc)
     compile_to_bitcode(real/power.cpp runtime_power.bc)
@@ -301,6 +314,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/skip_simplified_layer_norm.cpp runtime_skip_simplified_layer_norm.bc)
     compile_to_bitcode(real/rotary_embedding.cpp runtime_rotary_embedding.bc)
     compile_to_bitcode(real/gqa.cpp runtime_gqa.bc)
+    compile_to_bitcode(real/paged_attention.cpp runtime_paged_attention.bc)
     compile_to_bitcode(real/cast.cpp runtime_cast.bc)
     compile_to_bitcode(real/range.cpp runtime_range.bc)
     compile_to_bitcode(real/gather.cpp runtime_gather.bc)
@@ -407,6 +421,12 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_global_pool.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather_block_quantized.bc
     )
+    # Vendor-symbol stubs (see the compile_to_bitcode above) join runtime.bc only
+    # when the vendor BLAS/DNN backends are disabled.
+    if(HIPDNN_EP_DISABLE_VENDOR_BLAS)
+        list(APPEND RUNTIME_BC_MODULES
+            ${CMAKE_CURRENT_BINARY_DIR}/runtime_vendor_blas_stub.bc)
+    endif()
 else()
     # Mock runtime for testing without GPU
     compile_to_bitcode(mock/mock_gpu.cpp runtime_mock.bc)

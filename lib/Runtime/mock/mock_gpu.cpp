@@ -1736,3 +1736,20 @@ int wrap_hipStreamSynchronize(void *stream) {
   HIP_CHECK(hipStreamSynchronize(static_cast<hipStream_t>(stream)));
   return 0;
 }
+
+// Paged attention mock — not executed in CPU-only tests; stub to satisfy
+// linker.
+int wrap_paged_attention(RuntimeState * /*state*/, void * /*query*/,
+                         void * /*key*/, void * /*value*/, void * /*key_cache*/,
+                         void * /*value_cache*/, void * /*block_table*/,
+                         void * /*slot_mapping*/, void * /*sequence_lengths*/,
+                         void * /*output*/, int64_t /*num_heads*/,
+                         int64_t /*kv_num_heads*/, float /*scale*/,
+                         int64_t /*do_rotary*/, void * /*cos_cache*/,
+                         void * /*sin_cache*/, int64_t /*num_tokens*/,
+                         int64_t /*batch_size*/, int64_t /*head_dim*/,
+                         int64_t /*element_size_bytes*/, int64_t /*block_size*/,
+                         int64_t /*max_blocks_per_seq*/) {
+  MOCK_PRINT("[MOCK] wrap_paged_attention (stub)\n");
+  return 0;
+}
