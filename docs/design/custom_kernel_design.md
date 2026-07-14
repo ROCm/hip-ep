@@ -45,7 +45,7 @@ Key insight: The `.hip` files contain `__global__` kernels compiled by hipcc int
 ## Directory Structure
 
 ```
-onnx-hipdnn-ep/
+hip-ep/
 ├── lib/Runtime/
 │   ├── Kernels/                          # GPU-arch-dependent kernels (this doc)
 │   │   ├── CMakeLists.txt                # Builds .hip files into per-arch shared libs + install rules
@@ -71,7 +71,7 @@ onnx-hipdnn-ep/
 
 ### 1. `lib/Runtime/Kernels/cmake/hip_utils.cmake`
 
-Adapted from onnx-hipdnn-ep. Provides `hip_add_library()` function that:
+Adapted from hip-ep. Provides `hip_add_library()` function that:
 
 - On Windows: Uses `hipcc -c` to compile each `.hip` file to `.obj`, bundles into static lib
 - On Linux: Uses CMake HIP language support

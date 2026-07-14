@@ -4,7 +4,7 @@ Licensed under the MIT License.
 -->
 # Quick Start Guide
 
-This guide builds onnx-hipdnn-ep on Windows. The C++ dependencies
+This guide builds hip-ep on Windows. The C++ dependencies
 (LLVM/MLIR/LLD, FlatBuffers, Protobuf, ONNX Runtime) and the TheRock ROCm SDK
 are resolved automatically by CMake (see step 2): they are reused from
 a prefix when one is available, and otherwise built or downloaded from source.
@@ -96,11 +96,11 @@ use `..` to reference sibling directories:
 
 ```bash
 cd <workspace>
-git clone https://github.com/ROCm/onnx-hipdnn-ep.git
-cd onnx-hipdnn-ep
+git clone https://github.com/ROCm/hip-ep.git
+cd hip-ep
 ```
 
-All subsequent commands run from the `onnx-hipdnn-ep/` project root unless
+All subsequent commands run from the `hip-ep/` project root unless
 explicitly noted.
 
 ### 1. Build ONNX Runtime (optional)
@@ -150,7 +150,7 @@ ls ../build/onnxruntime/Release/dist/onnxruntime_directml-*.whl
 # onnxruntime_directml-1.25.1-cp314-cp314-win_amd64.whl
 ```
 
-### 2. Build onnx-hipdnn-ep
+### 2. Build hip-ep
 
 `build.py` is the cross-platform build driver (the same one used on Linux
 and in CI): it sets up the build, resolves every dependency
@@ -201,7 +201,7 @@ Python wheel (step 4); it is not required to build OGA's C++ artifacts. Step 2
 is only needed later to *run* `model_benchmark` against hipgpu EP, not to
 build OGA itself.
 
-Run all commands below from the `onnx-hipdnn-ep/` project root.
+Run all commands below from the `hip-ep/` project root.
 
 #### 3a. Prepare ORT_HOME
 
@@ -220,7 +220,7 @@ cp "$LOCAL_DIR/bin/onnxruntime_providers_shared.dll" "$ORT_HOME/lib/"
 #### 3b. Clone OGA
 
 ```bash
-cd ..  # Go to workspace directory (sibling of onnx-hipdnn-ep)
+cd ..  # Go to workspace directory (sibling of hip-ep)
 git clone -b v0.14.0 https://github.com/microsoft/onnxruntime-genai.git
 cd onnxruntime-genai
 git submodule update --init --recursive
@@ -287,16 +287,16 @@ If you also want to drive ORT / OGA from Python (e.g. to write your own
 generation script instead of using `model_benchmark.exe`), install the wheels.
 The hipgpu EP wheel is built by default by `build.py` (pass `--skip_wheel` to
 opt out, or build just it with `cmake --build <build> --target wheel`) at
-`../build/onnx-hipdnn-ep/python/dist/`.
+`../build/hip-ep/python/dist/`.
 
 **Install** -- give ORT / EP / OGA as local `.whl` files (so pip uses your custom
 builds, not the stock PyPI ones), and let `--extra-index-url` resolve ROCm:
 
 ```bash
-cd ../onnx-hipdnn-ep  # Back to the project root
+cd ../hip-ep  # Back to the project root
 pip install \
   ../build/onnxruntime/Release/dist/onnxruntime_directml-*.whl \
-  ../build/onnx-hipdnn-ep/python/dist/onnxruntime_ep_hip-*.whl \
+  ../build/hip-ep/python/dist/onnxruntime_ep_hip-*.whl \
   ../build/onnxruntime-genai/Release/wheel/onnxruntime_genai_directml-*.whl \
   --extra-index-url https://repo.amd.com/rocm/whl/gfx1151/
 ```
@@ -359,7 +359,7 @@ chain. For plain ORT (direct hipgpu, no OGA), register the colocated plugin via
 timing. It is built automatically when `BUILD_HIP_TOOLS=ON`.
 
 ```bash
-# first cd to your onnx-hipdnn-ep directory
+# first cd to your hip-ep directory
 # Default (bitcode) needs the ROCm runtime DLLs on PATH; TheRock's bin is under
 # the build dir (or your own -DTHEROCK_DIST path). NATIVE artifacts additionally
 # use THEROCK_DIST + LIB for the lld-link step.
