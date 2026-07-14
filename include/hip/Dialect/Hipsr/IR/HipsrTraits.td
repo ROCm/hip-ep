@@ -16,4 +16,17 @@ def IsolatedFromAboveButAllowOperands : NativeOpTrait<
   let cppNamespace = "::mlir::hipsr::OpTrait";
 }
 
+// Like SingleBlockImplicitTerminator<op>, but the terminator must be written
+// explicitly -- it is never auto-inserted. Used for shape regions, where the
+// terminator (hipsr.shape_yield) carries the computed shape, so a missing one
+// is a real error, not something to fill in. See HipsrTraits.h for the check.
+class SingleBlockExplicitTerminatorImpl<string op>
+    : ParamNativeOpTrait<"SingleBlockExplicitTerminator", op, [SingleBlock]>,
+      StructuralOpTrait {
+  let cppNamespace = "::mlir::hipsr::OpTrait";
+}
+
+class SingleBlockExplicitTerminator<string op>
+    : TraitList<[SingleBlock, SingleBlockExplicitTerminatorImpl<op>]>;
+
 #endif // HIPSR_TRAITS
