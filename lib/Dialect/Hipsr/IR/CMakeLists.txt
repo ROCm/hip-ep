@@ -13,6 +13,7 @@ add_dependencies(HipsrDialectIR
   HipsrDialectIncGen
   HipsrEnumsIncGen
   HipsrAttrsIncGen
+  HipsrTypesIncGen
 )
 
 target_link_libraries(HipsrDialectIR PUBLIC

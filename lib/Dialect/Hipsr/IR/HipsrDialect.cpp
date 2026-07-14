@@ -24,6 +24,9 @@ using namespace mlir::hipsr;
 #define GET_ATTRDEF_CLASSES
 #include "hip/Dialect/Hipsr/IR/HipsrAttrs.cpp.inc"
 
+#define GET_TYPEDEF_CLASSES
+#include "hip/Dialect/Hipsr/IR/HipsrTypes.cpp.inc"
+
 void HipsrDialect::initialize() {
   addOperations<
 #define GET_OP_LIST
@@ -32,5 +35,9 @@ void HipsrDialect::initialize() {
   addAttributes<
 #define GET_ATTRDEF_LIST
 #include "hip/Dialect/Hipsr/IR/HipsrAttrs.cpp.inc"
+      >();
+  addTypes<
+#define GET_TYPEDEF_LIST
+#include "hip/Dialect/Hipsr/IR/HipsrTypes.cpp.inc"
       >();
 }
