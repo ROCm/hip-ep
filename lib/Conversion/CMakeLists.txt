@@ -6,6 +6,7 @@
 message(STATUS "Building Conversion Libraries")
 
 add_subdirectory(OnnxToHip)
+add_subdirectory(OnnxToHipsr)
 add_subdirectory(OnnxToHipDNN)
 add_subdirectory(HipToLLVM)
 
@@ -16,6 +17,7 @@ add_library(HipConversion STATIC
 
 target_link_libraries(HipConversion PUBLIC
   OnnxToHip
+  OnnxToHipsr
   OnnxToHipDNN
   HipToLLVM
   MLIRIR
