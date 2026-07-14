@@ -84,4 +84,18 @@ module {
   // CHECK-LABEL: func.func @test_range_empty_neg_f32
   // CHECK: tensor.empty
   // CHECK: hip.range
+
+  // A single-element rank-1 bound (HF exports slice a length out of Shape as
+  // tensor<1xi64>) is accepted and collapsed to rank-0 before the readback +
+  // hip.range path. The dynamic limit reads back through a synchronized scalar.
+  func.func @test_range_rank1_limit(%limit: tensor<1xi64>) -> tensor<?xi64> {
+    %s = arith.constant dense<0> : tensor<i64>
+    %d = arith.constant dense<1> : tensor<i64>
+    %r = "onnx.Range"(%s, %limit, %d) : (tensor<i64>, tensor<1xi64>, tensor<i64>) -> tensor<?xi64>
+    return %r : tensor<?xi64>
+  }
+  // CHECK-LABEL: func.func @test_range_rank1_limit
+  // CHECK: tensor.collapse_shape %{{.*}} [] : tensor<1xi64> into tensor<i64>
+  // CHECK: hip.readback_scalar
+  // CHECK: hip.range
 }
