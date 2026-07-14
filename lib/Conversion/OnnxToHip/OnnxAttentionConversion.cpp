@@ -24,13 +24,23 @@ namespace {
 ///       -> (..., tensor<BxGxTxDxf16>, tensor<BxGxTxDxf16>)
 ///
 /// After:
-///   %past_len   = tensor.dim %past_k, %c2
-///   %seqlens_k  = tensor.from_elements %past_len_cast : tensor<1xi32>
-///   %total_seq  = tensor.from_elements %present_len  : tensor<i32>
+///   %cur        = tensor.dim %q, %c1       // current KV tokens (== query seq)
+///   %past       = tensor.dim %past_k, %c2  // valid past KV length (0 on prefill)
+///   %tot        = arith.addi %past, %cur   // present seq = past + current
+///   %seqlens_k  = tensor.from_elements (%tot - 1)  : tensor<1xi32>
+///   %total_seq  = tensor.from_elements %tot        : tensor<i32>
+///   %pk_init    = tensor.empty(%B, %tot)   // present sized to %tot, NOT %past
 ///   %y, %pk, %pv = hip.gqa(%ctx)
 ///       ins(%q, %k, %v, %past_k, %past_v, %seqlens_k, %total_seq, %mask)
-///       outs(...)
+///       outs(%y_init, %pk_init, %pv_init)
 ///       {num_heads = 16, kv_num_heads = 8, scale = 1.0, no_causal = true}
+///
+/// present KV is concat(past, current) along the seq axis, so its seq extent
+/// is past_seq + current_seq.  A fresh prefill arrives with an EMPTY past
+/// (past_seq == 0): sizing present from dim(past_key, 2) alone would collapse
+/// it to a zero-length buffer, the output allocator would then hand the
+/// runtime a null present_key/present_value, and wrap_group_query_attention
+/// would reject the call and leave the attention output zero-filled.
 struct OnnxAttentionToHip : public mlir::RewritePattern {
   OnnxAttentionToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Attention", /*benefit=*/1, ctx) {}
@@ -148,28 +158,41 @@ mlir::LogicalResult OnnxAttentionToHip::matchAndRewrite(
   mlir::Value context = *ctxOrFailure;
 
   auto i32Ty = rewriter.getIntegerType(32);
-  mlir::Value c2 =
-      mlir::arith::ConstantIndexOp::create(rewriter, loc, 2).getResult();
 
-  // seqlens_k[b] = valid past length = dim(past_key, seq).
-  mlir::Value seqlensK;
-  if (pastKey) {
-    mlir::Value pastSeqIdx =
-        mlir::tensor::DimOp::create(rewriter, loc, pastKey, c2).getResult();
-    mlir::Value pastSeqI32 = mlir::arith::IndexCastOp::create(
-        rewriter, loc, i32Ty, pastSeqIdx);
-    auto seqlensKType = mlir::RankedTensorType::get({1}, i32Ty);
-    seqlensK = mlir::tensor::FromElementsOp::create(rewriter, loc, seqlensKType,
-                                                   pastSeqI32);
-  } else {
-    // Prefill with empty past: ORT sentinel -1 (fresh prefill, past_len=0).
-    auto seqlensKType = mlir::RankedTensorType::get({1}, i32Ty);
-    auto sentinel = mlir::DenseElementsAttr::get(
-        seqlensKType, llvm::APInt(32, -1, /*isSigned=*/true));
-    seqlensK = mlir::arith::ConstantOp::create(rewriter, loc, sentinel);
-  }
+  // present KV = concat(past, current) along the seq axis, so the present seq
+  // extent is past_seq + current_seq. The current KV token count equals the
+  // query sequence length for self-attention (Q/K/V share the seq axis); query
+  // is validated rank-3 [B, S, hidden] above, so take S from query dim 1. The
+  // valid past length is dim(past_key, 2) (rank-4 BNSH), or 0 when there is no
+  // past operand (a fresh prefill carries an EMPTY past, past_seq == 0).
+  mlir::Value curSeqIdx =
+      mlir::tensor::DimOp::create(rewriter, loc, query, 1).getResult();
+  mlir::Value pastSeqIdx =
+      pastKey
+          ? mlir::tensor::DimOp::create(rewriter, loc, pastKey, 2).getResult()
+          : mlir::arith::ConstantIndexOp::create(rewriter, loc, 0).getResult();
+  mlir::Value totalKvIdx =
+      mlir::arith::AddIOp::create(rewriter, loc, pastSeqIdx, curSeqIdx)
+          .getResult();
 
-  // total_seq_len scalar = present_key buffer seq capacity (dim 2).
+  // seqlens_k[b] = total_seq - 1. The runtime uses the ORT GQA convention
+  // total_seq = seqlens_k + 1 and derives past_len = total_seq - sq, which for
+  // self-attention (current_seq == sq) is exactly past_seq. (Was dim(past_key,
+  // 2) = past_seq, which under +1 gives total_seq = past_seq + 1 — correct only
+  // for single-token decode, and 1 for an empty-past prefill.)
+  mlir::Value oneIdx =
+      mlir::arith::ConstantIndexOp::create(rewriter, loc, 1).getResult();
+  mlir::Value totalKvM1Idx =
+      mlir::arith::SubIOp::create(rewriter, loc, totalKvIdx, oneIdx).getResult();
+  mlir::Value seqlensKI32 =
+      mlir::arith::IndexCastOp::create(rewriter, loc, i32Ty, totalKvM1Idx);
+  auto seqlensKType = mlir::RankedTensorType::get({1}, i32Ty);
+  mlir::Value seqlensK = mlir::tensor::FromElementsOp::create(
+      rewriter, loc, seqlensKType, seqlensKI32);
+
+  // total_seq_len scalar = present KV buffer capacity = past_seq + current_seq.
+  // (The runtime re-derives total_seq from seqlens_k today, but keep this
+  // consistent with the present buffer for any future consumer.)
   mlir::Value totalSeqLen;
   if (!presentKeyType.isDynamicDim(2)) {
     auto totalSeqLenType = mlir::RankedTensorType::get({}, i32Ty);
@@ -178,25 +201,52 @@ mlir::LogicalResult OnnxAttentionToHip::matchAndRewrite(
         llvm::APInt(32, presentKeyType.getDimSize(2), /*isSigned=*/true));
     totalSeqLen =
         mlir::arith::ConstantOp::create(rewriter, loc, totalSeqLenAttr);
-  } else if (pastKey) {
-    mlir::Value presentSeqIdx =
-        mlir::tensor::DimOp::create(rewriter, loc, pastKey, c2).getResult();
-    mlir::Value presentSeqI32 = mlir::arith::IndexCastOp::create(
-        rewriter, loc, i32Ty, presentSeqIdx);
+  } else {
+    mlir::Value totalKvI32 =
+        mlir::arith::IndexCastOp::create(rewriter, loc, i32Ty, totalKvIdx);
     auto totalSeqLenType = mlir::RankedTensorType::get({}, i32Ty);
     totalSeqLen = mlir::tensor::FromElementsOp::create(
-        rewriter, loc, totalSeqLenType, presentSeqI32);
-  } else {
-    return rewriter.notifyMatchFailure(
-        op, "dynamic present_key seq dim requires past_key operand");
+        rewriter, loc, totalSeqLenType, totalKvI32);
   }
 
-  mlir::Value outputInit =
-      createEmptyTensor(rewriter, loc, outputType, query);
-  mlir::Value presentKeyInit = createEmptyTensor(
-      rewriter, loc, presentKeyType, pastKey ? pastKey : query);
-  mlir::Value presentValueInit = createEmptyTensor(
-      rewriter, loc, presentValueType, pastValue ? pastValue : query);
+  // Build the present_key/present_value init buffers with seq dim = total_seq
+  // (past + current). present is rank-4 BNSH [batch, kv_heads, seq, head_dim];
+  // batch (dim 0) and seq (dim 2) are the only dynamic dims in practice —
+  // kv_heads/head_dim are architecture constants. Batch is taken from query
+  // dim 0; the seq extent is the past+current total computed above.
+  auto buildPresentInit =
+      [&](mlir::RankedTensorType t) -> mlir::FailureOr<mlir::Value> {
+    llvm::SmallVector<mlir::Value> dynSizes;
+    for (int64_t dimIdx : llvm::seq<int64_t>(t.getRank())) {
+      if (!t.isDynamicDim(dimIdx))
+        continue;
+      if (dimIdx == 2)
+        dynSizes.push_back(totalKvIdx);
+      else if (dimIdx == 0)
+        dynSizes.push_back(
+            mlir::tensor::DimOp::create(rewriter, loc, query, 0).getResult());
+      else if (pastKey)
+        dynSizes.push_back(
+            mlir::tensor::DimOp::create(rewriter, loc, pastKey, dimIdx)
+                .getResult());
+      else
+        return mlir::failure();
+    }
+    return mlir::Value(mlir::tensor::EmptyOp::create(
+        rewriter, loc, t.getShape(), t.getElementType(), dynSizes));
+  };
+
+  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, query);
+  mlir::FailureOr<mlir::Value> presentKeyInitOr =
+      buildPresentInit(presentKeyType);
+  mlir::FailureOr<mlir::Value> presentValueInitOr =
+      buildPresentInit(presentValueType);
+  if (mlir::failed(presentKeyInitOr) || mlir::failed(presentValueInitOr))
+    return rewriter.notifyMatchFailure(
+        op, "present_key/present_value has an unsupported dynamic dim "
+            "(only batch and seq may be dynamic)");
+  mlir::Value presentKeyInit = *presentKeyInitOr;
+  mlir::Value presentValueInit = *presentValueInitOr;
 
   llvm::SmallVector<mlir::Type> resultTypes = {outputType, presentKeyType,
                                                presentValueType};
