@@ -124,14 +124,27 @@ if(NOT BUILD_MOCK_RUNTIME)
     endif()
 
     find_package(hip QUIET)
-    find_package(MIOpen QUIET)
-    find_package(hipblaslt QUIET)
+    if(NOT HIPDNN_EP_DISABLE_VENDOR_BLAS)
+        find_package(MIOpen QUIET)
+        find_package(hipblaslt QUIET)
+    endif()
 
     if(DEFINED THEROCK_DIST)
         set(CMAKE_PREFIX_PATH "${ORIGINAL_CMAKE_PREFIX_PATH}")
     endif()
 
-    if(NOT hip_FOUND OR NOT MIOpen_FOUND OR NOT hipblaslt_FOUND)
+    # Vendor BLAS/DNN disabled: build the real runtime with only hip (the stubbed
+    # wrappers, added in the follow-up change, keep the ABI intact).
+    if(HIPDNN_EP_DISABLE_VENDOR_BLAS)
+        if(NOT hip_FOUND)
+            message(WARNING "HIP not found. Building mock runtime library for testing.")
+            message(WARNING "  hip_FOUND=${hip_FOUND}; set THEROCK_DIST to the ROCm SDK path")
+            set(BUILD_MOCK_RUNTIME TRUE)
+        else()
+            message(STATUS "Building REAL runtime with HIP (vendor MIOpen/hipBLASLt DISABLED)")
+            message(STATUS "  HIP: ${hip_DIR}")
+        endif()
+    elseif(NOT hip_FOUND OR NOT MIOpen_FOUND OR NOT hipblaslt_FOUND)
         message(WARNING "ROCm components not found. Building mock runtime library for testing.")
         message(WARNING "  hip_FOUND=${hip_FOUND}, MIOpen_FOUND=${MIOpen_FOUND}, hipblaslt_FOUND=${hipblaslt_FOUND}")
         message(WARNING "  Set THEROCK_DIST environment variable to ROCm SDK path")
@@ -165,6 +178,13 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
     # Windows COFF this flag is a no-op (clang ignores it for the MSVC ABI).
     if(NOT WIN32)
         list(APPEND COMPILE_FLAGS "-fPIC")
+    endif()
+
+    # Propagate the vendor-BLAS opt-out into the bitcode compile so the
+    # MIOpen/hipBLASLt-backed wrappers (real/{miopen,hipblas,elementwise,gemm}.cpp)
+    # compile their stub branch instead of the vendor-backed one.
+    if(HIPDNN_EP_DISABLE_VENDOR_BLAS)
+        list(APPEND COMPILE_FLAGS "-DHIPDNN_EP_DISABLE_VENDOR_BLAS")
     endif()
 
     # Always add root directory for public headers
@@ -268,6 +288,11 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/hip.cpp runtime_hip.bc)
     compile_to_bitcode(real/miopen.cpp runtime_miopen.bc)
     compile_to_bitcode(real/hipblas.cpp runtime_hipblas.bc)
+    # Vendor-symbol stubs so a model links without libMIOpen / libhipblaslt (see
+    # real/vendor_blas_stub.cpp).
+    if(HIPDNN_EP_DISABLE_VENDOR_BLAS)
+        compile_to_bitcode(real/vendor_blas_stub.cpp runtime_vendor_blas_stub.bc)
+    endif()
     compile_to_bitcode(real/memory.cpp runtime_memory.bc)
     compile_to_bitcode(real/elementwise.cpp runtime_elementwise.bc)
     compile_to_bitcode(real/power.cpp runtime_power.bc)
@@ -405,6 +430,12 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_global_pool.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather_block_quantized.bc
     )
+    # Vendor-symbol stubs (see the compile_to_bitcode above) join runtime.bc only
+    # when the vendor BLAS/DNN backends are disabled.
+    if(HIPDNN_EP_DISABLE_VENDOR_BLAS)
+        list(APPEND RUNTIME_BC_MODULES
+            ${CMAKE_CURRENT_BINARY_DIR}/runtime_vendor_blas_stub.bc)
+    endif()
 else()
     # Mock runtime for testing without GPU
     compile_to_bitcode(mock/mock_gpu.cpp runtime_mock.bc)

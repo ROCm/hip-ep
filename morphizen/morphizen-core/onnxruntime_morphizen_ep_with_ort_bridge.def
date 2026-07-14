@@ -1,0 +1,19 @@
+LIBRARY onnxruntime_morphizen_ep
+EXPORTS
+    compile_onnx_model_morphizen_ep_v4
+    create_ep_context_nodes
+    deinitialize_onnxruntime_morphizen_ep
+    initialize_onnxruntime_morphizen_ep
+    profiler_collect
+    morphizen_get_version
+    morphizen_ep_on_run_start
+    morphizen_ep_set_ep_dynamic_options
+    morphizen_get_build_info
+    morphizen_get_execution_provider_deletor
+    get_compiled_model_compatibility_info
+    validate_compiled_model_compatibility_info
+    CreateEpFactories
+    ReleaseEpFactory
+    ??_7PassProto@morphizen@@6B@
+    ?apply@BaseRule@morphizen@@QEAAXPEAUGraph@onnxruntime@@@Z
+    ?create_rule@Rule@morphizen@@SA?AV?$unique_ptr@VRule@morphizen@@U?$default_delete@VRule@morphizen@@@std@@@std@@V?$shared_ptr@VPattern@morphizen@@@4@AEBV?$function@$$A6A_NPEAUGraph@onnxruntime@@AEAVBinder@morphizen@@@Z@4@@Z
