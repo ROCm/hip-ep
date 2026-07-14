@@ -19,6 +19,10 @@ set(LLVM_TARGET_DEFINITIONS HipsrOps.td)
 mlir_tablegen(HipsrOps.h.inc -gen-op-decls)
 mlir_tablegen(HipsrOps.cpp.inc -gen-op-defs)
 
+set(LLVM_TARGET_DEFINITIONS HipsrMatMulOp.td)
+mlir_tablegen(HipsrMatMulOp.h.inc -gen-op-decls)
+mlir_tablegen(HipsrMatMulOp.cpp.inc -gen-op-defs)
+
 add_public_tablegen_target(HipsrDialectIncGen)
 
 set(LLVM_TARGET_DEFINITIONS HipsrEnums.td)

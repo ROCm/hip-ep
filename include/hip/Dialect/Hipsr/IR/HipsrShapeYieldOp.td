@@ -35,6 +35,12 @@ def Hipsr_ShapeYieldOp : Hipsr_Op<"shape_yield", [Pure, Terminator]> {
 
   let arguments = (ins Variadic<Index>:$dims);
 
+  // Zero-operand builder so SingleBlockImplicitTerminator can auto-insert an
+  // (empty) shape_yield into a shaped op's region (cf. scf.yield).
+  let builders = [
+    OpBuilder<(ins), [{ /* no dims */ }]>
+  ];
+
   // Operands are always `index` (Variadic<Index>), so the types are redundant
   // and omitted from the assembly (cf. scf.yield / func.return practice).
   let assemblyFormat = "attr-dict ($dims^)?";
