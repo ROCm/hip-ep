@@ -10,6 +10,18 @@
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
 #include "hip/Conversion/OnnxToHipsr/Passes.h"
 
+namespace mlir {
+namespace hipsr {
+
+// Registration hooks for the TableGen-based HIP conversions (currently the
+// ONNX->hipsr conversion). Mirrors upstream mlir/Conversion/Passes.h; the
+// per-conversion declarations are pulled in by the includes above.
+#define GEN_PASS_REGISTRATION
+#include "hip/Conversion/Passes.h.inc"
+
+} // namespace hipsr
+} // namespace mlir
+
 namespace hip::compiler {
 
 /// Register all conversion passes (ONNX->HIP, HIP->LLVM).

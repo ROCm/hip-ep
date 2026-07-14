@@ -2,9 +2,14 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 //
+// Aggregate definitions for TableGen-based HIP conversion passes, mirroring
+// upstream mlir/Conversion/Passes.td. New conversions add their `def` here; the
+// per-conversion header under Conversion/<XToY>/ pulls just its declaration via
+// GEN_PASS_DECL_<NAME>, and Conversion/Passes.h registers them all.
+//
 
-#ifndef HIP_CONVERSION_ONNXTOHIPSR_PASSES
-#define HIP_CONVERSION_ONNXTOHIPSR_PASSES
+#ifndef HIP_CONVERSION_PASSES
+#define HIP_CONVERSION_PASSES
 
 include "mlir/Pass/PassBase.td"
 
@@ -27,4 +32,4 @@ def ConvertOnnxToHipsrPass : Pass<"convert-onnx-to-hipsr", "mlir::ModuleOp"> {
   ];
 }
 
-#endif // HIP_CONVERSION_ONNXTOHIPSR_PASSES
+#endif // HIP_CONVERSION_PASSES

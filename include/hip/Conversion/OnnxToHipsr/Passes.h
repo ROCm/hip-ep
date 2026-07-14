@@ -13,12 +13,12 @@
 namespace mlir {
 namespace hipsr {
 
-// createConvertOnnxToHipsrPass() is auto-declared by GEN_PASS_DECL and defined
-// by GEN_PASS_DEF (in OnnxToHipsr.cpp); no manual factory is needed since the
-// pass has no custom constructor.
+// Per-conversion declarations. createConvertOnnxToHipsrPass() is declared by
+// GEN_PASS_DECL (defined by GEN_PASS_DEF in OnnxToHipsr.cpp). Pattern-population
+// helpers for individual ONNX ops (added by follow-up layers) are declared here
+// too. Registration lives in the aggregate hip/Conversion/Passes.h.
 #define GEN_PASS_DECL_CONVERTONNXTOHIPSRPASS
-#define GEN_PASS_REGISTRATION
-#include "hip/Conversion/OnnxToHipsr/Passes.h.inc"
+#include "hip/Conversion/Passes.h.inc"
 
 } // namespace hipsr
 } // namespace mlir
