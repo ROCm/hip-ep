@@ -47,6 +47,10 @@ jobs:
           if exist msix-tool rd /s /q msix-tool
           if exist msix-stage rd /s /q msix-stage
           if exist msix-out rd /s /q msix-out
+          if exist oga-app rd /s /q oga-app
+          if exist winml-validate-stage rd /s /q winml-validate-stage
+          if exist hip-python-package rd /s /q hip-python-package
+          if exist release-out rd /s /q release-out
 
       # Extract the vendored MSIX packaging tool first (fail fast). It ships its
       # own x64\makeappx.exe + signtool.exe, and is vendored under .github/winml-msix/
@@ -217,4 +221,119 @@ jobs:
         with:
           name: winml-amdgpu-ep-msix
           path: msix-out/*.msix
+          retention-days: 14
+
+      # ---- Release package 1: winml-ep-validate (msix + cert + app runtime) ----
+      - name: Package winml-ep-validate.zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $date = Get-Date -Format 'yyyyMMdd'
+          $msix = Get-ChildItem "$PWD\msix-out" -Recurse -Filter *.msix | Select-Object -First 1
+          if (-not $msix) { throw "MSIX not found in msix-out" }
+          $cer = Get-ChildItem "$PWD\msix-tool" -Recurse -Filter "SelfSignedCertificate.cer" | Select-Object -First 1
+          if (-not $cer) { throw "SelfSignedCertificate.cer not found under msix-tool" }
+          $appDir = "$PWD\oga-app"
+          Expand-Archive -Path ".github\winml-msix\oga_winml_app.zip" -DestinationPath $appDir -Force
+          $stage = "$PWD\winml-validate-stage"
+          if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item $msix.FullName $stage -Force
+          Copy-Item $cer.FullName $stage -Force
+          foreach ($n in @("oga_winml_app.exe","Microsoft.Windows.AI.MachineLearning.dll","onnxruntime-genai.dll","onnxruntime.dll")) {
+            $p = Join-Path $appDir $n
+            if (-not (Test-Path $p)) { throw "app file missing: $p" }
+            Copy-Item $p $stage -Force
+          }
+          $out = "$PWD\release-out"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $zip = Join-Path $out "winml-ep-validate-$date.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::CreateFromDirectory($stage, $zip, [System.IO.Compression.CompressionLevel]::Optimal, $false)
+          Write-Host "Created $zip ($([math]::Round((Get-Item $zip).Length/1MB,1)) MB)"
+
+      - name: Upload winml-ep-validate
+        uses: actions/upload-artifact@v4
+        with:
+          name: winml-ep-validate
+          path: release-out/winml-ep-validate-*.zip
+          retention-days: 14
+
+      # ---- Release package 2: gpu-test-package (artifact + vendored ROCm bin) ----
+      - name: Package gpu-test-package.zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $date = Get-Date -Format 'yyyyMMdd'
+          $pkg = "$PWD\msix-gpu-test-package"
+          if (-not (Test-Path $pkg)) { throw "gpu-test-package not downloaded: $pkg" }
+          # Overlay the vendored ROCm runtime DLLs (already extracted to rocm-bin) into bin/.
+          $bin = Join-Path $pkg "bin"
+          New-Item -ItemType Directory -Force -Path $bin | Out-Null
+          Copy-Item "$PWD\rocm-bin\*" $bin -Recurse -Force
+          $out = "$PWD\release-out"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $zip = Join-Path $out "gpu-test-package-$date.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::CreateFromDirectory($pkg, $zip, [System.IO.Compression.CompressionLevel]::Optimal, $false)
+          Write-Host "Created $zip ($([math]::Round((Get-Item $zip).Length/1MB,1)) MB)"
+
+      - name: Upload gpu-test-package-zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-test-package-zip
+          path: release-out/gpu-test-package-*.zip
+          retention-days: 14
+
+      # ---- Release package 3: hipep-wheels (project wheels + ROCm deps + examples) ----
+      - name: Download hip-python-package
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: windows-build.yml
+          branch: ${{ github.event.inputs.source_branch || 'main' }}
+          workflow_conclusion: success
+          name: hip-python-package
+          path: hip-python-package
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Package hipep-wheels.zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $date = Get-Date -Format 'yyyyMMdd'
+          $pkg = "$PWD\hip-python-package"
+          $wheels = Join-Path $pkg "wheels"
+          if (-not (Test-Path $wheels)) { throw "wheels/ not found in hip-python-package" }
+          $ep = Get-ChildItem $wheels -Filter "onnxruntime_ep_hip-*.whl" | Select-Object -First 1
+          if (-not $ep) { throw "onnxruntime_ep_hip-*.whl not found in $wheels" }
+          # Pull the EP wheel's ROCm dependencies (version pinned by the wheel itself).
+          python -m pip download $ep.FullName --extra-index-url https://repo.amd.com/rocm/whl/gfx1151/ -d $wheels 2>&1 | ForEach-Object { Write-Host $_ }
+          if ($LASTEXITCODE -ne 0) { throw "pip download (ROCm deps) failed" }
+          $out = "$PWD\release-out"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $zip = Join-Path $out "hipep-wheels-$date.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          # Wheels are already-compressed zips; NoCompression avoids wasted CPU.
+          [System.IO.Compression.ZipFile]::CreateFromDirectory($wheels, $zip, [System.IO.Compression.CompressionLevel]::NoCompression, $false)
+          # Append the artifact's top-level example scripts under examples/.
+          $za = [System.IO.Compression.ZipFile]::Open($zip, [System.IO.Compression.ZipArchiveMode]::Update)
+          Get-ChildItem $pkg -File -Filter *.py | ForEach-Object {
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($za, $_.FullName, "examples/$($_.Name)", [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+          }
+          $za.Dispose()
+          Write-Host "Created $zip ($([math]::Round((Get-Item $zip).Length/1MB,1)) MB)"
+
+      - name: Upload hipep-wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: hipep-wheels
+          path: release-out/hipep-wheels-*.zip
           retention-days: 14
