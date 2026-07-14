@@ -5,6 +5,7 @@
 
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 
+#include "hip/Dialect/Hipsr/IR/HipsrMatMulOp.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 #include "hip/Dialect/Hipsr/IR/HipsrShapeYieldOp.h"
 
@@ -36,6 +37,10 @@ void HipsrDialect::initialize() {
   addOperations<
 #define GET_OP_LIST
 #include "hip/Dialect/Hipsr/IR/HipsrOps.cpp.inc"
+      >();
+  addOperations<
+#define GET_OP_LIST
+#include "hip/Dialect/Hipsr/IR/HipsrMatMulOp.cpp.inc"
       >();
   addAttributes<
 #define GET_ATTRDEF_LIST
