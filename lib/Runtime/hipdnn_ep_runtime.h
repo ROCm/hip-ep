@@ -1318,25 +1318,30 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
               int64_t K, float alpha, float beta, int64_t transA,
               int64_t transB, int64_t typeCode, int64_t cDim0, int64_t cDim1);
 
-// `out_num_elements` is the broadcast result count.  `a_num_elements` and
-// `b_num_elements` are the per-input element counts; either may be 1 to
-// indicate scalar broadcast.  Today only same-shape OR scalar-vs-tensor is
-// supported (the common case for embedding-style models like Qwen3.5 where
-// `Equal(input_ids[1,N], scalar)` lowers without an intervening `Expand`).
-int wrap_equal(RuntimeState *state, void *a, void *b, void *output,
-               int64_t a_num_elements, int64_t b_num_elements,
-               int64_t out_num_elements, int64_t data_type);
+// Element-wise Equal. Operand shapes are passed as 4D (N, C, H, W), left-
+// padded with 1 by the compiler; `data_type` is the INPUT (comparison
+// operand) type and the output is always 1 byte per element. General ONNX
+// multidirectional broadcast is handled by materialising any partially-
+// broadcast operand to the output shape via hip_expand; scalar and same-shape
+// operands take the kernel's direct path.
+int wrap_equal(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
+               int64_t a_c, int64_t a_h, int64_t a_w, int64_t b_n, int64_t b_c,
+               int64_t b_h, int64_t b_w, int64_t out_n, int64_t out_c,
+               int64_t out_h, int64_t out_w, int64_t data_type);
 
-// Element-wise logical AND wrapper. Inputs / output share the same data_type
-// (HIPDNN_EP_DATATYPE_*); ONNX `And` is defined on bool tensors, which the
-// EP marshals as i8/uint8 elements (1 byte per element). Today this is a
-// stub: the function returns success without computing anything so models
-// that include And can still link and lower end-to-end while a real
-// element-wise AND kernel is being built.
-int wrap_or(RuntimeState *state, void *a, void *b, void *output,
-            int64_t num_elements, int64_t data_type);
-int wrap_and(RuntimeState *state, void *a, void *b, void *output,
-             int64_t num_elements, int64_t data_type);
+// Element-wise logical AND / OR on bool tensors (marshalled as 1-byte
+// uint8 elements). Operand shapes are passed as 4D (N, C, H, W), left-padded
+// with 1 by the compiler; ONNX multidirectional broadcast is materialised via
+// hip_expand when an operand does not already match the output shape.
+// `data_type` is a sentinel (i1 has no HIPDNN dtype slot) and is unused.
+int wrap_or(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
+            int64_t a_c, int64_t a_h, int64_t a_w, int64_t b_n, int64_t b_c,
+            int64_t b_h, int64_t b_w, int64_t out_n, int64_t out_c,
+            int64_t out_h, int64_t out_w, int64_t data_type);
+int wrap_and(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
+             int64_t a_c, int64_t a_h, int64_t a_w, int64_t b_n, int64_t b_c,
+             int64_t b_h, int64_t b_w, int64_t out_n, int64_t out_c,
+             int64_t out_h, int64_t out_w, int64_t data_type);
 
 int wrap_abs(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
@@ -1460,9 +1465,15 @@ int wrap_reduce_prod(RuntimeState *state, void *data, void *axes, void *output,
                      int64_t keepdims, int64_t noop_with_empty_axes,
                      int64_t inner_size);
 
-// Less operation wrapper (element-wise C = A < B). Output is bool (1 byte).
-int wrap_less(RuntimeState *state, void *a, void *b, void *output,
-              int64_t num_elements, int64_t data_type);
+// Less operation wrapper (element-wise C = A < B). Output is bool (1 byte);
+// `data_type` is the INPUT (comparison operand) type. Operand shapes are
+// passed as 4D (N, C, H, W), left-padded with 1 by the compiler; ONNX
+// multidirectional broadcast is materialised via hip_expand when an operand
+// does not already match the output shape.
+int wrap_less(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
+              int64_t a_c, int64_t a_h, int64_t a_w, int64_t b_n, int64_t b_c,
+              int64_t b_h, int64_t b_w, int64_t out_n, int64_t out_c,
+              int64_t out_h, int64_t out_w, int64_t data_type);
 
 // GatherND operation wrapper. data_shape has rank `data_rank`; indices has
 // rank `indices_rank` with last dim `indices_inner = indices_shape[-1]`.

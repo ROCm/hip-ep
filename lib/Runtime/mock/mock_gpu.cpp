@@ -1501,9 +1501,10 @@ int wrap_where(RuntimeState *state, void *condition, void *x, void *y,
   return 0;
 }
 
-int wrap_equal(RuntimeState *state, void *a, void *b, void *output,
-               int64_t a_num_elements, int64_t b_num_elements,
-               int64_t out_num_elements, int64_t data_type) {
+int wrap_equal(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
+               int64_t a_c, int64_t a_h, int64_t a_w, int64_t b_n, int64_t b_c,
+               int64_t b_h, int64_t b_w, int64_t out_n, int64_t out_c,
+               int64_t out_h, int64_t out_w, int64_t data_type) {
   (void)a;
   (void)b;
   (void)output;
@@ -1511,26 +1512,39 @@ int wrap_equal(RuntimeState *state, void *a, void *b, void *output,
     fprintf(stderr, "Invalid state in wrap_equal\n");
     return -1;
   }
-  MOCK_PRINT("[MOCK] wrap_equal(a_num=%lld, b_num=%lld, out=%lld, "
-             "data_type=%s)\n",
-             (long long)a_num_elements, (long long)b_num_elements,
-             (long long)out_num_elements, hipdnn_ep_datatype_name(data_type));
+  MOCK_PRINT("[MOCK] wrap_equal a=[%lld,%lld,%lld,%lld] b=[%lld,%lld,%lld,%lld] "
+             "out=[%lld,%lld,%lld,%lld] dtype=%s\n",
+             (long long)a_n, (long long)a_c, (long long)a_h, (long long)a_w,
+             (long long)b_n, (long long)b_c, (long long)b_h, (long long)b_w,
+             (long long)out_n, (long long)out_c, (long long)out_h,
+             (long long)out_w, hipdnn_ep_datatype_name(data_type));
   return 0;
 }
 
-int wrap_or(RuntimeState *state, void *a, void *b, void *output,
-            int64_t num_elements, int64_t data_type) {
+int wrap_or(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
+            int64_t a_c, int64_t a_h, int64_t a_w, int64_t b_n, int64_t b_c,
+            int64_t b_h, int64_t b_w, int64_t out_n, int64_t out_c,
+            int64_t out_h, int64_t out_w, int64_t data_type) {
+  (void)a;
+  (void)b;
+  (void)output;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_or\n");
     return -1;
   }
-  MOCK_PRINT("[MOCK] wrap_or(num_elements=%lld, data_type=%s)\n",
-             (long long)num_elements, hipdnn_ep_datatype_name(data_type));
+  MOCK_PRINT("[MOCK] wrap_or a=[%lld,%lld,%lld,%lld] b=[%lld,%lld,%lld,%lld] "
+             "out=[%lld,%lld,%lld,%lld] dtype=%s\n",
+             (long long)a_n, (long long)a_c, (long long)a_h, (long long)a_w,
+             (long long)b_n, (long long)b_c, (long long)b_h, (long long)b_w,
+             (long long)out_n, (long long)out_c, (long long)out_h,
+             (long long)out_w, hipdnn_ep_datatype_name(data_type));
   return 0;
 }
 
-int wrap_and(RuntimeState *state, void *a, void *b, void *output,
-             int64_t num_elements, int64_t data_type) {
+int wrap_and(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
+             int64_t a_c, int64_t a_h, int64_t a_w, int64_t b_n, int64_t b_c,
+             int64_t b_h, int64_t b_w, int64_t out_n, int64_t out_c,
+             int64_t out_h, int64_t out_w, int64_t data_type) {
   (void)a;
   (void)b;
   (void)output;
@@ -1538,8 +1552,12 @@ int wrap_and(RuntimeState *state, void *a, void *b, void *output,
     fprintf(stderr, "Invalid state in wrap_and\n");
     return -1;
   }
-  MOCK_PRINT("[MOCK] wrap_and(num_elements=%lld, data_type=%s)\n",
-             (long long)num_elements, hipdnn_ep_datatype_name(data_type));
+  MOCK_PRINT("[MOCK] wrap_and a=[%lld,%lld,%lld,%lld] b=[%lld,%lld,%lld,%lld] "
+             "out=[%lld,%lld,%lld,%lld] dtype=%s\n",
+             (long long)a_n, (long long)a_c, (long long)a_h, (long long)a_w,
+             (long long)b_n, (long long)b_c, (long long)b_h, (long long)b_w,
+             (long long)out_n, (long long)out_c, (long long)out_h,
+             (long long)out_w, hipdnn_ep_datatype_name(data_type));
   return 0;
 }
 
@@ -1819,15 +1837,23 @@ int wrap_reduce_prod(RuntimeState *state, void *data, void *axes, void *output,
   return 0;
 }
 
-int wrap_less(RuntimeState *state, void *a, void *b, void *output,
-              int64_t num_elements, int64_t data_type) {
+int wrap_less(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
+              int64_t a_c, int64_t a_h, int64_t a_w, int64_t b_n, int64_t b_c,
+              int64_t b_h, int64_t b_w, int64_t out_n, int64_t out_c,
+              int64_t out_h, int64_t out_w, int64_t data_type) {
+  (void)a;
+  (void)b;
+  (void)output;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_less\n");
     return -1;
   }
-  MOCK_PRINT("[MOCK] wrap_less(num_elements=%lld, data_type=%s(%lld))\n",
-             (long long)num_elements, hipdnn_ep_datatype_name(data_type),
-             (long long)data_type);
+  MOCK_PRINT("[MOCK] wrap_less a=[%lld,%lld,%lld,%lld] b=[%lld,%lld,%lld,%lld] "
+             "out=[%lld,%lld,%lld,%lld] dtype=%s\n",
+             (long long)a_n, (long long)a_c, (long long)a_h, (long long)a_w,
+             (long long)b_n, (long long)b_c, (long long)b_h, (long long)b_w,
+             (long long)out_n, (long long)out_c, (long long)out_h,
+             (long long)out_w, hipdnn_ep_datatype_name(data_type));
   return 0;
 }
 
