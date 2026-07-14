@@ -8,6 +8,7 @@ add_library(HipsrDialectIR STATIC
   HipsrShapeRegionInterface.cpp
   HipsrShapeYieldOp.cpp
   HipsrOps.cpp
+  HipsrMatMulOp.cpp
   HipsrTypes.cpp
 )
 
@@ -21,4 +22,5 @@ add_dependencies(HipsrDialectIR
 target_link_libraries(HipsrDialectIR PUBLIC
   MLIRIR
   MLIRSupport
+  MLIRTensorDialect
 )
