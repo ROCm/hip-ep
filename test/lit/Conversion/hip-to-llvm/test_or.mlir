@@ -14,7 +14,7 @@ module {
     hip.or(%ctx) ins(%a, %b : memref<64xi1, 1>, memref<64xi1, 1>)
                  outs(%c : memref<64xi1, 1>)
 
-    // CHECK: llvm.call @wrap_or({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_or({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
     return
   }
 
@@ -30,7 +30,7 @@ module {
 
     // CHECK: llvm.extractvalue %{{.*}}[3, 0]
     // CHECK: llvm.extractvalue %{{.*}}[3, 1]
-    // CHECK: llvm.call @wrap_or({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_or({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
     return
   }
 }

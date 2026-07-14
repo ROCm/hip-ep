@@ -380,16 +380,32 @@ and `output_num` plus `axes_num_elements` (and a `noop_with_empty_axes`
 flag for the short-circuit). The actual axes vector is gone by the
 time we get the call — the lowering has consumed it.
 
-Same story for the binary elementwise ops: `wrap_div` / `wrap_mod` /
-`wrap_equal` / `wrap_less` take only a single `num_elements` and
-require both inputs already broadcast to that shape. No per-input
-shape, no broadcast factors. The MLIR side does the work, and the
-runtime stays simple.
+The binary elementwise ops split into two groups by how broadcast is
+handled:
 
-When adding a new reduction or binary op, **do not** request shape info
-that the lowering didn't volunteer — that's a sign the op needs to be
-expressed differently in the MLIR pipeline rather than worked around in
-C++.
+- `wrap_div` / `wrap_equal` / `wrap_less` / `wrap_and` / `wrap_or` take
+  **full 4D operand shapes** (each operand's N,C,H,W, left-padded with 1
+  by the lowering). When an operand does not already match the output
+  shape, the runtime materialises the ONNX multidirectional broadcast via
+  `hip_expand` into the per-session workspace, then runs the flat kernel
+  on same-shape buffers. This is required for correctness: the flat
+  kernels index each operand linearly, so a partially-broadcast operand
+  (e.g. an attention mask `[1,1,S]` combined with `[1,S,S]`, or
+  `[1,S,1]` vs `[1,1,S]`) would otherwise be read past its end and
+  produce wrong results. `wrap_equal` additionally keeps the kernel's
+  zero-stride fast path for a scalar operand (num==1), avoiding a
+  needless expand.
+- `wrap_mod` still takes only a single `num_elements` and requires both
+  inputs already broadcast to that shape.
+
+When adding a new binary op, prefer the 4D-shape + `hip_expand` pattern
+(see `wrap_div`) so general broadcast is correct; only take the bare
+`num_elements` form when the op is guaranteed same-shape inputs.
+
+When adding a new **reduction**, **do not** request axis info that the
+lowering didn't volunteer (the reduce axes are collapsed into the
+trailing dims for you) — that's a sign the op needs to be expressed
+differently in the MLIR pipeline rather than worked around in C++.
 
 ## 7. ONNX corner cases handled
 
