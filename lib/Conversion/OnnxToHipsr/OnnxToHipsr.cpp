@@ -12,8 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "hip/Conversion/OnnxToHipsr/Passes.h"
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
-#include "hip/Dialect/Hipsr/Transforms/Passes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
@@ -24,7 +24,7 @@ namespace mlir {
 namespace hipsr {
 
 #define GEN_PASS_DEF_CONVERTONNXTOHIPSRPASS
-#include "hip/Dialect/Hipsr/Transforms/Passes.h.inc"
+#include "hip/Conversion/OnnxToHipsr/Passes.h.inc"
 
 namespace {
 

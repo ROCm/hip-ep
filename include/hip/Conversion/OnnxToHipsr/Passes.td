@@ -3,8 +3,8 @@
 // Licensed under the MIT License.
 //
 
-#ifndef HIPSR_TRANSFORMS_PASSES
-#define HIPSR_TRANSFORMS_PASSES
+#ifndef HIP_CONVERSION_ONNXTOHIPSR_PASSES
+#define HIP_CONVERSION_ONNXTOHIPSR_PASSES
 
 include "mlir/Pass/PassBase.td"
 
@@ -27,4 +27,4 @@ def ConvertOnnxToHipsrPass : Pass<"convert-onnx-to-hipsr", "mlir::ModuleOp"> {
   ];
 }
 
-#endif // HIPSR_TRANSFORMS_PASSES
+#endif // HIP_CONVERSION_ONNXTOHIPSR_PASSES
