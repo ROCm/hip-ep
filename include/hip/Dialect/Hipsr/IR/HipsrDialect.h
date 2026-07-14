@@ -18,6 +18,10 @@
 #define GET_ATTRDEF_CLASSES
 #include "hip/Dialect/Hipsr/IR/HipsrAttrs.h.inc"
 
+// Type declarations (e.g. !hipsr.context).
+#define GET_TYPEDEF_CLASSES
+#include "hip/Dialect/Hipsr/IR/HipsrTypes.h.inc"
+
 // Predicates for the Hipsr_*MemRef type constraints (used by op verifiers once
 // ops adopt them).
 #include "hip/Dialect/Hipsr/IR/HipsrTypes.h"
