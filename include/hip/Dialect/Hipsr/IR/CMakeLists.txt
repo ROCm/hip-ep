@@ -30,3 +30,8 @@ set(LLVM_TARGET_DEFINITIONS HipsrAttrs.td)
 mlir_tablegen(HipsrAttrs.h.inc -gen-attrdef-decls -attrdefs-dialect=hipsr)
 mlir_tablegen(HipsrAttrs.cpp.inc -gen-attrdef-defs -attrdefs-dialect=hipsr)
 add_public_tablegen_target(HipsrAttrsIncGen)
+
+set(LLVM_TARGET_DEFINITIONS HipsrTypes.td)
+mlir_tablegen(HipsrTypes.h.inc -gen-typedef-decls -typedefs-dialect=hipsr)
+mlir_tablegen(HipsrTypes.cpp.inc -gen-typedef-defs -typedefs-dialect=hipsr)
+add_public_tablegen_target(HipsrTypesIncGen)

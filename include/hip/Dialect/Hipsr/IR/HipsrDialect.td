@@ -19,6 +19,9 @@ def Hipsr_Dialect : Dialect {
 
   // Lets the dialect parse/print `#hipsr.mem<...>`.
   let useDefaultAttributePrinterParser = 1;
+
+  // Lets the dialect parse/print `!hipsr.context`.
+  let useDefaultTypePrinterParser = 1;
 }
 
 #endif // HIPSR_DIALECT
