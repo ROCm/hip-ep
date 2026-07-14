@@ -32,14 +32,15 @@ def ShapeRegionInterface : OpInterface<"ShapeRegionInterface"> {
       def Hipsr_MatMulOp : Hipsr_Op<"matmul", [
           ShapeRegionInterface,
           IsolatedFromAboveButAllowOperands,
-          SingleBlockImplicitTerminator<"ShapeYieldOp">
+          SingleBlockExplicitTerminator<"ShapeYieldOp">
       ]> { ... }
 
-    `SingleBlockImplicitTerminator<"ShapeYieldOp">` inserts the terminator;
-    `IsolatedFromAboveButAllowOperands` restricts what the shape region may use.
-    The interface verifier checks the region structure and that the trait is
-    present (so a missing trait gives a clear error); the trait's own verifier
-    does the scoping check.
+    `SingleBlockExplicitTerminator<"ShapeYieldOp">` requires each region to end
+    with a `hipsr.shape_yield` (never added automatically, since it carries the
+    computed shape). `IsolatedFromAboveButAllowOperands` limits what the shape
+    region may read. The interface verifier only checks that both traits are
+    present so a missing one gives a clear error; each trait's own verifier does
+    the real check.
 
     Operation categories (barrier markers are separate interfaces):
     - Regular (MatMul, Add): no block arguments, one shape, depends on input shapes.
@@ -91,9 +92,14 @@ def ShapeRegionInterface : OpInterface<"ShapeRegionInterface"> {
   ];
 
   let verify = [{
-    if (::mlir::failed(::mlir::hipsr::verifyShapeRegionStructure($_op)))
-      return ::mlir::failure();
-    // The trait's verifier does the scoping check; just require it be present.
+    // Each trait's own verifier does the real check (explicit shape_yield,
+    // scoping); here we only require both traits so a missing one is a clear
+    // error instead of a silent skip.
+    if (!$_op->hasTrait<::mlir::hipsr::OpTrait::SingleBlockExplicitTerminator<
+            ::mlir::hipsr::ShapeYieldOp>::Impl>())
+      return $_op->emitOpError(
+          "ShapeRegionInterface requires the "
+          "SingleBlockExplicitTerminator<ShapeYieldOp> trait");
     if (!$_op->hasTrait<
             ::mlir::hipsr::OpTrait::IsolatedFromAboveButAllowOperands>())
       return $_op->emitOpError(
