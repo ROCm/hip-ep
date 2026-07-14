@@ -3,8 +3,8 @@
  * Licensed under the MIT License.
  */
 
-#include "hip/Dialect/Hipsr/Transforms/Passes.h"
 #include "hip/Dialect/Hipsr/IR/HipsrCastOp.h"
+#include "hip/Dialect/Hipsr/Transforms/Passes.h"
 
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/PatternMatch.h"
@@ -34,7 +34,8 @@ struct CastToHipsr : public ::mlir::RewritePattern {
     ::llvm::SmallVector<::mlir::Value> dynDims;
     for (int64_t i = 0; i < resultType.getRank(); ++i)
       if (resultType.isDynamicDim(i))
-        dynDims.push_back(rewriter.create<::mlir::tensor::DimOp>(loc, input, i));
+        dynDims.push_back(
+            rewriter.create<::mlir::tensor::DimOp>(loc, input, i));
     ::mlir::Value init = rewriter.create<::mlir::tensor::EmptyOp>(
         loc, resultType.getShape(), resultType.getElementType(), dynDims);
 
