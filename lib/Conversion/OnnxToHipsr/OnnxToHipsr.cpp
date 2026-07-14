@@ -12,7 +12,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "hip/Conversion/OnnxToHipsr/Passes.h"
+#include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
