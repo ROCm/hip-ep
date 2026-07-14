@@ -1,0 +1,64 @@
+# ONNX IR Implementation Library
+
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+cc_library(
+    name = "onnx_ir_imp",
+    tags = ["manual"],  # disabled: compilation issues with onnxruntime namespace conflicts
+    srcs = glob(
+        [
+            "src/*.cpp",
+        ],
+        exclude = [
+            "src/*_test.cpp",
+            "src/**/*_test.cpp",
+            "src/graph-shape-inference.cpp",  # Exclude shape inference implementation
+        ],
+    ),
+    hdrs = glob(
+        [
+            "src/*.hpp",
+        ],
+        exclude = [
+            "src/*_test.hpp",
+            "src/**/*_test.hpp",
+            "src/graph-shape-inference.hpp",  # Exclude shape inference header
+        ],
+    ),
+    # Add compiler flags if needed
+    copts =
+        select({
+            "@bazel_tools//src/conditions:windows": [
+                "/std:c++17",  # Use C++17 standard on Windows
+                "/wd4251",  # class needs to have dll-interface warnings from ONNXRuntime
+                "/wd4275",  # non dll-interface class used as base warnings
+                "/wd4996",  # deprecated function warnings
+                "/wd4100",  # unreferenced parameter warnings
+                "/wd4244",  # conversion warnings
+                "/wd4267",  # size_t conversion warnings
+                "/wd4305",  # truncation warnings
+                "/wd4141",  # inline modifier used more than once
+                "/wd4127",  # conditional expression is constant
+                "/W3",  # warning level 3 (less strict than W4)
+                # Note: removed /WX to avoid treating external library warnings as errors
+            ],
+            "//conditions:default": [
+                "-std=c++17",  # Use C++17 standard
+                "-Wno-unused-parameter",
+                "-Wno-sign-compare",
+                "-Wno-unused-variable",
+                "-Wno-conversion",
+                "-Wno-deprecated-declarations",
+            ],
+        }),
+    local_defines = [
+        "ONNX_NAMESPACE=morphizen_onnx",  # Define ONNX namespace for consistency
+    ],
+    strip_include_prefix = "src",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//morphizen-utils:morphizen_utils",
+        "//morphizen-ort-api-ext",
+        "@onnx",  # ONNX headers-only target
+    ],
+)

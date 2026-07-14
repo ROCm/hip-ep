@@ -50,12 +50,11 @@ TheRock ROCm SDK is auto-downloaded into the build tree at
 ```bash
 git clone https://github.com/ROCm/onnx-hipdnn-ep.git
 cd onnx-hipdnn-ep
-git submodule update --init --recursive
 ```
 
 ### Native (no Docker)
 
-`build.py` is a plain cross-platform driver: it ensures submodules,
+`build.py` is a plain cross-platform driver: it
 checks the toolchain, auto-detects the GPU arch (from `/sys/class/kfd`), then
 runs the cmake configure/build/install into `<workspace>/install/`. All
 dependencies (incl. from-source LLVM) are resolved by `cmake/deps.cmake`.

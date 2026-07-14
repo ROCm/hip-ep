@@ -257,7 +257,11 @@ def PoolAllocsPass : Pass<"hip-pool-allocs", "mlir::func::FuncOp"> {
   }];
   let options = [
     Option<"alignment", "alignment", "int64_t", /*default=*/"256",
-           "Sub-buffer byte offset alignment (must be power of 2)">
+           "Sub-buffer byte offset alignment (must be power of 2)">,
+    Option<"emitFragmentationReport", "emit-fragmentation-report", "bool",
+           /*default=*/"false",
+           "Debug-only: emit a per-domain remark comparing the packed pool "
+           "size to the max-load lower bound. No effect on generated code.">
   ];
   let dependentDialects = [
     "mlir::hip::HipDialect",
@@ -528,6 +532,33 @@ def ResolveTensorDimsPass
   ];
 }
 
+def ResolveMemRefDimsPass
+    : Pass<"hip-resolve-memref-dims", "mlir::func::FuncOp"> {
+  let summary = "Fold `memref.dim` of view ops to root-buffer dims "
+                "(post-bufferize, before pooling)";
+  let description = [{
+    Post-bufferize twin of `--hip-resolve-tensor-dims`: re-applies the
+    reify-based `memref` dim folds plus the `memref.dim` canonicalisers so
+    `memref.dim` of a `memref.subview` / `expand_shape` / `collapse_shape` /
+    `view` folds to a dim of the root buffer (ultimately `memref.dim` of a
+    function argument).
+
+    The strided views that pin these queries are created during bufferization
+    and by `--hip-promote-strided-hip-operands`, i.e. after resolve-tensor-dims
+    ran, so the patterns had nothing to fold then. Re-rooting the size to a
+    block-top arg dim lets `--hip-hoist-alloc-size-arith` lift it, so
+    `--hip-pool-allocs` shares one pool across many allocs instead of splitting
+    a dominance domain per alloc. Placement: after promote-strided-operands /
+    materialize-host-scalars, before hoist-alloc-size-arith / pool-allocs.
+    Idempotent. See ResolveMemRefDims.cpp for the before/after IR.
+  }];
+  let dependentDialects = [
+    "mlir::affine::AffineDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
 def LoopBodyToOutParamsPass
     : Pass<"hip-loop-body-to-out-params", "mlir::ModuleOp"> {
   let summary = "Promote outlined hip.loop body returns to out-param ABI";
@@ -561,17 +592,23 @@ def UseOutputAllocatorPass
     : Pass<"hip-use-output-allocator", "mlir::func::FuncOp"> {
   let summary = "Rewrite returned memref.alloc outputs to hip.alloc_output";
   let description = [{
-    Replaces each graph-output memref.alloc (a value returned by func.return)
-    with hip.alloc_output, reusing the alloc's dynamic-size operands and setting
-    out_idx to the return operand position.  Output buffers are then obtained
-    from the EP output allocator (EP/runtime-owned) instead of being deallocated
-    or pooled.
+    Replaces each graph-output memref.alloc with hip.alloc_output, reusing the
+    alloc's dynamic-size operands and setting out_idx to its position in
+    func.return.  Output buffers then come from the EP output allocator (the EP
+    owns and frees them) instead of being deallocated or pooled.
 
-    Scope: only public (graph-entry) functions are rewritten.  Private helpers
-    (e.g. outlined onnx.Loop bodies) carry a !hip.context arg 0 and return
-    memref.allocs too, but their results are DLL-internal, never EP outputs, so
-    they are left unchanged.  Functions lacking !hip.context as argument 0 are
-    likewise skipped.
+    An alloc counts as a graph output when func.return hands it back -- either
+    directly, or after it passes through view ops (memref.cast,
+    memref.collapse_shape, memref.expand_shape, memref.subview, any number of
+    them).  The pass uses BufferViewFlowAnalysis to check this: an alloc is an
+    output if any value made from it via those view ops is returned.  This
+    handles reshaped / cast / subview'd outputs without special-casing each op.
+    The view ops between the alloc and the return are left in place.
+
+    Only public (graph-entry) functions are rewritten.  Private helpers (e.g.
+    outlined onnx.Loop bodies) also take a !hip.context arg and return allocs,
+    but those buffers stay inside the DLL and are not EP outputs, so they are
+    left unchanged.  Functions whose arg 0 is not !hip.context are skipped too.
 
     Leaves the function signature and func.return untouched.
   }];

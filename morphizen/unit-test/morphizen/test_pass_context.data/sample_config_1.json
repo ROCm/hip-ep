@@ -1,0 +1,44 @@
+{
+    "provider_options": {
+        "k0": "value0_in_config",
+        "k1": "value1_in_config",
+        "k2": "value2_in_config",
+        "xclbin": "abc_in_config.xclbin",
+        "cacheDir": "cacheDir_in_config",
+        "config_file": "config.json",
+        "cache_key": "cache_key_in_config",
+        "log_level": "info"
+    },
+    "passes": [
+        {
+            "name": "init",
+            "plugin": "morphizen-pass_init"
+        },
+        {
+            "name": "fuse-rele-dq",
+            "plugin": "morphizen-level1-pass-relu-dq"
+        }
+    ],
+    "target": "relu-dq-target",
+    "targets": [
+        {
+            "name": "relu-dq-target",
+            "pass": [
+                "init",
+                "fuse-rele-dq"
+            ],
+            "xclbin": "abc_in_target_proto.xclbin",
+            "provider_options": {
+                "k0": "value0_in_target_proto",
+                "k1": "value1_in_target_proto",
+                "k2": "value2_in_target_proto",
+                "k3": "value3_in_target_proto",
+                "k4": "value4_in_target_proto",
+                "pass.init.enable_dump": "1",
+                "pass.init.directory": "morphizen_init",
+                "pass.init.filename": "init-graph-for-requ-dq.onnx",
+                "XLNX_model_clone_external_data_threshold": "17179869184"
+            }
+        }
+    ]
+}

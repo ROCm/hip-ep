@@ -46,8 +46,24 @@ endif()
 option(BUILD_EP "Build the ONNX HIP DNN Execution Provider" OFF)
 option(BUILD_HIP_TOOLS "Build HIP MLIR compiler tools (hip-mlir-opt, hip-compiler)" OFF)
 option(BUILD_MOCK_RUNTIME "Build mock runtime (no GPU required)" ON)
+# Build the REAL runtime without the vendor BLAS/DNN backends (MIOpen + hipBLASLt).
+# The MIOpen/hipBLASLt-backed op wrappers compile to error-returning stubs that
+# preserve their ABI, and the model link + package discovery drop those libraries.
+# For targets whose ROCm distribution lacks a usable MIOpen/hipBLASLt (e.g. a
+# pre-silicon functional model, or a stripped SDK): the compiler still links and
+# runs; only conv/gemm/hipBLASLt/MIOpen-elementwise ops are unavailable (they
+# fail at runtime with a clear message unless a plugin supplies replacements).
+option(HIPDNN_EP_DISABLE_VENDOR_BLAS
+  "Build the real runtime without MIOpen/hipBLASLt (stub the vendor op wrappers)" OFF)
 option(BUILD_HIP_UNIT_TESTS "Build and register LIT and E2E tests with CTest" ON)
 option(BUILD_PYTHON_WHEEL "Configure the 'wheel' target that packages the EP as a Python wheel" OFF)
+
+# Compiler plugins are linked STATICALLY into the host at configure time (see
+# cmake/HipEpPlugins.cmake and docs/design/plugin-interface.md). Select which
+# plugins to link with -DHIPDNN_EP_COMPILER_PLUGINS=<id;...> (default empty). No
+# symbol export, no dynamic loader, identical on every platform. HipEpPlugins.cmake
+# is included in the BUILD_HIP_TOOLS block below (it needs the LLVM/MLIR toolchain
+# resolved first) and defines HIPDNN_EP_COMPILER_PLUGINS.
 
 # Centralized dependency resolution. Always included; internally partitions by
 # BUILD_EP / BUILD_HIP_TOOLS so a tools-only tree (BUILD_EP=OFF) still gets the
@@ -126,6 +142,12 @@ if(BUILD_HIP_TOOLS)
   include(AddLLVM)
   include(AddMLIR)
 
+  # Static compiler-plugin machinery: HIPDNN_EP_COMPILER_PLUGINS cache var +
+  # hipdnn_ep_compiler_plugin_register() + hipdnn_ep_finalize_static_plugins().
+  # Included here (after the LLVM/MLIR toolchain is resolved) and before
+  # add_subdirectory(lib)/(tools)/(test) so plugin packages can register.
+  include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/HipEpPlugins.cmake)
+
   llvm_map_components_to_libnames(llvm_libs Support Core)
 
   # FlatBuffers schemas (GenerateInterface pass metadata)
@@ -181,7 +203,32 @@ if(BUILD_HIP_TOOLS)
 
     # Runtime unit tests (GPU-free; native against mock types)
     add_subdirectory(test/runtime)
+
+    # Static compiler-plugin tests (sample plugin + unit test).
+    # See docs/design/plugin-interface.md.
+    add_subdirectory(test/plugin)
   endif()
+
+  # Out-of-tree plugin dirs (HIPDNN_EP_COMPILER_PLUGIN_PATHS): add each so it can
+  # register its plugin. Must run before finalize (below).
+  hipdnn_ep_add_external_plugins()
+
+  # Finalize static compiler plugins: generate the registrar include and link
+  # the selected plugin static libs into LibHipCompiler. Must run after every
+  # plugin package (in-tree: test/plugin; out-of-tree: the paths above) has
+  # registered.
+  hipdnn_ep_finalize_static_plugins()
+
+  # Hide the statically-absorbed LLVM/MLIR symbols from each host executable's
+  # dynamic table so they cannot interpose ROCm comgr's private libLLVM at HIP
+  # init (see hipdnn_ep_harden_comgr_safe() in cmake/HipEpPlugins.cmake). Applied
+  # unconditionally, not just when a plugin is selected: the tools link LLVM/MLIR
+  # statically regardless, so the interposition hazard is latent in every build.
+  foreach(_host_exe hip-test hip-compiler hip-mlir-opt hip-onnx-runner hip-inspect)
+    if(TARGET ${_host_exe})
+      hipdnn_ep_harden_comgr_safe(${_host_exe})
+    endif()
+  endforeach()
 endif()
 
 # Python wheel packaging (opt-in; defines the 'wheel' target). Added last so

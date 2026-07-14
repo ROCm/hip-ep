@@ -641,7 +641,7 @@ Rebuild the Vulkan baseline: `python scripts/build_whisper_vulkan.py --run` (sta
 
 - C++ 17, formatted with clang-format 16. Python formatted with ruff.
 - MIT license headers enforced by pre-commit hook (template: `LICENSES/license.txt`).
-- `3rd-party/` is excluded from all linting.
+- The vendored `morphizen/` subtree is formatted with the same clang-format/ruff config as first-party code; only MIT license-header insertion skips it (it keeps its upstream copyright headers).
 - Design documents live in `docs/design/`.
 - Use MorphiZen C++ wrappers (`morphizen_cxx::NodeConstRef`, etc.) for graph/node APIs — do not use raw ONNX protobuf methods.
 - The ONNX-to-HIP conversion uses MLIR's generic `Operation` API to match ops by name — no onnx-mlir headers required.

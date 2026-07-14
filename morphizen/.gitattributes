@@ -1,0 +1,2 @@
+ort-bridge/test/src/pt_resnet50.onnx.mlir filter=lfs diff=lfs merge=lfs -text
+unit-test/data/*.onnx filter=lfs diff=lfs merge=lfs -text
