@@ -1244,9 +1244,20 @@ def Hip_RopeOp : Hip_DpsOp<"rope", /*traits=*/[],
   let summary = "Rotary position embedding (RoPE)";
   let description = [{
     Applies rotary position embedding to the input tensor.
-    Implements the Microsoft RotaryEmbedding operator.
 
     Uses destination-passing style: output buffer is provided as argument.
+
+    `position_ids` is OPTIONAL, mirroring the two forms of the ONNX
+    RotaryEmbedding operator:
+    - Present (com.microsoft.RotaryEmbedding / native with position_ids):
+      cos_cache/sin_cache are a 2D lookup table `[max_position, rotary_dim/2]`
+      indexed by `position_ids[b, s]`.
+    - Absent (native ai.onnx RotaryEmbedding opset>=23 without position_ids):
+      cos_cache/sin_cache are already position-expanded to
+      `[batch, seq, rotary_dim/2]`, so the runtime indexes them directly by
+      the flattened token position `b*seq + s`. (HF exports precompute the
+      per-token cos/sin via a Gather, leaving the RotaryEmbedding node with
+      no position_ids operand.)
 
     Attributes:
     - interleaved: Rotary embedding interleaved format (0 or 1)
@@ -1267,7 +1278,7 @@ def Hip_RopeOp : Hip_DpsOp<"rope", /*traits=*/[],
   let arguments = (ins
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$input,
-    Hip_TensorOrMemRef:$position_ids,
+    Optional<Hip_TensorOrMemRef>:$position_ids,
     Hip_TensorOrMemRef:$cos_cache,
     Hip_TensorOrMemRef:$sin_cache,
     Hip_TensorOrMemRef:$output,
@@ -1276,10 +1287,17 @@ def Hip_RopeOp : Hip_DpsOp<"rope", /*traits=*/[],
     I64Attr:$rotary_embedding_dim
   );
 
+  // position_ids is the only optional operand; MLIR resolves its presence from
+  // the operand count (no AttrSizedOperandSegments needed). Each optional group
+  // must LEAD with the `,` literal: a group's first parsable element has to be a
+  // literal / variable / custom directive, so a bare `type(...)` directive
+  // cannot open the type-list group. Anchoring on $position_ids omits it from
+  // both the value and type lists when absent; the present-form IR prints
+  // identically to before.
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(`
-        $input `,` $position_ids `,` $cos_cache `,` $sin_cache `:`
-        type($input) `,` type($position_ids) `,` type($cos_cache) `,` type($sin_cache)
+        $input (`,` $position_ids^)? `,` $cos_cache `,` $sin_cache `:`
+        type($input) (`,` type($position_ids)^)? `,` type($cos_cache) `,` type($sin_cache)
     `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?

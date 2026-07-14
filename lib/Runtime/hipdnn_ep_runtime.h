@@ -1116,6 +1116,10 @@ int wrap_global_pool(RuntimeState *state, void *input, void *output,
 //                  (also covers 3D [batch, seq_len, num_heads*head_dim])
 //   is_bnsh != 0 : BNSH [batch, num_heads, seq_len, head_dim]
 //                  (ONNX com.microsoft.RotaryEmbedding 4D default; GQA K/V)
+// position_ids may be NULL: native ai.onnx RotaryEmbedding (opset >= 23)
+// without position_ids ships cos/sin already position-expanded to
+// [batch, seq_len, rotary_dim/2], and the kernel indexes them by the flat
+// token position b*seq+s instead of looking up position_ids.
 int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
                           void *cos_cache, void *sin_cache, void *output,
                           int64_t interleaved, int64_t batch_size,
