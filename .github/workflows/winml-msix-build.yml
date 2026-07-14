@@ -305,7 +305,10 @@ jobs:
       - name: Package hipep-wheels.zip
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
+          # pip writes warnings/progress to stderr; under the default Stop that
+          # would terminate the step (NativeCommandError). Use Continue + disable
+          # native-exit mapping, and gate on $LASTEXITCODE explicitly instead.
+          $ErrorActionPreference = 'Continue'
           $PSNativeCommandUseErrorActionPreference = $false
           $date = Get-Date -Format 'yyyyMMdd'
           $pkg = "$PWD\hip-python-package"
