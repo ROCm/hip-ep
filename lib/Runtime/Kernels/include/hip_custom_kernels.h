@@ -943,12 +943,13 @@ HIP_KERNEL_API int hip_reduce_sum(
  *
  * Same layout convention and `inner_size` semantics as hip_reduce_sum, but
  * divides the float-accumulated sum of each `reduce_size`-element slice by
- * reduce_size = num_input / num_output before the half narrowing. The division
- * is performed in-kernel so the op needs no compile-time-static reduce dim and
- * tolerates a dynamic reduce axis.
+ * reduce_size = num_input / num_output before narrowing to the output type. The
+ * division is performed in-kernel so the op needs no compile-time-static reduce
+ * dim and tolerates a dynamic reduce axis.
  *
- * Supported types: HIP_DTYPE_FLOAT16 only (ONNX ReduceMean is float-domain;
- * the true-fp16 EP path only ever feeds half tensors). Other dtypes return -1.
+ * Supported types: HIP_DTYPE_FLOAT16 and HIP_DTYPE_FLOAT32 (ONNX ReduceMean is
+ * float-domain; both the true-fp16 path and fp32-upcast RMSNorm-style paths
+ * feed this). Both accumulate in float. Other dtypes return -1.
  * Returns: 0 on success, non-zero on failure
  */
 HIP_KERNEL_API int hip_reduce_mean(
