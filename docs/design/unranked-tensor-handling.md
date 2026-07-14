@@ -125,7 +125,6 @@ ONNX file → ort-bridge → mlir-imp → MLIR module → onnx-to-hip-pipeline
                                                     ├─ hip-infer-shapes  ← single refinement
                                                     ├─ one-shot-bufferize
                                                     ├─ buffer-deallocation
-                                                    ├─ hip-optimize-memrefs
                                                     ├─ hip-pool-allocs
                                                     └─ ...
                                                   → hip-to-llvm-pipeline
