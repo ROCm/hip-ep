@@ -172,7 +172,6 @@ Bufferization is handled upstream. The `hip-compiler` pipeline is:
 
 For reference, the upstream bufferization passes (not part of `hip-compiler`) are:
 - **`--one-shot-bufferize`** — converts tensor DPS ops to memref in-place ops.
-- **`--hip-optimize-memrefs`** — liveness-based buffer reuse.
 - **`--hip-lower-allocs`** — converts `memref.alloc` to `hip.alloc` + `hip.free`.
 
 Details of `--convert-hip-to-llvm`:
@@ -195,7 +194,7 @@ with `runtime.bc` (pre-compiled bitcode) and external libraries to produce a `.d
 
 For manual debugging, `hip-mlir-opt` can run the pass pipeline in isolation:
 `--one-shot-bufferize="bufferize-function-boundaries"`,
-`--hip-optimize-memrefs`, `--hip-lower-allocs`,
+`--hip-lower-allocs`,
 `--convert-hip-to-llvm`, `--finalize-memref-to-llvm`, `--convert-arith-to-llvm`,
 `--convert-func-to-llvm`, `--reconcile-unrealized-casts`.
 
@@ -218,7 +217,6 @@ include/hip/Dialect/Transforms/
 lib/Dialect/IR/
   HipDialect.cpp           Dialect registration + DPS interface implementations
 lib/Dialect/Transforms/
-  OptimizeMemRefs.cpp      Buffer reuse pass (--hip-optimize-memrefs)
   PoolAllocs.cpp           Memory pooling pass (--hip-pool-allocs)
   LowerAllocs.cpp          memref.alloc -> hip.alloc pass (--hip-lower-allocs)
 lib/Conversion/HipToLLVM/

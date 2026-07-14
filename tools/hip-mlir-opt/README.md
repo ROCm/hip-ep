@@ -53,7 +53,6 @@ hip-mlir-opt after_onnx_to_hip.mlir --convert-hip-to-llvm > after_hip_to_llvm.ml
 - `--convert-hip-to-llvm` - Convert HIP operations to LLVM dialect
 - `--generate-interface` - Generate C-ABI interface functions
 - `--hip-add-context-arg` - Add runtime context argument
-- `--hip-optimize-memrefs` - Optimize memory reference operations
 - `--hip-pool-allocs` - Pack allocations into a single byte pool
 - `--hip-lower-allocs` - Lower allocation operations
 - `--hip-resolve-extern-constants` - Resolve external constant references

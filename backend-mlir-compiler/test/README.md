@@ -223,7 +223,7 @@ Use `hip-mlir-opt` to test the full ONNX→HIP→LLVM→Interface pipeline using
 ```
 
 This runs the complete compilation pipeline:
-1. `--onnx-to-hip-pipeline` — ONNX→HIP conversion, bufferization, memory optimizations (`hip-optimize-memrefs`, `hip-pool-allocs`, `hip-lower-allocs`, `hip-resolve-extern-constants`)
+1. `--onnx-to-hip-pipeline` — ONNX→HIP conversion, bufferization, memory optimizations (`hip-pool-allocs`, `hip-lower-allocs`, `hip-resolve-extern-constants`)
 2. `--hip-to-llvm-pipeline` — HIP→LLVM lowering and C interface generation
 
 If successful, this validates that all MLIR transformations work correctly.
@@ -307,7 +307,6 @@ mkdir -p "$TEMP_DIR/ir_dumps"
 **Individual pass names** (use with `--mlir-print-ir-before=<name>` or `--mlir-print-ir-after=<name>`):
 - `convert-onnx-to-hip` — ONNX to HIP conversion
 - `hip-add-context-arg` — Add runtime context argument
-- `hip-optimize-memrefs` — Optimize memory reference operations
 - `hip-pool-allocs` — Pack allocations into a single byte pool
 - `hip-lower-allocs` — Replace memref.alloc with hip.alloc/hip.free
 - `hip-resolve-extern-constants` — Resolve external constant references

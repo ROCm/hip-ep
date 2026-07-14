@@ -169,28 +169,6 @@ def ConvertHipToLLVMPass : Pass<"convert-hip-to-llvm", "mlir::ModuleOp"> {
   ];
 }
 
-def OptimizeMemRefsPass : Pass<"hip-optimize-memrefs", "mlir::func::FuncOp"> {
-  let summary = "Optimize memref buffers to reduce allocation count";
-  let description = [{
-    Performs liveness-based best-fit buffer reuse on straight-line bufferized
-    HIP IR.  Replaces memref.alloc ops with earlier compatible buffers whose
-    live ranges have ended, reducing peak memory usage.
-
-    Compatibility rules:
-      - Static shapes: any slot whose byte-size is >= the needed allocation
-        (same element type and memory space).  A memref.reinterpret_cast is
-        inserted when shapes differ.
-      - Dynamic shapes: the MemRefType must be identical and every dynamic-size
-        operand must be the same SSA value.
-
-    Only single-block functions are optimized; multi-block functions are left
-    unchanged.
-  }];
-  let dependentDialects = [
-    "mlir::memref::MemRefDialect"
-  ];
-}
-
 def PromoteStridedHipOperandsPass
     : Pass<"hip-promote-strided-operands", "mlir::func::FuncOp"> {
   let summary = "Materialize contiguous temporaries for non-canonical memref "
@@ -218,7 +196,7 @@ def PromoteStridedHipOperandsPass
     read the base of the parent buffer instead of the intended slice.
 
     Recommended pipeline position:
-      hip-optimize-memrefs -> hip-promote-strided-operands -> hip-pool-allocs
+      hip-promote-strided-operands -> hip-pool-allocs
 
     This placement ensures the new transient allocations are routed through
     the HIP memory pool instead of producing extra hipMalloc calls.
@@ -246,7 +224,7 @@ def PoolAllocsPass : Pass<"hip-pool-allocs", "mlir::func::FuncOp"> {
     Sub-buffer offsets are aligned to 256 bytes by default (configurable).
 
     Recommended pipeline position:
-      hip-optimize-memrefs (optional) -> hip-pool-allocs -> hip-lower-allocs
+      hip-pool-allocs -> hip-lower-allocs
 
     Emission strategy:
       Per-bucket size arithmetic and the pool acquisition are anchored at

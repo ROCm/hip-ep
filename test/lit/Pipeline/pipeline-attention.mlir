@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 //
 //===----------------------------------------------------------------------===//
-// End-to-end pipeline test: bufferization -> buffer reuse -> alloc lowering.
+// End-to-end pipeline test: bufferization -> pool-allocs -> alloc lowering.
 //
 // Models single-head scaled dot-product attention:
 //   Q  = X @ Wq          K  = X @ Wk          V  = X @ Wv
@@ -10,24 +10,33 @@
 //   scaled = scores * (1/sqrt(D))   probs = softmax(scaled)   out = probs @ V
 //
 // Allocation lifecycle through the pipeline:
-//   tensor IR:              8 tensor.empty (no allocation yet)
-//   after bufferize:        8 memref.alloc
-//   after optimize-memrefs: 4 memref.alloc (Q, KT, scores, scaled reuse slots)
-//   after lower-allocs:     4 hip.alloc, 3 hip.free (out is returned)
+//   tensor IR:          8 tensor.empty (no allocation yet)
+//   after bufferize:    8 memref.alloc (each 2*64*64*4 = 32768 B)
+//   after pool-allocs:  1 grow-on-demand pool sized to the concurrent peak of
+//                       4 live 32768 B buffers = 131072 B, plus 8 memref.view.
+//                       Disjoint-lifetime buffers share pool offsets, so the peak
+//                       is 4 slots (the same reuse a liveness best-fit buffer
+//                       pass would find) -- no separate reuse pass is needed.
+//   after lower-allocs: unchanged -- every transient is a pool view and the pool
+//                       is runtime-owned, so there are no hip.alloc / hip.free.
 //===----------------------------------------------------------------------===//
 
-// RUN: hip-mlir-opt --one-shot-bufferize="bufferize-function-boundaries" --hip-optimize-memrefs --hip-lower-allocs %s | FileCheck %s
+// RUN: hip-mlir-opt --one-shot-bufferize="bufferize-function-boundaries" --hip-pool-allocs --hip-lower-allocs %s | FileCheck %s
 
 // CHECK-LABEL: func.func @attention_pipeline
 
-// Exactly 4 hip.alloc ops after reuse.
-// CHECK-COUNT-4: hip.alloc
+// One grow-on-demand pool sized to the 4-slot concurrent peak (4 * 32768 = 131072).
+// CHECK:         %[[SZ:.*]] = arith.constant 131072 : index
+// CHECK:         hip.get_pool(%arg0, %[[SZ]])
 
-// No memref.alloc should remain after lowering.
-// CHECK-NOT:   memref.alloc
+// The 8 transients become views into that single pool.
+// CHECK-COUNT-8: memref.view
 
-// Exactly 3 hip.free ops (the returned buffer is not freed).
-// CHECK-COUNT-3: hip.free
+// Pooling subsumes buffer reuse: no standalone allocation survives, and the
+// runtime-owned pool needs no per-buffer alloc/free.
+// CHECK-NOT:     memref.alloc
+// CHECK-NOT:     hip.alloc
+// CHECK-NOT:     hip.free
 
 func.func @attention_pipeline(
     %ctx: !hip.context,

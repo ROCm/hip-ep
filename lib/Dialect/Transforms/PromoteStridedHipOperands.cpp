@@ -35,7 +35,7 @@
 //
 // Pipeline placement
 // ------------------
-// Run between hip-optimize-memrefs and hip-pool-allocs (see Pipelines.cpp).
+// Run before hip-pool-allocs (see Pipelines.cpp).
 // PoolAllocs replaces every memref.alloc with a memref.view into the pool
 // and erases deallocs whose target is a view, so the new transient buffers
 // fold cleanly into the existing pool — no extra hipMalloc per inference.
