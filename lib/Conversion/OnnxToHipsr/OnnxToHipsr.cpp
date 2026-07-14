@@ -40,10 +40,33 @@ struct ConvertOnnxToHipsrPass
     // generated hipsr / shape-region IR is left untouched.
     ::mlir::GreedyRewriteConfig config;
     config.setStrictness(::mlir::GreedyRewriteStrictness::ExistingOps);
-    // Keep constant CSE off: it would hoist a shape region's index constants
-    // out to the enclosing func, breaking the self-containment the region's
-    // scoping verifier requires (only op operands / in-region values). Body
-    // constant CSE is a later -cse/-canonicalize's job, not this pass's.
+
+    // The greedy driver's constant CSE would hoist index constants out of the
+    // shape region to the nearest isolated ancestor (typically the enclosing
+    // func) and deduplicate them.
+    //
+    // However, ShapeRegionInterface requires a shape region to be
+    // self-contained: it may only reference the current Op's operands or values
+    // defined within the region itself. This ensures the shape region remains
+    // the single source of truth for shape computation and can be relocated as
+    // a whole.
+    //
+    // Hoisting constants out of the region would violate this requirement. For
+    // example, with CSE on the %c0 below is hoisted to the func entry, so the
+    // region uses a value defined outside it and the verifier rejects the op:
+    //
+    //   func.func @f(%in: tensor<?x8xf32>) -> tensor<?x8xf16> {
+    //     %c0 = arith.constant 0 : index          // hoisted out of the region
+    //     %init = tensor.empty(%d) : tensor<?x8xf16>
+    //     %0 = hipsr.cast ins(%in ...) outs(%init ...) -> ... shape_region {
+    //       %s  = shape.shape_of %in : tensor<?x8xf32> -> tensor<2xindex>
+    //       %e0 = shape.get_extent %s, %c0 : ...   // uses %c0 from outside
+    //       hipsr.shape_yield %e0
+    //     }
+    //     return %0 : tensor<?x8xf16>
+    //   }
+    //
+    // so enableConstantCSE is set to false.
     config.enableConstantCSE(false);
     if (::mlir::failed(::mlir::applyPatternsGreedily(
             getOperation(), std::move(patterns), config)))
