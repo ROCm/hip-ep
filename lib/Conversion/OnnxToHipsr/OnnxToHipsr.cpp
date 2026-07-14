@@ -26,6 +26,9 @@ namespace hipsr {
 #define GEN_PASS_DEF_CONVERTONNXTOHIPSRPASS
 #include "hip/Conversion/Passes.h.inc"
 
+void populateCastConversionPatterns(::mlir::RewritePatternSet &patterns,
+                                    ::mlir::MLIRContext *ctx);
+
 namespace {
 
 struct ConvertOnnxToHipsrPass
@@ -33,6 +36,7 @@ struct ConvertOnnxToHipsrPass
   void runOnOperation() override {
     ::mlir::RewritePatternSet patterns(&getContext());
     populateOnnxToHipsrConstantPatterns(patterns);
+    populateCastConversionPatterns(patterns, &getContext());
 
     // Same driver/config as convert-onnx-to-hip (greedy, ExistingOps): ONNX ops
     // are matched by name and only the ops present on entry are rewritten, so
