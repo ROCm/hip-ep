@@ -162,7 +162,7 @@ Run ALL commands from the project root:
 
 ```bash
 # Navigate to project root ONCE
-cd /c/Develop/m/onnx-hipdnn-ep/mlir-integration  # Adjust to your path
+cd /c/Develop/m/hip-ep/mlir-integration  # Adjust to your path
 
 # Set up directory variables
 PROJECT_ROOT=$(pwd)
@@ -380,7 +380,7 @@ Here's the complete workflow that was used to debug the "failed to legalize onnx
 
 ```bash
 # Set up environment
-cd /c/Develop/m/onnx-hipdnn-ep/mlir-integration
+cd /c/Develop/m/hip-ep/mlir-integration
 PROJECT_ROOT=$(pwd)
 BUILD_DIR="$PROJECT_ROOT/build/test"
 LOCAL_DIR="$PROJECT_ROOT/../../local"  # Two levels up from project root
@@ -648,7 +648,7 @@ backend-mlir-compiler/test/
 ### Path Examples
 ```bash
 # ✅ Good - All commands from project root
-cd /c/Develop/m/onnx-hipdnn-ep/mlir-integration
+cd /c/Develop/m/hip-ep/mlir-integration
 "$LOCAL_DIR/bin/hip-mlir-opt" --onnx-to-hip-pipeline --hip-to-llvm-pipeline "$TEMP_DIR/input.mlir"
 
 # ❌ Bad - Using cd, relative paths, workspace pollution
