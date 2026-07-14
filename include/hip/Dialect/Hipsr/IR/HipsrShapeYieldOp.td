@@ -1,0 +1,43 @@
+//
+// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+//
+// The hipsr.shape_yield op: the terminator of a hipsr shape region. Compute
+// ops and the shared Hipsr_Op base class live in HipsrOps.td.
+//
+
+#ifndef HIPSR_SHAPE_YIELD_OP
+#define HIPSR_SHAPE_YIELD_OP
+
+include "mlir/Interfaces/SideEffectInterfaces.td"
+include "hip/Dialect/Hipsr/IR/HipsrOps.td"
+
+//===----------------------------------------------------------------------===//
+// Hipsr_ShapeYieldOp
+//===----------------------------------------------------------------------===//
+
+def Hipsr_ShapeYieldOp : Hipsr_Op<"shape_yield", [Pure, Terminator]> {
+  let summary = "Terminator of a hipsr shape region";
+  let description = [{
+    Terminates a shape region and yields the computed output dimensions as
+    `index` values. Every shape region ends with exactly one `shape_yield`.
+
+    In Phase 1 a shape region is attached to a shaped op and computes that
+    op's output shape; `shape_yield` hands the resulting per-dimension SSA
+    values back to the enclosing op. A zero-operand `shape_yield` denotes a
+    rank-0 (scalar) result.
+
+    Example:
+    ```mlir
+    hipsr.shape_yield %d0, %d1
+    ```
+  }];
+
+  let arguments = (ins Variadic<Index>:$dims);
+
+  // Operands are always `index` (Variadic<Index>), so the types are redundant
+  // and omitted from the assembly (cf. scf.yield / func.return practice).
+  let assemblyFormat = "attr-dict ($dims^)?";
+}
+
+#endif // HIPSR_SHAPE_YIELD_OP
