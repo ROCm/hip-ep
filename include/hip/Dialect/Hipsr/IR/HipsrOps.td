@@ -10,6 +10,7 @@ include "mlir/IR/OpBase.td"
 include "mlir/Interfaces/DestinationStyleOpInterface.td"
 include "hip/Dialect/Hipsr/IR/HipsrDialect.td"
 include "hip/Dialect/Hipsr/IR/HipsrTypes.td"
+include "hip/Dialect/Hipsr/IR/HipsrTraits.td"
 include "hip/Dialect/Hipsr/IR/HipsrShapeRegionInterface.td"
 
 //===----------------------------------------------------------------------===//
@@ -31,6 +32,8 @@ class Hipsr_Op<string mnemonic, list<Trait> traits = []> :
 //     trait auto-inserts that terminator and structurally checks it;
 //   - implements ShapeRegionInterface, the single source of truth for shape
 //     computation (each op provides populateShapeRegion());
+//   - carries IsolatedFromAboveButAllowOperands, so the shape region may only
+//     use the op's operands and values defined inside the region;
 //   - uses destination-passing style (DestinationStyleOpInterface): its output
 //     buffer(s) are passed as `outs` init operands (getDpsInitsMutable is
 //     op-defined).
@@ -42,6 +45,7 @@ class Hipsr_DpsOp<string mnemonic, list<Trait> traits = []> :
         DeclareOpInterfaceMethods<ShapeRegionInterface, ["populateShapeRegion"]>,
         DeclareOpInterfaceMethods<DestinationStyleOpInterface,
                                   ["getDpsInitsMutable"]>,
+        IsolatedFromAboveButAllowOperands,
         SingleBlockImplicitTerminator<"ShapeYieldOp">
       ], traits)> {
   let regions = (region SizedRegion<1>:$shape_region);

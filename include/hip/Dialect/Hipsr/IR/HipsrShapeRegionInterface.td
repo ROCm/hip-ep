@@ -26,19 +26,20 @@ def ShapeRegionInterface : OpInterface<"ShapeRegionInterface"> {
     the op's output dimensions and ends with a `hipsr.shape_yield`. The
     populate* methods emit that region; the get* accessors retrieve it.
 
-    REQUIREMENT: an op implementing this interface MUST also add the
-    `SingleBlockImplicitTerminator<"ShapeYieldOp">` trait, e.g.
+    REQUIREMENT: an op implementing this interface MUST also add two traits
+    (MLIR interfaces cannot auto-attach traits), e.g.
 
       def Hipsr_MatMulOp : Hipsr_Op<"matmul", [
           ShapeRegionInterface,
+          IsolatedFromAboveButAllowOperands,
           SingleBlockImplicitTerminator<"ShapeYieldOp">
       ]> { ... }
 
-    The trait provides automatic terminator insertion; MLIR interfaces cannot
-    auto-attach traits, so the interface verifier defensively checks the shape
-    region's single-block/terminator structure (verifyShapeRegionStructure)
-    before enforcing the scoping rules (verifyShapeRegionScoping), giving a
-    clear error instead of a downstream crash if the trait is forgotten.
+    `SingleBlockImplicitTerminator<"ShapeYieldOp">` inserts the terminator;
+    `IsolatedFromAboveButAllowOperands` restricts what the shape region may use.
+    The interface verifier checks the region structure and that the trait is
+    present (so a missing trait gives a clear error); the trait's own verifier
+    does the scoping check.
 
     Operation categories (barrier markers are separate interfaces):
     - Regular (MatMul, Add): no block arguments, one shape, depends on input shapes.
@@ -92,7 +93,13 @@ def ShapeRegionInterface : OpInterface<"ShapeRegionInterface"> {
   let verify = [{
     if (::mlir::failed(::mlir::hipsr::verifyShapeRegionStructure($_op)))
       return ::mlir::failure();
-    return ::mlir::hipsr::verifyShapeRegionScoping($_op);
+    // The trait's verifier does the scoping check; just require it be present.
+    if (!$_op->hasTrait<
+            ::mlir::hipsr::OpTrait::IsolatedFromAboveButAllowOperands>())
+      return $_op->emitOpError(
+          "ShapeRegionInterface requires the "
+          "IsolatedFromAboveButAllowOperands trait");
+    return ::mlir::success();
   }];
 }
 
