@@ -20,6 +20,10 @@ void registerConversionPasses() {
   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
     return mlir::hip::createConvertHipToLLVMPass();
   });
+
+  // convert-onnx-to-hipsr (TableGen-defined, registered via its generated
+  // registrar).
+  mlir::hipsr::registerOnnxToHipsrPasses();
 }
 
 } // namespace hip::compiler

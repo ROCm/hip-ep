@@ -8,7 +8,7 @@ add_library(OnnxToHipsr STATIC
 )
 
 add_dependencies(OnnxToHipsr
-  HipsrTransformsPassesIncGen
+  HipsrConversionPassesIncGen
   HipsrDialectIncGen
 )
 

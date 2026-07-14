@@ -5,4 +5,4 @@
 
 set(LLVM_TARGET_DEFINITIONS Passes.td)
 mlir_tablegen(Passes.h.inc -gen-pass-decls -name OnnxToHipsr)
-add_public_tablegen_target(HipsrTransformsPassesIncGen)
+add_public_tablegen_target(HipsrConversionPassesIncGen)

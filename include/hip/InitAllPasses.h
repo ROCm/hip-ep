@@ -9,7 +9,6 @@
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/Passes.h"
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
-#include "hip/Dialect/Hipsr/Transforms/Passes.h"
 #include "hip/Dialect/IR/HipBufferize.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
@@ -138,15 +137,12 @@ inline void registerAllPasses() {
   mlir::hip::registerHipPipelines();
 
   // Conversion passes (convert-onnx-to-hip, outline-onnx-to-hipdnn,
-  // convert-hip-to-llvm); onnx-loop-outline is hand-written, not in the .td
-  // set, so it is registered separately below.
+  // convert-hip-to-llvm, convert-onnx-to-hipsr); onnx-loop-outline is
+  // hand-written, not in the .td set, so it is registered separately below.
   registerConversionPasses();
   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
     return mlir::hip::createOnnxLoopOutlinePass();
   });
-
-  // hipsr conversion passes (convert-onnx-to-hipsr).
-  mlir::hipsr::registerOnnxToHipsrPasses();
 
   // Standard MLIR passes the production pipeline interleaves, registered so an
   // override can name them around the hip-* passes. The registrar names differ
