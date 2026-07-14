@@ -3,8 +3,8 @@
  * Licensed under the MIT License.
  */
 
-#ifndef HIPSR_OPS_H
-#define HIPSR_OPS_H
+#ifndef HIPSR_SHAPE_YIELD_OP_H
+#define HIPSR_SHAPE_YIELD_OP_H
 
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 
@@ -15,6 +15,6 @@
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
 #define GET_OP_CLASSES
-#include "hip/Dialect/Hipsr/IR/HipsrOps.h.inc"
+#include "hip/Dialect/Hipsr/IR/HipsrShapeYieldOp.h.inc"
 
-#endif // HIPSR_OPS_H
+#endif // HIPSR_SHAPE_YIELD_OP_H

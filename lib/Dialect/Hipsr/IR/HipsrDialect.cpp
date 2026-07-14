@@ -6,6 +6,7 @@
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
+#include "hip/Dialect/Hipsr/IR/HipsrShapeYieldOp.h"
 
 #include "llvm/ADT/TypeSwitch.h"
 
@@ -25,6 +26,10 @@ using namespace mlir::hipsr;
 #include "hip/Dialect/Hipsr/IR/HipsrAttrs.cpp.inc"
 
 void HipsrDialect::initialize() {
+  addOperations<
+#define GET_OP_LIST
+#include "hip/Dialect/Hipsr/IR/HipsrShapeYieldOp.cpp.inc"
+      >();
   addOperations<
 #define GET_OP_LIST
 #include "hip/Dialect/Hipsr/IR/HipsrOps.cpp.inc"
