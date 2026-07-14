@@ -24,7 +24,7 @@ namespace mlir {
 namespace hipsr {
 
 #define GEN_PASS_DEF_CONVERTONNXTOHIPSRPASS
-#include "hip/Conversion/OnnxToHipsr/Passes.h.inc"
+#include "hip/Conversion/Passes.h.inc"
 
 namespace {
 

@@ -15,8 +15,8 @@ add_library(HipConversion STATIC
   Passes.cpp
 )
 
-# Passes.cpp includes hip/Conversion/OnnxToHipsr/Passes.h -> Passes.h.inc.
-add_dependencies(HipConversion HipsrConversionPassesIncGen)
+# Passes.cpp includes hip/Conversion/Passes.h -> Passes.h.inc.
+add_dependencies(HipConversion HipConversionPassIncGen)
 
 target_link_libraries(HipConversion PUBLIC
   OnnxToHip
