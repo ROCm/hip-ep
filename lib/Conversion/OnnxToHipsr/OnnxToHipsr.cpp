@@ -35,12 +35,22 @@ struct ConvertOnnxToHipsrPass
     // Per-op ONNX -> hipsr conversion patterns are registered by follow-up
     // layers (e.g. Cast) that add both the hipsr op and its pattern here.
 
+    // Same driver/config as convert-onnx-to-hip (greedy, ExistingOps): ONNX ops
+    // are matched by name and only the ops present on entry are rewritten, so
+    // generated hipsr / shape-region IR is left untouched.
     ::mlir::GreedyRewriteConfig config;
     config.setStrictness(::mlir::GreedyRewriteStrictness::ExistingOps);
-    // Do not CSE constants across region boundaries: the index constants a
-    // shaped op emits inside its shape region must stay there (the region's
-    // scoping verifier only allows op operands / in-region values), so they
-    // must not be hoisted to merge with identical constants in the parent.
+    // The one hipsr-specific delta vs convert-onnx-to-hip: keep constant CSE
+    // off. A shaped op's populateShapeRegion emits its output-shape computation
+    // (including index constants) inside the op's shape region, which is
+    // deliberately NOT IsolatedFromAbove so it can reference the op's operands.
+    // The greedy driver's constant CSE would hoist those constants to the
+    // nearest isolated ancestor (the enclosing func) and dedup them, moving
+    // them out of the region. ShapeRegionInterface's scoping verifier requires
+    // the region to be self-contained (uses only op operands or in-region
+    // values) so it stays relocatable as the single source of truth for shape;
+    // hoisting would violate that. Body-level constant CSE is not this
+    // conversion pass's job anyway -- a later -cse/-canonicalize handles it.
     config.enableConstantCSE(false);
     if (::mlir::failed(::mlir::applyPatternsGreedily(
             getOperation(), std::move(patterns), config)))
