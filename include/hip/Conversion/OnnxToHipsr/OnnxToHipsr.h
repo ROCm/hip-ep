@@ -3,8 +3,8 @@
  * Licensed under the MIT License.
  */
 
-#ifndef HIP_CONVERSION_ONNXTOHIPSR_PASSES_H
-#define HIP_CONVERSION_ONNXTOHIPSR_PASSES_H
+#ifndef HIP_CONVERSION_ONNXTOHIPSR_ONNXTOHIPSR_H
+#define HIP_CONVERSION_ONNXTOHIPSR_ONNXTOHIPSR_H
 
 #include "mlir/Pass/Pass.h"
 
@@ -23,4 +23,4 @@ namespace hipsr {
 } // namespace hipsr
 } // namespace mlir
 
-#endif // HIP_CONVERSION_ONNXTOHIPSR_PASSES_H
+#endif // HIP_CONVERSION_ONNXTOHIPSR_ONNXTOHIPSR_H

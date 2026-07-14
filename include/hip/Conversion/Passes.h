@@ -8,7 +8,7 @@
 #include "hip/Conversion/HipToLLVM/Passes.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
-#include "hip/Conversion/OnnxToHipsr/Passes.h"
+#include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
 
 namespace mlir {
 namespace hipsr {
