@@ -28,5 +28,6 @@ add_dependencies(HipsrDialectIR
 target_link_libraries(HipsrDialectIR PUBLIC
   MLIRIR
   MLIRSupport
-  MLIRTensorDialect
+  MLIRArithDialect
+  MLIRShapeDialect
 )
