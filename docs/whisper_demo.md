@@ -99,7 +99,7 @@ The minimal flow:
 import pathlib, sys
 import numpy as np
 
-REPO_ROOT = pathlib.Path("/path/to/onnx-hipdnn-ep")
+REPO_ROOT = pathlib.Path("/path/to/hip-ep")
 sys.path.insert(0, str(REPO_ROOT / "test" / "python"))
 sys.path.insert(0, str(REPO_ROOT / "test" / "python" / "whisper"))
 

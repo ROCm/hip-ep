@@ -5,7 +5,7 @@ Licensed under the MIT License.
 # Authoring a hip-compiler Plugin
 
 **Audience:** down-stream teams writing a plugin static library that extends
-`onnx-hipdnn-ep` with custom MLIR passes, a vendor dialect and op, runtime
+`hip-ep` with custom MLIR passes, a vendor dialect and op, runtime
 kernels, or link libraries. (A plugin does not add ONNX ops; it contributes
 compiler extensions. The host is an ONNX execution provider, which is why the
 pipeline and slot names below are ONNX-centric.)
@@ -99,13 +99,13 @@ To build and exercise the sample end-to-end, select it into the build:
 
 ```bash
 # Configure with the sample plugin selected, then build.
-cmake -S onnx-hipdnn-ep -B build/onnx-hipdnn-ep -DHIPDNN_EP_COMPILER_PLUGINS=sample ...
-cmake --build build/onnx-hipdnn-ep --config Release
+cmake -S hip-ep -B build/hip-ep -DHIPDNN_EP_COMPILER_PLUGINS=sample ...
+cmake --build build/hip-ep --config Release
 
 # The plugin is now statically linked into hip-compiler / hip-mlir-opt. Run the
 # plugin LIT tests (scoped to the Plugin dir) and the unit test:
-lit -sv build/onnx-hipdnn-ep/test/lit/Plugin
-build/onnx-hipdnn-ep/bin/test_static_plugins
+lit -sv build/hip-ep/test/lit/Plugin
+build/hip-ep/bin/test_static_plugins
 ```
 
 Note: a selected plugin is active for every compile in that build, so run the
@@ -141,7 +141,7 @@ with a clear message:
 ```cmake
 if(NOT COMMAND hipdnn_ep_compiler_plugin_register)
   message(FATAL_ERROR
-    "co-build this plugin into onnx-hipdnn-ep via "
+    "co-build this plugin into hip-ep via "
     "-DHIPDNN_EP_COMPILER_PLUGIN_PATHS=<this dir>; it is not standalone.")
 endif()
 
@@ -490,7 +490,7 @@ reference.
 
 Before shipping a plugin to consumers:
 
-- [ ] Plugin builds as part of the same `onnx-hipdnn-ep` build (same LLVM/MLIR
+- [ ] Plugin builds as part of the same `hip-ep` build (same LLVM/MLIR
       version, same flags). It is selected with
       `-DHIPDNN_EP_COMPILER_PLUGINS=<id>` and registered via
       `hipdnn_ep_compiler_plugin_register`.
