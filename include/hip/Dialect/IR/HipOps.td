@@ -994,6 +994,52 @@ def Hip_RmsNormOp : Hip_DpsOp<"rms_norm", /*traits=*/[OpStateOpInterface],
   let hasVerifier = 1;
 }
 
+def Hip_L2NormOp : Hip_DpsOp<"l2_norm", /*traits=*/[],
+                             /*outsAccessor=*/"Output",
+                             /*autoReify=*/1,
+                             /*autoInfer=*/1,
+                             /*declareInfer=*/1> {
+  let summary = "LpNormalization last-axis fast path, fused into one kernel";
+  let description = [{
+    Fused `onnx.LpNormalization` for the trailing (contiguous) normalization
+    axis, replacing the Mul -> ReduceSum -> Sqrt -> Div decomposition with a
+    single kernel.
+
+    Formula (reduce over the axis given by `axis`, which must be the last
+    dim):
+      p == 2: output = input / sqrt(sum(input^2))
+      p == 1: output = input / sum(|input|)
+
+    No epsilon / clamp: numerics match the decomposition (ORT CPU behaviour;
+    NaN/Inf on an all-zero row). Destination-passing style.
+
+    Example:
+    ```mlir
+    hip.l2_norm(%ctx)
+        ins(%input : memref<1x128x4096xf16, 1>)
+        outs(%output : memref<1x128x4096xf16, 1>)
+        {axis = -1 : i64, p = 2 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$output,
+    I64Attr:$axis,
+    I64Attr:$p
+  );
+
+  // result_tensors inherited from Hip_DpsOp
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  let hasVerifier = 1;
+}
+
 def Hip_LayerNormOp : Hip_DpsOp<"layer_norm",
     [AttrSizedOperandSegments]> {
   let summary = "Standard layer normalization (ONNX LayerNormalization opset 17)";

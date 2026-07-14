@@ -303,12 +303,80 @@ struct LayerNormOpLowering : public ConvertOpToLLVMPattern<LayerNormOp> {
   }
 };
 
+// hip.l2_norm(%ctx) ins(%input) outs(%output) {axis, p}
+//   -> wrap_l2_norm(state, input, output,
+//                   input_num_elements, norm_size, element_size_bytes, p)
+//
+// Only the trailing-axis case reaches here (guaranteed by the ONNX-level
+// reroute), so norm_size is the static last dim and outer = input_num /
+// norm_size is computed in the runtime.
+struct L2NormOpLowering : public ConvertOpToLLVMPattern<L2NormOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(L2NormOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+
+    Value statePtr = adaptor.getCtx();
+    Value inputPtr =
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
+
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+    Value inputNumElements =
+        computeNumElements(inputType, adaptor.getInput(), rewriter, loc);
+
+    // norm_size = trailing (normalization-axis) dim. The reroute only fires
+    // when the last dim is static, so read it straight from the type.
+    int64_t lastDim = inputType.getShape().back();
+    Value normSizeVal = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(lastDim));
+
+    Type elementType = inputType.getElementType();
+    unsigned elementSizeBytes = elementType.getIntOrFloatBitWidth() / 8;
+    Value elementSizeBytesVal = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(elementSizeBytes));
+
+    Value pVal = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(op.getP()));
+
+    // Runtime function signature (7 params):
+    //   state, input, output, input_num_elements, norm_size,
+    //   element_size_bytes, p
+    SmallVector<Type> paramTypes = {
+        ptrType,          // state
+        ptrType, ptrType, // input, output
+        i64Type, i64Type, // input_num_elements, norm_size
+        i64Type, i64Type  // element_size_bytes, p
+    };
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapL2Norm, paramTypes, rewriter.getI32Type());
+    if (failed(funcOp))
+      return failure();
+
+    SmallVector<Value> args = {statePtr,         inputPtr,
+                               outputPtr,        inputNumElements,
+                               normSizeVal,      elementSizeBytesVal,
+                               pVal};
+
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 } // namespace
 
 void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns) {
-  patterns.add<RmsNormOpLowering, SkipRmsNormOpLowering, LayerNormOpLowering>(
-      converter);
+  patterns.add<RmsNormOpLowering, SkipRmsNormOpLowering, LayerNormOpLowering,
+               L2NormOpLowering>(converter);
 }
 
 } // namespace hip

@@ -70,15 +70,32 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Debug.h"
 
+#include <cstdlib>
+#include <cstring>
+
 #define DEBUG_TYPE "lpnormalization-decompose"
 
 STATISTIC(NumLpNormalizationRewrites,
           "onnx.LpNormalization rewrites into Mul / ReduceSum / Sqrt / Div");
+STATISTIC(NumLpNormalizationFused,
+          "onnx.LpNormalization fused into a single hip.l2_norm op");
 
 namespace mlir {
 namespace hip {
 
 namespace {
+
+// Opt-in toggle for the fused last-axis hip.l2_norm fast path. Off by default
+// so the baseline (decomposition) is unchanged until the A/B measurement
+// justifies flipping the default. Enabled when HIPDNN_EP_FUSE_LPNORM is set to
+// a non-zero / non-"off" value.
+inline bool lpNormFuseEnabled() {
+  const char *v = std::getenv("HIPDNN_EP_FUSE_LPNORM");
+  if (!v || !*v)
+    return false;
+  return std::strcmp(v, "0") != 0 && std::strcmp(v, "off") != 0 &&
+         std::strcmp(v, "false") != 0;
+}
 
 /// Decomposes `onnx.LpNormalization` into a chain of already-supported ONNX
 /// primitives. See file header for the rewrite shape and the rationale for
@@ -214,11 +231,98 @@ struct LpNormalizationDecompose : public mlir::RewritePattern {
   }
 };
 
+/// Fuses `onnx.LpNormalization` into a single `hip.l2_norm` op when the
+/// normalization axis is the trailing (contiguous) axis with a STATIC extent
+/// and `p` is 1 or 2. Higher benefit than `LpNormalizationDecompose`, so the
+/// greedy driver tries this first and only falls back to the decomposition
+/// when this pattern reports a match failure (toggle off, non-last axis,
+/// dynamic last dim, or an unsupported dtype). Emits the hip.* op directly
+/// (like the other Norm conversions) — legal in the pre-lowering loop because
+/// the ctx handle is the enclosing function's first argument.
+struct LpNormToHip : public mlir::RewritePattern {
+  LpNormToHip(mlir::MLIRContext *ctx)
+      : RewritePattern("onnx.LpNormalization", /*benefit=*/3, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    if (!lpNormFuseEnabled())
+      return rewriter.notifyMatchFailure(op, "lpnorm.fuse_disabled");
+
+    if (op->getNumOperands() != 1 || op->getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "lpnorm.arity");
+
+    mlir::Value x = op->getOperand(0);
+    auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(x.getType());
+    auto outputType =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    if (!inputType || !outputType)
+      return rewriter.notifyMatchFailure(op, "lpnorm.not_ranked");
+    if (inputType.getShape() != outputType.getShape() ||
+        inputType.getElementType() != outputType.getElementType())
+      return rewriter.notifyMatchFailure(op, "lpnorm.in_out_type_mismatch");
+
+    int64_t rank = inputType.getRank();
+    if (rank == 0)
+      return rewriter.notifyMatchFailure(op, "lpnorm.scalar_input");
+
+    int64_t axis = -1;
+    if (auto axisAttr = op->getAttrOfType<mlir::IntegerAttr>("axis"))
+      axis = axisAttr.getSInt();
+    int64_t normAxis = axis < 0 ? axis + rank : axis;
+    if (normAxis < 0 || normAxis >= rank)
+      return rewriter.notifyMatchFailure(op, "lpnorm.axis_oob");
+
+    // Fast path requires the trailing (contiguous) axis with a static extent:
+    // the kernel reshapes to [outer, norm_size] and norm_size is a compile-time
+    // constant. Anything else falls back to the decomposition.
+    if (normAxis != rank - 1)
+      return rewriter.notifyMatchFailure(op, "lpnorm.not_last_axis");
+    if (inputType.isDynamicDim(normAxis))
+      return rewriter.notifyMatchFailure(op, "lpnorm.dynamic_norm_dim");
+
+    int64_t p = 2;
+    if (auto pAttr = op->getAttrOfType<mlir::IntegerAttr>("p"))
+      p = pAttr.getSInt();
+    if (p != 1 && p != 2)
+      return rewriter.notifyMatchFailure(op, "lpnorm.p_not_1_or_2");
+
+    // Kernel supports fp16 / fp32 only. Other float types (bf16, f64) stay on
+    // the decomposition path.
+    auto elemType = inputType.getElementType();
+    if (!elemType.isF16() && !elemType.isF32())
+      return rewriter.notifyMatchFailure(op, "lpnorm.dtype_not_f16_f32");
+
+    auto ctxOrFailure = getContextArg(op, rewriter);
+    if (mlir::failed(ctxOrFailure))
+      return rewriter.notifyMatchFailure(op, "lpnorm.missing_context");
+    mlir::Value context = *ctxOrFailure;
+
+    mlir::Location loc = op->getLoc();
+    mlir::Value init = createEmptyTensor(rewriter, loc, outputType, x);
+
+    auto axisI64Attr = rewriter.getI64IntegerAttr(normAxis);
+    auto pI64Attr = rewriter.getI64IntegerAttr(p);
+
+    // DPS: result type inferred from `init`. Arg order matches HipOps.td:
+    // (ctx, input, output, axis, p).
+    auto hipOp = mlir::hip::L2NormOp::create(rewriter, loc, context, x, init,
+                                             axisI64Attr, pI64Attr);
+
+    rewriter.replaceOp(op, hipOp->getResult(0));
+    ++NumLpNormalizationFused;
+    LLVM_DEBUG(llvm::dbgs()
+               << "[" DEBUG_TYPE "] fused LpNormalization " << inputType
+               << " axis=" << normAxis << " p=" << p << " -> hip.l2_norm\n");
+    return mlir::success();
+  }
+};
+
 } // namespace
 
 void populateLpNormalizationConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx) {
-  patterns.add<LpNormalizationDecompose>(ctx);
+  patterns.add<LpNormToHip, LpNormalizationDecompose>(ctx);
 }
 
 } // namespace hip

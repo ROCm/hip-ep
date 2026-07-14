@@ -947,6 +947,178 @@ __global__ void qmoe_decode_reduce_kernel(
   output[n] = static_cast<__half>(acc);
 }
 
+// Fused FC2 + reduce: grid (hidden/TILE_N) only (no grid.y=k). Each block owns
+// a TILE_N stripe of hidden and loops over all k slots internally, summing the
+// per-expert weighted fc2 GEMV directly into output[hidden]. Eliminates the
+// slot_buf[k,hidden] write+read and the separate reduce launch (~one launch/
+// layer + 2*k*hidden fp16 of traffic). Same total weight bytes as the split
+// path (this block reads k experts; the split path had k blocks each reading
+// one). Gated by HIPDNN_EP_QMOE_FUSE_REDUCE.
+template <int BLOCK_SIZE, int TILE_N>
+__global__ void qmoe_decode_fc2_reduce_kernel(
+    const __half*  __restrict__ act_out,         // [k, inter]
+    const int32_t* __restrict__ expert_indices,  // [k]
+    const __half*  __restrict__ expert_weights,  // [k]
+    const uint8_t* __restrict__ fc2_w,           // [E, hidden, inter/2]
+    const __half*  __restrict__ fc2_s,           // [E, hidden, n_blk_mid]
+    const uint8_t* __restrict__ fc2_zp_packed,   // [E, hidden, ...] or null
+    const __half*  __restrict__ fc2_b,           // [E, hidden] or null
+    __half*        __restrict__ output,          // [hidden]
+    int inter,
+    int hidden,
+    int n_blk_mid,
+    int block_size,
+    int k) {
+  const int n_base = blockIdx.x * TILE_N;
+  const int tid    = threadIdx.x;
+  const int bs_shift = __builtin_ctz(static_cast<unsigned>(block_size));
+  const int packed_zp_stride = (n_blk_mid + 1) / 2;
+  const size_t W_row_bytes = static_cast<size_t>(inter) / 2;
+  const int num_u128 = inter / 32;
+
+  constexpr int WARP_SIZE = 32;
+  const int warp_id = tid / WARP_SIZE;
+  const int lane    = tid % WARP_SIZE;
+  constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+  __shared__ float warp_sums[TILE_N * NUM_WARPS];
+
+  // Running per-stripe output sum across slots (valid at warp0/lane0).
+  float acc[TILE_N];
+  #pragma unroll
+  for (int t = 0; t < TILE_N; t++) acc[t] = 0.0f;
+
+  for (int slot = 0; slot < k; slot++) {
+    const int   E  = expert_indices[slot];
+    const float wt = static_cast<float>(expert_weights[slot]);
+    const __half* a_in = act_out + static_cast<size_t>(slot) * inter;
+    const uint8_t* W = fc2_w + static_cast<size_t>(E) * hidden * W_row_bytes;
+    const __half*  S = fc2_s + static_cast<size_t>(E) * hidden * n_blk_mid;
+    const uint8_t* Z = fc2_zp_packed
+        ? fc2_zp_packed + static_cast<size_t>(E) * hidden * packed_zp_stride
+        : nullptr;
+    const __half*  Bv = fc2_b ? fc2_b + static_cast<size_t>(E) * hidden : nullptr;
+    const bool has_zp = (Z != nullptr);
+
+    const uint8_t* W_rows[TILE_N];
+    const __half*  S_rows[TILE_N];
+    const uint8_t* Z_rows[TILE_N];
+    #pragma unroll
+    for (int t = 0; t < TILE_N; t++) {
+      int n = n_base + t;
+      int sn = (n < hidden) ? n : 0;
+      W_rows[t] = W + static_cast<size_t>(sn) * W_row_bytes;
+      S_rows[t] = S + static_cast<size_t>(sn) * n_blk_mid;
+      Z_rows[t] = Z ? Z + static_cast<size_t>(sn) * packed_zp_stride : nullptr;
+    }
+
+    float partial[TILE_N];
+    #pragma unroll
+    for (int t = 0; t < TILE_N; t++) partial[t] = 0.0f;
+
+    for (int idx = tid; idx < num_u128; idx += BLOCK_SIZE) {
+      const int k32 = idx * 32;
+      float a_vals[32];
+      float a_sum = 0.0f;
+      #pragma unroll
+      for (int i = 0; i < 32; i++) {
+        a_vals[i] = static_cast<float>(a_in[k32 + i]);
+        a_sum += a_vals[i];
+      }
+      const int   grp = k32 >> bs_shift;
+      const float a_sum_x_default_zp = a_sum * 8.0f;
+
+      uint4 b_pk[TILE_N];
+      float sv[TILE_N];
+      #pragma unroll
+      for (int t = 0; t < TILE_N; t++) {
+        b_pk[t] = *reinterpret_cast<const uint4*>(&W_rows[t][idx * 16]);
+        sv[t]   = static_cast<float>(S_rows[t][grp]);
+      }
+
+      #pragma unroll
+      for (int t = 0; t < TILE_N; t++) {
+        float dot = 0.0f;
+        #pragma unroll
+        for (int i = 0; i < 8; i++)
+          dot = __fmaf_rn(a_vals[i],
+                          static_cast<float>((b_pk[t].x >> (i * 4)) & 0xF), dot);
+        #pragma unroll
+        for (int i = 0; i < 8; i++)
+          dot = __fmaf_rn(a_vals[8 + i],
+                          static_cast<float>((b_pk[t].y >> (i * 4)) & 0xF), dot);
+        #pragma unroll
+        for (int i = 0; i < 8; i++)
+          dot = __fmaf_rn(a_vals[16 + i],
+                          static_cast<float>((b_pk[t].z >> (i * 4)) & 0xF), dot);
+        #pragma unroll
+        for (int i = 0; i < 8; i++)
+          dot = __fmaf_rn(a_vals[24 + i],
+                          static_cast<float>((b_pk[t].w >> (i * 4)) & 0xF), dot);
+
+        if (has_zp) {
+          uint8_t zp_byte = Z_rows[t][grp >> 1];
+          float   zp = static_cast<float>(
+                         (grp & 1) ? (zp_byte >> 4) : (zp_byte & 0x0F));
+          partial[t] += (dot - a_sum * zp) * sv[t];
+        } else {
+          partial[t] += (dot - a_sum_x_default_zp) * sv[t];
+        }
+      }
+    }
+
+    // Reduce partial across the block, then fold wt*(partial+bias) into acc.
+    #pragma unroll
+    for (int t = 0; t < TILE_N; t++) {
+      for (int off = WARP_SIZE >> 1; off > 0; off >>= 1)
+        partial[t] += __shfl_down(partial[t], off);
+    }
+    if constexpr (BLOCK_SIZE <= WARP_SIZE) {
+      if (lane == 0) {
+        #pragma unroll
+        for (int t = 0; t < TILE_N; t++) {
+          int n = n_base + t;
+          if (n < hidden) {
+            float v = partial[t];
+            if (Bv) v += static_cast<float>(Bv[n]);
+            acc[t] += wt * v;
+          }
+        }
+      }
+    } else {
+      if (lane == 0) {
+        #pragma unroll
+        for (int t = 0; t < TILE_N; t++)
+          warp_sums[t * NUM_WARPS + warp_id] = partial[t];
+      }
+      __syncthreads();
+      if (warp_id == 0) {
+        #pragma unroll
+        for (int t = 0; t < TILE_N; t++) {
+          float v = (lane < NUM_WARPS) ? warp_sums[t * NUM_WARPS + lane] : 0.0f;
+          for (int off = WARP_SIZE >> 1; off > 0; off >>= 1)
+            v += __shfl_down(v, off);
+          if (lane == 0) {
+            int n = n_base + t;
+            if (n < hidden) {
+              if (Bv) v += static_cast<float>(Bv[n]);
+              acc[t] += wt * v;
+            }
+          }
+        }
+      }
+      __syncthreads();  // before next slot reuses warp_sums
+    }
+  }
+
+  if (warp_id == 0 && lane == 0) {
+    #pragma unroll
+    for (int t = 0; t < TILE_N; t++) {
+      int n = n_base + t;
+      if (n < hidden) output[n] = static_cast<__half>(acc[t]);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Decode launchers. Hand-picked BLOCK_SIZE=256, TILE_N=8 (a strong default
 // for matmul_nbits autotune at gpt-oss-20b shapes; can later wrap in a
@@ -1043,6 +1215,48 @@ static hipError_t dispatch_qmoe_fc2(
                                 fc2_weights, fc2_scales, fc2_zero_points,
                                 fc2_bias, slot_buf, inter_size, hidden_size,
                                 n_blk_mid, block_size);
+}
+
+template <int BS, int TN>
+static hipError_t launch_qmoe_fc2_reduce(
+    hipStream_t s, int k, const void* act_out, const void* expert_indices,
+    const void* expert_weights, const void* fc2_weights, const void* fc2_scales,
+    const void* fc2_zero_points, const void* fc2_bias, void* output,
+    int inter_size, int hidden_size, int n_blk_mid, int block_size) {
+  dim3 grid(static_cast<unsigned>((hidden_size + TN - 1) / TN));
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_decode_fc2_reduce_kernel<BS, TN>), grid,
+                     dim3(BS), 0, s, static_cast<const __half*>(act_out),
+                     static_cast<const int32_t*>(expert_indices),
+                     static_cast<const __half*>(expert_weights),
+                     static_cast<const uint8_t*>(fc2_weights),
+                     static_cast<const __half*>(fc2_scales),
+                     static_cast<const uint8_t*>(fc2_zero_points),
+                     static_cast<const __half*>(fc2_bias),
+                     static_cast<__half*>(output), inter_size, hidden_size,
+                     n_blk_mid, block_size, k);
+  return hipGetLastError();
+}
+
+static hipError_t dispatch_qmoe_fc2_reduce(
+    int bs, int tn, hipStream_t s, int k, const void* act_out,
+    const void* expert_indices, const void* expert_weights,
+    const void* fc2_weights, const void* fc2_scales,
+    const void* fc2_zero_points, const void* fc2_bias, void* output,
+    int inter_size, int hidden_size, int n_blk_mid, int block_size) {
+#define X(B, T)                                                                \
+  if (bs == (B) && tn == (T))                                                  \
+    return launch_qmoe_fc2_reduce<B, T>(s, k, act_out, expert_indices,         \
+                                        expert_weights, fc2_weights,           \
+                                        fc2_scales, fc2_zero_points, fc2_bias, \
+                                        output, inter_size, hidden_size,       \
+                                        n_blk_mid, block_size);
+  QMOE_CFG_LIST(X)
+#undef X
+  return launch_qmoe_fc2_reduce<64, 8>(s, k, act_out, expert_indices,
+                                       expert_weights, fc2_weights, fc2_scales,
+                                       fc2_zero_points, fc2_bias, output,
+                                       inter_size, hidden_size, n_blk_mid,
+                                       block_size);
 }
 
 // Online per-shape autotune for the decode fc1/fc2 GEMV kernels. The optimal
@@ -1193,6 +1407,12 @@ extern "C" int hip_qmoe_decode_fused(
   }
 
   hipStream_t s = static_cast<hipStream_t>(stream);
+  // Lever 1 toggle: fuse fc2 + reduce into one kernel (write output directly,
+  // skip slot_buf + the separate reduce launch). Read once (kernels stateless).
+  static const bool qmoe_fuse_reduce = []{
+    const char* e = std::getenv("HIPDNN_EP_QMOE_FUSE_REDUCE");
+    return e && atoi(e) != 0;
+  }();
   const int fusion_inter = static_cast<int>(2 * inter_size);
   const int n_blk_in  = static_cast<int>((hidden_size + block_size - 1) / block_size);
   const int n_blk_mid = static_cast<int>((inter_size  + block_size - 1) / block_size);
@@ -1246,7 +1466,9 @@ extern "C" int hip_qmoe_decode_fused(
                    static_cast<int>(block_size), fc2_zero_points != nullptr);
   const QmoeCfg c2 = qmoe_tune_pick(g_qmoe_fc2_state, key2, &s2);
 
-  // FC2 + weighted write to slot_buf: grid (hidden/TN, k). No LDS preload.
+  // FC2. Split path writes slot_buf[k,hidden] (grid hidden/TN x k); fused path
+  // (qmoe_fuse_reduce) writes output[hidden] directly (grid hidden/TN), folding
+  // in the k-slot reduce and skipping slot_buf + the separate reduce launch.
   {
     hipEvent_t me0 = nullptr, me1 = nullptr;
     if (s2 >= 0) {
@@ -1254,11 +1476,19 @@ extern "C" int hip_qmoe_decode_fused(
       hipEventCreate(&me1);
       hipEventRecord(me0, s);
     }
-    hipError_t e = dispatch_qmoe_fc2(
-        c2.bs, c2.tn, s, static_cast<int>(k), act_out, expert_indices,
-        expert_weights, fc2_weights, fc2_scales, fc2_zero_points, fc2_bias,
-        slot_buf, static_cast<int>(inter_size), static_cast<int>(hidden_size),
-        n_blk_mid, static_cast<int>(block_size));
+    hipError_t e = qmoe_fuse_reduce
+        ? dispatch_qmoe_fc2_reduce(
+              c2.bs, c2.tn, s, static_cast<int>(k), act_out, expert_indices,
+              expert_weights, fc2_weights, fc2_scales, fc2_zero_points,
+              fc2_bias, output, static_cast<int>(inter_size),
+              static_cast<int>(hidden_size), n_blk_mid,
+              static_cast<int>(block_size))
+        : dispatch_qmoe_fc2(
+              c2.bs, c2.tn, s, static_cast<int>(k), act_out, expert_indices,
+              expert_weights, fc2_weights, fc2_scales, fc2_zero_points,
+              fc2_bias, slot_buf, static_cast<int>(inter_size),
+              static_cast<int>(hidden_size), n_blk_mid,
+              static_cast<int>(block_size));
     if (e != hipSuccess) {
       fprintf(stderr, "[custom_kernels] qmoe_decode_fc2 failed: %s\n",
               hipGetErrorString(e));
@@ -1278,8 +1508,8 @@ extern "C" int hip_qmoe_decode_fused(
     }
   }
 
-  // Reduce: grid (hidden/kBlock).
-  {
+  // Reduce: only for the split (slot_buf) path; fused fc2 already wrote output.
+  if (!qmoe_fuse_reduce) {
     int grid = static_cast<int>((hidden_size + kBlock - 1) / kBlock);
     hipLaunchKernelGGL(qmoe_decode_reduce_kernel, dim3(grid), dim3(kBlock), 0, s,
                        static_cast<const __half*>(slot_buf),

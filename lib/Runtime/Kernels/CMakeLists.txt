@@ -53,6 +53,7 @@ set(_kernel_sources
     hip/cumsum_kernel.hip
     hip/pad_kernel.hip
     hip/layer_norm_kernel.hip
+    hip/l2_norm_kernel.hip
     hip/cast_kernel.hip
     hip/range_kernel.hip
     hip/gather_kernel.hip

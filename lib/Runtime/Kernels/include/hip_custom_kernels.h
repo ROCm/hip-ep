@@ -1258,6 +1258,33 @@ HIP_KERNEL_API int hip_layer_norm(
     int mean_dtype);
 
 /* =========================================================================
+ * LpNormalization -- last-axis fast path (fused, ONNX-22)
+ * =========================================================================
+ *
+ * One fused kernel for `onnx.LpNormalization` when the normalization axis is
+ * the trailing (contiguous) axis, replacing the Mul -> ReduceSum -> Sqrt ->
+ * Div decomposition (4-5 dispatches) with a single dispatch.
+ *
+ *   p == 2:  output = input / sqrt(sum(input^2) over norm axis)
+ *   p == 1:  output = input / sum(|input|) over norm axis
+ *
+ * Numerics match the decomposition exactly: FP32 accumulation, no epsilon,
+ * no clamp (NaN/Inf on an all-zero row, matching ORT CPU).
+ *
+ * Layout: input reshaped as `[outer, norm_size]` (norm_size = size of the
+ *         trailing normalization axis, outer = product of the other dims).
+ * Supported hip_dtype: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16.
+ */
+HIP_KERNEL_API int hip_l2_norm(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t outer,
+    int64_t norm_size,
+    int p,
+    int hip_dtype);
+
+/* =========================================================================
  * Range (1-D sequence generation)
  * =========================================================================
  *

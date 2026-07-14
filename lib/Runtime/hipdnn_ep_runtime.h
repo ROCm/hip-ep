@@ -1086,6 +1086,15 @@ int wrap_layer_normalization(RuntimeState *state, void *input, void *scale,
                              int64_t element_size_bytes, int64_t axis,
                              float epsilon, int64_t stash_type);
 
+// LpNormalization last-axis fast path (fused). Reshapes input as
+// [outer, norm_size] (norm_size = trailing normalization-axis size) and
+// computes output = input / Lp_norm(input) in a single kernel.
+//   p == 2: output = input / sqrt(sum(input^2))
+//   p == 1: output = input / sum(|input|)
+int wrap_l2_norm(RuntimeState *state, void *input, void *output,
+                 int64_t input_num_elements, int64_t norm_size,
+                 int64_t element_size_bytes, int64_t p);
+
 // SkipSimplifiedLayerNormalization operation wrapper (Full MS spec)
 // Computes: input_skip_bias_sum = input + skip [+ bias]
 //           output = RMSNorm(input_skip_bias_sum) * gamma

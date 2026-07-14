@@ -1726,6 +1726,22 @@ int wrap_layer_normalization(RuntimeState *state, void *input, void *scale,
   return 0;
 }
 
+int wrap_l2_norm(RuntimeState *state, void *input, void *output,
+                 int64_t input_num_elements, int64_t norm_size,
+                 int64_t element_size_bytes, int64_t p) {
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_l2_norm\n");
+    return -1;
+  }
+  (void)input;
+  (void)output;
+  MOCK_PRINT("[MOCK] wrap_l2_norm(input_num_elements=%lld, norm_size=%lld, "
+             "element_size_bytes=%lld, p=%lld)\n",
+             (long long)input_num_elements, (long long)norm_size,
+             (long long)element_size_bytes, (long long)p);
+  return 0;
+}
+
 int wrap_hipMemcpyD2H(void *dst, const void *src, int64_t size, void *stream) {
   HIP_CHECK(hipMemcpyAsync(dst, src, size, hipMemcpyDeviceToHost,
                            static_cast<hipStream_t>(stream)));
