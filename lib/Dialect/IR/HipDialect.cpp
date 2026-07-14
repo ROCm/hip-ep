@@ -655,12 +655,13 @@ LogicalResult LayerNormOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
-// RopeOp: ins(input, position_ids, cos_cache, sin_cache), outs(output)
+// RopeOp: ins(input, [position_ids], cos_cache, sin_cache), outs(output)
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange RopeOp::getDpsInitsMutable() {
-  // 0=ctx, 1=input, 2=position_ids, 3=cos_cache, 4=sin_cache, 5=output
-  return MutableOperandRange(*this, /*start=*/5, /*length=*/1);
+  // position_ids is Optional, so the raw operand index of `output` shifts when
+  // it is absent. Use the generated accessor instead of a hardcoded index.
+  return getOutputMutable();
 }
 
 void RopeOp::getEffects(

@@ -24,6 +24,7 @@ add_library(OnnxToHip STATIC
   ConvTransposeConversion.cpp
   NormConversion.cpp
   RotaryEmbeddingConversion.cpp
+  OnnxRotaryEmbeddingConversion.cpp
   GqaConversion.cpp
   MultiHeadAttentionConversion.cpp
   AttentionConversion.cpp

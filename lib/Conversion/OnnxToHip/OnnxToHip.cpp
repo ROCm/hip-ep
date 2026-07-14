@@ -489,6 +489,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateConvTransposeConversionPatterns(patterns, ctx);
   populateNormConversionPatterns(patterns, ctx);
   populateRotaryEmbeddingConversionPatterns(patterns, ctx);
+  populateOnnxRotaryEmbeddingConversionPatterns(patterns, ctx);
   populateGqaConversionPatterns(patterns, ctx);
   populateMultiHeadAttentionConversionPatterns(patterns, ctx);
   populateAttentionConversionPatterns(patterns, ctx);

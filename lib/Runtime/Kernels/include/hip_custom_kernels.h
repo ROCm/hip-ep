@@ -489,9 +489,14 @@ HIP_KERNEL_API int hip_leaky_relu(
  *                          is_bnsh=0 -> BSNH [batch, seq_len, num_heads, head_dim]
  *                                       (also the 3D [B, S, num_heads*head_dim])
  *                          is_bnsh=1 -> BNSH [batch, num_heads, seq_len, head_dim]
- *   position_ids       - GPU pointer [batch, seq_len] (int64)
- *   cos_cache          - GPU pointer [max_seq, rotary_dim/2]
- *   sin_cache          - GPU pointer [max_seq, rotary_dim/2]
+ *   position_ids       - GPU pointer [batch, seq_len] (int64), or NULL when
+ *                        cos/sin are already position-expanded (see cos_cache)
+ *   cos_cache          - GPU pointer. position_ids != NULL: 2D lookup table
+ *                        [max_seq, rotary_dim/2] indexed by position_ids[b,s].
+ *                        position_ids == NULL: precomputed
+ *                        [batch, seq_len, rotary_dim/2] indexed by the flat
+ *                        token position b*seq+s.
+ *   sin_cache          - GPU pointer, same shape convention as cos_cache
  *   output             - GPU pointer (same shape/layout as input)
  *   batch_size         - batch dimension
  *   seq_len            - sequence length
