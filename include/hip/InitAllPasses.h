@@ -137,8 +137,8 @@ inline void registerAllPasses() {
   mlir::hip::registerHipPipelines();
 
   // Conversion passes (convert-onnx-to-hip, outline-onnx-to-hipdnn,
-  // convert-hip-to-llvm, convert-onnx-to-hipsr); onnx-loop-outline is
-  // hand-written, not in the .td set, so it is registered separately below.
+  // convert-hip-to-llvm); onnx-loop-outline is hand-written, not in the .td
+  // set, so it is registered separately below.
   registerConversionPasses();
   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
     return mlir::hip::createOnnxLoopOutlinePass();
