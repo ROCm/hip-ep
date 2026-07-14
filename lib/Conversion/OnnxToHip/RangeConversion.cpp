@@ -171,6 +171,24 @@ verifyConstantDeltaNonZero(Operation *op, Value deltaTensor, Type elemTy) {
   return failure();
 }
 
+/// Normalize a Range bound to a rank-0 scalar tensor. A rank-0 operand passes
+/// through unchanged (preserving constant-foldability for
+/// readbackScalarToHost); a single-element rank-1 operand is collapsed to
+/// rank-0 via an empty-reassociation tensor.collapse_shape.
+///
+///   Before:  %v : tensor<1xi64>
+///   After:   %v0 = tensor.collapse_shape %v [] : tensor<1xi64> into tensor<i64>
+static Value collapseRangeBoundToScalar(PatternRewriter &rewriter, Location loc,
+                                        Value v) {
+  auto t = cast<RankedTensorType>(v.getType());
+  if (t.getRank() == 0)
+    return v;
+  auto scalarTy = RankedTensorType::get({}, t.getElementType());
+  return tensor::CollapseShapeOp::create(
+      rewriter, loc, scalarTy, v,
+      llvm::ArrayRef<mlir::ReassociationIndices>{});
+}
+
 struct RangeToHip : public RewritePattern {
   RangeToHip(MLIRContext *ctx) : RewritePattern("onnx.Range", 1, ctx) {}
 
@@ -187,11 +205,21 @@ struct RangeToHip : public RewritePattern {
     if (!elemTy.isIntOrFloat())
       return rewriter.notifyMatchFailure(op, "unsupported element type");
 
+    // ONNX Range bounds are scalars. Accept a rank-0 tensor, or a rank-1
+    // tensor with a single static element (HF exports slice a length out of a
+    // Shape result as tensor<1xi64>). The rank-1 form is collapsed to rank-0
+    // below so the readback + hip.range path is identical either way.
     for (Value v : op->getOperands()) {
       auto t = dyn_cast<RankedTensorType>(v.getType());
-      if (!t || t.getRank() != 0 || t.getElementType() != elemTy)
+      if (!t || t.getElementType() != elemTy)
         return rewriter.notifyMatchFailure(
-            op, "expected 0-D operands matching result element type");
+            op, "expected scalar operands matching result element type");
+      if (t.getRank() == 0)
+        continue;
+      if (t.getRank() == 1 && t.hasStaticShape() && t.getDimSize(0) == 1)
+        continue;
+      return rewriter.notifyMatchFailure(
+          op, "expected rank-0 or single-element rank-1 operands");
     }
 
     Location loc = op->getLoc();
@@ -204,13 +232,19 @@ struct RangeToHip : public RewritePattern {
       return failure();
     Value ctx = *ctxOrFailure;
 
+    // Collapse any single-element rank-1 bound to rank-0 so the readback +
+    // hip.range path sees canonical scalars (see the operand check above).
+    Value startS = collapseRangeBoundToScalar(rewriter, loc, op->getOperand(0));
+    Value limitS = collapseRangeBoundToScalar(rewriter, loc, op->getOperand(1));
+    Value deltaS = collapseRangeBoundToScalar(rewriter, loc, op->getOperand(2));
+
     // Read start/limit/delta to host SSA values for the trip-count arithmetic.
     // Constants fold; GPU-computed operands go through a synchronized
     // hip.readback_scalar (see ReadbackScalar.h for why a plain tensor.extract
     // is a correctness bug on true-device-memory targets).
-    Value startE = readbackScalarToHost(rewriter, loc, ctx, op->getOperand(0));
-    Value limitE = readbackScalarToHost(rewriter, loc, ctx, op->getOperand(1));
-    Value deltaE = readbackScalarToHost(rewriter, loc, ctx, op->getOperand(2));
+    Value startE = readbackScalarToHost(rewriter, loc, ctx, startS);
+    Value limitE = readbackScalarToHost(rewriter, loc, ctx, limitS);
+    Value deltaE = readbackScalarToHost(rewriter, loc, ctx, deltaS);
 
     Value len = llvm::TypeSwitch<Type, Value>(elemTy)
                     .Case<IntegerType>([&](IntegerType ity) {
@@ -234,9 +268,8 @@ struct RangeToHip : public RewritePattern {
                                      elemTy, ValueRange{});
     }
 
-    auto rangeOp =
-        mlir::hip::RangeOp::create(rewriter, loc, ctx, op->getOperand(0),
-                                   op->getOperand(1), op->getOperand(2), init);
+    auto rangeOp = mlir::hip::RangeOp::create(rewriter, loc, ctx, startS, limitS,
+                                              deltaS, init);
     rewriter.replaceOp(op, rangeOp->getResult(0));
     return success();
   }
