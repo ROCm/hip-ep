@@ -99,6 +99,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | GroupQueryAttention (com.microsoft) | Custom HIP Kernel |
 | MultiHeadAttention (com.microsoft) | hipBLASLt + Custom HIP Kernels (encoder–decoder attention also lowers to GroupQueryAttention) |
 | Attention (com.microsoft) | Custom HIP Kernel (fused QKV split, lowered to GroupQueryAttention) |
+| Attention (ai.onnx opset 23/24) | Lowered to GroupQueryAttention (rank-3/rank-4 Q/K/V; 1 or 3 outputs; causal and/or additive-mask, or bidirectional; optional KV cache) |
 | MatMulNBits (com.microsoft) | Custom HIP Kernel |
 | QMoE (com.microsoft) | Custom HIP Kernel |
 | GatherBlockQuantized (com.microsoft) | Custom HIP Kernel |
