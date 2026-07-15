@@ -17,27 +17,58 @@ include "hip/Dialect/Hipsr/IR/HipsrOps.td"
 //===----------------------------------------------------------------------===//
 
 def Hipsr_ShapeYieldOp : Hipsr_Op<"shape_yield", [Pure, Terminator]> {
-  let summary = "Terminator of a hipsr shape region";
+  let summary = "Yield the result shapes from a hipsr shape region";
   let description = [{
-    Terminates a shape region and yields the computed output dimensions as
-    `index` values. Every shape region ends with exactly one `shape_yield`.
+    Ends a shape region and yields the output shape of each of the enclosing
+    op's results. Every shape region ends with exactly one `shape_yield`.
 
-    In Phase 1 a shape region is attached to a shaped op and computes that
-    op's output shape; `shape_yield` hands the resulting per-dimension SSA
-    values back to the enclosing op. A zero-operand `shape_yield` denotes a
-    rank-0 (scalar) result.
+    A result is described by three lists that line up by index:
 
-    Example:
+    - `shapes[i]`        : result i's dimensions, as a group of `index` values.
+    - `ranks[i]`         : result i's rank (how many dims are in `shapes[i]`).
+    - `element_types[i]` : result i's element type.
+
+    An empty dim group means a rank-0 (scalar) result. Each dim group prints in
+    parentheses; the element types print as a bracketed list.
+
+    Examples:
     ```mlir
-    hipsr.shape_yield %d0, %d1
+    // one 2-D f16 result
+    hipsr.shape_yield (%m, %n) : [f16]
+    // a 2-D f16 result and a 2-D i64 result
+    hipsr.shape_yield (%d0, %d1), (%N, %cap) : [f16, i64]
+    // one scalar (rank-0) result
+    hipsr.shape_yield () : [f32]
     ```
   }];
 
-  let arguments = (ins Variadic<Index>:$dims);
+  // `shapes` is a list of dim groups, one per result. `ranks` holds each
+  // group's size; it must be declared because VariadicOfVariadic looks it up by
+  // name (ODS does not add it for us) and fills it in from the shape groups.
+  // `element_types` holds each result's element type.
+  let arguments = (ins
+    VariadicOfVariadic<Index, "ranks">:$shapes,
+    DenseI32ArrayAttr:$ranks,
+    TypeArrayAttr:$element_types
+  );
 
-  // Operands are always `index` (Variadic<Index>), so the types are redundant
-  // and omitted from the assembly (cf. scf.yield / func.return practice).
-  let assemblyFormat = "attr-dict ($dims^)?";
+  // Dim groups print in parens; the element-type list prints in brackets. Dims
+  // are always `index`, so their types are left out (like scf.yield).
+  let assemblyFormat = "$shapes `:` $element_types attr-dict";
+
+  let hasVerifier = 1;
+
+  let builders = [
+    // Take element types as a TypeRange and wrap them into the attribute. Both
+    // args default to empty, so this also builds an empty `shape_yield` for
+    // SingleBlockImplicitTerminator. Callers that already have a TypeArrayAttr
+    // can use the builder ODS generates.
+    OpBuilder<(ins CArg<"::llvm::ArrayRef<::mlir::ValueRange>", "{}">:$shapes,
+                   CArg<"::mlir::TypeRange", "{}">:$elementTypes), [{
+      build($_builder, $_state, shapes,
+            $_builder.getTypeArrayAttr(elementTypes));
+    }]>
+  ];
 }
 
 #endif // HIPSR_SHAPE_YIELD_OP
