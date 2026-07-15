@@ -833,6 +833,36 @@ static void launchGemvConfig(
 #undef GEMV_CASE
 }
 
+// Cold-aware autotune scratch pool.
+//
+// Decode reads weights COLD on every token: they are GBs, the gfx1151
+// Infinity/MALL cache is ~32 MB, so nothing stays resident. The old warm tune
+// (5 back-to-back launches on ONE buffer) measured cache-HIT timings, which
+// systematically favor the lowest-thread config (least overhead when data is
+// hot) -- exactly the config that starves LPDDR5X when the data is actually
+// cold (too few in-flight loads to hide DRAM latency). Measured on out_proj
+// (N=2048,K=4096): warm picked {32,1} @ ~47% of peak cold, while {512,8} does
+// ~71% cold -- a ~1.5x left on the floor by warm tuning.
+//
+// Fix: tune against a scratch pool larger than the cache and rotate the B-read
+// base across it every launch, so each timed launch reads weights that are not
+// cache-resident -- reproducing decode's cold streaming. The pool holds garbage
+// (only sizes/addresses matter for timing/ranking, not values). Shapes whose
+// weights already exceed the pool (e.g. lm_head) are inherently cold, so they
+// fall back to the real B with no rotation.
+static constexpr size_t kGemvTunePoolBytes = 256ull * 1024 * 1024;  // > 32 MB cache
+
+static void* getGemvTunePool() {
+    static std::mutex m;
+    static void* p = nullptr;
+    std::lock_guard<std::mutex> lk(m);
+    if (!p) {
+        if (hipMalloc(&p, kGemvTunePoolBytes) != hipSuccess)
+            p = nullptr;  // graceful fallback: tuning stays warm (single-buffer) if OOM
+    }
+    return p;
+}
+
 static int tuneGemvConfig(
     hipStream_t stream,
     const __half* A, const uint8_t* B,
@@ -848,8 +878,39 @@ static int tuneGemvConfig(
 
     float best_ms = 1e30f;
     int   best_id = 8;
-    constexpr int WARMUP = 1;
-    constexpr int ITERS  = 5;
+    constexpr int WARMUP = 2;   // rotation warmup (code residency + fill pipeline)
+    constexpr int REPS   = 2;   // best-of-REPS windows
+    constexpr size_t kCacheBytes = 32ull * 1024 * 1024;  // gfx1151 Infinity/MALL
+
+    // Cold rotation: pick a per-launch B base stride and how many distinct
+    // bases fit in the pool. nrot==1 => weights bigger than pool (already cold)
+    // or OOM => use the real B, single buffer.
+    void*  pool     = getGemvTunePool();
+    size_t b_bytes  = static_cast<size_t>(N) * static_cast<size_t>(K) / 2;
+    size_t stride   = (b_bytes + 255) & ~static_cast<size_t>(255);
+    int    nrot     = 1;
+    const uint8_t* b_tune = B;
+    if (pool && stride > 0 && stride <= kGemvTunePoolBytes) {
+        nrot = static_cast<int>(kGemvTunePoolBytes / stride);
+        if (nrot < 1) nrot = 1;
+        if (nrot > 1) b_tune = static_cast<const uint8_t*>(pool);
+    }
+
+    // Launches per timed window. Rotating shapes need enough distinct reads to
+    // sweep past the cache (else the window reads warm); inherently-cold shapes
+    // (nrot==1, weights >> cache) need only a few. Cap the count so large/slow
+    // kernels (e.g. lm_head ~1.2 ms each) don't run long enough to trip the
+    // Windows TDR watchdog during the 35-config sweep.
+    int INNER;
+    if (nrot <= 1) {
+        INNER = 4;
+    } else {
+        size_t need = (2 * kCacheBytes + b_bytes - 1) / (b_bytes ? b_bytes : 1);
+        INNER = static_cast<int>(need);
+        if (INNER < 8)  INNER = 8;
+        if (INNER > 48) INNER = 48;
+        if (INNER > nrot) INNER = nrot;  // no repeats -> stay cold
+    }
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
         auto& cfg = kGemvConfigs[cid];
@@ -857,26 +918,33 @@ static int tuneGemvConfig(
         if (cfg.tile_n >= 32 && cfg.tile_n < 64 && N < 1024) continue;
 
         for (int w = 0; w < WARMUP; w++)
-            launchGemvConfig(cid, stream, A, B, sc, zp, bi, out,
-                             M, N, K, batch, bs, col_major);
+            launchGemvConfig(cid, stream, A,
+                             b_tune + static_cast<size_t>(w % nrot) * stride,
+                             sc, zp, bi, out, M, N, K, batch, bs, col_major);
 
-        hipEventRecord(ev0, stream);
-        for (int i = 0; i < ITERS; i++)
-            launchGemvConfig(cid, stream, A, B, sc, zp, bi, out,
-                             M, N, K, batch, bs, col_major);
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-
-        float ms = 0.0f;
-        hipEventElapsedTime(&ms, ev0, ev1);
+        float best_ms_cfg = 1e30f;
+        for (int r = 0; r < REPS; r++) {
+            hipEventRecord(ev0, stream);
+            for (int i = 0; i < INNER; i++)
+                launchGemvConfig(cid, stream, A,
+                                 b_tune + static_cast<size_t>(i % nrot) * stride,
+                                 sc, zp, bi, out, M, N, K, batch, bs, col_major);
+            hipEventRecord(ev1, stream);
+            hipEventSynchronize(ev1);
+            float ms = 0.0f;
+            hipEventElapsedTime(&ms, ev0, ev1);
+            float per = ms / INNER;
+            if (per < best_ms_cfg) best_ms_cfg = per;
+        }
 
         CUSTOM_KERNELS_DEBUG_LOG(
-            "[custom_kernels]   config[%2d] threads=%3d tile_n=%d : %.4f ms\n",
+            "[custom_kernels]   config[%2d] threads=%3d tile_n=%d : %.4f ms "
+            "(cold, nrot=%d)\n",
             cid, kGemvConfigs[cid].threads, kGemvConfigs[cid].tile_n,
-            ms / ITERS);
+            best_ms_cfg, nrot);
 
-        if (ms < best_ms) {
-            best_ms = ms;
+        if (best_ms_cfg < best_ms) {
+            best_ms = best_ms_cfg;
             best_id = cid;
         }
     }
@@ -885,11 +953,11 @@ static int tuneGemvConfig(
     hipEventDestroy(ev1);
 
     CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] GEMV autotune: M=%lld N=%lld K=%lld bs=%lld col_major=%d -> "
+        "[custom_kernels] GEMV autotune (cold): M=%lld N=%lld K=%lld bs=%lld col_major=%d -> "
         "best config[%d] threads=%d tile_n=%d (%.4f ms/iter)\n",
         (long long)M, (long long)N, (long long)K, (long long)bs, col_major,
         best_id, kGemvConfigs[best_id].threads,
-        kGemvConfigs[best_id].tile_n, best_ms / ITERS);
+        kGemvConfigs[best_id].tile_n, best_ms);
 
     return best_id;
 }
