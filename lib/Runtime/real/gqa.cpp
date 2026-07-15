@@ -18,16 +18,20 @@
 //                         hip_gqa_flash_decode_v2
 //
 //   * Everything else the fused kernels do not implement (fp32, no_causal /
-//     bidirectional, sliding window, head sink / smooth softmax, other
-//     head_dim, untemplated decode geometry) -> the feature-complete legacy
-//     decomposed hipBLASLt pipeline gqa_forward_hipblaslt below. This is a
-//     verbatim port of the proven gqa_back.cpp strategy (the read-only backup
-//     stays out of the build); its fast decode kernels (hip_gqa_fused_decode /
-//     hip_gqa_flash_decode) are folded into gqa_kernel.hip so the
-//     sliding-window / sink decode case keeps the legacy kernel's performance.
+//     bidirectional, sliding window, head sink / smooth softmax, additive
+//     attention bias, other head_dim, untemplated decode geometry) -> the
+//     feature-complete legacy decomposed hipBLASLt pipeline
+//     gqa_forward_hipblaslt below. This is a verbatim port of the proven
+//     gqa_back.cpp strategy (the read-only backup stays out of the build); its
+//     fast decode kernels (hip_gqa_fused_decode / hip_gqa_flash_decode) are
+//     folded into gqa_kernel.hip so the sliding-window / sink decode case keeps
+//     the legacy kernel's performance.
 //
-//   * Inputs NEITHER path supports (KV-cache quantization, attention bias,
-//     position ids, qk_output) are rejected up front.
+//   * The additive attention bias (onnx.Attention attn_mask) IS supported, but
+//     only by the decomposed path (Step 8b adds it; a causal op then masks the
+//     triangle in Step 9), so its presence forces the decomposed path.
+//   * Inputs NEITHER path supports (KV-cache quantization, position ids,
+//     qk_output) are rejected up front.
 //===----------------------------------------------------------------------===//
 
 #include "../debug_log.h"
@@ -1636,8 +1640,20 @@ static int gqa_forward_hipblaslt(
     // ---- Step 9: Causal Mask (fp32) + Softmax (fp32 -> fp16/fp32) ----
     // S is treated as [B*H, sq, total_seq] (head stride sq*total_seq) by both
     // GEMM flavours. softmax dtype follows gemm_fp32.
+    //
+    // The built-in causal triangle is applied whenever !no_causal, INDEPENDENTLY
+    // of attention_bias. This mirrors the ONNX Attention reference and the ORT
+    // GQA op: the additive mask (Step 8b, e.g. onnx.Attention attn_mask or a
+    // GQA/ALiBi bias) is ADDED first, then, if the op is causal, the upper
+    // triangle is masked out. For a mask that already encodes causal (the common
+    // HF export) this is idempotent (-inf stays -inf); for a padding-only mask +
+    // is_causal it supplies the missing triangle. The bidirectional paths
+    // (no_causal, e.g. Whisper encoder/cross-attn or onnx.Attention is_causal=0)
+    // set no_causal=true and thus skip this, letting the mask carry all masking.
+    // Note this Step is a no-op at sq==1 (single-query decode has no future
+    // tokens), gated by (sq > 1 || local_window_size > 0).
     int scoreFp16BatchStride = static_cast<int>(sq * total_seq);
-    if ((sq > 1 || local_window_size > 0) && !no_causal && !attention_bias) {
+    if ((sq > 1 || local_window_size > 0) && !no_causal) {
       HIP_CHECK(hip_gqa_causal_mask_f32(
           stream, d_S_f32, static_cast<int>(B * H), static_cast<int>(total_seq),
           static_cast<int>(sq), scoreF32BatchStride, static_cast<int>(past_len),
