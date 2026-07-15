@@ -296,14 +296,14 @@ jobs:
           # key folds in the pinned fork commit + ORT version/PR list; bumping
           # any of them forces a rebuild. On a hit the checkout + build below are
           # skipped and the staging step finds the cached DLLs in build-amdgpu.
-          key: dep-amdgpu-af39f35-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
+          key: dep-amdgpu-b9460ee-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
 
       - name: Checkout amdgpu-ep
         if: steps.cache-amdgpu.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: zz002/onnxruntime-ep-amdgpu
-          ref: af39f35fa832a0272904fb8606981c5b10bea974
+          ref: b9460eeed654a80d7bf2429c20a4397d940df180
           path: source-amdgpu
           fetch-depth: 1
           show-progress: false
