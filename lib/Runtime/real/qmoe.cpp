@@ -23,6 +23,22 @@ struct TokenEntry {
   int32_t slot;
 };
 
+// RAII: put hip_matmul_nbits into QMoE offline-autotune mode for the scope's
+// lifetime, then restore. QMoE prefill issues one hip_matmul_nbits per expert;
+// the single-token experts hit the small-M GEMV path, which defaults to the
+// online sampler. The online sampler's multi-sweep convergence can leak
+// per-call hipEventSynchronize into measured prefill iterations (TTFT
+// instability). In MoE mode that path uses the offline tune-once-then-cache
+// tuner instead, so one warmup prefill fully populates the cache. The flag is
+// thread_local, so scoping it here leaves dense matmul (single-token decode,
+// which prefers the online sampler) on other code paths untouched.
+struct MoeMatmulModeGuard {
+  MoeMatmulModeGuard() { hip_matmul_nbits_set_moe_mode(1); }
+  ~MoeMatmulModeGuard() { hip_matmul_nbits_set_moe_mode(0); }
+  MoeMatmulModeGuard(const MoeMatmulModeGuard &) = delete;
+  MoeMatmulModeGuard &operator=(const MoeMatmulModeGuard &) = delete;
+};
+
 int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
               const void *router_weights, const void *fc1_weights,
               const void *fc1_scales, const void *fc1_bias,
@@ -198,6 +214,15 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   }
 
   {
+    // Offline-autotune mode for the per-expert prefill matmul_nbits calls
+    // below (single-token experts otherwise sample the online tuner
+    // mid-measurement). Declared inside this block (not the function scope) so
+    // its scope ends before the `cleanup:` label: the earlier HIP_CHECK
+    // `goto cleanup`s (topk_routing / decode_fused, above) would otherwise
+    // jump past a live non-trivial-dtor local into its scope, which C++
+    // forbids. HIP_CHECKs within this block jump OUT of the guard's scope,
+    // which is legal (the destructor runs on the way out, restoring the mode).
+    MoeMatmulModeGuard moe_mode_guard;
     // Phase 2: GPU-side bucketing eliminates the per-expert host build +
     // 2 H2D round-trips per active expert per layer. Old flow was:
     //   D2H expert_indices + expert_weights -> sync -> host bucket loop ->
