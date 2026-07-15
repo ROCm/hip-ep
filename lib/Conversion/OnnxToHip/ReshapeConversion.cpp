@@ -617,13 +617,52 @@ struct SqueezeToStdTensor : public mlir::RewritePattern {
         failed(result))
       return result;
 
+    mlir::Location loc = op->getLoc();
+
+    // Squeeze to a rank-0 scalar (typical case: a pooler reduces a [B,1]
+    // statistic to a single value that is then consumed as a scalar
+    // depth/index). A `tensor.collapse_shape` into rank-0 is only legal when
+    // every collapsed input dim is a STATIC 1; an input with a dynamic or
+    // non-unit dim (e.g. tensor<?x1xf16>) makes the verifier reject with "rank
+    // 0 memrefs can only be extended/collapsed with/from ones". Squeeze
+    // semantics guarantee every squeezed axis is size 1 at runtime, so slice
+    // out the leading unit corner to a fully-static all-ones shape first
+    // (zero-copy tensor.extract_slice), then collapse that to rank-0. The
+    // full-extent slice folds away for an already-static all-ones input.
+    //
+    // Before:
+    //   %r = onnx.Squeeze %x, %axes : (tensor<?x1xf16>, tensor<2xi64>)
+    //          -> tensor<f16>
+    // After:
+    //   %s = tensor.extract_slice %x[0, 0] [1, 1] [1, 1]
+    //          : tensor<?x1xf16> to tensor<1x1xf16>
+    //   %r = tensor.collapse_shape %s [] : tensor<1x1xf16> into tensor<f16>
+    if (outputType.getRank() == 0) {
+      int64_t inputRank = inputType.getRank();
+      llvm::SmallVector<mlir::OpFoldResult> offsets(inputRank,
+                                                    rewriter.getIndexAttr(0));
+      llvm::SmallVector<mlir::OpFoldResult> sizes(inputRank,
+                                                  rewriter.getIndexAttr(1));
+      llvm::SmallVector<mlir::OpFoldResult> strides(inputRank,
+                                                    rewriter.getIndexAttr(1));
+      llvm::SmallVector<int64_t> onesShape(inputRank, 1);
+      auto onesType =
+          mlir::RankedTensorType::get(onesShape, inputType.getElementType());
+      mlir::Value unitCorner = mlir::tensor::ExtractSliceOp::create(
+          rewriter, loc, onesType, data, offsets, sizes, strides);
+      auto collapseOp = mlir::tensor::CollapseShapeOp::create(
+          rewriter, loc, outputType, unitCorner,
+          llvm::ArrayRef<mlir::ReassociationIndices>{});
+      rewriter.replaceOp(op, collapseOp.getResult());
+      return mlir::success();
+    }
+
     auto reassocOpt =
         mlir::getReassociationIndicesForReshape(inputType, outputType);
     if (!reassocOpt)
       return rewriter.notifyMatchFailure(
           op, "cannot compute squeeze reassociation");
 
-    mlir::Location loc = op->getLoc();
     auto collapseOp = mlir::tensor::CollapseShapeOp::create(
         rewriter, loc, outputType, data, *reassocOpt);
     rewriter.replaceOp(op, collapseOp.getResult());

@@ -448,17 +448,29 @@ OneHotOp::reifyResultShapes(OpBuilder &b,
   if (axis < 0)
     axis += outRank;
 
-  OpFoldResult depthDim;
-  if (depthType.getRank() == 0)
-    depthDim = b.getIndexAttr(1);
-  else
-    depthDim = tensor::getMixedSize(b, getLoc(), getDepth(), 0);
-
+  // The one-hot axis extent is the runtime *value* of the `depth` scalar
+  // (data-dependent), NOT any static dim of the `depth` tensor. A scalar
+  // depth's only "dim" is its element count (always 1), so reading
+  // `depth`'s shape here -- a rank-0 attr of 1, or dim(depth, 0) == 1 for a
+  // single-element rank-1 export -- both wrongly report an axis extent of 1.
+  // --hip-infer-shapes would then narrow the (dynamic) axis dim to a static
+  // 1 and the scatter drops every index >= 1, collapsing the axis to one
+  // row. Lift the axis extent from the DPS `outs` init instead: the
+  // ONNX->HIP converter sizes that init to the real depth via
+  // hip.readback_scalar (dynamic, so infer-shapes leaves it alone), or to a
+  // static extent when the depth folded at compile time (so infer-shapes
+  // narrows it correctly). Non-axis dims still come from `indices`, which
+  // may carry tighter static extents than the init.
+  //
+  // Before (buggy): rank-0 depth -> depthDim = 1 -> infer-shapes forces
+  //                 tensor<?x?x?> to tensor<?x?x1>.
+  // After:          depthDim = size(outs, axis) -> stays dynamic (readback)
+  //                 or narrows only to a genuine compile-time depth.
   SmallVector<OpFoldResult> dims;
   int64_t inDim = 0;
   for (int64_t outDim : llvm::seq<int64_t>(0, outRank)) {
     if (outDim == axis)
-      dims.push_back(depthDim);
+      dims.push_back(tensor::getMixedSize(b, getLoc(), getOutput(), axis));
     else
       dims.push_back(tensor::getMixedSize(b, getLoc(), getIndices(), inDim++));
   }

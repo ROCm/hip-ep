@@ -51,13 +51,33 @@ OneHotToHip::matchAndRewrite(mlir::Operation *op,
     if (!resultType.isDynamicDim(outDim))
       continue;
     if (outDim == normAxis) {
+      // The depth-axis extent is the runtime *value* of the `depth` scalar
+      // (data-dependent), NOT any static dim of the `depth` tensor. It must be
+      // read back to the host so tensor.empty sizes the output buffer to the
+      // real depth. A hardcoded 1, or a tensor.dim(depth, 0) (which yields the
+      // depth tensor's SHAPE, not its value), both make the axis extent 1: the
+      // scatter then drops every index >= 1 (`c >= oshape[axis]`) and any
+      // downstream pooling collapses to a single row.
+      //
+      // Before:  %init = tensor.empty(%c1) : tensor<...x?x...>  // extent 1 (BUG)
+      // After:   %d  = hip.readback_scalar %ctx, %depth : i64
+      //          %di = arith.index_cast %d : i64 to index
+      //          %init = tensor.empty(%di) : tensor<...x?x...>  // extent = depth
       auto depthType = mlir::cast<mlir::RankedTensorType>(depth.getType());
-      if (depthType.getRank() == 0)
-        dynSizes.push_back(
-            mlir::arith::ConstantIndexOp::create(rewriter, loc, 1));
-      else
-        dynSizes.push_back(
-            mlir::tensor::DimOp::create(rewriter, loc, depth, 0));
+      mlir::Value depthScalar = depth;
+      if (depthType.getRank() != 0) {
+        // ONNX OneHot depth is a scalar; collapse a single-element rank-1
+        // export to rank-0 so the readback observes the value (see Range).
+        auto scalarTy =
+            mlir::RankedTensorType::get({}, depthType.getElementType());
+        depthScalar = mlir::tensor::CollapseShapeOp::create(
+            rewriter, loc, scalarTy, depth,
+            llvm::ArrayRef<mlir::ReassociationIndices>{});
+      }
+      mlir::Value depthHost =
+          readbackScalarToHost(rewriter, loc, context, depthScalar);
+      dynSizes.push_back(mlir::arith::IndexCastOp::create(
+          rewriter, loc, rewriter.getIndexType(), depthHost));
     } else {
       dynSizes.push_back(
           mlir::tensor::DimOp::create(rewriter, loc, indices, inDim++));
