@@ -1005,3 +1005,36 @@ func.func @nested_loop_signatures(%ctx: !hip.context,
                  {num_loop_carried = 1 : i32, cond_is_passthrough}
   return %r : tensor<256xf32>
 }
+
+// -----
+
+// OneHot with a rank-0 (scalar) `depth` whose RUNTIME VALUE sizes the
+// one-hot axis. The axis extent is data-dependent (here materialized by
+// `hip.readback_scalar` into the DPS `outs` init, exactly as the
+// ONNX->HIP converter emits it), so `--hip-infer-shapes` MUST leave the
+// axis dim dynamic. Regression: `OneHotOp::reifyResultShapes` used to
+// return a constant `1` for a rank-0 depth, so this pass narrowed the
+// axis to a static `1` -- the scatter then dropped every index >= 1 and
+// the axis collapsed to a single row. The non-axis dims still narrow
+// from the static `indices` extents (2, 8).
+// CHECK-LABEL: func.func @onehot_scalar_depth_axis_stays_dynamic
+// CHECK:         hip.one_hot
+// CHECK-SAME:      outs({{.*}} : tensor<2x8x?xf32>) : tensor<2x8x?xf32>
+// CHECK-NOT:     tensor<2x8x1xf32>
+func.func @onehot_scalar_depth_axis_stays_dynamic(
+    %ctx: !hip.context,
+    %indices: tensor<2x8xi64>,
+    %depth: tensor<i64>,
+    %values: tensor<2xf32>) -> tensor<?x?x?xf32> {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %d0 = tensor.dim %indices, %c0 : tensor<2x8xi64>
+  %d1 = tensor.dim %indices, %c1 : tensor<2x8xi64>
+  %d = hip.readback_scalar(%ctx, %depth : tensor<i64>) -> i64
+  %di = arith.index_cast %d : i64 to index
+  %init = tensor.empty(%d0, %d1, %di) : tensor<?x?x?xf32>
+  %r = hip.one_hot(%ctx)
+      ins(%indices, %depth, %values : tensor<2x8xi64>, tensor<i64>, tensor<2xf32>)
+      outs(%init : tensor<?x?x?xf32>) {axis = 2 : i64} : tensor<?x?x?xf32>
+  return %r : tensor<?x?x?xf32>
+}
