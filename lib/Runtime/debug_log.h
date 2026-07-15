@@ -24,6 +24,14 @@ inline bool check_env(const char *name) {
   unsigned long n = GetEnvironmentVariableA(name, buf, sizeof(buf));
   return n > 0 && buf[0] >= '1';
 }
+// Default-ON variant: enabled unless the env var is explicitly set to "0".
+// Used for opt-in-turned-default paths where we want the optimization active
+// by default but keep an explicit kill-switch ("...=0") for A/B isolation.
+inline bool check_env_default_on(const char *name) {
+  char buf[8];
+  unsigned long n = GetEnvironmentVariableA(name, buf, sizeof(buf));
+  return n == 0 || buf[0] != '0';
+}
 } // namespace detail
 #endif
 
@@ -34,6 +42,25 @@ inline bool hipdnn_ep_debug_enabled() {
 #else
     const char *v = std::getenv("HIPDNN_EP_DEBUG");
     return v && v[0] >= '1';
+#endif
+  }();
+  return enabled;
+}
+
+// W4A8 integer-dot-product (dp4a) path for matmul_nbits single-row (M==1)
+// decode GEMV. When enabled, eligible bits==4, K%32==0 fp16 decode GEMVs
+// dynamically quantize the activation to per-group int8 and use a
+// v_dot4_i32_iu8 dot product instead of the dequant-ALU-bound fp GEMV.
+// DEFAULT-ON (so CI validates the optimization); set HIPDNN_EP_MATMUL_DP4A=0
+// to force the classic fp GEMV path for A/B isolation. Latched on first read
+// like the other flags here.
+inline bool hipdnn_ep_matmul_dp4a_enabled() {
+  static const bool enabled = [] {
+#ifdef _WIN32
+    return detail::check_env_default_on("HIPDNN_EP_MATMUL_DP4A");
+#else
+    const char *v = std::getenv("HIPDNN_EP_MATMUL_DP4A");
+    return !v || v[0] != '0';
 #endif
   }();
   return enabled;
