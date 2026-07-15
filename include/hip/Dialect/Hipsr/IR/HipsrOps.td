@@ -27,9 +27,10 @@ class Hipsr_Op<string mnemonic, list<Trait> traits = []> :
 //===----------------------------------------------------------------------===//
 
 // Base for shaped compute ops (MatMul, Add, ...). Every such op:
-//   - carries a shape region (region 0) that computes its output shape and is
-//     terminated by `hipsr.shape_yield`. The SingleBlockImplicitTerminator
-//     trait auto-inserts that terminator and structurally checks it;
+//   - carries a shape region (region 0) that computes its output shape and ends
+//     with a `hipsr.shape_yield` written by populateShapeRegion(). The
+//     SingleBlockExplicitTerminator trait checks that yield is present but never
+//     adds one, so a missing shape_yield is an error, not a silent default;
 //   - implements ShapeRegionInterface, the single source of truth for shape
 //     computation (each op provides populateShapeRegion());
 //   - carries IsolatedFromAboveButAllowOperands, so the shape region may only
@@ -46,7 +47,7 @@ class Hipsr_DpsOp<string mnemonic, list<Trait> traits = []> :
         DeclareOpInterfaceMethods<DestinationStyleOpInterface,
                                   ["getDpsInitsMutable"]>,
         IsolatedFromAboveButAllowOperands,
-        SingleBlockImplicitTerminator<"ShapeYieldOp">
+        SingleBlockExplicitTerminator<"ShapeYieldOp">
       ], traits)> {
   let regions = (region SizedRegion<1>:$shape_region);
   let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
