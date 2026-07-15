@@ -88,6 +88,52 @@ def ShapeRegionInterface : OpInterface<"ShapeRegionInterface"> {
         return $_op->getNumRegions() > 1 ? &$_op->getRegion(1) : nullptr;
       }]
     >,
+    InterfaceMethod<
+      [{Return each result's dim values, grouped per result (handy for building
+        `tensor.empty`). The shape region must be populated.}],
+      "::llvm::SmallVector<::llvm::SmallVector<::mlir::Value>>",
+      "getShapeRegionResultShapes", (ins),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        return ::mlir::hipsr::getShapeRegionResultShapes($_op.getShapeRegion());
+      }]
+    >,
+    InterfaceMethod<
+      [{Return each result's tensor type. Every extent is dynamic (an empty dim
+        group gives a rank-0 tensor); constant dims fold back to static extents
+        later via the tensor.empty canonicalizer. The shape region must be
+        populated.}],
+      "::llvm::SmallVector<::mlir::RankedTensorType>",
+      "getShapeRegionResultTypes", (ins),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        return ::mlir::hipsr::getShapeRegionResultTypes($_op.getShapeRegion());
+      }]
+    >,
+    InterfaceMethod<
+      [{Like getShapeRegionResultShapes, but for the capacity region (region 1).
+        Only valid on EndBarrier ops; the capacity region must be populated.}],
+      "::llvm::SmallVector<::llvm::SmallVector<::mlir::Value>>",
+      "getCapacityShapeRegionResultShapes", (ins),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        ::mlir::Region *region = $_op.getCapacityShapeRegion();
+        assert(region && "op has no capacity shape region (region 1)");
+        return ::mlir::hipsr::getShapeRegionResultShapes(*region);
+      }]
+    >,
+    InterfaceMethod<
+      [{Like getShapeRegionResultTypes, but for the capacity region (region 1).
+        Only valid on EndBarrier ops; the capacity region must be populated.}],
+      "::llvm::SmallVector<::mlir::RankedTensorType>",
+      "getCapacityShapeRegionResultTypes", (ins),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{
+        ::mlir::Region *region = $_op.getCapacityShapeRegion();
+        assert(region && "op has no capacity shape region (region 1)");
+        return ::mlir::hipsr::getShapeRegionResultTypes(*region);
+      }]
+    >,
   ];
 
   let verify = [{
