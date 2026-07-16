@@ -1,5 +1,7 @@
-# Copyright (c) Microsoft Corporation. All rights reserved.
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
+#
 
 r"""
 Minimal OGA KV-cache reuse demo.
@@ -9,20 +11,23 @@ This is a standalone multi-turn OGA append demo:
 2. Append only the newly required token suffix for that turn.
 3. Generate an assistant answer before moving to the next turn.
 
-run environment: use same environment in https://amdcloud.sharepoint.com/sites/AIG/ACAS/AIS/Shared%20Documents/Forms/AllItems.aspx?sortField=Modified&isAscending=false&viewid=a7467c25%2D045c%2D4cfa%2Db7d6%2D6087479176b2&FolderCTID=0x01200030E43EC46C7307458A426ABB9063F706&OR=Teams%2DHL&CT=1758686810028&TeamsCID=985c526a%2D11af%2D4578%2Db989%2D6ca2917610a4&ovuser=3dd8961f%2De488%2D4e60%2D8e11%2Da82d994e183d%2Cshili9%40amd%2Ecom&id=%2Fsites%2FAIG%2FACAS%2FAIS%2FShared%20Documents%2FROCm%20EP%2Fdemo%2Fhipep%20EP%20Python%20Package%20Download%20%20Install%20%20Run%2Epdf&parent=%2Fsites%2FAIG%2FACAS%2FAIS%2FShared%20Documents%2FROCm%20EP%2Fdemo
+run environment: use python env
 
-run command example:  
-(.venv) PS C:\a-1\hipep-wheels-release_0_2_0>  python C:\a-1\hipep-wheels-release_0_2_0\examples\kvcache_reuse_demo.py -m    C:\a-1\Qwen3.5-35B-A3B-fp16-ve-fp16-int4-text-gs32-dml  --testAll   > c:\a-1\dump.txt
+run command example:
+ python kvcache_reuse_demo.py -m model_path\Qwen3.5-35B-A3B-fp16-ve-fp16-int4-text-gs32-dml  --testAll   > dump.txt
 this command run the full six group of prompts;
 or
-(.venv) PS C:\a-1\hipep-wheels-release_0_2_0>  python C:\a-1\hipep-wheels-release_0_2_0\examples\kvcache_reuse_demo.py -m    C:\a-1\Qwen3.5-35B-A3B-fp16-ve-fp16-int4-text-gs32-dml > c:\a-1\dump.txt
+ python kvcache_reuse_demo.py -m model_path\Qwen3.5-35B-A3B-fp16-ve-fp16-int4-text-gs32-dml > dump.txt
 this command run 1 group of prompts;
 
 for vlm model, you can provide picture by parameter of -i
+python kvcache_reuse_demo.py -m model_path\Qwen3.5-35B-A3B-fp16-ve-fp16-int4-text-gs32-dml -i some_pic.jpg --testAll   > dump.txt
 
 """
 
 import argparse
+import ast
+import contextlib
 import json
 import time
 from pathlib import Path
@@ -32,13 +37,50 @@ import onnxruntime_genai as og
 
 
 prompts = [
- 
+    # 1
+    [
+        " My name is Alex, I work as a data scientist at Orbital AI.",
+        " I live in Berlin and enjoy playing the piano in my free time.",
+        " Where do I live and what do I enjoy doing?",
+        " What is my profession?",
+    ],
+    # 2
+    [
+        ' When I say "compact summary," respond with 3 bullet points only.',
+        ' Give me a compact summary of: Ancient Egypt (Egyptian: km.t) was a cradle of civilization concentrated along the lower reaches of the Nile River in Northeast Africa. It emerged from prehistoric Egypt around 3150 BC (according to conventional Egyptian chronology), when Upper and Lower Egypt were amalgamated by Menes, who is believed by the majority of Egyptologists to have been the same person as Narmer. The history of ancient Egypt unfolded as a series of stable kingdoms interspersed by the "Intermediate Periods" of relative instability. These stable kingdoms existed in one of three periods: the Old Kingdom of the Early Bronze Age; the Middle Kingdom of the Middle Bronze Age; or the New Kingdom of the Late Bronze Age.',
+        " Give me a compact summary of: stages of butterfly",
+    ],
+    # 3
+    [
+        " Sarah is a software engineer who leads the AI team. James is her manager.",
+        " Who is Sarah's manager?",
+        " What team does Sarah lead?",
+    ],
+    # 4
+    [
+        " Here is a list of items I need from the store: apples, bread, milk, eggs, tomatoes, pasta, and cheese.",
+        " What was the fourth item?",
+        " How many dairy items are in the list?",
+    ],
+    # 5
+    [
+        " Alice is a biologist who works at Genomix Lab. She reports to Dr. Patel, who is the head of the lab. Her colleague, Martin, specializes in data analysis.",
+        " Who is Alice's manager?",
+        " Who is the data analyst at Genomix Lab?",
+        " What is Dr. Patel's position?",
+        " What field does Alice work in?",
+    ],
+    # 6
+    [
+        " A farmer has 3 fields. Each field has 240 apple trees.",
+        " If each tree produces 120 apples, how many apples does one field produce?",
+        " How many apples in total across all fields?",
+        " If 10% of the apples are spoiled, how many are still good?",
+    ],
 ]
 
-default_questions = [
-  " My name is Alice. I live in Berlin.", 
-  " Where do I live?"
-]
+default_questions = [" My name is Alice. I live in Berlin.", " Where do I live?"]
+
 
 def build_prompt_chat_template(
     model_path: str,
@@ -117,7 +159,6 @@ def encode_prompt_inputs(
         return text_tokens, prompt, None, token_debug
 
     inputs = processor(prompt, images=images)
-    print("shili inputs ", inputs)
     input_ids = to_numpy(inputs["input_ids"]).reshape(-1)
     prompt_tokens = [int(t) for t in input_ids]
     token_debug = {
@@ -155,7 +196,6 @@ def make_generator(model: og.Model, max_length: int, repetition_penalty: float):
         top_k=1,
         top_p=1.0,
         repetition_penalty=1.0,
-
     )
     return og.Generator(model, params)
 
@@ -354,6 +394,62 @@ def run_demo(args: argparse.Namespace) -> int:
         del model
 
 
+def extract_bracketed_list(text: str, start: int) -> str:
+    list_start = text.find("[", start)
+    if list_start < 0:
+        raise ValueError("ttft_matrix_ms marker found, but '[' was not found")
+
+    depth = 0
+    for idx in range(list_start, len(text)):
+        char = text[idx]
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth == 0:
+                return text[list_start : idx + 1]
+
+    raise ValueError("ttft_matrix_ms list is not closed")
+
+
+def read_text_auto(path: Path) -> str:
+    data = path.read_bytes()
+    if data.startswith(bytes([0xFF, 0xFE])) or data.startswith(bytes([0xFE, 0xFF])):
+        return data.decode("utf-16")
+
+    # Windows PowerShell redirection may create UTF-16LE without a visible BOM.
+    if len(data) >= 4 and data[1::2].count(0) > len(data) // 4:
+        return data.decode("utf-16-le")
+    return data.decode("utf-8", errors="replace")
+
+
+def check_kvcache_reuse_output(path: Path) -> tuple[bool, list[str]]:
+    text = read_text_auto(path)
+    reasons: list[str] = []
+
+    q2_pos = text.find("Q2")
+    if q2_pos < 0:
+        reasons.append("can't find Q2")
+
+    berlin_pos = text.find(" Berlin", q2_pos + len("Q2")) if q2_pos >= 0 else -1
+    if q2_pos >= 0 and berlin_pos < 0:
+        reasons.append("can't find Berlin")
+
+    ttft_pos = text.find("ttft_matrix_ms", berlin_pos if berlin_pos >= 0 else 0)
+    if ttft_pos < 0:
+        reasons.append("can't find ttft_matrix_ms")
+    else:
+        matrix_text = extract_bracketed_list(text, ttft_pos)
+        matrix = ast.literal_eval(matrix_text)
+        first_row = matrix[0]
+        if len(first_row) < 2:
+            reasons.append("can't find ttft1/ttft2")
+        elif first_row[1] >= first_row[0]:
+            reasons.append("ttft2 > ttft1")
+
+    return not reasons, reasons
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Minimal OGA KV-cache reuse demo")
     parser.add_argument(
@@ -406,8 +502,34 @@ def main() -> int:
         default=None,
         help="Optional image path to attach to the first prompt",
     )
+    parser.add_argument(
+        "-o",
+        "--output_file",
+        type=Path,
+        default=Path("dump.txt"),
+        help="Path to write demo output (default: dump.txt)",
+    )
     args = parser.parse_args()
-    return run_demo(args)
+
+    if args.output_file.parent != Path(""):
+        args.output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with args.output_file.open("w", encoding="utf-8") as out_file:
+        with contextlib.redirect_stdout(out_file):
+            exit_code = run_demo(args)
+
+    if not args.testAll:
+        try:
+            passed, reasons = check_kvcache_reuse_output(args.output_file)
+        except Exception as exc:
+            passed, reasons = False, [f"check failed: {exc}"]
+        if passed:
+            print("OK")
+        else:
+            print("Fail: " + "; ".join(reasons))
+            return 1
+
+    return exit_code
 
 
 if __name__ == "__main__":
