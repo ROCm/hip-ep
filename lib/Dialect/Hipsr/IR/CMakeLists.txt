@@ -8,6 +8,8 @@ add_library(HipsrDialectIR STATIC
   HipsrShapeRegionInterface.cpp
   HipsrShapeYieldOp.cpp
   HipsrOps.cpp
+  HipsrPoolDomainYieldOp.cpp
+  HipsrPoolDomainOp.cpp
   HipsrTraits.cpp
   HipsrTypes.cpp
 )

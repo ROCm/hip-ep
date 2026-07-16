@@ -19,6 +19,14 @@ set(LLVM_TARGET_DEFINITIONS HipsrOps.td)
 mlir_tablegen(HipsrOps.h.inc -gen-op-decls)
 mlir_tablegen(HipsrOps.cpp.inc -gen-op-defs)
 
+set(LLVM_TARGET_DEFINITIONS HipsrPoolDomainYieldOp.td)
+mlir_tablegen(HipsrPoolDomainYieldOp.h.inc -gen-op-decls)
+mlir_tablegen(HipsrPoolDomainYieldOp.cpp.inc -gen-op-defs)
+
+set(LLVM_TARGET_DEFINITIONS HipsrPoolDomainOp.td)
+mlir_tablegen(HipsrPoolDomainOp.h.inc -gen-op-decls)
+mlir_tablegen(HipsrPoolDomainOp.cpp.inc -gen-op-defs)
+
 add_public_tablegen_target(HipsrDialectIncGen)
 
 set(LLVM_TARGET_DEFINITIONS HipsrEnums.td)
