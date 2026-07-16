@@ -1019,7 +1019,7 @@ func.func @nested_loop_signatures(%ctx: !hip.context,
 // from the static `indices` extents (2, 8).
 // CHECK-LABEL: func.func @onehot_scalar_depth_axis_stays_dynamic
 // CHECK:         hip.one_hot
-// CHECK-SAME:      outs({{.*}} : tensor<2x8x?xf32>) : tensor<2x8x?xf32>
+// CHECK-SAME:      outs({{.*}} : tensor<2x8x?xf32>) {axis = 2 : i64} : tensor<2x8x?xf32>
 // CHECK-NOT:     tensor<2x8x1xf32>
 func.func @onehot_scalar_depth_axis_stays_dynamic(
     %ctx: !hip.context,
