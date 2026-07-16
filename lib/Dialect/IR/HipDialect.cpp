@@ -113,6 +113,22 @@ LogicalResult AllocOutputOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// ConstantOp: neutral externalizable constant carrier
+//===----------------------------------------------------------------------===//
+
+LogicalResult ConstantOp::verify() {
+  // Carrier duality: exactly one of the inline `value` or the external-data
+  // `location` reference must be present. A producer (convert-onnx-to-hip or a
+  // plugin) chooses one representation; both-or-neither is malformed.
+  bool hasValue = getValueAttr() != nullptr;
+  bool hasLocation = getLocationAttr() != nullptr;
+  if (hasValue == hasLocation)
+    return emitOpError("must carry exactly one of `value` (inline) or "
+                       "`location` (external-data reference)");
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // LoopOp: outlined-body counted/conditional loop (DPS)
 //===----------------------------------------------------------------------===//
 

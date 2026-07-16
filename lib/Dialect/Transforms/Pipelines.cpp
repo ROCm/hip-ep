@@ -348,21 +348,31 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   addPluginPassesForSlot(pm,
                          ::hip::compiler::PipelineSlot::AfterOnnxLoopOutline);
 
-  if (fs) {
-    pm.addPass(mlir::hip::createConvertOnnxToHipPass(
-        fs, options.externalizeMinNumElements, options.skipConstantData));
-  } else {
-    ConvertOnnxToHipPassOptions onnxToHipOpts;
-    onnxToHipOpts.externalizeOutputDir = options.externalizeOutputDir;
-    onnxToHipOpts.externalizeMinNumElements = options.externalizeMinNumElements;
-    pm.addPass(createConvertOnnxToHipPass(std::move(onnxToHipOpts)));
-  }
+  // convert-onnx-to-hip now emits neutral hip.constant carriers; the actual
+  // externalization runs in the standalone hip-externalize-constants pass
+  // below, so plugin-emitted hip.constant ops are serialized identically.
+  pm.addPass(createConvertOnnxToHipPass());
 
   // Plugin slot: AfterConvertOnnxToHip. The most common slot for
   // vendor lowerings of `onnx.Custom` ops or vendor-specific hip.*
-  // canonicalisations.
+  // canonicalisations. Vendor ops may emit hip.constant here for their
+  // weights; the externalize pass (next) serializes them.
   addPluginPassesForSlot(pm,
                          ::hip::compiler::PipelineSlot::AfterConvertOnnxToHip);
+
+  // Externalize hip.constant -> constants.bin. After the AfterConvertOnnxToHip
+  // slot (so plugin constants are included) and before bufferization (in the
+  // tail). The FileSystem overload writes into the EPContext tar.
+  if (fs) {
+    pm.addPass(mlir::hip::createExternalizeConstantsPass(
+        fs, options.externalizeMinNumElements, options.skipConstantData));
+  } else {
+    ExternalizeConstantsPassOptions extOpts;
+    extOpts.externalizeOutputDir = options.externalizeOutputDir;
+    extOpts.externalizeMinNumElements = options.externalizeMinNumElements;
+    extOpts.skipConstantData = options.skipConstantData;
+    pm.addPass(createExternalizeConstantsPass(std::move(extOpts)));
+  }
 
   buildOnnxToHipPipelineTail(pm);
 }
@@ -387,18 +397,22 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
     pm.addPass(createCompileHipDNNGraphsPass(handle, std::move(output_graphs)));
   }
 
-  if (fs) {
-    pm.addPass(mlir::hip::createConvertOnnxToHipPass(
-        fs, options.externalizeMinNumElements, options.skipConstantData));
-  } else {
-    ConvertOnnxToHipPassOptions onnxToHipOpts;
-    onnxToHipOpts.externalizeOutputDir = options.externalizeOutputDir;
-    onnxToHipOpts.externalizeMinNumElements = options.externalizeMinNumElements;
-    pm.addPass(createConvertOnnxToHipPass(std::move(onnxToHipOpts)));
-  }
+  pm.addPass(createConvertOnnxToHipPass());
 
   addPluginPassesForSlot(pm,
                          ::hip::compiler::PipelineSlot::AfterConvertOnnxToHip);
+
+  // Externalize hip.constant carriers (in-tree + plugin) to constants.bin.
+  if (fs) {
+    pm.addPass(mlir::hip::createExternalizeConstantsPass(
+        fs, options.externalizeMinNumElements, options.skipConstantData));
+  } else {
+    ExternalizeConstantsPassOptions extOpts;
+    extOpts.externalizeOutputDir = options.externalizeOutputDir;
+    extOpts.externalizeMinNumElements = options.externalizeMinNumElements;
+    extOpts.skipConstantData = options.skipConstantData;
+    pm.addPass(createExternalizeConstantsPass(std::move(extOpts)));
+  }
 
   buildOnnxToHipPipelineTail(pm);
 }

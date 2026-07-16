@@ -464,6 +464,60 @@ def Hip_GetConstantOp : Hip_Op<"get_constant", [
   }];
 }
 
+def Hip_ConstantOp : Hip_Op<"constant", [Pure]> {
+  let summary = "Neutral large-constant carrier, externalized by "
+                "hip-externalize-constants";
+  let description = [{
+    Carries a constant that MAY be externalized to the constants.bin sidecar.
+    Emitted by convert-onnx-to-hip (from onnx.Constant) and by downstream
+    plugins for their own weight tensors, so a single standalone pass
+    (hip-externalize-constants) serializes every constant uniformly, regardless
+    of the producing dialect. Mirrors the constant-carrier duality of a
+    frontend constant op: it holds either an inline `value` (ElementsAttr) or an
+    external-data reference (`location`/`offset`/`size`).
+
+    No folder is defined on purpose: the op must survive canonicalize/cse
+    between convert-onnx-to-hip and the externalize pass so the latter can see
+    and serialize it.
+
+    Before (hip-externalize-constants input):
+      %w = hip.constant {value = dense<...> : tensor<64x64xf16>}
+             : tensor<64x64xf16>
+    After (large -> externalized):
+      memref.global "private" @hip_ext_constant_0 : memref<64x64xf16>
+        {hip.external_data = {index = 0, offset = 0, size = 8192}}
+      %g = memref.get_global @hip_ext_constant_0 : memref<64x64xf16>
+      %w = bufferization.to_tensor %g restrict
+             : memref<64x64xf16> to tensor<64x64xf16>
+    (small -> arith.constant)
+  }];
+
+  let arguments = (ins
+    OptionalAttr<ElementsAttr>:$value,
+    OptionalAttr<StrAttr>:$location,
+    OptionalAttr<I64Attr>:$offset,
+    OptionalAttr<I64Attr>:$size
+  );
+  let results = (outs AnyRankedTensor:$result);
+
+  let assemblyFormat = [{
+    attr-dict `:` type($result)
+  }];
+
+  let builders = [
+    // Result-type-only builder: producers create the carrier, then attach
+    // exactly one of `value` or `location` (+ offset/size) via setAttr.
+    OpBuilder<(ins "::mlir::Type":$result), [{
+      build($_builder, $_state, result, /*value=*/nullptr, /*location=*/nullptr,
+            /*offset=*/nullptr, /*size=*/nullptr);
+    }]>
+  ];
+
+  // Enforce the carrier duality: exactly one of the inline `value` or the
+  // external-data `location` must be present.
+  let hasVerifier = 1;
+}
+
 // ===== Region ops (structural grouping, no runtime) =========================
 
 def Hip_MiopenGraphOp : Hip_Op<"miopen.graph", [SingleBlock, NoTerminator]> {

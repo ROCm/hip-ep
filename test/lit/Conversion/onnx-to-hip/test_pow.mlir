@@ -29,8 +29,9 @@
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
-// RUN: hip-mlir-opt %s --hip-add-context-arg \
-// RUN:   --convert-onnx-to-hip="externalize-min-num-elements=1" \
+// RUN: mkdir -p %t && hip-mlir-opt %s --hip-add-context-arg \
+// RUN:   --convert-onnx-to-hip \
+// RUN:   --hip-externalize-constants="externalize-min-num-elements=1 externalize-output-dir=%t" \
 // RUN:   | FileCheck %s --check-prefix=EXTERN
 
 module {
