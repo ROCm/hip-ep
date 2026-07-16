@@ -907,6 +907,26 @@ extern "C"
       static_cast<OpProfileState *>(state->op_profile));
 }
 
+// Outer (whole-scope) CPU timing sink for the EP. Same dllexport/optional
+// contract as the two hooks above. `cpu_ms` is a steady_clock measurement from
+// the EP side (see the header contract); op_profile_add_cpu records it as a
+// CPU-only row so the resolve/print step can surface the bubble against the
+// per-op CPU rows. No-op when perf is disabled (state->op_profile is null).
+extern "C"
+#ifdef _WIN32
+    __declspec(dllexport)
+#endif
+        void hipdnn_ep_runtime_add_cpu_profile(RuntimeState *state,
+                                               const char *name,
+                                               double cpu_start_us,
+                                               double cpu_ms) {
+  if (!state || !name) {
+    return;
+  }
+  op_profile_add_cpu_total(static_cast<OpProfileState *>(state->op_profile),
+                           name, cpu_start_us, cpu_ms);
+}
+
 //===----------------------------------------------------------------------===//
 // Memory Pooling Support
 //===----------------------------------------------------------------------===//
