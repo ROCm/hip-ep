@@ -1,0 +1,26 @@
+cc_library(
+    name = "morphizen_utils",
+    srcs = glob([
+        "src/*.cpp",
+    ], exclude = [
+        "src/morphizen_plugin_lnx.cpp",  # Platform-specific, handled below
+        "src/morphizen_plugin_win.cpp",  # Platform-specific, handled below
+    ]) + select({
+        "@bazel_tools//src/conditions:windows": ["src/morphizen_plugin_win.cpp"],
+        "@bazel_tools//src/conditions:linux_x86_64": ["src/morphizen_plugin_lnx.cpp"],
+        "@bazel_tools//src/conditions:darwin": ["src/morphizen_plugin_lnx.cpp"],  # Use lnx version for macOS
+        "//conditions:default": [],
+    }),
+    hdrs = glob(["include/morphizen-utils/*.hpp"]),
+    strip_include_prefix = "include",
+    deps = [
+        "//morphizen-foundation",
+        "//3rd-party/onnxruntime-morphizen-headers",
+        "@glog//:glog",
+    ],
+    visibility = ["//visibility:public"],
+    copts = select({
+        "@bazel_tools//src/conditions:windows": ["/std:c++17"],  # MSVC syntax
+        "//conditions:default": ["-std=c++17"],                 # GCC/Clang syntax
+    }),
+)

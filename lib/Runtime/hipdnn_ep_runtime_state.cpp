@@ -163,6 +163,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->qmoe_host_scratch_size = 0;
   state->conv_scratch = nullptr;
   state->conv_scratch_size = 0;
+  state->matmul_dp4a_scratch = nullptr;
+  state->matmul_dp4a_scratch_size = 0;
   state->zp_unpack_cache = nullptr;
   state->op_profile = hipdnn_ep_perf_enabled() ? op_profile_create() : nullptr;
   state->device_error_flag = nullptr;
@@ -203,6 +205,11 @@ static int initialize_state_handles(RuntimeState **out_state) {
 
   TIMING_LOG("[Session] hipStreamCreate: %.3fs\n", record_elapsed(t_prev));
 
+  // Skip vendor-handle creation when the vendor BLAS/DNN backends are disabled:
+  // the stubbed miopenCreate/hipblasLtCreate would fail and abort session
+  // creation even for a model that never dispatches a vendor op. Handles stay
+  // null; cleanup is already null-guarded.
+#ifndef HIPDNN_EP_DISABLE_VENDOR_BLAS
   if (miopenCreate(&state->miopen_handle) != miopenStatusSuccess) {
     fprintf(stderr, "Failed to create MIOpen handle\n");
     if (state->stream)
@@ -231,6 +238,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
     free(state);
     return 9;
   }
+#endif // HIPDNN_EP_DISABLE_VENDOR_BLAS
 
   TIMING_LOG("[Session] hipBLASLt init: %.3fs\n", record_elapsed(t_prev));
 
@@ -702,6 +710,11 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   // sync above has drained any in-flight conv that may still be reading it.
   if (state->conv_scratch) {
     HIP_CLEANUP(hipFree(state->conv_scratch));
+  }
+
+  // Free the W4A8 dp4a matmul_nbits scratch (if allocated).
+  if (state->matmul_dp4a_scratch) {
+    HIP_CLEANUP(hipFree(state->matmul_dp4a_scratch));
   }
 
   // Tear down per-op state slots. Each entry's deletor destroys its concrete
@@ -1331,6 +1344,50 @@ int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
     return -1;
   }
   state->conv_scratch_size = alloc_size;
+  return 0;
+}
+
+void *hipdnn_ep_state_get_matmul_dp4a_scratch(RuntimeState *state) {
+  return state ? state->matmul_dp4a_scratch : nullptr;
+}
+
+int hipdnn_ep_state_ensure_matmul_dp4a_scratch(RuntimeState *state,
+                                               size_t needed_size) {
+  if (!state)
+    return -1;
+  if (needed_size == 0)
+    return 0;
+  if (state->matmul_dp4a_scratch_size >= needed_size)
+    return 0;
+
+  // 1.5x growth amortisation mirrors conv_scratch / qmoe_scratch.
+  size_t alloc_size = needed_size;
+  if (state->matmul_dp4a_scratch_size > 0) {
+    size_t grown =
+        state->matmul_dp4a_scratch_size + state->matmul_dp4a_scratch_size / 2;
+    if (grown > alloc_size)
+      alloc_size = grown;
+  }
+
+  if (state->matmul_dp4a_scratch) {
+    // Drain any in-flight dp4a gemv that may still be reading the old buffer
+    // before we free it. Growth is rare (only when a larger K is first seen).
+    if (state->stream) {
+      hipStreamSynchronize(state->stream);
+    }
+    HIP_CLEANUP(hipFree(state->matmul_dp4a_scratch));
+    state->matmul_dp4a_scratch = nullptr;
+    state->matmul_dp4a_scratch_size = 0;
+  }
+
+  if (hipMalloc(&state->matmul_dp4a_scratch, alloc_size) != hipSuccess) {
+    fprintf(stderr,
+            "hipdnn_ep_state_ensure_matmul_dp4a_scratch: hipMalloc failed for "
+            "%zu bytes\n",
+            alloc_size);
+    return -1;
+  }
+  state->matmul_dp4a_scratch_size = alloc_size;
   return 0;
 }
 

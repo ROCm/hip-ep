@@ -1,0 +1,14 @@
+# Example .bazelrc.local for Linux/macOS users
+# Copy this file to .bazelrc.local and uncomment the appropriate lines
+
+# For Linux users:
+# startup --output_user_root=/tmp/bazel-user-root
+
+# For macOS users:
+# startup --output_user_root=/tmp/bazel-user-root
+
+# You can also override any other settings here
+# build --config=linux  # Auto-apply Linux config
+# build --config=macos   # Auto-apply macOS config
+
+# Ensure no workspace symlinks are created

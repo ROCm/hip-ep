@@ -58,9 +58,91 @@
 #include <hip/hip_fp16.h>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+
+/* -----------------------------------------------------------------------
+ * Shared disk-persistent autotune cache (GEMV int4 / int8 paths)
+ *
+ * WHY: the GEMV autotune (kGemvConfigs) picks the fastest (threads, tile_n)
+ * by on-device timing. Kept purely in-process, every process re-runs that
+ * timing and -- because several configs are within measurement noise of each
+ * other -- can settle on a DIFFERENT winner run-to-run, so single-token
+ * decode TPS swings run-to-run between otherwise-identical processes.
+ * Persisting the winning config to disk (keyed by problem shape + a build
+ * stamp) makes the first process prime the file and every later process load
+ * the SAME config -> deterministic decode. Mirrors the WMMA disk cache
+ * (getWmmaCachePath / loadWmmaCache / saveWmmaCache) further down this file.
+ *
+ * File format: first line = build stamp (invalidates the file on recompile),
+ * then "<key> <config_id>" per line. One file per GPU arch in %TEMP%.
+ * ----------------------------------------------------------------------- */
+static constexpr const char kTuneCacheBuildStamp[] = __DATE__ " " __TIME__;
+
+static std::string getTuneCachePath(const char *name) {
+    std::string tmp_dir;
+#ifdef _WIN32
+    char *v = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&v, &len, "TEMP") == 0 && v != nullptr) {
+        tmp_dir = v;
+        free(v);
+    }
+#else
+    const char *v = getenv("TEMP");
+    if (!v) v = getenv("TMPDIR");
+    if (!v) v = "/tmp";
+    tmp_dir = v;
+#endif
+    if (tmp_dir.empty()) return std::string();
+
+    hipDeviceProp_t prop;
+    if (hipGetDeviceProperties(&prop, 0) != hipSuccess ||
+        prop.gcnArchName[0] == '\0')
+        return std::string();
+
+    return tmp_dir + "/morphizen_" + name + "_cache_" + prop.gcnArchName +
+           ".txt";
+}
+
+static void loadTuneCacheFile(const std::string &path,
+                              std::unordered_map<std::string, int> &cache,
+                              int maxConfigId) {
+    if (path.empty()) return;
+    FILE *f = fopen(path.c_str(), "r");
+    if (!f) return;
+    // First line is the build stamp -- discard the cache if the binary was
+    // rebuilt (config ids / timings may have changed).
+    char ts_line[64];
+    if (!fgets(ts_line, sizeof(ts_line), f)) {
+        fclose(f);
+        return;
+    }
+    size_t ts_len = strlen(ts_line);
+    if (ts_len > 0 && ts_line[ts_len - 1] == '\n') ts_line[ts_len - 1] = '\0';
+    if (strcmp(ts_line, kTuneCacheBuildStamp) != 0) {
+        fclose(f);
+        return;
+    }
+    char key[128];
+    int cfg;
+    while (fscanf(f, "%127s %d", key, &cfg) == 2)
+        if (cfg >= 0 && cfg < maxConfigId) cache[key] = cfg;
+    fclose(f);
+}
+
+static void saveTuneCacheFile(const std::string &path,
+                              const std::unordered_map<std::string, int> &cache) {
+    if (path.empty()) return;
+    FILE *f = fopen(path.c_str(), "w");
+    if (!f) return;
+    fprintf(f, "%s\n", kTuneCacheBuildStamp);
+    for (const auto &e : cache) fprintf(f, "%s %d\n", e.first.c_str(), e.second);
+    fclose(f);
+}
 
 /* =======================================================================
  * Section 1: Naive fallback kernel (row-major, any alignment, batched)
@@ -772,6 +854,236 @@ __global__ void matmul_nbits_gemv_kernel(
     }
 }
 
+/* =======================================================================
+ * Section 1c: W4A8 integer-dot-product (dp4a) GEMV path  [decode, M==1]
+ *
+ * WHY: the int4 GEMV kernel above is dequant-ALU-bound, not bandwidth-bound
+ * (external RDNA3 W4A16 roofline: ~4-6 ALU instructions per weight byte --
+ * shift + mask + int->float convert + fp32 FMA -- before a weight enters the
+ * dot). This path replaces that chain with the gfx11 signed/unsigned integer
+ * dot builtin `v_dot4_i32_iu8` (`__builtin_amdgcn_sudot4`): each instruction
+ * folds 4 MACs, so 8 nibbles cost 2 sudot4 + a few mask/shift ops instead of
+ * 8 float-converts + 8 fp32 FMAs.
+ *
+ * Precondition: the activation row is dynamically quantized to per-group int8
+ * once per token by `matmul_nbits_quant_act_i8_kernel` below (amortized across
+ * all N output columns), and packed nibble-DEINTERLEAVED so the weight's
+ * even/odd nibble split (`x & 0x0F0F0F0F` / `(x>>4) & 0x0F0F0F0F`) pairs
+ * byte-for-byte with the activation without any per-column reshuffle.
+ *
+ * Factored dequant (integer): with a[k] ~= a_scale[grp] * aq[k] (int8),
+ *   out = sum_k a[k]*(w[k]-zp)*scale[grp]
+ *       = a_scale[grp] * scale[grp] * ( dot_int(aq, w) - zp * sum(aq) )
+ * where dot_int and sum(aq) are int32 (sum via sudot4 against 0x01010101),
+ * and a_scale/scale/zp are per-group constants.
+ *
+ * Only the K%32==0 main path is implemented (all target decode shapes have
+ * K a multiple of 32); the dispatcher falls back to the fp GEMV otherwise.
+ * ======================================================================= */
+
+// Deinterleaved-int8 activation layout, per 8-element chunk c (k = 8c + p):
+//   bytes[8c+0..3] = {aq[8c+0], aq[8c+2], aq[8c+4], aq[8c+6]}   (a_lo, even p)
+//   bytes[8c+4..7] = {aq[8c+1], aq[8c+3], aq[8c+5], aq[8c+7]}   (a_hi, odd p)
+// This matches the byte order produced by masking a packed-nibble uint32 with
+// 0x0F0F0F0F (even nibbles) and (>>4)&0x0F0F0F0F (odd nibbles). One block per
+// K-group; group boundaries are 8-aligned (block_size is a power of two >= 32),
+// so no chunk straddles a group.
+template <int BLOCK_SIZE>
+__global__ void matmul_nbits_quant_act_i8_kernel(
+    const __half* __restrict__ A,
+    int8_t*       __restrict__ a_qb,
+    float*        __restrict__ a_scale,
+    int64_t K, int64_t block_size)
+{
+    const int64_t grp = blockIdx.x;
+    const int64_t g0  = grp * block_size;
+    const int64_t g1  = min(g0 + block_size, K);
+    const int     tid = threadIdx.x;
+
+    // Pass 1: per-group max|A| reduction (warp shuffle + LDS).
+    float local_max = 0.0f;
+    for (int64_t k = g0 + tid; k < g1; k += BLOCK_SIZE)
+        local_max = fmaxf(local_max, fabsf(static_cast<float>(A[k])));
+
+    constexpr int WARP_SIZE = 32;
+    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+    for (int off = WARP_SIZE >> 1; off > 0; off >>= 1)
+        local_max = fmaxf(local_max, __shfl_down(local_max, off));
+
+    __shared__ float smax[NUM_WARPS > 0 ? NUM_WARPS : 1];
+    if ((tid & (WARP_SIZE - 1)) == 0)
+        smax[tid >> 5] = local_max;
+    __syncthreads();
+    if (tid == 0) {
+        float m = 0.0f;
+#pragma unroll
+        for (int i = 0; i < NUM_WARPS; i++)
+            m = fmaxf(m, smax[i]);
+        smax[0] = m;
+    }
+    __syncthreads();
+
+    const float gmax      = smax[0];
+    const float scale     = (gmax > 0.0f) ? (gmax * (1.0f / 127.0f)) : 1.0f;
+    const float inv_scale = (gmax > 0.0f) ? (127.0f / gmax) : 0.0f;
+    if (tid == 0)
+        a_scale[grp] = scale;
+
+    // Pass 2: quantize + deinterleaved-pack write (byte writes, no conflict).
+    for (int64_t k = g0 + tid; k < g1; k += BLOCK_SIZE) {
+        int q = __float2int_rn(static_cast<float>(A[k]) * inv_scale);
+        q = max(-127, min(127, q));
+        const int64_t c = k >> 3;
+        const int     p = static_cast<int>(k & 7);
+        const int64_t byte_off =
+            (p & 1) ? (c * 8 + 4 + (p >> 1)) : (c * 8 + (p >> 1));
+        a_qb[byte_off] = static_cast<int8_t>(q);
+    }
+}
+
+// dp4a GEMV: mirrors matmul_nbits_gemv_kernel's main uint4 phase, but the
+// per-element dequant/FMA chain is replaced by two sudot4 per 8 nibbles.
+// Row-major only (decode); requires K % 32 == 0. Reads the per-group int8
+// activation (a_qb) + scales (a_scale) prepared ONCE per token by
+// matmul_nbits_quant_act_i8_kernel above -- the quant is amortized across all
+// N/TILE_N column blocks (fusing it into the GEMV instead re-quantizes A in
+// every block, which is a net loss: measured ~1.3-2x slower on decode shapes
+// because the redundant fp16 read + convert per block dwarfs the one launch it
+// would save).
+template <int BLOCK_SIZE, int TILE_N>
+__global__ void matmul_nbits_gemv_dp4a_kernel(
+    const int8_t*  __restrict__ a_qb,
+    const float*   __restrict__ a_scale,
+    const uint8_t* __restrict__ B,
+    const __half*  __restrict__ scales,
+    const uint8_t* __restrict__ zp,
+    const __half*  __restrict__ bias,
+    __half*        __restrict__ output,
+    int64_t N, int64_t K, int64_t block_size)
+{
+    const int64_t n_base = static_cast<int64_t>(blockIdx.x) * TILE_N;
+    const int     tid    = threadIdx.x;
+    const int64_t k_blocks = (K + block_size - 1) / block_size;
+    const int     bs_shift =
+        __builtin_ctzll(static_cast<unsigned long long>(block_size));
+    const bool has_zp = (zp != nullptr);
+
+    const uint8_t* b_base_arr[TILE_N];
+    const __half*  s_rows[TILE_N];
+    int64_t        n_idx[TILE_N];
+#pragma unroll
+    for (int tn = 0; tn < TILE_N; tn++) {
+        int64_t n  = n_base + tn;
+        int64_t sn = (n < N) ? n : 0;
+        n_idx[tn]  = sn;
+        b_base_arr[tn] = B + sn * (K / 2);
+        s_rows[tn] = scales + sn * k_blocks;
+    }
+
+    float partial[TILE_N];
+#pragma unroll
+    for (int tn = 0; tn < TILE_N; tn++)
+        partial[tn] = 0.0f;
+
+    const int num_u128 = static_cast<int>(K / 32);
+    for (int idx = tid; idx < num_u128; idx += BLOCK_SIZE) {
+        const int   k32 = idx * 32;
+        const int   grp = k32 >> bs_shift;
+        const float a_sc = a_scale[grp];
+
+        // 4 deinterleaved chunks (a_lo/a_hi) covering the 32 activations.
+        const int8_t* aq = a_qb + static_cast<int64_t>(idx) * 32;
+        int a_lo[4], a_hi[4];
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            a_lo[j] = *reinterpret_cast<const int*>(aq + j * 8);
+            a_hi[j] = *reinterpret_cast<const int*>(aq + j * 8 + 4);
+        }
+        // sum(aq) over the 32 elements: signed-int8 dot against all-ones.
+        int a_sum_q = 0;
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            a_sum_q = __builtin_amdgcn_sudot4(true, a_lo[j], false, 0x01010101,
+                                              a_sum_q, false);
+            a_sum_q = __builtin_amdgcn_sudot4(true, a_hi[j], false, 0x01010101,
+                                              a_sum_q, false);
+        }
+
+#pragma unroll
+        for (int tn = 0; tn < TILE_N; tn++) {
+            uint4 b = *reinterpret_cast<const uint4*>(&b_base_arr[tn][idx * 16]);
+            const unsigned comp[4] = {b.x, b.y, b.z, b.w};
+            int dot = 0;
+#pragma unroll
+            for (int j = 0; j < 4; j++) {
+                const int lo_w = static_cast<int>(comp[j] & 0x0F0F0F0Fu);
+                const int hi_w = static_cast<int>((comp[j] >> 4) & 0x0F0F0F0Fu);
+                dot = __builtin_amdgcn_sudot4(true, a_lo[j], false, lo_w, dot,
+                                              false);
+                dot = __builtin_amdgcn_sudot4(true, a_hi[j], false, hi_w, dot,
+                                              false);
+            }
+            const float sv = static_cast<float>(s_rows[tn][grp]);
+            const int   zv = has_zp
+                                 ? static_cast<int>(zp[n_idx[tn] * k_blocks + grp])
+                                 : 8;
+            partial[tn] += a_sc * sv * static_cast<float>(dot - a_sum_q * zv);
+        }
+    }
+
+    // --- Reduction: warp shuffle then shared memory (mirrors int4 path) ---
+    constexpr int WARP_SIZE = 32;
+    const int warp_id   = tid / WARP_SIZE;
+    const int lane_id   = tid % WARP_SIZE;
+    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+
+#pragma unroll
+    for (int tn = 0; tn < TILE_N; tn++) {
+        for (int offset = WARP_SIZE >> 1; offset > 0; offset >>= 1)
+            partial[tn] += __shfl_down(partial[tn], offset);
+    }
+
+    if constexpr (BLOCK_SIZE <= WARP_SIZE) {
+        if (lane_id == 0) {
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++) {
+                int64_t n = n_base + tn;
+                if (n < N) {
+                    float val = partial[tn];
+                    if (bias)
+                        val += static_cast<float>(bias[n]);
+                    output[n] = static_cast<__half>(val);
+                }
+            }
+        }
+    } else {
+        __shared__ float warp_sums[TILE_N * NUM_WARPS];
+        if (lane_id == 0) {
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++)
+                warp_sums[tn * NUM_WARPS + warp_id] = partial[tn];
+        }
+        __syncthreads();
+        if (warp_id == 0) {
+#pragma unroll
+            for (int tn = 0; tn < TILE_N; tn++) {
+                float val = (lane_id < NUM_WARPS)
+                                ? warp_sums[tn * NUM_WARPS + lane_id] : 0.0f;
+                for (int offset = WARP_SIZE >> 1; offset > 0; offset >>= 1)
+                    val += __shfl_down(val, offset);
+                if (lane_id == 0) {
+                    int64_t n = n_base + tn;
+                    if (n < N) {
+                        if (bias)
+                            val += static_cast<float>(bias[n]);
+                        output[n] = static_cast<__half>(val);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /* -----------------------------------------------------------------------
  * GEMV Autotune: config table, dispatch, benchmark, cache
  * ----------------------------------------------------------------------- */
@@ -912,6 +1224,8 @@ static int tuneGemvConfig(
 
 static std::unordered_map<std::string, int> gemv_cache;
 static std::mutex gemv_tune_mutex;
+static std::once_flag gemv_cache_init_flag;
+static std::string gemv_cache_path;
 
 static std::string gemvCacheKey(int64_t M, int64_t N, int64_t K, int64_t bs,
                                 bool col_major, bool has_zp) {
@@ -940,6 +1254,13 @@ static int getOrTuneGemvConfig(
     std::string key = gemvCacheKey(M, N, K, bs, effective_col_major,
                                    /*has_zp=*/zp != nullptr);
 
+    // Load the disk-persisted cache once per process so repeated runs settle on
+    // the same config -> deterministic decode (see kTuneCacheBuildStamp above).
+    std::call_once(gemv_cache_init_flag, [] {
+        gemv_cache_path = getTuneCachePath("gemv");
+        loadTuneCacheFile(gemv_cache_path, gemv_cache, kNumGemvConfigs);
+    });
+
     std::lock_guard<std::mutex> lock(gemv_tune_mutex);
 
     auto it = gemv_cache.find(key);
@@ -949,6 +1270,7 @@ static int getOrTuneGemvConfig(
     int best = tuneGemvConfig(stream, A, B, sc, zp, bi, out,
                                M, N, K, batch, bs, col_major);
     gemv_cache[key] = best;
+    saveTuneCacheFile(gemv_cache_path, gemv_cache);
 
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] GEMV cache: stored key=\"%s\" -> config[%d] "
@@ -956,6 +1278,177 @@ static int getOrTuneGemvConfig(
         key.c_str(), best, gemv_cache.size());
 
     return best;
+}
+
+/* -----------------------------------------------------------------------
+ * W4A8 dp4a GEMV Autotune + dispatch (decode, M==1, K%32==0)
+ *
+ * Reuses kGemvConfigs + the tune-cache mechanics; a separate cache is kept
+ * because the dp4a kernel's per-config ranking differs from the fp path
+ * (integer dot vs float FMA changes the occupancy/latency tradeoff).
+ * ----------------------------------------------------------------------- */
+
+static void launchDp4aConfig(
+    int config_id, hipStream_t stream,
+    const int8_t* a_qb, const float* a_scale,
+    const uint8_t* B, const __half* sc, const uint8_t* zp,
+    const __half* bi, __half* out,
+    int64_t N, int64_t K, int64_t bs)
+{
+    auto& c = kGemvConfigs[config_id];
+    dim3 grid(static_cast<unsigned>((N + c.tile_n - 1) / c.tile_n), 1u, 1u);
+    dim3 block(c.threads);
+
+#define DP4A_CASE(ID, BS, TN) \
+    case ID: \
+        hipLaunchKernelGGL( \
+            HIP_KERNEL_NAME(matmul_nbits_gemv_dp4a_kernel<BS, TN>), \
+            grid, block, 0, stream, a_qb, a_scale, B, sc, zp, bi, out, \
+            N, K, bs); \
+        break
+
+    switch (config_id) {
+        DP4A_CASE( 0,  32,  1);  DP4A_CASE( 1,  32,  2);
+        DP4A_CASE( 2,  32,  4);  DP4A_CASE( 3,  32,  8);
+        DP4A_CASE( 4,  64,  1);  DP4A_CASE( 5,  64,  2);
+        DP4A_CASE( 6,  64,  4);  DP4A_CASE( 7,  64,  8);
+        DP4A_CASE( 8,  64, 16);
+        DP4A_CASE( 9, 128,  1);  DP4A_CASE(10, 128,  2);
+        DP4A_CASE(11, 128,  4);  DP4A_CASE(12, 128,  8);
+        DP4A_CASE(13, 128, 16);
+        DP4A_CASE(14, 256,  1);  DP4A_CASE(15, 256,  2);
+        DP4A_CASE(16, 256,  4);  DP4A_CASE(17, 256,  8);
+        DP4A_CASE(18, 256, 16);
+        DP4A_CASE(19, 512,  1);  DP4A_CASE(20, 512,  2);
+        DP4A_CASE(21, 512,  4);  DP4A_CASE(22, 512,  8);
+        DP4A_CASE(23, 512, 16);
+        DP4A_CASE(24, 1024,  1); DP4A_CASE(25, 1024,  2);
+        DP4A_CASE(26, 1024,  4); DP4A_CASE(27, 1024,  8);
+        DP4A_CASE(28, 1024, 16);
+        DP4A_CASE(29,  64, 32);  DP4A_CASE(30, 128, 32);
+        DP4A_CASE(31, 256, 32);
+        DP4A_CASE(32,  64, 64);  DP4A_CASE(33, 128, 64);
+        DP4A_CASE(34, 256, 64);
+        default: break;
+    }
+#undef DP4A_CASE
+}
+
+static int tuneDp4aConfig(
+    hipStream_t stream,
+    const int8_t* a_qb, const float* a_scale,
+    const uint8_t* B, const __half* sc, const uint8_t* zp,
+    const __half* bi, __half* out,
+    int64_t N, int64_t K, int64_t bs)
+{
+    hipEvent_t ev0, ev1;
+    hipEventCreate(&ev0);
+    hipEventCreate(&ev1);
+    float best_ms = 1e30f;
+    int   best_id = 9;  // 128x1 default
+    constexpr int WARMUP = 1;
+    constexpr int ITERS  = 5;
+
+    for (int cid = 0; cid < kNumGemvConfigs; cid++) {
+        auto& cfg = kGemvConfigs[cid];
+        if (cfg.tile_n >= 64 && N < 2048) continue;
+        if (cfg.tile_n >= 32 && cfg.tile_n < 64 && N < 1024) continue;
+
+        for (int w = 0; w < WARMUP; w++)
+            launchDp4aConfig(cid, stream, a_qb, a_scale, B, sc, zp, bi, out,
+                             N, K, bs);
+
+        hipEventRecord(ev0, stream);
+        for (int i = 0; i < ITERS; i++)
+            launchDp4aConfig(cid, stream, a_qb, a_scale, B, sc, zp, bi, out,
+                             N, K, bs);
+        hipEventRecord(ev1, stream);
+        hipEventSynchronize(ev1);
+
+        float ms = 0.0f;
+        hipEventElapsedTime(&ms, ev0, ev1);
+        if (ms < best_ms) { best_ms = ms; best_id = cid; }
+    }
+    hipEventDestroy(ev0);
+    hipEventDestroy(ev1);
+    return best_id;
+}
+
+static std::unordered_map<std::string, int> dp4a_cache;
+static std::mutex dp4a_tune_mutex;
+static std::once_flag dp4a_cache_init_flag;
+static std::string dp4a_cache_path;
+
+static int getOrTuneDp4aConfig(
+    hipStream_t stream,
+    const int8_t* a_qb, const float* a_scale,
+    const uint8_t* B, const __half* sc, const uint8_t* zp,
+    const __half* bi, __half* out,
+    int64_t N, int64_t K, int64_t bs)
+{
+    std::string key = std::to_string(N) + "_" + std::to_string(K) + "_" +
+                      std::to_string(bs) + "_" + (zp ? "1" : "0");
+
+    std::call_once(dp4a_cache_init_flag, [] {
+        dp4a_cache_path = getTuneCachePath("dp4a");
+        loadTuneCacheFile(dp4a_cache_path, dp4a_cache, kNumGemvConfigs);
+    });
+
+    std::lock_guard<std::mutex> lock(dp4a_tune_mutex);
+    auto it = dp4a_cache.find(key);
+    if (it != dp4a_cache.end())
+        return it->second;
+
+    int best = tuneDp4aConfig(stream, a_qb, a_scale, B, sc, zp, bi, out,
+                              N, K, bs);
+    dp4a_cache[key] = best;
+    saveTuneCacheFile(dp4a_cache_path, dp4a_cache);
+    return best;
+}
+
+// Public entry: W4A8 dp4a GEMV for a single decode row.
+//   A          : fp16 activation row [K] (row-major, batch==M==1)
+//   B          : packed int4 weights [N, K/2]
+//   scales     : fp16 [N, k_blocks]
+//   zp_u8      : pre-unpacked uint8 zero points [N, k_blocks] or nullptr (sym)
+//   out        : fp16 [N]
+//   a_qb_scratch/a_scale_scratch : per-session scratch, caller-sized to
+//       >= K bytes and >= k_blocks floats respectively.
+// Returns hip status (hipSuccess on success). K must be a multiple of 32.
+extern "C" int hip_matmul_nbits_dp4a(
+    void* stream_v,
+    const void* A, const void* B, const void* scales, const void* zp_u8,
+    const void* bias, void* out,
+    int64_t N, int64_t K, int64_t block_size,
+    void* a_qb_scratch, void* a_scale_scratch)
+{
+    if (K % 32 != 0) return hipErrorInvalidValue;
+    hipStream_t stream = static_cast<hipStream_t>(stream_v);
+
+    const __half*  Ah   = static_cast<const __half*>(A);
+    const uint8_t* Bp   = static_cast<const uint8_t*>(B);
+    const __half*  sc   = static_cast<const __half*>(scales);
+    const uint8_t* zp   = static_cast<const uint8_t*>(zp_u8);
+    const __half*  bi   = static_cast<const __half*>(bias);
+    __half*        outp = static_cast<__half*>(out);
+    int8_t*        a_qb = static_cast<int8_t*>(a_qb_scratch);
+    float*         a_sc = static_cast<float*>(a_scale_scratch);
+
+    const int64_t k_blocks = (K + block_size - 1) / block_size;
+
+    // Step 1: dynamic per-group int8 quantization of the activation row.
+    // One block per K-group, fixed 128 threads (handles bs in {32,64,128,256}).
+    (void)hipGetLastError();
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(matmul_nbits_quant_act_i8_kernel<128>),
+                       dim3(static_cast<unsigned>(k_blocks)), dim3(128), 0,
+                       stream, Ah, a_qb, a_sc, K, block_size);
+
+    // Step 2: dp4a GEMV (autotuned config).
+    int cfg = getOrTuneDp4aConfig(stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
+                                  N, K, block_size);
+    launchDp4aConfig(cfg, stream, a_qb, a_sc, Bp, sc, zp, bi, outp,
+                     N, K, block_size);
+    return hipGetLastError();
 }
 
 /* -----------------------------------------------------------------------
@@ -1091,6 +1584,8 @@ static int tuneGemvConfigI8(
 
 static std::unordered_map<std::string, int> gemv_i8_cache;
 static std::mutex gemv_i8_tune_mutex;
+static std::once_flag gemv_i8_cache_init_flag;
+static std::string gemv_i8_cache_path;
 
 static std::string gemvI8CacheKey(int64_t M, int64_t N, int64_t K,
                                    int64_t bs, bool has_zp) {
@@ -1112,6 +1607,11 @@ static int getOrTuneGemvConfigI8(
     const bool has_zp = (zp != nullptr);
     std::string key = gemvI8CacheKey(M, N, K, bs, has_zp);
 
+    std::call_once(gemv_i8_cache_init_flag, [] {
+        gemv_i8_cache_path = getTuneCachePath("gemv_i8");
+        loadTuneCacheFile(gemv_i8_cache_path, gemv_i8_cache, kNumGemvConfigs);
+    });
+
     std::lock_guard<std::mutex> lock(gemv_i8_tune_mutex);
 
     auto it = gemv_i8_cache.find(key);
@@ -1121,6 +1621,7 @@ static int getOrTuneGemvConfigI8(
     int best = tuneGemvConfigI8(stream, A, B, sc, zp, bi, out,
                                  M, N, K, batch, bs);
     gemv_i8_cache[key] = best;
+    saveTuneCacheFile(gemv_i8_cache_path, gemv_i8_cache);
 
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] GEMV-i8 cache: stored key=\"%s\" -> config[%d] "
@@ -2019,6 +2520,20 @@ __global__ void dequant_u4_to_fp16(
 
 typedef _Float16 half16 __attribute__((ext_vector_type(16)));
 typedef float    float8 __attribute__((ext_vector_type(8)));
+
+// The WMMA builtin below is RDNA3-family (wave32) only. Where __has_builtin
+// reports it absent, trap instead so this file still compiles and a WMMA
+// launch on an unsupported arch aborts loudly rather than returning garbage.
+#if !defined(__has_builtin) ||                                                  \
+    !__has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_f16_w32)
+static __device__ __forceinline__ float8
+hipdnn_wmma_f32_16x16x16_f16_w32_unavailable(half16, half16, float8 c) {
+  __builtin_trap();
+  return c;
+}
+#define __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c)                     \
+  hipdnn_wmma_f32_16x16x16_f16_w32_unavailable((a), (b), (c))
+#endif
 
 #define WMMA_TILE 16
 

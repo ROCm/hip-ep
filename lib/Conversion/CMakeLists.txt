@@ -6,6 +6,7 @@
 message(STATUS "Building Conversion Libraries")
 
 add_subdirectory(OnnxToHip)
+add_subdirectory(OnnxToHipsr)
 add_subdirectory(OnnxToHipDNN)
 add_subdirectory(HipToLLVM)
 
@@ -14,8 +15,12 @@ add_library(HipConversion STATIC
   Passes.cpp
 )
 
+# Passes.cpp includes hip/Conversion/Passes.h -> Passes.h.inc.
+add_dependencies(HipConversion HipsrConversionPassIncGen)
+
 target_link_libraries(HipConversion PUBLIC
   OnnxToHip
+  OnnxToHipsr
   OnnxToHipDNN
   HipToLLVM
   MLIRIR

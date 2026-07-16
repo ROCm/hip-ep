@@ -1,0 +1,86 @@
+// Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+/*
+ *     MorphiZen in this distribution is provided under the
+ * following free and permissive binary-only license, but is not provided in
+ * source code form.  While the following free and permissive license is similar
+ * to the BSD open source license, it is NOT the BSD open source license nor
+ * other OSI-approved open source license.
+ *
+ *      Copyright (C) 2023 – 2024 Advanced Micro Devices, Inc. All rights reserved.
+ *
+ *      Redistribution and use in binary form only, without modification, is
+ * permitted provided that the following conditions are met:
+ *
+ *      1. Redistributions must reproduce the above copyright notice, this list
+ * of conditions and the following disclaimer in the documentation and/or other
+ * materials provided with the distribution.
+ *
+ *      2. The name of Xilinx, Inc. may not be used to endorse or promote
+ * products redistributed with this software without specific prior written
+ * permission.
+ *
+ *      THIS SOFTWARE IS PROVIDED BY XILINX, INC. "AS IS" AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO
+ * EVENT SHALL XILINX, INC. BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+ *      PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+ * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+ * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+ * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
+ * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
+ */
+syntax = "proto3";
+package morphizen;
+
+message RootPatternProto {
+  repeated PatternProto patterns = 1;
+}
+
+message PatternProto {
+  optional string id = 1;
+  bool is_root = 2;
+  oneof type {
+    PatternWildcardProto wildcard = 10;
+    PatternGraphInputProto graph_input = 11;
+    PatternConstantProto constant = 12;
+    PatternCallNodeProto call_node = 13;
+    PatternNodeOutputArgProto node_output_arg = 14;
+    PatternGraphOutputProto graph_output = 15;
+  }
+}
+
+message PatternWildcardProto {
+}
+
+message PatternGraphInputProto {
+}
+
+message PatternConstantProto {
+}
+
+message PatternCallNodeProto {
+  string op_type = 1;
+  string op_domain = 4;
+  repeated PatternCallNodeArgProto args = 2;
+  repeated bool optional_args = 3;
+}
+
+message PatternCallNodeArgProto {
+  oneof arg {
+    string name = 1;
+    PatternProto pattern  = 2;
+  }
+}
+
+message PatternNodeOutputArgProto {
+  PatternCallNodeArgProto call_node = 1;
+  uint64 output_arg_index = 2;
+}
+
+message PatternGraphOutputProto {
+  PatternCallNodeArgProto node_arg = 1;
+  optional uint64 graph_output_index = 2;
+  optional string graph_output_name = 3;
+}

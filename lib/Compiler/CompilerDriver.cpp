@@ -4,6 +4,7 @@
  */
 
 #include "hip/Compiler/CompilerDriver.h"
+#include "hip/Compiler/PluginRegistry.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Pipelines.h"
 #include "hip/InitAllPasses.h"
@@ -17,10 +18,12 @@
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Pass/PassManager.h"
+#include "mlir/Pass/PassRegistry.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Export.h"
 #include "mlir/Transforms/Passes.h"
 
+#include "llvm/ADT/Sequence.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
@@ -49,6 +52,11 @@ bool CompilerDriver::compile(llvm::StringRef input_mlir,
                              const mlir::hip::CompilationOptionsT &options,
                              std::string &error_message) {
   hip::compiler::registerAllPasses();
+  // Run every statically-linked plugin's registration (idempotent across
+  // compile() calls; no-op when none were selected). Plugin passes must land in
+  // MLIR's pass registry BEFORE buildOnnxToHipPipeline / buildHipToLLVMPipeline
+  // run, otherwise their slot lookups will silently miss.
+  hip::compiler::dispatchPluginRegistrationsOnce();
 
   mlir::MLIRContext context;
   hip::compiler::loadAllDialects(context);
@@ -86,6 +94,7 @@ bool CompilerDriver::compileFromModule(
     mlir::ModuleOp module, const std::string &output_path,
     const mlir::hip::CompilationOptionsT &options, std::string &error_message) {
   hip::compiler::registerAllPasses();
+  hip::compiler::dispatchPluginRegistrationsOnce();
   return compileImpl(module, output_path, options, error_message);
 }
 
@@ -221,24 +230,90 @@ bool CompilerDriver::runMLIRPasses(
     COMPILER_DEBUG_LOG("Running ONNX->HIP->LLVM->Interface passes\n");
   }
 
-  mlir::hip::OnnxToHipPipelineOptions onnxToHipOpts;
-  onnxToHipOpts.externalizeMinNumElements =
-      mlir::hip::kDefaultExternalizeMinNumElements;
-  onnxToHipOpts.skipConstantData = options.skip_constant_data;
+  // Pipeline composition override: a downstream may replace the built-in
+  // ONNX->HIP->LLVM order via the HIPDNN_EP_PIPELINE env var. The value is
+  // either a registered pipeline name or a textual `builtin.module(...)`
+  // string; it composes from in-tree passes resolved out of MLIR's global
+  // registry (populated by registerAllPasses() in compile()). A textual
+  // pipeline of in-tree passes needs no shared MLIR. When the env var is unset
+  // the built-in pipeline runs unchanged. The downstream then owns the
+  // load-bearing ordering invariants and the required terminal stages; the
+  // post-run check below hard-fails if the result lacks an inference_compute
+  // entry point. See docs/design/plugin-interface.md, "Pipeline composition".
+  //
+  // hip_get_env (not std::getenv): this code may be linked into the static-CRT
+  // EP DLL where std::getenv cannot see host-process env vars.
+  std::string customPipeline = hip_get_env("HIPDNN_EP_PIPELINE");
+  const bool overridePipeline = !customPipeline.empty();
 
-  if (hipdnnHandle_) {
-    compiledGraphs_ =
-        std::make_shared<llvm::StringMap<mlir::hip::OwnedGraph>>();
-    mlir::hip::buildOnnxToHipPipeline(
-        pm, onnxToHipOpts, fileSystem_,
-        static_cast<hipdnnHandle_t>(hipdnnHandle_), compiledGraphs_);
+  if (overridePipeline) {
+    std::string parseErr;
+    llvm::raw_string_ostream parseErrOS(parseErr);
+    llvm::StringRef desc = llvm::StringRef(customPipeline).trim();
+    // Strip a leading `builtin.module(...)` wrapper if present so the inner
+    // list parses into the module-level PassManager; otherwise treat the value
+    // as a registered pipeline name (or a bare inner list).
+    mlir::LogicalResult parsed = mlir::failure();
+    size_t paren = desc.find_first_of('(');
+    if (paren != llvm::StringRef::npos &&
+        desc.take_front(paren).rtrim() == "builtin.module" &&
+        desc.consume_back(")")) {
+      parsed =
+          mlir::parsePassPipeline(desc.drop_front(paren + 1), pm, parseErrOS);
+    } else {
+      parsed = mlir::parsePassPipeline(desc, pm, parseErrOS);
+    }
+    if (mlir::failed(parsed)) {
+      error_message = "HIPDNN_EP_PIPELINE: failed to parse pipeline '" +
+                      customPipeline + "': " + parseErrOS.str();
+      return false;
+    }
+    COMPILER_DEBUG_LOG("[CompilerDriver] HIPDNN_EP_PIPELINE set: built-in "
+                       "pipeline overridden by a custom pipeline\n");
+    // A custom pipeline replaces the built-in builders wholesale, and
+    // requestPipelineSlot() injections only run inside those builders
+    // (lib/Dialect/Transforms/Pipelines.cpp::addPluginPassesForSlot). So a
+    // plugin's slot requests are NOT applied under an override. Warn once if
+    // any are pending, so the interaction is not silent -- a custom pipeline
+    // that wants a plugin pass must name it directly in HIPDNN_EP_PIPELINE.
+    bool anySlotRequested = false;
+    for (int slotIdx : llvm::seq_inclusive(
+             0, static_cast<int>(
+                    ::hip::compiler::PipelineSlot::AfterGenerateInterface))) {
+      if (!::hip::compiler::pluginPassesForSlot(
+               static_cast<::hip::compiler::PipelineSlot>(slotIdx))
+               .empty()) {
+        anySlotRequested = true;
+        break;
+      }
+    }
+    if (anySlotRequested) {
+      llvm::errs()
+          << "[plugin] WARNING: HIPDNN_EP_PIPELINE is set, so the "
+             "built-in pipeline is bypassed and plugin requestPipelineSlot() "
+             "injections do NOT run. Name the plugin pass directly in the "
+             "HIPDNN_EP_PIPELINE string to run it under the override.\n";
+    }
   } else {
-    mlir::hip::buildOnnxToHipPipeline(pm, onnxToHipOpts, fileSystem_);
-  }
+    mlir::hip::OnnxToHipPipelineOptions onnxToHipOpts;
+    onnxToHipOpts.externalizeMinNumElements =
+        mlir::hip::kDefaultExternalizeMinNumElements;
+    onnxToHipOpts.skipConstantData = options.skip_constant_data;
 
-  mlir::hip::HipToLLVMPipelineOptions hipToLlvmOpts;
-  hipToLlvmOpts.constantsFile = options.constants_file;
-  mlir::hip::buildHipToLLVMPipeline(pm, hipToLlvmOpts);
+    if (hipdnnHandle_) {
+      compiledGraphs_ =
+          std::make_shared<llvm::StringMap<mlir::hip::OwnedGraph>>();
+      mlir::hip::buildOnnxToHipPipeline(
+          pm, onnxToHipOpts, fileSystem_,
+          static_cast<hipdnnHandle_t>(hipdnnHandle_), compiledGraphs_);
+    } else {
+      mlir::hip::buildOnnxToHipPipeline(pm, onnxToHipOpts, fileSystem_);
+    }
+
+    mlir::hip::HipToLLVMPipelineOptions hipToLlvmOpts;
+    hipToLlvmOpts.constantsFile = options.constants_file;
+    mlir::hip::buildHipToLLVMPipeline(pm, hipToLlvmOpts);
+  }
 
   std::unique_ptr<llvm::raw_fd_ostream> irDumpStream;
   // hip_get_env, not std::getenv: this code may be linked into the static-CRT
@@ -335,6 +410,21 @@ bool CompilerDriver::runMLIRPasses(
     return false;
   }
 
+  // Guardrail for the HIPDNN_EP_PIPELINE override: a custom pipeline that drops
+  // generate-interface (or otherwise fails to emit the C-ABI entry point)
+  // produces a module the rest of the EP cannot consume. Fail loudly here
+  // rather than later with a cryptic missing-symbol error at link/load. Only
+  // checked in override mode; the built-in pipeline always emits it.
+  if (overridePipeline &&
+      !module.lookupSymbol(hipdnn::abi::kInferenceCompute)) {
+    error_message =
+        std::string("HIPDNN_EP_PIPELINE: the custom pipeline did not produce "
+                    "an '") +
+        hipdnn::abi::kInferenceCompute +
+        "' entry point (did it omit generate-interface?)";
+    return false;
+  }
+
   if (options.verbose)
     COMPILER_DEBUG_LOG("MLIR passes completed\n\n");
 
@@ -409,7 +499,7 @@ bool CompilerDriver::linkToDLL(const std::string &objPath,
   return true;
 }
 
-void CompilerDriver::discoverLibraries(
+void CompilerDriver::discoverInTreeLibraries(
     std::vector<std::string> &libraries,
     std::vector<std::string> &library_paths) {
   // Current-stream accessor (lib/Runtime/tls_stream.cpp). runtime.bc references
@@ -438,6 +528,11 @@ void CompilerDriver::discoverLibraries(
   COMPILER_DEBUG_LOG("  Adding library path: " << lib_dir << "\n");
 
   libraries.push_back("amdhip64");
+
+  // Skip -lMIOpen/-lhipblaslt when the vendor BLAS/DNN backends are disabled;
+  // the runtime's vendor wrappers are then error-returning stubs that reference
+  // no MIOpen/hipBLASLt symbols, so a model links without these libraries.
+#ifndef HIPDNN_EP_DISABLE_VENDOR_BLAS
   libraries.push_back("MIOpen");
 
   // hipblaslt ships as .lib (Windows), .dll.a (cross-compiled), or
@@ -454,6 +549,7 @@ void CompilerDriver::discoverLibraries(
     libraries.push_back("hipblaslt");
   else
     COMPILER_DEBUG_LOG("  WARNING: hipblaslt import library not found\n");
+#endif // HIPDNN_EP_DISABLE_VENDOR_BLAS
 
   // Custom kernels: per-arch shared library (custom_kernels_<arch>.{dll,so}).
   // The native model DLL imports the hip_* launcher symbols from it; the EP
@@ -512,6 +608,33 @@ void CompilerDriver::discoverLibraries(
     libraries.push_back("hipdnn_graph_runtime");
     COMPILER_DEBUG_LOG("  hipDNN graph runtime: hipdnn_graph_runtime\n");
 #endif
+  }
+}
+
+void CompilerDriver::discoverLibraries(
+    std::vector<std::string> &libraries,
+    std::vector<std::string> &library_paths) {
+  // Phase 1: in-tree library discovery driven by THEROCK_DIST.
+  // No-op without THEROCK_DIST, which lets a CPU-only smoke test
+  // load a vendor plugin and still produce a model.dll, as long
+  // as the plugin contributes everything the model module needs.
+  discoverInTreeLibraries(libraries, library_paths);
+
+  // Phase 2: plugin-contributed libraries.
+  //
+  // Appended *after* the in-tree libraries so an in-tree library is searched
+  // first when both define the same symbol. Vendors who need to override an
+  // in-tree symbol should use the bitcode mechanism (`addRuntimeBitcode`),
+  // which is wired with `Linker::Flags::OverrideFromSrc` for that purpose.
+  // The `pluginLibraries()` doc comment in
+  // include/hip/Compiler/PluginRegistry.h documents this contract.
+  for (const auto &path : ::hip::compiler::pluginLibraryPaths()) {
+    library_paths.emplace_back(path);
+    COMPILER_DEBUG_LOG("  Plugin library path: " << path << "\n");
+  }
+  for (const auto &lib : ::hip::compiler::pluginLibraries()) {
+    libraries.emplace_back(lib);
+    COMPILER_DEBUG_LOG("  Plugin library: " << lib << "\n");
   }
 
   for (const auto &lib : libraries) {
