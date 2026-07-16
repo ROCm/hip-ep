@@ -22,9 +22,10 @@ def ShapeRegionInterface : OpInterface<"ShapeRegionInterface"> {
     Base interface for shape computation.
     Provides populateShapeRegion() method - single source of truth.
 
-    An implementing op carries a shape region (region 0) whose body computes
-    the op's output dimensions and ends with a `hipsr.shape_yield`. The
-    populate* methods emit that region; the get* accessors retrieve it.
+    An implementing op carries an optional shape region (region 0): either
+    empty (zero blocks, no shape computation yet) or a single block whose body
+    computes the op's output dimensions and ends with a `hipsr.shape_yield`.
+    The populate* methods emit that region; the get* accessors retrieve it.
 
     REQUIREMENT: an op implementing this interface MUST also add two traits
     (MLIR interfaces cannot auto-attach traits), e.g.
@@ -32,14 +33,16 @@ def ShapeRegionInterface : OpInterface<"ShapeRegionInterface"> {
       def Hipsr_MatMulOp : Hipsr_Op<"matmul", [
           ShapeRegionInterface,
           IsolatedFromAboveButAllowOperands,
-          SingleBlockImplicitTerminator<"ShapeYieldOp">
+          SingleBlock
       ]> { ... }
 
-    `SingleBlockImplicitTerminator<"ShapeYieldOp">` inserts the terminator;
+    `SingleBlock` keeps a non-empty region to a single block without inserting
+    or eliding a terminator (so an empty region stays empty);
     `IsolatedFromAboveButAllowOperands` restricts what the shape region may use.
-    The interface verifier checks the region structure and that the trait is
-    present (so a missing trait gives a clear error); the trait's own verifier
-    does the scoping check.
+    The interface verifier checks the region structure -- including that a
+    non-empty region ends with `hipsr.shape_yield` -- and that the
+    IsolatedFromAboveButAllowOperands trait is present (whose own verifier does
+    the scoping check).
 
     Operation categories (barrier markers are separate interfaces):
     - Regular (MatMul, Add): no block arguments, one shape, depends on input shapes.
