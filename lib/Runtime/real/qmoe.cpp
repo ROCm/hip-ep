@@ -316,10 +316,27 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       int32_t *d_ids_e = d_sorted_token_ids + off_e;
       char *d_wts_e = d_sorted_weights + off_e * elem_size;
 
+      // OPT2 DIAGNOSTIC: gather/scatter fusion into the shared WMMA/GEMV matmul
+      // is invasive (breaks the vectorized paired A-load) with weak correctness
+      // validation on this stack. Since items 1/3/5 showed MoE glue does not
+      // gate TTFT, we instead measure the UPPER BOUND on any fusion payoff by
+      // skipping the standalone gather + scatter kernels entirely. Output is
+      // intentionally wrong here (this branch is a measurement, not a shippable
+      // opt): TTFT(opt2) vs baseline == the most the fusion could ever save.
+      static bool s_opt2_logged = false;
+      if (!s_opt2_logged) {
+        s_opt2_logged = true;
+        fprintf(stderr,
+                "[OPT2] gather/scatter SKIPPED (fusion-ceiling diagnostic) "
+                "ENTERED\n");
+      }
+      const bool kOpt2SkipGatherScatter = true;
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: %lld tokens - gather\n",
                         (long long)e, (long long)count);
-      HIP_CHECK(hip_qmoe_gather_tokens(stream, input, d_gather_buf, d_ids_e,
-                                       hidden_size, count, elem_size));
+      if (!kOpt2SkipGatherScatter) {
+        HIP_CHECK(hip_qmoe_gather_tokens(stream, input, d_gather_buf, d_ids_e,
+                                         hidden_size, count, elem_size));
+      }
 
       const char *fc1_w_e = static_cast<const char *>(fc1_weights) +
                             e * fusion_inter * k_blocks_fc1 * blob_size_fc1;
@@ -435,8 +452,10 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
 
       RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: scatter_add\n",
                         (long long)e);
-      HIP_CHECK(hip_qmoe_scatter_add(stream, output, d_fc2_buf, d_ids_e,
-                                     d_wts_e, hidden_size, count, elem_size));
+      if (!kOpt2SkipGatherScatter) {
+        HIP_CHECK(hip_qmoe_scatter_add(stream, output, d_fc2_buf, d_ids_e,
+                                       d_wts_e, hidden_size, count, elem_size));
+      }
     }
   }
 
