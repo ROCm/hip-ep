@@ -34,6 +34,17 @@ public:
   }
 };
 
+/// Marks an op that starts a new pool domain. See HipsrTraits.td. No verifier.
+template <typename ConcreteType>
+class StartBarrier
+    : public ::mlir::OpTrait::TraitBase<ConcreteType, StartBarrier> {};
+
+/// Marks an op that ends the current pool domain. See HipsrTraits.td. No
+/// verifier.
+template <typename ConcreteType>
+class EndBarrier : public ::mlir::OpTrait::TraitBase<ConcreteType, EndBarrier> {
+};
+
 } // namespace OpTrait
 } // namespace hipsr
 } // namespace mlir
