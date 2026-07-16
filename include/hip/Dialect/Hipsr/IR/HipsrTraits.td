@@ -16,19 +16,4 @@ def IsolatedFromAboveButAllowOperands : NativeOpTrait<
   let cppNamespace = "::mlir::hipsr::OpTrait";
 }
 
-// Marks an op that starts a new pool domain. The op is the first op of the
-// new domain because its output shape needs the op's input data (e.g. Expand).
-// Marker only, no verifier. See HipsrTraits.h.
-def StartBarrier : NativeOpTrait<"StartBarrier"> {
-  let cppNamespace = "::mlir::hipsr::OpTrait";
-}
-
-// Marks an op that ends the current pool domain. The op stays in the current
-// domain; the next domain starts at the first op that uses this op's result.
-// Its output shape needs the op's output data (e.g. NonZero). Marker only, no
-// verifier. See HipsrTraits.h.
-def EndBarrier : NativeOpTrait<"EndBarrier"> {
-  let cppNamespace = "::mlir::hipsr::OpTrait";
-}
-
 #endif // HIPSR_TRAITS

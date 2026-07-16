@@ -2,8 +2,9 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 //
-// ShapeRegionInterface. The barrier markers (StartBarrier / EndBarrier) are
-// op traits in HipsrTraits.td, not interfaces, because they carry no methods.
+// ShapeRegionInterface. The pool-domain barriers are separate interfaces:
+// StartBarrierInterface (HipsrStartBarrierInterface.td) and EndBarrierInterface
+// (HipsrEndBarrierInterface.td).
 //
 
 #ifndef HIPSR_SHAPE_REGION_INTERFACE
