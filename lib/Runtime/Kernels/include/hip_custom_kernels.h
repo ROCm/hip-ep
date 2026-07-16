@@ -1542,6 +1542,21 @@ HIP_KERNEL_API int hip_qmoe_swiglu(
     float limit,
     int64_t element_size_bytes);
 
+/* SwiGLU with fused FC1 bias: adds the interleaved [2*inter] gate/up bias to
+ * the FC1 output before the activation, eliminating the separate
+ * matmul_nbits_add_bias pass. bias==NULL falls back to hip_qmoe_swiglu. */
+HIP_KERNEL_API int hip_qmoe_swiglu_bias(
+    void* stream,
+    const void* input,
+    const void* bias,
+    void* output,
+    int64_t n,
+    int64_t inter_size,
+    float alpha,
+    float beta,
+    float limit,
+    int64_t element_size_bytes);
+
 /* Weighted scatter-add: output[token_ids[i],:] += weights[i] * expert_out[i,:]
  *   token_ids - GPU [count] int32
  *   weights   - GPU [count] (same type as output)

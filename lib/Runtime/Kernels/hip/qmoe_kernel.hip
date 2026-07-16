@@ -206,6 +206,41 @@ __global__ void swiglu_kernel(
 }
 
 // ---------------------------------------------------------------------------
+// SwiGLU with fused FC1 bias (fp16 only). Folds the per-expert FC1 bias add
+// (previously a separate full [n, 2*inter] matmul_nbits_add_bias pass) into the
+// SwiGLU epilogue: gate/up get their bias BEFORE the activation, which is
+// mathematically identical to add-bias-then-activate. Saves one full R/W pass
+// over [n, 2*inter] per expert per layer.
+//   bias: [2*inter], interleaved gate_bias[0], up_bias[0], gate_bias[1], ...
+// ---------------------------------------------------------------------------
+__global__ void swiglu_bias_kernel(
+    const __half* __restrict__ input,
+    const __half* __restrict__ bias,
+    __half* __restrict__ output,
+    int64_t n,
+    int64_t inter_size,
+    float alpha,
+    float beta,
+    float limit) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx >= n * inter_size) return;
+
+  int64_t col = idx % inter_size;
+
+  // idx == row*inter + col, so row*2*inter + 2*col == 2*idx (interleaved).
+  float g = static_cast<float>(input[2 * idx]) +
+            static_cast<float>(bias[2 * col]);
+  float l = static_cast<float>(input[2 * idx + 1]) +
+            static_cast<float>(bias[2 * col + 1]);
+
+  float G = fminf(g, limit);
+  float L = fmaxf(fminf(l, limit), -limit);
+
+  float sigmoid_val = 1.0f / (1.0f + expf(-alpha * G));
+  output[idx] = static_cast<__half>(G * sigmoid_val * (L + beta));
+}
+
+// ---------------------------------------------------------------------------
 // Weighted scatter-add (fp16 only):
 //   output[token_ids[i], j] += weights[i] * expert_out[i, j]
 //
@@ -454,6 +489,49 @@ extern "C" int hip_qmoe_swiglu(
   hipError_t err = hipGetLastError();
   if (err != hipSuccess)
     fprintf(stderr, "[custom_kernels] hip_qmoe_swiglu failed: %s\n",
+            hipGetErrorString(err));
+  return static_cast<int>(err);
+}
+
+extern "C" int hip_qmoe_swiglu_bias(
+    void* stream,
+    const void* input,
+    const void* bias,
+    void* output,
+    int64_t n,
+    int64_t inter_size,
+    float alpha,
+    float beta,
+    float limit,
+    int64_t element_size_bytes) {
+  if (n <= 0 || inter_size <= 0) return 0;
+  if (!bias) {
+    // No bias -> fall back to the plain kernel (keeps callers simple).
+    return hip_qmoe_swiglu(stream, input, output, n, inter_size, alpha, beta,
+                           limit, element_size_bytes);
+  }
+
+  hipStream_t s = static_cast<hipStream_t>(stream);
+  int64_t total = n * inter_size;
+  int grid = static_cast<int>((total + kBlock - 1) / kBlock);
+
+  if (element_size_bytes != 2) {
+    fprintf(stderr,
+            "[custom_kernels] hip_qmoe_swiglu_bias: only fp16 supported, "
+            "got element_size %lld\n",
+            (long long)element_size_bytes);
+    return -1;
+  }
+
+  hipLaunchKernelGGL(swiglu_bias_kernel, dim3(grid), dim3(kBlock), 0, s,
+                     static_cast<const __half*>(input),
+                     static_cast<const __half*>(bias),
+                     static_cast<__half*>(output), n, inter_size, alpha,
+                     beta, limit);
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess)
+    fprintf(stderr, "[custom_kernels] hip_qmoe_swiglu_bias failed: %s\n",
             hipGetErrorString(err));
   return static_cast<int>(err);
 }

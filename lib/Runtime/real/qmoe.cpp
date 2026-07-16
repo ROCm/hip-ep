@@ -375,19 +375,28 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                         "[%lld x %lld] -> [%lld x %lld]\n",
                         (long long)e, (long long)count, (long long)hidden_size,
                         (long long)count, (long long)fusion_inter);
+      // OPT3: skip the standalone FC1 bias-add pass here (pass nullptr) and
+      // fold the bias into the SwiGLU epilogue below. Eliminates one full R/W
+      // pass over [count, 2*inter] per expert per layer.
       HIP_CHECK(
           hip_matmul_nbits(stream, d_gather_buf, fc1_w_e, fc1_s_e, fc1_zp_e,
-                           fc1_b_e, d_fc1_buf, count, fusion_inter, hidden_size,
-                           1, expert_weight_bits, block_size, elem_size,
+                           /*bias=*/nullptr, d_fc1_buf, count, fusion_inter,
+                           hidden_size, 1, expert_weight_bits, block_size,
+                           elem_size,
                            /*zp_elem_size=*/1, fc1_pre_zp_u8, fc1_pre_zp_fp16));
 
-      RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: swiglu(alpha=%.3f, "
+      static bool s_opt3_logged = false;
+      if (!s_opt3_logged) {
+        s_opt3_logged = true;
+        fprintf(stderr, "[OPT3] fused FC1 bias into swiglu ENTERED\n");
+      }
+      RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: expert %lld: swiglu+bias(alpha=%.3f, "
                         "beta=%.3f, limit=%.1f)\n",
                         (long long)e, (double)activation_alpha,
                         (double)activation_beta, (double)swiglu_limit);
-      HIP_CHECK(hip_qmoe_swiglu(stream, d_fc1_buf, d_act_buf, count, inter_size,
-                                activation_alpha, activation_beta, swiglu_limit,
-                                elem_size));
+      HIP_CHECK(hip_qmoe_swiglu_bias(stream, d_fc1_buf, fc1_b_e, d_act_buf,
+                                     count, inter_size, activation_alpha,
+                                     activation_beta, swiglu_limit, elem_size));
 
       const char *fc2_w_e = static_cast<const char *>(fc2_weights) +
                             e * hidden_size * k_blocks_fc2 * blob_size_fc2;
