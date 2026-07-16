@@ -22,6 +22,19 @@ def Hipsr_Dialect : Dialect {
 
   // Lets the dialect parse/print `!hipsr.context`.
   let useDefaultTypePrinterParser = 1;
+
+  let extraClassDeclaration = [{
+    /// Returns a cached memory-mapped view of the file at `path`, loading it on
+    /// first use. The buffer lives for the dialect's lifetime (no eviction --
+    /// constants are read only during compilation). Returns nullptr on failure.
+    /// Thread-safe: the dialect is a shared singleton and MLIR runs passes
+    /// multi-threaded, so the cache is guarded by a mutex.
+    ::llvm::MemoryBuffer *getOrLoadFileMap(::llvm::StringRef path);
+
+  private:
+    ::llvm::StringMap<std::unique_ptr<::llvm::MemoryBuffer>> fileMaps;
+    std::mutex fileMapsMutex;
+  }];
 }
 
 #endif // HIPSR_DIALECT

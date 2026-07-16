@@ -5,6 +5,7 @@
 
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 
+#include "hip/Dialect/Hipsr/IR/HipsrConstantOp.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 #include "hip/Dialect/Hipsr/IR/HipsrPoolDomainOp.h"
 #include "hip/Dialect/Hipsr/IR/HipsrPoolDomainYieldOp.h"
@@ -40,6 +41,9 @@ void HipsrDialect::initialize() {
       ,
 #define GET_OP_LIST
 #include "hip/Dialect/Hipsr/IR/HipsrPoolDomainOp.cpp.inc"
+      ,
+#define GET_OP_LIST
+#include "hip/Dialect/Hipsr/IR/HipsrConstantOp.cpp.inc"
       >();
   addAttributes<
 #define GET_ATTRDEF_LIST
@@ -49,4 +53,23 @@ void HipsrDialect::initialize() {
 #define GET_TYPEDEF_LIST
 #include "hip/Dialect/Hipsr/IR/HipsrTypes.cpp.inc"
       >();
+}
+
+llvm::MemoryBuffer *HipsrDialect::getOrLoadFileMap(llvm::StringRef path) {
+  // The dialect is a shared singleton and MLIR runs passes multi-threaded;
+  // guard the cache against concurrent lookups/inserts.
+  std::lock_guard<std::mutex> lock(fileMapsMutex);
+
+  auto it = fileMaps.find(path);
+  if (it != fileMaps.end())
+    return it->second.get();
+
+  llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> bufOr =
+      llvm::MemoryBuffer::getFile(path, /*IsText=*/false);
+  if (!bufOr)
+    return nullptr;
+
+  llvm::MemoryBuffer *raw = bufOr->get();
+  fileMaps[path] = std::move(*bufOr);
+  return raw;
 }
