@@ -133,6 +133,46 @@ func.func @tensor_vs_memref_mismatch(%in: memref<3x4xf32>) -> tensor<3x4xf32> {
 }
 
 // -----
+// Verifier: same element type but different static dims is still a mismatch.
+func.func @shape_mismatch_static(%in: tensor<4x3xf32>) -> tensor<3x4xf32> {
+  // expected-error @+1 {{result #0 type 'tensor<3x4xf32>' does not match the yielded value type 'tensor<4x3xf32>'}}
+  %0 = hipsr.pool_domain(%in : tensor<4x3xf32>) {
+    hipsr.pool_domain_yield %in : tensor<4x3xf32>
+  } -> tensor<3x4xf32>
+  return %0 : tensor<3x4xf32>
+}
+
+// -----
+// Verifier: differing rank (same total element count) is a mismatch.
+func.func @shape_mismatch_rank(%in: tensor<12xf32>) -> tensor<3x4xf32> {
+  // expected-error @+1 {{result #0 type 'tensor<3x4xf32>' does not match the yielded value type 'tensor<12xf32>'}}
+  %0 = hipsr.pool_domain(%in : tensor<12xf32>) {
+    hipsr.pool_domain_yield %in : tensor<12xf32>
+  } -> tensor<3x4xf32>
+  return %0 : tensor<3x4xf32>
+}
+
+// -----
+// Verifier: a static dim does not match a dynamic dim.
+func.func @shape_mismatch_dynamic(%in: tensor<2x?xi64>) -> tensor<2x4xi64> {
+  // expected-error @+1 {{result #0 type 'tensor<2x4xi64>' does not match the yielded value type 'tensor<2x?xi64>'}}
+  %0 = hipsr.pool_domain(%in : tensor<2x?xi64>) {
+    hipsr.pool_domain_yield %in : tensor<2x?xi64>
+  } -> tensor<2x4xi64>
+  return %0 : tensor<2x4xi64>
+}
+
+// -----
+// Verifier: memref results follow the same shape-consistency rule.
+func.func @shape_mismatch_memref(%in: memref<2x?xi64>) -> memref<2x8xi64> {
+  // expected-error @+1 {{result #0 type 'memref<2x8xi64>' does not match the yielded value type 'memref<2x?xi64>'}}
+  %0 = hipsr.pool_domain(%in : memref<2x?xi64>) {
+    hipsr.pool_domain_yield %in : memref<2x?xi64>
+  } -> memref<2x8xi64>
+  return %0 : memref<2x8xi64>
+}
+
+// -----
 // Verifier (SizedRegion<1>): the body must be a single block. Two blocks, each
 // terminated by its own pool_domain_yield, is rejected.
 func.func @multi_block_body(%in: tensor<3x4xf32>) {
