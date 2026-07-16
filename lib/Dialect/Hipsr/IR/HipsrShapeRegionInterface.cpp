@@ -26,6 +26,12 @@ LogicalResult mlir::hipsr::verifyShapeRegionStructure(Operation *op) {
     return op->emitOpError("expected a shape region (region 0)");
 
   Region &shapeRegion = op->getRegion(0);
+
+  // The shape region is optional: an empty region (0 blocks) means the op
+  // carries no shape computation. When present it must have exactly one block.
+  if (shapeRegion.empty())
+    return success();
+
   if (!shapeRegion.hasOneBlock())
     return op->emitOpError("shape region must have exactly one block");
 
@@ -38,8 +44,8 @@ LogicalResult mlir::hipsr::verifyShapeRegionStructure(Operation *op) {
                "shape region must terminate with hipsr.shape_yield, "
                "got '")
            << block.back().getName()
-           << "'; did you forget the "
-              "SingleBlockImplicitTerminator<\"ShapeYieldOp\"> trait?";
+           << "'; a non-empty shape region block must end with "
+              "hipsr.shape_yield";
 
   return success();
 }
