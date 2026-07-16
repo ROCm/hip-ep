@@ -28,6 +28,9 @@ namespace hipsr {
 // is layered on in the externalization pass).
 void populateOnnxToHipsrConstantPatterns(::mlir::RewritePatternSet &patterns);
 
+void populateCastConversionPatterns(::mlir::RewritePatternSet &patterns,
+                                    ::mlir::MLIRContext *ctx);
+
 } // namespace hipsr
 } // namespace mlir
 
