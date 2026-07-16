@@ -466,11 +466,29 @@ OneHotOp::reifyResultShapes(OpBuilder &b,
   //                 tensor<?x?x?> to tensor<?x?x1>.
   // After:          depthDim = size(outs, axis) -> stays dynamic (readback)
   //                 or narrows only to a genuine compile-time depth.
+  //
+  // Lift the axis extent from the init WITHOUT materializing a fresh
+  // `tensor.dim` on it: read the init's static dim directly, and for a
+  // dynamic axis reuse the init producer's own extent operand. A
+  // materialized `tensor.dim` would add a SECOND use to the init
+  // `tensor.empty`, tripping the single-use guard in `--hip-infer-shapes`
+  // (refineOneResult) that gates the whole result refinement -- so the
+  // static non-axis dims (from `indices`) would ALSO fail to narrow.
+  Value initVal = getOutput();
+  OpFoldResult axisExtent;
+  auto initTy = dyn_cast<RankedTensorType>(initVal.getType());
+  if (initTy && !initTy.isDynamicDim(axis))
+    axisExtent = b.getIndexAttr(initTy.getDimSize(axis));
+  else if (auto emptyOp = initVal.getDefiningOp<tensor::EmptyOp>())
+    axisExtent = emptyOp.getMixedSizes()[axis];
+  else
+    axisExtent = tensor::getMixedSize(b, getLoc(), getResult(0), axis);
+
   SmallVector<OpFoldResult> dims;
   int64_t inDim = 0;
   for (int64_t outDim : llvm::seq<int64_t>(0, outRank)) {
     if (outDim == axis)
-      dims.push_back(tensor::getMixedSize(b, getLoc(), getOutput(), axis));
+      dims.push_back(axisExtent);
     else
       dims.push_back(tensor::getMixedSize(b, getLoc(), getIndices(), inDim++));
   }
