@@ -2668,9 +2668,7 @@ class BaseOGATests:
             del generator
             gc.collect()
 
-    def test_oga_ep_context_cache_reusing_rewind_pending_token(
-        self, oga_default_model
-    ):
+    def test_oga_ep_context_cache_reusing_rewind_pending_token(self, oga_default_model):
         """
         context cache reusing feature test
         step 1: send Q1, get A1, send Q2, get A2
@@ -2684,7 +2682,7 @@ class BaseOGATests:
         consumed by the model yet. Rewind by one token before appending Q2 so
         the reused KV cache and the replayed full context describe the same
         effective sequence.
-        This is oga feature/bug caused by PR1814: 
+        This is oga feature/bug caused by PR1814:
         the last token in previous chat is not put in kvcache.
         """
         spec = self.spec
@@ -2710,7 +2708,7 @@ class BaseOGATests:
             params.set_search_options(
                 max_length=max_length,
                 min_length=0,
-                do_sample=False, # for exact compare of model output
+                do_sample=False,  # for exact compare of model output
                 repetition_penalty=1.15,
             )
             return og.Generator(model, params)
@@ -2783,9 +2781,7 @@ class BaseOGATests:
                 )
                 split_gen.rewind_to(rewind_len)
 
-            effective_context = (
-                turn1_tokens + effective_turn1_generated + turn2_tokens
-            )
+            effective_context = turn1_tokens + effective_turn1_generated + turn2_tokens
             if len(effective_context) + turn2_limit >= max_length:
                 pytest.skip("not enough max_length budget for fixed-count turn2")
 
@@ -2829,7 +2825,6 @@ class BaseOGATests:
             del split_gen
             del full_gen
             gc.collect()
-
 
     def test_oga_ep_chunked_prefill(self, dynamic_model_path, repo_root, golden_store):
         """Chunked prefill accuracy: OGA+EP with chunk_size=128 vs CPU golden.
