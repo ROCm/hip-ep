@@ -821,7 +821,7 @@ jobs:
       # ----------------------------------------------------------------------
       # AMD GPU umbrella NATIVE smoke test: same NATIVE compile/link/load path,
       # but driven through the amdgpu-ep umbrella instead of the hipgpu EP
-      # directly. profile=llm (an umbrella option, ep.amdgpuexecutionprovider.
+      # directly. profile=hip (an umbrella option, ep.amdgpuexecutionprovider.
       # prefix) selects the hipgpu backend; the umbrella forwards non-umbrella
       # session-config entries verbatim, so artifact_format is passed as a raw
       # ep.hipgpu.* entry to reach the backend. Real gate (no exit /b 0).
@@ -850,7 +850,7 @@ jobs:
           onnxruntime_perf_test.exe ^
             --plugin_ep_libs "AMDGPUExecutionProvider|amdgpu-ep.dll" ^
             --plugin_eps "AMDGPUExecutionProvider" ^
-            --plugin_ep_options "profile|llm" ^
+            --plugin_ep_options "profile|hip" ^
             -C "session.disable_cpu_ep_fallback|1" ^
             -C "ep.hipgpu.artifact_format|NATIVE" ^
             -r 1 -c 1 -s ^
