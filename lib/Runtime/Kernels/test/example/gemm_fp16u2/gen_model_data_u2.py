@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Generate bits=3 vs bits=4 comparison test data for every shape defined in a
+Generate bits=2 vs bits=4 comparison test data for every shape defined in a
 model config JSON. Mirrors ../gemm_fp16u4/gen_model_data.py but calls
-gen_matmul_nbits_u3_data.py (which emits both uint3 and uint4 data per shape).
+gen_matmul_nbits_u2_data.py (which emits both uint2 and uint4 data per shape).
 
 Usage:
-    python gen_model_data_u3.py test_model/gpt_oss_20b.json --group-size 128
-    python gen_model_data_u3.py test_model/gpt_oss_20b.json --group-size 128 --no-zeros
+    python gen_model_data_u2.py test_model/gpt_oss_20b.json --group-size 128
+    python gen_model_data_u2.py test_model/gpt_oss_20b.json --group-size 128 --no-zeros
 """
 
 import json
@@ -18,7 +18,7 @@ import os
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Generate MatMulNBits bits=3 vs bits=4 test data for all model shapes')
+        description='Generate MatMulNBits bits=2 vs bits=4 test data for all model shapes')
     parser.add_argument('model_json', help='Path to model config JSON')
     parser.add_argument('--group-size', type=int, default=128)
     parser.add_argument('--no-zeros', action='store_true')
@@ -48,7 +48,7 @@ def main():
     print()
 
     gen_script = os.path.join(os.path.dirname(__file__),
-                              'gen_matmul_nbits_u3_data.py')
+                              'gen_matmul_nbits_u2_data.py')
     idx = 0
     skipped = []
 

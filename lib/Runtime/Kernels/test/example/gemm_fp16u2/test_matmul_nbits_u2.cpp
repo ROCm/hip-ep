@@ -1,8 +1,8 @@
 // ============================================================
-// custom_kernels MatMulNBits bits=3 vs bits=4 Verification + Benchmark
+// custom_kernels MatMulNBits bits=2 vs bits=4 Verification + Benchmark
 //
-// Exercises the hip_matmul_nbits() API for the exploratory uint3
-// (continuous-bitstream) quantized-weight kernel and benchmarks it
+// Exercises the hip_matmul_nbits() API for the uint2 (2-bit packed,
+// ONNX MatMulNBits convention) quantized-weight kernel and benchmarks it
 // back-to-back against the existing uint4 (nibble-packed) kernel on the
 // *same* (M, K, N, group_size) shape, so the two can be compared fairly.
 //
@@ -10,21 +10,29 @@
 //
 // Public API tensors — all ROW-MAJOR:
 //   A            : FP16 [batch, M, K]                        (shared)
-//   u3: B        : uint8 [N, ceil(K*3/8)] continuous 3-bit bitstream
+//   u2: B        : uint8 [N, K/4] packed 2-bit stream (4 vals/byte)
 //       scales   : FP16  [N, num_groups_k]
-//       zeros    : uint8 [N, num_groups_k]  (optional, one byte per group)
-//       zeros_pkd: uint8 [N, ceil(num_groups_k*3/8)] (optional, ONNX-packed
-//                                             continuous 3-bit stream)
+//       zeros_u8 : uint8 [N, num_groups_k]  (optional, one byte per group)
+//       zeros_pkd: uint8 [N, ceil(num_groups_k/4)] (optional, ONNX-packed)
 //   u4: B_packed : uint8 [N, K/2] nibble-packed (ONNX convention)
 //       scales   : FP16  [N, num_groups_k]
-//       zeros_u8 : uint8 [N, num_groups_k]  (optional, per-element,
-//                                             pre-unpacked)
+//       zeros_u8 : uint8 [N, num_groups_k]  (optional, per-element)
 //       zeros_fp16: FP16 [N, num_groups_k]  (optional, same values as
 //                                             zeros_u8, for WMMA/col-GEMV)
 //   C            : FP16 row-major [batch, M, N]
 //
+// Two zero_points conventions for u2 are validated:
+//   (a) one-byte-per-group (zeros_u8) passed directly as zero_points with
+//       pre_unpacked_zp_u8 = null — the plain direct-call convention that the
+//       benchmark loop uses.
+//   (b) ONNX-packed (zeros_packed, 4 group-zp per byte) unpacked once via
+//       hip_matmul_nbits_unpack_zp_u8_2bit() and fed back as
+//       pre_unpacked_zp_u8 — the real runtime integration path. A dedicated
+//       correctness check (not benchmarked) confirms the unpack reproduces
+//       zeros_u8 and that the GEMM result matches the reference.
+//
 // Workflow:
-//   1) python gen_matmul_nbits_u3_data.py MxKxN --group-size GS --dir data
+//   1) python gen_matmul_nbits_u2_data.py MxKxN --group-size GS --dir data
 //   2) build and run the test executable
 // ============================================================
 #include <hip/hip_runtime.h>
@@ -139,7 +147,7 @@ static MeasureResult measureMedian(hipStream_t stream, int niters,
 }
 
 // ============================================================
-// Per-kernel benchmark + verify (shared by both bits=3 and bits=4)
+// Per-kernel benchmark + verify (shared by both bits=2 and bits=4)
 // ============================================================
 struct KernelStat {
     std::string label;
@@ -155,6 +163,28 @@ struct KernelStat {
     float  max_diff = 0.0f;
     float  max_rdiff = 0.0f;
 };
+
+static int verifyAgainstRef(const std::vector<__half>& h_C,
+                            const std::vector<__half>& h_C_ref, size_t countC,
+                            float& max_diff_out, float& max_rdiff_out)
+{
+    int errors = 0;
+    float max_diff = 0.0f, max_rdiff = 0.0f;
+    for(size_t i = 0; i < countC; i++)
+    {
+        float gpu_val = half_to_float(h_C[i]);
+        float ref_val = half_to_float(h_C_ref[i]);
+        float diff    = std::fabs(gpu_val - ref_val);
+        float rdiff   = (std::fabs(ref_val) > 1e-6f) ? diff / std::fabs(ref_val) : diff;
+        if(diff > max_diff) max_diff = diff;
+        if(rdiff > max_rdiff) max_rdiff = rdiff;
+        float tol = std::fabs(ref_val) * 0.05f + 0.1f;
+        if(diff > tol) errors++;
+    }
+    max_diff_out = max_diff;
+    max_rdiff_out = max_rdiff;
+    return errors;
+}
 
 static KernelStat benchmarkAndVerify(
     const std::string& label,
@@ -227,20 +257,8 @@ static KernelStat benchmarkAndVerify(
         std::vector<__half> h_C(countC);
         HIP_CHECK(hipMemcpy(h_C.data(), d_C, countC * sizeof(__half),
                             hipMemcpyDeviceToHost));
-
-        int errors = 0;
         float max_diff = 0.0f, max_rdiff = 0.0f;
-        for(size_t i = 0; i < countC; i++)
-        {
-            float gpu_val = half_to_float(h_C[i]);
-            float ref_val = half_to_float(h_C_ref[i]);
-            float diff    = std::fabs(gpu_val - ref_val);
-            float rdiff   = (std::fabs(ref_val) > 1e-6f) ? diff / std::fabs(ref_val) : diff;
-            if(diff > max_diff) max_diff = diff;
-            if(rdiff > max_rdiff) max_rdiff = rdiff;
-            float tol = std::fabs(ref_val) * 0.05f + 0.1f;
-            if(diff > tol) errors++;
-        }
+        int errors = verifyAgainstRef(h_C, h_C_ref, countC, max_diff, max_rdiff);
 
         st.errors    = errors;
         st.total     = static_cast<int>(countC);
@@ -256,10 +274,10 @@ static KernelStat benchmarkAndVerify(
     return st;
 }
 
-static void printComparison(const KernelStat& u3, const KernelStat& u4,
-                            size_t bytes_u3, size_t bytes_u4)
+static void printComparison(const KernelStat& u2, const KernelStat& u4,
+                            size_t bytes_u2, size_t bytes_u4)
 {
-    std::cout << "\n  === u3 vs u4 comparison ===" << std::endl;
+    std::cout << "\n  === u2 vs u4 comparison ===" << std::endl;
     std::cout << "  " << std::left << std::setw(10) << "Kernel"
               << std::right << std::setw(14) << "Median(ms)"
               << std::setw(12) << "GFLOPS"
@@ -282,46 +300,45 @@ static void printComparison(const KernelStat& u3, const KernelStat& u4,
                   << (!s.has_ref ? "N/A" : (s.errors == 0 ? "PASS" : "FAIL"))
                   << std::endl;
     };
-    row(u3, bytes_u3);
+    row(u2, bytes_u2);
     row(u4, bytes_u4);
 
-    if(u3.launch_ok && u4.launch_ok)
+    if(u2.launch_ok && u4.launch_ok)
     {
-        double speedup = u4.avg_ms / u3.avg_ms;
-        double size_ratio = 100.0 * bytes_u3 / bytes_u4;
-        std::cout << "  u3/u4 weight size: " << std::fixed << std::setprecision(1)
-                  << size_ratio << "%   u3 vs u4 speed: "
+        double speedup = u4.avg_ms / u2.avg_ms;
+        double size_ratio = 100.0 * bytes_u2 / bytes_u4;
+        std::cout << "  u2/u4 weight size: " << std::fixed << std::setprecision(1)
+                  << size_ratio << "%   u2 vs u4 speed: "
                   << std::setprecision(2) << speedup << "x "
-                  << (speedup >= 1.0 ? "(u3 faster)" : "(u4 faster)")
+                  << (speedup >= 1.0 ? "(u2 faster)" : "(u4 faster)")
                   << std::endl;
     }
 }
 
 // ============================================================
-// Packed-zero_points real-model path: correctness + PERFORMANCE (bits=3)
+// Packed-zero_points real-model path: correctness + PERFORMANCE (bits=2)
 //
-// Runs the exact steady-state path the runtime uses for an asym 3-bit ONNX
+// Runs the exact steady-state path the runtime uses for an asym 2-bit ONNX
 // model, and compares its performance head-to-head against u4 WITH zp:
-//   1. hip_matmul_nbits_unpack_zp_u8_3bit() unpacks the continuous per-row
-//      3-bit packed zero_points stream to one byte per group ONCE (byte-exact
-//      check vs the generator's zeros), mirroring the wrapper's pointer-keyed
-//      cache.
-//   2. The GEMM is benchmarked + verified with the raw packed stream as
+//   1. hip_matmul_nbits_unpack_zp_u8_2bit() unpacks the 4-per-byte packed
+//      zero_points blob to one byte per group ONCE (byte-exact check vs the
+//      generator's zeros_u8), mirroring the wrapper's pointer-keyed cache.
+//   2. The GEMM is benchmarked + verified with the raw packed blob as
 //      zero_points and the unpacked buffer as pre_unpacked_zp_u8. The unpack
 //      is NOT in the timed loop (once-per-pointer cache in the real runtime),
-//      so the number reflects steady-state decode cost, compared against u4's
-//      with-zp throughput.
+//      so the number reflects steady-state decode cost, which is what should
+//      be compared against u4's with-zp throughput.
 // ============================================================
 static bool benchmarkPackedZpPath(
     hipStream_t stream,
-    const __half* d_A, const uint8_t* d_B_u3, const __half* d_S_u3,
+    const __half* d_A, const uint8_t* d_B_u2, const __half* d_S_u2,
     const uint8_t* d_Z_packed, const std::vector<uint8_t>& h_Z_u8_ref,
     int M, int N, int K, int group_size, int num_groups_k,
     __half* d_C, size_t countC, double mem_bytes,
     const std::vector<__half>& h_C_ref, bool has_ref,
     const KernelStat& u4_stat)
 {
-    std::cout << "\n  --- u3 packed-zp real-model path (vs u4 with zp) ---" << std::endl;
+    std::cout << "\n  --- u2 packed-zp real-model path (vs u4 with zp) ---" << std::endl;
 
     size_t countZ = static_cast<size_t>(N) * num_groups_k;
     uint8_t* d_Z_unpacked = nullptr;
@@ -329,7 +346,7 @@ static bool benchmarkPackedZpPath(
     HIP_CHECK(hipMemset(d_Z_unpacked, 0xEE, countZ));
 
     // Unpack ONCE (as the wrapper's cache does), then check byte-exactness.
-    hip_matmul_nbits_unpack_zp_u8_3bit(stream, d_Z_packed, d_Z_unpacked,
+    hip_matmul_nbits_unpack_zp_u8_2bit(stream, d_Z_packed, d_Z_unpacked,
                                        N, num_groups_k);
     HIP_CHECK(hipStreamSynchronize(stream));
 
@@ -344,31 +361,31 @@ static bool benchmarkPackedZpPath(
               << " zero_points match one-byte-per-group   "
               << (unpack_ok ? "PASS" : "FAIL") << std::endl;
 
-    // Benchmark + verify the steady-state GEMM: packed stream as zero_points,
+    // Benchmark + verify the steady-state GEMM: packed blob as zero_points,
     // pre-unpacked buffer as pre_unpacked_zp_u8 (unpack excluded from timing).
     auto launch_checked = [&]() -> int {
         return hip_matmul_nbits(
-            stream, d_A, d_B_u3, d_S_u3,
-            d_Z_packed,        // zero_points (raw ONNX-packed stream)
+            stream, d_A, d_B_u2, d_S_u2,
+            d_Z_packed,        // zero_points (raw ONNX-packed blob)
             nullptr,           // bias
             d_C,
-            M, N, K, 1, 3, group_size, 2, 1,
+            M, N, K, 1, 2, group_size, 2, 1,
             d_Z_unpacked,      // pre_unpacked_zp_u8 (runtime cache output)
-            nullptr);          // pre_unpacked_zp_fp16 (u3 consumes u8)
+            nullptr);          // pre_unpacked_zp_fp16 (u2 WMMA consumes u8)
     };
     auto launch = [&]() { launch_checked(); };
 
     KernelStat st = benchmarkAndVerify(
-        "u3(pkd-zp)", stream, launch_checked, launch, M, N, K,
+        "u2(pkd-zp)", stream, launch_checked, launch, M, N, K,
         mem_bytes, d_C, countC, h_C_ref, has_ref);
 
     if(st.launch_ok && u4_stat.launch_ok)
     {
         double speedup = u4_stat.avg_ms / st.avg_ms;
-        std::cout << "  u3(pkd-zp) vs u4(zp) speed: " << std::fixed
+        std::cout << "  u2(pkd-zp) vs u4(zp) speed: " << std::fixed
                   << std::setprecision(2) << speedup << "x "
-                  << (speedup >= 1.0 ? "(u3 faster)" : "(u4 faster)")
-                  << "   [u3 " << st.gflops << " GFLOPS / " << st.bw_gbs
+                  << (speedup >= 1.0 ? "(u2 faster)" : "(u4 faster)")
+                  << "   [u2 " << st.gflops << " GFLOPS / " << st.bw_gbs
                   << " GB/s  vs  u4 " << u4_stat.gflops << " GFLOPS / "
                   << u4_stat.bw_gbs << " GB/s]" << std::endl;
     }
@@ -385,44 +402,43 @@ bool testCompareShape(int M, int N, int K, int group_size,
 {
     int num_groups_k = (K + group_size - 1) / group_size;
 
-    std::cout << "\n=== MatMulNBits u3 vs u4  M=" << M << " N=" << N
+    std::cout << "\n=== MatMulNBits u2 vs u4  M=" << M << " N=" << N
               << " K=" << K << " group_size=" << group_size
               << (use_zeros ? "" : " (no zeros)") << " ===" << std::endl;
 
-    size_t countA        = static_cast<size_t>(M) * K;
-    size_t countC         = static_cast<size_t>(M) * N;
-    size_t rowBytesU3     = (static_cast<size_t>(K) * 3 + 7) / 8;
-    size_t countB_u3      = static_cast<size_t>(N) * rowBytesU3;
-    size_t countB_u4      = static_cast<size_t>(N) * K / 2;
-    size_t countS         = static_cast<size_t>(N) * num_groups_k;
+    size_t countA          = static_cast<size_t>(M) * K;
+    size_t countC          = static_cast<size_t>(M) * N;
+    size_t rowBytesU2      = static_cast<size_t>(K) / 4;
+    size_t countB_u2       = static_cast<size_t>(N) * rowBytesU2;
+    size_t countB_u4       = static_cast<size_t>(N) * K / 2;
+    size_t countS          = static_cast<size_t>(N) * num_groups_k;
+    size_t packedZpCols    = (static_cast<size_t>(num_groups_k) + 3) / 4;
+    size_t countZ_packed   = static_cast<size_t>(N) * packedZpCols;
 
     // ---- Load shared A ----
     std::vector<__half> h_A;
     if(!readBin(data_dir + "/matmul_nbits_A.bin", h_A, countA))
     {
         std::cerr << "  ERROR: cannot read " << data_dir << "/matmul_nbits_A.bin" << std::endl;
-        std::cerr << "  Run: python gen_matmul_nbits_u3_data.py " << M << "x" << K << "x" << N
+        std::cerr << "  Run: python gen_matmul_nbits_u2_data.py " << M << "x" << K << "x" << N
                   << " --group-size " << group_size
                   << (use_zeros ? "" : " --no-zeros") << " --dir " << data_dir << std::endl;
         return false;
     }
 
-    size_t packedZpCols  = (static_cast<size_t>(num_groups_k) * 3 + 7) / 8;
-    size_t countZ_packed = static_cast<size_t>(N) * packedZpCols;
-
-    // ---- Load u3 data ----
-    std::vector<uint8_t> h_B_u3;
-    std::vector<__half>  h_S_u3;
-    std::vector<uint8_t> h_Z_u3;
-    std::vector<uint8_t> h_Z_u3_packed;
-    std::vector<__half>  h_Cref_u3;
-    bool ok_u3 = readBin(data_dir + "/matmul_nbits_u3_B.bin", h_B_u3, countB_u3)
-              && readBin(data_dir + "/matmul_nbits_u3_scales.bin", h_S_u3, countS);
+    // ---- Load u2 data ----
+    std::vector<uint8_t> h_B_u2;
+    std::vector<__half>  h_S_u2;
+    std::vector<uint8_t> h_Z_u2_u8;
+    std::vector<uint8_t> h_Z_u2_packed;
+    std::vector<__half>  h_Cref_u2;
+    bool ok_u2 = readBin(data_dir + "/matmul_nbits_u2_B.bin", h_B_u2, countB_u2)
+              && readBin(data_dir + "/matmul_nbits_u2_scales.bin", h_S_u2, countS);
     if(use_zeros)
-        ok_u3 = ok_u3
-              && readBin(data_dir + "/matmul_nbits_u3_zeros.bin", h_Z_u3, countS)
-              && readBin(data_dir + "/matmul_nbits_u3_zeros_packed.bin", h_Z_u3_packed, countZ_packed);
-    bool has_ref_u3 = readBin(data_dir + "/matmul_nbits_u3_C_ref.bin", h_Cref_u3, countC);
+        ok_u2 = ok_u2
+              && readBin(data_dir + "/matmul_nbits_u2_zeros_u8.bin", h_Z_u2_u8, countS)
+              && readBin(data_dir + "/matmul_nbits_u2_zeros_packed.bin", h_Z_u2_packed, countZ_packed);
+    bool has_ref_u2 = readBin(data_dir + "/matmul_nbits_u2_C_ref.bin", h_Cref_u2, countC);
 
     // ---- Load u4 data ----
     std::vector<uint8_t> h_B_u4;
@@ -438,45 +454,45 @@ bool testCompareShape(int M, int N, int K, int group_size,
               && readBin(data_dir + "/matmul_nbits_u4_zeros_fp16.bin", h_Zfp16_u4, countS);
     bool has_ref_u4 = readBin(data_dir + "/matmul_nbits_u4_C_ref.bin", h_Cref_u4, countC);
 
-    if(!ok_u3 || !ok_u4)
+    if(!ok_u2 || !ok_u4)
     {
-        std::cerr << "  ERROR: failed to read u3/u4 input data from " << data_dir << "/" << std::endl;
-        std::cerr << "  Run: python gen_matmul_nbits_u3_data.py " << M << "x" << K << "x" << N
+        std::cerr << "  ERROR: failed to read u2/u4 input data from " << data_dir << "/" << std::endl;
+        std::cerr << "  Run: python gen_matmul_nbits_u2_data.py " << M << "x" << K << "x" << N
                   << " --group-size " << group_size
                   << (use_zeros ? "" : " --no-zeros") << " --dir " << data_dir << std::endl;
         return false;
     }
-    std::cout << "  Loaded shared A + u3/u4 weights from " << data_dir << "/" << std::endl;
+    std::cout << "  Loaded shared A + u2/u4 weights from " << data_dir << "/" << std::endl;
 
     hipStream_t stream;
     HIP_CHECK(hipStreamCreate(&stream));
 
     // ---- Device buffers: shared A + per-kernel C ----
     __half* d_A = nullptr;
-    __half* d_C_u3 = nullptr;
+    __half* d_C_u2 = nullptr;
     __half* d_C_u4 = nullptr;
     HIP_CHECK(hipMalloc(&d_A, countA * sizeof(__half)));
-    HIP_CHECK(hipMalloc(&d_C_u3, countC * sizeof(__half)));
+    HIP_CHECK(hipMalloc(&d_C_u2, countC * sizeof(__half)));
     HIP_CHECK(hipMalloc(&d_C_u4, countC * sizeof(__half)));
     HIP_CHECK(hipMemcpy(d_A, h_A.data(), countA * sizeof(__half), hipMemcpyHostToDevice));
-    HIP_CHECK(hipMemset(d_C_u3, 0, countC * sizeof(__half)));
+    HIP_CHECK(hipMemset(d_C_u2, 0, countC * sizeof(__half)));
     HIP_CHECK(hipMemset(d_C_u4, 0, countC * sizeof(__half)));
 
-    // ---- u3 device buffers ----
-    uint8_t* d_B_u3 = nullptr;
-    __half*  d_S_u3 = nullptr;
-    uint8_t* d_Z_u3 = nullptr;
-    uint8_t* d_Z_u3_packed = nullptr;
-    HIP_CHECK(hipMalloc(&d_B_u3, countB_u3));
-    HIP_CHECK(hipMalloc(&d_S_u3, countS * sizeof(__half)));
-    HIP_CHECK(hipMemcpy(d_B_u3, h_B_u3.data(), countB_u3, hipMemcpyHostToDevice));
-    HIP_CHECK(hipMemcpy(d_S_u3, h_S_u3.data(), countS * sizeof(__half), hipMemcpyHostToDevice));
+    // ---- u2 device buffers ----
+    uint8_t* d_B_u2 = nullptr;
+    __half*  d_S_u2 = nullptr;
+    uint8_t* d_Z_u2_u8 = nullptr;
+    uint8_t* d_Z_u2_packed = nullptr;
+    HIP_CHECK(hipMalloc(&d_B_u2, countB_u2));
+    HIP_CHECK(hipMalloc(&d_S_u2, countS * sizeof(__half)));
+    HIP_CHECK(hipMemcpy(d_B_u2, h_B_u2.data(), countB_u2, hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d_S_u2, h_S_u2.data(), countS * sizeof(__half), hipMemcpyHostToDevice));
     if(use_zeros)
     {
-        HIP_CHECK(hipMalloc(&d_Z_u3, countS));
-        HIP_CHECK(hipMemcpy(d_Z_u3, h_Z_u3.data(), countS, hipMemcpyHostToDevice));
-        HIP_CHECK(hipMalloc(&d_Z_u3_packed, countZ_packed));
-        HIP_CHECK(hipMemcpy(d_Z_u3_packed, h_Z_u3_packed.data(), countZ_packed, hipMemcpyHostToDevice));
+        HIP_CHECK(hipMalloc(&d_Z_u2_u8, countS));
+        HIP_CHECK(hipMemcpy(d_Z_u2_u8, h_Z_u2_u8.data(), countS, hipMemcpyHostToDevice));
+        HIP_CHECK(hipMalloc(&d_Z_u2_packed, countZ_packed));
+        HIP_CHECK(hipMemcpy(d_Z_u2_packed, h_Z_u2_packed.data(), countZ_packed, hipMemcpyHostToDevice));
     }
 
     // ---- u4 device buffers ----
@@ -497,22 +513,25 @@ bool testCompareShape(int M, int N, int K, int group_size,
     }
 
     // ---- Launchers ----
-    auto launch_u3_checked = [&]() -> int {
+    // u2 benchmark path: one-byte-per-group zero_points passed directly
+    // (pre_unpacked_zp_u8 = null). The packed-zp real-model path is validated
+    // separately below via validatePackedZpPath().
+    auto launch_u2_checked = [&]() -> int {
         return hip_matmul_nbits(
-            stream, d_A, d_B_u3, d_S_u3,
-            use_zeros ? d_Z_u3 : nullptr,
+            stream, d_A, d_B_u2, d_S_u2,
+            use_zeros ? d_Z_u2_u8 : nullptr,
             nullptr,           // bias
-            d_C_u3,
+            d_C_u2,
             M, N, K,
             1,                 // batch_count
-            3,                 // bits
+            2,                 // bits
             group_size,        // block_size
             2,                 // element_size_bytes (fp16)
-            1,                 // zp_elem_size (uint8, plain per-element)
-            nullptr,           // pre_unpacked_zp_u8 (unused for bits=3)
-            nullptr);          // pre_unpacked_zp_fp16 (unused for bits=3)
+            1,                 // zp_elem_size (uint8, one byte per group)
+            nullptr,           // pre_unpacked_zp_u8 (direct convention)
+            nullptr);          // pre_unpacked_zp_fp16 (unused for bits=2)
     };
-    auto launch_u3 = [&]() { launch_u3_checked(); };
+    auto launch_u2 = [&]() { launch_u2_checked(); };
 
     auto launch_u4_checked = [&]() -> int {
         return hip_matmul_nbits(
@@ -531,7 +550,7 @@ bool testCompareShape(int M, int N, int K, int group_size,
     };
     auto launch_u4 = [&]() { launch_u4_checked(); };
 
-    double mem_bytes_u3 = static_cast<double>(countA) * 2 + static_cast<double>(countB_u3)
+    double mem_bytes_u2 = static_cast<double>(countA) * 2 + static_cast<double>(countB_u2)
                         + static_cast<double>(countS) * 2
                         + (use_zeros ? static_cast<double>(countS) : 0.0)
                         + static_cast<double>(countC) * 2;
@@ -540,34 +559,35 @@ bool testCompareShape(int M, int N, int K, int group_size,
                         + (use_zeros ? static_cast<double>(countS) * 2 : 0.0)
                         + static_cast<double>(countC) * 2;
 
-    KernelStat stat_u3 = benchmarkAndVerify(
-        "u3", stream, launch_u3_checked, launch_u3, M, N, K,
-        mem_bytes_u3, d_C_u3, countC, h_Cref_u3, has_ref_u3);
+    KernelStat stat_u2 = benchmarkAndVerify(
+        "u2", stream, launch_u2_checked, launch_u2, M, N, K,
+        mem_bytes_u2, d_C_u2, countC, h_Cref_u2, has_ref_u2);
     KernelStat stat_u4 = benchmarkAndVerify(
         "u4", stream, launch_u4_checked, launch_u4, M, N, K,
         mem_bytes_u4, d_C_u4, countC, h_Cref_u4, has_ref_u4);
 
-    printComparison(stat_u3, stat_u4, countB_u3, countB_u4);
+    printComparison(stat_u2, stat_u4, countB_u2, countB_u4);
 
     // ---- Packed-zp real-model path (only meaningful with zeros) ----
     bool packed_ok = true;
     if(use_zeros)
     {
         packed_ok = benchmarkPackedZpPath(
-            stream, d_A, d_B_u3, d_S_u3, d_Z_u3_packed, h_Z_u3,
+            stream, d_A, d_B_u2, d_S_u2, d_Z_u2_packed, h_Z_u2_u8,
             M, N, K, group_size, num_groups_k,
-            d_C_u3, countC, mem_bytes_u3, h_Cref_u3, has_ref_u3, stat_u4);
+            d_C_u2, countC, mem_bytes_u2, h_Cref_u2, has_ref_u2, stat_u4);
     }
 
-    bool pass = stat_u3.launch_ok && stat_u4.launch_ok
-             && (!stat_u3.has_ref || stat_u3.errors == 0)
+    bool pass = stat_u2.launch_ok && stat_u4.launch_ok
+             && (!stat_u2.has_ref || stat_u2.errors == 0)
              && (!stat_u4.has_ref || stat_u4.errors == 0)
              && packed_ok;
 
     hipFree(d_A);
-    hipFree(d_C_u3); hipFree(d_C_u4);
-    hipFree(d_B_u3); hipFree(d_S_u3); if(d_Z_u3) hipFree(d_Z_u3);
-    if(d_Z_u3_packed) hipFree(d_Z_u3_packed);
+    hipFree(d_C_u2); hipFree(d_C_u4);
+    hipFree(d_B_u2); hipFree(d_S_u2);
+    if(d_Z_u2_u8) hipFree(d_Z_u2_u8);
+    if(d_Z_u2_packed) hipFree(d_Z_u2_packed);
     hipFree(d_B_u4); hipFree(d_S_u4);
     if(d_Zu8_u4) hipFree(d_Zu8_u4);
     if(d_Zfp16_u4) hipFree(d_Zfp16_u4);
@@ -660,15 +680,15 @@ static ModelConfig parseModelConfig(const std::string& path)
 
 struct SweepRow {
     int M, K, N;
-    KernelStat u3, u4;
-    size_t bytesB_u3 = 0, bytesB_u4 = 0;
+    KernelStat u2, u4;
+    size_t bytesB_u2 = 0, bytesB_u4 = 0;
     bool skipped = false;
 };
 
 static int runModelSweep(const std::string& json_path, int group_size,
                          bool use_zeros, const std::string& data_root)
 {
-    std::cout << "\nModel sweep (u3 vs u4): " << json_path
+    std::cout << "\nModel sweep (u2 vs u4): " << json_path
               << "  (group_size=" << group_size
               << (use_zeros ? ", with zeros)" : ", no zeros)")
               << "\n  Data root: " << data_root << std::endl;
@@ -725,7 +745,7 @@ static int runModelSweep(const std::string& json_path, int group_size,
 
 int main(int argc, char* argv[])
 {
-    std::cout << "custom_kernels MatMulNBits bits=3 (uint3) vs bits=4 (uint4) Verification" << std::endl;
+    std::cout << "custom_kernels MatMulNBits bits=2 (uint2) vs bits=4 (uint4) Verification" << std::endl;
     std::cout << "==========================================================================" << std::endl;
 
     hipDeviceProp_t prop;
