@@ -106,8 +106,9 @@ const void *lookup_or_unpack_zp_u8_2bit(ZpUnpackCache &cache, void *stream,
 
   void *dst = nullptr;
   if (hipMalloc(&dst, need) != hipSuccess) {
-    fprintf(stderr, "matmul_nbits: hipMalloc(%zu) for zp_u8 (2-bit) cache "
-                    "failed\n",
+    fprintf(stderr,
+            "matmul_nbits: hipMalloc(%zu) for zp_u8 (2-bit) cache "
+            "failed\n",
             need);
     return nullptr;
   }
@@ -138,8 +139,9 @@ const void *lookup_or_unpack_zp_u8_3bit(ZpUnpackCache &cache, void *stream,
 
   void *dst = nullptr;
   if (hipMalloc(&dst, need) != hipSuccess) {
-    fprintf(stderr, "matmul_nbits: hipMalloc(%zu) for zp_u8 (3-bit) cache "
-                    "failed\n",
+    fprintf(stderr,
+            "matmul_nbits: hipMalloc(%zu) for zp_u8 (3-bit) cache "
+            "failed\n",
             need);
     return nullptr;
   }
