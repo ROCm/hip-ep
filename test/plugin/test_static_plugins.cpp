@@ -1,0 +1,137 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
+// Static compiler-plugin unit test.
+//
+// Runs the static registrar (dispatchPluginRegistrationsOnce,
+// StaticPlugins.cpp) and checks the recorded registry state. CMake sets
+// HIP_EP_EXPECT_SAMPLE:
+//   * 1 (sample selected): the registry records the sample's slot request,
+//     library + search path, bitcode buffer (empty => degraded no-clang build,
+//     skipped), and dialect registration (loaded here via loadAllDialects).
+//   * 0 (no plugins): dispatch is a clean no-op; the registry stays empty.
+// Either way dispatch must be safe + idempotent. Plain main() (no GTest).
+
+#include "hip/Compiler/PluginRegistry.h"
+#include "hip/InitAllPasses.h"
+
+#include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"
+#include "mlir/IR/Dialect.h"
+#include "mlir/IR/MLIRContext.h"
+
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/Support/raw_ostream.h"
+
+#include <cstddef>
+#include <string>
+
+#ifndef HIP_EP_EXPECT_SAMPLE
+#define HIP_EP_EXPECT_SAMPLE 0
+#endif
+
+namespace {
+
+int g_failures = 0;
+
+void check(bool cond, llvm::StringRef what) {
+  if (cond) {
+    llvm::outs() << "[ OK ] " << what << "\n";
+  } else {
+    llvm::errs() << "[FAIL] " << what << "\n";
+    ++g_failures;
+  }
+}
+
+template <typename Range>
+bool contains(const Range &range, llvm::StringRef needle) {
+  for (const auto &e : range)
+    if (llvm::StringRef(e) == needle)
+      return true;
+  return false;
+}
+
+} // namespace
+
+int main() {
+  using namespace hip::compiler;
+
+  // Dispatch must be safe to call and idempotent (call twice).
+  dispatchPluginRegistrationsOnce();
+  dispatchPluginRegistrationsOnce();
+  check(true, "dispatchPluginRegistrationsOnce() ran without crashing");
+
+  auto slotPasses = pluginPassesForSlot(PipelineSlot::AfterConvertOnnxToHip);
+  auto libs = pluginLibraries();
+  auto libPaths = pluginLibraryPaths();
+  auto bitcode = pluginBitcodeBuffers();
+  auto dialectRegs = pluginDialectRegistrations();
+
+#if HIP_EP_EXPECT_SAMPLE
+  llvm::outs() << "Mode: sample plugin EXPECTED (statically linked)\n";
+
+  check(contains(slotPasses, "func.func(hip-ep-sample-print-functions)"),
+        "AfterConvertOnnxToHip slot records the sample pass request");
+  check(contains(libs, "hip_ep_sample_lib"),
+        "pluginLibraries() records 'hip_ep_sample_lib'");
+  check(!libPaths.empty(), "pluginLibraryPaths() records a search path");
+
+  // Bitcode is present only when the build had clang to compile it; an empty
+  // set is the documented degraded-build case, not a failure.
+  if (bitcode.empty()) {
+    llvm::outs() << "[SKIP] no plugin bitcode (degraded build without clang)\n";
+  } else {
+    check(bitcode.size() == 1, "exactly one plugin bitcode buffer recorded");
+    const auto &buf = bitcode.front();
+    const auto *bytes = static_cast<const unsigned char *>(buf.data);
+    bool magicOk = buf.sizeBytes >= 4 && bytes[0] == 'B' && bytes[1] == 'C' &&
+                   bytes[2] == 0xC0 && bytes[3] == 0xDE;
+    check(magicOk, "plugin bitcode carries the LLVM bitcode magic");
+  }
+
+  // Dialect-registration path. The sample plugin contributes a minimal vendor
+  // dialect (hip_ep_sample) with a ConvertToLLVMPatternInterface. This is the
+  // only in-tree coverage of loadAllDialects()'s plugin loop and the
+  // convert-hip-to-llvm hasPromisedInterface guard, so exercise both here.
+  check(!dialectRegs.empty(),
+        "pluginDialectRegistrations() records the sample dialect callback");
+
+  mlir::MLIRContext context;
+  hip::compiler::loadAllDialects(context);
+  mlir::Dialect *sampleDialect = context.getLoadedDialect("hip_ep_sample");
+  check(sampleDialect != nullptr,
+        "loadAllDialects() loaded the plugin's hip_ep_sample dialect");
+  if (sampleDialect) {
+    // Mirror the convert-hip-to-llvm guard: a genuinely-registered interface
+    // (attached via DialectExtension, not just promised) has
+    // hasPromisedInterface() false AND dyn_casts, so its patterns are used.
+    bool onlyPromised = sampleDialect->hasPromisedInterface(
+        sampleDialect->getTypeID(),
+        mlir::ConvertToLLVMPatternInterface::getInterfaceID());
+    check(!onlyPromised,
+          "hip_ep_sample's ConvertToLLVM interface is registered, not just "
+          "promised (hasPromisedInterface == false)");
+    check(mlir::dyn_cast<mlir::ConvertToLLVMPatternInterface>(sampleDialect) !=
+              nullptr,
+          "hip_ep_sample implements ConvertToLLVMPatternInterface "
+          "(convert-hip-to-llvm guard admits it)");
+  }
+#else
+  llvm::outs() << "Mode: NO plugins selected (dispatch must be a no-op)\n";
+
+  check(slotPasses.empty(), "no plugin slot requests recorded");
+  check(libs.empty(), "no plugin libraries recorded");
+  check(libPaths.empty(), "no plugin library paths recorded");
+  check(bitcode.empty(), "no plugin bitcode recorded");
+  check(dialectRegs.empty(), "no plugin dialect registrations recorded");
+#endif
+
+  if (g_failures == 0) {
+    llvm::outs() << "\nAll checks passed.\n";
+    return 0;
+  }
+  llvm::errs() << "\n" << g_failures << " check(s) failed.\n";
+  return 1;
+}

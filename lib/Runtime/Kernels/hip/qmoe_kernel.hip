@@ -1295,3 +1295,627 @@ extern "C" int hip_qmoe_decode_fused(
 
   return 0;
 }
+
+// ===========================================================================
+// W4A8 dp4a decode path (env-gated via HIPDNN_EP_MATMUL_DP4A; wired in
+// lib/Runtime/real/qmoe.cpp). Mirrors the fp fc1/fc2 decode kernels above but
+// replaces the per-element int4->float dequant + fp32-FMA chain with the gfx11
+// integer dot builtin v_dot4_i32_iu8 (__builtin_amdgcn_sudot4): 8 nibbles cost
+// 2 sudot4 + a few mask ops instead of 8 float-converts + 8 fp32 FMAs (same
+// idea + layout as matmul_nbits_gemv_dp4a_kernel).
+//
+// The activation is dynamically quantized to per-group int8 ONCE per decode
+// (fc1: the shared [hidden] input; fc2: each of the k [inter] expert-slot
+// activations) by qmoe_quant_act_i8_kernel, and reused across all output-tile
+// blocks -- fusing the quant into the GEMV re-quantizes the activation in
+// every block, a measured net loss (same finding as the matmul_nbits dp4a
+// path). SwiGLU pairing (fc1) and the routing-weighted write (fc2) stay in
+// fp32 exactly as the fp kernels; only the dot-product inner loop changes.
+//
+// Factored integer dequant (per group g, a[k] ~= a_scale[g] * aq[k], int8):
+//   out = sum_k a[k]*(w[k]-zp)*scale[g]
+//       = a_scale[g]*scale[g]*( dot_int(aq,w) - zp*sum(aq) )
+// with dot_int / sum(aq) accumulated as int32 (sum via sudot4 vs 0x01010101).
+// ===========================================================================
+
+// Batched per-group int8 quant of activations, deinterleaved to match the
+// weight nibble split (b & 0x0F0F0F0F = even lanes, (b>>4)&0x0F0F0F0F = odd).
+// grid = (n_blk groups, rows); row r activation = A + r*row_len, quantized
+// into a_qb + r*row_len (int8) with per-group scale a_scale[r*n_blk + grp].
+// Requires row_len % 8 == 0 (guaranteed: block_size is a power of two >= 32).
+template <int BLOCK_SIZE>
+__global__ void qmoe_quant_act_i8_kernel(
+    const __half* __restrict__ A,
+    int8_t*       __restrict__ a_qb,
+    float*        __restrict__ a_scale,
+    int row_len, int block_size, int n_blk) {
+  const int grp = blockIdx.x;
+  const int row = blockIdx.y;
+  const int tid = threadIdx.x;
+  const int g0  = grp * block_size;
+  const int g1  = min(g0 + block_size, row_len);
+  const __half* Arow = A + static_cast<size_t>(row) * row_len;
+  int8_t*       qrow = a_qb + static_cast<size_t>(row) * row_len;
+
+  float local_max = 0.0f;
+  for (int k = g0 + tid; k < g1; k += BLOCK_SIZE)
+    local_max = fmaxf(local_max, fabsf(static_cast<float>(Arow[k])));
+
+  constexpr int WARP_SIZE = 32;
+  constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+  for (int off = WARP_SIZE >> 1; off > 0; off >>= 1)
+    local_max = fmaxf(local_max, __shfl_down(local_max, off));
+  __shared__ float smax[NUM_WARPS > 0 ? NUM_WARPS : 1];
+  if ((tid & (WARP_SIZE - 1)) == 0)
+    smax[tid >> 5] = local_max;
+  __syncthreads();
+  if (tid == 0) {
+    float m = 0.0f;
+#pragma unroll
+    for (int i = 0; i < NUM_WARPS; i++)
+      m = fmaxf(m, smax[i]);
+    smax[0] = m;
+  }
+  __syncthreads();
+
+  const float gmax      = smax[0];
+  const float scale     = (gmax > 0.0f) ? (gmax * (1.0f / 127.0f)) : 1.0f;
+  const float inv_scale = (gmax > 0.0f) ? (127.0f / gmax) : 0.0f;
+  if (tid == 0)
+    a_scale[static_cast<size_t>(row) * n_blk + grp] = scale;
+
+  for (int k = g0 + tid; k < g1; k += BLOCK_SIZE) {
+    int q = __float2int_rn(static_cast<float>(Arow[k]) * inv_scale);
+    q = max(-127, min(127, q));
+    const int c = k >> 3;
+    const int p = k & 7;
+    const int off = (p & 1) ? (c * 8 + 4 + (p >> 1)) : (c * 8 + (p >> 1));
+    qrow[off] = static_cast<int8_t>(q);
+  }
+}
+
+// FC1 + SwiGLU, dp4a. a_qb/a_scale are the quantized [hidden] input (shared
+// across slots). Output/SwiGLU/reduction logic is identical to
+// qmoe_decode_fc1_kernel; only the dot loop uses sudot4.
+template <int BLOCK_SIZE, int TILE_N>
+__global__ void qmoe_decode_fc1_dp4a_kernel(
+    const int8_t*  __restrict__ a_qb,            // [hidden] deinterleaved int8
+    const float*   __restrict__ a_scale,         // [n_blk_in]
+    const int32_t* __restrict__ expert_indices,  // [k]
+    const uint8_t* __restrict__ fc1_w,           // [E, fusion_inter, hidden/2]
+    const __half*  __restrict__ fc1_s,           // [E, fusion_inter, n_blk_in]
+    const uint8_t* __restrict__ fc1_zp_packed,   // [E, fusion_inter, ceil/2] or null
+    const __half*  __restrict__ fc1_b,           // [E, fusion_inter] or null
+    __half*        __restrict__ act_out,         // [k, inter]
+    int hidden, int fusion_inter, int n_blk_in, int block_size,
+    float swiglu_alpha, float swiglu_beta, float swiglu_limit) {
+  const int n_base = blockIdx.x * TILE_N;
+  const int slot   = blockIdx.y;
+  const int tid    = threadIdx.x;
+  const int E      = expert_indices[slot];
+
+  const size_t   W_row_bytes = static_cast<size_t>(hidden) / 2;
+  const uint8_t* W = fc1_w + static_cast<size_t>(E) * fusion_inter * W_row_bytes;
+  const __half*  S = fc1_s + static_cast<size_t>(E) * fusion_inter * n_blk_in;
+  const int      packed_zp_stride = (n_blk_in + 1) / 2;
+  const uint8_t* Z = fc1_zp_packed
+                       ? fc1_zp_packed + static_cast<size_t>(E) * fusion_inter * packed_zp_stride
+                       : nullptr;
+  const __half*  Bv = fc1_b ? fc1_b + static_cast<size_t>(E) * fusion_inter : nullptr;
+  const int bs_shift = __builtin_ctz(static_cast<unsigned>(block_size));
+
+  float partial[TILE_N];
+#pragma unroll
+  for (int t = 0; t < TILE_N; t++) partial[t] = 0.0f;
+
+  const uint8_t* W_rows[TILE_N];
+  const __half*  S_rows[TILE_N];
+  const uint8_t* Z_rows[TILE_N];
+#pragma unroll
+  for (int t = 0; t < TILE_N; t++) {
+    int n  = n_base + t;
+    int sn = (n < fusion_inter) ? n : 0;
+    W_rows[t] = W + static_cast<size_t>(sn) * W_row_bytes;
+    S_rows[t] = S + static_cast<size_t>(sn) * n_blk_in;
+    Z_rows[t] = Z ? Z + static_cast<size_t>(sn) * packed_zp_stride : nullptr;
+  }
+  const bool has_zp = (Z != nullptr);
+
+  const int num_u128 = hidden / 32;
+  for (int idx = tid; idx < num_u128; idx += BLOCK_SIZE) {
+    const int   k32  = idx * 32;
+    const int   grp  = k32 >> bs_shift;
+    const float a_sc = a_scale[grp];
+
+    const int8_t* aq = a_qb + static_cast<size_t>(idx) * 32;
+    int a_lo[4], a_hi[4];
+#pragma unroll
+    for (int j = 0; j < 4; j++) {
+      a_lo[j] = *reinterpret_cast<const int*>(aq + j * 8);
+      a_hi[j] = *reinterpret_cast<const int*>(aq + j * 8 + 4);
+    }
+    int a_sum_q = 0;
+#pragma unroll
+    for (int j = 0; j < 4; j++) {
+      a_sum_q = __builtin_amdgcn_sudot4(true, a_lo[j], false, 0x01010101, a_sum_q, false);
+      a_sum_q = __builtin_amdgcn_sudot4(true, a_hi[j], false, 0x01010101, a_sum_q, false);
+    }
+
+#pragma unroll
+    for (int t = 0; t < TILE_N; t++) {
+      uint4 b = *reinterpret_cast<const uint4*>(&W_rows[t][idx * 16]);
+      const unsigned comp[4] = {b.x, b.y, b.z, b.w};
+      int dot = 0;
+#pragma unroll
+      for (int j = 0; j < 4; j++) {
+        const int lo_w = static_cast<int>(comp[j] & 0x0F0F0F0Fu);
+        const int hi_w = static_cast<int>((comp[j] >> 4) & 0x0F0F0F0Fu);
+        dot = __builtin_amdgcn_sudot4(true, a_lo[j], false, lo_w, dot, false);
+        dot = __builtin_amdgcn_sudot4(true, a_hi[j], false, hi_w, dot, false);
+      }
+      const float sv = static_cast<float>(S_rows[t][grp]);
+      int zv = 8;
+      if (has_zp) {
+        uint8_t zp_byte = Z_rows[t][grp >> 1];
+        zv = static_cast<int>((grp & 1) ? (zp_byte >> 4) : (zp_byte & 0x0F));
+      }
+      partial[t] += a_sc * sv * static_cast<float>(dot - a_sum_q * zv);
+    }
+  }
+
+  constexpr int WARP_SIZE = 32;
+  const int warp_id = tid / WARP_SIZE;
+  const int lane    = tid % WARP_SIZE;
+  constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+  static_assert((TILE_N & 1) == 0, "TILE_N must be even for SwiGLU pairing");
+  constexpr int TILE_OUT = TILE_N / 2;
+  const int sw_base = n_base / 2;
+  const int inter   = fusion_inter / 2;
+
+#pragma unroll
+  for (int t = 0; t < TILE_N; t++) {
+    for (int off = WARP_SIZE >> 1; off > 0; off >>= 1)
+      partial[t] += __shfl_down(partial[t], off);
+  }
+
+  if constexpr (BLOCK_SIZE <= WARP_SIZE) {
+    if (lane == 0) {
+#pragma unroll
+      for (int p = 0; p < TILE_OUT; p++) {
+        int n_g = n_base + 2 * p;
+        int n_l = n_g + 1;
+        if (n_g < fusion_inter && n_l < fusion_inter) {
+          float g = partial[2 * p];
+          float l = partial[2 * p + 1];
+          if (Bv) { g += static_cast<float>(Bv[n_g]); l += static_cast<float>(Bv[n_l]); }
+          float G = fminf(g, swiglu_limit);
+          float L = fmaxf(fminf(l, swiglu_limit), -swiglu_limit);
+          float sig = 1.0f / (1.0f + expf(-swiglu_alpha * G));
+          act_out[slot * inter + sw_base + p] =
+              static_cast<__half>(G * sig * (L + swiglu_beta));
+        }
+      }
+    }
+  } else {
+    __shared__ float warp_sums[TILE_N * NUM_WARPS];
+    if (lane == 0) {
+#pragma unroll
+      for (int t = 0; t < TILE_N; t++)
+        warp_sums[t * NUM_WARPS + warp_id] = partial[t];
+    }
+    __syncthreads();
+    if (warp_id == 0) {
+      float reduced[TILE_N];
+#pragma unroll
+      for (int t = 0; t < TILE_N; t++) {
+        float v = (lane < NUM_WARPS) ? warp_sums[t * NUM_WARPS + lane] : 0.0f;
+        for (int off = WARP_SIZE >> 1; off > 0; off >>= 1)
+          v += __shfl_down(v, off);
+        reduced[t] = v;
+      }
+      if (lane == 0) {
+#pragma unroll
+        for (int p = 0; p < TILE_OUT; p++) {
+          int n_g = n_base + 2 * p;
+          int n_l = n_g + 1;
+          if (n_g < fusion_inter && n_l < fusion_inter) {
+            float g = reduced[2 * p];
+            float l = reduced[2 * p + 1];
+            if (Bv) { g += static_cast<float>(Bv[n_g]); l += static_cast<float>(Bv[n_l]); }
+            float G = fminf(g, swiglu_limit);
+            float L = fmaxf(fminf(l, swiglu_limit), -swiglu_limit);
+            float sig = 1.0f / (1.0f + expf(-swiglu_alpha * G));
+            act_out[slot * inter + sw_base + p] =
+                static_cast<__half>(G * sig * (L + swiglu_beta));
+          }
+        }
+      }
+    }
+  }
+}
+
+// FC2, dp4a. a_qb/a_scale are the quantized [k, inter] slot activations
+// (per-slot). Weighted write to slot_buf is identical to qmoe_decode_fc2_kernel.
+template <int BLOCK_SIZE, int TILE_N>
+__global__ void qmoe_decode_fc2_dp4a_kernel(
+    const int8_t*  __restrict__ a_qb,            // [k, inter] deinterleaved int8
+    const float*   __restrict__ a_scale,         // [k, n_blk_mid]
+    const int32_t* __restrict__ expert_indices,  // [k]
+    const __half*  __restrict__ expert_weights,  // [k]
+    const uint8_t* __restrict__ fc2_w,           // [E, hidden, inter/2]
+    const __half*  __restrict__ fc2_s,           // [E, hidden, n_blk_mid]
+    const uint8_t* __restrict__ fc2_zp_packed,   // [E, hidden, ceil/2] or null
+    const __half*  __restrict__ fc2_b,           // [E, hidden] or null
+    __half*        __restrict__ slot_buf,        // [k, hidden]
+    int inter, int hidden, int n_blk_mid, int block_size) {
+  const int n_base = blockIdx.x * TILE_N;
+  const int slot   = blockIdx.y;
+  const int tid    = threadIdx.x;
+  const int E      = expert_indices[slot];
+  const float wt   = static_cast<float>(expert_weights[slot]);
+
+  const int8_t* aq_slot = a_qb + static_cast<size_t>(slot) * inter;
+  const float*  as_slot = a_scale + static_cast<size_t>(slot) * n_blk_mid;
+
+  const size_t   W_row_bytes = static_cast<size_t>(inter) / 2;
+  const uint8_t* W = fc2_w + static_cast<size_t>(E) * hidden * W_row_bytes;
+  const __half*  S = fc2_s + static_cast<size_t>(E) * hidden * n_blk_mid;
+  const int      packed_zp_stride = (n_blk_mid + 1) / 2;
+  const uint8_t* Z = fc2_zp_packed
+                       ? fc2_zp_packed + static_cast<size_t>(E) * hidden * packed_zp_stride
+                       : nullptr;
+  const __half*  Bv = fc2_b ? fc2_b + static_cast<size_t>(E) * hidden : nullptr;
+  const int bs_shift = __builtin_ctz(static_cast<unsigned>(block_size));
+
+  float partial[TILE_N];
+#pragma unroll
+  for (int t = 0; t < TILE_N; t++) partial[t] = 0.0f;
+
+  const uint8_t* W_rows[TILE_N];
+  const __half*  S_rows[TILE_N];
+  const uint8_t* Z_rows[TILE_N];
+#pragma unroll
+  for (int t = 0; t < TILE_N; t++) {
+    int n  = n_base + t;
+    int sn = (n < hidden) ? n : 0;
+    W_rows[t] = W + static_cast<size_t>(sn) * W_row_bytes;
+    S_rows[t] = S + static_cast<size_t>(sn) * n_blk_mid;
+    Z_rows[t] = Z ? Z + static_cast<size_t>(sn) * packed_zp_stride : nullptr;
+  }
+  const bool has_zp = (Z != nullptr);
+
+  const int num_u128 = inter / 32;
+  for (int idx = tid; idx < num_u128; idx += BLOCK_SIZE) {
+    const int   k32  = idx * 32;
+    const int   grp  = k32 >> bs_shift;
+    const float a_sc = as_slot[grp];
+
+    const int8_t* aq = aq_slot + static_cast<size_t>(idx) * 32;
+    int a_lo[4], a_hi[4];
+#pragma unroll
+    for (int j = 0; j < 4; j++) {
+      a_lo[j] = *reinterpret_cast<const int*>(aq + j * 8);
+      a_hi[j] = *reinterpret_cast<const int*>(aq + j * 8 + 4);
+    }
+    int a_sum_q = 0;
+#pragma unroll
+    for (int j = 0; j < 4; j++) {
+      a_sum_q = __builtin_amdgcn_sudot4(true, a_lo[j], false, 0x01010101, a_sum_q, false);
+      a_sum_q = __builtin_amdgcn_sudot4(true, a_hi[j], false, 0x01010101, a_sum_q, false);
+    }
+
+#pragma unroll
+    for (int t = 0; t < TILE_N; t++) {
+      uint4 b = *reinterpret_cast<const uint4*>(&W_rows[t][idx * 16]);
+      const unsigned comp[4] = {b.x, b.y, b.z, b.w};
+      int dot = 0;
+#pragma unroll
+      for (int j = 0; j < 4; j++) {
+        const int lo_w = static_cast<int>(comp[j] & 0x0F0F0F0Fu);
+        const int hi_w = static_cast<int>((comp[j] >> 4) & 0x0F0F0F0Fu);
+        dot = __builtin_amdgcn_sudot4(true, a_lo[j], false, lo_w, dot, false);
+        dot = __builtin_amdgcn_sudot4(true, a_hi[j], false, hi_w, dot, false);
+      }
+      const float sv = static_cast<float>(S_rows[t][grp]);
+      int zv = 8;
+      if (has_zp) {
+        uint8_t zp_byte = Z_rows[t][grp >> 1];
+        zv = static_cast<int>((grp & 1) ? (zp_byte >> 4) : (zp_byte & 0x0F));
+      }
+      partial[t] += a_sc * sv * static_cast<float>(dot - a_sum_q * zv);
+    }
+  }
+
+  constexpr int WARP_SIZE = 32;
+  const int warp_id = tid / WARP_SIZE;
+  const int lane    = tid % WARP_SIZE;
+  constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+
+#pragma unroll
+  for (int t = 0; t < TILE_N; t++) {
+    for (int off = WARP_SIZE >> 1; off > 0; off >>= 1)
+      partial[t] += __shfl_down(partial[t], off);
+  }
+
+  if constexpr (BLOCK_SIZE <= WARP_SIZE) {
+    if (lane == 0) {
+#pragma unroll
+      for (int t = 0; t < TILE_N; t++) {
+        int n = n_base + t;
+        if (n < hidden) {
+          float v = partial[t];
+          if (Bv) v += static_cast<float>(Bv[n]);
+          slot_buf[slot * hidden + n] = static_cast<__half>(wt * v);
+        }
+      }
+    }
+  } else {
+    __shared__ float warp_sums[TILE_N * NUM_WARPS];
+    if (lane == 0) {
+#pragma unroll
+      for (int t = 0; t < TILE_N; t++)
+        warp_sums[t * NUM_WARPS + warp_id] = partial[t];
+    }
+    __syncthreads();
+    if (warp_id == 0) {
+#pragma unroll
+      for (int t = 0; t < TILE_N; t++) {
+        float v = (lane < NUM_WARPS) ? warp_sums[t * NUM_WARPS + lane] : 0.0f;
+        for (int off = WARP_SIZE >> 1; off > 0; off >>= 1)
+          v += __shfl_down(v, off);
+        if (lane == 0) {
+          int n = n_base + t;
+          if (n < hidden) {
+            if (Bv) v += static_cast<float>(Bv[n]);
+            slot_buf[slot * hidden + n] = static_cast<__half>(wt * v);
+          }
+        }
+      }
+    }
+  }
+}
+
+template <int BS, int TN>
+static hipError_t launch_qmoe_fc1_dp4a(
+    hipStream_t s, int k, int fusion_inter, const void* a_qb,
+    const void* a_scale, const void* expert_indices, const void* fc1_weights,
+    const void* fc1_scales, const void* fc1_zero_points, const void* fc1_bias,
+    void* act_out, int hidden_size, int n_blk_in, int block_size,
+    float swiglu_alpha, float swiglu_beta, float swiglu_limit) {
+  dim3 grid(static_cast<unsigned>((fusion_inter + TN - 1) / TN),
+            static_cast<unsigned>(k));
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_decode_fc1_dp4a_kernel<BS, TN>), grid,
+                     dim3(BS), 0, s, static_cast<const int8_t*>(a_qb),
+                     static_cast<const float*>(a_scale),
+                     static_cast<const int32_t*>(expert_indices),
+                     static_cast<const uint8_t*>(fc1_weights),
+                     static_cast<const __half*>(fc1_scales),
+                     static_cast<const uint8_t*>(fc1_zero_points),
+                     static_cast<const __half*>(fc1_bias),
+                     static_cast<__half*>(act_out), hidden_size, fusion_inter,
+                     n_blk_in, block_size, swiglu_alpha, swiglu_beta,
+                     swiglu_limit);
+  return hipGetLastError();
+}
+
+template <int BS, int TN>
+static hipError_t launch_qmoe_fc2_dp4a(
+    hipStream_t s, int k, const void* a_qb, const void* a_scale,
+    const void* expert_indices, const void* expert_weights,
+    const void* fc2_weights, const void* fc2_scales,
+    const void* fc2_zero_points, const void* fc2_bias, void* slot_buf,
+    int inter_size, int hidden_size, int n_blk_mid, int block_size) {
+  dim3 grid(static_cast<unsigned>((hidden_size + TN - 1) / TN),
+            static_cast<unsigned>(k));
+  hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_decode_fc2_dp4a_kernel<BS, TN>), grid,
+                     dim3(BS), 0, s, static_cast<const int8_t*>(a_qb),
+                     static_cast<const float*>(a_scale),
+                     static_cast<const int32_t*>(expert_indices),
+                     static_cast<const __half*>(expert_weights),
+                     static_cast<const uint8_t*>(fc2_weights),
+                     static_cast<const __half*>(fc2_scales),
+                     static_cast<const uint8_t*>(fc2_zero_points),
+                     static_cast<const __half*>(fc2_bias),
+                     static_cast<__half*>(slot_buf), inter_size, hidden_size,
+                     n_blk_mid, block_size);
+  return hipGetLastError();
+}
+
+static hipError_t dispatch_qmoe_fc1_dp4a(
+    int bs, int tn, hipStream_t s, int k, int fusion_inter, const void* a_qb,
+    const void* a_scale, const void* expert_indices, const void* fc1_weights,
+    const void* fc1_scales, const void* fc1_zero_points, const void* fc1_bias,
+    void* act_out, int hidden_size, int n_blk_in, int block_size,
+    float swiglu_alpha, float swiglu_beta, float swiglu_limit) {
+#define X(B, T)                                                                \
+  if (bs == (B) && tn == (T))                                                  \
+    return launch_qmoe_fc1_dp4a<B, T>(                                         \
+        s, k, fusion_inter, a_qb, a_scale, expert_indices, fc1_weights,        \
+        fc1_scales, fc1_zero_points, fc1_bias, act_out, hidden_size, n_blk_in, \
+        block_size, swiglu_alpha, swiglu_beta, swiglu_limit);
+  QMOE_CFG_LIST(X)
+#undef X
+  return launch_qmoe_fc1_dp4a<64, 8>(
+      s, k, fusion_inter, a_qb, a_scale, expert_indices, fc1_weights,
+      fc1_scales, fc1_zero_points, fc1_bias, act_out, hidden_size, n_blk_in,
+      block_size, swiglu_alpha, swiglu_beta, swiglu_limit);
+}
+
+static hipError_t dispatch_qmoe_fc2_dp4a(
+    int bs, int tn, hipStream_t s, int k, const void* a_qb,
+    const void* a_scale, const void* expert_indices, const void* expert_weights,
+    const void* fc2_weights, const void* fc2_scales,
+    const void* fc2_zero_points, const void* fc2_bias, void* slot_buf,
+    int inter_size, int hidden_size, int n_blk_mid, int block_size) {
+#define X(B, T)                                                                \
+  if (bs == (B) && tn == (T))                                                  \
+    return launch_qmoe_fc2_dp4a<B, T>(                                         \
+        s, k, a_qb, a_scale, expert_indices, expert_weights, fc2_weights,      \
+        fc2_scales, fc2_zero_points, fc2_bias, slot_buf, inter_size,           \
+        hidden_size, n_blk_mid, block_size);
+  QMOE_CFG_LIST(X)
+#undef X
+  return launch_qmoe_fc2_dp4a<64, 8>(
+      s, k, a_qb, a_scale, expert_indices, expert_weights, fc2_weights,
+      fc2_scales, fc2_zero_points, fc2_bias, slot_buf, inter_size, hidden_size,
+      n_blk_mid, block_size);
+}
+
+// Separate online-autotune state for the dp4a kernels (their per-config
+// ranking differs from the fp path; sharing keys would cross-contaminate).
+static std::unordered_map<uint64_t, QmoeTuneState> g_qmoe_fc1_dp4a_state;
+static std::unordered_map<uint64_t, QmoeTuneState> g_qmoe_fc2_dp4a_state;
+
+extern "C" int hip_qmoe_decode_fused_dp4a(
+    void* stream,
+    const void* input,
+    const void* expert_indices,
+    const void* expert_weights,
+    const void* fc1_weights, const void* fc1_scales,
+    const void* fc1_zero_points, const void* fc1_bias,
+    const void* fc2_weights, const void* fc2_scales,
+    const void* fc2_zero_points, const void* fc2_bias,
+    void* slot_buf,
+    void* act_out,
+    void* output,
+    void* a_qb_in, void* a_scale_in,    // scratch: quantized [hidden] input
+    void* a_qb_mid, void* a_scale_mid,  // scratch: quantized [k, inter] acts
+    int64_t hidden_size, int64_t inter_size,
+    int64_t k, int64_t block_size,
+    float swiglu_alpha, float swiglu_beta, float swiglu_limit,
+    int64_t element_size_bytes) {
+  if (element_size_bytes != 2) {
+    fprintf(stderr, "[custom_kernels] hip_qmoe_decode_fused_dp4a: only fp16 "
+                    "supported (got element_size %lld)\n",
+            (long long)element_size_bytes);
+    return -1;
+  }
+  if (block_size <= 0 || (block_size & 31) != 0) {
+    fprintf(stderr, "[custom_kernels] hip_qmoe_decode_fused_dp4a: block_size "
+                    "must be a positive multiple of 32 (got %lld)\n",
+            (long long)block_size);
+    return -1;
+  }
+  if (hidden_size <= 0 || inter_size <= 0 || k <= 0 ||
+      (hidden_size % 32) != 0 || (inter_size % 32) != 0) {
+    fprintf(stderr, "[custom_kernels] hip_qmoe_decode_fused_dp4a: invalid "
+                    "sizes (hidden=%lld inter=%lld k=%lld)\n",
+            (long long)hidden_size, (long long)inter_size, (long long)k);
+    return -1;
+  }
+
+  hipStream_t s = static_cast<hipStream_t>(stream);
+  const int fusion_inter = static_cast<int>(2 * inter_size);
+  const int n_blk_in  = static_cast<int>((hidden_size + block_size - 1) / block_size);
+  const int n_blk_mid = static_cast<int>((inter_size  + block_size - 1) / block_size);
+
+  // Quantize the shared [hidden] input once (grid = n_blk_in groups x 1 row).
+  {
+    dim3 grid(static_cast<unsigned>(n_blk_in), 1u);
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_quant_act_i8_kernel<128>), grid,
+                       dim3(128), 0, s, static_cast<const __half*>(input),
+                       static_cast<int8_t*>(a_qb_in),
+                       static_cast<float*>(a_scale_in),
+                       static_cast<int>(hidden_size),
+                       static_cast<int>(block_size), n_blk_in);
+    hipError_t e = hipGetLastError();
+    if (e != hipSuccess) {
+      fprintf(stderr, "[custom_kernels] qmoe quant_act(in) failed: %s\n",
+              hipGetErrorString(e));
+      return static_cast<int>(e);
+    }
+  }
+
+  // FC1 + SwiGLU (dp4a), online-autotuned. N=fusion_inter, K=hidden.
+  int s1 = -1;
+  const uint64_t key1 =
+      qmoe_cfg_key(fusion_inter, static_cast<int>(hidden_size),
+                   static_cast<int>(block_size), fc1_zero_points != nullptr);
+  const QmoeCfg c1 = qmoe_tune_pick(g_qmoe_fc1_dp4a_state, key1, &s1);
+  {
+    hipEvent_t me0 = nullptr, me1 = nullptr;
+    if (s1 >= 0) { hipEventCreate(&me0); hipEventCreate(&me1); hipEventRecord(me0, s); }
+    hipError_t e = dispatch_qmoe_fc1_dp4a(
+        c1.bs, c1.tn, s, static_cast<int>(k), fusion_inter, a_qb_in,
+        a_scale_in, expert_indices, fc1_weights, fc1_scales, fc1_zero_points,
+        fc1_bias, act_out, static_cast<int>(hidden_size), n_blk_in,
+        static_cast<int>(block_size), swiglu_alpha, swiglu_beta, swiglu_limit);
+    if (e != hipSuccess) {
+      fprintf(stderr, "[custom_kernels] qmoe_decode_fc1_dp4a failed: %s\n",
+              hipGetErrorString(e));
+      return static_cast<int>(e);
+    }
+    if (s1 >= 0) {
+      hipEventRecord(me1, s); hipEventSynchronize(me1);
+      float ms = 0; hipEventElapsedTime(&ms, me0, me1);
+      hipEventDestroy(me0); hipEventDestroy(me1);
+      qmoe_tune_record(g_qmoe_fc1_dp4a_state, key1, s1, ms, "fc1-dp4a",
+                       fusion_inter, static_cast<int>(hidden_size),
+                       static_cast<int>(block_size));
+    }
+  }
+
+  // Quantize the k [inter] expert-slot activations (grid = n_blk_mid x k).
+  {
+    dim3 grid(static_cast<unsigned>(n_blk_mid), static_cast<unsigned>(k));
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(qmoe_quant_act_i8_kernel<128>), grid,
+                       dim3(128), 0, s, static_cast<const __half*>(act_out),
+                       static_cast<int8_t*>(a_qb_mid),
+                       static_cast<float*>(a_scale_mid),
+                       static_cast<int>(inter_size),
+                       static_cast<int>(block_size), n_blk_mid);
+    hipError_t e = hipGetLastError();
+    if (e != hipSuccess) {
+      fprintf(stderr, "[custom_kernels] qmoe quant_act(mid) failed: %s\n",
+              hipGetErrorString(e));
+      return static_cast<int>(e);
+    }
+  }
+
+  // FC2 (dp4a) + routing-weighted write, online-autotuned. N=hidden, K=inter.
+  int s2 = -1;
+  const uint64_t key2 =
+      qmoe_cfg_key(static_cast<int>(hidden_size), static_cast<int>(inter_size),
+                   static_cast<int>(block_size), fc2_zero_points != nullptr);
+  const QmoeCfg c2 = qmoe_tune_pick(g_qmoe_fc2_dp4a_state, key2, &s2);
+  {
+    hipEvent_t me0 = nullptr, me1 = nullptr;
+    if (s2 >= 0) { hipEventCreate(&me0); hipEventCreate(&me1); hipEventRecord(me0, s); }
+    hipError_t e = dispatch_qmoe_fc2_dp4a(
+        c2.bs, c2.tn, s, static_cast<int>(k), a_qb_mid, a_scale_mid,
+        expert_indices, expert_weights, fc2_weights, fc2_scales,
+        fc2_zero_points, fc2_bias, slot_buf, static_cast<int>(inter_size),
+        static_cast<int>(hidden_size), n_blk_mid, static_cast<int>(block_size));
+    if (e != hipSuccess) {
+      fprintf(stderr, "[custom_kernels] qmoe_decode_fc2_dp4a failed: %s\n",
+              hipGetErrorString(e));
+      return static_cast<int>(e);
+    }
+    if (s2 >= 0) {
+      hipEventRecord(me1, s); hipEventSynchronize(me1);
+      float ms = 0; hipEventElapsedTime(&ms, me0, me1);
+      hipEventDestroy(me0); hipEventDestroy(me1);
+      qmoe_tune_record(g_qmoe_fc2_dp4a_state, key2, s2, ms, "fc2-dp4a",
+                       static_cast<int>(hidden_size),
+                       static_cast<int>(inter_size),
+                       static_cast<int>(block_size));
+    }
+  }
+
+  // Reduce: output[n] = sum over slot of slot_buf[slot, n].
+  {
+    int grid = static_cast<int>((hidden_size + kBlock - 1) / kBlock);
+    hipLaunchKernelGGL(qmoe_decode_reduce_kernel, dim3(grid), dim3(kBlock), 0, s,
+                       static_cast<const __half*>(slot_buf),
+                       static_cast<__half*>(output),
+                       static_cast<int>(hidden_size), static_cast<int>(k));
+    hipError_t e = hipGetLastError();
+    if (e != hipSuccess) {
+      fprintf(stderr, "[custom_kernels] qmoe_decode_reduce(dp4a) failed: %s\n",
+              hipGetErrorString(e));
+      return static_cast<int>(e);
+    }
+  }
+
+  return 0;
+}

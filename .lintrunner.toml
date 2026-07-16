@@ -25,7 +25,6 @@ include_patterns = [
     '**/*.pyi',
 ]
 exclude_patterns = [
-    '3rd-party/**',
     # Hand-written GPU kernels. They are first-party code, but kept
     # formatter-exempt (as they were under 3rd-party/ before the relocation)
     # so the move stays a pure relocation instead of a whole-tree reformat.
@@ -50,7 +49,6 @@ include_patterns = [
     '**/*.py',
 ]
 exclude_patterns = [
-    '3rd-party/**',
     # First-party GPU kernels, kept formatter-exempt; see the RUFF block above.
     'lib/Runtime/Kernels/**',
 ]
@@ -74,7 +72,6 @@ include_patterns = [
     '**/*.cpp',
 ]
 exclude_patterns = [
-    '3rd-party/**',
     # First-party GPU kernels, kept formatter-exempt; see the RUFF block above.
     'lib/Runtime/Kernels/**',
 ]

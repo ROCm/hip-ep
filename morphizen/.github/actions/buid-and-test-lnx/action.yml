@@ -1,0 +1,31 @@
+##
+## Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+
+# action.yml
+name: 'Hello World'
+description: 'Greet someone and record the time'
+inputs:
+  who-to-greet:  # id of input
+    description: 'Who to greet'
+    required: true
+    default: 'World'
+  user-name:
+    description: 'The name of the user'
+    required: true
+  user-id:
+    description: 'The id of the user'
+    required: true
+
+outputs:
+  time: # id of output
+    description: 'The time we greeted you'
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
+  args:
+    - ${{ inputs.who-to-greet }}
+  env:
+    HOST_USER_NAME: ${{ inputs.user-name }}
+    HOST_USER_ID: ${{ inputs.user-id }}

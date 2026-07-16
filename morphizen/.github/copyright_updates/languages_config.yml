@@ -1,0 +1,187 @@
+##
+## Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+languages:
+
+  # === SOURCE FILES === #
+
+  - name: Python
+    extensions: [.py]
+    comment_marker: '#'
+    # NOTE: Disable multiline support for Python
+    # Adding at the top can interfere with module docstrings
+    # multiline_start: '"""'
+    # multiline_end: '"""'
+
+  - name: C / C++
+    extensions: [.h, .c, .cpp, .hpp]
+    comment_marker: //
+    multiline_start: /*
+    multiline_end: '*/'
+
+  - name: Java/JavaScript/Groovy
+    extensions: [.java, .js, .ts, .tsx, .groovy]
+    comment_marker: //
+    multiline_start: /*
+    multiline_end: '*/'
+
+  - name: Proto File
+    extensions: [.proto]
+    comment_marker: //
+    multiline_start: /*
+    multiline_end: '*/'
+
+  - name: MLIR
+    extensions: [.mlir]
+    comment_marker: //
+
+  - name: Matlab
+    extensions: [.m]
+    comment_marker: '%'
+
+  - name: TableGen
+    extensions: [.td]
+    comment_marker: '//'
+
+  - name: MLIR PDL
+    extensions: [.pdll]
+    comment_marker: '//'
+
+  # === SHELL SCRIPTS === #
+
+  - name: Linux shell
+    extensions: [.sh, .bash, .ps1, .tcl, .csh, .cshrc]
+    comment_marker: '#'
+
+  - name: Windows Shell
+    extensions: [.bat, .cmd]
+    comment_marker: 'REM'
+
+  - name: Other scripts
+    extensions: ['']
+    filename_pattern: "\
+      .*(?:setupaie|\
+      pylintrc|clang-tidy|post-checkout|\
+      post-merge|prepare-commit-msg|onnx_to_preprocessed_onnx_mlir)"
+    comment_marker: '#'
+
+  # === CI/BUILD&TEST-RELATED === #
+
+  - name: Jenkinsfile
+    extensions: ['']
+    filename_pattern: '[Jj]enkinsfile(?:_.*)?'
+    comment_marker: //
+    multiline_start: /*
+    multiline_end: '*/'
+
+  - name: Makefile
+    extensions: ['']
+    filename_pattern: '.*[Mm]akefile'
+    comment_marker: '#'
+
+  - name: Makefile 2
+    extensions: [.mk]
+    comment_marker: '#'
+
+  - name: CMake
+    extensions: [.cmake]
+    comment_marker: '#'
+
+  - name: CMakeLists
+    extensions: [.txt]
+    filename_pattern: CMakeLists
+    comment_marker: '#'
+
+  - name: Dockerfile
+    extensions: ['']
+    filename_pattern: '.*[Dd]ockerfile'
+    comment_marker: '#'
+
+  - name: Dockerfile 2
+    extensions: ['.dockerfile']
+    comment_marker: '#'
+
+  - name: Conanfile
+    extensions: [.txt]
+    filename_pattern: '.*conanfile'
+    comment_marker: '#'
+
+  - name: Ref Input files
+    extensions: [.in]
+    filename_pattern: '.*\.h'
+    comment_marker: '//'
+
+  - name: Lit Config Input files
+    extensions: [.in]
+    filename_pattern: '.*^(?!.*\.h\.in$)'
+    comment_marker: '//'
+    multiline_start: /*
+    multiline_end: '*/'
+
+  - name: Lit Config Input files
+    extensions: [.in]
+    filename_pattern: '.*^(?!.*\.cpp\.in$)'
+    comment_marker: '//'
+    multiline_start: /*
+    multiline_end: '*/'
+
+  - name: Lit Config Input files
+    extensions: [.in]
+    filename_pattern: '.*^(?!.*\.cfg\.py\.in$)'
+    comment_marker: '#'
+
+  - name: Output files
+    extensions: [.txt]
+    filename_pattern: '.*out_.*'
+    comment_marker: '#'
+
+  - name: Pip requirements
+    extensions: [.txt]
+    filename_pattern: '.*(?:[Rr]equirements|[Cc]onstraints)'
+    comment_marker: '#'
+
+  - name: CODEOWNERS
+    extensions: ['']
+    filename_pattern: 'CODEOWNERS'
+    comment_marker: '#'
+
+  - name: Dotfiles
+    extensions: ['']
+    filename_pattern: '.gitmodules'
+    comment_marker: '#'
+
+  # === OTHER CONFIGS === #
+
+  - name: YAML
+    extensions: [.yaml, .yml]
+    comment_marker: '#'
+
+  - name: TOML
+    # Different from YAML because does not require document start marker ('---')
+    extensions: [.toml]
+    comment_marker: '#'
+
+  - name: Config
+    extensions: [.cfg, .ini]
+    comment_marker: '#'
+
+  # === DOCUMENTATION / HUMAN-READABLE === #
+
+  - name: XML / HTML / PRX
+    extensions: [.xml, .html, .prx, .prxui]
+    comment_marker: '<!--- '
+    single_line_end: ' --->'
+    multiline_start: <!---
+    multiline_end: --->
+
+  - name: CSS
+    extensions: [.css]
+    comment_marker: '/*'
+    single_line_end: '*/'
+    multiline_start: '/*'
+    multiline_end: '*/'
+
+  - name: Example files
+    extensions: ['.example']
+    comment_marker: '#'

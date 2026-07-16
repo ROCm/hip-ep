@@ -1,0 +1,2 @@
+# Python dependencies for build tools
+patch==1.16

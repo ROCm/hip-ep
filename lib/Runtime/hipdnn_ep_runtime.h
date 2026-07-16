@@ -393,6 +393,17 @@ void *hipdnn_ep_state_get_conv_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
                                         size_t needed_size);
 
+// Per-session scratch for the W4A8 dp4a matmul_nbits decode path
+// (hip_matmul_nbits_dp4a). One contiguous device buffer holding the quantized
+// activation row (int8) plus the per-group activation scales (float). Lazily
+// grown via hipdnn_ep_state_ensure_matmul_dp4a_scratch (same policy as
+// conv_scratch: never shrinks, freed in hipdnn_ep_state_cleanup). Single buffer
+// reused across all matmul_nbits calls in the session -- safe because the
+// stream is serialised. See runtime_state_internal.h for design rationale.
+void *hipdnn_ep_state_get_matmul_dp4a_scratch(RuntimeState *state);
+int hipdnn_ep_state_ensure_matmul_dp4a_scratch(RuntimeState *state,
+                                               size_t needed_size);
+
 // Per-op state slots (see docs/design/op-state-slots-design.md). The generated
 // @hipdnn_ep_op_states_init_fn (built by --generate-op-state-init) calls
 // _alloc once, then per stateful op calls its construct symbol; each construct

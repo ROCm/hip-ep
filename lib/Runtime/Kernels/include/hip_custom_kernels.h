@@ -617,27 +617,58 @@ HIP_KERNEL_API int hip_gqa_softmax_f32_to_f32(
     int input_batch_stride, int output_batch_stride,
     const void* head_sink, int num_heads, int use_smooth_softmax);
 
-/* Fused GQA decode (sq == 1, d in {64, 128, 256}): single-token attention
- * via cooperative dot product + online softmax in log2e space, one block
- * per (batch, head_q) with D threads (D == d).
- * Replaces steps 3, 6-11 of the decomposed pipeline.
- * Returns -1 for unsupported d values.
- * seqlens_k: optional device pointer [B] int32. When non-null, the kernel
- * reads total_seq = seqlens_k[b]+1 as the loop bound (instead of skv).
- * NOTE: assumes wave32 (RDNA); not portable to CDNA/wave64 without changes
- * to the warp shuffle reduction tree. */
+/* Legacy fast-path decode kernels (folded into gqa_kernel.hip with legacy_*
+ * device kernels). The production fused decode path uses hip_gqa_flash_decode_v2
+ * above; these two entries back gqa.cpp::gqa_forward_hipblaslt -- the decomposed
+ * hipBLASLt fallback -- for the cases the fused path does not cover. They MUST be
+ * exported (HIP_KERNEL_API) so the EP resolves them out of custom_kernels_<arch>
+ * at JIT link / native import (same as every other launcher here).
+ *
+ * hip_gqa_fused_decode: one-block-per-(batch,head_q) decode, d in {64,128,256},
+ * arbitrary HpG -- the general small-/odd-geometry decode used when flash is not
+ * eligible. */
 HIP_KERNEL_API int hip_gqa_fused_decode(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int H, int G, int d, int skv, int max_seq,
     float scale, const void* seqlens_k);
 
-/* Fused GQA prefill (sq > 1, d == 128): Flash Attention 2 with WMMA
- * tile GEMMs and online softmax. Double-buffered KV tiles, causal mask.
- * Replaces steps 3, 6-11 of the decomposed pipeline. */
-HIP_KERNEL_API int hip_gqa_fused_prefill(
+/* hip_gqa_flash_decode: FA-2 split-K (scalar|WMMA), HPG in {4,8}, with
+ * sliding-window + head-sink / smooth-softmax -- the fast windowed/sink decode
+ * the fallback uses. partials_workspace: float scratch B*H*K_SPLITS*(d+2). */
+HIP_KERNEL_API int hip_gqa_flash_decode(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
-    void* O, int B, int H, int G, int sq, int skv, int max_seq, int past_len,
-    float scale);
+    void* O, void* partials_workspace,
+    int B, int H, int G, int d, int max_seq, int K_SPLITS,
+    float scale, const void* seqlens_k, int local_window_size,
+    const void* head_sink, int use_smooth_softmax);
+
+/* Optimized fused GQA prefill (sq > 1, d in {64,128}, fp16, causal, GQA) --
+ * Flash-Attention-2 with WMMA tile GEMMs and intra-wave online softmax. These
+ * reproduce the gqa_compare TTFT-winning kernels (OPTIMIZATION.md ch.13):
+ *   v5: warp-private / register-resident (best at d == 64).
+ *   v7: M-register-blocked, global-streamed K (best at d == 128).
+ * Each self-tunes its launch config on the first call per (d,sq,skv,Hq,G)
+ * shape and caches the winner process-wide. Layout: Q [B,sq,Hq,d];
+ * K/V cache [B,G,max_seq,d] (post-RoPE, post-append). Returns 0 on success,
+ * -1 if d is unsupported. No seqlens_k / sliding-window / head-sink / smooth
+ * softmax / softcap -- caller must gate those out (use the decomposed path). */
+HIP_KERNEL_API int hip_gqa_flash_prefill_v5_v2(
+    void* stream, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
+    int past_len, float scale);
+
+HIP_KERNEL_API int hip_gqa_flash_prefill_v7_v2(
+    void* stream, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
+    int past_len, float scale);
+
+/* Unified fused flash-prefill entry: picks v5 (d==64) or v7 (d==128) internally
+ * so the runtime calls one symbol for any eligible prefill. Same layout /
+ * constraints as v5/v7 above. Returns 0 on success, -1 if d is unsupported. */
+HIP_KERNEL_API int hip_gqa_flash_prefill_v2(
+    void* stream, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
+    int past_len, float scale);
 
 /* FA-2 split-K GQA decode (sq == 1, d in {64, 128}, HPG=H/G==4):
  * GQA-aware kernel that loads K/V tiles into LDS once and reuses them
@@ -648,10 +679,19 @@ HIP_KERNEL_API int hip_gqa_fused_prefill(
  * Llama-3.x family shows large bandwidth headroom over the existing
  * one-block-per-head fused decode.
  *
- * Workspace: float scratch sized B*H*K_SPLITS*(d+2)*sizeof(float) bytes.
+ * Workspace: float scratch sized B*H*max_splits*(d+2)*sizeof(float) bytes.
  * Caller is responsible for allocating and passing it in.
  *
- * K_SPLITS: only 8 supported in V1. Returns -1 on unsupported (HPG, d, K_SPLITS).
+ * skv: current total KV length (host-known). Used only to autotune the split
+ * count / impl and key the per-shape cache; the kernels read seqlens_k for the
+ * exact per-batch length at runtime. Pass <= 0 to fall back to max_seq.
+ *
+ * max_splits: workspace capacity in splits. The launcher autotunes the actual
+ * split count (8..max_splits, capped at 64) and the scalar-vs-WMMA impl on the
+ * first call per (B,H,G,d, skv-bucket) shape, caches the winner in a
+ * process-wide map (matmul_nbits-style), and reuses it on later calls.
+ * Env overrides skip autotune: HIPDNN_GQA_DECODE_SCALAR / _WMMA (impl),
+ * HIPDNN_GQA_DECODE_SPLITS=N (count), HIPDNN_GQA_DECODE_NOAUTOTUNE=1 (fixed).
  *
  * seqlens_k: optional device pointer [B] int32. When non-null, total_seq
  * = seqlens_k[b]+1 is read on-device (no host sync).
@@ -667,12 +707,12 @@ HIP_KERNEL_API int hip_gqa_fused_prefill(
  * s_h = 0 for all heads. This is the gpt-oss-20b / Mistral-style attention
  * sink. The partials are unaffected; the term is folded in by the reduce
  * kernel. */
-HIP_KERNEL_API int hip_gqa_flash_decode(
+HIP_KERNEL_API int hip_gqa_flash_decode_v2(
     void* stream,
     const void* Q, const void* Kcache, const void* Vcache,
     void* O,
     void* partials_workspace,
-    int B, int H, int G, int d, int max_seq, int K_SPLITS,
+    int B, int H, int G, int d, int skv, int max_seq, int max_splits,
     float scale,
     const void* seqlens_k,
     int local_window_size,
@@ -1366,6 +1406,27 @@ HIP_KERNEL_API int hip_matmul_nbits(
     const void* pre_unpacked_zp_u8,
     const void* pre_unpacked_zp_fp16);
 
+/* W4A8 integer-dot-product (dp4a) GEMV for a single decode row (M==1).
+ * Dynamically quantizes the fp16 activation row to per-group int8 (into
+ * caller-owned scratch) and runs a `v_dot4_i32_iu8` (`__builtin_amdgcn_sudot4`)
+ * GEMV, replacing the dequant-ALU-bound fp path. Requires bits==4, K%32==0.
+ *   A          : fp16 activation [K]  (batch==M==1, row-major)
+ *   B          : packed int4 weights  [N, K/2]
+ *   scales     : fp16 [N, ceil(K/block_size)]
+ *   zp_u8      : pre-unpacked uint8 zero points [N, ceil(K/block_size)] or
+ *                nullptr for the symmetric (default zp=8) path
+ *   out        : fp16 [N]
+ *   a_qb_scratch    : >= K bytes (int8), caller/session-owned
+ *   a_scale_scratch : >= ceil(K/block_size) floats, caller/session-owned
+ * Returns a hipError_t (hipSuccess on success); hipErrorInvalidValue if K%32.
+ */
+HIP_KERNEL_API int hip_matmul_nbits_dp4a(
+    void* stream,
+    const void* A, const void* B, const void* scales, const void* zp_u8,
+    const void* bias, void* out,
+    int64_t N, int64_t K, int64_t block_size,
+    void* a_qb_scratch, void* a_scale_scratch);
+
 /* Stand-alone launchers for the zero_points unpack/convert kernels, used by
  * the asym matmul_nbits cache in lib/Runtime/real/matmul_nbits.cpp.
  *
@@ -1595,6 +1656,29 @@ HIP_KERNEL_API int hip_qmoe_decode_fused(
     void* slot_buf,
     void* act_out,
     void* output,
+    int64_t hidden_size, int64_t inter_size,
+    int64_t k, int64_t block_size,
+    float swiglu_alpha, float swiglu_beta, float swiglu_limit,
+    int64_t element_size_bytes);
+
+// W4A8 dp4a decode variant of hip_qmoe_decode_fused (env-gated via
+// HIPDNN_EP_MATMUL_DP4A). Additionally takes 4 scratch buffers: quantized
+// int8 activations + per-group scales for the fc1 input ([hidden]) and the
+// fc2 slot activations ([k, inter]). fp16 only; block_size a multiple of 32.
+HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a(
+    void* stream,
+    const void* input,
+    const void* expert_indices,
+    const void* expert_weights,
+    const void* fc1_weights, const void* fc1_scales,
+    const void* fc1_zero_points, const void* fc1_bias,
+    const void* fc2_weights, const void* fc2_scales,
+    const void* fc2_zero_points, const void* fc2_bias,
+    void* slot_buf,
+    void* act_out,
+    void* output,
+    void* a_qb_in, void* a_scale_in,
+    void* a_qb_mid, void* a_scale_mid,
     int64_t hidden_size, int64_t inter_size,
     int64_t k, int64_t block_size,
     float swiglu_alpha, float swiglu_beta, float swiglu_limit,

@@ -1,0 +1,66 @@
+module(
+    name = "morphizen",
+    version = "1.0",
+)
+
+# Core C++ rules
+bazel_dep(name = "rules_cc", version = "0.2.17")
+bazel_dep(name = "rules_proto", version = "7.0.2")
+bazel_dep(name = "rules_python", version = "1.6.3")
+
+# setup for Python 3.10
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.defaults(
+    # Use python.defaults if you have defined multiple toolchain versions.
+    python_version = "3.10",
+    python_version_env = "BAZEL_PYTHON_VERSION",
+)
+python.toolchain(
+    configure_coverage_tool = True,
+    python_version = "3.10",
+)
+
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+
+pip.parse(
+    hub_name = "my_pip_deps",  # fix error
+    python_version = "3.10",
+    requirements_lock = "//:requirements.txt",
+)
+use_repo(pip, "my_pip_deps")
+
+bazel_dep(name = "platforms", version = "1.0.0")
+
+# bazel_cpp_toolchain: provides clang-cl toolchain + platform targets used by --config=remote.
+# Sourced from bazel-registry (ROCm/bazel-registry v1.0.0).
+bazel_dep(name = "bazel_cpp_toolchain", version = "1.0.0")
+
+# External dependencies
+# glog 0.6.0 — must match cmake/deps.txt (which pins v0.6.0).
+# glog 0.7.1 changed google::Symbolize from 3 to 4 parameters;
+# morphizen-core/src/vitisai_compile_model.cpp forward-declares the 3-parameter
+# signature, so 0.7.1 causes an undefined symbol linker error.
+bazel_dep(name = "glog", version = "0.6.0")
+bazel_dep(name = "protobuf", version = "29.0") #rules_cc@0.2.17 → protobuf@29.0 rules_proto@7.0.2 → protobuf@29.0 rules_python@1.5.0 → protobuf@29.0
+bazel_dep(name = "gsl", version = "4.0.0")  # Needed by ONNXRuntime
+bazel_dep(name = "zlib", version = "1.3.1.bcr.6")
+bazel_dep(name = "openssl", version = "3.3.1.rocm.1")
+bazel_dep(name = "onnxruntime", version = "1.24.4")
+
+# ONNX v1.18.0 external dependency
+onnx_extension = use_extension("//3rd-party:onnx_extension.bzl", "onnx_extension")
+use_repo(onnx_extension, "onnx")
+
+# hash-library external dependency
+bazel_dep(name = "hash-library", version = "8.0.0")
+
+# googletest — required by unit-test
+bazel_dep(name = "googletest", version = "1.15.2")
+
+# Boost — required by various tools
+# cmake/deps.txt pins 1.84.0; 1.83.0.bcr.4 is the closest patched BCR version.
+# (plain 1.83.0 has a broken BUILD: glob("src/**/*.ipp") fails with no matches)
+bazel_dep(name = "boost.program_options", version = "1.83.0.bcr.4")
+
+# LLVM/MLIR v22.1.3 — required by mlir-imp backend
+bazel_dep(name = "llvm-project-overlay", version = "22.1.3")

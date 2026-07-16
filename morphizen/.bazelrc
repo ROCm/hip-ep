@@ -1,0 +1,67 @@
+# Bazel configuration for MorphiZen
+
+# Enable Bzlmod
+common --enable_bzlmod
+
+# Registry: bazel-registry (ROCm/bazel-registry) first, BCR as fallback.
+# Credential helper (tools/github-credential-helper.sh) supplies the Bearer token.
+# Pinned to a specific commit SHA so MODULE.bazel.lock never goes stale due to
+# registry updates. To upgrade: update the SHA, run `bazel build //...`, commit
+# both .bazelrc and MODULE.bazel.lock. See docs/workflows/bazel-registry-upgrade.md.
+# For local development with a local registry, override in .bazelrc.local:
+#   common --registry=file:///C:/Develop/w/source/bazel-registry-1
+common --registry=https://raw.githubusercontent.com/ROCm/bazel-registry/ef797daffaa786aa0c67a1e6e025e2b79774bc9c
+common --registry=https://bcr.bazel.build
+
+# Repository cache (reuses downloads across registry URL changes)
+common --repository_cache=C:/bazel_cache/repository_cache
+
+# Import local overrides (gitignored — for --override_module, local registry tweaks, etc.)
+try-import %workspace%/.bazelrc.local
+
+# GitHub credential helper
+# Reads GITHUB_TOKEN env var (CI) or falls back to `gh auth token` (local dev)
+common --credential_helper=github.com=%workspace%/tools/github-credential-helper.cmd
+common --credential_helper=raw.githubusercontent.com=%workspace%/tools/github-credential-helper.cmd
+common --credential_helper=codeload.github.com=%workspace%/tools/github-credential-helper.cmd
+
+# Modern C++ toolchain resolution
+build --incompatible_enable_cc_toolchain_resolution
+
+# C++ standard (applied globally; toolchain may override per target)
+build --cxxopt=/std:c++17
+build --host_cxxopt=/std:c++17
+
+# Allow protobuf to work with MSVC / clang-cl
+build --define=protobuf_allow_msvc=true
+
+# Output user root (override in .bazelrc.local for non-Windows dev)
+startup --output_user_root=C:/Develop/temp/bazel-user-root
+startup --host_jvm_args=-Djavax.net.ssl.trustStore=none
+startup --host_jvm_args=-Djavax.net.ssl.trustStorePassword=none
+
+# Debug configuration
+build:debug --compilation_mode=dbg
+build:debug --strip=never
+
+# Release configuration
+build:release --compilation_mode=opt
+build:release --strip=always
+
+# -----------------------------------------------------------------------------
+# Remote Execution Configuration (--config=remote)
+# Uses Cachion RBE and bazel_cpp_toolchain for consistent builds
+# -----------------------------------------------------------------------------
+build:remote --remote_executor=grpc://172.20.158.244:50051
+build:remote --remote_cache=grpc://172.20.158.244:50051
+build:remote --remote_upload_local_results=true
+build:remote --remote_download_outputs=minimal
+build:remote --remote_timeout=600
+build:remote --jobs=1000
+build:remote --spawn_strategy=remote
+
+build:remote --platforms=@bazel_cpp_toolchain//toolchain/platforms:windows_x64
+build:remote --extra_execution_platforms=@bazel_cpp_toolchain//toolchain/platforms:windows_x64
+build:remote --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
+build:remote --shell_executable=C:/PROGRA~1/Git/bin/bash.exe
+build:remote --noincompatible_validate_top_level_header_inclusions

@@ -1,0 +1,14 @@
+##
+##  Copyright (C) 2023 – 2024 Advanced Micro Devices, Inc. All rights reserved.
+##  Licensed under the MIT License.
+##
+## this GSL used by onnxruntime
+microsoft_gsl;https://github.com/microsoft/GSL/archive/refs/tags/v4.0.0.zip;cf368104cd22a87b4dd0c80228919bb2df3e2a14
+glog;https://github.com/google/glog/archive/refs/tags/v0.7.1.zip;8ec29681a237045e7ceec92587278c023664f18a
+GTest;https://github.com/google/googletest.git;v1.15.0
+protobuf;https://github.com/protocolbuffers/protobuf/archive/refs/tags/v21.12.zip;7cf2733949036c7d52fda017badcab093fe73bfa
+pybind11;https://github.com/pybind/pybind11/archive/refs/tags/v2.13.6.tar.gz;a2e59f0e7065404b44dfe92a28aca47ba1378dc4
+Boost;https://github.com/boostorg/boost/releases/download/boost-1.84.0/boost-1.84.0.tar.xz;893b5203b862eb9bbd08553e24ff146a
+onnx;https://github.com/onnx/onnx/archive/refs/tags/v1.18.0.zip;f156d032a3af91b66d554e11158b33ca77bbb1f2
+llvm;https://github.com/llvm/llvm-project.git;f8cb7987c64dcffb72414a40560055cb717dbf74
+hash-library;https://github.com/stbrumme/hash-library.git;d389d18112bcf7e4786ec5e8723f3658a7f433d7

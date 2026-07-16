@@ -1,0 +1,56 @@
+// Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+syntax = "proto3";
+
+message MorphizenE2ETestsProto {
+    repeated E2ETestConfigProto test_configs = 1;
+}
+message E2ETestConfigProto {
+    string name  = 1;
+    E2ETestEnvProto env = 2;
+}
+message E2ETestEnvProto {
+    string ort_log_level = 1;
+    string ort_log_id = 2;
+    repeated EPRegistrationProto registration = 3;
+    repeated E2ETestSessionOptionsProto session_options = 4;
+}
+message EPRegistrationProto {
+    string name = 1;
+    string library = 2;
+}
+
+message E2ETestSessionOptionsProto {
+    map<string, string> session_configs = 1;
+    oneof ep_param{
+        CPUEPParamProto cpu_ep_param = 2;
+        MorphiZenEPParamProto morphizen_ep_param = 3;
+        V2ParamProto v2_param = 4;
+    }
+    repeated E2ETestSessionProto session = 5; // session options for the test
+}
+
+message CPUEPParamProto {
+}
+
+message MorphiZenEPParamProto {
+    map<string, string> provider_options = 1;
+}
+message V2ParamProto {
+    map<string, string> provider_options = 1;
+    // devices get by OrtEnv
+}
+
+message E2ETestSessionProto{
+    string model_path = 1; // path to the model file
+    bool use_memory_model = 2; // use memory model for the session
+    int64 session_count = 3; // session count for the test
+    E2ETestSessionRunProto run = 4;
+}
+
+message E2ETestSessionRunProto {
+    int64 run_count = 1; // run count for the run
+    optional int64 batch_number = 2; // batch number for the run
+    repeated string golden_input = 3; // input data for the run
+    repeated string golden_output = 4; // golden output for the run
+}

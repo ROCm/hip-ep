@@ -1,0 +1,13 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "onnxruntime-morphizen-headers",
+    hdrs = glob(["morphizen/*.h"]),
+    includes = ["."],
+    visibility = ["//visibility:public"],
+)

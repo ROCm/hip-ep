@@ -133,6 +133,17 @@ struct RuntimeState {
   void *conv_scratch;
   size_t conv_scratch_size;
 
+  // Per-session scratch for the W4A8 dp4a matmul_nbits decode path
+  // (hip_matmul_nbits_dp4a). One contiguous device buffer holding the
+  // per-token quantized activation (int8, K bytes, nibble-deinterleaved) plus
+  // the per-group activation scales (float, ceil(K/block_size)). Same
+  // grow-on-demand / never-shrink policy as conv_scratch; lazily allocated on
+  // first dp4a call, freed in hipdnn_ep_state_cleanup. Single-buffer reuse is
+  // safe because the HIP stream is serialised (the next matmul_nbits only
+  // launches after the previous dp4a gemv has consumed the quantized row).
+  void *matmul_dp4a_scratch;
+  size_t matmul_dp4a_scratch_size;
+
   // NOTE: the GQA GEMM descriptor cache (GqaGemmCache) formerly lived here as
   // gqa_gemm_cache. It is now per-op-instance: each gqa instance owns one in
   // its GqaState op-state slot (see op_states below and

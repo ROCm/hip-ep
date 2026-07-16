@@ -1,0 +1,45 @@
+diff --git a/tar.h b/tar.h
+index 806a9e9ef12c..62c69ada614c 100644
+--- a/tar.h
++++ b/tar.h
+@@ -85,10 +85,15 @@
+ #define TAR_PAD(x)	((512 - ((x) & 511)) & 511)
+ #endif /* _PAX_ */
+
++#if defined(_WIN32)
++#define PACKED(x) __declspec(align(x))
++#else
++#define PACKED(x) __attribute__((packed, aligned(x)))
++#endif
+ /*
+  * structure of an old tar header as it appeared in BSD releases
+  */
+-typedef struct {
++typedef struct PACKED(1) {
+ 	char name[TNMSZ];		/* name of entry */
+ 	char mode[8]; 			/* mode */
+ 	char uid[8]; 			/* uid */
+@@ -98,7 +103,7 @@
+ 	char chksum[CHK_LEN];		/* checksum */
+ 	char linkflag;			/* norm, hard, or sym. */
+ 	char linkname[TNMSZ];		/* linked to name */
+-} HD_TAR __aligned(1);
++} HD_TAR;
+
+ #ifdef _PAX_
+ /*
+@@ -127,7 +132,7 @@
+ #define	TVERSION	"00"		/* 00 and no null */
+ #define	TVERSLEN	2
+
+-typedef struct {
++typedef struct PACKED(1) {
+ 	char name[TNMSZ];		/* name of entry */
+ 	char mode[8]; 			/* mode */
+ 	char uid[8]; 			/* uid */
+@@ -144,4 +149,4 @@
+ 	char devmajor[8];		/* major device number */
+ 	char devminor[8];		/* minor device number */
+ 	char prefix[TPFSZ];		/* linked to name */
+-} HD_USTAR __aligned(1);
++} HD_USTAR;
