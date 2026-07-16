@@ -35,7 +35,12 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
               int64_t k, int64_t expert_weight_bits, int64_t block_size,
               int64_t swiglu_fusion, int64_t activation_type,
               float activation_alpha, float activation_beta, float swiglu_limit,
-              int64_t normalize_routing_weights, int64_t elem_size) {
+              int64_t normalize_routing_weights, int64_t elem_size,
+              const void *router_input, const void *router_gate_weight,
+              const void *router_gate_scales,
+              const void *router_gate_zero_points, const void *router_gate_bias,
+              int64_t router_k, int64_t router_gate_bits,
+              int64_t router_gate_block_size) {
   OP_PROFILE(
       "qmoe",
       [&] {
@@ -170,13 +175,42 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       reinterpret_cast<int32_t *>(scratch_base + off_sorted_token_ids);
   char *d_sorted_weights = scratch_base + off_sorted_weights;
 
-  RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: topk_routing(tokens=%lld, experts=%lld, "
-                    "k=%lld, normalize=%lld)\n",
-                    (long long)num_tokens, (long long)num_experts, (long long)k,
-                    (long long)normalize_routing_weights);
-  HIP_CHECK(hip_qmoe_topk_routing(stream, router_probs, d_expert_indices,
-                                  d_expert_weights, num_tokens, num_experts, k,
-                                  normalize_routing_weights, elem_size));
+  // Router gate. When the compiler recovered the router_proj (MatMulNBits)
+  // operands, recompute logits + softmax + top-k entirely in fp32 on GPU. This
+  // matches the ORT CPU reference (which runs the router projection + softmax in
+  // fp32 via PrecisionFreeCast) and removes the fp16 top-k routing divergence
+  // that otherwise picks different experts than the CPU baseline. Otherwise fall
+  // back to the fp16 top-k over the precomputed (already fp16) router_probs.
+  if (router_gate_weight && router_input && router_gate_scales &&
+      router_k > 0 && router_gate_bits > 0 && router_gate_block_size > 0) {
+    RUNTIME_DEBUG_LOG(
+        "[REAL] wrap_qmoe: fp32 router_gate(tokens=%lld, experts=%lld, k=%lld, "
+        "router_k=%lld, bits=%lld, block=%lld, normalize=%lld)\n",
+        (long long)num_tokens, (long long)num_experts, (long long)k,
+        (long long)router_k, (long long)router_gate_bits,
+        (long long)router_gate_block_size,
+        (long long)normalize_routing_weights);
+    // router_k is the router GEMV contraction dim (router activation hidden);
+    // the top-k count is QMoE's own k. In practice router_k == hidden_size, but
+    // we pass the value derived from router_input's last dim for correctness.
+    // router_gate_bias is the optional per-expert bias (onnx.Add after the
+    // router projection); null when the router has no bias.
+    HIP_CHECK(hip_qmoe_router_gate(
+        stream, router_input, router_gate_weight, router_gate_scales,
+        router_gate_zero_points, router_gate_bias, d_expert_indices,
+        d_expert_weights, num_tokens, num_experts, /*router_hidden=*/router_k,
+        /*top_k=*/k, router_gate_bits, router_gate_block_size,
+        normalize_routing_weights, elem_size));
+  } else {
+    RUNTIME_DEBUG_LOG(
+        "[REAL] wrap_qmoe: topk_routing(tokens=%lld, experts=%lld, "
+        "k=%lld, normalize=%lld)\n",
+        (long long)num_tokens, (long long)num_experts, (long long)k,
+        (long long)normalize_routing_weights);
+    HIP_CHECK(hip_qmoe_topk_routing(stream, router_probs, d_expert_indices,
+                                    d_expert_weights, num_tokens, num_experts, k,
+                                    normalize_routing_weights, elem_size));
+  }
 
   // Fused decode fast path: single-token MoE collapses to three back-to-back
   // kernel launches (FC1+SwiGLU, FC2, weighted reduce) with zero D2H,

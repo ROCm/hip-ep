@@ -55,12 +55,15 @@ module {
   // CHECK-LABEL: llvm.func @test_qmoe_with_zp
   // CHECK: llvm.call @wrap_qmoe({{.*}}) :
   // CHECK-SAME: (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
-  // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
-  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, f32, i64, i64) -> i32
-  // Verify 30 parameters (same shape as test_qmoe.mlir):
-  // - 16 pointers: state, input, router, fc1_w, fc1_s, fc1_b(null), fc2_w, fc2_s, fc2_b(null),
-  //                fc3_w(null), fc3_s(null), fc3_b(null), fc1_zp, fc2_zp, fc3_zp(null), output
-  // - 11 i64 + 3 f32 attributes
+  // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
+  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, f32, i64, i64,
+  // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+  // Verify 39 parameters (same shape as test_qmoe.mlir):
+  // - 17 pointers: state, input, router, router_weights(null), fc1_w, fc1_s,
+  //                fc1_b(null), fc2_w, fc2_s, fc2_b(null), fc3_w(null), fc3_s(null),
+  //                fc3_b(null), fc1_zp, fc2_zp, fc3_zp(null), output
+  // - 9 i64 + 3 f32 + 2 i64 attributes
+  // - 5 pointers + 3 i64 router-gate fp32 recompute params (all null/0 here)
   // The fc1_zp / fc2_zp pointers MUST be non-null (extracted from the memref
   // descriptors), unlike the all-null path covered by test_qmoe.mlir.
 
@@ -104,7 +107,9 @@ module {
   // CHECK-LABEL: llvm.func @test_qmoe_with_bias_and_zp
   // CHECK: llvm.call @wrap_qmoe({{.*}}) :
   // CHECK-SAME: (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
-  // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
-  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, f32, i64, i64) -> i32
-  // 16 pointers, four of which (fc1_b, fc2_b, fc1_zp, fc2_zp) must be non-null.
+  // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
+  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, f32, i64, i64,
+  // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+  // 17 pointers, four of which (fc1_b, fc2_b, fc1_zp, fc2_zp) must be non-null;
+  // the 5 router-gate pointers are null here (router-gate recompute disabled).
 }
