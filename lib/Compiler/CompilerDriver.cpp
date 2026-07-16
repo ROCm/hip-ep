@@ -190,6 +190,14 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
     //                                          its wall_ms window closes so the
     //                                          resolve cost doesn't pollute
     //                                          TPS)
+    //   hipdnn_ep_runtime_add_cpu_profile    — EP pushes its outer (whole-
+    //                                          Compute) steady_clock total into
+    //                                          the per-op table + trace for
+    //                                          bubble detection (before flush).
+    //                                          A perf-only hook, so its name is
+    //                                          a plain literal here rather than
+    //                                          an artifact_abi.h constant (same
+    //                                          as test_hip_from_dll below).
     std::vector<std::string> export_symbols = {
         hipdnn::abi::kInferenceInit,
         hipdnn::abi::kInferenceCompute,
@@ -198,7 +206,8 @@ bool CompilerDriver::compileImpl(mlir::ModuleOp module,
         "test_hip_from_dll",
         hipdnn::abi::kRuntimeBeginCompute,
         hipdnn::abi::kSetOutputAllocator,
-        hipdnn::abi::kRuntimeFlushOpProfile};
+        hipdnn::abi::kRuntimeFlushOpProfile,
+        "hipdnn_ep_runtime_add_cpu_profile"};
     std::vector<std::string> libraries;
     std::vector<std::string> library_paths;
     discoverLibraries(libraries, library_paths);
