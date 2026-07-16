@@ -62,6 +62,7 @@ set(_kernel_sources
     hip/global_pool_kernel.hip
     hip/matmul_nbits_kernel.hip
     hip/qmoe_kernel.hip
+    hip/qmoe_grouped_kernel.hip
     hip/linear_attention_kernel.hip
     hip/transpose_kernel.hip
     hip/causal_conv_step_kernel.hip

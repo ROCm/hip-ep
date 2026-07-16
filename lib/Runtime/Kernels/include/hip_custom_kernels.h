@@ -1542,6 +1542,30 @@ HIP_KERNEL_API int hip_qmoe_swiglu(
     float limit,
     int64_t element_size_bytes);
 
+/* OPT4 (grouped-GEMM prototype, cherry-picked from perf/qmoe-bw-opt).
+ * Streaming grouped int4 GEMV: one launch does, per expert e,
+ * C_e = A_e x dequant(W_e) over that expert's bucket-sorted rows. */
+HIP_KERNEL_API int hip_qmoe_stream_gemm(
+    void* stream, const void* A, const void* Wbase, const void* Sbase,
+    const void* Zbase, const void* Bbase, void* C, int64_t N, int64_t K,
+    int64_t group_size, int64_t max_m_tiles, const void* tile_expert,
+    const void* tile_localm, const void* expert_offsets,
+    const void* expert_counts, const void* total_m_tiles);
+
+/* Device-side tile schedule build (no host sync). */
+HIP_KERNEL_API int hip_qmoe_build_schedule(
+    void* stream, const void* counts, int64_t num_experts, int64_t bm,
+    void* tile_expert, void* tile_localm, void* total_out);
+
+/* Weighted atomic scatter-add into an fp32 accumulator. */
+HIP_KERNEL_API int hip_qmoe_scatter_add_atomic(
+    void* stream, void* output_accum, const void* expert_out,
+    const void* token_ids, const void* weights, int64_t width, int64_t count);
+
+/* fp32 accumulator -> fp16 output cast. */
+HIP_KERNEL_API int hip_qmoe_cast_f32_f16(void* stream, const void* in,
+                                         void* out, int64_t n);
+
 /* Weighted scatter-add: output[token_ids[i],:] += weights[i] * expert_out[i,:]
  *   token_ids - GPU [count] int32
  *   weights   - GPU [count] (same type as output)

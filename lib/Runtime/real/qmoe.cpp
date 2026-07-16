@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <utility>
 #include <vector>
@@ -110,6 +111,18 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   int64_t k_blocks_fc2 = (inter_size + block_size - 1) / block_size;
   int64_t blob_size_fc2 = block_size / 2;
 
+  // OPT4 (grouped-GEMM prototype, cherry-picked from perf/qmoe-bw-opt).
+  // Batched prefill: one gather -> ALL fc1 (streaming grouped GEMV) -> one
+  // SwiGLU -> ALL fc2 -> one weighted atomic scatter -> one cast, on the
+  // bucket-sorted layout. Env-gated; the serial per-expert loop is the
+  // fallback. Set HIPDNN_EP_QMOE_GROUPED=1 to enable.
+  const bool use_grouped =
+      (std::getenv("HIPDNN_EP_QMOE_GROUPED") != nullptr) && num_tokens > 1;
+  const int64_t total_rows = num_tokens * k;
+  const int64_t kGroupedBM = 4;  // must match hip_qmoe_stream_gemm schedule BM
+  const int64_t max_tiles =
+      (total_rows + kGroupedBM - 1) / kGroupedBM + num_experts;  // upper bound
+
   // Per-state grow-on-demand scratch in place of 8 hipMalloc/8 hipFree per
   // call. Sub-buffers are 64-byte aligned (matches GPU pool alignment, gives
   // each sub-buffer its own cache line). The buffer grows when num_tokens /
@@ -136,6 +149,24 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   size_t sz_expert_offsets = align_up_64((num_experts + 1) * sizeof(int32_t));
   size_t sz_sorted_token_ids = align_up_64(num_tokens * k * sizeof(int32_t));
   size_t sz_sorted_weights = align_up_64(num_tokens * k * elem_size);
+  // OPT4 grouped-path buffers (sized only when active): sorted-layout
+  // activation buffers over total_rows + fp32 output accumulator + device
+  // tile schedule (tile_expert/tile_localm/total_tiles).
+  size_t sz_A_sorted =
+      use_grouped ? align_up_64(total_rows * hidden_size * elem_size) : 0;
+  size_t sz_fc1_sorted =
+      use_grouped ? align_up_64(total_rows * fusion_inter * elem_size) : 0;
+  size_t sz_act_sorted =
+      use_grouped ? align_up_64(total_rows * inter_size * elem_size) : 0;
+  size_t sz_fc2_sorted =
+      use_grouped ? align_up_64(total_rows * hidden_size * elem_size) : 0;
+  size_t sz_output_accum =
+      use_grouped ? align_up_64(num_tokens * hidden_size * sizeof(float)) : 0;
+  size_t sz_tile_expert =
+      use_grouped ? align_up_64(max_tiles * sizeof(int32_t)) : 0;
+  size_t sz_tile_localm =
+      use_grouped ? align_up_64(max_tiles * sizeof(int32_t)) : 0;
+  size_t sz_total_tiles = use_grouped ? align_up_64(sizeof(int32_t)) : 0;
   // dp4a decode scratch (fused decode only, env-gated): int8-quantized
   // activations + per-group fp32 scales for the fc1 input ([hidden]) and the
   // fc2 slot activations ([k, inter]). Sized unconditionally (a few KB) so the
@@ -156,7 +187,15 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   size_t off_expert_offsets = off_expert_counts + sz_expert_counts;
   size_t off_sorted_token_ids = off_expert_offsets + sz_expert_offsets;
   size_t off_sorted_weights = off_sorted_token_ids + sz_sorted_token_ids;
-  size_t off_a_qb_in = off_sorted_weights + sz_sorted_weights;
+  size_t off_A_sorted = off_sorted_weights + sz_sorted_weights;
+  size_t off_fc1_sorted = off_A_sorted + sz_A_sorted;
+  size_t off_act_sorted = off_fc1_sorted + sz_fc1_sorted;
+  size_t off_fc2_sorted = off_act_sorted + sz_act_sorted;
+  size_t off_output_accum = off_fc2_sorted + sz_fc2_sorted;
+  size_t off_tile_expert = off_output_accum + sz_output_accum;
+  size_t off_tile_localm = off_tile_expert + sz_tile_expert;
+  size_t off_total_tiles = off_tile_localm + sz_tile_localm;
+  size_t off_a_qb_in = off_total_tiles + sz_total_tiles;
   size_t off_a_scale_in = off_a_qb_in + sz_a_qb_in;
   size_t off_a_qb_mid = off_a_scale_in + sz_a_scale_in;
   size_t off_a_scale_mid = off_a_qb_mid + sz_a_qb_mid;
@@ -182,6 +221,17 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   int32_t *d_sorted_token_ids =
       reinterpret_cast<int32_t *>(scratch_base + off_sorted_token_ids);
   char *d_sorted_weights = scratch_base + off_sorted_weights;
+  void *d_A_sorted = scratch_base + off_A_sorted;
+  void *d_fc1_sorted = scratch_base + off_fc1_sorted;
+  void *d_act_sorted = scratch_base + off_act_sorted;
+  void *d_fc2_sorted = scratch_base + off_fc2_sorted;
+  void *d_output_accum = scratch_base + off_output_accum;
+  int32_t *d_tile_expert =
+      reinterpret_cast<int32_t *>(scratch_base + off_tile_expert);
+  int32_t *d_tile_localm =
+      reinterpret_cast<int32_t *>(scratch_base + off_tile_localm);
+  int32_t *d_total_tiles =
+      reinterpret_cast<int32_t *>(scratch_base + off_total_tiles);
   void *d_a_qb_in = scratch_base + off_a_qb_in;
   void *d_a_scale_in = scratch_base + off_a_scale_in;
   void *d_a_qb_mid = scratch_base + off_a_qb_mid;
@@ -296,6 +346,59 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: %lld/%lld experts active\n",
                       (long long)active_experts, (long long)num_experts);
 
+    // OPT4: grouped-GEMM prefill. One gather over the bucket-sorted layout ->
+    // one streaming grouped GEMV for fc1 (weights streamed once per expert,
+    // reused across BM-row tiles) -> one SwiGLU -> one grouped GEMV for fc2 ->
+    // one weighted atomic scatter into an fp32 accumulator -> one cast. Breaks
+    // the serial per-expert dependency chain. Uses raw packed-nibble zp
+    // (unpacked in-kernel), so it does not need the ZpUnpackCache below.
+    if (use_grouped) {
+      static bool s_opt4_logged = false;
+      if (!s_opt4_logged) {
+        s_opt4_logged = true;
+        fprintf(stderr, "[OPT4] grouped-GEMM prefill path ENTERED\n");
+        // Reliable runtime-entry proof (DLL fprintf(stderr) is not captured by
+        // the PowerShell harness): drop a sentinel file the harness checks.
+        FILE *fsent = fopen(
+            "C:/Users/Administrator/workspace/rgp_captures/opt_logs/"
+            "opt4_entered.txt",
+            "w");
+        if (fsent) {
+          fprintf(fsent, "grouped-GEMM prefill entered\n");
+          fclose(fsent);
+        }
+      }
+      HIP_CHECK(hip_qmoe_build_schedule(stream, d_expert_counts, num_experts,
+                                        kGroupedBM, d_tile_expert, d_tile_localm,
+                                        d_total_tiles));
+      HIP_CHECK(hip_qmoe_gather_tokens(stream, input, d_A_sorted,
+                                       d_sorted_token_ids, hidden_size,
+                                       total_rows, elem_size));
+      HIP_CHECK(hip_qmoe_stream_gemm(
+          stream, d_A_sorted, fc1_weights, fc1_scales, fc1_zero_points,
+          fc1_bias, d_fc1_sorted, fusion_inter, hidden_size, block_size,
+          max_tiles, d_tile_expert, d_tile_localm, d_expert_offsets,
+          d_expert_counts, d_total_tiles));
+      HIP_CHECK(hip_qmoe_swiglu(stream, d_fc1_sorted, d_act_sorted, total_rows,
+                                inter_size, activation_alpha, activation_beta,
+                                swiglu_limit, elem_size));
+      HIP_CHECK(hip_qmoe_stream_gemm(
+          stream, d_act_sorted, fc2_weights, fc2_scales, fc2_zero_points,
+          fc2_bias, d_fc2_sorted, hidden_size, inter_size, block_size,
+          max_tiles, d_tile_expert, d_tile_localm, d_expert_offsets,
+          d_expert_counts, d_total_tiles));
+      HIP_CHECK(hipMemsetAsync(
+          d_output_accum, 0,
+          static_cast<size_t>(num_tokens) * hidden_size * sizeof(float),
+          hip_stream));
+      HIP_CHECK(hip_qmoe_scatter_add_atomic(
+          stream, d_output_accum, d_fc2_sorted, d_sorted_token_ids,
+          d_sorted_weights, hidden_size, total_rows));
+      HIP_CHECK(hip_qmoe_cast_f32_f16(
+          stream, d_output_accum, output,
+          static_cast<int64_t>(num_tokens) * hidden_size));
+    }
+
     // Per-session pointer-keyed zero_points unpack cache (qmoe-owned, lives on
     // RuntimeState). Each expert's fc1/fc2 zp is a distinct pointer into the
     // constants blob, so each gets its own entry; unpack cost is paid once per
@@ -303,7 +406,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     hipdnn_ep_real::ZpUnpackCache *zpc =
         hipdnn_ep_real::get_or_create_zp_cache(state);
 
-    for (int64_t e = 0; e < num_experts; e++) {
+    for (int64_t e = 0; !use_grouped && e < num_experts; e++) {
       int64_t count = static_cast<int64_t>(h_counts[e]);
       if (count == 0) {
         continue;
