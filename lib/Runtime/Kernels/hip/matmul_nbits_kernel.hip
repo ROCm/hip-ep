@@ -2129,6 +2129,13 @@ static void launchDequant(
                        B_packed, scales, zeros, B_fp16, N, K, gs, ngk);
 }
 
+// OPT5: raise the WMMA occupancy target from waves_per_eu(8) to (12). At
+// ~104 VGPR the fused WMMA GEMM ran at ~24% occupancy; asking the compiler for
+// more waves per EU pushes it to shrink the register footprint so more waves
+// stay resident to hide memory latency. A/B'd vs the baseline 8; correctness-
+// gated (may spill and regress, in which case 8 was already optimal).
+#define WMMA_WAVES_EU 12
+
 static void launchWmmaConfig(
     int config_id, hipStream_t stream,
     int M, int N, int K,
@@ -2141,6 +2148,13 @@ static void launchWmmaConfig(
 {
     auto& c = kWmmaConfigs[config_id];
     bool need_bc = (M % c.bm != 0) || (N % c.bn != 0);
+
+    static bool s_opt5_logged = false;
+    if (!s_opt5_logged) {
+        s_opt5_logged = true;
+        fprintf(stderr, "[OPT5] WMMA waves_per_eu raised to %d ENTERED\n",
+                WMMA_WAVES_EU);
+    }
 
     if (!c.fused) {
         launchDequant(stream, B, scales, zeros, B_fp16_buf, N, K, gs, ngk);
@@ -2226,12 +2240,12 @@ static void launchWmmaConfig(
     dim3 block_(THR_); \
     if (has_zp) { \
         hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 2, 2, 8, BC_V>), \
+            HIP_KERNEL_NAME(MatMulNBitsWMMA_ZP<BM_V, BN_V, 2, 2, WMMA_WAVES_EU, BC_V>), \
             grid_, block_, 0, stream, \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
     } else { \
         hipLaunchKernelGGL( \
-            HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 2, 2, 8, BC_V>), \
+            HIP_KERNEL_NAME(MatMulNBitsWMMA_NoZP<BM_V, BN_V, 2, 2, WMMA_WAVES_EU, BC_V>), \
             grid_, block_, 0, stream, \
             M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
     } \
