@@ -27,9 +27,14 @@ class Hipsr_Op<string mnemonic, list<Trait> traits = []> :
 //===----------------------------------------------------------------------===//
 
 // Base for shaped compute ops (MatMul, Add, ...). Every such op:
-//   - carries a shape region (region 0) that computes its output shape and is
-//     terminated by `hipsr.shape_yield`. The SingleBlockImplicitTerminator
-//     trait auto-inserts that terminator and structurally checks it;
+//   - carries an optional shape region (region 0): it holds either zero blocks
+//     (no shape computation) or exactly one block that computes its output
+//     shape and is terminated by `hipsr.shape_yield`. MaxSizedRegion<1> allows
+//     the 0-or-1-block range; the SingleBlock trait keeps a non-empty region to
+//     a single block. Unlike SingleBlockImplicitTerminator, it neither
+//     auto-inserts nor elides the terminator, so an empty region stays empty
+//     (even across a textual round-trip); the ShapeRegionInterface verifier is
+//     what requires a non-empty region to end with `hipsr.shape_yield`;
 //   - implements ShapeRegionInterface, the single source of truth for shape
 //     computation (each op provides populateShapeRegion());
 //   - carries IsolatedFromAboveButAllowOperands, so the shape region may only
@@ -46,9 +51,9 @@ class Hipsr_DpsOp<string mnemonic, list<Trait> traits = []> :
         DeclareOpInterfaceMethods<DestinationStyleOpInterface,
                                   ["getDpsInitsMutable"]>,
         IsolatedFromAboveButAllowOperands,
-        SingleBlockImplicitTerminator<"ShapeYieldOp">
+        SingleBlock
       ], traits)> {
-  let regions = (region SizedRegion<1>:$shape_region);
+  let regions = (region MaxSizedRegion<1>:$shape_region);
   let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
 }
 
