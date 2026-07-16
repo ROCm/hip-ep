@@ -3396,18 +3396,94 @@ void MatMulNBitsWMMA_U3_ZP(
  * config in this table; no per-config skip logic needed).
  * ----------------------------------------------------------------------- */
 
+/* -----------------------------------------------------------------------
+ * uint3 -> fp16 dequant (for the separate-dequant "dq+gemm" path)
+ *
+ * Decodes the continuous per-row 3-bit bitstream into a dense fp16 [N, K]
+ * buffer so the plain fp16 WMMA GEMM (MatMulNBitsFp16GEMM, shared with the
+ * bits=4 path) can run at peak WMMA throughput with no in-loop decode.
+ * Each thread handles one 8-value chunk: 8 values * 3 bits = 24 bits pack
+ * into exactly 3 bytes, so the read never crosses into a 4th byte (same
+ * alignment proof as the fused kernel). Mirrors dequant_u4_to_fp16.
+ * ----------------------------------------------------------------------- */
+__global__ void dequant_u3_to_fp16(
+    const unsigned char* __restrict__ B,       // [N, (K*3)/8] bitstream
+    const _Float16* __restrict__ scales,       // [N, num_groups_k]
+    const unsigned char* __restrict__ zeros,   // [N, num_groups_k] or null
+    _Float16* __restrict__ B_fp16,             // [N, K]
+    int N, int K, int group_size, int num_groups_k)
+{
+    int n  = static_cast<int>(blockIdx.y);
+    int k8 = (static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x) * 8;
+    if (n >= N || k8 >= K) return;
+
+    int grp = k8 / group_size;
+    _Float16 scale = scales[n * num_groups_k + grp];
+    // Default zp = 2^(bits-1) = 4 for bits=3 (matches the fused u3 path).
+    _Float16 zp = zeros ? static_cast<_Float16>(zeros[n * num_groups_k + grp])
+                        : (_Float16)4;
+    _Float16 nzs = -zp * scale;
+
+    // K % 32 == 0 (dispatch gate) => K % 8 == 0, so row stride is exact and
+    // (k8 * 3) is a multiple of 8 -> byte offset needs no rounding.
+    const int row_bytes = (K * 3) >> 3;
+    const int off  = n * row_bytes + ((k8 * 3) >> 3);
+    const uint32_t lo16 = *reinterpret_cast<const uint16_t*>(&B[off]);
+    const uint32_t hi8  = B[off + 2];
+    const uint32_t p    = lo16 | (hi8 << 16);  // low 24 bits = 8 packed vals
+
+    _Float16 bv[8];
+#pragma unroll
+    for (int i = 0; i < 8; i++)
+        bv[i] = static_cast<_Float16>((p >> (3 * i)) & 0x7u) * scale + nzs;
+
+    _Float16* dst = &B_fp16[n * K + k8];
+    *reinterpret_cast<uint2*>(dst)     = *reinterpret_cast<uint2*>(&bv[0]);
+    *reinterpret_cast<uint2*>(dst + 4) = *reinterpret_cast<uint2*>(&bv[4]);
+}
+
+static void launchDequantU3(
+    hipStream_t stream,
+    const unsigned char* B, const _Float16* scales,
+    const unsigned char* zeros, _Float16* B_fp16,
+    int N, int K, int gs, int ngk)
+{
+    constexpr int DQ_THR = 256;
+    int k_groups = (K + DQ_THR * 8 - 1) / (DQ_THR * 8);
+    dim3 dq_grid(static_cast<unsigned>(k_groups), static_cast<unsigned>(N));
+    dim3 dq_block(DQ_THR);
+    hipLaunchKernelGGL(dequant_u3_to_fp16, dq_grid, dq_block, 0, stream,
+                       B, scales, zeros, B_fp16, N, K, gs, ngk);
+}
+
 struct WmmaConfigU3 {
-    int bm, bn;
-    int swizzle_n;
+    int  bm, bn;
+    int  swizzle_n;
+    bool fused = true;   // true: fused inline-decode; false: dequant + fp16 GEMM
+    int  wt_m = 2, wt_n = 2;
 };
 
 static constexpr WmmaConfigU3 kWmmaU3Configs[] = {
+    // --- fused inline-decode (bandwidth-optimized, best for small/medium M) ---
     { 64,  64,  2}, { 64,  64,  4}, { 64,  64,  8}, { 64,  64, 16},
     { 64, 128,  2}, { 64, 128,  4}, { 64, 128,  8}, { 64, 128, 16},
     {128,  64,  2}, {128,  64,  4}, {128,  64,  8}, {128,  64, 16},
     {128, 128,  2}, {128, 128,  4}, {128, 128,  8}, {128, 128, 16},
     {128, 128, 32}, {128, 128, 64},
     {128, 256,  4}, {128, 256,  8}, {128, 256, 16}, {128, 256, 32},
+    // --- fused inline-decode, 256x128 WT4 (higher compute-to-smem ratio;
+    //     matches the bits=4 fused winner on large-K compute-bound GEMMs) ---
+    {256, 128,  4, true, 4, 2}, {256, 128,  8, true, 4, 2},
+    {256, 128, 16, true, 4, 2}, {256, 128, 32, true, 4, 2},
+    // --- separate dequant + plain fp16 WMMA GEMM (peak compute for large M;
+    //     reuses the bits=4 MatMulNBitsFp16GEMM kernels, incl. 256x128 WT4) ---
+    { 64, 128,  8, false}, {128,  64,  8, false},
+    {128, 128,  2, false}, {128, 128,  8, false}, {128, 128, 16, false},
+    {128, 128, 32, false},
+    {128, 256,  4, false}, {128, 256,  8, false}, {128, 256, 16, false},
+    {128, 256, 32, false},
+    {256, 128,  4, false, 4, 2}, {256, 128,  8, false, 4, 2},
+    {256, 128, 16, false, 4, 2}, {256, 128, 32, false, 4, 2},
 };
 static constexpr int kNumWmmaU3Configs =
     static_cast<int>(sizeof(kWmmaU3Configs) / sizeof(kWmmaU3Configs[0]));
@@ -3419,10 +3495,67 @@ static void launchWmmaConfigU3(
     const unsigned char* B,
     const _Float16* scales, const unsigned char* zeros,
     int gs, int ngk,
-    _Float16* C, int ldc, bool has_zp)
+    _Float16* C, int ldc, bool has_zp,
+    _Float16* B_fp16_buf = nullptr)
 {
     auto& c = kWmmaU3Configs[config_id];
     bool need_bc = (M % c.bm != 0) || (N % c.bn != 0);
+
+    /* Separate-dequant path: decode the 3-bit stream to a dense fp16 buffer,
+     * then run the plain fp16 WMMA GEMM shared with the bits=4 path. The
+     * decode leaves the hot GEMM loop free of any bit-unpacking, letting the
+     * WMMA units hit peak throughput on compute-bound (large-M) shapes. */
+    if (!c.fused) {
+        launchDequantU3(stream, B, scales, zeros, B_fp16_buf, N, K, gs, ngk);
+
+#define U3_FP16_GEMM_LAUNCH(BM_V, BN_V, BC_V) do {                            \
+    constexpr int WM_  = BM_V / (2 * 16);                                     \
+    constexpr int WN_  = BN_V / (2 * 16);                                     \
+    constexpr int THR_ = WM_ * WN_ * 32;                                      \
+    dim3 grid_(static_cast<unsigned>((N + BN_V - 1) / BN_V),                  \
+               static_cast<unsigned>((M + BM_V - 1) / BM_V));                 \
+    dim3 block_(THR_);                                                        \
+    hipLaunchKernelGGL(                                                       \
+        HIP_KERNEL_NAME(MatMulNBitsFp16GEMM<BM_V, BN_V, 2, 2, 8, BC_V>),      \
+        grid_, block_, 0, stream,                                             \
+        M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n);                    \
+} while (0)
+
+#define U3_FP16_TILE_CASE(BM_V, BN_V) \
+    if (need_bc) U3_FP16_GEMM_LAUNCH(BM_V, BN_V, true);  \
+    else         U3_FP16_GEMM_LAUNCH(BM_V, BN_V, false)
+
+#define U3_FP16_GEMM_LAUNCH_WT4(BM_V, BN_V, BC_V) do {                        \
+    constexpr int WM_  = BM_V / (4 * 16);                                     \
+    constexpr int WN_  = BN_V / (2 * 16);                                     \
+    constexpr int THR_ = WM_ * WN_ * 32;                                      \
+    dim3 grid_(static_cast<unsigned>((N + BN_V - 1) / BN_V),                  \
+               static_cast<unsigned>((M + BM_V - 1) / BM_V));                 \
+    dim3 block_(THR_);                                                        \
+    hipLaunchKernelGGL(                                                       \
+        HIP_KERNEL_NAME(MatMulNBitsFp16GEMM<BM_V, BN_V, 4, 2, 6, BC_V>),      \
+        grid_, block_, 0, stream,                                             \
+        M, N, K, A, lda, B_fp16_buf, C, ldc, c.swizzle_n);                    \
+} while (0)
+
+#define U3_FP16_TILE_CASE_WT4(BM_V, BN_V) \
+    if (need_bc) U3_FP16_GEMM_LAUNCH_WT4(BM_V, BN_V, true);  \
+    else         U3_FP16_GEMM_LAUNCH_WT4(BM_V, BN_V, false)
+
+             if (c.wt_m == 4 && c.bm == 256 && c.bn == 128)
+                                                 U3_FP16_TILE_CASE_WT4(256, 128);
+        else if (c.bm ==  64 && c.bn ==  64) U3_FP16_TILE_CASE( 64,  64);
+        else if (c.bm ==  64 && c.bn == 128) U3_FP16_TILE_CASE( 64, 128);
+        else if (c.bm == 128 && c.bn ==  64) U3_FP16_TILE_CASE(128,  64);
+        else if (c.bm == 128 && c.bn == 256) U3_FP16_TILE_CASE(128, 256);
+        else                                  U3_FP16_TILE_CASE(128, 128);
+
+#undef U3_FP16_TILE_CASE_WT4
+#undef U3_FP16_GEMM_LAUNCH_WT4
+#undef U3_FP16_TILE_CASE
+#undef U3_FP16_GEMM_LAUNCH
+        return;
+    }
 
 #define WMMA_U3_LAUNCH(BM_V, BN_V, BC_V) do {                                \
     constexpr int WM_  = BM_V / (2 * 16);                                     \
@@ -3450,12 +3583,42 @@ static void launchWmmaConfigU3(
     if (need_bc) WMMA_U3_LAUNCH(BM_V, BN_V, true);  \
     else         WMMA_U3_LAUNCH(BM_V, BN_V, false)
 
-         if (c.bm ==  64 && c.bn ==  64) WMMA_U3_TILE_CASE( 64,  64);
+#define WMMA_U3_LAUNCH_WT4(BM_V, BN_V, BC_V) do {                            \
+    constexpr int WM_  = BM_V / (4 * 16);                                     \
+    constexpr int WN_  = BN_V / (2 * 16);                                     \
+    constexpr int THR_ = WM_ * WN_ * 32;                                      \
+    dim3 grid_(static_cast<unsigned>((N + BN_V - 1) / BN_V),                  \
+               static_cast<unsigned>((M + BM_V - 1) / BM_V));                 \
+    dim3 block_(THR_);                                                        \
+    if (has_zp) {                                                             \
+        hipLaunchKernelGGL(                                                   \
+            HIP_KERNEL_NAME(                                                  \
+                MatMulNBitsWMMA_U3_ZP<BM_V, BN_V, 4, 2, 6, BC_V>),            \
+            grid_, block_, 0, stream,                                         \
+            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
+    } else {                                                                  \
+        hipLaunchKernelGGL(                                                   \
+            HIP_KERNEL_NAME(                                                  \
+                MatMulNBitsWMMA_U3_NoZP<BM_V, BN_V, 4, 2, 6, BC_V>),          \
+            grid_, block_, 0, stream,                                         \
+            M, N, K, A, lda, B, scales, zeros, gs, ngk, C, ldc, c.swizzle_n); \
+    }                                                                         \
+} while (0)
+
+#define WMMA_U3_TILE_CASE_WT4(BM_V, BN_V) \
+    if (need_bc) WMMA_U3_LAUNCH_WT4(BM_V, BN_V, true);  \
+    else         WMMA_U3_LAUNCH_WT4(BM_V, BN_V, false)
+
+         if (c.wt_m == 4 && c.bm == 256 && c.bn == 128)
+                                             WMMA_U3_TILE_CASE_WT4(256, 128);
+    else if (c.bm ==  64 && c.bn ==  64) WMMA_U3_TILE_CASE( 64,  64);
     else if (c.bm ==  64 && c.bn == 128) WMMA_U3_TILE_CASE( 64, 128);
     else if (c.bm == 128 && c.bn ==  64) WMMA_U3_TILE_CASE(128,  64);
     else if (c.bm == 128 && c.bn == 256) WMMA_U3_TILE_CASE(128, 256);
     else                                  WMMA_U3_TILE_CASE(128, 128);
 
+#undef WMMA_U3_TILE_CASE_WT4
+#undef WMMA_U3_LAUNCH_WT4
 #undef WMMA_U3_TILE_CASE
 #undef WMMA_U3_LAUNCH
 }
@@ -3475,8 +3638,38 @@ static int tuneWmmaConfigU3(
 
     float best_ms = 1e30f;
     int   best_id = 12; // 128x128 sw=2: a safe default for typical N>=64
-    constexpr int WARMUP = 1;
-    constexpr int ITERS  = 5;
+    constexpr int WARMUP = 2;
+    constexpr int ITERS  = 7;
+
+    // Scratch fp16 buffer for the separate-dequant configs (fused=false).
+    _Float16* dq_buf = ensureDqBuffer(N, K);
+
+    // --- Clock settle -------------------------------------------------------
+    // Autotune compares configs by wall-time, so every config must be measured
+    // at the SAME GPU clock. Right after a cold start the GPU runs at boost
+    // clock and decays toward a lower sustained clock under load; a plain
+    // sequential sweep therefore times early configs while boosted and late
+    // configs while throttled, biasing the choice by table position (e.g. the
+    // dq+gemm configs, which sit last, looked ~30-40% slower than they really
+    // are). Drive a fixed compute load until per-iter latency plateaus (and for
+    // at least ~60 ms, so we don't accept the still-boosted plateau of the very
+    // first few iters) so all measurements happen at the steady-state clock.
+    {
+        float prev = 1e30f, cur = 0.0f, total = 0.0f;
+        int stable = 0;
+        for (int i = 0; i < 200 && stable < 3 && total < 200.0f; i++) {
+            hipEventRecord(ev0, stream);
+            launchWmmaConfigU3(12, stream, M, N, K, A, lda, B,
+                               scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf);
+            hipEventRecord(ev1, stream);
+            hipEventSynchronize(ev1);
+            hipEventElapsedTime(&cur, ev0, ev1);
+            if (total >= 60.0f && cur <= prev * 1.02f) stable++;
+            else                                       stable = 0;
+            prev = cur;
+            total += cur;
+        }
+    }
 
     for (int cid = 0; cid < kNumWmmaU3Configs; cid++) {
         auto& cfg = kWmmaU3Configs[cid];
@@ -3484,12 +3677,14 @@ static int tuneWmmaConfigU3(
 
         for (int w = 0; w < WARMUP; w++)
             launchWmmaConfigU3(cid, stream, M, N, K, A, lda, B,
-                               scales, zeros, gs, ngk, C, ldc, has_zp);
+                               scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf);
 
+        // Clocks are settled (above), so a single summed timing over ITERS is a
+        // stable, order-independent estimate of steady-state latency.
         hipEventRecord(ev0, stream);
         for (int i = 0; i < ITERS; i++)
             launchWmmaConfigU3(cid, stream, M, N, K, A, lda, B,
-                               scales, zeros, gs, ngk, C, ldc, has_zp);
+                               scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf);
         hipEventRecord(ev1, stream);
         hipEventSynchronize(ev1);
 
@@ -3497,8 +3692,9 @@ static int tuneWmmaConfigU3(
         hipEventElapsedTime(&ms, ev0, ev1);
 
         CUSTOM_KERNELS_DEBUG_LOG(
-            "[custom_kernels]   wmma-u3 config[%2d] bm=%3d bn=%3d sw=%d : %.4f ms\n",
-            cid, cfg.bm, cfg.bn, cfg.swizzle_n, ms / ITERS);
+            "[custom_kernels]   wmma-u3 config[%2d] %s bm=%3d bn=%3d sw=%d : %.4f ms\n",
+            cid, cfg.fused ? "fused " : "dq+gem",
+            cfg.bm, cfg.bn, cfg.swizzle_n, ms / ITERS);
 
         if (ms < best_ms) {
             best_ms = ms;
@@ -3511,9 +3707,10 @@ static int tuneWmmaConfigU3(
 
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] WMMA-u3 autotune: M=%d N=%d K=%d gs=%d zp=%s -> "
-        "best config[%d] bm=%d bn=%d sw=%d (%.4f ms/iter)\n",
+        "best config[%d] %s bm=%d bn=%d sw=%d (%.4f ms/iter)\n",
         M, N, K, gs, has_zp ? "yes" : "no",
-        best_id, kWmmaU3Configs[best_id].bm, kWmmaU3Configs[best_id].bn,
+        best_id, kWmmaU3Configs[best_id].fused ? "fused" : "dq+gemm",
+        kWmmaU3Configs[best_id].bm, kWmmaU3Configs[best_id].bn,
         kWmmaU3Configs[best_id].swizzle_n, best_ms / ITERS);
 
     return best_id;
@@ -3893,8 +4090,10 @@ extern "C" int hip_matmul_nbits(
           iM, iN, iK, gs, has_zp ? "yes" : "null",
           bias ? "yes" : "null", cfg_id);
 
+      _Float16* dq_buf = kWmmaU3Configs[cfg_id].fused
+                             ? nullptr : ensureDqBuffer(iN, iK);
       launchWmmaConfigU3(cfg_id, hip_stream, iM, iN, iK, a_ptr, lda, b_ptr,
-                         s_ptr, z_ptr, gs, ngk, o_ptr, ldc, has_zp);
+                         s_ptr, z_ptr, gs, ngk, o_ptr, ldc, has_zp, dq_buf);
 
       if (bias) {
         dim3 bias_grid(static_cast<unsigned>((iN + 255) / 256),
