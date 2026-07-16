@@ -26,7 +26,10 @@ module {
   // CHECK-LABEL: func.func @main_graph
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[COND:.*]]: tensor<i1>)
   // CHECK-DAG: %[[OUT_INIT:.*]] = tensor.empty() : tensor<5xf32>
-  // CHECK: %[[RES:.*]] = hip.if(%[[CTX]], %{{.*}})
+  // Non-greedy operand match: hip.if now prints a `-> (tensor<...>)` result
+  // clause, so a greedy `%{{.*}}` would consume past `outs(...)` to the last
+  // `)` on the line. `[^)]*` stops at the closing paren of the operand list.
+  // CHECK: %[[RES:.*]] = hip.if(%[[CTX]], %{{[^)]*}})
   // CHECK-SAME: outs(%[[OUT_INIT]] : tensor<5xf32>)
   // CHECK-SAME: -> (tensor<5xf32>)
   // CHECK-SAME: then @main_graph_if_then_n0 else @main_graph_if_else_n1
@@ -61,7 +64,9 @@ module {
   }
 
   // CHECK-LABEL: func.func @main_graph_capture
-  // CHECK: hip.if(%{{.*}}, %{{.*}})
+  // Non-greedy operand match (see note above) so the scan stops at the
+  // operand-list paren and `captures(...)` is still reachable on the line.
+  // CHECK: hip.if(%{{[^)]*}}, %{{[^)]*}})
   // CHECK-SAME: captures(%[[DATA:.*]] : tensor<4xf32>)
   // CHECK-LABEL: func.func private @main_graph_capture_if_then_n0
   // CHECK-SAME: (%{{.*}}, %[[DATA_ARG:.*]]: tensor<4xf32>) -> tensor<4xf32>
