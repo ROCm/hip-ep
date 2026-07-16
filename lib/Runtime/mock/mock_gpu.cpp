@@ -1396,7 +1396,12 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
               int64_t k, int64_t expert_weight_bits, int64_t block_size,
               int64_t swiglu_fusion, int64_t activation_type,
               float activation_alpha, float activation_beta, float swiglu_limit,
-              int64_t normalize_routing_weights, int64_t elem_size) {
+              int64_t normalize_routing_weights, int64_t elem_size,
+              const void *router_input, const void *router_gate_weight,
+              const void *router_gate_scales,
+              const void *router_gate_zero_points, const void *router_gate_bias,
+              int64_t router_k, int64_t router_gate_bits,
+              int64_t router_gate_block_size) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_qmoe\n");
     return -1;
@@ -1423,6 +1428,14 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
              fc1_bias ? "yes" : "null", fc2_bias ? "yes" : "null",
              fc3_weights ? "yes" : "null", fc1_zero_points ? "yes" : "null",
              fc2_zero_points ? "yes" : "null", router_weights ? "yes" : "null");
+  MOCK_PRINT("[MOCK]   router_gate: input=%s, weight=%s, scales=%s, zp=%s, "
+             "bias=%s, router_k=%lld, router_bits=%lld, router_block=%lld\n",
+             router_input ? "yes" : "null",
+             router_gate_weight ? "yes" : "null",
+             router_gate_scales ? "yes" : "null",
+             router_gate_zero_points ? "yes" : "null",
+             router_gate_bias ? "yes" : "null", (long long)router_k,
+             (long long)router_gate_bits, (long long)router_gate_block_size);
 
   return 0;
 }
