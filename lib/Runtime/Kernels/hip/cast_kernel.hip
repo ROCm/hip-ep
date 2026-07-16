@@ -156,6 +156,21 @@ __global__ void cast_ui8_to_f16_kernel(
   }
 }
 
+// bool is represented as uint8 in the EP, so ONNX Cast(bool -> float32)
+// (e.g. a padding-mask `Not(...)` promoted to a float multiplier) arrives
+// here as UINT8 -> FLOAT32. Without this path the dispatch fell through to
+// the unsupported branch, left the output buffer untouched (pool zeros), and
+// silently zeroed every masked value downstream.
+__global__ void cast_ui8_to_f32_kernel(
+    const uint8_t* __restrict__ input,
+    float* __restrict__ output,
+    int64_t num_elements) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = static_cast<float>(input[idx]);
+  }
+}
+
 __global__ void cast_f16_to_ui8_kernel(
     const __half* __restrict__ input,
     uint8_t* __restrict__ output,
@@ -277,6 +292,14 @@ extern "C" int hip_cast(
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
                        static_cast<const uint8_t*>(input),
                        static_cast<__half*>(output), num_elements);
+  } else if (input_dtype == HIP_DTYPE_UINT8 && output_dtype == HIP_DTYPE_FLOAT32) {
+    CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_cast: UINT8->FLOAT32, "
+            "num_elements=%lld, grid=%d, block=%d\n",
+            (long long)num_elements, grid_size, kBlockSize);
+    hipLaunchKernelGGL(cast_ui8_to_f32_kernel,
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const uint8_t*>(input),
+                       static_cast<float*>(output), num_elements);
   } else if (input_dtype == HIP_DTYPE_FLOAT16 && output_dtype == HIP_DTYPE_UINT8) {
     hipLaunchKernelGGL(cast_f16_to_ui8_kernel,
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,

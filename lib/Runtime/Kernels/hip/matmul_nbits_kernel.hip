@@ -490,7 +490,13 @@ __global__ void matmul_nbits_gemv_kernel(
         int64_t n  = n_base + tn;
         int64_t sn = (n < N) ? n : 0;
         n_idx[tn]  = sn;
-        b_base_arr[tn] = B + sn * (K / 2);
+        // Packed 4-bit weight rows are [N, k_blocks, block_size/2] bytes. The
+        // row stride must use k_blocks (= ceil(K/block_size)), NOT K/2: when K
+        // is not a multiple of block_size the last block is padded, so the true
+        // row is k_blocks*(block_size/2) bytes, which exceeds K/2. Using K/2
+        // misaligns every row n>0 by the padding delta and corrupts the output.
+        // When K % block_size == 0 this equals K/2 (backward compatible).
+        b_base_arr[tn] = B + sn * (k_blocks * (block_size / 2));
         s_rows[tn] = scales + sn * k_blocks;
     }
 
