@@ -23,17 +23,21 @@ def Hipsr_CastOp : Hipsr_DpsOp<"cast"> {
     Destination-passing style: the result buffer is passed as the `init`
     operand.
 
-    Regular op: carries a shape region (region 0) that copies the input shape
-    (dim(input, i) for each i).
+    Regular op: carries an optional shape region (region 0). When populated it
+    copies the input shape (via `populateShapeRegion`, which emits
+    `shape.shape_of` + `shape.get_extent` so it works for both tensor and
+    memref inputs); the yielded element type is the output element type.
 
-    Example:
+    Example (populated shape region):
     ```mlir
     %0 = hipsr.cast ins(%input : tensor<?x8xf32>) outs(%init : tensor<?x8xf16>)
                     -> tensor<?x8xf16> shape_region {
+      %shape = shape.shape_of %input : tensor<?x8xf32> -> tensor<2xindex>
       %c0 = arith.constant 0 : index
-      %c8 = arith.constant 8 : index
-      %d0 = tensor.dim %input, %c0 : tensor<?x8xf32>
-      hipsr.shape_yield %d0, %c8
+      %d0 = shape.get_extent %shape, %c0 : tensor<2xindex>, index -> index
+      %c1 = arith.constant 1 : index
+      %d1 = shape.get_extent %shape, %c1 : tensor<2xindex>, index -> index
+      hipsr.shape_yield (%d0, %d1) : [f16]
     }
     ```
   }];
@@ -43,10 +47,13 @@ def Hipsr_CastOp : Hipsr_DpsOp<"cast"> {
     Hipsr_TensorOrDeviceMemRef:$init
   );
 
+  // The shape region is optional: an empty (zero-block) region prints nothing
+  // and round-trips as empty. A non-empty region prints as
+  // `shape_region { ... }`.
   let assemblyFormat = [{
     `ins` `(` $input `:` type($input) `)`
     `outs` `(` $init `:` type($init) `)`
-    attr-dict `->` type($result_tensors) `shape_region` $shape_region
+    attr-dict `->` type($result_tensors) (`shape_region` $shape_region^)?
   }];
 }
 

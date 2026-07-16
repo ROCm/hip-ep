@@ -26,9 +26,6 @@ namespace hipsr {
 #define GEN_PASS_DEF_CONVERTONNXTOHIPSRPASS
 #include "hip/Conversion/Passes.h.inc"
 
-void populateCastConversionPatterns(::mlir::RewritePatternSet &patterns,
-                                    ::mlir::MLIRContext *ctx);
-
 namespace {
 
 struct ConvertOnnxToHipsrPass
