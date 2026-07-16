@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <utility>
 #include <vector>
@@ -22,6 +23,36 @@ struct TokenEntry {
   int32_t token_id;
   int32_t slot;
 };
+
+// Opt-in (default off) grouped, sync-free prefill MoE path (num_tokens > 1):
+// replaces the bucket -> D2H -> hipStreamSynchronize -> host per-expert loop
+// with hip_qmoe_prefill_fused. Evaluated once per process.
+static bool qmoe_fused_prefill_enabled() {
+  static const bool v = [] {
+#ifdef _WIN32
+    // Runtime is built /MT (static CRT): std::getenv cannot see env vars set by
+    // the host process. Must use the Win32 process env (see debug_log.h).
+    return detail::check_env("HIPDNN_EP_QMOE_FUSED_PREFILL");
+#else
+    const char *e = std::getenv("HIPDNN_EP_QMOE_FUSED_PREFILL");
+    return e && (e[0] == '1' || e[0] == 't' || e[0] == 'T' || e[0] == 'y' ||
+                 e[0] == 'Y');
+#endif
+  }();
+  return v;
+}
+
+// Same /MT CRT caveat as above: read the Win32 process environment so gates set
+// by the host (python) process are visible inside this DLL.
+static bool qmoe_env_flag(const char *name) {
+#ifdef _WIN32
+  return detail::check_env(name);
+#else
+  const char *e = std::getenv(name);
+  return e && (e[0] == '1' || e[0] == 't' || e[0] == 'T' || e[0] == 'y' ||
+               e[0] == 'Y');
+#endif
+}
 
 int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
               const void *router_weights, const void *fc1_weights,
@@ -160,7 +191,43 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   size_t off_a_scale_in = off_a_qb_in + sz_a_qb_in;
   size_t off_a_qb_mid = off_a_scale_in + sz_a_scale_in;
   size_t off_a_scale_mid = off_a_qb_mid + sz_a_qb_mid;
-  size_t total_scratch = off_a_scale_mid + sz_a_scale_mid;
+  // Fused prefill scratch (num_tokens > 1 path, env-gated). P = num_tokens*k
+  // pairs: per-pair expert id, [P, inter] activations, [P, hidden] per-pair
+  // outputs, and an fp32 [num_tokens, hidden] scatter accumulator. Sized
+  // unconditionally so the offset layout is stable; the decode path (k small)
+  // makes these tiny, prefill grows the pool once.
+  int64_t pf_pairs = num_tokens * k;
+  size_t sz_pf_sorted_eid = align_up_64(pf_pairs * sizeof(int32_t));
+  size_t sz_pf_act = align_up_64(pf_pairs * inter_size * elem_size);
+  size_t sz_pf_slot = align_up_64(pf_pairs * hidden_size * elem_size);
+  size_t sz_pf_accum = align_up_64(num_tokens * hidden_size * sizeof(float));
+  // Grouped-dp4a prefill scratch: int8-quantized activations + fp32 scales for
+  // the [num_tokens, hidden] input and the [P, inter] fc1 outputs. Sized
+  // unconditionally so the offset layout is stable; only the grouped-dp4a path
+  // reads them.
+  size_t sz_pf_aqb_in = align_up_64(num_tokens * hidden_size * sizeof(int8_t));
+  size_t sz_pf_ascale_in = align_up_64(num_tokens * k_blocks_fc1 * sizeof(float));
+  size_t sz_pf_aqb_mid = align_up_64(pf_pairs * inter_size * sizeof(int8_t));
+  size_t sz_pf_ascale_mid = align_up_64(pf_pairs * k_blocks_fc2 * sizeof(float));
+  // Grouped-WMMA prefill scratch (env-gated): gathered A_all [P, hidden],
+  // FC1 output [P, 2*inter], and the active-expert id list [num_experts].
+  // Sized unconditionally so the offset layout is stable; only the
+  // grouped-WMMA path reads them.
+  size_t sz_pf_a_all = align_up_64(pf_pairs * hidden_size * elem_size);
+  size_t sz_pf_fc1 = align_up_64(pf_pairs * fusion_inter * elem_size);
+  size_t sz_active_eids = align_up_64(num_experts * sizeof(int32_t));
+  size_t off_pf_sorted_eid = off_a_scale_mid + sz_a_scale_mid;
+  size_t off_pf_act = off_pf_sorted_eid + sz_pf_sorted_eid;
+  size_t off_pf_slot = off_pf_act + sz_pf_act;
+  size_t off_pf_accum = off_pf_slot + sz_pf_slot;
+  size_t off_pf_aqb_in = off_pf_accum + sz_pf_accum;
+  size_t off_pf_ascale_in = off_pf_aqb_in + sz_pf_aqb_in;
+  size_t off_pf_aqb_mid = off_pf_ascale_in + sz_pf_ascale_in;
+  size_t off_pf_ascale_mid = off_pf_aqb_mid + sz_pf_aqb_mid;
+  size_t off_pf_a_all = off_pf_ascale_mid + sz_pf_ascale_mid;
+  size_t off_pf_fc1 = off_pf_a_all + sz_pf_a_all;
+  size_t off_active_eids = off_pf_fc1 + sz_pf_fc1;
+  size_t total_scratch = off_active_eids + sz_active_eids;
 
   if (hipdnn_ep_state_ensure_qmoe_scratch(state, total_scratch) != 0) {
     fprintf(stderr, "wrap_qmoe: ensure_qmoe_scratch(%zu) failed\n",
@@ -186,6 +253,19 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   void *d_a_scale_in = scratch_base + off_a_scale_in;
   void *d_a_qb_mid = scratch_base + off_a_qb_mid;
   void *d_a_scale_mid = scratch_base + off_a_scale_mid;
+  int32_t *d_pf_sorted_eid =
+      reinterpret_cast<int32_t *>(scratch_base + off_pf_sorted_eid);
+  void *d_pf_act = scratch_base + off_pf_act;
+  void *d_pf_slot = scratch_base + off_pf_slot;
+  void *d_pf_accum = scratch_base + off_pf_accum;
+  void *d_pf_aqb_in = scratch_base + off_pf_aqb_in;
+  void *d_pf_ascale_in = scratch_base + off_pf_ascale_in;
+  void *d_pf_aqb_mid = scratch_base + off_pf_aqb_mid;
+  void *d_pf_ascale_mid = scratch_base + off_pf_ascale_mid;
+  void *d_pf_a_all = scratch_base + off_pf_a_all;
+  void *d_pf_fc1 = scratch_base + off_pf_fc1;
+  int32_t *d_active_eids =
+      reinterpret_cast<int32_t *>(scratch_base + off_active_eids);
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: topk_routing(tokens=%lld, experts=%lld, "
                     "k=%lld, normalize=%lld)\n",
@@ -250,7 +330,10 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       return (s + 63) & ~size_t(63);
     };
     size_t hsz_counts = align_up_64h(num_experts * sizeof(int32_t));
-    size_t total_host = hsz_counts;
+    // Grouped-WMMA path builds an active-expert id list on the host from the
+    // D2H'd counts; reserve space for it alongside h_counts.
+    size_t hsz_active = align_up_64h(num_experts * sizeof(int32_t));
+    size_t total_host = hsz_counts + hsz_active;
 
     if (hipdnn_ep_state_ensure_qmoe_host_scratch(state, total_host) != 0) {
       fprintf(stderr, "wrap_qmoe: ensure_qmoe_host_scratch(%zu) failed\n",
@@ -260,6 +343,8 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     char *host_base =
         static_cast<char *>(hipdnn_ep_state_get_qmoe_host_scratch(state));
     int32_t *h_counts = reinterpret_cast<int32_t *>(host_base);
+    int32_t *h_active =
+        reinterpret_cast<int32_t *>(host_base + hsz_counts);
 
     // Bucket tokens on the device: count per expert (atomicAdd), exclusive
     // prefix sum into d_expert_offsets, scatter (token_id, weight) pairs
@@ -268,6 +353,45 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                                      d_expert_counts, d_expert_offsets,
                                      d_sorted_token_ids, d_sorted_weights,
                                      num_tokens, num_experts, k, elem_size));
+
+    // Grouped, sync-free prefill path (env-gated): consumes the on-device
+    // sorted buffers directly, no D2H / hipStreamSynchronize / host loop.
+    if (qmoe_fused_prefill_enabled()) {
+      RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: fused prefill path (P=%lld)\n",
+                        (long long)(num_tokens * k));
+      int rc;
+      if (qmoe_env_flag("HIPDNN_EP_QMOE_PERPAIR")) {
+        rc = hip_qmoe_prefill_fused(
+            stream, input, d_sorted_token_ids, d_sorted_weights,
+            d_expert_offsets, d_pf_sorted_eid, fc1_weights, fc1_scales,
+            fc1_zero_points, fc1_bias, fc2_weights, fc2_scales, fc2_zero_points,
+            fc2_bias, d_pf_act, d_pf_slot, d_pf_accum, output, num_tokens,
+            hidden_size, inter_size, k, num_experts, block_size,
+            activation_alpha, activation_beta, swiglu_limit, elem_size);
+      } else if (qmoe_env_flag("HIPDNN_EP_QMOE_GROUPED_DP4A")) {
+        rc = hip_qmoe_grouped_prefill_fused_dp4a(
+            stream, input, d_sorted_token_ids, d_sorted_weights,
+            d_expert_offsets, fc1_weights, fc1_scales, fc1_zero_points, fc1_bias,
+            fc2_weights, fc2_scales, fc2_zero_points, fc2_bias, d_pf_aqb_in,
+            d_pf_ascale_in, d_pf_aqb_mid, d_pf_ascale_mid, d_pf_act, d_pf_accum,
+            output, num_tokens, hidden_size, inter_size, k, num_experts,
+            block_size, activation_alpha, activation_beta, swiglu_limit,
+            elem_size);
+      } else {
+        rc = hip_qmoe_grouped_prefill_fused(
+            stream, input, d_sorted_token_ids, d_sorted_weights,
+            d_expert_offsets, fc1_weights, fc1_scales, fc1_zero_points, fc1_bias,
+            fc2_weights, fc2_scales, fc2_zero_points, fc2_bias, d_pf_act,
+            d_pf_accum, output, num_tokens, hidden_size, inter_size, k,
+            num_experts, block_size, activation_alpha, activation_beta,
+            swiglu_limit, elem_size);
+      }
+      if (rc != 0) {
+        fprintf(stderr, "wrap_qmoe: fused prefill failed (%d)\n", rc);
+        return -1;
+      }
+      return 0;
+    }
 
     // Only readback the counts (num_experts * int32, e.g. 32*4 = 128 bytes)
     // to drive the host-side per-expert dispatch loop. Offsets are computed
@@ -295,6 +419,50 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     }
     RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: %lld/%lld experts active\n",
                       (long long)active_experts, (long long)num_experts);
+
+    // Default prefill path: grouped Matrix-Core (WMMA) int4 GEMM. One launch
+    // per FC over all active experts (blockIdx.z = expert) reuses the tuned
+    // double-buffered int4 pipeline, so the whole MoE layer runs in ~6 launches
+    // vs ~5*active_experts for the host per-expert loop below (measured ~6.5%
+    // TTFT win on Qwen3.6-35B-A3B, bit-identical output). Falls back to the
+    // host loop for shapes the 64x64 WMMA tile can't serve (hidden/inter not
+    // multiples of 64), non-fp16, non-int4, or when HIPDNN_EP_QMOE_HOST_LOOP
+    // forces the reference path.
+    bool wmma_prefill_ok = elem_size == 2 && expert_weight_bits == 4 &&
+                           block_size > 0 && (hidden_size % 64 == 0) &&
+                           (inter_size % 64 == 0) &&
+                           !qmoe_env_flag("HIPDNN_EP_QMOE_HOST_LOOP");
+    if (wmma_prefill_ok) {
+      int num_active = 0;
+      int max_count = 0;
+      for (int64_t e = 0; e < num_experts; e++) {
+        int c = h_counts[e];
+        if (c > 0) {
+          h_active[num_active++] = static_cast<int32_t>(e);
+          if (c > max_count) max_count = c;
+        }
+      }
+      if (num_active > 0) {
+        HIP_CHECK(hipMemcpyAsync(d_active_eids, h_active,
+                                 num_active * sizeof(int32_t),
+                                 hipMemcpyHostToDevice, hip_stream));
+      }
+      RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: grouped WMMA prefill "
+                        "(active=%d, max_count=%d)\n",
+                        num_active, max_count);
+      int rc = hip_qmoe_grouped_prefill_wmma(
+          stream, input, d_sorted_token_ids, d_sorted_weights, d_expert_offsets,
+          d_active_eids, num_active, max_count, fc1_weights, fc1_scales,
+          fc1_zero_points, fc1_bias, fc2_weights, fc2_scales, fc2_zero_points,
+          fc2_bias, d_pf_a_all, d_pf_fc1, d_pf_act, d_pf_accum, output,
+          num_tokens, hidden_size, inter_size, k, num_experts, block_size,
+          activation_alpha, activation_beta, swiglu_limit, elem_size);
+      if (rc != 0) {
+        fprintf(stderr, "wrap_qmoe: grouped WMMA prefill failed (%d)\n", rc);
+        result = -1;
+      }
+      goto cleanup;
+    }
 
     // Per-session pointer-keyed zero_points unpack cache (qmoe-owned, lives on
     // RuntimeState). Each expert's fc1/fc2 zp is a distinct pointer into the
