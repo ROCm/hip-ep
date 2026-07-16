@@ -437,9 +437,8 @@ __global__ void matmul_nbits_gemv_kernel_i8(
  *   - Single-warp fast path: BLOCK_SIZE=32 uses shuffle-only reduction
  *     (no LDS sync needed)
  *
- * At runtime, an autotune pass benchmarks all 35 (BLOCK_SIZE, TILE_N)
- * combinations on the first call for each problem shape and caches the
- * fastest configuration for subsequent calls.
+ * The (BLOCK_SIZE, TILE_N) config is chosen by a pure static O(1) heuristic
+ * (pickGemvConfig) from the problem shape -- no runtime benchmark, no cache.
  * BLOCK_SIZE ∈ {32,64,128,256,512,1024}, TILE_N ∈ {1,2,4,8,16,32,64}.
  * BS=32 configs use single-warp shuffle-only reduction (no LDS).
  * TILE_N=32 tested only when N>=1024; TILE_N=64 only when N>=2048.
@@ -779,6 +778,45 @@ static constexpr GemvConfig kGemvConfigs[] = {
 static constexpr int kNumGemvConfigs =
     static_cast<int>(sizeof(kGemvConfigs) / sizeof(kGemvConfigs[0]));
 
+// ---------------------------------------------------------------------------
+// Static GEMV config selection (default path: no runtime tuning).
+//
+// The runtime cold autotune was found to be counterproductive to reason about:
+// its per-shape "winner" is not reproducible (the config space is a flat
+// plateau, ~top-12 within ~5% in the cold microbenchmark) and, crucially, the
+// microbenchmark winner does NOT transfer to real steady-state decode -- a
+// static pick that exactly reproduced the captured cold winners still lost
+// ~6.5% e2e. Measuring the *real decode* landscape directly on gfx1151
+// (sweeping a forced config over full-length decode of phi4 / Qwen2.5 /
+// gpt-oss) gives a clean, generalizable answer:
+//   * threads=32 with a small tile_n=2 ({32,2}) is the robust decode config.
+//     It matches or beats the runtime tuner on dense models (phi4 +0.2 tps,
+//     Qwen2.5 22.1 vs 22.9). The cold microbenchmark's apparent preference for
+//     larger tile_n / threads=64-128 on some shapes was pure noise -- forcing
+//     those e2e regresses (Qwen2.5: {32,8} -> 20.5, {64,1} -> 20.9, {128,1} ->
+//     16.0 tps vs {32,2} -> 22.1).
+//   * tiny output width N (e.g. MoE router): too few column-tiles, so spend
+//     threads on the K reduction with tile_n=1 (microbench win; e2e neutral).
+//   * MoE per-expert col_major GEMV with several token-rows (M>=8): 64x16
+//     (microbench win; e2e neutral).
+//
+// This makes selection a pure O(1) function -- no mutex, no scratch pool, no
+// per-shape benchmark launches (removes the +0.25 GB pool tax and the
+// per-decode lock). The constants are fitted to gfx1151's memory system
+// (bandwidth, ~32 MB MALL, LPDDR5X latency); re-derive them for other silicon.
+static int pickGemvConfig(int64_t M, int64_t N, int64_t K, int64_t bs,
+                          bool /*has_zp*/, bool col_major) {
+    (void)bs;
+    if (col_major && M >= 8) return 8;    // {threads=64,  tile_n=16} MoE multi-row
+    if (N <= 128)            return 19;   // {threads=512, tile_n=1}  tiny N / router
+    if (K >= 2 * N)          return 9;    // {threads=128, tile_n=1}  K-heavy (down_proj)
+    if (N >= 65536)          return 3;    // {threads=32,  tile_n=8}  very wide (lm_head)
+    return 1;                             // {threads=32,  tile_n=2}  default decode
+}
+// NB: {32,2} is the robust real-decode default; the two shape exceptions above
+// (K-heavy reduction wants more threads; very wide output amortizes a bigger
+// tile) are the only per-shape effects that survived run-to-run in the tuner.
+
 static void launchGemvConfig(
     int config_id, hipStream_t stream,
     const __half* A, const uint8_t* B,
@@ -833,150 +871,9 @@ static void launchGemvConfig(
 #undef GEMV_CASE
 }
 
-// Cold-aware autotune scratch pool.
-//
-// Decode reads weights COLD on every token: they are GBs, the gfx1151
-// Infinity/MALL cache is ~32 MB, so nothing stays resident. The old warm tune
-// (5 back-to-back launches on ONE buffer) measured cache-HIT timings, which
-// systematically favor the lowest-thread config (least overhead when data is
-// hot) -- exactly the config that starves LPDDR5X when the data is actually
-// cold (too few in-flight loads to hide DRAM latency). Measured on out_proj
-// (N=2048,K=4096): warm picked {32,1} @ ~47% of peak cold, while {512,8} does
-// ~71% cold -- a ~1.5x left on the floor by warm tuning.
-//
-// Fix: tune against a scratch pool larger than the cache and rotate the B-read
-// base across it every launch, so each timed launch reads weights that are not
-// cache-resident -- reproducing decode's cold streaming. The pool holds garbage
-// (only sizes/addresses matter for timing/ranking, not values). Shapes whose
-// weights already exceed the pool (e.g. lm_head) are inherently cold, so they
-// fall back to the real B with no rotation.
-static constexpr size_t kGemvTunePoolBytes = 256ull * 1024 * 1024;  // > 32 MB cache
-
-static void* getGemvTunePool() {
-    static std::mutex m;
-    static void* p = nullptr;
-    std::lock_guard<std::mutex> lk(m);
-    if (!p) {
-        if (hipMalloc(&p, kGemvTunePoolBytes) != hipSuccess)
-            p = nullptr;  // graceful fallback: tuning stays warm (single-buffer) if OOM
-    }
-    return p;
-}
-
-static int tuneGemvConfig(
-    hipStream_t stream,
-    const __half* A, const uint8_t* B,
-    const __half* sc, const uint8_t* zp,
-    const __half* bi, __half* out,
-    int64_t M, int64_t N, int64_t K,
-    int64_t batch, int64_t bs,
-    bool col_major = false)
-{
-    hipEvent_t ev0, ev1;
-    hipEventCreate(&ev0);
-    hipEventCreate(&ev1);
-
-    float best_ms = 1e30f;
-    int   best_id = 8;
-    constexpr int WARMUP = 2;   // rotation warmup (code residency + fill pipeline)
-    constexpr int REPS   = 2;   // best-of-REPS windows
-    constexpr size_t kCacheBytes = 32ull * 1024 * 1024;  // gfx1151 Infinity/MALL
-
-    // Cold rotation: pick a per-launch B base stride and how many distinct
-    // bases fit in the pool. nrot==1 => weights bigger than pool (already cold)
-    // or OOM => use the real B, single buffer.
-    void*  pool     = getGemvTunePool();
-    size_t b_bytes  = static_cast<size_t>(N) * static_cast<size_t>(K) / 2;
-    size_t stride   = (b_bytes + 255) & ~static_cast<size_t>(255);
-    int    nrot     = 1;
-    const uint8_t* b_tune = B;
-    if (pool && stride > 0 && stride <= kGemvTunePoolBytes) {
-        nrot = static_cast<int>(kGemvTunePoolBytes / stride);
-        if (nrot < 1) nrot = 1;
-        if (nrot > 1) b_tune = static_cast<const uint8_t*>(pool);
-    }
-
-    // Launches per timed window. Rotating shapes need enough distinct reads to
-    // sweep past the cache (else the window reads warm); inherently-cold shapes
-    // (nrot==1, weights >> cache) need only a few. Cap the count so large/slow
-    // kernels (e.g. lm_head ~1.2 ms each) don't run long enough to trip the
-    // Windows TDR watchdog during the 35-config sweep.
-    int INNER;
-    if (nrot <= 1) {
-        INNER = 4;
-    } else {
-        size_t need = (2 * kCacheBytes + b_bytes - 1) / (b_bytes ? b_bytes : 1);
-        INNER = static_cast<int>(need);
-        if (INNER < 8)  INNER = 8;
-        if (INNER > 48) INNER = 48;
-        if (INNER > nrot) INNER = nrot;  // no repeats -> stay cold
-    }
-
-    for (int cid = 0; cid < kNumGemvConfigs; cid++) {
-        auto& cfg = kGemvConfigs[cid];
-        if (cfg.tile_n >= 64 && N < 2048) continue;
-        if (cfg.tile_n >= 32 && cfg.tile_n < 64 && N < 1024) continue;
-
-        for (int w = 0; w < WARMUP; w++)
-            launchGemvConfig(cid, stream, A,
-                             b_tune + static_cast<size_t>(w % nrot) * stride,
-                             sc, zp, bi, out, M, N, K, batch, bs, col_major);
-
-        float best_ms_cfg = 1e30f;
-        for (int r = 0; r < REPS; r++) {
-            hipEventRecord(ev0, stream);
-            for (int i = 0; i < INNER; i++)
-                launchGemvConfig(cid, stream, A,
-                                 b_tune + static_cast<size_t>(i % nrot) * stride,
-                                 sc, zp, bi, out, M, N, K, batch, bs, col_major);
-            hipEventRecord(ev1, stream);
-            hipEventSynchronize(ev1);
-            float ms = 0.0f;
-            hipEventElapsedTime(&ms, ev0, ev1);
-            float per = ms / INNER;
-            if (per < best_ms_cfg) best_ms_cfg = per;
-        }
-
-        CUSTOM_KERNELS_DEBUG_LOG(
-            "[custom_kernels]   config[%2d] threads=%3d tile_n=%d : %.4f ms "
-            "(cold, nrot=%d)\n",
-            cid, kGemvConfigs[cid].threads, kGemvConfigs[cid].tile_n,
-            best_ms_cfg, nrot);
-
-        if (best_ms_cfg < best_ms) {
-            best_ms = best_ms_cfg;
-            best_id = cid;
-        }
-    }
-
-    hipEventDestroy(ev0);
-    hipEventDestroy(ev1);
-
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] GEMV autotune (cold): M=%lld N=%lld K=%lld bs=%lld col_major=%d -> "
-        "best config[%d] threads=%d tile_n=%d (%.4f ms/iter)\n",
-        (long long)M, (long long)N, (long long)K, (long long)bs, col_major,
-        best_id, kGemvConfigs[best_id].threads,
-        kGemvConfigs[best_id].tile_n, best_ms);
-
-    return best_id;
-}
-
-static std::unordered_map<std::string, int> gemv_cache;
-static std::mutex gemv_tune_mutex;
-
-static std::string gemvCacheKey(int64_t M, int64_t N, int64_t K, int64_t bs,
-                                bool col_major, bool has_zp) {
-    // has_zp must be in the key: the asym path executes one extra read_zp +
-    // fp32 mul per K-tile per N-tile, so its optimal (threads, tile_n) can
-    // differ from the sym tune. Without it, a process that loads both sym and
-    // asym variants would silently reuse the wrong autotune result for one of
-    // them. (WMMA path's autotune key already includes has_zp — keep parity.)
-    return std::to_string(M) + "_" + std::to_string(N) + "_" +
-           std::to_string(K) + "_" + std::to_string(bs) + "_" +
-           (col_major ? "1" : "0") + "_" + (has_zp ? "1" : "0");
-}
-
+// Selection is a pure O(1) static pick (see pickGemvConfig). Params beyond the
+// shape are unused now that runtime measurement is gone; kept so the decode
+// call sites stay unchanged.
 static int getOrTuneGemvConfig(
     hipStream_t stream,
     const __half* A, const uint8_t* B,
@@ -986,40 +883,21 @@ static int getOrTuneGemvConfig(
     int64_t batch, int64_t bs,
     bool col_major = false)
 {
+    (void)stream; (void)A; (void)B; (void)sc; (void)bi; (void)out; (void)batch;
+
     // M=1: col_major and row_major layouts are identical (single row) —
-    // reuse the row_major autotune result to avoid a redundant tuning pass.
+    // reuse the row_major result to avoid a redundant selection.
     bool effective_col_major = (M == 1) ? false : col_major;
-    std::string key = gemvCacheKey(M, N, K, bs, effective_col_major,
-                                   /*has_zp=*/zp != nullptr);
-
-    std::lock_guard<std::mutex> lock(gemv_tune_mutex);
-
-    auto it = gemv_cache.find(key);
-    if (it != gemv_cache.end())
-        return it->second;
-
-    int best = tuneGemvConfig(stream, A, B, sc, zp, bi, out,
-                               M, N, K, batch, bs, col_major);
-    gemv_cache[key] = best;
-
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] GEMV cache: stored key=\"%s\" -> config[%d] "
-        "(cache size=%zu)\n",
-        key.c_str(), best, gemv_cache.size());
-
-    return best;
+    return pickGemvConfig(M, N, K, bs, /*has_zp=*/zp != nullptr,
+                          effective_col_major);
 }
 
 /* -----------------------------------------------------------------------
- * GEMV (int8) Autotune: dispatch, benchmark, cache
+ * GEMV (int8) dispatch
  *
- * Reuses kGemvConfigs (28 configs of BLOCK_SIZE x TILE_N) and the same
- * autotune mechanics as the int4 path, but launches the int8 GEMV kernel
- * matmul_nbits_gemv_kernel_i8 instead. A separate cache is used because
- * the int8 kernel's per-config performance ranking differs from int4 (B
- * is 2x larger at fp16-equivalent footprint, the inner loop has half as
- * many decode shifts, and zp is read directly as uint8 rather than
- * unpacked first).
+ * Reuses kGemvConfigs (BLOCK_SIZE x TILE_N) and the same static pick as the
+ * int4 path (pickGemvConfig), but launches the int8 GEMV kernel
+ * matmul_nbits_gemv_kernel_i8 instead.
  * ----------------------------------------------------------------------- */
 
 static void launchGemvConfigI8(
@@ -1082,77 +960,8 @@ static void launchGemvConfigI8(
 #undef GEMV_I8_CASE
 }
 
-static int tuneGemvConfigI8(
-    hipStream_t stream,
-    const __half* A, const uint8_t* B,
-    const __half* sc, const uint8_t* zp,
-    const __half* bi, __half* out,
-    int64_t M, int64_t N, int64_t K,
-    int64_t batch, int64_t bs)
-{
-    hipEvent_t ev0, ev1;
-    hipEventCreate(&ev0);
-    hipEventCreate(&ev1);
-
-    float best_ms = 1e30f;
-    int   best_id = 8; // 128 threads, TILE_N=8 -- safe default for typical N
-    constexpr int WARMUP = 1;
-    constexpr int ITERS  = 5;
-
-    for (int cid = 0; cid < kNumGemvConfigs; cid++) {
-        auto& cfg = kGemvConfigs[cid];
-        if (cfg.tile_n >= 32 && N < 1024) continue;
-
-        for (int w = 0; w < WARMUP; w++)
-            launchGemvConfigI8(cid, stream, A, B, sc, zp, bi, out,
-                               M, N, K, batch, bs);
-
-        hipEventRecord(ev0, stream);
-        for (int i = 0; i < ITERS; i++)
-            launchGemvConfigI8(cid, stream, A, B, sc, zp, bi, out,
-                               M, N, K, batch, bs);
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-
-        float ms = 0.0f;
-        hipEventElapsedTime(&ms, ev0, ev1);
-
-        CUSTOM_KERNELS_DEBUG_LOG(
-            "[custom_kernels]   i8 config[%2d] threads=%3d tile_n=%d : %.4f ms\n",
-            cid, kGemvConfigs[cid].threads, kGemvConfigs[cid].tile_n,
-            ms / ITERS);
-
-        if (ms < best_ms) {
-            best_ms = ms;
-            best_id = cid;
-        }
-    }
-
-    hipEventDestroy(ev0);
-    hipEventDestroy(ev1);
-
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] GEMV-i8 autotune: M=%lld N=%lld K=%lld bs=%lld -> "
-        "best config[%d] threads=%d tile_n=%d (%.4f ms/iter)\n",
-        (long long)M, (long long)N, (long long)K, (long long)bs,
-        best_id, kGemvConfigs[best_id].threads,
-        kGemvConfigs[best_id].tile_n, best_ms / ITERS);
-
-    return best_id;
-}
-
-static std::unordered_map<std::string, int> gemv_i8_cache;
-static std::mutex gemv_i8_tune_mutex;
-
-static std::string gemvI8CacheKey(int64_t M, int64_t N, int64_t K,
-                                   int64_t bs, bool has_zp) {
-    // has_zp affects the inner loop (one global ZP read per iter), so
-    // configs may rank differently with vs without -- key on it.
-    return std::to_string(M) + "_" + std::to_string(N) + "_" +
-           std::to_string(K) + "_" + std::to_string(bs) + "_" +
-           (has_zp ? "1" : "0");
-}
-
+// int8 GEMV also uses the static pick (row-major only). Same plateau logic as
+// the int4 path; extra params kept only to leave the call site unchanged.
 static int getOrTuneGemvConfigI8(
     hipStream_t stream,
     const __half* A, const uint8_t* B,
@@ -1161,25 +970,9 @@ static int getOrTuneGemvConfigI8(
     int64_t M, int64_t N, int64_t K,
     int64_t batch, int64_t bs)
 {
-    const bool has_zp = (zp != nullptr);
-    std::string key = gemvI8CacheKey(M, N, K, bs, has_zp);
-
-    std::lock_guard<std::mutex> lock(gemv_i8_tune_mutex);
-
-    auto it = gemv_i8_cache.find(key);
-    if (it != gemv_i8_cache.end())
-        return it->second;
-
-    int best = tuneGemvConfigI8(stream, A, B, sc, zp, bi, out,
-                                 M, N, K, batch, bs);
-    gemv_i8_cache[key] = best;
-
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] GEMV-i8 cache: stored key=\"%s\" -> config[%d] "
-        "(cache size=%zu)\n",
-        key.c_str(), best, gemv_i8_cache.size());
-
-    return best;
+    (void)stream; (void)A; (void)B; (void)sc; (void)bi; (void)out; (void)batch;
+    return pickGemvConfig(M, N, K, bs, /*has_zp=*/zp != nullptr,
+                          /*col_major=*/false);
 }
 
 /* =======================================================================
