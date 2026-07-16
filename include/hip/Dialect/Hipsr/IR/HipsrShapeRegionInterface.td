@@ -2,8 +2,8 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 //
-// ShapeRegionInterface. Other hipsr interfaces (barrier markers, ...) live in
-// their own per-interface files.
+// ShapeRegionInterface. The barrier markers (StartBarrier / EndBarrier) are
+// op traits in HipsrTraits.td, not interfaces, because they carry no methods.
 //
 
 #ifndef HIPSR_SHAPE_REGION_INTERFACE
