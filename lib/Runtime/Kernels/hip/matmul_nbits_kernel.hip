@@ -3489,7 +3489,14 @@ extern "C" int hip_matmul_nbits(
    * M=1 skips this path entirely — row/col layouts are identical for a
    * single row, and the row-major GEMV avoids the ZP conversion kernel.
    * ------------------------------------------------------------------- */
-  if (wmma_data_format && M > 1 && M < kBlockDim) {
+  // OPT1: for small M (1 < M < 16, WMMA data format) this col-major GEMV path
+  // requires TWO transpose2d launches per call (A row->col at entry, output
+  // col->row at exit). In the MoE host-loop prefill that fires for every small
+  // expert x {FC1,FC2} x layer. Disable it (s_opt1_colmajor=false) so these
+  // fall through to the row-major GEMV below, eliminating both transposes. Kept
+  // as a compile-time toggle so the original path is preserved for comparison.
+  static const bool s_opt1_colmajor = false;
+  if (s_opt1_colmajor && wmma_data_format && M > 1 && M < kBlockDim) {
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_matmul_nbits: GEMV col-major path M=%lld "
         "N=%lld K=%lld bs=%lld zp=%s bias=%s\n",
@@ -3563,6 +3570,17 @@ extern "C" int hip_matmul_nbits(
    * are benchmarked and the fastest is cached for subsequent calls.
    * ------------------------------------------------------------------- */
   if (M <= kBlockDim) {
+    // OPT1: prove the small-M (1<M<16, WMMA format) matmuls now take the
+    // row-major GEMV instead of the col-major+transpose path above.
+    if (wmma_data_format && M > 1 && M < kBlockDim) {
+      static bool s_opt1_logged = false;
+      if (!s_opt1_logged) {
+        s_opt1_logged = true;
+        fprintf(stderr,
+                "[OPT1] small-M row-major GEMV (transpose2d eliminated) "
+                "ENTERED\n");
+      }
+    }
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_matmul_nbits: GEMV path M=%lld N=%lld K=%lld "
         "batch=%lld bs=%lld zp=%s bias=%s\n",
