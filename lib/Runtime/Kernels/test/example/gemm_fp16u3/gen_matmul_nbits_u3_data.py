@@ -8,7 +8,7 @@ the SAME (M, K, N, group_size) shape:
     see matmul_nbits_kernel.hip Section 1c/1d -- NOT an ONNX MatMulNBits
     convention)
   - uint4, nibble-packed (the existing ONNX MatMulNBits convention, same
-    format gen_matmul_nbits_data.py in ../gemm_bf16u4 produces)
+    format gen_matmul_nbits_data.py in ../gemm_fp16u4 produces)
 
 so the C++ test binary can benchmark hip_matmul_nbits(bits=3) and
 hip_matmul_nbits(bits=4) back-to-back on identical shapes and report a fair
@@ -147,8 +147,12 @@ def main():
 
     scales_u3 = np.random.uniform(0.01, 0.05, (N, num_groups_k)).astype(np.float16)
     zeros_u3 = None
+    zeros_u3_packed = None
     if not args.no_zeros:
         zeros_u3 = np.random.randint(3, 6, (N, num_groups_k)).astype(np.uint8)
+        # ONNX bits=3 packs zero_points as the same continuous per-row 3-bit
+        # stream as the weights, one group-zp per 3-bit field.
+        zeros_u3_packed = pack_u3_continuous(zeros_u3)
 
     B_u3_packed.flatten(order='C').tofile(
         os.path.join(out_dir, "matmul_nbits_u3_B.bin"))
@@ -157,6 +161,8 @@ def main():
     if zeros_u3 is not None:
         zeros_u3.flatten(order='C').tofile(
             os.path.join(out_dir, "matmul_nbits_u3_zeros.bin"))
+        zeros_u3_packed.flatten(order='C').tofile(
+            os.path.join(out_dir, "matmul_nbits_u3_zeros_packed.bin"))
 
     # ================= uint4 (nibble-packed, ONNX convention) =================
     B_u4 = np.random.randint(0, 16, (N, K), dtype=np.uint8)

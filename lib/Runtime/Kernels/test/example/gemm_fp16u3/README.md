@@ -6,7 +6,7 @@ head-to-head against the existing `bits=4` (uint4, nibble-packed, ONNX
 `MatMulNBits` convention) kernel on **identical** (M, K, N, group_size)
 shapes.
 
-This is a sibling of `../gemm_bf16u4` — same build style, same Makefile
+This is a sibling of `../gemm_fp16u4` — same build style, same Makefile
 conventions — but a single test binary loads both a u3-quantized and a
 u4-quantized copy of the same-shaped weight matrix (sharing the same `A`)
 and runs both kernels back-to-back, printing a side-by-side comparison.
@@ -34,11 +34,30 @@ and runs both kernels back-to-back, printing a side-by-side comparison.
 
 Because the two formats have incompatible zero-point plumbing inside
 `hip_matmul_nbits()` (u4's asym path expects pre-unpacked uint8 *and* fp16
-zero-point buffers to correctly hit all of WMMA / GEMV / naive dispatch;
-u3's zero points are always plain per-element uint8), the generator emits
-both alongside a shared `A`, and the test binary wires each kernel's call
-according to its own zp contract — see `gen_matmul_nbits_u3_data.py`'s
-module docstring for the exact file layout.
+zero-point buffers to correctly hit all of WMMA / GEMV / naive dispatch),
+the generator emits each alongside a shared `A`, and the test binary wires
+each kernel's call according to its own zp contract — see
+`gen_matmul_nbits_u3_data.py`'s module docstring for the exact file layout.
+
+### Zero-point handling for u3 (two conventions, both validated)
+
+ONNX packs `zero_points` at `bits` bits, so a real 3-bit model ships them as a
+**continuous per-row 3-bit stream** (`[N, ceil(num_groups_k*3/8)]`), while the
+u3 kernels index one byte per group. The runtime wrapper
+(`lib/Runtime/real/matmul_nbits.cpp`) closes that gap: for `bits=3` asym it
+unpacks the packed stream to one-byte-per-group via
+`hip_matmul_nbits_unpack_zp_u8_3bit()` (pointer-keyed cache, once per
+`zero_points`) and passes it back as `pre_unpacked_zp_u8`. This test exercises
+both layouts:
+
+1. **one-byte-per-group** (`*_zeros`) passed directly as `zero_points` with
+   `pre_unpacked_zp_u8 = null` — the plain direct-call convention used by the
+   benchmark loop.
+2. **ONNX-packed** (`*_zeros_packed`) unpacked once via the 3-bit unpack
+   kernel and fed back as `pre_unpacked_zp_u8` — the real runtime integration
+   path. A dedicated check (`u3 packed-zp real-model path`, not benchmarked)
+   confirms the unpack reproduces `*_zeros` byte-for-byte and that the GEMM
+   result matches the reference.
 
 ## Usage
 
@@ -91,12 +110,12 @@ make direct
   independently-quantized u3 and u4 copies of `B` (same shape), scales,
   optional zero points, and NumPy references for both.
 - `gen_model_data_u3.py` — calls the above once per shape in a model config
-  JSON (mirrors `../gemm_bf16u4/gen_model_data.py`); skips shapes where
+  JSON (mirrors `../gemm_fp16u4/gen_model_data.py`); skips shapes where
   `K % 32 != 0`.
 - `test_matmul_nbits_u3.cpp` — loads both quantized copies, benchmarks +
   verifies each via `hip_matmul_nbits()`, prints the comparison table.
   Supports single-shape (default) and `--model <json>` sweep modes.
-- `Makefile` — same direct-compile-and-link style as `../gemm_bf16u4`
+- `Makefile` — same direct-compile-and-link style as `../gemm_fp16u4`
   (compiles `matmul_nbits_kernel.hip` and the test driver as two TUs, links
   them — no prebuilt `.lib` needed). Defaults to `--offload-arch=gfx1150`
   and `HIP_SDK=C:\AMD\Rocm\7.1`; override on the command line, e.g.
