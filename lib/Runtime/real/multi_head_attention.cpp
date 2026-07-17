@@ -497,8 +497,9 @@ extern "C" int wrap_multi_head_attention(
     }
     char *fa = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
     if (!fa) {
-      fprintf(stderr,
-              "[multi_head_attention] ERROR: flash workspace pointer is null\n");
+      fprintf(
+          stderr,
+          "[multi_head_attention] ERROR: flash workspace pointer is null\n");
       return -1;
     }
     void *d_Kbnsh = fa;
@@ -511,8 +512,9 @@ extern "C" int wrap_multi_head_attention(
         hip_gqa_transpose_mid_dims(stream, value, d_Vbnsh, static_cast<int>(B),
                                    static_cast<int>(Skv), static_cast<int>(N),
                                    static_cast<int>(H), 2) != 0) {
-      fprintf(stderr,
-              "[multi_head_attention] ERROR: flash path K/V transpose failed\n");
+      fprintf(
+          stderr,
+          "[multi_head_attention] ERROR: flash path K/V transpose failed\n");
       return -1;
     }
 
