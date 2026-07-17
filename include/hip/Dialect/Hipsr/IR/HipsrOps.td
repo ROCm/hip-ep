@@ -12,6 +12,8 @@ include "hip/Dialect/Hipsr/IR/HipsrDialect.td"
 include "hip/Dialect/Hipsr/IR/HipsrTypes.td"
 include "hip/Dialect/Hipsr/IR/HipsrTraits.td"
 include "hip/Dialect/Hipsr/IR/HipsrShapeRegionInterface.td"
+include "hip/Dialect/Hipsr/IR/HipsrStartBarrierInterface.td"
+include "hip/Dialect/Hipsr/IR/HipsrEndBarrierInterface.td"
 
 //===----------------------------------------------------------------------===//
 // Base op class
