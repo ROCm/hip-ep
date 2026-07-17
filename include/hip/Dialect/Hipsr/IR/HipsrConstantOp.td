@@ -37,8 +37,9 @@ def Hipsr_ConstantOp : Hipsr_Op<"constant", [Pure]> {
     `externalize` (default true) is an orthogonal opt-out flag; a downstream pass
     calls `disableExternalize()` to keep a constant inline (compile-time value).
 
-    The result must be a device `memref` (`#hipsr.mem<device>`); constants reside
-    in VRAM. The verifier enforces this.
+    The result is a ranked tensor (pre-bufferization) or a device `memref`
+    (`#hipsr.mem<device>`, post-bufferization); constants reside in VRAM. The
+    `Hipsr_TensorOrDeviceMemRef` ODS constraint enforces this.
 
     Example:
     ```mlir
@@ -55,7 +56,7 @@ def Hipsr_ConstantOp : Hipsr_Op<"constant", [Pure]> {
     OptionalAttr<BoolAttr>:$externalize
   );
 
-  let results = (outs AnyMemRef:$result);
+  let results = (outs Hipsr_TensorOrDeviceMemRef:$result);
 
   let assemblyFormat = "attr-dict `:` type($result)";
 
