@@ -345,7 +345,7 @@ python onnxruntime-genai/benchmark/python/benchmark_e2e.py \
 `benchmark_e2e.py` runs with the default `-e follow_config`, so the model's
 `genai_config.json` selects the EP via `provider_options`. With the upstream OGA
 (v0.14.0 + PR2194, DeviceType AMDGPU) this is the AMD GPU umbrella
-(`provider_options [{ "AMDGPU": {"profile": "llm"} }]`), which loads
+(`provider_options [{ "AMDGPU": {"profile": "hip"} }]`), which loads
 `amdgpu-ep.dll` and needs the umbrella DLLs colocated (see
 `.github/workflows/windows-build.yml`); the default wheel ships only the hipgpu
 chain. For plain ORT (direct hipgpu, no OGA), register the colocated plugin via
@@ -463,7 +463,7 @@ The EP is selected by the model's `genai_config.json` `provider_options` and
 auto-discovered next to `onnxruntime-genai.dll` -- do NOT pass `--ep_library`
 (upstream `model_benchmark` rejects it). With the upstream OGA (v0.14.0 +
 PR2194) the EP is the AMD GPU umbrella (`provider_options [{ "AMDGPU":
-{"profile": "llm"} }]`), so `amdgpu-ep.dll` must sit next to the OGA DLLs (see
+{"profile": "hip"} }]`), so `amdgpu-ep.dll` must sit next to the OGA DLLs (see
 `.github/workflows/windows-build.yml`).
 
 ```bash
