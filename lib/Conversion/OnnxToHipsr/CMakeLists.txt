@@ -4,6 +4,7 @@
 ##
 
 add_library(OnnxToHipsr STATIC
+  ConstantConversion.cpp
   OnnxToHipsr.cpp
 )
 
