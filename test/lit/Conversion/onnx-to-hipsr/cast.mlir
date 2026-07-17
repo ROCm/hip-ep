@@ -11,11 +11,14 @@
 
 // CHECK-LABEL: func.func @cast
 func.func @cast(%input: tensor<?x8xf32>) -> tensor<?x8xf16> {
-  // CHECK: %[[D0:.+]] = tensor.dim %[[IN:.+]], %{{.+}} : tensor<?x8xf32>
-  // CHECK: %[[INIT:.+]] = tensor.empty(%[[D0]]) : tensor<?x8xf16>
+  // The DPS init is a hipsr.placeholder that mirrors the result type, so no
+  // output-shape computation (tensor.empty / tensor.dim) is emitted here.
+  // CHECK: %[[INIT:.+]] = hipsr.placeholder : tensor<?x8xf16>
   // The shape region is left empty (zero blocks) here; a later pass populates
   // it. The optional region group prints nothing when the region is empty.
-  // CHECK: hipsr.cast ins(%[[IN]] : tensor<?x8xf32>) outs(%[[INIT]] : tensor<?x8xf16>) -> tensor<?x8xf16>
+  // CHECK: hipsr.cast ins(%[[IN:.+]] : tensor<?x8xf32>) outs(%[[INIT]] : tensor<?x8xf16>) -> tensor<?x8xf16>
+  // CHECK-NOT: tensor.empty
+  // CHECK-NOT: tensor.dim
   // CHECK-NOT: shape_region
   %0 = "onnx.Cast"(%input) : (tensor<?x8xf32>) -> tensor<?x8xf16>
   return %0 : tensor<?x8xf16>

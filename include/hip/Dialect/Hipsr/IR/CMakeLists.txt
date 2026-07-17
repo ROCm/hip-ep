@@ -43,6 +43,10 @@ set(LLVM_TARGET_DEFINITIONS HipsrCastOp.td)
 mlir_tablegen(HipsrCastOp.h.inc -gen-op-decls)
 mlir_tablegen(HipsrCastOp.cpp.inc -gen-op-defs)
 
+set(LLVM_TARGET_DEFINITIONS HipsrPlaceholderOp.td)
+mlir_tablegen(HipsrPlaceholderOp.h.inc -gen-op-decls)
+mlir_tablegen(HipsrPlaceholderOp.cpp.inc -gen-op-defs)
+
 add_public_tablegen_target(HipsrDialectIncGen)
 
 set(LLVM_TARGET_DEFINITIONS HipsrEnums.td)

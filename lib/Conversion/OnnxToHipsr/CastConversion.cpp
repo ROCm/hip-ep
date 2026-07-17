@@ -5,8 +5,8 @@
 
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
 #include "hip/Dialect/Hipsr/IR/HipsrCastOp.h"
+#include "hip/Dialect/Hipsr/IR/HipsrPlaceholderOp.h"
 
-#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/PatternMatch.h"
 
 namespace mlir {
@@ -40,15 +40,21 @@ struct CastToHipsr : public ::mlir::RewritePattern {
     if (!resultType)
       return rewriter.notifyMatchFailure(op, "expected ranked tensor result");
 
-    // DPS init: an empty tensor of the result type. Cast preserves the shape,
-    // so dynamic dims are taken from the input.
-    ::llvm::SmallVector<::mlir::Value> dynDims;
-    for (int64_t i = 0; i < resultType.getRank(); ++i)
-      if (resultType.isDynamicDim(i))
-        dynDims.push_back(
-            rewriter.create<::mlir::tensor::DimOp>(loc, input, i));
-    ::mlir::Value init = rewriter.create<::mlir::tensor::EmptyOp>(
-        loc, resultType.getShape(), resultType.getElementType(), dynDims);
+    // DPS init: a hipsr.placeholder with the cast result type. Its type matches
+    // the result, which is all the DPS verifier needs, and it saves computing
+    // the output shape here (no tensor.empty + tensor.dim). A later pass fills
+    // in the shape region.
+    //
+    // Old way (built the init from the input shape):
+    //   %d0   = tensor.dim %input, %c0 : tensor<?x8xf32>
+    //   %init = tensor.empty(%d0)      : tensor<?x8xf16>
+    //   %0    = hipsr.cast ins(%input) outs(%init) -> tensor<?x8xf16>
+    // New way (placeholder mirrors the result type):
+    //   %init = hipsr.placeholder      : tensor<?x8xf16>
+    //   %0    = hipsr.cast ins(%input) outs(%init) -> tensor<?x8xf16>
+    ::mlir::Value init =
+        rewriter.create<PlaceholderOp>(loc, ::mlir::TypeRange{resultType})
+            .getResult(0);
 
     auto castOp = rewriter.create<CastOp>(loc, ::mlir::TypeRange{resultType},
                                           input, init);
