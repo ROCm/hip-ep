@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-#include "hip/Conversion/OnnxToHip/ConstantsIO.h"
+#include "hip/Support/ConstantsIO.h"
 #include "morphizen-foundation/file_io.hpp"
 
 #include <algorithm>
