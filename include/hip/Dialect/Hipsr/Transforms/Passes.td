@@ -28,6 +28,10 @@ def PopulateShapeRegionPass
     op's `populateShapeRegion()` end-to-end in LIT tests, so the shape
     computation is verified against generated (not hand-written) IR.
   }];
+  // Union of the dialects that ops' populateShapeRegion() emit (can't be
+  // auto-derived: getDependentDialects runs before any IR exists). Extend it
+  // when a new op's populateShapeRegion() uses a new dialect; a missing entry
+  // asserts at op creation, caught by that op's populate LIT test.
   let dependentDialects = [
     "::mlir::hipsr::HipsrDialect",
     "::mlir::arith::ArithDialect",

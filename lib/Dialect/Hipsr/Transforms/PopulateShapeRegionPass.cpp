@@ -40,6 +40,10 @@ struct PopulateShapeRegionPass
       Region &shapeRegion = shapeRegionOp.getShapeRegion();
       if (shapeRegion.empty())
         shapeRegionOp.populateShapeRegion(builder, shapeRegion);
+      // TODO: EndBarrier ops also carry a capacity shape region (region 1).
+      // When such ops land, fill it too via getCapacityShapeRegion() /
+      // populateCapacityShapeRegion(). No EndBarrier op exists today, so only
+      // the shape region (region 0) is handled here.
     });
   }
 };
