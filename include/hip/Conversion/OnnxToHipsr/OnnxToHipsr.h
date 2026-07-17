@@ -6,6 +6,7 @@
 #ifndef HIP_CONVERSION_ONNXTOHIPSR_ONNXTOHIPSR_H
 #define HIP_CONVERSION_ONNXTOHIPSR_ONNXTOHIPSR_H
 
+#include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
 
 #include <memory>
@@ -20,6 +21,12 @@ namespace hipsr {
 // hip/Conversion/Passes.h.
 #define GEN_PASS_DECL_CONVERTONNXTOHIPSRPASS
 #include "hip/Conversion/Passes.h.inc"
+
+// Populates patterns that convert `onnx.Constant` into `hipsr.constant`
+// (rank>=1 inline / mem_source / file_source) or `arith.constant` (rank-0
+// scalar). Pure IR rewrite -- no file I/O and no size-threshold policy (that
+// is layered on in the externalization pass).
+void populateOnnxToHipsrConstantPatterns(::mlir::RewritePatternSet &patterns);
 
 } // namespace hipsr
 } // namespace mlir
