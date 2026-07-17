@@ -2,9 +2,10 @@
 // Licensed under the MIT License.
 //
 //===----------------------------------------------------------------------===//
-// -hipsr-populate-shape-region fills empty shape regions by invoking each op's
-// ShapeRegionInterface::populateShapeRegion(). This exercises the shape
-// computation end-to-end (the emitted region is generated, not hand-written).
+// hipsr.cast shape region, exercised through -hipsr-populate-shape-region: the
+// op's ShapeRegionInterface::populateShapeRegion() emits the shape computation
+// end-to-end (generated, not hand-written). Also checks the pass leaves an
+// already-populated region untouched (idempotent).
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt %s -split-input-file -hipsr-populate-shape-region | FileCheck %s
