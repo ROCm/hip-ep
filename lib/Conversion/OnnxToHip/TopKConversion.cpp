@@ -106,10 +106,38 @@ TopKToHip::matchAndRewrite(mlir::Operation *op,
   if (auto sortedAttr = op->getAttrOfType<mlir::BoolAttr>("sorted"))
     sorted = sortedAttr.getValue();
 
-  auto valuesType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  auto indicesType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(1).getType());
+  // TopK's two results share an IDENTICAL shape; only the element type differs
+  // (values inherit x's element type, indices are integer). Some exports drop
+  // the shape/rank on one result -- commonly the values result when only the
+  // indices result is a graph output -- leaving it as an unranked tensor. An
+  // unchecked cast to RankedTensorType then yields a null-backed handle and
+  // dereferencing it in createTopKEmpty segfaults. Instead, reconstruct the
+  // missing ranked type from its ranked sibling (same shape, own element type)
+  // so conversion still proceeds.
+  //
+  // Before (values result unranked):
+  //   %v, %i = "onnx.TopK"(%x, %k) : (tensor<?x?x512xf16>, tensor<1xi64>)
+  //                                    -> (tensor<*xf16>, tensor<?x?x22xi64>)
+  // After (values type rebuilt from indices shape + x elem type):
+  //   %v, %i = hip.top_k ... -> (tensor<?x?x22xf16>, tensor<?x?x22xi64>)
+  mlir::Type valuesRawType = op->getResult(0).getType();
+  mlir::Type indicesRawType = op->getResult(1).getType();
+  auto valuesType = mlir::dyn_cast<mlir::RankedTensorType>(valuesRawType);
+  auto indicesType = mlir::dyn_cast<mlir::RankedTensorType>(indicesRawType);
+
+  auto elemTypeOr = [](mlir::Type t, mlir::Type fallback) -> mlir::Type {
+    if (auto tt = mlir::dyn_cast<mlir::TensorType>(t))
+      return tt.getElementType();
+    return fallback;
+  };
+  if (!valuesType && indicesType)
+    valuesType = mlir::RankedTensorType::get(
+        indicesType.getShape(), elemTypeOr(valuesRawType, xType.getElementType()));
+  if (!indicesType && valuesType)
+    indicesType = mlir::RankedTensorType::get(
+        valuesType.getShape(), elemTypeOr(indicesRawType, rewriter.getI64Type()));
+  if (!valuesType || !indicesType)
+    return rewriter.notifyMatchFailure(op, "TopK results must be ranked tensors");
 
   mlir::Value valuesInit =
       createTopKEmpty(rewriter, loc, valuesType, x, context, k, axis);
