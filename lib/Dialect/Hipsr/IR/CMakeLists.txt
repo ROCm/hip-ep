@@ -16,6 +16,7 @@ add_library(HipsrDialectIR STATIC
   HipsrPlaceholderOp.cpp
   HipsrTraits.cpp
   HipsrCastOp.cpp
+  HipsrMatMulOp.cpp
   HipsrTypes.cpp
 )
 
@@ -30,5 +31,6 @@ target_link_libraries(HipsrDialectIR PUBLIC
   MLIRIR
   MLIRSupport
   MLIRArithDialect
+  MLIRControlFlowDialect
   MLIRShapeDialect
 )
