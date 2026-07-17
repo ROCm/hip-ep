@@ -10,6 +10,14 @@
 // Needed by the generated attribute parser/printer.
 #include "mlir/IR/OpImplementation.h"
 
+// The generated dialect decls (below) reference these in the file-map cache
+// declared via `extraClassDeclaration` in HipsrDialect.td.
+#include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/Support/MemoryBuffer.h"
+#include <memory>
+#include <mutex>
+
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h.inc"
 
 // Enum header first: MemorySpaceAttr uses MemorySpaceKind.
