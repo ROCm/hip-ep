@@ -2,8 +2,9 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 //
-// ShapeRegionInterface. Other hipsr interfaces (barrier markers, ...) live in
-// their own per-interface files.
+// ShapeRegionInterface. The pool-domain barriers are separate interfaces:
+// StartBarrierInterface (HipsrStartBarrierInterface.td) and EndBarrierInterface
+// (HipsrEndBarrierInterface.td).
 //
 
 #ifndef HIPSR_SHAPE_REGION_INTERFACE
