@@ -9,6 +9,7 @@
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/Passes.h"
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
+#include "hip/Dialect/Hipsr/Transforms/Passes.h"
 #include "hip/Dialect/IR/HipBufferize.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
@@ -135,6 +136,9 @@ inline void registerAllPasses() {
   // pipeline names. See docs/pipeline_pass_menu.md for the catalogue.
   mlir::hip::registerHipPasses();
   mlir::hip::registerHipPipelines();
+
+  // hipsr dialect transform passes (e.g. hipsr-populate-shape-region).
+  mlir::hipsr::registerHipsrPasses();
 
   // Conversion passes (convert-onnx-to-hip, outline-onnx-to-hipdnn,
   // convert-hip-to-llvm); onnx-loop-outline is hand-written, not in the .td
