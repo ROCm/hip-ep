@@ -17,6 +17,18 @@ func.func @inline_const() -> memref<4xf16, #hipsr.mem<device>> {
 
 // -----
 
+// A ranked tensor result is allowed (pre-bufferization form, as produced by
+// the onnx->hipsr conversion before bufferization).
+// CHECK-LABEL: func.func @inline_const_tensor
+func.func @inline_const_tensor() -> tensor<4xf16> {
+  // CHECK: hipsr.constant {value = dense<{{.*}}> : tensor<4xf16>} : tensor<4xf16>
+  %c = hipsr.constant {value = dense<[1.0, 2.0, 3.0, 4.0]> : tensor<4xf16>}
+     : tensor<4xf16>
+  return %c : tensor<4xf16>
+}
+
+// -----
+
 // CHECK-LABEL: func.func @file_source_const
 func.func @file_source_const() -> memref<100xf32, #hipsr.mem<device>> {
   // CHECK: hipsr.constant {source = #hipsr.file_source<"w.bin", 0, 1000>} : memref<100xf32, #hipsr.mem<device>>
@@ -66,8 +78,10 @@ func.func @offset_without_size_rejected() -> memref<4xf16, #hipsr.mem<device>> {
 
 // -----
 
+// A memref with no memory space is rejected by the ODS type constraint
+// (Hipsr_TensorOrDeviceMemRef), not by the verifier.
 func.func @non_device_space_rejected() -> memref<4xf16> {
-  // expected-error @+1 {{result must have #hipsr.mem<device> memory space}}
+  // expected-error @+1 {{result #0 must be ranked tensor or device memref}}
   %c = hipsr.constant {value = dense<1.0> : tensor<4xf16>} : memref<4xf16>
   return %c : memref<4xf16>
 }

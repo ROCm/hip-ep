@@ -26,13 +26,8 @@ LogicalResult ConstantOp::verify() {
   if (hasOffset != hasSize)
     return emitOpError("`offset` and `size` must be set together");
 
-  // Constants reside in VRAM: the result memref must be device memory.
-  MemRefType memrefType = getResult().getType();
-  auto deviceSpace =
-      llvm::dyn_cast_or_null<MemorySpaceAttr>(memrefType.getMemorySpace());
-  if (!deviceSpace || deviceSpace.getKind() != MemorySpaceKind::Device)
-    return emitOpError("result must have #hipsr.mem<device> memory space");
-
+  // The result type (ranked tensor or #hipsr.mem<device> memref) is enforced
+  // by the Hipsr_TensorOrDeviceMemRef ODS constraint.
   return success();
 }
 
