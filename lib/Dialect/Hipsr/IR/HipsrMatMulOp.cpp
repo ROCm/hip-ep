@@ -22,10 +22,9 @@ using namespace mlir::hipsr;
 // DestinationStyleOpInterface: the single init operand is the DPS out.
 MutableOperandRange MatMulOp::getDpsInitsMutable() { return getInitMutable(); }
 
-// A and B must be at least 1-D. matmul needs a contraction dim, and
-// populateShapeRegion below indexes the last one or two dims of each operand
-// (promoting a 1-D operand to 2-D). A rank-0 operand has no such dim and would
-// produce out-of-range shape.get_extent indices.
+// A and B must be at least 1-D: matmul needs a contraction dim, and the shape
+// region below reads the last one or two dims of each operand. A rank-0
+// (scalar) operand has neither.
 LogicalResult MatMulOp::verify() {
   if (cast<ShapedType>(getA().getType()).getRank() < 1)
     return emitOpError("operand A must be at least 1-D");
