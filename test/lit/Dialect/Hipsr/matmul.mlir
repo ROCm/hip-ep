@@ -332,3 +332,16 @@ func.func @matmul_4d_empty_shape_region(%a: tensor<2x3x64x4096xf16>,
   }
   return %0 : tensor<2x3x64x1024xf16>
 }
+
+// -----
+
+// Rank-0 (scalar) operand: a scalar tensor is a valid ranked tensor, so the
+// operand type constraint accepts it, but matmul needs a contraction dim so the
+// verifier rejects it.
+func.func @matmul_rank0_operand(%a: tensor<f16>, %b: tensor<4096x1024xf16>,
+                                %init: tensor<1024xf16>) -> tensor<1024xf16> {
+  // expected-error@+1 {{operand A must be at least 1-D}}
+  %0 = hipsr.matmul ins(%a, %b : tensor<f16>, tensor<4096x1024xf16>)
+                    outs(%init : tensor<1024xf16>) -> tensor<1024xf16>
+  return %0 : tensor<1024xf16>
+}
