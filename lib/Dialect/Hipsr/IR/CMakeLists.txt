@@ -12,6 +12,7 @@ add_library(HipsrDialectIR STATIC
   HipsrOps.cpp
   HipsrPoolDomainYieldOp.cpp
   HipsrPoolDomainOp.cpp
+  HipsrConstantOp.cpp
   HipsrTraits.cpp
   HipsrTypes.cpp
 )
