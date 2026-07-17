@@ -40,9 +40,10 @@ template <typename T>::llvm::ArrayRef<T> ConstantOp::getDataValues() {
   // (numElements * elemByteWidth), never splat-optimized.
   if (auto dense =
           ::llvm::dyn_cast_or_null<::mlir::DenseElementsAttr>(getValueAttr())) {
-    if (dense.isSplat())
+    if (dense.isSplat()) {
       llvm_unreachable("splat DenseElementsAttr not supported "
                        "(MorphiZen never emits splat-optimized constants)");
+    }
     ::llvm::ArrayRef<char> raw = dense.getRawData();
     return ::llvm::ArrayRef<T>(reinterpret_cast<const T *>(raw.data()),
                                raw.size() / sizeof(T));
@@ -50,9 +51,10 @@ template <typename T>::llvm::ArrayRef<T> ConstantOp::getDataValues() {
 
   // Resource-backed inline value: not emitted by MorphiZen.
   if (::llvm::isa_and_nonnull<::mlir::DenseResourceElementsAttr>(
-          getValueAttr()))
+          getValueAttr())) {
     llvm_unreachable("DenseResourceElementsAttr not supported "
                      "(MorphiZen never emits this)");
+  }
 
   // External source: raw pointer (mem) or memory-mapped file (cached).
   if (::mlir::Attribute src = getSourceAttr()) {
