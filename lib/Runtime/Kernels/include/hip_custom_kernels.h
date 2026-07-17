@@ -670,6 +670,20 @@ HIP_KERNEL_API int hip_gqa_flash_prefill_v2(
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale);
 
+/* hip_mha_flash_prefill: fused non-causal FA-2 WMMA prefill for the MS
+ * MultiHeadAttention contrib op (self-attention, N_q == N_kv). Replaces the
+ * decomposed hipBLASLt pipeline that materializes the fp32 score matrix
+ * S[B,N,sq,skv] in DRAM (~3.4 GB for the Qwen VLM vision encoder). Keeps the
+ * running (m, l, O) softmax state in registers; K streamed from global, V/P
+ * staged in LDS; score/value GEMMs on the RDNA3.5 WMMA unit. Head dim d need
+ * not be a multiple of 16 (padded to next multiple, tail tile masked-loaded).
+ * Layout: Q [B,sq,N,d] (BSND); K/V cache [B,N,max_seq,d] (BNSD); O [B,sq,N,d].
+ * fp16 only, bidirectional (non-causal), past_len == 0. Returns 0 on success,
+ * -1 if the (padded) head dim is unsupported (> 256). */
+HIP_KERNEL_API int hip_mha_flash_prefill(
+    void* stream, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int N, int sq, int skv, int d, int max_seq, float scale);
+
 /* FA-2 split-K GQA decode (sq == 1, d in {64, 128}, HPG=H/G==4):
  * GQA-aware kernel that loads K/V tiles into LDS once and reuses them
  * across the 4 query heads of each KV group, then a second kernel
