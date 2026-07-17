@@ -47,13 +47,15 @@ def Hipsr_CastOp : Hipsr_DpsOp<"cast"> {
     Hipsr_TensorOrDeviceMemRef:$init
   );
 
-  // The shape region is optional: an empty (zero-block) region prints nothing
-  // and round-trips as empty. A non-empty region prints as
-  // `shape_region { ... }`.
+  // The result clause is optional so the op round-trips in both DPS forms
+  // (cf. Hip_DpsOp): tensor mode prints `-> tensor<...>`; the bufferized memref
+  // mode has no tensor result and omits it entirely. The shape region is
+  // likewise optional: an empty (zero-block) region prints nothing, a non-empty
+  // one prints as `shape_region { ... }`.
   let assemblyFormat = [{
     `ins` `(` $input `:` type($input) `)`
     `outs` `(` $init `:` type($init) `)`
-    attr-dict `->` type($result_tensors) (`shape_region` $shape_region^)?
+    attr-dict (`->` type($result_tensors)^)? (`shape_region` $shape_region^)?
   }];
 }
 
