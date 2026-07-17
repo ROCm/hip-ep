@@ -31,11 +31,12 @@ namespace {
 struct PopulateShapeRegionPass
     : impl::PopulateShapeRegionPassBase<PopulateShapeRegionPass> {
   void runOnOperation() override {
+    auto funcOp = getOperation();
     OpBuilder builder(&getContext());
     // populateShapeRegion() only adds ops inside the op's own (previously
     // empty) shape region; none of those implement ShapeRegionInterface, so
     // the walk neither re-visits nor re-populates them.
-    getOperation().walk([&](ShapeRegionInterface shapeRegionOp) {
+    funcOp.walk([&](ShapeRegionInterface shapeRegionOp) {
       Region &shapeRegion = shapeRegionOp.getShapeRegion();
       if (shapeRegion.empty())
         shapeRegionOp.populateShapeRegion(builder, shapeRegion);
