@@ -456,6 +456,29 @@ void hipdnn_ep_runtime_begin_compute(RuntimeState *state);
 // call is skipped (inference unaffected; the per-op block just won't print).
 void hipdnn_ep_runtime_flush_op_profile(RuntimeState *state);
 
+// Record an outer (whole-scope) CPU timing sample into the per-op profile
+// table (HIPDNN_EP_PERF). Called by the EP from MlirCustomOp::Compute AFTER
+// inference_compute returns (so it survives the per-inference op_profile_reset
+// that happens during input marshaling) and BEFORE
+// hipdnn_ep_runtime_flush_op_profile resolves the table.
+//
+// `cpu_ms` MUST be a std::chrono::steady_clock measurement (the same clock the
+// per-op `cpu (ms)` column uses) and `cpu_start_us` the absolute steady_clock
+// microseconds at which the scope began (same axis as the chrome-trace CPU
+// track). The intent is bubble detection: this records a CPU-only table row AND
+// an enclosing chrome-trace span so the per-op spans nest inside it -- the
+// uncovered width is the CPU time not attributed to any wrapper (marshaling,
+// launch/dispatch overhead, inter-op gaps, fence). Do NOT feed a hipEvent-
+// derived (GPU-timer) value here -- that clock is distinct from steady_clock,
+// so mixing them would conflate async offset and clock skew with the bubble.
+//
+// Backwards compatibility: same contract as hipdnn_ep_runtime_flush_op_profile
+// -- a model.dll predating this export resolves to a null pointer EP-side and
+// the call is skipped. No-op (single null check) when perf is disabled, so it
+// is safe to call unconditionally.
+void hipdnn_ep_runtime_add_cpu_profile(RuntimeState *state, const char *name,
+                                       double cpu_start_us, double cpu_ms);
+
 // Initialize memory pool in runtime state
 // Called by generated inference_init after creating RuntimeState
 // Parameters:
