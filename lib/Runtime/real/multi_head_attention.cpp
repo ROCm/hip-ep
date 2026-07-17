@@ -478,10 +478,10 @@ extern "C" int wrap_multi_head_attention(
   // score matrix S[B,N,Sq,Skv] (~3.4 GB here) in DRAM and is entirely
   // HBM-bandwidth bound. hip_mha_flash_prefill keeps the running softmax state
   // in registers and never writes S: only K/V need transposing to BNSD; Q and
-  // O stay in their native BSND layout (no Q/O transpose). Gated default-ON;
-  // set HIPDNN_EP_MHA_FLASH=0 for A/B isolation against the decomposed path.
-  if (hipdnn_ep_mha_flash_enabled() && Sq > 1 && unidirectional != 1 &&
-      (((H + 15) / 16) * 16) <= 256) {
+  // O stay in their native BSND layout (no Q/O transpose). Always on for
+  // eligible shapes; the decomposed path below still handles the ineligible
+  // cases (decode Sq==1, causal/unidirectional, head-dim>256).
+  if (Sq > 1 && unidirectional != 1 && (((H + 15) / 16) * 16) <= 256) {
     const size_t fa_align = 64;
     auto fa_align_up = [&](size_t v) {
       return (v + fa_align - 1) & ~(fa_align - 1);
