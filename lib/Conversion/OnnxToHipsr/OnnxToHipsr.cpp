@@ -33,6 +33,7 @@ struct ConvertOnnxToHipsrPass
   void runOnOperation() override {
     ::mlir::RewritePatternSet patterns(&getContext());
     populateOnnxToHipsrConstantPatterns(patterns);
+    populateCastConversionPatterns(patterns, &getContext());
 
     // Same driver/config as convert-onnx-to-hip (greedy, ExistingOps): ONNX ops
     // are matched by name and only the ops present on entry are rewritten, so
