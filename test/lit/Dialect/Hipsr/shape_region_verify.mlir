@@ -2,14 +2,34 @@
 // Licensed under the MIT License.
 //
 //===----------------------------------------------------------------------===//
-// Negative tests for the hipsr shape region, exercised through hipsr.cast.
-// Cover both the scoping rule (IsolatedFromAboveButAllowOperands trait) and the
-// structural rules (SingleBlock trait + ShapeRegionInterface verifier): the
-// region is optional, but when present it must be a single, non-empty block
-// terminated by hipsr.shape_yield.
+// Tests for the hipsr shape region, exercised through hipsr.cast. The region is
+// optional; when present it must be a single, non-empty block ending in
+// hipsr.shape_yield. Covered here:
+//   - positive: a cast with the region omitted round-trips
+//   - scoping: the region may only use the op's operands
+//     (IsolatedFromAboveButAllowOperands)
+//   - structure: 0-or-1 blocks, non-empty, hipsr.shape_yield terminator
+//     (SingleBlock trait + ShapeRegionInterface verifier)
 //===----------------------------------------------------------------------===//
 
-// RUN: hip-mlir-opt %s -split-input-file -verify-diagnostics
+// RUN: hip-mlir-opt %s -split-input-file -verify-diagnostics | FileCheck %s
+
+// Positive round-trip: a cast with the shape region OMITTED entirely parses,
+// verifies, and prints back with no `shape_region` keyword (the optional region
+// group prints nothing when the region has zero blocks). This is the exact form
+// the onnx->hipsr conversion emits, so IR without a shape region must read back
+// correctly.
+// CHECK-LABEL: func.func @cast_no_shape_region
+func.func @cast_no_shape_region(%input: tensor<?x8xf32>,
+                                %init: tensor<?x8xf16>) -> tensor<?x8xf16> {
+  // CHECK: hipsr.cast ins(%{{.+}} : tensor<?x8xf32>) outs(%{{.+}} : tensor<?x8xf16>) -> tensor<?x8xf16>
+  // CHECK-NOT: shape_region
+  %0 = hipsr.cast ins(%input : tensor<?x8xf32>)
+                  outs(%init : tensor<?x8xf16>) -> tensor<?x8xf16>
+  return %0 : tensor<?x8xf16>
+}
+
+// -----
 
 // A value defined in the enclosing function that is NOT one of the op's
 // operands is a disallowed outer capture: the trait verifier rejects it.
