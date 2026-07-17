@@ -472,6 +472,72 @@ extern "C" int wrap_multi_head_attention(
     return -1;
   }
 
+  // ---- Fused flash-attention prefill fast path -------------------------
+  // Non-causal self-attention prefill (the Qwen VLM vision encoder: B=1,
+  // N=16, Sq=Skv=7296, H=72). The decomposed path below materializes the fp32
+  // score matrix S[B,N,Sq,Skv] (~3.4 GB here) in DRAM and is entirely
+  // HBM-bandwidth bound. hip_mha_flash_prefill keeps the running softmax state
+  // in registers and never writes S: only K/V need transposing to BNSD; Q and
+  // O stay in their native BSND layout (no Q/O transpose). Gated default-ON;
+  // set HIPDNN_EP_MHA_FLASH=0 for A/B isolation against the decomposed path.
+  if (hipdnn_ep_mha_flash_enabled() && Sq > 1 && unidirectional != 1 &&
+      (((H + 15) / 16) * 16) <= 256) {
+    const size_t fa_align = 64;
+    auto fa_align_up = [&](size_t v) {
+      return (v + fa_align - 1) & ~(fa_align - 1);
+    };
+    const size_t sz_kv = fa_align_up((size_t)B * N * Skv * H * 2);
+    const size_t fa_ws = sz_kv * 2;
+    if (hipdnn_ep_state_ensure_workspace(state, fa_ws) != 0) {
+      fprintf(stderr,
+              "[multi_head_attention] ERROR: flash path failed to ensure "
+              "workspace of %zu bytes\n",
+              fa_ws);
+      return -1;
+    }
+    char *fa = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
+    if (!fa) {
+      fprintf(stderr,
+              "[multi_head_attention] ERROR: flash workspace pointer is null\n");
+      return -1;
+    }
+    void *d_Kbnsh = fa;
+    void *d_Vbnsh = fa + sz_kv;
+
+    // Transpose K/V from BSND [B,Skv,N,H] to BNSD [B,N,Skv,H] (fp16).
+    if (hip_gqa_transpose_mid_dims(stream, key, d_Kbnsh, static_cast<int>(B),
+                                   static_cast<int>(Skv), static_cast<int>(N),
+                                   static_cast<int>(H), 2) != 0 ||
+        hip_gqa_transpose_mid_dims(stream, value, d_Vbnsh, static_cast<int>(B),
+                                   static_cast<int>(Skv), static_cast<int>(N),
+                                   static_cast<int>(H), 2) != 0) {
+      fprintf(stderr,
+              "[multi_head_attention] ERROR: flash path K/V transpose failed\n");
+      return -1;
+    }
+
+    // Q is BSND [B,Sq,N,H] == the kernel's expected [B,sq,N,d]; O written in
+    // place (BSND). K/V cache is the just-transposed BNSD with max_seq = Skv.
+    int rc = hip_mha_flash_prefill(
+        stream, query, d_Kbnsh, d_Vbnsh, output, static_cast<int>(B),
+        static_cast<int>(N), static_cast<int>(Sq), static_cast<int>(Skv),
+        static_cast<int>(H), static_cast<int>(Skv), scale);
+    if (rc != 0) {
+      fprintf(stderr,
+              "[multi_head_attention] ERROR: hip_mha_flash_prefill failed "
+              "(rc=%d) for B=%lld N=%lld Sq=%lld Skv=%lld H=%lld\n",
+              rc, (long long)B, (long long)N, (long long)Sq, (long long)Skv,
+              (long long)H);
+      return -1;
+    }
+    RUNTIME_DEBUG_LOG(
+        "[multi_head_attention] flash success: B=%lld N=%lld Sq=%lld "
+        "Skv=%lld H=%lld scale=%.6f\n",
+        (long long)B, (long long)N, (long long)Sq, (long long)Skv, (long long)H,
+        (double)scale);
+    return 0;
+  }
+
   // ---- Scratch layout (all backed by the shared workspace buffer) ----
   // 64-byte aligned sub-buffers in a single contiguous allocation:
   //   [ Q_BNSH (fp16, B*N*Sq *H)        -- skipped when S_q==1

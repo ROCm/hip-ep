@@ -30,6 +30,18 @@ inline bool hipdnn_ep_matmul_dp4a_enabled() {
   return enabled;
 }
 
+// Fused FA-2 WMMA prefill for MultiHeadAttention (non-causal self-attention).
+// When enabled, eligible fp16 prefill MHA (sq>1, N_q==N_kv, bidirectional)
+// skips the decomposed hipBLASLt pipeline (which materializes the fp32 score
+// matrix in DRAM) and runs the fused flash-attention kernel instead.
+// DEFAULT-ON (so CI validates the optimization); set HIPDNN_EP_MHA_FLASH=0 to
+// force the decomposed path for A/B isolation. Latched on first read.
+inline bool hipdnn_ep_mha_flash_enabled() {
+  static const bool enabled =
+      hipdnn_ep::env_enabled_default_on("HIPDNN_EP_MHA_FLASH");
+  return enabled;
+}
+
 inline bool hipdnn_ep_perf_enabled() {
   // PERF intentionally does NOT inherit from HIPDNN_EP_DEBUG: enabling PERF
   // forces a hipStreamSynchronize on every inference (so hipEventElapsedTime
