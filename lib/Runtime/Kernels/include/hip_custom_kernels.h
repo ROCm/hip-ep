@@ -1332,14 +1332,34 @@ HIP_KERNEL_API int hip_transpose(
  * =========================================================================
  *
  * Computes Y = A @ dequant(B)^T + bias, where B holds packed quantized
- * weights.  Supports bits=4 (packed nibbles) and bits=8 (1 byte per
- * weight); other widths return an error.
+ * weights.  Supports bits=4 (packed nibbles), bits=8 (1 byte per weight),
+ * bits=3 (custom continuous-bitstream packing, exploratory), and bits=2
+ * (4 values per byte, LSB-first — same layout as ONNX MatMulNBits since 2
+ * divides 8 evenly); other widths return an error.
  *
  * Dequantization (per-block): dequant = (quant_val - zero_point) * scale
  * For 4-bit: lower nibble = first value, upper nibble = second.
  *            Default zero_point = 8 (when zero_points is NULL).
  * For 8-bit: B is unpacked uint8 of shape [N, K]; zero_points (when
  *            provided) is uint8 [N, k_blocks]; default zero_point = 128.
+ * For 2-bit: 4 values per byte, LSB-first (value k occupies bits [2k, 2k+2)
+ *            of row n's byte stream), [N, ceil(K*2/8)] bytes. Because 2
+ *            divides 8, this equals the ONNX MatMulNBits blockwise layout.
+ *            zero_points (when provided) is uint8 [N, k_blocks] (not
+ *            bit-packed); default zero_point = 2. Same three dispatch paths
+ *            as bits=3.
+ * For 3-bit: NOT an ONNX MatMulNBits convention — B is a continuous
+ *            per-row 3-bit bitstream, [N, ceil(K*3/8)] bytes; value k
+ *            occupies bits [3k, 3k+3) of row n, LSB-first. zero_points
+ *            (when provided) is uint8 [N, k_blocks] (not bit-packed);
+ *            default zero_point = 4. Three dispatch paths (mirrors
+ *            bits=8): an autotuned WMMA fast path for M >= 16 (batch=1,
+ *            K % 32 == 0, block_size % 32 == 0 and >= 32) with the 3-bit
+ *            stream decoded inline in the K-loop (no separate dequant
+ *            buffer — every 8-value chunk packs into exactly 3 bytes, so
+ *            the decode never crosses a byte boundary); an autotuned GEMV
+ *            for decode/small-M (block_size a power of two >= 32, K % 32
+ *            == 0); and a naive per-element fallback for anything else.
  *
  * Parameters:
  *   stream             - hipStream_t cast to void*
@@ -1347,16 +1367,18 @@ HIP_KERNEL_API int hip_transpose(
  *   B                  - GPU packed weights:
  *                          bits=4: [N, k_blocks, blob_size] uint8 packed int4
  *                          bits=8: [N, K] uint8 (no packing)
+ *                          bits=3: [N, ceil(K*3/8)] uint8, continuous 3-bit
+ *                                  bitstream per row (see above)
  *   scales             - GPU [N, k_blocks] (same type as A)
  *   zero_points        - GPU [N, k_blocks] uint8 (nullable; default zp=8
- *                        for bits=4, zp=128 for bits=8)
+ *                        for bits=4, zp=128 for bits=8, zp=4 for bits=3)
  *   bias               - GPU [N] (nullable, same type as A)
  *   output             - GPU [batch, M, N]
  *   M                  - rows per batch
  *   N                  - output columns
  *   K                  - inner dimension
  *   batch_count        - number of batches
- *   bits               - quantization bit-width (must be 4)
+ *   bits               - quantization bit-width (2, 3, 4, or 8)
  *   block_size         - quantization block size (e.g. 32)
  *   element_size_bytes - 2 for fp16, 4 for fp32
  *
@@ -1414,6 +1436,14 @@ HIP_KERNEL_API int hip_matmul_nbits_dp4a(
  *   groups_k:  K / block_size (round-up)
  */
 HIP_KERNEL_API void hip_matmul_nbits_unpack_zp_u8(
+    void* stream, const void* zp_packed, void* dst_u8, int N, int groups_k);
+/* Same as above but for the bits=2 packing (4 group zero_points per byte,
+ * [N, ceil(groups_k/4)] packed input). */
+HIP_KERNEL_API void hip_matmul_nbits_unpack_zp_u8_2bit(
+    void* stream, const void* zp_packed, void* dst_u8, int N, int groups_k);
+/* Same as above but for the bits=3 packing (continuous per-row 3-bit stream,
+ * [N, ceil(groups_k*3/8)] packed input). */
+HIP_KERNEL_API void hip_matmul_nbits_unpack_zp_u8_3bit(
     void* stream, const void* zp_packed, void* dst_u8, int N, int groups_k);
 HIP_KERNEL_API void hip_matmul_nbits_convert_zp_fp16(
     void* stream, const void* zp_packed, void* dst_fp16, int N, int groups_k);
