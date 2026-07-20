@@ -125,7 +125,7 @@ def make_morphizen_session_factory(repo_root, model_dir):
         # bitcode by default; HIPEP_ARTIFACT_FORMAT=NATIVE is an opt-in escape
         # hatch (per-model DLL) — normally unneeded. See apply_artifact_format.
         apply_artifact_format(so)
-        # profile=llm tells the AMDGPU umbrella to dispatch to the hipgpu backend.
+        # profile=hip tells the AMDGPU umbrella to dispatch to the hipgpu backend.
         so.add_provider_for_devices(devices, dict(EP_PROVIDER_OPTIONS))
         return ort.InferenceSession(str(model_dir / model_name), sess_options=so)
 
