@@ -262,6 +262,7 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
                 ${CMAKE_CURRENT_SOURCE_DIR}/runtime_state_internal.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/op_state.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/op_profile.h
+                ${CMAKE_CURRENT_SOURCE_DIR}/chrome_trace.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/debug_log.h
                 ${IMPL_DEPS}
                 ${CMAKE_BINARY_DIR}/schemas/model_metadata_generated.h
@@ -277,6 +278,7 @@ compile_to_bitcode(hipdnn_ep_runtime_tensor.cpp runtime_tensor.bc)
 compile_to_bitcode(hipdnn_ep_runtime_loop.cpp runtime_loop.bc)
 compile_to_bitcode(hipdnn_ep_runtime_if.cpp runtime_if.bc)
 compile_to_bitcode(op_profile.cpp runtime_op_profile.bc)
+compile_to_bitcode(chrome_trace.cpp runtime_chrome_trace.bc)
 compile_to_bitcode(output_allocator.cpp runtime_output_allocator.bc)
 # Op-state slots ABI + reference constructors. Shared (host-only allocation),
 # so the same TU serves both the real and mock runtimes.
@@ -362,6 +364,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_loop.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_if.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_profile.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_chrome_trace.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_output_allocator.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_memory.bc
@@ -450,6 +453,7 @@ else()
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_loop.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_if.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_profile.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_chrome_trace.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_output_allocator.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_state_stubs.bc

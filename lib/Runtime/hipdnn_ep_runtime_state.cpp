@@ -163,6 +163,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->qmoe_host_scratch_size = 0;
   state->conv_scratch = nullptr;
   state->conv_scratch_size = 0;
+  state->matmul_dp4a_scratch = nullptr;
+  state->matmul_dp4a_scratch_size = 0;
   state->zp_unpack_cache = nullptr;
   state->op_profile = hipdnn_ep_perf_enabled() ? op_profile_create() : nullptr;
   state->device_error_flag = nullptr;
@@ -710,6 +712,11 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     HIP_CLEANUP(hipFree(state->conv_scratch));
   }
 
+  // Free the W4A8 dp4a matmul_nbits scratch (if allocated).
+  if (state->matmul_dp4a_scratch) {
+    HIP_CLEANUP(hipFree(state->matmul_dp4a_scratch));
+  }
+
   // Tear down per-op state slots. Each entry's deletor destroys its concrete
   // type; slots reference nothing in other slots, so order is irrelevant. The
   // stream sync at the top has drained any in-flight op that may read a slot.
@@ -898,6 +905,26 @@ extern "C"
   }
   op_profile_resolve_and_print(
       static_cast<OpProfileState *>(state->op_profile));
+}
+
+// Outer (whole-scope) CPU timing sink for the EP. Same dllexport/optional
+// contract as the two hooks above. `cpu_ms` is a steady_clock measurement from
+// the EP side (see the header contract); op_profile_add_cpu records it as a
+// CPU-only row so the resolve/print step can surface the bubble against the
+// per-op CPU rows. No-op when perf is disabled (state->op_profile is null).
+extern "C"
+#ifdef _WIN32
+    __declspec(dllexport)
+#endif
+        void hipdnn_ep_runtime_add_cpu_profile(RuntimeState *state,
+                                               const char *name,
+                                               double cpu_start_us,
+                                               double cpu_ms) {
+  if (!state || !name) {
+    return;
+  }
+  op_profile_add_cpu_total(static_cast<OpProfileState *>(state->op_profile),
+                           name, cpu_start_us, cpu_ms);
 }
 
 //===----------------------------------------------------------------------===//
@@ -1337,6 +1364,50 @@ int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
     return -1;
   }
   state->conv_scratch_size = alloc_size;
+  return 0;
+}
+
+void *hipdnn_ep_state_get_matmul_dp4a_scratch(RuntimeState *state) {
+  return state ? state->matmul_dp4a_scratch : nullptr;
+}
+
+int hipdnn_ep_state_ensure_matmul_dp4a_scratch(RuntimeState *state,
+                                               size_t needed_size) {
+  if (!state)
+    return -1;
+  if (needed_size == 0)
+    return 0;
+  if (state->matmul_dp4a_scratch_size >= needed_size)
+    return 0;
+
+  // 1.5x growth amortisation mirrors conv_scratch / qmoe_scratch.
+  size_t alloc_size = needed_size;
+  if (state->matmul_dp4a_scratch_size > 0) {
+    size_t grown =
+        state->matmul_dp4a_scratch_size + state->matmul_dp4a_scratch_size / 2;
+    if (grown > alloc_size)
+      alloc_size = grown;
+  }
+
+  if (state->matmul_dp4a_scratch) {
+    // Drain any in-flight dp4a gemv that may still be reading the old buffer
+    // before we free it. Growth is rare (only when a larger K is first seen).
+    if (state->stream) {
+      hipStreamSynchronize(state->stream);
+    }
+    HIP_CLEANUP(hipFree(state->matmul_dp4a_scratch));
+    state->matmul_dp4a_scratch = nullptr;
+    state->matmul_dp4a_scratch_size = 0;
+  }
+
+  if (hipMalloc(&state->matmul_dp4a_scratch, alloc_size) != hipSuccess) {
+    fprintf(stderr,
+            "hipdnn_ep_state_ensure_matmul_dp4a_scratch: hipMalloc failed for "
+            "%zu bytes\n",
+            alloc_size);
+    return -1;
+  }
+  state->matmul_dp4a_scratch_size = alloc_size;
   return 0;
 }
 
