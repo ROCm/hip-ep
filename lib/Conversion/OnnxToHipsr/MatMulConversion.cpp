@@ -14,8 +14,7 @@ namespace hipsr {
 namespace {
 
 /// onnx.MatMul -> hipsr.matmul. The shape region is left empty here; a later
-/// pass populates every op's shape region uniformly (see populateShapeRegion,
-/// which also emits the K/batch checks).
+/// pass populates every op's shape region uniformly (see populateShapeRegion).
 ///
 /// Before:
 ///   %0 = "onnx.MatMul"(%A, %B) : (tensor<?x?xf16>, tensor<?x?xf16>)
