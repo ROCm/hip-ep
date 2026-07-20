@@ -198,7 +198,7 @@ implementation used by the CLI tools (`hip-compiler`, `hip-mlir-opt`).
 
 ## DLL Boundary Contracts
 
-The compiler and EP now live in the same repository (onnx-hipdnn-ep), but
+The compiler and EP now live in the same repository (hip-ep), but
 communicate through minimal C APIs at DLL boundaries:
 
 - **`hip-compiler.dll`** and **`morphizen-ep.dll`** are coupled only through

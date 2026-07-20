@@ -7,6 +7,8 @@
 #define HIPSR_TYPES
 
 include "mlir/IR/OpBase.td"
+include "mlir/IR/AttrTypeBase.td"
+include "hip/Dialect/Hipsr/IR/HipsrDialect.td"
 
 // Type constraints for ops that need a memref in a specific memory space.
 //
@@ -24,5 +26,18 @@ def Hipsr_TensorOrHostMemRef    : AnyTypeOf<[AnyRankedTensor, Hipsr_HostMemRef],
 def Hipsr_TensorOrDeviceMemRef  : AnyTypeOf<[AnyRankedTensor, Hipsr_DeviceMemRef],  "ranked tensor or device memref">;
 def Hipsr_TensorOrPinnedMemRef  : AnyTypeOf<[AnyRankedTensor, Hipsr_PinnedMemRef],  "ranked tensor or pinned memref">;
 def Hipsr_TensorOrManagedMemRef : AnyTypeOf<[AnyRankedTensor, Hipsr_ManagedMemRef], "ranked tensor or managed memref">;
+
+// Base class for hipsr types.
+class Hipsr_Type<string name, string typeMnemonic> : TypeDef<Hipsr_Dialect, name> {
+  let mnemonic = typeMnemonic;
+}
+
+def Hipsr_ContextType : Hipsr_Type<"Context", "context"> {
+  let summary = "Opaque hipsr execution context";
+  let description = [{
+    Opaque per-session context. hipsr ops take it as their first operand.
+    Lowers to `!llvm.ptr`.
+  }];
+}
 
 #endif // HIPSR_TYPES

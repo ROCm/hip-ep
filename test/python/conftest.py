@@ -1492,7 +1492,9 @@ def setup_oga_ep(repo_root):
 
     global _oga_ep_registered
     if not _oga_ep_registered:
-        og.register_execution_provider_library(EP_OGA_NAME, str(ep_dll))
+        # OGA genai_config uses the provider key `AMDGPU`, but the plugin registers
+        # devices under the lowercase `amdgpu` name. need fix later
+        og.register_execution_provider_library(EP_OGA_NAME.lower(), str(ep_dll))
         _oga_ep_registered = True
 
     return og, ep_dll
@@ -2664,6 +2666,164 @@ class BaseOGATests:
             print(f"{'=' * 60}")
         finally:
             del generator
+            gc.collect()
+
+    def test_oga_ep_context_cache_reusing_rewind_pending_token(self, oga_default_model):
+        """
+        context cache reusing feature test
+        step 1: send Q1, get A1, send Q2, get A2
+        step 2: send full(Q1+A1+Q2), get A2_new
+        step 3: veryfy A2==A2_new
+
+        Fixed-count multi-turn reuse, rewinding away a pending token.
+
+        If the first turn stops because of a token-count limit rather than EOS,
+        the final generated token is present in OGA's sequence but has not been
+        consumed by the model yet. Rewind by one token before appending Q2 so
+        the reused KV cache and the replayed full context describe the same
+        effective sequence.
+        This is oga feature/bug caused by PR1814:
+        the last token in previous chat is not put in kvcache.
+        """
+        spec = self.spec
+        og, model = oga_default_model
+        tokenizer = og.Tokenizer(model)
+
+        turn1_prompt = (
+            " User: My name is Alice. I live in Berlin.\n"
+            "Assistant: I will remember that.\n"
+        )
+        turn2_prompt = " User: Where do I live?\nAssistant:"
+        turn1_tokens = [int(t) for t in tokenizer.encode(turn1_prompt)]
+        turn2_tokens = [int(t) for t in tokenizer.encode(turn2_prompt)]
+        turn1_limit = 200
+        turn2_limit = 200
+        max_length = max(
+            spec.max_seq_len,
+            len(turn1_tokens) + turn1_limit + len(turn2_tokens) + turn2_limit + 16,
+        )
+
+        def make_generator():
+            params = og.GeneratorParams(model)
+            params.set_search_options(
+                max_length=max_length,
+                min_length=0,
+                do_sample=False,  # for exact compare of model output
+                repetition_penalty=1.15,
+            )
+            return og.Generator(model, params)
+
+        def generate_up_to(generator, limit, label, ttft_start=None):
+            generated = []
+            pieces = []
+            stream = tokenizer.create_stream()
+            ttft_ms = None
+            print(f"  {label}=", end="", flush=True)
+            for step in range(limit):
+                generator.generate_next_token()
+                if step == 0 and ttft_start is not None:
+                    ttft_ms = (time.perf_counter() - ttft_start) * 1000
+                if generator.is_done():
+                    print("", flush=True)
+                    print(
+                        f"  {label}_debug stopped_by=eos step={step} "
+                        f"generated={len(generated)} ttft_ms={ttft_ms}",
+                        flush=True,
+                    )
+                    return generated, "".join(pieces), True, ttft_ms
+                token = int(generator.get_next_tokens()[0])
+                generated.append(token)
+                piece = stream.decode(token)
+                pieces.append(piece)
+                print(piece, end="", flush=True)
+            print("", flush=True)
+            print(
+                f"  {label}_debug stopped_by=limit limit={limit} "
+                f"generated={len(generated)} is_done={generator.is_done()} "
+                f"ttft_ms={ttft_ms}",
+                flush=True,
+            )
+            return generated, "".join(pieces), False, ttft_ms
+
+        split_gen = make_generator()
+        full_gen = make_generator()
+        try:
+            print(f"\n{'=' * 60}")
+            print("OGA EP context-cache fixed-count rewind vs full replay")
+            print(f"  Q1={turn1_prompt!r}")
+            print(f"  Q2={turn2_prompt!r}")
+            print(
+                f"  max_length={max_length} turn1_limit={turn1_limit} "
+                f"turn2_limit={turn2_limit} turn1_tokens={len(turn1_tokens)} "
+                f"turn2_tokens={len(turn2_tokens)}"
+            )
+
+            q1_ttft_start = time.perf_counter()
+            split_gen.append_tokens(np.array(turn1_tokens, dtype=np.int32))
+            turn1_generated, turn1_text, turn1_eos, q1_ttft_ms = generate_up_to(
+                split_gen, turn1_limit, "A1", q1_ttft_start
+            )
+
+            if turn1_eos:
+                effective_turn1_generated = turn1_generated
+                print("  split: A1 ended by EOS; no rewind needed", flush=True)
+            else:
+                if not turn1_generated:
+                    pytest.skip("first turn produced no token before limit")
+                effective_turn1_generated = turn1_generated[:-1]
+                rewind_len = len(turn1_tokens) + len(effective_turn1_generated)
+                print(
+                    f"  split: rewinding from len="
+                    f"{len(turn1_tokens) + len(turn1_generated)} to "
+                    f"rewind_len={rewind_len} to drop pending token "
+                    f"{turn1_generated[-1]}",
+                    flush=True,
+                )
+                split_gen.rewind_to(rewind_len)
+
+            effective_context = turn1_tokens + effective_turn1_generated + turn2_tokens
+            if len(effective_context) + turn2_limit >= max_length:
+                pytest.skip("not enough max_length budget for fixed-count turn2")
+
+            q2_ttft_start = time.perf_counter()
+            split_gen.append_tokens(np.array(turn2_tokens, dtype=np.int32))
+            split_generated, split_text, split_eos, q2_ttft_ms = generate_up_to(
+                split_gen, turn2_limit, "A2", q2_ttft_start
+            )
+
+            full_ttft_start = time.perf_counter()
+            full_gen.append_tokens(np.array(effective_context, dtype=np.int32))
+            full_generated, full_text, full_eos, full_ttft_ms = generate_up_to(
+                full_gen, turn2_limit, "A2_new", full_ttft_start
+            )
+
+            print(f"\n{'=' * 60}")
+            print("OGA EP context-cache fixed-count rewind vs full replay summary")
+            print(f"  Q1={turn1_prompt!r}")
+            print(f"  A1={turn1_text!r}")
+            print(f"  A1_tokens={turn1_generated}")
+            print(f"  A1_eos={turn1_eos}")
+            print(f"  effective_A1_tokens={effective_turn1_generated}")
+            print(f"  Q2={turn2_prompt!r}")
+            print(f"  A2={split_text!r}")
+            print(f"  A2_new={full_text!r}")
+            print(f"  A2_tokens={split_generated}")
+            print(f"  A2_new_tokens={full_generated}")
+            print(f"  A2_eos={split_eos} A2_new_eos={full_eos}")
+            print(
+                f"  ttft_ms: Q1={q1_ttft_ms:.1f} "
+                f"Q2={q2_ttft_ms:.1f} full={full_ttft_ms:.1f}"
+            )
+            print(f"  full_Q1A1Q2={tokenizer.decode(effective_context)!r}")
+            print(f"{'=' * 60}")
+
+            assert split_generated == full_generated, (
+                "Continuous OGA append with rewind(len-1) produced different "
+                "tokens than replaying the same effective Q1+A1+Q2 context"
+            )
+        finally:
+            del split_gen
+            del full_gen
             gc.collect()
 
     def test_oga_ep_chunked_prefill(self, dynamic_model_path, repo_root, golden_store):

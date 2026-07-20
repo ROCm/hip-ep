@@ -264,7 +264,7 @@ one class of contribution that also works dynamically into a prebuilt host.
 ### Deploying plugins with a prebuilt host
 
 Because static plugins are chosen at the host's configure time, a downstream
-builds `onnx-hipdnn-ep` itself (which it already does to target its GPU arch and
+builds `hip-ep` itself (which it already does to target its GPU arch and
 per-target kernels) and adds its plugin id to `HIPDNN_EP_COMPILER_PLUGINS`.
 There is no runtime drop-in of an MLIR plugin into an already-shipped host: that
 would require the dynamic-load boundary this design deliberately avoids.
@@ -275,7 +275,7 @@ contributions, which cross a pure C boundary.
 ## What a downstream team does
 
 A downstream team builds its plugin as a static library alongside its own
-build of `onnx-hipdnn-ep` (no fork of the public repo is required). The files a
+build of `hip-ep` (no fork of the public repo is required). The files a
 full-stack plugin (custom op + kernel) writes:
 
 | File | Role |
@@ -297,7 +297,7 @@ wrapper).
 
 ### 1. Build alongside the host
 
-A plugin is built in the same CMake build as `onnx-hipdnn-ep` and uses its
+A plugin is built in the same CMake build as `hip-ep` and uses its
 public headers:
 
 ```
@@ -398,13 +398,13 @@ as a native DLL); the kernel library is added to the native link.
 
 ### 5. Build the plugin (a static library selected into the host build)
 
-The plugin is built as part of the same CMake build as `onnx-hipdnn-ep` (a
+The plugin is built as part of the same CMake build as `hip-ep` (a
 downstream adds its plugin directory to that build, or builds the host as a
 subproject). It builds a **static** library, registers it as available, and is
 selected with `-DHIPDNN_EP_COMPILER_PLUGINS=myvendor`.
 
 ```cmake
-# CMakeLists.txt (in the downstream's build of onnx-hipdnn-ep).
+# CMakeLists.txt (in the downstream's build of hip-ep).
 find_package(MLIR CONFIG REQUIRED)   # the SAME MLIR the host is built against
 
 # (a) Compile the runtime wrapper to LLVM bitcode and embed it as a byte array
@@ -436,7 +436,7 @@ semicolon-separated list of out-of-tree plugin source dirs — each is
 its id; `HIPDNN_EP_COMPILER_PLUGINS` then selects which registered ids to link:
 
 ```
-cmake -S onnx-hipdnn-ep -B build \
+cmake -S hip-ep -B build \
   -DBUILD_HIP_TOOLS=ON \
   -DHIPDNN_EP_COMPILER_PLUGIN_PATHS=<your plugin repo> \
   -DHIPDNN_EP_COMPILER_PLUGINS=myvendor ...

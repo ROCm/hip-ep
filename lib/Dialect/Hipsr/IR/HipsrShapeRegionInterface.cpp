@@ -7,21 +7,36 @@
 
 #include "hip/Dialect/Hipsr/IR/HipsrShapeYieldOp.h"
 
-#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/STLExtras.h"
 
 using namespace mlir;
 using namespace mlir::hipsr;
+
+namespace {
+// Get the `hipsr.shape_yield` at the end of a (populated) shape region.
+ShapeYieldOp getShapeYieldOp(Region &shapeRegion) {
+  assert(!shapeRegion.empty() &&
+         "shape region must be populated before reading its shape_yield");
+  return cast<ShapeYieldOp>(shapeRegion.front().getTerminator());
+}
+} // namespace
 
 LogicalResult mlir::hipsr::verifyShapeRegionStructure(Operation *op) {
   if (op->getNumRegions() == 0)
     return op->emitOpError("expected a shape region (region 0)");
 
   Region &shapeRegion = op->getRegion(0);
+
+  // The shape region is optional: an empty region (0 blocks) means the op
+  // carries no shape computation. When present it must have exactly one block.
+  if (shapeRegion.empty())
+    return success();
+
   if (!shapeRegion.hasOneBlock())
     return op->emitOpError("shape region must have exactly one block");
 
   Block &block = shapeRegion.front();
-  if (block.empty() || !block.back().hasTrait<OpTrait::IsTerminator>())
+  if (block.empty() || !block.back().hasTrait<mlir::OpTrait::IsTerminator>())
     return op->emitOpError("shape region block must end with a terminator");
 
   if (!isa<ShapeYieldOp>(block.back()))
@@ -29,49 +44,35 @@ LogicalResult mlir::hipsr::verifyShapeRegionStructure(Operation *op) {
                "shape region must terminate with hipsr.shape_yield, "
                "got '")
            << block.back().getName()
-           << "'; did you forget the "
-              "SingleBlockImplicitTerminator<\"ShapeYieldOp\"> trait?";
+           << "'; a non-empty shape region block must end with "
+              "hipsr.shape_yield";
 
   return success();
 }
 
-LogicalResult mlir::hipsr::verifyShapeRegionScoping(Operation *op) {
-  Region &shapeRegion = op->getRegion(0);
-  if (shapeRegion.empty())
-    return success();
+SmallVector<SmallVector<Value>>
+mlir::hipsr::getShapeRegionResultShapes(Region &shapeRegion) {
+  ShapeYieldOp yieldOp = getShapeYieldOp(shapeRegion);
+  SmallVector<SmallVector<Value>> dims;
+  for (OperandRange group : yieldOp.getShapes())
+    dims.emplace_back(group.begin(), group.end());
+  return dims;
+}
 
-  // Values the shape region is allowed to reference from outside itself: the
-  // op's own operands (%ctx, inputs, outs, ...).
-  DenseSet<Value> allowedValues;
-  for (Value operand : op->getOperands())
-    allowedValues.insert(operand);
-
-  auto walkResult = shapeRegion.walk([&](Operation *innerOp) -> WalkResult {
-    for (Value operand : innerOp->getOperands()) {
-      // Block arguments (EndBarrier ops receive their results): fine.
-      if (isa<BlockArgument>(operand))
-        continue;
-      // Values (op results or block arguments) defined inside the shape
-      // region, directly or in a nested region (e.g. an scf.for used to
-      // compute a dim), are always fine. This also covers the shape region's
-      // own block arguments, which EndBarrier ops receive their results
-      // through; block arguments captured from an enclosing region are not an
-      // ancestor of the shape region and fall through to the operand check.
-      Region *definingRegion = operand.getParentRegion();
-      if (definingRegion && shapeRegion.isAncestor(definingRegion))
-        continue;
-      // Otherwise the value must be one of the op's own operands.
-      if (!allowedValues.contains(operand)) {
-        op->emitOpError("shape region references disallowed outer value")
-                .attachNote(innerOp->getLoc())
-            << "used here by '" << innerOp->getName() << "'";
-        return WalkResult::interrupt();
-      }
-    }
-    return WalkResult::advance();
-  });
-
-  return failure(walkResult.wasInterrupted());
+SmallVector<RankedTensorType>
+mlir::hipsr::getShapeRegionResultTypes(Region &shapeRegion) {
+  ShapeYieldOp yieldOp = getShapeYieldOp(shapeRegion);
+  SmallVector<RankedTensorType> types;
+  for (auto [group, elemType] :
+       llvm::zip_equal(yieldOp.getShapes(),
+                       yieldOp.getElementTypes().getAsValueRange<TypeAttr>())) {
+    // Mark every extent dynamic and keep only the rank and element type. When a
+    // dim value is a constant, the tensor.empty canonicalizer folds it back to
+    // a static extent later, so nothing is lost.
+    SmallVector<int64_t> shape(group.size(), ShapedType::kDynamic);
+    types.push_back(RankedTensorType::get(shape, elemType));
+  }
+  return types;
 }
 
 #include "hip/Dialect/Hipsr/IR/HipsrShapeRegionInterface.cpp.inc"

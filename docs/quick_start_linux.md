@@ -39,17 +39,17 @@ docker's `--device=/dev/kfd`, and the container entrypoint
 ([`docker/entrypoint.sh`](../docker/entrypoint.sh)) detects the host GID
 on `/dev/kfd` and adds the in-container user to that group automatically.
 
-All commands below assume you are in `<workspace>/onnx-hipdnn-ep/` (the
+All commands below assume you are in `<workspace>/hip-ep/` (the
 project root). The build writes to sibling directories under `<workspace>/`
 (`build/`, `install/`); the Docker path auto-mounts the whole workspace. The
 TheRock ROCm SDK is auto-downloaded into the build tree at
-`build/onnx-hipdnn-ep/_therock/`.
+`build/hip-ep/_therock/`.
 
 ## Build from source (developers)
 
 ```bash
-git clone https://github.com/ROCm/onnx-hipdnn-ep.git
-cd onnx-hipdnn-ep
+git clone https://github.com/ROCm/hip-ep.git
+cd hip-ep
 ```
 
 ### Native (no Docker)
@@ -105,16 +105,16 @@ A ready-to-run package is published for each green build. It contains every
 the host. Download it with `gh` (no compile needed):
 
 ```bash
-git clone https://github.com/ROCm/onnx-hipdnn-ep.git
-cd onnx-hipdnn-ep
+git clone https://github.com/ROCm/hip-ep.git
+cd hip-ep
 ./docker/run.sh image    # skip if the image is already built
 
 # Pick the latest green run from
-# https://github.com/ROCm/onnx-hipdnn-ep/actions/workflows/linux-build.yml
+# https://github.com/ROCm/hip-ep/actions/workflows/linux-build.yml
 RUN_ID=<paste-id>
 mkdir -p ../prebuilt/$RUN_ID
 ( cd ../prebuilt/$RUN_ID && \
-    gh run download $RUN_ID --repo ROCm/onnx-hipdnn-ep \
+    gh run download $RUN_ID --repo ROCm/hip-ep \
         --name linux-gpu-test-package --dir . && \
     chmod +x bin/* )
 ```
@@ -140,7 +140,7 @@ export ROOT="$WORKSPACE/install"            # built from source
 
 # THEROCK_DIST points the in-process tooling at the TheRock SDK that
 # `cmake/deps.cmake` auto-downloaded into the build tree at
-# $WORKSPACE/build/onnx-hipdnn-ep/_therock during the build. It is
+# $WORKSPACE/build/hip-ep/_therock during the build. It is
 # required at runtime even though the prebuilt package bundles transitive .so
 # files into $ROOT/lib, because:
 #   1. CompilerDriver::discoverLibraries() reads $THEROCK_DIST to
