@@ -155,7 +155,8 @@ extern "C" int wrap_gather_block_quantized(
   }
   for (int64_t i = 0; i < data_rank; ++i)
     logical_data_shape_buf[i] = data_shape[i];
-  if (bits == 4 && data_rank > 0)
+  if (bits == 4 && scales_shape[quantize_axis_n] * block_size ==
+                       data_shape[quantize_axis_n] * 2)
     logical_data_shape_buf[data_rank - 1] *= 2;
   const int64_t *logical_data_shape = logical_data_shape_buf;
 
