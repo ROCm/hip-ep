@@ -6,9 +6,8 @@
 //
 // Converts ONNX dialect IR into hipsr dialect IR (tensor DPS). ONNX ops are
 // matched by name via the generic MLIR Operation API, so no onnx-mlir headers
-// are required. Each shaped op fills its shape region through
-// ShapeRegionInterface::populateShapeRegion(), so this pass exercises that
-// single-source-of-truth path.
+// are required. Each pattern emits the hipsr op with its shape region left
+// empty; a later pass fills the region via ShapeRegionInterface.
 //
 //===----------------------------------------------------------------------===//
 

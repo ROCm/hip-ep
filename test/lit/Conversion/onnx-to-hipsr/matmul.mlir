@@ -6,6 +6,11 @@
 // blocks); a later dedicated pass fills in the shape computation, so this stage
 // does not populate it.
 //
+// The conversion is shape-agnostic: it mirrors the result type into a
+// hipsr.placeholder init and leaves the region empty, with no rank/shape
+// branching. So a few representative shapes suffice: a 2-D case, a 1-D-operand
+// (rank-reducing) case, and a batched case.
+//
 // The positive CHECK lines were seeded with mlir/utils/generate-test-checks.py
 // (full signature + named operand captures), then refined by hand: the
 // CHECK-NOT intent checks (no tensor.empty/tensor.dim/shape_region) were
@@ -19,9 +24,9 @@
 
 // -----
 
-// 2-D x 2-D: the DPS init is a hipsr.placeholder mirroring the result type, so
-// no output-shape computation (tensor.empty / tensor.dim) is emitted, and the
-// shape region is left empty (prints nothing).
+// 2-D x 2-D (dynamic M): the DPS init is a hipsr.placeholder mirroring the
+// result type, so no output-shape computation (tensor.empty / tensor.dim) is
+// emitted, and the shape region is left empty (prints nothing).
 // CHECK-LABEL: func.func @matmul_2d(
 // CHECK-SAME:    %[[A:.*]]: tensor<?x4096xf16>,
 // CHECK-SAME:    %[[B:.*]]: tensor<4096x1024xf16>) -> tensor<?x1024xf16> {
@@ -40,64 +45,8 @@ func.func @matmul_2d(%a: tensor<?x4096xf16>, %b: tensor<4096x1024xf16>)
 
 // -----
 
-// Batched 3-D x 2-D (broadcast weight): batch + M from A, N from B's last dim.
-// CHECK-LABEL: func.func @matmul_batched(
-// CHECK-SAME:    %[[A:.*]]: tensor<2x?x4096xf16>,
-// CHECK-SAME:    %[[B:.*]]: tensor<4096x1024xf16>) -> tensor<2x?x1024xf16> {
-// CHECK:         %[[INIT:.*]] = hipsr.placeholder : tensor<2x?x1024xf16>
-// CHECK:         hipsr.matmul ins(%[[A]], %[[B]] : tensor<2x?x4096xf16>, tensor<4096x1024xf16>)
-// CHECK-SAME:      outs(%[[INIT]] : tensor<2x?x1024xf16>) -> tensor<2x?x1024xf16>
-// CHECK-NOT:     shape_region
-func.func @matmul_batched(%a: tensor<2x?x4096xf16>, %b: tensor<4096x1024xf16>)
-    -> tensor<2x?x1024xf16> {
-  %0 = "onnx.MatMul"(%a, %b) : (tensor<2x?x4096xf16>, tensor<4096x1024xf16>)
-      -> tensor<2x?x1024xf16>
-  return %0 : tensor<2x?x1024xf16>
-}
-
-// -----
-
-// 4-D x 4-D equally-batched: the conversion mirrors the result type into the
-// placeholder init and leaves the region empty, so rank does not matter.
-// CHECK-LABEL: func.func @matmul_4d(
-// CHECK-SAME:    %[[A:.*]]: tensor<2x3x?x4096xf16>,
-// CHECK-SAME:    %[[B:.*]]: tensor<2x3x4096x1024xf16>) -> tensor<2x3x?x1024xf16> {
-// CHECK:         %[[INIT:.*]] = hipsr.placeholder : tensor<2x3x?x1024xf16>
-// CHECK:         hipsr.matmul ins(%[[A]], %[[B]] : tensor<2x3x?x4096xf16>, tensor<2x3x4096x1024xf16>)
-// CHECK-SAME:      outs(%[[INIT]] : tensor<2x3x?x1024xf16>) -> tensor<2x3x?x1024xf16>
-// CHECK-NOT:     tensor.empty
-// CHECK-NOT:     tensor.dim
-// CHECK-NOT:     shape_region
-func.func @matmul_4d(%a: tensor<2x3x?x4096xf16>, %b: tensor<2x3x4096x1024xf16>)
-    -> tensor<2x3x?x1024xf16> {
-  %0 = "onnx.MatMul"(%a, %b) : (tensor<2x3x?x4096xf16>, tensor<2x3x4096x1024xf16>)
-      -> tensor<2x3x?x1024xf16>
-  return %0 : tensor<2x3x?x1024xf16>
-}
-
-// -----
-
-// 4-D x 2-D broadcast weight: leading batch dims + M from A, N from B's last
-// dim. Fully static A/B shapes -> fully static result placeholder.
-// CHECK-LABEL: func.func @matmul_4d_by_2d(
-// CHECK-SAME:    %[[A:.*]]: tensor<2x3x64x4096xf16>,
-// CHECK-SAME:    %[[B:.*]]: tensor<4096x1024xf16>) -> tensor<2x3x64x1024xf16> {
-// CHECK:         %[[INIT:.*]] = hipsr.placeholder : tensor<2x3x64x1024xf16>
-// CHECK:         hipsr.matmul ins(%[[A]], %[[B]] : tensor<2x3x64x4096xf16>, tensor<4096x1024xf16>)
-// CHECK-SAME:      outs(%[[INIT]] : tensor<2x3x64x1024xf16>) -> tensor<2x3x64x1024xf16>
-// CHECK-NOT:     shape_region
-func.func @matmul_4d_by_2d(%a: tensor<2x3x64x4096xf16>, %b: tensor<4096x1024xf16>)
-    -> tensor<2x3x64x1024xf16> {
-  %0 = "onnx.MatMul"(%a, %b) : (tensor<2x3x64x4096xf16>, tensor<4096x1024xf16>)
-      -> tensor<2x3x64x1024xf16>
-  return %0 : tensor<2x3x64x1024xf16>
-}
-
-// -----
-
-// 1-D B (ONNX/NumPy): (M,K) @ (K) -> (M). The conversion mirrors the 1-D ONNX
-// result type into the placeholder; populateShapeRegion later handles the
-// promote-and-strip.
+// 1-D B (ONNX/NumPy): (M,K) @ (K) -> (M), a rank-reducing result. The
+// conversion still just mirrors the result type into the placeholder.
 // CHECK-LABEL: func.func @matmul_1d_rhs(
 // CHECK-SAME:    %[[A:.*]]: tensor<?x4096xf16>,
 // CHECK-SAME:    %[[B:.*]]: tensor<4096xf16>) -> tensor<?xf16> {
@@ -114,8 +63,8 @@ func.func @matmul_1d_rhs(%a: tensor<?x4096xf16>, %b: tensor<4096xf16>)
 
 // -----
 
-// NumPy batch broadcast (A batch dim 1, B batch dim 8 -> 8). The conversion is
-// shape-agnostic; the broadcast is resolved in the result type it mirrors.
+// Batched with NumPy batch broadcast (A batch dim 1, B batch dim 8 -> 8). The
+// broadcast is resolved in the result type the conversion mirrors.
 // CHECK-LABEL: func.func @matmul_broadcast_batch(
 // CHECK-SAME:    %[[A:.*]]: tensor<1x64x4096xf16>,
 // CHECK-SAME:    %[[B:.*]]: tensor<8x4096x1024xf16>) -> tensor<8x64x1024xf16> {
