@@ -51,21 +51,15 @@ module {
   // CHECK-LABEL: llvm.func @test_qmoe_with_bias
   // CHECK: llvm.call @wrap_qmoe({{.*}}) :
   // CHECK-SAME: (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
-  // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
-  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, f32, i64, i64,
-  // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
-  // Verify 39 parameters:
-  // - 17 pointers: state, input, router, router_weights(null), fc1_w, fc1_s, fc1_b,
-  //                fc2_w, fc2_s, fc2_b, fc3_w(null), fc3_s(null), fc3_b(null),
-  //                fc1_zp(null), fc2_zp(null), fc3_zp(null), output
-  // - 9 i64 + 3 f32 + 2 i64: num_tokens, hidden_size, inter_size, num_experts, k,
+  // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
+  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, f32, i64, i64) -> i32
+  // Verify 30 parameters:
+  // - 16 pointers: state, input, router, fc1_w, fc1_s, fc1_b, fc2_w, fc2_s, fc2_b,
+  //                fc3_w(null), fc3_s(null), fc3_b(null), fc1_zp(null), fc2_zp(null), fc3_zp(null), output
+  // - 11 i64 + 3 f32: num_tokens, hidden_size, inter_size, num_experts, k,
   //                    expert_weight_bits, block_size, swiglu_fusion, activation_type,
   //                    activation_alpha, activation_beta, swiglu_limit,
   //                    normalize_routing_weights, elem_size
-  // - 5 pointers + 3 i64 (router-gate fp32 recompute, all null/0 here):
-  //                    router_input, router_gate_weight, router_gate_scales,
-  //                    router_gate_zero_points, router_gate_bias, router_k,
-  //                    router_gate_bits, router_gate_block_size
 
   // ===== Test 2: QMoE without optional biases =====
 
@@ -96,8 +90,7 @@ module {
   // CHECK-LABEL: llvm.func @test_qmoe_no_bias
   // CHECK: llvm.call @wrap_qmoe({{.*}}) :
   // CHECK-SAME: (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
-  // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
-  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, f32, i64, i64,
-  // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64) -> i32
+  // CHECK-SAME:  !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr,
+  // CHECK-SAME:  i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f32, f32, i64, i64) -> i32
   // Optional pointers (fc1_b, fc2_b, fc3_*, zero_points) should be null
 }

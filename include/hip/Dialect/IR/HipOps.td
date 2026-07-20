@@ -890,18 +890,6 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe",
     Optional<Hip_TensorOrMemRef>:$fc2_zero_points,        // fc2 dequant zero points
     Optional<Hip_TensorOrMemRef>:$fc3_zero_points,        // fc3 dequant zero points
     Optional<Hip_TensorOrMemRef>:$router_weights,         // [num_tokens, num_experts] alternative routing weights (ONNX v1.25+)
-    // Optional fp32 router-gate recomputation inputs. When present, QMoE
-    // recomputes the router projection (router_proj MatMulNBits), softmax and
-    // top-k selection internally in fp32 instead of consuming the fp16
-    // `router_probs`. This matches the ORT CPU reference (whose inserted
-    // PrecisionFreeCast nodes run the router path in fp32) and removes the
-    // fp16 top-k routing divergence at near-tied gate boundaries. These carry
-    // the ORIGINAL operands of the upstream router_proj MatMulNBits.
-    Optional<Hip_TensorOrMemRef>:$router_input,               // [num_tokens, router_k] pre-projection router activation
-    Optional<Hip_TensorOrMemRef>:$router_gate_weight,         // [num_experts, router_k/pack] Q4 packed router_proj weight
-    Optional<Hip_TensorOrMemRef>:$router_gate_scales,         // [num_experts, router_k/router_bs]
-    Optional<Hip_TensorOrMemRef>:$router_gate_zero_points,    // (nullable) packed uint4 zero points
-    Optional<Hip_TensorOrMemRef>:$router_gate_bias,           // (nullable) [num_experts] fp16 per-expert bias (onnx.Add after router_proj)
     Hip_TensorOrMemRef:$output,                 // DPS init [batch, seq, hidden]
     I64Attr:$expert_weight_bits,
     I64Attr:$k,
@@ -912,10 +900,7 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe",
     F32Attr:$activation_alpha,
     F32Attr:$activation_beta,
     F32Attr:$swiglu_limit,
-    StrAttr:$activation_type,
-    // Router-gate quantization params (0 = router-gate recomputation disabled).
-    DefaultValuedAttr<I64Attr, "0">:$router_gate_bits,
-    DefaultValuedAttr<I64Attr, "0">:$router_gate_block_size
+    StrAttr:$activation_type
   );
 
   let assemblyFormat = [{
@@ -936,11 +921,6 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe",
     (`fc2_zero_points` `(` $fc2_zero_points^ `:` type($fc2_zero_points) `)`)?
     (`fc3_zero_points` `(` $fc3_zero_points^ `:` type($fc3_zero_points) `)`)?
     (`router_weights` `(` $router_weights^ `:` type($router_weights) `)`)?
-    (`router_input` `(` $router_input^ `:` type($router_input) `)`)?
-    (`router_gate_weight` `(` $router_gate_weight^ `:` type($router_gate_weight) `)`)?
-    (`router_gate_scales` `(` $router_gate_scales^ `:` type($router_gate_scales) `)`)?
-    (`router_gate_zero_points` `(` $router_gate_zero_points^ `:` type($router_gate_zero_points) `)`)?
-    (`router_gate_bias` `(` $router_gate_bias^ `:` type($router_gate_bias) `)`)?
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];

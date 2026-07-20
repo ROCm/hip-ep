@@ -24,139 +24,6 @@ struct QMoEToHip : public mlir::RewritePattern {
                   mlir::PatternRewriter &rewriter) const override;
 };
 
-// Trace the router-gate chain feeding QMoE's `router_probs` operand so QMoE can
-// recompute routing in fp32 internally. `router_probs` is actually the router
-// LOGITS — QMoE applies softmax + top-k internally — produced upstream by:
-//
-//   %logits = MatMulNBits(%router_input, %W_q4, %scales, [%zp])  (router_proj)
-//   [%logits = Add(%logits, %bias)]                              (optional bias)
-//   [%probs  = Reshape(%logits, ...)]                            (optional)
-//   %out     = QMoE(%hidden, %probs, ...)
-//
-// The walk skips shape-only Reshape ops and strips at most one bias Add, then
-// matches the router_proj MatMulNBits. Both the ONNX form (onnx.Reshape /
-// onnx.Add / onnx.Custom{MatMulNBits}) and the already-converted HIP form
-// (tensor.collapse_shape|expand_shape / hip.add / hip.matmul_nbits) are
-// accepted, since the onnx-to-hip patterns may fire in either order within a
-// single greedy conversion pass. On success fills the router_proj operands +
-// optional bias + quant params and returns true; on any structural mismatch
-// returns false, and QMoE falls back to consuming the fp16 `router_probs` via
-// hip_qmoe_topk_routing (unchanged behavior for MoE models whose router is not
-// a MatMulNBits[+bias][+reshape] chain).
-static bool traceRouterGate(mlir::Value routerProbs, mlir::Value &routerInput,
-                            mlir::Value &gateWeight, mlir::Value &gateScales,
-                            mlir::Value &gateZp, mlir::Value &gateBias,
-                            int64_t &bits, int64_t &blockSize) {
-  auto isNone = [](mlir::Value v) {
-    return !v || mlir::isa<mlir::NoneType>(v.getType());
-  };
-
-  // Extract router_proj MatMulNBits operands from the already-converted
-  // hip.matmul_nbits or the un-converted onnx.Custom{MatMulNBits} form.
-  auto matchMatMulNBits = [&](mlir::Operation *d) -> bool {
-    if (auto mm = mlir::dyn_cast<mlir::hip::MatMulNBitsOp>(d)) {
-      routerInput = mm.getA();
-      gateWeight = mm.getB();
-      gateScales = mm.getScales();
-      gateZp = isNone(mm.getZeroPoints()) ? mlir::Value{} : mm.getZeroPoints();
-      bits = mm.getBits();
-      blockSize = mm.getBlockSize();
-      return true;
-    }
-    auto fnAttr = d->getAttrOfType<mlir::StringAttr>("function_name");
-    auto domAttr = d->getAttrOfType<mlir::StringAttr>("domain_name");
-    if (fnAttr && fnAttr.getValue() == "MatMulNBits" && domAttr &&
-        domAttr.getValue() == "com.microsoft" && d->getNumOperands() >= 3) {
-      auto bs = d->getAttrOfType<mlir::IntegerAttr>("block_size");
-      if (!bs)
-        return false;
-      routerInput = d->getOperand(0);
-      gateWeight = d->getOperand(1);
-      gateScales = d->getOperand(2);
-      gateZp = (d->getNumOperands() > 3 && !isNone(d->getOperand(3)))
-                   ? d->getOperand(3)
-                   : mlir::Value{};
-      auto b = d->getAttrOfType<mlir::IntegerAttr>("bits");
-      bits = b ? b.getSInt() : 4;
-      blockSize = bs.getSInt();
-      return true;
-    }
-    return false;
-  };
-
-  // Skip a shape-only reshape; return the data source (or v unchanged).
-  auto stripReshape = [](mlir::Value v) -> mlir::Value {
-    mlir::Operation *d = v.getDefiningOp();
-    if (!d)
-      return v;
-    llvm::StringRef n = d->getName().getStringRef();
-    if (n == "onnx.Reshape" || n == "tensor.collapse_shape" ||
-        n == "tensor.expand_shape")
-      return d->getOperand(0);
-    return v;
-  };
-
-  // Match Add(proj, bias) (hip.add or onnx.Add) and split the larger-rank
-  // operand (projection output) from the smaller/equal-rank operand (bias).
-  auto matchAddBias = [](mlir::Value v, mlir::Value &projSide,
-                         mlir::Value &biasSide) -> bool {
-    mlir::Operation *d = v.getDefiningOp();
-    if (!d)
-      return false;
-    mlir::Value a, b;
-    if (auto add = mlir::dyn_cast<mlir::hip::AddOp>(d)) {
-      a = add.getLhs();
-      b = add.getRhs();
-    } else if (d->getName().getStringRef() == "onnx.Add" &&
-               d->getNumOperands() == 2) {
-      a = d->getOperand(0);
-      b = d->getOperand(1);
-    } else {
-      return false;
-    }
-    auto rankOf = [](mlir::Value x) -> int64_t {
-      if (auto t = mlir::dyn_cast<mlir::ShapedType>(x.getType()))
-        return t.hasRank() ? t.getRank() : -1;
-      return -1;
-    };
-    // The bias broadcasts to the projection output, so rank(bias) <=
-    // rank(proj). Ties default to (proj=a, bias=b) matching the common
-    // Add(proj, bias) authoring convention.
-    if (rankOf(b) <= rankOf(a)) {
-      projSide = a;
-      biasSide = b;
-    } else {
-      projSide = b;
-      biasSide = a;
-    }
-    return true;
-  };
-
-  mlir::Value cur = routerProbs;
-  gateBias = mlir::Value{};
-  // Real chain is <= 3 ops (matmul, add, reshape); cap the walk so a
-  // pathological IR shape cannot loop forever.
-  for (int hop = 0; hop < 6; ++hop) {
-    cur = stripReshape(cur);
-    mlir::Operation *d = cur.getDefiningOp();
-    if (!d)
-      return false;
-    if (matchMatMulNBits(d))
-      return true;
-    // Strip at most one bias add on the way up (record the first bias found).
-    if (!gateBias) {
-      mlir::Value projSide, biasSide;
-      if (matchAddBias(cur, projSide, biasSide)) {
-        gateBias = biasSide;
-        cur = projSide;
-        continue;
-      }
-    }
-    return false; // unknown op — QMoE falls back to the fp16 router_probs
-  }
-  return false;
-}
-
 mlir::LogicalResult
 QMoEToHip::matchAndRewrite(mlir::Operation *op,
                            mlir::PatternRewriter &rewriter) const {
@@ -296,32 +163,15 @@ QMoEToHip::matchAndRewrite(mlir::Operation *op,
   auto rt = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   mlir::Value init = createEmptyTensor(rewriter, loc, rt, input);
 
-  // Recover the upstream router_proj (MatMulNBits[+bias][+reshape]) chain so
-  // QMoE can recompute the gate in fp32 internally (see traceRouterGate). When
-  // the trace fails these stay null and QMoE consumes the fp16 router_probs
-  // unchanged. `routerGateBias` is the optional per-expert bias of an
-  // onnx.Add/hip.add inserted between router_proj and the softmax/top-k.
-  mlir::Value routerInput, routerGateWeight, routerGateScales, routerGateZp,
-      routerGateBias;
-  int64_t routerGateBits = 0, routerGateBlockSize = 0;
-  traceRouterGate(routerProbs, routerInput, routerGateWeight, routerGateScales,
-                  routerGateZp, routerGateBias, routerGateBits,
-                  routerGateBlockSize);
-  auto routerGateBitsAttr = rewriter.getI64IntegerAttr(routerGateBits);
-  auto routerGateBlockSizeAttr =
-      rewriter.getI64IntegerAttr(routerGateBlockSize);
-
   // Result type inferred from `init` via InferTypeOpInterface — DPS contract:
   // result type == outs operand type.
   auto hipOp = mlir::hip::QMoEOp::create(
       rewriter, loc, context, input, routerProbs, fc1Weights, fc1Scales,
       fc2Weights, fc2Scales, fc1Bias, fc2Bias, fc3Weights, fc3Scales, fc3Bias,
-      fc1ZeroPoints, fc2ZeroPoints, fc3ZeroPoints, routerWeights, routerInput,
-      routerGateWeight, routerGateScales, routerGateZp, routerGateBias, init,
+      fc1ZeroPoints, fc2ZeroPoints, fc3ZeroPoints, routerWeights, init,
       expertWeightBitsAttr, kAttr, blockSizeAttr, normalizeAttr,
       swigluFusionAttr, useSparseAttr, activationAlphaAttr, activationBetaAttr,
-      swigluLimitAttr, activationTypeAttr, routerGateBitsAttr,
-      routerGateBlockSizeAttr);
+      swigluLimitAttr, activationTypeAttr);
   rewriter.replaceOp(op, hipOp->getResults());
   return mlir::success();
 }
