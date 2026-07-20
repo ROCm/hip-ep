@@ -1630,45 +1630,6 @@ HIP_KERNEL_API int hip_qmoe_topk_routing(
     int64_t normalize,
     int64_t element_size_bytes);
 
-/* Fused fp32 router gate: recompute router_proj (Q4 dequant matmul), softmax
- * and top-k selection entirely in fp32, matching the ORT CPU fp32 reference
- * (whose PrecisionFreeCast nodes run the router path in fp32). This removes the
- * fp16 top-k routing divergence at near-tied gate boundaries that flips which
- * experts a token is routed to.
- *
- * Produces the SAME outputs as hip_qmoe_topk_routing (expert_indices /
- * expert_weights) so the downstream QMoE dispatch is unchanged.
- *
- *   router_input   - GPU [num_tokens, hidden] fp16 pre-projection activation
- *   gate_weight    - GPU Q4 packed [num_experts, hidden/2] (MatMulNBits layout)
- *   gate_scales    - GPU [num_experts, k_blocks] fp16
- *   gate_zp        - GPU (nullable) packed uint4 [num_experts, ceil(k_blocks/2)]
- *   gate_bias      - GPU (nullable) [num_experts] fp16 per-expert bias
- *                    (onnx.Add after router_proj; folded into the fp32 logit)
- *   expert_indices - GPU [num_tokens, k] int32 (output)
- *   expert_weights - GPU [num_tokens, k] fp16  (output)
- *   bits           - weight bits (4 supported)
- *   normalize      - 1 to renormalize selected weights (sum-to-one)
- *   element_size_bytes - router_input element size (2 = fp16 supported)
- */
-HIP_KERNEL_API int hip_qmoe_router_gate(
-    void* stream,
-    const void* router_input,
-    const void* gate_weight,
-    const void* gate_scales,
-    const void* gate_zp,
-    const void* gate_bias,
-    void* expert_indices,
-    void* expert_weights,
-    int64_t num_tokens,
-    int64_t num_experts,
-    int64_t hidden,
-    int64_t k,
-    int64_t bits,
-    int64_t block_size,
-    int64_t normalize,
-    int64_t element_size_bytes);
-
 /* Gather rows: gathered[i,:] = input[token_ids[i],:]
  *   token_ids - GPU [count] int32
  */

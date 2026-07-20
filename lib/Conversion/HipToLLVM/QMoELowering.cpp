@@ -68,16 +68,6 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
         extractOptionalMemRefPtr(adaptor.getRouterWeights(), rewriter, loc);
     Value outputPtr =
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
-    Value routerInputPtr =
-        extractOptionalMemRefPtr(adaptor.getRouterInput(), rewriter, loc);
-    Value routerGateWeightPtr =
-        extractOptionalMemRefPtr(adaptor.getRouterGateWeight(), rewriter, loc);
-    Value routerGateScalesPtr =
-        extractOptionalMemRefPtr(adaptor.getRouterGateScales(), rewriter, loc);
-    Value routerGateZpPtr = extractOptionalMemRefPtr(
-        adaptor.getRouterGateZeroPoints(), rewriter, loc);
-    Value routerGateBiasPtr =
-        extractOptionalMemRefPtr(adaptor.getRouterGateBias(), rewriter, loc);
 
     auto inputType = cast<MemRefType>(op.getInput().getType());
     auto routerType = cast<MemRefType>(op.getRouterProbs().getType());
@@ -135,19 +125,7 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
     Value normalizeVal = createI64Const(op.getNormalizeRoutingWeights());
     Value elemSizeVal = createI64Const(elemSize);
 
-    // Router-gate fp32 recomputation params. router_k = hidden dim of the
-    // router activation; 0 when the router-gate inputs are absent (trace
-    // failed), in which case wrap_qmoe consumes the fp16 router_probs instead.
-    Value routerKVal = createI64Const(0);
-    if (op.getRouterInput()) {
-      auto rinType = cast<MemRefType>(op.getRouterInput().getType());
-      routerKVal = getMemRefDimSize(rinType, rinType.getRank() - 1,
-                                    adaptor.getRouterInput(), rewriter, loc);
-    }
-    Value routerGateBitsVal = createI64Const(op.getRouterGateBits());
-    Value routerGateBlockSizeVal = createI64Const(op.getRouterGateBlockSize());
-
-    SmallVector<Type, 39> paramTypes = {
+    SmallVector<Type, 31> paramTypes = {
         ptrType, // state
         ptrType, // input
         ptrType, // router_probs
@@ -178,15 +156,7 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
         f32Type, // activation_beta
         f32Type, // swiglu_limit
         i64Type, // normalize_routing_weights
-        i64Type, // elem_size
-        ptrType, // router_input (nullable)
-        ptrType, // router_gate_weight (nullable)
-        ptrType, // router_gate_scales (nullable)
-        ptrType, // router_gate_zero_points (nullable)
-        ptrType, // router_gate_bias (nullable)
-        i64Type, // router_k
-        i64Type, // router_gate_bits
-        i64Type  // router_gate_block_size
+        i64Type  // elem_size
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -195,7 +165,7 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
       return failure();
     }
 
-    SmallVector<Value, 39> args = {statePtr,
+    SmallVector<Value, 31> args = {statePtr,
                                    inputPtr,
                                    routerPtr,
                                    routerWeightsPtr,
@@ -225,15 +195,7 @@ struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
                                    activationBetaVal,
                                    swigluLimitVal,
                                    normalizeVal,
-                                   elemSizeVal,
-                                   routerInputPtr,
-                                   routerGateWeightPtr,
-                                   routerGateScalesPtr,
-                                   routerGateZpPtr,
-                                   routerGateBiasPtr,
-                                   routerKVal,
-                                   routerGateBitsVal,
-                                   routerGateBlockSizeVal};
+                                   elemSizeVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

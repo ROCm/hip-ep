@@ -1269,17 +1269,7 @@ int wrap_qmoe(
     int64_t block_size, int64_t swiglu_fusion,
     int64_t activation_type, // 0=relu,1=gelu,2=silu,3=swiglu,4=identity
     float activation_alpha, float activation_beta, float swiglu_limit,
-    int64_t normalize_routing_weights, int64_t elem_size,
-    // Router-gate fp32 recomputation. When router_gate_weight is non-null QMoE
-    // recomputes router_proj + softmax + top-k in fp32 from these ORIGINAL
-    // router_proj operands (matching the ORT CPU fp32 reference), instead of
-    // consuming the fp16 router_probs. All nullable / 0 when disabled.
-    const void *router_input,            // [num_tokens, router_k] fp16 activation
-    const void *router_gate_weight,      // [num_experts, router_k/pack] Q4 packed
-    const void *router_gate_scales,      // [num_experts, router_k/router_bs]
-    const void *router_gate_zero_points, // (nullable) packed uint4 zero points
-    const void *router_gate_bias,        // (nullable) [num_experts] fp16 bias Add
-    int64_t router_k, int64_t router_gate_bits, int64_t router_gate_block_size);
+    int64_t normalize_routing_weights, int64_t elem_size);
 
 // CausalConvWithState operation wrapper (stateful causal depthwise convolution)
 // Used by Gated DeltaNet (Qwen3.5) and Mamba models.
