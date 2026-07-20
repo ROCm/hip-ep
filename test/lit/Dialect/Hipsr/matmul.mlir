@@ -5,11 +5,13 @@
 // Tests for hipsr.matmul that exercise its own code:
 //   - round-trip with the shape region omitted (the form onnx->hipsr emits)
 //   - verifier / parser diagnostics: rank-0 operand, DPS init/result type
-//     mismatch, non-shaped operand, empty shape-region block
+//     mismatch, non-shaped operand
 //
-// The shape region is populated by a later pass (not this stage), so
-// populateShapeRegion is covered with that pass, not here. Generic
-// shape-region structural tests live in shape_region_verify.mlir.
+// This stage emits the op with an empty shape region, so these tests cover the
+// empty-region round-trip and the verifier. populateShapeRegion belongs with a
+// future populate pass and will be tested there. Generic shape-region
+// structural tests (empty / multi-block region rules) live in
+// shape_region_verify.mlir.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt --split-input-file --verify-diagnostics %s | FileCheck %s
@@ -97,20 +99,4 @@ func.func @matmul_operand_not_shaped(%a: f16, %b: tensor<4096x1024xf16>,
   %0 = "hipsr.matmul"(%a, %b, %init) ({}) : (f16, tensor<4096x1024xf16>, tensor<64x1024xf16>)
       -> tensor<64x1024xf16>
   return %0 : tensor<64x1024xf16>
-}
-
-// -----
-
-// A present shape region must not be a lone empty block (an absent region is
-// expressed by omitting the region entirely).
-func.func @matmul_empty_shape_region(%a: tensor<2x3x64x4096xf16>,
-                                     %b: tensor<2x3x4096x1024xf16>,
-                                     %init: tensor<2x3x64x1024xf16>)
-    -> tensor<2x3x64x1024xf16> {
-  // expected-error@+1 {{expects a non-empty block}}
-  %0 = hipsr.matmul ins(%a, %b : tensor<2x3x64x4096xf16>, tensor<2x3x4096x1024xf16>)
-                    outs(%init : tensor<2x3x64x1024xf16>) -> tensor<2x3x64x1024xf16>
-                    shape_region {
-  }
-  return %0 : tensor<2x3x64x1024xf16>
 }

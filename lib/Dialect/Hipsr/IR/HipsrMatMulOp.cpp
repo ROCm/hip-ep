@@ -42,10 +42,9 @@ LogicalResult MatMulOp::verify() {
 //   - 1-D A (K): acts as (1,K); the leading 1 is dropped from the result.
 //   - 1-D B (K): acts as (K,1); the trailing 1 is dropped from the result.
 //   - both 1-D: scalar result.
-// The 1-D promotions and batch-dim count come from the static ranks. Only the
-// output shape is computed here; the validity checks (K equality, batch
-// broadcastability) are emitted by the shape-region populate pass, which is
-// where they belong with the shape dialect.
+// The 1-D promotions and batch-dim count come from the static ranks. This
+// computes only the output shape; validity checks (K equality, batch
+// broadcastability) are intentionally omitted and can be added later.
 //
 // Before (region omitted, as emitted by convert-onnx-to-hipsr):
 //   %0 = hipsr.matmul ins(%A, %B : tensor<?x?xf16>, tensor<?x?xf16>)
