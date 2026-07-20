@@ -44,7 +44,7 @@ EP_REGISTRATION_NAME = "AMDGPUExecutionProvider"
 # OGA registers the umbrella under its short name (genai_config key).
 EP_OGA_NAME = "AMDGPU"
 # Provider option the umbrella forwards to pick the hipgpu backend.
-EP_PROVIDER_OPTIONS = {"profile": "llm"}
+EP_PROVIDER_OPTIONS = {"profile": "hip"}
 
 # Optional artifact-format override (escape hatch). Production / CI use the
 # default in-process LLVM-IR (bitcode) JIT, so this is UNSET by default and the
@@ -1294,7 +1294,7 @@ def create_ep_session(model_path, repo_root, provider_options=None):
     """Create an AMDGPU-umbrella-EP InferenceSession.
 
     provider_options: optional dict forwarded to the EP. Defaults to
-    EP_PROVIDER_OPTIONS ({"profile": "llm"}) — the umbrella uses "profile" to
+    EP_PROVIDER_OPTIONS ({"profile": "hip"}) — the umbrella uses "profile" to
     select the hipgpu backend. The backend compiles every model in
     output-allocator mode (the 2-arg in-graph hip.alloc_output ABI) -- there is
     no provider option to select a mode.
