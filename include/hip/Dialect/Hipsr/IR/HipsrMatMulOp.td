@@ -27,9 +27,7 @@ def Hipsr_MatMulOp : Hipsr_DpsOp<"matmul"> {
     operand.
 
     Carries an optional shape region (region 0). When populated it yields the
-    output shape and asserts the matmul shape constraints: A and B must share the
-    contraction dim K, and the batch dims must be broadcastable (equal, or one
-    side is 1).
+    output shape.
 
     Example (populated shape region, 2-D):
     ```mlir
@@ -40,10 +38,6 @@ def Hipsr_MatMulOp : Hipsr_DpsOp<"matmul"> {
       %shB = shape.shape_of %B : tensor<?x?xf16> -> tensor<2xindex>
       %c0 = arith.constant 0 : index
       %c1 = arith.constant 1 : index
-      %ka = shape.get_extent %shA, %c1 : tensor<2xindex>, index -> index
-      %kb = shape.get_extent %shB, %c0 : tensor<2xindex>, index -> index
-      %eq = arith.cmpi eq, %ka, %kb : index
-      cf.assert %eq, "hipsr.matmul: A and B contraction dim (K) must be equal"
       %m = shape.get_extent %shA, %c0 : tensor<2xindex>, index -> index
       %n = shape.get_extent %shB, %c1 : tensor<2xindex>, index -> index
       hipsr.shape_yield (%m, %n) : [f16]

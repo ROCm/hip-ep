@@ -6,7 +6,6 @@
 #include "hip/Dialect/Hipsr/IR/HipsrMatMulOp.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
 
 #include "llvm/ADT/Sequence.h"
@@ -33,31 +32,28 @@ LogicalResult MatMulOp::verify() {
   return success();
 }
 
-// Fills the shape region with the ONNX/NumPy `matmul` output shape and its
-// constraint asserts. Uses the shape dialect so it works for both tensor and
-// memref inputs; static dims fold, so a fully static matmul canonicalizes the
-// asserts/selects away.
+// Fills the shape region with the ONNX/NumPy `matmul` output shape. Uses the
+// shape dialect so it works for both tensor and memref inputs; static dims
+// fold, so a fully static matmul canonicalizes the dim arithmetic away.
 //
-// ONNX/NumPy matmul rules (each maps to a branch below):
-//   - both >= 2-D: last two dims are the matrix (M,K)x(K,N)->(M,N); leading
-//   dims
-//     are batch dims and broadcast (equal, or one is 1).
+// ONNX/NumPy matmul output shape (each maps to a branch below):
+//   - both >= 2-D: (M,K) x (K,N) -> (M,N); leading dims are batch dims and
+//     broadcast (a dim of 1 takes the other side).
 //   - 1-D A (K): acts as (1,K); the leading 1 is dropped from the result.
 //   - 1-D B (K): acts as (K,1); the trailing 1 is dropped from the result.
 //   - both 1-D: scalar result.
-// The 1-D promotions and batch-dim count come from the static ranks, so only
-// the K check and batch broadcast are runtime values.
+// The 1-D promotions and batch-dim count come from the static ranks. Only the
+// output shape is computed here; the validity checks (K equality, batch
+// broadcastability) are emitted by the shape-region populate pass, which is
+// where they belong with the shape dialect.
 //
 // Before (region omitted, as emitted by convert-onnx-to-hipsr):
 //   %0 = hipsr.matmul ins(%A, %B : tensor<?x?xf16>, tensor<?x?xf16>)
 //                     outs(%init : tensor<?x?xf16>) -> tensor<?x?xf16>
 //
-// After (2-D case; batched adds one arith.select per broadcast batch axis):
+// After (2-D case; batched adds one dim per broadcast batch axis):
 //   %0 = hipsr.matmul ins(%A, %B) outs(%init) -> tensor<?x?xf16> shape_region {
 //     %shA = shape.shape_of %A ; %shB = shape.shape_of %B
-//     %ka = shape.get_extent %shA, 1 ; %kb = shape.get_extent %shB, 0
-//     %eq = arith.cmpi eq, %ka, %kb
-//     cf.assert %eq, "hipsr.matmul: A and B contraction dim (K) must be equal"
 //     %m = shape.get_extent %shA, 0 ; %n = shape.get_extent %shB, 1
 //     hipsr.shape_yield (%m, %n) : [f16]
 //   }
@@ -77,23 +73,10 @@ void MatMulOp::populateShapeRegion(OpBuilder &builder, Region &shapeRegion) {
     return builder.create<shape::GetExtentOp>(loc, shape, c);
   };
   Value one = builder.create<arith::ConstantIndexOp>(loc, 1);
-  auto isOne = [&](Value v) -> Value {
-    return builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, v, one);
-  };
-  auto assertTrue = [&](Value cond, StringRef msg) {
-    builder.create<cf::AssertOp>(loc, cond, builder.getStringAttr(msg));
-  };
-  // Broadcast two dims: if either is 1, take the other; otherwise assert equal.
+  // Broadcast two batch dims: a dim of 1 takes the other side.
   auto broadcastDim = [&](Value da, Value db) -> Value {
-    Value aIs1 = isOne(da);
-    Value bIs1 = isOne(db);
-    Value eq =
-        builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, da, db);
-    Value compat = builder.create<arith::OrIOp>(loc, eq, aIs1);
-    compat = builder.create<arith::OrIOp>(loc, compat, bIs1);
-    assertTrue(compat,
-               "hipsr.matmul: batch dims of A and B must be broadcastable");
-    // Pick the non-1 side (if both are 1, either gives 1).
+    Value aIs1 =
+        builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, da, one);
     return builder.create<arith::SelectOp>(loc, aIs1, db, da);
   };
 
@@ -103,13 +86,6 @@ void MatMulOp::populateShapeRegion(OpBuilder &builder, Region &shapeRegion) {
   bool bIs1D = bRank == 1;
   int64_t aEffRank = aIs1D ? 2 : aRank;
   int64_t bEffRank = bIs1D ? 2 : bRank;
-
-  // K: A's last dim == B's second-to-last dim. A 1-D operand's sole dim is K.
-  Value ka = aIs1D ? extent(shA, 0) : extent(shA, aRank - 1);
-  Value kb = bIs1D ? extent(shB, 0) : extent(shB, bRank - 2);
-  Value kEq =
-      builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, ka, kb);
-  assertTrue(kEq, "hipsr.matmul: A and B contraction dim (K) must be equal");
 
   // M from A, N from B. A 1-D operand contributes neither (its promoted unit
   // dim is stripped from the result).
