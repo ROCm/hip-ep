@@ -2,9 +2,9 @@
 // Licensed under the MIT License.
 //
 // Tests -hipsr-externalize-constants (Phase 2). The pass assigns each opted-in
-// hipsr.constant a 64-byte aligned cumulative sidecar offset and stamps
+// hipsr.constant a 64-byte aligned cumulative constants-file offset and stamps
 // offset/size on the op, append-only (value/source are kept). No FileSystem is
-// injected in these runs, so the sidecar write (Phase 2) is skipped and the
+// injected in these runs, so the constants-file write (Phase 2) is skipped and the
 // pass is a pure IR transform -- which is what lets these cases be checked
 // without any on-disk file.
 //

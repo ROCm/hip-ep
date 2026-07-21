@@ -4,11 +4,12 @@
  */
 
 // Unit test for -hipsr-externalize-constants that exercises Phase 2 (the
-// sidecar write), which the LIT tests cannot: LIT runs hip-mlir-opt with no
-// injected FileSystem, so it only sees the Phase 1 IR mutation (offset/size).
-// Here we inject an in-memory FileSystem and assert the actual bytes written --
-// the only way to catch entry-field bugs (e.g. file_source vs inline routing)
-// that are invisible in the IR because they produce identical offset/size.
+// constants-file write), which the LIT tests cannot: LIT runs hip-mlir-opt with
+// no injected FileSystem, so it only sees the Phase 1 IR mutation
+// (offset/size). Here we inject an in-memory FileSystem and assert the actual
+// bytes written -- the only way to catch entry-field bugs (e.g. file_source vs
+// inline routing) that are invisible in the IR because they produce identical
+// offset/size.
 //
 // Plain main() (no GTest): matches the other MLIR-side unit tests and avoids a
 // GTest dependency that is not present in the compiler build.
@@ -65,9 +66,9 @@ std::vector<char> readAt(const std::filesystem::path &file, int64_t offset,
   return buf;
 }
 
-// Verifies an in-memory sidecar `blob` against the ops (in walk order) and
-// their expected bytes, driven by the offset/size stamped on each op: the data
-// at each stamped offset must be that constant's bytes, sizes must match,
+// Verifies an in-memory constants file `blob` against the ops (in walk order)
+// and their expected bytes, driven by the offset/size stamped on each op: the
+// data at each stamped offset must be that constant's bytes, sizes must match,
 // offsets must be 64-aligned / monotonic / non-overlapping, gap and trailing
 // bytes zero, and the total length the aligned end of the last constant.
 void verifyLayout(const std::vector<char> &blob,
@@ -130,8 +131,8 @@ void verifyLayout(const std::vector<char> &blob,
 }
 
 // FileSystem that captures every write into an in-memory buffer per filename,
-// so a test can inspect the exact sidecar bytes. create_reader is unused --
-// writeConstantsBinToFileSystem reads file_source data via std::fopen on the
+// so a test can inspect the exact constants-file bytes. create_reader is unused
+// -- writeConstantsBinToFileSystem reads file_source data via std::fopen on the
 // file path directly, not through the FileSystem.
 class CapturingFileSystem : public morphizen::FileSystem {
 public:
@@ -199,8 +200,8 @@ struct Harness {
   }
 };
 
-// Inline value: the raw dense bytes land in the sidecar at offset 0, and the op
-// is stamped with that offset/size.
+// Inline value: the raw dense bytes land in the constants file at offset 0, and
+// the op is stamped with that offset/size.
 void testInlineValueBytesWritten() {
   Harness h;
   CapturingFileSystem fs;
@@ -262,8 +263,8 @@ void testMemSourceBytesWritten() {
         "mem_source: blob bytes copied from address");
 }
 
-// file_source: the sidecar bytes come from the referenced file at the given
-// offset. Covers the file-ref branch.
+// file_source: the constants-file bytes come from the referenced file at the
+// given offset. Covers the file-ref branch.
 void testFileSourceBytesStreamed() {
   auto path = std::filesystem::temp_directory_path() /
               "hipsr_externalize_test_weights.bin";
@@ -328,9 +329,10 @@ void testCumulativeAlignmentAndPadding() {
 }
 
 // Multiple functions in one module share a single cumulative offset and a
-// single sidecar write. This is the module-scoped contract: a per-function pass
-// would restart offsets at 0 and overwrite the file per function.
-void testMultiFunctionSharesOneSidecar() {
+// single constants-file write. This is the module-scoped contract: a
+// per-function pass would restart offsets at 0 and overwrite the file per
+// function.
+void testMultiFunctionSharesOneConstantsFile() {
   Harness h;
   CapturingFileSystem fs;
   bool ok = false;
@@ -352,7 +354,7 @@ void testMultiFunctionSharesOneSidecar() {
 
   // One shared file with both functions' constants, not one overwrite per
   // function.
-  check(fs.files.size() == 1, "multi-func: exactly one sidecar written");
+  check(fs.files.size() == 1, "multi-func: exactly one constants file written");
 
   std::vector<mlir::hipsr::ConstantOp> ops;
   module->walk([&](mlir::hipsr::ConstantOp c) { ops.push_back(c); });
@@ -365,9 +367,9 @@ void testMultiFunctionSharesOneSidecar() {
 }
 
 // The core round-trip: several constants of mixed kinds / dtypes / sizes chosen
-// so offsets need real (non-coincidental) padding. The sidecar is written to a
-// real file; each constant is read back by fseek-ing to the offset stamped on
-// its op and comparing the bytes and length. This is what catches an
+// so offsets need real (non-coincidental) padding. The constants file is
+// written to a real file; each constant is read back by fseek-ing to the offset
+// stamped on its op and comparing the bytes and length. This is what catches an
 // offset/size stamped != data actually placed bug, which the per-byte hardcoded
 // checks cannot.
 void testOffsetDrivenReadBack() {
@@ -448,7 +450,7 @@ void testOffsetDrivenReadBack() {
     return;
   }
 
-  fs::path sidecar = dir / "constants.bin";
+  fs::path constantsFile = dir / "constants.bin";
   int64_t prevEnd = 0;
   int64_t lastOffset = 0, lastSize = 0;
   bool layoutOk = true;
@@ -472,7 +474,7 @@ void testOffsetDrivenReadBack() {
       layoutOk = false;
     }
     // The data at the stamped offset is this constant's bytes.
-    if (readAt(sidecar, off, sz) != expected[i]) {
+    if (readAt(constantsFile, off, sz) != expected[i]) {
       bytesOk = false;
     }
     prevEnd = off + sz;
@@ -485,9 +487,9 @@ void testOffsetDrivenReadBack() {
 
   // Total file length is the aligned end of the last constant (derived, not
   // hardcoded).
-  auto fileLen = static_cast<int64_t>(fs::file_size(sidecar, ec));
+  auto fileLen = static_cast<int64_t>(fs::file_size(constantsFile, ec));
   check(!ec && fileLen == llvm::alignTo(lastOffset + lastSize, 64),
-        "readback: sidecar length == aligned total");
+        "readback: constants-file length == aligned total");
 
   fs::remove_all(dir, ec);
 }
@@ -518,7 +520,7 @@ int main() {
   testMemSourceBytesWritten();
   testFileSourceBytesStreamed();
   testCumulativeAlignmentAndPadding();
-  testMultiFunctionSharesOneSidecar();
+  testMultiFunctionSharesOneConstantsFile();
   testOffsetDrivenReadBack();
   testWriteFailureFailsPass();
 

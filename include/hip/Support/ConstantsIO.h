@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-// Shared emit logic for the constants.bin sidecar.
+// Shared emit logic for the constants.bin file.
 //
 // Both the ONNX->HIP conversion pass (standalone hip-compiler offline path)
 // and the MorphiZen EP level-1 pass (EPContext export path) produce the same
