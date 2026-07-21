@@ -262,8 +262,8 @@ void testMemSourceBytesWritten() {
         "mem_source: blob bytes copied from address");
 }
 
-// file_source: the writer streams the bytes from the referenced file at the
-// given offset (never mmap'd by the pass). Covers the file-ref branch.
+// file_source: the sidecar bytes come from the referenced file at the given
+// offset. Covers the file-ref branch.
 void testFileSourceBytesStreamed() {
   auto path = std::filesystem::temp_directory_path() /
               "hipsr_externalize_test_weights.bin";

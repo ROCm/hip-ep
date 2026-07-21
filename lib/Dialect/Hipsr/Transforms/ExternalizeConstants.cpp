@@ -12,9 +12,9 @@
 //   Phase 2 (only when a FileSystem is injected on the dialect): write the
 //     entries to the sidecar via writeConstantsBinToFileSystem.
 //
-// file_source entries carry their file_path/offset only (data = nullptr); the
-// writer streams them on demand, so the weight file is never mmap'd here.
-// inline / mem_source entries carry a byte view (getDataValues). See Passes.td.
+// file_source entries carry their file_path/offset only (data = nullptr) so
+// this pass does not read the weight file; inline / mem_source entries carry a
+// byte view (getDataValues). See Passes.td.
 //
 //===----------------------------------------------------------------------===//
 
@@ -69,8 +69,8 @@ struct HipsrExternalizeConstantsPass
       int64_t size = 0;
       if (auto fileSrc =
               llvm::dyn_cast_or_null<FileSourceAttr>(c.getSourceAttr())) {
-        // File-ref: keep the on-disk reference; the writer streams it on
-        // demand, so we never mmap the (possibly multi-GB) weight file here.
+        // File-ref: keep the on-disk reference (path/offset); this pass does
+        // not read the (possibly multi-GB) weight file.
         entry.file_path = fileSrc.getPath().getValue().str();
         entry.file_offset = fileSrc.getOffset();
         size = fileSrc.getSize();

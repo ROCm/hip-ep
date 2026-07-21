@@ -35,10 +35,6 @@ def Hipsr_Dialect : Dialect {
     /// Non-owning; the compile driver injects the same FileSystem it hands the
     /// hip.* pipeline. Null when nobody injected one (e.g. hip-mlir-opt), in
     /// which case the pass writes no sidecar (pure IR transform).
-    ///
-    /// Not synchronized: inject once before scheduling passes; passes only read
-    /// it. (Unlike the file-map cache above, this sink has no mutex, which is
-    /// safe only under that inject-before-run contract.)
     void setFileSystem(::morphizen::FileSystem *fs) { fileSystem = fs; }
     ::morphizen::FileSystem *getFileSystem() { return fileSystem; }
 
