@@ -28,6 +28,8 @@ CMakePresets.json
 *.pb.cc
 *.pb.h
 compile_commands.json
+# Build-generated version placeholder in the vendored morphizen subtree
+morphizen/morphizen-core/version.txt
 
 # Python
 __pycache__/

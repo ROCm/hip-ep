@@ -31,6 +31,9 @@ void populateOnnxToHipsrConstantPatterns(::mlir::RewritePatternSet &patterns);
 void populateCastConversionPatterns(::mlir::RewritePatternSet &patterns,
                                     ::mlir::MLIRContext *ctx);
 
+void populateMatMulConversionPatterns(::mlir::RewritePatternSet &patterns,
+                                      ::mlir::MLIRContext *ctx);
+
 } // namespace hipsr
 } // namespace mlir
 
