@@ -33,8 +33,9 @@ namespace hipsr {
 //
 // CONTRACT: MorphiZen-generated constants only. Works both before and after
 // externalization (value/source are never removed -- offset/size only mark the
-// sidecar location). Fails fast on forms MorphiZen never emits (splat-optimized
-// DenseElementsAttr, DenseResourceElementsAttr); add real APIs if that changes.
+// constants-file location). Fails fast on forms MorphiZen never emits
+// (splat-optimized DenseElementsAttr, DenseResourceElementsAttr); add real APIs
+// if that changes.
 template <typename T>::llvm::ArrayRef<T> ConstantOp::getDataValues() {
   // Inline dense value. MorphiZen writes FULL tensor data
   // (numElements * elemByteWidth), never splat-optimized.

@@ -82,8 +82,8 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
 
   // 3. Dispatch by metadata semantics: if any constant carries a per-entry
   //    source descriptor (Splat / FileRef), do per-tensor upload driven by
-  //    the source union. Otherwise fall back to the bulk sidecar path (used
-  //    by EPContext export / import and has_mem_addr downgrade).
+  //    the source union. Otherwise fall back to the bulk constants-file path
+  //    (used by EPContext export / import and has_mem_addr downgrade).
   bool anyPerEntry = false;
   for (int64_t i = 0; i < count; ++i) {
     if (constants->Get(i)->source_type() != mlir::hip::ConstantSource::NONE) {
@@ -96,7 +96,7 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
     constants_filename = meta->constants_filename()->c_str();
   int rc;
   if (anyPerEntry) {
-    // Hybrid path also goes through per-entry; SidecarSource entries open
+    // Hybrid path also goes through per-entry; MemSource entries open
     // constants_filename through fs to fetch their slice on demand. Pure
     // streaming (only Splat / FileRef) ignores fs/constants_filename.
     rc = per_entry_load_constants(*out_state, meta, fileSystem,
@@ -330,7 +330,7 @@ static int hipmalloc_and_fixup(RuntimeState *state,
   return 0;
 }
 
-// Load the entire constants sidecar as one blob and hipMemcpy it into the
+// Load the entire constants file as one blob and hipMemcpy it into the
 // pre-allocated gpu_constants_blob. Used when OnnxToHip wrote
 // model.constants.bin (non-streaming path: hip-compiler CLI, EPContext
 // import, mem-addr downgrade).
@@ -345,7 +345,7 @@ static int bulk_load_constants(RuntimeState *state, morphizen::FileSystem *fs,
   }
   size_t total_size = reader->size();
 
-  TIMING_LOG("[Session] open sidecar %s: %.3fs (%zu bytes)\n",
+  TIMING_LOG("[Session] open constants file %s: %.3fs (%zu bytes)\n",
              constants_filename, record_elapsed(t_prev), total_size);
 
   const void *src = reader->mmap();
@@ -459,13 +459,13 @@ static int fref_fetch(FrefCache *c, int64_t file_offset, size_t size,
   return 0;
 }
 
-// Lazy reader for the partial mem-addr sidecar (hybrid mode). Opened
-// through the EP FileSystem on first SidecarSource entry; if the
-// FileSystem can mmap the sidecar we keep the base pointer so the case
+// Lazy reader for the partial mem-addr constants file (hybrid mode). Opened
+// through the EP FileSystem on first MemSource entry; if the
+// FileSystem can mmap the constants file we keep the base pointer so the case
 // becomes a memcpy + hipMemcpy (no extra fread). On non-mmap backends
 // we fall back to fread, which still wins because the per-entry staging
 // reuse keeps host peak bounded to the largest single tensor.
-struct SidecarReaderCache {
+struct ConstantsFileReaderCache {
   std::unique_ptr<morphizen::FileReader,
                   morphizen::FileSystem::Deleter<morphizen::FileReader>>
       reader; // default-init: null pointer, deleter unused
@@ -475,21 +475,21 @@ struct SidecarReaderCache {
 };
 
 // Returns true on success (or no-op if already open). On first call
-// opens the sidecar through fs and tries mmap.
-static bool sidecar_cache_open(SidecarReaderCache *c, morphizen::FileSystem *fs,
-                               const char *constants_filename) {
+// opens the constants file through fs and tries mmap.
+static bool constants_file_cache_open(ConstantsFileReaderCache *c,
+                                      morphizen::FileSystem *fs,
+                                      const char *constants_filename) {
   if (c->tried_open)
     return c->reader != nullptr;
   c->tried_open = true;
   if (!fs || !constants_filename) {
-    fprintf(stderr,
-            "per_entry: SidecarSource entry but fs / constants_filename "
-            "unavailable\n");
+    fprintf(stderr, "per_entry: MemSource entry but fs / constants_filename "
+                    "unavailable\n");
     return false;
   }
   c->reader = fs->create_reader_template(constants_filename);
   if (!c->reader) {
-    fprintf(stderr, "per_entry: failed to open partial sidecar %s\n",
+    fprintf(stderr, "per_entry: failed to open partial constants file %s\n",
             constants_filename);
     return false;
   }
@@ -498,14 +498,16 @@ static bool sidecar_cache_open(SidecarReaderCache *c, morphizen::FileSystem *fs,
   return true;
 }
 
-// Copy `size` bytes at `offset` from the partial sidecar into `staging`.
-static int sidecar_fetch(SidecarReaderCache *c, int64_t offset, size_t size,
-                         void *staging) {
+// Copy `size` bytes at `offset` from the partial constants file into
+// `staging`.
+static int constants_file_fetch(ConstantsFileReaderCache *c, int64_t offset,
+                                size_t size, void *staging) {
   if ((uint64_t)offset + size > (uint64_t)c->total_size) {
-    fprintf(stderr,
-            "per_entry: sidecar fetch out of range (offset=%lld size=%zu "
-            "total=%zu)\n",
-            (long long)offset, size, c->total_size);
+    fprintf(
+        stderr,
+        "per_entry: constants-file fetch out of range (offset=%lld size=%zu "
+        "total=%zu)\n",
+        (long long)offset, size, c->total_size);
     return 1;
   }
   if (c->mmap_base) {
@@ -514,8 +516,8 @@ static int sidecar_fetch(SidecarReaderCache *c, int64_t offset, size_t size,
   }
   // Non-mmap reader: rewind + skip + fread. morphizen::FileReader does
   // not expose a seek primitive, so we read-and-discard up to offset.
-  // Sidecar is touched once per entry in entry order, so this still
-  // streams linearly through the file.
+  // The constants file is touched once per entry in entry order, so this
+  // still streams linearly through the file.
   c->reader->rewind();
   static constexpr size_t kSkipChunk = 64 * 1024;
   uint8_t skip_buf[kSkipChunk];
@@ -524,7 +526,8 @@ static int sidecar_fetch(SidecarReaderCache *c, int64_t offset, size_t size,
     size_t toRead = (size_t)std::min<uint64_t>(remaining_skip, kSkipChunk);
     size_t got = c->reader->fread(skip_buf, toRead);
     if (got != toRead) {
-      fprintf(stderr, "per_entry: sidecar skip short read (got %zu of %zu)\n",
+      fprintf(stderr,
+              "per_entry: constants-file skip short read (got %zu of %zu)\n",
               got, toRead);
       return 1;
     }
@@ -532,7 +535,8 @@ static int sidecar_fetch(SidecarReaderCache *c, int64_t offset, size_t size,
   }
   size_t got = c->reader->fread(staging, size);
   if (got != size) {
-    fprintf(stderr, "per_entry: sidecar payload short read (got %zu of %zu)\n",
+    fprintf(stderr,
+            "per_entry: constants-file payload short read (got %zu of %zu)\n",
             got, size);
     return 1;
   }
@@ -547,9 +551,9 @@ static int sidecar_fetch(SidecarReaderCache *c, int64_t offset, size_t size,
 // through a single reusable staging buffer, bounding host memory to the
 // largest single tensor.
 //
-// `fs` and `constants_filename` are only consulted by SidecarSource
+// `fs` and `constants_filename` are only consulted by MemSource
 // entries (hybrid path). Pure streaming modules (only Splat / FileRef)
-// never open the sidecar.
+// never open the constants file.
 static int per_entry_load_constants(RuntimeState *state,
                                     const mlir::hip::HipModelMetaInfo *meta,
                                     morphizen::FileSystem *fs,
@@ -581,7 +585,7 @@ static int per_entry_load_constants(RuntimeState *state,
   FrefCache fcache;
   fref_cache_init(&fcache);
 
-  SidecarReaderCache scache; // RAII; default-initialized above
+  ConstantsFileReaderCache cfcache; // RAII; default-initialized above
 
   for (int64_t i = 0; i < count; ++i) {
     auto *c = constants->Get(i);
@@ -636,21 +640,21 @@ static int per_entry_load_constants(RuntimeState *state,
       }
       break;
     }
-    case mlir::hip::ConstantSource::SidecarSource: {
-      auto *side = c->source_as_SidecarSource();
-      int64_t side_offset = side->sidecar_offset();
-      if (!sidecar_cache_open(&scache, fs, constants_filename)) {
+    case mlir::hip::ConstantSource::MemSource: {
+      auto *mem = c->source_as_MemSource();
+      int64_t mem_offset = mem->mem_offset();
+      if (!constants_file_cache_open(&cfcache, fs, constants_filename)) {
         free(staging);
         fref_cache_release(&fcache);
         return 1;
       }
-      if (sidecar_fetch(&scache, side_offset, sz, staging) != 0) {
+      if (constants_file_fetch(&cfcache, mem_offset, sz, staging) != 0) {
         free(staging);
         fref_cache_release(&fcache);
         return 1;
       }
       if (hipMemcpy(dst, staging, sz, hipMemcpyHostToDevice) != hipSuccess) {
-        fprintf(stderr, "per_entry: hipMemcpy failed for sidecar entry %lld\n",
+        fprintf(stderr, "per_entry: hipMemcpy failed for mem entry %lld\n",
                 (long long)i);
         free(staging);
         fref_cache_release(&fcache);

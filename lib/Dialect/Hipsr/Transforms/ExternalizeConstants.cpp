@@ -2,7 +2,7 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-//===- ExternalizeConstants.cpp - hipsr.constant -> sidecar --------------===//
+//===- ExternalizeConstants.cpp - hipsr.constant -> constants file -------===//
 //
 // Phase 2 of the hipsr constant subsystem. Two stages inside one pass:
 //
@@ -10,7 +10,7 @@
 //     aligned cumulative offset, and stamp offset/size on the op (append-only
 //     -- value/source are kept). Builds one hip::ConstantEntry per constant.
 //   Phase 2 (only when a FileSystem is injected on the dialect): write the
-//     entries to the sidecar via writeConstantsBinToFileSystem.
+//     entries to the constants file via writeConstantsBinToFileSystem.
 //
 // file_source entries carry their file_path/offset only (data = nullptr) so
 // this pass does not read the weight file; inline / mem_source entries carry a
@@ -40,8 +40,8 @@ namespace hipsr {
 
 namespace {
 
-// Sidecar alignment: every constant starts on a 64-byte boundary (GPU
-// alignment; matches the hip.* sidecar layout).
+// Constants-file alignment: every constant starts on a 64-byte boundary (GPU
+// alignment; matches the hip.* constants-file layout).
 constexpr int64_t kConstantAlignment = 64;
 
 struct HipsrExternalizeConstantsPass
@@ -55,9 +55,9 @@ struct HipsrExternalizeConstantsPass
     Builder builder(ctx);
 
     // Phase 1: collect entries and stamp offset/size across the whole module.
-    // Module-scoped so a single cumulative offset feeds one shared sidecar
-    // (see Passes.td). Independent of the FileSystem so the IR transform is
-    // deterministic with or without a sink.
+    // Module-scoped so a single cumulative offset feeds one shared constants
+    // file (see Passes.td). Independent of the FileSystem so the IR transform
+    // is deterministic with or without a sink.
     std::vector<hip::ConstantEntry> entries;
     int64_t filePos = 0;
     module.walk([&](ConstantOp c) {
@@ -95,9 +95,9 @@ struct HipsrExternalizeConstantsPass
       entries.push_back(std::move(entry));
     });
 
-    // Phase 2: write the sidecar, only when a FileSystem was injected (e.g. by
-    // the compile driver). Standalone runs (hip-mlir-opt) inject none, so the
-    // pass is a pure IR transform there.
+    // Phase 2: write the constants file, only when a FileSystem was injected
+    // (e.g. by the compile driver). Standalone runs (hip-mlir-opt) inject none,
+    // so the pass is a pure IR transform there.
     morphizen::FileSystem *fs = nullptr;
     if (auto *dialect = ctx->getLoadedDialect<HipsrDialect>()) {
       fs = dialect->getFileSystem();
@@ -106,8 +106,7 @@ struct HipsrExternalizeConstantsPass
       if (!hip::writeConstantsBinToFileSystem(
               fs, constantsFile, entries,
               llvm::alignTo(filePos, kConstantAlignment))) {
-        module.emitError("failed to write constants sidecar: ")
-            << constantsFile;
+        module.emitError("failed to write constants file: ") << constantsFile;
         signalPassFailure();
       }
     }

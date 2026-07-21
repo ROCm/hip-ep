@@ -81,7 +81,7 @@ static CompilationConfig load_config(PassContext *ctx) {
                                                                 : "LLVM_IR")
             << "; skipConstantData="
             << (config.skipConstantData ? "true" : "false")
-            << (epctxExport ? " (EPContext export -> sidecar)"
+            << (epctxExport ? " (EPContext export -> constants file)"
                             : " (streaming default)");
 
   return config;
