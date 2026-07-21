@@ -69,7 +69,8 @@ static FailureOr<Value> unboxCond(OpBuilder &builder, Location loc,
         if (at && at.getRank() == 0 && at.getElementType() == intTy) {
           bool truthy = (*attr.getValues<APInt>().begin()).getZExtValue() != 0;
           return arith::ConstantIntOp::create(builder, loc, builder.getI1Type(),
-                                              truthy ? 1 : 0);
+                                              truthy ? 1 : 0)
+              .getResult();
         }
       }
     }
