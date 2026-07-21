@@ -7,7 +7,7 @@
 # MLIR dialect/pass unit tests (GPU-free).
 #=============================================================================
 # Cover behavior that LIT cannot: here -hipsr-externalize-constants runs with an
-# injected in-memory FileSystem so the Phase 2 sidecar write (and the bytes it
+# injected in-memory FileSystem so the Phase 2 constants-file write (and the bytes it
 # emits) can be asserted, which hip-mlir-opt (no FileSystem) cannot exercise.
 # Plain main() (no GTest), matching the other MLIR-side unit tests.
 

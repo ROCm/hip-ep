@@ -78,7 +78,7 @@ def ConvertOnnxToHipPass : Pass<"convert-onnx-to-hip", "mlir::ModuleOp"> {
     Transformations:
       1. Constants: onnx.Constant -> arith.constant (small/inline) or
          memref.global extern + memref.get_global + bufferization.to_tensor
-         (large/externalized to sidecar .constants.bin + .constants.json)
+         (large/externalized to constants file .constants.bin + .constants.json)
       2. Op mapping: onnx.{MatMul,Transpose,Mul,Softmax} -> hip.* (tensor DPS)
       3. Cleanup: erase onnx.EntryPoint
 
@@ -86,7 +86,7 @@ def ConvertOnnxToHipPass : Pass<"convert-onnx-to-hip", "mlir::ModuleOp"> {
     available as function argument 0.
 
     Constant externalization (opt-in via --externalize-min-num-elements):
-      Large constants above the threshold are written to a binary sidecar file
+      Large constants above the threshold are written to a binary constants file
       and replaced with extern memref.global ops carrying a hip.external_data
       attribute (offset + size).  The filename is recorded as a
       hip.constants_file attribute on the module.  This follows the onnx-mlir
@@ -96,7 +96,7 @@ def ConvertOnnxToHipPass : Pass<"convert-onnx-to-hip", "mlir::ModuleOp"> {
   let options = [
     Option<"externalizeOutputDir", "externalize-output-dir", "std::string",
            /*default=*/"\"\"",
-           "Directory for sidecar .constants.bin/.json files (empty = cwd)">,
+           "Directory for constants-file .constants.bin/.json files (empty = cwd)">,
     Option<"externalizeMinNumElements", "externalize-min-num-elements",
            "int64_t", /*default=*/"0",
            "Minimum number of tensor elements to externalize (0 = disabled)">
@@ -779,7 +779,7 @@ def ResolveExternConstantsPass
     memref.global. The !hip.context is taken from function argument 0
     (inserted by --hip-add-context-arg).
 
-    The runtime is responsible for loading the sidecar constants.bin file
+    The runtime is responsible for loading the constants.bin file
     via morphizen::FileSystem, uploading constants to GPU memory, and
     returning GPU pointers via hipdnn_ep_constant_get(state, index).
 
