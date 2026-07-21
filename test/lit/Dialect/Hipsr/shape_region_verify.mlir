@@ -20,12 +20,12 @@
 // the onnx->hipsr conversion emits, so IR without a shape region must read back
 // correctly.
 // CHECK-LABEL: func.func @cast_no_shape_region
-func.func @cast_no_shape_region(%input: tensor<?x8xf32>,
+func.func @cast_no_shape_region(%ctx: !hipsr.context, %input: tensor<?x8xf32>,
                                 %init: tensor<?x8xf16>) -> tensor<?x8xf16> {
-  // CHECK: hipsr.cast ins(%{{.+}} : tensor<?x8xf32>) outs(%{{.+}} : tensor<?x8xf16>) -> tensor<?x8xf16>
+  // CHECK: hipsr.cast(%{{.+}}) ins(%{{.+}} : tensor<?x8xf32>) outs(%{{.+}} : tensor<?x8xf16>) : tensor<?x8xf16>
   // CHECK-NOT: shape_region
-  %0 = hipsr.cast ins(%input : tensor<?x8xf32>)
-                  outs(%init : tensor<?x8xf16>) -> tensor<?x8xf16>
+  %0 = hipsr.cast(%ctx) ins(%input : tensor<?x8xf32>)
+                  outs(%init : tensor<?x8xf16>) : tensor<?x8xf16>
   return %0 : tensor<?x8xf16>
 }
 
@@ -33,12 +33,12 @@ func.func @cast_no_shape_region(%input: tensor<?x8xf32>,
 
 // A value defined in the enclosing function that is NOT one of the op's
 // operands is a disallowed outer capture: the trait verifier rejects it.
-func.func @cast_scoping_disallowed_outer(%input: tensor<?x8xf32>,
+func.func @cast_scoping_disallowed_outer(%ctx: !hipsr.context, %input: tensor<?x8xf32>,
                                          %init: tensor<?x8xf16>) -> tensor<?x8xf16> {
   %outer = arith.constant 8 : index
   // expected-note@+1 {{may only use values defined in its regions or the op's operands}}
-  %0 = hipsr.cast ins(%input : tensor<?x8xf32>)
-                  outs(%init : tensor<?x8xf16>) -> tensor<?x8xf16>
+  %0 = hipsr.cast(%ctx) ins(%input : tensor<?x8xf32>)
+                  outs(%init : tensor<?x8xf16>) : tensor<?x8xf16>
                   shape_region {
     %c0 = arith.constant 0 : index
     %d0 = tensor.dim %input, %c0 : tensor<?x8xf32>
@@ -52,11 +52,11 @@ func.func @cast_scoping_disallowed_outer(%input: tensor<?x8xf32>,
 
 // A present shape region must not be a lone empty block. (An absent shape
 // region is expressed by omitting the region entirely, not by an empty block.)
-func.func @cast_empty_block(%input: tensor<4x8xf32>,
+func.func @cast_empty_block(%ctx: !hipsr.context, %input: tensor<4x8xf32>,
                             %init: tensor<4x8xf16>) -> tensor<4x8xf16> {
   // expected-error@+1 {{expects a non-empty block}}
-  %0 = hipsr.cast ins(%input : tensor<4x8xf32>)
-                  outs(%init : tensor<4x8xf16>) -> tensor<4x8xf16> shape_region {
+  %0 = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
+                  outs(%init : tensor<4x8xf16>) : tensor<4x8xf16> shape_region {
   }
   return %0 : tensor<4x8xf16>
 }
@@ -64,11 +64,11 @@ func.func @cast_empty_block(%input: tensor<4x8xf32>,
 // -----
 
 // The shape region may hold at most one block.
-func.func @cast_two_blocks(%input: tensor<4x8xf32>,
+func.func @cast_two_blocks(%ctx: !hipsr.context, %input: tensor<4x8xf32>,
                            %init: tensor<4x8xf16>) -> tensor<4x8xf16> {
   // expected-error@+1 {{expects region #0 to have 0 or 1 blocks}}
-  %0 = hipsr.cast ins(%input : tensor<4x8xf32>)
-                  outs(%init : tensor<4x8xf16>) -> tensor<4x8xf16> shape_region {
+  %0 = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
+                  outs(%init : tensor<4x8xf16>) : tensor<4x8xf16> shape_region {
     hipsr.shape_yield () : [f16]
   ^bb1:
     hipsr.shape_yield () : [f16]
@@ -79,11 +79,11 @@ func.func @cast_two_blocks(%input: tensor<4x8xf32>,
 // -----
 
 // A non-empty shape region block must end with a terminator.
-func.func @cast_missing_terminator(%input: tensor<4x8xf32>,
+func.func @cast_missing_terminator(%ctx: !hipsr.context, %input: tensor<4x8xf32>,
                                    %init: tensor<4x8xf16>) -> tensor<4x8xf16> {
   // expected-error@+1 {{shape region block must end with a terminator}}
-  %0 = hipsr.cast ins(%input : tensor<4x8xf32>)
-                  outs(%init : tensor<4x8xf16>) -> tensor<4x8xf16> shape_region {
+  %0 = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
+                  outs(%init : tensor<4x8xf16>) : tensor<4x8xf16> shape_region {
     %c0 = arith.constant 0 : index
   }
   return %0 : tensor<4x8xf16>
@@ -93,11 +93,11 @@ func.func @cast_missing_terminator(%input: tensor<4x8xf32>,
 
 // A non-empty shape region must terminate with hipsr.shape_yield, not some
 // other terminator.
-func.func @cast_wrong_terminator(%input: tensor<4x8xf32>,
+func.func @cast_wrong_terminator(%ctx: !hipsr.context, %input: tensor<4x8xf32>,
                                  %init: tensor<4x8xf16>) -> tensor<4x8xf16> {
   // expected-error@+1 {{shape region must terminate with hipsr.shape_yield, got 'cf.br'}}
-  %0 = hipsr.cast ins(%input : tensor<4x8xf32>)
-                  outs(%init : tensor<4x8xf16>) -> tensor<4x8xf16> shape_region {
+  %0 = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
+                  outs(%init : tensor<4x8xf16>) : tensor<4x8xf16> shape_region {
   ^bb0:
     cf.br ^bb0
   }
