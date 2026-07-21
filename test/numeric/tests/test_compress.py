@@ -19,7 +19,6 @@ kernel is genuinely exercised rather than constant-folded away.
 from __future__ import annotations
 
 import numpy as np
-import pytest
 from onnx import helper
 
 from framework.comparator import compare_outputs

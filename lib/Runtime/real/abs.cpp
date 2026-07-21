@@ -5,10 +5,6 @@
 
 // Abs: y = abs(x) (element-wise).
 //
-// Source: onnxruntime/core/providers/cuda/math/unary_elementwise_ops_impl.cu
-//         @ v1.22.2 (UNARY_OP_NAME_EXPR(Abs, abs(a)),
-//                    SPECIALIZED_UNARY_ELEMENTWISE_IMPL_CSILHFD(Abs))
-//
 // Type coverage restricted to FP16 + FP32 + INT32 + INT64 to match the
 // existing unary elementwise family (Neg / Sign / Exp).
 #include "../debug_log.h"
