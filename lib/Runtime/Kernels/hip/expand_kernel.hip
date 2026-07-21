@@ -172,6 +172,14 @@ extern "C" int hip_expand(void *stream, const void *input, void *output,
                        output_shape, aligned_in_strides, output_rank,
                        num_output_elements);
     break;
+  case HIP_DTYPE_INT16:
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_expand_kernel<int16_t>),
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int16_t *>(input),
+                       static_cast<int16_t *>(output), aligned_in_shape,
+                       output_shape, aligned_in_strides, output_rank,
+                       num_output_elements);
+    break;
   default:
     fprintf(stderr, "[custom_kernels] hip_expand: unsupported dtype=%d\n",
             hip_dtype);

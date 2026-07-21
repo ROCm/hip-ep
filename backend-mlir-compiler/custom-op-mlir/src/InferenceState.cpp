@@ -56,13 +56,19 @@ void InferenceState::resolveEntryPoints(const LoadedArtifact &artifact) {
           hipdnn::abi::kSetOutputAllocator);
   flush_op_profile_fn_ =
       artifact.get_method<void, void *>(hipdnn::abi::kRuntimeFlushOpProfile);
+  // Perf-only hook; its name is a plain literal (not an artifact_abi.h
+  // constant) since it is not part of the functional model ABI.
+  add_cpu_profile_fn_ =
+      artifact.get_method<void, void *, const char *, double, double>(
+          "hipdnn_ep_runtime_add_cpu_profile");
 }
 
 InferenceState::InferenceState(PrivateTag, void *state,
                                std::unique_ptr<LoadedArtifact> artifact)
     : state_(state), artifact_(std::move(artifact)), compute_fn_(nullptr),
       cleanup_fn_(nullptr), begin_compute_fn_(nullptr),
-      set_output_allocator_fn_(nullptr), flush_op_profile_fn_(nullptr) {
+      set_output_allocator_fn_(nullptr), flush_op_profile_fn_(nullptr),
+      add_cpu_profile_fn_(nullptr) {
   resolveEntryPoints(*artifact_);
 
   MY_LOG(2) << "begin_compute symbol "
@@ -71,6 +77,8 @@ InferenceState::InferenceState(PrivateTag, void *state,
             << (set_output_allocator_fn_ ? "resolved" : "not exported (no-op)");
   MY_LOG(2) << "flush_op_profile symbol "
             << (flush_op_profile_fn_ ? "resolved" : "not exported (no-op)");
+  MY_LOG(2) << "add_cpu_profile symbol "
+            << (add_cpu_profile_fn_ ? "resolved" : "not exported (no-op)");
 
   // Without begin_compute, the GQA seqlens_k cache survives across
   // forward passes and decode returns token-1 values for tokens 2..N
@@ -193,6 +201,13 @@ void InferenceState::begin_compute() const {
 void InferenceState::flush_op_profile() const {
   if (flush_op_profile_fn_ && state_) {
     flush_op_profile_fn_(state_);
+  }
+}
+
+void InferenceState::add_cpu_profile(const char *name, double cpu_start_us,
+                                     double cpu_ms) const {
+  if (add_cpu_profile_fn_ && state_) {
+    add_cpu_profile_fn_(state_, name, cpu_start_us, cpu_ms);
   }
 }
 

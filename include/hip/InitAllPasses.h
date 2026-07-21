@@ -10,6 +10,8 @@
 #include "hip/Compiler/PluginRegistry.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/Passes.h"
+#include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
+#include "hip/Dialect/Hipsr/Transforms/Passes.h"
 #include "hip/Dialect/IR/HipBufferize.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
@@ -71,6 +73,7 @@ inline void registerAllDialects(mlir::DialectRegistry &registry) {
   registry.insert<mlir::bufferization::BufferizationDialect>();
   registry.insert<mlir::LLVM::LLVMDialect>();
   registry.insert<mlir::hip::HipDialect>();
+  registry.insert<mlir::hipsr::HipsrDialect>();
   registry.insert<detail::OnnxStubDialect>();
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
   // The ownership-based buffer-deallocation pass walks arith ops (e.g.
@@ -147,13 +150,17 @@ inline void registerAllPasses() {
     mlir::hip::registerHipPasses();
     mlir::hip::registerHipPipelines();
 
-    // Conversion passes (convert-onnx-to-hip, outline-onnx-to-hipdnn,
-    // convert-hip-to-llvm); onnx-loop-outline is hand-written, not in the .td
-    // set, so it is registered separately below.
-    registerConversionPasses();
-    mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
-      return mlir::hip::createOnnxLoopOutlinePass();
-    });
+  // hipsr dialect transform passes (TableGen GEN_PASS_REGISTRATION):
+  // hipsr-populate-shape-region, hipsr-externalize-constants, ...
+  mlir::hipsr::registerHipsrPasses();
+
+  // Conversion passes (convert-onnx-to-hip, outline-onnx-to-hipdnn,
+  // convert-hip-to-llvm); onnx-loop-outline is hand-written, not in the .td
+  // set, so it is registered separately below.
+  registerConversionPasses();
+  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
+    return mlir::hip::createOnnxLoopOutlinePass();
+  });
 
     // Standard MLIR passes the production pipeline interleaves, registered so
     // an override can name them around the hip-* passes. The registrar names

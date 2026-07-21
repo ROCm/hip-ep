@@ -16,6 +16,7 @@
 
 // Component headers
 #include "InferenceState.h"
+#include "hip/env.h" // shared cross-platform env reader (single Win32 call)
 
 // HIPDNN_EP_PERF instrumentation dependencies
 #ifdef HIPDNN_EP_LINK_HIP_HOST
@@ -332,10 +333,16 @@ bool perf_enabled() {
 #ifndef HIPDNN_EP_LINK_HIP_HOST
   return false;
 #else
-  static const bool enabled = [] {
-    const char *v = std::getenv("HIPDNN_EP_PERF");
-    return v && v[0] >= '1' && v[0] <= '9';
-  }();
+  // Consistent with the runtime's hipdnn_ep_perf_enabled()
+  // (lib/Runtime/debug_log.h) -- both now read env through the shared
+  // hip/env.h helper. PERF is on for HIPDNN_EP_PERF OR a set
+  // HIPDNN_EP_TRACE_FILE. The trace case is load-bearing: without it a
+  // trace-only run leaves perf=false here, so the per-op flush below never
+  // runs and the chrome trace gets no per-op spans even though the runtime's
+  // OP_PROFILE scopes are collecting them.
+  static const bool enabled =
+      hipdnn_ep::env_enabled("HIPDNN_EP_PERF") ||
+      !hipdnn_ep::env_string("HIPDNN_EP_TRACE_FILE").empty();
   return enabled;
 #endif
 }
@@ -442,7 +449,7 @@ public:
       : stream_(stream) {
     if (!start_slot) {
       // hipEventDisableSystemFence: see op_profile.cpp
-      // (op_profile_acquire_event_pair) for the canonical rationale and
+      // (op_profile_make_marker) for the canonical rationale and
       // guardrail. Safe here -- elapsed time is read only after the
       // hipDeviceSynchronize() in finish().
       hipEvent_t a = nullptr, b = nullptr;
@@ -782,6 +789,11 @@ void MlirCustomOp::compute_with_output_allocator(
     s.marshal_out_ms = 0.0; // outputs are allocated in-graph, not marshaled
     s.compute_cpu_ms = EpPerfTimer::ms(t_after_in, timer->t_after_compute());
     timer->finish(s);
+    const double outer_start_us = std::chrono::duration<double, std::micro>(
+                                      timer->t_enter().time_since_epoch())
+                                      .count();
+    inference_state_->add_cpu_profile("[outer] Compute", outer_start_us,
+                                      s.wall_ms);
     // Resolve the per-op table AFTER the timing window closes (see the
     // flush_op_profile contract -- keeps the resolve cost out of wall_ms).
     inference_state_->flush_op_profile();
