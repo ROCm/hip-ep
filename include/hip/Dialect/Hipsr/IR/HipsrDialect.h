@@ -18,7 +18,7 @@
 #include <memory>
 #include <mutex>
 
-// The dialect holds a non-owning FileSystem* (constants sidecar sink). Forward
+// The dialect holds a non-owning FileSystem* (constants file sink). Forward
 // declaration only -- avoids pulling morphizen-foundation into every dialect
 // consumer.
 namespace morphizen {

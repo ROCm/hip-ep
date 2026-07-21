@@ -112,7 +112,7 @@ hip-compiler.dll
   │      ├── translateToLLVMIR      (LLVM dialect → LLVM IR)
   │      ├── optimizeLLVMIR         (target-independent PerModule O0-O3)
   │      ├── stripTargetMetadata    (clear triple + data layout for OS portability)
-  │      └── emit model.bc          (+ model.constants.bin sidecar)
+  │      └── emit model.bc          (+ model.constants.bin constants file)
   ▼
 Per-model LLVM bitcode  (written via MorphiZen FileSystem into the EPContext tar)
 ```

@@ -860,9 +860,9 @@ jobs:
           exit /b %RC%
 
       # ----------------------------------------------------------------------
-      # EPContext export + import perf test (PR #132 sidecar-in-tar path).
+      # EPContext export + import perf test (PR #132 constants-file-in-tar path).
       # Limited to full_model_seq128 to bound runtime: each model triggers
-      # one export pass (~60 s + N GB sidecar write) plus one import perf
+      # one export pass (~60 s + N GB constants-file write) plus one import perf
       # pass (-t 30). The _ctx.onnx + _MORPHIZEN.bin are deleted right after
       # import to keep runner disk usage bounded.
       # ----------------------------------------------------------------------

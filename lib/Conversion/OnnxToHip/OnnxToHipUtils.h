@@ -454,7 +454,7 @@ void populateFastGeluFusionPatterns(RewritePatternSet &patterns,
 /// through their own ONNX→HIP converters in `convertComputeOps`. Must run
 /// BEFORE `lowerOnnxConstants` because production builds externalize every
 /// `onnx.Constant` (incl. 1-element scalars) into a memref.global with the
-/// value moved to the constants sidecar — at that point the exponent is no
+/// value moved to the constants file — at that point the exponent is no
 /// longer recoverable from IR. See PowerConversion.cpp.
 void populatePowDecompositionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
