@@ -89,6 +89,9 @@ public:
   // is a single cached indirect dispatch.
   void flush_op_profile() const;
 
+  void add_cpu_profile(const char *name, double cpu_start_us,
+                       double cpu_ms) const;
+
   // Diagnostic-only accessor: returns the hipStream_t used by
   // inference_compute, as a void*.  Relies on RuntimeState
   // (lib/Runtime/runtime_state_internal.h) keeping hipStream_t as its first
@@ -145,6 +148,11 @@ private:
   // present.
   using FlushOpProfileFn = void (*)(void *);
   FlushOpProfileFn flush_op_profile_fn_;
+
+  // Cached function pointer for hipdnn_ep_runtime_add_cpu_profile. Same
+  // resolve-once / null-when-absent contract as flush_op_profile_fn_ above.
+  using AddCpuProfileFn = void (*)(void *, const char *, double, double);
+  AddCpuProfileFn add_cpu_profile_fn_;
 };
 
 } // namespace mlir_compilation::customop

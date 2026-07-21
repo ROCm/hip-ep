@@ -670,6 +670,20 @@ HIP_KERNEL_API int hip_gqa_flash_prefill_v2(
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale);
 
+/* hip_mha_flash_prefill: fused non-causal FA-2 WMMA prefill for the MS
+ * MultiHeadAttention contrib op (self-attention, N_q == N_kv). Replaces the
+ * decomposed hipBLASLt pipeline that materializes the fp32 score matrix
+ * S[B,N,sq,skv] in DRAM (~3.4 GB for the Qwen VLM vision encoder). Keeps the
+ * running (m, l, O) softmax state in registers; K streamed from global, V/P
+ * staged in LDS; score/value GEMMs on the RDNA3.5 WMMA unit. Head dim d need
+ * not be a multiple of 16 (padded to next multiple, tail tile masked-loaded).
+ * Layout: Q [B,sq,N,d] (BSND); K/V cache [B,N,max_seq,d] (BNSD); O [B,sq,N,d].
+ * fp16 only, bidirectional (non-causal), past_len == 0. Returns 0 on success,
+ * -1 if the (padded) head dim is unsupported (> 256). */
+HIP_KERNEL_API int hip_mha_flash_prefill(
+    void* stream, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int N, int sq, int skv, int d, int max_seq, float scale);
+
 /* FA-2 split-K GQA decode (sq == 1, d in {64, 128}, HPG=H/G==4):
  * GQA-aware kernel that loads K/V tiles into LDS once and reuses them
  * across the 4 query heads of each KV group, then a second kernel
@@ -1332,14 +1346,34 @@ HIP_KERNEL_API int hip_transpose(
  * =========================================================================
  *
  * Computes Y = A @ dequant(B)^T + bias, where B holds packed quantized
- * weights.  Supports bits=4 (packed nibbles) and bits=8 (1 byte per
- * weight); other widths return an error.
+ * weights.  Supports bits=4 (packed nibbles), bits=8 (1 byte per weight),
+ * bits=3 (custom continuous-bitstream packing, exploratory), and bits=2
+ * (4 values per byte, LSB-first — same layout as ONNX MatMulNBits since 2
+ * divides 8 evenly); other widths return an error.
  *
  * Dequantization (per-block): dequant = (quant_val - zero_point) * scale
  * For 4-bit: lower nibble = first value, upper nibble = second.
  *            Default zero_point = 8 (when zero_points is NULL).
  * For 8-bit: B is unpacked uint8 of shape [N, K]; zero_points (when
  *            provided) is uint8 [N, k_blocks]; default zero_point = 128.
+ * For 2-bit: 4 values per byte, LSB-first (value k occupies bits [2k, 2k+2)
+ *            of row n's byte stream), [N, ceil(K*2/8)] bytes. Because 2
+ *            divides 8, this equals the ONNX MatMulNBits blockwise layout.
+ *            zero_points (when provided) is uint8 [N, k_blocks] (not
+ *            bit-packed); default zero_point = 2. Same three dispatch paths
+ *            as bits=3.
+ * For 3-bit: NOT an ONNX MatMulNBits convention — B is a continuous
+ *            per-row 3-bit bitstream, [N, ceil(K*3/8)] bytes; value k
+ *            occupies bits [3k, 3k+3) of row n, LSB-first. zero_points
+ *            (when provided) is uint8 [N, k_blocks] (not bit-packed);
+ *            default zero_point = 4. Three dispatch paths (mirrors
+ *            bits=8): an autotuned WMMA fast path for M >= 16 (batch=1,
+ *            K % 32 == 0, block_size % 32 == 0 and >= 32) with the 3-bit
+ *            stream decoded inline in the K-loop (no separate dequant
+ *            buffer — every 8-value chunk packs into exactly 3 bytes, so
+ *            the decode never crosses a byte boundary); an autotuned GEMV
+ *            for decode/small-M (block_size a power of two >= 32, K % 32
+ *            == 0); and a naive per-element fallback for anything else.
  *
  * Parameters:
  *   stream             - hipStream_t cast to void*
@@ -1347,16 +1381,18 @@ HIP_KERNEL_API int hip_transpose(
  *   B                  - GPU packed weights:
  *                          bits=4: [N, k_blocks, blob_size] uint8 packed int4
  *                          bits=8: [N, K] uint8 (no packing)
+ *                          bits=3: [N, ceil(K*3/8)] uint8, continuous 3-bit
+ *                                  bitstream per row (see above)
  *   scales             - GPU [N, k_blocks] (same type as A)
  *   zero_points        - GPU [N, k_blocks] uint8 (nullable; default zp=8
- *                        for bits=4, zp=128 for bits=8)
+ *                        for bits=4, zp=128 for bits=8, zp=4 for bits=3)
  *   bias               - GPU [N] (nullable, same type as A)
  *   output             - GPU [batch, M, N]
  *   M                  - rows per batch
  *   N                  - output columns
  *   K                  - inner dimension
  *   batch_count        - number of batches
- *   bits               - quantization bit-width (must be 4)
+ *   bits               - quantization bit-width (2, 3, 4, or 8)
  *   block_size         - quantization block size (e.g. 32)
  *   element_size_bytes - 2 for fp16, 4 for fp32
  *
@@ -1384,6 +1420,27 @@ HIP_KERNEL_API int hip_matmul_nbits(
     const void* pre_unpacked_zp_u8,
     const void* pre_unpacked_zp_fp16);
 
+/* W4A8 integer-dot-product (dp4a) GEMV for a single decode row (M==1).
+ * Dynamically quantizes the fp16 activation row to per-group int8 (into
+ * caller-owned scratch) and runs a `v_dot4_i32_iu8` (`__builtin_amdgcn_sudot4`)
+ * GEMV, replacing the dequant-ALU-bound fp path. Requires bits==4, K%32==0.
+ *   A          : fp16 activation [K]  (batch==M==1, row-major)
+ *   B          : packed int4 weights  [N, K/2]
+ *   scales     : fp16 [N, ceil(K/block_size)]
+ *   zp_u8      : pre-unpacked uint8 zero points [N, ceil(K/block_size)] or
+ *                nullptr for the symmetric (default zp=8) path
+ *   out        : fp16 [N]
+ *   a_qb_scratch    : >= K bytes (int8), caller/session-owned
+ *   a_scale_scratch : >= ceil(K/block_size) floats, caller/session-owned
+ * Returns a hipError_t (hipSuccess on success); hipErrorInvalidValue if K%32.
+ */
+HIP_KERNEL_API int hip_matmul_nbits_dp4a(
+    void* stream,
+    const void* A, const void* B, const void* scales, const void* zp_u8,
+    const void* bias, void* out,
+    int64_t N, int64_t K, int64_t block_size,
+    void* a_qb_scratch, void* a_scale_scratch);
+
 /* Stand-alone launchers for the zero_points unpack/convert kernels, used by
  * the asym matmul_nbits cache in lib/Runtime/real/matmul_nbits.cpp.
  *
@@ -1393,6 +1450,14 @@ HIP_KERNEL_API int hip_matmul_nbits(
  *   groups_k:  K / block_size (round-up)
  */
 HIP_KERNEL_API void hip_matmul_nbits_unpack_zp_u8(
+    void* stream, const void* zp_packed, void* dst_u8, int N, int groups_k);
+/* Same as above but for the bits=2 packing (4 group zero_points per byte,
+ * [N, ceil(groups_k/4)] packed input). */
+HIP_KERNEL_API void hip_matmul_nbits_unpack_zp_u8_2bit(
+    void* stream, const void* zp_packed, void* dst_u8, int N, int groups_k);
+/* Same as above but for the bits=3 packing (continuous per-row 3-bit stream,
+ * [N, ceil(groups_k*3/8)] packed input). */
+HIP_KERNEL_API void hip_matmul_nbits_unpack_zp_u8_3bit(
     void* stream, const void* zp_packed, void* dst_u8, int N, int groups_k);
 HIP_KERNEL_API void hip_matmul_nbits_convert_zp_fp16(
     void* stream, const void* zp_packed, void* dst_fp16, int N, int groups_k);
@@ -1605,6 +1670,29 @@ HIP_KERNEL_API int hip_qmoe_decode_fused(
     void* slot_buf,
     void* act_out,
     void* output,
+    int64_t hidden_size, int64_t inter_size,
+    int64_t k, int64_t block_size,
+    float swiglu_alpha, float swiglu_beta, float swiglu_limit,
+    int64_t element_size_bytes);
+
+// W4A8 dp4a decode variant of hip_qmoe_decode_fused (env-gated via
+// HIPDNN_EP_MATMUL_DP4A). Additionally takes 4 scratch buffers: quantized
+// int8 activations + per-group scales for the fc1 input ([hidden]) and the
+// fc2 slot activations ([k, inter]). fp16 only; block_size a multiple of 32.
+HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a(
+    void* stream,
+    const void* input,
+    const void* expert_indices,
+    const void* expert_weights,
+    const void* fc1_weights, const void* fc1_scales,
+    const void* fc1_zero_points, const void* fc1_bias,
+    const void* fc2_weights, const void* fc2_scales,
+    const void* fc2_zero_points, const void* fc2_bias,
+    void* slot_buf,
+    void* act_out,
+    void* output,
+    void* a_qb_in, void* a_scale_in,
+    void* a_qb_mid, void* a_scale_mid,
     int64_t hidden_size, int64_t inter_size,
     int64_t k, int64_t block_size,
     float swiglu_alpha, float swiglu_beta, float swiglu_limit,

@@ -85,9 +85,12 @@ extern "C" void *hipdnn_ep_state_get_op_profile(RuntimeState *) {
 }
 
 bool op_profile_is_active(OpProfileState *) { return false; }
-int op_profile_acquire_event_pair(OpProfileState *) { return 0; }
-hipEvent_t op_profile_get_start_event(OpProfileState *, int) { return nullptr; }
-hipEvent_t op_profile_get_stop_event(OpProfileState *, int) { return nullptr; }
+void op_profile_ensure_epoch(OpProfileState *, hipStream_t) {}
+int op_profile_acquire_marker(OpProfileState *) { return 0; }
+hipEvent_t op_profile_get_marker_event(OpProfileState *, int) {
+  return nullptr;
+}
 void op_profile_add_pending(OpProfileState *, const std::string &,
-                            const std::string &, int, double) {}
+                            const std::string &, int, double, int64_t, double) {
+}
 void op_profile_add_cpu(OpProfileState *, const std::string &, double) {}

@@ -955,8 +955,10 @@ int main(int argc, char *argv[]) {
     // on the prebuilt Linux ORT package we ship here. Spell out the map type
     // so we always bind to the original overload and stay compatible with the
     // older ORT version we still link against on Windows.
-    session_opts.AppendExecutionProvider_V2(
-        env, devices, std::unordered_map<std::string, std::string>{});
+    std::unordered_map<std::string, std::string> ep_opts;
+    if (const char *af = std::getenv("HIPDNN_EP_ARTIFACT_FORMAT"))
+      ep_opts["artifact_format"] = af;
+    session_opts.AppendExecutionProvider_V2(env, devices, ep_opts);
     session_opts.AddConfigEntry("session.disable_cpu_ep_fallback", "1");
   }
 

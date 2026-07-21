@@ -48,6 +48,20 @@ struct ZpUnpackCache {
 const void *lookup_or_unpack_zp_u8(ZpUnpackCache &cache, void *stream,
                                    const void *zp_packed, int N, int groups_k);
 
+// Same as lookup_or_unpack_zp_u8 but for the bits=2 packing (4 group
+// zero_points per byte). Unpacks the packed 2-bit stream to one uint8 per
+// group. Returns nullptr only on hipMalloc failure.
+const void *lookup_or_unpack_zp_u8_2bit(ZpUnpackCache &cache, void *stream,
+                                        const void *zp_packed, int N,
+                                        int groups_k);
+
+// Same as lookup_or_unpack_zp_u8 but for the bits=3 packing (continuous
+// per-row 3-bit stream). Unpacks to one uint8 per group. Returns nullptr only
+// on hipMalloc failure.
+const void *lookup_or_unpack_zp_u8_3bit(ZpUnpackCache &cache, void *stream,
+                                        const void *zp_packed, int N,
+                                        int groups_k);
+
 // Returns the cached fp16 zero_points buffer for `zp_packed`, allocating +
 // converting on miss. Returns nullptr only on hipMalloc failure.
 const void *lookup_or_convert_zp_fp16(ZpUnpackCache &cache, void *stream,

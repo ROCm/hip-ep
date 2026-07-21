@@ -90,6 +90,72 @@ const void *lookup_or_unpack_zp_u8(ZpUnpackCache &cache, void *stream,
   return dst;
 }
 
+// bits=2 variant: unpacks the 4-per-byte packed 2-bit zero_points stream to
+// one uint8 per group. Same pointer-keyed cache as the nibble path — a given
+// zero_points pointer is either 2-bit or 4-bit packed for the life of the
+// session, so keying by pointer keeps the two unambiguous.
+const void *lookup_or_unpack_zp_u8_2bit(ZpUnpackCache &cache, void *stream,
+                                        const void *zp_packed, int N,
+                                        int groups_k) {
+  const size_t need = static_cast<size_t>(N) * static_cast<size_t>(groups_k);
+
+  std::lock_guard<std::mutex> lock(cache.mu);
+  auto it = cache.u8.find(zp_packed);
+  if (it != cache.u8.end() && it->second.second >= need)
+    return it->second.first;
+
+  void *dst = nullptr;
+  if (hipMalloc(&dst, need) != hipSuccess) {
+    fprintf(stderr,
+            "matmul_nbits: hipMalloc(%zu) for zp_u8 (2-bit) cache "
+            "failed\n",
+            need);
+    return nullptr;
+  }
+  hip_matmul_nbits_unpack_zp_u8_2bit(stream, zp_packed, dst, N, groups_k);
+
+  if (it != cache.u8.end()) {
+    hipFree(it->second.first);
+    it->second = {dst, need};
+  } else {
+    cache.u8.emplace(zp_packed, std::make_pair(dst, need));
+  }
+  return dst;
+}
+
+// bits=3 variant: unpacks the continuous per-row 3-bit packed zero_points
+// stream to one uint8 per group. Shares the pointer-keyed cache with the
+// nibble/2-bit paths (a given zero_points pointer has a single packing for
+// the life of the session).
+const void *lookup_or_unpack_zp_u8_3bit(ZpUnpackCache &cache, void *stream,
+                                        const void *zp_packed, int N,
+                                        int groups_k) {
+  const size_t need = static_cast<size_t>(N) * static_cast<size_t>(groups_k);
+
+  std::lock_guard<std::mutex> lock(cache.mu);
+  auto it = cache.u8.find(zp_packed);
+  if (it != cache.u8.end() && it->second.second >= need)
+    return it->second.first;
+
+  void *dst = nullptr;
+  if (hipMalloc(&dst, need) != hipSuccess) {
+    fprintf(stderr,
+            "matmul_nbits: hipMalloc(%zu) for zp_u8 (3-bit) cache "
+            "failed\n",
+            need);
+    return nullptr;
+  }
+  hip_matmul_nbits_unpack_zp_u8_3bit(stream, zp_packed, dst, N, groups_k);
+
+  if (it != cache.u8.end()) {
+    hipFree(it->second.first);
+    it->second = {dst, need};
+  } else {
+    cache.u8.emplace(zp_packed, std::make_pair(dst, need));
+  }
+  return dst;
+}
+
 const void *lookup_or_convert_zp_fp16(ZpUnpackCache &cache, void *stream,
                                       const void *zp_packed, int N,
                                       int groups_k) {
@@ -187,7 +253,8 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   // its own unpack/convert.
   const void *pre_zp_u8 = nullptr;
   const void *pre_zp_fp16 = nullptr;
-  if (zero_points && zp_elem_size == 1 && bits == 4 && block_size > 0) {
+  if (zero_points && zp_elem_size == 1 &&
+      (bits == 4 || bits == 3 || bits == 2) && block_size > 0) {
     MatmulNbitsState *mst =
         MatmulNbitsState::get_op_state(state, op_state_slot);
     if (!mst) {
@@ -196,16 +263,29 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
       return -1;
     }
     int ngk = static_cast<int>((K + block_size - 1) / block_size);
-    pre_zp_u8 = hipdnn_ep_real::lookup_or_unpack_zp_u8(
-        mst->zp, stream, zero_points, static_cast<int>(N), ngk);
+    // ONNX MatMulNBits packs zero_points at `bits` bits: 2-per-byte nibbles
+    // for bits=4, 4-per-byte for bits=2, and a continuous per-row 3-bit
+    // stream for bits=3. Unpack to one-byte-per-group so the kernel's
+    // GEMV/naive/WMMA paths can index zp[n*ngk + grp] directly.
+    pre_zp_u8 =
+        (bits == 2)
+            ? hipdnn_ep_real::lookup_or_unpack_zp_u8_2bit(
+                  mst->zp, stream, zero_points, static_cast<int>(N), ngk)
+        : (bits == 3)
+            ? hipdnn_ep_real::lookup_or_unpack_zp_u8_3bit(
+                  mst->zp, stream, zero_points, static_cast<int>(N), ngk)
+            : hipdnn_ep_real::lookup_or_unpack_zp_u8(
+                  mst->zp, stream, zero_points, static_cast<int>(N), ngk);
     if (!pre_zp_u8)
       return -1;
-    // The fp16 buffer is consumed only by WMMA (batch==1 && K%32==0 && M>=16)
-    // and the col-major GEMV M>1 fallback (same predicate on K, M>1). Build
-    // it eagerly when those preconditions are met — the cache makes the cost
-    // a one-time hit per zero_points pointer.
+    // The fp16 buffer is consumed only by the bits=4 WMMA (batch==1 &&
+    // K%32==0 && M>=16) and col-major GEMV M>1 fallback (same predicate on K,
+    // M>1). Build it eagerly when those preconditions are met — the cache
+    // makes the cost a one-time hit per zero_points pointer. The u2 WMMA path
+    // consumes uint8 zp directly, so bits=2 never needs the fp16 buffer (and
+    // the converter is nibble-specific anyway).
     bool wmma_data_format = (batch_count == 1) && (K % 32 == 0);
-    if (wmma_data_format && M > 1) {
+    if (bits == 4 && wmma_data_format && M > 1) {
       pre_zp_fp16 = hipdnn_ep_real::lookup_or_convert_zp_fp16(
           mst->zp, stream, zero_points, static_cast<int>(N), ngk);
       if (!pre_zp_fp16)
@@ -214,6 +294,49 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   }
 
   int result = 0;
+
+  // Opt-in W4A8 dp4a fast path for single-row decode GEMV. Eligibility:
+  //   - HIPDNN_EP_MATMUL_DP4A=1
+  //   - M==1 && batch_count==1 (single decode token)
+  //   - bits==4, K%32==0, block_size>0, elem_size==2 (fp16 activation)
+  //   - symmetric (no zero_points) OR asym with pre_zp_u8 already unpacked
+  //   above
+  // The kernel dynamically quantizes the activation row into per-session
+  // scratch (a_qb: K int8 bytes, a_scale: ceil(K/block_size) floats) sized once
+  // and grown on demand, then runs an integer-dot GEMV. Quantizing once (here)
+  // and reusing the compact int8 across all N/TILE_N GEMV blocks is measurably
+  // faster than fusing the quant into the GEMV (which would re-read fp16 A +
+  // re-convert in every block); the extra quant launch it saves is dwarfed by
+  // that redundant work. All other shapes fall through to hip_matmul_nbits.
+  if (hipdnn_ep_matmul_dp4a_enabled() && M == 1 && batch_count == 1 &&
+      bits == 4 && block_size > 0 && (K % 32 == 0) && elem_size == 2 &&
+      (!zero_points || (zp_elem_size == 1 && pre_zp_u8))) {
+    const size_t k_blocks =
+        static_cast<size_t>((K + block_size - 1) / block_size);
+    // a_qb at offset 0 (K bytes, hipMalloc base is over-aligned); a_scale after
+    // a 64-byte-rounded gap so its float reads stay naturally aligned.
+    const size_t a_qb_bytes = static_cast<size_t>(K);
+    const size_t scale_off = (a_qb_bytes + 63) & ~static_cast<size_t>(63);
+    const size_t need = scale_off + k_blocks * sizeof(float);
+    if (hipdnn_ep_state_ensure_matmul_dp4a_scratch(state, need) == 0) {
+      char *base =
+          static_cast<char *>(hipdnn_ep_state_get_matmul_dp4a_scratch(state));
+      if (base) {
+        void *a_qb = base;
+        void *a_scale = base + scale_off;
+        int rc = hip_matmul_nbits_dp4a(stream, A, B, scales, pre_zp_u8, bias,
+                                       output, N, K, block_size, a_qb, a_scale);
+        if (rc == 0) {
+          result = 0;
+          goto cleanup;
+        }
+        // Non-zero rc (e.g. unsupported geometry): fall through to fp path.
+        RUNTIME_DEBUG_LOG(
+            "[REAL] matmul_nbits dp4a rc=%d, falling back to fp GEMV\n", rc);
+      }
+    }
+  }
+
   HIP_CHECK(hip_matmul_nbits(stream, A, B, scales, zero_points, bias, output, M,
                              N, K, batch_count, bits, block_size, elem_size,
                              zp_elem_size, pre_zp_u8, pre_zp_fp16));

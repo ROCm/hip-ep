@@ -5,12 +5,14 @@
 
 #include "CrashHandler.h"
 #include "hip/Compiler/PluginRegistry.h"
+#include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 #include "hip/Dialect/IR/HipBufferize.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 #include "hip/Dialect/Transforms/Pipelines.h"
 
 #include "mlir/Conversion/Passes.h"
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Transforms/BufferDeallocationOpInterfaceImpl.h"
 #include "mlir/Dialect/Arith/Transforms/BufferizableOpInterfaceImpl.h"
@@ -43,6 +45,7 @@ int main(int argc, char **argv) {
   hip::install_crash_handlers("hip-mlir-opt");
   mlir::DialectRegistry registry;
   registry.insert<mlir::BuiltinDialect>();
+  registry.insert<mlir::affine::AffineDialect>();
   registry.insert<mlir::arith::ArithDialect>();
   registry.insert<mlir::bufferization::BufferizationDialect>();
   registry.insert<mlir::cf::ControlFlowDialect>();
@@ -53,6 +56,7 @@ int main(int argc, char **argv) {
   registry.insert<mlir::tensor::TensorDialect>();
   registry.insert<mlir::LLVM::LLVMDialect>();
   registry.insert<mlir::hip::HipDialect>();
+  registry.insert<mlir::hipsr::HipsrDialect>();
   registry.insert<hip::compiler::detail::OnnxStubDialect>();
 
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);

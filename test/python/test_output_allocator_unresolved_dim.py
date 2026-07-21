@@ -84,7 +84,7 @@ _WORKER = textwrap.dedent(
         sys.exit(3)
 
     so = ort.SessionOptions()
-    so.add_provider_for_devices(devices, {"profile": "llm"})
+    so.add_provider_for_devices(devices, {"profile": "hip"})
     sess = ort.InferenceSession(model_path, sess_options=so)
     print("SESSION_CREATED_OK")
     """

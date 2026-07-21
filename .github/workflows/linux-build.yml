@@ -26,12 +26,12 @@ env:
   # LLVM/MLIR/LLD are built from source at this upstream release tag; bumping it
   # only invalidates the llvm-install cache.
   LLVM_TAG: llvmorg-22.1.0
-  ONNXRUNTIME_VERSION: "1.25.1"
-  # Space-separated microsoft/onnxruntime PR numbers. Non-empty => build ORT
-  # from source and `git apply` each PR on top of the pinned tag; empty => use
-  # the official prebuilt release. Part of the ort-install cache key. Remove a
-  # PR once its fix lands in the pinned ONNX Runtime release.
-  ONNXRUNTIME_PR_PATCHES: "28608"
+  ONNXRUNTIME_VERSION: "1.27.0"
+  # Space-separated microsoft/onnxruntime PR numbers `git apply`-ed on top of
+  # the pinned tag during the from-source build (an empty list applies nothing;
+  # ORT is still built from source either way). Part of the ort-install cache
+  # key. Remove a PR once its fix lands in the pinned ONNX Runtime release.
+  ONNXRUNTIME_PR_PATCHES: ""
   OGA_VERSION: "0.14.0"
   # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
   # pull/<n>.patch and `git apply` on top of v<OGA_VERSION>. Part of the OGA
@@ -324,6 +324,10 @@ jobs:
             echo "OGA_PR_PATCHES is empty; nothing to apply"
             exit 0
           fi
+          # pull/<n>.patch is a format-patch series; apply with `git am` so that
+          # intra-series file renames (morphizen_ep -> amdgpu) replay against the
+          # correct intermediate tree. `git apply` flattens the series and chokes
+          # on the rename whose pre-image only exists after an earlier commit.
           # git am needs a committer identity on a bare runner.
           git config user.email "ci@onnx-hipdnn-ep.local"
           git config user.name "onnx-hipdnn-ep CI"
@@ -335,7 +339,8 @@ jobs:
             curl -fsSL --retry 6 --retry-delay 10 --retry-all-errors \
               "$url" -o "/tmp/oga-pr-${pr}.patch"
             echo "Applying PR #${pr}"
-            git am --whitespace=nowarn "/tmp/oga-pr-${pr}.patch"
+            git am --3way --whitespace=nowarn "/tmp/oga-pr-${pr}.patch" \
+              || { git am --abort; echo "PR #${pr} failed to apply"; exit 1; }
           done
 
       - name: Build OGA

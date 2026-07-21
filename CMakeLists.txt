@@ -207,6 +207,9 @@ if(BUILD_HIP_TOOLS)
     # Static compiler-plugin tests (sample plugin + unit test).
     # See docs/design/plugin-interface.md.
     add_subdirectory(test/plugin)
+
+    # MLIR dialect/pass unit tests (GTest; cover Phase 2 write paths LIT can't).
+    add_subdirectory(test/unit)
   endif()
 
   # Out-of-tree plugin dirs (HIPDNN_EP_COMPILER_PLUGIN_PATHS): add each so it can
