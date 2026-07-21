@@ -41,6 +41,8 @@ static int hipdnn_to_hip_dtype(int64_t hipdnn_type) {
     return HIP_DTYPE_UINT8;
   case HIPDNN_EP_DATATYPE_INT8:
     return HIP_DTYPE_INT8;
+  case HIPDNN_EP_DATATYPE_INT16:
+    return HIP_DTYPE_INT16;
   default:
     return -1;
   }
@@ -393,7 +395,7 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
     return -1;
   }
 
-  // Integer dtypes (i32/i64/ui8) aren't supported by miopenOpTensor. Vision
+  // Integer dtypes (i32/i64/i16) aren't supported by miopenOpTensor. Vision
   // encoders run small i64 shape arithmetic via these ops (e.g. multiplying
   // two i64 scalars to compute a downstream Reshape dim); attention chains
   // run i32/i64 Min/Max for the seqlens_k = Min(total_seq_len, max_seq_len)
@@ -401,7 +403,8 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
   // mul/add/min/max. Broadcasting is materialised below by hip_expand into
   // a per-state workspace before the flat kernel runs.
   if (data_type == HIPDNN_EP_DATATYPE_INT64 ||
-      data_type == HIPDNN_EP_DATATYPE_INT32) {
+      data_type == HIPDNN_EP_DATATYPE_INT32 ||
+      data_type == HIPDNN_EP_DATATYPE_INT16) {
     if (tensor_op != HIPDNN_EP_TENSOR_OP_MUL &&
         tensor_op != HIPDNN_EP_TENSOR_OP_ADD &&
         tensor_op != HIPDNN_EP_TENSOR_OP_MIN &&
