@@ -34,8 +34,9 @@ void CastOp::populateShapeRegion(OpBuilder &builder, Region &shapeRegion) {
     Value idx = builder.create<arith::ConstantIndexOp>(loc, i);
     dims.push_back(builder.create<shape::GetExtentOp>(loc, shape, idx));
   }
-  // Single result: one dim group and its (output) element type.
-  Type elemTy = cast<ShapedType>(getResult(0).getType()).getElementType();
+  // Output element type from the `init` operand, not getResult(0): the
+  // bufferized (memref) form has no tensor result.
+  Type elemTy = cast<ShapedType>(getInit().getType()).getElementType();
   builder.create<ShapeYieldOp>(loc, ArrayRef<ValueRange>{ValueRange(dims)},
                                TypeRange{elemTy});
 }

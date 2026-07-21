@@ -3,6 +3,8 @@
  * Licensed under the MIT License.
  */
 
+#include "OnnxToHipsrUtils.h"
+
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
 #include "hip/Dialect/Hipsr/IR/HipsrCastOp.h"
 #include "hip/Dialect/Hipsr/IR/HipsrPlaceholderOp.h"
@@ -33,6 +35,10 @@ struct CastToHipsr : public ::mlir::RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "expected a single operand and result");
 
+    ::mlir::FailureOr<::mlir::Value> ctx = getHipsrContextArg(op, rewriter);
+    if (::mlir::failed(ctx))
+      return ::mlir::failure();
+
     ::mlir::Location loc = op->getLoc();
     ::mlir::Value input = op->getOperand(0);
     auto resultType =
@@ -48,16 +54,16 @@ struct CastToHipsr : public ::mlir::RewritePattern {
     // Old way (built the init from the input shape):
     //   %d0   = tensor.dim %input, %c0 : tensor<?x8xf32>
     //   %init = tensor.empty(%d0)      : tensor<?x8xf16>
-    //   %0    = hipsr.cast ins(%input) outs(%init) -> tensor<?x8xf16>
+    //   %0    = hipsr.cast(%ctx) ins(%input) outs(%init) : tensor<?x8xf16>
     // New way (placeholder mirrors the result type):
     //   %init = hipsr.placeholder      : tensor<?x8xf16>
-    //   %0    = hipsr.cast ins(%input) outs(%init) -> tensor<?x8xf16>
+    //   %0    = hipsr.cast(%ctx) ins(%input) outs(%init) : tensor<?x8xf16>
     ::mlir::Value init =
         rewriter.create<PlaceholderOp>(loc, ::mlir::TypeRange{resultType})
             .getResult(0);
 
     auto castOp = rewriter.create<CastOp>(loc, ::mlir::TypeRange{resultType},
-                                          input, init);
+                                          *ctx, input, init);
     // The shape region is optional: leave it empty (zero blocks) here. A later
     // dedicated pass populates the shape computation.
 

@@ -23,6 +23,10 @@ def Hipsr_CastOp : Hipsr_DpsOp<"cast"> {
     Destination-passing style: the result buffer is passed as the `init`
     operand.
 
+    The `ctx` operand (`!hipsr.context`) is the per-session execution context.
+    Every hipsr op carries it as its first operand; it is added in the ONNX
+    phase and threaded through unchanged.
+
     Regular op: carries an optional shape region (region 0). When populated it
     copies the input shape (via `populateShapeRegion`, which emits
     `shape.shape_of` + `shape.get_extent` so it works for both tensor and
@@ -30,8 +34,8 @@ def Hipsr_CastOp : Hipsr_DpsOp<"cast"> {
 
     Example (populated shape region):
     ```mlir
-    %0 = hipsr.cast ins(%input : tensor<?x8xf32>) outs(%init : tensor<?x8xf16>)
-                    -> tensor<?x8xf16> shape_region {
+    %0 = hipsr.cast(%ctx) ins(%input : tensor<?x8xf32>) outs(%init : tensor<?x8xf16>)
+                          : tensor<?x8xf16> shape_region {
       %shape = shape.shape_of %input : tensor<?x8xf32> -> tensor<2xindex>
       %c0 = arith.constant 0 : index
       %d0 = shape.get_extent %shape, %c0 : tensor<2xindex>, index -> index
@@ -43,17 +47,24 @@ def Hipsr_CastOp : Hipsr_DpsOp<"cast"> {
   }];
 
   let arguments = (ins
+    Hipsr_ContextType:$ctx,
     Hipsr_TensorOrDeviceMemRef:$input,
     Hipsr_TensorOrDeviceMemRef:$init
   );
 
+
+  // Result type is optional: Bufferization removes results from DPS ops (the
+  // memref form has no result), so trying to print a non-existent result type
+  // would crash without the optional clause.
+  //
   // The shape region is optional: an empty (zero-block) region prints nothing
   // and round-trips as empty. A non-empty region prints as
   // `shape_region { ... }`.
   let assemblyFormat = [{
+    `(` $ctx `)`
     `ins` `(` $input `:` type($input) `)`
     `outs` `(` $init `:` type($init) `)`
-    attr-dict `->` type($result_tensors) (`shape_region` $shape_region^)?
+    attr-dict (`:` type($result_tensors)^)? (`shape_region` $shape_region^)?
   }];
 }
 
