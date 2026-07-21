@@ -5,6 +5,8 @@
 #ifndef HIP_COMPILER_INITALLPASSES_H
 #define HIP_COMPILER_INITALLPASSES_H
 
+#include <mutex>
+
 #include "hip/Compiler/PluginRegistry.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/Passes.h"
@@ -132,39 +134,51 @@ inline void loadAllDialects(mlir::MLIRContext &context) {
 /// embed those passes. See docs/design/plugin-interface.md "Pipeline
 /// composition".
 inline void registerAllPasses() {
-  // HIP transform passes (TableGen GEN_PASS_REGISTRATION) and the composable
-  // pipeline names. See docs/pipeline_pass_menu.md for the catalogue.
-  mlir::hip::registerHipPasses();
-  mlir::hip::registerHipPipelines();
+  // Register exactly once per process. PassPipelineRegistration (used by
+  // registerHipPipelines for `onnx-to-hip-pipeline` etc.) writes into MLIR's
+  // GLOBAL pipeline registry and asserts/aborts ("... registered multiple
+  // times") if the same name is registered twice. CompilerDriver::compile()
+  // / compileFromModule() call this per compile, so multi-subgraph models
+  // (e.g. VLM: embedding + text + vision) would register a second time and
+  // abort. std::call_once makes the whole registration idempotent across
+  // repeated compiles in one process (matching
+  // dispatchPluginRegistrationsOnce).
+  static std::once_flag registered;
+  std::call_once(registered, [] {
+    // HIP transform passes (TableGen GEN_PASS_REGISTRATION) and the composable
+    // pipeline names. See docs/pipeline_pass_menu.md for the catalogue.
+    mlir::hip::registerHipPasses();
+    mlir::hip::registerHipPipelines();
 
-  // hipsr dialect transform passes (TableGen GEN_PASS_REGISTRATION):
-  // hipsr-populate-shape-region, hipsr-externalize-constants, ...
-  mlir::hipsr::registerHipsrPasses();
+    // hipsr dialect transform passes (TableGen GEN_PASS_REGISTRATION):
+    // hipsr-populate-shape-region, hipsr-externalize-constants, ...
+    mlir::hipsr::registerHipsrPasses();
 
-  // Conversion passes (convert-onnx-to-hip, outline-onnx-to-hipdnn,
-  // convert-hip-to-llvm); onnx-loop-outline is hand-written, not in the .td
-  // set, so it is registered separately below.
-  registerConversionPasses();
-  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
-    return mlir::hip::createOnnxLoopOutlinePass();
+    // Conversion passes (convert-onnx-to-hip, outline-onnx-to-hipdnn,
+    // convert-hip-to-llvm); onnx-loop-outline is hand-written, not in the .td
+    // set, so it is registered separately below.
+    registerConversionPasses();
+    mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
+      return mlir::hip::createOnnxLoopOutlinePass();
+    });
+
+    // Standard MLIR passes the production pipeline interleaves, registered so
+    // an override can name them around the hip-* passes. The registrar names
+    // differ from the textual pass names they register (e.g.
+    // registerSCFToControlFlowPass registers `convert-scf-to-cf`);
+    // docs/pipeline_pass_menu.md lists every textual name. Bufferization's
+    // registrars cover several passes each (one-shot-bufferize,
+    // buffer-results-to-out-params, buffer-deallocation-pipeline, ...).
+    mlir::registerCanonicalizerPass();
+    mlir::registerPass(
+        []() -> std::unique_ptr<mlir::Pass> { return mlir::createCSEPass(); });
+    mlir::bufferization::registerBufferizationPasses();
+    mlir::bufferization::registerBufferizationPipelines();
+    mlir::registerConvertBufferizationToMemRefPass();
+    mlir::registerSCFToControlFlowPass();
+    mlir::registerReconcileUnrealizedCastsPass();
+    mlir::memref::registerResolveShapedTypeResultDimsPass();
   });
-
-  // Standard MLIR passes the production pipeline interleaves, registered so an
-  // override can name them around the hip-* passes. The registrar names differ
-  // from the textual pass names they register (e.g.
-  // registerSCFToControlFlowPass registers `convert-scf-to-cf`);
-  // docs/pipeline_pass_menu.md lists every textual name. Bufferization's
-  // registrars cover several passes each (one-shot-bufferize,
-  // buffer-results-to-out-params, buffer-deallocation-pipeline, ...).
-  mlir::registerCanonicalizerPass();
-  mlir::registerPass(
-      []() -> std::unique_ptr<mlir::Pass> { return mlir::createCSEPass(); });
-  mlir::bufferization::registerBufferizationPasses();
-  mlir::bufferization::registerBufferizationPipelines();
-  mlir::registerConvertBufferizationToMemRefPass();
-  mlir::registerSCFToControlFlowPass();
-  mlir::registerReconcileUnrealizedCastsPass();
-  mlir::memref::registerResolveShapedTypeResultDimsPass();
 }
 
 } // namespace hip::compiler
