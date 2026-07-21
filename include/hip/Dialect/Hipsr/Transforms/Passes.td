@@ -60,13 +60,12 @@ def HipsrExternalizeConstantsPass
 
     Phase 2 (only when a FileSystem is injected on the HipsrDialect via
     `setFileSystem`): write the entries through
-    `writeConstantsBinToFileSystem`, so file-ref weights stream on demand and
-    are never mmap'd. When no FileSystem is injected (e.g. hip-mlir-opt) the
-    pass is a pure IR transform (no file written).
+    `writeConstantsBinToFileSystem`. When no FileSystem is injected (e.g.
+    hip-mlir-opt) the pass is a pure IR transform (no file written).
 
     Constants with `externalize = false` and ones already externalized are
-    skipped. This pass emits no module-level descriptor arrays; runtime
-    metadata generation is a separate follow-up.
+    skipped. This pass emits no module attributes; runtime metadata generation
+    is a separate follow-up.
   }];
   let options = [
     Option<"constantsFile", "constants-file", "std::string",

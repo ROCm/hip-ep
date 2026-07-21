@@ -5,15 +5,11 @@
 
 // Shared emit logic for the constants.bin sidecar.
 //
-// Multiple constant-externalization producers write the same constants.bin
-// layout: the ONNX->HIP conversion pass (standalone hip-compiler offline
-// path), the MorphiZen EP level-1 pass (EPContext export path), and the
-// hipsr-externalize-constants pass. This header provides a single
-// implementation they call, preserving the streaming-with-1MB-tile pattern for
-// splat constants so no full-size expansion buffer is allocated during write.
-//
-// Lives under Support (not any one conversion) because it is shared
-// infrastructure independent of the hip.* / hipsr.* pipeline lifetimes.
+// Both the ONNX->HIP conversion pass (standalone hip-compiler offline path)
+// and the MorphiZen EP level-1 pass (EPContext export path) produce the same
+// constants.bin layout. This header provides a single implementation they
+// call, preserving the streaming-with-1MB-tile pattern for splat constants so
+// no full-size expansion buffer is allocated during write.
 
 #ifndef HIP_SUPPORT_CONSTANTSIO_H
 #define HIP_SUPPORT_CONSTANTSIO_H
