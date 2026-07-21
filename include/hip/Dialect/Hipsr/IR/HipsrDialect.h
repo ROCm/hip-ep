@@ -18,6 +18,13 @@
 #include <memory>
 #include <mutex>
 
+// The dialect holds a non-owning FileSystem* (constants sidecar sink). Forward
+// declaration only -- avoids pulling morphizen-foundation into every dialect
+// consumer.
+namespace morphizen {
+class FileSystem;
+} // namespace morphizen
+
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h.inc"
 
 // Enum header first: MemorySpaceAttr uses MemorySpaceKind.

@@ -31,9 +31,17 @@ def Hipsr_Dialect : Dialect {
     /// multi-threaded, so the cache is guarded by a mutex.
     ::llvm::MemoryBuffer *getOrLoadFileMap(::llvm::StringRef path);
 
+    /// Sink for the constants sidecar written by -hipsr-externalize-constants.
+    /// Non-owning; the compile driver injects the same FileSystem it hands the
+    /// hip.* pipeline. Null when nobody injected one (e.g. hip-mlir-opt), in
+    /// which case the pass writes no sidecar (pure IR transform).
+    void setFileSystem(::morphizen::FileSystem *fs) { fileSystem = fs; }
+    ::morphizen::FileSystem *getFileSystem() { return fileSystem; }
+
   private:
     ::llvm::StringMap<std::unique_ptr<::llvm::MemoryBuffer>> fileMaps;
     std::mutex fileMapsMutex;
+    ::morphizen::FileSystem *fileSystem = nullptr;
   }];
 }
 

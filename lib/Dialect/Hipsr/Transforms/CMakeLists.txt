@@ -4,6 +4,7 @@
 ##
 
 add_library(HipsrDialectTransforms STATIC
+  ExternalizeConstants.cpp
   PopulateShapeRegionPass.cpp
 )
 
@@ -14,9 +15,12 @@ add_dependencies(HipsrDialectTransforms
 
 target_link_libraries(HipsrDialectTransforms PUBLIC
   HipsrDialectIR
-  MLIRIR
+  HipConstantsIO  # writeConstantsBinToFileSystem / ConstantEntry
   MLIRPass
+  MLIRTransforms
   MLIRFuncDialect
   MLIRArithDialect
   MLIRShapeDialect
+  MLIRIR
+  MLIRSupport
 )
