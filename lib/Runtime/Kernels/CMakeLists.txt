@@ -40,6 +40,7 @@ set(_kernel_sources
     hip/gqa_kernel.hip
     hip/multi_head_attention_kernel.hip
     hip/gemm_wmma_kernel.hip
+    hip/gemm_fp32_kernel.hip
     hip/elementwise_sub_kernel.hip
     hip/elementwise_reciprocal_kernel.hip
     hip/elementwise_sqrt_kernel.hip
