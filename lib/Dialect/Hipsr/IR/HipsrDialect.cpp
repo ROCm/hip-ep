@@ -7,6 +7,7 @@
 
 #include "hip/Dialect/Hipsr/IR/HipsrCastOp.h"
 #include "hip/Dialect/Hipsr/IR/HipsrConstantOp.h"
+#include "hip/Dialect/Hipsr/IR/HipsrMatMulOp.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 #include "hip/Dialect/Hipsr/IR/HipsrPlaceholderOp.h"
 #include "hip/Dialect/Hipsr/IR/HipsrPoolDomainOp.h"
@@ -51,6 +52,9 @@ void HipsrDialect::initialize() {
 #include "hip/Dialect/Hipsr/IR/HipsrCastOp.cpp.inc"
       ,
 #define GET_OP_LIST
+#include "hip/Dialect/Hipsr/IR/HipsrMatMulOp.cpp.inc"
+      ,
+#define GET_OP_LIST
 #include "hip/Dialect/Hipsr/IR/HipsrPlaceholderOp.cpp.inc"
       >();
   addAttributes<
@@ -69,13 +73,15 @@ llvm::MemoryBuffer *HipsrDialect::getOrLoadFileMap(llvm::StringRef path) {
   std::lock_guard<std::mutex> lock(fileMapsMutex);
 
   auto it = fileMaps.find(path);
-  if (it != fileMaps.end())
+  if (it != fileMaps.end()) {
     return it->second.get();
+  }
 
   llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> bufOr =
       llvm::MemoryBuffer::getFile(path, /*IsText=*/false);
-  if (!bufOr)
+  if (!bufOr) {
     return nullptr;
+  }
 
   llvm::MemoryBuffer *raw = bufOr->get();
   fileMaps[path] = std::move(*bufOr);
