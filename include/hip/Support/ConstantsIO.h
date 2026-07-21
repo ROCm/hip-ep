@@ -11,8 +11,8 @@
 // call, preserving the streaming-with-1MB-tile pattern for splat constants so
 // no full-size expansion buffer is allocated during write.
 
-#ifndef HIP_CONVERSION_ONNXTOHIP_CONSTANTSIO_H
-#define HIP_CONVERSION_ONNXTOHIP_CONSTANTSIO_H
+#ifndef HIP_SUPPORT_CONSTANTSIO_H
+#define HIP_SUPPORT_CONSTANTSIO_H
 
 #include <cstdint>
 #include <string>
@@ -68,4 +68,4 @@ bool writeConstantsBinToFileSystem(morphizen::FileSystem *fs,
 } // namespace hip
 } // namespace mlir
 
-#endif // HIP_CONVERSION_ONNXTOHIP_CONSTANTSIO_H
+#endif // HIP_SUPPORT_CONSTANTSIO_H

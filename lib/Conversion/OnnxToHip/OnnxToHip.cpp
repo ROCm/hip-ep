@@ -13,7 +13,7 @@
 
 #include "OnnxToHipUtils.h"
 
-#include "hip/Conversion/OnnxToHip/ConstantsIO.h"
+#include "hip/Support/ConstantsIO.h"
 #include "hip/Support/DiskFileSystem.h"
 #include "hip/timing.h"
 #include "morphizen-foundation/file_io.hpp"
