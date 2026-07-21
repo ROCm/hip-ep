@@ -409,6 +409,64 @@ def Hip_LoopOp : Hip_Op<"loop",
   let hasVerifier = 1;
 }
 
+def Hip_IfOp : Hip_Op<"if",
+    [AttrSizedOperandSegments,
+     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+     DeclareOpInterfaceMethods<DestinationStyleOpInterface,
+                               ["getDpsInitsMutable"]>,
+     DeclareOpInterfaceMethods<InferTypeOpInterface,
+                               ["inferReturnTypes"]>,
+     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Outlined then/else conditional";
+  let description = [{
+    Runtime-driven conditional with outlined then/else body functions.
+    Exactly one branch executes per invocation; its outputs are written
+    into the DPS `o_init` buffers (tensor mode) or returned via out-params
+    (memref mode post-bufferization).
+
+    Operand layout:
+      - `$ctx`: `!hip.context` (always first).
+      - `$cond`: `i1` — branch selector (true -> then, false -> else).
+      - `$o_init`: variadic, length must equal `$num_outputs` — destination
+        buffers for branch outputs; types must match the op's result types.
+      - `$captures`: variadic — outer-graph values used inside either
+        branch that are not subgraph block arguments.
+
+    Result types match `$o_init` types in tensor mode.
+
+    Example:
+    ```mlir
+    %out = hip.if(%ctx, %cond)
+               outs(%out_init : tensor<5xf32>)
+               then @main_if_then_n0 else @main_if_else_n0
+               {num_outputs = 1 : i32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    I1:$cond,
+    Variadic<Hip_TensorOrMemRef>:$o_init,
+    Variadic<AnyType>:$captures,
+    FlatSymbolRefAttr:$then_func,
+    FlatSymbolRefAttr:$else_func,
+    I32Attr:$num_outputs
+  );
+
+  let results = (outs Variadic<AnyRankedTensor>:$outputs);
+
+  let assemblyFormat = [{
+    `(` $ctx `,` $cond `)`
+    ( `outs` `(` $o_init^ `:` type($o_init) `)` )?
+    ( `captures` `(` $captures^ `:` type($captures) `)` )?
+    ( `->` `(` type($outputs)^ `)` )?
+    `then` $then_func `else` $else_func
+    attr-dict
+  }];
+
+  let hasVerifier = 1;
+}
+
 def Hip_FreeOp : Hip_Op<"free",
     [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Free device memory";
@@ -1186,9 +1244,20 @@ def Hip_RopeOp : Hip_DpsOp<"rope", /*traits=*/[],
   let summary = "Rotary position embedding (RoPE)";
   let description = [{
     Applies rotary position embedding to the input tensor.
-    Implements the Microsoft RotaryEmbedding operator.
 
     Uses destination-passing style: output buffer is provided as argument.
+
+    `position_ids` is OPTIONAL, mirroring the two forms of the ONNX
+    RotaryEmbedding operator:
+    - Present (com.microsoft.RotaryEmbedding / native with position_ids):
+      cos_cache/sin_cache are a 2D lookup table `[max_position, rotary_dim/2]`
+      indexed by `position_ids[b, s]`.
+    - Absent (native ai.onnx RotaryEmbedding opset>=23 without position_ids):
+      cos_cache/sin_cache are already position-expanded to
+      `[batch, seq, rotary_dim/2]`, so the runtime indexes them directly by
+      the flattened token position `b*seq + s`. (HF exports precompute the
+      per-token cos/sin via a Gather, leaving the RotaryEmbedding node with
+      no position_ids operand.)
 
     Attributes:
     - interleaved: Rotary embedding interleaved format (0 or 1)
@@ -1209,7 +1278,7 @@ def Hip_RopeOp : Hip_DpsOp<"rope", /*traits=*/[],
   let arguments = (ins
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$input,
-    Hip_TensorOrMemRef:$position_ids,
+    Optional<Hip_TensorOrMemRef>:$position_ids,
     Hip_TensorOrMemRef:$cos_cache,
     Hip_TensorOrMemRef:$sin_cache,
     Hip_TensorOrMemRef:$output,
@@ -1218,10 +1287,17 @@ def Hip_RopeOp : Hip_DpsOp<"rope", /*traits=*/[],
     I64Attr:$rotary_embedding_dim
   );
 
+  // position_ids is the only optional operand; MLIR resolves its presence from
+  // the operand count (no AttrSizedOperandSegments needed). Each optional group
+  // must LEAD with the `,` literal: a group's first parsable element has to be a
+  // literal / variable / custom directive, so a bare `type(...)` directive
+  // cannot open the type-list group. Anchoring on $position_ids omits it from
+  // both the value and type lists when absent; the present-form IR prints
+  // identically to before.
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(`
-        $input `,` $position_ids `,` $cos_cache `,` $sin_cache `:`
-        type($input) `,` type($position_ids) `,` type($cos_cache) `,` type($sin_cache)
+        $input (`,` $position_ids^)? `,` $cos_cache `,` $sin_cache `:`
+        type($input) (`,` type($position_ids)^)? `,` type($cos_cache) `,` type($sin_cache)
     `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
@@ -1504,6 +1580,186 @@ def Hip_GatherOp : Hip_DpsOp<"gather", /*traits=*/[],
   }];
 }
 
+def Hip_OneHotOp : Hip_DpsOp<"one_hot", /*traits=*/[],
+                             /*outsAccessor=*/"Output",
+                             /*autoReify=*/0,
+                             /*autoInfer=*/1,
+                             /*declareInfer=*/1> {
+  let summary = "Expand indices into a one-hot tensor along an axis";
+  let description = [{
+    Implements ONNX OneHot: inserts a `depth`-sized axis into the output
+    and writes `on_value` at index positions from `indices`, filling all
+    other slots with `off_value` from the 2-element `values` tensor.
+
+    Example:
+    ```mlir
+    hip.one_hot(%ctx)
+        ins(%indices, %depth, %values :
+            memref<2x2xi64, 1>, memref<i64, 1>, memref<2xf32, 1>)
+        outs(%output : memref<2x2x10xf32, 1>) {axis = -1 : i64}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$indices,
+    Hip_TensorOrMemRef:$depth,
+    Hip_TensorOrMemRef:$values,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "-1">:$axis
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $indices `,` $depth `,` $values `:` type($indices) `,` type($depth) `,` type($values) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_CompressOp : Hip_DpsOp<"compress", /*traits=*/[],
+                               /*outsAccessor=*/"Output",
+                               /*autoReify=*/0,
+                               /*autoInfer=*/1,
+                               /*declareInfer=*/1> {
+  let summary = "Select slices or elements where a 1-D condition is true";
+  let description = [{
+    Implements ONNX Compress: along `axis`, keep only slices whose
+    corresponding `condition` entry is true. When `flatten` is true the
+    input is treated as a 1-D tensor before selection (no `axis` attribute
+    on the ONNX op).
+
+    Example:
+    ```mlir
+    hip.compress(%ctx)
+        ins(%input, %condition : memref<3x2xf32, 1>, memref<3xi1, 1>)
+        outs(%output : memref<2x2xf32, 1>) {axis = 0 : i64, flatten = false}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$condition,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "0">:$axis,
+    DefaultValuedAttr<BoolAttr, "false">:$flatten
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $condition `:` type($input) `,` type($condition) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_ScatterElementsOp : Hip_DpsOp<"scatter_elements", /*traits=*/[],
+                                      /*outsAccessor=*/"Output",
+                                      /*autoReify=*/1,
+                                      /*autoInfer=*/1,
+                                      /*declareInfer=*/1> {
+  let summary = "Scatter updates along an axis using same-rank indices";
+  let description = [{
+    Implements ONNX ScatterElements: produce an `output` tensor with the
+    same shape as `data` by copying `data`, then writing `updates` at
+    positions specified by `indices` along `axis`. Supports the same
+    `reduction` modes as ScatterND (`none`, `add`, `mul`, `min`, `max`).
+
+    Example:
+    ```mlir
+    hip.scatter_elements(%ctx)
+        ins(%data, %indices, %updates :
+            memref<2x2xf32, 1>, memref<2x2xi32, 1>, memref<2x2xf32, 1>)
+        outs(%output : memref<2x2xf32, 1>) {axis = 1 : i64, reduction = "none"}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$indices,
+    Hip_TensorOrMemRef:$updates,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "0">:$axis,
+    DefaultValuedAttr<StrAttr, "\"none\"">:$reduction
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `,` $indices `,` $updates `:` type($data) `,` type($indices) `,` type($updates) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_GatherElementsOp : Hip_DpsOp<"gather_elements", /*traits=*/[],
+                                      /*outsAccessor=*/"Output",
+                                      /*autoReify=*/0,
+                                      /*autoInfer=*/1,
+                                      /*declareInfer=*/1> {
+  let summary = "Gather elements along an axis using same-rank indices";
+  let description = [{
+    Gathers values from the data tensor at positions specified by the
+    indices tensor along the given axis. Output shape matches indices shape.
+    Implements the ONNX GatherElements operator.
+
+    Example:
+    ```mlir
+    hip.gather_elements(%ctx)
+        ins(%data, %indices : memref<2x2xf32, 1>, memref<2x2xi32, 1>)
+        outs(%output : memref<2x2xf32, 1>) {axis = 1 : i64}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$indices,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "0">:$axis
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `,` $indices `:` type($data) `,` type($indices) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_TopKOp : Hip_DpsOp<"top_k",
+    /*traits=*/[],
+    /*outsAccessor=*/"Values",
+    /*autoReify=*/0,
+    /*autoInfer=*/0,
+    /*declareInfer=*/0> {
+  let summary = "Retrieve top-K values and indices along an axis";
+  let description = [{
+    Implements the ONNX TopK operator: along `axis`, select the top `K`
+    elements from the input and return their values and indices.
+
+    Inputs:
+      x - data tensor
+      k - scalar or 1-element int64 tensor giving K
+
+    DPS outputs (always 2):
+      values - same element type as x
+      indices - int64
+
+    Example:
+    ```mlir
+    hip.top_k(%ctx)
+        ins(%x, %k : memref<3x4xf32, 1>, memref<i64, 1>)
+        outs(%values, %indices : memref<3x2xf32, 1>, memref<3x2xi64, 1>)
+        {axis = 1 : i64, largest = true, sorted = true}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$k,
+    Hip_TensorOrMemRef:$values,
+    Hip_TensorOrMemRef:$indices,
+    DefaultValuedAttr<I64Attr, "-1">:$axis,
+    DefaultValuedAttr<BoolAttr, "true">:$largest,
+    DefaultValuedAttr<BoolAttr, "true">:$sorted
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `,` $k `:` type($x) `,` type($k) `)`
+    `outs` `(` $values `,` $indices `:` type($values) `,` type($indices) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_RangeOp : Hip_DpsOp<"range", /*traits=*/[],
                             /*outsAccessor=*/"Output",
                             /*autoReify=*/0,
@@ -1722,6 +1978,74 @@ def Hip_GeluOp : Hip_DpsOp<"gelu", /*traits=*/[],
   }];
 }
 
+def Hip_BiasGeluOp : Hip_DpsOp<"bias_gelu", /*traits=*/[],
+                               /*outsAccessor=*/"Output",
+                               /*autoReify=*/1,
+                               /*autoInfer=*/1,
+                               /*declareInfer=*/1> {
+  let summary = "Fused bias-add + GELU (erf) activation";
+  let description = [{
+    Computes Gelu(data + bias) where bias is a 1D tensor broadcast along the
+    last dimension of data. Implements com.microsoft.BiasGelu with the exact
+    (erf-based) Gelu formula.
+
+    Example:
+    ```mlir
+    hip.bias_gelu(%ctx) ins(%data, %bias : tensor<1x128x768xf16>, tensor<768xf16>)
+                        outs(%out : tensor<1x128x768xf16>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$bias,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `,` $bias `:` type($data) `,` type($bias) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_FastGeluOp : Hip_DpsOp<"fast_gelu", /*traits=*/[],
+                               /*outsAccessor=*/"Output",
+                               /*autoReify=*/1,
+                               /*autoInfer=*/1,
+                               /*declareInfer=*/1> {
+  let summary = "Fast GELU (tanh approx) with optional 1D bias broadcast";
+  let description = [{
+    Computes FastGelu(x [+ broadcast(bias)]) using the tanh approximation.
+    Implements com.microsoft.FastGelu. When bias is omitted, applies FastGelu
+    to the input directly.
+
+    Example:
+    ```mlir
+    hip.fast_gelu(%ctx) ins(%x : tensor<1x128x768xf16>)
+                        outs(%y : tensor<1x128x768xf16>)
+    hip.fast_gelu(%ctx) ins(%x : tensor<1x128x768xf16>)
+                        bias(%b : tensor<768xf16>)
+                        outs(%y : tensor<1x128x768xf16>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Optional<Hip_TensorOrMemRef>:$bias,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    (`bias` `(` $bias^ `:` type($bias) `)`)?
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_LeakyReluOp : Hip_DpsOp<"leaky_relu"> {
   let summary = "LeakyRelu activation: y = x >= 0 ? x : alpha * x";
   let description = [{
@@ -1917,6 +2241,38 @@ def Hip_AndOp : Hip_DpsOp_Broadcast<"and", /*operandGetters=*/["Lhs", "Rhs"]> {
   }];
 }
 
+def Hip_OrOp : Hip_DpsOp_Broadcast<"or", /*operandGetters=*/["Lhs", "Rhs"]> {
+  let summary = "Element-wise logical OR: c = a || b";
+  let description = [{
+    Computes element-wise logical OR of two boolean tensors (i1).
+    Implements the standard ONNX Or operator.
+
+    Supports multidirectional (NumPy-style) broadcasting between `lhs`
+    and `rhs`. Both inputs and the output have boolean (i1) element type.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.or(%ctx) ins(%a, %b : memref<3x4xi1, 1>, memref<3x4xi1, 1>)
+                 outs(%c : memref<3x4xi1, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$lhs,
+    Hip_TensorOrMemRef:$rhs,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_NotOp : Hip_DpsOp<"not", /*traits=*/[],
                           /*outsAccessor=*/"Y",
                           /*autoReify=*/1,
@@ -2019,6 +2375,42 @@ def Hip_SinOp : Hip_DpsOp<"sin", /*traits=*/[],
   }];
 }
 
+def Hip_CeilOp : Hip_DpsOp<"ceil", /*traits=*/[],
+                           /*outsAccessor=*/"Y",
+                           /*autoReify=*/1,
+                           /*autoInfer=*/1,
+                           /*declareInfer=*/1> {
+  let summary = "Element-wise ceiling: y = ceil(x)";
+  let description = [{
+    Rounds each element upward to the nearest integer.
+    Implements the standard ONNX Ceil operator.
+
+    Formula: Y = ceil(X)
+
+    Lowered via the unified unary elementwise path (wrap_ceil).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.ceil(%ctx) ins(%x : memref<3x4xf32, 1>)
+                   outs(%y : memref<3x4xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_ExpOp : Hip_DpsOp<"exp"> {
   let summary = "Element-wise natural exponential: y = exp(x)";
   let description = [{
@@ -2035,6 +2427,74 @@ def Hip_ExpOp : Hip_DpsOp<"exp"> {
     ```mlir
     hip.exp(%ctx) ins(%x : memref<1x128x512xf32, 1>)
                   outs(%y : memref<1x128x512xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_LogOp : Hip_DpsOp<"log"> {
+  let summary = "Element-wise natural logarithm: y = log(x)";
+  let description = [{
+    Computes the natural logarithm of each element.
+    Implements the standard ONNX Log operator.
+
+    Formula: Y = log(X)
+
+    Lowered via the unified unary elementwise path (wrap_log).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.log(%ctx) ins(%x : memref<1x128x512xf32, 1>)
+                  outs(%y : memref<1x128x512xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_AbsOp : Hip_DpsOp<"abs", /*traits=*/[],
+                          /*outsAccessor=*/"Y",
+                          /*autoReify=*/1,
+                          /*autoInfer=*/1,
+                          /*declareInfer=*/1> {
+  let summary = "Element-wise absolute value: y = abs(x)";
+  let description = [{
+    Computes the absolute value of each element.
+    Implements the standard ONNX Abs operator.
+
+    Formula: Y = abs(X)
+
+    Lowered via the unified unary elementwise path (wrap_abs).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.abs(%ctx) ins(%x : memref<3x4xf32, 1>)
+                  outs(%y : memref<3x4xf32, 1>)
     ```
   }];
 
@@ -2286,6 +2746,41 @@ def Hip_ReduceMaxOp : Hip_DpsOp_Reduction<"reduce_max"> {
     Example:
     ```mlir
     hip.reduce_max(%ctx) ins(%data, %axes : memref<1x128xi64, 1>, memref<i64, 1>)
+                         outs(%output : memref<1x1xi64, 1>) {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$axes,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "1">:$keepdims,
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `,` $axes `:` type($data) `,` type($axes) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_ReduceMinOp : Hip_DpsOp_Reduction<"reduce_min"> {
+  let summary = "Reduce tensor by taking minimum along axes";
+  let description = [{
+    Computes the min of input tensor elements along the specified axes.
+    Implements the ONNX ReduceMin operator (opset 18+).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    When axes is not provided in ONNX, an empty tensor<0xi64> is passed.
+    Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
+    optional axes semantics while keeping all operands required.
+
+    Example:
+    ```mlir
+    hip.reduce_min(%ctx) ins(%data, %axes : memref<1x128xi64, 1>, memref<i64, 1>)
                          outs(%output : memref<1x1xi64, 1>) {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64}
     ```
   }];

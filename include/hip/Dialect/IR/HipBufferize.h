@@ -124,6 +124,13 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
         *ctx);
     TransposeOp::attachInterface<HipDstBufferizableModel<TransposeOp>>(*ctx);
     GatherOp::attachInterface<HipDstBufferizableModel<GatherOp>>(*ctx);
+    GatherElementsOp::attachInterface<
+        HipDstBufferizableModel<GatherElementsOp>>(*ctx);
+    TopKOp::attachInterface<HipDstBufferizableModel<TopKOp>>(*ctx);
+    ScatterElementsOp::attachInterface<
+        HipDstBufferizableModel<ScatterElementsOp>>(*ctx);
+    CompressOp::attachInterface<HipDstBufferizableModel<CompressOp>>(*ctx);
+    OneHotOp::attachInterface<HipDstBufferizableModel<OneHotOp>>(*ctx);
     RangeOp::attachInterface<HipDstBufferizableModel<RangeOp>>(*ctx);
     SiluOp::attachInterface<HipDstBufferizableModel<SiluOp>>(*ctx);
     GqaOp::attachInterface<HipDstBufferizableModel<GqaOp>>(*ctx);
@@ -132,6 +139,8 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     TanhOp::attachInterface<HipDstBufferizableModel<TanhOp>>(*ctx);
     SoftplusOp::attachInterface<HipDstBufferizableModel<SoftplusOp>>(*ctx);
     GeluOp::attachInterface<HipDstBufferizableModel<GeluOp>>(*ctx);
+    BiasGeluOp::attachInterface<HipDstBufferizableModel<BiasGeluOp>>(*ctx);
+    FastGeluOp::attachInterface<HipDstBufferizableModel<FastGeluOp>>(*ctx);
     LeakyReluOp::attachInterface<HipDstBufferizableModel<LeakyReluOp>>(*ctx);
     ResizeOp::attachInterface<HipDstBufferizableModel<ResizeOp>>(*ctx);
     GlobalPoolOp::attachInterface<HipDstBufferizableModel<GlobalPoolOp>>(*ctx);
@@ -141,6 +150,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     SubOp::attachInterface<HipDstBufferizableModel<SubOp>>(*ctx);
     ReduceSumOp::attachInterface<HipDstBufferizableModel<ReduceSumOp>>(*ctx);
     ReduceMaxOp::attachInterface<HipDstBufferizableModel<ReduceMaxOp>>(*ctx);
+    ReduceMinOp::attachInterface<HipDstBufferizableModel<ReduceMinOp>>(*ctx);
     ReduceMeanOp::attachInterface<HipDstBufferizableModel<ReduceMeanOp>>(*ctx);
     MatMulNBitsOp::attachInterface<HipDstBufferizableModel<MatMulNBitsOp>>(
         *ctx);
@@ -158,14 +168,18 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     LayerNormOp::attachInterface<HipDstBufferizableModel<LayerNormOp>>(*ctx);
     MinOp::attachInterface<HipDstBufferizableModel<MinOp>>(*ctx);
     MaxOp::attachInterface<HipDstBufferizableModel<MaxOp>>(*ctx);
+    AbsOp::attachInterface<HipDstBufferizableModel<AbsOp>>(*ctx);
     NegOp::attachInterface<HipDstBufferizableModel<NegOp>>(*ctx);
     EqualOp::attachInterface<HipDstBufferizableModel<EqualOp>>(*ctx);
     DivOp::attachInterface<HipDstBufferizableModel<DivOp>>(*ctx);
     NotOp::attachInterface<HipDstBufferizableModel<NotOp>>(*ctx);
+    OrOp::attachInterface<HipDstBufferizableModel<OrOp>>(*ctx);
     AndOp::attachInterface<HipDstBufferizableModel<AndOp>>(*ctx);
     CosOp::attachInterface<HipDstBufferizableModel<CosOp>>(*ctx);
     SinOp::attachInterface<HipDstBufferizableModel<SinOp>>(*ctx);
+    CeilOp::attachInterface<HipDstBufferizableModel<CeilOp>>(*ctx);
     ExpOp::attachInterface<HipDstBufferizableModel<ExpOp>>(*ctx);
+    LogOp::attachInterface<HipDstBufferizableModel<LogOp>>(*ctx);
     CumSumOp::attachInterface<HipDstBufferizableModel<CumSumOp>>(*ctx);
     PadOp::attachInterface<HipDstBufferizableModel<PadOp>>(*ctx);
     TileOp::attachInterface<HipDstBufferizableModel<TileOp>>(*ctx);
@@ -182,6 +196,12 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     NonZeroOp::attachInterface<HipDstBufferizableModel<NonZeroOp>>(*ctx);
     SizeOp::attachInterface<HipDstBufferizableModel<SizeOp>>(*ctx);
     LoopOp::attachInterface<HipDstBufferizableModel<LoopOp>>(*ctx);
+    // hip.if is a DPS control-flow op (getDpsInitsMutable, results alias
+    // o_init) just like hip.loop. Without this model one-shot-bufferize aborts
+    // with "op was not bufferized: hip.if" for any graph containing onnx.If,
+    // which is silent CPU fallback at the EP. The hip.if->llvm LIT test starts
+    // from the post-bufferize memref form, so the gap is invisible there.
+    IfOp::attachInterface<HipDstBufferizableModel<IfOp>>(*ctx);
   });
 }
 

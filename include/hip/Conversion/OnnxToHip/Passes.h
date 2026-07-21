@@ -36,6 +36,11 @@ std::unique_ptr<Pass> createConvertOnnxToHipPass(
 /// available as the parent function's arg 0.
 std::unique_ptr<Pass> createOnnxLoopOutlinePass();
 
+/// Creates a pass that outlines each onnx.If branch into separate
+/// func.func ops and rewrites the If into a hip.if op.  Runs BEFORE
+/// --convert-onnx-to-hip (same pipeline slot as onnx-loop-outline).
+std::unique_ptr<Pass> createOnnxIfOutlinePass();
+
 } // namespace hip
 } // namespace mlir
 
