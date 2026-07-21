@@ -605,6 +605,13 @@ extern "C" int hip_elementwise_mul(void *stream, const void *lhs,
                        static_cast<const int32_t *>(rhs),
                        static_cast<int32_t *>(output), num_elements);
     break;
+  case HIP_DTYPE_INT16:
+    hipLaunchKernelGGL(elementwise_mul_kernel<int16_t>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int16_t *>(lhs),
+                       static_cast<const int16_t *>(rhs),
+                       static_cast<int16_t *>(output), num_elements);
+    break;
   case HIP_DTYPE_FLOAT16:
     hipLaunchKernelGGL(elementwise_mul_kernel<__half>, dim3(grid_size),
                        dim3(kBlockSize), 0, hip_stream,
@@ -650,6 +657,13 @@ extern "C" int hip_elementwise_add(void *stream, const void *lhs,
                        static_cast<const int32_t *>(lhs),
                        static_cast<const int32_t *>(rhs),
                        static_cast<int32_t *>(output), num_elements);
+    break;
+  case HIP_DTYPE_INT16:
+    hipLaunchKernelGGL(elementwise_add_kernel<int16_t>, dim3(grid_size),
+                       dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int16_t *>(lhs),
+                       static_cast<const int16_t *>(rhs),
+                       static_cast<int16_t *>(output), num_elements);
     break;
   case HIP_DTYPE_FLOAT16:
     hipLaunchKernelGGL(elementwise_add_kernel<__half>, dim3(grid_size),

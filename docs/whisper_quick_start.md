@@ -149,7 +149,7 @@ After it finishes you should have `$ROOT/local/bin/hipgpu.dll`.
 > from the `onnxruntime-ep-amdgpu` fork (see `.github/workflows/windows-build.yml`
 > for the pinned commit + `cmake -DUSE_AMDGPU=ON` recipe) and must sit next to
 > `hipgpu.dll` in `$ROOT/local/bin/`. The umbrella selects the hipgpu backend via
-> the `profile=llm` provider option.
+> the `profile=hip` provider option.
 
 ---
 
@@ -428,13 +428,13 @@ pytest test/python/whisper/test_whisper.py -k "$SEL" -v -s
 
 Conv1d, attention, and LayerNorm — **fp16 + fp32 across every variant's shapes**
 (attention parametrizes d_model/num_heads per variant; conv1d covers each
-variant's encoder front-end). One line — note `profile=llm` is the ONLY provider
+variant's encoder front-end). One line — note `profile=hip` is the ONLY provider
 option the AMDGPU umbrella accepts (do NOT pass `config_file=`, the umbrella
 rejects unknown provider options). `THEROCK_DIST` must be set so the numeric
 backend can find the ROCm runtime DLLs:
 
 ```
-pytest test/numeric/tests/test_whisper_encoder_attention.py test/numeric/tests/test_whisper_cross_attention.py test/numeric/tests/test_whisper_self_attention.py test/numeric/tests/test_conv1d.py test/numeric/tests/test_layer_norm.py --backend ort_ep --ep-name AMDGPUExecutionProvider --ep-dll $ROOT/local/bin/amdgpu-ep.dll --ep-option profile=llm -v
+pytest test/numeric/tests/test_whisper_encoder_attention.py test/numeric/tests/test_whisper_cross_attention.py test/numeric/tests/test_whisper_self_attention.py test/numeric/tests/test_conv1d.py test/numeric/tests/test_layer_norm.py --backend ort_ep --ep-name AMDGPUExecutionProvider --ep-dll $ROOT/local/bin/amdgpu-ep.dll --ep-option profile=hip -v
 ```
 
 ### 4e. MLIR conversion (LIT)

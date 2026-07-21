@@ -305,6 +305,16 @@ extern "C" int hip_cast(
                        dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
                        static_cast<const __half*>(input),
                        static_cast<uint8_t*>(output), num_elements);
+  } else if (input_dtype == HIP_DTYPE_INT8 && output_dtype == HIP_DTYPE_INT16) {
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(cast_int_to_int_kernel<int8_t, int16_t>),
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int8_t*>(input),
+                       static_cast<int16_t*>(output), num_elements);
+  } else if (input_dtype == HIP_DTYPE_INT16 && output_dtype == HIP_DTYPE_UINT8) {
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(cast_int_to_int_kernel<int16_t, uint8_t>),
+                       dim3(grid_size), dim3(kBlockSize), 0, hip_stream,
+                       static_cast<const int16_t*>(input),
+                       static_cast<uint8_t*>(output), num_elements);
   } else {
     fprintf(stderr,
             "[custom_kernels] hip_cast: unsupported conversion "

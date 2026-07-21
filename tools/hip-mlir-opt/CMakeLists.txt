@@ -9,6 +9,7 @@ add_dependencies(hip-mlir-opt
   HipDialectIncGen
   HipsrDialectIncGen
   HipsrConversionPassIncGen
+  HipsrTransformsPassIncGen
   HipTypesIncGen
   HipOpsIncGen
   HipPassesIncGen
@@ -19,6 +20,7 @@ target_link_libraries(hip-mlir-opt PRIVATE
   LibHipCompiler
   HipDialectIR
   HipsrDialectIR
+  HipsrDialectTransforms
   HipDialectTransforms
   HipToLLVM
   OnnxToHip
