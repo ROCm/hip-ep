@@ -30,10 +30,10 @@
 #include <cstdint>
 #include <cstdio>
 
-int wrap_and(RuntimeState *state, void *a, void *b, void *output,
-             int64_t a_n, int64_t a_c, int64_t a_h, int64_t a_w, int64_t b_n,
-             int64_t b_c, int64_t b_h, int64_t b_w, int64_t out_n,
-             int64_t out_c, int64_t out_h, int64_t out_w, int64_t data_type) {
+int wrap_and(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
+             int64_t a_c, int64_t a_h, int64_t a_w, int64_t b_n, int64_t b_c,
+             int64_t b_h, int64_t b_w, int64_t out_n, int64_t out_c,
+             int64_t out_h, int64_t out_w, int64_t data_type) {
   OP_PROFILE(
       "and",
       [&] {
@@ -77,7 +77,8 @@ int wrap_and(RuntimeState *state, void *a, void *b, void *output,
               needed);
       return -1;
     }
-    uint8_t *ws_byte = static_cast<uint8_t *>(hipdnn_ep_state_get_workspace(state));
+    uint8_t *ws_byte =
+        static_cast<uint8_t *>(hipdnn_ep_state_get_workspace(state));
     const int64_t out_shape[4] = {out_n, out_c, out_h, out_w};
 
     if (!lhs_eq_out) {

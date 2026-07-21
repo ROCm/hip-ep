@@ -34,7 +34,8 @@ validateSqueezeUnsqueezeOp(mlir::Operation *op, mlir::PatternRewriter &rewriter,
                            mlir::RankedTensorType &outputType) {
   (void)tensorOpName;
   if (op->getNumOperands() < 1)
-    return rewriter.notifyMatchFailure(op, "expected at least 1 operand (data)");
+    return rewriter.notifyMatchFailure(op,
+                                       "expected at least 1 operand (data)");
 
   data = op->getOperand(0);
   axes = op->getNumOperands() >= 2 ? op->getOperand(1) : mlir::Value();
@@ -546,7 +547,8 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
 ///
 /// The reassociation is computed from the input/output SHAPES, so the `axes`
 /// operand is not read (it may even be a block-argument graph input after a
-/// graph slice routes a folded `const_1d_*` axes tensor across a part boundary).
+/// graph slice routes a folded `const_1d_*` axes tensor across a part
+/// boundary).
 ///
 /// Before:
 ///   %r = onnx.Unsqueeze %x, %axes

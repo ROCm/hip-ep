@@ -897,9 +897,9 @@ void ConvertOnnxToHipPass::runOnOperation() {
   // one-shot-bufferize abort with `op was not bufferized` — which is silent at
   // the EP level (CPU fallback). Report them here, grouped by op name with a
   // per-name count, so the missing converters are visible before bufferize.
-  // Gated on HIPDNN_EP_DEBUG=1 to avoid noise on normal compiles. `onnx.NoValue`
-  // is excluded — it is a legal placeholder consumed by later lowering, not an
-  // unconverted compute op.
+  // Gated on HIPDNN_EP_DEBUG=1 to avoid noise on normal compiles.
+  // `onnx.NoValue` is excluded — it is a legal placeholder consumed by later
+  // lowering, not an unconverted compute op.
   if (hipdnn_ep_debug_enabled()) {
     std::map<std::string, int64_t> unconverted;
     module.walk([&](mlir::Operation *op) {

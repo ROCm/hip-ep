@@ -132,12 +132,15 @@ TopKToHip::matchAndRewrite(mlir::Operation *op,
   };
   if (!valuesType && indicesType)
     valuesType = mlir::RankedTensorType::get(
-        indicesType.getShape(), elemTypeOr(valuesRawType, xType.getElementType()));
+        indicesType.getShape(),
+        elemTypeOr(valuesRawType, xType.getElementType()));
   if (!indicesType && valuesType)
     indicesType = mlir::RankedTensorType::get(
-        valuesType.getShape(), elemTypeOr(indicesRawType, rewriter.getI64Type()));
+        valuesType.getShape(),
+        elemTypeOr(indicesRawType, rewriter.getI64Type()));
   if (!valuesType || !indicesType)
-    return rewriter.notifyMatchFailure(op, "TopK results must be ranked tensors");
+    return rewriter.notifyMatchFailure(op,
+                                       "TopK results must be ranked tensors");
 
   mlir::Value valuesInit =
       createTopKEmpty(rewriter, loc, valuesType, x, context, k, axis);

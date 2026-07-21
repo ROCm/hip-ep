@@ -935,8 +935,7 @@ static int gqa_forward_hipblaslt(
   // Whisper bidirectional no-past path only when no_causal AND no external
   // attention_bias. ONNX Attention with is_causal=0 still carries past KV and
   // uses the standard decode seqlens_k convention.
-  const bool bidirectional_no_past =
-      no_causal && (attention_bias == nullptr);
+  const bool bidirectional_no_past = no_causal && (attention_bias == nullptr);
 
   int64_t HPG = H / G;
   int64_t present_seq = skv;
@@ -957,11 +956,11 @@ static int gqa_forward_hipblaslt(
       read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state);
   int64_t total_seq_pre = -1;
   if (bidirectional_no_past) {
-    // bidirectional_no_past (Whisper encoder / cross-attn): seqlens_k = skv means
-    // "all skv keys valid", there is no past. total_seq is exactly skv -- do NOT
-    // apply the +1 decode convention (would over-count and trip the smart-dispatch
-    // size check / fused validation). See the matching exemption at the
-    // decomposed-path total_seq derivation below.
+    // bidirectional_no_past (Whisper encoder / cross-attn): seqlens_k = skv
+    // means "all skv keys valid", there is no past. total_seq is exactly skv --
+    // do NOT apply the +1 decode convention (would over-count and trip the
+    // smart-dispatch size check / fused validation). See the matching exemption
+    // at the decomposed-path total_seq derivation below.
     total_seq_pre = skv;
   } else if (seqlens_k_pre != kSeqlensKNotRead) {
     // -1 is ORT's prefill sentinel: total_seq=sq, past_len=0. Real values are
@@ -1641,17 +1640,18 @@ static int gqa_forward_hipblaslt(
     // S is treated as [B*H, sq, total_seq] (head stride sq*total_seq) by both
     // GEMM flavours. softmax dtype follows gemm_fp32.
     //
-    // The built-in causal triangle is applied whenever !no_causal, INDEPENDENTLY
-    // of attention_bias. This mirrors the ONNX Attention reference and the ORT
-    // GQA op: the additive mask (Step 8b, e.g. onnx.Attention attn_mask or a
-    // GQA/ALiBi bias) is ADDED first, then, if the op is causal, the upper
-    // triangle is masked out. For a mask that already encodes causal (the common
-    // HF export) this is idempotent (-inf stays -inf); for a padding-only mask +
-    // is_causal it supplies the missing triangle. The bidirectional paths
-    // (no_causal, e.g. Whisper encoder/cross-attn or onnx.Attention is_causal=0)
-    // set no_causal=true and thus skip this, letting the mask carry all masking.
-    // Note this Step is a no-op at sq==1 (single-query decode has no future
-    // tokens), gated by (sq > 1 || local_window_size > 0).
+    // The built-in causal triangle is applied whenever !no_causal,
+    // INDEPENDENTLY of attention_bias. This mirrors the ONNX Attention
+    // reference and the ORT GQA op: the additive mask (Step 8b, e.g.
+    // onnx.Attention attn_mask or a GQA/ALiBi bias) is ADDED first, then, if
+    // the op is causal, the upper triangle is masked out. For a mask that
+    // already encodes causal (the common HF export) this is idempotent (-inf
+    // stays -inf); for a padding-only mask + is_causal it supplies the missing
+    // triangle. The bidirectional paths (no_causal, e.g. Whisper
+    // encoder/cross-attn or onnx.Attention is_causal=0) set no_causal=true and
+    // thus skip this, letting the mask carry all masking. Note this Step is a
+    // no-op at sq==1 (single-query decode has no future tokens), gated by (sq >
+    // 1 || local_window_size > 0).
     int scoreFp16BatchStride = static_cast<int>(sq * total_seq);
     if ((sq > 1 || local_window_size > 0) && !no_causal) {
       HIP_CHECK(hip_gqa_causal_mask_f32(
@@ -1862,7 +1862,8 @@ int wrap_group_query_attention(
       is_decode ? true : (head_dim == 64 || head_dim == 128 || head_dim == 256);
   // attention_bias (onnx.Attention external mask) is only applied by the legacy
   // decomposed pipeline (Step 8b); the lean fused path would silently drop it,
-  // so exclude it here to route masked attention to gqa_forward_hipblaslt below.
+  // so exclude it here to route masked attention to gqa_forward_hipblaslt
+  // below.
   const bool fused_supported = element_size_bytes == 2 && no_causal == 0 &&
                                local_window_size <= 0 && head_sink == nullptr &&
                                smooth_softmax != 1 && head_dim_ok &&

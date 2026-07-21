@@ -177,7 +177,8 @@ verifyConstantDeltaNonZero(Operation *op, Value deltaTensor, Type elemTy) {
 /// rank-0 via an empty-reassociation tensor.collapse_shape.
 ///
 ///   Before:  %v : tensor<1xi64>
-///   After:   %v0 = tensor.collapse_shape %v [] : tensor<1xi64> into tensor<i64>
+///   After:   %v0 = tensor.collapse_shape %v [] : tensor<1xi64> into
+///   tensor<i64>
 static Value collapseRangeBoundToScalar(PatternRewriter &rewriter, Location loc,
                                         Value v) {
   auto t = cast<RankedTensorType>(v.getType());
@@ -185,8 +186,7 @@ static Value collapseRangeBoundToScalar(PatternRewriter &rewriter, Location loc,
     return v;
   auto scalarTy = RankedTensorType::get({}, t.getElementType());
   return tensor::CollapseShapeOp::create(
-      rewriter, loc, scalarTy, v,
-      llvm::ArrayRef<mlir::ReassociationIndices>{});
+      rewriter, loc, scalarTy, v, llvm::ArrayRef<mlir::ReassociationIndices>{});
 }
 
 struct RangeToHip : public RewritePattern {
@@ -268,8 +268,8 @@ struct RangeToHip : public RewritePattern {
                                      elemTy, ValueRange{});
     }
 
-    auto rangeOp = mlir::hip::RangeOp::create(rewriter, loc, ctx, startS, limitS,
-                                              deltaS, init);
+    auto rangeOp = mlir::hip::RangeOp::create(rewriter, loc, ctx, startS,
+                                              limitS, deltaS, init);
     rewriter.replaceOp(op, rangeOp->getResult(0));
     return success();
   }

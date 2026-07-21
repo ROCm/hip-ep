@@ -90,13 +90,13 @@ int wrap_less(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
               needed);
       return -1;
     }
-    uint8_t *ws_byte = static_cast<uint8_t *>(hipdnn_ep_state_get_workspace(state));
+    uint8_t *ws_byte =
+        static_cast<uint8_t *>(hipdnn_ep_state_get_workspace(state));
     const int64_t out_shape[4] = {out_n, out_c, out_h, out_w};
 
     if (!lhs_eq_out) {
       const int64_t in_a[4] = {a_n, a_c, a_h, a_w};
-      int rc =
-          hip_expand(stream, a, ws_byte, in_a, 4, out_shape, 4, hip_dtype);
+      int rc = hip_expand(stream, a, ws_byte, in_a, 4, out_shape, 4, hip_dtype);
       if (rc != 0) {
         fprintf(stderr, "[REAL] wrap_less: hip_expand(a) failed (%d)\n", rc);
         return -1;
@@ -106,8 +106,7 @@ int wrap_less(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
     }
     if (!rhs_eq_out) {
       const int64_t in_b[4] = {b_n, b_c, b_h, b_w};
-      int rc =
-          hip_expand(stream, b, ws_byte, in_b, 4, out_shape, 4, hip_dtype);
+      int rc = hip_expand(stream, b, ws_byte, in_b, 4, out_shape, 4, hip_dtype);
       if (rc != 0) {
         fprintf(stderr, "[REAL] wrap_less: hip_expand(b) failed (%d)\n", rc);
         return -1;

@@ -59,10 +59,11 @@ OneHotToHip::matchAndRewrite(mlir::Operation *op,
       // scatter then drops every index >= 1 (`c >= oshape[axis]`) and any
       // downstream pooling collapses to a single row.
       //
-      // Before:  %init = tensor.empty(%c1) : tensor<...x?x...>  // extent 1 (BUG)
-      // After:   %d  = hip.readback_scalar %ctx, %depth : i64
+      // Before:  %init = tensor.empty(%c1) : tensor<...x?x...>  // extent 1
+      // (BUG) After:   %d  = hip.readback_scalar %ctx, %depth : i64
       //          %di = arith.index_cast %d : i64 to index
-      //          %init = tensor.empty(%di) : tensor<...x?x...>  // extent = depth
+      //          %init = tensor.empty(%di) : tensor<...x?x...>  // extent =
+      //          depth
       auto depthType = mlir::cast<mlir::RankedTensorType>(depth.getType());
       mlir::Value depthScalar = depth;
       if (depthType.getRank() != 0) {
