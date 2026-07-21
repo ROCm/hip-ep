@@ -148,12 +148,12 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
   bufferizeOpts.bufferizeFunctionBoundaries = true;
   bufferizeOpts.functionBoundaryTypeConversion =
       bufferization::LayoutMapOption::IdentityLayoutMap;
-  // Opt-in: skip One-Shot's RaW-conflict analysis (super-linear in op count; the
-  // sole hotspot on very large single-function graphs) by copying before every
-  // write instead of proving in-place safety. Gated because those extra copies
-  // cost runtime performance, so default OFF keeps the optimal in-place path;
-  // set HIPDNN_EP_BUFFERIZE_COPY_BEFORE_WRITE=1 to trade that for compile time
-  // on huge models.
+  // Opt-in: skip One-Shot's RaW-conflict analysis (super-linear in op count;
+  // the sole hotspot on very large single-function graphs) by copying before
+  // every write instead of proving in-place safety. Gated because those extra
+  // copies cost runtime performance, so default OFF keeps the optimal in-place
+  // path; set HIPDNN_EP_BUFFERIZE_COPY_BEFORE_WRITE=1 to trade that for compile
+  // time on huge models.
   // TODO: known super-linear scaling in One-Shot's RaW/alias analysis (LLVM
   // discourse #90858). Revisit for a real fix -- e.g. memoize the aliasing
   // read/write-set construction -- so large models keep the in-place path
