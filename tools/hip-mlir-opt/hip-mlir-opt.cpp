@@ -78,13 +78,6 @@ int main(int argc, char **argv) {
   // that function for the set and docs/pipeline_pass_menu.md for the catalogue.
   hip::compiler::registerAllPasses();
 
-  // onnx-if-outline is a local extension that registerAllPasses() does not yet
-  // cover; register it here next to its sibling onnx-loop-outline (which
-  // registerAllPasses does register) so LIT tests can name `--onnx-if-outline`.
-  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
-    return mlir::hip::createOnnxIfOutlinePass();
-  });
-
   // Tool-only extras: the standalone LLVM-lowering conversion passes. The
   // production pipeline reaches LLVM through `convert-hip-to-llvm` (which
   // populates these patterns internally), so the EP path does not register
