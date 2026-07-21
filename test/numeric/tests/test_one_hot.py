@@ -15,7 +15,6 @@ exact literal values, so the comparison is bit-exact (atol=0).
 from __future__ import annotations
 
 import numpy as np
-import pytest
 from onnx import helper, numpy_helper
 
 from framework.comparator import compare_outputs
