@@ -7,6 +7,7 @@
 #include "../op_profile.h"
 #include "../op_state.h"
 #include "error_check_macros.h"
+#include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
 #include <hipblaslt/hipblaslt-ext.hpp>
@@ -507,6 +508,23 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
 
   if (!handle || !stream) {
+    // hipBLASLt is unavailable (e.g. the functional-model build sets
+    // HIPDNN_EP_DISABLE_VENDOR_BLAS, so no hipBLASLt handle is created). Fall
+    // back to the in-tree tiled GEMM kernel so f32 Gemm subgraphs still run.
+    // Only the untransposed f32 case is handled; other dtypes/transposes keep
+    // the original failure rather than silently miscomputing.
+    if (typeCode == kTypeFloat32 && !transA && !transB) {
+      // bias is [cDim0, cDim1] added as beta*C (per-N bias is [1, N]); a null C
+      // means no bias.
+      const int bias_dim0 = C ? static_cast<int>(cDim0) : 0;
+      const int bias_dim1 = C ? static_cast<int>(cDim1) : 0;
+      int rc = hip_gemm_fp32(stream, A, B, C, output, static_cast<int>(M),
+                             static_cast<int>(N), static_cast<int>(K), alpha,
+                             beta, bias_dim0, bias_dim1);
+      if (rc != 0)
+        fprintf(stderr, "wrap_gemm: fp32 fallback kernel launch failed\n");
+      return rc;
+    }
     fprintf(stderr, "wrap_gemm: null handle or stream\n");
     return -1;
   }
