@@ -71,7 +71,8 @@ int wrap_or(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
               needed);
       return -1;
     }
-    uint8_t *ws_byte = static_cast<uint8_t *>(hipdnn_ep_state_get_workspace(state));
+    uint8_t *ws_byte =
+        static_cast<uint8_t *>(hipdnn_ep_state_get_workspace(state));
     const int64_t out_shape[4] = {out_n, out_c, out_h, out_w};
 
     if (!lhs_eq_out) {

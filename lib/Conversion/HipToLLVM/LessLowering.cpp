@@ -16,8 +16,8 @@ namespace {
 // Output is bool (1 byte/element); data_type identifies the comparison
 // operand type (lhs == rhs by ONNX type constraint T). Full 4D shapes are
 // passed (rank <= 4, left-padded with 1) so the runtime can materialise ONNX
-// multidirectional broadcast via hip_expand before the flat hip_elementwise_less
-// kernel -- mirrors DivOpLowering.
+// multidirectional broadcast via hip_expand before the flat
+// hip_elementwise_less kernel -- mirrors DivOpLowering.
 struct LessOpLowering : public ConvertOpToLLVMPattern<LessOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 

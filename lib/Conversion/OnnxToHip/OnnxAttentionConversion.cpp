@@ -31,14 +31,16 @@ namespace {
 ///     the ONNX op does not request present KV, internal DPS present buffers
 ///     are synthesized (hip.gqa always writes present_key/present_value); their
 ///     results are dropped on the floor.
-///   * is_causal = 1 (built-in causal mask) with OR without an external additive
+///   * is_causal = 1 (built-in causal mask) with OR without an external
+///   additive
 ///     mask; is_causal = 0 with an external additive mask (threaded through the
 ///     hip.gqa attention_bias operand); is_causal = 0 with no mask
 ///     (bidirectional / encoder attention).
 ///   * With OR without a past KV cache (BNSH past_key/past_value).
 ///
 /// Runtime causal/mask contract (see gqa.cpp), mirroring the ONNX Attention
-/// reference (scores += attn_mask; then, if is_causal, mask the upper triangle):
+/// reference (scores += attn_mask; then, if is_causal, mask the upper
+/// triangle):
 ///   - no_causal = (is_causal == 0). The built-in causal mask is applied
 ///     whenever `!no_causal` (is_causal == 1), INDEPENDENTLY of whether an
 ///     additive mask is present -- so is_causal=1 + mask applies BOTH (the mask
@@ -60,8 +62,8 @@ namespace {
 /// its batch/head dims broadcast (extent 1 -> all), but its q/kv extents must
 /// equal the query seq length and total (past+current) KV length respectively.
 /// The runtime bias kernel does NOT broadcast the q dim (a mask with q==1 while
-/// sq>1 would be read out of range), so exports that emit a full mask (q==S, the
-/// common case) are correct; a q-broadcast mask is not modelled.
+/// sq>1 would be read out of range), so exports that emit a full mask (q==S,
+/// the common case) are correct; a q-broadcast mask is not modelled.
 ///
 /// Before (Gemma-style decoder layer, is_causal=0, external fp16 mask, 3 out):
 ///   %y, %pk, %pv = onnx.Attention(%q, %k, %v, %mask, %past_k, %past_v)
@@ -94,8 +96,9 @@ struct OnnxAttentionToHip : public mlir::RewritePattern {
                   mlir::PatternRewriter &rewriter) const override;
 };
 
-mlir::LogicalResult OnnxAttentionToHip::matchAndRewrite(
-    mlir::Operation *op, mlir::PatternRewriter &rewriter) const {
+mlir::LogicalResult
+OnnxAttentionToHip::matchAndRewrite(mlir::Operation *op,
+                                    mlir::PatternRewriter &rewriter) const {
   mlir::Location loc = op->getLoc();
 
   size_t numOps = op->getNumOperands();
@@ -143,8 +146,7 @@ mlir::LogicalResult OnnxAttentionToHip::matchAndRewrite(
     return rewriter.notifyMatchFailure(
         op, "Q must be rank-3 [B,S,hidden] or rank-4 BNSH [B,N,S,head]");
   if (keyType.getRank() != rank || valueType.getRank() != rank)
-    return rewriter.notifyMatchFailure(op,
-                                       "Q/K/V must share the same rank");
+    return rewriter.notifyMatchFailure(op, "Q/K/V must share the same rank");
   const bool rank4 = (rank == 4);
 
   // === Head counts ===
@@ -193,16 +195,17 @@ mlir::LogicalResult OnnxAttentionToHip::matchAndRewrite(
         op, "onnx.Attention expects 1-4 results (Y,[present_k],[present_v],"
             "[qk])");
   if (numResults > 3)
-    return rewriter.notifyMatchFailure(op, "qk_matmul_output not supported yet");
+    return rewriter.notifyMatchFailure(op,
+                                       "qk_matmul_output not supported yet");
 
   // === Causal / mask contract ===
   //
   // Runtime (gqa.cpp) mirrors the ONNX Attention reference: the external float
   // mask (attention_bias) is ALWAYS added to the scores, and the built-in
   // causal mask is applied whenever !no_causal (== is_causal==1), regardless of
-  // whether a mask is present. So is_causal=1 + mask applies BOTH; is_causal=0 +
-  // mask applies only the mask; no_causal && no mask selects the bidirectional
-  // no-past path.
+  // whether a mask is present. So is_causal=1 + mask applies BOTH; is_causal=0
+  // + mask applies only the mask; no_causal && no mask selects the
+  // bidirectional no-past path.
   if (attnMask) {
     auto maskType = mlir::dyn_cast<mlir::RankedTensorType>(attnMask.getType());
     if (!maskType)
@@ -265,8 +268,8 @@ mlir::LogicalResult OnnxAttentionToHip::matchAndRewrite(
     mlir::Value transposed = transOp->getResult(0);
     auto collTy = mlir::RankedTensorType::get({B, S, N * D}, e);
     llvm::SmallVector<mlir::ReassociationIndices> re = {{0}, {1}, {2, 3}};
-    auto collapseOp = mlir::tensor::CollapseShapeOp::create(rewriter, loc,
-                                                            collTy, transposed, re);
+    auto collapseOp = mlir::tensor::CollapseShapeOp::create(
+        rewriter, loc, collTy, transposed, re);
     return mlir::Value(collapseOp.getResult());
   };
 
@@ -282,20 +285,20 @@ mlir::LogicalResult OnnxAttentionToHip::matchAndRewrite(
     auto expTy = mlir::RankedTensorType::get({B, S, N, D}, e);
     llvm::SmallVector<mlir::OpFoldResult> outShape;
     outShape.push_back(
-        B == kDyn ? mlir::OpFoldResult(
-                        mlir::tensor::DimOp::create(rewriter, loc, v, 0)
-                            .getResult())
-                  : mlir::OpFoldResult(rewriter.getIndexAttr(B)));
+        B == kDyn
+            ? mlir::OpFoldResult(
+                  mlir::tensor::DimOp::create(rewriter, loc, v, 0).getResult())
+            : mlir::OpFoldResult(rewriter.getIndexAttr(B)));
     outShape.push_back(
-        S == kDyn ? mlir::OpFoldResult(
-                        mlir::tensor::DimOp::create(rewriter, loc, v, 1)
-                            .getResult())
-                  : mlir::OpFoldResult(rewriter.getIndexAttr(S)));
+        S == kDyn
+            ? mlir::OpFoldResult(
+                  mlir::tensor::DimOp::create(rewriter, loc, v, 1).getResult())
+            : mlir::OpFoldResult(rewriter.getIndexAttr(S)));
     outShape.push_back(mlir::OpFoldResult(rewriter.getIndexAttr(N)));
     outShape.push_back(mlir::OpFoldResult(rewriter.getIndexAttr(D)));
     llvm::SmallVector<mlir::ReassociationIndices> re = {{0}, {1}, {2, 3}};
-    auto expandOp =
-        mlir::tensor::ExpandShapeOp::create(rewriter, loc, expTy, v, re, outShape);
+    auto expandOp = mlir::tensor::ExpandShapeOp::create(rewriter, loc, expTy, v,
+                                                        re, outShape);
     mlir::Value expanded = expandOp.getResult();
     llvm::SmallVector<mlir::Value> dyn;
     if (B == kDyn)
@@ -304,9 +307,9 @@ mlir::LogicalResult OnnxAttentionToHip::matchAndRewrite(
       dyn.push_back(mlir::tensor::DimOp::create(rewriter, loc, expanded, 1));
     mlir::Value tinit =
         mlir::tensor::EmptyOp::create(rewriter, loc, tt.getShape(), e, dyn);
-    auto transOp = mlir::hip::TransposeOp::create(
-        rewriter, loc, context, expanded, tinit,
-        rewriter.getI64ArrayAttr({0, 2, 1, 3}));
+    auto transOp =
+        mlir::hip::TransposeOp::create(rewriter, loc, context, expanded, tinit,
+                                       rewriter.getI64ArrayAttr({0, 2, 1, 3}));
     return transOp->getResult(0);
   };
 
@@ -347,7 +350,8 @@ mlir::LogicalResult OnnxAttentionToHip::matchAndRewrite(
   mlir::Value oneIdx =
       mlir::arith::ConstantIndexOp::create(rewriter, loc, 1).getResult();
   mlir::Value totalKvM1Idx =
-      mlir::arith::SubIOp::create(rewriter, loc, totalKvIdx, oneIdx).getResult();
+      mlir::arith::SubIOp::create(rewriter, loc, totalKvIdx, oneIdx)
+          .getResult();
   mlir::Value seqlensKI32 =
       mlir::arith::IndexCastOp::create(rewriter, loc, i32Ty, totalKvM1Idx);
   auto seqlensKType = mlir::RankedTensorType::get({1}, i32Ty);
@@ -371,8 +375,8 @@ mlir::LogicalResult OnnxAttentionToHip::matchAndRewrite(
     if (N == kDyn || Dv == kDyn)
       return rewriter.notifyMatchFailure(
           op, "rank-4 attention requires static num_heads and head_dim");
-    gqaOutType = mlir::RankedTensorType::get({B, S, N * Dv},
-                                             res0Type.getElementType());
+    gqaOutType =
+        mlir::RankedTensorType::get({B, S, N * Dv}, res0Type.getElementType());
   } else {
     gqaOutType = res0Type;
   }
@@ -414,14 +418,15 @@ mlir::LogicalResult OnnxAttentionToHip::matchAndRewrite(
           ? mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(2).getType())
           : synthPresent(vHeadDim, valueType.getElementType());
 
-  if (!presentKeyType || !presentValueType ||
-      presentKeyType.getRank() != 4 || presentValueType.getRank() != 4)
+  if (!presentKeyType || !presentValueType || presentKeyType.getRank() != 4 ||
+      presentValueType.getRank() != 4)
     return rewriter.notifyMatchFailure(
         op, "present_key/value must be rank-4 BNSH tensors");
   if (presentKeyType.getDimSize(3) == kDyn ||
       presentValueType.getDimSize(3) == kDyn)
     return rewriter.notifyMatchFailure(
-        op, "present_key/value head_dim must be static (architecture constant)");
+        op,
+        "present_key/value head_dim must be static (architecture constant)");
 
   // total_seq_len scalar = present KV buffer capacity. When the present seq dim
   // is static (provided result type), emit a constant; otherwise emit the
@@ -465,7 +470,8 @@ mlir::LogicalResult OnnxAttentionToHip::matchAndRewrite(
         rewriter, loc, t.getShape(), t.getElementType(), dynSizes));
   };
 
-  mlir::FailureOr<mlir::Value> presentKeyInitOr = buildPresentInit(presentKeyType);
+  mlir::FailureOr<mlir::Value> presentKeyInitOr =
+      buildPresentInit(presentKeyType);
   mlir::FailureOr<mlir::Value> presentValueInitOr =
       buildPresentInit(presentValueType);
   if (mlir::failed(presentKeyInitOr) || mlir::failed(presentValueInitOr))
@@ -519,8 +525,8 @@ mlir::LogicalResult OnnxAttentionToHip::matchAndRewrite(
   segmentSizes.push_back(0);                 // output_qk
 
   llvm::SmallVector<mlir::NamedAttribute> attrs;
-  attrs.push_back(rewriter.getNamedAttr(
-      "num_heads", rewriter.getI64IntegerAttr(qNumHeads)));
+  attrs.push_back(rewriter.getNamedAttr("num_heads",
+                                        rewriter.getI64IntegerAttr(qNumHeads)));
   attrs.push_back(rewriter.getNamedAttr(
       "kv_num_heads", rewriter.getI64IntegerAttr(kvNumHeads)));
   attrs.push_back(

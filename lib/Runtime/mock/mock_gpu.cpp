@@ -1512,12 +1512,13 @@ int wrap_equal(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
     fprintf(stderr, "Invalid state in wrap_equal\n");
     return -1;
   }
-  MOCK_PRINT("[MOCK] wrap_equal a=[%lld,%lld,%lld,%lld] b=[%lld,%lld,%lld,%lld] "
-             "out=[%lld,%lld,%lld,%lld] dtype=%s\n",
-             (long long)a_n, (long long)a_c, (long long)a_h, (long long)a_w,
-             (long long)b_n, (long long)b_c, (long long)b_h, (long long)b_w,
-             (long long)out_n, (long long)out_c, (long long)out_h,
-             (long long)out_w, hipdnn_ep_datatype_name(data_type));
+  MOCK_PRINT(
+      "[MOCK] wrap_equal a=[%lld,%lld,%lld,%lld] b=[%lld,%lld,%lld,%lld] "
+      "out=[%lld,%lld,%lld,%lld] dtype=%s\n",
+      (long long)a_n, (long long)a_c, (long long)a_h, (long long)a_w,
+      (long long)b_n, (long long)b_c, (long long)b_h, (long long)b_w,
+      (long long)out_n, (long long)out_c, (long long)out_h, (long long)out_w,
+      hipdnn_ep_datatype_name(data_type));
   return 0;
 }
 

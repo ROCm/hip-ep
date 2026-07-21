@@ -190,11 +190,10 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     if (op.getAttentionBias()) {
       auto biasType = cast<MemRefType>(op.getAttentionBias().getType());
       if (biasType.getRank() == 4) {
-        attnBiasBatchVal = getMemRefDimSize(biasType, 0, adaptor.getAttentionBias(),
-                                            rewriter, loc);
-        attnBiasNumHeadsVal =
-            getMemRefDimSize(biasType, 1, adaptor.getAttentionBias(), rewriter,
-                             loc);
+        attnBiasBatchVal = getMemRefDimSize(
+            biasType, 0, adaptor.getAttentionBias(), rewriter, loc);
+        attnBiasNumHeadsVal = getMemRefDimSize(
+            biasType, 1, adaptor.getAttentionBias(), rewriter, loc);
       }
     }
 

@@ -98,17 +98,18 @@ int wrap_equal(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
     const size_t needed = per_side * static_cast<size_t>((!a_direct ? 1 : 0) +
                                                          (!b_direct ? 1 : 0));
     if (hipdnn_ep_state_ensure_workspace(state, needed) != 0) {
-      fprintf(stderr, "[REAL] wrap_equal: workspace ensure failed (%zu bytes)\n",
+      fprintf(stderr,
+              "[REAL] wrap_equal: workspace ensure failed (%zu bytes)\n",
               needed);
       return -1;
     }
-    uint8_t *ws_byte = static_cast<uint8_t *>(hipdnn_ep_state_get_workspace(state));
+    uint8_t *ws_byte =
+        static_cast<uint8_t *>(hipdnn_ep_state_get_workspace(state));
     const int64_t out_shape[4] = {out_n, out_c, out_h, out_w};
 
     if (!a_direct) {
       const int64_t in_a[4] = {a_n, a_c, a_h, a_w};
-      int rc =
-          hip_expand(stream, a, ws_byte, in_a, 4, out_shape, 4, hip_dtype);
+      int rc = hip_expand(stream, a, ws_byte, in_a, 4, out_shape, 4, hip_dtype);
       if (rc != 0) {
         fprintf(stderr, "[REAL] wrap_equal: hip_expand(a) failed (%d)\n", rc);
         return -1;
@@ -119,8 +120,7 @@ int wrap_equal(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
     }
     if (!b_direct) {
       const int64_t in_b[4] = {b_n, b_c, b_h, b_w};
-      int rc =
-          hip_expand(stream, b, ws_byte, in_b, 4, out_shape, 4, hip_dtype);
+      int rc = hip_expand(stream, b, ws_byte, in_b, 4, out_shape, 4, hip_dtype);
       if (rc != 0) {
         fprintf(stderr, "[REAL] wrap_equal: hip_expand(b) failed (%d)\n", rc);
         return -1;
