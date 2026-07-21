@@ -68,12 +68,10 @@ def Hipsr_MatMulOp : Hipsr_DpsOp<"matmul"> {
     Hipsr_TensorOrDeviceMemRef:$init
   );
 
-  // `ctx` prints as a leading `(%ctx)` with its type elided (Hipsr_ContextType
-  // is a single fixed type), matching the hip dialect DPS ops. Result type
-  // follows the same convention: `: type` after attr-dict (optional, so a
-  // future memref/no-result form prints nothing). The shape region is optional
-  // too: an empty (zero-block) region prints nothing and round-trips as empty;
-  // a non-empty region prints as `shape_region { ... }`.
+  // Matches the hip dialect DPS ops: `ctx` prints as a leading `(%ctx)` with
+  // its type elided (it is a single fixed type). Result type and shape region
+  // are both optional groups so a memref/no-result form and the empty-region
+  // form (the one convert-onnx-to-hipsr emits) print nothing extra.
   let assemblyFormat = [{
     `(` $ctx `)`
     `ins` `(` $A `,` $B `:` type($A) `,` type($B) `)`

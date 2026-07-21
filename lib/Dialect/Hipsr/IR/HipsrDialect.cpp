@@ -73,13 +73,15 @@ llvm::MemoryBuffer *HipsrDialect::getOrLoadFileMap(llvm::StringRef path) {
   std::lock_guard<std::mutex> lock(fileMapsMutex);
 
   auto it = fileMaps.find(path);
-  if (it != fileMaps.end())
+  if (it != fileMaps.end()) {
     return it->second.get();
+  }
 
   llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> bufOr =
       llvm::MemoryBuffer::getFile(path, /*IsText=*/false);
-  if (!bufOr)
+  if (!bufOr) {
     return nullptr;
+  }
 
   llvm::MemoryBuffer *raw = bufOr->get();
   fileMaps[path] = std::move(*bufOr);
