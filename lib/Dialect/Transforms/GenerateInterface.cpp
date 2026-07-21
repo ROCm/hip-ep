@@ -74,12 +74,12 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
       module->getAttrOfType<DenseI64ArrayAttr>("hipdnn.constant_offsets");
 
   // Streaming-mode source descriptors. Present when OnnxToHip's finalize
-  // emitted per-constant source info (splat / file-ref / sidecar). Absent in
-  // full-sidecar mode (EPContext export), in which case every ConstantInfo
-  // keeps source = NONE and runtime falls back to the bulk constants_filename
-  // read. In hybrid mode (skipDataWrite=true with mem-addr entries) some
-  // constants carry SidecarSource pointing at a *partial* sidecar that holds
-  // only mem-addr bytes.
+  // emitted per-constant source info (splat / file-ref / mem). Absent in
+  // full-constants-file mode (EPContext export), in which case every
+  // ConstantInfo keeps source = NONE and runtime falls back to the bulk
+  // constants_filename read. In hybrid mode (skipDataWrite=true with mem-addr
+  // entries) some constants carry MemSource pointing at a *partial* constants
+  // file that holds only mem-addr bytes.
   auto sourceKindsAttr =
       module->getAttrOfType<DenseI32ArrayAttr>("hipdnn.constant_source_kinds");
   auto splatValuesAttr = module->getAttrOfType<DenseI64ArrayAttr>(
@@ -90,8 +90,8 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
       module->getAttrOfType<ArrayAttr>("hipdnn.constant_file_paths");
   auto fileOffsetsAttr =
       module->getAttrOfType<DenseI64ArrayAttr>("hipdnn.constant_file_offsets");
-  auto sidecarOffsetsAttr = module->getAttrOfType<DenseI64ArrayAttr>(
-      "hipdnn.constant_sidecar_offsets");
+  auto memOffsetsAttr =
+      module->getAttrOfType<DenseI64ArrayAttr>("hipdnn.constant_mem_offsets");
 
   mlir::hip::HipModelMetaInfoT meta;
   meta.version = 1;
@@ -109,8 +109,8 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
                                              : ArrayRef<int64_t>{};
     auto fileOffsets =
         fileOffsetsAttr ? fileOffsetsAttr.asArrayRef() : ArrayRef<int64_t>{};
-    auto sidecarOffsets = sidecarOffsetsAttr ? sidecarOffsetsAttr.asArrayRef()
-                                             : ArrayRef<int64_t>{};
+    auto memOffsets =
+        memOffsetsAttr ? memOffsetsAttr.asArrayRef() : ArrayRef<int64_t>{};
     for (auto i : llvm::seq<size_t>(0, sizes.size())) {
       auto ci = std::make_unique<mlir::hip::ConstantInfoT>();
       ci->size = sizes[i];
@@ -133,14 +133,13 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
         fref->file_offset = (i < fileOffsets.size()) ? fileOffsets[i] : 0;
         ci->source.Set(std::move(*fref));
       } else if (kind == 3) {
-        // Sidecar: mem-addr entry packed into
-        // HipModelMetaInfo.constants_filename at sidecar_offset by the
+        // Mem: mem-addr entry packed into
+        // HipModelMetaInfo.constants_filename at mem_offset by the
         // OnnxToHip hybrid finalize. Runtime reads size bytes from that offset
         // through the EP FileSystem.
-        auto side = std::make_unique<mlir::hip::SidecarSourceT>();
-        side->sidecar_offset =
-            (i < sidecarOffsets.size()) ? sidecarOffsets[i] : 0;
-        ci->source.Set(std::move(*side));
+        auto mem = std::make_unique<mlir::hip::MemSourceT>();
+        mem->mem_offset = (i < memOffsets.size()) ? memOffsets[i] : 0;
+        ci->source.Set(std::move(*mem));
       }
       meta.constants.push_back(std::move(ci));
     }

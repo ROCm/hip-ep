@@ -51,8 +51,8 @@ struct OnnxToHipPipelineOptions
     : public PassPipelineOptions<OnnxToHipPipelineOptions> {
   Option<std::string> externalizeOutputDir{
       *this, "externalize-output-dir",
-      llvm::cl::desc(
-          "Directory for sidecar .constants.bin/.json files (empty = cwd)"),
+      llvm::cl::desc("Directory for constants-file .constants.bin/.json files "
+                     "(empty = cwd)"),
       llvm::cl::init("")};
   Option<int64_t> externalizeMinNumElements{
       *this, "externalize-min-num-elements",

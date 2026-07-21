@@ -30,7 +30,7 @@ def Hipsr_ConstantOp : Hipsr_Op<"constant", [Pure]> {
                    file) or `#hipsr.mem_source<...>` (a raw ORT pointer).
 
     Externalization only *adds* `offset` + `size` (the location in the
-    compiler-produced constants sidecar); it never removes `value` / `source`,
+    compiler-produced constants file); it never removes `value` / `source`,
     so `getDataValues()` keeps working afterwards. Valid states:
     `{value}`, `{source}`, `{value, offset, size}`, `{source, offset, size}`.
 
@@ -67,7 +67,7 @@ def Hipsr_ConstantOp : Hipsr_Op<"constant", [Pure]> {
     bool isInline() { return getValueAttr() != nullptr; }
     /// True if the constant references an external file/memory source.
     bool hasExternalSource() { return getSourceAttr() != nullptr; }
-    /// True if the constant has been externalized (offset/size into sidecar).
+    /// True if the constant has been externalized (offset/size into constants file).
     bool isExternalized() { return getOffsetAttr() != nullptr; }
     /// Whether this constant should be externalized (defaults to true).
     bool shouldExternalize() {

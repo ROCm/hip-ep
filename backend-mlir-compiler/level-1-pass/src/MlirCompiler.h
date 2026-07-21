@@ -30,11 +30,12 @@ enum class ArtifactFormat { LLVM_IR, NATIVE };
 // `skipConstantData` selects the OnnxToHip finalize output:
 //   * true  -> per-entry source (descriptors baked into __metadata_blob;
 //              MlirCustomOp ctor streams constants into the GPU blob)
-//   * false -> sidecar  (model.constants.bin + .json; MlirCustomOp ctor
+//   * false -> constants file  (model.constants.bin + .json; MlirCustomOp ctor
 //              goes through inference_init -> init_with_fs bulk hipMemcpy)
 // The in-process EP path decides this inside pass_main::load_config based
-// on ep.context_enable; EPContext export forces sidecar. The struct default
-// (true / streaming) only applies to code paths that bypass load_config.
+// on ep.context_enable; EPContext export forces constants file. The struct
+// default (true / streaming) only applies to code paths that bypass
+// load_config.
 struct CompilationConfig {
   ArtifactFormat artifactFormat;
   int optLevel;

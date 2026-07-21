@@ -17,7 +17,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 - **hipBLASLt MatMul**: High-performance matrix multiplication
 - **Custom HIP Kernels**: GQA, RoPE, Cast, Sub, Gather, ReduceSum, Reciprocal, Sqrt, GELU, Range, LinearAttention, Softmax, CausalConvWithState(fast path)
 - **Memory Pool Optimization**: `hip-pool-allocs` pass packs allocations into a single grow-on-demand buffer
-- **Constant Externalization**: Large model weights stored in sidecar `.constants.bin` files
+- **Constant Externalization**: Large model weights stored in `.constants.bin` constants files
 - **Mock Runtime**: GPU-free development and testing with `BUILD_MOCK_RUNTIME=ON`
 - **MorphiZen EP Integration**: Plugs into ONNX Runtime as the MorphiZen Execution Provider
 

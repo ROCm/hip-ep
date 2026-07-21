@@ -41,7 +41,7 @@ def PopulateShapeRegionPass
 
 def HipsrExternalizeConstantsPass
     : Pass<"hipsr-externalize-constants", "mlir::ModuleOp"> {
-  let summary = "Write hipsr.constant data to a sidecar and mark offset/size";
+  let summary = "Write hipsr.constant data to a constants file and mark offset/size";
   let description = [{
     Phase 2 of the hipsr constant subsystem. Runs in two stages:
 
@@ -50,7 +50,7 @@ def HipsrExternalizeConstantsPass
     externalized; assign a 64-byte aligned cumulative offset and stamp the op
     with `offset`/`size`.
 
-    Module-scoped by design: offsets accumulate into a single sidecar shared by
+    Module-scoped by design: offsets accumulate into a single constants file shared by
     the whole module, so the pass must see every constant at once. A per-function
     pass would restart offsets at 0 per function (overlapping placements) and
     write the shared file once per function (races / last-writer-wins).
@@ -70,7 +70,7 @@ def HipsrExternalizeConstantsPass
   let options = [
     Option<"constantsFile", "constants-file", "std::string",
            /*default=*/"\"constants.bin\"",
-           "Sidecar file name written through the injected FileSystem">
+           "Constants-file name written through the injected FileSystem">
   ];
   let dependentDialects = [
     "::mlir::hipsr::HipsrDialect"
