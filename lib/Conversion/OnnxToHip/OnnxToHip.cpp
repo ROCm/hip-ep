@@ -13,7 +13,7 @@
 
 #include "OnnxToHipUtils.h"
 
-#include "hip/Conversion/OnnxToHip/ConstantsIO.h"
+#include "hip/Support/ConstantsIO.h"
 #include "hip/Support/DiskFileSystem.h"
 #include "hip/debug_log.h"
 #include "hip/timing.h"

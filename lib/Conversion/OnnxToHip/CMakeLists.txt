@@ -6,7 +6,6 @@
 add_library(OnnxToHip STATIC
   OnnxToHip.cpp
   SimplifyOnnx.cpp
-  ConstantsIO.cpp
   MatMulConversion.cpp
   TransposeConversion.cpp
   ElementwiseConversion.cpp
@@ -104,6 +103,7 @@ add_dependencies(OnnxToHip
 
 target_link_libraries(OnnxToHip PUBLIC
   HipDialectIR
+  HipConstantsIO
   MLIRPass
   MLIRFuncDialect
   MLIRArithDialect
