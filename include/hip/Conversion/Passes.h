@@ -6,6 +6,7 @@
 #define HIP_COMPILER_CONVERSION_PASSES_H
 
 #include "hip/Conversion/HipToLLVM/Passes.h"
+#include "hip/Conversion/HipsrToLLVM/Passes.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
