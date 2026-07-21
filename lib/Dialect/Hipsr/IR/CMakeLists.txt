@@ -16,6 +16,7 @@ add_library(HipsrDialectIR STATIC
   HipsrPlaceholderOp.cpp
   HipsrTraits.cpp
   HipsrCastOp.cpp
+  HipsrMatMulOp.cpp
   HipsrTypes.cpp
 )
 
