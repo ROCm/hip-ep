@@ -31,6 +31,5 @@ target_link_libraries(HipsrDialectIR PUBLIC
   MLIRIR
   MLIRSupport
   MLIRArithDialect
-  MLIRControlFlowDialect
   MLIRShapeDialect
 )

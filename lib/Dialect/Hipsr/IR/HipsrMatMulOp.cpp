@@ -25,34 +25,26 @@ MutableOperandRange MatMulOp::getDpsInitsMutable() { return getInitMutable(); }
 // region below reads the last one or two dims of each operand. A rank-0
 // (scalar) operand has neither.
 LogicalResult MatMulOp::verify() {
-  if (cast<ShapedType>(getA().getType()).getRank() < 1)
+  if (cast<ShapedType>(getA().getType()).getRank() < 1) {
     return emitOpError("operand A must be at least 1-D");
-  if (cast<ShapedType>(getB().getType()).getRank() < 1)
+  }
+  if (cast<ShapedType>(getB().getType()).getRank() < 1) {
     return emitOpError("operand B must be at least 1-D");
+  }
   return success();
 }
 
-// Fills the shape region with the ONNX/NumPy `matmul` output shape, guarded by
-// a contraction-dim (K) equality constraint. Uses the shape dialect so it works
-// for both tensor and memref inputs; static dims fold to constants, so a fully
-// static matmul keeps no dim arithmetic (and shape.cstr_eq folds its witness
-// away, leaving no constraint IR).
+// Fills the shape region with the ONNX/NumPy matmul output shape (semantics in
+// HipsrMatMulOp.td), guarded by a contraction-dim (K) equality constraint.
 //
-// ONNX/NumPy matmul output shape (each maps to a branch below):
-//   - both >= 2-D: (M,K) x (K,N) -> (M,N); leading dims are batch dims and
-//     broadcast (a dim of 1 takes the other side).
-//   - 1-D A (K): acts as (1,K); the leading 1 is dropped from the result.
-//   - 1-D B (K): acts as (K,1); the trailing 1 is dropped from the result.
-//   - both 1-D: scalar result.
-// The 1-D promotions and batch-dim count come from the static ranks.
-//
-// The contraction dim K (A's last dim; B's last dim when B is 1-D, else its
-// second-to-last) is not part of the output shape, but ONNX requires the two
-// sides to match. That is expressed as a shape.cstr_eq witness guarding a
-// shape.assuming region that yields the output dims, so a later
-// shape-constraint lowering can turn it into a runtime check while a static
-// match folds it away. Batch-dim broadcast compatibility is still left
-// unchecked and can be added the same way later.
+// The shape dialect is used (over tensor.dim / arith) so the same code covers
+// both tensor and memref inputs and static dims fold to constants -- a fully
+// static matmul then keeps no dim arithmetic and shape.cstr_eq folds its
+// witness away, leaving no constraint IR. K never reaches the output, but ONNX
+// requires both sides to match, so the equality is a shape.cstr_eq witness
+// guarding the shape.assuming region that yields the output dims; a later
+// shape-constraint lowering can turn it into a runtime check, and a static
+// match drops it. (Batch-dim broadcast compatibility is not yet checked.)
 //
 // Before (region omitted, as emitted by convert-onnx-to-hipsr):
 //   %0 = hipsr.matmul(%ctx) ins(%A, %B : tensor<?x?xf16>, tensor<?x?xf16>)
@@ -90,10 +82,7 @@ void MatMulOp::populateShapeRegion(OpBuilder &builder, Region &shapeRegion) {
     return b.create<shape::GetExtentOp>(loc, shape, c);
   };
 
-  // Constrain the contraction dim K (A's last dim == B's K dim) even though K
-  // never reaches the output: wrap each K extent in a rank-1 shape and require
-  // them equal. shape.cstr_eq folds to a passing witness when both are static
-  // and equal, so a static matmul carries no constraint.
+  // K is A's last dim; B's last dim when B is 1-D, else its second-to-last.
   int64_t kAIdx = aRank - 1;
   int64_t kBIdx = bIs1D ? bRank - 1 : bRank - 2;
   auto shapeTy = shape::ShapeType::get(ctx);
@@ -104,8 +93,7 @@ void MatMulOp::populateShapeRegion(OpBuilder &builder, Region &shapeRegion) {
   Value witness = builder.create<shape::CstrEqOp>(
       loc, shape::WitnessType::get(ctx), ValueRange{sa, sb});
 
-  // The output dims are produced inside the shape.assuming region, so they are
-  // valid under the K-equal assumption.
+  // Output dims go inside the region so they hold under the K-equal assumption.
   auto assuming = builder.create<shape::AssumingOp>(
       loc, witness, [&](OpBuilder &b, Location) -> SmallVector<Value, 2> {
         Value one = b.create<arith::ConstantIndexOp>(loc, 1);
@@ -139,24 +127,25 @@ void MatMulOp::populateShapeRegion(OpBuilder &builder, Region &shapeRegion) {
           // other".
           int64_t aAxis = i - (batchRank - aBatch);
           int64_t bAxis = i - (batchRank - bBatch);
-          if (aAxis < 0)
+          if (aAxis < 0) {
             dims.push_back(extent(b, shB, bAxis));
-          else if (bAxis < 0)
+          } else if (bAxis < 0) {
             dims.push_back(extent(b, shA, aAxis));
-          else
+          } else {
             dims.push_back(
                 broadcastDim(extent(b, shA, aAxis), extent(b, shB, bAxis)));
+          }
         }
         // Append M then N, skipping the promoted (later-stripped) unit dims.
-        if (m)
+        if (m) {
           dims.push_back(m);
-        if (n)
+        }
+        if (n) {
           dims.push_back(n);
+        }
         return dims;
       });
 
-  // Single result: one dim group (the assuming results) and its (output)
-  // element type.
   Type elemTy = cast<ShapedType>(getResult(0).getType()).getElementType();
   builder.create<ShapeYieldOp>(loc, ArrayRef<ValueRange>{assuming.getResults()},
                                TypeRange{elemTy});
