@@ -150,6 +150,10 @@ HIP_KERNEL_API int hip_elementwise_where(
  *               hip_dtype)
  * Returns: 0 on success (hipSuccess), non-zero hipError_t on failure.
  */
+HIP_KERNEL_API int hip_elementwise_abs(
+    void *stream, const void *input, void *output, int64_t num_elements,
+    int hip_dtype);
+
 HIP_KERNEL_API int hip_elementwise_neg(
     void* stream,
     const void* input,
@@ -178,7 +182,18 @@ HIP_KERNEL_API int hip_elementwise_sin(
     int64_t num_elements,
     int hip_dtype);
 
+HIP_KERNEL_API int hip_elementwise_ceil(
+    void *stream, const void *input, void *output, int64_t num_elements,
+    int hip_dtype);
+
 HIP_KERNEL_API int hip_elementwise_exp(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t num_elements,
+    int hip_dtype);
+
+HIP_KERNEL_API int hip_elementwise_log(
     void* stream,
     const void* input,
     void* output,
@@ -317,6 +332,10 @@ HIP_KERNEL_API int hip_elementwise_less(
 /* And over bool (1-byte) tensors. No hip_dtype: bool is the only supported
  * input/output type (mirrors ORT v1.22.2 SPECIALIZED_BINARY_ELEMENTWISE_IMPL(And, bool)).
  */
+HIP_KERNEL_API int hip_elementwise_or(
+    void *stream, const void *lhs, const void *rhs, void *output,
+    int64_t num_elements);
+
 HIP_KERNEL_API int hip_elementwise_and(
     void* stream,
     const void* lhs,
@@ -402,6 +421,20 @@ HIP_KERNEL_API int hip_elementwise_gelu(
     int64_t approximate);
 
 /* =========================================================================
+ * BiasGelu (fused bias-add + erf GELU)
+ * =========================================================================
+ *
+ * output[i] = Gelu_erf(data[i] + bias[i % bias_len])
+ */
+HIP_KERNEL_API int hip_bias_gelu(void *stream, const void *data, const void *bias,
+                                 void *output, int64_t num_elements,
+                                 int64_t bias_len, int hip_dtype);
+
+HIP_KERNEL_API int hip_fast_gelu(void *stream, const void *data, const void *bias,
+                                 void *output, int64_t num_elements,
+                                 int64_t bias_len, int hip_dtype);
+
+/* =========================================================================
  * LeakyRelu Activation
  * =========================================================================
  *
@@ -456,9 +489,14 @@ HIP_KERNEL_API int hip_leaky_relu(
  *                          is_bnsh=0 -> BSNH [batch, seq_len, num_heads, head_dim]
  *                                       (also the 3D [B, S, num_heads*head_dim])
  *                          is_bnsh=1 -> BNSH [batch, num_heads, seq_len, head_dim]
- *   position_ids       - GPU pointer [batch, seq_len] (int64)
- *   cos_cache          - GPU pointer [max_seq, rotary_dim/2]
- *   sin_cache          - GPU pointer [max_seq, rotary_dim/2]
+ *   position_ids       - GPU pointer [batch, seq_len] (int64), or NULL when
+ *                        cos/sin are already position-expanded (see cos_cache)
+ *   cos_cache          - GPU pointer. position_ids != NULL: 2D lookup table
+ *                        [max_seq, rotary_dim/2] indexed by position_ids[b,s].
+ *                        position_ids == NULL: precomputed
+ *                        [batch, seq_len, rotary_dim/2] indexed by the flat
+ *                        token position b*seq+s.
+ *   sin_cache          - GPU pointer, same shape convention as cos_cache
  *   output             - GPU pointer (same shape/layout as input)
  *   batch_size         - batch dimension
  *   seq_len            - sequence length
@@ -578,6 +616,16 @@ HIP_KERNEL_API int hip_gqa_causal_mask_f32(
     void* stream, void* S,
     int total_heads, int skv, int sq,
     int batch_stride, int past_len, int local_window_size);
+
+/* Add an attention bias onto the fp32 score matrix before softmax.
+ * scores layout: [total_heads, sq, total_seq] row-major with batch_stride
+ * = sq * total_seq per head.
+ * bias layout: [bias_batch, bias_heads, sq, total_seq], row-major.
+ * bias_batch / bias_heads may be 1 for ONNX-style broadcast. */
+HIP_KERNEL_API int hip_gqa_add_attention_bias_f32(
+    void* stream, void* scores, const void* bias,
+    int total_heads, int num_heads, int bias_batch, int bias_heads,
+    int sq, int total_seq, int score_batch_stride, int bias_element_size_bytes);
 
 /* Column-wise softmax in-place. One threadblock per (head, query).
  * Smooth softmax is activated when head_sink is non-null OR use_smooth_softmax
@@ -799,6 +847,74 @@ HIP_KERNEL_API int hip_gather(
     int element_size_bytes,
     int indices_element_size_bytes);
 
+HIP_KERNEL_API int hip_gather_elements(
+    void* stream,
+    const void* data,
+    const void* indices,
+    void* output,
+    int64_t axis,
+    int64_t rank,
+    const int64_t* data_shape,
+    const int64_t* indices_shape,
+    int64_t num_elements,
+    int element_size_bytes,
+    int indices_element_size_bytes);
+
+HIP_KERNEL_API int hip_top_k(void* stream, const void* data, void* values,
+                             void* indices, int64_t axis, int64_t largest,
+                             int64_t sorted, int64_t rank,
+                             const int64_t* x_shape, int64_t k,
+                             int element_size_bytes);
+
+HIP_KERNEL_API int hip_scatter_elements(
+    void* stream,
+    const void* data,
+    const void* indices,
+    const void* updates,
+    void* output,
+    int64_t axis,
+    int64_t reduction_id,
+    int64_t rank,
+    const int64_t* data_shape,
+    const int64_t* indices_shape,
+    int64_t num_updates,
+    int element_size_bytes,
+    int indices_element_size_bytes);
+
+HIP_KERNEL_API int hip_compress(
+    void* stream,
+    const void* input,
+    const void* condition,
+    void* output,
+    int64_t flatten,
+    int64_t axis,
+    int64_t input_rank,
+    int64_t output_rank,
+    const int64_t* input_shape,
+    const int64_t* output_shape,
+    int64_t condition_len,
+    int64_t num_output_elements,
+    void* workspace,
+    size_t workspace_bytes,
+    int element_size_bytes);
+
+HIP_KERNEL_API int hip_one_hot(
+    void* stream,
+    const void* indices,
+    const void* depth,
+    const void* values,
+    void* output,
+    int64_t axis,
+    int64_t indices_rank,
+    int64_t output_rank,
+    const int64_t* indices_shape,
+    const int64_t* output_shape,
+    int64_t num_indices,
+    int64_t num_output_elements,
+    int64_t depth_scalar,
+    int element_size_bytes,
+    int indices_element_size_bytes);
+
 /* =========================================================================
  * ReduceSum (Parallel Sum Reduction)
  * =========================================================================
@@ -841,12 +957,13 @@ HIP_KERNEL_API int hip_reduce_sum(
  *
  * Same layout convention and `inner_size` semantics as hip_reduce_sum, but
  * divides the float-accumulated sum of each `reduce_size`-element slice by
- * reduce_size = num_input / num_output before the half narrowing. The division
- * is performed in-kernel so the op needs no compile-time-static reduce dim and
- * tolerates a dynamic reduce axis.
+ * reduce_size = num_input / num_output before narrowing to the output type. The
+ * division is performed in-kernel so the op needs no compile-time-static reduce
+ * dim and tolerates a dynamic reduce axis.
  *
- * Supported types: HIP_DTYPE_FLOAT16 only (ONNX ReduceMean is float-domain;
- * the true-fp16 EP path only ever feeds half tensors). Other dtypes return -1.
+ * Supported types: HIP_DTYPE_FLOAT16 and HIP_DTYPE_FLOAT32 (ONNX ReduceMean is
+ * float-domain; both the true-fp16 path and fp32-upcast RMSNorm-style paths
+ * feed this). Both accumulate in float. Other dtypes return -1.
  * Returns: 0 on success, non-zero on failure
  */
 HIP_KERNEL_API int hip_reduce_mean(
@@ -988,6 +1105,8 @@ HIP_KERNEL_API int hip_global_pool(
  *
  * - hip_reduce_max  : Max op, init = -INF (FP) / TYPE_MIN (INT). NaN propagating
  *                     on the FP path (matches ORT _Max<float>).
+ * - hip_reduce_min  : Min op, init = +INF (FP) / TYPE_MAX (INT). NaN propagating
+ *                     on the FP path (matches ORT _Min<float>).
  * - hip_reduce_prod : Mul op, init = 1.
  *
  * Supported hip_dtypes: HIP_DTYPE_INT32, HIP_DTYPE_INT64, HIP_DTYPE_FLOAT16
@@ -995,6 +1114,15 @@ HIP_KERNEL_API int hip_global_pool(
  */
 /* `inner_size`: see hip_reduce_sum (strided non-trailing-axis support). */
 HIP_KERNEL_API int hip_reduce_max(
+    void* stream,
+    const void* data,
+    void* output,
+    int64_t num_input_elements,
+    int64_t num_output_elements,
+    int64_t inner_size,
+    int hip_dtype);
+
+HIP_KERNEL_API int hip_reduce_min(
     void* stream,
     const void* data,
     void* output,
