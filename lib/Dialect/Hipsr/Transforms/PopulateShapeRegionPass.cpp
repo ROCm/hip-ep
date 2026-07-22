@@ -9,9 +9,6 @@
 // populateShapeRegion() to emit the output-shape computation. Idempotent:
 // already-populated regions are skipped.
 //
-// The entry-block args are the op's shape-region args; for a normal op like
-// cast that is the data ins (ctx dropped).
-//
 // Before:
 //   %0 = hipsr.cast(%ctx) ins(%input) outs(%init) : tensor<?x8xf16>
 // After:

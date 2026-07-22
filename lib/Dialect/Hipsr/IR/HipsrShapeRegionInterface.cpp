@@ -28,8 +28,9 @@ ShapeYieldOp getShapeYieldOp(Region &shapeRegion) {
 SmallVector<SmallVector<Value>> resultShapesOf(Region &shapeRegion) {
   ShapeYieldOp yieldOp = getShapeYieldOp(shapeRegion);
   SmallVector<SmallVector<Value>> dims;
-  for (OperandRange group : yieldOp.getShapes())
+  for (OperandRange group : yieldOp.getShapes()) {
     dims.emplace_back(group.begin(), group.end());
+  }
   return dims;
 }
 
