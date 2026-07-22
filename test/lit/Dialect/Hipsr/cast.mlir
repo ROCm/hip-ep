@@ -10,18 +10,20 @@
 
 // RUN: hip-mlir-opt %s -split-input-file -hipsr-populate-shape-region | FileCheck %s
 
-// A hipsr.cast entered with an empty (omitted) shape region gets its region
-// populated: shape.shape_of + one shape.get_extent per dim, yielded as a single
-// group with the output element type.
-
+// An empty (omitted) shape region gets populated: shape.shape_of + one
+// shape.get_extent per dim, yielded as a single group with the output element
+// type. The region is IsolatedFromAbove, so the input arrives as the
+// entry-block arg (arg 0 is the shape-unused ctx) and shape.shape_of reads that
+// arg, not the op's operand.
 // CHECK-LABEL: func.func @cast_tensor
+// CHECK:       hipsr.cast(%{{.+}}) ins(%{{.+}} : tensor<?x8xf32>) outs(%{{.+}} : tensor<?x8xf16>) : tensor<?x8xf16> shape_region {
+// CHECK:         ^bb0(%{{.+}}: !hipsr.context, %[[IN:.+]]: tensor<?x8xf32>):
+// CHECK:         %[[SHAPE:.+]] = shape.shape_of %[[IN]]
+// CHECK:         %[[D0:.+]] = shape.get_extent %[[SHAPE]]
+// CHECK:         %[[D1:.+]] = shape.get_extent %[[SHAPE]]
+// CHECK:         hipsr.shape_yield (%[[D0]], %[[D1]]) : [f16]
+// CHECK:       }
 func.func @cast_tensor(%ctx: !hipsr.context, %input: tensor<?x8xf32>, %init: tensor<?x8xf16>) -> tensor<?x8xf16> {
-  // CHECK: hipsr.cast(%{{.+}}) ins(%[[IN:.+]] : tensor<?x8xf32>) outs(%{{.+}} : tensor<?x8xf16>) : tensor<?x8xf16> shape_region {
-  // CHECK:   %[[SHAPE:.+]] = shape.shape_of %[[IN]]
-  // CHECK:   %[[D0:.+]] = shape.get_extent %[[SHAPE]]
-  // CHECK:   %[[D1:.+]] = shape.get_extent %[[SHAPE]]
-  // CHECK:   hipsr.shape_yield (%[[D0]], %[[D1]]) : [f16]
-  // CHECK: }
   %0 = hipsr.cast(%ctx) ins(%input : tensor<?x8xf32>) outs(%init : tensor<?x8xf16>) : tensor<?x8xf16>
   return %0 : tensor<?x8xf16>
 }

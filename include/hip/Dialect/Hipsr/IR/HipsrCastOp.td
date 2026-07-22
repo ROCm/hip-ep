@@ -27,20 +27,20 @@ def Hipsr_CastOp : Hipsr_DpsOp<"cast"> {
     Every hipsr op carries it as its first operand; it is added in the ONNX
     phase and threaded through unchanged.
 
-    Regular op: carries an optional shape region (region 0). When populated it
-    copies the input shape (via `populateShapeRegion`, which emits
-    `shape.shape_of` + `shape.get_extent` so it works for both tensor and
-    memref inputs); the yielded element type is the output element type.
+    Carries an optional shape region (region 0) that yields the output shape:
+    the input shape, with the output element type. The region is isolated (see
+    ShapeRegionInterface), so its body reads the input as the entry-block arg
+    `%in` below (arg 0 is the shape-unused `ctx`), not the op's `input` operand.
 
-    Example (populated shape region):
+    Example (populated region; `^bb0(%ctxarg, %in)` mirrors the ctx/input
+    operands, `%ctxarg` unused):
     ```mlir
     %0 = hipsr.cast(%ctx) ins(%input : tensor<?x8xf32>) outs(%init : tensor<?x8xf16>)
                           : tensor<?x8xf16> shape_region {
-      %shape = shape.shape_of %input : tensor<?x8xf32> -> tensor<2xindex>
-      %c0 = arith.constant 0 : index
-      %d0 = shape.get_extent %shape, %c0 : tensor<2xindex>, index -> index
-      %c1 = arith.constant 1 : index
-      %d1 = shape.get_extent %shape, %c1 : tensor<2xindex>, index -> index
+    ^bb0(%ctxarg: !hipsr.context, %in: tensor<?x8xf32>):
+      %shape = shape.shape_of %in : tensor<?x8xf32> -> tensor<2xindex>
+      %d0 = shape.get_extent %shape, %c0 : ...   // dim 0
+      %d1 = shape.get_extent %shape, %c1 : ...   // dim 1
       hipsr.shape_yield (%d0, %d1) : [f16]
     }
     ```
@@ -52,9 +52,27 @@ def Hipsr_CastOp : Hipsr_DpsOp<"cast"> {
     Hipsr_TensorOrDeviceMemRef:$init
   );
 
-  // The shape region is optional: an empty (zero-block) region prints nothing
-  // and round-trips as empty. A non-empty region prints as
-  // `shape_region { ... }`.
+  let extraClassDeclaration = [{
+    /// Named view of the shape region's entry-block args: arg 0 = ctx (unused
+    /// by the shape body), 1 = input. getInput() returns the block arg, not the
+    /// same-named operand accessor -- only the block arg is legal inside the
+    /// isolated region.
+    struct ShapeRegionArgs {
+      ::mlir::Block &block;
+      /// Assert so a too-short arg list fails clearly, not as an out-of-range
+      /// access deeper in.
+      ::mlir::Value getInput() const {
+        assert(block.getNumArguments() > 1 &&
+               "shape region entry block is missing the `input` argument "
+               "(expected >= 2 block arguments: ctx, input)");
+        return block.getArgument(1);
+      }
+    };
+  }];
+
+  // `ctx` prints as a leading `(%ctx)` with its (single fixed) type elided,
+  // matching the hip dialect DPS ops. Result type and shape region are optional
+  // groups, so the memref/no-result and empty-region forms print nothing extra.
   let assemblyFormat = [{
     `(` $ctx `)`
     `ins` `(` $input `:` type($input) `)`
