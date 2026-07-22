@@ -22,16 +22,12 @@ def ShapeRegionInterface : OpInterface<"ShapeRegionInterface"> {
   let description = [{
     Interface for ops that compute their own output shape in an attached region.
 
-    An implementing op carries an optional shape region (region 0): either empty
-    (no shape computation yet) or a single block that computes the output
-    dimensions and ends with `hipsr.shape_yield`.
-
-    The region is `IsolatedFromAbove`, so it reads the operands it needs as
-    entry-block arguments rather than capturing the op's operands, which keeps
-    stock MLIR passes (-cse, -canonicalize, LICM) correct over it. Which
-    operands become args is keyed on the op's barrier category (see
-    `getShapeRegionArgOperands`). The `hipsr-populate-shape-region` pass creates
-    the entry block with those arguments and hands it to `populateShapeRegion`.
+    The shape region (region 0) is optional: empty, or one block ending in
+    `hipsr.shape_yield`. It is `IsolatedFromAbove`, reading its inputs as
+    entry-block args (keyed on barrier category, see `getShapeRegionArgOperands`)
+    instead of capturing the op's operands, so stock MLIR passes (-cse,
+    -canonicalize, LICM) stay correct over it. The `hipsr-populate-shape-region`
+    pass fills it via `populateShapeRegion`.
 
     An implementing op MUST also carry the `IsolatedFromAbove` and `SingleBlock`
     traits (an interface cannot auto-attach traits), e.g.
@@ -49,16 +45,15 @@ def ShapeRegionInterface : OpInterface<"ShapeRegionInterface"> {
 
   let methods = [
     InterfaceMethod<
-      [{Fill `shapeBlock` (already created by the pass, with the op's
-        category-specific args -- see `getShapeRegionArgOperands`) with the ops
-        computing the output shape. Read operands as the block's arguments --
-        the region is isolated, so the op's operands are off limits.}],
+      [{Emit the output-shape computation into `shapeBlock` (already created by
+        the pass with the op's args -- see `getShapeRegionArgOperands`), reading
+        inputs as the block's arguments.}],
       "void", "populateShapeRegion",
       (ins "::mlir::OpBuilder &":$builder, "::mlir::Block &":$shapeBlock)
     >,
     InterfaceMethod<
-      [{Fill the capacity shape region's block (region 1). Only EndBarrier ops
-        override this; same block-argument contract as `populateShapeRegion`.}],
+      [{Like `populateShapeRegion`, but for the capacity region (region 1); only
+        EndBarrier ops override it.}],
       "void", "populateCapacityShapeRegion",
       (ins "::mlir::OpBuilder &":$builder, "::mlir::Block &":$capacityBlock),
       /*methodBody=*/[{}],

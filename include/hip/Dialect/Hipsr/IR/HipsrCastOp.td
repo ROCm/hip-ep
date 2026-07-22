@@ -23,19 +23,14 @@ def Hipsr_CastOp : Hipsr_DpsOp<"cast"> {
     Destination-passing style: the result buffer is passed as the `init`
     operand.
 
-    The `ctx` operand (`!hipsr.context`) is the per-session execution context.
-    Every hipsr op carries it as its first operand; it is added in the ONNX
-    phase and threaded through unchanged.
-
     Carries an optional shape region (region 0, see ShapeRegionInterface) that
-    yields the output shape: the input shape with the output element type. Its
-    args mirror the DPS `ins`, so arg 0 is `ctx` and arg 1 the input.
+    yields the output shape: the input shape with the output element type.
 
     Example (populated region):
     ```mlir
     %0 = hipsr.cast(%ctx) ins(%input : tensor<?x8xf32>) outs(%init : tensor<?x8xf16>)
                           : tensor<?x8xf16> shape_region {
-    ^bb0(%ctxarg: !hipsr.context, %in: tensor<?x8xf32>):
+    ^bb0(%in: tensor<?x8xf32>):
       %shape = shape.shape_of %in : tensor<?x8xf32> -> tensor<2xindex>
       %d0 = shape.get_extent %shape, %c0 : ...
       %d1 = shape.get_extent %shape, %c1 : ...

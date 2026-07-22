@@ -4,17 +4,17 @@
  */
 //===- PopulateShapeRegionPass.cpp - Fill hipsr shape regions -------------===//
 //
-// For each op implementing ShapeRegionInterface whose shape region is empty,
-// creates the entry block with the op's category-specific shape-region args
-// (getShapeRegionArgOperands), then calls populateShapeRegion() so the op emits
-// its own output-shape computation. Populated regions are skipped, so the pass
-// is idempotent.
+// For each ShapeRegionInterface op with an empty shape region, adds the entry
+// block with the op's args (getShapeRegionArgOperands) and calls
+// populateShapeRegion() to emit the output-shape computation. Idempotent:
+// already-populated regions are skipped.
 //
-// Before (region declared but empty):
-//   %0 = hipsr.cast(%ctx) ins(%input : tensor<?x8xf32>)
-//                         outs(%init : tensor<?x8xf16>) : tensor<?x8xf16>
-// After (entry block + args added here; body emitted by the op). cast is a
-// normal op, so its args are the data ins only (ctx dropped):
+// The entry-block args are the op's shape-region args; for a normal op like
+// cast that is the data ins (ctx dropped).
+//
+// Before:
+//   %0 = hipsr.cast(%ctx) ins(%input) outs(%init) : tensor<?x8xf16>
+// After:
 //   %0 = hipsr.cast(%ctx) ins(%input) outs(%init)
 //       : tensor<?x8xf16> shape_region {
 //   ^bb0(%in: tensor<?x8xf32>):
