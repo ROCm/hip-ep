@@ -21,19 +21,30 @@ namespace hipsr {
 /// arguments mirror the op's DPS inputs and that ends in `hipsr.shape_yield`.
 ::mlir::LogicalResult verifyShapeRegionStructure(::mlir::Operation *op);
 
-namespace detail {
-// Cores backing the interface's result accessors. They take a bare region so
-// one body serves both the shape region (0) and the capacity region (1), and
-// both require the region already populated (block ends with
-// hipsr.shape_yield). Prefer the op-bound accessors
-// (op.getShapeRegionResultShapes() etc.); call these only when you already hold
-// a Region &.
+// Accessors for the fixed region layout (region 0 = shape, 1 = capacity). Free
+// functions so their definitions live once, not once per op as an interface
+// method's body would. Forward-declared here; defined by the .h.inc below.
+class ShapeRegionInterface;
+
+::mlir::Region &getShapeRegion(ShapeRegionInterface op);
+
+/// Region 1, present only on EndBarrier ops; a fatal error on any other op.
+::mlir::Region &getCapacityShapeRegion(ShapeRegionInterface op);
+
+/// Each result's dim values, grouped per result. Region must be populated.
 ::llvm::SmallVector<::llvm::SmallVector<::mlir::Value>>
-getShapeRegionResultShapes(::mlir::Region &shapeRegion);
+getShapeRegionResultShapes(ShapeRegionInterface op);
+
+/// Each result's tensor type, all extents dynamic. Region must be populated.
+::llvm::SmallVector<::mlir::RankedTensorType>
+getShapeRegionResultTypes(ShapeRegionInterface op);
+
+/// The two above over the capacity region (region 1).
+::llvm::SmallVector<::llvm::SmallVector<::mlir::Value>>
+getCapacityShapeRegionResultShapes(ShapeRegionInterface op);
 
 ::llvm::SmallVector<::mlir::RankedTensorType>
-getShapeRegionResultTypes(::mlir::Region &shapeRegion);
-} // namespace detail
+getCapacityShapeRegionResultTypes(ShapeRegionInterface op);
 
 } // namespace hipsr
 } // namespace mlir
