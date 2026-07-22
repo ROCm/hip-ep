@@ -15,12 +15,9 @@ include "hip/Dialect/Hipsr/IR/HipsrOps.td"
 // Hipsr_EmptyOp
 //===----------------------------------------------------------------------===//
 
-// NOTE (staged delivery): Stage 1 defines the op WITHOUT the
-// DestinationStyleOpInterface (added in Stage 2) and intentionally WITHOUT the
-// `Pure` trait -- hipsr.empty allocates an init tensor (it bufferizes to
-// memref.alloc), so marking it Pure would let CSE merge two distinct inits into
-// one buffer (the tensor.empty CSE aliasing trap). It is modelled like
-// bufferization.alloc_tensor (a fresh allocation), not like tensor.empty.
+// Each hipsr.empty is a fresh init-tensor allocation (like
+// bufferization.alloc_tensor), so it is not memory-effect-free: distinct ops
+// yield distinct buffers even when their shapes match.
 def Hipsr_EmptyOp : Hipsr_Op<"empty",
     [SingleBlockImplicitTerminator<"EmptyYieldOp">]> {
   let summary = "Create init tensor(s) with shape computation in a region";
@@ -34,8 +31,7 @@ def Hipsr_EmptyOp : Hipsr_Op<"empty",
     parent-scope values (e.g. `shape.shape_of %input`, where %input is a domain
     operand). It is variadic so one hipsr.empty can back a multi-output DPS op.
 
-    Bufferizes to one `memref.alloc()` per yielded tensor (bufferization
-    interface added separately, in a later stage).
+    Bufferizes to one `memref.alloc()` per yielded tensor.
 
     Example:
     ```mlir
