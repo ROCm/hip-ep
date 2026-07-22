@@ -18,23 +18,25 @@ Typical failure signatures:
 USAGE
 -----
   # Smoke-run one model (short, CPU fallback disabled)
-  python tools/common/identify_missing_ops.py model.onnx
+  python .cursor/skills/identify-missing-ops/scripts/identify_missing_ops.py model.onnx
 
   # Batch over a model tree
-  python tools/common/identify_missing_ops.py D:\\models --glob "*.onnx"
+  python .cursor/skills/identify-missing-ops/scripts/identify_missing_ops.py D:\\models --glob "*.onnx"
+  # Batch output includes a BATCH ROLLUP section (by model + by op) at the top.
 
   # Parse an existing perf_test log
-  python tools/common/identify_missing_ops.py --parse-log run.log
+  python .cursor/skills/identify-missing-ops/scripts/identify_missing_ops.py --parse-log run.log
 
   # Parse MLIR dump tree (HIPDNN_EP_IR_DUMP_TREE output)
-  python tools/common/identify_missing_ops.py --parse-mlir-dir output_test.1
+  python .cursor/skills/identify-missing-ops/scripts/identify_missing_ops.py --parse-mlir-dir output_test.1
 
   # Static ONNX scan vs hip-ep converters (no GPU run)
-  python tools/common/identify_missing_ops.py --scan-onnx model.onnx
+  python .cursor/skills/identify-missing-ops/scripts/identify_missing_ops.py --scan-onnx model.onnx
 
 Windows (gpu-test-package layout):
   cd gpu-test-package\\bin
-  python ..\\..\\hip-ep\\tools\\common\\identify_missing_ops.py model.onnx
+  python ..\\.cursor\\skills\\identify-missing-ops\\scripts\\identify_missing_ops.py model.onnx
+  # Monorepo workspace (hip-ep is a subfolder): use ..\\..\\.cursor\\skills\\identify-missing-ops\\scripts\\...
 
 Default stdout is a structured compatibility summary. Use --quiet for op names only.
 Use --show-next-step to include recommended work items in gap analysis tables.
@@ -55,7 +57,24 @@ from typing import Iterable
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-HIP_EP_ROOT = SCRIPT_DIR.parents[1]
+_ONNX_TO_HIP = Path("lib") / "Conversion" / "OnnxToHip"
+
+
+def _resolve_hip_ep_root(script_dir: Path) -> Path:
+    """Locate hip-ep root whether workspace is hip-ep or a parent monorepo."""
+    for parent in script_dir.parents:
+        if (parent / _ONNX_TO_HIP).is_dir():
+            return parent
+        sibling = parent / "hip-ep"
+        if (sibling / _ONNX_TO_HIP).is_dir():
+            return sibling
+    sys.exit(
+        "Could not locate hip-ep root (expected lib/Conversion/OnnxToHip). "
+        "Open hip-ep or its parent monorepo as the workspace."
+    )
+
+
+HIP_EP_ROOT = _resolve_hip_ep_root(SCRIPT_DIR)
 ONNX_TO_HIP_DIR = HIP_EP_ROOT / "lib" / "Conversion" / "OnnxToHip"
 
 # --- log / IR parsing patterns ------------------------------------------------
@@ -142,6 +161,23 @@ _GAP_NEXT_STEP: dict[str, str] = {
     ),
 }
 
+# Converter exists but pattern match fails on dynamic spatial shapes (H/W or 1D static).
+_SHAPE_BLOCKER_NEXT_STEP: dict[str, str] = {
+    "Conv": (
+        "Extend ConvConversion.cpp for dynamic spatial output dims (H/W), or "
+        "re-export ONNX with fixed latent/image resolution (static H/W)"
+    ),
+    "Resize": (
+        "Extend ResizeConversion.cpp for dynamic output spatial dims, or "
+        "re-export ONNX with fixed upsampler output sizes"
+    ),
+}
+
+RE_MLIR_ONNX_OP_TYPES = re.compile(
+    r'"onnx\.(\w+)"\([^)]*\)[^{]*\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}\s*:\s*\(([^)]*)\)\s*->\s*(.+)$'
+)
+RE_TENSOR_TYPE = re.compile(r"tensor<([^>]+)>")
+
 MORPHIZEN_SCHEMA_FILE = (
     HIP_EP_ROOT / "morphizen" / "morphizen-core" / "src" / "binary" / "onnx_schema_json_binary.hpp"
 )
@@ -189,12 +225,42 @@ _RUNTIME_PARTIAL: dict[str, str] = {
 
 INVENTORY_STATUS_LABELS = {
     "compile_blocker": "COMPILE BLOCKER (survived lowering)",
+    "shape_blocker": "SHAPE BLOCKER (converter exists; dynamic spatial dims)",
+    "variant_blocker": "VARIANT BLOCKER (converter exists; unsupported attributes/shape)",
+    "dtype_blocker": "DTYPE BLOCKER (converter exists; unsupported element type)",
+    "runtime_blocker": "RUNTIME BLOCKER (compiled; kernel rejected variant)",
+    "partial": "PARTIAL (no converter; some runtime pieces exist)",
     "lowered": "LOWERED by hip-ep",
     "fused": "FUSED by hip-ep",
     "lowered_incomplete": "LOWERED (converter in repo; still in MLIR at failure)",
     "unsupported": "UNSUPPORTED (no converter)",
     "lowered_unverified": "LOWERED (repo converter; no MLIR dump to confirm)",
 }
+
+BLOCKING_STATUSES = frozenset(
+    {
+        "compile_blocker",
+        "shape_blocker",
+        "variant_blocker",
+        "dtype_blocker",
+        "runtime_blocker",
+        "partial",
+        "unsupported",
+        "lowered_incomplete",
+    }
+)
+
+# ONNX element types that commonly block converters despite op support existing.
+_DTYPE_BLOCKER_RULES: dict[str, frozenset[str]] = {
+    "Abs": frozenset({"int64", "int32", "uint64", "uint32"}),
+    "Sign": frozenset({"int64", "int32"}),
+    "Neg": frozenset({"int64", "int32"}),
+    "Cast": frozenset({"double", "float64", "bfloat16"}),
+}
+
+RE_MLIR_ATTR = re.compile(
+    r'(\w+)\s*=\s*(?:"([^"]*)"|\[([^\]]*)\]|([^,}\s]+))'
+)
 
 # Infrastructure ops lowered before bufferize — not tracked in inventory.
 _IGNORE_ONNX_OPS = frozenset({"Constant", "CastLike"})
@@ -241,6 +307,17 @@ class OpGapLayers:
 
 
 @dataclass
+class ShapeBlockerDetail:
+    """Converter exists but lowering blocked (shape / variant / dtype / runtime)."""
+
+    reason: str
+    count: int = 0
+    example: str = ""
+    source: str = "mlir"  # mlir | onnx | log
+    kind: str = "shape"  # shape | variant | dtype | runtime
+
+
+@dataclass
 class OpInventoryItem:
     op: str
     count: int
@@ -270,7 +347,7 @@ class ModelReport:
             return sorted(
                 item.op
                 for item in self.op_inventory
-                if item.status in {"compile_blocker", "unsupported"}
+                if item.status in BLOCKING_STATUSES
             )
         seen: set[str] = set()
         out: list[str] = []
@@ -565,7 +642,49 @@ def _hip_ep_handled(op: str, known_ops: set[str]) -> bool:
     return op in known_ops
 
 
-def _hip_ep_handling(op: str, known: set[str], *, in_survivors: bool = False) -> str:
+def _analyze_blocker_gap(op: str, detail: ShapeBlockerDetail) -> OpGapLayers:
+    base = _analyze_op_gap(op)
+    if detail.kind == "shape":
+        next_step = _SHAPE_BLOCKER_NEXT_STEP.get(
+            op,
+            f"Extend {op} converter for dynamic spatial shapes or re-export with fixed H/W",
+        )
+    elif detail.kind == "dtype":
+        next_step = (
+            f"Extend {op} converter/runtime for this dtype, or insert Cast nodes "
+            f"to a supported type in the ONNX export"
+        )
+    elif detail.kind == "runtime":
+        next_step = (
+            f"Extend wrap_/kernel for {op} to handle: {detail.reason[:80]}"
+        )
+    elif detail.kind == "variant":
+        next_step = (
+            f"Extend {op} OnnxToHip converter for this attribute/shape variant, "
+            f"or re-export ONNX avoiding: {detail.reason[:60]}"
+        )
+    else:
+        next_step = _default_gap_next_step(
+            op,
+            has_converter=base.onnx_converter.startswith("yes"),
+            runtime_label=base.runtime,
+        )
+    return OpGapLayers(
+        schema=base.schema,
+        onnx_converter=base.onnx_converter,
+        fusion=base.fusion,
+        runtime=base.runtime,
+        next_step=f"{next_step} ({detail.reason})",
+    )
+
+
+def _hip_ep_handling(
+    op: str,
+    known: set[str],
+    *,
+    in_survivors: bool = False,
+    shape_detail: ShapeBlockerDetail | None = None,
+) -> str:
     gap = _analyze_op_gap(op)
     if gap.onnx_converter.startswith("yes"):
         if op in _repo_op_support().ms_custom_ops:
@@ -580,6 +699,16 @@ def _hip_ep_handling(op: str, known: set[str], *, in_survivors: bool = False) ->
 
     if in_survivors and _hip_ep_handled(op, known):
         handling += " (still onnx.* / Custom at bufferize dump)"
+    if shape_detail is not None:
+        label = {
+            "shape": "shape blocker",
+            "variant": "variant blocker",
+            "dtype": "dtype blocker",
+            "runtime": "runtime blocker",
+        }.get(shape_detail.kind, "blocker")
+        handling += f" [{label}: {shape_detail.reason}]"
+        if shape_detail.example:
+            handling += f" (e.g. {shape_detail.example})"
     return handling
 
 
@@ -600,6 +729,594 @@ def enumerate_onnx_ops(model_path: Path) -> dict[str, int]:
         for node in fn.node:
             op_counts[node.op_type] = op_counts.get(node.op_type, 0) + 1
     return op_counts
+
+
+def _tensor_dims_from_type(type_fragment: str) -> list[str]:
+    """Return dimension tokens from ``tensor<?x512x?x?xf32>`` (excludes element type)."""
+    match = RE_TENSOR_TYPE.search(type_fragment)
+    if not match:
+        return []
+    parts = match.group(1).split("x")
+    if not parts:
+        return []
+    if not re.fullmatch(r"[?0-9]+", parts[-1]):
+        parts = parts[:-1]
+    return parts
+
+
+def _conv_shape_issue(output_type: str, input_types: list[str]) -> str | None:
+    """Mirror ConvConversion.cpp limits for dynamic / 1D shapes."""
+    out_dims = _tensor_dims_from_type(output_type)
+    if not out_dims:
+        return None
+    rank = len(out_dims)
+    if rank == 3:
+        for dims in (out_dims, *(_tensor_dims_from_type(t) for t in input_types)):
+            if dims and any(d == "?" for d in dims):
+                return "1D Conv requires fully static input/output shapes"
+    elif rank >= 4:
+        for i in range(2, rank):
+            if out_dims[i] == "?":
+                return (
+                    "dynamic output spatial dims (H/W) — ConvToHip only "
+                    "supports dynamic batch (N)"
+                )
+    return None
+
+
+def _resize_shape_issue(output_type: str) -> str | None:
+    """Mirror ResizeConversion.cpp: dynamic output spatial dims unsupported."""
+    out_dims = _tensor_dims_from_type(output_type)
+    if len(out_dims) < 3:
+        return None
+    for i in range(2, len(out_dims)):
+        if out_dims[i] == "?":
+            return "dynamic output spatial dims (H/W) unsupported by hip.resize"
+    return None
+
+
+def _shape_issue_for_op(op: str, output_type: str, input_types: list[str]) -> str | None:
+    if op in {"Conv", "ConvTranspose"}:
+        return _conv_shape_issue(output_type, input_types)
+    if op == "Resize":
+        return _resize_shape_issue(output_type)
+    if op in {"MaxPool", "AveragePool", "GlobalMaxPool", "GlobalAveragePool"}:
+        out_dims = _tensor_dims_from_type(output_type)
+        if len(out_dims) >= 3:
+            for i in range(2, len(out_dims)):
+                if out_dims[i] == "?":
+                    return "dynamic spatial output dims unsupported for pool ops"
+    return None
+
+
+def _mlir_attr_dict(line: str) -> dict[str, str]:
+    attrs: dict[str, str] = {}
+    brace = line.find("{")
+    if brace < 0:
+        return attrs
+    segment = line[brace:]
+    for match in RE_MLIR_ATTR.finditer(segment):
+        key = match.group(1)
+        value = match.group(2) or match.group(3) or match.group(4) or ""
+        attrs[key] = value.strip()
+    return attrs
+
+
+def _mlir_attr_int(attrs: dict[str, str], key: str, default: int = 0) -> int:
+    raw = attrs.get(key, str(default))
+    match = re.search(r"-?\d+", raw)
+    return int(match.group(0)) if match else default
+
+
+def _variant_issue_for_op(
+    op: str,
+    *,
+    line: str = "",
+    input_types: list[str] | None = None,
+    output_type: str = "",
+    onnx_node=None,
+    values_by_name: dict | None = None,
+) -> str | None:
+    """Attribute / rank / mode limits that block lowering despite a converter."""
+    input_types = input_types or []
+    attrs = _mlir_attr_dict(line) if line else {}
+
+    if op in {"Conv", "ConvTranspose"}:
+        in_dims = _tensor_dims_from_type(input_types[0]) if input_types else []
+        if len(in_dims) == 5:
+            return "3D Conv (rank-5) not supported — only 1D/2D Conv"
+        if op == "Conv" and len(in_dims) == 3:
+            group = _mlir_attr_int(attrs, "group", 1)
+            dilations = attrs.get("dilations", "[1]")
+            if group != 1:
+                return "1D Conv with group != 1 is not supported"
+            if dilations not in {"[1]", "[1, 1]"} and "1" not in dilations.replace(" ", ""):
+                if not re.fullmatch(r"\[1(?:,\s*1)*\]", dilations.replace(" ", "")):
+                    return "1D Conv with dilation != 1 is not supported"
+
+    if op == "Resize":
+        mode = attrs.get("mode", "nearest").strip('"')
+        if mode == "cubic":
+            return "Resize mode=cubic not supported (nearest/linear only)"
+        if _mlir_attr_int(attrs, "antialias", 0) != 0:
+            return "Resize antialias not supported"
+        if _mlir_attr_int(attrs, "exclude_outside", 0) != 0:
+            return "Resize exclude_outside not supported"
+        kar = attrs.get("keep_aspect_ratio_policy", "stretch").strip('"')
+        if kar and kar != "stretch":
+            return "Resize keep_aspect_ratio_policy must be 'stretch'"
+        if input_types and len(input_types) >= 2 and "none" not in input_types[1].lower():
+            return "Resize with roi (tf_crop_and_resize) not supported"
+
+    if op in {"MaxPool", "AveragePool"}:
+        in_type = input_types[0] if input_types else ""
+        if in_type and not re.search(r"f16|f32|f64", in_type):
+            return "Pool runtime supports float element types only"
+        in_dims = _tensor_dims_from_type(in_type)
+        if len(in_dims) > 5:
+            return "Pool spatial rank > 3 not supported"
+
+    if op == "Slice" and onnx_node is not None and values_by_name is not None:
+        return _onnx_slice_variant_issue(onnx_node, values_by_name)
+
+    if onnx_node is not None and values_by_name is not None:
+        if op in {"Conv", "ConvTranspose"}:
+            return _onnx_conv_variant_issue(onnx_node, values_by_name)
+        if op == "Resize":
+            return _onnx_resize_variant_issue(onnx_node, values_by_name)
+        if op in {"MaxPool", "AveragePool"}:
+            return _onnx_pool_variant_issue(onnx_node, values_by_name)
+
+    return None
+
+
+def _onnx_elem_type_name(value) -> str | None:
+    if hasattr(value, "type"):
+        tensor_type = value.type.tensor_type
+        elem_type = tensor_type.elem_type
+    elif hasattr(value, "data_type"):
+        elem_type = value.data_type
+    else:
+        return None
+    if not elem_type:
+        return None
+    try:
+        import onnx
+
+        return onnx.TensorProto.DataType.Name(tensor_type.elem_type).lower()
+    except Exception:
+        return None
+
+
+def _onnx_get_int_attr(node, name: str, default: int = 0) -> int:
+    for attr in node.attribute:
+        if attr.name == name and attr.type == 2:  # INT
+            return int(attr.i)
+    return default
+
+
+def _onnx_get_str_attr(node, name: str, default: str = "") -> str:
+    for attr in node.attribute:
+        if attr.name == name and attr.type == 3:  # STRING
+            return attr.s.decode() if isinstance(attr.s, bytes) else str(attr.s)
+    return default
+
+
+def _onnx_conv_variant_issue(node, values_by_name: dict) -> str | None:
+    if not node.input:
+        return None
+    input_value = values_by_name.get(node.input[0])
+    if input_value is None:
+        return None
+    rank = _onnx_value_rank(input_value)
+    if rank == 5:
+        return "3D Conv (rank-5) not supported — only 1D/2D Conv"
+    if rank == 3 and node.op_type == "Conv":
+        group = _onnx_get_int_attr(node, "group", 1)
+        if group != 1:
+            return "1D Conv with group != 1 is not supported"
+        dilations = [
+            int(a.i)
+            for a in node.attribute
+            if a.name == "dilations" and a.type == 7
+        ]
+        if dilations and any(d != 1 for d in dilations):
+            return "1D Conv with dilation != 1 is not supported"
+        for name in node.input[:2]:
+            value = values_by_name.get(name)
+            if value is None or not hasattr(value, "type"):
+                continue
+            tensor_type = value.type.tensor_type
+            if not tensor_type.HasField("shape"):
+                return "1D Conv requires fully static input/output shapes"
+            if any(_onnx_dims_dynamic(tensor_type.shape.dim)):
+                return "1D Conv requires fully static input/output shapes"
+    return None
+
+
+def _onnx_resize_variant_issue(node, values_by_name: dict) -> str | None:
+    mode = _onnx_get_str_attr(node, "mode", "nearest")
+    if mode == "cubic":
+        return "Resize mode=cubic not supported (nearest/linear only)"
+    if _onnx_get_int_attr(node, "antialias", 0) != 0:
+        return "Resize antialias not supported"
+    if _onnx_get_int_attr(node, "exclude_outside", 0) != 0:
+        return "Resize exclude_outside not supported"
+    kar = _onnx_get_str_attr(node, "keep_aspect_ratio_policy", "stretch")
+    if kar and kar != "stretch":
+        return "Resize keep_aspect_ratio_policy must be 'stretch'"
+    if len(node.input) >= 2 and node.input[1]:
+        return "Resize with roi (tf_crop_and_resize) not supported"
+    return None
+
+
+def _onnx_pool_variant_issue(node, values_by_name: dict) -> str | None:
+    if not node.input:
+        return None
+    input_value = values_by_name.get(node.input[0])
+    if input_value is None:
+        return None
+    rank = _onnx_value_rank(input_value)
+    if rank > 5:
+        return "Pool spatial rank > 3 not supported"
+    elem = _onnx_elem_type_name(input_value)
+    if elem and elem not in {"float", "float16", "double"}:
+        return "Pool runtime supports float element types only"
+    return None
+
+
+def _onnx_slice_variant_issue(node, values_by_name: dict) -> str | None:
+    if len(node.input) < 3:
+        return None
+    for idx in (1, 2):
+        if idx >= len(node.input):
+            continue
+        value = values_by_name.get(node.input[idx])
+        if value is None:
+            return "Slice with dynamic starts/ends not supported"
+        if not hasattr(value, "type"):
+            continue
+        tensor_type = value.type.tensor_type
+        if not tensor_type.HasField("shape"):
+            return "Slice with dynamic starts/ends not supported"
+        if any(_onnx_dims_dynamic(tensor_type.shape.dim)):
+            return "Slice with dynamic starts/ends not supported"
+    return None
+
+
+def _dtype_issue_for_op(
+    op: str,
+    *,
+    onnx_node=None,
+    values_by_name: dict | None = None,
+    input_types: list[str] | None = None,
+) -> str | None:
+    blocked_types = _DTYPE_BLOCKER_RULES.get(op)
+    if not blocked_types:
+        return None
+    if onnx_node is not None and values_by_name is not None and onnx_node.input:
+        value = values_by_name.get(onnx_node.input[0])
+        if value is not None and hasattr(value, "type"):
+            elem = _onnx_elem_type_name(value)
+            if elem and elem in blocked_types:
+                return f"{op} on {elem} — converter targets float paths only"
+    if input_types:
+        for type_str in input_types:
+            match = re.search(r"([a-z0-9]+)$", type_str.strip().lower())
+            if match and match.group(1) in blocked_types:
+                return f"{op} on {match.group(1)} — converter targets float paths only"
+    return None
+
+
+def _record_blocker(
+    blockers: dict[str, ShapeBlockerDetail],
+    op: str,
+    reason: str,
+    *,
+    source: str,
+    kind: str,
+    example: str = "",
+) -> None:
+    key = f"{op}:{kind}"
+    detail = blockers.setdefault(
+        key,
+        ShapeBlockerDetail(reason=reason, source=source, kind=kind),
+    )
+    detail.count += 1
+    if example and not detail.example:
+        detail.example = example
+
+
+def _blockers_for_op(blockers: dict[str, ShapeBlockerDetail], op: str) -> dict[str, ShapeBlockerDetail]:
+    return {
+        detail.kind: detail
+        for key, detail in blockers.items()
+        if key.startswith(f"{op}:")
+    }
+
+
+def _pick_blocker_for_op(blockers: dict[str, ShapeBlockerDetail], op: str) -> ShapeBlockerDetail | None:
+    """Choose highest-priority blocker detail for inventory classification."""
+    by_kind = _blockers_for_op(blockers, op)
+    for kind in ("runtime", "dtype", "shape", "variant"):
+        detail = by_kind.get(kind)
+        if detail is not None:
+            return detail
+    return None
+
+
+def _blocker_status_for_kind(kind: str) -> str:
+    return {
+        "shape": "shape_blocker",
+        "variant": "variant_blocker",
+        "dtype": "dtype_blocker",
+        "runtime": "runtime_blocker",
+    }.get(kind, "variant_blocker")
+
+
+def _parse_mlir_onnx_op_types(line: str) -> tuple[str, list[str], str] | None:
+    match = RE_MLIR_ONNX_OP_TYPES.search(line.strip())
+    if not match:
+        return None
+    op = match.group(1)
+    input_types = [part.strip() for part in match.group(2).split(",") if part.strip()]
+    output_type = match.group(3).strip().rstrip(")")
+    return op, input_types, output_type
+
+
+def _onnx_dims_dynamic(dims: Iterable) -> list[bool]:
+    flags: list[bool] = []
+    for dim in dims:
+        if getattr(dim, "dim_param", None):
+            flags.append(True)
+        elif hasattr(dim, "HasField") and dim.HasField("dim_value"):
+            flags.append(False)
+        else:
+            flags.append(True)
+    return flags
+
+
+def _onnx_value_rank(value) -> int:
+    if hasattr(value, "type"):
+        tensor_type = value.type.tensor_type
+        if not tensor_type.HasField("shape"):
+            return 0
+        return len(tensor_type.shape.dim)
+    if hasattr(value, "dims"):
+        return len(value.dims)
+    return 0
+
+
+def _onnx_spatial_dynamic(value) -> bool:
+    if hasattr(value, "type"):
+        tensor_type = value.type.tensor_type
+        if not tensor_type.HasField("shape"):
+            return False
+        dynamic = _onnx_dims_dynamic(tensor_type.shape.dim)
+    elif hasattr(value, "dims"):
+        dynamic = [not dim for dim in value.dims]
+    else:
+        return False
+    rank = len(dynamic)
+    if rank < 3:
+        return False
+    spatial_start = 2 if rank >= 4 else 2
+    return any(dynamic[i] for i in range(spatial_start, rank))
+
+
+def analyze_blockers_from_mlir(mlir_base: Path | None) -> dict[str, ShapeBlockerDetail]:
+    """Detect shape/variant/dtype failures from surviving MLIR ``onnx.*`` lines."""
+    if mlir_base is None:
+        return {}
+
+    roots = discover_mlir_dump_dirs(mlir_base)
+    if not roots:
+        return {}
+
+    blockers: dict[str, ShapeBlockerDetail] = {}
+    for root in roots:
+        mlir_files = [p for p in root.rglob("*.mlir") if "bufferize" in p.name.lower()]
+        if not mlir_files:
+            convert_files = sorted(
+                p
+                for p in root.rglob("*.mlir")
+                if "convert-onnx-to-hip" in p.name.lower()
+            )
+            mlir_files = (
+                convert_files[-1:]
+                if convert_files
+                else sorted(root.rglob("*.mlir"))[-1:]
+            )
+        for mlir_path in mlir_files:
+            text = mlir_path.read_text(encoding="utf-8", errors="ignore")
+            for line in text.splitlines():
+                parsed = _parse_mlir_onnx_op_types(line)
+                if parsed is None:
+                    continue
+                op, input_types, output_type = parsed
+                name_match = RE_ONNX_NODE_NAME.search(line)
+                example = name_match.group(1) if name_match else output_type.strip()
+                for kind, reason in (
+                    ("shape", _shape_issue_for_op(op, output_type, input_types)),
+                    (
+                        "variant",
+                        _variant_issue_for_op(
+                            op,
+                            line=line,
+                            input_types=input_types,
+                            output_type=output_type,
+                        ),
+                    ),
+                    (
+                        "dtype",
+                        _dtype_issue_for_op(op, input_types=input_types),
+                    ),
+                ):
+                    if reason:
+                        _record_blocker(
+                            blockers,
+                            op,
+                            reason,
+                            source="mlir",
+                            kind=kind,
+                            example=example,
+                        )
+    return blockers
+
+
+def _load_onnx_graph(model_path: Path):
+    import onnx
+    from onnx import shape_inference
+
+    model = onnx.load(str(model_path), load_external_data=False)
+    try:
+        model = shape_inference.infer_shapes(model)
+    except Exception:
+        pass
+    values_by_name: dict[str, object] = {}
+    for src in (
+        list(model.graph.input),
+        list(model.graph.output),
+        list(model.graph.value_info),
+        list(getattr(model.graph, "initializer", [])),
+    ):
+        for value in src:
+            if value.name:
+                values_by_name[value.name] = value
+    nodes = list(model.graph.node)
+    for fn in model.functions:
+        nodes.extend(fn.node)
+    return model, values_by_name, nodes
+
+
+def analyze_blockers_from_onnx(model_path: Path) -> dict[str, ShapeBlockerDetail]:
+    """Predict shape/variant/dtype blockers from ONNX graph metadata."""
+    try:
+        _model, values_by_name, nodes = _load_onnx_graph(model_path)
+    except ImportError:
+        return {}
+    except Exception:
+        return {}
+
+    blockers: dict[str, ShapeBlockerDetail] = {}
+    for node in nodes:
+        op = node.op_type
+        if not node.output:
+            continue
+        output_value = values_by_name.get(node.output[0])
+        input_types: list[str] = []
+        if node.input:
+            input_value = values_by_name.get(node.input[0])
+            if input_value is not None and hasattr(input_value, "type"):
+                tt = input_value.type.tensor_type
+                if tt.HasField("shape"):
+                    dims = []
+                    for dim in tt.shape.dim:
+                        if dim.dim_param:
+                            dims.append("?")
+                        elif dim.HasField("dim_value"):
+                            dims.append(str(dim.dim_value))
+                        else:
+                            dims.append("?")
+                    elem = _onnx_elem_type_name(input_value) or "f32"
+                    input_types.append(f"tensor<{'x'.join(dims)}x{elem}>")
+        output_type = ""
+        if output_value is not None and hasattr(output_value, "type"):
+            tt = output_value.type.tensor_type
+            if tt.HasField("shape"):
+                dims = []
+                for dim in tt.shape.dim:
+                    if dim.dim_param:
+                        dims.append("?")
+                    elif dim.HasField("dim_value"):
+                        dims.append(str(dim.dim_value))
+                    else:
+                        dims.append("?")
+                elem = _onnx_elem_type_name(output_value) or "f32"
+                output_type = f"tensor<{'x'.join(dims)}x{elem}>"
+        example = node.name or (node.output[0] if node.output else op)
+        for kind, reason in (
+            ("shape", _shape_issue_for_op(op, output_type, input_types)),
+            (
+                "variant",
+                _variant_issue_for_op(
+                    op,
+                    onnx_node=node,
+                    values_by_name=values_by_name,
+                    input_types=input_types,
+                    output_type=output_type,
+                ),
+            ),
+            ("dtype", _dtype_issue_for_op(op, onnx_node=node, values_by_name=values_by_name)),
+        ):
+            if reason:
+                _record_blocker(
+                    blockers,
+                    op,
+                    reason,
+                    source="onnx",
+                    kind=kind,
+                    example=example,
+                )
+    return blockers
+
+
+def analyze_runtime_blockers(
+    runtime_findings: list[OpFinding] | None,
+) -> dict[str, ShapeBlockerDetail]:
+    blockers: dict[str, ShapeBlockerDetail] = {}
+    for finding in runtime_findings or []:
+        if "runtime unsupported" not in finding.detail:
+            continue
+        op = finding.op
+        if op.startswith("wrap_"):
+            op = _snake_to_op_name(op[5:])
+        reason = finding.detail.split("runtime unsupported:", 1)[-1].strip()
+        _record_blocker(
+            blockers,
+            op,
+            reason or "runtime kernel rejected this variant",
+            source="log",
+            kind="runtime",
+            example=finding.detail[:120],
+        )
+    return blockers
+
+
+def collect_shape_blockers(
+    model_path: Path,
+    *,
+    mlir_base: Path | None = None,
+    runtime_findings: list[OpFinding] | None = None,
+) -> dict[str, ShapeBlockerDetail]:
+    """Merge MLIR, ONNX, and runtime-detected blockers keyed as ``Op:kind``."""
+    merged: dict[str, ShapeBlockerDetail] = {}
+    for src in (
+        analyze_blockers_from_onnx(model_path),
+        analyze_blockers_from_mlir(mlir_base),
+        analyze_runtime_blockers(runtime_findings),
+    ):
+        for key, detail in src.items():
+            bucket = merged.get(key)
+            if bucket is None:
+                merged[key] = ShapeBlockerDetail(
+                    reason=detail.reason,
+                    count=detail.count,
+                    example=detail.example,
+                    source=detail.source,
+                    kind=detail.kind,
+                )
+                continue
+            bucket.count = max(bucket.count, detail.count)
+            if detail.source == "mlir":
+                bucket.source = "mlir"
+                bucket.reason = detail.reason
+            elif detail.source == "log" and bucket.source != "mlir":
+                bucket.source = "log"
+                bucket.reason = detail.reason
+            if detail.example and not bucket.example:
+                bucket.example = detail.example
+    return merged
 
 
 def collect_mlir_bufferize_survivors(mlir_base: Path | None) -> dict[str, int]:
@@ -630,50 +1347,116 @@ def build_op_inventory(
     known_ops: set[str],
     mlir_base: Path | None = None,
     compile_failed: bool = False,
+    report_shape_blockers: bool = False,
+    runtime_findings: list[OpFinding] | None = None,
 ) -> list[OpInventoryItem]:
     """Classify every ONNX op in the model for hip-ep support."""
     graph_ops = enumerate_onnx_ops(model_path)
     survivors = collect_mlir_bufferize_survivors(mlir_base)
+    all_blockers = collect_shape_blockers(
+        model_path,
+        mlir_base=mlir_base,
+        runtime_findings=runtime_findings,
+    )
     has_mlir = bool(survivors) or (
         mlir_base is not None and bool(discover_mlir_dump_dirs(mlir_base))
     )
 
     support = _repo_op_support()
     inventory: list[OpInventoryItem] = []
-    for op, count in sorted(graph_ops.items()):
-        if op in _IGNORE_ONNX_OPS:
-            continue
+    seen_ops: set[str] = set()
 
-        in_survivors = op in survivors
-        handled = _hip_ep_handled(op, known_ops)
-        handling = _hip_ep_handling(op, known_ops, in_survivors=in_survivors)
-
-        if op in support.fusion_ops:
-            status = "fused"
-        elif op in support.ms_custom_ops:
-            status = "lowered"
-        elif handled:
-            if in_survivors:
-                status = "lowered_incomplete"
-            elif compile_failed and not has_mlir:
-                status = "lowered_unverified"
-            else:
-                status = "lowered"
-        elif in_survivors:
-            status = "compile_blocker"
-        else:
-            status = "unsupported"
-
+    def _append_item(
+        op: str,
+        count: int,
+        status: str,
+        handling: str,
+        gap: OpGapLayers | None,
+    ) -> None:
         inventory.append(
             OpInventoryItem(
                 op=op,
                 count=count,
                 status=status,
                 hip_ep_handling=handling,
-                gap=_analyze_op_gap(op)
-                if status in {"compile_blocker", "unsupported"}
-                else None,
+                gap=gap,
             )
+        )
+        seen_ops.add(op)
+
+    for op, count in sorted(graph_ops.items()):
+        if op in _IGNORE_ONNX_OPS:
+            continue
+
+        in_survivors = op in survivors
+        handled = _hip_ep_handled(op, known_ops)
+        blocker_detail = _pick_blocker_for_op(all_blockers, op)
+        handling = _hip_ep_handling(
+            op,
+            known_ops,
+            in_survivors=in_survivors,
+            shape_detail=blocker_detail,
+        )
+
+        status: str
+        gap: OpGapLayers | None = None
+
+        if op in support.fusion_ops:
+            status = "fused"
+        elif blocker_detail and blocker_detail.kind == "runtime":
+            status = "runtime_blocker"
+            gap = _analyze_blocker_gap(op, blocker_detail)
+        elif blocker_detail and blocker_detail.kind == "dtype" and (
+            in_survivors or report_shape_blockers or compile_failed
+        ):
+            status = "dtype_blocker"
+            gap = _analyze_blocker_gap(op, blocker_detail)
+        elif blocker_detail and blocker_detail.kind == "shape" and (
+            in_survivors or report_shape_blockers or compile_failed
+        ):
+            status = "shape_blocker"
+            gap = _analyze_blocker_gap(op, blocker_detail)
+        elif blocker_detail and blocker_detail.kind == "variant" and (
+            in_survivors or report_shape_blockers or compile_failed
+        ):
+            status = "variant_blocker"
+            gap = _analyze_blocker_gap(op, blocker_detail)
+        elif op in support.ms_custom_ops:
+            status = "lowered"
+        elif handled:
+            if in_survivors and compile_failed:
+                status = "lowered_incomplete"
+            elif in_survivors:
+                status = "lowered_incomplete"
+            elif compile_failed and not has_mlir:
+                status = "lowered_unverified"
+            else:
+                status = "lowered"
+        elif op in _RUNTIME_PARTIAL:
+            status = "partial"
+            gap = _analyze_op_gap(op)
+        elif in_survivors:
+            status = "compile_blocker"
+            gap = _analyze_op_gap(op)
+        else:
+            status = "unsupported"
+            gap = _analyze_op_gap(op)
+
+        _append_item(op, count, status, handling, gap)
+
+    for key, detail in all_blockers.items():
+        if detail.kind != "runtime":
+            continue
+        op = key.split(":", 1)[0]
+        if op in seen_ops:
+            continue
+        handling = _hip_ep_handling(op, known_ops, shape_detail=detail)
+        _append_item(
+            op,
+            detail.count,
+            "runtime_blocker",
+            handling,
+            _analyze_blocker_gap(op, detail),
         )
 
     return inventory
@@ -1042,7 +1825,9 @@ def resolve_package_dir(raw: Path) -> Path:
         candidates.append(parent / raw.name)
         candidates.append(parent / "gpu-test-package")
 
-    # Common layout: repo root sibling of hip-ep.
+    # Common layouts: package next to hip-ep, inside hip-ep workspace, or monorepo sibling.
+    candidates.append(HIP_EP_ROOT / raw.name)
+    candidates.append(HIP_EP_ROOT / "gpu-test-package")
     candidates.append(HIP_EP_ROOT.parent / raw.name)
     candidates.append(HIP_EP_ROOT.parent / "gpu-test-package")
 
@@ -1409,6 +2194,9 @@ def run_perf_test(
             known_ops=known_ops or _repo_known_onnx_ops(),
             mlir_base=mlir_base if dump_mlir else None,
             compile_failed=status != "ok",
+            runtime_findings=[
+                f for f in findings if "runtime unsupported" in f.detail
+            ],
         )
     except RuntimeError:
         op_inventory = []
@@ -1461,6 +2249,220 @@ def _model_display_path(model: str | Path) -> str:
         return str(path)
 
 
+def _model_short_label(model: str | Path) -> str:
+    """Compact label for batch tables: ``parent/model.onnx`` or ``model.onnx``."""
+    path = Path(model)
+    try:
+        path = path.resolve()
+    except OSError:
+        pass
+    if path.parent.name and path.parent.name not in {".", ""}:
+        return f"{path.parent.name}/{path.name}"
+    return path.name
+
+
+@dataclass
+class ModelIssueSummary:
+    """Blocking ops for one model (batch rollup)."""
+
+    model: str
+    model_short: str
+    status: str
+    hip_ep_result: str
+    compile_blockers: list[str] = field(default_factory=list)
+    shape_blockers: list[str] = field(default_factory=list)
+    variant_blockers: list[str] = field(default_factory=list)
+    dtype_blockers: list[str] = field(default_factory=list)
+    runtime_blockers: list[str] = field(default_factory=list)
+    partial: list[str] = field(default_factory=list)
+    incomplete: list[str] = field(default_factory=list)
+    unsupported: list[str] = field(default_factory=list)
+
+    @property
+    def all_blocking_ops(self) -> list[str]:
+        return sorted(
+            set(
+                self.compile_blockers
+                + self.shape_blockers
+                + self.variant_blockers
+                + self.dtype_blockers
+                + self.runtime_blockers
+                + self.partial
+                + self.incomplete
+                + self.unsupported
+            )
+        )
+
+
+def _issue_ops_from_report(report: ModelReport) -> dict[str, list[str]]:
+    """Return blocking ops grouped by issue kind."""
+    buckets: dict[str, list[str]] = {
+        "compile_blocker": [],
+        "shape_blocker": [],
+        "variant_blocker": [],
+        "dtype_blocker": [],
+        "runtime_blocker": [],
+        "partial": [],
+        "incomplete": [],
+        "unsupported": [],
+    }
+    if report.op_inventory:
+        for item in report.op_inventory:
+            key = item.status
+            if key == "lowered_incomplete":
+                key = "incomplete"
+            if key in buckets:
+                buckets[key].append(item.op)
+    elif report.missing_ops:
+        for finding in report.missing_ops:
+            detail = finding.detail.lower()
+            if "runtime unsupported" in detail:
+                buckets["runtime_blocker"].append(finding.op)
+            elif "shape blocker" in detail:
+                buckets["shape_blocker"].append(finding.op)
+            elif "variant blocker" in detail:
+                buckets["variant_blocker"].append(finding.op)
+            elif "dtype blocker" in detail:
+                buckets["dtype_blocker"].append(finding.op)
+            elif "no converter" in detail:
+                buckets["unsupported"].append(finding.op)
+            else:
+                buckets["compile_blocker"].append(finding.op)
+    else:
+        buckets["compile_blocker"] = list(report.unique_missing_ops)
+    return {key: sorted(set(values)) for key, values in buckets.items() if values}
+
+
+def collect_batch_issue_summaries(
+    reports: list[ModelReport],
+) -> list[ModelIssueSummary]:
+    summaries: list[ModelIssueSummary] = []
+    for report in reports:
+        issues = _issue_ops_from_report(report)
+        summaries.append(
+            ModelIssueSummary(
+                model=_model_display_path(report.model),
+                model_short=_model_short_label(report.model),
+                status=report.status,
+                hip_ep_result=report.hip_ep_result,
+                compile_blockers=issues.get("compile_blocker", []),
+                shape_blockers=issues.get("shape_blocker", []),
+                variant_blockers=issues.get("variant_blocker", []),
+                dtype_blockers=issues.get("dtype_blocker", []),
+                runtime_blockers=issues.get("runtime_blocker", []),
+                partial=issues.get("partial", []),
+                incomplete=issues.get("incomplete", []),
+                unsupported=issues.get("unsupported", []),
+            )
+        )
+    return summaries
+
+
+def build_batch_op_index(
+    summaries: Iterable[ModelIssueSummary],
+) -> dict[str, list[str]]:
+    """Map each blocking op to the model short labels that need it."""
+    index: dict[str, list[str]] = {}
+    for summary in summaries:
+        if not summary.all_blocking_ops:
+            continue
+        for op in summary.all_blocking_ops:
+            index.setdefault(op, []).append(summary.model_short)
+    return {op: sorted(set(models)) for op, models in sorted(index.items())}
+
+
+def batch_summary_to_dict(reports: list[ModelReport]) -> dict:
+    summaries = collect_batch_issue_summaries(reports)
+    with_issues = [s for s in summaries if s.all_blocking_ops or s.status != "ok"]
+    ok_count = len(reports) - len(with_issues)
+    return {
+        "models_tested": len(reports),
+        "models_ok": ok_count,
+        "models_with_issues": len(with_issues),
+        "by_model": [
+            {
+                "model": s.model,
+                "model_short": s.model_short,
+                "status": s.status,
+                "hip_ep_result": s.hip_ep_result,
+                "compile_blockers": s.compile_blockers,
+                "shape_blockers": s.shape_blockers,
+                "variant_blockers": s.variant_blockers,
+                "dtype_blockers": s.dtype_blockers,
+                "runtime_blockers": s.runtime_blockers,
+                "partial": s.partial,
+                "incomplete": s.incomplete,
+                "unsupported": s.unsupported,
+                "all_blocking_ops": s.all_blocking_ops,
+            }
+            for s in summaries
+            if s.all_blocking_ops or s.status != "ok"
+        ],
+        "by_op": build_batch_op_index(with_issues),
+    }
+
+
+def format_batch_rollup(reports: list[ModelReport]) -> str:
+    """Single consolidated view of blocking ops across a model directory run."""
+    if len(reports) <= 1:
+        return ""
+
+    summaries = collect_batch_issue_summaries(reports)
+    with_issues = [s for s in summaries if s.all_blocking_ops or s.status != "ok"]
+    ok_count = len(reports) - len(with_issues)
+    lines: list[str] = [
+        "=" * 72,
+        "BATCH ROLLUP — all blocking ops across models",
+        "=" * 72,
+        f"Models tested : {len(reports)}",
+        f"  OK          : {ok_count}",
+        f"  With issues : {len(with_issues)}",
+        "",
+    ]
+
+    if with_issues:
+        lines.append("By model:")
+        model_w = max(len("Model"), *(len(s.model_short) for s in with_issues))
+        for summary in with_issues:
+            parts: list[str] = []
+            if summary.compile_blockers:
+                parts.append("compile: " + ", ".join(summary.compile_blockers))
+            if summary.shape_blockers:
+                parts.append("shape: " + ", ".join(summary.shape_blockers))
+            if summary.variant_blockers:
+                parts.append("variant: " + ", ".join(summary.variant_blockers))
+            if summary.dtype_blockers:
+                parts.append("dtype: " + ", ".join(summary.dtype_blockers))
+            if summary.runtime_blockers:
+                parts.append("runtime: " + ", ".join(summary.runtime_blockers))
+            if summary.partial:
+                parts.append("partial: " + ", ".join(summary.partial))
+            if summary.incomplete:
+                parts.append("incomplete: " + ", ".join(summary.incomplete))
+            if summary.unsupported:
+                parts.append("unsupported: " + ", ".join(summary.unsupported))
+            if not parts:
+                parts.append(
+                    f"{summary.hip_ep_result} — no specific blocking ops identified"
+                )
+            lines.append(f"  {summary.model_short:<{model_w}}  {' | '.join(parts)}")
+        lines.append("")
+
+        op_index = build_batch_op_index(with_issues)
+        if op_index:
+            lines.append("By op (models that need each op):")
+            op_w = max(len("Op"), *(len(op) for op in op_index))
+            for op, models in op_index.items():
+                lines.append(f"  {op:<{op_w}}  {', '.join(models)}")
+            lines.append("")
+    else:
+        lines.append("All models passed — no blocking ops detected.")
+        lines.append("")
+
+    lines.append("=" * 72)
+    return "\n".join(lines)
+
+
 def format_missing_ops_output(reports: list[ModelReport]) -> str:
     """Minimal output: compile blocker names only (--quiet)."""
     if len(reports) == 1 and reports[0].op_inventory:
@@ -1468,7 +2470,7 @@ def format_missing_ops_output(reports: list[ModelReport]) -> str:
             {
                 item.op
                 for item in reports[0].op_inventory
-                if item.status in {"compile_blocker", "unsupported"}
+                if item.status in BLOCKING_STATUSES
             }
         )
         return "\n".join(blockers)
@@ -1478,11 +2480,26 @@ def format_missing_ops_output(reports: list[ModelReport]) -> str:
 
     lines: list[str] = []
     for report in reports:
-        ops = report.unique_missing_ops
-        if not ops:
+        if report.op_inventory:
+            ops = sorted(
+                {
+                    item.op
+                    for item in report.op_inventory
+                    if item.status in BLOCKING_STATUSES
+                }
+            )
+        else:
+            ops = report.unique_missing_ops
+        if not ops and report.status == "ok":
             continue
-        label = _model_display_path(report.model)
-        lines.append(f"{label}: {', '.join(ops)}")
+        label = _model_short_label(report.model)
+        lines.append(f"{label}: {', '.join(ops) if ops else report.hip_ep_result}")
+
+    rollup = format_batch_rollup(reports)
+    if rollup and lines:
+        return rollup + "\n\n" + "\n".join(lines)
+    if rollup:
+        return rollup
     return "\n".join(lines)
 
 
@@ -1625,6 +2642,11 @@ def format_summary_report(
     blocks: list[str] = []
     show_gap_legend = False
 
+    if len(reports) > 1:
+        rollup = format_batch_rollup(reports)
+        if rollup:
+            blocks.append(rollup)
+
     for report in reports:
         lines: list[str] = []
         model_label = _model_display_path(report.model)
@@ -1650,6 +2672,19 @@ def format_summary_report(
 
         if report.op_inventory:
             blockers = [i for i in report.op_inventory if i.status == "compile_blocker"]
+            shape_blockers = [
+                i for i in report.op_inventory if i.status == "shape_blocker"
+            ]
+            variant_blockers = [
+                i for i in report.op_inventory if i.status == "variant_blocker"
+            ]
+            dtype_blockers = [
+                i for i in report.op_inventory if i.status == "dtype_blocker"
+            ]
+            runtime_blockers = [
+                i for i in report.op_inventory if i.status == "runtime_blocker"
+            ]
+            partial_ops = [i for i in report.op_inventory if i.status == "partial"]
             fused = [i for i in report.op_inventory if i.status == "fused"]
             lowered = [i for i in report.op_inventory if i.status == "lowered"]
             lowered_inc = [
@@ -1659,17 +2694,91 @@ def format_summary_report(
                 i for i in report.op_inventory if i.status == "lowered_unverified"
             ]
             unsupported = [i for i in report.op_inventory if i.status == "unsupported"]
+            has_blockers = any(
+                (
+                    blockers,
+                    shape_blockers,
+                    variant_blockers,
+                    dtype_blockers,
+                    runtime_blockers,
+                    partial_ops,
+                    unsupported,
+                )
+            )
 
             if blockers:
                 lines.extend(
                     _format_gap_table(
                         blockers,
-                        title="Compile blockers (survived MLIR lowering — caused failure)",
+                        title="Compile blockers (no converter — survived MLIR lowering)",
                         show_next_step=show_next_step,
                     )
                 )
                 lines.append("")
-            elif report.failure_level in {"mlir_bufferize", "mlir_compile"}:
+
+            if shape_blockers:
+                lines.extend(
+                    _format_gap_table(
+                        shape_blockers,
+                        title=(
+                            "Shape blockers (converter exists; dynamic spatial "
+                            "dims block lowering)"
+                        ),
+                        show_next_step=show_next_step,
+                    )
+                )
+                lines.append("")
+
+            if variant_blockers:
+                lines.extend(
+                    _format_gap_table(
+                        variant_blockers,
+                        title=(
+                            "Variant blockers (converter exists; unsupported "
+                            "attributes / rank / mode)"
+                        ),
+                        show_next_step=show_next_step,
+                    )
+                )
+                lines.append("")
+
+            if dtype_blockers:
+                lines.extend(
+                    _format_gap_table(
+                        dtype_blockers,
+                        title=(
+                            "Dtype blockers (converter exists; unsupported "
+                            "element type in graph)"
+                        ),
+                        show_next_step=show_next_step,
+                    )
+                )
+                lines.append("")
+
+            if runtime_blockers:
+                lines.extend(
+                    _format_gap_table(
+                        runtime_blockers,
+                        title="Runtime blockers (compiled; kernel rejected variant)",
+                        show_next_step=show_next_step,
+                    )
+                )
+                lines.append("")
+
+            if partial_ops:
+                lines.extend(
+                    _format_gap_table(
+                        partial_ops,
+                        title="Partial support (no converter; some runtime pieces exist)",
+                        show_next_step=show_next_step,
+                    )
+                )
+                lines.append("")
+
+            if (
+                report.failure_level in {"mlir_bufferize", "mlir_compile"}
+                and not has_blockers
+            ):
                 lines.append("Compile blockers:")
                 lines.append(
                     "  Compile failed but no op names in MLIR dump. "
@@ -1700,8 +2809,8 @@ def format_summary_report(
                     _format_inventory_table(
                         lowered_inc,
                         title=(
-                            "Lowered by hip-ep (converter in repo; still present "
-                            "in MLIR at failure — not the root blocker)"
+                            "Incomplete lowering (converter in repo; still in MLIR "
+                            "at failure — check variant/shape/dtype or pass ordering)"
                         ),
                     )
                 )
@@ -1726,14 +2835,20 @@ def format_summary_report(
                 )
                 lines.append("")
 
-            if blockers or unsupported:
+            if has_blockers:
                 show_gap_legend = True
 
             lines.append(
                 f"Graph summary: {len(report.op_inventory)} op types | "
-                f"{len(blockers)} blocker(s) | "
+                f"{len(blockers)} compile | "
+                f"{len(shape_blockers)} shape | "
+                f"{len(variant_blockers)} variant | "
+                f"{len(dtype_blockers)} dtype | "
+                f"{len(runtime_blockers)} runtime | "
+                f"{len(partial_ops)} partial | "
+                f"{len(lowered_inc)} incomplete | "
                 f"{len(fused)} fused | "
-                f"{len(lowered) + len(lowered_inc) + len(lowered_uv)} lowered | "
+                f"{len(lowered) + len(lowered_uv)} lowered | "
                 f"{len(unsupported)} unsupported"
             )
         else:
@@ -1778,17 +2893,29 @@ def format_summary_report(
 
         lines.append("")
         if report.op_inventory:
-            blockers = [i.op for i in report.op_inventory if i.status == "compile_blocker"]
-            unsupported = [
-                i.op for i in report.op_inventory if i.status == "unsupported"
-            ]
-            if blockers:
-                lines.append("Summary: compile blocked by: " + ", ".join(sorted(set(blockers))))
-            elif unsupported:
-                lines.append(
-                    "Summary: unsupported in graph (need converters): "
-                    + ", ".join(sorted(set(unsupported)))
-                )
+            summary_map = {
+                "compile_blocker": "compile blocked by",
+                "shape_blocker": "shape blockers",
+                "variant_blocker": "variant blockers",
+                "dtype_blocker": "dtype blockers",
+                "runtime_blocker": "runtime blockers",
+                "partial": "partial support",
+                "lowered_incomplete": "incomplete lowering",
+                "unsupported": "unsupported (need converters)",
+            }
+            grouped_summary: dict[str, list[str]] = {
+                key: [] for key in summary_map
+            }
+            for item in report.op_inventory:
+                if item.status in grouped_summary:
+                    grouped_summary[item.status].append(item.op)
+            summary_parts: list[str] = []
+            for status, label in summary_map.items():
+                ops = sorted(set(grouped_summary[status]))
+                if ops:
+                    summary_parts.append(f"{label}: " + ", ".join(ops))
+            if summary_parts:
+                lines.append("Summary: " + "; ".join(summary_parts))
             elif report.hip_ep_result == "OK":
                 lines.append("Summary: all graph ops lowered/fused by hip-ep.")
             else:
@@ -1818,6 +2945,12 @@ def format_summary_report(
 
 def format_report_text(reports: list[ModelReport]) -> str:
     lines: list[str] = []
+    if len(reports) > 1:
+        rollup = format_batch_rollup(reports)
+        if rollup:
+            lines.append(rollup)
+            lines.append("")
+
     lines.append("=" * 72)
     lines.append("hip-ep missing ops report")
     lines.append("=" * 72)
@@ -1830,15 +2963,20 @@ def format_report_text(reports: list[ModelReport]) -> str:
     lines.append(f"  Failed      : {len(failed)}")
     lines.append("")
 
-    all_missing: dict[str, int] = {}
+    all_missing: dict[str, list[str]] = {}
     for report in reports:
         for op in report.unique_missing_ops:
-            all_missing[op] = all_missing.get(op, 0) + 1
+            label = _model_short_label(report.model)
+            all_missing.setdefault(op, []).append(label)
 
     if all_missing:
         lines.append("Missing ops (aggregated across models):")
-        for op, count in sorted(all_missing.items(), key=lambda kv: (-kv[1], kv[0])):
-            lines.append(f"  {op:32s}  ({count} model(s))")
+        for op, models in sorted(
+            all_missing.items(), key=lambda kv: (-len(kv[1]), kv[0])
+        ):
+            lines.append(
+                f"  {op:32s}  ({len(models)} model(s): {', '.join(sorted(set(models)))})"
+            )
         lines.append("")
 
     for report in reports:
@@ -2088,7 +3226,10 @@ def main() -> int:
             path = Path(model)
             try:
                 op_inventory = build_op_inventory(
-                    path, known_ops=known_ops, compile_failed=False
+                    path,
+                    known_ops=known_ops,
+                    compile_failed=False,
+                    report_shape_blockers=True,
                 )
                 findings = [
                     OpFinding(
@@ -2098,7 +3239,7 @@ def main() -> int:
                         count=item.count,
                     )
                     for item in op_inventory
-                    if item.status in {"compile_blocker", "unsupported"}
+                    if item.status in BLOCKING_STATUSES
                 ]
             except RuntimeError as exc:
                 print(f"[ERROR] {exc}", file=sys.stderr)
@@ -2140,6 +3281,8 @@ def main() -> int:
             "known_converter_ops": sorted(known_ops),
             "reports": report_dicts,
         }
+        if len(reports) > 1:
+            payload["batch_summary"] = batch_summary_to_dict(reports)
         args.json_out.parent.mkdir(parents=True, exist_ok=True)
         args.json_out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         if args.verbose:
