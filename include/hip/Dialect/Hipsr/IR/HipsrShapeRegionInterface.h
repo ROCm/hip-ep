@@ -36,7 +36,7 @@ class ShapeRegionInterface;
 /// The op operands that become the shape region's entry-block arguments, in
 /// order. The isolated region reads these as block args. Keyed on the op's
 /// barrier category:
-///   normal         -> data ins            (ctx dropped: shape is input-driven)
+///   Regular        -> data ins            (ctx dropped: shape is input-driven)
 ///   StartBarrier   -> ctx + data ins      (reads input data at runtime)
 ///   EndBarrier     -> data ins + outs     (shape comes from output data)
 ::llvm::SmallVector<::mlir::Value>

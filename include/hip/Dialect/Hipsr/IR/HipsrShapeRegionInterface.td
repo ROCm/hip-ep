@@ -24,13 +24,12 @@ def ShapeRegionInterface : OpInterface<"ShapeRegionInterface"> {
 
     The shape region (region 0) is optional: empty, or one block ending in
     `hipsr.shape_yield`. It is `IsolatedFromAbove`, reading its inputs as
-    entry-block args (keyed on barrier category, see `getShapeRegionArgOperands`)
-    instead of capturing the op's operands, so stock MLIR passes (-cse,
-    -canonicalize, LICM) stay correct over it. The `hipsr-populate-shape-region`
-    pass fills it via `populateShapeRegion`.
+    entry-block args (keyed on barrier category, see `getShapeRegionArgOperands`),
+    so stock MLIR passes (-cse, -canonicalize, LICM) stay correct over it. The
+    `hipsr-populate-shape-region` pass fills it via `populateShapeRegion`.
 
     An implementing op MUST also carry the `IsolatedFromAbove` and `SingleBlock`
-    traits (an interface cannot auto-attach traits), e.g.
+    traits, e.g.
 
       def Hipsr_MatMulOp : Hipsr_Op<"matmul", [
           ShapeRegionInterface, IsolatedFromAbove, SingleBlock]> { ... }
@@ -57,8 +56,8 @@ def ShapeRegionInterface : OpInterface<"ShapeRegionInterface"> {
       "void", "populateCapacityShapeRegion",
       (ins "::mlir::OpBuilder &":$builder, "::mlir::Block &":$capacityBlock),
       /*methodBody=*/[{}],
-      // Default no-op: ops without a capacity region (Regular/StartBarrier)
-      // inherit it instead of each supplying an empty override.
+      // Default no-op for Regular/StartBarrier ops, which have no capacity
+      // region.
       /*defaultImplementation=*/[{ return; }]
     >,
   ];

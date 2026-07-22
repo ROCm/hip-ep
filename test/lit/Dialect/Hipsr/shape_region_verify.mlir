@@ -48,8 +48,8 @@ func.func @cast_uses_block_arg(%ctx: !hipsr.context, %input: tensor<?x8xf32>,
 
 // -----
 
-// Isolation: IsolatedFromAbove rejects referencing an enclosing-scope value --
-// not even the op's own operand %input (must use the entry-block arg).
+// Isolation: a shape region is IsolatedFromAbove, so reading the outer %input
+// operand from inside it is an error.
 func.func @cast_scoping_disallowed_outer(%ctx: !hipsr.context, %input: tensor<?x8xf32>,
                                          %init: tensor<?x8xf16>) -> tensor<?x8xf16> {
   // expected-note@+1 {{required by region isolation constraints}}
@@ -58,7 +58,6 @@ func.func @cast_scoping_disallowed_outer(%ctx: !hipsr.context, %input: tensor<?x
                   shape_region {
   ^bb0(%in: tensor<?x8xf32>):
     %c0 = arith.constant 0 : index
-    // Capturing the op operand %input (an outside value) is illegal.
     // expected-error@+1 {{using value defined outside the region}}
     %d0 = tensor.dim %input, %c0 : tensor<?x8xf32>
     %c8 = arith.constant 8 : index
@@ -126,7 +125,7 @@ func.func @cast_wrong_terminator(%ctx: !hipsr.context, %input: tensor<4x8xf32>,
 // -----
 
 // The entry-block args must match the op's shape-region operand list. cast is a
-// normal op, so it takes only its data input -- an extra leading ctx arg is
+// Regular op, so it takes only its data input -- an extra leading ctx arg is
 // rejected.
 func.func @cast_wrong_arg_count(%ctx: !hipsr.context, %input: tensor<?x8xf32>,
                                 %init: tensor<?x8xf16>) -> tensor<?x8xf16> {

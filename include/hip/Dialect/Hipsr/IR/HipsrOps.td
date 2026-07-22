@@ -31,7 +31,7 @@ class Hipsr_Op<string mnemonic, list<Trait> traits = []> :
 // Base for shaped compute ops (MatMul, Add, ...). Every such op:
 //   - is destination-passing style: the `outs` inits are the outputs;
 //   - carries an optional shape region (region 0, ShapeRegionInterface);
-//   - is IsolatedFromAbove, so the region reads entry-block args, not operands.
+//   - is IsolatedFromAbove: the region reads its inputs via entry-block args.
 // EndBarrier ops additionally carry a capacity region.
 class Hipsr_DpsOp<string mnemonic, list<Trait> traits = []> :
     Hipsr_Op<mnemonic, !listconcat([
