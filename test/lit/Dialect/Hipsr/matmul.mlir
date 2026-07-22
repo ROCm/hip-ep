@@ -2,9 +2,10 @@
 // Licensed under the MIT License.
 //
 //===----------------------------------------------------------------------===//
-// Tests for hipsr.matmul. Default prefix: empty-region round-trip and verifier
-// diagnostics. POPULATE prefix: -hipsr-populate-shape-region. Generic
-// shape-region structural rules live in shape_region_verify.mlir.
+// Tests for hipsr.matmul, one part per RUN line:
+//   - CHECK:    round-trips the op (empty region) and checks verifier errors;
+//   - POPULATE: runs -hipsr-populate-shape-region and checks the emitted shape.
+// Generic shape-region structural rules live in shape_region_verify.mlir.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt --split-input-file --verify-diagnostics %s | FileCheck %s
@@ -28,7 +29,7 @@ func.func @matmul_no_shape_region(%ctx: !hipsr.context,
 // -----
 
 //===----------------------------------------------------------------------===//
-// FAIL cases (compile-time diagnostics a LIT run observes).
+// Invalid IR: each case must be rejected with the expected-error diagnostic.
 //===----------------------------------------------------------------------===//
 
 // Rank-0 A: a valid ranked tensor (passes the type constraint) but has no
