@@ -7,6 +7,8 @@
 
 #include "hip/Dialect/Hipsr/IR/HipsrShapeYieldOp.h"
 
+#include "mlir/Interfaces/DestinationStyleOpInterface.h"
+
 #include "llvm/ADT/STLExtras.h"
 
 using namespace mlir;
@@ -47,11 +49,31 @@ LogicalResult mlir::hipsr::verifyShapeRegionStructure(Operation *op) {
            << "'; a non-empty shape region block must end with "
               "hipsr.shape_yield";
 
+  // The entry-block args mirror the DPS inputs one-for-one (see the interface
+  // doc). Check that here so a hand-written region with the wrong arg
+  // count/types is rejected up front rather than failing later against a bad
+  // block arg. Non-DPS ops (if any) have no inputs to mirror and skip this.
+  if (auto dps = dyn_cast<DestinationStyleOpInterface>(op)) {
+    SmallVector<OpOperand *> inputs = dps.getDpsInputOperands();
+    if (block.getNumArguments() != inputs.size())
+      return op->emitOpError("shape region block must have one argument per "
+                             "DPS input (expected ")
+             << inputs.size() << ", got " << block.getNumArguments() << ")";
+    for (auto [i, in] : llvm::enumerate(inputs)) {
+      Type argType = block.getArgument(i).getType();
+      Type inType = in->get().getType();
+      if (argType != inType)
+        return op->emitOpError("shape region block argument ")
+               << i << " type " << argType << " does not match DPS input type "
+               << inType;
+    }
+  }
+
   return success();
 }
 
 SmallVector<SmallVector<Value>>
-mlir::hipsr::getShapeRegionResultShapes(Region &shapeRegion) {
+mlir::hipsr::detail::getShapeRegionResultShapes(Region &shapeRegion) {
   ShapeYieldOp yieldOp = getShapeYieldOp(shapeRegion);
   SmallVector<SmallVector<Value>> dims;
   for (OperandRange group : yieldOp.getShapes())
@@ -60,7 +82,7 @@ mlir::hipsr::getShapeRegionResultShapes(Region &shapeRegion) {
 }
 
 SmallVector<RankedTensorType>
-mlir::hipsr::getShapeRegionResultTypes(Region &shapeRegion) {
+mlir::hipsr::detail::getShapeRegionResultTypes(Region &shapeRegion) {
   ShapeYieldOp yieldOp = getShapeYieldOp(shapeRegion);
   SmallVector<RankedTensorType> types;
   for (auto [group, elemType] :

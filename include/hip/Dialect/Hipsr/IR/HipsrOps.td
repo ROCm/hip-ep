@@ -29,30 +29,30 @@ class Hipsr_Op<string mnemonic, list<Trait> traits = []> :
 //===----------------------------------------------------------------------===//
 
 // Base for shaped compute ops (MatMul, Add, ...). Every such op:
-//   - carries an optional shape region (region 0): it holds either zero blocks
-//     (no shape computation) or exactly one block that computes its output
-//     shape and is terminated by `hipsr.shape_yield`. MaxSizedRegion<1> allows
-//     the 0-or-1-block range; the SingleBlock trait keeps a non-empty region to
-//     a single block. Unlike SingleBlockImplicitTerminator, it neither
-//     auto-inserts nor elides the terminator, so an empty region stays empty
-//     (even across a textual round-trip); the ShapeRegionInterface verifier is
-//     what requires a non-empty region to end with `hipsr.shape_yield`;
+//   - carries an optional shape region (region 0): zero blocks (no shape
+//     computation) or one block computing the output shape and ending in
+//     `hipsr.shape_yield`. MaxSizedRegion<1> allows the 0-or-1-block range;
+//     SingleBlock keeps a non-empty region to one block. Unlike
+//     SingleBlockImplicitTerminator it neither inserts nor elides the
+//     terminator, so an empty region stays empty across a round-trip and the
+//     ShapeRegionInterface verifier is what requires the `hipsr.shape_yield`;
 //   - implements ShapeRegionInterface, the single source of truth for shape
 //     computation (each op provides populateShapeRegion());
-//   - carries IsolatedFromAboveButAllowOperands, so the shape region may only
-//     use the op's operands and values defined inside the region;
-//   - uses destination-passing style (DestinationStyleOpInterface): its output
-//     buffer(s) are passed as `outs` init operands (getDpsInitsMutable is
-//     op-defined).
+//   - carries IsolatedFromAbove, so the shape region cannot read the op's
+//     operands or any enclosing value; the DPS `ins` are threaded in as
+//     entry-block args by hipsr-populate-shape-region (see the interface for
+//     why isolation matters);
+//   - uses destination-passing style (DestinationStyleOpInterface): output
+//     buffers are the `outs` init operands (getDpsInitsMutable is op-defined).
 //
-// Regular and StartBarrier ops use exactly this one shape region; EndBarrier
-// ops (which also need a capacity shape region) extend it separately.
+// Regular and StartBarrier ops use this one shape region; EndBarrier ops
+// (which also need a capacity region) extend it separately.
 class Hipsr_DpsOp<string mnemonic, list<Trait> traits = []> :
     Hipsr_Op<mnemonic, !listconcat([
         DeclareOpInterfaceMethods<ShapeRegionInterface, ["populateShapeRegion"]>,
         DeclareOpInterfaceMethods<DestinationStyleOpInterface,
                                   ["getDpsInitsMutable"]>,
-        IsolatedFromAboveButAllowOperands,
+        IsolatedFromAbove,
         SingleBlock
       ], traits)> {
   let regions = (region MaxSizedRegion<1>:$shape_region);

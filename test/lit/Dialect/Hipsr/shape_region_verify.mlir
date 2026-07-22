@@ -6,8 +6,9 @@
 // optional; when present it must be a single, non-empty block ending in
 // hipsr.shape_yield. Covered here:
 //   - positive: a cast with the region omitted round-trips
-//   - scoping: the region may only use the op's operands
-//     (IsolatedFromAboveButAllowOperands)
+//   - positive: a populated region reads its input as the entry-block arg
+//   - isolation: the region is standard IsolatedFromAbove -- capturing ANY
+//     outside value (including the op's own operand) is rejected
 //   - structure: 0-or-1 blocks, non-empty, hipsr.shape_yield terminator
 //     (SingleBlock trait + ShapeRegionInterface verifier)
 //===----------------------------------------------------------------------===//
@@ -20,10 +21,10 @@
 // the onnx->hipsr conversion emits, so IR without a shape region must read back
 // correctly.
 // CHECK-LABEL: func.func @cast_no_shape_region
+// CHECK:     hipsr.cast(%{{.+}}) ins(%{{.+}} : tensor<?x8xf32>) outs(%{{.+}} : tensor<?x8xf16>) : tensor<?x8xf16>
+// CHECK-NOT: shape_region
 func.func @cast_no_shape_region(%ctx: !hipsr.context, %input: tensor<?x8xf32>,
                                 %init: tensor<?x8xf16>) -> tensor<?x8xf16> {
-  // CHECK: hipsr.cast(%{{.+}}) ins(%{{.+}} : tensor<?x8xf32>) outs(%{{.+}} : tensor<?x8xf16>) : tensor<?x8xf16>
-  // CHECK-NOT: shape_region
   %0 = hipsr.cast(%ctx) ins(%input : tensor<?x8xf32>)
                   outs(%init : tensor<?x8xf16>) : tensor<?x8xf16>
   return %0 : tensor<?x8xf16>
@@ -31,19 +32,45 @@ func.func @cast_no_shape_region(%ctx: !hipsr.context, %input: tensor<?x8xf32>,
 
 // -----
 
-// A value defined in the enclosing function that is NOT one of the op's
-// operands is a disallowed outer capture: the trait verifier rejects it.
-func.func @cast_scoping_disallowed_outer(%ctx: !hipsr.context, %input: tensor<?x8xf32>,
-                                         %init: tensor<?x8xf16>) -> tensor<?x8xf16> {
-  %outer = arith.constant 8 : index
-  // expected-note@+1 {{may only use values defined in its regions or the op's operands}}
+// Positive: a populated region reads its input through the entry-block args the
+// pass mirrors from the DPS inputs (arg 0 is the unused ctx, arg 1 the input),
+// NOT the op's operand -- the shape IsolatedFromAbove contract.
+// CHECK-LABEL: func.func @cast_uses_block_arg
+// CHECK:       hipsr.cast
+// CHECK:         ^bb0(%{{.+}}: !hipsr.context, %[[IN:.+]]: tensor<?x8xf32>):
+// CHECK:         tensor.dim %[[IN]]
+func.func @cast_uses_block_arg(%ctx: !hipsr.context, %input: tensor<?x8xf32>,
+                               %init: tensor<?x8xf16>) -> tensor<?x8xf16> {
   %0 = hipsr.cast(%ctx) ins(%input : tensor<?x8xf32>)
                   outs(%init : tensor<?x8xf16>) : tensor<?x8xf16>
                   shape_region {
+  ^bb0(%ctxarg: !hipsr.context, %in: tensor<?x8xf32>):
     %c0 = arith.constant 0 : index
-    %d0 = tensor.dim %input, %c0 : tensor<?x8xf32>
+    %d0 = tensor.dim %in, %c0 : tensor<?x8xf32>
+    %c8 = arith.constant 8 : index
+    hipsr.shape_yield (%d0, %c8) : [f16]
+  }
+  return %0 : tensor<?x8xf16>
+}
+
+// -----
+
+// Isolation: under standard IsolatedFromAbove the region may NOT reference any
+// value from the enclosing scope -- not even the op's own operand %input. It
+// must read the input via the entry-block argument instead.
+func.func @cast_scoping_disallowed_outer(%ctx: !hipsr.context, %input: tensor<?x8xf32>,
+                                         %init: tensor<?x8xf16>) -> tensor<?x8xf16> {
+  // expected-note@+1 {{required by region isolation constraints}}
+  %0 = hipsr.cast(%ctx) ins(%input : tensor<?x8xf32>)
+                  outs(%init : tensor<?x8xf16>) : tensor<?x8xf16>
+                  shape_region {
+  ^bb0(%ctxarg: !hipsr.context, %in: tensor<?x8xf32>):
+    %c0 = arith.constant 0 : index
+    // Capturing the op operand %input (an outside value) is illegal.
     // expected-error@+1 {{using value defined outside the region}}
-    hipsr.shape_yield (%d0, %outer) : [f16]
+    %d0 = tensor.dim %input, %c0 : tensor<?x8xf32>
+    %c8 = arith.constant 8 : index
+    hipsr.shape_yield (%d0, %c8) : [f16]
   }
   return %0 : tensor<?x8xf16>
 }

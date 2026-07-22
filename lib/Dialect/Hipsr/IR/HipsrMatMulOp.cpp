@@ -34,17 +34,13 @@ LogicalResult MatMulOp::verify() {
   return success();
 }
 
-// Fills the shape region with the ONNX/NumPy matmul output shape (semantics in
-// HipsrMatMulOp.td), guarded by a contraction-dim (K) equality constraint.
-//
-// The shape dialect is used (over tensor.dim / arith) so the same code covers
-// both tensor and memref inputs and static dims fold to constants -- a fully
-// static matmul then keeps no dim arithmetic and shape.cstr_eq folds its
-// witness away, leaving no constraint IR. K never reaches the output, but ONNX
-// requires both sides to match, so the equality is a shape.cstr_eq witness
-// guarding the shape.assuming region that yields the output dims; a later
-// shape-constraint lowering can turn it into a runtime check, and a static
-// match drops it. (Batch-dim broadcast compatibility is not yet checked.)
+// Fills the shape region with the matmul output shape (semantics in
+// HipsrMatMulOp.td). Uses the shape dialect over tensor.dim/arith so one path
+// covers both tensor and memref inputs and static dims fold to constants. The
+// contraction dim K is not in the output but both sides must match, so it is
+// guarded by a shape.cstr_eq witness around the shape.assuming region that
+// yields the dims (a static-equal K folds the witness away, leaving no
+// constraint IR). (Batch-dim broadcast compatibility is not yet checked.)
 //
 // Before (region omitted, as emitted by convert-onnx-to-hipsr):
 //   %0 = hipsr.matmul(%ctx) ins(%A, %B : tensor<?x?xf16>, tensor<?x?xf16>)
@@ -53,6 +49,7 @@ LogicalResult MatMulOp::verify() {
 // After (2-D case; batched adds one dim per broadcast batch axis):
 //   %0 = hipsr.matmul(%ctx) ins(%A, %B) outs(%init) : tensor<?x?xf16>
 //   shape_region {
+//   ^bb0(%ctxarg: !hipsr.context, %A: tensor<?x?xf16>, %B: tensor<?x?xf16>):
 //     %shA = shape.shape_of %A ; %shB = shape.shape_of %B
 //     %kA = shape.get_extent %shA, 1 ; %kB = shape.get_extent %shB, 0
 //     %sa = shape.from_extents %kA ; %sb = shape.from_extents %kB
@@ -63,17 +60,27 @@ LogicalResult MatMulOp::verify() {
 //     }
 //     hipsr.shape_yield (%d#0, %d#1) : [f16]
 //   }
-void MatMulOp::populateShapeRegion(OpBuilder &builder, Region &shapeRegion) {
+void MatMulOp::populateShapeRegion(OpBuilder &builder) {
   OpBuilder::InsertionGuard guard(builder);
-  Block *body = builder.createBlock(&shapeRegion);
+  // The populate pass creates the entry block first. If it is missing, bail in
+  // release (the empty region then fails the verifier) rather than crash.
+  Block *body = getShapeBlock();
+  assert(body &&
+         "populateShapeRegion called before the entry block was created");
+  if (!body)
+    return;
   builder.setInsertionPointToStart(body);
 
   Location loc = getLoc();
   MLIRContext *ctx = builder.getContext();
-  Value shA = builder.create<shape::ShapeOfOp>(loc, getA());
-  Value shB = builder.create<shape::ShapeOfOp>(loc, getB());
-  int64_t aRank = cast<ShapedType>(getA().getType()).getRank();
-  int64_t bRank = cast<ShapedType>(getB().getType()).getRank();
+  // Isolated region: read A/B from the block args, never the operands.
+  ShapeRegionArgs args{*body};
+  Value aArg = args.getA();
+  Value bArg = args.getB();
+  Value shA = builder.create<shape::ShapeOfOp>(loc, aArg);
+  Value shB = builder.create<shape::ShapeOfOp>(loc, bArg);
+  int64_t aRank = cast<ShapedType>(aArg.getType()).getRank();
+  int64_t bRank = cast<ShapedType>(bArg.getType()).getRank();
   bool aIs1D = aRank == 1;
   bool bIs1D = bRank == 1;
 

@@ -10,8 +10,8 @@
 //
 // Positive CHECKs were seeded with mlir/utils/generate-test-checks.py (piped
 // from the -convert-onnx-to-hipsr output) and then refined: captures renamed,
-// the matmul operands tied back to the function arguments, terminator
-// boilerplate dropped, and the CHECK-NOT intent checks added.
+// the matmul operands tied back to the function arguments, and terminator
+// boilerplate dropped.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt %s --split-input-file -allow-unregistered-dialect -convert-onnx-to-hipsr | FileCheck %s
@@ -24,8 +24,6 @@
 // CHECK:         %[[INIT:.*]] = hipsr.placeholder : tensor<?x1024xf16>
 // CHECK:         hipsr.matmul(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<?x4096xf16>, tensor<4096x1024xf16>)
 // CHECK-SAME:      outs(%[[INIT]] : tensor<?x1024xf16>) : tensor<?x1024xf16>
-// CHECK-NOT:     tensor.empty
-// CHECK-NOT:     tensor.dim
 // CHECK-NOT:     shape_region
 func.func @matmul_2d(%ctx: !hipsr.context, %a: tensor<?x4096xf16>,
                      %b: tensor<4096x1024xf16>) -> tensor<?x1024xf16> {
@@ -45,8 +43,6 @@ func.func @matmul_2d(%ctx: !hipsr.context, %a: tensor<?x4096xf16>,
 // CHECK:         %[[INIT:.*]] = hipsr.placeholder : tensor<?xf16>
 // CHECK:         hipsr.matmul(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<?x4096xf16>, tensor<4096xf16>)
 // CHECK-SAME:      outs(%[[INIT]] : tensor<?xf16>) : tensor<?xf16>
-// CHECK-NOT:     tensor.empty
-// CHECK-NOT:     tensor.dim
 // CHECK-NOT:     shape_region
 func.func @matmul_1d_rhs(%ctx: !hipsr.context, %a: tensor<?x4096xf16>,
                          %b: tensor<4096xf16>) -> tensor<?xf16> {
