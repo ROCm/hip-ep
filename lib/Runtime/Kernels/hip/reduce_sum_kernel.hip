@@ -423,6 +423,46 @@ __global__ void reduce_mean_f16_kernel(
   }
 }
 
+// FP32 mean reduction. Some models upcast to fp32 before the mean for numerical
+// stability -- e.g. an attention QK-normalization RMSNorm exported as an
+// explicit Cast(fp16->fp32) -> Mul(x^2) -> ReduceMean -> Add(eps) -> Sqrt ->
+// Div chain -- so ReduceMean must accept fp32 as well as fp16. Accumulator and
+// storage are both float; structure is otherwise identical to the fp16 kernel.
+__global__ void reduce_mean_f32_kernel(
+    const float* __restrict__ data,
+    float* __restrict__ output,
+    int64_t reduce_size,
+    int64_t inner,
+    int64_t num_output_elements) {
+  extern __shared__ float sdata_mean_f32[];
+
+  int64_t out_idx = blockIdx.x;
+  if (out_idx >= num_output_elements) return;
+
+  int64_t oo = out_idx / inner;
+  int64_t ii = out_idx - oo * inner;
+  const float* slice = data + oo * reduce_size * inner + ii;
+  int tid = threadIdx.x;
+
+  float sum = 0.0f;
+  for (int64_t i = tid; i < reduce_size; i += blockDim.x) {
+    sum += slice[i * inner];
+  }
+  sdata_mean_f32[tid] = sum;
+  __syncthreads();
+
+  for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+    if (static_cast<unsigned int>(tid) < s) {
+      sdata_mean_f32[tid] += sdata_mean_f32[tid + s];
+    }
+    __syncthreads();
+  }
+
+  if (tid == 0) {
+    output[out_idx] = sdata_mean_f32[0] / static_cast<float>(reduce_size);
+  }
+}
+
 extern "C" int hip_reduce_mean(
     void* stream,
     const void* data,
@@ -446,13 +486,14 @@ extern "C" int hip_reduce_mean(
 
   int64_t reduce_size = num_input_elements / num_output_elements;
 
-  // fp16 is the only supported type: ONNX ReduceMean is float-domain and the
-  // true-fp16 EP path only ever feeds half tensors here. Other dtypes are
-  // rejected so a regression surfaces loudly rather than silently mis-dividing.
-  if (hip_dtype != HIP_DTYPE_FLOAT16) {
+  // ONNX ReduceMean is float-domain. fp16 is the common true-fp16 EP path; fp32
+  // is required by models that upcast to fp32 before the mean (e.g. an attention
+  // QK-normalization RMSNorm computed in fp32 for stability). Integer dtypes are
+  // rejected so a genuine regression surfaces loudly rather than mis-dividing.
+  if (hip_dtype != HIP_DTYPE_FLOAT16 && hip_dtype != HIP_DTYPE_FLOAT32) {
     fprintf(stderr,
             "[custom_kernels] hip_reduce_mean: unsupported dtype=%d "
-            "(only FLOAT16)\n",
+            "(only FLOAT16/FLOAT32)\n",
             hip_dtype);
     return -1;
   }
@@ -463,20 +504,33 @@ extern "C" int hip_reduce_mean(
     while (block_size < reduce_size) block_size <<= 1;
     if (block_size < 1) block_size = 1;
   }
+  // Both fp16 and fp32 paths accumulate in float, so the shared-memory staging
+  // area is float-sized in either case.
   size_t shared_mem = block_size * sizeof(float);
 
-  CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_reduce_mean: dtype=FLOAT16, "
+  CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_reduce_mean: dtype=%s, "
           "input=%lld, output=%lld, reduce_size=%lld, block=%d\n",
+          hip_dtype == HIP_DTYPE_FLOAT16 ? "FLOAT16" : "FLOAT32",
           (long long)num_input_elements, (long long)num_output_elements,
           (long long)reduce_size, block_size);
 
-  hipLaunchKernelGGL(reduce_mean_f16_kernel,
-                   dim3(static_cast<unsigned>(num_output_elements)),
-                   dim3(block_size),
-                   shared_mem, hip_stream,
-                   static_cast<const __half*>(data),
-                   static_cast<__half*>(output),
-                   reduce_size, inner_size, num_output_elements);
+  if (hip_dtype == HIP_DTYPE_FLOAT16) {
+    hipLaunchKernelGGL(reduce_mean_f16_kernel,
+                     dim3(static_cast<unsigned>(num_output_elements)),
+                     dim3(block_size),
+                     shared_mem, hip_stream,
+                     static_cast<const __half*>(data),
+                     static_cast<__half*>(output),
+                     reduce_size, inner_size, num_output_elements);
+  } else {
+    hipLaunchKernelGGL(reduce_mean_f32_kernel,
+                     dim3(static_cast<unsigned>(num_output_elements)),
+                     dim3(block_size),
+                     shared_mem, hip_stream,
+                     static_cast<const float*>(data),
+                     static_cast<float*>(output),
+                     reduce_size, inner_size, num_output_elements);
+  }
 
   hipError_t err = hipGetLastError();
   if (err != hipSuccess) {
@@ -517,6 +571,16 @@ __device__ inline float reduce_op_max<float>(float a, float b) {
   return (isnan(a) || isnan(b)) ? NAN : (a > b ? a : b);
 }
 
+template <typename T>
+__device__ inline T reduce_op_min(T a, T b) {
+  return a < b ? a : b;
+}
+
+template <>
+__device__ inline float reduce_op_min<float>(float a, float b) {
+  return (isnan(a) || isnan(b)) ? NAN : (a < b ? a : b);
+}
+
 template <typename T> __device__ inline T reduce_init_max();
 template <> __device__ inline int64_t reduce_init_max<int64_t>() {
   return INT64_MIN;
@@ -526,6 +590,17 @@ template <> __device__ inline int32_t reduce_init_max<int32_t>() {
 }
 template <> __device__ inline float reduce_init_max<float>() {
   return -INFINITY;
+}
+
+template <typename T> __device__ inline T reduce_init_min();
+template <> __device__ inline int64_t reduce_init_min<int64_t>() {
+  return INT64_MAX;
+}
+template <> __device__ inline int32_t reduce_init_min<int32_t>() {
+  return INT32_MAX;
+}
+template <> __device__ inline float reduce_init_min<float>() {
+  return INFINITY;
 }
 
 template <typename T>
@@ -543,12 +618,14 @@ template <> __device__ inline float reduce_init_prod<float>() { return 1.0f; }
 // (a pointer to a __device__ functor object) would be heavier than needed --
 // instead we pass the op as an enum and dispatch in-kernel.
 
-enum BlockReduceOp { OP_MAX = 0, OP_PROD = 1 };
+enum BlockReduceOp { OP_MAX = 0, OP_MIN = 1, OP_PROD = 2 };
 
 template <typename T, typename ACC, BlockReduceOp OP>
 __device__ inline ACC do_op(ACC a, ACC b) {
   if constexpr (OP == OP_MAX) {
     return reduce_op_max<ACC>(a, b);
+  } else if constexpr (OP == OP_MIN) {
+    return reduce_op_min<ACC>(a, b);
   } else {
     return reduce_op_prod<ACC>(a, b);
   }
@@ -558,6 +635,8 @@ template <typename T, typename ACC, BlockReduceOp OP>
 __device__ inline ACC init_val() {
   if constexpr (OP == OP_MAX) {
     return reduce_init_max<ACC>();
+  } else if constexpr (OP == OP_MIN) {
+    return reduce_init_min<ACC>();
   } else {
     return reduce_init_prod<ACC>();
   }
@@ -741,6 +820,16 @@ extern "C" int hip_reduce_max(void *stream, const void *data, void *output,
                                          num_input_elements,
                                          num_output_elements, inner_size,
                                          hip_dtype, "reduce_max");
+}
+
+extern "C" int hip_reduce_min(void *stream, const void *data, void *output,
+                              int64_t num_input_elements,
+                              int64_t num_output_elements, int64_t inner_size,
+                              int hip_dtype) {
+  return hip_block_reduce_launch<OP_MIN>(stream, data, output,
+                                         num_input_elements,
+                                         num_output_elements, inner_size,
+                                         hip_dtype, "reduce_min");
 }
 
 extern "C" int hip_reduce_prod(void *stream, const void *data, void *output,

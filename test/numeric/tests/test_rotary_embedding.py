@@ -170,3 +170,84 @@ class TestRotaryEmbedding:
 
         actual, expected = model_runner.run_sample(model, [x, pos_ids])
         compare_outputs(actual, expected, atol=1e-3)
+
+
+def _make_native_rope_precomputed_model(
+    batch,
+    seq_len,
+    hidden,
+    num_heads,
+    head_dim,
+):
+    """Build a native ai.onnx RotaryEmbedding model (opset 23) WITHOUT
+    position_ids.
+
+    This is the HF-export form used by Gemma: cos/sin are precomputed and
+    position-expanded to 3D [batch, seq, head_dim // 2], so the op has only 3
+    inputs (X, cos_cache, sin_cache) and no position_ids. num_heads is required
+    for a 3D input per the ONNX spec.
+    """
+    half_dim = head_dim // 2
+
+    X = helper.make_tensor_value_info(
+        "X", TensorProto.FLOAT16, [batch, seq_len, hidden]
+    )
+    Y = helper.make_tensor_value_info(
+        "Y", TensorProto.FLOAT16, [batch, seq_len, hidden]
+    )
+
+    rng = np.random.default_rng(123)
+    cos_data = rng.uniform(-1, 1, [batch, seq_len, half_dim]).astype(np.float16)
+    sin_data = rng.uniform(-1, 1, [batch, seq_len, half_dim]).astype(np.float16)
+    cos_init = numpy_helper.from_array(cos_data, name="cos_cache")
+    sin_init = numpy_helper.from_array(sin_data, name="sin_cache")
+
+    node = helper.make_node(
+        "RotaryEmbedding",
+        ["X", "cos_cache", "sin_cache"],
+        ["Y"],
+        domain="",
+        interleaved=0,
+        num_heads=num_heads,
+        rotary_embedding_dim=0,
+    )
+    model = make_model_from_nodes(
+        [node],
+        [X],
+        [Y],
+        initializers=[cos_init, sin_init],
+        opset=23,
+    )
+    return model
+
+
+class TestNativeRotaryEmbeddingNoPosIds:
+    """Native ai.onnx RotaryEmbedding (opset 23) with precomputed 3D cos/sin
+    and no position_ids -- the Gemma export form. Exercises the hip.rope path
+    where the runtime indexes cos/sin by the flat token position b*seq+s.
+    """
+
+    @pytest.mark.parametrize(
+        "hidden,num_heads,head_dim",
+        [
+            (128, 4, 32),
+            (4096, 16, 256),
+        ],
+    )
+    def test_native_rope_no_posids(
+        self,
+        model_runner,
+        hidden,
+        num_heads,
+        head_dim,
+    ):
+        seq_len = 8
+        model = _make_native_rope_precomputed_model(
+            1, seq_len, hidden, num_heads, head_dim
+        )
+
+        rng = np.random.default_rng(42)
+        x = rng.uniform(-1, 1, [1, seq_len, hidden]).astype(np.float16)
+
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=1e-3)
