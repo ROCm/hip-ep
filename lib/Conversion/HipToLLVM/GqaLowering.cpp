@@ -184,8 +184,21 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
 
     Value elemSizeVal = createI64Const(elementSizeBytes);
 
+    // attention_bias broadcast extents: ONNX masks are often [B,1,S,T].
+    Value attnBiasBatchVal = createI64Const(1);
+    Value attnBiasNumHeadsVal = createI64Const(1);
+    if (op.getAttentionBias()) {
+      auto biasType = cast<MemRefType>(op.getAttentionBias().getType());
+      if (biasType.getRank() == 4) {
+        attnBiasBatchVal = getMemRefDimSize(
+            biasType, 0, adaptor.getAttentionBias(), rewriter, loc);
+        attnBiasNumHeadsVal = getMemRefDimSize(
+            biasType, 1, adaptor.getAttentionBias(), rewriter, loc);
+      }
+    }
+
     // Function signature matches wrap_group_query_attention() in gqa.cpp
-    SmallVector<Type, 39> paramTypes = {
+    SmallVector<Type, 41> paramTypes = {
         ptrType, // state
         i32Type, // op_state_slot
         // Inputs (14 pointers - some may be nullptr)
@@ -228,7 +241,9 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         i64Type, // seq_len_kv
         i64Type, // past_buf_seq
         i64Type, // head_dim
-        i64Type  // element_size_bytes
+        i64Type, // element_size_bytes
+        i64Type, // attn_bias_batch
+        i64Type  // attn_bias_num_heads
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp =
@@ -236,7 +251,7 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 39> args = {
+    SmallVector<Value, 41> args = {
         statePtr,
         // Per-instance op-state slot (threaded by --assign-op-state-slots)
         getOpStateSlotValue(op, rewriter, loc),
@@ -250,9 +265,9 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
         numHeads, kvNumHeads, scale, doRotary, rotaryInterleaved, softcap,
         localWindowSize, smoothSoftmax, qkOutput, kQuantType, vQuantType,
         kvCacheBitWidth, noCausal,
-        // Shape info (6 values)
+        // Shape info (8 values)
         batchSizeVal, seqLenQVal, seqLenKVVal, pastBufSeqVal, headDimVal,
-        elemSizeVal};
+        elemSizeVal, attnBiasBatchVal, attnBiasNumHeadsVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 

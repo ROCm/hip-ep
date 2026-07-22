@@ -212,6 +212,85 @@ LoopOp::inferReturnTypes(MLIRContext *context, std::optional<Location> location,
 }
 
 //===----------------------------------------------------------------------===//
+// IfOp: outlined then/else conditional (DPS)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange IfOp::getDpsInitsMutable() { return getOInitMutable(); }
+
+void IfOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  for (OpOperand &operand : getOInitMutable())
+    if (isa<MemRefType>(operand.get().getType()))
+      effects.emplace_back(MemoryEffects::Write::get(), &operand,
+                           SideEffects::DefaultResource::get());
+  for (OpOperand &operand : getCapturesMutable())
+    if (isa<MemRefType>(operand.get().getType()))
+      effects.emplace_back(MemoryEffects::Read::get(), &operand,
+                           SideEffects::DefaultResource::get());
+}
+
+LogicalResult IfOp::verify() {
+  uint32_t numOutputs = getNumOutputs();
+
+  if (numOutputs != getOInit().size())
+    return emitOpError("num_outputs (")
+           << numOutputs << ") must equal the o_init operand count ("
+           << getOInit().size() << ")";
+
+  bool tensorMode = true;
+  if (!getOInit().empty())
+    tensorMode = isa<RankedTensorType>(getOInit()[0].getType());
+
+  if (tensorMode) {
+    if (numOutputs != getNumResults())
+      return emitOpError("tensor mode: num_outputs (")
+             << numOutputs << ") must equal the result count ("
+             << getNumResults() << ")";
+    for (uint32_t i = 0; i < numOutputs; ++i)
+      if (getOInit()[i].getType() != getResult(i).getType())
+        return emitOpError("result type #")
+               << i << " (" << getResult(i).getType()
+               << ") must match o_init type #" << i << " ("
+               << getOInit()[i].getType() << ")";
+  } else {
+    if (getNumResults() != 0)
+      return emitOpError("memref mode must have zero results, got ")
+             << getNumResults();
+  }
+  return success();
+}
+
+LogicalResult IfOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  auto thenFn = symbolTable.lookupNearestSymbolFrom<func::FuncOp>(
+      *this, getThenFuncAttr());
+  if (!thenFn)
+    return emitOpError("then_func '")
+           << getThenFunc() << "' does not reference a func.func";
+  auto elseFn = symbolTable.lookupNearestSymbolFrom<func::FuncOp>(
+      *this, getElseFuncAttr());
+  if (!elseFn)
+    return emitOpError("else_func '")
+           << getElseFunc() << "' does not reference a func.func";
+  return success();
+}
+
+LogicalResult
+IfOp::inferReturnTypes(MLIRContext *context, std::optional<Location> location,
+                       ValueRange operands, DictionaryAttr attributes,
+                       OpaqueProperties properties, RegionRange regions,
+                       SmallVectorImpl<Type> &inferredReturnTypes) {
+  IfOpAdaptor adaptor(operands, attributes, properties, regions);
+  auto oInit = adaptor.getOInit();
+  inferredReturnTypes.reserve(oInit.size());
+  for (Value v : oInit) {
+    if (isa<RankedTensorType>(v.getType()))
+      inferredReturnTypes.push_back(v.getType());
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // Helpers for DPS compute ops (custom parse/print, verify, interfaces)
 //===----------------------------------------------------------------------===//
 
@@ -576,12 +655,13 @@ LogicalResult LayerNormOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
-// RopeOp: ins(input, position_ids, cos_cache, sin_cache), outs(output)
+// RopeOp: ins(input, [position_ids], cos_cache, sin_cache), outs(output)
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange RopeOp::getDpsInitsMutable() {
-  // 0=ctx, 1=input, 2=position_ids, 3=cos_cache, 4=sin_cache, 5=output
-  return MutableOperandRange(*this, /*start=*/5, /*length=*/1);
+  // position_ids is Optional, so the raw operand index of `output` shifts when
+  // it is absent. Use the generated accessor instead of a hardcoded index.
+  return getOutputMutable();
 }
 
 void RopeOp::getEffects(
@@ -758,6 +838,78 @@ void GatherOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// OneHotOp: ins(indices, depth, values), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange OneHotOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void OneHotOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// CompressOp: ins(input, condition), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange CompressOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void CompressOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// ScatterElementsOp: ins(data, indices, updates), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ScatterElementsOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ScatterElementsOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// GatherElementsOp: ins(data, indices), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange GatherElementsOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void GatherElementsOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// TopKOp: ins(x, k), outs(values, indices)
+//===----------------------------------------------------------------------===//
+
+// Operand order is (ctx, x, k, values, indices); the two DPS inits are the
+// trailing contiguous range.
+MutableOperandRange TopKOp::getDpsInitsMutable() {
+  return MutableOperandRange(*this, /*start=*/3, /*length=*/2);
+}
+
+void TopKOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // RangeOp: ins(start, limit, delta), outs(output)
 //===----------------------------------------------------------------------===//
 
@@ -837,6 +989,34 @@ void SoftplusOp::getEffects(
 MutableOperandRange GeluOp::getDpsInitsMutable() { return getOutputMutable(); }
 
 void GeluOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// BiasGeluOp: ins(data, bias), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange BiasGeluOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void BiasGeluOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// FastGeluOp: ins(input, [bias]), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange FastGeluOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void FastGeluOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
@@ -1017,6 +1197,20 @@ MutableOperandRange ReduceMaxOp::getDpsInitsMutable() {
 }
 
 void ReduceMaxOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// ReduceMinOp: ins(data, axes), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ReduceMinOp::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ReduceMinOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
@@ -1354,6 +1548,18 @@ void DivOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// AbsOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange AbsOp::getDpsInitsMutable() { return getYMutable(); }
+
+void AbsOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // NegOp: ins(x), outs(y)
 //===----------------------------------------------------------------------===//
 
@@ -1372,6 +1578,18 @@ void NegOp::getEffects(
 MutableOperandRange NotOp::getDpsInitsMutable() { return getYMutable(); }
 
 void NotOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// OrOp: ins(lhs, rhs), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange OrOp::getDpsInitsMutable() { return getOutputMutable(); }
+
+void OrOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
@@ -1414,12 +1632,36 @@ void SinOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// CeilOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange CeilOp::getDpsInitsMutable() { return getYMutable(); }
+
+void CeilOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // ExpOp: ins(x), outs(y)
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange ExpOp::getDpsInitsMutable() { return getYMutable(); }
 
 void ExpOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
+// LogOp: ins(x), outs(y)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange LogOp::getDpsInitsMutable() { return getYMutable(); }
+
+void LogOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);

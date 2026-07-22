@@ -3,18 +3,29 @@
  * Licensed under the MIT License.
  */
 
-// Equal: y = (a == b)  -- element-wise, same-shape, bool (1-byte) output.
+// Equal: y = (a == b)  -- element-wise, bool (1-byte) output, with ONNX
+// multidirectional broadcast (rank <= 4).
 //
 // `data_type` refers to the INPUT type (the comparison operand type). The
 // output is always 1 byte per element.
 //
 // Source: onnxruntime/core/providers/cuda/math/binary_elementwise_ops_impl.cu
 //         @ v1.22.2 (BINARY_OP_NAME_EXPR2(Equal, (a == b)))
+//
+// Broadcast handling (operand shapes are 4D, left-padded with 1 by the
+// compiler):
+//   * same-shape / scalar operand -> handled directly by the kernel
+//     (a scalar, num==1, reads through a zero stride).
+//   * any other partial broadcast (e.g. [1,8,1] vs [1,1,8]) -> materialised
+//     to the output shape via hip_expand into the per-session workspace,
+//     then compared on same-shape buffers. Without this, the flat kernel
+//     indexes a partially-broadcast operand past its end.
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
 #include "hip_custom_kernels.h"
 
+#include <cstdint>
 #include <cstdio>
 
 static int equal_hipdnn_to_hip_dtype(int64_t hipdnn_type) {
@@ -32,16 +43,16 @@ static int equal_hipdnn_to_hip_dtype(int64_t hipdnn_type) {
   }
 }
 
-int wrap_equal(RuntimeState *state, void *a, void *b, void *output,
-               int64_t a_num_elements, int64_t b_num_elements,
-               int64_t out_num_elements, int64_t data_type) {
+int wrap_equal(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
+               int64_t a_c, int64_t a_h, int64_t a_w, int64_t b_n, int64_t b_c,
+               int64_t b_h, int64_t b_w, int64_t out_n, int64_t out_c,
+               int64_t out_h, int64_t out_w, int64_t data_type) {
   OP_PROFILE(
       "equal",
       [&] {
         char buf[80];
-        snprintf(buf, sizeof(buf), "a=%lld:b=%lld:out=%lld:%s",
-                 (long long)a_num_elements, (long long)b_num_elements,
-                 (long long)out_num_elements,
+        snprintf(buf, sizeof(buf), "%lldx%lldx%lldx%lld:%s", (long long)out_n,
+                 (long long)out_c, (long long)out_h, (long long)out_w,
                  hipdnn_ep_datatype_name(data_type));
         return std::string(buf);
       },
@@ -51,9 +62,10 @@ int wrap_equal(RuntimeState *state, void *a, void *b, void *output,
     RUNTIME_DEBUG_LOG("[REAL] wrap_equal: null argument\n");
     return -1;
   }
-  if (out_num_elements <= 0) {
+
+  const int64_t out_vol = out_n * out_c * out_h * out_w;
+  if (out_vol <= 0)
     return 0;
-  }
 
   int hip_dtype = equal_hipdnn_to_hip_dtype(data_type);
   if (hip_dtype < 0) {
@@ -64,33 +76,66 @@ int wrap_equal(RuntimeState *state, void *a, void *b, void *output,
     return -1;
   }
 
-  // Supported broadcast modes:
-  //   * same-shape: a_n == b_n == out_n
-  //   * scalar-rhs broadcast: b_n == 1, a_n == out_n
-  //   * scalar-lhs broadcast: a_n == 1, b_n == out_n
-  // Anything more general (rank-aware NumPy broadcast) must be materialised
-  // upstream via Expand and is rejected here so the kernel never reads OOB.
-  if (a_num_elements != out_num_elements && a_num_elements != 1) {
-    fprintf(stderr,
-            "[REAL] wrap_equal: unsupported broadcast: a_num=%lld out=%lld "
-            "(only scalar a (1) or full a (out) are supported)\n",
-            (long long)a_num_elements, (long long)out_num_elements);
-    return -1;
-  }
-  if (b_num_elements != out_num_elements && b_num_elements != 1) {
-    fprintf(stderr,
-            "[REAL] wrap_equal: unsupported broadcast: b_num=%lld out=%lld "
-            "(only scalar b (1) or full b (out) are supported)\n",
-            (long long)b_num_elements, (long long)out_num_elements);
-    return -1;
-  }
+  const int64_t a_vol = a_n * a_c * a_h * a_w;
+  const int64_t b_vol = b_n * b_c * b_h * b_w;
+
+  // An operand is served directly (no expand) when it already matches the
+  // output volume, or when it is a single scalar (the kernel reads it through
+  // a zero stride). Anything else is a partial broadcast that must be
+  // materialised so the flat kernel never indexes past the operand's end.
+  const bool a_direct = (a_vol == out_vol) || (a_vol == 1);
+  const bool b_direct = (b_vol == out_vol) || (b_vol == 1);
 
   void *stream = hipdnn_ep_state_get_stream(state);
-  RUNTIME_DEBUG_LOG(
-      "[REAL] wrap_equal: a_num=%lld, b_num=%lld, out=%lld, input_type=%s "
-      "-> hip_elementwise_equal\n",
-      (long long)a_num_elements, (long long)b_num_elements,
-      (long long)out_num_elements, hipdnn_ep_datatype_name(data_type));
-  return hip_elementwise_equal(stream, a, b, output, a_num_elements,
-                               b_num_elements, out_num_elements, hip_dtype);
+  void *a_use = a;
+  void *b_use = b;
+  int64_t a_num = a_vol;
+  int64_t b_num = b_vol;
+
+  if (!a_direct || !b_direct) {
+    const int64_t elem_bytes = hipdnn_ep_datatype_size(data_type);
+    const size_t per_side = static_cast<size_t>(out_vol * elem_bytes);
+    const size_t needed = per_side * static_cast<size_t>((!a_direct ? 1 : 0) +
+                                                         (!b_direct ? 1 : 0));
+    if (hipdnn_ep_state_ensure_workspace(state, needed) != 0) {
+      fprintf(stderr,
+              "[REAL] wrap_equal: workspace ensure failed (%zu bytes)\n",
+              needed);
+      return -1;
+    }
+    uint8_t *ws_byte =
+        static_cast<uint8_t *>(hipdnn_ep_state_get_workspace(state));
+    const int64_t out_shape[4] = {out_n, out_c, out_h, out_w};
+
+    if (!a_direct) {
+      const int64_t in_a[4] = {a_n, a_c, a_h, a_w};
+      int rc = hip_expand(stream, a, ws_byte, in_a, 4, out_shape, 4, hip_dtype);
+      if (rc != 0) {
+        fprintf(stderr, "[REAL] wrap_equal: hip_expand(a) failed (%d)\n", rc);
+        return -1;
+      }
+      a_use = ws_byte;
+      a_num = out_vol;
+      ws_byte += per_side;
+    }
+    if (!b_direct) {
+      const int64_t in_b[4] = {b_n, b_c, b_h, b_w};
+      int rc = hip_expand(stream, b, ws_byte, in_b, 4, out_shape, 4, hip_dtype);
+      if (rc != 0) {
+        fprintf(stderr, "[REAL] wrap_equal: hip_expand(b) failed (%d)\n", rc);
+        return -1;
+      }
+      b_use = ws_byte;
+      b_num = out_vol;
+    }
+  }
+
+  RUNTIME_DEBUG_LOG("[REAL] wrap_equal: out=[%lld,%lld,%lld,%lld] a%s b%s "
+                    "input_type=%s -> hip_elementwise_equal\n",
+                    (long long)out_n, (long long)out_c, (long long)out_h,
+                    (long long)out_w, a_direct ? "(direct)" : "(expanded)",
+                    b_direct ? "(direct)" : "(expanded)",
+                    hipdnn_ep_datatype_name(data_type));
+  return hip_elementwise_equal(stream, a_use, b_use, output, a_num, b_num,
+                               out_vol, hip_dtype);
 }
