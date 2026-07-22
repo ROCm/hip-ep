@@ -52,11 +52,6 @@ def Hipsr_CastOp : Hipsr_DpsOp<"cast"> {
     Hipsr_TensorOrDeviceMemRef:$init
   );
 
-
-  // Result type is optional: Bufferization removes results from DPS ops (the
-  // memref form has no result), so trying to print a non-existent result type
-  // would crash without the optional clause.
-  //
   // The shape region is optional: an empty (zero-block) region prints nothing
   // and round-trips as empty. A non-empty region prints as
   // `shape_region { ... }`.

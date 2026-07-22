@@ -31,20 +31,23 @@ struct CastToHipsr : public ::mlir::RewritePattern {
                   ::mlir::PatternRewriter &rewriter) const override {
     // Matching is by name on an (unregistered) ONNX op, so guard the shape:
     // onnx.Cast is single-input / single-result.
-    if (op->getNumOperands() != 1 || op->getNumResults() != 1)
+    if (op->getNumOperands() != 1 || op->getNumResults() != 1) {
       return rewriter.notifyMatchFailure(
           op, "expected a single operand and result");
+    }
 
     ::mlir::FailureOr<::mlir::Value> ctx = getHipsrContextArg(op, rewriter);
-    if (::mlir::failed(ctx))
+    if (::mlir::failed(ctx)) {
       return ::mlir::failure();
+    }
 
     ::mlir::Location loc = op->getLoc();
     ::mlir::Value input = op->getOperand(0);
     auto resultType =
         ::mlir::dyn_cast<::mlir::RankedTensorType>(op->getResult(0).getType());
-    if (!resultType)
+    if (!resultType) {
       return rewriter.notifyMatchFailure(op, "expected ranked tensor result");
+    }
 
     // DPS init: a hipsr.placeholder with the cast result type. Its type matches
     // the result, which is all the DPS verifier needs, and it saves computing
