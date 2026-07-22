@@ -54,14 +54,31 @@ void ConvertHipsrToLLVMPass::runOnOperation() {
       });
 
   // Index for each externalized constant = module walk order (0, 1, 2, ...),
-  // matching the second @hipdnn_ep_constant_get argument.
+  // the second @hipdnn_ep_constant_get argument. The same walk collects each
+  // constant's size/offset (stamped append-only by hipsr-externalize-constants)
+  // into hipdnn.constant_sizes / hipdnn.constant_offsets. Because a constant's
+  // index and its metadata slot come from the same iteration over the same op,
+  // the ConstantInfo[index] that GenerateInterface builds from these attrs is
+  // aligned with the runtime @hipdnn_ep_constant_get(ctx, index) call by
+  // construction -- no cross-pass walk-order assumption. Only sizes/offsets are
+  // emitted (no per-source descriptors), so every ConstantInfo.source stays
+  // NONE and the runtime bulk-loads the constants file.
   llvm::DenseMap<Operation *, int64_t> indexMap;
+  llvm::SmallVector<int64_t> constantSizes, constantOffsets;
   int64_t nextIndex = 0;
   module.walk([&](ConstantOp c) {
     if (c.isExternalized()) {
       indexMap[c.getOperation()] = nextIndex++;
+      constantOffsets.push_back(c.getOffsetAttr().getInt());
+      constantSizes.push_back(c.getSizeAttr().getInt());
     }
   });
+  if (!constantSizes.empty()) {
+    module->setAttr("hipdnn.constant_sizes",
+                    DenseI64ArrayAttr::get(ctx, constantSizes));
+    module->setAttr("hipdnn.constant_offsets",
+                    DenseI64ArrayAttr::get(ctx, constantOffsets));
+  }
 
   // ctx for each externalized constant = the !hip.context block argument of its
   // enclosing function (do not assume arg 0). A missing ctx is diagnosed in the

@@ -11,10 +11,17 @@
 //   not hardcoded to arg 0).
 // - The returned AS 0 pointer is address-space-cast to the device space (AS 1).
 // - Multiple externalized constants get module-walk-order indices 0, 1, ...
+// - The pass stamps hipdnn.constant_sizes / hipdnn.constant_offsets on the
+//   module (source=NONE metadata, in the same walk order as the indices), and
+//   stamps nothing when there is no externalized constant.
 //===----------------------------------------------------------------------===//
 
-// RUN: hip-mlir-opt %s --convert-hipsr-to-llvm | FileCheck %s
+// RUN: hip-mlir-opt %s -split-input-file --convert-hipsr-to-llvm | FileCheck %s
 
+// Module-level metadata: one array entry per externalized constant, in module
+// walk order (index order). single_constant's %c is 0; two_constants' %w/%b are
+// 1/2. Attributes print alphabetically, so offsets precede sizes.
+// CHECK: module attributes {hipdnn.constant_offsets = array<i64: 0, 0, 256>, hipdnn.constant_sizes = array<i64: 48, 256, 32>}
 module {
   // CHECK-LABEL: llvm.func @single_constant
   // CHECK-SAME:  (%[[CTX:.*]]: !llvm.ptr)
@@ -48,4 +55,14 @@ module {
        : memref<8xf32, #hipsr.mem<device>>
     return %w, %b : memref<64xf32, #hipsr.mem<device>>, memref<8xf32, #hipsr.mem<device>>
   }
+}
+
+// -----
+
+// No externalized constant -> the pass stamps no constant metadata attrs.
+// CHECK-LABEL: llvm.func @no_constant
+// CHECK-NOT: hipdnn.constant_sizes
+// CHECK-NOT: hipdnn.constant_offsets
+func.func @no_constant(%ctx: !hip.context) {
+  return
 }
