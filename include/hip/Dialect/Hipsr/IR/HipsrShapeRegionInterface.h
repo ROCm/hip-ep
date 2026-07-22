@@ -63,11 +63,8 @@ getCapacityShapeRegionResultShapes(ShapeRegionInterface op);
 ::llvm::SmallVector<::mlir::RankedTensorType>
 getCapacityShapeRegionResultTypes(ShapeRegionInterface op);
 
-/// Bounds-checked block-argument accessor, keyed on OpTy's barrier category:
-///
-///   normal        : [ in0, in1, ... ]
-///   start barrier : [ ctx, in0, in1, ... ]
-///   end barrier   : [ in0, in1, ..., out0, out1, ... ]
+/// Bounds-checked accessor over the getShapeRegionArgOperands layout above;
+/// ctx()/in(i)/out(j) index the block args, gated by OpTy's barrier category.
 template <typename OpTy> struct ShapeRegionArgs {
   explicit ShapeRegionArgs(Block &b) : block(b) {}
 
