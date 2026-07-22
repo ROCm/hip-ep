@@ -38,6 +38,7 @@
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 #include "mlir/Transforms/Passes.h"
 
+#include "hip/Conversion/HipsrToLLVM/Passes.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
 #include "hip/InitAllPasses.h"
@@ -59,6 +60,7 @@ int main(int argc, char **argv) {
   registry.insert<mlir::LLVM::LLVMDialect>();
   registry.insert<mlir::hip::HipDialect>();
   registry.insert<mlir::hipsr::HipsrDialect>();
+  mlir::hipsr::registerConvertHipsrToLLVMInterface(registry);
   registry.insert<hip::compiler::detail::OnnxStubDialect>();
 
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);

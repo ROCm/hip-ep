@@ -39,13 +39,11 @@ namespace hipsr {
 // hipdnn_ep_runtime_state.cpp).
 inline constexpr const char *kHipsrWrapGetGlobal = "wrap_get_global";
 
-// Lowers hipsr.constant to LLVM. \p ctxMap gives each externalized constant the
-// (pre-conversion) !hip.context block argument of its enclosing function; it is
-// owned by the caller and must outlive the pattern set. The constant's
-// offset/size are read directly off the op.
-void populateHipsrConstantLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns,
-    const llvm::DenseMap<Operation *, Value> &ctxMap);
+// Registers the hipsr.constant -> LLVM pattern. One populate per op/category
+// (mirrors HipToLLVMUtils.h's populate*LoweringPatterns). The pattern is
+// stateless (ctx is sourced inside it), so no caller state is needed.
+void populateHipsrConstantLoweringPatterns(const LLVMTypeConverter &converter,
+                                           RewritePatternSet &patterns);
 
 } // namespace hipsr
 } // namespace mlir

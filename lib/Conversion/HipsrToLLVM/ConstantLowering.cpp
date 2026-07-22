@@ -7,9 +7,11 @@
 // Mirrors the hip.get_constant lowering (HipToLLVM/MemoryLowering.cpp): an
 // externalized hipsr.constant becomes a @wrap_get_global(ctx, offset, size)
 // runtime call whose returned device pointer is wrapped in a memref
-// descriptor. hipsr.constant carries no operands, so ctx comes from the
-// enclosing function's !hip.context arg (via a map built in the pass) and
-// offset/size are read off the op.
+// descriptor. hipsr.constant carries no operands, so ctx is the enclosing
+// llvm.func's arg 0 (the runtime state pointer, per the EP ABI -- same
+// convention as MemRefCopyOpLowering) and offset/size are read off the op.
+// Registered via HipsrDialect's ConvertToLLVMPatternInterface, so it is a
+// stateless pattern discovered by the standard LLVM conversion driver.
 //
 //===----------------------------------------------------------------------===//
 
@@ -20,9 +22,7 @@ namespace hipsr {
 namespace {
 
 struct ConstantLowering : public ConvertOpToLLVMPattern<ConstantOp> {
-  ConstantLowering(const LLVMTypeConverter &converter,
-                   const llvm::DenseMap<Operation *, Value> &ctxMap)
-      : ConvertOpToLLVMPattern(converter), ctxMap(ctxMap) {}
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
   matchAndRewrite(ConstantOp op, OpAdaptor adaptor,
@@ -34,17 +34,16 @@ struct ConstantLowering : public ConvertOpToLLVMPattern<ConstantOp> {
       return lowerInline(op, rewriter);
     }
     // shouldExternalize() == true but no offset yet: the externalization pass
-    // must run before this one.
-    op.emitError("hipsr.constant reached --convert-hipsr-to-llvm without "
-                 "externalization; run the externalization pass first");
+    // must run first.
+    op.emitError(
+        "hipsr.constant reached LLVM lowering without externalization; "
+        "run -hipsr-externalize-constants first");
     return failure();
   }
 
 private:
-  // Externalized: emit @wrap_get_global(ctx, offset, size) and wrap the
-  // returned AS 0 device pointer in a memref descriptor (mirrors
-  // GetConstantOpLowering). offset/size are read off the op (stamped by
-  // hipsr-externalize-constants).
+  // offset/size were stamped on the op by hipsr-externalize-constants; wrap the
+  // AS 0 pointer @wrap_get_global returns in a memref descriptor.
   LogicalResult lowerExternalized(ConstantOp op,
                                   ConversionPatternRewriter &rewriter) const {
     Location loc = op.getLoc();
@@ -60,16 +59,18 @@ private:
       return failure();
     }
 
-    auto ctxIt = ctxMap.find(op.getOperation());
-    if (ctxIt == ctxMap.end() || !ctxIt->second) {
-      op.emitError("hipsr.constant: no !hip.context argument in enclosing "
-                   "function");
+    // ctx = the enclosing function's arg 0. Bail until the parent is llvm.func
+    // so the arg is already an !llvm.ptr (the conversion driver retries).
+    auto llvmFn = op->getParentOfType<LLVM::LLVMFuncOp>();
+    if (!llvmFn) {
+      return rewriter.notifyMatchFailure(op, "expected enclosing llvm.func");
+    }
+    if (llvmFn.getNumArguments() == 0) {
+      op.emitError("hipsr.constant: enclosing function has no arguments; "
+                   "expected the runtime context at arg 0");
       return failure();
     }
-    Value ctxArg = rewriter.getRemappedValue(ctxIt->second);
-    if (!ctxArg) {
-      return failure();
-    }
+    Value ctxArg = llvmFn.getArgument(0);
 
     Value offsetVal = LLVM::ConstantOp::create(
         rewriter, loc, i64Type,
@@ -141,16 +142,13 @@ private:
     rewriter.replaceOpWithNewOp<arith::ConstantOp>(op, tensorType, dense);
     return success();
   }
-
-  const llvm::DenseMap<Operation *, Value> &ctxMap;
 };
 
 } // namespace
 
-void populateHipsrConstantLoweringPatterns(
-    const LLVMTypeConverter &converter, RewritePatternSet &patterns,
-    const llvm::DenseMap<Operation *, Value> &ctxMap) {
-  patterns.add<ConstantLowering>(converter, ctxMap);
+void populateHipsrConstantLoweringPatterns(const LLVMTypeConverter &converter,
+                                           RewritePatternSet &patterns) {
+  patterns.add<ConstantLowering>(converter);
 }
 
 } // namespace hipsr

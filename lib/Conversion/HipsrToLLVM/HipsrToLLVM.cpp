@@ -2,121 +2,75 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-//===- HipsrToLLVM.cpp - Convert the hipsr dialect to LLVM ---------------===//
+//===- HipsrToLLVM.cpp - hipsr -> LLVM via ConvertToLLVMPatternInterface -===//
 //
-// Structure mirrors ConvertHipToLLVMPass (HipToLLVM/HipToLLVM.cpp): build an
-// LLVMTypeConverter, register the !hip.context and #hipsr.mem<device>
-// conversions, bundle the hipsr constant pattern with the standard
-// func/memref/arith/cf lowering, and run a single partial conversion. Unlike
-// the hip pass there is no @main_graph ABI rewrite here.
+// HipsrDialect implements ConvertToLLVMPatternInterface, so the standard LLVM
+// conversion driver discovers and applies hipsr lowering with no dedicated
+// pass. This repo's convert-hip-to-llvm walks the module and, for every
+// dialect that genuinely implements the interface, calls its populate (see
+// HipToLLVM.cpp). The driver already sets up the LLVMTypeConverter (incl.
+// !hip.context -> !llvm.ptr) and bundles the func/memref/arith/cf lowering, so
+// the interface only adds the hipsr-specific type conversion, target legality,
+// and patterns.
 //
 //===----------------------------------------------------------------------===//
 
 #include "HipsrToLLVMUtils.h"
 
+#include "hip/Conversion/HipsrToLLVM/Passes.h"
 #include "hip/Dialect/Hipsr/IR/HipsrTypes.h"
-#include "hip/Dialect/IR/HipDialect.h"
+
+#include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"
+#include "mlir/IR/DialectRegistry.h"
 
 namespace mlir {
 namespace hipsr {
-
-#define GEN_PASS_DEF_CONVERTHIPSRTOLLVMPASS
-#include "hip/Conversion/Passes.h.inc"
-
 namespace {
 
-struct ConvertHipsrToLLVMPass
-    : public impl::ConvertHipsrToLLVMPassBase<ConvertHipsrToLLVMPass> {
-  void runOnOperation() override;
-};
-
-void ConvertHipsrToLLVMPass::runOnOperation() {
-  ModuleOp module = getOperation();
-  MLIRContext *ctx = module.getContext();
-
-  LowerToLLVMOptions options(ctx);
-  LLVMTypeConverter typeConverter(ctx, options);
-
-  // !hip.context -> !llvm.ptr (opaque pointer to the runtime context). hipsr
-  // constants have no operand; the pass finds the ctx via the enclosing func.
-  typeConverter.addConversion([ctx](hip::ContextType) -> Type {
-    return LLVM::LLVMPointerType::get(ctx, 0);
-  });
-
-  // #hipsr.mem<kind> -> integer address space. MemorySpaceKind's numeric
-  // values already match the AMDGPU address spaces (host=0, device=1,
-  // pinned=2, managed=3), so map the enum directly.
-  typeConverter.addTypeAttributeConversion(
-      [](BaseMemRefType,
-         MemorySpaceAttr space) -> TypeConverter::AttributeConversionResult {
-        return IntegerAttr::get(IntegerType::get(space.getContext(), 64),
-                                static_cast<int64_t>(space.getKind()));
-      });
-
-  // Record each externalized constant's offset/size (stamped by
-  // hipsr-externalize-constants) into hipdnn.constant_{offsets,sizes}. These
-  // drive the runtime init that allocates and loads the constants blob;
-  // @wrap_get_global(ctx, offset, size) then returns blob + offset. The offset
-  // baked into the call is read off the same op below, so it always matches the
-  // offset recorded here. Only offset/size are emitted (no per-source
-  // descriptors), so ConstantInfo.source stays NONE (runtime bulk-loads the
-  // constants file).
-  llvm::SmallVector<int64_t> constantSizes, constantOffsets;
-  module.walk([&](ConstantOp c) {
-    if (c.isExternalized()) {
-      constantOffsets.push_back(c.getOffsetAttr().getInt());
-      constantSizes.push_back(c.getSizeAttr().getInt());
-    }
-  });
-  if (!constantSizes.empty()) {
-    module->setAttr("hipdnn.constant_sizes",
-                    DenseI64ArrayAttr::get(ctx, constantSizes));
-    module->setAttr("hipdnn.constant_offsets",
-                    DenseI64ArrayAttr::get(ctx, constantOffsets));
-  }
-
-  // ctx for each externalized constant = the !hip.context block argument of its
-  // enclosing function (do not assume arg 0). A missing ctx is diagnosed in the
-  // pattern.
-  llvm::DenseMap<Operation *, Value> ctxMap;
-  module.walk([&](func::FuncOp fn) {
-    Value ctxArg;
-    for (BlockArgument arg : fn.getArguments()) {
-      if (isa<hip::ContextType>(arg.getType())) {
-        ctxArg = arg;
-        break;
-      }
-    }
-    fn.walk([&](ConstantOp c) {
-      if (c.isExternalized()) {
-        ctxMap[c.getOperation()] = ctxArg;
-      }
-    });
-  });
-
-  RewritePatternSet patterns(ctx);
-  populateHipsrConstantLoweringPatterns(typeConverter, patterns, ctxMap);
-
-  // Bundle func/memref/arith/cf lowering with the hipsr lowering to minimize
-  // unrealized casts at the memref/LLVM boundary (same rationale as
-  // ConvertHipToLLVMPass).
-  populateFuncToLLVMConversionPatterns(typeConverter, patterns);
-  populateFinalizeMemRefToLLVMConversionPatterns(typeConverter, patterns);
-  arith::populateCeilFloorDivExpandOpsPatterns(patterns);
-  arith::populateArithToLLVMConversionPatterns(typeConverter, patterns);
-  cf::populateControlFlowToLLVMConversionPatterns(typeConverter, patterns);
-
-  LLVMConversionTarget target(*ctx);
-  target.addLegalDialect<LLVM::LLVMDialect>();
-  target.addIllegalOp<ConstantOp>();
-  target.addLegalOp<ModuleOp>();
-
-  if (failed(applyPartialConversion(module, target, std::move(patterns)))) {
-    signalPassFailure();
-  }
+// Aggregates every hipsr -> LLVM pattern populator. As each op is ported, add
+// its populateHipsr<Op>LoweringPatterns here (pattern defined in its own
+// <Op>Lowering.cpp, declared in HipsrToLLVMUtils.h) and its addIllegalOp in the
+// interface below. Mirrors how convert-hip-to-llvm's runOnOperation aggregates
+// the per-category populate*LoweringPatterns.
+void populateHipsrToLLVMPatterns(const LLVMTypeConverter &typeConverter,
+                                 RewritePatternSet &patterns) {
+  populateHipsrConstantLoweringPatterns(typeConverter, patterns);
 }
 
+struct HipsrConvertToLLVMInterface : public ConvertToLLVMPatternInterface {
+  using ConvertToLLVMPatternInterface::ConvertToLLVMPatternInterface;
+
+  void loadDependentDialects(MLIRContext *context) const final {
+    context->loadDialect<LLVM::LLVMDialect>();
+  }
+
+  void populateConvertToLLVMConversionPatterns(
+      ConversionTarget &target, LLVMTypeConverter &typeConverter,
+      RewritePatternSet &patterns) const final {
+    // #hipsr.mem<kind> -> integer address space. MemorySpaceKind's numeric
+    // values already match the AMDGPU address spaces (host=0, device=1,
+    // pinned=2, managed=3), so map the enum directly. (!hip.context ->
+    // !llvm.ptr is registered by the driver.)
+    typeConverter.addTypeAttributeConversion(
+        [](BaseMemRefType,
+           MemorySpaceAttr space) -> TypeConverter::AttributeConversionResult {
+          return IntegerAttr::get(IntegerType::get(space.getContext(), 64),
+                                  static_cast<int64_t>(space.getKind()));
+        });
+    // Only hipsr.constant has a lowering today; mark just it illegal (not the
+    // whole dialect) so as-yet-unported hipsr ops do not fail legalization.
+    target.addIllegalOp<ConstantOp>();
+    populateHipsrToLLVMPatterns(typeConverter, patterns);
+  }
+};
+
 } // namespace
+
+void registerConvertHipsrToLLVMInterface(DialectRegistry &registry) {
+  registry.addExtension(+[](MLIRContext *, HipsrDialect *dialect) {
+    dialect->addInterfaces<HipsrConvertToLLVMInterface>();
+  });
+}
 
 } // namespace hipsr
 } // namespace mlir

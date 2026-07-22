@@ -24,6 +24,7 @@ target_link_libraries(HipsrToLLVM PUBLIC
   MLIRPass
   MLIRLLVMDialect
   MLIRLLVMCommonConversion
+  MLIRConvertToLLVMInterface
   MLIRMemRefDialect
   MLIRTransforms
   MLIRArithTransforms

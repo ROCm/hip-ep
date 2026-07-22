@@ -6,18 +6,14 @@
 #ifndef HIP_CONVERSION_HIPSRTOLLVM_PASSES_H
 #define HIP_CONVERSION_HIPSRTOLLVM_PASSES_H
 
-#include "mlir/Pass/Pass.h"
-
-#include <memory>
-
 namespace mlir {
+class DialectRegistry;
 namespace hipsr {
 
-// Per-conversion declaration. createConvertHipsrToLLVMPass() is declared by
-// GEN_PASS_DECL (defined by GEN_PASS_DEF in HipsrToLLVM.cpp). Registration
-// lives in the aggregate hip/Conversion/Passes.h.
-#define GEN_PASS_DECL_CONVERTHIPSRTOLLVMPASS
-#include "hip/Conversion/Passes.h.inc"
+// Attach the ConvertToLLVMPatternInterface to HipsrDialect so the standard LLVM
+// conversion driver discovers and applies hipsr lowering without a dedicated
+// pass. Call when populating the DialectRegistry, before conversion runs.
+void registerConvertHipsrToLLVMInterface(DialectRegistry &registry);
 
 } // namespace hipsr
 } // namespace mlir
