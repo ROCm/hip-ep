@@ -7,6 +7,8 @@
 
 #include "hip/Dialect/Hipsr/IR/HipsrCastOp.h"
 #include "hip/Dialect/Hipsr/IR/HipsrConstantOp.h"
+#include "hip/Dialect/Hipsr/IR/HipsrEmptyOp.h"
+#include "hip/Dialect/Hipsr/IR/HipsrEmptyYieldOp.h"
 #include "hip/Dialect/Hipsr/IR/HipsrMatMulOp.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 #include "hip/Dialect/Hipsr/IR/HipsrPlaceholderOp.h"
@@ -44,6 +46,12 @@ void HipsrDialect::initialize() {
       ,
 #define GET_OP_LIST
 #include "hip/Dialect/Hipsr/IR/HipsrPoolDomainOp.cpp.inc"
+      ,
+#define GET_OP_LIST
+#include "hip/Dialect/Hipsr/IR/HipsrEmptyYieldOp.cpp.inc"
+      ,
+#define GET_OP_LIST
+#include "hip/Dialect/Hipsr/IR/HipsrEmptyOp.cpp.inc"
       ,
 #define GET_OP_LIST
 #include "hip/Dialect/Hipsr/IR/HipsrConstantOp.cpp.inc"
