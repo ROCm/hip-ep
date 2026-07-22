@@ -43,9 +43,6 @@ LogicalResult MatMulOp::verify() {
   return success();
 }
 
-// Yields the matmul output shape (semantics in HipsrMatMulOp.td). Uses the
-// shape dialect so one path covers tensor and memref inputs and static dims
-// fold away. Batch-dim broadcast compatibility is not yet checked.
 void MatMulOp::populateShapeRegion(OpBuilder &builder, Block &shapeBlock) {
   OpBuilder::InsertionGuard guard(builder);
   builder.setInsertionPointToStart(&shapeBlock);

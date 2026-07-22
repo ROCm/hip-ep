@@ -2,13 +2,10 @@
 // Licensed under the MIT License.
 //
 //===----------------------------------------------------------------------===//
-// Regression: shape regions are standard IsolatedFromAbove, so running the
-// stock MLIR passes -cse and -canonicalize over a populated shape region must
-// NOT hoist region-internal ops out, merge them with identical ops in the
-// enclosing function, or otherwise break isolation. Before the migration to
-// the builtin trait these passes could corrupt the region (the custom trait
-// was invisible to them). Each RUN re-verifies the module (implicit in
-// hip-mlir-opt) and FileCheck asserts the region body survived intact.
+// Shape regions are IsolatedFromAbove, so the stock -cse and -canonicalize
+// passes must not hoist region-internal ops out or merge them with identical
+// ops in the enclosing function. Each RUN asserts the region body survives
+// intact.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt %s -split-input-file -cse | FileCheck %s
@@ -17,8 +14,7 @@
 // The function computes shape.shape_of on the SAME value the region does. CSE
 // must not merge the region's shape.shape_of with the outer one (that would
 // pull an outside value into the isolated region); the region keeps its own
-// entry-block arg + its own shape.shape_of over that arg (arg 0 is the unused
-// ctx, arg 1 the input).
+// entry-block arg + its own shape.shape_of over that arg.
 // CHECK-LABEL: func.func @cse_keeps_region_isolated
 // CHECK:       hipsr.cast
 // CHECK:         ^bb0(%{{.+}}: !hipsr.context, %[[IN:.+]]: tensor<?x8xf32>):

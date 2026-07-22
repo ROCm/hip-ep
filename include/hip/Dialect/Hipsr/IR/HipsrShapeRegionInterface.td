@@ -65,10 +65,6 @@ def ShapeRegionInterface : OpInterface<"ShapeRegionInterface"> {
     >,
   ];
 
-  // Region-layout accessors (region 0 = shape, 1 = capacity) are free functions
-  // in HipsrShapeRegionInterface.{h,cpp} so their definitions live once, not
-  // inline per op as an interface method would. See that header.
-
   let verify = [{
     return ::mlir::hipsr::verifyShapeRegionStructure($_op);
   }];
