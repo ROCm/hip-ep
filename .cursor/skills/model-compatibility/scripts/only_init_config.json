@@ -1,0 +1,15 @@
+{
+    "passes": [
+        {
+            "name": "init",
+            "plugin": "vaip-pass_init"
+        }
+    ],
+    "target": "VAIML",
+    "targets": [
+        {
+            "name": "VAIML",
+            "pass": [ "init" ]
+         },
+    ]
+}
