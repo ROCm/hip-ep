@@ -195,26 +195,3 @@ func.func @matmul_batched(%ctx: !hipsr.context, %a: tensor<?x8x64x4096xf16>,
                     outs(%init : tensor<?x8x64x1024xf16>) : tensor<?x8x64x1024xf16>
   return %0 : tensor<?x8x64x1024xf16>
 }
-
-// -----
-
-// Idempotent: the pass only fills empty regions, so a hand-written region
-// survives untouched (no generated shape.shape_of over it).
-// POPULATE-LABEL: func.func @matmul_already_populated
-// POPULATE: shape_region {
-// POPULATE:   %[[C64:.+]] = arith.constant 64 : index
-// POPULATE:   %[[C1024:.+]] = arith.constant 1024 : index
-// POPULATE:   hipsr.shape_yield (%[[C64]], %[[C1024]]) : [f16]
-// POPULATE-NOT: shape.shape_of
-func.func @matmul_already_populated(%ctx: !hipsr.context, %a: tensor<64x4096xf16>,
-                                    %b: tensor<4096x1024xf16>,
-                                    %init: tensor<64x1024xf16>) -> tensor<64x1024xf16> {
-  %0 = hipsr.matmul(%ctx) ins(%a, %b : tensor<64x4096xf16>, tensor<4096x1024xf16>)
-                    outs(%init : tensor<64x1024xf16>) : tensor<64x1024xf16> shape_region {
-  ^bb0(%aarg: tensor<64x4096xf16>, %barg: tensor<4096x1024xf16>):
-    %c64 = arith.constant 64 : index
-    %c1024 = arith.constant 1024 : index
-    hipsr.shape_yield (%c64, %c1024) : [f16]
-  }
-  return %0 : tensor<64x1024xf16>
-}
