@@ -8,6 +8,7 @@
 #include <mutex>
 
 #include "hip/Compiler/PluginRegistry.h"
+#include "hip/Conversion/HipsrToLLVM/Passes.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/Passes.h"
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
@@ -74,6 +75,9 @@ inline void registerAllDialects(mlir::DialectRegistry &registry) {
   registry.insert<mlir::LLVM::LLVMDialect>();
   registry.insert<mlir::hip::HipDialect>();
   registry.insert<mlir::hipsr::HipsrDialect>();
+  // Attach hipsr's ConvertToLLVMPatternInterface so convert-hip-to-llvm
+  // discovers and lowers hipsr ops (no dedicated hipsr->LLVM pass).
+  mlir::hipsr::registerConvertHipsrToLLVMInterface(registry);
   registry.insert<detail::OnnxStubDialect>();
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
   // The ownership-based buffer-deallocation pass walks arith ops (e.g.
