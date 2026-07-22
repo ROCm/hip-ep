@@ -5,8 +5,7 @@
 // Shape-region verifier, exercised through hipsr.cast. Covered here:
 //   - positive: region omitted round-trips; populated region reads its input
 //     via the entry-block arg
-//   - isolation: IsolatedFromAbove rejects capturing any outside value (even
-//     the op's own operand)
+//   - isolation: IsolatedFromAbove requires reads to go through entry-block args
 //   - structure: 0-or-1 blocks, non-empty, hipsr.shape_yield terminator
 //===----------------------------------------------------------------------===//
 

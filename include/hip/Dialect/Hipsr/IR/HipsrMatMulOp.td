@@ -25,31 +25,6 @@ def Hipsr_MatMulOp : Hipsr_DpsOp<"matmul"> {
     leading 1), B `(K)` acts as `(K,1)` (drops the trailing 1); `(K) @ (K)` is a
     scalar. Destination-passing style: the result buffer is passed as the `init`
     operand.
-
-    Carries an optional shape region (region 0, see ShapeRegionInterface). The
-    contraction dim K is not in the output but must match on both sides, so it
-    is guarded by a `shape.cstr_eq` witness around a `shape.assuming` region
-    that produces the dims.
-
-    Example (populated region, 2-D):
-    ```mlir
-    %0 = hipsr.matmul(%ctx) ins(%Aop, %Bop : tensor<?x?xf16>, tensor<?x?xf16>)
-                      outs(%init : tensor<?x?xf16>)
-                      : tensor<?x?xf16> shape_region {
-    ^bb0(%A: tensor<?x?xf16>, %B: tensor<?x?xf16>):
-      %shA = shape.shape_of %A : ...   // [M, K]
-      %shB = shape.shape_of %B : ...   // [K, N]
-      %kA = shape.get_extent %shA, %c1 : ...   // A's K
-      %kB = shape.get_extent %shB, %c0 : ...   // B's K
-      %w  = shape.cstr_eq (shape %kA), (shape %kB)   // K must match
-      %d:2 = shape.assuming %w -> (index, index) {
-        %m = shape.get_extent %shA, %c0 : ...   // M
-        %n = shape.get_extent %shB, %c1 : ...   // N
-        shape.assuming_yield %m, %n : index, index
-      }
-      hipsr.shape_yield (%d#0, %d#1) : [f16]
-    }
-    ```
   }];
 
   let arguments = (ins
