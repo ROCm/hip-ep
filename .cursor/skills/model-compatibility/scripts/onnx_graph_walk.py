@@ -1,3 +1,7 @@
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
 """Traverse ONNX GraphProto nodes including nested subgraph attributes."""
 
 from __future__ import annotations

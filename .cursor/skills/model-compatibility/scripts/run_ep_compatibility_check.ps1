@@ -1,3 +1,8 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+
 # EP-aware compatibility pipeline:
 #   1) Dump EP input graph -> <OutputDir>/ep_input/<DumpFileName> (default onnx.onnx)
 #   2) step1 on original model and EP input; compare op distributions
