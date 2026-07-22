@@ -109,16 +109,17 @@ mlir::hipsr::getShapeRegionArgOperands(ShapeRegionInterface op) {
     return args;
   }
 
-  // Per-category arg layout in the declaration; keyed on op kind so the
-  // signature the verifier enforces is stable per op kind.
   SmallVector<Value> ins = dps.getDpsInputs();
   Operation *raw = op.getOperation();
-  if (isa<StartBarrierInterface>(raw) && !ins.empty())
+  if (isa<StartBarrierInterface>(raw) && !ins.empty()) {
     args.push_back(ins.front()); // ctx
-  if (!ins.empty())
+  }
+  if (!ins.empty()) {
     llvm::append_range(args, llvm::drop_begin(ins)); // data inputs
-  if (isa<EndBarrierInterface>(raw))
+  }
+  if (isa<EndBarrierInterface>(raw)) {
     llvm::append_range(args, dps.getDpsInits()); // outs
+  }
   return args;
 }
 

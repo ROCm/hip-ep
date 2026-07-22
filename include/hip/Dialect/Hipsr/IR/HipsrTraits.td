@@ -8,9 +8,9 @@
 
 include "mlir/IR/OpBase.td"
 
-// Like IsolatedFromAbove, but a region may also read the op's own operands.
-// Used by pool-domain-style grouping ops (e.g. hipsr.pool_domain) whose region
-// references those operands directly. See HipsrTraits.h for the verifier.
+// Like IsolatedFromAbove, but a region may also use the op's own operands (not
+// just values defined inside the region). Used by shape regions that read the
+// op's inputs to compute output shapes. See HipsrTraits.h for the verifier.
 def IsolatedFromAboveButAllowOperands : NativeOpTrait<
     "IsolatedFromAboveButAllowOperands"> {
   let cppNamespace = "::mlir::hipsr::OpTrait";

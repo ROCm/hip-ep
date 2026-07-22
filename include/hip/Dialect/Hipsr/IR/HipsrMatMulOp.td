@@ -26,21 +26,17 @@ def Hipsr_MatMulOp : Hipsr_DpsOp<"matmul"> {
     scalar. Destination-passing style: the result buffer is passed as the `init`
     operand.
 
-    The `ctx` operand (`!hipsr.context`) is the per-session execution context.
-    Every hipsr op carries it as its first operand; it is added in the ONNX
-    phase and threaded through unchanged.
-
-    Carries an optional shape region (region 0, see ShapeRegionInterface) whose
-    args mirror the DPS `ins`. The contraction dim K is not in the output but
-    must match on both sides, so it is guarded by a `shape.cstr_eq` witness
-    around a `shape.assuming` region that produces the dims.
+    Carries an optional shape region (region 0, see ShapeRegionInterface). The
+    contraction dim K is not in the output but must match on both sides, so it
+    is guarded by a `shape.cstr_eq` witness around a `shape.assuming` region
+    that produces the dims.
 
     Example (populated region, 2-D):
     ```mlir
     %0 = hipsr.matmul(%ctx) ins(%Aop, %Bop : tensor<?x?xf16>, tensor<?x?xf16>)
                       outs(%init : tensor<?x?xf16>)
                       : tensor<?x?xf16> shape_region {
-    ^bb0(%ctxarg: !hipsr.context, %A: tensor<?x?xf16>, %B: tensor<?x?xf16>):
+    ^bb0(%A: tensor<?x?xf16>, %B: tensor<?x?xf16>):
       %shA = shape.shape_of %A : ...   // [M, K]
       %shB = shape.shape_of %B : ...   // [K, N]
       %kA = shape.get_extent %shA, %c1 : ...   // A's K
