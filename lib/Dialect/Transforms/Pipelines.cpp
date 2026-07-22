@@ -335,6 +335,7 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   // every Python perf test under `test/python/` on a Loop-heavy
   // model end-to-end, then delete this TODO.
   pm.addPass(createOnnxLoopOutlinePass());
+  pm.addPass(createOnnxIfOutlinePass());
 
   // Rank-establish unranked tensors inside outlined loop bodies (e.g. a
   // loop-carried `onnx.Concat` output the importer left as `tensor<*xT>`)
@@ -378,6 +379,7 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
 
   pm.addPass(createHipAddContextArgPass());
   pm.addPass(createOnnxLoopOutlinePass());
+  pm.addPass(createOnnxIfOutlinePass());
   pm.addPass(createInferLoopBodyShapesPass());
   addPluginPassesForSlot(pm,
                          ::hip::compiler::PipelineSlot::AfterOnnxLoopOutline);

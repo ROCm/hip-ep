@@ -155,13 +155,16 @@ inline void registerAllPasses() {
     mlir::hipsr::registerHipsrPasses();
 
     // Conversion passes (convert-onnx-to-hip, outline-onnx-to-hipdnn,
-    // convert-hip-to-llvm); onnx-loop-outline is hand-written, not in the .td
-    // set, so it is registered separately below.
+    // convert-hip-to-llvm); onnx-loop-outline and its sibling onnx-if-outline
+    // are hand-written, not in the .td set, so they are registered separately
+    // below.
     registerConversionPasses();
     mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
       return mlir::hip::createOnnxLoopOutlinePass();
     });
-
+    mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
+      return mlir::hip::createOnnxIfOutlinePass();
+    });
     // Standard MLIR passes the production pipeline interleaves, registered so
     // an override can name them around the hip-* passes. The registrar names
     // differ from the textual pass names they register (e.g.

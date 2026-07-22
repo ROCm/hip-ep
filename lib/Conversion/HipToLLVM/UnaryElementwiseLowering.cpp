@@ -89,6 +89,8 @@ struct UnaryElementwiseOpLowering : public ConvertOpToLLVMPattern<OpTy> {
 
 void populateUnaryElementwiseLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+  patterns.insert<UnaryElementwiseOpLowering<AbsOp>>(converter, kWrapAbs,
+                                                     "abs");
   patterns.insert<UnaryElementwiseOpLowering<NegOp>>(converter, kWrapNeg,
                                                      "neg");
   patterns.insert<UnaryElementwiseOpLowering<NotOp>>(converter, kWrapNot,
@@ -97,8 +99,12 @@ void populateUnaryElementwiseLoweringPatterns(
                                                      "cos");
   patterns.insert<UnaryElementwiseOpLowering<SinOp>>(converter, kWrapSin,
                                                      "sin");
+  patterns.insert<UnaryElementwiseOpLowering<CeilOp>>(converter, kWrapCeil,
+                                                      "ceil");
   patterns.insert<UnaryElementwiseOpLowering<ExpOp>>(converter, kWrapExp,
                                                      "exp");
+  patterns.insert<UnaryElementwiseOpLowering<LogOp>>(converter, kWrapLog,
+                                                     "log");
   patterns.insert<UnaryElementwiseOpLowering<SignOp>>(converter, kWrapSign,
                                                       "sign");
 }

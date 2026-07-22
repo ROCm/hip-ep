@@ -39,17 +39,23 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | Tanh | MIOpen |
 | Softplus | MIOpen |
 | Gelu | Custom HIP kernel |
+| BiasGelu (com.microsoft) | Custom HIP kernel |
+| FastGelu (com.microsoft) | Custom HIP kernel |
 | Reciprocal | Custom HIP kernel |
 | Sqrt | Custom HIP kernel |
 | Exp | Custom HIP Kernel |
+| Log | Custom HIP Kernel |
 | Pow | Decomposed → Mul / Sqrt / Reciprocal for constant scalar exponents |
 | Sub | Custom HIP Kernel |
 | Cast | Custom HIP Kernel |
 | CastLike | Decomposed → Cast |
+| Ceil | Custom HIP Kernel |
 | Neg | Custom HIP Kernel |
 | Equal | Custom HIP Kernel |
 | Not | Custom HIP Kernel |
 | And | Custom HIP Kernel |
+| Or | Custom HIP Kernel |
+| Abs | Custom HIP Kernel |
 | Cos | Custom HIP Kernel |
 | Sin | Custom HIP Kernel |
 | Div | Custom HIP Kernel |
@@ -57,12 +63,14 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | Sign | Custom HIP Kernel |
 | Where | Custom HIP Kernel |
 | Less | Custom HIP Kernel |
+| Greater | Decomposed (Less(B, A)) |
 | GreaterOrEqual | Decomposed (Not(Less(A, B))) |
 | LessOrEqual | Decomposed (Not(Less(B, A))) |
 | Min | MIOpen |
 | Max | MIOpen |
 | ReduceSum | Custom HIP Kernel |
 | ReduceMax | Custom HIP Kernel |
+| ReduceMin | Custom HIP Kernel |
 | ReduceProd | Custom HIP Kernel |
 | ReduceMean | Custom HIP Kernel |
 | CumSum | Custom HIP Kernel |
@@ -71,12 +79,19 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | Expand | Custom HIP Kernel |
 | GatherND | Custom HIP Kernel |
 | ScatterND | Custom HIP Kernel (reductions: none / add / mul / min / max) |
+| ScatterElements | Custom HIP Kernel (reductions: none / add / mul / min / max) |
 | Range | Custom HIP kernel |
 | Size | Custom HIP Kernel (folds to a constant for static shapes) |
 | NonZero | Custom HIP Kernel |
 | Gather | Custom HIP Kernel |
+| GatherElements | Custom HIP Kernel |
+| TopK | Custom HIP Kernel |
+| If | Runtime branch dispatch (outlined then/else) |
+| Compress | Custom HIP Kernel |
+| OneHot | Custom HIP Kernel |
 | LayerNormalization | Custom HIP Kernel |
 | SkipLayerNormalization (com.microsoft) | Decomposed → Add (MIOpen) + LayerNormalization (Custom HIP Kernel) |
+| RMSNormalization | MIOpen |
 | SimplifiedLayerNormalization | MIOpen |
 | SkipSimplifiedLayerNormalization (com.microsoft) | MIOpen |
 | LpNormalization | Decomposed → Mul / ReduceSum / Sqrt / Div |
@@ -84,6 +99,7 @@ This project demonstrates the integration of HIP (Heterogeneous-compute Interfac
 | GroupQueryAttention (com.microsoft) | Custom HIP Kernel |
 | MultiHeadAttention (com.microsoft) | hipBLASLt + Custom HIP Kernels (encoder–decoder attention also lowers to GroupQueryAttention) |
 | Attention (com.microsoft) | Custom HIP Kernel (fused QKV split, lowered to GroupQueryAttention) |
+| Attention (ai.onnx opset 23/24) | Lowered to GroupQueryAttention (rank-3/rank-4 Q/K/V; 1 or 3 outputs; causal and/or additive-mask, or bidirectional; optional KV cache) |
 | MatMulNBits (com.microsoft) | Custom HIP Kernel |
 | QMoE (com.microsoft) | Custom HIP Kernel |
 | GatherBlockQuantized (com.microsoft) | Custom HIP Kernel |
@@ -147,6 +163,7 @@ onnx-to-hip-pipeline
     simplify-onnx                  (CastLike → Cast, drop dead type-donor args)
     hip-add-context-arg
     onnx-loop-outline              (+ hip-infer-loop-body-shapes)
+    onnx-if-outline
     convert-onnx-to-hip            constants → .constants.bin
     hip-infer-shapes               (refine dynamic result dims)
     hip-resolve-tensor-dims

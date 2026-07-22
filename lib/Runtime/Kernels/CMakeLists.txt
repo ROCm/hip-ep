@@ -44,6 +44,8 @@ set(_kernel_sources
     hip/elementwise_reciprocal_kernel.hip
     hip/elementwise_sqrt_kernel.hip
     hip/elementwise_gelu_kernel.hip
+    hip/bias_gelu_kernel.hip
+    hip/fast_gelu_kernel.hip
     hip/leaky_relu_kernel.hip
     hip/elementwise_where_kernel.hip
     hip/elementwise_unary_kernel.hip
@@ -57,6 +59,11 @@ set(_kernel_sources
     hip/cast_kernel.hip
     hip/range_kernel.hip
     hip/gather_kernel.hip
+    hip/gather_elements_kernel.hip
+    hip/top_k_kernel.hip
+    hip/scatter_elements_kernel.hip
+    hip/compress_kernel.hip
+    hip/one_hot_kernel.hip
     hip/reduce_sum_kernel.hip
     hip/pool_kernel.hip
     hip/resize_kernel.hip
