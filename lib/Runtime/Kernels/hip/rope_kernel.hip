@@ -54,6 +54,26 @@ static __device__ __forceinline__ int rope_base_offset(
          h * head_dim;
 }
 
+// Resolve the cos/sin cache row index for token (b, s).
+//
+// Two cache forms are supported:
+//   position_ids != null : 2D lookup table [max_seq_len, half]. The row is
+//                          position_ids[b, s], clamped to the table bounds.
+//   position_ids == null : cos/sin are already position-expanded to
+//                          [batch, seq, half] (native ai.onnx RotaryEmbedding
+//                          without position_ids). Element (b, s, *) lives at
+//                          flat offset (b*seq+s)*half, so the row index is
+//                          simply b*seq+s and no clamp is needed (it is always
+//                          < batch*seq = the number of rows).
+static __device__ __forceinline__ int rope_resolve_pos(
+    const int64_t* position_ids, int b, int s, int seq_len, int max_seq_len) {
+  if (!position_ids)
+    return b * seq_len + s;
+  int64_t pos_raw = position_ids[b * seq_len + s];
+  return static_cast<int>(pos_raw < 0 ? 0 :
+             (pos_raw >= max_seq_len ? max_seq_len - 1 : pos_raw));
+}
+
 // Half-rotated RoPE: dimensions [0..half) and [half..rotary_dim) form pairs.
 // Uses int32 index arithmetic for RDNA GPU performance (int64 div/mod is slow).
 template <typename T>
@@ -86,9 +106,7 @@ __global__ void rope_half_rotated_kernel(
     return;
   }
 
-  int64_t pos_raw = position_ids[b * seq_len + s];
-  int pos = static_cast<int>(pos_raw < 0 ? 0 :
-                (pos_raw >= max_seq_len ? max_seq_len - 1 : pos_raw));
+  int pos = rope_resolve_pos(position_ids, b, s, seq_len, max_seq_len);
 
   if (d < half_rot) {
     T cos_val = cos_cache[pos * half_rot + d];
@@ -143,9 +161,7 @@ __global__ void rope_interleaved_kernel(
     b = r2 / seq_len;
   }
 
-  int64_t pos_raw = position_ids[b * seq_len + s];
-  int pos = static_cast<int>(pos_raw < 0 ? 0 :
-                (pos_raw >= max_seq_len ? max_seq_len - 1 : pos_raw));
+  int pos = rope_resolve_pos(position_ids, b, s, seq_len, max_seq_len);
 
   T cos_val = cos_cache[pos * half_rot + pair];
   T sin_val = sin_cache[pos * half_rot + pair];
@@ -216,7 +232,10 @@ extern "C" int hip_rope_forward(
     int64_t element_size_bytes,
     int64_t is_bnsh) {
 
-  if (!input || !position_ids || !cos_cache || !sin_cache || !output) {
+  // position_ids may be null: native ai.onnx RotaryEmbedding without
+  // position_ids ships cos/sin already position-expanded, and the kernels index
+  // them by the flat token position instead of looking up position_ids.
+  if (!input || !cos_cache || !sin_cache || !output) {
     fprintf(stderr, "hip_rope_forward: null pointer argument\n");
     return -1;
   }

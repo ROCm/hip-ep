@@ -12,8 +12,15 @@ add_library(HipToLLVM STATIC
   ElementwiseLowering.cpp
   PowerLowering.cpp
   ActivationLowering.cpp
+  BiasGeluLowering.cpp
+  FastGeluLowering.cpp
   NormLowering.cpp
   GatherLowering.cpp
+  GatherElementsLowering.cpp
+  TopKLowering.cpp
+  ScatterElementsLowering.cpp
+  CompressLowering.cpp
+  OneHotLowering.cpp
   RangeLowering.cpp
   CastLowering.cpp
   ReduceLowering.cpp
@@ -29,6 +36,7 @@ add_library(HipToLLVM STATIC
   GemmLowering.cpp
   WhereLowering.cpp
   EqualLowering.cpp
+  OrLowering.cpp
   AndLowering.cpp
   DivLowering.cpp
   LinearAttentionLowering.cpp
@@ -47,6 +55,7 @@ add_library(HipToLLVM STATIC
   ReadbackScalarLowering.cpp
   SizeLowering.cpp
   LoopLowering.cpp
+  IfLowering.cpp
   PoolLowering.cpp
   ResizeLowering.cpp
   GlobalPoolLowering.cpp

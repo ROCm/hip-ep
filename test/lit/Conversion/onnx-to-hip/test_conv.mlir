@@ -11,6 +11,7 @@
 // 3. conv_depthwise      — depthwise conv (group=channels)
 // 4. conv_stride2        — strided conv (stride=2)
 // 5. conv_asymmetric_stride — asymmetric stride [2,3]
+// 6. conv_dynamic_spatial — dynamic batch + dynamic spatial output dim
 //
 // Note: conv without bias requires onnx.NoValue syntax which the current
 // ConvToHipPattern does not guard against NoneType operands; tracked separately.
@@ -125,5 +126,31 @@ module {
   // CHECK-LABEL: func.func @conv_asymmetric_stride
   // CHECK-SAME: !hip.context
   // CHECK: hip.conv({{.*}}) ins({{.*}}) outs({{.*}}) {dilations = [1, 1], group = 1 : i64, kernel_shape = [7, 3], pads = [3, 1, 3, 1], strides = [2, 3]}
+  // CHECK-NOT: hip.alloc
+
+  // --------------------------------------------------------------------------
+  // 6. Dynamic batch + dynamic spatial output dim (down-sampling front-end).
+  //    Output H is sized at runtime from the conv formula:
+  //      H' = (H + pad_begin + pad_end - dilation*(kernel-1) - 1)/stride + 1
+  //    The static W dim (64) stays in the result type; only N and H are dynamic.
+  // --------------------------------------------------------------------------
+  func.func @conv_dynamic_spatial(%input: tensor<?x1x?x128xf16>, %weights: tensor<128x1x3x3xf16>, %bias: tensor<128xf16>) -> tensor<?x128x?x64xf16> {
+    %output = "onnx.Conv"(%input, %weights, %bias) {
+      kernel_shape = [3, 3],
+      strides = [2, 2],
+      pads = [1, 1, 1, 1],
+      dilations = [1, 1],
+      group = 1 : i64
+    } : (tensor<?x1x?x128xf16>, tensor<128x1x3x3xf16>, tensor<128xf16>) -> tensor<?x128x?x64xf16>
+    return %output : tensor<?x128x?x64xf16>
+  }
+
+  // CHECK-LABEL: func.func @conv_dynamic_spatial
+  // CHECK-SAME: !hip.context
+  // Spatial output dim resolved from tensor.dim of the input + arith, NOT the
+  // conv result (would be a use-before-def).
+  // CHECK: arith.divsi
+  // CHECK: tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x128x?x64xf16>
+  // CHECK: hip.conv({{.*}}) outs({{.*}} : tensor<?x128x?x64xf16>) {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3], pads = [1, 1, 1, 1], strides = [2, 2]}
   // CHECK-NOT: hip.alloc
 }

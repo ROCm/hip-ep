@@ -26,8 +26,15 @@ struct RopeOpLowering : public ConvertOpToLLVMPattern<RopeOp> {
     Value statePtr = adaptor.getCtx();
     Value inputPtr =
         extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
+    // position_ids is optional. When absent (native ai.onnx RotaryEmbedding
+    // whose cos/sin are already position-expanded to [batch, seq, half]), pass
+    // a null pointer; the runtime then indexes cos/sin by the flat token
+    // position b*seq+s instead of position_ids[b, s].
     Value posIdsPtr =
-        extractContiguousMemRefPtr(adaptor.getPositionIds(), rewriter, loc);
+        op.getPositionIds()
+            ? extractContiguousMemRefPtr(adaptor.getPositionIds(), rewriter,
+                                         loc)
+            : LLVM::ZeroOp::create(rewriter, loc, ptrType).getResult();
     Value cosCachePtr =
         extractContiguousMemRefPtr(adaptor.getCosCache(), rewriter, loc);
     Value sinCachePtr =
