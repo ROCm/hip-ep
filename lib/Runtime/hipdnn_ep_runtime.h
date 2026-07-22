@@ -588,12 +588,6 @@ typedef struct {
 // Ownership: Caller does NOT own pointer (freed in state_cleanup)
 void *hipdnn_ep_constant_get(RuntimeState *state, int64_t index);
 
-// Offset-based constant access (hipsr @wrap_get_global lowering): returns a GPU
-// pointer at `offset` within the constants blob loaded at init. `size` is used
-// only for bounds checking. Returns NULL on invalid state/offset/size.
-// Ownership: caller does NOT own the pointer (freed in state_cleanup).
-void *wrap_get_global(RuntimeState *state, int64_t offset, int64_t size);
-
 //===----------------------------------------------------------------------===//
 // Tensor Preparation Helpers (allocation-strategy agnostic)
 //===----------------------------------------------------------------------===//

@@ -15,7 +15,7 @@
 // CHECK: enclosing function has no arguments
 module {
   func.func @no_ctx() -> memref<4xf32, #hipsr.mem<device>> {
-    %c = hipsr.constant {value = dense<1.0> : tensor<4xf32>, offset = 0 : i64, size = 16 : i64}
+    %c = hipsr.constant {value = dense<1.0> : tensor<4xf32>, offset = 0 : i64, size = 16 : i64, index = 0 : i64}
        : memref<4xf32, #hipsr.mem<device>>
     return %c : memref<4xf32, #hipsr.mem<device>>
   }
@@ -23,26 +23,12 @@ module {
 
 // -----
 
-// A constant that still wants to be externalized (offset/size not yet assigned)
-// reached this pass before the externalization pass ran.
+// A constant not yet externalized (no offset/size/index) reached this pass
+// before the externalization pass ran.
 // CHECK: reached LLVM lowering without externalization
 module {
   func.func @not_externalized(%ctx: !hip.context) -> memref<4xf32, #hipsr.mem<device>> {
     %c = hipsr.constant {value = dense<1.0> : tensor<4xf32>}
-       : memref<4xf32, #hipsr.mem<device>>
-    return %c : memref<4xf32, #hipsr.mem<device>>
-  }
-}
-
-// -----
-
-// An inline (disableExternalize) constant with a device-memref result is not
-// supported yet: arith.constant is illegal on memref, so this needs a
-// memref.global follow-up.
-// CHECK: inline (disableExternalize) lowering only supports a ranked-tensor result
-module {
-  func.func @inline_memref(%ctx: !hip.context) -> memref<4xf32, #hipsr.mem<device>> {
-    %c = hipsr.constant {value = dense<1.0> : tensor<4xf32>, externalize = false}
        : memref<4xf32, #hipsr.mem<device>>
     return %c : memref<4xf32, #hipsr.mem<device>>
   }

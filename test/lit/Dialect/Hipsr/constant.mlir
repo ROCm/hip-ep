@@ -2,8 +2,8 @@
 // Licensed under the MIT License.
 //
 // Round-trips the hipsr.constant forms and checks the verifier: exactly one of
-// {value, source} is always present, offset/size are a paired externalization
-// marker layered on top, and the result must be device memory.
+// {value, source} is always present, offset/size/index are a grouped
+// externalization marker layered on top, and the result must be device memory.
 
 // RUN: hip-mlir-opt %s -split-input-file -verify-diagnostics | FileCheck %s
 
@@ -49,11 +49,11 @@ func.func @mem_source_const() -> memref<2x4xf32, #hipsr.mem<device>> {
 
 // -----
 
-// Externalized: data source (value here) is kept; offset/size are added.
+// Externalized: data source (value here) is kept; offset/size/index are added.
 // CHECK-LABEL: func.func @externalized_const
 func.func @externalized_const() -> memref<512x512xf16, #hipsr.mem<device>> {
-  // CHECK: hipsr.constant {offset = 0 : i64, size = 524288 : i64, value = dense<{{.*}}> : tensor<512x512xf16>} : memref<512x512xf16, #hipsr.mem<device>>
-  %c = hipsr.constant {value = dense<1.0> : tensor<512x512xf16>, offset = 0 : i64, size = 524288 : i64}
+  // CHECK: hipsr.constant {index = 0 : i64, offset = 0 : i64, size = 524288 : i64, value = dense<{{.*}}> : tensor<512x512xf16>} : memref<512x512xf16, #hipsr.mem<device>>
+  %c = hipsr.constant {value = dense<1.0> : tensor<512x512xf16>, offset = 0 : i64, size = 524288 : i64, index = 0 : i64}
      : memref<512x512xf16, #hipsr.mem<device>>
   return %c : memref<512x512xf16, #hipsr.mem<device>>
 }
@@ -70,7 +70,7 @@ func.func @both_value_and_source_rejected() -> memref<4xf16, #hipsr.mem<device>>
 // -----
 
 func.func @offset_without_size_rejected() -> memref<4xf16, #hipsr.mem<device>> {
-  // expected-error @+1 {{`offset` and `size` must be set together}}
+  // expected-error @+1 {{`offset`, `size` and `index` must be set together}}
   %c = hipsr.constant {value = dense<1.0> : tensor<4xf16>, offset = 0 : i64}
      : memref<4xf16, #hipsr.mem<device>>
   return %c : memref<4xf16, #hipsr.mem<device>>

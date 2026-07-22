@@ -60,8 +60,9 @@ struct HipsrExternalizeConstantsPass
     // is deterministic with or without a sink.
     std::vector<hip::ConstantEntry> entries;
     int64_t filePos = 0;
+    int64_t constantIndex = 0;
     module.walk([&](ConstantOp c) {
-      if (!c.shouldExternalize() || c.isExternalized()) {
+      if (c.isExternalized()) {
         return;
       }
 
@@ -90,6 +91,9 @@ struct HipsrExternalizeConstantsPass
 
       c.setOffsetAttr(builder.getI64IntegerAttr(offset));
       c.setSizeAttr(builder.getI64IntegerAttr(size));
+      // Ordinal into the runtime gpu_constants[] array; assigned in the same
+      // walk that lays out entries[], so index and file layout stay in sync.
+      c.setIndexAttr(builder.getI64IntegerAttr(constantIndex++));
       filePos = offset + size;
 
       entries.push_back(std::move(entry));

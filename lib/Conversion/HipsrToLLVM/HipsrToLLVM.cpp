@@ -15,23 +15,26 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "HipsrToLLVMUtils.h"
-
 #include "hip/Conversion/HipsrToLLVM/Passes.h"
+#include "hip/Dialect/Hipsr/IR/HipsrConstantOp.h"
+#include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 #include "hip/Dialect/Hipsr/IR/HipsrTypes.h"
 
 #include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"
+#include "mlir/Conversion/LLVMCommon/TypeConverter.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/DialectRegistry.h"
+#include "mlir/Transforms/DialectConversion.h"
 
 namespace mlir {
 namespace hipsr {
 namespace {
 
 // Aggregates every hipsr -> LLVM pattern populator. As each op is ported, add
-// its populateHipsr<Op>LoweringPatterns here (pattern defined in its own
-// <Op>Lowering.cpp, declared in HipsrToLLVMUtils.h) and its addIllegalOp in the
-// interface below. Mirrors how convert-hip-to-llvm's runOnOperation aggregates
-// the per-category populate*LoweringPatterns.
+// its populateHipsr<Op>LoweringPatterns here (each pattern lives with its op in
+// the dialect IR lib, declared in that op's header). Mirrors how
+// convert-hip-to-llvm's runOnOperation aggregates the per-category
+// populate*LoweringPatterns.
 void populateHipsrToLLVMPatterns(const LLVMTypeConverter &typeConverter,
                                  RewritePatternSet &patterns) {
   populateHipsrConstantLoweringPatterns(typeConverter, patterns);
@@ -57,9 +60,11 @@ struct HipsrConvertToLLVMInterface : public ConvertToLLVMPatternInterface {
           return IntegerAttr::get(IntegerType::get(space.getContext(), 64),
                                   static_cast<int64_t>(space.getKind()));
         });
-    // Only hipsr.constant has a lowering today; mark just it illegal (not the
-    // whole dialect) so as-yet-unported hipsr ops do not fail legalization.
-    target.addIllegalOp<ConstantOp>();
+    // The whole dialect must be lowered by this point: any hipsr op still
+    // present at convert-hip-to-llvm has no legal form. Only hipsr.constant has
+    // a pattern today, so an as-yet-unported hipsr op surviving to here is a
+    // pipeline bug and legalization fails loudly.
+    target.addIllegalDialect<HipsrDialect>();
     populateHipsrToLLVMPatterns(typeConverter, patterns);
   }
 };

@@ -26,6 +26,12 @@
 #include "hip/Dialect/Hipsr/IR/HipsrConstantOp.h.inc"
 
 namespace mlir {
+// Forward-declared to keep the LLVM-conversion headers out of this widely
+// included op header; only the pattern definition in HipsrConstantOp.cpp needs
+// their full definitions.
+class LLVMTypeConverter;
+class RewritePatternSet;
+
 namespace hipsr {
 
 // Out-of-line template: needs the complete ConstantOp / attribute / dialect
@@ -79,6 +85,12 @@ template <typename T>::llvm::ArrayRef<T> ConstantOp::getDataValues() {
   // The verifier guarantees value XOR source, so this is unreachable.
   llvm_unreachable("ConstantOp has neither value nor source");
 }
+
+/// Registers the hipsr.constant -> LLVM lowering pattern. Defined out-of-line
+/// in HipsrConstantOp.cpp so the op owns its lowering; aggregated by
+/// convert-hip-to-llvm through HipsrDialect's ConvertToLLVMPatternInterface.
+void populateHipsrConstantLoweringPatterns(const LLVMTypeConverter &converter,
+                                           RewritePatternSet &patterns);
 
 } // namespace hipsr
 } // namespace mlir
