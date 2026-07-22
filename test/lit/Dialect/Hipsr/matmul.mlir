@@ -3,8 +3,10 @@
 //
 //===----------------------------------------------------------------------===//
 // Tests for hipsr.matmul, one part per RUN line:
-//   - CHECK:    round-trips the op (empty region) and checks verifier errors;
-//   - POPULATE: runs -hipsr-populate-shape-region and checks the emitted shape.
+//   - the default RUN line round-trips the op (empty region) and checks the
+//     verifier errors;
+//   - the POPULATE RUN line runs -hipsr-populate-shape-region and checks the
+//     emitted shape.
 // Generic shape-region structural rules live in shape_region_verify.mlir.
 //===----------------------------------------------------------------------===//
 
