@@ -2,20 +2,16 @@
 // Licensed under the MIT License.
 //
 //===----------------------------------------------------------------------===//
-// Pass-level behavior of -hipsr-populate-shape-region: what the pass does over a
-// function, independent of any single op's shape math (that is checked per op in
-// cast.mlir, matmul.mlir, ...). Two behaviors:
-//   - idempotency: a region that is already populated is left untouched;
-//   - whole-function walk: every empty ShapeRegionInterface region in the
-//     function, across op kinds, is filled in a single run.
+// Pass-level behavior of -hipsr-populate-shape-region (per-op shape math is
+// checked in cast.mlir, matmul.mlir, ...):
+//   - idempotency: an already-populated region is left untouched;
+//   - whole-function walk: every empty region is filled in a single run.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt %s -split-input-file -hipsr-populate-shape-region | FileCheck %s
 
-// The pass fills only empty regions, so this op's hand-written region is left
-// untouched -- the generated shape.shape_of form is never emitted over it. The
-// entry-block args (ctx, input) are verifier-required even though this region
-// ignores them.
+// The pass fills only empty regions, so this hand-written region is left
+// untouched (no generated shape.shape_of).
 // CHECK-LABEL: func.func @already_populated
 // CHECK:       hipsr.cast
 // CHECK:       shape_region {
@@ -25,7 +21,7 @@
 // CHECK-NOT:   shape.shape_of
 func.func @already_populated(%ctx: !hipsr.context, %input: tensor<4x8xf32>, %init: tensor<4x8xf16>) -> tensor<4x8xf16> {
   %0 = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>) outs(%init : tensor<4x8xf16>) : tensor<4x8xf16> shape_region {
-  ^bb0(%ctxarg: !hipsr.context, %in: tensor<4x8xf32>):
+  ^bb0(%in: tensor<4x8xf32>):
     %c4 = arith.constant 4 : index
     %c8 = arith.constant 8 : index
     hipsr.shape_yield (%c4, %c8) : [f16]
@@ -36,8 +32,7 @@ func.func @already_populated(%ctx: !hipsr.context, %input: tensor<4x8xf32>, %ini
 // -----
 
 // A cast feeds a matmul; the pass fills both empty regions in one run, each
-// emitting its own op-specific shape computation (cast: shape_of + get_extent;
-// matmul: the K-equality guard).
+// with its own shape computation (cast: shape_of; matmul: K-equality guard).
 // CHECK-LABEL: func.func @whole_function_walk
 // CHECK:       hipsr.cast(%{{.+}}) ins(%{{.+}} : tensor<?x8xf32>) outs(%{{.+}} : tensor<?x8xf16>) : tensor<?x8xf16> shape_region {
 // CHECK:         shape.shape_of

@@ -2,20 +2,18 @@
 // Licensed under the MIT License.
 //
 //===----------------------------------------------------------------------===//
-// hipsr.cast shape region, exercised through -hipsr-populate-shape-region: the
-// op's ShapeRegionInterface::populateShapeRegion() emits the shape computation
-// end-to-end (generated, not hand-written). Pass-level behavior (idempotency,
-// whole-function walk) lives in populate_shape_region.mlir.
+// hipsr.cast's populateShapeRegion() emits the shape computation, checked via
+// -hipsr-populate-shape-region. Pass-level behavior lives in
+// populate_shape_region.mlir.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt %s -split-input-file -hipsr-populate-shape-region | FileCheck %s
 
-// An empty shape region gets populated: shape.shape_of + one shape.get_extent
-// per dim, yielded with the output element type. shape.shape_of reads the
-// entry-block arg (IsolatedFromAbove), not the op's operand.
+// Empty region populated: shape.shape_of (over the entry-block arg) + one
+// get_extent per dim, yielded with the output element type.
 // CHECK-LABEL: func.func @cast_tensor
 // CHECK:       hipsr.cast(%{{.+}}) ins(%{{.+}} : tensor<?x8xf32>) outs(%{{.+}} : tensor<?x8xf16>) : tensor<?x8xf16> shape_region {
-// CHECK:         ^bb0(%{{.+}}: !hipsr.context, %[[IN:.+]]: tensor<?x8xf32>):
+// CHECK:         ^bb0(%[[IN:.+]]: tensor<?x8xf32>):
 // CHECK:         %[[SHAPE:.+]] = shape.shape_of %[[IN]]
 // CHECK:         %[[D0:.+]] = shape.get_extent %[[SHAPE]]
 // CHECK:         %[[D1:.+]] = shape.get_extent %[[SHAPE]]

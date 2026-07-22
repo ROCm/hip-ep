@@ -2,22 +2,18 @@
 // Licensed under the MIT License.
 //
 //===----------------------------------------------------------------------===//
-// Shape regions are IsolatedFromAbove, so the stock -cse and -canonicalize
-// passes must not hoist region-internal ops out or merge them with identical
-// ops in the enclosing function. Each RUN asserts the region body survives
-// intact.
+// Shape regions are IsolatedFromAbove, so -cse and -canonicalize must not merge
+// region-internal ops with identical ops in the enclosing function.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt %s -split-input-file -cse | FileCheck %s
 // RUN: hip-mlir-opt %s -split-input-file -canonicalize | FileCheck %s
 
-// The function computes shape.shape_of on the SAME value the region does. CSE
-// must not merge the region's shape.shape_of with the outer one (that would
-// pull an outside value into the isolated region); the region keeps its own
-// entry-block arg + its own shape.shape_of over that arg.
+// Function and region both compute shape.shape_of on the same value; CSE must
+// not merge them (the region keeps its own over the entry-block arg).
 // CHECK-LABEL: func.func @cse_keeps_region_isolated
 // CHECK:       hipsr.cast
-// CHECK:         ^bb0(%{{.+}}: !hipsr.context, %[[IN:.+]]: tensor<?x8xf32>):
+// CHECK:         ^bb0(%[[IN:.+]]: tensor<?x8xf32>):
 // CHECK:         shape.shape_of %[[IN]]
 // CHECK:         hipsr.shape_yield
 func.func @cse_keeps_region_isolated(%ctx: !hipsr.context, %input: tensor<?x8xf32>,
@@ -28,7 +24,7 @@ func.func @cse_keeps_region_isolated(%ctx: !hipsr.context, %input: tensor<?x8xf3
   %0 = hipsr.cast(%ctx) ins(%input : tensor<?x8xf32>)
                   outs(%init : tensor<?x8xf16>) : tensor<?x8xf16>
                   shape_region {
-  ^bb0(%ctxarg: !hipsr.context, %in: tensor<?x8xf32>):
+  ^bb0(%in: tensor<?x8xf32>):
     %shape = shape.shape_of %in : tensor<?x8xf32> -> tensor<2xindex>
     %c0 = arith.constant 0 : index
     %d0 = shape.get_extent %shape, %c0 : tensor<2xindex>, index -> index
@@ -41,12 +37,11 @@ func.func @cse_keeps_region_isolated(%ctx: !hipsr.context, %input: tensor<?x8xf3
 
 // -----
 
-// A constant defined in the function equals one used inside the region. -cse /
-// -canonicalize must not replace the region-internal constant with the outer
-// one (that would be an outside capture); the region keeps its own.
+// An outer constant equals one inside the region; -cse / -canonicalize must not
+// replace the region's constant with it (the region keeps its own).
 // CHECK-LABEL: func.func @cse_keeps_region_constant
 // CHECK:       hipsr.cast
-// CHECK:         ^bb0(%{{.+}}: !hipsr.context, %[[IN:.+]]: tensor<?x8xf32>):
+// CHECK:         ^bb0(%[[IN:.+]]: tensor<?x8xf32>):
 // CHECK:         arith.constant 0 : index
 // CHECK:         hipsr.shape_yield
 func.func @cse_keeps_region_constant(%ctx: !hipsr.context, %input: tensor<?x8xf32>,
@@ -57,7 +52,7 @@ func.func @cse_keeps_region_constant(%ctx: !hipsr.context, %input: tensor<?x8xf3
   %0 = hipsr.cast(%ctx) ins(%input : tensor<?x8xf32>)
                   outs(%init : tensor<?x8xf16>) : tensor<?x8xf16>
                   shape_region {
-  ^bb0(%ctxarg: !hipsr.context, %in: tensor<?x8xf32>):
+  ^bb0(%in: tensor<?x8xf32>):
     %shape = shape.shape_of %in : tensor<?x8xf32> -> tensor<2xindex>
     %c0 = arith.constant 0 : index
     %d0 = shape.get_extent %shape, %c0 : tensor<2xindex>, index -> index

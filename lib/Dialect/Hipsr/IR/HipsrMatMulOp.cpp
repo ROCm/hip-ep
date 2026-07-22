@@ -5,7 +5,7 @@
 
 #include "hip/Dialect/Hipsr/IR/HipsrMatMulOp.h"
 
-#include "hip/Dialect/Hipsr/IR/HipsrShapeRegionHelpers.h"
+#include "hip/Dialect/Hipsr/IR/HipsrShapeRegionInterface.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
@@ -21,11 +21,10 @@ using namespace mlir::hipsr;
 #include "hip/Dialect/Hipsr/IR/HipsrMatMulOp.cpp.inc"
 
 namespace {
-// Block args follow the operands: 0 is ctx (unused), 1/2 are A/B.
 struct MatMulShapeArgs : ShapeRegionArgs<MatMulOp> {
   using ShapeRegionArgs::ShapeRegionArgs;
-  Value getA() const { return ins(1); }
-  Value getB() const { return ins(2); }
+  Value getA() const { return in(0); }
+  Value getB() const { return in(1); }
 };
 } // namespace
 
