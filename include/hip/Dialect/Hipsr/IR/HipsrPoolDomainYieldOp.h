@@ -15,9 +15,6 @@
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
-// The .inc references PoolDomainOp (from the HasParent trait) only by name, so
-// a forward declaration is enough. The full type is needed only in the .cpp,
-// which includes its header.
 namespace mlir {
 namespace hipsr {
 class PoolDomainOp;

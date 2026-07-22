@@ -5,6 +5,7 @@
 
 add_library(HipsrDialectTransforms STATIC
   ExternalizeConstants.cpp
+  PartitionPoolDomains.cpp
   PopulateShapeRegionPass.cpp
 )
 

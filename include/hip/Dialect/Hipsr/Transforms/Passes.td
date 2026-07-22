@@ -39,6 +39,24 @@ def PopulateShapeRegionPass
   ];
 }
 
+def PartitionPoolDomainsPass
+    : Pass<"hipsr-partition-pool-domains", "mlir::func::FuncOp"> {
+  let summary = "Outline a barrier-free function into one hipsr pool domain";
+  let description = [{
+    Outlines the non-terminator operations of a barrier-free, single-block
+    function into one `hipsr.pool_domain` with standard `IsolatedFromAbove`
+    semantics. External values enter through operands and entry-block
+    arguments; escaping values become results.
+
+    Phase one rejects active barriers, multi-block functions, and existing
+    pool domains before mutation. Declarations and empty functions are
+    unchanged.
+  }];
+  let dependentDialects = [
+    "::mlir::hipsr::HipsrDialect"
+  ];
+}
+
 def HipsrExternalizeConstantsPass
     : Pass<"hipsr-externalize-constants", "mlir::ModuleOp"> {
   let summary = "Write hipsr.constant data to a constants file and mark offset/size";
