@@ -34,19 +34,17 @@
 namespace mlir {
 namespace hipsr {
 
-// Runtime symbol fetching a constant's device pointer by index. Same name the
-// hip.get_constant lowering uses (kHipGetConstant in HipToLLVMUtils.h) so both
-// pipelines bind to the identical RuntimeState callback.
-inline constexpr const char *kHipsrGetConstant = "hipdnn_ep_constant_get";
+// Runtime symbol returning a constant's device pointer by its byte offset into
+// the constants blob (wrap_get_global(state, offset, size) in
+// hipdnn_ep_runtime_state.cpp).
+inline constexpr const char *kHipsrWrapGetGlobal = "wrap_get_global";
 
-// Lowers hipsr.constant to LLVM. \p indexMap gives each externalized constant
-// its module-walk-order index (the second @hipdnn_ep_constant_get argument);
-// \p ctxMap gives each externalized constant the (pre-conversion) !hip.context
-// block argument of its enclosing function. Both are owned by the caller and
-// must outlive the pattern set.
+// Lowers hipsr.constant to LLVM. \p ctxMap gives each externalized constant the
+// (pre-conversion) !hip.context block argument of its enclosing function; it is
+// owned by the caller and must outlive the pattern set. The constant's
+// offset/size are read directly off the op.
 void populateHipsrConstantLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns,
-    const llvm::DenseMap<Operation *, int64_t> &indexMap,
     const llvm::DenseMap<Operation *, Value> &ctxMap);
 
 } // namespace hipsr

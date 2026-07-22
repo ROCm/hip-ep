@@ -41,6 +41,9 @@ struct RuntimeState {
   void *gpu_constants_blob;
   void **gpu_constants;
   size_t num_constants;
+  // Byte size of gpu_constants_blob; bounds-checks
+  // wrap_get_global(offset,size).
+  size_t gpu_constants_blob_size;
 
   // Memory pooling support — multi-domain.
   //

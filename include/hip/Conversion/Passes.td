@@ -37,7 +37,7 @@ def ConvertHipsrToLLVMPass : Pass<"convert-hipsr-to-llvm", "mlir::ModuleOp"> {
   let description = [{
     Lowers hipsr ops to the LLVM dialect. Currently handles `hipsr.constant`:
     an externalized constant (offset/size set) becomes a
-    `@hipdnn_ep_constant_get(ctx, index)` runtime call wrapped in a memref
+    `@wrap_get_global(ctx, offset, size)` runtime call wrapped in a memref
     descriptor, mirroring the `hip.get_constant` lowering. `!hip.context`
     function arguments convert to `!llvm.ptr`, and `#hipsr.mem<device>` memrefs
     map to their AMDGPU integer address space.
