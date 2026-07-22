@@ -87,8 +87,8 @@ func.func @matmul_operand_not_shaped(%ctx: !hipsr.context, %a: f16,
 // -----
 
 //===----------------------------------------------------------------------===//
-// Shape-region population (POPULATE RUN line). The 2-D case pins the full
-// dataflow; the rest assert only the structure that differs from it.
+// Shape-region population (POPULATE RUN line). The 2-D case checks the whole
+// generated region; the other cases check only what differs from it.
 //===----------------------------------------------------------------------===//
 
 // Canonical 2-D case, checked end-to-end: entry-block args (read via %[[A]]/
