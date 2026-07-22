@@ -27,7 +27,7 @@ func.func @cast_no_shape_region(%ctx: !hipsr.context, %input: tensor<?x8xf32>,
 // -----
 
 // Positive: a populated region reads its input via the entry-block arg (arg 0),
-// not the op's operand (IsolatedFromAbove).
+// as required by IsolatedFromAbove.
 // CHECK-LABEL: func.func @cast_uses_block_arg
 // CHECK:       hipsr.cast
 // CHECK:         ^bb0(%[[IN:.+]]: tensor<?x8xf32>):
