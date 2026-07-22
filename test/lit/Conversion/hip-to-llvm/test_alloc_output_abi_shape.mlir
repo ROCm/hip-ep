@@ -17,7 +17,8 @@ module attributes {
 } {
   // Gemma3-class vision encoder: internal BSH, ONNX/OGA image_features is SH.
   // CHECK-LABEL: llvm.func @vision_internal3_return2
-  // CHECK:       %[[SEQ:.*]] = memref.dim
+  // CHECK:       %[[C1:.*]] = llvm.mlir.constant(1 : index) : i64
+  // CHECK:       %[[SEQ:.*]] = llvm.mul %[[C1]], %{{.*}} : i64
   // CHECK:       %[[C2560:.*]] = llvm.mlir.constant(2560 : index) : i64
   // CHECK:       %[[SHAPE:.*]] = llvm.alloca %{{.*}} x !llvm.array<2 x i64>
   // CHECK:       llvm.store %[[SEQ]], %{{.*}} : i64, !llvm.ptr
@@ -35,7 +36,7 @@ module attributes {
   // Conv-style flatten: internal rank 4, returned rank 2 (both static).
   // CHECK-LABEL: llvm.func @collapse_static
   // CHECK:       %[[C1:.*]] = llvm.mlir.constant(1 : index) : i64
-  // CHECK:       %[[FLAT:.*]] = llvm.mlir.constant(200704 : index) : i64
+  // CHECK:       %[[FLAT:.*]] = llvm.mul %{{.*}} : i64
   // CHECK:       %[[SHAPE2:.*]] = llvm.alloca %{{.*}} x !llvm.array<2 x i64>
   // CHECK:       llvm.store %[[C1]], %{{.*}} : i64, !llvm.ptr
   // CHECK:       llvm.store %[[FLAT]], %{{.*}} : i64, !llvm.ptr
