@@ -5,10 +5,11 @@
 //===- ConstantLowering.cpp - Lower hipsr.constant to LLVM ---------------===//
 //
 // Mirrors the hip.get_constant lowering (HipToLLVM/MemoryLowering.cpp): an
-// externalized hipsr.constant becomes a @hipdnn_ep_constant_get(ctx, index)
+// externalized hipsr.constant becomes a @wrap_get_global(ctx, offset, size)
 // runtime call whose returned device pointer is wrapped in a memref
-// descriptor. hipsr.constant carries no operands, so the ctx pointer and the
-// index are supplied out-of-band via the maps built in the pass.
+// descriptor. hipsr.constant carries no operands, so ctx comes from the
+// enclosing function's !hip.context arg (via a map built in the pass) and
+// offset/size are read off the op.
 //
 //===----------------------------------------------------------------------===//
 
@@ -125,8 +126,8 @@ private:
 
   // Inline (disableExternalize): a compile-time constant. Only the ranked
   // tensor result is lowered here (to arith.constant); a device memref result
-  // in this state is not yet supported (needs a memref global) and is a
-  // follow-up. See the report / issue #105 for the plan.
+  // in this state is not yet supported (needs a memref.global) and is a
+  // follow-up.
   LogicalResult lowerInline(ConstantOp op,
                             ConversionPatternRewriter &rewriter) const {
     auto tensorType = dyn_cast<RankedTensorType>(op.getResult().getType());
