@@ -1,0 +1,320 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/schemas/report_input.schema.json",
+  "title": "ONNX-HIP Compatibility Report Input",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "meta",
+    "summary",
+    "operator_distribution",
+    "mapping_chain",
+    "compatibility",
+    "reason_catalog"
+  ],
+  "properties": {
+    "meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model_path",
+        "generated_at_utc",
+        "repo_root",
+        "tool_versions"
+      ],
+      "properties": {
+        "model_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "generated_at_utc": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T"
+        },
+        "repo_root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "git_sha": {
+          "type": "string"
+        },
+        "tool_versions": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "total_node_instances",
+        "supported_instances",
+        "unsupported_instances",
+        "total_operator_types",
+        "fully_compatible_operator_types",
+        "partially_compatible_operator_types",
+        "unsupported_operator_types"
+      ],
+      "properties": {
+        "total_node_instances": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "supported_instances": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unsupported_instances": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_operator_types": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fully_compatible_operator_types": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "partially_compatible_operator_types": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unsupported_operator_types": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "operator_distribution": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/operatorDistributionRow"
+      }
+    },
+    "mapping_chain": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/mappingChainRow"
+      }
+    },
+    "compatibility": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/compatibilityRow"
+      }
+    },
+    "reason_catalog": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/reasonCatalogRow"
+      }
+    }
+  },
+  "$defs": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "full",
+        "partial",
+        "unsupported"
+      ]
+    },
+    "backend": {
+      "type": "string",
+      "enum": [
+        "MIOpen",
+        "hipBLASLt",
+        "Custom Hip Kernel",
+        "Compile Time Optimization",
+        "Unknown"
+      ]
+    },
+    "reasonCode": {
+      "type": "string",
+      "enum": [
+        "NO_HIP_DIALECT_IMPL",
+        "COMPILE_TIME_TENSOR_OP",
+        "MISSING_HIP_REQUIRED_ATTR",
+        "EXTRA_ONNX_ATTR_NOT_IN_HIP",
+        "ONNX_INPUT_BELOW_HIP_MIN",
+        "ONNX_INPUT_ABOVE_HIP_MAX",
+        "ONNX_OUTPUT_BELOW_HIP_MIN",
+        "ONNX_OUTPUT_ABOVE_HIP_MAX"
+      ]
+    },
+    "operatorKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "onnx_op",
+        "domain"
+      ],
+      "properties": {
+        "onnx_op": {
+          "type": "string",
+          "minLength": 1
+        },
+        "domain": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "operatorDistributionRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "onnx_op",
+        "domain",
+        "count",
+        "data_types",
+        "status",
+        "hip_op"
+      ],
+      "properties": {
+        "onnx_op": {
+          "type": "string"
+        },
+        "domain": {
+          "type": "string"
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "data_types": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "hip_op": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runtime_func": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "backend": {
+          "$ref": "#/$defs/backend"
+        },
+        "op_description": {
+          "type": "string"
+        }
+      }
+    },
+    "mappingChainRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "onnx_op",
+        "domain",
+        "hip_op",
+        "runtime_func",
+        "backend"
+      ],
+      "properties": {
+        "onnx_op": {
+          "type": "string"
+        },
+        "domain": {
+          "type": "string"
+        },
+        "hip_op": {
+          "type": "string"
+        },
+        "runtime_func": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "backend": {
+          "$ref": "#/$defs/backend"
+        }
+      }
+    },
+    "compatibilityRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "onnx_op",
+        "domain",
+        "status",
+        "reason_codes",
+        "reason_texts",
+        "evidence"
+      ],
+      "properties": {
+        "onnx_op": {
+          "type": "string"
+        },
+        "domain": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "reason_codes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/reasonCode"
+          }
+        },
+        "reason_texts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source_file",
+              "json_pointer"
+            ],
+            "properties": {
+              "source_file": {
+                "type": "string"
+              },
+              "json_pointer": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "reasonCatalogRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "default_text"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/reasonCode"
+        },
+        "default_text": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
