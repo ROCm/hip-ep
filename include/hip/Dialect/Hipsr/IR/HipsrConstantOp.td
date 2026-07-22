@@ -29,13 +29,14 @@ def Hipsr_ConstantOp : Hipsr_Op<"constant", [Pure]> {
     - ext source : `source` references a `#hipsr.file_source<...>` (on-disk
                    file) or `#hipsr.mem_source<...>` (a raw ORT pointer).
 
-    Externalization only *adds* `offset` + `size` (the location in the
-    compiler-produced constants file); it never removes `value` / `source`,
-    so `getDataValues()` keeps working afterwards. Valid states:
-    `{value}`, `{source}`, `{value, offset, size}`, `{source, offset, size}`.
+    Externalization only *adds* `offset` + `size` + `index` (the location in
+    the compiler-produced constants file and the constant's ordinal in the
+    runtime constants array); it never removes `value` / `source`, so
+    `getDataValues()` keeps working afterwards. Valid states: `{value}`,
+    `{source}`, `{value, offset, size, index}`, `{source, offset, size, index}`.
 
-    `externalize` (default true) is an orthogonal opt-out flag; a downstream pass
-    calls `disableExternalize()` to keep a constant inline (compile-time value).
+    A consumer that wants a compile-time value replaces the op with the concrete
+    constant (e.g. `arith.constant`); there is no inline opt-out flag.
 
     The result is a ranked tensor (pre-bufferization) or a device `memref`
     (`#hipsr.mem<device>`, post-bufferization); constants reside in VRAM. The
@@ -53,7 +54,7 @@ def Hipsr_ConstantOp : Hipsr_Op<"constant", [Pure]> {
     OptionalAttr<AnyAttrOf<[Hipsr_FileSourceAttr, Hipsr_MemSourceAttr]>>:$source,
     OptionalAttr<I64Attr>:$offset,
     OptionalAttr<I64Attr>:$size,
-    OptionalAttr<BoolAttr>:$externalize
+    OptionalAttr<I64Attr>:$index
   );
 
   let results = (outs Hipsr_TensorOrDeviceMemRef:$result);
@@ -69,16 +70,6 @@ def Hipsr_ConstantOp : Hipsr_Op<"constant", [Pure]> {
     bool hasExternalSource() { return getSourceAttr() != nullptr; }
     /// True if the constant has been externalized (offset/size into constants file).
     bool isExternalized() { return getOffsetAttr() != nullptr; }
-    /// Whether this constant should be externalized (defaults to true).
-    bool shouldExternalize() {
-      ::mlir::BoolAttr a = getExternalizeAttr();
-      return a ? a.getValue() : true;
-    }
-    /// Opt out of externalization -- keep inline. One-way decision.
-    void disableExternalize() {
-      (*this)->setAttr("externalize",
-                       ::mlir::BoolAttr::get(getContext(), false));
-    }
 
     /// Returns a typed view of the constant data (inline dense / mem source /
     /// file source via the dialect cache). MorphiZen-only contract; works both

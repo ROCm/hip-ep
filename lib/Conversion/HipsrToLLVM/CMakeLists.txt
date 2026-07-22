@@ -5,7 +5,6 @@
 
 add_library(HipsrToLLVM STATIC
   HipsrToLLVM.cpp
-  ConstantLowering.cpp
 )
 
 add_dependencies(HipsrToLLVM
