@@ -6,50 +6,52 @@
 //
 // Verifies:
 // - An externalized hipsr.constant (offset/size set) lowers to
-//   llvm.call @hipdnn_ep_constant_get(%ctx, %index).
+//   llvm.call @wrap_get_global(%ctx, %offset, %size), with offset/size read
+//   off the op.
 // - The !hip.context function argument is used as %ctx (converted to !llvm.ptr,
 //   not hardcoded to arg 0).
 // - The returned AS 0 pointer is address-space-cast to the device space (AS 1).
-// - Multiple externalized constants get module-walk-order indices 0, 1, ...
 // - The pass stamps hipdnn.constant_sizes / hipdnn.constant_offsets on the
-//   module (source=NONE metadata, in the same walk order as the indices), and
-//   stamps nothing when there is no externalized constant.
+//   module (source=NONE metadata, one entry per externalized constant in
+//   module walk order), and stamps nothing when there is no externalized
+//   constant.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt %s -split-input-file --convert-hipsr-to-llvm | FileCheck %s
 
 // Module-level metadata: one array entry per externalized constant, in module
-// walk order (index order). single_constant's %c is 0; two_constants' %w/%b are
-// 1/2. Attributes print alphabetically, so offsets precede sizes.
+// walk order (single_constant's %c, then two_constants' %w, %b). Attributes
+// print alphabetically, so offsets precede sizes.
 // CHECK: module attributes {hipdnn.constant_offsets = array<i64: 0, 0, 256>, hipdnn.constant_sizes = array<i64: 48, 256, 32>}
 module {
   // CHECK-LABEL: llvm.func @single_constant
   // CHECK-SAME:  (%[[CTX:.*]]: !llvm.ptr)
   func.func @single_constant(%ctx: !hip.context)
       -> memref<3x4xf32, #hipsr.mem<device>> {
-    // CHECK:   %[[IDX:.*]] = llvm.mlir.constant(0 : i64) : i64
-    // CHECK:   %[[PTR:.*]] = llvm.call @hipdnn_ep_constant_get(%[[CTX]], %[[IDX]]) : (!llvm.ptr, i64) -> !llvm.ptr
+    // CHECK:   %[[OFF:.*]] = llvm.mlir.constant(0 : i64) : i64
+    // CHECK:   %[[SZ:.*]] = llvm.mlir.constant(48 : i64) : i64
+    // CHECK:   %[[PTR:.*]] = llvm.call @wrap_get_global(%[[CTX]], %[[OFF]], %[[SZ]]) : (!llvm.ptr, i64, i64) -> !llvm.ptr
     // CHECK:   llvm.addrspacecast %[[PTR]] : !llvm.ptr to !llvm.ptr<1>
     %c = hipsr.constant {value = dense<1.0> : tensor<3x4xf32>, offset = 0 : i64, size = 48 : i64}
        : memref<3x4xf32, #hipsr.mem<device>>
     return %c : memref<3x4xf32, #hipsr.mem<device>>
   }
 
-  // Two externalized constants. Indices are the module-global walk order, so
-  // they continue after @single_constant's constant (which is index 0): %w is
-  // 1, %b is 2. The context argument is not arg 0 here, exercising the
-  // per-function ctx lookup.
+  // Two externalized constants; each call carries its own offset/size. The
+  // context argument is not arg 0 here, exercising the per-function ctx lookup.
   // CHECK-LABEL: llvm.func @two_constants
   // CHECK-SAME:  (%[[N:.*]]: i64, %[[CTX2:.*]]: !llvm.ptr)
   func.func @two_constants(%n: i64, %ctx: !hip.context)
       -> (memref<64xf32, #hipsr.mem<device>>, memref<8xf32, #hipsr.mem<device>>) {
-    // CHECK:   %[[I1:.*]] = llvm.mlir.constant(1 : i64) : i64
-    // CHECK:   %[[P0:.*]] = llvm.call @hipdnn_ep_constant_get(%[[CTX2]], %[[I1]]) : (!llvm.ptr, i64) -> !llvm.ptr
+    // CHECK:   %[[OFF0:.*]] = llvm.mlir.constant(0 : i64) : i64
+    // CHECK:   %[[SZ0:.*]] = llvm.mlir.constant(256 : i64) : i64
+    // CHECK:   %[[P0:.*]] = llvm.call @wrap_get_global(%[[CTX2]], %[[OFF0]], %[[SZ0]]) : (!llvm.ptr, i64, i64) -> !llvm.ptr
     // CHECK:   llvm.addrspacecast %[[P0]] : !llvm.ptr to !llvm.ptr<1>
     %w = hipsr.constant {value = dense<1.0> : tensor<64xf32>, offset = 0 : i64, size = 256 : i64}
        : memref<64xf32, #hipsr.mem<device>>
-    // CHECK:   %[[I2:.*]] = llvm.mlir.constant(2 : i64) : i64
-    // CHECK:   %[[P1:.*]] = llvm.call @hipdnn_ep_constant_get(%[[CTX2]], %[[I2]]) : (!llvm.ptr, i64) -> !llvm.ptr
+    // CHECK:   %[[OFF1:.*]] = llvm.mlir.constant(256 : i64) : i64
+    // CHECK:   %[[SZ1:.*]] = llvm.mlir.constant(32 : i64) : i64
+    // CHECK:   %[[P1:.*]] = llvm.call @wrap_get_global(%[[CTX2]], %[[OFF1]], %[[SZ1]]) : (!llvm.ptr, i64, i64) -> !llvm.ptr
     // CHECK:   llvm.addrspacecast %[[P1]] : !llvm.ptr to !llvm.ptr<1>
     %b = hipsr.constant {value = dense<2.0> : tensor<8xf32>, offset = 256 : i64, size = 32 : i64}
        : memref<8xf32, #hipsr.mem<device>>

@@ -53,22 +53,17 @@ void ConvertHipsrToLLVMPass::runOnOperation() {
                                 static_cast<int64_t>(space.getKind()));
       });
 
-  // Index for each externalized constant = module walk order (0, 1, 2, ...),
-  // the second @hipdnn_ep_constant_get argument. The same walk collects each
-  // constant's size/offset (stamped append-only by hipsr-externalize-constants)
-  // into hipdnn.constant_sizes / hipdnn.constant_offsets. Because a constant's
-  // index and its metadata slot come from the same iteration over the same op,
-  // the ConstantInfo[index] that GenerateInterface builds from these attrs is
-  // aligned with the runtime @hipdnn_ep_constant_get(ctx, index) call by
-  // construction -- no cross-pass walk-order assumption. Only sizes/offsets are
-  // emitted (no per-source descriptors), so every ConstantInfo.source stays
-  // NONE and the runtime bulk-loads the constants file.
-  llvm::DenseMap<Operation *, int64_t> indexMap;
+  // Record each externalized constant's offset/size (stamped by
+  // hipsr-externalize-constants) into hipdnn.constant_{offsets,sizes}. These
+  // drive the runtime init that allocates and loads the constants blob;
+  // @wrap_get_global(ctx, offset, size) then returns blob + offset. The offset
+  // baked into the call is read off the same op below, so it always matches the
+  // offset recorded here. Only offset/size are emitted (no per-source
+  // descriptors), so ConstantInfo.source stays NONE (runtime bulk-loads the
+  // constants file).
   llvm::SmallVector<int64_t> constantSizes, constantOffsets;
-  int64_t nextIndex = 0;
   module.walk([&](ConstantOp c) {
     if (c.isExternalized()) {
-      indexMap[c.getOperation()] = nextIndex++;
       constantOffsets.push_back(c.getOffsetAttr().getInt());
       constantSizes.push_back(c.getSizeAttr().getInt());
     }
@@ -100,8 +95,7 @@ void ConvertHipsrToLLVMPass::runOnOperation() {
   });
 
   RewritePatternSet patterns(ctx);
-  populateHipsrConstantLoweringPatterns(typeConverter, patterns, indexMap,
-                                        ctxMap);
+  populateHipsrConstantLoweringPatterns(typeConverter, patterns, ctxMap);
 
   // Bundle func/memref/arith/cf lowering with the hipsr lowering to minimize
   // unrealized casts at the memref/LLVM boundary (same rationale as

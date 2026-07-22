@@ -142,6 +142,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->gpu_constants_blob = nullptr;
   state->gpu_constants = nullptr;
   state->num_constants = 0;
+  state->gpu_constants_blob_size = 0;
   // Per-domain pool arrays start empty; grown on demand (no compile-time cap).
   state->num_pool_domains = 0;
   state->pool_base = nullptr;
@@ -321,6 +322,7 @@ static int hipmalloc_and_fixup(RuntimeState *state,
   }
   TIMING_LOG("[Session] hipMalloc VRAM: %.3fs (%zu bytes)\n",
              record_elapsed(t_prev), total_size);
+  state->gpu_constants_blob_size = total_size;
   auto *constants = meta->constants();
   for (int64_t i = 0, n = (int64_t)constants->size(); i < n; ++i) {
     size_t offset = static_cast<size_t>(constants->Get(i)->offset());
@@ -849,6 +851,23 @@ void *hipdnn_ep_constant_get(RuntimeState *state, int64_t index) {
     return nullptr;
   }
   return state->gpu_constants[index];
+}
+
+// Offset-based constant access: return a pointer to `offset` inside the single
+// constants blob (which init loaded from the constants file). Used by the
+// hipsr constant lowering (@wrap_get_global), where the constant's file offset
+// is baked into the call rather than resolved through an index.
+void *wrap_get_global(RuntimeState *state, int64_t offset, int64_t size) {
+  if (!state || !state->gpu_constants_blob || offset < 0 || size < 0 ||
+      (uint64_t)offset + (uint64_t)size > state->gpu_constants_blob_size) {
+    fprintf(stderr,
+            "wrap_get_global: invalid state/offset/size (offset=%lld size=%lld "
+            "blob=%zu)\n",
+            (long long)offset, (long long)size,
+            state ? state->gpu_constants_blob_size : 0);
+    return nullptr;
+  }
+  return static_cast<char *>(state->gpu_constants_blob) + offset;
 }
 
 void *hipdnn_ep_state_get_stream(RuntimeState *state) {

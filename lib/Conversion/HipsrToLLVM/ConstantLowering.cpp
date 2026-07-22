@@ -20,9 +20,8 @@ namespace {
 
 struct ConstantLowering : public ConvertOpToLLVMPattern<ConstantOp> {
   ConstantLowering(const LLVMTypeConverter &converter,
-                   const llvm::DenseMap<Operation *, int64_t> &indexMap,
                    const llvm::DenseMap<Operation *, Value> &ctxMap)
-      : ConvertOpToLLVMPattern(converter), indexMap(indexMap), ctxMap(ctxMap) {}
+      : ConvertOpToLLVMPattern(converter), ctxMap(ctxMap) {}
 
   LogicalResult
   matchAndRewrite(ConstantOp op, OpAdaptor adaptor,
@@ -41,9 +40,10 @@ struct ConstantLowering : public ConvertOpToLLVMPattern<ConstantOp> {
   }
 
 private:
-  // Externalized: emit @hipdnn_ep_constant_get(ctx, index) and wrap the
+  // Externalized: emit @wrap_get_global(ctx, offset, size) and wrap the
   // returned AS 0 device pointer in a memref descriptor (mirrors
-  // GetConstantOpLowering).
+  // GetConstantOpLowering). offset/size are read off the op (stamped by
+  // hipsr-externalize-constants).
   LogicalResult lowerExternalized(ConstantOp op,
                                   ConversionPatternRewriter &rewriter) const {
     Location loc = op.getLoc();
@@ -70,22 +70,21 @@ private:
       return failure();
     }
 
-    auto idxIt = indexMap.find(op.getOperation());
-    if (idxIt == indexMap.end()) {
-      op.emitError("hipsr.constant: missing constant index");
-      return failure();
-    }
-    Value indexVal = LLVM::ConstantOp::create(
-        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(idxIt->second));
+    Value offsetVal = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type,
+        rewriter.getI64IntegerAttr(op.getOffsetAttr().getInt()));
+    Value sizeVal = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type,
+        rewriter.getI64IntegerAttr(op.getSizeAttr().getInt()));
 
-    SmallVector<Type, 2> paramTypes = {ptrType, i64Type};
+    SmallVector<Type, 3> paramTypes = {ptrType, i64Type, i64Type};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kHipsrGetConstant, paramTypes, ptrType);
+        rewriter, module, kHipsrWrapGetGlobal, paramTypes, ptrType);
     if (failed(funcOp)) {
       return failure();
     }
 
-    SmallVector<Value, 2> args = {ctxArg, indexVal};
+    SmallVector<Value, 3> args = {ctxArg, offsetVal, sizeVal};
     auto callOp = LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 
     // The runtime always returns a generic pointer (AS 0). Cast to the memref's
@@ -142,7 +141,6 @@ private:
     return success();
   }
 
-  const llvm::DenseMap<Operation *, int64_t> &indexMap;
   const llvm::DenseMap<Operation *, Value> &ctxMap;
 };
 
@@ -150,9 +148,8 @@ private:
 
 void populateHipsrConstantLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns,
-    const llvm::DenseMap<Operation *, int64_t> &indexMap,
     const llvm::DenseMap<Operation *, Value> &ctxMap) {
-  patterns.add<ConstantLowering>(converter, indexMap, ctxMap);
+  patterns.add<ConstantLowering>(converter, ctxMap);
 }
 
 } // namespace hipsr
