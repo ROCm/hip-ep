@@ -5,17 +5,19 @@
 //===- PopulateShapeRegionPass.cpp - Fill hipsr shape regions -------------===//
 //
 // For each op implementing ShapeRegionInterface whose shape region is empty,
-// creates the entry block with one arg per DPS input, then calls
-// populateShapeRegion() so the op emits its own output-shape computation.
-// Populated regions are skipped, so the pass is idempotent.
+// creates the entry block with the op's category-specific shape-region args
+// (getShapeRegionArgOperands), then calls populateShapeRegion() so the op emits
+// its own output-shape computation. Populated regions are skipped, so the pass
+// is idempotent.
 //
 // Before (region declared but empty):
 //   %0 = hipsr.cast(%ctx) ins(%input : tensor<?x8xf32>)
 //                         outs(%init : tensor<?x8xf16>) : tensor<?x8xf16>
-// After (entry block + args added here; body emitted by the op):
+// After (entry block + args added here; body emitted by the op). cast is a
+// normal op, so its args are the data ins only (ctx dropped):
 //   %0 = hipsr.cast(%ctx) ins(%input) outs(%init)
 //       : tensor<?x8xf16> shape_region {
-//   ^bb0(%ctxarg: !hipsr.context, %in: tensor<?x8xf32>):
+//   ^bb0(%in: tensor<?x8xf32>):
 //     ... op-emitted shape math ...
 //     hipsr.shape_yield (%d0, %d1) : [f16]
 //   }
@@ -30,7 +32,6 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/IR/Builders.h"
-#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 
 namespace mlir {
 namespace hipsr {
@@ -51,18 +52,14 @@ struct PopulateShapeRegionPass
         return;
       }
 
-      // One block arg per DPS input, in order; the isolated region reads these
-      // instead of the op's operands.
       Operation *op = shapeRegionOp.getOperation();
       Block *block = builder.createBlock(&shapeRegion);
-      if (auto dps = dyn_cast<DestinationStyleOpInterface>(op)) {
-        for (OpOperand *in : dps.getDpsInputOperands())
-          block->addArgument(in->get().getType(), op->getLoc());
+      for (Value operand : getShapeRegionArgOperands(shapeRegionOp)) {
+        block->addArgument(operand.getType(), op->getLoc());
       }
       shapeRegionOp.populateShapeRegion(builder, *block);
 
-      // TODO: when EndBarrier ops land, set up their capacity region (region 1)
-      // the same way and fill it via populateCapacityShapeRegion().
+      // TODO: EndBarrier ops also need their capacity region (region 1) filled.
     });
   }
 };

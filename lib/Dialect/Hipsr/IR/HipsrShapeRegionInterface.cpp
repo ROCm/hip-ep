@@ -5,7 +5,9 @@
 
 #include "hip/Dialect/Hipsr/IR/HipsrShapeRegionInterface.h"
 
+#include "hip/Dialect/Hipsr/IR/HipsrEndBarrierInterface.h"
 #include "hip/Dialect/Hipsr/IR/HipsrShapeYieldOp.h"
+#include "hip/Dialect/Hipsr/IR/HipsrStartBarrierInterface.h"
 
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 
@@ -23,7 +25,6 @@ ShapeYieldOp getShapeYieldOp(Region &shapeRegion) {
   return cast<ShapeYieldOp>(shapeRegion.front().getTerminator());
 }
 
-// Take a bare region so one body serves both the shape and capacity regions.
 SmallVector<SmallVector<Value>> resultShapesOf(Region &shapeRegion) {
   ShapeYieldOp yieldOp = getShapeYieldOp(shapeRegion);
   SmallVector<SmallVector<Value>> dims;
@@ -38,9 +39,6 @@ SmallVector<RankedTensorType> resultTypesOf(Region &shapeRegion) {
   for (auto [group, elemType] :
        llvm::zip_equal(yieldOp.getShapes(),
                        yieldOp.getElementTypes().getAsValueRange<TypeAttr>())) {
-    // Mark every extent dynamic and keep only the rank and element type. When a
-    // dim value is a constant, the tensor.empty canonicalizer folds it back to
-    // a static extent later, so nothing is lost.
     SmallVector<int64_t> shape(group.size(), ShapedType::kDynamic);
     types.push_back(RankedTensorType::get(shape, elemType));
   }
@@ -50,8 +48,6 @@ SmallVector<RankedTensorType> resultTypesOf(Region &shapeRegion) {
 } // namespace
 
 LogicalResult mlir::hipsr::verifyShapeRegionStructure(Operation *op) {
-  // The two builtin traits do the isolation and single-block checks in their
-  // own verifiers; here we only require an implementing op declares them.
   if (!op->hasTrait<mlir::OpTrait::IsIsolatedFromAbove>()) {
     return op->emitOpError(
         "ShapeRegionInterface requires the IsolatedFromAbove trait");
@@ -68,8 +64,6 @@ LogicalResult mlir::hipsr::verifyShapeRegionStructure(Operation *op) {
 
   Region &shapeRegion = op->getRegion(0);
 
-  // The region is optional: empty means no shape computation yet. Otherwise
-  // SingleBlock guarantees one block, so verify only its contents below.
   if (shapeRegion.empty()) {
     return success();
   }
@@ -85,22 +79,21 @@ LogicalResult mlir::hipsr::verifyShapeRegionStructure(Operation *op) {
            << block.back().getName() << "'";
   }
 
-  // Entry-block args must mirror the DPS inputs one-for-one; that is how the
-  // isolated region reaches the inputs without capturing the op's operands.
-  if (auto dps = dyn_cast<DestinationStyleOpInterface>(op)) {
-    SmallVector<OpOperand *> inputs = dps.getDpsInputOperands();
-    if (block.getNumArguments() != inputs.size()) {
+  if (isa<DestinationStyleOpInterface>(op)) {
+    SmallVector<Value> expected =
+        getShapeRegionArgOperands(cast<ShapeRegionInterface>(op));
+    if (block.getNumArguments() != expected.size()) {
       return op->emitOpError("shape region block must have one argument per "
-                             "DPS input (expected ")
-             << inputs.size() << ", got " << block.getNumArguments() << ")";
+                             "shape-region operand (expected ")
+             << expected.size() << ", got " << block.getNumArguments() << ")";
     }
-    for (auto [i, in] : llvm::enumerate(inputs)) {
+    for (auto [i, operand] : llvm::enumerate(expected)) {
       Type argType = block.getArgument(i).getType();
-      Type inType = in->get().getType();
-      if (argType != inType) {
+      Type operandType = operand.getType();
+      if (argType != operandType) {
         return op->emitOpError("shape region block argument ")
-               << i << " type " << argType << " does not match DPS input type "
-               << inType;
+               << i << " type " << argType << " does not match expected type "
+               << operandType;
       }
     }
   }
@@ -108,13 +101,32 @@ LogicalResult mlir::hipsr::verifyShapeRegionStructure(Operation *op) {
   return success();
 }
 
+SmallVector<Value>
+mlir::hipsr::getShapeRegionArgOperands(ShapeRegionInterface op) {
+  SmallVector<Value> args;
+  auto dps = dyn_cast<DestinationStyleOpInterface>(op.getOperation());
+  if (!dps) {
+    return args;
+  }
+
+  // Per-category arg layout in the declaration; keyed on op kind so the
+  // signature the verifier enforces is stable per op kind.
+  SmallVector<Value> ins = dps.getDpsInputs();
+  Operation *raw = op.getOperation();
+  if (isa<StartBarrierInterface>(raw) && !ins.empty())
+    args.push_back(ins.front()); // ctx
+  if (!ins.empty())
+    llvm::append_range(args, llvm::drop_begin(ins)); // data inputs
+  if (isa<EndBarrierInterface>(raw))
+    llvm::append_range(args, dps.getDpsInits()); // outs
+  return args;
+}
+
 Region &mlir::hipsr::getShapeRegion(ShapeRegionInterface op) {
   return op->getRegion(0);
 }
 
 Region &mlir::hipsr::getCapacityShapeRegion(ShapeRegionInterface op) {
-  // Region 1 exists only on EndBarrier ops; asking any other op for it is a
-  // caller bug, so fail with the op name instead of reading a missing region.
   if (op->getNumRegions() <= 1) {
     std::string msg;
     llvm::raw_string_ostream(msg)

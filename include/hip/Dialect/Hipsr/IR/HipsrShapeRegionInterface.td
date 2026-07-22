@@ -26,11 +26,12 @@ def ShapeRegionInterface : OpInterface<"ShapeRegionInterface"> {
     (no shape computation yet) or a single block that computes the output
     dimensions and ends with `hipsr.shape_yield`.
 
-    The region is `IsolatedFromAbove`, so it reads its inputs as entry-block
-    arguments (block arg `i` mirrors DPS input `i`) rather than the op's
-    operands, which keeps stock MLIR passes (-cse, -canonicalize, LICM) correct
-    over it. The `hipsr-populate-shape-region` pass creates the entry block with
-    those arguments and hands it to `populateShapeRegion`.
+    The region is `IsolatedFromAbove`, so it reads the operands it needs as
+    entry-block arguments rather than capturing the op's operands, which keeps
+    stock MLIR passes (-cse, -canonicalize, LICM) correct over it. Which
+    operands become args is keyed on the op's barrier category (see
+    `getShapeRegionArgOperands`). The `hipsr-populate-shape-region` pass creates
+    the entry block with those arguments and hands it to `populateShapeRegion`.
 
     An implementing op MUST also carry the `IsolatedFromAbove` and `SingleBlock`
     traits (an interface cannot auto-attach traits), e.g.
@@ -38,18 +39,20 @@ def ShapeRegionInterface : OpInterface<"ShapeRegionInterface"> {
       def Hipsr_MatMulOp : Hipsr_Op<"matmul", [
           ShapeRegionInterface, IsolatedFromAbove, SingleBlock]> { ... }
 
-    Op categories (barrier markers are separate interfaces):
-    - Regular (MatMul, Add): one shape, from the input shapes.
-    - StartBarrier (Expand): one shape, from the input data.
-    - EndBarrier (NonZero): two shapes (capacity + real) over two regions.
+    Op categories (barrier markers are separate interfaces) and their
+    entry-block args:
+    - Regular (MatMul, Add): one shape from the input shapes; args = data ins.
+    - StartBarrier (Expand): one shape from input data; args = ctx + data ins.
+    - EndBarrier (NonZero): two shapes (capacity + real) over two regions;
+      args = data ins + outs.
   }];
 
   let methods = [
     InterfaceMethod<
-      [{Fill `shapeBlock` (already created by the pass, with one argument per
-        DPS input) with the ops computing the output shape. Read inputs as the
-        block's arguments -- the region is isolated, so the operands are off
-        limits.}],
+      [{Fill `shapeBlock` (already created by the pass, with the op's
+        category-specific args -- see `getShapeRegionArgOperands`) with the ops
+        computing the output shape. Read operands as the block's arguments --
+        the region is isolated, so the op's operands are off limits.}],
       "void", "populateShapeRegion",
       (ins "::mlir::OpBuilder &":$builder, "::mlir::Block &":$shapeBlock)
     >,

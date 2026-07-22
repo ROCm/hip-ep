@@ -5,7 +5,7 @@
 
 #include "hip/Dialect/Hipsr/IR/HipsrCastOp.h"
 
-#include "hip/Dialect/Hipsr/IR/HipsrShapeRegionHelpers.h"
+#include "hip/Dialect/Hipsr/IR/HipsrShapeRegionInterface.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
@@ -19,10 +19,9 @@ using namespace mlir::hipsr;
 #include "hip/Dialect/Hipsr/IR/HipsrCastOp.cpp.inc"
 
 namespace {
-// Block args follow the operands: 0 is ctx (unused), 1 the input.
 struct CastShapeArgs : ShapeRegionArgs<CastOp> {
   using ShapeRegionArgs::ShapeRegionArgs;
-  Value getInput() const { return ins(1); }
+  Value getInput() const { return in(0); }
 };
 } // namespace
 
