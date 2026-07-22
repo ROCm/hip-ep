@@ -18,16 +18,20 @@
 //                         hip_gqa_flash_decode_v2
 //
 //   * Everything else the fused kernels do not implement (fp32, no_causal /
-//     bidirectional, sliding window, head sink / smooth softmax, other
-//     head_dim, untemplated decode geometry) -> the feature-complete legacy
-//     decomposed hipBLASLt pipeline gqa_forward_hipblaslt below. This is a
-//     verbatim port of the proven gqa_back.cpp strategy (the read-only backup
-//     stays out of the build); its fast decode kernels (hip_gqa_fused_decode /
-//     hip_gqa_flash_decode) are folded into gqa_kernel.hip so the
-//     sliding-window / sink decode case keeps the legacy kernel's performance.
+//     bidirectional, sliding window, head sink / smooth softmax, additive
+//     attention bias, other head_dim, untemplated decode geometry) -> the
+//     feature-complete legacy decomposed hipBLASLt pipeline
+//     gqa_forward_hipblaslt below. This is a verbatim port of the proven
+//     gqa_back.cpp strategy (the read-only backup stays out of the build); its
+//     fast decode kernels (hip_gqa_fused_decode / hip_gqa_flash_decode) are
+//     folded into gqa_kernel.hip so the sliding-window / sink decode case keeps
+//     the legacy kernel's performance.
 //
-//   * Inputs NEITHER path supports (KV-cache quantization, attention bias,
-//     position ids, qk_output) are rejected up front.
+//   * The additive attention bias (onnx.Attention attn_mask) IS supported, but
+//     only by the decomposed path (Step 8b adds it; a causal op then masks the
+//     triangle in Step 9), so its presence forces the decomposed path.
+//   * Inputs NEITHER path supports (KV-cache quantization, position ids,
+//     qk_output) are rejected up front.
 //===----------------------------------------------------------------------===//
 
 #include "../debug_log.h"
@@ -919,10 +923,19 @@ static int gqa_forward_hipblaslt(
     const void *query, const void *key, const void *value, const void *past_key,
     const void *past_value, const void *seqlens_k_ptr, const void *cos_cache,
     const void *sin_cache, void *head_sink, bool use_smooth_softmax,
-    void *output, void *present_key, void *present_value, int64_t B, int64_t sq,
-    int64_t skv, int64_t past_buf_seq, int64_t H, int64_t G, int64_t d,
-    float scale, int64_t do_rotary, int64_t local_window_size, bool no_causal,
+    // onnx.Attention external additive mask [B,H,S,T] (broadcastable on the
+    // batch / head dims); null for plain GQA.
+    const void *attention_bias, int64_t attn_bias_batch,
+    int64_t attn_bias_num_heads, void *output, void *present_key,
+    void *present_value, int64_t B, int64_t sq, int64_t skv,
+    int64_t past_buf_seq, int64_t H, int64_t G, int64_t d, float scale,
+    int64_t do_rotary, int64_t local_window_size, bool no_causal,
     int64_t element_size_bytes, int op_state_slot) {
+
+  // Whisper bidirectional no-past path only when no_causal AND no external
+  // attention_bias. ONNX Attention with is_causal=0 still carries past KV and
+  // uses the standard decode seqlens_k convention.
+  const bool bidirectional_no_past = no_causal && (attention_bias == nullptr);
 
   int64_t HPG = H / G;
   int64_t present_seq = skv;
@@ -942,12 +955,12 @@ static int gqa_forward_hipblaslt(
   int32_t seqlens_k_pre =
       read_seqlens_k_for_dispatch(stream, seqlens_k_ptr, B, state);
   int64_t total_seq_pre = -1;
-  if (no_causal) {
-    // no_causal (Whisper encoder / cross-attn): seqlens_k = skv means "all skv
-    // keys valid", there is no past. total_seq is exactly skv -- do NOT apply
-    // the +1 decode convention (would over-count and trip the smart-dispatch
-    // size check / fused validation). See the matching exemption at the
-    // decomposed-path total_seq derivation below.
+  if (bidirectional_no_past) {
+    // bidirectional_no_past (Whisper encoder / cross-attn): seqlens_k = skv
+    // means "all skv keys valid", there is no past. total_seq is exactly skv --
+    // do NOT apply the +1 decode convention (would over-count and trip the
+    // smart-dispatch size check / fused validation). See the matching exemption
+    // at the decomposed-path total_seq derivation below.
     total_seq_pre = skv;
   } else if (seqlens_k_pre != kSeqlensKNotRead) {
     // -1 is ORT's prefill sentinel: total_seq=sq, past_len=0. Real values are
@@ -1021,9 +1034,10 @@ static int gqa_forward_hipblaslt(
   // (cross-attn ships it as rank-4 BNSD with Skv != sq). Routing no_causal to
   // the decomposed path keeps a single correct code path for these models.
   bool fused_predicate =
-      (!gqa_fused_decode_disabled() && !no_causal && fused_fp16 && fused_d &&
-       sq == 1 && kv_inputs_ok && present_key && present_value &&
-       sliding_ok_for_fused && sink_ok_for_fused && size_ok_for_fused);
+      (!gqa_fused_decode_disabled() && !no_causal && !attention_bias &&
+       fused_fp16 && fused_d && sq == 1 && kv_inputs_ok && present_key &&
+       present_value && sliding_ok_for_fused && sink_ok_for_fused &&
+       size_ok_for_fused);
 
   //===--------------------------------------------------------------------===//
   // Fused / flash GQA decode path (sq == 1, d in {64,128,256}, KV cache on).
@@ -1262,9 +1276,11 @@ static int gqa_forward_hipblaslt(
   // PAST tokens => total_seq = seqlens_k+1) does NOT apply here -- it would
   // give total_seq = skv+1 > present_seq = skv -> rc=-1 -> zeroed output, and
   // past_len = total_seq - sq is invalid when sq != skv (cross-attn has sq=1,
-  // skv=1500 => bogus past_len=1499). For no_causal there is no past, so
+  // skv=1500 => bogus past_len=1499). Gated on bidirectional_no_past (not raw
+  // no_causal): an onnx.Attention with an external mask still carries past KV,
+  // so it keeps the standard seqlens_k path below. For the no-past case
   // total_seq = skv (== present_seq) and past_len = 0; skip the readback.
-  if (no_causal) {
+  if (bidirectional_no_past) {
     total_seq = skv;
     past_len = 0;
   } else if (seqlens_k_ptr) {
@@ -1560,13 +1576,18 @@ static int gqa_forward_hipblaslt(
     // no-expand hands seqlens_k_ptr to the append kernel (on-device past_len,
     // no D2H); the expand path already read total_seq host-side so passes null.
     if (present_key && present_value) {
+      // bidirectional_no_past (Whisper encoder / cross-attn): never hand
+      // seqlens_k to the append kernel (it would apply the +1 convention).
+      // ONNX Attention with is_causal=0 + external mask keeps the standard
+      // decode KV path (bidirectional_no_past=false).
       HIP_CHECK(update_kv_cache(
           stream, past_key, past_value, kSrc, vSrc, present_key, present_value,
           static_cast<int>(B), static_cast<int>(past_len), static_cast<int>(sq),
           static_cast<int>(G), static_cast<int>(d),
           static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
-          (use_no_expand && !no_causal) ? seqlens_k_ptr : nullptr,
-          static_cast<int>(elem_sz), no_causal, static_cast<int>(skv)));
+          (use_no_expand && !bidirectional_no_past) ? seqlens_k_ptr : nullptr,
+          static_cast<int>(elem_sz), bidirectional_no_past,
+          static_cast<int>(skv)));
     }
 
     // ---- Steps 6-7: KV Expand [B*G,present_seq,d] -> [B*H,total_seq,d] ----
@@ -1603,10 +1624,34 @@ static int gqa_forward_hipblaslt(
         scoreB, scoreState->layB, &beta, d_S_f32, scoreState->layC, d_S_f32,
         scoreState->layD, &sAlgo, gemm_ws_ptr, gemm_ws_bytes, stream));
 
+    // ---- Step 8b: Add external attention bias (onnx.Attention attn_mask) ----
+    int scoreF32BatchStride = static_cast<int>(sq * total_seq);
+    if (attention_bias) {
+      HIP_CHECK(hip_gqa_add_attention_bias_f32(
+          stream, d_S_f32, const_cast<void *>(attention_bias),
+          static_cast<int>(B * H), static_cast<int>(H),
+          static_cast<int>(attn_bias_batch),
+          static_cast<int>(attn_bias_num_heads), static_cast<int>(sq),
+          static_cast<int>(total_seq), scoreF32BatchStride,
+          static_cast<int>(elem_sz)));
+    }
+
     // ---- Step 9: Causal Mask (fp32) + Softmax (fp32 -> fp16/fp32) ----
     // S is treated as [B*H, sq, total_seq] (head stride sq*total_seq) by both
     // GEMM flavours. softmax dtype follows gemm_fp32.
-    int scoreF32BatchStride = static_cast<int>(sq * total_seq);
+    //
+    // The built-in causal triangle is applied whenever !no_causal,
+    // INDEPENDENTLY of attention_bias. This mirrors the ONNX Attention
+    // reference and the ORT GQA op: the additive mask (Step 8b, e.g.
+    // onnx.Attention attn_mask or a GQA/ALiBi bias) is ADDED first, then, if
+    // the op is causal, the upper triangle is masked out. For a mask that
+    // already encodes causal (the common HF export) this is idempotent (-inf
+    // stays -inf); for a padding-only mask + is_causal it supplies the missing
+    // triangle. The bidirectional paths (no_causal, e.g. Whisper
+    // encoder/cross-attn or onnx.Attention is_causal=0) set no_causal=true and
+    // thus skip this, letting the mask carry all masking. Note this Step is a
+    // no-op at sq==1 (single-query decode has no future tokens), gated by (sq >
+    // 1 || local_window_size > 0).
     int scoreFp16BatchStride = static_cast<int>(sq * total_seq);
     if ((sq > 1 || local_window_size > 0) && !no_causal) {
       HIP_CHECK(hip_gqa_causal_mask_f32(
@@ -1696,7 +1741,7 @@ extern "C" int8_t hipdnn_ep_op_state_construct_gqa(RuntimeState *state,
 
 //===----------------------------------------------------------------------===//
 // Public wrapper called by generated IR. ABI MUST stay identical to the
-// HipToLLVM lowering (kWrapGQA = "wrap_group_query_attention", 39 params).
+// HipToLLVM lowering (kWrapGQA = "wrap_group_query_attention", 41 params).
 //===----------------------------------------------------------------------===//
 int wrap_group_query_attention(
     RuntimeState *state, int op_state_slot,
@@ -1716,7 +1761,8 @@ int wrap_group_query_attention(
     int64_t v_quant_type, int64_t kv_cache_bit_width, int32_t no_causal,
     // Shape values (6)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
-    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes) {
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads) {
   OP_PROFILE(
       "gqa",
       [&] {
@@ -1756,11 +1802,10 @@ int wrap_group_query_attention(
     fprintf(stderr, "wrap_group_query_attention: position_ids not supported\n");
     return -1;
   }
-  if (attention_bias != nullptr) {
-    fprintf(stderr,
-            "wrap_group_query_attention: attention_bias not supported\n");
-    return -1;
-  }
+  // attention_bias (onnx.Attention external mask) is intentionally NOT rejected
+  // here: the legacy decomposed pipeline applies it (Step 8b in
+  // gqa_forward_hipblaslt), and fused_supported below excludes it so masked
+  // attention is routed to that path rather than the lean fused kernels.
   if (k_scale != nullptr || v_scale != nullptr || k_quant_type != 0 ||
       v_quant_type != 0) {
     fprintf(stderr, "wrap_group_query_attention: KV cache quantization not "
@@ -1815,10 +1860,14 @@ int wrap_group_query_attention(
   // to the templated set here.
   const bool head_dim_ok =
       is_decode ? true : (head_dim == 64 || head_dim == 128 || head_dim == 256);
+  // attention_bias (onnx.Attention external mask) is only applied by the legacy
+  // decomposed pipeline (Step 8b); the lean fused path would silently drop it,
+  // so exclude it here to route masked attention to gqa_forward_hipblaslt
+  // below.
   const bool fused_supported = element_size_bytes == 2 && no_causal == 0 &&
                                local_window_size <= 0 && head_sink == nullptr &&
                                smooth_softmax != 1 && head_dim_ok &&
-                               decode_geometry_ok;
+                               decode_geometry_ok && attention_bias == nullptr;
 
   if (!fused_supported) {
     hipblasLtHandle_t ltHandle = static_cast<hipblasLtHandle_t>(
@@ -1843,7 +1892,8 @@ int wrap_group_query_attention(
         static_cast<int>(decode_geometry_ok));
     int lrc = gqa_forward_hipblaslt(
         state, stream, ltHandle, query, key, value, past_key, past_value,
-        seqlens_k, cos_cache, sin_cache, head_sink, has_smooth_softmax, output,
+        seqlens_k, cos_cache, sin_cache, head_sink, has_smooth_softmax,
+        attention_bias, attn_bias_batch, attn_bias_num_heads, output,
         present_key, present_value, batch_size, seq_len_q, seq_len_kv,
         past_buf_seq, num_heads, kv_num_heads, head_dim, scale, do_rotary,
         local_window_size, no_causal != 0, element_size_bytes, op_state_slot);

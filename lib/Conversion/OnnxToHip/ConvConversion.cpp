@@ -14,7 +14,10 @@ namespace {
 /// tensor.expand_shape, run through the same hip.conv, then collapsed back to
 /// NCL via tensor.collapse_shape. Both expand/collapse lower to zero-cost
 /// metadata ops (no data movement), so 1D conv reuses the 2D MIOpen path
-/// instead of a dedicated op/kernel.
+/// instead of a dedicated op/kernel. The `group` attribute is preserved
+/// through the 1D reshape (grouped/depthwise 1D convs -> grouped/depthwise 2D
+/// convs), and dynamic result dims (batch, channels, and spatial extents) are
+/// sized at runtime from the conv input + attributes.
 struct ConvToHip : public mlir::RewritePattern {
   ConvToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Conv", /*benefit=*/1, ctx) {}
@@ -108,33 +111,109 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   // init/result reshape below.
   llvm::SmallVector<mlir::ReassociationIndices> reassoc1d = {{0}, {1}, {2, 3}};
 
+  // Resolve the runtime size of every dynamic result dim BEFORE the 1D reshape
+  // below rewrites `input`/`weights`/attrs into their H=1 2D forms — this block
+  // must see the ORIGINAL rank-N operands and attributes.
+  //   - dim 0 (batch)      -> input's batch extent
+  //   - dim 1 (out chans)  -> weights' dim 0 (Cout)
+  //   - dim >= 2 (spatial) -> the conv output formula for that axis:
+  //       out = (in + pad_begin + pad_end - dilation*(kernel-1) - 1)/stride + 1
+  // resultDynSize[d] stays null for static dims (extent lives in resultType).
+  //
+  // Before (only a dynamic batch could be sized -> non-batch dynamic bailed):
+  //   %n = tensor.dim %input, 0 ; tensor.empty(%n) : tensor<?x128x64xf16>
+  // After (dynamic spatial dims too, e.g. a strided down-sampling conv):
+  //   %h  = tensor.dim %input, 2
+  //   %ho = arith ((%h + addend) floordiv stride + 1)
+  //   tensor.empty(%n, %ho) : tensor<?x128x?x64xf16>
+  llvm::SmallVector<mlir::Value> resultDynSize(resultType.getRank(),
+                                               mlir::Value());
+  for (int64_t dimIdx : llvm::seq<int64_t>(resultType.getRank())) {
+    if (!resultType.isDynamicDim(dimIdx))
+      continue;
+    if (dimIdx == 0) {
+      resultDynSize[dimIdx] =
+          mlir::tensor::DimOp::create(rewriter, loc, input, /*index=*/0);
+      continue;
+    }
+    if (dimIdx == 1) {
+      // Output channels equal the weight tensor's first dim (Cout).
+      resultDynSize[dimIdx] =
+          mlir::tensor::DimOp::create(rewriter, loc, weights, /*index=*/0);
+      continue;
+    }
+    const int64_t s = dimIdx - 2; // spatial axis index (0-based)
+    if (s >= static_cast<int64_t>(kernelShape.size()))
+      return rewriter.notifyMatchFailure(
+          op, "dynamic spatial output dim requires an explicit kernel_shape");
+    const int64_t k = kernelShape[s];
+    const int64_t st =
+        (s < static_cast<int64_t>(strides.size())) ? strides[s] : 1;
+    const int64_t dil =
+        (s < static_cast<int64_t>(dilations.size())) ? dilations[s] : 1;
+    const int64_t pb = (s < static_cast<int64_t>(pads.size())) ? pads[s] : 0;
+    const int64_t pe = (spatialDims + s < static_cast<int64_t>(pads.size()))
+                           ? pads[spatialDims + s]
+                           : 0;
+    // Everything except the (dynamic) input extent is a compile-time constant.
+    const int64_t addend = pb + pe - dil * (k - 1) - 1;
+    mlir::Value inExtent =
+        mlir::tensor::DimOp::create(rewriter, loc, input, dimIdx);
+    mlir::Value addendC =
+        mlir::arith::ConstantIndexOp::create(rewriter, loc, addend);
+    mlir::Value num =
+        mlir::arith::AddIOp::create(rewriter, loc, inExtent, addendC);
+    mlir::Value strideC =
+        mlir::arith::ConstantIndexOp::create(rewriter, loc, st);
+    // Conv output extents are >= 0 for a valid convolution, so signed
+    // division (divsi) matches ONNX's floor semantics on the non-negative
+    // numerator here.
+    mlir::Value divd =
+        mlir::arith::DivSIOp::create(rewriter, loc, num, strideC);
+    mlir::Value oneC = mlir::arith::ConstantIndexOp::create(rewriter, loc, 1);
+    resultDynSize[dimIdx] =
+        mlir::arith::AddIOp::create(rewriter, loc, divd, oneC);
+  }
+
   if (is1D) {
-    // The shared 2D MIOpen path treats NCL as NC[H=1]L. It does not honor
-    // dilation != 1 or group != 1 in this H=1 reinterpretation; bail rather
-    // than silently miscompile.
+    // The shared 2D MIOpen path treats NCL as NC[H=1]L. The H=1 reshape hard-
+    // codes dilations to [1,1] below, so it cannot preserve a non-unit spatial
+    // dilation — bail on dilation != 1. `group` IS preserved verbatim on the
+    // 2D hip.conv (a depthwise [C,1,K] filter reshapes to [C,1,1,K] with
+    // group=C), so grouped/depthwise 1D convs are supported.
     if (!dilations.empty() && dilations[0] != 1)
       return rewriter.notifyMatchFailure(
           op, "1D Conv with dilation != 1 is not supported");
-    if (group != 1)
-      return rewriter.notifyMatchFailure(
-          op, "1D Conv with group != 1 is not supported");
-    if (inputType.getRank() != 3 || !inputType.hasStaticShape())
-      return rewriter.notifyMatchFailure(
-          op, "1D Conv requires a static rank-3 input shape");
 
     auto weightsType = mlir::cast<mlir::RankedTensorType>(weights.getType());
 
+    // Expand a rank-3 NCL operand to rank-4 NC1L (unit H before the spatial
+    // dim). Dynamic source dims are carried into output_shape via tensor.dim so
+    // a dynamic batch or spatial extent survives the reshape.
     auto expandTo = [&](mlir::Value v,
                         mlir::RankedTensorType srcTy) -> mlir::Value {
       llvm::SmallVector<int64_t> shape4(srcTy.getShape().begin(),
                                         srcTy.getShape().end());
       shape4.insert(shape4.end() - 1, 1); // insert H=1 before the spatial dim
       auto ty4 = mlir::RankedTensorType::get(shape4, srcTy.getElementType());
-      // All dims are static (guarded above), so the output_shape is a list of
-      // index attrs.
+      // output_shape maps rank-4 positions back to the rank-3 source: 0,1 are
+      // N,C; position 2 is the inserted unit H; position 3 is the spatial dim
+      // (source index 2). Static dims use an index attr; dynamic dims a
+      // tensor.dim of the source.
       llvm::SmallVector<mlir::OpFoldResult> outShape;
-      for (int64_t d : shape4)
-        outShape.push_back(rewriter.getIndexAttr(d));
+      for (int64_t i4 : llvm::seq<int64_t>(4)) {
+        if (i4 == 2) {
+          outShape.push_back(rewriter.getIndexAttr(1));
+          continue;
+        }
+        const int64_t origIdx = (i4 < 2) ? i4 : 2;
+        if (srcTy.isDynamicDim(origIdx))
+          outShape.push_back(
+              mlir::tensor::DimOp::create(rewriter, loc, v, origIdx)
+                  .getResult());
+        else
+          outShape.push_back(rewriter.getIndexAttr(srcTy.getDimSize(origIdx)));
+      }
       return mlir::tensor::ExpandShapeOp::create(rewriter, loc, ty4, v,
                                                  reassoc1d, outShape);
     };
@@ -170,46 +249,38 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   // throughs it to the output parameter exactly like the rank-4 path, leaving
   // NO transient alloc (a lone transient would not be pooled and would lower
   // to the undefined hip_device_malloc).
-  // Size the destination init's dynamic dims from the conv INPUT, not the conv
-  // result. Sourcing from op->getResult(0) is self-referential: replaceOp later
-  // remaps the DimOp's operand to the freshly-created hip.conv result, but the
-  // DimOp stays positioned *before* the conv it now reads from — a
-  // use-before-def / dominance error that aborts the pipeline. This only
-  // manifests when an output dim is dynamic (e.g. a dynamic batch), so static-
-  // shape convs never hit it. For a standard convolution the only dynamic
-  // output dim is the batch N (dim 0), which equals the input's batch dim;
-  // output channels are static (Cout from weights) and the spatial extents are
-  // statically inferred here. A dynamic non-batch output dim cannot be sized
-  // from the input alone, so bail (CPU fallback) rather than emit a wrong size.
   //
-  // Before (buggy — %dst defined below its use):
-  //   %n   = tensor.dim %dst, 0
-  //   %ini = tensor.empty(%n)
-  //   %dst = hip.conv ..., %ini
-  // After:
-  //   %n   = tensor.dim %input, 0
-  //   %ini = tensor.empty(%n)
-  //   %dst = hip.conv ..., %ini
+  // Dynamic dims are sized from `resultDynSize` (resolved above from the conv
+  // INPUT + attributes, never from op->getResult(0)): sourcing an extent from
+  // the op's own result is self-referential — replaceOp would remap the DimOp
+  // onto the freshly-created hip.conv result while the DimOp stays positioned
+  // before it, a use-before-def dominance error.
   llvm::SmallVector<mlir::Value> dynSizes;
-  for (int64_t dimIdx : llvm::seq<int64_t>(resultType.getRank())) {
-    if (!resultType.isDynamicDim(dimIdx))
-      continue;
-    if (dimIdx != 0)
-      return rewriter.notifyMatchFailure(
-          op, "ConvToHip can only size a dynamic batch dim from the input; "
-              "dynamic non-batch output dims are unsupported");
-    dynSizes.push_back(
-        mlir::tensor::DimOp::create(rewriter, loc, input, /*index=*/0));
-  }
+  for (int64_t dimIdx : llvm::seq<int64_t>(resultType.getRank()))
+    if (resultType.isDynamicDim(dimIdx))
+      dynSizes.push_back(resultDynSize[dimIdx]);
 
   mlir::Value init =
       mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
                                     resultType.getElementType(), dynSizes);
 
   if (is1D) {
+    // Expand the rank-3 init to the rank-4 NC1L' conv `outs`. Positions map
+    // like expandTo above: 0,1 -> N,C; 2 -> unit H; 3 -> spatial (source idx
+    // 2). Dynamic dims reuse the already-resolved resultDynSize values.
     llvm::SmallVector<mlir::OpFoldResult> outShape;
-    for (int64_t d : conv2dResultType.getShape())
-      outShape.push_back(rewriter.getIndexAttr(d));
+    for (int64_t i4 : llvm::seq<int64_t>(4)) {
+      if (i4 == 2) {
+        outShape.push_back(rewriter.getIndexAttr(1));
+        continue;
+      }
+      const int64_t origIdx = (i4 < 2) ? i4 : 2;
+      if (resultType.isDynamicDim(origIdx))
+        outShape.push_back(resultDynSize[origIdx]);
+      else
+        outShape.push_back(
+            rewriter.getIndexAttr(resultType.getDimSize(origIdx)));
+    }
     init = mlir::tensor::ExpandShapeOp::create(rewriter, loc, conv2dResultType,
                                                init, reassoc1d, outShape);
   }

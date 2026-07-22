@@ -65,6 +65,16 @@ module {
     %result = "onnx.Unsqueeze"(%data, %axes) : (tensor<128x4096xf16>, tensor<1xi64>) -> tensor<128x4096x1xf16>
     return %result : tensor<128x4096x1xf16>
   }
+
+  // --- Block-argument axes (graph-slice boundary) + dynamic leading dims ---
+  // The axes VALUE is never read; the reassociation is derived from shapes, so
+  // a non-constant (block-argument) axes operand -- as produced when a graph
+  // slice routes a folded axes constant across a part boundary -- must still
+  // lower to a zero-cost expand_shape rather than surviving unconverted.
+  func.func @test_unsqueeze_blockarg_axes(%data: tensor<?x?x128xf16>, %axes: tensor<1xi64>) -> tensor<?x?x128x1xf16> {
+    %result = "onnx.Unsqueeze"(%data, %axes) : (tensor<?x?x128xf16>, tensor<1xi64>) -> tensor<?x?x128x1xf16>
+    return %result : tensor<?x?x128x1xf16>
+  }
 }
 
 // CHECK-LABEL: func.func @test_unsqueeze_front
@@ -96,3 +106,8 @@ module {
 // CHECK-NOT: onnx.Unsqueeze
 // CHECK: %[[RESULT:.*]] = tensor.expand_shape %[[DATA]] {{\[\[}}0], [1, 2]] output_shape [128, 4096, 1] : tensor<128x4096xf16> into tensor<128x4096x1xf16>
 // CHECK: return %[[RESULT]] : tensor<128x4096x1xf16>
+
+// CHECK-LABEL: func.func @test_unsqueeze_blockarg_axes
+// CHECK-NOT: onnx.Unsqueeze
+// CHECK: %[[RESULT:.*]] = tensor.expand_shape %{{.*}} {{\[\[}}0], [1], [2, 3]] output_shape [%{{.*}}, %{{.*}}, 128, 1] : tensor<?x?x128xf16> into tensor<?x?x128x1xf16>
+// CHECK: return %[[RESULT]] : tensor<?x?x128x1xf16>

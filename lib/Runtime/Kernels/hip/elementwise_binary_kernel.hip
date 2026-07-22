@@ -420,6 +420,57 @@ extern "C" int hip_elementwise_mod(void *stream, const void *lhs,
 }
 
 // =====================================================================
+// Or: y = a | b  (bool input -> bool output, 1 byte each).
+//
+// Source: onnxruntime/core/providers/cuda/math/binary_elementwise_ops_impl.{h,cu}
+//         @ v1.22.2 (BINARY_OP_NAME_EXPR(Or, (a | b)),
+//                    SPECIALIZED_BINARY_ELEMENTWISE_IMPL(Or, bool))
+//
+// ORT specializes Or only on `bool`; for bool encoded as uint8 (0 or 1)
+// bitwise `|` and logical `||` agree. We keep `|` to match ORT verbatim.
+// =====================================================================
+
+__global__ void elementwise_or_kernel(const uint8_t *__restrict__ lhs,
+                                      const uint8_t *__restrict__ rhs,
+                                      uint8_t *__restrict__ output,
+                                      int64_t num_elements) {
+  int64_t idx =
+      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx < num_elements) {
+    output[idx] = static_cast<uint8_t>(lhs[idx] | rhs[idx]);
+  }
+}
+
+extern "C" int hip_elementwise_or(void *stream, const void *lhs,
+                                  const void *rhs, void *output,
+                                  int64_t num_elements) {
+  if (num_elements <= 0)
+    return 0;
+
+  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+  constexpr int kBlockSize = 256;
+  int grid_size =
+      static_cast<int>((num_elements + kBlockSize - 1) / kBlockSize);
+
+  CUSTOM_KERNELS_DEBUG_LOG(
+      "[custom_kernels] hip_elementwise_or: num=%lld\n",
+      (long long)num_elements);
+  hipLaunchKernelGGL(elementwise_or_kernel, dim3(grid_size),
+                     dim3(kBlockSize), 0, hip_stream,
+                     static_cast<const uint8_t *>(lhs),
+                     static_cast<const uint8_t *>(rhs),
+                     static_cast<uint8_t *>(output), num_elements);
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr,
+            "[custom_kernels] hip_elementwise_or launch failed: %s\n",
+            hipGetErrorString(err));
+  }
+  return static_cast<int>(err);
+}
+
+// =====================================================================
 // And: y = a & b  (bool input -> bool output, 1 byte each).
 //
 // Source: onnxruntime/core/providers/cuda/math/binary_elementwise_ops_impl.{h,cu}
