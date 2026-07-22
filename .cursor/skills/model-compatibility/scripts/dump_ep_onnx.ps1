@@ -1,3 +1,8 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+
 # Dump EP input ONNX graph (onnx.onnx) via VOE test_onnx_runner + pass.init only.
 
 # Usage:
@@ -313,5 +318,3 @@ if ($exitCode -ne 0) {
 Write-Host "OK: dumped EP ONNX graph ($size bytes)"
 
 Write-Host "    $dumpPath"
-
-

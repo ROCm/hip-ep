@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
 import json
 import sys
 import re
@@ -55,9 +59,17 @@ def render_op_distribution_comparison_section(comp: dict) -> list:
     only_orig = summary.get("only_in_original") or []
     only_ep = summary.get("only_in_ep") or []
     if only_orig:
-        out.append("**Operators only in original:** " + ", ".join(f"`{x}`" for x in only_orig) + "\n\n")
+        out.append(
+            "**Operators only in original:** "
+            + ", ".join(f"`{x}`" for x in only_orig)
+            + "\n\n"
+        )
     if only_ep:
-        out.append("**Operators only in EP input:** " + ", ".join(f"`{x}`" for x in only_ep) + "\n\n")
+        out.append(
+            "**Operators only in EP input:** "
+            + ", ".join(f"`{x}`" for x in only_ep)
+            + "\n\n"
+        )
 
     out.append("| Op Type | Original | EP input | Delta |\n")
     out.append("|---|---:|---:|---:|\n")
@@ -117,7 +129,9 @@ def load_reco_rules(script_dir: Path):
 
 
 def compile_time_reason_with_rules(reason_texts, rules):
-    terms = (((rules or {}).get("compile_time_rule") or {}).get("when_reason_contains_any")) or []
+    terms = (
+        ((rules or {}).get("compile_time_rule") or {}).get("when_reason_contains_any")
+    ) or []
     if not terms:
         return compile_time_reason(reason_texts)
     merged = " ".join(reason_texts or []).lower()
@@ -139,24 +153,30 @@ def infer_unsupported_reco(op_name: str, op_description: str, rules):
     desc_l = (op_description or "").lower()
 
     def has_keyword(text: str, kw: str) -> bool:
-        return re.search(rf"(^|[^a-z0-9]){re.escape(kw)}([^a-z0-9]|$)", text) is not None
+        return (
+            re.search(rf"(^|[^a-z0-9]){re.escape(kw)}([^a-z0-9]|$)", text) is not None
+        )
 
     # Exact op override has the highest priority.
-    for item in (rules.get("op_overrides") or []):
+    for item in rules.get("op_overrides") or []:
         if (item.get("op_name") or "").lower() == name_l:
             return {
-                "recommended": format_reco(item.get("recommended_path"), item.get("wrapper_extension_target")),
+                "recommended": format_reco(
+                    item.get("recommended_path"), item.get("wrapper_extension_target")
+                ),
                 "source": "op_override",
                 "matched_rule": item.get("op_name"),
                 "rationale": item.get("rationale", ""),
             }
 
     # Family routing by op name / description semantics.
-    for fam in (rules.get("family_routing") or []):
+    for fam in rules.get("family_routing") or []:
         kws = [str(x).lower() for x in (fam.get("op_name_keywords_any") or [])]
         if any(k and (has_keyword(name_l, k) or has_keyword(desc_l, k)) for k in kws):
             return {
-                "recommended": format_reco(fam.get("preferred_path"), fam.get("wrapper_extension_target")),
+                "recommended": format_reco(
+                    fam.get("preferred_path"), fam.get("wrapper_extension_target")
+                ),
                 "source": "family_routing",
                 "matched_rule": fam.get("family"),
                 "rationale": fam.get("notes", ""),
@@ -165,7 +185,10 @@ def infer_unsupported_reco(op_name: str, op_description: str, rules):
     # Fallback
     default_fb = rules.get("default_fallback") or {}
     return {
-        "recommended": format_reco(default_fb.get("recommended_path"), default_fb.get("wrapper_extension_target")),
+        "recommended": format_reco(
+            default_fb.get("recommended_path"),
+            default_fb.get("wrapper_extension_target"),
+        ),
         "source": "default_fallback",
         "matched_rule": "default_fallback",
         "rationale": default_fb.get("rationale", ""),
@@ -213,12 +236,15 @@ def recommended_impl_with_trace(op_row, compat_row, reco_rules):
             "rationale": "",
         }
 
-    if compile_time_reason_with_rules((compat_row or {}).get("reason_texts") or [], reco_rules):
+    if compile_time_reason_with_rules(
+        (compat_row or {}).get("reason_texts") or [], reco_rules
+    ):
         return {
             "recommended": "Compile Time Optimization",
             "source": "compile_time_reason",
             "matched_rule": "compile_time_rule",
-            "rationale": ((reco_rules.get("compile_time_rule") or {}).get("rationale")) or "",
+            "rationale": ((reco_rules.get("compile_time_rule") or {}).get("rationale"))
+            or "",
         }
     return infer_unsupported_reco(
         op_row.get("onnx_op", ""),
@@ -296,7 +322,9 @@ def main():
 
     total_instances = summary["total_node_instances"]
     supported_instances = summary["supported_instances"]
-    supported_pct = (supported_instances / total_instances * 100.0) if total_instances else 0.0
+    supported_pct = (
+        (supported_instances / total_instances * 100.0) if total_instances else 0.0
+    )
 
     # Main report
     lines = []
@@ -309,11 +337,15 @@ def main():
     lines.append(f"- Generated UTC: `{meta['generated_at_utc']}`\n\n")
     lines.append("## Summary\n\n")
     lines.append(f"- Total node instances: {summary['total_node_instances']}\n")
-    lines.append(f"- Supported instances: {summary['supported_instances']} ({supported_pct:.1f}%)\n")
+    lines.append(
+        f"- Supported instances: {summary['supported_instances']} ({supported_pct:.1f}%)\n"
+    )
     lines.append(f"- Unsupported instances: {summary['unsupported_instances']}\n")
     lines.append(f"- Total Operator Types: {summary['total_operator_types']}\n")
     lines.append(f"- Fully Compatible: {summary['fully_compatible_operator_types']}\n")
-    lines.append(f"- Partially Compatible: {summary['partially_compatible_operator_types']}\n")
+    lines.append(
+        f"- Partially Compatible: {summary['partially_compatible_operator_types']}\n"
+    )
     lines.append(f"- Unsupported: {summary['unsupported_operator_types']}\n\n")
 
     if op_dist_comparison:
@@ -325,7 +357,9 @@ def main():
         if op_dist_comparison
         else ""
     )
-    lines.append("| Op Type | Domain | Count | Data Types | Recommended Rocm Implementation | Status | Op Description |\n")
+    lines.append(
+        "| Op Type | Domain | Count | Data Types | Recommended Rocm Implementation | Status | Op Description |\n"
+    )
     lines.append("|---|---|---:|---|---|---|---|\n")
 
     unsupported_buckets = {}
@@ -358,7 +392,11 @@ def main():
             partial_ops.append(op)
         else:
             reason_texts = comp.get("reason_texts") or []
-            reason_text = "; ".join(reason_texts) if reason_texts else "No Hip Dialect implementation available."
+            reason_text = (
+                "; ".join(reason_texts)
+                if reason_texts
+                else "No Hip Dialect implementation available."
+            )
             unsupported_ops.append(
                 {
                     "onnx_op": op,
@@ -388,7 +426,9 @@ def main():
     lines.append("\n")
     lines.append(f"#### Partially Compatible Operators ({len(partial_ops)}):\n\n")
     for p in partial_ops:
-        c = compat_map.get((p, next((r["domain"] for r in op_dist if r["onnx_op"] == p), "onnx")), {})
+        c = compat_map.get(
+            (p, next((r["domain"] for r in op_dist if r["onnx_op"] == p), "onnx")), {}
+        )
         reasons = c.get("reason_texts") or []
         reason_text = "; ".join(reasons) if reasons else "Schema mismatch."
         lines.append(f"- `{p}`: {reason_text}\n")
@@ -418,11 +458,15 @@ def main():
         runtime = m.get("runtime_func") or "-"
         backend = m.get("backend") or "Unknown"
         lines.append(
-            f"| {m.get('onnx_op','')} | {m.get('domain','')} | {m.get('hip_op','')} | {runtime} | {backend} |\n"
+            f"| {m.get('onnx_op', '')} | {m.get('domain', '')} | {m.get('hip_op', '')} | {runtime} | {backend} |\n"
         )
-    lines.append("\nDetailed compatibility diagnostics are in model_compatibility_details.md\n")
+    lines.append(
+        "\nDetailed compatibility diagnostics are in model_compatibility_details.md\n"
+    )
 
-    (analysis_dir / "model_compatibility_report.md").write_text("".join(lines), encoding="utf-8")
+    (analysis_dir / "model_compatibility_report.md").write_text(
+        "".join(lines), encoding="utf-8"
+    )
 
     # Details report
     d = []
@@ -443,7 +487,7 @@ def main():
         if status_display(row.get("status", "")) == "supported":
             comp = compat_map.get((row.get("onnx_op"), row.get("domain")), {})
             d.append(
-                f"| {row.get('onnx_op','')} | {row.get('domain','')} | {row.get('count',0)} | {recommended_impl(row, comp, reco_rules)} |\n"
+                f"| {row.get('onnx_op', '')} | {row.get('domain', '')} | {row.get('count', 0)} | {recommended_impl(row, comp, reco_rules)} |\n"
             )
 
     d.append("\n## Partially compatible details\n\n")
@@ -452,9 +496,16 @@ def main():
     for row in compatibility:
         if row.get("status") == "partial":
             ev = row.get("evidence") or []
-            ev_text = "; ".join(f"{e.get('source_file','')}:{e.get('json_pointer','')}" for e in ev) if ev else "-"
+            ev_text = (
+                "; ".join(
+                    f"{e.get('source_file', '')}:{e.get('json_pointer', '')}"
+                    for e in ev
+                )
+                if ev
+                else "-"
+            )
             d.append(
-                f"| {row.get('onnx_op','')} | {row.get('domain','')} | {', '.join(row.get('reason_codes') or []) or '-'} | {'; '.join(row.get('reason_texts') or []) or '-'} | {ev_text} |\n"
+                f"| {row.get('onnx_op', '')} | {row.get('domain', '')} | {', '.join(row.get('reason_codes') or []) or '-'} | {'; '.join(row.get('reason_texts') or []) or '-'} | {ev_text} |\n"
             )
 
     d.append("\n## Unsupported operators\n\n")
@@ -463,17 +514,26 @@ def main():
     for row in op_dist:
         if status_display(row.get("status", "")) == "unsupported":
             comp = compat_map.get((row.get("onnx_op"), row.get("domain")), {})
-            reason = "; ".join(comp.get("reason_texts") or []) or "No Hip Dialect implementation available."
-            d.append(f"| {row.get('onnx_op','')} | {row.get('domain','')} | {row.get('count',0)} | {reason} |\n")
+            reason = (
+                "; ".join(comp.get("reason_texts") or [])
+                or "No Hip Dialect implementation available."
+            )
+            d.append(
+                f"| {row.get('onnx_op', '')} | {row.get('domain', '')} | {row.get('count', 0)} | {reason} |\n"
+            )
 
     d.append("\n## Data quality notes\n\n")
     d.append("- None.\n")
 
-    (analysis_dir / "model_compatibility_details.md").write_text("".join(d), encoding="utf-8")
+    (analysis_dir / "model_compatibility_details.md").write_text(
+        "".join(d), encoding="utf-8"
+    )
     runtime_json = {
         "meta": {
             "model_path": meta.get("model_path"),
-            "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "generated_at_utc": datetime.now(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            ),
             "rules_version": reco_rules.get("version", "unknown"),
         },
         "summary": {

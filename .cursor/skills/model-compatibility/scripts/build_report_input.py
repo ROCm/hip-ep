@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
 import json
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -69,7 +73,9 @@ def onnx_op_description(op: str, domain: str) -> str:
     try:
         from onnx import defs
 
-        schema = defs.get_schema(op, domain="" if domain in {"", "onnx", "ai.onnx"} else domain)
+        schema = defs.get_schema(
+            op, domain="" if domain in {"", "onnx", "ai.onnx"} else domain
+        )
         doc = " ".join((schema.doc or "").split())
         if doc:
             return doc.split(". ")[0].strip().rstrip(".")
@@ -153,28 +159,44 @@ def analyze_schema_for_key(nodes, hip_entry, strict_attr_names):
     some_missing = [a for a in req_attrs if 0 < miss_attr_counts[a] < total]
     if all_missing:
         reason_codes.append("MISSING_HIP_REQUIRED_ATTR")
-        reason_texts.append("Missing Hip-required attributes in all ONNX instances: " + ", ".join(sorted(all_missing)))
+        reason_texts.append(
+            "Missing Hip-required attributes in all ONNX instances: "
+            + ", ".join(sorted(all_missing))
+        )
     if some_missing:
         if "MISSING_HIP_REQUIRED_ATTR" not in reason_codes:
             reason_codes.append("MISSING_HIP_REQUIRED_ATTR")
-        reason_texts.append("Missing Hip-required attributes in some ONNX instances: " + ", ".join(sorted(some_missing)))
+        reason_texts.append(
+            "Missing Hip-required attributes in some ONNX instances: "
+            + ", ".join(sorted(some_missing))
+        )
 
     if in_low:
         reason_codes.append("ONNX_INPUT_BELOW_HIP_MIN")
-        reason_texts.append(f"ONNX inputs below Hip minimum in {in_low}/{total} instance(s).")
+        reason_texts.append(
+            f"ONNX inputs below Hip minimum in {in_low}/{total} instance(s)."
+        )
     if in_high:
         reason_codes.append("ONNX_INPUT_ABOVE_HIP_MAX")
-        reason_texts.append(f"ONNX inputs above Hip maximum in {in_high}/{total} instance(s).")
+        reason_texts.append(
+            f"ONNX inputs above Hip maximum in {in_high}/{total} instance(s)."
+        )
     if out_low:
         reason_codes.append("ONNX_OUTPUT_BELOW_HIP_MIN")
-        reason_texts.append(f"ONNX outputs below Hip minimum in {out_low}/{total} instance(s).")
+        reason_texts.append(
+            f"ONNX outputs below Hip minimum in {out_low}/{total} instance(s)."
+        )
     if out_high:
         reason_codes.append("ONNX_OUTPUT_ABOVE_HIP_MAX")
-        reason_texts.append(f"ONNX outputs above Hip maximum in {out_high}/{total} instance(s).")
+        reason_texts.append(
+            f"ONNX outputs above Hip maximum in {out_high}/{total} instance(s)."
+        )
     if nodes_with_extra:
         reason_codes.append("EXTRA_ONNX_ATTR_NOT_IN_HIP")
         top = [k for k, _ in extra_attr_counts.most_common(12)]
-        reason_texts.append("Extra attributes in ONNX not supported by Hip: " + ", ".join(top))
+        reason_texts.append(
+            "Extra attributes in ONNX not supported by Hip: " + ", ".join(top)
+        )
 
     status = "partial" if reason_codes else "full"
     return status, sorted(set(reason_codes)), reason_texts
@@ -182,7 +204,9 @@ def analyze_schema_for_key(nodes, hip_entry, strict_attr_names):
 
 def main():
     if len(sys.argv) != 4:
-        raise SystemExit("Usage: build_report_input.py <model.onnx> <analysis_dir> <repo_root>")
+        raise SystemExit(
+            "Usage: build_report_input.py <model.onnx> <analysis_dir> <repo_root>"
+        )
     model_path = Path(sys.argv[1])
     analysis_dir = Path(sys.argv[2])
     repo_root = Path(sys.argv[3])
@@ -191,10 +215,18 @@ def main():
 
     strict_attr_names = load_strict_attr_names(analysis_dir, repo_root)
 
-    step1 = json.loads((analysis_dir / "step1_onnx_ops.json").read_text(encoding="utf-8"))
-    step21 = json.loads((analysis_dir / "step2_1_onnx_to_hip_mappings.json").read_text(encoding="utf-8"))
-    step23 = json.loads((analysis_dir / "step2_3_backend_analysis.json").read_text(encoding="utf-8"))
-    step2hip = json.loads((analysis_dir / "step2_hip_ops.json").read_text(encoding="utf-8"))
+    step1 = json.loads(
+        (analysis_dir / "step1_onnx_ops.json").read_text(encoding="utf-8")
+    )
+    step21 = json.loads(
+        (analysis_dir / "step2_1_onnx_to_hip_mappings.json").read_text(encoding="utf-8")
+    )
+    step23 = json.loads(
+        (analysis_dir / "step2_3_backend_analysis.json").read_text(encoding="utf-8")
+    )
+    step2hip = json.loads(
+        (analysis_dir / "step2_hip_ops.json").read_text(encoding="utf-8")
+    )
 
     # Consolidate step2_1 mappings keyed on (op, domain). An ONNX op may
     # have MULTIPLE mappings -- e.g. Gather has hip.gather (the runtime path
@@ -208,7 +240,11 @@ def main():
         hop = mapping.get("hip_op", "") or ""
         if hop.startswith("hip."):
             return 0  # real runtime path -- highest priority
-        if hop.startswith("tensor.") or hop.startswith("arith.") or hop.startswith("memref."):
+        if (
+            hop.startswith("tensor.")
+            or hop.startswith("arith.")
+            or hop.startswith("memref.")
+        ):
             return 1  # compile-time fold variant
         return 2
 
@@ -239,7 +275,9 @@ def main():
     full_types = partial_types = unsupported_types = 0
     supported_instances = unsupported_instances = 0
 
-    for idx, ((op, dom), cnt) in enumerate(sorted(counts.items(), key=lambda x: (-x[1], x[0][0], x[0][1]))):
+    for idx, ((op, dom), cnt) in enumerate(
+        sorted(counts.items(), key=lambda x: (-x[1], x[0][0], x[0][1]))
+    ):
         s = support.get((op, dom))
         b = backend_by_key.get((op, dom), {})
         dtypes = []
@@ -267,7 +305,11 @@ def main():
             status = "unsupported"
             rec, why = unsupported_rec(op)
             reason_texts = [why]
-            reason_codes = ["COMPILE_TIME_TENSOR_OP"] if rec == "Compile Time Optimization" else ["NO_HIP_DIALECT_IMPL"]
+            reason_codes = (
+                ["COMPILE_TIME_TENSOR_OP"]
+                if rec == "Compile Time Optimization"
+                else ["NO_HIP_DIALECT_IMPL"]
+            )
             unsupported_instances += cnt
 
         if status == "full":
@@ -285,41 +327,56 @@ def main():
         if not desc or desc == "—":
             desc = onnx_op_description(op, dom)
 
-        op_dist.append({
-            "onnx_op": op,
-            "domain": dom,
-            "count": int(cnt),
-            "data_types": dtypes,
-            "status": status,
-            "hip_op": hip_op,
-            "runtime_func": runtime,
-            "backend": backend if backend else "Unknown",
-            "op_description": desc
-        })
+        op_dist.append(
+            {
+                "onnx_op": op,
+                "domain": dom,
+                "count": int(cnt),
+                "data_types": dtypes,
+                "status": status,
+                "hip_op": hip_op,
+                "runtime_func": runtime,
+                "backend": backend if backend else "Unknown",
+                "op_description": desc,
+            }
+        )
 
-        comp_rows.append({
-            "onnx_op": op,
-            "domain": dom,
-            "status": status,
-            "reason_codes": reason_codes,
-            "reason_texts": reason_texts,
-            "evidence": [{"source_file": "step2_1_onnx_to_hip_mappings.json", "json_pointer": f"/mappings/{idx}"}]
-        })
+        comp_rows.append(
+            {
+                "onnx_op": op,
+                "domain": dom,
+                "status": status,
+                "reason_codes": reason_codes,
+                "reason_texts": reason_texts,
+                "evidence": [
+                    {
+                        "source_file": "step2_1_onnx_to_hip_mappings.json",
+                        "json_pointer": f"/mappings/{idx}",
+                    }
+                ],
+            }
+        )
 
     mapping_chain = []
     for m in step23.get("mappings", []):
-        mapping_chain.append({
-            "onnx_op": m.get("onnx_op", ""),
-            "domain": norm_domain(m.get("onnx_domain", "onnx")),
-            "hip_op": m.get("hip_op", ""),
-            "runtime_func": m.get("runtime_func"),
-            "backend": m.get("backend", "Unknown") if m.get("backend") else "Unknown"
-        })
+        mapping_chain.append(
+            {
+                "onnx_op": m.get("onnx_op", ""),
+                "domain": norm_domain(m.get("onnx_domain", "onnx")),
+                "hip_op": m.get("hip_op", ""),
+                "runtime_func": m.get("runtime_func"),
+                "backend": m.get("backend", "Unknown")
+                if m.get("backend")
+                else "Unknown",
+            }
+        )
 
     out = {
         "meta": {
             "model_path": str(model_path),
-            "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "generated_at_utc": datetime.now(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            ),
             "repo_root": str(repo_root),
             "tool_versions": {"pipeline": "step1-step2_3"},
         },
@@ -336,15 +393,39 @@ def main():
         "mapping_chain": mapping_chain,
         "compatibility": comp_rows,
         "reason_catalog": [
-            {"code": "NO_HIP_DIALECT_IMPL", "default_text": "No Hip Dialect implementation available."},
-            {"code": "COMPILE_TIME_TENSOR_OP", "default_text": "Handled at compile time."},
-            {"code": "MISSING_HIP_REQUIRED_ATTR", "default_text": "Missing Hip-required attributes."},
-            {"code": "EXTRA_ONNX_ATTR_NOT_IN_HIP", "default_text": "Extra ONNX attributes not in Hip op."},
-            {"code": "ONNX_INPUT_BELOW_HIP_MIN", "default_text": "ONNX inputs below Hip minimum."},
-            {"code": "ONNX_INPUT_ABOVE_HIP_MAX", "default_text": "ONNX inputs above Hip maximum."},
-            {"code": "ONNX_OUTPUT_BELOW_HIP_MIN", "default_text": "ONNX outputs below Hip minimum."},
-            {"code": "ONNX_OUTPUT_ABOVE_HIP_MAX", "default_text": "ONNX outputs above Hip maximum."}
-        ]
+            {
+                "code": "NO_HIP_DIALECT_IMPL",
+                "default_text": "No Hip Dialect implementation available.",
+            },
+            {
+                "code": "COMPILE_TIME_TENSOR_OP",
+                "default_text": "Handled at compile time.",
+            },
+            {
+                "code": "MISSING_HIP_REQUIRED_ATTR",
+                "default_text": "Missing Hip-required attributes.",
+            },
+            {
+                "code": "EXTRA_ONNX_ATTR_NOT_IN_HIP",
+                "default_text": "Extra ONNX attributes not in Hip op.",
+            },
+            {
+                "code": "ONNX_INPUT_BELOW_HIP_MIN",
+                "default_text": "ONNX inputs below Hip minimum.",
+            },
+            {
+                "code": "ONNX_INPUT_ABOVE_HIP_MAX",
+                "default_text": "ONNX inputs above Hip maximum.",
+            },
+            {
+                "code": "ONNX_OUTPUT_BELOW_HIP_MIN",
+                "default_text": "ONNX outputs below Hip minimum.",
+            },
+            {
+                "code": "ONNX_OUTPUT_ABOVE_HIP_MAX",
+                "default_text": "ONNX outputs above Hip maximum.",
+            },
+        ],
     }
     out_path = analysis_dir / "report_input.json"
     out_path.write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")

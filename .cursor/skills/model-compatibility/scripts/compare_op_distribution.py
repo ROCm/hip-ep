@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
 """
 Compare step1 ONNX op distributions (original model vs EP-dumped onnx.onnx).
 
@@ -65,7 +69,9 @@ def build_comparison(
 
     return {
         "meta": {
-            "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "generated_at_utc": datetime.now(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            ),
             "original_model": original_model,
             "ep_model": ep_model,
             "original_step1": str(original_path),
@@ -95,8 +101,8 @@ def write_markdown(comp: dict, out_md: Path) -> None:
         f"- **EP input (dumped):** `{meta['ep_model']}`\n",
         f"- **Generated UTC:** `{meta['generated_at_utc']}`\n\n",
         "## Summary\n\n",
-        f"| Metric | Original | EP input | Delta |\n",
-        f"|---|---:|---:|---:|\n",
+        "| Metric | Original | EP input | Delta |\n",
+        "|---|---:|---:|---:|\n",
         f"| Total node instances | {summary['original_total_nodes']} | "
         f"{summary['ep_total_nodes']} | {summary['node_delta']:+d} |\n",
         f"| Unique operator types | {summary['original_unique_ops']} | "
@@ -153,7 +159,9 @@ def main() -> None:
     ap.add_argument("original_step1", type=Path)
     ap.add_argument("ep_step1", type=Path)
     ap.add_argument("output_dir", type=Path)
-    ap.add_argument("--original-model", default="", help="Label for original model path")
+    ap.add_argument(
+        "--original-model", default="", help="Label for original model path"
+    )
     ap.add_argument("--ep-model", default="", help="Label for EP onnx path")
     args = ap.parse_args()
 
@@ -165,7 +173,9 @@ def main() -> None:
 
     json_path = args.output_dir / "op_distribution_comparison.json"
     md_path = args.output_dir / "op_distribution_comparison.md"
-    json_path.write_text(json.dumps(comp, indent=2, ensure_ascii=False), encoding="utf-8")
+    json_path.write_text(
+        json.dumps(comp, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
     write_markdown(comp, md_path)
     print(f"[OK] {json_path}")
     print(f"[OK] {md_path}")

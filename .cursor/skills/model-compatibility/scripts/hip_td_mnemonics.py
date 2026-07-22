@@ -1,3 +1,7 @@
+#
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Licensed under the MIT License.
+#
 """
 Shared TableGen helper: map mlir::hip C++ op class (e.g. ReduceSumOp) to the
 string inside Hip_(Dps)Op<"…"> in HipOps.td (e.g. reduce_sum → hip.reduce_sum).
