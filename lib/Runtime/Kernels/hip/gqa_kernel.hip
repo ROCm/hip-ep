@@ -812,6 +812,60 @@ extern "C" int hip_gqa_causal_mask_f32(
   GQA_RETURN_LAUNCH_STATUS();
 }
 
+template <typename TBias>
+__global__ void add_attention_bias_kernel(
+    float* __restrict__ scores, const TBias* __restrict__ bias,
+    int total_heads, int num_heads, int bias_batch, int bias_heads, int sq,
+    int total_seq, int score_batch_stride) {
+  int head = blockIdx.y;
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  int n = sq * total_seq;
+  if (tid >= n)
+    return;
+  int row = tid / total_seq;
+  int col = tid % total_seq;
+  int b = head / num_heads;
+  int h = head % num_heads;
+  int bias_b = (bias_batch == 1) ? 0 : b;
+  int bias_h = (bias_heads == 1) ? 0 : h;
+  size_t bias_idx = static_cast<size_t>(bias_b) * bias_heads * sq * total_seq +
+                    static_cast<size_t>(bias_h) * sq * total_seq +
+                    static_cast<size_t>(row) * total_seq + col;
+  scores[static_cast<size_t>(head) * score_batch_stride + tid] +=
+      static_cast<float>(bias[bias_idx]);
+}
+
+extern "C" int hip_gqa_add_attention_bias_f32(
+    void* stream_ptr, void* scores, const void* bias, int total_heads,
+    int num_heads, int bias_batch, int bias_heads, int sq, int total_seq,
+    int score_batch_stride, int bias_element_size_bytes) {
+  if (!scores || !bias)
+    return -1;
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  int n = sq * total_seq;
+  int blocksX = (n + GQA_THREADS - 1) / GQA_THREADS;
+  (void)hipGetLastError();
+  if (bias_element_size_bytes == 2) {
+    add_attention_bias_kernel<__half>
+        <<<dim3(blocksX, total_heads), GQA_THREADS, 0, stream>>>(
+            static_cast<float*>(scores), static_cast<const __half*>(bias),
+            total_heads, num_heads, bias_batch, bias_heads, sq, total_seq,
+            score_batch_stride);
+  } else if (bias_element_size_bytes == 4) {
+    add_attention_bias_kernel<float>
+        <<<dim3(blocksX, total_heads), GQA_THREADS, 0, stream>>>(
+            static_cast<float*>(scores), static_cast<const float*>(bias),
+            total_heads, num_heads, bias_batch, bias_heads, sq, total_seq,
+            score_batch_stride);
+  } else {
+    fprintf(stderr,
+            "hip_gqa_add_attention_bias_f32: unsupported bias elem size %d\n",
+            bias_element_size_bytes);
+    return -1;
+  }
+  GQA_RETURN_LAUNCH_STATUS();
+}
+
 // Step 9b (fp32->fp16 variant): Softmax reading fp32 scores, writing fp16 output
 // Avoids inf-inf=NaN by operating entirely in fp32 before the final fp16 store.
 
