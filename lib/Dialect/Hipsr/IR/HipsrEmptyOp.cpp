@@ -20,18 +20,20 @@ LogicalResult EmptyOp::verify() {
   // yielded tensors become this op's results, so just check count and types.
   auto yieldOp = cast<EmptyYieldOp>(getRegion().front().getTerminator());
 
-  if (yieldOp.getTensors().size() != getNumResults())
+  if (yieldOp.getTensors().size() != getNumResults()) {
     return emitOpError() << "has " << getNumResults()
                          << " result(s) but its empty_yield yields "
                          << yieldOp.getTensors().size() << " value(s)";
+  }
 
   for (unsigned idx : llvm::seq<unsigned>(0, getNumResults())) {
     Type resultType = getResultTypes()[idx];
     Type yieldType = yieldOp.getTensors()[idx].getType();
-    if (resultType != yieldType)
+    if (resultType != yieldType) {
       return emitOpError() << "result #" << idx << " type " << resultType
                            << " does not match the yielded value type "
                            << yieldType;
+    }
   }
 
   return success();
