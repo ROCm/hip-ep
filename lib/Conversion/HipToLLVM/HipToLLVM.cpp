@@ -238,8 +238,15 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateElementwiseLoweringPatterns(typeConverter, patterns);
   populatePowerLoweringPatterns(typeConverter, patterns);
   populateActivationLoweringPatterns(typeConverter, patterns);
+  populateBiasGeluLoweringPatterns(typeConverter, patterns);
+  populateFastGeluLoweringPatterns(typeConverter, patterns);
   populateNormLoweringPatterns(typeConverter, patterns);
   populateGatherLoweringPatterns(typeConverter, patterns);
+  populateGatherElementsLoweringPatterns(typeConverter, patterns);
+  populateTopKLoweringPatterns(typeConverter, patterns);
+  populateScatterElementsLoweringPatterns(typeConverter, patterns);
+  populateCompressLoweringPatterns(typeConverter, patterns);
+  populateOneHotLoweringPatterns(typeConverter, patterns);
   populateRangeLoweringPatterns(typeConverter, patterns);
   populateCastLoweringPatterns(typeConverter, patterns);
   populateReduceLoweringPatterns(typeConverter, patterns);
@@ -254,9 +261,11 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateLinearAttentionLoweringPatterns(typeConverter, patterns);
   populateGraphLoweringPatterns(typeConverter, patterns);
   populateLoopLoweringPatterns(typeConverter, patterns);
+  populateIfLoweringPatterns(typeConverter, patterns);
   populateCausalConvWithStateLoweringPatterns(typeConverter, patterns);
   populateWhereLoweringPatterns(typeConverter, patterns);
   populateEqualLoweringPatterns(typeConverter, patterns);
+  populateOrLoweringPatterns(typeConverter, patterns);
   populateAndLoweringPatterns(typeConverter, patterns);
   populateDivLoweringPatterns(typeConverter, patterns);
   populateUnaryElementwiseLoweringPatterns(typeConverter, patterns);

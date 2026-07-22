@@ -4,9 +4,11 @@
 // ============================================================================
 // TEST PURPOSE:
 // Verify hip.and lowers to llvm.call @wrap_and with signature
-//   (state, lhs, rhs, output, num_elements, data_type) -> i32.
-// Both inputs are i1 (boolean). Since i1 is not in the HIPDNN dtype enum,
-// the lowering passes 0 as a sentinel.
+//   (state, lhs, rhs, output,
+//    lhs_n..lhs_w, rhs_n..rhs_w, out_n..out_w, data_type) -> i32.
+// Full 4D operand shapes are passed so the runtime can materialise ONNX
+// broadcast via hip_expand. Both inputs are i1 (boolean); since i1 is not in
+// the HIPDNN dtype enum, the lowering passes 0 as the data_type sentinel.
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --convert-hip-to-llvm | FileCheck %s
@@ -22,7 +24,7 @@ module {
     hip.and(%ctx) ins(%a, %b : memref<64xi1, 1>, memref<64xi1, 1>)
                   outs(%c : memref<64xi1, 1>)
 
-    // CHECK: llvm.call @wrap_and({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_and({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
     return
   }
 
@@ -38,7 +40,7 @@ module {
 
     // CHECK: llvm.extractvalue %{{.*}}[3, 0]
     // CHECK: llvm.extractvalue %{{.*}}[3, 1]
-    // CHECK: llvm.call @wrap_and({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_and({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
     return
   }
 
@@ -56,7 +58,7 @@ module {
     hip.and(%ctx) ins(%a, %b : memref<64xui8, 1>, memref<64xui8, 1>)
                   outs(%c : memref<64xui8, 1>)
 
-    // CHECK: llvm.call @wrap_and({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_and({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
     return
   }
 }

@@ -862,7 +862,8 @@ int wrap_group_query_attention(
     int32_t no_causal,
     // Shape values (6)
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
-    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes);
+    int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes,
+    int64_t attn_bias_batch, int64_t attn_bias_num_heads);
 
 // MultiHeadAttention operation wrapper (com.microsoft.MultiHeadAttention v1).
 // Called by generated IR for onnx.Custom(MultiHeadAttention) lowering.
@@ -968,6 +969,41 @@ int wrap_gather(RuntimeState *state, void *data, void *indices, void *output,
                 int64_t axis_size, int64_t inner_size,
                 int64_t element_size_bytes, int64_t indices_element_size_bytes);
 
+int wrap_gather_elements(RuntimeState *state, void *data, void *indices,
+                         void *output, int64_t axis, int64_t rank,
+                         const int64_t *data_shape,
+                         const int64_t *indices_shape, int64_t num_elements,
+                         int64_t element_size_bytes,
+                         int64_t indices_element_size_bytes);
+
+int wrap_top_k(RuntimeState *state, void *x, void *k, void *values,
+               void *indices, int64_t axis, int64_t largest, int64_t sorted,
+               int64_t rank, const int64_t *x_shape, int64_t num_elements,
+               int64_t element_size_bytes);
+
+int wrap_scatter_elements(RuntimeState *state, void *data, void *indices,
+                          void *updates, void *output, int64_t axis,
+                          int64_t reduction_id, int64_t rank,
+                          const int64_t *data_shape,
+                          const int64_t *indices_shape, int64_t num_updates,
+                          int64_t element_size_bytes,
+                          int64_t indices_element_size_bytes);
+
+int wrap_compress(RuntimeState *state, void *input, void *condition,
+                  void *output, int64_t flatten, int64_t axis,
+                  int64_t input_rank, int64_t output_rank,
+                  const int64_t *input_shape, const int64_t *output_shape,
+                  int64_t condition_len, int64_t num_output_elements,
+                  int64_t element_size_bytes);
+
+int wrap_one_hot(RuntimeState *state, void *indices, void *depth, void *values,
+                 void *output, int64_t axis, int64_t indices_rank,
+                 int64_t output_rank, const int64_t *indices_shape,
+                 const int64_t *output_shape, int64_t num_indices,
+                 int64_t num_output_elements, int64_t element_size_bytes,
+                 int64_t indices_element_size_bytes,
+                 int64_t depth_element_size_bytes);
+
 // Range operation wrapper
 int wrap_range(RuntimeState *state, void *start, void *limit, void *delta,
                void *output, int64_t output_num_elements, int64_t hip_dtype);
@@ -1017,6 +1053,14 @@ int wrap_reduce_max(RuntimeState *state, void *data, void *axes, void *output,
                     int64_t keepdims, int64_t noop_with_empty_axes,
                     int64_t inner_size);
 
+// ReduceMin operation wrapper
+// data_type: HIPDNN_EP_DATATYPE_* enum value identifying the element type.
+int wrap_reduce_min(RuntimeState *state, void *data, void *axes, void *output,
+                    int64_t data_num_elements, int64_t output_num_elements,
+                    int64_t axes_num_elements, int64_t data_type,
+                    int64_t keepdims, int64_t noop_with_empty_axes,
+                    int64_t inner_size);
+
 // Cast operation wrapper (element type conversion)
 // src_data_type and dst_data_type are HIPDNN_EP_DATATYPE_* enum values.
 int wrap_cast(RuntimeState *state, void *input, void *output,
@@ -1037,6 +1081,16 @@ int wrap_miopenActivationForward(RuntimeState *state, int op_state_slot,
 // approximate: 0 = exact (erf), 1 = tanh approximation
 int wrap_gelu(RuntimeState *state, void *input, void *output,
               int64_t num_elements, int64_t data_type, int64_t approximate);
+
+// Fused com.microsoft.BiasGelu: Gelu_erf(data + broadcast(bias)).
+// data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16, DOUBLE)
+int wrap_bias_gelu(RuntimeState *state, void *data, void *bias, void *output,
+                   int64_t num_elements, int64_t bias_len, int64_t data_type);
+
+// Fused com.microsoft.FastGelu: tanh-approx Gelu on (input + broadcast(bias)).
+// bias_len == 0 means no bias (bias pointer ignored).
+int wrap_fast_gelu(RuntimeState *state, void *input, void *bias, void *output,
+                   int64_t num_elements, int64_t bias_len, int64_t data_type);
 
 // LeakyRelu activation wrapper (uses custom HIP kernel).
 // data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, DOUBLE)
@@ -1101,6 +1155,10 @@ int wrap_global_pool(RuntimeState *state, void *input, void *output,
 //                  (also covers 3D [batch, seq_len, num_heads*head_dim])
 //   is_bnsh != 0 : BNSH [batch, num_heads, seq_len, head_dim]
 //                  (ONNX com.microsoft.RotaryEmbedding 4D default; GQA K/V)
+// position_ids may be NULL: native ai.onnx RotaryEmbedding (opset >= 23)
+// without position_ids ships cos/sin already position-expanded to
+// [batch, seq_len, rotary_dim/2], and the kernel indexes them by the flat
+// token position b*seq+s instead of looking up position_ids.
 int wrap_rotary_embedding(RuntimeState *state, void *input, void *position_ids,
                           void *cos_cache, void *sin_cache, void *output,
                           int64_t interleaved, int64_t batch_size,
@@ -1299,24 +1357,33 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
               int64_t K, float alpha, float beta, int64_t transA,
               int64_t transB, int64_t typeCode, int64_t cDim0, int64_t cDim1);
 
-// `out_num_elements` is the broadcast result count.  `a_num_elements` and
-// `b_num_elements` are the per-input element counts; either may be 1 to
-// indicate scalar broadcast.  Today only same-shape OR scalar-vs-tensor is
-// supported (the common case for embedding-style models like Qwen3.5 where
-// `Equal(input_ids[1,N], scalar)` lowers without an intervening `Expand`).
-int wrap_equal(RuntimeState *state, void *a, void *b, void *output,
-               int64_t a_num_elements, int64_t b_num_elements,
-               int64_t out_num_elements, int64_t data_type);
+// Element-wise Equal. Operand shapes are passed as 4D (N, C, H, W), left-
+// padded with 1 by the compiler; `data_type` is the INPUT (comparison
+// operand) type and the output is always 1 byte per element. General ONNX
+// multidirectional broadcast is handled by materialising any partially-
+// broadcast operand to the output shape via hip_expand; scalar and same-shape
+// operands take the kernel's direct path.
+int wrap_equal(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
+               int64_t a_c, int64_t a_h, int64_t a_w, int64_t b_n, int64_t b_c,
+               int64_t b_h, int64_t b_w, int64_t out_n, int64_t out_c,
+               int64_t out_h, int64_t out_w, int64_t data_type);
 
-// Element-wise logical AND wrapper. Inputs / output share the same data_type
-// (HIPDNN_EP_DATATYPE_*); ONNX `And` is defined on bool tensors, which the
-// EP marshals as i8/uint8 elements (1 byte per element). Today this is a
-// stub: the function returns success without computing anything so models
-// that include And can still link and lower end-to-end while a real
-// element-wise AND kernel is being built.
-int wrap_and(RuntimeState *state, void *a, void *b, void *output,
+// Element-wise logical AND / OR on bool tensors (marshalled as 1-byte
+// uint8 elements). Operand shapes are passed as 4D (N, C, H, W), left-padded
+// with 1 by the compiler; ONNX multidirectional broadcast is materialised via
+// hip_expand when an operand does not already match the output shape.
+// `data_type` is a sentinel (i1 has no HIPDNN dtype slot) and is unused.
+int wrap_or(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
+            int64_t a_c, int64_t a_h, int64_t a_w, int64_t b_n, int64_t b_c,
+            int64_t b_h, int64_t b_w, int64_t out_n, int64_t out_c,
+            int64_t out_h, int64_t out_w, int64_t data_type);
+int wrap_and(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
+             int64_t a_c, int64_t a_h, int64_t a_w, int64_t b_n, int64_t b_c,
+             int64_t b_h, int64_t b_w, int64_t out_n, int64_t out_c,
+             int64_t out_h, int64_t out_w, int64_t data_type);
+
+int wrap_abs(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
-
 int wrap_neg(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
 int wrap_not(RuntimeState *state, void *input, void *output,
@@ -1375,7 +1442,12 @@ int wrap_cos(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
 int wrap_sin(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
+int wrap_ceil(RuntimeState *state, void *input, void *output,
+              int64_t num_elements, int64_t data_type);
 int wrap_exp(RuntimeState *state, void *input, void *output,
+             int64_t num_elements, int64_t data_type);
+
+int wrap_log(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type);
 
 // Element-wise division with 4D ONNX broadcast (rank <= 4, left-padded).
@@ -1432,9 +1504,15 @@ int wrap_reduce_prod(RuntimeState *state, void *data, void *axes, void *output,
                      int64_t keepdims, int64_t noop_with_empty_axes,
                      int64_t inner_size);
 
-// Less operation wrapper (element-wise C = A < B). Output is bool (1 byte).
-int wrap_less(RuntimeState *state, void *a, void *b, void *output,
-              int64_t num_elements, int64_t data_type);
+// Less operation wrapper (element-wise C = A < B). Output is bool (1 byte);
+// `data_type` is the INPUT (comparison operand) type. Operand shapes are
+// passed as 4D (N, C, H, W), left-padded with 1 by the compiler; ONNX
+// multidirectional broadcast is materialised via hip_expand when an operand
+// does not already match the output shape.
+int wrap_less(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
+              int64_t a_c, int64_t a_h, int64_t a_w, int64_t b_n, int64_t b_c,
+              int64_t b_h, int64_t b_w, int64_t out_n, int64_t out_c,
+              int64_t out_h, int64_t out_w, int64_t data_type);
 
 // GatherND operation wrapper. data_shape has rank `data_rank`; indices has
 // rank `indices_rank` with last dim `indices_inner = indices_shape[-1]`.
@@ -1550,6 +1628,17 @@ int hipdnn_ep_run_loop(RuntimeState *state, HipdnnEpLoopBodyFn body_fn,
                        int64_t max_trip_count, bool cond_init,
                        int32_t num_loop_carried, int32_t num_captures,
                        void **loop_carried_descs, void **capture_descs);
+
+// ONNX If driver. Dispatches to exactly one of the two branch trampolines
+// based on `cond`. Each trampoline writes branch outputs into the shared
+// `output_descs` buffers (DPS / out-param ABI).
+typedef int (*HipdnnEpIfBranchFn)(RuntimeState *state, void **output_descs,
+                                  void **capture_descs);
+
+int hipdnn_ep_run_if(RuntimeState *state, bool cond, HipdnnEpIfBranchFn then_fn,
+                     HipdnnEpIfBranchFn else_fn, int32_t num_outputs,
+                     int32_t num_captures, void **output_descs,
+                     void **capture_descs);
 
 //===----------------------------------------------------------------------===//
 // Low-Level HIP Wrappers

@@ -63,10 +63,17 @@ inline constexpr const char *kMiopenMul = "hip_miopen_mul";
 inline constexpr const char *kMiopenSoftmax = "hip_miopen_softmax";
 inline constexpr const char *kWrapTranspose = "wrap_transpose";
 inline constexpr const char *kWrapGather = "wrap_gather";
+inline constexpr const char *kWrapGatherElements = "wrap_gather_elements";
+inline constexpr const char *kWrapTopK = "wrap_top_k";
+inline constexpr const char *kWrapScatterElements = "wrap_scatter_elements";
+inline constexpr const char *kWrapCompress = "wrap_compress";
+inline constexpr const char *kWrapOneHot = "wrap_one_hot";
 inline constexpr const char *kHipSilu = "hip_silu";
 inline constexpr const char *kWrapMiopenActivationForward =
-    "wrap_miopenActivationForward";                   // hip.sigmoid
-inline constexpr const char *kWrapGelu = "wrap_gelu"; // hip.gelu
+    "wrap_miopenActivationForward";                            // hip.sigmoid
+inline constexpr const char *kWrapGelu = "wrap_gelu";          // hip.gelu
+inline constexpr const char *kWrapBiasGelu = "wrap_bias_gelu"; // hip.bias_gelu
+inline constexpr const char *kWrapFastGelu = "wrap_fast_gelu"; // hip.fast_gelu
 inline constexpr const char *kWrapLeakyRelu =
     "wrap_leaky_relu"; // hip.leaky_relu
 inline constexpr const char *kWrapElementwiseSub = "wrap_elementwise_sub";
@@ -79,6 +86,7 @@ inline constexpr const char *kWrapRange = "wrap_range";
 inline constexpr const char *kWrapReduceSum = "wrap_reduce_sum";
 inline constexpr const char *kWrapReduceMean = "wrap_reduce_mean";
 inline constexpr const char *kWrapReduceMax = "wrap_reduce_max";
+inline constexpr const char *kWrapReduceMin = "wrap_reduce_min";
 inline constexpr const char *kWrapGQA = "wrap_group_query_attention";
 inline constexpr const char *kWrapMultiHeadAttention =
     "wrap_multi_head_attention";
@@ -94,12 +102,16 @@ inline constexpr const char *kWrapCausalConvWithState =
     "wrap_causal_conv_with_state";
 inline constexpr const char *kWrapWhere = "wrap_where";
 inline constexpr const char *kWrapEqual = "wrap_equal";
+inline constexpr const char *kWrapOr = "wrap_or";
 inline constexpr const char *kWrapAnd = "wrap_and";
+inline constexpr const char *kWrapAbs = "wrap_abs";
 inline constexpr const char *kWrapNeg = "wrap_neg";
 inline constexpr const char *kWrapNot = "wrap_not";
 inline constexpr const char *kWrapCos = "wrap_cos";
 inline constexpr const char *kWrapSin = "wrap_sin";
+inline constexpr const char *kWrapCeil = "wrap_ceil";
 inline constexpr const char *kWrapExp = "wrap_exp";
+inline constexpr const char *kWrapLog = "wrap_log";
 inline constexpr const char *kWrapDiv = "wrap_div";
 inline constexpr const char *kWrapCumSum = "wrap_cumsum";
 inline constexpr const char *kWrapPad = "wrap_pad";
@@ -384,9 +396,23 @@ void populatePowerLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
 void populateActivationLoweringPatterns(const LLVMTypeConverter &converter,
                                         RewritePatternSet &patterns);
+void populateBiasGeluLoweringPatterns(const LLVMTypeConverter &converter,
+                                      RewritePatternSet &patterns);
+void populateFastGeluLoweringPatterns(const LLVMTypeConverter &converter,
+                                      RewritePatternSet &patterns);
 void populateNormLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateGatherLoweringPatterns(const LLVMTypeConverter &converter,
+                                    RewritePatternSet &patterns);
+void populateGatherElementsLoweringPatterns(const LLVMTypeConverter &converter,
+                                            RewritePatternSet &patterns);
+void populateTopKLoweringPatterns(const LLVMTypeConverter &converter,
+                                  RewritePatternSet &patterns);
+void populateScatterElementsLoweringPatterns(const LLVMTypeConverter &converter,
+                                             RewritePatternSet &patterns);
+void populateCompressLoweringPatterns(const LLVMTypeConverter &converter,
+                                      RewritePatternSet &patterns);
+void populateOneHotLoweringPatterns(const LLVMTypeConverter &converter,
                                     RewritePatternSet &patterns);
 void populateRangeLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
@@ -424,6 +450,8 @@ void populateLinearAttentionLoweringPatterns(const LLVMTypeConverter &converter,
                                              RewritePatternSet &patterns);
 void populateEqualLoweringPatterns(const LLVMTypeConverter &converter,
                                    RewritePatternSet &patterns);
+void populateOrLoweringPatterns(const LLVMTypeConverter &converter,
+                                RewritePatternSet &patterns);
 void populateAndLoweringPatterns(const LLVMTypeConverter &converter,
                                  RewritePatternSet &patterns);
 void populateDivLoweringPatterns(const LLVMTypeConverter &converter,
@@ -463,6 +491,8 @@ void populateSizeLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateLoopLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
+void populateIfLoweringPatterns(const LLVMTypeConverter &converter,
+                                RewritePatternSet &patterns);
 void populatePoolLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateResizeLoweringPatterns(const LLVMTypeConverter &converter,
