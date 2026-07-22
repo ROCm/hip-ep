@@ -197,11 +197,15 @@ static void buildCallbackShapeValues(Location loc, MemRefType internalType,
 }
 
 /// If module metadata is present, verify callback rank matches the ONNX
-/// output shape recorded at compile time (hipdnn.output_shapes).
+/// output shape recorded at compile time (hipdnn.output_shapes). Metadata
+/// describes @main_graph only — auxiliary funcs in the same module are skipped.
 static LogicalResult verifyCallbackRankAgainstMetadata(ModuleOp module,
+                                                       func::FuncOp func,
                                                        int64_t outIdx,
                                                        int64_t callbackRank,
                                                        Location loc) {
+  if (!func || func.getName() != "main_graph")
+    return success();
   auto outputShapes = module->getAttrOfType<ArrayAttr>("hipdnn.output_shapes");
   if (!outputShapes || outIdx < 0 ||
       outIdx >= static_cast<int64_t>(outputShapes.size()))
@@ -482,8 +486,9 @@ struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
     int64_t callbackRank = rank;
     buildCallbackShapeValues(loc, memRefType, internalSizes, root, returnVal,
                              rewriter, callbackSizes, callbackRank);
-    if (failed(verifyCallbackRankAgainstMetadata(module, op.getOutIdx(),
-                                                 callbackRank, loc)))
+    auto parentFunc = op->getParentOfType<func::FuncOp>();
+    if (failed(verifyCallbackRankAgainstMetadata(
+            module, parentFunc, op.getOutIdx(), callbackRank, loc)))
       return failure();
 
     // Stack-allocate the i64[callbackRank] shape array for the runtime ABI.
