@@ -29,19 +29,15 @@ class Hipsr_Op<string mnemonic, list<Trait> traits = []> :
 //===----------------------------------------------------------------------===//
 
 // Base for shaped compute ops (MatMul, Add, ...). Every such op:
-//   - carries an optional shape region (region 0): zero blocks, or one block
-//     computing the output shape and ending in `hipsr.shape_yield`.
-//     MaxSizedRegion<1> allows the 0-or-1-block range; SingleBlock caps a
-//     non-empty region at one block (SingleBlockImplicitTerminator is avoided
-//     because it would inject a terminator into the empty form);
+//   - carries an optional shape region (region 0), empty or one block ending
+//     in `hipsr.shape_yield`;
 //   - implements ShapeRegionInterface (each op provides populateShapeRegion);
-//   - carries IsolatedFromAbove, so the shape region reads the DPS `ins` as
-//     entry-block args rather than the op's operands;
-//   - uses destination-passing style (DestinationStyleOpInterface): the `outs`
-//     init operands are the output buffers.
+//   - is IsolatedFromAbove, so the region reads the DPS `ins` as entry-block
+//     args, not the op's operands;
+//   - is destination-passing style: the `outs` init operands are the outputs.
 //
-// Regular and StartBarrier ops use this one shape region; EndBarrier ops
-// (which also need a capacity region) extend it separately.
+// EndBarrier ops additionally carry a capacity region; they extend this base
+// separately.
 class Hipsr_DpsOp<string mnemonic, list<Trait> traits = []> :
     Hipsr_Op<mnemonic, !listconcat([
         DeclareOpInterfaceMethods<ShapeRegionInterface, ["populateShapeRegion"]>,

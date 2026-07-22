@@ -10,11 +10,9 @@
 
 // RUN: hip-mlir-opt %s -split-input-file -hipsr-populate-shape-region | FileCheck %s
 
-// An empty (omitted) shape region gets populated: shape.shape_of + one
-// shape.get_extent per dim, yielded as a single group with the output element
-// type. The region is IsolatedFromAbove, so the input arrives as the
-// entry-block arg (arg 0 is the shape-unused ctx) and shape.shape_of reads that
-// arg, not the op's operand.
+// An empty shape region gets populated: shape.shape_of + one shape.get_extent
+// per dim, yielded with the output element type. shape.shape_of reads the
+// entry-block arg (IsolatedFromAbove), not the op's operand.
 // CHECK-LABEL: func.func @cast_tensor
 // CHECK:       hipsr.cast(%{{.+}}) ins(%{{.+}} : tensor<?x8xf32>) outs(%{{.+}} : tensor<?x8xf16>) : tensor<?x8xf16> shape_region {
 // CHECK:         ^bb0(%{{.+}}: !hipsr.context, %[[IN:.+]]: tensor<?x8xf32>):

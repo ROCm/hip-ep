@@ -13,11 +13,9 @@
 // RUN: hip-mlir-opt --split-input-file --verify-diagnostics %s | FileCheck %s
 // RUN: hip-mlir-opt --split-input-file --verify-diagnostics -hipsr-populate-shape-region %s | FileCheck %s --check-prefix=POPULATE
 
-// Shape region omitted: parses, verifies, and prints back with no
-// `shape_region` keyword (the optional region group prints nothing for a
-// zero-block region). This is the exact form convert-onnx-to-hipsr emits. The
-// trailing check that `return` follows immediately proves no region body was
-// printed -- a populated region would put its body on the next line instead.
+// Omitted shape region: parses, verifies, and prints back with no
+// `shape_region` keyword. The CHECK-NEXT return proves nothing was printed for
+// the empty region.
 // CHECK-LABEL: func.func @matmul_no_shape_region
 // CHECK:      hipsr.matmul(%{{.+}}) ins(%{{.+}}, %{{.+}} : tensor<?x4096xf16>, tensor<4096x1024xf16>)
 // CHECK-SAME:   outs(%{{.+}} : tensor<?x1024xf16>) : tensor<?x1024xf16>
@@ -100,11 +98,9 @@ func.func @matmul_operand_not_shaped(%ctx: !hipsr.context, %a: f16,
 // dataflow; the rest only assert the structure that differs from it.
 //===----------------------------------------------------------------------===//
 
-// Canonical 2-D case, checked end-to-end. Reads top to bottom as the emitted
-// IR: the entry-block args (the region is IsolatedFromAbove, so every check
-// reads A/B via the captured args %[[A]]/%[[B]], never the operands; arg0 is
-// the unused ctx), the K-equality guard, then the output dims (M from A, N from
-// B) yielded under that assumption.
+// Canonical 2-D case, checked end-to-end: entry-block args (read via %[[A]]/
+// %[[B]], since the region is IsolatedFromAbove), the K-equality guard, then
+// the output dims (M from A, N from B) yielded under that assumption.
 // POPULATE-LABEL: func.func @matmul_2d
 // POPULATE: hipsr.matmul(%{{.+}}) ins(%{{.+}}, %{{.+}} : tensor<?x4096xf16>, tensor<4096x1024xf16>)
 // POPULATE-SAME: shape_region {
@@ -218,8 +214,6 @@ func.func @matmul_batched(%ctx: !hipsr.context, %a: tensor<?x8x64x4096xf16>,
 func.func @matmul_already_populated(%ctx: !hipsr.context, %a: tensor<64x4096xf16>,
                                     %b: tensor<4096x1024xf16>,
                                     %init: tensor<64x1024xf16>) -> tensor<64x1024xf16> {
-  // The entry-block args mirror the DPS inputs [ctx, A, B] (verifier-enforced),
-  // even though this hand-written region does not read them.
   %0 = hipsr.matmul(%ctx) ins(%a, %b : tensor<64x4096xf16>, tensor<4096x1024xf16>)
                     outs(%init : tensor<64x1024xf16>) : tensor<64x1024xf16> shape_region {
   ^bb0(%ctxarg: !hipsr.context, %aarg: tensor<64x4096xf16>, %barg: tensor<4096x1024xf16>):

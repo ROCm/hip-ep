@@ -49,9 +49,6 @@ struct CastToHipsr : public ::mlir::RewritePattern {
       return rewriter.notifyMatchFailure(op, "expected ranked tensor result");
     }
 
-    // DPS init: a hipsr.placeholder mirroring the result type. That is all the
-    // DPS verifier needs and avoids computing the output shape here (no
-    // tensor.empty + tensor.dim); a later pass fills in the shape region.
     ::mlir::Value init =
         rewriter.create<PlaceholderOp>(loc, ::mlir::TypeRange{resultType})
             .getResult(0);

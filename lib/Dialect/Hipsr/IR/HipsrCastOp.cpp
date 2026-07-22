@@ -28,8 +28,6 @@ struct CastShapeArgs : ShapeRegionArgs<CastOp> {
 
 MutableOperandRange CastOp::getDpsInitsMutable() { return getInitMutable(); }
 
-// Yields the input shape with the output element type. Uses the shape dialect
-// so one path covers both tensor and memref inputs and static dims fold away.
 void CastOp::populateShapeRegion(OpBuilder &builder, Block &shapeBlock) {
   OpBuilder::InsertionGuard guard(builder);
   builder.setInsertionPointToStart(&shapeBlock);

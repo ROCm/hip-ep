@@ -59,9 +59,7 @@ def Hipsr_ShapeYieldOp : Hipsr_Op<"shape_yield", [Pure, Terminator]> {
   let hasVerifier = 1;
 
   let builders = [
-    // Custom builder: takes element types as a TypeRange and wraps them into the
-    // attribute (the ODS-generated builder takes a TypeArrayAttr). Both args
-    // default to empty so a no-argument call builds an empty `shape_yield`.
+    // Takes element types as a TypeRange (the ODS builder takes a TypeArrayAttr).
     OpBuilder<(ins CArg<"::llvm::ArrayRef<::mlir::ValueRange>", "{}">:$shapes,
                    CArg<"::mlir::TypeRange", "{}">:$elementTypes), [{
       build($_builder, $_state, shapes,
