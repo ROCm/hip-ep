@@ -189,7 +189,7 @@ Key passes in order:
 1. `hip-add-context-arg` — inject `!hip.context` argument
 2. `convert-onnx-to-hip` — ONNX ops to HIP dialect ops (externalizes large constants to `.constants.bin`)
 3. `one-shot-bufferize` — tensor semantics to memref (buffer) semantics
-4. `buffer-deallocation` + `hip-optimize-memrefs` — liveness-based buffer reuse
+4. `buffer-deallocation` — insert ownership-based deallocs (liveness-based buffer reuse is subsumed by `hip-pool-allocs` below, which packs by lifetime)
 5. `hip-pool-allocs` — pack all allocations into a single grow-on-demand GPU buffer
 6. `hip-lower-allocs` — `memref.alloc` to `hip.alloc`/`hip.free`
 7. `convert-hip-to-llvm` — HIP ops to runtime C API calls

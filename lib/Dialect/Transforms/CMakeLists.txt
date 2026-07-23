@@ -16,7 +16,6 @@ add_library(HipDialectTransforms STATIC
   LoopBodyToOutParams.cpp
   LowerAllocs.cpp
   MaterializeHostScalars.cpp
-  OptimizeMemRefs.cpp
   Pipelines.cpp
   PoolAllocs.cpp
   PromoteStridedHipOperands.cpp

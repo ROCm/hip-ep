@@ -4,7 +4,7 @@
  */
 //===- BufferUtils.h - Shared buffer analysis utilities -------------------===//
 //
-// Utilities shared by PoolAllocs, OptimizeMemRefs, and LowerAllocs.
+// Utilities shared by PoolAllocs and LowerAllocs.
 // Centralizes byte-size computation, alignment, and alias-aware liveness
 // queries using MLIR's BufferViewFlowAnalysis.
 //

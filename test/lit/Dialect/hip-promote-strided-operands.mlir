@@ -153,7 +153,7 @@ func.func @func_arg_strided_promoted(
 // memref.reinterpret_cast with a non-zero offset produces a non-identity
 // layout that must be promoted.
 //
-// Models the pattern from hip-optimize-memrefs buffer-reuse: a single backing
+// Models a buffer-reuse pattern: a single backing
 // allocation can be re-bound at multiple offsets for non-overlapping live
 // ranges.  When the resulting reinterpret_cast carries a non-zero offset, our
 // pass must materialize a contiguous temporary just like the subview case.

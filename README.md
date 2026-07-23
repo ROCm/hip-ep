@@ -174,7 +174,6 @@ onnx-to-hip-pipeline
                                     EP's output-allocator callback)
     hip-fix-loop-accumulator-offset (onnx.Loop growing-accumulator offsets)
     convert-linalg-to-loops        (lower any residual linalg.* to scf + stores)
-    hip-optimize-memrefs           (liveness-based buffer reuse)
     hip-promote-strided-operands
     hip-materialize-host-scalars   (host-mapped scratch for shape scalars)
     hip-hoist-alloc-size-arith

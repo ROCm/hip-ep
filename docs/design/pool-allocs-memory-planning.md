@@ -54,7 +54,6 @@ Several passes cooperate to produce the final pooled IR. The relevant stretch of
     → buildBufferDeallocationPipeline        (insert ownership-based deallocs)
     → hip-use-output-allocator               (returned memref.alloc → hip.alloc_output)
     → CSE → canonicalize
-    → hip-optimize-memrefs                   (HIP-specific buffer cleanup)
     → hip-promote-strided-hip-operands       (6a: contiguous temporaries for HIP-op operands)
     → hip-materialize-host-scalars           (6b: redirect tiny host-fed scalars to host scratch)
     → hip-hoist-alloc-size-arith             (6c: pull speculatable size arith above earliest dyn-alloc)

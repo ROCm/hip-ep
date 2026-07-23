@@ -61,6 +61,23 @@ void addPluginPassesForSlot(OpPassManager &pm,
   }
 }
 
+// hip-pool-allocs shape preconditions: post-bufferization normalizations whose
+// only purpose is to let the pooler collapse its dominance domains into a
+// single pool.
+//   - resolve-memref-dims    folds `memref.dim` of a view back to its func-arg
+//                            root (a mid-block size becomes block-top).
+//   - hoist-alloc-size-arith hoists that (now speculatable) size arithmetic
+//                            above the earliest dynamic alloc, so every pooled
+//                            alloc's size dominates it.
+// Dropping either keeps pooling correct but fragments the pool into more
+// domains (higher peak memory) — these are memory-quality preconditions, not
+// correctness passes. Must run after the view-creating passes and before
+// hip-pool-allocs (see call site).
+void addPoolAllocsShapePreconditionPasses(OpPassManager &pm) {
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createResolveMemRefDimsPass());
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createHoistAllocSizeArithPass());
+}
+
 } // namespace
 
 /// Common tail of the ONNX-to-HIP pipeline after the OnnxToHip pass.
@@ -212,61 +229,39 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
   //     device memory.  No-op on graphs that emit no linalg ops.
   pm.addNestedPass<func::FuncOp>(createConvertLinalgToLoopsPass());
 
-  // 6. HIP-specific buffer optimizations
-  pm.addNestedPass<func::FuncOp>(mlir::hip::createOptimizeMemRefsPass());
+  // Post-bufferization, pre-pool-allocs region. Two distinct kinds of pass run
+  // here and must not be conflated:
+  //   (A) pool-allocs shape preconditions — memory-quality only; grouped in
+  //       addPoolAllocsShapePreconditionPasses (slot 6c below).
+  //   (B) correctness/ABI passes that merely must precede pooling so their
+  //       allocs are placed correctly (slots 6a, 6b below).
+  // Buffer reuse needs no separate pass: hip-pool-allocs packs allocations by
+  // lifetime, which subsumes liveness best-fit reuse.
 
-  // 6a. Promote strided memref operands of hip.* ops to contiguous
-  //     temporaries.  Required because the HIP runtime call ABI (used by
-  //     --convert-hip-to-llvm) only forwards a bare alignedPtr per memref
-  //     operand and has no channel for offset / per-dim strides; without
-  //     this pass, hip.* ops that consume memref.subview results read the
-  //     base of the parent buffer rather than the slice.
-  //
-  //     Placement: after OptimizeMemRefs (so we don't fight its
-  //     subview-folding) and before PoolAllocs (so the new transient
-  //     memref.alloc / memref.dealloc pairs flow through pool views and do
-  //     not trigger extra hipMalloc calls per inference).
+  // 6a. (B) Promote strided memref operands of hip.* ops to contiguous
+  //     temporaries. The HIP runtime call ABI (--convert-hip-to-llvm) forwards
+  //     only a bare alignedPtr per memref operand — no offset/stride channel —
+  //     so a hip.* op fed a `memref.subview` would read the parent buffer's
+  //     base, not the slice. Runs before pool-allocs so the transient
+  //     alloc/dealloc pairs it introduces fold into pool views instead of extra
+  //     per-inference hipMalloc calls.
   pm.addNestedPass<func::FuncOp>(
       mlir::hip::createPromoteStridedHipOperandsPass());
 
-  // 6b. Redirect tiny host-fed memref.alloc ops (bufferized
-  //     `tensor.from_elements` for shape arithmetic — rank-0 / 1xi64) away
-  //     from the GPU pool to a runtime-owned host-mapped scratch buffer.
-  //
-  //     Placement is load-bearing: MUST run AFTER PromoteStridedHipOperands
-  //     (so any contiguous-temporary memref.alloc that pass introduces is
-  //     also visible to the candidate scan) and BEFORE PoolAllocs (so
-  //     candidates are removed from its input set).  If PoolAllocs runs
-  //     first, it absorbs the alloc into a memref.view over GPU pool memory
-  //     and the subsequent host store SEGVs on targets where the GPU pool is
-  //     real device memory (other targets silently worked because hipMalloc
-  //     returned UMA-mapped host memory there, masking the bug).  See
-  //     MaterializeHostScalars.cpp file header for the full pinned-mapped
-  //     story; the static-shape lockdown test under
-  //     test/lit/Pipelines/ asserts this ordering does not regress.
+  // 6b. (B) Redirect tiny host-fed memref.alloc ops (bufferized
+  //     `tensor.from_elements` shape arithmetic — rank-0 / 1xi64) from the GPU
+  //     pool to a runtime-owned host-mapped scratch buffer. Must run after 6a
+  //     (so any contiguous temporary it introduces is also scanned) and before
+  //     pool-allocs (so these allocs leave the pooler's input set); otherwise
+  //     the pooler absorbs them into device memory and the later host store
+  //     faults on targets whose pool is real device memory. See
+  //     MaterializeHostScalars.cpp; a static-shape test/lit/Pipelines/ lockdown
+  //     asserts this ordering.
   pm.addNestedPass<func::FuncOp>(mlir::hip::createMaterializeHostScalarsPass());
 
-  // 6b'. Post-bufferize twin of slot 1c: fold `memref.dim` of view ops
-  //      (created by bufferization + PromoteStridedHipOperands, i.e. after
-  //      resolve-tensor-dims ran) back to the root/func-arg dim. Placement is
-  //      load-bearing -- AFTER the view-creating passes (6a, 6b) and BEFORE
-  //      HoistAllocSizeArith (6c), so the re-rooted size cones hoist and
-  //      PoolAllocs shares one pool instead of one domain per alloc. See
-  //      ResolveMemRefDims.cpp.
-  pm.addNestedPass<func::FuncOp>(mlir::hip::createResolveMemRefDimsPass());
-
-  // 6c. Hoist speculatable size arithmetic feeding `memref.alloc` dynamic
-  //     operands above the earliest dynamic alloc in the entry block.
-  //     PoolAllocs's single-block dominator-emit phase requires every
-  //     dyn-operand SSA def to dominate the earliest pooled alloc; this
-  //     pass establishes that precondition for IR where canonicalize left
-  //     speculatable arith interleaved with allocs.  No-op for
-  //     already-feasible IR; PoolAllocs.cpp itself is unchanged.  Uses
-  //     `mlir::isSpeculatable` (the same predicate upstream LICM uses) so
-  //     traps (e.g. `arith.divsi` with a runtime-zero divisor) are not
-  //     speculated across the move.  See HoistAllocSizeArith.cpp for the
-  //     algorithm and rationale.
-  pm.addNestedPass<func::FuncOp>(mlir::hip::createHoistAllocSizeArithPass());
+  // 6c. (A) pool-allocs shape preconditions (see helper above). Load-bearing
+  //     placement: after the view-creating passes (6a, 6b), before pool-allocs.
+  addPoolAllocsShapePreconditionPasses(pm);
 
   pm.addNestedPass<func::FuncOp>(mlir::hip::createPoolAllocsPass());
 
