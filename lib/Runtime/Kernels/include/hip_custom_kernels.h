@@ -2082,6 +2082,30 @@ HIP_KERNEL_API int hip_causal_conv_prefill(
 HIP_KERNEL_API int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
                        void* C, int M, int K, int N);
 
+/*
+ * Tiled fp32 GEMM (row-major) — vendor-BLAS-disabled fallback for wrap_gemm.
+ *
+ * Computes out[M,N] = alpha * (A[M,K] @ B[K,N]) + beta * bias_broadcast.
+ * There is no fp32-input WMMA on this GPU family, so this is an LDS-tiled GEMM
+ * (16x16 output tile, 16-deep K tiles); arbitrary M/N/K (no multiple-of-16
+ * requirement). Untransposed only (matches wrap_gemm transA==transB==0).
+ *
+ * Parameters:
+ *   stream    - hipStream_t cast to void*
+ *   A         - GPU pointer to [M, K] row-major (fp32)
+ *   B         - GPU pointer to [K, N] row-major (fp32)
+ *   bias      - GPU pointer to [bias_dim0, bias_dim1] (fp32), or nullptr
+ *   out       - GPU pointer to [M, N] row-major (fp32)
+ *   alpha,beta- output = alpha*(A@B) + beta*bias
+ *   bias_dim0/1 - bias logical shape; a dim of 1 broadcasts along that axis
+ *                 (e.g. per-N bias is [1, N]). Ignored when bias == nullptr.
+ *
+ * Returns: 0 on success, non-zero on failure
+ */
+HIP_KERNEL_API int hip_gemm_fp32(void* stream, const void* A, const void* B,
+                       const void* bias, void* out, int M, int N, int K,
+                       float alpha, float beta, int bias_dim0, int bias_dim1);
+
 #ifdef __cplusplus
 }
 #endif
