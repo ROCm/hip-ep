@@ -23,30 +23,15 @@ include "hip/Dialect/Hipsr/IR/HipsrAttrs.td"
 def Hipsr_ConstantOp : Hipsr_Op<"constant", [Pure]> {
   let summary = "Constant tensor buffer (inline value or external source)";
   let description = [{
-    Produces a constant buffer. The data source is exactly one of:
+    Produces a constant buffer.
 
-    - inline     : `value` is a `DenseElementsAttr` carrying the bytes.
-    - ext source : `source` references a `#hipsr.file_source<...>` (on-disk
-                   file) or `#hipsr.mem_source<...>` (a raw ORT pointer).
+    - `value`  : inline `DenseElementsAttr` carrying the bytes.
+    - `source` : `#hipsr.file_source<...>` (on-disk file) or
+                 `#hipsr.mem_source<...>` (a raw ORT pointer).
+    - `offset`/`size`/`index` : offset+size = location in the constants file,
+                 index = ordinal in the runtime array.
 
-    Externalization only *adds* `offset` + `size` + `index` (the location in
-    the compiler-produced constants file and the constant's ordinal in the
-    runtime constants array); it never removes `value` / `source`, so
-    `getDataValues()` keeps working afterwards. Valid states: `{value}`,
-    `{source}`, `{value, offset, size, index}`, `{source, offset, size, index}`.
-
-    A consumer that wants a compile-time value replaces the op with the concrete
-    constant (e.g. `arith.constant`); there is no inline opt-out flag.
-
-    The result is a ranked tensor (pre-bufferization) or a device `memref`
-    (`#hipsr.mem<device>`, post-bufferization); constants reside in VRAM. The
-    `Hipsr_TensorOrDeviceMemRef` ODS constraint enforces this.
-
-    Example:
-    ```mlir
-    %w = hipsr.constant {value = dense<1.0> : tensor<4xf16>}
-       : memref<4xf16, #hipsr.mem<device>>
-    ```
+    Valid states: `{value}`, `{source}`, or either plus `{offset, size, index}`.
   }];
 
   let arguments = (ins
