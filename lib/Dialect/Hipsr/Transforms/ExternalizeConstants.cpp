@@ -91,8 +91,6 @@ struct HipsrExternalizeConstantsPass
 
       c.setOffsetAttr(builder.getI64IntegerAttr(offset));
       c.setSizeAttr(builder.getI64IntegerAttr(size));
-      // Ordinal into the runtime gpu_constants[] array; assigned in the same
-      // walk that lays out entries[], so index and file layout stay in sync.
       c.setIndexAttr(builder.getI64IntegerAttr(constantIndex++));
       filePos = offset + size;
 

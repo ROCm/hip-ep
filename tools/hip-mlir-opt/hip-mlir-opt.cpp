@@ -11,6 +11,11 @@
 #include "hip/Dialect/Transforms/Passes.h"
 #include "hip/Dialect/Transforms/Pipelines.h"
 
+#include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
+#include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
+#include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVM.h"
+#include "mlir/Conversion/IndexToLLVM/IndexToLLVM.h"
+#include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
 #include "mlir/Conversion/Passes.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -61,6 +66,11 @@ int main(int argc, char **argv) {
   registry.insert<mlir::hip::HipDialect>();
   registry.insert<mlir::hipsr::HipsrDialect>();
   mlir::hipsr::registerConvertHipsrToLLVMInterface(registry);
+  mlir::registerConvertFuncToLLVMInterface(registry);
+  mlir::registerConvertMemRefToLLVMInterface(registry);
+  mlir::arith::registerConvertArithToLLVMInterface(registry);
+  mlir::cf::registerConvertControlFlowToLLVMInterface(registry);
+  mlir::index::registerConvertIndexToLLVMInterface(registry);
   registry.insert<hip::compiler::detail::OnnxStubDialect>();
 
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
@@ -91,6 +101,7 @@ int main(int argc, char **argv) {
   mlir::registerArithToLLVMConversionPass();
   mlir::registerFinalizeMemRefToLLVMConversionPass();
   mlir::registerConvertControlFlowToLLVMPass();
+  mlir::registerConvertToLLVMPass();
 
   // Run every statically-linked plugin's registration before MlirOptMain
   // parses the command line, so `--<plugin-pass>` is recognised by the CL

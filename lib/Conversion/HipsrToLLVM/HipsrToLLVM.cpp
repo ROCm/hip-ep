@@ -55,9 +55,6 @@ struct HipsrConvertToLLVMInterface : public ConvertToLLVMPatternInterface {
           return IntegerAttr::get(IntegerType::get(space.getContext(), 64),
                                   static_cast<int64_t>(space.getKind()));
         });
-    // Every hipsr op must be lowered by now. Only hipsr.constant has a pattern
-    // today; any other hipsr op surviving to here is a pipeline bug and fails
-    // legalization.
     target.addIllegalDialect<HipsrDialect>();
     populateHipsrToLLVMPatterns(typeConverter, patterns);
   }

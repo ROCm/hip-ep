@@ -32,8 +32,6 @@ target_link_libraries(HipsrDialectIR PUBLIC
   MLIRSupport
   MLIRArithDialect
   MLIRShapeDialect
-  # hipsr.constant owns its LLVM lowering (ConstantLowering in
-  # HipsrConstantOp.cpp), so the IR lib links the LLVM conversion machinery.
   MLIRLLVMDialect
   MLIRLLVMCommonConversion
   MLIRTransforms
