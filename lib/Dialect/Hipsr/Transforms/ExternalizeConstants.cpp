@@ -60,11 +60,8 @@ struct HipsrExternalizeConstantsPass
     // is deterministic with or without a sink.
     std::vector<hip::ConstantEntry> entries;
     int64_t filePos = 0;
+    int64_t constantIndex = 0;
     module.walk([&](ConstantOp c) {
-      if (!c.shouldExternalize() || c.isExternalized()) {
-        return;
-      }
-
       hip::ConstantEntry entry;
       int64_t size = 0;
       if (auto fileSrc =
@@ -90,6 +87,7 @@ struct HipsrExternalizeConstantsPass
 
       c.setOffsetAttr(builder.getI64IntegerAttr(offset));
       c.setSizeAttr(builder.getI64IntegerAttr(size));
+      c.setIndexAttr(builder.getI64IntegerAttr(constantIndex++));
       filePos = offset + size;
 
       entries.push_back(std::move(entry));

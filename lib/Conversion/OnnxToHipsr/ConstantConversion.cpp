@@ -65,7 +65,7 @@ struct ConstantOpLowering : public ::mlir::RewritePattern {
       rewriter.replaceOpWithNewOp<ConstantOp>(
           op, /*result=*/tensorType, /*value=*/valueAttr,
           /*source=*/::mlir::Attribute(), /*offset=*/::mlir::IntegerAttr(),
-          /*size=*/::mlir::IntegerAttr(), /*externalize=*/::mlir::BoolAttr());
+          /*size=*/::mlir::IntegerAttr(), /*index=*/::mlir::IntegerAttr());
       return ::mlir::success();
     }
 
@@ -94,7 +94,7 @@ struct ConstantOpLowering : public ::mlir::RewritePattern {
     rewriter.replaceOpWithNewOp<ConstantOp>(
         op, /*result=*/tensorType, /*value=*/::mlir::ElementsAttr(), source,
         /*offset=*/::mlir::IntegerAttr(), /*size=*/::mlir::IntegerAttr(),
-        /*externalize=*/::mlir::BoolAttr());
+        /*index=*/::mlir::IntegerAttr());
     return ::mlir::success();
   }
 };

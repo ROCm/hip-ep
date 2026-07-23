@@ -26,6 +26,9 @@
 #include "hip/Dialect/Hipsr/IR/HipsrConstantOp.h.inc"
 
 namespace mlir {
+class LLVMTypeConverter;
+class RewritePatternSet;
+
 namespace hipsr {
 
 // Out-of-line template: needs the complete ConstantOp / attribute / dialect
@@ -79,6 +82,9 @@ template <typename T>::llvm::ArrayRef<T> ConstantOp::getDataValues() {
   // The verifier guarantees value XOR source, so this is unreachable.
   llvm_unreachable("ConstantOp has neither value nor source");
 }
+
+void populateHipsrConstantLoweringPatterns(const LLVMTypeConverter &converter,
+                                           RewritePatternSet &patterns);
 
 } // namespace hipsr
 } // namespace mlir

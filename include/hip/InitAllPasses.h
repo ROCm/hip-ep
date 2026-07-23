@@ -74,6 +74,7 @@ inline void registerAllDialects(mlir::DialectRegistry &registry) {
   registry.insert<mlir::LLVM::LLVMDialect>();
   registry.insert<mlir::hip::HipDialect>();
   registry.insert<mlir::hipsr::HipsrDialect>();
+  mlir::hipsr::registerConvertHipsrToLLVMInterface(registry);
   registry.insert<detail::OnnxStubDialect>();
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
   // The ownership-based buffer-deallocation pass walks arith ops (e.g.
