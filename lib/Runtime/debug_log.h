@@ -30,6 +30,78 @@ inline bool hipdnn_ep_matmul_dp4a_enabled() {
   return enabled;
 }
 
+// Minimum expert count for the grouped WMMA MoE prefill to be worthwhile.
+// Grouped amortizes one launch across all experts; it only beats the per-expert
+// host loop when there are many experts with small per-expert GEMMs. Measured:
+// gpt-oss-20b (32 experts) is ~18% faster on the host loop at P128 and P2048,
+// so few-expert models fall back. Default 64 sits between gpt-oss (32) and the
+// many-expert models (120b=128, A3B=256). CI-tunable via
+// HIPDNN_EP_QMOE_GROUPED_MIN_EXPERTS to sweep the crossover.
+inline int hipdnn_ep_qmoe_grouped_min_experts() {
+  static const int v =
+      hipdnn_ep::env_int("HIPDNN_EP_QMOE_GROUPED_MIN_EXPERTS", 64);
+  return v;
+}
+
+// Fill-aware post-bucket gate for grouped WMMA MoE prefill.
+//
+// The num_experts gate above is a poor predictor: grouped WMMA only wins when
+// each active expert fills its 64-row GEMM tile. gpt-oss-120b has 128 experts
+// (passes the count gate) but with k=4 routing its per-expert fill is ~7.6 rows
+// (P128) so the 64-row tile is mostly padding and the launch is gated by the
+// heaviest expert (tail) -> +13-37% TTFT regression. Qwen3.6-35B-A3B (256
+// experts, k=8) fills the tile well and wins. The separating signal is the
+// actual per-expert row distribution (h_counts), known only after bucketing.
+//
+// Decision (all must hold, else fall back to the host loop = pre-existing main
+// behavior, so there is no regression vs main):
+//   num_active >= MIN_ACTIVE  AND  dense_row_fraction >= MIN_DENSE_FRAC
+// where an expert is "dense" if its routed row count >= TILE_ROWS, and
+//   dense_row_fraction = (rows in dense experts) / (num_tokens * k).
+
+// Per-expert row count at/above which an expert fills the WMMA GEMM tile.
+inline int hipdnn_ep_qmoe_grouped_tile_rows() {
+  static const int v =
+      hipdnn_ep::env_int("HIPDNN_EP_QMOE_GROUPED_TILE_ROWS", 64);
+  return v;
+}
+
+// Minimum number of active experts for grouped's single-launch amortization to
+// beat the host loop. Few-expert models (gpt-oss-20b, <=32 active) issue few,
+// large, efficient per-expert GEMMs and lose with grouped even when dense.
+inline int hipdnn_ep_qmoe_grouped_min_active() {
+  static const int v =
+      hipdnn_ep::env_int("HIPDNN_EP_QMOE_GROUPED_MIN_ACTIVE", 64);
+  return v;
+}
+
+// Minimum fraction (percent, 0-100) of routed rows that must land in dense
+// experts for grouped WMMA to be selected. Conservative default: when in doubt,
+// use the host loop. Percent (not float) to reuse the int env parser.
+inline int hipdnn_ep_qmoe_grouped_min_dense_pct() {
+  static const int v =
+      hipdnn_ep::env_int("HIPDNN_EP_QMOE_GROUPED_MIN_DENSE_PCT", 70);
+  return v;
+}
+
+// Minimum prefill length (num_tokens) for grouped WMMA MoE prefill to be
+// selected. The dense-fraction gate above is scale-free (a ratio), so it admits
+// grouped for layers whose *shape* fills the tile even when the *total* prefill
+// is too small to amortize grouped's per-expert launch overhead. Measured on
+// Qwen3.6-35B-A3B (VLM image+text prefill), grouped vs host-loop TTFT:
+//   1842 tok: +4.7%   1949 tok: +5.9%   (grouped LOSES)   <- default vlm CSV pt
+//   2224 tok: -3.3%   2540 tok: -5.7%   3227 tok: -4.8%   3952 tok: -18.9%
+// i.e. a clean crossover at ~2.0-2.1k tokens. Below it, fall back to the host
+// loop (= pre-existing main behavior, so no regression vs main); above it keep
+// grouped and its large long-context win. Default 2048 sits in the
+// verified-safe window (1949, 2224]. CI-tunable via
+// HIPDNN_EP_QMOE_GROUPED_MIN_TOKENS.
+inline int hipdnn_ep_qmoe_grouped_min_tokens() {
+  static const int v =
+      hipdnn_ep::env_int("HIPDNN_EP_QMOE_GROUPED_MIN_TOKENS", 2048);
+  return v;
+}
+
 inline bool hipdnn_ep_perf_enabled() {
   // PERF intentionally does NOT inherit from HIPDNN_EP_DEBUG: enabling PERF
   // forces a hipStreamSynchronize on every inference (so hipEventElapsedTime
