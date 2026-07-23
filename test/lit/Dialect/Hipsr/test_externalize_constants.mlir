@@ -1,24 +1,9 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
-//
-// Tests -hipsr-externalize-constants (Phase 2). The pass assigns each
-// hipsr.constant a 64-byte aligned cumulative constants-file offset and stamps
-// offset/size/index on the op, append-only (value/source are kept). No
-// FileSystem is injected in these runs, so the constants-file write (Phase 2)
-// is skipped and the pass is a pure IR transform -- which is what lets these
-// cases be checked without any on-disk file.
-//
-// One case per distinct behavior (no source-kind duplication: file_source and
-// mem_source produce the same observable IR, so only file_source is checked):
-//   1. inline value        -> offset/size/index added, value kept
-//   2. file_source         -> offset/size/index added, source kept (size from attr)
-//   3. two constants       -> offsets cumulative/64-aligned, index 0 then 1
-//   4. already externalized -> skipped, not re-stamped (idempotent)
 
 // RUN: hip-mlir-opt --hipsr-externalize-constants %s -split-input-file | FileCheck %s
 
 // -----
-// Inline value: byte size (4 x f32 = 16) recorded at offset 0, value retained.
 
 // CHECK-LABEL: func.func @inline_value
 // CHECK: hipsr.constant {index = 0 : i64, offset = 0 : i64, size = 16 : i64, value = dense<[1.000000e+00, 2.000000e+00, 3.000000e+00, 4.000000e+00]> : tensor<4xf32>} : tensor<4xf32>
@@ -28,8 +13,6 @@ func.func @inline_value() -> tensor<4xf32> {
 }
 
 // -----
-// File-backed source: size is taken from the attr (the file is never read),
-// and the source attr is preserved alongside the new offset/size.
 
 // CHECK-LABEL: func.func @file_source
 // CHECK: hipsr.constant {index = 0 : i64, offset = 0 : i64, size = 1000 : i64, source = #hipsr.file_source<"w.bin", 100, 1000>} : tensor<100xf32>
@@ -39,9 +22,6 @@ func.func @file_source() -> tensor<100xf32> {
 }
 
 // -----
-// Cumulative placement: the first constant occupies [0, 1000); the second is
-// padded up to the next 64-byte boundary (1024), proving alignment + running
-// offset across constants.
 
 // CHECK-LABEL: func.func @cumulative_alignment
 // CHECK: hipsr.constant {index = 0 : i64, offset = 0 : i64, size = 1000 : i64, source = #hipsr.file_source<"w.bin", 0, 1000>} : tensor<250xf32>
@@ -71,8 +51,6 @@ func.func @second() -> tensor<2xf32> {
 }
 
 // -----
-// Idempotent: an already-externalized constant (offset present) is skipped, so
-// its pre-existing offset/index survive instead of being recomputed.
 
 // CHECK-LABEL: func.func @already_externalized
 // CHECK: hipsr.constant {index = 3 : i64, offset = 999 : i64, size = 16 : i64, value = dense<{{.*}}> : tensor<4xf32>} : tensor<4xf32>
