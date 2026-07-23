@@ -129,7 +129,3 @@ These operations are handled through standard MLIR transformations and generally
 ## Fusion and preprocessing
 
 The frontend also recognizes or simplifies selected patterns before operation conversion, including approximate/FastGelu chains, Erf-based Gelu chains, supported Pow forms, LpNormalization decompositions, CastLike simplification, and model-exporter cleanup patterns.
-
-## Experimental paths
-
-The Hipsr dialect and ONNX-to-Hipsr conversion are experimental compiler-development paths and are not part of the built-in production Execution Provider pipeline.
