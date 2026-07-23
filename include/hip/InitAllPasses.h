@@ -8,7 +8,6 @@
 #include <mutex>
 
 #include "hip/Compiler/PluginRegistry.h"
-#include "hip/Conversion/HipsrToLLVM/Passes.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/Passes.h"
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"

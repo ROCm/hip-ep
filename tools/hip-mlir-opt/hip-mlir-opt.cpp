@@ -43,7 +43,6 @@
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 #include "mlir/Transforms/Passes.h"
 
-#include "hip/Conversion/HipsrToLLVM/Passes.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
 #include "hip/InitAllPasses.h"
