@@ -68,7 +68,7 @@ getCapacityShapeRegionResultTypes(ShapeRegionInterface op);
 template <typename OpTy> struct ShapeRegionArgs {
   explicit ShapeRegionArgs(Block &b) : block(b) {}
 
-protected:
+public:
   static constexpr bool kIsStartBarrier =
       OpTy::template hasTrait<StartBarrierInterface::Trait>();
   static constexpr bool kIsEndBarrier =
@@ -88,7 +88,7 @@ protected:
     return arg(numDataInputs() + j);
   }
 
-private:
+protected:
   Block &block;
 
   static constexpr unsigned numCtxArgs() { return kIsStartBarrier ? 1u : 0u; }
