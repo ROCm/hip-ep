@@ -1469,6 +1469,25 @@ HIP_KERNEL_API int hip_transpose(
     int64_t num_elements,
     int element_size_bytes);
 
+/*
+ * hip_transpose_2d_tiled: coalesced LDS-tiled fast path for a *batched
+ * last-two-dim* transpose of 1/2/4/8-byte elements (transpose is pure data
+ * movement, so it is dtype-agnostic given the element width). Each of `batch`
+ * slices transposes a row-major [rows x cols] matrix into [cols x rows].
+ *
+ * Returns 0 on success, 1 if the config is declined -- unsupported element
+ * width or batch > gridDim.z limit -- (caller falls back to the generic
+ * hip_transpose), or a hipError_t / -1 on failure.
+ */
+HIP_KERNEL_API int hip_transpose_2d_tiled(
+    void* stream,
+    const void* input,
+    void* output,
+    int64_t batch,
+    int64_t rows,
+    int64_t cols,
+    int element_size_bytes);
+
 /* =========================================================================
  * MatMulNBits (Fused Dequant + MatMul)
  * =========================================================================
