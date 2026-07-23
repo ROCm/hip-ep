@@ -10,7 +10,7 @@ description: >-
 
   Reports CPU, memory, and GPU load on the dev machine (Halo) at the moment the
 
-  snapshot runs. Use when the user asks for halo-load-checker, load-on-halo, machine
+  snapshot runs. Use when the user asks for halo-load-checker, machine
   load, CPU/GPU activity, rocm-smi, whether a build/benchmark is using the GPU, or
   /halo-load-checker.
 

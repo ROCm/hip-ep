@@ -7,7 +7,7 @@ name: onnx-model-to-onnx-mlir
 description: >-
   Generates hip-compiler input MLIR from an ONNX model path via hip-onnx-runner,
   writing <stem>.mlir next to the .onnx file. Use for onnx-model-to-onnx-mlir, onnx to mlir, morphizen
-  mlir dump, hip-compiler input, or /onnx-model-to-onnx-mlir (formerly /onnx-to-mlir).
+  mlir dump, hip-compiler input, or /onnx-model-to-onnx-mlir.
 ---
 
 # ONNX model to ONNX MLIR
