@@ -93,16 +93,12 @@ RE_CPU_FALLBACK = re.compile(
     r"(nodes assigned to CPU|Session creation failed|Inference failed|fallback disabled)",
     re.IGNORECASE,
 )
-RE_ONNX_REWRITE_PATTERN = re.compile(
-    r'RewritePattern\(\s*"onnx\.(\w+)"'
-)
+RE_ONNX_REWRITE_PATTERN = re.compile(r'RewritePattern\(\s*"onnx\.(\w+)"')
 # com.microsoft ops lower via onnx.Custom + function_name= in Conversion/*.cpp.
 RE_MS_CUSTOM_FUNC = re.compile(
     r'funcNameAttr(?:\.getValue\(\))?\s*(?:!=|==)\s*"([A-Za-z0-9_]+)"'
 )
-RE_MLIR_CUSTOM_FUNC = re.compile(
-    r'function_name\s*=\s*"([A-Za-z0-9_]+)"'
-)
+RE_MLIR_CUSTOM_FUNC = re.compile(r'function_name\s*=\s*"([A-Za-z0-9_]+)"')
 
 SUCCESS_QPS = re.compile(
     r"Number of inferences per second:\s+"
@@ -179,10 +175,17 @@ RE_MLIR_ONNX_OP_TYPES = re.compile(
 RE_TENSOR_TYPE = re.compile(r"tensor<([^>]+)>")
 
 MORPHIZEN_SCHEMA_FILE = (
-    HIP_EP_ROOT / "morphizen" / "morphizen-core" / "src" / "binary" / "onnx_schema_json_binary.hpp"
+    HIP_EP_ROOT
+    / "morphizen"
+    / "morphizen-core"
+    / "src"
+    / "binary"
+    / "onnx_schema_json_binary.hpp"
 )
 RUNTIME_HEADER = HIP_EP_ROOT / "lib" / "Runtime" / "hipdnn_ep_runtime.h"
-KERNELS_HEADER = HIP_EP_ROOT / "lib" / "Runtime" / "Kernels" / "include" / "hip_custom_kernels.h"
+KERNELS_HEADER = (
+    HIP_EP_ROOT / "lib" / "Runtime" / "Kernels" / "include" / "hip_custom_kernels.h"
+)
 RUNTIME_REAL_DIR = HIP_EP_ROOT / "lib" / "Runtime" / "real"
 
 RE_MORPHIZEN_SCHEMA = re.compile(r'RegisterSchema\(OpSchema\("([A-Za-z0-9_]+)"')
@@ -258,9 +261,7 @@ _DTYPE_BLOCKER_RULES: dict[str, frozenset[str]] = {
     "Cast": frozenset({"double", "float64", "bfloat16"}),
 }
 
-RE_MLIR_ATTR = re.compile(
-    r'(\w+)\s*=\s*(?:"([^"]*)"|\[([^\]]*)\]|([^,}\s]+))'
-)
+RE_MLIR_ATTR = re.compile(r'(\w+)\s*=\s*(?:"([^"]*)"|\[([^\]]*)\]|([^,}\s]+))')
 
 # Infrastructure ops lowered before bufferize — not tracked in inventory.
 _IGNORE_ONNX_OPS = frozenset({"Constant", "CastLike"})
@@ -525,9 +526,7 @@ def _default_gap_next_step(
     if op in _GAP_NEXT_STEP:
         return _GAP_NEXT_STEP[op]
     if runtime_label.startswith("partial"):
-        return (
-            f"Add OnnxToHip converter for {op} (some runtime pieces already exist)"
-        )
+        return f"Add OnnxToHip converter for {op} (some runtime pieces already exist)"
     if runtime_label.startswith("yes"):
         return f"Add OnnxToHip converter for {op} (runtime wrap/kernel exists)"
     return f"Add OnnxToHip converter + runtime kernel for {op}"
@@ -608,7 +607,9 @@ def _extract_surviving_ops_from_line(
             custom_op = func_match.group(1)
             if custom_op not in known and custom_op not in _IGNORE_ONNX_OPS:
                 name_match = RE_ONNX_NODE_NAME.search(line)
-                detail = name_match.group(1) if name_match else f"com.microsoft.{custom_op}"
+                detail = (
+                    name_match.group(1) if name_match else f"com.microsoft.{custom_op}"
+                )
                 found.append((custom_op, detail))
 
     return found
@@ -632,7 +633,9 @@ def _extract_all_surviving_ops_from_line(line: str) -> list[tuple[str, str]]:
             custom_op = func_match.group(1)
             if custom_op not in _IGNORE_ONNX_OPS:
                 name_match = RE_ONNX_NODE_NAME.search(line)
-                detail = name_match.group(1) if name_match else f"com.microsoft.{custom_op}"
+                detail = (
+                    name_match.group(1) if name_match else f"com.microsoft.{custom_op}"
+                )
                 found.append((custom_op, detail))
 
     return found
@@ -655,9 +658,7 @@ def _analyze_blocker_gap(op: str, detail: ShapeBlockerDetail) -> OpGapLayers:
             f"to a supported type in the ONNX export"
         )
     elif detail.kind == "runtime":
-        next_step = (
-            f"Extend wrap_/kernel for {op} to handle: {detail.reason[:80]}"
-        )
+        next_step = f"Extend wrap_/kernel for {op} to handle: {detail.reason[:80]}"
     elif detail.kind == "variant":
         next_step = (
             f"Extend {op} OnnxToHip converter for this attribute/shape variant, "
@@ -775,7 +776,9 @@ def _resize_shape_issue(output_type: str) -> str | None:
     return None
 
 
-def _shape_issue_for_op(op: str, output_type: str, input_types: list[str]) -> str | None:
+def _shape_issue_for_op(
+    op: str, output_type: str, input_types: list[str]
+) -> str | None:
     if op in {"Conv", "ConvTranspose"}:
         return _conv_shape_issue(output_type, input_types)
     if op == "Resize":
@@ -830,7 +833,9 @@ def _variant_issue_for_op(
             dilations = attrs.get("dilations", "[1]")
             if group != 1:
                 return "1D Conv with group != 1 is not supported"
-            if dilations not in {"[1]", "[1, 1]"} and "1" not in dilations.replace(" ", ""):
+            if dilations not in {"[1]", "[1, 1]"} and "1" not in dilations.replace(
+                " ", ""
+            ):
                 if not re.fullmatch(r"\[1(?:,\s*1)*\]", dilations.replace(" ", "")):
                     return "1D Conv with dilation != 1 is not supported"
 
@@ -845,7 +850,11 @@ def _variant_issue_for_op(
         kar = attrs.get("keep_aspect_ratio_policy", "stretch").strip('"')
         if kar and kar != "stretch":
             return "Resize keep_aspect_ratio_policy must be 'stretch'"
-        if input_types and len(input_types) >= 2 and "none" not in input_types[1].lower():
+        if (
+            input_types
+            and len(input_types) >= 2
+            and "none" not in input_types[1].lower()
+        ):
             return "Resize with roi (tf_crop_and_resize) not supported"
 
     if op in {"MaxPool", "AveragePool"}:
@@ -916,9 +925,7 @@ def _onnx_conv_variant_issue(node, values_by_name: dict) -> str | None:
         if group != 1:
             return "1D Conv with group != 1 is not supported"
         dilations = [
-            int(a.i)
-            for a in node.attribute
-            if a.name == "dilations" and a.type == 7
+            int(a.i) for a in node.attribute if a.name == "dilations" and a.type == 7
         ]
         if dilations and any(d != 1 for d in dilations):
             return "1D Conv with dilation != 1 is not supported"
@@ -1027,7 +1034,9 @@ def _record_blocker(
         detail.example = example
 
 
-def _blockers_for_op(blockers: dict[str, ShapeBlockerDetail], op: str) -> dict[str, ShapeBlockerDetail]:
+def _blockers_for_op(
+    blockers: dict[str, ShapeBlockerDetail], op: str
+) -> dict[str, ShapeBlockerDetail]:
     return {
         detail.kind: detail
         for key, detail in blockers.items()
@@ -1035,7 +1044,9 @@ def _blockers_for_op(blockers: dict[str, ShapeBlockerDetail], op: str) -> dict[s
     }
 
 
-def _pick_blocker_for_op(blockers: dict[str, ShapeBlockerDetail], op: str) -> ShapeBlockerDetail | None:
+def _pick_blocker_for_op(
+    blockers: dict[str, ShapeBlockerDetail], op: str
+) -> ShapeBlockerDetail | None:
     """Choose highest-priority blocker detail for inventory classification."""
     by_kind = _blockers_for_op(blockers, op)
     for kind in ("runtime", "dtype", "shape", "variant"):
@@ -1247,7 +1258,10 @@ def analyze_blockers_from_onnx(model_path: Path) -> dict[str, ShapeBlockerDetail
                     output_type=output_type,
                 ),
             ),
-            ("dtype", _dtype_issue_for_op(op, onnx_node=node, values_by_name=values_by_name)),
+            (
+                "dtype",
+                _dtype_issue_for_op(op, onnx_node=node, values_by_name=values_by_name),
+            ),
         ):
             if reason:
                 _record_blocker(
@@ -1406,18 +1420,24 @@ def build_op_inventory(
         elif blocker_detail and blocker_detail.kind == "runtime":
             status = "runtime_blocker"
             gap = _analyze_blocker_gap(op, blocker_detail)
-        elif blocker_detail and blocker_detail.kind == "dtype" and (
-            in_survivors or report_shape_blockers or compile_failed
+        elif (
+            blocker_detail
+            and blocker_detail.kind == "dtype"
+            and (in_survivors or report_shape_blockers or compile_failed)
         ):
             status = "dtype_blocker"
             gap = _analyze_blocker_gap(op, blocker_detail)
-        elif blocker_detail and blocker_detail.kind == "shape" and (
-            in_survivors or report_shape_blockers or compile_failed
+        elif (
+            blocker_detail
+            and blocker_detail.kind == "shape"
+            and (in_survivors or report_shape_blockers or compile_failed)
         ):
             status = "shape_blocker"
             gap = _analyze_blocker_gap(op, blocker_detail)
-        elif blocker_detail and blocker_detail.kind == "variant" and (
-            in_survivors or report_shape_blockers or compile_failed
+        elif (
+            blocker_detail
+            and blocker_detail.kind == "variant"
+            and (in_survivors or report_shape_blockers or compile_failed)
         ):
             status = "variant_blocker"
             gap = _analyze_blocker_gap(op, blocker_detail)
@@ -1715,9 +1735,7 @@ def parse_mlir_tree(
     if not mlir_files:
         return [], [f"No .mlir files under {dump_dir}"]
 
-    errors.append(
-        "MLIR dump dirs: " + ", ".join(str(r) for r in roots)
-    )
+    errors.append("MLIR dump dirs: " + ", ".join(str(r) for r in roots))
 
     # Prefer the latest bufferize-failure dump when present.
     bufferize_fail = [p for p in mlir_files if "bufferize" in p.name.lower()]
@@ -1805,7 +1823,6 @@ def _package_has_perf_test(package_dir: Path) -> bool:
 
 def resolve_package_dir(raw: Path) -> Path:
     """Resolve gpu-test-package root, even when cwd is inside package/bin."""
-    perf = _perf_test_name()
     cwd = Path.cwd()
 
     if raw.is_absolute() and _package_has_perf_test(raw):
@@ -1903,7 +1920,11 @@ def _resolve_ep_settings(package_dir: Path) -> tuple[str, str, str | None]:
     ep_opts: str | None = None
     morphizen_cfg = package_dir / "morphizen_config.json"
     if morphizen_cfg.is_file():
-        rel = "..\\morphizen_config.json" if os.name == "nt" else "../morphizen_config.json"
+        rel = (
+            "..\\morphizen_config.json"
+            if os.name == "nt"
+            else "../morphizen_config.json"
+        )
         ep_opts = f"config_file|{rel}"
 
     if os.name == "nt":
@@ -1939,9 +1960,7 @@ def _run_and_capture_log(
 ) -> tuple[int | None, str]:
     """Run *cmd*, capturing merged stdout/stderr (optionally writing *log_path*)."""
     header = (
-        f"[CMD] {subprocess.list2cmdline(cmd)}\n"
-        f"[cwd] {cwd}\n"
-        f"[timeout] {timeout_sec}s\n"
+        f"[CMD] {subprocess.list2cmdline(cmd)}\n[cwd] {cwd}\n[timeout] {timeout_sec}s\n"
     )
     if log_path is not None:
         log_path.write_text(header, encoding="utf-8")
@@ -2094,9 +2113,7 @@ def run_perf_test(
     log_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     model_tag = _model_dump_tag(model_path)
-    log_file = (
-        log_dir / f"{model_tag}_missing_ops_{stamp}.log" if save_log else None
-    )
+    log_file = log_dir / f"{model_tag}_missing_ops_{stamp}.log" if save_log else None
 
     env = _build_package_env(package_dir)
     mlir_base: Path | None = None
@@ -2176,7 +2193,11 @@ def run_perf_test(
 
     status = "ok"
     if findings or errors or proc_returncode != 0:
-        if findings or RE_COMPILATION_FAILED.search(output) or RE_BUFFERIZE_FAILURE.search(output):
+        if (
+            findings
+            or RE_COMPILATION_FAILED.search(output)
+            or RE_BUFFERIZE_FAILURE.search(output)
+        ):
             status = "compile_failed"
         elif proc_returncode != 0:
             status = "runtime_failed"
@@ -2194,9 +2215,7 @@ def run_perf_test(
             known_ops=known_ops or _repo_known_onnx_ops(),
             mlir_base=mlir_base if dump_mlir else None,
             compile_failed=status != "ok",
-            runtime_findings=[
-                f for f in findings if "runtime unsupported" in f.detail
-            ],
+            runtime_findings=[f for f in findings if "runtime unsupported" in f.detail],
         )
     except RuntimeError:
         op_inventory = []
@@ -2517,9 +2536,7 @@ def _format_op_table(findings: list[OpFinding], *, title: str) -> list[str]:
     lines.append(f"  {'-' * op_w} {'-' * count_w}  {'-' * 28}")
     for op in ops:
         info = grouped[op]
-        sources = ", ".join(
-            SOURCE_LABELS.get(s, s) for s in sorted(info["sources"])
-        )
+        sources = ", ".join(SOURCE_LABELS.get(s, s) for s in sorted(info["sources"]))
         lines.append(f"  {op:<{op_w}} {info['count']:>{count_w}}  {sources}")
         for detail in info["details"][:2]:
             lines.append(f"  {'':<{op_w}} {'':>{count_w}}  note: {detail}")
@@ -2903,9 +2920,7 @@ def format_summary_report(
                 "lowered_incomplete": "incomplete lowering",
                 "unsupported": "unsupported (need converters)",
             }
-            grouped_summary: dict[str, list[str]] = {
-                key: [] for key in summary_map
-            }
+            grouped_summary: dict[str, list[str]] = {key: [] for key in summary_map}
             for item in report.op_inventory:
                 if item.status in grouped_summary:
                     grouped_summary[item.status].append(item.op)
@@ -3002,9 +3017,7 @@ def format_report_text(reports: list[ModelReport]) -> str:
             for finding in report.missing_ops:
                 suffix = f" x{finding.count}" if finding.count > 1 else ""
                 detail = f" - {finding.detail}" if finding.detail else ""
-                lines.append(
-                    f"  - {finding.op} [{finding.source}]{suffix}{detail}"
-                )
+                lines.append(f"  - {finding.op} [{finding.source}]{suffix}{detail}")
         elif report.status != "ok":
             lines.append("Missing ops: (none identified - see errors/log)")
 
@@ -3019,6 +3032,7 @@ def format_report_text(reports: list[ModelReport]) -> str:
 
     lines.append("=" * 72)
     return "\n".join(lines)
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(
@@ -3288,11 +3302,7 @@ def main() -> int:
         if args.verbose:
             print(f"JSON report: {args.json_out}")
 
-    failed = sum(
-        1
-        for r in reports
-        if r.status != "ok" or r.unique_missing_ops
-    )
+    failed = sum(1 for r in reports if r.status != "ok" or r.unique_missing_ops)
     return 1 if failed else 0
 
 
