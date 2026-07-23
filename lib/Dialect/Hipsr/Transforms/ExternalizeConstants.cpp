@@ -62,10 +62,6 @@ struct HipsrExternalizeConstantsPass
     int64_t filePos = 0;
     int64_t constantIndex = 0;
     module.walk([&](ConstantOp c) {
-      if (c.isExternalized()) {
-        return;
-      }
-
       hip::ConstantEntry entry;
       int64_t size = 0;
       if (auto fileSrc =

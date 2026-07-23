@@ -52,9 +52,11 @@ func.func @second() -> tensor<2xf32> {
 
 // -----
 
-// CHECK-LABEL: func.func @already_externalized
-// CHECK: hipsr.constant {index = 3 : i64, offset = 999 : i64, size = 16 : i64, value = dense<{{.*}}> : tensor<4xf32>} : tensor<4xf32>
-func.func @already_externalized() -> tensor<4xf32> {
+// A pre-stamped constant is re-stamped from scratch (offset/index recomputed,
+// not preserved).
+// CHECK-LABEL: func.func @restamps_existing
+// CHECK: hipsr.constant {index = 0 : i64, offset = 0 : i64, size = 16 : i64, value = dense<{{.*}}> : tensor<4xf32>} : tensor<4xf32>
+func.func @restamps_existing() -> tensor<4xf32> {
   %0 = hipsr.constant {value = dense<[1.0, 2.0, 3.0, 4.0]> : tensor<4xf32>, offset = 999 : i64, size = 16 : i64, index = 3 : i64} : tensor<4xf32>
   return %0 : tensor<4xf32>
 }

@@ -37,8 +37,6 @@ LogicalResult ConstantOp::verify() {
 #define GET_OP_CLASSES
 #include "hip/Dialect/Hipsr/IR/HipsrConstantOp.cpp.inc"
 
-namespace mlir {
-namespace hipsr {
 namespace {
 
 constexpr const char *kHipsrGetConstant = "hipdnn_ep_constant_get";
@@ -101,6 +99,8 @@ struct ConstantLowering : public ConvertOpToLLVMPattern<ConstantOp> {
     }
 
     Value dataPtr = callOp.getResult();
+    // TODO: hipdnn_ep_constant_get should return !llvm.ptr<1> so this cast is
+    // unnecessary.
     if (*addrSpace != 0) {
       dataPtr = LLVM::AddrSpaceCastOp::create(
           rewriter, loc, LLVM::LLVMPointerType::get(ctx, *addrSpace), dataPtr);
@@ -130,10 +130,7 @@ struct ConstantLowering : public ConvertOpToLLVMPattern<ConstantOp> {
 
 } // namespace
 
-void populateHipsrConstantLoweringPatterns(const LLVMTypeConverter &converter,
-                                           RewritePatternSet &patterns) {
+void mlir::hipsr::populateHipsrConstantLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
   patterns.add<ConstantLowering>(converter);
 }
-
-} // namespace hipsr
-} // namespace mlir
