@@ -23,22 +23,14 @@ LogicalResult ConstantOp::verify() {
   bool hasSize = getSizeAttr() != nullptr;
   bool hasIndex = getIndexAttr() != nullptr;
 
-  // A data source is always present: exactly one of value or source (never
-  // both, never neither). Externalization only *adds* offset/size/index; it
-  // never removes the data source, so getDataValues() keeps working
-  // post-externalization.
-  //   {value} | {source} | {value, offset, size, index} | {source, ...}
   if (hasValue == hasSource) {
     return emitOpError("expected exactly one of {value} or {source}");
   }
 
-  // offset/size/index are the externalized marker: all three set, or none.
   if (hasOffset != hasSize || hasOffset != hasIndex) {
     return emitOpError("`offset`, `size` and `index` must be set together");
   }
 
-  // The result type (ranked tensor or #hipsr.mem<device> memref) is enforced
-  // by the Hipsr_TensorOrDeviceMemRef ODS constraint.
   return success();
 }
 
@@ -49,16 +41,13 @@ namespace mlir {
 namespace hipsr {
 namespace {
 
-// Runtime symbol returning a constant's device pointer by its ordinal into the
-// gpu_constants[] array (hipdnn_ep_constant_get in hipdnn_ep_runtime_state.cpp;
-// same entry the hip.get_constant lowering targets).
+// gpu_constants[index] accessor; the hip.get_constant lowering targets the same
+// symbol.
 constexpr const char *kHipsrGetConstant = "hipdnn_ep_constant_get";
 
-// Lowers an externalized hipsr.constant to a @hipdnn_ep_constant_get(ctx,
-// index) runtime call whose returned device pointer is wrapped in a memref
-// descriptor. hipsr.constant carries no operands, so ctx is the enclosing
-// llvm.func's arg 0 (the runtime state pointer, per the EP ABI) and index is
-// the ordinal stamped by hipsr-externalize-constants.
+// ctx is the enclosing llvm.func's arg 0 (runtime state, per the EP ABI, since
+// hipsr.constant has no operands); index is stamped by
+// hipsr-externalize-constants.
 struct ConstantLowering : public ConvertOpToLLVMPattern<ConstantOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
