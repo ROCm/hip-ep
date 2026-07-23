@@ -8,7 +8,7 @@ set(MORPHIZEN_E2E_TESTS_PROTO_FILES
 set(MORPHIZEN_E2E_TESTS_PROTO_SRCS "")
 set(MORPHIZEN_E2E_TESTS_PROTO_HDRS "")
 set(Protobuf_USE_STATIC_LIBS ON)
-if(NOT TARGET protobuf::libprotobuf)
+if(NOT TARGET protobuf::libprotobuf OR NOT TARGET protobuf::protoc)
   find_package(Protobuf CONFIG REQUIRED)
 endif()
 if (NOT EXISTS ${CMAKE_CURRENT_BINARY_DIR}/e2e_config_proto)
