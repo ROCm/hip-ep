@@ -5,6 +5,8 @@
 
 #include "hip/Dialect/Hipsr/IR/HipsrMatMulOp.h"
 
+#include "hip/Dialect/Hipsr/IR/HipsrShapeRegionInterface.h"
+
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
 
@@ -18,12 +20,18 @@ using namespace mlir::hipsr;
 #define GET_OP_CLASSES
 #include "hip/Dialect/Hipsr/IR/HipsrMatMulOp.cpp.inc"
 
-// DestinationStyleOpInterface: the single init operand is the DPS out.
+namespace {
+struct MatMulShapeArgs : ShapeRegionArgs<MatMulOp> {
+  using ShapeRegionArgs::ShapeRegionArgs;
+  Value getA() const { return in(0); }
+  Value getB() const { return in(1); }
+};
+} // namespace
+
 MutableOperandRange MatMulOp::getDpsInitsMutable() { return getInitMutable(); }
 
 // A and B must be at least 1-D: matmul needs a contraction dim, and the shape
-// region below reads the last one or two dims of each operand. A rank-0
-// (scalar) operand has neither.
+// region reads the last one or two dims of each.
 LogicalResult MatMulOp::verify() {
   if (cast<ShapedType>(getA().getType()).getRank() < 1) {
     return emitOpError("operand A must be at least 1-D");
@@ -34,46 +42,19 @@ LogicalResult MatMulOp::verify() {
   return success();
 }
 
-// Fills the shape region with the ONNX/NumPy matmul output shape (semantics in
-// HipsrMatMulOp.td), guarded by a contraction-dim (K) equality constraint.
-//
-// The shape dialect is used (over tensor.dim / arith) so the same code covers
-// both tensor and memref inputs and static dims fold to constants -- a fully
-// static matmul then keeps no dim arithmetic and shape.cstr_eq folds its
-// witness away, leaving no constraint IR. K never reaches the output, but ONNX
-// requires both sides to match, so the equality is a shape.cstr_eq witness
-// guarding the shape.assuming region that yields the output dims; a later
-// shape-constraint lowering can turn it into a runtime check, and a static
-// match drops it. (Batch-dim broadcast compatibility is not yet checked.)
-//
-// Before (region omitted, as emitted by convert-onnx-to-hipsr):
-//   %0 = hipsr.matmul(%ctx) ins(%A, %B : tensor<?x?xf16>, tensor<?x?xf16>)
-//                           outs(%init : tensor<?x?xf16>) : tensor<?x?xf16>
-//
-// After (2-D case; batched adds one dim per broadcast batch axis):
-//   %0 = hipsr.matmul(%ctx) ins(%A, %B) outs(%init) : tensor<?x?xf16>
-//   shape_region {
-//     %shA = shape.shape_of %A ; %shB = shape.shape_of %B
-//     %kA = shape.get_extent %shA, 1 ; %kB = shape.get_extent %shB, 0
-//     %sa = shape.from_extents %kA ; %sb = shape.from_extents %kB
-//     %w  = shape.cstr_eq %sa, %sb
-//     %d:2 = shape.assuming %w -> (index, index) {
-//       %m = shape.get_extent %shA, 0 ; %n = shape.get_extent %shB, 1
-//       shape.assuming_yield %m, %n : index, index
-//     }
-//     hipsr.shape_yield (%d#0, %d#1) : [f16]
-//   }
-void MatMulOp::populateShapeRegion(OpBuilder &builder, Region &shapeRegion) {
+void MatMulOp::populateShapeRegion(OpBuilder &builder, Block &shapeBlock) {
   OpBuilder::InsertionGuard guard(builder);
-  Block *body = builder.createBlock(&shapeRegion);
-  builder.setInsertionPointToStart(body);
+  builder.setInsertionPointToStart(&shapeBlock);
 
   Location loc = getLoc();
   MLIRContext *ctx = builder.getContext();
-  Value shA = builder.create<shape::ShapeOfOp>(loc, getA());
-  Value shB = builder.create<shape::ShapeOfOp>(loc, getB());
-  int64_t aRank = cast<ShapedType>(getA().getType()).getRank();
-  int64_t bRank = cast<ShapedType>(getB().getType()).getRank();
+  MatMulShapeArgs args{shapeBlock};
+  Value aArg = args.getA();
+  Value bArg = args.getB();
+  Value shA = builder.create<shape::ShapeOfOp>(loc, aArg);
+  Value shB = builder.create<shape::ShapeOfOp>(loc, bArg);
+  int64_t aRank = cast<ShapedType>(aArg.getType()).getRank();
+  int64_t bRank = cast<ShapedType>(bArg.getType()).getRank();
   bool aIs1D = aRank == 1;
   bool bIs1D = bRank == 1;
 
