@@ -76,8 +76,10 @@ static Value asIndexValue(Value v, Type indexType,
 static Value collapseGroupSize(Location loc, ArrayRef<int64_t> group,
                                ArrayRef<Value> inputSizes, Type indexType,
                                ConversionPatternRewriter &rewriter) {
-  Value product = arith::ConstantIndexOp::create(rewriter, loc, 1);
-  for (int64_t idx : group)
+  assert(!group.empty() && "collapse group must be non-empty");
+  Value product =
+      asIndexValue(inputSizes[group.front()], indexType, rewriter, loc);
+  for (int64_t idx : group.drop_front())
     product = arith::MulIOp::create(
         rewriter, loc, product,
         asIndexValue(inputSizes[idx], indexType, rewriter, loc));
