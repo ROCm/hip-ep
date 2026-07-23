@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <utility>
 #include <vector>
@@ -110,41 +111,69 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   int64_t k_blocks_fc2 = (inter_size + block_size - 1) / block_size;
   int64_t blob_size_fc2 = block_size / 2;
 
+  // The grouped-vs-host-loop prefill decision is made AFTER bucket_tokens (it
+  // depends on the actual per-expert row distribution, not on num_experts), so
+  // the scratch pool must reserve BOTH prefill paths' buffers up front. The
+  // grouped adds (pf_act/pf_accum/active_eids) are tens of MB on top of the
+  // host-loop buffers, so the peak stays ~= the host-loop footprint (which is
+  // the pre-existing `main` behavior -> no memory regression). Decode buffers
+  // stay gated on is_decode. See the post-bucket gate near the dispatch below.
+  const bool is_decode = (num_tokens == 1);
+  const bool is_prefill = !is_decode;
+
   // Per-state grow-on-demand scratch in place of 8 hipMalloc/8 hipFree per
   // call. Sub-buffers are 64-byte aligned (matches GPU pool alignment, gives
   // each sub-buffer its own cache line). The buffer grows when num_tokens /
   // sizes exceed the cached capacity, never shrinks; freed in state cleanup.
+  // Buffers a path doesn't touch are sized 0 (their offset collapses onto the
+  // next buffer; the inactive-path pointers below are simply never
+  // dereferenced).
   auto align_up_64 = [](size_t s) -> size_t { return (s + 63) & ~size_t(63); };
+  // Routing outputs (topk_routing) are used by every path.
   size_t sz_expert_indices = align_up_64(num_tokens * k * sizeof(int32_t));
   size_t sz_expert_weights = align_up_64(num_tokens * k * elem_size);
-  size_t sz_gather_buf = align_up_64(num_tokens * hidden_size * elem_size);
-  size_t sz_fc1_buf = align_up_64(num_tokens * fusion_inter * elem_size);
+  // Host-loop fallback per-expert FFN buffers (sized to num_tokens, reused
+  // across experts). Reserved for every prefill because the host-loop path may
+  // be selected post-bucket; only the host-loop path dereferences them.
+  size_t sz_gather_buf =
+      is_prefill ? align_up_64(num_tokens * hidden_size * elem_size) : 0;
+  size_t sz_fc1_buf =
+      is_prefill ? align_up_64(num_tokens * fusion_inter * elem_size) : 0;
   // Fused decode (num_tokens == 1) reuses act_buf and fc2_buf as the [k,
   // inter] activation slots and [k, hidden] per-expert output slots needed
   // by hip_qmoe_decode_fused (gather/scatter happen inline inside the
-  // kernel, indexed by expert_indices). For num_tokens > 1 the multi-pass
+  // kernel, indexed by expert_indices). For num_tokens > 1 the host-loop
   // path uses [num_tokens, ...] sizing. Take the max so the per-state
-  // scratch is never under-sized regardless of which path runs.
+  // scratch is never under-sized regardless of which of those two paths runs.
+  // Always reserved: decode needs them, and the host-loop prefill path (which
+  // may be selected post-bucket) needs them too. The grouped-WMMA prefill path
+  // uses none of these (it has its own pf_*).
   int64_t act_slots = std::max<int64_t>(num_tokens, k);
   size_t sz_act_buf = align_up_64(act_slots * inter_size * elem_size);
   size_t sz_fc2_buf = align_up_64(act_slots * hidden_size * elem_size);
   // bucket_tokens outputs (Phase 2): per-expert counts + exclusive prefix sum
   // offsets, plus tokens/weights re-grouped on-device into per-expert
-  // contiguous slices. Replaces the old per-expert host h_ids/h_wts_e build +
-  // H2D round-trip (2 hipMemcpyAsync per active expert per layer).
-  size_t sz_expert_counts = align_up_64(num_experts * sizeof(int32_t));
-  size_t sz_expert_offsets = align_up_64((num_experts + 1) * sizeof(int32_t));
-  size_t sz_sorted_token_ids = align_up_64(num_tokens * k * sizeof(int32_t));
-  size_t sz_sorted_weights = align_up_64(num_tokens * k * elem_size);
+  // contiguous slices. Used by both prefill paths (grouped + host-loop), not
+  // by decode.
+  size_t sz_expert_counts =
+      is_decode ? 0 : align_up_64(num_experts * sizeof(int32_t));
+  size_t sz_expert_offsets =
+      is_decode ? 0 : align_up_64((num_experts + 1) * sizeof(int32_t));
+  size_t sz_sorted_token_ids =
+      is_decode ? 0 : align_up_64(num_tokens * k * sizeof(int32_t));
+  size_t sz_sorted_weights =
+      is_decode ? 0 : align_up_64(num_tokens * k * elem_size);
   // dp4a decode scratch (fused decode only, env-gated): int8-quantized
   // activations + per-group fp32 scales for the fc1 input ([hidden]) and the
-  // fc2 slot activations ([k, inter]). Sized unconditionally (a few KB) so the
-  // offset layout is identical whether or not dp4a runs; the fp path ignores
-  // them. k_blocks_fc1 == n_blk_in, k_blocks_fc2 == n_blk_mid.
-  size_t sz_a_qb_in = align_up_64(hidden_size * sizeof(int8_t));
-  size_t sz_a_scale_in = align_up_64(k_blocks_fc1 * sizeof(float));
-  size_t sz_a_qb_mid = align_up_64(k * inter_size * sizeof(int8_t));
-  size_t sz_a_scale_mid = align_up_64(k * k_blocks_fc2 * sizeof(float));
+  // fc2 slot activations ([k, inter]). Decode path only.
+  // k_blocks_fc1 == n_blk_in, k_blocks_fc2 == n_blk_mid.
+  size_t sz_a_qb_in = is_decode ? align_up_64(hidden_size * sizeof(int8_t)) : 0;
+  size_t sz_a_scale_in =
+      is_decode ? align_up_64(k_blocks_fc1 * sizeof(float)) : 0;
+  size_t sz_a_qb_mid =
+      is_decode ? align_up_64(k * inter_size * sizeof(int8_t)) : 0;
+  size_t sz_a_scale_mid =
+      is_decode ? align_up_64(k * k_blocks_fc2 * sizeof(float)) : 0;
 
   size_t off_expert_indices = 0;
   size_t off_expert_weights = off_expert_indices + sz_expert_indices;
@@ -160,7 +189,27 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   size_t off_a_scale_in = off_a_qb_in + sz_a_qb_in;
   size_t off_a_qb_mid = off_a_scale_in + sz_a_scale_in;
   size_t off_a_scale_mid = off_a_qb_mid + sz_a_qb_mid;
-  size_t total_scratch = off_a_scale_mid + sz_a_scale_mid;
+  // Grouped-WMMA prefill scratch (num_tokens > 1 default path). P =
+  // num_tokens*k pairs. FC1 fuses gather + SwiGLU into the WMMA kernel and
+  // writes act_out directly, and FC2 scatter-adds into an fp32 accumulator, so
+  // the path only needs: [P, inter] SwiGLU activations (pf_act), the fp32
+  // [num_tokens, hidden] accumulator (pf_accum), and the active-expert id list
+  // (active_eids). The old a_all [P, hidden] and fc1_out [P, 2*inter]
+  // intermediates are gone.
+  int64_t pf_pairs = num_tokens * k;
+  size_t sz_pf_act =
+      is_prefill ? align_up_64(pf_pairs * inter_size * elem_size) : 0;
+  size_t sz_pf_accum =
+      is_prefill ? align_up_64(num_tokens * hidden_size * sizeof(float)) : 0;
+  // FC1 gathers its rows straight from `input` and applies SwiGLU in-kernel,
+  // writing act_out (pf_act) directly, so neither the [P, hidden] a_all nor the
+  // [P, 2*inter] fc1_out buffer is materialized any more.
+  size_t sz_active_eids =
+      is_prefill ? align_up_64(num_experts * sizeof(int32_t)) : 0;
+  size_t off_pf_act = off_a_scale_mid + sz_a_scale_mid;
+  size_t off_pf_accum = off_pf_act + sz_pf_act;
+  size_t off_active_eids = off_pf_accum + sz_pf_accum;
+  size_t total_scratch = off_active_eids + sz_active_eids;
 
   if (hipdnn_ep_state_ensure_qmoe_scratch(state, total_scratch) != 0) {
     fprintf(stderr, "wrap_qmoe: ensure_qmoe_scratch(%zu) failed\n",
@@ -186,6 +235,10 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   void *d_a_scale_in = scratch_base + off_a_scale_in;
   void *d_a_qb_mid = scratch_base + off_a_qb_mid;
   void *d_a_scale_mid = scratch_base + off_a_scale_mid;
+  void *d_pf_act = scratch_base + off_pf_act;
+  void *d_pf_accum = scratch_base + off_pf_accum;
+  int32_t *d_active_eids =
+      reinterpret_cast<int32_t *>(scratch_base + off_active_eids);
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: topk_routing(tokens=%lld, experts=%lld, "
                     "k=%lld, normalize=%lld)\n",
@@ -250,7 +303,10 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       return (s + 63) & ~size_t(63);
     };
     size_t hsz_counts = align_up_64h(num_experts * sizeof(int32_t));
-    size_t total_host = hsz_counts;
+    // Grouped-WMMA path builds an active-expert id list on the host from the
+    // D2H'd counts; reserve space for it alongside h_counts.
+    size_t hsz_active = align_up_64h(num_experts * sizeof(int32_t));
+    size_t total_host = hsz_counts + hsz_active;
 
     if (hipdnn_ep_state_ensure_qmoe_host_scratch(state, total_host) != 0) {
       fprintf(stderr, "wrap_qmoe: ensure_qmoe_host_scratch(%zu) failed\n",
@@ -260,6 +316,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     char *host_base =
         static_cast<char *>(hipdnn_ep_state_get_qmoe_host_scratch(state));
     int32_t *h_counts = reinterpret_cast<int32_t *>(host_base);
+    int32_t *h_active = reinterpret_cast<int32_t *>(host_base + hsz_counts);
 
     // Bucket tokens on the device: count per expert (atomicAdd), exclusive
     // prefix sum into d_expert_offsets, scatter (token_id, weight) pairs
@@ -287,14 +344,88 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     HIP_CHECK(hipMemsetAsync(output, 0, num_tokens * hidden_size * elem_size,
                              hip_stream));
 
-    int64_t active_experts = 0;
+    // Post-bucket fill-aware gate: choose grouped WMMA prefill vs the host loop
+    // from the ACTUAL per-expert row distribution (h_counts), not from
+    // num_experts (which mis-predicts: gpt-oss-120b has 128 experts but ~7.6
+    // rows/expert, so the 64-row WMMA tile is mostly padding and grouped
+    // regresses; Qwen3.6-35B-A3B fills the tile and wins). See debug_log.h.
+    // One pass over h_counts computes: num_active (for launch amortization),
+    // max_count (grouped launch is sized to the heaviest expert), and
+    // dense_rows (routed rows in experts that fill the tile). Grouped is chosen
+    // only when the shape is WMMA-serviceable, there are enough active experts,
+    // and most routed rows land in dense experts; otherwise the host loop runs
+    // (this is the pre-existing `main` behavior, so there is no regression vs
+    // main).
+    const int tile_rows = hipdnn_ep_qmoe_grouped_tile_rows();
+    int num_active = 0;
+    int max_count = 0;
+    int64_t dense_rows = 0;
     for (int64_t e = 0; e < num_experts; e++) {
-      if (h_counts[e] > 0) {
-        active_experts++;
+      int c = h_counts[e];
+      if (c > 0) {
+        num_active++;
+        if (c > max_count)
+          max_count = c;
+        if (c >= tile_rows)
+          dense_rows += c;
       }
     }
-    RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: %lld/%lld experts active\n",
-                      (long long)active_experts, (long long)num_experts);
+    const int64_t total_rows = num_tokens * k; // routed (token,expert) pairs
+    const int dense_pct =
+        total_rows > 0 ? static_cast<int>((dense_rows * 100) / total_rows) : 0;
+    // Shape must be WMMA-serviceable (fp16 int4, hidden/inter multiples of the
+    // 64-row tile). num_experts >= MIN_EXPERTS is retained as a hard
+    // override/off-switch (set it very high to force the host loop for A/B).
+    const bool shape_ok = elem_size == 2 && expert_weight_bits == 4 &&
+                          block_size > 0 && (hidden_size % 64 == 0) &&
+                          (inter_size % 64 == 0) &&
+                          (num_experts >= hipdnn_ep_qmoe_grouped_min_experts());
+    const bool fill_ok = num_active >= hipdnn_ep_qmoe_grouped_min_active() &&
+                         dense_pct >= hipdnn_ep_qmoe_grouped_min_dense_pct();
+    // Absolute work-scale gate: the dense-fraction test above is scale-free, so
+    // it admits grouped on short prefills (e.g. VLM image prefill ~1.8k tokens)
+    // where grouped's per-expert launch overhead is not amortized and it loses
+    // to the host loop (+5-6% TTFT) with high run-to-run variance. Require a
+    // minimum prefill length; below it, fall back to the host loop (= main).
+    const bool scale_ok = num_tokens >= hipdnn_ep_qmoe_grouped_min_tokens();
+    const bool use_grouped_prefill = shape_ok && fill_ok && scale_ok;
+    RUNTIME_DEBUG_LOG(
+        "[REAL] wrap_qmoe: prefill gate active=%d/%lld max_count=%d "
+        "dense_pct=%d num_tokens=%lld (min_active=%d min_dense_pct=%d "
+        "min_tokens=%d) -> %s\n",
+        num_active, (long long)num_experts, max_count, dense_pct,
+        (long long)num_tokens, hipdnn_ep_qmoe_grouped_min_active(),
+        hipdnn_ep_qmoe_grouped_min_dense_pct(),
+        hipdnn_ep_qmoe_grouped_min_tokens(),
+        use_grouped_prefill ? "grouped WMMA" : "host loop");
+    if (use_grouped_prefill) {
+      // Build the active-expert id list (grouped launches one block group per
+      // active expert, blockIdx.z = expert).
+      int na = 0;
+      for (int64_t e = 0; e < num_experts; e++) {
+        if (h_counts[e] > 0)
+          h_active[na++] = static_cast<int32_t>(e);
+      }
+      if (na > 0) {
+        HIP_CHECK(hipMemcpyAsync(d_active_eids, h_active, na * sizeof(int32_t),
+                                 hipMemcpyHostToDevice, hip_stream));
+      }
+      RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: grouped WMMA prefill "
+                        "(active=%d, max_count=%d)\n",
+                        na, max_count);
+      int rc = hip_qmoe_grouped_prefill_wmma(
+          stream, input, d_sorted_token_ids, d_sorted_weights, d_expert_offsets,
+          d_active_eids, na, max_count, fc1_weights, fc1_scales,
+          fc1_zero_points, fc1_bias, fc2_weights, fc2_scales, fc2_zero_points,
+          fc2_bias, d_pf_act, d_pf_accum, output, num_tokens, hidden_size,
+          inter_size, k, num_experts, block_size, activation_alpha,
+          activation_beta, swiglu_limit, elem_size);
+      if (rc != 0) {
+        fprintf(stderr, "wrap_qmoe: grouped WMMA prefill failed (%d)\n", rc);
+        result = -1;
+      }
+      goto cleanup;
+    }
 
     // Per-session pointer-keyed zero_points unpack cache (qmoe-owned, lives on
     // RuntimeState). Each expert's fc1/fc2 zp is a distinct pointer into the

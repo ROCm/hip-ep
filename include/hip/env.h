@@ -71,4 +71,26 @@ inline std::string env_string(const char *name) {
   return (n > 0 && n < sizeof(buf)) ? std::string(buf, n) : std::string();
 }
 
+// Env var as an int; `dflt` when unset/blank. Manual parse (no std::stoi) to
+// keep the runtime bitcode free of MSVC vectorized helpers the JIT can't
+// resolve.
+inline int env_int(const char *name, int dflt) {
+  char buf[16];
+  unsigned long n = read_env(name, buf, sizeof(buf));
+  if (n == 0)
+    return dflt;
+  int sign = 1, i = 0;
+  if (buf[0] == '-') {
+    sign = -1;
+    i = 1;
+  }
+  long v = 0;
+  bool any = false;
+  for (; buf[i] >= '0' && buf[i] <= '9'; ++i) {
+    v = v * 10 + (buf[i] - '0');
+    any = true;
+  }
+  return any ? (int)(sign * v) : dflt;
+}
+
 } // namespace hipdnn_ep
