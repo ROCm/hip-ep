@@ -9,7 +9,6 @@ add_subdirectory(OnnxToHip)
 add_subdirectory(OnnxToHipsr)
 add_subdirectory(OnnxToHipDNN)
 add_subdirectory(HipToLLVM)
-add_subdirectory(HipsrToLLVM)
 
 # Umbrella conversion library
 add_library(HipConversion STATIC
@@ -24,7 +23,6 @@ target_link_libraries(HipConversion PUBLIC
   OnnxToHipsr
   OnnxToHipDNN
   HipToLLVM
-  HipsrToLLVM
   MLIRIR
   MLIRPass
 )
