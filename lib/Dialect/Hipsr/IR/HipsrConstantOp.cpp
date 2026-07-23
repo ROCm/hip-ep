@@ -41,13 +41,8 @@ namespace mlir {
 namespace hipsr {
 namespace {
 
-// gpu_constants[index] accessor; the hip.get_constant lowering targets the same
-// symbol.
 constexpr const char *kHipsrGetConstant = "hipdnn_ep_constant_get";
 
-// ctx is the enclosing llvm.func's arg 0 (runtime state, per the EP ABI, since
-// hipsr.constant has no operands); index is stamped by
-// hipsr-externalize-constants.
 struct ConstantLowering : public ConvertOpToLLVMPattern<ConstantOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -74,8 +69,6 @@ struct ConstantLowering : public ConvertOpToLLVMPattern<ConstantOp> {
       return failure();
     }
 
-    // ctx = the enclosing function's arg 0. Bail until the parent is llvm.func
-    // so the arg is already an !llvm.ptr (the conversion driver retries).
     auto llvmFn = op->getParentOfType<LLVM::LLVMFuncOp>();
     if (!llvmFn) {
       return rewriter.notifyMatchFailure(op, "expected enclosing llvm.func");
@@ -101,8 +94,6 @@ struct ConstantLowering : public ConvertOpToLLVMPattern<ConstantOp> {
     SmallVector<Value, 2> args = {ctxArg, indexVal};
     auto callOp = LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 
-    // The runtime always returns a generic pointer (AS 0). Cast to the memref's
-    // address space (e.g. AS 1 = AMDGPU global memory) if needed.
     FailureOr<unsigned> addrSpace =
         getTypeConverter()->getMemRefAddressSpace(memRefType);
     if (failed(addrSpace)) {
@@ -115,7 +106,6 @@ struct ConstantLowering : public ConvertOpToLLVMPattern<ConstantOp> {
           rewriter, loc, LLVM::LLVMPointerType::get(ctx, *addrSpace), dataPtr);
     }
 
-    // Row-major sizes / strides for a static, identity-layout memref.
     auto shape = memRefType.getShape();
     SmallVector<Value, 4> sizes;
     SmallVector<Value, 4> strides;

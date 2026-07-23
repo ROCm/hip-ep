@@ -30,11 +30,6 @@ namespace mlir {
 namespace hipsr {
 namespace {
 
-// Aggregates every hipsr -> LLVM pattern populator. As each op is ported, add
-// its populateHipsr<Op>LoweringPatterns here (each pattern lives with its op in
-// the dialect IR lib, declared in that op's header). Mirrors how
-// convert-hip-to-llvm's runOnOperation aggregates the per-category
-// populate*LoweringPatterns.
 void populateHipsrToLLVMPatterns(const LLVMTypeConverter &typeConverter,
                                  RewritePatternSet &patterns) {
   populateHipsrConstantLoweringPatterns(typeConverter, patterns);
