@@ -4,10 +4,20 @@
  */
 //===- PopulateShapeRegionPass.cpp - Fill hipsr shape regions -------------===//
 //
-// Walks every op implementing ShapeRegionInterface and, for each one whose
-// shape region is empty (unpopulated), calls populateShapeRegion() so the op
-// emits its own output-shape computation (the single source of truth). Ops
-// with an already-populated region are skipped, so the pass is idempotent.
+// For each ShapeRegionInterface op with an empty shape region, adds the entry
+// block with the op's args (getShapeRegionArgOperands) and calls
+// populateShapeRegion() to emit the output-shape computation. Idempotent:
+// already-populated regions are skipped.
+//
+// Before:
+//   %0 = hipsr.cast(%ctx) ins(%input) outs(%init) : tensor<?x8xf16>
+// After:
+//   %0 = hipsr.cast(%ctx) ins(%input) outs(%init)
+//       : tensor<?x8xf16> shape_region {
+//   ^bb0(%in: tensor<?x8xf32>):
+//     ... op-emitted shape math ...
+//     hipsr.shape_yield (%d0, %d1) : [f16]
+//   }
 //
 //===----------------------------------------------------------------------===//
 
@@ -33,17 +43,20 @@ struct PopulateShapeRegionPass
   void runOnOperation() override {
     auto funcOp = getOperation();
     OpBuilder builder(&getContext());
-    // populateShapeRegion() only adds ops inside the op's own (previously
-    // empty) shape region; none of those implement ShapeRegionInterface, so
-    // the walk neither re-visits nor re-populates them.
     funcOp.walk([&](ShapeRegionInterface shapeRegionOp) {
-      Region &shapeRegion = shapeRegionOp.getShapeRegion();
-      if (shapeRegion.empty())
-        shapeRegionOp.populateShapeRegion(builder, shapeRegion);
-      // TODO: EndBarrier ops also carry a capacity shape region (region 1).
-      // When such ops land, fill it too via getCapacityShapeRegion() /
-      // populateCapacityShapeRegion(). No EndBarrier op exists today, so only
-      // the shape region (region 0) is handled here.
+      Region &shapeRegion = getShapeRegion(shapeRegionOp);
+      if (!shapeRegion.empty()) {
+        return;
+      }
+
+      Operation *op = shapeRegionOp.getOperation();
+      Block *block = builder.createBlock(&shapeRegion);
+      for (Value operand : getShapeRegionArgOperands(shapeRegionOp)) {
+        block->addArgument(operand.getType(), op->getLoc());
+      }
+      shapeRegionOp.populateShapeRegion(builder, *block);
+
+      // TODO: EndBarrier ops also need their capacity region (region 1) filled.
     });
   }
 };

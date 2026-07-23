@@ -2,28 +2,23 @@
 // Licensed under the MIT License.
 //
 //===----------------------------------------------------------------------===//
-// Tests for the hipsr shape region, exercised through hipsr.cast. The region is
-// optional; when present it must be a single, non-empty block ending in
-// hipsr.shape_yield. Covered here:
-//   - positive: a cast with the region omitted round-trips
-//   - scoping: the region may only use the op's operands
-//     (IsolatedFromAboveButAllowOperands)
+// Shape-region verifier, exercised through hipsr.cast. Covered here:
+//   - positive: region omitted round-trips; populated region reads its input
+//     via the entry-block arg
+//   - isolation: IsolatedFromAbove requires reads to go through entry-block args
 //   - structure: 0-or-1 blocks, non-empty, hipsr.shape_yield terminator
-//     (SingleBlock trait + ShapeRegionInterface verifier)
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt %s -split-input-file -verify-diagnostics | FileCheck %s
 
-// Positive round-trip: a cast with the shape region OMITTED entirely parses,
-// verifies, and prints back with no `shape_region` keyword (the optional region
-// group prints nothing when the region has zero blocks). This is the exact form
-// the onnx->hipsr conversion emits, so IR without a shape region must read back
-// correctly.
+// Positive round-trip: a cast with the shape region omitted parses, verifies,
+// and prints back with no `shape_region` keyword. This is the form the
+// onnx->hipsr conversion emits.
 // CHECK-LABEL: func.func @cast_no_shape_region
+// CHECK:     hipsr.cast(%{{.+}}) ins(%{{.+}} : tensor<?x8xf32>) outs(%{{.+}} : tensor<?x8xf16>) : tensor<?x8xf16>
+// CHECK-NOT: shape_region
 func.func @cast_no_shape_region(%ctx: !hipsr.context, %input: tensor<?x8xf32>,
                                 %init: tensor<?x8xf16>) -> tensor<?x8xf16> {
-  // CHECK: hipsr.cast(%{{.+}}) ins(%{{.+}} : tensor<?x8xf32>) outs(%{{.+}} : tensor<?x8xf16>) : tensor<?x8xf16>
-  // CHECK-NOT: shape_region
   %0 = hipsr.cast(%ctx) ins(%input : tensor<?x8xf32>)
                   outs(%init : tensor<?x8xf16>) : tensor<?x8xf16>
   return %0 : tensor<?x8xf16>
@@ -31,27 +26,50 @@ func.func @cast_no_shape_region(%ctx: !hipsr.context, %input: tensor<?x8xf32>,
 
 // -----
 
-// A value defined in the enclosing function that is NOT one of the op's
-// operands is a disallowed outer capture: the trait verifier rejects it.
-func.func @cast_scoping_disallowed_outer(%ctx: !hipsr.context, %input: tensor<?x8xf32>,
-                                         %init: tensor<?x8xf16>) -> tensor<?x8xf16> {
-  %outer = arith.constant 8 : index
-  // expected-note@+1 {{may only use values defined in its regions or the op's operands}}
+// Positive: a populated region reads its input via the entry-block arg (arg 0),
+// as required by IsolatedFromAbove.
+// CHECK-LABEL: func.func @cast_uses_block_arg
+// CHECK:       hipsr.cast
+// CHECK:         ^bb0(%[[IN:.+]]: tensor<?x8xf32>):
+// CHECK:         tensor.dim %[[IN]]
+func.func @cast_uses_block_arg(%ctx: !hipsr.context, %input: tensor<?x8xf32>,
+                               %init: tensor<?x8xf16>) -> tensor<?x8xf16> {
   %0 = hipsr.cast(%ctx) ins(%input : tensor<?x8xf32>)
                   outs(%init : tensor<?x8xf16>) : tensor<?x8xf16>
                   shape_region {
+  ^bb0(%in: tensor<?x8xf32>):
     %c0 = arith.constant 0 : index
-    %d0 = tensor.dim %input, %c0 : tensor<?x8xf32>
-    // expected-error@+1 {{using value defined outside the region}}
-    hipsr.shape_yield (%d0, %outer) : [f16]
+    %d0 = tensor.dim %in, %c0 : tensor<?x8xf32>
+    %c8 = arith.constant 8 : index
+    hipsr.shape_yield (%d0, %c8) : [f16]
   }
   return %0 : tensor<?x8xf16>
 }
 
 // -----
 
-// A present shape region must not be a lone empty block. (An absent shape
-// region is expressed by omitting the region entirely, not by an empty block.)
+// Isolation: a shape region is IsolatedFromAbove, so reading the outer %input
+// operand from inside it is an error.
+func.func @cast_scoping_disallowed_outer(%ctx: !hipsr.context, %input: tensor<?x8xf32>,
+                                         %init: tensor<?x8xf16>) -> tensor<?x8xf16> {
+  // expected-note@+1 {{required by region isolation constraints}}
+  %0 = hipsr.cast(%ctx) ins(%input : tensor<?x8xf32>)
+                  outs(%init : tensor<?x8xf16>) : tensor<?x8xf16>
+                  shape_region {
+  ^bb0(%in: tensor<?x8xf32>):
+    %c0 = arith.constant 0 : index
+    // expected-error@+1 {{using value defined outside the region}}
+    %d0 = tensor.dim %input, %c0 : tensor<?x8xf32>
+    %c8 = arith.constant 8 : index
+    hipsr.shape_yield (%d0, %c8) : [f16]
+  }
+  return %0 : tensor<?x8xf16>
+}
+
+// -----
+
+// A present shape region must not be a lone empty block (absence is the omitted
+// region, not an empty block).
 func.func @cast_empty_block(%ctx: !hipsr.context, %input: tensor<4x8xf32>,
                             %init: tensor<4x8xf16>) -> tensor<4x8xf16> {
   // expected-error@+1 {{expects a non-empty block}}
@@ -102,4 +120,23 @@ func.func @cast_wrong_terminator(%ctx: !hipsr.context, %input: tensor<4x8xf32>,
     cf.br ^bb0
   }
   return %0 : tensor<4x8xf16>
+}
+
+// -----
+
+// The entry-block args must match the op's shape-region operand list. cast is a
+// Regular op, so it takes only its data input -- an extra leading ctx arg is
+// rejected.
+func.func @cast_wrong_arg_count(%ctx: !hipsr.context, %input: tensor<?x8xf32>,
+                                %init: tensor<?x8xf16>) -> tensor<?x8xf16> {
+  // expected-error@+1 {{shape region block must have one argument per shape-region operand (expected 1, got 2)}}
+  %0 = hipsr.cast(%ctx) ins(%input : tensor<?x8xf32>)
+                  outs(%init : tensor<?x8xf16>) : tensor<?x8xf16> shape_region {
+  ^bb0(%ctxarg: !hipsr.context, %in: tensor<?x8xf32>):
+    %c0 = arith.constant 0 : index
+    %d0 = tensor.dim %in, %c0 : tensor<?x8xf32>
+    %c8 = arith.constant 8 : index
+    hipsr.shape_yield (%d0, %c8) : [f16]
+  }
+  return %0 : tensor<?x8xf16>
 }
