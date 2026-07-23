@@ -21,8 +21,6 @@ void registerConversionPasses() {
     return mlir::hip::createConvertHipToLLVMPass();
   });
 
-  // TableGen-defined hipsr conversions (convert-onnx-to-hipsr, and future ones
-  // such as HipsrToLLVM), registered via the generated umbrella registrar.
   mlir::hipsr::registerHipsrConversionPasses();
 }
 

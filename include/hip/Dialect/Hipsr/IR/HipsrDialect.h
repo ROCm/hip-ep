@@ -41,4 +41,13 @@ class FileSystem;
 // ops adopt them).
 #include "hip/Dialect/Hipsr/IR/HipsrTypes.h"
 
+namespace mlir {
+class DialectRegistry;
+namespace hipsr {
+
+void registerConvertHipsrToLLVMInterface(DialectRegistry &registry);
+
+} // namespace hipsr
+} // namespace mlir
+
 #endif // HIPSR_DIALECT_H

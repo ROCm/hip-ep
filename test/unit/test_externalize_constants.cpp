@@ -319,6 +319,10 @@ void testCumulativeAlignmentAndPadding() {
 
   std::vector<mlir::hipsr::ConstantOp> ops;
   module->walk([&](mlir::hipsr::ConstantOp c) { ops.push_back(c); });
+  check(ops.size() == 2 && ops[0].getIndexAttr() &&
+            ops[0].getIndexAttr().getInt() == 0 && ops[1].getIndexAttr() &&
+            ops[1].getIndexAttr().getInt() == 1,
+        "cumulative: index stamped 0 then 1 in walk order");
   std::vector<std::vector<char>> expected = {
       {1, 2, 3, 4},
       {5, 6, 7, 8, 9, 10, 11, 12},
