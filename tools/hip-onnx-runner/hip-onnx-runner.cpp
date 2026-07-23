@@ -74,9 +74,11 @@ static void set_process_env(const char *key, const char *value) {
   g_persisted_env_strings.push_back(std::string(key) + "=" + value);
   const char *kv = g_persisted_env_strings.back().c_str();
 #if _WIN32
-  _putenv(kv);
+  if (_putenv(kv) != 0)
+    std::cerr << "Warning: failed to set env var " << key << " via _putenv\n";
 #else
-  setenv(key, value, 1);
+  if (setenv(key, value, 1) != 0)
+    std::cerr << "Warning: failed to set env var " << key << " via setenv\n";
 #endif
 }
 
