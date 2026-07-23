@@ -18,7 +18,6 @@ The provider integrates with ONNX Runtime through the MorphiZen pass framework. 
 - **Externalized constants** — stores large model weights in a sidecar constants file instead of embedding them in the model artifact.
 - **Two artifact formats** — LLVM bitcode with in-process JIT by default, or a native `.dll`/`.so` when explicitly requested.
 - **Extensible compiler pipeline** — supports registered plugin slots and out-of-tree dialect/pass plugins.
-- **GPU-free development** — provides a mock runtime for compiler and LIT testing without ROCm hardware.
 
 ## Get started
 
