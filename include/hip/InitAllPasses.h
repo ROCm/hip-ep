@@ -74,8 +74,6 @@ inline void registerAllDialects(mlir::DialectRegistry &registry) {
   registry.insert<mlir::LLVM::LLVMDialect>();
   registry.insert<mlir::hip::HipDialect>();
   registry.insert<mlir::hipsr::HipsrDialect>();
-  // Attach hipsr's ConvertToLLVMPatternInterface so convert-hip-to-llvm
-  // discovers and lowers hipsr ops (no dedicated hipsr->LLVM pass).
   mlir::hipsr::registerConvertHipsrToLLVMInterface(registry);
   registry.insert<detail::OnnxStubDialect>();
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);

@@ -1,9 +1,5 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
-//
-// Round-trips the hipsr.constant forms and checks the verifier: exactly one of
-// {value, source} is always present, offset/size/index are a grouped
-// externalization marker layered on top, and the result must be device memory.
 
 // RUN: hip-mlir-opt %s -split-input-file -verify-diagnostics | FileCheck %s
 
@@ -17,8 +13,6 @@ func.func @inline_const() -> memref<4xf16, #hipsr.mem<device>> {
 
 // -----
 
-// A ranked tensor result is allowed (pre-bufferization form, as produced by
-// the onnx->hipsr conversion before bufferization).
 // CHECK-LABEL: func.func @inline_const_tensor
 func.func @inline_const_tensor() -> tensor<4xf16> {
   // CHECK: hipsr.constant {value = dense<{{.*}}> : tensor<4xf16>} : tensor<4xf16>
@@ -49,7 +43,6 @@ func.func @mem_source_const() -> memref<2x4xf32, #hipsr.mem<device>> {
 
 // -----
 
-// Externalized: data source (value here) is kept; offset/size/index are added.
 // CHECK-LABEL: func.func @externalized_const
 func.func @externalized_const() -> memref<512x512xf16, #hipsr.mem<device>> {
   // CHECK: hipsr.constant {index = 0 : i64, offset = 0 : i64, size = 524288 : i64, value = dense<{{.*}}> : tensor<512x512xf16>} : memref<512x512xf16, #hipsr.mem<device>>
