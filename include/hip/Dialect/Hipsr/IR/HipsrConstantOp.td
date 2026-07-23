@@ -23,29 +23,15 @@ include "hip/Dialect/Hipsr/IR/HipsrAttrs.td"
 def Hipsr_ConstantOp : Hipsr_Op<"constant", [Pure]> {
   let summary = "Constant tensor buffer (inline value or external source)";
   let description = [{
-    Produces a constant buffer. The data source is exactly one of:
+    Produces a constant buffer.
 
-    - inline     : `value` is a `DenseElementsAttr` carrying the bytes.
-    - ext source : `source` references a `#hipsr.file_source<...>` (on-disk
-                   file) or `#hipsr.mem_source<...>` (a raw ORT pointer).
+    - `value`  : inline `DenseElementsAttr` carrying the bytes.
+    - `source` : `#hipsr.file_source<...>` (on-disk file) or
+                 `#hipsr.mem_source<...>` (a raw ORT pointer).
+    - `offset`/`size`/`index` : offset+size = location in the constants file,
+                 index = ordinal in the runtime array.
 
-    Externalization only *adds* `offset` + `size` (the location in the
-    compiler-produced constants file); it never removes `value` / `source`,
-    so `getDataValues()` keeps working afterwards. Valid states:
-    `{value}`, `{source}`, `{value, offset, size}`, `{source, offset, size}`.
-
-    `externalize` (default true) is an orthogonal opt-out flag; a downstream pass
-    calls `disableExternalize()` to keep a constant inline (compile-time value).
-
-    The result is a ranked tensor (pre-bufferization) or a device `memref`
-    (`#hipsr.mem<device>`, post-bufferization); constants reside in VRAM. The
-    `Hipsr_TensorOrDeviceMemRef` ODS constraint enforces this.
-
-    Example:
-    ```mlir
-    %w = hipsr.constant {value = dense<1.0> : tensor<4xf16>}
-       : memref<4xf16, #hipsr.mem<device>>
-    ```
+    Valid states: `{value}`, `{source}`, or either plus `{offset, size, index}`.
   }];
 
   let arguments = (ins
@@ -53,7 +39,7 @@ def Hipsr_ConstantOp : Hipsr_Op<"constant", [Pure]> {
     OptionalAttr<AnyAttrOf<[Hipsr_FileSourceAttr, Hipsr_MemSourceAttr]>>:$source,
     OptionalAttr<I64Attr>:$offset,
     OptionalAttr<I64Attr>:$size,
-    OptionalAttr<BoolAttr>:$externalize
+    OptionalAttr<I64Attr>:$index
   );
 
   let results = (outs Hipsr_TensorOrDeviceMemRef:$result);
@@ -69,16 +55,6 @@ def Hipsr_ConstantOp : Hipsr_Op<"constant", [Pure]> {
     bool hasExternalSource() { return getSourceAttr() != nullptr; }
     /// True if the constant has been externalized (offset/size into constants file).
     bool isExternalized() { return getOffsetAttr() != nullptr; }
-    /// Whether this constant should be externalized (defaults to true).
-    bool shouldExternalize() {
-      ::mlir::BoolAttr a = getExternalizeAttr();
-      return a ? a.getValue() : true;
-    }
-    /// Opt out of externalization -- keep inline. One-way decision.
-    void disableExternalize() {
-      (*this)->setAttr("externalize",
-                       ::mlir::BoolAttr::get(getContext(), false));
-    }
 
     /// Returns a typed view of the constant data (inline dense / mem source /
     /// file source via the dialect cache). MorphiZen-only contract; works both

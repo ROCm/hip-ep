@@ -41,31 +41,10 @@ def PopulateShapeRegionPass
 
 def HipsrExternalizeConstantsPass
     : Pass<"hipsr-externalize-constants", "mlir::ModuleOp"> {
-  let summary = "Write hipsr.constant data to a constants file and mark offset/size";
+  let summary = "Externalize hipsr.constant: stamp offset/size/index, write constants file";
   let description = [{
-    Phase 2 of the hipsr constant subsystem. Runs in two stages:
-
-    Phase 1 (always): walk every `hipsr.constant` in the module (across all
-    functions) that opts in (`shouldExternalize()` is true) and is not already
-    externalized; assign a 64-byte aligned cumulative offset and stamp the op
-    with `offset`/`size`.
-
-    Module-scoped by design: offsets accumulate into a single constants file shared by
-    the whole module, so the pass must see every constant at once. A per-function
-    pass would restart offsets at 0 per function (overlapping placements) and
-    write the shared file once per function (races / last-writer-wins).
-    Append-only -- `value`/`source` are kept, so `getDataValues()` still works
-    afterward. Builds one `hip::ConstantEntry` per constant (file_source keeps
-    its path/offset with no byte read; inline/mem_source keep a byte view).
-
-    Phase 2 (only when a FileSystem is injected on the HipsrDialect via
-    `setFileSystem`): write the entries through
-    `writeConstantsBinToFileSystem`. When no FileSystem is injected (e.g.
-    hip-mlir-opt) the pass is a pure IR transform (no file written).
-
-    Constants with `externalize = false` and ones already externalized are
-    skipped. This pass emits no module attributes; runtime metadata generation
-    is a separate follow-up.
+    Externalizes each `hipsr.constant`: stamps `offset`/`size`/`index`.
+    With a FileSystem injected, also writes the constants file.
   }];
   let options = [
     Option<"constantsFile", "constants-file", "std::string",

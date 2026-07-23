@@ -16,8 +16,13 @@
 
 #include "llvm/ADT/TypeSwitch.h"
 
+#include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"
+#include "mlir/Conversion/LLVMCommon/TypeConverter.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
+#include "mlir/IR/DialectRegistry.h"
+#include "mlir/Transforms/DialectConversion.h"
 
 using namespace mlir;
 using namespace mlir::hipsr;
@@ -86,4 +91,44 @@ llvm::MemoryBuffer *HipsrDialect::getOrLoadFileMap(llvm::StringRef path) {
   llvm::MemoryBuffer *raw = bufOr->get();
   fileMaps[path] = std::move(*bufOr);
   return raw;
+}
+
+namespace {
+
+void populateHipsrToLLVMPatterns(const LLVMTypeConverter &typeConverter,
+                                 RewritePatternSet &patterns) {
+  populateHipsrConstantLoweringPatterns(typeConverter, patterns);
+}
+
+struct HipsrConvertToLLVMInterface : public ConvertToLLVMPatternInterface {
+  using ConvertToLLVMPatternInterface::ConvertToLLVMPatternInterface;
+
+  void loadDependentDialects(MLIRContext *context) const final {
+    context->loadDialect<LLVM::LLVMDialect>();
+  }
+
+  void populateConvertToLLVMConversionPatterns(
+      ConversionTarget &target, LLVMTypeConverter &typeConverter,
+      RewritePatternSet &patterns) const final {
+    // #hipsr.mem<kind> -> integer address space. MemorySpaceKind's numeric
+    // values already match the AMDGPU address spaces (host=0, device=1,
+    // pinned=2, managed=3), so map the enum directly.
+    typeConverter.addTypeAttributeConversion(
+        [](BaseMemRefType,
+           MemorySpaceAttr space) -> TypeConverter::AttributeConversionResult {
+          return IntegerAttr::get(IntegerType::get(space.getContext(), 64),
+                                  static_cast<int64_t>(space.getKind()));
+        });
+    target.addIllegalDialect<HipsrDialect>();
+    populateHipsrToLLVMPatterns(typeConverter, patterns);
+  }
+};
+
+} // namespace
+
+void mlir::hipsr::registerConvertHipsrToLLVMInterface(
+    DialectRegistry &registry) {
+  registry.addExtension(+[](MLIRContext *, HipsrDialect *dialect) {
+    dialect->addInterfaces<HipsrConvertToLLVMInterface>();
+  });
 }

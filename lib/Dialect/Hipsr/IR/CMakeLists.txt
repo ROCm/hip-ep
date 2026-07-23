@@ -32,4 +32,8 @@ target_link_libraries(HipsrDialectIR PUBLIC
   MLIRSupport
   MLIRArithDialect
   MLIRShapeDialect
+  MLIRLLVMDialect
+  MLIRLLVMCommonConversion
+  MLIRConvertToLLVMInterface
+  MLIRTransforms
 )
