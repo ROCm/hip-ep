@@ -1049,7 +1049,6 @@ int main(int argc, char *argv[]) {
     if (!mlir_dump_dir.empty()) {
       const std::string dump_dir_u8 = mlir_dump_dir.u8string();
       ep_opts["dump_dir"] = dump_dir_u8;
-      session_opts.AddConfigEntry("ep.hipgpu.dump_dir", dump_dir_u8.c_str());
     }
     session_opts.AppendExecutionProvider_V2(env, devices, ep_opts);
     session_opts.AddConfigEntry("session.disable_cpu_ep_fallback", "1");
