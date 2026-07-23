@@ -60,10 +60,9 @@ struct HipsrConvertToLLVMInterface : public ConvertToLLVMPatternInterface {
           return IntegerAttr::get(IntegerType::get(space.getContext(), 64),
                                   static_cast<int64_t>(space.getKind()));
         });
-    // The whole dialect must be lowered by this point: any hipsr op still
-    // present at convert-hip-to-llvm has no legal form. Only hipsr.constant has
-    // a pattern today, so an as-yet-unported hipsr op surviving to here is a
-    // pipeline bug and legalization fails loudly.
+    // Every hipsr op must be lowered by now. Only hipsr.constant has a pattern
+    // today; any other hipsr op surviving to here is a pipeline bug and fails
+    // legalization.
     target.addIllegalDialect<HipsrDialect>();
     populateHipsrToLLVMPatterns(typeConverter, patterns);
   }
