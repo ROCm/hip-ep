@@ -68,14 +68,10 @@ Options:
 
 // MorphiZen reads many debug env vars once at DLL static init — set before
 // RegisterExecutionProviderLibrary.
-static std::vector<std::string> g_persisted_env_strings;
-
 static void set_process_env(const char *key, const char *value) {
-  g_persisted_env_strings.push_back(std::string(key) + "=" + value);
-  const char *kv = g_persisted_env_strings.back().c_str();
 #if _WIN32
-  if (_putenv(kv) != 0)
-    std::cerr << "Warning: failed to set env var " << key << " via _putenv\n";
+  if (_putenv_s(key, value) != 0)
+    std::cerr << "Warning: failed to set env var " << key << " via _putenv_s\n";
 #else
   if (setenv(key, value, 1) != 0)
     std::cerr << "Warning: failed to set env var " << key << " via setenv\n";
