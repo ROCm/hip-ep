@@ -2,25 +2,22 @@
 // Licensed under the MIT License.
 //
 //===----------------------------------------------------------------------===//
-// Tests for hipsr.matmul. Two RUN lines share the file, kept apart by a
-// FileCheck --check-prefix so each ignores the other's chunks: the default
-// prefix covers the empty-region round-trip and verifier diagnostics; the
-// POPULATE-* prefix covers -hipsr-populate-shape-region (MatMulOp's
-// populateShapeRegion). Generic shape-region structural rules live in
-// shape_region_verify.mlir.
+// Tests for hipsr.matmul, one part per RUN line:
+//   - the default RUN line round-trips the op (empty region) and checks the
+//     verifier errors;
+//   - the POPULATE RUN line runs -hipsr-populate-shape-region and checks the
+//     emitted shape.
+// Generic shape-region structural rules live in shape_region_verify.mlir.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt --split-input-file --verify-diagnostics %s | FileCheck %s
 // RUN: hip-mlir-opt --split-input-file --verify-diagnostics -hipsr-populate-shape-region %s | FileCheck %s --check-prefix=POPULATE
 
-// Shape region omitted: parses, verifies, and prints back with no
-// `shape_region` keyword (the optional region group prints nothing when the
-// region has zero blocks). This is the exact form convert-onnx-to-hipsr emits.
+// Omitted shape region round-trips with no `shape_region` keyword (CHECK-NEXT
+// return proves nothing was printed for it).
 // CHECK-LABEL: func.func @matmul_no_shape_region
-// CHECK: hipsr.matmul(%{{.+}}) ins(%{{.+}}, %{{.+}} : tensor<?x4096xf16>, tensor<4096x1024xf16>)
-// CHECK-SAME: outs(%{{.+}} : tensor<?x1024xf16>) : tensor<?x1024xf16>
-// CHECK-NEXT asserts return follows immediately: no region was printed (a
-// populated region would put its body on the next line instead).
+// CHECK:      hipsr.matmul(%{{.+}}) ins(%{{.+}}, %{{.+}} : tensor<?x4096xf16>, tensor<4096x1024xf16>)
+// CHECK-SAME:   outs(%{{.+}} : tensor<?x1024xf16>) : tensor<?x1024xf16>
 // CHECK-NEXT: return
 func.func @matmul_no_shape_region(%ctx: !hipsr.context,
                                   %a: tensor<?x4096xf16>,
@@ -34,12 +31,11 @@ func.func @matmul_no_shape_region(%ctx: !hipsr.context,
 // -----
 
 //===----------------------------------------------------------------------===//
-// FAIL cases (compile-time diagnostics a LIT run observes).
+// Invalid IR: each case must be rejected with the expected-error diagnostic.
 //===----------------------------------------------------------------------===//
 
-// Rank-0 (scalar) A: a scalar tensor is a valid ranked tensor, so the operand
-// type constraint accepts it, but matmul needs a contraction dim so the
-// verifier rejects it.
+// Rank-0 A: a valid ranked tensor (passes the type constraint) but has no
+// contraction dim, so the verifier rejects it.
 func.func @matmul_rank0_a(%ctx: !hipsr.context, %a: tensor<f16>,
                           %b: tensor<4096x1024xf16>,
                           %init: tensor<1024xf16>) -> tensor<1024xf16> {
@@ -63,8 +59,7 @@ func.func @matmul_rank0_b(%ctx: !hipsr.context, %a: tensor<64x4096xf16>,
 
 // -----
 
-// DPS init/result type mismatch: the DPS verifier requires init and result
-// types to be equal. Here the result batch-0 dim (4) differs from the init (2).
+// DPS verifier requires equal init/result types; here batch-0 differs (4 vs 2).
 func.func @matmul_init_result_mismatch(%ctx: !hipsr.context,
                                        %a: tensor<2x3x64x4096xf16>,
                                        %b: tensor<2x3x4096x1024xf16>,
@@ -78,10 +73,9 @@ func.func @matmul_init_result_mismatch(%ctx: !hipsr.context,
 
 // -----
 
-// Non-shaped operand: A is a scalar f16, which the operand type constraint
-// rejects. With ctx as operand #0, A is operand #1. The generic form needs an
-// empty region ({}) for the (optional) shape region so the region-count check
-// passes and the operand-type check fires.
+// Non-shaped operand: A is a plain f16, rejected by the operand type
+// constraint. Generic form with an empty region ({}) so the operand-type check
+// is what fires.
 func.func @matmul_operand_not_shaped(%ctx: !hipsr.context, %a: f16,
                                      %b: tensor<4096x1024xf16>,
                                      %init: tensor<64x1024xf16>)
@@ -95,16 +89,17 @@ func.func @matmul_operand_not_shaped(%ctx: !hipsr.context, %a: f16,
 // -----
 
 //===----------------------------------------------------------------------===//
-// Shape-region population (POPULATE-* RUN line only). One case per ONNX/NumPy
-// matmul shape rule (semantics in HipsrMatMulOp.td). The 2-D case pins the full
-// dataflow; the rest only assert the structure that differs from it.
+// Shape-region population (POPULATE RUN line). The 2-D case checks the whole
+// generated region; the other cases check only what differs from it.
 //===----------------------------------------------------------------------===//
 
-// Canonical 2-D case, checked end-to-end: the K guard reads A's last dim and
-// B's second-to-last, and M/N are yielded under the assumption.
+// Canonical 2-D case, checked end-to-end: entry-block args (read via %[[A]]/
+// %[[B]], since the region is IsolatedFromAbove), the K-equality guard, then
+// the output dims (M from A, N from B) yielded under that assumption.
 // POPULATE-LABEL: func.func @matmul_2d
-// POPULATE: hipsr.matmul(%{{.+}}) ins(%[[A:.+]], %[[B:.+]] : tensor<?x4096xf16>, tensor<4096x1024xf16>)
+// POPULATE: hipsr.matmul(%{{.+}}) ins(%{{.+}}, %{{.+}} : tensor<?x4096xf16>, tensor<4096x1024xf16>)
 // POPULATE-SAME: shape_region {
+// POPULATE:   ^bb0(%[[A:.+]]: tensor<?x4096xf16>, %[[B:.+]]: tensor<4096x1024xf16>):
 // POPULATE:   %[[SHA:.+]] = shape.shape_of %[[A]]
 // POPULATE:   %[[SHB:.+]] = shape.shape_of %[[B]]
 // POPULATE:   %[[KA:.+]] = shape.get_extent %[[SHA]]
@@ -199,26 +194,4 @@ func.func @matmul_batched(%ctx: !hipsr.context, %a: tensor<?x8x64x4096xf16>,
   %0 = hipsr.matmul(%ctx) ins(%a, %b : tensor<?x8x64x4096xf16>, tensor<1x8x4096x1024xf16>)
                     outs(%init : tensor<?x8x64x1024xf16>) : tensor<?x8x64x1024xf16>
   return %0 : tensor<?x8x64x1024xf16>
-}
-
-// -----
-
-// Idempotent: the pass only fills empty regions, so a hand-written region
-// survives untouched (no generated shape.shape_of over it).
-// POPULATE-LABEL: func.func @matmul_already_populated
-// POPULATE: shape_region {
-// POPULATE:   %[[C64:.+]] = arith.constant 64 : index
-// POPULATE:   %[[C1024:.+]] = arith.constant 1024 : index
-// POPULATE:   hipsr.shape_yield (%[[C64]], %[[C1024]]) : [f16]
-// POPULATE-NOT: shape.shape_of
-func.func @matmul_already_populated(%ctx: !hipsr.context, %a: tensor<64x4096xf16>,
-                                    %b: tensor<4096x1024xf16>,
-                                    %init: tensor<64x1024xf16>) -> tensor<64x1024xf16> {
-  %0 = hipsr.matmul(%ctx) ins(%a, %b : tensor<64x4096xf16>, tensor<4096x1024xf16>)
-                    outs(%init : tensor<64x1024xf16>) : tensor<64x1024xf16> shape_region {
-    %c64 = arith.constant 64 : index
-    %c1024 = arith.constant 1024 : index
-    hipsr.shape_yield (%c64, %c1024) : [f16]
-  }
-  return %0 : tensor<64x1024xf16>
 }

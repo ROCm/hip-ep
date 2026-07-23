@@ -22,28 +22,6 @@ def Hipsr_CastOp : Hipsr_DpsOp<"cast"> {
     has the same shape as the input; only the element type changes.
     Destination-passing style: the result buffer is passed as the `init`
     operand.
-
-    The `ctx` operand (`!hipsr.context`) is the per-session execution context.
-    Every hipsr op carries it as its first operand; it is added in the ONNX
-    phase and threaded through unchanged.
-
-    Regular op: carries an optional shape region (region 0). When populated it
-    copies the input shape (via `populateShapeRegion`, which emits
-    `shape.shape_of` + `shape.get_extent` so it works for both tensor and
-    memref inputs); the yielded element type is the output element type.
-
-    Example (populated shape region):
-    ```mlir
-    %0 = hipsr.cast(%ctx) ins(%input : tensor<?x8xf32>) outs(%init : tensor<?x8xf16>)
-                          : tensor<?x8xf16> shape_region {
-      %shape = shape.shape_of %input : tensor<?x8xf32> -> tensor<2xindex>
-      %c0 = arith.constant 0 : index
-      %d0 = shape.get_extent %shape, %c0 : tensor<2xindex>, index -> index
-      %c1 = arith.constant 1 : index
-      %d1 = shape.get_extent %shape, %c1 : tensor<2xindex>, index -> index
-      hipsr.shape_yield (%d0, %d1) : [f16]
-    }
-    ```
   }];
 
   let arguments = (ins
@@ -52,9 +30,6 @@ def Hipsr_CastOp : Hipsr_DpsOp<"cast"> {
     Hipsr_TensorOrDeviceMemRef:$init
   );
 
-  // The shape region is optional: an empty (zero-block) region prints nothing
-  // and round-trips as empty. A non-empty region prints as
-  // `shape_region { ... }`.
   let assemblyFormat = [{
     `(` $ctx `)`
     `ins` `(` $input `:` type($input) `)`
