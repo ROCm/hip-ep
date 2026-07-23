@@ -12,6 +12,8 @@ add_library(HipsrDialectIR STATIC
   HipsrOps.cpp
   HipsrPoolDomainYieldOp.cpp
   HipsrPoolDomainOp.cpp
+  HipsrEmptyYieldOp.cpp
+  HipsrEmptyOp.cpp
   HipsrConstantOp.cpp
   HipsrPlaceholderOp.cpp
   HipsrTraits.cpp
@@ -32,4 +34,5 @@ target_link_libraries(HipsrDialectIR PUBLIC
   MLIRSupport
   MLIRArithDialect
   MLIRShapeDialect
+  MLIRTensorDialect
 )
