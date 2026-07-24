@@ -485,76 +485,42 @@ extern "C" int wrap_multi_head_attention(
   // When a transpose is skipped, the source memref is BSHD [B,1,N,H] which is
   // bit-identical to BNSH [B,N,1,H] (different logical reshape, same memory
   // order), so we can point straight at the input buffer instead of copying.
-  const size_t align = 64;
-  auto align_up = [&](size_t v) { return (v + align - 1) & ~(align - 1); };
   const bool need_q_trans = (Sq > 1);
   const bool need_kv_trans = (Skv > 1);
   const bool need_o_trans = (Sq > 1);
-  const size_t sz_q_bnsh = need_q_trans ? align_up(B * N * Sq * H * 2) : 0;
-  const size_t sz_k_bnsh = need_kv_trans ? align_up(B * N * Skv * H * 2) : 0;
-  const size_t sz_v_bnsh = need_kv_trans ? align_up(B * N * Skv * H * 2) : 0;
-  const size_t sz_s_f32 = align_up(B * N * Sq * Skv * 4);
-  const size_t sz_p_f16 = align_up(B * N * Sq * Skv * 2);
-  const size_t sz_o_bnsh = need_o_trans ? align_up(B * N * Sq * H * 2) : 0;
-  const size_t sz_gemm_ws = align_up(kMaxWorkspaceBytes);
-  const size_t total_ws = sz_q_bnsh + sz_k_bnsh + sz_v_bnsh + sz_s_f32 +
-                          sz_p_f16 + sz_o_bnsh + sz_gemm_ws;
+  const size_t sz_q_bnsh = need_q_trans ? B * N * Sq * H * 2 : 0;
+  const size_t sz_k_bnsh = need_kv_trans ? B * N * Skv * H * 2 : 0;
+  const size_t sz_v_bnsh = need_kv_trans ? B * N * Skv * H * 2 : 0;
+  const size_t sz_s_f32 = B * N * Sq * Skv * 4;
+  const size_t sz_p_f16 = B * N * Sq * Skv * 2;
+  const size_t sz_o_bnsh = need_o_trans ? B * N * Sq * H * 2 : 0;
+  const size_t sz_gemm_ws = kMaxWorkspaceBytes;
 
-  if (hipdnn_ep_state_ensure_workspace(state, total_ws) != 0) {
-    fprintf(stderr,
-            "[multi_head_attention] ERROR: failed to ensure workspace of "
-            "%zu bytes\n",
-            total_ws);
-    return -1;
-  }
-  char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
-  if (!ws) {
-    fprintf(stderr,
-            "[multi_head_attention] ERROR: workspace pointer is null after "
-            "ensure_workspace\n");
-    return -1;
-  }
-  size_t off = 0;
-  void *d_Qbnsh = nullptr;
-  void *d_Kbnsh = nullptr;
-  void *d_Vbnsh = nullptr;
-  void *d_O_bnsh = nullptr;
-  if (sz_q_bnsh) {
-    d_Qbnsh = ws + off;
-    off += sz_q_bnsh;
-  } else {
-    d_Qbnsh = query;
-  }
-  if (sz_k_bnsh) {
-    d_Kbnsh = ws + off;
-    off += sz_k_bnsh;
-  } else {
-    d_Kbnsh = key;
-  }
-  if (sz_v_bnsh) {
-    d_Vbnsh = ws + off;
-    off += sz_v_bnsh;
-  } else {
-    d_Vbnsh = value;
-  }
-  void *d_S_f32 = ws + off;
-  off += sz_s_f32;
-  void *d_P_f16 = ws + off;
-  off += sz_p_f16;
-  if (sz_o_bnsh) {
-    d_O_bnsh = ws + off;
-    off += sz_o_bnsh;
-  } else {
-    d_O_bnsh = output;
-  }
-  void *gemm_ws = ws + off;
+  hipdnn_ep_scratch_restore(state, 0);
+  hipdnn_ep_scratch_reserve(state, sz_q_bnsh + sz_k_bnsh + sz_v_bnsh +
+                                       sz_s_f32 + sz_p_f16 + sz_o_bnsh +
+                                       sz_gemm_ws + 7 * 64);
+  void *d_Qbnsh = sz_q_bnsh ? hipdnn_ep_scratch_alloc(state, sz_q_bnsh) : query;
+  void *d_Kbnsh = sz_k_bnsh ? hipdnn_ep_scratch_alloc(state, sz_k_bnsh) : key;
+  void *d_Vbnsh = sz_v_bnsh ? hipdnn_ep_scratch_alloc(state, sz_v_bnsh) : value;
+  void *d_S_f32 = hipdnn_ep_scratch_alloc(state, sz_s_f32);
+  void *d_P_f16 = hipdnn_ep_scratch_alloc(state, sz_p_f16);
+  void *d_O_bnsh =
+      sz_o_bnsh ? hipdnn_ep_scratch_alloc(state, sz_o_bnsh) : output;
+  void *gemm_ws = hipdnn_ep_scratch_alloc(state, sz_gemm_ws);
   const size_t gemm_ws_bytes = sz_gemm_ws;
+  if (!d_S_f32 || !d_P_f16 || !gemm_ws || (sz_q_bnsh && !d_Qbnsh) ||
+      (sz_k_bnsh && !d_Kbnsh) || (sz_v_bnsh && !d_Vbnsh) ||
+      (sz_o_bnsh && !d_O_bnsh)) {
+    fprintf(stderr, "[multi_head_attention] ERROR: scratch_alloc failed\n");
+    return -1;
+  }
 
   RUNTIME_DEBUG_LOG(
-      "[multi_head_attention] workspace=%zu bytes (q=%zu k=%zu v=%zu "
+      "[multi_head_attention] scratch (q=%zu k=%zu v=%zu "
       "s=%zu p=%zu o=%zu gemm=%zu); need_q_trans=%d need_kv_trans=%d "
       "need_o_trans=%d\n",
-      total_ws, sz_q_bnsh, sz_k_bnsh, sz_v_bnsh, sz_s_f32, sz_p_f16, sz_o_bnsh,
+      sz_q_bnsh, sz_k_bnsh, sz_v_bnsh, sz_s_f32, sz_p_f16, sz_o_bnsh,
       sz_gemm_ws, (int)need_q_trans, (int)need_kv_trans, (int)need_o_trans);
 
   int result = 0;

@@ -410,21 +410,22 @@ int wrap_causal_conv_with_state(RuntimeState *state, int op_state_slot,
     }
   }
 
-  const size_t total_ws = virtual_size + sigmoid_size + conv_workspace_size;
-  if (total_ws > 0 && hipdnn_ep_state_ensure_workspace(state, total_ws) != 0) {
-    fprintf(stderr,
-            "wrap_causal_conv_with_state: ensure_workspace(%zu) failed\n",
-            total_ws);
-    return -1;
-  }
-  char *ws_base = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
-  void *virtual_buf = ws_base;
-  void *sigmoid_buf =
-      (activation == 1) ? static_cast<void *>(ws_base + virtual_size) : nullptr;
+  hipdnn_ep_scratch_restore(state, 0);
+  hipdnn_ep_scratch_reserve(state, virtual_size + sigmoid_size +
+                                       conv_workspace_size + 3 * 64);
+  void *virtual_buf = hipdnn_ep_scratch_alloc(state, virtual_size);
+  void *sigmoid_buf = (activation == 1)
+                          ? hipdnn_ep_scratch_alloc(state, sigmoid_size)
+                          : nullptr;
   void *conv_workspace =
       (conv_workspace_size > 0)
-          ? static_cast<void *>(ws_base + virtual_size + sigmoid_size)
+          ? hipdnn_ep_scratch_alloc(state, conv_workspace_size)
           : nullptr;
+  if (!virtual_buf || (activation == 1 && !sigmoid_buf) ||
+      (conv_workspace_size > 0 && !conv_workspace)) {
+    fprintf(stderr, "wrap_causal_conv_with_state: scratch_alloc failed\n");
+    return -1;
+  }
 
   // ---- Build the virtual buffer using *pitched* 2D copies, replacing the
   // O(B*C) host launch loops. Each plane (b,c) occupies one row of the

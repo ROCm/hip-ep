@@ -693,18 +693,17 @@ int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
   }
 
   {
-    if (cached.workspace_size > 0) {
-      if (hipdnn_ep_state_ensure_workspace(state, cached.workspace_size) != 0) {
+    hipdnn_ep_scratch_restore(state, 0);
+    void *ws_ptr = nullptr;
+    size_t ws_size = 0;
+    if (!cached.use_default_algo && cached.workspace_size > 0) {
+      ws_ptr = hipdnn_ep_scratch_alloc(state, cached.workspace_size);
+      if (!ws_ptr) {
         result = -1;
         goto cleanup;
       }
+      ws_size = cached.workspace_size;
     }
-
-    void *ws_ptr = cached.use_default_algo
-                       ? nullptr
-                       : hipdnn_ep_state_get_workspace(state);
-    size_t ws_size =
-        cached.use_default_algo ? 0 : hipdnn_ep_state_get_workspace_size(state);
     hipblasLtMatmulAlgo_t *algo_ptr =
         cached.use_default_algo
             ? nullptr

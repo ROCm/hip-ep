@@ -38,6 +38,9 @@ enum GraphExecError {
 // vector types. All handle fields (hipStream_t, miopenHandle_t,
 // hipblasLtHandle_t) are pointer types, so void* is binary-compatible on the
 // same ABI.
+//
+// IMPORTANT: this must match the field order and sizes of RuntimeState exactly.
+// When RuntimeState's layout changes, update this mirror.
 struct RuntimeStateLayout {
   void *stream;
   void *miopen_handle;
@@ -45,12 +48,12 @@ struct RuntimeStateLayout {
   void *gpu_constants_blob;
   void **gpu_constants;
   size_t num_constants;
-  void *pool_base;
-  size_t pool_size;
-  size_t *buffer_offsets;
-  size_t num_buffers;
-  void *workspace;
-  size_t workspace_size;
+  void *mm;                // MemoryManager* (opaque here)
+  void *output_alloc_self; // hipdnn_output_allocator_t.self
+  void *output_alloc_fn;   // hipdnn_output_allocator_t.allocate
+  void *zp_unpack_cache;
+  void *op_profile;
+  void *device_error_flag; // int* (pointer-sized)
   void *hipdnn_handle;
   void *hipdnn_graph_registry;
 };

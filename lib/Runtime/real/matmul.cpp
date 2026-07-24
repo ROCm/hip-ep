@@ -492,8 +492,9 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
     return -1;
   }
 
-  // Ensure workspace is large enough for auto-tune candidates (if pending)
-  // or the selected algorithm.
+  // Workspace for auto-tune candidates (first call) or the tuned algo.
+  // Uses ensure_workspace (not scratch_alloc) because the autotune loop
+  // needs the raw buffer + its full size for hipBLASLt benchmarking.
   size_t needed_ws =
       cached->tuned ? cached->workspace_size : cached->max_candidate_workspace;
   if (needed_ws > 0) {
