@@ -111,15 +111,34 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   int64_t k_blocks_fc2 = (inter_size + block_size - 1) / block_size;
   int64_t blob_size_fc2 = block_size / 2;
 
-  // The grouped-vs-host-loop prefill decision is made AFTER bucket_tokens (it
-  // depends on the actual per-expert row distribution, not on num_experts), so
-  // the scratch pool must reserve BOTH prefill paths' buffers up front. The
-  // grouped adds (pf_act/pf_accum/active_eids) are tens of MB on top of the
-  // host-loop buffers, so the peak stays ~= the host-loop footprint (which is
-  // the pre-existing `main` behavior -> no memory regression). Decode buffers
-  // stay gated on is_decode. See the post-bucket gate near the dispatch below.
+  // The grouped-vs-host-loop prefill decision has two parts: a shape/scale test
+  // knowable up front (grouped_shape_ok && grouped_scale_ok) and a fill test
+  // that needs the post-bucket per-expert row distribution (fill_ok). Only the
+  // grouped path uses pf_act/pf_accum/active_eids, so we reserve those buffers
+  // ONLY when grouped could actually run (the pre-bucket predicate below).
+  // Below the token threshold (short prompts, VLM image prefills) and for
+  // non-WMMA shapes the grouped-only scratch is skipped entirely, so the pool
+  // high-water matches the host-loop/main footprint and -- since the pool never
+  // shrinks -- is not carried into the decode phase. This is realloc-safe: the
+  // predicate is computed before bucket_tokens writes into the pool, so the
+  // size is final before the single ensure() below (growing after bucketing
+  // would realloc and drop the bucketed data). If the shape/scale test passes
+  // but fill_ok later fails, pf_* stay reserved-but-unused (rare: tokens >=
+  // threshold yet experts don't fill the WMMA tile). Decode buffers stay gated
+  // on is_decode.
   const bool is_decode = (num_tokens == 1);
   const bool is_prefill = !is_decode;
+  // Pre-bucket portion of the grouped-WMMA prefill gate (see the post-bucket
+  // gate near the dispatch for fill_ok). Kept as the single source of truth for
+  // both the scratch reservation here and the dispatch decision below.
+  const bool grouped_shape_ok =
+      elem_size == 2 && expert_weight_bits == 4 && block_size > 0 &&
+      (hidden_size % 64 == 0) && (inter_size % 64 == 0) &&
+      (num_experts >= hipdnn_ep_qmoe_grouped_min_experts());
+  const bool grouped_scale_ok =
+      num_tokens >= hipdnn_ep_qmoe_grouped_min_tokens();
+  const bool grouped_possible =
+      is_prefill && grouped_shape_ok && grouped_scale_ok;
 
   // Per-state grow-on-demand scratch in place of 8 hipMalloc/8 hipFree per
   // call. Sub-buffers are 64-byte aligned (matches GPU pool alignment, gives
@@ -198,14 +217,15 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   // intermediates are gone.
   int64_t pf_pairs = num_tokens * k;
   size_t sz_pf_act =
-      is_prefill ? align_up_64(pf_pairs * inter_size * elem_size) : 0;
+      grouped_possible ? align_up_64(pf_pairs * inter_size * elem_size) : 0;
   size_t sz_pf_accum =
-      is_prefill ? align_up_64(num_tokens * hidden_size * sizeof(float)) : 0;
+      grouped_possible ? align_up_64(num_tokens * hidden_size * sizeof(float))
+                       : 0;
   // FC1 gathers its rows straight from `input` and applies SwiGLU in-kernel,
   // writing act_out (pf_act) directly, so neither the [P, hidden] a_all nor the
   // [P, 2*inter] fc1_out buffer is materialized any more.
   size_t sz_active_eids =
-      is_prefill ? align_up_64(num_experts * sizeof(int32_t)) : 0;
+      grouped_possible ? align_up_64(num_experts * sizeof(int32_t)) : 0;
   size_t off_pf_act = off_a_scale_mid + sz_a_scale_mid;
   size_t off_pf_accum = off_pf_act + sz_pf_act;
   size_t off_active_eids = off_pf_accum + sz_pf_accum;
@@ -373,22 +393,23 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     const int64_t total_rows = num_tokens * k; // routed (token,expert) pairs
     const int dense_pct =
         total_rows > 0 ? static_cast<int>((dense_rows * 100) / total_rows) : 0;
-    // Shape must be WMMA-serviceable (fp16 int4, hidden/inter multiples of the
-    // 64-row tile). num_experts >= MIN_EXPERTS is retained as a hard
-    // override/off-switch (set it very high to force the host loop for A/B).
-    const bool shape_ok = elem_size == 2 && expert_weight_bits == 4 &&
-                          block_size > 0 && (hidden_size % 64 == 0) &&
-                          (inter_size % 64 == 0) &&
-                          (num_experts >= hipdnn_ep_qmoe_grouped_min_experts());
+    // Shape/scale portion of the gate was computed up front (grouped_shape_ok,
+    // grouped_scale_ok) as the single source of truth used to size the
+    // grouped-only scratch (pf_*). Only the fill test needs h_counts. Reusing
+    // the pre-bucket predicates guarantees the scratch reservation and the
+    // dispatch decision can never disagree (pf_* are always sized when this can
+    // pick grouped). num_experts >= MIN_EXPERTS (inside grouped_shape_ok) is
+    // retained as a hard override/off-switch (set it very high to force the
+    // host loop for A/B).
     const bool fill_ok = num_active >= hipdnn_ep_qmoe_grouped_min_active() &&
                          dense_pct >= hipdnn_ep_qmoe_grouped_min_dense_pct();
-    // Absolute work-scale gate: the dense-fraction test above is scale-free, so
-    // it admits grouped on short prefills (e.g. VLM image prefill ~1.8k tokens)
-    // where grouped's per-expert launch overhead is not amortized and it loses
-    // to the host loop (+5-6% TTFT) with high run-to-run variance. Require a
-    // minimum prefill length; below it, fall back to the host loop (= main).
-    const bool scale_ok = num_tokens >= hipdnn_ep_qmoe_grouped_min_tokens();
-    const bool use_grouped_prefill = shape_ok && fill_ok && scale_ok;
+    // grouped_scale_ok (num_tokens >= MIN_TOKENS) is the absolute work-scale
+    // gate: the dense-fraction test is scale-free, so it would otherwise admit
+    // grouped on short prefills (e.g. VLM image prefill ~1.8k tokens) where the
+    // per-expert launch overhead is not amortized and grouped loses to the host
+    // loop; below the threshold we fall back to the host loop (= main).
+    const bool use_grouped_prefill =
+        grouped_shape_ok && grouped_scale_ok && fill_ok;
     RUNTIME_DEBUG_LOG(
         "[REAL] wrap_qmoe: prefill gate active=%d/%lld max_count=%d "
         "dense_pct=%d num_tokens=%lld (min_active=%d min_dense_pct=%d "
