@@ -697,7 +697,7 @@ extern "C" int hip_linear_attention_decode(
 static constexpr int LA_CHUNK         = 32;   // tokens per chunk
 static constexpr int LA_PREFILL_THREADS = 256;
 
-template <typename T>
+template <typename T, int CHUNK>
 __global__ void linear_attention_prefill_chunked_kernel(
     const T* __restrict__ query,
     const T* __restrict__ key,
@@ -707,11 +707,23 @@ __global__ void linear_attention_prefill_chunked_kernel(
     T* __restrict__ state,        // [B, Hkv, dk, dv], pre-initialized
     T* __restrict__ output,       // [B, seq_len, Hout*dv]
     int seq_len, int Hq, int Hkv, int n_k, int dk, int dv,
-    float scale, int beta_per_head)
+    float scale, int beta_per_head, int G)
 {
-    const int bg = blockIdx.x;
-    const int b  = bg / Hkv;
-    const int g  = bg % Hkv;
+    // dv-split: grid = B*Hkv*G, ordered bg = (b*Hkv + g)*G + split.  Each block
+    // owns the contiguous output-column stripe [j0, j0+dvw) of the dv (value)
+    // axis.  Columns are fully independent across splits -- the recurrent state
+    // S[:,j], the intra-chunk U[:,j] and the output O[:,j] all factor per-j, so
+    // no cross-block communication is required.  The per-head [C,C] coupling
+    // matrices T/P (functions of q.k / k.k over dk, independent of j) and the K
+    // tile are recomputed by every split (cheap C*C*dk redundancy) in exchange
+    // for G-fold more resident workgroups + a smaller per-block LDS footprint.
+    const int bg    = blockIdx.x;
+    const int split = bg % G;
+    const int bh    = bg / G;
+    const int b     = bh / Hkv;
+    const int g     = bh % Hkv;
+    const int dvw   = dv / G;              // stripe width (host guarantees dv%G==0)
+    const int j0    = split * dvw;         // first global dv column owned here
     const int tid = threadIdx.x;
     const int nthreads = blockDim.x;
 
@@ -733,17 +745,17 @@ __global__ void linear_attention_prefill_chunked_kernel(
     T* S = state + b * state_bs + (int64_t)g * dk * dv;        // [dk,dv]
 
     extern __shared__ float smem[];
-    float* Ksm = smem;                              // [LA_CHUNK*dk]
-    float* Usm = Ksm + LA_CHUNK * dk;               // [LA_CHUNK*dv] : B -> U
-    float* Tm  = Usm + LA_CHUNK * dv;               // [LA_CHUNK*LA_CHUNK]
-    float* Pm  = Tm + LA_CHUNK * LA_CHUNK;          // [LA_CHUNK*LA_CHUNK]
-    float* Asm = Pm + LA_CHUNK * LA_CHUNK;          // [LA_CHUNK]
-    float* clog = Asm + LA_CHUNK;                   // [LA_CHUNK]
-    float* bsm = clog + LA_CHUNK;                   // [LA_CHUNK]
-    float* rlast = bsm + LA_CHUNK;                  // [LA_CHUNK] a_last/A_s
+    float* Ksm = smem;                              // [CHUNK*dk]
+    float* Usm = Ksm + CHUNK * dk;                  // [CHUNK*dvw] : B -> U
+    float* Tm  = Usm + CHUNK * dvw;                 // [CHUNK*CHUNK]
+    float* Pm  = Tm + CHUNK * CHUNK;                // [CHUNK*CHUNK]
+    float* Asm = Pm + CHUNK * CHUNK;                // [CHUNK]
+    float* clog = Asm + CHUNK;                      // [CHUNK]
+    float* bsm = clog + CHUNK;                      // [CHUNK]
+    float* rlast = bsm + CHUNK;                     // [CHUNK] a_last/A_s
 
-    for (int c0 = 0; c0 < seq_len; c0 += LA_CHUNK) {
-        const int Ceff = min(LA_CHUNK, seq_len - c0);
+    for (int c0 = 0; c0 < seq_len; c0 += CHUNK) {
+        const int Ceff = min(CHUNK, seq_len - c0);
 
         // load K tile, beta; build cumlog/A (single-thread prefix scan)
         for (int idx = tid; idx < Ceff * dk; idx += nthreads) {
@@ -789,8 +801,9 @@ __global__ void linear_attention_prefill_chunked_kernel(
         // Register-blocked over t: read each S[i,j] from GLOBAL once and fold it
         // into all Ceff partial sums sk[t], instead of re-reading the whole S
         // column once per t (LA_CHUNK x fewer global S loads).
-        for (int j = tid; j < dv; j += nthreads) {
-            float sk[LA_CHUNK];
+        for (int jj = tid; jj < dvw; jj += nthreads) {
+            const int j = j0 + jj;
+            float sk[CHUNK];
             for (int t = 0; t < Ceff; t++)
                 sk[t] = 0.f;
             for (int i = 0; i < dk; i++) {
@@ -802,7 +815,7 @@ __global__ void linear_attention_prefill_chunked_kernel(
                 float vtj = to_float(
                     value[b * v_bs + (int64_t)(c0 + t) * Hkv * dv +
                           (int64_t)g * dv + j]);
-                Usm[t * dv + j] = bsm[t] * vtj - bsm[t] * Asm[t] * sk[t];
+                Usm[t * dvw + jj] = bsm[t] * vtj - bsm[t] * Asm[t] * sk[t];
             }
         }
 
@@ -831,11 +844,11 @@ __global__ void linear_attention_prefill_chunked_kernel(
 
         // forward substitution: U[t] = B[t] - sum_{s<t} T[t,s] U[s] (serial t)
         for (int t = 1; t < Ceff; t++) {
-            for (int j = tid; j < dv; j += nthreads) {
-                float acc = Usm[t * dv + j];
+            for (int jj = tid; jj < dvw; jj += nthreads) {
+                float acc = Usm[t * dvw + jj];
                 for (int s = 0; s < t; s++)
-                    acc -= Tm[t * Ceff + s] * Usm[s * dv + j];
-                Usm[t * dv + j] = acc;
+                    acc -= Tm[t * Ceff + s] * Usm[s * dvw + jj];
+                Usm[t * dvw + jj] = acc;
             }
             __syncthreads();
         }
@@ -845,8 +858,9 @@ __global__ void linear_attention_prefill_chunked_kernel(
         // Register-blocked over t: read each S0[i,j] from GLOBAL once and fold
         // it into all Ceff inter-chunk partial sums qs[t] (the (A.*Q) @ S0 term),
         // mirroring the phase-2 blocking (LA_CHUNK x fewer global S0 loads).
-        for (int j = tid; j < dv; j += nthreads) {
-            float qs[LA_CHUNK];
+        for (int jj = tid; jj < dvw; jj += nthreads) {
+            const int j = j0 + jj;
+            float qs[CHUNK];
             for (int t = 0; t < Ceff; t++)
                 qs[t] = 0.f;
             for (int i = 0; i < dk; i++) {
@@ -861,7 +875,7 @@ __global__ void linear_attention_prefill_chunked_kernel(
                 float inter = Asm[t] * qs[t];
                 float intra = 0.f;
                 for (int s = 0; s <= t; s++)
-                    intra += Pm[t * Ceff + s] * Usm[s * dv + j];
+                    intra += Pm[t * Ceff + s] * Usm[s * dvw + jj];
                 output[b * out_bs + (int64_t)(c0 + t) * Hout * dv +
                        (int64_t)h_out * dv + j] =
                     from_float<T>(scale * (inter + intra));
@@ -870,11 +884,12 @@ __global__ void linear_attention_prefill_chunked_kernel(
         __syncthreads();   // all reads of S0 done before the update below
 
         // S = a_last*S + Ktilde^T U,  Ktilde[s][i] = (a_last/A_s) Ksm[s][i]
-        for (int idx = tid; idx < dk * dv; idx += nthreads) {
-            int i = idx / dv, j = idx % dv;
+        for (int idx = tid; idx < dk * dvw; idx += nthreads) {
+            int i = idx / dvw, jj = idx % dvw;
+            int j = j0 + jj;
             float acc = a_last * to_float(S[i * dv + j]);
             for (int s = 0; s < Ceff; s++)
-                acc += rlast[s] * Ksm[s * dk + i] * Usm[s * dv + j];
+                acc += rlast[s] * Ksm[s * dk + i] * Usm[s * dvw + jj];
             S[i * dv + j] = from_float<T>(acc);
         }
         __syncthreads();   // S update complete before next chunk reads it
@@ -916,63 +931,105 @@ extern "C" int hip_linear_attention_prefill_chunked(
     const int dk_i = static_cast<int>(dk);
     const int dv_i = static_cast<int>(dv);
 
-    // LDS budget: Ksm + Usm + Tm + Pm + 4 vectors of length LA_CHUNK
-    // (Asm, clog, bsm, rlast).
-    const size_t smem_bytes =
-        static_cast<size_t>(LA_CHUNK * dk_i + LA_CHUNK * dv_i +
-                            2 * LA_CHUNK * LA_CHUNK + 4 * LA_CHUNK) *
-        sizeof(float);
-    if (smem_bytes > 64 * 1024) return 1;           // too big -> fall back
+    // --- Tunables (env). --------------------------------------------------
+    // Defaults were chosen from a measured sweep on the Qwen3.5 gated-delta
+    // prefill shape (B=1, Hkv=32, dk=dv=128) on gfx1151:
+    //   * chunk=16 is the dominant lever: it cuts the per-chunk O(C^2*dk) T/P
+    //     matmuls (C^2 halves overall vs chunk=32), the serial tri-solve
+    //     length, and the per-thread sk[C]/qs[C] register arrays -> ~2.4x
+    //     faster kernel, ~16-17% lower end-to-end TTFT. (chunk=32 leaves it
+    //     ~2.4x slower; chunk=8 over-splits; chunk>=24 regresses to ~chunk=32.)
+    //   * G=2 (dv-split) then adds a further ~2-4%: grid B*Hkv=32 underfills
+    //     the ~40-CU GPU, and splitting the (independent) dv columns into 2
+    //     workgroups per head fills it. Larger G costs more than it gains
+    //     (T/P is recomputed per split). Only auto-enabled for small grids so
+    //     shapes that already saturate the GPU aren't burdened with the
+    //     redundant T/P recompute.
+    //   HIPDNN_EP_LA_PREFILL_G:     override dv-split factor (>=1). Must divide
+    //       dv; else clamped to 1. (Unset => auto, see below.)
+    //   HIPDNN_EP_LA_PREFILL_CHUNK: override tokens per chunk
+    //       (8/16/24/32/48/64; default 16).
+    static const int la_G_env = [] {
+        const char* e = std::getenv("HIPDNN_EP_LA_PREFILL_G");
+        return e ? atoi(e) : 0;                  // 0 => auto
+    }();
+    static const int la_chunk = [] {
+        const char* e = std::getenv("HIPDNN_EP_LA_PREFILL_CHUNK");
+        int v = e ? atoi(e) : 16;                // measured optimum
+        return (v == 8 || v == 16 || v == 24 || v == 32 || v == 48 || v == 64)
+                   ? v : 16;
+    }();
+
+    const int base_grid = static_cast<int>(B * Hkv);
+    int G;
+    if (la_G_env >= 1)                            // explicit override
+        G = (dv_i % la_G_env == 0) ? la_G_env : 1;
+    else                                          // auto: split only small grids
+        G = (dv_i % 2 == 0 && base_grid <= 48) ? 2 : 1;
+    int dvw = dv_i / G;
+
+    // LDS budget: Ksm[chunk*dk] + Usm[chunk*dvw] + Tm+Pm[2*chunk*chunk] +
+    // 4 vectors of length chunk (Asm, clog, bsm, rlast).
+    auto smem_of = [&](int c) -> size_t {
+        return static_cast<size_t>(c * dk_i + c * dvw + 2 * c * c + 4 * c) *
+               sizeof(float);
+    };
+    size_t smem_bytes = smem_of(la_chunk);
+    if (smem_bytes > 64 * 1024) {                   // stripe still too big?
+        G = 1;                                       // fall back to un-split
+        dvw = dv_i;
+        smem_bytes = smem_of(la_chunk);
+        if (smem_bytes > 64 * 1024) return 1;        // give up -> per-token loop
+    }
 
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);
-    const int grid  = static_cast<int>(B * Hkv);
+    const int grid  = static_cast<int>(B * Hkv) * G;
     const int block = LA_PREFILL_THREADS;
     const int beta_per_head_i = beta_per_head ? 1 : 0;
 
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_linear_attention_prefill_chunked: B=%lld "
         "seq_len=%lld Hq=%lld Hkv=%lld Nk=%lld dk=%d dv=%d scale=%.6f "
-        "chunk=%d grid=%d block=%d smem=%zu\n",
+        "chunk=%d G=%d dvw=%d grid=%d block=%d smem=%zu\n",
         (long long)B, (long long)seq_len, (long long)Hq, (long long)Hkv,
-        (long long)Nk, dk_i, dv_i, (double)scale, LA_CHUNK, grid, block,
-        smem_bytes);
+        (long long)Nk, dk_i, dv_i, (double)scale, la_chunk, G, dvw, grid,
+        block, smem_bytes);
+
+#define LA_PREFILL_LAUNCH(TYPE, CHUNK)                                        \
+    hipLaunchKernelGGL(                                                       \
+        (linear_attention_prefill_chunked_kernel<TYPE, CHUNK>),              \
+        dim3(grid), dim3(block), smem_bytes, hip_stream,                     \
+        static_cast<const TYPE*>(query), static_cast<const TYPE*>(key),      \
+        static_cast<const TYPE*>(value), static_cast<const TYPE*>(decay),    \
+        static_cast<const TYPE*>(beta), static_cast<TYPE*>(state),           \
+        static_cast<TYPE*>(output), static_cast<int>(seq_len),              \
+        static_cast<int>(Hq), static_cast<int>(Hkv), static_cast<int>(Nk),   \
+        dk_i, dv_i, scale, beta_per_head_i, G)
+
+#define LA_PREFILL_DISPATCH(TYPE)                                             \
+    do {                                                                     \
+        switch (la_chunk) {                                                  \
+        case 8:  LA_PREFILL_LAUNCH(TYPE, 8);  break;                          \
+        case 16: LA_PREFILL_LAUNCH(TYPE, 16); break;                         \
+        case 24: LA_PREFILL_LAUNCH(TYPE, 24); break;                         \
+        case 48: LA_PREFILL_LAUNCH(TYPE, 48); break;                         \
+        case 64: LA_PREFILL_LAUNCH(TYPE, 64); break;                         \
+        default: LA_PREFILL_LAUNCH(TYPE, 32); break;                         \
+        }                                                                    \
+    } while (0)
 
     if (type == 0) {
-        hipLaunchKernelGGL(
-            linear_attention_prefill_chunked_kernel<float>,
-            dim3(grid), dim3(block), smem_bytes, hip_stream,
-            static_cast<const float*>(query), static_cast<const float*>(key),
-            static_cast<const float*>(value), static_cast<const float*>(decay),
-            static_cast<const float*>(beta), static_cast<float*>(state),
-            static_cast<float*>(output), static_cast<int>(seq_len),
-            static_cast<int>(Hq), static_cast<int>(Hkv), static_cast<int>(Nk),
-            dk_i, dv_i, scale, beta_per_head_i);
+        LA_PREFILL_DISPATCH(float);
     } else if (type == 1) {
-        hipLaunchKernelGGL(
-            linear_attention_prefill_chunked_kernel<__half>,
-            dim3(grid), dim3(block), smem_bytes, hip_stream,
-            static_cast<const __half*>(query), static_cast<const __half*>(key),
-            static_cast<const __half*>(value), static_cast<const __half*>(decay),
-            static_cast<const __half*>(beta), static_cast<__half*>(state),
-            static_cast<__half*>(output), static_cast<int>(seq_len),
-            static_cast<int>(Hq), static_cast<int>(Hkv), static_cast<int>(Nk),
-            dk_i, dv_i, scale, beta_per_head_i);
+        LA_PREFILL_DISPATCH(__half);
     } else if (type == 2) {
-        hipLaunchKernelGGL(
-            linear_attention_prefill_chunked_kernel<__hip_bfloat16>,
-            dim3(grid), dim3(block), smem_bytes, hip_stream,
-            static_cast<const __hip_bfloat16*>(query),
-            static_cast<const __hip_bfloat16*>(key),
-            static_cast<const __hip_bfloat16*>(value),
-            static_cast<const __hip_bfloat16*>(decay),
-            static_cast<const __hip_bfloat16*>(beta),
-            static_cast<__hip_bfloat16*>(state),
-            static_cast<__hip_bfloat16*>(output), static_cast<int>(seq_len),
-            static_cast<int>(Hq), static_cast<int>(Hkv), static_cast<int>(Nk),
-            dk_i, dv_i, scale, beta_per_head_i);
+        LA_PREFILL_DISPATCH(__hip_bfloat16);
     } else {
         return 1;
     }
+
+#undef LA_PREFILL_DISPATCH
+#undef LA_PREFILL_LAUNCH
 
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
