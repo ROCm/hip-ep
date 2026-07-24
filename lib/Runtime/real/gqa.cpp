@@ -30,7 +30,13 @@
 //   * The additive attention bias (onnx.Attention attn_mask) IS supported, but
 //     only by the decomposed path (Step 8b adds it; a causal op then masks the
 //     triangle in Step 9), so its presence forces the decomposed path.
-//   * Inputs NEITHER path supports (KV-cache quantization, position ids,
+//   * Symmetric per-channel INT8 KV cache (k/v_quant_type=PER_CHANNEL,
+//     kv_cache_bit_width=8, static fp32 k/v_scale [G,d]) IS supported on the
+//     fused path: new tokens are quantize-appended into the int8 cache; decode
+//     reads int8 directly (bandwidth win), prefill dequantizes the cache
+//     to fp16 once and reuses the tuned fp16 prefill (compute-bound ->
+//     ~parity).
+//   * Inputs NEITHER path supports (other KV quantization, position ids,
 //     qk_output) are rejected up front.
 //===----------------------------------------------------------------------===//
 
@@ -248,6 +254,40 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
   return 0;
 }
 
+// INT8 KV-cache append: quantizes the incoming fp16 K/V (post-RoPE for K) with
+// the static per-channel scale and writes them into the symmetric-INT8 present
+// cache. Mirrors update_kv_cache's in-place-append vs separate-buffer-concat
+// choice (causal GQA only -- no no_causal path on the fused route).
+static int update_kv_cache_i8(hipStream_t stream, const void *past_key,
+                              const void *past_value, const void *new_key,
+                              const void *new_value, void *present_key,
+                              void *present_value, const void *k_scale,
+                              const void *v_scale, int B, int past_len, int sq,
+                              int G, int d, int past_buf_seq, int present_seq,
+                              const void *seqlens_k_ptr) {
+  if (past_key && past_len > 0 && past_key != present_key) {
+    if (hip_gqa_kv_cache_concat_quant_i8(stream, past_key, new_key, present_key,
+                                         k_scale, B, past_len, sq, G, d,
+                                         past_buf_seq, present_seq) != 0)
+      return -1;
+    if (hip_gqa_kv_cache_concat_quant_i8(stream, past_value, new_value,
+                                         present_value, v_scale, B, past_len,
+                                         sq, G, d, past_buf_seq,
+                                         present_seq) != 0)
+      return -1;
+  } else {
+    if (hip_gqa_kv_cache_append_quant_i8(stream, new_key, present_key, k_scale,
+                                         B, sq, G, d, present_seq, past_len,
+                                         seqlens_k_ptr) != 0)
+      return -1;
+    if (hip_gqa_kv_cache_append_quant_i8(stream, new_value, present_value,
+                                         v_scale, B, sq, G, d, present_seq,
+                                         past_len, seqlens_k_ptr) != 0)
+      return -1;
+  }
+  return 0;
+}
+
 //===----------------------------------------------------------------------===//
 // Fused-only forward: fp16, causal, GQA. No hipBLASLt, no decomposed fallback.
 //===----------------------------------------------------------------------===//
@@ -260,7 +300,9 @@ static int gqa_forward_fused(
     const void *past_value, const void *seqlens_k_ptr, const void *cos_cache,
     const void *sin_cache, void *output, void *present_key, void *present_value,
     int64_t B, int64_t sq, int64_t skv, int64_t past_buf_seq, int64_t H,
-    int64_t G, int64_t d, float scale, int64_t do_rotary) {
+    int64_t G, int64_t d, float scale, int64_t do_rotary,
+    const void *k_scale = nullptr, const void *v_scale = nullptr,
+    bool kv_i8 = false) {
 
   const int64_t present_seq = skv; // present_key buffer stride (may be max_seq)
   const size_t elem_sz = 2;        // fp16 only on the fused path
@@ -388,31 +430,58 @@ static int gqa_forward_fused(
       kSrc = d_Kroped; // V is never RoPE'd.
     }
 
-    if (update_kv_cache(
-            stream, past_key, past_value, kSrc, vSrc, present_key,
-            present_value, static_cast<int>(B), static_cast<int>(past_len),
-            static_cast<int>(sq), static_cast<int>(G), static_cast<int>(d),
-            static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
-            seqlens_k_ptr, static_cast<int>(elem_sz)) != 0)
+    // Append the new token to the KV cache. INT8 cache: quantize-and-append
+    // with the static per-channel scale; fp16 cache: plain append.
+    if (kv_i8) {
+      if (update_kv_cache_i8(stream, past_key, past_value, kSrc, vSrc,
+                             present_key, present_value, k_scale, v_scale,
+                             static_cast<int>(B), static_cast<int>(past_len),
+                             static_cast<int>(sq), static_cast<int>(G),
+                             static_cast<int>(d),
+                             static_cast<int>(past_buf_seq),
+                             static_cast<int>(present_seq), seqlens_k_ptr) != 0)
+        return -1;
+    } else if (update_kv_cache(
+                   stream, past_key, past_value, kSrc, vSrc, present_key,
+                   present_value, static_cast<int>(B),
+                   static_cast<int>(past_len), static_cast<int>(sq),
+                   static_cast<int>(G), static_cast<int>(d),
+                   static_cast<int>(past_buf_seq),
+                   static_cast<int>(present_seq), seqlens_k_ptr,
+                   static_cast<int>(elem_sz)) != 0) {
       return -1;
+    }
 
     {
       char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
       void *partials = ws + off_partials;
-      if (hip_gqa_flash_decode_v2(
-              stream, qSrc, present_key, present_value, output, partials,
-              static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
-              static_cast<int>(d), static_cast<int>(skv),
-              static_cast<int>(present_seq), kFlashDecodeMaxSplits, scale,
-              seqlens_k_ptr,
-              /*local_window_size=*/0, /*head_sink=*/nullptr,
-              /*smooth_softmax=*/0) != 0)
+      // Decode is bandwidth-bound: read the INT8 cache directly (half the DRAM
+      // traffic) via the i8 decode kernel; fp16 cache uses the fp16 kernel.
+      int drc =
+          kv_i8
+              ? hip_gqa_flash_decode_i8_v2(
+                    stream, qSrc, present_key, present_value, k_scale, v_scale,
+                    output, partials, static_cast<int>(B), static_cast<int>(H),
+                    static_cast<int>(G), static_cast<int>(d),
+                    static_cast<int>(skv), static_cast<int>(present_seq),
+                    kFlashDecodeMaxSplits, scale, seqlens_k_ptr,
+                    /*local_window_size=*/0, /*head_sink=*/nullptr,
+                    /*smooth_softmax=*/0)
+              : hip_gqa_flash_decode_v2(
+                    stream, qSrc, present_key, present_value, output, partials,
+                    static_cast<int>(B), static_cast<int>(H),
+                    static_cast<int>(G), static_cast<int>(d),
+                    static_cast<int>(skv), static_cast<int>(present_seq),
+                    kFlashDecodeMaxSplits, scale, seqlens_k_ptr,
+                    /*local_window_size=*/0, /*head_sink=*/nullptr,
+                    /*smooth_softmax=*/0);
+      if (drc != 0)
         return -1;
       RUNTIME_DEBUG_LOG(
-          "[REAL] flash GQA decode: B=%lld skv=%lld H=%lld G=%lld "
+          "[REAL] flash GQA decode (%s): B=%lld skv=%lld H=%lld G=%lld "
           "d=%lld max_splits=%d\n",
-          (long long)B, (long long)skv, (long long)H, (long long)G,
-          (long long)d, kFlashDecodeMaxSplits);
+          kv_i8 ? "int8" : "fp16", (long long)B, (long long)skv, (long long)H,
+          (long long)G, (long long)d, kFlashDecodeMaxSplits);
     }
     return 0;
   }
@@ -476,17 +545,26 @@ static int gqa_forward_fused(
   const void *kSrc = key;
   const void *vSrc = value;
 
-  // Workspace: [split? | rope-temp?]. flash_prefill reads the BNSD present
-  // cache + BSHD roped Q directly, so it needs no extra scratch.
+  // Workspace: [split? | rope-temp? | i8-dequant K/V?]. The fp16 flash_prefill
+  // reads the BNSD present cache + BSHD roped Q directly, so it needs no extra
+  // scratch. For the INT8 cache we additionally dequantize the [0,total_seq)
+  // cache range ONCE into an fp16 BNSD scratch (K and V) and run the tuned fp16
+  // prefill on it -- prefill is compute-bound, so dequantizing per WMMA
+  // fragment (re-done for every query tile) would be pure overhead; a single
+  // dequant pass amortizes to ~parity with fp16.
   const size_t split_bytes =
       packed_qkv ? (Q_full_bytes + K_full_bytes + K_full_bytes) : 0;
   const size_t rope_temp_bytes = need_rope ? (Q_full_bytes + K_full_bytes) : 0;
-  const size_t total_ws_bytes = split_bytes + rope_temp_bytes;
+  // 2 bytes/elem (fp16) x 2 (K and V).
+  const size_t deq_kv_bytes =
+      kv_i8 ? static_cast<size_t>(B) * G * total_seq * d * 2 * 2 : 0;
+  const size_t total_ws_bytes = split_bytes + rope_temp_bytes + deq_kv_bytes;
   if (total_ws_bytes > 0 &&
       hipdnn_ep_state_ensure_workspace(state, total_ws_bytes) != 0)
     return -1;
   const size_t off_split = 0;
   const size_t off_rope = off_split + split_bytes;
+  const size_t off_deq = off_rope + rope_temp_bytes;
 
   if (packed_qkv) {
     char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
@@ -524,27 +602,72 @@ static int gqa_forward_fused(
     kSrc = d_Kroped; // V is never RoPE'd.
   }
 
-  if (present_key && present_value &&
-      update_kv_cache(
-          stream, past_key, past_value, kSrc, vSrc, present_key, present_value,
-          static_cast<int>(B), static_cast<int>(past_len), static_cast<int>(sq),
-          static_cast<int>(G), static_cast<int>(d),
-          static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
-          seqlens_k_ptr, static_cast<int>(elem_sz)) != 0)
-    return -1;
+  if (present_key && present_value) {
+    if (kv_i8) {
+      if (update_kv_cache_i8(stream, past_key, past_value, kSrc, vSrc,
+                             present_key, present_value, k_scale, v_scale,
+                             static_cast<int>(B), static_cast<int>(past_len),
+                             static_cast<int>(sq), static_cast<int>(G),
+                             static_cast<int>(d),
+                             static_cast<int>(past_buf_seq),
+                             static_cast<int>(present_seq), seqlens_k_ptr) != 0)
+        return -1;
+    } else if (update_kv_cache(
+                   stream, past_key, past_value, kSrc, vSrc, present_key,
+                   present_value, static_cast<int>(B),
+                   static_cast<int>(past_len), static_cast<int>(sq),
+                   static_cast<int>(G), static_cast<int>(d),
+                   static_cast<int>(past_buf_seq),
+                   static_cast<int>(present_seq), seqlens_k_ptr,
+                   static_cast<int>(elem_sz)) != 0) {
+      return -1;
+    }
+  }
+
+  // Choose the KV the prefill attends over. fp16 cache: read present directly.
+  // INT8 cache: dequantize [0,total_seq) into a compact fp16 BNSD scratch ONCE
+  // and feed the tuned fp16 prefill (max_seq = total_seq). This attends over
+  // the exact rounded values decode will later read, so prefill/decode stay
+  // numerically consistent, and keeps prefill at ~fp16 speed (no per-fragment
+  // dequant).
+  const void *kAttn = present_key;
+  const void *vAttn = present_value;
+  int attn_max_seq = static_cast<int>(present_seq);
+  if (kv_i8) {
+    char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
+    void *d_Kf16 = ws + off_deq;
+    void *d_Vf16 = ws + off_deq +
+                   static_cast<size_t>(B) * G * total_seq * d * 2;
+    if (hip_gqa_dequant_kv_i8_to_fp16(
+            stream, present_key, d_Kf16, k_scale, static_cast<int>(B),
+            static_cast<int>(total_seq), static_cast<int>(G),
+            static_cast<int>(d), static_cast<int>(present_seq),
+            static_cast<int>(total_seq)) != 0)
+      return -1;
+    if (hip_gqa_dequant_kv_i8_to_fp16(
+            stream, present_value, d_Vf16, v_scale, static_cast<int>(B),
+            static_cast<int>(total_seq), static_cast<int>(G),
+            static_cast<int>(d), static_cast<int>(present_seq),
+            static_cast<int>(total_seq)) != 0)
+      return -1;
+    kAttn = d_Kf16;
+    vAttn = d_Vf16;
+    attn_max_seq = static_cast<int>(total_seq);
+  }
 
   // Single unified entry; v5 (d==64) / v7 (d==128) selection lives in the
   // kernel TU (gqa_kernel.hip).
   int fp_rc = hip_gqa_flash_prefill_v2(
-      stream, qSrc, present_key, present_value, output, static_cast<int>(B),
+      stream, qSrc, kAttn, vAttn, output, static_cast<int>(B),
       static_cast<int>(H), static_cast<int>(G), static_cast<int>(sq),
-      static_cast<int>(total_seq), static_cast<int>(d),
-      static_cast<int>(present_seq), static_cast<int>(past_len), scale);
-  RUNTIME_DEBUG_LOG("[REAL] GQA fused prefill (d=%lld -> v%d): B=%lld sq=%lld "
-                    "total_seq=%lld H=%lld G=%lld past_len=%lld rc=%d\n",
-                    (long long)d, (d == 64 ? 5 : 7), (long long)B,
-                    (long long)sq, (long long)total_seq, (long long)H,
-                    (long long)G, (long long)past_len, fp_rc);
+      static_cast<int>(total_seq), static_cast<int>(d), attn_max_seq,
+      static_cast<int>(past_len), scale);
+  RUNTIME_DEBUG_LOG(
+      "[REAL] GQA fused prefill (%s d=%lld -> v%d): B=%lld sq=%lld "
+      "total_seq=%lld H=%lld G=%lld past_len=%lld rc=%d\n",
+      kv_i8 ? "int8" : "fp16", (long long)d, (d == 64 ? 5 : 7), (long long)B,
+      (long long)sq, (long long)total_seq, (long long)H, (long long)G,
+      (long long)past_len, fp_rc);
   return fp_rc != 0 ? -1 : 0;
 }
 
@@ -1740,6 +1863,73 @@ extern "C" int8_t hipdnn_ep_op_state_construct_gqa(RuntimeState *state,
 }
 
 //===----------------------------------------------------------------------===//
+// KV-cache quantization scheme handling.
+//
+// The quant-type integers below MUST match GqaLowering.cpp's quantTypeToEnum():
+// the lowering converts the hip.gqa string attribute ("NONE"/"PER_TENSOR"/
+// "PER_CHANNEL") into these values before the runtime ABI sees them. Keep the
+// two in sync.
+//===----------------------------------------------------------------------===//
+enum GqaQuantType : int64_t {
+  GQA_QUANT_NONE = 0,
+  GQA_QUANT_PER_TENSOR = 1,
+  GQA_QUANT_PER_CHANNEL = 2,
+};
+
+// Logical storage format of the KV cache the fused path must read/write.
+// This is the single vocabulary the rest of gqa.cpp branches on; adding a new
+// quantized cache (e.g. INT4 per-channel, FP8) means adding an entry here, a
+// branch in classify_kv_cache(), and the matching kernel dispatch downstream --
+// not scattering new `k_quant_type == N` checks through wrap_*.
+enum class KvCacheFormat {
+  Fp16,           // unquantized (default path)
+  Int8PerChannel, // symmetric per-channel int8, static fp32 scales [G,d]
+};
+
+// Map the ONNX GQA quantization attributes onto a supported KvCacheFormat.
+// Returns false (and logs) for any combination not (yet) implemented, so the
+// caller can reject rather than silently mis-reading the cache bytes.
+static bool classify_kv_cache(int64_t k_quant_type, int64_t v_quant_type,
+                              int64_t kv_cache_bit_width, const void *k_scale,
+                              const void *v_scale, KvCacheFormat *out) {
+  const bool any_quant =
+      (k_quant_type != GQA_QUANT_NONE || v_quant_type != GQA_QUANT_NONE ||
+       k_scale != nullptr || v_scale != nullptr);
+  if (!any_quant) {
+    *out = KvCacheFormat::Fp16;
+    return true;
+  }
+
+  // K and V share one typed cache buffer, so they must use the same scheme.
+  if (k_quant_type != v_quant_type) {
+    fprintf(stderr,
+            "wrap_group_query_attention: mixed KV quantization not supported "
+            "(k_quant_type=%lld v_quant_type=%lld)\n",
+            (long long)k_quant_type, (long long)v_quant_type);
+    return false;
+  }
+
+  // Symmetric per-channel int8: static fp32 scales [G,d], no zero point.
+  if (k_quant_type == GQA_QUANT_PER_CHANNEL && kv_cache_bit_width == 8 &&
+      k_scale != nullptr && v_scale != nullptr) {
+    *out = KvCacheFormat::Int8PerChannel;
+    return true;
+  }
+
+  // Future schemes (int4 per-channel, fp8, per-tensor, ...) would add branches
+  // above. Anything not matched is rejected.
+  fprintf(stderr,
+          "wrap_group_query_attention: unsupported KV quantization "
+          "(k_quant_type=%lld v_quant_type=%lld bit_width=%lld "
+          "k_scale=%d v_scale=%d); only symmetric per-channel int8 "
+          "(quant_type=PER_CHANNEL=2, bit_width=8) is supported\n",
+          (long long)k_quant_type, (long long)v_quant_type,
+          (long long)kv_cache_bit_width, k_scale != nullptr,
+          v_scale != nullptr);
+  return false;
+}
+
+//===----------------------------------------------------------------------===//
 // Public wrapper called by generated IR. ABI MUST stay identical to the
 // HipToLLVM lowering (kWrapGQA = "wrap_group_query_attention", 41 params).
 //===----------------------------------------------------------------------===//
@@ -1806,12 +1996,15 @@ int wrap_group_query_attention(
   // here: the legacy decomposed pipeline applies it (Step 8b in
   // gqa_forward_hipblaslt), and fused_supported below excludes it so masked
   // attention is routed to that path rather than the lean fused kernels.
-  if (k_scale != nullptr || v_scale != nullptr || k_quant_type != 0 ||
-      v_quant_type != 0) {
-    fprintf(stderr, "wrap_group_query_attention: KV cache quantization not "
-                    "supported\n");
+  // Resolve the KV-cache storage format from the ONNX quant attributes. The
+  // classifier is the single place that decides which quantized caches are
+  // supported; unsupported combinations are rejected here rather than silently
+  // mis-read downstream.
+  KvCacheFormat kv_format = KvCacheFormat::Fp16;
+  if (!classify_kv_cache(k_quant_type, v_quant_type, kv_cache_bit_width,
+                         k_scale, v_scale, &kv_format))
     return -1;
-  }
+  const bool kv_i8 = (kv_format == KvCacheFormat::Int8PerChannel);
   if (output_qk != nullptr || qk_output != 0) {
     fprintf(stderr, "wrap_group_query_attention: qk_output not supported\n");
     return -1;
@@ -1837,7 +2030,7 @@ int wrap_group_query_attention(
   (void)total_seq_len;      // runtime derives total_seq from seqlens_k
   (void)rotary_interleaved; // interleaved layout handled inside hip_gqa_rope
   (void)softcap;            // softcap not applied on either path
-  (void)kv_cache_bit_width; // KV quant rejected above
+  (void)kv_cache_bit_width; // validated above for the int8 KV path
 
   //===------------------------------------------------------------------===//
   // Path selection. The optimized fused/flash kernels are fp16 causal GQA
@@ -1868,6 +2061,20 @@ int wrap_group_query_attention(
                                local_window_size <= 0 && head_sink == nullptr &&
                                smooth_softmax != 1 && head_dim_ok &&
                                decode_geometry_ok && attention_bias == nullptr;
+
+  // The INT8 KV cache is implemented ONLY on the fused path (i8 decode + fp16
+  // prefill-over-dequant), for head_dim in {64,128}. The legacy decomposed
+  // pipeline reads the cache as fp16 and would misinterpret INT8 bytes, so we
+  // must reject rather than silently fall through to it.
+  if (kv_i8 &&
+      (!fused_supported || (head_dim != 64 && head_dim != 128))) {
+    fprintf(stderr,
+            "wrap_group_query_attention: int8 KV cache requires the fused path "
+            "(fp16, causal, no window/sink/smooth/bias, head_dim 64 or 128); "
+            "got fused_supported=%d head_dim=%lld\n",
+            static_cast<int>(fused_supported), (long long)head_dim);
+    return -1;
+  }
 
   if (!fused_supported) {
     hipblasLtHandle_t ltHandle = static_cast<hipblasLtHandle_t>(
@@ -1917,7 +2124,8 @@ int wrap_group_query_attention(
                              past_value, seqlens_k, cos_cache, sin_cache,
                              output, present_key, present_value, batch_size,
                              seq_len_q, seq_len_kv, past_buf_seq, num_heads,
-                             kv_num_heads, head_dim, scale, do_rotary);
+                             kv_num_heads, head_dim, scale, do_rotary, k_scale,
+                             v_scale, kv_i8);
   if (rc != 0)
     fprintf(stderr,
             "wrap_group_query_attention: gqa_forward_fused failed "
