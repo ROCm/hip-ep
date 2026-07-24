@@ -402,6 +402,8 @@ void populateRopeLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateGqaLoweringPatterns(const LLVMTypeConverter &converter,
                                  RewritePatternSet &patterns);
+void populatePagedAttentionLoweringPatterns(LLVMTypeConverter &typeConverter,
+                                            RewritePatternSet &patterns);
 void populateMultiHeadAttentionLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns);
 void populateMatMulNBitsLoweringPatterns(const LLVMTypeConverter &converter,

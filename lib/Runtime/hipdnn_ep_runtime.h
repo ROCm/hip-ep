@@ -841,6 +841,30 @@ int wrap_group_query_attention(
     int64_t batch_size, int64_t seq_len_q, int64_t seq_len_kv,
     int64_t past_buf_seq, int64_t head_dim, int64_t element_size_bytes);
 
+// PagedAttention operation wrapper (com.microsoft.PagedAttention, Phase 4b).
+// Called by generated IR for onnx.Custom(PagedAttention) lowering.
+//
+// KV layout: NHD — key_cache/value_cache [num_blocks, block_size, G, D].
+// slot_mapping[token_idx] = physical slot (block_num * block_size + block_off).
+// block_table[batch, block_idx] = physical block number.
+//
+// Currently decode-only (num_tokens == batch_size). Returns -1 for prefill.
+int wrap_paged_attention(
+    RuntimeState *state,
+    void *query,            // [num_tokens, H*D] or packed QKV
+    void *key,              // [num_tokens, G*D]; nullptr if packed
+    void *value,            // [num_tokens, G*D]; nullptr if packed
+    void *key_cache,        // [num_blocks, block_size, G, D]
+    void *value_cache,      // same
+    void *block_table,      // [batch, max_blocks_per_seq] int32
+    void *slot_mapping,     // [num_tokens] int32 physical slot per token
+    void *sequence_lengths, // [batch] int32 KV lengths
+    void *output,           // [num_tokens, H*D]
+    int64_t num_heads, int64_t kv_num_heads, float scale, int64_t do_rotary,
+    void *cos_cache, void *sin_cache, int64_t num_tokens, int64_t batch_size,
+    int64_t head_dim, int64_t element_size_bytes, int64_t block_size,
+    int64_t max_blocks_per_seq);
+
 // MultiHeadAttention operation wrapper (com.microsoft.MultiHeadAttention v1).
 // Called by generated IR for onnx.Custom(MultiHeadAttention) lowering.
 //

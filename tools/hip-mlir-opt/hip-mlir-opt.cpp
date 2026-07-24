@@ -5,6 +5,7 @@
 
 #include "CrashHandler.h"
 #include "hip/Compiler/PluginRegistry.h"
+#include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 #include "hip/Dialect/IR/HipBufferize.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
@@ -53,6 +54,7 @@ int main(int argc, char **argv) {
   registry.insert<mlir::tensor::TensorDialect>();
   registry.insert<mlir::LLVM::LLVMDialect>();
   registry.insert<mlir::hip::HipDialect>();
+  registry.insert<mlir::hipsr::HipsrDialect>();
   registry.insert<hip::compiler::detail::OnnxStubDialect>();
 
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);

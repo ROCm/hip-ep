@@ -1,0 +1,13 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+
+#include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
+
+using namespace mlir;
+using namespace mlir::hipsr;
+
+#include "hip/Dialect/Hipsr/IR/HipsrDialect.cpp.inc"
+
+void HipsrDialect::initialize() {}
