@@ -16,9 +16,10 @@ description: >-
 
 Create and run an **Olive recipe** that converts a model into an optimized ONNX
 model, then verify it. Recipes live under a local clone of `microsoft/olive-recipes`
-at `%USERPROFILE%\workspace\olive-recipes\<model-slug>\olive\`. Mirror the
-canonical `nvidia-resnet50v1.5/olive/` (GitHub CNN) recipe; for a non-square
-transformer, mirror `microsoft-swinv2-tiny-patch4-window16-256/olive/`.
+(cloned into your workspace root, referred to below as `<workspace>`), at
+`<workspace>/olive-recipes/<model-slug>/olive/`. Mirror the canonical
+`nvidia-resnet50v1.5/olive/` (GitHub CNN) recipe; for a non-square transformer,
+mirror `microsoft-swinv2-tiny-patch4-window16-256/olive/`.
 
 NOTE: the team's vision recipes (`nvidia-resnet50v1.5`, `google-mobilenet_v2_1.0_224`,
 `qfgaohao-mb1-ssd`, `facebook-detr-resnet-50`, `ultralytics-yolov5lu`,
@@ -41,19 +42,20 @@ or weights only available behind a Google-Drive folder).
 - ❌ **Multi-view 3D-detection stacks** (PETR, BEVFormer, DETR3D): need the `mmdet3d`/`mmcv` ecosystem, multi-input camera geometry, and custom deformable/DCN ops that don't fit this CPU env or standard ONNX. Explain why and stop (offer only a backbone-only CNN stand-in).
 
 ## One-time setup (do first if missing)
-- **Repos**: clone both into `%USERPROFILE%\workspace` (shallow, to avoid the
-  known hang on large assets during a full clone):
+- **Repos**: clone both into your workspace root `<workspace>` (shallow, to avoid
+  the known hang on large assets during a full clone):
   `git clone --depth 1 https://github.com/microsoft/Olive.git` and
   `git clone --depth 1 https://github.com/microsoft/olive-recipes.git`.
-- **Env deps**: the `hipdnn-ep` env ships `onnx`, `onnxruntime-directml`,
+- **Env deps**: the `hipdnn-ep` conda env ships `onnx`, `onnxruntime-directml`,
   `transformers`, `onnx_ir` but NOT torch/olive. Install the rest:
   - `python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu`
   - `python -m pip install olive-ai onnxscript`
   - Do NOT `pip install onnxruntime` — it collides with the installed
     `onnxruntime-directml`, which already provides `CPUExecutionProvider` (all
     Olive passes here run on CPU). Installing `olive-ai` does NOT pull it in.
-  - Env python: `C:\ProgramData\miniforge3\envs\hipdnn-ep\python.exe`
-    (conda root: `C:\ProgramData\miniforge3`).
+  - Env python: the `hipdnn-ep` env's interpreter under your conda/miniforge
+    install (find it via `conda env list`; e.g.
+    `<miniforge-root>/envs/hipdnn-ep/python.exe` on Windows).
 - Verified against **olive-ai 0.13.0** (pass/config names below match this).
   `onnxoptimizer` is optional (peephole logs a benign warning without it).
 
@@ -62,7 +64,8 @@ or weights only available behind a Google-Drive folder).
   ultralytics), use: `conda run --no-capture-output -n hipdnn-ep python ...`
   and set `PYTHONUTF8=1` (avoids a Windows cp1252 `conda run` crash). Running the
   env python directly (path above) with `$env:PYTHONUTF8=1` also works.
-- Scratch downloads/scripts go in `%USERPROFILE%\workspace\repos\rocm\cursor_workspace`.
+- Scratch downloads/scripts go in a scratch dir under your workspace
+  (e.g. `<workspace>/cursor_workspace`), referred to below as `cursor_workspace/`.
 - Do NOT `git clone` the **model source** repos (e.g. NVIDIA DeepLearningExamples) —
   they hang on assets. `curl` only the needed model definition file(s) from
   `raw.githubusercontent.com`. (The two Olive repos above are the exception:
