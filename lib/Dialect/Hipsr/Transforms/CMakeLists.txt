@@ -20,7 +20,9 @@ target_link_libraries(HipsrDialectTransforms PUBLIC
   MLIRTransforms
   MLIRFuncDialect
   MLIRArithDialect
+  MLIRMemRefDialect
   MLIRShapeDialect
+  MLIRTensorDialect
   MLIRIR
   MLIRSupport
 )
