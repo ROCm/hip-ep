@@ -9,6 +9,7 @@
 #ifndef HIPSR_EMPTY_OP
 #define HIPSR_EMPTY_OP
 
+include "mlir/Interfaces/SideEffectInterfaces.td"
 include "hip/Dialect/Hipsr/IR/HipsrOps.td"
 
 //===----------------------------------------------------------------------===//
@@ -16,7 +17,7 @@ include "hip/Dialect/Hipsr/IR/HipsrOps.td"
 //===----------------------------------------------------------------------===//
 
 def Hipsr_EmptyOp : Hipsr_Op<"empty",
-    [SingleBlockImplicitTerminator<"EmptyYieldOp">]> {
+    [Pure, SingleBlockImplicitTerminator<"EmptyYieldOp">]> {
   let summary = "Create init tensor(s) with shape computation in a region";
   let description = [{
     Creates an init tensor for destination-passing style operations.
