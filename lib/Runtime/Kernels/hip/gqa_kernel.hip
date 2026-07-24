@@ -3016,14 +3016,17 @@ static inline void dispatchPrefillV8(
     else if (nd == 2 && mt == 2 && bkv == 64) LAUNCH_V8(2, 2, 64);
     else if (nd == 4 && mt == 1 && bkv == 32) LAUNCH_V8(4, 1, 32);
     else if (nd == 4 && mt == 2 && bkv == 32) LAUNCH_V8(4, 2, 32);
-    else                                      LAUNCH_V8(2, 1, 32);
+    else if (nd == 2 && mt == 1 && bkv == 16) LAUNCH_V8(2, 1, 16);
+    else if (nd == 4 && mt == 1 && bkv == 16) LAUNCH_V8(4, 1, 16);
+    else                                      LAUNCH_V8(2, 1, 16);
     #undef LAUNCH_V8
 }
 
 struct PrefillV8Cfg { int nd; int mt; int bkv; };
 static inline int prefillV8Candidates(int d, PrefillV8Cfg* out) {
     static const PrefillV8Cfg kAll[] = {
-        {2, 1, 32}, {2, 2, 32}, {2, 1, 64}, {2, 2, 64}, {4, 1, 32}, {4, 2, 32}};
+        {2, 1, 16}, {4, 1, 16}, {2, 1, 32}, {2, 2, 32},
+        {2, 1, 64}, {2, 2, 64}, {4, 1, 32}, {4, 2, 32}};
     int n = 0;
     for (const PrefillV8Cfg& c : kAll)
         if (prefillV8SmemBytes(c.nd, c.mt, c.bkv, d) <= kPrefillV8MaxSmem)
@@ -3074,16 +3077,35 @@ static int tunePrefillV8Cfg(
     (void)hipEventDestroy(ev1);
 
     if (getenv("HIPDNN_PREFILL_TUNE_DEBUG")) {
-        for (int i = 0; i < nc; ++i)
+        for (int i = 0; i < nc; ++i) {
+            const size_t sm =
+                prefillV8SmemBytes(cands[i].nd, cands[i].mt, cands[i].bkv, d);
             fprintf(stderr,
                 "[prefill-v8-tune] d=%d sq=%d skv=%d  ND=%d MT=%d BKV=%-3d : "
-                "%.5f ms/call\n",
+                "%.5f ms/call  LDS=%zu B  wg/CU(LDS)=%zu\n",
                 d, sq, skv, cands[i].nd, cands[i].mt, cands[i].bkv,
-                best_ms[i] / kIters);
+                best_ms[i] / kIters, sm, kPrefillV8MaxSmem / sm);
+        }
     }
 
-    int best = 0;
-    for (int i = 1; i < nc; ++i) if (best_ms[i] < best_ms[best]) best = i;
+    // Occupancy-aware selection: start from the fastest per-call config, then
+    // among all candidates within a small ms tolerance prefer the one with the
+    // lowest LDS (most workgroups/CU). Single-call ms undervalues cross-dispatch
+    // concurrency, so on near-ties the higher-occupancy config wins the aggregate
+    // prefill; at d=256 this reliably lands ND=2,MT=1,BKV=16 (fastest per-call
+    // AND lowest LDS here) instead of the higher-LDS ND=4,MT=1,BKV=32.
+    constexpr float kMsTol = 0.03f;  // 3% single-call band treated as a tie
+    int fastest = 0;
+    for (int i = 1; i < nc; ++i) if (best_ms[i] < best_ms[fastest]) fastest = i;
+    int best = fastest;
+    size_t best_lds =
+        prefillV8SmemBytes(cands[best].nd, cands[best].mt, cands[best].bkv, d);
+    for (int i = 0; i < nc; ++i) {
+        if (best_ms[i] > best_ms[fastest] * (1.0f + kMsTol)) continue;
+        const size_t lds =
+            prefillV8SmemBytes(cands[i].nd, cands[i].mt, cands[i].bkv, d);
+        if (lds < best_lds) { best = i; best_lds = lds; }
+    }
     return cands[best].nd * 1000000 + cands[best].mt * 1000 + cands[best].bkv;
 }
 
