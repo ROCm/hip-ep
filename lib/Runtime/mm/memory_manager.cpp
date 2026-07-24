@@ -69,6 +69,10 @@ static inline void hip_free_host(void *ptr) { ::free(ptr); }
 MemoryManager::MemoryManager(HalAllocator *hal) : hal_(hal) {}
 
 MemoryManager::~MemoryManager() {
+  // Free paged KV block pool.
+  delete block_pool_;
+  block_pool_ = nullptr;
+
   // Free all pool domains.
   if (domains_) {
     for (int i = 0; i < num_pool_domains_; ++i) {
@@ -447,9 +451,35 @@ size_t MemoryManager::gpu_bytes_used() const {
     total += domains_[i].size;
   total += workspace_size_;
   total += kv_bytes_total_;
+  if (block_pool_) {
+    size_t bp = block_pool_->num_blocks() * block_pool_->block_stride_bytes() *
+                2; // K + V
+    total += bp;
+  }
   return total;
 }
 
 size_t MemoryManager::cpu_bytes_used() const {
   return host_scratch_size_ + qmoe_host_scratch_size_;
+}
+
+//===----------------------------------------------------------------------===//
+// Paged KV cache block pool (Phase 4b)
+//===----------------------------------------------------------------------===//
+
+bool MemoryManager::init_block_pool(size_t num_blocks, int block_size,
+                                    int kv_num_heads, int head_dim,
+                                    int elem_size) {
+  if (block_pool_) {
+    fprintf(stderr, "MemoryManager::init_block_pool: already initialized\n");
+    return false;
+  }
+  block_pool_ = new BlockPool();
+  if (!block_pool_->init(hal_, num_blocks, block_size, kv_num_heads, head_dim,
+                         elem_size)) {
+    delete block_pool_;
+    block_pool_ = nullptr;
+    return false;
+  }
+  return true;
 }

@@ -24,6 +24,7 @@ add_executable(test-memory-manager
     ${CMAKE_SOURCE_DIR}/lib/Runtime/mm/hal_discrete.cpp
     ${CMAKE_SOURCE_DIR}/lib/Runtime/mm/hal_factory.cpp
     ${CMAKE_SOURCE_DIR}/lib/Runtime/mm/memory_manager.cpp
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/mm/block_pool.cpp
 )
 
 target_compile_features(test-memory-manager PRIVATE cxx_std_17)

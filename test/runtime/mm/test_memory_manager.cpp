@@ -427,6 +427,70 @@ static void test_kv_bytes_included_in_gpu_bytes() {
 }
 
 //===----------------------------------------------------------------------===//
+// BlockPool tests
+//===----------------------------------------------------------------------===//
+
+static void test_block_pool_init_succeeds() {
+  auto mm = make_mm();
+  bool ok = mm->init_block_pool(/*num_blocks=*/64, /*block_size=*/16,
+                                /*kv_num_heads=*/8, /*head_dim=*/64,
+                                /*elem_size=*/2);
+  CHECK(ok);
+  CHECK(mm->get_block_pool() != nullptr);
+  CHECK(mm->get_block_pool()->num_blocks() == 64);
+  CHECK(mm->get_block_pool()->num_free_blocks() == 64);
+  delete mm;
+}
+
+static void test_block_pool_alloc_and_free() {
+  auto mm = make_mm();
+  mm->init_block_pool(4, 16, 8, 64, 2);
+  auto *pool = mm->get_block_pool();
+  int b0 = pool->alloc_block();
+  int b1 = pool->alloc_block();
+  CHECK(b0 >= 0 && b0 < 4);
+  CHECK(b1 >= 0 && b1 < 4);
+  CHECK(b0 != b1);
+  CHECK(pool->num_free_blocks() == 2);
+  pool->free_block(b0);
+  CHECK(pool->num_free_blocks() == 3);
+  delete mm;
+}
+
+static void test_block_pool_exhaustion_returns_minus1() {
+  auto mm = make_mm();
+  mm->init_block_pool(2, 16, 8, 64, 2);
+  auto *pool = mm->get_block_pool();
+  pool->alloc_block();
+  pool->alloc_block();
+  CHECK(pool->num_free_blocks() == 0);
+  int bad = pool->alloc_block();
+  CHECK(bad == -1);
+  delete mm;
+}
+
+static void test_block_pool_key_value_bases_differ() {
+  auto mm = make_mm();
+  mm->init_block_pool(8, 16, 8, 64, 2);
+  auto *pool = mm->get_block_pool();
+  CHECK(pool->key_cache_base() != nullptr);
+  CHECK(pool->value_cache_base() != nullptr);
+  CHECK(pool->key_cache_base() != pool->value_cache_base());
+  delete mm;
+}
+
+static void test_block_pool_included_in_gpu_bytes_used() {
+  auto mm = make_mm();
+  size_t before = mm->gpu_bytes_used();
+  mm->init_block_pool(16, 16, 8, 64, 2);
+  size_t after = mm->gpu_bytes_used();
+  // 16 blocks × 16 tokens × 8 heads × 64 dim × 2 bytes × 2 (K+V)
+  size_t expected = 16ull * 16 * 8 * 64 * 2 * 2;
+  CHECK(after == before + expected);
+  delete mm;
+}
+
+//===----------------------------------------------------------------------===//
 // main — runs all MM unit tests (HAL + MemoryManager)
 //===----------------------------------------------------------------------===//
 
@@ -474,6 +538,12 @@ int main() {
   test_kv_buffer_count_multiple();
   test_register_kv_duplicate_is_idempotent();
   test_kv_bytes_included_in_gpu_bytes();
+
+  test_block_pool_init_succeeds();
+  test_block_pool_alloc_and_free();
+  test_block_pool_exhaustion_returns_minus1();
+  test_block_pool_key_value_bases_differ();
+  test_block_pool_included_in_gpu_bytes_used();
 
   test_gpu_bytes_used_accounts_for_pool_and_workspace();
   test_cpu_bytes_used_accounts_for_host_scratch();
