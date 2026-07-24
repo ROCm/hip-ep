@@ -20,15 +20,16 @@
 // BOTH orderings against the same input.
 //===----------------------------------------------------------------------===//
 
-// Chosen ordering (deallocation THEN allocator): clean, zero-copy.
+// Hypothetical safe ordering if deallocation is reintroduced: deallocation
+// THEN allocator is clean and zero-copy.
 // RUN: hip-mlir-opt --buffer-deallocation-pipeline --hip-use-output-allocator %s 2>&1 | FileCheck %s
 
-// Rejected ordering (allocator THEN deallocation): clones the output. Pinned
-// so a future change back to this order (or a doc claiming it is safe) trips.
+// Rejected hypothetical ordering (allocator THEN deallocation): clones the
+// output. Pinned so a future reintroduction in this order trips.
 // RUN: hip-mlir-opt --hip-use-output-allocator --buffer-deallocation-pipeline %s 2>&1 | FileCheck --check-prefix=BADORDER %s
 
-// --- Chosen ordering: the returned hip.alloc_output is the value written by
-//     the last op (sigmoid) AND the value returned, with no clone between. ---
+// --- Safe hypothetical ordering: the returned hip.alloc_output is the value
+//     written by the last op (sigmoid) AND returned, with no clone between. ---
 // CHECK-LABEL: func.func @main_graph
 // CHECK:         %[[OUT:.*]] = hip.alloc_output(%{{.*}}, %{{.*}}) {out_idx = 0 : i64} : memref<?x64xf16>
 // CHECK:         hip.sigmoid(%{{.*}}) ins(%{{.*}} : memref<?x64xf16>) outs(%[[OUT]] : memref<?x64xf16>)

@@ -250,8 +250,12 @@ Primary regression coverage:
 - `test/lit/Dialect/hip-resolve-memref-dims.mlir`
 - `test/lit/Dialect/hip-hoist-alloc-size-arith.mlir`
 - `test/lit/Dialect/hip-materialize-host-scalars.mlir`
-- `test/lit/Pipeline/output-allocator-dealloc.mlir`
 - `test/lit/Pipeline/pipeline-pool-lower.mlir`
+- `test/lit/e2e/test_mlp_model.mlir`
+
+`test/lit/Pipeline/output-allocator-dealloc.mlir` separately characterizes the
+historical interaction if ownership-based deallocation is reintroduced; it is
+not a production-pipeline test.
 
 ## Current limitations
 
