@@ -13,7 +13,6 @@
 #include "mlir/Conversion/BufferizationToMemRef/BufferizationToMemRef.h"
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
-#include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/Passes.h"
@@ -81,8 +80,8 @@ void addPoolAllocsShapePreconditionPasses(OpPassManager &pm) {
 /// Graph outputs use the output-allocator ABI: `hip-use-output-allocator` runs
 /// at slot 4.5, rewriting each returned `memref.alloc` into `hip.alloc_output`
 /// (allocated in-graph at runtime via the EP's output-allocator callback).
-/// Where it runs matters (after buffer-deallocation, before pool-allocs); the
-/// reason is at that slot. See docs/design/output-allocator-design.md.
+/// It must run before pool-allocs (slot 6); the reason is at that slot. See
+/// docs/design/output-allocator-design.md.
 static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
   // 1b. Refine `?` (kDynamic) dims on HIP DPS op result types using each
   //     op's `ReifyRankedShapedTypeOpInterface` impl. Placed here so the
@@ -166,39 +165,39 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
   //    LoopLowering expects. @main_graph keeps its returned memrefs here and
   //    defers output handling to slot 4.5 (hip-use-output-allocator). This pass
   //    is scoped to the private loop bodies (modifyPublicFunctions = false) and
-  //    must run before buffer-deallocation.
+  //    must run before the pool/lowering passes that consume the out-param ABI.
   pm.addPass(mlir::hip::createLoopBodyToOutParamsPass());
 
-  // 4. Insert ownership-based buffer deallocation
-  bufferization::BufferDeallocationPipelineOptions deallocOpts;
-  bufferization::buildBufferDeallocationPipeline(pm, deallocOpts);
+  // 4. Ownership-based buffer deallocation is intentionally NOT run. One-Shot
+  //    Bufferize emits a `memref.alloc` per transient, but this pipeline never
+  //    frees them individually: `hip-pool-allocs` (slot 6) rewrites each into a
+  //    `memref.view` over one of the session-owned pools (`hip.get_pool`),
+  //    reusing slots across disjoint lifetimes and freeing the pools once at
+  //    session cleanup; graph outputs become runtime-owned `hip.alloc_output`
+  //    (slot 4.5). So no individually allocated buffer survives -- there is
+  //    nothing to deallocate. Running the pass is also a compile-time hazard:
+  //    buffer-deallocation-simplification's O(n^2) pairwise `isSameAllocation`
+  //    scan over the one giant `bufferization.dealloc` it emits per block hangs
+  //    large single-block functions. (Dropping the bundle also omits
+  //    expand-realloc, fine here: the pipeline emits no `memref.realloc`.)
 
   // 4.5. hip-use-output-allocator (FuncOp) rewrites each returned
   //      `memref.alloc` into `hip.alloc_output` (EP-owned, allocated in-graph
   //      at runtime via the output-allocator callback). Leaves the function
-  //      signature + `return` intact.
-  //
-  //      Ordering is load-bearing -- the rewrite MUST run AFTER buffer-
-  //      deallocation: `hip.alloc_output` has a Write effect but NO Allocate
-  //      effect, so the ownership-based deallocation pass would treat it as an
-  //      unowned value at the `func.return` and clone it (`%c =
-  //      bufferization.clone %out; return %c`), adding a per-inference alloc +
-  //      full-output copy. By running here the deallocation pass sees the
-  //      output as a plain `memref.alloc` (Allocate effect => owned), so it
-  //      returns it directly with no clone and no dealloc. Still runs BEFORE
-  //      pool-allocs (slot 6) so the EP-owned output never enters the GPU pool,
-  //      which only absorbs `memref.alloc`. Verified by test/lit/Pipeline/
-  //      output-allocator-dealloc.mlir (both orderings).
+  //      signature + `return` intact. Must run BEFORE pool-allocs (slot 6) so
+  //      the EP-owned output never enters the GPU pool, which only absorbs
+  //      `memref.alloc` (`hip.alloc_output` carries a Write but no Allocate
+  //      effect).
   pm.addNestedPass<func::FuncOp>(mlir::hip::createUseOutputAllocatorPass());
 
   // 4.6. Rewrite frozen Concat-accumulator offsets in outlined hip.loop bodies
   //      to iter-driven offsets (the loop trampoline aliases v_in/v_out onto
   //      one descriptor, freezing `memref.dim %v_in` so a growing accumulator
   //      keeps only its last chunk). Placement is load-bearing: AFTER
-  //      buffer-deallocation (the in-place-writer alias only exists
-  //      post-out-param-promotion) and BEFORE the pool/hoist passes (so the
-  //      synthesized readback + index_cast flow through them). No-op on
-  //      non-loop-body funcs. See FixLoopAccumulatorOffset.cpp.
+  //      out-param promotion (slot 3, which is what creates the in-place-writer
+  //      alias) and BEFORE the pool/hoist passes (so the synthesized readback +
+  //      index_cast flow through them). No-op on non-loop-body funcs. See
+  //      FixLoopAccumulatorOffset.cpp.
   pm.addNestedPass<func::FuncOp>(
       mlir::hip::createFixLoopAccumulatorOffsetPass());
 

@@ -2,24 +2,22 @@
 // Licensed under the MIT License.
 //
 //===----------------------------------------------------------------------===//
-// R2 gate: pins the buffer-deallocation vs hip-use-output-allocator ordering.
+// Isolated pass-interaction record -- NOT the production pipeline.
 //
-// hip.alloc_output carries a Write effect but NO Allocate effect (so the
-// ownership-based deallocation pass never FREES the EP-owned output buffer).
-// But "not freed" is not the whole story: a value returned by func.return whose
-// defining op has no Allocate effect is treated as UNOWNED, so if
-// hip-use-output-allocator runs BEFORE buffer-deallocation the deallocation
-// pass inserts a `bufferization.clone` at the return (returning the clone, not
-// the EP buffer) -- an extra per-inference alloc + full-output copy that
-// defeats the allocator's zero-copy goal.
+// The onnx-to-hip pipeline no longer runs ownership-based buffer deallocation
+// at all: hip-pool-allocs owns every buffer lifetime, so there is nothing to
+// deallocate (see lib/Dialect/Transforms/Pipelines.cpp buildOnnxToHipPipelineTail).
+// This file is retained only to document the pass INTERACTION that motivated the
+// output-allocator's placement, should deallocation ever be reintroduced:
 //
-// Therefore the onnx-to-hip allocator pipeline runs hip-use-output-allocator
-// AFTER buffer-deallocation (slot 4.5), when the output is still a
-// memref.alloc (Allocate effect => owned, returned directly with no clone).
-// This file characterizes BOTH orderings against the same input so the choice
-// is a committed, regression-guarded decision record. See
-// lib/Dialect/Transforms/Pipelines.cpp (buildOnnxToHipPipelineTail) and
-// docs/design/output-allocator-design.md.
+// hip.alloc_output carries a Write effect but NO Allocate effect, so a value
+// returned by func.return whose defining op has no Allocate effect is treated
+// as UNOWNED. If hip-use-output-allocator ran BEFORE buffer-deallocation, the
+// deallocation pass would insert a `bufferization.clone` at the return
+// (returning the clone, not the EP buffer) -- an extra per-inference alloc +
+// full-output copy defeating zero-copy; running AFTER leaves the output a plain
+// memref.alloc (owned, returned directly, no clone). This file characterizes
+// BOTH orderings against the same input.
 //===----------------------------------------------------------------------===//
 
 // Chosen ordering (deallocation THEN allocator): clean, zero-copy.

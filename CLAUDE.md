@@ -128,7 +128,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for PR, formatting, AI-disclosure, and co
 ### Output allocator ABI
 
 - The supported generated ABI is `inference_compute(state, inputs)`.
-- `hip-use-output-allocator` must run after buffer deallocation and before PoolAllocs. Changing this ordering can introduce output clones, copies, or incorrect ownership.
+- `hip-use-output-allocator` must run before PoolAllocs so graph outputs remain runtime-owned and are not pooled. The production pipeline intentionally omits ownership-based buffer deallocation because every transient is pooled and outputs are runtime-owned.
 - Keep the allocator callback model-agnostic; dynamic output shapes are computed in the generated graph.
 - See [docs/design/output-allocator-design.md](docs/design/output-allocator-design.md).
 

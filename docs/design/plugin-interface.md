@@ -527,9 +527,10 @@ plugin pass:
    `ConvertToLLVMPatternInterface`.
 2. **Bufferization** -- one-shot-bufferize finds the attached
    `BufferizableOpInterface` model and turns the tensor-form op into its
-   buffer form, exactly like an in-tree HIP op. (A custom op with memref
-   operands must also carry `MemoryEffectOpInterface`, or the ownership-based
-   buffer-deallocation pass rejects it with "unknown memory side effects".)
+   buffer form, exactly like an in-tree HIP op. A custom op with memref
+   operands should also carry `MemoryEffectOpInterface` so downstream analyses
+   know which operands it reads and writes; a custom pipeline that enables
+   ownership-based buffer deallocation requires it.
 3. **HIP -> LLVM lowering** -- `convert-hip-to-llvm` walks the bufferized
    module and, for every dialect that *registers* `ConvertToLLVMPatternInterface`,
    lets it add its lowering patterns and mark its ops illegal. This is the body
@@ -588,7 +589,7 @@ support this today; a fourth is planned.
   (e.g. `func.func(my-vendor-pass), onnx-to-hip-pipeline, hip-to-llvm-pipeline`).
 - **Guardrails.** When an override replaces the order, the load-bearing ordering
   invariants (host-scalar materialization before pool allocation; output-allocator
-  after buffer deallocation; affine lowering after strided-metadata expansion; the
+  before pool allocation; affine lowering after strided-metadata expansion; the
   terminal `convert-hip-to-llvm` + `generate-interface` stages) become the
   overrider's responsibility. A post-pipeline check hard-fails with a clear
   message when the produced module lacks an `inference_compute` entry point after

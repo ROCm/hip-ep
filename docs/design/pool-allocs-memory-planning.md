@@ -43,7 +43,6 @@ The default domain ID is zero and is omitted from textual IR. Additional domains
 → hip-resolve-tensor-dims
 → one-shot-bufferize
 → hip-loop-body-to-out-params
-→ buffer-deallocation pipeline
 → hip-use-output-allocator
 → hip-fix-loop-accumulator-offset
 → CSE → canonicalize
@@ -63,7 +62,7 @@ The default domain ID is zero and is omitted from textual IR. Additional domains
 
 `hip-promote-strided-operands` materializes contiguous temporaries for HIP runtime calls whose ABI carries a bare pointer but no offset/stride metadata. It must run before pooling so those temporaries become pool views.
 
-`hip-use-output-allocator` must run after buffer deallocation and before pooling so returned buffers are neither cloned nor absorbed into the transient pool. See [output-allocator-design.md](output-allocator-design.md).
+`hip-use-output-allocator` must run before pooling so returned buffers are rewritten to runtime-owned `hip.alloc_output` operations rather than absorbed into the transient pool. The production pipeline intentionally omits ownership-based buffer deallocation because every transient is pooled and outputs are runtime-owned. See [output-allocator-design.md](output-allocator-design.md).
 
 `convert-linalg-to-loops` must run before host-scalar materialization: a rank-zero `linalg.fill` must become `memref.store` before the host-I/O candidate scan.
 
