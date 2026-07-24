@@ -5,6 +5,7 @@
 
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 
+#include "hip/Dialect/Hipsr/IR/HipsrAddOp.h"
 #include "hip/Dialect/Hipsr/IR/HipsrCastOp.h"
 #include "hip/Dialect/Hipsr/IR/HipsrConstantOp.h"
 #include "hip/Dialect/Hipsr/IR/HipsrMatMulOp.h"
@@ -60,6 +61,9 @@ void HipsrDialect::initialize() {
 #include "hip/Dialect/Hipsr/IR/HipsrMatMulOp.cpp.inc"
       ,
 #define GET_OP_LIST
+#include "hip/Dialect/Hipsr/IR/HipsrAddOp.cpp.inc"
+      ,
+#define GET_OP_LIST
 #include "hip/Dialect/Hipsr/IR/HipsrPlaceholderOp.cpp.inc"
       >();
   addAttributes<
@@ -98,6 +102,7 @@ namespace {
 void populateHipsrToLLVMPatterns(const LLVMTypeConverter &typeConverter,
                                  RewritePatternSet &patterns) {
   populateHipsrConstantLoweringPatterns(typeConverter, patterns);
+  populateHipsrAddLoweringPatterns(typeConverter, patterns);
 }
 
 struct HipsrConvertToLLVMInterface : public ConvertToLLVMPatternInterface {
@@ -119,6 +124,9 @@ struct HipsrConvertToLLVMInterface : public ConvertToLLVMPatternInterface {
           return IntegerAttr::get(IntegerType::get(space.getContext(), 64),
                                   static_cast<int64_t>(space.getKind()));
         });
+    typeConverter.addConversion([](ContextType type) -> Type {
+      return LLVM::LLVMPointerType::get(type.getContext(), 0);
+    });
     target.addIllegalDialect<HipsrDialect>();
     populateHipsrToLLVMPatterns(typeConverter, patterns);
   }
