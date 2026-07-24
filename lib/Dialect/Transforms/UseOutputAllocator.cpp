@@ -210,11 +210,12 @@ struct UseOutputAllocatorPass
 
       Value inv = allocOutput.getResult();
       for (Operation *v : chain) { // outermost (produces retVal) -> innermost
-        Type srcTy = mlir::cast<ViewLikeOpInterface>(v).getViewSource().getType();
+        Type srcTy =
+            mlir::cast<ViewLikeOpInterface>(v).getViewSource().getType();
         if (auto e = dyn_cast<memref::ExpandShapeOp>(v)) {
           // forward src -> larger rank; inverse collapses back to src.
-          inv = memref::CollapseShapeOp::create(builder, v->getLoc(), srcTy, inv,
-                                                e.getReassociationIndices());
+          inv = memref::CollapseShapeOp::create(
+              builder, v->getLoc(), srcTy, inv, e.getReassociationIndices());
         } else if (auto c = dyn_cast<memref::CollapseShapeOp>(v)) {
           // forward src -> smaller rank; inverse expands back to src (static).
           auto srcMr = mlir::cast<MemRefType>(srcTy);
