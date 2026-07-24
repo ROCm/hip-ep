@@ -141,7 +141,7 @@ Options use MLIR's pipeline-option syntax:
 |---|---|---|
 | `canonicalize` | any | Standard canonicalization. |
 | `cse` | any | Common-subexpression elimination. |
-| `one-shot-bufferize` | module | Tensor → memref bufferization (function boundaries, identity layout). |
+| `one-shot-bufferize` | module | Tensor → memref bufferization (function boundaries, identity layout); `HIPDNN_EP_BUFFERIZE_COPY_BEFORE_WRITE=1` enables the huge-graph copy-before-write escape hatch. |
 | `buffer-deallocation-pipeline` | module | Ownership-based buffer deallocation (a sub-pipeline). |
 | `convert-bufferization-to-memref` | any | Lower residual `bufferization.*` ops to memref. |
 | `convert-scf-to-cf` | any | Lower `scf.for`/`scf.if` to unstructured control flow. |
