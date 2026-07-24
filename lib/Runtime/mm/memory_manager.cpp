@@ -7,10 +7,9 @@
 //
 // See memory_manager.h for the design.
 //
-// Phase 1: wraps all six existing ensure_* patterns behind a typed API with
-// uniform 1.5× amortized growth. No behavior change — callers that used the
-// old direct RuntimeState fields now go through MM, which delegates to the
-// same underlying HIP calls (via HalAllocator or direct hipMalloc/hipFree).
+// Wraps all six existing ensure_* patterns behind a typed API with uniform
+// 1.5× amortized growth. All callers go through MM exclusively; the legacy
+// RuntimeState fields were removed in Phase 2.
 //
 //===----------------------------------------------------------------------===//
 
@@ -309,7 +308,42 @@ void *MemoryManager::get_host_scratch(size_t needed_size) {
 }
 
 //===----------------------------------------------------------------------===//
-// Shared GPU workspace
+// Scratch arena (bump-pointer allocator over the shared workspace)
+//===----------------------------------------------------------------------===//
+
+static constexpr size_t kScratchAlignment = 64;
+
+void *MemoryManager::scratch_alloc(size_t size) {
+  if (size == 0)
+    return workspace_ ? static_cast<char *>(workspace_) + scratch_offset_
+                      : nullptr;
+
+  size_t aligned = (size + kScratchAlignment - 1) & ~(kScratchAlignment - 1);
+  size_t needed = scratch_offset_ + aligned;
+  if (needed > workspace_size_) {
+    // Growth frees the old buffer and allocates a new one. Any pointers
+    // returned by prior scratch_alloc calls in this sequence become invalid.
+    // Callers must call scratch_reserve(total) up front to avoid mid-sequence
+    // growth, or re-derive all pointers after any alloc that might grow.
+    if (!grow_gpu_buffer(&workspace_, &workspace_size_, needed, "workspace"))
+      return nullptr;
+  }
+
+  void *ptr = static_cast<char *>(workspace_) + scratch_offset_;
+  scratch_offset_ += aligned;
+  return ptr;
+}
+
+bool MemoryManager::scratch_reserve(size_t total) {
+  if (total <= workspace_size_)
+    return true;
+  return grow_gpu_buffer(&workspace_, &workspace_size_, total, "workspace");
+}
+
+void MemoryManager::scratch_reset() { scratch_offset_ = 0; }
+
+//===----------------------------------------------------------------------===//
+// Shared GPU workspace (low-level; prefer scratch_alloc for new code)
 //===----------------------------------------------------------------------===//
 
 void *MemoryManager::ensure_workspace(size_t needed_size) {
@@ -345,15 +379,13 @@ void *MemoryManager::get_qmoe_host_scratch() const {
 //===----------------------------------------------------------------------===//
 
 void MemoryManager::begin_compute() {
-  // Invalidate the seqlens_k cross-layer cache (same semantics as the old
-  // RuntimeState fields, just moved here so begin_compute() is the one
-  // authoritative place to invalidate all per-forward-pass caches).
+  scratch_reset();
   seqlens_k_valid_ = false;
   seqlens_k_ptr_ = nullptr;
 }
 
 void MemoryManager::end_compute() {
-  // Phase 1: no-op. Phase 2 will reset the bump-pointer scratch arena here.
+  // Reserved for future phases that need end-of-inference cleanup.
 }
 
 //===----------------------------------------------------------------------===//
