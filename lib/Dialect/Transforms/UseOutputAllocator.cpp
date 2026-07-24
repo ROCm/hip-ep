@@ -16,7 +16,11 @@
 //   - sets `out_idx` to its position in func.return (the graph output index),
 //   - reuses the alloc's dynamic-size operands unchanged,
 //   - deletes any `memref.dealloc` of it (the EP frees it, not us),
-//   - leaves the view ops in place -- only the alloc op itself changes.
+//   - leaves the view ops in place -- only the alloc op itself changes,
+//   - when the output is returned through a rank-reducing collapse_shape,
+//     stamps `hipdnn.abi_shape` / `hipdnn.abi_groups` so the HIP->LLVM lowering
+//     issues the output-allocator callback at the RETURNED (ONNX) rank rather
+//     than the higher internal compute rank (see stampAbiCollapseAttrs).
 //
 // How outputs are found. Rather than listing every view op by hand, the pass
 // asks `BufferViewFlowAnalysis` one question per alloc: does any value derived
@@ -60,8 +64,10 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/BuiltinTypes.h"
 
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 
 #define DEBUG_TYPE "hip-use-output-allocator"
 
@@ -72,6 +78,95 @@ namespace hip {
 #include "hip/Dialect/Transforms/Passes.h.inc"
 
 namespace {
+
+// If the graph output is returned through a rank-reducing
+// `memref.collapse_shape` (the internal compute buffer is higher-rank than the
+// ONNX / func.return output -- e.g. a vision encoder produces
+// memref<?x?x2560> internally but its `image_features` output is rank-2
+// memref<?x2560>), stamp the collapse mapping onto `allocOutput` as the
+// discardable attrs `hipdnn.abi_shape` + `hipdnn.abi_groups`. The HIP->LLVM
+// lowering (`AllocOutputOpLowering`) reads them to emit the EP output-allocator
+// callback at the RETURNED rank instead of the internal rank -- otherwise ORT
+// rejects the pre-bound output OrtValue with a shape-mismatch
+// ("has shape {252,2560} but the computed output shape ... is {1,252,2560}").
+//
+// Why here and not in the lowering: the reassociation must be read while
+// collapse_shape is still intact. By the time `convert-hip-to-llvm` runs,
+// `expand-strided-metadata` has decomposed collapse_shape into
+// extract_strided_metadata + reinterpret_cast, which erases the reassociation
+// and re-defines the external dims AFTER this alloc (referencing them there
+// would break SSA dominance). Stamping static attrs now lets the lowering
+// re-derive each external dim from the internal alloc sizes (which dominate).
+//
+// Only a single collapse (optionally wrapped by rank-preserving `memref.cast`)
+// is handled. Any other view (expand_shape / subview / reinterpret_cast, a
+// second collapse, or a non-view producer) leaves the attrs unset and the
+// lowering keeps the internal rank -- unchanged behavior, no new regression.
+//
+// Before (IR reaching this pass; the alloc is already an EP output):
+//   %out = hip.alloc_output(%ctx, %d0, %d1) {out_idx = 0}
+//        : memref<?x?x2560xf16>
+//   %r = memref.collapse_shape %out [[0, 1], [2]]
+//        : memref<?x?x2560xf16> into memref<?x2560xf16>
+//   return %r : memref<?x2560xf16>
+// After (attrs added; op type + operands unchanged):
+//   %out = hip.alloc_output(%ctx, %d0, %d1)
+//            {out_idx = 0,
+//             hipdnn.abi_shape  = array<i64: -9223372036854775808, 2560>,
+//             hipdnn.abi_groups = array<i64: 2, 1>} : memref<?x?x2560xf16>
+static void stampAbiCollapseAttrs(AllocOutputOp allocOutput, Value retVal,
+                                  OpBuilder &builder) {
+  Value root = allocOutput.getResult();
+  auto rootType = dyn_cast<MemRefType>(root.getType());
+  if (!rootType)
+    return;
+
+  memref::CollapseShapeOp collapse;
+  Value cur = retVal;
+  while (cur != root) {
+    Operation *def = cur.getDefiningOp();
+    if (!def)
+      return; // block-arg / input passthrough -- no alloc-rooted view chain.
+    if (auto c = dyn_cast<memref::CollapseShapeOp>(def)) {
+      if (collapse)
+        return; // more than one collapse on the path -- unsupported.
+      collapse = c;
+      cur = c.getSrc();
+      continue;
+    }
+    if (auto castOp = dyn_cast<memref::CastOp>(def)) {
+      cur = castOp.getSource(); // rank-preserving -- dims unchanged.
+      continue;
+    }
+    return; // expand_shape / subview / reinterpret_cast / other -- bail.
+  }
+  if (!collapse)
+    return; // returned directly or via casts only -- rank already matches.
+
+  auto extType = cast<MemRefType>(retVal.getType());
+
+  // groups[e] = #consecutive internal dims collapsed into external dim e.
+  // collapse_shape reassociation is contiguous and ordered, so the lowering
+  // consumes the internal sizes sequentially with a running index.
+  SmallVector<int64_t> groups;
+  int64_t total = 0;
+  for (ArrayRef<int64_t> g : collapse.getReassociationIndices()) {
+    groups.push_back(static_cast<int64_t>(g.size()));
+    total += static_cast<int64_t>(g.size());
+  }
+
+  // Guard the invariants the lowering relies on; bail (leave attrs unset) on
+  // any mismatch rather than risk a wrong callback shape.
+  if (total != rootType.getRank() ||
+      static_cast<int64_t>(groups.size()) != extType.getRank() ||
+      extType.getRank() == rootType.getRank())
+    return;
+
+  allocOutput->setAttr(kAbiShapeAttrName,
+                       builder.getDenseI64ArrayAttr(extType.getShape()));
+  allocOutput->setAttr(kAbiGroupsAttrName,
+                       builder.getDenseI64ArrayAttr(groups));
+}
 
 struct UseOutputAllocatorPass
     : impl::UseOutputAllocatorPassBase<UseOutputAllocatorPass> {
@@ -126,6 +221,12 @@ struct UseOutputAllocatorPass
         outputs.emplace_back(allocOp, outIdx);
     });
 
+    // The single func.return of this graph-entry function. Used to recover the
+    // returned (ONNX ABI) value per output index for the collapse-shape ABI
+    // adjustment below.
+    func::ReturnOp returnOp;
+    funcOp.walk([&](func::ReturnOp r) { returnOp = r; });
+
     // Phase 2 -- rewrite (IR mutation only; the analysis is no longer queried).
     OpBuilder builder(funcOp.getContext());
     for (auto [allocOp, outIdx] : outputs) {
@@ -142,6 +243,14 @@ struct UseOutputAllocatorPass
           allocOp.getDynamicSizes(), builder.getI64IntegerAttr(outIdx));
       allocOp.getResult().replaceAllUsesWith(allocOutput.getResult());
       allocOp.erase();
+
+      // After RAUW the returned value's view chain is rooted at allocOutput.
+      // Record the ONNX return shape when it is a rank-reduced collapse of the
+      // internal compute buffer, so the lowering issues the output-allocator
+      // callback at the returned rank (see stampAbiCollapseAttrs).
+      if (returnOp && outIdx >= 0 &&
+          outIdx < static_cast<int64_t>(returnOp.getNumOperands()))
+        stampAbiCollapseAttrs(allocOutput, returnOp.getOperand(outIdx), builder);
     }
   }
 };

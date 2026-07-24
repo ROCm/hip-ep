@@ -5,198 +5,15 @@
 
 #include "HipToLLVMUtils.h"
 
-#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypeInterfaces.h"
 #include "mlir/IR/BuiltinTypes.h"
 
-#include "llvm/ADT/DenseSet.h"
-
 namespace mlir {
 namespace hip {
 namespace {
-
-/// View ops that preserve the backing allocation while changing the memref
-/// descriptor fed to func.return (same set BufferViewFlowAnalysis follows).
-static bool isOutputViewOp(Operation *op) {
-  return isa<memref::CollapseShapeOp, memref::ExpandShapeOp, memref::CastOp,
-             memref::ReinterpretCastOp, memref::SubViewOp, memref::ViewOp>(op);
-}
-
-/// Walk forward from the graph-output buffer to the value returned by
-/// func.return. When the return path goes through collapse/expand/cast views,
-/// that returned type is the ONNX / OGA ABI shape — not the root alloc rank.
-static Value findGraphOutputReturnValue(Value root) {
-  SmallVector<Value> worklist = {root};
-  DenseSet<Value> visited;
-  while (!worklist.empty()) {
-    Value v = worklist.pop_back_val();
-    if (!visited.insert(v).second)
-      continue;
-    for (OpOperand &use : v.getUses()) {
-      Operation *user = use.getOwner();
-      if (isa<func::ReturnOp>(user))
-        return v;
-      if (user->getNumResults() == 1 && isOutputViewOp(user))
-        worklist.push_back(user->getResult(0));
-    }
-  }
-  return {};
-}
-
-/// Collect view ops on the path from root (hip.alloc_output result) to
-/// returnVal, in forward order. Empty if returnVal is not reachable through
-/// view ops only.
-static SmallVector<Operation *> collectViewChainRootToReturn(Value root,
-                                                             Value returnVal) {
-  SmallVector<Operation *> chain;
-  Value current = returnVal;
-  while (current != root) {
-    Operation *def = current.getDefiningOp();
-    if (!def || !isOutputViewOp(def))
-      return {};
-    chain.push_back(def);
-    if (def->getNumOperands() == 0)
-      return {};
-    current = def->getOperand(0);
-  }
-  std::reverse(chain.begin(), chain.end());
-  return chain;
-}
-
-static Value asIndexValue(Value v, Type indexType,
-                          ConversionPatternRewriter &rewriter, Location loc) {
-  if (v.getType() == indexType)
-    return v;
-  return arith::IndexCastOp::create(rewriter, loc, indexType, v);
-}
-
-static Value collapseGroupSize(Location loc, ArrayRef<int64_t> group,
-                               ArrayRef<Value> inputSizes, Type indexType,
-                               ConversionPatternRewriter &rewriter) {
-  assert(!group.empty() && "collapse group must be non-empty");
-  Value product =
-      asIndexValue(inputSizes[group.front()], indexType, rewriter, loc);
-  for (int64_t idx : group.drop_front())
-    product = arith::MulIOp::create(
-        rewriter, loc, product,
-        asIndexValue(inputSizes[idx], indexType, rewriter, loc));
-  return product;
-}
-
-static SmallVector<Value>
-propagateCollapseSizes(memref::CollapseShapeOp op, ArrayRef<Value> inputSizes,
-                       Type indexType, ConversionPatternRewriter &rewriter) {
-  Location loc = op.getLoc();
-  SmallVector<Value> out;
-  for (ArrayRef<int64_t> group : op.getReassociationIndices())
-    out.push_back(
-        collapseGroupSize(loc, group, inputSizes, indexType, rewriter));
-  return out;
-}
-
-static SmallVector<Value>
-propagateExpandSizes(memref::ExpandShapeOp op, ArrayRef<Value> inputSizes,
-                     Type indexType, ConversionPatternRewriter &rewriter) {
-  Location loc = op.getLoc();
-  auto resultType = cast<MemRefType>(op.getType());
-  SmallVector<Value> out(resultType.getRank());
-  auto outputShapeOperands = op.getOutputShape();
-  Value outputShape =
-      outputShapeOperands.empty() ? Value() : outputShapeOperands.front();
-  int64_t outputShapeIdx = 0;
-  int64_t inDim = 0;
-  for (ArrayRef<int64_t> group : op.getReassociationIndices()) {
-    if (group.size() == 1) {
-      out[group[0]] =
-          asIndexValue(inputSizes[inDim++], indexType, rewriter, loc);
-      continue;
-    }
-    for (int64_t outDim : group) {
-      if (!resultType.isDynamicDim(outDim)) {
-        out[outDim] = arith::ConstantIndexOp::create(
-            rewriter, loc, resultType.getDimSize(outDim));
-        continue;
-      }
-      if (!outputShape)
-        return {};
-      Value idx =
-          arith::ConstantIndexOp::create(rewriter, loc, outputShapeIdx++);
-      Value dim = memref::LoadOp::create(rewriter, loc, outputShape, idx);
-      out[outDim] = asIndexValue(dim, indexType, rewriter, loc);
-    }
-    ++inDim;
-  }
-  return out;
-}
-
-/// Build the i64 shape vector passed to hipdnn_ep_alloc_output. Uses the
-/// func.return operand type when its rank differs from the internal memref
-/// (e.g. memref<1x?xH> compute buffer returned as memref<?xH>).
-///
-/// Sizes are derived from the internal alloc dims plus any intervening
-/// collapse/expand views — not from memref.dim on the return value, which would
-/// be defined later in the block and violate SSA dominance at the alloc site.
-static void buildCallbackShapeValues(Location loc, MemRefType internalType,
-                                     ArrayRef<Value> internalSizes, Value root,
-                                     Value returnVal,
-                                     ConversionPatternRewriter &rewriter,
-                                     SmallVectorImpl<Value> &outSizes,
-                                     int64_t &outRank) {
-  outSizes.clear();
-  if (!returnVal) {
-    outSizes.assign(internalSizes.begin(), internalSizes.end());
-    outRank = internalType.getRank();
-    return;
-  }
-
-  auto externalType = dyn_cast<MemRefType>(returnVal.getType());
-  if (!externalType || externalType.getRank() == internalType.getRank()) {
-    outSizes.assign(internalSizes.begin(), internalSizes.end());
-    outRank = internalType.getRank();
-    return;
-  }
-
-  Type indexType = rewriter.getIndexType();
-  Type i64Type = rewriter.getI64Type();
-  SmallVector<Value, 4> indexSizes;
-  indexSizes.reserve(internalSizes.size());
-  for (Value v : internalSizes)
-    indexSizes.push_back(asIndexValue(v, indexType, rewriter, loc));
-
-  SmallVector<Value, 4> currentSizes = indexSizes;
-  for (Operation *viewOp : collectViewChainRootToReturn(root, returnVal)) {
-    if (auto collapse = dyn_cast<memref::CollapseShapeOp>(viewOp)) {
-      currentSizes =
-          propagateCollapseSizes(collapse, currentSizes, indexType, rewriter);
-      continue;
-    }
-    if (auto expand = dyn_cast<memref::ExpandShapeOp>(viewOp)) {
-      currentSizes =
-          propagateExpandSizes(expand, currentSizes, indexType, rewriter);
-      if (currentSizes.empty()) {
-        outSizes.assign(internalSizes.begin(), internalSizes.end());
-        outRank = internalType.getRank();
-        return;
-      }
-      continue;
-    }
-    // Same-rank views (cast / subview / reinterpret_cast): dim values
-    // unchanged.
-  }
-
-  if (static_cast<int64_t>(currentSizes.size()) != externalType.getRank()) {
-    outSizes.assign(internalSizes.begin(), internalSizes.end());
-    outRank = internalType.getRank();
-    return;
-  }
-
-  outRank = externalType.getRank();
-  for (Value dim : currentSizes)
-    outSizes.push_back(arith::IndexCastOp::create(rewriter, loc, i64Type, dim));
-}
 
 /// If module metadata is present, verify callback rank matches the ONNX
 /// output shape recorded at compile time (hipdnn.output_shapes). Metadata
@@ -429,20 +246,25 @@ struct GetHostScratchOpLowering
 //        elem_size) + a memref descriptor over the returned device pointer.
 //
 // The op obtains a graph-output buffer from the EP output allocator at the
-// point where the output shape is known. The shape handed to the runtime uses
-// the func.return / ONNX ABI rank when it differs from the internal memref
-// (e.g. a rank-3 compute buffer returned through collapse_shape as rank-2).
-// Internal memref descriptors still use the op's own type for downstream ops.
+// point where the output shape is known. The runtime callback shape uses the
+// func.return / ONNX ABI rank when it differs from the internal memref (e.g. a
+// rank-3 compute buffer returned through collapse_shape as rank-2). That rank
+// mismatch is recorded by hip-use-output-allocator as the discardable attrs
+// `hipdnn.abi_shape` / `hipdnn.abi_groups` (see stampAbiCollapseAttrs) -- read
+// here to re-derive each external dim from the internal alloc sizes (which
+// dominate this alloc site). The memref descriptor handed to downstream compute
+// ops still uses the op's own (internal) type.
 //
-// Before (internal rank 3, ONNX return rank 2):
-//   %out = hip.alloc_output(%ctx, %seq) : memref<1x?x2560>
-//   %ret = memref.collapse_shape %out [[0], [1, 2]] : ... into memref<?x2560>
-//   return %ret
-// hipdnn_ep_alloc_output(..., shape={%seq, 2560}, rank=2)  // not rank 3
+// Before (internal rank 3, ONNX return rank 2; abi_groups=[2,1]):
+//   %out = hip.alloc_output(%ctx, %d0, %d1)
+//            {out_idx = 0,
+//             hipdnn.abi_shape  = array<i64: kDynamic, 2560>,
+//             hipdnn.abi_groups = array<i64: 2, 1>} : memref<?x?x2560xf16>
 //
-// After (mixed static/dynamic ABI):
+// After (callback shape rank 2, ext dim0 = %d0 * %d1):
 //   %shape = llvm.alloca ... x !llvm.array<2 x i64>
-//   llvm.store %seq, %shape[0]
+//   %p0    = llvm.mul %d0, %d1
+//   llvm.store %p0,    %shape[0]
 //   llvm.store %c2560, %shape[1]
 //   %p = llvm.call @hipdnn_ep_alloc_output(..., %shape, %c2_rank, ...)
 struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
@@ -473,21 +295,69 @@ struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
 
     int64_t rank = memRefType.getRank();
 
-    // sizes[] interleaves static dims (type constants) with the dynamic-size
-    // operands (in type order); strides[] are row-major. Used for the internal
-    // memref descriptor consumed by downstream compute ops.
+    // internalSizes[] interleave static dims (type constants) with the
+    // dynamic-size operands (in type order); strides[] are row-major. They
+    // build the memref descriptor the downstream compute ops consume, so they
+    // always describe the op's own (internal) type. All are i64 (index lowers
+    // to i64), materialized here, so they dominate the callback arithmetic
+    // below.
     SmallVector<Value, 4> internalSizes;
     SmallVector<Value, 4> strides;
     Value sizeBytes;
     getMemRefDescriptorSizes(loc, memRefType, adaptor.getDynamicSizes(),
                              rewriter, internalSizes, strides, sizeBytes, true);
 
-    Value root = op.getMemref();
-    Value returnVal = findGraphOutputReturnValue(root);
+    // Runtime callback shape: the ONNX / func.return output shape, which may be
+    // a rank-reduced collapse of internalSizes. hip-use-output-allocator stamped
+    // that mapping on the op (while collapse_shape was still intact) as
+    // `hipdnn.abi_shape` (external shape; ShapedType::kDynamic per dynamic dim)
+    // + `hipdnn.abi_groups` (# internal dims folded into each external dim).
+    // Re-derive each external dim: static from the attribute, dynamic as the
+    // runtime i64 product of the internal dims it folds. Absent / malformed
+    // attrs -> internal rank/sizes verbatim (unchanged behavior).
+    auto abiShapeAttr = op->getAttrOfType<DenseI64ArrayAttr>(kAbiShapeAttrName);
+    auto abiGroupsAttr =
+        op->getAttrOfType<DenseI64ArrayAttr>(kAbiGroupsAttrName);
+
     SmallVector<Value, 4> callbackSizes;
     int64_t callbackRank = rank;
-    buildCallbackShapeValues(loc, memRefType, internalSizes, root, returnVal,
-                             rewriter, callbackSizes, callbackRank);
+    if (abiShapeAttr && abiGroupsAttr &&
+        abiShapeAttr.size() == abiGroupsAttr.size()) {
+      ArrayRef<int64_t> abiShape = abiShapeAttr.asArrayRef();
+      ArrayRef<int64_t> abiGroups = abiGroupsAttr.asArrayRef();
+      int64_t internalDim = 0;
+      bool ok = true;
+      for (int64_t e : llvm::seq<int64_t>(0, abiShape.size())) {
+        int64_t cnt = abiGroups[e];
+        if (cnt <= 0 || internalDim + cnt > rank) {
+          ok = false; // group bookkeeping doesn't cover the internal rank.
+          break;
+        }
+        Value dim;
+        if (!ShapedType::isDynamic(abiShape[e])) {
+          // Static external dim: the folded product is compile-time known.
+          dim = LLVM::ConstantOp::create(
+              rewriter, loc, i64Type, rewriter.getI64IntegerAttr(abiShape[e]));
+        } else {
+          // Dynamic external dim: runtime product of the internal dims it folds.
+          dim = internalSizes[internalDim];
+          for (int64_t j : llvm::seq<int64_t>(1, cnt))
+            dim = LLVM::MulOp::create(rewriter, loc, dim,
+                                      internalSizes[internalDim + j]);
+        }
+        callbackSizes.push_back(dim);
+        internalDim += cnt;
+      }
+      if (ok && internalDim == rank)
+        callbackRank = static_cast<int64_t>(abiShape.size());
+      else
+        callbackSizes.clear(); // malformed -> fall through to internal rank.
+    }
+    if (callbackSizes.empty()) {
+      callbackSizes.assign(internalSizes.begin(), internalSizes.end());
+      callbackRank = rank;
+    }
+
     auto parentFunc = op->getParentOfType<func::FuncOp>();
     if (failed(verifyCallbackRankAgainstMetadata(
             module, parentFunc, op.getOutIdx(), callbackRank, loc)))
