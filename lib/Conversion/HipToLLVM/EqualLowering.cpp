@@ -9,6 +9,14 @@ namespace mlir {
 namespace hip {
 namespace {
 
+// hip.equal(ctx, lhs, rhs, output)
+//   -> wrap_equal(state, lhs, rhs, output,
+//                 lhs_n..lhs_w, rhs_n..rhs_w, out_n..out_w, data_type)
+//
+// Output is bool (1 byte/element); data_type identifies the comparison
+// operand type. Full 4D shapes are passed (rank <= 4, left-padded with 1) so
+// the runtime handles same-shape / scalar directly and materialises any other
+// ONNX multidirectional broadcast via hip_expand -- mirrors DivOpLowering.
 struct EqualOpLowering : public ConvertOpToLLVMPattern<EqualOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -21,48 +29,49 @@ struct EqualOpLowering : public ConvertOpToLLVMPattern<EqualOp> {
     Type i32Type = rewriter.getI32Type();
     Type i64Type = rewriter.getI64Type();
 
-    Value statePtr = adaptor.getCtx();
-    Value lhsPtr = extractContiguousMemRefPtr(adaptor.getLhs(), rewriter, loc);
-    Value rhsPtr = extractContiguousMemRefPtr(adaptor.getRhs(), rewriter, loc);
-    Value outputPtr =
-        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
-
     auto lhsType = cast<MemRefType>(op.getLhs().getType());
     auto rhsType = cast<MemRefType>(op.getRhs().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
 
-    // ONNX Equal supports broadcasting; the kernel handles same-shape and
-    // scalar (lhs/rhs num_elements == 1) cases. Larger NumPy-style broadcasts
-    // must be materialised upstream via Expand (the runtime wrapper enforces
-    // this).
-    Value lhsNumElements =
-        computeNumElements(lhsType, adaptor.getLhs(), rewriter, loc);
-    Value rhsNumElements =
-        computeNumElements(rhsType, adaptor.getRhs(), rewriter, loc);
-    Value outNumElements =
-        computeNumElements(outputType, adaptor.getOutput(), rewriter, loc);
+    if (lhsType.getRank() > 4 || rhsType.getRank() > 4 ||
+        outputType.getRank() > 4)
+      return rewriter.notifyMatchFailure(
+          op, "rank > 4 unsupported by 4D broadcast descriptor API");
 
     int64_t dataType = getHipdnnDataType(lhsType.getElementType());
     if (dataType < 0)
       return rewriter.notifyMatchFailure(op, "unsupported input element type");
+
+    auto lhsDims =
+        extractShape4D(lhsType, adaptor.getLhs(), rewriter, loc, i64Type);
+    auto rhsDims =
+        extractShape4D(rhsType, adaptor.getRhs(), rewriter, loc, i64Type);
+    auto outDims =
+        extractShape4D(outputType, adaptor.getOutput(), rewriter, loc, i64Type);
 
     auto createI64Const = [&](int64_t v) -> Value {
       return LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                       rewriter.getI64IntegerAttr(v));
     };
 
-    SmallVector<Type, 8> paramTypes = {ptrType, ptrType, ptrType, ptrType,
-                                       i64Type, i64Type, i64Type, i64Type};
+    // 17 params: state + 3 data ptrs + 12 shape dims + data_type
+    SmallVector<Type, 17> paramTypes(4, ptrType);
+    paramTypes.append(13, i64Type);
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapEqual, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 8> args = {statePtr,       lhsPtr,
-                                  rhsPtr,         outputPtr,
-                                  lhsNumElements, rhsNumElements,
-                                  outNumElements, createI64Const(dataType)};
+    SmallVector<Value, 17> args = {
+        adaptor.getCtx(),
+        extractContiguousMemRefPtr(adaptor.getLhs(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getRhs(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc)};
+    args.append(lhsDims.begin(), lhsDims.end());
+    args.append(rhsDims.begin(), rhsDims.end());
+    args.append(outDims.begin(), outDims.end());
+    args.push_back(createI64Const(dataType));
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

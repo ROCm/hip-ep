@@ -1,0 +1,16 @@
+{
+    "metaDef": [],
+    "config": {
+        "cacheDir": "C:\\temp\\zhenzew\\morphizen\\.cache",
+        "cacheKey": "87661f9682d9e299380d77e6e288e471",
+        "sessionOptions": {
+            "_comment": "for historical reasons, this is provider_options not session options",
+            "ep_context_file_path": "C:/Users/zhenzew/build/build.Windows.10.0.20348.AMD64.Release/morphizen/unit-test/pt_resnet50.onnx_ctx.onnx",
+            "ep_context_embed_mode": "1",
+            "ep_context_enable": "1",
+            "xclbin": "AMD_AIE2P_4x4_Overlay_CFG2.xclbin",
+            "k0": "value0_in_context.json",
+            "k1": "value1_in_context.json"
+        }
+    }
+}

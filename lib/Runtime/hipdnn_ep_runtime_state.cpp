@@ -82,8 +82,8 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
 
   // 3. Dispatch by metadata semantics: if any constant carries a per-entry
   //    source descriptor (Splat / FileRef), do per-tensor upload driven by
-  //    the source union. Otherwise fall back to the bulk sidecar path (used
-  //    by EPContext export / import and has_mem_addr downgrade).
+  //    the source union. Otherwise fall back to the bulk constants-file path
+  //    (used by EPContext export / import and has_mem_addr downgrade).
   bool anyPerEntry = false;
   for (int64_t i = 0; i < count; ++i) {
     if (constants->Get(i)->source_type() != mlir::hip::ConstantSource::NONE) {
@@ -96,7 +96,7 @@ int hipdnn_ep_state_init_with_fs(RuntimeState **out_state, void *fs,
     constants_filename = meta->constants_filename()->c_str();
   int rc;
   if (anyPerEntry) {
-    // Hybrid path also goes through per-entry; SidecarSource entries open
+    // Hybrid path also goes through per-entry; MemSource entries open
     // constants_filename through fs to fetch their slice on demand. Pure
     // streaming (only Splat / FileRef) ignores fs/constants_filename.
     rc = per_entry_load_constants(*out_state, meta, fileSystem,
@@ -152,9 +152,9 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->workspace_size = 0;
   state->host_scratch_base = nullptr;
   state->host_scratch_size = 0;
-  // No allocator installed by default (null context + callback). The EP
-  // overwrites this via hipdnn_ep_set_output_allocator; the classic pipeline
-  // leaves it null and never calls hipdnn_ep_alloc_output.
+  // Start with no output allocator (null context + callback). The EP installs
+  // one via hipdnn_ep_set_output_allocator before the first inference_compute,
+  // and hipdnn_ep_alloc_output then forwards each graph-output request to it.
   state->output_allocator.self = nullptr;
   state->output_allocator.allocate = nullptr;
   state->qmoe_scratch = nullptr;
@@ -163,9 +163,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->qmoe_host_scratch_size = 0;
   state->conv_scratch = nullptr;
   state->conv_scratch_size = 0;
-  state->gqa_gemm_cache = nullptr;
-  state->mha_gemm_cache = nullptr;
-  state->causal_conv_cache = nullptr;
+  state->matmul_dp4a_scratch = nullptr;
+  state->matmul_dp4a_scratch_size = 0;
   state->zp_unpack_cache = nullptr;
   state->op_profile = hipdnn_ep_perf_enabled() ? op_profile_create() : nullptr;
   state->device_error_flag = nullptr;
@@ -180,6 +179,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->loop_cond_host = nullptr;
   state->loop_cond_dev = nullptr;
   state->loop_event = nullptr;
+  state->op_states = nullptr;
+  state->num_op_states = 0;
 
   int device_count = 0;
   if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
@@ -204,6 +205,11 @@ static int initialize_state_handles(RuntimeState **out_state) {
 
   TIMING_LOG("[Session] hipStreamCreate: %.3fs\n", record_elapsed(t_prev));
 
+  // Skip vendor-handle creation when the vendor BLAS/DNN backends are disabled:
+  // the stubbed miopenCreate/hipblasLtCreate would fail and abort session
+  // creation even for a model that never dispatches a vendor op. Handles stay
+  // null; cleanup is already null-guarded.
+#ifndef HIPDNN_EP_DISABLE_VENDOR_BLAS
   if (miopenCreate(&state->miopen_handle) != miopenStatusSuccess) {
     fprintf(stderr, "Failed to create MIOpen handle\n");
     if (state->stream)
@@ -232,6 +238,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
     free(state);
     return 9;
   }
+#endif // HIPDNN_EP_DISABLE_VENDOR_BLAS
 
   TIMING_LOG("[Session] hipBLASLt init: %.3fs\n", record_elapsed(t_prev));
 
@@ -323,7 +330,7 @@ static int hipmalloc_and_fixup(RuntimeState *state,
   return 0;
 }
 
-// Load the entire constants sidecar as one blob and hipMemcpy it into the
+// Load the entire constants file as one blob and hipMemcpy it into the
 // pre-allocated gpu_constants_blob. Used when OnnxToHip wrote
 // model.constants.bin (non-streaming path: hip-compiler CLI, EPContext
 // import, mem-addr downgrade).
@@ -338,7 +345,7 @@ static int bulk_load_constants(RuntimeState *state, morphizen::FileSystem *fs,
   }
   size_t total_size = reader->size();
 
-  TIMING_LOG("[Session] open sidecar %s: %.3fs (%zu bytes)\n",
+  TIMING_LOG("[Session] open constants file %s: %.3fs (%zu bytes)\n",
              constants_filename, record_elapsed(t_prev), total_size);
 
   const void *src = reader->mmap();
@@ -452,13 +459,13 @@ static int fref_fetch(FrefCache *c, int64_t file_offset, size_t size,
   return 0;
 }
 
-// Lazy reader for the partial mem-addr sidecar (hybrid mode). Opened
-// through the EP FileSystem on first SidecarSource entry; if the
-// FileSystem can mmap the sidecar we keep the base pointer so the case
+// Lazy reader for the partial mem-addr constants file (hybrid mode). Opened
+// through the EP FileSystem on first MemSource entry; if the
+// FileSystem can mmap the constants file we keep the base pointer so the case
 // becomes a memcpy + hipMemcpy (no extra fread). On non-mmap backends
 // we fall back to fread, which still wins because the per-entry staging
 // reuse keeps host peak bounded to the largest single tensor.
-struct SidecarReaderCache {
+struct ConstantsFileReaderCache {
   std::unique_ptr<morphizen::FileReader,
                   morphizen::FileSystem::Deleter<morphizen::FileReader>>
       reader; // default-init: null pointer, deleter unused
@@ -468,21 +475,21 @@ struct SidecarReaderCache {
 };
 
 // Returns true on success (or no-op if already open). On first call
-// opens the sidecar through fs and tries mmap.
-static bool sidecar_cache_open(SidecarReaderCache *c, morphizen::FileSystem *fs,
-                               const char *constants_filename) {
+// opens the constants file through fs and tries mmap.
+static bool constants_file_cache_open(ConstantsFileReaderCache *c,
+                                      morphizen::FileSystem *fs,
+                                      const char *constants_filename) {
   if (c->tried_open)
     return c->reader != nullptr;
   c->tried_open = true;
   if (!fs || !constants_filename) {
-    fprintf(stderr,
-            "per_entry: SidecarSource entry but fs / constants_filename "
-            "unavailable\n");
+    fprintf(stderr, "per_entry: MemSource entry but fs / constants_filename "
+                    "unavailable\n");
     return false;
   }
   c->reader = fs->create_reader_template(constants_filename);
   if (!c->reader) {
-    fprintf(stderr, "per_entry: failed to open partial sidecar %s\n",
+    fprintf(stderr, "per_entry: failed to open partial constants file %s\n",
             constants_filename);
     return false;
   }
@@ -491,14 +498,16 @@ static bool sidecar_cache_open(SidecarReaderCache *c, morphizen::FileSystem *fs,
   return true;
 }
 
-// Copy `size` bytes at `offset` from the partial sidecar into `staging`.
-static int sidecar_fetch(SidecarReaderCache *c, int64_t offset, size_t size,
-                         void *staging) {
+// Copy `size` bytes at `offset` from the partial constants file into
+// `staging`.
+static int constants_file_fetch(ConstantsFileReaderCache *c, int64_t offset,
+                                size_t size, void *staging) {
   if ((uint64_t)offset + size > (uint64_t)c->total_size) {
-    fprintf(stderr,
-            "per_entry: sidecar fetch out of range (offset=%lld size=%zu "
-            "total=%zu)\n",
-            (long long)offset, size, c->total_size);
+    fprintf(
+        stderr,
+        "per_entry: constants-file fetch out of range (offset=%lld size=%zu "
+        "total=%zu)\n",
+        (long long)offset, size, c->total_size);
     return 1;
   }
   if (c->mmap_base) {
@@ -507,8 +516,8 @@ static int sidecar_fetch(SidecarReaderCache *c, int64_t offset, size_t size,
   }
   // Non-mmap reader: rewind + skip + fread. morphizen::FileReader does
   // not expose a seek primitive, so we read-and-discard up to offset.
-  // Sidecar is touched once per entry in entry order, so this still
-  // streams linearly through the file.
+  // The constants file is touched once per entry in entry order, so this
+  // still streams linearly through the file.
   c->reader->rewind();
   static constexpr size_t kSkipChunk = 64 * 1024;
   uint8_t skip_buf[kSkipChunk];
@@ -517,7 +526,8 @@ static int sidecar_fetch(SidecarReaderCache *c, int64_t offset, size_t size,
     size_t toRead = (size_t)std::min<uint64_t>(remaining_skip, kSkipChunk);
     size_t got = c->reader->fread(skip_buf, toRead);
     if (got != toRead) {
-      fprintf(stderr, "per_entry: sidecar skip short read (got %zu of %zu)\n",
+      fprintf(stderr,
+              "per_entry: constants-file skip short read (got %zu of %zu)\n",
               got, toRead);
       return 1;
     }
@@ -525,7 +535,8 @@ static int sidecar_fetch(SidecarReaderCache *c, int64_t offset, size_t size,
   }
   size_t got = c->reader->fread(staging, size);
   if (got != size) {
-    fprintf(stderr, "per_entry: sidecar payload short read (got %zu of %zu)\n",
+    fprintf(stderr,
+            "per_entry: constants-file payload short read (got %zu of %zu)\n",
             got, size);
     return 1;
   }
@@ -540,9 +551,9 @@ static int sidecar_fetch(SidecarReaderCache *c, int64_t offset, size_t size,
 // through a single reusable staging buffer, bounding host memory to the
 // largest single tensor.
 //
-// `fs` and `constants_filename` are only consulted by SidecarSource
+// `fs` and `constants_filename` are only consulted by MemSource
 // entries (hybrid path). Pure streaming modules (only Splat / FileRef)
-// never open the sidecar.
+// never open the constants file.
 static int per_entry_load_constants(RuntimeState *state,
                                     const mlir::hip::HipModelMetaInfo *meta,
                                     morphizen::FileSystem *fs,
@@ -574,7 +585,7 @@ static int per_entry_load_constants(RuntimeState *state,
   FrefCache fcache;
   fref_cache_init(&fcache);
 
-  SidecarReaderCache scache; // RAII; default-initialized above
+  ConstantsFileReaderCache cfcache; // RAII; default-initialized above
 
   for (int64_t i = 0; i < count; ++i) {
     auto *c = constants->Get(i);
@@ -629,21 +640,21 @@ static int per_entry_load_constants(RuntimeState *state,
       }
       break;
     }
-    case mlir::hip::ConstantSource::SidecarSource: {
-      auto *side = c->source_as_SidecarSource();
-      int64_t side_offset = side->sidecar_offset();
-      if (!sidecar_cache_open(&scache, fs, constants_filename)) {
+    case mlir::hip::ConstantSource::MemSource: {
+      auto *mem = c->source_as_MemSource();
+      int64_t mem_offset = mem->mem_offset();
+      if (!constants_file_cache_open(&cfcache, fs, constants_filename)) {
         free(staging);
         fref_cache_release(&fcache);
         return 1;
       }
-      if (sidecar_fetch(&scache, side_offset, sz, staging) != 0) {
+      if (constants_file_fetch(&cfcache, mem_offset, sz, staging) != 0) {
         free(staging);
         fref_cache_release(&fcache);
         return 1;
       }
       if (hipMemcpy(dst, staging, sz, hipMemcpyHostToDevice) != hipSuccess) {
-        fprintf(stderr, "per_entry: hipMemcpy failed for sidecar entry %lld\n",
+        fprintf(stderr, "per_entry: hipMemcpy failed for mem entry %lld\n",
                 (long long)i);
         free(staging);
         fref_cache_release(&fcache);
@@ -705,6 +716,25 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
     HIP_CLEANUP(hipFree(state->conv_scratch));
   }
 
+  // Free the W4A8 dp4a matmul_nbits scratch (if allocated).
+  if (state->matmul_dp4a_scratch) {
+    HIP_CLEANUP(hipFree(state->matmul_dp4a_scratch));
+  }
+
+  // Tear down per-op state slots. Each entry's deletor destroys its concrete
+  // type; slots reference nothing in other slots, so order is irrelevant. The
+  // stream sync at the top has drained any in-flight op that may read a slot.
+  if (state->op_states) {
+    for (int i = 0; i < state->num_op_states; ++i) {
+      OpState *os = state->op_states[i];
+      if (os && os->deletor)
+        os->deletor(os);
+    }
+    free(state->op_states);
+    state->op_states = nullptr;
+    state->num_op_states = 0;
+  }
+
   // Free ONNX Loop driver host-mapped buffers + reusable sync event (if
   // allocated). The stream sync at the top of cleanup has already drained
   // any in-flight kernel that may have been holding loop_*_dev pointers,
@@ -758,25 +788,21 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   if (state->gpu_constants)
     free(state->gpu_constants);
 
-  // Free GQA GEMM descriptor cache
-  if (state->gqa_gemm_cache) {
-    hipdnn_ep_gqa_gemm_cache_destroy(state->gqa_gemm_cache);
-    state->gqa_gemm_cache = nullptr;
-  }
+  // (The GQA GEMM descriptor cache is no longer freed here: it moved into each
+  // gqa instance's GqaState op-state slot, freed by the slot's deletor in the
+  // per-op-state teardown just below.)
 
-  // Free MultiHeadAttention GEMM descriptor cache
-  if (state->mha_gemm_cache) {
-    hipdnn_ep_mha_gemm_cache_destroy(state->mha_gemm_cache);
-    state->mha_gemm_cache = nullptr;
-  }
+  // (The MultiHeadAttention GEMM descriptor cache is no longer freed here: it
+  // moved into each multi_head_attention instance's MhaState op-state slot,
+  // freed by the slot's deletor in the per-op-state teardown just below.)
 
-  // Free CausalConvWithState descriptor/algo cache
-  if (state->causal_conv_cache) {
-    hipdnn_ep_causal_conv_cache_destroy(state->causal_conv_cache);
-    state->causal_conv_cache = nullptr;
-  }
+  // (The CausalConvWithState descriptor/algo cache is no longer freed here:
+  // it moved into each causal_conv_with_state instance's CausalConvState
+  // op-state slot, freed by the slot's deletor in the per-op-state teardown
+  // just below.)
 
-  // Free MatMulNBits asym zero_points unpack cache
+  // Free the asym zero_points unpack cache (qmoe-owned; matmul_nbits keeps a
+  // per-instance cache in its op-state slot).
   if (state->zp_unpack_cache) {
     hipdnn_ep_zp_unpack_cache_destroy(state->zp_unpack_cache);
     state->zp_unpack_cache = nullptr;
@@ -883,6 +909,26 @@ extern "C"
   }
   op_profile_resolve_and_print(
       static_cast<OpProfileState *>(state->op_profile));
+}
+
+// Outer (whole-scope) CPU timing sink for the EP. Same dllexport/optional
+// contract as the two hooks above. `cpu_ms` is a steady_clock measurement from
+// the EP side (see the header contract); op_profile_add_cpu records it as a
+// CPU-only row so the resolve/print step can surface the bubble against the
+// per-op CPU rows. No-op when perf is disabled (state->op_profile is null).
+extern "C"
+#ifdef _WIN32
+    __declspec(dllexport)
+#endif
+        void hipdnn_ep_runtime_add_cpu_profile(RuntimeState *state,
+                                               const char *name,
+                                               double cpu_start_us,
+                                               double cpu_ms) {
+  if (!state || !name) {
+    return;
+  }
+  op_profile_add_cpu_total(static_cast<OpProfileState *>(state->op_profile),
+                           name, cpu_start_us, cpu_ms);
 }
 
 //===----------------------------------------------------------------------===//
@@ -1176,43 +1222,11 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
 // QMoE scratch helpers (device + pinned-host)
 //===----------------------------------------------------------------------===//
 //
-// Why this lives in the dynseqlen PR
-// ----------------------------------
-// Conceptually independent of dynamic sequence length, but the same
-// grow-on-demand infrastructure (1.5x amortization, sync-before-free,
-// monotonic-grow, never-shrink) introduced by dynseqlen for the runtime
-// pool and the shared workspace already encodes the policy this code
-// wants.  Bundling keeps the policy in one place and avoids repeating
-// the same sync-and-free dance in three near-identical helpers.
-//
-// Sub-buffer offset validation
-// ----------------------------
-// `wrap_qmoe` (lib/Runtime/real/qmoe.cpp) is the sole writer of
-// sub-buffer offsets, and it sums them into `total_scratch` before
-// calling `hipdnn_ep_state_ensure_qmoe_scratch`.  No defensive bound
-// check is performed at the use sites today; that is intentional in the
-// hot path but means a future refactor that adds a sub-buffer without
-// updating `total_scratch` would silently overrun the allocation.  A
-// follow-up should add a `qmoe_scratch_size` parameter exchange so the
-// caller can `assert(offset + size <= cap)` per sub-buffer.
-//
-// Cleanup-after-sync ordering
-// ---------------------------
-// Both grow paths sync the stream BEFORE freeing the old buffer
-// (`HIP_CLEANUP(hipStreamSynchronize) → HIP_CLEANUP(hipFree)`) and BEFORE
-// hipMalloc'ing the replacement.  Synchronizing first is required by HIP
-// semantics: hipFree on a buffer with in-flight kernel reads is undefined
-// behavior.  Both calls go through HIP_CLEANUP so a sync/free failure is
-// logged but does not abort the runtime — losing this scratch is a
-// recoverable error (the next call re-allocates).
-//
-// Mock-CI coverage
-// ----------------
-// The mock GPU (`lib/Runtime/mock/mock_gpu.cpp`) stubs `hipMalloc` /
-// `hipHostMalloc` so the grow path runs under mock CI, but no mock-CI
-// test exercises a shape progression that triggers an actual
-// reallocation.  Real-CI dynamic-shape benchmarks DO exercise the grow
-// path; document this gap rather than paper over it with mock fixtures.
+// Per-session grow-on-demand scratch shared by all qmoe instances. Single-
+// buffer reuse is safe because the HIP stream is serialised: the next qmoe
+// launches only after the previous one's kernels have consumed the buffer.
+// Both grow paths sync the stream BEFORE freeing the old buffer (hipFree on a
+// buffer with in-flight kernel reads is undefined behavior) and never shrink.
 //===----------------------------------------------------------------------===//
 
 // qmoe device scratch (single contiguous buffer, sub-buffer offsets computed
@@ -1354,6 +1368,50 @@ int hipdnn_ep_state_ensure_conv_scratch(RuntimeState *state,
     return -1;
   }
   state->conv_scratch_size = alloc_size;
+  return 0;
+}
+
+void *hipdnn_ep_state_get_matmul_dp4a_scratch(RuntimeState *state) {
+  return state ? state->matmul_dp4a_scratch : nullptr;
+}
+
+int hipdnn_ep_state_ensure_matmul_dp4a_scratch(RuntimeState *state,
+                                               size_t needed_size) {
+  if (!state)
+    return -1;
+  if (needed_size == 0)
+    return 0;
+  if (state->matmul_dp4a_scratch_size >= needed_size)
+    return 0;
+
+  // 1.5x growth amortisation mirrors conv_scratch / qmoe_scratch.
+  size_t alloc_size = needed_size;
+  if (state->matmul_dp4a_scratch_size > 0) {
+    size_t grown =
+        state->matmul_dp4a_scratch_size + state->matmul_dp4a_scratch_size / 2;
+    if (grown > alloc_size)
+      alloc_size = grown;
+  }
+
+  if (state->matmul_dp4a_scratch) {
+    // Drain any in-flight dp4a gemv that may still be reading the old buffer
+    // before we free it. Growth is rare (only when a larger K is first seen).
+    if (state->stream) {
+      hipStreamSynchronize(state->stream);
+    }
+    HIP_CLEANUP(hipFree(state->matmul_dp4a_scratch));
+    state->matmul_dp4a_scratch = nullptr;
+    state->matmul_dp4a_scratch_size = 0;
+  }
+
+  if (hipMalloc(&state->matmul_dp4a_scratch, alloc_size) != hipSuccess) {
+    fprintf(stderr,
+            "hipdnn_ep_state_ensure_matmul_dp4a_scratch: hipMalloc failed for "
+            "%zu bytes\n",
+            alloc_size);
+    return -1;
+  }
+  state->matmul_dp4a_scratch_size = alloc_size;
   return 0;
 }
 

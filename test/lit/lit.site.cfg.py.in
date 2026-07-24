@@ -26,6 +26,12 @@ config.hip_build_dir = r"@CMAKE_BINARY_DIR@"
 # string) so that lit substitutes the actual config (Debug/Release) at runtime.
 config.hip_build_mode = "@LLVM_BUILD_MODE@"
 
+# Whether the sample plugin was statically linked into the host (i.e. `sample`
+# is in HIPDNN_EP_COMPILER_PLUGINS). lit.cfg.py turns this into the
+# `hip_static_plugins` feature that gates the Plugin/ pass tests. Works on every
+# platform (static linking needs no symbol export).
+config.hip_static_plugins = @HIPDNN_STATIC_PLUGINS_LIT_FEATURE@
+
 lit.llvm.initialize(lit_config, config)
 
 # Resolve %(build_mode)s for VS multi-config generators. No-op for single-config.

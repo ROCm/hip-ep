@@ -9,12 +9,15 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
+#include "../op_state.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
 #include "runtime_types.h"
 
 #include <cstdio>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <unordered_map>
 
 // Use the shared MIOPEN_CHECK_GOTO macro for goto cleanup pattern
@@ -48,9 +51,9 @@ struct SkipT5NormCacheKeyHash {
   }
 };
 
-/// Cached MIOpen descriptors for a single SkipSimplifiedLayerNorm shape.
-/// Ownership: descriptors are created in queryOrCreateSkipT5Norm() and live
-/// for the process lifetime (never destroyed individually).
+/// Cached MIOpen descriptors for a single SkipSimplifiedLayerNorm shape. Owned
+/// by the SkipT5NormTable, which destroys them when the last session sharing it
+/// is torn down (previously these leaked for the process lifetime).
 struct SkipT5NormCacheEntry {
   // T5LayerNorm descriptors
   miopenTensorDescriptor_t xDesc, yDesc, weightDesc, rstdDesc;
@@ -58,14 +61,56 @@ struct SkipT5NormCacheEntry {
   miopenTensorDescriptor_t addADesc, addBDesc, addCDesc, biasDesc;
 };
 
-static std::unordered_map<SkipT5NormCacheKey, SkipT5NormCacheEntry,
-                          SkipT5NormCacheKeyHash>
-    g_skip_t5norm_cache;
+// One descriptor table shared across every session in the process and freed
+// when the last session holding it is destroyed. MIOpen descriptors are pure
+// shape/dtype metadata (no device binding), so a single table is correct for
+// all sessions; the mutex guards find/insert because sessions run Compute() on
+// independent threads.
+struct SkipT5NormTable {
+  std::mutex mu;
+  std::unordered_map<SkipT5NormCacheKey, SkipT5NormCacheEntry,
+                     SkipT5NormCacheKeyHash>
+      map;
+  ~SkipT5NormTable() {
+    for (auto &kv : map) {
+      SkipT5NormCacheEntry &e = kv.second;
+      miopenTensorDescriptor_t descs[] = {e.xDesc,    e.yDesc,    e.weightDesc,
+                                          e.rstdDesc, e.addADesc, e.addBDesc,
+                                          e.addCDesc, e.biasDesc};
+      for (miopenTensorDescriptor_t d : descs)
+        if (d)
+          miopenDestroyTensorDescriptor(d);
+    }
+  }
+};
+
+// Per-instance op state for hip.skip_rms_norm: the slot holds a shared_ptr to
+// the one shared descriptor table, reached through a global WeakStore keyed by
+// device (see op_state.h). The store is weak_ptr-backed, so the table lives
+// only while some session's SkipT5NormState holds a shared_ptr to it.
+struct SkipT5NormState : OpStateT<SkipT5NormState> {
+  std::shared_ptr<SkipT5NormTable> table;
+  SkipT5NormState() {
+    int dev = 0;
+    hipGetDevice(&dev);
+    table = WeakStore<int, SkipT5NormTable>::get_or_create(
+        dev, [] { return std::make_shared<SkipT5NormTable>(); });
+  }
+};
+
+extern "C" int8_t hipdnn_ep_op_state_construct_skip_t5norm(RuntimeState *state,
+                                                           int32_t slot) {
+  hipdnn_ep_op_state_set(state, slot, SkipT5NormState::create().release());
+  return 0;
+}
 
 static const SkipT5NormCacheEntry *
-queryOrCreateSkipT5Norm(const SkipT5NormCacheKey &key) {
-  auto it = g_skip_t5norm_cache.find(key);
-  if (it != g_skip_t5norm_cache.end())
+queryOrCreateSkipT5Norm(SkipT5NormTable &table, const SkipT5NormCacheKey &key) {
+  // The table is shared across sessions, so guard find/insert. Entries are
+  // never erased, so the returned pointer stays valid after the lock drops.
+  std::lock_guard<std::mutex> guard(table.mu);
+  auto it = table.map.find(key);
+  if (it != table.map.end())
     return &it->second;
 
   SkipT5NormCacheEntry e{};
@@ -127,7 +172,7 @@ cache_fail:
   return nullptr;
 
 cache_done:
-  auto [ins, _] = g_skip_t5norm_cache.emplace(key, e);
+  auto [ins, _] = table.map.emplace(key, e);
 
   RUNTIME_DEBUG_LOG("[REAL] queryOrCreateSkipT5Norm: cached 8 descriptors for "
                     "num_rows=%lld hidden_dim=%lld data_type=%d\n",
@@ -163,9 +208,10 @@ cache_done:
 //   rstd (scratch):                      [num_rows] (f32)
 //===----------------------------------------------------------------------===//
 
-int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
-                                    void *skip, void *gamma, void *bias,
-                                    void *output, void *input_skip_bias_sum,
+int wrap_skip_simplified_layer_norm(RuntimeState *state, int op_state_slot,
+                                    void *input, void *skip, void *gamma,
+                                    void *bias, void *output,
+                                    void *input_skip_bias_sum,
                                     int64_t input_num_elements,
                                     int64_t gamma_num_elements,
                                     int64_t element_size_bytes, float epsilon) {
@@ -219,9 +265,17 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, void *input,
     return -1;
   }
 
+  SkipT5NormState *ns = SkipT5NormState::get_op_state(state, op_state_slot);
+  if (!ns || !ns->table) {
+    fprintf(stderr,
+            "wrap_skip_simplified_layer_norm: missing op-state for slot %d\n",
+            op_state_slot);
+    return -1;
+  }
+
   // Look up or create cached descriptors (T5LayerNorm + OpTensor)
   SkipT5NormCacheKey key{num_rows, hidden_dim, data_type};
-  const SkipT5NormCacheEntry *c = queryOrCreateSkipT5Norm(key);
+  const SkipT5NormCacheEntry *c = queryOrCreateSkipT5Norm(*ns->table, key);
   if (!c) {
     fprintf(
         stderr,

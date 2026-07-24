@@ -9,12 +9,15 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
+#include "../op_state.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
 #include "runtime_types.h"
 
 #include <cstdio>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <unordered_map>
 
 // Use the shared macros from error_check_macros.h with goto cleanup pattern
@@ -45,19 +48,63 @@ struct T5NormCacheKeyHash {
   }
 };
 
-/// Cached MIOpen tensor descriptors for a single T5LayerNorm shape.
-/// Ownership: descriptors are created in queryOrCreateT5Norm() and live
-/// for the process lifetime (never destroyed individually).
+/// Cached MIOpen tensor descriptors for a single T5LayerNorm shape. Owned by
+/// the T5NormTable, which destroys them when the last session sharing it is
+/// torn down (previously these leaked for the process lifetime).
 struct T5NormCacheEntry {
   miopenTensorDescriptor_t xDesc, yDesc, weightDesc, rstdDesc;
 };
 
-static std::unordered_map<T5NormCacheKey, T5NormCacheEntry, T5NormCacheKeyHash>
-    g_t5norm_cache;
+// One descriptor table shared across every session in the process and freed
+// when the last session holding it is destroyed. MIOpen tensor descriptors are
+// pure shape/dtype metadata (no device binding), so a single table is correct
+// for all sessions; the mutex guards find/insert because sessions run
+// Compute() on independent threads.
+struct T5NormTable {
+  std::mutex mu;
+  std::unordered_map<T5NormCacheKey, T5NormCacheEntry, T5NormCacheKeyHash> map;
+  ~T5NormTable() {
+    for (auto &kv : map) {
+      T5NormCacheEntry &e = kv.second;
+      if (e.rstdDesc)
+        miopenDestroyTensorDescriptor(e.rstdDesc);
+      if (e.weightDesc)
+        miopenDestroyTensorDescriptor(e.weightDesc);
+      if (e.yDesc)
+        miopenDestroyTensorDescriptor(e.yDesc);
+      if (e.xDesc)
+        miopenDestroyTensorDescriptor(e.xDesc);
+    }
+  }
+};
 
-static const T5NormCacheEntry *queryOrCreateT5Norm(const T5NormCacheKey &key) {
-  auto it = g_t5norm_cache.find(key);
-  if (it != g_t5norm_cache.end())
+// Per-instance op state for hip.rms_norm: the slot holds a shared_ptr to the
+// one shared descriptor table, reached through a global WeakStore keyed by
+// device (see op_state.h). The store is weak_ptr-backed, so the table lives
+// only while some session's T5NormState holds a shared_ptr to it.
+struct T5NormState : OpStateT<T5NormState> {
+  std::shared_ptr<T5NormTable> table;
+  T5NormState() {
+    int dev = 0;
+    hipGetDevice(&dev);
+    table = WeakStore<int, T5NormTable>::get_or_create(
+        dev, [] { return std::make_shared<T5NormTable>(); });
+  }
+};
+
+extern "C" int8_t hipdnn_ep_op_state_construct_t5norm(RuntimeState *state,
+                                                      int32_t slot) {
+  hipdnn_ep_op_state_set(state, slot, T5NormState::create().release());
+  return 0;
+}
+
+static const T5NormCacheEntry *queryOrCreateT5Norm(T5NormTable &table,
+                                                   const T5NormCacheKey &key) {
+  // The table is shared across sessions, so guard find/insert. Entries are
+  // never erased, so the returned pointer stays valid after the lock drops.
+  std::lock_guard<std::mutex> guard(table.mu);
+  auto it = table.map.find(key);
+  if (it != table.map.end())
     return &it->second;
 
   T5NormCacheEntry e{};
@@ -109,7 +156,7 @@ cache_fail:
   return nullptr;
 
 cache_done:
-  auto [ins, _] = g_t5norm_cache.emplace(key, e);
+  auto [ins, _] = table.map.emplace(key, e);
 
   RUNTIME_DEBUG_LOG("[REAL] queryOrCreateT5Norm: cached 4 descriptors for "
                     "num_rows=%lld hidden_dim=%lld data_type=%d\n",
@@ -135,8 +182,9 @@ cache_done:
 //   rstd:   [num_rows]              (scratch -- not exposed to caller)
 //===----------------------------------------------------------------------===//
 
-int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,
-                                  void *output, int64_t input_num_elements,
+int wrap_miopenT5LayerNormForward(RuntimeState *state, int op_state_slot,
+                                  void *input, void *scale, void *output,
+                                  int64_t input_num_elements,
                                   int64_t scale_num_elements,
                                   int64_t element_size_bytes, int64_t axis,
                                   float epsilon, int64_t stash_type) {
@@ -189,9 +237,17 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, void *input, void *scale,
     return -1;
   }
 
+  T5NormState *ns = T5NormState::get_op_state(state, op_state_slot);
+  if (!ns || !ns->table) {
+    fprintf(stderr,
+            "wrap_miopenT5LayerNormForward: missing op-state for slot %d\n",
+            op_state_slot);
+    return -1;
+  }
+
   // Look up or create cached descriptors
   T5NormCacheKey key{num_rows, hidden_dim, data_type};
-  const T5NormCacheEntry *c = queryOrCreateT5Norm(key);
+  const T5NormCacheEntry *c = queryOrCreateT5Norm(*ns->table, key);
   if (!c) {
     fprintf(
         stderr,

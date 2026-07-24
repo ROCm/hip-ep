@@ -147,7 +147,7 @@ void ResolveExternConstantsPass::runOnOperation() {
     info.globalOp.erase();
 
   // Keep hip.constants_file so GenerateInterface can embed the correct
-  // sidecar filename in the model metadata.
+  // constants-file name in the model metadata.
 }
 
 } // namespace

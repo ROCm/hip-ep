@@ -5,6 +5,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
+#include "../op_state.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
@@ -13,6 +14,8 @@
 #include <algorithm>
 #include <cstdio>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -38,6 +41,8 @@ static int hipdnn_to_hip_dtype(int64_t hipdnn_type) {
     return HIP_DTYPE_UINT8;
   case HIPDNN_EP_DATATYPE_INT8:
     return HIP_DTYPE_INT8;
+  case HIPDNN_EP_DATATYPE_INT16:
+    return HIP_DTYPE_INT16;
   default:
     return -1;
   }
@@ -127,24 +132,65 @@ struct OpTensorCacheKeyHash {
   }
 };
 
-/// Cached MIOpen tensor descriptors for a single OpTensor shape.
-/// Ownership: descriptors are created in queryOrCreateOpTensor() and live
-/// for the process lifetime (never destroyed individually).
+/// Cached MIOpen tensor descriptors for a single OpTensor shape. Owned by the
+/// OpTensorTable, which destroys them when the last session sharing it is torn
+/// down (previously these leaked for the process lifetime).
 struct OpTensorCacheEntry {
   miopenTensorDescriptor_t aDesc, bDesc, cDesc; // lhs, rhs, output
 };
 
-static std::unordered_map<OpTensorCacheKey, OpTensorCacheEntry,
-                          OpTensorCacheKeyHash>
-    g_optensor_cache;
+// One descriptor table shared across every session in the process and freed
+// when the last session holding it is destroyed. MIOpen tensor descriptors are
+// pure shape/dtype metadata (no device binding), so a single table is correct
+// for all sessions; the mutex guards find/insert because sessions run
+// Compute() on independent threads.
+struct OpTensorTable {
+  std::mutex mu;
+  std::unordered_map<OpTensorCacheKey, OpTensorCacheEntry, OpTensorCacheKeyHash>
+      map;
+  ~OpTensorTable() {
+    for (auto &kv : map) {
+      OpTensorCacheEntry &e = kv.second;
+      if (e.cDesc)
+        miopenDestroyTensorDescriptor(e.cDesc);
+      if (e.bDesc)
+        miopenDestroyTensorDescriptor(e.bDesc);
+      if (e.aDesc)
+        miopenDestroyTensorDescriptor(e.aDesc);
+    }
+  }
+};
+
+// Per-instance op state for hip.miopen.add: the slot holds a shared_ptr to the
+// one shared descriptor table, reached through a global WeakStore keyed by
+// device (see op_state.h). The store is weak_ptr-backed, so the table lives
+// only while some session's OpTensorState holds a shared_ptr to it.
+struct OpTensorState : OpStateT<OpTensorState> {
+  std::shared_ptr<OpTensorTable> table;
+  OpTensorState() {
+    int dev = 0;
+    hipGetDevice(&dev);
+    table = WeakStore<int, OpTensorTable>::get_or_create(
+        dev, [] { return std::make_shared<OpTensorTable>(); });
+  }
+};
+
+extern "C" int8_t hipdnn_ep_op_state_construct_optensor(RuntimeState *state,
+                                                        int32_t slot) {
+  hipdnn_ep_op_state_set(state, slot, OpTensorState::create().release());
+  return 0;
+}
 
 /// Look up or create cached MIOpen tensor descriptors for an OpTensor shape.
 /// Returns nullptr on any MIOpen API failure (partially created descriptors
 /// are cleaned up before returning).
 static const OpTensorCacheEntry *
-queryOrCreateOpTensor(const OpTensorCacheKey &key) {
-  auto it = g_optensor_cache.find(key);
-  if (it != g_optensor_cache.end())
+queryOrCreateOpTensor(OpTensorTable &table, const OpTensorCacheKey &key) {
+  // The table is shared across sessions, so guard find/insert. Entries are
+  // never erased, so the returned pointer stays valid after the lock drops.
+  std::lock_guard<std::mutex> guard(table.mu);
+  auto it = table.map.find(key);
+  if (it != table.map.end())
     return &it->second;
 
   bool type_ok;
@@ -187,7 +233,7 @@ cache_fail:
   return nullptr;
 
 cache_done:
-  auto [ins, _] = g_optensor_cache.emplace(key, e);
+  auto [ins, _] = table.map.emplace(key, e);
   return &ins->second;
 }
 
@@ -205,12 +251,12 @@ cache_done:
 // The compiler (HipToLLVM) left-pads shapes with 1 for rank < 4.
 //===----------------------------------------------------------------------===//
 
-int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
-                        int64_t lhs_n, int64_t lhs_c, int64_t lhs_h,
-                        int64_t lhs_w, int64_t rhs_n, int64_t rhs_c,
-                        int64_t rhs_h, int64_t rhs_w, int64_t out_n,
-                        int64_t out_c, int64_t out_h, int64_t out_w,
-                        int64_t data_type, int64_t tensor_op) {
+int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
+                        void *rhs, void *output, int64_t lhs_n, int64_t lhs_c,
+                        int64_t lhs_h, int64_t lhs_w, int64_t rhs_n,
+                        int64_t rhs_c, int64_t rhs_h, int64_t rhs_w,
+                        int64_t out_n, int64_t out_c, int64_t out_h,
+                        int64_t out_w, int64_t data_type, int64_t tensor_op) {
   OP_PROFILE(
       "elementwise",
       [&] {
@@ -349,7 +395,7 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
     return -1;
   }
 
-  // Integer dtypes (i32/i64/ui8) aren't supported by miopenOpTensor. Vision
+  // Integer dtypes (i32/i64/i16) aren't supported by miopenOpTensor. Vision
   // encoders run small i64 shape arithmetic via these ops (e.g. multiplying
   // two i64 scalars to compute a downstream Reshape dim); attention chains
   // run i32/i64 Min/Max for the seqlens_k = Min(total_seq_len, max_seq_len)
@@ -357,7 +403,8 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
   // mul/add/min/max. Broadcasting is materialised below by hip_expand into
   // a per-state workspace before the flat kernel runs.
   if (data_type == HIPDNN_EP_DATATYPE_INT64 ||
-      data_type == HIPDNN_EP_DATATYPE_INT32) {
+      data_type == HIPDNN_EP_DATATYPE_INT32 ||
+      data_type == HIPDNN_EP_DATATYPE_INT16) {
     if (tensor_op != HIPDNN_EP_TENSOR_OP_MUL &&
         tensor_op != HIPDNN_EP_TENSOR_OP_ADD &&
         tensor_op != HIPDNN_EP_TENSOR_OP_MIN &&
@@ -591,9 +638,16 @@ int wrap_miopenOpTensor(RuntimeState *state, void *lhs, void *rhs, void *output,
     }
   }
 
+  OpTensorState *os = OpTensorState::get_op_state(state, op_state_slot);
+  if (!os || !os->table) {
+    fprintf(stderr, "wrap_miopenOpTensor: missing op-state for slot %d\n",
+            op_state_slot);
+    return -1;
+  }
+
   OpTensorCacheKey key{lhs_n, lhs_c, lhs_h, lhs_w, rhs_n, rhs_c,    rhs_h,
                        rhs_w, out_n, out_c, out_h, out_w, data_type};
-  const OpTensorCacheEntry *c = queryOrCreateOpTensor(key);
+  const OpTensorCacheEntry *c = queryOrCreateOpTensor(*os->table, key);
   if (!c) {
     fprintf(stderr, "wrap_miopenOpTensor: descriptor cache creation failed\n");
     return -1;

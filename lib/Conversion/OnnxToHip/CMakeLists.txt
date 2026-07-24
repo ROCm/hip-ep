@@ -6,12 +6,13 @@
 add_library(OnnxToHip STATIC
   OnnxToHip.cpp
   SimplifyOnnx.cpp
-  ConstantsIO.cpp
   MatMulConversion.cpp
   TransposeConversion.cpp
   ElementwiseConversion.cpp
   PowerConversion.cpp
   ActivationConversion.cpp
+  BiasGeluConversion.cpp
+  FastGeluConversion.cpp
   CastConversion.cpp
   ReduceSumConversion.cpp
   ReduceMeanConversion.cpp
@@ -22,11 +23,18 @@ add_library(OnnxToHip STATIC
   ConvTransposeConversion.cpp
   NormConversion.cpp
   RotaryEmbeddingConversion.cpp
+  OnnxRotaryEmbeddingConversion.cpp
   GqaConversion.cpp
   MultiHeadAttentionConversion.cpp
   AttentionConversion.cpp
+  OnnxAttentionConversion.cpp
   HipGqaBuilder.cpp
   GatherConversion.cpp
+  GatherElementsConversion.cpp
+  TopKConversion.cpp
+  ScatterElementsConversion.cpp
+  CompressConversion.cpp
+  OneHotConversion.cpp
   GatherShapeFold.cpp
   ReshapeShapeFold.cpp
   PadShapeFold.cpp
@@ -44,18 +52,22 @@ add_library(OnnxToHip STATIC
   EqualConversion.cpp
   DivConversion.cpp
   ReduceMaxConversion.cpp
+  ReduceMinConversion.cpp
   MinConversion.cpp
   MaxConversion.cpp
   NotConversion.cpp
   CosConversion.cpp
   SinConversion.cpp
+  CeilConversion.cpp
   ExpConversion.cpp
+  LogConversion.cpp
   CumSumConversion.cpp
   PadConversion.cpp
   TileConversion.cpp
   ExpandConversion.cpp
   ReduceProdConversion.cpp
   LessConversion.cpp
+  GreaterConversion.cpp
   GreaterOrEqualConversion.cpp
   LessOrEqualConversion.cpp
   GatherNDConversion.cpp
@@ -65,7 +77,9 @@ add_library(OnnxToHip STATIC
   SliceConversion.cpp
   ScatterNDConversion.cpp
   IdentityConversion.cpp
+  OrConversion.cpp
   AndConversion.cpp
+  AbsConversion.cpp
   SizeConversion.cpp
   NonZeroConversion.cpp
   ConcatConversion.cpp
@@ -74,6 +88,7 @@ add_library(OnnxToHip STATIC
   GlobalPoolConversion.cpp
   FlattenConversion.cpp
   LoopOutline.cpp
+  IfOutline.cpp
   ReluConversion.cpp
   LeakyReluConversion.cpp
   ClipConversion.cpp
@@ -88,6 +103,7 @@ add_dependencies(OnnxToHip
 
 target_link_libraries(OnnxToHip PUBLIC
   HipDialectIR
+  HipConstantsIO
   MLIRPass
   MLIRFuncDialect
   MLIRArithDialect

@@ -9,9 +9,9 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "onnxruntime-ep-hipep"
+name = "onnxruntime-ep-hip"
 version = "@PROJECT_VERSION@"
-description = "hipep Execution Provider for ONNX Runtime (AMD GPU via HIP/ROCm)"
+description = "hipgpu Execution Provider for ONNX Runtime (AMD GPU via HIP/ROCm)"
 requires-python = ">=3.8"
 license = { text = "MIT" }
 authors = [{ name = "Advanced Micro Devices, Inc." }]
@@ -38,7 +38,7 @@ dependencies = [
 # onnxruntime/capi/, so we never clobber ONNX Runtime's own files).
 
 [tool.setuptools.packages.find]
-include = ["onnxruntime_ep_hipep", "onnxruntime.capi"]
+include = ["onnxruntime_ep_hip", "onnxruntime.capi"]
 namespaces = true
 
 [tool.setuptools.package-data]

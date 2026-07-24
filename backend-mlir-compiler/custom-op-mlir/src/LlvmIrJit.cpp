@@ -10,6 +10,8 @@
 #include <hip/hip_runtime_api.h>
 #endif
 
+#include <llvm/ADT/ArrayRef.h>
+#include <llvm/ADT/SmallString.h>
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/ExecutionEngine/JITSymbol.h>
 #include <llvm/ExecutionEngine/Orc/AbsoluteSymbols.h>
@@ -19,9 +21,16 @@
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Support/Error.h>
+#include <llvm/Support/FileSystem.h>
 #include <llvm/Support/MemoryBuffer.h>
+#include <llvm/Support/Path.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/TargetParser/Triple.h>
+
+// Plugin-registry accessors (pluginBitcodeBuffers / pluginLibraries /
+// pluginLibraryPaths). Provided by LibHipCompiler, which every host linking
+// this lib also links (see this dir's CMakeLists).
+#include "hip/Compiler/PluginRegistry.h"
 
 #include <glog/logging.h>
 
@@ -33,6 +42,7 @@ extern "C" const std::size_t runtime_bc_data_size;
 #include <cstdint>
 #include <mutex>
 #include <new>
+#include <string>
 #include <typeinfo>
 #include <vector>
 
@@ -235,8 +245,46 @@ std::string detectCustomKernelArch() {
 }
 #endif // HIPDNN_EP_LINK_HIP_HOST
 
+// Resolve a plugin's addLibrary() argument to a file on disk. Accepts a path
+// that already exists as-is, or a bare name resolved against the plugin's
+// addLibraryPath() dirs using the platform's library naming (mirroring what the
+// native lld-link path resolves). Empty string when nothing matches.
+std::string resolvePluginLibrary(llvm::StringRef nameOrPath,
+                                 llvm::ArrayRef<std::string> searchPaths) {
+  if (llvm::sys::fs::exists(nameOrPath))
+    return nameOrPath.str();
+
+  std::string name = nameOrPath.str();
+  std::vector<std::string> candidates;
+#ifdef _WIN32
+  candidates = {name + ".dll", name + ".lib"};
+#else
+  candidates = {"lib" + name + ".so", "lib" + name + ".a"};
+#endif
+  for (const std::string &dir : searchPaths) {
+    for (const std::string &cand : candidates) {
+      llvm::SmallString<256> full(dir);
+      llvm::sys::path::append(full, cand);
+      if (llvm::sys::fs::exists(full))
+        return std::string(full.data(), full.size());
+    }
+  }
+  return {};
+}
+
+// A shared library is loaded into the JIT via DynamicLibrarySearchGenerator; a
+// static archive via StaticLibraryDefinitionGenerator. Dispatch on extension.
+bool isSharedLibraryFile(llvm::StringRef path) {
+#ifdef _WIN32
+  return path.ends_with_insensitive(".dll");
+#else
+  return path.ends_with(".so") || path.contains(".so.");
+#endif
+}
+
 // Install symbol search generators on the JIT's main JITDylib, in priority
-// order: per-OS ROCm libs, the per-arch kernel DLL/SO, then the process image.
+// order: per-OS ROCm libs, the per-arch kernel DLL/SO, plugin-contributed
+// libraries, then the process image.
 // The kernel DLL is added before the process generator so its hip_* launchers
 // win over any look-alike symbol in another loaded module. Returns false only
 // when a mandatory load fails.
@@ -296,6 +344,70 @@ bool installSearchGenerators(llvm::orc::LLJIT &jit) {
     jd.addGenerator(std::move(*gen));
   }
 #endif // HIPDNN_EP_LOAD_KERNEL_DLLS
+
+  // Plugin-contributed libraries (addLibrary / addLibraryPath): load each so a
+  // plugin's kernel/host symbols resolve, the same way the in-tree
+  // custom_kernels dylib is loaded above -- a shared lib via
+  // DynamicLibrarySearchGenerator, a static archive via
+  // StaticLibraryDefinitionGenerator. Added before the process generator so a
+  // plugin symbol is preferred over a coincidental process-image look-alike.
+  // No-op when no plugin contributed a library.
+  {
+    // SmallVector<std::string> binds to the ArrayRef parameter directly.
+    auto searchPaths = ::hip::compiler::pluginLibraryPaths();
+    for (llvm::StringRef lib : ::hip::compiler::pluginLibraries()) {
+      std::string file = resolvePluginLibrary(lib, searchPaths);
+      if (file.empty()) {
+        LOG(WARNING) << "LlvmIrJit: plugin library '" << lib.str()
+                     << "' not found on its search paths; symbols it provides "
+                        "will fail at lookup.";
+        continue;
+      }
+      if (isSharedLibraryFile(file)) {
+        auto gen = llvm::orc::DynamicLibrarySearchGenerator::Load(
+            file.c_str(), global_prefix);
+        if (!gen) {
+          LOG(ERROR) << "LlvmIrJit: plugin library Load(" << file
+                     << ") failed: " << llvm::toString(gen.takeError());
+          return false;
+        }
+        jd.addGenerator(std::move(*gen));
+      } else {
+        auto gen = llvm::orc::StaticLibraryDefinitionGenerator::Load(
+            jit.getObjLinkingLayer(), file.c_str());
+        if (!gen) {
+          LOG(ERROR) << "LlvmIrJit: plugin static library Load(" << file
+                     << ") failed: " << llvm::toString(gen.takeError());
+          return false;
+        }
+        jd.addGenerator(std::move(*gen));
+      }
+    }
+  }
+
+#ifdef _WIN32
+  // Pin the C runtime to the shared UCRT before the process generator (ORC
+  // tries generators in add-order). Binds the runtime's stdio family to the
+  // same UCRT that owns the stderr/_iob FILE; otherwise the process search
+  // picks legacy msvcrt.dll's fputs over a ucrtbase FILE -> heap corruption
+  // under perf=1. Match this build's CRT: debug (/MTd, /MDd; _DEBUG) ships
+  // ucrtbased.dll, release ships ucrtbase.dll. operator new/delete and
+  // type_info stay pinned to the EP DLL via the absolute shims (which outrank
+  // generators), so the C++ heap is untouched.
+#ifdef _DEBUG
+  constexpr const char *kUcrtDll = "ucrtbased.dll";
+#else
+  constexpr const char *kUcrtDll = "ucrtbase.dll";
+#endif
+  if (auto ucrt = llvm::orc::DynamicLibrarySearchGenerator::Load(
+          kUcrtDll, global_prefix)) {
+    jd.addGenerator(std::move(*ucrt));
+  } else {
+    LOG(INFO) << "LlvmIrJit: Load(" << kUcrtDll
+              << ") failed: " << llvm::toString(ucrt.takeError())
+              << "; stdio may bind to a foreign CRT under perf=1.";
+  }
+#endif // _WIN32
 
   // Process image: EP DLL, amdhip64, the libs above, the CRT, ORT, ...
   auto gen = llvm::orc::DynamicLibrarySearchGenerator::GetForCurrentProcess(
@@ -421,6 +533,25 @@ LlvmIrJit::create(const std::vector<uint8_t> &bitcode,
   if (!runtime_module)
     return nullptr;
 
+  // Plugin-contributed runtime bitcode (addRuntimeBitcode): parse each into the
+  // same shared context so it can be added as a sibling module alongside
+  // runtime.bc below. This is what makes a plugin's wrap_* definitions resolve
+  // for the JIT'd model on the default (LLVM_IR/JIT) path -- the native
+  // linkRuntime merge, which links plugin bitcode too, does not run here.
+  // Empty when no plugin contributed bitcode.
+  std::vector<std::unique_ptr<llvm::Module>> plugin_modules;
+  {
+    unsigned idx = 0;
+    for (const auto &buf : ::hip::compiler::pluginBitcodeBuffers()) {
+      auto plugin_module = parseAndStamp(
+          llvm::StringRef(static_cast<const char *>(buf.data), buf.sizeBytes),
+          "plugin." + std::to_string(idx++) + ".bc");
+      if (!plugin_module)
+        return nullptr;
+      plugin_modules.push_back(std::move(plugin_module));
+    }
+  }
+
   auto tsc = llvm::orc::ThreadSafeContext(std::move(context));
 
   // Add runtime first so the per-model module's external hipdnn_ep_* refs
@@ -430,6 +561,18 @@ LlvmIrJit::create(const std::vector<uint8_t> &bitcode,
     LOG(ERROR) << "LlvmIrJit::create: addIRModule(runtime) failed: "
                << llvm::toString(std::move(err));
     return nullptr;
+  }
+  // Then plugin bitcode, so plugin-defined wrap_* symbols are visible to the
+  // per-model module too. Vendors must prefix their symbols: two modules
+  // defining the same name in one JITDylib is a duplicate-definition error, so
+  // the native path's OverrideFromSrc shadowing is not available under JIT.
+  for (auto &plugin_module : plugin_modules) {
+    if (auto err = jit->addIRModule(
+            llvm::orc::ThreadSafeModule(std::move(plugin_module), tsc))) {
+      LOG(ERROR) << "LlvmIrJit::create: addIRModule(plugin bitcode) failed: "
+                 << llvm::toString(std::move(err));
+      return nullptr;
+    }
   }
   if (auto err = jit->addIRModule(
           llvm::orc::ThreadSafeModule(std::move(module), tsc))) {

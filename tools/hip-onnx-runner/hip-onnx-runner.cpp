@@ -878,11 +878,11 @@ int main(int argc, char *argv[]) {
   // ORT environment
   Ort::Env env(ORT_LOGGING_LEVEL_ERROR, "hip-onnx-runner");
 
-  const std::string kEpName = "hipep";
+  const std::string kEpName = "hipgpu";
 #ifdef _WIN32
-  const std::string ep_lib_name = "hipep.dll";
+  const std::string ep_lib_name = "hipgpu.dll";
 #else
-  const std::string ep_lib_name = "libhipep.so";
+  const std::string ep_lib_name = "libhipgpu.so";
 #endif
 
   if (!no_ep) {
@@ -955,8 +955,10 @@ int main(int argc, char *argv[]) {
     // on the prebuilt Linux ORT package we ship here. Spell out the map type
     // so we always bind to the original overload and stay compatible with the
     // older ORT version we still link against on Windows.
-    session_opts.AppendExecutionProvider_V2(
-        env, devices, std::unordered_map<std::string, std::string>{});
+    std::unordered_map<std::string, std::string> ep_opts;
+    if (const char *af = std::getenv("HIPDNN_EP_ARTIFACT_FORMAT"))
+      ep_opts["artifact_format"] = af;
+    session_opts.AppendExecutionProvider_V2(env, devices, ep_opts);
     session_opts.AddConfigEntry("session.disable_cpu_ep_fallback", "1");
   }
 

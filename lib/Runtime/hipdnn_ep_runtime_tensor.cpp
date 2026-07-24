@@ -49,7 +49,7 @@ static void perf_ensure_events() {
   if (g_perf.initialized)
     return;
   // hipEventDisableSystemFence: see op_profile.cpp
-  // (op_profile_acquire_event_pair) for the canonical rationale and the
+  // (op_profile_make_marker) for the canonical rationale and the
   // "never set without a following sync" guardrail. Safe here -- these phase
   // events are read via hipEventElapsedTime only after hipStreamSynchronize.
   if (hipEventCreateWithFlags(&g_perf.h2d_start, hipEventDisableSystemFence) !=
@@ -417,12 +417,16 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
       (void)hipEventElapsedTime(&compute_ms, g_perf.h2d_end, g_perf.d2h_start);
       (void)hipEventElapsedTime(&d2h_ms, g_perf.d2h_start, g_perf.d2h_end);
       const float total_ms = h2d_ms + compute_ms + d2h_ms;
-      RUNTIME_PERF_LOG("[PERF] #%u: H2D %zut/%.1fMB/%.2fms | Compute %.2fms | "
-                       "D2H %zut/%.1fMB/%.2fms | Total %.2fms\n",
+      RUNTIME_PERF_LOG("[PERF] #%u: H2D %zut/%.1fMB | "
+                       "D2H %zut/%.1fMB | Total %.2fms\n",
                        g_perf.inference_num, g_perf.h2d_count,
-                       g_perf.h2d_bytes / 1048576.0, h2d_ms, compute_ms,
-                       g_perf.d2h_count, g_perf.d2h_bytes / 1048576.0, d2h_ms,
-                       total_ms);
+                       g_perf.h2d_bytes / 1048576.0, g_perf.d2h_count,
+                       g_perf.d2h_bytes / 1048576.0, total_ms);
+      // Chrome trace: add the just-closed inference's pipeline phase spans
+      // (H2D / Compute / D2H) on their own tracks. No-op unless tracing is on.
+      op_profile_add_io_spans(static_cast<OpProfileState *>(state->op_profile),
+                              h2d_ms, (int64_t)g_perf.h2d_bytes, compute_ms,
+                              d2h_ms, (int64_t)g_perf.d2h_bytes);
     }
     g_perf.h2d_bytes = 0;
     g_perf.h2d_count = 0;
@@ -461,135 +465,6 @@ int hipdnn_ep_tensor_prepare_input(RuntimeState *state, span_t *inputs,
   out_buffer->is_aliased = alias_caller_buffer;
 
   check_gcnarch("AFTER prepare_input");
-  return HIPDNN_EP_SUCCESS;
-}
-
-// Prepare output tensor: parse, validate, allocate GPU buffer (no H2D)
-int hipdnn_ep_tensor_prepare_output(RuntimeState *state, span_t *outputs,
-                                    size_t index, size_t expected_rank,
-                                    TensorBuffer *out_buffer) {
-  // Validate arguments
-  if (!state) {
-    fprintf(stderr, "hipdnn_ep_tensor_prepare_output: null state\n");
-    return HIPDNN_EP_ERR_NULL_POINTER;
-  }
-  if (!outputs) {
-    fprintf(stderr, "hipdnn_ep_tensor_prepare_output: null outputs\n");
-    return HIPDNN_EP_ERR_NULL_POINTER;
-  }
-  if (!out_buffer) {
-    fprintf(stderr, "hipdnn_ep_tensor_prepare_output: null out_buffer\n");
-    return HIPDNN_EP_ERR_NULL_POINTER;
-  }
-
-  // Validate index bounds
-  if (index >= outputs->count) {
-    fprintf(stderr,
-            "hipdnn_ep_tensor_prepare_output: index %zu out of bounds "
-            "(count=%zu)\n",
-            index, outputs->count);
-    return HIPDNN_EP_ERR_INDEX_OUT_OF_BOUNDS;
-  }
-
-  // Extract tensor from span
-  tensor_t *tensor = &outputs->data[index];
-
-  // Shape must be present (or rank==0 for scalars).
-  if (!tensor->shape && tensor->rank != 0) {
-    fprintf(stderr,
-            "hipdnn_ep_tensor_prepare_output: tensor[%zu].shape is null\n",
-            index);
-    return HIPDNN_EP_ERR_NULL_POINTER;
-  }
-
-  // Validate rank
-  if (tensor->rank != expected_rank) {
-    fprintf(stderr,
-            "hipdnn_ep_tensor_prepare_output: rank mismatch (expected %zu, got "
-            "%zu)\n",
-            expected_rank, tensor->rank);
-    return HIPDNN_EP_ERR_RANK_MISMATCH;
-  }
-
-  // Read element size from tensor struct (set by EP caller)
-  size_t element_size = tensor->element_size;
-  if (element_size == 0) {
-    fprintf(stderr,
-            "hipdnn_ep_tensor_prepare_output: tensor[%zu].element_size is 0, "
-            "defaulting to %zu\n",
-            index, kDefaultElementSize);
-    element_size = kDefaultElementSize;
-  }
-
-  // Calculate buffer size
-  size_t size_bytes =
-      calculateTensorSize(tensor->shape, tensor->rank, element_size);
-
-  // Empty output tensors (any dim == 0) are legitimate -- e.g. an op
-  // producing a slice with a zero-length dim.  Skip allocation and return
-  // success with a zero-size buffer.  Compiled kernels never dereference
-  // gpu_ptr when the corresponding dim is zero (the iteration range is
-  // empty).
-  if (size_bytes == 0) {
-    out_buffer->gpu_ptr = nullptr;
-    out_buffer->host_ptr = tensor->data;
-    out_buffer->shape_ptr = tensor->shape;
-    out_buffer->rank = tensor->rank;
-    out_buffer->size_bytes = 0;
-    out_buffer->is_pooled = false;
-    out_buffer->is_aliased = false;
-    return HIPDNN_EP_SUCCESS;
-  }
-
-  // Non-empty: data must be non-null now.
-  if (!tensor->data) {
-    fprintf(stderr,
-            "hipdnn_ep_tensor_prepare_output: tensor[%zu].data is null but "
-            "size_bytes=%zu (rank=%zu)\n",
-            index, size_bytes, tensor->rank);
-    return HIPDNN_EP_ERR_NULL_POINTER;
-  }
-
-  RUNTIME_DEBUG_LOG(
-      "[Runtime DEBUG] prepare_output[%zu]: rank=%zu element_size=%zu "
-      "size_bytes=%zu memory_type=%d\n",
-      index, tensor->rank, element_size, size_bytes, tensor->memory_type);
-
-  // PERF: record H2D end on first output alloc (after all H2D copies queued)
-  if (hipdnn_ep_perf_enabled() && index == 0 && g_perf.initialized) {
-    (void)hipEventRecord(g_perf.h2d_end,
-                         static_cast<hipStream_t>(state->stream));
-  }
-
-  // Fast path: caller's output OrtValue is in GPU-accessible memory, alias
-  // it so the kernel writes directly into the caller's buffer and we can
-  // skip both the pool_alloc here and the D2H copy in finalize_output. For
-  // OGA path A this hits on present_key/present_value tensors that share
-  // buffers with past_key/past_value (past_present_share_buffer=true).
-  const bool alias_caller_buffer = (tensor->memory_type == TENSOR_MEMORY_GPU);
-  void *gpu_ptr = nullptr;
-  if (alias_caller_buffer) {
-    gpu_ptr = tensor->data;
-  } else {
-    // Allocate GPU buffer (pool reuses across inferences)
-    gpu_ptr = pool_alloc(size_bytes);
-    if (!gpu_ptr) {
-      fprintf(stderr,
-              "hipdnn_ep_tensor_prepare_output: failed to allocate %zu bytes\n",
-              size_bytes);
-      return HIPDNN_EP_ERR_GPU_ALLOC_FAILED;
-    }
-  }
-
-  // Populate output buffer
-  out_buffer->gpu_ptr = gpu_ptr;
-  out_buffer->host_ptr = tensor->data;
-  out_buffer->shape_ptr = tensor->shape;
-  out_buffer->rank = tensor->rank;
-  out_buffer->size_bytes = size_bytes;
-  out_buffer->is_pooled = false;
-  out_buffer->is_aliased = alias_caller_buffer;
-
   return HIPDNN_EP_SUCCESS;
 }
 

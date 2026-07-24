@@ -296,6 +296,10 @@ void populatePowerConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populateActivationConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
+void populateBiasGeluConversionPatterns(RewritePatternSet &patterns,
+                                        MLIRContext *ctx);
+void populateFastGeluConversionPatterns(RewritePatternSet &patterns,
+                                        MLIRContext *ctx);
 void populateCastConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateReduceSumConversionPatterns(RewritePatternSet &patterns,
@@ -316,14 +320,28 @@ void populateNormConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 void populateRotaryEmbeddingConversionPatterns(RewritePatternSet &patterns,
                                                MLIRContext *ctx);
+void populateOnnxRotaryEmbeddingConversionPatterns(RewritePatternSet &patterns,
+                                                   MLIRContext *ctx);
 void populateGqaConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateMultiHeadAttentionConversionPatterns(RewritePatternSet &patterns,
                                                   MLIRContext *ctx);
 void populateAttentionConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
+void populateOnnxAttentionConversionPatterns(RewritePatternSet &patterns,
+                                             MLIRContext *ctx);
 void populateGatherConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
+void populateCompressConversionPatterns(RewritePatternSet &patterns,
+                                        MLIRContext *ctx);
+void populateOneHotConversionPatterns(RewritePatternSet &patterns,
+                                      MLIRContext *ctx);
+void populateGatherElementsConversionPatterns(RewritePatternSet &patterns,
+                                              MLIRContext *ctx);
+void populateTopKConversionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx);
+void populateScatterElementsConversionPatterns(RewritePatternSet &patterns,
+                                               MLIRContext *ctx);
 void populateShapeConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 void populateReshapeConversionPatterns(RewritePatternSet &patterns,
@@ -348,13 +366,19 @@ void populateMaxConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateReduceMaxConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
+void populateReduceMinConversionPatterns(RewritePatternSet &patterns,
+                                         MLIRContext *ctx);
 void populateNotConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateCosConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateSinConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
+void populateCeilConversionPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx);
 void populateExpConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
+void populateLogConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateCumSumConversionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
@@ -368,6 +392,8 @@ void populateReduceProdConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
 void populateLessConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+void populateGreaterConversionPatterns(RewritePatternSet &patterns,
+                                       MLIRContext *ctx);
 void populateGreaterOrEqualConversionPatterns(RewritePatternSet &patterns,
                                               MLIRContext *ctx);
 void populateLessOrEqualConversionPatterns(RewritePatternSet &patterns,
@@ -386,7 +412,11 @@ void populateScatterNDConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
 void populateIdentityConversionPatterns(RewritePatternSet &patterns,
                                         MLIRContext *ctx);
+void populateOrConversionPatterns(RewritePatternSet &patterns,
+                                  MLIRContext *ctx);
 void populateAndConversionPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
+void populateAbsConversionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
 void populateSizeConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
@@ -454,7 +484,7 @@ void populateFastGeluFusionPatterns(RewritePatternSet &patterns,
 /// through their own ONNX→HIP converters in `convertComputeOps`. Must run
 /// BEFORE `lowerOnnxConstants` because production builds externalize every
 /// `onnx.Constant` (incl. 1-element scalars) into a memref.global with the
-/// value moved to the constants sidecar — at that point the exponent is no
+/// value moved to the constants file — at that point the exponent is no
 /// longer recoverable from IR. See PowerConversion.cpp.
 void populatePowDecompositionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);

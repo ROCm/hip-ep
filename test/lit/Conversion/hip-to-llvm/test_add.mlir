@@ -38,7 +38,7 @@ module {
 
     // 4D shape constants for lhs/rhs/out: [1, 1, 128, 512]
     // data_type = 0 (f32), tensor_op = 1 (ADD)
-    // CHECK: llvm.call @wrap_miopenOpTensor({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_miopenOpTensor({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -55,7 +55,7 @@ module {
                          outs(%c : memref<1x128x32xf16, 1>)
 
     // lhs padded: [1, 1, 128, 32], rhs padded: [1, 1, 1, 32] (broadcast dim)
-    // CHECK: llvm.call @wrap_miopenOpTensor({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_miopenOpTensor({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
     return
   }

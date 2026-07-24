@@ -1,0 +1,34 @@
+##
+# ** Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "morphizen-graph",
+    srcs = glob(["src/*.cpp"]),
+    hdrs = glob(["include/morphizen/*.hpp"]),
+    strip_include_prefix = "include",
+    copts = select({
+        "@bazel_tools//src/conditions:windows": [
+            "/W0",
+            "/DONNX_NAMESPACE=onnx",
+            "/DMORPHIZEN_USE_DLL=0",
+            "/DMORPHIZEN_EXPORT_DLL=1",
+            "/Zc:__cplusplus",
+        ],
+        "//conditions:default": [
+            "-w",
+            "-DONNX_NAMESPACE=onnx",
+            "-DMORPHIZEN_USE_DLL=0",
+            "-DMORPHIZEN_EXPORT_DLL=1",
+            "-fPIC",
+        ],
+    }),
+    visibility = ["//visibility:public"],
+    deps = [
+        "//morphizen-ort-api-ext",
+        "@glog",
+    ],
+)

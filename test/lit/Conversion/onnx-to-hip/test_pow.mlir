@@ -11,7 +11,7 @@
 // Running pre-lowering is required: with externalization enabled (production
 // default), every onnx.Constant — including 1-element scalars — is replaced
 // by bufferization.to_tensor(memref.get_global) whose value lives in the
-// constants sidecar, and a post-lowering matcher could not recover it.
+// constants file, and a post-lowering matcher could not recover it.
 //
 // Covered exponents (all forms):
 //   2    -> single hip.mul (x*x)        — dominant RMS/LayerNorm variance case
@@ -117,7 +117,7 @@ module {
   // onnx.Cast. Validates the actual SAM `output_upscaling.1/Pow` pattern.
   // Verified BOTH with externalization off (CHECK) AND on (EXTERN), to lock
   // in that the decomposition runs before lowerOnnxConstants moves the value
-  // into the sidecar.
+  // into the constants file.
   func.func @test_pow_onnx_const_cast(%arg0: tensor<1x64x128x128xf16>) -> tensor<1x64x128x128xf16> {
     %c = "onnx.Constant"() {value = dense<3.0> : tensor<f32>} : () -> tensor<f32>
     %ec = "onnx.Cast"(%c) {to = 10 : si64} : (tensor<f32>) -> tensor<f16>

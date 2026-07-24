@@ -136,6 +136,15 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   size_t sz_expert_offsets = align_up_64((num_experts + 1) * sizeof(int32_t));
   size_t sz_sorted_token_ids = align_up_64(num_tokens * k * sizeof(int32_t));
   size_t sz_sorted_weights = align_up_64(num_tokens * k * elem_size);
+  // dp4a decode scratch (fused decode only, env-gated): int8-quantized
+  // activations + per-group fp32 scales for the fc1 input ([hidden]) and the
+  // fc2 slot activations ([k, inter]). Sized unconditionally (a few KB) so the
+  // offset layout is identical whether or not dp4a runs; the fp path ignores
+  // them. k_blocks_fc1 == n_blk_in, k_blocks_fc2 == n_blk_mid.
+  size_t sz_a_qb_in = align_up_64(hidden_size * sizeof(int8_t));
+  size_t sz_a_scale_in = align_up_64(k_blocks_fc1 * sizeof(float));
+  size_t sz_a_qb_mid = align_up_64(k * inter_size * sizeof(int8_t));
+  size_t sz_a_scale_mid = align_up_64(k * k_blocks_fc2 * sizeof(float));
 
   size_t off_expert_indices = 0;
   size_t off_expert_weights = off_expert_indices + sz_expert_indices;
@@ -147,7 +156,11 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   size_t off_expert_offsets = off_expert_counts + sz_expert_counts;
   size_t off_sorted_token_ids = off_expert_offsets + sz_expert_offsets;
   size_t off_sorted_weights = off_sorted_token_ids + sz_sorted_token_ids;
-  size_t total_scratch = off_sorted_weights + sz_sorted_weights;
+  size_t off_a_qb_in = off_sorted_weights + sz_sorted_weights;
+  size_t off_a_scale_in = off_a_qb_in + sz_a_qb_in;
+  size_t off_a_qb_mid = off_a_scale_in + sz_a_scale_in;
+  size_t off_a_scale_mid = off_a_qb_mid + sz_a_qb_mid;
+  size_t total_scratch = off_a_scale_mid + sz_a_scale_mid;
 
   if (hipdnn_ep_state_ensure_qmoe_scratch(state, total_scratch) != 0) {
     fprintf(stderr, "wrap_qmoe: ensure_qmoe_scratch(%zu) failed\n",
@@ -169,6 +182,10 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   int32_t *d_sorted_token_ids =
       reinterpret_cast<int32_t *>(scratch_base + off_sorted_token_ids);
   char *d_sorted_weights = scratch_base + off_sorted_weights;
+  void *d_a_qb_in = scratch_base + off_a_qb_in;
+  void *d_a_scale_in = scratch_base + off_a_scale_in;
+  void *d_a_qb_mid = scratch_base + off_a_qb_mid;
+  void *d_a_scale_mid = scratch_base + off_a_scale_mid;
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: topk_routing(tokens=%lld, experts=%lld, "
                     "k=%lld, normalize=%lld)\n",
@@ -186,6 +203,26 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   // activation slots, d_fc2_buf as the [k, hidden] per-expert output slots
   // (gather/scatter happen inline via expert_indices).
   if (num_tokens == 1) {
+    // W4A8 dp4a decode variant (env-gated). Requires fp16 and 32-aligned
+    // block_size / hidden / inter (all true for the MoE targets: block_size
+    // 32, hidden/inter multiples of 32). Quantizes the shared input + the k
+    // slot activations to int8 once, then runs the fc1/fc2 GEMVs via sudot4.
+    // Falls through to the fp fused path otherwise.
+    const bool dp4a_ok = hipdnn_ep_matmul_dp4a_enabled() && elem_size == 2 &&
+                         block_size > 0 && (block_size % 32 == 0) &&
+                         (hidden_size % 32 == 0) && (inter_size % 32 == 0);
+    if (dp4a_ok) {
+      RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: fused decode dp4a path (k=%lld)\n",
+                        (long long)k);
+      HIP_CHECK(hip_qmoe_decode_fused_dp4a(
+          stream, input, d_expert_indices, d_expert_weights, fc1_weights,
+          fc1_scales, fc1_zero_points, fc1_bias, fc2_weights, fc2_scales,
+          fc2_zero_points, fc2_bias, d_fc2_buf, d_act_buf, output, d_a_qb_in,
+          d_a_scale_in, d_a_qb_mid, d_a_scale_mid, hidden_size, inter_size, k,
+          block_size, activation_alpha, activation_beta, swiglu_limit,
+          elem_size));
+      return 0;
+    }
     RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: fused decode path (k=%lld)\n",
                       (long long)k);
     HIP_CHECK(hip_qmoe_decode_fused(
@@ -259,6 +296,13 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: %lld/%lld experts active\n",
                       (long long)active_experts, (long long)num_experts);
 
+    // Per-session pointer-keyed zero_points unpack cache (qmoe-owned, lives on
+    // RuntimeState). Each expert's fc1/fc2 zp is a distinct pointer into the
+    // constants blob, so each gets its own entry; unpack cost is paid once per
+    // expert across the session lifetime.
+    hipdnn_ep_real::ZpUnpackCache *zpc =
+        hipdnn_ep_real::get_or_create_zp_cache(state);
+
     for (int64_t e = 0; e < num_experts; e++) {
       int64_t count = static_cast<int64_t>(h_counts[e]);
       if (count == 0) {
@@ -291,7 +335,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       // returns -1 for every token -> 0/N experts active from layer ~3 on
       // -> garbage logits). Matches `convertZpToFp16`'s
       // `packed_cols = (groups_k + 1) / 2` in
-      // 3rd-party/custom_kernels/hip/matmul_nbits_kernel.hip and the
+      // lib/Runtime/Kernels/hip/matmul_nbits_kernel.hip and the
       // hard-coded `zp_elem_size = 1` we pass to hip_matmul_nbits below.
       const void *fc1_zp_e =
           fc1_zero_points ? static_cast<const char *>(fc1_zero_points) +
@@ -302,7 +346,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
                                      : nullptr;
 
       // hip_matmul_nbits no longer unpacks zp internally — pre-unpack via the
-      // per-state pointer-keyed cache (same path as wrap_matmul_nbits). Each
+      // per-session pointer-keyed cache (same path as wrap_matmul_nbits). Each
       // expert's fc1_zp_e is a distinct pointer into the constants blob, so
       // each expert gets its own cache entry; the cost is paid once per
       // expert across the lifetime of the session.
@@ -311,7 +355,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       if (fc1_zp_e && expert_weight_bits == 4 && block_size > 0) {
         int ngk = static_cast<int>(k_blocks_fc1);
         fc1_pre_zp_u8 = hipdnn_ep_real::lookup_or_unpack_zp_u8(
-            state, stream, fc1_zp_e, static_cast<int>(fusion_inter), ngk);
+            *zpc, stream, fc1_zp_e, static_cast<int>(fusion_inter), ngk);
         if (!fc1_pre_zp_u8) {
           result = -1;
           goto cleanup;
@@ -319,7 +363,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
         bool wmma_data_format = (hidden_size % 32 == 0);
         if (wmma_data_format && count > 1) {
           fc1_pre_zp_fp16 = hipdnn_ep_real::lookup_or_convert_zp_fp16(
-              state, stream, fc1_zp_e, static_cast<int>(fusion_inter), ngk);
+              *zpc, stream, fc1_zp_e, static_cast<int>(fusion_inter), ngk);
           if (!fc1_pre_zp_fp16) {
             result = -1;
             goto cleanup;
@@ -364,7 +408,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
       if (fc2_zp_e && expert_weight_bits == 4 && block_size > 0) {
         int ngk = static_cast<int>(k_blocks_fc2);
         fc2_pre_zp_u8 = hipdnn_ep_real::lookup_or_unpack_zp_u8(
-            state, stream, fc2_zp_e, static_cast<int>(hidden_size), ngk);
+            *zpc, stream, fc2_zp_e, static_cast<int>(hidden_size), ngk);
         if (!fc2_pre_zp_u8) {
           result = -1;
           goto cleanup;
@@ -372,7 +416,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
         bool wmma_data_format = (inter_size % 32 == 0);
         if (wmma_data_format && count > 1) {
           fc2_pre_zp_fp16 = hipdnn_ep_real::lookup_or_convert_zp_fp16(
-              state, stream, fc2_zp_e, static_cast<int>(hidden_size), ngk);
+              *zpc, stream, fc2_zp_e, static_cast<int>(hidden_size), ngk);
           if (!fc2_pre_zp_fp16) {
             result = -1;
             goto cleanup;
@@ -398,7 +442,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
 
 cleanup:
   // Sub-buffers above (d_expert_indices ... d_sorted_weights) are views into
-  // RuntimeState->qmoe_scratch -- owned by the runtime state, freed in
+  // the per-session RuntimeState::qmoe_scratch pool -- freed in
   // hipdnn_ep_state_cleanup. Do NOT hipFree them here.
   if (result == 0) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: completed successfully\n");

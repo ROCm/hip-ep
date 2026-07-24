@@ -64,20 +64,16 @@ public:
   InferenceState(InferenceState &&) = delete;
   InferenceState &operator=(InferenceState &&) = delete;
 
-  // Execute inference computation (classic 3-arg ABI).
-  int compute(span_t *inputs, span_t *outputs) const;
-
-  // Output-allocator mode: 2-arg inference_compute (state, inputs). Graph
-  // outputs are allocated in-graph via the callback installed by
-  // set_output_allocator(); there is no outputs span. The artifact exports
-  // exactly one arity, fixed at compile time by use_output_allocator.
-  int compute_with_output_allocator(span_t *inputs) const;
+  // Execute inference computation: 2-arg inference_compute (state, inputs).
+  // Graph outputs are allocated in-graph via the callback installed by
+  // set_output_allocator(); there is no outputs span.
+  int compute(span_t *inputs) const;
 
   // Install (allocator != nullptr) or clear (nullptr) the output allocator on
-  // the loaded artifact's RuntimeState before compute_with_output_allocator().
-  // Resolved once in the ctor. Fatal if called with a non-null allocator but
-  // the artifact does not export the setter (a stale allocator-mode artifact
-  // would otherwise crash with a null output buffer).
+  // the loaded artifact's RuntimeState before compute(). Resolved once in the
+  // ctor. Fatal if called with a non-null allocator but the artifact does not
+  // export the setter (a stale artifact would otherwise crash with a null
+  // output buffer).
   void set_output_allocator(const output_allocator_t *allocator) const;
 
   // Invokes the optional `hipdnn_ep_runtime_begin_compute` hook to invalidate
@@ -92,6 +88,9 @@ public:
   // inference is unaffected). Symbol resolved once in create() so the call
   // is a single cached indirect dispatch.
   void flush_op_profile() const;
+
+  void add_cpu_profile(const char *name, double cpu_start_us,
+                       double cpu_ms) const;
 
   // Diagnostic-only accessor: returns the hipStream_t used by
   // inference_compute, as a void*.  Relies on RuntimeState
@@ -128,12 +127,9 @@ private:
   // (tens of microseconds per token at 32-layer LLM decode). A missing symbol
   // leaves the pointer null; the error surfaces at first use (compute() /
   // ~InferenceState()) rather than at session creation.
-  using ComputeFn = int (*)(void *, span_t *, span_t *);
-  using ComputeAllocFn = int (*)(void *,
-                                 span_t *); // 2-arg output-allocator ABI
+  using ComputeFn = int (*)(void *, span_t *); // 2-arg output-allocator ABI
   using CleanupFn = int (*)(void *);
   ComputeFn compute_fn_;
-  ComputeAllocFn compute_alloc_fn_;
   CleanupFn cleanup_fn_;
 
   // Cached so begin_compute() is a single indirect call on the decode hot
@@ -142,8 +138,7 @@ private:
   BeginComputeFn begin_compute_fn_;
 
   // Cached hipdnn_ep_set_output_allocator (resolved once in the ctor, like
-  // begin_compute_fn_). Null when the model.dll predates the export (classic
-  // DLLs); only used in output-allocator mode.
+  // begin_compute_fn_). Null when the model.dll predates the export.
   using SetOutputAllocatorFn = void (*)(void *, const output_allocator_t *);
   SetOutputAllocatorFn set_output_allocator_fn_;
 
@@ -153,6 +148,11 @@ private:
   // present.
   using FlushOpProfileFn = void (*)(void *);
   FlushOpProfileFn flush_op_profile_fn_;
+
+  // Cached function pointer for hipdnn_ep_runtime_add_cpu_profile. Same
+  // resolve-once / null-when-absent contract as flush_op_profile_fn_ above.
+  using AddCpuProfileFn = void (*)(void *, const char *, double, double);
+  AddCpuProfileFn add_cpu_profile_fn_;
 };
 
 } // namespace mlir_compilation::customop

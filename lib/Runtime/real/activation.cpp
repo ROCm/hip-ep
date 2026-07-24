@@ -5,6 +5,7 @@
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
+#include "../op_state.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
 #include "hip_custom_kernels.h"
@@ -12,6 +13,8 @@
 
 #include <cstdio>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <unordered_map>
 
 static miopenDataType_t hipdnn_ep_to_miopen_type(int64_t data_type, bool &ok) {
@@ -75,22 +78,65 @@ struct ActivationCacheKeyHash {
   }
 };
 
-/// Cached MIOpen descriptors for a single activation shape.
-/// Ownership: descriptors are created in queryOrCreateActivation() and live
-/// for the process lifetime (never destroyed individually).
+/// Cached MIOpen descriptors for a single activation shape. Owned by the
+/// ActivationTable, which destroys them when the last session sharing it is
+/// torn down (previously these leaked for the process lifetime).
 struct ActivationCacheEntry {
   miopenTensorDescriptor_t inDesc, outDesc;
   miopenActivationDescriptor_t actDesc;
 };
 
-static std::unordered_map<ActivationCacheKey, ActivationCacheEntry,
-                          ActivationCacheKeyHash>
-    g_activation_cache;
+// One descriptor table shared across every session in the process and freed
+// when the last session holding it is destroyed. MIOpen tensor/activation
+// descriptors are pure shape/dtype metadata (no device binding), so a single
+// table is correct for all sessions; the mutex guards find/insert because
+// sessions run Compute() on independent threads.
+struct ActivationTable {
+  std::mutex mu;
+  std::unordered_map<ActivationCacheKey, ActivationCacheEntry,
+                     ActivationCacheKeyHash>
+      map;
+  ~ActivationTable() {
+    for (auto &kv : map) {
+      ActivationCacheEntry &e = kv.second;
+      if (e.actDesc)
+        miopenDestroyActivationDescriptor(e.actDesc);
+      if (e.outDesc)
+        miopenDestroyTensorDescriptor(e.outDesc);
+      if (e.inDesc)
+        miopenDestroyTensorDescriptor(e.inDesc);
+    }
+  }
+};
+
+// Per-instance op state shared by hip.sigmoid / hip.tanh / hip.softplus: each
+// slot holds a shared_ptr to the one shared descriptor table. The table is
+// reached through a global WeakStore keyed by device (see op_state.h): it is
+// weak_ptr-backed, so it lives only while some session's ActivationState holds
+// a shared_ptr to it.
+struct ActivationState : OpStateT<ActivationState> {
+  std::shared_ptr<ActivationTable> table;
+  ActivationState() {
+    int dev = 0;
+    hipGetDevice(&dev);
+    table = WeakStore<int, ActivationTable>::get_or_create(
+        dev, [] { return std::make_shared<ActivationTable>(); });
+  }
+};
+
+extern "C" int8_t hipdnn_ep_op_state_construct_activation(RuntimeState *state,
+                                                          int32_t slot) {
+  hipdnn_ep_op_state_set(state, slot, ActivationState::create().release());
+  return 0;
+}
 
 static const ActivationCacheEntry *
-queryOrCreateActivation(const ActivationCacheKey &key) {
-  auto it = g_activation_cache.find(key);
-  if (it != g_activation_cache.end())
+queryOrCreateActivation(ActivationTable &table, const ActivationCacheKey &key) {
+  // The table is shared across sessions, so guard find/insert. Entries are
+  // never erased, so the returned pointer stays valid after the lock drops.
+  std::lock_guard<std::mutex> guard(table.mu);
+  auto it = table.map.find(key);
+  if (it != table.map.end())
     return &it->second;
 
   bool type_ok, act_ok;
@@ -148,7 +194,7 @@ cache_fail:
   return nullptr;
 
 cache_done:
-  auto [ins, _] = g_activation_cache.emplace(key, e);
+  auto [ins, _] = table.map.emplace(key, e);
 
   RUNTIME_DEBUG_LOG("[REAL] queryOrCreateActivation: cached 2 tensor + 1 act "
                     "desc for num_elements=%lld data_type=%lld mode=%lld\n",
@@ -167,7 +213,8 @@ cache_done:
 // MIOpen's 4D tensor descriptor requirement.
 //===----------------------------------------------------------------------===//
 
-int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
+int wrap_miopenActivationForward(RuntimeState *state, int op_state_slot,
+                                 void *input, void *output,
                                  int64_t num_elements, int64_t data_type,
                                  int64_t activation_mode) {
   OP_PROFILE(
@@ -200,8 +247,17 @@ int wrap_miopenActivationForward(RuntimeState *state, void *input, void *output,
     return -1;
   }
 
+  ActivationState *as = ActivationState::get_op_state(state, op_state_slot);
+  if (!as || !as->table) {
+    fprintf(stderr,
+            "[REAL] wrap_miopenActivationForward: missing op-state for slot "
+            "%d\n",
+            op_state_slot);
+    return -1;
+  }
+
   ActivationCacheKey key{num_elements, data_type, activation_mode};
-  const ActivationCacheEntry *c = queryOrCreateActivation(key);
+  const ActivationCacheEntry *c = queryOrCreateActivation(*as->table, key);
   if (!c) {
     fprintf(stderr, "[REAL] wrap_miopenActivationForward: descriptor cache "
                     "creation failed\n");

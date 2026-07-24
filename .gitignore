@@ -28,6 +28,8 @@ CMakePresets.json
 *.pb.cc
 *.pb.h
 compile_commands.json
+# Build-generated version placeholder in the vendored morphizen subtree
+morphizen/morphizen-core/version.txt
 
 # Python
 __pycache__/
@@ -70,10 +72,19 @@ Thumbs.db
 # Cline/AI assistant storage
 .cline_storage/
 .cline/
-.cursor/
+# Ignore .cursor/ contents (IDE/agent state) but track project-level skills.
+# Use .cursor/* (not .cursor/) so we can un-ignore .cursor/skills/ below;
+# a fully-ignored parent dir cannot have children re-included by git.
+.cursor/*
+!.cursor/skills/
+.cursor/skills/**/__pycache__/
+.cursor/skills/**/*.pyc
 
-# Claude Code local settings (machine-specific)
-.claude/settings.local.json
+# Claude Code workspace (worktrees, local settings, sdd ledger — never committed)
+.claude/
+
+# Agentic spec/plan scratch docs (superpowers) — working artifacts, not shipped
+docs/superpowers/
 
 # Additional IDE/editor files
 *.sublime-project

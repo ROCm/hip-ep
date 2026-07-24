@@ -78,7 +78,7 @@ def ConvertOnnxToHipPass : Pass<"convert-onnx-to-hip", "mlir::ModuleOp"> {
     Transformations:
       1. Constants: onnx.Constant -> arith.constant (small/inline) or
          memref.global extern + memref.get_global + bufferization.to_tensor
-         (large/externalized to sidecar .constants.bin + .constants.json)
+         (large/externalized to constants file .constants.bin + .constants.json)
       2. Op mapping: onnx.{MatMul,Transpose,Mul,Softmax} -> hip.* (tensor DPS)
       3. Cleanup: erase onnx.EntryPoint
 
@@ -86,7 +86,7 @@ def ConvertOnnxToHipPass : Pass<"convert-onnx-to-hip", "mlir::ModuleOp"> {
     available as function argument 0.
 
     Constant externalization (opt-in via --externalize-min-num-elements):
-      Large constants above the threshold are written to a binary sidecar file
+      Large constants above the threshold are written to a binary constants file
       and replaced with extern memref.global ops carrying a hip.external_data
       attribute (offset + size).  The filename is recorded as a
       hip.constants_file attribute on the module.  This follows the onnx-mlir
@@ -96,7 +96,7 @@ def ConvertOnnxToHipPass : Pass<"convert-onnx-to-hip", "mlir::ModuleOp"> {
   let options = [
     Option<"externalizeOutputDir", "externalize-output-dir", "std::string",
            /*default=*/"\"\"",
-           "Directory for sidecar .constants.bin/.json files (empty = cwd)">,
+           "Directory for constants-file .constants.bin/.json files (empty = cwd)">,
     Option<"externalizeMinNumElements", "externalize-min-num-elements",
            "int64_t", /*default=*/"0",
            "Minimum number of tensor elements to externalize (0 = disabled)">
@@ -109,6 +109,50 @@ def ConvertOnnxToHipPass : Pass<"convert-onnx-to-hip", "mlir::ModuleOp"> {
     "mlir::linalg::LinalgDialect",
     "mlir::memref::MemRefDialect",
     "mlir::bufferization::BufferizationDialect"
+  ];
+}
+
+def AssignOpStateSlotsPass
+    : Pass<"assign-op-state-slots", "mlir::ModuleOp"> {
+  let summary = "Assign one op-state slot per stateful op instance";
+  let description = [{
+    Identity half of the op-state-slots design
+    (docs/design/op-state-slots-design.md). Walks the module in program order
+    and gives EACH op implementing `OpStateOpInterface` its own dense slot
+    `0..N-1`, stamping `hip.op_state_slot` on the op and recording the total as
+    the module attribute `hipdnn.num_op_state_slots`.
+
+    Per-instance is the default: two ops of the same kind get two slots and
+    two independent state objects. No per-class deduplication is done here.
+
+    Runs before --convert-hip-to-llvm so the slot is available to the lowering
+    (threaded into the op's wrap_* call) and to --generate-op-state-init. A
+    no-op (no module attr) when no op implements the interface.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect"
+  ];
+}
+
+def GenerateOpStateInitPass
+    : Pass<"generate-op-state-init", "mlir::ModuleOp"> {
+  let summary = "Emit @hipdnn_ep_op_states_init_fn from per-op generateOpStateInit";
+  let description = [{
+    Construction half of the op-state-slots design
+    (docs/design/op-state-slots-design.md). Runs AFTER --assign-op-state-slots
+    and BEFORE --convert-hip-to-llvm, while the HIP ops still exist. Emits a
+    standalone `llvm.func @hipdnn_ep_op_states_init_fn(!llvm.ptr) -> i32` that:
+      1. calls @hipdnn_ep_op_states_alloc(state, N) to size the slot array,
+      2. for each stateful op (in slot order) calls the op's
+         `generateOpStateInit` (which emits its construct_* call from the op's
+         own attributes) and stores the result via @hipdnn_ep_op_state_set.
+
+    --generate-interface later calls this function from inference_init. A no-op
+    when `hipdnn.num_op_state_slots` is absent or zero.
+  }];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::LLVM::LLVMDialect"
   ];
 }
 
@@ -213,7 +257,11 @@ def PoolAllocsPass : Pass<"hip-pool-allocs", "mlir::func::FuncOp"> {
   }];
   let options = [
     Option<"alignment", "alignment", "int64_t", /*default=*/"256",
-           "Sub-buffer byte offset alignment (must be power of 2)">
+           "Sub-buffer byte offset alignment (must be power of 2)">,
+    Option<"emitFragmentationReport", "emit-fragmentation-report", "bool",
+           /*default=*/"false",
+           "Debug-only: emit a per-domain remark comparing the packed pool "
+           "size to the max-load lower bound. No effect on generated code.">
   ];
   let dependentDialects = [
     "mlir::hip::HipDialect",
@@ -484,12 +532,38 @@ def ResolveTensorDimsPass
   ];
 }
 
+def ResolveMemRefDimsPass
+    : Pass<"hip-resolve-memref-dims", "mlir::func::FuncOp"> {
+  let summary = "Fold `memref.dim` of view ops to root-buffer dims "
+                "(post-bufferize, before pooling)";
+  let description = [{
+    Post-bufferize twin of `--hip-resolve-tensor-dims`: re-applies the
+    reify-based `memref` dim folds plus the `memref.dim` canonicalisers so
+    `memref.dim` of a `memref.subview` / `expand_shape` / `collapse_shape` /
+    `view` folds to a dim of the root buffer (ultimately `memref.dim` of a
+    function argument).
+
+    The strided views that pin these queries are created during bufferization
+    and by `--hip-promote-strided-hip-operands`, i.e. after resolve-tensor-dims
+    ran, so the patterns had nothing to fold then. Re-rooting the size to a
+    block-top arg dim lets `--hip-hoist-alloc-size-arith` lift it, so
+    `--hip-pool-allocs` shares one pool across many allocs instead of splitting
+    a dominance domain per alloc. Placement: after promote-strided-operands /
+    materialize-host-scalars, before hoist-alloc-size-arith / pool-allocs.
+    Idempotent. See ResolveMemRefDims.cpp for the before/after IR.
+  }];
+  let dependentDialects = [
+    "mlir::affine::AffineDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
 def LoopBodyToOutParamsPass
     : Pass<"hip-loop-body-to-out-params", "mlir::ModuleOp"> {
   let summary = "Promote outlined hip.loop body returns to out-param ABI";
   let description = [{
-    Runs AFTER `one-shot-bufferize` and BEFORE `buffer-deallocation` in
-    both classic and allocator pipelines.
+    Runs AFTER `one-shot-bufferize` and BEFORE `buffer-deallocation`.
 
     `onnx-loop-outline` emits each `hip.loop` body as a private
     `func.func` named `*_loop_body_*`. After bufferization those helpers
@@ -497,12 +571,12 @@ def LoopBodyToOutParamsPass
     LoopLowering expects the out-param ABI (`v_in` + `v_out` per
     loop-carried value, with `{bufferize.result}` on each out-param).
 
-    Module-level `buffer-results-to-out-params` promotes `@main_graph` in
-    the classic pipeline but skips private functions; the allocator
-    pipeline skips module-level out-params on `@main_graph` entirely.
-    This pass closes the gap by calling MLIR's
-    `promoteBufferResultsToOutParams` with `modifyPublicFunctions = false`
-    and a filter on `*_loop_body_*` only.
+    This is the loop-body out-param ABI, which is INTERNAL to the DLL and
+    unrelated to the graph-entry output allocator ABI. `@main_graph`
+    outputs are handled by `hip-use-output-allocator` (`hip.alloc_output`
+    + EP callback); this pass only promotes the private `*_loop_body_*`
+    helpers by calling MLIR's `promoteBufferResultsToOutParams` with
+    `modifyPublicFunctions = false` and a filter on `*_loop_body_*` only.
 
     Example (one loop-carried memref):
       Before:  private @body(..., %v_in) -> memref<16xf32> { return %out }
@@ -518,26 +592,25 @@ def UseOutputAllocatorPass
     : Pass<"hip-use-output-allocator", "mlir::func::FuncOp"> {
   let summary = "Rewrite returned memref.alloc outputs to hip.alloc_output";
   let description = [{
-    Replaces each graph-output memref.alloc (a value returned by func.return)
-    with hip.alloc_output, reusing the alloc's dynamic-size operands and setting
-    out_idx to the return operand position.  Output buffers are then obtained
-    from the EP output allocator (EP/runtime-owned) instead of being deallocated
-    or pooled.
+    Replaces each graph-output memref.alloc with hip.alloc_output, reusing the
+    alloc's dynamic-size operands and setting out_idx to its position in
+    func.return.  Output buffers then come from the EP output allocator (the EP
+    owns and frees them) instead of being deallocated or pooled.
 
-    Scope: only public (graph-entry) functions are rewritten.  Private helpers
-    (e.g. outlined onnx.Loop bodies) carry a !hip.context arg 0 and return
-    memref.allocs too, but their results are DLL-internal, never EP outputs, so
-    they are left unchanged.  Functions lacking !hip.context as argument 0 are
-    likewise skipped.
+    An alloc counts as a graph output when func.return hands it back -- either
+    directly, or after it passes through view ops (memref.cast,
+    memref.collapse_shape, memref.expand_shape, memref.subview, any number of
+    them).  The pass uses BufferViewFlowAnalysis to check this: an alloc is an
+    output if any value made from it via those view ops is returned.  This
+    handles reshaped / cast / subview'd outputs without special-casing each op.
+    The view ops between the alloc and the return are left in place.
 
-    The pass also stamps the `hipdnn.use_output_allocator` BoolAttr (value =
-    true) on the parent module -- the allocator-mode marker that downstream
-    convert-hip-to-llvm and generate-interface read to select the allocator ABI.
-    It is a typed bool, not a presence-only UnitAttr, so readers test the VALUE
-    (absence and `= false` both mean classic mode).  It is stamped even when no
-    alloc is rewritten, because the mode is decided by the pass being run, not by
-    the IR contents (a zero-output graph must still be marked).  Leaves the
-    function signature and func.return untouched.
+    Only public (graph-entry) functions are rewritten.  Private helpers (e.g.
+    outlined onnx.Loop bodies) also take a !hip.context arg and return allocs,
+    but those buffers stay inside the DLL and are not EP outputs, so they are
+    left unchanged.  Functions whose arg 0 is not !hip.context are skipped too.
+
+    Leaves the function signature and func.return untouched.
   }];
   let dependentDialects = [
     "mlir::hip::HipDialect",
@@ -706,7 +779,7 @@ def ResolveExternConstantsPass
     memref.global. The !hip.context is taken from function argument 0
     (inserted by --hip-add-context-arg).
 
-    The runtime is responsible for loading the sidecar constants.bin file
+    The runtime is responsible for loading the constants.bin file
     via morphizen::FileSystem, uploading constants to GPU memory, and
     returning GPU pointers via hipdnn_ep_constant_get(state, index).
 
@@ -718,6 +791,51 @@ def ResolveExternConstantsPass
     "mlir::arith::ArithDialect",
     "mlir::func::FuncDialect",
     "mlir::memref::MemRefDialect"
+  ];
+}
+
+def SplitDuplicateDpsInitsPass
+    : Pass<"hip-split-duplicate-dps-inits", "mlir::func::FuncOp"> {
+  let summary = "De-alias DPS init operands of an op that CSE merged onto one "
+                "tensor.empty";
+  let description = [{
+    `tensor.empty` is `Pure`, so CSE deduplicates same-typed empties. That is
+    harmless for single-use scratch, but WRONG when one merged empty feeds two
+    or more *init* (DPS-out) operands of the SAME op: bufferization then aliases
+    those results into one buffer, and an op whose kernel reads back its own
+    outputs -- e.g. `hip.gqa` reading K from `present_key` and V from
+    `present_value` -- consumes the same bytes for both and silently
+    miscompiles. One-Shot Bufferize separates such inits only when the tied
+    results are live; for dead scratch results it keeps them merged.
+
+    For each `DestinationStyleOpInterface` op, this pass re-points every init
+    operand after the first occurrence of a shared `tensor.empty` at its own
+    fresh `bufferization.alloc_tensor` (CSE-immune, documented to not alias any
+    other buffer). Only `tensor.empty` seeds are rewritten -- their contents are
+    undefined, so the substitution is value-preserving; non-empty inits, which
+    may carry contents the op reads, are left untouched. Single-use scratch
+    empties are unaffected and stay CSE-mergeable, so pool packing is preserved.
+
+    This is the surgical counterpart to running `empty-tensor-to-alloc-tensor`
+    over every empty (the upstream blanket approach), which also blocks benign
+    merges and inflates the buffer / pool-domain count on activation-heavy
+    graphs. Runs after CSE (which creates the duplication) and before
+    one-shot-bufferize (which would otherwise lock in the shared buffer).
+
+    Before (post-CSE; one %e feeds both present_* inits):
+
+        %e = tensor.empty() : tensor<AxBxCxDxf16>
+        hip.gqa(...) outs(%out, %e, %e : ...)   // present_key aliases present_value
+
+    After:
+
+        %e  = tensor.empty()               : tensor<AxBxCxDxf16>
+        %e2 = bufferization.alloc_tensor() : tensor<AxBxCxDxf16>
+        hip.gqa(...) outs(%out, %e, %e2 : ...)  // distinct buffers
+  }];
+  let dependentDialects = [
+    "mlir::bufferization::BufferizationDialect",
+    "mlir::tensor::TensorDialect"
   ];
 }
 

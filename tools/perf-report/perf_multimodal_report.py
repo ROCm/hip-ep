@@ -823,32 +823,65 @@ class ComputeSample:
 
 
 def _classify_stage(block: list[str]) -> str:
-    """prefill vs decode from the op block's sequence length.
+    """prefill vs decode from the op block's attention sequence length.
 
-    Decode processes exactly one new token, so its attention / matmul shapes
-    carry ``sq=1,`` (gqa) or ``m=1,`` (matmul_nbits). Everything else --
-    text prefill (``sq=301,``), the vision encoder (``sq=1196,`` MHA), and
-    the embedding/glue Computes -- is the one-time TTFT work, bucketed as
-    prefill. This is the standard autoregressive single-token tell; the
-    ``sq=1,``/``m=1,`` trailing comma avoids matching ``sq=1196`` / ``m=1196``.
+    Decode processes exactly one new token, so its attention op carries
+    ``sq=1,``. Every attention variant the EP emits prints ``sq=`` -- ``gqa``,
+    ``multi_head_attention``, and ``linear_attention`` all do -- so the tell is
+    attention-kind-agnostic. Prefill (text prompt, vision encoder) runs
+    attention over many tokens (``sq=301,``, ``sq=1196,``), and the
+    embedding/glue Computes have no single-token attention -- all bucketed as
+    prefill. The ``sq=1,`` trailing comma avoids matching ``sq=1196``.
+
+    Do NOT also key decode on ``m=1,`` (matmul_nbits): an ``m=1`` matmul is NOT
+    unique to decode. A prefill that slices its lm_head to the LAST token only
+    (a common optimization -- logits are needed for just the final prompt
+    position to sample the first token) emits ``m=1,n=<vocab>,k=...`` while its
+    attention is still ``sq=<prompt_len>``. Keying on ``m=1,`` then misfiled
+    that whole text-prefill Compute as decode, zeroing the "Text prefill" row in
+    the # 2 stage breakdown. Models whose prefill lm_head is NOT sliced
+    (``m=<prompt_len>``) were unaffected, which is why it showed up on some
+    models and not others. ``sq=1,`` (true single-token attention) is the only
+    reliable autoregressive tell, present in every decode block and no prefill
+    block.
     """
     text = "\n".join(block)
-    return "decode" if ("sq=1," in text or "m=1," in text) else "prefill"
+    return "decode" if "sq=1," in text else "prefill"
 
 
-# Prefill sub-model buckets, by op signature (Qwen-VL-shaped; the text-prefill
-# / vision tells are fairly general, embedding/glue is a catch-all):
-#   vision       -> multi_head_attention (the ViT encoder)
-#   text_prefill -> matmul_nbits (the quantized LLM prefill)
+def _has_op(block: list[str], name: str) -> bool:
+    """True iff the block has an op-NAME parent row for exactly ``name``.
+
+    Matches the parent-row prefix ``[PERF]  <name> `` (op name 2-space-indented,
+    then column whitespace) so it tests the exact op name -- NOT a substring.
+    This is load-bearing: a substring test for ``conv`` would also match the
+    text decoder's ``causal_conv`` (linear-attention / SSM hybrids) and misfile
+    that text prefill as vision. Shape sub-rows (4-space indent) never match.
+    """
+    prefix = f"[PERF]  {name} "
+    return any(ln.startswith(prefix) for ln in block)
+
+
+# Prefill sub-model buckets, by op signature. One Compute belongs to exactly one
+# sub-model session (vision.onnx / embedding.onnx / text.onnx are separate
+# graphs -> separate Compute calls), so the buckets are disjoint and order only
+# decides which tell we trust first:
+#   text_prefill -> matmul_nbits (the quantized LLM). Checked first; the vision
+#                   encoders in the target models are fp16 (no matmul_nbits), so
+#                   this never steals a vision Compute.
+#   vision       -> the ViT/SigLIP encoder. Two attention styles appear: a FUSED
+#                   op (multi_head_attention, e.g. Qwen-VL) or DECOMPOSED
+#                   attention (matmul + softmax, e.g. gemma3 SigLIP), the latter
+#                   also carrying a patch-embedding `conv`. Any of those (exact
+#                   op names) identifies vision.
 #   embedding    -> image-feature scatter (nonzero / scatter_nd)
 #   glue         -> everything else (tiny inter-op Computes)
 def _prefill_substage(block: list[str]) -> str:
-    text = "\n".join(block)
-    if "multi_head_attention" in text:
-        return "vision"
-    if "matmul_nbits" in text:
+    if _has_op(block, "matmul_nbits"):
         return "text_prefill"
-    if "nonzero" in text or "scatter_nd" in text:
+    if any(_has_op(block, op) for op in ("multi_head_attention", "softmax", "conv")):
+        return "vision"
+    if _has_op(block, "nonzero") or _has_op(block, "scatter_nd"):
         return "embedding"
     return "glue"
 

@@ -42,12 +42,6 @@ static CompilationConfig load_config(PassContext *ctx) {
   CompilationConfig config;
   config.artifactFormat = ArtifactFormat::LLVM_IR;
   config.optLevel = 2;
-  // Output-allocator ABI is the only mode: the DLL allocates graph outputs
-  // in-graph (hip.alloc_output) and the EP dispatches the 2-arg
-  // inference_compute. There is no provider option; the classic out-param ABI
-  // has been removed at the EP front-end. Threaded into both the compile
-  // pipeline and the embedded metadata flag so they can never disagree.
-  config.useOutputAllocator = true;
 
   auto ep_ctx = ctx->get_session_config("ep.context_enable");
   bool epctxExport = ep_ctx.has_value() && ep_ctx.value() == "1";
@@ -87,7 +81,7 @@ static CompilationConfig load_config(PassContext *ctx) {
                                                                 : "LLVM_IR")
             << "; skipConstantData="
             << (config.skipConstantData ? "true" : "false")
-            << (epctxExport ? " (EPContext export -> sidecar)"
+            << (epctxExport ? " (EPContext export -> constants file)"
                             : " (streaming default)");
 
   return config;
@@ -157,16 +151,11 @@ static int64_t normalizeDim(int64_t dim) {
 // Step 5: Build metadata JSON from graph inputs and outputs.
 // Output shapes are emitted verbatim (static extent or -1 for dynamic dims);
 // the DLL sizes dynamic outputs in-graph at runtime via the output-allocator
-// callback (the only ABI).
+// callback.
 static std::string build_metadata_json(const CompilationArtifact &artifact,
                                        Graph &graph) {
   mlir_metadata::Metadata metadata;
   metadata.set_artifact_filename(artifact.filename);
-  // Always the output-allocator ABI -- there is no classic out-param mode at
-  // the EP front-end. The same value is set on the compile flag
-  // (CompilationConfig::useOutputAllocator), so the DLL ABI and the EP's
-  // runtime dispatch arity can never disagree.
-  metadata.set_use_output_allocator(true);
   // Record the artifact format so the EP picks the matching loader before it
   // opens the artifact (the artifact's own metadata blob is inside the
   // artifact and cannot drive the load decision).

@@ -33,32 +33,22 @@ jobs:
       # windows-build.yml's, so identical cache keys resolve to identical
       # artifacts and each dep's expensive cold build runs once globally.
       LLVM_TAG: llvmorg-22.1.0
-      ONNXRUNTIME_VERSION: "1.25.1"
+      ONNXRUNTIME_VERSION: "1.27.0"
       # Must match windows-build.yml verbatim: it is part of the shared
       # ort-install cache key and drives the same patch set.
-      ONNXRUNTIME_PR_PATCHES: "28608"
+      ONNXRUNTIME_PR_PATCHES: ""
       SCCACHE_GHA_ENABLED: "true"
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
 
     steps:
-      - name: Setup SSH key for MorphiZen submodule
-        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555 # v0.10.0
-        with:
-          ssh-private-key: ${{ secrets.MORPHIZEN_DEPLOY_KEY }}
-
+      # MorphiZen is vendored in-tree as a git subtree under morphizen,
+      # so no deploy key or submodule initialization is needed.
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           submodules: false
           fetch-depth: 0
           show-progress: false
-
-      - name: Checkout MorphiZen submodule
-        shell: bash
-        run: |
-          git config --global url."git@github.com:ROCm/MorphiZen.git".insteadOf \
-            "../MorphiZen"
-          git submodule update --init --recursive
 
       # -----------------------------------------------------------------------
       # Per-dependency caches. Keys are identical to windows-build.yml so the
@@ -100,6 +90,37 @@ jobs:
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
+
+      # -----------------------------------------------------------------------
+      # Build LLVM/MLIR/LLD from source into llvm-install (clang;mlir;lld, X86,
+      # /MT). Identical recipe to windows-build.yml (shared cache).
+      # -----------------------------------------------------------------------
+      - name: Build LLVM/MLIR/LLD from source
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          SRC="${{ runner.workspace }}/llvm-project"
+          git init "$SRC"
+          git -C "$SRC" remote add origin https://github.com/llvm/llvm-project.git
+          git -C "$SRC" fetch --depth 1 origin "${{ env.LLVM_TAG }}"
+          git -C "$SRC" checkout FETCH_HEAD
+          cmake -G Ninja -S "$SRC/llvm" -B "${{ runner.workspace }}/build-llvm" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
+            -DLLVM_TARGETS_TO_BUILD=X86 \
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
+            -DCMAKE_INSTALL_PREFIX="${{ runner.workspace }}/llvm-install" \
+            -DLLVM_ENABLE_RTTI=ON \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_BUILD_TOOLS=ON \
+            -DLLVM_INSTALL_UTILS=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+          cmake --build "${{ runner.workspace }}/build-llvm" --target install
 
       # -----------------------------------------------------------------------
       # Build ONNX Runtime from source into ort-install. Recipe is byte-for-
@@ -192,37 +213,6 @@ jobs:
           echo "Cached ORT wheel: $(basename "$ORT_WHEEL")"
 
       # -----------------------------------------------------------------------
-      # Build LLVM/MLIR/LLD from source into llvm-install (clang;mlir;lld, X86,
-      # /MT). Identical recipe to windows-build.yml (shared cache).
-      # -----------------------------------------------------------------------
-      - name: Build LLVM/MLIR/LLD from source
-        if: steps.cache-llvm.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          SRC="${{ runner.workspace }}/llvm-project"
-          git init "$SRC"
-          git -C "$SRC" remote add origin https://github.com/llvm/llvm-project.git
-          git -C "$SRC" fetch --depth 1 origin "${{ env.LLVM_TAG }}"
-          git -C "$SRC" checkout FETCH_HEAD
-          cmake -G Ninja -S "$SRC/llvm" -B "${{ runner.workspace }}/build-llvm" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
-            -DLLVM_TARGETS_TO_BUILD=X86 \
-            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
-            -DCMAKE_INSTALL_PREFIX="${{ runner.workspace }}/llvm-install" \
-            -DLLVM_ENABLE_RTTI=ON \
-            -DLLVM_ENABLE_ZLIB=OFF \
-            -DLLVM_ENABLE_ZSTD=OFF \
-            -DLLVM_INCLUDE_TESTS=OFF \
-            -DLLVM_INCLUDE_EXAMPLES=OFF \
-            -DLLVM_INCLUDE_BENCHMARKS=OFF \
-            -DLLVM_BUILD_TOOLS=ON \
-            -DLLVM_INSTALL_UTILS=ON \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-          cmake --build "${{ runner.workspace }}/build-llvm" --target install
-
-      # -----------------------------------------------------------------------
       # protobuf, flatbuffers and gtest are resolved by cmake/deps.cmake during
       # Configure/Build (from-source FetchContent fallback), not pre-built here.
       # -----------------------------------------------------------------------
@@ -230,8 +220,10 @@ jobs:
       # -----------------------------------------------------------------------
       # Build (mock) via the cross-platform build.py. --mock sets
       # BUILD_MOCK_RUNTIME=ON (no ROCm/TheRock); ORT + LLVM come from the cached
-      # prefixes and cmake/deps.cmake source-builds the rest. The LIT tests run
-      # inside build.py after install.
+      # prefixes and cmake/deps.cmake source-builds the rest. build.py runs the
+      # GPU-free test suites (LIT + the plugin-registrar and output-allocator
+      # unit tests) after install. No compiler plugin is selected here, so the
+      # LIT pipeline stays plugin-free (see the isolated step below for why).
       # -----------------------------------------------------------------------
       - name: Build onnx-hipdnn-ep (mock)
         shell: bash
@@ -240,4 +232,26 @@ jobs:
             --mock \
             --config Release \
             --cmake_generator Ninja \
+            --build_dir "${{ runner.workspace }}/build/mock" \
             --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install"
+
+      # -----------------------------------------------------------------------
+      # Exercise the sample plugin's registrar unit test in ISOLATION. This is a
+      # validation-only build (no artifacts shipped), but the sample plugin
+      # cannot be selected in the build above: selecting a plugin injects its
+      # pipeline-slot pass into buildOnnxToHipPipeline, and the sample pass emits
+      # a remark per func.func, which pollutes the pipeline LIT tests that
+      # capture stderr. So reconfigure the just-built tree with the plugin and
+      # run ONLY the registrar ctest -- it checks the plugin registry (it does
+      # not run the pipeline), so it is unaffected. This covers the
+      # HIP_EP_EXPECT_SAMPLE=1 branch: the addDialectRegistration ->
+      # loadAllDialects path and the convert-hip-to-llvm hasPromisedInterface
+      # guard. LIT is not re-run here, so it stays plugin-free.
+      # -----------------------------------------------------------------------
+      - name: Plugin registrar unit test (sample plugin selected)
+        shell: bash
+        run: |
+          BUILD="${{ runner.workspace }}/build/mock"
+          cmake -B "$BUILD" -DHIPDNN_EP_COMPILER_PLUGINS=sample
+          cmake --build "$BUILD" --config Release --target test_static_plugins
+          ctest --test-dir "$BUILD" -C Release -R StaticPlugins --output-on-failure

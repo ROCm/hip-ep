@@ -8,6 +8,7 @@
 
 include "hip/Dialect/IR/HipDialect.td"
 include "hip/Dialect/IR/HipDpsOpInterface.td"
+include "hip/Dialect/IR/HipOpStateInterface.td"
 include "hip/Dialect/IR/HipTypes.td"
 include "mlir/Interfaces/DestinationStyleOpInterface.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
@@ -392,7 +393,7 @@ def Hip_LoopOp : Hip_Op<"loop",
   );
 
   // v_final is non-empty only at the tensor level (DPS convention).
-  // After BufferResultsToOutParams / OneShotBufferize, the results are
+  // After bufferization + loop-body out-param promotion, the results are
   // eliminated and v_init carries the writes via its memref descriptors.
   let results = (outs Variadic<AnyRankedTensor>:$v_final);
 
@@ -402,6 +403,64 @@ def Hip_LoopOp : Hip_Op<"loop",
     ( `captures` `(` $captures^ `:` type($captures) `)` )?
     ( `->` `(` type($v_final)^ `)` )?
     `body` $body_func
+    attr-dict
+  }];
+
+  let hasVerifier = 1;
+}
+
+def Hip_IfOp : Hip_Op<"if",
+    [AttrSizedOperandSegments,
+     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+     DeclareOpInterfaceMethods<DestinationStyleOpInterface,
+                               ["getDpsInitsMutable"]>,
+     DeclareOpInterfaceMethods<InferTypeOpInterface,
+                               ["inferReturnTypes"]>,
+     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Outlined then/else conditional";
+  let description = [{
+    Runtime-driven conditional with outlined then/else body functions.
+    Exactly one branch executes per invocation; its outputs are written
+    into the DPS `o_init` buffers (tensor mode) or returned via out-params
+    (memref mode post-bufferization).
+
+    Operand layout:
+      - `$ctx`: `!hip.context` (always first).
+      - `$cond`: `i1` — branch selector (true -> then, false -> else).
+      - `$o_init`: variadic, length must equal `$num_outputs` — destination
+        buffers for branch outputs; types must match the op's result types.
+      - `$captures`: variadic — outer-graph values used inside either
+        branch that are not subgraph block arguments.
+
+    Result types match `$o_init` types in tensor mode.
+
+    Example:
+    ```mlir
+    %out = hip.if(%ctx, %cond)
+               outs(%out_init : tensor<5xf32>)
+               then @main_if_then_n0 else @main_if_else_n0
+               {num_outputs = 1 : i32}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    I1:$cond,
+    Variadic<Hip_TensorOrMemRef>:$o_init,
+    Variadic<AnyType>:$captures,
+    FlatSymbolRefAttr:$then_func,
+    FlatSymbolRefAttr:$else_func,
+    I32Attr:$num_outputs
+  );
+
+  let results = (outs Variadic<AnyRankedTensor>:$outputs);
+
+  let assemblyFormat = [{
+    `(` $ctx `,` $cond `)`
+    ( `outs` `(` $o_init^ `:` type($o_init) `)` )?
+    ( `captures` `(` $captures^ `:` type($captures) `)` )?
+    ( `->` `(` type($outputs)^ `)` )?
+    `then` $then_func `else` $else_func
     attr-dict
   }];
 
@@ -611,7 +670,7 @@ def Hip_ConvTransposeOp : Hip_DpsOp<"conv_transpose"> {
 // reason to write that boilerplate by hand. Matmul is the worked
 // example for the orthogonality of these two layers on #260; #262
 // extends the same split to gemm / qmoe / matmul_nbits.
-def Hip_MatmulOp : Hip_DpsOp<"matmul", /*traits=*/[],
+def Hip_MatmulOp : Hip_DpsOp<"matmul", /*traits=*/[OpStateOpInterface],
                              /*outsAccessor=*/"Output",
                              /*autoReify=*/0,
                              /*autoInfer=*/1,
@@ -666,6 +725,20 @@ def Hip_MatmulOp : Hip_DpsOp<"matmul", /*traits=*/[],
     attr-dict (`:` type($result_tensors)^)?
   }];
 
+  // OpStateOpInterface: construct this matmul instance's per-session state
+  // (MatmulState), which holds a shared_ptr to the device-wide hipBLASLt algo
+  // table. No compile-time params — the table fills lazily per call. The
+  // construct fn stores the state into op_states[slot] itself.
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_matmul",
+          {});
+    }
+  }];
+
   let hasVerifier = 1;
 }
 
@@ -674,7 +747,8 @@ def Hip_MatmulOp : Hip_DpsOp<"matmul", /*traits=*/[],
 //===----------------------------------------------------------------------===//
 
 def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
-                                  /*traits=*/[AttrSizedOperandSegments],
+                                  /*traits=*/[AttrSizedOperandSegments,
+                                              OpStateOpInterface],
                                   /*outsAccessor=*/"Output",
                                   /*autoReify=*/0,
                                   /*autoInfer=*/1,
@@ -736,6 +810,20 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
     (`bias` `(` $bias^ `:` type($bias) `)`)?
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  // OpStateOpInterface: construct this MatMulNBits instance's per-session
+  // zero_points unpack cache (MatmulNbitsState). No compile-time params — the
+  // cache fills lazily per call. The construct fn stores the state into
+  // op_states[slot] itself.
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, slot,
+          "hipdnn_ep_op_state_construct_matmul_nbits", {});
+    }
   }];
 }
 
@@ -901,7 +989,7 @@ def Hip_GatherBlockQuantizedOp : Hip_DpsOp<"gather_block_quantized"> {
 
 // ===== MIOpen ops ============================================================
 
-def Hip_RmsNormOp : Hip_DpsOp<"rms_norm", /*traits=*/[],
+def Hip_RmsNormOp : Hip_DpsOp<"rms_norm", /*traits=*/[OpStateOpInterface],
                               /*outsAccessor=*/"Output",
                               /*autoReify=*/0,
                               /*autoInfer=*/1,
@@ -947,6 +1035,20 @@ def Hip_RmsNormOp : Hip_DpsOp<"rms_norm", /*traits=*/[],
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  // OpStateOpInterface: construct this instance's per-session state
+  // (T5NormState), which holds a shared_ptr to the device-wide MIOpen
+  // descriptor table shared across sessions via WeakStore.
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_t5norm",
+          {});
+    }
+  }];
+
   let hasVerifier = 1;
 }
 
@@ -1043,7 +1145,7 @@ def Hip_LayerNormOp : Hip_DpsOp<"layer_norm",
 }
 
 def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
-    [AttrSizedOperandSegments]> {
+    [AttrSizedOperandSegments, OpStateOpInterface]> {
   let summary = "Fused skip + RMS normalization (com.microsoft.SkipSimplifiedLayerNormalization)";
   let description = [{
     Full alignment with Microsoft ONNX Runtime SkipSimplifiedLayerNormalization
@@ -1117,6 +1219,20 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
     `outs` `(` $outputs `:` type($outputs) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  // OpStateOpInterface: construct this instance's per-session state
+  // (SkipT5NormState), which holds a shared_ptr to the device-wide MIOpen
+  // descriptor table shared across sessions via WeakStore.
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, slot,
+          "hipdnn_ep_op_state_construct_skip_t5norm", {});
+    }
+  }];
+
   let hasVerifier = 1;
 }
 
@@ -1128,9 +1244,20 @@ def Hip_RopeOp : Hip_DpsOp<"rope", /*traits=*/[],
   let summary = "Rotary position embedding (RoPE)";
   let description = [{
     Applies rotary position embedding to the input tensor.
-    Implements the Microsoft RotaryEmbedding operator.
 
     Uses destination-passing style: output buffer is provided as argument.
+
+    `position_ids` is OPTIONAL, mirroring the two forms of the ONNX
+    RotaryEmbedding operator:
+    - Present (com.microsoft.RotaryEmbedding / native with position_ids):
+      cos_cache/sin_cache are a 2D lookup table `[max_position, rotary_dim/2]`
+      indexed by `position_ids[b, s]`.
+    - Absent (native ai.onnx RotaryEmbedding opset>=23 without position_ids):
+      cos_cache/sin_cache are already position-expanded to
+      `[batch, seq, rotary_dim/2]`, so the runtime indexes them directly by
+      the flattened token position `b*seq + s`. (HF exports precompute the
+      per-token cos/sin via a Gather, leaving the RotaryEmbedding node with
+      no position_ids operand.)
 
     Attributes:
     - interleaved: Rotary embedding interleaved format (0 or 1)
@@ -1151,7 +1278,7 @@ def Hip_RopeOp : Hip_DpsOp<"rope", /*traits=*/[],
   let arguments = (ins
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$input,
-    Hip_TensorOrMemRef:$position_ids,
+    Optional<Hip_TensorOrMemRef>:$position_ids,
     Hip_TensorOrMemRef:$cos_cache,
     Hip_TensorOrMemRef:$sin_cache,
     Hip_TensorOrMemRef:$output,
@@ -1160,10 +1287,17 @@ def Hip_RopeOp : Hip_DpsOp<"rope", /*traits=*/[],
     I64Attr:$rotary_embedding_dim
   );
 
+  // position_ids is the only optional operand; MLIR resolves its presence from
+  // the operand count (no AttrSizedOperandSegments needed). Each optional group
+  // must LEAD with the `,` literal: a group's first parsable element has to be a
+  // literal / variable / custom directive, so a bare `type(...)` directive
+  // cannot open the type-list group. Anchoring on $position_ids omits it from
+  // both the value and type lists when absent; the present-form IR prints
+  // identically to before.
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(`
-        $input `,` $position_ids `,` $cos_cache `,` $sin_cache `:`
-        type($input) `,` type($position_ids) `,` type($cos_cache) `,` type($sin_cache)
+        $input (`,` $position_ids^)? `,` $cos_cache `,` $sin_cache `:`
+        type($input) (`,` type($position_ids)^)? `,` type($cos_cache) `,` type($sin_cache)
     `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
@@ -1185,8 +1319,23 @@ def Hip_MiopenAddOp : Hip_DpsOp_Broadcast<"miopen.add",
   let hasVerifier = 1;
 }
 
-def Hip_MulOp : Hip_DpsOp_Broadcast<"mul", /*operandGetters=*/["Lhs", "Rhs"]> {
+def Hip_MulOp : Hip_DpsOp_Broadcast<"mul", /*operandGetters=*/["Lhs", "Rhs"],
+                                    /*outsAccessor=*/"Output",
+                                    /*traits=*/[OpStateOpInterface]> {
   let summary = "Elementwise multiplication";
+
+  // OpStateOpInterface: hip.mul/add/min/max all lower to wrap_miopenOpTensor,
+  // which owns the shared MIOpen OpTensor descriptor table (OpTensorState);
+  // each instance's slot holds a shared_ptr to the device-wide table.
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_optensor",
+          {});
+    }
+  }];
   let description = [{
     Performs elementwise multiplication: output = lhs * rhs
 
@@ -1212,8 +1361,21 @@ def Hip_MulOp : Hip_DpsOp_Broadcast<"mul", /*operandGetters=*/["Lhs", "Rhs"]> {
   let hasVerifier = 1;
 }
 
-def Hip_AddOp : Hip_DpsOp_Broadcast<"add", /*operandGetters=*/["Lhs", "Rhs"]> {
+def Hip_AddOp : Hip_DpsOp_Broadcast<"add", /*operandGetters=*/["Lhs", "Rhs"],
+                                    /*outsAccessor=*/"Output",
+                                    /*traits=*/[OpStateOpInterface]> {
   let summary = "Elementwise addition";
+
+  // OpStateOpInterface: shared OpTensorState (see hip.mul).
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_optensor",
+          {});
+    }
+  }];
   let description = [{
     Performs elementwise addition: output = lhs + rhs
 
@@ -1239,8 +1401,21 @@ def Hip_AddOp : Hip_DpsOp_Broadcast<"add", /*operandGetters=*/["Lhs", "Rhs"]> {
   let hasVerifier = 1;
 }
 
-def Hip_MinOp : Hip_DpsOp_Broadcast<"min", /*operandGetters=*/["Lhs", "Rhs"]> {
+def Hip_MinOp : Hip_DpsOp_Broadcast<"min", /*operandGetters=*/["Lhs", "Rhs"],
+                                    /*outsAccessor=*/"Output",
+                                    /*traits=*/[OpStateOpInterface]> {
   let summary = "Elementwise minimum";
+
+  // OpStateOpInterface: shared OpTensorState (see hip.mul).
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_optensor",
+          {});
+    }
+  }];
   let description = [{
     Performs elementwise minimum: output = min(lhs, rhs)
 
@@ -1271,8 +1446,19 @@ def Hip_MinOp : Hip_DpsOp_Broadcast<"min", /*operandGetters=*/["Lhs", "Rhs"]> {
   }];
 }
 
-def Hip_MaxOp : Hip_DpsOp<"max"> {
+def Hip_MaxOp : Hip_DpsOp<"max", /*traits=*/[OpStateOpInterface]> {
   let summary = "Elementwise maximum";
+
+  // OpStateOpInterface: shared OpTensorState (see hip.mul).
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_optensor",
+          {});
+    }
+  }];
   let description = [{
     Performs elementwise maximum: output = max(lhs, rhs)
 
@@ -1394,6 +1580,186 @@ def Hip_GatherOp : Hip_DpsOp<"gather", /*traits=*/[],
   }];
 }
 
+def Hip_OneHotOp : Hip_DpsOp<"one_hot", /*traits=*/[],
+                             /*outsAccessor=*/"Output",
+                             /*autoReify=*/0,
+                             /*autoInfer=*/1,
+                             /*declareInfer=*/1> {
+  let summary = "Expand indices into a one-hot tensor along an axis";
+  let description = [{
+    Implements ONNX OneHot: inserts a `depth`-sized axis into the output
+    and writes `on_value` at index positions from `indices`, filling all
+    other slots with `off_value` from the 2-element `values` tensor.
+
+    Example:
+    ```mlir
+    hip.one_hot(%ctx)
+        ins(%indices, %depth, %values :
+            memref<2x2xi64, 1>, memref<i64, 1>, memref<2xf32, 1>)
+        outs(%output : memref<2x2x10xf32, 1>) {axis = -1 : i64}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$indices,
+    Hip_TensorOrMemRef:$depth,
+    Hip_TensorOrMemRef:$values,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "-1">:$axis
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $indices `,` $depth `,` $values `:` type($indices) `,` type($depth) `,` type($values) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_CompressOp : Hip_DpsOp<"compress", /*traits=*/[],
+                               /*outsAccessor=*/"Output",
+                               /*autoReify=*/0,
+                               /*autoInfer=*/1,
+                               /*declareInfer=*/1> {
+  let summary = "Select slices or elements where a 1-D condition is true";
+  let description = [{
+    Implements ONNX Compress: along `axis`, keep only slices whose
+    corresponding `condition` entry is true. When `flatten` is true the
+    input is treated as a 1-D tensor before selection (no `axis` attribute
+    on the ONNX op).
+
+    Example:
+    ```mlir
+    hip.compress(%ctx)
+        ins(%input, %condition : memref<3x2xf32, 1>, memref<3xi1, 1>)
+        outs(%output : memref<2x2xf32, 1>) {axis = 0 : i64, flatten = false}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Hip_TensorOrMemRef:$condition,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "0">:$axis,
+    DefaultValuedAttr<BoolAttr, "false">:$flatten
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `,` $condition `:` type($input) `,` type($condition) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_ScatterElementsOp : Hip_DpsOp<"scatter_elements", /*traits=*/[],
+                                      /*outsAccessor=*/"Output",
+                                      /*autoReify=*/1,
+                                      /*autoInfer=*/1,
+                                      /*declareInfer=*/1> {
+  let summary = "Scatter updates along an axis using same-rank indices";
+  let description = [{
+    Implements ONNX ScatterElements: produce an `output` tensor with the
+    same shape as `data` by copying `data`, then writing `updates` at
+    positions specified by `indices` along `axis`. Supports the same
+    `reduction` modes as ScatterND (`none`, `add`, `mul`, `min`, `max`).
+
+    Example:
+    ```mlir
+    hip.scatter_elements(%ctx)
+        ins(%data, %indices, %updates :
+            memref<2x2xf32, 1>, memref<2x2xi32, 1>, memref<2x2xf32, 1>)
+        outs(%output : memref<2x2xf32, 1>) {axis = 1 : i64, reduction = "none"}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$indices,
+    Hip_TensorOrMemRef:$updates,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "0">:$axis,
+    DefaultValuedAttr<StrAttr, "\"none\"">:$reduction
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `,` $indices `,` $updates `:` type($data) `,` type($indices) `,` type($updates) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_GatherElementsOp : Hip_DpsOp<"gather_elements", /*traits=*/[],
+                                      /*outsAccessor=*/"Output",
+                                      /*autoReify=*/0,
+                                      /*autoInfer=*/1,
+                                      /*declareInfer=*/1> {
+  let summary = "Gather elements along an axis using same-rank indices";
+  let description = [{
+    Gathers values from the data tensor at positions specified by the
+    indices tensor along the given axis. Output shape matches indices shape.
+    Implements the ONNX GatherElements operator.
+
+    Example:
+    ```mlir
+    hip.gather_elements(%ctx)
+        ins(%data, %indices : memref<2x2xf32, 1>, memref<2x2xi32, 1>)
+        outs(%output : memref<2x2xf32, 1>) {axis = 1 : i64}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$indices,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "0">:$axis
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `,` $indices `:` type($data) `,` type($indices) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_TopKOp : Hip_DpsOp<"top_k",
+    /*traits=*/[],
+    /*outsAccessor=*/"Values",
+    /*autoReify=*/0,
+    /*autoInfer=*/0,
+    /*declareInfer=*/0> {
+  let summary = "Retrieve top-K values and indices along an axis";
+  let description = [{
+    Implements the ONNX TopK operator: along `axis`, select the top `K`
+    elements from the input and return their values and indices.
+
+    Inputs:
+      x - data tensor
+      k - scalar or 1-element int64 tensor giving K
+
+    DPS outputs (always 2):
+      values - same element type as x
+      indices - int64
+
+    Example:
+    ```mlir
+    hip.top_k(%ctx)
+        ins(%x, %k : memref<3x4xf32, 1>, memref<i64, 1>)
+        outs(%values, %indices : memref<3x2xf32, 1>, memref<3x2xi64, 1>)
+        {axis = 1 : i64, largest = true, sorted = true}
+    ```
+  }];
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$k,
+    Hip_TensorOrMemRef:$values,
+    Hip_TensorOrMemRef:$indices,
+    DefaultValuedAttr<I64Attr, "-1">:$axis,
+    DefaultValuedAttr<BoolAttr, "true">:$largest,
+    DefaultValuedAttr<BoolAttr, "true">:$sorted
+  );
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `,` $k `:` type($x) `,` type($k) `)`
+    `outs` `(` $values `,` $indices `:` type($values) `,` type($indices) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_RangeOp : Hip_DpsOp<"range", /*traits=*/[],
                             /*outsAccessor=*/"Output",
                             /*autoReify=*/0,
@@ -1440,12 +1806,26 @@ def Hip_SiluOp : Hip_DpsOp<"silu", /*traits=*/[],
   let hasVerifier = 1;
 }
 
-def Hip_SigmoidOp : Hip_DpsOp<"sigmoid", /*traits=*/[],
+def Hip_SigmoidOp : Hip_DpsOp<"sigmoid", /*traits=*/[OpStateOpInterface],
                               /*outsAccessor=*/"Y",
                               /*autoReify=*/1,
                               /*autoInfer=*/1,
                               /*declareInfer=*/1> {
   let summary = "Sigmoid activation";
+
+  // OpStateOpInterface: construct this instance's per-session ActivationState,
+  // which holds a shared_ptr to the device-wide MIOpen descriptor table shared
+  // across sessions via WeakStore. All three MIOpen activations (sigmoid, tanh,
+  // softplus) share the same construct + table.
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, slot,
+          "hipdnn_ep_op_state_construct_activation", {});
+    }
+  }];
   let description = [{
     Applies sigmoid activation: y = 1 / (1 + exp(-x))
 
@@ -1471,12 +1851,23 @@ def Hip_SigmoidOp : Hip_DpsOp<"sigmoid", /*traits=*/[],
   }];
 }
 
-def Hip_TanhOp : Hip_DpsOp<"tanh", /*traits=*/[],
+def Hip_TanhOp : Hip_DpsOp<"tanh", /*traits=*/[OpStateOpInterface],
                            /*outsAccessor=*/"Y",
                            /*autoReify=*/1,
                            /*autoInfer=*/1,
                            /*declareInfer=*/1> {
   let summary = "Tanh activation";
+
+  // OpStateOpInterface: shared ActivationState (see hip.sigmoid).
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, slot,
+          "hipdnn_ep_op_state_construct_activation", {});
+    }
+  }];
   let description = [{
     Applies hyperbolic-tangent activation: y = tanh(x)
 
@@ -1502,12 +1893,23 @@ def Hip_TanhOp : Hip_DpsOp<"tanh", /*traits=*/[],
   }];
 }
 
-def Hip_SoftplusOp : Hip_DpsOp<"softplus", /*traits=*/[],
+def Hip_SoftplusOp : Hip_DpsOp<"softplus", /*traits=*/[OpStateOpInterface],
                                /*outsAccessor=*/"Y",
                                /*autoReify=*/1,
                                /*autoInfer=*/1,
                                /*declareInfer=*/1> {
   let summary = "Softplus activation: y = ln(exp(x) + 1)";
+
+  // OpStateOpInterface: shared ActivationState (see hip.sigmoid).
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, slot,
+          "hipdnn_ep_op_state_construct_activation", {});
+    }
+  }];
   let description = [{
     Applies the softplus activation function element-wise.
     Implements the standard ONNX Softplus operator.
@@ -1571,6 +1973,74 @@ def Hip_GeluOp : Hip_DpsOp<"gelu", /*traits=*/[],
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_BiasGeluOp : Hip_DpsOp<"bias_gelu", /*traits=*/[],
+                               /*outsAccessor=*/"Output",
+                               /*autoReify=*/1,
+                               /*autoInfer=*/1,
+                               /*declareInfer=*/1> {
+  let summary = "Fused bias-add + GELU (erf) activation";
+  let description = [{
+    Computes Gelu(data + bias) where bias is a 1D tensor broadcast along the
+    last dimension of data. Implements com.microsoft.BiasGelu with the exact
+    (erf-based) Gelu formula.
+
+    Example:
+    ```mlir
+    hip.bias_gelu(%ctx) ins(%data, %bias : tensor<1x128x768xf16>, tensor<768xf16>)
+                        outs(%out : tensor<1x128x768xf16>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$bias,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `,` $bias `:` type($data) `,` type($bias) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_FastGeluOp : Hip_DpsOp<"fast_gelu", /*traits=*/[],
+                               /*outsAccessor=*/"Output",
+                               /*autoReify=*/1,
+                               /*autoInfer=*/1,
+                               /*declareInfer=*/1> {
+  let summary = "Fast GELU (tanh approx) with optional 1D bias broadcast";
+  let description = [{
+    Computes FastGelu(x [+ broadcast(bias)]) using the tanh approximation.
+    Implements com.microsoft.FastGelu. When bias is omitted, applies FastGelu
+    to the input directly.
+
+    Example:
+    ```mlir
+    hip.fast_gelu(%ctx) ins(%x : tensor<1x128x768xf16>)
+                        outs(%y : tensor<1x128x768xf16>)
+    hip.fast_gelu(%ctx) ins(%x : tensor<1x128x768xf16>)
+                        bias(%b : tensor<768xf16>)
+                        outs(%y : tensor<1x128x768xf16>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$input,
+    Optional<Hip_TensorOrMemRef>:$bias,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+    (`bias` `(` $bias^ `:` type($bias) `)`)?
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
@@ -1771,6 +2241,38 @@ def Hip_AndOp : Hip_DpsOp_Broadcast<"and", /*operandGetters=*/["Lhs", "Rhs"]> {
   }];
 }
 
+def Hip_OrOp : Hip_DpsOp_Broadcast<"or", /*operandGetters=*/["Lhs", "Rhs"]> {
+  let summary = "Element-wise logical OR: c = a || b";
+  let description = [{
+    Computes element-wise logical OR of two boolean tensors (i1).
+    Implements the standard ONNX Or operator.
+
+    Supports multidirectional (NumPy-style) broadcasting between `lhs`
+    and `rhs`. Both inputs and the output have boolean (i1) element type.
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.or(%ctx) ins(%a, %b : memref<3x4xi1, 1>, memref<3x4xi1, 1>)
+                 outs(%c : memref<3x4xi1, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$lhs,
+    Hip_TensorOrMemRef:$rhs,
+    Hip_TensorOrMemRef:$output
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_NotOp : Hip_DpsOp<"not", /*traits=*/[],
                           /*outsAccessor=*/"Y",
                           /*autoReify=*/1,
@@ -1873,6 +2375,42 @@ def Hip_SinOp : Hip_DpsOp<"sin", /*traits=*/[],
   }];
 }
 
+def Hip_CeilOp : Hip_DpsOp<"ceil", /*traits=*/[],
+                           /*outsAccessor=*/"Y",
+                           /*autoReify=*/1,
+                           /*autoInfer=*/1,
+                           /*declareInfer=*/1> {
+  let summary = "Element-wise ceiling: y = ceil(x)";
+  let description = [{
+    Rounds each element upward to the nearest integer.
+    Implements the standard ONNX Ceil operator.
+
+    Formula: Y = ceil(X)
+
+    Lowered via the unified unary elementwise path (wrap_ceil).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.ceil(%ctx) ins(%x : memref<3x4xf32, 1>)
+                   outs(%y : memref<3x4xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 def Hip_ExpOp : Hip_DpsOp<"exp"> {
   let summary = "Element-wise natural exponential: y = exp(x)";
   let description = [{
@@ -1889,6 +2427,74 @@ def Hip_ExpOp : Hip_DpsOp<"exp"> {
     ```mlir
     hip.exp(%ctx) ins(%x : memref<1x128x512xf32, 1>)
                   outs(%y : memref<1x128x512xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_LogOp : Hip_DpsOp<"log"> {
+  let summary = "Element-wise natural logarithm: y = log(x)";
+  let description = [{
+    Computes the natural logarithm of each element.
+    Implements the standard ONNX Log operator.
+
+    Formula: Y = log(X)
+
+    Lowered via the unified unary elementwise path (wrap_log).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.log(%ctx) ins(%x : memref<1x128x512xf32, 1>)
+                  outs(%y : memref<1x128x512xf32, 1>)
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$x,
+    Hip_TensorOrMemRef:$y
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $x `:` type($x) `)`
+    `outs` `(` $y `:` type($y) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_AbsOp : Hip_DpsOp<"abs", /*traits=*/[],
+                          /*outsAccessor=*/"Y",
+                          /*autoReify=*/1,
+                          /*autoInfer=*/1,
+                          /*declareInfer=*/1> {
+  let summary = "Element-wise absolute value: y = abs(x)";
+  let description = [{
+    Computes the absolute value of each element.
+    Implements the standard ONNX Abs operator.
+
+    Formula: Y = abs(X)
+
+    Lowered via the unified unary elementwise path (wrap_abs).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    Example:
+    ```mlir
+    hip.abs(%ctx) ins(%x : memref<3x4xf32, 1>)
+                  outs(%y : memref<3x4xf32, 1>)
     ```
   }];
 
@@ -2160,10 +2766,45 @@ def Hip_ReduceMaxOp : Hip_DpsOp_Reduction<"reduce_max"> {
   }];
 }
 
+def Hip_ReduceMinOp : Hip_DpsOp_Reduction<"reduce_min"> {
+  let summary = "Reduce tensor by taking minimum along axes";
+  let description = [{
+    Computes the min of input tensor elements along the specified axes.
+    Implements the ONNX ReduceMin operator (opset 18+).
+
+    Uses destination-passing style: output buffer is provided as argument.
+
+    When axes is not provided in ONNX, an empty tensor<0xi64> is passed.
+    Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
+    optional axes semantics while keeping all operands required.
+
+    Example:
+    ```mlir
+    hip.reduce_min(%ctx) ins(%data, %axes : memref<1x128xi64, 1>, memref<i64, 1>)
+                         outs(%output : memref<1x1xi64, 1>) {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$axes,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "1">:$keepdims,
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `,` $axes `:` type($data) `,` type($axes) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
 // ===== Causal Conv with State ================================================
 
 def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
-    [AttrSizedOperandSegments]> {
+    [AttrSizedOperandSegments, OpStateOpInterface]> {
   let summary = "Stateful causal depthwise convolution";
   let description = [{
     Causal depthwise convolution with carry state for incremental decoding.
@@ -2230,11 +2871,26 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
     `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  // OpStateOpInterface: construct this instance's per-session MIOpen
+  // descriptor/algo cache (CausalConvState). No compile-time params — the
+  // cache fills lazily per shape. The construct fn stores the state into
+  // op_states[slot] itself.
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, slot,
+          "hipdnn_ep_op_state_construct_causal_conv_with_state", {});
+    }
+  }];
 }
 
 // ===== Group Query Attention =================================================
 
-def Hip_GqaOp : Hip_DpsOp<"gqa", [AttrSizedOperandSegments]> {
+def Hip_GqaOp : Hip_DpsOp<"gqa",
+    [AttrSizedOperandSegments, OpStateOpInterface]> {
   let summary = "Group Query Attention - Full MS spec implementation";
   let description = [{
     Complete implementation of com.microsoft.GroupQueryAttention (v1) specification.
@@ -2374,6 +3030,19 @@ def Hip_GqaOp : Hip_DpsOp<"gqa", [AttrSizedOperandSegments]> {
     attr-dict (`:` type($result_tensors)^)?
   }];
 
+  // OpStateOpInterface: construct this GQA instance's per-session hipBLASLt
+  // GEMM descriptor/algo cache (GqaState). No compile-time params — the cache
+  // fills lazily per GEMM shape. The construct fn stores the state into
+  // op_states[slot] itself.
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_gqa", {});
+    }
+  }];
+
   let hasVerifier = 1;
 }
 
@@ -2488,7 +3157,7 @@ def Hip_HipDNNGraphOp : Hip_DpsOp<"hipdnn_graph", [
 // ===== Multi-Head Attention =================================================
 
 def Hip_MultiHeadAttentionOp : Hip_DpsOp<"multi_head_attention",
-    [AttrSizedOperandSegments]> {
+    [AttrSizedOperandSegments, OpStateOpInterface]> {
   let summary = "Multi-Head Attention (com.microsoft.MultiHeadAttention v1)";
   let description = [{
     Implements the com.microsoft.MultiHeadAttention operator (opset v1).
@@ -2629,6 +3298,20 @@ def Hip_MultiHeadAttentionOp : Hip_DpsOp<"multi_head_attention",
     `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  // OpStateOpInterface: construct this MHA instance's per-session hipBLASLt
+  // GEMM descriptor/algo cache (MhaState). No compile-time params — the cache
+  // fills lazily per GEMM shape. The construct fn stores the state into
+  // op_states[slot] itself.
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, slot,
+          "hipdnn_ep_op_state_construct_multi_head_attention", {});
+    }
+  }];
 }
 
 def Hip_LinearAttentionOp : Hip_DpsOp<"linear_attention",
@@ -2730,7 +3413,7 @@ def Hip_LinearAttentionOp : Hip_DpsOp<"linear_attention",
   }];
 }
 
-def Hip_GemmOp : Hip_DpsOp<"gemm", /*traits=*/[],
+def Hip_GemmOp : Hip_DpsOp<"gemm", /*traits=*/[OpStateOpInterface],
                            /*outsAccessor=*/"Output",
                            /*autoReify=*/0,
                            /*autoInfer=*/1,
@@ -2775,6 +3458,19 @@ def Hip_GemmOp : Hip_DpsOp<"gemm", /*traits=*/[],
     `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
+  }];
+
+  // OpStateOpInterface: construct this instance's per-session GemmState, which
+  // holds a shared_ptr to the device-wide hipBLASLt algo table shared across
+  // sessions via WeakStore.
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_gemm",
+          {});
+    }
   }];
 }
 
