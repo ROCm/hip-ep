@@ -6187,3 +6187,397 @@ extern "C" int hip_matmul_nbits(
   }
   return static_cast<int>(err);
 }
+
+/* =======================================================================
+ * Grouped int4 WMMA GEMM for the fused MoE prefill path.
+ *
+ * Adapted from GemmFp16U4Impl above: identical double-buffered,
+ * register-prefetch Matrix-Core pipeline, but:
+ *   (1) blockIdx.z selects an active expert, so one launch runs every
+ *       expert's GEMM (grid.z = num_active experts). Grid.y is sized to the
+ *       hottest expert (max_count); blocks past an expert's row count early
+ *       out. B (int4 weights) therefore streams from DRAM once per expert.
+ *   (2) zero_points are read inline from the packed uint8 nibble buffer
+ *       (ONNX MatMulNBits layout [N, ceil(ngk/2)]) -- no fp16 pre-convert
+ *       (which would need ~GBs for all experts), matching
+ *       unpack_zp_u8_to_fp16_kernel's nibble order (low = even group).
+ *   (3) two epilogues: QMOE_EPI_PLAIN writes C_all[(off+row)*N + col]
+ *       (FC1 -> [P, fusion_inter], then a separate SwiGLU pass), and
+ *       QMOE_EPI_SCATTER does the routing-weighted atomicAdd into an fp32
+ *       accumulator at each token's original row (FC2).
+ * No column swizzle: row0/col0 come straight from blockIdx.y/.x within the
+ * expert (memory-bound on B, so L2 swizzle gains are marginal here).
+ * ======================================================================= */
+
+enum {
+  QMOE_EPI_PLAIN = 0,         // C_all[(off+row)*N + col] = v            (FC1, unfused)
+  QMOE_EPI_SCATTER = 1,       // routing-weighted atomicAdd into accum    (FC2)
+  QMOE_EPI_PLAIN_SWIGLU = 2,  // fused SwiGLU: act_out[(off+row)*N/2 + col/2] (FC1)
+};
+
+template <int BM_T, int BN_T, int WT_M, int WT_N, int EPI, bool GATHER>
+__global__
+__attribute__((amdgpu_flat_work_group_size(
+    GEMM_WG_SZ(BM_T, BN_T, WT_M, WT_N),
+    GEMM_WG_SZ(BM_T, BN_T, WT_M, WT_N))))
+void QMoEGroupedWmmaKernel(
+    int N, int K,
+    const _Float16* __restrict__ A_all,           // [P, K] gathered, or null when GATHER
+    const int32_t*  __restrict__ expert_offsets,  // [E + 1] exclusive prefix
+    const int32_t*  __restrict__ active_eids,     // [num_active]
+    const unsigned char* __restrict__ B_base,     // [E, N, K/2] packed int4
+    const _Float16* __restrict__ S_base,          // [E, N, num_groups_k] fp16
+    const unsigned char* __restrict__ Z_base,     // [E, N, (ngk+1)/2] or null
+    const _Float16* __restrict__ bias_base,       // [E, N] or null
+    int num_groups_k, int group_size,
+    _Float16* __restrict__ C_all,                 // [P, N] (EPI_PLAIN)
+    const int32_t* __restrict__ scatter_ids,      // [P] (EPI_SCATTER)
+    const _Float16* __restrict__ scatter_wts,     // [P] (EPI_SCATTER)
+    float* __restrict__ accum, int accum_ldc,     // [num_tokens, N] (EPI_SCATTER)
+    const _Float16* __restrict__ gather_input,    // [num_tokens, K] source (GATHER)
+    const int32_t* __restrict__ gather_ids,       // [P] token id per routed row (GATHER)
+    float sw_alpha, float sw_beta, float sw_limit) // SwiGLU params (EPI_PLAIN_SWIGLU)
+{
+    constexpr int WM_L   = BM_T / (WT_M * 16);
+    constexpr int WN_L   = BN_T / (WT_N * 16);
+    constexpr int THR_L  = WM_L * WN_L * 32;
+    constexpr int BK_T   = BM_T / (WT_M * WT_N);
+    constexpr int PAD_K  = 2;
+    constexpr int K_STR  = BK_T + PAD_K;
+    constexpr int A_VL   = (BM_T * BK_T) / (THR_L * 4);
+    constexpr int A_GRP_K = BK_T / 2;
+    constexpr int K_STEPS = BK_T / WMMA_TILE;
+    static_assert(A_VL >= 1, "A_VL must be >= 1");
+    static_assert(THR_L * 8 == BN_T * BK_T, "B loading balance");
+
+    const int e_slot = blockIdx.z;
+    const int e      = active_eids[e_slot];
+    const int off    = expert_offsets[e];
+    const int M      = expert_offsets[e + 1] - off;
+    const int row0   = blockIdx.y * BM_T;
+    if (row0 >= M) return;
+    const int col0   = blockIdx.x * BN_T;
+
+    // Per-routed-row A source: for FC1 (GATHER) the row is gathered straight
+    // from gather_input via its routed token id (no separate gather kernel /
+    // a_all buffer); for FC2 it reads the pre-laid-out A_all. lda == K in both.
+    auto row_src = [&](int r) -> const _Float16* {
+      if constexpr (GATHER)
+        return gather_input + static_cast<size_t>(gather_ids[off + r]) * K;
+      else
+        return A_all + static_cast<size_t>(off + r) * K;
+    };
+    const unsigned char* B_packed =
+        B_base + static_cast<size_t>(e) * N * (K / 2);
+    const _Float16* scales = S_base + static_cast<size_t>(e) * N * num_groups_k;
+    const int packed_cols = (num_groups_k + 1) / 2;
+    const unsigned char* Zp =
+        Z_base ? Z_base + static_cast<size_t>(e) * N * packed_cols : nullptr;
+    const bool has_zp = (Zp != nullptr);
+    const _Float16* bias = bias_base ? bias_base + static_cast<size_t>(e) * N
+                                     : nullptr;
+
+    __shared__ _Float16 smA[2][BM_T][K_STR];
+    __shared__ _Float16 smB[2][BN_T][K_STR];
+
+    const int tid  = threadIdx.x;
+    const int wid  = tid / 32;
+    const int lid  = tid % 32;
+    const int lane = lid % 16;
+    const int sub  = lid / 16;
+    const int wrow = wid / WN_L;
+    const int wcol = wid % WN_L;
+
+    constexpr int B_COL_SHIFT = __builtin_ctz(BK_T / 8);
+    const int b_col     = tid >> B_COL_SHIFT;
+    const int b_sub     = tid & ((1 << B_COL_SHIFT) - 1);
+    const int b_k8      = b_sub << 3;
+    const int b_n_g_raw = col0 + b_col;
+    const bool b_valid  = (b_n_g_raw < N);
+    const int b_n_g     = b_valid ? b_n_g_raw : 0;
+
+    const int b_byte_base = b_n_g * (K >> 1) + (b_k8 >> 1);
+    const int b_gid_base  = b_n_g * num_groups_k;
+    int      cached_k_grp = -1;
+    _Float16 cached_s = 0;
+    _Float16 neg_zs = 0;
+
+    float8 acc[WT_M][WT_N];
+#pragma unroll
+    for (int i = 0; i < WT_M; i++)
+#pragma unroll
+        for (int j = 0; j < WT_N; j++)
+#pragma unroll
+            for (int ee = 0; ee < 8; ee++) acc[i][j][ee] = 0.0f;
+
+    uint32_t pf_a1[A_VL], pf_a2[A_VL];
+    int      pf_am[A_VL], pf_ak[A_VL];
+    const _Float16* a_row1[A_VL];
+    const _Float16* a_row2[A_VL];
+    uint32_t pf_b4 = 0;
+
+    // Each thread's A-load geometry (which two rows / which K offset) is fixed
+    // across the K loop, so resolve each routed row's source pointer once. For
+    // FC1 this is the fused gather (row_src reads gather_input via token id).
+#pragma unroll
+    for (int ld = 0; ld < A_VL; ld++) {
+        int vid   = tid + ld * THR_L;
+        pf_ak[ld] = (vid % A_GRP_K) * 2;
+        pf_am[ld] = (vid / A_GRP_K) * 2;
+        int row_a = row0 + pf_am[ld];
+        a_row1[ld] = (row_a     < M) ? row_src(row_a)     : nullptr;
+        a_row2[ld] = (row_a + 1 < M) ? row_src(row_a + 1) : nullptr;
+    }
+
+    auto issueLoads = [&](int t) __attribute__((always_inline)) {
+#pragma unroll
+        for (int ld = 0; ld < A_VL; ld++) {
+            pf_a1[ld] = a_row1[ld] ? *reinterpret_cast<const uint32_t*>(
+                            &a_row1[ld][t + pf_ak[ld]]) : 0u;
+            pf_a2[ld] = a_row2[ld] ? *reinterpret_cast<const uint32_t*>(
+                            &a_row2[ld][t + pf_ak[ld]]) : 0u;
+        }
+        if (b_valid) {
+            pf_b4 = *reinterpret_cast<const uint32_t*>(
+                &B_packed[b_byte_base + (t >> 1)]);
+            const int grp = (t + b_k8) / group_size;
+            if (__builtin_expect(grp != cached_k_grp, 0)) {
+                cached_k_grp = grp;
+                cached_s = scales[grp + b_gid_base];
+                if (has_zp) {
+                    unsigned char zb = Zp[b_n_g * packed_cols + (grp >> 1)];
+                    int znib = (grp & 1) ? (zb >> 4) : (zb & 0xF);
+                    neg_zs = -static_cast<_Float16>(znib) * cached_s;
+                } else {
+                    neg_zs = static_cast<_Float16>(-8) * cached_s;
+                }
+            }
+        }
+    };
+
+    auto storeToShared = [&](int buf) __attribute__((always_inline)) {
+        if (b_valid) {
+            _Float16 s16 = cached_s;
+            _Float16 nzs = neg_zs;
+            _Float16 bv[8];
+            bv[0] = static_cast<_Float16>((pf_b4      ) & 0xFu) * s16 + nzs;
+            bv[1] = static_cast<_Float16>((pf_b4 >>  4) & 0xFu) * s16 + nzs;
+            bv[2] = static_cast<_Float16>((pf_b4 >>  8) & 0xFu) * s16 + nzs;
+            bv[3] = static_cast<_Float16>((pf_b4 >> 12) & 0xFu) * s16 + nzs;
+            bv[4] = static_cast<_Float16>((pf_b4 >> 16) & 0xFu) * s16 + nzs;
+            bv[5] = static_cast<_Float16>((pf_b4 >> 20) & 0xFu) * s16 + nzs;
+            bv[6] = static_cast<_Float16>((pf_b4 >> 24) & 0xFu) * s16 + nzs;
+            bv[7] = static_cast<_Float16>((pf_b4 >> 28)       ) * s16 + nzs;
+            *reinterpret_cast<uint2*>(&smB[buf][b_col][b_k8])     =
+                *reinterpret_cast<uint2*>(&bv[0]);
+            *reinterpret_cast<uint2*>(&smB[buf][b_col][b_k8 + 4]) =
+                *reinterpret_cast<uint2*>(&bv[4]);
+        } else {
+            uint2 zero2 = {0, 0};
+            *reinterpret_cast<uint2*>(&smB[buf][b_col][b_k8])     = zero2;
+            *reinterpret_cast<uint2*>(&smB[buf][b_col][b_k8 + 4]) = zero2;
+        }
+#pragma unroll
+        for (int ld = 0; ld < A_VL; ld++) {
+            *reinterpret_cast<uint32_t*>(&smA[buf][pf_am[ld]  ][pf_ak[ld]]) =
+                pf_a1[ld];
+            *reinterpret_cast<uint32_t*>(&smA[buf][pf_am[ld]+1][pf_ak[ld]]) =
+                pf_a2[ld];
+        }
+    };
+
+    auto computeWMMA = [&](int buf) __attribute__((always_inline)) {
+#pragma unroll
+        for (int ks = 0; ks < K_STEPS; ks++) {
+            half16 b_frag[WT_N];
+#pragma unroll
+            for (int wn = 0; wn < WT_N; wn++) {
+                int noff            = (wcol * WT_N + wn) * WMMA_TILE;
+                uint32_t* dst       = reinterpret_cast<uint32_t*>(&b_frag[wn]);
+                const uint32_t* src = reinterpret_cast<const uint32_t*>(
+                    &smB[buf][noff + lane][ks * WMMA_TILE]);
+#pragma unroll
+                for (int i = 0; i < 8; i++) dst[i] = src[i];
+            }
+#pragma unroll
+            for (int wm = 0; wm < WT_M; wm++) {
+                int moff            = (wrow * WT_M + wm) * WMMA_TILE;
+                half16 a_frag;
+                uint32_t* dst       = reinterpret_cast<uint32_t*>(&a_frag);
+                const uint32_t* src = reinterpret_cast<const uint32_t*>(
+                    &smA[buf][moff + lane][ks * WMMA_TILE]);
+#pragma unroll
+                for (int i = 0; i < 8; i++) dst[i] = src[i];
+#pragma unroll
+                for (int wn = 0; wn < WT_N; wn++)
+                    acc[wm][wn] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(
+                        a_frag, b_frag[wn], acc[wm][wn]);
+            }
+        }
+    };
+
+    issueLoads(0);
+    storeToShared(0);
+    __syncthreads();
+
+    int buf = 0;
+    for (int t = BK_T; t < K; t += BK_T) {
+        int nxt = 1 - buf;
+        issueLoads(t);
+        computeWMMA(buf);
+        storeToShared(nxt);
+        __syncthreads();
+        buf = nxt;
+    }
+    computeWMMA(buf);
+
+#pragma unroll
+    for (int wm = 0; wm < WT_M; wm++) {
+        int mbase = row0 + (wrow * WT_M + wm) * WMMA_TILE;
+#pragma unroll
+        for (int wn = 0; wn < WT_N; wn++) {
+            int nbase = col0 + (wcol * WT_N + wn) * WMMA_TILE;
+#pragma unroll
+            for (int ee = 0; ee < 8; ee++) {
+                int mrow = mbase + ee * 2 + sub;
+                int ncol = nbase + lane;
+                if constexpr (EPI == QMOE_EPI_PLAIN_SWIGLU) {
+                    // Fused SwiGLU. FC1 output columns are interleaved
+                    // gate(even)/linear(odd); the WMMA layout puts adjacent
+                    // columns on adjacent lanes (same mrow), so a lane-pair
+                    // shuffle gives each even lane both halves. The shuffle
+                    // must run for all lanes (mrow is identical across a pair,
+                    // so no divergence), then only the even lane emits act_out.
+                    float v = acc[wm][wn][ee];
+                    if (bias) v += static_cast<float>(bias[ncol]);
+                    float partner = __shfl_xor(v, 1);
+                    if (mrow < M && ((ncol & 1) == 0)) {
+                        float G = fminf(v, sw_limit);
+                        float L = fmaxf(fminf(partner, sw_limit), -sw_limit);
+                        float sig = 1.0f / (1.0f + expf(-sw_alpha * G));
+                        _Float16* act_out = C_all;
+                        act_out[static_cast<size_t>(off + mrow) * (N >> 1) +
+                                (ncol >> 1)] =
+                            static_cast<_Float16>(G * sig * (L + sw_beta));
+                    }
+                } else if (mrow < M && ncol < N) {
+                    float v = acc[wm][wn][ee];
+                    if (bias) v += static_cast<float>(bias[ncol]);
+                    if constexpr (EPI == QMOE_EPI_PLAIN) {
+                        C_all[static_cast<size_t>(off + mrow) * N + ncol] =
+                            static_cast<_Float16>(v);
+                    } else {
+                        int tok = scatter_ids[off + mrow];
+                        float w = static_cast<float>(scatter_wts[off + mrow]);
+                        atomicAdd(
+                            &accum[static_cast<size_t>(tok) * accum_ldc + ncol],
+                            w * v);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* Host launcher for one grouped int4 WMMA GEMM (all active experts, one
+ * launch). Used twice per MoE layer by hip_qmoe_grouped_prefill_wmma: FC1
+ * (epilogue=QMOE_EPI_PLAIN) and FC2 (epilogue=QMOE_EPI_SCATTER). Tile is
+ * fixed at 64x64 (WT2x2, 128 threads); N must be a multiple of 64 and K a
+ * multiple of 16 (true for the MoE FC1/FC2 shapes). */
+extern "C" int hip_qmoe_wmma_gemm_grouped(
+    void* stream,
+    const void* A_all,
+    const void* expert_offsets,
+    const void* active_eids, int num_active, int max_count,
+    const void* B_base, const void* S_base, const void* Z_base,
+    const void* bias_base,
+    int N, int K, int num_groups_k, int group_size,
+    int epilogue,
+    void* C_all,
+    const void* scatter_ids, const void* scatter_wts,
+    void* accum_f32, int accum_ldc,
+    const void* gather_input, const void* gather_ids,
+    float sw_alpha, float sw_beta, float sw_limit)
+{
+    if (num_active <= 0 || max_count <= 0) return 0;
+    constexpr int BM = 64, BN = 64, WT_M = 2, WT_N = 2;
+    if ((N % BN) != 0 || (K % 16) != 0) {
+        fprintf(stderr,
+                "[custom_kernels] hip_qmoe_wmma_gemm_grouped: N=%d must be "
+                "%%%d==0 and K=%d must be %%16==0\n", N, BN, K);
+        return -1;
+    }
+    hipStream_t s = static_cast<hipStream_t>(stream);
+    constexpr int THR = GEMM_WG_SZ(BM, BN, WT_M, WT_N);
+    dim3 grid(static_cast<unsigned>(N / BN),
+              static_cast<unsigned>((max_count + BM - 1) / BM),
+              static_cast<unsigned>(num_active));
+    dim3 block(THR);
+
+    if (epilogue == QMOE_EPI_PLAIN_SWIGLU) {
+        // FC1 (default): gather rows from gather_input (GATHER=true) and apply
+        // SwiGLU in the epilogue, writing act_out ([P, N/2]) via C_all. No
+        // separate a_all / fc1_out buffer, no separate gather / swiglu kernel.
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(QMoEGroupedWmmaKernel<BM, BN, WT_M, WT_N,
+                                                  QMOE_EPI_PLAIN_SWIGLU, true>),
+            grid, block, 0, s, N, K,
+            static_cast<const _Float16*>(A_all),
+            static_cast<const int32_t*>(expert_offsets),
+            static_cast<const int32_t*>(active_eids),
+            static_cast<const unsigned char*>(B_base),
+            static_cast<const _Float16*>(S_base),
+            static_cast<const unsigned char*>(Z_base),
+            static_cast<const _Float16*>(bias_base),
+            num_groups_k, group_size,
+            static_cast<_Float16*>(C_all), nullptr, nullptr, nullptr, 0,
+            static_cast<const _Float16*>(gather_input),
+            static_cast<const int32_t*>(gather_ids),
+            sw_alpha, sw_beta, sw_limit);
+    } else if (epilogue == QMOE_EPI_PLAIN) {
+        // FC1 (unfused): gathered plain store to C_all [P, N].
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(QMoEGroupedWmmaKernel<BM, BN, WT_M, WT_N,
+                                                  QMOE_EPI_PLAIN, true>),
+            grid, block, 0, s, N, K,
+            static_cast<const _Float16*>(A_all),
+            static_cast<const int32_t*>(expert_offsets),
+            static_cast<const int32_t*>(active_eids),
+            static_cast<const unsigned char*>(B_base),
+            static_cast<const _Float16*>(S_base),
+            static_cast<const unsigned char*>(Z_base),
+            static_cast<const _Float16*>(bias_base),
+            num_groups_k, group_size,
+            static_cast<_Float16*>(C_all), nullptr, nullptr, nullptr, 0,
+            static_cast<const _Float16*>(gather_input),
+            static_cast<const int32_t*>(gather_ids),
+            0.0f, 0.0f, 0.0f);
+    } else {
+        // FC2: A is the pre-laid-out act_out (GATHER=false).
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(QMoEGroupedWmmaKernel<BM, BN, WT_M, WT_N,
+                                                  QMOE_EPI_SCATTER, false>),
+            grid, block, 0, s, N, K,
+            static_cast<const _Float16*>(A_all),
+            static_cast<const int32_t*>(expert_offsets),
+            static_cast<const int32_t*>(active_eids),
+            static_cast<const unsigned char*>(B_base),
+            static_cast<const _Float16*>(S_base),
+            static_cast<const unsigned char*>(Z_base),
+            static_cast<const _Float16*>(bias_base),
+            num_groups_k, group_size, nullptr,
+            static_cast<const int32_t*>(scatter_ids),
+            static_cast<const _Float16*>(scatter_wts),
+            static_cast<float*>(accum_f32), accum_ldc,
+            nullptr, nullptr, 0.0f, 0.0f, 0.0f);
+    }
+
+    hipError_t e = hipGetLastError();
+    if (e != hipSuccess) {
+        fprintf(stderr,
+                "[custom_kernels] hip_qmoe_wmma_gemm_grouped launch failed: "
+                "%s\n", hipGetErrorString(e));
+        return static_cast<int>(e);
+    }
+    return 0;
+}

@@ -1826,6 +1826,140 @@ HIP_KERNEL_API int hip_qmoe_decode_fused_dp4a(
     float swiglu_alpha, float swiglu_beta, float swiglu_limit,
     int64_t element_size_bytes);
 
+/* -------------------------------------------------------------------------
+ * Fully fused MoE prefill (num_tokens > 1).
+ *
+ * The prefill analogue of hip_qmoe_decode_fused: runs the whole MoE layer in
+ * build_sorted_expert_id + FC1(+SwiGLU,+gather) + FC2 + atomic scatter + cast
+ * = 5 launches, with no D2H, no hipStreamSynchronize, and no host per-expert
+ * loop. Caller first runs hip_qmoe_topk_routing then hip_qmoe_bucket_tokens
+ * (producing sorted_token_ids / sorted_weights / expert_offsets grouped by
+ * expert); this launcher fills sorted_expert_id from expert_offsets and
+ * processes all P = num_tokens * k (token, slot) pairs.
+ *
+ * Scratch: act_out [P, inter] fp16, slot_buf [P, hidden] fp16, accum_f32
+ * [num_tokens, hidden] fp32, sorted_expert_id [P] int32. Weight/scale/zp
+ * layout is identical to hip_qmoe_decode_fused (per-expert packed int4).
+ * fp16 only; hidden_size and inter_size multiples of 32; block_size > 0/even.
+ */
+HIP_KERNEL_API int hip_qmoe_prefill_fused(
+    void* stream,
+    const void* input,
+    const void* sorted_token_ids,
+    const void* sorted_weights,
+    const void* expert_offsets,
+    void* sorted_expert_id,
+    const void* fc1_weights, const void* fc1_scales,
+    const void* fc1_zero_points, const void* fc1_bias,
+    const void* fc2_weights, const void* fc2_scales,
+    const void* fc2_zero_points, const void* fc2_bias,
+    void* act_out,
+    void* slot_buf,
+    void* accum_f32,
+    void* output,
+    int64_t num_tokens, int64_t hidden_size, int64_t inter_size,
+    int64_t k, int64_t num_experts, int64_t block_size,
+    float swiglu_alpha, float swiglu_beta, float swiglu_limit,
+    int64_t element_size_bytes);
+
+/* Grouped-GEMM variant of the fused prefill MoE. Same routing inputs as
+ * hip_qmoe_prefill_fused (sorted_* + expert_offsets from bucket_tokens), but
+ * each block owns (expert, N-tile) and loops the expert's rows internally so
+ * the int4 weight streams from DRAM ~once per expert. No sorted_expert_id /
+ * slot_buf needed (FC2 atomic-scatters into accum_f32). */
+HIP_KERNEL_API int hip_qmoe_grouped_prefill_fused(
+    void* stream,
+    const void* input,
+    const void* sorted_token_ids,
+    const void* sorted_weights,
+    const void* expert_offsets,
+    const void* fc1_weights, const void* fc1_scales,
+    const void* fc1_zero_points, const void* fc1_bias,
+    const void* fc2_weights, const void* fc2_scales,
+    const void* fc2_zero_points, const void* fc2_bias,
+    void* act_out,
+    void* accum_f32,
+    void* output,
+    int64_t num_tokens, int64_t hidden_size, int64_t inter_size,
+    int64_t k, int64_t num_experts, int64_t block_size,
+    float swiglu_alpha, float swiglu_beta, float swiglu_limit,
+    int64_t element_size_bytes);
+
+/* dp4a (W4A8) variant of the grouped prefill MoE: pre-quantizes activations to
+ * int8 and uses sudot4 for the inner product, multi-warp blocks for occupancy.
+ * Needs four extra scratch buffers for the quantized activations + scales. */
+HIP_KERNEL_API int hip_qmoe_grouped_prefill_fused_dp4a(
+    void* stream,
+    const void* input,
+    const void* sorted_token_ids,
+    const void* sorted_weights,
+    const void* expert_offsets,
+    const void* fc1_weights, const void* fc1_scales,
+    const void* fc1_zero_points, const void* fc1_bias,
+    const void* fc2_weights, const void* fc2_scales,
+    const void* fc2_zero_points, const void* fc2_bias,
+    void* a_qb_in, void* a_scale_in,
+    void* a_qb_mid, void* a_scale_mid,
+    void* act_out,
+    void* accum_f32,
+    void* output,
+    int64_t num_tokens, int64_t hidden_size, int64_t inter_size,
+    int64_t k, int64_t num_experts, int64_t block_size,
+    float swiglu_alpha, float swiglu_beta, float swiglu_limit,
+    int64_t element_size_bytes);
+
+/* Grouped int4 WMMA (Matrix-Core) variant of the fused prefill MoE.
+ *
+ * One grouped WMMA GEMM launch per FC (blockIdx.z selects an active expert),
+ * so the int4 weights stream from DRAM once per expert and the tuned
+ * Matrix-Core pipeline is reused across every expert. Flow: gather A_all ->
+ * FC1 WMMA (+bias) -> SwiGLU -> FC2 WMMA (routing-weighted atomic scatter to
+ * an fp32 accumulator) -> cast to fp16. Zero-points are read inline from the
+ * packed nibble buffer (no fp16 pre-convert).
+ *
+ * Caller (wrap_qmoe) provides the active-expert list built from a one-shot
+ * D2H of the bucket_tokens counts: active_eids [num_active] int32 (device),
+ * num_active and max_count (host). Scratch: a_all [P, hidden] fp16, fc1_out
+ * [P, 2*inter] fp16, act_out [P, inter] fp16, accum_f32 [num_tokens, hidden].
+ * fp16 only; hidden/inter multiples of 64; block_size > 0/even. */
+HIP_KERNEL_API int hip_qmoe_grouped_prefill_wmma(
+    void* stream,
+    const void* input,
+    const void* sorted_token_ids,
+    const void* sorted_weights,
+    const void* expert_offsets,
+    const void* active_eids, int num_active, int max_count,
+    const void* fc1_weights, const void* fc1_scales,
+    const void* fc1_zero_points, const void* fc1_bias,
+    const void* fc2_weights, const void* fc2_scales,
+    const void* fc2_zero_points, const void* fc2_bias,
+    void* act_out,
+    void* accum_f32,
+    void* output,
+    int64_t num_tokens, int64_t hidden_size, int64_t inter_size,
+    int64_t k, int64_t num_experts, int64_t block_size,
+    float swiglu_alpha, float swiglu_beta, float swiglu_limit,
+    int64_t element_size_bytes);
+
+/* Single grouped int4 WMMA GEMM over all active experts (one launch).
+ * Implemented in matmul_nbits_kernel.hip; used by hip_qmoe_grouped_prefill_wmma
+ * for FC1 (epilogue=0, plain store to C_all) and FC2 (epilogue=1, weighted
+ * atomic scatter-add into accum_f32). Tile fixed 64x64; N%64==0, K%16==0. */
+HIP_KERNEL_API int hip_qmoe_wmma_gemm_grouped(
+    void* stream,
+    const void* A_all,
+    const void* expert_offsets,
+    const void* active_eids, int num_active, int max_count,
+    const void* B_base, const void* S_base, const void* Z_base,
+    const void* bias_base,
+    int N, int K, int num_groups_k, int group_size,
+    int epilogue,
+    void* C_all,
+    const void* scatter_ids, const void* scatter_wts,
+    void* accum_f32, int accum_ldc,
+    const void* gather_input, const void* gather_ids,
+    float sw_alpha, float sw_beta, float sw_limit);
+
 /* =========================================================================
  * Linear Attention Decode (Single-Token Recurrence, Prefill-Friendly)
  * =========================================================================
