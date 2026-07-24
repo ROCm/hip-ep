@@ -30,6 +30,7 @@ add_library(HipDialectTransforms STATIC
 add_dependencies(HipDialectTransforms
   HipDialectIncGen
   HipTypesIncGen
+  HipAttributesIncGen
   HipOpsIncGen
   HipPassesIncGen
   HipSchemas

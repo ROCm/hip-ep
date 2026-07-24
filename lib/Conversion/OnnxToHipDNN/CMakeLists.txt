@@ -18,6 +18,7 @@ add_library(OnnxToHipDNN STATIC ${ONNX_TO_HIPDNN_SOURCES})
 add_dependencies(OnnxToHipDNN
   HipDialectIncGen
   HipTypesIncGen
+  HipAttributesIncGen
   HipOpsIncGen
 )
 

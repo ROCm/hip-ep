@@ -1263,6 +1263,25 @@ int wrap_hipMemcpyH2D(void *dst, const void *src, int64_t size, void *stream) {
   return 0;
 }
 
+// State-based async memcpy wrappers for the explicit memref-phase cross-space
+// copy ops (mirror wrap_hipMemcpyAsync: resolve the stream from the opaque
+// RuntimeState).
+int wrap_hipMemcpyH2DAsync(RuntimeState *state, void *dst, const void *src,
+                           int64_t size) {
+  hipStream_t stream =
+      static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+  HIP_CHECK(hipMemcpyAsync(dst, src, size, hipMemcpyHostToDevice, stream));
+  return 0;
+}
+
+int wrap_hipMemcpyD2HAsync(RuntimeState *state, void *dst, const void *src,
+                           int64_t size) {
+  hipStream_t stream =
+      static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+  HIP_CHECK(hipMemcpyAsync(dst, src, size, hipMemcpyDeviceToHost, stream));
+  return 0;
+}
+
 // hip.reciprocal / hip.sqrt lower to wrap_power(..., alpha, beta, gamma).
 int wrap_power(RuntimeState *state, void *input, void *output,
                int64_t num_elements, int64_t data_type, double alpha,
@@ -1732,7 +1751,9 @@ int wrap_hipMemcpyD2H(void *dst, const void *src, int64_t size, void *stream) {
   return 0;
 }
 
-int wrap_hipStreamSynchronize(void *stream) {
-  HIP_CHECK(hipStreamSynchronize(static_cast<hipStream_t>(stream)));
+int wrap_hipStreamSynchronize(RuntimeState *state) {
+  hipStream_t stream =
+      static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+  HIP_CHECK(hipStreamSynchronize(stream));
   return 0;
 }

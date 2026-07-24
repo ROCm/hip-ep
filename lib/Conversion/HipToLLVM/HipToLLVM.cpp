@@ -296,6 +296,22 @@ void ConvertHipToLLVMPass::runOnOperation() {
     return LLVM::LLVMPointerType::get(ctx, 0);
   });
 
+  // Map each HIP memory space to a distinct LLVM address space, numbered by the
+  // MemorySpaceKind enum (host=0, device=1, pinned=2, managed=3). This follows
+  // the AMDGPU/MLIR convention: host is the generic/flat AS 0, device is the
+  // global AS 1. The runtime C ABI is flat AS-0 !llvm.ptr, so per-op lowerings
+  // addrspace-cast the device (AS 1) pointer down to AS 0 at the call boundary
+  // (see extractMemRefDataPtr) and runtime decls stay AS-0. These spaces are a
+  // compile-time type-system label only -- the host JIT target flattens them
+  // all, so the casts are no-ops at runtime. Without this hook the type
+  // converter rejects the non-integer MemorySpaceAttr.
+  typeConverter.addTypeAttributeConversion(
+      [ctx](BaseMemRefType,
+            MemorySpaceAttr attr) -> TypeConverter::AttributeConversionResult {
+        return IntegerAttr::get(IntegerType::get(ctx, 64),
+                                static_cast<int64_t>(attr.getKind()));
+      });
+
   RewritePatternSet patterns(ctx);
 
   // HIP dialect-specific lowerings
@@ -340,6 +356,7 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateNonZeroLoweringPatterns(typeConverter, patterns);
   populateReadbackDimLoweringPatterns(typeConverter, patterns);
   populateReadbackScalarLoweringPatterns(typeConverter, patterns);
+  populateMemcpyLoweringPatterns(typeConverter, patterns);
   populateSizeLoweringPatterns(typeConverter, patterns);
   populatePoolLoweringPatterns(typeConverter, patterns);
   populateResizeLoweringPatterns(typeConverter, patterns);

@@ -71,9 +71,9 @@ Problems:
 
 ### Consequence 3: Cannot Minimize Synchronization
 
-Without knowing which memrefs are device vs host, must sync conservatively after every potentially-device operation, or risk SEGFAULT.
+Without knowing which memrefs are device vs host, must sync after every possibly-device operation just to be safe, or risk SEGFAULT.
 
-Cannot optimize sync barriers to actual device→host crossings only.
+Cannot limit sync barriers to the actual device→host crossings only.
 
 ---
 
@@ -104,7 +104,7 @@ def Hip_GetPoolOp : Hip_Op<"get_pool"> {
 
 **2. OnnxToHip Converters Insert Intentional Transfers**
 
-When ONNX operation semantics require host/device boundary crossing, converters insert explicit transfers. Primary source: shape inference needing to inspect device data.
+When an ONNX operation's behavior requires crossing the host/device boundary, converters insert explicit transfers. Primary source: shape inference needing to inspect device data.
 
 ```mlir
 // ONNX NonZero: GPU computes condition, CPU must count true elements
@@ -157,7 +157,7 @@ hip.pad(%ctx) outs(%device)  // Type-correct, no fix-up needed
 
 ```
 Slot 1:  OnnxToHip Conversion
-           ↓ Converters insert explicit transfers when ONNX semantics require
+           ↓ Converters insert explicit transfers when the ONNX op requires it
            → For shape inference: D2H transfers for dynamic shape calculation
 Slot 2:  One-Shot-Bufferize
            ↓ Operations specify memory space via getBufferType()
@@ -170,7 +170,7 @@ Slot 6b: ShapeInference (CRITICAL)
            → Examples: NonZero (count), TopK (k value), Reshape (shape tensor)
 Slot 6c: EliminateStreamSyncBarriers
            ↓ Analyze MemoryEffectsOpInterface (similar to MLIR's EliminateBarriers)
-           → Consolidate multiple syncs into minimum necessary barriers
+           → Combine multiple syncs into the fewest barriers needed
 Slot 6+: PoolAllocs
            → Pool device memory allocations into hip.get_pool
 ```
@@ -184,7 +184,7 @@ Slot 6+: PoolAllocs
 - No fix-up passes - converters and bufferization generate type-correct IR from the start
 
 **Performance:**
-- Shape inference inserts transfers only when semantically required (e.g., dynamic shape calculation)
+- Shape inference inserts transfers only when the operation truly needs them (e.g., dynamic shape calculation)
 - Synchronization minimized via barrier elimination
 - Explicit async operations allow overlap optimization
 
@@ -193,20 +193,27 @@ Slot 6+: PoolAllocs
 The codebase has ~70 HIP operations. Each needs review to ensure:
 - `getBufferType()` returns correct memory space for results
 - OnnxToHip converters respect operation type constraints
-- Converters insert intentional transfers when ONNX semantics require (primarily shape inference)
+- Converters insert intentional transfers when the ONNX op requires them (primarily shape inference)
 - Type system prevents accidental violations
 
 This is correct-by-construction design, not detect-and-fix.
 
 **Note on LLVM Lowering:**
 
-Before lowering to LLVM, we don't need to design anything for address space handling. MLIR's standard MemRefToLLVM conversion automatically maps `#hip.mem<device>` → LLVM address space 1 and `#hip.mem<host>` → LLVM address space 0. This is infrastructure that already exists; our solution is entirely at MLIR level.
+`ConvertHipToLLVMPass` registers a type-attribute conversion (`addTypeAttributeConversion`) that maps each `#hip.mem<...>` space to a distinct LLVM address space, numbered by the `MemorySpaceKind` enum (**host = 0, device = 1, pinned = 2, managed = 3**).
+
+This follows the **AMDGPU/MLIR convention**: host is the generic/flat AS 0, device is the global AS 1. The address spaces are a compile-time type-system label only, not the AMDGPU backend's hardware spaces — the JIT target is the host, which flattens every space back to one flat pointer space (see the last bullet), so the casts below are no-ops at runtime and the generated model code passes device pointers to the runtime as plain opaque values.
+
+- The runtime C ABI is flat AS-0 `!llvm.ptr`. Each per-op lowering resolves the operand space via `getMemRefAddressSpace()` and addrspace-casts the device (AS 1) pointer down to AS 0 at the call boundary (see `extractMemRefDataPtr` / `MemoryLowering.cpp`), so runtime declarations stay AS-0.
+- The host target collapses every space back to one flat space, so CPU access to host/pinned/managed buffers (e.g. `tensor.extract` after a D2H `hip.memcpy_d2h_async` + `hip.stream_sync`) stays valid.
+
+Without this hook, the stock `MemRefToLLVM` conversion — which only understands integer memory spaces — rejects any memref carrying the non-integer `MemorySpaceAttr` and conversion fails.
 
 ---
 
 ## Design
 
-This section explains the four key abstractions that implement the 3-step solution overview.
+This section explains the four building blocks that implement the 3-step solution overview.
 
 ### Memory Space Attribute
 
@@ -362,7 +369,7 @@ This is significant refactoring work across:
 
 This design document establishes the principle. The systematic operation-by-operation review and fixes are future work.
 
-Maps to Solution Step 1 & 3: Type system should enforce memory space constraints matching the semantic role of each argument. Current implementation has inconsistencies requiring systematic review.
+Maps to Solution Step 1 & 3: Type system should enforce memory space constraints matching the role of each argument. Current implementation has inconsistencies requiring systematic review.
 
 ### Transfer Operations
 
@@ -373,7 +380,7 @@ Explicit operations for moving data across host/device boundary:
 def Hip_MemcpyD2HAsyncOp : Hip_Op<"memcpy_d2h_async"> {
   let arguments = (ins
     Hip_ContextType:$ctx,
-    HostMemRef:$dst,        // Must be host
+    HostMemRef:$dst,        // Must be host (impl: host OR pinned — same hipMemcpyKind)
     DeviceMemRef:$src       // Must be device
   );
 }
@@ -385,7 +392,7 @@ def Hip_MemcpyH2DAsyncOp : Hip_Op<"memcpy_h2d_async"> {
   let arguments = (ins
     Hip_ContextType:$ctx,
     DeviceMemRef:$dst,      // Must be device
-    HostMemRef:$src         // Must be host
+    HostMemRef:$src         // Must be host (impl: host OR pinned — same hipMemcpyKind)
   );
 }
 ```
@@ -399,7 +406,7 @@ def Hip_StreamSyncOp : Hip_Op<"stream_sync"> {
 
 Type constraints enforce correct transfer direction automatically. Cannot accidentally copy device→device or host→host using these operations.
 
-Maps to Solution Step 2: OnnxToHip converters and shape inference use these operations to insert intentional transfers when ONNX semantics require host/device boundary crossing.
+Maps to Solution Step 2: OnnxToHip converters and shape inference use these operations to insert intentional transfers when an ONNX op requires crossing the host/device boundary.
 
 ### Pass Pipeline
 
@@ -419,13 +426,13 @@ Three passes coordinate to enforce memory spaces and optimize synchronization:
   - Insert `hip.memcpy_d2h_async` + `hip.stream_sync`
   - Perform shape calculation on host copy
   - Use calculated shape for subsequent allocations
-- This is not fixing violations - these transfers are semantically required by ONNX operations
+- This is not fixing violations - these transfers are genuinely required by the ONNX operations
 
 **3. EliminateStreamSyncBarriers (Slot 6c):**
 - Custom pass (similar to MLIR's EliminateBarriers, but for `hip.stream_sync`)
 - Analyzes `MemoryEffectsOpInterface` to find conflicting memory effects
 - Removes redundant `hip.stream_sync` operations
-- Consolidates multiple syncs into minimum necessary barriers
+- Combines multiple syncs into the fewest barriers needed
 
 Maps to Solution Step 3: Type system guarantees no access violations at compile time. No fix-up passes needed - code is correct from the start.
 
@@ -453,7 +460,7 @@ This section contrasts wrong (type violations) vs right (correct-by-construction
 %host = hip.pad(%ctx) ins(%input, %pads) outs(%output)
         -> memref<?x?xf16, #hip.mem<host>>  // WRONG - GPU writes to host?
 // Type mismatch: GPU kernel result cannot be host memory
-// Error: operation 'hip.pad' result type incompatible with device memory semantics
+// Error: operation 'hip.pad' result type incompatible with device-memory requirement
 ```
 
 ✅ **RIGHT** - Correct from start:
@@ -543,7 +550,7 @@ hip.range(%ctx) ins(%start, %limit, %delta)  // No allocation, fastest
 ### Key Takeaways
 
 - **No type violations generated** - `getBufferType()` returns correct memory space from start
-- **Intentional transfers only** - shape inference inserts D2H transfers when ONNX semantics require
+- **Intentional transfers only** - shape inference inserts D2H transfers when the ONNX op requires them
 - **Type system enforces correctness** - cannot compile invalid host/device access patterns
 - **70+ operations need review** - ensure each operation's `getBufferType()` and converters are correct
 

@@ -362,8 +362,10 @@ struct GetConstantOpLowering : public ConvertOpToLLVMPattern<GetConstantOp> {
     SmallVector<Value, 2> args = {adaptor.getCtx(), adaptor.getIndex()};
     auto callOp = LLVM::CallOp::create(rewriter, loc, *funcOp, args);
 
-    // The runtime always returns a generic pointer (AS 0).  Cast to the
-    // memref's address space (e.g. AS 1 = AMDGPU global memory) if needed.
+    // The runtime always returns a generic pointer (AS 0). Cast to the memref's
+    // address space if it differs. Constants live in device memory (device =
+    // AS 1 under the per-kind numbering), so a #hip.mem<device> result takes
+    // this cast to AS 0; a space-less constant memref (AS 0) makes it a no-op.
     FailureOr<unsigned> addrSpace =
         getTypeConverter()->getMemRefAddressSpace(memRefType);
     if (failed(addrSpace))
