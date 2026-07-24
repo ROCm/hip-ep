@@ -27,17 +27,13 @@ def Hipsr_PoolDomainOp : Hipsr_Op<"pool_domain", [
   ]> {
   let summary = "Group operations that share one memory pool";
   let description = [{
-    Groups a sequence of operations so they can share one memory pool.
+    Groups operations that share one memory pool.
 
-    The body has one block and ends with `hipsr.pool_domain_yield`.
-    `IsolatedFromAbove` prevents direct use of values from the parent scope.
-    Each external value must be an op operand with a matching block argument.
-
-    `RegionBranchOpInterface` tells MLIR how values enter and leave the body.
-    MLIR's verifier checks that operand types match block argument types and
-    yielded types match result types. `RecursiveMemoryEffects` reports effects
-    from operations inside the body. Operands and results are `AnyType`, so the
-    same op works with tensors before bufferization and memrefs after it.
+    `IsolatedFromAbove` and `RegionBranchOpInterface` make every value crossing
+    the boundary explicit and verifiable. This gives transformations complete
+    dependency information when treating the group as one unit.
+    `RecursiveMemoryEffects` keeps nested effects visible to analyses.
+    `AnyType` lets the group stay in place during bufferization.
 
     Example:
     ```mlir

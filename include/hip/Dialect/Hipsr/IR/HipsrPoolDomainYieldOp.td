@@ -21,12 +21,11 @@ def Hipsr_PoolDomainYieldOp : Hipsr_Op<"pool_domain_yield",
     [Pure, ReturnLike, Terminator, HasParent<"PoolDomainOp">]> {
   let summary = "Yield values out of a hipsr.pool_domain region";
   let description = [{
-    Ends the body of a `hipsr.pool_domain`. Its operands match the parent op's
-    results one for one. `ReturnLike` marks this as the region exit so MLIR's
-    verifier can check the values against the parent's
-    `RegionBranchOpInterface`.
+    Returns values from a pool-domain body to the parent op.
 
-    Operands are `AnyType` to match the parent op's results.
+    `ReturnLike` lets the parent's `RegionBranchOpInterface` verify these
+    outputs. Because the op only forwards values, `Pure` lets effect analyses
+    ignore it. `AnyType` keeps the same boundary before and after bufferization.
 
     Example:
     ```mlir
