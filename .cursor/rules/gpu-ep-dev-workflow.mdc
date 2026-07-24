@@ -1,0 +1,83 @@
+---
+description: GPU EP build, LIT tests, MSVC env, and agent temp workspace
+alwaysApply: true
+---
+
+# GPU EP Dev Workflow (Windows)
+
+## Agent temp files
+
+Use **`$env:USERPROFILE\workspace\temp`** for agent-generated artifacts during debugging and fixes:
+
+- Build logs (`gpu-ep-build.log`, MSBuild logs)
+- VS installer scripts/logs (`temp/install-spectre.cmd`, `temp/install-vs-deps.cmd`, etc.)
+- One-off repro scripts, captured command output
+
+Do **not** scatter these in the repo root or `onnx-hipdnn-ep/` unless the user asks.
+
+## Key paths
+
+| Item | Path |
+|------|------|
+| Repo | `$env:USERPROFILE\workspace\onnx-hipdnn-ep` |
+| Build tree | `$env:USERPROFILE\workspace\build\onnx-hipdnn-ep` |
+| Install prefix | `$env:USERPROFILE\workspace\local` |
+| MSVC + Git Bash launcher | `$env:USERPROFILE\workspace\gpu-ep-msvc-bash.cmd` |
+| LIT suite dir (binary) | `$env:USERPROFILE\workspace\build\onnx-hipdnn-ep\test\lit` |
+| LIT sources | `onnx-hipdnn-ep\test\lit\` |
+
+Launch dev shell: `cmd /c "%USERPROFILE%\workspace\gpu-ep-msvc-bash.cmd"`
+
+**Open files from Git Bash:** use `copen file.mlir` (uses **cursor-server remote-cli** on Remote SSH, not desktop `code.cmd`). Launch bash **from a Cursor integrated terminal** so `VSCODE_IPC_HOOK_CLI` is set. With `CURSOR_LAYOUT=unifiedAgent`, the file opens in the **Editor** tab — switch away from Agent if you do not see it. Helpers: `~/.bashrc` → `bashrc-gpu-ep.sh`.
+
+**Toolchain:** VS 2022 Build Tools 17.14 (MSVC 19.44), CMake 4.3+, Python 3.14, Git for Windows on PATH (before Cygwin Git).
+
+## Build
+
+```bash
+export LOCAL_DIR="$HOME/workspace/local"
+cd ~/workspace/onnx-hipdnn-ep
+python build.py --install_dir "$LOCAL_DIR" --config RelWithDebInfo -j 8 \
+  --cmake_extra_defines CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION=10.0.22621.0
+```
+
+Skip tests: add `--skip_tests`. Configure only: `--skip_build`.
+
+## LIT tests (hip-mlir-compiler)
+
+**Preferred** — CMake target (builds tools if needed):
+
+```bash
+cmake --build "$HOME/workspace/build/onnx-hipdnn-ep" \
+  --config RelWithDebInfo --target check-hip-mlir-lit
+```
+
+**CTest:**
+
+```bash
+ctest --test-dir "$HOME/workspace/build/onnx-hipdnn-ep/test/lit" \
+  -C RelWithDebInfo -V
+```
+
+**Direct lit** (from build tree):
+
+```bash
+cd "$HOME/workspace/build/onnx-hipdnn-ep/test/lit"
+lit -sv --param=build_mode=RelWithDebInfo .
+```
+
+Single file or subset:
+
+```bash
+lit -sv --param=build_mode=RelWithDebInfo path/to/test.mlir
+lit -sv -j 8 --param=build_mode=RelWithDebInfo Conversion/onnx-to-hip/
+```
+
+Prerequisites: `pip install lit`; match `--config` / `build_mode` to the built configuration (`RelWithDebInfo`).
+
+## Windows build gotchas (seen on this machine)
+
+- **MSB8040 Spectre:** MorphiZen needs MSVC Spectre libs — component `Microsoft.VisualStudio.Component.VC.14.44.17.14.x86.x64.Spectre`
+- **stdalign.h:** use Windows SDK 10.0.22621+ (`CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION=10.0.22621.0`)
+- **atlbase.h:** LLVM DIA needs VC ATL component
+- **MorphiZen version script:** MSBuild must see Git for Windows (`C:\Program Files\Git\cmd`), not Cygwin Git 2.21
