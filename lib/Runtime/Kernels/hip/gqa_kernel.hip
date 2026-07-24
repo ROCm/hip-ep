@@ -408,6 +408,89 @@ __global__ void kv_cache_concat_kernel(
 }
 
 // -------------------------------------------------------------------------
+// INT8 KV cache: quantized append / concat + dequant (per-channel symmetric)
+// -------------------------------------------------------------------------
+// For the quantized-KV GroupQueryAttention variant (k/v_quant_type=PER_CHANNEL,
+// kv_cache_bit_width=8): the KV cache is stored as symmetric INT8 with a static
+// per-channel fp32 scale [G, d] (no zero point). These mirror the fp16
+// append/concat above, but fold in QuantizeLinear on the incoming fp16 tokens
+// (q = clamp(round(x / scale[g*d+di]), -128, 127)) and a matching DequantizeLinear
+// used to rebuild an fp16 view for the compute-bound prefill (x = q * scale).
+
+// Quantize-append (in-place cache): fp16 BSHD [B,sq,G,d] -> INT8 BNSD
+// [B,G,present_seq,d] at offset past_len (or seqlens_k-derived).
+__global__ void kv_cache_append_quant_i8_kernel(
+    const _Float16* __restrict__ src,     // BSHD [B, sq, G, d]
+    int8_t* __restrict__ cache,           // BNSD [B, G, present_seq, d]
+    const float* __restrict__ scale,      // [G, d]
+    int sq, int G, int d, int present_seq, int past_len,
+    const int* __restrict__ seqlens_k) {
+  const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
+  int eff_past_len = seqlens_k ? (seqlens_k[batch_idx] + 1 - sq) : past_len;
+  if (eff_past_len < 0 || eff_past_len + sq > present_seq) return;
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int total_per_batch = sq * G * d;
+  if (idx >= total_per_batch) return;
+  int di = idx % d;
+  int remaining = idx / d;
+  int g = remaining % G;
+  int s = remaining / G;
+  int src_idx = ((batch_idx * sq + s) * G + g) * d + di;
+  int dst_idx = ((batch_idx * G + g) * present_seq + (eff_past_len + s)) * d + di;
+  float inv = 1.0f / scale[g * d + di];
+  float q = rintf((float)src[src_idx] * inv);
+  q = fminf(fmaxf(q, -128.0f), 127.0f);
+  cache[dst_idx] = (int8_t)q;
+}
+
+// Quantize-concat (separate past/present buffers): copy past INT8 [0,past_len)
+// then quantize new fp16 tokens [past_len, past_len+sq) into present INT8.
+__global__ void kv_cache_concat_quant_i8_kernel(
+    const int8_t* __restrict__ past,      // BNSD int8 [B, G, past_seq, d]
+    const _Float16* __restrict__ current, // BSHD fp16 [B, sq, G, d]
+    int8_t* __restrict__ present,         // BNSD int8 [B, G, present_seq, d]
+    const float* __restrict__ scale,      // [G, d]
+    int past_len, int sq, int G, int d, int past_seq, int present_seq) {
+  const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int total_seq = past_len + sq;
+  if (idx >= total_seq * G * d) return;
+  int di = idx % d;
+  int r = idx / d;
+  int g = r % G;
+  int s = r / G;
+  int dst_idx = ((batch_idx * G + g) * present_seq + s) * d + di;
+  if (s < past_len) {
+    present[dst_idx] = past[((batch_idx * G + g) * past_seq + s) * d + di];
+  } else {
+    int cs = s - past_len;
+    float inv = 1.0f / scale[g * d + di];
+    float q = rintf((float)current[((batch_idx * sq + cs) * G + g) * d + di] * inv);
+    q = fminf(fmaxf(q, -128.0f), 127.0f);
+    present[dst_idx] = (int8_t)q;
+  }
+}
+
+// Dequant INT8 BNSD [B,G,src_seq,d] -> fp16 BNSD [B,G,dst_seq,d] over the first
+// total_seq positions (rebuilds an fp16 cache view for the fp16 prefill kernel).
+__global__ void dequant_kv_i8_to_fp16_kernel(
+    const int8_t* __restrict__ src,   // BNSD int8 [B, G, src_seq, d]
+    _Float16* __restrict__ dst,       // BNSD fp16 [B, G, dst_seq, d]
+    const float* __restrict__ scale,  // [G, d]
+    int total_seq, int G, int d, int src_seq, int dst_seq) {
+  const int batch_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= total_seq * G * d) return;
+  int di = idx % d;
+  int r = idx / d;
+  int g = r % G;
+  int s = r / G;
+  int src_idx = ((batch_idx * G + g) * src_seq + s) * d + di;
+  int dst_idx = ((batch_idx * G + g) * dst_seq + s) * d + di;
+  dst[dst_idx] = (_Float16)((float)src[src_idx] * scale[g * d + di]);
+}
+
+// -------------------------------------------------------------------------
 // Step 6-7: KV Group Expansion (G groups -> H heads)
 // -------------------------------------------------------------------------
 // Replicates each KV group for HPG = H/G query heads.
@@ -752,6 +835,56 @@ extern "C" int hip_gqa_kv_cache_concat(
   GQA_DISPATCH_BY_ELEM_SIZE(element_size_bytes, launch_kv_cache_concat, stream,
                             past, current, present, batch_size, past_len, sq, G,
                             d, past_seq, present_seq);
+  GQA_RETURN_LAUNCH_STATUS();
+}
+
+// INT8 KV cache: quantized append (in-place)
+extern "C" int hip_gqa_kv_cache_append_quant_i8(
+    void* stream_ptr, const void* src, void* cache, const void* scale,
+    int batch_size, int sq, int G, int d, int present_seq, int past_len,
+    const void* seqlens_k) {
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  int total = sq * G * d;
+  int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
+  (void)hipGetLastError();
+  kv_cache_append_quant_i8_kernel<<<dim3(blocks, batch_size), GQA_THREADS, 0,
+                                    stream>>>(
+      static_cast<const _Float16*>(src), static_cast<int8_t*>(cache),
+      static_cast<const float*>(scale), sq, G, d, present_seq, past_len,
+      static_cast<const int*>(seqlens_k));
+  GQA_RETURN_LAUNCH_STATUS();
+}
+
+// INT8 KV cache: quantized concat (separate past/present buffers)
+extern "C" int hip_gqa_kv_cache_concat_quant_i8(
+    void* stream_ptr, const void* past, const void* current, void* present,
+    const void* scale, int batch_size, int past_len, int sq, int G, int d,
+    int past_seq, int present_seq) {
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  int total_seq = past_len + sq;
+  int total = total_seq * G * d;
+  int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
+  (void)hipGetLastError();
+  kv_cache_concat_quant_i8_kernel<<<dim3(blocks, batch_size), GQA_THREADS, 0,
+                                    stream>>>(
+      static_cast<const int8_t*>(past), static_cast<const _Float16*>(current),
+      static_cast<int8_t*>(present), static_cast<const float*>(scale),
+      past_len, sq, G, d, past_seq, present_seq);
+  GQA_RETURN_LAUNCH_STATUS();
+}
+
+// INT8 KV cache: dequant to fp16 view (for the compute-bound fp16 prefill)
+extern "C" int hip_gqa_dequant_kv_i8_to_fp16(
+    void* stream_ptr, const void* src, void* dst, const void* scale,
+    int batch_size, int total_seq, int G, int d, int src_seq, int dst_seq) {
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  int total = total_seq * G * d;
+  int blocks = (total + GQA_THREADS - 1) / GQA_THREADS;
+  (void)hipGetLastError();
+  dequant_kv_i8_to_fp16_kernel<<<dim3(blocks, batch_size), GQA_THREADS, 0,
+                                 stream>>>(
+      static_cast<const int8_t*>(src), static_cast<_Float16*>(dst),
+      static_cast<const float*>(scale), total_seq, G, d, src_seq, dst_seq);
   GQA_RETURN_LAUNCH_STATUS();
 }
 
@@ -1982,6 +2115,718 @@ extern "C" int hip_gqa_flash_decode_v2(
                           max_seq, scale, iSeq, local_window_size, hSink,
                           use_smooth_softmax);
 
+  return hipGetLastError();
+}
+
+//===----------------------------------------------------------------------===//
+// INT8 KV-cache FA-2 Split-K GQA Decode  (fp16 Q, symmetric per-channel int8 K/V)
+//===----------------------------------------------------------------------===//
+// Identical math / partials / FA-2 reduce as the fp16 decode above, but the K/V
+// cache is stored as symmetric per-channel INT8 (1 byte/elem -> HALF the DRAM
+// traffic on the bandwidth-bound decode read). This matches the quantized-KV
+// GroupQueryAttention variant (k_quant_type/v_quant_type = PER_CHANNEL,
+// kv_cache_bit_width = 8) whose cache is INT8 [B, G, max_seq, D] with fp32
+// per-channel scales [G, D] (one scale per (kv_head, head_dim) channel, no
+// zero point):
+//     k_fp16 = k_i8 * k_scale[head_kv*D + channel]
+//     v_fp16 = v_i8 * v_scale[head_kv*D + channel]
+//
+//   * Scalar kernel: keeps the tile INT8 (GQA stages it into LDS with a
+//     vectorized int4 copy -> half the fp16 path's LDS, more resident blocks;
+//     MHA streams it straight from global) and dequantizes per-lane on read via
+//     char2 loads, with this lane's EPT scales resident in registers. The read
+//     stays 1 byte/elem, halving the fp16 DRAM traffic.
+//   * WMMA kernel: dequantizes INT8 -> fp16 during the global->LDS stage so the
+//     16x16x16 WMMA score / value GEMMs are byte-identical to the fp16 path.
+//
+// Both emit the SAME [B, H, K_SPLITS, D+2] partials as the fp16 kernels, so the
+// shared gqa_flash_decode_reduce_kernel (seqlens_k / sliding-window / head-sink
+// / smooth-softmax) is reused unchanged.
+//===----------------------------------------------------------------------===//
+
+template <int D, int HPG>
+__global__ void __launch_bounds__(HPG * WAVE_SIZE)
+gqa_flash_decode_kernel_i8(
+    const __half* __restrict__ Q_roped,    // [B, 1, H, D] (BSHD with sq=1)
+    const int8_t* __restrict__ Kcache,     // [B, G, max_seq, D] (BNSD) int8
+    const int8_t* __restrict__ Vcache,     // [B, G, max_seq, D] int8
+    const float* __restrict__ k_scale,     // [G, D] per-channel fp32
+    const float* __restrict__ v_scale,     // [G, D]
+    float* __restrict__ partials,          // [B, H, K_SPLITS, D+2]
+    int H, int G, int max_seq,
+    float scale,
+    const int* __restrict__ seqlens_k,
+    int local_window_size,
+    int K_SPLITS) {
+  constexpr int BKV = (D >= 256) ? 16 : (D == 128) ? 32 : FLASH_DECODE_BKV;
+  constexpr int THREADS = HPG * WAVE_SIZE;
+  constexpr int EPT = D / WAVE_SIZE;
+
+  static_assert(D % WAVE_SIZE == 0, "D must be a multiple of WAVE_SIZE");
+  static_assert(EPT >= 2 && EPT <= 8 && (EPT % 2 == 0),
+                "EPT must be even in 2..8 for char2 dequant loads");
+
+  const int batch     = __builtin_amdgcn_readfirstlane(blockIdx.x / G);
+  const int head_kv   = __builtin_amdgcn_readfirstlane(blockIdx.x % G);
+  const int split_idx = __builtin_amdgcn_readfirstlane(blockIdx.y);
+  const int tid       = threadIdx.x;
+  const int wave_id   = tid / WAVE_SIZE;
+  const int lane_id   = tid % WAVE_SIZE;
+  const int head_q    = head_kv * HPG + wave_id;
+
+  const int raw_skv = seqlens_k
+      ? __builtin_amdgcn_readfirstlane(seqlens_k[batch] + 1)
+      : max_seq;
+  const int eff_skv = (raw_skv > 0)
+      ? (raw_skv < max_seq ? raw_skv : max_seq) : 0;
+  int kv_lo = 0;
+  if (local_window_size > 0 && eff_skv > local_window_size) {
+    kv_lo = eff_skv - local_window_size;
+  }
+  const int kv_range = eff_skv - kv_lo;
+  const int chunk    = (kv_range + K_SPLITS - 1) / K_SPLITS;
+  const int kv_start = kv_lo + chunk * split_idx;
+  int kv_end_tmp     = kv_start + chunk;
+  if (kv_end_tmp > eff_skv) kv_end_tmp = eff_skv;
+  const int kv_end   = kv_end_tmp;
+
+  float* partial_dst = partials +
+      flash_decode_partial_offset(batch, head_q, split_idx, H, K_SPLITS, D);
+  if (kv_start >= kv_end) {
+    if (lane_id == 0) {
+      partial_dst[0] = -INFINITY;
+      partial_dst[1] = 0.0f;
+    }
+    #pragma unroll
+    for (int e = 0; e < EPT; ++e)
+      partial_dst[2 + lane_id * EPT + e] = 0.0f;
+    return;
+  }
+
+  // INT8 LDS tile (half the fp16 path's footprint -> more resident blocks).
+  // GQA (HpG>1) stages so the HpG query heads reuse the tile; MHA (HpG==1)
+  // streams straight from global. Either way the int8 is dequantized per-lane
+  // on read, with this lane's EPT K/V scales resident in registers.
+  constexpr bool kStage = (HPG > 1);
+  constexpr int kShElems = kStage ? (BKV * D) : 1;
+  __shared__ __align__(16) int8_t K_lds[kShElems];
+  __shared__ __align__(16) int8_t V_lds[kShElems];
+
+  // Fold the per-channel K scale into Q ( dot = sum_e (Q[e]*Ksc[e]) * K_i8[e] )
+  // and defer the per-channel V scale to the epilogue ( O[e] = Vsc[e] * sum_t
+  // p*V_i8[e] ). Both are valid because the scales are constant across keys, so
+  // the inner loop drops the per-key dequant multiplies (int8 then costs only
+  // ~1 extra int->float vs the fp16 kernel) and frees the K-scale registers.
+  // The V scale is NOT loaded here: it is only needed once in the epilogue, so
+  // reloading it there (EPT cheap, cache-hot global reads) instead of holding
+  // it live across the whole KV loop saves EPT VGPRs and lifts occupancy on the
+  // high-HpG (256-thread) blocks -- exactly the compute-bound regime where int8
+  // is otherwise register/occupancy-limited rather than bandwidth-bound.
+  float Qk[EPT];
+  {
+    const __half* Q_ptr = Q_roped + (size_t)(batch * H + head_q) * D;
+    const float* ks = k_scale + (size_t)head_kv * D;
+    #pragma unroll
+    for (int e = 0; e < EPT; ++e)
+      Qk[e] = __half2float(Q_ptr[lane_id * EPT + e]) * ks[lane_id * EPT + e];
+  }
+
+  const size_t kv_base = (size_t)__builtin_amdgcn_readfirstlane(
+      (unsigned)((batch * G + head_kv) * max_seq)) * (size_t)D;
+  const float scale_log2e = scale * LOG2E;
+
+  float m_acc = -INFINITY;
+  float l_acc = 0.0f;
+  float O_acc[EPT];
+  #pragma unroll
+  for (int e = 0; e < EPT; ++e) O_acc[e] = 0.0f;
+
+  for (int tile_start = kv_start; tile_start < kv_end; tile_start += BKV) {
+    const int tile_n = (tile_start + BKV <= kv_end)
+        ? BKV : (kv_end - tile_start);
+
+    const int8_t* Kt;
+    const int8_t* Vt;
+    if constexpr (kStage) {
+      // Copy the INT8 tile into LDS. tile_n*D is always a multiple of 16 bytes
+      // (D % 16 == 0), so a single int4 (16 int8) vectorized copy tiles it
+      // exactly -- no tail loop.
+      const int total_vec = (tile_n * D) / 16;
+      const int4* Kv = reinterpret_cast<const int4*>(
+          Kcache + kv_base + (size_t)tile_start * D);
+      const int4* Vv = reinterpret_cast<const int4*>(
+          Vcache + kv_base + (size_t)tile_start * D);
+      int4* Ksv = reinterpret_cast<int4*>(K_lds);
+      int4* Vsv = reinterpret_cast<int4*>(V_lds);
+      for (int i = tid; i < total_vec; i += THREADS) {
+        Ksv[i] = Kv[i];
+        Vsv[i] = Vv[i];
+      }
+      __syncthreads();
+      Kt = K_lds;
+      Vt = V_lds;
+    } else {
+      Kt = Kcache + kv_base + (size_t)tile_start * D;
+      Vt = Vcache + kv_base + (size_t)tile_start * D;
+    }
+
+    for (int t = 0; t < tile_n; ++t) {
+      // Per-lane partial dot. K scale is pre-folded into Qk, so this is a plain
+      // int8 * Qk multiply-accumulate in fp32. When EPT is a multiple of 4 we
+      // load 4 int8 with a single 32-bit char4 access (one ds_read_b32 from LDS
+      // instead of two 16-bit reads) -- lane*EPT+e is then 4-byte aligned.
+      float dot_partial = 0.0f;
+      if constexpr (EPT % 4 == 0) {
+        #pragma unroll
+        for (int e = 0; e < EPT; e += 4) {
+          const char4 kk =
+              *reinterpret_cast<const char4*>(&Kt[t * D + lane_id * EPT + e]);
+          dot_partial += Qk[e]     * (float)kk.x + Qk[e + 1] * (float)kk.y
+                       + Qk[e + 2] * (float)kk.z + Qk[e + 3] * (float)kk.w;
+        }
+      } else {
+        #pragma unroll
+        for (int e = 0; e < EPT; e += 2) {
+          const char2 kk =
+              *reinterpret_cast<const char2*>(&Kt[t * D + lane_id * EPT + e]);
+          dot_partial += Qk[e] * (float)kk.x + Qk[e + 1] * (float)kk.y;
+        }
+      }
+      dot_partial += __shfl_xor(dot_partial, 16);
+      dot_partial += __shfl_xor(dot_partial, 8);
+      dot_partial += __shfl_xor(dot_partial, 4);
+      dot_partial += __shfl_xor(dot_partial, 2);
+      dot_partial += __shfl_xor(dot_partial, 1);
+
+      const float score = dot_partial * scale_log2e;
+      const float m_new = fmaxf(m_acc, score);
+      const float correction = exp2f(m_acc - m_new);
+      const float p = exp2f(score - m_new);
+      l_acc = correction * l_acc + p;
+
+      // Accumulate raw p*V_i8; the per-channel V scale is applied in the epilogue.
+      if constexpr (EPT % 4 == 0) {
+        #pragma unroll
+        for (int e = 0; e < EPT; e += 4) {
+          const char4 vv =
+              *reinterpret_cast<const char4*>(&Vt[t * D + lane_id * EPT + e]);
+          O_acc[e]     = correction * O_acc[e]     + p * (float)vv.x;
+          O_acc[e + 1] = correction * O_acc[e + 1] + p * (float)vv.y;
+          O_acc[e + 2] = correction * O_acc[e + 2] + p * (float)vv.z;
+          O_acc[e + 3] = correction * O_acc[e + 3] + p * (float)vv.w;
+        }
+      } else {
+        #pragma unroll
+        for (int e = 0; e < EPT; e += 2) {
+          const char2 vv =
+              *reinterpret_cast<const char2*>(&Vt[t * D + lane_id * EPT + e]);
+          O_acc[e]     = correction * O_acc[e]     + p * (float)vv.x;
+          O_acc[e + 1] = correction * O_acc[e + 1] + p * (float)vv.y;
+        }
+      }
+      m_acc = m_new;
+    }
+    if constexpr (kStage) __syncthreads();
+  }
+
+  if (lane_id == 0) {
+    partial_dst[0] = m_acc;
+    partial_dst[1] = l_acc;
+  }
+  // Apply the deferred per-channel V scale on the way out (loaded here, not held
+  // in registers across the KV loop).
+  const float* vs = v_scale + (size_t)head_kv * D;
+  #pragma unroll
+  for (int e = 0; e < EPT; ++e)
+    partial_dst[2 + lane_id * EPT + e] = O_acc[e] * vs[lane_id * EPT + e];
+}
+
+//===----------------------------------------------------------------------===//
+// WMMA Split-K INT8 KV-cache Decode -- dequant int8->fp16 during LDS stage.
+// Produces the SAME [B, H, K_SPLITS, D+2] partials as the fp16 WMMA kernel.
+//===----------------------------------------------------------------------===//
+template <int D, int HPG, int BKV>
+__global__ void __launch_bounds__(32)
+gqa_flash_decode_wmma_kernel_i8(
+    const __half* __restrict__ Q_in,       // [B, 1, H, D] (sq=1)
+    const int8_t* __restrict__ K_in,       // [B, G, max_seq, D] int8
+    const int8_t* __restrict__ V_in,       // [B, G, max_seq, D] int8
+    const float* __restrict__ k_scale,     // [G, D]
+    const float* __restrict__ v_scale,     // [G, D]
+    float* __restrict__ partials,          // [B, H, K_SPLITS, D+2]
+    int H, int G, int max_seq, float scale,
+    const int* __restrict__ seqlens_k,
+    int local_window_size,
+    int K_SPLITS) {
+  constexpr int DSTR    = D + 2;
+  constexpr int S_STR   = BKV + 1;
+  constexpr int P_STR   = BKV + 2;
+  constexpr int Q_TILES = D / kWmmaTile;
+  constexpr int O_TILES = D / kWmmaTile;
+  constexpr int N_TILES = BKV / kWmmaTile;
+
+  const _Float16* Q = reinterpret_cast<const _Float16*>(Q_in);
+
+  const int head_kv = __builtin_amdgcn_readfirstlane(blockIdx.x);
+  const int split   = __builtin_amdgcn_readfirstlane(blockIdx.y);
+  const int batch   = __builtin_amdgcn_readfirstlane(blockIdx.z);
+
+  const int lane      = threadIdx.x;
+  const int wmma_lane = lane % kWmmaTile;
+  const int pair      = lane / kWmmaTile;
+
+  const int raw_skv = seqlens_k
+      ? __builtin_amdgcn_readfirstlane(seqlens_k[batch] + 1)
+      : max_seq;
+  const int eff_skv = (raw_skv > 0)
+      ? (raw_skv < max_seq ? raw_skv : max_seq) : 0;
+  int kv_lo = 0;
+  if (local_window_size > 0 && eff_skv > local_window_size) {
+    kv_lo = eff_skv - local_window_size;
+  }
+  const int kv_range = eff_skv - kv_lo;
+  const int chunk    = (kv_range + K_SPLITS - 1) / K_SPLITS;
+  const int kv_start = kv_lo + chunk * split;
+  int kv_end_tmp     = kv_start + chunk;
+  if (kv_end_tmp > eff_skv) kv_end_tmp = eff_skv;
+  const int kv_end   = kv_end_tmp;
+
+  if (kv_start >= kv_end) {
+    if (lane < HPG) {
+      const int head_q = head_kv * HPG + lane;
+      float* pd = partials +
+          flash_decode_partial_offset(batch, head_q, split, H, K_SPLITS, D);
+      pd[0] = -INFINITY;
+      pd[1] = 0.0f;
+      #pragma unroll
+      for (int c = 0; c < D; ++c) pd[2 + c] = 0.0f;
+    }
+    return;
+  }
+
+  extern __shared__ char smem_dw_i8[];
+  float*    S_lds  = reinterpret_cast<float*>(smem_dw_i8);
+  _Float16* K_lds  = reinterpret_cast<_Float16*>(smem_dw_i8 + 16 * S_STR * sizeof(float));
+  _Float16* V_lds  = K_lds + BKV * DSTR;
+  _Float16* P_lds  = V_lds + BKV * DSTR;
+  float*    ml     = reinterpret_cast<float*>(P_lds + 16 * P_STR);   // [16*3]
+  float*    ksc_sh = ml + 16 * 3;                                     // [D]
+  float*    vsc_sh = ksc_sh + D;                                      // [D]
+
+  // Preload this KV head's per-channel scales into LDS once.
+  {
+    const float* ks = k_scale + (size_t)head_kv * D;
+    const float* vs = v_scale + (size_t)head_kv * D;
+    for (int c = lane; c < D; c += 32) { ksc_sh[c] = ks[c]; vsc_sh[c] = vs[c]; }
+  }
+
+  const size_t kv_base = (static_cast<size_t>(batch) * G + head_kv)
+                         * static_cast<size_t>(max_seq) * D;
+
+  half16 Q_reg[Q_TILES];
+  {
+    const bool valid = wmma_lane < HPG;
+    const int head = head_kv * HPG + wmma_lane;
+    const size_t q_row = (static_cast<size_t>(batch) * H + head) * D;
+    #pragma unroll
+    for (int tk = 0; tk < Q_TILES; ++tk)
+      Q_reg[tk] = valid ? HALF16(Q[q_row + tk * 16]) : half16{};
+  }
+
+  if (lane < 16) {
+    ml[lane * 3]     = -INFINITY;
+    ml[lane * 3 + 1] = 0.0f;
+    ml[lane * 3 + 2] = 1.0f;
+  }
+  __syncthreads();  // ml + scale tables visible to all lanes
+
+  float8 O_frag[O_TILES] = {};
+
+  const float scale_log2e = scale * LOG2E;
+  const int num_tiles = (kv_end - kv_start + BKV - 1) / BKV;
+
+  // Software pipeline (mirrors the fp16 WMMA kernel): prefetch the next tile's
+  // INT8 K/V global loads into registers while the current tile's GEMMs run,
+  // dequantizing to fp16 only on the LDS write. Only viable when the per-lane
+  // register footprint is small (D=64/BKV=16). The int8 loads keep HALF the
+  // DRAM traffic of the fp16 path.
+  constexpr int kPET = (BKV * D) / 32;          // elements per lane per tile
+  constexpr bool kPrefetch = (kPET <= 32);
+
+  int8_t k_pf[kPrefetch ? kPET : 1];
+  int8_t v_pf[kPrefetch ? kPET : 1];
+  if (kPrefetch) {
+    #pragma unroll
+    for (int j = 0; j < kPET; ++j) {
+      const int i = lane + j * 32;
+      const int row = i / D, col = i % D;
+      const int kv_pos = kv_start + row;          // tile 0
+      const bool ok = kv_pos < kv_end;
+      const size_t off = kv_base + static_cast<size_t>(kv_pos) * D + col;
+      k_pf[j] = ok ? K_in[off] : (int8_t)0;
+      v_pf[j] = ok ? V_in[off] : (int8_t)0;
+    }
+  }
+
+  for (int t = 0; t < num_tiles; ++t) {
+    const int kv0 = kv_start + t * BKV;
+
+    if (kPrefetch) {
+      // Dequant the prefetched tile from registers into LDS.
+      #pragma unroll
+      for (int j = 0; j < kPET; ++j) {
+        const int i = lane + j * 32;
+        const int row = i / D, col = i % D;
+        K_lds[row * DSTR + col] = (_Float16)((float)k_pf[j] * ksc_sh[col]);
+        V_lds[row * DSTR + col] = (_Float16)((float)v_pf[j] * vsc_sh[col]);
+      }
+      __syncthreads();
+      // Issue next tile's global int8 loads (overlap with the GEMMs below).
+      const int kv0n = kv_start + (t + 1) * BKV;
+      if (t + 1 < num_tiles) {
+        #pragma unroll
+        for (int j = 0; j < kPET; ++j) {
+          const int i = lane + j * 32;
+          const int row = i / D, col = i % D;
+          const int kv_pos = kv0n + row;
+          const bool ok = kv_pos < kv_end;
+          const size_t off = kv_base + static_cast<size_t>(kv_pos) * D + col;
+          k_pf[j] = ok ? K_in[off] : (int8_t)0;
+          v_pf[j] = ok ? V_in[off] : (int8_t)0;
+        }
+      }
+    } else {
+      // Stage: dequant int8 -> fp16 into LDS (so the WMMA GEMMs are unchanged).
+      for (int i = lane; i < BKV * D; i += 32) {
+        const int row = i / D, col = i % D;
+        const int kv_pos = kv0 + row;
+        if (kv_pos < kv_end) {
+          const size_t off = kv_base + static_cast<size_t>(kv_pos) * D + col;
+          K_lds[row * DSTR + col] = (_Float16)((float)K_in[off] * ksc_sh[col]);
+          V_lds[row * DSTR + col] = (_Float16)((float)V_in[off] * vsc_sh[col]);
+        } else {
+          K_lds[row * DSTR + col] = (_Float16)0;
+          V_lds[row * DSTR + col] = (_Float16)0;
+        }
+      }
+      __syncthreads();
+    }
+
+    // scoreGEMM: S[16, BKV] = Q . K^T (scaled, log2 domain) -> S_lds.
+    #pragma unroll
+    for (int sj = 0; sj < N_TILES; ++sj) {
+      float8 s_frag = {};
+      #pragma unroll
+      for (int tk = 0; tk < Q_TILES; ++tk) {
+        half16 kf = HALF16(K_lds[(sj * 16 + wmma_lane) * DSTR + tk * 16]);
+        s_frag = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(Q_reg[tk], kf, s_frag);
+      }
+      #pragma unroll
+      for (int ele = 0; ele < 8; ++ele) {
+        const int r = ele * 2 + pair;
+        const int c = sj * 16 + wmma_lane;
+        S_lds[r * S_STR + c] = s_frag[ele] * scale_log2e;
+      }
+    }
+    __syncthreads();
+
+    // Online softmax over the BKV columns (no causal mask at decode).
+    {
+      const int row  = lane / 2;
+      const int half = lane & 1;
+      const int col_start = half * (BKV / 2);
+
+      float local_max = -INFINITY;
+      #pragma unroll
+      for (int c = 0; c < BKV / 2; ++c) {
+        const int kv_pos = kv0 + col_start + c;
+        float s = (kv_pos < kv_end) ? S_lds[row * S_STR + col_start + c]
+                                    : -INFINITY;
+        S_lds[row * S_STR + col_start + c] = s;
+        local_max = fmaxf(local_max, s);
+      }
+      local_max = fmaxf(local_max, __shfl_xor(local_max, 1));
+
+      const float m_old = ml[row * 3];
+      const float l_old = ml[row * 3 + 1];
+      const float m_new = fmaxf(m_old, local_max);
+      const float correction = exp2f(m_old - m_new);
+
+      float local_sum = 0.0f;
+      #pragma unroll
+      for (int c = 0; c < BKV / 2; ++c) {
+        const float p = exp2f(S_lds[row * S_STR + col_start + c] - m_new);
+        local_sum += p;
+        P_lds[row * P_STR + col_start + c] = static_cast<_Float16>(p);
+      }
+      local_sum += __shfl_xor(local_sum, 1);
+
+      if (half == 0) {
+        ml[row * 3]     = m_new;
+        ml[row * 3 + 1] = correction * l_old + local_sum;
+        ml[row * 3 + 2] = correction;
+      }
+    }
+    __syncthreads();
+
+    #pragma unroll
+    for (int tj = 0; tj < O_TILES; ++tj)
+      #pragma unroll
+      for (int ele = 0; ele < 8; ++ele)
+        O_frag[tj][ele] *= ml[(ele * 2 + pair) * 3 + 2];
+
+    #pragma unroll
+    for (int tj = 0; tj < O_TILES; ++tj) {
+      #pragma unroll
+      for (int tk = 0; tk < N_TILES; ++tk) {
+        half16 p = HALF16(P_lds[wmma_lane * P_STR + tk * 16]);
+        half16 v;
+        #pragma unroll
+        for (int e = 0; e < 16; ++e)
+          v[e] = V_lds[(tk * 16 + e) * DSTR + tj * 16 + wmma_lane];
+        O_frag[tj] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(p, v, O_frag[tj]);
+      }
+    }
+    __syncthreads();
+  }
+
+  #pragma unroll
+  for (int tj = 0; tj < O_TILES; ++tj)
+    #pragma unroll
+    for (int ele = 0; ele < 8; ++ele) {
+      const int r = ele * 2 + pair;
+      const int c = tj * 16 + wmma_lane;
+      if (r < HPG) {
+        const int head_q = head_kv * HPG + r;
+        float* pd = partials +
+            flash_decode_partial_offset(batch, head_q, split, H, K_SPLITS, D);
+        pd[2 + c] = O_frag[tj][ele];
+      }
+    }
+  if (lane < HPG) {
+    const int head_q = head_kv * HPG + lane;
+    float* pd = partials +
+        flash_decode_partial_offset(batch, head_q, split, H, K_SPLITS, D);
+    pd[0] = ml[lane * 3];
+    pd[1] = ml[lane * 3 + 1];
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// INT8 decode launcher: same autotune structure as hip_gqa_flash_decode_v2, but
+// carries the k_scale/v_scale per-channel tables and dispatches the int8 kernels.
+//===----------------------------------------------------------------------===//
+static inline void launchFlashDecodeConfigI8(
+    const FlashDecodeCfg& cfg, hipStream_t stream,
+    const __half* hQ, const int8_t* hK, const int8_t* hV,
+    const float* kSc, const float* vSc, __half* hO, float* hP,
+    int B, int H, int G, int d, int hpg, int max_seq, float scale,
+    const int* iSeq, int local_window_size,
+    const __half* hSink, int use_smooth_softmax) {
+  const int splits = cfg.splits;
+  const bool use_wmma = cfg.use_wmma && flash_decode_wmma_supported(d, hpg);
+  if (use_wmma) {
+    auto smem_bytes = [](int D_, int bkv) -> size_t {
+      const int DSTR = D_ + 2;
+      return (size_t)16 * (bkv + 1) * sizeof(float)
+           + (size_t)2 * bkv * DSTR * sizeof(_Float16)
+           + (size_t)16 * (bkv + 2) * sizeof(_Float16)
+           + (size_t)16 * 3 * sizeof(float)
+           + (size_t)2 * D_ * sizeof(float);  // ksc_sh + vsc_sh
+    };
+    dim3 grid_wmma((unsigned)G, (unsigned)splits, (unsigned)B);
+    #define LAUNCH_DW_I8(D_, HPG_, BKV_)                                        \
+      gqa_flash_decode_wmma_kernel_i8<D_, HPG_, BKV_>                           \
+          <<<grid_wmma, 32, smem_bytes(D_, BKV_), stream>>>(                    \
+              hQ, hK, hV, kSc, vSc, hP, H, G, max_seq, scale, iSeq,             \
+              local_window_size, splits)
+    if (hpg == 4) {
+      if (d == 128) LAUNCH_DW_I8(128, 4, 32); else LAUNCH_DW_I8(64, 4, 16);
+    } else { /* hpg == 8, d == 64 */
+      LAUNCH_DW_I8(64, 8, 16);
+    }
+    #undef LAUNCH_DW_I8
+  } else {
+    dim3 grid_main(B * G, splits);
+    #define LAUNCH_SCALAR_I8(HPG_)                                              \
+      do {                                                                      \
+        if (d == 256)                                                           \
+          gqa_flash_decode_kernel_i8<256, HPG_>                                 \
+              <<<grid_main, (HPG_) * WAVE_SIZE, 0, stream>>>(                    \
+                  hQ, hK, hV, kSc, vSc, hP, H, G, max_seq, scale, iSeq,         \
+                  local_window_size, splits);                                   \
+        else if (d == 128)                                                      \
+          gqa_flash_decode_kernel_i8<128, HPG_>                                 \
+              <<<grid_main, (HPG_) * WAVE_SIZE, 0, stream>>>(                    \
+                  hQ, hK, hV, kSc, vSc, hP, H, G, max_seq, scale, iSeq,         \
+                  local_window_size, splits);                                   \
+        else                                                                    \
+          gqa_flash_decode_kernel_i8<64, HPG_>                                  \
+              <<<grid_main, (HPG_) * WAVE_SIZE, 0, stream>>>(                    \
+                  hQ, hK, hV, kSc, vSc, hP, H, G, max_seq, scale, iSeq,         \
+                  local_window_size, splits);                                   \
+      } while (0)
+    switch (hpg) {
+      case 1:  LAUNCH_SCALAR_I8(1);  break;
+      case 2:  LAUNCH_SCALAR_I8(2);  break;
+      case 3:  LAUNCH_SCALAR_I8(3);  break;
+      case 4:  LAUNCH_SCALAR_I8(4);  break;
+      case 5:  LAUNCH_SCALAR_I8(5);  break;
+      case 8:  LAUNCH_SCALAR_I8(8);  break;
+      case 16: LAUNCH_SCALAR_I8(16); break;
+      default: break;
+    }
+    #undef LAUNCH_SCALAR_I8
+  }
+
+  dim3 grid_reduce(B * H);
+  if (d == 256)
+    gqa_flash_decode_reduce_kernel<256><<<grid_reduce, 256, 0, stream>>>(
+        hP, hO, H, hSink, H, use_smooth_softmax, splits);
+  else if (d == 128)
+    gqa_flash_decode_reduce_kernel<128><<<grid_reduce, 128, 0, stream>>>(
+        hP, hO, H, hSink, H, use_smooth_softmax, splits);
+  else
+    gqa_flash_decode_reduce_kernel<64><<<grid_reduce, 64, 0, stream>>>(
+        hP, hO, H, hSink, H, use_smooth_softmax, splits);
+}
+
+static std::unordered_map<uint64_t, FlashDecodeCfg> g_flash_decode_i8_cache;
+static std::mutex g_flash_decode_i8_mutex;
+
+static FlashDecodeCfg tuneFlashDecodeI8(
+    hipStream_t stream,
+    const __half* hQ, const int8_t* hK, const int8_t* hV,
+    const float* kSc, const float* vSc, __half* hO, float* hP,
+    int B, int H, int G, int d, int hpg, int skv, int max_seq, int max_splits,
+    float scale, const int* iSeq, int local_window_size,
+    const __half* hSink, int use_smooth_softmax) {
+  int split_set[7]; int n_splits = 0;
+  flashDecodeCandidateSplits(skv, max_splits, split_set, n_splits);
+  const bool impls[2] = {false, true};
+
+  hipEvent_t ev0, ev1;
+  hipEventCreate(&ev0);
+  hipEventCreate(&ev1);
+  constexpr int WARMUP = 2;
+  constexpr int ITERS  = 10;
+
+  const bool wmma_ok = flash_decode_wmma_supported(d, hpg);
+  FlashDecodeCfg best{wmma_ok && (d == 64), split_set[0]};
+  float best_ms = 1e30f;
+
+  for (int ii = 0; ii < 2; ++ii) {
+    if (impls[ii] && !wmma_ok) continue;
+    for (int si = 0; si < n_splits; ++si) {
+      FlashDecodeCfg cfg{impls[ii], split_set[si]};
+      for (int w = 0; w < WARMUP; ++w)
+        launchFlashDecodeConfigI8(cfg, stream, hQ, hK, hV, kSc, vSc, hO, hP,
+                                  B, H, G, d, hpg, max_seq, scale, iSeq,
+                                  local_window_size, hSink, use_smooth_softmax);
+      hipEventRecord(ev0, stream);
+      for (int it = 0; it < ITERS; ++it)
+        launchFlashDecodeConfigI8(cfg, stream, hQ, hK, hV, kSc, vSc, hO, hP,
+                                  B, H, G, d, hpg, max_seq, scale, iSeq,
+                                  local_window_size, hSink, use_smooth_softmax);
+      hipEventRecord(ev1, stream);
+      hipEventSynchronize(ev1);
+      float ms = 0.0f;
+      hipEventElapsedTime(&ms, ev0, ev1);
+      if (ms < best_ms) { best_ms = ms; best = cfg; }
+    }
+  }
+  hipEventDestroy(ev0);
+  hipEventDestroy(ev1);
+  return best;
+}
+
+// INT8 KV-cache FA-2 split-K decode. Same contract as hip_gqa_flash_decode_v2
+// with two extra per-channel scale tables:
+//   Kcache/Vcache : INT8 [B, G, max_seq, d] (symmetric per-channel quant)
+//   k_scale/v_scale: fp32 [G, d] (one scale per (kv_head, head_dim) channel)
+// Env overrides mirror the fp16 path but on their own keys:
+//   HIPDNN_GQA_DECODE_SCALAR / _WMMA / _SPLITS / _NOAUTOTUNE.
+extern "C" int hip_gqa_flash_decode_i8_v2(
+    void* stream_ptr,
+    const void* Q, const void* Kcache, const void* Vcache,
+    const void* k_scale, const void* v_scale,
+    void* O,
+    void* partials_workspace,
+    int B, int H, int G, int d, int skv, int max_seq, int max_splits,
+    float scale,
+    const void* seqlens_k,
+    int local_window_size,
+    const void* head_sink,
+    int use_smooth_softmax) {
+  if (G <= 0 || H % G != 0) {
+    fprintf(stderr, "hip_gqa_flash_decode_i8_v2: H=%d not divisible by G=%d\n", H, G);
+    return -1;
+  }
+  const int hpg = H / G;
+  if (hpg != 1 && hpg != 2 && hpg != 3 && hpg != 4 && hpg != 5 && hpg != 8 &&
+      hpg != 16) {
+    fprintf(stderr,
+            "hip_gqa_flash_decode_i8_v2: unsupported HPG=%d (H=%d, G=%d)\n",
+            hpg, H, G);
+    return -1;
+  }
+  if (d != 64 && d != 128 && d != 256) {
+    fprintf(stderr, "hip_gqa_flash_decode_i8_v2: unsupported d=%d\n", d);
+    return -1;
+  }
+  if (k_scale == nullptr || v_scale == nullptr) {
+    fprintf(stderr, "hip_gqa_flash_decode_i8_v2: k_scale/v_scale required\n");
+    return -1;
+  }
+
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  const __half*  hQ   = static_cast<const __half*>(Q);
+  const int8_t*  hK   = static_cast<const int8_t*>(Kcache);
+  const int8_t*  hV   = static_cast<const int8_t*>(Vcache);
+  const float*   kSc  = static_cast<const float*>(k_scale);
+  const float*   vSc  = static_cast<const float*>(v_scale);
+  __half*        hO   = static_cast<__half*>(O);
+  float*         hP   = static_cast<float*>(partials_workspace);
+  const int*     iSeq = static_cast<const int*>(seqlens_k);
+  const __half*  hSink= static_cast<const __half*>(head_sink);
+
+  int cap = max_splits;
+  if (cap < 1) cap = 1;
+  if (cap > kFlashDecodeMaxSplits) cap = kFlashDecodeMaxSplits;
+  const int eff_skv = skv > 0 ? skv : max_seq;
+  const int tune_len = (local_window_size > 0 && eff_skv > local_window_size)
+                           ? local_window_size
+                           : eff_skv;
+
+  FlashDecodeCfg cfg{flash_decode_wmma_supported(d, hpg) && (d == 64),
+                     cap < 8 ? cap : 8};
+
+  bool forced = false;
+  if (const char* e = getenv("HIPDNN_GQA_DECODE_SCALAR")) { if (atoi(e) != 0) { cfg.use_wmma = false; forced = true; } }
+  if (const char* e = getenv("HIPDNN_GQA_DECODE_WMMA"))   { if (atoi(e) != 0) { cfg.use_wmma = true;  forced = true; } }
+  if (const char* e = getenv("HIPDNN_GQA_DECODE_SPLITS")) {
+    int v = atoi(e); if (v >= 1) { cfg.splits = v > cap ? cap : v; forced = true; }
+  }
+  bool no_autotune = false;
+  if (const char* e = getenv("HIPDNN_GQA_DECODE_NOAUTOTUNE")) no_autotune = (atoi(e) != 0);
+
+  if (!forced && !no_autotune) {
+    const uint64_t key = flashDecodeKey(B, H, G, d, tune_len);
+    std::lock_guard<std::mutex> lock(g_flash_decode_i8_mutex);
+    auto it = g_flash_decode_i8_cache.find(key);
+    if (it != g_flash_decode_i8_cache.end()) {
+      cfg = it->second;
+    } else {
+      cfg = tuneFlashDecodeI8(stream, hQ, hK, hV, kSc, vSc, hO, hP, B, H, G, d,
+                              hpg, tune_len, max_seq, cap, scale, iSeq,
+                              local_window_size, hSink, use_smooth_softmax);
+      g_flash_decode_i8_cache[key] = cfg;
+    }
+  }
+
+  launchFlashDecodeConfigI8(cfg, stream, hQ, hK, hV, kSc, vSc, hO, hP, B, H, G,
+                            d, hpg, max_seq, scale, iSeq, local_window_size,
+                            hSink, use_smooth_softmax);
   return hipGetLastError();
 }
 

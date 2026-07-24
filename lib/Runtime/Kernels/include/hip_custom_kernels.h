@@ -567,6 +567,30 @@ HIP_KERNEL_API int hip_gqa_kv_cache_concat(
     int batch_size, int past_len, int sq, int G, int d,
     int past_seq, int present_seq, int element_size_bytes);
 
+/* INT8 KV cache (symmetric per-channel, kv_cache_bit_width=8) append/concat/
+ * dequant. `scale` is the static fp32 per-channel table [G,d] (no zero point).
+ *  - append_quant_i8: in-place analogue of hip_gqa_kv_cache_append -- transposes
+ *    new fp16 BSHD [B,sq,G,d] into INT8 BNSD cache [B,G,present_seq,d] applying
+ *    q = clamp(round(x / scale[g*d+di]), -128, 127).
+ *  - concat_quant_i8: separate-buffer analogue -- copies past INT8 then quantizes
+ *    the new fp16 tokens.
+ *  - dequant_kv_i8_to_fp16: rebuilds an fp16 BNSD view [B,G,dst_seq,d] of the
+ *    first `total_seq` cache positions (x = q * scale) so the compute-bound
+ *    prefill can reuse the tuned fp16 kernel. Q stays fp16 throughout. */
+HIP_KERNEL_API int hip_gqa_kv_cache_append_quant_i8(
+    void* stream, const void* src, void* cache, const void* scale,
+    int batch_size, int sq, int G, int d, int present_seq, int past_len,
+    const void* seqlens_k);
+
+HIP_KERNEL_API int hip_gqa_kv_cache_concat_quant_i8(
+    void* stream, const void* past, const void* current, void* present,
+    const void* scale, int batch_size, int past_len, int sq, int G, int d,
+    int past_seq, int present_seq);
+
+HIP_KERNEL_API int hip_gqa_dequant_kv_i8_to_fp16(
+    void* stream, const void* src, void* dst, const void* scale,
+    int batch_size, int total_seq, int G, int d, int src_seq, int dst_seq);
+
 /* Internal GQA RoPE (half-rotated):
  * out[d] = in[d]*cos - in[d+half]*sin
  * out[d+half] = in[d+half]*cos + in[d]*sin
@@ -718,6 +742,12 @@ HIP_KERNEL_API int hip_gqa_flash_prefill_v2(
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale);
 
+/* NB: prefill is compute-bound, so there is deliberately NO separate int8
+ * prefill kernel. The runtime (real/gqa.cpp) dequantizes the int8 KV cache to an
+ * fp16 scratch ONCE (hip_gqa_dequant_kv_i8_to_fp16) and reuses the tuned fp16
+ * hip_gqa_flash_prefill_v2 above -- ~parity with fp16. Only the bandwidth-bound
+ * decode reads int8 directly (hip_gqa_flash_decode_i8_v2). */
+
 /* hip_mha_flash_prefill: fused non-causal FA-2 WMMA prefill for the MS
  * MultiHeadAttention contrib op (self-attention, N_q == N_kv). Replaces the
  * decomposed hipBLASLt pipeline that materializes the fp32 score matrix
@@ -772,6 +802,33 @@ HIP_KERNEL_API int hip_mha_flash_prefill(
 HIP_KERNEL_API int hip_gqa_flash_decode_v2(
     void* stream,
     const void* Q, const void* Kcache, const void* Vcache,
+    void* O,
+    void* partials_workspace,
+    int B, int H, int G, int d, int skv, int max_seq, int max_splits,
+    float scale,
+    const void* seqlens_k,
+    int local_window_size,
+    const void* head_sink,
+    int use_smooth_softmax);
+
+/* INT8 KV-cache variant of hip_gqa_flash_decode_v2 (fp16 Q, symmetric
+ * per-channel INT8 K/V cache). Same FA-2 split-K algorithm, partials layout,
+ * autotune and reduce as the fp16 path, but the cache is stored as 1 byte /
+ * element (half the DRAM read traffic on the bandwidth-bound decode).
+ *
+ * Matches the quantized-KV GroupQueryAttention variant
+ * (k_quant_type / v_quant_type = PER_CHANNEL, kv_cache_bit_width = 8):
+ *   Kcache / Vcache : INT8 [B, G, max_seq, d] (BNSD), symmetric quant.
+ *   k_scale / v_scale: fp32 [G, d] -- one scale per (kv_head, head_dim) channel
+ *                      (no zero point). Dequant: x_fp16 = x_i8 * scale[g*d + c].
+ * All other parameters, workspace sizing (float B*H*max_splits*(d+2)), seqlens_k
+ * / sliding-window / head-sink / smooth-softmax semantics and env overrides
+ * (HIPDNN_GQA_DECODE_SCALAR / _WMMA / _SPLITS / _NOAUTOTUNE) match
+ * hip_gqa_flash_decode_v2. Returns 0 on success. */
+HIP_KERNEL_API int hip_gqa_flash_decode_i8_v2(
+    void* stream,
+    const void* Q, const void* Kcache, const void* Vcache,
+    const void* k_scale, const void* v_scale,
     void* O,
     void* partials_workspace,
     int B, int H, int G, int d, int skv, int max_seq, int max_splits,
