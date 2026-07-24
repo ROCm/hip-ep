@@ -46,11 +46,12 @@ jobs:
       # Remove a PR number once its fix is in the pinned ONNXRUNTIME_VERSION.
       ONNXRUNTIME_PR_PATCHES: ""
       SCCACHE_GHA_ENABLED: "true"
-      OGA_VERSION: "0.14.0"
-      # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
-      # pull/<n>.patch and `git apply` on top of v<OGA_VERSION>. Part of the OGA
-      # cache key. Remove a PR once it lands in the pinned OGA release.
-      OGA_PR_PATCHES: "2194"
+      # OGA is built directly from a pinned fork commit (no v<x> tag + PR-patch
+      # dance). The commit carries the AMDGPU umbrella EP integration (PR 2165)
+      # plus our EP-registration/profile fixes not yet merged upstream. Part of
+      # the OGA cache key -- bump OGA_COMMIT to move to a newer build.
+      OGA_REPO: "zz002/onnxruntime-genai"
+      OGA_COMMIT: "24ad31f0faac1e3e44fde921789bddeedfb3204a"
       # ilammy/msvc-dev-cmd and mozilla-actions/sccache-action have no
       # Node.js 24 releases yet; allow Node.js 20 until they are updated.
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
@@ -366,62 +367,26 @@ jobs:
         with:
           path: ${{ runner.workspace }}/oga-artifacts
           # OGA is built against the patched ort-install, so the key folds in
-          # both OGA's own PR list and ONNXRUNTIME_PR_PATCHES; editing either
-          # forces a rebuild. The mm<N> token bumps when the OGA artifact set
-          # changes shape, or when a PR's branch content changes under the same
-          # number (mm2: PR 2194 now carries the AMDGPU OGA integration).
-          key: oga-dml-mm2-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
+          # both the pinned OGA commit and ONNXRUNTIME_PR_PATCHES; editing either
+          # forces a rebuild. OGA_COMMIT now captures any source change, so the
+          # mm<N> token only bumps when the OGA artifact set changes shape.
+          key: oga-dml-mm2-${{ env.OGA_COMMIT }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
 
-      # OGA is built from upstream microsoft/onnxruntime-genai + PR patches
-      # (OGA_PR_PATCHES). PR 2194 (the dynamic-shape-morphizen branch) now also
-      # carries the AMDGPU umbrella integration, so the patched upstream build
-      # is the AMDGPU-targeted OGA -- no fork checkout needed.
+      # OGA is checked out directly at the pinned fork commit (OGA_REPO/OGA_COMMIT),
+      # which already carries the AMDGPU umbrella EP integration plus our
+      # EP-registration/profile fixes. No v<x> tag + PR-patch step; the commit is
+      # the source of truth. fetch-depth 1 is enough since we build the checked-out
+      # tree as-is (checkout resolves a full 40-char SHA via fetch-by-sha).
       - name: Checkout OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: microsoft/onnxruntime-genai
-          ref: v${{ env.OGA_VERSION }}
+          repository: ${{ env.OGA_REPO }}
+          ref: ${{ env.OGA_COMMIT }}
           path: source-oga
           submodules: true
           fetch-depth: 1
           show-progress: false
-
-      # Fetch and apply microsoft/onnxruntime-genai PR patches listed in
-      # OGA_PR_PATCHES (env), mirroring the ONNX Runtime PR patch step. The
-      # source-oga tree is a fresh checkout so patches apply directly; the OGA
-      # cache key includes the PR list, so editing it forces a rebuild.
-      - name: Apply OGA PR patches
-        if: steps.cache-oga.outputs.cache-hit != 'true'
-        shell: pwsh
-        working-directory: ${{ github.workspace }}\source-oga
-        env:
-          OGA_PRS: ${{ env.OGA_PR_PATCHES }}
-        run: |
-          $prs = $env:OGA_PRS.Trim()
-          if (-not $prs) {
-            Write-Host "OGA_PR_PATCHES is empty; nothing to apply"
-            exit 0
-          }
-          # pull/<n>.patch is a format-patch series; apply with `git am` so that
-          # intra-series file renames (morphizen_ep -> amdgpu) replay against the
-          # correct intermediate tree. `git apply` flattens the series and chokes
-          # on the rename whose pre-image only exists after an earlier commit.
-          git config user.email "ci@rocm.amd.com"
-          git config user.name "ROCm CI"
-          foreach ($pr in $prs -split '\s+') {
-            if (-not $pr) { continue }
-            $url = "https://github.com/microsoft/onnxruntime-genai/pull/$pr.patch"
-            $tmp = Join-Path $env:RUNNER_TEMP "oga-pr-$pr.patch"
-            Write-Host "Fetching $url"
-            Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
-            Write-Host "Applying PR #$pr"
-            git am --3way --whitespace=nowarn $tmp
-            if ($LASTEXITCODE -ne 0) {
-              git am --abort
-              throw "PR #$pr failed to apply (exit $LASTEXITCODE)"
-            }
-          }
 
       - name: Prepare ORT_HOME for OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
