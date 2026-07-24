@@ -14,7 +14,6 @@
 using namespace mlir;
 using namespace mlir::hipsr;
 
-// Explicit operands cross the isolation boundary as entry-block arguments.
 OperandRange
 PoolDomainOp::getEntrySuccessorOperands(RegionSuccessor successor) {
   if (successor.getSuccessor() != &getBody()) {
@@ -25,8 +24,6 @@ PoolDomainOp::getEntrySuccessorOperands(RegionSuccessor successor) {
   return getOperands();
 }
 
-// Report how control and values enter and leave the body. MLIR uses these
-// mappings to check argument and result counts and types.
 void PoolDomainOp::getSuccessorRegions(
     RegionBranchPoint point, SmallVectorImpl<RegionSuccessor> &regions) {
   if (point.isParent()) {
