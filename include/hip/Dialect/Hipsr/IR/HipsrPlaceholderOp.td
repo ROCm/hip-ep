@@ -22,8 +22,13 @@ def Hipsr_PlaceholderOp : Hipsr_Op<"placeholder", [Pure]> {
 
     The DPS verifier requires each init type to equal the matching result type,
     and mirroring the result types makes that hold by construction. The op is
-    variadic, so one placeholder can back a multi-output DPS op (one result per
-    output).
+    variadic, so one placeholder can back one multi-output DPS op (one result
+    per output). At the pool-domain partitioning stage, each result must have
+    exactly one use, every result must initialize the same top-level hipsr DPS
+    op, and every top-level hipsr DPS tensor init must come from such a
+    placeholder. The partitioning pass verifies this transient staging
+    contract and must run before CSE, which may merge same-typed pure
+    placeholders.
 
     `hipsr.placeholder` is transient: it has no bufferization interface, so it
     must be replaced before bufferization runs.

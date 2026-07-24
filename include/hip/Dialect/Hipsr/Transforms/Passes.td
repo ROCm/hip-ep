@@ -41,6 +41,36 @@ def PopulateShapeRegionPass
   ];
 }
 
+def PartitionPoolDomainsPass
+    : Pass<"hipsr-partition-pool-domains", "mlir::func::FuncOp"> {
+  let summary = "Partition a function into maximal hipsr pool domains";
+  let description = [{
+    Greedily partitions the non-terminator operations of a single-block
+    function into maximal `hipsr.pool_domain` operations with standard
+    `IsolatedFromAbove` semantics. An active `StartBarrierInterface` operation
+    begins a domain. An active `EndBarrierInterface` operation remains in its
+    current domain, and the first operation consuming one of its results begins
+    the next domain.
+
+    At this pipeline stage, every top-level hipsr DPS tensor init must be
+    produced by a dedicated top-level `hipsr.placeholder`. Every placeholder
+    result must have exactly one use, all as DPS inits of the same hipsr
+    operation. During the greedy planning scan, each placeholder is validated
+    and queued for its later consumer. On reaching that consumer, the pass
+    verifies all tensor DPS inits, selects the domain from the barrier rules,
+    and inserts the queued placeholders immediately before it. The pass must
+    run before CSE, which may merge same-typed pure placeholders; such merged
+    input is rejected.
+
+    External values enter through operands and entry-block arguments; escaping
+    values become results. Multi-block functions and existing pool domains are
+    rejected before mutation. Declarations and empty functions are unchanged.
+  }];
+  let dependentDialects = [
+    "::mlir::hipsr::HipsrDialect"
+  ];
+}
+
 def HipsrExternalizeConstantsPass
     : Pass<"hipsr-externalize-constants", "mlir::ModuleOp"> {
   let summary = "Externalize hipsr.constant: stamp offset/size/index, write constants file";
