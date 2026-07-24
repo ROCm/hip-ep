@@ -164,6 +164,21 @@ private:
   // (e.g. degenerate / fake OrtMemoryInfo); AllocImpl falls back to the
   // current HIP device in that case rather than failing the allocation.
   int device_id_;
+
+  // Optional MemoryManager reference for KV cache buffer tracking (Phase 4a).
+  // Set after session init via set_memory_manager(). When non-null, large
+  // (>16MB) allocations are registered as KV cache buffers so the EP can
+  // track KV memory usage. Typed as void* to avoid cross-module include of
+  // mm/memory_manager.h.
+  void *memory_manager_ = nullptr;
+
+public:
+  // Connect this allocator to a MemoryManager for KV cache tracking.
+  // `mm` is a MemoryManager* cast to void*. Must be called after the
+  // session's inference_init creates the MM. Safe to call with nullptr
+  // (disables tracking). Not thread-safe with concurrent Alloc/Free calls
+  // (but ORT serializes session init vs Run).
+  void set_memory_manager(void *mm) { memory_manager_ = mm; }
 };
 
 // hipMemcpy / hipMemcpyAsync based OrtDataTransferImpl. A single shared

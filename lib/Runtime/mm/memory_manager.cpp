@@ -405,6 +405,39 @@ void MemoryManager::seqlens_k_cache_set(const void *ptr, int32_t val) {
 }
 
 //===----------------------------------------------------------------------===//
+// KV cache buffer tracking
+//===----------------------------------------------------------------------===//
+
+void MemoryManager::register_kv_buffer(void *ptr, size_t size) {
+  if (!ptr || size == 0)
+    return;
+  for (int i = 0; i < kv_buffer_count_; ++i) {
+    if (kv_entries_[i].ptr == ptr)
+      return;
+  }
+  if (kv_buffer_count_ >= kMaxKvBuffers) {
+    fprintf(stderr,
+            "MemoryManager::register_kv_buffer: capacity exceeded (%d)\n",
+            kMaxKvBuffers);
+    return;
+  }
+  kv_entries_[kv_buffer_count_++] = {ptr, size};
+  kv_bytes_total_ += size;
+}
+
+void MemoryManager::unregister_kv_buffer(void *ptr) {
+  if (!ptr)
+    return;
+  for (int i = 0; i < kv_buffer_count_; ++i) {
+    if (kv_entries_[i].ptr == ptr) {
+      kv_bytes_total_ -= kv_entries_[i].size;
+      kv_entries_[i] = kv_entries_[--kv_buffer_count_];
+      return;
+    }
+  }
+}
+
+//===----------------------------------------------------------------------===//
 // Stats
 //===----------------------------------------------------------------------===//
 
@@ -413,6 +446,7 @@ size_t MemoryManager::gpu_bytes_used() const {
   for (int i = 0; i < num_pool_domains_; ++i)
     total += domains_[i].size;
   total += workspace_size_;
+  total += kv_bytes_total_;
   return total;
 }
 
