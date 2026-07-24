@@ -33,8 +33,7 @@ def Hipsr_EmptyYieldOp : Hipsr_Op<"empty_yield",
 
   let arguments = (ins Variadic<AnyRankedTensor>:$tensors);
 
-  // Operands are optional so the empty implicit terminator prints as just the
-  // mnemonic (matches pool_domain_yield).
+  // Operands optional so the implicit terminator prints as just the mnemonic.
   let assemblyFormat = "($tensors^ `:` type($tensors))? attr-dict";
 
   let builders = [

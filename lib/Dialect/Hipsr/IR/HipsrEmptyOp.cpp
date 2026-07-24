@@ -5,8 +5,7 @@
 
 #include "hip/Dialect/Hipsr/IR/HipsrEmptyOp.h"
 
-// Needs the full EmptyYieldOp type: the implicit-terminator trait's generated
-// methods and verify() below both use it.
+// Needs the full EmptyYieldOp type for the implicit-terminator trait and verify().
 #include "hip/Dialect/Hipsr/IR/HipsrEmptyYieldOp.h"
 
 #include "mlir/Dialect/Tensor/IR/Tensor.h" // tensor::EmptyOp
@@ -40,7 +39,6 @@ LogicalResult EmptyOp::verify() {
 }
 
 SmallVector<SmallVector<Value>> EmptyOp::getShapes() {
-  // Only valid once the region is populated with the tensor.empty producers.
   assert(!getRegion().empty() &&
          "region must be populated before calling getShapes");
   auto yieldOp = cast<EmptyYieldOp>(getRegion().front().getTerminator());

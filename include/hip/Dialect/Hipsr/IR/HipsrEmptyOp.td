@@ -15,9 +15,6 @@ include "hip/Dialect/Hipsr/IR/HipsrOps.td"
 // Hipsr_EmptyOp
 //===----------------------------------------------------------------------===//
 
-// Each hipsr.empty is a fresh init-tensor allocation (like
-// bufferization.alloc_tensor), so it is not memory-effect-free: distinct ops
-// yield distinct buffers even when their shapes match.
 def Hipsr_EmptyOp : Hipsr_Op<"empty",
     [SingleBlockImplicitTerminator<"EmptyYieldOp">]> {
   let summary = "Create init tensor(s) with shape computation in a region";
@@ -49,17 +46,15 @@ def Hipsr_EmptyOp : Hipsr_Op<"empty",
   let results = (outs Variadic<AnyRankedTensor>:$results);
   let regions = (region SizedRegion<1>:$region);
 
-  // Result types after `:`, then the region. Matches the pool_domain layout.
   let assemblyFormat = "`(` `)` attr-dict `:` type($results) $region";
 
   let hasVerifier = 1;
 
   let extraClassDeclaration = [{
-    /// Runtime dim SSA values per result: [[dims for result 0], ...].
-    /// Reads each yielded tensor.empty's dynamic sizes. Region must be populated.
+    /// Runtime dim SSA values per result: [[dims for result 0], ...]. Region
+    /// must be populated.
     ::llvm::SmallVector<::llvm::SmallVector<::mlir::Value>> getShapes();
 
-    /// Compile-time tensor types of all results.
     ::llvm::SmallVector<::mlir::RankedTensorType> getTensorTypes();
   }];
 }
