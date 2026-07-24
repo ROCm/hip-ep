@@ -115,6 +115,7 @@ struct AddLowering : public ConvertOpToLLVMPattern<AddOp> {
                                         ptrType};
     paramTypes.append(14, i64Type);
 
+    // TODO: the runtime function should use !llvm.ptr<1> (GPU) pointers.
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapMiopenOpTensor, paramTypes, i32Type);
     if (failed(funcOp)) {

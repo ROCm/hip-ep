@@ -48,6 +48,7 @@ Value mlir::hipsr::extractContiguousMemRefPtr(
     Value memrefDesc, ConversionPatternRewriter &rewriter, Location loc) {
   Value ptr = MemRefDescriptor(memrefDesc).alignedPtr(rewriter, loc);
   auto ptrTy = cast<LLVM::LLVMPointerType>(ptr.getType());
+  // TODO: we should not need AddrSpaceCastOp in the future.
   if (ptrTy.getAddressSpace() != 0) {
     ptr = LLVM::AddrSpaceCastOp::create(
         rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext(), 0),

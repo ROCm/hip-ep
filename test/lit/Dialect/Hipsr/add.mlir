@@ -34,14 +34,17 @@ func.func @add_memref(%ctx: !hipsr.context,
 
 // POPULATE-LABEL: func.func @add_broadcast
 // POPULATE: hipsr.add(%{{.+}}) ins(%{{.+}}, %{{.+}} : tensor<?x1024xf16>, tensor<1024xf16>)
-// POPULATE-SAME: shape_region {
+// POPULATE-SAME: outs(%{{.+}} : tensor<?x1024xf16>) : tensor<?x1024xf16> shape_region {
 // POPULATE:   ^bb0(%[[LHS:.+]]: tensor<?x1024xf16>, %[[RHS:.+]]: tensor<1024xf16>):
-// POPULATE:   %[[SHL:.+]] = shape.shape_of %[[LHS]]
-// POPULATE:   %[[SHR:.+]] = shape.shape_of %[[RHS]]
-// POPULATE:   %[[BC:.+]] = shape.broadcast %[[SHL]], %[[SHR]]
-// POPULATE:   %[[D0:.+]] = shape.get_extent %[[BC]]
-// POPULATE:   %[[D1:.+]] = shape.get_extent %[[BC]]
-// POPULATE:   hipsr.shape_yield (%[[D0]], %[[D1]]) : [f16]
+// POPULATE:     %[[SHL:.+]] = shape.shape_of %[[LHS]] : tensor<?x1024xf16> -> tensor<2xindex>
+// POPULATE:     %[[SHR:.+]] = shape.shape_of %[[RHS]] : tensor<1024xf16> -> tensor<1xindex>
+// POPULATE:     %[[BC:.+]] = shape.broadcast %[[SHL]], %[[SHR]] : tensor<2xindex>, tensor<1xindex> -> tensor<?xindex>
+// POPULATE:     %[[C0:.+]] = arith.constant 0 : index
+// POPULATE:     %[[D0:.+]] = shape.get_extent %[[BC]], %[[C0]] : tensor<?xindex>, index -> index
+// POPULATE:     %[[C1:.+]] = arith.constant 1 : index
+// POPULATE:     %[[D1:.+]] = shape.get_extent %[[BC]], %[[C1]] : tensor<?xindex>, index -> index
+// POPULATE:     hipsr.shape_yield (%[[D0]], %[[D1]]) : [f16]
+// POPULATE:   }
 func.func @add_broadcast(%ctx: !hipsr.context, %lhs: tensor<?x1024xf16>,
                          %rhs: tensor<1024xf16>,
                          %init: tensor<?x1024xf16>) -> tensor<?x1024xf16> {
