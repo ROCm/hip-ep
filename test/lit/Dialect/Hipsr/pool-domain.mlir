@@ -7,7 +7,8 @@
 
 // RUN: hip-mlir-opt --split-input-file --verify-diagnostics %s | FileCheck %s
 
-// Operands enter through block arguments, and yielded values become results.
+// The operand is forwarded to the block argument, and the two yielded values
+// become two results.
 // CHECK-LABEL: func.func @roundtrip(
 // CHECK-SAME: %[[INPUT:.+]]: tensor<3x4xf32>) -> (tensor<2x?xi64>, tensor<i32>) {
 // CHECK-NEXT: %[[RESULTS:.+]]:2 = hipsr.pool_domain(%[[INPUT]] : tensor<3x4xf32>) {
@@ -33,7 +34,7 @@ func.func @roundtrip(%in: tensor<3x4xf32>) -> (tensor<2x?xi64>, tensor<i32>) {
 }
 
 // -----
-// The op also accepts memrefs and index values after bufferization.
+// A hand-written post-bufferization form accepts memref and index values.
 // CHECK-LABEL: func.func @memref_form(
 // CHECK-SAME: %[[INPUT:.+]]: memref<2x?xi64>) -> (memref<2x?xi64>, index) {
 // CHECK-NEXT: %[[RESULTS:.+]]:2 = hipsr.pool_domain(%[[INPUT]] : memref<2x?xi64>) {
@@ -55,7 +56,7 @@ func.func @memref_form(%in: memref<2x?xi64>) -> (memref<2x?xi64>, index) {
 }
 
 // -----
-// An empty domain prints without an explicit empty yield.
+// The printer omits the empty implicit yield.
 // CHECK-LABEL: func.func @empty_domain() {
 // CHECK-NEXT: hipsr.pool_domain() {
 // CHECK-NEXT: }
@@ -69,7 +70,7 @@ func.func @empty_domain() {
 }
 
 // -----
-// A pool domain must contain one block.
+// The generic form is invalid because the body has no block.
 func.func @empty_body() {
   // expected-error @+1 {{failed to verify constraint: region with 1 blocks}}
   "hipsr.pool_domain"() ({
@@ -78,9 +79,9 @@ func.func @empty_body() {
 }
 
 // -----
-// Each op operand needs a matching entry block argument.
+// The op has one operand, but the body has no entry block argument.
 func.func @missing_entry_argument(%in: tensor<3x4xf32>) -> tensor<3x4xf32> {
-  // expected-error @+2 {{region branch point has 1 operands, but region successor needs 0 inputs}}
+  // expected-error @+2 {{along control flow edge from parent to Region #0: region branch point has 1 operands, but region successor needs 0 inputs}}
   // expected-note @+1 {{region branch point}}
   %0 = hipsr.pool_domain(%in : tensor<3x4xf32>) {
     %local = tensor.empty() : tensor<3x4xf32>
@@ -90,9 +91,9 @@ func.func @missing_entry_argument(%in: tensor<3x4xf32>) -> tensor<3x4xf32> {
 }
 
 // -----
-// Each entry block argument needs a matching op operand.
+// The body has one entry block argument, but the op has no operand.
 func.func @extra_entry_argument() -> tensor<3x4xf32> {
-  // expected-error @+2 {{region branch point has 0 operands, but region successor needs 1 inputs}}
+  // expected-error @+2 {{along control flow edge from parent to Region #0: region branch point has 0 operands, but region successor needs 1 inputs}}
   // expected-note @+1 {{region branch point}}
   %0 = hipsr.pool_domain() {
   ^bb0(%domain_in: tensor<3x4xf32>):
@@ -102,10 +103,10 @@ func.func @extra_entry_argument() -> tensor<3x4xf32> {
 }
 
 // -----
-// Operand types must match entry block argument types.
+// The f32 pool-domain operand does not match the i64 entry block argument.
 func.func @entry_argument_type_mismatch(%in: tensor<3x4xf32>)
     -> tensor<3x4xi64> {
-  // expected-error @+2 {{successor operand type #0 'tensor<3x4xf32>' should match successor input type #0 'tensor<3x4xi64>'}}
+  // expected-error @+2 {{along control flow edge from parent to Region #0: successor operand type #0 'tensor<3x4xf32>' should match successor input type #0 'tensor<3x4xi64>'}}
   // expected-note @+1 {{region branch point}}
   %0 = hipsr.pool_domain(%in : tensor<3x4xf32>) {
   ^bb0(%domain_in: tensor<3x4xi64>):
@@ -115,9 +116,9 @@ func.func @entry_argument_type_mismatch(%in: tensor<3x4xf32>)
 }
 
 // -----
-// Each parent result needs a matching yielded value.
+// The pool domain has one result, but the yield has no value.
 func.func @missing_yield_value() -> tensor<3x4xf32> {
-  // expected-error @+1 {{region branch point has 0 operands, but region successor needs 1 inputs}}
+  // expected-error @+1 {{along control flow edge from Operation hipsr.pool_domain_yield to parent: region branch point has 0 operands, but region successor needs 1 inputs}}
   %0 = hipsr.pool_domain() {
     // expected-note @+1 {{region branch point}}
     hipsr.pool_domain_yield
@@ -126,9 +127,9 @@ func.func @missing_yield_value() -> tensor<3x4xf32> {
 }
 
 // -----
-// Each yielded value needs a matching parent result.
+// The yield has one value, but the pool domain has no result.
 func.func @extra_yield_value() {
-  // expected-error @+1 {{region branch point has 1 operands, but region successor needs 0 inputs}}
+  // expected-error @+1 {{along control flow edge from Operation hipsr.pool_domain_yield to parent: region branch point has 1 operands, but region successor needs 0 inputs}}
   hipsr.pool_domain() {
     %local = tensor.empty() : tensor<3x4xf32>
     // expected-note @+1 {{region branch point}}
@@ -138,9 +139,9 @@ func.func @extra_yield_value() {
 }
 
 // -----
-// Yielded value types must match parent result types.
+// The yielded f32 value does not match the pool domain's i64 result.
 func.func @yield_type_mismatch() -> tensor<3x4xi64> {
-  // expected-error @+1 {{successor operand type #0 'tensor<3x4xf32>' should match successor input type #0 'tensor<3x4xi64>'}}
+  // expected-error @+1 {{along control flow edge from Operation hipsr.pool_domain_yield to parent: successor operand type #0 'tensor<3x4xf32>' should match successor input type #0 'tensor<3x4xi64>'}}
   %0 = hipsr.pool_domain() {
     %local = tensor.empty() : tensor<3x4xf32>
     // expected-note @+1 {{region branch point}}
@@ -150,7 +151,7 @@ func.func @yield_type_mismatch() -> tensor<3x4xi64> {
 }
 
 // -----
-// The isolated body must use its block argument instead of the parent value.
+// The isolated body uses the parent value instead of its block argument.
 func.func @body_uses_parent_value_directly(%in: tensor<3x4xf32>)
     -> tensor<3x4xf32> {
   // expected-note @+1 {{required by region isolation constraints}}
@@ -163,14 +164,14 @@ func.func @body_uses_parent_value_directly(%in: tensor<3x4xf32>)
 }
 
 // -----
-// A pool-domain yield is only valid inside a pool domain.
+// The yield is invalid because it has no parent pool domain.
 func.func @yield_without_parent(%in: tensor<3x4xf32>) {
   // expected-error @+1 {{expects parent op 'hipsr.pool_domain'}}
   hipsr.pool_domain_yield %in : tensor<3x4xf32>
 }
 
 // -----
-// A pool domain cannot contain more than one block.
+// The body has two blocks, but a pool domain allows only one.
 func.func @multi_block_body() {
   // expected-error @+1 {{expects region #0 to have 0 or 1 blocks}}
   hipsr.pool_domain() {
