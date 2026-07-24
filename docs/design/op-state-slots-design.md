@@ -7,7 +7,7 @@ Licensed under the MIT License.
 **Date:** 2026-06-15
 **Document Type:** Design
 **Status:** Draft
-**Related:** [pool-allocs-memory-planning.md](pool-allocs-memory-planning.md), [constant-handling-design.md](constant-handling-design.md), [per-op-profiling.md](per-op-profiling.md), [technical-pipeline-walkthrough.md](../technical-pipeline-walkthrough.md)
+**Related:** [pool-allocs-memory-planning.md](pool-allocs-memory-planning.md), [constant-handling-design.md](constant-handling-design.md), [per-op-profiling.md](per-op-profiling.md)
 
 ---
 
@@ -212,4 +212,3 @@ The set of stateful operators in a fused function, and the attributes each needs
 - [pool-allocs-memory-planning.md](pool-allocs-memory-planning.md) — Pass computes a count + offsets; generated init consumes them.
 - [constant-handling-design.md](constant-handling-design.md) — Compiler-supplied attribute consumed by generated init.
 - [per-op-profiling.md](per-op-profiling.md) — Existing per-session operator state attached to `RuntimeState`.
-- [technical-pipeline-walkthrough.md](../technical-pipeline-walkthrough.md) — End-to-end compile/runtime pipeline and where init runs.
