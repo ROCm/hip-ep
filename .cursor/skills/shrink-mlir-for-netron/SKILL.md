@@ -21,7 +21,7 @@ disable-model-invocation: true
 
 Do not open the multi-GB original. No other files are written next to the input.
 
-**Project skill:** `~/workspace/.cursor/skills/shrink-mlir-for-netron/`
+**Project skill:** `.cursor/skills/shrink-mlir-for-netron/` (repo-relative)
 
 **Slash command:** `/shrink-mlir-for-netron`
 

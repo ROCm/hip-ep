@@ -7,9 +7,9 @@
 
 # Usage:
 
-#   .\dump_ep_onnx.ps1 -ModelPath "D:\path\to\model.onnx"
+#   .\dump_ep_onnx.ps1 -ModelPath "<path>\model.onnx"
 
-#   .\dump_ep_onnx.ps1 -ModelPath "D:\path\to\model.onnx" -DumpFileName "onnx.onnx"
+#   .\dump_ep_onnx.ps1 -ModelPath "<path>\model.onnx" -DumpFileName "onnx.onnx"
 
 # Dump output defaults to the same directory as the input model.
 

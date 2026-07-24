@@ -1,17 +1,17 @@
 ---
-description: Project naming — onnx-hipdnn-ep / GPU EP
+description: Project naming — hip-ep / GPU EP
 alwaysApply: true
 ---
 
 # GPU EP Project Context
 
-The user is working on **onnx-hipdnn-ep**, which they interchangeably call **GPU EP**.
+The user is working on **hip-ep** (ROCm/onnx-hipdnn-ep), which they interchangeably call **GPU EP**.
 
-- **Repo**: `git@github.com:ROCm/onnx-hipdnn-ep.git`
-- **Local folder** (when cloned): `onnx-hipdnn-ep/`
-- **Aliases**: "GPU EP", "onnx-hipdnn-ep", "hipdnn EP" — treat these as the same project
+- **Repo**: `https://github.com/ROCm/hip-ep.git`
+- **Local folder** (when cloned): `hip-ep/`
+- **Aliases**: "GPU EP", "hip-ep", "onnx-hipdnn-ep", "hipdnn EP" — treat these as the same project
 - **Domain**: ROCm ONNX Execution Provider using hipDNN
 
-When the user says "GPU EP", refer to onnx-hipdnn-ep unless context clearly indicates otherwise.
+When the user says "GPU EP", refer to hip-ep unless context clearly indicates otherwise.
 
-See also: **gpu-ep-dev-workflow** rule (build, LIT tests, MSVC launcher, agent temp dir `%USERPROFILE%\workspace\temp`).
+**Build, test, and benchmark:** see `hip-ep/docs/quick_start.md` (official default flow; CI and release packages use the same steps).

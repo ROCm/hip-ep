@@ -21,7 +21,7 @@ USAGE
   python .cursor/skills/identify-missing-ops/scripts/identify_missing_ops.py model.onnx
 
   # Batch over a model tree
-  python .cursor/skills/identify-missing-ops/scripts/identify_missing_ops.py D:\\models --glob "*.onnx"
+  python .cursor/skills/identify-missing-ops/scripts/identify_missing_ops.py "<models-dir>" --glob "*.onnx"
   # Batch output includes a BATCH ROLLUP section (by model + by op) at the top.
 
   # Parse an existing perf_test log

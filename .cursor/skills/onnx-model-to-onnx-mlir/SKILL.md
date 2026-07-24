@@ -14,7 +14,7 @@ description: >-
 
 Writes **`<model_stem>.mlir`** in the **same directory** as the source `.onnx` (hip-compiler input from MorphiZen). Scripts start `hip-onnx-runner`, wait until **`mlir_bytecode_dump.mlir`** size is stable, then **kill the runner** so post-dump hip-compiler / session init is skipped.
 
-**Project location:** `~/workspace/.cursor/skills/onnx-model-to-onnx-mlir/` (workspace root `.cursor/skills`, not `~/.cursor`).
+**Project location:** `.cursor/skills/onnx-model-to-onnx-mlir/` (repo-relative paths below).
 
 **Slash command:** `/onnx-model-to-onnx-mlir` via `.cursor/commands/onnx-model-to-onnx-mlir.md`.
 
@@ -31,15 +31,13 @@ Writes **`<model_stem>.mlir`** in the **same directory** as the source `.onnx` (
 **Git Bash / gpu-bash:**
 
 ```bash
-bash "$HOME/workspace/.cursor/skills/onnx-model-to-onnx-mlir/scripts/onnx-model-to-onnx-mlir.sh" \
-  /c/Users/asparkhi/workspace/models/my_model/model.onnx
+bash ".cursor/skills/onnx-model-to-onnx-mlir/scripts/onnx-model-to-onnx-mlir.sh" <path-to-model.onnx>
 ```
 
 **PowerShell:**
 
 ```powershell
-& "$env:USERPROFILE\workspace\.cursor\skills\onnx-model-to-onnx-mlir\scripts\onnx-model-to-onnx-mlir.ps1" `
-  "$env:USERPROFILE\workspace\models\my_model\model.onnx"
+& ".cursor/skills/onnx-model-to-onnx-mlir/scripts/onnx-model-to-onnx-mlir.ps1" <path-to-model.onnx>
 ```
 
 Optional second argument overrides the output directory (default: ONNX file directory).
@@ -48,12 +46,11 @@ Optional second argument overrides the output directory (default: ONNX file dire
 
 | Item | Default |
 |------|---------|
-| `WORKSPACE` | `~/workspace` |
-| `BUILD_DIR` | `$WORKSPACE/build/hip-ep` |
-| `hip-onnx-runner` | `$BUILD_DIR/bin/RelWithDebInfo/hip-onnx-runner.exe` |
+| `BUILD_DIR` | `$env:BUILD_DIR` or `$env:USERPROFILE\workspace\build\hip-ep` (PowerShell); `$BUILD_DIR` or `$HOME/workspace/build/hip-ep` (Git Bash) |
+| `hip-onnx-runner` | `$BUILD_DIR/bin/RelWithDebInfo/hip-onnx-runner.exe` (or `Release/` per `--config`) |
 | **Output MLIR** | `<dir-of-onnx>/<stem>.mlir` |
 
-gpu-bash: `cmd /c "%USERPROFILE%\workspace\gpu-ep-msvc-bash.cmd"`
+Run from the **hip-ep repo root** (Git Bash launched from an x64 Native Tools prompt; see [docs/quick_start.md](../../docs/quick_start.md)).
 
 ## Notes
 

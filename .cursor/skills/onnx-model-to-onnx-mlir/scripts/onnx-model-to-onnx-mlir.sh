@@ -17,6 +17,11 @@ usage() {
 
 ONNX="$1"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -z "${WORKSPACE:-}" ]]; then
+  REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+  WORKSPACE="$(cd "$REPO_ROOT/.." && pwd)"
+fi
 WORKSPACE="${WORKSPACE:-$HOME/workspace}"
 BUILD_DIR="${BUILD_DIR:-$WORKSPACE/build/hip-ep}"
 CONFIG="${CONFIG:-RelWithDebInfo}"

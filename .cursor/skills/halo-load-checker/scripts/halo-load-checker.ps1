@@ -23,15 +23,25 @@ function Write-Section($title) {
 
 }
 
+function Get-DefaultBuildDir {
+
+    if ($env:BUILD_DIR) { return $env:BUILD_DIR }
+
+    $workspace = if ($env:WORKSPACE) { $env:WORKSPACE } else { Join-Path $env:USERPROFILE "workspace" }
+
+    return Join-Path $workspace "build\hip-ep"
+
+}
+
 function Get-TherockCandidates {
+
+    $buildDir = Get-DefaultBuildDir
 
     @(
 
         $env:THEROCK_DIST,
 
-        "$env:USERPROFILE\workspace\build\hip-ep\_therock",
-
-        "$env:USERPROFILE\workspace\build\onnx-hipdnn-ep\_therock"
+        (Join-Path $buildDir "_therock")
 
     ) | Where-Object { $_ -and (Test-Path (Join-Path $_ "bin")) } | ForEach-Object {
 
