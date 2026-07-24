@@ -4,36 +4,36 @@
  */
 
 #include "hip/Dialect/Hipsr/IR/HipsrPoolDomainOp.h"
-
-// Needs the full PoolDomainYieldOp type: the implicit-terminator trait's
-// generated methods and verify() below both use it.
 #include "hip/Dialect/Hipsr/IR/HipsrPoolDomainYieldOp.h"
 
-#include "llvm/ADT/Sequence.h"
+#include <cassert>
 
 using namespace mlir;
 using namespace mlir::hipsr;
 
-LogicalResult PoolDomainOp::verify() {
-  // The trait already guarantees a single block ending in PoolDomainYieldOp.
-  // Its operands become this op's results, so just check count and types.
-  auto yieldOp = cast<PoolDomainYieldOp>(getBody().front().getTerminator());
+OperandRange
+PoolDomainOp::getEntrySuccessorOperands(RegionSuccessor successor) {
+  assert(successor.getSuccessor() == &getBody() &&
+         "expected the pool domain body");
+  return getOperands();
+}
 
-  if (yieldOp.getNumOperands() != getNumResults())
-    return emitOpError() << "has " << getNumResults()
-                         << " result(s) but its pool_domain_yield yields "
-                         << yieldOp.getNumOperands() << " value(s)";
-
-  for (unsigned idx : llvm::seq<unsigned>(0, getNumResults())) {
-    Type resultType = getResultTypes()[idx];
-    Type yieldType = yieldOp.getOperandTypes()[idx];
-    if (resultType != yieldType)
-      return emitOpError() << "result #" << idx << " type " << resultType
-                           << " does not match the yielded value type "
-                           << yieldType;
+void PoolDomainOp::getSuccessorRegions(
+    RegionBranchPoint point, SmallVectorImpl<RegionSuccessor> &regions) {
+  if (point.isParent()) {
+    regions.emplace_back(&getBody(), getBody().getArguments());
+    return;
   }
 
-  return success();
+  assert(point.getTerminatorPredecessorOrNull()->getParentRegion() ==
+             &getBody() &&
+         "expected the pool domain body");
+  regions.emplace_back(getOperation(), getResults());
+}
+
+void PoolDomainOp::getRegionInvocationBounds(
+    ArrayRef<Attribute>, SmallVectorImpl<InvocationBounds> &invocationBounds) {
+  invocationBounds.emplace_back(1, 1);
 }
 
 #define GET_OP_CLASSES

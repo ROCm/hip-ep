@@ -14,9 +14,6 @@
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
-// Must precede the .inc: generated op classes use the trait template.
-#include "hip/Dialect/Hipsr/IR/HipsrTraits.h"
-
 #define GET_OP_CLASSES
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h.inc"
 
