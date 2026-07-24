@@ -21,7 +21,7 @@ dependencies = [
     # (@MORPHIZEN_HIP_ARCH@ = the GPU arch this wheel was built for). Pinned to
     # the exact TheRock version the EP is built against to avoid runtime/JIT
     # import ABI skew.
-    "rocm[libraries,devel]==7.11.0",
+    "rocm[libraries,devel]==7.13.0",
 ]
 # NOTE: a custom ONNX Runtime build (the plugin-EP-patched onnxruntime-directml)
 # is required at runtime, but it is NOT declared as a dependency: this wheel
