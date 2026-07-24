@@ -17,7 +17,6 @@ using namespace mlir::hipsr;
 OperandRange
 PoolDomainOp::getEntrySuccessorOperands(RegionSuccessor successor) {
   if (successor.getSuccessor() != &getBody()) {
-    emitOpError("expected its body as the entry successor");
     llvm::report_fatal_error(
         "hipsr.pool_domain received an unexpected entry successor");
   }
@@ -33,7 +32,6 @@ void PoolDomainOp::getSuccessorRegions(
 
   Operation *terminator = point.getTerminatorPredecessorOrNull();
   if (!terminator || terminator->getParentRegion() != &getBody()) {
-    emitOpError("expected a branch point in its body");
     llvm::report_fatal_error(
         "hipsr.pool_domain received an unexpected branch point");
   }
