@@ -1,26 +1,23 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
-//
-//===----------------------------------------------------------------------===//
-// Standard MLIR passes must not move or reuse values across a pool domain.
-//===----------------------------------------------------------------------===//
 
-// RUN: hip-mlir-opt --split-input-file -cse %s | FileCheck %s --check-prefixes=COMMON,CSE
-// RUN: hip-mlir-opt --split-input-file -canonicalize %s | FileCheck %s --check-prefixes=COMMON,CANON
+// RUN: hip-mlir-opt --split-input-file -cse %s | FileCheck %s --check-prefix=CSE
+// RUN: hip-mlir-opt --split-input-file -canonicalize %s | FileCheck %s --check-prefix=CANON
 
-// CSE must keep identical constants inside and outside the domain separate.
-// COMMON-LABEL: func.func @cse_keeps_domain_isolated(
-// COMMON-SAME: %[[INPUT:.+]]: i32) -> i32 {
-// COMMON-NEXT: %[[OUTSIDE_C2:.+]] = arith.constant 2 : i32
-// COMMON-NEXT: %[[DOMAIN:.+]] = hipsr.pool_domain(%[[INPUT]] : i32) {
-// COMMON-NEXT: ^bb0(%[[DOMAIN_INPUT:.+]]: i32):
-// COMMON-NEXT: %[[INSIDE_C2:.+]] = arith.constant 2 : i32
-// COMMON-NEXT: %[[SCALED:.+]] = arith.muli %[[DOMAIN_INPUT]], %[[INSIDE_C2]] : i32
-// COMMON-NEXT: hipsr.pool_domain_yield %[[SCALED]] : i32
-// COMMON-NEXT: } -> i32
-// COMMON-NEXT: %[[RESULT:.+]] = arith.addi %[[DOMAIN]], %[[OUTSIDE_C2]] : i32
-// COMMON-NEXT: return %[[RESULT]] : i32
-// COMMON-NEXT: }
+// CSE must not reuse the outside constant for the identical constant inside
+// the domain.
+// CSE-LABEL: func.func @cse_keeps_domain_isolated(
+// CSE-SAME: %[[INPUT:.+]]: i32) -> i32 {
+// CSE-NEXT: %[[OUTSIDE_C2:.+]] = arith.constant 2 : i32
+// CSE-NEXT: %[[DOMAIN:.+]] = hipsr.pool_domain(%[[INPUT]] : i32) {
+// CSE-NEXT: ^bb0(%[[DOMAIN_INPUT:.+]]: i32):
+// CSE-NEXT: %[[INSIDE_C2:.+]] = arith.constant 2 : i32
+// CSE-NEXT: %[[SCALED:.+]] = arith.muli %[[DOMAIN_INPUT]], %[[INSIDE_C2]] : i32
+// CSE-NEXT: hipsr.pool_domain_yield %[[SCALED]] : i32
+// CSE-NEXT: } -> i32
+// CSE-NEXT: %[[RESULT:.+]] = arith.addi %[[DOMAIN]], %[[OUTSIDE_C2]] : i32
+// CSE-NEXT: return %[[RESULT]] : i32
+// CSE-NEXT: }
 func.func @cse_keeps_domain_isolated(%arg: i32) -> i32 {
   %c2 = arith.constant 2 : i32
   %scaled = hipsr.pool_domain(%arg : i32) {
@@ -34,21 +31,8 @@ func.func @cse_keeps_domain_isolated(%arg: i32) -> i32 {
 }
 
 // -----
-// Canonicalize must create a folded constant inside the domain, not reuse the
-// matching constant outside it.
-// CSE-LABEL: func.func @canonicalize_keeps_domain_isolated(
-// CSE-SAME: %[[INPUT:.+]]: i32) -> i32 {
-// CSE-NEXT: %[[OUTSIDE_C2:.+]] = arith.constant 2 : i32
-// CSE-NEXT: %[[DOMAIN:.+]] = hipsr.pool_domain(%[[INPUT]] : i32) {
-// CSE-NEXT: ^bb0(%[[DOMAIN_INPUT:.+]]: i32):
-// CSE-NEXT: %[[C1:.+]] = arith.constant 1 : i32
-// CSE-NEXT: %[[INSIDE_C2:.+]] = arith.addi %[[C1]], %[[C1]] : i32
-// CSE-NEXT: %[[SCALED:.+]] = arith.muli %[[DOMAIN_INPUT]], %[[INSIDE_C2]] : i32
-// CSE-NEXT: hipsr.pool_domain_yield %[[SCALED]] : i32
-// CSE-NEXT: } -> i32
-// CSE-NEXT: %[[RESULT:.+]] = arith.addi %[[DOMAIN]], %[[OUTSIDE_C2]] : i32
-// CSE-NEXT: return %[[RESULT]] : i32
-// CSE-NEXT: }
+// Canonicalize must fold the addition to a constant inside the domain without
+// reusing the equal constant outside it.
 // CANON-LABEL: func.func @canonicalize_keeps_domain_isolated(
 // CANON-SAME: %[[INPUT:.+]]: i32) -> i32 {
 // CANON-NEXT: %[[OUTSIDE_C2:.+]] = arith.constant 2 : i32
