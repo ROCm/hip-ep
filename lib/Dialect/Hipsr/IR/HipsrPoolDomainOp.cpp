@@ -4,6 +4,9 @@
  */
 
 #include "hip/Dialect/Hipsr/IR/HipsrPoolDomainOp.h"
+
+// The implicit-terminator trait's generated methods need the full terminator
+// type, rather than the forward declaration in HipsrPoolDomainOp.h.
 #include "hip/Dialect/Hipsr/IR/HipsrPoolDomainYieldOp.h"
 
 #include <cassert>
@@ -11,6 +14,7 @@
 using namespace mlir;
 using namespace mlir::hipsr;
 
+// Explicit operands cross the isolation boundary as entry-block arguments.
 OperandRange
 PoolDomainOp::getEntrySuccessorOperands(RegionSuccessor successor) {
   assert(successor.getSuccessor() == &getBody() &&
@@ -18,6 +22,8 @@ PoolDomainOp::getEntrySuccessorOperands(RegionSuccessor successor) {
   return getOperands();
 }
 
+// Report how control and values enter and leave the body. MLIR uses these
+// mappings to check argument and result counts and types.
 void PoolDomainOp::getSuccessorRegions(
     RegionBranchPoint point, SmallVectorImpl<RegionSuccessor> &regions) {
   if (point.isParent()) {
@@ -29,11 +35,6 @@ void PoolDomainOp::getSuccessorRegions(
              &getBody() &&
          "expected the pool domain body");
   regions.emplace_back(getOperation(), getResults());
-}
-
-void PoolDomainOp::getRegionInvocationBounds(
-    ArrayRef<Attribute>, SmallVectorImpl<InvocationBounds> &invocationBounds) {
-  invocationBounds.emplace_back(1, 1);
 }
 
 #define GET_OP_CLASSES
