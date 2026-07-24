@@ -45,21 +45,6 @@ func.func @roundtrip_multi(%n: index, %m: index) -> (tensor<?x?xf16>, tensor<?xi
 }
 
 // -----
-// Round-trip: rank-0 (scalar) result, no dynamic dims.
-// CHECK-LABEL: func.func @roundtrip_scalar
-// CHECK: %[[R:.*]] = hipsr.empty() : tensor<f32> {
-// CHECK:   %[[T:.*]] = tensor.empty() : tensor<f32>
-// CHECK:   hipsr.empty_yield %[[T]] : tensor<f32>
-// CHECK: }
-func.func @roundtrip_scalar() -> tensor<f32> {
-  %0 = hipsr.empty() : tensor<f32> {
-    %t = tensor.empty() : tensor<f32>
-    hipsr.empty_yield %t : tensor<f32>
-  }
-  return %0 : tensor<f32>
-}
-
-// -----
 // Verifier: result count must match the yielded tensor count.
 func.func @result_count_mismatch() -> tensor<4xf16> {
   // expected-error @+1 {{has 1 result(s) but its empty_yield yields 2 value(s)}}

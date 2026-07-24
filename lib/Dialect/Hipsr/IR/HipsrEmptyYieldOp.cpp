@@ -5,7 +5,6 @@
 
 #include "hip/Dialect/Hipsr/IR/HipsrEmptyYieldOp.h"
 
-// Needs the full EmptyOp type for the HasParent trait's generated check.
 #include "hip/Dialect/Hipsr/IR/HipsrEmptyOp.h"
 
 using namespace mlir;

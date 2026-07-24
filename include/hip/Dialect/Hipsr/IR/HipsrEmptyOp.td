@@ -19,16 +19,13 @@ def Hipsr_EmptyOp : Hipsr_Op<"empty",
     [SingleBlockImplicitTerminator<"EmptyYieldOp">]> {
   let summary = "Create init tensor(s) with shape computation in a region";
   let description = [{
-    Produces the `outs` init tensor(s) for a DPS op. The attached region
-    computes each result's shape (typically `shape.shape_of` + `shape.get_extent`
-    for a regular op, or `hipsr.readback_scalar` for a data-dependent one),
-    builds a `tensor.empty()` per result, and yields them via `hipsr.empty_yield`.
+    Creates an init tensor for destination-passing style operations.
+    Shape computation is encapsulated in the attached region, which executes
+    to produce the init tensor.
 
-    Unlike pool_domain / DPS compute ops, the region is NOT isolated: it may read
-    parent-scope values (e.g. `shape.shape_of %input`, where %input is a domain
-    operand). It is variadic so one hipsr.empty can back a multi-output DPS op.
-
-    Bufferizes to one `memref.alloc()` per yielded tensor.
+    The region contains operations that compute the tensor shape (dimensions
+    and element type), then creates a tensor.empty() with those dimensions,
+    and yields it via hipsr.empty_yield.
 
     Example:
     ```mlir

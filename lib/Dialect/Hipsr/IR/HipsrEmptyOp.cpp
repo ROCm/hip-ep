@@ -5,7 +5,6 @@
 
 #include "hip/Dialect/Hipsr/IR/HipsrEmptyOp.h"
 
-// Needs the full EmptyYieldOp type for the implicit-terminator trait and verify().
 #include "hip/Dialect/Hipsr/IR/HipsrEmptyYieldOp.h"
 
 #include "mlir/Dialect/Tensor/IR/Tensor.h" // tensor::EmptyOp
@@ -45,8 +44,9 @@ SmallVector<SmallVector<Value>> EmptyOp::getShapes() {
   SmallVector<SmallVector<Value>> dimsPerResult;
   for (Value t : yieldOp.getTensors()) {
     SmallVector<Value> dims;
-    if (auto emptyTensor = t.getDefiningOp<tensor::EmptyOp>())
+    if (auto emptyTensor = t.getDefiningOp<tensor::EmptyOp>()) {
       dims = llvm::to_vector(emptyTensor.getDynamicSizes());
+    }
     dimsPerResult.push_back(std::move(dims));
   }
   return dimsPerResult;
@@ -54,8 +54,9 @@ SmallVector<SmallVector<Value>> EmptyOp::getShapes() {
 
 SmallVector<RankedTensorType> EmptyOp::getTensorTypes() {
   SmallVector<RankedTensorType> types;
-  for (Value result : getResults())
+  for (Value result : getResults()) {
     types.push_back(cast<RankedTensorType>(result.getType()));
+  }
   return types;
 }
 

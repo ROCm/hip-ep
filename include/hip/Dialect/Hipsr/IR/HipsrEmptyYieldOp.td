@@ -20,20 +20,23 @@ def Hipsr_EmptyYieldOp : Hipsr_Op<"empty_yield",
     [Pure, Terminator, HasParent<"EmptyOp">]> {
   let summary = "Yield the init tensor(s) from a hipsr.empty region";
   let description = [{
-    Ends the body of a `hipsr.empty`. Its operands (each a `tensor.empty`
-    result) become the parent op's results, matched by the parent's verifier.
-    Operands are `AnyRankedTensor`: `hipsr.empty` is a tensor-stage op, so it
-    can only yield tensors before bufferization.
+    Terminates a hipsr.empty region and yields the computed init tensors.
+    The yielded tensors become the results of the hipsr.empty operation.
+    Supports variadic operands for multi-result operations.
 
-    Example:
+    Example (single result):
     ```mlir
-    hipsr.empty_yield %t0, %t1 : tensor<?x?xf16>, tensor<?xi64>
+    hipsr.empty_yield %tensor : tensor<?x512xf16>
     ```
+    Example (multi-result):
+    ```mlir
+    hipsr.empty_yield %tensor0, %tensor1 : tensor<?x?xf16>, tensor<?x?xi64>
+    ```
+
   }];
 
   let arguments = (ins Variadic<AnyRankedTensor>:$tensors);
 
-  // Operands optional so the implicit terminator prints as just the mnemonic.
   let assemblyFormat = "($tensors^ `:` type($tensors))? attr-dict";
 
   let builders = [
