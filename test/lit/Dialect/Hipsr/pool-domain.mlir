@@ -64,7 +64,8 @@ func.func @empty_body() {
 
 // -----
 func.func @missing_entry_argument(%in: tensor<3x4xf32>) -> tensor<3x4xf32> {
-  // expected-error @+1 {{has 1 operand(s) but its entry block has 0 argument(s)}}
+  // expected-error @+2 {{region branch point has 1 operands, but region successor needs 0 inputs}}
+  // expected-note @+1 {{region branch point}}
   %0 = hipsr.pool_domain(%in : tensor<3x4xf32>) {
     %local = tensor.empty() : tensor<3x4xf32>
     hipsr.pool_domain_yield %local : tensor<3x4xf32>
@@ -74,7 +75,8 @@ func.func @missing_entry_argument(%in: tensor<3x4xf32>) -> tensor<3x4xf32> {
 
 // -----
 func.func @extra_entry_argument() -> tensor<3x4xf32> {
-  // expected-error @+1 {{has 0 operand(s) but its entry block has 1 argument(s)}}
+  // expected-error @+2 {{region branch point has 0 operands, but region successor needs 1 inputs}}
+  // expected-note @+1 {{region branch point}}
   %0 = hipsr.pool_domain() {
   ^bb0(%domain_in: tensor<3x4xf32>):
     hipsr.pool_domain_yield %domain_in : tensor<3x4xf32>
@@ -85,7 +87,8 @@ func.func @extra_entry_argument() -> tensor<3x4xf32> {
 // -----
 func.func @entry_argument_type_mismatch(%in: tensor<3x4xf32>)
     -> tensor<3x4xi64> {
-  // expected-error @+1 {{operand #0 type 'tensor<3x4xf32>' does not match entry block argument type 'tensor<3x4xi64>'}}
+  // expected-error @+2 {{successor operand type #0 'tensor<3x4xf32>' should match successor input type #0 'tensor<3x4xi64>'}}
+  // expected-note @+1 {{region branch point}}
   %0 = hipsr.pool_domain(%in : tensor<3x4xf32>) {
   ^bb0(%domain_in: tensor<3x4xi64>):
     hipsr.pool_domain_yield %domain_in : tensor<3x4xi64>
@@ -95,8 +98,9 @@ func.func @entry_argument_type_mismatch(%in: tensor<3x4xf32>)
 
 // -----
 func.func @missing_yield_value() -> tensor<3x4xf32> {
-  // expected-error @+1 {{has 1 result(s) but its pool_domain_yield yields 0 value(s)}}
+  // expected-error @+1 {{region branch point has 0 operands, but region successor needs 1 inputs}}
   %0 = hipsr.pool_domain() {
+    // expected-note @+1 {{region branch point}}
     hipsr.pool_domain_yield
   } -> tensor<3x4xf32>
   return %0 : tensor<3x4xf32>
@@ -104,9 +108,10 @@ func.func @missing_yield_value() -> tensor<3x4xf32> {
 
 // -----
 func.func @extra_yield_value() {
-  // expected-error @+1 {{has 0 result(s) but its pool_domain_yield yields 1 value(s)}}
+  // expected-error @+1 {{region branch point has 1 operands, but region successor needs 0 inputs}}
   hipsr.pool_domain() {
     %local = tensor.empty() : tensor<3x4xf32>
+    // expected-note @+1 {{region branch point}}
     hipsr.pool_domain_yield %local : tensor<3x4xf32>
   }
   return
@@ -114,9 +119,10 @@ func.func @extra_yield_value() {
 
 // -----
 func.func @yield_type_mismatch() -> tensor<3x4xi64> {
-  // expected-error @+1 {{result #0 type 'tensor<3x4xi64>' does not match the yielded value type 'tensor<3x4xf32>'}}
+  // expected-error @+1 {{successor operand type #0 'tensor<3x4xf32>' should match successor input type #0 'tensor<3x4xi64>'}}
   %0 = hipsr.pool_domain() {
     %local = tensor.empty() : tensor<3x4xf32>
+    // expected-note @+1 {{region branch point}}
     hipsr.pool_domain_yield %local : tensor<3x4xf32>
   } -> tensor<3x4xi64>
   return %0 : tensor<3x4xi64>

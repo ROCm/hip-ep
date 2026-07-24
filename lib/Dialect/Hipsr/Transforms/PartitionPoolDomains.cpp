@@ -4,45 +4,77 @@
  */
 //===- PartitionPoolDomains.cpp - Outline hipsr pool domains --------------===//
 //
-// Phase one wraps the non-terminator ops of a barrier-free, single-block
-// function in one standard IsolatedFromAbove domain.
+// Greedily partitions the non-terminator ops of a single-block function into
+// standard IsolatedFromAbove domains. An active start barrier begins a domain;
+// the first operation using an active end-barrier result begins the next. Every
+// top-level hipsr DPS tensor init must come from a dedicated hipsr.placeholder;
+// the placeholder follows its sole DPS consumer into the same domain.
+//
+// In the example, example.end_barrier implements EndBarrierInterface, and
+// hipsr.example_start_barrier implements both StartBarrierInterface and
+// DestinationStyleOpInterface with %init as its DPS init operand.
 //
 // Before:
 //   func.func @graph(%arg: tensor<?xf32>) -> tensor<?xf32> {
-//     %0 = "example.compute"(%arg) : (tensor<?xf32>) -> tensor<?xf32>
-//     return %0 : tensor<?xf32>
+//     %init = hipsr.placeholder : tensor<?xf32>
+//     %0 = "example.end_barrier"(%arg)
+//         : (tensor<?xf32>) -> tensor<?xf32>
+//     %1 = "example.compute"(%0) : (tensor<?xf32>) -> tensor<?xf32>
+//     %2 = "hipsr.example_start_barrier"(%1, %init)
+//         : (tensor<?xf32>, tensor<?xf32>) -> tensor<?xf32>
+//     return %2 : tensor<?xf32>
 //   }
 //
 // After:
 //   func.func @graph(%arg: tensor<?xf32>) -> tensor<?xf32> {
 //     %0 = hipsr.pool_domain(%arg : tensor<?xf32>) {
 //     ^bb0(%domain_arg: tensor<?xf32>):
-//       %1 = "example.compute"(%domain_arg)
+//       %3 = "example.end_barrier"(%domain_arg)
 //           : (tensor<?xf32>) -> tensor<?xf32>
-//       hipsr.pool_domain_yield %1 : tensor<?xf32>
+//       hipsr.pool_domain_yield %3 : tensor<?xf32>
 //     } -> tensor<?xf32>
-//     return %0 : tensor<?xf32>
+//     %1 = hipsr.pool_domain(%0 : tensor<?xf32>) {
+//     ^bb0(%domain_arg: tensor<?xf32>):
+//       %3 = "example.compute"(%domain_arg)
+//           : (tensor<?xf32>) -> tensor<?xf32>
+//       hipsr.pool_domain_yield %3 : tensor<?xf32>
+//     } -> tensor<?xf32>
+//     %2 = hipsr.pool_domain(%1 : tensor<?xf32>) {
+//     ^bb0(%domain_arg: tensor<?xf32>):
+//       %init = hipsr.placeholder : tensor<?xf32>
+//       %3 = "hipsr.example_start_barrier"(%domain_arg, %init)
+//           : (tensor<?xf32>, tensor<?xf32>) -> tensor<?xf32>
+//       hipsr.pool_domain_yield %3 : tensor<?xf32>
+//     } -> tensor<?xf32>
+//     return %2 : tensor<?xf32>
 //   }
 //
-// Compute every domain's operands and results before cloning so rewrites cannot
-// change their order.
+// One read-only planning scan validates each placeholder when encountered and
+// records it for its sole later consumer. At that consumer, the scan verifies
+// every tensor DPS init, selects the domain from the barrier rules, then
+// inserts the recorded placeholders immediately before the consumer. Compute
+// each domain's results before mutation. Materialization moves the operations
+// into the new region, then MLIR's region-isolation utility derives the
+// operands and entry-block arguments.
 //
 //===----------------------------------------------------------------------===//
 
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 #include "hip/Dialect/Hipsr/IR/HipsrEndBarrierInterface.h"
+#include "hip/Dialect/Hipsr/IR/HipsrPlaceholderOp.h"
 #include "hip/Dialect/Hipsr/IR/HipsrPoolDomainOp.h"
 #include "hip/Dialect/Hipsr/IR/HipsrPoolDomainYieldOp.h"
 #include "hip/Dialect/Hipsr/IR/HipsrStartBarrierInterface.h"
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Transforms/RegionUtils.h"
 
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 
@@ -55,85 +87,145 @@ namespace hipsr {
 namespace {
 
 struct Domain {
+  Operation *insertionPoint = nullptr;
   SmallVector<Operation *> operations;
-  llvm::SetVector<Value> operands;
   SmallVector<Value> results;
 };
 
-static Operation *findAncestorInBlock(Operation *operation, Block &block) {
-  if (operation->getBlock() == &block) {
-    return operation;
-  }
-  return block.findAncestorOpInBlock(*operation);
+static bool isActiveStartBarrier(Operation &operation) {
+  auto barrier = dyn_cast<StartBarrierInterface>(operation);
+  return barrier && barrier.isStartBarrier();
 }
 
-static bool isOperationInsideDomain(
-    Operation *operation, Block &entryBlock,
-    const llvm::SmallPtrSetImpl<Operation *> &domainOperations) {
-  Operation *ancestor = findAncestorInBlock(operation, entryBlock);
-  return ancestor && domainOperations.contains(ancestor);
+static bool isActiveEndBarrier(Operation &operation) {
+  auto barrier = dyn_cast<EndBarrierInterface>(operation);
+  return barrier && barrier.isEndBarrier();
 }
 
-static bool isValueDefinedInsideDomain(
-    Value value, Block &entryBlock,
-    const llvm::SmallPtrSetImpl<Operation *> &domainOperations) {
-  if (Operation *definingOp = value.getDefiningOp()) {
-    return isOperationInsideDomain(definingOp, entryBlock, domainOperations);
+static bool usesAnyEndBarrierResult(
+    Operation &operation,
+    const llvm::SmallDenseSet<Value, 8> &endBarrierResults) {
+  if (llvm::any_of(operation.getOperands(), [&](Value operand) {
+        return endBarrierResults.contains(operand);
+      })) {
+    return true;
   }
 
-  auto blockArgument = dyn_cast<BlockArgument>(value);
-  if (!blockArgument || blockArgument.getOwner() == &entryBlock) {
-    return false;
-  }
-
-  Operation *parentOp = blockArgument.getOwner()->getParentOp();
-  return parentOp &&
-         isOperationInsideDomain(parentOp, entryBlock, domainOperations);
+  // A region-bearing op can consume a value through an implicit nested capture
+  // even when that value is absent from the parent op's operand list.
+  bool hasNestedUse = false;
+  visitUsedValuesDefinedAbove(operation.getRegions(), [&](OpOperand *operand) {
+    hasNestedUse |= endBarrierResults.contains(operand->get());
+  });
+  return hasNestedUse;
 }
 
-static void computeDomainBoundary(Domain &domain, Block &parentBlock) {
-  llvm::SmallPtrSet<Operation *, 16> domainOperations(domain.operations.begin(),
-                                                      domain.operations.end());
-  auto recordExternalOperand = [&](Value value) {
-    if (!isValueDefinedInsideDomain(value, parentBlock, domainOperations))
-      domain.operands.insert(value);
-  };
+static bool isHipsrDpsOp(Operation &operation) {
+  return operation.getName().getDialectNamespace() ==
+             HipsrDialect::getDialectNamespace() &&
+         isa<DestinationStyleOpInterface>(operation);
+}
 
-  for (Operation *operation : domain.operations) {
-    for (Value operand : operation->getOperands())
-      recordExternalOperand(operand);
+using PendingPlaceholders =
+    llvm::DenseMap<Operation *, SmallVector<Operation *>>;
 
-    // Values captured only by nested regions may not appear among the parent
-    // op's operands, but isolation still requires them at the domain boundary.
-    if (operation->getNumRegions() != 0) {
-      llvm::SetVector<Value> nestedCaptures;
-      getUsedValuesDefinedAbove(operation->getRegions(), nestedCaptures);
-      for (Value capture : nestedCaptures)
-        recordExternalOperand(capture);
+static LogicalResult verifyNoNestedPlaceholders(Operation &operation) {
+  WalkResult result = operation.walk([&](PlaceholderOp placeholder) {
+    placeholder.emitOpError("must be top-level when partitioning pool domains");
+    return WalkResult::interrupt();
+  });
+  return result.wasInterrupted() ? failure() : success();
+}
+
+static FailureOr<Operation *>
+verifyDedicatedPlaceholder(PlaceholderOp placeholder, Block &block) {
+  if (placeholder->getNumResults() == 0) {
+    placeholder.emitOpError("must produce at least one tensor DPS init");
+    return failure();
+  }
+
+  Operation *consumer = nullptr;
+  for (Value result : placeholder->getResults()) {
+    if (!result.hasOneUse()) {
+      placeholder.emitOpError("requires each result to have exactly one use");
+      return failure();
+    }
+
+    OpOperand &use = *result.getUses().begin();
+    auto dpsOp = dyn_cast<DestinationStyleOpInterface>(use.getOwner());
+    if (!dpsOp || !isHipsrDpsOp(*use.getOwner()) || !dpsOp.isDpsInit(&use) ||
+        use.getOwner()->getBlock() != &block ||
+        use.getOwner() == block.getTerminator()) {
+      placeholder.emitOpError(
+          "requires every result to be a DPS init of one top-level hipsr "
+          "operation");
+      return failure();
+    }
+    if (consumer && consumer != use.getOwner()) {
+      placeholder.emitOpError(
+          "requires all results to initialize the same hipsr operation");
+      return failure();
+    }
+    consumer = use.getOwner();
+  }
+
+  return consumer;
+}
+
+static LogicalResult
+verifyDpsInitPlaceholders(Operation &operation, Block &block,
+                          ArrayRef<Operation *> consumerPlaceholders) {
+  if (!isHipsrDpsOp(operation)) {
+    return success();
+  }
+
+  llvm::SmallPtrSet<Operation *, 4> expectedPlaceholders(
+      consumerPlaceholders.begin(), consumerPlaceholders.end());
+  auto dpsOp = cast<DestinationStyleOpInterface>(operation);
+  for (Value init : dpsOp.getDpsInits()) {
+    if (!isa<TensorType>(init.getType())) {
+      continue;
+    }
+    auto placeholder = init.getDefiningOp<PlaceholderOp>();
+    if (!placeholder || placeholder->getBlock() != &block ||
+        !expectedPlaceholders.contains(placeholder.getOperation())) {
+      operation.emitOpError(
+          "requires each tensor DPS init to be produced by a top-level "
+          "hipsr.placeholder");
+      return failure();
     }
   }
 
+  return success();
+}
+
+static void computeDomainResults(Domain &domain, Block &parentBlock) {
+  llvm::SmallPtrSet<Operation *, 16> domainOperations(domain.operations.begin(),
+                                                      domain.operations.end());
+
   for (Operation *operation : domain.operations) {
     for (Value result : operation->getResults()) {
-      bool escapes = llvm::any_of(result.getUses(), [&](OpOperand &use) {
-        return !isOperationInsideDomain(use.getOwner(), parentBlock,
-                                        domainOperations);
+      bool escapes = llvm::any_of(result.getUsers(), [&](Operation *user) {
+        Operation *ancestor = parentBlock.findAncestorOpInBlock(*user);
+        return !ancestor || !domainOperations.contains(ancestor);
       });
-      if (escapes)
+      if (escapes) {
         domain.results.push_back(result);
+      }
     }
   }
 }
 
 static FailureOr<SmallVector<Domain>> partitionIntoDomains(Block &block) {
   SmallVector<Domain> domains;
-  Domain currentDomain;
+  llvm::SmallDenseSet<Value, 8> endBarrierResults;
+  PendingPlaceholders pendingPlaceholders;
 
-  for (Operation &operation : block) {
-    if (operation.hasTrait<OpTrait::IsTerminator>()) {
-      continue;
-    }
-
+  // TODO: When concrete barrier ops land, shape materialization must emit
+  // start-barrier input readbacks at domain entry and end-barrier capacity
+  // shapes before execution plus real shapes afterward. This pass only
+  // establishes the boundaries required by those computations.
+  for (Operation &operation : block.without_terminator()) {
     if (isa<PoolDomainOp>(operation)) {
       operation.emitError(
           "hipsr-partition-pool-domains does not support existing pool "
@@ -141,31 +233,64 @@ static FailureOr<SmallVector<Domain>> partitionIntoDomains(Block &block) {
       return failure();
     }
 
-    // TODO: Replace this phase-one rejection with boundary splitting once
-    // barrier operations have defined domain semantics.
-    if (auto startBarrier = dyn_cast<StartBarrierInterface>(operation);
-        startBarrier && startBarrier.isStartBarrier()) {
-      operation.emitError(
-          "hipsr-partition-pool-domains: active start barriers are not "
-          "supported in phase 1");
-      return failure();
+    // A placeholder is emitted with its sole consumer after that consumer's
+    // barrier boundary has selected the domain.
+    if (auto placeholder = dyn_cast<PlaceholderOp>(operation)) {
+      FailureOr<Operation *> consumer =
+          verifyDedicatedPlaceholder(placeholder, block);
+      if (failed(consumer)) {
+        return failure();
+      }
+      pendingPlaceholders[*consumer].push_back(&operation);
+      continue;
     }
-    if (auto endBarrier = dyn_cast<EndBarrierInterface>(operation);
-        endBarrier && endBarrier.isEndBarrier()) {
-      operation.emitError(
-          "hipsr-partition-pool-domains: active end barriers are not "
-          "supported in phase 1");
+
+    if (failed(verifyNoNestedPlaceholders(operation))) {
       return failure();
     }
 
+    auto placeholdersIt = pendingPlaceholders.find(&operation);
+    ArrayRef<Operation *> placeholders;
+    if (placeholdersIt != pendingPlaceholders.end()) {
+      placeholders = placeholdersIt->second;
+    }
+    if (failed(verifyDpsInitPlaceholders(operation, block, placeholders))) {
+      return failure();
+    }
+
+    if (domains.empty() ||
+        usesAnyEndBarrierResult(operation, endBarrierResults) ||
+        isActiveStartBarrier(operation)) {
+      domains.emplace_back();
+      domains.back().insertionPoint = &operation;
+      endBarrierResults.clear();
+    }
+
+    Domain &currentDomain = domains.back();
+    if (placeholdersIt != pendingPlaceholders.end()) {
+      currentDomain.operations.append(placeholdersIt->second.begin(),
+                                      placeholdersIt->second.end());
+      pendingPlaceholders.erase(placeholdersIt);
+    }
     currentDomain.operations.push_back(&operation);
+
+    if (isActiveEndBarrier(operation)) {
+      for (Value result : operation.getResults()) {
+        endBarrierResults.insert(result);
+      }
+    }
   }
 
-  if (!currentDomain.operations.empty())
-    domains.push_back(std::move(currentDomain));
+  if (!pendingPlaceholders.empty()) {
+    pendingPlaceholders.begin()->second.front()->emitOpError(
+        "has a DPS consumer that was not visited during pool-domain "
+        "partitioning");
+    return failure();
+  }
 
-  for (Domain &domain : domains)
-    computeDomainBoundary(domain, block);
+  for (Domain &domain : domains) {
+    computeDomainResults(domain, block);
+  }
 
   return domains;
 }
@@ -175,60 +300,45 @@ static void materializeDomains(ArrayRef<Domain> domains) {
     return;
   }
 
-  IRRewriter rewriter(domains.front().operations.front()->getContext());
-  // Keep originals alive while every plan is cloned because a later domain
-  // may consume a result replaced by an earlier domain.
-  IRMapping globalMapping;
-  SmallVector<std::pair<Value, Value>> resultReplacements;
+  IRRewriter rewriter(domains.front().insertionPoint->getContext());
 
   for (const Domain &domain : domains) {
-    Operation *firstOperation = domain.operations.front();
-    rewriter.setInsertionPoint(firstOperation);
+    Operation *insertionPoint = domain.insertionPoint;
+    rewriter.setInsertionPoint(insertionPoint);
 
-    SmallVector<Value> resolvedOperands;
-    resolvedOperands.reserve(domain.operands.size());
-    for (Value operand : domain.operands)
-      resolvedOperands.push_back(globalMapping.lookupOrDefault(operand));
+    SmallVector<Type> resultTypes = llvm::map_to_vector(
+        domain.results, [](Value result) { return result.getType(); });
 
-    SmallVector<Type> resultTypes;
-    resultTypes.reserve(domain.results.size());
-    for (Value result : domain.results)
-      resultTypes.push_back(result.getType());
-
-    auto domainOp = rewriter.create<PoolDomainOp>(
-        firstOperation->getLoc(), resultTypes, resolvedOperands);
-    Block *body = rewriter.createBlock(&domainOp.getBody());
-
-    IRMapping localMapping;
-    for (Value operand : domain.operands) {
-      BlockArgument argument =
-          body->addArgument(operand.getType(), operand.getLoc());
-      localMapping.map(operand, argument);
+    auto domainOp = rewriter.create<PoolDomainOp>(insertionPoint->getLoc(),
+                                                  resultTypes, ValueRange{});
+    Region &bodyRegion = domainOp.getBody();
+    Block *body = rewriter.createBlock(&bodyRegion);
+    for (Operation *operation : domain.operations) {
+      rewriter.moveOpBefore(operation, body, body->end());
     }
 
-    rewriter.setInsertionPointToStart(body);
-    for (Operation *operation : domain.operations)
-      rewriter.clone(*operation, localMapping);
+    SmallVector<Value> capturedValues =
+        makeRegionIsolatedFromAbove(rewriter, bodyRegion);
+    rewriter.modifyOpInPlace(
+        domainOp, [&] { domainOp->insertOperands(0, capturedValues); });
 
-    SmallVector<Value> yieldedValues;
-    yieldedValues.reserve(domain.results.size());
-    for (Value result : domain.results)
-      yieldedValues.push_back(localMapping.lookup(result));
-    rewriter.create<PoolDomainYieldOp>(firstOperation->getLoc(), yieldedValues);
-
-    for (auto [original, replacement] :
-         llvm::zip_equal(domain.results, domainOp.getResults())) {
-      globalMapping.map(original, replacement);
-      resultReplacements.emplace_back(original, replacement);
+    Block &entryBlock = bodyRegion.front();
+    // Ensure implicit captures in descendant regions are also remapped to the
+    // entry arguments created by makeRegionIsolatedFromAbove.
+    for (auto [capturedValue, argument] :
+         llvm::zip_equal(capturedValues, entryBlock.getArguments())) {
+      replaceAllUsesInRegionWith(capturedValue, argument, bodyRegion);
     }
+
+    rewriter.setInsertionPointToEnd(&entryBlock);
+    rewriter.create<PoolDomainYieldOp>(insertionPoint->getLoc(),
+                                       domain.results);
+
+    rewriter.replaceUsesWithIf(
+        domain.results, domainOp.getResults(), [&](OpOperand &use) {
+          return !domainOp->isProperAncestor(use.getOwner());
+        });
   }
-
-  for (auto [original, replacement] : resultReplacements)
-    rewriter.replaceAllUsesWith(original, replacement);
-
-  for (const Domain &domain : llvm::reverse(domains))
-    for (Operation *operation : llvm::reverse(domain.operations))
-      rewriter.eraseOp(operation);
 }
 
 struct PartitionPoolDomainsPass
@@ -242,8 +352,7 @@ struct PartitionPoolDomainsPass
 
     if (!funcOp.getBody().hasOneBlock()) {
       funcOp.emitError(
-          "hipsr-partition-pool-domains only supports single-block functions "
-          "in phase 1");
+          "hipsr-partition-pool-domains only supports single-block functions");
       signalPassFailure();
       return;
     }

@@ -6,47 +6,34 @@
 #include "hip/Dialect/Hipsr/IR/HipsrPoolDomainOp.h"
 #include "hip/Dialect/Hipsr/IR/HipsrPoolDomainYieldOp.h"
 
-#include "llvm/ADT/Sequence.h"
+#include <cassert>
 
 using namespace mlir;
 using namespace mlir::hipsr;
 
-LogicalResult PoolDomainOp::verify() {
-  Block &body = getBody().front();
-  if (getNumOperands() != body.getNumArguments()) {
-    return emitOpError() << "has " << getNumOperands()
-                         << " operand(s) but its entry block has "
-                         << body.getNumArguments() << " argument(s)";
+OperandRange
+PoolDomainOp::getEntrySuccessorOperands(RegionSuccessor successor) {
+  assert(successor.getSuccessor() == &getBody() &&
+         "expected the pool domain body");
+  return getOperands();
+}
+
+void PoolDomainOp::getSuccessorRegions(
+    RegionBranchPoint point, SmallVectorImpl<RegionSuccessor> &regions) {
+  if (point.isParent()) {
+    regions.emplace_back(&getBody(), getBody().getArguments());
+    return;
   }
 
-  for (unsigned idx : llvm::seq<unsigned>(0, getNumOperands())) {
-    Type operandType = getOperand(idx).getType();
-    Type argumentType = body.getArgument(idx).getType();
-    if (operandType != argumentType) {
-      return emitOpError() << "operand #" << idx << " type " << operandType
-                           << " does not match entry block argument type "
-                           << argumentType;
-    }
-  }
+  assert(point.getTerminatorPredecessorOrNull()->getParentRegion() ==
+             &getBody() &&
+         "expected the pool domain body");
+  regions.emplace_back(getOperation(), getResults());
+}
 
-  auto yieldOp = cast<PoolDomainYieldOp>(body.getTerminator());
-  if (yieldOp.getNumOperands() != getNumResults()) {
-    return emitOpError() << "has " << getNumResults()
-                         << " result(s) but its pool_domain_yield yields "
-                         << yieldOp.getNumOperands() << " value(s)";
-  }
-
-  for (unsigned idx : llvm::seq<unsigned>(0, getNumResults())) {
-    Type resultType = getResult(idx).getType();
-    Type yieldType = yieldOp.getOperand(idx).getType();
-    if (resultType != yieldType) {
-      return emitOpError() << "result #" << idx << " type " << resultType
-                           << " does not match the yielded value type "
-                           << yieldType;
-    }
-  }
-
-  return success();
+void PoolDomainOp::getRegionInvocationBounds(
+    ArrayRef<Attribute>, SmallVectorImpl<InvocationBounds> &invocationBounds) {
+  invocationBounds.emplace_back(1, 1);
 }
 
 #define GET_OP_CLASSES

@@ -18,7 +18,7 @@ target_link_libraries(HipsrDialectTransforms PUBLIC
   HipsrDialectIR
   HipConstantsIO  # writeConstantsBinToFileSystem / ConstantEntry
   MLIRPass
-  MLIRTransforms
+  MLIRTransformUtils
   MLIRFuncDialect
   MLIRArithDialect
   MLIRShapeDialect

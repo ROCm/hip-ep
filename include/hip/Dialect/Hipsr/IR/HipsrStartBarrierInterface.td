@@ -14,8 +14,9 @@ def StartBarrierInterface : OpInterface<"StartBarrierInterface"> {
   let cppNamespace = "::mlir::hipsr";
 
   let description = [{
-    Marks an op that starts a new pool domain: it is the first op in the new
-    domain because its output shape comes from its input data (e.g. Expand).
+    Marks an op that starts a new pool domain because its output shape comes
+    from its input data (e.g. Expand). A dedicated `hipsr.placeholder` that
+    produces the op's DPS tensor init may precede it in that domain.
 
     This is an interface method rather than a trait because barrier status can
     depend on the operands: an Expand with a constant shape operand is not a

@@ -6,10 +6,11 @@
 #define HIPSR_POOL_DOMAIN_YIELD_OP
 
 include "hip/Dialect/Hipsr/IR/HipsrOps.td"
+include "mlir/Interfaces/ControlFlowInterfaces.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
 def Hipsr_PoolDomainYieldOp : Hipsr_Op<"pool_domain_yield",
-    [Pure, Terminator, HasParent<"PoolDomainOp">]> {
+    [Pure, ReturnLike, Terminator, HasParent<"PoolDomainOp">]> {
   let summary = "Yield values out of a hipsr.pool_domain region";
   let description = [{
     Terminates a `hipsr.pool_domain`. Its operands correspond positionally to

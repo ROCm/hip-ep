@@ -6,9 +6,13 @@
 #define HIPSR_POOL_DOMAIN_OP
 
 include "hip/Dialect/Hipsr/IR/HipsrOps.td"
+include "mlir/Interfaces/ControlFlowInterfaces.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
 def Hipsr_PoolDomainOp : Hipsr_Op<"pool_domain", [
+    DeclareOpInterfaceMethods<RegionBranchOpInterface, [
+      "getEntrySuccessorOperands", "getRegionInvocationBounds"
+    ]>,
     IsolatedFromAbove,
     RecursiveMemoryEffects,
     SingleBlockImplicitTerminator<"PoolDomainYieldOp">
@@ -27,8 +31,6 @@ def Hipsr_PoolDomainOp : Hipsr_Op<"pool_domain", [
     `(` ($operands^ `:` type($operands))? `)` $body
     (`->` type($results)^)? attr-dict
   }];
-
-  let hasVerifier = 1;
 }
 
 #endif // HIPSR_POOL_DOMAIN_OP
