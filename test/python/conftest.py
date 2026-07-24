@@ -36,8 +36,38 @@ os.environ.setdefault("HIPDNN_EP_STRICT", "1")
 NUM_WARMUP = 1
 NUM_RUNS = 3
 
-EP_DLL_NAME = "onnxruntime_morphizen_ep.dll"
-EP_REGISTRATION_NAME = "MorphiZenExecutionProvider"
+# The EP is now reached through the AMD GPU umbrella EP (amdgpu-ep.dll), which
+# loads hip-backend.dll → hipgpu.dll (the renamed MorphiZen EP). The umbrella
+# selects the backend via the "profile" provider option (see EP_PROVIDER_OPTIONS).
+EP_DLL_NAME = "amdgpu-ep.dll"
+EP_REGISTRATION_NAME = "AMDGPUExecutionProvider"
+# OGA registers the umbrella under its short name (genai_config key).
+EP_OGA_NAME = "AMDGPU"
+# Provider option the umbrella forwards to pick the hipgpu backend.
+EP_PROVIDER_OPTIONS = {"profile": "hip"}
+
+# Optional artifact-format override (escape hatch). Production / CI use the
+# default in-process LLVM-IR (bitcode) JIT, so this is UNSET by default and the
+# tests run on bitcode. Set HIPEP_ARTIFACT_FORMAT=NATIVE to compile each model to
+# a per-model DLL (lld-link + LoadLibrary) instead. Normally not needed — build
+# the EP against a Tier-1 `llvm-install` (see docs/whisper_quick_start.md §1) and
+# bitcode works; NATIVE is just a fallback. The value rides through as a raw
+# `ep.hipgpu.*` session-config entry (NOT a provider option: ORT validates those
+# against the umbrella's declared set and rejects an unknown key; the umbrella
+# forwards non-umbrella-prefixed config entries to the backend verbatim). Mirrors
+# CI's `-C ep.hipgpu.artifact_format|NATIVE`.
+ARTIFACT_FORMAT_ENV = "HIPEP_ARTIFACT_FORMAT"
+
+
+def apply_artifact_format(so):
+    """Apply the optional HIPEP_ARTIFACT_FORMAT override to a SessionOptions.
+
+    No-op (bitcode default) when the env var is unset/empty.
+    """
+    fmt = os.environ.get(ARTIFACT_FORMAT_ENV, "").strip()
+    if fmt:
+        so.add_session_config_entry("ep.hipgpu.artifact_format", fmt)
+
 
 _morphizen_registered = False
 
@@ -47,13 +77,16 @@ def _ep_runtime_dirs(repo_root):
 
     Honours an out-of-tree install layout via env vars (set them when you build
     with a custom --install_dir / --build_dir, e.g. the quick-start $ROOT layout):
-      MORPHIZEN_EP_BIN  -- dir holding onnxruntime_morphizen_ep.dll
+      HIPEP_EP_BIN      -- dir holding the AMD GPU umbrella EP chain
+                           (amdgpu-ep.dll + hip-backend.dll + hipgpu.dll)
                            (default <repo>/install/dist/bin)
       THEROCK_DIST      -- TheRock SDK root; its bin/ holds amdhip64*.dll etc.
                            (default <repo>/install/therock)
     Falls back to the legacy in-repo layout so existing setups keep working.
+    The legacy MORPHIZEN_EP_BIN name is still honoured as a fallback so older
+    local setups / scripts keep working during the rename.
     """
-    ep_env = os.environ.get("MORPHIZEN_EP_BIN")
+    ep_env = os.environ.get("HIPEP_EP_BIN") or os.environ.get("MORPHIZEN_EP_BIN")
     ep_bin = pathlib.Path(ep_env) if ep_env else repo_root / "install" / "dist" / "bin"
     therock_env = os.environ.get("THEROCK_DIST")
     therock_bin = (
@@ -467,7 +500,12 @@ def get_amd_dml_providers():
 
 
 def register_morphizen_ep(repo_root):
-    """Register the MorphiZen EP library with ONNX Runtime (once per process)."""
+    """Register the AMDGPU umbrella EP library with ONNX Runtime (once per process).
+
+    Registers ``amdgpu-ep.dll`` under ``AMDGPUExecutionProvider``; the umbrella
+    loads hip-backend.dll → hipgpu.dll underneath. Returns the matching EP
+    devices (callers pass ``EP_PROVIDER_OPTIONS`` to ``add_provider_for_devices``).
+    """
     global _morphizen_registered
 
     dist_bin, therock_bin = _ep_runtime_dirs(repo_root)
@@ -560,14 +598,208 @@ class WhisperModelConfig:
     n_vocab: int = 51866
 
 
+# ── Whisper variant registry + config/token derivation ───────────────────────
+#
+# Per-variant shape params (state, layers, heads, n_mels, vocab) are DERIVED from
+# each model's transformers WhisperConfig (whisper_model_config_from_hf_config) —
+# we do NOT maintain a hardcoded dimension table. The registry pins only the HF
+# model id + revision so the source weights are reproducible. head_dim is 64,
+# n_text_ctx is 448, n_audio_ctx is 1500 for every Whisper variant.
+WHISPER_VARIANTS = {
+    # name            (hf_model_id,                    revision)
+    "large-v3": ("openai/whisper-large-v3", "06f233fe06e710322aca913c1bc4249a0d71fce1"),
+    "large-v3-turbo": ("openai/whisper-large-v3-turbo", "main"),
+    "tiny": ("openai/whisper-tiny", "main"),
+    "base": ("openai/whisper-base", "main"),
+    "small": ("openai/whisper-small", "main"),
+    "medium": ("openai/whisper-medium", "main"),
+}
+
+
+def whisper_model_config_from_hf_config(c) -> "WhisperModelConfig":
+    """Map a transformers WhisperConfig (or any object exposing the same attrs)
+    to our WhisperModelConfig. This is the single source of per-variant shape
+    params — the OGA builder reads the same WhisperConfig, so the ONNX and our
+    test config can never disagree."""
+    return WhisperModelConfig(
+        n_audio_state=c.d_model,
+        n_audio_layer=c.encoder_layers,
+        n_audio_head=c.encoder_attention_heads,
+        n_audio_ctx=c.max_source_positions,
+        n_text_state=c.d_model,
+        n_text_layer=c.decoder_layers,
+        n_text_head=c.decoder_attention_heads,
+        n_text_ctx=c.max_target_positions,
+        n_mels=c.num_mel_bins,
+        n_vocab=c.vocab_size,
+    )
+
+
+# Forced-start specials for transcription (English, no timestamps). The IDs are
+# READ from the tokenizer per variant — large-v3's 51866 layout added a language
+# vs the 51865 multilingual layout, which shifts <|transcribe|>/<|notimestamps|>
+# by one, so these MUST NOT be hardcoded.
+WHISPER_SPECIAL_TOKENS = (
+    "<|startoftranscript|>",
+    "<|en|>",
+    "<|transcribe|>",
+    "<|notimestamps|>",
+)
+
+
+def whisper_start_tokens(tokenizer):
+    """Derive (start_tokens, eot) from a tokenizer exposing
+    convert_tokens_to_ids(str) -> int. Returns (list[int], int)."""
+    start = [tokenizer.convert_tokens_to_ids(t) for t in WHISPER_SPECIAL_TOKENS]
+    eot = tokenizer.convert_tokens_to_ids("<|endoftext|>")
+    return start, eot
+
+
+@dataclass
+class WhisperVariant:
+    """A fully-resolved Whisper variant: pinned source + derived shape config +
+    derived forced-start tokens. head_dim / n_layers / n_heads / self_kv_slots
+    are read off cfg so callers never recompute them."""
+
+    name: str
+    hf_model_id: str
+    revision: str
+    cfg: "WhisperModelConfig"
+    start_tokens: list
+    eot: int
+
+    @property
+    def n_layers(self) -> int:
+        return self.cfg.n_text_layer
+
+    @property
+    def n_heads(self) -> int:
+        return self.cfg.n_text_head
+
+    @property
+    def head_dim(self) -> int:
+        return self.cfg.n_text_state // self.cfg.n_text_head
+
+    @property
+    def self_kv_slots(self) -> int:
+        return self.cfg.n_text_ctx
+
+
+def resolve_whisper_variant(name) -> "WhisperVariant":
+    """Resolve a variant name to a WhisperVariant. Reads the HF WhisperConfig +
+    tokenizer (network/cache) for shapes and forced-start tokens. Raises KeyError
+    for an unknown name."""
+    if name not in WHISPER_VARIANTS:
+        raise KeyError(
+            f"unknown Whisper variant {name!r}; known: {sorted(WHISPER_VARIANTS)}"
+        )
+    hf_id, rev = WHISPER_VARIANTS[name]
+    from transformers import WhisperConfig, WhisperTokenizer
+
+    cfg = whisper_model_config_from_hf_config(
+        WhisperConfig.from_pretrained(hf_id, revision=rev)
+    )
+    start, eot = whisper_start_tokens(
+        WhisperTokenizer.from_pretrained(hf_id, revision=rev)
+    )
+    return WhisperVariant(name, hf_id, rev, cfg, start, eot)
+
+
 # Canonical AMD-hosted raw OGA bundles (encoder/decoder + tokenizer + config).
 # These are the default model source: the setup helpers below download them on
 # first use; a local build (scripts/build_whisper_models.py) is the backup that
 # pre-populates the dir so the download is skipped. The fp32 LOCAL dir is
 # `models/whisper-large-v3-onnx` (no -fp32 suffix) but its HF repo carries the
 # -fp32 suffix — the download targets whatever model_dir the caller passes.
-WHISPER_HF_REPO_FP32 = "amd/whisper-large-v3-onnx-fp32"
-WHISPER_HF_REPO_FP16 = "amd/whisper-large-v3-onnx-fp16"
+#
+# EVERY variant has an fp16 AMD repo (amd/whisper-{name}-onnx-fp16); only large-v3
+# additionally ships an fp32 repo (for the cross-backend fp32-vs-fp32 benchmark).
+# Each repo ships BOTH the raw OGA bundle (encoder/decoder.onnx + .data) AND the
+# pre-surgered/fixed files (decoder_surgery.onnx, encoder_fixed.onnx,
+# decoder_fixed_{prefill,decode}.onnx) — so a downloaded snapshot satisfies
+# _apply_whisper_surgery_and_fix_shapes with no surgery actually running (every
+# step gates on its output existing). These repos are GATED: `hf auth login` is
+# required (same as the gpt-oss-120b AMD repo).
+
+
+def whisper_hf_repo(name: str, precision: str) -> str:
+    """AMD HF repo id for a (variant, precision).
+
+    Convention: ``amd/whisper-{name}-onnx-{fp16|fp32}``. fp16 exists for every
+    variant; fp32 exists only for large-v3 (callers must not request fp32 for
+    other variants — _ensure_whisper_raw routes those to the local-build hint).
+    """
+    suffix = "fp16" if precision == "fp16" else "fp32"
+    return f"amd/whisper-{name}-onnx-{suffix}"
+
+
+# Back-compat aliases for the large-v3-specific wrappers (setup_whisper_*_dir).
+WHISPER_HF_REPO_FP32 = whisper_hf_repo("large-v3", "fp32")
+WHISPER_HF_REPO_FP16 = whisper_hf_repo("large-v3", "fp16")
+
+
+def whisper_model_dir(name: str, precision: str) -> pathlib.Path:
+    """Return the model directory for a (variant, precision) pair.
+
+    Naming convention: models/whisper-{name}-onnx[-fp16]. MUST match
+    build_whisper_models.whisper_output_dirs so both the builder and the test
+    infra resolve to the same on-disk location.
+    """
+    suffix = "-fp16" if precision == "fp16" else ""
+    return REPO_ROOT / "models" / f"whisper-{name}-onnx{suffix}"
+
+
+def _ensure_whisper_raw(name: str, model_dir: pathlib.Path, precision: str) -> None:
+    """Ensure model_dir/{encoder,decoder}.onnx exist.
+
+    Primary source for EVERY variant is its AMD HF repo (fp16:
+    amd/whisper-{name}-onnx-fp16, for all variants; fp32: only large-v3). A local
+    build (scripts/build_whisper_models.py) that pre-populated model_dir is the
+    backup — the existence check below short-circuits the download in that case.
+
+    fp32 of a non-large-v3 variant has no AMD repo, so it falls back to the
+    local-build hint (the test matrix only runs fp32 on large-v3).
+    """
+    if (model_dir / "encoder.onnx").exists() and (model_dir / "decoder.onnx").exists():
+        return
+    # fp16 exists for all variants; fp32 only for large-v3.
+    if precision == "fp16" or name == "large-v3":
+        _ensure_whisper_raw_downloaded(model_dir, whisper_hf_repo(name, precision))
+        return
+    raise FileNotFoundError(
+        f"Whisper {name} {precision} raw model not found at {model_dir}.\n"
+        f"  No AMD HF fp32 repo exists for {name} (only large-v3 ships fp32).\n"
+        f"  Build it locally: python scripts/build_whisper_models.py "
+        f"--variant {name} --precision {precision}"
+    )
+
+
+def setup_whisper_variant(
+    name: str, precision: str = "fp16"
+) -> "tuple[pathlib.Path, WhisperVariant]":
+    """Idempotent prep for ANY Whisper variant.
+
+    Ensures the raw OGA bundle (downloads from the variant's AMD HF repo —
+    amd/whisper-{name}-onnx-fp16 — with a local scripts/build_whisper_models.py
+    build as the backup), then runs surgery + fix_shapes using the variant's
+    n_text_ctx. Surgery is a no-op when the downloaded snapshot already carries
+    the fixed files (every step gates on its output). Returns
+    (model_dir, WhisperVariant).
+    """
+    var = resolve_whisper_variant(name)
+    model_dir = whisper_model_dir(name, precision)
+    _ensure_whisper_raw(name, model_dir, precision)
+    # Defense-in-depth: _ensure_whisper_raw guarantees both files on success today,
+    # but re-check so a future change there can't silently proceed with a half-built dir.
+    for fname in ("encoder.onnx", "decoder.onnx"):
+        if not (model_dir / fname).exists():
+            raise FileNotFoundError(
+                f"Whisper {name} {precision} incomplete at {model_dir} "
+                f"(missing {fname}); build with "
+                f"python scripts/build_whisper_models.py --variant {name}"
+            )
+    _apply_whisper_surgery_and_fix_shapes(model_dir, var.cfg.n_text_ctx)
+    return model_dir, var
 
 
 def _ensure_whisper_raw_downloaded(model_dir: pathlib.Path, hf_repo: str) -> None:
@@ -582,11 +814,15 @@ def _ensure_whisper_raw_downloaded(model_dir: pathlib.Path, hf_repo: str) -> Non
     if (model_dir / "encoder.onnx").exists() and (model_dir / "decoder.onnx").exists():
         return
 
+    # Derive the variant name from the model dir so the build-backup hint names the
+    # right --variant (dir convention: whisper-{name}-onnx[-fp16]).
+    variant_hint = model_dir.name.removeprefix("whisper-").removesuffix("-fp16")
+    variant_hint = variant_hint.removesuffix("-onnx") or "large-v3"
     hint = (
         f"Could not obtain the Whisper raw model for {model_dir}.\n"
         f"  - Primary: it auto-downloads from https://huggingface.co/{hf_repo} "
-        "(run `hf auth login` if the repo needs auth / you are rate-limited).\n"
-        "  - Backup:  build it locally with `python build.py --build-whisper-models`."
+        "(the AMD repos are GATED — run `hf auth login` if you hit auth / rate limits).\n"
+        f"  - Backup:  build it locally with `python scripts/build_whisper_models.py --variant {variant_hint}`."
     )
     try:
         from huggingface_hub import snapshot_download
@@ -624,12 +860,14 @@ def setup_whisper_model_dir(model_dir: pathlib.Path) -> None:
             raise FileNotFoundError(
                 f"Whisper raw model incomplete at {model_dir} (missing {fname}). "
                 f"Download from https://huggingface.co/{WHISPER_HF_REPO_FP32} or "
-                "build it: python build.py --build-whisper-models"
+                "build it: python scripts/build_whisper_models.py --variant large-v3"
             )
     _apply_whisper_surgery_and_fix_shapes(model_dir)
 
 
-def _apply_whisper_surgery_and_fix_shapes(model_dir: pathlib.Path) -> None:
+def _apply_whisper_surgery_and_fix_shapes(
+    model_dir: pathlib.Path, n_text_ctx: int = 448
+) -> None:
     """Surgery + fix_shapes on a locally-built Whisper bundle (fp32 OR fp16).
 
     Consumes ``model_dir/{encoder,decoder}.onnx`` (+ ``.data`` sidecars) and emits
@@ -659,8 +897,8 @@ def _apply_whisper_surgery_and_fix_shapes(model_dir: pathlib.Path) -> None:
             {
                 "batch_size": 1,
                 "sequence_length": 4,
-                "past_sequence_length": 448,
-                "total_sequence_length": 448,
+                "past_sequence_length": n_text_ctx,
+                "total_sequence_length": n_text_ctx,
             },
         )
 
@@ -672,8 +910,8 @@ def _apply_whisper_surgery_and_fix_shapes(model_dir: pathlib.Path) -> None:
             {
                 "batch_size": 1,
                 "sequence_length": 1,
-                "past_sequence_length": 448,
-                "total_sequence_length": 448,
+                "past_sequence_length": n_text_ctx,
+                "total_sequence_length": n_text_ctx,
             },
         )
 
@@ -694,7 +932,7 @@ def setup_whisper_fp16_model_dir(model_dir: pathlib.Path) -> None:
             raise FileNotFoundError(
                 f"Whisper fp16 raw model incomplete at {model_dir} (missing {fname}). "
                 f"Download from https://huggingface.co/{WHISPER_HF_REPO_FP16} or "
-                "build it: python build.py --build-whisper-models"
+                "build it: python scripts/build_whisper_models.py --variant large-v3"
             )
     _apply_whisper_surgery_and_fix_shapes(model_dir)
 
@@ -718,10 +956,12 @@ def make_whisper_inputs(audio_path: pathlib.Path, cfg: WhisperModelConfig) -> di
     import soundfile as sf
     from transformers import WhisperFeatureExtractor
 
-    # The processor config (mel filterbanks, target sample rate, n_mels)
-    # is the same across whisper-large-v3 variants — use the openai original
-    # so we don't depend on the built ONNX bundle shipping a processor.
-    fe = WhisperFeatureExtractor.from_pretrained("openai/whisper-large-v3")
+    # Pick the feature extractor by mel count. All openai 80-mel Whisper models
+    # (tiny/base/small/medium) share one preprocessor config (80 mels, 16 kHz,
+    # same mel filterbank, 30 s window), so whisper-tiny is just a lightweight
+    # representative for the whole 80-mel family; large-v3/turbo use 128 mels.
+    fe_id = "openai/whisper-large-v3" if cfg.n_mels == 128 else "openai/whisper-tiny"
+    fe = WhisperFeatureExtractor.from_pretrained(fe_id)
 
     audio, sr = sf.read(str(audio_path))
     # soundfile returns shape (N,) for mono, (N, C) for multi-channel.
@@ -1051,17 +1291,22 @@ def create_cpu_session(model_path):
 
 
 def create_ep_session(model_path, repo_root, provider_options=None):
-    """Create a MorphiZen-EP InferenceSession.
+    """Create an AMDGPU-umbrella-EP InferenceSession.
 
-    provider_options: optional dict forwarded to the EP. Defaults to {}. The EP
-    compiles every model in output-allocator mode (the 2-arg in-graph
-    hip.alloc_output ABI) -- there is no provider option to select a mode.
+    provider_options: optional dict forwarded to the EP. Defaults to
+    EP_PROVIDER_OPTIONS ({"profile": "hip"}) — the umbrella uses "profile" to
+    select the hipgpu backend. The backend compiles every model in
+    output-allocator mode (the 2-arg in-graph hip.alloc_output ABI) -- there is
+    no provider option to select a mode.
     """
     devices = register_morphizen_ep(repo_root)
     if not devices:
-        pytest.skip("MorphiZen EP not found — run build.py first")
+        pytest.skip("AMDGPU EP not found — run build.py first")
     so = ort.SessionOptions()
-    so.add_provider_for_devices(devices, provider_options or {})
+    apply_artifact_format(
+        so
+    )  # bitcode by default; HIPEP_ARTIFACT_FORMAT=NATIVE opts in
+    so.add_provider_for_devices(devices, provider_options or dict(EP_PROVIDER_OPTIONS))
     return ort.InferenceSession(model_path, sess_options=so)
 
 
@@ -1239,7 +1484,7 @@ def setup_oga_ep(repo_root):
     dist_bin, therock_bin = _ep_runtime_dirs(repo_root)
     ep_dll = dist_bin / EP_DLL_NAME
     if not ep_dll.exists():
-        pytest.skip("MorphiZen EP DLL not found — run build.py first")
+        pytest.skip("AMDGPU EP DLL not found — run build.py first")
 
     for d in [dist_bin, therock_bin]:
         if d.exists() and str(d) not in os.environ.get("PATH", ""):
@@ -1247,7 +1492,9 @@ def setup_oga_ep(repo_root):
 
     global _oga_ep_registered
     if not _oga_ep_registered:
-        og.register_execution_provider_library("MorphiZenEP", str(ep_dll))
+        # OGA genai_config uses the provider key `AMDGPU`, but the plugin registers
+        # devices under the lowercase `amdgpu` name. need fix later
+        og.register_execution_provider_library(EP_OGA_NAME.lower(), str(ep_dll))
         _oga_ep_registered = True
 
     return og, ep_dll
@@ -1261,7 +1508,7 @@ def patch_genai_config_for_morphizen(model_dir, ep_dll):
     shutil.copy2(config_path, backup_path)
     with open(config_path) as f:
         config = json.load(f)
-    morphizen_options = [{"MorphiZenEP": {}}]
+    morphizen_options = [{EP_OGA_NAME: dict(EP_PROVIDER_OPTIONS)}]
     config["model"]["decoder"]["session_options"]["provider_options"] = (
         morphizen_options
     )
@@ -2419,6 +2666,164 @@ class BaseOGATests:
             print(f"{'=' * 60}")
         finally:
             del generator
+            gc.collect()
+
+    def test_oga_ep_context_cache_reusing_rewind_pending_token(self, oga_default_model):
+        """
+        context cache reusing feature test
+        step 1: send Q1, get A1, send Q2, get A2
+        step 2: send full(Q1+A1+Q2), get A2_new
+        step 3: veryfy A2==A2_new
+
+        Fixed-count multi-turn reuse, rewinding away a pending token.
+
+        If the first turn stops because of a token-count limit rather than EOS,
+        the final generated token is present in OGA's sequence but has not been
+        consumed by the model yet. Rewind by one token before appending Q2 so
+        the reused KV cache and the replayed full context describe the same
+        effective sequence.
+        This is oga feature/bug caused by PR1814:
+        the last token in previous chat is not put in kvcache.
+        """
+        spec = self.spec
+        og, model = oga_default_model
+        tokenizer = og.Tokenizer(model)
+
+        turn1_prompt = (
+            " User: My name is Alice. I live in Berlin.\n"
+            "Assistant: I will remember that.\n"
+        )
+        turn2_prompt = " User: Where do I live?\nAssistant:"
+        turn1_tokens = [int(t) for t in tokenizer.encode(turn1_prompt)]
+        turn2_tokens = [int(t) for t in tokenizer.encode(turn2_prompt)]
+        turn1_limit = 200
+        turn2_limit = 200
+        max_length = max(
+            spec.max_seq_len,
+            len(turn1_tokens) + turn1_limit + len(turn2_tokens) + turn2_limit + 16,
+        )
+
+        def make_generator():
+            params = og.GeneratorParams(model)
+            params.set_search_options(
+                max_length=max_length,
+                min_length=0,
+                do_sample=False,  # for exact compare of model output
+                repetition_penalty=1.15,
+            )
+            return og.Generator(model, params)
+
+        def generate_up_to(generator, limit, label, ttft_start=None):
+            generated = []
+            pieces = []
+            stream = tokenizer.create_stream()
+            ttft_ms = None
+            print(f"  {label}=", end="", flush=True)
+            for step in range(limit):
+                generator.generate_next_token()
+                if step == 0 and ttft_start is not None:
+                    ttft_ms = (time.perf_counter() - ttft_start) * 1000
+                if generator.is_done():
+                    print("", flush=True)
+                    print(
+                        f"  {label}_debug stopped_by=eos step={step} "
+                        f"generated={len(generated)} ttft_ms={ttft_ms}",
+                        flush=True,
+                    )
+                    return generated, "".join(pieces), True, ttft_ms
+                token = int(generator.get_next_tokens()[0])
+                generated.append(token)
+                piece = stream.decode(token)
+                pieces.append(piece)
+                print(piece, end="", flush=True)
+            print("", flush=True)
+            print(
+                f"  {label}_debug stopped_by=limit limit={limit} "
+                f"generated={len(generated)} is_done={generator.is_done()} "
+                f"ttft_ms={ttft_ms}",
+                flush=True,
+            )
+            return generated, "".join(pieces), False, ttft_ms
+
+        split_gen = make_generator()
+        full_gen = make_generator()
+        try:
+            print(f"\n{'=' * 60}")
+            print("OGA EP context-cache fixed-count rewind vs full replay")
+            print(f"  Q1={turn1_prompt!r}")
+            print(f"  Q2={turn2_prompt!r}")
+            print(
+                f"  max_length={max_length} turn1_limit={turn1_limit} "
+                f"turn2_limit={turn2_limit} turn1_tokens={len(turn1_tokens)} "
+                f"turn2_tokens={len(turn2_tokens)}"
+            )
+
+            q1_ttft_start = time.perf_counter()
+            split_gen.append_tokens(np.array(turn1_tokens, dtype=np.int32))
+            turn1_generated, turn1_text, turn1_eos, q1_ttft_ms = generate_up_to(
+                split_gen, turn1_limit, "A1", q1_ttft_start
+            )
+
+            if turn1_eos:
+                effective_turn1_generated = turn1_generated
+                print("  split: A1 ended by EOS; no rewind needed", flush=True)
+            else:
+                if not turn1_generated:
+                    pytest.skip("first turn produced no token before limit")
+                effective_turn1_generated = turn1_generated[:-1]
+                rewind_len = len(turn1_tokens) + len(effective_turn1_generated)
+                print(
+                    f"  split: rewinding from len="
+                    f"{len(turn1_tokens) + len(turn1_generated)} to "
+                    f"rewind_len={rewind_len} to drop pending token "
+                    f"{turn1_generated[-1]}",
+                    flush=True,
+                )
+                split_gen.rewind_to(rewind_len)
+
+            effective_context = turn1_tokens + effective_turn1_generated + turn2_tokens
+            if len(effective_context) + turn2_limit >= max_length:
+                pytest.skip("not enough max_length budget for fixed-count turn2")
+
+            q2_ttft_start = time.perf_counter()
+            split_gen.append_tokens(np.array(turn2_tokens, dtype=np.int32))
+            split_generated, split_text, split_eos, q2_ttft_ms = generate_up_to(
+                split_gen, turn2_limit, "A2", q2_ttft_start
+            )
+
+            full_ttft_start = time.perf_counter()
+            full_gen.append_tokens(np.array(effective_context, dtype=np.int32))
+            full_generated, full_text, full_eos, full_ttft_ms = generate_up_to(
+                full_gen, turn2_limit, "A2_new", full_ttft_start
+            )
+
+            print(f"\n{'=' * 60}")
+            print("OGA EP context-cache fixed-count rewind vs full replay summary")
+            print(f"  Q1={turn1_prompt!r}")
+            print(f"  A1={turn1_text!r}")
+            print(f"  A1_tokens={turn1_generated}")
+            print(f"  A1_eos={turn1_eos}")
+            print(f"  effective_A1_tokens={effective_turn1_generated}")
+            print(f"  Q2={turn2_prompt!r}")
+            print(f"  A2={split_text!r}")
+            print(f"  A2_new={full_text!r}")
+            print(f"  A2_tokens={split_generated}")
+            print(f"  A2_new_tokens={full_generated}")
+            print(f"  A2_eos={split_eos} A2_new_eos={full_eos}")
+            print(
+                f"  ttft_ms: Q1={q1_ttft_ms:.1f} "
+                f"Q2={q2_ttft_ms:.1f} full={full_ttft_ms:.1f}"
+            )
+            print(f"  full_Q1A1Q2={tokenizer.decode(effective_context)!r}")
+            print(f"{'=' * 60}")
+
+            assert split_generated == full_generated, (
+                "Continuous OGA append with rewind(len-1) produced different "
+                "tokens than replaying the same effective Q1+A1+Q2 context"
+            )
+        finally:
+            del split_gen
+            del full_gen
             gc.collect()
 
     def test_oga_ep_chunked_prefill(self, dynamic_model_path, repo_root, golden_store):

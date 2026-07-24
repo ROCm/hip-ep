@@ -1,0 +1,59 @@
+# Prerequisites
+*.d
+*~
+\#*
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+/build/
+/build-*/
+/.cache/
+/build.ninja/
+/compile_commands.json
+/config.log
+/*.log
+__pycache__/
+*.pyc
+/.vscode/
+/bazel-*
+/.clwb
+/.idea
+/.cline_storage/
+/.clinerules/*
+!/.clinerules/*.md
+/.claude/settings.local.json
+
+# PR Review Toolkit
+pr*_review.md
+research/ut
+
+# Prevent accidentally committing FetchContent downloads
+# (FetchContent uses build dir, but just in case someone manually downloads here)
+3rd-party/hash-library/

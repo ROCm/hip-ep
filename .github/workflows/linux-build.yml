@@ -26,12 +26,12 @@ env:
   # LLVM/MLIR/LLD are built from source at this upstream release tag; bumping it
   # only invalidates the llvm-install cache.
   LLVM_TAG: llvmorg-22.1.0
-  ONNXRUNTIME_VERSION: "1.25.1"
-  # Space-separated microsoft/onnxruntime PR numbers. Non-empty => build ORT
-  # from source and `git apply` each PR on top of the pinned tag; empty => use
-  # the official prebuilt release. Part of the ort-install cache key. Remove a
-  # PR once its fix lands in the pinned ONNX Runtime release.
-  ONNXRUNTIME_PR_PATCHES: "28608"
+  ONNXRUNTIME_VERSION: "1.27.0"
+  # Space-separated microsoft/onnxruntime PR numbers `git apply`-ed on top of
+  # the pinned tag during the from-source build (an empty list applies nothing;
+  # ORT is still built from source either way). Part of the ort-install cache
+  # key. Remove a PR once its fix lands in the pinned ONNX Runtime release.
+  ONNXRUNTIME_PR_PATCHES: ""
   OGA_VERSION: "0.14.0"
   # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
   # pull/<n>.patch and `git apply` on top of v<OGA_VERSION>. Part of the OGA
@@ -46,12 +46,9 @@ jobs:
     # No draft-PR gate: the cache-priming strategy needs every PR push.
     runs-on: ubuntu-latest
     steps:
-      # ROCm/MorphiZen is private — needs the deploy key.
-      - name: Setup SSH key for MorphiZen submodule
-        uses: webfactory/ssh-agent@e83874834305fe9a4a2997156cb26c5de65a8555 # v0.10.0
-        with:
-          ssh-private-key: ${{ secrets.MORPHIZEN_DEPLOY_KEY }}
-
+      # MorphiZen is vendored in-tree as a git subtree under morphizen,
+      # so no deploy key or submodule initialization is needed.
+      #
       # Checkout at the workspace root. build/, install/, llvm-install/,
       # ort-install/ live under ${{ runner.workspace }}
       # (the repo's parent), which is the WORKSPACE build.py derives.
@@ -63,15 +60,24 @@ jobs:
           fetch-depth: 1
           show-progress: false
 
-      # Initialize submodules on the HOST with ssh-agent loaded so the private
-      # MorphiZen repo is populated; build.py then sees them present
-      # and skips its own submodule update (needs no SSH).
-      - name: Checkout MorphiZen submodule
+      # -----------------------------------------------------------------------
+      # Regression guard for the HIPDNN_EP_DISABLE_VENDOR_BLAS build mode (build
+      # the real runtime without MIOpen/hipBLASLt). A source-only grep -- no
+      # configure, build, or SDK download -- so it costs ~0 CI time and fails
+      # fast if the flag's load-bearing pieces are removed or renamed.
+      # -----------------------------------------------------------------------
+      - name: Check HIPDNN_EP_DISABLE_VENDOR_BLAS wiring is intact
         run: |
           set -euo pipefail
-          git config --global url."git@github.com:ROCm/MorphiZen.git".insteadOf \
-            "../MorphiZen"
-          git submodule update --init --recursive --depth 1
+          fail=0
+          check() { grep -q "$1" "$2" || { echo "ERROR: missing '$1' in $2"; fail=1; }; }
+          check "option(HIPDNN_EP_DISABLE_VENDOR_BLAS" CMakeLists.txt
+          check "HIPDNN_EP_DISABLE_VENDOR_BLAS" lib/Runtime/CMakeLists.txt
+          check "ifndef HIPDNN_EP_DISABLE_VENDOR_BLAS" lib/Compiler/CompilerDriver.cpp
+          check "ifdef HIPDNN_EP_DISABLE_VENDOR_BLAS" lib/Runtime/real/vendor_blas_stub.cpp
+          check "vendor_blas_stub" lib/Runtime/CMakeLists.txt
+          [ "$fail" = 0 ] || { echo "HIPDNN_EP_DISABLE_VENDOR_BLAS wiring is broken"; exit 1; }
+          echo "HIPDNN_EP_DISABLE_VENDOR_BLAS wiring OK"
 
       # ubuntu-latest ships ~14 GB usable SSD; the from-source LLVM build + ORT
       # need much more. Reclaim ~30 GB by pruning preinstalled toolchains.
@@ -86,6 +92,12 @@ jobs:
           large-packages: false
           swap-storage: true
 
+      # Pin the Python the whole job uses (ORT/OGA wheels are built against it).
+      - name: Setup Python 3.14
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.14"
+
       - name: Install build toolchain
         run: |
           set -euo pipefail
@@ -94,7 +106,12 @@ jobs:
             build-essential ninja-build git ca-certificates curl
           # backend-mlir-compiler needs cmake >= 3.29; pip cmake wins over apt's.
           python3 -m pip install --upgrade pip
-          python3 -m pip install cmake ninja lit
+          # numpy/wheel/setuptools/packaging are needed at ORT configure time:
+          # --build_wheel makes onnxruntime_python.cmake run find_package(Python
+          # ... NumPy), which fails the generate step if numpy is absent.
+          # requests: OGA build.py's util.dependency_resolver imports it at
+          # module load (the pinned Python 3.14 has no preinstalled requests).
+          python3 -m pip install cmake ninja lit numpy wheel setuptools packaging requests
           cmake --version
           ninja --version
 
@@ -158,7 +175,7 @@ jobs:
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/ort-install
-          key: linux-ort-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}
+          key: linux-ort-${{ env.ONNXRUNTIME_VERSION }}-ortpr-${{ env.ONNXRUNTIME_PR_PATCHES }}-whl
 
       - name: Checkout ONNX Runtime v${{ env.ONNXRUNTIME_VERSION }}
         if: steps.cache-ort.outputs.cache-hit != 'true'
@@ -190,7 +207,10 @@ jobs:
           for pr in $prs; do
             url="https://github.com/microsoft/onnxruntime/pull/${pr}.patch"
             echo "Fetching $url"
-            curl -fsSL "$url" -o "/tmp/ort-pr-${pr}.patch"
+            # github.com throttles raw .patch fetches with HTTP 429; retry with
+            # backoff (--retry-all-errors covers 429/5xx) to ride out the limit.
+            curl -fsSL --retry 6 --retry-delay 10 --retry-all-errors \
+              "$url" -o "/tmp/ort-pr-${pr}.patch"
             echo "Applying PR #${pr}"
             git apply --whitespace=nowarn "/tmp/ort-pr-${pr}.patch"
           done
@@ -209,6 +229,7 @@ jobs:
             --build_dir "${{ runner.workspace }}/build-onnxruntime" \
             --skip_tests \
             --cmake_generator Ninja \
+            --build_wheel \
             --cmake_extra_defines \
               CMAKE_C_COMPILER_LAUNCHER=sccache \
               CMAKE_CXX_COMPILER_LAUNCHER=sccache
@@ -228,6 +249,17 @@ jobs:
           fi
           mkdir -p "${{ runner.workspace }}/ort-install/bin"
           cp "$PERF" "${{ runner.workspace }}/ort-install/bin/"
+          # Cache the ORT Python wheel inside ort-install so it rides the same
+          # cache key. Output: build-onnxruntime/Release/dist/onnxruntime-<ver>-cp<py>-linux_x86_64.whl
+          ORT_WHEEL=$(find "${{ runner.workspace }}/build-onnxruntime" \
+            -name "onnxruntime-*.whl" -type f | head -1)
+          if [ -z "$ORT_WHEEL" ]; then
+            echo "ERROR: onnxruntime wheel not found in build tree (need --build_wheel)"
+            exit 1
+          fi
+          mkdir -p "${{ runner.workspace }}/ort-install/wheels"
+          cp "$ORT_WHEEL" "${{ runner.workspace }}/ort-install/wheels/"
+          echo "Cached ORT wheel: $(basename "$ORT_WHEEL")"
 
       # TheRock is auto-downloaded fresh by cmake/deps.cmake during the configure
       # (not cached).
@@ -257,7 +289,7 @@ jobs:
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/oga-artifacts
-          key: linux-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
+          key: linux-oga-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-am-whl-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
 
       # Checkout + build are skipped on an OGA cache hit (step-level gate); the
       # install-copy below always runs so the
@@ -274,9 +306,12 @@ jobs:
           show-progress: false
 
       # Fetch and apply microsoft/onnxruntime-genai PR patches listed in
-      # OGA_PR_PATCHES (env), mirroring the ONNX Runtime PR patch step. Fresh
-      # checkout => patches apply directly; the OGA cache key includes the PR
-      # list, so editing it forces a rebuild.
+      # OGA_PR_PATCHES (env). pull/<n>.patch is a multi-commit mbox; `git am`
+      # replays each commit in order, so a PR that adds -> modifies -> renames
+      # the same path within its own series (e.g. #2194: morphizen_ep/* ->
+      # amdgpu/*) applies cleanly. `git apply` pre-checks every hunk against the
+      # base tree at once and self-conflicts on such a series. The OGA cache key
+      # includes the PR list, so editing it forces a rebuild.
       - name: Apply OGA PR patches
         if: steps.cache-oga.outputs.cache-hit != 'true'
         working-directory: onnxruntime-genai
@@ -289,12 +324,23 @@ jobs:
             echo "OGA_PR_PATCHES is empty; nothing to apply"
             exit 0
           fi
+          # pull/<n>.patch is a format-patch series; apply with `git am` so that
+          # intra-series file renames (morphizen_ep -> amdgpu) replay against the
+          # correct intermediate tree. `git apply` flattens the series and chokes
+          # on the rename whose pre-image only exists after an earlier commit.
+          # git am needs a committer identity on a bare runner.
+          git config user.email "ci@onnx-hipdnn-ep.local"
+          git config user.name "onnx-hipdnn-ep CI"
           for pr in $prs; do
             url="https://github.com/microsoft/onnxruntime-genai/pull/${pr}.patch"
             echo "Fetching $url"
-            curl -fsSL "$url" -o "/tmp/oga-pr-${pr}.patch"
+            # github.com throttles raw .patch fetches with HTTP 429; retry with
+            # backoff (--retry-all-errors covers 429/5xx) to ride out the limit.
+            curl -fsSL --retry 6 --retry-delay 10 --retry-all-errors \
+              "$url" -o "/tmp/oga-pr-${pr}.patch"
             echo "Applying PR #${pr}"
-            git apply --whitespace=nowarn "/tmp/oga-pr-${pr}.patch"
+            git am --3way --whitespace=nowarn "/tmp/oga-pr-${pr}.patch" \
+              || { git am --abort; echo "PR #${pr} failed to apply"; exit 1; }
           done
 
       - name: Build OGA
@@ -314,13 +360,13 @@ jobs:
           fi
           cp -a "$ORT_PREFIX"/lib/libonnxruntime.so* "$ORT_HOME/lib/" 2>/dev/null || true
           cp -a "$ORT_PREFIX"/lib/libonnxruntime_providers_shared.so* "$ORT_HOME/lib/" 2>/dev/null || true
-          # --skip_wheel: the OGA python wheel needs an ORT python wheel at
-          # import time, which we don't build; the C++ artifacts are enough.
+          # Build the OGA python wheel too: it pairs with the ORT python wheel
+          # (built above with --build_wheel) so the pair is pip-installable.
           python3 onnxruntime-genai/build.py \
             --config Release \
             --cmake_generator Ninja \
             --ort_home "$ORT_HOME" \
-            --skip_tests --skip_examples --skip_wheel \
+            --skip_tests --skip_examples \
             --parallel \
             --build_dir "${{ runner.workspace }}/build-oga" \
             --cmake_extra_defines \
@@ -329,6 +375,15 @@ jobs:
           mkdir -p "$ART"
           cp "${{ runner.workspace }}/build-oga/Release/benchmark/c/model_benchmark" "$ART/"
           cp -a "${{ runner.workspace }}/build-oga/Release"/libonnxruntime-genai.so* "$ART/"
+          # Cache the OGA python wheel alongside the other OGA artifacts.
+          OGA_WHEEL=$(find "${{ runner.workspace }}/build-oga" \
+            -name "onnxruntime_genai-*.whl" -type f | head -1)
+          if [ -z "$OGA_WHEEL" ]; then
+            echo "ERROR: onnxruntime_genai wheel not found in build tree"
+            exit 1
+          fi
+          cp "$OGA_WHEEL" "$ART/"
+          echo "Cached OGA wheel: $(basename "$OGA_WHEEL")"
 
       - name: Install OGA artifacts into install/
         run: |
@@ -350,7 +405,19 @@ jobs:
           set -euo pipefail
           INSTALL="${{ runner.workspace }}/install"
           ORT="${{ runner.workspace }}/ort-install"
-          THEROCK="${{ runner.workspace }}/build/onnx-hipdnn-ep/_therock"
+          # build.py builds into <workspace>/build/<checkout-dir-name>/ (REPO.parent
+          # / build / REPO.name), so derive _therock from the checkout dir name
+          # instead of hardcoding it -- otherwise a repo rename (onnx-hipdnn-ep ->
+          # hip-ep) silently points this at an empty dir and the closure check below
+          # fails with "libamdhip64.so.7 => not found". This step runs in the default
+          # cwd (github.workspace = the checkout), matching windows-build.yml's
+          # `$(basename "$PWD")` idiom.
+          THEROCK="${{ runner.workspace }}/build/$(basename "$PWD")/_therock"
+          # The renamed AMDGPU OGA integration dlopen's libamdgpu-ep.so; the
+          # project still builds the EP as libhipgpu.so. Ship the expected
+          # filename so the genai auto-loader resolves it (deps + closure below
+          # then cover the copy too).
+          cp -a "$INSTALL/lib/libhipgpu.so" "$INSTALL/lib/libamdgpu-ep.so"
           stage_pass() {
             LD_LIBRARY_PATH="$THEROCK/lib:$ORT/lib:$INSTALL/lib" ldd "$@" 2>/dev/null \
               | awk -v p="$ORT" 'index($3, p) == 1 {print $3}' | sort -u \
@@ -365,7 +432,7 @@ jobs:
                 done
           }
           stage_pass \
-            "$INSTALL"/lib/libhipep.so \
+            "$INSTALL"/lib/libhipgpu.so \
             "$INSTALL"/lib/libhip-compiler.so \
             "$INSTALL"/bin/hip-compiler \
             "$INSTALL"/bin/hip-onnx-runner \
@@ -458,7 +525,7 @@ jobs:
 
           cp "${{ github.workspace }}/etc/morphizen_config.json" staging/etc/
 
-          # Smoke: per-arch kernel SO must sit next to libhipep.so (the EP, named
+          # Smoke: per-arch kernel SO must sit next to libhipgpu.so (the EP, named
           # via morphizen_OUTPUT_NAME); the EP anchors dlopen via dladdr() + RPATH=$ORIGIN.
           KERNEL_SO="staging/lib/libcustom_kernels_gfx1151.so"
           if [ ! -f "$KERNEL_SO" ]; then
@@ -474,6 +541,21 @@ jobs:
                 staging/lib/libzstd.a
           rm -rf staging/lib/pkgconfig
           rm -f staging/bin/morphizen_config.json
+
+          # Python wheels (ORT + OGA) under staging/wheels/. Both are cached
+          # inside ort-install/wheels and oga-artifacts, so cache hits restore
+          # them without rebuilding ORT / OGA.
+          mkdir -p staging/wheels
+          ORT_WHEEL=$(find "${{ runner.workspace }}/ort-install/wheels" \
+            -name "onnxruntime-*.whl" -type f | head -1)
+          OGA_WHEEL=$(find "${{ runner.workspace }}/oga-artifacts" \
+            -name "onnxruntime_genai-*.whl" -type f | head -1)
+          if [ -z "$ORT_WHEEL" ] || [ -z "$OGA_WHEEL" ]; then
+            echo "ERROR: wheel(s) missing"
+            echo "  ORT=$ORT_WHEEL OGA=$OGA_WHEEL"
+            exit 1
+          fi
+          cp "$ORT_WHEEL" "$OGA_WHEEL" staging/wheels/
 
           chmod +x staging/bin/* 2>/dev/null || true
 

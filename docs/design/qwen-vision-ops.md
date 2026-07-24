@@ -7,7 +7,7 @@ Licensed under the MIT License.
 This document captures the design rationale, runtime ABI conventions, and
 gotchas encountered while implementing 18 GPU runtime kernels for the
 Qwen3.5-35B-A3B vision encoder (`vision.onnx`). All 18 kernels live in
-`lib/Runtime/real/*.cpp` (host wrappers) and `3rd-party/custom_kernels/hip/*.hip`
+`lib/Runtime/real/*.cpp` (host wrappers) and `lib/Runtime/Kernels/hip/*.hip`
 (device code), and are dispatched from MLIR via `wrap_*` functions declared in
 `lib/Runtime/hipdnn_ep_runtime.h`.
 
@@ -340,8 +340,8 @@ times per kernel.
    CMake silently re-uses the same target — but it costs build time.
 
 4. **New `.hip` file requires CMakeLists.txt update.** Each new
-   `3rd-party/custom_kernels/hip/foo_kernel.hip` must be added to the
-   `HIP_KERNEL_SOURCES` list in `3rd-party/custom_kernels/CMakeLists.txt`
+   `lib/Runtime/Kernels/hip/foo_kernel.hip` must be added to the
+   `HIP_KERNEL_SOURCES` list in `lib/Runtime/Kernels/CMakeLists.txt`
    or it won't be linked into `custom_kernels.lib`.
 
 5. **PowerShell + commit messages.** Use `git commit -F <file>` with a
@@ -380,16 +380,32 @@ and `output_num` plus `axes_num_elements` (and a `noop_with_empty_axes`
 flag for the short-circuit). The actual axes vector is gone by the
 time we get the call — the lowering has consumed it.
 
-Same story for the binary elementwise ops: `wrap_div` / `wrap_mod` /
-`wrap_equal` / `wrap_less` take only a single `num_elements` and
-require both inputs already broadcast to that shape. No per-input
-shape, no broadcast factors. The MLIR side does the work, and the
-runtime stays simple.
+The binary elementwise ops split into two groups by how broadcast is
+handled:
 
-When adding a new reduction or binary op, **do not** request shape info
-that the lowering didn't volunteer — that's a sign the op needs to be
-expressed differently in the MLIR pipeline rather than worked around in
-C++.
+- `wrap_div` / `wrap_equal` / `wrap_less` / `wrap_and` / `wrap_or` take
+  **full 4D operand shapes** (each operand's N,C,H,W, left-padded with 1
+  by the lowering). When an operand does not already match the output
+  shape, the runtime materialises the ONNX multidirectional broadcast via
+  `hip_expand` into the per-session workspace, then runs the flat kernel
+  on same-shape buffers. This is required for correctness: the flat
+  kernels index each operand linearly, so a partially-broadcast operand
+  (e.g. an attention mask `[1,1,S]` combined with `[1,S,S]`, or
+  `[1,S,1]` vs `[1,1,S]`) would otherwise be read past its end and
+  produce wrong results. `wrap_equal` additionally keeps the kernel's
+  zero-stride fast path for a scalar operand (num==1), avoiding a
+  needless expand.
+- `wrap_mod` still takes only a single `num_elements` and requires both
+  inputs already broadcast to that shape.
+
+When adding a new binary op, prefer the 4D-shape + `hip_expand` pattern
+(see `wrap_div`) so general broadcast is correct; only take the bare
+`num_elements` form when the op is guaranteed same-shape inputs.
+
+When adding a new **reduction**, **do not** request axis info that the
+lowering didn't volunteer (the reduce axes are collapsed into the
+trailing dims for you) — that's a sign the op needs to be expressed
+differently in the MLIR pipeline rather than worked around in C++.
 
 ## 7. ONNX corner cases handled
 
@@ -521,9 +537,9 @@ When adding the next op:
 5. Add the `.cpp` to **both** `compile_to_bitcode(...)` and
    `RUNTIME_BC_MODULES` in `lib/Runtime/CMakeLists.txt`. Add the
    `.hip` to `HIP_KERNEL_SOURCES` in
-   `3rd-party/custom_kernels/CMakeLists.txt`.
+   `lib/Runtime/Kernels/CMakeLists.txt`.
 6. Add the kernel header's prototype to
-   `3rd-party/custom_kernels/include/hip_custom_kernels.h`, **inside
+   `lib/Runtime/Kernels/include/hip_custom_kernels.h`, **inside
    the existing `extern "C"` block**.
 7. After building, `del %TEMP%\morphizen_mlir_*` before testing — the
    build helper does this, manual cmake runs don't.

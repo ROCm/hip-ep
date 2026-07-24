@@ -4,7 +4,7 @@ Licensed under the MIT License.
 -->
 # Quick Start Guide
 
-This guide builds onnx-hipdnn-ep on Windows. The C++ dependencies
+This guide builds hip-ep on Windows. The C++ dependencies
 (LLVM/MLIR/LLD, FlatBuffers, Protobuf, ONNX Runtime) and the TheRock ROCm SDK
 are resolved automatically by CMake (see step 2): they are reused from
 a prefix when one is available, and otherwise built or downloaded from source.
@@ -20,8 +20,8 @@ ONNX Runtime is built explicitly only if you need to modify it or build OGA
 | **MSVC 2022** | C++ compiler (Visual Studio Build Tools or full IDE) |
 | **Python 3** | LLVM/MLIR tools runtime |
 | **sccache** | Compiler cache (significantly speeds up rebuilds) |
-| **`gh` CLI** | Authenticating access to the private MorphiZen submodule (`gh auth login`) |
-| **Git** | Clone + submodules; from-source deps are fetched via git |
+| **`gh` CLI** | Authenticating access to the private ROCm repositories (`gh auth login`) |
+| **Git** | Clone the repo; from-source deps are fetched via git |
 
 **<span style="color:red">IMPORTANT</span> -- MSVC Environment Setup:**
 
@@ -51,8 +51,7 @@ winget install Mozilla.sccache
 winget install GitHub.cli
 winget install Git.Git
 
-# 3. Authenticate gh / set up an SSH key with access to the private
-#    ROCm/MorphiZen submodule (cloned by `git submodule update`).
+# 3. Authenticate gh for access to the private ROCm repositories.
 gh auth login
 ```
 
@@ -97,12 +96,11 @@ use `..` to reference sibling directories:
 
 ```bash
 cd <workspace>
-git clone https://github.com/ROCm/onnx-hipdnn-ep.git
-cd onnx-hipdnn-ep
-git submodule update --init --recursive
+git clone https://github.com/ROCm/hip-ep.git
+cd hip-ep
 ```
 
-All subsequent commands run from the `onnx-hipdnn-ep/` project root unless
+All subsequent commands run from the `hip-ep/` project root unless
 explicitly noted.
 
 ### 1. Build ONNX Runtime (optional)
@@ -152,10 +150,10 @@ ls ../build/onnxruntime/Release/dist/onnxruntime_directml-*.whl
 # onnxruntime_directml-1.25.1-cp314-cp314-win_amd64.whl
 ```
 
-### 2. Build onnx-hipdnn-ep
+### 2. Build hip-ep
 
 `build.py` is the cross-platform build driver (the same one used on Linux
-and in CI): it ensures submodules, sets up the build, resolves every dependency
+and in CI): it sets up the build, resolves every dependency
 via `cmake/deps.cmake` (TheRock SDK + GPU arch auto-detected for real builds),
 and runs the cmake configure/build/install plus the LIT tests. A fresh tree needs
 no manual dependency setup; the cold from-source LLVM build is the long pole
@@ -187,7 +185,7 @@ python build.py --install_dir "$LOCAL_DIR" --cmake_prefix_path "$LOCAL_DIR"
 ```
 
 `--cmake_prefix_path "$LOCAL_DIR"` lets the build reuse an ONNX Runtime you
-installed in step 1; omit it and ORT is auto-downloaded. The hipep EP, HIP
+installed in step 1; omit it and ORT is auto-downloaded. The hipgpu EP, HIP
 tools and LIT tests are built and installed into `../local/`.
 
 ### 3. Build OGA (onnxruntime-genai)
@@ -200,10 +198,10 @@ against the same ORT version.
 **Prerequisites**: a local ORT install for `ORT_HOME` (build it in step 1, or
 stage the release zip). `--build_wheel` is only needed if you also want the ORT
 Python wheel (step 4); it is not required to build OGA's C++ artifacts. Step 2
-is only needed later to *run* `model_benchmark` against hipep EP, not to
+is only needed later to *run* `model_benchmark` against hipgpu EP, not to
 build OGA itself.
 
-Run all commands below from the `onnx-hipdnn-ep/` project root.
+Run all commands below from the `hip-ep/` project root.
 
 #### 3a. Prepare ORT_HOME
 
@@ -222,7 +220,7 @@ cp "$LOCAL_DIR/bin/onnxruntime_providers_shared.dll" "$ORT_HOME/lib/"
 #### 3b. Clone OGA
 
 ```bash
-cd ..  # Go to workspace directory (sibling of onnx-hipdnn-ep)
+cd ..  # Go to workspace directory (sibling of hip-ep)
 git clone -b v0.14.0 https://github.com/microsoft/onnxruntime-genai.git
 cd onnxruntime-genai
 git submodule update --init --recursive
@@ -287,29 +285,29 @@ below. `onnxruntime_perf_test.exe` is staged separately in
 
 If you also want to drive ORT / OGA from Python (e.g. to write your own
 generation script instead of using `model_benchmark.exe`), install the wheels.
-The hipep EP wheel is built by default by `build.py` (pass `--skip_wheel` to
+The hipgpu EP wheel is built by default by `build.py` (pass `--skip_wheel` to
 opt out, or build just it with `cmake --build <build> --target wheel`) at
-`../build/onnx-hipdnn-ep/python/dist/`.
+`../build/hip-ep/python/dist/`.
 
 **Install** -- give ORT / EP / OGA as local `.whl` files (so pip uses your custom
 builds, not the stock PyPI ones), and let `--extra-index-url` resolve ROCm:
 
 ```bash
-cd ../onnx-hipdnn-ep  # Back to the project root
+cd ../hip-ep  # Back to the project root
 pip install \
   ../build/onnxruntime/Release/dist/onnxruntime_directml-*.whl \
-  ../build/onnx-hipdnn-ep/python/dist/onnxruntime_ep_hipep-*.whl \
+  ../build/hip-ep/python/dist/onnxruntime_ep_hip-*.whl \
   ../build/onnxruntime-genai/Release/wheel/onnxruntime_genai_directml-*.whl \
   --extra-index-url https://repo.amd.com/rocm/whl/gfx1151/
 ```
 > **Note**: the ORT whl may be under `../build/onnxruntime/Release/Release/dist/`.
 > Replace `gfx1151` with your GPU arch. Install the EP wheel AFTER onnxruntime:
-> it ships its own native files (EP plugin `hipep.dll`, hip-compiler, custom
+> it ships its own native files (EP plugin `hipgpu.dll`, hip-compiler, custom
 > kernels) straight into `onnxruntime/capi/` next to `onnxruntime.dll`. The ROCm
 > runtime DLLs (amdhip64/MIOpen/hipBLASLt) come from the `rocm[devel]` wheel
 > (expanded next). The wheel does NOT bundle the AMD GPU umbrella
-> (`amdgpu-ep.dll` + `hipep-backend.dll`); driving OGA through the umbrella needs
-> those supplied separately (CI injects them via `HIPEP_WHEEL_EXTRA_DLLS`).
+> (`amdgpu-ep.dll` + `hip-backend.dll`); driving OGA through the umbrella needs
+> those supplied separately (CI injects them via `HIP_WHEEL_EXTRA_DLLS`).
 
 **Expand ROCm devel** -- the EP's JIT linker needs the ROCm import libs, which
 `rocm[devel]` ships compressed. Expand them once:
@@ -347,21 +345,21 @@ python onnxruntime-genai/benchmark/python/benchmark_e2e.py \
 `benchmark_e2e.py` runs with the default `-e follow_config`, so the model's
 `genai_config.json` selects the EP via `provider_options`. With the upstream OGA
 (v0.14.0 + PR2194, DeviceType AMDGPU) this is the AMD GPU umbrella
-(`provider_options [{ "AMDGPU": {"profile": "llm"} }]`), which loads
+(`provider_options [{ "AMDGPU": {"profile": "hip"} }]`), which loads
 `amdgpu-ep.dll` and needs the umbrella DLLs colocated (see
-`.github/workflows/windows-build.yml`); the default wheel ships only the hipep
-chain. For plain ORT (direct hipep, no OGA), register the colocated plugin via
-`ort.register_execution_provider_library("hipep", "$CAPI/hipep.dll")`.
+`.github/workflows/windows-build.yml`); the default wheel ships only the hipgpu
+chain. For plain ORT (direct hipgpu, no OGA), register the colocated plugin via
+`ort.register_execution_provider_library("hipgpu", "$CAPI/hipgpu.dll")`.
 
 ## Testing & Benchmarking
 
 ### Model Inference with hip-onnx-runner
 
-`hip-onnx-runner` runs a single ONNX model through hipep EP and reports
+`hip-onnx-runner` runs a single ONNX model through hipgpu EP and reports
 timing. It is built automatically when `BUILD_HIP_TOOLS=ON`.
 
 ```bash
-# first cd to your onnx-hipdnn-ep directory
+# first cd to your hip-ep directory
 # Default (bitcode) needs the ROCm runtime DLLs on PATH; TheRock's bin is under
 # the build dir (or your own -DTHEROCK_DIST path). NATIVE artifacts additionally
 # use THEROCK_DIST + LIB for the lld-link step.
@@ -377,7 +375,7 @@ export PATH="$(cd ../build/$(basename $PWD)/_therock/bin && pwd):$LOCAL_DIR/bin:
 > ```
 
 ```bash
-# Run with hipep EP (default), on your model directly (dynamic shape)
+# Run with hipgpu EP (default), on your model directly (dynamic shape)
 $LOCAL_DIR/bin/hip-onnx-runner.exe -m /path/to/model.onnx -i gen_inputs
 
 # Resolve symbolic input dims at runtime (the EP still compiles the dynamic graph)
@@ -407,7 +405,7 @@ $LOCAL_DIR/bin/hip-onnx-runner.exe -L ep_o_dump,cpu_o_dump
 ### Latency Benchmarking with onnxruntime_perf_test
 
 Use `onnxruntime_perf_test` to benchmark inference latency. The examples below
-compare hipep EP (AMD GPU via HIP) against DML EP.
+compare hipgpu EP (AMD GPU via HIP) against DML EP.
 
 **Setup:**
 
@@ -424,12 +422,12 @@ export PATH="$(cd ../build/$(basename $PWD)/_therock/bin && pwd):$PATH"
 cd $LOCAL_DIR/bin
 ```
 
-**hipep EP:**
+**hipgpu EP:**
 
 ```bash
 ./onnxruntime_perf_test.exe \
-  --plugin_ep_libs "hipep|hipep.dll" \
-  --plugin_eps "hipep" \
+  --plugin_ep_libs "hipgpu|hipgpu.dll" \
+  --plugin_eps "hipgpu" \
   -t 60 -c 1 -s -I \
   /path/to/model.onnx
 ```
@@ -465,7 +463,7 @@ The EP is selected by the model's `genai_config.json` `provider_options` and
 auto-discovered next to `onnxruntime-genai.dll` -- do NOT pass `--ep_library`
 (upstream `model_benchmark` rejects it). With the upstream OGA (v0.14.0 +
 PR2194) the EP is the AMD GPU umbrella (`provider_options [{ "AMDGPU":
-{"profile": "llm"} }]`), so `amdgpu-ep.dll` must sit next to the OGA DLLs (see
+{"profile": "hip"} }]`), so `amdgpu-ep.dll` must sit next to the OGA DLLs (see
 `.github/workflows/windows-build.yml`).
 
 ```bash

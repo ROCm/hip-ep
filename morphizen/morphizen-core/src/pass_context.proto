@@ -1,0 +1,129 @@
+// Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+/*
+ *     MorphiZen in this distribution is provided under the
+ * following free and permissive binary-only license, but are not provided in
+ * source code form.  While the following free and permissive license is similar
+ * to the BSD open source license, it is NOT the BSD open source license nor
+ * other OSI-approved open source license.
+ *
+ *      Copyright (C) 2022 Xilinx, Inc.
+ *      Copyright (C) 2023 – 2024 Advanced Micro Devices, Inc. All rights reserved.
+ *
+ *      Redistribution and use in binary form only, without modification, is
+ * permitted provided that the following conditions are met:
+ *
+ *      1. Redistributions must reproduce the above copyright notice, this list
+ * of conditions and the following disclaimer in the documentation and/or other
+ * materials provided with the distribution.
+ *
+ *      2. The name of Xilinx, Inc. may not be used to endorse or promote
+ * products redistributed with this software without specific prior written
+ * permission.
+ *
+ *      THIS SOFTWARE IS PROVIDED BY XILINX, INC. "AS IS" AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO
+ * EVENT SHALL XILINX, INC. BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+ *      PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+ * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+ * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+ * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
+ * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
+ */
+syntax = "proto3";
+package morphizen;
+import "capability.proto";
+import "config.proto";
+import "anchor_point.proto";
+import "version.proto";
+
+message SubgraphProto {
+  string op_name = 1;
+  MetaDefProto metadef = 2;
+}
+
+message ContextProto {
+  repeated MetaDefProto meta_def = 1;
+  reserved 3;
+  reserved "config";
+  map<string, AnchorPointProto> origin_nodes = 4;
+  reserved 6;
+  reserved "fix_info";
+  map<string, int32> device_subgraph_count = 7; // only used for fused dpu
+  repeated string stacks = 8;
+  repeated EventProto events = 9;
+  repeated CPUUsageProto cpu_usage = 10;
+  map<string, SubgraphProto> subgraph_metadefs = 11;
+  reserved 12;
+  reserved "cache_files";
+  string cache_key = 13; // Cache namespace prefix for shared context scenarios
+  AllVersionInfoProto version = 14; // Compiler version info (output metadata)
+}
+/*
+{
+  "name": "myName",
+  "cat": "category,list",
+  "ph": "B",
+  "ts": 12345,
+  "pid": 123,
+  "tid": 456,
+  "args": {
+    "someArg": 1,
+    "anotherArg": {
+      "value": "my value"
+    }
+  }
+}
+General Event Structure
+
+
+name: The name of the event, as displayed in Trace Viewer
+cat: The event categories. This is a comma separated list of categories for the event. The categories can be used to hide events in the Trace Viewer UI.
+ph: The event type. This is a single character which changes depending on the type of event being output. The valid values are listed in the table below. We will discuss each phase type below.
+ts: The tracing clock timestamp of the event. The timestamps are provided at microsecond granularity.
+tts: Optional. The thread clock timestamp of the event. The timestamps are provided at microsecond granularity.
+pid: The process ID for the process that output this event.
+tid: The thread ID for the thread that output this event.
+args: Any arguments provided for the event. Some of the event types have required argument fields, otherwise, you can put any information you wish in here. The arguments are displayed in Trace Viewer when you view an event in the analysis section.
+Optional
+cname: A fixed color name to associate with the event. If provided, cname must be one of the names listed in trace-viewer's base color scheme's reserved color names list
+
+Complete Events ("X")
+Each complete event logically combines a pair of duration (B and E) events. The complete events are designated by the X phase type. In a trace that most of the events are duration events, using complete events to replace the duration events can reduce the size of the trace to about half.
+
+There is an extra parameter dur to specify the tracing clock duration of complete events in microseconds. All other parameters are the same as in duration events. The ts parameter indicate the time of the start of the complete event. Unlike duration events, the timestamps of complete events can be in any order.
+
+An optional parameter tdur specifies the thread clock duration of complete events in microseconds.
+
+*/
+message EventProto {
+  string id = 1;
+  string name = 2;
+  repeated string cat = 3;
+  string ph = 4;
+  int64 ts = 5;
+  int64 pid = 6;
+  int64 tid = 7;
+  EventArgProto args = 8;
+  string cname = 9;
+  int64 dur = 10;
+};
+message EventArgProto {
+  MemDumpProto dumps = 1;
+  MemUsageProto mem_usage = 2;
+}
+message MemDumpProto {
+  MemUsageProto process_totals = 1  [json_name = "process_totals"];
+}
+message MemUsageProto {
+  int64 peak_memory_in_bytes = 1;
+  string peak_memory = 2  [json_name = "peak_memory"];
+  int64 current_memory_in_bytes = 3;
+  string current_memory = 4 [json_name = "current_memory"];
+}
+message CPUUsageProto {
+  float avg_cpu_util = 1; // %
+  float mem_peak_working_set_size = 2; // MBs
+};

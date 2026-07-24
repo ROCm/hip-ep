@@ -87,8 +87,8 @@ struct RuntimeState {
   // Output allocator installed by the EP before inference_compute via
   // hipdnn_ep_set_output_allocator. hipdnn_ep_alloc_output forwards to
   // allocate(self, ...). Borrowed: `self` is EP-owned, never freed here.
-  // allocate == nullptr means no allocator is installed (the classic pipeline
-  // never calls alloc_output); zero-initialized in initialize_state_handles.
+  // allocate == nullptr means no allocator has been installed yet;
+  // zero-initialized in initialize_state_handles.
   hipdnn_output_allocator_t output_allocator;
 
   // Per-session scratch buffer for wrap_qmoe transient device buffers
@@ -132,6 +132,17 @@ struct RuntimeState {
   // miopenConvolutionForward + bias add have consumed the workspace.
   void *conv_scratch;
   size_t conv_scratch_size;
+
+  // Per-session scratch for the W4A8 dp4a matmul_nbits decode path
+  // (hip_matmul_nbits_dp4a). One contiguous device buffer holding the
+  // per-token quantized activation (int8, K bytes, nibble-deinterleaved) plus
+  // the per-group activation scales (float, ceil(K/block_size)). Same
+  // grow-on-demand / never-shrink policy as conv_scratch; lazily allocated on
+  // first dp4a call, freed in hipdnn_ep_state_cleanup. Single-buffer reuse is
+  // safe because the HIP stream is serialised (the next matmul_nbits only
+  // launches after the previous dp4a gemv has consumed the quantized row).
+  void *matmul_dp4a_scratch;
+  size_t matmul_dp4a_scratch_size;
 
   // NOTE: the GQA GEMM descriptor cache (GqaGemmCache) formerly lived here as
   // gqa_gemm_cache. It is now per-op-instance: each gqa instance owns one in

@@ -130,7 +130,7 @@ module {
   // alongside each shape pointer. The runtime treats rank-0 specially (loop
   // degeneracy yields all-zero strides and a single-element kernel launch),
   // see `hip_elementwise_where` in
-  // 3rd-party/custom_kernels/hip/elementwise_where_kernel.hip.
+  // lib/Runtime/Kernels/hip/elementwise_where_kernel.hip.
   // CHECK-LABEL: llvm.func @where_scalar_test
   func.func @where_scalar_test(
       %ctx: !hip.context,

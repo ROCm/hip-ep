@@ -34,7 +34,7 @@ static constexpr int64_t kMaxPowUnroll = 16;
 /// Why this peek runs PRE-lowering: with externalization enabled, every
 /// `onnx.Constant` — including 1-element scalars — is replaced by
 /// `bufferization.to_tensor(memref.get_global)` whose value lives in the
-/// constants sidecar, NOT in IR. A post-lowering matcher cannot recover the
+/// constants file, NOT in IR. A post-lowering matcher cannot recover the
 /// scalar value from that form. Running before `lowerOnnxConstants` keeps the
 /// `onnx.Constant` (and any wrapping Cast) in IR, so the value is readable.
 static std::optional<double> getScalarConstantValue(mlir::Value v) {
@@ -189,7 +189,7 @@ struct NegToHip : public mlir::RewritePattern {
 /// one). With externalization enabled in production every `onnx.Constant`
 /// — including 1-element scalars — gets replaced by
 /// `bufferization.to_tensor(memref.get_global)` whose value is buried in the
-/// constants sidecar; matching post-lowering would silently miss every Pow.
+/// constants file; matching post-lowering would silently miss every Pow.
 ///
 /// In practice the exponent is always a constant scalar (variance
 /// `Pow(x, 2)` in RMS/LayerNorm and SAM's LayerNorm2d, `Pow(x, 3)` in the

@@ -1,0 +1,207 @@
+{
+  "version": "2.0",
+  "description": "ROCm-real-capability-driven recommendation rules for unsupported ONNX ops.",
+  "default_fallback": {
+    "recommended_path": "Custom Hip Kernel",
+    "wrapper_extension_target": "new custom wrapper",
+    "rationale": "No validated ROCm library path with stable semantics for this operator."
+  },
+  "compile_time_rule": {
+    "when_reason_contains_any": [
+      "compile time",
+      "compile-time",
+      "constant folding",
+      "shape inference",
+      "shape manipulation",
+      "type-canonicalization"
+    ],
+    "recommended_path": "Compile Time Optimization",
+    "wrapper_extension_target": "none",
+    "rationale": "Operation is handled by compile-time transformation or shape/type propagation."
+  },
+  "real_rocm_capability_inventory": {
+    "MIOpen Activation API": {
+      "api_group": "miopenActivation*",
+      "validated_direct_modes": [
+        "relu",
+        "sigmoid",
+        "tanh",
+        "softplus",
+        "abs",
+        "elu",
+        "clamp",
+        "leakyrelu"
+      ],
+      "validated_parameterized_mode": "power: (alpha + beta*x)^gamma",
+      "power_derived_candidates": [
+        "reciprocal",
+        "sqrt",
+        "rsqrt"
+      ]
+    },
+    "MIOpen OpTensor API": {
+      "api_group": "miopenOpTensor",
+      "validated_binary_ops": [
+        "add",
+        "mul",
+        "min",
+        "max"
+      ],
+      "derived_candidate": "div via reciprocal + mul composition"
+    },
+    "MIOpen Convolution API": {
+      "api_group": "miopenConvolution*",
+      "validated_family": "convolution"
+    },
+    "hipBLASLt API": {
+      "api_group": "hipblasLt*",
+      "validated_family": "matmul/gemm"
+    }
+  },
+  "op_overrides": [
+    {
+      "op_name": "Reciprocal",
+      "recommended_path": "MIOpen",
+      "wrapper_extension_target": "wrap_miopenActivationForward (POWER mode)",
+      "rationale": "Can be represented by MIOpen POWER activation with gamma = -1."
+    },
+    {
+      "op_name": "Sqrt",
+      "recommended_path": "MIOpen",
+      "wrapper_extension_target": "wrap_miopenActivationForward (POWER mode)",
+      "rationale": "Can be represented by MIOpen POWER activation with gamma = 0.5."
+    },
+    {
+      "op_name": "Div",
+      "recommended_path": "MIOpen",
+      "wrapper_extension_target": "compose POWER reciprocal + wrap_miopenOpTensor(mul)",
+      "rationale": "No direct OpTensor div, but composable via reciprocal then multiplication."
+    }
+  ],
+  "family_routing": [
+    {
+      "family": "matmul",
+      "op_name_keywords_any": [
+        "matmul",
+        "gemm"
+      ],
+      "preferred_path": "hipBLASLt",
+      "wrapper_extension_target": "wrap_hipblasLtMatmul",
+      "fallback_path": "Custom Hip Kernel"
+    },
+    {
+      "family": "convolution",
+      "op_name_keywords_any": [
+        "conv"
+      ],
+      "preferred_path": "MIOpen",
+      "wrapper_extension_target": "wrap_miopenConvolutionForward",
+      "fallback_path": "Custom Hip Kernel"
+    },
+    {
+      "family": "activation_direct",
+      "op_name_keywords_any": [
+        "relu",
+        "sigmoid",
+        "tanh",
+        "softplus",
+        "elu",
+        "leakyrelu",
+        "clamp",
+        "abs"
+      ],
+      "preferred_path": "MIOpen",
+      "wrapper_extension_target": "wrap_miopenActivationForward",
+      "fallback_path": "Custom Hip Kernel"
+    },
+    {
+      "family": "activation_power_derived",
+      "op_name_keywords_any": [
+        "reciprocal",
+        "sqrt",
+        "rsqrt"
+      ],
+      "preferred_path": "MIOpen",
+      "wrapper_extension_target": "wrap_miopenActivationForward (POWER mode)",
+      "fallback_path": "Custom Hip Kernel"
+    },
+    {
+      "family": "elementwise_binary",
+      "op_name_keywords_any": [
+        "add",
+        "mul",
+        "min",
+        "max",
+        "div"
+      ],
+      "preferred_path": "MIOpen",
+      "wrapper_extension_target": "wrap_miopenOpTensor (or composed path for div)",
+      "fallback_path": "Custom Hip Kernel"
+    },
+    {
+      "family": "reduction",
+      "op_name_keywords_any": [
+        "reduce",
+        "cumsum"
+      ],
+      "preferred_path": "Custom Hip Kernel",
+      "wrapper_extension_target": "wrap_reduce_sum",
+      "fallback_path": "Custom Hip Kernel"
+    },
+    {
+      "family": "indexing_data_movement",
+      "op_name_keywords_any": [
+        "gather",
+        "scatter",
+        "slice",
+        "split",
+        "tile",
+        "pad",
+        "concat",
+        "expand"
+      ],
+      "preferred_path": "Custom Hip Kernel",
+      "wrapper_extension_target": "wrap_gather",
+      "fallback_path": "Custom Hip Kernel"
+    },
+    {
+      "family": "control_flow",
+      "op_name_keywords_any": [
+        "loop",
+        "if",
+        "scan"
+      ],
+      "preferred_path": "Custom Hip Kernel",
+      "wrapper_extension_target": "runtime orchestration extension",
+      "fallback_path": "Custom Hip Kernel"
+    },
+    {
+      "family": "attention_composite",
+      "op_name_keywords_any": [
+        "attention"
+      ],
+      "preferred_path": "Custom Hip Kernel",
+      "wrapper_extension_target": "attention specialized runtime wrapper",
+      "fallback_path": "Custom Hip Kernel"
+    },
+    {
+      "family": "normalization_composite",
+      "op_name_keywords_any": [
+        "layernormalization",
+        "groupnormalization",
+        "rmsnorm",
+        "batchnormalization"
+      ],
+      "preferred_path": "MIOpen",
+      "wrapper_extension_target": "wrap_miopenT5LayerNormForward",
+      "fallback_path": "Custom Hip Kernel"
+    }
+  ],
+  "output_requirements": {
+    "must_include_fields": [
+      "recommended_path",
+      "closest_wrapper_or_extension_target",
+      "rationale"
+    ]
+  }
+}

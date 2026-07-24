@@ -9,7 +9,8 @@
 // This pass generates four C-ABI compatible functions that wrap the internal
 // @main_graph function:
 // - inference_init: Allocate context, create handles, upload constants
-// - inference_compute: Parse inputs/outputs, call @main_graph
+// - inference_compute: 2-arg (state, inputs) ABI -- stage inputs, call
+//   @main_graph (graph outputs are allocated in-graph via hip.alloc_output)
 // - inference_cleanup: Free resources
 // - inference_get_metadata_json: Return JSON metadata (input/output shapes)
 //===----------------------------------------------------------------------===//
@@ -73,12 +74,12 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
       module->getAttrOfType<DenseI64ArrayAttr>("hipdnn.constant_offsets");
 
   // Streaming-mode source descriptors. Present when OnnxToHip's finalize
-  // emitted per-constant source info (splat / file-ref / sidecar). Absent in
-  // full-sidecar mode (EPContext export), in which case every ConstantInfo
-  // keeps source = NONE and runtime falls back to the bulk constants_filename
-  // read. In hybrid mode (skipDataWrite=true with mem-addr entries) some
-  // constants carry SidecarSource pointing at a *partial* sidecar that holds
-  // only mem-addr bytes.
+  // emitted per-constant source info (splat / file-ref / mem). Absent in
+  // full-constants-file mode (EPContext export), in which case every
+  // ConstantInfo keeps source = NONE and runtime falls back to the bulk
+  // constants_filename read. In hybrid mode (skipDataWrite=true with mem-addr
+  // entries) some constants carry MemSource pointing at a *partial* constants
+  // file that holds only mem-addr bytes.
   auto sourceKindsAttr =
       module->getAttrOfType<DenseI32ArrayAttr>("hipdnn.constant_source_kinds");
   auto splatValuesAttr = module->getAttrOfType<DenseI64ArrayAttr>(
@@ -89,8 +90,8 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
       module->getAttrOfType<ArrayAttr>("hipdnn.constant_file_paths");
   auto fileOffsetsAttr =
       module->getAttrOfType<DenseI64ArrayAttr>("hipdnn.constant_file_offsets");
-  auto sidecarOffsetsAttr = module->getAttrOfType<DenseI64ArrayAttr>(
-      "hipdnn.constant_sidecar_offsets");
+  auto memOffsetsAttr =
+      module->getAttrOfType<DenseI64ArrayAttr>("hipdnn.constant_mem_offsets");
 
   mlir::hip::HipModelMetaInfoT meta;
   meta.version = 1;
@@ -108,8 +109,8 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
                                              : ArrayRef<int64_t>{};
     auto fileOffsets =
         fileOffsetsAttr ? fileOffsetsAttr.asArrayRef() : ArrayRef<int64_t>{};
-    auto sidecarOffsets = sidecarOffsetsAttr ? sidecarOffsetsAttr.asArrayRef()
-                                             : ArrayRef<int64_t>{};
+    auto memOffsets =
+        memOffsetsAttr ? memOffsetsAttr.asArrayRef() : ArrayRef<int64_t>{};
     for (auto i : llvm::seq<size_t>(0, sizes.size())) {
       auto ci = std::make_unique<mlir::hip::ConstantInfoT>();
       ci->size = sizes[i];
@@ -132,14 +133,13 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
         fref->file_offset = (i < fileOffsets.size()) ? fileOffsets[i] : 0;
         ci->source.Set(std::move(*fref));
       } else if (kind == 3) {
-        // Sidecar: mem-addr entry packed into
-        // HipModelMetaInfo.constants_filename at sidecar_offset by the
+        // Mem: mem-addr entry packed into
+        // HipModelMetaInfo.constants_filename at mem_offset by the
         // OnnxToHip hybrid finalize. Runtime reads size bytes from that offset
         // through the EP FileSystem.
-        auto side = std::make_unique<mlir::hip::SidecarSourceT>();
-        side->sidecar_offset =
-            (i < sidecarOffsets.size()) ? sidecarOffsets[i] : 0;
-        ci->source.Set(std::move(*side));
+        auto mem = std::make_unique<mlir::hip::MemSourceT>();
+        mem->mem_offset = (i < memOffsets.size()) ? memOffsets[i] : 0;
+        ci->source.Set(std::move(*mem));
       }
       meta.constants.push_back(std::move(ci));
     }
@@ -345,11 +345,9 @@ static void emitErrorCheckedCall(OpBuilder &builder, Location loc,
 
 // Generates the four C-ABI interface functions (inference_init,
 // inference_compute, inference_cleanup, inference_get_metadata_json) for a
-// lowered module. Allocator vs classic mode is read from the
-// `hipdnn.use_output_allocator` module attribute (set by hip-use-output-
-// allocator) in place by verifyPrerequisites and generateInferenceCompute;
-// inference_init, inference_cleanup, runtime declarations and metadata are
-// identical in both modes.
+// lowered module. inference_compute has the (state, inputs) -> i32 signature;
+// graph outputs are allocated in-graph via hip.alloc_output, not passed as
+// out-params.
 class GenerateInterfacePass
     : public PassWrapper<GenerateInterfacePass, OperationPass<ModuleOp>> {
 public:
@@ -399,21 +397,14 @@ public:
 
     generateInferenceInit(module, blob.size());
     auto inputShapes = module->getAttrOfType<ArrayAttr>("hipdnn.input_shapes");
-    auto outputShapes =
-        module->getAttrOfType<ArrayAttr>("hipdnn.output_shapes");
-    generateInferenceCompute(module, inputShapes, outputShapes);
+    generateInferenceCompute(module, inputShapes);
     generateInferenceCleanup(module);
 
     std::string json = buildMetadataJson(module, constantsFile);
     generateMetadataGlobal(module, json);
     generateInferenceGetMetadataJson(module);
 
-    auto allocatorAttr =
-        module->getAttrOfType<BoolAttr>("hipdnn.use_output_allocator");
-    bool allocatorMode = allocatorAttr && allocatorAttr.getValue();
-    COMPILER_DEBUG_LOG("[GenerateInterface] Generated 4 interface functions ("
-                       << (allocatorMode ? "allocator" : "classic")
-                       << " mode)\n");
+    COMPILER_DEBUG_LOG("[GenerateInterface] Generated 4 interface functions\n");
   }
 
 private:
@@ -451,8 +442,6 @@ private:
         {"hipdnn_ep_pool_init", i32, {ptr, i64, ptr, i64}},
         {"hipdnn_ep_get_buffer_from_pool", ptr, {ptr, i64}},
         {"hipdnn_ep_tensor_prepare_input", i32, {ptr, ptr, i64, i64, ptr}},
-        {"hipdnn_ep_tensor_prepare_output", i32, {ptr, ptr, i64, i64, ptr}},
-        {"hipdnn_ep_tensor_finalize_output", i32, {ptr, ptr}},
         {"hipdnn_ep_tensor_free_input", vd, {ptr, ptr}},
         {"hipdnn_ep_tensor_buffer_get_gpu_ptr", ptr, {ptr}},
         {"hipdnn_ep_tensor_buffer_get_host_ptr", ptr, {ptr}},
@@ -482,9 +471,6 @@ private:
   }
 
   LogicalResult verifyPrerequisites(ModuleOp module) {
-    auto allocatorAttr =
-        module->getAttrOfType<BoolAttr>("hipdnn.use_output_allocator");
-    bool allocatorMode = allocatorAttr && allocatorAttr.getValue();
     MLIRContext *ctx = module.getContext();
     Type ptrType = LLVM::LLVMPointerType::get(ctx, 0);
     Type i32Type = IntegerType::get(ctx, 32);
@@ -513,23 +499,19 @@ private:
       return failure();
     }
 
-    // After convert-hip-to-llvm's transformMainFunction, @main_graph is the
-    // runtime-ABI wrapper: (ptr, ptr, ptr) -> i32 classic, (ptr, ptr) -> i32
-    // allocator (no outputs span). All params are opaque pointers; the result
-    // is the i32 status.
+    // After convert-hip-to-llvm, @main_graph is the (ctx, inputs) -> i32
+    // wrapper (no outputs param -- outputs are allocated in-graph). Both params
+    // are opaque pointers.
     auto mainType = mainFunc.getFunctionType();
-    unsigned expectedNumParams = allocatorMode ? 2 : 3;
-    bool sigOk = mainType.getNumParams() == expectedNumParams &&
+    constexpr unsigned kExpectedNumParams = 2; // (ctx, inputs)
+    bool sigOk = mainType.getNumParams() == kExpectedNumParams &&
                  mainType.getReturnType() == i32Type;
     if (sigOk)
-      for (unsigned p : llvm::seq<unsigned>(0, expectedNumParams))
+      for (unsigned p : llvm::seq<unsigned>(0, kExpectedNumParams))
         sigOk &= mainType.getParamType(p) == ptrType;
     if (!sigOk) {
       llvm::errs() << "[GenerateInterface] @main_graph has wrong signature.\n"
-                   << "Expected: "
-                   << (allocatorMode ? "(ptr, ptr) -> i32 (allocator)"
-                                     : "(ptr, ptr, ptr) -> i32 (classic)")
-                   << "\n";
+                   << "Expected: (ptr, ptr) -> i32\n";
       return failure();
     }
 
@@ -757,37 +739,21 @@ private:
     }
   }
 
-  /// Generated IR overview (1 input, 1 output of rank 1):
-  ///   llvm.func @inference_compute(%state: !llvm.ptr, %ins: !llvm.ptr,
-  ///                                %outs: !llvm.ptr) -> i32
+  /// Generated IR overview (1 input of rank 1; outputs allocated in-graph):
+  ///   llvm.func @inference_compute(%state: !llvm.ptr, %ins: !llvm.ptr) -> i32
   ///       attributes {llvm.emit_c_interface, sym_visibility = "public"} {
-  ///     // 1. Alloca TensorBuffer structs on the stack
+  ///     // 1. Alloca input TensorBuffer structs on the stack
   ///     // 2. For each input:  call hipdnn_ep_tensor_prepare_input,
   ///     error-check
-  ///     // 3. For each output: call hipdnn_ep_tensor_prepare_output,
-  ///     error-check
-  ///     // 4. Build LLVM memref descriptors from TensorBuffer GPU/shape ptrs
-  ///     // 5. Call @main_graph(%state, %input_memrefs, %output_memrefs)
-  ///     // 6. For each output: call hipdnn_ep_tensor_finalize_output,
-  ///     error-check
-  ///     // 7. Call hipdnn_ep_stream_sync (GPU sync + PERF profiling output)
-  ///     // 8. Read device-side error flag
-  ///     // 9. Free input TensorBuffers
+  ///     // 3. Build LLVM memref descriptors from TensorBuffer GPU/shape ptrs
+  ///     // 4. Call @main_graph(%state, %input_memrefs) -- outputs are
+  ///     //    allocated in-graph via hip.alloc_output and written directly
+  ///     // 5. Call hipdnn_ep_stream_sync (GPU sync + PERF profiling output)
+  ///     // 6. Read device-side error flag
+  ///     // 7. Free input TensorBuffers
   ///     // On error: store error code, free inputs, return error
   ///   }
-  ///
-  /// Allocator mode (module's `hipdnn.use_output_allocator` attr is true): the
-  /// wrapper takes (state, inputs) only; output-tensor handling
-  /// (prepare_output, the output-memref array, finalize_output) and the outputs
-  /// span are all skipped -- graph outputs are allocated in-graph by
-  /// hip.alloc_output (lowered to the hipdnn_ep_alloc_output callback) and
-  /// written directly, so
-  /// @main_graph is called as (state, input_memrefs).
-  void generateInferenceCompute(ModuleOp module, ArrayAttr inputShapes,
-                                ArrayAttr outputShapes) {
-    auto allocatorAttr =
-        module->getAttrOfType<BoolAttr>("hipdnn.use_output_allocator");
-    bool allocatorMode = allocatorAttr && allocatorAttr.getValue();
+  void generateInferenceCompute(ModuleOp module, ArrayAttr inputShapes) {
     OpBuilder builder(module.getContext());
     Location loc = module.getLoc();
     builder.setInsertionPointToEnd(module.getBody());
@@ -795,10 +761,7 @@ private:
     Type ptrType = LLVM::LLVMPointerType::get(builder.getContext(), 0);
     Type i32Type = builder.getI32Type();
     Type i64Type = builder.getI64Type();
-    // Allocator mode drops the trailing outputs span arg.
-    SmallVector<Type> paramTypes =
-        allocatorMode ? SmallVector<Type>{ptrType, ptrType}
-                      : SmallVector<Type>{ptrType, ptrType, ptrType};
+    SmallVector<Type> paramTypes{ptrType, ptrType}; // (state, inputs)
     auto funcType = LLVM::LLVMFunctionType::get(i32Type, paramTypes);
 
     auto funcOp = LLVM::LLVMFuncOp::create(
@@ -834,16 +797,8 @@ private:
       LLVM::CallOp::create(builder, loc, beginComputeFunc, ValueRange{state});
 
     Value inputsSpanPtr = entryBlock->getArgument(1);
-    // outputsSpanPtr is arg 2 in classic mode only; allocator mode has no
-    // outputs span (outputs are allocated in-graph).
-    Value outputsSpanPtr = allocatorMode ? Value() : entryBlock->getArgument(2);
 
     size_t numInputs = inputShapes ? inputShapes.size() : 0;
-    // True output count in both modes. Allocator mode skips the classic output
-    // staging below (prepare_output, output-memref build, finalize_output) via
-    // `if (!allocatorMode)` scopes, not by zeroing this count -- those outputs
-    // are instead allocated in-graph by the hip.alloc_output emitted earlier.
-    size_t numOutputs = outputShapes ? outputShapes.size() : 0;
 
     Value c0_i32 = LLVM::ConstantOp::create(builder, loc, i32Type,
                                             builder.getI32IntegerAttr(0));
@@ -852,10 +807,6 @@ private:
 
     auto prepareInputFunc =
         module.lookupSymbol<LLVM::LLVMFuncOp>("hipdnn_ep_tensor_prepare_input");
-    auto prepareOutputFunc = module.lookupSymbol<LLVM::LLVMFuncOp>(
-        "hipdnn_ep_tensor_prepare_output");
-    auto finalizeOutputFunc = module.lookupSymbol<LLVM::LLVMFuncOp>(
-        "hipdnn_ep_tensor_finalize_output");
     auto freeInputFunc =
         module.lookupSymbol<LLVM::LLVMFuncOp>("hipdnn_ep_tensor_free_input");
 
@@ -874,11 +825,6 @@ private:
         LLVM::AllocaOp::create(builder, loc, ptrType, i32Type, c1_i64, 0);
 
     SmallVector<Value> inputBuffers;
-    SmallVector<Value> outputBuffers;
-    // Hoisted: assigned inside the classic `if (!allocatorMode)` output-memref
-    // scope below, read by the @main_graph call. Stays null in allocator mode
-    // (where it is never pushed onto the call args).
-    Value outputMemrefArray;
 
     // sizeof(TensorBuffer) in the runtime (6 fields, 48 bytes on 64-bit).
     // TODO: Replace with sizeof(TensorBuffer) or a runtime query once the
@@ -895,17 +841,6 @@ private:
       Value bufferPtr = LLVM::AllocaOp::create(builder, loc, ptrType, i8Type,
                                                tensorBufferSize, 0);
       inputBuffers.push_back(bufferPtr);
-    }
-    // classic out-param staging - delete when classic is removed. Allocator
-    // mode allocates outputs in-graph via hip.alloc_output, so no per-output
-    // TensorBuffer is staged here.
-    if (!allocatorMode) {
-      for (auto i : llvm::seq<size_t>(0, numOutputs)) {
-        (void)i;
-        Value bufferPtr = LLVM::AllocaOp::create(builder, loc, ptrType, i8Type,
-                                                 tensorBufferSize, 0);
-        outputBuffers.push_back(bufferPtr);
-      }
     }
 
     Block *errorCleanupBlock = funcOp.addBlock();
@@ -925,26 +860,6 @@ private:
           builder, loc, prepareInputFunc,
           ValueRange{state, inputsSpanPtr, indexVal, rankVal, bufferPtr},
           errorCodePtr, errorCleanupBlock, funcOp);
-    }
-
-    // classic out-param staging - delete when classic is removed.
-    if (!allocatorMode) {
-      for (auto i : llvm::seq<size_t>(0, numOutputs)) {
-        Value bufferPtr = outputBuffers[i];
-
-        Value indexVal = LLVM::ConstantOp::create(builder, loc, i64Type,
-                                                  builder.getI64IntegerAttr(i));
-
-        Value rankVal = LLVM::ConstantOp::create(
-            builder, loc, i64Type,
-            builder.getI64IntegerAttr(
-                cast<DenseI64ArrayAttr>(outputShapes.getValue()[i]).size()));
-
-        emitErrorCheckedCall(
-            builder, loc, prepareOutputFunc,
-            ValueRange{state, outputsSpanPtr, indexVal, rankVal, bufferPtr},
-            errorCodePtr, errorCleanupBlock, funcOp);
-      }
     }
 
     // Build memref structs for @main call
@@ -979,43 +894,6 @@ private:
       LLVM::StoreOp::create(builder, loc, memrefPtr, arraySlot);
     }
 
-    // classic out-param staging - delete when classic is removed. The
-    // output-memref array is forwarded to @main_graph in classic mode only;
-    // allocator mode leaves outputMemrefArray null and never passes it.
-    if (!allocatorMode) {
-      Value numOutputsVal = LLVM::ConstantOp::create(
-          builder, loc, i64Type, builder.getI64IntegerAttr(numOutputs));
-      outputMemrefArray = LLVM::AllocaOp::create(builder, loc, ptrType, ptrType,
-                                                 numOutputsVal, 0);
-
-      for (auto i : llvm::seq<size_t>(0, numOutputs)) {
-        int64_t rank =
-            cast<DenseI64ArrayAttr>(outputShapes.getValue()[i]).size();
-
-        Value bufferPtr = outputBuffers[i];
-        Value gpuPtrRaw = LLVM::CallOp::create(builder, loc, getGpuPtrFunc,
-                                               ValueRange{bufferPtr})
-                              .getResult();
-        Value shapePtr = LLVM::CallOp::create(builder, loc, getShapePtrFunc,
-                                              ValueRange{bufferPtr})
-                             .getResult();
-
-        Value memref = buildMemrefDescriptor(builder, loc, gpuPtrRaw, shapePtr,
-                                             rank, ptrType, i64Type);
-
-        Value memrefPtr = LLVM::AllocaOp::create(builder, loc, ptrType,
-                                                 memref.getType(), c1_i64, 0);
-        LLVM::StoreOp::create(builder, loc, memref, memrefPtr);
-
-        Value indexVal = LLVM::ConstantOp::create(builder, loc, i64Type,
-                                                  builder.getI64IntegerAttr(i));
-        Value arraySlot = LLVM::GEPOp::create(builder, loc, ptrType, ptrType,
-                                              outputMemrefArray,
-                                              ArrayRef<LLVM::GEPArg>{indexVal});
-        LLVM::StoreOp::create(builder, loc, memrefPtr, arraySlot);
-      }
-    }
-
     // Reset kernel-side runtime error flag before graph execution.
     emitErrorCheckedCall(builder, loc, resetErrorFlagFunc, ValueRange{state},
                          errorCodePtr, errorCleanupBlock, funcOp);
@@ -1031,30 +909,15 @@ private:
       LLVM::BrOp::create(builder, loc, mainSuccessBlock);
     } else {
       mainSuccessBlock = funcOp.addBlock();
-      // Classic: @main_graph(state, in_memrefs, out_memrefs). Allocator:
-      // @main_graph(state, in_memrefs) -- outputs allocated in-graph.
+      // @main_graph(state, in_memrefs) -- outputs are allocated in-graph, so
+      // there is no outputs arg.
       SmallVector<Value> mainArgs = {state, inputMemrefArray};
-      if (!allocatorMode)
-        mainArgs.push_back(outputMemrefArray);
       emitErrorCheckedCall(builder, loc, mainFunc, mainArgs, errorCodePtr,
                            errorCleanupBlock, funcOp);
       LLVM::BrOp::create(builder, loc, mainSuccessBlock);
     }
 
-    // Finalize output tensors (D2H, sync, cleanup)
     builder.setInsertionPointToStart(mainSuccessBlock);
-
-    // classic out-param staging - delete when classic is removed. Allocator
-    // outputs are EP-owned (written in place by hip.alloc_output), so there is
-    // nothing to finalize back to a caller buffer here.
-    if (!allocatorMode) {
-      for (auto i : llvm::seq<size_t>(0, numOutputs)) {
-        Value bufferPtr = outputBuffers[i];
-        emitErrorCheckedCall(builder, loc, finalizeOutputFunc,
-                             ValueRange{state, bufferPtr}, errorCodePtr,
-                             errorCleanupBlock, funcOp);
-      }
-    }
 
     // Synchronize GPU stream after all D2H copies are queued. Also prints
     // PERF phase timing and per-op profile when HIPDNN_EP_PERF is enabled.

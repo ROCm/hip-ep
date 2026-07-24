@@ -34,6 +34,10 @@ NUM_HEADS = 20
 HEAD_DIM = 64
 HIDDEN = NUM_HEADS * HEAD_DIM  # 1280
 
+# num_heads for every supported variant (head_dim == 64 for all): tiny 6, base 8,
+# small 12, medium 16, large-v3 & turbo 20. Cross-attn hidden = num_heads*64.
+VARIANT_HEADS = [6, 8, 12, 16, 20]
+
 
 def _make_cross_mha_model(
     batch, seq_q, seq_kv, num_heads, head_dim, np_dtype=np.float16
@@ -110,24 +114,26 @@ def _cross_inputs(
 class TestWhisperCrossAttention:
     """8-input MultiHeadAttention cross-attn -> hip.gqa(no_causal=true)."""
 
+    @pytest.mark.parametrize("num_heads", VARIANT_HEADS)
     @pytest.mark.parametrize("seq_q", [1, 4])
     @pytest.mark.parametrize("seq_kv", [64, 256])
-    def test_cross_attention(self, model_runner, seq_q, seq_kv):
-        """Whisper decoder cross-attn: Q from decoder, K/V from encoder (BNSH).
+    def test_cross_attention(self, model_runner, seq_q, seq_kv, num_heads):
+        """Whisper decoder cross-attn across every variant's num_heads.
 
         Real Whisper Skv=1500; we test 64 / 256 for speed (kernel is
         shape-agnostic).  Bidirectional, compared directly against ORT CPU.
         """
         batch = 1
-        model = _make_cross_mha_model(batch, seq_q, seq_kv, NUM_HEADS, HEAD_DIM)
-        q, k, v = _cross_inputs(batch, seq_q, seq_kv, NUM_HEADS, HEAD_DIM)
+        model = _make_cross_mha_model(batch, seq_q, seq_kv, num_heads, HEAD_DIM)
+        q, k, v = _cross_inputs(batch, seq_q, seq_kv, num_heads, HEAD_DIM)
 
         actual, expected = model_runner.run_sample(model, [q, k, v])
         compare_outputs(actual, expected, atol=2e-2, rtol=2e-2, cos_threshold=0.999)
 
+    @pytest.mark.parametrize("num_heads", VARIANT_HEADS)
     @pytest.mark.parametrize("seq_q", [1, 4])
     @pytest.mark.parametrize("seq_kv", [64, 256])
-    def test_cross_attention_fp32(self, model_runner, seq_q, seq_kv):
+    def test_cross_attention_fp32(self, model_runner, seq_q, seq_kv, num_heads):
         """fp32 variant: drives the fp32 decomposed GQA path (elem_size=4).
 
         seq_q=1 / seq_kv>1 exercises the no_causal D2D-copy KV population +
@@ -137,10 +143,10 @@ class TestWhisperCrossAttention:
         """
         batch = 1
         model = _make_cross_mha_model(
-            batch, seq_q, seq_kv, NUM_HEADS, HEAD_DIM, np_dtype=np.float32
+            batch, seq_q, seq_kv, num_heads, HEAD_DIM, np_dtype=np.float32
         )
         q, k, v = _cross_inputs(
-            batch, seq_q, seq_kv, NUM_HEADS, HEAD_DIM, np_dtype=np.float32
+            batch, seq_q, seq_kv, num_heads, HEAD_DIM, np_dtype=np.float32
         )
 
         actual, expected = model_runner.run_sample(model, [q, k, v])

@@ -124,14 +124,27 @@ if(NOT BUILD_MOCK_RUNTIME)
     endif()
 
     find_package(hip QUIET)
-    find_package(MIOpen QUIET)
-    find_package(hipblaslt QUIET)
+    if(NOT HIPDNN_EP_DISABLE_VENDOR_BLAS)
+        find_package(MIOpen QUIET)
+        find_package(hipblaslt QUIET)
+    endif()
 
     if(DEFINED THEROCK_DIST)
         set(CMAKE_PREFIX_PATH "${ORIGINAL_CMAKE_PREFIX_PATH}")
     endif()
 
-    if(NOT hip_FOUND OR NOT MIOpen_FOUND OR NOT hipblaslt_FOUND)
+    # Vendor BLAS/DNN disabled: build the real runtime with only hip (the stubbed
+    # wrappers, added in the follow-up change, keep the ABI intact).
+    if(HIPDNN_EP_DISABLE_VENDOR_BLAS)
+        if(NOT hip_FOUND)
+            message(WARNING "HIP not found. Building mock runtime library for testing.")
+            message(WARNING "  hip_FOUND=${hip_FOUND}; set THEROCK_DIST to the ROCm SDK path")
+            set(BUILD_MOCK_RUNTIME TRUE)
+        else()
+            message(STATUS "Building REAL runtime with HIP (vendor MIOpen/hipBLASLt DISABLED)")
+            message(STATUS "  HIP: ${hip_DIR}")
+        endif()
+    elseif(NOT hip_FOUND OR NOT MIOpen_FOUND OR NOT hipblaslt_FOUND)
         message(WARNING "ROCm components not found. Building mock runtime library for testing.")
         message(WARNING "  hip_FOUND=${hip_FOUND}, MIOpen_FOUND=${MIOpen_FOUND}, hipblaslt_FOUND=${hipblaslt_FOUND}")
         message(WARNING "  Set THEROCK_DIST environment variable to ROCm SDK path")
@@ -167,6 +180,13 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
         list(APPEND COMPILE_FLAGS "-fPIC")
     endif()
 
+    # Propagate the vendor-BLAS opt-out into the bitcode compile so the
+    # MIOpen/hipBLASLt-backed wrappers (real/{miopen,hipblas,elementwise,gemm}.cpp)
+    # compile their stub branch instead of the vendor-backed one.
+    if(HIPDNN_EP_DISABLE_VENDOR_BLAS)
+        list(APPEND COMPILE_FLAGS "-DHIPDNN_EP_DISABLE_VENDOR_BLAS")
+    endif()
+
     # Always add root directory for public headers
     list(APPEND COMPILE_FLAGS "-I" "${CMAKE_CURRENT_SOURCE_DIR}")
 
@@ -197,7 +217,7 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
         list(APPEND COMPILE_FLAGS "-I" "${CMAKE_CURRENT_SOURCE_DIR}/real")
 
         # Add custom_kernels include directory
-        list(APPEND COMPILE_FLAGS "-I" "${CMAKE_SOURCE_DIR}/3rd-party/custom_kernels/include")
+        list(APPEND COMPILE_FLAGS "-I" "${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/include")
 
         # Add ROCm includes
         if(THEROCK_DIST)
@@ -210,7 +230,7 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
             ${CMAKE_CURRENT_SOURCE_DIR}/real/runtime_types.h
             ${CMAKE_CURRENT_SOURCE_DIR}/real/cache_utils.h
             ${CMAKE_CURRENT_SOURCE_DIR}/real/zp_unpack_cache.h
-            ${CMAKE_SOURCE_DIR}/3rd-party/custom_kernels/include/hip_custom_kernels.h)
+            ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/include/hip_custom_kernels.h)
     else()
         list(APPEND COMPILE_FLAGS "-I" "${CMAKE_CURRENT_SOURCE_DIR}/mock")
         list(APPEND IMPL_DEPS
@@ -242,6 +262,7 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
                 ${CMAKE_CURRENT_SOURCE_DIR}/runtime_state_internal.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/op_state.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/op_profile.h
+                ${CMAKE_CURRENT_SOURCE_DIR}/chrome_trace.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/debug_log.h
                 ${IMPL_DEPS}
                 ${CMAKE_BINARY_DIR}/schemas/model_metadata_generated.h
@@ -255,7 +276,9 @@ endmacro()
 compile_to_bitcode(hipdnn_ep_runtime_state.cpp runtime_state.bc)
 compile_to_bitcode(hipdnn_ep_runtime_tensor.cpp runtime_tensor.bc)
 compile_to_bitcode(hipdnn_ep_runtime_loop.cpp runtime_loop.bc)
+compile_to_bitcode(hipdnn_ep_runtime_if.cpp runtime_if.bc)
 compile_to_bitcode(op_profile.cpp runtime_op_profile.bc)
+compile_to_bitcode(chrome_trace.cpp runtime_chrome_trace.bc)
 compile_to_bitcode(output_allocator.cpp runtime_output_allocator.bc)
 # Op-state slots ABI + reference constructors. Shared (host-only allocation),
 # so the same TU serves both the real and mock runtimes.
@@ -267,11 +290,18 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/hip.cpp runtime_hip.bc)
     compile_to_bitcode(real/miopen.cpp runtime_miopen.bc)
     compile_to_bitcode(real/hipblas.cpp runtime_hipblas.bc)
+    # Vendor-symbol stubs so a model links without libMIOpen / libhipblaslt (see
+    # real/vendor_blas_stub.cpp).
+    if(HIPDNN_EP_DISABLE_VENDOR_BLAS)
+        compile_to_bitcode(real/vendor_blas_stub.cpp runtime_vendor_blas_stub.bc)
+    endif()
     compile_to_bitcode(real/memory.cpp runtime_memory.bc)
     compile_to_bitcode(real/elementwise.cpp runtime_elementwise.bc)
     compile_to_bitcode(real/power.cpp runtime_power.bc)
     compile_to_bitcode(real/matmul.cpp runtime_matmul.bc)
     compile_to_bitcode(real/activation.cpp runtime_activation.bc)
+    compile_to_bitcode(real/bias_gelu.cpp runtime_bias_gelu.bc)
+    compile_to_bitcode(real/fast_gelu.cpp runtime_fast_gelu.bc)
     compile_to_bitcode(real/layer_normalization.cpp runtime_layer_normalization.bc)
     compile_to_bitcode(real/simplified_layer_norm.cpp runtime_simplified_layer_norm.bc)
     compile_to_bitcode(real/skip_simplified_layer_norm.cpp runtime_skip_simplified_layer_norm.bc)
@@ -280,9 +310,15 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/cast.cpp runtime_cast.bc)
     compile_to_bitcode(real/range.cpp runtime_range.bc)
     compile_to_bitcode(real/gather.cpp runtime_gather.bc)
+    compile_to_bitcode(real/gather_elements.cpp runtime_gather_elements.bc)
+    compile_to_bitcode(real/top_k.cpp runtime_top_k.bc)
+    compile_to_bitcode(real/scatter_elements.cpp runtime_scatter_elements.bc)
+    compile_to_bitcode(real/compress.cpp runtime_compress.bc)
+    compile_to_bitcode(real/one_hot.cpp runtime_one_hot.bc)
     compile_to_bitcode(real/reduce_sum.cpp runtime_reduce_sum.bc)
     compile_to_bitcode(real/reduce_mean.cpp runtime_reduce_mean.bc)
     compile_to_bitcode(real/reduce_max.cpp runtime_reduce_max.bc)
+    compile_to_bitcode(real/reduce_min.cpp runtime_reduce_min.bc)
     compile_to_bitcode(real/matmul_nbits.cpp runtime_matmul_nbits.bc)
     compile_to_bitcode(real/qmoe.cpp runtime_qmoe.bc)
     compile_to_bitcode(real/gather_block_quantized.cpp runtime_gather_block_quantized.bc)
@@ -291,15 +327,19 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/gemm.cpp runtime_gemm.bc)
     compile_to_bitcode(real/where.cpp runtime_where.bc)
     compile_to_bitcode(real/equal.cpp runtime_equal.bc)
+    compile_to_bitcode(real/or.cpp runtime_or.bc)
     compile_to_bitcode(real/and.cpp runtime_and.bc)
     compile_to_bitcode(real/div.cpp runtime_div.bc)
     compile_to_bitcode(real/linear_attention.cpp runtime_linear_attention.bc)
     compile_to_bitcode(real/transpose.cpp runtime_transpose.bc)
+    compile_to_bitcode(real/abs.cpp runtime_abs.bc)
     compile_to_bitcode(real/neg.cpp runtime_neg.bc)
     compile_to_bitcode(real/not.cpp runtime_not.bc)
     compile_to_bitcode(real/cos.cpp runtime_cos.bc)
     compile_to_bitcode(real/sin.cpp runtime_sin.bc)
+    compile_to_bitcode(real/ceil.cpp runtime_ceil.bc)
     compile_to_bitcode(real/exp.cpp runtime_exp.bc)
+    compile_to_bitcode(real/log.cpp runtime_log.bc)
     compile_to_bitcode(real/cumsum.cpp runtime_cumsum.bc)
     compile_to_bitcode(real/pad.cpp runtime_pad.bc)
     compile_to_bitcode(real/tile.cpp runtime_tile.bc)
@@ -322,7 +362,9 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_loop.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_if.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_profile.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_chrome_trace.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_output_allocator.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_memory.bc
@@ -333,6 +375,8 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_power.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_matmul.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_activation.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_bias_gelu.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_fast_gelu.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_layer_normalization.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_simplified_layer_norm.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_skip_simplified_layer_norm.bc
@@ -341,9 +385,15 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_cast.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_range.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather_elements.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_top_k.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_scatter_elements.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_compress.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_one_hot.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_sum.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_mean.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_max.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_min.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_matmul_nbits.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_qmoe.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_causal_conv_with_state.bc
@@ -351,15 +401,19 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gemm.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_where.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_equal.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_or.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_and.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_div.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_linear_attention.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_transpose.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_abs.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_neg.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_not.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_cos.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_sin.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_ceil.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_exp.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_log.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_cumsum.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_pad.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tile.bc
@@ -379,6 +433,12 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_global_pool.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_gather_block_quantized.bc
     )
+    # Vendor-symbol stubs (see the compile_to_bitcode above) join runtime.bc only
+    # when the vendor BLAS/DNN backends are disabled.
+    if(HIPDNN_EP_DISABLE_VENDOR_BLAS)
+        list(APPEND RUNTIME_BC_MODULES
+            ${CMAKE_CURRENT_BINARY_DIR}/runtime_vendor_blas_stub.bc)
+    endif()
 else()
     # Mock runtime for testing without GPU
     compile_to_bitcode(mock/mock_gpu.cpp runtime_mock.bc)
@@ -391,7 +451,9 @@ else()
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_tensor.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_loop.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_if.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_profile.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_chrome_trace.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_output_allocator.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_state_stubs.bc

@@ -15,6 +15,7 @@
 
 #include "llvm/ADT/Sequence.h"
 
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Value.h"
@@ -416,6 +417,118 @@ GatherOp::reifyResultShapes(OpBuilder &b,
   return success();
 }
 
+LogicalResult
+GatherElementsOp::reifyResultShapes(OpBuilder &b,
+                                    ReifiedRankedShapedTypeDims &reified) {
+  if (getNumResults() == 0)
+    return failure();
+  auto indicesType = dyn_cast<RankedTensorType>(getIndices().getType());
+  if (!indicesType)
+    return failure();
+
+  SmallVector<OpFoldResult> dims;
+  for (auto i : llvm::seq<int64_t>(0, indicesType.getRank()))
+    dims.push_back(tensor::getMixedSize(b, getLoc(), getIndices(), i));
+  reified.assign({std::move(dims)});
+  return success();
+}
+
+LogicalResult
+OneHotOp::reifyResultShapes(OpBuilder &b,
+                            ReifiedRankedShapedTypeDims &reified) {
+  if (getNumResults() == 0)
+    return failure();
+  auto indicesType = dyn_cast<RankedTensorType>(getIndices().getType());
+  auto depthType = dyn_cast<RankedTensorType>(getDepth().getType());
+  if (!indicesType || !depthType)
+    return failure();
+
+  int64_t outRank = indicesType.getRank() + 1;
+  int64_t axis = getAxis();
+  if (axis < 0)
+    axis += outRank;
+
+  // The one-hot axis extent is the runtime *value* of the `depth` scalar
+  // (data-dependent), NOT any static dim of the `depth` tensor. A scalar
+  // depth's only "dim" is its element count (always 1), so reading
+  // `depth`'s shape here -- a rank-0 attr of 1, or dim(depth, 0) == 1 for a
+  // single-element rank-1 export -- both wrongly report an axis extent of 1.
+  // --hip-infer-shapes would then narrow the (dynamic) axis dim to a static
+  // 1 and the scatter drops every index >= 1, collapsing the axis to one
+  // row. Lift the axis extent from the DPS `outs` init instead: the
+  // ONNX->HIP converter sizes that init to the real depth via
+  // hip.readback_scalar (dynamic, so infer-shapes leaves it alone), or to a
+  // static extent when the depth folded at compile time (so infer-shapes
+  // narrows it correctly). Non-axis dims still come from `indices`, which
+  // may carry tighter static extents than the init.
+  //
+  // Before (buggy): rank-0 depth -> depthDim = 1 -> infer-shapes forces
+  //                 tensor<?x?x?> to tensor<?x?x1>.
+  // After:          depthDim = size(outs, axis) -> stays dynamic (readback)
+  //                 or narrows only to a genuine compile-time depth.
+  //
+  // Lift the axis extent from the init WITHOUT materializing a fresh
+  // `tensor.dim` on it: read the init's static dim directly, and for a
+  // dynamic axis reuse the init producer's own extent operand. A
+  // materialized `tensor.dim` would add a SECOND use to the init
+  // `tensor.empty`, tripping the single-use guard in `--hip-infer-shapes`
+  // (refineOneResult) that gates the whole result refinement -- so the
+  // static non-axis dims (from `indices`) would ALSO fail to narrow.
+  Value initVal = getOutput();
+  OpFoldResult axisExtent;
+  auto initTy = dyn_cast<RankedTensorType>(initVal.getType());
+  if (initTy && !initTy.isDynamicDim(axis))
+    axisExtent = b.getIndexAttr(initTy.getDimSize(axis));
+  else if (auto emptyOp = initVal.getDefiningOp<tensor::EmptyOp>())
+    axisExtent = emptyOp.getMixedSizes()[axis];
+  else
+    axisExtent = tensor::getMixedSize(b, getLoc(), getResult(0), axis);
+
+  SmallVector<OpFoldResult> dims;
+  int64_t inDim = 0;
+  for (int64_t outDim : llvm::seq<int64_t>(0, outRank)) {
+    if (outDim == axis)
+      dims.push_back(axisExtent);
+    else
+      dims.push_back(tensor::getMixedSize(b, getLoc(), getIndices(), inDim++));
+  }
+  reified.assign({std::move(dims)});
+  return success();
+}
+
+LogicalResult
+CompressOp::reifyResultShapes(OpBuilder &b,
+                              ReifiedRankedShapedTypeDims &reified) {
+  if (getNumResults() == 0)
+    return failure();
+  auto inputType = dyn_cast<RankedTensorType>(getInput().getType());
+  auto conditionType = dyn_cast<RankedTensorType>(getCondition().getType());
+  if (!inputType || !conditionType || conditionType.getRank() != 1)
+    return failure();
+
+  OpFoldResult condLen = tensor::getMixedSize(b, getLoc(), getCondition(), 0);
+
+  if (getFlatten()) {
+    reified.assign({SmallVector<OpFoldResult>{condLen}});
+    return success();
+  }
+
+  int64_t rank = inputType.getRank();
+  int64_t axis = getAxis();
+  if (axis < 0)
+    axis += rank;
+
+  SmallVector<OpFoldResult> dims;
+  for (int64_t i : llvm::seq<int64_t>(0, rank)) {
+    if (i == axis)
+      dims.push_back(condLen);
+    else
+      dims.push_back(tensor::getMixedSize(b, getLoc(), getInput(), i));
+  }
+  reified.assign({std::move(dims)});
+  return success();
+}
+
 LogicalResult GatherNDOp::reifyResultShapes(
     OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
   if (getNumResults() == 0)
@@ -504,6 +617,29 @@ RangeOp::reifyResultShapes(OpBuilder &b,
     reifiedReturnShapes.assign({std::move(dims)});
     return success();
   }
+  return cast<HipDpsOp>(getOperation())
+      .reifyResultShapes(b, reifiedReturnShapes);
+}
+
+//===----------------------------------------------------------------------===//
+// TopKOp
+//
+// Two DPS results (values, indices) share the same extents; the axis dim is K.
+// Lift each init's runtime shape via the shared HipDpsOp default body.
+//
+// Before:
+//   %v, %idx = hip.top_k(%ctx) ins(%x, %k : ...)
+//                            outs(%values, %indices : ...)
+// After (reified result shapes):
+//   values dim i  -> tensor.dim %values, %ci  (or memref.dim)
+//   indices dim i -> tensor.dim %indices, %ci
+//===----------------------------------------------------------------------===//
+
+LogicalResult
+TopKOp::reifyResultShapes(OpBuilder &b,
+                          ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() == 0)
+    return failure();
   return cast<HipDpsOp>(getOperation())
       .reifyResultShapes(b, reifiedReturnShapes);
 }

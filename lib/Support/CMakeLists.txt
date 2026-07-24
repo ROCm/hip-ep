@@ -10,3 +10,12 @@ target_include_directories(HipSupport PUBLIC
 )
 
 target_link_libraries(HipSupport PUBLIC cpptrace::cpptrace)
+
+# Shared constants.bin file I/O. Its own target (not folded into any
+# conversion) so producers -- OnnxToHip, the MorphiZen EP, hipsr-externalize-
+# constants -- depend on this rather than on each other's pipeline libs.
+add_library(HipConstantsIO STATIC ConstantsIO.cpp)
+
+target_include_directories(HipConstantsIO PRIVATE
+  ${CMAKE_SOURCE_DIR}/morphizen/morphizen-foundation/include  # file_io.hpp
+)

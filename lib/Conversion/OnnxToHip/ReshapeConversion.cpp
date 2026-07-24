@@ -13,35 +13,32 @@ namespace {
 // Shape Operations Helpers (Reshape, Unsqueeze, Squeeze)
 //===----------------------------------------------------------------------===//
 
-/// True when the defining op of the axes value is compile-time known.
-///
-/// After constant externalization, small onnx.Constant / arith.constant tensors
-/// become memref.get_global + bufferization.to_tensor (see OnnxToHip.cpp);
-/// those must still count as constant axes. Arbitrary ToTensor(alloc) is not.
-static bool axesDefOpIsCompileTimeKnown(mlir::Operation *axesDefOp) {
-  if (mlir::isa<mlir::arith::ConstantOp>(axesDefOp) ||
-      axesDefOp->hasAttr("value"))
-    return true;
-  auto toTensor = mlir::dyn_cast<mlir::bufferization::ToTensorOp>(axesDefOp);
-  if (!toTensor)
-    return false;
-  mlir::Operation *bufDef = toTensor.getBuffer().getDefiningOp();
-  return bufDef && mlir::isa<mlir::memref::GetGlobalOp>(bufDef);
-}
-
 /// Validate common requirements for Unsqueeze/Squeeze operations.
-/// Requires: 2 operands (data, axes), ranked tensors, matching element types,
-/// and constant axes (dynamic axes would require runtime shape computation).
+///
+/// Requires only: ranked data + result tensors with matching element type. The
+/// `axes` operand's VALUE is intentionally NOT required to be present or
+/// constant: both lowerings (Squeeze -> collapse_shape / rank-0 slice,
+/// Unsqueeze -> expand_shape) derive the reassociation purely from the
+/// input/output SHAPES (getReassociationIndicesForReshape), never from the axes
+/// values. Demanding a compile-time-constant axes operand only gate-kept valid
+/// zero-cost reshapes: a graph slice can route a folded `axes` constant in as a
+/// block-argument graph input (a mid-model part fed a shared `const_1d_*` axes
+/// tensor), and opset<13 carries axes as an attribute (1 operand) rather than
+/// an operand -- both were wrongly rejected, leaving the op unconverted ->
+/// `error: op was not bufferized`. `axes` is still returned (for callers that
+/// want it) when present.
 mlir::LogicalResult
 validateSqueezeUnsqueezeOp(mlir::Operation *op, mlir::PatternRewriter &rewriter,
                            const char *tensorOpName, mlir::Value &data,
                            mlir::Value &axes, mlir::RankedTensorType &inputType,
                            mlir::RankedTensorType &outputType) {
-  if (op->getNumOperands() != 2)
-    return rewriter.notifyMatchFailure(op, "expected 2 operands (data, axes)");
+  (void)tensorOpName;
+  if (op->getNumOperands() < 1)
+    return rewriter.notifyMatchFailure(op,
+                                       "expected at least 1 operand (data)");
 
   data = op->getOperand(0);
-  axes = op->getOperand(1);
+  axes = op->getNumOperands() >= 2 ? op->getOperand(1) : mlir::Value();
 
   inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
   outputType =
@@ -50,27 +47,6 @@ validateSqueezeUnsqueezeOp(mlir::Operation *op, mlir::PatternRewriter &rewriter,
     return rewriter.notifyMatchFailure(op, "expected ranked tensor types");
   if (inputType.getElementType() != outputType.getElementType())
     return rewriter.notifyMatchFailure(op, "element type mismatch");
-
-  auto axesDefOp = axes.getDefiningOp();
-  if (!axesDefOp) {
-    std::string msg =
-        "axes must be defined by a constant operation (block "
-        "argument not supported). Dynamic axes would require "
-        "runtime shape computation and cannot use zero-cost tensor.";
-    msg += tensorOpName;
-    return rewriter.notifyMatchFailure(op, msg);
-  }
-
-  if (!axesDefOpIsCompileTimeKnown(axesDefOp)) {
-    std::string msg =
-        "axes must be compile-time constant (arith.constant, onnx.Constant, or "
-        "memref.get_global + bufferization.to_tensor from constant "
-        "externalization). Dynamic axes need runtime shape computation and "
-        "cannot use zero-cost tensor.";
-    msg += tensorOpName;
-    msg += " approach";
-    return rewriter.notifyMatchFailure(op, msg);
-  }
 
   return mlir::success();
 }
@@ -568,6 +544,19 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
 //===----------------------------------------------------------------------===//
 
 /// onnx.Unsqueeze -> tensor.expand_shape (zero-cost metadata operation).
+///
+/// The reassociation is computed from the input/output SHAPES, so the `axes`
+/// operand is not read (it may even be a block-argument graph input after a
+/// graph slice routes a folded `const_1d_*` axes tensor across a part
+/// boundary).
+///
+/// Before:
+///   %r = onnx.Unsqueeze %x, %axes
+///          : (tensor<?x?x128xf16>, tensor<1xi64>) -> tensor<?x?x128x1xf16>
+/// After:
+///   %r = tensor.expand_shape %x [[0], [1], [2, 3]]
+///          output_shape [%b, %s, 128, 1]
+///          : tensor<?x?x128xf16> into tensor<?x?x128x1xf16>
 struct UnsqueezeToStdTensor : public mlir::RewritePattern {
   UnsqueezeToStdTensor(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Unsqueeze", /*benefit=*/1, ctx) {}
@@ -617,13 +606,52 @@ struct SqueezeToStdTensor : public mlir::RewritePattern {
         failed(result))
       return result;
 
+    mlir::Location loc = op->getLoc();
+
+    // Squeeze to a rank-0 scalar (typical case: a pooler reduces a [B,1]
+    // statistic to a single value that is then consumed as a scalar
+    // depth/index). A `tensor.collapse_shape` into rank-0 is only legal when
+    // every collapsed input dim is a STATIC 1; an input with a dynamic or
+    // non-unit dim (e.g. tensor<?x1xf16>) makes the verifier reject with "rank
+    // 0 memrefs can only be extended/collapsed with/from ones". Squeeze
+    // semantics guarantee every squeezed axis is size 1 at runtime, so slice
+    // out the leading unit corner to a fully-static all-ones shape first
+    // (zero-copy tensor.extract_slice), then collapse that to rank-0. The
+    // full-extent slice folds away for an already-static all-ones input.
+    //
+    // Before:
+    //   %r = onnx.Squeeze %x, %axes : (tensor<?x1xf16>, tensor<2xi64>)
+    //          -> tensor<f16>
+    // After:
+    //   %s = tensor.extract_slice %x[0, 0] [1, 1] [1, 1]
+    //          : tensor<?x1xf16> to tensor<1x1xf16>
+    //   %r = tensor.collapse_shape %s [] : tensor<1x1xf16> into tensor<f16>
+    if (outputType.getRank() == 0) {
+      int64_t inputRank = inputType.getRank();
+      llvm::SmallVector<mlir::OpFoldResult> offsets(inputRank,
+                                                    rewriter.getIndexAttr(0));
+      llvm::SmallVector<mlir::OpFoldResult> sizes(inputRank,
+                                                  rewriter.getIndexAttr(1));
+      llvm::SmallVector<mlir::OpFoldResult> strides(inputRank,
+                                                    rewriter.getIndexAttr(1));
+      llvm::SmallVector<int64_t> onesShape(inputRank, 1);
+      auto onesType =
+          mlir::RankedTensorType::get(onesShape, inputType.getElementType());
+      mlir::Value unitCorner = mlir::tensor::ExtractSliceOp::create(
+          rewriter, loc, onesType, data, offsets, sizes, strides);
+      auto collapseOp = mlir::tensor::CollapseShapeOp::create(
+          rewriter, loc, outputType, unitCorner,
+          llvm::ArrayRef<mlir::ReassociationIndices>{});
+      rewriter.replaceOp(op, collapseOp.getResult());
+      return mlir::success();
+    }
+
     auto reassocOpt =
         mlir::getReassociationIndicesForReshape(inputType, outputType);
     if (!reassocOpt)
       return rewriter.notifyMatchFailure(
           op, "cannot compute squeeze reassociation");
 
-    mlir::Location loc = op->getLoc();
     auto collapseOp = mlir::tensor::CollapseShapeOp::create(
         rewriter, loc, outputType, data, *reassocOpt);
     rewriter.replaceOp(op, collapseOp.getResult());

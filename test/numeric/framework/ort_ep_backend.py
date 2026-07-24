@@ -260,6 +260,18 @@ def create(pytest_config=None) -> OrtEpBackend:
     # are looked up against cwd at every call, which is fragile).
     _prepend_path(ep_dll_path.parent)
 
+    # The EP backend links vendor runtime DLLs (ROCm: amdhip64*, MIOpen,
+    # hipBLASLt) that live in the SDK's bin/, NOT next to the EP DLL. When
+    # THEROCK_DIST is set, prepend its bin/ in-process too — mirroring the
+    # python/whisper register_morphizen_ep, which prepends BOTH the EP dir and
+    # THEROCK_DIST/bin. The Windows loader does not reliably consult the
+    # shell-exported PATH for a LoadLibrary'd EP's transitive deps; the
+    # in-process prepend is what actually makes a split EP-bin / ROCm-SDK layout
+    # resolve. No-op when THEROCK_DIST is unset (deps co-located with the EP).
+    therock = os.environ.get("THEROCK_DIST")
+    if therock:
+        _prepend_path(Path(therock) / "bin")
+
     return OrtEpBackend(
         ep_name=ep_name,
         ep_dll_path=str(ep_dll_path),

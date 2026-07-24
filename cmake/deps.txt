@@ -18,7 +18,7 @@
 ## version. cmake/deps.cmake derives the per-OS archive basename
 ## (onnxruntime-win-x64-<ver>.zip / onnxruntime-linux-x64-<ver>.tgz). Resolved
 ## find_package-first; this is the download-only fallback.
-onnxruntime;https://github.com/microsoft/onnxruntime/releases/download;1.25.1
+onnxruntime;https://github.com/microsoft/onnxruntime/releases/download;1.27.0
 ##
 ## Source-built deps (hash = git tag/commit). Resolved find_package-first;
 ## these are the from-source fallbacks when no prefix is found.

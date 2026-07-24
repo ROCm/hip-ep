@@ -23,20 +23,29 @@ target_link_libraries(hip-test
   ${llvm_libs}
 )
 
-# LlvmIrJit (linked in via morphizen-custom-op-mlir above) dlopens the
-# matching custom_kernels_<arch>.{dll,so} at JIT init, anchoring the
-# lookup on the containing module's directory. So hip-test only needs
-# the per-arch DLLs co-located with hip-test.exe (which the kernel
-# install rule already arranges on Windows; Linux needs $ORIGIN/../lib in
-# the RPATH because the .so installs to lib/ while the exe installs to
-# bin/). Skipped on mock / GPU-less builds, where the per-arch targets
-# are not registered.
+# LlvmIrJit (linked in via morphizen-custom-op-mlir above) dlopens the matching
+# custom_kernels_<arch>.{dll,so} at JIT init using an EXPLICIT path built from
+# its own module directory (thisModuleDirectory() == the hip-test binary's dir).
+# An explicit-path dlopen bypasses RPATH search, so INSTALL_RPATH does NOT help
+# the kernel load -- the .so must physically sit next to hip-test. The kernel
+# target emits into lib/Runtime/Kernels/, so co-locate a copy beside hip-test
+# after each build or the JIT load fails at run time (LlvmIrJit::create ->
+# "Load(<dir>/libcustom_kernels_<arch>.so) failed"). copy_if_different is
+# idempotent and a no-op when the two dirs already coincide. Skipped on mock /
+# GPU-less builds, where the per-arch targets are not registered.
 if(NOT BUILD_MOCK_RUNTIME AND HIP_ARCHITECTURES)
   foreach(_arch IN LISTS HIP_ARCHITECTURES)
     if(TARGET custom_kernels_${_arch})
       add_dependencies(hip-test custom_kernels_${_arch})
+      add_custom_command(TARGET hip-test POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "$<TARGET_FILE:custom_kernels_${_arch}>"
+          "$<TARGET_FILE_DIR:hip-test>"
+        VERBATIM)
     endif()
   endforeach()
+  # Separate concern from the kernel co-location above: this lets the INSTALLED
+  # hip-test resolve its own DT_NEEDED shared libs (LLVM, ORT, ...) from ../lib.
   if(NOT WIN32)
     set_property(TARGET hip-test APPEND PROPERTY INSTALL_RPATH "$ORIGIN/../lib")
     set_target_properties(hip-test PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE)
@@ -45,13 +54,24 @@ endif()
 if(NOT BUILD_MOCK_RUNTIME)
   find_package(hip CONFIG REQUIRED)
   target_link_libraries(hip-test PRIVATE hip::host)
+  # Signals the output-allocator callback to hand the model.dll real device
+  # memory (hipMalloc) and copy it back D2H for validation. Mock builds omit
+  # this and the callback returns host buffers the CPU stubs write directly.
+  target_compile_definitions(hip-test PRIVATE HIPDNN_EP_LINK_HIP_HOST=1)
+
+  # Hide static-archive symbols so hip-test's statically-linked LLVM can't clash
+  # with a different shared libLLVM the HIP runtime may pull in at load time
+  # (which can SIGSEGV before main). GNU ld / lld only.
+  if(NOT WIN32)
+    target_link_options(hip-test PRIVATE "LINKER:--exclude-libs,ALL")
+  endif()
 endif()
 
 target_include_directories(hip-test
   BEFORE PRIVATE
   ${CMAKE_SOURCE_DIR}/include   # For hip/Support/DiskFileSystem.h (must precede local/include)
-  ${CMAKE_SOURCE_DIR}/3rd-party/morphizen/morphizen-foundation/include  # For morphizen-foundation/file_io.hpp
-  ${CMAKE_SOURCE_DIR}/3rd-party/morphizen/morphizen-core/include         # For morphizen/plugin.hpp (native loader)
+  ${CMAKE_SOURCE_DIR}/morphizen/morphizen-foundation/include  # For morphizen-foundation/file_io.hpp
+  ${CMAKE_SOURCE_DIR}/morphizen/morphizen-core/include         # For morphizen/plugin.hpp (native loader)
   ${CMAKE_SOURCE_DIR}/backend-mlir-compiler/custom-op-mlir/src           # For LlvmIrJit.h
 )
 

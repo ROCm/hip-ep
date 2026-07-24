@@ -39,23 +39,22 @@ docker's `--device=/dev/kfd`, and the container entrypoint
 ([`docker/entrypoint.sh`](../docker/entrypoint.sh)) detects the host GID
 on `/dev/kfd` and adds the in-container user to that group automatically.
 
-All commands below assume you are in `<workspace>/onnx-hipdnn-ep/` (the
+All commands below assume you are in `<workspace>/hip-ep/` (the
 project root). The build writes to sibling directories under `<workspace>/`
 (`build/`, `install/`); the Docker path auto-mounts the whole workspace. The
 TheRock ROCm SDK is auto-downloaded into the build tree at
-`build/onnx-hipdnn-ep/_therock/`.
+`build/hip-ep/_therock/`.
 
 ## Build from source (developers)
 
 ```bash
-git clone https://github.com/ROCm/onnx-hipdnn-ep.git
-cd onnx-hipdnn-ep
-git submodule update --init --recursive
+git clone https://github.com/ROCm/hip-ep.git
+cd hip-ep
 ```
 
 ### Native (no Docker)
 
-`build.py` is a plain cross-platform driver: it ensures submodules,
+`build.py` is a plain cross-platform driver: it
 checks the toolchain, auto-detects the GPU arch (from `/sys/class/kfd`), then
 runs the cmake configure/build/install into `<workspace>/install/`. All
 dependencies (incl. from-source LLVM) are resolved by `cmake/deps.cmake`.
@@ -81,7 +80,7 @@ python3 build.py
 The result tree under `<workspace>/install/`:
 
 - `bin/hip-onnx-runner`, `bin/hip-compiler`, `bin/hip-mlir-opt`, `bin/hip-test`
-- `lib/libhip-compiler.so`, `lib/libhipep.so`
+- `lib/libhip-compiler.so`, `lib/libhipgpu.so`
 
 A locally-built `install/` is **not** fully self-contained: `libonnxruntime.so`
 lives in the ONNX Runtime prefix and the ROCm libs in TheRock, so run with
@@ -99,23 +98,23 @@ section once `install/bin/` is populated.
 ## Use the prebuilt package (testers, no compile)
 
 A ready-to-run package is published for each green build. It contains every
-`.so` / binary the host needs (`libhipep`,
+`.so` / binary the host needs (`libhipgpu`,
 `hip-onnx-runner`, `onnxruntime_perf_test`, `model_benchmark`,
 `libonnxruntime`, `libonnxruntime-genai`) plus a `clang`/`lld` toolchain in
 `bin/` (next to the other tools). TheRock is **not** included — install ROCm on
 the host. Download it with `gh` (no compile needed):
 
 ```bash
-git clone https://github.com/ROCm/onnx-hipdnn-ep.git
-cd onnx-hipdnn-ep
+git clone https://github.com/ROCm/hip-ep.git
+cd hip-ep
 ./docker/run.sh image    # skip if the image is already built
 
 # Pick the latest green run from
-# https://github.com/ROCm/onnx-hipdnn-ep/actions/workflows/linux-build.yml
+# https://github.com/ROCm/hip-ep/actions/workflows/linux-build.yml
 RUN_ID=<paste-id>
 mkdir -p ../prebuilt/$RUN_ID
 ( cd ../prebuilt/$RUN_ID && \
-    gh run download $RUN_ID --repo ROCm/onnx-hipdnn-ep \
+    gh run download $RUN_ID --repo ROCm/hip-ep \
         --name linux-gpu-test-package --dir . && \
     chmod +x bin/* )
 ```
@@ -141,7 +140,7 @@ export ROOT="$WORKSPACE/install"            # built from source
 
 # THEROCK_DIST points the in-process tooling at the TheRock SDK that
 # `cmake/deps.cmake` auto-downloaded into the build tree at
-# $WORKSPACE/build/onnx-hipdnn-ep/_therock during the build. It is
+# $WORKSPACE/build/hip-ep/_therock during the build. It is
 # required at runtime even though the prebuilt package bundles transitive .so
 # files into $ROOT/lib, because:
 #   1. CompilerDriver::discoverLibraries() reads $THEROCK_DIST to
@@ -169,7 +168,7 @@ export LIBRARY_PATH="$ROOT/lib:$THEROCK_DIST/lib"
 export PATH="$ROOT/bin:$PATH"
 
 # Sanity check
-ldd "$ROOT/lib/libhipep.so" | grep "not found"   # expect empty
+ldd "$ROOT/lib/libhipgpu.so" | grep "not found"   # expect empty
 "$ROOT/bin/hip-onnx-runner" --help | head -5
 ```
 
@@ -182,7 +181,7 @@ exclusively, so the snippets are identical regardless of entry path.
 
 ### Model Inference with hip-onnx-runner
 
-`hip-onnx-runner` runs a single ONNX model through hipep EP and reports
+`hip-onnx-runner` runs a single ONNX model through hipgpu EP and reports
 timing. It is built by `build.py` and also ships in the prebuilt
 package.
 
@@ -197,7 +196,7 @@ package.
 > ```
 
 ```bash
-# Run with hipep EP (default), on your model directly (dynamic shape)
+# Run with hipgpu EP (default), on your model directly (dynamic shape)
 $ROOT/bin/hip-onnx-runner -m /path/to/model.onnx -i gen_inputs
 
 # Resolve symbolic input dims at runtime (the EP still compiles the dynamic graph)
@@ -227,17 +226,17 @@ $ROOT/bin/hip-onnx-runner -L ep_o_dump,cpu_o_dump
 ### Latency Benchmarking with onnxruntime_perf_test
 
 `onnxruntime_perf_test` benchmarks inference latency. It ships in the prebuilt
-package; a local build may not include it. The examples below compare hipep
+package; a local build may not include it. The examples below compare hipgpu
 EP against the CPU EP baseline (DML is Windows-only).
 
 ```bash
 # CPU baseline (no EP; useful to size the EP speedup)
 $ROOT/bin/onnxruntime_perf_test -e cpu -t 30 -c 1 -s /path/to/MODEL.onnx
 
-# hipep EP
+# hipgpu EP
 $ROOT/bin/onnxruntime_perf_test \
-  --plugin_ep_libs "hipep|$ROOT/lib/libhipep.so" \
-  --plugin_eps     "hipep" \
+  --plugin_ep_libs "hipgpu|$ROOT/lib/libhipgpu.so" \
+  --plugin_eps     "hipgpu" \
   -C "session.disable_cpu_ep_fallback|1" \
   -t 60 -c 1 -s -I \
   /path/to/MODEL.onnx
@@ -252,7 +251,7 @@ $ROOT/bin/onnxruntime_perf_test \
 | `-s` | Show per-iteration latency statistics |
 | `-I` | Use sequential inputs (do not randomize) |
 
-> The first iteration triggers hipep's HIP kernel JIT compile
+> The first iteration triggers hipgpu's HIP kernel JIT compile
 > (multi-minute); bump `-t` so steady-state samples dominate the average.
 
 ### OGA End-to-End Benchmarking with model_benchmark
@@ -264,7 +263,7 @@ prebuilt package to get it.
 The EP is selected by the model's `genai_config.json` `provider_options` and
 auto-discovered next to the OGA runtime lib -- do NOT pass `--ep_library`
 (upstream `model_benchmark` rejects it). With the upstream OGA (v0.14.0 + PR2194)
-the EP is the AMD GPU umbrella (`provider_options [{ "AMDGPU": {"profile": "llm"} }]`);
+the EP is the AMD GPU umbrella (`provider_options [{ "AMDGPU": {"profile": "hip"} }]`);
 the prebuilt package bundles the umbrella libs.
 
 ```bash
@@ -346,13 +345,13 @@ Inside `./docker/run.sh shell` this is handled automatically — the
 container entrypoint reads the host GID off `/dev/kfd` and adds the
 in-container user to it, so you don't need host `render` membership.
 
-**`EP library not found: libhipep.so` from `hip-onnx-runner`**
+**`EP library not found: libhipgpu.so` from `hip-onnx-runner`**
 
 The runner's search order is `$MORPHIZEN_EP_LIB` (full path) → cwd →
-`<exe-dir>/libhipep.so` → `<exe-dir>/../lib/libhipep.so`.
+`<exe-dir>/libhipgpu.so` → `<exe-dir>/../lib/libhipgpu.so`.
 If you're running out of `install/bin/`, no env vars are needed — the
 sibling `install/lib/` is auto-discovered. If you've copied the binary
-elsewhere, set `MORPHIZEN_EP_LIB=/full/path/to/libhipep.so`.
+elsewhere, set `MORPHIZEN_EP_LIB=/full/path/to/libhipgpu.so`.
 
 **`clang++ not found on PATH and HIPDNN_CLANG_PATH is unset or stale` from `hip-compiler`**
 

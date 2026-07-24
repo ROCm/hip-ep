@@ -23,11 +23,15 @@
   } while (0)
 
 // Map HIPDNN_EP_DATATYPE_* -> hip_dtype_t for hip_reduce_mean.
-// ReduceMean is float-domain; only fp16 is implemented in the kernel.
+// ReduceMean is float-domain: fp16 for the common true-fp16 path, plus fp32 for
+// models that upcast to fp32 before the mean (e.g. an attention
+// QK-normalization RMSNorm computed in fp32 for numerical stability).
 static int hipdnn_to_hip_dtype_mean(int64_t hipdnn_type) {
   switch (hipdnn_type) {
   case HIPDNN_EP_DATATYPE_HALF:
     return HIP_DTYPE_FLOAT16;
+  case HIPDNN_EP_DATATYPE_FLOAT:
+    return HIP_DTYPE_FLOAT32;
   default:
     return -1;
   }
@@ -80,7 +84,7 @@ int wrap_reduce_mean(RuntimeState *state, void *data, void *axes, void *output,
   if (hip_dtype < 0) {
     fprintf(stderr,
             "[REAL] wrap_reduce_mean: unsupported data_type=%s(%lld) "
-            "(supported: f16)\n",
+            "(supported: f16, f32)\n",
             hipdnn_ep_datatype_name(data_type), (long long)data_type);
     return -1;
   }

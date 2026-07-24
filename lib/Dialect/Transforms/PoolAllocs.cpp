@@ -63,6 +63,14 @@
 STATISTIC(NumAllocsPooled, "Number of allocations pooled into byte buffer");
 STATISTIC(NumStaticPacked, "Number of static allocations packed");
 STATISTIC(NumDynBuckets, "Number of dynamic size buckets created");
+STATISTIC(NumDomains, "Number of dominance domains (separate pools) created");
+STATISTIC(NumStaticFragBytes,
+          "Static-pool bytes beyond the max-load lower bound (fragmentation)");
+STATISTIC(NumDynFragUnits,
+          "Aligned dynamic-group staticFactor bytes beyond the max-load lower "
+          "bound (per-group fragmentation, pre-scale by the dynamic factor)");
+STATISTIC(NumSmallBucketExcessBins,
+          "Small-bucket bins beyond the peak concurrent count");
 
 namespace mlir {
 namespace hip {
@@ -86,6 +94,43 @@ struct AllocInfo {
 /// True when two allocs' [def, lastUse] intervals overlap.
 static bool lifetimesOverlap(const AllocInfo &a, const AllocInfo &b) {
   return !(a.lastUseIndex < b.defIndex || b.lastUseIndex < a.defIndex);
+}
+
+/// Byte size of a memref's STATIC dims: elementBytes * product(static dims).
+/// For a static memref this is the whole byte size; for a dynamic one it is the
+/// per-alloc `staticFactor` -- multiply by product(dynOperands) for the runtime
+/// byte size. Shared by the dynamic packer (as `staticFactor`) and the
+/// fragmentation probe (which compares aligned groups in these units, since the
+/// dynamic factor is common and symbolic within a group).
+static int64_t staticFactorBytes(MemRefType type) {
+  int64_t staticElems = 1;
+  for (int64_t dim : type.getShape())
+    if (!ShapedType::isDynamic(dim))
+      staticElems *= dim;
+  return static_cast<int64_t>(
+      llvm::divideCeil(staticElems * type.getElementTypeBitWidth(), 8));
+}
+
+/// Max-load lower bound: the peak sum of `sizeOf` over members live at a single
+/// point in time. No contiguous packing of these intervals can be smaller, so a
+/// packer's highwater minus this is its fragmentation. The load only rises when
+/// an interval starts, so the peak occurs at some member's def point; summing
+/// the members live AT each such point (not merely overlapping the anchor's
+/// interval -- two members can each overlap the anchor yet never coexist) is
+/// exact. O(n^2), fine here (n = allocs per domain, tens in practice).
+static int64_t
+maxConcurrentLoad(ArrayRef<const AllocInfo *> members,
+                  llvm::function_ref<int64_t(const AllocInfo *)> sizeOf) {
+  int64_t peak = 0;
+  for (const AllocInfo *anchor : members) {
+    unsigned point = anchor->defIndex;
+    int64_t load = 0;
+    for (const AllocInfo *other : members)
+      if (other->defIndex <= point && point <= other->lastUseIndex)
+        load += sizeOf(other); // live at `point` (includes anchor itself)
+    peak = std::max(peak, load);
+  }
+  return peak;
 }
 
 //===----------------------------------------------------------------------===//
@@ -209,12 +254,13 @@ struct Domain {
 /// Advisory threshold on the number of domains a single function produces.
 /// This is NOT a cap — the runtime grows its per-domain pool arrays on demand
 /// with no upper bound, so any domain count compiles and runs correctly. But a
-/// well-canonicalised graph produces 1 domain (the typical case after upstream
-/// hoisting) or 2 (when a host-load-dependent alloc forces a second domain).
-/// A count far above that usually means upstream hoisting is missing or some
-/// size arithmetic that `--hip-hoist-alloc-size-arith` should have lifted is
-/// still pinned below its allocs — so we emit a non-fatal remark to flag the
-/// likely pre-condition gap, then proceed normally.
+/// well-canonicalised graph produces 1 domain (the typical case once size
+/// arithmetic has been hoisted to block top) or 2 (when a host-load-dependent
+/// alloc forces a second domain). A count far above that usually means the
+/// earlier `--hip-hoist-alloc-size-arith` pass did not run, or size arithmetic
+/// it should have lifted is still pinned below its allocs — so we emit a
+/// non-fatal remark to flag the likely pre-condition gap, then proceed
+/// normally.
 static constexpr unsigned kDomainCountAdvisoryThreshold = 8;
 
 /// Greedy textual-order clustering of pooled allocs into dominance domains.
@@ -318,18 +364,28 @@ struct Reservation {
   int64_t size; ///< aligned byte size
 };
 
-/// Assign byte offsets to static allocs using a greedy best-fit strategy.
+/// Greedy best-fit gap packer over a lifetime-annotated set.
 ///
-/// For each alloc (processed largest-first), scan the existing reservations
-/// whose lifetimes overlap, find the smallest gap that fits, and place it
-/// there.  If no gap fits, append after the last overlapping reservation.
+/// `items` MUST be pre-sorted largest-first (by `sizeOf`) for good packing.
+/// For each item, scan the reservations whose lifetimes overlap, find the
+/// smallest gap that fits, and place it there; otherwise append after the
+/// last overlapping reservation. Returns `(item, alignedByteOffset)` and sets
+/// `highwater` = total span (aligned). `sizeOf` gives each item's UNALIGNED
+/// byte size (the packer aligns it).
+///
+/// Shared by Phase 3 (static packing, `sizeOf = staticByteSize`) and Phase 4's
+/// aligned-dynamic groups (`sizeOf = staticFactor`, offsets later scaled by the
+/// group's common dynamic factor -- see `packDynamicAllocs`).
 static SmallVector<std::pair<AllocInfo *, int64_t>>
-packStaticAllocs(MutableArrayRef<AllocInfo> statics, int64_t alignment) {
+packGreedyBestFit(ArrayRef<AllocInfo *> items,
+                  llvm::function_ref<int64_t(const AllocInfo *)> sizeOf,
+                  int64_t alignment, int64_t &highwater) {
   SmallVector<std::pair<AllocInfo *, int64_t>> assignments;
   SmallVector<Reservation, 16> reservations; // kept sorted by offset
+  highwater = 0;
 
-  for (AllocInfo &info : statics) {
-    int64_t size = llvm::alignTo(info.staticByteSize, alignment);
+  for (AllocInfo *info : items) {
+    int64_t size = llvm::alignTo(sizeOf(info), alignment);
     int64_t bestOffset = -1;
     int64_t bestFit = INT64_MAX;
 
@@ -337,7 +393,7 @@ packStaticAllocs(MutableArrayRef<AllocInfo> statics, int64_t alignment) {
     // the smallest gap between them that fits this allocation.
     int64_t currentOffset = 0;
     for (auto &res : reservations) {
-      if (!lifetimesOverlap(info, *res.info))
+      if (!lifetimesOverlap(*info, *res.info))
         continue;
       int64_t alignedOffset = llvm::alignTo(currentOffset, alignment);
       if (alignedOffset + size <= res.offset &&
@@ -353,38 +409,63 @@ packStaticAllocs(MutableArrayRef<AllocInfo> statics, int64_t alignment) {
       bestOffset = llvm::alignTo(currentOffset, alignment);
 
     // Insert into the sorted reservation list.
-    Reservation newRes{&info, bestOffset, size};
+    Reservation newRes{info, bestOffset, size};
     auto insertIt = reservations.begin();
     while (insertIt != reservations.end() && insertIt->offset < newRes.offset)
       ++insertIt;
     reservations.insert(insertIt, newRes);
-    assignments.emplace_back(&info, bestOffset);
+    assignments.emplace_back(info, bestOffset);
+    highwater = std::max(highwater, bestOffset + size);
   }
 
   return assignments;
 }
 
+/// Assign byte offsets to static allocs using greedy best-fit (thin wrapper
+/// over `packGreedyBestFit`). `statics` is pre-sorted largest-first by the
+/// caller.
+static SmallVector<std::pair<AllocInfo *, int64_t>>
+packStaticAllocs(MutableArrayRef<AllocInfo> statics, int64_t alignment) {
+  SmallVector<AllocInfo *> items;
+  items.reserve(statics.size());
+  for (AllocInfo &info : statics)
+    items.push_back(&info);
+  int64_t highwater = 0;
+  return packGreedyBestFit(
+      items, [](const AllocInfo *i) { return i->staticByteSize; }, alignment,
+      highwater);
+}
+
 //===----------------------------------------------------------------------===//
-// Phase 4 - Dynamic packing: bucket by structural byte-size, bin by lifetime
+// Phase 4 - Dynamic packing: factored static packing + small-bucket fallback
 //===----------------------------------------------------------------------===//
 //
-// For allocs with runtime-unknown sizes we cannot hardcode byte offsets.
-// Instead we group allocs that provably have the same runtime byte size into
-// "buckets", then within each bucket we bin allocs with non-overlapping
-// lifetimes so they can share one offset slot.
+// For allocs with runtime-unknown sizes we cannot hardcode byte offsets. Each
+// alloc's byte size is `staticFactor * product(dynOperands)`, where
+// staticFactor = elementBytes * product_of_static_dims and dynOperands are the
+// SSA values for the dynamic dims.
 //
-// Two-level grouping:
+// Two paths, split on whether `staticFactor` is a multiple of the pool
+// alignment (default 256 B):
 //
-//   Level 1 - Bucket by DynSizeKey:
-//     A DynSizeKey = {staticFactor, [dynOperands...]}.
-//     staticFactor = elementBytes * product_of_static_dims.
-//     dynOperands  = SSA values for the dynamic dimensions.
-//     Two allocs with the same key have the same runtime byte size:
-//       byte_size = staticFactor * dynDim0 * dynDim1 * ...
+//   ALIGNED (staticFactor % alignment == 0, the memory-dominant case):
+//     Group by dynOperands (common factor F = product(dynOperands)). Every
+//     member size is `staticFactor_i * F`, so members differ only by the
+//     integer staticFactor. Non-overlap is scale-invariant, so we run the same
+//     greedy best-fit packer as Phase 3 on the integer staticFactors -- packing
+//     largest-first, gap-filling, and letting disjoint-lifetime allocs of
+//     different sizes share one slab -- then scale offsets and the span by F at
+//     emit. Because staticFactor is a multiple of the alignment, the packed
+//     unit offsets are too, so `unitOffset * F` stays aligned for any F. This
+//     turns a group's transient footprint from a SUM of its size classes into
+//     a MAX of its concurrently-live members (see AlignedDynGroup).
 //
-//   Level 2 - Bin by lifetime:
-//     Within a bucket, first-fit pack allocs whose lifetimes don't overlap
-//     into bins.  All allocs in the same bin share one offset at runtime.
+//   SMALL (staticFactor not a multiple of the alignment, e.g. a per-channel
+//   scalar of 1 or 2 B):
+//     Negligible bytes; kept on the simple per-size scheme -- bucket by
+//     {staticFactor, dynOperands}, first-fit lifetime bins -- because the
+//     factoring would round their unit offsets up to the alignment and inflate
+//     each reservation by a factor of F.
 
 /// A bucket groups dynamic allocs that share the same runtime byte size.
 /// Within a bucket, each "bin" holds allocs with non-overlapping lifetimes
@@ -422,97 +503,132 @@ struct DynBucket {
   Value alignedSize;
 };
 
-/// Structural key for grouping allocs with identical runtime byte sizes.
-struct DynSizeKey {
-  int64_t staticFactor;
+/// An aligned-dynamic group: allocs that share the same `dynOperands` and whose
+/// `staticFactor` is a multiple of the pool alignment.  All member byte sizes
+/// are `staticFactor_i * F` with a common `F = product(dynOperands)`.  We pack
+/// the integer `staticFactor`s with the static greedy packer -- non-overlap is
+/// scale-invariant, so scaling every offset/size by the common `F` preserves it
+/// -- then multiply offsets and the span by `F` at emit.  Because every
+/// `staticFactor` is a multiple of `alignment`, the packed unit offsets are
+/// too, so `unitOffset * F` stays aligned for any integer `F` (no per-alloc
+/// alignment padding).
+///
+/// `assignments` = (alloc, unitOffset in staticFactor bytes); `spanUnits` =
+/// highwater in staticFactor bytes.  Emitted byte offset = base + unitOffset*F.
+struct AlignedDynGroup {
   SmallVector<Value, 2> dynOperands;
-
-  bool operator==(const DynSizeKey &other) const {
-    return staticFactor == other.staticFactor &&
-           dynOperands == other.dynOperands;
-  }
+  SmallVector<std::pair<AllocInfo *, int64_t>> assignments;
+  int64_t spanUnits = 0;
 };
 
-/// Group dynamic allocs into buckets and bins.
-///
-/// Pure structural analysis: no SSA values are emitted. Each returned
-/// `DynBucket` carries the `staticFactor` and `dynOperands` needed to
-/// rebuild the size at any insertion point during Phase 5; `byteSizeValue`
-/// and `alignedSize` start out null.
-///
-/// Allocs are grouped by the structural key `{staticFactor, dynOperands}`.
-/// Within each group, allocs whose lifetimes do not overlap are bin-packed
-/// (first-fit) so they can share a single offset at runtime.
-static SmallVector<DynBucket>
-packDynamicAllocs(MutableArrayRef<AllocInfo> dynamics) {
-  struct KeyedInfo {
-    DynSizeKey key;
-    AllocInfo *info;
-  };
+/// Phase-4 result: aligned groups (factored static packing -- the memory-
+/// dominant case) plus small buckets (`staticFactor` not a multiple of the
+/// alignment -> per-size bucket/bin packing in byte space).  Small allocs stay
+/// off the factoring path because rounding their unit offsets up to the pool
+/// alignment would inflate each reservation by a factor of F; keeping them
+/// byte-aligned avoids that, and their byte contribution is negligible.
+struct DynPacking {
+  SmallVector<AlignedDynGroup> alignedGroups;
+  SmallVector<DynBucket> smallBuckets;
+  bool empty() const { return alignedGroups.empty() && smallBuckets.empty(); }
+};
 
-  // Step 1: build structural keys.
-  SmallVector<KeyedInfo> keyed;
-  for (AllocInfo &info : dynamics) {
+/// Group dynamic allocs and assign each a byte offset (see AlignedDynGroup /
+/// DynPacking).
+///
+/// Aligned allocs are grouped by `dynOperands`; within a group every size is
+/// `staticFactor_i * F` with a common `F = product(dynOperands)`, so best-fit-
+/// packing the integer `staticFactor`s largest-first and scaling by `F` lets
+/// disjoint-lifetime allocs of different sizes share one slab -- a group's
+/// footprint is then the MAX of its concurrently-live members, not the SUM of
+/// its size classes. Small (non-alignment-multiple) allocs are bucketed by
+/// `{staticFactor, dynOperands}` and lifetime-binned in byte space instead (see
+/// DynPacking for why they stay off the factoring path).
+static DynPacking packDynamicAllocs(MutableArrayRef<AllocInfo> dynamics,
+                                    int64_t alignment) {
+  // staticFactor (elem bytes * product of static dims) + dynOperands per alloc.
+  auto computeKey = [](AllocInfo &info) {
     MemRefType type = info.allocOp.getType();
     auto dynSizes = info.allocOp.getDynamicSizes();
-    int64_t totalBits = type.getElementTypeBitWidth();
-    int64_t staticFactor = 1;
-    for (int64_t dim : type.getShape())
-      if (!ShapedType::isDynamic(dim))
-        staticFactor *= dim;
-    staticFactor =
-        static_cast<int64_t>(llvm::divideCeil(staticFactor * totalBits, 8));
-    DynSizeKey key;
-    key.staticFactor = staticFactor;
+    int64_t staticFactor = staticFactorBytes(type);
+    SmallVector<Value, 2> dynOperands;
     unsigned dynIdx = 0;
     for (int64_t dim : type.getShape())
       if (ShapedType::isDynamic(dim))
-        key.dynOperands.push_back(dynSizes[dynIdx++]);
-    keyed.push_back({key, &info});
-  }
-
-  // Step 2: group allocs by structural key. We keep insertion order so the
-  // emit phase processes buckets in the order they were first encountered;
-  // SmallVector + linear scan is fine because the number of unique keys is
-  // small (≤ tens on real models).
-  SmallVector<DynBucket> buckets;
-  auto findOrCreateBucket = [&](const DynSizeKey &key) -> DynBucket & {
-    for (auto &b : buckets)
-      if (b.staticFactor == key.staticFactor &&
-          b.dynOperands == key.dynOperands)
-        return b;
-    DynBucket b;
-    b.staticFactor = key.staticFactor;
-    b.dynOperands.assign(key.dynOperands.begin(), key.dynOperands.end());
-    buckets.push_back(std::move(b));
-    return buckets.back();
+        dynOperands.push_back(dynSizes[dynIdx++]);
+    return std::make_pair(staticFactor, dynOperands);
   };
 
-  // Step 3: first-fit bin packing within each bucket. Two allocs share a
-  // bin iff their lifetimes don't overlap; bins map 1:1 to runtime
-  // offsets.
-  for (auto &[key, info] : keyed) {
-    DynBucket &bucket = findOrCreateBucket(key);
-    bool placed = false;
+  DynPacking result;
+  DenseMap<const AllocInfo *, int64_t> staticFactorOf;
+
+  // ALIGNED allocs: collect per `dynOperands` group (SSA identity) before
+  // packing, so each group can be sorted largest-first.
+  struct AlignedTmp {
+    SmallVector<Value, 2> dynOperands;
+    SmallVector<AllocInfo *> allocs;
+  };
+  SmallVector<AlignedTmp> alignedTmp;
+  auto findAligned = [&](ArrayRef<Value> ops) -> AlignedTmp & {
+    for (auto &t : alignedTmp)
+      if (ArrayRef<Value>(t.dynOperands) == ops)
+        return t;
+    alignedTmp.push_back({SmallVector<Value, 2>(ops.begin(), ops.end()), {}});
+    return alignedTmp.back();
+  };
+
+  // SMALL allocs: bucket by `{staticFactor, dynOperands}` + first-fit lifetime
+  // bins (per-size packing in byte space).
+  auto findOrCreateBucket = [&](int64_t sf,
+                                ArrayRef<Value> ops) -> DynBucket & {
+    for (auto &b : result.smallBuckets)
+      if (b.staticFactor == sf && ArrayRef<Value>(b.dynOperands) == ops)
+        return b;
+    DynBucket b;
+    b.staticFactor = sf;
+    b.dynOperands.assign(ops.begin(), ops.end());
+    result.smallBuckets.push_back(std::move(b));
+    return result.smallBuckets.back();
+  };
+  auto binPack = [](DynBucket &bucket, AllocInfo *info) {
     for (auto &bin : bucket.bins) {
       bool conflicts = false;
-      for (AllocInfo *existing : bin) {
-        if (lifetimesOverlap(*info, *existing)) {
+      for (AllocInfo *e : bin)
+        if (lifetimesOverlap(*info, *e)) {
           conflicts = true;
           break;
         }
-      }
       if (!conflicts) {
         bin.push_back(info);
-        placed = true;
-        break;
+        return;
       }
     }
-    if (!placed)
-      bucket.bins.push_back({info});
+    bucket.bins.push_back({info});
+  };
+
+  for (AllocInfo &info : dynamics) {
+    auto [sf, ops] = computeKey(info);
+    staticFactorOf[&info] = sf;
+    if (sf % alignment == 0)
+      findAligned(ops).allocs.push_back(&info);
+    else
+      binPack(findOrCreateBucket(sf, ops), &info);
   }
 
-  return buckets;
+  // Pack each aligned group largest-`staticFactor`-first with best-fit gaps.
+  for (auto &t : alignedTmp) {
+    llvm::stable_sort(t.allocs, [&](AllocInfo *a, AllocInfo *b) {
+      return staticFactorOf.lookup(a) > staticFactorOf.lookup(b);
+    });
+    AlignedDynGroup g;
+    g.dynOperands = std::move(t.dynOperands);
+    g.assignments = packGreedyBestFit(
+        t.allocs, [&](const AllocInfo *i) { return staticFactorOf.lookup(i); },
+        alignment, g.spanUnits);
+    result.alignedGroups.push_back(std::move(g));
+  }
+
+  return result;
 }
 
 /// Emit the SSA values describing a bucket's runtime byte size at the
@@ -653,18 +769,19 @@ void PoolAllocsPass::runOnOperation() {
   // ----- Phase 1.5: partition allocs into dominance domains ------------
 
   SmallVector<Domain> domains = partitionByDominanceDomain(allInfos, block);
+  NumDomains += domains.size();
 
   // The domain count is unbounded — the runtime grows its per-domain pool
   // arrays on demand — so a high count is correct, just suspicious. Emit a
   // non-fatal remark (compilation continues) pointing at the likely missing
-  // upstream pre-condition, rather than failing the pass.
+  // pipeline pre-condition, rather than failing the pass.
   if (domains.size() > kDomainCountAdvisoryThreshold) {
     funcOp.emitRemark("hip-pool-allocs: dominance partition produced ")
         << domains.size() << " domains (advisory threshold "
         << kDomainCountAdvisoryThreshold
-        << "); this usually means upstream hoisting "
-           "(--hip-hoist-alloc-size-arith) is missing or canonicalization left "
-           "unhoistable size arithmetic in place. Compilation continues.";
+        << "); this usually means the earlier --hip-hoist-alloc-size-arith "
+           "pass did not run, or canonicalization left unhoistable size "
+           "arithmetic in place. Compilation continues.";
   }
 
   LLVM_DEBUG({
@@ -726,9 +843,67 @@ void PoolAllocsPass::runOnOperation() {
     }
 
     // Phase 4: bucket dynamics within this domain.
-    auto dynBuckets = packDynamicAllocs(dynamics);
-    NumDynBuckets += dynBuckets.size();
-    bool hasDynamic = !dynBuckets.empty();
+    auto dynPacking = packDynamicAllocs(dynamics, align);
+    NumDynBuckets +=
+        dynPacking.alignedGroups.size() + dynPacking.smallBuckets.size();
+    bool hasDynamic = !dynPacking.empty();
+    // F = product(dynOperands) per aligned group; emitted below (Phase 5) and
+    // reused for both the pool-size and per-alloc offset arithmetic.
+    SmallVector<Value> groupFactors(dynPacking.alignedGroups.size());
+
+    // Debug-only fragmentation probe. Reads the packing result (no IR emitted,
+    // no offsets changed) and compares each part of this domain's footprint to
+    // its max-load lower bound; the surplus is recoverable fragmentation. A
+    // zero surplus means best-fit reached the theoretical floor for that part.
+    // Static bytes and small-bucket bins are exact; aligned dynamic groups are
+    // compared in staticFactor units because the dynamic factor F is common
+    // (and symbolic) within a group, so the byte surplus is (unit surplus) * F.
+    // Runs unconditionally (accumulates statistics); only the per-domain remark
+    // is gated behind the emit-fragmentation-report option.
+    {
+      SmallVector<const AllocInfo *> members;
+      members.reserve(statics.size());
+      for (const AllocInfo &s : statics)
+        members.push_back(&s);
+      int64_t staticLb = maxConcurrentLoad(members, [&](const AllocInfo *i) {
+        return llvm::alignTo(i->staticByteSize, align);
+      });
+      int64_t staticFrag = staticPoolSize - staticLb;
+      NumStaticFragBytes += staticFrag;
+
+      int64_t dynSpanUnits = 0, dynLbUnits = 0;
+      for (const AlignedDynGroup &group : dynPacking.alignedGroups) {
+        members.clear();
+        for (const auto &[info, unitOffset] : group.assignments)
+          members.push_back(info);
+        dynSpanUnits += group.spanUnits;
+        dynLbUnits += maxConcurrentLoad(members, [](const AllocInfo *i) {
+          memref::AllocOp op = i->allocOp; // copy handle to drop constness
+          return staticFactorBytes(op.getType());
+        });
+      }
+      NumDynFragUnits += dynSpanUnits - dynLbUnits;
+
+      int64_t smallBins = 0, smallMinBins = 0;
+      for (const DynBucket &bucket : dynPacking.smallBuckets) {
+        members.clear();
+        for (const auto &bin : bucket.bins)
+          members.append(bin.begin(), bin.end());
+        smallBins += static_cast<int64_t>(bucket.bins.size());
+        smallMinBins += maxConcurrentLoad(
+            members, [](const AllocInfo *) { return int64_t{1}; });
+      }
+      NumSmallBucketExcessBins += smallBins - smallMinBins;
+
+      if (emitFragmentationReport)
+        funcOp.emitRemark()
+            << "hip-pool-allocs fragmentation: domain " << domainId
+            << ": static " << staticPoolSize << "/" << staticLb << " B ("
+            << staticFrag << " frag); dyn-groups " << dynSpanUnits << "/"
+            << dynLbUnits << " units (" << (dynSpanUnits - dynLbUnits)
+            << " frag); small-buckets " << smallBins << "/" << smallMinBins
+            << " bins (" << (smallBins - smallMinBins) << " excess)";
+    }
 
     domainPoolStaticSizes.push_back(staticPoolSize);
 
@@ -745,28 +920,45 @@ void PoolAllocsPass::runOnOperation() {
     for (AllocInfo *info : domain.allocs)
       domainAllocOps.push_back(info->allocOp.getOperation());
 
-    for (auto &bucket : dynBuckets) {
+    // Move the builder to the latest legal point for `dynOperands`-derived
+    // size arithmetic: strictly after every dyn-operand def, strictly before
+    // every alloc in this domain. Shared by the aligned-group F emit and the
+    // small-bucket size emit. Returns false (after emitting an error) when no
+    // such point exists -- impossible after a successful Phase 1.5 partition,
+    // whose feasibility check is a superset of this one.
+    auto seekSizeInsertionPoint = [&](ArrayRef<Value> dynOperands) -> bool {
       SmallVector<Operation *> requiredAfter;
-      for (Value dynOp : bucket.dynOperands)
+      for (Value dynOp : dynOperands)
         if (auto *def = dynOp.getDefiningOp())
           if (def->getBlock() == &block)
             requiredAfter.push_back(def);
       auto ip =
           findLatestLegalInsertionPoint(block, requiredAfter, domainAllocOps);
       if (!ip) {
-        // Should be impossible after a successful Phase 1.5 partition:
-        // partitionByDominanceDomain only forms a domain when its full
-        // {requiredAfter, requiredBefore} union admits a strict insertion
-        // point, and a single bucket's constraints are a subset of the
-        // domain's. Surface anyway in case a future change diverges the
-        // two feasibility checks.
         funcOp.emitError(
-            "hip-pool-allocs: cannot place bucket size arithmetic at a "
-            "legal point in the block (a dyn-operand def is at-or-after "
-            "the earliest pooled alloc in its domain)");
-        return signalPassFailure();
+            "hip-pool-allocs: cannot place dynamic size arithmetic at a legal "
+            "point in the block (a dyn-operand def is at-or-after the earliest "
+            "pooled alloc in its domain)");
+        return false;
       }
       builder.setInsertionPoint(&block, *ip);
+      return true;
+    };
+
+    // Emit each aligned group's F = product(dynOperands).
+    for (auto [gi, group] : llvm::enumerate(dynPacking.alignedGroups)) {
+      if (!seekSizeInsertionPoint(group.dynOperands))
+        return signalPassFailure();
+      Value f = arith::ConstantIndexOp::create(builder, loc, 1);
+      for (Value d : group.dynOperands)
+        f = builder.createOrFold<arith::MulIOp>(loc, f, d);
+      groupFactors[gi] = f;
+    }
+
+    // Emit each small bucket's aligned byte size.
+    for (auto &bucket : dynPacking.smallBuckets) {
+      if (!seekSizeInsertionPoint(bucket.dynOperands))
+        return signalPassFailure();
       emitBucketSize(builder, loc, bucket, align);
     }
 
@@ -774,7 +966,12 @@ void PoolAllocsPass::runOnOperation() {
     // SSA value, before every alloc IN THIS DOMAIN.
     {
       SmallVector<Operation *> requiredAfter;
-      for (auto &bucket : dynBuckets) {
+      for (Value f : groupFactors)
+        if (f)
+          if (auto *def = f.getDefiningOp())
+            if (def->getBlock() == &block)
+              requiredAfter.push_back(def);
+      for (auto &bucket : dynPacking.smallBuckets) {
         Value v =
             bucket.alignedSize ? bucket.alignedSize : bucket.byteSizeValue;
         if (!v)
@@ -788,25 +985,33 @@ void PoolAllocsPass::runOnOperation() {
       if (!ip) {
         funcOp.emitError(
             "hip-pool-allocs: cannot place hip.get_pool at a legal point "
-            "(some bucket size arithmetic is at-or-after an alloc in its "
+            "(some dynamic size arithmetic is at-or-after an alloc in its "
             "domain)");
         return signalPassFailure();
       }
       builder.setInsertionPoint(&block, *ip);
     }
 
-    // Pool size = staticPoolSize + sum_buckets(alignedSize * numBins).
+    // Pool size = staticPoolSize
+    //           + sum_alignedGroups(spanUnits * F)
+    //           + sum_smallBuckets(alignedSize * numBins).
     Value poolSize =
         arith::ConstantIndexOp::create(builder, loc, staticPoolSize);
-    if (hasDynamic) {
-      for (auto &bucket : dynBuckets) {
-        Value numBinsVal = arith::ConstantIndexOp::create(
-            builder, loc, static_cast<int64_t>(bucket.bins.size()));
-        Value contribution = builder.createOrFold<arith::MulIOp>(
-            loc, bucket.alignedSize, numBinsVal);
-        poolSize =
-            builder.createOrFold<arith::AddIOp>(loc, poolSize, contribution);
-      }
+    for (auto [gi, group] : llvm::enumerate(dynPacking.alignedGroups)) {
+      Value spanVal =
+          arith::ConstantIndexOp::create(builder, loc, group.spanUnits);
+      Value contribution =
+          builder.createOrFold<arith::MulIOp>(loc, groupFactors[gi], spanVal);
+      poolSize =
+          builder.createOrFold<arith::AddIOp>(loc, poolSize, contribution);
+    }
+    for (auto &bucket : dynPacking.smallBuckets) {
+      Value numBinsVal = arith::ConstantIndexOp::create(
+          builder, loc, static_cast<int64_t>(bucket.bins.size()));
+      Value contribution = builder.createOrFold<arith::MulIOp>(
+          loc, bucket.alignedSize, numBinsVal);
+      poolSize =
+          builder.createOrFold<arith::AddIOp>(loc, poolSize, contribution);
     }
 
     // Tag the get_pool with this domain's id so the runtime grows the right
@@ -829,7 +1034,27 @@ void PoolAllocsPass::runOnOperation() {
     if (hasDynamic) {
       Value currentBase =
           arith::ConstantIndexOp::create(builder, loc, staticPoolSize);
-      for (auto &bucket : dynBuckets) {
+      // Aligned groups: byte offset = currentBase + unitOffset * F; the group
+      // occupies spanUnits * F bytes.
+      for (auto [gi, group] : llvm::enumerate(dynPacking.alignedGroups)) {
+        Value f = groupFactors[gi];
+        for (auto &[info, unitOffset] : group.assignments) {
+          Value off = currentBase;
+          if (unitOffset != 0) {
+            Value uo = arith::ConstantIndexOp::create(builder, loc, unitOffset);
+            Value scaled = builder.createOrFold<arith::MulIOp>(loc, f, uo);
+            off = builder.createOrFold<arith::AddIOp>(loc, currentBase, scaled);
+          }
+          allocToOffset[info->allocOp.getOperation()] = off;
+        }
+        Value spanVal =
+            arith::ConstantIndexOp::create(builder, loc, group.spanUnits);
+        Value groupTotal = builder.createOrFold<arith::MulIOp>(loc, f, spanVal);
+        currentBase =
+            builder.createOrFold<arith::AddIOp>(loc, currentBase, groupTotal);
+      }
+      // Small buckets: bin offset = currentBase + binIdx * alignedSize.
+      for (auto &bucket : dynPacking.smallBuckets) {
         for (auto [binIdx, bin] : llvm::enumerate(bucket.bins)) {
           Value binIdxVal = arith::ConstantIndexOp::create(
               builder, loc, static_cast<int64_t>(binIdx));
@@ -851,8 +1076,9 @@ void PoolAllocsPass::runOnOperation() {
 
     LLVM_DEBUG(llvm::dbgs()
                << "  Pool[" << domainId << "]: static=" << staticPoolSize
-               << " bytes, " << dynBuckets.size() << " dynamic buckets, "
-               << domain.allocs.size() << " allocs\n");
+               << " bytes, " << dynPacking.alignedGroups.size()
+               << " aligned dyn groups, " << dynPacking.smallBuckets.size()
+               << " small buckets, " << domain.allocs.size() << " allocs\n");
 
     // Replace this domain's allocs with views into THIS domain's pool.
     // Metadata (offset + domain id) is recorded BEFORE erasing the alloc
