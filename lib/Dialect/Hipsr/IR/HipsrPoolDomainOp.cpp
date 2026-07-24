@@ -9,7 +9,7 @@
 // type, rather than the forward declaration in HipsrPoolDomainOp.h.
 #include "hip/Dialect/Hipsr/IR/HipsrPoolDomainYieldOp.h"
 
-#include <cassert>
+#include "llvm/Support/ErrorHandling.h"
 
 using namespace mlir;
 using namespace mlir::hipsr;
@@ -17,8 +17,11 @@ using namespace mlir::hipsr;
 // Explicit operands cross the isolation boundary as entry-block arguments.
 OperandRange
 PoolDomainOp::getEntrySuccessorOperands(RegionSuccessor successor) {
-  assert(successor.getSuccessor() == &getBody() &&
-         "expected the pool domain body");
+  if (successor.getSuccessor() != &getBody()) {
+    emitOpError("expected its body as the entry successor");
+    llvm::report_fatal_error(
+        "hipsr.pool_domain received an unexpected entry successor");
+  }
   return getOperands();
 }
 
@@ -31,9 +34,12 @@ void PoolDomainOp::getSuccessorRegions(
     return;
   }
 
-  assert(point.getTerminatorPredecessorOrNull()->getParentRegion() ==
-             &getBody() &&
-         "expected the pool domain body");
+  Operation *terminator = point.getTerminatorPredecessorOrNull();
+  if (!terminator || terminator->getParentRegion() != &getBody()) {
+    emitOpError("expected a branch point in its body");
+    llvm::report_fatal_error(
+        "hipsr.pool_domain received an unexpected branch point");
+  }
   regions.emplace_back(getOperation(), getResults());
 }
 
