@@ -199,7 +199,7 @@ Analysis/comparison → Tech Note
 | Design | [output-allocator-design.md](../design/output-allocator-design.md) | Separation of concerns + diagrams |
 | Design | [op-state-slots-design.md](../design/op-state-slots-design.md) | Compile-time identity vs runtime construction |
 | Design | [pool-allocs-memory-planning.md](../design/pool-allocs-memory-planning.md) | Pass computes count + offsets; init consumes |
-| Overview | [technical-pipeline-walkthrough.md](../technical-pipeline-walkthrough.md) | End-to-end compile/runtime flow |
+| Reference | [pipeline_pass_menu.md](../pipeline_pass_menu.md) | Pass names, anchors, and built-in order |
 
 ---
 
