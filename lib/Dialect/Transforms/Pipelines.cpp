@@ -303,12 +303,12 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   // mapping, etc.) -- the conversion pass already iterates all func.func
   // ops in the module.
   //
-  // ONNX-side shape refinement is intentionally NOT done here. The
-  // importer is responsible for emitting `tensor<*xT>` (unranked) for
-  // values whose shape it does not know, and `tensor<>` (rank-0) only
-  // for genuine scalars. Any unranked tensors that survive into the
-  // HIP dialect are refined post-conversion by `--hip-infer-shapes`
-  // via `ReifyRankedShapedTypeOpInterface`. See
+  // General ONNX-side shape refinement is intentionally NOT done here. The
+  // importer is responsible for emitting `tensor<*xT>` (unranked) for values
+  // whose shape it does not know, and `tensor<>` (rank-0) only for genuine
+  // scalars. The narrow pre-conversion pass below establishes rank where
+  // outlined-loop conversion requires it; post-conversion
+  // `--hip-infer-shapes` only narrows `?` dims on ranked HIP results. See
   // `docs/design/unranked-tensor-handling.md` for the full contract.
   //
   // TODO(unranked-import-contract): the unranked-import contract on
