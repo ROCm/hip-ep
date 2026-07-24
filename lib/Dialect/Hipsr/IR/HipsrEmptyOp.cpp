@@ -37,19 +37,18 @@ LogicalResult EmptyOp::verify() {
   return success();
 }
 
-SmallVector<SmallVector<Value>> EmptyOp::getShapes() {
+SmallVector<SmallVector<OpFoldResult>> EmptyOp::getMixedSizes() {
   assert(!getRegion().empty() &&
-         "region must be populated before calling getShapes");
+         "region must be populated before calling getMixedSizes");
   auto yieldOp = cast<EmptyYieldOp>(getRegion().front().getTerminator());
-  SmallVector<SmallVector<Value>> dimsPerResult;
+  SmallVector<SmallVector<OpFoldResult>> sizesPerResult;
   for (Value t : yieldOp.getTensors()) {
-    SmallVector<Value> dims;
-    if (auto emptyTensor = t.getDefiningOp<tensor::EmptyOp>()) {
-      dims = llvm::to_vector(emptyTensor.getDynamicSizes());
-    }
-    dimsPerResult.push_back(std::move(dims));
+    auto emptyTensor = t.getDefiningOp<tensor::EmptyOp>();
+    assert(emptyTensor && "hipsr.empty_yield verifier should ensure operands "
+                          "are tensor.empty results");
+    sizesPerResult.push_back(emptyTensor.getMixedSizes());
   }
-  return dimsPerResult;
+  return sizesPerResult;
 }
 
 SmallVector<RankedTensorType> EmptyOp::getTensorTypes() {

@@ -58,9 +58,11 @@ def Hipsr_EmptyOp : Hipsr_Op<"empty",
   let hasVerifier = 1;
 
   let extraClassDeclaration = [{
-    /// Runtime dim SSA values per result: [[dims for result 0], ...]. Region
-    /// must be populated.
-    ::llvm::SmallVector<::llvm::SmallVector<::mlir::Value>> getShapes();
+    /// Mixed static/dynamic sizes per result, preserving dimension position:
+    /// [[sizes for result 0], ...]. Each entry is an Attribute (static extent)
+    /// or a Value (runtime extent), mirroring tensor::EmptyOp::getMixedSizes().
+    ::llvm::SmallVector<::llvm::SmallVector<::mlir::OpFoldResult>>
+    getMixedSizes();
 
     ::llvm::SmallVector<::mlir::RankedTensorType> getTensorTypes();
   }];

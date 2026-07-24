@@ -81,6 +81,17 @@ func.func @later_result_type_mismatch() -> (tensor<4xf16>, tensor<4xi64>) {
 }
 
 // -----
+// Verifier: each empty_yield operand must be a tensor.empty result. Here the
+// region yields a parent-scope value (%arg) instead of a tensor.empty.
+func.func @yield_non_tensor_empty(%arg: tensor<4xf16>) -> tensor<4xf16> {
+  %0 = hipsr.empty() : tensor<4xf16> {
+    // expected-error @+1 {{operand #0 must be a tensor.empty result}}
+    hipsr.empty_yield %arg : tensor<4xf16>
+  }
+  return %0 : tensor<4xf16>
+}
+
+// -----
 // Verifier (HasParent): empty_yield outside a hipsr.empty is rejected.
 func.func @yield_without_parent(%t: tensor<4xf16>) {
   // expected-error @+1 {{expects parent op 'hipsr.empty'}}

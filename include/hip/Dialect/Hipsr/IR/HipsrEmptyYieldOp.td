@@ -39,6 +39,8 @@ def Hipsr_EmptyYieldOp : Hipsr_Op<"empty_yield",
 
   let assemblyFormat = "($tensors^ `:` type($tensors))? attr-dict";
 
+  let hasVerifier = 1;
+
   let builders = [
     // No-arg build for the implicit terminator the parent auto-inserts.
     OpBuilder<(ins), [{
