@@ -63,6 +63,40 @@ int wrap_transpose(RuntimeState *state, const void *input, void *output,
       "[REAL] wrap_transpose: rank=%lld, num_elements=%lld, elem_size=%lld\n",
       (long long)rank, (long long)num_elements, (long long)element_size_bytes);
 
+  // Fast path: a batched last-two-dim swap of 1/2/4/8-byte elements
+  // (perm = [0,1,...,r-3, r-1, r-2]) is the layout flip around
+  // linear_attention ([1, S, F] <-> [1, F, S]) that dominates transpose GPU
+  // time. The generic kernel below gathers per output element with an
+  // uncoalesced read there; the tiled kernel restores coalescing. Bit-exact
+  // data movement, so it cannot change any model's output. Falls through to the
+  // generic path if the tiled launcher declines (unsupported width or
+  // batch > gridDim.z limit).
+  if (rank >= 2 && (element_size_bytes == 1 || element_size_bytes == 2 ||
+                    element_size_bytes == 4 || element_size_bytes == 8)) {
+    bool last_two_swap =
+        perm[rank - 1] == rank - 2 && perm[rank - 2] == rank - 1;
+    for (int64_t i = 0; last_two_swap && i < rank - 2; ++i)
+      last_two_swap = perm[i] == i;
+    if (last_two_swap) {
+      int64_t rows = input_shape[rank - 2];
+      int64_t cols = input_shape[rank - 1];
+      int64_t batch = 1;
+      for (int64_t i = 0; i < rank - 2; ++i)
+        batch *= input_shape[i];
+      int rc = hip_transpose_2d_tiled(stream, input, output, batch, rows, cols,
+                                      static_cast<int>(element_size_bytes));
+      if (rc == 0) {
+        RUNTIME_DEBUG_LOG("[REAL] wrap_transpose: tiled 2D path "
+                          "(batch=%lld rows=%lld cols=%lld)\n",
+                          (long long)batch, (long long)rows, (long long)cols);
+        return 0;
+      }
+      if (rc < 0) // hard launch failure -> surface it
+        return rc;
+      // rc == 1: declined (e.g. batch > gridDim.z limit) -> generic fallback.
+    }
+  }
+
   return hip_transpose(stream, input, output, rank, input_shape, perm,
                        num_elements, static_cast<int>(element_size_bytes));
 }
