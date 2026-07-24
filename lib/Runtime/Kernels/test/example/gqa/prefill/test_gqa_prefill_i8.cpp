@@ -2,8 +2,9 @@
 // GQA prefill (TTFT) with INT8 KV cache -- validates the ACTUAL runtime path
 // (real/gqa.cpp gqa_forward_fused, kv_i8 branch):
 //
-//   1. hip_gqa_kv_cache_append_quant_i8 : quantize incoming fp16 K/V (BSHD) into
-//      the symmetric-INT8 BNSD cache with the static per-channel scale.
+//   1. hip_gqa_kv_cache_append (non-null scale) : quantize incoming fp16 K/V
+//      (BSHD) into the symmetric-INT8 BNSD cache with the static per-channel
+//      scale (the scale arg selects the int8 path).
 //   2. hip_gqa_dequant_kv_i8_to_fp16    : rebuild an fp16 BNSD view of the cache
 //      ONCE (prefill is compute-bound; per-fragment dequant would be pure waste).
 //   3. hip_gqa_flash_prefill_v2         : the tuned fp16 WMMA prefill, unchanged.
@@ -33,10 +34,15 @@
 #include <string>
 #include <vector>
 
-extern "C" int hip_gqa_kv_cache_append_quant_i8(
-    void* stream, const void* src, void* cache, const void* scale,
+// KV-cache dtype ABI (mirrors hip_kv_dtype_t in hip_custom_kernels.h).
+enum { HIP_KV_DTYPE_FP16 = 0, HIP_KV_DTYPE_INT8 = 1 };
+
+// Unified append: kv_dtype selects the format (INT8 here quantizes with scale).
+extern "C" int hip_gqa_kv_cache_append(
+    void* stream, const void* src, void* cache,
     int batch_size, int sq, int G, int d, int present_seq, int past_len,
-    const void* seqlens_k);
+    const void* seqlens_k, int element_size_bytes,
+    int kv_dtype, const void* scale);
 extern "C" int hip_gqa_dequant_kv_i8_to_fp16(
     void* stream, const void* src, void* dst, const void* scale,
     int batch_size, int total_seq, int G, int d, int src_seq, int dst_seq);
@@ -220,11 +226,14 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
   HIP_CHECK(hipMemcpy(dKsc, kscale.data(), kscale.size() * sizeof(float), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(dVsc, vscale.data(), vscale.size() * sizeof(float), hipMemcpyHostToDevice));
 
-  // Step 1: quantize-append fp16 BSHD -> int8 BNSD cache.
-  HIP_CHECK((hipError_t)hip_gqa_kv_cache_append_quant_i8(
-      nullptr, dKbshd, dK8, dKsc, B, sq, G, D, max_seq, past_len, nullptr));
-  HIP_CHECK((hipError_t)hip_gqa_kv_cache_append_quant_i8(
-      nullptr, dVbshd, dV8, dVsc, B, sq, G, D, max_seq, past_len, nullptr));
+  // Step 1: quantize-append fp16 BSHD -> int8 BNSD cache (kv_dtype = INT8;
+  // element_size_bytes is unused on that path).
+  HIP_CHECK((hipError_t)hip_gqa_kv_cache_append(
+      nullptr, dKbshd, dK8, B, sq, G, D, max_seq, past_len, nullptr,
+      /*element_size_bytes=*/2, HIP_KV_DTYPE_INT8, dKsc));
+  HIP_CHECK((hipError_t)hip_gqa_kv_cache_append(
+      nullptr, dVbshd, dV8, B, sq, G, D, max_seq, past_len, nullptr,
+      /*element_size_bytes=*/2, HIP_KV_DTYPE_INT8, dVsc));
   HIP_CHECK(hipDeviceSynchronize());
 
   // CPU reference over the EXACT int8 bytes the kernel produced.

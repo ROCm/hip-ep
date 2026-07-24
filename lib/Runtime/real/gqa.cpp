@@ -178,6 +178,31 @@ static inline bool flash_decode_geometry_ok(int64_t H, int64_t G, int64_t d) {
          hpg == 16;
 }
 
+// Logical storage format of the KV cache the fused path must read/write. This
+// is the single vocabulary the rest of gqa.cpp branches on; adding a new
+// quantized cache (e.g. INT4 per-channel, FP8) means adding an entry here, a
+// branch in classify_kv_cache(), a case in kv_dtype_abi() and the matching
+// kernel specialization downstream -- NOT a new boolean threaded through every
+// signature, and not scattering `k_quant_type == N` checks through wrap_*.
+enum class KvCacheFormat {
+  Fp16,           // unquantized (default path)
+  Int8PerChannel, // symmetric per-channel int8, static fp32 scales [G,d]
+};
+
+// Map the runtime KvCacheFormat onto the kernel ABI dtype code (hip_kv_dtype_t
+// in hip_custom_kernels.h). Single choke point: one case per format, so the
+// kernel entries stay dtype-driven (switch) rather than
+// boolean/pointer-sniffing.
+static inline int kv_dtype_abi(KvCacheFormat f) {
+  switch (f) {
+  case KvCacheFormat::Int8PerChannel:
+    return HIP_KV_DTYPE_INT8;
+  case KvCacheFormat::Fp16:
+  default:
+    return HIP_KV_DTYPE_FP16;
+  }
+}
+
 //===----------------------------------------------------------------------===//
 // KV cache update: concat past+new, append new tokens in place, or (no_causal)
 // the bidirectional copy/append branch used by the decomposed pipeline.
@@ -187,13 +212,23 @@ static inline bool flash_decode_geometry_ok(int64_t H, int64_t G, int64_t d) {
 // kernel reads past_len from device memory (zero D2H). The fused path calls
 // this with the default no_causal=false / skv=-1; the decomposed pipeline
 // passes them for the Whisper no_causal cases. Returns 0 on success.
+//
+// kv_format: for any quantized format (Int8PerChannel today, INT4/FP8 later)
+// the (causal) concat/append quantizes the incoming fp16 K/V with the static
+// per-channel k_scale/v_scale into the quantized present cache instead of a
+// plain copy. Only the causal concat/append tail honours it (the no_causal
+// Whisper branches are fp16/fp32-only), so the format decision lives here
+// rather than in a separate helper or at each call site.
 static int update_kv_cache(hipStream_t stream, const void *past_key,
                            const void *past_value, const void *new_key,
                            const void *new_value, void *present_key,
                            void *present_value, int B, int past_len, int sq,
                            int G, int d, int past_buf_seq, int present_seq,
                            const void *seqlens_k_ptr, int elem_sz,
-                           bool no_causal = false, int skv = -1) {
+                           bool no_causal = false, int skv = -1,
+                           KvCacheFormat kv_format = KvCacheFormat::Fp16,
+                           const void *k_scale = nullptr,
+                           const void *v_scale = nullptr) {
   // no_causal (Whisper encoder / cross-attn): bidirectional, no past KV.
   // The KV to attend over is the FULL `new_key`/`new_value` (Skv tokens), not
   // `sq` newly-appended tokens. Two sub-cases distinguished by sq vs Skv:
@@ -220,69 +255,45 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
   if (no_causal) {
     // Encoder self-attn: append all Skv (== sq) tokens at offset 0, bypassing
     // the seqlens_k +1 convention (pass nullptr so the kernel uses past_len=0).
+    // no_causal is fp16/fp32 only (decomposed pipeline), never quantized.
     if (hip_gqa_kv_cache_append(stream, new_key, present_key, B, sq, G, d,
                                 present_seq, /*past_len=*/0,
-                                /*seqlens_k_ptr=*/nullptr, elem_sz) != 0)
+                                /*seqlens_k_ptr=*/nullptr, elem_sz,
+                                HIP_KV_DTYPE_FP16, /*scale=*/nullptr) != 0)
       return -1;
     if (hip_gqa_kv_cache_append(stream, new_value, present_value, B, sq, G, d,
                                 present_seq, /*past_len=*/0,
-                                /*seqlens_k_ptr=*/nullptr, elem_sz) != 0)
+                                /*seqlens_k_ptr=*/nullptr, elem_sz,
+                                HIP_KV_DTYPE_FP16, /*scale=*/nullptr) != 0)
       return -1;
     return 0;
   }
+  // Quantized cache: pass the per-channel scale so the kernel quantizes on
+  // write; fp16/fp32: pass nullptr for a plain copy. The append/concat entries
+  // dispatch on kv_dtype, so no separate per-format code path is needed here.
+  const int kv_dtype = kv_dtype_abi(kv_format);
+  const bool quantized = (kv_format != KvCacheFormat::Fp16);
+  const void *k_sc = quantized ? k_scale : nullptr;
+  const void *v_sc = quantized ? v_scale : nullptr;
   if (past_key && past_len > 0 && past_key != present_key) {
     // Separate-buffer concat: needs host-side past_len for stride computation.
     if (hip_gqa_kv_cache_concat(stream, past_key, new_key, present_key, B,
                                 past_len, sq, G, d, past_buf_seq, present_seq,
-                                elem_sz) != 0)
+                                elem_sz, kv_dtype, k_sc) != 0)
       return -1;
     if (hip_gqa_kv_cache_concat(stream, past_value, new_value, present_value, B,
                                 past_len, sq, G, d, past_buf_seq, present_seq,
-                                elem_sz) != 0)
+                                elem_sz, kv_dtype, v_sc) != 0)
       return -1;
   } else {
     // In-place append: kernel can read past_len from device via seqlens_k_ptr.
     if (hip_gqa_kv_cache_append(stream, new_key, present_key, B, sq, G, d,
-                                present_seq, past_len, seqlens_k_ptr,
-                                elem_sz) != 0)
+                                present_seq, past_len, seqlens_k_ptr, elem_sz,
+                                kv_dtype, k_sc) != 0)
       return -1;
     if (hip_gqa_kv_cache_append(stream, new_value, present_value, B, sq, G, d,
-                                present_seq, past_len, seqlens_k_ptr,
-                                elem_sz) != 0)
-      return -1;
-  }
-  return 0;
-}
-
-// INT8 KV-cache append: quantizes the incoming fp16 K/V (post-RoPE for K) with
-// the static per-channel scale and writes them into the symmetric-INT8 present
-// cache. Mirrors update_kv_cache's in-place-append vs separate-buffer-concat
-// choice (causal GQA only -- no no_causal path on the fused route).
-static int update_kv_cache_i8(hipStream_t stream, const void *past_key,
-                              const void *past_value, const void *new_key,
-                              const void *new_value, void *present_key,
-                              void *present_value, const void *k_scale,
-                              const void *v_scale, int B, int past_len, int sq,
-                              int G, int d, int past_buf_seq, int present_seq,
-                              const void *seqlens_k_ptr) {
-  if (past_key && past_len > 0 && past_key != present_key) {
-    if (hip_gqa_kv_cache_concat_quant_i8(stream, past_key, new_key, present_key,
-                                         k_scale, B, past_len, sq, G, d,
-                                         past_buf_seq, present_seq) != 0)
-      return -1;
-    if (hip_gqa_kv_cache_concat_quant_i8(stream, past_value, new_value,
-                                         present_value, v_scale, B, past_len,
-                                         sq, G, d, past_buf_seq,
-                                         present_seq) != 0)
-      return -1;
-  } else {
-    if (hip_gqa_kv_cache_append_quant_i8(stream, new_key, present_key, k_scale,
-                                         B, sq, G, d, present_seq, past_len,
-                                         seqlens_k_ptr) != 0)
-      return -1;
-    if (hip_gqa_kv_cache_append_quant_i8(stream, new_value, present_value,
-                                         v_scale, B, sq, G, d, present_seq,
-                                         past_len, seqlens_k_ptr) != 0)
+                                present_seq, past_len, seqlens_k_ptr, elem_sz,
+                                kv_dtype, v_sc) != 0)
       return -1;
   }
   return 0;
@@ -302,8 +313,11 @@ static int gqa_forward_fused(
     int64_t B, int64_t sq, int64_t skv, int64_t past_buf_seq, int64_t H,
     int64_t G, int64_t d, float scale, int64_t do_rotary,
     const void *k_scale = nullptr, const void *v_scale = nullptr,
-    bool kv_i8 = false) {
+    KvCacheFormat kv_format = KvCacheFormat::Fp16) {
 
+  // Any non-fp16 cache reads/writes quantized bytes on the concat/append/decode
+  // path; the specific scheme is carried by kv_format (extensible to INT4/FP8).
+  const bool kv_quantized = (kv_format != KvCacheFormat::Fp16);
   const int64_t present_seq = skv; // present_key buffer stride (may be max_seq)
   const size_t elem_sz = 2;        // fp16 only on the fused path
   const bool need_rope = do_rotary && cos_cache && sin_cache;
@@ -430,58 +444,39 @@ static int gqa_forward_fused(
       kSrc = d_Kroped; // V is never RoPE'd.
     }
 
-    // Append the new token to the KV cache. INT8 cache: quantize-and-append
-    // with the static per-channel scale; fp16 cache: plain append.
-    if (kv_i8) {
-      if (update_kv_cache_i8(stream, past_key, past_value, kSrc, vSrc,
-                             present_key, present_value, k_scale, v_scale,
-                             static_cast<int>(B), static_cast<int>(past_len),
-                             static_cast<int>(sq), static_cast<int>(G),
-                             static_cast<int>(d),
-                             static_cast<int>(past_buf_seq),
-                             static_cast<int>(present_seq), seqlens_k_ptr) != 0)
-        return -1;
-    } else if (update_kv_cache(
-                   stream, past_key, past_value, kSrc, vSrc, present_key,
-                   present_value, static_cast<int>(B),
-                   static_cast<int>(past_len), static_cast<int>(sq),
-                   static_cast<int>(G), static_cast<int>(d),
-                   static_cast<int>(past_buf_seq),
-                   static_cast<int>(present_seq), seqlens_k_ptr,
-                   static_cast<int>(elem_sz)) != 0) {
+    // Append the new token to the KV cache. Quantized cache:
+    // quantize-and-append with the static per-channel scale; fp16 cache: plain
+    // append. update_kv_cache dispatches on kv_format internally.
+    if (update_kv_cache(
+            stream, past_key, past_value, kSrc, vSrc, present_key,
+            present_value, static_cast<int>(B), static_cast<int>(past_len),
+            static_cast<int>(sq), static_cast<int>(G), static_cast<int>(d),
+            static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
+            seqlens_k_ptr, static_cast<int>(elem_sz), /*no_causal=*/false,
+            /*skv=*/-1, kv_format, k_scale, v_scale) != 0)
       return -1;
-    }
 
     {
       char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
       void *partials = ws + off_partials;
-      // Decode is bandwidth-bound: read the INT8 cache directly (half the DRAM
-      // traffic) via the i8 decode kernel; fp16 cache uses the fp16 kernel.
-      int drc =
-          kv_i8
-              ? hip_gqa_flash_decode_i8_v2(
-                    stream, qSrc, present_key, present_value, k_scale, v_scale,
-                    output, partials, static_cast<int>(B), static_cast<int>(H),
-                    static_cast<int>(G), static_cast<int>(d),
-                    static_cast<int>(skv), static_cast<int>(present_seq),
-                    kFlashDecodeMaxSplits, scale, seqlens_k_ptr,
-                    /*local_window_size=*/0, /*head_sink=*/nullptr,
-                    /*smooth_softmax=*/0)
-              : hip_gqa_flash_decode_v2(
-                    stream, qSrc, present_key, present_value, output, partials,
-                    static_cast<int>(B), static_cast<int>(H),
-                    static_cast<int>(G), static_cast<int>(d),
-                    static_cast<int>(skv), static_cast<int>(present_seq),
-                    kFlashDecodeMaxSplits, scale, seqlens_k_ptr,
-                    /*local_window_size=*/0, /*head_sink=*/nullptr,
-                    /*smooth_softmax=*/0);
+      // Decode is bandwidth-bound: a quantized cache is read directly (e.g.
+      // int8 halves the DRAM traffic). One entry serves every format --
+      // kv_dtype selects the code path inside the kernel; scales feed dequant.
+      int drc = hip_gqa_flash_decode_v2(
+          stream, qSrc, present_key, present_value, output, partials,
+          static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
+          static_cast<int>(d), static_cast<int>(skv),
+          static_cast<int>(present_seq), kFlashDecodeMaxSplits, scale,
+          seqlens_k_ptr, /*local_window_size=*/0, /*head_sink=*/nullptr,
+          /*smooth_softmax=*/0, kv_dtype_abi(kv_format),
+          kv_quantized ? k_scale : nullptr, kv_quantized ? v_scale : nullptr);
       if (drc != 0)
         return -1;
       RUNTIME_DEBUG_LOG(
           "[REAL] flash GQA decode (%s): B=%lld skv=%lld H=%lld G=%lld "
           "d=%lld max_splits=%d\n",
-          kv_i8 ? "int8" : "fp16", (long long)B, (long long)skv, (long long)H,
-          (long long)G, (long long)d, kFlashDecodeMaxSplits);
+          kv_quantized ? "quant" : "fp16", (long long)B, (long long)skv,
+          (long long)H, (long long)G, (long long)d, kFlashDecodeMaxSplits);
     }
     return 0;
   }
@@ -557,7 +552,7 @@ static int gqa_forward_fused(
   const size_t rope_temp_bytes = need_rope ? (Q_full_bytes + K_full_bytes) : 0;
   // 2 bytes/elem (fp16) x 2 (K and V).
   const size_t deq_kv_bytes =
-      kv_i8 ? static_cast<size_t>(B) * G * total_seq * d * 2 * 2 : 0;
+      kv_quantized ? static_cast<size_t>(B) * G * total_seq * d * 2 * 2 : 0;
   const size_t total_ws_bytes = split_bytes + rope_temp_bytes + deq_kv_bytes;
   if (total_ws_bytes > 0 &&
       hipdnn_ep_state_ensure_workspace(state, total_ws_bytes) != 0)
@@ -603,41 +598,33 @@ static int gqa_forward_fused(
   }
 
   if (present_key && present_value) {
-    if (kv_i8) {
-      if (update_kv_cache_i8(stream, past_key, past_value, kSrc, vSrc,
-                             present_key, present_value, k_scale, v_scale,
-                             static_cast<int>(B), static_cast<int>(past_len),
-                             static_cast<int>(sq), static_cast<int>(G),
-                             static_cast<int>(d),
-                             static_cast<int>(past_buf_seq),
-                             static_cast<int>(present_seq), seqlens_k_ptr) != 0)
-        return -1;
-    } else if (update_kv_cache(
-                   stream, past_key, past_value, kSrc, vSrc, present_key,
-                   present_value, static_cast<int>(B),
-                   static_cast<int>(past_len), static_cast<int>(sq),
-                   static_cast<int>(G), static_cast<int>(d),
-                   static_cast<int>(past_buf_seq),
-                   static_cast<int>(present_seq), seqlens_k_ptr,
-                   static_cast<int>(elem_sz)) != 0) {
+    // Quantized cache: quantize-and-append/concat; fp16: plain. update_kv_cache
+    // dispatches on kv_format internally.
+    if (update_kv_cache(
+            stream, past_key, past_value, kSrc, vSrc, present_key,
+            present_value, static_cast<int>(B), static_cast<int>(past_len),
+            static_cast<int>(sq), static_cast<int>(G), static_cast<int>(d),
+            static_cast<int>(past_buf_seq), static_cast<int>(present_seq),
+            seqlens_k_ptr, static_cast<int>(elem_sz), /*no_causal=*/false,
+            /*skv=*/-1, kv_format, k_scale, v_scale) != 0)
       return -1;
-    }
   }
 
   // Choose the KV the prefill attends over. fp16 cache: read present directly.
-  // INT8 cache: dequantize [0,total_seq) into a compact fp16 BNSD scratch ONCE
-  // and feed the tuned fp16 prefill (max_seq = total_seq). This attends over
-  // the exact rounded values decode will later read, so prefill/decode stay
-  // numerically consistent, and keeps prefill at ~fp16 speed (no per-fragment
-  // dequant).
+  // Quantized cache: dequantize [0,total_seq) into a compact fp16 BNSD scratch
+  // ONCE and feed the tuned fp16 prefill (max_seq = total_seq). This attends
+  // over the exact rounded values decode will later read, so prefill/decode
+  // stay numerically consistent, and keeps prefill at ~fp16 speed (no
+  // per-fragment dequant). (INT8 today; a new quantized format adds its dequant
+  // here.)
   const void *kAttn = present_key;
   const void *vAttn = present_value;
   int attn_max_seq = static_cast<int>(present_seq);
-  if (kv_i8) {
+  if (kv_quantized) {
     char *ws = static_cast<char *>(hipdnn_ep_state_get_workspace(state));
     void *d_Kf16 = ws + off_deq;
-    void *d_Vf16 = ws + off_deq +
-                   static_cast<size_t>(B) * G * total_seq * d * 2;
+    void *d_Vf16 =
+        ws + off_deq + static_cast<size_t>(B) * G * total_seq * d * 2;
     if (hip_gqa_dequant_kv_i8_to_fp16(
             stream, present_key, d_Kf16, k_scale, static_cast<int>(B),
             static_cast<int>(total_seq), static_cast<int>(G),
@@ -665,9 +652,9 @@ static int gqa_forward_fused(
   RUNTIME_DEBUG_LOG(
       "[REAL] GQA fused prefill (%s d=%lld -> v%d): B=%lld sq=%lld "
       "total_seq=%lld H=%lld G=%lld past_len=%lld rc=%d\n",
-      kv_i8 ? "int8" : "fp16", (long long)d, (d == 64 ? 5 : 7), (long long)B,
-      (long long)sq, (long long)total_seq, (long long)H, (long long)G,
-      (long long)past_len, fp_rc);
+      kv_quantized ? "quant" : "fp16", (long long)d, (d == 64 ? 5 : 7),
+      (long long)B, (long long)sq, (long long)total_seq, (long long)H,
+      (long long)G, (long long)past_len, fp_rc);
   return fp_rc != 0 ? -1 : 0;
 }
 
@@ -1876,16 +1863,6 @@ enum GqaQuantType : int64_t {
   GQA_QUANT_PER_CHANNEL = 2,
 };
 
-// Logical storage format of the KV cache the fused path must read/write.
-// This is the single vocabulary the rest of gqa.cpp branches on; adding a new
-// quantized cache (e.g. INT4 per-channel, FP8) means adding an entry here, a
-// branch in classify_kv_cache(), and the matching kernel dispatch downstream --
-// not scattering new `k_quant_type == N` checks through wrap_*.
-enum class KvCacheFormat {
-  Fp16,           // unquantized (default path)
-  Int8PerChannel, // symmetric per-channel int8, static fp32 scales [G,d]
-};
-
 // Map the ONNX GQA quantization attributes onto a supported KvCacheFormat.
 // Returns false (and logs) for any combination not (yet) implemented, so the
 // caller can reject rather than silently mis-reading the cache bytes.
@@ -2004,7 +1981,7 @@ int wrap_group_query_attention(
   if (!classify_kv_cache(k_quant_type, v_quant_type, kv_cache_bit_width,
                          k_scale, v_scale, &kv_format))
     return -1;
-  const bool kv_i8 = (kv_format == KvCacheFormat::Int8PerChannel);
+  const bool kv_quantized = (kv_format != KvCacheFormat::Fp16);
   if (output_qk != nullptr || qk_output != 0) {
     fprintf(stderr, "wrap_group_query_attention: qk_output not supported\n");
     return -1;
@@ -2062,16 +2039,16 @@ int wrap_group_query_attention(
                                smooth_softmax != 1 && head_dim_ok &&
                                decode_geometry_ok && attention_bias == nullptr;
 
-  // The INT8 KV cache is implemented ONLY on the fused path (i8 decode + fp16
-  // prefill-over-dequant), for head_dim in {64,128}. The legacy decomposed
-  // pipeline reads the cache as fp16 and would misinterpret INT8 bytes, so we
-  // must reject rather than silently fall through to it.
-  if (kv_i8 &&
+  // A quantized KV cache is implemented ONLY on the fused path (quant decode +
+  // fp16 prefill-over-dequant), for head_dim in {64,128}. The legacy decomposed
+  // pipeline reads the cache as fp16 and would misinterpret quantized bytes, so
+  // we must reject rather than silently fall through to it.
+  if (kv_quantized &&
       (!fused_supported || (head_dim != 64 && head_dim != 128))) {
     fprintf(stderr,
-            "wrap_group_query_attention: int8 KV cache requires the fused path "
-            "(fp16, causal, no window/sink/smooth/bias, head_dim 64 or 128); "
-            "got fused_supported=%d head_dim=%lld\n",
+            "wrap_group_query_attention: quantized KV cache requires the fused "
+            "path (fp16, causal, no window/sink/smooth/bias, head_dim 64 or "
+            "128); got fused_supported=%d head_dim=%lld\n",
             static_cast<int>(fused_supported), (long long)head_dim);
     return -1;
   }
@@ -2120,12 +2097,11 @@ int wrap_group_query_attention(
       (long long)do_rotary,
       static_cast<int>(key == nullptr && value == nullptr));
 
-  int rc = gqa_forward_fused(state, stream, query, key, value, past_key,
-                             past_value, seqlens_k, cos_cache, sin_cache,
-                             output, present_key, present_value, batch_size,
-                             seq_len_q, seq_len_kv, past_buf_seq, num_heads,
-                             kv_num_heads, head_dim, scale, do_rotary, k_scale,
-                             v_scale, kv_i8);
+  int rc = gqa_forward_fused(
+      state, stream, query, key, value, past_key, past_value, seqlens_k,
+      cos_cache, sin_cache, output, present_key, present_value, batch_size,
+      seq_len_q, seq_len_kv, past_buf_seq, num_heads, kv_num_heads, head_dim,
+      scale, do_rotary, k_scale, v_scale, kv_format);
   if (rc != 0)
     fprintf(stderr,
             "wrap_group_query_attention: gqa_forward_fused failed "
