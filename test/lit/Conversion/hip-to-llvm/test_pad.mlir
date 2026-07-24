@@ -35,19 +35,24 @@ module {
     return
   }
 
-  // Constant mode with explicit constant_value scalar.
+  // Constant mode with explicit constant_value scalar. The scalar is passed by
+  // value via a host stack slot (alloca + store), then its pointer is handed
+  // to wrap_pad -- the 14-param call signature is unchanged (cval_ptr is still
+  // an !llvm.ptr, now a host pointer).
   func.func @pad_constant_with_cval(
       %ctx: !hip.context,
       %data: memref<3x4xf32, 1>,
       %pads: memref<4xi64, 1>,
-      %cval: memref<f32, 1>,
+      %cval: f32,
       %out: memref<5x6xf32, 1>) {
     // CHECK-LABEL: llvm.func @pad_constant_with_cval
 
     hip.pad(%ctx) ins(%data, %pads : memref<3x4xf32, 1>, memref<4xi64, 1>)
-                  cval(%cval : memref<f32, 1>)
+                  cval(%cval : f32)
                   outs(%out : memref<5x6xf32, 1>)
 
+    // CHECK: %[[SLOT:.*]] = llvm.alloca {{.*}} x i64 {{.*}}-> !llvm.ptr
+    // CHECK: llvm.store %{{.*}}, %[[SLOT]] : f32, !llvm.ptr
     // CHECK: llvm.call @wrap_pad({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64) -> i32
     return
   }

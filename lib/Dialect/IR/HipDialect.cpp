@@ -175,6 +175,23 @@ LogicalResult MemcpyD2HAsyncOp::verify() {
   return verifyMemcpyShapes(getOperation(), getDst(), getSrc());
 }
 
+// hip.transfer_to_host only copies a value, so `src` and `result` must match in
+// shape and element type. The memory SPACE is NOT checked -- moving the value
+// into host space is the whole point. Works in the tensor phase and, briefly
+// during bufferization, the memref phase.
+LogicalResult TransferToHostOp::verify() {
+  auto srcTy = dyn_cast<ShapedType>(getSrc().getType());
+  auto resTy = dyn_cast<ShapedType>(getResult().getType());
+  if (!srcTy || !resTy)
+    return emitOpError("src and result must both be shaped (tensor or memref)");
+  if (srcTy.getElementType() != resTy.getElementType())
+    return emitOpError("src/result element type mismatch: ")
+           << srcTy.getElementType() << " vs " << resTy.getElementType();
+  if (srcTy.getShape() != resTy.getShape())
+    return emitOpError("src/result shape mismatch");
+  return success();
+}
+
 void StreamSyncOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {

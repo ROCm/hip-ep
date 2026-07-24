@@ -3070,19 +3070,26 @@ def Hip_PadOp : Hip_DpsOp<"pad",
     Example:
     ```mlir
     hip.pad(%ctx) ins(%data, %pads : memref<3x2xf32, 1>, memref<4xi64, 1>)
-                  cval(%cval : memref<f32, 1>)
+                  cval(%cval : f32)
                   axes(%axes : memref<2xi64, 1>)
                   outs(%out : memref<3x4xf32, 1>) {mode = "constant"}
     ```
   }];
 
+  // Pilot op for the memory-space type system. It uses BOTH spaces: the big
+  // data tensors (`data`, `output`) are device buffers, the small shape tensors
+  // (`pads`, `axes`) are host. `constant_value` is one scalar fill value passed
+  // BY VALUE (a plain SSA value, not a buffer), so it has no space: the converter
+  // makes it a host value (constant-fold or a synced read) and the runtime uses
+  // it directly -- no device alloc, no D2H.
   let arguments = (ins
     Hip_ContextType:$ctx,
-    Hip_TensorOrMemRef:$data,
-    Hip_TensorOrMemRef:$pads,
-    Optional<Hip_TensorOrMemRef>:$constant_value,
-    Optional<Hip_TensorOrMemRef>:$axes,
-    Hip_TensorOrMemRef:$output,
+    Hip_TensorOrDeviceMemRef:$data,
+    Hip_TensorOrHostMemRef:$pads,
+    Optional<AnyTypeOf<[AnyFloat, AnySignlessInteger],
+                       "scalar float or integer">>:$constant_value,
+    Optional<Hip_TensorOrHostMemRef>:$axes,
+    Hip_TensorOrDeviceMemRef:$output,
     DefaultValuedAttr<StrAttr, "\"constant\"">:$mode
   );
 
@@ -3825,10 +3832,38 @@ def Hip_ReadbackScalarOp : Hip_Op<"readback_scalar",
 
 // ===== Explicit memory transfers =============================================
 //
-// The memref-phase `hip.memcpy_*_async` / `hip.stream_sync` ops: an explicit,
-// IR-level crossing between HIP memory spaces, parallel to the existing
-// readback / host-scratch mechanisms (both kept unchanged). See
-// docs/design/memory-space-design.md.
+// `hip.transfer_to_host` (tensor phase) and the memref-phase ops it bufferizes
+// into (`hip.memcpy_*_async` / `hip.stream_sync`) make a device->host crossing
+// explicit in the IR. Runs alongside the existing readback / host-scratch
+// helpers (both unchanged). Today only `hip.pad` emits it (for `pads` / `axes`
+// and a runtime `constant_value`). See docs/design/memory-space-design.md and
+// HipBufferize.h.
+def Hip_TransferToHostOp : Hip_Op<"transfer_to_host", []> {
+  let summary = "Copy a tensor into host memory (device -> host)";
+  let description = [{
+    Copies `src` into HOST memory, same shape and element type. Before
+    bufferization it is a plain tensor->tensor op; bufferization turns it into a
+    host stack `memref.alloca` (relabeled `#hip.mem<host>`) + async D2H copy +
+    stream sync (the host reads the result right after, so it waits for the copy).
+
+    Direction is always device -> host: `src` is a device tensor (or, while the
+    memory-space migration is partial, one with no space yet) and the result is
+    host. The host buffer is always on the stack, so use this only for SMALL data
+    (shape/param vectors, scalars). The reverse (host -> device) is handled at the
+    memref phase by `hip.memcpy_h2d_async`.
+  }];
+
+  let arguments = (ins Hip_ContextType:$ctx,
+                       Hip_TensorOrMemRef:$src);
+  let results = (outs Hip_TensorOrMemRef:$result);
+
+  let assemblyFormat = [{
+    `(` $ctx `,` $src `:` type($src) `)` attr-dict `->` type($result)
+  }];
+
+  // Value-preserving: verifier checks shape + element type, NOT memory space.
+  let hasVerifier = 1;
+}
 
 // hip.memcpy_h2d_async : async host->device copy on the runtime stream (dst
 // device, src host/pinned; same element type + count). Wired for symmetry with

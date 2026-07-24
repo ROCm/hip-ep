@@ -8,6 +8,7 @@
 
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/Sequence.h"
 
 namespace mlir {
 namespace hip {
@@ -61,59 +62,56 @@ extractIntVector(mlir::Value v, llvm::SmallVectorImpl<int64_t> &out) {
   return mlir::success();
 }
 
-/// Read entry `[idx]` from a 1-D int tensor on the host and return an
-/// `index`-typed value.
+/// Read entry `[idx]` from `padsHost` (the host copy of `pads`) as an `index`.
 ///
-/// The `pads` operand is frequently an externalized constant (its inline
-/// `dense` value is stripped by constant externalization), so a bare
-/// `tensor.extract` would bufferize to an UNSYNCHRONIZED host `memref.load` of
-/// the device-resident constants blob -- a SEGV on targets where that blob is
-/// true device memory. `readbackShapeEntryToHost` folds the value when the
-/// constant is still inline and otherwise emits a synchronized
-/// `hip.readback_scalar` (D2H + stream sync). See ReadbackScalar.h.
+/// `padsHost` comes from `hip.transfer_to_host(%pads)`, so this is a synced
+/// host read. A bare `tensor.extract` of the device `pads` would instead be an
+/// unsynced host load of the device constants blob and SEGV where that blob is
+/// real device memory. Only used on the runtime path (the compile-time path
+/// uses literal pad amounts and never extracts).
+///
+/// Before:  %e = tensor.extract %pads_device[%idx]   // unsynced device load
+/// After:   %e = tensor.extract %padsHost[%idx]      // synced host load
 static mlir::Value extractAsIndex(mlir::PatternRewriter &rewriter,
-                                  mlir::Location loc, mlir::Value ctx,
-                                  mlir::Value tensor1d, int64_t idx) {
-  mlir::Value extracted =
-      readbackShapeEntryToHost(rewriter, loc, ctx, tensor1d, idx);
+                                  mlir::Location loc, mlir::Value padsHost,
+                                  int64_t idx) {
+  mlir::Value index = mlir::arith::ConstantIndexOp::create(rewriter, loc, idx);
+  mlir::Value extracted = mlir::tensor::ExtractOp::create(
+      rewriter, loc, padsHost, mlir::ValueRange{index});
   return mlir::arith::IndexCastOp::create(rewriter, loc,
                                           rewriter.getIndexType(), extracted);
 }
 
-/// Build a `tensor.empty` for the Pad output, computing dynamic dims as
+/// Build the device-space init (see `createDeviceAllocTensor` in
+/// OnnxToHipUtils.h) for the Pad output, sizing dynamic dims as
 ///   out_dim[i] = data_dim[i] + pads[i] + pads[i + N]
 /// where `N` is the number of padded axes. Two cases:
 ///
-///   * pads is a compile-time constant: use the literal pad amounts.
+///   * pads is a compile-time constant: use the literal amounts.
 ///   * pads is dynamic: emit `tensor.extract` + `arith.addi`.
 ///
-/// When `axes` is supplied and not the default identity, only those axes
-/// participate; dims outside `axes` keep their input size. We require
-/// `axes` to be either absent or a compile-time constant -- a dynamic
-/// `axes` would make the per-dim pad lookup data-dependent, which we
-/// can't express with `tensor.empty` dynsizes.
+/// With a non-default `axes`, only those axes are padded; other dims keep their
+/// input size. `axes` must be absent or a compile-time constant -- a dynamic
+/// `axes` would make the pad lookup data-dependent, which we can't express in
+/// `alloc_tensor` dynsizes.
 ///
-/// `padsAttr` / `axesAttr` carry the compile-time `pads` / `axes` values when
-/// the pre-lowering `PadShapeFold` stamped them onto the op (the common case:
-/// the operand was an inline constant before externalization). When present we
-/// use them directly -- no operand read, no `hip.readback_scalar`. When absent
-/// (genuinely runtime-dynamic `pads`) we fall back to reading the operand via
-/// the synchronized readback path.
+/// `padsAttr` / `axesAttr` are the compile-time values stamped by PadShapeFold
+/// (the common case); if present we use them, else an inline-constant `pads`
+/// operand, else a synced read of `padsHost` (see extractAsIndex). So `pads` is
+/// the device operand (only for the inline fold) and `padsHost` its host copy
+/// (only on the runtime path).
 static mlir::FailureOr<mlir::Value> buildPadOutputInit(
     mlir::PatternRewriter &rewriter, mlir::Location loc, mlir::Operation *op,
-    mlir::Value ctx, mlir::RankedTensorType resultType, mlir::Value data,
-    mlir::Value pads, mlir::Value axes, llvm::ArrayRef<int64_t> padsAttr,
+    mlir::RankedTensorType resultType, mlir::Value data, mlir::Value pads,
+    mlir::Value padsHost, mlir::Value axes, llvm::ArrayRef<int64_t> padsAttr,
     bool hasPadsAttr, llvm::ArrayRef<int64_t> axesAttr, bool hasAxesAttr) {
-  // Fully static result: the empty tensor needs no dynamic sizes, and we do
-  // not have to look at `pads` / `axes` at all. This is important when
-  // either operand is a function argument (dynamic) but the output shape is
-  // still fixed -- the per-axis math below would otherwise bail out and the
-  // whole onnx.Pad op would stay unconverted.
+  // Fully static result: no dynamic sizes, so we don't touch `pads` / `axes`.
+  // Important when an operand is dynamic (a function arg) but the output shape
+  // is still fixed -- the per-axis math below would otherwise bail and leave
+  // the onnx.Pad unconverted.
   if (resultType.hasStaticShape()) {
-    return mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
-                                         resultType.getElementType(),
-                                         mlir::ValueRange{})
-        .getResult();
+    return createDeviceAllocTensor(rewriter, loc, resultType,
+                                   mlir::ValueRange{});
   }
 
   auto dataType = mlir::cast<mlir::RankedTensorType>(data.getType());
@@ -132,7 +130,7 @@ static mlir::FailureOr<mlir::Value> buildPadOutputInit(
           op, "dynamic `axes` operand is not supported by Pad conversion");
   }
   if (axesVec.empty())
-    for (int64_t i = 0; i < rank; ++i)
+    for (int64_t i : llvm::seq<int64_t>(0, rank))
       axesVec.push_back(i);
   for (int64_t &a : axesVec)
     if (a < 0)
@@ -155,7 +153,7 @@ static mlir::FailureOr<mlir::Value> buildPadOutputInit(
   bool padsAreConst = static_cast<int64_t>(padsConst.size()) == 2 * nPadded;
 
   llvm::SmallVector<mlir::Value> dynSizes;
-  for (int64_t i = 0; i < resultType.getRank(); ++i) {
+  for (int64_t i : llvm::seq<int64_t>(0, resultType.getRank())) {
     if (!resultType.isDynamicDim(i))
       continue;
 
@@ -182,8 +180,8 @@ static mlir::FailureOr<mlir::Value> buildPadOutputInit(
       end = mlir::arith::ConstantIndexOp::create(rewriter, loc,
                                                  padsConst[slot + nPadded]);
     } else {
-      begin = extractAsIndex(rewriter, loc, ctx, pads, slot);
-      end = extractAsIndex(rewriter, loc, ctx, pads, slot + nPadded);
+      begin = extractAsIndex(rewriter, loc, padsHost, slot);
+      end = extractAsIndex(rewriter, loc, padsHost, slot + nPadded);
     }
     mlir::Value sum =
         mlir::arith::AddIOp::create(rewriter, loc, dataDim, begin);
@@ -191,9 +189,7 @@ static mlir::FailureOr<mlir::Value> buildPadOutputInit(
     dynSizes.push_back(sum);
   }
 
-  return mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
-                                       resultType.getElementType(), dynSizes)
-      .getResult();
+  return createDeviceAllocTensor(rewriter, loc, resultType, dynSizes);
 }
 
 /// onnx.Pad -> hip.pad
@@ -228,13 +224,51 @@ struct PadToHip : public mlir::RewritePattern {
     if (op->getNumOperands() > 3 && !isNone(op->getOperand(3)))
       axes = op->getOperand(3);
 
+    // ONNX `Pad.constant_value` is a scalar; hip.pad takes it BY VALUE (no
+    // buffer). A compile-time constant folds to an `arith.constant`; a runtime
+    // value is brought to host via the same `hip.transfer_to_host` as
+    // pads/axes, then read with `tensor.extract` (safe: the operand is the
+    // post-sync host copy, not a device buffer).
+    //
+    // Before: %cv : tensor<f32>   (runtime, non-constant)
+    // After:  %cvH = hip.transfer_to_host(%ctx, %cv : tensor<f32>) ->
+    // tensor<f32>
+    //         %s   = tensor.extract %cvH[] : tensor<f32>
+    // (constant case folds instead to:  %s = arith.constant <val> : f32)
+    if (constantValue) {
+      auto cvTy = mlir::cast<mlir::RankedTensorType>(constantValue.getType());
+      mlir::Type cvElemTy = cvTy.getElementType();
+      if (mlir::DenseElementsAttr dense = getConstantDense(constantValue);
+          dense && dense.getNumElements() == 1) {
+        constantValue =
+            materializeConstScalar(rewriter, loc, dense, cvElemTy, 0);
+      } else {
+        // Collapse a 1-element 1-D tensor to rank-0 (zero-cost) so the
+        // transfer/extract work on a 0-D scalar.
+        if (cvTy.getRank() != 0 && cvTy.hasStaticShape() &&
+            cvTy.getNumElements() == 1) {
+          auto scalarTy = mlir::RankedTensorType::get({}, cvElemTy);
+          llvm::SmallVector<mlir::ReassociationIndices> noReassoc;
+          constantValue = mlir::tensor::CollapseShapeOp::create(
+              rewriter, loc, scalarTy, constantValue, noReassoc);
+        }
+        mlir::Value cvHost =
+            TransferToHostOp::create(rewriter, loc, constantValue.getType(),
+                                     context, constantValue)
+                .getResult();
+        constantValue = mlir::tensor::ExtractOp::create(rewriter, loc, cvHost,
+                                                        mlir::ValueRange{})
+                            .getResult();
+      }
+    }
+
     auto resultType =
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 
     // Compile-time pads/axes stamped by the pre-lowering PadShapeFold pattern
-    // (before externalization stripped the inline constant). Their presence
-    // lets buildPadOutputInit fold the output shape with zero device traffic;
-    // absence falls back to the synchronized readback path.
+    // (before externalization stripped the inline constant). If present,
+    // buildPadOutputInit folds the output shape with no device traffic; if not,
+    // it reads the amounts from the host transfer copy below.
     llvm::ArrayRef<int64_t> padsAttr;
     bool hasPadsAttr = false;
     if (auto a =
@@ -250,14 +284,31 @@ struct PadToHip : public mlir::RewritePattern {
       hasAxesAttr = true;
     }
 
-    // Build the output buffer. When the result is fully static, the helper
-    // collapses to a `tensor.empty` with no dynsizes (identical to the old
-    // `createEmptyTensor` behaviour). When at least one dim is dynamic, the
-    // dynamic dims are computed as data_dim + pads_begin + pads_end at IR
-    // build time (using the stamped constant `pads` if available, an inline
-    // operand if still present, otherwise a synchronized readback).
+    // Bring `pads` (and `axes`) to host ONCE via hip.transfer_to_host: wrap_pad
+    // reads them CPU-side, and the dynamic-output path reads the same host copy
+    // via tensor.extract (see extractAsIndex). One shared transfer instead of a
+    // per-dim hip.readback_scalar; bufferizes to a host buffer + async D2H +
+    // sync.
+    //
+    // Before: %pads : tensor<4xi64>   (device operand)
+    // After:  %ph = hip.transfer_to_host(%ctx, %pads : tensor<4xi64>) ->
+    // tensor<4xi64>
+    mlir::Value padsHost =
+        TransferToHostOp::create(rewriter, loc, pads.getType(), context, pads)
+            .getResult();
+    mlir::Value axesHost;
+    if (axes)
+      axesHost =
+          TransferToHostOp::create(rewriter, loc, axes.getType(), context, axes)
+              .getResult();
+
+    // Build the output buffer as a DEVICE-space bufferization.alloc_tensor (see
+    // createDeviceAllocTensor). Static result -> no dynsizes; dynamic dims are
+    // computed as data_dim + pads_begin + pads_end at build time (from the
+    // stamped constant `pads`, an inline operand, or a synced read of
+    // padsHost).
     auto initOrFailure =
-        buildPadOutputInit(rewriter, loc, op, context, resultType, data, pads,
+        buildPadOutputInit(rewriter, loc, op, resultType, data, pads, padsHost,
                            axes, padsAttr, hasPadsAttr, axesAttr, hasAxesAttr);
     if (mlir::failed(initOrFailure))
       return mlir::failure();
@@ -274,11 +325,11 @@ struct PadToHip : public mlir::RewritePattern {
     mlir::SmallVector<mlir::Value> operands;
     operands.push_back(context);
     operands.push_back(data);
-    operands.push_back(pads);
+    operands.push_back(padsHost);
     if (constantValue)
       operands.push_back(constantValue);
     if (axes)
-      operands.push_back(axes);
+      operands.push_back(axesHost);
     operands.push_back(init);
 
     llvm::SmallVector<int32_t, 6> segmentSizes = {

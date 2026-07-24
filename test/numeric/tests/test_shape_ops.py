@@ -292,6 +292,38 @@ class TestPad:
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=0)
 
+    @pytest.mark.parametrize("dtype", [np.float32, np.float16, np.int32])
+    def test_pad_constant_runtime_cval(self, model_runner, dtype):
+        """Runtime (non-constant) constant_value via a graph input.
+
+        A non-constant fill can't be folded, so the converter brings it to host
+        via hip.transfer_to_host + tensor.extract. Exercises that cval-transfer
+        path on the GPU EP (the constant-cval tests above only hit the fold path).
+        """
+        shape = [2, 3]
+        pads = [1, 1, 1, 1]
+        tp = np_to_onnx_type(dtype)
+        X = helper.make_tensor_value_info("X", tp, list(shape))
+        pads_init = numpy_helper.from_array(np.array(pads, dtype=np.int64), name="pads")
+        # Rank-0 scalar graph input -> runtime constant_value.
+        CV = helper.make_tensor_value_info("constant_value", tp, [])
+        rank = len(shape)
+        out_shape = [shape[i] + pads[i] + pads[i + rank] for i in range(rank)]
+        Y = helper.make_tensor_value_info("Y", tp, out_shape)
+        node = helper.make_node(
+            "Pad", ["X", "pads", "constant_value"], ["Y"], mode="constant"
+        )
+        model = make_model_from_nodes([node], [X, CV], [Y], initializers=[pads_init])
+        rng = np.random.default_rng(405)
+        if np.issubdtype(dtype, np.integer):
+            x = rng.integers(-10, 10, shape, dtype=dtype)
+            cval = np.array(7, dtype=dtype)
+        else:
+            x = rng.uniform(-2.0, 2.0, shape).astype(dtype)
+            cval = np.array(3.5, dtype=dtype)
+        actual, expected = model_runner.run_sample(model, [x, cval])
+        compare_outputs(actual, expected, atol=0)
+
 
 # ---------------------------------------------------------------------------
 # GatherND

@@ -2,12 +2,21 @@
 // Licensed under the MIT License.
 //
 //===----------------------------------------------------------------------===//
-// Parse/verify round-trip for the memref-phase async memcpy / stream-sync ops:
+// Parse/verify round-trip for the explicit transfer op family:
+//   hip.transfer_to_host (tensor-phase, value-preserving device->host)
 //   hip.memcpy_h2d_async / hip.memcpy_d2h_async (memref-phase async copy)
 //   hip.stream_sync (host-side barrier)
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt %s 2>&1 | FileCheck %s
+
+// --- hip.transfer_to_host: tensor -> tensor, host destination is implicit. ---
+// CHECK-LABEL: func.func @transfer_to_host
+// CHECK: %[[H:.*]] = hip.transfer_to_host(%{{.*}}, %{{.*}} : tensor<8xi64>) -> tensor<8xi64>
+func.func @transfer_to_host(%ctx: !hip.context, %pads: tensor<8xi64>) -> tensor<8xi64> {
+  %h = hip.transfer_to_host(%ctx, %pads : tensor<8xi64>) -> tensor<8xi64>
+  return %h : tensor<8xi64>
+}
 
 // --- hip.memcpy_d2h_async: device src -> host dst (the primary direction). ---
 // CHECK-LABEL: func.func @memcpy_d2h

@@ -8,8 +8,10 @@
 #include "hip/Dialect/IR/HipDialect.h"
 #include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
 #include "mlir/Dialect/Bufferization/IR/DstBufferizableOpInterfaceImpl.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/OperationSupport.h"
+#include "llvm/ADT/Sequence.h"
 
 namespace mlir {
 namespace hip {
@@ -102,6 +104,104 @@ struct HipReadbackBufferizableModel
   }
 };
 
+// Bufferization model for hip.transfer_to_host: a tensor->tensor op that copies
+// `src` (a device tensor) into HOST memory. It bufferizes to a host STACK
+// `memref.alloca` (space-less, since alloca must live in the default LLVM stack
+// address space) relabeled to `#hip.mem<host>`, then an async D2H copy + a
+// stream sync (the host reads the result next). Stack-only, so use it for SMALL
+// data (shape/param vectors, scalars); the alloca frees itself at function
+// scope, needs no dealloc, and is skipped by hip-pool-allocs and
+// hip-materialize-host-scalars.
+//
+//   Before:  %h = hip.transfer_to_host(%ctx, %pads : tensor<8xi64>)
+//                   -> tensor<8xi64>
+//   After:   %slot = memref.alloca() : memref<8xi64>
+//            %dst  = memref.memory_space_cast %slot
+//                      : memref<8xi64> to memref<8xi64, #hip.mem<host>>
+//            hip.memcpy_d2h_async(%ctx, %dst, %srcBuf)
+//            hip.stream_sync(%ctx)            // uses of %h replaced by %dst
+struct HipTransferToHostBufferizableModel
+    : public bufferization::BufferizableOpInterface::ExternalModel<
+          HipTransferToHostBufferizableModel, TransferToHostOp> {
+
+  bool bufferizesToAllocation(Operation *, Value) const { return true; }
+
+  bool bufferizesToMemoryRead(Operation *op, OpOperand &opOperand,
+                              const bufferization::AnalysisState &) const {
+    // Only the `src` tensor operand is read; `ctx` is not a tensor.
+    return opOperand.get() == cast<TransferToHostOp>(op).getSrc();
+  }
+  bool bufferizesToMemoryWrite(Operation *, OpOperand &,
+                               const bufferization::AnalysisState &) const {
+    return false;
+  }
+  bufferization::AliasingValueList
+  getAliasingValues(Operation *, OpOperand &,
+                    const bufferization::AnalysisState &) const {
+    // Result is a fresh allocation, never an alias of an operand.
+    return {};
+  }
+
+  FailureOr<bufferization::BufferLikeType>
+  getBufferType(Operation *op, Value /*value*/,
+                const bufferization::BufferizationOptions & /*options*/,
+                const bufferization::BufferizationState & /*state*/,
+                SmallVector<Value> & /*invocationStack*/) const {
+    auto transfer = cast<TransferToHostOp>(op);
+    auto tensorTy = cast<TensorType>(transfer.getResult().getType());
+    // Result buffer is HOST memory with a static identity layout (so the pad
+    // lowering sees a dense buffer). The op is host-only, so the space is fixed
+    // here, not read from an attribute.
+    auto hostSpace =
+        MemorySpaceAttr::get(op->getContext(), MemorySpaceKind::Host);
+    BaseMemRefType bt = bufferization::getMemRefTypeWithStaticIdentityLayout(
+        tensorTy, hostSpace);
+    return cast<bufferization::BufferLikeType>(bt);
+  }
+
+  LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
+                          const bufferization::BufferizationOptions &options,
+                          bufferization::BufferizationState &state) const {
+    auto transfer = cast<TransferToHostOp>(op);
+    Location loc = op->getLoc();
+
+    FailureOr<Value> srcBuf =
+        getBuffer(rewriter, transfer.getSrc(), options, state);
+    if (failed(srcBuf))
+      return failure();
+
+    // Get the destination buffer type from the framework (it calls our
+    // getBufferType() hook above: host space, static identity layout).
+    // Computing it again here could drift from that declared type.
+    FailureOr<bufferization::BufferLikeType> dstTyOr =
+        bufferization::getBufferType(transfer.getResult(), options, state);
+    if (failed(dstTyOr))
+      return failure();
+    auto dstTy = cast<MemRefType>(*dstTyOr);
+
+    // Dynamic dst dims mirror the src buffer's dims.
+    SmallVector<Value> dynDims;
+    for (int64_t i : llvm::seq<int64_t>(dstTy.getRank()))
+      if (dstTy.isDynamicDim(i))
+        dynDims.push_back(memref::DimOp::create(rewriter, loc, *srcBuf, i));
+
+    // Host dst is ALWAYS a stack alloca (space-less, since alloca must live in
+    // the default LLVM stack AS) lifted to #hip.mem<host>. See header comment.
+    auto slotTy = MemRefType::get(dstTy.getShape(), dstTy.getElementType());
+    Value slot = memref::AllocaOp::create(rewriter, loc, slotTy, dynDims);
+    Value dst = memref::MemorySpaceCastOp::create(rewriter, loc, dstTy, slot);
+
+    // Device -> host copy, then sync: the host reads `dst` next, so wait for
+    // the async copy to complete before the op's uses observe the buffer.
+    Value ctx = transfer.getCtx();
+    MemcpyD2HAsyncOp::create(rewriter, loc, ctx, dst, *srcBuf);
+    StreamSyncOp::create(rewriter, loc, ctx);
+
+    bufferization::replaceOpWithBufferizedValues(rewriter, op, dst);
+    return success();
+  }
+};
+
 inline void
 registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *ctx, HipDialect *) {
@@ -109,6 +209,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
         *ctx);
     ReadbackScalarOp::attachInterface<
         HipReadbackBufferizableModel<ReadbackScalarOp>>(*ctx);
+    TransferToHostOp::attachInterface<HipTransferToHostBufferizableModel>(*ctx);
     ConvOp::attachInterface<HipDstBufferizableModel<ConvOp>>(*ctx);
     ConvTransposeOp::attachInterface<HipDstBufferizableModel<ConvTransposeOp>>(
         *ctx);

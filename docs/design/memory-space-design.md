@@ -333,10 +333,14 @@ def Hip_MemPrefetchAsyncOp : Hip_Op<"mem_prefetch_async"> {
 
 The codebase has ~70 HIP operations, each with a runtime wrapper function. Many operations have inconsistent or suboptimal memory space handling for shape arguments:
 
-Examples of design flaws:
-- `hip.pad` - pads, axes are device pointers, runtime does hipMemcpyAsync D2H copy before kernel launch
-  - Problem: Worst of both worlds - device pointer allocation + D2H copy overhead
-  - Better: Pass pads (≤16 ints, 64 bytes) as kernel argument struct via constant memory
+A worked example of the by-value approach — `hip.pad`'s `constant_value`:
+- Passed **by value**: a plain `f32`/`i32`/... SSA operand, not a device pointer.
+- The converter handles it **fold first, transfer second** — a compile-time-constant fill (the common case, e.g. `0.0`) folds to an `arith.constant` with no device traffic; a runtime fill rides the same `hip.transfer_to_host` as `pads`/`axes` (see the pad-pilot section below) and is read with `tensor.extract`.
+- The lowering puts the scalar in a host stack slot; the runtime reads it with a plain `memcpy` — no device allocation, no hidden D2H.
+
+The remaining flaws below should follow this same pattern.
+
+Examples of remaining design flaws:
 - `hip.range` - start, limit, delta are device pointers for 3 scalar values
   - Problem: Allocates device memory + pointer dereference for 3 integers
   - Better: Pass as i64 scalar arguments directly
@@ -408,6 +412,58 @@ Type constraints enforce correct transfer direction automatically. Cannot accide
 
 Maps to Solution Step 2: OnnxToHip converters and shape inference use these operations to insert intentional transfers when an ONNX op requires crossing the host/device boundary.
 
+#### Implementation status: `hip.transfer_to_host` as a parallel mechanism (pad pilot)
+
+The transfer machinery above is now **partly implemented**. It runs alongside the two existing host-access mechanisms and replaces neither — all three coexist:
+
+| Mechanism | Phase | Used by | Status |
+|-----------|-------|---------|--------|
+| `hip.readback_scalar` / `hip.readback_dim` | tensor → bufferized D2H + sync | Range bounds, Loop trip count, dynamic Reshape/Expand **output-shape** arithmetic, FixLoopAccumulatorOffset (memref-phase) | unchanged; every op keeps using it. **Pad no longer uses it** — it reads pad amounts from its `hip.transfer_to_host` host copy instead |
+| `get_host_scratch` (pinned) + `MaterializeHostScalars` | memref-phase host-mapped scratch | `tensor.from_elements` host-scalar staging (e.g. GQA `seqlens_k`) | unchanged; 100% untouched |
+| **`hip.transfer_to_host` (+ `hip.memcpy_d2h_async` / `hip.stream_sync`)** | **tensor-phase explicit device→host transfer**, bufferizes to a host stack alloca + memref-phase async D2H + sync | **`hip.pad` only** (its `pads`/`axes` buffers) | **new; pilot** |
+
+**`hip.transfer_to_host`** is the tensor-phase device→host copy op (`hip.transfer_to_host %ctx, %src -> ...`). The direction is fixed by the op name (host destination), so there is no `target` attribute and no "unsupported direction" error — same style as the memref-phase `hip.memcpy_d2h_async` / `hip.memcpy_h2d_async`. Its bufferize model allocates the destination as a **host stack `memref.alloca`** (space-less, since alloca must live in the default LLVM stack address space) relabeled to `#hip.mem<host>`, emits an async D2H copy, then a `hip.stream_sync` (the host reads the buffer next, so it waits), and replaces the result. The buffer is **stack-only**: freed at function scope, needs no `dealloc`, and is skipped by `hip-pool-allocs` and `MaterializeHostScalars`. That is fine because it is only for **small** host data (shape/param vectors, scalars). It is the tensor-phase op the original design was missing — converters emit it before bufferization instead of hand-writing the memref-phase memcpy/sync.
+
+**Pad pilot (the one wired op).** `PadConversion` wraps `pads` (and `axes`, when present) in `hip.transfer_to_host`; `wrap_pad` then reads them with a plain `memcpy` instead of an internal `hipMemcpyAsync` D2H + `hipStreamSynchronize`. Two consequences:
+- **Sync count is unchanged** — the D2H + sync moved out of the runtime and became explicit in the IR, the prerequisite for a future `EliminateStreamSyncBarriers` pass to coalesce crossings.
+- **No `hip.readback_scalar`** — the output-shape arithmetic (`data_dim + pads_begin + pads_end`) reads the amounts from that *same* host copy via `tensor.extract`, so the single transfer of `pads` serves both the kernel operand and the dynamic-dim computation. This is the first op fully off readback for its host-scalar reads; the other readback users (Range/Reshape/Expand/Loop, and memref-phase FixLoopAccumulatorOffset) are unchanged.
+
+**Still future work:** moving readback / host-scratch / other ops onto `hip.transfer_to_host`; the reverse host→device direction (today only the memref-phase `hip.memcpy_h2d_async` exists, built for symmetry but unused; a tensor-phase `hip.transfer_to_device` could be added if needed); a pinned-memory destination; the `ShapeInference` and `EliminateStreamSyncBarriers` passes; and making an unspecified memory space an error instead of a silent default.
+
+### Pad output buffer: device space via `bufferization.alloc_tensor`
+
+`hip.pad`'s `output` operand is `Hip_TensorOrDeviceMemRef`, so after bufferization it MUST be `#hip.mem<device>` (the pad kernel writes it on the GPU). A custom `getBufferType()` override would fight DPS: the result buffer type is *tied* to the init operand's type, so forcing a different space causes a bufferization conflict. Instead we set the space on the **DPS init** — the standard MLIR way.
+
+`PadConversion::buildPadOutputInit` builds the init with `bufferization.alloc_tensor {memory_space = #hip.mem<device>}` instead of `tensor.empty`:
+
+```mlir
+// tensor phase (after convert-onnx-to-hip)
+%init = bufferization.alloc_tensor() {memory_space = #hip.mem<device>} : tensor<5x6xf32>
+%r    = hip.pad(%ctx) ins(%data, %pads) outs(%init : tensor<5x6xf32>) : tensor<5x6xf32>
+```
+
+`one-shot-bufferize` reads `alloc_tensor`'s `memory_space` and materializes an **identity-layout `#hip.mem<device>` `memref.alloc`**; DPS then ties `hip.pad`'s result buffer to that init, so both the `outs` operand and the result are device-typed — satisfying the type constraint by construction, no fix-up pass:
+
+```mlir
+// after one-shot-bufferize
+%a = memref.alloc() : memref<5x6xf32, #hip.mem<device>>
+hip.pad(%ctx) ins(...) outs(%a : memref<5x6xf32, #hip.mem<device>>)
+```
+
+**PoolAllocs reconciliation (space-less view + relabel cast).** `hip-pool-allocs` folds every device `memref.alloc` into the one grow-on-demand GPU pool (`hip.get_pool : memref<?xi8>`, deliberately space-less so the pool machinery stays uniform). But `memref.view` requires its result and its source to share a memory space, and the pool base has none — so the view is created **space-less**, then relabeled back to the alloc's declared space with a `memref.memory_space_cast`:
+
+```mlir
+// after hip-pool-allocs
+%pool = hip.get_pool(%ctx, %sz) : memref<?xi8>
+%v    = memref.view %pool[%off][] : memref<?xi8> to memref<5x6xf32>
+%a    = memref.memory_space_cast %v : memref<5x6xf32> to memref<5x6xf32, #hip.mem<device>>
+hip.pad(%ctx) ins(...) outs(%a : memref<5x6xf32, #hip.mem<device>>)
+```
+
+The cast lowers to an addrspace-cast between the space-less view (LLVM AS 0) and the device space (LLVM AS 1); on the host JIT target every space flattens to one flat pointer space, so it is a runtime no-op. It is emitted **only** for allocs that already carry a space, leaving the common space-less pooled allocations byte-identical. Coverage: `test/lit/Dialect/hip-pad-bufferize.mlir` (bufferize + pool artifacts), `test/lit/Dialect/hip-memory-space-pipeline.mlir` (device output at the op boundary end-to-end), `test/lit/e2e/test_pad_model.mlir`.
+
+**Why not make `hip.get_pool` device-typed and skip the cast?** It is possible with no runtime change (`GetPoolOpLowering` already derives the pool's address space from its type). But `memref.view` needs the view and the pool base to share a space, so a device-typed base would force **every** view to be device-typed. Today most pooled allocs have no space and only a few ops set device (just `hip.pad`'s output), so a device base would only move the cast onto that space-less majority — worse. The space-less pool plus a targeted cast is the smallest correct step. Once **every** pooled alloc is device-typed, we can flip the pool base to `#hip.mem<device>` and delete the cast in `PoolAllocs.cpp` (see its `FUTURE (remove this cast)` note).
+
 ### Pass Pipeline
 
 Three passes coordinate to enforce memory spaces and optimize synchronization:
@@ -465,7 +521,9 @@ This section contrasts wrong (type violations) vs right (correct-by-construction
 
 ✅ **RIGHT** - Correct from start:
 ```mlir
-// getBufferType() correctly declares device memory
+// The DPS init is a device-space bufferization.alloc_tensor, so one-shot-bufferize
+// materializes a #hip.mem<device> memref.alloc and DPS ties the result to it.
+// (See "Pad output buffer: device space via bufferization.alloc_tensor" above.)
 %device = hip.pad(%ctx) ins(%input, %pads) outs(%output)
           -> memref<?x?xf16, #hip.mem<device>>  // Correct - GPU writes to device
 // Type-correct, no fix-up needed

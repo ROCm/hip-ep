@@ -97,6 +97,39 @@ inline mlir::Value createEmptyTensor(mlir::OpBuilder &builder,
                                        resultType.getElementType(), dynSizes);
 }
 
+/// Create a DPS init as `bufferization.alloc_tensor {memory_space = <space>}`.
+///
+/// Use instead of `tensor.empty` when the consuming op needs its output buffer
+/// in a specific space -- e.g. a GPU-kernel op whose output must be
+/// `#hip.mem<device>`. one-shot-bufferize reads the `memory_space` attr and
+/// makes a `memref.alloc` in that space; a DPS consumer then ties its `outs`
+/// and result to this init, so they inherit the space. That is why the space
+/// goes on the init and not a `getBufferType` override (a DPS result aliases
+/// the init and can't carry a different space; see HipBufferize.h).
+///
+/// \p dynSizes  one Value per dynamic dim of \p resultType (empty if static).
+inline mlir::Value createAllocTensorInSpace(mlir::OpBuilder &builder,
+                                            mlir::Location loc,
+                                            mlir::RankedTensorType resultType,
+                                            mlir::hip::MemorySpaceKind space,
+                                            mlir::ValueRange dynSizes = {}) {
+  auto alloc = mlir::bufferization::AllocTensorOp::create(builder, loc,
+                                                          resultType, dynSizes);
+  alloc.setMemorySpaceAttr(
+      mlir::hip::MemorySpaceAttr::get(builder.getContext(), space));
+  return alloc.getResult();
+}
+
+/// Device-space convenience wrapper around `createAllocTensorInSpace` -- the
+/// common case for GPU-kernel-output ops (their `outs` is `#hip.mem<device>`).
+inline mlir::Value createDeviceAllocTensor(mlir::OpBuilder &builder,
+                                           mlir::Location loc,
+                                           mlir::RankedTensorType resultType,
+                                           mlir::ValueRange dynSizes = {}) {
+  return createAllocTensorInSpace(builder, loc, resultType,
+                                  mlir::hip::MemorySpaceKind::Device, dynSizes);
+}
+
 /// Resolve the ranked result type of an ONNX reduction op (ReduceMax / Sum /
 /// Mean / Prod / ...).
 ///
