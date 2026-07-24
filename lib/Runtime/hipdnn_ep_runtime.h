@@ -371,6 +371,12 @@ void *hipdnn_ep_get_host_scratch_base(RuntimeState *state, size_t needed_size);
 // pointer is reset at the start of each Compute() (begin_compute).
 void *hipdnn_ep_scratch_alloc(RuntimeState *state, size_t size);
 int hipdnn_ep_scratch_reserve(RuntimeState *state, size_t total);
+
+// KV cache tracking singleton (Phase 4a). Natively compiled in
+// mm/kv_wrappers.cpp. Called from bitcode (runtime_state init/cleanup)
+// and from the allocator module (morphizen/ort-bridge).
+void hipdnn_ep_mm_set_instance(void *mm);
+void *hipdnn_ep_mm_get_instance(void);
 size_t hipdnn_ep_scratch_save(RuntimeState *state);
 void hipdnn_ep_scratch_restore(RuntimeState *state, size_t saved);
 

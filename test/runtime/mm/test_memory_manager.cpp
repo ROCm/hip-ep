@@ -368,6 +368,65 @@ static void test_scratch_alloc_zero_returns_valid_ptr() {
 }
 
 //===----------------------------------------------------------------------===//
+// KV cache buffer tracking
+//===----------------------------------------------------------------------===//
+
+static void test_register_kv_buffer_tracks_size() {
+  auto mm = make_mm();
+  CHECK(mm->kv_bytes_used() == 0);
+  CHECK(mm->kv_buffer_count() == 0);
+  char dummy[64];
+  mm->register_kv_buffer(dummy, 1024);
+  CHECK(mm->kv_bytes_used() == 1024);
+  CHECK(mm->kv_buffer_count() == 1);
+  delete mm;
+}
+
+static void test_unregister_kv_buffer_removes_tracking() {
+  auto mm = make_mm();
+  char dummy[64];
+  mm->register_kv_buffer(dummy, 2048);
+  CHECK(mm->kv_bytes_used() == 2048);
+  mm->unregister_kv_buffer(dummy);
+  CHECK(mm->kv_bytes_used() == 0);
+  CHECK(mm->kv_buffer_count() == 0);
+  delete mm;
+}
+
+static void test_kv_buffer_count_multiple() {
+  auto mm = make_mm();
+  char a[1], b[1], c[1];
+  mm->register_kv_buffer(a, 100);
+  mm->register_kv_buffer(b, 200);
+  mm->register_kv_buffer(c, 300);
+  CHECK(mm->kv_buffer_count() == 3);
+  CHECK(mm->kv_bytes_used() == 600);
+  mm->unregister_kv_buffer(b);
+  CHECK(mm->kv_buffer_count() == 2);
+  CHECK(mm->kv_bytes_used() == 400);
+  delete mm;
+}
+
+static void test_register_kv_duplicate_is_idempotent() {
+  auto mm = make_mm();
+  char dummy[64];
+  mm->register_kv_buffer(dummy, 512);
+  mm->register_kv_buffer(dummy, 512);
+  CHECK(mm->kv_buffer_count() == 1);
+  CHECK(mm->kv_bytes_used() == 512);
+  delete mm;
+}
+
+static void test_kv_bytes_included_in_gpu_bytes() {
+  auto mm = make_mm();
+  size_t base = mm->gpu_bytes_used();
+  char dummy[64];
+  mm->register_kv_buffer(dummy, 4096);
+  CHECK(mm->gpu_bytes_used() == base + 4096);
+  delete mm;
+}
+
+//===----------------------------------------------------------------------===//
 // main — runs all MM unit tests (HAL + MemoryManager)
 //===----------------------------------------------------------------------===//
 
@@ -409,6 +468,12 @@ int main() {
   test_begin_compute_resets_scratch();
   test_ensure_workspace_preserves_scratch();
   test_scratch_alloc_zero_returns_valid_ptr();
+
+  test_register_kv_buffer_tracks_size();
+  test_unregister_kv_buffer_removes_tracking();
+  test_kv_buffer_count_multiple();
+  test_register_kv_duplicate_is_idempotent();
+  test_kv_bytes_included_in_gpu_bytes();
 
   test_gpu_bytes_used_accounts_for_pool_and_workspace();
   test_cpu_bytes_used_accounts_for_host_scratch();

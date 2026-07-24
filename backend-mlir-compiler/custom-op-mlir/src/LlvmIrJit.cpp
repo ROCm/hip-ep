@@ -120,6 +120,8 @@ inline llvm::Error installPlatformSymbolShims(llvm::orc::LLJIT & /*jit*/) {
 // the host image (EP DLL / hip-test / hip-inspect) so the addresses are valid.
 extern "C" void *hipdnn_ep_get_current_stream(void);
 extern "C" void hipdnn_ep_set_current_stream(void *stream);
+extern "C" void hipdnn_ep_mm_set_instance(void *mm);
+extern "C" void *hipdnn_ep_mm_get_instance(void);
 
 llvm::Error installRuntimeStreamShims(llvm::orc::LLJIT &jit) {
   llvm::orc::SymbolMap syms;
@@ -132,6 +134,10 @@ llvm::Error installRuntimeStreamShims(llvm::orc::LLJIT &jit) {
       reinterpret_cast<void *>(&hipdnn_ep_get_current_stream));
   add("hipdnn_ep_set_current_stream",
       reinterpret_cast<void *>(&hipdnn_ep_set_current_stream));
+  add("hipdnn_ep_mm_set_instance",
+      reinterpret_cast<void *>(&hipdnn_ep_mm_set_instance));
+  add("hipdnn_ep_mm_get_instance",
+      reinterpret_cast<void *>(&hipdnn_ep_mm_get_instance));
   return jit.getMainJITDylib().define(
       llvm::orc::absoluteSymbols(std::move(syms)));
 }

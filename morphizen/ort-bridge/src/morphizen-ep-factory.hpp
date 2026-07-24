@@ -125,6 +125,7 @@ struct MorphiZenEpFactory : OrtEpFactory, ApiPtrs {
 
   // Single shared OrtDataTransferImpl returned from CreateDataTransferImpl.
   std::unique_ptr<HipDataTransferImpl> data_transfer_impl_;
+
 #endif
 };
 } // namespace morphizen
