@@ -1130,10 +1130,9 @@ void PoolAllocsPass::runOnOperation() {
   //     hipdnn.buffer_count   = i64           // total pooled allocs
   //     hipdnn.buffer_offsets = array<i64>    // -1 for dynamic offsets
   //
-  //   Emitted only when domain_count > 1 (consumed by the multi-domain
-  //   runtime — older runtimes predating the multi-domain ABI silently ignore
-  //   the extra attrs and would alias all domains onto a single pool, which is
-  //   incorrect; the compiler/runtime ABI bump fixes that):
+  //   Emitted only when domain_count > 1 (informational/code-generation
+  //   metadata; runtime domain selection is carried by each lowered
+  //   hip.get_pool call's domain_id and size operands):
   //     hipdnn.domain_count   = i64
   //     hipdnn.pool_sizes     = array<i64>    // per-domain static prefix
   //     hipdnn.buffer_domains = array<i64>    // per-buffer domain id

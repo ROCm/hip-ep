@@ -17,6 +17,7 @@ Licensed under the MIT License.
 - [Schema: Single Source of Truth](#schema-single-source-of-truth)
 - [Embedding Mechanism](#embedding-mechanism)
 - [Current Fields](#current-fields)
+- [Generated-Code Runtime Inputs](#generated-code-runtime-inputs)
 - [Consumers](#consumers)
 - [Design Principles](#design-principles)
 - [Related Documents](#related-documents)
@@ -25,10 +26,11 @@ Licensed under the MIT License.
 
 ## Overview
 
-`schemas/model_metadata.fbs` is the **single source of truth** for the contract
-between the compiler and the runtime. Every piece of information the compiler
-needs to communicate to the runtime at code-generation time is expressed as a
-field in this schema.
+`schemas/model_metadata.fbs` is the **single source of truth for serialized
+model metadata** shared with artifact loaders and external consumers. It does
+not contain every compile-time value passed to runtime functions by generated
+LLVM IR. Transient memory planning is the canonical generated-code-only
+contract; see [Generated-Code Runtime Inputs](#generated-code-runtime-inputs).
 
 ```
   Compiler (GenerateInterface pass)
@@ -157,6 +159,31 @@ Dynamic dimensions are encoded as `-1`.
 
 ---
 
+## Generated-Code Runtime Inputs
+
+Some compiler/runtime coupling is encoded directly in generated LLVM calls
+rather than serialized in `model_metadata.fbs`. These contracts are internal to
+the compiled model and are documented by the design that owns the lowering.
+
+Pool planning is the canonical example:
+
+- `hip-pool-allocs` writes `hipdnn.pool_size`,
+  `hipdnn.buffer_count`, `hipdnn.buffer_offsets`, and optional
+  multi-domain attributes on the MLIR module.
+- `generate-interface` consumes the legacy attributes at compile time and emits
+  `hipdnn_ep_pool_init` only when all three are present and
+  `hipdnn.pool_size > 0`.
+- Each `hip.get_pool` lowers directly to
+  `hipdnn_ep_get_pool_base(state, domain_id, needed_size)`.
+- None of the `hipdnn.pool_*` or `hipdnn.buffer_*` attributes are fields in the
+  FlatBuffers schema or the JSON mirror.
+
+The generated LLVM IR plus `RuntimeState` therefore carry pool behavior. See
+[pool-allocs-memory-planning.md](pool-allocs-memory-planning.md) for the
+attribute, lowering, and grow-on-demand runtime contract.
+
+---
+
 ## Consumers
 
 | Consumer | Fields used | How |
@@ -168,14 +195,18 @@ Dynamic dimensions are encoded as `-1`.
 
 ## Design Principles
 
-**All compiler–runtime coupling goes through this schema.** If the compiler
-needs to pass information to the runtime, it adds a field here — not through
-a separate file, environment variable, or hardcoded constant.
+**Durable serialized metadata goes through this schema.** Add a schema field
+when information must be inspected by the loader or external consumers, or
+must remain available independently of generated code. Compile-time values
+used only to form calls inside the generated model may remain an internal
+lowering contract, but must be documented by the owning design and must not be
+described as part of `__metadata_blob`.
 
 ---
 
 ## Related Documents
 
 - [constant-handling-design.md](constant-handling-design.md) — how `constants_filename`, `sizes`, and `offsets` fields are produced and consumed
+- [pool-allocs-memory-planning.md](pool-allocs-memory-planning.md) — generated-code-only pool attributes and runtime calls
 - [morphizen-ep-integration.md](morphizen-ep-integration.md) — JIT loader contract; `inference_init` public interface
 - [compilation-options.md](compilation-options.md) — `constants_file` compilation option
