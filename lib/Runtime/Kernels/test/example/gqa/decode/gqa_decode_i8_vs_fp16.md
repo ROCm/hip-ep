@@ -17,7 +17,7 @@ Source model: `models/gqa_kv_u8/psu_orc_211_merged_fp16_gqa.onnx` (`com.microsof
 - **Scales: fp32 `[G*D]` = `[10*128]` = 1280** (`dec_k_scale_*`, `dec_v_scale_*`), i.e. one scale per `(kv_head, head_dim)` channel; all positive -> **symmetric** quant, **no zero point**.
 - Dequant: `k_fp16 = k_i8 * k_scale[g*D + c]`, `v_fp16 = v_i8 * v_scale[g*D + c]`. Attention is then the standard GQA math over the dequantized K/V.
 
-## Kernel implementation (`hip_gqa_flash_decode_i8_v2`)
+## Kernel implementation (`hip_gqa_flash_decode_v2` + scales)
 
 Same FA-2 split-K algorithm, `[B,H,K_SPLITS,D+2]` partials, autotune and reduce as the fp16 `hip_gqa_flash_decode_v2`, so seqlens_k / sliding-window / head-sink / smooth-softmax all carry over unchanged. The only change is the K/V load:
 

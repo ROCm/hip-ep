@@ -1,8 +1,8 @@
 // ============================================================
 // custom_kernels GQA flash *decode* with INT8 KV cache (fp16 Q, int8 K/V).
 //
-// Verifies hip_gqa_flash_decode_i8_v2 (symmetric per-channel int8 KV cache)
-// against:
+// Verifies hip_gqa_flash_decode_v2 with k_scale/v_scale (symmetric per-channel
+// int8 KV cache) against:
 //   1. a CPU fp32 reference that dequantizes the SAME int8 cache + scales
 //      (exact target -- measures kernel correctness), and
 //   2. a CPU fp32 reference over the ORIGINAL fp16 K/V (measures the quant
@@ -31,22 +31,18 @@
 #include <string>
 #include <vector>
 
-// fp16 KV-cache decode (baseline).
+// KV-cache dtype ABI (mirrors hip_kv_dtype_t in hip_custom_kernels.h).
+enum { HIP_KV_DTYPE_FP16 = 0, HIP_KV_DTYPE_INT8 = 1 };
+
+// Unified decode entry: kv_dtype selects the cache format (FP16 baseline vs INT8
+// under test); k_scale/v_scale carry the per-channel dequant tables for INT8.
 extern "C" int hip_gqa_flash_decode_v2(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, void* partials_workspace,
     int B, int H, int G, int d, int skv, int max_seq, int max_splits,
     float scale, const void* seqlens_k, int local_window_size,
-    const void* head_sink, int use_smooth_softmax);
-
-// INT8 KV-cache decode (under test).
-extern "C" int hip_gqa_flash_decode_i8_v2(
-    void* stream, const void* Q, const void* Kcache, const void* Vcache,
-    const void* k_scale, const void* v_scale,
-    void* O, void* partials_workspace,
-    int B, int H, int G, int d, int skv, int max_seq, int max_splits,
-    float scale, const void* seqlens_k, int local_window_size,
-    const void* head_sink, int use_smooth_softmax);
+    const void* head_sink, int use_smooth_softmax,
+    int kv_dtype, const void* k_scale, const void* v_scale);
 
 static constexpr int MAX_SPLITS = 64;
 
@@ -263,10 +259,10 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
   HIP_CHECK(hipMemcpy(dVsc, vscale.data(), vscale.size() * sizeof(float), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(dSeq, Seq.data(), Seq.size() * sizeof(int), hipMemcpyHostToDevice));
 
-  // Warmup + correctness fetch for the int8 kernel.
-  HIP_CHECK((hipError_t)hip_gqa_flash_decode_i8_v2(
-      nullptr, dQ, dK8, dV8, dKsc, dVsc, dO8, dPart, B, H, G, D, c.total, max_seq,
-      MAX_SPLITS, scale, dSeq, 0, nullptr, 0));
+  // Warmup + correctness fetch for the int8 kernel (kv_dtype = INT8).
+  HIP_CHECK((hipError_t)hip_gqa_flash_decode_v2(
+      nullptr, dQ, dK8, dV8, dO8, dPart, B, H, G, D, c.total, max_seq,
+      MAX_SPLITS, scale, dSeq, 0, nullptr, 0, HIP_KV_DTYPE_INT8, dKsc, dVsc));
   HIP_CHECK(hipDeviceSynchronize());
   std::vector<float> O_int8((size_t)B * H * D);
   {
@@ -275,10 +271,11 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
     for (size_t i = 0; i < tmp.size(); ++i) O_int8[i] = __half2float(tmp[i]);
   }
 
-  // Warmup fp16 kernel (also its correctness for reference).
+  // Warmup fp16 kernel (also its correctness for reference; kv_dtype = FP16).
   HIP_CHECK((hipError_t)hip_gqa_flash_decode_v2(
       nullptr, dQ, dKh, dVh, dO16, dPart, B, H, G, D, c.total, max_seq,
-      MAX_SPLITS, scale, dSeq, 0, nullptr, 0));
+      MAX_SPLITS, scale, dSeq, 0, nullptr, 0, HIP_KV_DTYPE_FP16, nullptr,
+      nullptr));
   HIP_CHECK(hipDeviceSynchronize());
 
   auto bench = [&](auto&& launch) -> double {
@@ -299,14 +296,14 @@ static Result run_case(const Case& c, int iters, unsigned seed) {
   };
 
   double ms_int8 = bench([&]() {
-    hip_gqa_flash_decode_i8_v2(nullptr, dQ, dK8, dV8, dKsc, dVsc, dO8, dPart,
-                               B, H, G, D, c.total, max_seq, MAX_SPLITS, scale,
-                               dSeq, 0, nullptr, 0);
+    hip_gqa_flash_decode_v2(nullptr, dQ, dK8, dV8, dO8, dPart, B, H, G, D,
+                            c.total, max_seq, MAX_SPLITS, scale, dSeq, 0,
+                            nullptr, 0, HIP_KV_DTYPE_INT8, dKsc, dVsc);
   });
   double ms_fp16 = bench([&]() {
     hip_gqa_flash_decode_v2(nullptr, dQ, dKh, dVh, dO16, dPart, B, H, G, D,
                             c.total, max_seq, MAX_SPLITS, scale, dSeq, 0,
-                            nullptr, 0);
+                            nullptr, 0, HIP_KV_DTYPE_FP16, nullptr, nullptr);
   });
 
   Result r;
@@ -360,7 +357,7 @@ static void write_markdown(const char* path, const char* dev, int cus,
              "`v_fp16 = v_i8 * v_scale[g*D + c]`. Attention is then the standard "
              "GQA math over the dequantized K/V.\n\n");
 
-  fprintf(f, "## Kernel implementation (`hip_gqa_flash_decode_i8_v2`)\n\n");
+  fprintf(f, "## Kernel implementation (`hip_gqa_flash_decode_v2` + scales)\n\n");
   fprintf(f, "Same FA-2 split-K algorithm, `[B,H,K_SPLITS,D+2]` partials, autotune "
              "and reduce as the fp16 `hip_gqa_flash_decode_v2`, so seqlens_k / "
              "sliding-window / head-sink / smooth-softmax all carry over unchanged. "

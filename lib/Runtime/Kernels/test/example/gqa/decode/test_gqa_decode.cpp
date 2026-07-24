@@ -28,6 +28,9 @@
 #include <string>
 
 // Launcher under test (implemented in hip/gqa_kernel.hip).
+// KV-cache dtype ABI (mirrors hip_kv_dtype_t in hip_custom_kernels.h).
+enum { HIP_KV_DTYPE_FP16 = 0, HIP_KV_DTYPE_INT8 = 1 };
+
 extern "C" int hip_gqa_flash_decode_v2(
     void* stream,
     const void* Q, const void* Kcache, const void* Vcache,
@@ -38,7 +41,8 @@ extern "C" int hip_gqa_flash_decode_v2(
     const void* seqlens_k,
     int local_window_size,
     const void* head_sink,
-    int use_smooth_softmax);
+    int use_smooth_softmax,
+    int kv_dtype, const void* k_scale, const void* v_scale);
 
 // Legacy one-block-per-head fused decode (the ORIGINAL baseline that the
 // OPTIMIZATION.md 10-20x figure was measured against). No window/sink/split-K.
@@ -192,7 +196,8 @@ static double run_kernel(DecodeMode mode, const Case& c, float scale,
   // pass (timed candidates) and caches the winner; subsequent calls reuse it.
   HIP_CHECK((hipError_t)hip_gqa_flash_decode_v2(
       nullptr, dQ, dK, dV, dO, dPart, B, H, G, D, c.total, max_seq, MAX_SPLITS,
-      scale, dSeq, c.window, sinkp, c.smooth));
+      scale, dSeq, c.window, sinkp, c.smooth, HIP_KV_DTYPE_FP16, nullptr,
+      nullptr));
   HIP_CHECK(hipDeviceSynchronize());
   host_O.resize((size_t)B * H * D);
   {
@@ -208,8 +213,8 @@ static double run_kernel(DecodeMode mode, const Case& c, float scale,
   HIP_CHECK(hipEventRecord(a));
   for (int it = 0; it < iters; ++it) {
     hip_gqa_flash_decode_v2(nullptr, dQ, dK, dV, dO, dPart, B, H, G, D, c.total,
-                         max_seq, MAX_SPLITS, scale, dSeq, c.window, sinkp,
-                         c.smooth);
+                            max_seq, MAX_SPLITS, scale, dSeq, c.window, sinkp,
+                            c.smooth, HIP_KV_DTYPE_FP16, nullptr, nullptr);
   }
   HIP_CHECK(hipEventRecord(b));
   HIP_CHECK(hipEventSynchronize(b));
