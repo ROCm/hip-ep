@@ -6,9 +6,7 @@
 # Posts a single reminder comment on PR open with links to the
 # incremental-development and AI-tool-use policies. Also auto-labels
 # PRs that exceed the soft size threshold as `large-pr`. The bot does
-# NOT generate review content; it only posts static text and a label.
-# This is intentional — automated review verdicts are not allowed in
-# this repo (see CONTRIBUTING.md, "No automated reviews").
+# not generate review content; it only posts static guidance and a label.
 
 name: PR policy reminder
 
@@ -32,27 +30,24 @@ jobs:
             const body = [
               "Thanks for opening a PR!",
               "",
-              "This repo follows two policies, summarised in",
-              "[`CONTRIBUTING.md`](../blob/main/CONTRIBUTING.md):",
+              "This project follows LLVM's incremental-development and AI-tool-use",
+              "guidance. See [`CONTRIBUTING.md`](../blob/main/CONTRIBUTING.md)",
+              "for the project workflow.",
               "",
-              "- [Incremental development](https://llvm.org/docs/DeveloperPolicy.html#incremental-development) —",
-              "  small PRs, precursors first, document the series for big work.",
-              "- [AI tool use](https://llvm.org/docs/AIToolPolicy.html) —",
-              "  human in the loop, disclose substantial AI assistance, no",
-              "  automated review verdicts, no AI on `good first issue`s.",
+              "Before requesting review, please check that:",
               "",
-              "Quick checks before requesting review:",
+              "1. The change is focused. Substantial work links the relevant issue",
+              "   or design discussion.",
+              "2. The PR documents relevant test results and updates affected",
+              "   documentation.",
+              "3. If AI tools provided substantial assistance, the description",
+              "   explains what was assisted and how it was validated, and commit",
+              "   trailers identify the tool. The contributor has reviewed and",
+              "   understands the result.",
               "",
-              "1. The Summary / Why sections explain *why* the change is",
-              "   reviewable in one sitting (or link the precursor / design",
-              "   issue if not).",
-              "2. If AI tools were used substantially, the PR description and",
-              "   commit trailers (`Co-Authored-By:`, `Made-with:`) disclose it.",
-              "3. You are confident enough in the change to defend each design",
-              "   decision in review without re-prompting an LLM.",
-              "",
-              "Reviewers will be assigned automatically via",
-              "[`CODEOWNERS`](../blob/main/.github/CODEOWNERS).",
+              "Reviewers are assigned through",
+              "[`CODEOWNERS`](../blob/main/.github/CODEOWNERS) where ownership",
+              "is configured.",
             ].join("\n");
             await github.rest.issues.createComment({
               owner: context.repo.owner,
