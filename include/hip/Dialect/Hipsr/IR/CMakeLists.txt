@@ -35,6 +35,14 @@ set(LLVM_TARGET_DEFINITIONS HipsrPoolDomainOp.td)
 mlir_tablegen(HipsrPoolDomainOp.h.inc -gen-op-decls)
 mlir_tablegen(HipsrPoolDomainOp.cpp.inc -gen-op-defs)
 
+set(LLVM_TARGET_DEFINITIONS HipsrEmptyYieldOp.td)
+mlir_tablegen(HipsrEmptyYieldOp.h.inc -gen-op-decls)
+mlir_tablegen(HipsrEmptyYieldOp.cpp.inc -gen-op-defs)
+
+set(LLVM_TARGET_DEFINITIONS HipsrEmptyOp.td)
+mlir_tablegen(HipsrEmptyOp.h.inc -gen-op-decls)
+mlir_tablegen(HipsrEmptyOp.cpp.inc -gen-op-defs)
+
 set(LLVM_TARGET_DEFINITIONS HipsrConstantOp.td)
 mlir_tablegen(HipsrConstantOp.h.inc -gen-op-decls)
 mlir_tablegen(HipsrConstantOp.cpp.inc -gen-op-defs)
