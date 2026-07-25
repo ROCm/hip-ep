@@ -109,6 +109,15 @@ int main(int argc, char **argv) {
   // (HIPDNN_EP_COMPILER_PLUGINS empty). See cmake/HipEpPlugins.cmake.
   hip::compiler::dispatchPluginRegistrationsOnce();
 
+  // Companion to dispatchPluginRegistrationsOnce() above: that registers plugin
+  // passes, this registers plugin dialects (custom ops + their bufferization
+  // and HIP->LLVM-lowering interface models) into the tool's registry,
+  // mirroring hip::compiler::loadAllDialects so the op set never drifts between
+  // the tool and the EP. Without it convert-hip-to-llvm finds no lowering for
+  // plugin ops and they survive unlowered. No-op when no plugins are selected.
+  for (auto registerFn : hip::compiler::pluginDialectRegistrations())
+    registerFn(registry);
+
   return mlir::asMainReturnCode(mlir::MlirOptMain(
       argc, argv, "hip-mlir-opt: HIP dialect compiler driver\n", registry));
 }
