@@ -3088,24 +3088,16 @@ static int tunePrefillV8Cfg(
         }
     }
 
-    // Occupancy-aware selection: start from the fastest per-call config, then
-    // among all candidates within a small ms tolerance prefer the one with the
-    // lowest LDS (most workgroups/CU). Single-call ms undervalues cross-dispatch
-    // concurrency, so on near-ties the higher-occupancy config wins the aggregate
-    // prefill; at d=256 this reliably lands ND=2,MT=1,BKV=16 (fastest per-call
-    // AND lowest LDS here) instead of the higher-LDS ND=4,MT=1,BKV=32.
-    constexpr float kMsTol = 0.03f;  // 3% single-call band treated as a tie
-    int fastest = 0;
-    for (int i = 1; i < nc; ++i) if (best_ms[i] < best_ms[fastest]) fastest = i;
-    int best = fastest;
-    size_t best_lds =
-        prefillV8SmemBytes(cands[best].nd, cands[best].mt, cands[best].bkv, d);
-    for (int i = 0; i < nc; ++i) {
-        if (best_ms[i] > best_ms[fastest] * (1.0f + kMsTol)) continue;
-        const size_t lds =
-            prefillV8SmemBytes(cands[i].nd, cands[i].mt, cands[i].bkv, d);
-        if (lds < best_lds) { best = i; best_lds = lds; }
-    }
+    // Pure fastest measured per-call config. An earlier "occupancy-aware"
+    // tiebreak (prefer lowest LDS within a 3% band) was dropped: RGP SQTT on
+    // gfx1151 showed its premise is false here -- the lowest-LDS d=256 config
+    // (ND=2,BKV=16) is LDS-limited at 31% occupancy while ND=4,BKV=16 is
+    // VGPR-limited at 50%, so lowest LDS is NOT highest occupancy. The band also
+    // never fired in practice (adjacent candidates differ by >3%). The candidate
+    // set (incl. BKV=16) plus per-shape caching already lands the right config:
+    // ND=4,BKV=16 for short prompts, ND=2,BKV=16 for long.
+    int best = 0;
+    for (int i = 1; i < nc; ++i) if (best_ms[i] < best_ms[best]) best = i;
     return cands[best].nd * 1000000 + cands[best].mt * 1000 + cands[best].bkv;
 }
 
