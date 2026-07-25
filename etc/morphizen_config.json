@@ -1,0 +1,27 @@
+{
+  "passes": [
+    {
+      "name": "init",
+      "plugin": "morphizen-pass-init"
+    },
+    {
+      "name": "mlir-pass",
+      "plugin": "morphizen-level1-pass-mlir-compiler"
+    }
+  ],
+  "target": "mlir-target",
+  "targets": [
+    {
+      "name": "mlir-target",
+      "pass": [
+        "init",
+        "mlir-pass"
+      ],
+      "provider_options": {
+        "pass.init.enable_dump": "0",
+        "pass.init.directory": "morphizen_mlir_init",
+        "pass.init.filename": "init-graph-for-mlir.onnx"
+      }
+    }
+  ]
+}

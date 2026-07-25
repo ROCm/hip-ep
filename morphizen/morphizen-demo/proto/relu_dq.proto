@@ -1,0 +1,12 @@
+// Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+syntax = "proto3";
+package relu_dq;
+message ReluDqParamProto {
+  string sample_string = 1;
+  int32 sample_int = 2;
+  repeated string sample_strings = 4;
+  repeated int32 sample_ints = 5;
+  string ep_context_file_name = 6;
+  int32 ep_context_file_size = 7;
+}

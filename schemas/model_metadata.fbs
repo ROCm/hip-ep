@@ -1,0 +1,50 @@
+// Copyright (C) 2023 - 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+
+namespace mlir.hip;
+
+table TensorInfo {
+  shape: [int64];
+  element_size: int64;
+}
+
+// Per-constant source descriptor baked into __metadata_blob. When a
+// ConstantInfo.source is NONE, the runtime falls back to the bulk
+// constants-file read (constants_filename). Otherwise it uploads this
+// constant tensor-by-tensor using the source-specific payload.
+table SplatSource {
+  // Element bytes (1 / 2 / 4 / 8), tile-expanded to ConstantInfo.size
+  // at runtime.
+  elem_bytes: [ubyte];
+}
+table FileRefSource {
+  path:        string;  // absolute OS path to external data file
+  file_offset: int64;   // byte offset within that file
+}
+// Hybrid path: a constant whose source could not be re-read on demand
+// (mem-addr alias of DenseAttr / OrtValue) was packed into the small
+// per-session partial constants file. The runtime fetches `size` bytes at
+// `mem_offset` from HipModelMetaInfo.constants_filename through
+// the EP's FileSystem and uploads via the per-entry staging buffer.
+table MemSource {
+  mem_offset: int64; // byte offset within HipModelMetaInfo.constants_filename
+}
+union ConstantSource { SplatSource, FileRefSource, MemSource }
+
+table ConstantInfo {
+  size:   int64;
+  offset: int64;
+  source: ConstantSource;
+}
+
+table HipModelMetaInfo {
+  version: int32 = 1;
+  constants_filename: string;
+  constants: [ConstantInfo];
+  input_count: int64;
+  output_count: int64;
+  inputs: [TensorInfo];
+  outputs: [TensorInfo];
+}
+
+root_type HipModelMetaInfo;

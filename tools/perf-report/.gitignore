@@ -1,0 +1,10 @@
+# Runtime artifacts produced by run_bench.sh. Scoped here (rather than the
+# top-level .gitignore) because they only exist when this directory's
+# scripts are exercised. gitignore patterns must be on their own lines --
+# trailing same-line comments are treated as part of the pattern.
+
+# bench stderr+stdout captures
+_perf_logs/
+
+# staged model dirs (symlinks + copy of genai_config_MorphiZenEP.json)
+oga_dynamic_dirs/

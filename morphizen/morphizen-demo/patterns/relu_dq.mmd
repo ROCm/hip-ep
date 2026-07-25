@@ -1,0 +1,12 @@
+flowchart TB
+    input_0[\"input_0<br>[1,64,112,112], id=0, ty=1<br>127"/]
+    classDef input fill:#add8e6,stroke:#00008b,stroke-width:2px;;
+    class input_0 input;
+    Relu_0["Relu_0<br>[1,64,112,112], id=1, ty=1<br>128"]
+    input_0 -.-> Relu_0
+    classDef Relu fill:#ffb6c1,stroke:#8b0000,stroke-width:2px;;
+    class Relu_0 Relu;
+    QuantizeLinear_0[["QuantizeLinear_0<br>[1,64,112,112], id=4, ty=3<br>131"]]
+    Relu_0 --o QuantizeLinear_0
+    classDef QuantizeLinear fill:#ffa07a,stroke:#8b0000,stroke-width:2px;;
+    class QuantizeLinear_0 QuantizeLinear;

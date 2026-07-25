@@ -1,0 +1,52 @@
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
+//===- OnnxToHipsr.cpp - Convert ONNX dialect to the hipsr dialect --------===//
+//
+// Converts ONNX dialect IR into hipsr dialect IR (tensor DPS). ONNX ops are
+// matched by name via the generic MLIR Operation API, so no onnx-mlir headers
+// are required. Each pattern emits the hipsr op with its shape region left
+// empty; a later pass fills the region via ShapeRegionInterface.
+//
+//===----------------------------------------------------------------------===//
+
+#include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
+#include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
+
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Shape/IR/Shape.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+
+namespace mlir {
+namespace hipsr {
+
+#define GEN_PASS_DEF_CONVERTONNXTOHIPSRPASS
+#include "hip/Conversion/Passes.h.inc"
+
+namespace {
+
+struct ConvertOnnxToHipsrPass
+    : impl::ConvertOnnxToHipsrPassBase<ConvertOnnxToHipsrPass> {
+  void runOnOperation() override {
+    ::mlir::RewritePatternSet patterns(&getContext());
+    populateOnnxToHipsrConstantPatterns(patterns);
+    populateCastConversionPatterns(patterns, &getContext());
+    populateMatMulConversionPatterns(patterns, &getContext());
+
+    // Same driver/config as convert-onnx-to-hip (greedy, ExistingOps): ONNX ops
+    // are matched by name and only the ops present on entry are rewritten, so
+    // generated hipsr / shape-region IR is left untouched.
+    ::mlir::GreedyRewriteConfig config;
+    config.setStrictness(::mlir::GreedyRewriteStrictness::ExistingOps);
+    if (::mlir::failed(::mlir::applyPatternsGreedily(
+            getOperation(), std::move(patterns), config)))
+      signalPassFailure();
+  }
+};
+
+} // namespace
+
+} // namespace hipsr
+} // namespace mlir

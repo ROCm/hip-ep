@@ -1,0 +1,11 @@
+*.onnx filter=lfs diff=lfs merge=lfs -text
+
+# Force UTF-8 for all source files. Prevents Windows editors from saving a
+# Latin-1 / CP1252 round-trip view of UTF-8 comments back as broken UTF-8
+# (e.g. `→` -> `â†’`, `α` -> `Î±`). See PR #213 review for the prior occurrence.
+*.cpp text working-tree-encoding=UTF-8
+*.h   text working-tree-encoding=UTF-8
+*.hpp text working-tree-encoding=UTF-8
+*.c   text working-tree-encoding=UTF-8
+*.cc  text working-tree-encoding=UTF-8
+*.md  text working-tree-encoding=UTF-8

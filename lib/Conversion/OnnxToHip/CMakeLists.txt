@@ -1,0 +1,117 @@
+##
+# ** Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# ** Licensed under the MIT License.
+##
+
+add_library(OnnxToHip STATIC
+  OnnxToHip.cpp
+  SimplifyOnnx.cpp
+  MatMulConversion.cpp
+  TransposeConversion.cpp
+  ElementwiseConversion.cpp
+  PowerConversion.cpp
+  ActivationConversion.cpp
+  BiasGeluConversion.cpp
+  FastGeluConversion.cpp
+  CastConversion.cpp
+  ReduceSumConversion.cpp
+  ReduceMeanConversion.cpp
+  MatMulNBitsConversion.cpp
+  QMoEConversion.cpp
+  GatherBlockQuantizedConversion.cpp
+  ConvConversion.cpp
+  ConvTransposeConversion.cpp
+  NormConversion.cpp
+  RotaryEmbeddingConversion.cpp
+  OnnxRotaryEmbeddingConversion.cpp
+  GqaConversion.cpp
+  MultiHeadAttentionConversion.cpp
+  AttentionConversion.cpp
+  OnnxAttentionConversion.cpp
+  HipGqaBuilder.cpp
+  GatherConversion.cpp
+  GatherElementsConversion.cpp
+  TopKConversion.cpp
+  ScatterElementsConversion.cpp
+  CompressConversion.cpp
+  OneHotConversion.cpp
+  GatherShapeFold.cpp
+  ReshapeShapeFold.cpp
+  PadShapeFold.cpp
+  ShapeConversion.cpp
+  ReshapeConversion.cpp
+  CausalConvWithStateConversion.cpp
+  GemmConversion.cpp
+  WhereConversion.cpp
+  LinearAttentionConversion.cpp
+  RangeConversion.cpp
+  FastGeluFusion.cpp
+  ErfGeluFusion.cpp
+  ProjectorOpsRewrites.cpp
+  LpNormalizationConversion.cpp
+  EqualConversion.cpp
+  DivConversion.cpp
+  ReduceMaxConversion.cpp
+  ReduceMinConversion.cpp
+  MinConversion.cpp
+  MaxConversion.cpp
+  NotConversion.cpp
+  CosConversion.cpp
+  SinConversion.cpp
+  CeilConversion.cpp
+  ExpConversion.cpp
+  LogConversion.cpp
+  CumSumConversion.cpp
+  PadConversion.cpp
+  TileConversion.cpp
+  ExpandConversion.cpp
+  ReduceProdConversion.cpp
+  LessConversion.cpp
+  GreaterConversion.cpp
+  GreaterOrEqualConversion.cpp
+  LessOrEqualConversion.cpp
+  GatherNDConversion.cpp
+  SignConversion.cpp
+  ModConversion.cpp
+  ConstantOfShapeConversion.cpp
+  SliceConversion.cpp
+  ScatterNDConversion.cpp
+  IdentityConversion.cpp
+  OrConversion.cpp
+  AndConversion.cpp
+  AbsConversion.cpp
+  SizeConversion.cpp
+  NonZeroConversion.cpp
+  ConcatConversion.cpp
+  PoolConversion.cpp
+  ResizeConversion.cpp
+  GlobalPoolConversion.cpp
+  FlattenConversion.cpp
+  LoopOutline.cpp
+  IfOutline.cpp
+  ReluConversion.cpp
+  LeakyReluConversion.cpp
+  ClipConversion.cpp
+)
+
+add_dependencies(OnnxToHip
+  HipDialectIncGen
+  HipTypesIncGen
+  HipOpsIncGen
+  HipPassesIncGen
+)
+
+target_link_libraries(OnnxToHip PUBLIC
+  HipDialectIR
+  HipConstantsIO
+  MLIRPass
+  MLIRFuncDialect
+  MLIRArithDialect
+  MLIRTensorDialect
+  MLIRLinalgDialect
+  MLIRMemRefDialect
+  MLIRBufferizationDialect
+  MLIRIR
+  MLIRSupport
+  MLIRTransforms
+)

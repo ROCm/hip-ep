@@ -1,0 +1,23 @@
+# Numeric verification test suite -- direct Python dependencies.
+#
+# Use this file when you want to install just what this suite needs
+# into an isolated env (CI worker, fresh venv, anyone bringing their
+# own ONNX model and EP DLL):
+#
+#   pip install -r test/numeric/requirements.txt
+#
+# If you already use the repo's canonical conda env (see CLAUDE.md:
+# `conda env create -f environment.yml && conda activate hipdnn-ep`)
+# you do NOT need to install this file -- environment.yml already
+# pulls in pytest / numpy / onnx / onnxruntime-directml, which is a
+# superset of what's listed here.
+#
+# Versions are intentionally unpinned: the suite uses only stable
+# public APIs (numpy arrays, onnx.helper, ORT InferenceSession +
+# register_execution_provider_library). Pin upstream in your env
+# file if you need reproducibility.
+
+numpy
+onnx
+onnxruntime
+pytest

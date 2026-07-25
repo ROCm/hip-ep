@@ -1,0 +1,35 @@
+// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+
+syntax = "proto3";
+
+package mlir_metadata;
+
+// Minimal metadata for MLIR compiled artifacts
+message Metadata {
+  string artifact_filename = 1;
+  repeated Output outputs = 2;
+  repeated Input inputs = 3;
+  // Per-model artifact format, mirrors CompilationOptions.output_mode.
+  // Read by the EP before loading the artifact to select the loader:
+  //   "LLVM_IR" (default / empty) -> LlvmIrJit (in-process ORC JIT)
+  //   "NATIVE"                    -> morphizen::Plugin (LoadLibrary/dlopen)
+  string artifact_format = 4;
+}
+
+message Input {
+  string name = 1;
+  int32 rank = 2;
+  int32 elem_type = 3;
+  repeated int64 shape = 4;
+}
+
+message Output {
+  string name = 1;
+  int32 rank = 2;
+  int32 elem_type = 3;
+  // Static dims carry their size; dynamic dims carry -1. The DLL works out the
+  // size of a dynamic output at runtime through the EP's output-allocator
+  // callback, so no extra per-dim metadata is needed.
+  repeated int64 shape = 4;
+}

@@ -1,0 +1,19 @@
+// Copyright (C) 2023 - 2025 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+
+namespace mlir.hip;
+
+enum OutputMode : int {
+  LLVM_IR = 0,
+  NATIVE = 1
+}
+
+table CompilationOptions {
+  opt_level: int = 2;
+  output_mode: OutputMode = LLVM_IR;
+  verbose: bool = false;
+  constants_file: string = "constants.bin";
+  skip_constant_data: bool = false;
+}
+
+root_type CompilationOptions;

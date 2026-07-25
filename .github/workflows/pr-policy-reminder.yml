@@ -1,0 +1,75 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+
+# Posts a single reminder comment on PR open with links to the
+# incremental-development and AI-tool-use policies. Also auto-labels
+# PRs that exceed the soft size threshold as `large-pr`. The bot does
+# not generate review content; it only posts static guidance and a label.
+
+name: PR policy reminder
+
+on:
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  pull-requests: write
+  issues: write
+
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post policy reminder
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const body = [
+              "Thanks for opening a PR!",
+              "",
+              "This project follows LLVM's incremental-development and AI-tool-use",
+              "guidance. See [`CONTRIBUTING.md`](../blob/main/CONTRIBUTING.md)",
+              "for the project workflow.",
+              "",
+              "Before requesting review, please check that:",
+              "",
+              "1. The change is focused. Substantial work links the relevant issue",
+              "   or design discussion.",
+              "2. The PR documents relevant test results and updates affected",
+              "   documentation.",
+              "3. If AI tools provided substantial assistance, the description",
+              "   explains what was assisted and how it was validated, and commit",
+              "   trailers identify the tool. The contributor has reviewed and",
+              "   understands the result.",
+              "",
+              "Reviewers are assigned through",
+              "[`CODEOWNERS`](../blob/main/.github/CODEOWNERS) where ownership",
+              "is configured.",
+            ].join("\n");
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              body,
+            });
+
+      - name: Label oversized PRs
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const LOC_LIMIT = 1000;
+            const FILE_LIMIT = 20;
+            const changedLoc = (pr.additions || 0) + (pr.deletions || 0);
+            const changedFiles = pr.changed_files || 0;
+            if (changedLoc > LOC_LIMIT || changedFiles > FILE_LIMIT) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                labels: ["large-pr"],
+              });
+            }
