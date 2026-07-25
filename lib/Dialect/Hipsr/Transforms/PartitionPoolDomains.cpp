@@ -6,9 +6,9 @@
 //
 // Greedily partitions the non-terminator ops of a single-block function into
 // standard IsolatedFromAbove domains. An active start barrier begins a domain;
-// the first operation using an active end-barrier result begins the next. Every
-// top-level hipsr DPS tensor init must come from a dedicated hipsr.placeholder;
-// the placeholder follows its sole DPS consumer into the same domain.
+// the first operation using an active end-barrier result begins the next.
+// Top-level placeholders are validated before planning and excluded from
+// boundary analysis.
 //
 // In the example, example.end_barrier implements EndBarrierInterface, and
 // hipsr.example_start_barrier implements both StartBarrierInterface and
@@ -49,13 +49,12 @@
 //     return %2 : tensor<?xf32>
 //   }
 //
-// One read-only planning scan validates each placeholder when encountered and
-// records it for its sole later consumer. At that consumer, the scan verifies
-// every tensor DPS init, selects the domain from the barrier rules, then
-// inserts the recorded placeholders immediately before the consumer. Compute
-// each domain's results before mutation. Materialization moves the operations
-// into the new region, then MLIR's region-isolation utility derives the
-// operands and entry-block arguments.
+// A read-only preflight validates each placeholder. Domain planning then
+// considers only non-placeholder operations. Materialization moves those
+// operations into their domains and derives each consumer's placeholders from
+// its DPS init operands. It recreates the placeholders immediately before the
+// consumer and erases the originals. MLIR's region-isolation utility then
+// derives the operands and entry-block arguments.
 //
 //===----------------------------------------------------------------------===//
 
@@ -72,9 +71,9 @@
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Transforms/RegionUtils.h"
 
-#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 
@@ -126,9 +125,6 @@ static bool isHipsrDpsOp(Operation &operation) {
          isa<DestinationStyleOpInterface>(operation);
 }
 
-using PendingPlaceholders =
-    llvm::DenseMap<Operation *, SmallVector<Operation *>>;
-
 static LogicalResult verifyNoNestedPlaceholders(Operation &operation) {
   WalkResult result = operation.walk([&](PlaceholderOp placeholder) {
     placeholder.emitOpError("must be top-level when partitioning pool domains");
@@ -137,8 +133,8 @@ static LogicalResult verifyNoNestedPlaceholders(Operation &operation) {
   return result.wasInterrupted() ? failure() : success();
 }
 
-static FailureOr<Operation *>
-verifyDedicatedPlaceholder(PlaceholderOp placeholder, Block &block) {
+static LogicalResult verifyDedicatedPlaceholder(PlaceholderOp placeholder,
+                                                Block &block) {
   if (placeholder->getNumResults() == 0) {
     placeholder.emitOpError("must produce at least one tensor DPS init");
     return failure();
@@ -169,29 +165,52 @@ verifyDedicatedPlaceholder(PlaceholderOp placeholder, Block &block) {
     consumer = use.getOwner();
   }
 
-  return consumer;
+  return success();
 }
 
-static LogicalResult
-verifyDpsInitPlaceholders(Operation &operation, Block &block,
-                          ArrayRef<Operation *> consumerPlaceholders) {
+static LogicalResult verifyDpsInitPlaceholders(Operation &operation,
+                                               Block &block) {
   if (!isHipsrDpsOp(operation)) {
     return success();
   }
 
-  llvm::SmallPtrSet<Operation *, 4> expectedPlaceholders(
-      consumerPlaceholders.begin(), consumerPlaceholders.end());
   auto dpsOp = cast<DestinationStyleOpInterface>(operation);
   for (Value init : dpsOp.getDpsInits()) {
     if (!isa<TensorType>(init.getType())) {
       continue;
     }
     auto placeholder = init.getDefiningOp<PlaceholderOp>();
-    if (!placeholder || placeholder->getBlock() != &block ||
-        !expectedPlaceholders.contains(placeholder.getOperation())) {
+    if (!placeholder || placeholder->getBlock() != &block) {
       operation.emitOpError(
           "requires each tensor DPS init to be produced by a top-level "
           "hipsr.placeholder");
+      return failure();
+    }
+  }
+
+  return success();
+}
+
+static LogicalResult validatePlaceholders(Block &block) {
+  for (Operation &operation : block.without_terminator()) {
+    if (isa<PoolDomainOp>(operation)) {
+      operation.emitError(
+          "hipsr-partition-pool-domains does not support existing pool "
+          "domains");
+      return failure();
+    }
+
+    if (auto placeholder = dyn_cast<PlaceholderOp>(operation)) {
+      if (failed(verifyDedicatedPlaceholder(placeholder, block))) {
+        return failure();
+      }
+      continue;
+    }
+
+    if (failed(verifyNoNestedPlaceholders(operation))) {
+      return failure();
+    }
+    if (failed(verifyDpsInitPlaceholders(operation, block))) {
       return failure();
     }
   }
@@ -216,46 +235,17 @@ static void computeDomainResults(Domain &domain, Block &parentBlock) {
   }
 }
 
-static FailureOr<SmallVector<Domain>> partitionIntoDomains(Block &block) {
+static SmallVector<Domain> partitionIntoDomains(Block &block) {
   SmallVector<Domain> domains;
   llvm::SmallDenseSet<Value, 8> endBarrierResults;
-  PendingPlaceholders pendingPlaceholders;
 
   // TODO: When concrete barrier ops land, shape materialization must emit
   // start-barrier input readbacks at domain entry and end-barrier capacity
   // shapes before execution plus real shapes afterward. This pass only
   // establishes the boundaries required by those computations.
   for (Operation &operation : block.without_terminator()) {
-    if (isa<PoolDomainOp>(operation)) {
-      operation.emitError(
-          "hipsr-partition-pool-domains does not support existing pool "
-          "domains");
-      return failure();
-    }
-
-    // A placeholder is emitted with its sole consumer after that consumer's
-    // barrier boundary has selected the domain.
-    if (auto placeholder = dyn_cast<PlaceholderOp>(operation)) {
-      FailureOr<Operation *> consumer =
-          verifyDedicatedPlaceholder(placeholder, block);
-      if (failed(consumer)) {
-        return failure();
-      }
-      pendingPlaceholders[*consumer].push_back(&operation);
+    if (isa<PlaceholderOp>(operation)) {
       continue;
-    }
-
-    if (failed(verifyNoNestedPlaceholders(operation))) {
-      return failure();
-    }
-
-    auto placeholdersIt = pendingPlaceholders.find(&operation);
-    ArrayRef<Operation *> placeholders;
-    if (placeholdersIt != pendingPlaceholders.end()) {
-      placeholders = placeholdersIt->second;
-    }
-    if (failed(verifyDpsInitPlaceholders(operation, block, placeholders))) {
-      return failure();
     }
 
     if (domains.empty() ||
@@ -267,11 +257,6 @@ static FailureOr<SmallVector<Domain>> partitionIntoDomains(Block &block) {
     }
 
     Domain &currentDomain = domains.back();
-    if (placeholdersIt != pendingPlaceholders.end()) {
-      currentDomain.operations.append(placeholdersIt->second.begin(),
-                                      placeholdersIt->second.end());
-      pendingPlaceholders.erase(placeholdersIt);
-    }
     currentDomain.operations.push_back(&operation);
 
     if (isActiveEndBarrier(operation)) {
@@ -281,18 +266,34 @@ static FailureOr<SmallVector<Domain>> partitionIntoDomains(Block &block) {
     }
   }
 
-  if (!pendingPlaceholders.empty()) {
-    pendingPlaceholders.begin()->second.front()->emitOpError(
-        "has a DPS consumer that was not visited during pool-domain "
-        "partitioning");
-    return failure();
-  }
-
   for (Domain &domain : domains) {
     computeDomainResults(domain, block);
   }
 
   return domains;
+}
+
+static void recreatePlaceholders(IRRewriter &rewriter, const Domain &domain) {
+  for (Operation *consumer : domain.operations) {
+    if (!isHipsrDpsOp(*consumer)) {
+      continue;
+    }
+
+    llvm::SmallSetVector<Operation *, 4> placeholders;
+    auto dpsOp = cast<DestinationStyleOpInterface>(*consumer);
+    for (Value init : dpsOp.getDpsInits()) {
+      if (isa<TensorType>(init.getType())) {
+        auto placeholder = cast<PlaceholderOp>(init.getDefiningOp());
+        placeholders.insert(placeholder.getOperation());
+      }
+    }
+
+    rewriter.setInsertionPoint(consumer);
+    for (Operation *placeholder : placeholders) {
+      Operation *replacement = rewriter.clone(*placeholder);
+      rewriter.replaceOp(placeholder, replacement->getResults());
+    }
+  }
 }
 
 static void materializeDomains(ArrayRef<Domain> domains) {
@@ -316,6 +317,7 @@ static void materializeDomains(ArrayRef<Domain> domains) {
     for (Operation *operation : domain.operations) {
       rewriter.moveOpBefore(operation, body, body->end());
     }
+    recreatePlaceholders(rewriter, domain);
 
     SmallVector<Value> capturedValues =
         makeRegionIsolatedFromAbove(rewriter, bodyRegion);
@@ -358,13 +360,13 @@ struct PartitionPoolDomainsPass
     }
 
     Block &entryBlock = funcOp.front();
-    FailureOr<SmallVector<Domain>> domains = partitionIntoDomains(entryBlock);
-    if (failed(domains)) {
+    if (failed(validatePlaceholders(entryBlock))) {
       signalPassFailure();
       return;
     }
 
-    materializeDomains(*domains);
+    SmallVector<Domain> domains = partitionIntoDomains(entryBlock);
+    materializeDomains(domains);
   }
 };
 

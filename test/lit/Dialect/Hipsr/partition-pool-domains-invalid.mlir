@@ -77,7 +77,7 @@ func.func @non_dps_placeholder_use() -> tensor<?x8xf16> {
 
 // -----
 
-// Placeholders must be top-level so planning can move them with consumers.
+// Placeholders must be top-level so the pass can recreate them in a domain.
 func.func @nested_placeholder(%ctx: !hipsr.context,
                               %input: tensor<4x8xf32>)
     -> tensor<4x8xf16> {

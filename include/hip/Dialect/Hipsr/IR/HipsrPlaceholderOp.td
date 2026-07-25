@@ -27,8 +27,9 @@ def Hipsr_PlaceholderOp : Hipsr_Op<"placeholder", [Pure]> {
     exactly one use, every result must initialize the same top-level hipsr DPS
     op, and every top-level hipsr DPS tensor init must come from such a
     placeholder. The partitioning pass verifies this transient staging
-    contract and must run before CSE, which may merge same-typed pure
-    placeholders.
+    contract, excludes placeholders from boundary analysis, and recreates each
+    one inside its consumer's domain. It must run before CSE, which may merge
+    same-typed pure placeholders.
 
     `hipsr.placeholder` is transient: it has no bufferization interface, so it
     must be replaced before bufferization runs.

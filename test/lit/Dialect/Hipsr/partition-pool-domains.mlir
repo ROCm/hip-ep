@@ -3,9 +3,10 @@
 
 // RUN: hip-mlir-opt --split-input-file -hipsr-partition-pool-domains %s | FileCheck %s
 
-// A DPS chain and its dedicated placeholders move into one domain.
+// A DPS chain gets fresh placeholders inside its assigned domain.
 // CHECK-LABEL: func.func @cast_matmul_chain
 // CHECK-SAME: (%[[CTX:.*]]: !hipsr.context, %[[A:.*]]: tensor<4x8xf32>, %[[B:.*]]: tensor<8x2xf16>)
+// CHECK-NOT: hipsr.placeholder
 // CHECK: hipsr.pool_domain(%[[CTX]], %[[A]], %[[B]] : !hipsr.context, tensor<4x8xf32>, tensor<8x2xf16>) {
 // CHECK-NEXT: ^bb0(%[[DCTX:.*]]: !hipsr.context, %[[DA:.*]]: tensor<4x8xf32>, %[[DB:.*]]: tensor<8x2xf16>):
 // CHECK: %[[CAST_INIT:.*]] = hipsr.placeholder : tensor<4x8xf16>
@@ -31,9 +32,10 @@ func.func @cast_matmul_chain(
 
 // -----
 
-// A placeholder moves immediately before its sole DPS consumer.
+// A placeholder is recreated immediately before its sole DPS consumer.
 // CHECK-LABEL: func.func @dps_init_producer
 // CHECK-SAME: (%[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<4x8xf32>)
+// CHECK-NOT: hipsr.placeholder
 // CHECK: %[[DOMAIN:.*]] = hipsr.pool_domain(%[[CTX]], %[[INPUT]] : !hipsr.context, tensor<4x8xf32>) {
 // CHECK-NEXT: ^bb0(%[[DCTX:.*]]: !hipsr.context, %[[DINPUT:.*]]: tensor<4x8xf32>):
 // CHECK-NEXT: %[[INIT:.*]] = hipsr.placeholder : tensor<4x8xf16>
@@ -52,8 +54,9 @@ func.func @dps_init_producer(%ctx: !hipsr.context,
 
 // -----
 
-// Planning keeps an early placeholder with a later DPS consumer.
+// Planning ignores an early placeholder and recreates it by its later consumer.
 // CHECK-LABEL: func.func @deferred_dps_init
+// CHECK-NOT: hipsr.placeholder
 // CHECK: %[[DOMAIN:.*]]:2 = hipsr.pool_domain(
 // CHECK: %[[SUM:.*]] = arith.addf
 // CHECK-NEXT: %[[INIT:.*]] = hipsr.placeholder : tensor<4x8xf16>

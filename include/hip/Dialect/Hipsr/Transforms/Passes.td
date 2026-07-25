@@ -55,12 +55,12 @@ def PartitionPoolDomainsPass
     At this pipeline stage, every top-level hipsr DPS tensor init must be
     produced by a dedicated top-level `hipsr.placeholder`. Every placeholder
     result must have exactly one use, all as DPS inits of the same hipsr
-    operation. During the greedy planning scan, each placeholder is validated
-    and queued for its later consumer. On reaching that consumer, the pass
-    verifies all tensor DPS inits, selects the domain from the barrier rules,
-    and inserts the queued placeholders immediately before it. The pass must
-    run before CSE, which may merge same-typed pure placeholders; such merged
-    input is rejected.
+    operation. A read-only preflight validates this contract. Boundary analysis
+    then ignores placeholders. After assigning the data operations to domains,
+    the pass finds their placeholders through the standard destination-style
+    interface, recreates each one immediately before its consumer, and erases
+    the original. The pass must run before CSE, which may merge same-typed pure
+    placeholders; such merged input is rejected.
 
     External values enter through operands and entry-block arguments; escaping
     values become results. Multi-block functions and existing pool domains are
