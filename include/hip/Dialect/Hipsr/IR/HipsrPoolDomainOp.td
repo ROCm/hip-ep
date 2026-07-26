@@ -37,8 +37,8 @@ def Hipsr_PoolDomainOp : Hipsr_Op<"pool_domain", [
 
     Example:
     ```mlir
-    %out = hipsr.pool_domain(%input : tensor<?xf32>) {
-    ^bb0(%domain_input: tensor<?xf32>):
+    %out = hipsr.pool_domain(%ctx, %input : !hipsr.context, tensor<?xf32>) {
+    ^bb0(%domain_ctx: !hipsr.context, %domain_input: tensor<?xf32>):
       %c0 = arith.constant 0 : index
       %size = tensor.dim %domain_input, %c0 : tensor<?xf32>
       %buffer = tensor.empty(%size) : tensor<?xf32>

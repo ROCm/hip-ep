@@ -4,8 +4,8 @@
 // RUN: hip-mlir-opt --split-input-file -cse %s | FileCheck %s --check-prefix=CSE
 // RUN: hip-mlir-opt --split-input-file -canonicalize %s | FileCheck %s --check-prefix=CANON
 
-// CSE must not reuse the outside constant for the identical constant inside
-// the domain.
+// Issue #512, case 1: the same constant appears on both sides of the
+// IsolatedFromAbove boundary. CSE must keep the inner constant in the domain.
 // CSE-LABEL: func.func @cse_keeps_domain_isolated(
 // CSE-SAME: %[[INPUT:.+]]: i32) -> i32 {
 // CSE-NEXT: %[[OUTSIDE_C2:.+]] = arith.constant 2 : i32
@@ -31,8 +31,8 @@ func.func @cse_keeps_domain_isolated(%arg: i32) -> i32 {
 }
 
 // -----
-// Canonicalize must fold the addition to a constant inside the domain without
-// reusing the equal constant outside it.
+// Issue #512, case 2: canonicalize folds the addition inside the
+// IsolatedFromAbove boundary. The new constant must stay in the domain.
 // CANON-LABEL: func.func @canonicalize_keeps_domain_isolated(
 // CANON-SAME: %[[INPUT:.+]]: i32) -> i32 {
 // CANON-NEXT: %[[OUTSIDE_C2:.+]] = arith.constant 2 : i32

@@ -5,8 +5,8 @@
 
 #include "hip/Dialect/Hipsr/IR/HipsrPoolDomainOp.h"
 
-// The implicit-terminator trait's generated methods need the full terminator
-// type, rather than the forward declaration in HipsrPoolDomainOp.h.
+// Generated SingleBlockImplicitTerminator methods need the complete
+// PoolDomainYieldOp class from HipsrPoolDomainYieldOp.h.
 #include "hip/Dialect/Hipsr/IR/HipsrPoolDomainYieldOp.h"
 
 #include "llvm/Support/ErrorHandling.h"
