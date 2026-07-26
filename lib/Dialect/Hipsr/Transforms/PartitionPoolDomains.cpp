@@ -7,8 +7,8 @@
 // Greedily partitions the non-terminator ops of a single-block function into
 // standard IsolatedFromAbove domains. An active start barrier begins a domain;
 // the first operation using an active end-barrier result begins the next.
-// Top-level placeholders are validated before planning and excluded from
-// boundary analysis.
+// The pass validates the top-level staging layout before planning and excludes
+// placeholders from boundary analysis.
 //
 // In the example, example.end_barrier implements EndBarrierInterface, and
 // hipsr.example_start_barrier implements both StartBarrierInterface and
@@ -49,12 +49,14 @@
 //     return %2 : tensor<?xf32>
 //   }
 //
-// A read-only preflight validates each placeholder. Domain planning then
-// considers only non-placeholder operations. Materialization moves those
-// operations into their domains and derives each consumer's placeholders from
-// its DPS init operands. It recreates the placeholders immediately before the
-// consumer and erases the originals. MLIR's region-isolation utility then
-// derives the operands and entry-block arguments.
+// The placeholder verifier guarantees dedicated DPS-init use. A read-only
+// preflight additionally requires each placeholder and its consumer to be
+// top-level. Domain planning then considers only non-placeholder operations.
+// Materialization moves those operations into their domains and derives each
+// consumer's placeholders from its DPS init operands. It recreates the
+// placeholders immediately before the consumer and erases the originals.
+// MLIR's region-isolation utility then derives the operands and entry-block
+// arguments.
 //
 //===----------------------------------------------------------------------===//
 
@@ -133,41 +135,6 @@ static LogicalResult verifyNoNestedPlaceholders(Operation &operation) {
   return result.wasInterrupted() ? failure() : success();
 }
 
-static LogicalResult verifyDedicatedPlaceholder(PlaceholderOp placeholder,
-                                                Block &block) {
-  if (placeholder->getNumResults() == 0) {
-    placeholder.emitOpError("must produce at least one tensor DPS init");
-    return failure();
-  }
-
-  Operation *consumer = nullptr;
-  for (Value result : placeholder->getResults()) {
-    if (!result.hasOneUse()) {
-      placeholder.emitOpError("requires each result to have exactly one use");
-      return failure();
-    }
-
-    OpOperand &use = *result.getUses().begin();
-    auto dpsOp = dyn_cast<DestinationStyleOpInterface>(use.getOwner());
-    if (!dpsOp || !isHipsrDpsOp(*use.getOwner()) || !dpsOp.isDpsInit(&use) ||
-        use.getOwner()->getBlock() != &block ||
-        use.getOwner() == block.getTerminator()) {
-      placeholder.emitOpError(
-          "requires every result to be a DPS init of one top-level hipsr "
-          "operation");
-      return failure();
-    }
-    if (consumer && consumer != use.getOwner()) {
-      placeholder.emitOpError(
-          "requires all results to initialize the same hipsr operation");
-      return failure();
-    }
-    consumer = use.getOwner();
-  }
-
-  return success();
-}
-
 static LogicalResult verifyDpsInitPlaceholders(Operation &operation,
                                                Block &block) {
   if (!isHipsrDpsOp(operation)) {
@@ -191,7 +158,7 @@ static LogicalResult verifyDpsInitPlaceholders(Operation &operation,
   return success();
 }
 
-static LogicalResult validatePlaceholders(Block &block) {
+static LogicalResult validatePartitionInput(Block &block) {
   for (Operation &operation : block.without_terminator()) {
     if (isa<PoolDomainOp>(operation)) {
       operation.emitError(
@@ -201,7 +168,11 @@ static LogicalResult validatePlaceholders(Block &block) {
     }
 
     if (auto placeholder = dyn_cast<PlaceholderOp>(operation)) {
-      if (failed(verifyDedicatedPlaceholder(placeholder, block))) {
+      Operation *consumer = *placeholder->getResult(0).getUsers().begin();
+      if (consumer->getBlock() != &block) {
+        placeholder.emitOpError(
+            "requires its DPS consumer to be top-level when partitioning pool "
+            "domains");
         return failure();
       }
       continue;
@@ -360,7 +331,7 @@ struct PartitionPoolDomainsPass
     }
 
     Block &entryBlock = funcOp.front();
-    if (failed(validatePlaceholders(entryBlock))) {
+    if (failed(validatePartitionInput(entryBlock))) {
       signalPassFailure();
       return;
     }
