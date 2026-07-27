@@ -73,9 +73,14 @@ bool CompilerDriver::compile(llvm::StringRef input_mlir,
   sourceMgr.AddNewSourceBuffer(std::move(memBuffer), llvm::SMLoc());
 
   auto t0 = timing_now();
-
+  // Disable post-parse verification to avoid anonymous-namespace TypeID checks
+  // in debug-mode MLIR prebuilts (LLVM_ENABLE_ABI_BREAKING_CHECKS=1). The
+  // operation verifier uses anonymous-namespace helper types whose TypeID
+  // registration triggers report_fatal_error. We run verification inside
+  // compileImpl via the pass manager's built-in infrastructure.
+  mlir::ParserConfig parseConfig(&context, /*verifyAfterParse=*/false);
   mlir::OwningOpRef<mlir::ModuleOp> module =
-      mlir::parseSourceFile<mlir::ModuleOp>(sourceMgr, &context);
+      mlir::parseSourceFile<mlir::ModuleOp>(sourceMgr, parseConfig);
 
   if (hipdnn_ep_timing_enabled()) {
     llvm::errs() << "[CompilerDriver] MLIR parsing: "
@@ -107,8 +112,14 @@ bool CompilerDriver::validate(llvm::StringRef input_mlir,
   llvm::SourceMgr sourceMgr;
   sourceMgr.AddNewSourceBuffer(std::move(memBuffer), llvm::SMLoc());
 
+  // Disable post-parse verification to avoid anonymous-namespace TypeID checks
+  // in debug-mode MLIR prebuilts (LLVM_ENABLE_ABI_BREAKING_CHECKS=1). The
+  // operation verifier uses anonymous-namespace helper types whose TypeID
+  // registration triggers report_fatal_error. We run verification inside
+  // compileImpl via the pass manager's built-in infrastructure.
+  mlir::ParserConfig parseConfig(&context, /*verifyAfterParse=*/false);
   mlir::OwningOpRef<mlir::ModuleOp> module =
-      mlir::parseSourceFile<mlir::ModuleOp>(sourceMgr, &context);
+      mlir::parseSourceFile<mlir::ModuleOp>(sourceMgr, parseConfig);
 
   if (!module) {
     error_message = "Failed to parse MLIR input";
