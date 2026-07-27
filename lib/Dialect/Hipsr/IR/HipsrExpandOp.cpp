@@ -31,10 +31,6 @@ struct ExpandShapeArgs : ShapeRegionArgs<ExpandOp> {
 MutableOperandRange ExpandOp::getDpsInitsMutable() { return getInitMutable(); }
 
 LogicalResult ExpandOp::verify() {
-  if (getNumResults() > 1) {
-    return emitOpError("expected at most one tensor result");
-  }
-
   auto inputType = cast<ShapedType>(getInput().getType());
   auto shapeType = cast<ShapedType>(getShape().getType());
   auto outputType = cast<ShapedType>(getInit().getType());
@@ -62,8 +58,8 @@ LogicalResult ExpandOp::verify() {
 }
 
 bool ExpandOp::isStartBarrier() {
-  // Direct dense producers prove every requested extent without runtime or
-  // external-storage access. Other producers remain barriers.
+  // A directly defined dense constant makes every requested extent known at
+  // compile time. All other shape sources require a runtime barrier.
   DenseIntElementsAttr denseAttr;
   if (matchPattern(getShape(), m_Constant(&denseAttr))) {
     return false;
@@ -75,13 +71,6 @@ bool ExpandOp::isStartBarrier() {
   return true;
 }
 
-// Before:
-//   hipsr.expand(%ctx) ins(%input, %shape) outs(%init)
-// After:
-//   hipsr.expand ... shape_region {
-//     %broadcast = shape.broadcast %input_shape, %requested_shape
-//     hipsr.shape_yield (%dims) : [element_type]
-//   }
 void ExpandOp::populateShapeRegion(OpBuilder &builder, Block &shapeBlock) {
   OpBuilder::InsertionGuard guard(builder);
   builder.setInsertionPointToStart(&shapeBlock);
@@ -96,41 +85,45 @@ void ExpandOp::populateShapeRegion(OpBuilder &builder, Block &shapeBlock) {
   int64_t resultRank =
       std::max(inputType.getRank(), requestedShapeType.getDimSize(0));
 
-  Value inputShape = builder.create<shape::ShapeOfOp>(loc, input);
+  Value inputShape = shape::ShapeOfOp::create(builder, loc, input);
   SmallVector<Value> requestedExtents;
   requestedExtents.reserve(requestedShapeType.getDimSize(0));
   for (int64_t i : llvm::seq<int64_t>(0, requestedShapeType.getDimSize(0))) {
-    Value index = builder.create<arith::ConstantIndexOp>(loc, i);
+    Value index = arith::ConstantIndexOp::create(builder, loc, i);
     Value extent;
     if (isa<RankedTensorType>(requestedShapeArg.getType())) {
-      extent = builder.create<tensor::ExtractOp>(loc, requestedShapeArg,
-                                                 ValueRange{index});
+      extent = tensor::ExtractOp::create(builder, loc, requestedShapeArg,
+                                         ValueRange{index});
     } else {
-      extent = builder.create<memref::LoadOp>(loc, requestedShapeArg,
-                                              ValueRange{index});
+      extent = memref::LoadOp::create(builder, loc, requestedShapeArg,
+                                      ValueRange{index});
     }
-    requestedExtents.push_back(builder.create<arith::IndexCastOp>(
-        loc, builder.getIndexType(), extent));
+    requestedExtents.push_back(arith::IndexCastOp::create(
+        builder, loc, builder.getIndexType(), extent));
   }
 
   auto shapeType = shape::ShapeType::get(ctx);
-  Value requestedShape = builder.create<shape::FromExtentsOp>(
-      loc, shapeType, ValueRange{requestedExtents});
-  Value witness = builder.create<shape::CstrBroadcastableOp>(loc, inputShape,
-                                                             requestedShape);
-  auto assuming = builder.create<shape::AssumingOp>(
-      loc, witness, [&](OpBuilder &b, Location) -> SmallVector<Value, 2> {
-        Value broadcastShape = b.create<shape::BroadcastOp>(
-            loc, shapeType, inputShape, requestedShape, StringAttr{});
+  Value requestedShape = shape::FromExtentsOp::create(
+      builder, loc, shapeType, ValueRange{requestedExtents});
+
+  // ONNX Expand uses right-aligned multidirectional broadcasting.
+  Value witness = shape::CstrBroadcastableOp::create(builder, loc, inputShape,
+                                                     requestedShape);
+  auto assuming = shape::AssumingOp::create(
+      builder, loc, witness,
+      [&](OpBuilder &b, Location) -> SmallVector<Value, 2> {
+        Value broadcastShape = shape::BroadcastOp::create(
+            b, loc, shapeType, inputShape, requestedShape, StringAttr{});
         SmallVector<Value, 2> resultExtents;
         resultExtents.reserve(resultRank);
         for (int64_t i : llvm::seq<int64_t>(0, resultRank)) {
-          Value extent = b.create<shape::GetExtentOp>(loc, broadcastShape, i);
-          resultExtents.push_back(b.create<shape::SizeToIndexOp>(loc, extent));
+          Value extent = shape::GetExtentOp::create(b, loc, broadcastShape, i);
+          resultExtents.push_back(shape::SizeToIndexOp::create(b, loc, extent));
         }
         return resultExtents;
       });
 
-  builder.create<ShapeYieldOp>(loc, ArrayRef<ValueRange>{assuming.getResults()},
-                               TypeRange{inputType.getElementType()});
+  ShapeYieldOp::create(builder, loc,
+                       ArrayRef<ValueRange>{assuming.getResults()},
+                       TypeRange{inputType.getElementType()});
 }

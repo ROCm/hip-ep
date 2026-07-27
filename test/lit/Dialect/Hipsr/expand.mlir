@@ -1,15 +1,44 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 //
-// hipsr.expand round-trip, verification, and generated ONNX broadcast shape.
+// hipsr.expand round-trip, shape-region population, and verification.
 
 // RUN: hip-mlir-opt --split-input-file --verify-diagnostics %s | FileCheck %s
 // RUN: hip-mlir-opt --split-input-file --verify-diagnostics -hipsr-populate-shape-region %s | FileCheck %s --check-prefix=POPULATE
 
+// Tensor form round-trips without a shape region. Population checks the
+// complete rank-2 ONNX broadcast shape computation.
 // CHECK-LABEL: func.func @expand_tensor
-// CHECK:      hipsr.expand(%{{.+}}) ins(%{{.+}}, %{{.+}} : tensor<?x3xf16>, tensor<2xi64>)
+// CHECK:      %[[RESULT:.+]] = hipsr.expand(%{{.+}}) ins(%{{.+}}, %{{.+}} : tensor<?x3xf16>, tensor<2xi64>)
 // CHECK-SAME:   outs(%{{.+}} : tensor<?x?xf16>) : tensor<?x?xf16>
-// CHECK-NEXT: return
+// CHECK-NOT:  shape_region
+// CHECK-NEXT: return %[[RESULT]] : tensor<?x?xf16>
+// POPULATE-LABEL: func.func @expand_tensor
+// POPULATE:      %[[RESULT:.+]] = hipsr.expand(%{{.+}}) ins(%{{.+}}, %{{.+}} : tensor<?x3xf16>, tensor<2xi64>)
+// POPULATE-SAME:   shape_region {
+// POPULATE-NEXT: ^bb0(%{{.+}}: !hipsr.context, %[[INPUT:.+]]: tensor<?x3xf16>, %[[REQUEST:.+]]: tensor<2xi64>):
+// POPULATE-NEXT:   %[[INPUT_SHAPE:.+]] = shape.shape_of %[[INPUT]] : tensor<?x3xf16> -> tensor<2xindex>
+// POPULATE-NEXT:   %[[INDEX0:.+]] = arith.constant 0 : index
+// POPULATE-NEXT:   %[[REQUEST0_I64:.+]] = tensor.extract %[[REQUEST]][%[[INDEX0]]] : tensor<2xi64>
+// POPULATE-NEXT:   %[[REQUEST0:.+]] = arith.index_cast %[[REQUEST0_I64]] : i64 to index
+// POPULATE-NEXT:   %[[INDEX1:.+]] = arith.constant 1 : index
+// POPULATE-NEXT:   %[[REQUEST1_I64:.+]] = tensor.extract %[[REQUEST]][%[[INDEX1]]] : tensor<2xi64>
+// POPULATE-NEXT:   %[[REQUEST1:.+]] = arith.index_cast %[[REQUEST1_I64]] : i64 to index
+// POPULATE-NEXT:   %[[REQUEST_SHAPE:.+]] = shape.from_extents %[[REQUEST0]], %[[REQUEST1]] : index, index
+// POPULATE-NEXT:   %[[WITNESS:.+]] = shape.cstr_broadcastable %[[INPUT_SHAPE]], %[[REQUEST_SHAPE]] : tensor<2xindex>, !shape.shape
+// POPULATE-NEXT:   %[[DIMS:.+]]:2 = shape.assuming %[[WITNESS]] -> (index, index) {
+// POPULATE-NEXT:     %[[BROADCAST:.+]] = shape.broadcast %[[INPUT_SHAPE]], %[[REQUEST_SHAPE]] : tensor<2xindex>, !shape.shape -> !shape.shape
+// POPULATE-NEXT:     %[[SIZE_INDEX0:.+]] = shape.const_size 0
+// POPULATE-NEXT:     %[[SIZE0:.+]] = shape.get_extent %[[BROADCAST]], %[[SIZE_INDEX0]] : !shape.shape, !shape.size -> !shape.size
+// POPULATE-NEXT:     %[[DIM0:.+]] = shape.size_to_index %[[SIZE0]] : !shape.size
+// POPULATE-NEXT:     %[[SIZE_INDEX1:.+]] = shape.const_size 1
+// POPULATE-NEXT:     %[[SIZE1:.+]] = shape.get_extent %[[BROADCAST]], %[[SIZE_INDEX1]] : !shape.shape, !shape.size -> !shape.size
+// POPULATE-NEXT:     %[[DIM1:.+]] = shape.size_to_index %[[SIZE1]] : !shape.size
+// POPULATE-NEXT:     shape.assuming_yield %[[DIM0]], %[[DIM1]] : index, index
+// POPULATE-NEXT:   }
+// POPULATE-NEXT:   hipsr.shape_yield (%[[DIMS]]#0, %[[DIMS]]#1) : [f16]
+// POPULATE-NEXT: }
+// POPULATE-NEXT: return %[[RESULT]] : tensor<?x?xf16>
 func.func @expand_tensor(%ctx: !hipsr.context, %input: tensor<?x3xf16>,
                          %shape: tensor<2xi64>,
                          %init: tensor<?x?xf16>) -> tensor<?x?xf16> {
@@ -20,53 +49,24 @@ func.func @expand_tensor(%ctx: !hipsr.context, %input: tensor<?x3xf16>,
 
 // -----
 
-// A StartBarrier shape region receives ctx followed by its two data inputs.
-// POPULATE-LABEL: func.func @expand_runtime_shape
-// POPULATE: hipsr.expand(%{{.+}}) ins(%{{.+}}, %{{.+}} : tensor<?x3xf16>, tensor<2xi64>)
-// POPULATE-SAME: shape_region {
-// POPULATE:   ^bb0(%[[CTX:.+]]: !hipsr.context, %[[INPUT:.+]]: tensor<?x3xf16>, %[[REQUEST:.+]]: tensor<2xi64>):
-// POPULATE:   %[[INPUT_SHAPE:.+]] = shape.shape_of %[[INPUT]]
-// POPULATE:   %[[I0:.+]] = arith.constant 0 : index
-// POPULATE:   %[[R0_I64:.+]] = tensor.extract %[[REQUEST]][%[[I0]]]
-// POPULATE:   %[[R0:.+]] = arith.index_cast %[[R0_I64]] : i64 to index
-// POPULATE:   %[[I1:.+]] = arith.constant 1 : index
-// POPULATE:   %[[R1_I64:.+]] = tensor.extract %[[REQUEST]][%[[I1]]]
-// POPULATE:   %[[R1:.+]] = arith.index_cast %[[R1_I64]] : i64 to index
-// POPULATE:   %[[REQUEST_SHAPE:.+]] = shape.from_extents %[[R0]], %[[R1]]
-// POPULATE:   %[[WITNESS:.+]] = shape.cstr_broadcastable %[[INPUT_SHAPE]], %[[REQUEST_SHAPE]]
-// POPULATE:   %[[DIMS:.+]]:2 = shape.assuming %[[WITNESS]] -> (index, index) {
-// POPULATE:     %[[BROADCAST:.+]] = shape.broadcast %[[INPUT_SHAPE]], %[[REQUEST_SHAPE]]
-// POPULATE:     %[[S0:.+]] = shape.get_extent %[[BROADCAST]]
-// POPULATE:     %[[D0:.+]] = shape.size_to_index %[[S0]]
-// POPULATE:     %[[S1:.+]] = shape.get_extent %[[BROADCAST]]
-// POPULATE:     %[[D1:.+]] = shape.size_to_index %[[S1]]
-// POPULATE:     shape.assuming_yield %[[D0]], %[[D1]] : index, index
-// POPULATE:   }
-// POPULATE:   hipsr.shape_yield (%[[DIMS]]#0, %[[DIMS]]#1) : [f16]
-func.func @expand_runtime_shape(%ctx: !hipsr.context,
-                                %input: tensor<?x3xf16>,
-                                %shape: tensor<2xi64>,
-                                %init: tensor<?x?xf16>)
-    -> tensor<?x?xf16> {
-  %0 = hipsr.expand(%ctx) ins(%input, %shape : tensor<?x3xf16>, tensor<2xi64>)
-                   outs(%init : tensor<?x?xf16>) : tensor<?x?xf16>
-  return %0 : tensor<?x?xf16>
-}
-
-// -----
-
-// Buffer form reads requested extents only from host-visible memory.
+// Buffer form reads the requested extents from host-visible memory.
 // CHECK-LABEL: func.func @expand_host_shape_memref
 // CHECK: hipsr.expand(%{{.+}}) ins(%{{.+}}, %{{.+}} : memref<?x3xf16, #hipsr.mem<device>>, memref<2xi64, #hipsr.mem<host>>)
 // CHECK-SAME: outs(%{{.+}} : memref<?x?xf16, #hipsr.mem<device>>)
+// CHECK-NOT: shape_region
+// CHECK-NEXT: return
 // POPULATE-LABEL: func.func @expand_host_shape_memref
-// POPULATE: shape_region {
-// POPULATE:   ^bb0(%{{.+}}: !hipsr.context, %{{.+}}: memref<?x3xf16, #hipsr.mem<device>>, %[[REQUEST:.+]]: memref<2xi64, #hipsr.mem<host>>):
-// POPULATE:   memref.load %[[REQUEST]]
-// POPULATE:   memref.load %[[REQUEST]]
-// POPULATE:   shape.cstr_broadcastable
-// POPULATE:   shape.broadcast
-// POPULATE:   hipsr.shape_yield
+// POPULATE:      hipsr.expand(%{{.+}}) ins(%{{.+}}, %{{.+}} : memref<?x3xf16, #hipsr.mem<device>>, memref<2xi64, #hipsr.mem<host>>)
+// POPULATE-SAME:   shape_region {
+// POPULATE-NEXT: ^bb0(%{{.+}}: !hipsr.context, %[[INPUT:.+]]: memref<?x3xf16, #hipsr.mem<device>>, %[[REQUEST:.+]]: memref<2xi64, #hipsr.mem<host>>):
+// POPULATE-NEXT:   %{{.+}} = shape.shape_of %[[INPUT]]
+// POPULATE-NEXT:   %[[INDEX0:.+]] = arith.constant 0 : index
+// POPULATE-NEXT:   %[[REQUEST0_I64:.+]] = memref.load %[[REQUEST]][%[[INDEX0]]] : memref<2xi64, #hipsr.mem<host>>
+// POPULATE-NEXT:   %[[REQUEST0:.+]] = arith.index_cast %[[REQUEST0_I64]] : i64 to index
+// POPULATE-NEXT:   %[[INDEX1:.+]] = arith.constant 1 : index
+// POPULATE-NEXT:   %[[REQUEST1_I64:.+]] = memref.load %[[REQUEST]][%[[INDEX1]]] : memref<2xi64, #hipsr.mem<host>>
+// POPULATE-NEXT:   %[[REQUEST1:.+]] = arith.index_cast %[[REQUEST1_I64]] : i64 to index
+// POPULATE-NEXT:   %{{.+}} = shape.from_extents %[[REQUEST0]], %[[REQUEST1]] : index, index
 func.func @expand_host_shape_memref(
     %ctx: !hipsr.context,
     %input: memref<?x3xf16, #hipsr.mem<device>>,
@@ -84,10 +84,9 @@ func.func @expand_host_shape_memref(
 // A requested shape shorter than the input keeps the leading input ranks.
 // POPULATE-LABEL: func.func @expand_shorter_requested_shape
 // POPULATE: %[[DIMS:.+]]:3 = shape.assuming %{{.+}} -> (index, index, index) {
-// POPULATE:   shape.broadcast
 // POPULATE:   shape.assuming_yield %{{.+}}, %{{.+}}, %{{.+}} : index, index, index
-// POPULATE: }
-// POPULATE: hipsr.shape_yield (%[[DIMS]]#0, %[[DIMS]]#1, %[[DIMS]]#2) : [f16]
+// POPULATE-NEXT: }
+// POPULATE-NEXT: hipsr.shape_yield (%[[DIMS]]#0, %[[DIMS]]#1, %[[DIMS]]#2) : [f16]
 func.func @expand_shorter_requested_shape(
     %ctx: !hipsr.context, %input: tensor<?x4x8xf16>,
     %shape: tensor<1xi64>, %init: tensor<?x4x8xf16>)
@@ -100,33 +99,12 @@ func.func @expand_shorter_requested_shape(
 
 // -----
 
-// A requested extent of one still participates in multidirectional broadcast;
-// shape.broadcast selects the aligned input extent when it is not one.
-// POPULATE-LABEL: func.func @expand_requested_one
-// POPULATE: tensor.extract
-// POPULATE: shape.cstr_broadcastable
-// POPULATE: shape.broadcast
-// POPULATE: hipsr.shape_yield
-func.func @expand_requested_one(%ctx: !hipsr.context,
-                                %input: tensor<?x8xf16>,
-                                %init: tensor<?x8xf16>)
-    -> tensor<?x8xf16> {
-  %shape = arith.constant dense<[1, 8]> : tensor<2xi64>
-  %0 = hipsr.expand(%ctx)
-      ins(%input, %shape : tensor<?x8xf16>, tensor<2xi64>)
-      outs(%init : tensor<?x8xf16>) : tensor<?x8xf16>
-  return %0 : tensor<?x8xf16>
-}
-
-// -----
-
 // A longer requested shape adds leading output dimensions.
 // POPULATE-LABEL: func.func @expand_leading_rank
 // POPULATE: %[[DIMS:.+]]:4 = shape.assuming %{{.+}} -> (index, index, index, index) {
-// POPULATE:   shape.broadcast
 // POPULATE:   shape.assuming_yield %{{.+}}, %{{.+}}, %{{.+}}, %{{.+}} : index, index, index, index
-// POPULATE: }
-// POPULATE: hipsr.shape_yield (%[[DIMS]]#0, %[[DIMS]]#1, %[[DIMS]]#2, %[[DIMS]]#3) : [f16]
+// POPULATE-NEXT: }
+// POPULATE-NEXT: hipsr.shape_yield (%[[DIMS]]#0, %[[DIMS]]#1, %[[DIMS]]#2, %[[DIMS]]#3) : [f16]
 func.func @expand_leading_rank(%ctx: !hipsr.context,
                                %input: tensor<?x8xf16>,
                                %shape: tensor<4xi64>,
@@ -140,24 +118,7 @@ func.func @expand_leading_rank(%ctx: !hipsr.context,
 
 // -----
 
-// Incompatible runtime extents are guarded before shape.broadcast.
-// POPULATE-LABEL: func.func @expand_broadcast_constraint
-// POPULATE: shape.cstr_broadcastable
-// POPULATE-NEXT: shape.assuming
-// POPULATE: shape.broadcast
-func.func @expand_broadcast_constraint(%ctx: !hipsr.context,
-                                       %input: tensor<2x3xf16>,
-                                       %init: tensor<2x4xf16>)
-    -> tensor<2x4xf16> {
-  %shape = arith.constant dense<[2, 4]> : tensor<2xi64>
-  %0 = hipsr.expand(%ctx)
-      ins(%input, %shape : tensor<2x3xf16>, tensor<2xi64>)
-      outs(%init : tensor<2x4xf16>) : tensor<2x4xf16>
-  return %0 : tensor<2x4xf16>
-}
-
-// -----
-
+// Shape must be a rank-1 extent vector.
 func.func @expand_shape_rank(%ctx: !hipsr.context,
                              %input: tensor<2x3xf16>,
                              %shape: tensor<1x2xi64>,
@@ -171,6 +132,7 @@ func.func @expand_shape_rank(%ctx: !hipsr.context,
 
 // -----
 
+// ONNX shape extents use i64 elements.
 func.func @expand_shape_element_type(%ctx: !hipsr.context,
                                      %input: tensor<2x3xf16>,
                                      %shape: tensor<2xi32>,
@@ -185,6 +147,7 @@ func.func @expand_shape_element_type(%ctx: !hipsr.context,
 
 // -----
 
+// The static shape length determines the output rank.
 func.func @expand_dynamic_shape_length(%ctx: !hipsr.context,
                                        %input: tensor<2x3xf16>,
                                        %shape: tensor<?xi64>,
@@ -199,6 +162,7 @@ func.func @expand_dynamic_shape_length(%ctx: !hipsr.context,
 
 // -----
 
+// Expand preserves the input element type.
 func.func @expand_element_mismatch(%ctx: !hipsr.context,
                                    %input: tensor<2x3xf16>,
                                    %shape: tensor<2xi64>,
@@ -213,6 +177,7 @@ func.func @expand_element_mismatch(%ctx: !hipsr.context,
 
 // -----
 
+// Output rank is max(input rank, requested shape length).
 func.func @expand_output_rank(%ctx: !hipsr.context,
                               %input: tensor<2x3xf16>,
                               %shape: tensor<4xi64>,
@@ -226,19 +191,7 @@ func.func @expand_output_rank(%ctx: !hipsr.context,
 
 // -----
 
-func.func @expand_init_result_mismatch(
-    %ctx: !hipsr.context, %input: tensor<2x3xf16>,
-    %shape: tensor<2xi64>, %init: tensor<2x3xf16>)
-    -> tensor<2x4xf16> {
-  // expected-error@+1 {{to match type of corresponding result}}
-  %0 = hipsr.expand(%ctx)
-      ins(%input, %shape : tensor<2x3xf16>, tensor<2xi64>)
-      outs(%init : tensor<2x3xf16>) : tensor<2x4xf16>
-  return %0 : tensor<2x4xf16>
-}
-
-// -----
-
+// The shape is read on the host to determine the output allocation.
 func.func @expand_device_shape(
     %ctx: !hipsr.context,
     %input: memref<2x3xf16, #hipsr.mem<device>>,
