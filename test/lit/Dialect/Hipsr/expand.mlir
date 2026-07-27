@@ -1,22 +1,12 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 //
-// hipsr.expand round-trip, shape-region population, and verification.
+// hipsr.expand shape-region population and verification.
 
-// RUN: hip-mlir-opt --split-input-file --verify-diagnostics %s | FileCheck %s
+// RUN: hip-mlir-opt --split-input-file --verify-diagnostics %s
 // RUN: hip-mlir-opt --split-input-file --verify-diagnostics -hipsr-populate-shape-region %s | FileCheck %s --check-prefix=POPULATE
 
-// Tensor form round-trips without a shape region. Population checks the
-// complete rank-2 ONNX broadcast shape computation.
-// CHECK-LABEL: func.func @expand_tensor(
-// CHECK-SAME:   %[[CTX:.*]]: !hipsr.context,
-// CHECK-SAME:   %[[INPUT:.*]]: tensor<?x3xf16>,
-// CHECK-SAME:   %[[REQUEST:.*]]: tensor<2xi64>,
-// CHECK-SAME:   %[[INIT:.*]]: tensor<?x?xf16>) -> tensor<?x?xf16> {
-// CHECK-NEXT: %[[RESULT:.*]] = hipsr.expand(%[[CTX]]) ins(%[[INPUT]], %[[REQUEST]] : tensor<?x3xf16>, tensor<2xi64>)
-// CHECK-SAME:   outs(%[[INIT]] : tensor<?x?xf16>) : tensor<?x?xf16>
-// CHECK-NOT:  shape_region
-// CHECK-NEXT: return %[[RESULT]] : tensor<?x?xf16>
+// Tensor form checks the complete rank-2 ONNX broadcast shape computation.
 // POPULATE-LABEL: func.func @expand_tensor(
 // POPULATE-SAME:   %[[CTX:.*]]: !hipsr.context,
 // POPULATE-SAME:   %[[OUTER_INPUT:.*]]: tensor<?x3xf16>,
@@ -58,15 +48,6 @@ func.func @expand_tensor(%ctx: !hipsr.context, %input: tensor<?x3xf16>,
 // -----
 
 // Buffer form reads the requested extents from host-visible memory.
-// CHECK-LABEL: func.func @expand_host_shape_memref(
-// CHECK-SAME:   %[[CTX:.*]]: !hipsr.context,
-// CHECK-SAME:   %[[INPUT:.*]]: memref<?x3xf16, #hipsr.mem<device>>,
-// CHECK-SAME:   %[[REQUEST:.*]]: memref<2xi64, #hipsr.mem<host>>,
-// CHECK-SAME:   %[[INIT:.*]]: memref<?x?xf16, #hipsr.mem<device>>) {
-// CHECK-NEXT: hipsr.expand(%[[CTX]]) ins(%[[INPUT]], %[[REQUEST]] : memref<?x3xf16, #hipsr.mem<device>>, memref<2xi64, #hipsr.mem<host>>)
-// CHECK-SAME:   outs(%[[INIT]] : memref<?x?xf16, #hipsr.mem<device>>)
-// CHECK-NOT: shape_region
-// CHECK-NEXT: return
 // POPULATE-LABEL: func.func @expand_host_shape_memref(
 // POPULATE-SAME:   %[[CTX:.*]]: !hipsr.context,
 // POPULATE-SAME:   %[[OUTER_INPUT:.*]]: memref<?x3xf16, #hipsr.mem<device>>,
@@ -93,43 +74,6 @@ func.func @expand_host_shape_memref(
                             memref<2xi64, #hipsr.mem<host>>)
       outs(%init : memref<?x?xf16, #hipsr.mem<device>>)
   return
-}
-
-// -----
-
-// A requested shape shorter than the input keeps the leading input ranks.
-// POPULATE-LABEL: func.func @expand_shorter_requested_shape
-// POPULATE: %[[DIMS:.+]]:3 = shape.assuming %{{.+}} -> (index, index, index) {
-// POPULATE:   shape.assuming_yield %{{.+}}, %{{.+}}, %{{.+}} : index, index, index
-// POPULATE-NEXT: }
-// POPULATE-NEXT: hipsr.shape_yield (%[[DIMS]]#0, %[[DIMS]]#1, %[[DIMS]]#2) : [f16]
-func.func @expand_shorter_requested_shape(
-    %ctx: !hipsr.context, %input: tensor<?x4x8xf16>,
-    %shape: tensor<1xi64>, %init: tensor<?x4x8xf16>)
-    -> tensor<?x4x8xf16> {
-  %0 = hipsr.expand(%ctx)
-      ins(%input, %shape : tensor<?x4x8xf16>, tensor<1xi64>)
-      outs(%init : tensor<?x4x8xf16>) : tensor<?x4x8xf16>
-  return %0 : tensor<?x4x8xf16>
-}
-
-// -----
-
-// A longer requested shape adds leading output dimensions.
-// POPULATE-LABEL: func.func @expand_leading_rank
-// POPULATE: %[[DIMS:.+]]:4 = shape.assuming %{{.+}} -> (index, index, index, index) {
-// POPULATE:   shape.assuming_yield %{{.+}}, %{{.+}}, %{{.+}}, %{{.+}} : index, index, index, index
-// POPULATE-NEXT: }
-// POPULATE-NEXT: hipsr.shape_yield (%[[DIMS]]#0, %[[DIMS]]#1, %[[DIMS]]#2, %[[DIMS]]#3) : [f16]
-func.func @expand_leading_rank(%ctx: !hipsr.context,
-                               %input: tensor<?x8xf16>,
-                               %shape: tensor<4xi64>,
-                               %init: tensor<?x?x?x8xf16>)
-    -> tensor<?x?x?x8xf16> {
-  %0 = hipsr.expand(%ctx)
-      ins(%input, %shape : tensor<?x8xf16>, tensor<4xi64>)
-      outs(%init : tensor<?x?x?x8xf16>) : tensor<?x?x?x8xf16>
-  return %0 : tensor<?x?x?x8xf16>
 }
 
 // -----

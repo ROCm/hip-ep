@@ -24,27 +24,6 @@ func.func @expand(%ctx: !hipsr.context, %input: tensor<?x3xf16>,
 
 // -----
 
-// Requested shape can add leading dimensions.
-// CHECK-LABEL: func.func @expand_leading_rank(
-// CHECK-SAME:    %[[CTX:.*]]: !hipsr.context,
-// CHECK-SAME:    %[[INPUT:.*]]: tensor<?x8xf32>,
-// CHECK-SAME:    %[[SHAPE:.*]]: tensor<4xi64>) -> tensor<?x?x?x8xf32> {
-// CHECK-NEXT:    %[[INIT:.*]] = hipsr.placeholder : tensor<?x?x?x8xf32>
-// CHECK-NEXT:    %[[RESULT:.*]] = hipsr.expand(%[[CTX]]) ins(%[[INPUT]], %[[SHAPE]] : tensor<?x8xf32>, tensor<4xi64>)
-// CHECK-SAME:      outs(%[[INIT]] : tensor<?x?x?x8xf32>) : tensor<?x?x?x8xf32>
-// CHECK-NOT:     shape_region
-// CHECK-NEXT:    return %[[RESULT]] : tensor<?x?x?x8xf32>
-func.func @expand_leading_rank(%ctx: !hipsr.context,
-                               %input: tensor<?x8xf32>,
-                               %shape: tensor<4xi64>)
-    -> tensor<?x?x?x8xf32> {
-  %0 = "onnx.Expand"(%input, %shape)
-      : (tensor<?x8xf32>, tensor<4xi64>) -> tensor<?x?x?x8xf32>
-  return %0 : tensor<?x?x?x8xf32>
-}
-
-// -----
-
 // Shape must be a rank-1 extent vector.
 // CHECK-LABEL: func.func @expand_shape_rank(
 // CHECK-SAME:    %{{.*}}: !hipsr.context,

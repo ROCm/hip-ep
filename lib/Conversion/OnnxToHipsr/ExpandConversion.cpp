@@ -16,13 +16,6 @@ namespace mlir {
 namespace hipsr {
 namespace {
 
-/// Before:
-///   %0 = "onnx.Expand"(%input, %shape) : (...) -> tensor<?x?xf16>
-/// After:
-///   %init = hipsr.placeholder : tensor<?x?xf16>
-///   %0 = hipsr.expand(%ctx) ins(%input, %shape) outs(%init)
-///
-/// The shape region stays empty for the population pass.
 struct ExpandToHipsr : public ::mlir::RewritePattern {
   ExpandToHipsr(::mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Expand", /*benefit=*/1, ctx) {}
