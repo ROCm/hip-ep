@@ -6,14 +6,6 @@
 #ifndef HIPSR_GET_POOL_OP_H
 #define HIPSR_GET_POOL_OP_H
 
-#include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
-
-#include "mlir/Bytecode/BytecodeOpInterface.h"
-#include "mlir/IR/BuiltinTypes.h"
-#include "mlir/IR/OpDefinition.h"
-#include "mlir/IR/OpImplementation.h"
-#include "mlir/Interfaces/SideEffectInterfaces.h"
-
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 namespace mlir {

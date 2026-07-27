@@ -6,23 +6,16 @@
 #ifndef HIPSR_CONSTANT_OP_H
 #define HIPSR_CONSTANT_OP_H
 
-#include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
-#include "mlir/Bytecode/BytecodeOpInterface.h"
-#include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
-#include "mlir/IR/BuiltinTypes.h"
-#include "mlir/IR/ImplicitLocOpBuilder.h"
-#include "mlir/IR/OpDefinition.h"
-#include "mlir/Interfaces/SideEffectInterfaces.h"
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MemoryBuffer.h"
 
 #include <cassert>
-
-#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
+#include <cstdint>
 
 namespace mlir {
 class LLVMTypeConverter;

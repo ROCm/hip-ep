@@ -6,24 +6,6 @@
 #ifndef HIPSR_POOL_DOMAIN_OP_H
 #define HIPSR_POOL_DOMAIN_OP_H
 
-#include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
-
-#include "mlir/IR/Builders.h"
-#include "mlir/IR/BuiltinTypes.h"
-#include "mlir/IR/OpDefinition.h"
-#include "mlir/IR/OpImplementation.h"
-#include "mlir/Interfaces/ControlFlowInterfaces.h"
-#include "mlir/Interfaces/SideEffectInterfaces.h"
-
-// The .inc references PoolDomainYieldOp (from the implicit-terminator trait)
-// only by name, so a forward declaration is enough. The full type is needed
-// only in the .cpp, which includes its header.
-namespace mlir {
-namespace hipsr {
-class PoolDomainYieldOp;
-} // namespace hipsr
-} // namespace mlir
-
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #endif // HIPSR_POOL_DOMAIN_OP_H
