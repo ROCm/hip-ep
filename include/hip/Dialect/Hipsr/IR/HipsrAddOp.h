@@ -17,8 +17,7 @@
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
-#define GET_OP_CLASSES
-#include "hip/Dialect/Hipsr/IR/HipsrAddOp.h.inc"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 namespace mlir {
 class LLVMTypeConverter;

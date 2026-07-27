@@ -10,6 +10,3 @@
 
 using namespace mlir;
 using namespace mlir::hipsr;
-
-#define GET_OP_CLASSES
-#include "hip/Dialect/Hipsr/IR/HipsrPoolDomainYieldOp.cpp.inc"

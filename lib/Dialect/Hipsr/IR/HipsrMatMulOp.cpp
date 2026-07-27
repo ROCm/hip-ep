@@ -17,9 +17,6 @@
 using namespace mlir;
 using namespace mlir::hipsr;
 
-#define GET_OP_CLASSES
-#include "hip/Dialect/Hipsr/IR/HipsrMatMulOp.cpp.inc"
-
 namespace {
 struct MatMulShapeArgs : ShapeRegionArgs<MatMulOp> {
   using ShapeRegionArgs::ShapeRegionArgs;

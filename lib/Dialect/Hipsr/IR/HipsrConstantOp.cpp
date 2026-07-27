@@ -34,9 +34,6 @@ LogicalResult ConstantOp::verify() {
   return success();
 }
 
-#define GET_OP_CLASSES
-#include "hip/Dialect/Hipsr/IR/HipsrConstantOp.cpp.inc"
-
 namespace {
 
 constexpr const char *kHipsrGetConstant = "hipdnn_ep_constant_get";

@@ -64,6 +64,3 @@ SmallVector<RankedTensorType> EmptyOp::getTensorTypes() {
   }
   return types;
 }
-
-#define GET_OP_CLASSES
-#include "hip/Dialect/Hipsr/IR/HipsrEmptyOp.cpp.inc"

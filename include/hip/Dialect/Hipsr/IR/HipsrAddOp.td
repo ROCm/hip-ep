@@ -3,11 +3,6 @@
 // Licensed under the MIT License.
 //
 
-#ifndef HIPSR_ADD_OP
-#define HIPSR_ADD_OP
-
-include "hip/Dialect/Hipsr/IR/HipsrOps.td"
-
 def Hipsr_AddOp : Hipsr_DpsOp<"add"> {
   let summary = "Elementwise add, destination-passing style";
   let description = [{
@@ -28,5 +23,3 @@ def Hipsr_AddOp : Hipsr_DpsOp<"add"> {
     attr-dict (`:` type($result_tensors)^)? (`shape_region` $shape_region^)?
   }];
 }
-
-#endif // HIPSR_ADD_OP

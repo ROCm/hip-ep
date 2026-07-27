@@ -6,17 +6,9 @@
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 
 #include "hip/Dialect/Hipsr/IR/HipsrAddOp.h"
-#include "hip/Dialect/Hipsr/IR/HipsrCastOp.h"
 #include "hip/Dialect/Hipsr/IR/HipsrConstantOp.h"
-#include "hip/Dialect/Hipsr/IR/HipsrEmptyOp.h"
-#include "hip/Dialect/Hipsr/IR/HipsrEmptyYieldOp.h"
 #include "hip/Dialect/Hipsr/IR/HipsrGetPoolOp.h"
-#include "hip/Dialect/Hipsr/IR/HipsrMatMulOp.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
-#include "hip/Dialect/Hipsr/IR/HipsrPlaceholderOp.h"
-#include "hip/Dialect/Hipsr/IR/HipsrPoolDomainOp.h"
-#include "hip/Dialect/Hipsr/IR/HipsrPoolDomainYieldOp.h"
-#include "hip/Dialect/Hipsr/IR/HipsrShapeYieldOp.h"
 
 #include "llvm/ADT/TypeSwitch.h"
 
@@ -46,37 +38,7 @@ using namespace mlir::hipsr;
 void HipsrDialect::initialize() {
   addOperations<
 #define GET_OP_LIST
-#include "hip/Dialect/Hipsr/IR/HipsrShapeYieldOp.cpp.inc"
-      ,
-#define GET_OP_LIST
-#include "hip/Dialect/Hipsr/IR/HipsrPoolDomainYieldOp.cpp.inc"
-      ,
-#define GET_OP_LIST
-#include "hip/Dialect/Hipsr/IR/HipsrPoolDomainOp.cpp.inc"
-      ,
-#define GET_OP_LIST
-#include "hip/Dialect/Hipsr/IR/HipsrEmptyYieldOp.cpp.inc"
-      ,
-#define GET_OP_LIST
-#include "hip/Dialect/Hipsr/IR/HipsrEmptyOp.cpp.inc"
-      ,
-#define GET_OP_LIST
-#include "hip/Dialect/Hipsr/IR/HipsrConstantOp.cpp.inc"
-      ,
-#define GET_OP_LIST
-#include "hip/Dialect/Hipsr/IR/HipsrCastOp.cpp.inc"
-      ,
-#define GET_OP_LIST
-#include "hip/Dialect/Hipsr/IR/HipsrMatMulOp.cpp.inc"
-      ,
-#define GET_OP_LIST
-#include "hip/Dialect/Hipsr/IR/HipsrAddOp.cpp.inc"
-      ,
-#define GET_OP_LIST
-#include "hip/Dialect/Hipsr/IR/HipsrGetPoolOp.cpp.inc"
-      ,
-#define GET_OP_LIST
-#include "hip/Dialect/Hipsr/IR/HipsrPlaceholderOp.cpp.inc"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.cpp.inc"
       >();
   addAttributes<
 #define GET_ATTRDEF_LIST

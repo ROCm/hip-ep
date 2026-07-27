@@ -21,7 +21,6 @@ class EmptyYieldOp;
 } // namespace hipsr
 } // namespace mlir
 
-#define GET_OP_CLASSES
-#include "hip/Dialect/Hipsr/IR/HipsrEmptyOp.h.inc"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #endif // HIPSR_EMPTY_OP_H

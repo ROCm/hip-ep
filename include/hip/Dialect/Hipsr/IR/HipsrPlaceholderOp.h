@@ -15,7 +15,6 @@
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
-#define GET_OP_CLASSES
-#include "hip/Dialect/Hipsr/IR/HipsrPlaceholderOp.h.inc"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #endif // HIPSR_PLACEHOLDER_OP_H

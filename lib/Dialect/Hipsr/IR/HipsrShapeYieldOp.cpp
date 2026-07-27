@@ -21,6 +21,3 @@ LogicalResult ShapeYieldOp::verify() {
                          << numTypes << " element type(s)";
   return success();
 }
-
-#define GET_OP_CLASSES
-#include "hip/Dialect/Hipsr/IR/HipsrShapeYieldOp.cpp.inc"

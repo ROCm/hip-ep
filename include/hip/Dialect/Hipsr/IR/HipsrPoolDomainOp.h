@@ -24,7 +24,6 @@ class PoolDomainYieldOp;
 } // namespace hipsr
 } // namespace mlir
 
-#define GET_OP_CLASSES
-#include "hip/Dialect/Hipsr/IR/HipsrPoolDomainOp.h.inc"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #endif // HIPSR_POOL_DOMAIN_OP_H

@@ -6,11 +6,6 @@
 // Hipsr_DpsOp base class from HipsrOps.td.
 //
 
-#ifndef HIPSR_CAST_OP
-#define HIPSR_CAST_OP
-
-include "hip/Dialect/Hipsr/IR/HipsrOps.td"
-
 //===----------------------------------------------------------------------===//
 // Hipsr_CastOp
 //===----------------------------------------------------------------------===//
@@ -37,5 +32,3 @@ def Hipsr_CastOp : Hipsr_DpsOp<"cast"> {
     attr-dict (`:` type($result_tensors)^)? (`shape_region` $shape_region^)?
   }];
 }
-
-#endif // HIPSR_CAST_OP

@@ -6,6 +6,3 @@
 #include "hip/Dialect/Hipsr/IR/HipsrEmptyYieldOp.h"
 
 #include "hip/Dialect/Hipsr/IR/HipsrEmptyOp.h"
-
-#define GET_OP_CLASSES
-#include "hip/Dialect/Hipsr/IR/HipsrEmptyYieldOp.cpp.inc"

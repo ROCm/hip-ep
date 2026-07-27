@@ -37,6 +37,3 @@ void PoolDomainOp::getSuccessorRegions(
   }
   regions.emplace_back(getOperation(), getResults());
 }
-
-#define GET_OP_CLASSES
-#include "hip/Dialect/Hipsr/IR/HipsrPoolDomainOp.cpp.inc"
