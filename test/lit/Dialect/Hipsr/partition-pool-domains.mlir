@@ -3,6 +3,91 @@
 
 // RUN: hip-mlir-opt --split-input-file -hipsr-partition-pool-domains %s | FileCheck %s
 
+// Each runtime Expand starts a domain. Values flow through three domains while
+// placeholders stay immediately before their Cast, Expand, and Add consumers.
+// CHECK-LABEL: func.func @runtime_expands_split_domains(
+// CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<1x4xf32>,
+// CHECK-SAME: %[[FIRST_SHAPE:.*]]: tensor<2xi64>, %[[SECOND_SHAPE:.*]]: tensor<2xi64>)
+// CHECK: %[[CAST_DOMAIN:.*]] = hipsr.pool_domain(%[[CTX]], %[[INPUT]] : !hipsr.context, tensor<1x4xf32>) {
+// CHECK-NEXT: ^bb0(%[[CAST_CTX:.*]]: !hipsr.context, %[[CAST_INPUT:.*]]: tensor<1x4xf32>):
+// CHECK-NEXT: %[[CAST_INIT:.*]] = hipsr.placeholder : tensor<1x4xf16>
+// CHECK-NEXT: %[[CAST:.*]] = hipsr.cast(%[[CAST_CTX]]) ins(%[[CAST_INPUT]] : tensor<1x4xf32>) outs(%[[CAST_INIT]] : tensor<1x4xf16>) : tensor<1x4xf16>
+// CHECK-NEXT: hipsr.pool_domain_yield %[[CAST]] : tensor<1x4xf16>
+// CHECK-NEXT: } -> tensor<1x4xf16>
+// CHECK-NEXT: %[[ADD_DOMAIN:.*]] = hipsr.pool_domain(%[[CTX]], %[[CAST_DOMAIN]], %[[FIRST_SHAPE]] : !hipsr.context, tensor<1x4xf16>, tensor<2xi64>) {
+// CHECK-NEXT: ^bb0(%[[ADD_CTX:.*]]: !hipsr.context, %[[ADD_INPUT:.*]]: tensor<1x4xf16>, %[[ADD_SHAPE:.*]]: tensor<2xi64>):
+// CHECK-NEXT: %[[FIRST_EXPAND_INIT:.*]] = hipsr.placeholder : tensor<?x4xf16>
+// CHECK-NEXT: %[[FIRST_EXPAND:.*]] = hipsr.expand(%[[ADD_CTX]]) ins(%[[ADD_INPUT]], %[[ADD_SHAPE]] : tensor<1x4xf16>, tensor<2xi64>) outs(%[[FIRST_EXPAND_INIT]] : tensor<?x4xf16>) : tensor<?x4xf16>
+// CHECK-NEXT: %[[ADD_INIT:.*]] = hipsr.placeholder : tensor<?x4xf16>
+// CHECK-NEXT: %[[SUM:.*]] = hipsr.add(%[[ADD_CTX]]) ins(%[[FIRST_EXPAND]], %[[FIRST_EXPAND]] : tensor<?x4xf16>, tensor<?x4xf16>) outs(%[[ADD_INIT]] : tensor<?x4xf16>) : tensor<?x4xf16>
+// CHECK-NEXT: hipsr.pool_domain_yield %[[SUM]] : tensor<?x4xf16>
+// CHECK-NEXT: } -> tensor<?x4xf16>
+// CHECK-NEXT: %[[FINAL_DOMAIN:.*]] = hipsr.pool_domain(%[[CTX]], %[[ADD_DOMAIN]], %[[SECOND_SHAPE]] : !hipsr.context, tensor<?x4xf16>, tensor<2xi64>) {
+// CHECK-NEXT: ^bb0(%[[FINAL_CTX:.*]]: !hipsr.context, %[[FINAL_INPUT:.*]]: tensor<?x4xf16>, %[[FINAL_SHAPE:.*]]: tensor<2xi64>):
+// CHECK-NEXT: %[[SECOND_EXPAND_INIT:.*]] = hipsr.placeholder : tensor<?x?xf16>
+// CHECK-NEXT: %[[RESULT:.*]] = hipsr.expand(%[[FINAL_CTX]]) ins(%[[FINAL_INPUT]], %[[FINAL_SHAPE]] : tensor<?x4xf16>, tensor<2xi64>) outs(%[[SECOND_EXPAND_INIT]] : tensor<?x?xf16>) : tensor<?x?xf16>
+// CHECK-NEXT: hipsr.pool_domain_yield %[[RESULT]] : tensor<?x?xf16>
+// CHECK-NEXT: } -> tensor<?x?xf16>
+// CHECK-NEXT: return %[[FINAL_DOMAIN]] : tensor<?x?xf16>
+// CHECK-NEXT: }
+func.func @runtime_expands_split_domains(
+    %ctx: !hipsr.context, %input: tensor<1x4xf32>,
+    %first_shape: tensor<2xi64>, %second_shape: tensor<2xi64>)
+    -> tensor<?x?xf16> {
+  %cast_init = hipsr.placeholder : tensor<1x4xf16>
+  %cast = hipsr.cast(%ctx) ins(%input : tensor<1x4xf32>)
+      outs(%cast_init : tensor<1x4xf16>) : tensor<1x4xf16>
+
+  %first_expand_init = hipsr.placeholder : tensor<?x4xf16>
+  %first_expand = hipsr.expand(%ctx)
+      ins(%cast, %first_shape : tensor<1x4xf16>, tensor<2xi64>)
+      outs(%first_expand_init : tensor<?x4xf16>) : tensor<?x4xf16>
+  %add_init = hipsr.placeholder : tensor<?x4xf16>
+  %sum = hipsr.add(%ctx)
+      ins(%first_expand, %first_expand : tensor<?x4xf16>, tensor<?x4xf16>)
+      outs(%add_init : tensor<?x4xf16>) : tensor<?x4xf16>
+
+  %second_expand_init = hipsr.placeholder : tensor<?x?xf16>
+  %result = hipsr.expand(%ctx)
+      ins(%sum, %second_shape : tensor<?x4xf16>, tensor<2xi64>)
+      outs(%second_expand_init : tensor<?x?xf16>) : tensor<?x?xf16>
+  return %result : tensor<?x?xf16>
+}
+
+// -----
+
+// A dense hipsr.constant shape disables Expand's start barrier, so Constant,
+// Cast, and Expand remain in one domain.
+// CHECK-LABEL: func.func @constant_expand_stays_in_domain(
+// CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<1x4xf32>)
+// CHECK: %[[DOMAIN:.*]] = hipsr.pool_domain(%[[CTX]], %[[INPUT]] : !hipsr.context, tensor<1x4xf32>) {
+// CHECK-NEXT: ^bb0(%[[DOMAIN_CTX:.*]]: !hipsr.context, %[[DOMAIN_INPUT:.*]]: tensor<1x4xf32>):
+// CHECK-NEXT: %[[SHAPE:.*]] = hipsr.constant {value = dense<[2, 4]> : tensor<2xi64>} : tensor<2xi64>
+// CHECK-NEXT: %[[CAST_INIT:.*]] = hipsr.placeholder : tensor<1x4xf16>
+// CHECK-NEXT: %[[CAST:.*]] = hipsr.cast(%[[DOMAIN_CTX]]) ins(%[[DOMAIN_INPUT]] : tensor<1x4xf32>) outs(%[[CAST_INIT]] : tensor<1x4xf16>) : tensor<1x4xf16>
+// CHECK-NEXT: %[[EXPAND_INIT:.*]] = hipsr.placeholder : tensor<2x4xf16>
+// CHECK-NEXT: %[[RESULT:.*]] = hipsr.expand(%[[DOMAIN_CTX]]) ins(%[[CAST]], %[[SHAPE]] : tensor<1x4xf16>, tensor<2xi64>) outs(%[[EXPAND_INIT]] : tensor<2x4xf16>) : tensor<2x4xf16>
+// CHECK-NEXT: hipsr.pool_domain_yield %[[RESULT]] : tensor<2x4xf16>
+// CHECK-NEXT: } -> tensor<2x4xf16>
+// CHECK-NEXT: return %[[DOMAIN]] : tensor<2x4xf16>
+// CHECK-NEXT: }
+func.func @constant_expand_stays_in_domain(
+    %ctx: !hipsr.context, %input: tensor<1x4xf32>) -> tensor<2x4xf16> {
+  %shape = hipsr.constant {
+    value = dense<[2, 4]> : tensor<2xi64>
+  } : tensor<2xi64>
+  %cast_init = hipsr.placeholder : tensor<1x4xf16>
+  %cast = hipsr.cast(%ctx) ins(%input : tensor<1x4xf32>)
+      outs(%cast_init : tensor<1x4xf16>) : tensor<1x4xf16>
+  %expand_init = hipsr.placeholder : tensor<2x4xf16>
+  %result = hipsr.expand(%ctx)
+      ins(%cast, %shape : tensor<1x4xf16>, tensor<2xi64>)
+      outs(%expand_init : tensor<2x4xf16>) : tensor<2x4xf16>
+  return %result : tensor<2x4xf16>
+}
+
+// -----
+
 // A DPS chain gets fresh placeholders inside its assigned domain.
 // CHECK-LABEL: func.func @cast_matmul_chain
 // CHECK-SAME: (%[[CTX:.*]]: !hipsr.context, %[[A:.*]]: tensor<4x8xf32>, %[[B:.*]]: tensor<8x2xf16>)
