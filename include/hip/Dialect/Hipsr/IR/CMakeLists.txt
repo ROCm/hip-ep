@@ -59,6 +59,10 @@ set(LLVM_TARGET_DEFINITIONS HipsrAddOp.td)
 mlir_tablegen(HipsrAddOp.h.inc -gen-op-decls)
 mlir_tablegen(HipsrAddOp.cpp.inc -gen-op-defs)
 
+set(LLVM_TARGET_DEFINITIONS HipsrGetPoolOp.td)
+mlir_tablegen(HipsrGetPoolOp.h.inc -gen-op-decls)
+mlir_tablegen(HipsrGetPoolOp.cpp.inc -gen-op-defs)
+
 set(LLVM_TARGET_DEFINITIONS HipsrPlaceholderOp.td)
 mlir_tablegen(HipsrPlaceholderOp.h.inc -gen-op-decls)
 mlir_tablegen(HipsrPlaceholderOp.cpp.inc -gen-op-defs)
