@@ -23,7 +23,7 @@ def Hipsr_GetPoolOp : Hipsr_Op<"get_pool",
 
   let arguments = (ins Hipsr_ContextType:$ctx, Index:$pool_size,
                        DefaultValuedAttr<I64Attr, "0">:$domain_id);
-  let results = (outs AnyMemRef:$pool);
+  let results = (outs Hipsr_DeviceMemRef:$pool);
   let assemblyFormat = "`(` $ctx `,` $pool_size `)` attr-dict `:` type($pool)";
 }
 

@@ -39,14 +39,16 @@ struct GetPoolLowering : public ConvertOpToLLVMPattern<GetPoolOp> {
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
-    Type ptrType = getPtrType();
+    MLIRContext *ctx = rewriter.getContext();
+    Type hostPtrType = LLVM::LLVMPointerType::get(ctx, 0);
+    Type devicePtrType = LLVM::LLVMPointerType::get(ctx, 1);
     Type i32Type = rewriter.getI32Type();
     Type i64Type = rewriter.getI64Type();
     MemRefType memRefType = cast<MemRefType>(op.getPool().getType());
 
-    // TODO: the runtime function should use !llvm.ptr<1> (GPU) pointers.
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kGetPoolBase, {ptrType, i32Type, i64Type}, ptrType);
+    FailureOr<LLVM::LLVMFuncOp> funcOp =
+        LLVM::lookupOrCreateFn(rewriter, module, kGetPoolBase,
+                               {hostPtrType, i32Type, i64Type}, devicePtrType);
     if (failed(funcOp)) {
       return failure();
     }
@@ -55,25 +57,10 @@ struct GetPoolLowering : public ConvertOpToLLVMPattern<GetPoolOp> {
     Value domainIdVal = LLVM::ConstantOp::create(
         rewriter, loc, i32Type,
         rewriter.getI32IntegerAttr(static_cast<int32_t>(op.getDomainId())));
-    Value rawPtr = LLVM::CallOp::create(
+    Value gpuPtr = LLVM::CallOp::create(
                        rewriter, loc, *funcOp,
                        ValueRange{adaptor.getCtx(), domainIdVal, poolSize})
                        .getResult();
-
-    FailureOr<unsigned> addrSpace =
-        getTypeConverter()->getMemRefAddressSpace(memRefType);
-    if (failed(addrSpace)) {
-      return failure();
-    }
-
-    Value gpuPtr = rawPtr;
-    if (cast<LLVM::LLVMPointerType>(rawPtr.getType()).getAddressSpace() !=
-        *addrSpace) {
-      gpuPtr = LLVM::AddrSpaceCastOp::create(
-          rewriter, loc,
-          LLVM::LLVMPointerType::get(rewriter.getContext(), *addrSpace),
-          rawPtr);
-    }
 
     Value stride1 = LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                              rewriter.getI64IntegerAttr(1));
