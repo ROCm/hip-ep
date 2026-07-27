@@ -18,15 +18,6 @@
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
-namespace mlir {
-namespace hipsr {
-class EmptyOp;
-class EmptyYieldOp;
-class PoolDomainOp;
-class PoolDomainYieldOp;
-} // namespace hipsr
-} // namespace mlir
-
 #define GET_OP_CLASSES
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h.inc"
 
