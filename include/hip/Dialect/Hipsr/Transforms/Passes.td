@@ -58,4 +58,13 @@ def HipsrExternalizeConstantsPass
   ];
 }
 
+def HipsrPoolAllocPass : Pass<"hipsr-pool-alloc", "mlir::ModuleOp"> {
+  let summary = "Pool intermediate buffers per pool_domain by lifetime (skeleton)";
+  let description = [{
+    Placeholder for the lifetime-based pool allocation pass. Currently a no-op;
+    the allocation algorithm lands in a follow-up.
+  }];
+  let dependentDialects = ["::mlir::hipsr::HipsrDialect"];
+}
+
 #endif // HIPSR_TRANSFORMS_PASSES
