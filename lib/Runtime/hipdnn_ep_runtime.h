@@ -1053,10 +1053,10 @@ int wrap_reduce_mean(RuntimeState *state, void *data, void *axes, void *output,
 // trailing/contiguous reduce); enables strided reduction over a non-trailing
 // axis.
 int wrap_reduce_l2(RuntimeState *state, void *data, void *axes, void *output,
-                    int64_t data_num_elements, int64_t output_num_elements,
-                    int64_t axes_num_elements, int64_t data_type,
-                    int64_t keepdims, int64_t noop_with_empty_axes,
-                    int64_t inner_size);
+                   int64_t data_num_elements, int64_t output_num_elements,
+                   int64_t axes_num_elements, int64_t data_type,
+                   int64_t keepdims, int64_t noop_with_empty_axes,
+                   int64_t inner_size);
 
 // ReduceMax operation wrapper
 // data_type: HIPDNN_EP_DATATYPE_* enum value identifying the element type.
