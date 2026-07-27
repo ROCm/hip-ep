@@ -52,7 +52,8 @@ namespace hip {
 ///                        external dim (ShapedType::kDynamic marks dynamic).
 ///   kAbiGroupsAttrName : DenseI64ArrayAttr -- number of consecutive internal
 ///                        dims folded into each external dim (contiguous
-///                        collapse reassociation; entries sum to internal rank).
+///                        collapse reassociation; entries sum to internal
+///                        rank).
 inline constexpr ::llvm::StringLiteral kAbiShapeAttrName = "hipdnn.abi_shape";
 inline constexpr ::llvm::StringLiteral kAbiGroupsAttrName = "hipdnn.abi_groups";
 

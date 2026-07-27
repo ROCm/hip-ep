@@ -250,7 +250,8 @@ struct UseOutputAllocatorPass
       // callback at the returned rank (see stampAbiCollapseAttrs).
       if (returnOp && outIdx >= 0 &&
           outIdx < static_cast<int64_t>(returnOp.getNumOperands()))
-        stampAbiCollapseAttrs(allocOutput, returnOp.getOperand(outIdx), builder);
+        stampAbiCollapseAttrs(allocOutput, returnOp.getOperand(outIdx),
+                              builder);
     }
   }
 };

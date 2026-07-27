@@ -308,8 +308,8 @@ struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
                              rewriter, internalSizes, strides, sizeBytes, true);
 
     // Runtime callback shape: the ONNX / func.return output shape, which may be
-    // a rank-reduced collapse of internalSizes. hip-use-output-allocator stamped
-    // that mapping on the op (while collapse_shape was still intact) as
+    // a rank-reduced collapse of internalSizes. hip-use-output-allocator
+    // stamped that mapping on the op (while collapse_shape was still intact) as
     // `hipdnn.abi_shape` (external shape; ShapedType::kDynamic per dynamic dim)
     // + `hipdnn.abi_groups` (# internal dims folded into each external dim).
     // Re-derive each external dim: static from the attribute, dynamic as the
@@ -339,7 +339,8 @@ struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
           dim = LLVM::ConstantOp::create(
               rewriter, loc, i64Type, rewriter.getI64IntegerAttr(abiShape[e]));
         } else {
-          // Dynamic external dim: runtime product of the internal dims it folds.
+          // Dynamic external dim: runtime product of the internal dims it
+          // folds.
           dim = internalSizes[internalDim];
           for (int64_t j : llvm::seq<int64_t>(1, cnt))
             dim = LLVM::MulOp::create(rewriter, loc, dim,
