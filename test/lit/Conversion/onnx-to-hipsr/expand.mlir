@@ -46,9 +46,12 @@ func.func @expand_leading_rank(%ctx: !hipsr.context,
 // -----
 
 // Shape must be a rank-1 extent vector.
-// CHECK-LABEL: func.func @expand_shape_rank
+// CHECK-LABEL: func.func @expand_shape_rank(
+// CHECK-SAME:    %{{.*}}: !hipsr.context,
+// CHECK-SAME:    %[[INPUT:.*]]: tensor<2x3xf16>,
+// CHECK-SAME:    %[[SHAPE:.*]]: tensor<1x2xi64>) -> tensor<2x3xf16> {
 // CHECK-NOT:   hipsr.expand
-// CHECK:       %[[RESULT:.+]] = "onnx.Expand"
+// CHECK-NEXT:  %[[RESULT:.*]] = "onnx.Expand"(%[[INPUT]], %[[SHAPE]]) : (tensor<2x3xf16>, tensor<1x2xi64>) -> tensor<2x3xf16>
 // CHECK-NEXT:  return %[[RESULT]] : tensor<2x3xf16>
 func.func @expand_shape_rank(%ctx: !hipsr.context,
                              %input: tensor<2x3xf16>,
@@ -62,9 +65,12 @@ func.func @expand_shape_rank(%ctx: !hipsr.context,
 // -----
 
 // ONNX shape extents use i64 elements.
-// CHECK-LABEL: func.func @expand_shape_element_type
+// CHECK-LABEL: func.func @expand_shape_element_type(
+// CHECK-SAME:    %{{.*}}: !hipsr.context,
+// CHECK-SAME:    %[[INPUT:.*]]: tensor<2x3xf16>,
+// CHECK-SAME:    %[[SHAPE:.*]]: tensor<2xi32>) -> tensor<2x3xf16> {
 // CHECK-NOT:   hipsr.expand
-// CHECK:       %[[RESULT:.+]] = "onnx.Expand"
+// CHECK-NEXT:  %[[RESULT:.*]] = "onnx.Expand"(%[[INPUT]], %[[SHAPE]]) : (tensor<2x3xf16>, tensor<2xi32>) -> tensor<2x3xf16>
 // CHECK-NEXT:  return %[[RESULT]] : tensor<2x3xf16>
 func.func @expand_shape_element_type(%ctx: !hipsr.context,
                                      %input: tensor<2x3xf16>,
@@ -78,9 +84,12 @@ func.func @expand_shape_element_type(%ctx: !hipsr.context,
 // -----
 
 // The static shape length determines the output rank.
-// CHECK-LABEL: func.func @expand_dynamic_shape_length
+// CHECK-LABEL: func.func @expand_dynamic_shape_length(
+// CHECK-SAME:    %{{.*}}: !hipsr.context,
+// CHECK-SAME:    %[[INPUT:.*]]: tensor<2x3xf16>,
+// CHECK-SAME:    %[[SHAPE:.*]]: tensor<?xi64>) -> tensor<2x3xf16> {
 // CHECK-NOT:   hipsr.expand
-// CHECK:       %[[RESULT:.+]] = "onnx.Expand"
+// CHECK-NEXT:  %[[RESULT:.*]] = "onnx.Expand"(%[[INPUT]], %[[SHAPE]]) : (tensor<2x3xf16>, tensor<?xi64>) -> tensor<2x3xf16>
 // CHECK-NEXT:  return %[[RESULT]] : tensor<2x3xf16>
 func.func @expand_dynamic_shape_length(%ctx: !hipsr.context,
                                        %input: tensor<2x3xf16>,
@@ -94,9 +103,12 @@ func.func @expand_dynamic_shape_length(%ctx: !hipsr.context,
 // -----
 
 // Expand preserves the input element type.
-// CHECK-LABEL: func.func @expand_element_mismatch
+// CHECK-LABEL: func.func @expand_element_mismatch(
+// CHECK-SAME:    %{{.*}}: !hipsr.context,
+// CHECK-SAME:    %[[INPUT:.*]]: tensor<2x3xf16>,
+// CHECK-SAME:    %[[SHAPE:.*]]: tensor<2xi64>) -> tensor<2x3xf32> {
 // CHECK-NOT:   hipsr.expand
-// CHECK:       %[[RESULT:.+]] = "onnx.Expand"
+// CHECK-NEXT:  %[[RESULT:.*]] = "onnx.Expand"(%[[INPUT]], %[[SHAPE]]) : (tensor<2x3xf16>, tensor<2xi64>) -> tensor<2x3xf32>
 // CHECK-NEXT:  return %[[RESULT]] : tensor<2x3xf32>
 func.func @expand_element_mismatch(%ctx: !hipsr.context,
                                    %input: tensor<2x3xf16>,
@@ -110,9 +122,12 @@ func.func @expand_element_mismatch(%ctx: !hipsr.context,
 // -----
 
 // Output rank is max(input rank, requested shape length).
-// CHECK-LABEL: func.func @expand_output_rank
+// CHECK-LABEL: func.func @expand_output_rank(
+// CHECK-SAME:    %{{.*}}: !hipsr.context,
+// CHECK-SAME:    %[[INPUT:.*]]: tensor<2x3xf16>,
+// CHECK-SAME:    %[[SHAPE:.*]]: tensor<4xi64>) -> tensor<2x3xf16> {
 // CHECK-NOT:   hipsr.expand
-// CHECK:       %[[RESULT:.+]] = "onnx.Expand"
+// CHECK-NEXT:  %[[RESULT:.*]] = "onnx.Expand"(%[[INPUT]], %[[SHAPE]]) : (tensor<2x3xf16>, tensor<4xi64>) -> tensor<2x3xf16>
 // CHECK-NEXT:  return %[[RESULT]] : tensor<2x3xf16>
 func.func @expand_output_rank(%ctx: !hipsr.context,
                               %input: tensor<2x3xf16>,

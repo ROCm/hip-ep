@@ -8,14 +8,22 @@
 
 // Tensor form round-trips without a shape region. Population checks the
 // complete rank-2 ONNX broadcast shape computation.
-// CHECK-LABEL: func.func @expand_tensor
-// CHECK:      %[[RESULT:.+]] = hipsr.expand(%{{.+}}) ins(%{{.+}}, %{{.+}} : tensor<?x3xf16>, tensor<2xi64>)
-// CHECK-SAME:   outs(%{{.+}} : tensor<?x?xf16>) : tensor<?x?xf16>
+// CHECK-LABEL: func.func @expand_tensor(
+// CHECK-SAME:   %[[CTX:.*]]: !hipsr.context,
+// CHECK-SAME:   %[[INPUT:.*]]: tensor<?x3xf16>,
+// CHECK-SAME:   %[[REQUEST:.*]]: tensor<2xi64>,
+// CHECK-SAME:   %[[INIT:.*]]: tensor<?x?xf16>) -> tensor<?x?xf16> {
+// CHECK-NEXT: %[[RESULT:.*]] = hipsr.expand(%[[CTX]]) ins(%[[INPUT]], %[[REQUEST]] : tensor<?x3xf16>, tensor<2xi64>)
+// CHECK-SAME:   outs(%[[INIT]] : tensor<?x?xf16>) : tensor<?x?xf16>
 // CHECK-NOT:  shape_region
 // CHECK-NEXT: return %[[RESULT]] : tensor<?x?xf16>
-// POPULATE-LABEL: func.func @expand_tensor
-// POPULATE:      %[[RESULT:.+]] = hipsr.expand(%{{.+}}) ins(%{{.+}}, %{{.+}} : tensor<?x3xf16>, tensor<2xi64>)
-// POPULATE-SAME:   shape_region {
+// POPULATE-LABEL: func.func @expand_tensor(
+// POPULATE-SAME:   %[[CTX:.*]]: !hipsr.context,
+// POPULATE-SAME:   %[[OUTER_INPUT:.*]]: tensor<?x3xf16>,
+// POPULATE-SAME:   %[[OUTER_REQUEST:.*]]: tensor<2xi64>,
+// POPULATE-SAME:   %[[INIT:.*]]: tensor<?x?xf16>) -> tensor<?x?xf16> {
+// POPULATE-NEXT: %[[RESULT:.*]] = hipsr.expand(%[[CTX]]) ins(%[[OUTER_INPUT]], %[[OUTER_REQUEST]] : tensor<?x3xf16>, tensor<2xi64>)
+// POPULATE-SAME:   outs(%[[INIT]] : tensor<?x?xf16>) : tensor<?x?xf16> shape_region {
 // POPULATE-NEXT: ^bb0(%{{.+}}: !hipsr.context, %[[INPUT:.+]]: tensor<?x3xf16>, %[[REQUEST:.+]]: tensor<2xi64>):
 // POPULATE-NEXT:   %[[INPUT_SHAPE:.+]] = shape.shape_of %[[INPUT]] : tensor<?x3xf16> -> tensor<2xindex>
 // POPULATE-NEXT:   %[[INDEX0:.+]] = arith.constant 0 : index
@@ -50,14 +58,22 @@ func.func @expand_tensor(%ctx: !hipsr.context, %input: tensor<?x3xf16>,
 // -----
 
 // Buffer form reads the requested extents from host-visible memory.
-// CHECK-LABEL: func.func @expand_host_shape_memref
-// CHECK: hipsr.expand(%{{.+}}) ins(%{{.+}}, %{{.+}} : memref<?x3xf16, #hipsr.mem<device>>, memref<2xi64, #hipsr.mem<host>>)
-// CHECK-SAME: outs(%{{.+}} : memref<?x?xf16, #hipsr.mem<device>>)
+// CHECK-LABEL: func.func @expand_host_shape_memref(
+// CHECK-SAME:   %[[CTX:.*]]: !hipsr.context,
+// CHECK-SAME:   %[[INPUT:.*]]: memref<?x3xf16, #hipsr.mem<device>>,
+// CHECK-SAME:   %[[REQUEST:.*]]: memref<2xi64, #hipsr.mem<host>>,
+// CHECK-SAME:   %[[INIT:.*]]: memref<?x?xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT: hipsr.expand(%[[CTX]]) ins(%[[INPUT]], %[[REQUEST]] : memref<?x3xf16, #hipsr.mem<device>>, memref<2xi64, #hipsr.mem<host>>)
+// CHECK-SAME:   outs(%[[INIT]] : memref<?x?xf16, #hipsr.mem<device>>)
 // CHECK-NOT: shape_region
 // CHECK-NEXT: return
-// POPULATE-LABEL: func.func @expand_host_shape_memref
-// POPULATE:      hipsr.expand(%{{.+}}) ins(%{{.+}}, %{{.+}} : memref<?x3xf16, #hipsr.mem<device>>, memref<2xi64, #hipsr.mem<host>>)
-// POPULATE-SAME:   shape_region {
+// POPULATE-LABEL: func.func @expand_host_shape_memref(
+// POPULATE-SAME:   %[[CTX:.*]]: !hipsr.context,
+// POPULATE-SAME:   %[[OUTER_INPUT:.*]]: memref<?x3xf16, #hipsr.mem<device>>,
+// POPULATE-SAME:   %[[OUTER_REQUEST:.*]]: memref<2xi64, #hipsr.mem<host>>,
+// POPULATE-SAME:   %[[INIT:.*]]: memref<?x?xf16, #hipsr.mem<device>>) {
+// POPULATE-NEXT: hipsr.expand(%[[CTX]]) ins(%[[OUTER_INPUT]], %[[OUTER_REQUEST]] : memref<?x3xf16, #hipsr.mem<device>>, memref<2xi64, #hipsr.mem<host>>)
+// POPULATE-SAME:   outs(%[[INIT]] : memref<?x?xf16, #hipsr.mem<device>>) shape_region {
 // POPULATE-NEXT: ^bb0(%{{.+}}: !hipsr.context, %[[INPUT:.+]]: memref<?x3xf16, #hipsr.mem<device>>, %[[REQUEST:.+]]: memref<2xi64, #hipsr.mem<host>>):
 // POPULATE-NEXT:   %{{.+}} = shape.shape_of %[[INPUT]]
 // POPULATE-NEXT:   %[[INDEX0:.+]] = arith.constant 0 : index
