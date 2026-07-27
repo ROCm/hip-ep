@@ -45,36 +45,38 @@ func.func @roundtrip_multi(%n: index, %m: index) -> (tensor<?x?xf16>, tensor<?xi
 }
 
 // -----
-// Verifier: result count must match the yielded tensor count.
+// RegionBranchOpInterface: result count must match the yielded tensor count.
 func.func @result_count_mismatch() -> tensor<4xf16> {
-  // expected-error @+1 {{has 1 result(s) but its empty_yield yields 2 value(s)}}
+  // expected-error @+1 {{along control flow edge from Operation hipsr.empty_yield to parent: region branch point has 2 operands, but region successor needs 1 inputs}}
   %0 = hipsr.empty() : tensor<4xf16> {
     %t0 = tensor.empty() : tensor<4xf16>
     %t1 = tensor.empty() : tensor<4xf16>
+    // expected-note @+1 {{region branch point}}
     hipsr.empty_yield %t0, %t1 : tensor<4xf16>, tensor<4xf16>
   }
   return %0 : tensor<4xf16>
 }
 
 // -----
-// Verifier: result type must match the yielded tensor type.
+// RegionBranchOpInterface: result type must match the yielded tensor type.
 func.func @result_type_mismatch() -> tensor<4xi64> {
-  // expected-error @+1 {{result #0 type 'tensor<4xi64>' does not match the yielded value type 'tensor<4xf16>'}}
+  // expected-error @+1 {{along control flow edge from Operation hipsr.empty_yield to parent: successor operand type #0 'tensor<4xf16>' should match successor input type #0 'tensor<4xi64>'}}
   %0 = hipsr.empty() : tensor<4xi64> {
     %t = tensor.empty() : tensor<4xf16>
+    // expected-note @+1 {{region branch point}}
     hipsr.empty_yield %t : tensor<4xf16>
   }
   return %0 : tensor<4xi64>
 }
 
 // -----
-// Verifier: a mismatch on a later result is reported with that result's index
-// (result #0 matches, result #1 does not).
+// RegionBranchOpInterface reports the index of a later result mismatch.
 func.func @later_result_type_mismatch() -> (tensor<4xf16>, tensor<4xi64>) {
-  // expected-error @+1 {{result #1 type 'tensor<4xi64>' does not match the yielded value type 'tensor<4xf16>'}}
+  // expected-error @+1 {{along control flow edge from Operation hipsr.empty_yield to parent: successor operand type #1 'tensor<4xf16>' should match successor input type #1 'tensor<4xi64>'}}
   %0:2 = hipsr.empty() : tensor<4xf16>, tensor<4xi64> {
     %t0 = tensor.empty() : tensor<4xf16>
     %t1 = tensor.empty() : tensor<4xf16>
+    // expected-note @+1 {{region branch point}}
     hipsr.empty_yield %t0, %t1 : tensor<4xf16>, tensor<4xf16>
   }
   return %0#0, %0#1 : tensor<4xf16>, tensor<4xi64>
