@@ -85,6 +85,7 @@ inline constexpr const char *kWrapPower = "wrap_power";
 inline constexpr const char *kWrapRange = "wrap_range";
 inline constexpr const char *kWrapReduceSum = "wrap_reduce_sum";
 inline constexpr const char *kWrapReduceMean = "wrap_reduce_mean";
+inline constexpr const char *kWrapReduceL2 = "wrap_reduce_l2";
 inline constexpr const char *kWrapReduceMax = "wrap_reduce_max";
 inline constexpr const char *kWrapReduceMin = "wrap_reduce_min";
 inline constexpr const char *kWrapGQA = "wrap_group_query_attention";

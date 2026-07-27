@@ -179,6 +179,38 @@ class TestReduceMean:
 
 
 # ---------------------------------------------------------------------------
+# ReduceL2 -- first-class hip.reduce_l2 op. SwinV2 attention Q/K L2 norm uses
+# axis=-1, keepdims=1 over head_dim (e.g. 32). Runtime dtype: f16/f32.
+# ---------------------------------------------------------------------------
+
+
+class TestReduceL2:
+    @pytest.mark.parametrize(
+        "shape,axes,keepdims",
+        [
+            ([4, 8], [1], 1),
+            ([4, 8], [1], 0),
+            ([128, 3, 256, 32], [-1], 1),
+        ],
+    )
+    def test_reduce_l2(self, model_runner, shape, axes, keepdims):
+        model = _make_reduce_model("ReduceL2", np.float16, shape, axes, keepdims)
+        rng = np.random.default_rng(501)
+        x = rng.uniform(-3.0, 3.0, shape).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=2e-2, rtol=1e-2)
+
+    def test_reduce_l2_swinv2_head_dim(self, model_runner):
+        """SwinV2 Q/K L2 norm: [128, 3, 256, 32] -> [128, 3, 256, 1]."""
+        shape = [128, 3, 256, 32]
+        model = _make_reduce_model("ReduceL2", np.float16, shape, [-1], 1)
+        rng = np.random.default_rng(502)
+        x = rng.uniform(-2.0, 2.0, shape).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=2e-2, rtol=1e-2)
+
+
+# ---------------------------------------------------------------------------
 # ReduceMax (added by qwen-vision-kernels PR)
 # Runtime dtypes: f16, i32, i64  (NO f32 -- not in the dispatch table)
 # ---------------------------------------------------------------------------

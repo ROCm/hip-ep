@@ -976,6 +976,28 @@ HIP_KERNEL_API int hip_reduce_mean(
     int hip_dtype);
 
 /* =========================================================================
+ * ReduceL2 (Parallel L2 Norm Reduction)
+ * =========================================================================
+ *
+ * Same layout convention and `inner_size` semantics as hip_reduce_sum, but
+ * accumulates sum(x^2) in float and writes sqrt(sum) to the output. The
+ * reduction is performed in-kernel so the op needs no compile-time-static reduce
+ * dim and tolerates a dynamic reduce axis.
+ *
+ * Supported types: HIP_DTYPE_FLOAT16 and HIP_DTYPE_FLOAT32 (ONNX ReduceL2 is
+ * float-domain). Both accumulate in float. Other dtypes return -1.
+ * Returns: 0 on success, non-zero on failure
+ */
+HIP_KERNEL_API int hip_reduce_l2(
+    void* stream,
+    const void* data,
+    void* output,
+    int64_t num_input_elements,
+    int64_t num_output_elements,
+    int64_t inner_size,
+    int hip_dtype);
+
+/* =========================================================================
  * Pool — MaxPool / AveragePool / LpPool (1D / 2D / 3D)
  * =========================================================================
  *

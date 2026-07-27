@@ -1189,6 +1189,20 @@ void ReduceMeanOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
+// ReduceL2Op: ins(data, axes), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange ReduceL2Op::getDpsInitsMutable() {
+  return getOutputMutable();
+}
+
+void ReduceL2Op::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+//===----------------------------------------------------------------------===//
 // ReduceMaxOp: ins(data, axes), outs(output)
 //===----------------------------------------------------------------------===//
 
