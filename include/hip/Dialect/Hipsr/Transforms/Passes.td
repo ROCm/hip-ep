@@ -59,12 +59,20 @@ def HipsrExternalizeConstantsPass
 }
 
 def HipsrPoolAllocPass : Pass<"hipsr-pool-alloc", "mlir::ModuleOp"> {
-  let summary = "Pool intermediate buffers per pool_domain by lifetime (skeleton)";
+  let summary = "Pool intermediate buffers per pool_domain by lifetime";
   let description = [{
-    Placeholder for the lifetime-based pool allocation pass. Currently a no-op;
-    the allocation algorithm lands in a follow-up.
+    Pools the `memref.alloc` buffers inside each `hipsr.pool_domain` by
+    lifetime: allocations whose live ranges do not overlap share one
+    `hipsr.get_pool` buffer, each `memref.alloc` becoming a `memref.view` into
+    the pool. Lifetime uses first-write (DPS `outs`) as start and last use as
+    end. This pass handles the single-group case; multiple non-overlap groups
+    error out for now.
   }];
-  let dependentDialects = ["::mlir::hipsr::HipsrDialect"];
+  let dependentDialects = [
+    "::mlir::hipsr::HipsrDialect",
+    "::mlir::memref::MemRefDialect",
+    "::mlir::arith::ArithDialect"
+  ];
 }
 
 #endif // HIPSR_TRANSFORMS_PASSES
