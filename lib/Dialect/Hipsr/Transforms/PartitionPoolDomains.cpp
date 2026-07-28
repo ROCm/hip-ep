@@ -6,8 +6,7 @@
 //
 // Splits a single-block function into IsolatedFromAbove pool domains. A start
 // barrier begins a domain; the first op that uses an end-barrier result begins
-// the next. The pass checks the input before changing the IR. Placeholders do
-// not set domain boundaries.
+// the next. The pass checks the input before changing the IR.
 //
 // "hipsr.example_end_barrier" stands in for the DPS end-barrier op that will
 // be added later.
@@ -86,10 +85,6 @@
 //
 // The end barrier stays in the first domain. Its first user starts the second
 // domain. Expand is a start barrier, so it starts the third domain.
-//
-// Placeholders and the ops that use them must be top-level. The pass ignores
-// placeholders while finding boundaries, then moves each one before the op
-// that uses it.
 //
 //===----------------------------------------------------------------------===//
 
