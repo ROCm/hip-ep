@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-#include "hip/Dialect/Hipsr/IR/HipsrCastOp.h"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "hip/Dialect/Hipsr/IR/HipsrShapeRegionInterface.h"
 
@@ -14,9 +14,6 @@
 
 using namespace mlir;
 using namespace mlir::hipsr;
-
-#define GET_OP_CLASSES
-#include "hip/Dialect/Hipsr/IR/HipsrCastOp.cpp.inc"
 
 namespace {
 struct CastShapeArgs : ShapeRegionArgs<CastOp> {

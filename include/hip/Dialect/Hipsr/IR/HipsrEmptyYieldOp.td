@@ -6,13 +6,6 @@
 // hipsr.empty op itself lives in HipsrEmptyOp.td.
 //
 
-#ifndef HIPSR_EMPTY_YIELD_OP
-#define HIPSR_EMPTY_YIELD_OP
-
-include "hip/Dialect/Hipsr/IR/HipsrOps.td"
-include "mlir/Interfaces/ControlFlowInterfaces.td"
-include "mlir/Interfaces/SideEffectInterfaces.td"
-
 //===----------------------------------------------------------------------===//
 // Hipsr_EmptyYieldOp
 //===----------------------------------------------------------------------===//
@@ -50,5 +43,3 @@ def Hipsr_EmptyYieldOp : Hipsr_Op<"empty_yield",
     }]>
   ];
 }
-
-#endif // HIPSR_EMPTY_YIELD_OP

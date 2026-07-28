@@ -14,8 +14,7 @@
 // Plain main() (no GTest): matches the other MLIR-side unit tests and avoids a
 // GTest dependency that is not present in the compiler build.
 
-#include "hip/Dialect/Hipsr/IR/HipsrConstantOp.h"
-#include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
 #include "hip/Support/DiskFileSystem.h"
 
