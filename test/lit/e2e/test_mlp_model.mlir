@@ -1,6 +1,6 @@
 // RUN: hip-mlir-opt %s --hipdnn-pipeline | FileCheck %s
-// RUN: hip-mlir-opt %s --onnx-to-hip-pipeline | FileCheck %s --check-prefix=POOLED
-// RUN: hip-mlir-opt %s --onnx-to-hip-pipeline --dump-pass-pipeline -o /dev/null 2>&1 | FileCheck %s --check-prefix=PIPELINE
+// RUN: hip-mlir-opt %s --onnx-to-hip-pipeline --dump-pass-pipeline -o /dev/null 2>&1 | FileCheck %s --check-prefix=DEFAULT-BUFFERIZE
+// RUN: env HIPDNN_EP_BUFFERIZE_COPY_BEFORE_WRITE=1 hip-mlir-opt %s --onnx-to-hip-pipeline --dump-pass-pipeline -o /dev/null 2>&1 | FileCheck %s --check-prefix=COPY-BEFORE-WRITE
 
 // Test MLP E2E pipeline from real Llama-3.1-8B MLP subgraph
 // The model has MatMul + Sigmoid + Mul (SiLU gate) ops with constant weights.
@@ -24,6 +24,10 @@
 // CHECK-NOT: onnx.Sigmoid
 // CHECK-NOT: onnx.Mul
 
+// The huge-graph escape hatch is opt-in: default retains One-Shot analysis;
+// setting the process environment enables copy-before-write.
+// DEFAULT-BUFFERIZE: one-shot-bufferize{{.*}}copy-before-write=false
+// COPY-BEFORE-WRITE: one-shot-bufferize{{.*}}copy-before-write=true
 // Production pipeline schedule: ownership-based deallocation must not return.
 // PIPELINE-LABEL: Pass Manager with
 // PIPELINE-NOT: buffer-deallocation
