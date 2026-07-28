@@ -6,9 +6,7 @@
 #include "OnnxToHipsrUtils.h"
 
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
-#include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
-#include "hip/Dialect/Hipsr/IR/HipsrMatMulOp.h"
-#include "hip/Dialect/Hipsr/IR/HipsrPlaceholderOp.h"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "mlir/IR/PatternMatch.h"
 

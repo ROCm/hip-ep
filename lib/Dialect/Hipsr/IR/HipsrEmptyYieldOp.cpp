@@ -3,6 +3,4 @@
  * Licensed under the MIT License.
  */
 
-#include "hip/Dialect/Hipsr/IR/HipsrEmptyYieldOp.h"
-
-#include "hip/Dialect/Hipsr/IR/HipsrEmptyOp.h"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"

@@ -3,7 +3,7 @@
  * Licensed under the MIT License.
  */
 
-#include "hip/Dialect/Hipsr/IR/HipsrCastOp.h"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "hip/Dialect/Hipsr/IR/HipsrShapeRegionInterface.h"
 

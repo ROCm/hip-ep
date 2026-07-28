@@ -5,9 +5,7 @@
 
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 
-#include "hip/Dialect/Hipsr/IR/HipsrAddOp.h"
-#include "hip/Dialect/Hipsr/IR/HipsrConstantOp.h"
-#include "hip/Dialect/Hipsr/IR/HipsrGetPoolOp.h"
+#include "hip/Conversion/HipsrToLLVM/HipsrToLLVM.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "llvm/ADT/TypeSwitch.h"
