@@ -34,7 +34,7 @@ constexpr int64_t kPoolAlignment = 256;
 
 struct Lifetime {
   size_t start; // first write (DPS outs), not the alloc index
-  size_t end;   // last use
+  size_t end;
 };
 
 bool overlaps(const Lifetime &a, const Lifetime &b) {
@@ -195,11 +195,13 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
     Location loc = domain.getLoc();
 
     llvm::ArrayRef<Value> group = groups.front();
-    Value groupSize = emitAllocByteSize(
-        builder, loc, group.front().getDefiningOp<memref::AllocOp>());
-    for (Value alloc : group.drop_front()) {
-      Value size = emitAllocByteSize(builder, loc,
-                                     alloc.getDefiningOp<memref::AllocOp>());
+    llvm::SmallVector<Value> sizes;
+    for (Value alloc : group) {
+      sizes.push_back(emitAllocByteSize(
+          builder, loc, alloc.getDefiningOp<memref::AllocOp>()));
+    }
+    Value groupSize = sizes.front();
+    for (Value size : llvm::ArrayRef<Value>(sizes).drop_front()) {
       groupSize = arith::MaxUIOp::create(builder, loc, groupSize, size);
     }
     groupSize = emitAlignUp(builder, loc, groupSize, kPoolAlignment);
