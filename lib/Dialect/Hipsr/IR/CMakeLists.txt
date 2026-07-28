@@ -12,11 +12,16 @@ add_library(HipsrDialectIR STATIC
   HipsrOps.cpp
   HipsrPoolDomainYieldOp.cpp
   HipsrPoolDomainOp.cpp
+  HipsrEmptyYieldOp.cpp
+  HipsrEmptyOp.cpp
   HipsrConstantOp.cpp
   HipsrPlaceholderOp.cpp
-  HipsrTraits.cpp
   HipsrCastOp.cpp
   HipsrMatMulOp.cpp
+  HipsrExpandOp.cpp
+  HipsrAddOp.cpp
+  HipsrGetPoolOp.cpp
+  HipsrLLVMLoweringUtils.cpp
   HipsrTypes.cpp
 )
 
@@ -30,10 +35,15 @@ add_dependencies(HipsrDialectIR
 target_link_libraries(HipsrDialectIR PUBLIC
   MLIRIR
   MLIRSupport
+  MLIRControlFlowInterfaces
+  MLIRDestinationStyleOpInterface
+  MLIRSideEffectInterfaces
   MLIRArithDialect
+  MLIRMemRefDialect
   MLIRShapeDialect
   MLIRLLVMDialect
   MLIRLLVMCommonConversion
   MLIRConvertToLLVMInterface
   MLIRTransforms
+  MLIRTensorDialect
 )

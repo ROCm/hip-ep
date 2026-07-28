@@ -112,6 +112,7 @@ Options use MLIR's pipeline-option syntax:
 | `simplify-onnx` | module | Pre-lowering ONNX cleanups (`CastLike`→`Cast`, drop dead type-donor args). |
 | `hip-add-context-arg` | module | Inject the `!hip.context` argument into functions. |
 | `onnx-loop-outline` | module | Outline `onnx.Loop` bodies into separate `func.func` ops. |
+| `onnx-if-outline` | module | Outline `onnx.If` branches before ONNX-to-HIP conversion. |
 | `hip-infer-loop-body-shapes` | module | Rank-establish unranked tensors inside outlined loop bodies. |
 | `outline-onnx-to-hipdnn` | module | Outline subgraphs targeted at hipDNN graph compilation. |
 | `convert-onnx-to-hip` | module | Pattern-match ONNX ops by name → HIP dialect; externalize large constants. |
@@ -124,8 +125,9 @@ Options use MLIR's pipeline-option syntax:
 | `hip-optimize-memrefs` | func.func | HIP-specific buffer reuse / subview folding. |
 | `hip-promote-strided-operands` | func.func | Materialize contiguous temporaries for strided memref operands of `hip.*` ops. |
 | `hip-materialize-host-scalars` | func.func | Redirect tiny host-fed scalar allocs to runtime-owned host-mapped scratch (away from the GPU pool). |
+| `hip-resolve-memref-dims` | func.func | Fold post-bufferization `memref.dim` through view/reshape chains before pool planning. |
 | `hip-hoist-alloc-size-arith` | func.func | Hoist speculatable size arithmetic above the earliest dynamic alloc (PoolAllocs precondition). |
-| `hip-pool-allocs` | func.func | Pack allocations into a single grow-on-demand GPU pool; stamp `hipdnn.pool_size`. |
+| `hip-pool-allocs` | func.func | Pack allocations into one or more grow-on-demand GPU pools; stamp pool-planning module attributes. |
 | `hip-lower-allocs` | func.func | Replace `memref.alloc`/`dealloc` with `hip.alloc`/`hip.free`. |
 | `hip-relax-multi-dyn-expand-shape` | func.func | Rewrite multi-dynamic-per-group `memref.expand_shape` → `reinterpret_cast` before strided-metadata expansion. |
 | `hip-resolve-extern-constants` | module | Resolve extern constants → `memref.view` into the constants-blob argument. |
@@ -176,6 +178,7 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   «slot: AfterSimplifyOnnx»
   hip-add-context-arg
   onnx-loop-outline
+  onnx-if-outline
   hip-infer-loop-body-shapes
   «slot: AfterOnnxLoopOutline»
   [outline-onnx-to-hipdnn + compile-hipdnn-graphs]   (handle overload only)
@@ -196,6 +199,7 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   func.func(hip-optimize-memrefs)
   func.func(hip-promote-strided-operands)
   func.func(hip-materialize-host-scalars)
+  func.func(hip-resolve-memref-dims)
   func.func(hip-hoist-alloc-size-arith)
   func.func(hip-pool-allocs)
   «slot: AfterPoolAllocs»
@@ -230,7 +234,7 @@ a fixed point without rewriting the order. Slots (see
 | Slot | Sits after / before | Typical use |
 |---|---|---|
 | `AfterSimplifyOnnx` | after `simplify-onnx` | Canonical ONNX dialect, no HIP context arg yet. |
-| `AfterOnnxLoopOutline` | after loop outlining + body shape inference | Operate on outlined ONNX loop bodies. |
+| `AfterOnnxLoopOutline` | after loop/if outlining + loop-body shape inference | Operate on outlined ONNX control-flow bodies. |
 | `AfterConvertOnnxToHip` | after `convert-onnx-to-hip` | Most common slot — lower `onnx.Custom`, vendor `hip.*` canonicalizations. |
 | `BeforeBufferization` | before `one-shot-bufferize` | Lower/canonicalize `hip.*` while still in tensor type-system. |
 | `AfterPoolAllocs` | after `hip-pool-allocs` | Analyze/transform pooled allocations (allocator tagging, etc.). |

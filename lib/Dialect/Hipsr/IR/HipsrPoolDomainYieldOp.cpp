@@ -3,13 +3,7 @@
  * Licensed under the MIT License.
  */
 
-#include "hip/Dialect/Hipsr/IR/HipsrPoolDomainYieldOp.h"
-
-// Needs the full PoolDomainOp type for the HasParent trait's generated check.
-#include "hip/Dialect/Hipsr/IR/HipsrPoolDomainOp.h"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 using namespace mlir;
 using namespace mlir::hipsr;
-
-#define GET_OP_CLASSES
-#include "hip/Dialect/Hipsr/IR/HipsrPoolDomainYieldOp.cpp.inc"
