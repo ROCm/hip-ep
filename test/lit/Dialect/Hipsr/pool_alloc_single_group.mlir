@@ -180,22 +180,3 @@ func.func @noalloc_noop(%ctx: !hipsr.context,
   } -> tensor<2x4xi64>
   return %0 : tensor<2x4xi64>
 }
-
-// -----
-
-// Overlapping lifetimes yield two groups; 9a bails without touching the IR.
-func.func @multigroup(%ctx: !hipsr.context,
-                      %in: memref<4x1024xf16, #hipsr.mem<device>>) {
-  // expected-error @+1 {{multi-group pooling not yet supported}}
-  hipsr.pool_domain(%ctx, %in : !hipsr.context, memref<4x1024xf16, #hipsr.mem<device>>) {
-  ^bb0(%dctx: !hipsr.context, %din: memref<4x1024xf16, #hipsr.mem<device>>):
-    %a1 = memref.alloc() : memref<4x1024xf16, #hipsr.mem<device>>
-    %a2 = memref.alloc() : memref<4x1024xf16, #hipsr.mem<device>>
-    hipsr.add(%dctx) ins(%din, %din : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>)
-               outs(%a1 : memref<4x1024xf16, #hipsr.mem<device>>)
-    hipsr.add(%dctx) ins(%a1, %din : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>)
-               outs(%a2 : memref<4x1024xf16, #hipsr.mem<device>>)
-    hipsr.pool_domain_yield
-  }
-  return
-}

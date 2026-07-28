@@ -212,23 +212,33 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
     }
 
     auto groups = greedyGroup(allocs, lifetimes);
-    if (groups.size() > 1) {
-      domain.emitError("hipsr-pool-alloc: multi-group pooling not yet "
-                       "supported (")
-          << groups.size() << " non-overlapping groups)";
-      signalPassFailure();
-      return;
-    }
 
     OpBuilder builder(&getContext());
     builder.setInsertionPointAfter(findLastAlloc(body));
     Location loc = domain.getLoc();
 
-    llvm::ArrayRef<Value> group = groups.front();
-    Value groupSize = emitGroupSize(builder, loc, group, kPoolAlignment);
-    Value pool = emitPool(builder, loc, ctx, groupSize);
-    Value offset = arith::ConstantIndexOp::create(builder, loc, 0);
-    replaceAllocsWithViews(builder, group, pool, offset);
+    llvm::SmallVector<Value> groupSizes;
+    for (auto &group : groups) {
+      groupSizes.push_back(emitGroupSize(builder, loc, group, kPoolAlignment));
+    }
+
+    Value poolSize = groupSizes.front();
+    for (Value gs : llvm::ArrayRef<Value>(groupSizes).drop_front()) {
+      poolSize = arith::AddIOp::create(builder, loc, poolSize, gs);
+    }
+
+    Value pool = emitPool(builder, loc, ctx, poolSize);
+
+    llvm::SmallVector<Value> offsets;
+    offsets.push_back(arith::ConstantIndexOp::create(builder, loc, 0));
+    for (size_t i = 1; i < groups.size(); ++i) {
+      offsets.push_back(arith::AddIOp::create(builder, loc, offsets[i - 1],
+                                              groupSizes[i - 1]));
+    }
+
+    for (size_t i = 0; i < groups.size(); ++i) {
+      replaceAllocsWithViews(builder, groups[i], pool, offsets[i]);
+    }
   }
 };
 
