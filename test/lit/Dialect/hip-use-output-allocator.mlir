@@ -187,16 +187,18 @@ func.func @return_order(%ctx: !hip.context, %M: index) -> (memref<4xf16>, memref
   return %b, %a : memref<4xf16>, memref<?xf16>
 }
 
-// --- Output returned through memref.collapse_shape: the alloc still becomes
-//     hip.alloc_output, and the collapse_shape stays in place feeding the
-//     return. Models a reshaped output such as a rank-4 conv result flattened
-//     to rank-2 before the return, so the buffer is owned by the EP rather than
-//     pooled. ---
+// --- Output returned through memref.collapse_shape: hip.alloc_output is created
+//     at the GRAPH-OUTPUT (returned) type, and the view chain is inverted so the
+//     producer still writes into the EP-owned buffer viewed as its original
+//     type. Models a reshaped output such as a rank-4 conv result flattened to
+//     rank-2 before the return; the EP must report the returned (rank-2) shape
+//     to ORT, not the producer's rank-4 shape. ---
 // CHECK-LABEL: func.func @collapse_output
 // CHECK-SAME:    (%[[CTX:.*]]: !hip.context)
 // CHECK-NOT:     memref.alloc
-// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]]) {out_idx = 0 : i64} : memref<1x64x56x56xf32>
-// CHECK:         %[[C:.*]] = memref.collapse_shape %[[OUT]]
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]]) {out_idx = 0 : i64} : memref<1x200704xf32>
+// CHECK:         %[[E:.*]] = memref.expand_shape %[[OUT]]
+// CHECK:         %[[C:.*]] = memref.collapse_shape %[[E]]
 // CHECK:         return %[[C]]
 func.func @collapse_output(%ctx: !hip.context) -> memref<1x200704xf32> {
   %x = memref.alloc() : memref<1x64x56x56xf32>
@@ -205,13 +207,15 @@ func.func @collapse_output(%ctx: !hip.context) -> memref<1x200704xf32> {
   return %out : memref<1x200704xf32>
 }
 
-// --- Output returned through memref.expand_shape: handled the same way as
-//     collapse_shape (the analysis follows both). ---
+// --- Output returned through memref.expand_shape: hip.alloc_output is created at
+//     the returned (rank-4) type and the view chain is inverted (collapse) so
+//     the producer writes into the EP-owned buffer viewed as its rank-2 type. ---
 // CHECK-LABEL: func.func @expand_output
 // CHECK-SAME:    (%[[CTX:.*]]: !hip.context)
 // CHECK-NOT:     memref.alloc
-// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]]) {out_idx = 0 : i64} : memref<1x200704xf32>
-// CHECK:         %[[E:.*]] = memref.expand_shape %[[OUT]]
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]]) {out_idx = 0 : i64} : memref<1x64x56x56xf32>
+// CHECK:         %[[C:.*]] = memref.collapse_shape %[[OUT]]
+// CHECK:         %[[E:.*]] = memref.expand_shape %[[C]]
 // CHECK:         return %[[E]]
 func.func @expand_output(%ctx: !hip.context) -> memref<1x64x56x56xf32> {
   %x = memref.alloc() : memref<1x200704xf32>
