@@ -2,15 +2,6 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-//===- HipsrPoolAllocPass.cpp - Lifetime-based pool allocation -----------===//
-//
-// Pools the memref.alloc buffers inside each hipsr.pool_domain: allocations
-// with disjoint lifetimes share one hipsr.get_pool byte buffer, each alloc
-// becoming a memref.view at offset 0. Lifetime start = first write (DPS outs),
-// end = last use. This pass implements the single-group case; more than one
-// non-overlapping group errors out (left to a follow-up).
-//
-//===----------------------------------------------------------------------===//
 
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
 
@@ -38,23 +29,19 @@ namespace hipsr {
 
 namespace {
 
-// Sub-buffer alignment (bytes): every pool group starts on this boundary to
-// satisfy GPU coalesced-access requirements.
+// 256 B matches GPU coalesced-access requirements.
 constexpr int64_t kPoolAlignment = 256;
 
 struct Lifetime {
-  size_t start; // op index of first write (DPS outs)
-  size_t end;   // op index of last use
+  size_t start; // first write (DPS outs), not the alloc index
+  size_t end;   // last use
 };
 
-// [start, end] intervals overlap iff NOT (a.end < b.start OR b.end < a.start).
 bool overlaps(const Lifetime &a, const Lifetime &b) {
   return !(a.end < b.start || b.end < a.start);
 }
 
-// first write = earliest DPS op using the buffer as an init/out; end = last
-// use. Returns std::nullopt for a buffer never written (dead), which the
-// caller skips.
+// nullopt when the buffer is never written (dead); the caller skips it.
 std::optional<Lifetime>
 computeLifetime(Value buffer,
                 const llvm::DenseMap<Operation *, size_t> &opIndices) {
@@ -78,8 +65,6 @@ computeLifetime(Value buffer,
   return Lifetime{start, end};
 }
 
-// Greedy grouping: allocations sorted by lifetime start are placed into the
-// first existing group with no overlap, else open a new group.
 llvm::SmallVector<llvm::SmallVector<Value>>
 greedyGroup(llvm::ArrayRef<Value> allocs,
             const llvm::DenseMap<Value, Lifetime> &lifetimes) {
@@ -113,10 +98,8 @@ greedyGroup(llvm::ArrayRef<Value> allocs,
   return groups;
 }
 
-// Byte size of an alloc = elemBytes * product(static dims) * product(dynamic
-// size operands). Built from the alloc's own dynamic-size SSA operands (defined
-// above the alloc), never from the buffer value itself, so it stays valid after
-// the alloc is replaced and erased.
+// Sizes from the alloc's dynamic-size operands (defined above the alloc), never
+// from the buffer value, so the size IR survives replacing/erasing the alloc.
 Value emitAllocByteSize(OpBuilder &builder, Location loc,
                         memref::AllocOp allocOp) {
   auto memTy = cast<MemRefType>(allocOp.getType());
@@ -133,7 +116,6 @@ Value emitAllocByteSize(OpBuilder &builder, Location loc,
   return size;
 }
 
-// alignUp(size, alignment) = ((size + alignment - 1) / alignment) * alignment.
 Value emitAlignUp(OpBuilder &builder, Location loc, Value size,
                   int64_t alignment) {
   Value alignVal = arith::ConstantIndexOp::create(builder, loc, alignment);
@@ -175,7 +157,7 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
       }
     }
 
-    // No live memref.alloc (e.g. a tensor-mode domain): leave the IR untouched.
+    // No live memref.alloc (e.g. a tensor-mode domain): nothing to pool.
     if (allocs.empty()) {
       return;
     }
@@ -196,8 +178,7 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
         break;
       }
     }
-    // get_pool requires an !hipsr.context operand; without one (an
-    // unpartitioned fixture) there is nothing this pass can anchor to, so skip.
+    // get_pool needs an !hipsr.context operand; none available, nothing to do.
     if (!ctx) {
       return;
     }
@@ -232,9 +213,8 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
 
     Value offset = arith::ConstantIndexOp::create(builder, loc, 0);
 
-    // View emission stays at the builder point (after the pool) so each view
-    // dominates the data ops that consume it; emitting at the alloc's original
-    // slot would place the view above the pool it references.
+    // Views emit here (after the pool), not at the alloc's slot: a view
+    // references the pool, so it must not sit above it.
     for (Value alloc : group) {
       auto allocOp = alloc.getDefiningOp<memref::AllocOp>();
       auto view = memref::ViewOp::create(
