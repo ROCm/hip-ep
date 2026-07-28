@@ -6,12 +6,6 @@
 // ops and the shared Hipsr_Op base class live in HipsrOps.td.
 //
 
-#ifndef HIPSR_SHAPE_YIELD_OP
-#define HIPSR_SHAPE_YIELD_OP
-
-include "mlir/Interfaces/SideEffectInterfaces.td"
-include "hip/Dialect/Hipsr/IR/HipsrOps.td"
-
 //===----------------------------------------------------------------------===//
 // Hipsr_ShapeYieldOp
 //===----------------------------------------------------------------------===//
@@ -66,5 +60,3 @@ def Hipsr_ShapeYieldOp : Hipsr_Op<"shape_yield", [Pure, Terminator]> {
     }]>
   ];
 }
-
-#endif // HIPSR_SHAPE_YIELD_OP

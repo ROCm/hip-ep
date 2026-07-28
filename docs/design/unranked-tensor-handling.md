@@ -137,7 +137,6 @@ ONNX file → ort-bridge → mlir-imp → MLIR module → onnx-to-hip-pipeline
                                                     ├─ hip-split-duplicate-dps-inits
                                                     ├─ hip-resolve-tensor-dims
                                                     ├─ one-shot-bufferize
-                                                    ├─ buffer-deallocation
                                                     ├─ hip-use-output-allocator
                                                     ├─ hip-optimize-memrefs
                                                     ├─ hip-materialize-host-scalars

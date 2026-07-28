@@ -8,14 +8,6 @@
 // and consume these forms live in later PRs.
 //
 
-#ifndef HIPSR_CONSTANT_OP
-#define HIPSR_CONSTANT_OP
-
-include "mlir/IR/OpBase.td"
-include "mlir/Interfaces/SideEffectInterfaces.td"
-include "hip/Dialect/Hipsr/IR/HipsrOps.td"
-include "hip/Dialect/Hipsr/IR/HipsrAttrs.td"
-
 //===----------------------------------------------------------------------===//
 // Hipsr_ConstantOp
 //===----------------------------------------------------------------------===//
@@ -59,10 +51,8 @@ def Hipsr_ConstantOp : Hipsr_Op<"constant", [Pure]> {
     /// Returns a typed view of the constant data (inline dense / mem source /
     /// file source via the dialect cache). MorphiZen-only contract; works both
     /// pre- and post-externalization. See the CONTRACT comment on the
-    /// definition in HipsrConstantOp.h. Defined out-of-line there.
+    /// definition in HipsrOps.h. Defined out-of-line there.
     template <typename T>
     ::llvm::ArrayRef<T> getDataValues();
   }];
 }
-
-#endif // HIPSR_CONSTANT_OP

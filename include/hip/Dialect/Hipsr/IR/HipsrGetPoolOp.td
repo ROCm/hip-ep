@@ -3,13 +3,6 @@
 // Licensed under the MIT License.
 //
 
-#ifndef HIPSR_GET_POOL_OP
-#define HIPSR_GET_POOL_OP
-
-include "mlir/IR/OpBase.td"
-include "mlir/Interfaces/SideEffectInterfaces.td"
-include "hip/Dialect/Hipsr/IR/HipsrOps.td"
-
 def Hipsr_GetPoolOp : Hipsr_Op<"get_pool",
     [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Get a runtime-owned GPU memory pool";
@@ -26,5 +19,3 @@ def Hipsr_GetPoolOp : Hipsr_Op<"get_pool",
   let results = (outs Hipsr_DeviceMemRef:$pool);
   let assemblyFormat = "`(` $ctx `,` $pool_size `)` attr-dict `:` type($pool)";
 }
-
-#endif // HIPSR_GET_POOL_OP

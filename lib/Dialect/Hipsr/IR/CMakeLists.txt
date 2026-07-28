@@ -18,6 +18,7 @@ add_library(HipsrDialectIR STATIC
   HipsrPlaceholderOp.cpp
   HipsrCastOp.cpp
   HipsrMatMulOp.cpp
+  HipsrExpandOp.cpp
   HipsrAddOp.cpp
   HipsrGetPoolOp.cpp
   HipsrLLVMLoweringUtils.cpp
@@ -38,6 +39,7 @@ target_link_libraries(HipsrDialectIR PUBLIC
   MLIRDestinationStyleOpInterface
   MLIRSideEffectInterfaces
   MLIRArithDialect
+  MLIRMemRefDialect
   MLIRShapeDialect
   MLIRLLVMDialect
   MLIRLLVMCommonConversion

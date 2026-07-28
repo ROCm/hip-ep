@@ -20,8 +20,7 @@
 
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
 
-#include "hip/Dialect/Hipsr/IR/HipsrConstantOp.h"
-#include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 #include "hip/Support/ConstantsIO.h"
 
 #include "mlir/IR/Builders.h"

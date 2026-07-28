@@ -7,12 +7,6 @@
 // shape. The shaped DPS op base class lives in HipsrOps.td.
 //
 
-#ifndef HIPSR_PLACEHOLDER_OP
-#define HIPSR_PLACEHOLDER_OP
-
-include "mlir/Interfaces/SideEffectInterfaces.td"
-include "hip/Dialect/Hipsr/IR/HipsrOps.td"
-
 //===----------------------------------------------------------------------===//
 // Hipsr_PlaceholderOp
 //===----------------------------------------------------------------------===//
@@ -51,5 +45,3 @@ def Hipsr_PlaceholderOp : Hipsr_Op<"placeholder", [Pure]> {
     }]>
   ];
 }
-
-#endif // HIPSR_PLACEHOLDER_OP

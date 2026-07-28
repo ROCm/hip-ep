@@ -3,7 +3,8 @@
  * Licensed under the MIT License.
  */
 
-#include "hip/Dialect/Hipsr/IR/HipsrGetPoolOp.h"
+#include "hip/Conversion/HipsrToLLVM/HipsrToLLVM.h"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "mlir/Conversion/LLVMCommon/MemRefBuilder.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
@@ -15,9 +16,6 @@
 
 using namespace mlir;
 using namespace mlir::hipsr;
-
-#define GET_OP_CLASSES
-#include "hip/Dialect/Hipsr/IR/HipsrGetPoolOp.cpp.inc"
 
 void GetPoolOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>

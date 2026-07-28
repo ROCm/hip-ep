@@ -563,7 +563,8 @@ def LoopBodyToOutParamsPass
     : Pass<"hip-loop-body-to-out-params", "mlir::ModuleOp"> {
   let summary = "Promote outlined hip.loop body returns to out-param ABI";
   let description = [{
-    Runs AFTER `one-shot-bufferize` and BEFORE `buffer-deallocation`.
+    Runs AFTER `one-shot-bufferize` and BEFORE the pool/lowering passes that
+    consume the out-param ABI.
 
     `onnx-loop-outline` emits each `hip.loop` body as a private
     `func.func` named `*_loop_body_*`. After bufferization those helpers
@@ -755,7 +756,7 @@ def FixLoopAccumulatorOffsetPass
     `memref.dim` to the real per-iter chunk start: `seqlens_k[iter]` (read via a
     synchronized `hip.readback_scalar` of the body's first
     `hip.gather -> memref<1xi32>`), or `iter * chunk_size` when there is no
-    seqlens gather. Only OFFSETs are touched. Runs after buffer-deallocation
+    seqlens gather. Only OFFSETs are touched. Runs after out-param promotion
     and before the pool/hoist passes. See FixLoopAccumulatorOffset.cpp for the
     matcher and a Before/After snippet.
   }];

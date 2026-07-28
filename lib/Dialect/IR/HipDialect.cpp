@@ -84,10 +84,10 @@ void AllocOutputOp::getEffects(
         &effects) {
   // Two requirements, both load-bearing:
   //   (1) NOT MemoryEffects::Allocate. The returned buffer is EP/runtime-owned
-  //       (a graph output): buffer-deallocation must never free it and
-  //       hip-pool-allocs must never pool it. Ownership is keyed on the
-  //       Allocate effect, so we deliberately omit it (unlike AllocOp/GetPoolOp
-  //       above).
+  //       (a graph output): hip-pool-allocs must never pool it, and a custom
+  //       pipeline that enables ownership-based buffer deallocation must never
+  //       free it. Ownership is keyed on the Allocate effect, so we
+  //       deliberately omit it (unlike AllocOp/GetPoolOp above).
   //   (2) A generic Write effect (no associated value) marks the side effect of
   //       calling into the EP output allocator, which mutates external runtime
   //       state. This is what keeps the op alive: an op carrying a Write is
@@ -1841,11 +1841,11 @@ void NonZeroOp::getEffects(
 // ReadbackDimOp: ins(scalar) -> index
 //===----------------------------------------------------------------------===//
 
-// Reads the device `scalar` buffer (a Read effect on the operand) plus a
-// stream synchronization. Declaring the effect gives the ownership-based
-// buffer-deallocation pass a known (non-allocating) effect for this op, and
-// the Read-after-Write against the producing kernel's write to the same buffer
+// Reads the device `scalar` buffer (a Read effect on the operand) plus a stream
+// synchronization. The Read-after-Write against the producing kernel's write
 // keeps it correctly ordered (and, with no speculatable trait, un-hoistable).
+// The known non-allocating effect also keeps this op valid if a custom pipeline
+// enables ownership-based buffer deallocation.
 void ReadbackDimOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {

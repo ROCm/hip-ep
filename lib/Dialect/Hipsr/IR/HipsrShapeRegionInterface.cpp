@@ -6,7 +6,7 @@
 #include "hip/Dialect/Hipsr/IR/HipsrShapeRegionInterface.h"
 
 #include "hip/Dialect/Hipsr/IR/HipsrEndBarrierInterface.h"
-#include "hip/Dialect/Hipsr/IR/HipsrShapeYieldOp.h"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 #include "hip/Dialect/Hipsr/IR/HipsrStartBarrierInterface.h"
 
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"

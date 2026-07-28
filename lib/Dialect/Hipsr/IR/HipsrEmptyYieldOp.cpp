@@ -3,9 +3,4 @@
  * Licensed under the MIT License.
  */
 
-#include "hip/Dialect/Hipsr/IR/HipsrEmptyYieldOp.h"
-
-#include "hip/Dialect/Hipsr/IR/HipsrEmptyOp.h"
-
-#define GET_OP_CLASSES
-#include "hip/Dialect/Hipsr/IR/HipsrEmptyYieldOp.cpp.inc"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
