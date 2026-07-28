@@ -68,3 +68,21 @@ func.func @collapse_static(%ctx: !hip.context) -> memref<1x200704xf32> {
       : memref<1x64x56x56xf32> into memref<1x200704xf32>
   return %ret : memref<1x200704xf32>
 }
+
+// DETR logits-style expand: internal rank 2, ONNX return rank 3.
+// abi_groups=[2,1] -> ext dim0 static 1, ext dim1 = internal dim0, ext dim2 = 92.
+// STAMP-LABEL: func.func @expand_logits
+// STAMP:       hip.alloc_output
+// STAMP-SAME:    hipdnn.abi_groups = array<i64: 2, 1>
+// STAMP-SAME:    hipdnn.abi_shape = array<i64: 1, -9223372036854775808, 92>
+//
+// DECOMP-LABEL: llvm.func @expand_logits
+// DECOMP:       llvm.alloca %{{.*}} x !llvm.array<3 x i64>
+// DECOMP:       %[[RANK3:.*]] = llvm.mlir.constant(3 : i64) : i64
+// DECOMP:       llvm.call @hipdnn_ep_alloc_output(%{{.*}}, %{{.*}}, %{{.*}}, %[[RANK3]], %{{.*}}) : (!llvm.ptr, i64, !llvm.ptr, i64, i64) -> !llvm.ptr
+func.func @expand_logits(%ctx: !hip.context, %n: index) -> memref<1x?x92xf16> {
+  %out = memref.alloc(%n) : memref<?x92xf16>
+  %ret = memref.expand_shape %out [[0, 1], [2]] output_shape [1, %n, 92]
+      : memref<?x92xf16> into memref<1x?x92xf16>
+  return %ret : memref<1x?x92xf16>
+}

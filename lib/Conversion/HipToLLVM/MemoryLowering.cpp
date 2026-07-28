@@ -250,7 +250,7 @@ struct GetHostScratchOpLowering
 // func.return / ONNX ABI rank when it differs from the internal memref (e.g. a
 // rank-3 compute buffer returned through collapse_shape as rank-2). That rank
 // mismatch is recorded by hip-use-output-allocator as the discardable attrs
-// `hipdnn.abi_shape` / `hipdnn.abi_groups` (see stampAbiCollapseAttrs) -- read
+// `hipdnn.abi_shape` / `hipdnn.abi_groups` (see stampAbiReshapeAttrs) -- read
 // here to re-derive each external dim from the internal alloc sizes (which
 // dominate this alloc site). The memref descriptor handed to downstream compute
 // ops still uses the op's own (internal) type.
@@ -307,52 +307,97 @@ struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
     getMemRefDescriptorSizes(loc, memRefType, adaptor.getDynamicSizes(),
                              rewriter, internalSizes, strides, sizeBytes, true);
 
-    // Runtime callback shape: the ONNX / func.return output shape, which may be
-    // a rank-reduced collapse of internalSizes. hip-use-output-allocator
-    // stamped that mapping on the op (while collapse_shape was still intact) as
-    // `hipdnn.abi_shape` (external shape; ShapedType::kDynamic per dynamic dim)
-    // + `hipdnn.abi_groups` (# internal dims folded into each external dim).
-    // Re-derive each external dim: static from the attribute, dynamic as the
-    // runtime i64 product of the internal dims it folds. Absent / malformed
-    // attrs -> internal rank/sizes verbatim (unchanged behavior).
+    // Runtime callback shape: the ONNX / func.return output shape when it
+    // differs from the internal memref rank. hip-use-output-allocator stamps
+    // `hipdnn.abi_shape` (external shape) + `hipdnn.abi_groups`:
+    //   * collapse (internal rank > external): groups[e] = # internal dims
+    //     folded into external dim e; dynamic external dims = product of those
+    //     internal sizes.
+    //   * expand (internal rank < external): groups[i] = # external dims
+    //     expanded from internal dim i; each dynamic external dim in that
+    //     group takes the corresponding internal size (static dims from attr).
+    // Absent / malformed attrs -> internal rank/sizes verbatim.
     auto abiShapeAttr = op->getAttrOfType<DenseI64ArrayAttr>(kAbiShapeAttrName);
     auto abiGroupsAttr =
         op->getAttrOfType<DenseI64ArrayAttr>(kAbiGroupsAttrName);
 
     SmallVector<Value, 4> callbackSizes;
     int64_t callbackRank = rank;
-    if (abiShapeAttr && abiGroupsAttr &&
-        abiShapeAttr.size() == abiGroupsAttr.size()) {
+    if (abiShapeAttr && abiGroupsAttr) {
       ArrayRef<int64_t> abiShape = abiShapeAttr.asArrayRef();
       ArrayRef<int64_t> abiGroups = abiGroupsAttr.asArrayRef();
-      int64_t internalDim = 0;
-      bool ok = true;
-      for (int64_t e : llvm::seq<int64_t>(0, abiShape.size())) {
-        int64_t cnt = abiGroups[e];
-        if (cnt <= 0 || internalDim + cnt > rank) {
-          ok = false; // group bookkeeping doesn't cover the internal rank.
-          break;
+      int64_t extRank = static_cast<int64_t>(abiShape.size());
+      int64_t groupsRank = static_cast<int64_t>(abiGroups.size());
+      bool ok = false;
+
+      // Collapse: one group entry per external dim.
+      if (groupsRank == extRank && extRank < rank) {
+        int64_t internalDim = 0;
+        ok = true;
+        for (int64_t e : llvm::seq<int64_t>(0, extRank)) {
+          int64_t cnt = abiGroups[e];
+          if (cnt <= 0 || internalDim + cnt > rank) {
+            ok = false;
+            break;
+          }
+          Value dim;
+          if (!ShapedType::isDynamic(abiShape[e])) {
+            dim = LLVM::ConstantOp::create(
+                rewriter, loc, i64Type,
+                rewriter.getI64IntegerAttr(abiShape[e]));
+          } else {
+            dim = internalSizes[internalDim];
+            for (int64_t j : llvm::seq<int64_t>(1, cnt))
+              dim = LLVM::MulOp::create(rewriter, loc, dim,
+                                        internalSizes[internalDim + j]);
+          }
+          callbackSizes.push_back(dim);
+          internalDim += cnt;
         }
-        Value dim;
-        if (!ShapedType::isDynamic(abiShape[e])) {
-          // Static external dim: the folded product is compile-time known.
-          dim = LLVM::ConstantOp::create(
-              rewriter, loc, i64Type, rewriter.getI64IntegerAttr(abiShape[e]));
-        } else {
-          // Dynamic external dim: runtime product of the internal dims it
-          // folds.
-          dim = internalSizes[internalDim];
-          for (int64_t j : llvm::seq<int64_t>(1, cnt))
-            dim = LLVM::MulOp::create(rewriter, loc, dim,
-                                      internalSizes[internalDim + j]);
-        }
-        callbackSizes.push_back(dim);
-        internalDim += cnt;
+        if (ok && internalDim != rank)
+          ok = false;
+        if (ok)
+          callbackRank = extRank;
       }
-      if (ok && internalDim == rank)
-        callbackRank = static_cast<int64_t>(abiShape.size());
-      else
-        callbackSizes.clear(); // malformed -> fall through to internal rank.
+
+      // Expand: one group entry per internal dim.
+      if (!ok && groupsRank == rank && extRank > rank) {
+        int64_t externalDim = 0;
+        ok = true;
+        for (int64_t i : llvm::seq<int64_t>(0, rank)) {
+          int64_t cnt = abiGroups[i];
+          if (cnt <= 0 || externalDim + cnt > extRank) {
+            ok = false;
+            break;
+          }
+          bool usedInternal = false;
+          for (int64_t j : llvm::seq<int64_t>(0, cnt)) {
+            int64_t e = externalDim + j;
+            if (!ShapedType::isDynamic(abiShape[e])) {
+              callbackSizes.push_back(LLVM::ConstantOp::create(
+                  rewriter, loc, i64Type,
+                  rewriter.getI64IntegerAttr(abiShape[e])));
+            } else {
+              if (usedInternal) {
+                ok = false;
+                break;
+              }
+              callbackSizes.push_back(internalSizes[i]);
+              usedInternal = true;
+            }
+          }
+          if (!ok)
+            break;
+          externalDim += cnt;
+        }
+        if (ok && externalDim != extRank)
+          ok = false;
+        if (ok)
+          callbackRank = extRank;
+      }
+
+      if (!ok)
+        callbackSizes.clear();
     }
     if (callbackSizes.empty()) {
       callbackSizes.assign(internalSizes.begin(), internalSizes.end());

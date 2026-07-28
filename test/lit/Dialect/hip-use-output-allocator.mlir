@@ -209,12 +209,12 @@ func.func @collapse_output(%ctx: !hip.context) -> memref<1x200704xf32> {
   return %out : memref<1x200704xf32>
 }
 
-// --- Output returned through memref.expand_shape: handled the same way as
-//     collapse_shape (the analysis follows both). ---
+// --- Output returned through memref.expand_shape: rank-increasing view; the
+//     pass stamps abi_groups per INTERNAL dim (expand reassociation). ---
 // CHECK-LABEL: func.func @expand_output
 // CHECK-SAME:    (%[[CTX:.*]]: !hip.context)
 // CHECK-NOT:     memref.alloc
-// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]]) {out_idx = 0 : i64} : memref<1x200704xf32>
+// CHECK:         %[[OUT:.*]] = hip.alloc_output(%[[CTX]]) {hipdnn.abi_groups = array<i64: 1, 3>, hipdnn.abi_shape = array<i64: 1, 64, 56, 56>, out_idx = 0 : i64} : memref<1x200704xf32>
 // CHECK:         %[[E:.*]] = memref.expand_shape %[[OUT]]
 // CHECK:         return %[[E]]
 func.func @expand_output(%ctx: !hip.context) -> memref<1x64x56x56xf32> {
@@ -310,4 +310,16 @@ func.func @subview_output(%ctx: !hip.context) -> memref<2x4xf32, strided<[8, 1]>
   %s = memref.subview %x[0, 0] [2, 4] [1, 1]
      : memref<4x8xf32> to memref<2x4xf32, strided<[8, 1]>>
   return %s : memref<2x4xf32, strided<[8, 1]>>
+}
+
+// --- DETR-class expand: internal rank-2 Gemm buffer, graph output rank 3.
+//     abi_groups=[2,1]: internal dim0 -> external dims [0,1]; internal dim1 ->
+//     external dim [2]. Matches PR #557 logits scenario in abi_shape style.
+// CHECK-LABEL: func.func @expand_logits_class
+// CHECK:         hip.alloc_output(%{{.*}}) {hipdnn.abi_groups = array<i64: 2, 1>, hipdnn.abi_shape = array<i64: 1, {{-?[0-9]+}}, 92>, out_idx = 0 : i64} : memref<?x92xf16>
+func.func @expand_logits_class(%ctx: !hip.context, %n: index) -> memref<1x?x92xf16> {
+  %out = memref.alloc(%n) : memref<?x92xf16>
+  %ret = memref.expand_shape %out [[0, 1], [2]] output_shape [1, %n, 92]
+       : memref<?x92xf16> into memref<1x?x92xf16>
+  return %ret : memref<1x?x92xf16>
 }

@@ -36,24 +36,23 @@ namespace mlir {
 namespace hip {
 /// Discardable attribute names stamped on `hip.alloc_output` by
 /// `hip-use-output-allocator` and consumed by `AllocOutputOpLowering`. They
-/// describe the ONNX / func.return ("ABI") output shape when it is a
-/// rank-reduced view of the internal compute buffer -- e.g. a rank-3 vision
-/// buffer whose ONNX output is returned rank-2 through `memref.collapse_shape`.
+/// describe the ONNX / func.return ("ABI") output shape when it differs from
+/// the internal compute buffer rank:
+///   * **Collapse** (internal rank > external): `abi_groups` has one entry per
+///     **external** dim -- how many consecutive **internal** dims it folds.
+///   * **Expand** (internal rank < external): `abi_groups` has one entry per
+///     **internal** dim -- how many consecutive **external** dims it expands
+///     into.
 ///
-/// The mapping is captured while the collapse reassociation is still explicit,
-/// i.e. BEFORE `expand-strided-metadata` decomposes collapse_shape into
-/// reinterpret_cast + extract_strided_metadata (which erases the reassociation
-/// and re-defines the external dims *after* the alloc, so the HIP->LLVM
-/// lowering can no longer re-derive them without violating SSA dominance at the
-/// alloc site). The lowering then re-computes each external dim from the
-/// internal alloc sizes (which dominate) -- static dims from the attribute,
-/// dynamic dims as the runtime product of the internal dims they fold.
-///   kAbiShapeAttrName  : DenseI64ArrayAttr -- external shape, one entry per
-///                        external dim (ShapedType::kDynamic marks dynamic).
-///   kAbiGroupsAttrName : DenseI64ArrayAttr -- number of consecutive internal
-///                        dims folded into each external dim (contiguous
-///                        collapse reassociation; entries sum to internal
-///                        rank).
+/// The mapping is captured while the view reassociation is still explicit,
+/// i.e. BEFORE `expand-strided-metadata` decomposes the view op. The lowering
+/// re-computes each external dim from the internal alloc sizes (which
+/// dominate):
+///   kAbiShapeAttrName  : DenseI64ArrayAttr -- external (ONNX) shape.
+///   kAbiGroupsAttrName : DenseI64ArrayAttr -- reassociation group sizes; see
+///                        collapse vs expand semantics above (entries sum to
+///                        internal rank for collapse, external rank for
+///                        expand).
 inline constexpr ::llvm::StringLiteral kAbiShapeAttrName = "hipdnn.abi_shape";
 inline constexpr ::llvm::StringLiteral kAbiGroupsAttrName = "hipdnn.abi_groups";
 
