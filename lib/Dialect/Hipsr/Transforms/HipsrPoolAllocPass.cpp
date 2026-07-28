@@ -116,12 +116,13 @@ greedyGroup(llvm::ArrayRef<Value> allocs,
 }
 
 Value findContext(Block &body) {
+  Value ctx;
   for (BlockArgument arg : body.getArguments()) {
     if (isa<ContextType>(arg.getType())) {
-      return arg;
+      ctx = arg;
     }
   }
-  return {};
+  return ctx;
 }
 
 Operation *findLastAlloc(Block &body) {
@@ -134,42 +135,55 @@ Operation *findLastAlloc(Block &body) {
   return lastAlloc;
 }
 
-Value emitGroupSize(OpBuilder &builder, Location loc,
-                    llvm::ArrayRef<Value> group, int64_t alignment) {
-  llvm::SmallVector<Value> sizes;
-  for (Value alloc : group) {
-    auto allocOp = alloc.getDefiningOp<memref::AllocOp>();
-    auto memTy = cast<MemRefType>(allocOp.getType());
-    int64_t staticFactor = memTy.getElementTypeBitWidth() / 8;
-    for (int64_t dim : memTy.getShape()) {
-      if (!ShapedType::isDynamic(dim)) {
-        staticFactor *= dim;
+llvm::SmallVector<Value>
+emitGroupSizes(OpBuilder &builder, Location loc,
+               llvm::ArrayRef<llvm::SmallVector<Value>> groups,
+               int64_t alignment) {
+  llvm::SmallVector<Value> groupSizes;
+  for (llvm::ArrayRef<Value> group : groups) {
+    llvm::SmallVector<Value> sizes;
+    for (Value alloc : group) {
+      auto allocOp = alloc.getDefiningOp<memref::AllocOp>();
+      auto memTy = cast<MemRefType>(allocOp.getType());
+      int64_t staticFactor = memTy.getElementTypeBitWidth() / 8;
+      for (int64_t dim : memTy.getShape()) {
+        if (!ShapedType::isDynamic(dim)) {
+          staticFactor *= dim;
+        }
       }
+      Value size = arith::ConstantIndexOp::create(builder, loc, staticFactor);
+      for (Value dynDim : allocOp.getDynamicSizes()) {
+        size = arith::MulIOp::create(builder, loc, size, dynDim);
+      }
+      sizes.push_back(size);
     }
-    Value size = arith::ConstantIndexOp::create(builder, loc, staticFactor);
-    for (Value dynDim : allocOp.getDynamicSizes()) {
-      size = arith::MulIOp::create(builder, loc, size, dynDim);
+    Value groupSize = sizes.front();
+    for (Value size : llvm::ArrayRef<Value>(sizes).drop_front()) {
+      groupSize = arith::MaxUIOp::create(builder, loc, groupSize, size);
     }
-    sizes.push_back(size);
+    Value alignVal = arith::ConstantIndexOp::create(builder, loc, alignment);
+    Value alignMinus1 =
+        arith::ConstantIndexOp::create(builder, loc, alignment - 1);
+    Value numerator =
+        arith::AddIOp::create(builder, loc, groupSize, alignMinus1);
+    Value divided = arith::DivUIOp::create(builder, loc, numerator, alignVal);
+    groupSizes.push_back(
+        arith::MulIOp::create(builder, loc, divided, alignVal));
   }
-  Value groupSize = sizes.front();
-  for (Value size : llvm::ArrayRef<Value>(sizes).drop_front()) {
-    groupSize = arith::MaxUIOp::create(builder, loc, groupSize, size);
-  }
-  Value alignVal = arith::ConstantIndexOp::create(builder, loc, alignment);
-  Value alignMinus1 =
-      arith::ConstantIndexOp::create(builder, loc, alignment - 1);
-  Value numerator = arith::AddIOp::create(builder, loc, groupSize, alignMinus1);
-  Value divided = arith::DivUIOp::create(builder, loc, numerator, alignVal);
-  return arith::MulIOp::create(builder, loc, divided, alignVal);
+  return groupSizes;
 }
 
-Value emitPool(OpBuilder &builder, Location loc, Value ctx, Value groupSize) {
+Value emitPool(OpBuilder &builder, Location loc, Value ctx,
+               llvm::ArrayRef<Value> groupSizes) {
+  Value poolSize = groupSizes.front();
+  for (Value gs : groupSizes.drop_front()) {
+    poolSize = arith::AddIOp::create(builder, loc, poolSize, gs);
+  }
   auto deviceSpace =
       MemorySpaceAttr::get(builder.getContext(), MemorySpaceKind::Device);
   auto poolType = MemRefType::get({ShapedType::kDynamic}, builder.getI8Type(),
                                   MemRefLayoutAttrInterface{}, deviceSpace);
-  return GetPoolOp::create(builder, loc, poolType, ctx, groupSize);
+  return GetPoolOp::create(builder, loc, poolType, ctx, poolSize);
 }
 
 void replaceAllocsWithViews(OpBuilder &builder, llvm::ArrayRef<Value> group,
@@ -216,17 +230,9 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
     builder.setInsertionPointAfter(findLastAlloc(body));
     Location loc = domain.getLoc();
 
-    llvm::SmallVector<Value> groupSizes;
-    for (auto &group : groups) {
-      groupSizes.push_back(emitGroupSize(builder, loc, group, kPoolAlignment));
-    }
-
-    Value poolSize = groupSizes.front();
-    for (Value gs : llvm::ArrayRef<Value>(groupSizes).drop_front()) {
-      poolSize = arith::AddIOp::create(builder, loc, poolSize, gs);
-    }
-
-    Value pool = emitPool(builder, loc, ctx, poolSize);
+    llvm::SmallVector<Value> groupSizes =
+        emitGroupSizes(builder, loc, groups, kPoolAlignment);
+    Value pool = emitPool(builder, loc, ctx, groupSizes);
 
     llvm::SmallVector<Value> offsets;
     offsets.push_back(arith::ConstantIndexOp::create(builder, loc, 0));
@@ -235,8 +241,8 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
                                               groupSizes[i - 1]));
     }
 
-    for (size_t i = 0; i < groups.size(); ++i) {
-      replaceAllocsWithViews(builder, groups[i], pool, offsets[i]);
+    for (auto [group, offset] : llvm::zip(groups, offsets)) {
+      replaceAllocsWithViews(builder, group, pool, offset);
     }
   }
 };
