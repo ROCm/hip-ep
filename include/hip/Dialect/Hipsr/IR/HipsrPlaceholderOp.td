@@ -2,9 +2,8 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 //
-// The hipsr.placeholder op: a typed stand-in that mirrors a hipsr DPS op's
-// result type(s) so the DPS op can be built without first computing its output
-// shape. The shaped DPS op base class lives in HipsrOps.td.
+// hipsr.placeholder gives DPS ops typed init values before computing output
+// shapes.
 //
 
 //===----------------------------------------------------------------------===//
@@ -12,26 +11,23 @@
 //===----------------------------------------------------------------------===//
 
 def Hipsr_PlaceholderOp : Hipsr_Op<"placeholder"> {
-  let summary = "Typed placeholder for a hipsr DPS op's init operand(s)";
+  let summary = "Typed placeholder for hipsr DPS init operands";
   let description = [{
-    Stands in for the `outs` init operand(s) of a hipsr DPS op. It takes the DPS
-    op's result type(s) and re-emits the same type(s) as its own results, which
-    are then passed as the DPS op's init operands. This lets a DPS op be built
-    without computing its output shape first: the shape region stays the source
-    of truth for output dimensions.
+    Provides `outs` init values before a hipsr DPS op computes its output
+    shape. Each DPS init must have the same type as the matching op result, so
+    the placeholder uses the op's result types. The shape region still computes
+    the output dimensions.
 
-    The DPS verifier requires each init type to equal the matching result type,
-    and mirroring the result types makes that hold by construction. The op is
-    variadic, so one placeholder can back one multi-output DPS op (one result
-    per output). Its verifier requires each result to have exactly one use as a
-    DPS init, with every result initializing the same hipsr operation.
+    One placeholder can have several results for one multi-output DPS op. Each
+    result must be used once as a DPS init. All results must go to the same
+    hipsr op.
 
-    A placeholder represents one DPS destination and is intentionally not
-    `Pure`, so CSE cannot merge consumer-specific destinations. Pool-domain
-    partitioning moves each placeholder beside its consumer.
+    Each placeholder is tied to one DPS op. It is not `Pure`, so CSE cannot
+    merge placeholders used by different ops. The pool-domain pass moves it
+    next to the op that uses it.
 
-    `hipsr.placeholder` is transient: it has no bufferization interface, so it
-    must be replaced before bufferization runs.
+    This op is temporary. It has no bufferization interface and must be replaced
+    before bufferization.
 
     Example:
     ```mlir
@@ -46,7 +42,6 @@ def Hipsr_PlaceholderOp : Hipsr_Op<"placeholder"> {
   let hasVerifier = 1;
 
   let builders = [
-    // Pass the DPS op's result types so init and result types match.
     OpBuilder<(ins "::mlir::TypeRange":$resultTypes), [{
       $_state.addTypes(resultTypes);
     }]>

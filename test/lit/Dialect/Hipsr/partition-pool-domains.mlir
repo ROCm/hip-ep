@@ -1,12 +1,13 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// CSE before or after partitioning must preserve consumer-specific placeholders.
+// CSE before or after partitioning must not merge placeholders used by
+// different ops.
+// Every pool domain receives the function's first hipsr context argument.
 // RUN: hip-mlir-opt --split-input-file -cse -hipsr-partition-pool-domains %s | FileCheck %s
 // RUN: hip-mlir-opt --split-input-file -hipsr-partition-pool-domains -cse %s | FileCheck %s
 
-// A runtime Expand starts a second domain. Same-typed placeholders remain
-// distinct across CSE and move beside their Cast, Expand, and Add consumers.
+// Runtime Expand starts a domain.
 // CHECK-LABEL: func.func @runtime_expand_splits_domains(
 // CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<?x4xf32>,
 // CHECK-SAME: %[[SHAPE:.*]]: tensor<2xi64>)
@@ -46,8 +47,8 @@ func.func @runtime_expand_splits_domains(
 
 // -----
 
-// A shape_attr avoids a runtime shape-data read, so Expand stays in Cast's
-// domain even though broadcasting preserves a dynamic result dimension.
+// With a shape attribute, Expand needs no runtime read and stays in the current
+// domain even with a dynamic result.
 // CHECK-LABEL: func.func @shape_attr_dynamic_result_stays_in_domain(
 // CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<?x3xf32>)
 // CHECK-SAME: -> tensor<?x3xf16> {
@@ -76,7 +77,7 @@ func.func @shape_attr_dynamic_result_stays_in_domain(
 
 // -----
 
-// A DPS chain and its placeholders move into one domain.
+// A DPS chain and its placeholders share one domain.
 // CHECK-LABEL: func.func @cast_matmul_chain(
 // CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[A:.*]]: tensor<4x8xf32>, %[[B:.*]]: tensor<8x2xf16>)
 // CHECK-SAME: -> tensor<4x2xf16> {
@@ -107,12 +108,12 @@ func.func @cast_matmul_chain(
 
 // -----
 
-// Planning ignores an early placeholder and moves it beside its consumer.
+// An early placeholder moves next to the op that uses it.
 // CHECK-LABEL: func.func @deferred_dps_init(
 // CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<4x8xf32>,
 // CHECK-SAME: %[[LHS:.*]]: f32, %[[RHS:.*]]: f32) -> (tensor<4x8xf16>, f32) {
-// CHECK-NEXT: %[[DOMAIN:.*]]:2 = hipsr.pool_domain(%[[LHS]], %[[RHS]], %[[CTX]], %[[INPUT]] : f32, f32, !hipsr.context, tensor<4x8xf32>) {
-// CHECK-NEXT: ^bb0(%[[DLHS:.*]]: f32, %[[DRHS:.*]]: f32, %[[DCTX:.*]]: !hipsr.context, %[[DINPUT:.*]]: tensor<4x8xf32>):
+// CHECK-NEXT: %[[DOMAIN:.*]]:2 = hipsr.pool_domain(%[[CTX]], %[[LHS]], %[[RHS]], %[[INPUT]] : !hipsr.context, f32, f32, tensor<4x8xf32>) {
+// CHECK-NEXT: ^bb0(%[[DCTX:.*]]: !hipsr.context, %[[DLHS:.*]]: f32, %[[DRHS:.*]]: f32, %[[DINPUT:.*]]: tensor<4x8xf32>):
 // CHECK-NEXT: %[[SUM:.*]] = arith.addf %[[DLHS]], %[[DRHS]] : f32
 // CHECK-NEXT: %[[INIT:.*]] = hipsr.placeholder : tensor<4x8xf16>
 // CHECK-NEXT: %[[CAST:.*]] = hipsr.cast(%[[DCTX]]) ins(%[[DINPUT]] : tensor<4x8xf32>) outs(%[[INIT]] : tensor<4x8xf16>) : tensor<4x8xf16>
@@ -133,11 +134,12 @@ func.func @deferred_dps_init(
 
 // -----
 
-// Captured operands keep their first-use order.
+// Context is first. Other domain operands keep first-use order.
 // CHECK-LABEL: func.func @operand_order(
-// CHECK-SAME: %[[A:.*]]: i32, %[[B:.*]]: i32, %[[C:.*]]: i32) -> i32 {
-// CHECK-NEXT: %[[DOMAIN:.*]] = hipsr.pool_domain(%[[C]], %[[A]], %[[B]] : i32, i32, i32) {
-// CHECK-NEXT: ^bb0(%[[DC:.*]]: i32, %[[DA:.*]]: i32, %[[DB:.*]]: i32):
+// CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[A:.*]]: i32, %[[B:.*]]: i32,
+// CHECK-SAME: %[[C:.*]]: i32) -> i32 {
+// CHECK-NEXT: %[[DOMAIN:.*]] = hipsr.pool_domain(%[[CTX]], %[[C]], %[[A]], %[[B]] : !hipsr.context, i32, i32, i32) {
+// CHECK-NEXT: ^bb0(%[[DCTX:.*]]: !hipsr.context, %[[DC:.*]]: i32, %[[DA:.*]]: i32, %[[DB:.*]]: i32):
 // CHECK-NEXT: %[[FIRST:.*]] = arith.addi %[[DC]], %[[DA]] : i32
 // CHECK-NEXT: %[[SECOND:.*]] = arith.addi %[[FIRST]], %[[DB]] : i32
 // CHECK-NEXT: hipsr.pool_domain_yield %[[SECOND]] : i32
@@ -145,7 +147,8 @@ func.func @deferred_dps_init(
 // CHECK-NEXT: return %[[DOMAIN]] : i32
 // CHECK-NEXT: }
 
-func.func @operand_order(%a: i32, %b: i32, %c: i32) -> i32 {
+func.func @operand_order(
+    %ctx: !hipsr.context, %a: i32, %b: i32, %c: i32) -> i32 {
   %first = arith.addi %c, %a : i32
   %second = arith.addi %first, %b : i32
   return %second : i32
@@ -153,7 +156,7 @@ func.func @operand_order(%a: i32, %b: i32, %c: i32) -> i32 {
 
 // -----
 
-// Values used by a nested shape region become explicit domain inputs.
+// Values used in a nested shape region become domain inputs.
 // CHECK-LABEL: func.func @nested_shape_region(
 // CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<?x8xf32>) -> tensor<?x8xf16> {
 // CHECK-NEXT: %[[DOMAIN:.*]] = hipsr.pool_domain(%[[CTX]], %[[INPUT]] : !hipsr.context, tensor<?x8xf32>) {
@@ -192,11 +195,11 @@ func.func @nested_shape_region(%ctx: !hipsr.context,
 
 // -----
 
-// Implicit captures in descendant regions are remapped to domain arguments.
+// Nested regions use domain arguments after the split.
 // CHECK-LABEL: func.func @implicit_region_capture(
-// CHECK-SAME: %[[CAPTURE:.*]]: i32) -> i32 {
-// CHECK-NEXT: %[[DOMAIN:.*]] = hipsr.pool_domain(%[[CAPTURE]] : i32) {
-// CHECK-NEXT: ^bb0(%[[DOMAIN_CAPTURE:.*]]: i32):
+// CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[CAPTURE:.*]]: i32) -> i32 {
+// CHECK-NEXT: %[[DOMAIN:.*]] = hipsr.pool_domain(%[[CTX]], %[[CAPTURE]] : !hipsr.context, i32) {
+// CHECK-NEXT: ^bb0(%[[DOMAIN_CTX:.*]]: !hipsr.context, %[[DOMAIN_CAPTURE:.*]]: i32):
 // CHECK-NEXT: %[[REGION:.*]] = scf.execute_region -> i32 {
 // CHECK-NEXT: %[[SUM:.*]] = arith.addi %[[DOMAIN_CAPTURE]], %[[DOMAIN_CAPTURE]] : i32
 // CHECK-NEXT: scf.yield %[[SUM]] : i32
@@ -206,7 +209,8 @@ func.func @nested_shape_region(%ctx: !hipsr.context,
 // CHECK-NEXT: return %[[DOMAIN]] : i32
 // CHECK-NEXT: }
 
-func.func @implicit_region_capture(%capture: i32) -> i32 {
+func.func @implicit_region_capture(
+    %ctx: !hipsr.context, %capture: i32) -> i32 {
   %0 = scf.execute_region -> i32 {
     %1 = arith.addi %capture, %capture : i32
     scf.yield %1 : i32
@@ -216,25 +220,26 @@ func.func @implicit_region_capture(%capture: i32) -> i32 {
 
 // -----
 
-// A side-effecting operation with no result remains in its domain.
+// Side-effecting ops with no results stay in their domain.
 // CHECK-LABEL: func.func @zero_result_retained(
-// CHECK-SAME: %[[BUFFER:.*]]: memref<4xi32>, %[[VALUE:.*]]: i32, %[[INDEX:.*]]: index) {
-// CHECK-NEXT: hipsr.pool_domain(%[[VALUE]], %[[BUFFER]], %[[INDEX]] : i32, memref<4xi32>, index) {
-// CHECK-NEXT: ^bb0(%[[DVALUE:.*]]: i32, %[[DBUFFER:.*]]: memref<4xi32>, %[[DINDEX:.*]]: index):
+// CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[BUFFER:.*]]: memref<4xi32>,
+// CHECK-SAME: %[[VALUE:.*]]: i32, %[[INDEX:.*]]: index) {
+// CHECK-NEXT: hipsr.pool_domain(%[[CTX]], %[[VALUE]], %[[BUFFER]], %[[INDEX]] : !hipsr.context, i32, memref<4xi32>, index) {
+// CHECK-NEXT: ^bb0(%[[DCTX:.*]]: !hipsr.context, %[[DVALUE:.*]]: i32, %[[DBUFFER:.*]]: memref<4xi32>, %[[DINDEX:.*]]: index):
 // CHECK-NEXT: memref.store %[[DVALUE]], %[[DBUFFER]]{{\[}}%[[DINDEX]]] : memref<4xi32>
 // CHECK-NEXT: }
 // CHECK-NEXT: return
 // CHECK-NEXT: }
 
-func.func @zero_result_retained(%buffer: memref<4xi32>, %value: i32,
-                                %index: index) {
+func.func @zero_result_retained(
+    %ctx: !hipsr.context, %buffer: memref<4xi32>, %value: i32, %index: index) {
   memref.store %value, %buffer[%index] : memref<4xi32>
   return
 }
 
 // -----
 
-// An empty function is unchanged.
+// Empty functions are unchanged.
 // CHECK-LABEL: func.func @empty()
 // CHECK-NEXT: return
 // CHECK-NEXT: }
@@ -245,7 +250,7 @@ func.func @empty() {
 
 // -----
 
-// A declaration is unchanged.
+// Declarations are unchanged.
 // CHECK-LABEL: func.func private @declaration(i32) -> i32
 // CHECK-NEXT: }
 

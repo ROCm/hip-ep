@@ -3,7 +3,7 @@
 
 // RUN: hip-mlir-opt --split-input-file --verify-diagnostics %s
 
-// An unranked result is rejected by the ODS type constraint.
+// Results must be ranked tensors.
 func.func @unranked_rejected() {
   // expected-error @+1 {{op result #0 must be variadic of ranked tensor of any type values}}
   %0 = "hipsr.placeholder"() : () -> tensor<*xf16>
@@ -12,7 +12,7 @@ func.func @unranked_rejected() {
 
 // -----
 
-// A placeholder must produce at least one init value.
+// Zero-result placeholders are invalid.
 func.func @zero_result_placeholder() {
   // expected-error @+1 {{must produce at least one tensor DPS init}}
   "hipsr.placeholder"() : () -> ()
@@ -21,7 +21,7 @@ func.func @zero_result_placeholder() {
 
 // -----
 
-// Every placeholder result must be used.
+// Unused placeholder results are invalid.
 func.func @unused_placeholder() {
   // expected-error @+1 {{requires each result to have exactly one use}}
   %init = hipsr.placeholder : tensor<4x8xf16>
@@ -30,7 +30,7 @@ func.func @unused_placeholder() {
 
 // -----
 
-// A placeholder result may only be used by a destination-style operation.
+// Placeholder results must be DPS init values.
 func.func @non_dps_placeholder_use() -> tensor<?x8xf16> {
   // expected-error @+1 {{requires each result to be used as a DPS init of a hipsr operation}}
   %init = hipsr.placeholder : tensor<4x8xf16>
@@ -40,7 +40,7 @@ func.func @non_dps_placeholder_use() -> tensor<?x8xf16> {
 
 // -----
 
-// A placeholder may only initialize an operation in the hipsr dialect.
+// Placeholder results must be used by hipsr ops.
 func.func @non_hipsr_dps_use(%value: f32) -> tensor<4x8xf32> {
   // expected-error @+1 {{requires each result to be used as a DPS init of a hipsr operation}}
   %init = hipsr.placeholder : tensor<4x8xf32>
@@ -51,7 +51,7 @@ func.func @non_hipsr_dps_use(%value: f32) -> tensor<4x8xf32> {
 
 // -----
 
-// A placeholder cannot be a destination-style input.
+// A placeholder cannot be a DPS input.
 func.func @dps_input_placeholder(%ctx: !hipsr.context) -> tensor<4x8xf16> {
   // expected-error @+1 {{requires each result to be used as a DPS init of a hipsr operation}}
   %input = hipsr.placeholder : tensor<4x8xf32>
@@ -63,7 +63,7 @@ func.func @dps_input_placeholder(%ctx: !hipsr.context) -> tensor<4x8xf16> {
 
 // -----
 
-// A placeholder result cannot initialize multiple operations.
+// Each result can be a DPS init for only one op.
 func.func @shared_placeholder(%ctx: !hipsr.context,
                               %input: tensor<4x8xf32>)
     -> (tensor<4x8xf16>, tensor<4x8xf16>) {
@@ -78,7 +78,7 @@ func.func @shared_placeholder(%ctx: !hipsr.context,
 
 // -----
 
-// All results of one placeholder must initialize the same operation.
+// All results must be DPS init values for the same op.
 func.func @split_placeholder_consumers(
     %ctx: !hipsr.context, %input: tensor<4x8xf32>)
     -> (tensor<4x8xf16>, tensor<4x8xf16>) {

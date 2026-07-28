@@ -2,48 +2,90 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-//===- PartitionPoolDomains.cpp - Outline hipsr pool domains --------------===//
+//===- PartitionPoolDomains.cpp - Split hipsr pool domains ----------------===//
 //
-// Greedily partitions the non-terminator ops of a single-block function into
-// standard IsolatedFromAbove domains. An active start barrier begins a domain;
-// the first operation using an active end-barrier result begins the next.
-// The pass validates the top-level staging layout before planning and excludes
-// placeholders from boundary analysis.
+// Splits a single-block function into IsolatedFromAbove pool domains. A start
+// barrier begins a domain; the first op that uses an end-barrier result begins
+// the next. The pass checks the input before changing the IR. Placeholders do
+// not set domain boundaries.
+//
+// "hipsr.example_end_barrier" stands in for the end-barrier op that will be
+// added later.
 //
 // Before:
-//   func.func @graph(%arg: tensor<?xf32>) -> tensor<?xf32> {
-//     %init = hipsr.placeholder : tensor<?xf32>
-//     %0 = "example.compute"(%arg) : (tensor<?xf32>) -> tensor<?xf32>
-//     %1 = "hipsr.example_start_barrier"(%0, %init)
-//         : (tensor<?xf32>, tensor<?xf32>) -> tensor<?xf32>
-//     return %1 : tensor<?xf32>
+//   func.func @graph(%ctx: !hipsr.context, %input: tensor<?x4xf32>,
+//       %shape: tensor<2xi64>) -> tensor<?x4xf16> {
+//     %cast_init = hipsr.placeholder : tensor<?x4xf16>
+//     %cast = hipsr.cast(%ctx) ins(%input : tensor<?x4xf32>)
+//         outs(%cast_init : tensor<?x4xf16>) : tensor<?x4xf16>
+//     %ready = "hipsr.example_end_barrier"(%ctx, %cast)
+//         : (!hipsr.context, tensor<?x4xf16>) -> tensor<?x4xf16>
+//     %add_init = hipsr.placeholder : tensor<?x4xf16>
+//     %sum = hipsr.add(%ctx)
+//         ins(%ready, %ready : tensor<?x4xf16>, tensor<?x4xf16>)
+//         outs(%add_init : tensor<?x4xf16>) : tensor<?x4xf16>
+//     %expand_init = hipsr.placeholder : tensor<?x4xf16>
+//     %expanded = hipsr.expand(%ctx)
+//         ins(%sum, %shape : tensor<?x4xf16>, tensor<2xi64>)
+//         outs(%expand_init : tensor<?x4xf16>) : tensor<?x4xf16>
+//     %result_init = hipsr.placeholder : tensor<?x4xf16>
+//     %result = hipsr.add(%ctx)
+//         ins(%expanded, %expanded : tensor<?x4xf16>, tensor<?x4xf16>)
+//         outs(%result_init : tensor<?x4xf16>) : tensor<?x4xf16>
+//     return %result : tensor<?x4xf16>
 //   }
 //
 // After:
-//   func.func @graph(%arg: tensor<?xf32>) -> tensor<?xf32> {
-//     %0 = hipsr.pool_domain(%arg : tensor<?xf32>) {
-//     ^bb0(%domain_arg: tensor<?xf32>):
-//       %2 = "example.compute"(%domain_arg)
-//           : (tensor<?xf32>) -> tensor<?xf32>
-//       hipsr.pool_domain_yield %2 : tensor<?xf32>
-//     } -> tensor<?xf32>
-//     %1 = hipsr.pool_domain(%0 : tensor<?xf32>) {
-//     ^bb0(%domain_arg: tensor<?xf32>):
-//       %init = hipsr.placeholder : tensor<?xf32>
-//       %2 = "hipsr.example_start_barrier"(%domain_arg, %init)
-//           : (tensor<?xf32>, tensor<?xf32>) -> tensor<?xf32>
-//       hipsr.pool_domain_yield %2 : tensor<?xf32>
-//     } -> tensor<?xf32>
-//     return %1 : tensor<?xf32>
+//   func.func @graph(%ctx: !hipsr.context, %input: tensor<?x4xf32>,
+//       %shape: tensor<2xi64>) -> tensor<?x4xf16> {
+//     %0 = hipsr.pool_domain(%ctx, %input
+//         : !hipsr.context, tensor<?x4xf32>) {
+//     ^bb0(%domain_ctx: !hipsr.context,
+//          %domain_input: tensor<?x4xf32>):
+//       %cast_init = hipsr.placeholder : tensor<?x4xf16>
+//       %cast = hipsr.cast(%domain_ctx)
+//           ins(%domain_input : tensor<?x4xf32>)
+//           outs(%cast_init : tensor<?x4xf16>) : tensor<?x4xf16>
+//       %ready = "hipsr.example_end_barrier"(%domain_ctx, %cast)
+//           : (!hipsr.context, tensor<?x4xf16>) -> tensor<?x4xf16>
+//       hipsr.pool_domain_yield %ready : tensor<?x4xf16>
+//     } -> tensor<?x4xf16>
+//     %1 = hipsr.pool_domain(%ctx, %0
+//         : !hipsr.context, tensor<?x4xf16>) {
+//     ^bb0(%domain_ctx: !hipsr.context,
+//          %domain_input: tensor<?x4xf16>):
+//       %add_init = hipsr.placeholder : tensor<?x4xf16>
+//       %sum = hipsr.add(%domain_ctx)
+//           ins(%domain_input, %domain_input
+//               : tensor<?x4xf16>, tensor<?x4xf16>)
+//           outs(%add_init : tensor<?x4xf16>) : tensor<?x4xf16>
+//       hipsr.pool_domain_yield %sum : tensor<?x4xf16>
+//     } -> tensor<?x4xf16>
+//     %2 = hipsr.pool_domain(%ctx, %1, %shape
+//         : !hipsr.context, tensor<?x4xf16>, tensor<2xi64>) {
+//     ^bb0(%domain_ctx: !hipsr.context,
+//          %domain_input: tensor<?x4xf16>,
+//          %domain_shape: tensor<2xi64>):
+//       %expand_init = hipsr.placeholder : tensor<?x4xf16>
+//       %expanded = hipsr.expand(%domain_ctx)
+//           ins(%domain_input, %domain_shape
+//               : tensor<?x4xf16>, tensor<2xi64>)
+//           outs(%expand_init : tensor<?x4xf16>) : tensor<?x4xf16>
+//       %result_init = hipsr.placeholder : tensor<?x4xf16>
+//       %result = hipsr.add(%domain_ctx)
+//           ins(%expanded, %expanded : tensor<?x4xf16>, tensor<?x4xf16>)
+//           outs(%result_init : tensor<?x4xf16>) : tensor<?x4xf16>
+//       hipsr.pool_domain_yield %result : tensor<?x4xf16>
+//     } -> tensor<?x4xf16>
+//     return %2 : tensor<?x4xf16>
 //   }
 //
-// The placeholder verifier guarantees dedicated DPS-init use. A read-only
-// preflight additionally requires each placeholder and its consumer to be
-// top-level. Domain planning then considers only non-placeholder operations.
-// Materialization moves those operations into their domains, derives each
-// consumer's placeholders from its DPS init operands, and moves the
-// placeholders immediately before the consumer. MLIR's region-isolation
-// utility then derives the operands and entry-block arguments.
+// The end barrier stays in the first domain. Its first user starts the second
+// domain. Expand is a start barrier, so it starts the third domain.
+//
+// Placeholders and the ops that use them must be top-level. The pass ignores
+// placeholders while finding boundaries, then moves each one before the op
+// that uses it.
 //
 //===----------------------------------------------------------------------===//
 
@@ -96,8 +138,8 @@ static bool usesAnyEndBarrierResult(
     return true;
   }
 
-  // A region-bearing op can consume a value through an implicit nested capture
-  // even when that value is absent from the parent op's operand list.
+  // A nested region can use an end-barrier result even when its parent op has
+  // no matching operand.
   bool hasNestedUse = false;
   visitUsedValuesDefinedAbove(operation.getRegions(), [&](OpOperand *operand) {
     hasNestedUse |= endBarrierResults.contains(operand->get());
@@ -207,10 +249,7 @@ static SmallVector<Domain> partitionIntoDomains(Block &block) {
   SmallVector<Domain> domains;
   llvm::SmallDenseSet<Value, 8> endBarrierResults;
 
-  // TODO: When concrete barrier ops land, shape materialization must emit
-  // start-barrier input readbacks at domain entry and end-barrier capacity
-  // shapes before execution plus real shapes afterward. This pass only
-  // establishes the boundaries required by those computations.
+  // TODO: Add runtime shape reads and writes at these boundaries.
   for (Operation &operation : block.without_terminator()) {
     if (isa<PlaceholderOp>(operation)) {
       continue;
@@ -262,7 +301,32 @@ static void movePlaceholders(IRRewriter &rewriter, const Domain &domain) {
   }
 }
 
-static void materializeDomains(ArrayRef<Domain> domains) {
+static void putContextFirst(Value context,
+                            SmallVectorImpl<Value> &capturedValues,
+                            Block &entryBlock) {
+  if (!context) {
+    return;
+  }
+
+  auto contextIt = llvm::find(capturedValues, context);
+  if (contextIt != capturedValues.end() &&
+      contextIt == capturedValues.begin()) {
+    return;
+  }
+
+  BlockArgument contextArgument =
+      entryBlock.insertArgument(0u, context.getType(), context.getLoc());
+  if (contextIt != capturedValues.end()) {
+    unsigned contextIndex = contextIt - capturedValues.begin();
+    entryBlock.getArgument(contextIndex + 1)
+        .replaceAllUsesWith(contextArgument);
+    entryBlock.eraseArgument(contextIndex + 1);
+    capturedValues.erase(contextIt);
+  }
+  capturedValues.insert(capturedValues.begin(), context);
+}
+
+static void materializeDomains(ArrayRef<Domain> domains, Value context) {
   if (domains.empty()) {
     return;
   }
@@ -287,12 +351,13 @@ static void materializeDomains(ArrayRef<Domain> domains) {
 
     SmallVector<Value> capturedValues =
         makeRegionIsolatedFromAbove(rewriter, bodyRegion);
+    Block &entryBlock = bodyRegion.front();
+    putContextFirst(context, capturedValues, entryBlock);
     rewriter.modifyOpInPlace(
         domainOp, [&] { domainOp->insertOperands(0, capturedValues); });
 
-    Block &entryBlock = bodyRegion.front();
-    // makeRegionIsolatedFromAbove rewrites uses owned directly by this region's
-    // blocks. Remap the captured values used in descendant regions as well.
+    // makeRegionIsolatedFromAbove updates uses only in this region's blocks.
+    // Update uses in nested regions too.
     for (auto [capturedValue, argument] :
          llvm::zip_equal(capturedValues, entryBlock.getArguments())) {
       replaceAllUsesInRegionWith(capturedValue, argument, bodyRegion);
@@ -332,7 +397,12 @@ struct PartitionPoolDomainsPass
     }
 
     SmallVector<Domain> domains = partitionIntoDomains(entryBlock);
-    materializeDomains(domains);
+    Value context;
+    if (entryBlock.getNumArguments() > 0 &&
+        isa<ContextType>(entryBlock.getArgument(0).getType())) {
+      context = entryBlock.getArgument(0);
+    }
+    materializeDomains(domains, context);
   }
 };
 

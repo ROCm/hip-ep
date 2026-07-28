@@ -43,24 +43,25 @@ def PopulateShapeRegionPass
 
 def PartitionPoolDomainsPass
     : Pass<"hipsr-partition-pool-domains", "mlir::func::FuncOp"> {
-  let summary = "Partition a function into maximal hipsr pool domains";
+  let summary = "Split a function into hipsr pool domains";
   let description = [{
-    Greedily partitions the non-terminator operations of a single-block
-    function into maximal `hipsr.pool_domain` operations with standard
-    `IsolatedFromAbove` semantics. An active `StartBarrierInterface` operation
-    begins a domain. An active `EndBarrierInterface` operation remains in its
-    current domain, and the first operation consuming one of its results begins
-    the next domain.
+    Groups as many ops as possible into each `hipsr.pool_domain` in a
+    single-block function. Each domain is `IsolatedFromAbove`. An active
+    `StartBarrierInterface` op starts a domain. An active
+    `EndBarrierInterface` op stays in its domain; the first op that uses any
+    result starts the next domain.
 
-    Each top-level hipsr DPS tensor init must come from a dedicated top-level
-    `hipsr.placeholder`. Each result is used once, and all results initialize
-    the same operation. Preflight rejects nested placeholders or consumers
-    before mutation. Boundary analysis ignores placeholders; after assigning
-    data operations, the pass moves each placeholder before its consumer.
+    Each top-level hipsr DPS tensor init must come from a top-level
+    `hipsr.placeholder` used by only that op. Placeholders and the ops that use
+    them must be top-level. The pass checks this before changing the IR.
+    Placeholders do not set domain boundaries. After the split, each one moves
+    before the op that uses it.
 
-    External values enter through operands and entry-block arguments; escaping
-    values become results. Multi-block functions and existing pool domains are
-    rejected before mutation. Declarations and empty functions are unchanged.
+    If the function starts with `!hipsr.context`, every domain receives it as
+    its first operand and block argument. Other values defined outside a domain
+    also become operands and block arguments. Values used outside the domain
+    become domain results. The pass rejects multi-block functions and existing
+    pool domains before changing the IR.
   }];
   let dependentDialects = [
     "::mlir::hipsr::HipsrDialect"

@@ -3,7 +3,7 @@
 
 // RUN: hip-mlir-opt --split-input-file --verify-diagnostics -hipsr-partition-pool-domains %s
 
-// The pass only supports a single-block function body.
+// Multi-block functions are not supported.
 // expected-error @+1 {{hipsr-partition-pool-domains only supports single-block functions}}
 func.func @multi_block() {
   return
@@ -13,11 +13,11 @@ func.func @multi_block() {
 
 // -----
 
-// Repartitioning an existing pool domain is unsupported.
-func.func @existing_domain(%arg: i32) -> i32 {
+// Existing top-level domains are not supported.
+func.func @existing_domain(%ctx: !hipsr.context, %arg: i32) -> i32 {
   // expected-error @+1 {{hipsr-partition-pool-domains does not support existing pool domains}}
-  %0 = hipsr.pool_domain(%arg : i32) {
-  ^bb0(%domain_arg: i32):
+  %0 = hipsr.pool_domain(%ctx, %arg : !hipsr.context, i32) {
+  ^bb0(%domain_ctx: !hipsr.context, %domain_arg: i32):
     hipsr.pool_domain_yield %domain_arg : i32
   } -> i32
   return %0 : i32
@@ -25,12 +25,13 @@ func.func @existing_domain(%arg: i32) -> i32 {
 
 // -----
 
-// Existing pool domains are rejected at any nesting depth.
-func.func @nested_existing_domain(%arg: i32) -> i32 {
+// Existing nested domains are not supported.
+func.func @nested_existing_domain(
+    %ctx: !hipsr.context, %arg: i32) -> i32 {
   %0 = scf.execute_region -> i32 {
     // expected-error @+1 {{hipsr-partition-pool-domains does not support existing pool domains}}
-    %1 = hipsr.pool_domain(%arg : i32) {
-    ^bb0(%domain_arg: i32):
+    %1 = hipsr.pool_domain(%ctx, %arg : !hipsr.context, i32) {
+    ^bb0(%domain_ctx: !hipsr.context, %domain_arg: i32):
       hipsr.pool_domain_yield %domain_arg : i32
     } -> i32
     scf.yield %1 : i32
@@ -40,7 +41,7 @@ func.func @nested_existing_domain(%arg: i32) -> i32 {
 
 // -----
 
-// Every tensor DPS init must come from a dedicated placeholder.
+// Each tensor DPS init needs a top-level placeholder.
 func.func @non_placeholder_init(
     %ctx: !hipsr.context, %input: tensor<4x8xf32>,
     %init: tensor<4x8xf16>) -> tensor<4x8xf16> {
@@ -52,7 +53,7 @@ func.func @non_placeholder_init(
 
 // -----
 
-// Placeholders must be top-level so the pass can move them into a domain.
+// Nested placeholders are not supported.
 func.func @nested_placeholder(%ctx: !hipsr.context,
                               %input: tensor<4x8xf32>)
     -> tensor<4x8xf16> {
@@ -68,7 +69,7 @@ func.func @nested_placeholder(%ctx: !hipsr.context,
 
 // -----
 
-// A top-level placeholder's consumer must also be top-level.
+// The op that uses a placeholder must be top-level.
 func.func @nested_placeholder_consumer(%ctx: !hipsr.context,
                                        %input: tensor<4x8xf32>)
     -> tensor<4x8xf16> {
