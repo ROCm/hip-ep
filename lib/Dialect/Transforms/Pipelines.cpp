@@ -446,7 +446,23 @@ void mlir::hip::buildHipToLLVMPipeline(
   pm.addPass(createReconcileUnrealizedCastsPass());
 
   pm.addPass(createConvertHipToLLVMPass());
-
+  
+  // convert-hip-to-llvm runs applyPartialConversion, which cleans up the
+  // unrealized casts it materializes only when both the producer and every
+  // consumer of a value get converted in that same run. The upstream
+  // memref->LLVM descriptor builders (populateFinalizeMemRefToLLVMConversion
+  // Patterns) can still leave a dead `i64 -> index -> index -> i64` round-trip
+  // when lowering a dynamic-shaped result descriptor: e.g. a memref.reshape
+  // feeding a hip.matmul_nbits output whose middle dim is data-dependent
+  // (dynamic sequence length in the Gemma qmoe vision encoder) loads each
+  // dynamic size as i64 and bounces it through `index` while assembling the
+  // descriptor's sizes[]/strides[]. Those casts have no LLVM translation, so
+  // MLIR->LLVM export aborts with "LLVM Translation failed for operation:
+  // builtin.unrealized_conversion_cast". The earlier reconcile (before
+  // convert-hip-to-llvm) cannot see them because they are introduced by this
+  // pass; reconcile again here to fold the round-trips away. No-op on graphs
+  // that leave no residual casts.
+  pm.addPass(createReconcileUnrealizedCastsPass());
   mlir::hip::CompilationOptionsT compOpts;
   compOpts.constants_file = options.constantsFile;
   // convert-hip-to-llvm (above) rewrites @main_graph to the 2-arg
