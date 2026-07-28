@@ -12,6 +12,7 @@ namespace {
 // hip.gemm(handle, input_A, input_B, input_C, output, alpha, beta, transA,
 // transB, typeCode)
 struct GemmOpLowering : public ConvertOpToLLVMPattern<GemmOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GemmOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

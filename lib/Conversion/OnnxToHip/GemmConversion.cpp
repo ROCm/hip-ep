@@ -13,6 +13,7 @@ namespace {
 // ONNX Gemm -> HIP Gemm
 //===----------------------------------------------------------------------===//
 struct GemmToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GemmToHip)
   GemmToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Gemm", /*benefit=*/1, ctx) {}
   mlir::LogicalResult

@@ -103,6 +103,7 @@ static std::optional<double> getOnnxConstantScalar(mlir::Operation *constOp) {
 //===----------------------------------------------------------------------===//
 
 struct PowToMul : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(PowToMul)
   PowToMul(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Pow", /*benefit=*/2, ctx) {}
 
@@ -178,6 +179,7 @@ struct PowToMul : public mlir::RewritePattern {
 //===----------------------------------------------------------------------===//
 
 struct AveragePoolToReshapeMean : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(AveragePoolToReshapeMean)
   AveragePoolToReshapeMean(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.AveragePool", /*benefit=*/2, ctx) {}
 
@@ -405,6 +407,7 @@ struct AveragePoolToReshapeMean : public mlir::RewritePattern {
 //===----------------------------------------------------------------------===//
 
 struct BroadcastDivToMulReciprocal : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(BroadcastDivToMulReciprocal)
   BroadcastDivToMulReciprocal(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Div", /*benefit=*/2, ctx) {}
 
@@ -525,6 +528,7 @@ struct BroadcastDivToMulReciprocal : public mlir::RewritePattern {
 //   %y  = onnx.Reshape(%y2, const [-1, 1152, 1, 1, 1])
 //           : -> tensor<?x1152x1x1x1xf16>
 struct PatchEmbedConvToGemm : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(PatchEmbedConvToGemm)
   PatchEmbedConvToGemm(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Conv", /*benefit=*/2, ctx) {}
 

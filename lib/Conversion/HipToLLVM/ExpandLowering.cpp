@@ -13,6 +13,7 @@ namespace {
 //   -> wrap_expand(state, in_ptr, shape_ptr, out_ptr,
 //                  in_shape_ptr, in_rank, out_shape_ptr, out_rank, data_type)
 struct ExpandOpLowering : public ConvertOpToLLVMPattern<ExpandOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ExpandOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

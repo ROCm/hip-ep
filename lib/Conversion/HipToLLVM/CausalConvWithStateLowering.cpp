@@ -20,6 +20,7 @@ namespace {
 //                                 element_size_bytes)
 struct CausalConvWithStateOpLowering
     : public ConvertOpToLLVMPattern<CausalConvWithStateOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(CausalConvWithStateOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

@@ -43,6 +43,7 @@ namespace {
 // because pre-existing models bake the constant into the DLL.
 
 struct SizeToConstantOrHipSize : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SizeToConstantOrHipSize)
   SizeToConstantOrHipSize(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Size", /*benefit=*/1, ctx) {}
 

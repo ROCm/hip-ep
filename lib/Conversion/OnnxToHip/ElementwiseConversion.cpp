@@ -11,6 +11,7 @@ namespace {
 
 /// onnx.Add -> hip.miopen.add
 struct AddToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(AddToHip)
   AddToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Add", /*benefit=*/1, ctx) {}
 
@@ -21,6 +22,7 @@ struct AddToHip : public mlir::RewritePattern {
 
 /// onnx.Mul -> hip.mul
 struct MulToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(MulToHip)
   MulToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Mul", /*benefit=*/1, ctx) {}
 
@@ -31,6 +33,7 @@ struct MulToHip : public mlir::RewritePattern {
 
 /// onnx.Sub -> hip.sub
 struct SubToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SubToHip)
   SubToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Sub", /*benefit=*/1, ctx) {}
 

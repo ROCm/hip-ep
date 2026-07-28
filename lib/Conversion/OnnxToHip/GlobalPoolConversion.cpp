@@ -96,6 +96,7 @@ static mlir::LogicalResult buildHipGlobalPool(mlir::Operation *op,
 }
 
 struct GlobalAveragePoolToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GlobalAveragePoolToHip)
   GlobalAveragePoolToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.GlobalAveragePool", /*benefit=*/1, ctx) {}
 
@@ -108,6 +109,7 @@ struct GlobalAveragePoolToHip : public mlir::RewritePattern {
 };
 
 struct GlobalMaxPoolToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GlobalMaxPoolToHip)
   GlobalMaxPoolToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.GlobalMaxPool", /*benefit=*/1, ctx) {}
 
@@ -120,6 +122,7 @@ struct GlobalMaxPoolToHip : public mlir::RewritePattern {
 };
 
 struct GlobalLpPoolToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GlobalLpPoolToHip)
   GlobalLpPoolToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.GlobalLpPool", /*benefit=*/1, ctx) {}
 

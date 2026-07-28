@@ -41,6 +41,7 @@ namespace {
 // rows during the dequantize step.
 
 struct GatherBlockQuantizedToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GatherBlockQuantizedToHip)
   GatherBlockQuantizedToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
 

@@ -16,6 +16,7 @@ namespace {
 // over all elements of A.
 template <typename OpTy>
 struct MiopenBinaryOpLowering : public ConvertOpToLLVMPattern<OpTy> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(MiopenBinaryOpLowering)
   using ConvertOpToLLVMPattern<OpTy>::ConvertOpToLLVMPattern;
   const char *funcName;
 
@@ -88,6 +89,7 @@ struct MiopenBinaryOpLowering : public ConvertOpToLLVMPattern<OpTy> {
 // elementwise support is available.
 template <typename OpTy, HipdnnTensorOp tensorOpEnum>
 struct ElementwiseOpLowering : public ConvertOpToLLVMPattern<OpTy> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ElementwiseOpLowering)
   using ConvertOpToLLVMPattern<OpTy>::ConvertOpToLLVMPattern;
 
   LogicalResult
@@ -160,6 +162,7 @@ struct ElementwiseOpLowering : public ConvertOpToLLVMPattern<OpTy> {
 // Full 4D shapes enable runtime broadcast materialisation via hip_expand
 // before the flat hip_elementwise_sub kernel (rank <= 4, left-padded with 1).
 struct SubOpLowering : public ConvertOpToLLVMPattern<SubOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SubOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

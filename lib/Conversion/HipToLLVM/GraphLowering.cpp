@@ -13,6 +13,7 @@ namespace {
 
 template <typename OpTy>
 struct GraphRegionOpLowering : public ConvertOpToLLVMPattern<OpTy> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GraphRegionOpLowering)
   using ConvertOpToLLVMPattern<OpTy>::ConvertOpToLLVMPattern;
 
   LogicalResult
@@ -31,6 +32,7 @@ using HipblasltGraphOpLowering = GraphRegionOpLowering<HipblasltGraphOp>;
 // --- HipDNNGraphOp: hip.hipdnn_graph -> hipdnn_graph_execute(state,
 //     graph_id, num_io, uids, ptrs)
 struct HipDNNGraphOpLowering : public ConvertOpToLLVMPattern<HipDNNGraphOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(HipDNNGraphOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

@@ -12,6 +12,7 @@ namespace {
 /// onnx.Not -> hip.not
 /// Unary logical NOT: Y = !X. Input/output are bool (i1).
 struct NotToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(NotToHip)
   NotToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Not", /*benefit=*/1, ctx) {}
 

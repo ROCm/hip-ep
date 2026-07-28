@@ -11,6 +11,7 @@ namespace {
 
 /// onnx.Cast -> hip.cast
 struct CastToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(CastToHip)
   CastToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Cast", /*benefit=*/1, ctx) {}
 

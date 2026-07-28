@@ -11,6 +11,7 @@ namespace {
 
 // hip.miopen.rope(handle, q, k, cos_cache, sin_cache, start_pos)
 struct RopeOpLowering : public ConvertOpToLLVMPattern<RopeOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(RopeOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

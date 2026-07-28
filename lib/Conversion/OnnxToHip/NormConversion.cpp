@@ -53,6 +53,7 @@ inline mlir::Value getOptionalResult(mlir::Operation *op, unsigned idx) {
 
 /// onnx.Custom(SimplifiedLayerNormalization) -> hip.rms_norm
 struct SimplifiedLayerNormToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SimplifiedLayerNormToHip)
   SimplifiedLayerNormToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
 
@@ -177,6 +178,7 @@ RMSNormalizationToHip::matchAndRewrite(mlir::Operation *op,
 
 /// onnx.Custom(SkipSimplifiedLayerNormalization) -> hip.skip_rms_norm
 struct SkipSimplifiedLayerNormToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SkipSimplifiedLayerNormToHip)
   SkipSimplifiedLayerNormToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
 
@@ -358,6 +360,7 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
 /// not be revisited for lowering (see AttentionConversion.cpp:174-178 and
 /// MultiHeadAttentionConversion.cpp:40 for the same gotcha).
 struct SkipLayerNormToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SkipLayerNormToHip)
   SkipLayerNormToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
 
@@ -495,6 +498,7 @@ SkipLayerNormToHip::matchAndRewrite(mlir::Operation *op,
 /// runtime is allowed to skip computing them when the corresponding output
 /// tensor is omitted -- the lowering passes nullptr in that case.
 struct LayerNormToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LayerNormToHip)
   LayerNormToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.LayerNormalization", /*benefit=*/1, ctx) {}
 

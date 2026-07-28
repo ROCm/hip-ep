@@ -20,6 +20,7 @@ namespace {
 // `mode_id` encodes the string attribute as a small enum:
 //   0 = constant, 1 = reflect, 2 = edge, 3 = wrap.
 struct PadOpLowering : public ConvertOpToLLVMPattern<PadOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(PadOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   static int64_t modeIdFromString(StringRef m) {

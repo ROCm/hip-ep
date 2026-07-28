@@ -31,6 +31,7 @@ namespace {
 /// NaN-correct lowering would need e.g. `(A < B) || (A == B)` (extra ops) or a
 /// dedicated `<=` kernel.
 struct LessOrEqualDecompose : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LessOrEqualDecompose)
   LessOrEqualDecompose(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.LessOrEqual", /*benefit=*/1, ctx) {}
 

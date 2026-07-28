@@ -11,6 +11,7 @@ namespace {
 
 /// onnx.Equal -> hip.equal
 struct EqualToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(EqualToHip)
   EqualToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Equal", /*benefit=*/1, ctx) {}
 

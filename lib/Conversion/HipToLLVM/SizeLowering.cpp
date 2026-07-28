@@ -22,6 +22,7 @@ namespace {
 // input pointer also keeps the input memref live only as a shape source,
 // which buffer-deallocation can free aggressively.
 struct SizeOpLowering : public ConvertOpToLLVMPattern<SizeOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SizeOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

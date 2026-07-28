@@ -141,6 +141,7 @@ static mlir::Value buildReduceProdInit(mlir::PatternRewriter &rewriter,
 /// `keepdims` and `noop_with_empty_axes` through, and shares lowering with
 /// other reduction ops via the unified ReduceLowering template.
 struct ReduceProdToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ReduceProdToHip)
   ReduceProdToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.ReduceProd", /*benefit=*/1, ctx) {}
 

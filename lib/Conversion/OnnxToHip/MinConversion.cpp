@@ -15,6 +15,7 @@ namespace {
 ///   min(a, b, c) = min(min(a, b), c)
 /// Single input is identity (pass through).
 struct MinToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(MinToHip)
   MinToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Min", /*benefit=*/1, ctx) {}
 

@@ -108,6 +108,7 @@ namespace {
 /// file header for the rationale and the IR-snippet contract.
 struct RelaxMultiDynExpandShapePattern
     : public OpRewritePattern<memref::ExpandShapeOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(RelaxMultiDynExpandShapePattern)
   using OpRewritePattern::OpRewritePattern;
 
   LogicalResult matchAndRewrite(memref::ExpandShapeOp op,

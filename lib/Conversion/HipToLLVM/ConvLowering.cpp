@@ -39,6 +39,7 @@ namespace {
 // host-side typing rule in OnnxToHip (`init` tensor allocated with
 // `resultType.getElementType()`).
 struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ConvOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

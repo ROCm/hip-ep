@@ -11,6 +11,7 @@ namespace {
 
 /// onnx.Softmax -> hip.miopen.softmax
 struct SoftmaxToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SoftmaxToHip)
   SoftmaxToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Softmax", /*benefit=*/1, ctx) {}
 
@@ -42,6 +43,7 @@ SoftmaxToHip::matchAndRewrite(mlir::Operation *op,
 
 /// onnx.Sigmoid -> hip.sigmoid
 struct SigmoidToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SigmoidToHip)
   SigmoidToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Sigmoid", /*benefit=*/1, ctx) {}
 
@@ -71,6 +73,7 @@ SigmoidToHip::matchAndRewrite(mlir::Operation *op,
 
 /// onnx.Tanh -> hip.tanh
 struct TanhToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(TanhToHip)
   TanhToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Tanh", /*benefit=*/1, ctx) {}
 
@@ -102,6 +105,7 @@ TanhToHip::matchAndRewrite(mlir::Operation *op,
 
 /// onnx.Softplus -> hip.softplus
 struct SoftplusToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SoftplusToHip)
   SoftplusToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Softplus", /*benefit=*/1, ctx) {}
 
@@ -131,6 +135,7 @@ SoftplusToHip::matchAndRewrite(mlir::Operation *op,
 
 /// onnx.Gelu -> hip.gelu
 struct GeluToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GeluToHip)
   GeluToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Gelu", /*benefit=*/1, ctx) {}
 

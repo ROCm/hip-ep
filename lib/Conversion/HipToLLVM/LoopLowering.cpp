@@ -259,6 +259,7 @@ createOrGetTrampoline(OpBuilder &b, ModuleOp module, Location loc, LoopOp op,
 //===----------------------------------------------------------------------===//
 
 struct LoopOpLowering : public ConvertOpToLLVMPattern<LoopOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LoopOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

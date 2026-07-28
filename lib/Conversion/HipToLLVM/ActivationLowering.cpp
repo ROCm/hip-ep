@@ -110,6 +110,7 @@ lowerMiopenActivation(OpType op, typename OpType::Adaptor adaptor,
 //   -> wrap_miopenActivationForward(state, x, y, num_elements,
 //                                    data_type, activation_mode=SIGMOID)
 struct SigmoidOpLowering : public ConvertOpToLLVMPattern<SigmoidOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SigmoidOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
@@ -124,6 +125,7 @@ struct SigmoidOpLowering : public ConvertOpToLLVMPattern<SigmoidOp> {
 //   -> wrap_miopenActivationForward(state, x, y, num_elements,
 //                                    data_type, activation_mode=TANH)
 struct TanhOpLowering : public ConvertOpToLLVMPattern<TanhOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(TanhOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
@@ -139,6 +141,7 @@ struct TanhOpLowering : public ConvertOpToLLVMPattern<TanhOp> {
 //                                    data_type, activation_mode=SOFTPLUS)
 // Supports both static and dynamic shapes (computes num_elements at runtime).
 struct SoftplusOpLowering : public ConvertOpToLLVMPattern<SoftplusOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SoftplusOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
@@ -156,6 +159,7 @@ struct SoftplusOpLowering : public ConvertOpToLLVMPattern<SoftplusOp> {
 // Supports data types: f32, f16, bf16, f64 (per ONNX Gelu spec).
 // Supports approximate modes: "none" (erf) and "tanh".
 struct GeluOpLowering : public ConvertOpToLLVMPattern<GeluOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GeluOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
@@ -242,6 +246,7 @@ struct GeluOpLowering : public ConvertOpToLLVMPattern<GeluOp> {
 // Supports static and dynamic shapes (computes num_elements at runtime).
 // Supports data types: f32, f16, f64.
 struct LeakyReluOpLowering : public ConvertOpToLLVMPattern<LeakyReluOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LeakyReluOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
@@ -320,6 +325,7 @@ struct LeakyReluOpLowering : public ConvertOpToLLVMPattern<LeakyReluOp> {
 
 // hip.silu(handle, input, output)
 struct SiluOpLowering : public ConvertOpToLLVMPattern<SiluOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SiluOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
@@ -352,6 +358,7 @@ struct SiluOpLowering : public ConvertOpToLLVMPattern<SiluOp> {
 // Rank-generic: softmax over last dim. For 3D [B,S,D], rows = B*S, cols = D.
 struct MiopenSoftmaxOpLowering
     : public ConvertOpToLLVMPattern<MiopenSoftmaxOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(MiopenSoftmaxOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

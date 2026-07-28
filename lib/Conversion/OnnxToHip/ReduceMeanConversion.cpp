@@ -30,6 +30,7 @@ namespace {
 ///   %init = tensor.empty(%n) : tensor<?x1xf16>
 ///   %y    = hip.reduce_mean(%ctx) ins(%x, %axes) outs(%init) {keepdims = 1}
 struct ReduceMeanToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ReduceMeanToHip)
   ReduceMeanToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.ReduceMean", /*benefit=*/1, ctx) {}
 

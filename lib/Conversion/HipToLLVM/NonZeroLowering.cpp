@@ -29,6 +29,7 @@ namespace {
 // computes it directly from the output descriptor so the path is correct
 // even if the conversion ever uses a smaller upper bound.
 struct NonZeroOpLowering : public ConvertOpToLLVMPattern<NonZeroOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(NonZeroOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

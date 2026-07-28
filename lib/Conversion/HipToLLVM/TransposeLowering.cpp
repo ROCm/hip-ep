@@ -17,6 +17,7 @@ namespace {
 // the runtime treats them as host-side metadata and forwards them to the
 // transpose kernel after computing strides.
 struct TransposeOpLowering : public ConvertOpToLLVMPattern<TransposeOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(TransposeOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

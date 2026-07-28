@@ -68,6 +68,7 @@ constexpr int64_t kPoolMax = 1;
 constexpr int64_t kPoolLp = 2;
 
 struct PoolToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(PoolToHip)
   int64_t poolMode;
   PoolToHip(mlir::MLIRContext *ctx, llvm::StringRef onnxName, int64_t mode)
       : RewritePattern(onnxName, /*benefit=*/1, ctx), poolMode(mode) {}

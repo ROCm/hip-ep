@@ -29,6 +29,7 @@ namespace {
 // required.
 
 struct IdentityForward : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(IdentityForward)
   IdentityForward(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Identity", /*benefit=*/1, ctx) {}
 
