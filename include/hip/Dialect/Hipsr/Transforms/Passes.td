@@ -51,17 +51,11 @@ def PartitionPoolDomainsPass
     `EndBarrierInterface` op stays in its domain; the first op that uses any
     result starts the next domain.
 
-    Each top-level hipsr DPS tensor init must come from a top-level
-    `hipsr.placeholder` used by only that op. Placeholders and the ops that use
-    them must be top-level. The pass checks this before changing the IR.
-    Placeholders do not set domain boundaries. After the split, each one moves
-    before the op that uses it.
+    See `hipsr.placeholder` for placeholder requirements.
 
-    If the function starts with `!hipsr.context`, every domain receives it as
-    its first operand and block argument. Other values defined outside a domain
-    also become operands and block arguments. Values used outside the domain
-    become domain results. The pass rejects multi-block functions and existing
-    pool domains before changing the IR.
+    Values defined outside a domain become domain operands and block arguments.
+    Values used outside the domain become domain results. The pass rejects
+    multi-block functions and existing pool domains before changing the IR.
   }];
   let dependentDialects = [
     "::mlir::hipsr::HipsrDialect"
