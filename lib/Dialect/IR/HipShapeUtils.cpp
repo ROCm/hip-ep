@@ -134,8 +134,10 @@ mlir::hip::inferMatmulShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
 LogicalResult mlir::hip::verifyStridedBatchMatmul(
     ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
     function_ref<InFlightDiagnostic()> emitError) {
-  if (aShape.size() < 2 || bShape.size() < 2)
+  if (aShape.size() < 2 || bShape.size() < 2) {
+    emitError() << "strided-batch matmul requires rank >= 2 operands";
     return failure();
+  }
 
   ArrayRef<int64_t> aBatch = aShape.drop_back(2);
   ArrayRef<int64_t> bBatch = bShape.drop_back(2);
@@ -157,8 +159,11 @@ LogicalResult mlir::hip::verifyStridedBatchMatmul(
   }
 
   SmallVector<int64_t> outputBatch;
-  if (!OpTrait::util::getBroadcastedShape(aBatch, bBatch, outputBatch))
+  if (!OpTrait::util::getBroadcastedShape(aBatch, bBatch, outputBatch)) {
+    emitError() << "matmul batch broadcast failure: A.batch="
+                << formatShape(aBatch) << " B.batch=" << formatShape(bBatch);
     return failure();
+  }
   auto product = [](ArrayRef<int64_t> shape) {
     return std::accumulate(shape.begin(), shape.end(), int64_t{1},
                            std::multiplies<int64_t>());
@@ -289,6 +294,10 @@ FailureOr<SmallVector<OpFoldResult>> mlir::hip::reifyBroadcastResultShape(
       return failure();
     }
     bool reused = false;
+    // Reuse the first mixed shape for repeated SSA operands (e.g. x*x) so
+    // broadcastDim sees identical OpFoldResults and emits no redundant
+    // tensor.dim/cmpi/select chain. Broadcast arity is normally 2-3, so a
+    // linear scan is simpler than maintaining a side map.
     for (size_t j : llvm::seq<size_t>(0, i)) {
       if (operand == operands[j]) {
         shapes.push_back(shapes[j]);
