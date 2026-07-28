@@ -1446,7 +1446,10 @@ def Hip_MinOp : Hip_DpsOp_Broadcast<"min", /*operandGetters=*/["Lhs", "Rhs"],
   }];
 }
 
-def Hip_MaxOp : Hip_DpsOp<"max", /*traits=*/[OpStateOpInterface]> {
+def Hip_MaxOp : Hip_DpsOp_Broadcast<"max",
+                                    /*operandGetters=*/["Lhs", "Rhs"],
+                                    /*outsAccessor=*/"Output",
+                                    /*traits=*/[OpStateOpInterface]> {
   let summary = "Elementwise maximum";
 
   // OpStateOpInterface: shared OpTensorState (see hip.mul).
@@ -2552,8 +2555,7 @@ def Hip_SubOp : Hip_DpsOp_Broadcast<"sub", /*operandGetters=*/["Lhs", "Rhs"]> {
   let description = [{
     Performs elementwise subtraction: output = lhs - rhs
 
-    Both inputs must have the same shape. Broadcasting is not currently supported
-    and must be handled before conversion to HIP dialect.
+    Supports multidirectional (NumPy-style) broadcasting.
 
     Uses destination-passing style: output buffer is provided as argument.
 

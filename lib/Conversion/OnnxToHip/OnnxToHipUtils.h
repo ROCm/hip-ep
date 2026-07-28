@@ -16,6 +16,7 @@
 
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/IR/HipShapeUtils.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -26,6 +27,7 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/ReshapeOpsUtils.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
@@ -144,13 +146,51 @@ inferReduceResultType(mlir::Operation *op, mlir::Value data,
   return mlir::RankedTensorType::get(outShape, inputType.getElementType());
 }
 
+/// Build a tensor.empty with the imported result type and the dynamic sizes
+/// described by `reifiedShape`. Static reified dimensions are materialized as
+/// constant index operands when the imported type keeps that dimension
+/// dynamic; the existing `hip-infer-shapes` pass owns later type refinement.
+inline mlir::FailureOr<mlir::Value> createEmptyTensorFromReifiedShape(
+    mlir::OpBuilder &builder, mlir::Location loc,
+    mlir::RankedTensorType resultType,
+    llvm::ArrayRef<mlir::OpFoldResult> reifiedShape) {
+  if (static_cast<int64_t>(reifiedShape.size()) != resultType.getRank())
+    return mlir::failure();
+
+  llvm::SmallVector<mlir::Value> dynSizes;
+  for (int64_t dimIdx : llvm::seq<int64_t>(resultType.getRank())) {
+    std::optional<int64_t> reifiedStatic =
+        mlir::getConstantIntValue(reifiedShape[dimIdx]);
+    if (!resultType.isDynamicDim(dimIdx)) {
+      if (reifiedStatic && *reifiedStatic != resultType.getDimSize(dimIdx))
+        return mlir::failure();
+      continue;
+    }
+    dynSizes.push_back(mlir::getValueOrCreateConstantIndexOp(
+        builder, loc, reifiedShape[dimIdx]));
+  }
+  return mlir::Value(
+      mlir::tensor::EmptyOp::create(builder, loc, resultType.getShape(),
+                                    resultType.getElementType(), dynSizes));
+}
+
+/// Derive a tensor type for a synthesized intermediate from a reified shape.
+/// Constant dimensions become static; all other dimensions stay dynamic.
+inline mlir::RankedTensorType
+getTensorTypeFromReifiedShape(llvm::ArrayRef<mlir::OpFoldResult> reifiedShape,
+                              mlir::Type elementType,
+                              mlir::Attribute encoding = {}) {
+  llvm::SmallVector<int64_t> shape;
+  shape.reserve(reifiedShape.size());
+  for (mlir::OpFoldResult dim : reifiedShape)
+    shape.push_back(
+        mlir::getConstantIntValue(dim).value_or(mlir::ShapedType::kDynamic));
+  return mlir::RankedTensorType::get(shape, elementType, encoding);
+}
+
 /// Create a tensor.empty for a DPS init whose shape is the NumPy-style
-/// broadcast of \p operands. Operand shapes are right-aligned with the
-/// result. For each dynamic dimension of \p resultType, the size is taken
-/// from the first operand that truly contributes at that axis -- i.e. whose
-/// corresponding dim is not statically 1. Shorter-rank operands (left-padded
-/// with 1) and statically-1 dims are skipped. If every spanning operand is
-/// statically 1 at the axis, fall back to the first operand that spans it.
+/// broadcast of \p operands. Converter destination construction delegates to
+/// the same dialect helper used by ReifyRankedShapedTypeOpInterface.
 ///
 /// Use this for binary/multinary broadcast elementwise ops (Add, Mul, Where,
 /// ...). Do NOT use `createEmptyTensor(resultType, source)` when operands can
@@ -160,46 +200,12 @@ inline mlir::FailureOr<mlir::Value>
 createBroadcastEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
                            mlir::RankedTensorType resultType,
                            mlir::ValueRange operands) {
-  int64_t resultRank = resultType.getRank();
-  llvm::SmallVector<mlir::Value> dynSizes;
-  for (int64_t dimIdx : llvm::seq<int64_t>(resultRank)) {
-    if (!resultType.isDynamicDim(dimIdx))
-      continue;
-
-    mlir::Value chosen;
-    int64_t chosenDim = -1;
-    mlir::Value fallback;
-    int64_t fallbackDim = -1;
-    for (mlir::Value operand : operands) {
-      auto t = mlir::dyn_cast<mlir::RankedTensorType>(operand.getType());
-      if (!t)
-        continue;
-      int64_t offset = resultRank - t.getRank();
-      if (dimIdx < offset)
-        continue;
-      int64_t operandDim = dimIdx - offset;
-      if (!fallback) {
-        fallback = operand;
-        fallbackDim = operandDim;
-      }
-      if (!t.isDynamicDim(operandDim) && t.getDimSize(operandDim) == 1)
-        continue;
-      chosen = operand;
-      chosenDim = operandDim;
-      break;
-    }
-    if (!chosen) {
-      chosen = fallback;
-      chosenDim = fallbackDim;
-    }
-    if (!chosen)
-      return mlir::failure();
-    dynSizes.push_back(
-        mlir::tensor::DimOp::create(builder, loc, chosen, chosenDim));
-  }
-  return mlir::Value(
-      mlir::tensor::EmptyOp::create(builder, loc, resultType.getShape(),
-                                    resultType.getElementType(), dynSizes));
+  mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>> shape =
+      mlir::hip::reifyBroadcastResultShape(
+          builder, loc, operands, [&]() { return mlir::emitError(loc); });
+  if (mlir::failed(shape))
+    return mlir::failure();
+  return createEmptyTensorFromReifiedShape(builder, loc, resultType, *shape);
 }
 
 /// Get !hip.context from function argument 0. Returns failure if the

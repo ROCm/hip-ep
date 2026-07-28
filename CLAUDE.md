@@ -138,6 +138,15 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for PR, formatting, AI-disclosure, and co
 - Keep tiny host-written shape buffers out of the GPU pool; `hip-materialize-host-scalars` redirects them to host-mapped scratch.
 - See [docs/design/hip-shape-inference.md](docs/design/hip-shape-inference.md).
 
+### Result-shape agreement
+
+- Converter destination construction and `reifyResultShapes` must use the same `OpFoldResult` shape helper for broadcast, Gemm, and MatMul.
+- Fully dynamic broadcast uses `select(lhs == 1, rhs, lhs)`, not integer maximum: broadcasting extents 0 and 1 produces 0.
+- Rank-zero success is an empty shape carried by `FailureOr`; never use an empty vector as both success and failure.
+- Variadic Max/Min derive every pairwise intermediate rank from the shared broadcast shape.
+- MatMul uses the reified output batch product plus independent A/B strides, so either whole matrix may broadcast across the other's batches. Per-axis partial batch broadcasting is rejected because the single-stride runtime cannot represent it. New artifacts call `wrap_hipblasLtMatmul_v2`; retain the legacy wrapper for cached artifacts compiled with the old signature.
+- See [docs/design/hip-shape-inference.md](docs/design/hip-shape-inference.md).
+
 ### Allocation and memory planning
 
 - Every transient allocation must be pooled or rewritten as an output allocation. Leftover `hip.alloc`/`memref.alloc` paths are not a supported per-inference allocator strategy.

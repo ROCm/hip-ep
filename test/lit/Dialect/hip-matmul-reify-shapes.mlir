@@ -148,3 +148,30 @@ func.func @reify_dyn_static_batch_broadcast(%ctx: !hip.context,
   %d2 = tensor.dim %r, %d2_idx : tensor<?x4x16xf16>
   return %d0, %d1, %d2 : index, index, index
 }
+
+// -----
+
+// Unequal ranks: B supplies the leading batch dim, A supplies M, B supplies N.
+// CHECK-LABEL: func.func @reify_2d_3d
+// CHECK-SAME: (%{{.*}}: !hip.context, %[[A:[A-Za-z0-9_]+]]: tensor<?x4xf16>, %[[B:[A-Za-z0-9_]+]]: tensor<?x4x?xf16>
+// CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+// CHECK-DAG: %[[C2:.*]] = arith.constant 2 : index
+// CHECK-DAG: %[[BATCH:.*]] = tensor.dim %[[B]], %[[C0]]
+// CHECK-DAG: %[[M:.*]] = tensor.dim %[[A]], %[[C0]]
+// CHECK-DAG: %[[N:.*]] = tensor.dim %[[B]], %[[C2]]
+// CHECK: return %[[BATCH]], %[[M]], %[[N]]
+func.func @reify_2d_3d(%ctx: !hip.context,
+                       %a: tensor<?x4xf16>,
+                       %b: tensor<?x4x?xf16>,
+                       %c: tensor<?x?x?xf16>) -> (index, index, index) {
+  %r = hip.matmul(%ctx)
+    ins(%a, %b : tensor<?x4xf16>, tensor<?x4x?xf16>)
+    outs(%c : tensor<?x?x?xf16>) : tensor<?x?x?xf16>
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2 = arith.constant 2 : index
+  %d0 = tensor.dim %r, %c0 : tensor<?x?x?xf16>
+  %d1 = tensor.dim %r, %c1 : tensor<?x?x?xf16>
+  %d2 = tensor.dim %r, %c2 : tensor<?x?x?xf16>
+  return %d0, %d1, %d2 : index, index, index
+}

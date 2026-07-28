@@ -4,7 +4,7 @@ Licensed under the MIT License.
 -->
 # HIP dialect shape inference
 
-**Date:** 2026-07-24
+**Date:** 2026-07-28
 **Document Type:** Design
 **Status:** Implemented
 **Related:** [unranked-tensor-handling.md](unranked-tensor-handling.md), [pool-allocs-memory-planning.md](pool-allocs-memory-planning.md), [output-allocator-design.md](output-allocator-design.md), [compiler-runtime-contract.md](compiler-runtime-contract.md), [pipeline_pass_menu.md](../pipeline_pass_menu.md)
@@ -76,13 +76,14 @@ Choose the smallest mechanism that matches the operation's semantics:
 |---|---|
 | Result shape equals DPS init shape, including most multi-result DPS ops | Shared `HipDpsOpInterface` default |
 | Result shape equals a named input | `reifyElementwiseSameShape` or a small dedicated thunk |
-| NumPy-style broadcast | `Hip_DpsOp_Broadcast` and broadcast helpers |
+| NumPy-style broadcast | `Hip_DpsOp_Broadcast`, `reifyBroadcastResultShape`, and the shared converter bridge |
 | Reduction with constant axes/keepdims | `Hip_DpsOp_Reduction` and reduction helpers |
 | Permutation | `reifyTransposeByPerm` |
 | Gather/GatherND/GatherElements | Gather-specific helpers or thunks |
 | OneHot, Compress, TopK | Dedicated reification thunks |
 | Pad, Tile, Expand, Slice, Range | Fold-or-bail helpers with fallback to DPS-init shape |
-| MatMul/Gemm/MatMulNBits | Dedicated shape logic based on operand dimensions and attributes |
+| MatMul/Gemm | Shared operand-based helpers used by conversion and reification |
+| MatMulNBits | Dedicated shape logic based on A and the N attribute |
 | Attention or normalization with multiple destinations | One shape vector per DPS init unless an op supplies a dedicated thunk |
 | Convolution, pooling, or resize with converter-computed destinations | DPS-init shape, with semantic validity handled by conversion or verification |
 | Runtime-dependent count, such as NonZero | DPS-init shape; unresolved dimensions remain dynamic |
@@ -115,6 +116,47 @@ Reification returns one `OpFoldResult` for each result dimension:
 Reification is allowed to create IR at the caller's insertion point. Helpers therefore reuse operand dimensions where possible, fold constant operands and attributes, and avoid pretending that a runtime-computed extent is static. For operations whose runtime extent cannot be represented before execution, the honest result remains dynamic.
 
 Reification is per result: `reifyResultShapes` returns one shape vector for every tensor result. The number and rank of those vectors must match the operation's tensor results even when the implementation derives them from DPS init operands.
+
+### Shared converter/reification shape helpers
+
+Converter destination construction and operation reification must not
+independently implement the same shape category. Broadcast, Gemm, and MatMul
+use helpers in `HipShapeUtils` that return `FailureOr<SmallVector<OpFoldResult>>`.
+The `FailureOr` is required because a valid rank-zero result has a successful
+empty shape.
+
+Broadcast dimensions are right-aligned. Static 1 yields to the other side;
+equal non-unit static dimensions agree; dynamic/static-non-1 tightens to the
+static extent under the ONNX input contract. Two dynamic dimensions emit:
+
+```mlir
+%lhs_is_one = arith.cmpi eq, %lhs_dim, %c1 : index
+%extent = arith.select %lhs_is_one, %rhs_dim, %lhs_dim : index
+```
+
+Do not replace this with an integer maximum: broadcasting dimensions 0 and 1
+produces 0, not 1.
+
+ONNX conversion keeps the imported ranked result type and uses the shared
+`OpFoldResult`s only to populate `tensor.empty` dynamic-size operands. When a
+reified dimension is constant but the imported dimension is dynamic, the
+converter materializes a constant index size. `--hip-infer-shapes` remains the
+single owner of later type narrowing, destination rebuilding, and cast
+barriers.
+
+Variadic Max/Min derive every pairwise intermediate type from the shared
+broadcast shape. Gemm derives M/N from A/B with transpose-aware indices and
+checks optional C without using C as an extent source. MatMul broadcasts only
+the leading batch slices, then appends M from A[-2] and N from B[-1].
+
+The hipBLASLt MatMul lowering takes the batch product from the reified output
+shape and carries independent A/B batch strides. A rank-2 or all-leading-one
+operand uses stride 0, allowing the entire matrix to broadcast against a
+batched operand on the other side. Per-axis partial batch broadcasting where
+both operands contain fewer matrices than the output batch product is not yet
+representable by one constant stride and is rejected by the MatMul verifier.
+New lowering calls the versioned `wrap_hipblasLtMatmul_v2`; the legacy wrapper
+remains available so cached artifacts with the previous signature still load.
 
 ## `--hip-infer-shapes`
 
@@ -224,6 +266,8 @@ Primary regression coverage:
 | `test/lit/Dialect/hip-infer-shapes.mlir` | Module-level static-dimension refinement and cast barriers |
 | `test/lit/Dialect/hip-infer-loop-body-shapes.mlir` | Pre-conversion rank establishment |
 | `test/lit/Dialect/hip-dps-op-interface.mlir` | Shared `HipDpsOpInterface` reification |
+| `test/lit/Dialect/hip-broadcast-reify-shapes.mlir` | Broadcast dynamic SSA, zero extents, and rank-zero success |
+| `test/lit/Dialect/hip-gemm-reify-shapes.mlir` | Transpose-aware Gemm M/N reification |
 | `test/lit/Dialect/hip-matmul-reify-shapes.mlir` | Per-op reification through `--resolve-shaped-type-result-dims` |
 | `test/lit/Dialect/hip-matmul-shape-verifier.mlir` | Static MatMul shape validation |
 | `test/lit/Dialect/hip-loop-verifier.mlir` | Loop-carried type contract |
@@ -234,6 +278,7 @@ Complex operations may use dedicated files; common shape categories should exten
 ## Current limitations
 
 - ONNX MatMul rank-1 operands require promotion to rank 2 before constructing `hip.matmul`; the runtime and current verifier require rank at least 2.
+- MatMul supports whole-matrix batch broadcast (one operand's leading product is 1) and equal flattened batch counts; per-axis partial batch broadcast remains unsupported by the strided-batch runtime.
 - Converter migration to inferred-type builders is incremental; explicit result-type builders remain supported.
 - A future multi-result operation that needs custom `InferTypeOpInterface` logic may require a dedicated result-type inference implementation file.
 - Runtime-dependent extents without pre-execution SSA remain dynamic.

@@ -804,23 +804,20 @@ int wrap_hipblasLtGemm(void *handle, // hipBLASLt handle
 // MatMul operation wrapper (batched matrix multiplication)
 // Called by generated IR for onnx.MatMul lowering
 // Computes output = A @ B for each batch
-// A: [batch_count x M x K], B: [K x N] (broadcast) or [batch_count x K x N]
+// A/B may each contain one broadcast matrix or one matrix per output batch.
 // output: [batch_count x M x N]
 //
-// `b_batch_stride` is hipBLASLt's STRIDED_BATCH_OFFSET on layA when
-// `batch_count > 1`: the per-batch advance in elements through B. It MUST be:
-//   * 0   when B is a broadcast weight — one matrix reused across all
-//         batches. Includes both rank-2 `[K, N]` and rank-N
-//         `[1, ..., 1, K, N]` (any leading-dim product == 1).
-//   * K*N when B is per-batch — leading-dim product > 1, so the buffer
-//         actually holds multiple `[K, N]` matrices laid out contiguously.
-// Mis-setting this to K*N for a broadcast B causes hipBLASLt to step K*N
-// elements past the end of the weight buffer on every batch beyond the
-// first, reading uninitialised memory into the GEMM and producing wrong
-// (often NaN) outputs for batch > 0. For batch_count == 1 the value is
-// ignored. Always pass an exact stride; the compiler computes 0 vs K*N
-// at compile time when B's leading dims are static, else at runtime.
-int wrap_hipblasLtMatmul(
+// `a_batch_stride` / `b_batch_stride` are hipBLASLt's per-batch advances in
+// elements. A stride is 0 when one matrix is broadcast across all batches;
+// otherwise it is M*K for A or K*N for B.
+// Legacy wrapper retained for cached model artifacts compiled before the A
+// batch-stride parameter was added. It assumes A is per-batch.
+int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
+                         const void *B, void *output, int64_t M, int64_t N,
+                         int64_t K, int64_t batch_count, int64_t elem_size,
+                         int64_t b_batch_stride);
+
+int wrap_hipblasLtMatmul_v2(
     RuntimeState *state,
     int op_state_slot,       // per-instance op-state slot (shared algo table)
     const void *A,           // Matrix A GPU pointer
@@ -831,6 +828,7 @@ int wrap_hipblasLtMatmul(
     int64_t K,               // Columns of A / Rows of B
     int64_t batch_count,     // Number of batches
     int64_t elem_size,       // Element size in bytes (2=f16, 4=f32)
+    int64_t a_batch_stride,  // 0 = broadcast; M*K = per-batch
     int64_t b_batch_stride); // 0 = broadcast (any rank); K*N = per-batch
 
 // GroupQueryAttention operation wrapper (Full MS spec)

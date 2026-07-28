@@ -24,10 +24,10 @@ module {
 // CHECK-LABEL: llvm.func @test_matmul_rank2_b
 // CHECK-NOT: llvm.icmp
 // CHECK-NOT: llvm.select
-// CHECK: llvm.call @wrap_hipblasLtMatmul({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32
-// Verify 11 parameters:
+// CHECK: llvm.call @wrap_hipblasLtMatmul_v2({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64) -> i32
+// Verify 12 parameters:
 // - 4 pointers: state, A, B, output
-// - 6 i64: M=128, N=1024, K=4096, batch_count=1, elem_size=2, b_batch_stride=0
+// - 7 i64: M, N, K, batch_count, elem_size, A stride, B stride
 //   (B is rank-2 [K, N] = broadcast weight → stride = 0, compile-time const)
 // - 1 i32: op_state_slot (-1 here — --assign-op-state-slots not run in this RUN)
 
@@ -54,4 +54,25 @@ module {
 // CHECK-LABEL: llvm.func @test_matmul_rank3_leading_one_b
 // CHECK-NOT: llvm.icmp
 // CHECK-NOT: llvm.select
-// CHECK: llvm.call @wrap_hipblasLtMatmul({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK: llvm.call @wrap_hipblasLtMatmul_v2({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64) -> i32
+
+// ----- Rank-2 broadcast A against rank-3 B -------------------------------
+// A contains one matrix and therefore uses A stride 0. B and the output carry
+// two batches.
+
+module {
+  func.func @test_matmul_rank2_a(%ctx: !hip.context,
+                                 %A: memref<128x4096xf16, 1>,
+                                 %B: memref<2x4096x1024xf16, 1>,
+                                 %output: memref<2x128x1024xf16, 1>) {
+    hip.matmul(%ctx)
+        ins(%A, %B : memref<128x4096xf16, 1>, memref<2x4096x1024xf16, 1>)
+        outs(%output : memref<2x128x1024xf16, 1>)
+    return
+  }
+}
+
+// CHECK-LABEL: llvm.func @test_matmul_rank2_a
+// CHECK-NOT: llvm.icmp
+// CHECK-NOT: llvm.select
+// CHECK: llvm.call @wrap_hipblasLtMatmul_v2({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64) -> i32

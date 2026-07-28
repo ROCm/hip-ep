@@ -14,6 +14,12 @@ namespace {
 /// Handles variadic inputs by pairwise chaining:
 ///   min(a, b, c) = min(min(a, b), c)
 /// Single input is identity (pass through).
+///
+/// Before:
+///   %tmp = hip.min ... outs(%same_rank_as_a)
+/// After:
+///   %tmp_shape = broadcast_shape(%a, %b)
+///   %tmp = hip.min ... outs(%empty_for_tmp_shape)
 struct MinToHip : public mlir::RewritePattern {
   MinToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Min", /*benefit=*/1, ctx) {}
@@ -49,15 +55,23 @@ MinToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value accumulate = op->getOperand(0);
   for (unsigned i = 1; i < numInputs; ++i) {
     mlir::Value rhs = op->getOperand(i);
-    auto accType = mlir::cast<mlir::RankedTensorType>(accumulate.getType());
-    mlir::RankedTensorType stepResultType =
-        (i == numInputs - 1) ? resultType : accType;
+    mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>> stepShape =
+        mlir::hip::reifyBroadcastResultShape(rewriter, loc, {accumulate, rhs},
+                                             [&]() { return op->emitError(); });
+    if (mlir::failed(stepShape))
+      return mlir::failure();
 
-    mlir::FailureOr<mlir::Value> initOrFailure = createBroadcastEmptyTensor(
-        rewriter, loc, stepResultType, {accumulate, rhs});
+    bool isFinal = i == numInputs - 1;
+    mlir::RankedTensorType stepResultType =
+        isFinal ? resultType
+                : getTensorTypeFromReifiedShape(*stepShape,
+                                                resultType.getElementType());
+    mlir::FailureOr<mlir::Value> initOrFailure =
+        createEmptyTensorFromReifiedShape(rewriter, loc, stepResultType,
+                                          *stepShape);
     if (mlir::failed(initOrFailure))
       return rewriter.notifyMatchFailure(
-          op, "Min: no ranked operand spans dynamic result dim");
+          op, "Min result type is incompatible with broadcast shape");
     auto minOp = mlir::hip::MinOp::create(rewriter, loc, context, accumulate,
                                           rhs, *initOrFailure);
     accumulate = minOp->getResult(0);

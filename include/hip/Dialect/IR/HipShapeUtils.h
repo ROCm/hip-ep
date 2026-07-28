@@ -41,6 +41,14 @@ SmallVector<int64_t>
 inferMatmulShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
                  function_ref<InFlightDiagnostic()> emitError);
 
+/// Verify that MatMul's broadcasted batches are representable by one constant
+/// strided-batch offset per operand. Whole-matrix broadcast (rank 2 or all
+/// leading extents 1) and equal static batch products are supported. Partial
+/// per-axis broadcast and two nontrivial dynamic batch shapes are rejected.
+LogicalResult
+verifyStridedBatchMatmul(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
+                         function_ref<InFlightDiagnostic()> emitError);
+
 /// Verify that the actual `outs` operand shapes of a DPS HIP op match the
 /// shapes returned by `computeExpected`. `op` must implement
 /// `DestinationStyleOpInterface`.
@@ -84,15 +92,29 @@ OpFoldResult reifyDimOrConstant(OpBuilder &b, Location loc, int64_t staticDim,
 SmallVector<OpFoldResult> reifyElementwiseSameShape(OpBuilder &b, Location loc,
                                                     Value source);
 
-/// Compute the NumPy-broadcast result shape over `operands` and lift each
-/// output dim to an `OpFoldResult`. Static result dims become `IndexAttr`
-/// (no IR emitted); dynamic result dims become `tensor.dim` against
-/// whichever operand contributes the runtime extent — right-aligned, and
-/// preferring the canonical side (in-range and != 1) when multiple
-/// operands could contribute. The canonical-side preference matches the
-/// batch-dim contract in `MatmulOp::reifyResultShapes` and ensures that
-/// a future `tensor.dim` of the result folds back to the operand that
-/// actually determines the size at runtime.
+/// Compute a NumPy-broadcast result shape from already-reified operand shapes.
+/// Static extents remain `IndexAttr`; dynamic/dynamic pairs materialize the
+/// runtime broadcast rule as ordinary index SSA.
+///
+/// Before (choosing either dynamic operand is incorrect when it is 1):
+///   %lhs_dim = tensor.dim %lhs, %c0
+///   %init = tensor.empty(%lhs_dim) : tensor<?xf32>
+/// After:
+///   %lhs_dim = tensor.dim %lhs, %c0
+///   %rhs_dim = tensor.dim %rhs, %c0
+///   %lhs_is_one = arith.cmpi eq, %lhs_dim, %c1 : index
+///   %extent = arith.select %lhs_is_one, %rhs_dim, %lhs_dim : index
+///   %init = tensor.empty(%extent) : tensor<?xf32>
+///
+/// The `FailureOr` distinguishes failure from a successful rank-zero shape.
+FailureOr<SmallVector<OpFoldResult>>
+reifyBroadcastShape(OpBuilder &b, Location loc,
+                    ArrayRef<SmallVector<OpFoldResult>> inputShapes,
+                    function_ref<InFlightDiagnostic()> emitError);
+
+/// Compute the NumPy-broadcast result shape over ranked tensor `operands`.
+/// This is the ValueRange convenience wrapper around the mixed-shape helper
+/// above and uses `tensor::getMixedSizes` for each operand.
 ///
 /// Used by elementwise ops that take broadcast-shape operands and write
 /// the broadcast result into their `outs` (add, mul, sub, div, min, mod,
@@ -102,12 +124,25 @@ SmallVector<OpFoldResult> reifyElementwiseSameShape(OpBuilder &b, Location loc,
 /// and the helper handles both cases identically (it only looks at
 /// shapes).
 ///
-/// All operands must be `RankedTensorType`-typed Values (the interface
-/// contract for `reifyResultShapes` callers). Returns an empty vector
-/// if broadcast fails — verifiers should already have caught this, but
-/// reify bails defensively to avoid materializing nonsense IR.
-SmallVector<OpFoldResult> reifyBroadcastShape(OpBuilder &b, Location loc,
-                                              ValueRange operands);
+/// All operands must be `RankedTensorType`-typed Values.
+FailureOr<SmallVector<OpFoldResult>>
+reifyBroadcastResultShape(OpBuilder &b, Location loc, ValueRange operands,
+                          function_ref<InFlightDiagnostic()> emitError);
+
+/// Reify ONNX MatMul's result shape: broadcast the leading batch dimensions,
+/// append M from `A[-2]`, and append N from `B[-1]`. Rank-1 MatMul is outside
+/// the current HIP op contract.
+FailureOr<SmallVector<OpFoldResult>>
+reifyMatmulResultShape(OpBuilder &b, Location loc, Value A, Value B,
+                       function_ref<InFlightDiagnostic()> emitError);
+
+/// Reify ONNX Gemm's rank-2 `{M, N}` result using transpose-aware dimensions.
+/// Optional C is checked for static unidirectional broadcast compatibility but
+/// never supplies M or N.
+FailureOr<SmallVector<OpFoldResult>>
+reifyGemmResultShape(OpBuilder &b, Location loc, Value A, Value B,
+                     Value optionalC, int64_t transA, int64_t transB,
+                     function_ref<InFlightDiagnostic()> emitError);
 
 /// Reify the result shape of a transpose op as `output[i] = input[perm[i]]`.
 /// `perm` must be a permutation of `[0, rank-1)` and have the same length
@@ -200,15 +235,14 @@ LogicalResult reifyReductionShape(OpBuilder &b, Location loc, Value data,
 
 /// One-shot reify body for elementwise NumPy-broadcast ops (add, mul,
 /// sub, div, min, mod, equal, less, and, where, ...). Wraps
-/// `reifyBroadcastShape` with the per-op guards (no-results bail,
+/// `reifyBroadcastResultShape` with the per-op guards (no-results bail,
 /// every operand must be `RankedTensorType`) and writes the lifted
 /// dim list into `reified`.
 ///
 /// `operands` is the list of broadcast input operands in the order
 /// they should be aligned (right-aligned for NumPy broadcast).
-/// Returns `failure()` on any defensive bail or when broadcast itself
-/// fails (verifier should already have caught the latter; reify bails
-/// to avoid materializing nonsense IR).
+/// Returns `failure()` on any defensive bail or when broadcast itself fails.
+/// A successful rank-zero result writes one empty shape into `reified`.
 ///
 /// Used as the body of `Hip_DpsOp_Broadcast`'s auto-emitted reify
 /// dispatcher; see `Hip_DpsOp_Broadcast` in `HipOps.td`.

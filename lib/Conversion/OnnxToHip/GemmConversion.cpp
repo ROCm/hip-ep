@@ -11,6 +11,12 @@ namespace {
 
 //===----------------------------------------------------------------------===//
 // ONNX Gemm -> HIP Gemm
+//
+// Before:
+//   %init = tensor.empty(tensor.dim %A, 0, tensor.dim %A, 1)
+// After:
+//   %shape = gemm_shape(%A, %B, transA, transB)
+//   %init = tensor.empty(%shape.M, %shape.N)
 //===----------------------------------------------------------------------===//
 struct GemmToHip : public mlir::RewritePattern {
   GemmToHip(mlir::MLIRContext *ctx)
@@ -44,7 +50,17 @@ struct GemmToHip : public mlir::RewritePattern {
     mlir::Location loc = op->getLoc();
     auto resultType =
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    mlir::Value init = createEmptyTensor(rewriter, loc, resultType, inputA);
+    mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>> resultShape =
+        mlir::hip::reifyGemmResultShape(rewriter, loc, inputA, inputB, inputC,
+                                        transA, transB,
+                                        [&]() { return op->emitError(); });
+    if (mlir::failed(resultShape))
+      return mlir::failure();
+    mlir::FailureOr<mlir::Value> init = createEmptyTensorFromReifiedShape(
+        rewriter, loc, resultType, *resultShape);
+    if (mlir::failed(init))
+      return rewriter.notifyMatchFailure(
+          op, "Gemm result type is incompatible with inferred shape");
 
     // hip.gemm
     llvm::SmallVector<mlir::NamedAttribute> attrs;
@@ -61,7 +77,7 @@ struct GemmToHip : public mlir::RewritePattern {
     if (hasInputC) {
       operands.push_back(inputC);
     }
-    operands.push_back(init);
+    operands.push_back(*init);
     // Result type inferred from `init` via InferTypeOpInterface — DPS contract:
     // result type == outs operand type.
     auto hipOp = mlir::hip::GemmOp::create(rewriter, loc, operands, attrs);

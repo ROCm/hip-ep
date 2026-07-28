@@ -14,6 +14,12 @@ namespace {
 /// Handles variadic inputs by pairwise chaining:
 ///   max(a, b, c) = max(max(a, b), c)
 /// Single input is identity (pass through).
+///
+/// Before:
+///   %tmp = hip.max ... outs(%same_rank_as_a)
+/// After:
+///   %tmp_shape = broadcast_shape(%a, %b)
+///   %tmp = hip.max ... outs(%empty_for_tmp_shape)
 struct MaxToHip : public mlir::RewritePattern {
   MaxToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Max", /*benefit=*/1, ctx) {}
@@ -48,15 +54,25 @@ MaxToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value accumulate = op->getOperand(0);
   for (unsigned i = 1; i < numInputs; ++i) {
     mlir::Value rhs = op->getOperand(i);
-    auto accType = mlir::cast<mlir::RankedTensorType>(accumulate.getType());
-    mlir::RankedTensorType stepResultType =
-        (i == numInputs - 1) ? resultType : accType;
+    mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>> stepShape =
+        mlir::hip::reifyBroadcastResultShape(rewriter, loc, {accumulate, rhs},
+                                             [&]() { return op->emitError(); });
+    if (mlir::failed(stepShape))
+      return mlir::failure();
 
-    mlir::Value source =
-        (accType.getRank() == stepResultType.getRank()) ? accumulate : rhs;
-    mlir::Value init = createEmptyTensor(rewriter, loc, stepResultType, source);
-    auto maxOp = mlir::hip::MaxOp::create(rewriter, loc, stepResultType,
-                                          context, accumulate, rhs, init);
+    bool isFinal = i == numInputs - 1;
+    mlir::RankedTensorType stepResultType =
+        isFinal ? resultType
+                : getTensorTypeFromReifiedShape(*stepShape,
+                                                resultType.getElementType());
+    mlir::FailureOr<mlir::Value> init = createEmptyTensorFromReifiedShape(
+        rewriter, loc, stepResultType, *stepShape);
+    if (mlir::failed(init))
+      return rewriter.notifyMatchFailure(
+          op, "Max result type is incompatible with broadcast shape");
+
+    auto maxOp = mlir::hip::MaxOp::create(rewriter, loc, context, accumulate,
+                                          rhs, *init);
     accumulate = maxOp->getResult(0);
   }
 

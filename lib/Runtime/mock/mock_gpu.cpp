@@ -596,6 +596,16 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
                          const void *B, void *output, int64_t M, int64_t N,
                          int64_t K, int64_t batch_count, int64_t elem_size,
                          int64_t b_batch_stride) {
+  return wrap_hipblasLtMatmul_v2(state, op_state_slot, A, B, output, M, N, K,
+                                 batch_count, elem_size, M * K, b_batch_stride);
+}
+
+int wrap_hipblasLtMatmul_v2(RuntimeState *state, int op_state_slot,
+                            const void *A, const void *B, void *output,
+                            int64_t M, int64_t N, int64_t K,
+                            int64_t batch_count, int64_t elem_size,
+                            int64_t a_batch_stride, int64_t b_batch_stride) {
+  (void)a_batch_stride;
   (void)b_batch_stride;
   (void)op_state_slot;
   if (!state) {

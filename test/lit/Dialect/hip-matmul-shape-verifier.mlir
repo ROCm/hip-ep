@@ -136,3 +136,16 @@ func.func @matmul_tensor_mode_static(%ctx: !hip.context,
     outs(%c : tensor<2x8xf16>) : tensor<2x8xf16>
   return %r : tensor<2x8xf16>
 }
+
+// -----
+
+func.func @matmul_partial_batch_broadcast(%ctx: !hip.context,
+                                          %a: memref<2x1x4x8xf16, 1>,
+                                          %b: memref<1x3x8x16xf16, 1>,
+                                          %c: memref<2x3x4x16xf16, 1>) {
+  // expected-error @+1 {{matmul partial per-axis batch broadcast is not supported by the strided-batch runtime}}
+  hip.matmul(%ctx)
+    ins(%a, %b : memref<2x1x4x8xf16, 1>, memref<1x3x8x16xf16, 1>)
+    outs(%c : memref<2x3x4x16xf16, 1>)
+  return
+}
