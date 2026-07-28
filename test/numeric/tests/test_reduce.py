@@ -209,6 +209,24 @@ class TestReduceL2:
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=2e-2, rtol=1e-2)
 
+    def test_reduce_l2_dynamic_last_axis(self, model_runner):
+        """Dynamic batch/seq dims with last-axis L2 norm: [?, ?, 512] -> [?, ?]."""
+        tp = np_to_onnx_type(np.float16)
+        X = helper.make_tensor_value_info("X", tp, [None, None, 512])
+        axes_init = numpy_helper.from_array(np.array([-1], dtype=np.int64), name="axes")
+        Y = helper.make_tensor_value_info("Y", tp, [None, None])
+        node = helper.make_node(
+            "ReduceL2", ["X", "axes"], ["Y"], keepdims=0, noop_with_empty_axes=0
+        )
+        model = make_model_from_nodes(
+            [node], [X], [Y], initializers=[axes_init], opset=18
+        )
+        shape = [4, 8, 512]
+        rng = np.random.default_rng(503)
+        x = rng.uniform(-3.0, 3.0, shape).astype(np.float16)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=2e-2, rtol=1e-2)
+
 
 # ---------------------------------------------------------------------------
 # ReduceMax (added by qwen-vision-kernels PR)
