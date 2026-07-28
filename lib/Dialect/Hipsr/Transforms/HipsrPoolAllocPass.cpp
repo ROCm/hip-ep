@@ -6,8 +6,7 @@
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
 
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
-#include "hip/Dialect/Hipsr/IR/HipsrGetPoolOp.h"
-#include "hip/Dialect/Hipsr/IR/HipsrPoolDomainOp.h"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
