@@ -446,7 +446,7 @@ void mlir::hip::buildHipToLLVMPipeline(
   pm.addPass(createReconcileUnrealizedCastsPass());
 
   pm.addPass(createConvertHipToLLVMPass());
-  
+
   // convert-hip-to-llvm runs applyPartialConversion, which cleans up the
   // unrealized casts it materializes only when both the producer and every
   // consumer of a value get converted in that same run. The upstream
