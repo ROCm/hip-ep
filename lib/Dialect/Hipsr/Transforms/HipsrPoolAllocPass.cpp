@@ -29,19 +29,13 @@ namespace hipsr {
 
 namespace {
 
-// 256 B matches GPU coalesced-access requirements.
 constexpr int64_t kPoolAlignment = 256;
 
 struct Lifetime {
-  size_t start; // first write (DPS outs), not the alloc index
+  size_t start;
   size_t end;
 };
 
-bool overlaps(const Lifetime &a, const Lifetime &b) {
-  return !(a.end < b.start || b.end < a.start);
-}
-
-// nullopt when the buffer is never written (dead); the caller skips it.
 std::optional<Lifetime>
 computeLifetime(Value buffer,
                 const llvm::DenseMap<Operation *, size_t> &opIndices) {
@@ -65,9 +59,33 @@ computeLifetime(Value buffer,
   return Lifetime{start, end};
 }
 
+void collectAllocLifetimes(Block &body, llvm::SmallVectorImpl<Value> &allocs,
+                           llvm::DenseMap<Value, Lifetime> &lifetimes) {
+  llvm::DenseMap<Operation *, size_t> opIndices;
+  size_t idx = 0;
+  for (Operation &op : body) {
+    opIndices[&op] = idx++;
+  }
+  for (Operation &op : body) {
+    auto allocOp = dyn_cast<memref::AllocOp>(&op);
+    if (!allocOp) {
+      continue;
+    }
+    Value buffer = allocOp.getResult();
+    if (std::optional<Lifetime> lt = computeLifetime(buffer, opIndices)) {
+      allocs.push_back(buffer);
+      lifetimes[buffer] = *lt;
+    }
+  }
+}
+
 llvm::SmallVector<llvm::SmallVector<Value>>
 greedyGroup(llvm::ArrayRef<Value> allocs,
             const llvm::DenseMap<Value, Lifetime> &lifetimes) {
+  auto overlaps = [](const Lifetime &a, const Lifetime &b) {
+    return !(a.end < b.start || b.end < a.start);
+  };
+
   llvm::SmallVector<Value> ordered(allocs.begin(), allocs.end());
   llvm::sort(ordered, [&](Value a, Value b) {
     return lifetimes.lookup(a).start < lifetimes.lookup(b).start;
@@ -98,32 +116,73 @@ greedyGroup(llvm::ArrayRef<Value> allocs,
   return groups;
 }
 
-// Sizes from the alloc's dynamic-size operands (defined above the alloc), never
-// from the buffer value, so the size IR survives replacing/erasing the alloc.
-Value emitAllocByteSize(OpBuilder &builder, Location loc,
-                        memref::AllocOp allocOp) {
-  auto memTy = cast<MemRefType>(allocOp.getType());
-  int64_t staticFactor = memTy.getElementTypeBitWidth() / 8;
-  for (int64_t dim : memTy.getShape()) {
-    if (!ShapedType::isDynamic(dim)) {
-      staticFactor *= dim;
+Value findContext(Block &body) {
+  for (BlockArgument arg : body.getArguments()) {
+    if (isa<ContextType>(arg.getType())) {
+      return arg;
     }
   }
-  Value size = arith::ConstantIndexOp::create(builder, loc, staticFactor);
-  for (Value dynDim : allocOp.getDynamicSizes()) {
-    size = arith::MulIOp::create(builder, loc, size, dynDim);
-  }
-  return size;
+  return {};
 }
 
-Value emitAlignUp(OpBuilder &builder, Location loc, Value size,
-                  int64_t alignment) {
+Operation *findLastAlloc(Block &body) {
+  Operation *lastAlloc = nullptr;
+  for (Operation &op : body) {
+    if (isa<memref::AllocOp>(&op)) {
+      lastAlloc = &op;
+    }
+  }
+  return lastAlloc;
+}
+
+Value emitGroupSize(OpBuilder &builder, Location loc,
+                    llvm::ArrayRef<Value> group, int64_t alignment) {
+  llvm::SmallVector<Value> sizes;
+  for (Value alloc : group) {
+    auto allocOp = alloc.getDefiningOp<memref::AllocOp>();
+    auto memTy = cast<MemRefType>(allocOp.getType());
+    int64_t staticFactor = memTy.getElementTypeBitWidth() / 8;
+    for (int64_t dim : memTy.getShape()) {
+      if (!ShapedType::isDynamic(dim)) {
+        staticFactor *= dim;
+      }
+    }
+    Value size = arith::ConstantIndexOp::create(builder, loc, staticFactor);
+    for (Value dynDim : allocOp.getDynamicSizes()) {
+      size = arith::MulIOp::create(builder, loc, size, dynDim);
+    }
+    sizes.push_back(size);
+  }
+  Value groupSize = sizes.front();
+  for (Value size : llvm::ArrayRef<Value>(sizes).drop_front()) {
+    groupSize = arith::MaxUIOp::create(builder, loc, groupSize, size);
+  }
   Value alignVal = arith::ConstantIndexOp::create(builder, loc, alignment);
   Value alignMinus1 =
       arith::ConstantIndexOp::create(builder, loc, alignment - 1);
-  Value numerator = arith::AddIOp::create(builder, loc, size, alignMinus1);
+  Value numerator = arith::AddIOp::create(builder, loc, groupSize, alignMinus1);
   Value divided = arith::DivUIOp::create(builder, loc, numerator, alignVal);
   return arith::MulIOp::create(builder, loc, divided, alignVal);
+}
+
+Value emitPool(OpBuilder &builder, Location loc, Value ctx, Value groupSize) {
+  auto deviceSpace =
+      MemorySpaceAttr::get(builder.getContext(), MemorySpaceKind::Device);
+  auto poolType = MemRefType::get({ShapedType::kDynamic}, builder.getI8Type(),
+                                  MemRefLayoutAttrInterface{}, deviceSpace);
+  return GetPoolOp::create(builder, loc, poolType, ctx, groupSize);
+}
+
+void replaceAllocsWithViews(OpBuilder &builder, llvm::ArrayRef<Value> group,
+                            Value pool, Value offset) {
+  for (Value alloc : group) {
+    auto allocOp = alloc.getDefiningOp<memref::AllocOp>();
+    auto view = memref::ViewOp::create(
+        builder, allocOp.getLoc(), allocOp.getType(), pool, offset,
+        llvm::SmallVector<Value>(allocOp.getDynamicSizes()));
+    allocOp.replaceAllUsesWith(view.getResult());
+    allocOp.erase();
+  }
 }
 
 struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
@@ -137,28 +196,18 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
   void processDomain(PoolDomainOp domain) {
     Block &body = domain.getBody().front();
 
-    llvm::DenseMap<Operation *, size_t> opIndices;
-    size_t idx = 0;
-    for (Operation &op : body) {
-      opIndices[&op] = idx++;
-    }
-
     llvm::SmallVector<Value> allocs;
     llvm::DenseMap<Value, Lifetime> lifetimes;
-    for (Operation &op : body) {
-      auto allocOp = dyn_cast<memref::AllocOp>(&op);
-      if (!allocOp) {
-        continue;
-      }
-      Value buffer = allocOp.getResult();
-      if (std::optional<Lifetime> lt = computeLifetime(buffer, opIndices)) {
-        allocs.push_back(buffer);
-        lifetimes[buffer] = *lt;
-      }
+    collectAllocLifetimes(body, allocs, lifetimes);
+    if (allocs.empty()) {
+      return;
     }
 
-    // No live memref.alloc (e.g. a tensor-mode domain): nothing to pool.
-    if (allocs.empty()) {
+    Value ctx = findContext(body);
+    if (!ctx) {
+      domain.emitError("hipsr-pool-alloc: pool_domain has poolable allocs but "
+                       "no !hipsr.context operand");
+      signalPassFailure();
       return;
     }
 
@@ -171,60 +220,15 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
       return;
     }
 
-    Value ctx;
-    for (BlockArgument arg : body.getArguments()) {
-      if (isa<ContextType>(arg.getType())) {
-        ctx = arg;
-        break;
-      }
-    }
-    // get_pool needs an !hipsr.context operand; none available, nothing to do.
-    if (!ctx) {
-      return;
-    }
-
-    Operation *lastAlloc = nullptr;
-    for (Operation &op : body) {
-      if (isa<memref::AllocOp>(&op)) {
-        lastAlloc = &op;
-      }
-    }
-
     OpBuilder builder(&getContext());
-    builder.setInsertionPointAfter(lastAlloc);
+    builder.setInsertionPointAfter(findLastAlloc(body));
     Location loc = domain.getLoc();
 
     llvm::ArrayRef<Value> group = groups.front();
-    llvm::SmallVector<Value> sizes;
-    for (Value alloc : group) {
-      sizes.push_back(emitAllocByteSize(
-          builder, loc, alloc.getDefiningOp<memref::AllocOp>()));
-    }
-    Value groupSize = sizes.front();
-    for (Value size : llvm::ArrayRef<Value>(sizes).drop_front()) {
-      groupSize = arith::MaxUIOp::create(builder, loc, groupSize, size);
-    }
-    groupSize = emitAlignUp(builder, loc, groupSize, kPoolAlignment);
-
-    auto deviceSpace =
-        MemorySpaceAttr::get(&getContext(), MemorySpaceKind::Device);
-    auto poolType = MemRefType::get({ShapedType::kDynamic}, builder.getI8Type(),
-                                    /*layout=*/MemRefLayoutAttrInterface{},
-                                    /*memorySpace=*/deviceSpace);
-    Value pool = GetPoolOp::create(builder, loc, poolType, ctx, groupSize);
-
+    Value groupSize = emitGroupSize(builder, loc, group, kPoolAlignment);
+    Value pool = emitPool(builder, loc, ctx, groupSize);
     Value offset = arith::ConstantIndexOp::create(builder, loc, 0);
-
-    // Views emit here (after the pool), not at the alloc's slot: a view
-    // references the pool, so it must not sit above it.
-    for (Value alloc : group) {
-      auto allocOp = alloc.getDefiningOp<memref::AllocOp>();
-      auto view = memref::ViewOp::create(
-          builder, allocOp.getLoc(), allocOp.getType(), pool, offset,
-          llvm::SmallVector<Value>(allocOp.getDynamicSizes()));
-      allocOp.replaceAllUsesWith(view.getResult());
-      allocOp.erase();
-    }
+    replaceAllocsWithViews(builder, group, pool, offset);
   }
 };
 
