@@ -4,52 +4,36 @@
 // RUN: hip-mlir-opt --split-input-file %s | FileCheck %s
 // RUN: hip-mlir-opt --split-input-file -cse %s | FileCheck %s --check-prefix=CSE
 
-// -----
-// A dynamic tensor result parses and prints.
-// CHECK-LABEL: func.func @single_dynamic(
-// CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<?x?xf32>) -> tensor<?x?xf16> {
-// CHECK-NEXT: %[[INIT:.*]] = hipsr.placeholder : tensor<?x?xf16>
-// CHECK-NEXT: %[[RESULT:.*]] = hipsr.cast(%[[CTX]]) ins(%[[INPUT]] : tensor<?x?xf32>) outs(%[[INIT]] : tensor<?x?xf16>) : tensor<?x?xf16>
-// CHECK-NEXT: return %[[RESULT]] : tensor<?x?xf16>
+// Dynamic, static, and rank-0 results parse and print together.
+// CHECK-LABEL: func.func @tensor_forms(
+// CHECK-SAME: %[[CTX:.*]]: !hipsr.context,
+// CHECK-SAME: %[[DYNAMIC_INPUT:.*]]: tensor<?x?xf32>,
+// CHECK-SAME: %[[STATIC_INPUT:.*]]: tensor<4x8xf32>,
+// CHECK-SAME: %[[SCALAR_INPUT:.*]]: tensor<f32>)
+// CHECK-SAME: -> (tensor<?x?xf16>, tensor<4x8xi64>, tensor<f16>) {
+// CHECK-NEXT: %[[DYNAMIC_INIT:.*]] = hipsr.placeholder : tensor<?x?xf16>
+// CHECK-NEXT: %[[DYNAMIC_RESULT:.*]] = hipsr.cast(%[[CTX]]) ins(%[[DYNAMIC_INPUT]] : tensor<?x?xf32>) outs(%[[DYNAMIC_INIT]] : tensor<?x?xf16>) : tensor<?x?xf16>
+// CHECK-NEXT: %[[STATIC_INIT:.*]] = hipsr.placeholder : tensor<4x8xi64>
+// CHECK-NEXT: %[[STATIC_RESULT:.*]] = hipsr.cast(%[[CTX]]) ins(%[[STATIC_INPUT]] : tensor<4x8xf32>) outs(%[[STATIC_INIT]] : tensor<4x8xi64>) : tensor<4x8xi64>
+// CHECK-NEXT: %[[SCALAR_INIT:.*]] = hipsr.placeholder : tensor<f16>
+// CHECK-NEXT: %[[SCALAR_RESULT:.*]] = hipsr.cast(%[[CTX]]) ins(%[[SCALAR_INPUT]] : tensor<f32>) outs(%[[SCALAR_INIT]] : tensor<f16>) : tensor<f16>
+// CHECK-NEXT: return %[[DYNAMIC_RESULT]], %[[STATIC_RESULT]], %[[SCALAR_RESULT]] : tensor<?x?xf16>, tensor<4x8xi64>, tensor<f16>
 // CHECK-NEXT: }
-func.func @single_dynamic(%ctx: !hipsr.context,
-                          %input: tensor<?x?xf32>) -> tensor<?x?xf16> {
-  %init = hipsr.placeholder : tensor<?x?xf16>
-  %result = hipsr.cast(%ctx) ins(%input : tensor<?x?xf32>)
-      outs(%init : tensor<?x?xf16>) : tensor<?x?xf16>
-  return %result : tensor<?x?xf16>
-}
-
-// -----
-// A static tensor result parses and prints.
-// CHECK-LABEL: func.func @single_static(
-// CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<4x8xf32>) -> tensor<4x8xi64> {
-// CHECK-NEXT: %[[INIT:.*]] = hipsr.placeholder : tensor<4x8xi64>
-// CHECK-NEXT: %[[RESULT:.*]] = hipsr.cast(%[[CTX]]) ins(%[[INPUT]] : tensor<4x8xf32>) outs(%[[INIT]] : tensor<4x8xi64>) : tensor<4x8xi64>
-// CHECK-NEXT: return %[[RESULT]] : tensor<4x8xi64>
-// CHECK-NEXT: }
-func.func @single_static(%ctx: !hipsr.context,
-                         %input: tensor<4x8xf32>) -> tensor<4x8xi64> {
-  %init = hipsr.placeholder : tensor<4x8xi64>
-  %result = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
-      outs(%init : tensor<4x8xi64>) : tensor<4x8xi64>
-  return %result : tensor<4x8xi64>
-}
-
-// -----
-// A rank-0 tensor result parses and prints.
-// CHECK-LABEL: func.func @rank0(
-// CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<f32>) -> tensor<f16> {
-// CHECK-NEXT: %[[INIT:.*]] = hipsr.placeholder : tensor<f16>
-// CHECK-NEXT: %[[RESULT:.*]] = hipsr.cast(%[[CTX]]) ins(%[[INPUT]] : tensor<f32>) outs(%[[INIT]] : tensor<f16>) : tensor<f16>
-// CHECK-NEXT: return %[[RESULT]] : tensor<f16>
-// CHECK-NEXT: }
-func.func @rank0(%ctx: !hipsr.context,
-                 %input: tensor<f32>) -> tensor<f16> {
-  %init = hipsr.placeholder : tensor<f16>
-  %result = hipsr.cast(%ctx) ins(%input : tensor<f32>)
-      outs(%init : tensor<f16>) : tensor<f16>
-  return %result : tensor<f16>
+func.func @tensor_forms(
+    %ctx: !hipsr.context, %dynamic_input: tensor<?x?xf32>,
+    %static_input: tensor<4x8xf32>, %scalar_input: tensor<f32>)
+    -> (tensor<?x?xf16>, tensor<4x8xi64>, tensor<f16>) {
+  %dynamic_init = hipsr.placeholder : tensor<?x?xf16>
+  %dynamic_result = hipsr.cast(%ctx) ins(%dynamic_input : tensor<?x?xf32>)
+      outs(%dynamic_init : tensor<?x?xf16>) : tensor<?x?xf16>
+  %static_init = hipsr.placeholder : tensor<4x8xi64>
+  %static_result = hipsr.cast(%ctx) ins(%static_input : tensor<4x8xf32>)
+      outs(%static_init : tensor<4x8xi64>) : tensor<4x8xi64>
+  %scalar_init = hipsr.placeholder : tensor<f16>
+  %scalar_result = hipsr.cast(%ctx) ins(%scalar_input : tensor<f32>)
+      outs(%scalar_init : tensor<f16>) : tensor<f16>
+  return %dynamic_result, %static_result, %scalar_result
+      : tensor<?x?xf16>, tensor<4x8xi64>, tensor<f16>
 }
 
 // -----

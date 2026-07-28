@@ -9,8 +9,8 @@
 // the next. The pass checks the input before changing the IR. Placeholders do
 // not set domain boundaries.
 //
-// "hipsr.example_end_barrier" stands in for the end-barrier op that will be
-// added later.
+// "hipsr.example_end_barrier" stands in for the DPS end-barrier op that will
+// be added later.
 //
 // Before:
 //   func.func @graph(%ctx: !hipsr.context, %input: tensor<?x4xf32>,
@@ -18,8 +18,10 @@
 //     %cast_init = hipsr.placeholder : tensor<?x4xf16>
 //     %cast = hipsr.cast(%ctx) ins(%input : tensor<?x4xf32>)
 //         outs(%cast_init : tensor<?x4xf16>) : tensor<?x4xf16>
-//     %ready = "hipsr.example_end_barrier"(%ctx, %cast)
-//         : (!hipsr.context, tensor<?x4xf16>) -> tensor<?x4xf16>
+//     %ready_init = hipsr.placeholder : tensor<?x4xf16>
+//     %ready = hipsr.example_end_barrier(%ctx)
+//         ins(%cast : tensor<?x4xf16>)
+//         outs(%ready_init : tensor<?x4xf16>) : tensor<?x4xf16>
 //     %add_init = hipsr.placeholder : tensor<?x4xf16>
 //     %sum = hipsr.add(%ctx)
 //         ins(%ready, %ready : tensor<?x4xf16>, tensor<?x4xf16>)
@@ -46,8 +48,10 @@
 //       %cast = hipsr.cast(%domain_ctx)
 //           ins(%domain_input : tensor<?x4xf32>)
 //           outs(%cast_init : tensor<?x4xf16>) : tensor<?x4xf16>
-//       %ready = "hipsr.example_end_barrier"(%domain_ctx, %cast)
-//           : (!hipsr.context, tensor<?x4xf16>) -> tensor<?x4xf16>
+//       %ready_init = hipsr.placeholder : tensor<?x4xf16>
+//       %ready = hipsr.example_end_barrier(%domain_ctx)
+//           ins(%cast : tensor<?x4xf16>)
+//           outs(%ready_init : tensor<?x4xf16>) : tensor<?x4xf16>
 //       hipsr.pool_domain_yield %ready : tensor<?x4xf16>
 //     } -> tensor<?x4xf16>
 //     %1 = hipsr.pool_domain(%ctx, %0
