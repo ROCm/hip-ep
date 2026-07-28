@@ -49,7 +49,7 @@ jobs:
       # Fork branch carrying AMDGPU MorphiZen integration (former PR 2194) plus
       # sliding_window support.
       OGA_REPO: "amd-genmingz/onnxruntime-genai"
-      OGA_REF: "genmingz/test"
+      OGA_REF: "genmingz/test2"
       # Optional space-separated microsoft/onnxruntime-genai PR numbers applied
       # on top of the fork checkout via pull/<n>.patch + git am. Empty when the
       # fork branch already carries the needed integration.
