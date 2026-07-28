@@ -26,29 +26,86 @@ struct ExpandShapeArgs : ShapeRegionArgs<ExpandOp> {
   Value getInput() const { return in(0); }
   Value getRequestedShape() const { return in(1); }
 };
+
+struct CanonicalizeConstantShape : OpRewritePattern<ExpandOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(ExpandOp op,
+                                PatternRewriter &rewriter) const override {
+    if (!op.getShape() || op.getShapeAttrAttr() ||
+        !op.getShapeRegion().empty()) {
+      return failure();
+    }
+
+    DenseIntElementsAttr denseShape;
+    if (!matchPattern(op.getShape(), m_Constant(&denseShape))) {
+      return failure();
+    }
+
+    auto shapeType = cast<ShapedType>(op.getShape().getType());
+    if (denseShape.getNumElements() != shapeType.getDimSize(0)) {
+      return failure();
+    }
+
+    SmallVector<int64_t> extents;
+    extents.reserve(denseShape.getNumElements());
+    for (APInt extent : denseShape.getValues<APInt>()) {
+      extents.push_back(extent.getSExtValue());
+    }
+
+    rewriter.modifyOpInPlace(op, [&] {
+      op.getShapeMutable().clear();
+      op.setShapeAttrAttr(rewriter.getDenseI64ArrayAttr(extents));
+    });
+    return success();
+  }
+};
 } // namespace
 
 MutableOperandRange ExpandOp::getDpsInitsMutable() { return getInitMutable(); }
 
+void ExpandOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
+                                           MLIRContext *context) {
+  patterns.add<CanonicalizeConstantShape>(context);
+}
+
 LogicalResult ExpandOp::verify() {
+  bool hasShapeOperand = static_cast<bool>(getShape());
+  bool hasShapeAttr = static_cast<bool>(getShapeAttrAttr());
+  if (hasShapeOperand && hasShapeAttr) {
+    return emitOpError(
+        "cannot have both shape operand and shape_attr attribute");
+  }
+  if (!hasShapeOperand && !hasShapeAttr) {
+    return emitOpError(
+        "must have either shape operand or shape_attr attribute");
+  }
+
   auto inputType = cast<ShapedType>(getInput().getType());
-  auto shapeType = cast<ShapedType>(getShape().getType());
   auto outputType = cast<ShapedType>(getInit().getType());
 
-  if (shapeType.getRank() != 1) {
-    return emitOpError("shape must be rank-1");
+  int64_t shapeLength;
+  if (hasShapeOperand) {
+    auto shapeType = cast<ShapedType>(getShape().getType());
+    if (shapeType.getRank() != 1) {
+      return emitOpError("shape must be rank-1");
+    }
+    if (!shapeType.getElementType().isInteger(64)) {
+      return emitOpError("shape element type must be i64");
+    }
+    if (shapeType.isDynamicDim(0)) {
+      return emitOpError("shape length must be static");
+    }
+    shapeLength = shapeType.getDimSize(0);
+  } else {
+    shapeLength = static_cast<int64_t>(getShapeAttrAttr().asArrayRef().size());
   }
-  if (!shapeType.getElementType().isInteger(64)) {
-    return emitOpError("shape element type must be i64");
-  }
-  if (shapeType.isDynamicDim(0)) {
-    return emitOpError("shape length must be static");
-  }
+
   if (inputType.getElementType() != outputType.getElementType()) {
     return emitOpError("input and output element types must match");
   }
 
-  int64_t expectedRank = std::max(inputType.getRank(), shapeType.getDimSize(0));
+  int64_t expectedRank = std::max(inputType.getRank(), shapeLength);
   if (outputType.getRank() != expectedRank) {
     return emitOpError("output rank must equal max(input rank, shape length); "
                        "expected ")
@@ -57,19 +114,7 @@ LogicalResult ExpandOp::verify() {
   return success();
 }
 
-bool ExpandOp::isStartBarrier() {
-  // A directly defined dense constant makes every requested extent known at
-  // compile time. All other shape sources require a runtime barrier.
-  DenseIntElementsAttr denseAttr;
-  if (matchPattern(getShape(), m_Constant(&denseAttr))) {
-    return false;
-  }
-
-  if (auto constant = getShape().getDefiningOp<ConstantOp>()) {
-    return !isa_and_nonnull<DenseIntElementsAttr>(constant.getValueAttr());
-  }
-  return true;
-}
+bool ExpandOp::isStartBarrier() { return getShapeAttrAttr() == nullptr; }
 
 void ExpandOp::populateShapeRegion(OpBuilder &builder, Block &shapeBlock) {
   OpBuilder::InsertionGuard guard(builder);
@@ -79,29 +124,39 @@ void ExpandOp::populateShapeRegion(OpBuilder &builder, Block &shapeBlock) {
   MLIRContext *ctx = builder.getContext();
   ExpandShapeArgs args{shapeBlock};
   Value input = args.getInput();
-  Value requestedShapeArg = args.getRequestedShape();
   auto inputType = cast<ShapedType>(input.getType());
-  auto requestedShapeType = cast<ShapedType>(requestedShapeArg.getType());
-  int64_t resultRank =
-      std::max(inputType.getRank(), requestedShapeType.getDimSize(0));
 
   Value inputShape = shape::ShapeOfOp::create(builder, loc, input);
   SmallVector<Value> requestedExtents;
-  requestedExtents.reserve(requestedShapeType.getDimSize(0));
-  for (int64_t i : llvm::seq<int64_t>(0, requestedShapeType.getDimSize(0))) {
-    Value index = arith::ConstantIndexOp::create(builder, loc, i);
-    Value extent;
-    if (isa<RankedTensorType>(requestedShapeArg.getType())) {
-      extent = tensor::ExtractOp::create(builder, loc, requestedShapeArg,
-                                         ValueRange{index});
-    } else {
-      extent = memref::LoadOp::create(builder, loc, requestedShapeArg,
-                                      ValueRange{index});
+  int64_t requestedRank;
+  if (DenseI64ArrayAttr shapeAttr = getShapeAttrAttr()) {
+    requestedRank = static_cast<int64_t>(shapeAttr.asArrayRef().size());
+    requestedExtents.reserve(requestedRank);
+    for (int64_t extent : shapeAttr.asArrayRef()) {
+      requestedExtents.push_back(
+          arith::ConstantIndexOp::create(builder, loc, extent));
     }
-    requestedExtents.push_back(arith::IndexCastOp::create(
-        builder, loc, builder.getIndexType(), extent));
+  } else {
+    Value requestedShapeArg = args.getRequestedShape();
+    auto requestedShapeType = cast<ShapedType>(requestedShapeArg.getType());
+    requestedRank = requestedShapeType.getDimSize(0);
+    requestedExtents.reserve(requestedRank);
+    for (int64_t i : llvm::seq<int64_t>(0, requestedRank)) {
+      Value index = arith::ConstantIndexOp::create(builder, loc, i);
+      Value extent;
+      if (isa<RankedTensorType>(requestedShapeArg.getType())) {
+        extent = tensor::ExtractOp::create(builder, loc, requestedShapeArg,
+                                           ValueRange{index});
+      } else {
+        extent = memref::LoadOp::create(builder, loc, requestedShapeArg,
+                                        ValueRange{index});
+      }
+      requestedExtents.push_back(arith::IndexCastOp::create(
+          builder, loc, builder.getIndexType(), extent));
+    }
   }
 
+  int64_t resultRank = std::max(inputType.getRank(), requestedRank);
   auto shapeType = shape::ShapeType::get(ctx);
   Value requestedShape = shape::FromExtentsOp::create(
       builder, loc, shapeType, ValueRange{requestedExtents});

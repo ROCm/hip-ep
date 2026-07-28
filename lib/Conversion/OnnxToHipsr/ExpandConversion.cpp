@@ -8,6 +8,7 @@
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/PatternMatch.h"
 
 #include <algorithm>
@@ -73,8 +74,9 @@ struct ExpandToHipsr : public ::mlir::RewritePattern {
     ::mlir::Value init =
         PlaceholderOp::create(rewriter, loc, ::mlir::TypeRange{resultType})
             .getResult(0);
-    auto expandOp = ExpandOp::create(
-        rewriter, loc, ::mlir::TypeRange{resultType}, *ctx, input, shape, init);
+    auto expandOp =
+        ExpandOp::create(rewriter, loc, ::mlir::TypeRange{resultType}, *ctx,
+                         input, shape, init, ::mlir::DenseI64ArrayAttr{});
     rewriter.replaceOp(op, expandOp.getResult(0));
     return ::mlir::success();
   }

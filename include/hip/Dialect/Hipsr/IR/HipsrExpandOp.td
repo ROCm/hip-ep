@@ -15,29 +15,33 @@ def Hipsr_ExpandOp : Hipsr_DpsOp<
     [DeclareOpInterfaceMethods<StartBarrierInterface, ["isStartBarrier"]>]> {
   let summary = "Broadcast a tensor to a requested shape";
   let description = [{
-    Broadcasts `input` and the requested `shape` using ONNX multidirectional
+    Broadcasts `input` and the requested shape using ONNX multidirectional
     broadcasting. Dimensions are right-aligned. Each aligned pair must be equal
     or contain a one. The output rank is the greater of the input rank and the
     requested shape length.
 
-    The requested shape is host-resident because its values determine the
-    output allocation. Destination-passing style passes that allocation as
+    Exactly one shape representation is present: `shape_attr` carries
+    compile-time extents, while the host-resident `shape` operand carries
+    runtime extents. Destination-passing style passes the output allocation as
     `init`.
   }];
 
   let arguments = (ins
     Hipsr_ContextType:$ctx,
     Hipsr_TensorOrDeviceMemRef:$input,
-    Hipsr_TensorOrHostMemRef:$shape,
-    Hipsr_TensorOrDeviceMemRef:$init
+    Optional<Hipsr_TensorOrHostMemRef>:$shape,
+    Hipsr_TensorOrDeviceMemRef:$init,
+    OptionalAttr<DenseI64ArrayAttr>:$shape_attr
   );
 
   let assemblyFormat = [{
     `(` $ctx `)`
-    `ins` `(` $input `,` $shape `:` type($input) `,` type($shape) `)`
+    `ins` `(` $input (`,` $shape^)? `:` type($input)
+        (`,` type($shape)^)? `)`
     `outs` `(` $init `:` type($init) `)`
     attr-dict (`:` type($result_tensors)^)? (`shape_region` $shape_region^)?
   }];
 
+  let hasCanonicalizer = 1;
   let hasVerifier = 1;
 }
