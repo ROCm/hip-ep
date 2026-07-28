@@ -18,10 +18,10 @@ def StartBarrierInterface : OpInterface<"StartBarrierInterface"> {
     domain because its output shape comes from its input data (e.g. Expand).
 
     This is an interface method rather than a trait because barrier status can
-    depend on the operands: an Expand with a constant shape operand is not a
-    barrier (its output shape is static), while one with a runtime shape
-    operand is. The default returns true; an op overrides isStartBarrier() to
-    return false when its shape is static.
+    depend on the operation instance: an Expand with a compile-time shape
+    attribute is not a barrier (its output shape is static), while one with a
+    runtime shape operand is. The default returns true; an op overrides
+    isStartBarrier() to return false when its shape is static.
   }];
 
   let methods = [

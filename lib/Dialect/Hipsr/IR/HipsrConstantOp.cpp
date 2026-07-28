@@ -3,7 +3,8 @@
  * Licensed under the MIT License.
  */
 
-#include "hip/Dialect/Hipsr/IR/HipsrConstantOp.h"
+#include "hip/Conversion/HipsrToLLVM/HipsrToLLVM.h"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "mlir/Conversion/LLVMCommon/MemRefBuilder.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
@@ -33,9 +34,6 @@ LogicalResult ConstantOp::verify() {
 
   return success();
 }
-
-#define GET_OP_CLASSES
-#include "hip/Dialect/Hipsr/IR/HipsrConstantOp.cpp.inc"
 
 namespace {
 
