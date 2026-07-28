@@ -11,10 +11,12 @@
 
 // -----
 // Single result, dynamic dims.
-// CHECK-LABEL: func.func @single_dynamic
-// CHECK: %[[INIT:.*]] = hipsr.placeholder : tensor<?x?xf16>
-// CHECK: hipsr.cast
-// CHECK-SAME: outs(%[[INIT]] : tensor<?x?xf16>)
+// CHECK-LABEL: func.func @single_dynamic(
+// CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<?x?xf32>) -> tensor<?x?xf16> {
+// CHECK-NEXT: %[[INIT:.*]] = hipsr.placeholder : tensor<?x?xf16>
+// CHECK-NEXT: %[[RESULT:.*]] = hipsr.cast(%[[CTX]]) ins(%[[INPUT]] : tensor<?x?xf32>) outs(%[[INIT]] : tensor<?x?xf16>) : tensor<?x?xf16>
+// CHECK-NEXT: return %[[RESULT]] : tensor<?x?xf16>
+// CHECK-NEXT: }
 func.func @single_dynamic(%ctx: !hipsr.context,
                           %input: tensor<?x?xf32>) -> tensor<?x?xf16> {
   %init = hipsr.placeholder : tensor<?x?xf16>
@@ -25,10 +27,12 @@ func.func @single_dynamic(%ctx: !hipsr.context,
 
 // -----
 // Single result, static dims.
-// CHECK-LABEL: func.func @single_static
-// CHECK: %[[INIT:.*]] = hipsr.placeholder : tensor<4x8xi64>
-// CHECK: hipsr.cast
-// CHECK-SAME: outs(%[[INIT]] : tensor<4x8xi64>)
+// CHECK-LABEL: func.func @single_static(
+// CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<4x8xf32>) -> tensor<4x8xi64> {
+// CHECK-NEXT: %[[INIT:.*]] = hipsr.placeholder : tensor<4x8xi64>
+// CHECK-NEXT: %[[RESULT:.*]] = hipsr.cast(%[[CTX]]) ins(%[[INPUT]] : tensor<4x8xf32>) outs(%[[INIT]] : tensor<4x8xi64>) : tensor<4x8xi64>
+// CHECK-NEXT: return %[[RESULT]] : tensor<4x8xi64>
+// CHECK-NEXT: }
 func.func @single_static(%ctx: !hipsr.context,
                          %input: tensor<4x8xf32>) -> tensor<4x8xi64> {
   %init = hipsr.placeholder : tensor<4x8xi64>
@@ -39,10 +43,12 @@ func.func @single_static(%ctx: !hipsr.context,
 
 // -----
 // Rank-0 (scalar) result.
-// CHECK-LABEL: func.func @rank0
-// CHECK: %[[INIT:.*]] = hipsr.placeholder : tensor<f16>
-// CHECK: hipsr.cast
-// CHECK-SAME: outs(%[[INIT]] : tensor<f16>)
+// CHECK-LABEL: func.func @rank0(
+// CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<f32>) -> tensor<f16> {
+// CHECK-NEXT: %[[INIT:.*]] = hipsr.placeholder : tensor<f16>
+// CHECK-NEXT: %[[RESULT:.*]] = hipsr.cast(%[[CTX]]) ins(%[[INPUT]] : tensor<f32>) outs(%[[INIT]] : tensor<f16>) : tensor<f16>
+// CHECK-NEXT: return %[[RESULT]] : tensor<f16>
+// CHECK-NEXT: }
 func.func @rank0(%ctx: !hipsr.context,
                  %input: tensor<f32>) -> tensor<f16> {
   %init = hipsr.placeholder : tensor<f16>

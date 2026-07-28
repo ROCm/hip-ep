@@ -10,7 +10,8 @@
 // CHECK-LABEL: func.func @runtime_expand_splits_domains(
 // CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<?x4xf32>,
 // CHECK-SAME: %[[SHAPE:.*]]: tensor<2xi64>)
-// CHECK: %[[CAST_DOMAIN:.*]] = hipsr.pool_domain(%[[CTX]], %[[INPUT]] : !hipsr.context, tensor<?x4xf32>) {
+// CHECK-SAME: -> tensor<?x4xf16> {
+// CHECK-NEXT: %[[CAST_DOMAIN:.*]] = hipsr.pool_domain(%[[CTX]], %[[INPUT]] : !hipsr.context, tensor<?x4xf32>) {
 // CHECK-NEXT: ^bb0(%[[CAST_CTX:.*]]: !hipsr.context, %[[CAST_INPUT:.*]]: tensor<?x4xf32>):
 // CHECK-NEXT: %[[CAST_INIT:.*]] = hipsr.placeholder : tensor<?x4xf16>
 // CHECK-NEXT: %[[CAST:.*]] = hipsr.cast(%[[CAST_CTX]]) ins(%[[CAST_INPUT]] : tensor<?x4xf32>) outs(%[[CAST_INIT]] : tensor<?x4xf16>) : tensor<?x4xf16>
@@ -49,7 +50,8 @@ func.func @runtime_expand_splits_domains(
 // domain even though broadcasting preserves a dynamic result dimension.
 // CHECK-LABEL: func.func @shape_attr_dynamic_result_stays_in_domain(
 // CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<?x3xf32>)
-// CHECK: %[[DOMAIN:.*]] = hipsr.pool_domain(%[[CTX]], %[[INPUT]] : !hipsr.context, tensor<?x3xf32>) {
+// CHECK-SAME: -> tensor<?x3xf16> {
+// CHECK-NEXT: %[[DOMAIN:.*]] = hipsr.pool_domain(%[[CTX]], %[[INPUT]] : !hipsr.context, tensor<?x3xf32>) {
 // CHECK-NEXT: ^bb0(%[[DOMAIN_CTX:.*]]: !hipsr.context, %[[DOMAIN_INPUT:.*]]: tensor<?x3xf32>):
 // CHECK-NEXT: %[[CAST_INIT:.*]] = hipsr.placeholder : tensor<?x3xf16>
 // CHECK-NEXT: %[[CAST:.*]] = hipsr.cast(%[[DOMAIN_CTX]]) ins(%[[DOMAIN_INPUT]] : tensor<?x3xf32>) outs(%[[CAST_INIT]] : tensor<?x3xf16>) : tensor<?x3xf16>
@@ -75,18 +77,20 @@ func.func @shape_attr_dynamic_result_stays_in_domain(
 // -----
 
 // A DPS chain and its placeholders move into one domain.
-// CHECK-LABEL: func.func @cast_matmul_chain
-// CHECK-SAME: (%[[CTX:.*]]: !hipsr.context, %[[A:.*]]: tensor<4x8xf32>, %[[B:.*]]: tensor<8x2xf16>)
-// CHECK-NOT: hipsr.placeholder
-// CHECK: hipsr.pool_domain(%[[CTX]], %[[A]], %[[B]] : !hipsr.context, tensor<4x8xf32>, tensor<8x2xf16>) {
+// CHECK-LABEL: func.func @cast_matmul_chain(
+// CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[A:.*]]: tensor<4x8xf32>, %[[B:.*]]: tensor<8x2xf16>)
+// CHECK-SAME: -> tensor<4x2xf16> {
+// CHECK-NEXT: %[[DOMAIN:.*]] = hipsr.pool_domain(%[[CTX]], %[[A]], %[[B]] : !hipsr.context, tensor<4x8xf32>, tensor<8x2xf16>) {
 // CHECK-NEXT: ^bb0(%[[DCTX:.*]]: !hipsr.context, %[[DA:.*]]: tensor<4x8xf32>, %[[DB:.*]]: tensor<8x2xf16>):
 // CHECK-NEXT: %[[CAST_INIT:.*]] = hipsr.placeholder : tensor<4x8xf16>
-// CHECK-NEXT: %[[CAST:.*]] = hipsr.cast(%[[DCTX]]) ins(%[[DA]] : tensor<4x8xf32>) outs(%[[CAST_INIT]] : tensor<4x8xf16>)
+// CHECK-NEXT: %[[CAST:.*]] = hipsr.cast(%[[DCTX]]) ins(%[[DA]] : tensor<4x8xf32>) outs(%[[CAST_INIT]] : tensor<4x8xf16>) : tensor<4x8xf16>
 // CHECK-NEXT: %[[MM_INIT:.*]] = hipsr.placeholder : tensor<4x2xf16>
 // CHECK-NEXT: %[[MM:.*]] = hipsr.matmul(%[[DCTX]]) ins(%[[CAST]], %[[DB]]
-// CHECK-SAME: outs(%[[MM_INIT]] : tensor<4x2xf16>)
+// CHECK-SAME: outs(%[[MM_INIT]] : tensor<4x2xf16>) : tensor<4x2xf16>
 // CHECK-NEXT: hipsr.pool_domain_yield %[[MM]] : tensor<4x2xf16>
 // CHECK-NEXT: } -> tensor<4x2xf16>
+// CHECK-NEXT: return %[[DOMAIN]] : tensor<4x2xf16>
+// CHECK-NEXT: }
 
 func.func @cast_matmul_chain(
     %ctx: !hipsr.context, %a: tensor<4x8xf32>, %b: tensor<8x2xf16>)
@@ -104,15 +108,18 @@ func.func @cast_matmul_chain(
 // -----
 
 // Planning ignores an early placeholder and moves it beside its consumer.
-// CHECK-LABEL: func.func @deferred_dps_init
-// CHECK-NOT: hipsr.placeholder
-// CHECK: %[[DOMAIN:.*]]:2 = hipsr.pool_domain(
-// CHECK: %[[SUM:.*]] = arith.addf
+// CHECK-LABEL: func.func @deferred_dps_init(
+// CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<4x8xf32>,
+// CHECK-SAME: %[[LHS:.*]]: f32, %[[RHS:.*]]: f32) -> (tensor<4x8xf16>, f32) {
+// CHECK-NEXT: %[[DOMAIN:.*]]:2 = hipsr.pool_domain(%[[LHS]], %[[RHS]], %[[CTX]], %[[INPUT]] : f32, f32, !hipsr.context, tensor<4x8xf32>) {
+// CHECK-NEXT: ^bb0(%[[DLHS:.*]]: f32, %[[DRHS:.*]]: f32, %[[DCTX:.*]]: !hipsr.context, %[[DINPUT:.*]]: tensor<4x8xf32>):
+// CHECK-NEXT: %[[SUM:.*]] = arith.addf %[[DLHS]], %[[DRHS]] : f32
 // CHECK-NEXT: %[[INIT:.*]] = hipsr.placeholder : tensor<4x8xf16>
-// CHECK-NEXT: %[[CAST:.*]] = hipsr.cast
-// CHECK-SAME: outs(%[[INIT]] : tensor<4x8xf16>)
-// CHECK: hipsr.pool_domain_yield %[[SUM]], %[[CAST]]
-// CHECK: return %[[DOMAIN]]#1, %[[DOMAIN]]#0
+// CHECK-NEXT: %[[CAST:.*]] = hipsr.cast(%[[DCTX]]) ins(%[[DINPUT]] : tensor<4x8xf32>) outs(%[[INIT]] : tensor<4x8xf16>) : tensor<4x8xf16>
+// CHECK-NEXT: hipsr.pool_domain_yield %[[SUM]], %[[CAST]] : f32, tensor<4x8xf16>
+// CHECK-NEXT: } -> f32, tensor<4x8xf16>
+// CHECK-NEXT: return %[[DOMAIN]]#1, %[[DOMAIN]]#0 : tensor<4x8xf16>, f32
+// CHECK-NEXT: }
 
 func.func @deferred_dps_init(
     %ctx: !hipsr.context, %input: tensor<4x8xf32>, %lhs: f32, %rhs: f32)
@@ -127,12 +134,16 @@ func.func @deferred_dps_init(
 // -----
 
 // Captured operands keep their first-use order.
-// CHECK-LABEL: func.func @operand_order
-// CHECK: hipsr.pool_domain(%[[C:.*]], %[[A:.*]], %[[B:.*]] : i32, i32, i32) {
+// CHECK-LABEL: func.func @operand_order(
+// CHECK-SAME: %[[A:.*]]: i32, %[[B:.*]]: i32, %[[C:.*]]: i32) -> i32 {
+// CHECK-NEXT: %[[DOMAIN:.*]] = hipsr.pool_domain(%[[C]], %[[A]], %[[B]] : i32, i32, i32) {
 // CHECK-NEXT: ^bb0(%[[DC:.*]]: i32, %[[DA:.*]]: i32, %[[DB:.*]]: i32):
-// CHECK: %[[FIRST:.*]] = arith.addi %[[DC]], %[[DA]] : i32
-// CHECK: %[[SECOND:.*]] = arith.addi %[[FIRST]], %[[DB]] : i32
-// CHECK: hipsr.pool_domain_yield %[[SECOND]] : i32
+// CHECK-NEXT: %[[FIRST:.*]] = arith.addi %[[DC]], %[[DA]] : i32
+// CHECK-NEXT: %[[SECOND:.*]] = arith.addi %[[FIRST]], %[[DB]] : i32
+// CHECK-NEXT: hipsr.pool_domain_yield %[[SECOND]] : i32
+// CHECK-NEXT: } -> i32
+// CHECK-NEXT: return %[[DOMAIN]] : i32
+// CHECK-NEXT: }
 
 func.func @operand_order(%a: i32, %b: i32, %c: i32) -> i32 {
   %first = arith.addi %c, %a : i32
@@ -143,15 +154,24 @@ func.func @operand_order(%a: i32, %b: i32, %c: i32) -> i32 {
 // -----
 
 // Values used by a nested shape region become explicit domain inputs.
-// CHECK-LABEL: func.func @nested_shape_region
-// CHECK: hipsr.pool_domain(%[[CTX:.*]], %[[INPUT:.*]]
+// CHECK-LABEL: func.func @nested_shape_region(
+// CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<?x8xf32>) -> tensor<?x8xf16> {
+// CHECK-NEXT: %[[DOMAIN:.*]] = hipsr.pool_domain(%[[CTX]], %[[INPUT]] : !hipsr.context, tensor<?x8xf32>) {
 // CHECK-NEXT: ^bb0(%[[DCTX:.*]]: !hipsr.context, %[[DINPUT:.*]]: tensor<?x8xf32>):
-// CHECK: %[[INIT:.*]] = hipsr.placeholder : tensor<?x8xf16>
-// CHECK: hipsr.cast(%[[DCTX]]) ins(%[[DINPUT]] : tensor<?x8xf32>) outs(%[[INIT]] : tensor<?x8xf16>)
-// CHECK: shape_region {
+// CHECK-NEXT: %[[INIT:.*]] = hipsr.placeholder : tensor<?x8xf16>
+// CHECK-NEXT: %[[CAST:.*]] = hipsr.cast(%[[DCTX]]) ins(%[[DINPUT]] : tensor<?x8xf32>) outs(%[[INIT]] : tensor<?x8xf16>) : tensor<?x8xf16> shape_region {
 // CHECK-NEXT: ^bb0(%[[SHAPE_INPUT:.*]]: tensor<?x8xf32>):
-// CHECK: shape.shape_of %[[SHAPE_INPUT]]
-// CHECK: hipsr.shape_yield
+// CHECK-NEXT: %[[SHAPE:.*]] = shape.shape_of %[[SHAPE_INPUT]] : tensor<?x8xf32> -> tensor<2xindex>
+// CHECK-NEXT: %[[C0:.*]] = arith.constant 0 : index
+// CHECK-NEXT: %[[D0:.*]] = shape.get_extent %[[SHAPE]], %[[C0]] : tensor<2xindex>, index -> index
+// CHECK-NEXT: %[[C1:.*]] = arith.constant 1 : index
+// CHECK-NEXT: %[[D1:.*]] = shape.get_extent %[[SHAPE]], %[[C1]] : tensor<2xindex>, index -> index
+// CHECK-NEXT: hipsr.shape_yield (%[[D0]], %[[D1]]) : [f16]
+// CHECK-NEXT: }
+// CHECK-NEXT: hipsr.pool_domain_yield %[[CAST]] : tensor<?x8xf16>
+// CHECK-NEXT: } -> tensor<?x8xf16>
+// CHECK-NEXT: return %[[DOMAIN]] : tensor<?x8xf16>
+// CHECK-NEXT: }
 
 func.func @nested_shape_region(%ctx: !hipsr.context,
                                %input: tensor<?x8xf32>)
@@ -174,11 +194,17 @@ func.func @nested_shape_region(%ctx: !hipsr.context,
 
 // Implicit captures in descendant regions are remapped to domain arguments.
 // CHECK-LABEL: func.func @implicit_region_capture(
-// CHECK-SAME: %[[CAPTURE:.*]]: i32)
-// CHECK: hipsr.pool_domain(%[[CAPTURE]] : i32) {
+// CHECK-SAME: %[[CAPTURE:.*]]: i32) -> i32 {
+// CHECK-NEXT: %[[DOMAIN:.*]] = hipsr.pool_domain(%[[CAPTURE]] : i32) {
 // CHECK-NEXT: ^bb0(%[[DOMAIN_CAPTURE:.*]]: i32):
-// CHECK: scf.execute_region -> i32 {
-// CHECK: arith.addi %[[DOMAIN_CAPTURE]], %[[DOMAIN_CAPTURE]] : i32
+// CHECK-NEXT: %[[REGION:.*]] = scf.execute_region -> i32 {
+// CHECK-NEXT: %[[SUM:.*]] = arith.addi %[[DOMAIN_CAPTURE]], %[[DOMAIN_CAPTURE]] : i32
+// CHECK-NEXT: scf.yield %[[SUM]] : i32
+// CHECK-NEXT: }
+// CHECK-NEXT: hipsr.pool_domain_yield %[[REGION]] : i32
+// CHECK-NEXT: } -> i32
+// CHECK-NEXT: return %[[DOMAIN]] : i32
+// CHECK-NEXT: }
 
 func.func @implicit_region_capture(%capture: i32) -> i32 {
   %0 = scf.execute_region -> i32 {
@@ -191,9 +217,13 @@ func.func @implicit_region_capture(%capture: i32) -> i32 {
 // -----
 
 // A side-effecting operation with no result remains in its domain.
-// CHECK-LABEL: func.func @zero_result_retained
-// CHECK: hipsr.pool_domain(
-// CHECK: memref.store
+// CHECK-LABEL: func.func @zero_result_retained(
+// CHECK-SAME: %[[BUFFER:.*]]: memref<4xi32>, %[[VALUE:.*]]: i32, %[[INDEX:.*]]: index) {
+// CHECK-NEXT: hipsr.pool_domain(%[[VALUE]], %[[BUFFER]], %[[INDEX]] : i32, memref<4xi32>, index) {
+// CHECK-NEXT: ^bb0(%[[DVALUE:.*]]: i32, %[[DBUFFER:.*]]: memref<4xi32>, %[[DINDEX:.*]]: index):
+// CHECK-NEXT: memref.store %[[DVALUE]], %[[DBUFFER]]{{\[}}%[[DINDEX]]] : memref<4xi32>
+// CHECK-NEXT: }
+// CHECK-NEXT: return
 // CHECK-NEXT: }
 
 func.func @zero_result_retained(%buffer: memref<4xi32>, %value: i32,
@@ -216,8 +246,7 @@ func.func @empty() {
 // -----
 
 // A declaration is unchanged.
-// CHECK-LABEL: func.func private @declaration
-// CHECK-NOT: hipsr.pool_domain
+// CHECK-LABEL: func.func private @declaration(i32) -> i32
 // CHECK-NEXT: }
 
 func.func private @declaration(i32) -> i32
