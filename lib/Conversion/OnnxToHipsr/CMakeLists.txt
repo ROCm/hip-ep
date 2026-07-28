@@ -8,6 +8,7 @@ add_library(OnnxToHipsr STATIC
   OnnxToHipsr.cpp
   CastConversion.cpp
   MatMulConversion.cpp
+  ExpandConversion.cpp
 )
 
 add_dependencies(OnnxToHipsr
