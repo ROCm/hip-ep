@@ -7,13 +7,21 @@
 // disjoint, so this guards against a regression to alloc-index liveness (which
 // would mark all three overlapping and refuse to pool).
 // CHECK-LABEL: func.func @pool_diff_sizes
-// CHECK: arith.maxui
-// CHECK: arith.maxui
-// CHECK: %[[POOL:.+]] = hipsr.get_pool(%{{.+}}, %{{.+}}) : memref<?xi8, #hipsr.mem<device>>
-// CHECK: %[[OFF:.+]] = arith.constant 0 : index
-// CHECK: memref.view %[[POOL]][%[[OFF]]][] : memref<?xi8, #hipsr.mem<device>> to memref<8x1024xf16, #hipsr.mem<device>>
-// CHECK: memref.view %[[POOL]][%[[OFF]]][] : memref<?xi8, #hipsr.mem<device>> to memref<4x1024xf16, #hipsr.mem<device>>
-// CHECK: memref.view %[[POOL]][%[[OFF]]][] : memref<?xi8, #hipsr.mem<device>> to memref<2x1024xf16, #hipsr.mem<device>>
+// CHECK: %[[C16384:.+]] = arith.constant 16384 : index
+// CHECK-NEXT: %[[C8192:.+]] = arith.constant 8192 : index
+// CHECK-NEXT: %[[M0:.+]] = arith.maxui %[[C16384]], %[[C8192]] : index
+// CHECK-NEXT: %[[C4096:.+]] = arith.constant 4096 : index
+// CHECK-NEXT: %[[M1:.+]] = arith.maxui %[[M0]], %[[C4096]] : index
+// CHECK-NEXT: %[[C256:.+]] = arith.constant 256 : index
+// CHECK-NEXT: %[[C255:.+]] = arith.constant 255 : index
+// CHECK-NEXT: %[[NUM:.+]] = arith.addi %[[M1]], %[[C255]] : index
+// CHECK-NEXT: %[[DIV:.+]] = arith.divui %[[NUM]], %[[C256]] : index
+// CHECK-NEXT: %[[SZ:.+]] = arith.muli %[[DIV]], %[[C256]] : index
+// CHECK-NEXT: %[[POOL:.+]] = hipsr.get_pool(%{{.+}}, %[[SZ]]) : memref<?xi8, #hipsr.mem<device>>
+// CHECK-NEXT: %[[OFF:.+]] = arith.constant 0 : index
+// CHECK-NEXT: memref.view %[[POOL]][%[[OFF]]][] : memref<?xi8, #hipsr.mem<device>> to memref<8x1024xf16, #hipsr.mem<device>>
+// CHECK-NEXT: memref.view %[[POOL]][%[[OFF]]][] : memref<?xi8, #hipsr.mem<device>> to memref<4x1024xf16, #hipsr.mem<device>>
+// CHECK-NEXT: memref.view %[[POOL]][%[[OFF]]][] : memref<?xi8, #hipsr.mem<device>> to memref<2x1024xf16, #hipsr.mem<device>>
 // CHECK-NOT: memref.alloc
 // CHECK-NOT: shape.
 func.func @pool_diff_sizes(
@@ -49,13 +57,14 @@ func.func @pool_diff_sizes(
 // 3xf16 = 6 B is not a multiple of 256, so the alignUp chain must round up.
 // CHECK-LABEL: func.func @single_align
 // CHECK: %[[C6:.+]] = arith.constant 6 : index
-// CHECK: %[[C256:.+]] = arith.constant 256 : index
-// CHECK: %[[C255:.+]] = arith.constant 255 : index
-// CHECK: %[[NUM:.+]] = arith.addi %[[C6]], %[[C255]]
-// CHECK: %[[DIV:.+]] = arith.divui %[[NUM]], %[[C256]]
-// CHECK: %[[SZ:.+]] = arith.muli %[[DIV]], %[[C256]]
-// CHECK: %[[POOL:.+]] = hipsr.get_pool(%{{.+}}, %[[SZ]]) : memref<?xi8, #hipsr.mem<device>>
-// CHECK: memref.view %[[POOL]][%{{.+}}][] : memref<?xi8, #hipsr.mem<device>> to memref<3xf16, #hipsr.mem<device>>
+// CHECK-NEXT: %[[C256:.+]] = arith.constant 256 : index
+// CHECK-NEXT: %[[C255:.+]] = arith.constant 255 : index
+// CHECK-NEXT: %[[NUM:.+]] = arith.addi %[[C6]], %[[C255]] : index
+// CHECK-NEXT: %[[DIV:.+]] = arith.divui %[[NUM]], %[[C256]] : index
+// CHECK-NEXT: %[[SZ:.+]] = arith.muli %[[DIV]], %[[C256]] : index
+// CHECK-NEXT: %[[POOL:.+]] = hipsr.get_pool(%{{.+}}, %[[SZ]]) : memref<?xi8, #hipsr.mem<device>>
+// CHECK-NEXT: %[[OFF:.+]] = arith.constant 0 : index
+// CHECK-NEXT: memref.view %[[POOL]][%[[OFF]]][] : memref<?xi8, #hipsr.mem<device>> to memref<3xf16, #hipsr.mem<device>>
 // CHECK-NOT: arith.maxui
 // CHECK-NOT: memref.alloc
 func.func @single_align(%ctx: !hipsr.context,
@@ -76,10 +85,16 @@ func.func @single_align(%ctx: !hipsr.context,
 // by the erased buffer value; guards the cyclic-SSA bug from shape_of %alloc.
 // CHECK-LABEL: func.func @dynamic
 // CHECK: %[[DIM:.+]] = memref.dim
-// CHECK: %[[C1024:.+]] = arith.constant 1024 : index
-// CHECK: arith.muli %[[C1024]], %[[DIM]]
-// CHECK: %[[POOL:.+]] = hipsr.get_pool
-// CHECK: memref.view %[[POOL]][%{{.+}}][%[[DIM]]] : memref<?xi8, #hipsr.mem<device>> to memref<?x512xf16, #hipsr.mem<device>>
+// CHECK-NEXT: %[[C1024:.+]] = arith.constant 1024 : index
+// CHECK-NEXT: %[[BYTES:.+]] = arith.muli %[[C1024]], %[[DIM]] : index
+// CHECK-NEXT: %[[C256:.+]] = arith.constant 256 : index
+// CHECK-NEXT: %[[C255:.+]] = arith.constant 255 : index
+// CHECK-NEXT: %[[NUM:.+]] = arith.addi %[[BYTES]], %[[C255]] : index
+// CHECK-NEXT: %[[DIV:.+]] = arith.divui %[[NUM]], %[[C256]] : index
+// CHECK-NEXT: %[[SZ:.+]] = arith.muli %[[DIV]], %[[C256]] : index
+// CHECK-NEXT: %[[POOL:.+]] = hipsr.get_pool(%{{.+}}, %[[SZ]]) : memref<?xi8, #hipsr.mem<device>>
+// CHECK-NEXT: %[[OFF:.+]] = arith.constant 0 : index
+// CHECK-NEXT: memref.view %[[POOL]][%[[OFF]]][%[[DIM]]] : memref<?xi8, #hipsr.mem<device>> to memref<?x512xf16, #hipsr.mem<device>>
 // CHECK-NOT: memref.alloc
 func.func @dynamic(%ctx: !hipsr.context,
                    %in: memref<?x512xf16, #hipsr.mem<device>>) {
@@ -101,11 +116,19 @@ func.func @dynamic(%ctx: !hipsr.context,
 // static/dynamic and different-element-type paths together (max over both).
 // CHECK-LABEL: func.func @mixed
 // CHECK: %[[DIM:.+]] = memref.dim
-// CHECK: arith.muli %{{.+}}, %[[DIM]]
-// CHECK: arith.maxui
-// CHECK: %[[POOL:.+]] = hipsr.get_pool
-// CHECK: memref.view %[[POOL]][%{{.+}}][] : memref<?xi8, #hipsr.mem<device>> to memref<4x256xf32, #hipsr.mem<device>>
-// CHECK: memref.view %[[POOL]][%{{.+}}][%[[DIM]]] : memref<?xi8, #hipsr.mem<device>> to memref<?x512xf16, #hipsr.mem<device>>
+// CHECK-NEXT: %[[C4096:.+]] = arith.constant 4096 : index
+// CHECK-NEXT: %[[C1024:.+]] = arith.constant 1024 : index
+// CHECK-NEXT: %[[BYTES:.+]] = arith.muli %[[C1024]], %[[DIM]] : index
+// CHECK-NEXT: %[[MAX:.+]] = arith.maxui %[[C4096]], %[[BYTES]] : index
+// CHECK-NEXT: %[[C256:.+]] = arith.constant 256 : index
+// CHECK-NEXT: %[[C255:.+]] = arith.constant 255 : index
+// CHECK-NEXT: %[[NUM:.+]] = arith.addi %[[MAX]], %[[C255]] : index
+// CHECK-NEXT: %[[DIV:.+]] = arith.divui %[[NUM]], %[[C256]] : index
+// CHECK-NEXT: %[[SZ:.+]] = arith.muli %[[DIV]], %[[C256]] : index
+// CHECK-NEXT: %[[POOL:.+]] = hipsr.get_pool(%{{.+}}, %[[SZ]]) : memref<?xi8, #hipsr.mem<device>>
+// CHECK-NEXT: %[[OFF:.+]] = arith.constant 0 : index
+// CHECK-NEXT: memref.view %[[POOL]][%[[OFF]]][] : memref<?xi8, #hipsr.mem<device>> to memref<4x256xf32, #hipsr.mem<device>>
+// CHECK-NEXT: memref.view %[[POOL]][%[[OFF]]][%[[DIM]]] : memref<?xi8, #hipsr.mem<device>> to memref<?x512xf16, #hipsr.mem<device>>
 // CHECK-NOT: memref.alloc
 func.func @mixed(%ctx: !hipsr.context,
                  %inf32: memref<4x256xf32, #hipsr.mem<device>>,
@@ -135,8 +158,8 @@ func.func @mixed(%ctx: !hipsr.context,
 // A domain with no memref.alloc (tensor-mode) is left untouched.
 // CHECK-LABEL: func.func @noalloc_noop
 // CHECK: hipsr.pool_domain
-// CHECK: tensor.empty
-// CHECK: hipsr.pool_domain_yield
+// CHECK: %[[BUF:.+]] = tensor.empty() : tensor<2x4xi64>
+// CHECK-NEXT: hipsr.pool_domain_yield %[[BUF]] : tensor<2x4xi64>
 // CHECK-NOT: hipsr.get_pool
 // CHECK-NOT: memref.view
 func.func @noalloc_noop(%ctx: !hipsr.context,
