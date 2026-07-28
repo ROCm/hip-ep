@@ -3,12 +3,21 @@
  * Licensed under the MIT License.
  */
 
+#include "hip/Conversion/HipsrToLLVM/HipsrToLLVM.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
+#include "hip/Dialect/Hipsr/IR/HipsrLLVMLoweringUtils.h"
 #include "hip/Dialect/Hipsr/IR/HipsrShapeRegionInterface.h"
 
+#include "mlir/Conversion/LLVMCommon/MemRefBuilder.h"
+#include "mlir/Conversion/LLVMCommon/Pattern.h"
+#include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/LLVMIR/FunctionCallUtils.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
+#include "mlir/Transforms/DialectConversion.h"
 
 #include "llvm/ADT/Sequence.h"
 
@@ -127,4 +136,141 @@ void MatMulOp::populateShapeRegion(OpBuilder &builder, Block &shapeBlock) {
   Type elemTy = cast<ShapedType>(getResult(0).getType()).getElementType();
   builder.create<ShapeYieldOp>(loc, ArrayRef<ValueRange>{assuming.getResults()},
                                TypeRange{elemTy});
+}
+
+namespace {
+
+constexpr const char *kWrapHipblasLtMatmul = "wrap_hipblasLtMatmul";
+
+struct MatMulLowering : ConvertOpToLLVMPattern<MatMulOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(MatMulOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+    MLIRContext *ctx = rewriter.getContext();
+    Type hostPtrType = LLVM::LLVMPointerType::get(ctx, 0);
+    Type devicePtrType = LLVM::LLVMPointerType::get(ctx, 1);
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+
+    auto aType = dyn_cast<MemRefType>(op.getA().getType());
+    auto bType = dyn_cast<MemRefType>(op.getB().getType());
+    auto outputType = dyn_cast<MemRefType>(op.getInit().getType());
+    if (!aType || !bType || !outputType) {
+      return rewriter.notifyMatchFailure(
+          op, "operands must be memrefs (run bufferization first)");
+    }
+
+    Type elementType = aType.getElementType();
+    if ((!elementType.isF16() && !elementType.isF32()) ||
+        bType.getElementType() != elementType ||
+        outputType.getElementType() != elementType) {
+      return rewriter.notifyMatchFailure(
+          op, "expected matching f16 or f32 element types");
+    }
+
+    auto createI64Const = [&](int64_t value) {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+
+    MemRefDescriptor aDesc(adaptor.getA());
+    MemRefDescriptor bDesc(adaptor.getB());
+    int64_t aRank = aType.getRank();
+    int64_t bRank = bType.getRank();
+
+    Value m =
+        aRank == 1 ? createI64Const(1) : aDesc.size(rewriter, loc, aRank - 2);
+    Value k = aDesc.size(rewriter, loc, aRank - 1);
+    Value n =
+        bRank == 1 ? createI64Const(1) : bDesc.size(rewriter, loc, bRank - 1);
+
+    Value batchCount = createI64Const(1);
+    for (int64_t i : llvm::seq<int64_t>(0, std::max<int64_t>(aRank - 2, 0))) {
+      batchCount = LLVM::MulOp::create(rewriter, loc, batchCount,
+                                       aDesc.size(rewriter, loc, i));
+    }
+
+    Value bBatchStride;
+    if (bRank <= 2) {
+      bBatchStride = createI64Const(0);
+    } else {
+      bool allLeadingStatic = true;
+      int64_t staticLeadingProduct = 1;
+      for (int64_t i : llvm::seq<int64_t>(0, bRank - 2)) {
+        if (bType.isDynamicDim(i)) {
+          allLeadingStatic = false;
+          break;
+        }
+        staticLeadingProduct *= bType.getDimSize(i);
+      }
+      if (allLeadingStatic) {
+        bBatchStride = staticLeadingProduct <= 1
+                           ? createI64Const(0)
+                           : LLVM::MulOp::create(rewriter, loc, k, n).getRes();
+      } else {
+        Value one = createI64Const(1);
+        Value zero = createI64Const(0);
+        Value leadingProduct = one;
+        for (int64_t i : llvm::seq<int64_t>(0, bRank - 2)) {
+          leadingProduct = LLVM::MulOp::create(rewriter, loc, leadingProduct,
+                                               bDesc.size(rewriter, loc, i));
+        }
+        Value isBroadcast = LLVM::ICmpOp::create(
+            rewriter, loc, LLVM::ICmpPredicate::sle, leadingProduct, one);
+        Value kn = LLVM::MulOp::create(rewriter, loc, k, n);
+        bBatchStride =
+            LLVM::SelectOp::create(rewriter, loc, isBroadcast, zero, kn);
+      }
+    }
+
+    Value elementSize = createI64Const(elementType.getIntOrFloatBitWidth() / 8);
+    SmallVector<Type, 11> paramTypes = {
+        hostPtrType,   // state
+        i32Type,       // op_state_slot
+        devicePtrType, // A
+        devicePtrType, // B
+        devicePtrType, // output
+        i64Type,       // M
+        i64Type,       // N
+        i64Type,       // K
+        i64Type,       // batch_count
+        i64Type,       // elem_size
+        i64Type        // b_batch_stride
+    };
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapHipblasLtMatmul, paramTypes, i32Type);
+    if (failed(funcOp)) {
+      return failure();
+    }
+
+    // TODO: Use a compiler-assigned slot once hipsr supports op-state init.
+    Value opStateSlot = LLVM::ConstantOp::create(
+        rewriter, loc, i32Type, rewriter.getI32IntegerAttr(-1));
+    SmallVector<Value, 11> args = {
+        adaptor.getCtx(),
+        opStateSlot,
+        extractContiguousMemRefPtr(adaptor.getA(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getB(), rewriter, loc),
+        extractContiguousMemRefPtr(adaptor.getInit(), rewriter, loc),
+        m,
+        n,
+        k,
+        batchCount,
+        elementSize,
+        bBatchStride};
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+} // namespace
+
+void mlir::hipsr::populateHipsrMatMulLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+  patterns.add<MatMulLowering>(converter);
 }
