@@ -1,0 +1,4 @@
+onnx>=1.16.0
+numpy>=1.24.0
+# onnxruntime is OPTIONAL: only required for `--ort-verify` numeric equivalence.
+#   pip install onnxruntime
