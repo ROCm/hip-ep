@@ -29,7 +29,7 @@ Resolve paths relative to the workspace root. Quote paths that contain spaces or
    - `$env:PACKAGE_DIR` (Windows) / `$PACKAGE_DIR` (Unix), if set
    - Search workspace for `gpu-test-package*` siblings
    - If cwd is `*/bin`, use the parent directory
-3. **Log dir** — use a subdirectory under the workspace (e.g. `output_test/`). Create it if missing.
+3. **Log dir** — use a subdirectory under `$env:USERPROFILE\workspace\temp` (PowerShell) or `$HOME/workspace/temp` (Git Bash), e.g. `output_test/`. Create it if missing.
 
 If gpu-test-package is not found, use `--scan-onnx` for a static-only check and tell the user full compile needs the package.
 
