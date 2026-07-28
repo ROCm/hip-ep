@@ -9,20 +9,24 @@
 #ifndef HIPSR_EMPTY_YIELD_OP
 #define HIPSR_EMPTY_YIELD_OP
 
-include "mlir/Interfaces/SideEffectInterfaces.td"
 include "hip/Dialect/Hipsr/IR/HipsrOps.td"
+include "mlir/Interfaces/ControlFlowInterfaces.td"
+include "mlir/Interfaces/SideEffectInterfaces.td"
 
 //===----------------------------------------------------------------------===//
 // Hipsr_EmptyYieldOp
 //===----------------------------------------------------------------------===//
 
 def Hipsr_EmptyYieldOp : Hipsr_Op<"empty_yield",
-    [Pure, Terminator, HasParent<"EmptyOp">]> {
+    [Pure, ReturnLike, Terminator, HasParent<"EmptyOp">]> {
   let summary = "Yield the init tensor(s) from a hipsr.empty region";
   let description = [{
     Terminates a hipsr.empty region and yields the computed init tensors.
     The yielded tensors become the results of the hipsr.empty operation.
     Supports variadic operands for multi-result operations.
+
+    `ReturnLike` lets the parent's `RegionBranchOpInterface` verify that the
+    yielded values match the parent operation's results.
 
     Example (single result):
     ```mlir
@@ -38,8 +42,6 @@ def Hipsr_EmptyYieldOp : Hipsr_Op<"empty_yield",
   let arguments = (ins Variadic<AnyRankedTensor>:$tensors);
 
   let assemblyFormat = "($tensors^ `:` type($tensors))? attr-dict";
-
-  let hasVerifier = 1;
 
   let builders = [
     // No-arg build for the implicit terminator the parent auto-inserts.

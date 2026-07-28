@@ -9,15 +9,17 @@
 #ifndef HIPSR_EMPTY_OP
 #define HIPSR_EMPTY_OP
 
-include "mlir/Interfaces/SideEffectInterfaces.td"
 include "hip/Dialect/Hipsr/IR/HipsrOps.td"
+include "mlir/Interfaces/ControlFlowInterfaces.td"
+include "mlir/Interfaces/SideEffectInterfaces.td"
 
 //===----------------------------------------------------------------------===//
 // Hipsr_EmptyOp
 //===----------------------------------------------------------------------===//
 
 def Hipsr_EmptyOp : Hipsr_Op<"empty",
-    [Pure, SingleBlockImplicitTerminator<"EmptyYieldOp">]> {
+    [Pure, DeclareOpInterfaceMethods<RegionBranchOpInterface>,
+     SingleBlockImplicitTerminator<"EmptyYieldOp">]> {
   let summary = "Create init tensor(s) with shape computation in a region";
   let description = [{
     Creates init tensor(s) for destination-passing style operations. Shape
@@ -27,6 +29,9 @@ def Hipsr_EmptyOp : Hipsr_Op<"empty",
     The region contains operations that compute each tensor's shape (dimensions
     and element type), creates a tensor.empty() per result with those
     dimensions, and yields them via hipsr.empty_yield.
+
+    `RegionBranchOpInterface` models the region's yielded values as this
+    operation's results and verifies their counts and types.
 
     Example (single-output):
     ```mlir

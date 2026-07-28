@@ -5,35 +5,37 @@
 
 #include "hip/Dialect/Hipsr/IR/HipsrPoolDomainOp.h"
 
-// Needs the full PoolDomainYieldOp type: the implicit-terminator trait's
-// generated methods and verify() below both use it.
+// Generated SingleBlockImplicitTerminator methods need the complete
+// PoolDomainYieldOp class from HipsrPoolDomainYieldOp.h.
 #include "hip/Dialect/Hipsr/IR/HipsrPoolDomainYieldOp.h"
 
-#include "llvm/ADT/Sequence.h"
+#include "llvm/Support/ErrorHandling.h"
 
 using namespace mlir;
 using namespace mlir::hipsr;
 
-LogicalResult PoolDomainOp::verify() {
-  // The trait already guarantees a single block ending in PoolDomainYieldOp.
-  // Its operands become this op's results, so just check count and types.
-  auto yieldOp = cast<PoolDomainYieldOp>(getBody().front().getTerminator());
+OperandRange
+PoolDomainOp::getEntrySuccessorOperands(RegionSuccessor successor) {
+  if (successor.getSuccessor() != &getBody()) {
+    llvm::report_fatal_error(
+        "hipsr.pool_domain received an unexpected entry successor");
+  }
+  return getOperands();
+}
 
-  if (yieldOp.getNumOperands() != getNumResults())
-    return emitOpError() << "has " << getNumResults()
-                         << " result(s) but its pool_domain_yield yields "
-                         << yieldOp.getNumOperands() << " value(s)";
-
-  for (unsigned idx : llvm::seq<unsigned>(0, getNumResults())) {
-    Type resultType = getResultTypes()[idx];
-    Type yieldType = yieldOp.getOperandTypes()[idx];
-    if (resultType != yieldType)
-      return emitOpError() << "result #" << idx << " type " << resultType
-                           << " does not match the yielded value type "
-                           << yieldType;
+void PoolDomainOp::getSuccessorRegions(
+    RegionBranchPoint point, SmallVectorImpl<RegionSuccessor> &regions) {
+  if (point.isParent()) {
+    regions.emplace_back(&getBody(), getBody().getArguments());
+    return;
   }
 
-  return success();
+  Operation *terminator = point.getTerminatorPredecessorOrNull();
+  if (!terminator || terminator->getParentRegion() != &getBody()) {
+    llvm::report_fatal_error(
+        "hipsr.pool_domain received an unexpected branch point");
+  }
+  regions.emplace_back(getOperation(), getResults());
 }
 
 #define GET_OP_CLASSES

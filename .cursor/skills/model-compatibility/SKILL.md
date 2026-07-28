@@ -4,7 +4,7 @@ Licensed under the MIT License.
 -->
 ---
 name: model-compatibility
-description: Analyze ONNX models for AMD HIP / HIP EP compatibility against the onnx-hipdnn-ep dialect. Dumps the EP-input graph via VOE when available, classifies every operator as supported / partial / unsupported, generates markdown reports, and verifies every non-supported entry against the actual source in lib/Conversion and include/hip/Dialect/IR/HipOps.td to catch parser false positives. Use when the user asks to analyze an ONNX model, check op compatibility, diagnose EP fallbacks, decide if a model can run on hipdnn EP, or batch-compare multiple ONNX models.
+description: Analyze ONNX models for AMD HIP / HIP EP compatibility against the hip-ep dialect. Dumps the EP-input graph via VOE when available, classifies every operator as supported / partial / unsupported, generates markdown reports, and verifies every non-supported entry against the actual source in lib/Conversion and include/hip/Dialect/IR/HipOps.td to catch parser false positives. Use when the user asks to analyze an ONNX model, check op compatibility, diagnose EP fallbacks, decide if a model can run on hipdnn EP, or batch-compare multiple ONNX models.
 ---
 
 # model-compatibility
@@ -17,7 +17,7 @@ Run the ONNX -> HIP / HIP EP compatibility pipeline against a given ONNX model. 
 |---|---|---|
 | `<model.onnx>` | Yes | — |
 | `<VoePackageRoot>` | No (optional) | `$env:VOE_PACKAGE_ROOT` if set; otherwise must use `-SkipDump` |
-| `<OutputDir>` | No | `D:\temp\<meaningful-path-name>_ep_compat` (auto-derived from path; see below) |
+| `<OutputDir>` | No | `$env:TEMP\<meaningful-path-name>_ep_compat` (auto-derived from path; see below) |
 
 Before running, ask the user only for `<model.onnx>` if missing. **Never invent paths**. Do not reuse a path from an earlier chat unless the user confirms it again.
 
@@ -49,9 +49,9 @@ The orchestrator auto-derives a human-readable `OutputDir` from the model's path
 
 | Input model path | Auto OutputDir |
 |---|---|
-| `...\blip\onnx\decoder\fp16\model.onnx` | `D:\temp\blip_decoder_fp16_ep_compat` |
-| `...\blip\onnx\encoder\fp16\model.onnx` | `D:\temp\blip_encoder_fp16_ep_compat` |
-| `D:\bar\custom_v2.onnx` | `D:\temp\bar_custom_v2_ep_compat` |
+| `...\blip\onnx\decoder\fp16\model.onnx` | `$env:TEMP\blip_decoder_fp16_ep_compat` |
+| `...\blip\onnx\encoder\fp16\model.onnx` | `$env:TEMP\blip_encoder_fp16_ep_compat` |
+| `<any-drive>\bar\custom_v2.onnx` | `$env:TEMP\bar_custom_v2_ep_compat` |
 
 Re-runs against the same model reuse the same dir. If two genuinely-distinct models would collide on the auto name, pass `-OutputDir <dir>` explicitly.
 
@@ -82,9 +82,9 @@ Each non-supported entry resolves to one of three labels:
 When the user asks for multiple models, drive the loop yourself. The ONNX file name is **not** standardized (it may be `model.onnx`, `<model_name>.onnx`, `decoder.onnx`, etc.); ask the user for the filter pattern or default to `*.onnx`:
 
 ```powershell
-$skill = "<repo>\.cursor\skills\model-compatibility"
+$skill = ".cursor\skills\model-compatibility"
 # Pick ONE of:
-#   - Explicit list:           $models = @("D:\a\foo.onnx", "D:\b\bar.onnx")
+#   - Explicit list:           $models = @("<path>\foo.onnx", "<path>\bar.onnx")
 #   - All .onnx under a root:  $models = Get-ChildItem -Recurse -Filter *.onnx <models-root> | % FullName
 #   - Custom pattern:          $models = Get-ChildItem -Recurse -Filter <user-glob> <models-root> | % FullName
 foreach ($m in $models) {

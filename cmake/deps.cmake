@@ -52,10 +52,21 @@ if(_HIPDNN_NEED_TOOLCHAIN)
   # The resolved path is added to CMAKE_PREFIX_PATH so find_package(hip) finds it.
   if(NOT BUILD_MOCK_RUNTIME)
     set(THEROCK_DIST "" CACHE PATH "TheRock ROCm SDK distribution path")
-    if(THEROCK_DIST)
-      # Provided via -DTHEROCK_DIST: use as-is.
+    set(_therock_dist_resolved "${THEROCK_DIST}")
+    if(_therock_dist_resolved)
+      string(STRIP "${_therock_dist_resolved}" _therock_dist_resolved)
     elseif(DEFINED ENV{THEROCK_DIST})
-      set(THEROCK_DIST "$ENV{THEROCK_DIST}")
+      string(STRIP "$ENV{THEROCK_DIST}" _therock_dist_resolved)
+    endif()
+    if(_therock_dist_resolved AND NOT EXISTS "${_therock_dist_resolved}/bin")
+      message(WARNING
+        "THEROCK_DIST is set to '${_therock_dist_resolved}' but bin/ is missing; "
+        "falling back to auto-download under the build tree.")
+      set(_therock_dist_resolved "")
+    endif()
+    if(_therock_dist_resolved)
+      set(THEROCK_DIST "${_therock_dist_resolved}"
+          CACHE PATH "TheRock ROCm SDK distribution path" FORCE)
     else()
       # Auto-download: no SDK provided, so download the official tarball from the
       # public AMD host and extract it under the build tree, so a fresh real
@@ -412,6 +423,18 @@ if(BUILD_EP)
       GIT_SUBMODULES_RECURSE TRUE
       EXCLUDE_FROM_ALL)
     FetchContent_MakeAvailable(Protobuf)
+    # morphizen/unit-test/.../proto.cmake calls find_package(Protobuf CONFIG
+    # REQUIRED). FetchContent exposes protobuf:: targets but does not always
+    # populate Protobuf_DIR for a nested CONFIG-mode find.
+    if(TARGET protobuf::libprotobuf)
+      if(EXISTS "${Protobuf_BINARY_DIR}/protobuf-config.cmake")
+        set(Protobuf_DIR "${Protobuf_BINARY_DIR}" CACHE PATH
+            "Protobuf package config (FetchContent)" FORCE)
+      elseif(EXISTS "${Protobuf_BINARY_DIR}/cmake/protobuf-config.cmake")
+        set(Protobuf_DIR "${Protobuf_BINARY_DIR}/cmake" CACHE PATH
+            "Protobuf package config (FetchContent)" FORCE)
+      endif()
+    endif()
   endif()
 
   # Add morphizen subdirectory.
