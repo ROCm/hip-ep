@@ -8,7 +8,7 @@
 // CHECK-DAG:   %[[SLOT:.*]] = llvm.mlir.constant(-1 : i32) : i32
 // CHECK-DAG:   %[[TOP:.*]] = llvm.mlir.constant(1 : i64) : i64
 // CHECK:       llvm.call @wrap_miopenOpTensor(%[[CTX]], %[[SLOT]],
-// CHECK-SAME:    !llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK-SAME:    !llvm.ptr, i32, !llvm.ptr<1>, !llvm.ptr<1>, !llvm.ptr<1>, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 func.func @add(%ctx: !hipsr.context,
                %lhs: memref<4x1024xf16, #hipsr.mem<device>>,
                %rhs: memref<1024xf16, #hipsr.mem<device>>,
