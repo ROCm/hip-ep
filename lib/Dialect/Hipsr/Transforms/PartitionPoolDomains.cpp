@@ -10,43 +10,31 @@
 // The pass validates the top-level staging layout before planning and excludes
 // placeholders from boundary analysis.
 //
-// In the example, example.end_barrier implements EndBarrierInterface, and
-// hipsr.example_start_barrier implements both StartBarrierInterface and
-// DestinationStyleOpInterface with %init as its DPS init operand.
-//
 // Before:
 //   func.func @graph(%arg: tensor<?xf32>) -> tensor<?xf32> {
 //     %init = hipsr.placeholder : tensor<?xf32>
-//     %0 = "example.end_barrier"(%arg)
-//         : (tensor<?xf32>) -> tensor<?xf32>
-//     %1 = "example.compute"(%0) : (tensor<?xf32>) -> tensor<?xf32>
-//     %2 = "hipsr.example_start_barrier"(%1, %init)
+//     %0 = "example.compute"(%arg) : (tensor<?xf32>) -> tensor<?xf32>
+//     %1 = "hipsr.example_start_barrier"(%0, %init)
 //         : (tensor<?xf32>, tensor<?xf32>) -> tensor<?xf32>
-//     return %2 : tensor<?xf32>
+//     return %1 : tensor<?xf32>
 //   }
 //
 // After:
 //   func.func @graph(%arg: tensor<?xf32>) -> tensor<?xf32> {
 //     %0 = hipsr.pool_domain(%arg : tensor<?xf32>) {
 //     ^bb0(%domain_arg: tensor<?xf32>):
-//       %3 = "example.end_barrier"(%domain_arg)
+//       %2 = "example.compute"(%domain_arg)
 //           : (tensor<?xf32>) -> tensor<?xf32>
-//       hipsr.pool_domain_yield %3 : tensor<?xf32>
+//       hipsr.pool_domain_yield %2 : tensor<?xf32>
 //     } -> tensor<?xf32>
 //     %1 = hipsr.pool_domain(%0 : tensor<?xf32>) {
 //     ^bb0(%domain_arg: tensor<?xf32>):
-//       %3 = "example.compute"(%domain_arg)
-//           : (tensor<?xf32>) -> tensor<?xf32>
-//       hipsr.pool_domain_yield %3 : tensor<?xf32>
-//     } -> tensor<?xf32>
-//     %2 = hipsr.pool_domain(%1 : tensor<?xf32>) {
-//     ^bb0(%domain_arg: tensor<?xf32>):
 //       %init = hipsr.placeholder : tensor<?xf32>
-//       %3 = "hipsr.example_start_barrier"(%domain_arg, %init)
+//       %2 = "hipsr.example_start_barrier"(%domain_arg, %init)
 //           : (tensor<?xf32>, tensor<?xf32>) -> tensor<?xf32>
-//       hipsr.pool_domain_yield %3 : tensor<?xf32>
+//       hipsr.pool_domain_yield %2 : tensor<?xf32>
 //     } -> tensor<?xf32>
-//     return %2 : tensor<?xf32>
+//     return %1 : tensor<?xf32>
 //   }
 //
 // The placeholder verifier guarantees dedicated DPS-init use. A read-only

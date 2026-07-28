@@ -52,15 +52,11 @@ def PartitionPoolDomainsPass
     current domain, and the first operation consuming one of its results begins
     the next domain.
 
-    At this pipeline stage, every top-level hipsr DPS tensor init must be
-    produced by a dedicated top-level `hipsr.placeholder`. Every placeholder
-    result is verified to have exactly one use as a DPS init, with all results
-    initializing the same hipsr operation. A read-only preflight additionally
-    requires each placeholder and its consumer to be top-level. Boundary
-    analysis then ignores placeholders. After assigning the data operations to
-    domains, the pass finds their placeholders through the standard
-    destination-style interface and moves each one immediately before its
-    consumer.
+    Each top-level hipsr DPS tensor init must come from a dedicated top-level
+    `hipsr.placeholder`. Each result is used once, and all results initialize
+    the same operation. Preflight rejects nested placeholders or consumers
+    before mutation. Boundary analysis ignores placeholders; after assigning
+    data operations, the pass moves each placeholder before its consumer.
 
     External values enter through operands and entry-block arguments; escaping
     values become results. Multi-block functions and existing pool domains are

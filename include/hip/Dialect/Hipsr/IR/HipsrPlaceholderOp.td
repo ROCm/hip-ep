@@ -26,12 +26,9 @@ def Hipsr_PlaceholderOp : Hipsr_Op<"placeholder"> {
     per output). Its verifier requires each result to have exactly one use as a
     DPS init, with every result initializing the same hipsr operation.
 
-    At the pool-domain partitioning stage, every top-level hipsr DPS tensor init
-    must come from a top-level placeholder. The partitioning pass verifies this
-    staging layout, excludes placeholders from boundary analysis, and moves
-    each one inside its consumer's domain. A placeholder represents one DPS
-    destination and is intentionally not `Pure`, so CSE preserves its
-    consumer-specific identity.
+    A placeholder represents one DPS destination and is intentionally not
+    `Pure`, so CSE cannot merge consumer-specific destinations. Pool-domain
+    partitioning moves each placeholder beside its consumer.
 
     `hipsr.placeholder` is transient: it has no bufferization interface, so it
     must be replaced before bufferization runs.

@@ -52,7 +52,7 @@ func.func @non_placeholder_init(
 
 // -----
 
-// Placeholders must be top-level so the pass can recreate them in a domain.
+// Placeholders must be top-level so the pass can move them into a domain.
 func.func @nested_placeholder(%ctx: !hipsr.context,
                               %input: tensor<4x8xf32>)
     -> tensor<4x8xf16> {
