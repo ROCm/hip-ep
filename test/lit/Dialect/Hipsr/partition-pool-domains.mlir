@@ -125,10 +125,10 @@ func.func @zero_result_retained(
 // CHECK-LABEL: func.func @empty()
 // CHECK-NEXT: return
 // CHECK-NEXT: }
-// CHECK-LABEL: func.func private @declaration(i32) -> i32
-// CHECK-NEXT: }
 func.func @empty() {
   return
 }
 
+// CHECK-LABEL: func.func private @declaration(i32) -> i32
+// CHECK-NEXT: }
 func.func private @declaration(i32) -> i32
