@@ -20,7 +20,7 @@ on:
         default: main
   push:
     branches:
-      - ci/winml-msix-build
+      - ci/winml-msix-build*
 
 jobs:
   build-msix:
