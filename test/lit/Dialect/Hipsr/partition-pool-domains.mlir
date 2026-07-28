@@ -1,7 +1,9 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// RUN: hip-mlir-opt --split-input-file -hipsr-partition-pool-domains %s | FileCheck %s
+// CSE before or after partitioning must preserve consumer-specific placeholders.
+// RUN: hip-mlir-opt --split-input-file -cse -hipsr-partition-pool-domains %s | FileCheck %s
+// RUN: hip-mlir-opt --split-input-file -hipsr-partition-pool-domains -cse %s | FileCheck %s
 
 // Each runtime Expand starts a domain. Values flow through three domains while
 // placeholders stay immediately before their Cast, Expand, and Add consumers.
@@ -56,34 +58,31 @@ func.func @runtime_expands_split_domains(
 
 // -----
 
-// A dense hipsr.constant shape disables Expand's start barrier, so Constant,
-// Cast, and Expand remain in one domain.
-// CHECK-LABEL: func.func @constant_expand_stays_in_domain(
-// CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<1x4xf32>)
-// CHECK: %[[DOMAIN:.*]] = hipsr.pool_domain(%[[CTX]], %[[INPUT]] : !hipsr.context, tensor<1x4xf32>) {
-// CHECK-NEXT: ^bb0(%[[DOMAIN_CTX:.*]]: !hipsr.context, %[[DOMAIN_INPUT:.*]]: tensor<1x4xf32>):
-// CHECK-NEXT: %[[SHAPE:.*]] = hipsr.constant {value = dense<[2, 4]> : tensor<2xi64>} : tensor<2xi64>
-// CHECK-NEXT: %[[CAST_INIT:.*]] = hipsr.placeholder : tensor<1x4xf16>
-// CHECK-NEXT: %[[CAST:.*]] = hipsr.cast(%[[DOMAIN_CTX]]) ins(%[[DOMAIN_INPUT]] : tensor<1x4xf32>) outs(%[[CAST_INIT]] : tensor<1x4xf16>) : tensor<1x4xf16>
-// CHECK-NEXT: %[[EXPAND_INIT:.*]] = hipsr.placeholder : tensor<2x4xf16>
-// CHECK-NEXT: %[[RESULT:.*]] = hipsr.expand(%[[DOMAIN_CTX]]) ins(%[[CAST]], %[[SHAPE]] : tensor<1x4xf16>, tensor<2xi64>) outs(%[[EXPAND_INIT]] : tensor<2x4xf16>) : tensor<2x4xf16>
-// CHECK-NEXT: hipsr.pool_domain_yield %[[RESULT]] : tensor<2x4xf16>
-// CHECK-NEXT: } -> tensor<2x4xf16>
-// CHECK-NEXT: return %[[DOMAIN]] : tensor<2x4xf16>
+// A shape_attr avoids a runtime shape-data read, so Expand stays in Cast's
+// domain even though broadcasting preserves a dynamic result dimension.
+// CHECK-LABEL: func.func @shape_attr_dynamic_result_stays_in_domain(
+// CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<?x3xf32>)
+// CHECK: %[[DOMAIN:.*]] = hipsr.pool_domain(%[[CTX]], %[[INPUT]] : !hipsr.context, tensor<?x3xf32>) {
+// CHECK-NEXT: ^bb0(%[[DOMAIN_CTX:.*]]: !hipsr.context, %[[DOMAIN_INPUT:.*]]: tensor<?x3xf32>):
+// CHECK-NEXT: %[[CAST_INIT:.*]] = hipsr.placeholder : tensor<?x3xf16>
+// CHECK-NEXT: %[[CAST:.*]] = hipsr.cast(%[[DOMAIN_CTX]]) ins(%[[DOMAIN_INPUT]] : tensor<?x3xf32>) outs(%[[CAST_INIT]] : tensor<?x3xf16>) : tensor<?x3xf16>
+// CHECK-NEXT: %[[EXPAND_INIT:.*]] = hipsr.placeholder : tensor<?x3xf16>
+// CHECK-NEXT: %[[RESULT:.*]] = hipsr.expand(%[[DOMAIN_CTX]]) ins(%[[CAST]] : tensor<?x3xf16>) outs(%[[EXPAND_INIT]] : tensor<?x3xf16>) {shape_attr = array<i64: 1, 3>} : tensor<?x3xf16>
+// CHECK-NEXT: hipsr.pool_domain_yield %[[RESULT]] : tensor<?x3xf16>
+// CHECK-NEXT: } -> tensor<?x3xf16>
+// CHECK-NEXT: return %[[DOMAIN]] : tensor<?x3xf16>
 // CHECK-NEXT: }
-func.func @constant_expand_stays_in_domain(
-    %ctx: !hipsr.context, %input: tensor<1x4xf32>) -> tensor<2x4xf16> {
-  %shape = hipsr.constant {
-    value = dense<[2, 4]> : tensor<2xi64>
-  } : tensor<2xi64>
-  %cast_init = hipsr.placeholder : tensor<1x4xf16>
-  %cast = hipsr.cast(%ctx) ins(%input : tensor<1x4xf32>)
-      outs(%cast_init : tensor<1x4xf16>) : tensor<1x4xf16>
-  %expand_init = hipsr.placeholder : tensor<2x4xf16>
+func.func @shape_attr_dynamic_result_stays_in_domain(
+    %ctx: !hipsr.context, %input: tensor<?x3xf32>) -> tensor<?x3xf16> {
+  %cast_init = hipsr.placeholder : tensor<?x3xf16>
+  %cast = hipsr.cast(%ctx) ins(%input : tensor<?x3xf32>)
+      outs(%cast_init : tensor<?x3xf16>) : tensor<?x3xf16>
+  %expand_init = hipsr.placeholder : tensor<?x3xf16>
   %result = hipsr.expand(%ctx)
-      ins(%cast, %shape : tensor<1x4xf16>, tensor<2xi64>)
-      outs(%expand_init : tensor<2x4xf16>) : tensor<2x4xf16>
-  return %result : tensor<2x4xf16>
+      ins(%cast : tensor<?x3xf16>)
+      outs(%expand_init : tensor<?x3xf16>)
+      {shape_attr = array<i64: 1, 3>} : tensor<?x3xf16>
+  return %result : tensor<?x3xf16>
 }
 
 // -----

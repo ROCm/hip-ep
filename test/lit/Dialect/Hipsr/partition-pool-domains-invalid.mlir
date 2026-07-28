@@ -25,6 +25,21 @@ func.func @existing_domain(%arg: i32) -> i32 {
 
 // -----
 
+// Existing pool domains are rejected at any nesting depth.
+func.func @nested_existing_domain(%arg: i32) -> i32 {
+  %0 = scf.execute_region -> i32 {
+    // expected-error @+1 {{hipsr-partition-pool-domains does not support existing pool domains}}
+    %1 = hipsr.pool_domain(%arg : i32) {
+    ^bb0(%domain_arg: i32):
+      hipsr.pool_domain_yield %domain_arg : i32
+    } -> i32
+    scf.yield %1 : i32
+  }
+  return %0 : i32
+}
+
+// -----
+
 // Every tensor DPS init must come from a dedicated placeholder.
 func.func @non_placeholder_init(
     %ctx: !hipsr.context, %input: tensor<4x8xf32>,

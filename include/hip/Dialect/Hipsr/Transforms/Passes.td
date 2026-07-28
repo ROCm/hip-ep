@@ -59,9 +59,8 @@ def PartitionPoolDomainsPass
     requires each placeholder and its consumer to be top-level. Boundary
     analysis then ignores placeholders. After assigning the data operations to
     domains, the pass finds their placeholders through the standard
-    destination-style interface, recreates each one immediately before its
-    consumer, and erases the original. Placeholder staging must complete before
-    CSE, which may merge same-typed pure placeholders.
+    destination-style interface and moves each one immediately before its
+    consumer.
 
     External values enter through operands and entry-block arguments; escaping
     values become results. Multi-block functions and existing pool domains are

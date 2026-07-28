@@ -52,19 +52,15 @@
 // The placeholder verifier guarantees dedicated DPS-init use. A read-only
 // preflight additionally requires each placeholder and its consumer to be
 // top-level. Domain planning then considers only non-placeholder operations.
-// Materialization moves those operations into their domains and derives each
-// consumer's placeholders from its DPS init operands. It recreates the
-// placeholders immediately before the consumer and erases the originals.
-// MLIR's region-isolation utility then derives the operands and entry-block
-// arguments.
+// Materialization moves those operations into their domains, derives each
+// consumer's placeholders from its DPS init operands, and moves the
+// placeholders immediately before the consumer. MLIR's region-isolation
+// utility then derives the operands and entry-block arguments.
 //
 //===----------------------------------------------------------------------===//
 
-#include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 #include "hip/Dialect/Hipsr/IR/HipsrEndBarrierInterface.h"
-#include "hip/Dialect/Hipsr/IR/HipsrPlaceholderOp.h"
-#include "hip/Dialect/Hipsr/IR/HipsrPoolDomainOp.h"
-#include "hip/Dialect/Hipsr/IR/HipsrPoolDomainYieldOp.h"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 #include "hip/Dialect/Hipsr/IR/HipsrStartBarrierInterface.h"
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
 
@@ -127,10 +123,23 @@ static bool isHipsrDpsOp(Operation &operation) {
          isa<DestinationStyleOpInterface>(operation);
 }
 
-static LogicalResult verifyNoNestedPlaceholders(Operation &operation) {
-  WalkResult result = operation.walk([&](PlaceholderOp placeholder) {
-    placeholder.emitOpError("must be top-level when partitioning pool domains");
-    return WalkResult::interrupt();
+static LogicalResult verifyNoUnsupportedNestedOps(Operation &operation) {
+  WalkResult result = operation.walk([&](Operation *nested) {
+    if (nested == &operation) {
+      return WalkResult::advance();
+    }
+    if (isa<PoolDomainOp>(nested)) {
+      nested->emitError(
+          "hipsr-partition-pool-domains does not support existing pool "
+          "domains");
+      return WalkResult::interrupt();
+    }
+    if (auto placeholder = dyn_cast<PlaceholderOp>(nested)) {
+      placeholder.emitOpError(
+          "must be top-level when partitioning pool domains");
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
   });
   return result.wasInterrupted() ? failure() : success();
 }
@@ -178,7 +187,7 @@ static LogicalResult validatePartitionInput(Block &block) {
       continue;
     }
 
-    if (failed(verifyNoNestedPlaceholders(operation))) {
+    if (failed(verifyNoUnsupportedNestedOps(operation))) {
       return failure();
     }
     if (failed(verifyDpsInitPlaceholders(operation, block))) {
@@ -244,7 +253,7 @@ static SmallVector<Domain> partitionIntoDomains(Block &block) {
   return domains;
 }
 
-static void recreatePlaceholders(IRRewriter &rewriter, const Domain &domain) {
+static void movePlaceholders(IRRewriter &rewriter, const Domain &domain) {
   for (Operation *consumer : domain.operations) {
     if (!isHipsrDpsOp(*consumer)) {
       continue;
@@ -259,10 +268,8 @@ static void recreatePlaceholders(IRRewriter &rewriter, const Domain &domain) {
       }
     }
 
-    rewriter.setInsertionPoint(consumer);
     for (Operation *placeholder : placeholders) {
-      Operation *replacement = rewriter.clone(*placeholder);
-      rewriter.replaceOp(placeholder, replacement->getResults());
+      rewriter.moveOpBefore(placeholder, consumer);
     }
   }
 }
@@ -288,7 +295,7 @@ static void materializeDomains(ArrayRef<Domain> domains) {
     for (Operation *operation : domain.operations) {
       rewriter.moveOpBefore(operation, body, body->end());
     }
-    recreatePlaceholders(rewriter, domain);
+    movePlaceholders(rewriter, domain);
 
     SmallVector<Value> capturedValues =
         makeRegionIsolatedFromAbove(rewriter, bodyRegion);
@@ -296,8 +303,8 @@ static void materializeDomains(ArrayRef<Domain> domains) {
         domainOp, [&] { domainOp->insertOperands(0, capturedValues); });
 
     Block &entryBlock = bodyRegion.front();
-    // Ensure implicit captures in descendant regions are also remapped to the
-    // entry arguments created by makeRegionIsolatedFromAbove.
+    // makeRegionIsolatedFromAbove rewrites uses owned directly by this region's
+    // blocks. Remap the captured values used in descendant regions as well.
     for (auto [capturedValue, argument] :
          llvm::zip_equal(capturedValues, entryBlock.getArguments())) {
       replaceAllUsesInRegionWith(capturedValue, argument, bodyRegion);

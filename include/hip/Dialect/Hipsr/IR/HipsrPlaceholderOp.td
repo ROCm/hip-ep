@@ -11,7 +11,7 @@
 // Hipsr_PlaceholderOp
 //===----------------------------------------------------------------------===//
 
-def Hipsr_PlaceholderOp : Hipsr_Op<"placeholder", [Pure]> {
+def Hipsr_PlaceholderOp : Hipsr_Op<"placeholder"> {
   let summary = "Typed placeholder for a hipsr DPS op's init operand(s)";
   let description = [{
     Stands in for the `outs` init operand(s) of a hipsr DPS op. It takes the DPS
@@ -28,9 +28,10 @@ def Hipsr_PlaceholderOp : Hipsr_Op<"placeholder", [Pure]> {
 
     At the pool-domain partitioning stage, every top-level hipsr DPS tensor init
     must come from a top-level placeholder. The partitioning pass verifies this
-    staging layout, excludes placeholders from boundary analysis, and recreates
-    each one inside its consumer's domain. Placeholder staging must complete
-    before CSE, which may merge same-typed pure placeholders.
+    staging layout, excludes placeholders from boundary analysis, and moves
+    each one inside its consumer's domain. A placeholder represents one DPS
+    destination and is intentionally not `Pure`, so CSE preserves its
+    consumer-specific identity.
 
     `hipsr.placeholder` is transient: it has no bufferization interface, so it
     must be replaced before bufferization runs.
