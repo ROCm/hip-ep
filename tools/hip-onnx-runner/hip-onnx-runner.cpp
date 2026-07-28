@@ -29,6 +29,10 @@ Options:
  -1 = default, not call this function  (default: -1)
 -p, --positive-only       Generate positive-only random inputs [0.1, 256.0]
  for Sqrt/Reciprocal testing (flag)
+--dump-compiler-mlir      Dump MorphiZen MLIR before hip-compiler (sets env
+ vars before EP load; see --mlir-dump-dir) (flag)
+--mlir-dump-dir           Directory for morphizen MLIR dumps (default with
+ --dump-compiler-mlir: $WORKSPACE/temp/mlir-dumps/<model_stem>)
 */
 //===----------------------------------------------------------------------===//
 
@@ -61,6 +65,39 @@ Options:
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// MorphiZen reads many debug env vars once at DLL static init — set before
+// RegisterExecutionProviderLibrary.
+static void set_process_env(const char *key, const char *value) {
+#if _WIN32
+  if (_putenv_s(key, value) != 0)
+    std::cerr << "Warning: failed to set env var " << key << " via _putenv_s\n";
+#else
+  if (setenv(key, value, 1) != 0)
+    std::cerr << "Warning: failed to set env var " << key << " via setenv\n";
+#endif
+}
+
+static void enable_compiler_mlir_dump_env() {
+  set_process_env("MORPHIZEN_DEBUG_MLIR_BACKEND", "2");
+  set_process_env("MORPHIZEN_SAVE_MLIR_AS_TEXT", "1");
+  set_process_env("ENABLE_SAVE_GRAPH_MLIR", "1");
+  set_process_env("XLNX_ONNX_EP_VERBOSE", "2");
+}
+
+static std::filesystem::path
+default_mlir_dump_dir(const std::filesystem::path &model_path) {
+  std::filesystem::path base =
+      std::filesystem::current_path() / "temp" / "mlir-dumps";
+  if (const char *workspace = std::getenv("WORKSPACE");
+      workspace && *workspace) {
+    base = std::filesystem::u8path(workspace) / "temp" / "mlir-dumps";
+  }
+  std::string stem = model_path.stem().string();
+  if (stem.empty())
+    stem = "model";
+  return base / stem;
+}
 
 static int64_t calculate_product(const std::vector<int64_t> &shape) {
   int64_t n = 1;
@@ -835,6 +872,14 @@ int main(int argc, char *argv[]) {
       "graph; the value only sizes the input tensors. Symbolic dims without a "
       "matching override default to 1.",
       "");
+  mo.add_option("", "dump-compiler-mlir",
+                "Dump MLIR fed to hip-compiler (mlir_bytecode_dump.mlir) and "
+                "per-pass snapshots; sets MorphiZen env before EP load",
+                "false", true);
+  mo.add_option("", "mlir-dump-dir",
+                "MorphiZen dump_dir provider option (used with "
+                "--dump-compiler-mlir or manual env)",
+                "");
 
   try {
     mo.parse(argc, argv);
@@ -858,6 +903,9 @@ int main(int argc, char *argv[]) {
   const bool use_input_files = !input_dir_str.empty();
   const int graph_optimization_level = mo.get<int>("graph-opt-level");
   const bool positive_only = mo.get<bool>("positive-only");
+  const bool dump_compiler_mlir = mo.get<bool>("dump-compiler-mlir");
+  std::string mlir_dump_dir_str =
+      trim_string(mo.get<std::string>("mlir-dump-dir"));
 
   if ((l2norm_arg.size() == 2) && !l2norm_arg[0].empty() &&
       !l2norm_arg[1].empty()) {
@@ -873,6 +921,47 @@ int main(int argc, char *argv[]) {
     std::cerr << "Error: --dump-level must be 0, 1, 2, or 3.\n\n";
     mo.print_help(argv[0]);
     return 1;
+  }
+
+  if (dump_compiler_mlir) {
+    if (no_ep) {
+      std::cerr
+          << "Warning: --dump-compiler-mlir has no effect with --no-ep.\n";
+    } else {
+      enable_compiler_mlir_dump_env();
+    }
+  }
+  std::filesystem::path mlir_dump_dir;
+  if (!mlir_dump_dir_str.empty()) {
+    mlir_dump_dir = std::filesystem::u8path(mlir_dump_dir_str);
+  } else if (dump_compiler_mlir && !model_path_str.empty()) {
+    mlir_dump_dir =
+        default_mlir_dump_dir(std::filesystem::u8path(model_path_str));
+  }
+  if (!mlir_dump_dir.empty()) {
+    std::error_code ec;
+    std::filesystem::create_directories(mlir_dump_dir, ec);
+    if (ec) {
+      std::cerr << "Error: cannot create --mlir-dump-dir "
+                << mlir_dump_dir.string() << ": " << ec.message() << "\n";
+      return 1;
+    }
+  }
+  if (dump_compiler_mlir && !no_ep) {
+    std::cout << "MorphiZen MLIR dump enabled.\n";
+    if (!mlir_dump_dir.empty()) {
+      std::cout << "  dump_dir: " << mlir_dump_dir.string() << "\n";
+      std::cout << "  pre-compiler input: "
+                << (mlir_dump_dir / "mlir_bytecode_dump.mlir").string() << "\n";
+      std::cout << "  per-pass snapshots: morphizen.*.mlir in the same dir\n";
+    } else {
+      std::cout << "  dump_dir: C:\\temp\\morphizen_dumps\\<cache_key> "
+                   "(default; pass --mlir-dump-dir for a fixed path)\n";
+      std::cout << "  pre-compiler input: .../mlir_bytecode_dump.mlir\n";
+    }
+    std::cout << "  (MORPHIZEN_SAVE_MLIR_AS_TEXT=1 => text MLIR; else use "
+                 "hip-mlir-opt to decode bytecode)\n";
+    std::cout.flush();
   }
 
   // ORT environment
@@ -958,6 +1047,10 @@ int main(int argc, char *argv[]) {
     std::unordered_map<std::string, std::string> ep_opts;
     if (const char *af = std::getenv("HIPDNN_EP_ARTIFACT_FORMAT"))
       ep_opts["artifact_format"] = af;
+    if (!mlir_dump_dir.empty()) {
+      const std::string dump_dir_u8 = mlir_dump_dir.u8string();
+      ep_opts["dump_dir"] = dump_dir_u8;
+    }
     session_opts.AppendExecutionProvider_V2(env, devices, ep_opts);
     session_opts.AddConfigEntry("session.disable_cpu_ep_fallback", "1");
   }

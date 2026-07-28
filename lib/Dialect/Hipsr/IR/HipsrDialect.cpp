@@ -10,6 +10,7 @@
 #include "hip/Dialect/Hipsr/IR/HipsrConstantOp.h"
 #include "hip/Dialect/Hipsr/IR/HipsrEmptyOp.h"
 #include "hip/Dialect/Hipsr/IR/HipsrEmptyYieldOp.h"
+#include "hip/Dialect/Hipsr/IR/HipsrGetPoolOp.h"
 #include "hip/Dialect/Hipsr/IR/HipsrMatMulOp.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 #include "hip/Dialect/Hipsr/IR/HipsrPlaceholderOp.h"
@@ -72,6 +73,9 @@ void HipsrDialect::initialize() {
 #include "hip/Dialect/Hipsr/IR/HipsrAddOp.cpp.inc"
       ,
 #define GET_OP_LIST
+#include "hip/Dialect/Hipsr/IR/HipsrGetPoolOp.cpp.inc"
+      ,
+#define GET_OP_LIST
 #include "hip/Dialect/Hipsr/IR/HipsrPlaceholderOp.cpp.inc"
       >();
   addAttributes<
@@ -111,6 +115,7 @@ void populateHipsrToLLVMPatterns(const LLVMTypeConverter &typeConverter,
                                  RewritePatternSet &patterns) {
   populateHipsrConstantLoweringPatterns(typeConverter, patterns);
   populateHipsrAddLoweringPatterns(typeConverter, patterns);
+  populateHipsrGetPoolLoweringPatterns(typeConverter, patterns);
 }
 
 struct HipsrConvertToLLVMInterface : public ConvertToLLVMPatternInterface {

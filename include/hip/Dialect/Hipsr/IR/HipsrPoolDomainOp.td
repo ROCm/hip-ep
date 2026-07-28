@@ -11,35 +11,39 @@
 #define HIPSR_POOL_DOMAIN_OP
 
 include "hip/Dialect/Hipsr/IR/HipsrOps.td"
-include "hip/Dialect/Hipsr/IR/HipsrTraits.td"
+include "mlir/Interfaces/ControlFlowInterfaces.td"
+include "mlir/Interfaces/SideEffectInterfaces.td"
 
 //===----------------------------------------------------------------------===//
 // Hipsr_PoolDomainOp
 //===----------------------------------------------------------------------===//
 
 def Hipsr_PoolDomainOp : Hipsr_Op<"pool_domain", [
-    IsolatedFromAboveButAllowOperands,
+    DeclareOpInterfaceMethods<RegionBranchOpInterface,
+                              ["getEntrySuccessorOperands"]>,
+    IsolatedFromAbove,
+    RecursiveMemoryEffects,
     SingleBlockImplicitTerminator<"PoolDomainYieldOp">
   ]> {
   let summary = "Group operations that share one memory pool";
   let description = [{
-    Groups a sequence of operations so they can share one memory pool.
+    Groups operations that share one memory pool.
 
-    The body is a single block ending in `hipsr.pool_domain_yield`, whose
-    values become this op's results. `IsolatedFromAboveButAllowOperands` lets
-    the body read this op's operands but nothing else outside, so the block
-    takes no arguments. Operands and results are `AnyType`, so the op is
-    unchanged by bufferization (tensors just become memrefs).
+    `IsolatedFromAbove` and `RegionBranchOpInterface` make every value crossing
+    the boundary explicit and verifiable. This gives transformations complete
+    dependency information when treating the group as one unit.
+    `RecursiveMemoryEffects` keeps nested effects visible to analyses.
+    `AnyType` lets the group stay in place during bufferization.
 
     Example:
     ```mlir
-    %out:2 = hipsr.pool_domain(%ctx, %in : !hipsr.context, tensor<3x4xf32>) {
-      %c1 = arith.constant 1 : index
-      %n = tensor.dim %in, %c1 : tensor<3x4xf32>
-      %idx = tensor.empty(%n) : tensor<2x?xi64>
-      %cnt = tensor.empty() : tensor<i32>
-      hipsr.pool_domain_yield %idx, %cnt : tensor<2x?xi64>, tensor<i32>
-    } -> tensor<2x?xi64>, tensor<i32>
+    %out = hipsr.pool_domain(%ctx, %input : !hipsr.context, tensor<?xf32>) {
+    ^bb0(%domain_ctx: !hipsr.context, %domain_input: tensor<?xf32>):
+      %c0 = arith.constant 0 : index
+      %size = tensor.dim %domain_input, %c0 : tensor<?xf32>
+      %buffer = tensor.empty(%size) : tensor<?xf32>
+      hipsr.pool_domain_yield %buffer : tensor<?xf32>
+    } -> tensor<?xf32>
     ```
   }];
 
@@ -53,8 +57,6 @@ def Hipsr_PoolDomainOp : Hipsr_Op<"pool_domain", [
     `(` ($operands^ `:` type($operands))? `)` $body
     (`->` type($results)^)? attr-dict
   }];
-
-  let hasVerifier = 1;
 }
 
 #endif // HIPSR_POOL_DOMAIN_OP
