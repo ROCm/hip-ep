@@ -199,9 +199,8 @@ ReduceL2ToHip::matchAndRewrite(mlir::Operation *op,
             "static axes)");
   mlir::RankedTensorType resultType = *resultTypeOr;
 
-  mlir::Value init =
-      buildReduceL2Init(rewriter, loc, resultType, data, axesVec, axesKnown,
-                        keepdims);
+  mlir::Value init = buildReduceL2Init(rewriter, loc, resultType, data, axesVec,
+                                       axesKnown, keepdims);
 
   auto keepdimsAttr = rewriter.getI64IntegerAttr(keepdims);
   auto noopWithEmptyAxesAttr = rewriter.getI64IntegerAttr(noopWithEmptyAxes);
