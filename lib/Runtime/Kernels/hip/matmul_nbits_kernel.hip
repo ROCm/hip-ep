@@ -170,7 +170,13 @@ __global__ void matmul_nbits_kernel(
 
   float acc = 0.0f;
   const __half* a_row = A + batch * M * K + m * K;
-  const uint8_t* b_row = B + n * (K / 2);
+  // Packed 4-bit weight rows are [N, k_blocks, block_size/2] bytes. The row
+  // stride must use k_blocks (= ceil(K/block_size)), NOT K/2: when K is not a
+  // multiple of block_size the last block is padded, so the true row is
+  // k_blocks*(block_size/2) bytes, which exceeds K/2. Using K/2 misaligns
+  // every row n>0 by the padding delta and corrupts the output. When
+  // K % block_size == 0 this equals K/2 (backward compatible).
+  const uint8_t* b_row = B + n * (k_blocks * blob_size);
   const __half* s_row = scales + n * k_blocks;
 
   for (int64_t blk = 0; blk < k_blocks; blk++) {
