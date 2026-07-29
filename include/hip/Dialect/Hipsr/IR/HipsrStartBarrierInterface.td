@@ -14,19 +14,19 @@ def StartBarrierInterface : OpInterface<"StartBarrierInterface"> {
   let cppNamespace = "::mlir::hipsr";
 
   let description = [{
-    Marks an op that starts a new pool domain: it is the first op in the new
-    domain because its output shape comes from its input data (e.g. Expand).
+    Marks an op that reads tensor values at runtime to compute its output shape,
+    such as Expand reading its shape operand.
 
-    This is an interface method rather than a trait because barrier status can
-    depend on the operation instance: an Expand with a compile-time shape
-    attribute is not a barrier (its output shape is static), while one with a
-    runtime shape operand is. The default returns true; an op overrides
-    isStartBarrier() to return false when its shape is static.
+    An op may start a domain in some cases but not others. Expand does not start
+    one when its shape is an attribute, even if the result type is dynamic. It
+    does start one when the shape comes from a tensor. The default is true. Ops
+    return false from `isStartBarrier()` when they do not need runtime shape
+    data.
   }];
 
   let methods = [
     InterfaceMethod<
-      "Return true if this op instance starts a new pool domain.",
+      "Return true if this op starts a new pool domain.",
       "bool", "isStartBarrier", (ins),
       /*methodBody=*/[{}],
       /*defaultImplementation=*/[{

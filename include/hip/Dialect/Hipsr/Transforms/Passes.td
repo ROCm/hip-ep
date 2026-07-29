@@ -41,6 +41,109 @@ def PopulateShapeRegionPass
   ];
 }
 
+def PartitionPoolDomainsPass
+    : Pass<"hipsr-partition-pool-domains", "mlir::func::FuncOp"> {
+  let summary = "Split a function into hipsr pool domains";
+  let description = [{
+    Groups as many ops as possible into each `hipsr.pool_domain` in a
+    single-block function. Each domain is `IsolatedFromAbove`. An active
+    `StartBarrierInterface` op starts a domain. An active
+    `EndBarrierInterface` op stays in its domain; the first op that uses any
+    result starts the next domain.
+
+    See `hipsr.placeholder` for placeholder requirements.
+
+    Values defined outside a domain become domain operands and block arguments.
+    Values used outside the domain become domain results. The pass rejects
+    multi-block functions and existing pool domains before changing the IR.
+
+    `hipsr.example_end_barrier` below stands in for a future DPS end-barrier
+    op.
+
+    Before:
+    ```mlir
+    func.func @graph(%ctx: !hipsr.context, %input: tensor<?x4xf32>,
+        %shape: tensor<2xi64>) -> tensor<?x4xf16> {
+      %cast_init = hipsr.placeholder : tensor<?x4xf16>
+      %cast = hipsr.cast(%ctx) ins(%input : tensor<?x4xf32>)
+          outs(%cast_init : tensor<?x4xf16>) : tensor<?x4xf16>
+      %ready_init = hipsr.placeholder : tensor<?x4xf16>
+      %ready = hipsr.example_end_barrier(%ctx)
+          ins(%cast : tensor<?x4xf16>)
+          outs(%ready_init : tensor<?x4xf16>) : tensor<?x4xf16>
+      %add_init = hipsr.placeholder : tensor<?x4xf16>
+      %sum = hipsr.add(%ctx)
+          ins(%ready, %ready : tensor<?x4xf16>, tensor<?x4xf16>)
+          outs(%add_init : tensor<?x4xf16>) : tensor<?x4xf16>
+      %expand_init = hipsr.placeholder : tensor<?x4xf16>
+      %expanded = hipsr.expand(%ctx)
+          ins(%sum, %shape : tensor<?x4xf16>, tensor<2xi64>)
+          outs(%expand_init : tensor<?x4xf16>) : tensor<?x4xf16>
+      %result_init = hipsr.placeholder : tensor<?x4xf16>
+      %result = hipsr.add(%ctx)
+          ins(%expanded, %expanded : tensor<?x4xf16>, tensor<?x4xf16>)
+          outs(%result_init : tensor<?x4xf16>) : tensor<?x4xf16>
+      return %result : tensor<?x4xf16>
+    }
+    ```
+
+    After:
+    ```mlir
+    func.func @graph(%ctx: !hipsr.context, %input: tensor<?x4xf32>,
+        %shape: tensor<2xi64>) -> tensor<?x4xf16> {
+      %0 = hipsr.pool_domain(%ctx, %input
+          : !hipsr.context, tensor<?x4xf32>) {
+      ^bb0(%domain_ctx: !hipsr.context,
+           %domain_input: tensor<?x4xf32>):
+        %cast_init = hipsr.placeholder : tensor<?x4xf16>
+        %cast = hipsr.cast(%domain_ctx)
+            ins(%domain_input : tensor<?x4xf32>)
+            outs(%cast_init : tensor<?x4xf16>) : tensor<?x4xf16>
+        %ready_init = hipsr.placeholder : tensor<?x4xf16>
+        %ready = hipsr.example_end_barrier(%domain_ctx)
+            ins(%cast : tensor<?x4xf16>)
+            outs(%ready_init : tensor<?x4xf16>) : tensor<?x4xf16>
+        hipsr.pool_domain_yield %ready : tensor<?x4xf16>
+      } -> tensor<?x4xf16>
+      %1 = hipsr.pool_domain(%ctx, %0
+          : !hipsr.context, tensor<?x4xf16>) {
+      ^bb0(%domain_ctx: !hipsr.context,
+           %domain_input: tensor<?x4xf16>):
+        %add_init = hipsr.placeholder : tensor<?x4xf16>
+        %sum = hipsr.add(%domain_ctx)
+            ins(%domain_input, %domain_input
+                : tensor<?x4xf16>, tensor<?x4xf16>)
+            outs(%add_init : tensor<?x4xf16>) : tensor<?x4xf16>
+        hipsr.pool_domain_yield %sum : tensor<?x4xf16>
+      } -> tensor<?x4xf16>
+      %2 = hipsr.pool_domain(%ctx, %1, %shape
+          : !hipsr.context, tensor<?x4xf16>, tensor<2xi64>) {
+      ^bb0(%domain_ctx: !hipsr.context,
+           %domain_input: tensor<?x4xf16>,
+           %domain_shape: tensor<2xi64>):
+        %expand_init = hipsr.placeholder : tensor<?x4xf16>
+        %expanded = hipsr.expand(%domain_ctx)
+            ins(%domain_input, %domain_shape
+                : tensor<?x4xf16>, tensor<2xi64>)
+            outs(%expand_init : tensor<?x4xf16>) : tensor<?x4xf16>
+        %result_init = hipsr.placeholder : tensor<?x4xf16>
+        %result = hipsr.add(%domain_ctx)
+            ins(%expanded, %expanded : tensor<?x4xf16>, tensor<?x4xf16>)
+            outs(%result_init : tensor<?x4xf16>) : tensor<?x4xf16>
+        hipsr.pool_domain_yield %result : tensor<?x4xf16>
+      } -> tensor<?x4xf16>
+      return %2 : tensor<?x4xf16>
+    }
+    ```
+
+    The end barrier stays in the first domain. Its first user starts the second
+    domain. Expand is a start barrier, so it starts the third domain.
+  }];
+  let dependentDialects = [
+    "::mlir::hipsr::HipsrDialect"
+  ];
+}
+
 def HipsrExternalizeConstantsPass
     : Pass<"hipsr-externalize-constants", "mlir::ModuleOp"> {
   let summary = "Externalize hipsr.constant: stamp offset/size/index, write constants file";
@@ -55,6 +158,19 @@ def HipsrExternalizeConstantsPass
   ];
   let dependentDialects = [
     "::mlir::hipsr::HipsrDialect"
+  ];
+}
+
+def HipsrPoolAllocPass : Pass<"hipsr-pool-alloc", "mlir::ModuleOp"> {
+  let summary = "Pool intermediate buffers per pool_domain by lifetime";
+  let description = [{
+    Pools each `hipsr.pool_domain`'s `memref.alloc`s by lifetime:
+    non-overlapping ones share one `hipsr.get_pool` buffer as `memref.view`s.
+  }];
+  let dependentDialects = [
+    "::mlir::hipsr::HipsrDialect",
+    "::mlir::memref::MemRefDialect",
+    "::mlir::arith::ArithDialect"
   ];
 }
 
