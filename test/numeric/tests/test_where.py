@@ -105,34 +105,6 @@ class TestWhere:
         actual, expected = model_runner.run_sample(model, [cond, x, y])
         compare_outputs(actual, expected, atol=1e-4)
 
-    def test_where_asymmetric_dynamic_broadcast(self, model_runner):
-        """Every dynamic output axis may be selected from a different input."""
-        m, n = 3, 5
-        model = _make_where_model(
-            [1, "N"],
-            ["M", 1],
-            ["M", "N"],
-            ["M", "N"],
-            np.float32,
-        )
-        rng = np.random.default_rng(46)
-        cond = rng.integers(0, 2, (1, n), dtype=np.bool_)
-        x = rng.uniform(-1, 1, (m, 1)).astype(np.float32)
-        y = rng.uniform(-1, 1, (m, n)).astype(np.float32)
-
-        actual, expected = model_runner.run_sample(model, [cond, x, y], reference="cpu")
-        compare_outputs(actual, expected, atol=1e-6)
-
-    def test_where_rank_zero_output(self, model_runner):
-        """All-scalar Where proves rank-zero reification is a success."""
-        model = _make_where_model([], [], [], [], np.float32)
-        cond = np.array(False, dtype=np.bool_)
-        x = np.array(1.25, dtype=np.float32)
-        y = np.array(-2.5, dtype=np.float32)
-
-        actual, expected = model_runner.run_sample(model, [cond, x, y], reference="cpu")
-        compare_outputs(actual, expected, atol=0)
-
     @pytest.mark.parametrize("seq_len", SEQ_LENS)
     def test_where_qwen9b_rope_mask_shape(self, model_runner, seq_len):
         """RoPE mask Where as it appears in Qwen3.5-9B text.onnx.

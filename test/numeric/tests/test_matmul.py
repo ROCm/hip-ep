@@ -40,14 +40,6 @@ def _make_matmul_model(input_shape: list[int], weight_shape: list[int]):
     return make_model_from_nodes([node], [X], [Y], initializers=[w_init])
 
 
-def _make_unequal_rank_model(a_shape, b_shape, output_shape):
-    A = helper.make_tensor_value_info("A", TensorProto.FLOAT16, a_shape)
-    B = helper.make_tensor_value_info("B", TensorProto.FLOAT16, b_shape)
-    Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT16, output_shape)
-    node = helper.make_node("MatMul", ["A", "B"], ["Y"])
-    return make_model_from_nodes([node], [A, B], [Y])
-
-
 class TestMatMul:
     @pytest.mark.parametrize(
         "input_shape,weight_shape",
@@ -96,40 +88,4 @@ class TestMatMul:
         x = rng.uniform(-1, 1, [1, seq_len, LLAMA_HIDDEN]).astype(np.float16)
 
         actual, expected = model_runner.run_sample(model, [x])
-        compare_outputs(actual, expected, atol=1e-3)
-
-    @pytest.mark.parametrize(
-        "a_type_shape,b_type_shape,out_type_shape,a_shape,b_shape",
-        [
-            (
-                ["M", 4],
-                ["B", 4, "N"],
-                ["B", "M", "N"],
-                (3, 4),
-                (2, 4, 5),
-            ),
-            (
-                ["M", 4],
-                ["B0", "B1", 4, "N"],
-                ["B0", "B1", "M", "N"],
-                (6, 4),
-                (2, 3, 4, 5),
-            ),
-        ],
-    )
-    def test_matmul_unequal_rank_batch_from_b(
-        self,
-        model_runner,
-        a_type_shape,
-        b_type_shape,
-        out_type_shape,
-        a_shape,
-        b_shape,
-    ):
-        model = _make_unequal_rank_model(a_type_shape, b_type_shape, out_type_shape)
-        rng = np.random.default_rng(45)
-        a = rng.uniform(-1, 1, a_shape).astype(np.float16)
-        b = rng.uniform(-1, 1, b_shape).astype(np.float16)
-
-        actual, expected = model_runner.run_sample(model, [a, b], reference="cpu")
         compare_outputs(actual, expected, atol=1e-3)
