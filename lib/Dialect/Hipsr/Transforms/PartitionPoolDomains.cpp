@@ -2,91 +2,6 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-//===- PartitionPoolDomains.cpp - Split hipsr pool domains ----------------===//
-//
-// Splits a single-block function into IsolatedFromAbove pool domains. A start
-// barrier begins a domain; the first op that uses an end-barrier result begins
-// the next. The pass checks the input before changing the IR.
-//
-// "hipsr.example_end_barrier" stands in for the DPS end-barrier op that will
-// be added later.
-//
-// Before:
-//   func.func @graph(%ctx: !hipsr.context, %input: tensor<?x4xf32>,
-//       %shape: tensor<2xi64>) -> tensor<?x4xf16> {
-//     %cast_init = hipsr.placeholder : tensor<?x4xf16>
-//     %cast = hipsr.cast(%ctx) ins(%input : tensor<?x4xf32>)
-//         outs(%cast_init : tensor<?x4xf16>) : tensor<?x4xf16>
-//     %ready_init = hipsr.placeholder : tensor<?x4xf16>
-//     %ready = hipsr.example_end_barrier(%ctx)
-//         ins(%cast : tensor<?x4xf16>)
-//         outs(%ready_init : tensor<?x4xf16>) : tensor<?x4xf16>
-//     %add_init = hipsr.placeholder : tensor<?x4xf16>
-//     %sum = hipsr.add(%ctx)
-//         ins(%ready, %ready : tensor<?x4xf16>, tensor<?x4xf16>)
-//         outs(%add_init : tensor<?x4xf16>) : tensor<?x4xf16>
-//     %expand_init = hipsr.placeholder : tensor<?x4xf16>
-//     %expanded = hipsr.expand(%ctx)
-//         ins(%sum, %shape : tensor<?x4xf16>, tensor<2xi64>)
-//         outs(%expand_init : tensor<?x4xf16>) : tensor<?x4xf16>
-//     %result_init = hipsr.placeholder : tensor<?x4xf16>
-//     %result = hipsr.add(%ctx)
-//         ins(%expanded, %expanded : tensor<?x4xf16>, tensor<?x4xf16>)
-//         outs(%result_init : tensor<?x4xf16>) : tensor<?x4xf16>
-//     return %result : tensor<?x4xf16>
-//   }
-//
-// After:
-//   func.func @graph(%ctx: !hipsr.context, %input: tensor<?x4xf32>,
-//       %shape: tensor<2xi64>) -> tensor<?x4xf16> {
-//     %0 = hipsr.pool_domain(%ctx, %input
-//         : !hipsr.context, tensor<?x4xf32>) {
-//     ^bb0(%domain_ctx: !hipsr.context,
-//          %domain_input: tensor<?x4xf32>):
-//       %cast_init = hipsr.placeholder : tensor<?x4xf16>
-//       %cast = hipsr.cast(%domain_ctx)
-//           ins(%domain_input : tensor<?x4xf32>)
-//           outs(%cast_init : tensor<?x4xf16>) : tensor<?x4xf16>
-//       %ready_init = hipsr.placeholder : tensor<?x4xf16>
-//       %ready = hipsr.example_end_barrier(%domain_ctx)
-//           ins(%cast : tensor<?x4xf16>)
-//           outs(%ready_init : tensor<?x4xf16>) : tensor<?x4xf16>
-//       hipsr.pool_domain_yield %ready : tensor<?x4xf16>
-//     } -> tensor<?x4xf16>
-//     %1 = hipsr.pool_domain(%ctx, %0
-//         : !hipsr.context, tensor<?x4xf16>) {
-//     ^bb0(%domain_ctx: !hipsr.context,
-//          %domain_input: tensor<?x4xf16>):
-//       %add_init = hipsr.placeholder : tensor<?x4xf16>
-//       %sum = hipsr.add(%domain_ctx)
-//           ins(%domain_input, %domain_input
-//               : tensor<?x4xf16>, tensor<?x4xf16>)
-//           outs(%add_init : tensor<?x4xf16>) : tensor<?x4xf16>
-//       hipsr.pool_domain_yield %sum : tensor<?x4xf16>
-//     } -> tensor<?x4xf16>
-//     %2 = hipsr.pool_domain(%ctx, %1, %shape
-//         : !hipsr.context, tensor<?x4xf16>, tensor<2xi64>) {
-//     ^bb0(%domain_ctx: !hipsr.context,
-//          %domain_input: tensor<?x4xf16>,
-//          %domain_shape: tensor<2xi64>):
-//       %expand_init = hipsr.placeholder : tensor<?x4xf16>
-//       %expanded = hipsr.expand(%domain_ctx)
-//           ins(%domain_input, %domain_shape
-//               : tensor<?x4xf16>, tensor<2xi64>)
-//           outs(%expand_init : tensor<?x4xf16>) : tensor<?x4xf16>
-//       %result_init = hipsr.placeholder : tensor<?x4xf16>
-//       %result = hipsr.add(%domain_ctx)
-//           ins(%expanded, %expanded : tensor<?x4xf16>, tensor<?x4xf16>)
-//           outs(%result_init : tensor<?x4xf16>) : tensor<?x4xf16>
-//       hipsr.pool_domain_yield %result : tensor<?x4xf16>
-//     } -> tensor<?x4xf16>
-//     return %2 : tensor<?x4xf16>
-//   }
-//
-// The end barrier stays in the first domain. Its first user starts the second
-// domain. Expand is a start barrier, so it starts the third domain.
-//
-//===----------------------------------------------------------------------===//
 
 #include "hip/Dialect/Hipsr/IR/HipsrEndBarrierInterface.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
@@ -113,7 +28,6 @@ namespace hipsr {
 namespace {
 
 struct Domain {
-  Operation *insertionPoint = nullptr;
   SmallVector<Operation *> operations;
   SmallVector<Value> results;
 };
@@ -248,8 +162,9 @@ static SmallVector<Domain> partitionIntoDomains(Block &block) {
   SmallVector<Domain> domains;
   llvm::SmallDenseSet<Value, 8> endBarrierResults;
 
-  // TODO: Add runtime shape reads and writes at these boundaries.
   for (Operation &operation : block.without_terminator()) {
+    // Placeholders do not set boundaries. movePlaceholders() handles them
+    // later.
     if (isa<PlaceholderOp>(operation)) {
       continue;
     }
@@ -258,7 +173,6 @@ static SmallVector<Domain> partitionIntoDomains(Block &block) {
         usesAnyEndBarrierResult(operation, endBarrierResults) ||
         isActiveStartBarrier(operation)) {
       domains.emplace_back();
-      domains.back().insertionPoint = &operation;
       endBarrierResults.clear();
     }
 
@@ -330,10 +244,10 @@ static void materializeDomains(ArrayRef<Domain> domains, Value context) {
     return;
   }
 
-  IRRewriter rewriter(domains.front().insertionPoint->getContext());
+  IRRewriter rewriter(domains.front().operations.front()->getContext());
 
   for (const Domain &domain : domains) {
-    Operation *insertionPoint = domain.insertionPoint;
+    Operation *insertionPoint = domain.operations.front();
     rewriter.setInsertionPoint(insertionPoint);
 
     SmallVector<Type> resultTypes = llvm::map_to_vector(
