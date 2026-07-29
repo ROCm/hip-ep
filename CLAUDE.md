@@ -128,7 +128,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for PR, formatting, AI-disclosure, and co
 ### Output allocator ABI
 
 - The supported generated ABI is `inference_compute(state, inputs)`.
-- `hip-use-output-allocator` must run after buffer deallocation and before PoolAllocs. Changing this ordering can introduce output clones, copies, or incorrect ownership.
+- `hip-use-output-allocator` must run before PoolAllocs so graph outputs remain runtime-owned and are not pooled. The production pipeline intentionally omits ownership-based buffer deallocation because every transient is pooled and outputs are runtime-owned.
 - Keep the allocator callback model-agnostic; dynamic output shapes are computed in the generated graph.
 - See [docs/design/output-allocator-design.md](docs/design/output-allocator-design.md).
 
@@ -142,6 +142,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for PR, formatting, AI-disclosure, and co
 
 - Every transient allocation must be pooled or rewritten as an output allocation. Leftover `hip.alloc`/`memref.alloc` paths are not a supported per-inference allocator strategy.
 - Preserve the ordering and dominance requirements documented in [docs/design/pool-allocs-memory-planning.md](docs/design/pool-allocs-memory-planning.md).
+- `HIPDNN_EP_BUFFERIZE_COPY_BEFORE_WRITE=1` is an opt-in compile-time escape hatch for extremely large single-function graphs: it skips One-Shot Bufferize's expensive RaW analysis by copying before writes. Keep it off by default because the extra copies can reduce runtime performance.
 - HIP runtime calls consume contiguous bare pointers unless their ABI explicitly carries layout metadata. Materialize non-contiguous inputs before such calls.
 
 ### Runtime ABI and bitcode

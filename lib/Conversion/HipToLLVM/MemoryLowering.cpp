@@ -5,6 +5,8 @@
 
 #include "HipToLLVMUtils.h"
 
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypeInterfaces.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -12,6 +14,30 @@
 namespace mlir {
 namespace hip {
 namespace {
+
+/// If module metadata is present, verify callback rank matches the ONNX
+/// output shape recorded at compile time (hipdnn.output_shapes). Metadata
+/// describes @main_graph only — auxiliary funcs in the same module are skipped.
+static LogicalResult verifyCallbackRankAgainstMetadata(ModuleOp module,
+                                                       func::FuncOp func,
+                                                       int64_t outIdx,
+                                                       int64_t callbackRank,
+                                                       Location loc) {
+  if (!func || func.getName() != "main_graph")
+    return success();
+  auto outputShapes = module->getAttrOfType<ArrayAttr>("hipdnn.output_shapes");
+  if (!outputShapes || outIdx < 0 ||
+      outIdx >= static_cast<int64_t>(outputShapes.size()))
+    return success();
+  auto shapeAttr = dyn_cast<DenseI64ArrayAttr>(outputShapes[outIdx]);
+  if (!shapeAttr)
+    return success();
+  if (static_cast<int64_t>(shapeAttr.size()) != callbackRank)
+    return emitError(loc) << "hip.alloc_output callback rank " << callbackRank
+                          << " does not match hipdnn.output_shapes[" << outIdx
+                          << "] rank " << shapeAttr.size();
+  return success();
+}
 
 // --- AllocOp: hip.alloc(%ctx, %dyn...) -> hipMalloc(bytes) + memref descriptor
 struct AllocOpLowering : public ConvertOpToLLVMPattern<AllocOp> {
@@ -220,27 +246,27 @@ struct GetHostScratchOpLowering
 //        elem_size) + a memref descriptor over the returned device pointer.
 //
 // The op obtains a graph-output buffer from the EP output allocator at the
-// point where the output shape is known. The shape is handed to the runtime as
-// a stack-allocated i64[rank] array (static dims become constants, dynamic dims
-// come from the op's operands, in type order); the runtime returns the device
-// pointer, which the lowering wraps in a standard memref descriptor with
-// row-major strides. Unlike AllocOp this issues no hipMalloc/hipFree -- the
-// buffer is EP-owned (a graph output), matching AllocOutputOp::getEffects
-// (no Allocate effect). Works uniformly for static, dynamic, and mixed shapes
-// because getMemRefDescriptorSizes interleaves type constants with operands.
+// point where the output shape is known. The runtime callback shape uses the
+// func.return / ONNX ABI rank when it differs from the internal memref (e.g. a
+// rank-3 compute buffer returned through collapse_shape as rank-2). That rank
+// mismatch is recorded by hip-use-output-allocator as the discardable attrs
+// `hipdnn.abi_shape` / `hipdnn.abi_groups` (see stampAbiReshapeAttrs) -- read
+// here to re-derive each external dim from the internal alloc sizes (which
+// dominate this alloc site). The memref descriptor handed to downstream compute
+// ops still uses the op's own (internal) type.
 //
-// Before:
-//   %out = hip.alloc_output(%ctx, %M, %N) {out_idx = 0 : i64} : memref<?x?xf16>
+// Before (internal rank 3, ONNX return rank 2; abi_groups=[2,1]):
+//   %out = hip.alloc_output(%ctx, %d0, %d1)
+//            {out_idx = 0,
+//             hipdnn.abi_shape  = array<i64: kDynamic, 2560>,
+//             hipdnn.abi_groups = array<i64: 2, 1>} : memref<?x?x2560xf16>
 //
-// After:
-//   %shape = llvm.alloca %c1 x !llvm.array<2 x i64>
-//   llvm.store %M, %shape[0]            // gep elem i64, index 0
-//   llvm.store %N, %shape[1]            // gep elem i64, index 1
-//   %p = llvm.call @hipdnn_ep_alloc_output(%state, %c0_outidx, %shape,
-//                                          %c2_rank, %c2_elem)
-//          : (!llvm.ptr, i64, !llvm.ptr, i64, i64) -> !llvm.ptr
-//   // descriptor { alloc=%p, aligned=%p, offset=0, sizes=[%M,%N],
-//   //              strides=[%N,1] }
+// After (callback shape rank 2, ext dim0 = %d0 * %d1):
+//   %shape = llvm.alloca ... x !llvm.array<2 x i64>
+//   %p0    = llvm.mul %d0, %d1
+//   llvm.store %p0,    %shape[0]
+//   llvm.store %c2560, %shape[1]
+//   %p = llvm.call @hipdnn_ep_alloc_output(..., %shape, %c2_rank, ...)
 struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -269,35 +295,139 @@ struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
 
     int64_t rank = memRefType.getRank();
 
-    // sizes[] interleaves static dims (type constants) with the dynamic-size
-    // operands (in type order); strides[] are row-major. Same helper AllocOp
-    // uses, so static / dynamic / mixed shapes all flow through one path. The
-    // returned sizeBytes is unused here (the runtime computes bytes itself).
-    SmallVector<Value, 4> sizes;
+    // internalSizes[] interleave static dims (type constants) with the
+    // dynamic-size operands (in type order); strides[] are row-major. They
+    // build the memref descriptor the downstream compute ops consume, so they
+    // always describe the op's own (internal) type. All are i64 (index lowers
+    // to i64), materialized here, so they dominate the callback arithmetic
+    // below.
+    SmallVector<Value, 4> internalSizes;
     SmallVector<Value, 4> strides;
     Value sizeBytes;
     getMemRefDescriptorSizes(loc, memRefType, adaptor.getDynamicSizes(),
-                             rewriter, sizes, strides, sizeBytes, true);
+                             rewriter, internalSizes, strides, sizeBytes, true);
 
-    // Stack-allocate the i64[rank] shape array and populate it from sizes[].
+    // Runtime callback shape: the ONNX / func.return output shape when it
+    // differs from the internal memref rank. hip-use-output-allocator stamps
+    // `hipdnn.abi_shape` (external shape) + `hipdnn.abi_groups`:
+    //   * collapse (internal rank > external): groups[e] = # internal dims
+    //     folded into external dim e; dynamic external dims = product of those
+    //     internal sizes.
+    //   * expand (internal rank < external): groups[i] = # external dims
+    //     expanded from internal dim i; each dynamic external dim in that
+    //     group takes the corresponding internal size (static dims from attr).
+    // Absent / malformed attrs -> internal rank/sizes verbatim.
+    auto abiShapeAttr = op->getAttrOfType<DenseI64ArrayAttr>(kAbiShapeAttrName);
+    auto abiGroupsAttr =
+        op->getAttrOfType<DenseI64ArrayAttr>(kAbiGroupsAttrName);
+
+    SmallVector<Value, 4> callbackSizes;
+    int64_t callbackRank = rank;
+    if (abiShapeAttr && abiGroupsAttr) {
+      ArrayRef<int64_t> abiShape = abiShapeAttr.asArrayRef();
+      ArrayRef<int64_t> abiGroups = abiGroupsAttr.asArrayRef();
+      int64_t extRank = static_cast<int64_t>(abiShape.size());
+      int64_t groupsRank = static_cast<int64_t>(abiGroups.size());
+      bool ok = false;
+
+      // Collapse: one group entry per external dim.
+      if (groupsRank == extRank && extRank < rank) {
+        int64_t internalDim = 0;
+        ok = true;
+        for (int64_t e : llvm::seq<int64_t>(0, extRank)) {
+          int64_t cnt = abiGroups[e];
+          if (cnt <= 0 || internalDim + cnt > rank) {
+            ok = false;
+            break;
+          }
+          Value dim;
+          if (!ShapedType::isDynamic(abiShape[e])) {
+            dim = LLVM::ConstantOp::create(
+                rewriter, loc, i64Type,
+                rewriter.getI64IntegerAttr(abiShape[e]));
+          } else {
+            dim = internalSizes[internalDim];
+            for (int64_t j : llvm::seq<int64_t>(1, cnt))
+              dim = LLVM::MulOp::create(rewriter, loc, dim,
+                                        internalSizes[internalDim + j]);
+          }
+          callbackSizes.push_back(dim);
+          internalDim += cnt;
+        }
+        if (ok && internalDim != rank)
+          ok = false;
+        if (ok)
+          callbackRank = extRank;
+      }
+
+      // Expand: one group entry per internal dim.
+      if (!ok && groupsRank == rank && extRank > rank) {
+        int64_t externalDim = 0;
+        ok = true;
+        for (int64_t i : llvm::seq<int64_t>(0, rank)) {
+          int64_t cnt = abiGroups[i];
+          if (cnt <= 0 || externalDim + cnt > extRank) {
+            ok = false;
+            break;
+          }
+          bool usedInternal = false;
+          for (int64_t j : llvm::seq<int64_t>(0, cnt)) {
+            int64_t e = externalDim + j;
+            if (!ShapedType::isDynamic(abiShape[e])) {
+              callbackSizes.push_back(LLVM::ConstantOp::create(
+                  rewriter, loc, i64Type,
+                  rewriter.getI64IntegerAttr(abiShape[e])));
+            } else {
+              if (usedInternal) {
+                ok = false;
+                break;
+              }
+              callbackSizes.push_back(internalSizes[i]);
+              usedInternal = true;
+            }
+          }
+          if (!ok)
+            break;
+          externalDim += cnt;
+        }
+        if (ok && externalDim != extRank)
+          ok = false;
+        if (ok)
+          callbackRank = extRank;
+      }
+
+      if (!ok)
+        callbackSizes.clear();
+    }
+    if (callbackSizes.empty()) {
+      callbackSizes.assign(internalSizes.begin(), internalSizes.end());
+      callbackRank = rank;
+    }
+
+    auto parentFunc = op->getParentOfType<func::FuncOp>();
+    if (failed(verifyCallbackRankAgainstMetadata(
+            module, parentFunc, op.getOutIdx(), callbackRank, loc)))
+      return failure();
+
+    // Stack-allocate the i64[callbackRank] shape array for the runtime ABI.
     Value oneI64 = LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                             rewriter.getI64IntegerAttr(1));
     auto shapeArrayType =
-        LLVM::LLVMArrayType::get(i64Type, rank > 0 ? rank : 1);
+        LLVM::LLVMArrayType::get(i64Type, callbackRank > 0 ? callbackRank : 1);
     Value shapeAlloca = LLVM::AllocaOp::create(
         rewriter, loc, ptrType, shapeArrayType, oneI64, /*alignment=*/8);
-    for (int64_t i : llvm::seq<int64_t>(0, rank)) {
+    for (int64_t i : llvm::seq<int64_t>(0, callbackRank)) {
       Value idx = LLVM::ConstantOp::create(rewriter, loc, i32Type,
                                            rewriter.getI32IntegerAttr(i));
       Value gep = LLVM::GEPOp::create(rewriter, loc, ptrType, i64Type,
                                       shapeAlloca, idx);
-      LLVM::StoreOp::create(rewriter, loc, sizes[i], gep);
+      LLVM::StoreOp::create(rewriter, loc, callbackSizes[i], gep);
     }
 
     Value outIdxVal = LLVM::ConstantOp::create(
         rewriter, loc, i64Type, rewriter.getI64IntegerAttr(op.getOutIdx()));
-    Value rankVal = LLVM::ConstantOp::create(rewriter, loc, i64Type,
-                                             rewriter.getI64IntegerAttr(rank));
+    Value rankVal = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(callbackRank));
     Value elemSizeVal = LLVM::ConstantOp::create(
         rewriter, loc, i64Type, rewriter.getI64IntegerAttr(elemSizeBytes));
 
@@ -332,7 +462,7 @@ struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
           rawPtr);
 
     MemRefDescriptor desc = createMemRefDescriptor(
-        loc, memRefType, dataPtr, dataPtr, sizes, strides, rewriter);
+        loc, memRefType, dataPtr, dataPtr, internalSizes, strides, rewriter);
     rewriter.replaceOp(op, {desc});
     return success();
   }

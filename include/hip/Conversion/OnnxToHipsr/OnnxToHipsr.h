@@ -34,6 +34,9 @@ void populateCastConversionPatterns(::mlir::RewritePatternSet &patterns,
 void populateMatMulConversionPatterns(::mlir::RewritePatternSet &patterns,
                                       ::mlir::MLIRContext *ctx);
 
+void populateExpandConversionPatterns(::mlir::RewritePatternSet &patterns,
+                                      ::mlir::MLIRContext *ctx);
+
 } // namespace hipsr
 } // namespace mlir
 

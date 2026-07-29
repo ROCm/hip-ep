@@ -3,38 +3,33 @@
  * Licensed under the MIT License.
  */
 
-#include "hip/Dialect/Hipsr/IR/HipsrPoolDomainOp.h"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
-// Needs the full PoolDomainYieldOp type: the implicit-terminator trait's
-// generated methods and verify() below both use it.
-#include "hip/Dialect/Hipsr/IR/HipsrPoolDomainYieldOp.h"
-
-#include "llvm/ADT/Sequence.h"
+#include "llvm/Support/ErrorHandling.h"
 
 using namespace mlir;
 using namespace mlir::hipsr;
 
-LogicalResult PoolDomainOp::verify() {
-  // The trait already guarantees a single block ending in PoolDomainYieldOp.
-  // Its operands become this op's results, so just check count and types.
-  auto yieldOp = cast<PoolDomainYieldOp>(getBody().front().getTerminator());
-
-  if (yieldOp.getNumOperands() != getNumResults())
-    return emitOpError() << "has " << getNumResults()
-                         << " result(s) but its pool_domain_yield yields "
-                         << yieldOp.getNumOperands() << " value(s)";
-
-  for (unsigned idx : llvm::seq<unsigned>(0, getNumResults())) {
-    Type resultType = getResultTypes()[idx];
-    Type yieldType = yieldOp.getOperandTypes()[idx];
-    if (resultType != yieldType)
-      return emitOpError() << "result #" << idx << " type " << resultType
-                           << " does not match the yielded value type "
-                           << yieldType;
+OperandRange
+PoolDomainOp::getEntrySuccessorOperands(RegionSuccessor successor) {
+  if (successor.getSuccessor() != &getBody()) {
+    llvm::report_fatal_error(
+        "hipsr.pool_domain received an unexpected entry successor");
   }
-
-  return success();
+  return getOperands();
 }
 
-#define GET_OP_CLASSES
-#include "hip/Dialect/Hipsr/IR/HipsrPoolDomainOp.cpp.inc"
+void PoolDomainOp::getSuccessorRegions(
+    RegionBranchPoint point, SmallVectorImpl<RegionSuccessor> &regions) {
+  if (point.isParent()) {
+    regions.emplace_back(&getBody(), getBody().getArguments());
+    return;
+  }
+
+  Operation *terminator = point.getTerminatorPredecessorOrNull();
+  if (!terminator || terminator->getParentRegion() != &getBody()) {
+    llvm::report_fatal_error(
+        "hipsr.pool_domain received an unexpected branch point");
+  }
+  regions.emplace_back(getOperation(), getResults());
+}

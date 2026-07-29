@@ -101,6 +101,12 @@ int main(int argc, char **argv) {
   mlir::registerFinalizeMemRefToLLVMConversionPass();
   mlir::registerConvertControlFlowToLLVMPass();
   mlir::registerConvertToLLVMPass();
+  // expand-strided-metadata: the production hip-to-llvm pipeline runs this
+  // (inside buildHipToLLVMPipeline) to decompose memref.collapse_shape /
+  // expand_shape BEFORE convert-hip-to-llvm. Exposed here as a standalone name
+  // so LIT tests can reproduce that exact order (e.g. proving hip.alloc_output
+  // ABI attrs survive the decomposition).
+  mlir::memref::registerExpandStridedMetadataPass();
 
   // Run every statically-linked plugin's registration before MlirOptMain
   // parses the command line, so `--<plugin-pass>` is recognised by the CL
@@ -108,6 +114,15 @@ int main(int argc, char **argv) {
   // its pass manager. No-op when no plugins were selected at configure time
   // (HIPDNN_EP_COMPILER_PLUGINS empty). See cmake/HipEpPlugins.cmake.
   hip::compiler::dispatchPluginRegistrationsOnce();
+
+  // Companion to dispatchPluginRegistrationsOnce() above: that registers plugin
+  // passes, this registers plugin dialects (custom ops + their bufferization
+  // and HIP->LLVM-lowering interface models) into the tool's registry,
+  // mirroring hip::compiler::loadAllDialects so the op set never drifts between
+  // the tool and the EP. Without it convert-hip-to-llvm finds no lowering for
+  // plugin ops and they survive unlowered. No-op when no plugins are selected.
+  for (auto registerFn : hip::compiler::pluginDialectRegistrations())
+    registerFn(registry);
 
   return mlir::asMainReturnCode(mlir::MlirOptMain(
       argc, argv, "hip-mlir-opt: HIP dialect compiler driver\n", registry));
