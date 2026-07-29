@@ -15,6 +15,7 @@ namespace {
 ///   max(a, b, c) = max(max(a, b), c)
 /// Single input is identity (pass through).
 struct MaxToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(MaxToHip)
   MaxToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Max", /*benefit=*/1, ctx) {}
 

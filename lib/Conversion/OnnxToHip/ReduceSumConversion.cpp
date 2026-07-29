@@ -11,6 +11,7 @@ namespace {
 
 /// onnx.ReduceSum -> hip.reduce_sum
 struct ReduceSumToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ReduceSumToHip)
   ReduceSumToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.ReduceSum", /*benefit=*/1, ctx) {}
 

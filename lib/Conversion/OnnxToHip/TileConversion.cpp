@@ -11,6 +11,7 @@ namespace {
 
 /// onnx.Tile -> hip.tile
 struct TileToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(TileToHip)
   TileToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Tile", /*benefit=*/1, ctx) {}
 

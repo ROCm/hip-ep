@@ -29,6 +29,7 @@ namespace {
 ///   * data-tail region (i >= q - 1): take from data at
 ///     `i - (q - 1) + batch_dims + indices.shape[-1]`.
 struct GatherNDToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GatherNDToHip)
   GatherNDToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.GatherND", /*benefit=*/1, ctx) {}
 

@@ -79,6 +79,7 @@ createBroadcastEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
 /// X and Y. The condition tensor is bool (i1); X and Y share the result
 /// element type.
 struct WhereToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(WhereToHip)
   WhereToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Where", /*benefit=*/1, ctx) {}
 

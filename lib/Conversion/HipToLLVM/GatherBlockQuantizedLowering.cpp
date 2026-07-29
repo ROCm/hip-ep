@@ -45,6 +45,7 @@ namespace {
 
 struct GatherBlockQuantizedOpLowering
     : public ConvertOpToLLVMPattern<GatherBlockQuantizedOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GatherBlockQuantizedOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

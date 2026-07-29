@@ -61,6 +61,7 @@ namespace {
 // `tensor.dim` on the intermediate for the dynamic side.
 
 struct FlattenDecompose : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(FlattenDecompose)
   FlattenDecompose(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Flatten", /*benefit=*/1, ctx) {}
 

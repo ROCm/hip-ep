@@ -42,6 +42,7 @@ namespace {
 /// would NOT be picked up by their lowering patterns in this pass.  See the
 /// same comment in `AttentionConversion.cpp`.
 struct MultiHeadAttentionToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(MultiHeadAttentionToHip)
   MultiHeadAttentionToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
 

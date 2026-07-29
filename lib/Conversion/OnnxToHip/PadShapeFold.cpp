@@ -113,6 +113,7 @@ getInlineIntVector(mlir::Value v) {
 }
 
 struct PadStampConstShape : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(PadStampConstShape)
   PadStampConstShape(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Pad", /*benefit=*/1, ctx) {}
 

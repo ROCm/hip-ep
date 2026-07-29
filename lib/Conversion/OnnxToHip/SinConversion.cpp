@@ -12,6 +12,7 @@ namespace {
 /// onnx.Sin -> hip.sin
 /// Unary element-wise sine: Y = sin(X). Float types.
 struct SinToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SinToHip)
   SinToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Sin", /*benefit=*/1, ctx) {}
 

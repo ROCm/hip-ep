@@ -14,6 +14,7 @@ namespace {
 //                src_data_type, dst_data_type)
 // Supports both static and dynamic shapes (computes num_elements at runtime).
 struct CastOpLowering : public ConvertOpToLLVMPattern<CastOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(CastOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

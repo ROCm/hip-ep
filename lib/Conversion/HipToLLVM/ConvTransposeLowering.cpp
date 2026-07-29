@@ -26,6 +26,7 @@ namespace {
 // dtype (f16/bf16/f32).
 struct ConvTransposeOpLowering
     : public ConvertOpToLLVMPattern<ConvTransposeOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ConvTransposeOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

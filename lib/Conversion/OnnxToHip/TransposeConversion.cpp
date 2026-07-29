@@ -16,6 +16,7 @@ namespace {
 /// [rank-1, ..., 0] is materialized so hip.transpose always carries an
 /// explicit perm attribute.
 struct TransposeToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(TransposeToHip)
   TransposeToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Transpose", /*benefit=*/1, ctx) {}
 

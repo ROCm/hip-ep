@@ -40,6 +40,7 @@ namespace {
 //   -> i32
 
 struct PoolOpLowering : public ConvertOpToLLVMPattern<PoolOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(PoolOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

@@ -21,6 +21,7 @@ namespace {
 //   - Cube:       alpha=0, beta=1, gamma=3.0   → (0 + 1*x)^3 = x^3
 template <typename OpTy>
 struct PowerOpLowering : public ConvertOpToLLVMPattern<OpTy> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(PowerOpLowering)
   using ConvertOpToLLVMPattern<OpTy>::ConvertOpToLLVMPattern;
   double alpha, beta, gamma;
   const char *opName;

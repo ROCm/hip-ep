@@ -48,6 +48,7 @@ static bool isNoValue(mlir::Value v) {
 }
 
 struct ClipToHipMinMax : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ClipToHipMinMax)
   ClipToHipMinMax(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Clip", /*benefit=*/1, ctx) {}
 

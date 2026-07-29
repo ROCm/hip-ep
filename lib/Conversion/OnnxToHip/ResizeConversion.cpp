@@ -55,6 +55,7 @@ namespace {
 //                         {mode = 1, coord_transform = 0, nearest_mode = 0}
 
 struct ResizeToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ResizeToHip)
   ResizeToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Resize", /*benefit=*/1, ctx) {}
 

@@ -11,6 +11,7 @@ namespace {
 
 struct LinearAttentionOpLowering
     : public ConvertOpToLLVMPattern<LinearAttentionOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LinearAttentionOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

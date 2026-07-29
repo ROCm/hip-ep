@@ -20,6 +20,7 @@ namespace {
 // pointer plus the axis dtype enum so the runtime knows whether to treat
 // the byte buffer as int32 or int64.
 struct CumSumOpLowering : public ConvertOpToLLVMPattern<CumSumOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(CumSumOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

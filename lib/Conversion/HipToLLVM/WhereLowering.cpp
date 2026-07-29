@@ -50,6 +50,7 @@ namespace {
 // updated together; otherwise the kernel will read wrong offsets
 // silently. See the matching comment block at the top of that .hip file.
 struct WhereOpLowering : public ConvertOpToLLVMPattern<WhereOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(WhereOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

@@ -31,6 +31,7 @@ static int64_t getHipCustomKernelDType(Type elemType) {
 //   -> wrap_range(state, start, limit, delta, output, output_num_elements,
 //                 hip_dtype)
 struct RangeOpLowering : public ConvertOpToLLVMPattern<RangeOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(RangeOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

@@ -217,6 +217,7 @@ static bool isBinaryOpWithConst(mlir::Operation *op, llvm::StringRef opName,
 /// in CLAUDE.md is the regression signal for that pattern; this pattern's
 /// failure histogram doesn't conflate the two).
 struct InlinedFastGeluVisionToGelu : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(InlinedFastGeluVisionToGelu)
   InlinedFastGeluVisionToGelu(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Tanh", /*benefit=*/1, ctx) {}
 
@@ -381,6 +382,7 @@ struct InlinedFastGeluVisionToGelu : public mlir::RewritePattern {
 };
 
 struct InlinedFastGeluToGelu : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(InlinedFastGeluToGelu)
   InlinedFastGeluToGelu(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Tanh", /*benefit=*/1, ctx) {}
 
@@ -588,6 +590,7 @@ struct InlinedFastGeluToGelu : public mlir::RewritePattern {
 /// After:
 ///   %y = onnx.Gelu(%x) {approximate = "none"} : tensor<?xf16>
 struct InlinedExactGeluToGelu : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(InlinedExactGeluToGelu)
   InlinedExactGeluToGelu(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Erf", /*benefit=*/2, ctx) {}
 

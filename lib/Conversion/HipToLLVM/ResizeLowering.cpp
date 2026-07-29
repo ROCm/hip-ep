@@ -30,6 +30,7 @@ namespace {
 //   -> i32
 
 struct ResizeOpLowering : public ConvertOpToLLVMPattern<ResizeOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ResizeOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

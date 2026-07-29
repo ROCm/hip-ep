@@ -64,6 +64,7 @@ namespace {
 //   %r    = tensor.insert_slice %b into %0  [%dim_a, 0] [3, 4] [1, 1]
 
 struct ConcatDecompose : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ConcatDecompose)
   ConcatDecompose(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Concat", /*benefit=*/1, ctx) {}
 

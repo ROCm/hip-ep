@@ -13,6 +13,7 @@ namespace {
 /// Unary element-wise sign: Y = sign(X). Lowered through the unified unary
 /// elementwise template (wrap_sign).
 struct SignToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SignToHip)
   SignToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Sign", /*benefit=*/1, ctx) {}
 

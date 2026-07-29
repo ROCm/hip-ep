@@ -19,6 +19,7 @@ namespace {
 /// convs), and dynamic result dims (batch, channels, and spatial extents) are
 /// sized at runtime from the conv input + attributes.
 struct ConvToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ConvToHip)
   ConvToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Conv", /*benefit=*/1, ctx) {}
 

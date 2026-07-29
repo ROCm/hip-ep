@@ -23,6 +23,7 @@ namespace {
 ///          {kernel_shape = [3, 3], strides = [2, 2], pads = [0, 0, 0, 0],
 ///           dilations = [1, 1], output_padding = [0, 0], group = 1}
 struct ConvTransposeToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ConvTransposeToHip)
   ConvTransposeToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.ConvTranspose", /*benefit=*/1, ctx) {}
 

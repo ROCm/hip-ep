@@ -11,6 +11,7 @@ namespace {
 
 // hip.gather(handle, indices, table, output)
 struct GatherOpLowering : public ConvertOpToLLVMPattern<GatherOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GatherOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

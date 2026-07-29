@@ -14,6 +14,7 @@ namespace {
 //===----------------------------------------------------------------------===//
 
 struct MatMulNBitsToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(MatMulNBitsToHip)
   MatMulNBitsToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
 

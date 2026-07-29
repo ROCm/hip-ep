@@ -11,6 +11,7 @@ namespace {
 
 /// onnx.Mod -> hip.mod
 struct ModToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ModToHip)
   ModToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Mod", /*benefit=*/1, ctx) {}
 

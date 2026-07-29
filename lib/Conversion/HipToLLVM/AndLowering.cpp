@@ -19,6 +19,7 @@ namespace {
 /// hip_elementwise_and kernel -- mirrors DivOpLowering. Inputs and output
 /// share the same element type for AND (no type promotion).
 struct AndOpLowering : public ConvertOpToLLVMPattern<AndOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(AndOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

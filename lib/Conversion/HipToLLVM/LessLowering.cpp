@@ -19,6 +19,7 @@ namespace {
 // multidirectional broadcast via hip_expand before the flat
 // hip_elementwise_less kernel -- mirrors DivOpLowering.
 struct LessOpLowering : public ConvertOpToLLVMPattern<LessOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LessOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

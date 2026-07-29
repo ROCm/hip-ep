@@ -36,6 +36,7 @@ inline Value getNullableMemRefPtr(Value memref,
 // Rank-generic: N = product of all dims except last, D = last dim.
 // For 3D [B,S,D]: N = B*S, D = D.
 struct RmsNormOpLowering : public ConvertOpToLLVMPattern<RmsNormOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(RmsNormOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
@@ -111,6 +112,7 @@ struct RmsNormOpLowering : public ConvertOpToLLVMPattern<RmsNormOp> {
 
 // hip.skip_rms_norm lowering with dynamic shape support
 struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SkipRmsNormOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
@@ -213,6 +215,7 @@ struct SkipRmsNormOpLowering : public ConvertOpToLLVMPattern<SkipRmsNormOp> {
 // bias / mean / inv_std are optional — when absent, a null pointer (address
 // space 0) is forwarded so the runtime can early-out for that step.
 struct LayerNormOpLowering : public ConvertOpToLLVMPattern<LayerNormOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LayerNormOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

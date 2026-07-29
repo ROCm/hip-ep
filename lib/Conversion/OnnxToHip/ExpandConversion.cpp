@@ -29,6 +29,7 @@ static mlir::Value readShapeEntryToIndex(mlir::PatternRewriter &rewriter,
 /// input tensor (right-aligned with the result rank, NumPy-style); leading
 /// dims that are absent from `shape` fall back to the matching input dim.
 struct ExpandToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ExpandToHip)
   ExpandToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Expand", /*benefit=*/1, ctx) {}
 

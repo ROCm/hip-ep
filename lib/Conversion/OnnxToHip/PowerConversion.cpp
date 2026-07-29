@@ -85,6 +85,7 @@ static std::optional<double> getScalarConstantValue(mlir::Value v) {
 /// Converts ONNX reciprocal (y = 1/x, full signed IEEE domain) to HIP.
 /// Runtime uses a HIP elementwise kernel (not MIOpen POWER activation).
 struct ReciprocalToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ReciprocalToHip)
   ReciprocalToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Reciprocal", /*benefit=*/1, ctx) {}
 
@@ -97,6 +98,7 @@ struct ReciprocalToHip : public mlir::RewritePattern {
 /// ONNX element-wise sqrt; lowered to @wrap_power(0, 1, 0.5) and executed
 /// with hip_elementwise_sqrt at runtime (not MIOpen POWER).
 struct SqrtToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SqrtToHip)
   SqrtToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Sqrt", /*benefit=*/1, ctx) {}
 
@@ -157,6 +159,7 @@ SqrtToHip::matchAndRewrite(mlir::Operation *op,
 /// onnx.Neg -> hip.neg
 /// Negation: y = -x. Lowered via wrap_power(alpha=0, beta=-1, gamma=1).
 struct NegToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(NegToHip)
   NegToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Neg", /*benefit=*/1, ctx) {}
 
@@ -222,6 +225,7 @@ struct NegToHip : public mlir::RewritePattern {
 ///        : (tensor<1x64x128x128xf16>, tensor<1x64x128x128xf16>)
 ///        -> tensor<1x64x128x128xf16>
 struct PowDecompose : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(PowDecompose)
   PowDecompose(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Pow", /*benefit=*/1, ctx) {}
 

@@ -190,6 +190,7 @@ static Value collapseRangeBoundToScalar(PatternRewriter &rewriter, Location loc,
 }
 
 struct RangeToHip : public RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(RangeToHip)
   RangeToHip(MLIRContext *ctx) : RewritePattern("onnx.Range", 1, ctx) {}
 
   LogicalResult matchAndRewrite(Operation *op,

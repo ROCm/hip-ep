@@ -42,6 +42,7 @@ namespace {
 /// layout matches what the original ONNX graph already has and produces a
 /// single large GEMM (cleaner lowering, fewer hipBLASLt launches).
 struct AttentionToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(AttentionToHip)
   AttentionToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
 

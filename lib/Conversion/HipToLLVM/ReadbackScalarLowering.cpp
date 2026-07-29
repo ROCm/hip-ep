@@ -28,6 +28,7 @@ namespace {
 // operand's element type and sign.
 struct ReadbackScalarOpLowering
     : public ConvertOpToLLVMPattern<ReadbackScalarOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ReadbackScalarOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

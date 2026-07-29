@@ -12,6 +12,7 @@ namespace {
 /// onnx.ReduceMax -> hip.reduce_max
 /// Reuses the same axes/keepdims/noop_with_empty_axes handling as ReduceSum.
 struct ReduceMaxToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ReduceMaxToHip)
   ReduceMaxToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.ReduceMax", /*benefit=*/1, ctx) {}
 

@@ -16,6 +16,7 @@ namespace {
 /// `createBroadcastEmptyTensor` so each axis picks the non-broadcasting operand
 /// (e.g. `[?x1] & [1x?] -> [?x?]`).
 struct AndToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(AndToHip)
   AndToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.And", /*benefit=*/1, ctx) {}
 

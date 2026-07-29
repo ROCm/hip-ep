@@ -97,6 +97,7 @@ static std::optional<int64_t> getInlineScalarIndex(mlir::Operation *constOp) {
 }
 
 struct GatherOfShapeToDim : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GatherOfShapeToDim)
   GatherOfShapeToDim(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Gather", /*benefit=*/1, ctx) {}
 
