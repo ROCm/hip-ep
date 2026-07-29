@@ -569,6 +569,55 @@ struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
       return rewriter.notifyMatchFailure(op, "unsupported element type");
     int64_t elemBytes = *elemBytesOr;
 
+    // Contiguous (identity-layout) copy with a DYNAMIC shape.
+    //
+    // tryStaticStridesElems() below only accepts fully-static strides, so a
+    // contiguous copy whose shape has dynamic dims (e.g. memref<?x?x2816xf16>,
+    // pervasive once HIPDNN_EP_BUFFERIZE_COPY_BEFORE_WRITE clones whole
+    // buffers) fails that check and, without this branch, falls through to the
+    // upstream default memref.copy lowering. For an identity layout the
+    // upstream path emits a *host* llvm.intr.memcpy -- which faults
+    // (0xC0000005) because the operands are device pool pointers
+    // (hipdnn_ep_get_pool_base), not host memory. An identity layout is a
+    // dense row-major block, so lower it here to one linear device copy sized
+    // at runtime (mirrors the static dense fast path below, byte count
+    // computed from the descriptor dims). Non-identity dynamic copies keep
+    // falling back to the upstream memrefCopy runtime call, which is
+    // device-safe.
+    if ((!srcTy.hasStaticShape() || !dstTy.hasStaticShape()) &&
+        srcTy.getLayout().isIdentity() && dstTy.getLayout().isIdentity()) {
+      ModuleOp module = op->getParentOfType<ModuleOp>();
+      Type ptrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
+      Type i64Type = rewriter.getI64Type();
+      Type i32Type = rewriter.getI32Type();
+
+      Value statePtr = llvmFn.getArgument(0);
+      Value srcPtr = extractMemRefDataPtr(adaptor.getSource(), srcTy,
+                                          getTypeConverter(), rewriter, loc);
+      Value dstPtr = extractMemRefDataPtr(adaptor.getTarget(), dstTy,
+                                          getTypeConverter(), rewriter, loc);
+      if (!srcPtr || !dstPtr)
+        return failure();
+
+      Value numElems =
+          computeNumElements(srcTy, adaptor.getSource(), rewriter, loc);
+      Value elemBytesVal = LLVM::ConstantOp::create(
+          rewriter, loc, i64Type, rewriter.getI64IntegerAttr(elemBytes));
+      Value totalBytes =
+          LLVM::MulOp::create(rewriter, loc, numElems, elemBytesVal);
+
+      FailureOr<LLVM::LLVMFuncOp> memcpyFn =
+          LLVM::lookupOrCreateFn(rewriter, module, kWrapHipMemcpyAsync,
+                                 {ptrType, ptrType, ptrType, i64Type}, i32Type);
+      if (failed(memcpyFn))
+        return failure();
+
+      LLVM::CallOp::create(rewriter, loc, *memcpyFn,
+                           ValueRange{statePtr, dstPtr, srcPtr, totalBytes});
+      rewriter.eraseOp(op);
+      return success();
+    }
+
     FailureOr<SmallVector<int64_t>> srcStridesOr = tryStaticStridesElems(srcTy);
     FailureOr<SmallVector<int64_t>> dstStridesOr = tryStaticStridesElems(dstTy);
     if (failed(srcStridesOr) || failed(dstStridesOr))
