@@ -161,4 +161,17 @@ def HipsrExternalizeConstantsPass
   ];
 }
 
+def HipsrPoolAllocPass : Pass<"hipsr-pool-alloc", "mlir::ModuleOp"> {
+  let summary = "Pool intermediate buffers per pool_domain by lifetime";
+  let description = [{
+    Pools each `hipsr.pool_domain`'s `memref.alloc`s by lifetime:
+    non-overlapping ones share one `hipsr.get_pool` buffer as `memref.view`s.
+  }];
+  let dependentDialects = [
+    "::mlir::hipsr::HipsrDialect",
+    "::mlir::memref::MemRefDialect",
+    "::mlir::arith::ArithDialect"
+  ];
+}
+
 #endif // HIPSR_TRANSFORMS_PASSES
