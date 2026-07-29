@@ -26,6 +26,100 @@ static constexpr int64_t kUpdateRuleGated = 1;
 static constexpr int64_t kUpdateRuleDelta = 2;
 static constexpr int64_t kUpdateRuleGatedDelta = 3;
 
+// --- RGP capture fence (diagnostics only) -----------------------------------
+// Isolating one sparse kernel (linear_attention: 1 dispatch/layer buried in
+// ~800 MoE dispatches) in an RGP dispatch capture is unreliable via delay- or
+// dispatch-index triggers because of run-to-run jitter. This fence removes the
+// guesswork: when HIPDNN_RGP_FENCE names an op, the runtime drains the GPU
+// queue and idles (Sleep) for a WIDE window right before that op's kernels
+// launch -- ONCE, after HIPDNN_RGP_FENCE_SKIP matching calls (skip warmup).
+// An RGP capture armed with --rgp-auto-capture dispatch:1:N and an
+// --rgp-auto-capture-delay landing anywhere inside that idle window arms while
+// the GPU is idle, so the very next dispatch is this op -> captured cleanly.
+// Uses only raw char ops + Win32/HIP imports that resolve in the JIT-linked
+// runtime bitcode (same constraints as op_profile_ablated); no STL string/IO.
+#ifdef _WIN32
+extern "C" __declspec(dllimport) unsigned long __stdcall GetEnvironmentVariableA(
+    const char *, char *, unsigned long);
+extern "C" __declspec(dllimport) void __stdcall Sleep(unsigned long);
+#endif
+
+static bool rgp_getenv(const char *name, char *buf, unsigned bufsz) {
+#ifdef _WIN32
+  unsigned long n = GetEnvironmentVariableA(name, buf, bufsz);
+  if (n == 0 || n >= bufsz) {
+    buf[0] = '\0';
+    return false;
+  }
+  return true;
+#else
+  const char *v = getenv(name);
+  if (!v) {
+    buf[0] = '\0';
+    return false;
+  }
+  unsigned i = 0;
+  for (; v[i] && i + 1 < bufsz; ++i)
+    buf[i] = v[i];
+  buf[i] = '\0';
+  return i > 0;
+#endif
+}
+
+static long rgp_atol(const char *s) {
+  long r = 0;
+  while (*s >= '0' && *s <= '9') {
+    r = r * 10 + (*s - '0');
+    ++s;
+  }
+  return r;
+}
+
+static bool rgp_str_eq(const char *a, const char *b) {
+  while (*a && *b && *a == *b) {
+    ++a;
+    ++b;
+  }
+  return *a == '\0' && *b == '\0';
+}
+
+// Fences the given op if HIPDNN_RGP_FENCE matches it. Fires exactly once, after
+// HIPDNN_RGP_FENCE_SKIP matching calls; idles HIPDNN_RGP_FENCE_MS (default 45s).
+static void rgp_capture_fence(const char *opname, hipStream_t stream) {
+  static char target[128];
+  static const bool has =
+      rgp_getenv("HIPDNN_RGP_FENCE", target, sizeof(target));
+  if (!has || !rgp_str_eq(target, opname))
+    return;
+  static const long skip = [] {
+    char b[32];
+    return rgp_getenv("HIPDNN_RGP_FENCE_SKIP", b, sizeof(b)) ? rgp_atol(b) : 3L;
+  }();
+  static const long fence_ms = [] {
+    char b[32];
+    return rgp_getenv("HIPDNN_RGP_FENCE_MS", b, sizeof(b)) ? rgp_atol(b)
+                                                           : 45000L;
+  }();
+  static long count = 0;
+  static bool fired = false;
+  if (fired || count++ < skip)
+    return;
+  fired = true;
+  fprintf(stderr,
+          "[rgp_fence] '%s' call #%ld: draining queue + idling %ld ms so RGP "
+          "can arm on the next dispatch...\n",
+          opname, count, fence_ms);
+  fflush(stderr);
+  (void)hipStreamSynchronize(stream);
+  (void)hipDeviceSynchronize();
+#ifdef _WIN32
+  Sleep((unsigned long)fence_ms);
+#endif
+  fprintf(stderr, "[rgp_fence] resume '%s' -> launching now (capture window).\n",
+          opname);
+  fflush(stderr);
+}
+
 extern "C" int wrap_linear_attention(
     RuntimeState *state, const void *query, const void *key, const void *value,
     const void *past_state, const void *decay, const void *beta, void *output,
@@ -199,6 +293,9 @@ extern "C" int wrap_linear_attention(
   // returns 1 when it declines an unsupported config; we then fall back to the
   // per-token loop below.
   if (update_rule == kUpdateRuleGatedDelta && seq_len > 1) {
+    // Optional: idle here so an RGP capture can arm right before this launch.
+    // No-op unless HIPDNN_RGP_FENCE=linear_attention.
+    rgp_capture_fence("linear_attention", (hipStream_t)hip_stream);
     int rc = hip_linear_attention_prefill_chunked(
         hip_stream, query, key, value, decay, beta, present_state, output, B,
         seq_len, Hq, Hkv, Nk, dk, dv, scale, update_rule, decay_per_key_dim,
