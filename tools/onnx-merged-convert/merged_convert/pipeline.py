@@ -19,7 +19,6 @@ from .bundle import (
 )
 from .int8kv import convert_decoder_int8kv
 from .pipeline_aliases import (
-    CONVERT_PROFILE_LITE,
     CONVERT_PROFILE_LOW_BIT,
     convert_head_quantized,
     merge_split_pipeline,
@@ -28,6 +27,7 @@ from .pipeline_aliases import (
     patch_emb_quantized,
     process_one_onnx,
 )
+from .qdq_ext import CONVERT_PROFILE_LITE
 from .step1_qdq_fp16 import (
     ShapeFixConfig,
     convert_decoder_model,
@@ -345,12 +345,11 @@ def convert_bundle(bundle: ModelBundle, output_dir: Path) -> Path:
         meta_path = output_dir / "lora_dequant.json"
         meta_path.write_text(json.dumps(lora_dequant_meta, indent=2), encoding="utf-8")
         extras.append(f"lora_dequant.json ({len(lora_dequant_meta)} adapter ports)")
-        adapter_src = bundle.input_dir / "adapter.safetensors"
-        if adapter_src.exists():
-            adapter_dst = output_dir / "adapter.safetensors"
-            if not adapter_dst.exists():
-                shutil.copy2(adapter_src, adapter_dst)
-            extras.append("adapter.safetensors")
+
+    adapter_src = bundle.input_dir / "adapter.safetensors"
+    if adapter_src.is_file():
+        shutil.copy2(adapter_src, output_dir / "adapter.safetensors")
+        extras.append("adapter.safetensors")
 
     extra_msg = f" + {', '.join(extras)}" if extras else ""
     print(
