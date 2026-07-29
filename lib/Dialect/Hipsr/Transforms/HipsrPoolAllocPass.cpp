@@ -16,9 +16,20 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/Statistic.h"
+#include "llvm/Support/Debug.h"
 
 #include <cstdint>
 #include <limits>
+
+// Distinct from the legacy hip-pool-allocs pass so --debug-only can select one.
+#define DEBUG_TYPE "hipsr-pool-allocs"
+
+STATISTIC(NumDomainsProcessed, "Number of pool domains processed");
+STATISTIC(NumAllocationsPooled, "Number of allocations pooled into a domain");
+STATISTIC(NumGroupsCreated, "Number of lifetime groups created");
+STATISTIC(NumAllocationsReused,
+          "Number of allocations sharing another allocation's pool space");
 
 namespace mlir {
 namespace hipsr {
@@ -33,29 +44,53 @@ constexpr int64_t kPoolAlignment = 256;
 struct Lifetime {
   size_t start;
   size_t end;
+  // Ops the endpoints resolve to; read only by the LLVM_DEBUG trace.
+  Operation *startOp = nullptr;
+  Operation *endOp = nullptr;
 };
 
 std::optional<Lifetime>
 computeLifetime(Value buffer,
                 const llvm::DenseMap<Operation *, size_t> &opIndices) {
-  size_t start = std::numeric_limits<size_t>::max();
-  size_t end = 0;
+  Lifetime lt{std::numeric_limits<size_t>::max(), 0};
   for (Operation *user : buffer.getUsers()) {
     size_t userIdx = opIndices.lookup(user);
     if (auto dpsOp = dyn_cast<DestinationStyleOpInterface>(user)) {
       for (Value init : dpsOp.getDpsInits()) {
         if (init == buffer) {
-          start = std::min(start, userIdx);
+          if (userIdx < lt.start) {
+            lt.start = userIdx;
+            lt.startOp = user;
+          }
           break;
         }
       }
     }
-    end = std::max(end, userIdx);
+    if (!lt.endOp || userIdx > lt.end) {
+      lt.end = userIdx;
+      lt.endOp = user;
+    }
   }
-  if (start == std::numeric_limits<size_t>::max()) {
+  if (lt.start == std::numeric_limits<size_t>::max()) {
     return std::nullopt;
   }
-  return Lifetime{start, end};
+  return lt;
+}
+
+// Element bytes times every static dimension: the whole byte size when the
+// shape is static, and the compile-time factor of the runtime size otherwise.
+int64_t staticByteFactor(MemRefType memTy) {
+  int64_t factor = memTy.getElementTypeBitWidth() / 8;
+  for (int64_t dim : memTy.getShape()) {
+    if (!ShapedType::isDynamic(dim)) {
+      factor *= dim;
+    }
+  }
+  return factor;
+}
+
+int64_t alignUp(int64_t value, int64_t alignment) {
+  return (value + alignment - 1) / alignment * alignment;
 }
 
 void collectAllocLifetimes(Block &body, llvm::SmallVectorImpl<Value> &allocs,
@@ -74,7 +109,13 @@ void collectAllocLifetimes(Block &body, llvm::SmallVectorImpl<Value> &allocs,
     if (std::optional<Lifetime> lt = computeLifetime(buffer, opIndices)) {
       allocs.push_back(buffer);
       lifetimes[buffer] = *lt;
+      continue;
     }
+    // Without a DPS `outs` write there is no live range to place, which points
+    // at an upstream pass leaving a dead alloc behind rather than at an input
+    // this pass is expected to see.
+    allocOp.emitWarning("hipsr-pool-alloc: allocation has no first-write or no "
+                        "users, not pooled");
   }
 }
 
@@ -94,19 +135,25 @@ greedyGroup(llvm::ArrayRef<Value> allocs,
   for (Value alloc : ordered) {
     Lifetime lt = lifetimes.lookup(alloc);
     bool placed = false;
-    for (auto &group : groups) {
-      bool conflicts = false;
-      for (Value member : group) {
+    for (size_t groupIdx = 0; groupIdx < groups.size(); ++groupIdx) {
+      Value conflict;
+      for (Value member : groups[groupIdx]) {
         if (overlaps(lifetimes.lookup(member), lt)) {
-          conflicts = true;
+          conflict = member;
           break;
         }
       }
-      if (!conflicts) {
-        group.push_back(alloc);
+      if (!conflict) {
+        groups[groupIdx].push_back(alloc);
         placed = true;
         break;
       }
+      LLVM_DEBUG({
+        Lifetime other = lifetimes.lookup(conflict);
+        llvm::dbgs() << "  alloc " << alloc << " [" << lt.start << "," << lt.end
+                     << "] conflicts with " << conflict << " [" << other.start
+                     << "," << other.end << "] in group " << groupIdx << "\n";
+      });
     }
     if (!placed) {
       groups.push_back({alloc});
@@ -144,14 +191,8 @@ emitGroupSizes(OpBuilder &builder, Location loc,
     llvm::SmallVector<Value> sizes;
     for (Value alloc : group) {
       auto allocOp = alloc.getDefiningOp<memref::AllocOp>();
-      auto memTy = cast<MemRefType>(allocOp.getType());
-      int64_t staticFactor = memTy.getElementTypeBitWidth() / 8;
-      for (int64_t dim : memTy.getShape()) {
-        if (!ShapedType::isDynamic(dim)) {
-          staticFactor *= dim;
-        }
-      }
-      Value size = arith::ConstantIndexOp::create(builder, loc, staticFactor);
+      Value size = arith::ConstantIndexOp::create(
+          builder, loc, staticByteFactor(cast<MemRefType>(allocOp.getType())));
       for (Value dynDim : allocOp.getDynamicSizes()) {
         size = arith::MulIOp::create(builder, loc, size, dynDim);
       }
@@ -186,6 +227,50 @@ Value emitPool(OpBuilder &builder, Location loc, Value ctx,
   return GetPoolOp::create(builder, loc, poolType, ctx, poolSize);
 }
 
+// Byte totals are only meaningful when every size is a compile-time constant;
+// a domain with a dynamic extent reports the structural counts alone rather
+// than a symbolic expression.
+void emitPoolingReport(PoolDomainOp domain, int64_t domainId,
+                       llvm::ArrayRef<Value> allocs,
+                       llvm::ArrayRef<llvm::SmallVector<Value>> groups,
+                       int64_t alignment) {
+  InFlightDiagnostic diag = domain.emitRemark();
+  diag << "hipsr-pool-alloc: domain " << domainId << " pooled " << allocs.size()
+       << " allocs into " << groups.size() << " groups (reused "
+       << (allocs.size() - groups.size()) << ")";
+
+  bool allStatic = llvm::all_of(allocs, [](Value alloc) {
+    return cast<MemRefType>(alloc.getType()).hasStaticShape();
+  });
+  if (!allStatic) {
+    return;
+  }
+
+  int64_t poolBytes = 0;
+  int64_t naiveBytes = 0;
+  int64_t slackBytes = 0;
+  for (llvm::ArrayRef<Value> group : groups) {
+    int64_t groupBytes = 0;
+    for (Value member : group) {
+      groupBytes = std::max(
+          groupBytes, staticByteFactor(cast<MemRefType>(member.getType())));
+    }
+    poolBytes += alignUp(groupBytes, alignment);
+    for (Value member : group) {
+      int64_t memberBytes =
+          staticByteFactor(cast<MemRefType>(member.getType()));
+      // Naive baseline gives every alloc its own aligned buffer, so the ratio
+      // compares like with like and can never make pooling look like a loss.
+      naiveBytes += alignUp(memberBytes, alignment);
+      slackBytes += groupBytes - memberBytes;
+    }
+  }
+  int64_t savedPct =
+      naiveBytes ? (naiveBytes - poolBytes) * 100 / naiveBytes : 0;
+  diag << "; pool " << poolBytes << "/" << naiveBytes << " B (saved "
+       << savedPct << "%), slack " << slackBytes << " B";
+}
+
 void replaceAllocsWithViews(OpBuilder &builder, llvm::ArrayRef<Value> group,
                             Value pool, Value offset) {
   for (Value alloc : group) {
@@ -203,16 +288,22 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
       HipsrPoolAllocPass>::HipsrPoolAllocPassBase;
 
   void runOnOperation() override {
-    getOperation().walk([&](PoolDomainOp domain) { processDomain(domain); });
+    int64_t domainId = 0;
+    getOperation().walk(
+        [&](PoolDomainOp domain) { processDomain(domain, domainId++); });
   }
 
-  void processDomain(PoolDomainOp domain) {
+  void processDomain(PoolDomainOp domain, int64_t domainId) {
     Block &body = domain.getBody().front();
 
     llvm::SmallVector<Value> allocs;
     llvm::DenseMap<Value, Lifetime> lifetimes;
     collectAllocLifetimes(body, allocs, lifetimes);
     if (allocs.empty()) {
+      if (emitPoolReport) {
+        domain.emitRemark() << "hipsr-pool-alloc: domain " << domainId
+                            << " has no poolable allocations";
+      }
       return;
     }
 
@@ -225,6 +316,34 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
     }
 
     auto groups = greedyGroup(allocs, lifetimes);
+
+    ++NumDomainsProcessed;
+    NumAllocationsPooled += allocs.size();
+    NumGroupsCreated += groups.size();
+    NumAllocationsReused += allocs.size() - groups.size();
+
+    LLVM_DEBUG({
+      llvm::dbgs() << "domain " << domainId << ": " << allocs.size()
+                   << " allocs, " << groups.size() << " groups\n";
+      for (Value alloc : allocs) {
+        Lifetime lt = lifetimes.lookup(alloc);
+        llvm::dbgs() << "  " << alloc << " [" << lt.start << "," << lt.end
+                     << "] first-write " << lt.startOp->getName()
+                     << " last-use " << lt.endOp->getName() << "\n";
+      }
+      for (auto [groupIdx, group] : llvm::enumerate(groups)) {
+        llvm::dbgs() << "  group " << groupIdx << ":";
+        for (Value member : group) {
+          llvm::dbgs() << " " << member;
+        }
+        llvm::dbgs() << "\n";
+      }
+    });
+
+    // Emitted before the allocs are replaced, while their types are still live.
+    if (emitPoolReport) {
+      emitPoolingReport(domain, domainId, allocs, groups, kPoolAlignment);
+    }
 
     OpBuilder builder(&getContext());
     builder.setInsertionPointAfter(findLastAlloc(body));

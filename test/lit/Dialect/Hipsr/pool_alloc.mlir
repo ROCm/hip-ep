@@ -6,7 +6,7 @@
 // Cases are ordered by lifetime-interval topology (interference-graph chromatic
 // number chi = group count), ascending:
 //   chi=0  empty         : noalloc_noop
-//   chi=1  single point   : align_up_rounding, dynamic_size
+//   chi=1  single point   : align_up_rounding, dynamic_size, dead_alloc_skipped
 //   chi=1  independent    : coalesce_static, coalesce_dynamic, coalesce_mixed
 //   chi=2  staggered edge : split_two_groups, split_two_groups_dynamic
 //   chi=2  one-over-many  : split_with_coalesced_group
@@ -85,6 +85,38 @@ func.func @dynamic_size(%ctx: !hipsr.context,
     %a1 = memref.alloc(%d) : memref<?x512xf16, #hipsr.mem<device>>
     hipsr.add(%dctx) ins(%din, %din : memref<?x512xf16, #hipsr.mem<device>>, memref<?x512xf16, #hipsr.mem<device>>)
                outs(%a1 : memref<?x512xf16, #hipsr.mem<device>>)
+    hipsr.pool_domain_yield
+  }
+  return
+}
+
+// -----
+
+// An alloc with no DPS write has no interval to place, so it is warned about and
+// left as a memref.alloc; the pool is sized for the live alloc alone (8192, no
+// maxui) and the live alloc is still pooled.
+// CHECK-LABEL: func.func @dead_alloc_skipped
+// CHECK: memref.alloc() : memref<4x1024xf16, #hipsr.mem<device>>
+// CHECK-NEXT: %[[C8192:.+]] = arith.constant 8192 : index
+// CHECK-NEXT: %[[C256:.+]] = arith.constant 256 : index
+// CHECK-NEXT: %[[C255:.+]] = arith.constant 255 : index
+// CHECK-NEXT: %[[NUM:.+]] = arith.addi %[[C8192]], %[[C255]] : index
+// CHECK-NEXT: %[[DIV:.+]] = arith.divui %[[NUM]], %[[C256]] : index
+// CHECK-NEXT: %[[SZ:.+]] = arith.muli %[[DIV]], %[[C256]] : index
+// CHECK-NEXT: %[[POOL:.+]] = hipsr.get_pool(%{{.+}}, %[[SZ]]) : memref<?xi8, #hipsr.mem<device>>
+// CHECK-NEXT: %[[OFF:.+]] = arith.constant 0 : index
+// CHECK-NEXT: %[[V0:.+]] = memref.view %[[POOL]][%[[OFF]]][] : memref<?xi8, #hipsr.mem<device>> to memref<4x1024xf16, #hipsr.mem<device>>
+// CHECK-NEXT: hipsr.add(%{{.+}}) ins(%{{.+}}, %{{.+}} : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%[[V0]] : memref<4x1024xf16, #hipsr.mem<device>>)
+// CHECK-NOT: arith.maxui
+func.func @dead_alloc_skipped(%ctx: !hipsr.context,
+                        %in: memref<4x1024xf16, #hipsr.mem<device>>) {
+  hipsr.pool_domain(%ctx, %in : !hipsr.context, memref<4x1024xf16, #hipsr.mem<device>>) {
+  ^bb0(%dctx: !hipsr.context, %din: memref<4x1024xf16, #hipsr.mem<device>>):
+    // expected-warning@+1 {{hipsr-pool-alloc: allocation has no first-write or no users, not pooled}}
+    %dead = memref.alloc() : memref<4x1024xf16, #hipsr.mem<device>>
+    %a1 = memref.alloc() : memref<4x1024xf16, #hipsr.mem<device>>
+    hipsr.add(%dctx) ins(%din, %din : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>)
+               outs(%a1 : memref<4x1024xf16, #hipsr.mem<device>>)
     hipsr.pool_domain_yield
   }
   return

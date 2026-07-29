@@ -65,9 +65,17 @@ def HipsrPoolAllocPass : Pass<"hipsr-pool-alloc", "mlir::ModuleOp"> {
     lifetime: allocations whose live ranges do not overlap share one
     `hipsr.get_pool` buffer, each `memref.alloc` becoming a `memref.view` into
     the pool. Lifetime uses first-write (DPS `outs`) as start and last use as
-    end. This pass handles the single-group case; multiple non-overlap groups
-    error out for now.
+    end. Allocations that do overlap are greedily split into groups; each group
+    takes its own aligned slice of the one pool buffer, sized by its largest
+    member.
   }];
+  let options = [
+    Option<"emitPoolReport", "emit-pool-report", "bool", /*default=*/"false",
+           "Debug-only: emit a per-domain remark with pooling effectiveness "
+           "(allocations, groups, reuse, and for fully static domains the "
+           "pooled vs naive byte totals and intra-group slack). No effect on "
+           "generated code.">
+  ];
   let dependentDialects = [
     "::mlir::hipsr::HipsrDialect",
     "::mlir::memref::MemRefDialect",
