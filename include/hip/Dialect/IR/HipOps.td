@@ -312,10 +312,10 @@ def Hip_AllocOutputOp : Hip_Op<"alloc_output",
 
     Unlike hip.alloc / hip.get_pool / hip.get_host_scratch, this op intentionally
     does NOT carry an Allocate memory effect: the buffer is EP/runtime-owned (it
-    is a graph output), so buffer-deallocation must not free it and
-    hip-pool-allocs must not pool it. It DOES carry a Write effect so later
-    DCE/CSE cannot drop or merge it -- see AllocOutputOp::getEffects in
-    HipDialect.cpp for the rationale.
+    is a graph output), so hip-pool-allocs must not pool it. A custom pipeline
+    that enables ownership-based buffer deallocation must not free it either.
+    It DOES carry a Write effect so later DCE/CSE cannot drop or merge it -- see
+    AllocOutputOp::getEffects in HipDialect.cpp for the rationale.
 
     Example:
     ```mlir

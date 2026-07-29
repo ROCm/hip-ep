@@ -1,4 +1,6 @@
 // RUN: hip-mlir-opt %s --hipdnn-pipeline | FileCheck %s
+// RUN: hip-mlir-opt %s --onnx-to-hip-pipeline --dump-pass-pipeline -o /dev/null 2>&1 | FileCheck %s --check-prefix=DEFAULT-BUFFERIZE
+// RUN: env HIPDNN_EP_BUFFERIZE_COPY_BEFORE_WRITE=1 hip-mlir-opt %s --onnx-to-hip-pipeline --dump-pass-pipeline -o /dev/null 2>&1 | FileCheck %s --check-prefix=COPY-BEFORE-WRITE
 
 // Test MLP E2E pipeline from real Llama-3.1-8B MLP subgraph
 // The model has MatMul + Sigmoid + Mul (SiLU gate) ops with constant weights.
@@ -21,6 +23,42 @@
 // CHECK-NOT: onnx.MatMul
 // CHECK-NOT: onnx.Sigmoid
 // CHECK-NOT: onnx.Mul
+
+// The huge-graph escape hatch is opt-in: default retains One-Shot analysis;
+// setting the process environment enables copy-before-write.
+// DEFAULT-BUFFERIZE: one-shot-bufferize{{.*}}copy-before-write=false
+// COPY-BEFORE-WRITE: one-shot-bufferize{{.*}}copy-before-write=true
+// Production pipeline schedule: ownership-based deallocation must not return.
+// PIPELINE-LABEL: Pass Manager with
+// PIPELINE-NOT: buffer-deallocation
+// PIPELINE: hip-loop-body-to-out-params
+// PIPELINE-NOT: buffer-deallocation
+// PIPELINE: hip-use-output-allocator
+// PIPELINE-NOT: buffer-deallocation
+// PIPELINE: hip-pool-allocs
+// PIPELINE-NOT: buffer-deallocation
+
+// Multi-intermediate production IR: transients are pooled and the graph output
+// is runtime-owned, with no per-buffer allocation/free or deallocation clone.
+// POOLED-LABEL: func.func @main_graph
+// POOLED-NOT: memref.alloc
+// POOLED-NOT: memref.dealloc
+// POOLED-NOT: bufferization.dealloc
+// POOLED-NOT: bufferization.clone
+// POOLED-NOT: hip.alloc(
+// POOLED-NOT: hip.free
+// POOLED: hip.get_pool
+// POOLED-NOT: memref.alloc
+// POOLED-NOT: bufferization.dealloc
+// POOLED-NOT: bufferization.clone
+// POOLED: hip.alloc_output
+// POOLED-NOT: memref.alloc
+// POOLED-NOT: memref.dealloc
+// POOLED-NOT: bufferization.dealloc
+// POOLED-NOT: bufferization.clone
+// POOLED-NOT: hip.alloc(
+// POOLED-NOT: hip.free
+// POOLED: return
 module {
   func.func @main_graph(%arg0: tensor<1x128x4096xf16> {onnx.name = "/model/layers.0/post_attention_layernorm/output_0"}) -> (tensor<1x128x4096xf16> {onnx.name = "/model/layers.0/mlp/down_proj/MatMul/output_0"}) {
     %0 = "onnx.Constant"() {value = dense<5.000000e-03> : tensor<4096x14336xf16>} : () -> tensor<4096x14336xf16>

@@ -188,6 +188,33 @@ python build.py --install_dir "$LOCAL_DIR" --cmake_prefix_path "$LOCAL_DIR"
 installed in step 1; omit it and ORT is auto-downloaded. The hipgpu EP, HIP
 tools and LIT tests are built and installed into `../local/`.
 
+#### Running LIT tests manually
+
+`build.py` runs the LIT suite after install by default (`--skip_tests` to
+opt out). To re-run without a full rebuild, from the project root:
+
+```bash
+BUILD_DIR="../build/$(basename $PWD)"
+CONFIG=Release   # match your --config; default is Release
+
+# Preferred — CMake target (builds tools if needed)
+cmake --build "$BUILD_DIR" --config "$CONFIG" --target check-hip-mlir-lit
+
+# CTest
+ctest --test-dir "$BUILD_DIR/test/lit" -C "$CONFIG" -V
+
+# Direct lit (from build tree)
+cd "$BUILD_DIR/test/lit"
+lit -sv --param=build_mode="$CONFIG" .
+
+# Single file or subset
+lit -sv --param=build_mode="$CONFIG" path/to/test.mlir
+lit -sv -j 8 --param=build_mode="$CONFIG" Conversion/onnx-to-hip/
+```
+
+Prerequisite: `pip install lit`. Match `--config` / `build_mode` to your build
+type.
+
 ### 3. Build OGA (onnxruntime-genai)
 
 OGA (ONNX Runtime GenAI) provides the generative-pipeline runtime used by
