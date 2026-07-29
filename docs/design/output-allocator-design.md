@@ -49,8 +49,7 @@ Dynamic output shapes are computed **inside** the graph (e.g. `M = memref.dim %i
 
 ```mermaid
 graph TD
-    A[one-shot-bufferize] --> B[buffer-deallocation]
-    B --> C[hip-use-output-allocator]
+    A[one-shot-bufferize] --> C[hip-use-output-allocator]
     C --> D[hip-pool-allocs]
     D --> E[convert-hip-to-llvm]
     E --> F[generate-interface]
@@ -61,8 +60,7 @@ graph TD
 
 ```
 one-shot-bufferize
-buffer-deallocation              ← output still memref.alloc (owned) → no clone
-hip-use-output-allocator         ← memref.alloc → hip.alloc_output (AFTER dealloc)
+hip-use-output-allocator         ← memref.alloc → hip.alloc_output
 hip-pool-allocs                  ← pools only intermediates; skips hip.alloc_output
 convert-hip-to-llvm              ← 2-arg main_graph wrapper
 generate-interface               ← 2-arg inference_compute ABI
@@ -70,7 +68,7 @@ generate-interface               ← 2-arg inference_compute ABI
 - `main_graph(state, inputs_array) -> i32`
 - Outputs allocated in-graph via `hip.alloc_output`, no `outputs_array`
 
-**Pipeline ordering is load-bearing.** `hip-use-output-allocator` runs *after* `buffer-deallocation` and *before* `hip-pool-allocs` (the "slot 4.5" placement). After dealloc, the output is still a plain `memref.alloc` (owned) and is returned with no clone; running before dealloc would make the deallocator clone the unowned `hip.alloc_output` result at the `return`, defeating zero-copy. Before pool-allocs keeps the EP-owned output out of the GPU pool. Pinned in [test/lit/Pipeline/output-allocator-dealloc.mlir](../../test/lit/Pipeline/output-allocator-dealloc.mlir).
+**Pipeline ordering is load-bearing.** `hip-use-output-allocator` runs *before* `hip-pool-allocs` (the "slot 4.5" placement) so the EP-owned output stays out of the GPU pool. Note this pipeline does **not** run ownership-based buffer deallocation at all — every transient is packed into session-owned pool(s) by `hip-pool-allocs` (as `memref.view` over `hip.get_pool`) rather than freed per-`memref.alloc`, so there is nothing to deallocate (see the pipeline-tail comment in `lib/Dialect/Transforms/Pipelines.cpp`). The historical constraint of running the output-allocator *after* deallocation (to stop the deallocator cloning the unowned `hip.alloc_output` at the `return`) is therefore moot.
 
 ---
 
@@ -91,9 +89,9 @@ Introduce `hip.alloc_output` — an operation that allocates output buffers via 
 - Attribute: `out_idx` identifying which graph output
 - Result type: memref with static dims from type, dynamic dims from operands
 
-**Key property:** Does not declare `Allocate` memory effect — the buffer is owned by the EP/runtime, not the graph, so buffer-deallocation never inserts a `hip.free` for it.
+**Key property:** Does not declare `Allocate` memory effect — the buffer is owned by the EP/runtime, not the graph, so `hip-pool-allocs` skips it and no `hip.free` is ever emitted for it.
 
-**Placement in pipeline:** *after* `buffer-deallocation`, *before* `hip-pool-allocs` (so pooling skips the EP-owned buffer). `hip-use-output-allocator` is FuncOp-scoped: it rewrites returned allocs (leaving each signature + `return` intact). The after-dealloc order is load-bearing — see [§2](#the-pipeline).
+**Placement in pipeline:** *before* `hip-pool-allocs` (so pooling skips the EP-owned buffer). `hip-use-output-allocator` is FuncOp-scoped: it rewrites returned allocs (leaving each signature + `return` intact). See [§2](#the-pipeline).
 
 The `hip-use-output-allocator` pass replaces the returned `memref.alloc` for each graph output with `hip.alloc_output`, reusing the alloc's dynamic-size operands. An alloc counts as a graph output when `func.return` hands it back — either directly, or after it passes through view ops (`memref.cast`, `memref.collapse_shape`, `memref.expand_shape`, `memref.subview`, any number of them). The pass uses `BufferViewFlowAnalysis` to check this: an alloc is an output if any value made from it via those view ops is returned. This handles reshaped / cast / subview'd outputs without special-casing each op, and the view ops between the alloc and the return are left in place.
 

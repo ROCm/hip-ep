@@ -413,10 +413,10 @@ HIP_EP_DEFINE_PLUGIN(myvendor) {
    vendor op through untouched.
 2. **Bufferize.** `one-shot-bufferize` finds the op's attached
    `BufferizableOpInterface` model and rewrites tensor semantics to memref. If
-   the bufferized op has memref operands, it must also implement
-   `MemoryEffectOpInterface` (declaring which operands it reads and writes), or
-   the ownership-based buffer-deallocation pass rejects it with "unknown memory
-   side effects".
+   the bufferized op has memref operands, it should also implement
+   `MemoryEffectOpInterface` so downstream analyses know which operands it reads
+   and writes. This is required if a custom pipeline enables ownership-based
+   buffer deallocation; the built-in pipeline omits that pass.
 3. **Lower to LLVM.** `convert-hip-to-llvm` collects every dialect that
    implements `ConvertToLLVMPatternInterface` and lets it add its lowering
    patterns and mark its ops illegal. The vendor op lowers to a call into the
