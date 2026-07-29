@@ -207,8 +207,6 @@ struct ExpandLowering : ConvertOpToLLVMPattern<ExpandOp> {
     MLIRContext *ctx = rewriter.getContext();
     Type hostPtrType = LLVM::LLVMPointerType::get(ctx, 0);
     Type devicePtrType = LLVM::LLVMPointerType::get(ctx, 1);
-    Type i32Type = rewriter.getI32Type();
-    Type i64Type = rewriter.getI64Type();
 
     auto inputType = dyn_cast<MemRefType>(op.getInput().getType());
     auto outputType = dyn_cast<MemRefType>(op.getInit().getType());
@@ -222,12 +220,14 @@ struct ExpandLowering : ConvertOpToLLVMPattern<ExpandOp> {
       return rewriter.notifyMatchFailure(op, "unsupported element type");
     }
 
-    auto createI64Const = [&](int64_t value) {
+    Type i64Type = rewriter.getI64Type();
+    auto createI64Const = [&](int64_t v) {
       return LLVM::ConstantOp::create(rewriter, loc, i64Type,
-                                      rewriter.getI64IntegerAttr(value));
+                                      rewriter.getI64IntegerAttr(v));
     };
 
     Value one = createI64Const(1);
+    Type i32Type = rewriter.getI32Type();
     auto emitShapeArray = [&](MemRefType type, Value descriptor) -> Value {
       int64_t rank = type.getRank();
       auto arrayType =

@@ -67,8 +67,6 @@ struct CastLowering : ConvertOpToLLVMPattern<CastOp> {
     MLIRContext *ctx = rewriter.getContext();
     Type hostPtrType = LLVM::LLVMPointerType::get(ctx, 0);
     Type devicePtrType = LLVM::LLVMPointerType::get(ctx, 1);
-    Type i32Type = rewriter.getI32Type();
-    Type i64Type = rewriter.getI64Type();
 
     auto inputType = dyn_cast<MemRefType>(op.getInput().getType());
     auto outputType = dyn_cast<MemRefType>(op.getInit().getType());
@@ -83,9 +81,10 @@ struct CastLowering : ConvertOpToLLVMPattern<CastOp> {
       return rewriter.notifyMatchFailure(op, "unsupported element type");
     }
 
-    auto createI64Const = [&](int64_t value) {
+    Type i64Type = rewriter.getI64Type();
+    auto createI64Const = [&](int64_t v) {
       return LLVM::ConstantOp::create(rewriter, loc, i64Type,
-                                      rewriter.getI64IntegerAttr(value));
+                                      rewriter.getI64IntegerAttr(v));
     };
 
     Value numElements = createI64Const(1);
@@ -107,7 +106,7 @@ struct CastLowering : ConvertOpToLLVMPattern<CastOp> {
         i64Type        // dst_data_type
     };
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapCast, paramTypes, i32Type);
+        rewriter, module, kWrapCast, paramTypes, rewriter.getI32Type());
     if (failed(funcOp)) {
       return failure();
     }

@@ -153,8 +153,6 @@ struct MatMulLowering : ConvertOpToLLVMPattern<MatMulOp> {
     MLIRContext *ctx = rewriter.getContext();
     Type hostPtrType = LLVM::LLVMPointerType::get(ctx, 0);
     Type devicePtrType = LLVM::LLVMPointerType::get(ctx, 1);
-    Type i32Type = rewriter.getI32Type();
-    Type i64Type = rewriter.getI64Type();
 
     auto aType = dyn_cast<MemRefType>(op.getA().getType());
     auto bType = dyn_cast<MemRefType>(op.getB().getType());
@@ -172,9 +170,10 @@ struct MatMulLowering : ConvertOpToLLVMPattern<MatMulOp> {
           op, "expected matching f16 or f32 element types");
     }
 
-    auto createI64Const = [&](int64_t value) {
+    Type i64Type = rewriter.getI64Type();
+    auto createI64Const = [&](int64_t v) {
       return LLVM::ConstantOp::create(rewriter, loc, i64Type,
-                                      rewriter.getI64IntegerAttr(value));
+                                      rewriter.getI64IntegerAttr(v));
     };
 
     MemRefDescriptor aDesc(adaptor.getA());
@@ -191,7 +190,8 @@ struct MatMulLowering : ConvertOpToLLVMPattern<MatMulOp> {
     Value batchCount = createI64Const(1);
     for (int64_t i : llvm::seq<int64_t>(0, std::max<int64_t>(aRank - 2, 0))) {
       batchCount = LLVM::MulOp::create(rewriter, loc, batchCount,
-                                       aDesc.size(rewriter, loc, i));
+                                       aDesc.size(rewriter, loc, i))
+                       .getResult();
     }
 
     Value bBatchStride;
@@ -208,26 +208,29 @@ struct MatMulLowering : ConvertOpToLLVMPattern<MatMulOp> {
         staticLeadingProduct *= bType.getDimSize(i);
       }
       if (allLeadingStatic) {
-        bBatchStride = staticLeadingProduct <= 1
-                           ? createI64Const(0)
-                           : LLVM::MulOp::create(rewriter, loc, k, n).getRes();
+        bBatchStride =
+            staticLeadingProduct <= 1
+                ? createI64Const(0)
+                : LLVM::MulOp::create(rewriter, loc, k, n).getResult();
       } else {
         Value one = createI64Const(1);
         Value zero = createI64Const(0);
         Value leadingProduct = one;
         for (int64_t i : llvm::seq<int64_t>(0, bRank - 2)) {
           leadingProduct = LLVM::MulOp::create(rewriter, loc, leadingProduct,
-                                               bDesc.size(rewriter, loc, i));
+                                               bDesc.size(rewriter, loc, i))
+                               .getResult();
         }
         Value isBroadcast = LLVM::ICmpOp::create(
             rewriter, loc, LLVM::ICmpPredicate::sle, leadingProduct, one);
-        Value kn = LLVM::MulOp::create(rewriter, loc, k, n);
+        Value kn = LLVM::MulOp::create(rewriter, loc, k, n).getResult();
         bBatchStride =
             LLVM::SelectOp::create(rewriter, loc, isBroadcast, zero, kn);
       }
     }
 
     Value elementSize = createI64Const(elementType.getIntOrFloatBitWidth() / 8);
+    Type i32Type = rewriter.getI32Type();
     SmallVector<Type, 11> paramTypes = {
         hostPtrType,   // state
         i32Type,       // op_state_slot

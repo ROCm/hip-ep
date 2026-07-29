@@ -22,6 +22,36 @@ func.func @matmul_rank2(
   return
 }
 
+// CHECK-LABEL: llvm.func @matmul_lhs_1d
+// CHECK:       llvm.call @wrap_hipblasLtMatmul
+func.func @matmul_lhs_1d(
+    %ctx: !hipsr.context,
+    %a: memref<64xf16, #hipsr.mem<device>>,
+    %b: memref<64x32xf16, #hipsr.mem<device>>,
+    %init: memref<32xf16, #hipsr.mem<device>>) {
+  hipsr.matmul(%ctx)
+      ins(%a, %b : memref<64xf16, #hipsr.mem<device>>,
+                    memref<64x32xf16, #hipsr.mem<device>>)
+      outs(%init : memref<32xf16, #hipsr.mem<device>>)
+  return
+}
+
+// CHECK-LABEL: llvm.func @matmul_static_broadcast_b
+// CHECK:       %[[BROADCAST_BATCH:.*]] = llvm.mul
+// CHECK:       %[[BROADCAST_STRIDE:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK:       llvm.call @wrap_hipblasLtMatmul({{.*}}, %[[BROADCAST_BATCH]], {{%.*}}, %[[BROADCAST_STRIDE]])
+func.func @matmul_static_broadcast_b(
+    %ctx: !hipsr.context,
+    %a: memref<4x128x64xf16, #hipsr.mem<device>>,
+    %b: memref<1x64x32xf16, #hipsr.mem<device>>,
+    %init: memref<4x128x32xf16, #hipsr.mem<device>>) {
+  hipsr.matmul(%ctx)
+      ins(%a, %b : memref<4x128x64xf16, #hipsr.mem<device>>,
+                    memref<1x64x32xf16, #hipsr.mem<device>>)
+      outs(%init : memref<4x128x32xf16, #hipsr.mem<device>>)
+  return
+}
+
 // CHECK-LABEL: llvm.func @matmul_dynamic_batch
 // CHECK-SAME:  (%[[DYN_CTX:.*]]: !llvm.ptr,
 // CHECK:       %[[DYN_BATCH:.*]] = llvm.mul
