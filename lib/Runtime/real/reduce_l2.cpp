@@ -52,6 +52,13 @@ int wrap_reduce_l2(RuntimeState *state, void *data, void *axes, void *output,
   }
 
   if (axes_num_elements == 0 && noop_with_empty_axes == 1) {
+    if (data_num_elements != output_num_elements) {
+      fprintf(stderr,
+              "[REAL] wrap_reduce_l2: noop path shape mismatch "
+              "data_num_elements=%lld output_num_elements=%lld\n",
+              (long long)data_num_elements, (long long)output_num_elements);
+      return -1;
+    }
     void *stream = hipdnn_ep_state_get_stream(state);
     int64_t element_size_bytes = hipdnn_ep_datatype_size(data_type);
     if (element_size_bytes < 0) {
@@ -61,7 +68,7 @@ int wrap_reduce_l2(RuntimeState *state, void *data, void *axes, void *output,
               (long long)data_type);
       return -1;
     }
-    int64_t total_bytes = data_num_elements * element_size_bytes;
+    int64_t total_bytes = output_num_elements * element_size_bytes;
     RUNTIME_DEBUG_LOG(
         "[REAL] wrap_reduce_l2: noop_with_empty_axes=1 with empty axes, "
         "copying %lld bytes (data_type=%s)\n",

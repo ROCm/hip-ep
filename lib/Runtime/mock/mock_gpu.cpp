@@ -1079,7 +1079,10 @@ int wrap_reduce_mean(RuntimeState *state, void *data, void *axes, void *output,
 int wrap_reduce_l2(RuntimeState *state, void *data, void *axes, void *output,
                    int64_t data_num_elements, int64_t output_num_elements,
                    int64_t axes_num_elements, int64_t data_type,
-                   int64_t keepdims, int64_t noop_with_empty_axes) {
+                   int64_t keepdims, int64_t noop_with_empty_axes,
+                   int64_t inner_size) {
+  (void)axes;
+  (void)inner_size;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_reduce_l2\n");
     return -1;
@@ -1088,11 +1091,11 @@ int wrap_reduce_l2(RuntimeState *state, void *data, void *axes, void *output,
   MOCK_PRINT(
       "[MOCK] wrap_reduce_l2(data_num_elements=%lld, "
       "output_num_elements=%lld, axes_num_elements=%lld, data_type=%s(%lld), "
-      "keepdims=%lld, noop_with_empty_axes=%lld)\n",
+      "keepdims=%lld, noop_with_empty_axes=%lld, inner_size=%lld)\n",
       (long long)data_num_elements, (long long)output_num_elements,
       (long long)axes_num_elements, hipdnn_ep_datatype_name(data_type),
       (long long)data_type, (long long)keepdims,
-      (long long)noop_with_empty_axes);
+      (long long)noop_with_empty_axes, (long long)inner_size);
 
   return 0;
 }

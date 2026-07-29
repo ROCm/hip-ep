@@ -664,6 +664,7 @@ extern "C" int hip_reduce_l2(
           (long long)num_input_elements, (long long)num_output_elements,
           (long long)reduce_size, block_size);
 
+  (void)hipGetLastError();
   if (hip_dtype == HIP_DTYPE_FLOAT16) {
     hipLaunchKernelGGL(reduce_l2_f16_kernel,
                      dim3(static_cast<unsigned>(num_output_elements)),
