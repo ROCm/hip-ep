@@ -801,35 +801,16 @@ int wrap_hipblasLtGemm(void *handle, // hipBLASLt handle
                        const void *beta,  // Scalar beta
                        void *C);          // Matrix C GPU pointer (in/out)
 
-// MatMul operation wrapper (batched matrix multiplication)
-// Called by generated IR for onnx.MatMul lowering
-// Computes output = A @ B for each batch
-// A/B may each contain one broadcast matrix or one matrix per output batch.
-// output: [batch_count x M x N]
+// Compute output = A @ B for each batch. Either operand may contain one matrix
+// broadcast across all output batches or one matrix per output batch.
 //
 // `a_batch_stride` / `b_batch_stride` are hipBLASLt's per-batch advances in
 // elements. A stride is 0 when one matrix is broadcast across all batches;
 // otherwise it is M*K for A or K*N for B.
-// Legacy wrapper retained for cached model artifacts compiled before the A
-// batch-stride parameter was added. It assumes A is per-batch.
 int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
                          const void *B, void *output, int64_t M, int64_t N,
                          int64_t K, int64_t batch_count, int64_t elem_size,
-                         int64_t b_batch_stride);
-
-int wrap_hipblasLtMatmul_v2(
-    RuntimeState *state,
-    int op_state_slot,       // per-instance op-state slot (shared algo table)
-    const void *A,           // Matrix A GPU pointer
-    const void *B,           // Matrix B GPU pointer
-    void *output,            // Output GPU pointer
-    int64_t M,               // Rows of A (per batch)
-    int64_t N,               // Columns of B
-    int64_t K,               // Columns of A / Rows of B
-    int64_t batch_count,     // Number of batches
-    int64_t elem_size,       // Element size in bytes (2=f16, 4=f32)
-    int64_t a_batch_stride,  // 0 = broadcast; M*K = per-batch
-    int64_t b_batch_stride); // 0 = broadcast (any rank); K*N = per-batch
+                         int64_t a_batch_stride, int64_t b_batch_stride);
 
 // GroupQueryAttention operation wrapper (Full MS spec)
 // Called by generated IR for onnx.Custom(GroupQueryAttention) lowering

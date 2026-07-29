@@ -192,10 +192,12 @@ getTensorTypeFromReifiedShape(llvm::ArrayRef<mlir::OpFoldResult> reifiedShape,
 /// broadcast of \p operands. Converter destination construction delegates to
 /// the same dialect helper used by ReifyRankedShapedTypeOpInterface.
 ///
-/// Use this for binary/multinary broadcast elementwise ops (Add, Mul, Where,
-/// ...). Do NOT use `createEmptyTensor(resultType, source)` when operands can
-/// disagree on which side supplies a dynamic extent (e.g. `[?x1] + [1x?] ->
-/// [?x?]` -- dim 0 from lhs, dim 1 from rhs).
+/// Before:
+///   %init = tensor.empty(%lhs_dim) : tensor<?xf32>
+/// After:
+///   %lhs_is_one = arith.cmpi eq, %lhs_dim, %c1 : index
+///   %extent = arith.select %lhs_is_one, %rhs_dim, %lhs_dim : index
+///   %init = tensor.empty(%extent) : tensor<?xf32>
 inline mlir::FailureOr<mlir::Value>
 createBroadcastEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
                            mlir::RankedTensorType resultType,

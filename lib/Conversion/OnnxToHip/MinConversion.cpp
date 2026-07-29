@@ -9,17 +9,15 @@ namespace mlir {
 namespace hip {
 namespace {
 
-/// onnx.Min -> hip.min (via MIOpen miopenOpTensor with miopenTensorOpMin)
-///
-/// Handles variadic inputs by pairwise chaining:
-///   min(a, b, c) = min(min(a, b), c)
-/// Single input is identity (pass through).
+/// Lower variadic `onnx.Min` to pairwise `hip.min` operations.
 ///
 /// Before:
-///   %tmp = hip.min ... outs(%same_rank_as_a)
+///   %r = "onnx.Min"(%a, %b, %c) : (...) -> tensor<2x3x4xf32>
 /// After:
-///   %tmp_shape = broadcast_shape(%a, %b)
-///   %tmp = hip.min ... outs(%empty_for_tmp_shape)
+///   %ab_init = tensor.empty() : tensor<3x4xf32>
+///   %ab = hip.min ... outs(%ab_init : tensor<3x4xf32>)
+///   %abc_init = tensor.empty() : tensor<2x3x4xf32>
+///   %r = hip.min ... outs(%abc_init : tensor<2x3x4xf32>)
 struct MinToHip : public mlir::RewritePattern {
   MinToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Min", /*benefit=*/1, ctx) {}
@@ -36,7 +34,6 @@ MinToHip::matchAndRewrite(mlir::Operation *op,
   if (numInputs == 0)
     return rewriter.notifyMatchFailure(op, "Min requires at least 1 input");
 
-  // Single input: identity
   if (numInputs == 1) {
     rewriter.replaceOp(op, op->getOperand(0));
     return mlir::success();
@@ -51,9 +48,8 @@ MinToHip::matchAndRewrite(mlir::Operation *op,
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 
-  // Pairwise chaining: accumulate = min(accumulate, next_input)
   mlir::Value accumulate = op->getOperand(0);
-  for (unsigned i = 1; i < numInputs; ++i) {
+  for (unsigned i : llvm::seq<unsigned>(1, numInputs)) {
     mlir::Value rhs = op->getOperand(i);
     mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>> stepShape =
         mlir::hip::reifyBroadcastResultShape(rewriter, loc, {accumulate, rhs},

@@ -91,16 +91,16 @@ broadcastDim(OpBuilder &b, Location loc, OpFoldResult lhs, OpFoldResult rhs,
 
 } // namespace
 
-SmallVector<int64_t>
+FailureOr<SmallVector<int64_t>>
 mlir::hip::inferMatmulShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
                             function_ref<InFlightDiagnostic()> emitError) {
   if (aShape.size() < 2) {
     emitError() << "matmul A must have rank >= 2, got rank " << aShape.size();
-    return {};
+    return failure();
   }
   if (bShape.size() < 2) {
     emitError() << "matmul B must have rank >= 2, got rank " << bShape.size();
-    return {};
+    return failure();
   }
 
   int64_t M = aShape[aShape.size() - 2];
@@ -112,18 +112,16 @@ mlir::hip::inferMatmulShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
   if (!ShapedType::isDynamic(Ka) && !ShapedType::isDynamic(Kb) && Ka != Kb) {
     emitError() << "matmul contraction dim mismatch: A.shape[-1]=" << Ka
                 << " vs B.shape[-2]=" << Kb;
-    return {};
+    return failure();
   }
 
-  // Batch broadcast (NumPy / ONNX MatMul) on the leading dims; see header
-  // for the full case table.
   ArrayRef<int64_t> aBatch = aShape.drop_back(2);
   ArrayRef<int64_t> bBatch = bShape.drop_back(2);
   SmallVector<int64_t> result;
   if (!OpTrait::util::getBroadcastedShape(aBatch, bBatch, result)) {
     emitError() << "matmul batch broadcast failure: A.batch="
                 << formatShape(aBatch) << " B.batch=" << formatShape(bBatch);
-    return {};
+    return failure();
   }
   result.reserve(result.size() + 2);
   result.push_back(M);
@@ -141,6 +139,13 @@ LogicalResult mlir::hip::verifyStridedBatchMatmul(
 
   ArrayRef<int64_t> aBatch = aShape.drop_back(2);
   ArrayRef<int64_t> bBatch = bShape.drop_back(2);
+  SmallVector<int64_t> outputBatch;
+  if (!OpTrait::util::getBroadcastedShape(aBatch, bBatch, outputBatch)) {
+    emitError() << "matmul batch broadcast failure: A.batch="
+                << formatShape(aBatch) << " B.batch=" << formatShape(bBatch);
+    return failure();
+  }
+
   auto isSingleMatrix = [](ArrayRef<int64_t> batch) {
     return llvm::all_of(batch, [](int64_t dim) { return dim == 1; });
   };
@@ -153,14 +158,8 @@ LogicalResult mlir::hip::verifyStridedBatchMatmul(
 
   auto isDynamic = [](int64_t dim) { return ShapedType::isDynamic(dim); };
   if (llvm::any_of(aBatch, isDynamic) || llvm::any_of(bBatch, isDynamic)) {
-    emitError() << "matmul with two nontrivial dynamic batch shapes is not "
-                   "supported by the strided-batch runtime";
-    return failure();
-  }
-
-  SmallVector<int64_t> outputBatch;
-  if (!OpTrait::util::getBroadcastedShape(aBatch, bBatch, outputBatch)) {
-    emitError() << "matmul batch broadcast failure: A.batch="
+    emitError() << "matmul dynamic batch layout is not representable by one "
+                   "constant stride per operand: A.batch="
                 << formatShape(aBatch) << " B.batch=" << formatShape(bBatch);
     return failure();
   }
@@ -321,7 +320,7 @@ FailureOr<SmallVector<OpFoldResult>> mlir::hip::reifyMatmulResultShape(
     emitError() << "matmul operands must be ranked tensors";
     return failure();
   }
-  if (inferMatmulShape(aType.getShape(), bType.getShape(), emitError).empty())
+  if (failed(inferMatmulShape(aType.getShape(), bType.getShape(), emitError)))
     return failure();
   if (failed(verifyStridedBatchMatmul(aType.getShape(), bType.getShape(),
                                       emitError)))

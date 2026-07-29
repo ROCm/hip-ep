@@ -155,8 +155,8 @@ operand uses stride 0, allowing the entire matrix to broadcast against a
 batched operand on the other side. Per-axis partial batch broadcasting where
 both operands contain fewer matrices than the output batch product is not yet
 representable by one constant stride and is rejected by the MatMul verifier.
-New lowering calls the versioned `wrap_hipblasLtMatmul_v2`; the legacy wrapper
-remains available so cached artifacts with the previous signature still load.
+`wrap_hipblasLtMatmul` carries both strides. LLVM-IR artifacts compiled against
+the previous wrapper ABI must be invalidated.
 
 ## `--hip-infer-shapes`
 

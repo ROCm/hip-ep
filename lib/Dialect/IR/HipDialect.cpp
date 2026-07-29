@@ -569,16 +569,14 @@ LogicalResult MatmulOp::verify() {
 
   ArrayRef<int64_t> aShape = getShapeOf(getA());
   ArrayRef<int64_t> bShape = getShapeOf(getB());
-  // Static shape check via the shared matmul helper. The lambda is
-  // invoked once; it returns `{outputShape}` on success or `{}` on shape
-  // mismatch (in which case it has already issued a diagnostic on `*this`).
   if (failed(mlir::hip::verifyHipOpShape(
           *this, [&]() -> SmallVector<SmallVector<int64_t>> {
-            SmallVector<int64_t> outShape = mlir::hip::inferMatmulShape(
-                aShape, bShape, [&]() { return this->emitOpError(); });
-            if (outShape.empty())
+            FailureOr<SmallVector<int64_t>> outShape =
+                mlir::hip::inferMatmulShape(
+                    aShape, bShape, [&]() { return this->emitOpError(); });
+            if (failed(outShape))
               return {};
-            return {std::move(outShape)};
+            return {std::move(*outShape)};
           })))
     return failure();
   return mlir::hip::verifyStridedBatchMatmul(

@@ -144,7 +144,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for PR, formatting, AI-disclosure, and co
 - Fully dynamic broadcast uses `select(lhs == 1, rhs, lhs)`, not integer maximum: broadcasting extents 0 and 1 produces 0.
 - Rank-zero success is an empty shape carried by `FailureOr`; never use an empty vector as both success and failure.
 - Variadic Max/Min derive every pairwise intermediate rank from the shared broadcast shape.
-- MatMul uses the reified output batch product plus independent A/B strides, so either whole matrix may broadcast across the other's batches. Per-axis partial batch broadcasting is rejected because the single-stride runtime cannot represent it. New artifacts call `wrap_hipblasLtMatmul_v2`; retain the legacy wrapper for cached artifacts compiled with the old signature.
+- MatMul uses the reified output batch product plus independent A/B strides, so either whole matrix may broadcast across the other's batches. Per-axis partial batch broadcasting is rejected because the single-stride runtime cannot represent it. `wrap_hipblasLtMatmul` carries both strides; invalidate LLVM-IR artifacts compiled against the previous wrapper ABI.
 - See [docs/design/hip-shape-inference.md](docs/design/hip-shape-inference.md).
 
 ### Allocation and memory planning

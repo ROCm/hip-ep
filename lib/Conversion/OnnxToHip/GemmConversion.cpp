@@ -13,10 +13,13 @@ namespace {
 // ONNX Gemm -> HIP Gemm
 //
 // Before:
-//   %init = tensor.empty(tensor.dim %A, 0, tensor.dim %A, 1)
+//   %r = "onnx.Gemm"(%a, %b) {transA = 1 : i64, transB = 0 : i64}
+//       : (tensor<?x?xf16>, tensor<?x?xf16>) -> tensor<?x?xf16>
 // After:
-//   %shape = gemm_shape(%A, %B, transA, transB)
-//   %init = tensor.empty(%shape.M, %shape.N)
+//   %m = tensor.dim %a, %c1
+//   %n = tensor.dim %b, %c1
+//   %init = tensor.empty(%m, %n) : tensor<?x?xf16>
+//   %r = hip.gemm ... outs(%init : tensor<?x?xf16>)
 //===----------------------------------------------------------------------===//
 struct GemmToHip : public mlir::RewritePattern {
   GemmToHip(mlir::MLIRContext *ctx)
@@ -62,7 +65,6 @@ struct GemmToHip : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "Gemm result type is incompatible with inferred shape");
 
-    // hip.gemm
     llvm::SmallVector<mlir::NamedAttribute> attrs;
     attrs.push_back(
         rewriter.getNamedAttr("alpha", rewriter.getF32FloatAttr(alpha)));
@@ -74,12 +76,10 @@ struct GemmToHip : public mlir::RewritePattern {
         rewriter.getNamedAttr("transB", rewriter.getI64IntegerAttr(transB)));
 
     llvm::SmallVector<mlir::Value> operands = {context, inputA, inputB};
-    if (hasInputC) {
+    if (hasInputC)
       operands.push_back(inputC);
-    }
     operands.push_back(*init);
-    // Result type inferred from `init` via InferTypeOpInterface — DPS contract:
-    // result type == outs operand type.
+    // Let ODS infer the result type from the DPS init.
     auto hipOp = mlir::hip::GemmOp::create(rewriter, loc, operands, attrs);
     rewriter.replaceOp(op, hipOp.getResult(0));
     return mlir::success();

@@ -24,7 +24,10 @@ module {
 // CHECK-LABEL: llvm.func @test_matmul_rank2_b
 // CHECK-NOT: llvm.icmp
 // CHECK-NOT: llvm.select
-// CHECK: llvm.call @wrap_hipblasLtMatmul_v2({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK-NOT: @wrap_hipblasLtMatmul_v2
+// CHECK: %[[A0_STRIDE:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK: %[[B0_STRIDE:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK: llvm.call @wrap_hipblasLtMatmul({{.*}}, %[[A0_STRIDE]], %[[B0_STRIDE]]) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64) -> i32
 // Verify 12 parameters:
 // - 4 pointers: state, A, B, output
 // - 7 i64: M, N, K, batch_count, elem_size, A stride, B stride
@@ -54,7 +57,12 @@ module {
 // CHECK-LABEL: llvm.func @test_matmul_rank3_leading_one_b
 // CHECK-NOT: llvm.icmp
 // CHECK-NOT: llvm.select
-// CHECK: llvm.call @wrap_hipblasLtMatmul_v2({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK-NOT: @wrap_hipblasLtMatmul_v2
+// CHECK: %{{.*}} = llvm.mul %{{.*}}, %{{.*}} : i64
+// CHECK: %[[A1_STRIDE:.*]] = llvm.mul %{{.*}}, %{{.*}} : i64
+// CHECK: %{{.*}} = llvm.mul %{{.*}}, %{{.*}} : i64
+// CHECK: %[[B1_STRIDE:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK: llvm.call @wrap_hipblasLtMatmul({{.*}}, %[[A1_STRIDE]], %[[B1_STRIDE]]) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64) -> i32
 
 // ----- Rank-2 broadcast A against rank-3 B -------------------------------
 // A contains one matrix and therefore uses A stride 0. B and the output carry
@@ -75,4 +83,9 @@ module {
 // CHECK-LABEL: llvm.func @test_matmul_rank2_a
 // CHECK-NOT: llvm.icmp
 // CHECK-NOT: llvm.select
-// CHECK: llvm.call @wrap_hipblasLtMatmul_v2({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK-NOT: @wrap_hipblasLtMatmul_v2
+// CHECK: %{{.*}} = llvm.mul %{{.*}}, %{{.*}} : i64
+// CHECK: %{{.*}} = llvm.mul %{{.*}}, %{{.*}} : i64
+// CHECK: %[[B2_STRIDE:.*]] = llvm.mul %{{.*}}, %{{.*}} : i64
+// CHECK: %[[A2_STRIDE:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK: llvm.call @wrap_hipblasLtMatmul({{.*}}, %[[A2_STRIDE]], %[[B2_STRIDE]]) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64) -> i32

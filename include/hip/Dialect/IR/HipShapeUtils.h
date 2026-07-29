@@ -18,26 +18,13 @@ namespace mlir {
 namespace hip {
 
 /// Compute the shape of `A @ B` for matmul with NumPy-style batch broadcast
-/// over the leading dims. Last two dims of `aShape` are `[M, K]`; last two
-/// dims of `bShape` are `[K, N]`. Leading dims are broadcast (right-aligned,
-/// missing dims treated as 1).
+/// over the leading dimensions. The matrix dimensions are `A[..., M, K]` and
+/// `B[..., K, N]`.
 ///
-/// Returns the inferred shape on success. Returns an empty `SmallVector` and
-/// emits a diagnostic via `emitError` on rank-, K-, or batch-broadcast
-/// mismatch.
-///
-/// `ShapedType::kDynamic` is treated as a wildcard:
-///   - K_a or K_b dynamic -> K match passes (result K is dropped anyway).
-///   - Batch dim broadcast follows NumPy / TF / ONNX MatMul semantics
-///     (delegated to `mlir::OpTrait::util::getBroadcastedShape`):
-///       * 1 broadcasts against any dim.
-///       * dynamic + static>1 -> static (the dynamic side must be 1 or
-///         match the static side at runtime per the broadcast contract;
-///         taking the static side is the strictly-correct tightening).
-///       * dynamic + dynamic -> dynamic.
-///       * static + static, equal -> static; unequal and neither is 1
-///         -> error.
-SmallVector<int64_t>
+/// Dynamic contraction dimensions are treated as compatible. Batch dimensions
+/// use `OpTrait::util::getBroadcastedShape`. On failure, emits a diagnostic
+/// through `emitError`.
+FailureOr<SmallVector<int64_t>>
 inferMatmulShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
                  function_ref<InFlightDiagnostic()> emitError);
 

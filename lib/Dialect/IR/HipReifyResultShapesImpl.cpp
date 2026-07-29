@@ -49,11 +49,13 @@ ArrayRef<int64_t> getShapeOf(Value v) {
 // NumPy broadcast semantics.
 //
 // Before:
-//   %m = hip.matmul ins(%a, %b : tensor<?x4096xf16>, tensor<4096x4096xf16>)
-//                   outs(%out : tensor<?x4096xf16>) -> tensor<?x4096xf16>
+//   %r = hip.matmul ins(%a, %b : tensor<?x4096xf16>,
+//                                tensor<?x4096x?xf16>)
+//                   outs(%out : tensor<?x?x?xf16>) -> tensor<?x?x?xf16>
 // After (reified result shape):
-//   dim 0 (dynamic M) -> %d0 = tensor.dim %a, %c0
-//   dim 1 (static N)  -> 4096 : index
+//   dim 0 (batch) -> tensor.dim %b, %c0
+//   dim 1 (M)     -> tensor.dim %a, %c0
+//   dim 2 (N)     -> tensor.dim %b, %c2
 //===----------------------------------------------------------------------===//
 
 LogicalResult

@@ -11,13 +11,16 @@ namespace mlir {
 namespace hip {
 namespace {
 
-// ===== hipBLASLt ops =========================================================
-
-// hip.hipblaslt.matmul(handle) ins(A, B) outs(C)
-//   -> wrap_hipblasLtMatmul(state, A, B, C, M, N, K, batch, A-stride,
-//                           B-stride)
-// Rank-generic for whole-tensor batch broadcast: a rank-2 (or leading-one)
-// operand uses stride 0 while the other operand supplies the output batches.
+// Lower `hip.matmul` to the hipBLASLt runtime ABI. Each operand gets an
+// independent batch stride so either whole matrix may be broadcast.
+//
+// Before:
+//   hip.matmul ins(%a, %b : memref<128x4096xf16>,
+//                           memref<2x4096x1024xf16>) outs(%out : ...)
+// After:
+//   %a_stride = llvm.mlir.constant(0 : i64) : i64
+//   %b_stride = llvm.mul %k, %n : i64
+//   llvm.call @wrap_hipblasLtMatmul(..., %a_stride, %b_stride)
 struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
@@ -30,20 +33,17 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     Type i32Type = rewriter.getI32Type();
     Type i64Type = rewriter.getI64Type();
 
-    // Helper: create i64 constant
     auto createI64Const = [&](int64_t value) -> Value {
       return LLVM::ConstantOp::create(rewriter, loc, i64Type,
                                       rewriter.getI64IntegerAttr(value));
     };
 
-    // Extract pointers
     Value statePtr = adaptor.getCtx();
     Value APtr = extractContiguousMemRefPtr(adaptor.getA(), rewriter, loc);
     Value BPtr = extractContiguousMemRefPtr(adaptor.getB(), rewriter, loc);
     Value outputPtr =
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
-    // Get memref types and shapes
     auto AType = cast<MemRefType>(op.getA().getType());
     auto BType = cast<MemRefType>(op.getB().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
@@ -54,16 +54,11 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
                                         [&]() { return op.emitOpError(); })))
       return failure();
 
-    // === DYNAMIC SHAPE SUPPORT ===
-    // For dynamic shapes, we compute dimensions at runtime
     MemRefDescriptor ADesc(adaptor.getA());
     MemRefDescriptor BDesc(adaptor.getB());
     MemRefDescriptor outputDesc(adaptor.getOutput());
 
-    // Compute M, K, N from runtime dimensions
-    // A: [..., M, K], B: [..., K, N] or B: [K, N]
-    Value M =
-        (ARank >= 2) ? ADesc.size(rewriter, loc, ARank - 2) : createI64Const(1);
+    Value M = ADesc.size(rewriter, loc, ARank - 2);
     Value K = ADesc.size(rewriter, loc, ARank - 1);
     Value N = BDesc.size(rewriter, loc, BRank - 1);
 
@@ -74,20 +69,11 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
       batchCount = LLVM::MulOp::create(rewriter, loc, batchCount, dim);
     }
 
-    // Compute element size in bytes
     unsigned elemBits = AType.getElementType().getIntOrFloatBitWidth();
     Value elemSize = createI64Const(elemBits / 8);
 
     // Each operand independently uses stride 0 when it contains one matrix,
     // or its matrix size when it contains one matrix per output batch.
-    //
-    // Before:
-    //   hip.matmul ins(%A, %B : memref<128x4096xf16>,
-    //                              memref<2x4096x1024xf16>)
-    // After:
-    //   %a_stride = llvm.mlir.constant(0 : i64) : i64
-    //   %b_stride = llvm.mul %K, %N : i64
-    //   llvm.call @wrap_hipblasLtMatmul(..., %a_stride, %b_stride)
     auto computeBatchStride = [&](MemRefType type, MemRefDescriptor desc,
                                   Value matrixElements) -> Value {
       int64_t rank = type.getRank();
@@ -147,7 +133,7 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapHipblasltMatmulV2, paramTypes, i32Type);
+        rewriter, module, kWrapHipblasltMatmul, paramTypes, i32Type);
     if (failed(funcOp))
       return failure();
 

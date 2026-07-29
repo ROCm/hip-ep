@@ -9,17 +9,15 @@ namespace mlir {
 namespace hip {
 namespace {
 
-/// onnx.Max -> hip.max (via MIOpen miopenOpTensor with miopenTensorOpMax)
-///
-/// Handles variadic inputs by pairwise chaining:
-///   max(a, b, c) = max(max(a, b), c)
-/// Single input is identity (pass through).
+/// Lower variadic `onnx.Max` to pairwise `hip.max` operations.
 ///
 /// Before:
-///   %tmp = hip.max ... outs(%same_rank_as_a)
+///   %r = "onnx.Max"(%a, %b, %c) : (...) -> tensor<2x3x4xf32>
 /// After:
-///   %tmp_shape = broadcast_shape(%a, %b)
-///   %tmp = hip.max ... outs(%empty_for_tmp_shape)
+///   %ab_init = tensor.empty() : tensor<3x4xf32>
+///   %ab = hip.max ... outs(%ab_init : tensor<3x4xf32>)
+///   %abc_init = tensor.empty() : tensor<2x3x4xf32>
+///   %r = hip.max ... outs(%abc_init : tensor<2x3x4xf32>)
 struct MaxToHip : public mlir::RewritePattern {
   MaxToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Max", /*benefit=*/1, ctx) {}
@@ -50,9 +48,8 @@ MaxToHip::matchAndRewrite(mlir::Operation *op,
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 
-  // Pairwise chaining: accumulate = max(accumulate, next_input)
   mlir::Value accumulate = op->getOperand(0);
-  for (unsigned i = 1; i < numInputs; ++i) {
+  for (unsigned i : llvm::seq<unsigned>(1, numInputs)) {
     mlir::Value rhs = op->getOperand(i);
     mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>> stepShape =
         mlir::hip::reifyBroadcastResultShape(rewriter, loc, {accumulate, rhs},

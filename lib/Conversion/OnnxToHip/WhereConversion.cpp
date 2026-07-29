@@ -9,11 +9,18 @@ namespace mlir {
 namespace hip {
 namespace {
 
-/// onnx.Where -> hip.where
-/// ONNX Where: output[i] = condition[i] ? X[i] : Y[i].
-/// Supports multidirectional (NumPy-style) broadcasting between condition,
-/// X and Y. The condition tensor is bool (i1); X and Y share the result
-/// element type.
+/// Lower `onnx.Where` with multidirectional broadcasting.
+///
+/// Before:
+///   %r = "onnx.Where"(%cond, %x, %y)
+///       : (tensor<?xi1>, tensor<1xf32>, tensor<?xf32>) -> tensor<?xf32>
+/// After:
+///   %cond_dim = tensor.dim %cond, %c0
+///   %y_dim = tensor.dim %y, %c0
+///   %cond_is_one = arith.cmpi eq, %cond_dim, %c1 : index
+///   %extent = arith.select %cond_is_one, %y_dim, %cond_dim : index
+///   %init = tensor.empty(%extent) : tensor<?xf32>
+///   %r = hip.where ... outs(%init : tensor<?xf32>)
 struct WhereToHip : public mlir::RewritePattern {
   WhereToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Where", /*benefit=*/1, ctx) {}
@@ -46,15 +53,10 @@ WhereToHip::matchAndRewrite(mlir::Operation *op,
     return rewriter.notifyMatchFailure(
         op, "onnx.Where lowering expects a ranked tensor result");
 
-  // ONNX Where supports multidirectional (NumPy-style) broadcasting, so any
-  // given output dim may be contributed by a different operand. Resolve each
-  // dynamic result dim by scanning all three operands rather than relying on
-  // a single "source" tensor.
   mlir::FailureOr<mlir::Value> initOrFailure =
       createBroadcastEmptyTensor(rewriter, loc, resultType, {condition, x, y});
   if (mlir::failed(initOrFailure))
-    return rewriter.notifyMatchFailure(
-        op, "onnx.Where: no ranked operand spans dynamic result dim");
+    return mlir::failure();
   auto hipOp = mlir::hip::WhereOp::create(rewriter, loc, context, condition, x,
                                           y, *initOrFailure);
   rewriter.replaceOp(op, hipOp->getResult(0));

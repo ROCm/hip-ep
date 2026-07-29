@@ -52,7 +52,6 @@ inline constexpr const char *kMiopenConvolutionForward =
 inline constexpr const char *kMiopenConvolutionTranspose =
     "wrap_miopenConvolutionTranspose";
 inline constexpr const char *kWrapHipblasltMatmul = "wrap_hipblasLtMatmul";
-inline constexpr const char *kWrapHipblasltMatmulV2 = "wrap_hipblasLtMatmul_v2";
 inline constexpr const char *kWrapMiopenT5LayerNormForward =
     "wrap_miopenT5LayerNormForward";
 inline constexpr const char *kWrapSkipSimplifiedLayerNorm =
