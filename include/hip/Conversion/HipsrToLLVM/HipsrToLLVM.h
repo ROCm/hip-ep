@@ -170,17 +170,25 @@ public:
   }
 
   template <typename... Args> LogicalResult call(Args &&...args) {
+    createCall(std::forward<Args>(args)...);
+    return success();
+  }
+
+  template <typename... Args> Value callWithResult(Args &&...args) {
+    return createCall(std::forward<Args>(args)...).getResult();
+  }
+
+private:
+  template <typename... Args> LLVM::CallOp createCall(Args &&...args) {
     static_assert(sizeof...(Params) == sizeof...(Args),
                   "argument count must match parameter count");
 
     llvm::SmallVector<Value, sizeof...(Params)> convertedArgs{
         detail::ArgConverter<Params, std::decay_t<Args>>::convert(
             rewriter, loc, std::forward<Args>(args))...};
-    LLVM::CallOp::create(rewriter, loc, funcOp, convertedArgs);
-    return success();
+    return LLVM::CallOp::create(rewriter, loc, funcOp, convertedArgs);
   }
 
-private:
   RuntimeFunc(LLVM::LLVMFuncOp funcOp, ConversionPatternRewriter &rewriter,
               Location loc)
       : funcOp(funcOp), rewriter(rewriter), loc(loc) {}
