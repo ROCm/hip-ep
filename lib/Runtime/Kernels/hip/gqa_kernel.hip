@@ -2056,14 +2056,23 @@ static void flashDecodeCandidateSplits(int skv, int max_splits,
   // Small counts {2,4} let short contexts pick a leaner reduce (fewer partial
   // rows -> smaller reduce launch). But a small split at LARGE skv makes each
   // block serial-scan skv/splits keys, which is a hard cliff (measured at
-  // skv=2048: splits=2 -> 0.175ms, splits=4 -> 0.0075ms, vs splits>=8 ->
-  // ~0.0045ms). The autotune only times 10 iters, so at us scale it can noisily
-  // mis-pick a catastrophic small split. Guard it structurally: never offer a
-  // split whose per-block KV scan exceeds kMaxKeysPerSplit. This keeps {2,4}
-  // available exactly where they help (short contexts) and also raises the
-  // floor at huge skv so the tuner can't land on an under-filled config.
+  // skv=8192: splits=2 -> 1.13ms, splits=4 -> 0.59ms, vs splits>=8 ->
+  // <=0.36ms). Guard it structurally: never offer a split whose per-block KV
+  // scan exceeds kMaxKeysPerSplit.
+  //
+  // The bound is 1024, not the 256 it started at: at 256 the floor was
+  // min_splits=17 at skv=4096 and 33 at skv=8192, which excluded splits=16
+  // outright, and 16 measured at least as fast as every wider split there for
+  // both impls (the spread across 16/32/48/64 was single-digit percent, i.e.
+  // inside this part's run-to-run drift -- what matters is that 16 was not
+  // worse, so there is no reason to forbid it). The tight bound existed because
+  // a 10-iteration tune could noisily mis-pick a catastrophic small split;
+  // timeDecodeCandidate now budgets by duration and keeps the fastest of
+  // several bursts, so the tuner can be trusted with the wider set. 1024 still
+  // fences off the cliff (it leaves min_splits=8 at skv=8192, where the worst
+  // survivor is ~1.4x off the best rather than 4.5x).
   static const int kBase[7] = {2, 4, 8, 16, 32, 48, 64};
-  constexpr int kMaxKeysPerSplit = 256;
+  constexpr int kMaxKeysPerSplit = 1024;
   int cap = max_splits < kFlashDecodeMaxSplits ? max_splits : kFlashDecodeMaxSplits;
   if (cap < 1) cap = 1;
   int eff = skv > 0 ? skv : 1;
@@ -2080,6 +2089,58 @@ static void flashDecodeCandidateSplits(int skv, int max_splits,
     if (!dup) out[n++] = v;
   }
   if (n == 0) { out[0] = min_splits; n = 1; }  // safety: always >=1 candidate
+}
+
+// Waves the split kernel should aim to launch, derived from the device's actual
+// wave-slot capacity rather than an assumed SIMD count -- multiProcessorCount
+// reports WGPs on RDNA (a 40-CU 8060S reports 20), so counting SIMDs from it
+// would be off by 2x. maxThreadsPerMultiProcessor/WAVE_SIZE is the wave slots
+// per unit and needs no such assumption: 2048/32 = 64 slots, i.e. 4 SIMD32 with
+// 16 waves each. A quarter of the machine's slots is ~4 waves/SIMD, enough to
+// hide DRAM latency without inflating the partials workspace.
+static int flashDecodeTargetWaves() {
+  static const int target = [] {
+    int dev = 0;
+    hipDeviceProp_t prop{};
+    if (hipGetDevice(&dev) != hipSuccess ||
+        hipGetDeviceProperties(&prop, dev) != hipSuccess ||
+        prop.multiProcessorCount <= 0 || prop.maxThreadsPerMultiProcessor <= 0)
+      return 128;
+    const int slots =
+        prop.multiProcessorCount * (prop.maxThreadsPerMultiProcessor / WAVE_SIZE);
+    return slots >= 4 ? slots / 4 : 1;
+  }();
+  return target;
+}
+
+// Fallback split count (used when autotune is disabled or overridden).
+// Decode is bandwidth-bound -- d=64 GQA reads 2*G*skv*d*2 bytes to do
+// 4*H*skv*d flops, i.e. 8 flop/byte against a machine balance two orders up --
+// so splits buy nothing but memory-level parallelism, and every extra split
+// adds partials traffic to the reduce. Take the smallest candidate that fills
+// the device, or the widest one when the KV range is too short to fill it at
+// all (a 128-key sliding window cannot, and should not try).
+//
+// This has to be impl-aware: the scalar kernel launches HpG waves per block and
+// WMMA exactly one, so a fixed count under-fills the WMMA path by HpG-x. The
+// old constant 8 is G*8 = 64 waves for gpt-oss-20b, which covers all 32 SIMDs
+// of an 8-WGP part twice over but cannot even cover the 80 SIMDs of a 20-WGP
+// 8060S once -- a fifth of them would get no work at all.
+//
+// Candidates come from flashDecodeCandidateSplits so the pick inherits its
+// min_splits floor; occupancy alone would happily choose splits=1 for the
+// scalar kernel at skv=8192 (already 64 waves), which is the 4.5x serial-scan
+// cliff that floor exists to fence off.
+static int flashDecodeDefaultSplits(bool use_wmma, int B, int H, int G, int skv,
+                                    int cap) {
+  int split_set[7];
+  int n = 0;
+  flashDecodeCandidateSplits(skv, cap, split_set, n);
+  const int waves_per_split = use_wmma ? (B * G) : (B * H);
+  const int target = flashDecodeTargetWaves();
+  for (int i = 0; i < n; ++i)
+    if (waves_per_split * split_set[i] >= target) return split_set[i];
+  return split_set[n - 1];  // ascending; nothing reaches the target
 }
 
 static std::unordered_map<uint64_t, FlashDecodeCfg> g_flash_decode_cache;
@@ -2103,6 +2164,65 @@ static uint64_t flashDecodeKey(int B, int H, int G, int d, int skv) {
          (uint64_t)(uint32_t)blog;
 }
 
+// Time one candidate, shared by the fp16 and INT8 tuners.
+//
+// A fixed iteration count is wrong at both ends of this kernel's range. Decode
+// spans ~3us (a 128-key sliding window) to ~300us (8k context): 10 iterations
+// of the 3us case is 30us of GPU work, small enough that launch jitter swamps
+// it -- repeated 10-iteration bursts on an IDENTICAL config measured a 1.4-2.3x
+// spread, enough for the tuner to hand a 2.4x-slower config to every sliding
+// layer for the process lifetime. Meanwhile 10 iterations of the 300us case
+// costs 3ms per candidate for statistics it never needed.
+//
+// So budget by duration, and keep the FASTEST burst rather than averaging: the
+// minimum is the sample least polluted by interference from the rest of the
+// system, which is what we want when ranking configs.
+template <typename LaunchFn>
+static float timeDecodeCandidate(hipStream_t stream, LaunchFn&& launch) {
+  constexpr float kBudgetMs = 1.0f;  // GPU work per candidate, across bursts
+  constexpr int kBursts = 3;
+  constexpr int kProbeIters = 3;
+  constexpr int kMaxIters = 4096;
+
+  hipEvent_t ev0, ev1;
+  (void)hipEventCreate(&ev0);
+  (void)hipEventCreate(&ev1);
+
+  // Warm up first: the initial launch of each kernel pays lazy module load.
+  launch();
+  launch();
+
+  (void)hipEventRecord(ev0, stream);
+  for (int i = 0; i < kProbeIters; ++i) launch();
+  (void)hipEventRecord(ev1, stream);
+  (void)hipEventSynchronize(ev1);
+  float probe_ms = 0.0f;
+  (void)hipEventElapsedTime(&probe_ms, ev0, ev1);
+  const float per_iter = probe_ms / kProbeIters;
+
+  int iters = 1;
+  if (per_iter > 0.0f) {
+    const float want = kBudgetMs / (kBursts * per_iter);
+    iters = want < 1.0f ? 1 : (want > kMaxIters ? kMaxIters : (int)want);
+  }
+
+  float best = per_iter;
+  for (int b = 0; b < kBursts; ++b) {
+    (void)hipEventRecord(ev0, stream);
+    for (int i = 0; i < iters; ++i) launch();
+    (void)hipEventRecord(ev1, stream);
+    (void)hipEventSynchronize(ev1);
+    float ms = 0.0f;
+    (void)hipEventElapsedTime(&ms, ev0, ev1);
+    ms /= iters;
+    if (ms < best) best = ms;
+  }
+
+  (void)hipEventDestroy(ev0);
+  (void)hipEventDestroy(ev1);
+  return best;
+}
+
 // Benchmark all (impl, splits) candidates on the actual device buffers and pick
 // the fastest. Leaves the output buffers holding the *last* candidate's result;
 // the caller relaunches the winner afterwards to produce the correct output.
@@ -2116,12 +2236,6 @@ static FlashDecodeCfg tuneFlashDecode(
   flashDecodeCandidateSplits(skv, max_splits, split_set, n_splits);
   const bool impls[2] = {false, true};  // {scalar, WMMA}; geometry is identical
 
-  hipEvent_t ev0, ev1;
-  hipEventCreate(&ev0);
-  hipEventCreate(&ev1);
-  constexpr int WARMUP = 2;
-  constexpr int ITERS  = 10;
-
   const bool wmma_ok = flash_decode_wmma_supported(d, hpg);
   FlashDecodeCfg best{wmma_ok && (d == 64), split_set[0]};
   float best_ms = 1e30f;
@@ -2130,28 +2244,18 @@ static FlashDecodeCfg tuneFlashDecode(
     if (impls[ii] && !wmma_ok) continue;  // skip WMMA where it isn't templated
     for (int si = 0; si < n_splits; ++si) {
       FlashDecodeCfg cfg{impls[ii], split_set[si]};
-      for (int w = 0; w < WARMUP; ++w)
+      const float ms = timeDecodeCandidate(stream, [&] {
         launchFlashDecodeConfig(cfg, stream, hQ, hK, hV, hO, hP, B, H, G, d, hpg,
                                 max_seq, scale, iSeq, local_window_size, hSink,
                                 use_smooth_softmax);
-      hipEventRecord(ev0, stream);
-      for (int it = 0; it < ITERS; ++it)
-        launchFlashDecodeConfig(cfg, stream, hQ, hK, hV, hO, hP, B, H, G, d, hpg,
-                                max_seq, scale, iSeq, local_window_size, hSink,
-                                use_smooth_softmax);
-      hipEventRecord(ev1, stream);
-      hipEventSynchronize(ev1);
-      float ms = 0.0f;
-      hipEventElapsedTime(&ms, ev0, ev1);
+      });
       CUSTOM_KERNELS_DEBUG_LOG(
           "[custom_kernels]   flash_decode cand impl=%-6s splits=%2d : %.4f ms\n",
-          cfg.use_wmma ? "wmma" : "scalar", cfg.splits, ms / ITERS);
+          cfg.use_wmma ? "wmma" : "scalar", cfg.splits, ms);
       if (ms < best_ms) { best_ms = ms; best = cfg; }
     }
   }
 
-  hipEventDestroy(ev0);
-  hipEventDestroy(ev1);
   return best;
 }
 
@@ -2271,9 +2375,13 @@ extern "C" int hip_gqa_flash_decode_v2(
 
   // --- Config selection: env override > autotune cache > one-shot tune ---
   // Heuristic default favours WMMA at d==64, but only where it is templated;
-  // every other geometry (incl. MHA) starts from the scalar kernel.
-  FlashDecodeCfg cfg{flash_decode_wmma_supported(d, hpg) && (d == 64),
-                     cap < 8 ? cap : 8};
+  // every other geometry (incl. MHA) starts from the scalar kernel. The split
+  // count is sized from the device rather than fixed, and keys off tune_len so
+  // sliding-window layers do not over-split their (much shorter) range.
+  const bool default_wmma = flash_decode_wmma_supported(d, hpg) && (d == 64);
+  FlashDecodeCfg cfg{
+      default_wmma,
+      flashDecodeDefaultSplits(default_wmma, B, H, G, tune_len, cap)};
 
   bool forced = false;
   if (const char* e = getenv("HIPDNN_GQA_DECODE_SCALAR")) { if (atoi(e) != 0) { cfg.use_wmma = false; forced = true; } }
@@ -2430,12 +2538,6 @@ static FlashDecodeCfg tuneFlashDecodeI8(
   flashDecodeCandidateSplits(skv, max_splits, split_set, n_splits);
   const bool impls[2] = {false, true};
 
-  hipEvent_t ev0, ev1;
-  hipEventCreate(&ev0);
-  hipEventCreate(&ev1);
-  constexpr int WARMUP = 2;
-  constexpr int ITERS  = 10;
-
   const bool wmma_ok = flash_decode_wmma_supported(d, hpg);
   FlashDecodeCfg best{wmma_ok && (d == 64), split_set[0]};
   float best_ms = 1e30f;
@@ -2444,24 +2546,17 @@ static FlashDecodeCfg tuneFlashDecodeI8(
     if (impls[ii] && !wmma_ok) continue;
     for (int si = 0; si < n_splits; ++si) {
       FlashDecodeCfg cfg{impls[ii], split_set[si]};
-      for (int w = 0; w < WARMUP; ++w)
+      const float ms = timeDecodeCandidate(stream, [&] {
         launchFlashDecodeConfigI8(cfg, stream, hQ, hK, hV, kSc, vSc, hO, hP,
                                   B, H, G, d, hpg, max_seq, scale, iSeq,
                                   local_window_size, hSink, use_smooth_softmax);
-      hipEventRecord(ev0, stream);
-      for (int it = 0; it < ITERS; ++it)
-        launchFlashDecodeConfigI8(cfg, stream, hQ, hK, hV, kSc, vSc, hO, hP,
-                                  B, H, G, d, hpg, max_seq, scale, iSeq,
-                                  local_window_size, hSink, use_smooth_softmax);
-      hipEventRecord(ev1, stream);
-      hipEventSynchronize(ev1);
-      float ms = 0.0f;
-      hipEventElapsedTime(&ms, ev0, ev1);
+      });
+      CUSTOM_KERNELS_DEBUG_LOG(
+          "[custom_kernels]   flash_decode_i8 cand impl=%-6s splits=%2d : %.4f ms\n",
+          cfg.use_wmma ? "wmma" : "scalar", cfg.splits, ms);
       if (ms < best_ms) { best_ms = ms; best = cfg; }
     }
   }
-  hipEventDestroy(ev0);
-  hipEventDestroy(ev1);
   return best;
 }
 
