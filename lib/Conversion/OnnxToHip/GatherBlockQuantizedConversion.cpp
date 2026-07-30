@@ -12,9 +12,7 @@
 
 #include "OnnxToHipUtils.h"
 
-#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/IR/BuiltinAttributes.h"
-#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "llvm/ADT/SmallVector.h"
 
@@ -29,10 +27,6 @@ inline bool isUnsignedMlirElementType(Type elemType) {
     return intTy.isUnsigned();
   return false;
 }
-
-inline constexpr int64_t kOnnxElementTypeUint8 = 2;
-inline constexpr int64_t kOnnxElementTypeUint4 = 21;
-inline constexpr int64_t kOnnxElementTypeInt4 = 22;
 
 inline bool isGatherBlockQuantizedOp(Operation *op) {
   if (!op || op->getName().getStringRef() != "onnx.Custom")
@@ -55,71 +49,6 @@ inline int normalizeGbqAxis(int64_t axis, int64_t rank) {
   if (a < 0)
     a += static_cast<int>(rank);
   return a;
-}
-
-inline Value traceGbqDataToSource(Value value) {
-  Value cur = value;
-  for (int depth = 0; depth < 12; ++depth) {
-    Operation *op = cur.getDefiningOp();
-    if (!op)
-      break;
-    if (isa<bufferization::ToTensorOp>(op)) {
-      cur = op->getOperand(0);
-      continue;
-    }
-    if (op->getName().getStringRef() == "onnx.Constant")
-      return cur;
-    if (op->getNumOperands() == 0)
-      break;
-    StringRef name = op->getName().getStringRef();
-    if (name == "onnx.Reshape" || name == "onnx.Transpose" ||
-        name == "onnx.Squeeze" || name == "onnx.Unsqueeze" ||
-        name == "onnx.Flatten" || name == "onnx.Gather" ||
-        name == "onnx.Identity") {
-      cur = op->getOperand(0);
-      continue;
-    }
-    break;
-  }
-  return cur;
-}
-
-inline std::optional<int64_t> readOnnxElementTypeAttr(Operation *op) {
-  if (auto attr = op->getAttrOfType<IntegerAttr>("onnx.element_type"))
-    return attr.getSInt();
-  return std::nullopt;
-}
-
-inline bool isUnsignedOnnxElementType(int64_t elem) {
-  return elem == kOnnxElementTypeUint4 || elem == kOnnxElementTypeUint8;
-}
-
-inline bool inferSignedStorageFromConstant(RankedTensorType dataType,
-                                           Operation *constOp) {
-  if (auto constTy =
-          dyn_cast<RankedTensorType>(constOp->getResult(0).getType())) {
-    if (constTy.getElementType().isUnsignedInteger(8))
-      return false;
-    if (auto intTy = dyn_cast<IntegerType>(constTy.getElementType())) {
-      if (intTy.isUnsigned())
-        return false;
-    }
-  }
-
-  if (auto elem = readOnnxElementTypeAttr(constOp)) {
-    if (*elem == kOnnxElementTypeInt4)
-      return true;
-    if (isUnsignedOnnxElementType(*elem))
-      return false;
-  }
-
-  if (dataType.getElementType().isF32())
-    return true;
-
-  if (auto intTy = dyn_cast<IntegerType>(dataType.getElementType()))
-    return intTy.isSigned() || intTy.isSignless();
-
-  return true;
 }
 
 inline bool resolveUnsignedQuantStorage(int64_t bits, bool hasUnsignedAttr,
