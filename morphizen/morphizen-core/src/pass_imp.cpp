@@ -411,7 +411,22 @@ MetaDefProto &Pass::fuse(Graph &graph, const std::string &name,
   auto graph_ref = morphizen_cxx::GraphConstRef(graph);
   for (auto n : nodes) {
     auto node_ref = graph_ref.node(n);
-    meta_def->add_nodes(node_get_first_output_name(*node_ref.ptr()));
+    const Node &nd = *node_ref.ptr();
+    // Some nodes carry an empty (non-existent) NodeArg in output slot 0 (e.g.
+    // optional outputs in quantized/hybrid models). Use the first existing
+    // output name instead of unconditionally reading slot 0, which fatal-CHECKs
+    // in node_arg.cpp. A fused node must still produce at least one real
+    // output, so CHECK if none exists.
+    const std::string *picked = nullptr;
+    for (const NodeArg *a : node_get_output_node_args(nd)) {
+      if (a != nullptr && node_arg_exists(*a)) {
+        picked = &node_arg_get_name(*a);
+        break;
+      }
+    }
+    CHECK(picked != nullptr)
+        << "no existing output NodeArg on node: " << node_as_string(nd);
+    meta_def->add_nodes(*picked);
   }
   meta_def->set_device(device);
   morphizen::graph_fuse(graph, name, op_type, nodes, inputs, outputs,
