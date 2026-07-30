@@ -1091,8 +1091,8 @@ void MLIRGraph::add_constant_initialized_tensor(
   const void *data = node_arg->getData();
   size_t dataSize = node_arg->getDataSize();
 
-  // Preserve ONNX UINT8/SINT8 on external initializers so downstream GBQ
-  // legalize and hip-ep externalize can tell unsigned quant storage apart.
+  // Preserve ONNX UINT8/SINT8 on external initializers so convert-onnx-to-hip
+  // prepare and hip-ep externalize can tell unsigned quant storage apart.
   // Inline dense constants still use signless integers for DenseElementsAttr.
   const int onnxElemType = node_arg->getElementType();
   if (node_arg->isExternalData()) {
