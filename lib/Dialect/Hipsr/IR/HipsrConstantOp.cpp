@@ -77,8 +77,11 @@ struct ConstantLowering : public ConvertOpToLLVMPattern<ConstantOp> {
     if (failed(constantFunc)) {
       return failure();
     }
-    Value dataPtr =
-        constantFunc->callWithResult(ctxArg, op.getIndexAttr().getInt());
+    FailureOr<Value> dataPtr =
+        constantFunc->call(ctxArg, op.getIndexAttr().getInt());
+    if (failed(dataPtr)) {
+      return failure();
+    }
 
     Type i64Type = rewriter.getI64Type();
     auto shape = memRefType.getShape();
@@ -97,7 +100,7 @@ struct ConstantLowering : public ConvertOpToLLVMPattern<ConstantOp> {
     }
 
     MemRefDescriptor desc = createMemRefDescriptor(
-        loc, memRefType, dataPtr, dataPtr, sizes, strides, rewriter);
+        loc, memRefType, *dataPtr, *dataPtr, sizes, strides, rewriter);
     rewriter.replaceOp(op, {desc});
     return success();
   }

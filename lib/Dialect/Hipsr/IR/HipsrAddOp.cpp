@@ -105,12 +105,14 @@ struct AddLowering : public ConvertOpToLLVMPattern<AddOp> {
     if (failed(addFunc)) {
       return failure();
     }
-    addFunc->call(adaptor.getCtx(), SlotIndex{op.getOperation()},
-                  adaptor.getLhs(), adaptor.getRhs(), adaptor.getInit(),
-                  lhsDims[0], lhsDims[1], lhsDims[2], lhsDims[3], rhsDims[0],
-                  rhsDims[1], rhsDims[2], rhsDims[3], outDims[0], outDims[1],
-                  outDims[2], outDims[3], dataType,
-                  static_cast<int64_t>(kTensorOpAdd));
+    if (failed(addFunc->call(
+            adaptor.getCtx(), SlotIndex{op.getOperation()}, adaptor.getLhs(),
+            adaptor.getRhs(), adaptor.getInit(), lhsDims[0], lhsDims[1],
+            lhsDims[2], lhsDims[3], rhsDims[0], rhsDims[1], rhsDims[2],
+            rhsDims[3], outDims[0], outDims[1], outDims[2], outDims[3],
+            dataType, static_cast<int64_t>(kTensorOpAdd)))) {
+      return failure();
+    }
     rewriter.eraseOp(op);
     return success();
   }
