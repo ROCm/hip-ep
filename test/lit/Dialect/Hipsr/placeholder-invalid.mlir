@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// RUN: hip-mlir-opt --split-input-file --verify-diagnostics %s
+// RUN: hip-mlir-opt --split-input-file --verify-diagnostics -allow-unregistered-dialect %s
 
 // Results must be ranked tensors.
 func.func @unranked_rejected(
@@ -178,6 +178,41 @@ func.func @nonleading_context(
       {type = #hipsr.placeholder_type<normal>}
       : (tensor<4x8xf32>, !hipsr.context) -> tensor<4x8xf16>
   %result = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
+      outs(%init : tensor<4x8xf16>) : tensor<4x8xf16>
+  return %result : tensor<4x8xf16>
+}
+
+// -----
+
+// Shape dependencies use the producer's placeholder, not its data result.
+func.func @data_result_shape_input(
+    %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<4x8xf32> {
+  %first_init = hipsr.placeholder(%ctx)
+      ins(%input : tensor<4x8xf32>)
+      {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
+  %first = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
+      outs(%first_init : tensor<4x8xf16>) : tensor<4x8xf16>
+  // expected-error @+1 {{input 0 must be a block argument or a result of hipsr.placeholder, arith.constant, or hipsr.constant; got result of 'hipsr.cast'}}
+  %second_init = hipsr.placeholder(%ctx)
+      ins(%first : tensor<4x8xf16>)
+      {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf32>
+  %second = hipsr.cast(%ctx) ins(%first : tensor<4x8xf16>)
+      outs(%second_init : tensor<4x8xf32>) : tensor<4x8xf32>
+  return %second : tensor<4x8xf32>
+}
+
+// -----
+
+// A value from an unconverted operation cannot root the shape graph.
+func.func @unconverted_shape_input(
+    %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<4x8xf16> {
+  %unconverted = "onnx.Unsupported"(%input)
+      : (tensor<4x8xf32>) -> tensor<4x8xf32>
+  // expected-error @+1 {{input 0 must be a block argument or a result of hipsr.placeholder, arith.constant, or hipsr.constant; got result of 'onnx.Unsupported'}}
+  %init = hipsr.placeholder(%ctx)
+      ins(%unconverted : tensor<4x8xf32>)
+      {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
+  %result = hipsr.cast(%ctx) ins(%unconverted : tensor<4x8xf32>)
       outs(%init : tensor<4x8xf16>) : tensor<4x8xf16>
   return %result : tensor<4x8xf16>
 }

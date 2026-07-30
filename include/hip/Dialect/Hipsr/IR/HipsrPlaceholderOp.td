@@ -20,7 +20,9 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
     the placeholder uses the op's result types.
 
     `!hipsr.context` is operand 0. The remaining inputs provide values to the
-    shape graph. `type` marks the placeholder as `normal` or `barrier`.
+    shape graph and must be block arguments or results of `hipsr.placeholder`,
+    `arith.constant`, or `hipsr.constant`. `type` marks the placeholder as
+    `normal` or `barrier`.
 
     The optional `shape_region` defines the placeholder result shapes. It has
     one block when present and ends with `hipsr.shape_yield`.
@@ -65,6 +67,9 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
   let hasVerifier = 1;
 
   let extraClassDeclaration = [{
+    /// Returns whether a value may be used as a placeholder shape-graph input.
+    static bool isAllowedShapeGraphInput(::mlir::Value value);
+
     /// Returns the hipsr DPS operation initialized by this placeholder, or
     /// null if no such use exists.
     ::mlir::Operation *getDpsConsumer();

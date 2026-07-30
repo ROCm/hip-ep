@@ -67,6 +67,30 @@ func.func @tensor_forms(
 
 // -----
 
+// Arith and HIPSR constants are valid shape-graph roots.
+// CHECK-LABEL: func.func @constant_shape_roots(
+// CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<4x8xf32>) -> tensor<4x8xf16> {
+// CHECK-NEXT: %[[ARITH_SHAPE:.*]] = arith.constant dense<[4, 8]> : tensor<2xi64>
+// CHECK-NEXT: %[[HIPSR_SHAPE:.*]] = hipsr.constant {value = dense<[4, 8]> : tensor<2xi64>} : tensor<2xi64>
+// CHECK-NEXT: %[[INIT:.*]] = hipsr.placeholder(%[[CTX]]) ins(%[[ARITH_SHAPE]], %[[HIPSR_SHAPE]] : tensor<2xi64>, tensor<2xi64>) {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
+// CHECK-NEXT: %[[RESULT:.*]] = hipsr.cast(%[[CTX]]) ins(%[[INPUT]] : tensor<4x8xf32>) outs(%[[INIT]] : tensor<4x8xf16>) : tensor<4x8xf16>
+// CHECK-NEXT: return %[[RESULT]] : tensor<4x8xf16>
+// CHECK-NEXT: }
+func.func @constant_shape_roots(
+    %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<4x8xf16> {
+  %arith_shape = arith.constant dense<[4, 8]> : tensor<2xi64>
+  %hipsr_shape = hipsr.constant
+      {value = dense<[4, 8]> : tensor<2xi64>} : tensor<2xi64>
+  %init = hipsr.placeholder(%ctx)
+      ins(%arith_shape, %hipsr_shape : tensor<2xi64>, tensor<2xi64>)
+      {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
+  %result = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
+      outs(%init : tensor<4x8xf16>) : tensor<4x8xf16>
+  return %result : tensor<4x8xf16>
+}
+
+// -----
+
 // CSE must not merge otherwise identical placeholders tied to different ops.
 // CSE-LABEL: func.func @cse_keeps_placeholders(
 // CSE-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<4x8xf32>)

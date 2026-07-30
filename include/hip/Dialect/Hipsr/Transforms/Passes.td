@@ -70,25 +70,25 @@ def PartitionPoolDomainsPass
       %cast = hipsr.cast(%ctx) ins(%input : tensor<?x4xf32>)
           outs(%cast_init : tensor<?x4xf16>) : tensor<?x4xf16>
       %ready_init = hipsr.placeholder(%ctx)
-          ins(%cast : tensor<?x4xf16>)
+          ins(%input : tensor<?x4xf32>)
           {type = #hipsr.placeholder_type<barrier>} : tensor<?x4xf16>
       %ready = hipsr.example_end_barrier(%ctx)
           ins(%cast : tensor<?x4xf16>)
           outs(%ready_init : tensor<?x4xf16>) : tensor<?x4xf16>
       %add_init = hipsr.placeholder(%ctx)
-          ins(%ready, %ready : tensor<?x4xf16>, tensor<?x4xf16>)
+          ins(%input, %input : tensor<?x4xf32>, tensor<?x4xf32>)
           {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
       %sum = hipsr.add(%ctx)
           ins(%ready, %ready : tensor<?x4xf16>, tensor<?x4xf16>)
           outs(%add_init : tensor<?x4xf16>) : tensor<?x4xf16>
       %expand_init = hipsr.placeholder(%ctx)
-          ins(%sum, %shape : tensor<?x4xf16>, tensor<2xi64>)
+          ins(%input, %shape : tensor<?x4xf32>, tensor<2xi64>)
           {type = #hipsr.placeholder_type<barrier>} : tensor<?x4xf16>
       %expanded = hipsr.expand(%ctx)
           ins(%sum, %shape : tensor<?x4xf16>, tensor<2xi64>)
           outs(%expand_init : tensor<?x4xf16>) : tensor<?x4xf16>
       %result_init = hipsr.placeholder(%ctx)
-          ins(%expanded, %expanded : tensor<?x4xf16>, tensor<?x4xf16>)
+          ins(%input, %input : tensor<?x4xf32>, tensor<?x4xf32>)
           {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
       %result = hipsr.add(%ctx)
           ins(%expanded, %expanded : tensor<?x4xf16>, tensor<?x4xf16>)
@@ -112,7 +112,7 @@ def PartitionPoolDomainsPass
             ins(%domain_input : tensor<?x4xf32>)
             outs(%cast_init : tensor<?x4xf16>) : tensor<?x4xf16>
         %ready_init = hipsr.placeholder(%domain_ctx)
-            ins(%cast : tensor<?x4xf16>)
+            ins(%domain_input : tensor<?x4xf32>)
             {type = #hipsr.placeholder_type<barrier>}
             : tensor<?x4xf16>
         %ready = hipsr.example_end_barrier(%domain_ctx)
@@ -120,13 +120,14 @@ def PartitionPoolDomainsPass
             outs(%ready_init : tensor<?x4xf16>) : tensor<?x4xf16>
         hipsr.pool_domain_yield %ready : tensor<?x4xf16>
       } -> tensor<?x4xf16>
-      %1 = hipsr.pool_domain(%ctx, %0
-          : !hipsr.context, tensor<?x4xf16>) {
+      %1 = hipsr.pool_domain(%ctx, %input, %0
+          : !hipsr.context, tensor<?x4xf32>, tensor<?x4xf16>) {
       ^bb0(%domain_ctx: !hipsr.context,
+           %shape_root: tensor<?x4xf32>,
            %domain_input: tensor<?x4xf16>):
         %add_init = hipsr.placeholder(%domain_ctx)
-            ins(%domain_input, %domain_input
-                : tensor<?x4xf16>, tensor<?x4xf16>)
+            ins(%shape_root, %shape_root
+                : tensor<?x4xf32>, tensor<?x4xf32>)
             {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
         %sum = hipsr.add(%domain_ctx)
             ins(%domain_input, %domain_input
@@ -134,14 +135,16 @@ def PartitionPoolDomainsPass
             outs(%add_init : tensor<?x4xf16>) : tensor<?x4xf16>
         hipsr.pool_domain_yield %sum : tensor<?x4xf16>
       } -> tensor<?x4xf16>
-      %2 = hipsr.pool_domain(%ctx, %1, %shape
-          : !hipsr.context, tensor<?x4xf16>, tensor<2xi64>) {
+      %2 = hipsr.pool_domain(%ctx, %input, %1, %shape
+          : !hipsr.context, tensor<?x4xf32>, tensor<?x4xf16>,
+            tensor<2xi64>) {
       ^bb0(%domain_ctx: !hipsr.context,
+           %shape_root: tensor<?x4xf32>,
            %domain_input: tensor<?x4xf16>,
            %domain_shape: tensor<2xi64>):
         %expand_init = hipsr.placeholder(%domain_ctx)
-            ins(%domain_input, %domain_shape
-                : tensor<?x4xf16>, tensor<2xi64>)
+            ins(%shape_root, %domain_shape
+                : tensor<?x4xf32>, tensor<2xi64>)
             {type = #hipsr.placeholder_type<barrier>}
             : tensor<?x4xf16>
         %expanded = hipsr.expand(%domain_ctx)
@@ -149,8 +152,8 @@ def PartitionPoolDomainsPass
                 : tensor<?x4xf16>, tensor<2xi64>)
             outs(%expand_init : tensor<?x4xf16>) : tensor<?x4xf16>
         %result_init = hipsr.placeholder(%domain_ctx)
-            ins(%expanded, %expanded
-                : tensor<?x4xf16>, tensor<?x4xf16>)
+            ins(%shape_root, %shape_root
+                : tensor<?x4xf32>, tensor<?x4xf32>)
             {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
         %result = hipsr.add(%domain_ctx)
             ins(%expanded, %expanded : tensor<?x4xf16>, tensor<?x4xf16>)

@@ -5,12 +5,23 @@
 
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 
 #include "llvm/ADT/STLExtras.h"
 
 using namespace mlir;
 using namespace mlir::hipsr;
+
+bool PlaceholderOp::isAllowedShapeGraphInput(Value value) {
+  if (isa<BlockArgument>(value)) {
+    return true;
+  }
+
+  Operation *definingOp = value.getDefiningOp();
+  return isa_and_nonnull<PlaceholderOp, ConstantOp, arith::ConstantOp>(
+      definingOp);
+}
 
 Operation *PlaceholderOp::getDpsConsumer() {
   for (Value result : getResults()) {
@@ -29,6 +40,16 @@ Operation *PlaceholderOp::getDpsConsumer() {
 LogicalResult PlaceholderOp::verify() {
   if (getNumResults() == 0) {
     return emitOpError("must produce at least one tensor DPS init");
+  }
+
+  for (auto [inputIndex, input] : llvm::enumerate(getInputs())) {
+    if (!isAllowedShapeGraphInput(input)) {
+      return emitOpError("input ")
+             << inputIndex
+             << " must be a block argument or a result of hipsr.placeholder, "
+                "arith.constant, or hipsr.constant; got result of '"
+             << input.getDefiningOp()->getName() << "'";
+    }
   }
 
   Operation *consumer = nullptr;
