@@ -295,6 +295,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     if(HIPDNN_EP_DISABLE_VENDOR_BLAS)
         compile_to_bitcode(real/vendor_blas_stub.cpp runtime_vendor_blas_stub.bc)
     endif()
+	compile_to_bitcode(real/im2col.cpp runtime_im2col.bc)
     compile_to_bitcode(real/memory.cpp runtime_memory.bc)
     compile_to_bitcode(real/elementwise.cpp runtime_elementwise.bc)
     compile_to_bitcode(real/power.cpp runtime_power.bc)
@@ -372,6 +373,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_hip.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_miopen.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_hipblas.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_im2col.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_elementwise.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_power.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_matmul.bc
