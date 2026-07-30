@@ -100,13 +100,7 @@ extern "C" int wrap_gather_block_quantized(
     return -1;
   }
 
-  // Legacy bitcode may pass INT8 for bits==8 uint8 storage; ONNX GBQ only
-  // allows uint8 element type at bits==8.
   bool is_signed_data = (data_dtype == HIPDNN_EP_DATATYPE_INT8);
-  if (bits == 8 && is_signed_data) {
-    data_dtype = HIPDNN_EP_DATATYPE_UINT8;
-    is_signed_data = false;
-  }
   if (bits == 8 && !is_signed_data && gather_axis_n != 0) {
     fprintf(stderr,
             "[REAL] wrap_gather_block_quantized: ONNX spec requires "

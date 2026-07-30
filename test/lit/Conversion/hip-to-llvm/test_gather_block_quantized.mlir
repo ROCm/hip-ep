@@ -70,7 +70,7 @@ module {
   }
 
   // ===== Test 4: signless i8 + unsigned_quant_storage =====
-  // MorphiZen legalizes UINT4 to signless i8; lowering must pass
+  // unsigned_quant_storage marks UINT4 packed in signless i8; lowering must pass
   // HIPDNN_EP_DATATYPE_UINT8 (7), not signless-i8 default (5).
 
   func.func @test_gbq_unsigned_quant_storage(%ctx: !hip.context,

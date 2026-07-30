@@ -109,7 +109,7 @@ module {
   // CHECK: hip.gather_block_quantized(%[[CTX]]) ins({{.*}}, %[[IDX]], {{.*}} : tensor<2048x96xui8>, tensor<?xi64>, tensor<2048x12xf16>) outs(%[[INIT]] : tensor<?x96xf16>)
   // CHECK-NOT: onnx.Custom
 
-  // ===== Test 4: MorphiZen INT4 legalize path (signless i8 + unsigned flag) =====
+  // ===== Test 4: prepare-annotated UINT4 (signless i8 + unsigned flag) =====
   // Packed byte shape with logical quantize_axis already halved; unsigned
   // storage is carried on the Custom op, not via ui8 element type.
 
