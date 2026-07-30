@@ -15,8 +15,6 @@ add_library(${LIB_NAME}
   src/mlir-graph.cpp
   src/mlir-constants.hpp
   src/mlir-constants.cpp
-  src/mlir-gbq-int4-legalize.hpp
-  src/mlir-gbq-int4-legalize.cpp
   src/symbol-table.hpp
   src/symbol-table.cpp
   src/mlir-node-attributes.hpp

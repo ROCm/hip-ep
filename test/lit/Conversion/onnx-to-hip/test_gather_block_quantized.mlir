@@ -11,7 +11,7 @@
 //     domain_name=com.microsoft)
 //   - Optional zero_points operand handling (present + absent)
 //   - Attribute propagation (bits, block_size, gather_axis, quantize_axis,
-//     unsigned_quant_storage for MorphiZen INT4 legalize path)
+//     unsigned_quant_storage for INT4/UINT4 prepare path)
 //   - Output shape derivation (data[:gather_axis] ++ indices ++
 //     data[gather_axis+1:])
 //   - Dynamic-shape `tensor.dim` + `tensor.empty` plumbing for the gathered
