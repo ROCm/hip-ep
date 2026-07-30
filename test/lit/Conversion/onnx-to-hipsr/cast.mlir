@@ -8,14 +8,14 @@
 
 // RUN: hip-mlir-opt %s -allow-unregistered-dialect -convert-onnx-to-hipsr | FileCheck %s
 
-// Chained casts produce parallel data and placeholder dependencies. All shape
-// regions remain empty.
+// Each placeholder receives the same input as its cast. All shape regions
+// remain empty.
 // CHECK-LABEL: func.func @cast_chain(
 // CHECK-SAME:    %[[CTX:.*]]: !hipsr.context,
 // CHECK-SAME:    %[[IN:.*]]: tensor<?x8xf32>) -> tensor<?x8xf32> {
 // CHECK-NEXT: %[[FIRST_INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[IN]] : tensor<?x8xf32>) {type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16>
 // CHECK-NEXT: %[[FIRST:.+]] = hipsr.cast(%[[CTX]]) ins(%[[IN]] : tensor<?x8xf32>) outs(%[[FIRST_INIT]] : tensor<?x8xf16>) : tensor<?x8xf16>
-// CHECK-NEXT: %[[SECOND_INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[FIRST_INIT]] : tensor<?x8xf16>) {type = #hipsr.placeholder_type<normal>} : tensor<?x8xf32>
+// CHECK-NEXT: %[[SECOND_INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[FIRST]] : tensor<?x8xf16>) {type = #hipsr.placeholder_type<normal>} : tensor<?x8xf32>
 // CHECK-NEXT: %[[SECOND:.+]] = hipsr.cast(%[[CTX]]) ins(%[[FIRST]] : tensor<?x8xf16>) outs(%[[SECOND_INIT]] : tensor<?x8xf32>) : tensor<?x8xf32>
 // CHECK-NOT: shape_region
 func.func @cast_chain(

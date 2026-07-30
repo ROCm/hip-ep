@@ -31,13 +31,6 @@ struct ExpandToHipsr : public ::mlir::RewritePattern {
 
     ::mlir::Value input = op->getOperand(0);
     ::mlir::Value shape = op->getOperand(1);
-    ::mlir::FailureOr<::mlir::Value> placeholderInput =
-        getPlaceholderDependency(input, op, rewriter);
-    ::mlir::FailureOr<::mlir::Value> placeholderShape =
-        getPlaceholderDependency(shape, op, rewriter);
-    if (::mlir::failed(placeholderInput) || ::mlir::failed(placeholderShape)) {
-      return ::mlir::failure();
-    }
     auto inputType =
         ::mlir::dyn_cast<::mlir::RankedTensorType>(input.getType());
     if (!inputType) {
@@ -79,10 +72,9 @@ struct ExpandToHipsr : public ::mlir::RewritePattern {
 
     ::mlir::Location loc = op->getLoc();
     ::mlir::Value init =
-        PlaceholderOp::create(
-            rewriter, loc, ::mlir::TypeRange{resultType}, *ctx,
-            ::mlir::ValueRange{*placeholderInput, *placeholderShape},
-            PlaceholderType::Barrier)
+        PlaceholderOp::create(rewriter, loc, ::mlir::TypeRange{resultType},
+                              *ctx, ::mlir::ValueRange{input, shape},
+                              PlaceholderType::Barrier)
             .getResult(0);
     auto expandOp =
         ExpandOp::create(rewriter, loc, ::mlir::TypeRange{resultType}, *ctx,

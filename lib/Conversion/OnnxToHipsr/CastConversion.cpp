@@ -42,11 +42,6 @@ struct CastToHipsr : public ::mlir::RewritePattern {
 
     ::mlir::Location loc = op->getLoc();
     ::mlir::Value input = op->getOperand(0);
-    ::mlir::FailureOr<::mlir::Value> placeholderInput =
-        getPlaceholderDependency(input, op, rewriter);
-    if (::mlir::failed(placeholderInput)) {
-      return ::mlir::failure();
-    }
     auto resultType =
         ::mlir::dyn_cast<::mlir::RankedTensorType>(op->getResult(0).getType());
     if (!resultType) {
@@ -56,7 +51,7 @@ struct CastToHipsr : public ::mlir::RewritePattern {
     ::mlir::Value init =
         rewriter
             .create<PlaceholderOp>(loc, ::mlir::TypeRange{resultType}, *ctx,
-                                   ::mlir::ValueRange{*placeholderInput},
+                                   ::mlir::ValueRange{input},
                                    PlaceholderType::Normal)
             .getResult(0);
 
