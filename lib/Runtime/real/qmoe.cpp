@@ -109,10 +109,10 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   int64_t blob_size_fc1 = block_size / 2;
   int64_t k_blocks_fc2 = (inter_size + block_size - 1) / block_size;
   int64_t blob_size_fc2 = block_size / 2;
-  const bool grouped_prefill_ok =
-      num_tokens > 1 && elem_size == 2 && expert_weight_bits == 4 &&
-      block_size == 32 && hidden_size == 2048 && inter_size == 512 &&
-      !fc1_zero_points && !fc2_zero_points;
+  const bool grouped_prefill_ok = num_tokens > 1 && elem_size == 2 &&
+                                  expert_weight_bits == 4 && block_size == 32 &&
+                                  hidden_size == 2048 && inter_size == 512 &&
+                                  !fc1_zero_points && !fc2_zero_points;
   const int64_t total_pairs = num_tokens * k;
   const int64_t work_rows = grouped_prefill_ok ? total_pairs : num_tokens;
 
@@ -301,8 +301,7 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     for (int64_t e = 0; e < num_experts; e++) {
       if (h_counts[e] > 0) {
         active_experts++;
-        max_expert_tokens =
-            std::max<int64_t>(max_expert_tokens, h_counts[e]);
+        max_expert_tokens = std::max<int64_t>(max_expert_tokens, h_counts[e]);
       }
     }
     RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: %lld/%lld experts active\n",
@@ -319,18 +318,18 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
           (long long)total_pairs, (long long)max_expert_tokens,
           (long long)num_experts);
 
-      HIP_CHECK(hip_qmoe_gather_tokens(
-          stream, input, d_gather_buf, d_sorted_token_ids, hidden_size,
-          total_pairs, elem_size));
+      HIP_CHECK(hip_qmoe_gather_tokens(stream, input, d_gather_buf,
+                                       d_sorted_token_ids, hidden_size,
+                                       total_pairs, elem_size));
 
       HIP_CHECK(hip_matmul_nbits_grouped_nozp(
           stream, d_gather_buf, fc1_weights, fc1_scales, fc1_bias, d_fc1_buf,
           d_expert_counts, d_expert_offsets, num_experts, max_expert_tokens,
           fusion_inter, hidden_size, block_size));
 
-      HIP_CHECK(hip_qmoe_swiglu(
-          stream, d_fc1_buf, d_act_buf, total_pairs, inter_size,
-          activation_alpha, activation_beta, swiglu_limit, elem_size));
+      HIP_CHECK(hip_qmoe_swiglu(stream, d_fc1_buf, d_act_buf, total_pairs,
+                                inter_size, activation_alpha, activation_beta,
+                                swiglu_limit, elem_size));
 
       HIP_CHECK(hip_matmul_nbits_grouped_nozp(
           stream, d_act_buf, fc2_weights, fc2_scales, fc2_bias, d_gather_buf,
@@ -339,16 +338,15 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
 
       for (int64_t e = 0; e < num_experts; e++) {
         int64_t count = static_cast<int64_t>(h_counts[e]);
-        if (count == 0) continue;
+        if (count == 0)
+          continue;
         int64_t off_e = h_offsets[e];
         int32_t *d_ids_e = d_sorted_token_ids + off_e;
         char *d_wts_e = d_sorted_weights + off_e * elem_size;
         char *d_out_e =
-            static_cast<char *>(d_gather_buf) +
-            off_e * hidden_size * elem_size;
-        HIP_CHECK(hip_qmoe_scatter_add(
-            stream, output, d_out_e, d_ids_e, d_wts_e, hidden_size, count,
-            elem_size));
+            static_cast<char *>(d_gather_buf) + off_e * hidden_size * elem_size;
+        HIP_CHECK(hip_qmoe_scatter_add(stream, output, d_out_e, d_ids_e,
+                                       d_wts_e, hidden_size, count, elem_size));
       }
       goto cleanup;
     }
