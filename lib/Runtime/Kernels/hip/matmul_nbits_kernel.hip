@@ -2871,6 +2871,86 @@ void MatMulNBitsWMMA_NoZP(
         group_size, num_groups_k, C, ldc, swizzle_n);
 }
 
+template <int BM_T, int BN_T, int WT_M = 2, int WT_N = 2,
+          int WAVES_EU = 8>
+__global__
+__attribute__((amdgpu_flat_work_group_size(
+    GEMM_WG_SZ(BM_T, BN_T, WT_M, WT_N),
+    GEMM_WG_SZ(BM_T, BN_T, WT_M, WT_N))))
+__attribute__((amdgpu_waves_per_eu(WAVES_EU)))
+void MatMulNBitsWMMA_Grouped_NoZP(
+    int N, int K,
+    const _Float16* __restrict__ A,
+    const unsigned char* __restrict__ B_packed,
+    const _Float16* __restrict__ scales,
+    const _Float16* __restrict__ bias,
+    _Float16* __restrict__ C,
+    const int32_t* __restrict__ expert_counts,
+    const int32_t* __restrict__ expert_offsets,
+    int num_experts, int group_size, int num_groups_k, int swizzle_n)
+{
+    const int expert = static_cast<int>(blockIdx.z);
+    if (expert >= num_experts) return;
+
+    const int M = expert_counts[expert];
+    if (M <= 0) return;
+
+    // GemmFp16U4Impl swizzles the logical (by,bx) tile coordinates. Reproduce
+    // that mapping here so rectangular max-M grouped grids can cheaply skip
+    // tiles beyond this expert's actual row count before touching weights.
+    const int n_tiles = static_cast<int>(gridDim.x);
+    const int m_tiles = static_cast<int>(gridDim.y);
+    const int block_id = static_cast<int>(blockIdx.y) * n_tiles +
+                         static_cast<int>(blockIdx.x);
+    const int sw = (n_tiles >= swizzle_n) ? swizzle_n : n_tiles;
+    const int main_cols = (n_tiles / sw) * sw;
+    const int main_blocks = main_cols * m_tiles;
+    int by, bx;
+    if (block_id < main_blocks) {
+        const int super = block_id / (sw * m_tiles);
+        const int rem = block_id % (sw * m_tiles);
+        by = rem / sw;
+        bx = super * sw + rem % sw;
+    } else {
+        const int tail_id = block_id - main_blocks;
+        const int tail_cols = n_tiles - main_cols;
+        by = tail_id / tail_cols;
+        bx = main_cols + tail_id % tail_cols;
+    }
+    if (by * BM_T >= M) return;
+
+    const int64_t row_offset = expert_offsets[expert];
+    const _Float16* A_e = A + row_offset * K;
+    _Float16* C_e = C + row_offset * N;
+    const unsigned char* B_e =
+        B_packed + static_cast<int64_t>(expert) * N * (K >> 1);
+    const _Float16* scales_e =
+        scales + static_cast<int64_t>(expert) * N * num_groups_k;
+    const _Float16* bias_e =
+        bias ? bias + static_cast<int64_t>(expert) * N : nullptr;
+
+    GemmFp16U4Impl<BM_T, BN_T, WT_M, WT_N, false, true>(
+        M, N, K, A_e, K, B_e, scales_e, nullptr, group_size, num_groups_k,
+        C_e, N, swizzle_n);
+
+    if (bias_e) {
+        __syncthreads();
+        for (int idx = threadIdx.x; idx < BM_T * BN_T; idx += blockDim.x) {
+            const int r = idx / BN_T;
+            const int c = idx % BN_T;
+            const int row = by * BM_T + r;
+            const int col = bx * BN_T + c;
+            if (row < M && col < N) {
+                C_e[static_cast<int64_t>(row) * N + col] =
+                    static_cast<_Float16>(
+                        static_cast<float>(
+                            C_e[static_cast<int64_t>(row) * N + col]) +
+                        static_cast<float>(bias_e[col]));
+            }
+        }
+    }
+}
+
 template <int BM_T = 128, int BN_T = 128, int WT_M = 2, int WT_N = 2,
           int WAVES_EU = 8, bool BC = false>
 __global__
@@ -5499,6 +5579,70 @@ extern "C" void hip_matmul_nbits_convert_zp_fp16(
                        static_cast<const unsigned char*>(zp_packed),
                        static_cast<_Float16*>(dst_fp16),
                        N, groups_k, packed_cols);
+}
+
+extern "C" int hip_matmul_nbits_grouped_nozp(
+    void* stream_v,
+    const void* A_v,
+    const void* B_v,
+    const void* scales_v,
+    const void* bias_v,
+    void* C_v,
+    const int32_t* expert_counts,
+    const int32_t* expert_offsets,
+    int64_t num_experts,
+    int64_t max_m,
+    int64_t N,
+    int64_t K,
+    int64_t block_size)
+{
+    if (!stream_v || !A_v || !B_v || !scales_v || !C_v ||
+        !expert_counts || !expert_offsets || num_experts <= 0 || max_m <= 0 ||
+        N <= 0 || K <= 0 || block_size != 32 || (K % 32) != 0) {
+        return hipErrorInvalidValue;
+    }
+
+    hipStream_t stream = static_cast<hipStream_t>(stream_v);
+    const _Float16* A = static_cast<const _Float16*>(A_v);
+    const unsigned char* B = static_cast<const unsigned char*>(B_v);
+    const _Float16* scales = static_cast<const _Float16*>(scales_v);
+    const _Float16* bias = static_cast<const _Float16*>(bias_v);
+    _Float16* C = static_cast<_Float16*>(C_v);
+    const int ngk = static_cast<int>(K / block_size);
+
+    // Qwen3.5 MoE fc1: [M,2048] x [1024,2048]^T.
+    if (N == 1024 && K == 2048) {
+        constexpr int BM = 128, BN = 64, WM = 2, WN = 2;
+        constexpr int THR = GEMM_WG_SZ(BM, BN, WM, WN);
+        dim3 grid(static_cast<unsigned>((N + BN - 1) / BN),
+                  static_cast<unsigned>((max_m + BM - 1) / BM),
+                  static_cast<unsigned>(num_experts));
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(
+                MatMulNBitsWMMA_Grouped_NoZP<BM, BN, WM, WN, 8>),
+            grid, dim3(THR), 0, stream, static_cast<int>(N),
+            static_cast<int>(K), A, B, scales, bias, C, expert_counts,
+            expert_offsets, static_cast<int>(num_experts),
+            static_cast<int>(block_size), ngk, 8);
+    // Qwen3.5 MoE fc2: [M,512] x [2048,512]^T.
+    } else if (N == 2048 && K == 512) {
+        constexpr int BM = 64, BN = 128, WM = 2, WN = 2;
+        constexpr int THR = GEMM_WG_SZ(BM, BN, WM, WN);
+        dim3 grid(static_cast<unsigned>((N + BN - 1) / BN),
+                  static_cast<unsigned>((max_m + BM - 1) / BM),
+                  static_cast<unsigned>(num_experts));
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(
+                MatMulNBitsWMMA_Grouped_NoZP<BM, BN, WM, WN, 8>),
+            grid, dim3(THR), 0, stream, static_cast<int>(N),
+            static_cast<int>(K), A, B, scales, bias, C, expert_counts,
+            expert_offsets, static_cast<int>(num_experts),
+            static_cast<int>(block_size), ngk, 8);
+    } else {
+        return hipErrorInvalidValue;
+    }
+
+    return static_cast<int>(hipGetLastError());
 }
 
 extern "C" int hip_matmul_nbits(
