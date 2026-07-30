@@ -4,6 +4,7 @@
  */
 
 #include "HipToLLVMUtils.h"
+#include <mlir/Dialect/LLVMIR/LLVMDialect.h>
 
 namespace mlir {
 namespace hip {
@@ -231,11 +232,97 @@ struct ConvOpLowering : public ConvertOpToLLVMPattern<ConvOp> {
   }
 };
 
+class Im2d2ColLowering : public ConvertOpToLLVMPattern<Im2d2ColOp> {
+public:
+  using ConvertOpToLLVMPattern<Im2d2ColOp>::ConvertOpToLLVMPattern;
+  LogicalResult
+  matchAndRewrite(Im2d2ColOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op->getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+
+    Type ptrType = getPtrType();
+    Type i64Type = rewriter.getI64Type();
+    SmallVector<Type> paramTypes = {
+        ptrType, // state
+        ptrType, // input
+        i64Type, // data_type
+        i64Type, // C
+        i64Type, // H
+        i64Type, // W
+        i64Type, // kh
+        i64Type, // kw
+        i64Type, // pad_top
+        i64Type, // pad_bottom
+        i64Type, // pad_left
+        i64Type, // pad_right
+        i64Type, // stride_h
+        i64Type, // stride_w
+        i64Type, // dilation_h
+        i64Type, // dilation_w
+        ptrType, // output
+        i64Type, // out_h
+        i64Type, // out_w
+    };
+
+    // Lookup or create the runtime function
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kIm2d2Col, paramTypes, rewriter.getI32Type());
+    if (failed(funcOp))
+      return failure();
+
+    auto inputType = cast<MemRefType>(op.getInput().getType());
+
+    auto createI64Const = [&](Attribute value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      cast<IntegerAttr>(value));
+    };
+
+    Value statePtr = adaptor.getCtx();
+    Value inputPtr =
+        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
+    Value dataType =
+        createI64Const(rewriter.getI64IntegerAttr(getHipdnnDataType(
+            cast<MemRefType>(op.getInput().getType()).getElementType())));
+    auto _ = getMemRefDimSize(inputType, 0, adaptor.getInput(), rewriter, loc);
+    auto C = getMemRefDimSize(inputType, 1, adaptor.getInput(), rewriter, loc);
+    auto H = getMemRefDimSize(inputType, 2, adaptor.getInput(), rewriter, loc);
+    auto W = getMemRefDimSize(inputType, 3, adaptor.getInput(), rewriter, loc);
+    auto kh = createI64Const(adaptor.getKernelShape()[0]);
+    auto kw = createI64Const(adaptor.getKernelShape()[1]);
+    auto pad_top = createI64Const(adaptor.getPads()[0]);
+    auto pad_bottom = createI64Const(adaptor.getPads()[1]);
+    auto pad_left = createI64Const(adaptor.getPads()[2]);
+    auto pad_right = createI64Const(adaptor.getPads()[3]);
+    auto stride_h = createI64Const(adaptor.getStrides()[0]);
+    auto stride_w = createI64Const(adaptor.getStrides()[1]);
+    auto dilation_h = createI64Const(adaptor.getDilations()[0]);
+    auto dilation_w = createI64Const(adaptor.getDilations()[1]);
+
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
+    auto out_h = createI64Const(adaptor.getOutDims()[0]);
+    auto out_w = createI64Const(adaptor.getOutDims()[1]);
+
+    SmallVector<Value> args({statePtr, inputPtr, dataType, C, H, W, kh, kw,
+                             pad_top, pad_bottom, pad_left, pad_right, stride_h,
+                             stride_w, dilation_h, dilation_w, outputPtr, out_h,
+                             out_w});
+
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+
+    rewriter.eraseOp(op);
+
+    return success();
+  }
+};
+
 } // namespace
 
 void populateConvLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns) {
   patterns.add<ConvOpLowering>(converter);
+  patterns.add<Im2d2ColLowering>(converter);
 }
 
 } // namespace hip
