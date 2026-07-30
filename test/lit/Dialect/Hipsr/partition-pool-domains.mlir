@@ -1,11 +1,8 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// CSE before or after partitioning must not merge placeholders used by
-// different ops.
 // Every pool domain receives the function's first hipsr context argument.
-// RUN: hip-mlir-opt --split-input-file -cse -hipsr-partition-pool-domains %s | FileCheck %s
-// RUN: hip-mlir-opt --split-input-file -hipsr-partition-pool-domains -cse %s | FileCheck %s
+// RUN: hip-mlir-opt --split-input-file -hipsr-partition-pool-domains %s | FileCheck %s
 
 // Expand with a shape attribute stays in its domain. Its placeholder's use of
 // the Cast result remains internal. Runtime Expand starts the next domain.

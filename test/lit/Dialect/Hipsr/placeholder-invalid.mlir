@@ -184,6 +184,28 @@ func.func @nonleading_context(
 
 // -----
 
+// Placeholder shape regions cannot capture values from their parent scope.
+func.func @shape_region_capture(
+    %ctx: !hipsr.context, %input: tensor<?x8xf32>) -> tensor<?x8xf16> {
+  // expected-note @+1 {{required by region isolation constraints}}
+  %init = hipsr.placeholder(%ctx)
+      ins(%input : tensor<?x8xf32>)
+      {type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16>
+      shape_region {
+  ^bb0(%shape_ctx: !hipsr.context, %shape_input: tensor<?x8xf32>):
+    %c0 = arith.constant 0 : index
+    // expected-error @+1 {{using value defined outside the region}}
+    %d0 = tensor.dim %input, %c0 : tensor<?x8xf32>
+    %c8 = arith.constant 8 : index
+    hipsr.shape_yield (%d0, %c8) : [f16]
+  }
+  %result = hipsr.cast(%ctx) ins(%input : tensor<?x8xf32>)
+      outs(%init : tensor<?x8xf16>) : tensor<?x8xf16>
+  return %result : tensor<?x8xf16>
+}
+
+// -----
+
 // A placeholder shape region may have at most one block.
 func.func @two_shape_region_blocks(
     %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<4x8xf16> {
@@ -196,6 +218,23 @@ func.func @two_shape_region_blocks(
   ^bb1:
     hipsr.shape_yield () : [f16]
   }
+  %result = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
+      outs(%init : tensor<4x8xf16>) : tensor<4x8xf16>
+  return %result : tensor<4x8xf16>
+}
+
+// -----
+
+// A placeholder shape region must end with hipsr.shape_yield.
+func.func @wrong_shape_region_terminator(
+    %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<4x8xf16> {
+  // expected-error @+2 {{expects regions to end with 'hipsr.shape_yield'}}
+  // expected-note @+1 {{in custom textual format, the absence of terminator implies 'hipsr.shape_yield'}}
+  %init = "hipsr.placeholder"(%ctx, %input) ({
+  ^bb0(%shape_ctx: !hipsr.context, %shape_input: tensor<4x8xf32>):
+    llvm.unreachable
+  }) {type = #hipsr.placeholder_type<normal>}
+      : (!hipsr.context, tensor<4x8xf32>) -> tensor<4x8xf16>
   %result = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
       outs(%init : tensor<4x8xf16>) : tensor<4x8xf16>
   return %result : tensor<4x8xf16>

@@ -5,8 +5,8 @@
 // RUN: hip-mlir-opt --split-input-file -cse %s | FileCheck %s --check-prefix=CSE
 
 // Placeholders preserve dynamic, static, and rank-0 result types. The dynamic
-// case carries one shape-region block. Its placeholder and data result both
-// feed a second placeholder; the others have zero blocks.
+// case carries one shape-region block and feeds a second placeholder; the
+// others have zero blocks.
 // CHECK-LABEL: func.func @tensor_forms(
 // CHECK-SAME: %[[CTX:.*]]: !hipsr.context,
 // CHECK-SAME: %[[DYNAMIC_INPUT:.*]]: tensor<?x?xf32>,
@@ -21,7 +21,7 @@
 // CHECK-NEXT: hipsr.shape_yield (%[[D0]], %[[C8]]) : [f16]
 // CHECK-NEXT: }
 // CHECK-NEXT: %[[DYNAMIC_RESULT:.*]] = hipsr.cast(%[[CTX]]) ins(%[[DYNAMIC_INPUT]] : tensor<?x?xf32>) outs(%[[DYNAMIC_INIT]] : tensor<?x?xf16>) : tensor<?x?xf16>
-// CHECK-NEXT: %[[CHAINED_INIT:.*]] = hipsr.placeholder(%[[CTX]]) ins(%[[DYNAMIC_INIT]], %[[DYNAMIC_RESULT]] : tensor<?x?xf16>, tensor<?x?xf16>) {type = #hipsr.placeholder_type<normal>} : tensor<?x?xf32>
+// CHECK-NEXT: %[[CHAINED_INIT:.*]] = hipsr.placeholder(%[[CTX]]) ins(%[[DYNAMIC_INIT]] : tensor<?x?xf16>) {type = #hipsr.placeholder_type<normal>} : tensor<?x?xf32>
 // CHECK-NEXT: %[[CHAINED_RESULT:.*]] = hipsr.cast(%[[CTX]]) ins(%[[DYNAMIC_RESULT]] : tensor<?x?xf16>) outs(%[[CHAINED_INIT]] : tensor<?x?xf32>) : tensor<?x?xf32>
 // CHECK-NEXT: %[[STATIC_INIT:.*]] = hipsr.placeholder(%[[CTX]]) ins(%[[STATIC_INPUT]] : tensor<4x8xf32>) {type = #hipsr.placeholder_type<normal>} : tensor<4x8xi64>
 // CHECK-NEXT: %[[STATIC_RESULT:.*]] = hipsr.cast(%[[CTX]]) ins(%[[STATIC_INPUT]] : tensor<4x8xf32>) outs(%[[STATIC_INIT]] : tensor<4x8xi64>) : tensor<4x8xi64>
@@ -46,8 +46,7 @@ func.func @tensor_forms(
   %dynamic_result = hipsr.cast(%ctx) ins(%dynamic_input : tensor<?x?xf32>)
       outs(%dynamic_init : tensor<?x?xf16>) : tensor<?x?xf16>
   %chained_init = hipsr.placeholder(%ctx)
-      ins(%dynamic_init, %dynamic_result
-          : tensor<?x?xf16>, tensor<?x?xf16>)
+      ins(%dynamic_init : tensor<?x?xf16>)
       {type = #hipsr.placeholder_type<normal>} : tensor<?x?xf32>
   %chained_result = hipsr.cast(%ctx)
       ins(%dynamic_result : tensor<?x?xf16>)
