@@ -693,21 +693,24 @@ static bool gqa_no_expand_enabled() {
   return enabled;
 }
 
-// Env-var gate for enabling the no-expand path on prefill (sq > 1). Default
-// off: today only decode (sq == 1) takes the no-expand fast path, matching the
-// verified pre-step-2 behaviour. Set HIPDNN_EP_GQA_NO_EXPAND_PREFILL=1 to opt
-// prefill into the same group-batched pipeline -- same strides as decode, but
-// with Q/O transpose kernels kept in place because BSHD and BNSD diverge at
-// sq > 1.
+// Env-var gate for enabling the no-expand path on prefill (sq > 1). Now default
+// ON, matching decode: prefill uses the same group-batched pipeline (same
+// strides as decode) with the Q/O transpose kernels kept in place because BSHD
+// and BNSD diverge at sq > 1.
 //
-// Keeping this behind a separate flag lets us A/B just the new prefill
-// behaviour without touching decode. Once verified across model families
-// (Mistral / Llama / GPT-OSS / ...), this can be folded into the main
-// HIPDNN_EP_GQA_NO_EXPAND flag.
+// Verified before flipping the default: the three prefill cases of the numeric
+// suite (test_gqa_prefill_fixed_cache_llama_shape, past_valid 0/64/128) pass
+// against the ORT CPU reference with this path active, and on gpt-oss-20b at
+// seqlen 16384 it drops the two expand_kv dispatches per layer for a 908 ms TTFT
+// win (29,177 -> 28,269 ms).
+//
+// Set HIPDNN_EP_GQA_NO_EXPAND_PREFILL=0 to fall back for A/B testing. The flag
+// stays separate from HIPDNN_EP_GQA_NO_EXPAND so prefill and decode remain
+// independently switchable.
 static bool gqa_no_expand_prefill_enabled() {
   static const bool enabled = [] {
     const char *v = std::getenv("HIPDNN_EP_GQA_NO_EXPAND_PREFILL");
-    return v && std::strcmp(v, "0") != 0;
+    return !v || std::strcmp(v, "0") != 0;
   }();
   return enabled;
 }
