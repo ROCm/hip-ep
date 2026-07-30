@@ -123,26 +123,12 @@ inline bool inferSignedStorageFromConstant(RankedTensorType dataType,
 }
 
 inline bool resolveUnsignedQuantStorage(int64_t bits, bool hasUnsignedAttr,
-                                        Type dataElemType, Value dataValue) {
+                                        Type dataElemType) {
   if (hasUnsignedAttr)
     return true;
   if (bits == 8)
     return true;
-  if (isUnsignedMlirElementType(dataElemType))
-    return true;
-
-  Value source = traceGbqDataToSource(dataValue);
-  if (auto *constOp = source.getDefiningOp()) {
-    if (constOp->getName().getStringRef() == "onnx.Constant") {
-      if (auto ty = dyn_cast<RankedTensorType>(constOp->getResult(0).getType()))
-        if (isUnsignedMlirElementType(ty.getElementType()))
-          return true;
-      if (!inferSignedStorageFromConstant(
-              cast<RankedTensorType>(dataValue.getType()), constOp))
-        return true;
-    }
-  }
-  return false;
+  return isUnsignedMlirElementType(dataElemType);
 }
 
 inline bool isAlreadyPackedByteTensor(RankedTensorType dataType,
@@ -285,8 +271,7 @@ bool annotateGbqSemantics(Operation *gbq, OpBuilder &builder) {
 
   bool changed = false;
   const bool unsignedStorage = gbq::resolveUnsignedQuantStorage(
-      bits, gbq->hasAttr("unsigned_quant_storage"), dataType.getElementType(),
-      gbq->getOperand(0));
+      bits, gbq->hasAttr("unsigned_quant_storage"), dataType.getElementType());
   if (unsignedStorage) {
     if (!gbq->hasAttr("unsigned_quant_storage")) {
       gbq->setAttr("unsigned_quant_storage",
@@ -451,8 +436,7 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
         op, "could not resolve `quantize_axis` from GBQ data/scales shapes");
 
   bool unsignedQuantStorage = gbq::resolveUnsignedQuantStorage(
-      bits, op->hasAttr("unsigned_quant_storage"), dataType.getElementType(),
-      data);
+      bits, op->hasAttr("unsigned_quant_storage"), dataType.getElementType());
 
   auto bitsAttr = rewriter.getI64IntegerAttr(bits);
   auto blockSizeAttr = rewriter.getI64IntegerAttr(blockSize);

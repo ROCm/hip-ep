@@ -39,12 +39,9 @@ mlir::Type onnxElementTypeToMlirElementType(int element_type,
     return builder.getF16Type();
   case 11: // TensorProto_DataType_DOUBLE
     return builder.getF64Type();
-  case 21: // TensorProto_DataType_UINT4 — byte-packed; ui8 on external
-           // tensors so GBQ legalize and hip-ep can detect unsigned storage.
-           // Inline dense constants still use signless i8 via
-           // onnxElementTypeToMlirDenseElementType.
+  case 21: // TensorProto_DataType_UINT4
     return builder.getIntegerType(8, false);
-  case 22: // TensorProto_DataType_INT4 — byte-packed (signless i8 storage)
+  case 22: // TensorProto_DataType_INT4
     return builder.getIntegerType(8);
   default:
     // TensorProto_DataType_UNDEFINED = 0,
@@ -61,13 +58,9 @@ mlir::Type onnxElementTypeToMlirElementType(int element_type,
     // TensorProto_DataType_UINT4 = 21,
     // TensorProto_DataType_INT4 = 22
     //
-    // NOTE: INT4 maps to signless i8; UINT4 external tensors use ui8 so
-    // hip-ep convert-onnx-to-hip can infer unsigned storage from
-    // element types without relying on node-arg metadata.
-    //
-    // Unmapped types silently fall back to F32 here. This is only safe because
-    // every consumer that needs exact bytes downstream: `create_tensor`
-    // (mlir-named-attribute.cpp) is the enforcement
+    // NOTE: unmapped types silently fall back to F32 here. This is only safe
+    // because every consumer that needs exact bytes re-validates the width
+    // downstream: `create_tensor` (mlir-named-attribute.cpp) is the enforcement
     // point -- its DenseElementsAttr byte-size guard catches this F32 default
     // (4B/elem) against the real ONNX raw_data width and LOG(FATAL)s with a fix
     // hint rather than emitting a corrupted attribute. Add a real case above

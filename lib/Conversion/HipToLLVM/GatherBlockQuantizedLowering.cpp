@@ -34,7 +34,7 @@ namespace {
 //       %scl_shape,  %scl_rank=2,
 //       %out_shape,  %out_rank=2,
 //       %bits=4, %block_size=16, %gather_axis=0, %quantize_axis=1,
-//       %data_dtype=7,    ; kHipdnnDatatypeUint8 when unsigned_quant_storage
+//       %data_dtype=7,    ; HIPDNN_EP_DATATYPE_UINT8 when unsigned_quant_storage
 //       %indices_dtype=4, ; HIPDNN_EP_DATATYPE_INT64
 //       %scales_dtype=1)  ; HIPDNN_EP_DATATYPE_HALF
 //
@@ -62,10 +62,9 @@ struct GatherBlockQuantizedOpLowering
     auto outputType = cast<MemRefType>(op.getOutput().getType());
 
     int64_t dataDtype = getHipdnnDataType(dataType.getElementType());
-    const int64_t bits = op.getBits();
-    if (dataType.getElementType().isUnsignedInteger(8) || bits == 8 ||
+    if (dataType.getElementType().isUnsignedInteger(8) || op.getBits() == 8 ||
         op->hasAttr("unsigned_quant_storage"))
-      dataDtype = kHipdnnDatatypeUint8;
+      dataDtype = 7; // HIPDNN_EP_DATATYPE_UINT8
     int64_t indicesDtype = getHipdnnDataType(indicesType.getElementType());
     int64_t scalesDtype = getHipdnnDataType(scalesType.getElementType());
     if (dataDtype < 0 || indicesDtype < 0 || scalesDtype < 0)
@@ -122,7 +121,7 @@ struct GatherBlockQuantizedOpLowering
     Value scalesRank = createI64Const(scalesType.getRank());
     Value outRank = createI64Const(outputType.getRank());
 
-    Value bitsVal = createI64Const(bits);
+    Value bits = createI64Const(op.getBits());
     Value blockSize = createI64Const(op.getBlockSize());
     Value gatherAxis = createI64Const(op.getGatherAxis());
     Value quantAxis = createI64Const(op.getQuantizeAxis());
@@ -154,7 +153,7 @@ struct GatherBlockQuantizedOpLowering
     SmallVector<Value, 24> args = {
         statePtr,      dataPtr,    indicesPtr, scalesPtr,    zpPtr,
         outPtr,        dataShape,  dataRank,   indicesShape, indicesRank,
-        scalesShape,   scalesRank, outShape,   outRank,      bitsVal,
+        scalesShape,   scalesRank, outShape,   outRank,      bits,
         blockSize,     gatherAxis, quantAxis,  dataDtypeVal, indicesDtypeVal,
         scalesDtypeVal};
 
