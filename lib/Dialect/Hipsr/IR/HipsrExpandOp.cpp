@@ -13,9 +13,7 @@
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/LLVMIR/FunctionCallUtils.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
-#include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -204,9 +202,6 @@ struct ExpandLowering : ConvertOpToLLVMPattern<ExpandOp> {
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
-    MLIRContext *ctx = rewriter.getContext();
-    Type hostPtrType = LLVM::LLVMPointerType::get(ctx, 0);
-    Type devicePtrType = LLVM::LLVMPointerType::get(ctx, 1);
 
     auto inputType = dyn_cast<MemRefType>(op.getInput().getType());
     auto outputType = dyn_cast<MemRefType>(op.getInit().getType());
@@ -228,6 +223,7 @@ struct ExpandLowering : ConvertOpToLLVMPattern<ExpandOp> {
 
     Value one = createI64Const(1);
     Type i32Type = rewriter.getI32Type();
+    Type hostPtrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
     auto emitShapeArray = [&](MemRefType type, Value descriptor) -> Value {
       int64_t rank = type.getRank();
       auto arrayType =
@@ -247,44 +243,27 @@ struct ExpandLowering : ConvertOpToLLVMPattern<ExpandOp> {
       return array;
     };
 
-    Value inputPtr =
-        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc);
     Value shapePtr =
         op.getShape()
             ? extractContiguousMemRefPtr(adaptor.getShape(), rewriter, loc)
             : LLVM::ZeroOp::create(rewriter, loc, hostPtrType).getResult();
-    Value outputPtr =
-        extractContiguousMemRefPtr(adaptor.getInit(), rewriter, loc);
     Value inputShape = emitShapeArray(inputType, adaptor.getInput());
     Value outputShape = emitShapeArray(outputType, adaptor.getInit());
 
-    SmallVector<Type, 9> paramTypes = {
-        hostPtrType,   // state
-        devicePtrType, // input
-        hostPtrType,   // requested shape
-        devicePtrType, // output
-        hostPtrType,   // input shape
-        i64Type,       // input rank
-        hostPtrType,   // output shape
-        i64Type,       // output rank
-        i64Type        // data type
-    };
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapExpand, paramTypes, i32Type);
-    if (failed(funcOp)) {
+    using ExpandCall = RuntimeFunc<i32, hostPtr, devicePtr, hostPtr, devicePtr,
+                                   hostPtr, i64, hostPtr, i64, i64>;
+    auto expandFunc =
+        ExpandCall::lookupOrCreateFn(rewriter, loc, module, kWrapExpand);
+    if (failed(expandFunc)) {
+      return failure();
+    }
+    if (failed(expandFunc->call(adaptor.getCtx(), adaptor.getInput(), shapePtr,
+                                adaptor.getInit(), inputShape,
+                                inputType.getRank(), outputShape,
+                                outputType.getRank(), dataType))) {
       return failure();
     }
 
-    SmallVector<Value, 9> args = {adaptor.getCtx(),
-                                  inputPtr,
-                                  shapePtr,
-                                  outputPtr,
-                                  inputShape,
-                                  createI64Const(inputType.getRank()),
-                                  outputShape,
-                                  createI64Const(outputType.getRank()),
-                                  createI64Const(dataType)};
-    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);
     return success();
   }
