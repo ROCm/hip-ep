@@ -13,10 +13,11 @@
 #ifndef HIP_CONVERSION_ONNXTOHIPSR_UTILS_H
 #define HIP_CONVERSION_ONNXTOHIPSR_UTILS_H
 
-#include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 
 namespace mlir {
 namespace hipsr {
@@ -42,6 +43,36 @@ getHipsrContextArg(::mlir::Operation *op, ::mlir::PatternRewriter &rewriter) {
                                        "first argument is not !hipsr.context");
   }
   return ctx;
+}
+
+/// Maps a data-graph input to the matching shape-graph dependency. Function
+/// inputs are shared roots. A hipsr DPS result maps to its placeholder init.
+inline ::mlir::FailureOr<::mlir::Value>
+getPlaceholderDependency(::mlir::Value input, ::mlir::Operation *op,
+                         ::mlir::PatternRewriter &rewriter) {
+  if (::mlir::isa<::mlir::BlockArgument>(input)) {
+    return input;
+  }
+
+  auto result = ::mlir::dyn_cast<::mlir::OpResult>(input);
+  if (!result) {
+    return rewriter.notifyMatchFailure(op,
+                                       "input has no shape-graph dependency");
+  }
+  auto dpsProducer =
+      ::mlir::dyn_cast<::mlir::DestinationStyleOpInterface>(result.getOwner());
+  if (!dpsProducer || result.getOwner()->getName().getDialectNamespace() !=
+                          HipsrDialect::getDialectNamespace()) {
+    return rewriter.notifyMatchFailure(
+        op, "input is not a function argument or hipsr DPS result");
+  }
+
+  ::mlir::Value init = dpsProducer.getTiedOpOperand(result)->get();
+  if (!init.getDefiningOp<::mlir::hipsr::PlaceholderOp>()) {
+    return rewriter.notifyMatchFailure(
+        op, "hipsr DPS input producer has no placeholder init");
+  }
+  return init;
 }
 
 } // namespace hipsr

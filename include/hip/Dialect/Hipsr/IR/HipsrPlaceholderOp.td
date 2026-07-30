@@ -18,16 +18,16 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
     shape. Each DPS init must have the same type as the matching op result, so
     the placeholder uses the op's result types.
 
-    The operands mirror the consuming op's DPS inputs, including
-    `!hipsr.context` as operand 0. `type` marks the placeholder as `normal` or
-    `barrier`.
+    `!hipsr.context` is operand 0. The remaining inputs form the shape graph:
+    each is a block argument or a result of another placeholder. `type` marks
+    the placeholder as `normal` or `barrier`.
 
     The optional `shape_region` defines the placeholder result shapes. It has
     one block when present and ends with `hipsr.shape_yield`.
 
     One placeholder can have several results for one multi-output DPS op. Each
-    result must be used once as a DPS init. All results must go to the same
-    hipsr op.
+    result initializes exactly one DPS result and may also feed other
+    placeholders. All DPS init uses must go to the same hipsr op.
 
     Each placeholder is tied to one DPS op. It is not `Pure`, so CSE cannot
     merge placeholders used by different ops.
@@ -63,6 +63,12 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
   }];
 
   let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    /// Returns the hipsr DPS operation initialized by this placeholder, or
+    /// null if no such use exists.
+    ::mlir::Operation *getDpsConsumer();
+  }];
 
   let builders = [
     OpBuilder<(ins "::mlir::TypeRange":$resultTypes,

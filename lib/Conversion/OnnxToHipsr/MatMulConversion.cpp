@@ -36,6 +36,13 @@ struct MatMulToHipsr : public ::mlir::RewritePattern {
     ::mlir::Location loc = op->getLoc();
     ::mlir::Value a = op->getOperand(0);
     ::mlir::Value b = op->getOperand(1);
+    ::mlir::FailureOr<::mlir::Value> placeholderA =
+        getPlaceholderDependency(a, op, rewriter);
+    ::mlir::FailureOr<::mlir::Value> placeholderB =
+        getPlaceholderDependency(b, op, rewriter);
+    if (::mlir::failed(placeholderA) || ::mlir::failed(placeholderB)) {
+      return ::mlir::failure();
+    }
     auto resultType =
         ::mlir::dyn_cast<::mlir::RankedTensorType>(op->getResult(0).getType());
     if (!resultType) {
@@ -44,7 +51,8 @@ struct MatMulToHipsr : public ::mlir::RewritePattern {
 
     ::mlir::Value init = PlaceholderOp::create(
                              rewriter, loc, ::mlir::TypeRange{resultType}, *ctx,
-                             ::mlir::ValueRange{a, b}, PlaceholderType::Normal)
+                             ::mlir::ValueRange{*placeholderA, *placeholderB},
+                             PlaceholderType::Normal)
                              .getResult(0);
 
     auto matmulOp = MatMulOp::create(

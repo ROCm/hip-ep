@@ -5,13 +5,14 @@
 // RUN: hip-mlir-opt --split-input-file -cse %s | FileCheck %s --check-prefix=CSE
 
 // Placeholders preserve dynamic, static, and rank-0 result types. The dynamic
-// case carries one shape-region block; the others have zero blocks.
+// case carries one shape-region block and feeds a second placeholder; the
+// others have zero blocks.
 // CHECK-LABEL: func.func @tensor_forms(
 // CHECK-SAME: %[[CTX:.*]]: !hipsr.context,
 // CHECK-SAME: %[[DYNAMIC_INPUT:.*]]: tensor<?x?xf32>,
 // CHECK-SAME: %[[STATIC_INPUT:.*]]: tensor<4x8xf32>,
 // CHECK-SAME: %[[SCALAR_INPUT:.*]]: tensor<f32>)
-// CHECK-SAME: -> (tensor<?x?xf16>, tensor<4x8xi64>, tensor<f16>) {
+// CHECK-SAME: -> (tensor<?x?xf16>, tensor<?x?xf32>, tensor<4x8xi64>, tensor<f16>) {
 // CHECK-NEXT: %[[DYNAMIC_INIT:.*]] = hipsr.placeholder(%[[CTX]]) ins(%[[DYNAMIC_INPUT]] : tensor<?x?xf32>) {type = #hipsr.placeholder_type<normal>} : tensor<?x?xf16> shape_region {
 // CHECK-NEXT: ^bb0(%{{.*}}: !hipsr.context, %[[SHAPE_INPUT:.*]]: tensor<?x?xf32>):
 // CHECK-NEXT: %[[C0:.*]] = arith.constant 0 : index
@@ -20,16 +21,18 @@
 // CHECK-NEXT: hipsr.shape_yield (%[[D0]], %[[C8]]) : [f16]
 // CHECK-NEXT: }
 // CHECK-NEXT: %[[DYNAMIC_RESULT:.*]] = hipsr.cast(%[[CTX]]) ins(%[[DYNAMIC_INPUT]] : tensor<?x?xf32>) outs(%[[DYNAMIC_INIT]] : tensor<?x?xf16>) : tensor<?x?xf16>
+// CHECK-NEXT: %[[CHAINED_INIT:.*]] = hipsr.placeholder(%[[CTX]]) ins(%[[DYNAMIC_INIT]] : tensor<?x?xf16>) {type = #hipsr.placeholder_type<normal>} : tensor<?x?xf32>
+// CHECK-NEXT: %[[CHAINED_RESULT:.*]] = hipsr.cast(%[[CTX]]) ins(%[[DYNAMIC_RESULT]] : tensor<?x?xf16>) outs(%[[CHAINED_INIT]] : tensor<?x?xf32>) : tensor<?x?xf32>
 // CHECK-NEXT: %[[STATIC_INIT:.*]] = hipsr.placeholder(%[[CTX]]) ins(%[[STATIC_INPUT]] : tensor<4x8xf32>) {type = #hipsr.placeholder_type<normal>} : tensor<4x8xi64>
 // CHECK-NEXT: %[[STATIC_RESULT:.*]] = hipsr.cast(%[[CTX]]) ins(%[[STATIC_INPUT]] : tensor<4x8xf32>) outs(%[[STATIC_INIT]] : tensor<4x8xi64>) : tensor<4x8xi64>
 // CHECK-NEXT: %[[SCALAR_INIT:.*]] = hipsr.placeholder(%[[CTX]]) ins(%[[SCALAR_INPUT]] : tensor<f32>) {type = #hipsr.placeholder_type<normal>} : tensor<f16>
 // CHECK-NEXT: %[[SCALAR_RESULT:.*]] = hipsr.cast(%[[CTX]]) ins(%[[SCALAR_INPUT]] : tensor<f32>) outs(%[[SCALAR_INIT]] : tensor<f16>) : tensor<f16>
-// CHECK-NEXT: return %[[DYNAMIC_RESULT]], %[[STATIC_RESULT]], %[[SCALAR_RESULT]] : tensor<?x?xf16>, tensor<4x8xi64>, tensor<f16>
+// CHECK-NEXT: return %[[DYNAMIC_RESULT]], %[[CHAINED_RESULT]], %[[STATIC_RESULT]], %[[SCALAR_RESULT]] : tensor<?x?xf16>, tensor<?x?xf32>, tensor<4x8xi64>, tensor<f16>
 // CHECK-NEXT: }
 func.func @tensor_forms(
     %ctx: !hipsr.context, %dynamic_input: tensor<?x?xf32>,
     %static_input: tensor<4x8xf32>, %scalar_input: tensor<f32>)
-    -> (tensor<?x?xf16>, tensor<4x8xi64>, tensor<f16>) {
+    -> (tensor<?x?xf16>, tensor<?x?xf32>, tensor<4x8xi64>, tensor<f16>) {
   %dynamic_init = hipsr.placeholder(%ctx)
       ins(%dynamic_input : tensor<?x?xf32>)
       {type = #hipsr.placeholder_type<normal>} : tensor<?x?xf16>
@@ -42,6 +45,12 @@ func.func @tensor_forms(
   }
   %dynamic_result = hipsr.cast(%ctx) ins(%dynamic_input : tensor<?x?xf32>)
       outs(%dynamic_init : tensor<?x?xf16>) : tensor<?x?xf16>
+  %chained_init = hipsr.placeholder(%ctx)
+      ins(%dynamic_init : tensor<?x?xf16>)
+      {type = #hipsr.placeholder_type<normal>} : tensor<?x?xf32>
+  %chained_result = hipsr.cast(%ctx)
+      ins(%dynamic_result : tensor<?x?xf16>)
+      outs(%chained_init : tensor<?x?xf32>) : tensor<?x?xf32>
   %static_init = hipsr.placeholder(%ctx)
       ins(%static_input : tensor<4x8xf32>)
       {type = #hipsr.placeholder_type<normal>} : tensor<4x8xi64>
@@ -52,8 +61,8 @@ func.func @tensor_forms(
       {type = #hipsr.placeholder_type<normal>} : tensor<f16>
   %scalar_result = hipsr.cast(%ctx) ins(%scalar_input : tensor<f32>)
       outs(%scalar_init : tensor<f16>) : tensor<f16>
-  return %dynamic_result, %static_result, %scalar_result
-      : tensor<?x?xf16>, tensor<4x8xi64>, tensor<f16>
+  return %dynamic_result, %chained_result, %static_result, %scalar_result
+      : tensor<?x?xf16>, tensor<?x?xf32>, tensor<4x8xi64>, tensor<f16>
 }
 
 // -----

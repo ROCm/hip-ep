@@ -12,44 +12,77 @@
 using namespace mlir;
 using namespace mlir::hipsr;
 
+Operation *PlaceholderOp::getDpsConsumer() {
+  for (Value result : getResults()) {
+    for (OpOperand &use : result.getUses()) {
+      Operation *owner = use.getOwner();
+      auto dpsOp = dyn_cast<DestinationStyleOpInterface>(owner);
+      if (dpsOp && owner->getDialect() == getOperation()->getDialect() &&
+          dpsOp.isDpsInit(&use)) {
+        return owner;
+      }
+    }
+  }
+  return nullptr;
+}
+
 LogicalResult PlaceholderOp::verify() {
   if (getNumResults() == 0) {
     return emitOpError("must produce at least one tensor DPS init");
   }
 
+  if (!isa<BlockArgument>(getCtx())) {
+    return emitOpError("context must be a block argument");
+  }
+  for (auto [inputIndex, input] : llvm::enumerate(getInputs())) {
+    if (isa<BlockArgument>(input) || input.getDefiningOp<PlaceholderOp>()) {
+      continue;
+    }
+    return emitOpError("input ")
+           << inputIndex
+           << " must be a block argument or result of hipsr.placeholder";
+  }
+
   Operation *consumer = nullptr;
-  for (Value result : getResults()) {
-    if (!result.hasOneUse()) {
-      return emitOpError("requires each result to have exactly one use");
+  for (auto [resultIndex, result] : llvm::enumerate(getResults())) {
+    OpOperand *dpsInitUse = nullptr;
+    for (OpOperand &use : result.getUses()) {
+      Operation *owner = use.getOwner();
+      if (isa<PlaceholderOp>(owner)) {
+        continue;
+      }
+
+      auto dpsOp = dyn_cast<DestinationStyleOpInterface>(owner);
+      if (!dpsOp || owner->getDialect() != getOperation()->getDialect() ||
+          !dpsOp.isDpsInit(&use)) {
+        return emitOpError("requires each result use to be a placeholder input "
+                           "or a DPS init of a hipsr operation");
+      }
+      if (dpsInitUse) {
+        return emitOpError(
+            "requires each result to initialize exactly one hipsr operation");
+      }
+      dpsInitUse = &use;
+    }
+    if (!dpsInitUse) {
+      return emitOpError(
+          "requires each result to initialize exactly one hipsr operation");
     }
 
-    OpOperand &use = *result.getUses().begin();
-    Operation *owner = use.getOwner();
-    auto dpsOp = dyn_cast<DestinationStyleOpInterface>(owner);
-    if (!dpsOp || owner->getDialect() != getOperation()->getDialect() ||
-        !dpsOp.isDpsInit(&use)) {
-      return emitOpError(
-          "requires each result to be used as a DPS init of a hipsr operation");
+    Operation *owner = dpsInitUse->getOwner();
+    auto dpsOp = cast<DestinationStyleOpInterface>(owner);
+    OpResult consumerResult = dpsOp.getTiedOpResult(dpsInitUse);
+    if (result.getType() != consumerResult.getType()) {
+      return emitOpError("result ")
+             << resultIndex << " type " << result.getType()
+             << " must match consumer result type " << consumerResult.getType();
     }
+
     if (consumer && consumer != owner) {
       return emitOpError(
           "requires all results to initialize the same hipsr operation");
     }
     consumer = owner;
-  }
-
-  auto dpsConsumer = cast<DestinationStyleOpInterface>(consumer);
-  SmallVector<Value> consumerInputs = dpsConsumer.getDpsInputs();
-  if (getNumOperands() != consumerInputs.size()) {
-    return emitOpError("operand count must match consumer DPS input count; "
-                       "expected ")
-           << consumerInputs.size() << ", got " << getNumOperands();
-  }
-  for (auto [index, input] : llvm::enumerate(consumerInputs)) {
-    if (getOperand(index) != input) {
-      return emitOpError("operand ")
-             << index << " must match consumer DPS input " << index;
-    }
   }
 
   if (getBodyRegion().empty()) {

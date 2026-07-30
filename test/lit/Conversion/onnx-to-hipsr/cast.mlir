@@ -8,14 +8,19 @@
 
 // RUN: hip-mlir-opt %s -allow-unregistered-dialect -convert-onnx-to-hipsr | FileCheck %s
 
-// DPS init is a Normal placeholder. Both placeholder and op regions are empty.
-// CHECK-LABEL: func.func @cast(
+// Chained casts produce parallel data and placeholder dependencies. All shape
+// regions remain empty.
+// CHECK-LABEL: func.func @cast_chain(
 // CHECK-SAME:    %[[CTX:.*]]: !hipsr.context,
-// CHECK-SAME:    %[[IN:.*]]: tensor<?x8xf32>) -> tensor<?x8xf16> {
-// CHECK-NEXT: %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[IN]] : tensor<?x8xf32>) {type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16>
-// CHECK-NEXT: hipsr.cast(%[[CTX]]) ins(%[[IN]] : tensor<?x8xf32>) outs(%[[INIT]] : tensor<?x8xf16>) : tensor<?x8xf16>
+// CHECK-SAME:    %[[IN:.*]]: tensor<?x8xf32>) -> tensor<?x8xf32> {
+// CHECK-NEXT: %[[FIRST_INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[IN]] : tensor<?x8xf32>) {type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16>
+// CHECK-NEXT: %[[FIRST:.+]] = hipsr.cast(%[[CTX]]) ins(%[[IN]] : tensor<?x8xf32>) outs(%[[FIRST_INIT]] : tensor<?x8xf16>) : tensor<?x8xf16>
+// CHECK-NEXT: %[[SECOND_INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[FIRST_INIT]] : tensor<?x8xf16>) {type = #hipsr.placeholder_type<normal>} : tensor<?x8xf32>
+// CHECK-NEXT: %[[SECOND:.+]] = hipsr.cast(%[[CTX]]) ins(%[[FIRST]] : tensor<?x8xf16>) outs(%[[SECOND_INIT]] : tensor<?x8xf32>) : tensor<?x8xf32>
 // CHECK-NOT: shape_region
-func.func @cast(%ctx: !hipsr.context, %input: tensor<?x8xf32>) -> tensor<?x8xf16> {
+func.func @cast_chain(
+    %ctx: !hipsr.context, %input: tensor<?x8xf32>) -> tensor<?x8xf32> {
   %0 = "onnx.Cast"(%input) : (tensor<?x8xf32>) -> tensor<?x8xf16>
-  return %0 : tensor<?x8xf16>
+  %1 = "onnx.Cast"(%0) : (tensor<?x8xf16>) -> tensor<?x8xf32>
+  return %1 : tensor<?x8xf32>
 }
