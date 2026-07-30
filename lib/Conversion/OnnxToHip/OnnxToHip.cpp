@@ -764,6 +764,9 @@ void ConvertOnnxToHipPass::runOnOperation() {
     //     AveragePool decomposition's emitted Reshape feeds the next
     //     round's ReduceMean handling), so the set is applied in a
     //     fixed-point loop until quiescence rather than a single pass.
+    //   * GatherBlockQuantized INT4 legalize (packed-byte weight shapes,
+    //     unsigned_quant_storage, quantize_axis inference) on
+    //     com.microsoft.GatherBlockQuantized custom ops.
     // All patterns are value-based and require the literal constants to
     // still be inline in `onnx.Constant` `value` attributes — once the
     // constants are externalized to memref.get_global the matchers break.
@@ -806,6 +809,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
       for (int round = 0; round < kMaxRounds; ++round) {
         mlir::RewritePatternSet preLoweringPatterns(ctx);
         populateGatherShapeFoldPatterns(preLoweringPatterns, ctx);
+        populateGatherBlockQuantizedPreparePatterns(preLoweringPatterns, ctx);
         populateReshapeShapeFoldPatterns(preLoweringPatterns, ctx);
         populatePadShapeFoldPatterns(preLoweringPatterns, ctx);
         populateFastGeluFusionPatterns(preLoweringPatterns, ctx);

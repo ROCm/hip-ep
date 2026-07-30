@@ -62,10 +62,8 @@ mlir::Type onnxElementTypeToMlirElementType(int element_type,
     // TensorProto_DataType_INT4 = 22
     //
     // NOTE: INT4 maps to signless i8; UINT4 external tensors use ui8 so
-    // GatherBlockQuantized legalize can set unsigned_quant_storage without
-    // relying on node-arg element types (setValue overwrites TensorDesc and
-    // signless i8 is mis-read as ONNX INT8). DenseElementsAttr still uses
-    // signless via onnxElementTypeToMlirDenseElementType.
+    // hip-ep convert-onnx-to-hip can infer unsigned storage from
+    // element types without relying on node-arg metadata.
     //
     // Unmapped types silently fall back to F32 here. This is only safe because
     // every consumer that needs exact bytes downstream: `create_tensor`

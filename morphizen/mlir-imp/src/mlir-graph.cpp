@@ -5,7 +5,6 @@
 #include "mlir-graph.hpp"
 #include "./mlir-constants.hpp"
 #include "./mlir-context-manager.hpp"
-#include "./mlir-gbq-int4-legalize.hpp"
 #include "./mlir-graph-store.hpp"
 #include "./mlir-node-arg.hpp"
 
@@ -1192,13 +1191,6 @@ std::string MLIRGraph::save_string() const {
          "(subgraph embedded in parent op; dump module instead)";
   MY_LOG(1) << "Serializing MLIR graph to string";
 
-  // level-1-pass calls save_string before Pass::apply's post-action resolve(),
-  // so legalize here to ensure exported bytecode matches packed INT4 weights.
-  auto *mutableThis = const_cast<MLIRGraph *>(this);
-  if (auto f = func()) {
-    legalizeGatherBlockQuantizedInt4Constants(*mutableThis, f);
-  }
-
   // Get the parent module containing this function
   mlir::ModuleOp module = func()->getParentOfType<mlir::ModuleOp>();
   if (!module) {
@@ -1514,10 +1506,6 @@ int MLIRGraph::resolve(bool force) {
     // func walks nested regions transitively). Skip the FuncOp-typed check
     // here for subgraphs and proceed straight to canonicalize + re-init.
     if (!is_subgraph()) {
-      // Legalize INT4 GBQ weights before verify so tensor types match raw
-      // bytes.
-      legalizeGatherBlockQuantizedInt4Constants(*this, func());
-
       // Verify that the function is well-formed
       if (failed(mlir::verify(func()))) {
         if (ENV_PARAM(MORPHIZEN_DEBUG_MLIR_GRAPH))
