@@ -2092,6 +2092,20 @@ int wrap_group_query_attention(
       head_dim_ok && decode_geometry_ok && attention_bias == nullptr &&
       !hipdnn_device_is_wave64();
 
+  // The quantized-cache kernels live exclusively on the fused path, which is
+  // disabled above on wave64 because it is built on the RDNA-only WMMA
+  // intrinsics. A quantized cache therefore has no implementation at all on
+  // CDNA. Reject it here, naming the architecture: the generic check below
+  // would only report fused_supported=0, pointing a reader at the feature gates
+  // (causal / window / sink / bias) instead of the real reason.
+  if (kv_quantized && hipdnn_device_is_wave64()) {
+    fprintf(stderr,
+            "wrap_group_query_attention: quantized KV cache is not supported on "
+            "wave64 devices (CDNA, e.g. MI350) -- its kernels are on the WMMA "
+            "fused path, which is RDNA-only. Use an fp16 KV cache.\n");
+    return -1;
+  }
+
   // A quantized KV cache is implemented ONLY on the fused path (quant decode +
   // fp16 prefill-over-dequant), for head_dim in {64,128}. The legacy decomposed
   // pipeline reads the cache as fp16 and would misinterpret quantized bytes, so
