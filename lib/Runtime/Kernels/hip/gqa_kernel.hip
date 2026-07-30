@@ -2500,7 +2500,9 @@ gqa_flash_prefill_v5_kernel(
     const _Float16* __restrict__ Vcache,  // [B, G, max_seq, D]
     _Float16* __restrict__ O,             // [B, sq, Hq, D]
     int B_count, int Hq, int G, int sq, int skv, int max_seq, int past_len,
-    float scale, int ablate)
+    float scale, int ablate,
+    const _Float16* __restrict__ head_sink,  // [num_heads] or null
+    int num_heads, int smooth_softmax)
 {
     // ablation bitmask (perf diagnostics only; wrong numerics):
     //   bit0 skip softmax, bit1 skip valueGEMM, bit2 skip scoreGEMM,
@@ -2697,6 +2699,36 @@ gqa_flash_prefill_v5_kernel(
         __syncthreads();   // WAR: P_lds reused by next tile's softmax
     }
 
+    // ---- Attention sink: one extra term in the softmax denominator ----
+    // m_reg / l_reg are in log2 space (scores were premultiplied by
+    // scale * kLog2e above and exp2f is used for both), so m_reg == m_nat *
+    // kLog2e and the natural-units sink term exp(s - m_nat) becomes
+    // exp2(s * kLog2e - m_reg) -- the same identity the decode reduce kernel
+    // documents. Row-invariant in the D dimension, so it is folded into l once
+    // here rather than inside the D_TILES loop below.
+    //
+    // smooth_softmax with a null sink means s = 0, matching
+    // softmax_f32_to_out_kernel. A row where every key was masked keeps
+    // m_reg == -INFINITY; it must be skipped, because the exponent would
+    // otherwise be +inf and the whole row would come out zero instead of
+    // sink-only.
+    float l_final[M_TILES][8];
+    const bool apply_sink = (head_sink != nullptr) || (smooth_softmax != 0);
+    float sink_logit = 0.0f;
+    if (head_sink != nullptr)
+        sink_logit = static_cast<float>(
+            head_sink[num_heads > 0 ? (head_q % num_heads) : head_q]);
+    #pragma unroll
+    for (int mi = 0; mi < M_TILES; ++mi) {
+        #pragma unroll
+        for (int e = 0; e < 8; ++e) {
+            float l = l_reg[mi][e];
+            if (apply_sink && m_reg[mi][e] > -INFINITY)
+                l += exp2f(sink_logit * kLog2e - m_reg[mi][e]);
+            l_final[mi][e] = fmaxf(l, 1e-6f);
+        }
+    }
+
     // ---- Epilogue: O / l ----
     #pragma unroll
     for (int mi = 0; mi < M_TILES; ++mi) {
@@ -2708,8 +2740,7 @@ gqa_flash_prefill_v5_kernel(
                 const int c     = tj * 16 + wmma_lane;
                 const int q_pos = q_start + row;
                 if (q_pos < sq && c < D) {
-                    const float l_val   = fmaxf(l_reg[mi][e], 1e-6f);
-                    const float out_val = O_frag[mi][tj][e] / l_val;
+                    const float out_val = O_frag[mi][tj][e] / l_final[mi][e];
                     O[(static_cast<size_t>(batch * sq + q_pos) * Hq + head_q) * D + c] =
                         static_cast<_Float16>(out_val);
                 }
@@ -2734,7 +2765,8 @@ static inline void dispatchPrefillV5(
     int m_tiles, int bkv, int d, hipStream_t stream,
     const _Float16* Q, const _Float16* Kcache, const _Float16* Vcache,
     _Float16* O, int B, int Hq, int G, int sq, int skv, int max_seq,
-    int past_len, float scale)
+    int past_len, float scale,
+    const _Float16* head_sink, int num_heads, int smooth_softmax)
 {
     const int rows = m_tiles * 16;
     const int num_q_tiles = (sq + rows - 1) / rows;
@@ -2746,7 +2778,7 @@ static inline void dispatchPrefillV5(
         gqa_flash_prefill_v5_kernel<MT_, BKV_, D_>                              \
             <<<grid, 32, smem, stream>>>(                                       \
                 Q, Kcache, Vcache, O, B, Hq, G, sq, skv, max_seq, past_len,     \
-                scale, ablate)
+                scale, ablate, head_sink, num_heads, smooth_softmax)
 
     if (d == 64) {
         if (m_tiles == 2 && bkv == 64)      LAUNCH_V5(2, 64, 64);
@@ -2786,9 +2818,13 @@ static int tunePrefillV5Cfg(
     const int nc = prefillV5Candidates(d, cands);
     constexpr int kWarmup = 30, kRounds = 4, kIters = 30;
 
+    // Tuning launches carry no sink: it is a single fused-multiply-add per row in
+    // the epilogue, so it cannot shift which (M_TILES, BKV) wins, and leaving it
+    // out keeps tuned configs comparable with the non-sink case.
     auto launch_cfg = [&](const PrefillV5Cfg& c) {
         dispatchPrefillV5(c.m_tiles, c.bkv, d, stream, Q, Kcache, Vcache, O,
-                          B, Hq, G, sq, skv, max_seq, past_len, scale);
+                          B, Hq, G, sq, skv, max_seq, past_len, scale,
+                          nullptr, Hq, 0);
     };
 
     for (int w = 0; w < kWarmup; ++w) launch_cfg(cands[w % nc]);
@@ -3613,11 +3649,11 @@ extern "C" void hip_gqa_flash_prefill_v5_set_ablate(int mask) {
     g_v5_ablate = mask;
 }
 
-extern "C" int hip_gqa_flash_prefill_v5_v2(
+static int prefillV5Run(
     void* stream_ptr,
     const void* Q, const void* Kcache, const void* Vcache, void* O,
     int B, int Hq, int G, int sq, int skv, int d, int max_seq, int past_len,
-    float scale)
+    float scale, const void* head_sink, int num_heads, int smooth_softmax)
 {
     if (d != 64 && d != 128) return -1;
 
@@ -3626,7 +3662,10 @@ extern "C" int hip_gqa_flash_prefill_v5_v2(
     const _Float16* K_ptr = static_cast<const _Float16*>(Kcache);
     const _Float16* V_ptr = static_cast<const _Float16*>(Vcache);
     _Float16* O_ptr       = static_cast<_Float16*>(O);
+    const _Float16* sink_ptr = static_cast<const _Float16*>(head_sink);
 
+    // The sink is absent from the key on purpose: it does not change the tuned
+    // tile shape (see tunePrefillV5Cfg).
     std::string key = std::to_string(d) + "_" + std::to_string(sq) + "_" +
                       std::to_string(skv) + "_" + std::to_string(Hq) + "_" +
                       std::to_string(G);
@@ -3646,8 +3685,19 @@ extern "C" int hip_gqa_flash_prefill_v5_v2(
     }
     int m_tiles = cfg / 1000, bkv = cfg % 1000;
     dispatchPrefillV5(m_tiles, bkv, d, stream, Q_ptr, K_ptr, V_ptr, O_ptr,
-                      B, Hq, G, sq, skv, max_seq, past_len, scale);
+                      B, Hq, G, sq, skv, max_seq, past_len, scale,
+                      sink_ptr, num_heads, smooth_softmax);
     return 0;
+}
+
+extern "C" int hip_gqa_flash_prefill_v5_v2(
+    void* stream_ptr,
+    const void* Q, const void* Kcache, const void* Vcache, void* O,
+    int B, int Hq, int G, int sq, int skv, int d, int max_seq, int past_len,
+    float scale)
+{
+    return prefillV5Run(stream_ptr, Q, Kcache, Vcache, O, B, Hq, G, sq, skv, d,
+                        max_seq, past_len, scale, nullptr, Hq, 0);
 }
 
 
@@ -3714,6 +3764,33 @@ extern "C" void hip_gqa_flash_prefill_v8_set_ablate(int mask) {
 // to lift occupancy). The runtime only has to call this one symbol for any
 // eligible (fp16, causal, GQA) prefill and gets the right kernel automatically.
 // Returns -1 for unsupported head dims so the caller can fall back.
+// Wide entry: adds attention sinks (and reserves sliding-window) on top of v2.
+// v2 stays the narrow ABI so the standalone harnesses and shim headers that
+// redeclare it keep linking unchanged.
+//
+// Sinks are implemented for d == 64 (the v5 kernel) only. For any other d we
+// return -1 rather than silently ignoring the sink, so the runtime keeps routing
+// those shapes to the decomposed path, which does implement it.
+extern "C" int hip_gqa_flash_prefill_v3(
+    void* stream_ptr,
+    const void* Q, const void* Kcache, const void* Vcache, void* O,
+    int B, int Hq, int G, int sq, int skv, int d, int max_seq, int past_len,
+    float scale, int local_window_size, const void* head_sink,
+    int num_heads, int smooth_softmax)
+{
+    const bool wants_sink = (head_sink != nullptr) || (smooth_softmax != 0);
+    // Sliding window is not implemented in the flash prefill kernels yet.
+    if (local_window_size > 0) return -1;
+    if (wants_sink && d != 64) return -1;
+    if (!wants_sink) {
+        return hip_gqa_flash_prefill_v2(stream_ptr, Q, Kcache, Vcache, O, B, Hq,
+                                        G, sq, skv, d, max_seq, past_len, scale);
+    }
+    return prefillV5Run(stream_ptr, Q, Kcache, Vcache, O, B, Hq, G, sq, skv, d,
+                        max_seq, past_len, scale, head_sink, num_heads,
+                        smooth_softmax);
+}
+
 extern "C" int hip_gqa_flash_prefill_v2(
     void* stream_ptr,
     const void* Q, const void* Kcache, const void* Vcache, void* O,
