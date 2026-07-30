@@ -3664,11 +3664,14 @@ static int prefillV5Run(
     _Float16* O_ptr       = static_cast<_Float16*>(O);
     const _Float16* sink_ptr = static_cast<const _Float16*>(head_sink);
 
-    // The sink is absent from the key on purpose: it does not change the tuned
-    // tile shape (see tunePrefillV5Cfg).
+    // Neither skv nor the sink belongs in the key. skv only scales the KV loop
+    // length, uniformly across candidates, so it cannot reorder them: measured
+    // on gpt-oss-20b, M_TILES=2/BKV=32 wins at all 32 chunk skv values from 512
+    // to 16384 with an identical candidate ranking. Keying on skv re-tuned once
+    // per chunk of a chunked prefill instead of once per process. The sink is
+    // one FMA per row in the epilogue (see tunePrefillV5Cfg).
     std::string key = std::to_string(d) + "_" + std::to_string(sq) + "_" +
-                      std::to_string(skv) + "_" + std::to_string(Hq) + "_" +
-                      std::to_string(G);
+                      std::to_string(Hq) + "_" + std::to_string(G);
     int cfg;
     {
         std::lock_guard<std::mutex> lk(g_v5_cfg_mutex);
