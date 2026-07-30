@@ -47,6 +47,7 @@ inline constexpr const char *kWrapHipMemcpyAsync = "wrap_hipMemcpyAsync";
 inline constexpr const char *kWrapHipMemcpy2DAsync = "wrap_hipMemcpy2DAsync";
 inline constexpr const char *kWrapStridedCopy = "wrap_strided_copy";
 
+inline constexpr const char *kIm2d2Col = "wrap_im2d2col";
 inline constexpr const char *kMiopenConvolutionForward =
     "wrap_miopenConvolutionForward";
 inline constexpr const char *kMiopenConvolutionTranspose =

@@ -721,6 +721,13 @@ int wrap_strided_copy(RuntimeState *state, void *dst_ptr, const void *src_ptr,
 // Library Operations (MIOpen, hipBLAS)
 //===----------------------------------------------------------------------===//
 
+int wrap_im2d2col(RuntimeState *state, const void *input, int64_t data_type,
+                  int64_t C, int64_t H, int64_t W, int64_t kh, int64_t kw,
+                  int64_t pad_top, int64_t pad_bottom, int64_t pad_left,
+                  int64_t pad_right, int64_t stride_h, int64_t stride_w,
+                  int64_t dilation_h, int64_t dilation_w, void *output,
+                  int64_t out_h, int64_t out_w);
+
 // MIOpen convolution forward operation
 // Full wrapper with descriptor creation, algorithm finding, workspace
 // management. Follows opaque RuntimeState pattern - extracts handle/stream

@@ -110,6 +110,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     ReadbackScalarOp::attachInterface<
         HipReadbackBufferizableModel<ReadbackScalarOp>>(*ctx);
     ConvOp::attachInterface<HipDstBufferizableModel<ConvOp>>(*ctx);
+    Im2d2ColOp::attachInterface<HipDstBufferizableModel<Im2d2ColOp>>(*ctx);
     ConvTransposeOp::attachInterface<HipDstBufferizableModel<ConvTransposeOp>>(
         *ctx);
     MatmulOp::attachInterface<HipDstBufferizableModel<MatmulOp>>(*ctx);
