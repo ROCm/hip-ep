@@ -112,24 +112,25 @@ extern "C" int wrap_gather_block_quantized(
     return -1;
   }
 
-  // Default zero point when zero_points is omitted (ONNX spec):
-  // "If zero_points is not provided, the default value is 0 for signed
-  //  types and 2^(bits-1) for unsigned types." That gives the four-way
-  // table:
-  //   bits == 4 + int8  storage (int4)  .. 0
-  //   bits == 4 + uint8 storage (uint4)  .. 8   (= 2^(bits-1))
-  //   bits == 8 + int8  storage (int8)   .. 0
-  //   bits == 8 + uint8 storage (uint8)  .. 128 (= 2^(bits-1))
-  // The previous version hard-coded 0 for bits == 4, which silently
-  // produces values shifted by +(8 * scale) on every uint4-packed weight
-  // (canonical site: Qwen3.5 vision encoder's pos_embed.weight_Q4 — the
-  // model dequantises to roughly +0.65/+0.73 in place of the correct
-  // values, which cluster around 0).
+  // Default zero point when zero_points is omitted. Per the
+  // com.microsoft.GatherBlockQuantized spec (T1 = int4/uint4/uint8):
+  //   "If zero_points is not provided, the default value is 0 for
+  //    int4/uint4, or 2^(bits-1) for uint8."
+  // So the ONLY type that gets a non-zero default is uint8 (-> 128):
+  //   int4  (i8  storage, signed)   .. 0
+  //   uint4 (ui8 storage, unsigned) .. 0   (NOT 2^(bits-1))
+  //   uint8 (ui8 storage, unsigned) .. 128 (= 2^(bits-1))
+  // NOTE: a previous version applied 2^(bits-1) to every unsigned type,
+  // which shifted uint4-no-zero_points output by +(8 * scale). That was a
+  // misreading of the spec (it paraphrased "unsigned" for what the spec
+  // scopes to uint8 only); the correct 4-bit default is 0 regardless of
+  // signedness. Signed int4 already reaches this code as i8 storage via the
+  // frontend type mapping, so it also correctly defaults to 0.
   int default_zp;
-  if (is_signed_data) {
-    default_zp = 0;
+  if (!is_signed_data && bits == 8) {
+    default_zp = 1 << (static_cast<int>(bits) - 1); // uint8 -> 128
   } else {
-    default_zp = 1 << (static_cast<int>(bits) - 1);
+    default_zp = 0; // int4 / uint4 (and signed int8) -> 0
   }
 
   // Sub-byte storage: when bits == 4 and the data tensor element type is
