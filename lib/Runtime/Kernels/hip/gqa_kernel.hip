@@ -4023,6 +4023,12 @@ legacy_gqa_flash_decode_kernel(
 
 // FA-2 split-K decode (WMMA). Same [B,H,K_SPLITS,D+2] partials as the scalar
 // kernel, so the shared reduce (window/sink) is identical. One wave/block.
+//
+// Not dispatched: hip_gqa_flash_decode is locked to K_SPLITS=8, which pins this
+// at G*8*B one-wave blocks (64 for gpt-oss-20b) with no way to fill a wider
+// part, and it regressed gpt-oss-20b on 40 CU. Kept for reference -- the split
+// count has to become tunable (as in hip_gqa_flash_decode_v2) before it is
+// worth re-dispatching here.
 template <int D, int K_SPLITS, int HPG, int BKV>
 __global__ void __launch_bounds__(32)
 legacy_gqa_flash_decode_wmma_kernel(
@@ -4323,6 +4329,9 @@ legacy_gqa_flash_decode_reduce_kernel(
   O[(batch * H + head_q) * D + tid] = __float2half(O_sum * inv_l);
 }
 
+// Launcher: dispatches FA-2 split-K decode + reduction.
+//   workspace: float scratch of size B*H*K_SPLITS*(D+2)*4 bytes.
+//   K_SPLITS: only 8 supported in V1.
 extern "C" int hip_gqa_flash_decode(
     void* stream_ptr,
     const void* Q, const void* Kcache, const void* Vcache,
@@ -4334,6 +4343,10 @@ extern "C" int hip_gqa_flash_decode(
     int local_window_size,
     const void* head_sink,
     int use_smooth_softmax) {
+  // HPG = heads-per-group (Q heads sharing one KV head). The kernel is
+  // instantiated for HPG=4 (Llama-3.x family at d=64 and d=128) and HPG=8
+  // (gpt-oss-20b at d=64). HPG=8 with d=128 is rejected to keep template
+  // bloat bounded; no current model needs it.
   if (G <= 0 || H % G != 0) {
     fprintf(stderr, "hip_gqa_flash_decode: H=%d not divisible by G=%d\n", H, G);
     return -1;
@@ -4371,48 +4384,27 @@ extern "C" int hip_gqa_flash_decode(
   float* hP = static_cast<float*>(partials_workspace);
   const int* iSeq = static_cast<const int*>(seqlens_k);
 
-  bool use_wmma = (d == 64);
-  if (const char* e = getenv("HIPDNN_GQA_DECODE_SCALAR")) { if (atoi(e) != 0) use_wmma = false; }
-  if (const char* e = getenv("HIPDNN_GQA_DECODE_WMMA"))   { if (atoi(e) != 0) use_wmma = true; }
-
-  if (use_wmma) {
-    auto smem_bytes = [](int D_, int bkv) -> size_t {
-      const int DSTR = D_ + 2;
-      return (size_t)16 * (bkv + 1) * sizeof(float)
-           + (size_t)2 * bkv * DSTR * sizeof(_Float16)
-           + (size_t)16 * (bkv + 2) * sizeof(_Float16)
-           + (size_t)16 * 3 * sizeof(float);
-    };
-    dim3 grid_wmma((unsigned)G, (unsigned)K_SPLITS, (unsigned)B);
-    #define LAUNCH_LEGACY_DW(D_, HPG_, BKV_)                                   \
-      legacy_gqa_flash_decode_wmma_kernel<D_, 8, HPG_, BKV_>                   \
-          <<<grid_wmma, 32, smem_bytes(D_, BKV_), stream>>>(                   \
-              hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size)
-    if (hpg == 4) {
-      if (d == 128) LAUNCH_LEGACY_DW(128, 4, 32); else LAUNCH_LEGACY_DW(64, 4, 16);
-    } else { /* hpg == 8, d == 64 */
-      LAUNCH_LEGACY_DW(64, 8, 16);
-    }
-    #undef LAUNCH_LEGACY_DW
-  } else {
-    dim3 grid_main(B * G, K_SPLITS);
-    if (hpg == 4) {
-      if (d == 128) {
-        legacy_gqa_flash_decode_kernel<128, 8, 4>
-            <<<grid_main, 4 * WAVE_SIZE, 0, stream>>>(
-                hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size);
-      } else { /* d == 64 */
-        legacy_gqa_flash_decode_kernel<64, 8, 4>
-            <<<grid_main, 4 * WAVE_SIZE, 0, stream>>>(
-                hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size);
-      }
-    } else { /* hpg == 8, d == 64 */
-      legacy_gqa_flash_decode_kernel<64, 8, 8>
-          <<<grid_main, 8 * WAVE_SIZE, 0, stream>>>(
+  dim3 grid_main(B * G, K_SPLITS);
+  if (hpg == 4) {
+    if (d == 128) {
+      legacy_gqa_flash_decode_kernel<128, 8, 4>
+          <<<grid_main, 4 * WAVE_SIZE, 0, stream>>>(
+              hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size);
+    } else { /* d == 64 */
+      legacy_gqa_flash_decode_kernel<64, 8, 4>
+          <<<grid_main, 4 * WAVE_SIZE, 0, stream>>>(
               hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size);
     }
+  } else { /* hpg == 8, d == 64 (asserted above) */
+    legacy_gqa_flash_decode_kernel<64, 8, 8>
+        <<<grid_main, 8 * WAVE_SIZE, 0, stream>>>(
+            hQ, hK, hV, hP, H, G, max_seq, scale, iSeq, local_window_size);
   }
 
+  // Reduce kernel does not depend on HPG; it walks the K_SPLITS partials
+  // per (b, h_q) and merges. Grid is one block per query head, block dim D.
+  // The smooth-softmax / head_sink path is folded into the denominator here
+  // (not the partials), since the sink only affects the final L term.
   dim3 grid_reduce(B * H);
   const __half* hSink = static_cast<const __half*>(head_sink);
   if (d == 128) {
