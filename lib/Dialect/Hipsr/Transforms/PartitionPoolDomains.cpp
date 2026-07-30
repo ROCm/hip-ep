@@ -13,7 +13,6 @@
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Transforms/RegionUtils.h"
 
-#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
@@ -145,6 +144,8 @@ static LogicalResult validatePartitionInput(Block &block) {
 static void computeDomainResults(Domain &domain, Block &parentBlock) {
   llvm::SmallPtrSet<Operation *, 16> domainOperations(domain.operations.begin(),
                                                       domain.operations.end());
+  // Placeholder operands mirror their consumers' inputs. Treat those uses as
+  // internal when the consumer belongs to this domain.
   for (Operation *operation : domain.operations) {
     if (!isHipsrDpsOp(*operation)) {
       continue;
@@ -165,66 +166,6 @@ static void computeDomainResults(Domain &domain, Block &parentBlock) {
       });
       if (escapes) {
         domain.results.push_back(result);
-      }
-    }
-  }
-}
-
-static OpResult getConsumerResult(PlaceholderOp placeholder,
-                                  Value placeholderResult) {
-  Operation *consumer = placeholder.getDpsConsumer();
-  auto dpsConsumer = cast<DestinationStyleOpInterface>(consumer);
-  for (OpOperand &use : placeholderResult.getUses()) {
-    if (use.getOwner() == consumer && dpsConsumer.isDpsInit(&use)) {
-      return dpsConsumer.getTiedOpResult(&use);
-    }
-  }
-  llvm_unreachable("verified placeholder has no DPS init use");
-}
-
-// A placeholder edge that crosses a domain boundary becomes a block argument
-// backed by the matching data result:
-//
-// Before: %prev = hipsr.cast ... outs(%prev_init)
-//         %next_init = hipsr.placeholder ... ins(%prev_init)
-// After:  %prev = hipsr.cast ... outs(%prev_init)
-//         %next_init = hipsr.placeholder ... ins(%prev)
-//
-// makeRegionIsolatedFromAbove then replaces %prev with the destination
-// domain's block argument.
-static void
-redirectCrossDomainShapeDependencies(MutableArrayRef<Domain> domains) {
-  llvm::DenseMap<Operation *, Domain *> operationDomains;
-  for (Domain &domain : domains) {
-    for (Operation *operation : domain.operations) {
-      operationDomains.insert({operation, &domain});
-    }
-  }
-
-  llvm::SmallPtrSet<Operation *, 16> visitedPlaceholders;
-  for (Domain &domain : domains) {
-    for (Operation *operation : domain.operations) {
-      if (!isHipsrDpsOp(*operation)) {
-        continue;
-      }
-      auto dpsOp = cast<DestinationStyleOpInterface>(*operation);
-      for (Value init : dpsOp.getDpsInits()) {
-        auto placeholder = init.getDefiningOp<PlaceholderOp>();
-        if (!placeholder || !visitedPlaceholders.insert(placeholder).second) {
-          continue;
-        }
-
-        for (Value result : placeholder.getResults()) {
-          OpResult consumerResult = getConsumerResult(placeholder, result);
-          for (OpOperand &use : llvm::make_early_inc_range(result.getUses())) {
-            auto dependent = dyn_cast<PlaceholderOp>(use.getOwner());
-            if (!dependent || operationDomains.lookup(
-                                  dependent.getDpsConsumer()) == &domain) {
-              continue;
-            }
-            use.set(consumerResult);
-          }
-        }
       }
     }
   }
@@ -258,7 +199,6 @@ static SmallVector<Domain> partitionIntoDomains(Block &block) {
     }
   }
 
-  redirectCrossDomainShapeDependencies(domains);
   for (Domain &domain : domains) {
     computeDomainResults(domain, block);
   }
