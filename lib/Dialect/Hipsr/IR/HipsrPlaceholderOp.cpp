@@ -31,18 +31,6 @@ LogicalResult PlaceholderOp::verify() {
     return emitOpError("must produce at least one tensor DPS init");
   }
 
-  if (!isa<BlockArgument>(getCtx())) {
-    return emitOpError("context must be a block argument");
-  }
-  for (auto [inputIndex, input] : llvm::enumerate(getInputs())) {
-    if (isa<BlockArgument>(input) || input.getDefiningOp<PlaceholderOp>()) {
-      continue;
-    }
-    return emitOpError("input ")
-           << inputIndex
-           << " must be a block argument or result of hipsr.placeholder";
-  }
-
   Operation *consumer = nullptr;
   for (auto [resultIndex, result] : llvm::enumerate(getResults())) {
     OpOperand *dpsInitUse = nullptr;

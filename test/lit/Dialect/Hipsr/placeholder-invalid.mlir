@@ -184,25 +184,6 @@ func.func @nonleading_context(
 
 // -----
 
-// Placeholder inputs cannot depend directly on data-operation results.
-func.func @operation_result_input(
-    %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<4x8xf16> {
-  %producer_init = hipsr.placeholder(%ctx)
-      ins(%input : tensor<4x8xf32>)
-      {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf32>
-  %producer = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
-      outs(%producer_init : tensor<4x8xf32>) : tensor<4x8xf32>
-  // expected-error @+1 {{input 0 must be a block argument or result of hipsr.placeholder}}
-  %consumer_init = hipsr.placeholder(%ctx)
-      ins(%producer : tensor<4x8xf32>)
-      {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
-  %result = hipsr.cast(%ctx) ins(%producer : tensor<4x8xf32>)
-      outs(%consumer_init : tensor<4x8xf16>) : tensor<4x8xf16>
-  return %result : tensor<4x8xf16>
-}
-
-// -----
-
 // A placeholder shape region may have at most one block.
 func.func @two_shape_region_blocks(
     %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<4x8xf16> {

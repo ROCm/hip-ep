@@ -18,9 +18,8 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
     shape. Each DPS init must have the same type as the matching op result, so
     the placeholder uses the op's result types.
 
-    `!hipsr.context` is operand 0. The remaining inputs form the shape graph:
-    each is a block argument or a result of another placeholder. `type` marks
-    the placeholder as `normal` or `barrier`.
+    `!hipsr.context` is operand 0. The remaining inputs provide values to the
+    shape graph. `type` marks the placeholder as `normal` or `barrier`.
 
     The optional `shape_region` defines the placeholder result shapes. It has
     one block when present and ends with `hipsr.shape_yield`.
