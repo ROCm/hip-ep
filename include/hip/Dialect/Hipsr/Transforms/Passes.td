@@ -64,34 +64,31 @@ def PartitionPoolDomainsPass
     ```mlir
     func.func @graph(%ctx: !hipsr.context, %input: tensor<?x4xf32>,
         %shape: tensor<2xi64>) -> tensor<?x4xf16> {
-      %cast_init = hipsr.placeholder(
-          %ctx, %input : tensor<?x4xf32>)
+      %cast_init = hipsr.placeholder(%ctx)
+          ins(%input : tensor<?x4xf32>)
           {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
       %cast = hipsr.cast(%ctx) ins(%input : tensor<?x4xf32>)
           outs(%cast_init : tensor<?x4xf16>) : tensor<?x4xf16>
-      %ready_init = hipsr.placeholder(
-          %ctx, %cast : tensor<?x4xf16>)
+      %ready_init = hipsr.placeholder(%ctx)
+          ins(%cast : tensor<?x4xf16>)
           {type = #hipsr.placeholder_type<barrier>} : tensor<?x4xf16>
       %ready = hipsr.example_end_barrier(%ctx)
           ins(%cast : tensor<?x4xf16>)
           outs(%ready_init : tensor<?x4xf16>) : tensor<?x4xf16>
-      %add_init = hipsr.placeholder(
-          %ctx, %ready, %ready
-          : tensor<?x4xf16>, tensor<?x4xf16>)
+      %add_init = hipsr.placeholder(%ctx)
+          ins(%ready, %ready : tensor<?x4xf16>, tensor<?x4xf16>)
           {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
       %sum = hipsr.add(%ctx)
           ins(%ready, %ready : tensor<?x4xf16>, tensor<?x4xf16>)
           outs(%add_init : tensor<?x4xf16>) : tensor<?x4xf16>
-      %expand_init = hipsr.placeholder(
-          %ctx, %sum, %shape
-          : tensor<?x4xf16>, tensor<2xi64>)
+      %expand_init = hipsr.placeholder(%ctx)
+          ins(%sum, %shape : tensor<?x4xf16>, tensor<2xi64>)
           {type = #hipsr.placeholder_type<barrier>} : tensor<?x4xf16>
       %expanded = hipsr.expand(%ctx)
           ins(%sum, %shape : tensor<?x4xf16>, tensor<2xi64>)
           outs(%expand_init : tensor<?x4xf16>) : tensor<?x4xf16>
-      %result_init = hipsr.placeholder(
-          %ctx, %expanded, %expanded
-          : tensor<?x4xf16>, tensor<?x4xf16>)
+      %result_init = hipsr.placeholder(%ctx)
+          ins(%expanded, %expanded : tensor<?x4xf16>, tensor<?x4xf16>)
           {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
       %result = hipsr.add(%ctx)
           ins(%expanded, %expanded : tensor<?x4xf16>, tensor<?x4xf16>)
@@ -108,14 +105,14 @@ def PartitionPoolDomainsPass
           : !hipsr.context, tensor<?x4xf32>) {
       ^bb0(%domain_ctx: !hipsr.context,
            %domain_input: tensor<?x4xf32>):
-        %cast_init = hipsr.placeholder(
-            %domain_ctx, %domain_input : tensor<?x4xf32>)
+        %cast_init = hipsr.placeholder(%domain_ctx)
+            ins(%domain_input : tensor<?x4xf32>)
             {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
         %cast = hipsr.cast(%domain_ctx)
             ins(%domain_input : tensor<?x4xf32>)
             outs(%cast_init : tensor<?x4xf16>) : tensor<?x4xf16>
-        %ready_init = hipsr.placeholder(
-            %domain_ctx, %cast : tensor<?x4xf16>)
+        %ready_init = hipsr.placeholder(%domain_ctx)
+            ins(%cast : tensor<?x4xf16>)
             {type = #hipsr.placeholder_type<barrier>}
             : tensor<?x4xf16>
         %ready = hipsr.example_end_barrier(%domain_ctx)
@@ -127,9 +124,9 @@ def PartitionPoolDomainsPass
           : !hipsr.context, tensor<?x4xf16>) {
       ^bb0(%domain_ctx: !hipsr.context,
            %domain_input: tensor<?x4xf16>):
-        %add_init = hipsr.placeholder(
-            %domain_ctx, %domain_input, %domain_input
-            : tensor<?x4xf16>, tensor<?x4xf16>)
+        %add_init = hipsr.placeholder(%domain_ctx)
+            ins(%domain_input, %domain_input
+                : tensor<?x4xf16>, tensor<?x4xf16>)
             {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
         %sum = hipsr.add(%domain_ctx)
             ins(%domain_input, %domain_input
@@ -142,18 +139,18 @@ def PartitionPoolDomainsPass
       ^bb0(%domain_ctx: !hipsr.context,
            %domain_input: tensor<?x4xf16>,
            %domain_shape: tensor<2xi64>):
-        %expand_init = hipsr.placeholder(
-            %domain_ctx, %domain_input, %domain_shape
-            : tensor<?x4xf16>, tensor<2xi64>)
+        %expand_init = hipsr.placeholder(%domain_ctx)
+            ins(%domain_input, %domain_shape
+                : tensor<?x4xf16>, tensor<2xi64>)
             {type = #hipsr.placeholder_type<barrier>}
             : tensor<?x4xf16>
         %expanded = hipsr.expand(%domain_ctx)
             ins(%domain_input, %domain_shape
                 : tensor<?x4xf16>, tensor<2xi64>)
             outs(%expand_init : tensor<?x4xf16>) : tensor<?x4xf16>
-        %result_init = hipsr.placeholder(
-            %domain_ctx, %expanded, %expanded
-            : tensor<?x4xf16>, tensor<?x4xf16>)
+        %result_init = hipsr.placeholder(%domain_ctx)
+            ins(%expanded, %expanded
+                : tensor<?x4xf16>, tensor<?x4xf16>)
             {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
         %result = hipsr.add(%domain_ctx)
             ins(%expanded, %expanded : tensor<?x4xf16>, tensor<?x4xf16>)

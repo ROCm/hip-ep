@@ -59,8 +59,8 @@ func.func @nested_placeholder(%ctx: !hipsr.context,
     -> tensor<4x8xf16> {
   %result = scf.execute_region -> tensor<4x8xf16> {
     // expected-error @+1 {{must be top-level when partitioning pool domains}}
-    %init = hipsr.placeholder(
-        %ctx, %input : tensor<4x8xf32>)
+    %init = hipsr.placeholder(%ctx)
+        ins(%input : tensor<4x8xf32>)
         {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
     %cast = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
         outs(%init : tensor<4x8xf16>) : tensor<4x8xf16>
@@ -76,8 +76,8 @@ func.func @nested_placeholder_consumer(%ctx: !hipsr.context,
                                        %input: tensor<4x8xf32>)
     -> tensor<4x8xf16> {
   // expected-error @+1 {{requires its DPS consumer to be top-level when partitioning pool domains}}
-  %init = hipsr.placeholder(
-      %ctx, %input : tensor<4x8xf32>)
+  %init = hipsr.placeholder(%ctx)
+      ins(%input : tensor<4x8xf32>)
       {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
   %result = scf.execute_region -> tensor<4x8xf16> {
     %cast = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)

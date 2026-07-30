@@ -43,8 +43,8 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
 
     Example:
     ```mlir
-    %init = hipsr.placeholder(%ctx, %input
-        : tensor<?x?xf16>)
+    %init = hipsr.placeholder(%ctx)
+        ins(%input : tensor<?x?xf16>)
         {type = #hipsr.placeholder_type<normal>} : tensor<?x?xf16>
     ```
   }];
@@ -58,7 +58,7 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
   let regions = (region MaxSizedRegion<1>:$shape_region);
 
   let assemblyFormat = [{
-    `(` $ctx (`,` $inputs^ `:` type($inputs))? `)`
+    `(` $ctx `)` (`ins` `(` $inputs^ `:` type($inputs) `)`)?
     attr-dict `:` type($results) (`shape_region` $shape_region^)?
   }];
 
