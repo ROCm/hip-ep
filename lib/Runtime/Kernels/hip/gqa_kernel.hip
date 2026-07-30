@@ -1096,13 +1096,17 @@ static void launch_softmax_f32_to_out(
     int total_head_queries, int rows, int cols,
     int input_batch_stride, int output_batch_stride,
     const void* head_sink, int num_heads, int use_smooth_softmax) {
-  // Floor of 64 keeps the block a whole multiple of the hardware wave on both
-  // wave32 (RDNA) and wave64 (CDNA/MI350): a 32-thread block would be a partial
-  // wave on wave64 and corrupt the __shfl_xor reduction across inactive lanes.
-  int threads = 64;
+  // The block must be a whole multiple of the hardware wave, else the tail of a
+  // partial wave is inactive and the __shfl_xor reduction folds in its lanes.
+  // The floor is therefore the device wave size: 32 on wave32 (RDNA, unchanged
+  // from the original geometry) and 64 on wave64 (CDNA/MI350). num_waves must
+  // use the same value so the LDS fan-in buffer matches the kernel's
+  // blockDim.x / WAVE_SIZE.
+  const int wave = hipdnn_device_wave_size();
+  int threads = wave;
   while (threads < std::min(rows, 256)) threads *= 2;
   if (threads > 256) threads = 256;
-  int num_waves = threads / WAVE_SIZE;
+  int num_waves = threads / wave;
   softmax_f32_to_out_kernel<TOut><<<total_head_queries, threads,
                                     num_waves * sizeof(float), stream>>>(
       static_cast<const float*>(input_f32), static_cast<TOut*>(output),
@@ -1148,12 +1152,12 @@ extern "C" int hip_gqa_softmax_inplace(
     int batch_stride, const void* head_sink, int num_heads,
     int use_smooth_softmax) {
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
-  // Floor of 64: see launch_softmax_f32_to_out -- avoids a partial wave on
-  // wave64 (CDNA/MI350) that would corrupt the __shfl_xor reduction.
-  int threads = 64;
+  // Block floor is the device wave size: see launch_softmax_f32_to_out.
+  const int wave = hipdnn_device_wave_size();
+  int threads = wave;
   while (threads < std::min(rows, 256)) threads *= 2;
   if (threads > 256) threads = 256;
-  int num_waves = threads / WAVE_SIZE;
+  int num_waves = threads / wave;
   (void)hipGetLastError();  // clear stale error for correct attribution
   softmax_inplace_kernel<<<total_head_queries, threads,
                            num_waves * sizeof(float), stream>>>(

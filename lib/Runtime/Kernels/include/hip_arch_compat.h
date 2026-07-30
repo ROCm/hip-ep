@@ -73,23 +73,46 @@ __device__ static inline int hipdnn_sudot4(int a, int b, int acc) {
 }
 #endif  /* __HIPCC__ */
 
-/* Host-side runtime probe: does the current device run wave64 (CDNA)?  Used by
- * the host dispatch to avoid launching WMMA kernels on CDNA, where they compile
- * to a trap. Cached after the first query. */
+/* Host-side runtime probe for the wavefront size of the *currently selected*
+ * device. Used by the host dispatch to avoid launching WMMA kernels on CDNA
+ * (where they compile to a trap) and to size blocks as whole waves.
+ *
+ * The result is cached per device ordinal rather than once per process: a host
+ * may drive several GPUs of different families (e.g. a gfx1151 APU alongside a
+ * discrete card), and a single cached answer would then be applied to the wrong
+ * device after hipSetDevice. Query failure yields 32, the RDNA/WMMA-capable
+ * default, so dispatch decisions stay as they were before CDNA support. */
 #ifdef __cplusplus
 #include <hip/hip_runtime.h>
-static inline bool hipdnn_device_is_wave64() {
-  static int cached = -1;
-  if (cached < 0) {
-    int dev = 0;
-    hipGetDevice(&dev);
+static inline int hipdnn_device_wave_size() {
+  constexpr int kMaxCachedDevices = 16;
+  // Zero-initialized (0 == not probed yet), so no thread-safe-statics guard is
+  // emitted; concurrent probes race only to write the same value.
+  static int cached[kMaxCachedDevices] = {};
+
+  auto probe = [](int d) {
     hipDeviceProp_t p;
-    if (hipGetDeviceProperties(&p, dev) == hipSuccess)
-      cached = (p.warpSize >= 64) ? 1 : 0;
-    else
-      cached = 0;  // assume wave32/WMMA-capable on query failure (RDNA default)
+    return (hipGetDeviceProperties(&p, d) == hipSuccess && p.warpSize >= 64)
+               ? 64
+               : 32;
+  };
+
+  int dev = 0;
+  if (hipGetDevice(&dev) != hipSuccess || dev < 0)
+    return 32;
+  if (dev >= kMaxCachedDevices)
+    return probe(dev);
+
+  int w = cached[dev];
+  if (w == 0) {
+    w = probe(dev);
+    cached[dev] = w;
   }
-  return cached == 1;
+  return w;
+}
+
+static inline bool hipdnn_device_is_wave64() {
+  return hipdnn_device_wave_size() >= 64;
 }
 #endif
 
