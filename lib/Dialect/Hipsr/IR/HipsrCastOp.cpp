@@ -99,11 +99,8 @@ struct CastLowering : ConvertOpToLLVMPattern<CastOp> {
     if (failed(castFunc)) {
       return failure();
     }
-    if (failed(castFunc->call(adaptor.getCtx(), adaptor.getInput(),
-                              adaptor.getInit(), numElements, srcDataType,
-                              dstDataType))) {
-      return failure();
-    }
+    castFunc->call(adaptor.getCtx(), adaptor.getInput(), adaptor.getInit(),
+                   numElements, srcDataType, dstDataType);
     rewriter.eraseOp(op);
     return success();
   }

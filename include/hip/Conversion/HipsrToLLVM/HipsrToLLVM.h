@@ -169,9 +169,8 @@ public:
     return RuntimeFunc(*funcOp, rewriter, loc);
   }
 
-  template <typename... Args> LogicalResult call(Args &&...args) {
+  template <typename... Args> void call(Args &&...args) {
     createCall(std::forward<Args>(args)...);
-    return success();
   }
 
   template <typename... Args> Value callWithResult(Args &&...args) {
