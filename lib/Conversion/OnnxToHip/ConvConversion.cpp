@@ -4,6 +4,8 @@
  */
 
 #include "OnnxToHipUtils.h"
+#include <mlir/Dialect/Tensor/IR/Tensor.h>
+#include <mlir/IR/BuiltinAttributeInterfaces.h>
 
 namespace mlir {
 namespace hip {
@@ -321,11 +323,145 @@ ConvToHip::matchAndRewrite(mlir::Operation *op,
   return mlir::success();
 }
 
+class ConvToGemm : public RewritePattern {
+public:
+  ConvToGemm(MLIRContext *ctx)
+      : RewritePattern("onnx.Conv", /*patternBenefit=*/1, ctx) {}
+
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override;
+};
+
+LogicalResult ConvToGemm::matchAndRewrite(Operation *op,
+                                          PatternRewriter &rewriter) const {
+  const auto inputType = cast<RankedTensorType>(op->getOperand(0).getType());
+  const int64_t inputRank = inputType.getRank();
+
+  // Only supports 2D
+  if (inputRank != 4)
+    return rewriter.notifyMatchFailure(op, "Only 2d supported");
+
+  // Not handling dynamic shapes now
+  if (llvm::any_of(llvm::seq(inputRank),
+                   [&inputType](int i) { return inputType.isDynamicDim(i); }))
+    return rewriter.notifyMatchFailure(op, "dynamic dim");
+
+  const auto inputShape = inputType.getShape();
+  int64_t N = inputShape[0];
+  int64_t C = inputShape[1];
+  int64_t H = inputShape[2];
+  int64_t W = inputShape[3];
+
+  // Only batch size 1 supported
+  if (N != 1)
+    return rewriter.notifyMatchFailure(op, "N != 1");
+
+  const int64_t spatialDims = inputRank - 2;
+  const auto resultType = cast<RankedTensorType>(op->getResult(0).getType());
+
+  SmallVector<int64_t> kernelShape;
+  if (auto attr = op->getAttrOfType<ArrayAttr>("kernel_shape")) {
+    for (auto a : attr)
+      kernelShape.push_back(cast<IntegerAttr>(a).getValue().getSExtValue());
+  }
+  int64_t kh = kernelShape[0];
+  int64_t kw = kernelShape[1];
+
+  SmallVector<int64_t> strides;
+  if (auto attr = op->getAttrOfType<ArrayAttr>("strides")) {
+    for (auto a : attr)
+      strides.push_back(cast<IntegerAttr>(a).getValue().getSExtValue());
+  } else {
+    // Default strides = 1 for each spatial dimension
+    strides.assign(spatialDims, 1);
+  }
+  int64_t stride_h = strides[0];
+  int64_t stride_w = strides[1];
+
+  llvm::SmallVector<int64_t> pads;
+  if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("pads")) {
+    for (auto a : attr)
+      pads.push_back(
+          mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
+  } else {
+    // Default pads = 0 (2 entries per spatial dim: begin + end)
+    pads.assign(spatialDims * 2, 0);
+  }
+  int64_t pad_h0 = pads[0];
+  int64_t pad_h1 = pads[1];
+  int64_t pad_w0 = pads[2];
+  int64_t pad_w1 = pads[3];
+
+  llvm::SmallVector<int64_t> dilations;
+  if (auto attr = op->getAttrOfType<mlir::ArrayAttr>("dilations")) {
+    for (auto a : attr)
+      dilations.push_back(
+          mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
+  } else {
+    // Default dilations = 1
+    dilations.assign(spatialDims, 1);
+  }
+  int64_t dil_h = dilations[0];
+  int64_t dil_w = dilations[1];
+  if (dil_h != 1 || dil_w != 1)
+    return rewriter.notifyMatchFailure(op, "dilation != 1");
+
+  int64_t group = 1;
+  if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("group"))
+    group = attr.getValue().getSExtValue();
+  if (group != 1)
+    return rewriter.notifyMatchFailure(op, "group != 1");
+
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return mlir::failure();
+  mlir::Value context = *ctxOrFailure;
+
+  int64_t H_out = (H + pad_h0 + pad_h1 - kh) / stride_h + 1;
+  int64_t W_out = (W + pad_w0 + pad_w1 - kw) / stride_w + 1;
+  auto im2colResultType = inputType.clone({C * kh * kw, H_out * W_out});
+
+  auto wgtType = cast<RankedTensorType>(op->getOperand(1).getType());
+
+  auto loc = op->getLoc();
+  Value im2colInit =
+      tensor::EmptyOp::create(rewriter, loc, im2colResultType, {});
+  auto im2colOp = hip::Im2d2ColOp::create(
+      rewriter, loc, im2colResultType, context, op->getOperand(0), im2colInit,
+      rewriter.getI64ArrayAttr(kernelShape), rewriter.getI64ArrayAttr(strides),
+      rewriter.getI64ArrayAttr(pads), rewriter.getI64ArrayAttr(dilations),
+      rewriter.getI64ArrayAttr({H_out, W_out}));
+
+  auto OC = wgtType.getShape()[0];
+  auto newWgtType = wgtType.clone({OC, C * kh * kw});
+  Value newWgtShape = arith::ConstantOp::create(
+      rewriter, loc, rewriter.getIndexTensorAttr(newWgtType.getShape()));
+  Value newWgt = tensor::ReshapeOp::create(rewriter, loc, newWgtType,
+                                           op->getOperand(1), newWgtShape);
+
+  auto gemmOutType = inputType.clone({OC, H_out * W_out});
+  auto gemmInit = tensor::EmptyOp::create(rewriter, loc, gemmOutType, {});
+  SmallVector<Value> operands = {context, newWgt, im2colOp.getResult(0)};
+  if (op->getNumOperands() > 2)
+    operands.push_back(op->getOperand(2));
+  operands.push_back(gemmInit);
+
+  auto hipGemm = hip::GemmOp::create(rewriter, loc, gemmOutType, operands);
+
+  Value finalShape = arith::ConstantOp::create(
+      rewriter, loc, rewriter.getIndexTensorAttr(resultType.getShape()));
+  auto finalReshape = tensor::ReshapeOp::create(
+      rewriter, loc, resultType, hipGemm.getResult(0), finalShape);
+  rewriter.replaceOp(op, finalReshape);
+
+  return success();
+}
+
 } // namespace
 
 void populateConvConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx) {
-  patterns.add<ConvToHip>(ctx);
+  patterns.add<ConvToGemm>(ctx);
 }
 
 } // namespace hip
