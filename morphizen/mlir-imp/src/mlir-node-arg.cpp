@@ -56,7 +56,9 @@ int mlirElementTypeToOnnxType(mlir::Type elementType) {
     int mlir_type_code = -1;
     switch (width) {
     case 4:
-      mlir_type_code = isSigned ? 21 : 22; // TensorProto_DataType_INT4 or UINT4
+      // ONNX codes: UINT4 = 21, INT4 = 22 (previously swapped, which mislabeled
+      // signed 4-bit weights as unsigned and flipped the dequant sign path).
+      mlir_type_code = isSigned ? 22 : 21; // INT4 : UINT4
       break;
     case 8:
       mlir_type_code = isSigned ? 3 : 2; // INT8 : UINT8

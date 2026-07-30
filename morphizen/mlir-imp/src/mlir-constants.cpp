@@ -39,6 +39,19 @@ mlir::Type onnxElementTypeToMlirElementType(int element_type,
     return builder.getF16Type();
   case 11: // TensorProto_DataType_DOUBLE
     return builder.getF64Type();
+  case 21: // TensorProto_DataType_UINT4
+    // No native 4-bit type in the EP: sub-byte quantized weights (e.g.
+    // GatherBlockQuantized/MatMulNBits) ride as byte tensors, two nibbles per
+    // byte. Carry the *signedness* on the byte element type so the downstream
+    // dtype mapping (getHipdnnDataType: ui8 -> UINT8) selects the unsigned
+    // dequant path (default zero-point = 2^(bits-1)). The packed-byte shape is
+    // handled separately by the initializer legalization / runtime unpack.
+    return builder.getIntegerType(8, false); // ui8
+  case 22: // TensorProto_DataType_INT4
+    // Signed 4-bit -> signless i8 (getHipdnnDataType: i8 -> INT8) so the signed
+    // dequant path (default zero-point = 0) is selected. Mapping to F32 here
+    // silently dropped the signedness and produced a +(2^(bits-1))*scale bias.
+    return builder.getIntegerType(8); // signless i8
   default:
     // TensorProto_DataType_UNDEFINED = 0,
     // TensorProto_DataType_STRING = 8,
@@ -51,8 +64,6 @@ mlir::Type onnxElementTypeToMlirElementType(int element_type,
     // TensorProto_DataType_FLOAT8E4M3FNUZ = 18,
     // TensorProto_DataType_FLOAT8E5M2 = 19,
     // TensorProto_DataType_FLOAT8E5M2FNUZ = 20,
-    // TensorProto_DataType_UINT4 = 21,
-    // TensorProto_DataType_INT4 = 22
     //
     // NOTE: unmapped types silently fall back to F32 here. This is only safe
     // because every consumer that needs exact bytes re-validates the width
