@@ -34,6 +34,7 @@ struct ConvertOnnxToHipsrPass
     populateOnnxToHipsrConstantPatterns(patterns);
     populateCastConversionPatterns(patterns, &getContext());
     populateMatMulConversionPatterns(patterns, &getContext());
+    populateExpandConversionPatterns(patterns, &getContext());
 
     // Same driver/config as convert-onnx-to-hip (greedy, ExistingOps): ONNX ops
     // are matched by name and only the ops present on entry are rewritten, so
@@ -41,8 +42,9 @@ struct ConvertOnnxToHipsrPass
     ::mlir::GreedyRewriteConfig config;
     config.setStrictness(::mlir::GreedyRewriteStrictness::ExistingOps);
     if (::mlir::failed(::mlir::applyPatternsGreedily(
-            getOperation(), std::move(patterns), config)))
+            getOperation(), std::move(patterns), config))) {
       signalPassFailure();
+    }
   }
 };
 

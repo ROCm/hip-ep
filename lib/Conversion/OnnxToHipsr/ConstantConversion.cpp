@@ -22,7 +22,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
-#include "hip/Dialect/Hipsr/IR/HipsrConstantOp.h"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/BuiltinAttributes.h"

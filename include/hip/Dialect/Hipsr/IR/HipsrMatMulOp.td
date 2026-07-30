@@ -6,11 +6,6 @@
 // Hipsr_DpsOp base class from HipsrOps.td.
 //
 
-#ifndef HIPSR_MATMUL_OP
-#define HIPSR_MATMUL_OP
-
-include "hip/Dialect/Hipsr/IR/HipsrOps.td"
-
 //===----------------------------------------------------------------------===//
 // Hipsr_MatMulOp
 //===----------------------------------------------------------------------===//
@@ -44,5 +39,3 @@ def Hipsr_MatMulOp : Hipsr_DpsOp<"matmul"> {
   // Rejects rank-0 (scalar) A/B: matmul needs at least a contraction dim.
   let hasVerifier = 1;
 }
-
-#endif // HIPSR_MATMUL_OP

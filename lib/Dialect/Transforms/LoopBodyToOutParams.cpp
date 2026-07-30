@@ -4,8 +4,8 @@
  */
 //===- LoopBodyToOutParams.cpp - Out-param ABI for outlined loop bodies ---===//
 //
-// Module pass that runs AFTER `one-shot-bufferize` and BEFORE
-// `buffer-deallocation`.
+// Module pass that runs AFTER `one-shot-bufferize` and BEFORE the pool/lowering
+// passes that consume the out-param ABI.
 //
 // Problem. `onnx-loop-outline` emits each `hip.loop` body as a private
 // `func.func` named `*_loop_body_*`. After bufferization those helpers still

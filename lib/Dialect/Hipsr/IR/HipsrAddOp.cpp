@@ -3,7 +3,8 @@
  * Licensed under the MIT License.
  */
 
-#include "hip/Dialect/Hipsr/IR/HipsrAddOp.h"
+#include "hip/Conversion/HipsrToLLVM/HipsrToLLVM.h"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "hip/Dialect/Hipsr/IR/HipsrLLVMLoweringUtils.h"
 #include "hip/Dialect/Hipsr/IR/HipsrShapeRegionInterface.h"
@@ -23,9 +24,6 @@
 
 using namespace mlir;
 using namespace mlir::hipsr;
-
-#define GET_OP_CLASSES
-#include "hip/Dialect/Hipsr/IR/HipsrAddOp.cpp.inc"
 
 namespace {
 struct AddShapeArgs : ShapeRegionArgs<AddOp> {
@@ -76,7 +74,9 @@ struct AddLowering : public ConvertOpToLLVMPattern<AddOp> {
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
-    Type ptrType = getPtrType();
+    MLIRContext *ctx = rewriter.getContext();
+    Type hostPtrType = LLVM::LLVMPointerType::get(ctx, 0);
+    Type devicePtrType = LLVM::LLVMPointerType::get(ctx, 1);
     Type i32Type = rewriter.getI32Type();
     Type i64Type = rewriter.getI64Type();
 
@@ -111,11 +111,10 @@ struct AddLowering : public ConvertOpToLLVMPattern<AddOp> {
                                       rewriter.getI64IntegerAttr(v));
     };
 
-    SmallVector<Type, 19> paramTypes = {ptrType, i32Type, ptrType, ptrType,
-                                        ptrType};
+    SmallVector<Type, 19> paramTypes = {hostPtrType, i32Type, devicePtrType,
+                                        devicePtrType, devicePtrType};
     paramTypes.append(14, i64Type);
 
-    // TODO: the runtime function should use !llvm.ptr<1> (GPU) pointers.
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kWrapMiopenOpTensor, paramTypes, i32Type);
     if (failed(funcOp)) {

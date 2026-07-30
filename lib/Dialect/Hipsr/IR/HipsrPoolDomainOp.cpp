@@ -3,11 +3,7 @@
  * Licensed under the MIT License.
  */
 
-#include "hip/Dialect/Hipsr/IR/HipsrPoolDomainOp.h"
-
-// Generated SingleBlockImplicitTerminator methods need the complete
-// PoolDomainYieldOp class from HipsrPoolDomainYieldOp.h.
-#include "hip/Dialect/Hipsr/IR/HipsrPoolDomainYieldOp.h"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "llvm/Support/ErrorHandling.h"
 
@@ -37,6 +33,3 @@ void PoolDomainOp::getSuccessorRegions(
   }
   regions.emplace_back(getOperation(), getResults());
 }
-
-#define GET_OP_CLASSES
-#include "hip/Dialect/Hipsr/IR/HipsrPoolDomainOp.cpp.inc"

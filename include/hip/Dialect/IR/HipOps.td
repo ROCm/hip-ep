@@ -312,10 +312,10 @@ def Hip_AllocOutputOp : Hip_Op<"alloc_output",
 
     Unlike hip.alloc / hip.get_pool / hip.get_host_scratch, this op intentionally
     does NOT carry an Allocate memory effect: the buffer is EP/runtime-owned (it
-    is a graph output), so buffer-deallocation must not free it and
-    hip-pool-allocs must not pool it. It DOES carry a Write effect so later
-    DCE/CSE cannot drop or merge it -- see AllocOutputOp::getEffects in
-    HipDialect.cpp for the rationale.
+    is a graph output), so hip-pool-allocs must not pool it. A custom pipeline
+    that enables ownership-based buffer deallocation must not free it either.
+    It DOES carry a Write effect so later DCE/CSE cannot drop or merge it -- see
+    AllocOutputOp::getEffects in HipDialect.cpp for the rationale.
 
     Example:
     ```mlir
@@ -2712,6 +2712,45 @@ def Hip_ReduceMeanOp : Hip_DpsOp_Reduction<"reduce_mean"> {
     ```mlir
     hip.reduce_mean(%ctx) ins(%data, %axes : memref<1x128xf16, 1>, memref<i64, 1>)
                           outs(%output : memref<1x1xf16, 1>) {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$axes,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "1">:$keepdims,
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `,` $axes `:` type($data) `,` type($axes) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_ReduceL2Op : Hip_DpsOp_Reduction<"reduce_l2"> {
+  let summary = "Reduce tensor by L2 norm along axes";
+  let description = [{
+    Computes the L2 norm (Euclidean norm) of input tensor elements along the
+    specified axes: output = sqrt(sum(x^2)). Implements the ONNX ReduceL2
+    operator (opset 18+).
+
+    Uses destination-passing style: output buffer is provided as argument.
+    The sum-of-squares and sqrt are performed inside the runtime kernel
+    (`reduce_size = num_input / num_output`), so this op is tolerant of a
+    dynamic reduce axis.
+
+    When axes is not provided in ONNX, an empty tensor<0xi64> is passed.
+    Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
+    optional axes semantics while keeping all operands required.
+
+    Example:
+    ```mlir
+    hip.reduce_l2(%ctx) ins(%data, %axes : memref<128x3x256x32xf16, 1>, memref<1xi64, 1>)
+                         outs(%output : memref<128x3x256x1xf16, 1>) {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64}
     ```
   }];
 

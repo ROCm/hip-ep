@@ -77,11 +77,9 @@ inline void registerAllDialects(mlir::DialectRegistry &registry) {
   mlir::hipsr::registerConvertHipsrToLLVMInterface(registry);
   registry.insert<detail::OnnxStubDialect>();
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
-  // The ownership-based buffer-deallocation pass walks arith ops (e.g.
-  // arith.select on buffers, present in hybrid/MoE graphs). Without this
-  // external model the pass fatal-errors: "interface
-  // BufferDeallocationOpInterface promised by dialect 'arith' but never
-  // implemented".
+  // The built-in pipeline omits ownership-based buffer deallocation, but the
+  // pass remains available to custom pipelines and characterization tests.
+  // It walks arith ops (e.g. arith.select on buffers) and requires this model.
   mlir::arith::registerBufferDeallocationOpInterfaceExternalModels(registry);
   mlir::tensor::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::tensor::registerInferTypeOpInterfaceExternalModels(registry);
@@ -166,8 +164,9 @@ inline void registerAllPasses() {
     mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
       return mlir::hip::createOnnxIfOutlinePass();
     });
-    // Standard MLIR passes the production pipeline interleaves, registered so
-    // an override can name them around the hip-* passes. The registrar names
+    // Standard MLIR passes used by the production flow or supported custom/test
+    // pipelines, registered so an override can name them around the hip-*
+    // passes. The registrar names
     // differ from the textual pass names they register (e.g.
     // registerSCFToControlFlowPass registers `convert-scf-to-cf`);
     // docs/pipeline_pass_menu.md lists every textual name. Bufferization's

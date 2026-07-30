@@ -6,13 +6,6 @@
 // shape. Its terminator, hipsr.empty_yield, lives in HipsrEmptyYieldOp.td.
 //
 
-#ifndef HIPSR_EMPTY_OP
-#define HIPSR_EMPTY_OP
-
-include "hip/Dialect/Hipsr/IR/HipsrOps.td"
-include "mlir/Interfaces/ControlFlowInterfaces.td"
-include "mlir/Interfaces/SideEffectInterfaces.td"
-
 //===----------------------------------------------------------------------===//
 // Hipsr_EmptyOp
 //===----------------------------------------------------------------------===//
@@ -72,5 +65,3 @@ def Hipsr_EmptyOp : Hipsr_Op<"empty",
     ::llvm::SmallVector<::mlir::RankedTensorType> getTensorTypes();
   }];
 }
-
-#endif // HIPSR_EMPTY_OP
