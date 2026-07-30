@@ -442,8 +442,18 @@ LogicalResult ConvToGemm::matchAndRewrite(Operation *op,
   auto gemmOutType = inputType.clone({OC, H_out * W_out});
   auto gemmInit = tensor::EmptyOp::create(rewriter, loc, gemmOutType, {});
   SmallVector<Value> operands = {context, newWgt, im2colOp.getResult(0)};
-  if (op->getNumOperands() > 2)
-    operands.push_back(op->getOperand(2));
+  if (op->getNumOperands() > 2) {
+    auto bias = op->getOperand(2);
+    auto biasType = cast<RankedTensorType>(bias.getType());
+    if (biasType.getRank() == 1) {
+      auto biasDim = biasType.getDimSize(0);
+      Value biasShape = arith::ConstantOp::create(
+          rewriter, loc, rewriter.getIndexTensorAttr({biasDim, 1}));
+      bias = tensor::ReshapeOp::create(
+          rewriter, loc, biasType.clone({biasDim, 1}), bias, biasShape);
+    }
+    operands.push_back(bias);
+  }
   operands.push_back(gemmInit);
 
   auto hipGemm = hip::GemmOp::create(rewriter, loc, gemmOutType, operands);
