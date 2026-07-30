@@ -833,6 +833,14 @@ HIP_KERNEL_API int hip_gqa_flash_decode_v2(
     const void* k_scale,
     const void* v_scale);
 
+
+HIP_KERNEL_API int hip_im2d2col(void *stream, void *input, int64_t data_type,
+                                int64_t C, int64_t H, int64_t W, int64_t kh,
+                                int64_t kw, int64_t pad_top, int64_t pad_bottom,
+                                int64_t pad_left, int64_t pad_right,
+                                int64_t stride_h, int64_t stride_w,
+                                void *output, int64_t out_h, int64_t out_w);
+
 /* =========================================================================
  * Cast (Element Type Conversion)
  * =========================================================================
