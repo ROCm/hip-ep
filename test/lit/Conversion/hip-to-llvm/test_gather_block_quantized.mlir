@@ -68,6 +68,25 @@ module {
          gather_axis = 0 : i64, quantize_axis = 1 : i64}
     return
   }
+
+  // ===== Test 4: signless i8 + unsigned_quant_storage =====
+  // MorphiZen legalizes UINT4 to signless i8; lowering must pass
+  // HIPDNN_EP_DATATYPE_UINT8 (7), not signless-i8 default (5).
+
+  func.func @test_gbq_unsigned_quant_storage(%ctx: !hip.context,
+                                              %data: memref<2048x96xi8, 1>,
+                                              %indices: memref<8xi64, 1>,
+                                              %scales: memref<2048x12xf16, 1>,
+                                              %output: memref<8x96xf16, 1>) {
+    hip.gather_block_quantized(%ctx)
+        ins(%data, %indices, %scales :
+            memref<2048x96xi8, 1>, memref<8xi64, 1>, memref<2048x12xf16, 1>)
+        outs(%output : memref<8x96xf16, 1>)
+        {bits = 4 : i64, block_size = 16 : i64,
+         gather_axis = 0 : i64, quantize_axis = 1 : i64,
+         unsigned_quant_storage}
+    return
+  }
 }
 
 // CHECK-LABEL: llvm.func @test_gbq_static_with_zp
@@ -82,4 +101,10 @@ module {
 // CHECK: llvm.extractvalue %{{.*}}[3, 0]
 // output dim 0 also dynamic — same pattern.
 // CHECK: llvm.extractvalue %{{.*}}[3, 0]
+// CHECK: llvm.call @wrap_gather_block_quantized
+
+// CHECK-LABEL: llvm.func @test_gbq_unsigned_quant_storage
+// data_dtype must be HIPDNN_EP_DATATYPE_UINT8 (7), not signless-i8 default (5).
+// CHECK-DAG: llvm.mlir.constant(7 : i64) : i64
+// CHECK-NOT: llvm.mlir.constant(5 : i64) : i64
 // CHECK: llvm.call @wrap_gather_block_quantized

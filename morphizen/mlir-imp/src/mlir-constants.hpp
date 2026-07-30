@@ -139,6 +139,11 @@ inline bool isReturnOrYieldOp(mlir::Operation *op) {
 mlir::Type onnxElementTypeToMlirElementType(int element_type,
                                             mlir::OpBuilder &builder);
 
+// Element type for DenseElementsAttr / getFromRawBuffer. MLIR requires signless
+// integers (or index); map ONNX signed/unsigned integers to signless storage.
+mlir::Type onnxElementTypeToMlirDenseElementType(int element_type,
+                                                 mlir::OpBuilder &builder);
+
 // Convert an ONNX TensorProto element type + shape to an MLIR tensor type.
 //   shape == nullptr   -> mlir::UnrankedTensorType (tensor<*xT>); used for
 //                         tensors that crossed the ORT boundary with

@@ -5,6 +5,7 @@
 #include "mlir-graph.hpp"
 #include "./mlir-constants.hpp"
 #include "./mlir-context-manager.hpp"
+#include "./mlir-gbq-int4-legalize.hpp"
 #include "./mlir-graph-store.hpp"
 #include "./mlir-node-arg.hpp"
 
@@ -1091,6 +1092,25 @@ void MLIRGraph::add_constant_initialized_tensor(
   const void *data = node_arg->getData();
   size_t dataSize = node_arg->getDataSize();
 
+  // Preserve ONNX UINT8/SINT8 on external initializers so downstream GBQ
+  // legalize and hip-ep externalize can tell unsigned quant storage apart.
+  // Inline dense constants still use signless integers for DenseElementsAttr.
+  const int onnxElemType = node_arg->getElementType();
+  if (node_arg->isExternalData()) {
+    auto elemType = onnxElementTypeToMlirElementType(onnxElemType, builder);
+    if (shapedTensorType.getElementType() != elemType) {
+      shapedTensorType =
+          mlir::RankedTensorType::get(shapedTensorType.getShape(), elemType);
+    }
+  } else {
+    auto denseElemType =
+        onnxElementTypeToMlirDenseElementType(onnxElemType, builder);
+    if (shapedTensorType.getElementType() != denseElemType) {
+      shapedTensorType = mlir::RankedTensorType::get(
+          shapedTensorType.getShape(), denseElemType);
+    }
+  }
+
   mlir::OperationState state(loc, "onnx.Constant");
   state.addTypes(shapedTensorType);
 
@@ -1171,6 +1191,13 @@ std::string MLIRGraph::save_string() const {
       << "save_string is top-level only "
          "(subgraph embedded in parent op; dump module instead)";
   MY_LOG(1) << "Serializing MLIR graph to string";
+
+  // level-1-pass calls save_string before Pass::apply's post-action resolve(),
+  // so legalize here to ensure exported bytecode matches packed INT4 weights.
+  auto *mutableThis = const_cast<MLIRGraph *>(this);
+  if (auto f = func()) {
+    legalizeGatherBlockQuantizedInt4Constants(*mutableThis, f);
+  }
 
   // Get the parent module containing this function
   mlir::ModuleOp module = func()->getParentOfType<mlir::ModuleOp>();
@@ -1487,6 +1514,10 @@ int MLIRGraph::resolve(bool force) {
     // func walks nested regions transitively). Skip the FuncOp-typed check
     // here for subgraphs and proceed straight to canonicalize + re-init.
     if (!is_subgraph()) {
+      // Legalize INT4 GBQ weights before verify so tensor types match raw
+      // bytes.
+      legalizeGatherBlockQuantizedInt4Constants(*this, func());
+
       // Verify that the function is well-formed
       if (failed(mlir::verify(func()))) {
         if (ENV_PARAM(MORPHIZEN_DEBUG_MLIR_GRAPH))

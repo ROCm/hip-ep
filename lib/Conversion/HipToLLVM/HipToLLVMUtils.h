@@ -191,6 +191,11 @@ inline int64_t getHipdnnDataType(Type elemType) {
   return -1;
 }
 
+// MorphiZen legalizes ONNX UINT4 weights to signless i8 MLIR constants;
+// `unsigned_quant_storage` on hip.gather_block_quantized forces this dtype
+// instead of the signless-i8 default (HIPDNN_EP_DATATYPE_INT8).
+inline constexpr int64_t kHipdnnDatatypeUint8 = 7; // HIPDNN_EP_DATATYPE_UINT8
+
 // Tensor operation types (must match runtime enum).
 // HIPDNN_EP_TENSOR_OP_* values.
 enum class TensorOp : int64_t {
