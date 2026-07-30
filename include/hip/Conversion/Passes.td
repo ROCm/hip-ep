@@ -20,8 +20,9 @@ def ConvertOnnxToHipsrPass : Pass<"convert-onnx-to-hipsr", "mlir::ModuleOp"> {
     style with tensor types. ONNX ops are matched by name via the generic MLIR
     Operation API, so no onnx-mlir headers are required.
 
-    Converted DPS operations form a data graph, while their placeholders form
-    a parallel shape-dependency graph. Block arguments, `arith.constant`, and
+    Converted DPS operations form a data graph. Their tied placeholders form a
+    parallel shape-dependency graph in which downstream placeholders use
+    upstream placeholder results. Block arguments, `arith.constant`, and
     `hipsr.constant` results are graph roots.
 
     Shape regions remain empty for the later population pass.

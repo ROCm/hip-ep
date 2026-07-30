@@ -24,6 +24,9 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
     `arith.constant`, or `hipsr.constant`. `type` marks the placeholder as
     `normal` or `barrier`.
 
+    The shape graph is independent of DPS data inputs: downstream placeholders
+    use upstream placeholder results rather than DPS data results.
+
     The optional `shape_region` defines the placeholder result shapes. It has
     one block when present and ends with `hipsr.shape_yield`.
 

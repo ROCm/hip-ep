@@ -144,8 +144,7 @@ static LogicalResult validatePartitionInput(Block &block) {
 static void computeDomainResults(Domain &domain, Block &parentBlock) {
   llvm::SmallPtrSet<Operation *, 16> domainOperations(domain.operations.begin(),
                                                       domain.operations.end());
-  // A placeholder belongs to its DPS consumer's domain, so its uses of domain
-  // results remain internal to that domain.
+  // Treat each DPS init placeholder as part of its consumer's domain.
   for (Operation *operation : domain.operations) {
     if (!isHipsrDpsOp(*operation)) {
       continue;

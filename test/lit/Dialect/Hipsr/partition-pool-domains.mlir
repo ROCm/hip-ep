@@ -4,8 +4,8 @@
 // Every pool domain receives the function's first hipsr context argument.
 // RUN: hip-mlir-opt --split-input-file -hipsr-partition-pool-domains %s | FileCheck %s
 
-// Expand with a shape attribute stays in its domain. Placeholder dependencies
-// are function roots. Runtime Expand starts the next domain.
+// Expand with a shape attribute stays in its domain. This fixture uses function
+// arguments as shape-graph roots. Runtime Expand starts the next domain.
 // CHECK-LABEL: func.func @expand_barrier_modes(
 // CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<?x4xf32>,
 // CHECK-SAME: %[[SHAPE:.*]]: tensor<2xi64>)
