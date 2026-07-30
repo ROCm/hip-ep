@@ -79,6 +79,7 @@ set(_kernel_sources
     hip/softmax_kernel.hip
     hip/nonzero_kernel.hip
     hip/strided_copy_kernel.hip
+    hip/im2col.hip
 )
 
 # One SHARED target per arch. Each builds a fatbin with that single slice;
