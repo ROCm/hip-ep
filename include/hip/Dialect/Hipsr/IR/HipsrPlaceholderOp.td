@@ -44,22 +44,21 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
     Example:
     ```mlir
     %init = hipsr.placeholder(%ctx, %input
-        : !hipsr.context, tensor<?x?xf16>)
+        : tensor<?x?xf16>)
         {type = #hipsr.placeholder_type<normal>} : tensor<?x?xf16>
     ```
   }];
 
   let arguments = (ins
     Hipsr_ContextType:$ctx,
-    Variadic<AnyRankedTensor>:$shape_operands,
+    Variadic<AnyRankedTensor>:$inputs,
     Hipsr_PlaceholderTypeAttr:$type
   );
   let results = (outs Variadic<AnyRankedTensor>:$results);
   let regions = (region MaxSizedRegion<1>:$shape_region);
 
   let assemblyFormat = [{
-    `(` $ctx (`,` $shape_operands^)? `:` type($ctx)
-        (`,` type($shape_operands)^)? `)`
+    `(` $ctx (`,` $inputs^ `:` type($inputs))? `)`
     attr-dict `:` type($results) (`shape_region` $shape_region^)?
   }];
 
@@ -68,10 +67,10 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
   let builders = [
     OpBuilder<(ins "::mlir::TypeRange":$resultTypes,
                    "::mlir::Value":$ctx,
-                   "::mlir::ValueRange":$shapeOperands,
+                   "::mlir::ValueRange":$inputs,
                    "::mlir::hipsr::PlaceholderType":$type), [{
       $_state.addOperands(ctx);
-      $_state.addOperands(shapeOperands);
+      $_state.addOperands(inputs);
       $_state.addAttribute(
           "type", ::mlir::hipsr::PlaceholderTypeAttr::get(
                       $_builder.getContext(), type));

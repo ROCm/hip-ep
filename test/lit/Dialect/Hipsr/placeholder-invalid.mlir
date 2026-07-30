@@ -15,7 +15,7 @@ func.func @unranked_rejected(
 
 // -----
 
-// Shape operands must be ranked tensors.
+// Inputs must be ranked tensors.
 func.func @unranked_shape_operand_rejected(
     %ctx: !hipsr.context, %input: tensor<*xf32>) {
   // expected-error @+1 {{op operand #1 must be variadic of ranked tensor of any type values}}
@@ -44,7 +44,7 @@ func.func @missing_type(
     %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<4x8xf16> {
   // expected-error @+1 {{requires attribute 'type'}}
   %init = hipsr.placeholder(
-      %ctx, %input : !hipsr.context, tensor<4x8xf32>) : tensor<4x8xf16>
+      %ctx, %input : tensor<4x8xf32>) : tensor<4x8xf16>
   %result = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
       outs(%init : tensor<4x8xf16>) : tensor<4x8xf16>
   return %result : tensor<4x8xf16>
@@ -57,7 +57,7 @@ func.func @unused_placeholder(
     %ctx: !hipsr.context, %input: tensor<4x8xf32>) {
   // expected-error @+1 {{requires each result to have exactly one use}}
   %init = hipsr.placeholder(
-      %ctx, %input : !hipsr.context, tensor<4x8xf32>)
+      %ctx, %input : tensor<4x8xf32>)
       {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
   return
 }
@@ -69,7 +69,7 @@ func.func @non_dps_placeholder_use(
     %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<?x8xf16> {
   // expected-error @+1 {{requires each result to be used as a DPS init of a hipsr operation}}
   %init = hipsr.placeholder(
-      %ctx, %input : !hipsr.context, tensor<4x8xf32>)
+      %ctx, %input : tensor<4x8xf32>)
       {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
   %result = tensor.cast %init : tensor<4x8xf16> to tensor<?x8xf16>
   return %result : tensor<?x8xf16>
@@ -83,7 +83,7 @@ func.func @non_hipsr_dps_use(
     %value: f32) -> tensor<4x8xf32> {
   // expected-error @+1 {{requires each result to be used as a DPS init of a hipsr operation}}
   %init = hipsr.placeholder(
-      %ctx, %input : !hipsr.context, tensor<4x8xf32>)
+      %ctx, %input : tensor<4x8xf32>)
       {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf32>
   %result = linalg.fill ins(%value : f32)
       outs(%init : tensor<4x8xf32>) -> tensor<4x8xf32>
@@ -98,7 +98,7 @@ func.func @dps_input_placeholder(
     %init: tensor<4x8xf16>) -> tensor<4x8xf16> {
   // expected-error @+1 {{requires each result to be used as a DPS init of a hipsr operation}}
   %input = hipsr.placeholder(
-      %ctx, %source : !hipsr.context, tensor<4x8xf32>)
+      %ctx, %source : tensor<4x8xf32>)
       {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf32>
   %result = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
       outs(%init : tensor<4x8xf16>) : tensor<4x8xf16>
@@ -113,7 +113,7 @@ func.func @shared_placeholder(%ctx: !hipsr.context,
     -> (tensor<4x8xf16>, tensor<4x8xf16>) {
   // expected-error @+1 {{requires each result to have exactly one use}}
   %init = hipsr.placeholder(
-      %ctx, %input : !hipsr.context, tensor<4x8xf32>)
+      %ctx, %input : tensor<4x8xf32>)
       {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
   %first = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
       outs(%init : tensor<4x8xf16>) : tensor<4x8xf16>
@@ -130,7 +130,7 @@ func.func @split_placeholder_consumers(
     -> (tensor<4x8xf16>, tensor<4x8xf16>) {
   // expected-error @+1 {{requires all results to initialize the same hipsr operation}}
   %inits:2 = hipsr.placeholder(
-      %ctx, %input : !hipsr.context, tensor<4x8xf32>)
+      %ctx, %input : tensor<4x8xf32>)
       {type = #hipsr.placeholder_type<normal>}
       : tensor<4x8xf16>, tensor<4x8xf16>
   %first = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
@@ -142,7 +142,7 @@ func.func @split_placeholder_consumers(
 
 // -----
 
-// Placeholder operands always start with the HIPSR context.
+// Placeholder inputs always follow the HIPSR context.
 func.func @missing_context(
     %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<4x8xf16> {
   // expected-error @+1 {{expected 1 or more operands, but found 0}}
@@ -158,10 +158,10 @@ func.func @missing_context(
 // A context after a data operand does not satisfy the context-first contract.
 func.func @nonleading_context(
     %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<4x8xf16> {
-  // expected-error @+2 {{expected hipsr.context}}
-  %init = hipsr.placeholder(
-      %input, %ctx : tensor<4x8xf32>, !hipsr.context)
-      {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
+  // expected-error @+1 {{operand #0 must be Opaque hipsr execution context}}
+  %init = "hipsr.placeholder"(%input, %ctx) ({})
+      {type = #hipsr.placeholder_type<normal>}
+      : (tensor<4x8xf32>, !hipsr.context) -> tensor<4x8xf16>
   %result = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
       outs(%init : tensor<4x8xf16>) : tensor<4x8xf16>
   return %result : tensor<4x8xf16>
@@ -169,11 +169,11 @@ func.func @nonleading_context(
 
 // -----
 
-// Placeholder operands mirror the consumer's complete DPS input list.
+// Placeholder inputs mirror the consumer's data inputs.
 func.func @missing_data_input(
     %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<4x8xf16> {
   // expected-error @+1 {{operand count must match consumer DPS input count; expected 2, got 1}}
-  %init = hipsr.placeholder(%ctx : !hipsr.context)
+  %init = hipsr.placeholder(%ctx)
       {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
   %result = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
       outs(%init : tensor<4x8xf16>) : tensor<4x8xf16>
@@ -182,14 +182,14 @@ func.func @missing_data_input(
 
 // -----
 
-// Matching types are insufficient: each placeholder operand mirrors the same
+// Matching types are insufficient: each placeholder input mirrors the same
 // SSA value used by the consumer.
 func.func @wrong_data_input(
     %ctx: !hipsr.context, %input: tensor<4x8xf32>,
     %other: tensor<4x8xf32>) -> tensor<4x8xf16> {
   // expected-error @+1 {{operand 1 must match consumer DPS input 1}}
   %init = hipsr.placeholder(
-      %ctx, %other : !hipsr.context, tensor<4x8xf32>)
+      %ctx, %other : tensor<4x8xf32>)
       {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
   %result = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
       outs(%init : tensor<4x8xf16>) : tensor<4x8xf16>
@@ -203,7 +203,7 @@ func.func @two_shape_region_blocks(
     %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<4x8xf16> {
   // expected-error @+1 {{expects region #0 to have 0 or 1 blocks}}
   %init = hipsr.placeholder(
-      %ctx, %input : !hipsr.context, tensor<4x8xf32>)
+      %ctx, %input : tensor<4x8xf32>)
       {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
       shape_region {
     hipsr.shape_yield () : [f16]
@@ -222,7 +222,7 @@ func.func @shape_region_argument_count(
     %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<4x8xf16> {
   // expected-error @+1 {{shape region block argument count must match operand count; expected 2, got 1}}
   %init = hipsr.placeholder(
-      %ctx, %input : !hipsr.context, tensor<4x8xf32>)
+      %ctx, %input : tensor<4x8xf32>)
       {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
       shape_region {
   ^bb0(%shape_ctx: !hipsr.context):
@@ -240,7 +240,7 @@ func.func @wrong_shape_region_terminator(
     %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<4x8xf16> {
   // expected-error @+1 {{shape region must terminate with hipsr.shape_yield}}
   %init = hipsr.placeholder(
-      %ctx, %input : !hipsr.context, tensor<4x8xf32>)
+      %ctx, %input : tensor<4x8xf32>)
       {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
       shape_region {
   ^bb0(%shape_ctx: !hipsr.context, %shape_input: tensor<4x8xf32>):

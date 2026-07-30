@@ -14,7 +14,7 @@
 // CHECK-SAME:    %[[CTX:.*]]: !hipsr.context,
 // CHECK-SAME:    %[[A:.*]]: tensor<?x4096xf16>,
 // CHECK-SAME:    %[[B:.*]]: tensor<4096x1024xf16>) -> tensor<?x1024xf16> {
-// CHECK-NEXT:    %[[INIT:.*]] = hipsr.placeholder(%[[CTX]], %[[A]], %[[B]] : !hipsr.context, tensor<?x4096xf16>, tensor<4096x1024xf16>) {type = #hipsr.placeholder_type<normal>} : tensor<?x1024xf16>
+// CHECK-NEXT:    %[[INIT:.*]] = hipsr.placeholder(%[[CTX]], %[[A]], %[[B]] : tensor<?x4096xf16>, tensor<4096x1024xf16>) {type = #hipsr.placeholder_type<normal>} : tensor<?x1024xf16>
 // CHECK-NEXT:    hipsr.matmul(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<?x4096xf16>, tensor<4096x1024xf16>)
 // CHECK-SAME:      outs(%[[INIT]] : tensor<?x1024xf16>) : tensor<?x1024xf16>
 // CHECK-NOT:     shape_region
@@ -32,7 +32,7 @@ func.func @matmul_2d(%ctx: !hipsr.context, %a: tensor<?x4096xf16>,
 // CHECK-SAME:    %[[CTX:.*]]: !hipsr.context,
 // CHECK-SAME:    %[[A:.*]]: tensor<?x4096xf16>,
 // CHECK-SAME:    %[[B:.*]]: tensor<4096xf16>) -> tensor<?xf16> {
-// CHECK-NEXT:    %[[INIT:.*]] = hipsr.placeholder(%[[CTX]], %[[A]], %[[B]] : !hipsr.context, tensor<?x4096xf16>, tensor<4096xf16>) {type = #hipsr.placeholder_type<normal>} : tensor<?xf16>
+// CHECK-NEXT:    %[[INIT:.*]] = hipsr.placeholder(%[[CTX]], %[[A]], %[[B]] : tensor<?x4096xf16>, tensor<4096xf16>) {type = #hipsr.placeholder_type<normal>} : tensor<?xf16>
 // CHECK-NEXT:    hipsr.matmul(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<?x4096xf16>, tensor<4096xf16>)
 // CHECK-SAME:      outs(%[[INIT]] : tensor<?xf16>) : tensor<?xf16>
 // CHECK-NOT:     shape_region
