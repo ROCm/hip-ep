@@ -13,7 +13,7 @@ module {
   // Logical INT4 shape: scales[2048,12] * block_size 16 == data[2048,192].
   // External constant metadata only; raw bytes are already packed.
 
-  func.func @test_prepare_gbq_int4_logical_shape(%indices: tensor<8xi64>) -> tensor<8x192xf16> {
+  func.func @main_graph(%indices: tensor<8xi64>) -> tensor<8x192xf16> {
     %data = "onnx.Constant"() {
       location = "weights.bin",
       offset = 0 : i64,
@@ -32,7 +32,7 @@ module {
     return %out : tensor<8x192xf16>
   }
 
-  // CHECK-LABEL: func.func @test_prepare_gbq_int4_logical_shape
+  // CHECK-LABEL: func.func @main_graph
   // CHECK: "onnx.Constant"() {location = "weights.bin"
   // CHECK-SAME: } : () -> tensor<2048x96xui8>
   // CHECK: hip.gather_block_quantized
