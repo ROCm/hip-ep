@@ -168,6 +168,8 @@ void populateReduceLoweringPatterns(const LLVMTypeConverter &converter,
                                                  "reduce_sum");
   patterns.insert<ReduceOpLowering<ReduceMeanOp>>(converter, kWrapReduceMean,
                                                   "reduce_mean");
+  patterns.insert<ReduceOpLowering<ReduceL2Op>>(converter, kWrapReduceL2,
+                                                "reduce_l2");
   patterns.insert<ReduceOpLowering<ReduceMaxOp>>(converter, kWrapReduceMax,
                                                  "reduce_max");
   patterns.insert<ReduceOpLowering<ReduceMinOp>>(converter, kWrapReduceMin,
