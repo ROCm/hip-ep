@@ -72,7 +72,9 @@ struct ExpandToHipsr : public ::mlir::RewritePattern {
 
     ::mlir::Location loc = op->getLoc();
     ::mlir::Value init =
-        PlaceholderOp::create(rewriter, loc, ::mlir::TypeRange{resultType})
+        PlaceholderOp::create(rewriter, loc, ::mlir::TypeRange{resultType},
+                              *ctx, ::mlir::ValueRange{input, shape},
+                              PlaceholderType::Barrier)
             .getResult(0);
     auto expandOp =
         ExpandOp::create(rewriter, loc, ::mlir::TypeRange{resultType}, *ctx,

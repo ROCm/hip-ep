@@ -10,13 +10,20 @@
 // Hipsr_PlaceholderOp
 //===----------------------------------------------------------------------===//
 
-def Hipsr_PlaceholderOp : Hipsr_Op<"placeholder"> {
+def Hipsr_PlaceholderOp : Hipsr_Op<
+    "placeholder", [IsolatedFromAbove, SingleBlock]> {
   let summary = "Typed placeholder for hipsr DPS init operands";
   let description = [{
     Provides `outs` init values before a hipsr DPS op computes its output
     shape. Each DPS init must have the same type as the matching op result, so
-    the placeholder uses the op's result types. The shape region still computes
-    the output dimensions.
+    the placeholder uses the op's result types.
+
+    The operands mirror the consuming op's DPS inputs, including
+    `!hipsr.context` as operand 0. `type` marks the placeholder as `normal` or
+    `barrier`.
+
+    The optional `shape_region` defines the placeholder result shapes. It has
+    one block when present and ends with `hipsr.shape_yield`.
 
     One placeholder can have several results for one multi-output DPS op. Each
     result must be used once as a DPS init. All results must go to the same
@@ -36,19 +43,40 @@ def Hipsr_PlaceholderOp : Hipsr_Op<"placeholder"> {
 
     Example:
     ```mlir
-    %inits:2 = hipsr.placeholder : tensor<?x?xf16>, tensor<?xi64>
+    %init = hipsr.placeholder(%ctx, %input
+        : !hipsr.context, tensor<?x?xf16>)
+        {type = #hipsr.placeholder_type<normal>} : tensor<?x?xf16>
     ```
   }];
 
+  let arguments = (ins
+    Hipsr_ContextType:$ctx,
+    Variadic<AnyRankedTensor>:$shape_operands,
+    Hipsr_PlaceholderTypeAttr:$type
+  );
   let results = (outs Variadic<AnyRankedTensor>:$results);
+  let regions = (region MaxSizedRegion<1>:$shape_region);
 
-  let assemblyFormat = "attr-dict `:` type($results)";
+  let assemblyFormat = [{
+    `(` $ctx (`,` $shape_operands^)? `:` type($ctx)
+        (`,` type($shape_operands)^)? `)`
+    attr-dict `:` type($results) (`shape_region` $shape_region^)?
+  }];
 
   let hasVerifier = 1;
 
   let builders = [
-    OpBuilder<(ins "::mlir::TypeRange":$resultTypes), [{
+    OpBuilder<(ins "::mlir::TypeRange":$resultTypes,
+                   "::mlir::Value":$ctx,
+                   "::mlir::ValueRange":$shapeOperands,
+                   "::mlir::hipsr::PlaceholderType":$type), [{
+      $_state.addOperands(ctx);
+      $_state.addOperands(shapeOperands);
+      $_state.addAttribute(
+          "type", ::mlir::hipsr::PlaceholderTypeAttr::get(
+                      $_builder.getContext(), type));
       $_state.addTypes(resultTypes);
+      $_state.addRegion();
     }]>
   ];
 }

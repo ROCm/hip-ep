@@ -7,6 +7,8 @@
 
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 
+#include "llvm/ADT/STLExtras.h"
+
 using namespace mlir;
 using namespace mlir::hipsr;
 
@@ -34,6 +36,35 @@ LogicalResult PlaceholderOp::verify() {
           "requires all results to initialize the same hipsr operation");
     }
     consumer = owner;
+  }
+
+  auto dpsConsumer = cast<DestinationStyleOpInterface>(consumer);
+  SmallVector<Value> consumerInputs = dpsConsumer.getDpsInputs();
+  if (getNumOperands() != consumerInputs.size()) {
+    return emitOpError("operand count must match consumer DPS input count; "
+                       "expected ")
+           << consumerInputs.size() << ", got " << getNumOperands();
+  }
+  for (auto [index, input] : llvm::enumerate(consumerInputs)) {
+    if (getOperand(index) != input) {
+      return emitOpError("operand ")
+             << index << " must match consumer DPS input " << index;
+    }
+  }
+
+  if (getBodyRegion().empty()) {
+    return success();
+  }
+
+  Block &block = *getBody();
+  if (block.getNumArguments() != getNumOperands()) {
+    return emitOpError("shape region block argument count must match operand "
+                       "count; expected ")
+           << getNumOperands() << ", got " << block.getNumArguments();
+  }
+
+  if (block.empty() || !isa<ShapeYieldOp>(block.back())) {
+    return emitOpError("shape region must terminate with hipsr.shape_yield");
   }
 
   return success();

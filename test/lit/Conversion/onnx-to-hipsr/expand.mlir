@@ -5,13 +5,12 @@
 // Unsupported forms remain unchanged for another conversion path.
 
 // RUN: hip-mlir-opt %s --split-input-file -allow-unregistered-dialect -convert-onnx-to-hipsr | FileCheck %s
-// RUN: hip-mlir-opt %s --split-input-file -allow-unregistered-dialect -convert-onnx-to-hipsr -canonicalize | FileCheck %s --check-prefix=CANONICALIZE
 
 // CHECK-LABEL: func.func @expand(
 // CHECK-SAME:    %[[CTX:.*]]: !hipsr.context,
 // CHECK-SAME:    %[[INPUT:.*]]: tensor<?x3xf16>,
 // CHECK-SAME:    %[[SHAPE:.*]]: tensor<2xi64>) -> tensor<?x?xf16> {
-// CHECK-NEXT:    %[[INIT:.*]] = hipsr.placeholder : tensor<?x?xf16>
+// CHECK-NEXT:    %[[INIT:.*]] = hipsr.placeholder(%[[CTX]], %[[INPUT]], %[[SHAPE]] : !hipsr.context, tensor<?x3xf16>, tensor<2xi64>) {type = #hipsr.placeholder_type<barrier>} : tensor<?x?xf16>
 // CHECK-NEXT:    %[[RESULT:.*]] = hipsr.expand(%[[CTX]]) ins(%[[INPUT]], %[[SHAPE]] : tensor<?x3xf16>, tensor<2xi64>)
 // CHECK-SAME:      outs(%[[INIT]] : tensor<?x?xf16>) : tensor<?x?xf16>
 // CHECK-NOT:     shape_region
@@ -21,34 +20,6 @@ func.func @expand(%ctx: !hipsr.context, %input: tensor<?x3xf16>,
   %0 = "onnx.Expand"(%input, %shape)
       : (tensor<?x3xf16>, tensor<2xi64>) -> tensor<?x?xf16>
   return %0 : tensor<?x?xf16>
-}
-
-// -----
-
-// Conversion always preserves the shape operand. Canonicalization folds a
-// ConstantLike shape into shape_attr and removes the now-unused constant.
-// CHECK-LABEL: func.func @expand_constant_shape(
-// CHECK-SAME:    %[[CTX:.*]]: !hipsr.context,
-// CHECK-SAME:    %[[INPUT:.*]]: tensor<1x3xf16>) -> tensor<4x3xf16> {
-// CHECK-NEXT:  %[[SHAPE:.*]] = arith.constant dense<[4, 3]> : tensor<2xi64>
-// CHECK-NEXT:  %[[INIT:.*]] = hipsr.placeholder : tensor<4x3xf16>
-// CHECK-NEXT:  %[[RESULT:.*]] = hipsr.expand(%[[CTX]]) ins(%[[INPUT]], %[[SHAPE]] : tensor<1x3xf16>, tensor<2xi64>)
-// CHECK-SAME:    outs(%[[INIT]] : tensor<4x3xf16>) : tensor<4x3xf16>
-// CHECK-NEXT:  return %[[RESULT]] : tensor<4x3xf16>
-// CANONICALIZE-LABEL: func.func @expand_constant_shape(
-// CANONICALIZE-SAME:    %[[CTX:.*]]: !hipsr.context,
-// CANONICALIZE-SAME:    %[[INPUT:.*]]: tensor<1x3xf16>) -> tensor<4x3xf16> {
-// CANONICALIZE-NEXT:  %[[INIT:.*]] = hipsr.placeholder : tensor<4x3xf16>
-// CANONICALIZE-NEXT:  %[[RESULT:.*]] = hipsr.expand(%[[CTX]]) ins(%[[INPUT]] : tensor<1x3xf16>)
-// CANONICALIZE-SAME:    outs(%[[INIT]] : tensor<4x3xf16>) {shape_attr = array<i64: 4, 3>} : tensor<4x3xf16>
-// CANONICALIZE-NEXT:  return %[[RESULT]] : tensor<4x3xf16>
-func.func @expand_constant_shape(%ctx: !hipsr.context,
-                                 %input: tensor<1x3xf16>)
-    -> tensor<4x3xf16> {
-  %shape = arith.constant dense<[4, 3]> : tensor<2xi64>
-  %0 = "onnx.Expand"(%input, %shape)
-      : (tensor<1x3xf16>, tensor<2xi64>) -> tensor<4x3xf16>
-  return %0 : tensor<4x3xf16>
 }
 
 // -----

@@ -144,6 +144,19 @@ static LogicalResult validatePartitionInput(Block &block) {
 static void computeDomainResults(Domain &domain, Block &parentBlock) {
   llvm::SmallPtrSet<Operation *, 16> domainOperations(domain.operations.begin(),
                                                       domain.operations.end());
+  // Placeholder operands mirror their consumers' inputs. Treat those uses as
+  // internal when the consumer belongs to this domain.
+  for (Operation *operation : domain.operations) {
+    if (!isHipsrDpsOp(*operation)) {
+      continue;
+    }
+    auto dpsOp = cast<DestinationStyleOpInterface>(*operation);
+    for (Value init : dpsOp.getDpsInits()) {
+      if (auto placeholder = init.getDefiningOp<PlaceholderOp>()) {
+        domainOperations.insert(placeholder);
+      }
+    }
+  }
 
   for (Operation *operation : domain.operations) {
     for (Value result : operation->getResults()) {

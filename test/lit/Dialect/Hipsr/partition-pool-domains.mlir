@@ -7,25 +7,25 @@
 // RUN: hip-mlir-opt --split-input-file -cse -hipsr-partition-pool-domains %s | FileCheck %s
 // RUN: hip-mlir-opt --split-input-file -hipsr-partition-pool-domains -cse %s | FileCheck %s
 
-// Expand with a shape attribute stays in its domain. Runtime Expand starts the
-// next domain.
+// Expand with a shape attribute stays in its domain. Its placeholder's use of
+// the Cast result remains internal. Runtime Expand starts the next domain.
 // CHECK-LABEL: func.func @expand_barrier_modes(
 // CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<?x4xf32>,
 // CHECK-SAME: %[[SHAPE:.*]]: tensor<2xi64>)
 // CHECK-SAME: -> tensor<?x4xf16> {
 // CHECK-NEXT: %[[FIRST_DOMAIN:.*]] = hipsr.pool_domain(%[[CTX]], %[[INPUT]] : !hipsr.context, tensor<?x4xf32>) {
 // CHECK-NEXT: ^bb0(%[[FIRST_CTX:.*]]: !hipsr.context, %[[FIRST_INPUT:.*]]: tensor<?x4xf32>):
-// CHECK-NEXT: %[[CAST_INIT:.*]] = hipsr.placeholder : tensor<?x4xf16>
+// CHECK-NEXT: %[[CAST_INIT:.*]] = hipsr.placeholder(%[[FIRST_CTX]], %[[FIRST_INPUT]] : !hipsr.context, tensor<?x4xf32>) {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
 // CHECK-NEXT: %[[CAST:.*]] = hipsr.cast(%[[FIRST_CTX]]) ins(%[[FIRST_INPUT]] : tensor<?x4xf32>) outs(%[[CAST_INIT]] : tensor<?x4xf16>) : tensor<?x4xf16>
-// CHECK-NEXT: %[[SHAPE_ATTR_INIT:.*]] = hipsr.placeholder : tensor<?x4xf16>
+// CHECK-NEXT: %[[SHAPE_ATTR_INIT:.*]] = hipsr.placeholder(%[[FIRST_CTX]], %[[CAST]] : !hipsr.context, tensor<?x4xf16>) {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
 // CHECK-NEXT: %[[SHAPE_ATTR_EXPANDED:.*]] = hipsr.expand(%[[FIRST_CTX]]) ins(%[[CAST]] : tensor<?x4xf16>) outs(%[[SHAPE_ATTR_INIT]] : tensor<?x4xf16>) {shape_attr = array<i64: 1, 4>} : tensor<?x4xf16>
 // CHECK-NEXT: hipsr.pool_domain_yield %[[SHAPE_ATTR_EXPANDED]] : tensor<?x4xf16>
 // CHECK-NEXT: } -> tensor<?x4xf16>
 // CHECK-NEXT: %[[EXPAND_DOMAIN:.*]] = hipsr.pool_domain(%[[CTX]], %[[FIRST_DOMAIN]], %[[SHAPE]] : !hipsr.context, tensor<?x4xf16>, tensor<2xi64>) {
 // CHECK-NEXT: ^bb0(%[[EXPAND_CTX:.*]]: !hipsr.context, %[[EXPAND_INPUT:.*]]: tensor<?x4xf16>, %[[EXPAND_SHAPE:.*]]: tensor<2xi64>):
-// CHECK-NEXT: %[[EXPAND_INIT:.*]] = hipsr.placeholder : tensor<?x4xf16>
+// CHECK-NEXT: %[[EXPAND_INIT:.*]] = hipsr.placeholder(%[[EXPAND_CTX]], %[[EXPAND_INPUT]], %[[EXPAND_SHAPE]] : !hipsr.context, tensor<?x4xf16>, tensor<2xi64>) {type = #hipsr.placeholder_type<barrier>} : tensor<?x4xf16>
 // CHECK-NEXT: %[[EXPANDED:.*]] = hipsr.expand(%[[EXPAND_CTX]]) ins(%[[EXPAND_INPUT]], %[[EXPAND_SHAPE]] : tensor<?x4xf16>, tensor<2xi64>) outs(%[[EXPAND_INIT]] : tensor<?x4xf16>) : tensor<?x4xf16>
-// CHECK-NEXT: %[[ADD_INIT:.*]] = hipsr.placeholder : tensor<?x4xf16>
+// CHECK-NEXT: %[[ADD_INIT:.*]] = hipsr.placeholder(%[[EXPAND_CTX]], %[[EXPANDED]], %[[EXPANDED]] : !hipsr.context, tensor<?x4xf16>, tensor<?x4xf16>) {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
 // CHECK-NEXT: %[[RESULT:.*]] = hipsr.add(%[[EXPAND_CTX]]) ins(%[[EXPANDED]], %[[EXPANDED]] : tensor<?x4xf16>, tensor<?x4xf16>) outs(%[[ADD_INIT]] : tensor<?x4xf16>) : tensor<?x4xf16>
 // CHECK-NEXT: hipsr.pool_domain_yield %[[RESULT]] : tensor<?x4xf16>
 // CHECK-NEXT: } -> tensor<?x4xf16>
@@ -34,19 +34,29 @@
 func.func @expand_barrier_modes(
     %ctx: !hipsr.context, %input: tensor<?x4xf32>, %shape: tensor<2xi64>)
     -> tensor<?x4xf16> {
-  %cast_init = hipsr.placeholder : tensor<?x4xf16>
+  %cast_init = hipsr.placeholder(
+      %ctx, %input : !hipsr.context, tensor<?x4xf32>)
+      {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
   %cast = hipsr.cast(%ctx) ins(%input : tensor<?x4xf32>)
       outs(%cast_init : tensor<?x4xf16>) : tensor<?x4xf16>
-  %shape_attr_init = hipsr.placeholder : tensor<?x4xf16>
+  %shape_attr_init = hipsr.placeholder(
+      %ctx, %cast : !hipsr.context, tensor<?x4xf16>)
+      {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
   %shape_attr_expanded = hipsr.expand(%ctx)
       ins(%cast : tensor<?x4xf16>)
       outs(%shape_attr_init : tensor<?x4xf16>)
       {shape_attr = array<i64: 1, 4>} : tensor<?x4xf16>
-  %runtime_init = hipsr.placeholder : tensor<?x4xf16>
+  %runtime_init = hipsr.placeholder(
+      %ctx, %shape_attr_expanded, %shape
+      : !hipsr.context, tensor<?x4xf16>, tensor<2xi64>)
+      {type = #hipsr.placeholder_type<barrier>} : tensor<?x4xf16>
   %runtime_expanded = hipsr.expand(%ctx)
       ins(%shape_attr_expanded, %shape : tensor<?x4xf16>, tensor<2xi64>)
       outs(%runtime_init : tensor<?x4xf16>) : tensor<?x4xf16>
-  %add_init = hipsr.placeholder : tensor<?x4xf16>
+  %add_init = hipsr.placeholder(
+      %ctx, %runtime_expanded, %runtime_expanded
+      : !hipsr.context, tensor<?x4xf16>, tensor<?x4xf16>)
+      {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
   %result = hipsr.add(%ctx)
       ins(%runtime_expanded, %runtime_expanded
           : tensor<?x4xf16>, tensor<?x4xf16>)
@@ -67,7 +77,7 @@ func.func @expand_barrier_modes(
 // CHECK-NEXT: %[[SUM:.*]] = arith.addi %[[DCAPTURE]], %[[DCAPTURE]] : i32
 // CHECK-NEXT: scf.yield %[[SUM]] : i32
 // CHECK-NEXT: }
-// CHECK-NEXT: %[[INIT:.*]] = hipsr.placeholder : tensor<?x8xf16>
+// CHECK-NEXT: %[[INIT:.*]] = hipsr.placeholder(%[[DCTX]], %[[DINPUT]] : !hipsr.context, tensor<?x8xf32>) {type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16>
 // CHECK-NEXT: %[[CAST:.*]] = hipsr.cast(%[[DCTX]]) ins(%[[DINPUT]] : tensor<?x8xf32>) outs(%[[INIT]] : tensor<?x8xf16>) : tensor<?x8xf16> shape_region {
 // CHECK-NEXT: ^bb0(%[[SHAPE_INPUT:.*]]: tensor<?x8xf32>):
 // CHECK-NEXT: %[[SHAPE:.*]] = shape.shape_of %[[SHAPE_INPUT]] : tensor<?x8xf32> -> tensor<2xindex>
@@ -85,7 +95,9 @@ func.func @nested_shape_region(%ctx: !hipsr.context,
                                %input: tensor<?x8xf32>,
                                %capture: i32)
     -> (tensor<?x8xf16>, i32) {
-  %init = hipsr.placeholder : tensor<?x8xf16>
+  %init = hipsr.placeholder(
+      %ctx, %input : !hipsr.context, tensor<?x8xf32>)
+      {type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16>
   %region = scf.execute_region -> i32 {
     %sum = arith.addi %capture, %capture : i32
     scf.yield %sum : i32
