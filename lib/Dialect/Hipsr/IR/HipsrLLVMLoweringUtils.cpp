@@ -49,6 +49,32 @@ Value mlir::hipsr::extractContiguousMemRefPtr(
   return MemRefDescriptor(memrefDesc).alignedPtr(rewriter, loc);
 }
 
+Value mlir::hipsr::getMemRefDimSize(MemRefType type, unsigned dimIdx,
+                                    Value descriptor,
+                                    ConversionPatternRewriter &rewriter,
+                                    Location loc) {
+  if (type.isDynamicDim(dimIdx)) {
+    return MemRefDescriptor(descriptor).size(rewriter, loc, dimIdx);
+  }
+  return LLVM::ConstantOp::create(
+      rewriter, loc, rewriter.getI64Type(),
+      rewriter.getI64IntegerAttr(type.getDimSize(dimIdx)));
+}
+
+Value mlir::hipsr::computeNumElements(MemRefType type, Value descriptor,
+                                      ConversionPatternRewriter &rewriter,
+                                      Location loc) {
+  Type i64Type = rewriter.getI64Type();
+  Value numElements = LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                               rewriter.getI64IntegerAttr(1));
+  for (int64_t dimIdx : llvm::seq<int64_t>(type.getRank())) {
+    numElements = LLVM::MulOp::create(
+        rewriter, loc, numElements,
+        getMemRefDimSize(type, dimIdx, descriptor, rewriter, loc));
+  }
+  return numElements;
+}
+
 llvm::SmallVector<Value, 4>
 mlir::hipsr::extractShape4D(MemRefType type, Value descriptor,
                             ConversionPatternRewriter &rewriter, Location loc,
