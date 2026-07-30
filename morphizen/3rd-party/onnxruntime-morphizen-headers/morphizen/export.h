@@ -12,7 +12,12 @@
 #define MORPHIZEN_DLL_SPEC
 #endif
 #else
-#define MORPHIZEN_DLL_SPEC __attribute__((visibility("default")))
+// Empty on non-Windows: protobuf v34's generated *.pb.h emits
+//   class MORPHIZEN_DLL_SPEC [[gnu::warn_unused]] Name
+// and GCC rejects a GNU __attribute__ placed before the C++11 [[...]]
+// attribute (clang tolerates it). Default ELF visibility already exports these
+// symbols, so an empty decoration is correct and portable across GCC and clang.
+#define MORPHIZEN_DLL_SPEC
 #endif
 
 #if defined(_WIN32)

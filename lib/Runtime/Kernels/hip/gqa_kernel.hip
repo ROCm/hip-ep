@@ -15,10 +15,15 @@
 #include <unordered_map>
 
 #include "hip_custom_kernels.h"
+#include "hip_arch_compat.h"
 #include "debug_log.h"
 
 static constexpr int GQA_THREADS = 256;
-static constexpr int WAVE_SIZE = 32;  // RDNA wave32; not portable to CDNA/wave64
+// Wavefront size: 32 on RDNA (wave32), 64 on CDNA (wave64, e.g. MI350). Keyed
+// off the device-pass arch macros via hip_arch_compat.h so the shuffle-based
+// reductions and per-wave shared-memory fan-in below span the whole hardware
+// wave on both families.
+static constexpr int WAVE_SIZE = HIPDNN_WAVE_SIZE;
 static constexpr float LOG2E = 1.4426950408889634f;
 
 // Element-size dispatch helper for the pure data-movement kernels (transpose,
@@ -617,23 +622,19 @@ __global__ void causal_mask_kernel_impl(
 // Uses shared memory for parallel max-reduction and sum-reduction.
 // -------------------------------------------------------------------------
 
-// Warp-level reduction helpers (RDNA wave32)
+// Warp-level reduction helpers (wave-size portable: 32 on RDNA, 64 on CDNA)
 
 __device__ __forceinline__ float warp_reduce_max(float val) {
-  val = fmaxf(val, __shfl_xor(val, 16));
-  val = fmaxf(val, __shfl_xor(val, 8));
-  val = fmaxf(val, __shfl_xor(val, 4));
-  val = fmaxf(val, __shfl_xor(val, 2));
-  val = fmaxf(val, __shfl_xor(val, 1));
+#pragma unroll
+  for (int offset = WAVE_SIZE >> 1; offset > 0; offset >>= 1)
+    val = fmaxf(val, __shfl_xor(val, offset));
   return val;
 }
 
 __device__ __forceinline__ float warp_reduce_sum(float val) {
-  val += __shfl_xor(val, 16);
-  val += __shfl_xor(val, 8);
-  val += __shfl_xor(val, 4);
-  val += __shfl_xor(val, 2);
-  val += __shfl_xor(val, 1);
+#pragma unroll
+  for (int offset = WAVE_SIZE >> 1; offset > 0; offset >>= 1)
+    val += __shfl_xor(val, offset);
   return val;
 }
 
@@ -1095,7 +1096,10 @@ static void launch_softmax_f32_to_out(
     int total_head_queries, int rows, int cols,
     int input_batch_stride, int output_batch_stride,
     const void* head_sink, int num_heads, int use_smooth_softmax) {
-  int threads = 32;
+  // Floor of 64 keeps the block a whole multiple of the hardware wave on both
+  // wave32 (RDNA) and wave64 (CDNA/MI350): a 32-thread block would be a partial
+  // wave on wave64 and corrupt the __shfl_xor reduction across inactive lanes.
+  int threads = 64;
   while (threads < std::min(rows, 256)) threads *= 2;
   if (threads > 256) threads = 256;
   int num_waves = threads / WAVE_SIZE;
@@ -1144,7 +1148,9 @@ extern "C" int hip_gqa_softmax_inplace(
     int batch_stride, const void* head_sink, int num_heads,
     int use_smooth_softmax) {
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
-  int threads = 32;
+  // Floor of 64: see launch_softmax_f32_to_out -- avoids a partial wave on
+  // wave64 (CDNA/MI350) that would corrupt the __shfl_xor reduction.
+  int threads = 64;
   while (threads < std::min(rows, 256)) threads *= 2;
   if (threads > 256) threads = 256;
   int num_waves = threads / WAVE_SIZE;
@@ -1327,7 +1333,13 @@ gqa_flash_decode_kernel(
 
   // LDS tiles for K/V (shared across HPG=4 query heads for dedup). 16B-aligned
   // so the cooperative load can move 8 fp16 per float4 (see staging below).
-  static_assert(EPT % 2 == 0, "EPT must be even for __half2 vectorized loads");
+  // The __half2-vectorized staging below assumes an even EPT. Flash-decode is a
+  // wave32 (RDNA) path only -- it is disabled at dispatch on wave64 (see the
+  // gqa_flash_decode_enabled() gate in gqa.cpp), so this invariant only needs to
+  // hold there. On wave64 (CDNA/MI350) D=64 yields EPT=1; the kernel is then
+  // dead code that must still compile, so exempt the wave64 device pass.
+  static_assert(EPT % 2 == 0 || WAVE_SIZE != 32,
+                "EPT must be even for __half2 vectorized loads (wave32)");
   // HpG==1 (MHA) runs a single wave per block, so the K/V tile in LDS is never
   // reused across waves -- staging is pure overhead (32KB LDS + a __syncthreads
   // every tile). Stream straight from global instead (kStage=false): the LDS
@@ -1454,12 +1466,10 @@ gqa_flash_decode_kernel(
           dot_partial += Q_f[e] * kf.x + Q_f[e + 1] * kf.y;
         }
       }
-      // Warp reduce across 32 lanes -> all lanes hold the full dot.
-      dot_partial += __shfl_xor(dot_partial, 16);
-      dot_partial += __shfl_xor(dot_partial, 8);
-      dot_partial += __shfl_xor(dot_partial, 4);
-      dot_partial += __shfl_xor(dot_partial, 2);
-      dot_partial += __shfl_xor(dot_partial, 1);
+      // Warp reduce across the wave -> all lanes hold the full dot.
+#pragma unroll
+      for (int offset = WAVE_SIZE >> 1; offset > 0; offset >>= 1)
+        dot_partial += __shfl_xor(dot_partial, offset);
 
       const float score = dot_partial * scale_log2e;
       const float m_new = fmaxf(m_acc, score);
@@ -3954,11 +3964,9 @@ legacy_fused_gqa_decode_kernel(
         for (int t_off = 0; t_off < tile_n; ++t_off) {
             float dot = Q_val * __half2float(K_tile[t_off * D + tid]);
 
-            dot += __shfl_xor(dot, 16);
-            dot += __shfl_xor(dot, 8);
-            dot += __shfl_xor(dot, 4);
-            dot += __shfl_xor(dot, 2);
-            dot += __shfl_xor(dot, 1);
+#pragma unroll
+            for (int offset = WAVE_SIZE >> 1; offset > 0; offset >>= 1)
+                dot += __shfl_xor(dot, offset);
 
             if (lane_id == 0)
                 smem[wave_id] = dot;
@@ -4121,11 +4129,9 @@ legacy_gqa_flash_decode_kernel(
         dot_partial += __half2float(Q_reg[e]) *
                        __half2float(K_lds[t * D + lane_id * EPT + e]);
       }
-      dot_partial += __shfl_xor(dot_partial, 16);
-      dot_partial += __shfl_xor(dot_partial, 8);
-      dot_partial += __shfl_xor(dot_partial, 4);
-      dot_partial += __shfl_xor(dot_partial, 2);
-      dot_partial += __shfl_xor(dot_partial, 1);
+#pragma unroll
+      for (int offset = WAVE_SIZE >> 1; offset > 0; offset >>= 1)
+        dot_partial += __shfl_xor(dot_partial, offset);
 
       const float score = dot_partial * scale_log2e;
       const float m_new = fmaxf(m_acc, score);

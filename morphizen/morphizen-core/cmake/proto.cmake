@@ -38,11 +38,17 @@ if(MSVC)
     PROPERTIES COMPILE_DEFINITIONS "MORPHIZEN_DLL_SPEC=${MORPHIZEN_DLL_SPEC}"
     COMPILE_FLAGS "/w")
 else(MSVC)
+  # Leave the dllexport decoration empty on non-MSVC toolchains. protobuf v34's
+  # generated code emits `class <DLL_SPEC> [[gnu::warn_unused]] Name`; a GNU
+  # __attribute__ placed before the C++11 [[...]] attribute is rejected by GCC
+  # (only accepted by clang). On Linux the default symbol visibility already
+  # exports these proto symbols, so an empty decoration is both correct and
+  # portable across GCC and clang hosts.
   set_source_files_properties(
     ${PROTO_SRCS}
     PROPERTIES
     COMPILE_DEFINITIONS
-    "MORPHIZEN_DLL_SPEC=__attribute__((visibility(\"default\")))"
+    "MORPHIZEN_DLL_SPEC="
     COMPILE_FLAGS
     "-Wno-unused-variable -Wno-conversion")
 endif(MSVC)
