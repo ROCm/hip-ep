@@ -2,7 +2,7 @@
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Licensed under the MIT License.
 #
-"""Offline "prune logits" transform for ONNX decoder (LLM) models.
+"""Offline "prune logits" transform for ONNX decoder models.
 
 Many exported decoder models emit full-sequence logits: the lm_head runs on every
 position, producing logits of shape [batch, sequence_length, vocab]. During
@@ -10,13 +10,30 @@ autoregressive generation only the LAST token's logits are needed, so at long
 prefill this wastes a multi-GB logits buffer (+ lm_head dequant scratch) and a
 seq-wide matmul.
 
-This tool rewires the graph to the "9B-style" last-token prune, inserting a
+This tool prunes the graph to last-token logits, inserting a
 Gather(axis=1, index=-1) + Unsqueeze(axes=[1]) in front of lm_head so only the
 last position reaches it:
 
     Before:  final_norm -[B,seq,H]-> lm_head(MatMul*) -> logits [B, seq, vocab]
     After:   final_norm -[B,seq,H]-> Gather(idx=-1,axis=1) -[B,H]->
                  Unsqueeze(axes=[1]) -[B,1,H]-> lm_head -> logits [B, 1, vocab]
+
+lm_head resolution (the graph is not always the simple case above):
+
+- Common case: lm_head directly produces the `logits` output. The prune is
+  inserted on lm_head's hidden-state input, and lm_head is matched across the
+  usual variants -- plain `MatMul`, quantized `MatMulNBits`, `Gemm`,
+  `FusedMatMul` (or any node whose name contains "lm_head").
+- Trailing-node case: some exports have nodes BETWEEN lm_head and the output
+  (e.g. logit soft-cap / scaling / a final `Cast`). Then the producer of
+  `logits` is not the matmul, and pruning there would leave the matmul running
+  on the full sequence (no prefill savings). The tool detects this and refuses,
+  asking you to point at the real matmul with `--lm-head-name` so the prune
+  lands before it.
+- Opset differences are handled: `Unsqueeze` axes go in an attribute
+  (opset < 13) or an input initializer (opset >= 13).
+- Already-pruned models (logits sequence dim already 1) are detected and
+  rejected rather than double-pruned.
 
 Design / safety contract:
 

@@ -4,7 +4,7 @@ Licensed under the MIT License.
 -->
 # Prune Logits
 
-Offline transform that rewires an ONNX decoder (LLM) model so its `lm_head` runs
+Offline transform that prunes an ONNX decoder model so its `lm_head` runs
 on the **last token only**, collapsing the `logits` output from
 `[batch, sequence_length, vocab]` to `[batch, 1, vocab]`.
 
