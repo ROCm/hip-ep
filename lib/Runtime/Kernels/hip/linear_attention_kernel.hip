@@ -16,6 +16,17 @@
 
 static constexpr int LA_THREADS = 256;
 
+// --- WMMA (RDNA3 wave32) support, mirrors gemm_wmma_kernel.hip ---
+typedef _Float16 la_half16 __attribute__((ext_vector_type(16)));
+typedef float    la_float8 __attribute__((ext_vector_type(8)));
+#if !defined(__has_builtin) ||                                                  \
+    !__has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_f16_w32)
+static __device__ __forceinline__ la_float8
+la_wmma_unavailable(la_half16, la_half16, la_float8 c) { __builtin_trap(); return c; }
+#define __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c) la_wmma_unavailable((a),(b),(c))
+#endif
+static constexpr int LA_WT = 16;   // WMMA 16x16x16 tile dim
+
 static constexpr int LA_RULE_LINEAR      = 0;
 static constexpr int LA_RULE_GATED       = 1;
 static constexpr int LA_RULE_DELTA       = 2;
@@ -881,6 +892,563 @@ __global__ void linear_attention_prefill_chunked_kernel(
     }
 }
 
+//===----------------------------------------------------------------------===//
+// Chunk-parallel gated_delta prefill (breaks the 587-deep serial recurrence).
+//
+// The serial kernel above processes chunks one at a time because the chunk
+// output and state-update both read the chunk-start state S0, which is only
+// known after the previous chunk finishes.  We split each chunk's work into an
+// S0-independent local part (fully parallel across all Hkv*nchunks blocks) and
+// a light affine state scan (per head, sequential over chunks but cheap):
+//
+//   Within a chunk (tokens t):
+//     Uloc = (I - tril T)^{-1} (beta .* v)                     [C x dv]
+//     W    = (I - tril T)^{-1} (diag(beta .* A) K)             [C x dk]
+//     Ktilde[s][i] = rlast[s] * K[s][i]                        [C x dk]
+//   Then, with true chunk-start state S0:
+//     U   = Uloc - W @ S0                                      (== original U)
+//     S1  = a_last*S0 + Ktilde^T U   (affine in S0)
+//     O[t]= scale*( A_t (q_t . S0) + sum_{s<=t} P[t,s] U[s] )
+//
+// Pass 1 (parallel): compute Uloc, W, Ktilde, a_last.
+// Pass 2 (scan):     S0_c per chunk, then S1 = a_last*S0 + Ktilde^T(Uloc - W S0).
+// Pass 3 (parallel): recompute P, form U = Uloc - W S0, emit O.
+// Numerically equivalent to the serial kernel (same fp32 math, same per-chunk
+// fp16 rounding of S); differs only by fp32 op-order (cosine ~1.0).
+//===----------------------------------------------------------------------===//
+static constexpr int LA_PAR_THREADS = 256;
+
+template <typename T>
+__global__ void la_pf_pass1_local(
+    const T* __restrict__ key,
+    const T* __restrict__ value,
+    const T* __restrict__ decay,
+    const T* __restrict__ beta_in,
+    float* __restrict__ Uloc_g,   // [B*Hkv*nchunks, C*dv]
+    float* __restrict__ W_g,      // [B*Hkv*nchunks, C*dk]
+    float* __restrict__ Kt_g,     // [B*Hkv*nchunks, C*dk]
+    float* __restrict__ alast_g,  // [B*Hkv*nchunks]
+    int seq_len, int Hkv, int n_k, int dk, int dv,
+    int beta_per_head, int nchunks)
+{
+    const int c   = blockIdx.x % nchunks;
+    int tmp       = blockIdx.x / nchunks;
+    const int g   = tmp % Hkv;
+    const int b   = tmp / Hkv;
+    const int tid = threadIdx.x;
+    const int nthreads = blockDim.x;
+    const int c0   = c * LA_CHUNK;
+    const int Ceff = min(LA_CHUNK, seq_len - c0);
+    const int h_k  = g * n_k / Hkv;
+
+    const int64_t k_bs     = (int64_t)seq_len * n_k  * dk;
+    const int64_t v_bs     = (int64_t)seq_len * Hkv  * dv;
+    const int64_t decay_bs = (int64_t)seq_len * Hkv;
+    const int64_t beta_bs  = beta_per_head ? (int64_t)seq_len * Hkv
+                                           : (int64_t)seq_len;
+    const int64_t base = ((int64_t)(b * Hkv + g) * nchunks + c);
+
+    // Compact LDS (K as half, single reused solve buffer) so 2 blocks/CU fit.
+    extern __shared__ float smem[];
+    float*  Tm   = smem;                           // C*C
+    float*  Buf  = Tm + LA_CHUNK * LA_CHUNK;       // C*dv (Uloc, then W)
+    float*  Asm  = Buf + LA_CHUNK * dv;            // C
+    float*  clog = Asm + LA_CHUNK;                 // C
+    float*  bsm  = clog + LA_CHUNK;                // C
+    float*  rlast= bsm + LA_CHUNK;                 // C
+    __half* Ksm  = (__half*)(rlast + LA_CHUNK);    // C*dk (half)
+
+    for (int idx = tid; idx < Ceff * dk; idx += nthreads) {
+        int t = idx / dk, i = idx % dk;
+        Ksm[t * dk + i] = __float2half(to_float(
+            key[b * k_bs + (int64_t)(c0 + t) * n_k * dk +
+                (int64_t)h_k * dk + i]));
+    }
+    for (int t = tid; t < Ceff; t += nthreads) {
+        const int64_t beta_idx =
+            beta_per_head ? b * beta_bs + (int64_t)(c0 + t) * Hkv + g
+                          : b * beta_bs + (int64_t)(c0 + t);
+        bsm[t] = to_float(beta_in[beta_idx]);
+    }
+    __syncthreads();
+    if (tid == 0) {
+        float acc = 0.f;
+        for (int t = 0; t < Ceff; t++) {
+            float gt = to_float(decay[b * decay_bs + (int64_t)(c0 + t) * Hkv + g]);
+            acc += gt;
+            clog[t] = acc;
+            Asm[t]  = expf(acc);
+        }
+    }
+    __syncthreads();
+    const float a_last = Asm[Ceff - 1];
+    for (int s = tid; s < Ceff; s += nthreads)
+        rlast[s] = expf(clog[Ceff - 1] - clog[s]);
+
+    // T[t][s] strict-lower
+    for (int idx = tid; idx < Ceff * Ceff; idx += nthreads) {
+        int t = idx / Ceff, s = idx % Ceff;
+        if (s < t) {
+            float kk = 0.f;
+            for (int i = 0; i < dk; i++)
+                kk += __half2float(Ksm[t * dk + i]) * __half2float(Ksm[s * dk + i]);
+            Tm[t * Ceff + s] = bsm[t] * expf(clog[t] - clog[s]) * kk;
+        } else {
+            Tm[t * Ceff + s] = 0.f;
+        }
+    }
+    __syncthreads();
+
+    // --- Solve 1: Uloc = (I-trilT)^{-1}(beta.*v) ---
+    for (int idx = tid; idx < Ceff * dv; idx += nthreads) {
+        int t = idx / dv, j = idx % dv;
+        float vtj = to_float(
+            value[b * v_bs + (int64_t)(c0 + t) * Hkv * dv + (int64_t)g * dv + j]);
+        Buf[t * dv + j] = bsm[t] * vtj;
+    }
+    __syncthreads();
+    for (int t = 1; t < Ceff; t++) {
+        for (int j = tid; j < dv; j += nthreads) {
+            float acc = Buf[t * dv + j];
+            for (int s = 0; s < t; s++)
+                acc -= Tm[t * Ceff + s] * Buf[s * dv + j];
+            Buf[t * dv + j] = acc;
+        }
+        __syncthreads();
+    }
+    for (int idx = tid; idx < LA_CHUNK * dv; idx += nthreads) {
+        int t = idx / dv;
+        Uloc_g[base * (LA_CHUNK * dv) + idx] = (t < Ceff) ? Buf[idx] : 0.f;
+    }
+    __syncthreads();
+
+    // --- Solve 2: W = (I-trilT)^{-1}(diag(beta.*A) K) ---
+    for (int idx = tid; idx < Ceff * dk; idx += nthreads) {
+        int t = idx / dk, i = idx % dk;
+        Buf[t * dk + i] = bsm[t] * Asm[t] * __half2float(Ksm[t * dk + i]);
+    }
+    __syncthreads();
+    for (int t = 1; t < Ceff; t++) {
+        for (int i = tid; i < dk; i += nthreads) {
+            float acc = Buf[t * dk + i];
+            for (int s = 0; s < t; s++)
+                acc -= Tm[t * Ceff + s] * Buf[s * dk + i];
+            Buf[t * dk + i] = acc;
+        }
+        __syncthreads();
+    }
+    for (int idx = tid; idx < LA_CHUNK * dk; idx += nthreads) {
+        int t = idx / dk, i = idx % dk;
+        float wv = (t < Ceff) ? Buf[idx] : 0.f;
+        float kv = (t < Ceff) ? (rlast[t] * __half2float(Ksm[t * dk + i])) : 0.f;
+        W_g[base * (LA_CHUNK * dk) + idx]  = wv;
+        Kt_g[base * (LA_CHUNK * dk) + idx] = kv;
+    }
+    if (tid == 0) alast_g[base] = a_last;
+}
+
+// Pass 2: per-head sequential affine scan over chunks.
+template <typename T>
+__global__ void la_pf_scan(
+    const float* __restrict__ Uloc_g,
+    const float* __restrict__ W_g,
+    const float* __restrict__ Kt_g,
+    const float* __restrict__ alast_g,
+    __half* __restrict__ S0_g,     // [B*Hkv*nchunks, dk*dv]  chunk-start states
+    T* __restrict__ state,         // final state out [B,Hkv,dk,dv]
+    int Hkv, int dk, int dv, int nchunks)
+{
+    const int bg = blockIdx.x;
+    const int b  = bg / Hkv;
+    const int g  = bg % Hkv;
+    const int tid = threadIdx.x;
+    const int nthreads = blockDim.x;
+    const int64_t state_bs = (int64_t)Hkv * dk * dv;
+    T* Sout = state + b * state_bs + (int64_t)g * dk * dv;
+
+    extern __shared__ float smem[];
+    __half* Ssm = (__half*)smem;                       // dk*dv (half) = 32KB
+    float*  Buf1 = (float*)(Ssm + dk * dv);            // C*dk (float) = 16KB
+    float*  Buf2 = Buf1 + LA_CHUNK * dk;               // C*dv (float) = 16KB
+
+    // Initialize from the incoming state buffer (matches the serial kernel,
+    // which reads S in place; == 0 for a fresh prefill).
+    for (int idx = tid; idx < dk * dv; idx += nthreads)
+        Ssm[idx] = __float2half(to_float(Sout[idx]));
+    __syncthreads();
+
+    for (int c = 0; c < nchunks; c++) {
+        const int64_t base = ((int64_t)(b * Hkv + g) * nchunks + c);
+        // store chunk-start state
+        for (int idx = tid; idx < dk * dv; idx += nthreads)
+            S0_g[base * (dk * dv) + idx] = Ssm[idx];
+        // load W tile
+        for (int idx = tid; idx < LA_CHUNK * dk; idx += nthreads)
+            Buf1[idx] = W_g[base * (LA_CHUNK * dk) + idx];
+        __syncthreads();
+        // WS[t][j] = sum_i W[t][i] * S0[i][j]  -> Buf2
+        for (int idx = tid; idx < LA_CHUNK * dv; idx += nthreads) {
+            int t = idx / dv, j = idx % dv;
+            float acc = 0.f;
+            for (int i = 0; i < dk; i++)
+                acc += Buf1[t * dk + i] * __half2float(Ssm[i * dv + j]);
+            // U = Uloc - WS
+            Buf2[idx] = Uloc_g[base * (LA_CHUNK * dv) + idx] - acc;
+        }
+        __syncthreads();
+        // load Ktilde tile into Buf1 (W no longer needed)
+        for (int idx = tid; idx < LA_CHUNK * dk; idx += nthreads)
+            Buf1[idx] = Kt_g[base * (LA_CHUNK * dk) + idx];
+        const float a_last = alast_g[base];
+        __syncthreads();
+        // S1[i][j] = a_last*S0[i][j] + sum_s Ktilde[s][i] U[s][j]
+        for (int idx = tid; idx < dk * dv; idx += nthreads) {
+            int i = idx / dv, j = idx % dv;
+            float acc = a_last * __half2float(Ssm[idx]);
+            for (int s = 0; s < LA_CHUNK; s++)
+                acc += Buf1[s * dk + i] * Buf2[s * dv + j];
+            Ssm[idx] = __float2half(acc);
+        }
+        __syncthreads();
+    }
+    for (int idx = tid; idx < dk * dv; idx += nthreads)
+        Sout[idx] = from_float<T>(__half2float(Ssm[idx]));
+}
+
+// Pass 3: per (head,chunk) parallel output.
+template <typename T>
+__global__ void la_pf_pass3_out(
+    const T* __restrict__ query,
+    const T* __restrict__ key,
+    const T* __restrict__ decay,
+    const float* __restrict__ Uloc_g,
+    const float* __restrict__ W_g,
+    const __half* __restrict__ S0_g,
+    T* __restrict__ output,
+    int seq_len, int Hq, int Hkv, int n_k, int dk, int dv,
+    float scale, int nchunks)
+{
+    const int c   = blockIdx.x % nchunks;
+    int tmp       = blockIdx.x / nchunks;
+    const int g   = tmp % Hkv;
+    const int b   = tmp / Hkv;
+    const int tid = threadIdx.x;
+    const int nthreads = blockDim.x;
+    const int c0   = c * LA_CHUNK;
+    const int Ceff = min(LA_CHUNK, seq_len - c0);
+
+    const bool inverse_gqa = (Hq < Hkv);
+    const int Hout  = Hq >= Hkv ? Hq : Hkv;
+    const int h_q   = inverse_gqa ? (g * Hq / Hkv) : (g * (Hq / Hkv));
+    const int h_out = inverse_gqa ? g : (g * (Hq / Hkv));
+    const int h_k   = g * n_k / Hkv;
+
+    const int64_t q_bs     = (int64_t)seq_len * Hq   * dk;
+    const int64_t k_bs     = (int64_t)seq_len * n_k  * dk;
+    const int64_t out_bs   = (int64_t)seq_len * Hout * dv;
+    const int64_t decay_bs = (int64_t)seq_len * Hkv;
+    const int64_t base = ((int64_t)(b * Hkv + g) * nchunks + c);
+    const __half* S0 = S0_g + base * (dk * dv);
+    const float*  Wc = W_g  + base * (LA_CHUNK * dk);
+    const float*  Ul = Uloc_g + base * (LA_CHUNK * dv);
+
+    // Compact LDS (halves) so 2-3 blocks/CU fit -> higher occupancy.
+    extern __shared__ float smem[];
+    float*  Pm   = smem;                        // C*C  (float)
+    float*  Asm  = Pm + LA_CHUNK * LA_CHUNK;    // C
+    float*  clog = Asm + LA_CHUNK;              // C
+    __half* Qh   = (__half*)(clog + LA_CHUNK);  // C*dk (half)
+    __half* Kh   = Qh + LA_CHUNK * dk;          // C*dk (half); reused as W
+
+    for (int idx = tid; idx < Ceff * dk; idx += nthreads) {
+        int t = idx / dk, i = idx % dk;
+        Kh[t * dk + i] = __float2half(to_float(
+            key[b * k_bs + (int64_t)(c0 + t) * n_k * dk + (int64_t)h_k * dk + i]));
+        Qh[t * dk + i] = __float2half(to_float(
+            query[b * q_bs + (int64_t)(c0 + t) * Hq * dk + (int64_t)h_q * dk + i]));
+    }
+    __syncthreads();
+    if (tid == 0) {
+        float acc = 0.f;
+        for (int t = 0; t < Ceff; t++) {
+            acc += to_float(decay[b * decay_bs + (int64_t)(c0 + t) * Hkv + g]);
+            clog[t] = acc;
+            Asm[t]  = expf(acc);
+        }
+    }
+    __syncthreads();
+    for (int idx = tid; idx < Ceff * Ceff; idx += nthreads) {
+        int t = idx / Ceff, s = idx % Ceff;
+        if (s <= t) {
+            float qk = 0.f;
+            for (int i = 0; i < dk; i++)
+                qk += __half2float(Qh[t * dk + i]) * __half2float(Kh[s * dk + i]);
+            Pm[t * Ceff + s] = expf(clog[t] - clog[s]) * qk;
+        }
+    }
+    __syncthreads();
+    // K no longer needed: reuse Kh buffer to cache W (as half) in LDS.
+    __half* Wh = Kh;
+    for (int idx = tid; idx < Ceff * dk; idx += nthreads)
+        Wh[idx] = __float2half(Wc[idx]);
+    __syncthreads();
+
+    // Each thread owns output column j: form U[.,j] and O[.,j].
+    for (int j = tid; j < dv; j += nthreads) {
+        float ws[LA_CHUNK], qs[LA_CHUNK];
+        for (int t = 0; t < Ceff; t++) { ws[t] = 0.f; qs[t] = 0.f; }
+        for (int i = 0; i < dk; i++) {
+            float s = __half2float(S0[i * dv + j]);
+            for (int t = 0; t < Ceff; t++) {
+                ws[t] += __half2float(Wh[t * dk + i]) * s;
+                qs[t] += __half2float(Qh[t * dk + i]) * s;
+            }
+        }
+        // reuse ws[] as U[] (U = Uloc - W@S0) to cut register pressure
+        for (int t = 0; t < Ceff; t++)
+            ws[t] = Ul[t * dv + j] - ws[t];
+        for (int t = 0; t < Ceff; t++) {
+            float inter = Asm[t] * qs[t];
+            float intra = 0.f;
+            for (int s = 0; s <= t; s++)
+                intra += Pm[t * Ceff + s] * ws[s];
+            output[b * out_bs + (int64_t)(c0 + t) * Hout * dv +
+                   (int64_t)h_out * dv + j] =
+                from_float<T>(scale * (inter + intra));
+        }
+    }
+}
+
+// Pass 3, WMMA variant: the dominant [Q;W]@S0 GEMM (M=2C, K=dk, N=dv) runs on
+// the wave-matrix cores; the small P@U intra term stays scalar. Requires
+// blockDim=256 (8 wave32 wavefronts) and dk,dv multiples of 16.
+template <typename T>
+__global__ void __launch_bounds__(256) la_pf_pass3_wmma(
+    const T* __restrict__ query,
+    const T* __restrict__ key,
+    const T* __restrict__ decay,
+    const float* __restrict__ Uloc_g,
+    const float* __restrict__ W_g,
+    const __half* __restrict__ S0_g,
+    T* __restrict__ output,
+    int seq_len, int Hq, int Hkv, int n_k, int dk, int dv,
+    float scale, int nchunks)
+{
+    const int c   = blockIdx.x % nchunks;
+    int tmp       = blockIdx.x / nchunks;
+    const int g   = tmp % Hkv;
+    const int b   = tmp / Hkv;
+    const int tid = threadIdx.x;
+    const int nthreads = blockDim.x;
+    const int c0   = c * LA_CHUNK;
+    const int Ceff = min(LA_CHUNK, seq_len - c0);
+    const int M    = 2 * LA_CHUNK;   // stacked [Q; W] rows
+
+    const bool inverse_gqa = (Hq < Hkv);
+    const int Hout  = Hq >= Hkv ? Hq : Hkv;
+    const int h_q   = inverse_gqa ? (g * Hq / Hkv) : (g * (Hq / Hkv));
+    const int h_out = inverse_gqa ? g : (g * (Hq / Hkv));
+    const int h_k   = g * n_k / Hkv;
+
+    const int64_t q_bs     = (int64_t)seq_len * Hq   * dk;
+    const int64_t k_bs     = (int64_t)seq_len * n_k  * dk;
+    const int64_t out_bs   = (int64_t)seq_len * Hout * dv;
+    const int64_t decay_bs = (int64_t)seq_len * Hkv;
+    const int64_t base = ((int64_t)(b * Hkv + g) * nchunks + c);
+    const __half* S0 = S0_g + base * (dk * dv);
+    const float*  Wc = W_g  + base * (LA_CHUNK * dk);
+    const float*  Ul = Uloc_g + base * (LA_CHUNK * dv);
+
+    extern __shared__ float smem[];
+    float*  QWS  = smem;                          // M*dv (float, WMMA result)
+    float*  Pm   = QWS + M * dv;                  // C*C
+    float*  Asm  = Pm + LA_CHUNK * LA_CHUNK;      // C
+    float*  clog = Asm + LA_CHUNK;                // C
+    __half* QW   = (__half*)(clog + LA_CHUNK);    // M*dk (half; rows 0..C-1 Q, C..2C-1 W)
+    __half* Kh   = QW + M * dk;                   // C*dk (half)
+
+    for (int idx = tid; idx < M * dk; idx += nthreads) QW[idx] = __float2half(0.f);
+    __syncthreads();
+    for (int idx = tid; idx < Ceff * dk; idx += nthreads) {
+        int t = idx / dk, i = idx % dk;
+        Kh[t * dk + i] = __float2half(to_float(
+            key[b * k_bs + (int64_t)(c0 + t) * n_k * dk + (int64_t)h_k * dk + i]));
+        QW[t * dk + i] = __float2half(to_float(
+            query[b * q_bs + (int64_t)(c0 + t) * Hq * dk + (int64_t)h_q * dk + i]));
+        QW[(LA_CHUNK + t) * dk + i] = __float2half(Wc[t * dk + i]);
+    }
+    __syncthreads();
+    if (tid == 0) {
+        float acc = 0.f;
+        for (int t = 0; t < Ceff; t++) {
+            acc += to_float(decay[b * decay_bs + (int64_t)(c0 + t) * Hkv + g]);
+            clog[t] = acc;
+            Asm[t]  = expf(acc);
+        }
+    }
+    __syncthreads();
+    for (int idx = tid; idx < Ceff * Ceff; idx += nthreads) {
+        int t = idx / Ceff, s = idx % Ceff;
+        if (s <= t) {
+            float qk = 0.f;
+            for (int i = 0; i < dk; i++)
+                qk += __half2float(QW[t * dk + i]) * __half2float(Kh[s * dk + i]);
+            Pm[t * Ceff + s] = expf(clog[t] - clog[s]) * qk;
+        }
+    }
+    __syncthreads();
+
+    // WMMA: QWS[M x dv] = QW[M x dk] @ S0[dk x dv].
+    const int wf   = tid / 32;
+    const int nwf  = nthreads / 32;
+    const int lane = (tid % 32) % LA_WT;
+    const int pair = (tid % 32) / LA_WT;
+    const int mt   = M  / LA_WT;
+    const int nt   = dv / LA_WT;
+    for (int tile = wf; tile < mt * nt; tile += nwf) {
+        const int m_base = (tile / nt) * LA_WT;
+        const int n_base = (tile % nt) * LA_WT;
+        la_float8 acc = {};
+        for (int k = 0; k < dk; k += LA_WT) {
+            la_half16 a_frag, b_frag;
+            for (int ele = 0; ele < LA_WT; ele++) {
+                a_frag[ele] = (_Float16)__half2float(QW[(m_base + lane) * dk + k + ele]);
+                b_frag[ele] = (_Float16)__half2float(S0[(k + ele) * dv + n_base + lane]);
+            }
+            acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag, b_frag, acc);
+        }
+        for (int ele = 0; ele < 8; ele++)
+            QWS[(m_base + ele * 2 + pair) * dv + n_base + lane] = acc[ele];
+    }
+    __syncthreads();
+
+    // Postprocess per output column: U = Uloc - (W@S0); O = scale*(A.*qs + P_lower@U).
+    for (int j = tid; j < dv; j += nthreads) {
+        float U[LA_CHUNK];
+        for (int t = 0; t < Ceff; t++)
+            U[t] = Ul[t * dv + j] - QWS[(LA_CHUNK + t) * dv + j];
+        for (int t = 0; t < Ceff; t++) {
+            float inter = Asm[t] * QWS[t * dv + j];
+            float intra = 0.f;
+            for (int s = 0; s <= t; s++)
+                intra += Pm[t * Ceff + s] * U[s];
+            output[b * out_bs + (int64_t)(c0 + t) * Hout * dv +
+                   (int64_t)h_out * dv + j] =
+                from_float<T>(scale * (inter + intra));
+        }
+    }
+}
+
+// Persistent scratch for the chunk-parallel path (grows as needed, freed never).
+static void*  g_la_scratch = nullptr;
+static size_t g_la_scratch_bytes = 0;
+
+template <typename T>
+static int la_launch_parallel(
+    hipStream_t s, const T* q, const T* k, const T* v, const T* dec,
+    const T* beta, T* state, T* out,
+    int B, int seq_len, int Hq, int Hkv, int Nk, int dk, int dv,
+    float scale, int beta_per_head)
+{
+    const int nchunks = (seq_len + LA_CHUNK - 1) / LA_CHUNK;
+    const int64_t ncb = (int64_t)B * Hkv * nchunks;   // # (head,chunk) blocks
+
+    const size_t sz_Uloc  = (size_t)ncb * LA_CHUNK * dv * sizeof(float);
+    const size_t sz_W     = (size_t)ncb * LA_CHUNK * dk * sizeof(float);
+    const size_t sz_Kt    = (size_t)ncb * LA_CHUNK * dk * sizeof(float);
+    const size_t sz_alast = (size_t)ncb * sizeof(float);
+    const size_t sz_S0    = (size_t)ncb * dk * dv * sizeof(__half);
+    auto align = [](size_t x){ return (x + 255) & ~((size_t)255); };
+    const size_t oU = 0;
+    const size_t oW = align(oU + sz_Uloc);
+    const size_t oK = align(oW + sz_W);
+    const size_t oA = align(oK + sz_Kt);
+    const size_t oS = align(oA + sz_alast);
+    const size_t total = align(oS + sz_S0);
+
+    if (total > g_la_scratch_bytes) {
+        if (g_la_scratch) hipFree(g_la_scratch);
+        if (hipMalloc(&g_la_scratch, total) != hipSuccess) {
+            g_la_scratch = nullptr; g_la_scratch_bytes = 0; return 1;
+        }
+        g_la_scratch_bytes = total;
+    }
+    char* sp = (char*)g_la_scratch;
+    float*  Uloc_g  = (float*)(sp + oU);
+    float*  W_g     = (float*)(sp + oW);
+    float*  Kt_g    = (float*)(sp + oK);
+    float*  alast_g = (float*)(sp + oA);
+    __half* S0_g    = (__half*)(sp + oS);
+
+    const int block = LA_PAR_THREADS;
+    // Pass 1 LDS: Tm + Buf(=C*dv) + 4 vecs (float), plus K tile (half)
+    const size_t s1 = (size_t)(LA_CHUNK * LA_CHUNK + LA_CHUNK * dv +
+                               4 * LA_CHUNK) * sizeof(float) +
+                      (size_t)(LA_CHUNK * dk) * sizeof(__half);
+    // Pass 2 LDS
+    const size_t s2 = (size_t)(dk * dv) * sizeof(__half) +
+                      (size_t)(LA_CHUNK * dk + LA_CHUNK * dv) * sizeof(float);
+    // Pass 3 LDS: Pm + (Asm,clog) floats, plus Q and K/W tiles (half).
+    const size_t s3 = (size_t)(LA_CHUNK * LA_CHUNK + 2 * LA_CHUNK) * sizeof(float) +
+                      (size_t)(2 * LA_CHUNK * dk) * sizeof(__half);
+    // WMMA Pass 3 LDS: QWS(M*dv) + Pm + (Asm,clog) floats, QW(M*dk) + K(C*dk) half.
+    // WMMA Pass 3 is default-ON (this DLL targets RDNA3 gfx1151 where the
+    // wave-matrix builtin is always present); HIPDNN_EP_LA_WMMA=0 forces scalar.
+    bool use_wmma = (dk % LA_WT == 0) && (dv % LA_WT == 0);
+    { const char* w = std::getenv("HIPDNN_EP_LA_WMMA");
+      if (w && w[0] == '0') use_wmma = false; }
+    const size_t s3w = (size_t)(2 * LA_CHUNK * dv + LA_CHUNK * LA_CHUNK +
+                                2 * LA_CHUNK) * sizeof(float) +
+                       (size_t)(2 * LA_CHUNK * dk + LA_CHUNK * dk) * sizeof(__half);
+    if (s1 > 64 * 1024 || s2 > 64 * 1024 || s3 > 64 * 1024) return 1;
+    if (use_wmma && s3w > 64 * 1024) return 1;
+
+    int scan_block = 1024;
+    { const char* sb = std::getenv("HIPDNN_EP_LA_SCANBLK");
+      if (sb && sb[0]) scan_block = atoi(sb); }
+    const bool prof = std::getenv("HIPDNN_EP_LA_PROF") != nullptr;
+    hipEvent_t e0, e1, e2, e3;
+    if (prof) { hipEventCreate(&e0); hipEventCreate(&e1);
+                hipEventCreate(&e2); hipEventCreate(&e3);
+                hipEventRecord(e0, s); }
+
+    int p3_block = block;
+    { const char* pb = std::getenv("HIPDNN_EP_LA_P3BLK");
+      if (pb && pb[0]) p3_block = atoi(pb); }
+    hipLaunchKernelGGL(la_pf_pass1_local<T>, dim3((unsigned)ncb), dim3(block),
+        s1, s, k, v, dec, beta, Uloc_g, W_g, Kt_g, alast_g,
+        seq_len, Hkv, Nk, dk, dv, beta_per_head, nchunks);
+    if (prof) hipEventRecord(e1, s);
+    hipLaunchKernelGGL(la_pf_scan<T>, dim3((unsigned)(B * Hkv)), dim3(scan_block),
+        s2, s, Uloc_g, W_g, Kt_g, alast_g, S0_g, state, Hkv, dk, dv, nchunks);
+    if (prof) hipEventRecord(e2, s);
+    if (use_wmma)
+        hipLaunchKernelGGL(la_pf_pass3_wmma<T>, dim3((unsigned)ncb), dim3(256),
+            s3w, s, q, k, dec, Uloc_g, W_g, S0_g, out,
+            seq_len, Hq, Hkv, Nk, dk, dv, scale, nchunks);
+    else
+        hipLaunchKernelGGL(la_pf_pass3_out<T>, dim3((unsigned)ncb), dim3(p3_block),
+            s3, s, q, k, dec, Uloc_g, W_g, S0_g, out,
+            seq_len, Hq, Hkv, Nk, dk, dv, scale, nchunks);
+    if (prof) {
+        hipEventRecord(e3, s); hipEventSynchronize(e3);
+        float t1=0, t2=0, t3=0;
+        hipEventElapsedTime(&t1, e0, e1); hipEventElapsedTime(&t2, e1, e2);
+        hipEventElapsedTime(&t3, e2, e3);
+        fprintf(stderr, "[la_prof] pass1=%.3f scan=%.3f pass3=%.3f ms\n", t1, t2, t3);
+        hipEventDestroy(e0); hipEventDestroy(e1);
+        hipEventDestroy(e2); hipEventDestroy(e3);
+    }
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        fprintf(stderr, "[custom_kernels] la_launch_parallel failed: %s\n",
+                hipGetErrorString(err));
+        return (int)err;
+    }
+    return 0;
+}
+
 extern "C" int hip_linear_attention_prefill_chunked(
     void* stream,
     const void* query,
@@ -928,6 +1496,43 @@ extern "C" int hip_linear_attention_prefill_chunked(
     const int grid  = static_cast<int>(B * Hkv);
     const int block = LA_PREFILL_THREADS;
     const int beta_per_head_i = beta_per_head ? 1 : 0;
+
+    // Chunk-parallel path (env-gated during bring-up). Falls through to the
+    // serial kernel below when disabled or on any launch failure.
+    {
+        // Default ON; set HIPDNN_EP_LA_PARALLEL=0 to force the serial kernel.
+        const char* par = std::getenv("HIPDNN_EP_LA_PARALLEL");
+        const bool use_par = !(par && par[0] == '0');
+        if (use_par) {
+            int rc = 1;
+            if (type == 0)
+                rc = la_launch_parallel<float>(hip_stream,
+                    static_cast<const float*>(query), static_cast<const float*>(key),
+                    static_cast<const float*>(value), static_cast<const float*>(decay),
+                    static_cast<const float*>(beta), static_cast<float*>(state),
+                    static_cast<float*>(output), (int)B, (int)seq_len, (int)Hq,
+                    (int)Hkv, (int)Nk, dk_i, dv_i, scale, beta_per_head_i);
+            else if (type == 1)
+                rc = la_launch_parallel<__half>(hip_stream,
+                    static_cast<const __half*>(query), static_cast<const __half*>(key),
+                    static_cast<const __half*>(value), static_cast<const __half*>(decay),
+                    static_cast<const __half*>(beta), static_cast<__half*>(state),
+                    static_cast<__half*>(output), (int)B, (int)seq_len, (int)Hq,
+                    (int)Hkv, (int)Nk, dk_i, dv_i, scale, beta_per_head_i);
+            else if (type == 2)
+                rc = la_launch_parallel<__hip_bfloat16>(hip_stream,
+                    static_cast<const __hip_bfloat16*>(query),
+                    static_cast<const __hip_bfloat16*>(key),
+                    static_cast<const __hip_bfloat16*>(value),
+                    static_cast<const __hip_bfloat16*>(decay),
+                    static_cast<const __hip_bfloat16*>(beta),
+                    static_cast<__hip_bfloat16*>(state),
+                    static_cast<__hip_bfloat16*>(output), (int)B, (int)seq_len,
+                    (int)Hq, (int)Hkv, (int)Nk, dk_i, dv_i, scale, beta_per_head_i);
+            if (rc == 0) return 0;
+            // else fall through to the serial kernel
+        }
+    }
 
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_linear_attention_prefill_chunked: B=%lld "
