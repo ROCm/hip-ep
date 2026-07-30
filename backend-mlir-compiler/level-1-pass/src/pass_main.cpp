@@ -89,6 +89,12 @@ static CompilationConfig load_config(PassContext *ctx) {
 
 // Step 2: Get MLIR bytecode from graph
 static std::string get_mlir_bytecode(PassContext *ctx, Graph &graph) {
+  // save_string() legalizes INT4 GBQ weights, but resolve() also verifies IR
+  // before export (Pass::apply runs resolve only after this action returns).
+  if (!GraphRef(graph).resolve(/*force=*/true)) {
+    LOG(ERROR) << "Graph resolve failed before MLIR bytecode export";
+    return "";
+  }
   auto bytecode = GraphConstRef(GraphRef(graph)).save_string();
   if (bytecode->empty()) {
     return "";

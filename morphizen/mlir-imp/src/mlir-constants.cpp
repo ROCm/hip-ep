@@ -39,6 +39,13 @@ mlir::Type onnxElementTypeToMlirElementType(int element_type,
     return builder.getF16Type();
   case 11: // TensorProto_DataType_DOUBLE
     return builder.getF64Type();
+  case 21: // TensorProto_DataType_UINT4 — byte-packed; ui8 on external
+           // tensors so GBQ legalize and hip-ep can detect unsigned storage.
+           // Inline dense constants still use signless i8 via
+           // onnxElementTypeToMlirDenseElementType.
+    return builder.getIntegerType(8, false);
+  case 22: // TensorProto_DataType_INT4 — byte-packed (signless i8 storage)
+    return builder.getIntegerType(8);
   default:
     // TensorProto_DataType_UNDEFINED = 0,
     // TensorProto_DataType_STRING = 8,
@@ -54,9 +61,15 @@ mlir::Type onnxElementTypeToMlirElementType(int element_type,
     // TensorProto_DataType_UINT4 = 21,
     // TensorProto_DataType_INT4 = 22
     //
-    // NOTE: unmapped types silently fall back to F32 here. This is only safe
-    // because every consumer that needs exact bytes re-validates the width
-    // downstream: `create_tensor` (mlir-named-attribute.cpp) is the enforcement
+    // NOTE: INT4 maps to signless i8; UINT4 external tensors use ui8 so
+    // GatherBlockQuantized legalize can set unsigned_quant_storage without
+    // relying on node-arg element types (setValue overwrites TensorDesc and
+    // signless i8 is mis-read as ONNX INT8). DenseElementsAttr still uses
+    // signless via onnxElementTypeToMlirDenseElementType.
+    //
+    // Unmapped types silently fall back to F32 here. This is only safe because
+    // every consumer that needs exact bytes downstream: `create_tensor`
+    // (mlir-named-attribute.cpp) is the enforcement
     // point -- its DenseElementsAttr byte-size guard catches this F32 default
     // (4B/elem) against the real ONNX raw_data width and LOG(FATAL)s with a fix
     // hint rather than emitting a corrupted attribute. Add a real case above
@@ -65,6 +78,16 @@ mlir::Type onnxElementTypeToMlirElementType(int element_type,
                  << ", using F32";
     return builder.getF32Type();
   }
+}
+
+mlir::Type onnxElementTypeToMlirDenseElementType(int element_type,
+                                                 mlir::OpBuilder &builder) {
+  mlir::Type elem = onnxElementTypeToMlirElementType(element_type, builder);
+  if (auto intTy = mlir::dyn_cast<mlir::IntegerType>(elem)) {
+    if (!intTy.isSignless())
+      return mlir::IntegerType::get(builder.getContext(), intTy.getWidth());
+  }
+  return elem;
 }
 
 mlir::Type onnxElementTypeToMlirType(int element_type, mlir::OpBuilder &builder,

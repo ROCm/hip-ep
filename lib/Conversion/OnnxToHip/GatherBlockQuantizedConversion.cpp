@@ -3,7 +3,10 @@
  * Licensed under the MIT License.
  */
 
+#include "GatherBlockQuantizedUtils.h"
 #include "OnnxToHipUtils.h"
+
+#include <optional>
 
 namespace mlir {
 namespace hip {
@@ -13,32 +16,13 @@ namespace {
 // ONNX com.microsoft.GatherBlockQuantized -> HIP gather_block_quantized
 //===----------------------------------------------------------------------===//
 //
-// Before:
-//   %out = "onnx.Custom"(%data, %indices, %scales, %zero_points)
-//       {function_name = "GatherBlockQuantized",
-//        domain_name = "com.microsoft",
-//        bits = 4 : si64, block_size = 16 : si64,
-//        gather_axis = 0 : si64, quantize_axis = 1 : si64}
-//       : (tensor<2048x96xui8>, tensor<8xi64>,
-//          tensor<2048x12xf16>, tensor<2048x12xui8>) -> tensor<8x96xf16>
+// Storage semantics (unsigned vs signed) come from ONNX T1 + bits, not from
+// signless MLIR integer types alone. `unsigned_quant_storage` is set when:
+//   - MorphiZen import legalized UINT4 or annotated UINT8 weights, or
+//   - the data tensor element type is ui8 at conversion time.
 //
-// After:
-//   %init = tensor.empty() : tensor<8x96xf16>
-//   %out = hip.gather_block_quantized(%ctx)
-//       ins(%data, %indices, %scales :
-//           tensor<2048x96xui8>, tensor<8xi64>, tensor<2048x12xf16>)
-//       zero_points(%zp : tensor<2048x12xui8>)
-//       outs(%init : tensor<8x96xf16>)
-//       {bits = 4, block_size = 16, gather_axis = 0, quantize_axis = 1}
-//       : tensor<8x96xf16>
-//
-// Output shape derivation (mirrors plain Gather):
-//   out.shape = data.shape[0:gather_axis]
-//             ++ indices.shape
-//             ++ data.shape[gather_axis+1:]
-// The dequant block axis lives entirely inside `data`, so the output has
-// no extra "blocks" dim — the runtime fans out per-element on the gathered
-// rows during the dequantize step.
+// quantize_axis is taken from the ONNX attribute when present; otherwise it is
+// inferred from (data, scales, block_size, bits) shape invariants.
 
 struct GatherBlockQuantizedToHip : public mlir::RewritePattern {
   GatherBlockQuantizedToHip(mlir::MLIRContext *ctx)
@@ -77,9 +61,6 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
   mlir::Value indices = op->getOperand(1);
   mlir::Value scales = op->getOperand(2);
 
-  // ONNX models that omit `zero_points` may either drop the operand entirely
-  // (only 3 operands present) or pass an `onnx.NoValue` of !NoneType — match
-  // MatMulNBitsConversion's handling so both forms produce a null Value.
   mlir::Value zeroPoints;
   if (op->getNumOperands() >= 4) {
     mlir::Value v = op->getOperand(3);
@@ -87,11 +68,6 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
       zeroPoints = v;
   }
 
-  // Attribute extraction. Spec defaults:
-  //   bits           — required, 4 or 8
-  //   block_size     — required, power of 2 >= 16
-  //   gather_axis    — optional, default 0
-  //   quantize_axis  — optional, default 0
   auto bitsIntAttr = op->getAttrOfType<mlir::IntegerAttr>("bits");
   if (!bitsIntAttr)
     return rewriter.notifyMatchFailure(op, "missing required `bits` attribute");
@@ -102,25 +78,41 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
   auto gatherAxisIntAttr = op->getAttrOfType<mlir::IntegerAttr>("gather_axis");
   auto quantAxisIntAttr = op->getAttrOfType<mlir::IntegerAttr>("quantize_axis");
 
-  auto bitsAttr = rewriter.getI64IntegerAttr(bitsIntAttr.getSInt());
-  auto blockSizeAttr = rewriter.getI64IntegerAttr(blockSizeIntAttr.getSInt());
-  auto gatherAxisAttr = rewriter.getI64IntegerAttr(
-      gatherAxisIntAttr ? gatherAxisIntAttr.getSInt() : 0);
-  auto quantAxisAttr = rewriter.getI64IntegerAttr(
-      quantAxisIntAttr ? quantAxisIntAttr.getSInt() : 0);
+  const int64_t bits = bitsIntAttr.getSInt();
+  const int64_t blockSize = blockSizeIntAttr.getSInt();
+  if (bits != 4 && bits != 8)
+    return rewriter.notifyMatchFailure(op, "GBQ `bits` must be 4 or 8");
+  if (blockSize <= 0)
+    return rewriter.notifyMatchFailure(op, "invalid `block_size`");
 
-  // Output shape: [data[0:gather_axis], indices.shape, data[gather_axis+1:]].
-  // Mirror GatherConversion's dim-mapping: walk output dims, source each
-  // dynamic dim from either data or indices according to its position.
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   auto dataType = mlir::cast<mlir::RankedTensorType>(data.getType());
-  auto indicesType = mlir::cast<mlir::RankedTensorType>(indices.getType());
+  auto scalesType = mlir::cast<mlir::RankedTensorType>(scales.getType());
+
+  std::optional<int64_t> explicitQuantAxis;
+  if (quantAxisIntAttr)
+    explicitQuantAxis = quantAxisIntAttr.getSInt();
+  auto quantAxisOr = gbq::resolveQuantizeAxis(dataType, scalesType, blockSize,
+                                              bits, explicitQuantAxis);
+  if (mlir::failed(quantAxisOr))
+    return rewriter.notifyMatchFailure(
+        op, "could not resolve `quantize_axis` from GBQ data/scales shapes");
+
+  bool unsignedQuantStorage = gbq::resolveUnsignedQuantStorage(
+      bits, op->hasAttr("unsigned_quant_storage"), dataType.getElementType());
+
+  auto bitsAttr = rewriter.getI64IntegerAttr(bits);
+  auto blockSizeAttr = rewriter.getI64IntegerAttr(blockSize);
+  auto gatherAxisAttr = rewriter.getI64IntegerAttr(
+      gatherAxisIntAttr ? gatherAxisIntAttr.getSInt() : 0);
+  auto quantAxisAttr = rewriter.getI64IntegerAttr(*quantAxisOr);
 
   int64_t gatherAxis = gatherAxisAttr.getInt();
   int64_t normalizedGatherAxis =
       gatherAxis < 0 ? gatherAxis + dataType.getRank() : gatherAxis;
 
+  auto indicesType = mlir::cast<mlir::RankedTensorType>(indices.getType());
   llvm::SmallVector<mlir::Value> dynSizes;
   int64_t outDimIdx = 0;
   for (auto i : llvm::seq<int64_t>(0, normalizedGatherAxis)) {
@@ -149,6 +141,8 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
       rewriter, loc, mlir::TypeRange{resultType}, context, data, indices,
       scales, zeroPoints, init, bitsAttr, blockSizeAttr, gatherAxisAttr,
       quantAxisAttr);
+  if (unsignedQuantStorage)
+    hipOp->setAttr("unsigned_quant_storage", rewriter.getUnitAttr());
   rewriter.replaceOp(op, hipOp->getResults());
   return mlir::success();
 }
