@@ -35,6 +35,13 @@ extern "C" int hip_gqa_flash_prefill_v2(
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale);
 
+// Wide entry: same as v2 plus attention sinks / smooth softmax.
+extern "C" int hip_gqa_flash_prefill_v3(
+    void* stream, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
+    int past_len, float scale, int local_window_size, const void* head_sink,
+    int num_heads, int smooth_softmax);
+
 extern "C" int hip_gqa_flash_prefill_v7(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
@@ -50,9 +57,21 @@ extern "C" int hip_gqa_flash_prefill_v7(
     }                                                                          \
   } while (0)
 
+// Sink handling, matching softmax_f32_to_out_kernel exactly: the row max is
+// taken over the scores only (the sink does NOT participate), and the sink
+// contributes a single exp(s - max) term to the denominator. kSinkSmooth is the
+// smooth_softmax case, i.e. a sink logit of 0 with no sink tensor.
+enum SinkMode { kSinkNone = 0, kSinkPerHead = 1, kSinkSmooth = 2 };
+
 struct Case {
   const char* name;
-  int B, H, G, D, sq;  // pure prefill: skv = sq, past_len = 0
+  int B, H, G, D, sq;
+  int past;       // past_len; total_seq = past + sq. 0 = pure prefill.
+  int sink_mode;  // SinkMode
+  // Expect the kernel to decline (rc != 0) instead of computing. Used for the
+  // shapes v3 must refuse so the runtime falls back to the decomposed path
+  // rather than dropping the sink.
+  bool expect_reject;
 };
 
 // CPU fp32 reference: causal GQA attention. Q/O BSHD, K/V cache BNSD.
@@ -60,7 +79,8 @@ static void cpu_reference(const std::vector<float>& Q,
                           const std::vector<float>& K,
                           const std::vector<float>& V, std::vector<float>& O,
                           int B, int H, int G, int D, int sq, int max_seq,
-                          int past_len, float scale) {
+                          int past_len, float scale, int sink_mode,
+                          const std::vector<float>& sink) {
   const int HPG = H / G;
   const int total = past_len + sq;
   std::vector<float> scores(total);
@@ -83,6 +103,10 @@ static void cpu_reference(const std::vector<float>& Q,
           scores[k] = std::exp(scores[k] - m);
           l += scores[k];
         }
+        if (sink_mode == kSinkPerHead)
+          l += std::exp(sink[hq] - m);
+        else if (sink_mode == kSinkSmooth)
+          l += std::exp(0.0f - m);
         const float inv = (l > 0.0f) ? 1.0f / l : 0.0f;
         float* o = &O[((size_t)(b * sq + s) * H + hq) * D];
         for (int e = 0; e < D; ++e) o[e] = 0.0f;
@@ -108,13 +132,14 @@ static double rel_l2(const std::vector<float>& a, const std::vector<float>& b) {
 
 static bool run_case(const Case& c, int iters) {
   const int B = c.B, H = c.H, G = c.G, D = c.D, sq = c.sq;
-  const int max_seq = sq;       // pure-prefill cache buffer
-  const int past_len = 0, skv = sq;
+  const int past_len = c.past;
+  const int skv = past_len + sq;   // total_seq
+  const int max_seq = skv;         // cache buffer holds exactly total_seq
   const float scale = 1.0f / std::sqrt((float)D);
 
   const size_t qn = (size_t)B * sq * H * D;
   const size_t kn = (size_t)B * G * max_seq * D;
-  std::mt19937 rng(1234 + sq + D);
+  std::mt19937 rng(1234 + sq + D + past_len + c.sink_mode);
   std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
 
   std::vector<float> Qf(qn), Kf(kn), Vf(kn), Oref(qn);
@@ -122,31 +147,57 @@ static bool run_case(const Case& c, int iters) {
   for (auto& x : Kf) x = dist(rng);
   for (auto& x : Vf) x = dist(rng);
 
-  cpu_reference(Qf, Kf, Vf, Oref, B, H, G, D, sq, max_seq, past_len, scale);
+  // gpt-oss ships sink logits around O(1); span a wider range so a sign or
+  // scaling error in the log2-space conversion cannot hide. Round-trip through
+  // fp16 first, because that is what the kernel reads -- otherwise the
+  // comparison would charge the kernel for the host's rounding.
+  std::vector<__half> sinkh(H);
+  std::vector<float> sinkf(H);
+  for (int h = 0; h < H; ++h) {
+    sinkh[h] = __float2half(-2.0f + 4.0f * (float)h / (float)H);
+    sinkf[h] = __half2float(sinkh[h]);
+  }
+
+  cpu_reference(Qf, Kf, Vf, Oref, B, H, G, D, sq, max_seq, past_len, scale,
+                c.sink_mode, sinkf);
 
   std::vector<__half> Qh(qn), Kh(kn), Vh(kn);
   for (size_t i = 0; i < qn; ++i) Qh[i] = __float2half(Qf[i]);
   for (size_t i = 0; i < kn; ++i) { Kh[i] = __float2half(Kf[i]); Vh[i] = __float2half(Vf[i]); }
 
-  __half *dQ, *dK, *dV, *dO;
+  __half *dQ, *dK, *dV, *dO, *dSink;
   HIP_CHECK(hipMalloc(&dQ, qn * sizeof(__half)));
   HIP_CHECK(hipMalloc(&dK, kn * sizeof(__half)));
   HIP_CHECK(hipMalloc(&dV, kn * sizeof(__half)));
   HIP_CHECK(hipMalloc(&dO, qn * sizeof(__half)));
+  HIP_CHECK(hipMalloc(&dSink, (size_t)H * sizeof(__half)));
   HIP_CHECK(hipMemcpy(dQ, Qh.data(), qn * sizeof(__half), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(dK, Kh.data(), kn * sizeof(__half), hipMemcpyHostToDevice));
   HIP_CHECK(hipMemcpy(dV, Vh.data(), kn * sizeof(__half), hipMemcpyHostToDevice));
+  HIP_CHECK(hipMemcpy(dSink, sinkh.data(), (size_t)H * sizeof(__half), hipMemcpyHostToDevice));
 
   // Route through the unified entry (same path the runtime takes); it dispatches
   // v5 (D==64) / v7 (D==128) internally.
+  const void* sink_arg = (c.sink_mode == kSinkPerHead) ? (const void*)dSink : nullptr;
+  const int smooth_arg = (c.sink_mode == kSinkSmooth) ? 1 : 0;
   auto launch = [&]() {
-    return hip_gqa_flash_prefill_v2(nullptr, dQ, dK, dV, dO, B, H, G, sq, skv, D,
-                                 max_seq, past_len, scale);
+    return hip_gqa_flash_prefill_v3(nullptr, dQ, dK, dV, dO, B, H, G, sq, skv, D,
+                                    max_seq, past_len, scale,
+                                    /*local_window_size=*/-1, sink_arg, H,
+                                    smooth_arg);
   };
 
   int rc = launch();  // first call self-tunes
   HIP_CHECK(hipDeviceSynchronize());
-  if (rc != 0) { fprintf(stderr, "kernel returned %d\n", rc); return false; }
+  if (c.expect_reject) {
+    const bool ok = (rc != 0);
+    printf("%-16s B%d H%d G%d(hpg%d) D%-3d sq=%-5d past=%-5d %-6s | rc=%d (expected decline)  %s\n",
+           c.name, B, H, G, H / G, D, sq, past_len,
+           c.sink_mode == kSinkPerHead ? "sink" : "-", rc, ok ? "PASS" : "FAIL");
+    hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO); hipFree(dSink);
+    return ok;
+  }
+  if (rc != 0) { fprintf(stderr, "%s: kernel returned %d\n", c.name, rc); return false; }
 
   std::vector<__half> Oh(qn);
   HIP_CHECK(hipMemcpy(Oh.data(), dO, qn * sizeof(__half), hipMemcpyDeviceToHost));
@@ -167,13 +218,16 @@ static bool run_case(const Case& c, int iters) {
   HIP_CHECK(hipEventElapsedTime(&ms, e0, e1));
   ms /= iters;
 
+  const char* sink_tag = (c.sink_mode == kSinkPerHead) ? "sink"
+                       : (c.sink_mode == kSinkSmooth)  ? "smooth"
+                                                       : "-";
   const bool pass = err < 2e-3;
-  printf("%-16s B%d H%d G%d(hpg%d) D%-3d sq=%-5d | relL2=%.2e  latency=%.4f ms  %s (v%d)\n",
-         c.name, B, H, G, H / G, D, sq, err, ms, pass ? "PASS" : "FAIL",
-         D == 64 ? 5 : 7);
+  printf("%-16s B%d H%d G%d(hpg%d) D%-3d sq=%-5d past=%-5d %-6s | relL2=%.2e  latency=%.4f ms  %s (v%d)\n",
+         c.name, B, H, G, H / G, D, sq, past_len, sink_tag, err, ms,
+         pass ? "PASS" : "FAIL", D == 64 ? 5 : 7);
 
   hipEventDestroy(e0); hipEventDestroy(e1);
-  hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO);
+  hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO); hipFree(dSink);
   return pass;
 }
 
@@ -183,12 +237,24 @@ int main(int argc, char** argv) {
     if (!std::strcmp(argv[i], "--iters") && i + 1 < argc) iters = std::atoi(argv[++i]);
 
   const Case cases[] = {
-      {"gpt_oss-20b",  1, 64, 8,  64, 512},
-      {"gpt_oss-20b",  1, 64, 8,  64, 2048},
-      {"llama-3.2-1b", 1, 32, 8,  64, 512},
-      {"llama-3.2-1b", 1, 32, 8,  64, 2048},
-      {"llama-3.1-8b", 1, 32, 8, 128, 512},
-      {"llama-3.1-8b", 1, 32, 8, 128, 2048},
+      // No-sink regression set (must stay as accurate as before).
+      {"gpt_oss-20b",  1, 64, 8,  64, 512,  0,    kSinkNone,    false},
+      {"gpt_oss-20b",  1, 64, 8,  64, 2048, 0,    kSinkNone,    false},
+      {"llama-3.2-1b", 1, 32, 8,  64, 512,  0,    kSinkNone,    false},
+      {"llama-3.2-1b", 1, 32, 8,  64, 2048, 0,    kSinkNone,    false},
+      {"llama-3.1-8b", 1, 32, 8, 128, 512,  0,    kSinkNone,    false},
+      {"llama-3.1-8b", 1, 32, 8, 128, 2048, 0,    kSinkNone,    false},
+      // Sink set at the real gpt-oss geometry (H=64, G=8, d=64), including
+      // chunked prefill (past > 0), which is what a 16k prompt actually runs.
+      {"gpt_oss-sink",  1, 64, 8,  64, 512,  0,    kSinkPerHead, false},
+      {"gpt_oss-sink",  1, 64, 8,  64, 2048, 0,    kSinkPerHead, false},
+      {"gpt_oss-sink",  1, 64, 8,  64, 512,  512,  kSinkPerHead, false},
+      {"gpt_oss-sink",  1, 64, 8,  64, 512,  8192, kSinkPerHead, false},
+      {"gpt_oss-smooth",1, 64, 8,  64, 512,  0,    kSinkSmooth,  false},
+      {"gpt_oss-smooth",1, 64, 8,  64, 512,  512,  kSinkSmooth,  false},
+      // A sink must not silently apply at d == 128: v3 declines so the runtime
+      // falls back to the decomposed path, which does implement it.
+      {"llama-sink-d128",1, 32, 8, 128, 512, 0,    kSinkPerHead, true},
   };
   int fails = 0;
   for (const auto& c : cases) if (!run_case(c, iters)) ++fails;
