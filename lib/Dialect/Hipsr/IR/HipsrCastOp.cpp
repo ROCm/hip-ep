@@ -13,9 +13,7 @@
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/LLVMIR/FunctionCallUtils.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
-#include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/Transforms/DialectConversion.h"
 
@@ -55,6 +53,7 @@ void CastOp::populateShapeRegion(OpBuilder &builder, Block &shapeBlock) {
 namespace {
 
 constexpr const char *kWrapCast = "wrap_cast";
+using CastCall = RuntimeFunc<i32, hostPtr, devicePtr, devicePtr, i64, i64, i64>;
 
 struct CastLowering : ConvertOpToLLVMPattern<CastOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -64,9 +63,6 @@ struct CastLowering : ConvertOpToLLVMPattern<CastOp> {
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
-    MLIRContext *ctx = rewriter.getContext();
-    Type hostPtrType = LLVM::LLVMPointerType::get(ctx, 0);
-    Type devicePtrType = LLVM::LLVMPointerType::get(ctx, 1);
 
     auto inputType = dyn_cast<MemRefType>(op.getInput().getType());
     auto outputType = dyn_cast<MemRefType>(op.getInit().getType());
@@ -97,28 +93,16 @@ struct CastLowering : ConvertOpToLLVMPattern<CastOp> {
           LLVM::MulOp::create(rewriter, loc, numElements, dim).getResult();
     }
 
-    SmallVector<Type, 6> paramTypes = {
-        hostPtrType,   // state
-        devicePtrType, // input
-        devicePtrType, // output
-        i64Type,       // num_elements
-        i64Type,       // src_data_type
-        i64Type        // dst_data_type
-    };
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapCast, paramTypes, rewriter.getI32Type());
-    if (failed(funcOp)) {
+    auto castFunc =
+        CastCall::lookupOrCreateFn(rewriter, loc, module, kWrapCast);
+    if (failed(castFunc)) {
       return failure();
     }
-
-    SmallVector<Value, 6> args = {
-        adaptor.getCtx(),
-        extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
-        extractContiguousMemRefPtr(adaptor.getInit(), rewriter, loc),
-        numElements,
-        createI64Const(srcDataType),
-        createI64Const(dstDataType)};
-    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    if (failed(castFunc->call(adaptor.getCtx(), adaptor.getInput(),
+                              adaptor.getInit(), numElements, srcDataType,
+                              dstDataType))) {
+      return failure();
+    }
     rewriter.eraseOp(op);
     return success();
   }
