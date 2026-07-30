@@ -741,7 +741,7 @@ __global__ void la_pf_pass1_local(
     const T* __restrict__ beta_in,
     float* __restrict__ Uloc_g,   // [B*Hkv*nchunks, C*dv]
     float* __restrict__ W_g,      // [B*Hkv*nchunks, C*dk]
-    float* __restrict__ Kt_g,     // [B*Hkv*nchunks, C*dk]
+    float* __restrict__ rlast_g,  // [B*Hkv*nchunks, C]  (a_last/A_s per token)
     float* __restrict__ alast_g,  // [B*Hkv*nchunks]
     int seq_len, int Hkv, int n_k, int dk, int dv,
     int beta_per_head, int nchunks)
@@ -853,31 +853,38 @@ __global__ void la_pf_pass1_local(
         __syncthreads();
     }
     for (int idx = tid; idx < LA_CHUNK * dk; idx += nthreads) {
-        int t = idx / dk, i = idx % dk;
-        float wv = (t < Ceff) ? Buf[idx] : 0.f;
-        float kv = (t < Ceff) ? (rlast[t] * __half2float(Ksm[t * dk + i])) : 0.f;
-        W_g[base * (LA_CHUNK * dk) + idx]  = wv;
-        Kt_g[base * (LA_CHUNK * dk) + idx] = kv;
+        int t = idx / dk;
+        W_g[base * (LA_CHUNK * dk) + idx] = (t < Ceff) ? Buf[idx] : 0.f;
     }
+    // Store only the per-token rlast scalar (C floats/chunk) instead of the
+    // full Ktilde = rlast*K tile (C*dk floats/chunk). The scan rebuilds Ktilde
+    // from the original key tensor + rlast (bit-identical values, ~1/dk the
+    // scratch). rlast is 0 for the padded tail (t >= Ceff) so Ktilde vanishes
+    // there without the scan needing to read out-of-range key rows.
+    for (int t = tid; t < LA_CHUNK; t += nthreads)
+        rlast_g[base * LA_CHUNK + t] = (t < Ceff) ? rlast[t] : 0.f;
     if (tid == 0) alast_g[base] = a_last;
 }
 
 // Pass 2: per-head sequential affine scan over chunks.
 template <typename T>
 __global__ void la_pf_scan(
+    const T* __restrict__ key,     // [B, seq, n_k*dk] -- to rebuild Ktilde
     const float* __restrict__ Uloc_g,
     const float* __restrict__ W_g,
-    const float* __restrict__ Kt_g,
+    const float* __restrict__ rlast_g,  // [B*Hkv*nchunks, C]
     const float* __restrict__ alast_g,
     __half* __restrict__ S0_g,     // [B*Hkv*nchunks, dk*dv]  chunk-start states
     T* __restrict__ state,         // final state out [B,Hkv,dk,dv]
-    int Hkv, int dk, int dv, int nchunks)
+    int seq_len, int Hkv, int n_k, int dk, int dv, int nchunks)
 {
     const int bg = blockIdx.x;
     const int b  = bg / Hkv;
     const int g  = bg % Hkv;
     const int tid = threadIdx.x;
     const int nthreads = blockDim.x;
+    const int h_k = g * n_k / Hkv;
+    const int64_t k_bs = (int64_t)seq_len * n_k * dk;
     const int64_t state_bs = (int64_t)Hkv * dk * dv;
     T* Sout = state + b * state_bs + (int64_t)g * dk * dv;
 
@@ -894,6 +901,8 @@ __global__ void la_pf_scan(
 
     for (int c = 0; c < nchunks; c++) {
         const int64_t base = ((int64_t)(b * Hkv + g) * nchunks + c);
+        const int c0   = c * LA_CHUNK;
+        const int Ceff = min(LA_CHUNK, seq_len - c0);
         // store chunk-start state
         for (int idx = tid; idx < dk * dv; idx += nthreads)
             S0_g[base * (dk * dv) + idx] = Ssm[idx];
@@ -911,9 +920,17 @@ __global__ void la_pf_scan(
             Buf2[idx] = Uloc_g[base * (LA_CHUNK * dv) + idx] - acc;
         }
         __syncthreads();
-        // load Ktilde tile into Buf1 (W no longer needed)
-        for (int idx = tid; idx < LA_CHUNK * dk; idx += nthreads)
-            Buf1[idx] = Kt_g[base * (LA_CHUNK * dk) + idx];
+        // Rebuild Ktilde[s][i] = rlast[s]*K[s][i] into Buf1 (W no longer
+        // needed). rlast_g is 0 for s >= Ceff, so the padded tail contributes
+        // nothing; guard the key read so it never indexes past seq_len.
+        for (int idx = tid; idx < LA_CHUNK * dk; idx += nthreads) {
+            int t = idx / dk, i = idx % dk;
+            float rl = rlast_g[base * LA_CHUNK + t];
+            Buf1[idx] = (t < Ceff)
+                ? rl * to_float(key[b * k_bs + (int64_t)(c0 + t) * n_k * dk +
+                                    (int64_t)h_k * dk + i])
+                : 0.f;
+        }
         const float a_last = alast_g[base];
         __syncthreads();
         // S1[i][j] = a_last*S0[i][j] + sum_s Ktilde[s][i] U[s][j]
@@ -1051,46 +1068,59 @@ __global__ void __launch_bounds__(256) la_pf_pass3_wmma(
     }
 }
 
-// Persistent scratch for the chunk-parallel path (grows as needed, freed never).
-static void*  g_la_scratch = nullptr;
-static size_t g_la_scratch_bytes = 0;
+// Scratch layout for the chunk-parallel path. The buffer itself is owned by
+// the runtime (RuntimeState::la_scratch, grown on demand, freed on session
+// cleanup) and passed in; this kernel TU only computes the sub-buffer offsets.
+// Kept in one place so hip_linear_attention_prefill_scratch_bytes (used by the
+// wrapper to size the pool) and la_launch_parallel cannot drift apart.
+struct LaScratchLayout { size_t oU, oW, oR, oA, oS, total; };
+
+static inline LaScratchLayout la_scratch_layout(int B, int seq_len, int Hkv,
+                                                int dk, int dv) {
+    const int nchunks = (seq_len + LA_CHUNK - 1) / LA_CHUNK;
+    const int64_t ncb = (int64_t)B * Hkv * nchunks;   // # (head,chunk) blocks
+    auto align = [](size_t x){ return (x + 255) & ~((size_t)255); };
+    const size_t sz_Uloc  = (size_t)ncb * LA_CHUNK * dv * sizeof(float);
+    const size_t sz_W     = (size_t)ncb * LA_CHUNK * dk * sizeof(float);
+    const size_t sz_rlast = (size_t)ncb * LA_CHUNK * sizeof(float);
+    const size_t sz_alast = (size_t)ncb * sizeof(float);
+    const size_t sz_S0    = (size_t)ncb * dk * dv * sizeof(__half);
+    LaScratchLayout L;
+    L.oU = 0;
+    L.oW = align(L.oU + sz_Uloc);
+    L.oR = align(L.oW + sz_W);
+    L.oA = align(L.oR + sz_rlast);
+    L.oS = align(L.oA + sz_alast);
+    L.total = align(L.oS + sz_S0);
+    return L;
+}
+
+// Bytes of runtime scratch the chunk-parallel prefill needs for this shape.
+// Returns 0 for shapes the parallel path does not run (caller sizes nothing).
+extern "C" HIP_KERNEL_API size_t hip_linear_attention_prefill_scratch_bytes(
+    int B, int seq_len, int Hkv, int dk, int dv) {
+    if (B <= 0 || seq_len <= 1 || Hkv <= 0 || dk <= 0 || dv <= 0) return 0;
+    return la_scratch_layout(B, seq_len, Hkv, dk, dv).total;
+}
 
 template <typename T>
 static int la_launch_parallel(
     hipStream_t s, const T* q, const T* k, const T* v, const T* dec,
     const T* beta, T* state, T* out,
     int B, int seq_len, int Hq, int Hkv, int Nk, int dk, int dv,
-    float scale, int beta_per_head)
+    float scale, int beta_per_head, void* scratch, size_t scratch_bytes)
 {
     const int nchunks = (seq_len + LA_CHUNK - 1) / LA_CHUNK;
     const int64_t ncb = (int64_t)B * Hkv * nchunks;   // # (head,chunk) blocks
 
-    const size_t sz_Uloc  = (size_t)ncb * LA_CHUNK * dv * sizeof(float);
-    const size_t sz_W     = (size_t)ncb * LA_CHUNK * dk * sizeof(float);
-    const size_t sz_Kt    = (size_t)ncb * LA_CHUNK * dk * sizeof(float);
-    const size_t sz_alast = (size_t)ncb * sizeof(float);
-    const size_t sz_S0    = (size_t)ncb * dk * dv * sizeof(__half);
-    auto align = [](size_t x){ return (x + 255) & ~((size_t)255); };
-    const size_t oU = 0;
-    const size_t oW = align(oU + sz_Uloc);
-    const size_t oK = align(oW + sz_W);
-    const size_t oA = align(oK + sz_Kt);
-    const size_t oS = align(oA + sz_alast);
-    const size_t total = align(oS + sz_S0);
-
-    if (total > g_la_scratch_bytes) {
-        if (g_la_scratch) hipFree(g_la_scratch);
-        if (hipMalloc(&g_la_scratch, total) != hipSuccess) {
-            g_la_scratch = nullptr; g_la_scratch_bytes = 0; return 1;
-        }
-        g_la_scratch_bytes = total;
-    }
-    char* sp = (char*)g_la_scratch;
-    float*  Uloc_g  = (float*)(sp + oU);
-    float*  W_g     = (float*)(sp + oW);
-    float*  Kt_g    = (float*)(sp + oK);
-    float*  alast_g = (float*)(sp + oA);
-    __half* S0_g    = (__half*)(sp + oS);
+    const LaScratchLayout L = la_scratch_layout(B, seq_len, Hkv, dk, dv);
+    if (!scratch || scratch_bytes < L.total) return 1;  // caller under-sized it
+    char* sp = (char*)scratch;
+    float*  Uloc_g  = (float*)(sp + L.oU);
+    float*  W_g     = (float*)(sp + L.oW);
+    float*  rlast_g = (float*)(sp + L.oR);
+    float*  alast_g = (float*)(sp + L.oA);
+    __half* S0_g    = (__half*)(sp + L.oS);
 
     const int block = LA_PAR_THREADS;
     // Pass 1 LDS: Tm + Buf(=C*dv) + 4 vecs (float), plus K tile (half).
@@ -1110,10 +1140,11 @@ static int la_launch_parallel(
     const int scan_block = 1024;
 
     hipLaunchKernelGGL(la_pf_pass1_local<T>, dim3((unsigned)ncb), dim3(block),
-        s1, s, k, v, dec, beta, Uloc_g, W_g, Kt_g, alast_g,
+        s1, s, k, v, dec, beta, Uloc_g, W_g, rlast_g, alast_g,
         seq_len, Hkv, Nk, dk, dv, beta_per_head, nchunks);
     hipLaunchKernelGGL(la_pf_scan<T>, dim3((unsigned)(B * Hkv)), dim3(scan_block),
-        s2, s, Uloc_g, W_g, Kt_g, alast_g, S0_g, state, Hkv, dk, dv, nchunks);
+        s2, s, k, Uloc_g, W_g, rlast_g, alast_g, S0_g, state,
+        seq_len, Hkv, Nk, dk, dv, nchunks);
     hipLaunchKernelGGL(la_pf_pass3_wmma<T>, dim3((unsigned)ncb), dim3(256),
         s3, s, q, k, dec, Uloc_g, W_g, S0_g, out,
         seq_len, Hq, Hkv, Nk, dk, dv, scale, nchunks);
@@ -1147,7 +1178,9 @@ extern "C" int hip_linear_attention_prefill_chunked(
     int64_t update_rule,
     int64_t decay_per_key_dim,
     int64_t beta_per_head,
-    int64_t type)
+    int64_t type,
+    void* scratch,
+    size_t scratch_bytes)
 {
     // Decline (return 1 -> caller falls back to per-token loop) for any config
     // this kernel does not implement.
@@ -1178,14 +1211,16 @@ extern "C" int hip_linear_attention_prefill_chunked(
             static_cast<const float*>(value), static_cast<const float*>(decay),
             static_cast<const float*>(beta), static_cast<float*>(state),
             static_cast<float*>(output), (int)B, (int)seq_len, (int)Hq,
-            (int)Hkv, (int)Nk, dk_i, dv_i, scale, beta_per_head_i);
+            (int)Hkv, (int)Nk, dk_i, dv_i, scale, beta_per_head_i,
+            scratch, scratch_bytes);
     else if (type == 1)
         rc = la_launch_parallel<__half>(hip_stream,
             static_cast<const __half*>(query), static_cast<const __half*>(key),
             static_cast<const __half*>(value), static_cast<const __half*>(decay),
             static_cast<const __half*>(beta), static_cast<__half*>(state),
             static_cast<__half*>(output), (int)B, (int)seq_len, (int)Hq,
-            (int)Hkv, (int)Nk, dk_i, dv_i, scale, beta_per_head_i);
+            (int)Hkv, (int)Nk, dk_i, dv_i, scale, beta_per_head_i,
+            scratch, scratch_bytes);
     else if (type == 2)
         rc = la_launch_parallel<__hip_bfloat16>(hip_stream,
             static_cast<const __hip_bfloat16*>(query),
@@ -1195,7 +1230,8 @@ extern "C" int hip_linear_attention_prefill_chunked(
             static_cast<const __hip_bfloat16*>(beta),
             static_cast<__hip_bfloat16*>(state),
             static_cast<__hip_bfloat16*>(output), (int)B, (int)seq_len,
-            (int)Hq, (int)Hkv, (int)Nk, dk_i, dv_i, scale, beta_per_head_i);
+            (int)Hq, (int)Hkv, (int)Nk, dk_i, dv_i, scale, beta_per_head_i,
+            scratch, scratch_bytes);
     else
         return 1;
 
