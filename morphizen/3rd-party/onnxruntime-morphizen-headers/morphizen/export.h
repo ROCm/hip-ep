@@ -12,12 +12,24 @@
 #define MORPHIZEN_DLL_SPEC
 #endif
 #else
-// Empty on non-Windows: protobuf v34's generated *.pb.h emits
-//   class MORPHIZEN_DLL_SPEC [[gnu::warn_unused]] Name
-// and GCC rejects a GNU __attribute__ placed before the C++11 [[...]]
-// attribute (clang tolerates it). Default ELF visibility already exports these
-// symbols, so an empty decoration is correct and portable across GCC and clang.
-#define MORPHIZEN_DLL_SPEC
+#define MORPHIZEN_DLL_SPEC __attribute__((visibility("default")))
+#endif
+
+// Decoration protoc stamps on the generated *.pb.h classes (passed as
+// --cpp_out=dllexport_decl=...). It is deliberately NOT MORPHIZEN_DLL_SPEC:
+// protobuf v34 emits
+//   class MORPHIZEN_PROTO_DLL_SPEC [[gnu::warn_unused]] Name
+// and GCC rejects a GNU __attribute__ placed before a C++11 [[...]] attribute
+// (only clang tolerates it). Generated protobuf symbols do not need the
+// decoration on ELF -- default visibility plus the `*morphizen*` version script
+// already export them -- so it is empty there, while the hand-written API above
+// keeps its explicit visibility attribute. Keep in sync with the
+// MORPHIZEN_PROTO_DLL_SPEC compile definition in morphizen-core/cmake/
+// proto.cmake and morphizen-pattern/CMakeLists.txt.
+#if defined(_WIN32)
+#define MORPHIZEN_PROTO_DLL_SPEC MORPHIZEN_DLL_SPEC
+#else
+#define MORPHIZEN_PROTO_DLL_SPEC
 #endif
 
 #if defined(_WIN32)

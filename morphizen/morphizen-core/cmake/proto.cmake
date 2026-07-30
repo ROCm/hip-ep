@@ -23,7 +23,7 @@ foreach(PROTO_FILE ${PROTO_FILES})
     COMMAND protobuf::protoc
     ARGS
       --proto_path=${protobuf_SOURCE_DIR}/src
-      --cpp_out=dllexport_decl=MORPHIZEN_DLL_SPEC:${CMAKE_CURRENT_BINARY_DIR}/morphizen
+      --cpp_out=dllexport_decl=MORPHIZEN_PROTO_DLL_SPEC:${CMAKE_CURRENT_BINARY_DIR}/morphizen
       -I ${CMAKE_CURRENT_SOURCE_DIR}/src
       ${CMAKE_CURRENT_SOURCE_DIR}/${PROTO_FILE}
     DEPENDS ${PROTO_FILE})
@@ -32,23 +32,25 @@ foreach(PROTO_FILE ${PROTO_FILES})
 endforeach(PROTO_FILE ${PROTO_FILES})
 
 if(MSVC)
-  set(MORPHIZEN_DLL_SPEC "__declspec(dllexport)")
+  set(MORPHIZEN_PROTO_DLL_SPEC "__declspec(dllexport)")
   set_source_files_properties(
     ${PROTO_SRCS}
-    PROPERTIES COMPILE_DEFINITIONS "MORPHIZEN_DLL_SPEC=${MORPHIZEN_DLL_SPEC}"
+    PROPERTIES COMPILE_DEFINITIONS "MORPHIZEN_PROTO_DLL_SPEC=${MORPHIZEN_PROTO_DLL_SPEC}"
     COMPILE_FLAGS "/w")
 else(MSVC)
-  # Leave the dllexport decoration empty on non-MSVC toolchains. protobuf v34's
-  # generated code emits `class <DLL_SPEC> [[gnu::warn_unused]] Name`; a GNU
-  # __attribute__ placed before the C++11 [[...]] attribute is rejected by GCC
-  # (only accepted by clang). On Linux the default symbol visibility already
-  # exports these proto symbols, so an empty decoration is both correct and
-  # portable across GCC and clang hosts.
+  # Empty decoration for the generated protobuf classes only (the hand-written
+  # API keeps __attribute__((visibility("default"))) via morphizen/export.h).
+  # protobuf v34 emits `class <decl> [[gnu::warn_unused]] Name`, and GCC rejects
+  # a GNU __attribute__ placed before a C++11 [[...]] attribute. Default ELF
+  # visibility plus the `*morphizen*` version script already export these
+  # symbols, so dropping the decoration here costs nothing. Must stay in sync
+  # with MORPHIZEN_PROTO_DLL_SPEC in morphizen/export.h, which supplies the
+  # macro to every other translation unit that includes the generated *.pb.h.
   set_source_files_properties(
     ${PROTO_SRCS}
     PROPERTIES
     COMPILE_DEFINITIONS
-    "MORPHIZEN_DLL_SPEC="
+    "MORPHIZEN_PROTO_DLL_SPEC="
     COMPILE_FLAGS
     "-Wno-unused-variable -Wno-conversion")
 endif(MSVC)
