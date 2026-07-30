@@ -100,8 +100,7 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
         op, "could not resolve `quantize_axis` from GBQ data/scales shapes");
 
   bool unsignedQuantStorage = gbq::resolveUnsignedQuantStorage(
-      bits, op->hasAttr("unsigned_quant_storage"), dataType.getElementType(),
-      data);
+      bits, op->hasAttr("unsigned_quant_storage"), dataType.getElementType());
 
   auto bitsAttr = rewriter.getI64IntegerAttr(bits);
   auto blockSizeAttr = rewriter.getI64IntegerAttr(blockSize);

@@ -14,8 +14,6 @@
 #define HIP_CONVERSION_GATHERBLOCKQUANTIZED_UTILS_H
 
 #include "hip/Dialect/IR/HipDialect.h"
-#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
-#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "llvm/ADT/SmallVector.h"
 #include <optional>
 
@@ -30,58 +28,15 @@ inline bool isUnsignedMlirElementType(Type elemType) {
   return false;
 }
 
-/// Walk backward through layout-preserving ops to the underlying value.
-inline Value traceGbqDataToSource(Value value) {
-  Value cur = value;
-  for (int depth = 0; depth < 12; ++depth) {
-    Operation *op = cur.getDefiningOp();
-    if (!op)
-      break;
-    if (isa<bufferization::ToTensorOp>(op)) {
-      cur = op->getOperand(0);
-      continue;
-    }
-    if (op->getName().getStringRef() == "onnx.Constant")
-      return cur;
-    if (op->getNumOperands() == 0)
-      break;
-    StringRef name = op->getName().getStringRef();
-    if (name == "onnx.Reshape" || name == "onnx.Transpose" ||
-        name == "onnx.Squeeze" || name == "onnx.Unsqueeze" ||
-        name == "onnx.Flatten" || name == "onnx.Gather" ||
-        name == "onnx.Identity") {
-      cur = op->getOperand(0);
-      continue;
-    }
-    break;
-  }
-  return cur;
-}
-
 /// Resolve unsigned storage for GBQ from ONNX rules + MLIR types.
 /// bits==8 always uses uint8 semantics. bits==4 uses ui8 source type or attr.
 inline bool resolveUnsignedQuantStorage(int64_t bits, bool hasUnsignedAttr,
-                                        Type dataElemType, Value dataValue) {
+                                        Type dataElemType) {
   if (hasUnsignedAttr)
     return true;
   if (bits == 8)
     return true;
-  if (isUnsignedMlirElementType(dataElemType))
-    return true;
-
-  Value source = traceGbqDataToSource(dataValue);
-  if (auto global = source.getDefiningOp<memref::GetGlobalOp>()) {
-    if (isUnsignedMlirElementType(global.getType().getElementType()))
-      return true;
-  }
-  if (auto *constOp = source.getDefiningOp()) {
-    if (constOp->getName().getStringRef() == "onnx.Constant") {
-      if (auto ty = dyn_cast<RankedTensorType>(constOp->getResult(0).getType()))
-        if (isUnsignedMlirElementType(ty.getElementType()))
-          return true;
-    }
-  }
-  return false;
+  return isUnsignedMlirElementType(dataElemType);
 }
 
 /// Returns true when `axis` satisfies GBQ block-quant shape invariants.
