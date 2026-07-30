@@ -440,6 +440,31 @@ hipblasLtMatmul(hipblasLtHandle_t handle, hipblasLtMatmulDesc_t matmul_desc,
   } while (0)
 // hipGetErrorString is now a real mock function declared above
 
+int wrap_im2d2col(RuntimeState *state, const void *input, int64_t data_type,
+                  int64_t C, int64_t H, int64_t W, int64_t kh, int64_t kw,
+                  int64_t pad_top, int64_t pad_bottom, int64_t pad_left,
+                  int64_t pad_right, int64_t stride_h, int64_t stride_w,
+                  int64_t dilation_h, int64_t dilation_w, void *output,
+                  int64_t out_h, int64_t out_w) {
+
+  MOCK_PRINT("[MOCK] wrap_im2d2col(\n");
+  MOCK_PRINT("[MOCK]   input=[%lld,%lld,%lld],\n", (long long)C, (long long)H,
+             (long long)W);
+  MOCK_PRINT("[MOCK]   output=[%lld*%lld*%lld,%lld*%lld],\n", (long long)C,
+             (long long)kh, (long long)kw, (long long)out_h, (long long)out_w);
+  MOCK_PRINT("[MOCK]   stride=[%lld,%lld], pad=[%lld,%lld,%lld,%lld], "
+             "dilation=[%lld,%lld], group=%lld)\n",
+             (long long)stride_h, (long long)stride_w, (long long)pad_top,
+             (long long)pad_bottom, (long long)pad_left, (long long)pad_right,
+             (long long)dilation_h, (long long)dilation_w, (long long)1);
+
+  int64_t elem_bytes = hipdnn_ep_datatype_size(data_type);
+  size_t elem = (elem_bytes > 0) ? (size_t)elem_bytes : sizeof(float);
+  size_t output_size = (size_t)C * kh * kw * out_h * out_w * elem;
+  memset(output, 0, output_size);
+  return 0;
+}
+
 // Mock wrapper implementations (called from generated MLIR code)
 
 int wrap_miopenConvolutionForward(
@@ -1344,6 +1369,14 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, int op_state_slot,
              (long long)element_size_bytes, (double)epsilon,
              bias ? "yes" : "no", input_skip_bias_sum ? "yes" : "no");
 
+  return 0;
+}
+
+int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
+              const void *B, const void *C, void *output, int64_t M, int64_t N,
+              int64_t K, float alpha, float beta, int64_t transA,
+              int64_t transB, int64_t typeCode, int64_t cDim0, int64_t cDim1) {
+  MOCK_PRINT("[MOCK] wrap_gemm\n");
   return 0;
 }
 
