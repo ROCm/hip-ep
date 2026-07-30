@@ -546,6 +546,26 @@ def Hip_HipblasltGraphOp : Hip_Op<"hipblaslt.graph", [SingleBlock, NoTerminator]
 
 // ===== MIOpen DNN Operations =================================================
 
+
+def Hip_Im2d2ColOp : Hip_DpsOp<"im2d2col"> {
+	let arguments = (ins
+		Hip_ContextType:$ctx,
+		Hip_TensorOrMemRef:$input,
+		Hip_TensorOrMemRef:$output,
+		I64ArrayAttr:$kernel_shape,
+		I64ArrayAttr:$strides,
+		I64ArrayAttr:$pads,
+		I64ArrayAttr:$dilations,
+		I64ArrayAttr:$out_dims
+	);
+
+	let assemblyFormat = [{
+		`(` $ctx `)` `ins` `(` $input `:` type($input) `)`
+		`outs` `(` $output `:` type($output) `)`
+		attr-dict (`:` type($result_tensors)^ )?
+	}];
+}
+
 def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[], /*outsAccessor=*/"Output",
                            /*autoReify=*/1,
                            /*autoInfer=*/1, /*declareInfer=*/1> {
