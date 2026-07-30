@@ -34,7 +34,7 @@ namespace {
 //       %scl_shape,  %scl_rank=2,
 //       %out_shape,  %out_rank=2,
 //       %bits=4, %block_size=16, %gather_axis=0, %quantize_axis=1,
-//       %data_dtype=7,    ; HIPDNN_EP_DATATYPE_UINT8 when unsigned_quant_storage
+//       %data_dtype=7,    ; HIPDNN_EP_DATATYPE_UINT8 packed nibbles
 //       %indices_dtype=4, ; HIPDNN_EP_DATATYPE_INT64
 //       %scales_dtype=1)  ; HIPDNN_EP_DATATYPE_HALF
 //

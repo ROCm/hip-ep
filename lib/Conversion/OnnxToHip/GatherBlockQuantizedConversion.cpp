@@ -2,13 +2,6 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-//===- GatherBlockQuantizedConversion.cpp - GBQ prepare + ONNX->HIP -------===//
-//
-// com.microsoft.GatherBlockQuantized:
-//   * pre-lowering prepare pattern (INT4 packing, unsigned, quantize_axis)
-//   * convert-onnx-to-hip pattern (onnx.Custom -> hip.gather_block_quantized)
-//
-//===----------------------------------------------------------------------===//
 
 #include "OnnxToHipUtils.h"
 
@@ -281,6 +274,33 @@ struct GatherBlockQuantizedPreparePattern : public RewritePattern {
 // ONNX com.microsoft.GatherBlockQuantized -> HIP gather_block_quantized
 //===----------------------------------------------------------------------===//
 //
+// Before:
+//   %out = "onnx.Custom"(%data, %indices, %scales, %zero_points)
+//       {function_name = "GatherBlockQuantized",
+//        domain_name = "com.microsoft",
+//        bits = 4 : si64, block_size = 16 : si64,
+//        gather_axis = 0 : si64, quantize_axis = 1 : si64}
+//       : (tensor<2048x96xui8>, tensor<8xi64>,
+//          tensor<2048x12xf16>, tensor<2048x12xui8>) -> tensor<8x96xf16>
+//
+// After:
+//   %init = tensor.empty() : tensor<8x96xf16>
+//   %out = hip.gather_block_quantized(%ctx)
+//       ins(%data, %indices, %scales :
+//           tensor<2048x96xui8>, tensor<8xi64>, tensor<2048x12xf16>)
+//       zero_points(%zp : tensor<2048x12xui8>)
+//       outs(%init : tensor<8x96xf16>)
+//       {bits = 4, block_size = 16, gather_axis = 0, quantize_axis = 1}
+//       : tensor<8x96xf16>
+//
+// Output shape derivation (mirrors plain Gather):
+//   out.shape = data.shape[0:gather_axis]
+//             ++ indices.shape
+//             ++ data.shape[gather_axis+1:]
+// The dequant block axis lives entirely inside `data`, so the output has
+// no extra "blocks" dim — the runtime fans out per-element on the gathered
+// rows during the dequantize step.
+//
 // Storage semantics (unsigned vs signed) come from ONNX T1 + bits, not from
 // signless MLIR integer types alone. `unsigned_quant_storage` is set when:
 //   - convert-onnx-to-hip prepare annotated the Custom op, or
@@ -326,6 +346,9 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
   mlir::Value indices = op->getOperand(1);
   mlir::Value scales = op->getOperand(2);
 
+  // ONNX models that omit `zero_points` may either drop the operand entirely
+  // (only 3 operands present) or pass an `onnx.NoValue` of !NoneType — match
+  // MatMulNBitsConversion's handling so both forms produce a null Value.
   mlir::Value zeroPoints;
   if (op->getNumOperands() >= 4) {
     mlir::Value v = op->getOperand(3);
@@ -333,6 +356,11 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
       zeroPoints = v;
   }
 
+  // Attribute extraction. Spec defaults:
+  //   bits           — required, 4 or 8
+  //   block_size     — required, power of 2 >= 16
+  //   gather_axis    — optional, default 0
+  //   quantize_axis  — optional, default 0
   auto bitsIntAttr = op->getAttrOfType<mlir::IntegerAttr>("bits");
   if (!bitsIntAttr)
     return rewriter.notifyMatchFailure(op, "missing required `bits` attribute");
@@ -373,6 +401,9 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
       gatherAxisIntAttr ? gatherAxisIntAttr.getSInt() : 0);
   auto quantAxisAttr = rewriter.getI64IntegerAttr(*quantAxisOr);
 
+  // Output shape: [data[0:gather_axis], indices.shape, data[gather_axis+1:]].
+  // Mirror GatherConversion's dim-mapping: walk output dims, source each
+  // dynamic dim from either data or indices according to its position.
   int64_t gatherAxis = gatherAxisAttr.getInt();
   int64_t normalizedGatherAxis =
       gatherAxis < 0 ? gatherAxis + dataType.getRank() : gatherAxis;
