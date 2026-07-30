@@ -218,22 +218,3 @@ func.func @shape_region_argument_count(
       outs(%init : tensor<4x8xf16>) : tensor<4x8xf16>
   return %result : tensor<4x8xf16>
 }
-
-// -----
-
-// Placeholder shape regions terminate with hipsr.shape_yield.
-func.func @wrong_shape_region_terminator(
-    %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<4x8xf16> {
-  // expected-error @+1 {{shape region must terminate with hipsr.shape_yield}}
-  %init = hipsr.placeholder(%ctx)
-      ins(%input : tensor<4x8xf32>)
-      {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
-      shape_region {
-  ^bb0(%shape_ctx: !hipsr.context, %shape_input: tensor<4x8xf32>):
-    cf.br ^bb0(%shape_ctx, %shape_input
-        : !hipsr.context, tensor<4x8xf32>)
-  }
-  %result = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
-      outs(%init : tensor<4x8xf16>) : tensor<4x8xf16>
-  return %result : tensor<4x8xf16>
-}

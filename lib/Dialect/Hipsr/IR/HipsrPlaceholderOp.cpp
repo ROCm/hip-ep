@@ -84,9 +84,5 @@ LogicalResult PlaceholderOp::verify() {
            << getNumOperands() << ", got " << block.getNumArguments();
   }
 
-  if (block.empty() || !isa<ShapeYieldOp>(block.back())) {
-    return emitOpError("shape region must terminate with hipsr.shape_yield");
-  }
-
   return success();
 }

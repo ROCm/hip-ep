@@ -11,7 +11,8 @@
 //===----------------------------------------------------------------------===//
 
 def Hipsr_PlaceholderOp : Hipsr_Op<
-    "placeholder", [IsolatedFromAbove, SingleBlock]> {
+    "placeholder",
+    [IsolatedFromAbove, SingleBlockImplicitTerminator<"ShapeYieldOp">]> {
   let summary = "Typed placeholder for hipsr DPS init operands";
   let description = [{
     Provides `outs` init values before a hipsr DPS op computes its output
