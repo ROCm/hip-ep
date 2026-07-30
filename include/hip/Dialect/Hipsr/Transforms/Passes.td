@@ -167,6 +167,11 @@ def HipsrPoolAllocPass : Pass<"hipsr-pool-alloc", "mlir::ModuleOp"> {
     Pools each `hipsr.pool_domain`'s `memref.alloc`s by lifetime:
     non-overlapping ones share one `hipsr.get_pool` buffer as `memref.view`s.
   }];
+  let options = [
+    Option<"emitPoolReport", "emit-pool-report", "bool", /*default=*/"false",
+           "Debug-only: emit remarks describing the pooling decisions. "
+           "No effect on generated code.">
+  ];
   let dependentDialects = [
     "::mlir::hipsr::HipsrDialect",
     "::mlir::memref::MemRefDialect",
