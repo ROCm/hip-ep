@@ -32,12 +32,6 @@ Value extractContiguousMemRefPtr(Value memrefDesc,
                                  ConversionPatternRewriter &rewriter,
                                  Location loc);
 
-Value getMemRefDimSize(MemRefType type, unsigned dimIdx, Value descriptor,
-                       ConversionPatternRewriter &rewriter, Location loc);
-
-Value computeNumElements(MemRefType type, Value descriptor,
-                         ConversionPatternRewriter &rewriter, Location loc);
-
 llvm::SmallVector<Value, 4> extractShape4D(MemRefType type, Value descriptor,
                                            ConversionPatternRewriter &rewriter,
                                            Location loc, Type i64Type);
