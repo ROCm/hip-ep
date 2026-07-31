@@ -3,9 +3,10 @@
  * Licensed under the MIT License.
  */
 
-#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
+#include "hip/Dialect/Hipsr/IR/HipsrShapeRegionPopulation.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 
 #include "llvm/ADT/STLExtras.h"
@@ -35,6 +36,19 @@ Operation *PlaceholderOp::getDpsConsumer() {
     }
   }
   return nullptr;
+}
+
+SmallVector<Type> PlaceholderOp::getShapeRegionArgumentTypes() {
+  SmallVector<Type> types;
+  if (getPlaceholderType() == PlaceholderType::Normal) {
+    types.assign(getInputs().size(), shape::ShapeType::get(getContext()));
+    return types;
+  }
+
+  types.reserve(getNumOperands());
+  types.push_back(getCtx().getType());
+  llvm::append_range(types, getInputs().getTypes());
+  return types;
 }
 
 LogicalResult PlaceholderOp::verify() {
@@ -94,15 +108,38 @@ LogicalResult PlaceholderOp::verify() {
     consumer = owner;
   }
 
-  if (getBodyRegion().empty()) {
+  bool isPopulated = !getShapeRegion().empty();
+  unsigned expectedInputCount = getShapedDpsInputCount(consumer);
+  if (!isPopulated) {
+    if (getInputs().size() < expectedInputCount) {
+      return emitOpError("empty shape region requires at least ")
+             << expectedInputCount << " shape-graph input(s) for "
+             << consumer->getName() << " consumer; got " << getInputs().size();
+    }
     return success();
   }
 
-  Block &block = *getBody();
-  if (block.getNumArguments() != getNumOperands()) {
-    return emitOpError("shape region block argument count must match operand "
-                       "count; expected ")
-           << getNumOperands() << ", got " << block.getNumArguments();
+  if (getInputs().size() != expectedInputCount) {
+    return emitOpError("populated shape region requires ")
+           << expectedInputCount << " shape-graph input(s) for "
+           << consumer->getName() << " consumer; got " << getInputs().size();
+  }
+
+  Block &block = getShapeRegion().front();
+  SmallVector<Type> expectedTypes = getShapeRegionArgumentTypes();
+  if (block.getNumArguments() != expectedTypes.size()) {
+    return emitOpError("shape region block argument count must match the '")
+           << stringifyPlaceholderType(getPlaceholderType())
+           << "' layout; expected " << expectedTypes.size() << ", got "
+           << block.getNumArguments();
+  }
+  for (auto [index, expectedType] : llvm::enumerate(expectedTypes)) {
+    Type actualType = block.getArgument(index).getType();
+    if (actualType != expectedType) {
+      return emitOpError("shape region block argument ")
+             << index << " type " << actualType
+             << " does not match expected type " << expectedType;
+    }
   }
 
   return success();

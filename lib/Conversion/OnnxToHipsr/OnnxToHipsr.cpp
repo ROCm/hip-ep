@@ -7,7 +7,7 @@
 // Converts ONNX dialect IR into hipsr dialect IR (tensor DPS). ONNX ops are
 // matched by name via the generic MLIR Operation API, so no onnx-mlir headers
 // are required. After rewriting, placeholder dependencies are separated from
-// data dependencies. A later pass fills shape regions via ShapeRegionInterface.
+// data dependencies. A later pass fills the empty placeholder shape regions.
 //
 //===----------------------------------------------------------------------===//
 
@@ -101,7 +101,7 @@ struct ConvertOnnxToHipsrPass
 
     // Same driver/config as convert-onnx-to-hip (greedy, ExistingOps): ONNX ops
     // are matched by name and only the ops present on entry are rewritten, so
-    // generated hipsr / shape-region IR is left untouched.
+    // generated hipsr and empty placeholder IR is left untouched.
     ::mlir::GreedyRewriteConfig config;
     config.setStrictness(::mlir::GreedyRewriteStrictness::ExistingOps);
     if (::mlir::failed(::mlir::applyPatternsGreedily(

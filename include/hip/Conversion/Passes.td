@@ -25,7 +25,8 @@ def ConvertOnnxToHipsrPass : Pass<"convert-onnx-to-hipsr", "mlir::ModuleOp"> {
     upstream placeholder results. Block arguments, `arith.constant`, and
     `hipsr.constant` results are graph roots.
 
-    Shape regions remain empty for the later population pass.
+    Placeholder shape regions remain empty for the later population pass;
+    compute operations do not own shape regions.
   }];
   let dependentDialects = [
     "::mlir::hipsr::HipsrDialect",

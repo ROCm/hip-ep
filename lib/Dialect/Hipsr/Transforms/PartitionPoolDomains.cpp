@@ -3,9 +3,7 @@
  * Licensed under the MIT License.
  */
 
-#include "hip/Dialect/Hipsr/IR/HipsrEndBarrierInterface.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
-#include "hip/Dialect/Hipsr/IR/HipsrStartBarrierInterface.h"
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -13,7 +11,6 @@
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Transforms/RegionUtils.h"
 
-#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
@@ -31,34 +28,6 @@ struct Domain {
   SmallVector<Operation *> operations;
   SmallVector<Value> results;
 };
-
-static bool isActiveStartBarrier(Operation &operation) {
-  auto barrier = dyn_cast<StartBarrierInterface>(operation);
-  return barrier && barrier.isStartBarrier();
-}
-
-static bool isActiveEndBarrier(Operation &operation) {
-  auto barrier = dyn_cast<EndBarrierInterface>(operation);
-  return barrier && barrier.isEndBarrier();
-}
-
-static bool usesAnyEndBarrierResult(
-    Operation &operation,
-    const llvm::SmallDenseSet<Value, 8> &endBarrierResults) {
-  if (llvm::any_of(operation.getOperands(), [&](Value operand) {
-        return endBarrierResults.contains(operand);
-      })) {
-    return true;
-  }
-
-  // A nested region can use an end-barrier result even when its parent op has
-  // no matching operand.
-  bool hasNestedUse = false;
-  visitUsedValuesDefinedAbove(operation.getRegions(), [&](OpOperand *operand) {
-    hasNestedUse |= endBarrierResults.contains(operand->get());
-  });
-  return hasNestedUse;
-}
 
 static bool isHipsrDpsOp(Operation &operation) {
   return operation.getName().getDialectNamespace() ==
@@ -172,7 +141,6 @@ static void computeDomainResults(Domain &domain, Block &parentBlock) {
 
 static SmallVector<Domain> partitionIntoDomains(Block &block) {
   SmallVector<Domain> domains;
-  llvm::SmallDenseSet<Value, 8> endBarrierResults;
 
   for (Operation &operation : block.without_terminator()) {
     // Placeholders do not set boundaries. movePlaceholders() handles them
@@ -181,21 +149,11 @@ static SmallVector<Domain> partitionIntoDomains(Block &block) {
       continue;
     }
 
-    if (domains.empty() ||
-        usesAnyEndBarrierResult(operation, endBarrierResults) ||
-        isActiveStartBarrier(operation)) {
+    if (domains.empty()) {
       domains.emplace_back();
-      endBarrierResults.clear();
     }
 
-    Domain &currentDomain = domains.back();
-    currentDomain.operations.push_back(&operation);
-
-    if (isActiveEndBarrier(operation)) {
-      for (Value result : operation.getResults()) {
-        endBarrierResults.insert(result);
-      }
-    }
+    domains.back().operations.push_back(&operation);
   }
 
   for (Domain &domain : domains) {

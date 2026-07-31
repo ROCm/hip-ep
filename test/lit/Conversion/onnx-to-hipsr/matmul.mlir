@@ -2,9 +2,7 @@
 // Licensed under the MIT License.
 //
 //===----------------------------------------------------------------------===//
-// Converts onnx.MatMul to hipsr.matmul (placeholder init, empty shape region).
-// Two cases: a plain 2-D matmul and a 1-D-operand matmul (the rank-reducing
-// ONNX case).
+// Converts onnx.MatMul to hipsr.matmul with an empty placeholder shape region.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt %s --split-input-file -allow-unregistered-dialect -convert-onnx-to-hipsr | FileCheck %s

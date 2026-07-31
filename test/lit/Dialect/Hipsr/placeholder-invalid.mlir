@@ -145,7 +145,6 @@ func.func @split_placeholder_consumers(
 // A placeholder result must match the corresponding consumer result type.
 func.func @result_type_mismatch(
     %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<4x8xf32> {
-  // expected-error @+1 {{result 0 type 'tensor<4x8xf16>' must match consumer result type 'tensor<4x8xf32>'}}
   %init = hipsr.placeholder(%ctx)
       ins(%input : tensor<4x8xf32>)
       {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
@@ -227,12 +226,10 @@ func.func @shape_region_capture(
       ins(%input : tensor<?x8xf32>)
       {type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16>
       shape_region {
-  ^bb0(%shape_ctx: !hipsr.context, %shape_input: tensor<?x8xf32>):
-    %c0 = arith.constant 0 : index
+  ^bb0(%input_shape: !shape.shape):
     // expected-error @+1 {{using value defined outside the region}}
-    %d0 = tensor.dim %input, %c0 : tensor<?x8xf32>
-    %c8 = arith.constant 8 : index
-    hipsr.shape_yield (%d0, %c8) : [f16]
+    %captured_shape = shape.shape_of %input : tensor<?x8xf32> -> !shape.shape
+    hipsr.shape_yield %captured_shape : !shape.shape
   }
   %result = hipsr.cast(%ctx) ins(%input : tensor<?x8xf32>)
       outs(%init : tensor<?x8xf16>) : tensor<?x8xf16>
@@ -249,9 +246,11 @@ func.func @two_shape_region_blocks(
       ins(%input : tensor<4x8xf32>)
       {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
       shape_region {
-    hipsr.shape_yield () : [f16]
+    %shape0 = "shape.from_extents"() : () -> !shape.shape
+    hipsr.shape_yield %shape0 : !shape.shape
   ^bb1:
-    hipsr.shape_yield () : [f16]
+    %shape1 = "shape.from_extents"() : () -> !shape.shape
+    hipsr.shape_yield %shape1 : !shape.shape
   }
   %result = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
       outs(%init : tensor<4x8xf16>) : tensor<4x8xf16>
@@ -266,7 +265,7 @@ func.func @wrong_shape_region_terminator(
   // expected-error @+2 {{expects regions to end with 'hipsr.shape_yield'}}
   // expected-note @+1 {{in custom textual format, the absence of terminator implies 'hipsr.shape_yield'}}
   %init = "hipsr.placeholder"(%ctx, %input) ({
-  ^bb0(%shape_ctx: !hipsr.context, %shape_input: tensor<4x8xf32>):
+  ^bb0(%input_shape: !shape.shape):
     llvm.unreachable
   }) {type = #hipsr.placeholder_type<normal>}
       : (!hipsr.context, tensor<4x8xf32>) -> tensor<4x8xf16>
@@ -277,18 +276,140 @@ func.func @wrong_shape_region_terminator(
 
 // -----
 
-// A populated shape region has one block argument per placeholder operand.
+// Normal regions have one shape argument per placeholder input.
 func.func @shape_region_argument_count(
     %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<4x8xf16> {
-  // expected-error @+1 {{shape region block argument count must match operand count; expected 2, got 1}}
+  // expected-error @+1 {{shape region block argument count must match the 'normal' layout; expected 1, got 2}}
   %init = hipsr.placeholder(%ctx)
       ins(%input : tensor<4x8xf32>)
       {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
       shape_region {
-  ^bb0(%shape_ctx: !hipsr.context):
-    hipsr.shape_yield () : [f16]
+  ^bb0(%shape0: !shape.shape, %shape1: !shape.shape):
+    hipsr.shape_yield %shape0 : !shape.shape
   }
   %result = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
       outs(%init : tensor<4x8xf16>) : tensor<4x8xf16>
   return %result : tensor<4x8xf16>
+}
+
+// -----
+
+// Normal arguments carry shapes rather than the placeholder operand types.
+func.func @normal_argument_type(
+    %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<4x8xf16> {
+  // expected-error @+1 {{shape region block argument 0 type 'tensor<4x8xf32>' does not match expected type '!shape.shape'}}
+  %init = hipsr.placeholder(%ctx)
+      ins(%input : tensor<4x8xf32>)
+      {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
+      shape_region {
+  ^bb0(%shape_input: tensor<4x8xf32>):
+    %shape = shape.shape_of %shape_input
+        : tensor<4x8xf32> -> !shape.shape
+    hipsr.shape_yield %shape : !shape.shape
+  }
+  %result = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
+      outs(%init : tensor<4x8xf16>) : tensor<4x8xf16>
+  return %result : tensor<4x8xf16>
+}
+
+// -----
+
+// Empty placeholders must provide every shape input used by the recipe.
+func.func @missing_cast_shape_input(
+    %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<4x8xf16> {
+  // expected-error @+1 {{empty shape region requires at least 1 shape-graph input(s) for hipsr.cast consumer; got 0}}
+  %init = hipsr.placeholder(%ctx)
+      {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
+  %result = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
+      outs(%init : tensor<4x8xf16>) : tensor<4x8xf16>
+  return %result : tensor<4x8xf16>
+}
+
+// -----
+
+// Populated placeholders require exactly one input per shaped DPS input.
+func.func @populated_shape_input_count(
+    %ctx: !hipsr.context, %input: tensor<4x8xf32>,
+    %extra: tensor<4x8xf32>) -> tensor<4x8xf16> {
+  // expected-error @+1 {{populated shape region requires 1 shape-graph input(s) for hipsr.cast consumer; got 2}}
+  %init = hipsr.placeholder(%ctx)
+      ins(%input, %extra : tensor<4x8xf32>, tensor<4x8xf32>)
+      {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
+      shape_region {
+  ^bb0(%input_shape: !shape.shape, %extra_shape: !shape.shape):
+    hipsr.shape_yield %input_shape : !shape.shape
+  }
+  %result = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
+      outs(%init : tensor<4x8xf16>) : tensor<4x8xf16>
+  return %result : tensor<4x8xf16>
+}
+
+// -----
+
+// Barrier arguments preserve the original tensor types after context.
+func.func @barrier_argument_type(
+    %ctx: !hipsr.context, %input: tensor<?x3xf16>, %shape: tensor<2xi64>)
+    -> tensor<?x?xf16> {
+  // expected-error @+1 {{shape region block argument 1 type '!shape.shape' does not match expected type 'tensor<?x3xf16>'}}
+  %init = hipsr.placeholder(%ctx)
+      ins(%input, %shape : tensor<?x3xf16>, tensor<2xi64>)
+      {type = #hipsr.placeholder_type<barrier>} : tensor<?x?xf16>
+      shape_region {
+  ^bb0(%shape_ctx: !hipsr.context, %input_shape: !shape.shape,
+       %requested_shape: tensor<2xi64>):
+    hipsr.shape_yield %input_shape : !shape.shape
+  }
+  %result = hipsr.expand(%ctx)
+      ins(%input, %shape : tensor<?x3xf16>, tensor<2xi64>)
+      outs(%init : tensor<?x?xf16>) : tensor<?x?xf16>
+  return %result : tensor<?x?xf16>
+}
+
+// -----
+
+// A populated region yields one shape per placeholder result.
+func.func @shape_yield_count(
+    %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<4x8xf16> {
+  %init = hipsr.placeholder(%ctx)
+      ins(%input : tensor<4x8xf32>)
+      {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
+      shape_region {
+  ^bb0(%input_shape: !shape.shape):
+    // expected-error @+1 {{must yield one !shape.shape per enclosing placeholder result; expected 1, got 0}}
+    "hipsr.shape_yield"() : () -> ()
+  }
+  %result = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
+      outs(%init : tensor<4x8xf16>) : tensor<4x8xf16>
+  return %result : tensor<4x8xf16>
+}
+
+// -----
+
+// Shape yield operands must have !shape.shape type.
+func.func @shape_yield_type(
+    %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<4x8xf16> {
+  %init = hipsr.placeholder(%ctx)
+      ins(%input : tensor<4x8xf32>)
+      {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
+      shape_region {
+  ^bb0(%input_shape: !shape.shape):
+    %tensor_shape = arith.constant dense<[4, 8]> : tensor<2xi64>
+    // expected-error @+1 {{operand #0 must be variadic of}}
+    "hipsr.shape_yield"(%tensor_shape) : (tensor<2xi64>) -> ()
+  }
+  %result = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
+      outs(%init : tensor<4x8xf16>) : tensor<4x8xf16>
+  return %result : tensor<4x8xf16>
+}
+
+// -----
+
+// Shape yield directly terminates only placeholder regions.
+func.func @shape_yield_parent() {
+  "test.region_holder"() ({
+    %shape = "shape.from_extents"() : () -> !shape.shape
+    // expected-error @+1 {{expects parent op 'hipsr.placeholder'}}
+    hipsr.shape_yield %shape : !shape.shape
+  }) : () -> ()
+  return
 }

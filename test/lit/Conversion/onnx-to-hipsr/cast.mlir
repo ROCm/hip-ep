@@ -2,8 +2,7 @@
 // Licensed under the MIT License.
 //
 //===----------------------------------------------------------------------===//
-// Converts onnx.Cast to hipsr.cast, leaving the shape region empty (a later
-// pass populates it).
+// Converts onnx.Cast to hipsr.cast with an empty placeholder shape region.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt %s -allow-unregistered-dialect -convert-onnx-to-hipsr | FileCheck %s

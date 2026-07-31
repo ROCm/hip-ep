@@ -4,10 +4,9 @@
  */
 
 #include "hip/Conversion/HipsrToLLVM/HipsrToLLVM.h"
-#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
+#include "hip/Dialect/Hipsr/IR/HipsrShapeRegionPopulation.h"
 
 #include "hip/Dialect/Hipsr/IR/HipsrLLVMLoweringUtils.h"
-#include "hip/Dialect/Hipsr/IR/HipsrShapeRegionInterface.h"
 
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
@@ -16,48 +15,32 @@
 #include "mlir/Transforms/DialectConversion.h"
 
 #include "llvm/ADT/Sequence.h"
-
 using namespace mlir;
 using namespace mlir::hipsr;
 
+MutableOperandRange AddOp::getDpsInitsMutable() { return getInitMutable(); }
+
 namespace {
+
 struct AddShapeArgs : ShapeRegionArgs<AddOp> {
   using ShapeRegionArgs::ShapeRegionArgs;
   Value getLhs() const { return in(0); }
   Value getRhs() const { return in(1); }
 };
-} // namespace
 
-MutableOperandRange AddOp::getDpsInitsMutable() { return getInitMutable(); }
+PlaceholderType getAddPlaceholderType(AddOp) { return PlaceholderType::Normal; }
 
-void AddOp::populateShapeRegion(OpBuilder &builder, Block &shapeBlock) {
+void populateAddShapeRegion(OpBuilder &builder, Block &block, AddOp op,
+                            PlaceholderType placeholderType) {
   OpBuilder::InsertionGuard guard(builder);
-  builder.setInsertionPointToStart(&shapeBlock);
-
-  Location loc = getLoc();
-  AddShapeArgs args{shapeBlock};
-  Value shLhs = builder.create<shape::ShapeOfOp>(loc, args.getLhs());
-  Value shRhs = builder.create<shape::ShapeOfOp>(loc, args.getRhs());
-
-  auto extentTensorTy = RankedTensorType::get(
-      {ShapedType::kDynamic}, IndexType::get(builder.getContext()));
-  Value bcast = builder.create<shape::BroadcastOp>(
-      loc, extentTensorTy, ValueRange{shLhs, shRhs}, /*error=*/nullptr);
-
-  int64_t outRank = cast<ShapedType>(getInit().getType()).getRank();
-  SmallVector<Value> dims;
-  dims.reserve(outRank);
-  for (int64_t i : llvm::seq<int64_t>(0, outRank)) {
-    Value idx = builder.create<arith::ConstantIndexOp>(loc, i);
-    dims.push_back(builder.create<shape::GetExtentOp>(loc, bcast, idx));
-  }
-
-  Type elemTy = cast<ShapedType>(getInit().getType()).getElementType();
-  builder.create<ShapeYieldOp>(loc, ArrayRef<ValueRange>{ValueRange(dims)},
-                               TypeRange{elemTy});
+  builder.setInsertionPointToStart(&block);
+  AddShapeArgs args(placeholderType, block);
+  auto shapeType = shape::ShapeType::get(builder.getContext());
+  Value resultShape = builder.create<shape::BroadcastOp>(
+      op.getLoc(), shapeType, ValueRange{args.getLhs(), args.getRhs()},
+      /*error=*/nullptr);
+  builder.create<ShapeYieldOp>(op.getLoc(), resultShape);
 }
-
-namespace {
 
 constexpr const char *kWrapMiopenOpTensor = "wrap_miopenOpTensor";
 
@@ -119,6 +102,11 @@ struct AddLowering : public ConvertOpToLLVMPattern<AddOp> {
 };
 
 } // namespace
+
+void mlir::hipsr::populateAddShapeRegionPatterns(
+    ShapeRegionPopulationPatternSet &patterns) {
+  patterns.add<AddOp, getAddPlaceholderType, populateAddShapeRegion>();
+}
 
 void mlir::hipsr::populateHipsrAddLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns) {

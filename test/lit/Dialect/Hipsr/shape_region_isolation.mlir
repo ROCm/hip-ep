@@ -1,64 +1,61 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
-//
-//===----------------------------------------------------------------------===//
-// Shape regions are IsolatedFromAbove, so -cse and -canonicalize must not merge
-// region-internal ops with identical ops in the enclosing function.
-//===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt %s -split-input-file -cse | FileCheck %s
 // RUN: hip-mlir-opt %s -split-input-file -canonicalize | FileCheck %s
 
-// Function and region both compute shape.shape_of on the same value; CSE must
-// not merge them (the region keeps its own over the entry-block arg).
+// Placeholder shape regions are IsolatedFromAbove. Equivalent outer and inner
+// shape computations remain in their own scopes.
 // CHECK-LABEL: func.func @cse_keeps_region_isolated
-// CHECK:       hipsr.cast
-// CHECK:         ^bb0(%[[IN:.+]]: tensor<?x8xf32>):
-// CHECK:         shape.shape_of %[[IN]]
-// CHECK:         hipsr.shape_yield
-func.func @cse_keeps_region_isolated(%ctx: !hipsr.context, %input: tensor<?x8xf32>,
-                                     %init: tensor<?x8xf16>)
-    -> (tensor<?x8xf16>, !shape.shape) {
-  // Outer shape.shape_of over the operand -- must NOT be merged into the region.
-  %outer = shape.shape_of %input : tensor<?x8xf32> -> !shape.shape
-  %0 = hipsr.cast(%ctx) ins(%input : tensor<?x8xf32>)
-                  outs(%init : tensor<?x8xf16>) : tensor<?x8xf16>
-                  shape_region {
-  ^bb0(%in: tensor<?x8xf32>):
-    %shape = shape.shape_of %in : tensor<?x8xf32> -> tensor<2xindex>
-    %c0 = arith.constant 0 : index
-    %d0 = shape.get_extent %shape, %c0 : tensor<2xindex>, index -> index
-    %c1 = arith.constant 1 : index
-    %d1 = shape.get_extent %shape, %c1 : tensor<2xindex>, index -> index
-    hipsr.shape_yield (%d0, %d1) : [f16]
+// CHECK: shape.num_elements
+// CHECK: hipsr.placeholder
+// CHECK: ^bb0(%[[INPUT_SHAPE:.+]]: !shape.shape):
+// CHECK: shape.num_elements %[[INPUT_SHAPE]]
+// CHECK: hipsr.shape_yield
+func.func @cse_keeps_region_isolated(
+    %ctx: !hipsr.context, %input: tensor<?x8xf32>)
+    -> (tensor<?x8xf16>, !shape.size) {
+  %outer_shape = shape.shape_of %input : tensor<?x8xf32> -> !shape.shape
+  %outer_elements = shape.num_elements %outer_shape
+      : !shape.shape -> !shape.size
+  %init = hipsr.placeholder(%ctx)
+      ins(%input : tensor<?x8xf32>)
+      {type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16>
+      shape_region {
+  ^bb0(%input_shape: !shape.shape):
+    %elements = shape.num_elements %input_shape
+        : !shape.shape -> !shape.size
+    %extent = shape.size_to_index %elements : !shape.size
+    %result_shape = shape.from_extents %extent : index
+    hipsr.shape_yield %result_shape : !shape.shape
   }
-  return %0, %outer : tensor<?x8xf16>, !shape.shape
+  %result = hipsr.cast(%ctx) ins(%input : tensor<?x8xf32>)
+      outs(%init : tensor<?x8xf16>) : tensor<?x8xf16>
+  return %result, %outer_elements : tensor<?x8xf16>, !shape.size
 }
 
 // -----
 
-// An outer constant equals one inside the region; -cse / -canonicalize must not
-// replace the region's constant with it (the region keeps its own).
 // CHECK-LABEL: func.func @cse_keeps_region_constant
-// CHECK:       hipsr.cast
-// CHECK:         ^bb0(%[[IN:.+]]: tensor<?x8xf32>):
-// CHECK:         arith.constant 0 : index
-// CHECK:         hipsr.shape_yield
-func.func @cse_keeps_region_constant(%ctx: !hipsr.context, %input: tensor<?x8xf32>,
-                                     %init: tensor<?x8xf16>)
+// CHECK: %[[OUTER:.+]] = arith.constant 0 : index
+// CHECK: hipsr.placeholder
+// CHECK: ^bb0(%{{.+}}: !shape.shape):
+// CHECK: shape.{{(from_extents|const_shape)}}
+// CHECK: hipsr.shape_yield
+func.func @cse_keeps_region_constant(
+    %ctx: !hipsr.context, %input: tensor<?x8xf32>)
     -> (tensor<?x8xf16>, index) {
-  // Outer constant -- must NOT replace the region's own constant.
   %outer_c0 = arith.constant 0 : index
-  %0 = hipsr.cast(%ctx) ins(%input : tensor<?x8xf32>)
-                  outs(%init : tensor<?x8xf16>) : tensor<?x8xf16>
-                  shape_region {
-  ^bb0(%in: tensor<?x8xf32>):
-    %shape = shape.shape_of %in : tensor<?x8xf32> -> tensor<2xindex>
+  %init = hipsr.placeholder(%ctx)
+      ins(%input : tensor<?x8xf32>)
+      {type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16>
+      shape_region {
+  ^bb0(%input_shape: !shape.shape):
     %c0 = arith.constant 0 : index
-    %d0 = shape.get_extent %shape, %c0 : tensor<2xindex>, index -> index
-    %c1 = arith.constant 1 : index
-    %d1 = shape.get_extent %shape, %c1 : tensor<2xindex>, index -> index
-    hipsr.shape_yield (%d0, %d1) : [f16]
+    %result_shape = shape.from_extents %c0 : index
+    hipsr.shape_yield %result_shape : !shape.shape
   }
-  return %0, %outer_c0 : tensor<?x8xf16>, index
+  %result = hipsr.cast(%ctx) ins(%input : tensor<?x8xf32>)
+      outs(%init : tensor<?x8xf16>) : tensor<?x8xf16>
+  return %result, %outer_c0 : tensor<?x8xf16>, index
 }

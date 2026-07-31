@@ -3,32 +3,114 @@
  * Licensed under the MIT License.
  */
 
-#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
-
-#include "hip/Dialect/Hipsr/IR/HipsrShapeRegionInterface.h"
+#include "hip/Dialect/Hipsr/IR/HipsrShapeRegionPopulation.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
 
-#include "llvm/ADT/Sequence.h"
-
-#include <algorithm>
-
 using namespace mlir;
 using namespace mlir::hipsr;
 
+MutableOperandRange MatMulOp::getDpsInitsMutable() { return getInitMutable(); }
+
 namespace {
+
 struct MatMulShapeArgs : ShapeRegionArgs<MatMulOp> {
   using ShapeRegionArgs::ShapeRegionArgs;
   Value getA() const { return in(0); }
   Value getB() const { return in(1); }
 };
+
+PlaceholderType getMatMulPlaceholderType(MatMulOp) {
+  return PlaceholderType::Normal;
+}
+
+void populateMatMulShapeRegion(OpBuilder &builder, Block &block, MatMulOp op,
+                               PlaceholderType placeholderType) {
+  OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPointToStart(&block);
+
+  MatMulShapeArgs args(placeholderType, block);
+  Location loc = op.getLoc();
+  MLIRContext *ctx = builder.getContext();
+  Value aShape = args.getA();
+  Value bShape = args.getB();
+  auto shapeType = shape::ShapeType::get(ctx);
+  auto witnessType = shape::WitnessType::get(ctx);
+  Value one = builder.create<arith::ConstantIndexOp>(loc, 1);
+  Value minusTwo = builder.create<arith::ConstantIndexOp>(loc, -2);
+
+  auto getRank = [&](Value shape) {
+    Value rank =
+        builder.create<shape::RankOp>(loc, shape::SizeType::get(ctx), shape);
+    return builder.create<shape::SizeToIndexOp>(loc, rank);
+  };
+  Value aIs1D = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                              getRank(aShape), one);
+  Value bIs1D = builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq,
+                                              getRank(bShape), one);
+
+  Value emptyShape =
+      builder.create<shape::FromExtentsOp>(loc, shapeType, ValueRange{});
+  Value oneShape =
+      builder.create<shape::FromExtentsOp>(loc, shapeType, ValueRange{one});
+
+  // Promote vectors to matrices so the remaining algebra is rank-agnostic.
+  Value promotedA =
+      builder.create<shape::ConcatOp>(loc, shapeType, oneShape, aShape);
+  Value promotedB =
+      builder.create<shape::ConcatOp>(loc, shapeType, bShape, oneShape);
+  Value normalizedA =
+      builder.create<arith::SelectOp>(loc, aIs1D, promotedA, aShape);
+  Value normalizedB =
+      builder.create<arith::SelectOp>(loc, bIs1D, promotedB, bShape);
+
+  auto aParts = builder.create<shape::SplitAtOp>(
+      loc, TypeRange{shapeType, shapeType}, normalizedA, minusTwo);
+  auto bParts = builder.create<shape::SplitAtOp>(
+      loc, TypeRange{shapeType, shapeType}, normalizedB, minusTwo);
+  auto aMatrix = builder.create<shape::SplitAtOp>(
+      loc, TypeRange{shapeType, shapeType}, aParts.getTail(), one);
+  auto bMatrix = builder.create<shape::SplitAtOp>(
+      loc, TypeRange{shapeType, shapeType}, bParts.getTail(), one);
+
+  Value kWitness = builder.create<shape::CstrEqOp>(
+      loc, witnessType, ValueRange{aMatrix.getTail(), bMatrix.getHead()});
+  Value batchWitness = builder.create<shape::CstrBroadcastableOp>(
+      loc, aParts.getHead(), bParts.getHead());
+  Value witness = builder.create<shape::AssumingAllOp>(
+      loc, witnessType, ValueRange{kWitness, batchWitness});
+
+  auto assuming = builder.create<shape::AssumingOp>(
+      loc, witness,
+      [&](OpBuilder &nestedBuilder,
+          Location nestedLoc) -> SmallVector<Value, 2> {
+        Value batchShape = nestedBuilder.create<shape::BroadcastOp>(
+            nestedLoc, shapeType,
+            ValueRange{aParts.getHead(), bParts.getHead()},
+            /*error=*/nullptr);
+        Value mShape = nestedBuilder.create<arith::SelectOp>(
+            nestedLoc, aIs1D, emptyShape, aMatrix.getHead());
+        Value nShape = nestedBuilder.create<arith::SelectOp>(
+            nestedLoc, bIs1D, emptyShape, bMatrix.getTail());
+        Value matrixShape = nestedBuilder.create<shape::ConcatOp>(
+            nestedLoc, shapeType, mShape, nShape);
+        Value resultShape = nestedBuilder.create<shape::ConcatOp>(
+            nestedLoc, shapeType, batchShape, matrixShape);
+        return {resultShape};
+      });
+
+  builder.create<ShapeYieldOp>(loc, assuming.getResult(0));
+}
+
 } // namespace
 
-MutableOperandRange MatMulOp::getDpsInitsMutable() { return getInitMutable(); }
+void mlir::hipsr::populateMatMulShapeRegionPatterns(
+    ShapeRegionPopulationPatternSet &patterns) {
+  patterns.add<MatMulOp, getMatMulPlaceholderType, populateMatMulShapeRegion>();
+}
 
-// A and B must be at least 1-D: matmul needs a contraction dim, and the shape
-// region reads the last one or two dims of each.
+// A and B must be at least 1-D because matmul needs a contraction dimension.
 LogicalResult MatMulOp::verify() {
   if (cast<ShapedType>(getA().getType()).getRank() < 1) {
     return emitOpError("operand A must be at least 1-D");
@@ -37,94 +119,4 @@ LogicalResult MatMulOp::verify() {
     return emitOpError("operand B must be at least 1-D");
   }
   return success();
-}
-
-void MatMulOp::populateShapeRegion(OpBuilder &builder, Block &shapeBlock) {
-  OpBuilder::InsertionGuard guard(builder);
-  builder.setInsertionPointToStart(&shapeBlock);
-
-  Location loc = getLoc();
-  MLIRContext *ctx = builder.getContext();
-  MatMulShapeArgs args{shapeBlock};
-  Value aArg = args.getA();
-  Value bArg = args.getB();
-  Value shA = builder.create<shape::ShapeOfOp>(loc, aArg);
-  Value shB = builder.create<shape::ShapeOfOp>(loc, bArg);
-  int64_t aRank = cast<ShapedType>(aArg.getType()).getRank();
-  int64_t bRank = cast<ShapedType>(bArg.getType()).getRank();
-  bool aIs1D = aRank == 1;
-  bool bIs1D = bRank == 1;
-
-  auto extent = [&](OpBuilder &b, Value shape, int64_t idx) -> Value {
-    Value c = b.create<arith::ConstantIndexOp>(loc, idx);
-    return b.create<shape::GetExtentOp>(loc, shape, c);
-  };
-
-  // K is A's last dim; B's last dim when B is 1-D, else its second-to-last.
-  int64_t kAIdx = aRank - 1;
-  int64_t kBIdx = bIs1D ? bRank - 1 : bRank - 2;
-  auto shapeTy = shape::ShapeType::get(ctx);
-  Value sa = builder.create<shape::FromExtentsOp>(
-      loc, shapeTy, ValueRange{extent(builder, shA, kAIdx)});
-  Value sb = builder.create<shape::FromExtentsOp>(
-      loc, shapeTy, ValueRange{extent(builder, shB, kBIdx)});
-  Value witness = builder.create<shape::CstrEqOp>(
-      loc, shape::WitnessType::get(ctx), ValueRange{sa, sb});
-
-  // Output dims go inside the region so they hold under the K-equal assumption.
-  auto assuming = builder.create<shape::AssumingOp>(
-      loc, witness, [&](OpBuilder &b, Location) -> SmallVector<Value, 2> {
-        Value one = b.create<arith::ConstantIndexOp>(loc, 1);
-        // Broadcast two batch dims: a dim of 1 takes the other side.
-        auto broadcastDim = [&](Value da, Value db) -> Value {
-          Value aIs1 =
-              b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, da, one);
-          return b.create<arith::SelectOp>(loc, aIs1, db, da);
-        };
-
-        // A 1-D operand acts as rank 2 for the multiply (A: (1,K), B: (K,1));
-        // the effective rank drives the batch-dim count below.
-        int64_t aEffRank = aIs1D ? 2 : aRank;
-        int64_t bEffRank = bIs1D ? 2 : bRank;
-
-        // M from A, N from B. A 1-D operand contributes neither (its promoted
-        // unit dim is stripped from the result).
-        Value m = aIs1D ? Value() : extent(b, shA, aRank - 2);
-        Value n = bIs1D ? Value() : extent(b, shB, bRank - 1);
-
-        // Batch dims: the leading dims of each operand, right-aligned and
-        // broadcast. The result's batch rank is the larger of the two.
-        int64_t aBatch = aEffRank - 2;
-        int64_t bBatch = bEffRank - 2;
-        int64_t batchRank = std::max(aBatch, bBatch);
-        SmallVector<Value, 2> dims;
-        dims.reserve(batchRank + 2);
-        for (int64_t i : llvm::seq<int64_t>(0, batchRank)) {
-          // Right-align: a shorter operand has an implicit 1 at its missing
-          // leading axes, so a negative index means "that side is 1, take the
-          // other".
-          int64_t aAxis = i - (batchRank - aBatch);
-          int64_t bAxis = i - (batchRank - bBatch);
-          if (aAxis < 0) {
-            dims.push_back(extent(b, shB, bAxis));
-          } else if (bAxis < 0) {
-            dims.push_back(extent(b, shA, aAxis));
-          } else {
-            dims.push_back(
-                broadcastDim(extent(b, shA, aAxis), extent(b, shB, bAxis)));
-          }
-        }
-        // Append M then N, skipping the promoted (later-stripped) unit dims.
-        if (m) {
-          dims.push_back(m);
-        }
-        if (n) {
-          dims.push_back(n);
-        }
-        return dims;
-      });
-
-  Type elemTy = cast<ShapedType>(getResult(0).getType()).getElementType();
-  builder.create<ShapeYieldOp>(loc, ArrayRef<ValueRange>{assuming.getResults()},
-                               TypeRange{elemTy});
 }

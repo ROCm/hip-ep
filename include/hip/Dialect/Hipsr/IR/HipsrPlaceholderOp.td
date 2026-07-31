@@ -21,14 +21,31 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
 
     `!hipsr.context` is operand 0. The remaining inputs provide values to the
     shape graph and must be block arguments or results of `hipsr.placeholder`,
-    `arith.constant`, or `hipsr.constant`. `type` marks the placeholder as
-    `normal` or `barrier`.
+    `arith.constant`, or `hipsr.constant`.
 
-    The shape graph is independent of DPS data inputs: downstream placeholders
-    use upstream placeholder results rather than DPS data results.
+    The shape graph uses separate SSA dependencies from the DPS data graph:
+    downstream placeholders use upstream placeholder results rather than DPS
+    data results.
+
+    Shape-graph inputs follow the relative order of the consumer's shaped DPS
+    inputs. Non-shaped DPS inputs do not receive shape-region arguments.
 
     The optional `shape_region` defines the placeholder result shapes. It has
-    one block when present and ends with `hipsr.shape_yield`.
+    one block when present and ends with `hipsr.shape_yield`. `type` controls
+    the block argument layout:
+
+    - `normal` receives one `!shape.shape` per shape-graph input and omits
+      `ctx`.
+    - `barrier` receives `ctx` followed by the shape-graph inputs with their
+      tensor types.
+
+    The population pass selects the category for an empty placeholder from its
+    consumer recipe. Empty placeholders may retain trailing shape inputs
+    removed by canonicalization, but must provide every shaped DPS input.
+    Population drops stale trailing inputs. Populated regions must have the
+    exact input count and the argument layout selected by `type`.
+
+    The terminator yields one `!shape.shape` per placeholder result.
 
     One placeholder can have several results for one multi-output DPS op. Each
     result initializes exactly one DPS result and may also feed other
@@ -73,9 +90,22 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
     /// Returns whether a value may be used as a placeholder shape-graph input.
     static bool isAllowedShapeGraphInput(::mlir::Value value);
 
-    /// Returns the hipsr DPS operation initialized by this placeholder, or
-    /// null if no such use exists.
+    /// Returns the HIPSR DPS operation initialized by this placeholder, or
+    /// null if no such use exists. A verified placeholder has one consumer.
     ::mlir::Operation *getDpsConsumer();
+
+    /// Returns this placeholder's category.
+    PlaceholderType getPlaceholderType() {
+      return getTypeAttr().getValue();
+    }
+
+    /// Sets this placeholder's category.
+    void setPlaceholderType(PlaceholderType type) {
+      setTypeAttr(PlaceholderTypeAttr::get(getContext(), type));
+    }
+
+    /// Returns the shape-region block argument types for this placeholder.
+    ::llvm::SmallVector<::mlir::Type> getShapeRegionArgumentTypes();
   }];
 
   let builders = [

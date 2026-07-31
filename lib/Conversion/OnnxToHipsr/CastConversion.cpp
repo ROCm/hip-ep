@@ -14,9 +14,8 @@ namespace mlir {
 namespace hipsr {
 namespace {
 
-/// onnx.Cast -> hipsr.cast. The op's shape region is left empty (zero blocks)
-/// here; a dedicated later pass populates every op's shape region uniformly, so
-/// this stage does not call populateShapeRegion.
+/// onnx.Cast -> hipsr.cast. Its placeholder shape region is left empty for the
+/// dedicated population pass.
 ///
 /// The ONNX `saturate` attribute (clamp-vs-wrap when casting to float8) is not
 /// modeled on hipsr.cast yet, so it is currently ignored. Revisit once float8
@@ -42,11 +41,7 @@ struct CastToHipsr : public ::mlir::RewritePattern {
 
     ::mlir::Location loc = op->getLoc();
     ::mlir::Value input = op->getOperand(0);
-    auto resultType =
-        ::mlir::dyn_cast<::mlir::RankedTensorType>(op->getResult(0).getType());
-    if (!resultType) {
-      return rewriter.notifyMatchFailure(op, "expected ranked tensor result");
-    }
+    ::mlir::Type resultType = op->getResult(0).getType();
 
     ::mlir::Value init =
         rewriter
