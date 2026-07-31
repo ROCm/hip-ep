@@ -128,15 +128,15 @@ struct SliceStampConstParams : public mlir::RewritePattern {
       if (steps) {
         stepsVec = getInlineIntVector(steps);
         if (!stepsVec)
-          return rewriter.notifyMatchFailure(op, "slice.steps_not_inline_const");
+          return rewriter.notifyMatchFailure(op,
+                                             "slice.steps_not_inline_const");
       }
     }
 
     rewriter.modifyOpInPlace(op, [&] {
       op->setAttr("hipdnn.slice_starts",
                   rewriter.getDenseI64ArrayAttr(*startsVec));
-      op->setAttr("hipdnn.slice_ends",
-                  rewriter.getDenseI64ArrayAttr(*endsVec));
+      op->setAttr("hipdnn.slice_ends", rewriter.getDenseI64ArrayAttr(*endsVec));
       if (axesVec)
         op->setAttr("hipdnn.slice_axes",
                     rewriter.getDenseI64ArrayAttr(*axesVec));
