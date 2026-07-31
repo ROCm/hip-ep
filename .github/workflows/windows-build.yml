@@ -371,7 +371,7 @@ jobs:
           # OGA is built against the patched ort-install, so the key folds in
           # the fork ref, optional OGA_PR_PATCHES, and ONNXRUNTIME_PR_PATCHES.
           # The mm<N> token bumps when the OGA artifact set changes shape.
-          key: oga-dml-mm3-${{ env.OGA_REPO }}-${{ env.OGA_REF }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
+          key: oga-dml-mm3-${{ env.OGA_REPO }}-${{ env.OGA_REF }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}-1
 
       # OGA is built from cliu1003/onnxruntime-genai sliding_window_support_amdgpu
       # (AMDGPU MorphiZen integration + sliding_window). Optional OGA_PR_PATCHES
