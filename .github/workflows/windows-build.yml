@@ -700,6 +700,37 @@ jobs:
           if exist wheelpkg rd /s /q wheelpkg
           if exist therock-dist rd /s /q therock-dist
 
+      # Persistent GPU assets (model/, amdgpu-oga-models/, l2-test-models/) live
+      # outside the checkout and survive across runs. After the onnx-hipdnn-ep ->
+      # hip-ep rename, runner.workspace moved but the staged dirs did not; probe
+      # legacy paths before failing. Override anytime via GPU_TEST_ASSET_ROOT.
+      - name: Resolve GPU test asset root
+        shell: pwsh
+        run: |
+          $explicit = "${{ vars.GPU_TEST_ASSET_ROOT }}".Trim()
+          $candidates = [System.Collections.Generic.List[string]]::new()
+          if ($explicit) { $candidates.Add($explicit) }
+          $candidates.Add("${{ runner.workspace }}")
+          $parent = Split-Path "${{ runner.workspace }}" -Parent
+          $candidates.Add((Join-Path $parent "onnx-hipdnn-ep"))
+          $candidates.Add((Join-Path $parent "hip-ep"))
+
+          $root = $null
+          foreach ($c in ($candidates | Select-Object -Unique)) {
+            if ((Test-Path (Join-Path $c "model")) -or
+                (Test-Path (Join-Path $c "amdgpu-oga-models")) -or
+                (Test-Path (Join-Path $c "l2-test-models"))) {
+              $root = $c
+              Write-Host "Using GPU test asset root: $root"
+              break
+            }
+          }
+          if (-not $root) {
+            $root = if ($explicit) { $explicit } else { "${{ runner.workspace }}" }
+            Write-Host "WARNING: no GPU asset dirs found; defaulting to: $root"
+          }
+          "GPU_TEST_ASSET_ROOT=$root" >> $env:GITHUB_ENV
+
       - name: Download GPU test package
         uses: actions/download-artifact@v4
         with:
@@ -733,17 +764,14 @@ jobs:
       # Output is tee'd to results/ for QPS extraction. Non-zero exit code
       # sets FAILED but continues so all models are tested.
       #
-      # GPU-test asset dirs (model/, amdgpu-oga-models/, l2-test-models/) resolve
-      # under ${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}: set the repo/org
-      # Actions variable GPU_TEST_ASSET_ROOT to a stable path (and stage the dirs
-      # there) so persistent assets need not live under the repo-name-derived
-      # _work/<repo>/, which strands them on a repo rename. Unset => runner.workspace
-      # (unchanged from today).
+      # GPU-test asset dirs resolve under $env:GPU_TEST_ASSET_ROOT (see
+      # "Resolve GPU test asset root" above). Set the repo/org Actions variable
+      # GPU_TEST_ASSET_ROOT to override the auto-detected path.
       - name: Run onnxruntime_perf_test (GPU)
         shell: cmd
         run: |
           set PATH=%CD%\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
-          set MODEL_DIR=${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\model
+          set MODEL_DIR=%GPU_TEST_ASSET_ROOT%\model
           if not exist "%MODEL_DIR%" (
             echo [ERROR] MODEL_DIR not found: %MODEL_DIR%
             exit /b 1
@@ -787,7 +815,7 @@ jobs:
           set THEROCK_DIST=%CD%\therock-dist
           set PATH=%CD%\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;%CD%\therock-dist\lib
-          set MODEL_DIR=${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\model
+          set MODEL_DIR=%GPU_TEST_ASSET_ROOT%\model
           if not exist "%MODEL_DIR%" (
             echo [SKIP] MODEL_DIR not found: %MODEL_DIR%
             exit /b 0
@@ -833,7 +861,7 @@ jobs:
           set THEROCK_DIST=%CD%\therock-dist
           set PATH=%CD%\therock-dist\bin;%CD%\gpu-test-package\bin;%PATH%
           set LIB=%CD%\gpu-test-package\lib;%CD%\therock-dist\lib
-          set MODEL_DIR=${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\model
+          set MODEL_DIR=%GPU_TEST_ASSET_ROOT%\model
           if not exist "%MODEL_DIR%" (
             echo [SKIP] MODEL_DIR not found: %MODEL_DIR%
             exit /b 0
@@ -875,7 +903,7 @@ jobs:
           $pkgBin = Join-Path $PWD "gpu-test-package\bin"
           $env:PATH = "$PWD\therock-dist\bin;$pkgBin;$env:PATH"
 
-          $modelDir = "${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\model"
+          $modelDir = "$env:GPU_TEST_ASSET_ROOT\model"
           if (-not (Test-Path $modelDir)) {
             Write-Host "[SKIP] MODEL_DIR not found: $modelDir"
             exit 0
@@ -955,7 +983,7 @@ jobs:
           # generated once on the GPU runner and persists across runs, so just
           # consume it here (no re-copy / no config rewrite). It must be present
           # -- treat its absence as an error, not a skip.
-          $ogaModelRoot = "${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\amdgpu-oga-models"
+          $ogaModelRoot = "$env:GPU_TEST_ASSET_ROOT\amdgpu-oga-models"
           if (-not (Test-Path $ogaModelRoot)) {
             Write-Host "[ERROR] AMDGPU OGA model directory not found: $ogaModelRoot"
             exit 1
@@ -1049,7 +1077,7 @@ jobs:
           $ErrorActionPreference = 'Continue'
           $PSNativeCommandUseErrorActionPreference = $false
 
-          $model = "${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\amdgpu-oga-models\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml"
+          $model = "$env:GPU_TEST_ASSET_ROOT\amdgpu-oga-models\Llama-3.1-8B-awq-g128-int4-asym-fp16-onnx-dml"
           if (-not (Test-Path $model)) { Write-Host "[SKIP] model not found: $model"; exit 0 }
 
           # The morphizen wheel now bundles the whole AMD GPU umbrella chain
@@ -1098,7 +1126,7 @@ jobs:
           rem The EP DLL is now hipgpu.dll; hip-onnx-runner's legacy default name
           rem is onnxruntime_morphizen_ep.dll, so point it at the new DLL.
           set MORPHIZEN_EP_LIB=%CD%\gpu-test-package\bin\hipgpu.dll
-          set L2_MODEL_DIR=${{ vars.GPU_TEST_ASSET_ROOT || runner.workspace }}\l2-test-models
+          set L2_MODEL_DIR=%GPU_TEST_ASSET_ROOT%\l2-test-models
           if not exist "%L2_MODEL_DIR%" (
             echo [SKIP] L2 model directory not found: %L2_MODEL_DIR%
             exit /b 0
@@ -1227,6 +1255,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
           $resultsDir = "gpu-test-package/results"
           $runUrl = "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           $rawSha = if ("${{ github.event_name }}" -eq "pull_request") { "${{ github.event.pull_request.head.sha }}" } else { "${{ github.sha }}" }
@@ -1373,3 +1403,6 @@ jobs:
               Write-Host "WARNING: gh api unreachable, skipping PR comment"
             }
           }
+
+          # Step summary is the source of truth; fork PRs may lack comment perms.
+          exit 0
