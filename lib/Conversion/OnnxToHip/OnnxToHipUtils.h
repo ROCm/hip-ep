@@ -494,6 +494,14 @@ void populateReshapeShapeFoldPatterns(RewritePatternSet &patterns,
 void populatePadShapeFoldPatterns(RewritePatternSet &patterns,
                                   MLIRContext *ctx);
 
+/// Pre-lowering pattern set: stamp compile-time `onnx.Slice` starts/ends/axes/
+/// steps onto the op as `hipdnn.slice_*` attributes so SliceDecompose can
+/// rewrite to `tensor.extract_slice` after `lowerOnnxConstants` externalizes
+/// the operand constants. Sibling of PadShapeFold; must run BEFORE
+/// lowerOnnxConstants. See SliceShapeFold.cpp.
+void populateSliceShapeFoldPatterns(RewritePatternSet &patterns,
+                                    MLIRContext *ctx);
+
 /// Pre-lowering pattern set: collapse ORT's inlined `FastGelu` primitive
 /// chain (Pow / Mul / Sum / Tanh) back into a single
 /// `onnx.Gelu(approximate="tanh")`. ORT inlines the Gelu function body
