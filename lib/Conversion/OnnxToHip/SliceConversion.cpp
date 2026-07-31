@@ -155,8 +155,8 @@ struct SliceDecompose : public mlir::RewritePattern {
                                                  axesVec)))
           return rewriter.notifyMatchFailure(
               op, "axes is not a compile-time constant");
-      } else if (auto attr =
-                     op->getAttrOfType<mlir::DenseI64ArrayAttr>("hipdnn.slice_axes")) {
+      } else if (auto attr = op->getAttrOfType<mlir::DenseI64ArrayAttr>(
+                     "hipdnn.slice_axes")) {
         axesVec.assign(attr.asArrayRef().begin(), attr.asArrayRef().end());
       }
     }
@@ -168,12 +168,12 @@ struct SliceDecompose : public mlir::RewritePattern {
     if (op->getNumOperands() == 5) {
       mlir::Value steps = normaliseOptional(op->getOperand(4));
       if (steps) {
-        if (mlir::failed(extractSliceParamVector(op, "hipdnn.slice_steps", steps,
-                                                 stepsVec)))
+        if (mlir::failed(extractSliceParamVector(op, "hipdnn.slice_steps",
+                                                 steps, stepsVec)))
           return rewriter.notifyMatchFailure(
               op, "steps is not a compile-time constant");
-      } else if (auto attr =
-                     op->getAttrOfType<mlir::DenseI64ArrayAttr>("hipdnn.slice_steps")) {
+      } else if (auto attr = op->getAttrOfType<mlir::DenseI64ArrayAttr>(
+                     "hipdnn.slice_steps")) {
         stepsVec.assign(attr.asArrayRef().begin(), attr.asArrayRef().end());
       }
     }
