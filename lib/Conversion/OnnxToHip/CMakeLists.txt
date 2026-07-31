@@ -5,6 +5,7 @@
 
 add_library(OnnxToHip STATIC
   OnnxToHip.cpp
+  OnnxToHipUtils.cpp
   SimplifyOnnx.cpp
   MatMulConversion.cpp
   TransposeConversion.cpp

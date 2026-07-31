@@ -136,10 +136,24 @@ rewrite or reification reports failure; upstream's
 codebase avoids creating them in the first place. Emitting IR is therefore the
 last thing a helper does.
 
-The same split gives operation verifiers a shape rule to check against:
-`MatmulOp::verify` and `GemmOp::verify` call `verifyHipOpShape` with
-`inferMatmulShape` / `inferGemmShape`, so the `outs` shape, the converter
-destination, and `reifyResultShapes` are all held to one shape function.
+The same split gives operation verifiers a shape rule to check against.
+`verifyHipOpShape` takes an `infer*` helper directly, so a single-destination op
+pairs the two in one expression and the `outs` shape, the converter destination,
+and `reifyResultShapes` are all held to one shape function:
+
+```c++
+LogicalResult MatmulOp::verify() {
+  // ... DPS contract first ...
+  return verifyHipOpShape(*this, [&] {
+    return inferMatmulShape(aShape, bShape,
+                            [&] { return this->emitOpError(); });
+  });
+}
+```
+
+Only the `infer*` helpers are public. The dimension mappings and static
+broadcast folds they are built from stay internal to `HipShapeUtils.cpp`, so the
+header exposes shape *rules* rather than the machinery behind them.
 
 Broadcast dimensions are right-aligned. Static 1 yields to the other side;
 equal non-unit static dimensions agree; dynamic/static-non-1 tightens to the
@@ -166,17 +180,22 @@ M/N from A/B with transpose-aware indices and validates optional C without using
 C as an extent source. MatMul broadcasts only the leading batch slices, then
 appends M from A[-2] and N from B[-1].
 
-Reductions resolve to one out-to-in dimension map, `computeReductionDimMap`,
-which both `inferReductionShape` (static extents, used for destination types)
-and `reifyReductionResultShape` (mixed extents, used for destination
-construction and `reifyResultShapes`) consume. The mapping matters for
-`keepdims = 0`, where dropping reduced axes makes the output dimension order
-non-positional in the input: reducing axes `[1, 2]` of a rank-4 input maps
-output dimension 1 to input dimension 3. A positional copy from the input is
-correct only when no reduced axis precedes a kept one. When the reduced axes are
-only known at runtime the mapping is data-dependent, so the converter falls back
-to a positional copy and reification lifts the `outs` shape; both sides bail on
-the same condition and therefore still agree.
+Reductions resolve to one internal out-to-in dimension map, consumed by both
+`inferReductionShape` (static extents, used for destination types) and
+`reifyReductionResultShape` (mixed extents, used for destination construction
+and `reifyResultShapes`). The mapping matters for `keepdims = 0`, where dropping
+reduced axes makes the output dimension order non-positional in the input:
+reducing axes `[1, 2]` of a rank-4 input maps output dimension 1 to input
+dimension 3. A positional copy from the input is correct only when no reduced
+axis precedes a kept one.
+
+Whether the axes are usable at all is decided once, by
+`resolveReductionAxes`, which returns `std::nullopt` when they are only known at
+runtime. Both the destination and reification key off that single answer: the
+converter falls back to a positional copy and reification lifts the `outs`
+shape. Deciding it twice is how the two drift apart — gating the converter on
+the axes operand *count* while reification gates on the operand being
+*constant* leaves opset-13+ constant axes handled inconsistently.
 
 ### MatMul strided-batch representability
 

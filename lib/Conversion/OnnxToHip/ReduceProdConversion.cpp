@@ -48,8 +48,9 @@ ReduceProdToHip::matchAndRewrite(mlir::Operation *op,
   // Reduced axes, resolved from the attribute or a compile-time-constant
   // operand, so the destination shape can map each output dimension back to the
   // input dimension it comes from.
-  llvm::SmallVector<int64_t> axesVec;
-  bool axesKnown = resolveReductionAxes(op, data, noopWithEmptyAxes, axesVec);
+  llvm::SmallVector<int64_t> axesStorage;
+  std::optional<llvm::ArrayRef<int64_t>> reducedAxes =
+      resolveReductionAxes(op, data, noopWithEmptyAxes, axesStorage);
 
   mlir::Value axesOperand;
   if (op->getNumOperands() > 1 &&
@@ -57,17 +58,15 @@ ReduceProdToHip::matchAndRewrite(mlir::Operation *op,
     axesOperand = op->getOperand(1);
   } else {
     auto axesType = mlir::RankedTensorType::get(
-        {static_cast<int64_t>(axesVec.size())}, rewriter.getI64Type());
-    auto axesAttr =
-        mlir::DenseIntElementsAttr::get(axesType, llvm::ArrayRef(axesVec));
+        {static_cast<int64_t>(axesStorage.size())}, rewriter.getI64Type());
+    auto axesAttr = mlir::DenseIntElementsAttr::get(
+        axesType, llvm::ArrayRef<int64_t>(axesStorage));
     axesOperand =
         mlir::arith::ConstantOp::create(rewriter, loc, axesType, axesAttr);
   }
 
-  // Resolve the result type (infer if the importer left it unranked). axesKnown
-  // also covers the compile-time-constant axes-operand case extracted above.
-  auto resultTypeOr =
-      inferReduceResultType(op, data, axesVec, axesKnown, keepdims);
+  // Resolve the result type (infer if the importer left it unranked).
+  auto resultTypeOr = inferReduceResultType(op, data, reducedAxes, keepdims);
   if (mlir::failed(resultTypeOr))
     return rewriter.notifyMatchFailure(
         op, "ReduceProd: cannot infer unranked result (need ranked input and "
@@ -75,7 +74,7 @@ ReduceProdToHip::matchAndRewrite(mlir::Operation *op,
   mlir::RankedTensorType resultType = *resultTypeOr;
 
   mlir::FailureOr<mlir::Value> init = createReductionEmptyTensor(
-      rewriter, loc, resultType, data, axesVec, axesKnown, keepdims);
+      rewriter, loc, resultType, data, reducedAxes, keepdims);
   if (mlir::failed(init))
     return rewriter.notifyMatchFailure(
         op, "ReduceProd result type is incompatible with the reduction shape");

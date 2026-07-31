@@ -45,15 +45,14 @@ ReduceMaxToHip::matchAndRewrite(mlir::Operation *op,
   // Statically-known reduced axes (only when axes is NOT a runtime operand).
   // Used both to materialize the axes constant below and to infer the result
   // type when the ONNX importer left the result unranked (see below).
-  llvm::SmallVector<int64_t> axesVec;
-  bool axesStaticallyKnown =
-      resolveReductionAxes(op, data, noopWithEmptyAxes, axesVec);
+  llvm::SmallVector<int64_t> axesStorage;
+  std::optional<llvm::ArrayRef<int64_t>> reducedAxes =
+      resolveReductionAxes(op, data, noopWithEmptyAxes, axesStorage);
 
   // The ONNX importer can leave the ReduceMax result unranked (e.g. Phi's
   // pos_ids_reformat ReduceMax(position_ids) feeding GreaterOrEqual); infer a
   // ranked result type in that case (see inferReduceResultType).
-  auto resultTypeOr =
-      inferReduceResultType(op, data, axesVec, axesStaticallyKnown, keepdims);
+  auto resultTypeOr = inferReduceResultType(op, data, reducedAxes, keepdims);
   if (mlir::failed(resultTypeOr))
     return rewriter.notifyMatchFailure(
         op, "ReduceMax: cannot infer unranked result (need ranked input and "
@@ -61,7 +60,7 @@ ReduceMaxToHip::matchAndRewrite(mlir::Operation *op,
   mlir::RankedTensorType resultType = *resultTypeOr;
 
   mlir::FailureOr<mlir::Value> init = createReductionEmptyTensor(
-      rewriter, loc, resultType, data, axesVec, axesStaticallyKnown, keepdims);
+      rewriter, loc, resultType, data, reducedAxes, keepdims);
   if (mlir::failed(init))
     return rewriter.notifyMatchFailure(
         op, "ReduceMax result type is incompatible with the reduction shape");
@@ -71,9 +70,9 @@ ReduceMaxToHip::matchAndRewrite(mlir::Operation *op,
     axesOperand = op->getOperand(1);
   } else {
     auto axesType = mlir::RankedTensorType::get(
-        {static_cast<int64_t>(axesVec.size())}, rewriter.getI64Type());
-    auto axesAttr =
-        mlir::DenseIntElementsAttr::get(axesType, llvm::ArrayRef(axesVec));
+        {static_cast<int64_t>(axesStorage.size())}, rewriter.getI64Type());
+    auto axesAttr = mlir::DenseIntElementsAttr::get(
+        axesType, llvm::ArrayRef<int64_t>(axesStorage));
     axesOperand =
         mlir::arith::ConstantOp::create(rewriter, loc, axesType, axesAttr);
   }

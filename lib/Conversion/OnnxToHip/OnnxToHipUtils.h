@@ -108,82 +108,29 @@ inline mlir::Value createEmptyTensor(mlir::OpBuilder &builder,
 /// introspect (an inlined `arith.constant`). A converter that saw *fewer*
 /// constants than reification would build its destination from a weaker rule
 /// than the shape consumers observe, and the two would disagree.
-inline bool extractConstantIntVector(mlir::Value value,
-                                     llvm::SmallVectorImpl<int64_t> &out) {
-  out.clear();
-  mlir::Operation *defOp = value.getDefiningOp();
-  if (!defOp)
-    return false;
+bool extractConstantIntVector(mlir::Value value,
+                              llvm::SmallVectorImpl<int64_t> &out);
 
-  mlir::DenseElementsAttr dense;
-  if (auto cst = mlir::dyn_cast<mlir::arith::ConstantOp>(defOp))
-    dense = mlir::dyn_cast<mlir::DenseElementsAttr>(cst.getValue());
-  if (!dense)
-    if (auto attr = defOp->getAttr("value"))
-      dense = mlir::dyn_cast<mlir::DenseElementsAttr>(attr);
-  if (!dense) {
-    // Externalized constant: to_tensor(get_global) whose global still carries
-    // an initial value.
-    if (auto toTensor = mlir::dyn_cast<mlir::bufferization::ToTensorOp>(defOp))
-      if (auto getGlobal =
-              toTensor.getBuffer().getDefiningOp<mlir::memref::GetGlobalOp>())
-        if (auto module = getGlobal->getParentOfType<mlir::ModuleOp>())
-          if (auto global = module.lookupSymbol<mlir::memref::GlobalOp>(
-                  getGlobal.getNameAttr()))
-            dense = mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
-                global.getInitialValueAttr());
-  }
-  if (!dense)
-    return false;
-
-  auto denseType = mlir::dyn_cast<mlir::RankedTensorType>(dense.getType());
-  if (!denseType || denseType.getRank() > 1)
-    return false;
-  mlir::Type elemType = denseType.getElementType();
-  if (!elemType.isInteger(64) && !elemType.isInteger(32))
-    return false;
-  for (mlir::APInt entry : dense.getValues<mlir::APInt>())
-    out.push_back(entry.getSExtValue());
-  return true;
-}
-
-/// Resolve the reduced axis list of an ONNX reduction op into \p axes.
+/// Resolve the reduced axis list of an ONNX reduction op.
 ///
 /// The axes arrive either as an `axes` attribute (opset < 13) or as an operand
 /// (opset 13+) that may still be a compile-time constant. ONNX's empty-axes
 /// semantics are applied here: with `noop_with_empty_axes = 0` an absent or
 /// empty list reduces every axis, and with 1 it reduces nothing.
 ///
-/// Returns false when the axes are only known at runtime. The axis mapping is
-/// then data-dependent and no shape rule applies, so both destination
-/// construction and reification fall back to the `outs` shape. Deciding this
-/// from one predicate is what keeps those two paths in agreement -- gating the
-/// converter on the operand *count* while reification gates on the operand
-/// being *constant* is exactly how they drift apart.
-inline bool resolveReductionAxes(mlir::Operation *op, mlir::Value data,
-                                 int64_t noopWithEmptyAxes,
-                                 llvm::SmallVectorImpl<int64_t> &axes) {
-  axes.clear();
-  bool hasAxesOperand = op->getNumOperands() > 1 &&
-                        !mlir::isa<mlir::NoneType>(op->getOperand(1).getType());
-  if (hasAxesOperand) {
-    if (!extractConstantIntVector(op->getOperand(1), axes))
-      return false;
-  } else if (auto axesAttr = op->getAttrOfType<mlir::ArrayAttr>("axes")) {
-    for (mlir::Attribute entry : axesAttr)
-      axes.push_back(
-          mlir::cast<mlir::IntegerAttr>(entry).getValue().getSExtValue());
-  }
-
-  if (!axes.empty() || noopWithEmptyAxes != 0)
-    return true;
-  // Empty axes with noop_with_empty_axes = 0 reduces every axis.
-  auto dataType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
-  if (!dataType)
-    return false;
-  axes = llvm::to_vector(llvm::seq<int64_t>(0, dataType.getRank()));
-  return true;
-}
+/// Returns `std::nullopt` when the axes are only known at runtime. The axis
+/// mapping is then data-dependent and no shape rule applies, so both
+/// destination construction and reification fall back to the `outs` shape.
+/// Deciding this from one predicate is what keeps those two paths in agreement
+/// -- gating the converter on the operand *count* while reification gates on
+/// the operand being *constant* is exactly how they drift apart.
+///
+/// \p storage is caller-owned scratch that backs the returned view; it must
+/// outlive the result and must not be modified while the view is in use.
+std::optional<llvm::ArrayRef<int64_t>>
+resolveReductionAxes(mlir::Operation *op, mlir::Value data,
+                     int64_t noopWithEmptyAxes,
+                     llvm::SmallVectorImpl<int64_t> &storage);
 
 /// Resolve the ranked result type of an ONNX reduction op (ReduceMax / Sum /
 /// Mean / Prod / ...).
@@ -202,73 +149,32 @@ inline bool resolveReductionAxes(mlir::Operation *op, mlir::Value data,
 /// The shape rule itself is shared with destination construction and
 /// `reifyResultShapes` through `mlir::hip::inferReductionShape`.
 ///
-/// \p reducedAxes          reduced axis indices (may be negative; normalized
-///                         by the shared helper). For the all-axes default the
-///                         caller passes every axis; for a noop (empty axes)
-///                         it passes none.
-/// \p axesStaticallyKnown  false when axes are only known at runtime, in which
-///                         case an unranked result cannot be inferred.
+/// \p reducedAxes reduced axis indices (may be negative; normalized by the
+///                shared helper), or `std::nullopt` when the axes are only
+///                known at runtime, in which case an unranked result cannot be
+///                inferred.
 /// Returns failure only when the result is unranked AND cannot be inferred
 /// (unranked/absent input type, or runtime-only axes).
-inline mlir::FailureOr<mlir::RankedTensorType>
+mlir::FailureOr<mlir::RankedTensorType>
 inferReduceResultType(mlir::Operation *op, mlir::Value data,
-                      llvm::ArrayRef<int64_t> reducedAxes,
-                      bool axesStaticallyKnown, int64_t keepdims) {
-  if (auto ranked =
-          mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType()))
-    return ranked;
-  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
-  if (!inputType || !axesStaticallyKnown)
-    return mlir::failure();
-  mlir::FailureOr<llvm::SmallVector<int64_t>> outShape =
-      mlir::hip::inferReductionShape(inputType.getShape(), reducedAxes,
-                                     keepdims);
-  if (mlir::failed(outShape))
-    return mlir::failure();
-  return mlir::RankedTensorType::get(*outShape, inputType.getElementType());
-}
+                      std::optional<llvm::ArrayRef<int64_t>> reducedAxes,
+                      int64_t keepdims);
 
 /// Build a tensor.empty with the imported result type and the dynamic sizes
 /// described by `reifiedShape`. Static reified dimensions are materialized as
 /// constant index operands when the imported type keeps that dimension
 /// dynamic; the existing `hip-infer-shapes` pass owns later type refinement.
-inline mlir::FailureOr<mlir::Value> createEmptyTensorFromReifiedShape(
+mlir::FailureOr<mlir::Value> createEmptyTensorFromReifiedShape(
     mlir::OpBuilder &builder, mlir::Location loc,
     mlir::RankedTensorType resultType,
-    llvm::ArrayRef<mlir::OpFoldResult> reifiedShape) {
-  if (static_cast<int64_t>(reifiedShape.size()) != resultType.getRank())
-    return mlir::failure();
-
-  llvm::SmallVector<mlir::Value> dynSizes;
-  for (int64_t dimIdx : llvm::seq<int64_t>(resultType.getRank())) {
-    std::optional<int64_t> reifiedStatic =
-        mlir::getConstantIntValue(reifiedShape[dimIdx]);
-    if (!resultType.isDynamicDim(dimIdx)) {
-      if (reifiedStatic && *reifiedStatic != resultType.getDimSize(dimIdx))
-        return mlir::failure();
-      continue;
-    }
-    dynSizes.push_back(mlir::getValueOrCreateConstantIndexOp(
-        builder, loc, reifiedShape[dimIdx]));
-  }
-  return mlir::Value(
-      mlir::tensor::EmptyOp::create(builder, loc, resultType.getShape(),
-                                    resultType.getElementType(), dynSizes));
-}
+    llvm::ArrayRef<mlir::OpFoldResult> reifiedShape);
 
 /// Derive a tensor type for a synthesized intermediate from a reified shape.
 /// Constant dimensions become static; all other dimensions stay dynamic.
-inline mlir::RankedTensorType
+mlir::RankedTensorType
 getTensorTypeFromReifiedShape(llvm::ArrayRef<mlir::OpFoldResult> reifiedShape,
                               mlir::Type elementType,
-                              mlir::Attribute encoding = {}) {
-  llvm::SmallVector<int64_t> shape;
-  shape.reserve(reifiedShape.size());
-  for (mlir::OpFoldResult dim : reifiedShape)
-    shape.push_back(
-        mlir::getConstantIntValue(dim).value_or(mlir::ShapedType::kDynamic));
-  return mlir::RankedTensorType::get(shape, elementType, encoding);
-}
+                              mlir::Attribute encoding = {});
 
 /// Create a tensor.empty for a DPS init whose shape is the NumPy-style
 /// broadcast of \p operands. Converter destination construction delegates to
@@ -280,21 +186,14 @@ getTensorTypeFromReifiedShape(llvm::ArrayRef<mlir::OpFoldResult> reifiedShape,
 ///   %lhs_is_one = arith.cmpi eq, %lhs_dim, %c1 : index
 ///   %extent = arith.select %lhs_is_one, %rhs_dim, %lhs_dim : index
 ///   %init = tensor.empty(%extent) : tensor<?xf32>
-inline mlir::FailureOr<mlir::Value>
+mlir::FailureOr<mlir::Value>
 createBroadcastEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
                            mlir::RankedTensorType resultType,
-                           mlir::ValueRange operands) {
-  mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>> shape =
-      mlir::hip::reifyBroadcastResultShape(
-          builder, loc, operands, [&]() { return mlir::emitError(loc); });
-  if (mlir::failed(shape))
-    return mlir::failure();
-  return createEmptyTensorFromReifiedShape(builder, loc, resultType, *shape);
-}
+                           mlir::ValueRange operands);
 
 /// Create a tensor.empty for the DPS init of an ONNX reduction op.
 ///
-/// When the reduced axes are known at compile time the extents come from
+/// When \p reducedAxes carries a value the extents come from
 /// `reifyReductionResultShape` — the same helper that backs
 /// `reifyResultShapes` — so the destination and the shape observed by
 /// consumers implement one ONNX reduction shape function. This matters for
@@ -310,24 +209,15 @@ createBroadcastEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
 ///   %d3 = tensor.dim %data, %c3
 ///   %init = tensor.empty(%d0, %d3) : tensor<?x?xf32>
 ///
-/// When the axes are only known at runtime the mapping is data-dependent and
-/// no shape function applies, so the destination falls back to a positional
-/// copy from `data`. `reifyReductionShape` bails on the same condition and
-/// lifts the `outs` shape instead, so the two still agree.
-inline mlir::FailureOr<mlir::Value>
+/// `std::nullopt` means the axes are only known at runtime: the mapping is then
+/// data-dependent and no shape function applies, so the destination falls back
+/// to a positional copy from `data`. `reifyReductionShape` bails on the same
+/// condition and lifts the `outs` shape instead, so the two still agree.
+mlir::FailureOr<mlir::Value>
 createReductionEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
                            mlir::RankedTensorType resultType, mlir::Value data,
-                           llvm::ArrayRef<int64_t> reducedAxes, bool axesKnown,
-                           int64_t keepdims) {
-  if (!axesKnown)
-    return createEmptyTensor(builder, loc, resultType, data);
-  mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>> shape =
-      mlir::hip::reifyReductionResultShape(builder, loc, data, reducedAxes,
-                                           keepdims);
-  if (mlir::failed(shape))
-    return mlir::failure();
-  return createEmptyTensorFromReifiedShape(builder, loc, resultType, *shape);
-}
+                           std::optional<llvm::ArrayRef<int64_t>> reducedAxes,
+                           int64_t keepdims);
 
 /// Get !hip.context from function argument 0. Returns failure if the
 /// function has no arguments or the first argument is not !hip.context.

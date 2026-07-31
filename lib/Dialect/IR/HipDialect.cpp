@@ -569,15 +569,10 @@ LogicalResult MatmulOp::verify() {
 
   ArrayRef<int64_t> aShape = getShapeOf(getA());
   ArrayRef<int64_t> bShape = getShapeOf(getB());
-  if (failed(mlir::hip::verifyHipOpShape(
-          *this, [&]() -> SmallVector<SmallVector<int64_t>> {
-            FailureOr<SmallVector<int64_t>> outShape =
-                mlir::hip::inferMatmulShape(
-                    aShape, bShape, [&]() { return this->emitOpError(); });
-            if (failed(outShape))
-              return {};
-            return {std::move(*outShape)};
-          })))
+  if (failed(mlir::hip::verifyHipOpShape(*this, [&] {
+        return mlir::hip::inferMatmulShape(aShape, bShape,
+                                           [&] { return this->emitOpError(); });
+      })))
     return failure();
   return mlir::hip::verifyStridedBatchMatmul(
       aShape, bShape, [&]() { return this->emitOpError(); });
@@ -1310,15 +1305,11 @@ LogicalResult GemmOp::verify() {
   std::optional<ArrayRef<int64_t>> cShape;
   if (getInputC())
     cShape = getShapeOf(getInputC());
-  return mlir::hip::verifyHipOpShape(
-      *this, [&]() -> SmallVector<SmallVector<int64_t>> {
-        FailureOr<SmallVector<int64_t>> outShape = mlir::hip::inferGemmShape(
-            getShapeOf(getInputA()), getShapeOf(getInputB()), cShape,
-            getTransA(), getTransB(), [&]() { return this->emitOpError(); });
-        if (failed(outShape))
-          return {};
-        return {std::move(*outShape)};
-      });
+  return mlir::hip::verifyHipOpShape(*this, [&] {
+    return mlir::hip::inferGemmShape(
+        getShapeOf(getInputA()), getShapeOf(getInputB()), cShape, getTransA(),
+        getTransB(), [&] { return this->emitOpError(); });
+  });
 }
 
 //===----------------------------------------------------------------------===//

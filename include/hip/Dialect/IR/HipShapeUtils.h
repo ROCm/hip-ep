@@ -62,13 +62,6 @@ LogicalResult
 verifyStridedBatchMatmul(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
                          function_ref<InFlightDiagnostic()> emitError);
 
-/// Compute the NumPy-broadcast result shape of `shapes` (right-aligned) from
-/// static extents only. Folds `OpTrait::util::getBroadcastedShape` pairwise so
-/// static broadcast validation is identical to the matmul batch path.
-FailureOr<SmallVector<int64_t>>
-inferBroadcastShape(ArrayRef<ArrayRef<int64_t>> shapes,
-                    function_ref<InFlightDiagnostic()> emitError);
-
 /// Compute ONNX Gemm's rank-2 `{M, N}` result shape from static extents.
 /// Validates that A and B are rank 2, that `transA`/`transB` are 0 or 1, that
 /// the transpose-aware contraction extents agree, and that the optional C is
@@ -79,22 +72,25 @@ inferGemmShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
                std::optional<ArrayRef<int64_t>> cShape, int64_t transA,
                int64_t transB, function_ref<InFlightDiagnostic()> emitError);
 
-/// Verify that the actual `outs` operand shapes of a DPS HIP op match the
-/// shapes returned by `computeExpected`. `op` must implement
-/// `DestinationStyleOpInterface`.
+/// Verify that the `outs` shape of a single-destination DPS HIP op matches the
+/// shape returned by `inferShape`. `op` must implement
+/// `DestinationStyleOpInterface` and have exactly one DPS init.
 ///
-/// `computeExpected` is invoked once and must return one shape per init
-/// operand (== one per `OpResult` for tensor mode; same count for memref
-/// mode, just no SSA result). An empty outer vector signals that the
-/// shape-arithmetic helper already emitted a diagnostic — this function
-/// returns `failure()` without re-emitting.
+/// `inferShape` is invoked once and returns `failure()` when the underlying
+/// `infer*` helper already emitted a diagnostic, which this function
+/// propagates without re-emitting. Pair it directly with an `infer*` helper:
+///
+///   return verifyHipOpShape(*this, [&] {
+///     return inferMatmulShape(aShape, bShape,
+///                             [&] { return this->emitOpError(); });
+///   });
 ///
 /// Element-type checks are intentionally not handled here: dtype-changing
 /// ops (cast, equal, less, not, and) keep their own element-type checks in
 /// their op-local verifiers.
-LogicalResult verifyHipOpShape(
-    Operation *op,
-    function_ref<SmallVector<SmallVector<int64_t>>()> computeExpected);
+LogicalResult
+verifyHipOpShape(Operation *op,
+                 function_ref<FailureOr<SmallVector<int64_t>>()> inferShape);
 
 /// Build an `OpFoldResult` for one dimension of a reify-callable op's
 /// result:
@@ -211,39 +207,26 @@ SmallVector<OpFoldResult> reifyGatherWithAxis(OpBuilder &b, Location loc,
 SmallVector<OpFoldResult> reifyGatherND(OpBuilder &b, Location loc, Value data,
                                         Value indices, int64_t batchDims);
 
-/// Sentinel in a reduction dim map: this output dimension is a reduced axis
-/// retained by `keepdims=1`, so its extent is 1 rather than an input extent.
-constexpr int64_t kReducedDim = -1;
-
-/// Map each output dimension of an ONNX reduction to the input dimension it
-/// takes its extent from, or `kReducedDim` for a kept reduced axis.
+/// ONNX reduction result shape over `axes`, from static extents only.
 ///
 /// `axes` holds the already-resolved reduced axis indices (ONNX negative-axis
-/// convention); an empty list means no reduction. `keepdims=0` drops reduced
-/// axes from the output rank, so the output dimension order is *not*
-/// positional in the input:
+/// convention); an empty list means no reduction. `keepdims = 0` drops reduced
+/// axes from the output rank, so the output dimension order is *not* positional
+/// in the input: reducing axes `[1, 2]` of a rank-4 input maps output dimension
+/// 1 to input dimension 3.
 ///
-///   data = tensor<?x?x?x?xf32>, axes = [1, 2], keepdims = 0
-///   -> map = [0, 3], i.e. output dim 1 comes from input dim 3, not dim 1.
-///
-/// This mapping is the single source of truth behind `inferReductionShape`
-/// (static extents, used for destination types) and
-/// `reifyReductionResultShape` (mixed extents, used for destination
-/// construction and `reifyResultShapes`), so the three can never disagree.
-/// Returns failure when an axis is out of range for `dataRank`.
-FailureOr<SmallVector<int64_t>> computeReductionDimMap(int64_t dataRank,
-                                                       ArrayRef<int64_t> axes,
-                                                       int64_t keepdims);
-
-/// Static ONNX reduction result shape: `computeReductionDimMap` applied to
-/// `dataShape`, with kept reduced axes becoming 1.
+/// This and `reifyReductionResultShape` share one internal output-to-input
+/// dimension mapping, so a destination built from either cannot disagree with
+/// the shape `reifyResultShapes` reports. Returns failure when an axis is out
+/// of range for `dataShape`.
 FailureOr<SmallVector<int64_t>> inferReductionShape(ArrayRef<int64_t> dataShape,
                                                     ArrayRef<int64_t> axes,
                                                     int64_t keepdims);
 
-/// Mixed ONNX reduction result shape: `computeReductionDimMap` applied to
-/// `data`, emitting `tensor.dim` only for dimensions that are dynamic in
-/// `data`. `data` must be a `RankedTensorType`-typed Value.
+/// ONNX reduction result shape over `axes` as mixed extents, emitting
+/// `tensor.dim` only for dimensions that are dynamic in `data`. Same mapping
+/// as `inferReductionShape`; see it for the `keepdims` semantics. `data` must
+/// be a `RankedTensorType`-typed Value.
 FailureOr<SmallVector<OpFoldResult>>
 reifyReductionResultShape(OpBuilder &b, Location loc, Value data,
                           ArrayRef<int64_t> axes, int64_t keepdims);

@@ -46,20 +46,19 @@ ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
   // Reduced axes, resolved from the attribute or a compile-time-constant
   // operand. Drives the axes constant we materialize, the unranked-result
   // inference, and the destination shape.
-  llvm::SmallVector<int64_t> axesVec;
-  bool axesStaticallyKnown =
-      resolveReductionAxes(op, data, noopWithEmptyAxes, axesVec);
+  llvm::SmallVector<int64_t> axesStorage;
+  std::optional<llvm::ArrayRef<int64_t>> reducedAxes =
+      resolveReductionAxes(op, data, noopWithEmptyAxes, axesStorage);
 
   // Resolve the result type (infer if the importer left it unranked).
-  auto resultTypeOr =
-      inferReduceResultType(op, data, axesVec, axesStaticallyKnown, keepdims);
+  auto resultTypeOr = inferReduceResultType(op, data, reducedAxes, keepdims);
   if (mlir::failed(resultTypeOr))
     return rewriter.notifyMatchFailure(
         op, "ReduceSum: cannot infer unranked result (need ranked input and "
             "static axes)");
   mlir::RankedTensorType resultType = *resultTypeOr;
   mlir::FailureOr<mlir::Value> init = createReductionEmptyTensor(
-      rewriter, loc, resultType, data, axesVec, axesStaticallyKnown, keepdims);
+      rewriter, loc, resultType, data, reducedAxes, keepdims);
   if (mlir::failed(init))
     return rewriter.notifyMatchFailure(
         op, "ReduceSum result type is incompatible with the reduction shape");
@@ -73,9 +72,9 @@ ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
   } else {
     // Create constant tensor for axes
     auto axesType = mlir::RankedTensorType::get(
-        {static_cast<int64_t>(axesVec.size())}, rewriter.getI64Type());
-    auto axesAttr =
-        mlir::DenseIntElementsAttr::get(axesType, llvm::ArrayRef(axesVec));
+        {static_cast<int64_t>(axesStorage.size())}, rewriter.getI64Type());
+    auto axesAttr = mlir::DenseIntElementsAttr::get(
+        axesType, llvm::ArrayRef<int64_t>(axesStorage));
     axesOperand =
         mlir::arith::ConstantOp::create(rewriter, loc, axesType, axesAttr);
   }

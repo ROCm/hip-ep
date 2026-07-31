@@ -114,7 +114,7 @@ func.func @matmul_m_mismatch(%ctx: !hip.context,
                              %a: memref<2x4xf16, 1>,
                              %b: memref<4x8xf16, 1>,
                              %c: memref<3x8xf16, 1>) {
-  // expected-error @below {{dim 0 of result #0 mismatch: expected 2}}
+  // expected-error @below {{dim 0 of result mismatch: expected 2}}
   hip.matmul(%ctx)
     ins(%a, %b : memref<2x4xf16, 1>, memref<4x8xf16, 1>)
     outs(%c : memref<3x8xf16, 1>)
@@ -127,7 +127,7 @@ func.func @matmul_n_mismatch(%ctx: !hip.context,
                              %a: memref<2x4xf16, 1>,
                              %b: memref<4x8xf16, 1>,
                              %c: memref<2x9xf16, 1>) {
-  // expected-error @below {{dim 1 of result #0 mismatch: expected 8}}
+  // expected-error @below {{dim 1 of result mismatch: expected 8}}
   hip.matmul(%ctx)
     ins(%a, %b : memref<2x4xf16, 1>, memref<4x8xf16, 1>)
     outs(%c : memref<2x9xf16, 1>)
@@ -153,7 +153,7 @@ func.func @matmul_rank_mismatch(%ctx: !hip.context,
                                 %a: memref<2x4x8xf16, 1>,
                                 %b: memref<8x16xf16, 1>,
                                 %c: memref<4x16xf16, 1>) {
-  // expected-error @below {{rank mismatch on result #0: expected rank 3}}
+  // expected-error @below {{rank mismatch on result: expected rank 3}}
   hip.matmul(%ctx)
     ins(%a, %b : memref<2x4x8xf16, 1>, memref<8x16xf16, 1>)
     outs(%c : memref<4x16xf16, 1>)
