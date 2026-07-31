@@ -1,5 +1,7 @@
-// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
-// Licensed under the MIT License.
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Licensed under the MIT License.
+ */
 
 #include "../hipdnn_ep_runtime.h"
 #include "hip_custom_kernels.h"
@@ -43,9 +45,8 @@ int wrap_im2d2col(RuntimeState *state, const void *input, int64_t data_type,
         const char *dt = (data_type == HIPDNN_EP_DATATYPE_HALF)       ? "f16"
                          : (data_type == HIPDNN_EP_DATATYPE_BFLOAT16) ? "bf16"
                                                                       : "f32";
-        snprintf(b, sizeof(b), "%lldx%lldx%lld,k=%lldx%lld,%s",
-                 (long long)C, (long long)H, (long long)W,
-                 (long long)kh, (long long)kw, dt);
+        snprintf(b, sizeof(b), "%lldx%lldx%lld,k=%lldx%lld,%s", (long long)C,
+                 (long long)H, (long long)W, (long long)kh, (long long)kw, dt);
         return std::string(b);
       },
       state);
@@ -55,7 +56,7 @@ int wrap_im2d2col(RuntimeState *state, const void *input, int64_t data_type,
   }
 
   void *stream = hipdnn_ep_state_get_stream(state);
-  return hip_im2d2col(stream, input, data_type, C, H, W, kh, kw, pad_top,
+  return hip_im2d2col(state, input, data_type, C, H, W, kh, kw, pad_top,
                       pad_bottom, pad_left, pad_right, stride_h, stride_w,
-                      output, out_h, out_w);
+                      dilation_h, dilation_w, output, out_h, out_w);
 }
