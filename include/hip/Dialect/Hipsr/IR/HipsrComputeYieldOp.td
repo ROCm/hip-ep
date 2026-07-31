@@ -18,7 +18,8 @@ def Hipsr_ComputeYieldOp : Hipsr_Op<"compute_yield",
 
     `ReturnLike` lets the parent's `RegionBranchOpInterface` verify these
     outputs. Because the op only forwards values, `Pure` lets effect analyses
-    ignore it. `AnyType` keeps the same boundary before and after bufferization.
+    ignore it. Operands are ranked tensors, like the results of
+    `hipsr.compute`; a bufferized compute has no results and yields nothing.
 
     Example:
     ```mlir
@@ -26,7 +27,7 @@ def Hipsr_ComputeYieldOp : Hipsr_Op<"compute_yield",
     ```
   }];
 
-  let arguments = (ins Variadic<AnyType>:$operands);
+  let arguments = (ins Variadic<AnyRankedTensor>:$operands);
 
   let assemblyFormat = "($operands^ `:` type($operands))? attr-dict";
 
