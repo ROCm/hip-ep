@@ -101,12 +101,6 @@ int main(int argc, char **argv) {
   mlir::registerFinalizeMemRefToLLVMConversionPass();
   mlir::registerConvertControlFlowToLLVMPass();
   mlir::registerConvertToLLVMPass();
-  // expand-strided-metadata: the production hip-to-llvm pipeline runs this
-  // (inside buildHipToLLVMPipeline) to decompose memref.collapse_shape /
-  // expand_shape BEFORE convert-hip-to-llvm. Exposed here as a standalone name
-  // so LIT tests can reproduce that exact order (e.g. proving hip.alloc_output
-  // ABI attrs survive the decomposition).
-  mlir::memref::registerExpandStridedMetadataPass();
 
   // Run every statically-linked plugin's registration before MlirOptMain
   // parses the command line, so `--<plugin-pass>` is recognised by the CL
