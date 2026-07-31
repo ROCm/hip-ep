@@ -317,6 +317,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/one_hot.cpp runtime_one_hot.bc)
     compile_to_bitcode(real/reduce_sum.cpp runtime_reduce_sum.bc)
     compile_to_bitcode(real/reduce_mean.cpp runtime_reduce_mean.bc)
+    compile_to_bitcode(real/reduce_l2.cpp runtime_reduce_l2.bc)
     compile_to_bitcode(real/reduce_max.cpp runtime_reduce_max.bc)
     compile_to_bitcode(real/reduce_min.cpp runtime_reduce_min.bc)
     compile_to_bitcode(real/matmul_nbits.cpp runtime_matmul_nbits.bc)
@@ -392,6 +393,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_one_hot.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_sum.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_mean.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_l2.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_max.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_reduce_min.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_matmul_nbits.bc

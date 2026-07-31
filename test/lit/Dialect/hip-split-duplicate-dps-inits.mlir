@@ -44,6 +44,35 @@ func.func @gqa_duplicate_present_inits(
 
 // -----
 
+// A shared empty used by different DPS ops is also split. This keeps CSE from
+// creating one large alias class that One-Shot must repeatedly analyze.
+
+// CHECK-LABEL: func.func @cross_op_shared_empty
+func.func @cross_op_shared_empty(
+    %ctx: !hip.context,
+    %input: tensor<?xf32>,
+    %size: index) -> (tensor<?xf32>, tensor<?xf32>) {
+  %empty = tensor.empty(%size) : tensor<?xf32>
+  // CHECK: %[[EMPTY:.*]] = tensor.empty(%[[SIZE:.*]]) : tensor<?xf32>
+  // CHECK: %[[SIGMOID:.*]] = hip.sigmoid
+  // CHECK-SAME: outs(%[[EMPTY]] : tensor<?xf32>)
+  %sigmoid = hip.sigmoid(%ctx)
+      ins(%input : tensor<?xf32>)
+      outs(%empty : tensor<?xf32>)
+      : tensor<?xf32>
+  // CHECK: %[[FRESH:.*]] = bufferization.alloc_tensor(%[[SIZE]]) : tensor<?xf32>
+  // CHECK: %[[TANH:.*]] = hip.tanh
+  // CHECK-SAME: outs(%[[FRESH]] : tensor<?xf32>)
+  %tanh = hip.tanh(%ctx)
+      ins(%input : tensor<?xf32>)
+      outs(%empty : tensor<?xf32>)
+      : tensor<?xf32>
+  // CHECK: return %[[SIGMOID]], %[[TANH]]
+  return %sigmoid, %tanh : tensor<?xf32>, tensor<?xf32>
+}
+
+// -----
+
 // Single-use scratch empties (each feeding ONE init of ONE op) are left
 // untouched, so benign CSE merges -- and pool packing -- are unaffected.
 

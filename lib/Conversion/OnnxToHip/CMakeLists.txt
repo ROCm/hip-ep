@@ -17,6 +17,7 @@ add_library(OnnxToHip STATIC
   CastConversion.cpp
   ReduceSumConversion.cpp
   ReduceMeanConversion.cpp
+  ReduceL2Conversion.cpp
   MatMulNBitsConversion.cpp
   QMoEConversion.cpp
   GatherBlockQuantizedConversion.cpp

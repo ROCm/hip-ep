@@ -12,15 +12,10 @@
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/LLVMIR/FunctionCallUtils.h"
-#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
-#include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/Transforms/DialectConversion.h"
 
 #include "llvm/ADT/Sequence.h"
-
-#include <algorithm>
 
 using namespace mlir;
 using namespace mlir::hipsr;
@@ -74,8 +69,6 @@ struct AddLowering : public ConvertOpToLLVMPattern<AddOp> {
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
-    Type ptrType = getPtrType();
-    Type i32Type = rewriter.getI32Type();
     Type i64Type = rewriter.getI64Type();
 
     auto lhsType = dyn_cast<MemRefType>(op.getLhs().getType());
@@ -104,37 +97,22 @@ struct AddLowering : public ConvertOpToLLVMPattern<AddOp> {
       return rewriter.notifyMatchFailure(op, "unsupported element type");
     }
 
-    auto createI64Const = [&](int64_t v) {
-      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
-                                      rewriter.getI64IntegerAttr(v));
-    };
-
-    SmallVector<Type, 19> paramTypes = {ptrType, i32Type, ptrType, ptrType,
-                                        ptrType};
-    paramTypes.append(14, i64Type);
-
-    // TODO: the runtime function should use !llvm.ptr<1> (GPU) pointers.
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapMiopenOpTensor, paramTypes, i32Type);
-    if (failed(funcOp)) {
+    using AddCall = RuntimeFunc<i32, hostPtr, slotIndex, devicePtr, devicePtr,
+                                devicePtr, i64, i64, i64, i64, i64, i64, i64,
+                                i64, i64, i64, i64, i64, i64, i64>;
+    auto addFunc =
+        AddCall::lookupOrCreateFn(rewriter, loc, module, kWrapMiopenOpTensor);
+    if (failed(addFunc)) {
       return failure();
     }
-
-    Value opStateSlot = LLVM::ConstantOp::create(
-        rewriter, loc, i32Type, rewriter.getI32IntegerAttr(-1));
-
-    SmallVector<Value, 19> args = {
-        adaptor.getCtx(), opStateSlot,
-        extractContiguousMemRefPtr(adaptor.getLhs(), rewriter, loc),
-        extractContiguousMemRefPtr(adaptor.getRhs(), rewriter, loc),
-        extractContiguousMemRefPtr(adaptor.getInit(), rewriter, loc)};
-    args.append(lhsDims.begin(), lhsDims.end());
-    args.append(rhsDims.begin(), rhsDims.end());
-    args.append(outDims.begin(), outDims.end());
-    args.push_back(createI64Const(dataType));
-    args.push_back(createI64Const(kTensorOpAdd));
-
-    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    if (failed(addFunc->call(
+            adaptor.getCtx(), SlotIndex{op.getOperation()}, adaptor.getLhs(),
+            adaptor.getRhs(), adaptor.getInit(), lhsDims[0], lhsDims[1],
+            lhsDims[2], lhsDims[3], rhsDims[0], rhsDims[1], rhsDims[2],
+            rhsDims[3], outDims[0], outDims[1], outDims[2], outDims[3],
+            dataType, static_cast<int64_t>(kTensorOpAdd)))) {
+      return failure();
+    }
     rewriter.eraseOp(op);
     return success();
   }

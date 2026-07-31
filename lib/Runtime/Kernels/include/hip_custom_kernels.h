@@ -540,6 +540,18 @@ HIP_KERNEL_API int hip_rope_forward(
  * buffers) lives in the runtime wrapper (real/gqa.cpp).
  */
 
+/* KV-cache element format for the fused/append/concat/decode GQA kernels. This
+ * is the single ABI selector the kernels dispatch on -- callers pass ONE enum
+ * instead of a per-type boolean or inferring the type from which pointers are
+ * non-null. Adding a new quantized cache (INT4, FP8, ...) means: add an
+ * enumerator here, add the matching kernel specialization, and add one switch
+ * case in the entry -- no new parameter and no change to existing call sites'
+ * shapes. Keep in sync with real/gqa.cpp::KvCacheFormat (via kv_dtype_abi). */
+typedef enum {
+  HIP_KV_DTYPE_FP16 = 0, /* unquantized __half cache */
+  HIP_KV_DTYPE_INT8 = 1, /* symmetric per-channel int8, fp32 scale [G,d] */
+} hip_kv_dtype_t;
+
 /* KV cache append: scatter new K/V from BSHD [B,sq,G,d] into an existing
  * BNSD cache [B,G,present_seq,d] at positions [past_len .. past_len+sq).
  * present_seq is the actual sequence dimension (stride) of the present buffer,
@@ -548,11 +560,18 @@ HIP_KERNEL_API int hip_rope_forward(
  * seqlens_k: optional device pointer [B] int32. When non-null, past_len is
  * derived from seqlens_k[b]+1-sq (per-batch) and the host past_len is ignored.
  * Pass NULL for host-side past_len.
- * element_size_bytes: 2 = fp16, 4 = fp32. */
+ * element_size_bytes: 2 = fp16, 4 = fp32 (used only by the FP16 copy path).
+ * kv_dtype: hip_kv_dtype_t selecting the cache format:
+ *   HIP_KV_DTYPE_FP16 -> plain elem-size copy/transpose (fp16 or fp32 cache);
+ *                        scale is ignored (pass NULL).
+ *   HIP_KV_DTYPE_INT8 -> symmetric per-channel INT8 quant (fp16 src, int8
+ *                        cache); scale is the static fp32 per-channel table
+ *                        [G,d] (no zero point), q = clamp(round(x/scale),-128,127). */
 HIP_KERNEL_API int hip_gqa_kv_cache_append(
     void* stream, const void* src, void* cache,
     int batch_size, int sq, int G, int d, int present_seq, int past_len,
-    const void* seqlens_k, int element_size_bytes);
+    const void* seqlens_k, int element_size_bytes,
+    int kv_dtype, const void* scale);
 
 /* KV cache concat: concatenate past data and new tokens into a fresh present
  * buffer.  Fills present [B,G,present_seq,d] by copying past data from
@@ -561,11 +580,25 @@ HIP_KERNEL_API int hip_gqa_kv_cache_append(
  * past_seq and present_seq are the actual sequence dimensions (strides) of the
  * respective buffers.  Handles the stride mismatch (past_seq != present_seq)
  * in a single kernel launch.
- * element_size_bytes: 2 = fp16, 4 = fp32. */
+ * element_size_bytes: 2 = fp16, 4 = fp32 (used only by the FP16 copy path).
+ * kv_dtype / scale select the storage format exactly as in
+ * hip_gqa_kv_cache_append (HIP_KV_DTYPE_FP16 -> plain copy; HIP_KV_DTYPE_INT8 ->
+ * INT8 quant of the new fp16 tokens, past then read as INT8, scale = [G,d]). */
 HIP_KERNEL_API int hip_gqa_kv_cache_concat(
     void* stream, const void* past, const void* current, void* present,
     int batch_size, int past_len, int sq, int G, int d,
-    int past_seq, int present_seq, int element_size_bytes);
+    int past_seq, int present_seq, int element_size_bytes,
+    int kv_dtype, const void* scale);
+
+/* INT8 KV cache (symmetric per-channel, kv_cache_bit_width=8) dequant.
+ * dequant_kv_i8_to_fp16: rebuilds an fp16 BNSD view [B,G,dst_seq,d] of the first
+ * `total_seq` cache positions (x = q * scale) so the compute-bound prefill can
+ * reuse the tuned fp16 kernel. `scale` is the static fp32 per-channel table
+ * [G,d] (no zero point). Q stays fp16 throughout. (Append/concat quantization
+ * is folded into hip_gqa_kv_cache_append/concat via their kv_dtype argument.) */
+HIP_KERNEL_API int hip_gqa_dequant_kv_i8_to_fp16(
+    void* stream, const void* src, void* dst, const void* scale,
+    int batch_size, int total_seq, int G, int d, int src_seq, int dst_seq);
 
 /* Internal GQA RoPE (half-rotated):
  * out[d] = in[d]*cos - in[d+half]*sin
@@ -718,6 +751,12 @@ HIP_KERNEL_API int hip_gqa_flash_prefill_v2(
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale);
 
+/* NB: prefill is compute-bound, so there is deliberately NO separate int8
+ * prefill kernel. The runtime (real/gqa.cpp) dequantizes the int8 KV cache to an
+ * fp16 scratch ONCE (hip_gqa_dequant_kv_i8_to_fp16) and reuses the tuned fp16
+ * hip_gqa_flash_prefill_v2 above -- ~parity with fp16. Only the bandwidth-bound
+ * decode reads int8 directly (hip_gqa_flash_decode_v2 with kv_dtype=INT8). */
+
 /* hip_mha_flash_prefill: fused non-causal FA-2 WMMA prefill for the MS
  * MultiHeadAttention contrib op (self-attention, N_q == N_kv). Replaces the
  * decomposed hipBLASLt pipeline that materializes the fp32 score matrix
@@ -768,7 +807,17 @@ HIP_KERNEL_API int hip_mha_flash_prefill(
  * for the sink). When null and use_smooth_softmax != 0, behaves as if
  * s_h = 0 for all heads. This is the gpt-oss-20b / Mistral-style attention
  * sink. The partials are unaffected; the term is folded in by the reduce
- * kernel. */
+ * kernel.
+ *
+ * KV-cache format is chosen by kv_dtype (hip_kv_dtype_t), so one entry serves
+ * every format:
+ *   HIP_KV_DTYPE_FP16 -> fp16 K/V cache (Kcache/Vcache are __half); k_scale/
+ *     v_scale ignored (pass NULL).
+ *   HIP_KV_DTYPE_INT8 -> symmetric per-channel INT8 K/V cache: Kcache/Vcache are
+ *     INT8 [B,G,max_seq,d] (BNSD); k_scale/v_scale are fp32 [G,d] (one scale per
+ *     (kv_head, head_dim) channel, no zero point; dequant x_fp16 = x_i8 *
+ *     scale[g*d + c]). The int8 read is 1 byte/elem, halving the DRAM traffic on
+ *     the bandwidth-bound decode. Both scales are required for INT8. */
 HIP_KERNEL_API int hip_gqa_flash_decode_v2(
     void* stream,
     const void* Q, const void* Kcache, const void* Vcache,
@@ -779,7 +828,10 @@ HIP_KERNEL_API int hip_gqa_flash_decode_v2(
     const void* seqlens_k,
     int local_window_size,
     const void* head_sink,
-    int use_smooth_softmax);
+    int use_smooth_softmax,
+    int kv_dtype,
+    const void* k_scale,
+    const void* v_scale);
 
 /* =========================================================================
  * Cast (Element Type Conversion)
@@ -967,6 +1019,28 @@ HIP_KERNEL_API int hip_reduce_sum(
  * Returns: 0 on success, non-zero on failure
  */
 HIP_KERNEL_API int hip_reduce_mean(
+    void* stream,
+    const void* data,
+    void* output,
+    int64_t num_input_elements,
+    int64_t num_output_elements,
+    int64_t inner_size,
+    int hip_dtype);
+
+/* =========================================================================
+ * ReduceL2 (Parallel L2 Norm Reduction)
+ * =========================================================================
+ *
+ * Same layout convention and `inner_size` semantics as hip_reduce_sum, but
+ * accumulates sum(x^2) in float and writes sqrt(sum) to the output. The
+ * reduction is performed in-kernel so the op needs no compile-time-static reduce
+ * dim and tolerates a dynamic reduce axis.
+ *
+ * Supported types: HIP_DTYPE_FLOAT16 and HIP_DTYPE_FLOAT32 (ONNX ReduceL2 is
+ * float-domain). Both accumulate in float. Other dtypes return -1.
+ * Returns: 0 on success, non-zero on failure
+ */
+HIP_KERNEL_API int hip_reduce_l2(
     void* stream,
     const void* data,
     void* output,

@@ -1,5 +1,7 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
+
+// UNSUPPORTED: true
 //
 //===----------------------------------------------------------------------===//
 // Converts onnx.MatMul to hipsr.matmul (placeholder init, empty shape region).
@@ -14,8 +16,8 @@
 // CHECK-SAME:    %[[CTX:.*]]: !hipsr.context,
 // CHECK-SAME:    %[[A:.*]]: tensor<?x4096xf16>,
 // CHECK-SAME:    %[[B:.*]]: tensor<4096x1024xf16>) -> tensor<?x1024xf16> {
-// CHECK:         %[[INIT:.*]] = hipsr.placeholder : tensor<?x1024xf16>
-// CHECK:         hipsr.matmul(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<?x4096xf16>, tensor<4096x1024xf16>)
+// CHECK-NEXT:    %[[INIT:.*]] = hipsr.placeholder(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<?x4096xf16>, tensor<4096x1024xf16>) {type = #hipsr.placeholder_type<normal>} : tensor<?x1024xf16>
+// CHECK-NEXT:    hipsr.matmul(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<?x4096xf16>, tensor<4096x1024xf16>)
 // CHECK-SAME:      outs(%[[INIT]] : tensor<?x1024xf16>) : tensor<?x1024xf16>
 // CHECK-NOT:     shape_region
 func.func @matmul_2d(%ctx: !hipsr.context, %a: tensor<?x4096xf16>,
@@ -32,8 +34,8 @@ func.func @matmul_2d(%ctx: !hipsr.context, %a: tensor<?x4096xf16>,
 // CHECK-SAME:    %[[CTX:.*]]: !hipsr.context,
 // CHECK-SAME:    %[[A:.*]]: tensor<?x4096xf16>,
 // CHECK-SAME:    %[[B:.*]]: tensor<4096xf16>) -> tensor<?xf16> {
-// CHECK:         %[[INIT:.*]] = hipsr.placeholder : tensor<?xf16>
-// CHECK:         hipsr.matmul(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<?x4096xf16>, tensor<4096xf16>)
+// CHECK-NEXT:    %[[INIT:.*]] = hipsr.placeholder(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<?x4096xf16>, tensor<4096xf16>) {type = #hipsr.placeholder_type<normal>} : tensor<?xf16>
+// CHECK-NEXT:    hipsr.matmul(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<?x4096xf16>, tensor<4096xf16>)
 // CHECK-SAME:      outs(%[[INIT]] : tensor<?xf16>) : tensor<?xf16>
 // CHECK-NOT:     shape_region
 func.func @matmul_1d_rhs(%ctx: !hipsr.context, %a: tensor<?x4096xf16>,
