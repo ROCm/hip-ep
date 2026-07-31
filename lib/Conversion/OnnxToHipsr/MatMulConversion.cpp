@@ -14,18 +14,6 @@ namespace mlir {
 namespace hipsr {
 namespace {
 
-/// onnx.MatMul -> hipsr.matmul. The shape region is left empty here; a later
-/// pass populates every op's shape region uniformly (see populateShapeRegion).
-/// The `!hipsr.context` threaded onto the op comes from function arg 0 (added
-/// in the ONNX phase).
-///
-/// Before:
-///   %0 = "onnx.MatMul"(%A, %B) : (tensor<?x?xf16>, tensor<?x?xf16>)
-///                                 -> tensor<?x?xf16>
-/// After:
-///   %init = hipsr.placeholder : tensor<?x?xf16>
-///   %0 = hipsr.matmul(%ctx) ins(%A, %B : tensor<?x?xf16>, tensor<?x?xf16>)
-///                           outs(%init : tensor<?x?xf16>) : tensor<?x?xf16>
 struct MatMulToHipsr : public ::mlir::RewritePattern {
   MatMulToHipsr(::mlir::MLIRContext *ctx)
       : RewritePattern("onnx.MatMul", /*benefit=*/1, ctx) {}
@@ -54,14 +42,13 @@ struct MatMulToHipsr : public ::mlir::RewritePattern {
       return rewriter.notifyMatchFailure(op, "expected ranked tensor result");
     }
 
-    // A hipsr.placeholder mirroring the result type satisfies the DPS verifier
-    // without computing the output shape here; a later pass fills that in.
-    ::mlir::Value init =
-        rewriter.create<PlaceholderOp>(loc, ::mlir::TypeRange{resultType})
-            .getResult(0);
+    ::mlir::Value init = PlaceholderOp::create(
+                             rewriter, loc, ::mlir::TypeRange{resultType}, *ctx,
+                             ::mlir::ValueRange{a, b}, PlaceholderType::Normal)
+                             .getResult(0);
 
-    auto matmulOp = rewriter.create<MatMulOp>(
-        loc, ::mlir::TypeRange{resultType}, *ctx, a, b, init);
+    auto matmulOp = MatMulOp::create(
+        rewriter, loc, ::mlir::TypeRange{resultType}, *ctx, a, b, init);
 
     rewriter.replaceOp(op, matmulOp.getResult(0));
     return ::mlir::success();

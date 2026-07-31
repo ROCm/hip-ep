@@ -64,22 +64,32 @@ def PartitionPoolDomainsPass
     ```mlir
     func.func @graph(%ctx: !hipsr.context, %input: tensor<?x4xf32>,
         %shape: tensor<2xi64>) -> tensor<?x4xf16> {
-      %cast_init = hipsr.placeholder : tensor<?x4xf16>
+      %cast_init = hipsr.placeholder(%ctx)
+          ins(%input : tensor<?x4xf32>)
+          {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
       %cast = hipsr.cast(%ctx) ins(%input : tensor<?x4xf32>)
           outs(%cast_init : tensor<?x4xf16>) : tensor<?x4xf16>
-      %ready_init = hipsr.placeholder : tensor<?x4xf16>
+      %ready_init = hipsr.placeholder(%ctx)
+          ins(%input : tensor<?x4xf32>)
+          {type = #hipsr.placeholder_type<barrier>} : tensor<?x4xf16>
       %ready = hipsr.example_end_barrier(%ctx)
           ins(%cast : tensor<?x4xf16>)
           outs(%ready_init : tensor<?x4xf16>) : tensor<?x4xf16>
-      %add_init = hipsr.placeholder : tensor<?x4xf16>
+      %add_init = hipsr.placeholder(%ctx)
+          ins(%input, %input : tensor<?x4xf32>, tensor<?x4xf32>)
+          {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
       %sum = hipsr.add(%ctx)
           ins(%ready, %ready : tensor<?x4xf16>, tensor<?x4xf16>)
           outs(%add_init : tensor<?x4xf16>) : tensor<?x4xf16>
-      %expand_init = hipsr.placeholder : tensor<?x4xf16>
+      %expand_init = hipsr.placeholder(%ctx)
+          ins(%input, %shape : tensor<?x4xf32>, tensor<2xi64>)
+          {type = #hipsr.placeholder_type<barrier>} : tensor<?x4xf16>
       %expanded = hipsr.expand(%ctx)
           ins(%sum, %shape : tensor<?x4xf16>, tensor<2xi64>)
           outs(%expand_init : tensor<?x4xf16>) : tensor<?x4xf16>
-      %result_init = hipsr.placeholder : tensor<?x4xf16>
+      %result_init = hipsr.placeholder(%ctx)
+          ins(%input, %input : tensor<?x4xf32>, tensor<?x4xf32>)
+          {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
       %result = hipsr.add(%ctx)
           ins(%expanded, %expanded : tensor<?x4xf16>, tensor<?x4xf16>)
           outs(%result_init : tensor<?x4xf16>) : tensor<?x4xf16>
@@ -95,38 +105,56 @@ def PartitionPoolDomainsPass
           : !hipsr.context, tensor<?x4xf32>) {
       ^bb0(%domain_ctx: !hipsr.context,
            %domain_input: tensor<?x4xf32>):
-        %cast_init = hipsr.placeholder : tensor<?x4xf16>
+        %cast_init = hipsr.placeholder(%domain_ctx)
+            ins(%domain_input : tensor<?x4xf32>)
+            {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
         %cast = hipsr.cast(%domain_ctx)
             ins(%domain_input : tensor<?x4xf32>)
             outs(%cast_init : tensor<?x4xf16>) : tensor<?x4xf16>
-        %ready_init = hipsr.placeholder : tensor<?x4xf16>
+        %ready_init = hipsr.placeholder(%domain_ctx)
+            ins(%domain_input : tensor<?x4xf32>)
+            {type = #hipsr.placeholder_type<barrier>}
+            : tensor<?x4xf16>
         %ready = hipsr.example_end_barrier(%domain_ctx)
             ins(%cast : tensor<?x4xf16>)
             outs(%ready_init : tensor<?x4xf16>) : tensor<?x4xf16>
         hipsr.pool_domain_yield %ready : tensor<?x4xf16>
       } -> tensor<?x4xf16>
-      %1 = hipsr.pool_domain(%ctx, %0
-          : !hipsr.context, tensor<?x4xf16>) {
+      %1 = hipsr.pool_domain(%ctx, %input, %0
+          : !hipsr.context, tensor<?x4xf32>, tensor<?x4xf16>) {
       ^bb0(%domain_ctx: !hipsr.context,
+           %shape_root: tensor<?x4xf32>,
            %domain_input: tensor<?x4xf16>):
-        %add_init = hipsr.placeholder : tensor<?x4xf16>
+        %add_init = hipsr.placeholder(%domain_ctx)
+            ins(%shape_root, %shape_root
+                : tensor<?x4xf32>, tensor<?x4xf32>)
+            {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
         %sum = hipsr.add(%domain_ctx)
             ins(%domain_input, %domain_input
                 : tensor<?x4xf16>, tensor<?x4xf16>)
             outs(%add_init : tensor<?x4xf16>) : tensor<?x4xf16>
         hipsr.pool_domain_yield %sum : tensor<?x4xf16>
       } -> tensor<?x4xf16>
-      %2 = hipsr.pool_domain(%ctx, %1, %shape
-          : !hipsr.context, tensor<?x4xf16>, tensor<2xi64>) {
+      %2 = hipsr.pool_domain(%ctx, %input, %1, %shape
+          : !hipsr.context, tensor<?x4xf32>, tensor<?x4xf16>,
+            tensor<2xi64>) {
       ^bb0(%domain_ctx: !hipsr.context,
+           %shape_root: tensor<?x4xf32>,
            %domain_input: tensor<?x4xf16>,
            %domain_shape: tensor<2xi64>):
-        %expand_init = hipsr.placeholder : tensor<?x4xf16>
+        %expand_init = hipsr.placeholder(%domain_ctx)
+            ins(%shape_root, %domain_shape
+                : tensor<?x4xf32>, tensor<2xi64>)
+            {type = #hipsr.placeholder_type<barrier>}
+            : tensor<?x4xf16>
         %expanded = hipsr.expand(%domain_ctx)
             ins(%domain_input, %domain_shape
                 : tensor<?x4xf16>, tensor<2xi64>)
             outs(%expand_init : tensor<?x4xf16>) : tensor<?x4xf16>
-        %result_init = hipsr.placeholder : tensor<?x4xf16>
+        %result_init = hipsr.placeholder(%domain_ctx)
+            ins(%shape_root, %shape_root
+                : tensor<?x4xf32>, tensor<?x4xf32>)
+            {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
         %result = hipsr.add(%domain_ctx)
             ins(%expanded, %expanded : tensor<?x4xf16>, tensor<?x4xf16>)
             outs(%result_init : tensor<?x4xf16>) : tensor<?x4xf16>
@@ -167,6 +195,11 @@ def HipsrPoolAllocPass : Pass<"hipsr-pool-alloc", "mlir::ModuleOp"> {
     Pools each `hipsr.pool_domain`'s `memref.alloc`s by lifetime:
     non-overlapping ones share one `hipsr.get_pool` buffer as `memref.view`s.
   }];
+  let options = [
+    Option<"emitPoolReport", "emit-pool-report", "bool", /*default=*/"false",
+           "Debug-only: emit remarks describing the pooling decisions. "
+           "No effect on generated code.">
+  ];
   let dependentDialects = [
     "::mlir::hipsr::HipsrDialect",
     "::mlir::memref::MemRefDialect",

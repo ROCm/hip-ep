@@ -542,6 +542,157 @@ extern "C" int hip_reduce_mean(
 }
 
 // =============================================================================
+// FP16 / FP32 L2 norm reduction (ReduceL2)
+// =============================================================================
+//
+// Identical structure to reduce_mean_* but accumulates sum(x^2) and writes
+// sqrt(sum) instead of mean.
+__global__ void reduce_l2_f16_kernel(
+    const __half* __restrict__ data,
+    __half* __restrict__ output,
+    int64_t reduce_size,
+    int64_t inner,
+    int64_t num_output_elements) {
+  extern __shared__ float sdata_l2_f16[];
+
+  int64_t out_idx = blockIdx.x;
+  if (out_idx >= num_output_elements) return;
+
+  int64_t oo = out_idx / inner;
+  int64_t ii = out_idx - oo * inner;
+  const __half* slice = data + oo * reduce_size * inner + ii;
+  int tid = threadIdx.x;
+
+  float sum_sq = 0.0f;
+  for (int64_t i = tid; i < reduce_size; i += blockDim.x) {
+    float val = __half2float(slice[i * inner]);
+    sum_sq += val * val;
+  }
+  sdata_l2_f16[tid] = sum_sq;
+  __syncthreads();
+
+  for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+    if (static_cast<unsigned int>(tid) < s) {
+      sdata_l2_f16[tid] += sdata_l2_f16[tid + s];
+    }
+    __syncthreads();
+  }
+
+  if (tid == 0) {
+    output[out_idx] = __float2half(sqrtf(sdata_l2_f16[0]));
+  }
+}
+
+__global__ void reduce_l2_f32_kernel(
+    const float* __restrict__ data,
+    float* __restrict__ output,
+    int64_t reduce_size,
+    int64_t inner,
+    int64_t num_output_elements) {
+  extern __shared__ float sdata_l2_f32[];
+
+  int64_t out_idx = blockIdx.x;
+  if (out_idx >= num_output_elements) return;
+
+  int64_t oo = out_idx / inner;
+  int64_t ii = out_idx - oo * inner;
+  const float* slice = data + oo * reduce_size * inner + ii;
+  int tid = threadIdx.x;
+
+  float sum_sq = 0.0f;
+  for (int64_t i = tid; i < reduce_size; i += blockDim.x) {
+    float val = slice[i * inner];
+    sum_sq += val * val;
+  }
+  sdata_l2_f32[tid] = sum_sq;
+  __syncthreads();
+
+  for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+    if (static_cast<unsigned int>(tid) < s) {
+      sdata_l2_f32[tid] += sdata_l2_f32[tid + s];
+    }
+    __syncthreads();
+  }
+
+  if (tid == 0) {
+    output[out_idx] = sqrtf(sdata_l2_f32[0]);
+  }
+}
+
+extern "C" int hip_reduce_l2(
+    void* stream,
+    const void* data,
+    void* output,
+    int64_t num_input_elements,
+    int64_t num_output_elements,
+    int64_t inner_size,
+    int hip_dtype) {
+  if (num_output_elements <= 0) return 0;
+  if (inner_size <= 0) inner_size = 1;
+
+  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+
+  if (num_input_elements % num_output_elements != 0) {
+    fprintf(stderr,
+            "[custom_kernels] hip_reduce_l2: input(%lld) not divisible "
+            "by output(%lld)\n",
+            (long long)num_input_elements, (long long)num_output_elements);
+    return -1;
+  }
+
+  int64_t reduce_size = num_input_elements / num_output_elements;
+
+  if (hip_dtype != HIP_DTYPE_FLOAT16 && hip_dtype != HIP_DTYPE_FLOAT32) {
+    fprintf(stderr,
+            "[custom_kernels] hip_reduce_l2: unsupported dtype=%d "
+            "(only FLOAT16/FLOAT32)\n",
+            hip_dtype);
+    return -1;
+  }
+
+  int block_size = 256;
+  if (reduce_size < 256) {
+    block_size = 1;
+    while (block_size < reduce_size) block_size <<= 1;
+    if (block_size < 1) block_size = 1;
+  }
+  size_t shared_mem = block_size * sizeof(float);
+
+  CUSTOM_KERNELS_DEBUG_LOG("[custom_kernels] hip_reduce_l2: dtype=%s, "
+          "input=%lld, output=%lld, reduce_size=%lld, block=%d\n",
+          hip_dtype == HIP_DTYPE_FLOAT16 ? "FLOAT16" : "FLOAT32",
+          (long long)num_input_elements, (long long)num_output_elements,
+          (long long)reduce_size, block_size);
+
+  (void)hipGetLastError();
+  if (hip_dtype == HIP_DTYPE_FLOAT16) {
+    hipLaunchKernelGGL(reduce_l2_f16_kernel,
+                     dim3(static_cast<unsigned>(num_output_elements)),
+                     dim3(block_size),
+                     shared_mem, hip_stream,
+                     static_cast<const __half*>(data),
+                     static_cast<__half*>(output),
+                     reduce_size, inner_size, num_output_elements);
+  } else {
+    hipLaunchKernelGGL(reduce_l2_f32_kernel,
+                     dim3(static_cast<unsigned>(num_output_elements)),
+                     dim3(block_size),
+                     shared_mem, hip_stream,
+                     static_cast<const float*>(data),
+                     static_cast<float*>(output),
+                     reduce_size, inner_size, num_output_elements);
+  }
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr,
+            "[custom_kernels] hip_reduce_l2 launch failed: %s\n",
+            hipGetErrorString(err));
+  }
+  return static_cast<int>(err);
+}
+
+// =============================================================================
 // ReduceMax / ReduceProd
 //
 // Same block-per-output-element pattern as reduce_sum_*. Differences:

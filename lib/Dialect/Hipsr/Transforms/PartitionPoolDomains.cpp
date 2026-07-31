@@ -120,8 +120,8 @@ static LogicalResult validatePartitionInput(Block &block) {
     }
 
     if (auto placeholder = dyn_cast<PlaceholderOp>(operation)) {
-      Operation *consumer = *placeholder->getResult(0).getUsers().begin();
-      if (consumer->getBlock() != &block) {
+      Operation *consumer = placeholder.getDpsConsumer();
+      if (!consumer || consumer->getBlock() != &block) {
         placeholder.emitOpError(
             "requires its DPS consumer to be top-level when partitioning pool "
             "domains");
@@ -144,6 +144,18 @@ static LogicalResult validatePartitionInput(Block &block) {
 static void computeDomainResults(Domain &domain, Block &parentBlock) {
   llvm::SmallPtrSet<Operation *, 16> domainOperations(domain.operations.begin(),
                                                       domain.operations.end());
+  // Treat each DPS init placeholder as part of its consumer's domain.
+  for (Operation *operation : domain.operations) {
+    if (!isHipsrDpsOp(*operation)) {
+      continue;
+    }
+    auto dpsOp = cast<DestinationStyleOpInterface>(*operation);
+    for (Value init : dpsOp.getDpsInits()) {
+      if (auto placeholder = init.getDefiningOp<PlaceholderOp>()) {
+        domainOperations.insert(placeholder);
+      }
+    }
+  }
 
   for (Operation *operation : domain.operations) {
     for (Value result : operation->getResults()) {
