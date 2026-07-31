@@ -49,27 +49,6 @@ static bool node_arg_is_initializer(const Graph &graph,
                      });
 }
 
-// Safety helper for the try_fuse boundary. In large hybrid / quantized models
-// some nodes carry an empty (non-existent) NodeArg in an output slot. Calling
-// node_arg_get_name on such a slot fatal-CHECKs in node_arg.cpp
-// ("node_arg doesn't exist!"). Return the first EXISTING output name instead of
-// unconditionally reading output slot 0. A node reaching fusion must still
-// produce at least one real output, so CHECK (like
-// node_get_first_output_node_arg) if none exists rather than emitting a bogus
-// node name.
-static const std::string &node_first_existing_output_name(const Node &node) {
-  const std::string *name = nullptr;
-  for (const NodeArg *arg : node_get_output_node_args(node)) {
-    if (arg != nullptr && node_arg_exists(*arg)) {
-      name = &node_arg_get_name(*arg);
-      break;
-    }
-  }
-  CHECK(name != nullptr) << "no existing output NodeArg on node: "
-                         << node_as_string(node);
-  return *name;
-}
-
 // return values are Node found by node_arg name and the node_arg names
 // that cannot find the node through node_arg
 // Cannot find the node are three scenarios where the node cannot be found using
@@ -306,9 +285,11 @@ check_loop(const Graph &graph, const std::vector<const Node *> &input_nodes,
         if (hit_output) {
           ret = true;
           auto route = map_route[current_node.ptr()];
-          for (size_t i = 0; i < route.size(); i++) {
-            auto node = route[i];
-            maybe_loop_path.push_back(node_first_existing_output_name(*node));
+          for (auto *node : route) {
+            auto node_ref =
+                morphizen_cxx::NodeConstRef::from_node(graph, *node);
+            maybe_loop_path.push_back(
+                node_get_first_existing_output_name(*node_ref.ptr()));
           }
         }
         return false; // leave callback return value
@@ -622,7 +603,7 @@ IPass_try_fuse(const Graph &graph, const std::string &name,
     meta_def->add_constant_initializers(constant_initializer);
   }
   for (auto node : body_nodes) {
-    meta_def->add_nodes(node_first_existing_output_name(*node));
+    meta_def->add_nodes(node_get_first_existing_output_name(*node));
   }
   meta_def->set_device(device);
   return std::make_pair(
