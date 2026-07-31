@@ -82,17 +82,25 @@ struct ClipToHipMinMax : public mlir::RewritePattern {
       return mlir::failure();
     mlir::Value context = *ctxOrFailure;
 
+    // `hip.max` / `hip.min` reify their result as the broadcast of both
+    // operands, so build each destination with the same helper. ONNX Clip
+    // bounds are scalars in practice, for which the broadcast collapses to
+    // `cur`'s own extents.
     mlir::Value cur = x;
     if (loV) {
-      mlir::Value init = createEmptyTensor(rewriter, loc, resultType, cur);
-      cur = mlir::hip::MaxOp::create(rewriter, loc, resultType, context, cur,
-                                     loV, init)
+      mlir::FailureOr<mlir::Value> init =
+          createBroadcastEmptyTensor(rewriter, loc, resultType, {cur, loV});
+      if (mlir::failed(init))
+        return mlir::failure();
+      cur = mlir::hip::MaxOp::create(rewriter, loc, context, cur, loV, *init)
                 ->getResult(0);
     }
     if (hiV) {
-      mlir::Value init = createEmptyTensor(rewriter, loc, resultType, cur);
-      cur = mlir::hip::MinOp::create(rewriter, loc, resultType, context, cur,
-                                     hiV, init)
+      mlir::FailureOr<mlir::Value> init =
+          createBroadcastEmptyTensor(rewriter, loc, resultType, {cur, hiV});
+      if (mlir::failed(init))
+        return mlir::failure();
+      cur = mlir::hip::MinOp::create(rewriter, loc, context, cur, hiV, *init)
                 ->getResult(0);
     }
 

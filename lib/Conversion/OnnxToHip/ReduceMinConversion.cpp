@@ -42,47 +42,41 @@ ReduceMinToHip::matchAndRewrite(mlir::Operation *op,
     keepdims = keepdimsAttr.getSInt();
   }
 
-  bool axesStaticallyKnown = op->getNumOperands() <= 1;
-  llvm::SmallVector<int64_t> axesVec;
-  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
-  if (axesStaticallyKnown) {
-    if (auto axesAttr = op->getAttrOfType<mlir::ArrayAttr>("axes")) {
-      for (auto a : axesAttr)
-        axesVec.push_back(
-            mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
-    } else if (noopWithEmptyAxes == 0 && inputType) {
-      for (int64_t i : llvm::seq<int64_t>(inputType.getRank()))
-        axesVec.push_back(i);
-    }
-  }
+  llvm::SmallVector<int64_t> axesStorage;
+  std::optional<llvm::ArrayRef<int64_t>> reducedAxes =
+      resolveReductionAxes(op, data, noopWithEmptyAxes, axesStorage);
 
-  auto resultTypeOr =
-      inferReduceResultType(op, data, axesVec, axesStaticallyKnown, keepdims);
+  auto resultTypeOr = inferReduceResultType(op, data, reducedAxes, keepdims);
   if (mlir::failed(resultTypeOr))
     return rewriter.notifyMatchFailure(
         op, "ReduceMin: cannot infer unranked result (need ranked input and "
             "static axes)");
   mlir::RankedTensorType resultType = *resultTypeOr;
 
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, data);
+  mlir::FailureOr<mlir::Value> init = createReductionEmptyTensor(
+      rewriter, loc, resultType, data, reducedAxes, keepdims);
+  if (mlir::failed(init))
+    return rewriter.notifyMatchFailure(
+        op, "ReduceMin result type is incompatible with the reduction shape");
 
   mlir::Value axesOperand;
-  if (op->getNumOperands() > 1) {
+  if (op->getNumOperands() > 1 &&
+      !mlir::isa<mlir::NoneType>(op->getOperand(1).getType())) {
     axesOperand = op->getOperand(1);
   } else {
     auto axesType = mlir::RankedTensorType::get(
-        {static_cast<int64_t>(axesVec.size())}, rewriter.getI64Type());
-    auto axesAttr =
-        mlir::DenseIntElementsAttr::get(axesType, llvm::ArrayRef(axesVec));
+        {static_cast<int64_t>(axesStorage.size())}, rewriter.getI64Type());
+    auto axesAttr = mlir::DenseIntElementsAttr::get(
+        axesType, llvm::ArrayRef<int64_t>(axesStorage));
     axesOperand =
         mlir::arith::ConstantOp::create(rewriter, loc, axesType, axesAttr);
   }
 
   auto keepdimsAttr = rewriter.getI64IntegerAttr(keepdims);
   auto noopWithEmptyAxesAttr = rewriter.getI64IntegerAttr(noopWithEmptyAxes);
-  auto hipOp =
-      mlir::hip::ReduceMinOp::create(rewriter, loc, context, data, axesOperand,
-                                     init, keepdimsAttr, noopWithEmptyAxesAttr);
+  auto hipOp = mlir::hip::ReduceMinOp::create(rewriter, loc, context, data,
+                                              axesOperand, *init, keepdimsAttr,
+                                              noopWithEmptyAxesAttr);
 
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();

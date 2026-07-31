@@ -17,18 +17,21 @@
 #include "hip/Dialect/IR/HipDialect.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Traits.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Sequence.h"
-#include "llvm/ADT/SmallSet.h"
+#include "llvm/ADT/SmallBitVector.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
+#include <optional>
 
 using namespace mlir;
 using namespace mlir::hip;
@@ -47,21 +50,56 @@ std::string formatShape(ArrayRef<int64_t> shape) {
       os << d;
   });
   os << "]";
-  return os.str();
+  return out;
+}
+
+FailureOr<OpFoldResult>
+broadcastDim(OpBuilder &b, Location loc, OpFoldResult lhs, OpFoldResult rhs,
+             function_ref<InFlightDiagnostic()> emitError) {
+  if (lhs == rhs)
+    return lhs;
+
+  std::optional<int64_t> lhsStatic = getConstantIntValue(lhs);
+  std::optional<int64_t> rhsStatic = getConstantIntValue(rhs);
+
+  if (lhsStatic && rhsStatic) {
+    if (*lhsStatic == 1)
+      return rhs;
+    if (*rhsStatic == 1 || *lhsStatic == *rhsStatic)
+      return lhs;
+    emitError() << "incompatible broadcast dimensions " << *lhsStatic << " and "
+                << *rhsStatic;
+    return failure();
+  }
+
+  // Under the ONNX broadcastability precondition, a dynamic extent paired
+  // with a known non-unit extent must be either 1 or that known extent.
+  if (lhsStatic)
+    return *lhsStatic == 1 ? rhs : lhs;
+  if (rhsStatic)
+    return *rhsStatic == 1 ? lhs : rhs;
+
+  Value lhsValue = getValueOrCreateConstantIndexOp(b, loc, lhs);
+  Value rhsValue = getValueOrCreateConstantIndexOp(b, loc, rhs);
+  Value one = arith::ConstantIndexOp::create(b, loc, 1);
+  Value lhsIsOne =
+      arith::CmpIOp::create(b, loc, arith::CmpIPredicate::eq, lhsValue, one);
+  return OpFoldResult(
+      arith::SelectOp::create(b, loc, lhsIsOne, rhsValue, lhsValue));
 }
 
 } // namespace
 
-SmallVector<int64_t>
+FailureOr<SmallVector<int64_t>>
 mlir::hip::inferMatmulShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
                             function_ref<InFlightDiagnostic()> emitError) {
   if (aShape.size() < 2) {
     emitError() << "matmul A must have rank >= 2, got rank " << aShape.size();
-    return {};
+    return failure();
   }
   if (bShape.size() < 2) {
     emitError() << "matmul B must have rank >= 2, got rank " << bShape.size();
-    return {};
+    return failure();
   }
 
   int64_t M = aShape[aShape.size() - 2];
@@ -73,18 +111,16 @@ mlir::hip::inferMatmulShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
   if (!ShapedType::isDynamic(Ka) && !ShapedType::isDynamic(Kb) && Ka != Kb) {
     emitError() << "matmul contraction dim mismatch: A.shape[-1]=" << Ka
                 << " vs B.shape[-2]=" << Kb;
-    return {};
+    return failure();
   }
 
-  // Batch broadcast (NumPy / ONNX MatMul) on the leading dims; see header
-  // for the full case table.
   ArrayRef<int64_t> aBatch = aShape.drop_back(2);
   ArrayRef<int64_t> bBatch = bShape.drop_back(2);
   SmallVector<int64_t> result;
   if (!OpTrait::util::getBroadcastedShape(aBatch, bBatch, result)) {
     emitError() << "matmul batch broadcast failure: A.batch="
                 << formatShape(aBatch) << " B.batch=" << formatShape(bBatch);
-    return {};
+    return failure();
   }
   result.reserve(result.size() + 2);
   result.push_back(M);
@@ -92,51 +128,181 @@ mlir::hip::inferMatmulShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
   return result;
 }
 
-LogicalResult mlir::hip::verifyHipOpShape(
-    Operation *op,
-    function_ref<SmallVector<SmallVector<int64_t>>()> computeExpected) {
-  // Asserting cast: every op wired to verifyHipOpShape also implements DPS
-  // via TableGen; a missing interface is a programmer error in the op def.
-  auto dpsOp = cast<DestinationStyleOpInterface>(op);
+namespace {
 
-  // Empty outer vector means the shape helper already emitted a diagnostic.
-  SmallVector<SmallVector<int64_t>> expected = computeExpected();
-  if (expected.empty())
+/// Whether `batch` -- one operand's leading extents, right-aligned against
+/// `outputBatch` -- holds a matrix count that one constant stride can express.
+///
+/// A stride of 0 reuses a single matrix for every output batch and a stride of
+/// the matrix size walks one matrix per output batch, so the operand's matrix
+/// count must be either 1 or the output's. A partial broadcast lands strictly
+/// between the two: `[2, 1]` against an output batch of `[2, 3]` holds 2
+/// matrices where the output needs 6, so neither stride is correct.
+///
+/// Extents that are not statically 1 count as carrying batches and output
+/// extents that are not statically 1 count as broadcast targets, so an unknown
+/// extent is never assumed away.
+bool isSingleStrideBatchLayout(ArrayRef<int64_t> batch,
+                               ArrayRef<int64_t> outputBatch) {
+  // Guaranteed by getBroadcastedShape, and load-bearing: the unsigned `pad`
+  // below would wrap and silently report "representable" if it were violated.
+  assert(batch.size() <= outputBatch.size() &&
+         "operand batch cannot outrank the broadcasted output batch");
+  size_t pad = outputBatch.size() - batch.size();
+  bool broadcastsUp = false;
+  bool carriesBatches = false;
+  for (size_t i : llvm::seq<size_t>(0, outputBatch.size())) {
+    // Axes below `pad` are the implicit leading ones of right-alignment.
+    int64_t extent = i < pad ? 1 : batch[i - pad];
+    if (extent == 1)
+      broadcastsUp |= outputBatch[i] != 1;
+    else
+      carriesBatches = true;
+  }
+  return !(broadcastsUp && carriesBatches);
+}
+
+} // namespace
+
+LogicalResult mlir::hip::verifyStridedBatchMatmul(
+    ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
+    function_ref<InFlightDiagnostic()> emitError) {
+  if (aShape.size() < 2 || bShape.size() < 2) {
+    emitError() << "strided-batch matmul requires rank >= 2 operands";
     return failure();
-
-  // Each helper returns one shape per DPS init by construction; assert in
-  // debug, fail-safe in release to avoid OOB on `expected[i]` below.
-  auto inits = dpsOp.getDpsInits();
-  assert(expected.size() == inits.size() &&
-         "shape helper must produce one expected shape per DPS init operand");
-  if (expected.size() != inits.size())
-    return failure();
-
-  for (auto [i, init] : llvm::enumerate(inits)) {
-    auto initType = dyn_cast<ShapedType>(init.getType());
-    if (!initType)
-      return op->emitOpError("init #") << i << " is not a shaped type";
-    ArrayRef<int64_t> actualShape = initType.getShape();
-    ArrayRef<int64_t> expShape = expected[i];
-    if (actualShape.size() != expShape.size())
-      return op->emitOpError("rank mismatch on result #")
-             << i << ": expected rank " << expShape.size() << " "
-             << formatShape(expShape) << " but outs has rank "
-             << actualShape.size() << " " << formatShape(actualShape);
-    for (size_t d : llvm::seq<size_t>(0, actualShape.size())) {
-      // kDynamic on either side is a wildcard.
-      if (ShapedType::isDynamic(actualShape[d]) ||
-          ShapedType::isDynamic(expShape[d]))
-        continue;
-      if (actualShape[d] != expShape[d])
-        return op->emitOpError("dim ")
-               << d << " of result #" << i << " mismatch: expected "
-               << expShape[d] << " " << formatShape(expShape)
-               << " but outs has " << actualShape[d] << " "
-               << formatShape(actualShape);
-    }
   }
 
+  ArrayRef<int64_t> aBatch = aShape.drop_back(2);
+  ArrayRef<int64_t> bBatch = bShape.drop_back(2);
+  SmallVector<int64_t> outputBatch;
+  if (!OpTrait::util::getBroadcastedShape(aBatch, bBatch, outputBatch)) {
+    emitError() << "matmul batch broadcast failure: A.batch="
+                << formatShape(aBatch) << " B.batch=" << formatShape(bBatch);
+    return failure();
+  }
+
+  if (isSingleStrideBatchLayout(aBatch, outputBatch) &&
+      isSingleStrideBatchLayout(bBatch, outputBatch))
+    return success();
+
+  emitError() << "matmul partial per-axis batch broadcast is not supported by "
+                 "the strided-batch runtime: A.batch="
+              << formatShape(aBatch) << " B.batch=" << formatShape(bBatch);
+  return failure();
+}
+
+namespace {
+
+/// NumPy-broadcast result shape of `shapes` (right-aligned) from static extents
+/// only. Folds `OpTrait::util::getBroadcastedShape` pairwise so static
+/// broadcast validation is identical to the matmul batch path.
+FailureOr<SmallVector<int64_t>>
+inferBroadcastShape(ArrayRef<ArrayRef<int64_t>> shapes,
+                    function_ref<InFlightDiagnostic()> emitError) {
+  if (shapes.empty()) {
+    emitError() << "broadcast requires at least one input shape";
+    return failure();
+  }
+
+  SmallVector<int64_t> result(shapes.front());
+  for (ArrayRef<int64_t> shape : shapes.drop_front()) {
+    SmallVector<int64_t> merged;
+    if (!OpTrait::util::getBroadcastedShape(result, shape, merged)) {
+      emitError() << "incompatible broadcast shapes " << formatShape(result)
+                  << " and " << formatShape(shape);
+      return failure();
+    }
+    result = std::move(merged);
+  }
+  return result;
+}
+
+} // namespace
+
+FailureOr<SmallVector<int64_t>>
+mlir::hip::inferGemmShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
+                          std::optional<ArrayRef<int64_t>> cShape,
+                          int64_t transA, int64_t transB,
+                          function_ref<InFlightDiagnostic()> emitError) {
+  if (aShape.size() != 2 || bShape.size() != 2) {
+    emitError() << "gemm A and B must be rank-2 tensors";
+    return failure();
+  }
+  if ((transA != 0 && transA != 1) || (transB != 0 && transB != 1)) {
+    emitError() << "gemm transA and transB must be 0 or 1";
+    return failure();
+  }
+
+  // Contraction K must agree (kDynamic on either side is a wildcard).
+  int64_t aK = aShape[transA ? 0 : 1];
+  int64_t bK = bShape[transB ? 1 : 0];
+  if (!ShapedType::isDynamic(aK) && !ShapedType::isDynamic(bK) && aK != bK) {
+    emitError() << "gemm contraction dim mismatch: A has " << aK
+                << " but B has " << bK;
+    return failure();
+  }
+
+  SmallVector<int64_t> result = {aShape[transA ? 1 : 0],
+                                 bShape[transB ? 0 : 1]};
+  if (!cShape)
+    return result;
+
+  if (cShape->size() > 2) {
+    emitError() << "gemm C must be a ranked tensor of rank at most 2";
+    return failure();
+  }
+  // ONNX Gemm broadcasts C onto `{M, N}` unidirectionally: C never widens the
+  // result, so every C extent must be 1 or equal to the output extent.
+  size_t pad = result.size() - cShape->size();
+  for (size_t i : llvm::seq<size_t>(pad, result.size())) {
+    int64_t cDim = (*cShape)[i - pad];
+    if (ShapedType::isDynamic(cDim) || ShapedType::isDynamic(result[i]) ||
+        cDim == 1 || cDim == result[i])
+      continue;
+    emitError() << "gemm C dimension " << cDim
+                << " is not broadcastable to output dimension " << result[i];
+    return failure();
+  }
+  return result;
+}
+
+LogicalResult mlir::hip::verifyHipOpShape(
+    Operation *op, function_ref<FailureOr<SmallVector<int64_t>>()> inferShape) {
+  auto dpsOp = dyn_cast<DestinationStyleOpInterface>(op);
+  if (!dpsOp)
+    return op->emitOpError(
+        "shape verification requires DestinationStyleOpInterface");
+  auto inits = dpsOp.getDpsInits();
+  if (inits.size() != 1)
+    return op->emitOpError("expected a single DPS init operand, got ")
+           << inits.size();
+
+  // The shape helper has already emitted a diagnostic on failure.
+  FailureOr<SmallVector<int64_t>> expected = inferShape();
+  if (failed(expected))
+    return failure();
+
+  auto initType = dyn_cast<ShapedType>(inits.front().getType());
+  if (!initType)
+    return op->emitOpError("init operand is not a shaped type");
+  ArrayRef<int64_t> actual = initType.getShape();
+  if (actual.size() != expected->size())
+    return op->emitOpError("rank mismatch on result: expected rank ")
+           << expected->size() << " " << formatShape(*expected)
+           << " but outs has rank " << actual.size() << " "
+           << formatShape(actual);
+
+  for (size_t d : llvm::seq<size_t>(0, actual.size())) {
+    // kDynamic on either side is a wildcard.
+    if (ShapedType::isDynamic(actual[d]) ||
+        ShapedType::isDynamic((*expected)[d]))
+      continue;
+    if (actual[d] != (*expected)[d])
+      return op->emitOpError("dim ")
+             << d << " of result mismatch: expected " << (*expected)[d] << " "
+             << formatShape(*expected) << " but outs has " << actual[d] << " "
+             << formatShape(actual);
+  }
   return success();
 }
 
@@ -150,11 +316,11 @@ OpFoldResult mlir::hip::reifyDimOrConstant(OpBuilder &b, Location loc,
   return tensor::getMixedSize(b, loc, source, sourceDim);
 }
 
-SmallVector<OpFoldResult>
+FailureOr<SmallVector<OpFoldResult>>
 mlir::hip::reifyElementwiseSameShape(OpBuilder &b, Location loc, Value source) {
-  // Caller must hand a ranked tensor; reify is only invoked in tensor mode
-  // per the ReifyRankedShapedTypeOpInterface contract.
-  auto sourceType = cast<RankedTensorType>(source.getType());
+  auto sourceType = dyn_cast<RankedTensorType>(source.getType());
+  if (!sourceType)
+    return failure();
   ArrayRef<int64_t> shape = sourceType.getShape();
   SmallVector<OpFoldResult> dims;
   dims.reserve(shape.size());
@@ -163,122 +329,210 @@ mlir::hip::reifyElementwiseSameShape(OpBuilder &b, Location loc, Value source) {
   return dims;
 }
 
-SmallVector<OpFoldResult> mlir::hip::reifyBroadcastShape(OpBuilder &b,
-                                                         Location loc,
-                                                         ValueRange operands) {
-  if (operands.empty())
-    return {};
+namespace {
 
-  // Collect operand shapes; bail if any is non-ranked (verifier should
-  // already have caught this on the op).
-  SmallVector<ArrayRef<int64_t>> shapes;
+/// NumPy-broadcast result shape from already-reified operand shapes. Callers
+/// must have validated broadcastability against the static shapes first, since
+/// this materializes index SSA as it folds.
+FailureOr<SmallVector<OpFoldResult>>
+reifyBroadcastShape(OpBuilder &b, Location loc,
+                    ArrayRef<SmallVector<OpFoldResult>> inputShapes,
+                    function_ref<InFlightDiagnostic()> emitError) {
+  if (inputShapes.empty()) {
+    emitError() << "broadcast requires at least one input shape";
+    return failure();
+  }
+
+  size_t resultRank = 0;
+  for (const SmallVector<OpFoldResult> &shape : inputShapes)
+    resultRank = std::max(resultRank, shape.size());
+
+  SmallVector<OpFoldResult> result(resultRank, b.getIndexAttr(1));
+  for (const SmallVector<OpFoldResult> &shape : inputShapes) {
+    size_t pad = resultRank - shape.size();
+    for (size_t i : llvm::seq<size_t>(0, resultRank)) {
+      OpFoldResult inputDim =
+          i < pad ? OpFoldResult(b.getIndexAttr(1)) : shape[i - pad];
+      FailureOr<OpFoldResult> merged =
+          broadcastDim(b, loc, result[i], inputDim, emitError);
+      if (failed(merged))
+        return failure();
+      result[i] = *merged;
+    }
+  }
+  return result;
+}
+
+} // namespace
+
+FailureOr<SmallVector<OpFoldResult>> mlir::hip::reifyBroadcastResultShape(
+    OpBuilder &b, Location loc, ValueRange operands,
+    function_ref<InFlightDiagnostic()> emitError) {
+  if (operands.empty()) {
+    emitError() << "broadcast requires at least one operand";
+    return failure();
+  }
+
+  SmallVector<ArrayRef<int64_t>> staticShapes;
+  staticShapes.reserve(operands.size());
+  for (Value operand : operands) {
+    auto operandType = dyn_cast<RankedTensorType>(operand.getType());
+    if (!operandType) {
+      emitError() << "broadcast operand must be a ranked tensor";
+      return failure();
+    }
+    staticShapes.push_back(operandType.getShape());
+  }
+  // Validate broadcastability before emitting any `tensor.dim`, so a failure
+  // leaves the IR unchanged (see the contract in HipShapeUtils.h).
+  if (failed(inferBroadcastShape(staticShapes, emitError)))
+    return failure();
+
+  SmallVector<SmallVector<OpFoldResult>> shapes;
   shapes.reserve(operands.size());
-  for (Value v : operands) {
-    auto t = dyn_cast<RankedTensorType>(v.getType());
-    if (!t)
-      return {};
-    shapes.push_back(t.getShape());
-  }
-
-  // Compute the broadcast result shape via sequential pairwise reduction.
-  // `getBroadcastedShape` follows NumPy/ONNX semantics:
-  //   - 1 broadcasts against any other dim
-  //   - dynamic + static>1 -> static (the strictly-correct tightening,
-  //     since the dynamic side must equal the static side at runtime)
-  //   - dynamic + dynamic -> dynamic
-  //   - equal static -> static; unequal non-1 static -> failure
-  SmallVector<int64_t> outShape(shapes[0].begin(), shapes[0].end());
-  for (size_t k : llvm::seq<size_t>(1, shapes.size())) {
-    SmallVector<int64_t> tmp;
-    if (!OpTrait::util::getBroadcastedShape(outShape, shapes[k], tmp))
-      return {};
-    outShape = std::move(tmp);
-  }
-
-  size_t outRank = outShape.size();
-  // Right-alignment padding per operand (operand `k` doesn't reach output
-  // dims in `[0, pads[k])`; those positions are an implicit 1 contribution).
-  SmallVector<size_t> pads(operands.size());
-  for (size_t k : llvm::seq<size_t>(0, operands.size()))
-    pads[k] = outRank - shapes[k].size();
-
-  SmallVector<OpFoldResult> dims;
-  dims.reserve(outRank);
-  for (size_t i : llvm::seq<size_t>(0, outRank)) {
-    // Pick the operand to reify this dim against:
-    //   1. earliest operand that is in-range AND has a non-1 dim
-    //      (that operand actually determines the runtime extent;
-    //      `tensor.dim %that, i` folds to the constant when that
-    //      operand's dim is static)
-    //   2. else earliest operand that is in-range (all in-range
-    //      operands have a 1 here, so reifying against any of them
-    //      is correct; first wins for stability)
-    //   3. else operand 0 dim 0 — defensive fallback that should be
-    //      unreachable when the broadcast result rank == max input rank.
-    Value bestSrc;
-    size_t bestSrcDim = 0;
-    bool foundCanonical = false;
-    for (size_t k : llvm::seq<size_t>(0, operands.size())) {
-      if (i < pads[k])
-        continue;
-      size_t kDim = i - pads[k];
-      if (!bestSrc) {
-        bestSrc = operands[k];
-        bestSrcDim = kDim;
-      }
-      if (shapes[k][kDim] != 1) {
-        bestSrc = operands[k];
-        bestSrcDim = kDim;
-        foundCanonical = true;
+  for (size_t i : llvm::seq<size_t>(0, operands.size())) {
+    Value operand = operands[i];
+    bool reused = false;
+    // Reuse the first mixed shape for repeated SSA operands (e.g. x*x) so
+    // broadcastDim sees identical OpFoldResults and emits no redundant
+    // tensor.dim/cmpi/select chain. Broadcast arity is normally 2-3, so a
+    // linear scan is simpler than maintaining a side map.
+    for (size_t j : llvm::seq<size_t>(0, i)) {
+      if (operand == operands[j]) {
+        shapes.push_back(shapes[j]);
+        reused = true;
         break;
       }
     }
-    (void)foundCanonical;
-    if (!bestSrc) {
-      bestSrc = operands[0];
-      bestSrcDim = 0;
-    }
-    dims.push_back(
-        reifyDimOrConstant(b, loc, outShape[i], bestSrc, bestSrcDim));
+    if (reused)
+      continue;
+    shapes.push_back(tensor::getMixedSizes(b, loc, operand));
   }
+  return reifyBroadcastShape(b, loc, shapes, emitError);
+}
+
+FailureOr<SmallVector<OpFoldResult>> mlir::hip::reifyMatmulResultShape(
+    OpBuilder &b, Location loc, Value A, Value B,
+    function_ref<InFlightDiagnostic()> emitError) {
+  auto aType = dyn_cast<RankedTensorType>(A.getType());
+  auto bType = dyn_cast<RankedTensorType>(B.getType());
+  if (!aType || !bType) {
+    emitError() << "matmul operands must be ranked tensors";
+    return failure();
+  }
+  // Validate before emitting any `tensor.dim`, so a failure leaves the IR
+  // unchanged (see the contract in HipShapeUtils.h). Strided-batch
+  // representability is a backend capability rather than a shape rule, so it
+  // stays with `MatmulOp::verify` and the converter.
+  if (failed(inferMatmulShape(aType.getShape(), bType.getShape(), emitError)))
+    return failure();
+
+  SmallVector<OpFoldResult> aSizes = tensor::getMixedSizes(b, loc, A);
+  SmallVector<OpFoldResult> bSizes = tensor::getMixedSizes(b, loc, B);
+  ArrayRef<OpFoldResult> aBatch = ArrayRef<OpFoldResult>(aSizes).drop_back(2);
+  ArrayRef<OpFoldResult> bBatch = ArrayRef<OpFoldResult>(bSizes).drop_back(2);
+  SmallVector<SmallVector<OpFoldResult>> batchShapes = {
+      SmallVector<OpFoldResult>(aBatch.begin(), aBatch.end()),
+      SmallVector<OpFoldResult>(bBatch.begin(), bBatch.end())};
+  FailureOr<SmallVector<OpFoldResult>> result =
+      reifyBroadcastShape(b, loc, batchShapes, emitError);
+  if (failed(result))
+    return failure();
+  result->push_back(aSizes[aSizes.size() - 2]);
+  result->push_back(bSizes.back());
+  return result;
+}
+
+FailureOr<SmallVector<OpFoldResult>>
+mlir::hip::reifyMatMulNBitsResultShape(OpBuilder &b, Location loc, Value A,
+                                       int64_t N) {
+  auto aType = dyn_cast<RankedTensorType>(A.getType());
+  if (!aType || aType.getRank() < 1)
+    return failure();
+
+  ArrayRef<int64_t> aShape = aType.getShape();
+  SmallVector<OpFoldResult> dims;
+  dims.reserve(aShape.size());
+  for (size_t i : llvm::seq<size_t>(0, aShape.size() - 1))
+    dims.push_back(reifyDimOrConstant(b, loc, aShape[i], A, i));
+  dims.push_back(b.getIndexAttr(N));
   return dims;
 }
 
-SmallVector<OpFoldResult>
+FailureOr<SmallVector<OpFoldResult>>
+mlir::hip::reifyGemmResultShape(OpBuilder &b, Location loc, Value A, Value B,
+                                Value optionalC, int64_t transA, int64_t transB,
+                                function_ref<InFlightDiagnostic()> emitError) {
+  auto aType = dyn_cast<RankedTensorType>(A.getType());
+  auto bType = dyn_cast<RankedTensorType>(B.getType());
+  if (!aType || !bType) {
+    emitError() << "gemm A and B must be ranked tensors";
+    return failure();
+  }
+  std::optional<ArrayRef<int64_t>> cShape;
+  if (optionalC) {
+    auto cType = dyn_cast<RankedTensorType>(optionalC.getType());
+    if (!cType) {
+      emitError() << "gemm C must be a ranked tensor";
+      return failure();
+    }
+    cShape = cType.getShape();
+  }
+  // Validate before emitting any `tensor.dim`, so a failure leaves the IR
+  // unchanged (see the contract in HipShapeUtils.h).
+  if (failed(inferGemmShape(aType.getShape(), bType.getShape(), cShape, transA,
+                            transB, emitError)))
+    return failure();
+
+  // C is validated above but never contributes an extent: Gemm's result is
+  // exactly `{M, N}` from the transpose-aware A and B dimensions.
+  SmallVector<OpFoldResult> aSizes = tensor::getMixedSizes(b, loc, A);
+  SmallVector<OpFoldResult> bSizes = tensor::getMixedSizes(b, loc, B);
+  return SmallVector<OpFoldResult>{aSizes[transA ? 1 : 0],
+                                   bSizes[transB ? 0 : 1]};
+}
+
+FailureOr<SmallVector<OpFoldResult>>
 mlir::hip::reifyTransposeByPerm(OpBuilder &b, Location loc, Value input,
                                 ArrayRef<int64_t> perm) {
   auto inputType = dyn_cast<RankedTensorType>(input.getType());
   if (!inputType)
-    return {};
+    return failure();
   ArrayRef<int64_t> inputShape = inputType.getShape();
   int64_t rank = inputType.getRank();
   if (static_cast<int64_t>(perm.size()) != rank)
-    return {};
+    return failure();
+
+  // Validate the entire permutation before materializing any tensor.dim. A
+  // failure must leave the IR unchanged.
+  llvm::SmallBitVector seen(rank);
+  for (int64_t dim : perm) {
+    if (dim < 0 || dim >= rank || seen.test(dim))
+      return failure();
+    seen.set(dim);
+  }
 
   SmallVector<OpFoldResult> dims;
   dims.reserve(perm.size());
-  for (int64_t pi : perm) {
-    if (pi < 0 || pi >= rank)
-      return {};
-    dims.push_back(reifyDimOrConstant(b, loc, inputShape[pi], input, pi));
-  }
+  for (int64_t dim : perm)
+    dims.push_back(reifyDimOrConstant(b, loc, inputShape[dim], input, dim));
   return dims;
 }
 
-SmallVector<OpFoldResult>
+FailureOr<SmallVector<OpFoldResult>>
 mlir::hip::reifyGatherWithAxis(OpBuilder &b, Location loc, Value data,
                                Value indices, int64_t axis) {
   auto dataType = dyn_cast<RankedTensorType>(data.getType());
   auto indicesType = dyn_cast<RankedTensorType>(indices.getType());
   if (!dataType || !indicesType)
-    return {};
+    return failure();
   int64_t dataRank = dataType.getRank();
   int64_t indicesRank = indicesType.getRank();
   // Negative-axis normalization (ONNX convention).
   if (axis < 0)
     axis += dataRank;
   if (axis < 0 || axis >= dataRank)
-    return {};
+    return failure();
 
   ArrayRef<int64_t> dataShape = dataType.getShape();
   ArrayRef<int64_t> indicesShape = indicesType.getShape();
@@ -295,17 +549,17 @@ mlir::hip::reifyGatherWithAxis(OpBuilder &b, Location loc, Value data,
   return dims;
 }
 
-SmallVector<OpFoldResult> mlir::hip::reifyGatherND(OpBuilder &b, Location loc,
-                                                   Value data, Value indices,
-                                                   int64_t batchDims) {
+FailureOr<SmallVector<OpFoldResult>>
+mlir::hip::reifyGatherND(OpBuilder &b, Location loc, Value data, Value indices,
+                         int64_t batchDims) {
   auto dataType = dyn_cast<RankedTensorType>(data.getType());
   auto indicesType = dyn_cast<RankedTensorType>(indices.getType());
   if (!dataType || !indicesType)
-    return {};
+    return failure();
   int64_t dataRank = dataType.getRank();
   int64_t indicesRank = indicesType.getRank();
   if (indicesRank < 1)
-    return {};
+    return failure();
   ArrayRef<int64_t> dataShape = dataType.getShape();
   ArrayRef<int64_t> indicesShape = indicesType.getShape();
 
@@ -314,10 +568,10 @@ SmallVector<OpFoldResult> mlir::hip::reifyGatherND(OpBuilder &b, Location loc,
   // synthesise a rank with a dynamic count of dim entries.
   int64_t tupleWidth = indicesShape[indicesRank - 1];
   if (ShapedType::isDynamic(tupleWidth))
-    return {};
+    return failure();
   if (batchDims < 0 || batchDims > indicesRank - 1 ||
       batchDims + tupleWidth > dataRank)
-    return {};
+    return failure();
 
   // Output = data.shape[:batch_dims] (the shared batch prefix) ++
   //          indices.shape[batch_dims:-1] (the gathered tuple count) ++
@@ -366,64 +620,122 @@ bool extractConstantInts(Value v, SmallVectorImpl<int64_t> &out) {
 
 } // namespace
 
-LogicalResult mlir::hip::reifyReductionWithKeepdims(
-    OpBuilder &b, Location loc, Value data, Value axes, int64_t keepdims,
-    int64_t noopWithEmptyAxes, SmallVectorImpl<OpFoldResult> &out) {
+namespace {
+
+/// Map each output dimension of an ONNX reduction to the input dimension it
+/// takes its extent from; `std::nullopt` marks a reduced axis retained by
+/// `keepdims`, whose extent is the literal 1 rather than an input extent.
+///
+/// `axes` holds reduced axis indices in the ONNX negative-axis convention; an
+/// empty list means no reduction. Returns failure when an axis is out of range.
+///
+/// This is the single source of truth behind `inferReductionShape` and
+/// `reifyReductionResultShape`, so the static and mixed forms cannot disagree.
+FailureOr<SmallVector<std::optional<int64_t>>>
+computeReductionDimMap(int64_t dataRank, ArrayRef<int64_t> axes,
+                       int64_t keepdims) {
+  // Axis membership over the closed domain [0, dataRank).
+  llvm::SmallBitVector reduced(dataRank);
+  for (int64_t axis : axes) {
+    int64_t normalized = axis < 0 ? axis + dataRank : axis;
+    if (normalized < 0 || normalized >= dataRank)
+      return failure();
+    reduced.set(normalized);
+  }
+
+  SmallVector<std::optional<int64_t>> dimMap;
+  dimMap.reserve(dataRank);
+  for (int64_t i : llvm::seq<int64_t>(0, dataRank)) {
+    if (!reduced.test(i))
+      dimMap.push_back(i);
+    else if (keepdims)
+      dimMap.push_back(std::nullopt);
+    // keepdims=0: the reduced axis leaves the output rank entirely.
+  }
+  return dimMap;
+}
+
+} // namespace
+
+FailureOr<SmallVector<int64_t>>
+mlir::hip::inferReductionShape(ArrayRef<int64_t> dataShape,
+                               ArrayRef<int64_t> axes, int64_t keepdims) {
+  FailureOr<SmallVector<std::optional<int64_t>>> dimMap =
+      computeReductionDimMap(dataShape.size(), axes, keepdims);
+  if (failed(dimMap))
+    return failure();
+
+  SmallVector<int64_t> shape;
+  shape.reserve(dimMap->size());
+  for (std::optional<int64_t> sourceDim : *dimMap)
+    shape.push_back(sourceDim ? dataShape[*sourceDim] : 1);
+  return shape;
+}
+
+FailureOr<SmallVector<OpFoldResult>>
+mlir::hip::reifyReductionResultShape(OpBuilder &b, Location loc, Value data,
+                                     ArrayRef<int64_t> axes, int64_t keepdims) {
+  auto dataType = dyn_cast<RankedTensorType>(data.getType());
+  if (!dataType)
+    return failure();
+  // Validate before emitting any `tensor.dim`, so a failure leaves the IR
+  // unchanged (see the contract in HipShapeUtils.h).
+  FailureOr<SmallVector<std::optional<int64_t>>> dimMap =
+      computeReductionDimMap(dataType.getRank(), axes, keepdims);
+  if (failed(dimMap))
+    return failure();
+
+  ArrayRef<int64_t> dataShape = dataType.getShape();
+  SmallVector<OpFoldResult> dims;
+  dims.reserve(dimMap->size());
+  for (std::optional<int64_t> sourceDim : *dimMap)
+    dims.push_back(sourceDim ? reifyDimOrConstant(b, loc, dataShape[*sourceDim],
+                                                  data, *sourceDim)
+                             : OpFoldResult(b.getIndexAttr(1)));
+  return dims;
+}
+
+namespace {
+
+/// Reduction result shape recovered from a constant `axes` operand.
+///
+/// Introspects `axes` as an `arith.constant` (the typical case after the
+/// OnnxToHip converter materializes it from the ONNX attribute), resolves
+/// ONNX's empty-axes semantics against `noop_with_empty_axes` — reduce every
+/// axis when 0, reduce nothing when 1 — and delegates the shape rule to
+/// `reifyReductionResultShape`.
+///
+/// Returns failure when `axes` is not a recognised constant, which is why this
+/// returns `LogicalResult` and writes through `out`: a valid rank-0 reduction
+/// result is a successful *empty* dim list and would otherwise be
+/// indistinguishable from the bail path.
+LogicalResult reifyReductionWithKeepdims(OpBuilder &b, Location loc, Value data,
+                                         Value axes, int64_t keepdims,
+                                         int64_t noopWithEmptyAxes,
+                                         SmallVectorImpl<OpFoldResult> &out) {
   out.clear();
   auto dataType = dyn_cast<RankedTensorType>(data.getType());
   if (!dataType)
     return failure();
-  ArrayRef<int64_t> dataShape = dataType.getShape();
-  int64_t dataRank = dataType.getRank();
 
-  // Axes operand: try to fold to a constant int vector. ONNX semantics
-  // allow a size-0 vector to mean "no axes specified" — combined with the
-  // `noop_with_empty_axes` attribute that selects between "no-op" and
-  // "reduce all axes".
   SmallVector<int64_t> axesList;
   if (!extractConstantInts(axes, axesList))
     return failure();
-
-  // Empty axes branch: "no axes specified" semantics.
-  if (axesList.empty()) {
-    if (noopWithEmptyAxes != 0) {
-      // No-op: output == data shape.
-      out.reserve(dataRank);
-      for (int64_t i : llvm::seq<int64_t>(0, dataRank))
-        out.push_back(reifyDimOrConstant(b, loc, dataShape[i], data, i));
-      return success();
-    }
-    // Reduce all axes: every dim is reduced.
-    if (keepdims) {
-      out.append(dataRank, b.getIndexAttr(1));
-      return success();
-    }
-    // keepdims=0: output is rank-0 — `out` stays empty (a valid result).
-    return success();
+  if (axesList.empty() && noopWithEmptyAxes == 0) {
+    // Reduce every axis. `noop_with_empty_axes = 1` instead means "reduce
+    // nothing", which the empty list already expresses.
+    axesList = llvm::to_vector(llvm::seq<int64_t>(0, dataType.getRank()));
   }
 
-  // Normalize negative axes (ONNX convention).
-  llvm::SmallSet<int64_t, 8> reducedSet;
-  for (int64_t a : axesList) {
-    if (a < 0)
-      a += dataRank;
-    if (a < 0 || a >= dataRank)
-      return failure();
-    reducedSet.insert(a);
-  }
-
-  out.reserve(dataRank);
-  for (int64_t i : llvm::seq<int64_t>(0, dataRank)) {
-    if (reducedSet.contains(i)) {
-      if (keepdims)
-        out.push_back(b.getIndexAttr(1));
-      // else: drop the dim from the output.
-    } else {
-      out.push_back(reifyDimOrConstant(b, loc, dataShape[i], data, i));
-    }
-  }
+  FailureOr<SmallVector<OpFoldResult>> dims =
+      mlir::hip::reifyReductionResultShape(b, loc, data, axesList, keepdims);
+  if (failed(dims))
+    return failure();
+  out.assign(dims->begin(), dims->end());
   return success();
 }
+
+} // namespace
 
 LogicalResult
 mlir::hip::reifyBroadcastShapeFor(OpBuilder &b, Location loc,
@@ -434,10 +746,11 @@ mlir::hip::reifyBroadcastShapeFor(OpBuilder &b, Location loc,
   for (Value v : operands)
     if (!isa<RankedTensorType>(v.getType()))
       return failure();
-  SmallVector<OpFoldResult> dims = reifyBroadcastShape(b, loc, operands);
-  if (dims.empty())
+  FailureOr<SmallVector<OpFoldResult>> dims = reifyBroadcastResultShape(
+      b, loc, operands, [&]() { return op->emitOpError(); });
+  if (failed(dims))
     return failure();
-  reified.assign({std::move(dims)});
+  reified.assign({std::move(*dims)});
   return success();
 }
 

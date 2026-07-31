@@ -567,18 +567,15 @@ LogicalResult MatmulOp::verify() {
                                 /*numInits=*/1)))
     return failure();
 
-  // Static shape check via the shared matmul helper. The lambda is
-  // invoked once; it returns `{outputShape}` on success or `{}` on shape
-  // mismatch (in which case it has already issued a diagnostic on `*this`).
-  return mlir::hip::verifyHipOpShape(
-      *this, [&]() -> SmallVector<SmallVector<int64_t>> {
-        SmallVector<int64_t> outShape =
-            mlir::hip::inferMatmulShape(getShapeOf(getA()), getShapeOf(getB()),
-                                        [&]() { return this->emitOpError(); });
-        if (outShape.empty())
-          return {};
-        return {std::move(outShape)};
-      });
+  ArrayRef<int64_t> aShape = getShapeOf(getA());
+  ArrayRef<int64_t> bShape = getShapeOf(getB());
+  if (failed(mlir::hip::verifyHipOpShape(*this, [&] {
+        return mlir::hip::inferMatmulShape(aShape, bShape,
+                                           [&] { return this->emitOpError(); });
+      })))
+    return failure();
+  return mlir::hip::verifyStridedBatchMatmul(
+      aShape, bShape, [&]() { return this->emitOpError(); });
 }
 
 // `MatmulOp::reifyResultShapes` lives in
@@ -1306,6 +1303,27 @@ void GemmOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult GemmOp::verify() {
+  SmallVector<Value> dataOperands = {getInputA(), getInputB()};
+  if (getInputC())
+    dataOperands.push_back(getInputC());
+  dataOperands.push_back(getOutput());
+  // The cross-cutting DPS contract first (all-tensor-or-all-memref +
+  // result-count parity); it also rules out non-shaped data operands, so the
+  // shape check below can rely on getShapeOf().
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  std::optional<ArrayRef<int64_t>> cShape;
+  if (getInputC())
+    cShape = getShapeOf(getInputC());
+  return mlir::hip::verifyHipOpShape(*this, [&] {
+    return mlir::hip::inferGemmShape(
+        getShapeOf(getInputA()), getShapeOf(getInputB()), cShape, getTransA(),
+        getTransB(), [&] { return this->emitOpError(); });
+  });
 }
 
 //===----------------------------------------------------------------------===//
