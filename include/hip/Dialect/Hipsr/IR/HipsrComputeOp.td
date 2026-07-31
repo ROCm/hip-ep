@@ -63,7 +63,6 @@ def Hipsr_ComputeOp : Hipsr_Op<"compute", [
   let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
   let regions = (region SizedRegion<1>:$body);
 
-  // Both operand lists are optional groups so an empty one prints as `ins()`.
   let assemblyFormat = [{
     `(` $ctx `)`
     `ins` `(` ($inputs^ `:` type($inputs))? `)`
