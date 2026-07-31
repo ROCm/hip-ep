@@ -3474,6 +3474,11 @@ def Hip_GemmOp : Hip_DpsOp<"gemm", /*traits=*/[OpStateOpInterface],
           {});
     }
   }];
+
+  // Verifies the DPS contract plus the shared `inferGemmShape` rule, so the
+  // `outs` shape, the converter destination, and `reifyResultShapes` are all
+  // held to one ONNX Gemm shape function.
+  let hasVerifier = 1;
 }
 
 def Hip_CumSumOp : Hip_DpsOp<"cumsum", /*traits=*/[],

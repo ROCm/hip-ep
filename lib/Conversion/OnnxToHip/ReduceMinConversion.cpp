@@ -42,19 +42,9 @@ ReduceMinToHip::matchAndRewrite(mlir::Operation *op,
     keepdims = keepdimsAttr.getSInt();
   }
 
-  bool axesStaticallyKnown = op->getNumOperands() <= 1;
   llvm::SmallVector<int64_t> axesVec;
-  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
-  if (axesStaticallyKnown) {
-    if (auto axesAttr = op->getAttrOfType<mlir::ArrayAttr>("axes")) {
-      for (auto a : axesAttr)
-        axesVec.push_back(
-            mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
-    } else if (noopWithEmptyAxes == 0 && inputType) {
-      for (int64_t i : llvm::seq<int64_t>(inputType.getRank()))
-        axesVec.push_back(i);
-    }
-  }
+  bool axesStaticallyKnown =
+      resolveReductionAxes(op, data, noopWithEmptyAxes, axesVec);
 
   auto resultTypeOr =
       inferReduceResultType(op, data, axesVec, axesStaticallyKnown, keepdims);
@@ -64,7 +54,11 @@ ReduceMinToHip::matchAndRewrite(mlir::Operation *op,
             "static axes)");
   mlir::RankedTensorType resultType = *resultTypeOr;
 
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, data);
+  mlir::FailureOr<mlir::Value> init = createReductionEmptyTensor(
+      rewriter, loc, resultType, data, axesVec, axesStaticallyKnown, keepdims);
+  if (mlir::failed(init))
+    return rewriter.notifyMatchFailure(
+        op, "ReduceMin result type is incompatible with the reduction shape");
 
   mlir::Value axesOperand;
   if (op->getNumOperands() > 1) {
@@ -80,9 +74,9 @@ ReduceMinToHip::matchAndRewrite(mlir::Operation *op,
 
   auto keepdimsAttr = rewriter.getI64IntegerAttr(keepdims);
   auto noopWithEmptyAxesAttr = rewriter.getI64IntegerAttr(noopWithEmptyAxes);
-  auto hipOp =
-      mlir::hip::ReduceMinOp::create(rewriter, loc, context, data, axesOperand,
-                                     init, keepdimsAttr, noopWithEmptyAxesAttr);
+  auto hipOp = mlir::hip::ReduceMinOp::create(rewriter, loc, context, data,
+                                              axesOperand, *init, keepdimsAttr,
+                                              noopWithEmptyAxesAttr);
 
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();

@@ -140,11 +140,13 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for PR, formatting, AI-disclosure, and co
 
 ### Result-shape agreement
 
-- Converter destination construction and `reifyResultShapes` must use the same `OpFoldResult` shape helper for broadcast, Gemm, and MatMul.
+- Converter destination construction, op verification, and `reifyResultShapes` must use the same `HipShapeUtils` shape rule for broadcast, Gemm, MatMul, and reductions.
+- Each category splits into a pure `infer*` function of static shapes and a `reify*` function that may emit index SSA. A `reify*` helper must validate through its `infer*` counterpart **before** touching the builder: a rewrite or reification that reports failure must leave the IR unchanged, so emitting IR is always the last step.
 - Fully dynamic broadcast uses `select(lhs == 1, rhs, lhs)`, not integer maximum: broadcasting extents 0 and 1 produces 0.
 - Rank-zero success is an empty shape carried by `FailureOr`; never use an empty vector as both success and failure.
-- Variadic Max/Min derive every pairwise intermediate rank from the shared broadcast shape.
-- MatMul uses the reified output batch product plus independent A/B strides, so either whole matrix may broadcast across the other's batches. Per-axis partial batch broadcasting is rejected because the single-stride runtime cannot represent it. `wrap_hipblasLtMatmul` carries both strides; invalidate LLVM-IR artifacts compiled against the previous wrapper ABI.
+- Variadic Max/Min share one pairwise-chain helper so every intermediate rank comes from the shared broadcast shape.
+- Reductions resolve to one out-to-in dimension map. `keepdims = 0` makes the output dimension order non-positional in the input, so never copy input extents positionally when a reduced axis can precede a kept one.
+- MatMul uses the reified output batch count plus independent A/B strides, so either whole matrix may broadcast across the other's batches. Only *partial per-axis* batch broadcast is rejected; dynamic batch extents are supported and must not be rejected wholesale. `wrap_hipblasLtMatmul` carries both strides; invalidate LLVM-IR artifacts compiled against the previous wrapper ABI.
 - See [docs/design/hip-shape-inference.md](docs/design/hip-shape-inference.md).
 
 ### Allocation and memory planning

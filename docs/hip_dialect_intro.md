@@ -48,8 +48,10 @@ Matrix multiplication backed by the hipBLASLt library (`hipblasLtMatmul`).
 
 The output batch count is the product of the broadcasted leading dimensions.
 Either operand may provide one matrix for all batches (`stride = 0`) or one
-matrix per output batch. Per-axis partial batch broadcasting is rejected
-because it cannot be represented by one constant stride per operand.
+matrix per output batch, including when the leading extents are dynamic. Only
+partial per-axis batch broadcasting -- some axes broadcast up while others carry
+batches -- is rejected, because the resulting matrix count cannot be expressed
+by one constant stride per operand.
 
 ---
 

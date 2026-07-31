@@ -62,22 +62,11 @@ ReduceMeanToHip::matchAndRewrite(mlir::Operation *op,
     keepdims = keepdimsAttr.getSInt();
   }
 
-  // Statically-known reduced axes (only when axes is NOT a runtime operand).
-  bool axesStaticallyKnown = op->getNumOperands() <= 1;
-  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+  // Reduced axes, resolved from the attribute or a compile-time-constant
+  // operand.
   llvm::SmallVector<int64_t> axesVec;
-  if (axesStaticallyKnown) {
-    if (auto axesAttr = op->getAttrOfType<mlir::ArrayAttr>("axes")) {
-      for (auto a : axesAttr)
-        axesVec.push_back(
-            mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
-    } else if (noopWithEmptyAxes == 0 && inputType) {
-      // Default: reduce all axes (when noop_with_empty_axes is 0)
-      for (int64_t i : llvm::seq<int64_t>(inputType.getRank()))
-        axesVec.push_back(i);
-    }
-    // noop_with_empty_axes == 1 with no axes -> axesVec stays empty (identity).
-  }
+  bool axesStaticallyKnown =
+      resolveReductionAxes(op, data, noopWithEmptyAxes, axesVec);
 
   // Resolve the result type (infer if the importer left it unranked).
   auto resultTypeOr =
@@ -87,7 +76,11 @@ ReduceMeanToHip::matchAndRewrite(mlir::Operation *op,
         op, "ReduceMean: cannot infer unranked result (need ranked input and "
             "static axes)");
   mlir::RankedTensorType resultType = *resultTypeOr;
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, data);
+  mlir::FailureOr<mlir::Value> init = createReductionEmptyTensor(
+      rewriter, loc, resultType, data, axesVec, axesStaticallyKnown, keepdims);
+  if (mlir::failed(init))
+    return rewriter.notifyMatchFailure(
+        op, "ReduceMean result type is incompatible with the reduction shape");
 
   // axes is always required in HIP dialect; create empty tensor<0xi64> when not
   // provided
@@ -109,7 +102,7 @@ ReduceMeanToHip::matchAndRewrite(mlir::Operation *op,
   auto keepdimsAttr = rewriter.getI64IntegerAttr(keepdims);
   auto noopWithEmptyAxesAttr = rewriter.getI64IntegerAttr(noopWithEmptyAxes);
   auto hipOp = mlir::hip::ReduceMeanOp::create(rewriter, loc, context, data,
-                                               axesOperand, init, keepdimsAttr,
+                                               axesOperand, *init, keepdimsAttr,
                                                noopWithEmptyAxesAttr);
 
   rewriter.replaceOp(op, hipOp->getResult(0));

@@ -43,6 +43,19 @@ MatMulToHip::matchAndRewrite(mlir::Operation *op,
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 
+  // The strided-batch runtime carries one constant stride per operand, so
+  // reject layouts it cannot express before any destination IR is emitted.
+  // This is a backend capability check rather than a shape rule, which is why
+  // it lives here and in `MatmulOp::verify` instead of in the shape helper.
+  auto aType = mlir::dyn_cast<mlir::RankedTensorType>(a.getType());
+  auto bType = mlir::dyn_cast<mlir::RankedTensorType>(b.getType());
+  if (!aType || !bType)
+    return rewriter.notifyMatchFailure(op, "MatMul operands must be ranked");
+  if (mlir::failed(mlir::hip::verifyStridedBatchMatmul(
+          aType.getShape(), bType.getShape(),
+          [&]() { return op->emitError(); })))
+    return mlir::failure();
+
   mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>> resultShape =
       mlir::hip::reifyMatmulResultShape(rewriter, loc, a, b,
                                         [&]() { return op->emitError(); });

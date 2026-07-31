@@ -120,10 +120,26 @@ Reification is per result: `reifyResultShapes` returns one shape vector for ever
 ### Shared converter/reification shape helpers
 
 Converter destination construction and operation reification must not
-independently implement the same shape category. Broadcast, Gemm, and MatMul
-use helpers in `HipShapeUtils` that return `FailureOr<SmallVector<OpFoldResult>>`.
-The `FailureOr` is required because a valid rank-zero result has a successful
-empty shape.
+independently implement the same shape category. Broadcast, Gemm, MatMul, and
+reductions use helpers in `HipShapeUtils` that return
+`FailureOr<SmallVector<OpFoldResult>>`. The `FailureOr` is required because a
+valid rank-zero result has a successful empty shape.
+
+`HipShapeUtils` splits each category into a pure `infer*` function of static
+shapes and a `reify*` function that may materialize index SSA. Every `reify*`
+helper validates its preconditions through the matching `infer*` function
+**before** it touches the builder, so a failure never leaves stray dimension ops
+behind. Both the pattern-rewrite contract and
+`ReifyRankedShapedTypeOpInterface` require the IR to be unchanged when a
+rewrite or reification reports failure; upstream's
+`ResolveShapedTypeResultDims` erases such stray ops explicitly, and this
+codebase avoids creating them in the first place. Emitting IR is therefore the
+last thing a helper does.
+
+The same split gives operation verifiers a shape rule to check against:
+`MatmulOp::verify` and `GemmOp::verify` call `verifyHipOpShape` with
+`inferMatmulShape` / `inferGemmShape`, so the `outs` shape, the converter
+destination, and `reifyResultShapes` are all held to one shape function.
 
 Broadcast dimensions are right-aligned. Static 1 yields to the other side;
 equal non-unit static dimensions agree; dynamic/static-non-1 tightens to the
@@ -144,17 +160,49 @@ converter materializes a constant index size. `--hip-infer-shapes` remains the
 single owner of later type narrowing, destination rebuilding, and cast
 barriers.
 
-Variadic Max/Min derive every pairwise intermediate type from the shared
-broadcast shape. Gemm derives M/N from A/B with transpose-aware indices and
-checks optional C without using C as an extent source. MatMul broadcasts only
-the leading batch slices, then appends M from A[-2] and N from B[-1].
+Variadic Max/Min share one `lowerVariadicBroadcastChain` helper that derives
+every pairwise intermediate type from the shared broadcast shape. Gemm derives
+M/N from A/B with transpose-aware indices and validates optional C without using
+C as an extent source. MatMul broadcasts only the leading batch slices, then
+appends M from A[-2] and N from B[-1].
 
-The hipBLASLt MatMul lowering takes the batch product from the reified output
-shape and carries independent A/B batch strides. A rank-2 or all-leading-one
-operand uses stride 0, allowing the entire matrix to broadcast against a
-batched operand on the other side. Per-axis partial batch broadcasting where
-both operands contain fewer matrices than the output batch product is not yet
-representable by one constant stride and is rejected by the MatMul verifier.
+Reductions resolve to one out-to-in dimension map, `computeReductionDimMap`,
+which both `inferReductionShape` (static extents, used for destination types)
+and `reifyReductionResultShape` (mixed extents, used for destination
+construction and `reifyResultShapes`) consume. The mapping matters for
+`keepdims = 0`, where dropping reduced axes makes the output dimension order
+non-positional in the input: reducing axes `[1, 2]` of a rank-4 input maps
+output dimension 1 to input dimension 3. A positional copy from the input is
+correct only when no reduced axis precedes a kept one. When the reduced axes are
+only known at runtime the mapping is data-dependent, so the converter falls back
+to a positional copy and reification lifts the `outs` shape; both sides bail on
+the same condition and therefore still agree.
+
+### MatMul strided-batch representability
+
+The hipBLASLt MatMul lowering takes the batch count from the reified output
+shape and carries independent A/B batch strides, so either whole matrix may
+broadcast across the other's batches. One constant stride per operand can
+express exactly two layouts: stride 0 reuses a single matrix across every output
+batch, and a stride of the matrix size walks one matrix per output batch. An
+operand's matrix count must therefore be either 1 or the output's.
+
+A partial per-axis broadcast falls strictly between the two — batch `[2, 1]`
+against an output batch of `[2, 3]` holds 2 matrices where the output needs 6 —
+and is rejected by `verifyStridedBatchMatmul`, the MatMul verifier, and the
+converter. The check is per axis: an operand is rejected only when some axis is
+statically 1 while the output extent is not, *and* another axis carries batches.
+Extents that are not statically 1 count as carrying batches, so an unknown
+extent never hides a partial broadcast. Ordinary batched matmul with dynamic
+leading extents (`[?, H, M, K] @ [?, H, K, N]`) is representable and accepted; a
+blanket rejection of dynamic batch extents would fail that common layout.
+
+The lowering distinguishes the two strides by comparing the operand's matrix
+count against the output batch count, folding at compile time when both are
+static. Comparing against the output count rather than testing for "more than
+one matrix" also keeps the read in bounds if a runtime-only shape ever violated
+the invariant.
+
 `wrap_hipblasLtMatmul` carries both strides. LLVM-IR artifacts compiled against
 the previous wrapper ABI must be invalidated.
 
@@ -269,7 +317,9 @@ Primary regression coverage:
 | `test/lit/Dialect/hip-broadcast-reify-shapes.mlir` | Broadcast dynamic SSA, zero extents, and rank-zero success |
 | `test/lit/Dialect/hip-gemm-reify-shapes.mlir` | Transpose-aware Gemm M/N reification |
 | `test/lit/Dialect/hip-matmul-reify-shapes.mlir` | Per-op reification through `--resolve-shaped-type-result-dims` |
-| `test/lit/Dialect/hip-matmul-shape-verifier.mlir` | Static MatMul shape validation |
+| `test/lit/Dialect/hip-matmul-shape-verifier.mlir` | Static MatMul shape validation, including accepted dynamic batch layouts and rejected partial per-axis broadcast |
+| `test/lit/Conversion/hip-to-llvm/test_matmul.mlir` | Per-operand batch strides: compile-time 0 / matrix size, and the runtime comparison against the output batch count |
+| `test/lit/Conversion/onnx-to-hip/test_reduce_sum.mlir` | Reduction destinations, including the non-positional `keepdims = 0` dimension mapping |
 | `test/lit/Dialect/hip-loop-verifier.mlir` | Loop-carried type contract |
 | `test/lit/Dialect/hip-resolve-tensor-dims.mlir` | Production pre-bufferization dim folding |
 
@@ -278,7 +328,8 @@ Complex operations may use dedicated files; common shape categories should exten
 ## Current limitations
 
 - ONNX MatMul rank-1 operands require promotion to rank 2 before constructing `hip.matmul`; the runtime and current verifier require rank at least 2.
-- MatMul supports whole-matrix batch broadcast (one operand's leading product is 1) and equal flattened batch counts; per-axis partial batch broadcast remains unsupported by the strided-batch runtime.
+- MatMul supports whole-matrix batch broadcast and one-matrix-per-output-batch operands, including dynamic batch extents; per-axis partial batch broadcast remains unsupported by the strided-batch runtime.
+- Reduction destinations fall back to a positional copy from the input when the reduced axes are only known at runtime; reification mirrors that fallback rather than inventing a shape.
 - Converter migration to inferred-type builders is incremental; explicit result-type builders remain supported.
 - A future multi-result operation that needs custom `InferTypeOpInterface` logic may require a dedicated result-type inference implementation file.
 - Runtime-dependent extents without pre-execution SSA remain dynamic.

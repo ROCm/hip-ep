@@ -7,6 +7,8 @@
 
 #include "hip/Dialect/IR/HipShapeUtils.h"
 
+#include "llvm/ADT/STLExtras.h"
+
 namespace mlir {
 namespace hip {
 namespace {
@@ -72,43 +74,40 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     unsigned elemBits = AType.getElementType().getIntOrFloatBitWidth();
     Value elemSize = createI64Const(elemBits / 8);
 
-    // Each operand independently uses stride 0 when it contains one matrix,
-    // or its matrix size when it contains one matrix per output batch.
-    auto computeBatchStride = [&](MemRefType type, MemRefDescriptor desc,
-                                  Value matrixElements) -> Value {
-      int64_t rank = type.getRank();
-      if (rank == 2)
-        return createI64Const(0);
+    // `verifyStridedBatchMatmul` guarantees each operand holds either one
+    // matrix or one matrix per output batch, so one constant stride per operand
+    // is exact: 0 reuses a single matrix across every batch and the matrix size
+    // walks one matrix per batch. The two cases are distinguished by comparing
+    // the operand's matrix count against the output's, which also keeps the
+    // read in bounds if a runtime-only shape ever violated the invariant.
+    auto batchStride =
+        [&](MemRefType type, MemRefDescriptor desc,
+            llvm::function_ref<Value()> matrixElements) -> Value {
+      ArrayRef<int64_t> batch = type.getShape().drop_back(2);
+      if (!ShapedType::isDynamicShape(batch))
+        return llvm::product_of(batch) == 1 ? createI64Const(0)
+                                            : matrixElements();
 
-      bool allLeadingStatic = true;
-      int64_t staticLeadingProduct = 1;
-      for (int64_t i : llvm::seq<int64_t>(0, rank - 2)) {
-        if (type.isDynamicDim(i)) {
-          allLeadingStatic = false;
-          break;
-        }
-        staticLeadingProduct *= type.getDimSize(i);
-      }
-      if (allLeadingStatic)
-        return staticLeadingProduct <= 1 ? createI64Const(0) : matrixElements;
-
-      Value one = createI64Const(1);
-      Value leadingProduct = one;
-      for (int64_t i : llvm::seq<int64_t>(0, rank - 2)) {
-        Value dim = desc.size(rewriter, loc, i);
-        leadingProduct =
-            LLVM::MulOp::create(rewriter, loc, leadingProduct, dim).getRes();
-      }
-      Value isBroadcast = LLVM::ICmpOp::create(
-          rewriter, loc, LLVM::ICmpPredicate::sle, leadingProduct, one);
-      return LLVM::SelectOp::create(rewriter, loc, isBroadcast,
-                                    createI64Const(0), matrixElements)
+      Value count = createI64Const(1);
+      for (unsigned i : llvm::seq<unsigned>(0, batch.size()))
+        count = LLVM::MulOp::create(rewriter, loc, count,
+                                    desc.size(rewriter, loc, i));
+      Value perBatch = LLVM::ICmpOp::create(
+          rewriter, loc, LLVM::ICmpPredicate::eq, count, batchCount);
+      // Materialize both arms into locals: passing calls that emit IR directly
+      // as arguments would leave the emission order unspecified.
+      Value perBatchStride = matrixElements();
+      Value broadcastStride = createI64Const(0);
+      return LLVM::SelectOp::create(rewriter, loc, perBatch, perBatchStride,
+                                    broadcastStride)
           .getRes();
     };
-    Value aMatrixElements = LLVM::MulOp::create(rewriter, loc, M, K);
-    Value bMatrixElements = LLVM::MulOp::create(rewriter, loc, K, N);
-    Value aBatchStride = computeBatchStride(AType, ADesc, aMatrixElements);
-    Value bBatchStride = computeBatchStride(BType, BDesc, bMatrixElements);
+    Value aBatchStride = batchStride(AType, ADesc, [&] {
+      return LLVM::MulOp::create(rewriter, loc, M, K).getRes();
+    });
+    Value bBatchStride = batchStride(BType, BDesc, [&] {
+      return LLVM::MulOp::create(rewriter, loc, K, N).getRes();
+    });
 
     // Runtime signature:
     // int wrap_hipblasLtMatmul(RuntimeState* state,

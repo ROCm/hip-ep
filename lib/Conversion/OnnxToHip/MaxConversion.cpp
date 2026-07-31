@@ -24,58 +24,10 @@ struct MaxToHip : public mlir::RewritePattern {
 
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
-                  mlir::PatternRewriter &rewriter) const override;
+                  mlir::PatternRewriter &rewriter) const override {
+    return lowerVariadicBroadcastChain<mlir::hip::MaxOp>(op, rewriter);
+  }
 };
-
-mlir::LogicalResult
-MaxToHip::matchAndRewrite(mlir::Operation *op,
-                          mlir::PatternRewriter &rewriter) const {
-  unsigned numInputs = op->getNumOperands();
-  if (numInputs == 0)
-    return rewriter.notifyMatchFailure(op, "Max requires at least 1 input");
-
-  if (numInputs == 1) {
-    rewriter.replaceOp(op, op->getOperand(0));
-    return mlir::success();
-  }
-
-  auto ctxOrFailure = getContextArg(op, rewriter);
-  if (mlir::failed(ctxOrFailure))
-    return mlir::failure();
-  mlir::Value context = *ctxOrFailure;
-  mlir::Location loc = op->getLoc();
-
-  auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-
-  mlir::Value accumulate = op->getOperand(0);
-  for (unsigned i : llvm::seq<unsigned>(1, numInputs)) {
-    mlir::Value rhs = op->getOperand(i);
-    mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>> stepShape =
-        mlir::hip::reifyBroadcastResultShape(rewriter, loc, {accumulate, rhs},
-                                             [&]() { return op->emitError(); });
-    if (mlir::failed(stepShape))
-      return mlir::failure();
-
-    bool isFinal = i == numInputs - 1;
-    mlir::RankedTensorType stepResultType =
-        isFinal ? resultType
-                : getTensorTypeFromReifiedShape(*stepShape,
-                                                resultType.getElementType());
-    mlir::FailureOr<mlir::Value> init = createEmptyTensorFromReifiedShape(
-        rewriter, loc, stepResultType, *stepShape);
-    if (mlir::failed(init))
-      return rewriter.notifyMatchFailure(
-          op, "Max result type is incompatible with broadcast shape");
-
-    auto maxOp = mlir::hip::MaxOp::create(rewriter, loc, context, accumulate,
-                                          rhs, *init);
-    accumulate = maxOp->getResult(0);
-  }
-
-  rewriter.replaceOp(op, accumulate);
-  return mlir::success();
-}
 
 } // namespace
 

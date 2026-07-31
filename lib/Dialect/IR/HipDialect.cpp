@@ -1296,6 +1296,31 @@ void GemmOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult GemmOp::verify() {
+  SmallVector<Value> dataOperands = {getInputA(), getInputB()};
+  if (getInputC())
+    dataOperands.push_back(getInputC());
+  dataOperands.push_back(getOutput());
+  // The cross-cutting DPS contract first (all-tensor-or-all-memref +
+  // result-count parity); it also rules out non-shaped data operands, so the
+  // shape check below can rely on getShapeOf().
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  std::optional<ArrayRef<int64_t>> cShape;
+  if (getInputC())
+    cShape = getShapeOf(getInputC());
+  return mlir::hip::verifyHipOpShape(
+      *this, [&]() -> SmallVector<SmallVector<int64_t>> {
+        FailureOr<SmallVector<int64_t>> outShape = mlir::hip::inferGemmShape(
+            getShapeOf(getInputA()), getShapeOf(getInputB()), cShape,
+            getTransA(), getTransB(), [&]() { return this->emitOpError(); });
+        if (failed(outShape))
+          return {};
+        return {std::move(*outShape)};
+      });
+}
+
 //===----------------------------------------------------------------------===//
 // GqaOp: Full MS spec implementation
 //        ins(query, [key, value, past_key, past_value], seqlens_k,

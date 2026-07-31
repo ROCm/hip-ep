@@ -68,4 +68,49 @@ module {
   // CHECK: %[[INIT:.*]] = tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?xf32>
   // CHECK: hip.reduce_sum(%[[CTX]]) ins(%[[DATA]], %[[AXES]] : tensor<?x?x512xf32>, tensor<i64>) outs(%[[INIT]] : tensor<?x?xf32>) {keepdims = 0 : i64}
   // CHECK-NOT: hip.alloc
+
+  // keepdims = 0 with compile-time axes and dynamic extents. Dropping the
+  // reduced axes makes the output dimension order non-positional in the input:
+  // output dim 1 must come from `data` dim 3, not dim 1. The destination is
+  // built from the same shape helper that backs `reifyResultShapes`, so both
+  // agree on that mapping.
+  func.func @reduce_sum_no_keepdims_static_axes(%data: tensor<?x?x?x?xf32>)
+      -> tensor<?x?xf32> {
+    %output = "onnx.ReduceSum"(%data)
+        {axes = [1 : si64, 2 : si64], keepdims = 0 : si64,
+         noop_with_empty_axes = 0 : si64}
+        : (tensor<?x?x?x?xf32>) -> tensor<?x?xf32>
+    return %output : tensor<?x?xf32>
+  }
+
+  // CHECK-LABEL: func.func @reduce_sum_no_keepdims_static_axes
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<?x?x?x?xf32>)
+  // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[C3:.*]] = arith.constant 3 : index
+  // CHECK: %[[D0:.*]] = tensor.dim %[[DATA]], %[[C0]] : tensor<?x?x?x?xf32>
+  // CHECK: %[[D3:.*]] = tensor.dim %[[DATA]], %[[C3]] : tensor<?x?x?x?xf32>
+  // CHECK: %[[INIT:.*]] = tensor.empty(%[[D0]], %[[D3]]) : tensor<?x?xf32>
+  // CHECK: hip.reduce_sum(%[[CTX]]) ins(%[[DATA]], %{{.*}} : tensor<?x?x?x?xf32>, tensor<2xi64>) outs(%[[INIT]] : tensor<?x?xf32>) {keepdims = 0 : i64}
+
+  // Same mapping when the axes arrive as a compile-time-constant OPERAND
+  // (opset 13+) rather than an attribute. Gating destination construction on the
+  // operand count instead of on the operand being constant would build a
+  // positional destination here while reification computed the real mapping.
+  func.func @reduce_sum_no_keepdims_constant_axes_operand(
+      %data: tensor<?x?x?x?xf32>) -> tensor<?x?xf32> {
+    %axes = arith.constant dense<[1, 2]> : tensor<2xi64>
+    %output = "onnx.ReduceSum"(%data, %axes)
+        {keepdims = 0 : si64, noop_with_empty_axes = 0 : si64}
+        : (tensor<?x?x?x?xf32>, tensor<2xi64>) -> tensor<?x?xf32>
+    return %output : tensor<?x?xf32>
+  }
+
+  // CHECK-LABEL: func.func @reduce_sum_no_keepdims_constant_axes_operand
+  // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[DATA:.*]]: tensor<?x?x?x?xf32>)
+  // CHECK-DAG: %[[OC0:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[OC3:.*]] = arith.constant 3 : index
+  // CHECK: %[[OD0:.*]] = tensor.dim %[[DATA]], %[[OC0]] : tensor<?x?x?x?xf32>
+  // CHECK: %[[OD3:.*]] = tensor.dim %[[DATA]], %[[OC3]] : tensor<?x?x?x?xf32>
+  // CHECK: %[[OINIT:.*]] = tensor.empty(%[[OD0]], %[[OD3]]) : tensor<?x?xf32>
+  // CHECK: hip.reduce_sum(%[[CTX]]) ins(%[[DATA]], %{{.*}} : tensor<?x?x?x?xf32>, tensor<2xi64>) outs(%[[OINIT]] : tensor<?x?xf32>) {keepdims = 0 : i64}
 }

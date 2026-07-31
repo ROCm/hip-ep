@@ -45,19 +45,9 @@ ReduceMaxToHip::matchAndRewrite(mlir::Operation *op,
   // Statically-known reduced axes (only when axes is NOT a runtime operand).
   // Used both to materialize the axes constant below and to infer the result
   // type when the ONNX importer left the result unranked (see below).
-  bool axesStaticallyKnown = op->getNumOperands() <= 1;
   llvm::SmallVector<int64_t> axesVec;
-  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
-  if (axesStaticallyKnown) {
-    if (auto axesAttr = op->getAttrOfType<mlir::ArrayAttr>("axes")) {
-      for (auto a : axesAttr)
-        axesVec.push_back(
-            mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
-    } else if (noopWithEmptyAxes == 0 && inputType) {
-      for (int64_t i : llvm::seq<int64_t>(inputType.getRank()))
-        axesVec.push_back(i);
-    }
-  }
+  bool axesStaticallyKnown =
+      resolveReductionAxes(op, data, noopWithEmptyAxes, axesVec);
 
   // The ONNX importer can leave the ReduceMax result unranked (e.g. Phi's
   // pos_ids_reformat ReduceMax(position_ids) feeding GreaterOrEqual); infer a
@@ -70,7 +60,11 @@ ReduceMaxToHip::matchAndRewrite(mlir::Operation *op,
             "static axes)");
   mlir::RankedTensorType resultType = *resultTypeOr;
 
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, data);
+  mlir::FailureOr<mlir::Value> init = createReductionEmptyTensor(
+      rewriter, loc, resultType, data, axesVec, axesStaticallyKnown, keepdims);
+  if (mlir::failed(init))
+    return rewriter.notifyMatchFailure(
+        op, "ReduceMax result type is incompatible with the reduction shape");
 
   mlir::Value axesOperand;
   if (op->getNumOperands() > 1) {
@@ -86,9 +80,9 @@ ReduceMaxToHip::matchAndRewrite(mlir::Operation *op,
 
   auto keepdimsAttr = rewriter.getI64IntegerAttr(keepdims);
   auto noopWithEmptyAxesAttr = rewriter.getI64IntegerAttr(noopWithEmptyAxes);
-  auto hipOp =
-      mlir::hip::ReduceMaxOp::create(rewriter, loc, context, data, axesOperand,
-                                     init, keepdimsAttr, noopWithEmptyAxesAttr);
+  auto hipOp = mlir::hip::ReduceMaxOp::create(rewriter, loc, context, data,
+                                              axesOperand, *init, keepdimsAttr,
+                                              noopWithEmptyAxesAttr);
 
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();

@@ -43,23 +43,12 @@ ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
     keepdims = keepdimsAttr.getSInt();
   }
 
-  // Statically-known reduced axes (only when axes is NOT a runtime operand).
-  // Used to materialize the axes constant and to infer an unranked result.
-  bool axesStaticallyKnown = op->getNumOperands() <= 1;
-  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+  // Reduced axes, resolved from the attribute or a compile-time-constant
+  // operand. Drives the axes constant we materialize, the unranked-result
+  // inference, and the destination shape.
   llvm::SmallVector<int64_t> axesVec;
-  if (axesStaticallyKnown) {
-    if (auto axesAttr = op->getAttrOfType<mlir::ArrayAttr>("axes")) {
-      for (auto a : axesAttr)
-        axesVec.push_back(
-            mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
-    } else if (noopWithEmptyAxes == 0 && inputType) {
-      // Default: reduce all axes (when noop_with_empty_axes is 0)
-      for (int64_t i : llvm::seq<int64_t>(inputType.getRank()))
-        axesVec.push_back(i);
-    }
-    // noop_with_empty_axes == 1 with no axes -> axesVec stays empty (identity).
-  }
+  bool axesStaticallyKnown =
+      resolveReductionAxes(op, data, noopWithEmptyAxes, axesVec);
 
   // Resolve the result type (infer if the importer left it unranked).
   auto resultTypeOr =
@@ -69,7 +58,11 @@ ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
         op, "ReduceSum: cannot infer unranked result (need ranked input and "
             "static axes)");
   mlir::RankedTensorType resultType = *resultTypeOr;
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, data);
+  mlir::FailureOr<mlir::Value> init = createReductionEmptyTensor(
+      rewriter, loc, resultType, data, axesVec, axesStaticallyKnown, keepdims);
+  if (mlir::failed(init))
+    return rewriter.notifyMatchFailure(
+        op, "ReduceSum result type is incompatible with the reduction shape");
 
   // axes is always required in HIP dialect; create empty tensor<0xi64> when not
   // provided
@@ -90,9 +83,9 @@ ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
   // Create hip.reduce_sum operation (axes always provided, may be empty)
   auto keepdimsAttr = rewriter.getI64IntegerAttr(keepdims);
   auto noopWithEmptyAxesAttr = rewriter.getI64IntegerAttr(noopWithEmptyAxes);
-  auto hipOp =
-      mlir::hip::ReduceSumOp::create(rewriter, loc, context, data, axesOperand,
-                                     init, keepdimsAttr, noopWithEmptyAxesAttr);
+  auto hipOp = mlir::hip::ReduceSumOp::create(rewriter, loc, context, data,
+                                              axesOperand, *init, keepdimsAttr,
+                                              noopWithEmptyAxesAttr);
 
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();

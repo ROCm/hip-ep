@@ -59,6 +59,44 @@ func.func @matmul_dynamic_k(%ctx: !hip.context,
 
 // -----
 
+// An ordinary batched matmul with a dynamic leading extent and a second static
+// batch axis on both operands: nothing broadcasts, so each operand holds one
+// matrix per output batch and a single stride per operand is exact. Rejecting
+// every dynamic batch extent with more than one batch axis would fail this
+// legal `[?, H, M, K] @ [?, H, K, N]` layout.
+
+// CHECK-LABEL: func.func @matmul_dynamic_batch_two_axes
+// CHECK:         hip.matmul
+func.func @matmul_dynamic_batch_two_axes(%ctx: !hip.context,
+                                         %a: memref<?x8x4x16xf16, 1>,
+                                         %b: memref<?x8x16x32xf16, 1>,
+                                         %c: memref<?x8x4x32xf16, 1>) {
+  hip.matmul(%ctx)
+    ins(%a, %b : memref<?x8x4x16xf16, 1>, memref<?x8x16x32xf16, 1>)
+    outs(%c : memref<?x8x4x32xf16, 1>)
+  return
+}
+
+// -----
+
+// Whole-matrix broadcast of A across B's batches, with a dynamic batch extent.
+// A's batch extents are all statically 1, so A uses stride 0 regardless of what
+// the dynamic output batch turns out to be.
+
+// CHECK-LABEL: func.func @matmul_dynamic_batch_broadcast_a
+// CHECK:         hip.matmul
+func.func @matmul_dynamic_batch_broadcast_a(%ctx: !hip.context,
+                                            %a: memref<1x1x4x16xf16, 1>,
+                                            %b: memref<?x8x16x32xf16, 1>,
+                                            %c: memref<?x8x4x32xf16, 1>) {
+  hip.matmul(%ctx)
+    ins(%a, %b : memref<1x1x4x16xf16, 1>, memref<?x8x16x32xf16, 1>)
+    outs(%c : memref<?x8x4x32xf16, 1>)
+  return
+}
+
+// -----
+
 func.func @matmul_k_mismatch(%ctx: !hip.context,
                              %a: memref<2x4xf16, 1>,
                              %b: memref<8x16xf16, 1>,
