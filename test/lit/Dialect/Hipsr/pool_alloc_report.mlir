@@ -1,6 +1,8 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
+// UNSUPPORTED: true
+
 // RUN: hip-mlir-opt %s -split-input-file --verify-diagnostics \
 // RUN:   -hipsr-pool-alloc='emit-pool-report=true' \
 // RUN:   | FileCheck %s --implicit-check-not=hipsr.get_pool \

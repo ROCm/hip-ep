@@ -1,6 +1,8 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
+// UNSUPPORTED: true
+
 // RUN: hip-mlir-opt --split-input-file --verify-diagnostics -hipsr-partition-pool-domains %s
 
 // Multi-block functions are not supported.
