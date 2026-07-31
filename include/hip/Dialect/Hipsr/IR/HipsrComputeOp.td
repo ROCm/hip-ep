@@ -26,21 +26,20 @@ def Hipsr_ComputeOp : Hipsr_Op<"compute", [
   let description = [{
     Groups the operations that implement one high-level computation, so an ONNX
     op that needs several tensor or shape operations still appears as a single
-    hipsr op. Without this grouping the intermediate values would sit in the
-    enclosing block, where the `hipsr.placeholder` of a later op would have to
-    take one as an input; a placeholder accepts only block arguments and
-    constant or placeholder results.
+    hipsr op. Without the grouping those intermediates stay in the enclosing
+    block, where a later op's `hipsr.placeholder` cannot use one: a placeholder
+    input must be a block argument or the result of a constant or another
+    placeholder.
 
-    Destination-passing style: the `outs` inits are the destinations, and each
-    tensor init is tied to the matching result. The inits come from
-    `hipsr.placeholder`, which owns the output-shape computation; this op has no
-    shape region of its own.
+    Each tensor init is tied to the result in the same position. The inits come
+    from `hipsr.placeholder`, which owns the output-shape computation, so this
+    op has no shape region of its own.
 
-    `IsolatedFromAbove` keeps every value crossing the boundary explicit, so
-    stock MLIR passes stay correct over the body. `ctx`, the inputs, and the
-    inits therefore enter the body as entry-block arguments, in that order.
-    `RecursiveMemoryEffects` keeps nested effects visible to analyses, and the
-    body is an allocation scope so allocations made inside it end there.
+    `IsolatedFromAbove` and `RegionBranchOpInterface` make every value crossing
+    the boundary explicit and verifiable, so `ctx`, the inputs, and the inits
+    enter the body as entry-block arguments, in that order.
+    `RecursiveMemoryEffects` keeps nested effects visible to analyses, and
+    `AutomaticAllocationScope` frees allocations made in the body when it exits.
 
     Example:
     ```mlir

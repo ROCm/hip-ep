@@ -14,7 +14,7 @@ def Hipsr_ComputeYieldOp : Hipsr_Op<"compute_yield",
     [Pure, ReturnLike, Terminator, HasParent<"ComputeOp">]> {
   let summary = "Yield the computed values out of a hipsr.compute region";
   let description = [{
-    Returns the values a compute body produced to the parent op.
+    Returns values from a compute body to the parent op.
 
     `ReturnLike` lets the parent's `RegionBranchOpInterface` verify these
     outputs. Because the op only forwards values, `Pure` lets effect analyses
