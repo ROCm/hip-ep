@@ -291,16 +291,18 @@ uint64_t prefill_shape_key(int64_t M, int64_t N, int64_t K) {
 // Y[M,N] (row-major, fp16) = A[M,K] @ Bfp16[N,K]^T + (bias[N]).
 //
 // hipBLASLt is column-major, so we compute D = Y^T = [N,M] col-major:
+// clang-format off
 //   matA = Bfp16 : row-major [N,K] == col-major [K,N] ld=K, TRANSA=OP_T -> [N,K]
 //   matB = A     : row-major [M,K] == col-major [K,M] ld=K, TRANSB=OP_N -> [K,M]
 //   D           : col-major [N,M] ld=N == row-major Y[M,N]
+// clang-format on
 // A per-output-channel bias[N] is the per-row vector of D -> BIAS epilogue.
 int matmul_nbits_prefill_hipblaslt(MatmulNbitsState *mst, RuntimeState *state,
                                    const void *A, const void *Bfp16,
                                    const void *bias, void *Y, int64_t M,
                                    int64_t N, int64_t K) {
-  hipblasLtHandle_t handle = static_cast<hipblasLtHandle_t>(
-      hipdnn_ep_state_get_hipblas_handle(state));
+  hipblasLtHandle_t handle =
+      static_cast<hipblasLtHandle_t>(hipdnn_ep_state_get_hipblas_handle(state));
   hipStream_t stream =
       static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
   if (!handle || !stream) {
@@ -473,10 +475,9 @@ int matmul_nbits_prefill_hipblaslt(MatmulNbitsState *mst, RuntimeState *state,
     ws_size = hipdnn_ep_state_get_workspace_size(state);
   }
 
-  HIPBLAS_CHECK(hipblasLtMatmul(handle, desc, &alpha, Bfp16, matA, A, matB,
-                                &beta, Y, matD, Y, matD,
-                                have_algo ? &chosen.algo : nullptr, ws, ws_size,
-                                stream));
+  HIPBLAS_CHECK(hipblasLtMatmul(
+      handle, desc, &alpha, Bfp16, matA, A, matB, &beta, Y, matD, Y, matD,
+      have_algo ? &chosen.algo : nullptr, ws, ws_size, stream));
 
 cleanup:
   if (matA)

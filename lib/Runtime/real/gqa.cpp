@@ -2099,10 +2099,11 @@ int wrap_group_query_attention(
   // would only report fused_supported=0, pointing a reader at the feature gates
   // (causal / window / sink / bias) instead of the real reason.
   if (kv_quantized && hipdnn_device_is_wave64()) {
-    fprintf(stderr,
-            "wrap_group_query_attention: quantized KV cache is not supported on "
-            "wave64 devices (CDNA, e.g. MI350) -- its kernels are on the WMMA "
-            "fused path, which is RDNA-only. Use an fp16 KV cache.\n");
+    fprintf(
+        stderr,
+        "wrap_group_query_attention: quantized KV cache is not supported on "
+        "wave64 devices (CDNA, e.g. MI350) -- its kernels are on the WMMA "
+        "fused path, which is RDNA-only. Use an fp16 KV cache.\n");
     return -1;
   }
 
