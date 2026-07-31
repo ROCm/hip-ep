@@ -984,10 +984,13 @@ HIP_KERNEL_API int hip_one_hot(
  *   num_output_elements - total output elements
  *   hip_dtype           - data type (hip_dtype_t value cast to int)
  *
- * Currently supported types: HIP_DTYPE_INT64, HIP_DTYPE_INT32, HIP_DTYPE_FLOAT16
+ * Currently supported types: HIP_DTYPE_INT64, HIP_DTYPE_INT32, HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_FLOAT32
  *   - INT32 accumulates in int64 internally to avoid overflow on large slices.
  *   - FLOAT16 accumulates in float internally to preserve precision; the
  *     final result is narrowed back to half.
+ *   - FLOAT32 accumulates and stores in float; required by models that upcast
+ *     to fp32 before the sum for numerical stability.
  * Returns: 0 on success, non-zero on failure
  */
 /* `inner_size` = product of input dims AFTER the reduced axis (1 for a
