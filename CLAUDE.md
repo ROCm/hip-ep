@@ -140,7 +140,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for PR, formatting, AI-disclosure, and co
 
 ### Result-shape agreement
 
-- Converter destination construction, op verification, and `reifyResultShapes` must use the same `HipShapeUtils` shape rule for broadcast, Gemm, MatMul, and reductions.
+- Converter destination construction and `reifyResultShapes` must use the same `HipShapeUtils` shape rule for broadcast, Gemm, MatMul, and reductions. MatMul and Gemm also use their shared rule for static verification; broadcast and reduction verifiers are future work.
 - Each category splits into a pure `infer*` function of static shapes and a `reify*` function that may emit index SSA. A `reify*` helper must validate through its `infer*` counterpart **before** touching the builder: a rewrite or reification that reports failure must leave the IR unchanged, so emitting IR is always the last step.
 - Keep the shape machinery internal: only the `infer*`/`reify*` rules belong in `HipShapeUtils.h`. Dimension maps and static folds stay file-static in the `.cpp`, and non-template helper bodies belong in `OnnxToHipUtils.cpp` rather than inline in the header every converter includes.
 - Express "not known at compile time" as `std::optional`, not a parallel `bool` flag, so a caller cannot pass a value that contradicts the flag.
@@ -148,7 +148,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for PR, formatting, AI-disclosure, and co
 - Rank-zero success is an empty shape carried by `FailureOr`; never use an empty vector as both success and failure.
 - Variadic Max/Min share one pairwise-chain helper so every intermediate rank comes from the shared broadcast shape.
 - Reductions resolve to one out-to-in dimension map. `keepdims = 0` makes the output dimension order non-positional in the input, so never copy input extents positionally when a reduced axis can precede a kept one.
-- MatMul uses the reified output batch count plus independent A/B strides, so either whole matrix may broadcast across the other's batches. Only *partial per-axis* batch broadcast is rejected; dynamic batch extents are supported and must not be rejected wholesale. `wrap_hipblasLtMatmul` carries both strides; invalidate LLVM-IR artifacts compiled against the previous wrapper ABI.
+- MatMul uses the reified output batch count plus independent A/B strides, so either whole matrix may broadcast across the other's batches. Static partial per-axis broadcast is rejected by the verifier; dynamic layouts are validated at runtime and return a recoverable inference error when an operand contains neither one matrix nor one matrix per output batch. `wrap_hipblasLtMatmul` carries both operand batch counts and strides; invalidate LLVM-IR artifacts compiled against the previous wrapper ABI.
 - See [docs/design/hip-shape-inference.md](docs/design/hip-shape-inference.md).
 
 ### Allocation and memory planning

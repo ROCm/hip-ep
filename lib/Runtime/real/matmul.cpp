@@ -419,6 +419,7 @@ static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
 int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
                          const void *B, void *output, int64_t M, int64_t N,
                          int64_t K, int64_t batch_count, int64_t elem_size,
+                         int64_t a_batch_count, int64_t b_batch_count,
                          int64_t a_batch_stride, int64_t b_batch_stride) {
   OP_PROFILE(
       "matmul",
@@ -431,6 +432,22 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
       state);
   if (!state || !A || !B || !output) {
     fprintf(stderr, "Invalid arguments to wrap_hipblasLtMatmul\n");
+    return -1;
+  }
+
+  auto isRepresentable = [batch_count](int64_t operandBatchCount) {
+    return operandBatchCount == 1 || operandBatchCount == batch_count;
+  };
+  if (!isRepresentable(a_batch_count) || !isRepresentable(b_batch_count)) {
+    fprintf(stderr,
+            "wrap_hipblasLtMatmul: runtime batch layout is not representable "
+            "by one stride per operand (A batches=%lld, B batches=%lld, "
+            "output batches=%lld)\n",
+            (long long)a_batch_count, (long long)b_batch_count,
+            (long long)batch_count);
+    // The generated interface reads this flag after stream synchronization and
+    // returns a non-zero inference status to ORT.
+    (void)hipdnn_ep_state_set_error_flag(state);
     return -1;
   }
 
@@ -452,10 +469,12 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
 
   const char *type_name = (elem_size == 2) ? "f16" : "f32";
   RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: M=%lld, N=%lld, K=%lld, "
-                    "batch=%lld, a_batch_stride=%lld, b_batch_stride=%lld, "
+                    "batch=%lld, a_batches=%lld, b_batches=%lld, "
+                    "a_batch_stride=%lld, b_batch_stride=%lld, "
                     "elem_size=%lld (%s), total_bytes=%lld\n",
                     (long long)M, (long long)N, (long long)K,
-                    (long long)batch_count, (long long)a_batch_stride,
+                    (long long)batch_count, (long long)a_batch_count,
+                    (long long)b_batch_count, (long long)a_batch_stride,
                     (long long)b_batch_stride, (long long)elem_size, type_name,
                     (long long)(batch_count * M * N * elem_size));
 

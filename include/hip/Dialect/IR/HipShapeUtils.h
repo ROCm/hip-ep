@@ -54,10 +54,10 @@ inferMatmulShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
 /// provably needs something in between: a partial broadcast that pads some
 /// batch axes up to the output extent while carrying batches on others.
 ///
-/// Extents that are not statically 1 count as carrying batches, so an unknown
-/// extent never hides a partial broadcast. Ordinary batched matmul with
-/// dynamic leading extents (`[?, H, M, K] @ [?, H, K, N]`) is representable
-/// and accepted.
+/// This helper rejects layouts that are provably partial from static types.
+/// Dynamic extents can conceal a partial broadcast, so the HIP-to-LLVM lowering
+/// also passes each operand's runtime batch count to the wrapper. The wrapper
+/// dispatches only when that count is 1 or equals the output batch count.
 LogicalResult
 verifyStridedBatchMatmul(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
                          function_ref<InFlightDiagnostic()> emitError);
@@ -112,11 +112,10 @@ OpFoldResult reifyDimOrConstant(OpBuilder &b, Location loc, int64_t staticDim,
 /// dim becomes `tensor.dim %source, %i`. Used by ops whose result has
 /// the same shape as one designated input (e.g. rope, rms_norm, qmoe).
 ///
-/// `source` must be a `RankedTensorType`-typed Value -- this helper is
-/// called from `reifyResultShapes` impls, which are invoked only in
-/// tensor mode per the interface contract.
-SmallVector<OpFoldResult> reifyElementwiseSameShape(OpBuilder &b, Location loc,
-                                                    Value source);
+/// Returns failure when `source` is not a ranked tensor. The `FailureOr`
+/// distinguishes that failure from a successful rank-zero shape.
+FailureOr<SmallVector<OpFoldResult>>
+reifyElementwiseSameShape(OpBuilder &b, Location loc, Value source);
 
 /// Compute the NumPy-broadcast result shape over ranked tensor `operands`,
 /// using `tensor::getMixedSizes` for each. Static extents remain `IndexAttr`;
@@ -154,6 +153,15 @@ FailureOr<SmallVector<OpFoldResult>>
 reifyMatmulResultShape(OpBuilder &b, Location loc, Value A, Value B,
                        function_ref<InFlightDiagnostic()> emitError);
 
+/// Reify MatMulNBits' result shape: `A`'s leading dimensions followed by the
+/// static `N` attribute. The quantized weight is stored transposed, so the
+/// contraction dimension never appears in the result -- which is why the last
+/// dimension comes from `N` and not from `A`.
+///
+/// `A` must be a `RankedTensorType`-typed Value of rank at least 1.
+FailureOr<SmallVector<OpFoldResult>>
+reifyMatMulNBitsResultShape(OpBuilder &b, Location loc, Value A, int64_t N);
+
 /// Reify ONNX Gemm's rank-2 `{M, N}` result using transpose-aware dimensions.
 /// Optional C is checked for static unidirectional broadcast compatibility but
 /// never supplies M or N.
@@ -163,41 +171,41 @@ reifyGemmResultShape(OpBuilder &b, Location loc, Value A, Value B,
                      function_ref<InFlightDiagnostic()> emitError);
 
 /// Reify the result shape of a transpose op as `output[i] = input[perm[i]]`.
-/// `perm` must be a permutation of `[0, rank-1)` and have the same length
-/// as `input`'s rank — the verifier should already guarantee this; the
-/// helper bails (returns empty) on mismatch.
+/// `perm` must be a permutation of `[0, rank)` and have the same length as
+/// `input`'s rank. Returns failure on malformed input, before emitting IR.
 ///
 /// Each output dim `i`:
 ///   - emits `IndexAttr(input.shape[perm[i]])` when that dim is static,
 ///   - emits `tensor.dim %input, perm[i]` otherwise.
 ///
-/// `input` must be a `RankedTensorType`-typed Value.
-SmallVector<OpFoldResult> reifyTransposeByPerm(OpBuilder &b, Location loc,
-                                               Value input,
-                                               ArrayRef<int64_t> perm);
+/// The `FailureOr` distinguishes failure from a successful rank-zero shape.
+FailureOr<SmallVector<OpFoldResult>>
+reifyTransposeByPerm(OpBuilder &b, Location loc, Value input,
+                     ArrayRef<int64_t> perm);
 
 /// Reify the result shape of a gather op as
 /// `output = data.shape[:axis] ++ indices.shape ++ data.shape[axis+1:]`.
 /// `axis` is normalized into `[0, data.rank)` (negative axis follows ONNX
-/// convention). The helper bails (returns empty) on a malformed axis.
+/// convention). Returns failure on a malformed axis.
 ///
-/// `data` and `indices` must be `RankedTensorType`-typed Values.
-SmallVector<OpFoldResult> reifyGatherWithAxis(OpBuilder &b, Location loc,
-                                              Value data, Value indices,
-                                              int64_t axis);
+/// The `FailureOr` distinguishes failure from a successful rank-zero shape.
+FailureOr<SmallVector<OpFoldResult>>
+reifyGatherWithAxis(OpBuilder &b, Location loc, Value data, Value indices,
+                    int64_t axis);
 
 /// Reify the result shape of a `gather_nd` op as
 /// `batch_dims_from_data ++ indices.shape[batch_dims:-1] ++
 ///  data.shape[batch_dims + indices.shape[-1]:]`.
 /// Per ONNX GatherND semantics, output rank =
 /// `q + r - indices.shape[-1] - 1 - batch_dims`, where `q = rank(indices)`
-/// and `r = rank(data)`. The helper bails (returns empty) when the
+/// and `r = rank(data)`. Returns failure when the
 /// trailing index-tuple width (`indices.shape[-1]`) is dynamic — the
 /// output rank itself is then unknown and reify cannot run.
 ///
-/// `data` and `indices` must be `RankedTensorType`-typed Values.
-SmallVector<OpFoldResult> reifyGatherND(OpBuilder &b, Location loc, Value data,
-                                        Value indices, int64_t batchDims);
+/// The `FailureOr` distinguishes failure from a successful rank-zero shape.
+FailureOr<SmallVector<OpFoldResult>> reifyGatherND(OpBuilder &b, Location loc,
+                                                   Value data, Value indices,
+                                                   int64_t batchDims);
 
 /// ONNX reduction result shape over `axes`, from static extents only.
 ///

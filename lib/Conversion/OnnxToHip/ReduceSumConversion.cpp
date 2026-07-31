@@ -66,7 +66,8 @@ ReduceSumToHip::matchAndRewrite(mlir::Operation *op,
   // axes is always required in HIP dialect; create empty tensor<0xi64> when not
   // provided
   mlir::Value axesOperand;
-  if (op->getNumOperands() > 1) {
+  if (op->getNumOperands() > 1 &&
+      !mlir::isa<mlir::NoneType>(op->getOperand(1).getType())) {
     // Axes provided as operand (opset 13+)
     axesOperand = op->getOperand(1);
   } else {

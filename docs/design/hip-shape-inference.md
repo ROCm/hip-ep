@@ -136,10 +136,11 @@ rewrite or reification reports failure; upstream's
 codebase avoids creating them in the first place. Emitting IR is therefore the
 last thing a helper does.
 
-The same split gives operation verifiers a shape rule to check against.
-`verifyHipOpShape` takes an `infer*` helper directly, so a single-destination op
-pairs the two in one expression and the `outs` shape, the converter destination,
-and `reifyResultShapes` are all held to one shape function:
+The same split gives targeted operation verifiers a shape rule to check against.
+MatMul and Gemm use `verifyHipOpShape` with their `infer*` helper, so their
+`outs` shape, converter destination, and `reifyResultShapes` are all held to one
+shape function. Broadcast and reduction ops share their converter/reify rule
+but do not yet have shared static shape verifiers:
 
 ```c++
 LogicalResult MatmulOp::verify() {
@@ -207,23 +208,22 @@ batch, and a stride of the matrix size walks one matrix per output batch. An
 operand's matrix count must therefore be either 1 or the output's.
 
 A partial per-axis broadcast falls strictly between the two — batch `[2, 1]`
-against an output batch of `[2, 3]` holds 2 matrices where the output needs 6 —
-and is rejected by `verifyStridedBatchMatmul`, the MatMul verifier, and the
-converter. The check is per axis: an operand is rejected only when some axis is
-statically 1 while the output extent is not, *and* another axis carries batches.
-Extents that are not statically 1 count as carrying batches, so an unknown
-extent never hides a partial broadcast. Ordinary batched matmul with dynamic
-leading extents (`[?, H, M, K] @ [?, H, K, N]`) is representable and accepted; a
-blanket rejection of dynamic batch extents would fail that common layout.
+against an output batch of `[2, 3]` holds 2 matrices where the output needs 6.
+`verifyStridedBatchMatmul` rejects partial layouts visible in the static types.
+Dynamic extents can conceal the same layout, so the lowering also computes each
+operand's runtime matrix count. `wrap_hipblasLtMatmul` dispatches only when each
+count is either 1 or the output batch count; otherwise it records an error in
+the runtime state's device error flag and skips hipBLASLt. The generated
+interface observes that flag after its existing stream synchronization and
+returns a recoverable non-zero inference status to ORT.
 
-The lowering distinguishes the two strides by comparing the operand's matrix
-count against the output batch count, folding at compile time when both are
-static. Comparing against the output count rather than testing for "more than
-one matrix" also keeps the read in bounds if a runtime-only shape ever violated
-the invariant.
+This preserves ordinary dynamic batched matmul
+(`[?, H, M, K] @ [?, H, K, N]`) without treating every non-output matrix count
+as whole-matrix broadcast. The stride is 0 only for one matrix and the matrix
+size only for one matrix per output batch.
 
-`wrap_hipblasLtMatmul` carries both strides. LLVM-IR artifacts compiled against
-the previous wrapper ABI must be invalidated.
+`wrap_hipblasLtMatmul` carries both operand batch counts and both strides.
+LLVM-IR artifacts compiled against the previous wrapper ABI must be invalidated.
 
 ## `--hip-infer-shapes`
 
@@ -337,7 +337,7 @@ Primary regression coverage:
 | `test/lit/Dialect/hip-gemm-reify-shapes.mlir` | Transpose-aware Gemm M/N reification |
 | `test/lit/Dialect/hip-matmul-reify-shapes.mlir` | Per-op reification through `--resolve-shaped-type-result-dims` |
 | `test/lit/Dialect/hip-matmul-shape-verifier.mlir` | Static MatMul shape validation, including accepted dynamic batch layouts and rejected partial per-axis broadcast |
-| `test/lit/Conversion/hip-to-llvm/test_matmul.mlir` | Per-operand batch strides: compile-time 0 / matrix size, and the runtime comparison against the output batch count |
+| `test/lit/Conversion/hip-to-llvm/test_matmul.mlir` | Per-operand batch counts and strides: compile-time 0 / matrix size, dynamic count comparison, and the runtime-validation ABI |
 | `test/lit/Conversion/onnx-to-hip/test_reduce_sum.mlir` | Reduction destinations, including the non-positional `keepdims = 0` dimension mapping |
 | `test/lit/Dialect/hip-loop-verifier.mlir` | Loop-carried type contract |
 | `test/lit/Dialect/hip-resolve-tensor-dims.mlir` | Production pre-bufferization dim folding |
@@ -347,7 +347,7 @@ Complex operations may use dedicated files; common shape categories should exten
 ## Current limitations
 
 - ONNX MatMul rank-1 operands require promotion to rank 2 before constructing `hip.matmul`; the runtime and current verifier require rank at least 2.
-- MatMul supports whole-matrix batch broadcast and one-matrix-per-output-batch operands, including dynamic batch extents; per-axis partial batch broadcast remains unsupported by the strided-batch runtime.
+- MatMul supports whole-matrix batch broadcast and one-matrix-per-output-batch operands, including dynamic batch extents. Static partial per-axis broadcast is rejected during compilation; a dynamically concealed partial layout returns a recoverable runtime error.
 - Reduction destinations fall back to a positional copy from the input when the reduced axes are only known at runtime; reification mirrors that fallback rather than inventing a shape.
 - Converter migration to inferred-type builders is incremental; explicit result-type builders remain supported.
 - A future multi-result operation that needs custom `InferTypeOpInterface` logic may require a dedicated result-type inference implementation file.

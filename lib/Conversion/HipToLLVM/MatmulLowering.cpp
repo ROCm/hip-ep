@@ -40,12 +40,6 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
                                       rewriter.getI64IntegerAttr(value));
     };
 
-    Value statePtr = adaptor.getCtx();
-    Value APtr = extractContiguousMemRefPtr(adaptor.getA(), rewriter, loc);
-    Value BPtr = extractContiguousMemRefPtr(adaptor.getB(), rewriter, loc);
-    Value outputPtr =
-        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
-
     auto AType = cast<MemRefType>(op.getA().getType());
     auto BType = cast<MemRefType>(op.getB().getType());
     auto outputType = cast<MemRefType>(op.getOutput().getType());
@@ -55,6 +49,13 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     if (failed(verifyStridedBatchMatmul(AType.getShape(), BType.getShape(),
                                         [&]() { return op.emitOpError(); })))
       return failure();
+
+    // No IR is emitted before all static representability checks pass.
+    Value statePtr = adaptor.getCtx();
+    Value APtr = extractContiguousMemRefPtr(adaptor.getA(), rewriter, loc);
+    Value BPtr = extractContiguousMemRefPtr(adaptor.getB(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
 
     MemRefDescriptor ADesc(adaptor.getA());
     MemRefDescriptor BDesc(adaptor.getB());
@@ -74,15 +75,28 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     unsigned elemBits = AType.getElementType().getIntOrFloatBitWidth();
     Value elemSize = createI64Const(elemBits / 8);
 
-    // `verifyStridedBatchMatmul` guarantees each operand holds either one
-    // matrix or one matrix per output batch, so one constant stride per operand
-    // is exact: 0 reuses a single matrix across every batch and the matrix size
-    // walks one matrix per batch. The two cases are distinguished by comparing
-    // the operand's matrix count against the output's, which also keeps the
-    // read in bounds if a runtime-only shape ever violated the invariant.
+    auto operandBatchCount = [&](MemRefType type,
+                                 MemRefDescriptor desc) -> Value {
+      ArrayRef<int64_t> batch = type.getShape().drop_back(2);
+      if (!ShapedType::isDynamicShape(batch))
+        return createI64Const(llvm::product_of(batch));
+
+      Value count = createI64Const(1);
+      for (unsigned i : llvm::seq<unsigned>(0, batch.size()))
+        count = LLVM::MulOp::create(rewriter, loc, count,
+                                    desc.size(rewriter, loc, i));
+      return count;
+    };
+    Value aBatchCount = operandBatchCount(AType, ADesc);
+    Value bBatchCount = operandBatchCount(BType, BDesc);
+
+    // A stride can represent exactly one matrix (stride 0) or one matrix per
+    // output batch (matrix-size stride). Dynamic extents are checked again by
+    // the runtime wrapper because static types cannot rule out a partial
+    // per-axis broadcast in every invocation.
     // `rows` x `cols` is the operand's matrix size in elements, materialized
     // only on the paths that need it.
-    auto batchStride = [&](MemRefType type, MemRefDescriptor desc, Value rows,
+    auto batchStride = [&](MemRefType type, Value count, Value rows,
                            Value cols) -> Value {
       ArrayRef<int64_t> batch = type.getShape().drop_back(2);
       if (!ShapedType::isDynamicShape(batch)) {
@@ -91,10 +105,6 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
         return LLVM::MulOp::create(rewriter, loc, rows, cols).getRes();
       }
 
-      Value count = createI64Const(1);
-      for (unsigned i : llvm::seq<unsigned>(0, batch.size()))
-        count = LLVM::MulOp::create(rewriter, loc, count,
-                                    desc.size(rewriter, loc, i));
       Value perBatch = LLVM::ICmpOp::create(
           rewriter, loc, LLVM::ICmpPredicate::eq, count, batchCount);
       // Both arms in locals, so the emission order does not depend on the
@@ -105,17 +115,19 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
                                     zero)
           .getRes();
     };
-    Value aBatchStride = batchStride(AType, ADesc, M, K);
-    Value bBatchStride = batchStride(BType, BDesc, K, N);
+    Value aBatchStride = batchStride(AType, aBatchCount, M, K);
+    Value bBatchStride = batchStride(BType, bBatchCount, K, N);
 
     // Runtime signature:
     // int wrap_hipblasLtMatmul(RuntimeState* state,
     //                          const void* A, const void* B, void* output,
     //                          int64_t M, int64_t N, int64_t K,
     //                          int64_t batch_count, int64_t elem_size,
+    //                          int64_t a_batch_count,
+    //                          int64_t b_batch_count,
     //                          int64_t a_batch_stride,
     //                          int64_t b_batch_stride)
-    SmallVector<Type, 12> paramTypes = {
+    SmallVector<Type, 14> paramTypes = {
         ptrType, // state
         i32Type, // op_state_slot
         ptrType, // A
@@ -126,6 +138,8 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
         i64Type, // K
         i64Type, // batch_count
         i64Type, // elem_size
+        i64Type, // a_batch_count
+        i64Type, // b_batch_count
         i64Type, // a_batch_stride
         i64Type  // b_batch_stride
     };
@@ -135,7 +149,7 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     if (failed(funcOp))
       return failure();
 
-    SmallVector<Value, 12> args = {statePtr,
+    SmallVector<Value, 14> args = {statePtr,
                                    getOpStateSlotValue(op, rewriter, loc),
                                    APtr,
                                    BPtr,
@@ -145,6 +159,8 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
                                    K,
                                    batchCount,
                                    elemSize,
+                                   aBatchCount,
+                                   bBatchCount,
                                    aBatchStride,
                                    bBatchStride};
 

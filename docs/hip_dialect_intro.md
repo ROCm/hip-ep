@@ -44,7 +44,7 @@ Matrix multiplication backed by the hipBLASLt library (`hipblasLtMatmul`).
 
 | Op | DPS Syntax | Runtime | Status |
 |---|---|---|---|
-| `hip.matmul` | `(%ctx) ins(%A, %B : ...) outs(%C : ...)` | `wrap_hipblasLtMatmul(state, slot, A, B, C, M, N, K, batch, elem, a_stride, b_stride)` | Full impl |
+| `hip.matmul` | `(%ctx) ins(%A, %B : ...) outs(%C : ...)` | `wrap_hipblasLtMatmul(state, slot, A, B, C, M, N, K, batch, elem, a_batches, b_batches, a_stride, b_stride)` | Full impl |
 
 The output batch count is the product of the broadcasted leading dimensions.
 Either operand may provide one matrix for all batches (`stride = 0`) or one

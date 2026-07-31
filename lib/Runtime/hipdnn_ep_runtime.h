@@ -418,11 +418,16 @@ int hipdnn_ep_state_ensure_matmul_dp4a_scratch(RuntimeState *state,
 // walks the array via each object's deletor.
 bool hipdnn_ep_op_states_alloc(RuntimeState *state, int64_t n);
 
-// Device-side runtime error flag (set by kernels, observed by wrappers).
-// Intended for operators that detect runtime-invalid inputs on GPU (e.g. Range
-// delta==0) and need to propagate an error code back through main_graph.
+// Device-side runtime error flag (set by kernels or queued by wrappers).
+// Intended for operators that detect runtime-invalid inputs (e.g. Range
+// delta==0 or a dynamically concealed partial MatMul batch broadcast) and need
+// to propagate an error code back through main_graph.
 void *hipdnn_ep_state_get_error_flag_device_ptr(RuntimeState *state);
 int hipdnn_ep_state_reset_error_flag(RuntimeState *state);
+// Record a host-detected runtime error on the stream. The generated interface
+// observes it at the same boundary as device-detected errors and returns a
+// recoverable non-zero status to ORT.
+int hipdnn_ep_state_set_error_flag(RuntimeState *state);
 int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state);
 // Mark the start of a new Compute() call. Invalidates per-forward-pass
 // runtime caches -- today: the GQA seqlens_k cache (see
@@ -807,9 +812,15 @@ int wrap_hipblasLtGemm(void *handle, // hipBLASLt handle
 // `a_batch_stride` / `b_batch_stride` are hipBLASLt's per-batch advances in
 // elements. A stride is 0 when one matrix is broadcast across all batches;
 // otherwise it is M*K for A or K*N for B.
+//
+// `a_batch_count` / `b_batch_count` are validated at runtime because dynamic
+// batch extents can conceal a partial per-axis broadcast from the static
+// verifier. Each count must be either 1 or `batch_count`; otherwise the wrapper
+// records a recoverable runtime error and does not dispatch hipBLASLt.
 int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
                          const void *B, void *output, int64_t M, int64_t N,
                          int64_t K, int64_t batch_count, int64_t elem_size,
+                         int64_t a_batch_count, int64_t b_batch_count,
                          int64_t a_batch_stride, int64_t b_batch_stride);
 
 // GroupQueryAttention operation wrapper (Full MS spec)

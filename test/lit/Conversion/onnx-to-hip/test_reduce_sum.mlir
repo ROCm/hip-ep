@@ -113,4 +113,21 @@ module {
   // CHECK: %[[OD3:.*]] = tensor.dim %[[DATA]], %[[OC3]] : tensor<?x?x?x?xf32>
   // CHECK: %[[OINIT:.*]] = tensor.empty(%[[OD0]], %[[OD3]]) : tensor<?x?xf32>
   // CHECK: hip.reduce_sum(%[[CTX]]) ins(%[[DATA]], %{{.*}} : tensor<?x?x?x?xf32>, tensor<2xi64>) outs(%[[OINIT]] : tensor<?x?xf32>) {keepdims = 0 : i64}
+
+  // An explicit ONNX NoValue is semantically the absent axes operand. The HIP
+  // op still requires an axes tensor, so conversion must materialize all axes
+  // rather than forwarding a `none` value.
+  func.func @reduce_sum_none_axes(%data: tensor<?x?xf32>) -> tensor<f32> {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %output = "onnx.ReduceSum"(%data, %none)
+        {keepdims = 0 : si64, noop_with_empty_axes = 0 : si64}
+        : (tensor<?x?xf32>, none) -> tensor<f32>
+    return %output : tensor<f32>
+  }
+
+  // CHECK-LABEL: func.func @reduce_sum_none_axes
+  // CHECK: %[[AXES:.*]] = arith.constant dense<[0, 1]> : tensor<2xi64>
+  // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<f32>
+  // CHECK: hip.reduce_sum({{.*}}) ins({{.*}}, %[[AXES]] : tensor<?x?xf32>, tensor<2xi64>) outs(%[[INIT]] : tensor<f32>) {keepdims = 0 : i64}
+  // CHECK-NOT: onnx.NoValue
 }

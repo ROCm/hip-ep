@@ -268,13 +268,11 @@ mlir::hip::inferGemmShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
 
 LogicalResult mlir::hip::verifyHipOpShape(
     Operation *op, function_ref<FailureOr<SmallVector<int64_t>>()> inferShape) {
-  // Asserting cast: every op wired to verifyHipOpShape also implements DPS
-  // via TableGen; a missing interface is a programmer error in the op def.
-  auto dpsOp = cast<DestinationStyleOpInterface>(op);
+  auto dpsOp = dyn_cast<DestinationStyleOpInterface>(op);
+  if (!dpsOp)
+    return op->emitOpError(
+        "shape verification requires DestinationStyleOpInterface");
   auto inits = dpsOp.getDpsInits();
-  assert(inits.size() == 1 &&
-         "verifyHipOpShape covers single-destination ops; a multi-destination "
-         "op needs one expected shape per init");
   if (inits.size() != 1)
     return op->emitOpError("expected a single DPS init operand, got ")
            << inits.size();
@@ -318,11 +316,11 @@ OpFoldResult mlir::hip::reifyDimOrConstant(OpBuilder &b, Location loc,
   return tensor::getMixedSize(b, loc, source, sourceDim);
 }
 
-SmallVector<OpFoldResult>
+FailureOr<SmallVector<OpFoldResult>>
 mlir::hip::reifyElementwiseSameShape(OpBuilder &b, Location loc, Value source) {
-  // Caller must hand a ranked tensor; reify is only invoked in tensor mode
-  // per the ReifyRankedShapedTypeOpInterface contract.
-  auto sourceType = cast<RankedTensorType>(source.getType());
+  auto sourceType = dyn_cast<RankedTensorType>(source.getType());
+  if (!sourceType)
+    return failure();
   ArrayRef<int64_t> shape = sourceType.getShape();
   SmallVector<OpFoldResult> dims;
   dims.reserve(shape.size());
@@ -446,6 +444,22 @@ FailureOr<SmallVector<OpFoldResult>> mlir::hip::reifyMatmulResultShape(
 }
 
 FailureOr<SmallVector<OpFoldResult>>
+mlir::hip::reifyMatMulNBitsResultShape(OpBuilder &b, Location loc, Value A,
+                                       int64_t N) {
+  auto aType = dyn_cast<RankedTensorType>(A.getType());
+  if (!aType || aType.getRank() < 1)
+    return failure();
+
+  ArrayRef<int64_t> aShape = aType.getShape();
+  SmallVector<OpFoldResult> dims;
+  dims.reserve(aShape.size());
+  for (size_t i : llvm::seq<size_t>(0, aShape.size() - 1))
+    dims.push_back(reifyDimOrConstant(b, loc, aShape[i], A, i));
+  dims.push_back(b.getIndexAttr(N));
+  return dims;
+}
+
+FailureOr<SmallVector<OpFoldResult>>
 mlir::hip::reifyGemmResultShape(OpBuilder &b, Location loc, Value A, Value B,
                                 Value optionalC, int64_t transA, int64_t transB,
                                 function_ref<InFlightDiagnostic()> emitError) {
@@ -478,41 +492,47 @@ mlir::hip::reifyGemmResultShape(OpBuilder &b, Location loc, Value A, Value B,
                                    bSizes[transB ? 0 : 1]};
 }
 
-SmallVector<OpFoldResult>
+FailureOr<SmallVector<OpFoldResult>>
 mlir::hip::reifyTransposeByPerm(OpBuilder &b, Location loc, Value input,
                                 ArrayRef<int64_t> perm) {
   auto inputType = dyn_cast<RankedTensorType>(input.getType());
   if (!inputType)
-    return {};
+    return failure();
   ArrayRef<int64_t> inputShape = inputType.getShape();
   int64_t rank = inputType.getRank();
   if (static_cast<int64_t>(perm.size()) != rank)
-    return {};
+    return failure();
+
+  // Validate the entire permutation before materializing any tensor.dim. A
+  // failure must leave the IR unchanged.
+  llvm::SmallBitVector seen(rank);
+  for (int64_t dim : perm) {
+    if (dim < 0 || dim >= rank || seen.test(dim))
+      return failure();
+    seen.set(dim);
+  }
 
   SmallVector<OpFoldResult> dims;
   dims.reserve(perm.size());
-  for (int64_t pi : perm) {
-    if (pi < 0 || pi >= rank)
-      return {};
-    dims.push_back(reifyDimOrConstant(b, loc, inputShape[pi], input, pi));
-  }
+  for (int64_t dim : perm)
+    dims.push_back(reifyDimOrConstant(b, loc, inputShape[dim], input, dim));
   return dims;
 }
 
-SmallVector<OpFoldResult>
+FailureOr<SmallVector<OpFoldResult>>
 mlir::hip::reifyGatherWithAxis(OpBuilder &b, Location loc, Value data,
                                Value indices, int64_t axis) {
   auto dataType = dyn_cast<RankedTensorType>(data.getType());
   auto indicesType = dyn_cast<RankedTensorType>(indices.getType());
   if (!dataType || !indicesType)
-    return {};
+    return failure();
   int64_t dataRank = dataType.getRank();
   int64_t indicesRank = indicesType.getRank();
   // Negative-axis normalization (ONNX convention).
   if (axis < 0)
     axis += dataRank;
   if (axis < 0 || axis >= dataRank)
-    return {};
+    return failure();
 
   ArrayRef<int64_t> dataShape = dataType.getShape();
   ArrayRef<int64_t> indicesShape = indicesType.getShape();
@@ -529,17 +549,17 @@ mlir::hip::reifyGatherWithAxis(OpBuilder &b, Location loc, Value data,
   return dims;
 }
 
-SmallVector<OpFoldResult> mlir::hip::reifyGatherND(OpBuilder &b, Location loc,
-                                                   Value data, Value indices,
-                                                   int64_t batchDims) {
+FailureOr<SmallVector<OpFoldResult>>
+mlir::hip::reifyGatherND(OpBuilder &b, Location loc, Value data, Value indices,
+                         int64_t batchDims) {
   auto dataType = dyn_cast<RankedTensorType>(data.getType());
   auto indicesType = dyn_cast<RankedTensorType>(indices.getType());
   if (!dataType || !indicesType)
-    return {};
+    return failure();
   int64_t dataRank = dataType.getRank();
   int64_t indicesRank = indicesType.getRank();
   if (indicesRank < 1)
-    return {};
+    return failure();
   ArrayRef<int64_t> dataShape = dataType.getShape();
   ArrayRef<int64_t> indicesShape = indicesType.getShape();
 
@@ -548,10 +568,10 @@ SmallVector<OpFoldResult> mlir::hip::reifyGatherND(OpBuilder &b, Location loc,
   // synthesise a rank with a dynamic count of dim entries.
   int64_t tupleWidth = indicesShape[indicesRank - 1];
   if (ShapedType::isDynamic(tupleWidth))
-    return {};
+    return failure();
   if (batchDims < 0 || batchDims > indicesRank - 1 ||
       batchDims + tupleWidth > dataRank)
-    return {};
+    return failure();
 
   // Output = data.shape[:batch_dims] (the shared batch prefix) ++
   //          indices.shape[batch_dims:-1] (the gathered tuple count) ++

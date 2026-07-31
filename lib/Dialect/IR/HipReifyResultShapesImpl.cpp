@@ -95,10 +95,11 @@ RopeOp::reifyResultShapes(OpBuilder &b,
                           ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
   if (getNumResults() == 0)
     return failure();
-  if (!isa<RankedTensorType>(getInput().getType()))
+  FailureOr<SmallVector<OpFoldResult>> dims =
+      mlir::hip::reifyElementwiseSameShape(b, getLoc(), getInput());
+  if (failed(dims))
     return failure();
-  reifiedReturnShapes.assign(
-      {mlir::hip::reifyElementwiseSameShape(b, getLoc(), getInput())});
+  reifiedReturnShapes.assign({std::move(*dims)});
   return success();
 }
 
@@ -124,10 +125,11 @@ RmsNormOp::reifyResultShapes(OpBuilder &b,
                              ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
   if (getNumResults() == 0)
     return failure();
-  if (!isa<RankedTensorType>(getInput().getType()))
+  FailureOr<SmallVector<OpFoldResult>> dims =
+      mlir::hip::reifyElementwiseSameShape(b, getLoc(), getInput());
+  if (failed(dims))
     return failure();
-  reifiedReturnShapes.assign(
-      {mlir::hip::reifyElementwiseSameShape(b, getLoc(), getInput())});
+  reifiedReturnShapes.assign({std::move(*dims)});
   return success();
 }
 
@@ -156,10 +158,11 @@ QMoEOp::reifyResultShapes(OpBuilder &b,
                           ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
   if (getNumResults() == 0)
     return failure();
-  if (!isa<RankedTensorType>(getInput().getType()))
+  FailureOr<SmallVector<OpFoldResult>> dims =
+      mlir::hip::reifyElementwiseSameShape(b, getLoc(), getInput());
+  if (failed(dims))
     return failure();
-  reifiedReturnShapes.assign(
-      {mlir::hip::reifyElementwiseSameShape(b, getLoc(), getInput())});
+  reifiedReturnShapes.assign({std::move(*dims)});
   return success();
 }
 
@@ -189,20 +192,11 @@ LogicalResult MatMulNBitsOp::reifyResultShapes(
     OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
   if (getNumResults() == 0)
     return failure();
-  ArrayRef<int64_t> aShape = getShapeOf(getA());
-  if (aShape.empty())
+  FailureOr<SmallVector<OpFoldResult>> dims =
+      mlir::hip::reifyMatMulNBitsResultShape(b, getLoc(), getA(), getN());
+  if (failed(dims))
     return failure();
-
-  Location loc = getLoc();
-  Value A = getA();
-  size_t aRank = aShape.size();
-  SmallVector<OpFoldResult> dims;
-  dims.reserve(aRank);
-  // Leading dims (rank-1 of them) from A; final dim is the static N attr.
-  for (size_t i : llvm::seq<size_t>(0, aRank - 1))
-    dims.push_back(mlir::hip::reifyDimOrConstant(b, loc, aShape[i], A, i));
-  dims.push_back(b.getIndexAttr(getN()));
-  reifiedReturnShapes.assign({std::move(dims)});
+  reifiedReturnShapes.assign({std::move(*dims)});
   return success();
 }
 
@@ -333,11 +327,11 @@ LogicalResult TransposeOp::reifyResultShapes(
     perm.push_back(ia.getInt());
   }
 
-  SmallVector<OpFoldResult> dims =
+  FailureOr<SmallVector<OpFoldResult>> dims =
       mlir::hip::reifyTransposeByPerm(b, getLoc(), getInput(), perm);
-  if (dims.empty())
+  if (failed(dims))
     return failure();
-  reifiedReturnShapes.assign({std::move(dims)});
+  reifiedReturnShapes.assign({std::move(*dims)});
   return success();
 }
 
@@ -350,11 +344,11 @@ GatherOp::reifyResultShapes(OpBuilder &b,
       !isa<RankedTensorType>(getIndices().getType()))
     return failure();
 
-  SmallVector<OpFoldResult> dims = mlir::hip::reifyGatherWithAxis(
+  FailureOr<SmallVector<OpFoldResult>> dims = mlir::hip::reifyGatherWithAxis(
       b, getLoc(), getData(), getIndices(), getAxis());
-  if (dims.empty())
+  if (failed(dims))
     return failure();
-  reifiedReturnShapes.assign({std::move(dims)});
+  reifiedReturnShapes.assign({std::move(*dims)});
   return success();
 }
 
@@ -363,14 +357,11 @@ GatherElementsOp::reifyResultShapes(OpBuilder &b,
                                     ReifiedRankedShapedTypeDims &reified) {
   if (getNumResults() == 0)
     return failure();
-  auto indicesType = dyn_cast<RankedTensorType>(getIndices().getType());
-  if (!indicesType)
+  FailureOr<SmallVector<OpFoldResult>> dims =
+      mlir::hip::reifyElementwiseSameShape(b, getLoc(), getIndices());
+  if (failed(dims))
     return failure();
-
-  SmallVector<OpFoldResult> dims;
-  for (auto i : llvm::seq<int64_t>(0, indicesType.getRank()))
-    dims.push_back(tensor::getMixedSize(b, getLoc(), getIndices(), i));
-  reified.assign({std::move(dims)});
+  reified.assign({std::move(*dims)});
   return success();
 }
 
@@ -478,11 +469,11 @@ LogicalResult GatherNDOp::reifyResultShapes(
       !isa<RankedTensorType>(getIndices().getType()))
     return failure();
 
-  SmallVector<OpFoldResult> dims = mlir::hip::reifyGatherND(
+  FailureOr<SmallVector<OpFoldResult>> dims = mlir::hip::reifyGatherND(
       b, getLoc(), getData(), getIndices(), getBatchDims());
-  if (dims.empty())
+  if (failed(dims))
     return failure();
-  reifiedReturnShapes.assign({std::move(dims)});
+  reifiedReturnShapes.assign({std::move(*dims)});
   return success();
 }
 

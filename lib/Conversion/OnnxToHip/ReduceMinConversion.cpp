@@ -60,7 +60,8 @@ ReduceMinToHip::matchAndRewrite(mlir::Operation *op,
         op, "ReduceMin result type is incompatible with the reduction shape");
 
   mlir::Value axesOperand;
-  if (op->getNumOperands() > 1) {
+  if (op->getNumOperands() > 1 &&
+      !mlir::isa<mlir::NoneType>(op->getOperand(1).getType())) {
     axesOperand = op->getOperand(1);
   } else {
     auto axesType = mlir::RankedTensorType::get(
