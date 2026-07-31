@@ -36,26 +36,27 @@ func.func @roundtrip(%ctx: !hipsr.context, %data: tensor<2x3xf16>,
 }
 
 // -----
-// Several inputs and inits, including a non-tensor input, and one result tied to
-// each init.
+// Several inputs and inits, with one result tied to each init.
 // CHECK-LABEL: func.func @multi_result(
-// CHECK-SAME: %[[CTX:.+]]: !hipsr.context, %[[DATA:.+]]: tensor<2x3xf16>, %[[EXTENT:.+]]: index, %[[INIT0:.+]]: tensor<6xf16>, %[[INIT1:.+]]: tensor<3x2xf16>) -> (tensor<6xf16>, tensor<3x2xf16>) {
-// CHECK-NEXT: %[[RESULTS:.+]]:2 = hipsr.compute(%[[CTX]]) ins(%[[DATA]], %[[EXTENT]] : tensor<2x3xf16>, index) outs(%[[INIT0]], %[[INIT1]] : tensor<6xf16>, tensor<3x2xf16>) {
-// CHECK-NEXT: ^bb0(%[[BODY_CTX:.+]]: !hipsr.context, %[[IN:.+]]: tensor<2x3xf16>, %[[BODY_EXTENT:.+]]: index, %[[DEST0:.+]]: tensor<6xf16>, %[[DEST1:.+]]: tensor<3x2xf16>):
+// CHECK-SAME: %[[CTX:.+]]: !hipsr.context, %[[DATA:.+]]: tensor<2x3xf16>, %[[SCALE:.+]]: tensor<f16>, %[[INIT0:.+]]: tensor<6xf16>, %[[INIT1:.+]]: tensor<3x2xf16>) -> (tensor<6xf16>, tensor<3x2xf16>) {
+// CHECK-NEXT: %[[RESULTS:.+]]:2 = hipsr.compute(%[[CTX]]) ins(%[[DATA]], %[[SCALE]] : tensor<2x3xf16>, tensor<f16>) outs(%[[INIT0]], %[[INIT1]] : tensor<6xf16>, tensor<3x2xf16>) {
+// CHECK-NEXT: ^bb0(%[[BODY_CTX:.+]]: !hipsr.context, %[[IN:.+]]: tensor<2x3xf16>, %[[BODY_SCALE:.+]]: tensor<f16>, %[[DEST0:.+]]: tensor<6xf16>, %[[DEST1:.+]]: tensor<3x2xf16>):
 // CHECK-NEXT: %[[FLAT:.+]] = tensor.collapse_shape %[[IN]] {{\[\[}}0, 1]] : tensor<2x3xf16> into tensor<6xf16>
 // CHECK-NEXT: %[[SWAPPED:.+]] = tensor.expand_shape %[[FLAT]] {{\[\[}}0, 1]] output_shape [3, 2] : tensor<6xf16> into tensor<3x2xf16>
 // CHECK-NEXT: hipsr.compute_yield %[[FLAT]], %[[SWAPPED]] : tensor<6xf16>, tensor<3x2xf16>
 // CHECK-NEXT: } : tensor<6xf16>, tensor<3x2xf16>{{$}}
 // CHECK-NEXT: return %[[RESULTS]]#0, %[[RESULTS]]#1 : tensor<6xf16>, tensor<3x2xf16>
 // CHECK-NEXT: }
-func.func @multi_result(%ctx: !hipsr.context, %data: tensor<2x3xf16>, %n: index,
-                        %init0: tensor<6xf16>, %init1: tensor<3x2xf16>)
+func.func @multi_result(%ctx: !hipsr.context, %data: tensor<2x3xf16>,
+                        %scale: tensor<f16>, %init0: tensor<6xf16>,
+                        %init1: tensor<3x2xf16>)
     -> (tensor<6xf16>, tensor<3x2xf16>) {
-  %out:2 = hipsr.compute(%ctx) ins(%data, %n : tensor<2x3xf16>, index)
+  %out:2 = hipsr.compute(%ctx) ins(%data, %scale : tensor<2x3xf16>, tensor<f16>)
                                outs(%init0, %init1 : tensor<6xf16>,
                                                      tensor<3x2xf16>) {
-  ^bb0(%body_ctx: !hipsr.context, %in: tensor<2x3xf16>, %extent: index,
-       %dest0: tensor<6xf16>, %dest1: tensor<3x2xf16>):
+  ^bb0(%body_ctx: !hipsr.context, %in: tensor<2x3xf16>,
+       %body_scale: tensor<f16>, %dest0: tensor<6xf16>,
+       %dest1: tensor<3x2xf16>):
     %flat = tensor.collapse_shape %in [[0, 1]]
         : tensor<2x3xf16> into tensor<6xf16>
     %swapped = tensor.expand_shape %flat [[0, 1]] output_shape [3, 2]
@@ -193,6 +194,17 @@ func.func @body_uses_parent_value(%ctx: !hipsr.context, %init: tensor<6xf16>) {
     // expected-error @+1 {{using value defined outside the region}}
     hipsr.compute_yield %init : tensor<6xf16>
   } : tensor<6xf16>
+  return
+}
+
+// -----
+// Inputs carry tensor data, so a scalar cannot cross the boundary.
+func.func @non_tensor_input(%ctx: !hipsr.context, %n: index) {
+  // expected-error @+1 {{operand #1 must be variadic of ranked tensor or device memref, but got 'index'}}
+  hipsr.compute(%ctx) ins(%n : index) outs() {
+  ^bb0(%body_ctx: !hipsr.context, %extent: index):
+    hipsr.compute_yield
+  }
   return
 }
 

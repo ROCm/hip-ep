@@ -57,7 +57,7 @@ def Hipsr_ComputeOp : Hipsr_Op<"compute", [
 
   let arguments = (ins
     Hipsr_ContextType:$ctx,
-    Variadic<AnyType>:$inputs,
+    Variadic<Hipsr_TensorOrDeviceMemRef>:$inputs,
     Variadic<Hipsr_TensorOrDeviceMemRef>:$inits
   );
   let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
