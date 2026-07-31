@@ -89,8 +89,7 @@ func.func @memref_form(%ctx: !hipsr.context,
 }
 
 // -----
-// The body must have a block. The custom form always parses one, so this is what
-// a caller that builds the op and skips the entry block runs into.
+// The generic form is invalid because the body has no block.
 func.func @empty_body(%ctx: !hipsr.context) {
   // expected-error @+1 {{failed to verify constraint: region with 1 blocks}}
   "hipsr.compute"(%ctx) <{operandSegmentSizes = array<i32: 1, 0, 0>}> ({
@@ -209,8 +208,7 @@ func.func @host_memref_init(%ctx: !hipsr.context, %init: memref<6xf16>) {
 }
 
 // -----
-// Only hipsr.compute_yield may terminate the body. The custom form always
-// supplies it, so only the generic form can end with something else.
+// The body must end with hipsr.compute_yield.
 func.func @wrong_terminator(%ctx: !hipsr.context) {
   // expected-error @+2 {{expects regions to end with 'hipsr.compute_yield', found 'llvm.unreachable'}}
   // expected-note @+1 {{in custom textual format, the absence of terminator implies 'hipsr.compute_yield'}}

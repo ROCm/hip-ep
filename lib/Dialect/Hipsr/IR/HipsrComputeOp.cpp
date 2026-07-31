@@ -19,8 +19,6 @@ OperandRange ComputeOp::getEntrySuccessorOperands(RegionSuccessor successor) {
     llvm::report_fatal_error(
         "hipsr.compute received an unexpected entry successor");
   }
-  // The body is isolated from above, so every operand crosses the boundary as
-  // an entry-block argument: the context first, then the inputs and the inits.
   return getOperands();
 }
 
