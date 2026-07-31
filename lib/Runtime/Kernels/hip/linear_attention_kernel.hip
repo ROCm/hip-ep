@@ -818,7 +818,8 @@ __global__ void la_pf_pass1_local(
     for (int idx = tid; idx < Ceff * dv; idx += nthreads) {
         int t = idx / dv, j = idx % dv;
         float vtj = to_float(
-            value[b * v_bs + (int64_t)(c0 + t) * Hkv * dv + (int64_t)g * dv + j]);
+            value[b * v_bs + (int64_t)(c0 + t) * Hkv * dv +
+                  (int64_t)g * dv + j]);
         Buf[t * dv + j] = bsm[t] * vtj;
     }
     __syncthreads();
@@ -840,7 +841,8 @@ __global__ void la_pf_pass1_local(
     // --- Solve 2: W = (I-trilT)^{-1}(diag(beta.*A) K) ---
     for (int idx = tid; idx < Ceff * dk; idx += nthreads) {
         int t = idx / dk, i = idx % dk;
-        Buf[t * dk + i] = bsm[t] * Asm[t] * __half2float(Ksm[t * dk + i]);
+        Buf[t * dk + i] =
+            bsm[t] * Asm[t] * __half2float(Ksm[t * dk + i]);
     }
     __syncthreads();
     for (int t = 1; t < Ceff; t++) {
@@ -903,21 +905,34 @@ __global__ void la_pf_scan(
         const int64_t base = ((int64_t)(b * Hkv + g) * nchunks + c);
         const int c0   = c * LA_CHUNK;
         const int Ceff = min(LA_CHUNK, seq_len - c0);
-        // store chunk-start state
-        for (int idx = tid; idx < dk * dv; idx += nthreads)
-            S0_g[base * (dk * dv) + idx] = Ssm[idx];
+        // Store chunk-start state two dv columns at a time.
+        __half2* S0_pair =
+            reinterpret_cast<__half2*>(S0_g + base * (dk * dv));
+        const __half2* Ssm_pair =
+            reinterpret_cast<const __half2*>(Ssm);
+        for (int idx = tid; idx < dk * (dv / 2); idx += nthreads)
+            S0_pair[idx] = Ssm_pair[idx];
         // load W tile
         for (int idx = tid; idx < LA_CHUNK * dk; idx += nthreads)
             Buf1[idx] = W_g[base * (LA_CHUNK * dk) + idx];
         __syncthreads();
         // WS[t][j] = sum_i W[t][i] * S0[i][j]  -> Buf2
-        for (int idx = tid; idx < LA_CHUNK * dv; idx += nthreads) {
-            int t = idx / dv, j = idx % dv;
-            float acc = 0.f;
-            for (int i = 0; i < dk; i++)
-                acc += Buf1[t * dk + i] * __half2float(Ssm[i * dv + j]);
+        const int dv_pairs = dv / 2;
+        for (int idx = tid; idx < LA_CHUNK * dv_pairs; idx += nthreads) {
+            int t = idx / dv_pairs, j2 = idx % dv_pairs;
+            float acc0 = 0.f, acc1 = 0.f;
+            for (int i = 0; i < dk; i++) {
+                float w = Buf1[t * dk + i];
+                float2 sv = __half22float2(
+                    reinterpret_cast<const __half2*>(Ssm + i * dv)[j2]);
+                acc0 += w * sv.x;
+                acc1 += w * sv.y;
+            }
             // U = Uloc - WS
-            Buf2[idx] = Uloc_g[base * (LA_CHUNK * dv) + idx] - acc;
+            float2 ul = reinterpret_cast<const float2*>(
+                Uloc_g + base * (LA_CHUNK * dv) + t * dv)[j2];
+            reinterpret_cast<float2*>(Buf2 + t * dv)[j2] =
+                make_float2(ul.x - acc0, ul.y - acc1);
         }
         __syncthreads();
         // Rebuild Ktilde[s][i] = rlast[s]*K[s][i] into Buf1 (W no longer
@@ -934,12 +949,21 @@ __global__ void la_pf_scan(
         const float a_last = alast_g[base];
         __syncthreads();
         // S1[i][j] = a_last*S0[i][j] + sum_s Ktilde[s][i] U[s][j]
-        for (int idx = tid; idx < dk * dv; idx += nthreads) {
-            int i = idx / dv, j = idx % dv;
-            float acc = a_last * __half2float(Ssm[idx]);
-            for (int s = 0; s < LA_CHUNK; s++)
-                acc += Buf1[s * dk + i] * Buf2[s * dv + j];
-            Ssm[idx] = __float2half(acc);
+        for (int idx = tid; idx < dk * dv_pairs; idx += nthreads) {
+            int i = idx / dv_pairs, j2 = idx % dv_pairs;
+            float2 state = __half22float2(
+                reinterpret_cast<const __half2*>(Ssm + i * dv)[j2]);
+            float acc0 = a_last * state.x;
+            float acc1 = a_last * state.y;
+            for (int s = 0; s < LA_CHUNK; s++) {
+                float kt = Buf1[s * dk + i];
+                float2 u =
+                    reinterpret_cast<const float2*>(Buf2 + s * dv)[j2];
+                acc0 += kt * u.x;
+                acc1 += kt * u.y;
+            }
+            reinterpret_cast<__half2*>(Ssm + i * dv)[j2] =
+                __floats2half2_rn(acc0, acc1);
         }
         __syncthreads();
     }
@@ -949,10 +973,10 @@ __global__ void la_pf_scan(
 
 // Pass 3: per (head,chunk) parallel output. The dominant [Q;W]@S0 GEMM
 // (M=2C, K=dk, N=dv) runs on the RDNA3 wave-matrix cores; the small P@U intra
-// term stays scalar. Requires blockDim=256 (8 wave32 wavefronts) and dk,dv
+// term stays scalar. Requires blockDim=512 (16 wave32 wavefronts) and dk,dv
 // multiples of 16.
 template <typename T>
-__global__ void __launch_bounds__(256) la_pf_pass3_wmma(
+__global__ void __launch_bounds__(512) la_pf_pass3_wmma(
     const T* __restrict__ query,
     const T* __restrict__ key,
     const T* __restrict__ decay,
@@ -1051,12 +1075,21 @@ __global__ void __launch_bounds__(256) la_pf_pass3_wmma(
     }
     __syncthreads();
 
-    // Postprocess per output column: U = Uloc - (W@S0); O = scale*(A.*qs + P_lower@U).
-    for (int j = tid; j < dv; j += nthreads) {
+    // Postprocess per output column: U = Uloc - (W@S0);
+    // O = scale*(A.*qs + P_lower@U).
+    //
+    // When blockDim > dv (the production shape is 512 threads, dv=128), let
+    // multiple thread groups share each output column and partition the t rows.
+    // Each output element is still accumulated by one thread in the original s
+    // order, while all waves participate instead of leaving half the block idle.
+    const int col_groups = max(1, nthreads / dv);
+    const int col_group = tid / dv;
+    const int j = tid % dv;
+    if (col_group < col_groups) {
         float U[LA_CHUNK];
         for (int t = 0; t < Ceff; t++)
             U[t] = Ul[t * dv + j] - QWS[(LA_CHUNK + t) * dv + j];
-        for (int t = 0; t < Ceff; t++) {
+        for (int t = col_group; t < Ceff; t += col_groups) {
             float inter = Asm[t] * QWS[t * dv + j];
             float intra = 0.f;
             for (int s = 0; s <= t; s++)
@@ -1145,7 +1178,7 @@ static int la_launch_parallel(
     hipLaunchKernelGGL(la_pf_scan<T>, dim3((unsigned)(B * Hkv)), dim3(scan_block),
         s2, s, k, Uloc_g, W_g, rlast_g, alast_g, S0_g, state,
         seq_len, Hkv, Nk, dk, dv, nchunks);
-    hipLaunchKernelGGL(la_pf_pass3_wmma<T>, dim3((unsigned)ncb), dim3(256),
+    hipLaunchKernelGGL(la_pf_pass3_wmma<T>, dim3((unsigned)ncb), dim3(512),
         s3, s, q, k, dec, Uloc_g, W_g, S0_g, out,
         seq_len, Hq, Hkv, Nk, dk, dv, scale, nchunks);
 
