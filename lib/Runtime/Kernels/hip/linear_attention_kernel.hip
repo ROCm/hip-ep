@@ -713,7 +713,7 @@ static constexpr int LA_CHUNK         = 32;   // tokens per chunk
 // A naive serial kernel would process chunks one at a time, because the chunk
 // output and state-update both read the chunk-start state S0, which is only
 // known after the previous chunk finishes.  We split each chunk's work into an
-// S0-independent local part (fully parallel across all Hkv*nchunks blocks) and
+// S0-independent local part (fully parallel across all Hkv*chunk blocks) and
 // a light affine state scan (per head, sequential over chunks but cheap):
 //
 //   Within a chunk (tokens t):
@@ -728,6 +728,11 @@ static constexpr int LA_CHUNK         = 32;   // tokens per chunk
 // Pass 1 (parallel): compute Uloc, W, Ktilde, a_last.
 // Pass 2 (scan):     S0_c per chunk, then S1 = a_last*S0 + Ktilde^T(Uloc - W S0).
 // Pass 3 (parallel): recompute P, form U = Uloc - W S0, emit O.
+//
+// The three passes run over a window of LA_WINDOW_CHUNKS chunks at a time
+// rather than the whole sequence, so the per-(head,chunk) scratch is bounded by
+// the window instead of by seq_len. The scan is already sequential over chunks,
+// so windowing only changes where its running state lives between launches.
 // Numerically equivalent to the serial kernel (same fp32 math, same per-chunk
 // fp16 rounding of S); differs only by fp32 op-order (cosine ~1.0).
 //===----------------------------------------------------------------------===//
@@ -739,20 +744,24 @@ __global__ void la_pf_pass1_local(
     const T* __restrict__ value,
     const T* __restrict__ decay,
     const T* __restrict__ beta_in,
-    float* __restrict__ Uloc_g,   // [B*Hkv*nchunks, C*dv]
-    float* __restrict__ W_g,      // [B*Hkv*nchunks, C*dk]
-    float* __restrict__ rlast_g,  // [B*Hkv*nchunks, C]  (a_last/A_s per token)
-    float* __restrict__ alast_g,  // [B*Hkv*nchunks]
+    float* __restrict__ Uloc_g,   // [B*Hkv*nchunks_win, C*dv]
+    float* __restrict__ W_g,      // [B*Hkv*nchunks_win, C*dk]
+    float* __restrict__ rlast_g,  // [B*Hkv*nchunks_win, C] (a_last/A_s per token)
+    float* __restrict__ alast_g,  // [B*Hkv*nchunks_win]
     int seq_len, int Hkv, int n_k, int dk, int dv,
-    int beta_per_head, int nchunks)
+    int beta_per_head, int nchunks_win, int chunk_begin)
 {
-    const int c   = blockIdx.x % nchunks;
-    int tmp       = blockIdx.x / nchunks;
+    // cw indexes the chunk within this launch window; chunk_begin + cw is the
+    // chunk's position in the sequence. Scratch is sized for one window, so it
+    // is addressed with the window-local index while the input/output tensors
+    // are addressed with the global one.
+    const int cw  = blockIdx.x % nchunks_win;
+    int tmp       = blockIdx.x / nchunks_win;
     const int g   = tmp % Hkv;
     const int b   = tmp / Hkv;
     const int tid = threadIdx.x;
     const int nthreads = blockDim.x;
-    const int c0   = c * LA_CHUNK;
+    const int c0   = (chunk_begin + cw) * LA_CHUNK;
     const int Ceff = min(LA_CHUNK, seq_len - c0);
     const int h_k  = g * n_k / Hkv;
 
@@ -761,7 +770,7 @@ __global__ void la_pf_pass1_local(
     const int64_t decay_bs = (int64_t)seq_len * Hkv;
     const int64_t beta_bs  = beta_per_head ? (int64_t)seq_len * Hkv
                                            : (int64_t)seq_len;
-    const int64_t base = ((int64_t)(b * Hkv + g) * nchunks + c);
+    const int64_t base = ((int64_t)(b * Hkv + g) * nchunks_win + cw);
 
     // Compact LDS (K as half, single reused solve buffer) so 2 blocks/CU fit.
     extern __shared__ float smem[];
@@ -872,11 +881,13 @@ __global__ void la_pf_scan(
     const T* __restrict__ key,     // [B, seq, n_k*dk] -- to rebuild Ktilde
     const float* __restrict__ Uloc_g,
     const float* __restrict__ W_g,
-    const float* __restrict__ rlast_g,  // [B*Hkv*nchunks, C]
+    const float* __restrict__ rlast_g,  // [B*Hkv*nchunks_win, C]
     const float* __restrict__ alast_g,
-    __half* __restrict__ S0_g,     // [B*Hkv*nchunks, dk*dv]  chunk-start states
+    __half* __restrict__ S0_g,     // [B*Hkv*nchunks_win, dk*dv] chunk-start states
+    __half* __restrict__ carry_g,  // [B*Hkv, dk*dv] state carried across windows
     T* __restrict__ state,         // final state out [B,Hkv,dk,dv]
-    int seq_len, int Hkv, int n_k, int dk, int dv, int nchunks)
+    int seq_len, int Hkv, int n_k, int dk, int dv,
+    int nchunks_win, int chunk_begin, int is_first, int is_last)
 {
     const int bg = blockIdx.x;
     const int b  = bg / Hkv;
@@ -887,21 +898,25 @@ __global__ void la_pf_scan(
     const int64_t k_bs = (int64_t)seq_len * n_k * dk;
     const int64_t state_bs = (int64_t)Hkv * dk * dv;
     T* Sout = state + b * state_bs + (int64_t)g * dk * dv;
+    __half* carry = carry_g + (int64_t)bg * dk * dv;
 
     extern __shared__ float smem[];
     __half* Ssm = (__half*)smem;                       // dk*dv (half) = 32KB
     float*  Buf1 = (float*)(Ssm + dk * dv);            // C*dk (float) = 16KB
     float*  Buf2 = Buf1 + LA_CHUNK * dk;               // C*dv (float) = 16KB
 
-    // Initialize from the incoming state buffer (matches the serial kernel,
-    // which reads S in place; == 0 for a fresh prefill).
+    // The first window seeds from the incoming state buffer (matches the serial
+    // kernel, which reads S in place; == 0 for a fresh prefill). Later windows
+    // resume from the fp16 carry rather than re-reading `state`: the running
+    // state is fp16 in LDS, so a round trip through a narrower T (bf16 has 8
+    // mantissa bits vs fp16's 10) would perturb it at every window boundary.
     for (int idx = tid; idx < dk * dv; idx += nthreads)
-        Ssm[idx] = __float2half(to_float(Sout[idx]));
+        Ssm[idx] = is_first ? __float2half(to_float(Sout[idx])) : carry[idx];
     __syncthreads();
 
-    for (int c = 0; c < nchunks; c++) {
-        const int64_t base = ((int64_t)(b * Hkv + g) * nchunks + c);
-        const int c0   = c * LA_CHUNK;
+    for (int cw = 0; cw < nchunks_win; cw++) {
+        const int64_t base = ((int64_t)(b * Hkv + g) * nchunks_win + cw);
+        const int c0   = (chunk_begin + cw) * LA_CHUNK;
         const int Ceff = min(LA_CHUNK, seq_len - c0);
         // store chunk-start state
         for (int idx = tid; idx < dk * dv; idx += nthreads)
@@ -943,8 +958,14 @@ __global__ void la_pf_scan(
         }
         __syncthreads();
     }
-    for (int idx = tid; idx < dk * dv; idx += nthreads)
-        Sout[idx] = from_float<T>(__half2float(Ssm[idx]));
+    // Only the final window publishes the state in the caller's dtype; the rest
+    // hand off through the carry buffer.
+    for (int idx = tid; idx < dk * dv; idx += nthreads) {
+        if (is_last)
+            Sout[idx] = from_float<T>(__half2float(Ssm[idx]));
+        else
+            carry[idx] = Ssm[idx];
+    }
 }
 
 // Pass 3: per (head,chunk) parallel output. The dominant [Q;W]@S0 GEMM
@@ -961,15 +982,17 @@ __global__ void __launch_bounds__(256) la_pf_pass3_wmma(
     const __half* __restrict__ S0_g,
     T* __restrict__ output,
     int seq_len, int Hq, int Hkv, int n_k, int dk, int dv,
-    float scale, int nchunks)
+    float scale, int nchunks_win, int chunk_begin)
 {
-    const int c   = blockIdx.x % nchunks;
-    int tmp       = blockIdx.x / nchunks;
+    // See la_pf_pass1_local: cw is window-local (indexes scratch), chunk_begin
+    // + cw is global (indexes query/key/decay/output).
+    const int cw  = blockIdx.x % nchunks_win;
+    int tmp       = blockIdx.x / nchunks_win;
     const int g   = tmp % Hkv;
     const int b   = tmp / Hkv;
     const int tid = threadIdx.x;
     const int nthreads = blockDim.x;
-    const int c0   = c * LA_CHUNK;
+    const int c0   = (chunk_begin + cw) * LA_CHUNK;
     const int Ceff = min(LA_CHUNK, seq_len - c0);
     const int M    = 2 * LA_CHUNK;   // stacked [Q; W] rows
 
@@ -983,7 +1006,7 @@ __global__ void __launch_bounds__(256) la_pf_pass3_wmma(
     const int64_t k_bs     = (int64_t)seq_len * n_k  * dk;
     const int64_t out_bs   = (int64_t)seq_len * Hout * dv;
     const int64_t decay_bs = (int64_t)seq_len * Hkv;
-    const int64_t base = ((int64_t)(b * Hkv + g) * nchunks + c);
+    const int64_t base = ((int64_t)(b * Hkv + g) * nchunks_win + cw);
     const __half* S0 = S0_g + base * (dk * dv);
     const float*  Wc = W_g  + base * (LA_CHUNK * dk);
     const float*  Ul = Uloc_g + base * (LA_CHUNK * dv);
@@ -1068,30 +1091,44 @@ __global__ void __launch_bounds__(256) la_pf_pass3_wmma(
     }
 }
 
+// Chunks processed per launch window. The passes run one window at a time, so
+// the per-(head,chunk) scratch is sized for a window instead of the whole
+// sequence and stops growing with seq_len. 64 chunks = 2048 tokens still gives
+// B*Hkv*64 = 2048 blocks per launch at Hkv=32, far more than the 40 CUs need to
+// stay saturated, so the chunk-parallel speedup is unaffected.
+static constexpr int LA_WINDOW_CHUNKS = 64;
+
 // Scratch layout for the chunk-parallel path. The buffer itself is owned by
 // the runtime (RuntimeState::la_scratch, grown on demand, freed on session
 // cleanup) and passed in; this kernel TU only computes the sub-buffer offsets.
 // Kept in one place so hip_linear_attention_prefill_scratch_bytes (used by the
 // wrapper to size the pool) and la_launch_parallel cannot drift apart.
-struct LaScratchLayout { size_t oU, oW, oR, oA, oS, total; };
+struct LaScratchLayout { size_t oU, oW, oR, oA, oS, oC, total; };
 
 static inline LaScratchLayout la_scratch_layout(int B, int seq_len, int Hkv,
                                                 int dk, int dv) {
     const int nchunks = (seq_len + LA_CHUNK - 1) / LA_CHUNK;
-    const int64_t ncb = (int64_t)B * Hkv * nchunks;   // # (head,chunk) blocks
+    const int win = nchunks < LA_WINDOW_CHUNKS ? nchunks : LA_WINDOW_CHUNKS;
+    const int64_t ncb = (int64_t)B * Hkv * win;  // # (head,chunk) blocks / window
     auto align = [](size_t x){ return (x + 255) & ~((size_t)255); };
     const size_t sz_Uloc  = (size_t)ncb * LA_CHUNK * dv * sizeof(float);
     const size_t sz_W     = (size_t)ncb * LA_CHUNK * dk * sizeof(float);
     const size_t sz_rlast = (size_t)ncb * LA_CHUNK * sizeof(float);
     const size_t sz_alast = (size_t)ncb * sizeof(float);
     const size_t sz_S0    = (size_t)ncb * dk * dv * sizeof(__half);
+    // Cross-window carry of the recurrent state, one tile per (batch, kv head).
+    // A single-window prefill hands off through `state` directly and never
+    // touches the carry, so it does not pay for it.
+    const size_t sz_carry = (nchunks > win)
+        ? (size_t)B * Hkv * dk * dv * sizeof(__half) : 0;
     LaScratchLayout L;
     L.oU = 0;
     L.oW = align(L.oU + sz_Uloc);
     L.oR = align(L.oW + sz_W);
     L.oA = align(L.oR + sz_rlast);
     L.oS = align(L.oA + sz_alast);
-    L.total = align(L.oS + sz_S0);
+    L.oC = align(L.oS + sz_S0);
+    L.total = align(L.oC + sz_carry);
     return L;
 }
 
@@ -1111,7 +1148,6 @@ static int la_launch_parallel(
     float scale, int beta_per_head, void* scratch, size_t scratch_bytes)
 {
     const int nchunks = (seq_len + LA_CHUNK - 1) / LA_CHUNK;
-    const int64_t ncb = (int64_t)B * Hkv * nchunks;   // # (head,chunk) blocks
 
     const LaScratchLayout L = la_scratch_layout(B, seq_len, Hkv, dk, dv);
     if (!scratch || scratch_bytes < L.total) return 1;  // caller under-sized it
@@ -1121,6 +1157,7 @@ static int la_launch_parallel(
     float*  rlast_g = (float*)(sp + L.oR);
     float*  alast_g = (float*)(sp + L.oA);
     __half* S0_g    = (__half*)(sp + L.oS);
+    __half* carry_g = (__half*)(sp + L.oC);
 
     const int block = LA_PAR_THREADS;
     // Pass 1 LDS: Tm + Buf(=C*dv) + 4 vecs (float), plus K tile (half).
@@ -1139,15 +1176,28 @@ static int la_launch_parallel(
     // Pass 2's serial scan uses a larger block for more resident waves.
     const int scan_block = 1024;
 
-    hipLaunchKernelGGL(la_pf_pass1_local<T>, dim3((unsigned)ncb), dim3(block),
-        s1, s, k, v, dec, beta, Uloc_g, W_g, rlast_g, alast_g,
-        seq_len, Hkv, Nk, dk, dv, beta_per_head, nchunks);
-    hipLaunchKernelGGL(la_pf_scan<T>, dim3((unsigned)(B * Hkv)), dim3(scan_block),
-        s2, s, k, Uloc_g, W_g, rlast_g, alast_g, S0_g, state,
-        seq_len, Hkv, Nk, dk, dv, nchunks);
-    hipLaunchKernelGGL(la_pf_pass3_wmma<T>, dim3((unsigned)ncb), dim3(256),
-        s3, s, q, k, dec, Uloc_g, W_g, S0_g, out,
-        seq_len, Hq, Hkv, Nk, dk, dv, scale, nchunks);
+    // Window the sequence so the scratch above covers one window rather than
+    // the whole prefill. The three passes are issued back-to-back on the same
+    // stream, so pass 3 of a window has finished reading Uloc/W/S0 before pass
+    // 1 of the next window overwrites them -- no extra synchronisation needed.
+    // The scan carries the recurrent state between windows (carry_g).
+    for (int cbeg = 0; cbeg < nchunks; cbeg += LA_WINDOW_CHUNKS) {
+        const int rem = nchunks - cbeg;
+        const int win = rem < LA_WINDOW_CHUNKS ? rem : LA_WINDOW_CHUNKS;
+        const int64_t ncb = (int64_t)B * Hkv * win;  // (head,chunk) blocks
+        const int is_first = (cbeg == 0) ? 1 : 0;
+        const int is_last  = (cbeg + win >= nchunks) ? 1 : 0;
+
+        hipLaunchKernelGGL(la_pf_pass1_local<T>, dim3((unsigned)ncb), dim3(block),
+            s1, s, k, v, dec, beta, Uloc_g, W_g, rlast_g, alast_g,
+            seq_len, Hkv, Nk, dk, dv, beta_per_head, win, cbeg);
+        hipLaunchKernelGGL(la_pf_scan<T>, dim3((unsigned)(B * Hkv)), dim3(scan_block),
+            s2, s, k, Uloc_g, W_g, rlast_g, alast_g, S0_g, carry_g, state,
+            seq_len, Hkv, Nk, dk, dv, win, cbeg, is_first, is_last);
+        hipLaunchKernelGGL(la_pf_pass3_wmma<T>, dim3((unsigned)ncb), dim3(256),
+            s3, s, q, k, dec, Uloc_g, W_g, S0_g, out,
+            seq_len, Hq, Hkv, Nk, dk, dv, scale, win, cbeg);
+    }
 
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
