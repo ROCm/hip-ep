@@ -5,13 +5,15 @@
 
 // RUN: hip-mlir-opt --split-input-file --verify-diagnostics %s
 // RUN: hip-mlir-opt --split-input-file --verify-diagnostics -hipsr-populate-shape-region %s | FileCheck %s --check-prefix=POPULATE
+// RUN: hip-mlir-opt --split-input-file --verify-diagnostics -canonicalize %s | FileCheck %s --check-prefix=CANONICALIZE
 
 // Tensor form checks the complete rank-2 ONNX broadcast shape computation.
+// Its constant shape also canonicalizes to shape_attr.
 // POPULATE-LABEL: func.func @expand_tensor(
 // POPULATE-SAME:   %[[CTX:.*]]: !hipsr.context,
 // POPULATE-SAME:   %[[OUTER_INPUT:.*]]: tensor<?x3xf16>,
-// POPULATE-SAME:   %[[OUTER_REQUEST:.*]]: tensor<2xi64>,
 // POPULATE-SAME:   %[[INIT:.*]]: tensor<?x?xf16>) -> tensor<?x?xf16> {
+// POPULATE-NEXT: %[[OUTER_REQUEST:.*]] = arith.constant dense<[4, 3]> : tensor<2xi64>
 // POPULATE-NEXT: %[[RESULT:.*]] = hipsr.expand(%[[CTX]]) ins(%[[OUTER_INPUT]], %[[OUTER_REQUEST]] : tensor<?x3xf16>, tensor<2xi64>)
 // POPULATE-SAME:   outs(%[[INIT]] : tensor<?x?xf16>) : tensor<?x?xf16> shape_region {
 // POPULATE-NEXT: ^bb0(%{{.+}}: !hipsr.context, %[[INPUT:.+]]: tensor<?x3xf16>, %[[REQUEST:.+]]: tensor<2xi64>):
@@ -37,9 +39,16 @@
 // POPULATE-NEXT:   hipsr.shape_yield (%[[DIMS]]#0, %[[DIMS]]#1) : [f16]
 // POPULATE-NEXT: }
 // POPULATE-NEXT: return %[[RESULT]] : tensor<?x?xf16>
+// CANONICALIZE-LABEL: func.func @expand_tensor(
+// CANONICALIZE-SAME:    %[[CTX:.*]]: !hipsr.context,
+// CANONICALIZE-SAME:    %[[INPUT:.*]]: tensor<?x3xf16>,
+// CANONICALIZE-SAME:    %[[INIT:.*]]: tensor<?x?xf16>) -> tensor<?x?xf16> {
+// CANONICALIZE-NEXT:  %[[RESULT:.*]] = hipsr.expand(%[[CTX]]) ins(%[[INPUT]] : tensor<?x3xf16>)
+// CANONICALIZE-SAME:    outs(%[[INIT]] : tensor<?x?xf16>) {shape_attr = array<i64: 4, 3>} : tensor<?x?xf16>
+// CANONICALIZE-NEXT:  return %[[RESULT]] : tensor<?x?xf16>
 func.func @expand_tensor(%ctx: !hipsr.context, %input: tensor<?x3xf16>,
-                         %shape: tensor<2xi64>,
                          %init: tensor<?x?xf16>) -> tensor<?x?xf16> {
+  %shape = arith.constant dense<[4, 3]> : tensor<2xi64>
   %0 = hipsr.expand(%ctx) ins(%input, %shape : tensor<?x3xf16>, tensor<2xi64>)
                    outs(%init : tensor<?x?xf16>) : tensor<?x?xf16>
   return %0 : tensor<?x?xf16>
