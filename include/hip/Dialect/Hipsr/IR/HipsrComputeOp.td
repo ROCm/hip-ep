@@ -64,7 +64,6 @@ def Hipsr_ComputeOp : Hipsr_Op<"compute", [
   let regions = (region SizedRegion<1>:$body);
 
   // Both operand lists are optional groups so an empty one prints as `ins()`.
-  // The result types trail the body after `:`, as in the other hipsr DPS ops.
   let assemblyFormat = [{
     `(` $ctx `)`
     `ins` `(` ($inputs^ `:` type($inputs))? `)`

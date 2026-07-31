@@ -28,8 +28,6 @@ def Hipsr_ComputeYieldOp : Hipsr_Op<"compute_yield",
 
   let arguments = (ins Variadic<AnyType>:$operands);
 
-  // Operands are optional, so the empty implicit terminator prints as just the
-  // mnemonic.
   let assemblyFormat = "($operands^ `:` type($operands))? attr-dict";
 
   let builders = [
