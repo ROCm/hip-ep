@@ -272,14 +272,120 @@ def _collect_eos_token_ids(
     return ids
 
 
+def _bundle_hf_config(input_dir: Path) -> dict[str, Any] | None:
+    return _read_json(input_dir / "tokenizer" / "config.json") or _read_json(
+        input_dir / "config.json"
+    )
+
+
+def _bundle_tokenizer_config(input_dir: Path) -> dict[str, Any] | None:
+    return _read_json(input_dir / "tokenizer" / "tokenizer_config.json") or _read_json(
+        input_dir / "tokenizer_config.json"
+    )
+
+
+def _bundle_tokenizer_json(input_dir: Path) -> dict[str, Any] | None:
+    return _read_json(input_dir / "tokenizer" / "tokenizer.json") or _read_json(
+        input_dir / "tokenizer.json"
+    )
+
+
+_HF_DECODER_FIELD_MAP = (
+    ("hidden_size", "hidden_size"),
+    ("num_attention_heads", "num_attention_heads"),
+    ("num_key_value_heads", "num_key_value_heads"),
+    ("num_hidden_layers", "num_hidden_layers"),
+    ("head_dim", "head_size"),
+)
+
+
+def _infer_decoder_metadata_from_hf(hf_cfg: dict[str, Any] | None) -> dict[str, int]:
+    meta: dict[str, int] = {}
+    if not hf_cfg:
+        return meta
+    for hf_key, dec_key in _HF_DECODER_FIELD_MAP:
+        value = hf_cfg.get(hf_key)
+        if value is not None:
+            meta[dec_key] = int(value)
+    return meta
+
+
+def _infer_decoder_metadata_from_merged(merged_path: Path) -> dict[str, int]:
+    """Infer decoder architecture from merged graph KV I/O and GQA attributes."""
+    model = onnx.load(str(merged_path), load_external_data=False)
+    meta: dict[str, int] = {}
+
+    for vi in model.graph.input:
+        name = vi.name
+        if not name.endswith("_0") or "past_keys_" not in name:
+            continue
+        if name.rsplit("_", 1)[-1] != "0":
+            continue
+        dims = vi.type.tensor_type.shape.dim
+        if len(dims) >= 4:
+            kv_heads = dims[1].dim_value
+            head_size = dims[3].dim_value
+            if kv_heads > 0:
+                meta["num_key_value_heads"] = int(kv_heads)
+            if head_size > 0:
+                meta["head_size"] = int(head_size)
+        break
+
+    for node in model.graph.node:
+        if node.op_type != "GroupQueryAttention":
+            continue
+        attrs = {a.name: a for a in node.attribute}
+        num_heads = attrs.get("num_heads")
+        kv_num_heads = attrs.get("kv_num_heads")
+        if num_heads is not None and num_heads.i > 0:
+            meta["num_attention_heads"] = int(num_heads.i)
+        if kv_num_heads is not None and kv_num_heads.i > 0:
+            meta["num_key_value_heads"] = int(kv_num_heads.i)
+        break
+
+    if "num_attention_heads" in meta and "head_size" in meta:
+        meta.setdefault("hidden_size", meta["num_attention_heads"] * meta["head_size"])
+    return meta
+
+
+def _infer_decoder_metadata(
+    bundle: ModelBundle, merged_path: Path, *, num_layers: int
+) -> dict[str, int]:
+    from_hf = _infer_decoder_metadata_from_hf(_bundle_hf_config(bundle.input_dir))
+    from_onnx = _infer_decoder_metadata_from_merged(merged_path)
+    meta: dict[str, int] = {}
+    for key in (
+        "head_size",
+        "hidden_size",
+        "num_attention_heads",
+        "num_key_value_heads",
+        "num_hidden_layers",
+    ):
+        if key in from_hf:
+            meta[key] = from_hf[key]
+        elif key in from_onnx:
+            meta[key] = from_onnx[key]
+    meta["num_hidden_layers"] = num_layers
+    if "hidden_size" not in meta:
+        if "num_attention_heads" in meta and "head_size" in meta:
+            meta["hidden_size"] = meta["num_attention_heads"] * meta["head_size"]
+    return meta
+
+
+def _fill_missing_decoder_metadata(
+    decoder: dict[str, Any], inferred: dict[str, int]
+) -> None:
+    for key, value in inferred.items():
+        if key not in decoder or decoder[key] in (None, "", 0):
+            decoder[key] = value
+
+
 def _infer_model_metadata(bundle: ModelBundle, merged_path: Path) -> dict[str, Any]:
     """Fill genai model fields when no source genai_config.json is available."""
     input_dir = bundle.input_dir
-    hf_cfg = _read_json(input_dir / "tokenizer" / "config.json") or _read_json(
-        input_dir / "config.json"
-    )
-    tok_cfg = _read_json(input_dir / "tokenizer" / "tokenizer_config.json")
-    tok_json = _read_json(input_dir / "tokenizer" / "tokenizer.json")
+    hf_cfg = _bundle_hf_config(input_dir)
+    tok_cfg = _bundle_tokenizer_config(input_dir)
+    tok_json = _bundle_tokenizer_json(input_dir)
 
     meta: dict[str, Any] = {}
 
@@ -288,7 +394,7 @@ def _infer_model_metadata(bundle: ModelBundle, merged_path: Path) -> dict[str, A
             if key in hf_cfg and hf_cfg[key] is not None:
                 meta[key] = hf_cfg[key]
         if hf_cfg.get("max_position_embeddings") is not None:
-            meta.setdefault("context_length", hf_cfg["max_position_embeddings"])
+            meta["context_length"] = int(hf_cfg["max_position_embeddings"])
 
     if "vocab_size" not in meta and tok_json:
         added = tok_json.get("added_tokens") or []
@@ -336,6 +442,10 @@ def build_genai_config(
     source: Path | None,
 ) -> dict:
     io = introspect_merged_io(merged_path)
+    model_meta = _infer_model_metadata(bundle, merged_path)
+    decoder_meta = _infer_decoder_metadata(
+        bundle, merged_path, num_layers=int(io["num_layers"])
+    )
     prefill = _pipeline_stage(merged_filename, io)
     prefill["run_on_prompt"] = True
     prefill["run_on_token_gen"] = False
@@ -348,7 +458,7 @@ def build_genai_config(
     else:
         cfg = {
             "model": {
-                "context_length": DEFAULT_MAX_SEQ_LEN,
+                "context_length": model_meta.get("context_length", DEFAULT_MAX_SEQ_LEN),
                 "type": "decoder-pipeline",
                 "decoder": {
                     "session_options": {
@@ -356,11 +466,11 @@ def build_genai_config(
                         "session.disable_cpu_ep_fallback": "1",
                         "provider_options": [{"AMDGPU": {"profile": "hip"}}],
                     },
-                    "head_size": 128,
-                    "hidden_size": 2048,
-                    "num_attention_heads": 24,
+                    "head_size": decoder_meta.get("head_size", 128),
+                    "hidden_size": decoder_meta.get("hidden_size", 2048),
+                    "num_attention_heads": decoder_meta.get("num_attention_heads", 24),
                     "num_hidden_layers": int(io["num_layers"]),
-                    "num_key_value_heads": 8,
+                    "num_key_value_heads": decoder_meta.get("num_key_value_heads", 8),
                     "inputs": {
                         "input_ids": "input_ids",
                         "past_sequence_length": "past_seq_len",
@@ -414,6 +524,7 @@ def build_genai_config(
             opt["AMDGPU"]["profile"] = "hip"
 
     _fill_missing_model_metadata(model, bundle, merged_path)
+    _fill_missing_decoder_metadata(decoder, decoder_meta)
 
     search = cfg.setdefault("search", {})
     search["chunk_size"] = bundle.chunk_size
