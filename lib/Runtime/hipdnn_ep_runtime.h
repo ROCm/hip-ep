@@ -1256,9 +1256,10 @@ int wrap_gather_block_quantized(
     int64_t bits,       // 4 or 8
     int64_t block_size, // power of 2, >= 16
     int64_t gather_axis, int64_t quantize_axis,
-    int64_t data_dtype,    // HIPDNN_EP_DATATYPE_* (uint8 packed)
-    int64_t indices_dtype, // INT32 / INT64
-    int64_t scales_dtype); // FLOAT / HALF / BFLOAT16
+    int64_t data_dtype,          // HIPDNN_EP_DATATYPE_* (uint8 packed)
+    int64_t indices_dtype,       // INT32 / INT64
+    int64_t scales_dtype,        // FLOAT / HALF / BFLOAT16
+    int64_t quant_storage_bits); // ONNX T1 width: 4 (uint4/int4) or 8 (uint8)
 
 // QMoE operation wrapper (quantized Mixture-of-Experts)
 // Routes tokens to top-k experts, performs quantized MLP per expert,

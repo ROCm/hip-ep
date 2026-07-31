@@ -953,6 +953,13 @@ def Hip_GatherBlockQuantizedOp : Hip_DpsOp<"gather_block_quantized"> {
     HIPDNN_EP_DATATYPE_UINT8 to the runtime instead of the signless-i8 default
     (INT8 / signed int4). Absent for signed INT4 or explicit ui8/i8 storage.
 
+    Optional i64 attribute `quant_storage_bits`: width of one stored ONNX T1
+    element -- 4 for tensor(uint4)/tensor(int4), 8 for tensor(uint8). Selects
+    the default zero point above, and is independent of `bits` since
+    tensor(uint8) legally carries 2- or 4-bit values. convert-onnx-to-hip
+    reads it from the importer's `onnx.element_type` mark on the defining
+    constant, defaulting to `bits` when that mark is absent.
+
     Uses destination-passing style: the `output` buffer is provided as an
     argument. The runtime is responsible for fetching the per-element
     quantized value (handling sub-byte unpacking when `bits == 4`),
@@ -982,8 +989,11 @@ def Hip_GatherBlockQuantizedOp : Hip_DpsOp<"gather_block_quantized"> {
     I64Attr:$block_size,
     I64Attr:$gather_axis,
     I64Attr:$quantize_axis,
-    UnitAttr:$unsigned_quant_storage
+    UnitAttr:$unsigned_quant_storage,
+    OptionalAttr<I64Attr>:$quant_storage_bits
   );
+
+  let hasVerifier = 1;
 
   let assemblyFormat = [{
     `(` $ctx `)` `ins` `(` $data `,` $indices `,` $scales `:`
