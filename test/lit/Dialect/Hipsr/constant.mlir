@@ -1,6 +1,8 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
+// REQUIRES: hipsr
+
 // RUN: hip-mlir-opt %s -split-input-file -verify-diagnostics | FileCheck %s
 
 // CHECK-LABEL: func.func @inline_const

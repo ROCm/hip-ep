@@ -1,5 +1,7 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
+
+// REQUIRES: hipsr
 //
 // Converts supported onnx.Expand ops to placeholder-backed hipsr.expand ops.
 // Unsupported forms remain unchanged for another conversion path.

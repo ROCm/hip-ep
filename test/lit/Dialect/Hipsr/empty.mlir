@@ -1,5 +1,7 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
+
+// REQUIRES: hipsr
 //
 //===----------------------------------------------------------------------===//
 // Tests that hipsr.empty / hipsr.empty_yield parse, round-trip, and that the

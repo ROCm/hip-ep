@@ -60,6 +60,11 @@ if("sample" IN_LIST HIPDNN_EP_COMPILER_PLUGINS)
 else()
     set(HIPDNN_STATIC_PLUGINS_LIT_FEATURE "False")
 endif()
+if(BUILD_HIPSR_TESTS)
+    set(HIPSR_TESTS_LIT_FEATURE "True")
+else()
+    set(HIPSR_TESTS_LIT_FEATURE "False")
+endif()
 if(CMAKE_CONFIGURATION_TYPES)
     # Multi-config (MSVC): mark the mode as a Python format placeholder so
     # lit.site.cfg.py resolves it at runtime from --param build_mode=<cfg>.

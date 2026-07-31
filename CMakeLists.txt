@@ -56,6 +56,7 @@ option(BUILD_MOCK_RUNTIME "Build mock runtime (no GPU required)" ON)
 option(HIPDNN_EP_DISABLE_VENDOR_BLAS
   "Build the real runtime without MIOpen/hipBLASLt (stub the vendor op wrappers)" OFF)
 option(BUILD_HIP_UNIT_TESTS "Build and register LIT and E2E tests with CTest" ON)
+option(BUILD_HIPSR_TESTS "Build and register HIPSR tests" OFF)
 option(BUILD_PYTHON_WHEEL "Configure the 'wheel' target that packages the EP as a Python wheel" OFF)
 
 # Compiler plugins are linked STATICALLY into the host at configure time (see
