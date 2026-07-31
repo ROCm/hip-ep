@@ -100,7 +100,10 @@ extern "C" int wrap_gather_block_quantized(
     return -1;
   }
 
-  bool is_signed_data = (data_dtype == HIPDNN_EP_DATATYPE_INT8);
+  // Spec: for uint8 data the gather_axis must be 0. Catch this here
+  // (cheap) instead of producing silently-wrong output.
+  bool is_signed_data =
+      (data_dtype == HIPDNN_EP_DATATYPE_INT8); // i8 storage -> int4 / int8
   if (bits == 8 && !is_signed_data && gather_axis_n != 0) {
     fprintf(stderr,
             "[REAL] wrap_gather_block_quantized: ONNX spec requires "
@@ -133,11 +136,13 @@ extern "C" int wrap_gather_block_quantized(
   // uint8 / int8 (no native int4/uint4 in the EP type system), ONNX stores
   // two logical 4-bit values per byte, packed along quantize_axis with the
   // low nibble being the lower logical index. The memref-derived shape we
-  // get from the lowering is therefore the BYTE shape (e.g. [2048, 2560]
-  // for a 2048x5120 logical tensor with quantize_axis=1). The kernel's
-  // coord arithmetic assumes `data_shape` is the LOGICAL shape — read_quant
-  // unpacks sub-byte values from a logical index. Materialise a local shape
-  // array with quantize_axis doubled for the kernel.
+  // get from the lowering is therefore the BYTE shape (e.g. [2304, 576] for
+  // a 2304x1152 logical tensor with quantize_axis=1). The kernel's coord
+  // arithmetic assumes `data_shape` is the LOGICAL shape — read_quant does
+  // the sub-byte unpack from a logical element index — so we materialise a
+  // local shape array with quantize_axis doubled and pass that to the kernel.
+  // The scales / zero_points tensors are not packed and keep their original
+  // shape (the per-block scale axis already divides the logical element count).
   int64_t logical_data_shape_buf[8];
   if (data_rank >
       static_cast<int64_t>(sizeof(logical_data_shape_buf) / sizeof(int64_t))) {
