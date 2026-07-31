@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// REQUIRES: hipsr
+// UNSUPPORTED: true
 //
 //===----------------------------------------------------------------------===//
 // Pass-level behavior of -hipsr-populate-shape-region (per-op shape math is

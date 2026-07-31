@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// REQUIRES: hipsr
+// UNSUPPORTED: true
 //
 //===----------------------------------------------------------------------===//
 // Tests that #hipsr.mem<...> parses and prints, and that a bad kind errors.

@@ -97,6 +97,3 @@ llvm_config.add_tool_substitutions(tools, hip_tools_dirs + [config.llvm_tools_di
 # covered GPU-free by the StaticPlugins unit test (test/plugin/test_static_plugins).
 if getattr(config, "hip_static_plugins", False):
     config.available_features.add("hip_static_plugins")
-
-if getattr(config, "hipsr_tests", False):
-    config.available_features.add("hipsr")

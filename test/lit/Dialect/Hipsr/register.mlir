@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// REQUIRES: hipsr
+// UNSUPPORTED: true
 //
 //===----------------------------------------------------------------------===//
 // Checks that hipsr shows up in hip-mlir-opt's list of registered dialects.

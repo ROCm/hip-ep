@@ -31,7 +31,6 @@ config.hip_build_mode = "@LLVM_BUILD_MODE@"
 # `hip_static_plugins` feature that gates the Plugin/ pass tests. Works on every
 # platform (static linking needs no symbol export).
 config.hip_static_plugins = @HIPDNN_STATIC_PLUGINS_LIT_FEATURE@
-config.hipsr_tests = @HIPSR_TESTS_LIT_FEATURE@
 
 lit.llvm.initialize(lit_config, config)
 

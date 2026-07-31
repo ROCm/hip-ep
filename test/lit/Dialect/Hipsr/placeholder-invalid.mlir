@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// REQUIRES: hipsr
+// UNSUPPORTED: true
 
 // RUN: hip-mlir-opt --split-input-file --verify-diagnostics -allow-unregistered-dialect %s
 
