@@ -7,6 +7,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
+#include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 
 #include "llvm/ADT/STLExtras.h"
@@ -36,6 +37,45 @@ Operation *PlaceholderOp::getDpsConsumer() {
     }
   }
   return nullptr;
+}
+
+namespace {
+struct ReconcileStaleInputs : OpRewritePattern<PlaceholderOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(PlaceholderOp op,
+                                PatternRewriter &rewriter) const override {
+    if (!op.getShapeRegion().empty()) {
+      return failure();
+    }
+
+    Operation *consumer = op.getDpsConsumer();
+    if (!consumer) {
+      return failure();
+    }
+
+    unsigned expectedInputCount = getShapedDpsInputCount(consumer);
+    unsigned inputCount = static_cast<unsigned>(op.getInputs().size());
+    if (inputCount <= expectedInputCount) {
+      return failure();
+    }
+
+    FailureOr<SmallVector<Value>> inputs =
+        getConsumerShapeGraphInputs(op, consumer);
+    if (failed(inputs)) {
+      return failure();
+    }
+
+    rewriter.modifyOpInPlace(op,
+                             [&] { op.getInputsMutable().assign(*inputs); });
+    return success();
+  }
+};
+} // namespace
+
+void PlaceholderOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
+                                                MLIRContext *context) {
+  patterns.add<ReconcileStaleInputs>(context);
 }
 
 SmallVector<Type> PlaceholderOp::getShapeRegionArgumentTypes() {
@@ -115,6 +155,11 @@ LogicalResult PlaceholderOp::verify() {
       return emitOpError("empty shape region requires at least ")
              << expectedInputCount << " shape-graph input(s) for "
              << consumer->getName() << " consumer; got " << getInputs().size();
+    }
+    if (getInputs().size() > expectedInputCount &&
+        failed(getConsumerShapeGraphInputs(*this, consumer))) {
+      return emitOpError("cannot reconcile stale shape-graph inputs with ")
+             << consumer->getName() << " consumer";
     }
     return success();
   }

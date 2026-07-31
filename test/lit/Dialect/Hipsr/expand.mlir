@@ -70,14 +70,17 @@ func.func @expand_shape_attr(
 
 // -----
 
-// Folding changes only Expand. Population later removes the stale shape
-// dependency and changes the empty placeholder to normal.
+// Canonicalization folds Expand and removes the placeholder's stale shape
+// input in the same pass. Population later selects the normal layout.
 // CANONICALIZE-LABEL: func.func @expand_arith_constant(
-// CANONICALIZE: %[[INIT:.+]] = hipsr.placeholder
-// CANONICALIZE-SAME: ins(%{{.+}}, %{{.+}} : tensor<?x3xf16>, tensor<2xi64>)
-// CANONICALIZE-SAME: #hipsr.placeholder_type<barrier>
-// CANONICALIZE-NEXT: %[[RESULT:.+]] = hipsr.expand
+// CANONICALIZE-SAME: %[[CTX:.+]]: !hipsr.context, %[[INPUT:.+]]: tensor<?x3xf16>)
 // CANONICALIZE-NOT: tensor<2xi64>
+// CANONICALIZE: %[[INIT:.+]] = hipsr.placeholder(%[[CTX]])
+// CANONICALIZE-SAME: ins(%[[INPUT]] : tensor<?x3xf16>)
+// CANONICALIZE-SAME: #hipsr.placeholder_type<barrier>
+// CANONICALIZE-NEXT: %[[RESULT:.+]] = hipsr.expand(%[[CTX]])
+// CANONICALIZE-SAME: ins(%[[INPUT]] : tensor<?x3xf16>)
+// CANONICALIZE-SAME: outs(%[[INIT]] : tensor<?x?xf16>)
 // CANONICALIZE-SAME: {shape_attr = array<i64: 4, 3>}
 // FOLD-POPULATE-LABEL: func.func @expand_arith_constant(
 // FOLD-POPULATE: %[[INIT:.+]] = hipsr.placeholder

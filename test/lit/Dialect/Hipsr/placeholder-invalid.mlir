@@ -218,6 +218,22 @@ func.func @unconverted_shape_input(
 
 // -----
 
+// Stale inputs require consumer values that can be mapped to the shape graph.
+func.func @unreconcilable_stale_input(
+    %ctx: !hipsr.context, %input: tensor<4x8xf32>,
+    %stale: tensor<1xi64>) -> tensor<?x8xf16> {
+  %cast = tensor.cast %input : tensor<4x8xf32> to tensor<?x8xf32>
+  // expected-error @+1 {{cannot reconcile stale shape-graph inputs with hipsr.cast consumer}}
+  %init = hipsr.placeholder(%ctx)
+      ins(%input, %stale : tensor<4x8xf32>, tensor<1xi64>)
+      {type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16>
+  %result = hipsr.cast(%ctx) ins(%cast : tensor<?x8xf32>)
+      outs(%init : tensor<?x8xf16>) : tensor<?x8xf16>
+  return %result : tensor<?x8xf16>
+}
+
+// -----
+
 // Placeholder shape regions cannot capture values from their parent scope.
 func.func @shape_region_capture(
     %ctx: !hipsr.context, %input: tensor<?x8xf32>) -> tensor<?x8xf16> {

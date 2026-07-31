@@ -39,11 +39,12 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
     - `barrier` receives `ctx` followed by the shape-graph inputs with their
       tensor types.
 
-    The population pass selects the category for an empty placeholder from its
-    consumer recipe. Empty placeholders may retain trailing shape inputs
-    removed by canonicalization, but must provide every shaped DPS input.
-    Population drops stale trailing inputs. Populated regions must have the
-    exact input count and the argument layout selected by `type`.
+    Empty placeholders may temporarily retain stale shape inputs after their
+    consumer is canonicalized, but must provide every shaped DPS input.
+    Placeholder canonicalization reconciles the inputs with the consumer.
+    Population performs the same cleanup when canonicalization has not run and
+    selects the final category from the consumer recipe. Populated regions must
+    have the exact input count and the argument layout selected by `type`.
 
     The terminator yields one `!shape.shape` per placeholder result.
 
@@ -84,6 +85,7 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
     attr-dict `:` type($results) (`shape_region` $shape_region^)?
   }];
 
+  let hasCanonicalizer = 1;
   let hasVerifier = 1;
 
   let extraClassDeclaration = [{

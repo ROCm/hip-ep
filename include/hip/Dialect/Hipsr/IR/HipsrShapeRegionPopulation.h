@@ -75,7 +75,7 @@ struct ShapeRegionPopulationPlan {
   PlaceholderOp placeholder;
   Operation *consumer;
   PlaceholderType placeholderType;
-  unsigned inputCount;
+  llvm::SmallVector<Value> inputs;
   ShapeRegionPopulationPattern::PopulateFunction populate;
 };
 
@@ -123,6 +123,11 @@ private:
 
 /// Returns the number of shaped DPS input operands on a consumer.
 unsigned getShapedDpsInputCount(Operation *consumer);
+
+/// Returns the shape-graph inputs corresponding to a consumer's shaped DPS
+/// inputs.
+FailureOr<llvm::SmallVector<Value>>
+getConsumerShapeGraphInputs(PlaceholderOp placeholder, Operation *consumer);
 
 /// Creates a population plan for a verified empty placeholder.
 FailureOr<ShapeRegionPopulationPlan>

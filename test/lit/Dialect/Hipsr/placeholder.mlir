@@ -3,6 +3,7 @@
 
 // RUN: hip-mlir-opt --split-input-file %s | FileCheck %s
 // RUN: hip-mlir-opt --split-input-file -cse %s | FileCheck %s --check-prefix=CSE
+// RUN: hip-mlir-opt --split-input-file -canonicalize %s | FileCheck %s --check-prefix=CANONICALIZE
 
 // Normal regions omit context and receive one !shape.shape per input.
 // A scalar result still yields one shape value with no extents.
@@ -73,6 +74,28 @@ func.func @barrier_layout(
       ins(%input, %shape : tensor<?x3xf16>, tensor<2xi64>)
       outs(%init : tensor<?x?xf16>) : tensor<?x?xf16>
   return %result : tensor<?x?xf16>
+}
+
+// -----
+
+// Canonicalization removes stale inputs from any position.
+// CANONICALIZE-LABEL: func.func @middle_stale_input(
+// CANONICALIZE: %[[INIT:.+]] = hipsr.placeholder
+// CANONICALIZE-SAME: ins(%[[LHS:[^,]+]], %[[RHS:[^ )]+]] : tensor<4x8xf32>, tensor<4x8xf32>)
+// CANONICALIZE-NEXT: %[[RESULT:.+]] = hipsr.add
+// CANONICALIZE-SAME: ins(%[[LHS]], %[[RHS]] : tensor<4x8xf32>, tensor<4x8xf32>)
+// CANONICALIZE-SAME: outs(%[[INIT]] : tensor<4x8xf32>)
+func.func @middle_stale_input(
+    %ctx: !hipsr.context, %lhs: tensor<4x8xf32>, %stale: tensor<1xi64>,
+    %rhs: tensor<4x8xf32>) -> tensor<4x8xf32> {
+  %init = hipsr.placeholder(%ctx)
+      ins(%lhs, %stale, %rhs
+          : tensor<4x8xf32>, tensor<1xi64>, tensor<4x8xf32>)
+      {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf32>
+  %result = hipsr.add(%ctx)
+      ins(%lhs, %rhs : tensor<4x8xf32>, tensor<4x8xf32>)
+      outs(%init : tensor<4x8xf32>) : tensor<4x8xf32>
+  return %result : tensor<4x8xf32>
 }
 
 // -----

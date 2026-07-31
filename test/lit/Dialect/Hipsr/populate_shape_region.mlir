@@ -61,21 +61,27 @@ func.func @whole_function_walk(
 
 // -----
 
-// The consumer recipe selects the final category for an empty placeholder.
+// Population drops stale inputs when canonicalization has not run and selects
+// the final category from the consumer recipe.
 // CHECK-LABEL: func.func @consumer_selects_category
 // CHECK: %[[INIT:.+]] = hipsr.placeholder
+// CHECK-SAME: ins(%[[LHS:[^,]+]], %[[RHS:[^ )]+]] : tensor<4x8xf32>, tensor<4x8xf32>)
 // CHECK-SAME: #hipsr.placeholder_type<normal>
 // CHECK-SAME: shape_region {
-// CHECK-NEXT: ^bb0(%[[SHAPE:.+]]: !shape.shape):
+// CHECK-NEXT: ^bb0(%[[LHS_SHAPE:.+]]: !shape.shape, %[[RHS_SHAPE:.+]]: !shape.shape):
+// CHECK-NEXT: %[[SHAPE:.+]] = shape.broadcast %[[LHS_SHAPE]], %[[RHS_SHAPE]]
 // CHECK-NEXT: hipsr.shape_yield %[[SHAPE]] : !shape.shape
 func.func @consumer_selects_category(
-    %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<4x8xf16> {
+    %ctx: !hipsr.context, %lhs: tensor<4x8xf32>, %stale: tensor<1xi64>,
+    %rhs: tensor<4x8xf32>) -> tensor<4x8xf32> {
   %init = hipsr.placeholder(%ctx)
-      ins(%input : tensor<4x8xf32>)
-      {type = #hipsr.placeholder_type<barrier>} : tensor<4x8xf16>
-  %result = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
-      outs(%init : tensor<4x8xf16>) : tensor<4x8xf16>
-  return %result : tensor<4x8xf16>
+      ins(%lhs, %stale, %rhs
+          : tensor<4x8xf32>, tensor<1xi64>, tensor<4x8xf32>)
+      {type = #hipsr.placeholder_type<barrier>} : tensor<4x8xf32>
+  %result = hipsr.add(%ctx)
+      ins(%lhs, %rhs : tensor<4x8xf32>, tensor<4x8xf32>)
+      outs(%init : tensor<4x8xf32>) : tensor<4x8xf32>
+  return %result : tensor<4x8xf32>
 }
 
 // -----

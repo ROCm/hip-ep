@@ -9,6 +9,9 @@
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/ErrorHandling.h"
+
+#include <utility>
 
 namespace mlir {
 namespace hipsr {
@@ -36,6 +39,37 @@ unsigned getShapedDpsInputCount(Operation *consumer) {
       }));
 }
 
+FailureOr<SmallVector<Value>>
+getConsumerShapeGraphInputs(PlaceholderOp placeholder, Operation *consumer) {
+  auto dps = cast<DestinationStyleOpInterface>(consumer);
+  SmallVector<Value> inputs;
+  for (OpOperand *operand : dps.getDpsInputOperands()) {
+    Value input = operand->get();
+    if (!isa<ShapedType>(input.getType())) {
+      continue;
+    }
+    if (PlaceholderOp::isAllowedShapeGraphInput(input)) {
+      inputs.push_back(input);
+      continue;
+    }
+
+    auto result = dyn_cast<OpResult>(input);
+    if (!result) {
+      return failure();
+    }
+    auto producer = dyn_cast<DestinationStyleOpInterface>(result.getOwner());
+    if (!producer || producer->getDialect() != placeholder->getDialect()) {
+      return failure();
+    }
+    OpOperand *init = producer.getTiedOpOperand(result);
+    if (!init || !init->get().getDefiningOp<PlaceholderOp>()) {
+      return failure();
+    }
+    inputs.push_back(init->get());
+  }
+  return inputs;
+}
+
 FailureOr<ShapeRegionPopulationPlan>
 planShapeRegionPopulation(PlaceholderOp placeholder,
                           const ShapeRegionPopulationPatternSet &patterns) {
@@ -57,9 +91,22 @@ planShapeRegionPopulation(PlaceholderOp placeholder,
   if (failed(match)) {
     return failure();
   }
-  return ShapeRegionPopulationPlan{
-      placeholder, consumer, match->placeholderType,
-      getShapedDpsInputCount(consumer), match->pattern->populate};
+
+  unsigned expectedInputCount = getShapedDpsInputCount(consumer);
+  SmallVector<Value> inputs(placeholder.getInputs());
+  if (inputs.size() > expectedInputCount) {
+    FailureOr<SmallVector<Value>> consumerInputs =
+        getConsumerShapeGraphInputs(placeholder, consumer);
+    if (failed(consumerInputs)) {
+      llvm::report_fatal_error(
+          "verified placeholder has unreconcilable shape-graph inputs");
+    }
+    inputs = std::move(*consumerInputs);
+  }
+
+  return ShapeRegionPopulationPlan{placeholder, consumer,
+                                   match->placeholderType, std::move(inputs),
+                                   match->pattern->populate};
 }
 
 LogicalResult populateShapeRegion(const ShapeRegionPopulationPlan &plan,
@@ -68,21 +115,13 @@ LogicalResult populateShapeRegion(const ShapeRegionPopulationPlan &plan,
   if (!placeholder.getShapeRegion().empty()) {
     return placeholder.emitOpError("cannot populate a non-empty shape region");
   }
-  if (placeholder.getInputs().size() < plan.inputCount) {
-    return placeholder.emitOpError("cannot populate shape region: expected ")
-           << plan.inputCount << " shape-graph input(s), got "
-           << placeholder.getInputs().size();
-  }
   if (!plan.populate) {
     return placeholder.emitOpError(
         "shape-region population plan has no callback");
   }
 
-  unsigned currentInputCount =
-      static_cast<unsigned>(placeholder.getInputs().size());
-  unsigned trailingInputCount = currentInputCount - plan.inputCount;
-  if (trailingInputCount != 0) {
-    placeholder.getInputsMutable().erase(plan.inputCount, trailingInputCount);
+  if (!llvm::equal(placeholder.getInputs(), plan.inputs)) {
+    placeholder.getInputsMutable().assign(plan.inputs);
   }
   placeholder.setPlaceholderType(plan.placeholderType);
 

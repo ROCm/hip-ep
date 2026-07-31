@@ -20,8 +20,8 @@ def PopulateShapeRegionPass
     Populates each empty `hipsr.placeholder` shape region with the registered
     recipe for its unique Cast, Add, MatMul, or Expand DPS consumer. The
     consumer recipe selects the final placeholder category. The pass collects
-    every population plan before changing any region and removes stale trailing
-    shape inputs left by canonicalization.
+    every population plan before changing any region and reconciles stale shape
+    inputs not already removed by canonicalization.
 
     Already-populated placeholders are unchanged, making repeated runs
     idempotent. Shape-affecting canonicalization, including constant Expand
