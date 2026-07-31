@@ -80,13 +80,16 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     // walks one matrix per batch. The two cases are distinguished by comparing
     // the operand's matrix count against the output's, which also keeps the
     // read in bounds if a runtime-only shape ever violated the invariant.
-    auto batchStride =
-        [&](MemRefType type, MemRefDescriptor desc,
-            llvm::function_ref<Value()> matrixElements) -> Value {
+    // `rows` x `cols` is the operand's matrix size in elements, materialized
+    // only on the paths that need it.
+    auto batchStride = [&](MemRefType type, MemRefDescriptor desc, Value rows,
+                           Value cols) -> Value {
       ArrayRef<int64_t> batch = type.getShape().drop_back(2);
-      if (!ShapedType::isDynamicShape(batch))
-        return llvm::product_of(batch) == 1 ? createI64Const(0)
-                                            : matrixElements();
+      if (!ShapedType::isDynamicShape(batch)) {
+        if (llvm::product_of(batch) == 1)
+          return createI64Const(0);
+        return LLVM::MulOp::create(rewriter, loc, rows, cols).getRes();
+      }
 
       Value count = createI64Const(1);
       for (unsigned i : llvm::seq<unsigned>(0, batch.size()))
@@ -94,20 +97,16 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
                                     desc.size(rewriter, loc, i));
       Value perBatch = LLVM::ICmpOp::create(
           rewriter, loc, LLVM::ICmpPredicate::eq, count, batchCount);
-      // Materialize both arms into locals: passing calls that emit IR directly
-      // as arguments would leave the emission order unspecified.
-      Value perBatchStride = matrixElements();
-      Value broadcastStride = createI64Const(0);
-      return LLVM::SelectOp::create(rewriter, loc, perBatch, perBatchStride,
-                                    broadcastStride)
+      // Both arms in locals, so the emission order does not depend on the
+      // unspecified evaluation order of call arguments.
+      Value matrixElements = LLVM::MulOp::create(rewriter, loc, rows, cols);
+      Value zero = createI64Const(0);
+      return LLVM::SelectOp::create(rewriter, loc, perBatch, matrixElements,
+                                    zero)
           .getRes();
     };
-    Value aBatchStride = batchStride(AType, ADesc, [&] {
-      return LLVM::MulOp::create(rewriter, loc, M, K).getRes();
-    });
-    Value bBatchStride = batchStride(BType, BDesc, [&] {
-      return LLVM::MulOp::create(rewriter, loc, K, N).getRes();
-    });
+    Value aBatchStride = batchStride(AType, ADesc, M, K);
+    Value bBatchStride = batchStride(BType, BDesc, K, N);
 
     // Runtime signature:
     // int wrap_hipblasLtMatmul(RuntimeState* state,

@@ -118,9 +118,9 @@ OpFoldResult reifyDimOrConstant(OpBuilder &b, Location loc, int64_t staticDim,
 SmallVector<OpFoldResult> reifyElementwiseSameShape(OpBuilder &b, Location loc,
                                                     Value source);
 
-/// Compute a NumPy-broadcast result shape from already-reified operand shapes.
-/// Static extents remain `IndexAttr`; dynamic/dynamic pairs materialize the
-/// runtime broadcast rule as ordinary index SSA.
+/// Compute the NumPy-broadcast result shape over ranked tensor `operands`,
+/// using `tensor::getMixedSizes` for each. Static extents remain `IndexAttr`;
+/// dynamic/dynamic pairs materialize the runtime broadcast rule as index SSA.
 ///
 /// Before (choosing either dynamic operand is incorrect when it is 1):
 ///   %lhs_dim = tensor.dim %lhs, %c0
@@ -133,14 +133,6 @@ SmallVector<OpFoldResult> reifyElementwiseSameShape(OpBuilder &b, Location loc,
 ///   %init = tensor.empty(%extent) : tensor<?xf32>
 ///
 /// The `FailureOr` distinguishes failure from a successful rank-zero shape.
-FailureOr<SmallVector<OpFoldResult>>
-reifyBroadcastShape(OpBuilder &b, Location loc,
-                    ArrayRef<SmallVector<OpFoldResult>> inputShapes,
-                    function_ref<InFlightDiagnostic()> emitError);
-
-/// Compute the NumPy-broadcast result shape over ranked tensor `operands`.
-/// This is the ValueRange convenience wrapper around the mixed-shape helper
-/// above and uses `tensor::getMixedSizes` for each operand.
 ///
 /// Used by elementwise ops that take broadcast-shape operands and write
 /// the broadcast result into their `outs` (add, mul, sub, div, min, mod,
@@ -230,31 +222,6 @@ FailureOr<SmallVector<int64_t>> inferReductionShape(ArrayRef<int64_t> dataShape,
 FailureOr<SmallVector<OpFoldResult>>
 reifyReductionResultShape(OpBuilder &b, Location loc, Value data,
                           ArrayRef<int64_t> axes, int64_t keepdims);
-
-/// Reify the result shape of a reduction op (reduce_sum / reduce_max /
-/// reduce_prod) given `data`, the `axes` operand (rank-1 i64 tensor),
-/// and the `keepdims` / `noop_with_empty_axes` attributes.
-///
-/// Introspects `axes` as an `arith.constant` (the typical case after the
-/// OnnxToHip converter materializes it from the ONNX attribute), resolves
-/// ONNX's empty-axes semantics against `noop_with_empty_axes` — reduce every
-/// axis when 0, reduce nothing when 1 — and delegates the shape rule to
-/// `reifyReductionResultShape`.
-///
-/// Returns `success()` and writes the reified dim list into `out` when
-/// `axes` can be introspected. Returns `failure()` when `axes` is not a
-/// recognised constant — the caller should then fall back to
-/// `reifyElementwiseSameShape(output)` to keep the reify interface
-/// non-failing.
-///
-/// Uses `LogicalResult` (rather than the empty-vector sentinel used by
-/// the other helpers in this header) because a valid rank-0 reduction
-/// result has an empty dim list, which would otherwise be
-/// indistinguishable from the bail path.
-LogicalResult reifyReductionWithKeepdims(OpBuilder &b, Location loc, Value data,
-                                         Value axes, int64_t keepdims,
-                                         int64_t noopWithEmptyAxes,
-                                         SmallVectorImpl<OpFoldResult> &out);
 
 /// One-shot reify body for ONNX-style reduction ops (reduce_sum,
 /// reduce_max, reduce_prod). Tries `reifyReductionWithKeepdims` first

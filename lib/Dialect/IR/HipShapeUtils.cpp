@@ -331,10 +331,15 @@ mlir::hip::reifyElementwiseSameShape(OpBuilder &b, Location loc, Value source) {
   return dims;
 }
 
+namespace {
+
+/// NumPy-broadcast result shape from already-reified operand shapes. Callers
+/// must have validated broadcastability against the static shapes first, since
+/// this materializes index SSA as it folds.
 FailureOr<SmallVector<OpFoldResult>>
-mlir::hip::reifyBroadcastShape(OpBuilder &b, Location loc,
-                               ArrayRef<SmallVector<OpFoldResult>> inputShapes,
-                               function_ref<InFlightDiagnostic()> emitError) {
+reifyBroadcastShape(OpBuilder &b, Location loc,
+                    ArrayRef<SmallVector<OpFoldResult>> inputShapes,
+                    function_ref<InFlightDiagnostic()> emitError) {
   if (inputShapes.empty()) {
     emitError() << "broadcast requires at least one input shape";
     return failure();
@@ -359,6 +364,8 @@ mlir::hip::reifyBroadcastShape(OpBuilder &b, Location loc,
   }
   return result;
 }
+
+} // namespace
 
 FailureOr<SmallVector<OpFoldResult>> mlir::hip::reifyBroadcastResultShape(
     OpBuilder &b, Location loc, ValueRange operands,
@@ -668,18 +675,29 @@ mlir::hip::reifyReductionResultShape(OpBuilder &b, Location loc, Value data,
   return dims;
 }
 
-LogicalResult mlir::hip::reifyReductionWithKeepdims(
-    OpBuilder &b, Location loc, Value data, Value axes, int64_t keepdims,
-    int64_t noopWithEmptyAxes, SmallVectorImpl<OpFoldResult> &out) {
+namespace {
+
+/// Reduction result shape recovered from a constant `axes` operand.
+///
+/// Introspects `axes` as an `arith.constant` (the typical case after the
+/// OnnxToHip converter materializes it from the ONNX attribute), resolves
+/// ONNX's empty-axes semantics against `noop_with_empty_axes` — reduce every
+/// axis when 0, reduce nothing when 1 — and delegates the shape rule to
+/// `reifyReductionResultShape`.
+///
+/// Returns failure when `axes` is not a recognised constant, which is why this
+/// returns `LogicalResult` and writes through `out`: a valid rank-0 reduction
+/// result is a successful *empty* dim list and would otherwise be
+/// indistinguishable from the bail path.
+LogicalResult reifyReductionWithKeepdims(OpBuilder &b, Location loc, Value data,
+                                         Value axes, int64_t keepdims,
+                                         int64_t noopWithEmptyAxes,
+                                         SmallVectorImpl<OpFoldResult> &out) {
   out.clear();
   auto dataType = dyn_cast<RankedTensorType>(data.getType());
   if (!dataType)
     return failure();
 
-  // Axes operand: try to fold to a constant int vector. ONNX semantics
-  // allow a size-0 vector to mean "no axes specified" — combined with the
-  // `noop_with_empty_axes` attribute that selects between "no-op" and
-  // "reduce all axes".
   SmallVector<int64_t> axesList;
   if (!extractConstantInts(axes, axesList))
     return failure();
@@ -690,12 +708,14 @@ LogicalResult mlir::hip::reifyReductionWithKeepdims(
   }
 
   FailureOr<SmallVector<OpFoldResult>> dims =
-      reifyReductionResultShape(b, loc, data, axesList, keepdims);
+      mlir::hip::reifyReductionResultShape(b, loc, data, axesList, keepdims);
   if (failed(dims))
     return failure();
   out.assign(dims->begin(), dims->end());
   return success();
 }
+
+} // namespace
 
 LogicalResult
 mlir::hip::reifyBroadcastShapeFor(OpBuilder &b, Location loc,

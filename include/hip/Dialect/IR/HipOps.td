@@ -164,11 +164,10 @@ class Hip_DpsOp<string mnemonic,
 
 // Parameterized sub-base for ONNX-style reduction ops (reduce_sum,
 // reduce_max, reduce_prod). Auto-emits a `reifyResultShapes` body
-// that calls `mlir::hip::reifyReductionShape` — which tries
-// `reifyReductionWithKeepdims` first to recover per-input-dim
-// mappings from a constant `axes` operand and falls back to the
-// shared `HipDpsOp` outs-lift default when `axes` is not a
-// recognised constant. Each leaf op contributes only its TableGen
+// that calls `mlir::hip::reifyReductionShape` — which recovers
+// per-input-dim mappings from a constant `axes` operand and falls
+// back to the shared `HipDpsOp` outs-lift default when `axes` is not
+// a recognised constant. Each leaf op contributes only its TableGen
 // declaration; no per-op `.cpp` thunk is needed.
 //
 // Contract on the leaf op: must declare operands `$data` (input

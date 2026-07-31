@@ -21,6 +21,10 @@ namespace hip {
 bool extractConstantIntVector(mlir::Value value,
                               llvm::SmallVectorImpl<int64_t> &out) {
   out.clear();
+  // Optional ONNX operands arrive as a null Value; `getDefiningOp` would
+  // dereference it.
+  if (!value)
+    return false;
   mlir::Operation *defOp = value.getDefiningOp();
   if (!defOp)
     return false;
@@ -108,18 +112,23 @@ mlir::FailureOr<mlir::Value> createEmptyTensorFromReifiedShape(
   if (static_cast<int64_t>(reifiedShape.size()) != resultType.getRank())
     return mlir::failure();
 
-  llvm::SmallVector<mlir::Value> dynSizes;
+  // Check every dimension before materializing any index value. Bailing out
+  // partway through the loop below would leave stray constants behind, which
+  // the contract in HipShapeUtils.h forbids.
   for (int64_t dimIdx : llvm::seq<int64_t>(resultType.getRank())) {
+    if (resultType.isDynamicDim(dimIdx))
+      continue;
     std::optional<int64_t> reifiedStatic =
         mlir::getConstantIntValue(reifiedShape[dimIdx]);
-    if (!resultType.isDynamicDim(dimIdx)) {
-      if (reifiedStatic && *reifiedStatic != resultType.getDimSize(dimIdx))
-        return mlir::failure();
-      continue;
-    }
-    dynSizes.push_back(mlir::getValueOrCreateConstantIndexOp(
-        builder, loc, reifiedShape[dimIdx]));
+    if (reifiedStatic && *reifiedStatic != resultType.getDimSize(dimIdx))
+      return mlir::failure();
   }
+
+  llvm::SmallVector<mlir::Value> dynSizes;
+  for (int64_t dimIdx : llvm::seq<int64_t>(resultType.getRank()))
+    if (resultType.isDynamicDim(dimIdx))
+      dynSizes.push_back(mlir::getValueOrCreateConstantIndexOp(
+          builder, loc, reifiedShape[dimIdx]));
   return mlir::Value(
       mlir::tensor::EmptyOp::create(builder, loc, resultType.getShape(),
                                     resultType.getElementType(), dynSizes));
