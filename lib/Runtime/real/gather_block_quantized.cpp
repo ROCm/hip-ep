@@ -62,7 +62,8 @@ extern "C" int wrap_gather_block_quantized(
     int64_t indices_rank, const int64_t *scales_shape, int64_t scales_rank,
     const int64_t *output_shape, int64_t output_rank, int64_t bits,
     int64_t block_size, int64_t gather_axis, int64_t quantize_axis,
-    int64_t data_dtype, int64_t indices_dtype, int64_t scales_dtype) {
+    int64_t data_dtype, int64_t indices_dtype, int64_t scales_dtype,
+    int64_t quant_storage_bits) {
   OP_PROFILE(
       "gather_block_quantized",
       [&] {
@@ -112,25 +113,13 @@ extern "C" int wrap_gather_block_quantized(
     return -1;
   }
 
-  // Default zero point when zero_points is omitted (ONNX spec):
-  // "If zero_points is not provided, the default value is 0 for signed
-  //  types and 2^(bits-1) for unsigned types." That gives the four-way
-  // table:
-  //   bits == 4 + int8  storage (int4)  .. 0
-  //   bits == 4 + uint8 storage (uint4)  .. 8   (= 2^(bits-1))
-  //   bits == 8 + int8  storage (int8)   .. 0
-  //   bits == 8 + uint8 storage (uint8)  .. 128 (= 2^(bits-1))
-  // The previous version hard-coded 0 for bits == 4, which silently
-  // produces values shifted by +(8 * scale) on every uint4-packed weight
-  // (canonical site: Qwen3.5 vision encoder's pos_embed.weight_Q4 — the
-  // model dequantises to roughly +0.65/+0.73 in place of the correct
-  // values, which cluster around 0).
-  int default_zp;
-  if (is_signed_data) {
-    default_zp = 0;
-  } else {
+  // Default zero point when zero_points is omitted. Keyed off the ONNX
+  // storage type T1, not off `bits` and not off signedness -- uint4 defaults
+  // to 0 despite being unsigned. See the T1 dispatch in ORT's
+  // contrib_ops/cpu/quantization/gather_block_quantized.cc.
+  int default_zp = 0;
+  if (quant_storage_bits == 8)
     default_zp = 1 << (static_cast<int>(bits) - 1);
-  }
 
   // Sub-byte storage: when bits == 4 and the data tensor element type is
   // uint8 / int8 (no native int4/uint4 in the EP type system), ONNX stores
@@ -193,14 +182,14 @@ extern "C" int wrap_gather_block_quantized(
 
   RUNTIME_DEBUG_LOG(
       "[REAL] wrap_gather_block_quantized: data_dtype=%s indices_dtype=%s "
-      "scales_dtype=%s bits=%lld block_size=%lld gather_axis=%d "
-      "quantize_axis=%d signed=%d default_zp=%d has_zp=%d "
+      "scales_dtype=%s bits=%lld storage_bits=%lld block_size=%lld "
+      "gather_axis=%d quantize_axis=%d signed=%d default_zp=%d has_zp=%d "
       "data_rank=%lld indices_rank=%lld out_rank=%lld total=%lld\n",
       hipdnn_ep_datatype_name(data_dtype),
       hipdnn_ep_datatype_name(indices_dtype),
       hipdnn_ep_datatype_name(scales_dtype), (long long)bits,
-      (long long)block_size, gather_axis_n, quantize_axis_n,
-      (int)is_signed_data, default_zp, zero_points ? 1 : 0,
+      (long long)quant_storage_bits, (long long)block_size, gather_axis_n,
+      quantize_axis_n, (int)is_signed_data, default_zp, zero_points ? 1 : 0,
       (long long)data_rank, (long long)indices_rank, (long long)output_rank,
       (long long)total);
 

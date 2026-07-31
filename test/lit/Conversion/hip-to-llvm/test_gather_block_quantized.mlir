@@ -4,7 +4,7 @@
 // RUN: hip-mlir-opt --convert-hip-to-llvm %s | FileCheck %s
 
 // Verify that hip.gather_block_quantized lowers to wrap_gather_block_quantized
-// with the full 21-parameter signature:
+// with the full 22-parameter signature:
 //   state, data, indices, scales, zero_points (nullable), output  (6 ptrs)
 //   data_shape/rank, idx_shape/rank, scl_shape/rank, out_shape/rank
 //                                                              (4 * (ptr, i64))
@@ -87,14 +87,76 @@ module {
          unsigned_quant_storage}
     return
   }
+
+  // ===== Tests 5-7: quant_storage_bits reaches the runtime by value =====
+  // The trailing runtime argument is the ONNX T1 storage width, which is NOT
+  // `bits`: tensor(uint8) legally holds 4-bit values two per byte. The three
+  // cases below are identical apart from that attribute, so checking the
+  // argument list positionally is the only way to catch it being dropped,
+  // reordered, or silently defaulted back to `bits`.
+  //
+  // Shapes deliberately avoid a literal 4 in any dim or rank so the first
+  // `constant(4 : i64)` in each function is unambiguously `bits`.
+
+  // Test 5: uint8 storage, 4-bit values -> storage width 8 while bits is 4.
+
+  func.func @test_gbq_storage_bits_uint8_packed(%ctx: !hip.context,
+                                                 %data: memref<2048x96xui8, 1>,
+                                                 %indices: memref<5xi64, 1>,
+                                                 %scales: memref<2048x12xf16, 1>,
+                                                 %output: memref<5x96xf16, 1>) {
+    hip.gather_block_quantized(%ctx)
+        ins(%data, %indices, %scales :
+            memref<2048x96xui8, 1>, memref<5xi64, 1>, memref<2048x12xf16, 1>)
+        outs(%output : memref<5x96xf16, 1>)
+        {bits = 4 : i64, block_size = 16 : i64,
+         gather_axis = 0 : i64, quantize_axis = 1 : i64,
+         unsigned_quant_storage, quant_storage_bits = 8 : i64}
+    return
+  }
+
+  // Test 6: native uint4 storage -> storage width 4, same bits, same types.
+
+  func.func @test_gbq_storage_bits_uint4(%ctx: !hip.context,
+                                          %data: memref<2048x96xui8, 1>,
+                                          %indices: memref<5xi64, 1>,
+                                          %scales: memref<2048x12xf16, 1>,
+                                          %output: memref<5x96xf16, 1>) {
+    hip.gather_block_quantized(%ctx)
+        ins(%data, %indices, %scales :
+            memref<2048x96xui8, 1>, memref<5xi64, 1>, memref<2048x12xf16, 1>)
+        outs(%output : memref<5x96xf16, 1>)
+        {bits = 4 : i64, block_size = 16 : i64,
+         gather_axis = 0 : i64, quantize_axis = 1 : i64,
+         unsigned_quant_storage, quant_storage_bits = 4 : i64}
+    return
+  }
+
+  // Test 7: attribute absent (hand-written IR, or a non-constant `data`) ->
+  // falls back to `bits` rather than guessing.
+
+  func.func @test_gbq_storage_bits_absent(%ctx: !hip.context,
+                                           %data: memref<2048x96xui8, 1>,
+                                           %indices: memref<5xi64, 1>,
+                                           %scales: memref<2048x12xf16, 1>,
+                                           %output: memref<5x96xf16, 1>) {
+    hip.gather_block_quantized(%ctx)
+        ins(%data, %indices, %scales :
+            memref<2048x96xui8, 1>, memref<5xi64, 1>, memref<2048x12xf16, 1>)
+        outs(%output : memref<5x96xf16, 1>)
+        {bits = 4 : i64, block_size = 16 : i64,
+         gather_axis = 0 : i64, quantize_axis = 1 : i64,
+         unsigned_quant_storage}
+    return
+  }
 }
 
 // CHECK-LABEL: llvm.func @test_gbq_static_with_zp
-// CHECK: llvm.call @wrap_gather_block_quantized({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK: llvm.call @wrap_gather_block_quantized({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
 // CHECK-LABEL: llvm.func @test_gbq_static_no_zp
 // CHECK: llvm.mlir.zero
-// CHECK: llvm.call @wrap_gather_block_quantized({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
+// CHECK: llvm.call @wrap_gather_block_quantized({{.*}}) : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i32
 
 // CHECK-LABEL: llvm.func @test_gbq_dynamic_indices
 // indices dim 0 read from descriptor — must be extractvalue, not a constant.
@@ -108,3 +170,43 @@ module {
 // CHECK-DAG: llvm.mlir.constant(7 : i64) : i64
 // CHECK-NOT: llvm.mlir.constant(5 : i64) : i64
 // CHECK: llvm.call @wrap_gather_block_quantized
+
+// The scalar tail is emitted in a fixed order immediately before the call:
+// bits, block_size, gather_axis, quantize_axis, data_dtype, indices_dtype,
+// scales_dtype, quant_storage_bits. Binding each to an SSA name and then
+// requiring that exact sequence as the last eight call operands pins both the
+// value and the position of the storage width.
+
+// CHECK-LABEL: llvm.func @test_gbq_storage_bits_uint8_packed
+// CHECK: %[[BITS:.*]] = llvm.mlir.constant(4 : i64) : i64
+// CHECK: %[[BLK:.*]] = llvm.mlir.constant(16 : i64) : i64
+// CHECK: %[[GA:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK: %[[QA:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK: %[[DDT:.*]] = llvm.mlir.constant(7 : i64) : i64
+// CHECK: %[[IDT:.*]] = llvm.mlir.constant(4 : i64) : i64
+// CHECK: %[[SDT:.*]] = llvm.mlir.constant(1 : i64) : i64
+// storage width 8 even though bits is 4 -- the whole point of the argument.
+// CHECK: %[[QSB:.*]] = llvm.mlir.constant(8 : i64) : i64
+// CHECK: llvm.call @wrap_gather_block_quantized({{.*}}, %[[BITS]], %[[BLK]], %[[GA]], %[[QA]], %[[DDT]], %[[IDT]], %[[SDT]], %[[QSB]])
+
+// CHECK-LABEL: llvm.func @test_gbq_storage_bits_uint4
+// CHECK: %[[BITS:.*]] = llvm.mlir.constant(4 : i64) : i64
+// CHECK: %[[BLK:.*]] = llvm.mlir.constant(16 : i64) : i64
+// CHECK: %[[GA:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK: %[[QA:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK: %[[DDT:.*]] = llvm.mlir.constant(7 : i64) : i64
+// CHECK: %[[IDT:.*]] = llvm.mlir.constant(4 : i64) : i64
+// CHECK: %[[SDT:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK: %[[QSB:.*]] = llvm.mlir.constant(4 : i64) : i64
+// CHECK: llvm.call @wrap_gather_block_quantized({{.*}}, %[[BITS]], %[[BLK]], %[[GA]], %[[QA]], %[[DDT]], %[[IDT]], %[[SDT]], %[[QSB]])
+
+// CHECK-LABEL: llvm.func @test_gbq_storage_bits_absent
+// CHECK: %[[BITS:.*]] = llvm.mlir.constant(4 : i64) : i64
+// CHECK: %[[BLK:.*]] = llvm.mlir.constant(16 : i64) : i64
+// CHECK: %[[GA:.*]] = llvm.mlir.constant(0 : i64) : i64
+// CHECK: %[[QA:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK: %[[DDT:.*]] = llvm.mlir.constant(7 : i64) : i64
+// CHECK: %[[IDT:.*]] = llvm.mlir.constant(4 : i64) : i64
+// CHECK: %[[SDT:.*]] = llvm.mlir.constant(1 : i64) : i64
+// CHECK: %[[QSB:.*]] = llvm.mlir.constant(4 : i64) : i64
+// CHECK: llvm.call @wrap_gather_block_quantized({{.*}}, %[[BITS]], %[[BLK]], %[[GA]], %[[QA]], %[[DDT]], %[[IDT]], %[[SDT]], %[[QSB]])

@@ -130,6 +130,9 @@ struct GatherBlockQuantizedOpLowering
     Value indicesDtypeVal = createI64Const(indicesDtype);
     Value scalesDtypeVal = createI64Const(scalesDtype);
 
+    Value quantStorageBitsVal =
+        createI64Const(op.getQuantStorageBits().value_or(op.getBits()));
+
     SmallVector<Type, 24> paramTypes = {
         ptrType,                            // state
         ptrType, ptrType, ptrType,          // data, indices, scales
@@ -141,8 +144,9 @@ struct GatherBlockQuantizedOpLowering
         ptrType, i64Type,                   // output_shape, output_rank
         i64Type, i64Type, i64Type, i64Type, // bits, block_size, gather_axis,
                                             // quantize_axis
-        i64Type, i64Type, i64Type           // data_dtype, indices_dtype,
+        i64Type, i64Type, i64Type,          // data_dtype, indices_dtype,
                                             // scales_dtype
+        i64Type                             // quant_storage_bits
     };
 
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
@@ -151,11 +155,14 @@ struct GatherBlockQuantizedOpLowering
       return failure();
 
     SmallVector<Value, 24> args = {
-        statePtr,      dataPtr,    indicesPtr, scalesPtr,    zpPtr,
-        outPtr,        dataShape,  dataRank,   indicesShape, indicesRank,
-        scalesShape,   scalesRank, outShape,   outRank,      bits,
-        blockSize,     gatherAxis, quantAxis,  dataDtypeVal, indicesDtypeVal,
-        scalesDtypeVal};
+        statePtr,           dataPtr,         indicesPtr,
+        scalesPtr,          zpPtr,           outPtr,
+        dataShape,          dataRank,        indicesShape,
+        indicesRank,        scalesShape,     scalesRank,
+        outShape,           outRank,         bits,
+        blockSize,          gatherAxis,      quantAxis,
+        dataDtypeVal,       indicesDtypeVal, scalesDtypeVal,
+        quantStorageBitsVal};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

@@ -1378,7 +1378,8 @@ int wrap_gather_block_quantized(
     int64_t indices_rank, const int64_t *scales_shape, int64_t scales_rank,
     const int64_t *output_shape, int64_t output_rank, int64_t bits,
     int64_t block_size, int64_t gather_axis, int64_t quantize_axis,
-    int64_t data_dtype, int64_t indices_dtype, int64_t scales_dtype) {
+    int64_t data_dtype, int64_t indices_dtype, int64_t scales_dtype,
+    int64_t quant_storage_bits) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_gather_block_quantized\n");
     return -1;
@@ -1395,12 +1396,13 @@ int wrap_gather_block_quantized(
 
   MOCK_PRINT(
       "[MOCK] wrap_gather_block_quantized(data_rank=%lld, indices_rank=%lld, "
-      "scales_rank=%lld, output_rank=%lld, bits=%lld, block_size=%lld, "
-      "gather_axis=%lld, quantize_axis=%lld, data_dtype=%s(%lld), "
+      "scales_rank=%lld, output_rank=%lld, bits=%lld, storage_bits=%lld, "
+      "block_size=%lld, gather_axis=%lld, quantize_axis=%lld, "
+      "data_dtype=%s(%lld), "
       "indices_dtype=%s(%lld), scales_dtype=%s(%lld), zero_points=%s)\n",
       (long long)data_rank, (long long)indices_rank, (long long)scales_rank,
-      (long long)output_rank, (long long)bits, (long long)block_size,
-      (long long)gather_axis, (long long)quantize_axis,
+      (long long)output_rank, (long long)bits, (long long)quant_storage_bits,
+      (long long)block_size, (long long)gather_axis, (long long)quantize_axis,
       hipdnn_ep_datatype_name(data_dtype), (long long)data_dtype,
       hipdnn_ep_datatype_name(indices_dtype), (long long)indices_dtype,
       hipdnn_ep_datatype_name(scales_dtype), (long long)scales_dtype,

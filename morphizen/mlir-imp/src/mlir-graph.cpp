@@ -1129,6 +1129,12 @@ void MLIRGraph::add_constant_initialized_tensor(
     state.addAttribute("value", denseAttr);
   }
 
+  // The MLIR element type is lossy for sub-byte storage -- UINT4 and UINT8
+  // both land on ui8 -- so keep the original TensorProto code for consumers
+  // that must tell them apart.
+  state.addAttribute("onnx.element_type",
+                     builder.getI64IntegerAttr(onnxElemType));
+
   mlir::Operation *op = builder.create(state);
   op->setAttr(attr_names::NODE_OUTPUTS,
               builder.getArrayAttr({builder.getStringAttr(name)}));

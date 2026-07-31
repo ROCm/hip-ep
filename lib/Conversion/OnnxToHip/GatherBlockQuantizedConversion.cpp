@@ -44,6 +44,9 @@ inline int normalizeGbqAxis(int64_t axis, int64_t rank) {
   return a;
 }
 
+// `bits == 8` implies unsigned storage because the contrib schema constrains
+// T1 to {tensor(int4), tensor(uint4), tensor(uint8)} -- uint8 is the only
+// legal 8-bit storage type, and tensor(int8) is rejected at model load.
 inline bool resolveUnsignedQuantStorage(int64_t bits, bool hasUnsignedAttr,
                                         Type dataElemType) {
   if (hasUnsignedAttr)
@@ -51,6 +54,39 @@ inline bool resolveUnsignedQuantStorage(int64_t bits, bool hasUnsignedAttr,
   if (bits == 8)
     return true;
   return isUnsignedMlirElementType(dataElemType);
+}
+
+constexpr StringRef kQuantStorageBitsAttr = "quant_storage_bits";
+constexpr StringRef kOnnxElementTypeAttr = "onnx.element_type";
+
+inline std::optional<int64_t> quantStorageBitsFromOnnxType(int64_t onnxType) {
+  switch (onnxType) {
+  case 21: // TensorProto_DataType_UINT4
+  case 22: // TensorProto_DataType_INT4
+    return 4;
+  case 2: // TensorProto_DataType_UINT8
+  case 3: // TensorProto_DataType_INT8
+    return 8;
+  default:
+    return std::nullopt;
+  }
+}
+
+// Falls back to `bits` when the mark is absent (hand-written IR, or a
+// non-constant `data`), reproducing the pre-existing behaviour rather than
+// guessing a storage width.
+inline int64_t resolveQuantStorageBits(Operation *gbq, int64_t bits) {
+  if (auto attr = gbq->getAttrOfType<IntegerAttr>(kQuantStorageBitsAttr))
+    return attr.getInt();
+  if (gbq->getNumOperands() >= 1) {
+    if (Operation *def = gbq->getOperand(0).getDefiningOp()) {
+      if (auto attr = def->getAttrOfType<IntegerAttr>(kOnnxElementTypeAttr)) {
+        if (auto width = quantStorageBitsFromOnnxType(attr.getInt()))
+          return *width;
+      }
+    }
+  }
+  return bits;
 }
 
 inline bool isAlreadyPackedByteTensor(RankedTensorType dataType,
@@ -177,7 +213,7 @@ Operation *recreateExternalConstant(PatternRewriter &rewriter,
   return newConst;
 }
 
-bool annotateGbqSemantics(Operation *gbq, OpBuilder &builder) {
+bool annotateGbqSemantics(Operation *gbq, PatternRewriter &rewriter) {
   if (gbq->getNumOperands() < 3)
     return false;
 
@@ -191,28 +227,46 @@ bool annotateGbqSemantics(Operation *gbq, OpBuilder &builder) {
   if (!dataType || !scalesType)
     return false;
 
-  bool changed = false;
+  // Decide everything up front, then apply as a single rewriter-tracked
+  // mutation. Mutating an op inside a pattern without going through
+  // `modifyOpInPlace` bypasses the driver's listener/worklist bookkeeping.
+  const bool hasUnsignedAttr = gbq->hasAttr("unsigned_quant_storage");
   const bool unsignedStorage = gbq::resolveUnsignedQuantStorage(
-      bits, gbq->hasAttr("unsigned_quant_storage"), dataType.getElementType());
-  if (unsignedStorage) {
-    if (!gbq->hasAttr("unsigned_quant_storage")) {
-      gbq->setAttr("unsigned_quant_storage",
-                   UnitAttr::get(builder.getContext()));
-      changed = true;
-    }
-  } else if (gbq->hasAttr("unsigned_quant_storage")) {
-    gbq->removeAttr("unsigned_quant_storage");
-    changed = true;
-  }
+      bits, hasUnsignedAttr, dataType.getElementType());
+  const bool addUnsigned = unsignedStorage && !hasUnsignedAttr;
+  const bool dropUnsigned = !unsignedStorage && hasUnsignedAttr;
 
+  std::optional<int64_t> inferredAxis;
   if (!gbq->getAttr("quantize_axis")) {
     auto axisOr = gbq::inferQuantizeAxis(dataType, scalesType, blockSize, bits);
-    if (succeeded(axisOr)) {
-      gbq->setAttr("quantize_axis", builder.getI64IntegerAttr(*axisOr));
-      changed = true;
-    }
+    if (succeeded(axisOr))
+      inferredAxis = *axisOr;
   }
-  return changed;
+
+  // Pin the storage width now, while the defining constant still carries the
+  // ONNX element type: legalizeInt4ConstantIfNeeded rewrites the constant
+  // below, after which a 4-bit tensor is shape-indistinguishable from a
+  // uint8 tensor holding packed nibbles.
+  std::optional<int64_t> storageBits;
+  if (!gbq->hasAttr(gbq::kQuantStorageBitsAttr))
+    storageBits = gbq::resolveQuantStorageBits(gbq, bits);
+
+  if (!addUnsigned && !dropUnsigned && !inferredAxis.has_value() &&
+      !storageBits.has_value())
+    return false;
+
+  rewriter.modifyOpInPlace(gbq, [&] {
+    if (addUnsigned)
+      gbq->setAttr("unsigned_quant_storage", rewriter.getUnitAttr());
+    else if (dropUnsigned)
+      gbq->removeAttr("unsigned_quant_storage");
+    if (inferredAxis.has_value())
+      gbq->setAttr("quantize_axis", rewriter.getI64IntegerAttr(*inferredAxis));
+    if (storageBits.has_value())
+      gbq->setAttr(gbq::kQuantStorageBitsAttr,
+                   rewriter.getI64IntegerAttr(*storageBits));
+  });
+  return true;
 }
 
 bool legalizeInt4ConstantIfNeeded(Operation *gbq, PatternRewriter &rewriter) {
@@ -394,6 +448,7 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
 
   bool unsignedQuantStorage = gbq::resolveUnsignedQuantStorage(
       bits, op->hasAttr("unsigned_quant_storage"), dataType.getElementType());
+  const int64_t quantStorageBits = gbq::resolveQuantStorageBits(op, bits);
 
   auto bitsAttr = rewriter.getI64IntegerAttr(bits);
   auto blockSizeAttr = rewriter.getI64IntegerAttr(blockSize);
@@ -436,9 +491,9 @@ mlir::LogicalResult GatherBlockQuantizedToHip::matchAndRewrite(
   auto hipOp = mlir::hip::GatherBlockQuantizedOp::create(
       rewriter, loc, mlir::TypeRange{resultType}, context, data, indices,
       scales, zeroPoints, init, bitsAttr, blockSizeAttr, gatherAxisAttr,
-      quantAxisAttr);
-  if (unsignedQuantStorage)
-    hipOp->setAttr("unsigned_quant_storage", rewriter.getUnitAttr());
+      quantAxisAttr,
+      unsignedQuantStorage ? rewriter.getUnitAttr() : mlir::UnitAttr(),
+      rewriter.getI64IntegerAttr(quantStorageBits));
   rewriter.replaceOp(op, hipOp->getResults());
   return mlir::success();
 }
