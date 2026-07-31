@@ -1172,6 +1172,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
           $l2Dir = "l2-results"
           if (-not (Test-Path $l2Dir)) {
             Write-Host "No L2 results to publish (directory not found)"
@@ -1245,6 +1247,9 @@ jobs:
               Write-Host "WARNING: gh api unreachable, skipping L2 PR comment"
             }
           }
+
+          # Step summary is the source of truth; fork PRs may lack comment perms.
+          exit 0
 
       # Parse QPS from result files and publish:
       #   - PR trigger  → post/update a PR comment via gh CLI (github-actions[bot])
