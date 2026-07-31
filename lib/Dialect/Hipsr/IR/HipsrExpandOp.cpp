@@ -3,15 +3,22 @@
  * Licensed under the MIT License.
  */
 
+#include "hip/Conversion/HipsrToLLVM/HipsrToLLVM.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
+#include "hip/Dialect/Hipsr/IR/HipsrLLVMLoweringUtils.h"
 #include "hip/Dialect/Hipsr/IR/HipsrShapeRegionInterface.h"
 
+#include "mlir/Conversion/LLVMCommon/MemRefBuilder.h"
+#include "mlir/Conversion/LLVMCommon/Pattern.h"
+#include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Matchers.h"
+#include "mlir/Transforms/DialectConversion.h"
 
 #include "llvm/ADT/Sequence.h"
 
@@ -181,4 +188,90 @@ void ExpandOp::populateShapeRegion(OpBuilder &builder, Block &shapeBlock) {
   ShapeYieldOp::create(builder, loc,
                        ArrayRef<ValueRange>{assuming.getResults()},
                        TypeRange{inputType.getElementType()});
+}
+
+namespace {
+
+constexpr const char *kWrapExpand = "wrap_expand";
+
+struct ExpandLowering : ConvertOpToLLVMPattern<ExpandOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(ExpandOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+
+    auto inputType = dyn_cast<MemRefType>(op.getInput().getType());
+    auto outputType = dyn_cast<MemRefType>(op.getInit().getType());
+    if (!inputType || !outputType) {
+      return rewriter.notifyMatchFailure(
+          op, "operands must be memrefs (run bufferization first)");
+    }
+
+    int64_t dataType = getHipdnnDataType(inputType.getElementType());
+    if (dataType < 0) {
+      return rewriter.notifyMatchFailure(op, "unsupported element type");
+    }
+
+    Type i64Type = rewriter.getI64Type();
+    auto createI64Const = [&](int64_t v) {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(v));
+    };
+
+    Value one = createI64Const(1);
+    Type i32Type = rewriter.getI32Type();
+    Type hostPtrType = LLVM::LLVMPointerType::get(rewriter.getContext(), 0);
+    auto emitShapeArray = [&](MemRefType type, Value descriptor) -> Value {
+      int64_t rank = type.getRank();
+      auto arrayType =
+          LLVM::LLVMArrayType::get(i64Type, std::max<int64_t>(rank, 1));
+      Value array = LLVM::AllocaOp::create(rewriter, loc, hostPtrType,
+                                           arrayType, one, /*alignment=*/8);
+      MemRefDescriptor desc(descriptor);
+      for (int64_t i : llvm::seq<int64_t>(0, rank)) {
+        Value dim = type.isDynamicDim(i) ? desc.size(rewriter, loc, i)
+                                         : createI64Const(type.getDimSize(i));
+        Value index = LLVM::ConstantOp::create(rewriter, loc, i32Type,
+                                               rewriter.getI32IntegerAttr(i));
+        Value elementPtr = LLVM::GEPOp::create(rewriter, loc, hostPtrType,
+                                               i64Type, array, index);
+        LLVM::StoreOp::create(rewriter, loc, dim, elementPtr);
+      }
+      return array;
+    };
+
+    Value shapePtr =
+        op.getShape()
+            ? extractContiguousMemRefPtr(adaptor.getShape(), rewriter, loc)
+            : LLVM::ZeroOp::create(rewriter, loc, hostPtrType).getResult();
+    Value inputShape = emitShapeArray(inputType, adaptor.getInput());
+    Value outputShape = emitShapeArray(outputType, adaptor.getInit());
+
+    using ExpandCall = RuntimeFunc<i32, hostPtr, devicePtr, hostPtr, devicePtr,
+                                   hostPtr, i64, hostPtr, i64, i64>;
+    auto expandFunc =
+        ExpandCall::lookupOrCreateFn(rewriter, loc, module, kWrapExpand);
+    if (failed(expandFunc)) {
+      return failure();
+    }
+    if (failed(expandFunc->call(adaptor.getCtx(), adaptor.getInput(), shapePtr,
+                                adaptor.getInit(), inputShape,
+                                inputType.getRank(), outputShape,
+                                outputType.getRank(), dataType))) {
+      return failure();
+    }
+
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+} // namespace
+
+void mlir::hipsr::populateHipsrExpandLoweringPatterns(
+    const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
+  patterns.add<ExpandLowering>(converter);
 }
