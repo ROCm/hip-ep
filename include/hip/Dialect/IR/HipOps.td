@@ -947,6 +947,12 @@ def Hip_GatherBlockQuantizedOp : Hip_DpsOp<"gather_block_quantized"> {
     `output` matches `scales` (T2: f32 / f16 / bf16). For uint8 `data`,
     `gather_axis` must be 0.
 
+    Optional unit attribute `unsigned_quant_storage`: set when
+    convert-onnx-to-hip identifies UINT4/UINT8
+    packed byte storage (MLIR cannot represent ui4). Lowering passes
+    HIPDNN_EP_DATATYPE_UINT8 to the runtime instead of the signless-i8 default
+    (INT8 / signed int4). Absent for signed INT4 or explicit ui8/i8 storage.
+
     Uses destination-passing style: the `output` buffer is provided as an
     argument. The runtime is responsible for fetching the per-element
     quantized value (handling sub-byte unpacking when `bits == 4`),
@@ -975,7 +981,8 @@ def Hip_GatherBlockQuantizedOp : Hip_DpsOp<"gather_block_quantized"> {
     I64Attr:$bits,
     I64Attr:$block_size,
     I64Attr:$gather_axis,
-    I64Attr:$quantize_axis
+    I64Attr:$quantize_axis,
+    UnitAttr:$unsigned_quant_storage
   );
 
   let assemblyFormat = [{
