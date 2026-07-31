@@ -8,17 +8,20 @@
 // Normal regions omit context and receive one !shape.shape per input.
 // A scalar result still yields one shape value with no extents.
 // CHECK-LABEL: func.func @normal_forms(
-// CHECK: %[[DYNAMIC_INIT:.+]] = hipsr.placeholder
-// CHECK-SAME: #hipsr.placeholder_type<normal>
-// CHECK-SAME: shape_region {
+// CHECK-SAME: %[[CTX:.+]]: !hipsr.context, %[[DYNAMIC_INPUT:.+]]: tensor<?x?xf32>, %[[SCALAR_INPUT:.+]]: tensor<f32>) -> (tensor<?x?xf16>, tensor<f16>) {
+// CHECK-NEXT: %[[DYNAMIC_INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[DYNAMIC_INPUT]] : tensor<?x?xf32>) {type = #hipsr.placeholder_type<normal>} : tensor<?x?xf16> shape_region {
 // CHECK-NEXT: ^bb0(%[[DYNAMIC_SHAPE:.+]]: !shape.shape):
 // CHECK-NEXT: hipsr.shape_yield %[[DYNAMIC_SHAPE]] : !shape.shape
 // CHECK-NEXT: }
-// CHECK: %[[SCALAR_INIT:.+]] = hipsr.placeholder
-// CHECK-SAME: tensor<f16> shape_region {
-// CHECK-NEXT: ^bb0(%{{.+}}: !shape.shape):
-// CHECK-NEXT: %[[SCALAR_SHAPE:.+]] = shape.from_extents
+// CHECK-NEXT: %[[DYNAMIC_RESULT:.+]] = hipsr.cast(%[[CTX]]) ins(%[[DYNAMIC_INPUT]] : tensor<?x?xf32>) outs(%[[DYNAMIC_INIT]] : tensor<?x?xf16>) : tensor<?x?xf16>
+// CHECK-NEXT: %[[SCALAR_INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[SCALAR_INPUT]] : tensor<f32>) {type = #hipsr.placeholder_type<normal>} : tensor<f16> shape_region {
+// CHECK-NEXT: ^bb0(%[[SCALAR_INPUT_SHAPE:.+]]: !shape.shape):
+// CHECK-NEXT: %[[SCALAR_SHAPE:.+]] = shape.from_extents  :
 // CHECK-NEXT: hipsr.shape_yield %[[SCALAR_SHAPE]] : !shape.shape
+// CHECK-NEXT: }
+// CHECK-NEXT: %[[SCALAR_RESULT:.+]] = hipsr.cast(%[[CTX]]) ins(%[[SCALAR_INPUT]] : tensor<f32>) outs(%[[SCALAR_INIT]] : tensor<f16>) : tensor<f16>
+// CHECK-NEXT: return %[[DYNAMIC_RESULT]], %[[SCALAR_RESULT]] : tensor<?x?xf16>, tensor<f16>
+// CHECK-NEXT: }
 func.func @normal_forms(
     %ctx: !hipsr.context, %dynamic_input: tensor<?x?xf32>,
     %scalar_input: tensor<f32>) -> (tensor<?x?xf16>, tensor<f16>) {
@@ -51,12 +54,15 @@ func.func @normal_forms(
 
 // Barrier regions preserve the context and tensor inputs.
 // CHECK-LABEL: func.func @barrier_layout(
-// CHECK: %[[INIT:.+]] = hipsr.placeholder
-// CHECK-SAME: #hipsr.placeholder_type<barrier>
-// CHECK-SAME: shape_region {
-// CHECK-NEXT: ^bb0(%{{.+}}: !hipsr.context, %[[INPUT:.+]]: tensor<?x3xf16>, %{{.+}}: tensor<2xi64>):
-// CHECK-NEXT: %[[SHAPE:.+]] = shape.shape_of %[[INPUT]]
+// CHECK-SAME: %[[CTX:.+]]: !hipsr.context, %[[INPUT:.+]]: tensor<?x3xf16>, %[[REQUEST:.+]]: tensor<2xi64>) -> tensor<?x?xf16> {
+// CHECK-NEXT: %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]], %[[REQUEST]] : tensor<?x3xf16>, tensor<2xi64>) {type = #hipsr.placeholder_type<barrier>} : tensor<?x?xf16> shape_region {
+// CHECK-NEXT: ^bb0(%[[SHAPE_CTX:.+]]: !hipsr.context, %[[SHAPE_INPUT:.+]]: tensor<?x3xf16>, %[[SHAPE_REQUEST:.+]]: tensor<2xi64>):
+// CHECK-NEXT: %[[SHAPE:.+]] = shape.shape_of %[[SHAPE_INPUT]] : tensor<?x3xf16> -> !shape.shape
 // CHECK-NEXT: hipsr.shape_yield %[[SHAPE]] : !shape.shape
+// CHECK-NEXT: }
+// CHECK-NEXT: %[[RESULT:.+]] = hipsr.expand(%[[CTX]]) ins(%[[INPUT]], %[[REQUEST]] : tensor<?x3xf16>, tensor<2xi64>) outs(%[[INIT]] : tensor<?x?xf16>) : tensor<?x?xf16>
+// CHECK-NEXT: return %[[RESULT]] : tensor<?x?xf16>
+// CHECK-NEXT: }
 func.func @barrier_layout(
     %ctx: !hipsr.context, %input: tensor<?x3xf16>, %shape: tensor<2xi64>)
     -> tensor<?x?xf16> {
@@ -80,11 +86,11 @@ func.func @barrier_layout(
 
 // Canonicalization removes stale inputs from any position.
 // CANONICALIZE-LABEL: func.func @middle_stale_input(
-// CANONICALIZE: %[[INIT:.+]] = hipsr.placeholder
-// CANONICALIZE-SAME: ins(%[[LHS:[^,]+]], %[[RHS:[^ )]+]] : tensor<4x8xf32>, tensor<4x8xf32>)
-// CANONICALIZE-NEXT: %[[RESULT:.+]] = hipsr.add
-// CANONICALIZE-SAME: ins(%[[LHS]], %[[RHS]] : tensor<4x8xf32>, tensor<4x8xf32>)
-// CANONICALIZE-SAME: outs(%[[INIT]] : tensor<4x8xf32>)
+// CANONICALIZE-SAME: %[[CTX:.+]]: !hipsr.context, %[[LHS:.+]]: tensor<4x8xf32>, %[[STALE:.+]]: tensor<1xi64>, %[[RHS:.+]]: tensor<4x8xf32>) -> tensor<4x8xf32> {
+// CANONICALIZE-NEXT: %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[LHS]], %[[RHS]] : tensor<4x8xf32>, tensor<4x8xf32>) {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf32>
+// CANONICALIZE-NEXT: %[[RESULT:.+]] = hipsr.add(%[[CTX]]) ins(%[[LHS]], %[[RHS]] : tensor<4x8xf32>, tensor<4x8xf32>) outs(%[[INIT]] : tensor<4x8xf32>) : tensor<4x8xf32>
+// CANONICALIZE-NEXT: return %[[RESULT]] : tensor<4x8xf32>
+// CANONICALIZE-NEXT: }
 func.func @middle_stale_input(
     %ctx: !hipsr.context, %lhs: tensor<4x8xf32>, %stale: tensor<1xi64>,
     %rhs: tensor<4x8xf32>) -> tensor<4x8xf32> {
@@ -102,13 +108,13 @@ func.func @middle_stale_input(
 
 // Absent regions are the valid staging form and preserve shape-graph chains.
 // CHECK-LABEL: func.func @absent_region_chain(
-// CHECK: %[[FIRST_INIT:.+]] = hipsr.placeholder
-// CHECK-NOT: shape_region
-// CHECK-NEXT: %[[FIRST:.+]] = hipsr.cast
-// CHECK-NEXT: %[[SECOND_INIT:.+]] = hipsr.placeholder
-// CHECK-SAME: ins(%[[FIRST_INIT]]
-// CHECK-NOT: shape_region
-// CHECK-NEXT: %[[SECOND:.+]] = hipsr.cast
+// CHECK-SAME: %[[CTX:.+]]: !hipsr.context, %[[INPUT:.+]]: tensor<4x8xf32>) -> tensor<4x8xf32> {
+// CHECK-NEXT: %[[FIRST_INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<4x8xf32>) {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
+// CHECK-NEXT: %[[FIRST:.+]] = hipsr.cast(%[[CTX]]) ins(%[[INPUT]] : tensor<4x8xf32>) outs(%[[FIRST_INIT]] : tensor<4x8xf16>) : tensor<4x8xf16>
+// CHECK-NEXT: %[[SECOND_INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[FIRST_INIT]] : tensor<4x8xf16>) {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf32>
+// CHECK-NEXT: %[[SECOND:.+]] = hipsr.cast(%[[CTX]]) ins(%[[FIRST]] : tensor<4x8xf16>) outs(%[[SECOND_INIT]] : tensor<4x8xf32>) : tensor<4x8xf32>
+// CHECK-NEXT: return %[[SECOND]] : tensor<4x8xf32>
+// CHECK-NEXT: }
 func.func @absent_region_chain(
     %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<4x8xf32> {
   %first_init = hipsr.placeholder(%ctx)
@@ -128,10 +134,13 @@ func.func @absent_region_chain(
 
 // Arith and HIPSR constants are valid shape-graph roots.
 // CHECK-LABEL: func.func @constant_shape_roots(
-// CHECK: %[[ARITH:.+]] = arith.constant
-// CHECK-NEXT: %[[HIPSR:.+]] = hipsr.constant
-// CHECK-NEXT: %[[INIT:.+]] = hipsr.placeholder
-// CHECK-SAME: ins(%[[ARITH]], %[[HIPSR]]
+// CHECK-SAME: %[[CTX:.+]]: !hipsr.context, %[[INPUT:.+]]: tensor<4x8xf16>) -> tensor<4x8xf16> {
+// CHECK-NEXT: %[[ARITH:.+]] = arith.constant dense<[4, 8]> : tensor<2xi64>
+// CHECK-NEXT: %[[HIPSR:.+]] = hipsr.constant {value = dense<[4, 8]> : tensor<2xi64>} : tensor<2xi64>
+// CHECK-NEXT: %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[ARITH]], %[[HIPSR]] : tensor<2xi64>, tensor<2xi64>) {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
+// CHECK-NEXT: %[[RESULT:.+]] = hipsr.add(%[[CTX]]) ins(%[[INPUT]], %[[INPUT]] : tensor<4x8xf16>, tensor<4x8xf16>) outs(%[[INIT]] : tensor<4x8xf16>) : tensor<4x8xf16>
+// CHECK-NEXT: return %[[RESULT]] : tensor<4x8xf16>
+// CHECK-NEXT: }
 func.func @constant_shape_roots(
     %ctx: !hipsr.context, %input: tensor<4x8xf16>) -> tensor<4x8xf16> {
   %arith_shape = arith.constant dense<[4, 8]> : tensor<2xi64>
@@ -150,10 +159,14 @@ func.func @constant_shape_roots(
 
 // CSE must not merge placeholders tied to different consumers.
 // CSE-LABEL: func.func @cse_keeps_placeholders(
-// CSE: %[[LHS_INIT:.+]] = hipsr.placeholder
+// CSE-SAME: %[[CTX:.+]]: !hipsr.context, %[[INPUT:.+]]: tensor<4x8xf32>) -> (tensor<4x8xf16>, tensor<4x8xf16>) {
+// CSE-NEXT: %[[LHS_INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<4x8xf32>) {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
 // CSE-NEXT: %[[RHS_INIT:.+]] = hipsr.placeholder
-// CSE: outs(%[[LHS_INIT]]
-// CSE: outs(%[[RHS_INIT]]
+// CSE-SAME: (%[[CTX]]) ins(%[[INPUT]] : tensor<4x8xf32>) {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
+// CSE-NEXT: %[[LHS:.+]] = hipsr.cast(%[[CTX]]) ins(%[[INPUT]] : tensor<4x8xf32>) outs(%[[LHS_INIT]] : tensor<4x8xf16>) : tensor<4x8xf16>
+// CSE-NEXT: %[[RHS:.+]] = hipsr.cast(%[[CTX]]) ins(%[[INPUT]] : tensor<4x8xf32>) outs(%[[RHS_INIT]] : tensor<4x8xf16>) : tensor<4x8xf16>
+// CSE-NEXT: return %[[LHS]], %[[RHS]] : tensor<4x8xf16>, tensor<4x8xf16>
+// CSE-NEXT: }
 func.func @cse_keeps_placeholders(
     %ctx: !hipsr.context, %input: tensor<4x8xf32>)
     -> (tensor<4x8xf16>, tensor<4x8xf16>) {

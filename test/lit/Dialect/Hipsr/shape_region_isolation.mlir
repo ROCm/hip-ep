@@ -1,17 +1,25 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// RUN: hip-mlir-opt %s -split-input-file -cse | FileCheck %s
-// RUN: hip-mlir-opt %s -split-input-file -canonicalize | FileCheck %s
+// RUN: hip-mlir-opt %s -split-input-file -cse | FileCheck %s --check-prefixes=COMMON,CSE
+// RUN: hip-mlir-opt %s -split-input-file -canonicalize | FileCheck %s --check-prefixes=COMMON,CANONICALIZE
 
 // Placeholder shape regions are IsolatedFromAbove. Equivalent outer and inner
 // shape computations remain in their own scopes.
-// CHECK-LABEL: func.func @cse_keeps_region_isolated
-// CHECK: shape.num_elements
-// CHECK: hipsr.placeholder
-// CHECK: ^bb0(%[[INPUT_SHAPE:.+]]: !shape.shape):
-// CHECK: shape.num_elements %[[INPUT_SHAPE]]
-// CHECK: hipsr.shape_yield
+// COMMON-LABEL: func.func @cse_keeps_region_isolated(
+// COMMON-SAME: %[[CTX:.+]]: !hipsr.context, %[[INPUT:.+]]: tensor<?x8xf32>) -> (tensor<?x8xf16>, !shape.size) {
+// COMMON-NEXT: %[[OUTER_SHAPE:.+]] = shape.shape_of %[[INPUT]] : tensor<?x8xf32> -> !shape.shape
+// COMMON-NEXT: %[[OUTER_ELEMENTS:.+]] = shape.num_elements %[[OUTER_SHAPE]] : !shape.shape -> !shape.size
+// COMMON-NEXT: %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<?x8xf32>) {type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16> shape_region {
+// COMMON-NEXT: ^bb0(%[[INPUT_SHAPE:.+]]: !shape.shape):
+// COMMON-NEXT: %[[ELEMENTS:.+]] = shape.num_elements %[[INPUT_SHAPE]] : !shape.shape -> !shape.size
+// COMMON-NEXT: %[[EXTENT:.+]] = shape.size_to_index %[[ELEMENTS]] : !shape.size
+// COMMON-NEXT: %[[RESULT_SHAPE:.+]] = shape.from_extents %[[EXTENT]] : index
+// COMMON-NEXT: hipsr.shape_yield %[[RESULT_SHAPE]] : !shape.shape
+// COMMON-NEXT: }
+// COMMON-NEXT: %[[RESULT:.+]] = hipsr.cast(%[[CTX]]) ins(%[[INPUT]] : tensor<?x8xf32>) outs(%[[INIT]] : tensor<?x8xf16>) : tensor<?x8xf16>
+// COMMON-NEXT: return %[[RESULT]], %[[OUTER_ELEMENTS]] : tensor<?x8xf16>, !shape.size
+// COMMON-NEXT: }
 func.func @cse_keeps_region_isolated(
     %ctx: !hipsr.context, %input: tensor<?x8xf32>)
     -> (tensor<?x8xf16>, !shape.size) {
@@ -36,12 +44,19 @@ func.func @cse_keeps_region_isolated(
 
 // -----
 
-// CHECK-LABEL: func.func @cse_keeps_region_constant
-// CHECK: %[[OUTER:.+]] = arith.constant 0 : index
-// CHECK: hipsr.placeholder
-// CHECK: ^bb0(%{{.+}}: !shape.shape):
-// CHECK: shape.{{(from_extents|const_shape)}}
-// CHECK: hipsr.shape_yield
+// COMMON-LABEL: func.func @cse_keeps_region_constant(
+// COMMON-SAME: %[[CTX:.+]]: !hipsr.context, %[[INPUT:.+]]: tensor<?x8xf32>) -> (tensor<?x8xf16>, index) {
+// COMMON-NEXT: %[[OUTER:.+]] = arith.constant 0 : index
+// COMMON-NEXT: %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<?x8xf32>) {type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16> shape_region {
+// COMMON-NEXT: ^bb0(%[[INPUT_SHAPE:.+]]: !shape.shape):
+// CSE-NEXT: %[[INNER:.+]] = arith.constant 0 : index
+// CSE-NEXT: %[[RESULT_SHAPE:.+]] = shape.from_extents %[[INNER]] : index
+// CANONICALIZE-NEXT: %[[RESULT_SHAPE:.+]] = shape.const_shape [0] : !shape.shape
+// COMMON-NEXT: hipsr.shape_yield %[[RESULT_SHAPE]] : !shape.shape
+// COMMON-NEXT: }
+// COMMON-NEXT: %[[RESULT:.+]] = hipsr.cast(%[[CTX]]) ins(%[[INPUT]] : tensor<?x8xf32>) outs(%[[INIT]] : tensor<?x8xf16>) : tensor<?x8xf16>
+// COMMON-NEXT: return %[[RESULT]], %[[OUTER]] : tensor<?x8xf16>, index
+// COMMON-NEXT: }
 func.func @cse_keeps_region_constant(
     %ctx: !hipsr.context, %input: tensor<?x8xf32>)
     -> (tensor<?x8xf16>, index) {

@@ -36,7 +36,11 @@ struct MatMulToHipsr : public ::mlir::RewritePattern {
     ::mlir::Location loc = op->getLoc();
     ::mlir::Value a = op->getOperand(0);
     ::mlir::Value b = op->getOperand(1);
-    ::mlir::Type resultType = op->getResult(0).getType();
+    auto resultType =
+        ::mlir::dyn_cast<::mlir::RankedTensorType>(op->getResult(0).getType());
+    if (!resultType) {
+      return rewriter.notifyMatchFailure(op, "expected ranked tensor result");
+    }
 
     ::mlir::Value init = PlaceholderOp::create(
                              rewriter, loc, ::mlir::TypeRange{resultType}, *ctx,

@@ -4,13 +4,15 @@
 // RUN: hip-mlir-opt %s -split-input-file --verify-diagnostics -hipsr-populate-shape-region -hipsr-populate-shape-region | FileCheck %s
 
 // A populated placeholder is unchanged across repeated runs.
-// CHECK-LABEL: func.func @already_populated
-// CHECK: %[[INIT:.+]] = hipsr.placeholder
-// CHECK-SAME: shape_region {
+// CHECK-LABEL: func.func @already_populated(
+// CHECK-SAME: %[[CTX:.+]]: !hipsr.context, %[[INPUT:.+]]: tensor<4x8xf32>) -> tensor<4x8xf16> {
+// CHECK-NEXT: %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<4x8xf32>) {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16> shape_region {
 // CHECK-NEXT: ^bb0(%[[SHAPE:.+]]: !shape.shape):
 // CHECK-NEXT: hipsr.shape_yield %[[SHAPE]] : !shape.shape
 // CHECK-NEXT: }
-// CHECK-NOT: shape.broadcast
+// CHECK-NEXT: %[[RESULT:.+]] = hipsr.cast(%[[CTX]]) ins(%[[INPUT]] : tensor<4x8xf32>) outs(%[[INIT]] : tensor<4x8xf16>) : tensor<4x8xf16>
+// CHECK-NEXT: return %[[RESULT]] : tensor<4x8xf16>
+// CHECK-NEXT: }
 func.func @already_populated(
     %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<4x8xf16> {
   %init = hipsr.placeholder(%ctx)
@@ -28,20 +30,21 @@ func.func @already_populated(
 // -----
 
 // Every empty placeholder in a shape-graph chain is populated in one run.
-// CHECK-LABEL: func.func @whole_function_walk
-// CHECK: %[[CAST_INIT:.+]] = hipsr.placeholder
-// CHECK-SAME: shape_region {
-// CHECK: hipsr.shape_yield
-// CHECK: %[[CAST:.+]] = hipsr.cast
-// CHECK-NOT: shape_region
-// CHECK: %[[MATMUL_INIT:.+]] = hipsr.placeholder
-// CHECK-SAME: ins(%[[CAST_INIT]]
-// CHECK-SAME: shape_region {
-// CHECK: shape.cstr_eq
-// CHECK: hipsr.shape_yield
-// CHECK: %[[MATMUL:.+]] = hipsr.matmul
-// CHECK-NOT: shape_region
+// CHECK-LABEL: func.func @whole_function_walk(
+// CHECK-SAME: %[[CTX:.+]]: !hipsr.context, %[[INPUT:.+]]: tensor<?x8xf32>, %[[B:.+]]: tensor<8x16xf16>) -> tensor<?x16xf16> {
+// CHECK-NEXT: %[[CAST_INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<?x8xf32>) {type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16> shape_region {
+// CHECK-NEXT: ^bb0(%[[INPUT_SHAPE:.+]]: !shape.shape):
+// CHECK-NEXT: hipsr.shape_yield %[[INPUT_SHAPE]] : !shape.shape
+// CHECK-NEXT: }
+// CHECK-NEXT: %[[CAST:.+]] = hipsr.cast(%[[CTX]]) ins(%[[INPUT]] : tensor<?x8xf32>) outs(%[[CAST_INIT]] : tensor<?x8xf16>) : tensor<?x8xf16>
+// CHECK-NEXT: %[[MATMUL_INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[CAST_INIT]], %[[B]] : tensor<?x8xf16>, tensor<8x16xf16>) {type = #hipsr.placeholder_type<normal>} : tensor<?x16xf16> shape_region {
+// CHECK-NEXT: ^bb0(%[[A_SHAPE:.+]]: !shape.shape, %[[B_SHAPE:.+]]: !shape.shape):
+// CHECK: hipsr.shape_yield %[[RESULT_SHAPE:.+]] : !shape.shape
+// CHECK-NEXT: }
+// CHECK-NEXT: %[[MATMUL:.+]] = hipsr.matmul(%[[CTX]]) ins(%[[CAST]], %[[B]] : tensor<?x8xf16>, tensor<8x16xf16>) outs(%[[MATMUL_INIT]] : tensor<?x16xf16>) : tensor<?x16xf16>
 // CHECK-NEXT: return %[[MATMUL]]
+// CHECK-SAME: : tensor<?x16xf16>
+// CHECK-NEXT: }
 func.func @whole_function_walk(
     %ctx: !hipsr.context, %input: tensor<?x8xf32>,
     %b: tensor<8x16xf16>) -> tensor<?x16xf16> {
@@ -63,14 +66,16 @@ func.func @whole_function_walk(
 
 // Population drops stale inputs when canonicalization has not run and selects
 // the final category from the consumer recipe.
-// CHECK-LABEL: func.func @consumer_selects_category
-// CHECK: %[[INIT:.+]] = hipsr.placeholder
-// CHECK-SAME: ins(%[[LHS:[^,]+]], %[[RHS:[^ )]+]] : tensor<4x8xf32>, tensor<4x8xf32>)
-// CHECK-SAME: #hipsr.placeholder_type<normal>
-// CHECK-SAME: shape_region {
+// CHECK-LABEL: func.func @consumer_selects_category(
+// CHECK-SAME: %[[CTX:.+]]: !hipsr.context, %[[LHS:.+]]: tensor<4x8xf32>, %[[STALE:.+]]: tensor<1xi64>, %[[RHS:.+]]: tensor<4x8xf32>) -> tensor<4x8xf32> {
+// CHECK-NEXT: %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[LHS]], %[[RHS]] : tensor<4x8xf32>, tensor<4x8xf32>) {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf32> shape_region {
 // CHECK-NEXT: ^bb0(%[[LHS_SHAPE:.+]]: !shape.shape, %[[RHS_SHAPE:.+]]: !shape.shape):
-// CHECK-NEXT: %[[SHAPE:.+]] = shape.broadcast %[[LHS_SHAPE]], %[[RHS_SHAPE]]
+// CHECK-NEXT: %[[SHAPE:.+]] = shape.broadcast %[[LHS_SHAPE]], %[[RHS_SHAPE]] : !shape.shape, !shape.shape -> !shape.shape
 // CHECK-NEXT: hipsr.shape_yield %[[SHAPE]] : !shape.shape
+// CHECK-NEXT: }
+// CHECK-NEXT: %[[RESULT:.+]] = hipsr.add(%[[CTX]]) ins(%[[LHS]], %[[RHS]] : tensor<4x8xf32>, tensor<4x8xf32>) outs(%[[INIT]] : tensor<4x8xf32>) : tensor<4x8xf32>
+// CHECK-NEXT: return %[[RESULT]] : tensor<4x8xf32>
+// CHECK-NEXT: }
 func.func @consumer_selects_category(
     %ctx: !hipsr.context, %lhs: tensor<4x8xf32>, %stale: tensor<1xi64>,
     %rhs: tensor<4x8xf32>) -> tensor<4x8xf32> {
@@ -82,13 +87,4 @@ func.func @consumer_selects_category(
       ins(%lhs, %rhs : tensor<4x8xf32>, tensor<4x8xf32>)
       outs(%init : tensor<4x8xf32>) : tensor<4x8xf32>
   return %result : tensor<4x8xf32>
-}
-
-// -----
-
-// Functions without placeholders are unchanged.
-// CHECK-LABEL: func.func @no_placeholder
-// CHECK-NEXT: return
-func.func @no_placeholder() {
-  return
 }

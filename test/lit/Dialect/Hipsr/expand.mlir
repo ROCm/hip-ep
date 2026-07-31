@@ -9,26 +9,27 @@
 // Runtime-shape Expand uses the barrier layout: context, input tensor, and
 // requested-shape tensor. The tensor-stage recipe extracts each extent.
 // POPULATE-LABEL: func.func @expand_runtime(
-// POPULATE-NEXT: %[[INIT:.+]] = hipsr.placeholder(%{{.+}}) ins(%{{.+}}, %{{.+}} : tensor<?x3xf16>, tensor<2xi64>) {type = #hipsr.placeholder_type<barrier>} : tensor<?x?xf16> shape_region {
-// POPULATE-NEXT: ^bb0(%{{.+}}: !hipsr.context, %[[INPUT:.+]]: tensor<?x3xf16>, %[[REQUEST:.+]]: tensor<2xi64>):
-// POPULATE-NEXT: %[[INPUT_SHAPE:.+]] = shape.shape_of %[[INPUT]]
+// POPULATE-SAME: %[[CTX:.+]]: !hipsr.context, %[[INPUT:.+]]: tensor<?x3xf16>, %[[REQUEST:.+]]: tensor<2xi64>) -> tensor<?x?xf16> {
+// POPULATE-NEXT: %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]], %[[REQUEST]] : tensor<?x3xf16>, tensor<2xi64>) {type = #hipsr.placeholder_type<barrier>} : tensor<?x?xf16> shape_region {
+// POPULATE-NEXT: ^bb0(%[[SHAPE_CTX:.+]]: !hipsr.context, %[[SHAPE_INPUT:.+]]: tensor<?x3xf16>, %[[SHAPE_REQUEST:.+]]: tensor<2xi64>):
+// POPULATE-NEXT: %[[INPUT_SHAPE:.+]] = shape.shape_of %[[SHAPE_INPUT]] : tensor<?x3xf16> -> tensor<2xindex>
 // POPULATE-NEXT: %[[INDEX0:.+]] = arith.constant 0 : index
-// POPULATE-NEXT: %[[EXTENT0_I64:.+]] = tensor.extract %[[REQUEST]][%[[INDEX0]]]
+// POPULATE-NEXT: %[[EXTENT0_I64:.+]] = tensor.extract %[[SHAPE_REQUEST]][%[[INDEX0]]] : tensor<2xi64>
 // POPULATE-NEXT: %[[EXTENT0:.+]] = arith.index_cast %[[EXTENT0_I64]] : i64 to index
 // POPULATE-NEXT: %[[INDEX1:.+]] = arith.constant 1 : index
-// POPULATE-NEXT: %[[EXTENT1_I64:.+]] = tensor.extract %[[REQUEST]][%[[INDEX1]]]
+// POPULATE-NEXT: %[[EXTENT1_I64:.+]] = tensor.extract %[[SHAPE_REQUEST]][%[[INDEX1]]] : tensor<2xi64>
 // POPULATE-NEXT: %[[EXTENT1:.+]] = arith.index_cast %[[EXTENT1_I64]] : i64 to index
-// POPULATE-NEXT: %[[REQUEST_SHAPE:.+]] = shape.from_extents %[[EXTENT0]], %[[EXTENT1]]
-// POPULATE-NEXT: %[[WITNESS:.+]] = shape.cstr_broadcastable %[[INPUT_SHAPE]], %[[REQUEST_SHAPE]]
+// POPULATE-NEXT: %[[REQUEST_SHAPE:.+]] = shape.from_extents %[[EXTENT0]], %[[EXTENT1]] : index, index
+// POPULATE-NEXT: %[[WITNESS:.+]] = shape.cstr_broadcastable %[[INPUT_SHAPE]], %[[REQUEST_SHAPE]] : tensor<2xindex>, !shape.shape
 // POPULATE-NEXT: %[[RESULT_SHAPE:.+]] = shape.assuming %[[WITNESS]] -> (!shape.shape) {
-// POPULATE-NEXT: %[[BROADCAST:.+]] = shape.broadcast %[[INPUT_SHAPE]], %[[REQUEST_SHAPE]]
+// POPULATE-NEXT: %[[BROADCAST:.+]] = shape.broadcast %[[INPUT_SHAPE]], %[[REQUEST_SHAPE]] : tensor<2xindex>, !shape.shape -> !shape.shape
 // POPULATE-NEXT: shape.assuming_yield %[[BROADCAST]] : !shape.shape
 // POPULATE-NEXT: }
 // POPULATE-NEXT: hipsr.shape_yield %[[RESULT_SHAPE]] : !shape.shape
 // POPULATE-NEXT: }
-// POPULATE-NEXT: %[[RESULT:.+]] = hipsr.expand
-// POPULATE-NOT: shape_region
+// POPULATE-NEXT: %[[RESULT:.+]] = hipsr.expand(%[[CTX]]) ins(%[[INPUT]], %[[REQUEST]] : tensor<?x3xf16>, tensor<2xi64>) outs(%[[INIT]] : tensor<?x?xf16>) : tensor<?x?xf16>
 // POPULATE-NEXT: return %[[RESULT]] : tensor<?x?xf16>
+// POPULATE-NEXT: }
 func.func @expand_runtime(
     %ctx: !hipsr.context, %input: tensor<?x3xf16>, %shape: tensor<2xi64>)
     -> tensor<?x?xf16> {
@@ -45,17 +46,22 @@ func.func @expand_runtime(
 
 // Attribute Expand uses one normal input shape and materializes its extents.
 // POPULATE-LABEL: func.func @expand_shape_attr(
-// POPULATE-NEXT: %[[INIT:.+]] = hipsr.placeholder(%{{.+}}) ins(%{{.+}} : tensor<?x3xf16>) {type = #hipsr.placeholder_type<normal>} : tensor<?x?xf16> shape_region {
+// POPULATE-SAME: %[[CTX:.+]]: !hipsr.context, %[[INPUT:.+]]: tensor<?x3xf16>) -> tensor<?x?xf16> {
+// POPULATE-NEXT: %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<?x3xf16>) {type = #hipsr.placeholder_type<normal>} : tensor<?x?xf16> shape_region {
 // POPULATE-NEXT: ^bb0(%[[INPUT_SHAPE:.+]]: !shape.shape):
 // POPULATE-NEXT: %[[EXTENT0:.+]] = arith.constant 4 : index
 // POPULATE-NEXT: %[[EXTENT1:.+]] = arith.constant 3 : index
-// POPULATE-NEXT: %[[REQUEST_SHAPE:.+]] = shape.from_extents %[[EXTENT0]], %[[EXTENT1]]
-// POPULATE-NEXT: %[[WITNESS:.+]] = shape.cstr_broadcastable %[[INPUT_SHAPE]], %[[REQUEST_SHAPE]]
+// POPULATE-NEXT: %[[REQUEST_SHAPE:.+]] = shape.from_extents %[[EXTENT0]], %[[EXTENT1]] : index, index
+// POPULATE-NEXT: %[[WITNESS:.+]] = shape.cstr_broadcastable %[[INPUT_SHAPE]], %[[REQUEST_SHAPE]] : !shape.shape, !shape.shape
 // POPULATE-NEXT: %[[RESULT_SHAPE:.+]] = shape.assuming %[[WITNESS]] -> (!shape.shape) {
-// POPULATE-NEXT: %[[BROADCAST:.+]] = shape.broadcast %[[INPUT_SHAPE]], %[[REQUEST_SHAPE]]
+// POPULATE-NEXT: %[[BROADCAST:.+]] = shape.broadcast %[[INPUT_SHAPE]], %[[REQUEST_SHAPE]] : !shape.shape, !shape.shape -> !shape.shape
 // POPULATE-NEXT: shape.assuming_yield %[[BROADCAST]] : !shape.shape
 // POPULATE-NEXT: }
 // POPULATE-NEXT: hipsr.shape_yield %[[RESULT_SHAPE]] : !shape.shape
+// POPULATE-NEXT: }
+// POPULATE-NEXT: %[[RESULT:.+]] = hipsr.expand(%[[CTX]]) ins(%[[INPUT]] : tensor<?x3xf16>) outs(%[[INIT]] : tensor<?x?xf16>) {shape_attr = array<i64: 4, 3>} : tensor<?x?xf16>
+// POPULATE-NEXT: return %[[RESULT]] : tensor<?x?xf16>
+// POPULATE-NEXT: }
 func.func @expand_shape_attr(
     %ctx: !hipsr.context, %input: tensor<?x3xf16>) -> tensor<?x?xf16> {
   %init = hipsr.placeholder(%ctx)
@@ -74,23 +80,28 @@ func.func @expand_shape_attr(
 // input in the same pass. Population later selects the normal layout.
 // CANONICALIZE-LABEL: func.func @expand_arith_constant(
 // CANONICALIZE-SAME: %[[CTX:.+]]: !hipsr.context, %[[INPUT:.+]]: tensor<?x3xf16>)
-// CANONICALIZE-NOT: tensor<2xi64>
-// CANONICALIZE: %[[INIT:.+]] = hipsr.placeholder(%[[CTX]])
-// CANONICALIZE-SAME: ins(%[[INPUT]] : tensor<?x3xf16>)
-// CANONICALIZE-SAME: #hipsr.placeholder_type<barrier>
-// CANONICALIZE-NEXT: %[[RESULT:.+]] = hipsr.expand(%[[CTX]])
-// CANONICALIZE-SAME: ins(%[[INPUT]] : tensor<?x3xf16>)
-// CANONICALIZE-SAME: outs(%[[INIT]] : tensor<?x?xf16>)
-// CANONICALIZE-SAME: {shape_attr = array<i64: 4, 3>}
+// CANONICALIZE-SAME: -> tensor<?x?xf16> {
+// CANONICALIZE-NEXT: %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<?x3xf16>) {type = #hipsr.placeholder_type<barrier>} : tensor<?x?xf16>
+// CANONICALIZE-NEXT: %[[RESULT:.+]] = hipsr.expand(%[[CTX]]) ins(%[[INPUT]] : tensor<?x3xf16>) outs(%[[INIT]] : tensor<?x?xf16>) {shape_attr = array<i64: 4, 3>} : tensor<?x?xf16>
+// CANONICALIZE-NEXT: return %[[RESULT]] : tensor<?x?xf16>
+// CANONICALIZE-NEXT: }
 // FOLD-POPULATE-LABEL: func.func @expand_arith_constant(
-// FOLD-POPULATE: %[[INIT:.+]] = hipsr.placeholder
-// FOLD-POPULATE-SAME: ins(%{{.+}} : tensor<?x3xf16>)
-// FOLD-POPULATE-SAME: #hipsr.placeholder_type<normal>
-// FOLD-POPULATE-SAME: shape_region {
-// FOLD-POPULATE-NEXT: ^bb0(%{{.+}}: !shape.shape):
-// FOLD-POPULATE: %[[RESULT:.+]] = hipsr.expand
-// FOLD-POPULATE-SAME: ins(%{{.+}} : tensor<?x3xf16>)
-// FOLD-POPULATE-SAME: {shape_attr = array<i64: 4, 3>}
+// FOLD-POPULATE-SAME: %[[CTX:.+]]: !hipsr.context, %[[INPUT:.+]]: tensor<?x3xf16>) -> tensor<?x?xf16> {
+// FOLD-POPULATE-NEXT: %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<?x3xf16>) {type = #hipsr.placeholder_type<normal>} : tensor<?x?xf16> shape_region {
+// FOLD-POPULATE-NEXT: ^bb0(%[[INPUT_SHAPE:.+]]: !shape.shape):
+// FOLD-POPULATE-NEXT: %[[EXTENT0:.+]] = arith.constant 4 : index
+// FOLD-POPULATE-NEXT: %[[EXTENT1:.+]] = arith.constant 3 : index
+// FOLD-POPULATE-NEXT: %[[REQUEST_SHAPE:.+]] = shape.from_extents %[[EXTENT0]], %[[EXTENT1]] : index, index
+// FOLD-POPULATE-NEXT: %[[WITNESS:.+]] = shape.cstr_broadcastable %[[INPUT_SHAPE]], %[[REQUEST_SHAPE]] : !shape.shape, !shape.shape
+// FOLD-POPULATE-NEXT: %[[RESULT_SHAPE:.+]] = shape.assuming %[[WITNESS]] -> (!shape.shape) {
+// FOLD-POPULATE-NEXT: %[[BROADCAST:.+]] = shape.broadcast %[[INPUT_SHAPE]], %[[REQUEST_SHAPE]] : !shape.shape, !shape.shape -> !shape.shape
+// FOLD-POPULATE-NEXT: shape.assuming_yield %[[BROADCAST]] : !shape.shape
+// FOLD-POPULATE-NEXT: }
+// FOLD-POPULATE-NEXT: hipsr.shape_yield %[[RESULT_SHAPE]] : !shape.shape
+// FOLD-POPULATE-NEXT: }
+// FOLD-POPULATE-NEXT: %[[RESULT:.+]] = hipsr.expand(%[[CTX]]) ins(%[[INPUT]] : tensor<?x3xf16>) outs(%[[INIT]] : tensor<?x?xf16>) {shape_attr = array<i64: 4, 3>} : tensor<?x?xf16>
+// FOLD-POPULATE-NEXT: return %[[RESULT]] : tensor<?x?xf16>
+// FOLD-POPULATE-NEXT: }
 func.func @expand_arith_constant(
     %ctx: !hipsr.context, %input: tensor<?x3xf16>) -> tensor<?x?xf16> {
   %shape = arith.constant dense<[4, 3]> : tensor<2xi64>
@@ -108,9 +119,10 @@ func.func @expand_arith_constant(
 // Post-bufferization host-shape syntax remains valid, but this stage does not
 // populate memref placeholders.
 // POPULATE-LABEL: func.func @expand_host_shape_memref(
-// POPULATE: hipsr.expand
-// POPULATE-NOT: shape_region
+// POPULATE-SAME: %[[CTX:.+]]: !hipsr.context, %[[INPUT:.+]]: memref<?x3xf16, #hipsr.mem<device>>, %[[SHAPE:.+]]: memref<2xi64, #hipsr.mem<host>>, %[[INIT:.+]]: memref<?x?xf16, #hipsr.mem<device>>) {
+// POPULATE-NEXT: hipsr.expand(%[[CTX]]) ins(%[[INPUT]], %[[SHAPE]] : memref<?x3xf16, #hipsr.mem<device>>, memref<2xi64, #hipsr.mem<host>>) outs(%[[INIT]] : memref<?x?xf16, #hipsr.mem<device>>)
 // POPULATE-NEXT: return
+// POPULATE-NEXT: }
 func.func @expand_host_shape_memref(
     %ctx: !hipsr.context,
     %input: memref<?x3xf16, #hipsr.mem<device>>,

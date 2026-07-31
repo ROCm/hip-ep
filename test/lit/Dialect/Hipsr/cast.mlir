@@ -6,13 +6,14 @@
 // Cast yields its normal placeholder input shape unchanged. The compute op
 // remains regionless.
 // CHECK-LABEL: func.func @cast_tensor(
-// CHECK-NEXT: %[[INIT:.+]] = hipsr.placeholder(%{{.+}}) ins(%{{.+}} : tensor<?x8xf32>) {type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16> shape_region {
+// CHECK-SAME: %[[CTX:.+]]: !hipsr.context, %[[INPUT:.+]]: tensor<?x8xf32>) -> tensor<?x8xf16> {
+// CHECK-NEXT: %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<?x8xf32>) {type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16> shape_region {
 // CHECK-NEXT: ^bb0(%[[INPUT_SHAPE:.+]]: !shape.shape):
 // CHECK-NEXT: hipsr.shape_yield %[[INPUT_SHAPE]] : !shape.shape
 // CHECK-NEXT: }
-// CHECK-NEXT: %[[RESULT:.+]] = hipsr.cast
-// CHECK-NOT: shape_region
+// CHECK-NEXT: %[[RESULT:.+]] = hipsr.cast(%[[CTX]]) ins(%[[INPUT]] : tensor<?x8xf32>) outs(%[[INIT]] : tensor<?x8xf16>) : tensor<?x8xf16>
 // CHECK-NEXT: return %[[RESULT]] : tensor<?x8xf16>
+// CHECK-NEXT: }
 func.func @cast_tensor(
     %ctx: !hipsr.context, %input: tensor<?x8xf32>) -> tensor<?x8xf16> {
   %init = hipsr.placeholder(%ctx)

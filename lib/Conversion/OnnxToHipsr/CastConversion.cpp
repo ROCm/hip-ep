@@ -41,7 +41,11 @@ struct CastToHipsr : public ::mlir::RewritePattern {
 
     ::mlir::Location loc = op->getLoc();
     ::mlir::Value input = op->getOperand(0);
-    ::mlir::Type resultType = op->getResult(0).getType();
+    auto resultType =
+        ::mlir::dyn_cast<::mlir::RankedTensorType>(op->getResult(0).getType());
+    if (!resultType) {
+      return rewriter.notifyMatchFailure(op, "expected ranked tensor result");
+    }
 
     ::mlir::Value init =
         rewriter
