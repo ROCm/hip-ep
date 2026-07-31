@@ -24,4 +24,16 @@ def Hipsr_MemorySpaceKind : I32EnumAttr<"MemorySpaceKind",
   let genSpecializedAttr = 0;
 }
 
+def Hipsr_PlaceholderNormal :
+    I32EnumAttrCase<"Normal", 0, "normal">;
+def Hipsr_PlaceholderBarrier :
+    I32EnumAttrCase<"Barrier", 1, "barrier">;
+
+def Hipsr_PlaceholderType : I32EnumAttr<"PlaceholderType",
+    "hipsr placeholder shape dependency category",
+    [Hipsr_PlaceholderNormal, Hipsr_PlaceholderBarrier]> {
+  let cppNamespace = "::mlir::hipsr";
+  let genSpecializedAttr = 0;
+}
+
 #endif // HIPSR_ENUMS
