@@ -12,17 +12,17 @@ func.func @interleaved_allocs(%ctx: !hipsr.context,
   hipsr.pool_domain(%ctx, %in
       : !hipsr.context, memref<4x1024xf16, #hipsr.mem<device>>) {
   ^bb0(%dctx: !hipsr.context, %din: memref<4x1024xf16, #hipsr.mem<device>>):
-    // expected-remark@+1 {{hipsr-pool-alloc: lifetime [1,3]}}
+    // expected-remark@+1 {{hipsr-pool-alloc: lifetime [1,3] group 0}}
     %a1 = memref.alloc() : memref<4x1024xf16, #hipsr.mem<device>>
     hipsr.add(%dctx) ins(%din, %din : memref<4x1024xf16, #hipsr.mem<device>>,
                                       memref<4x1024xf16, #hipsr.mem<device>>)
                outs(%a1 : memref<4x1024xf16, #hipsr.mem<device>>)
-    // expected-remark@+1 {{hipsr-pool-alloc: lifetime [3,5]}}
+    // expected-remark@+1 {{hipsr-pool-alloc: lifetime [3,5] group 1}}
     %a2 = memref.alloc() : memref<4x1024xf16, #hipsr.mem<device>>
     hipsr.add(%dctx) ins(%a1, %a1 : memref<4x1024xf16, #hipsr.mem<device>>,
                                     memref<4x1024xf16, #hipsr.mem<device>>)
                outs(%a2 : memref<4x1024xf16, #hipsr.mem<device>>)
-    // expected-remark@+1 {{hipsr-pool-alloc: lifetime [5,7]}}
+    // expected-remark@+1 {{hipsr-pool-alloc: lifetime [5,7] group 0}}
     %a3 = memref.alloc() : memref<4x1024xf16, #hipsr.mem<device>>
     hipsr.add(%dctx) ins(%a2, %a2 : memref<4x1024xf16, #hipsr.mem<device>>,
                                     memref<4x1024xf16, #hipsr.mem<device>>)
@@ -49,11 +49,11 @@ func.func @hoisted_allocs(%ctx: !hipsr.context,
   hipsr.pool_domain(%ctx, %in
       : !hipsr.context, memref<4x1024xf16, #hipsr.mem<device>>) {
   ^bb0(%dctx: !hipsr.context, %din: memref<4x1024xf16, #hipsr.mem<device>>):
-    // expected-remark@+1 {{hipsr-pool-alloc: lifetime [3,4]}}
+    // expected-remark@+1 {{hipsr-pool-alloc: lifetime [3,4] group 0}}
     %a1 = memref.alloc() : memref<4x1024xf16, #hipsr.mem<device>>
-    // expected-remark@+1 {{hipsr-pool-alloc: lifetime [4,5]}}
+    // expected-remark@+1 {{hipsr-pool-alloc: lifetime [4,5] group 1}}
     %a2 = memref.alloc() : memref<4x1024xf16, #hipsr.mem<device>>
-    // expected-remark@+1 {{hipsr-pool-alloc: lifetime [5,6]}}
+    // expected-remark@+1 {{hipsr-pool-alloc: lifetime [5,6] group 0}}
     %a3 = memref.alloc() : memref<4x1024xf16, #hipsr.mem<device>>
     hipsr.add(%dctx) ins(%din, %din : memref<4x1024xf16, #hipsr.mem<device>>,
                                       memref<4x1024xf16, #hipsr.mem<device>>)
@@ -82,7 +82,7 @@ func.func @nested_region_user(%ctx: !hipsr.context,
   hipsr.pool_domain(%ctx, %in
       : !hipsr.context, memref<4x1024xf16, #hipsr.mem<device>>) {
   ^bb0(%dctx: !hipsr.context, %din: memref<4x1024xf16, #hipsr.mem<device>>):
-    // expected-remark@+1 {{hipsr-pool-alloc: lifetime [1,2]}}
+    // expected-remark@+1 {{hipsr-pool-alloc: lifetime [1,2] group 0}}
     %a1 = memref.alloc() : memref<4x1024xf16, #hipsr.mem<device>>
     hipsr.add(%dctx) ins(%din, %din : memref<4x1024xf16, #hipsr.mem<device>>,
                                       memref<4x1024xf16, #hipsr.mem<device>>)
@@ -93,6 +93,69 @@ func.func @nested_region_user(%ctx: !hipsr.context,
                  outs(%din : memref<4x1024xf16, #hipsr.mem<device>>)
       scf.yield
     }
+    hipsr.pool_domain_yield
+  }
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @coalesce_static
+func.func @coalesce_static(%ctx: !hipsr.context,
+                               %in8: memref<8x1024xf16, #hipsr.mem<device>>,
+                               %in4a: memref<4x1024xf16, #hipsr.mem<device>>,
+                               %in2: memref<2x1024xf16, #hipsr.mem<device>>,
+                               %in4b: memref<4x1024xf16, #hipsr.mem<device>>) {
+  hipsr.pool_domain(%ctx, %in8, %in4a, %in2, %in4b :
+      !hipsr.context,
+      memref<8x1024xf16, #hipsr.mem<device>>,
+      memref<4x1024xf16, #hipsr.mem<device>>,
+      memref<2x1024xf16, #hipsr.mem<device>>,
+      memref<4x1024xf16, #hipsr.mem<device>>) {
+  ^bb0(%dctx: !hipsr.context,
+       %d8: memref<8x1024xf16, #hipsr.mem<device>>,
+       %d4a: memref<4x1024xf16, #hipsr.mem<device>>,
+       %d2: memref<2x1024xf16, #hipsr.mem<device>>,
+       %d4b: memref<4x1024xf16, #hipsr.mem<device>>):
+    // expected-remark@+1 {{hipsr-pool-alloc: lifetime [4,5] group 0}}
+    %a1 = memref.alloc() : memref<8x1024xf16, #hipsr.mem<device>>
+    // expected-remark@+1 {{hipsr-pool-alloc: lifetime [6,7] group 0}}
+    %a2 = memref.alloc() : memref<4x1024xf16, #hipsr.mem<device>>
+    // expected-remark@+1 {{hipsr-pool-alloc: lifetime [8,9] group 0}}
+    %a3 = memref.alloc() : memref<2x1024xf16, #hipsr.mem<device>>
+    // expected-remark@+1 {{hipsr-pool-alloc: lifetime [10,11] group 0}}
+    %a4 = memref.alloc() : memref<4x1024xf16, #hipsr.mem<device>>
+    hipsr.add(%dctx) ins(%d8, %d8 : memref<8x1024xf16, #hipsr.mem<device>>, memref<8x1024xf16, #hipsr.mem<device>>) outs(%a1 : memref<8x1024xf16, #hipsr.mem<device>>)
+    hipsr.add(%dctx) ins(%a1, %a1 : memref<8x1024xf16, #hipsr.mem<device>>, memref<8x1024xf16, #hipsr.mem<device>>) outs(%d8 : memref<8x1024xf16, #hipsr.mem<device>>)
+    hipsr.add(%dctx) ins(%d4a, %d4a : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%a2 : memref<4x1024xf16, #hipsr.mem<device>>)
+    hipsr.add(%dctx) ins(%a2, %a2 : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%d4a : memref<4x1024xf16, #hipsr.mem<device>>)
+    hipsr.add(%dctx) ins(%d2, %d2 : memref<2x1024xf16, #hipsr.mem<device>>, memref<2x1024xf16, #hipsr.mem<device>>) outs(%a3 : memref<2x1024xf16, #hipsr.mem<device>>)
+    hipsr.add(%dctx) ins(%a3, %a3 : memref<2x1024xf16, #hipsr.mem<device>>, memref<2x1024xf16, #hipsr.mem<device>>) outs(%d2 : memref<2x1024xf16, #hipsr.mem<device>>)
+    hipsr.add(%dctx) ins(%d4b, %d4b : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%a4 : memref<4x1024xf16, #hipsr.mem<device>>)
+    hipsr.add(%dctx) ins(%a4, %a4 : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%d4b : memref<4x1024xf16, #hipsr.mem<device>>)
+    hipsr.pool_domain_yield
+  }
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @split_three_groups
+func.func @split_three_groups(%ctx: !hipsr.context, %in: memref<4x1024xf16, #hipsr.mem<device>>) {
+  hipsr.pool_domain(%ctx, %in : !hipsr.context, memref<4x1024xf16, #hipsr.mem<device>>) {
+  ^bb0(%dctx: !hipsr.context, %din: memref<4x1024xf16, #hipsr.mem<device>>):
+    // expected-remark@+1 {{hipsr-pool-alloc: lifetime [3,8] group 0}}
+    %a1 = memref.alloc() : memref<4x1024xf16, #hipsr.mem<device>>
+    // expected-remark@+1 {{hipsr-pool-alloc: lifetime [4,7] group 1}}
+    %a2 = memref.alloc() : memref<4x1024xf16, #hipsr.mem<device>>
+    // expected-remark@+1 {{hipsr-pool-alloc: lifetime [5,8] group 2}}
+    %a3 = memref.alloc() : memref<4x1024xf16, #hipsr.mem<device>>
+    hipsr.add(%dctx) ins(%din, %din : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%a1 : memref<4x1024xf16, #hipsr.mem<device>>)
+    hipsr.add(%dctx) ins(%din, %din : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%a2 : memref<4x1024xf16, #hipsr.mem<device>>)
+    hipsr.add(%dctx) ins(%din, %din : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%a3 : memref<4x1024xf16, #hipsr.mem<device>>)
+    hipsr.add(%dctx) ins(%a1, %a2 : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%din : memref<4x1024xf16, #hipsr.mem<device>>)
+    hipsr.add(%dctx) ins(%a2, %a3 : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%din : memref<4x1024xf16, #hipsr.mem<device>>)
+    hipsr.add(%dctx) ins(%a1, %a3 : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%din : memref<4x1024xf16, #hipsr.mem<device>>)
     hipsr.pool_domain_yield
   }
   return
