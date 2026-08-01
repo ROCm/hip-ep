@@ -348,8 +348,12 @@ struct SiluOpLowering : public ConvertOpToLLVMPattern<SiluOp> {
 };
 
 // hip.miopen.softmax(%handle) ins(%input) outs(%output)
-//   -> hip_miopen_softmax(handle, input, output, rows, cols)
+//   -> hip_miopen_softmax(handle, input, output, rows, cols, elem_size_bytes)
 // Rank-generic: softmax over last dim. For 3D [B,S,D], rows = B*S, cols = D.
+// elem_size_bytes is derived from the MemRef element type (2=fp16, 4=fp32)
+// and passed to the runtime so it can copy + dispatch with the right dtype.
+// Previously this was not passed, causing fp32 Softmax inputs (e.g. Qwen VLM
+// attention scores) to be misread as fp16, producing completely wrong outputs.
 struct MiopenSoftmaxOpLowering
     : public ConvertOpToLLVMPattern<MiopenSoftmaxOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
@@ -364,13 +368,14 @@ struct MiopenSoftmaxOpLowering
     Type indexType = getIndexType();
 
     SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType, indexType,
-                                    indexType};
+                                    indexType, indexType};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kMiopenSoftmax, paramTypes, voidType);
     if (failed(funcOp))
       return failure();
 
-    int rank = cast<MemRefType>(op.getInput().getType()).getRank();
+    auto inputMemrefType = cast<MemRefType>(op.getInput().getType());
+    int rank = inputMemrefType.getRank();
     MemRefDescriptor inputDesc(adaptor.getInput());
 
     // cols = last dim; rows = product of all other dims
@@ -380,11 +385,24 @@ struct MiopenSoftmaxOpLowering
       rows = LLVM::MulOp::create(rewriter, loc, rows,
                                  inputDesc.size(rewriter, loc, i));
 
+    // Determine element size in bytes from the MemRef element type.
+    // fp16/bf16 = 2, fp32 = 4.  Fall back to 2 for any unrecognised type
+    // to preserve backward-compatible behaviour with the fp16 softmax path.
+    Type elemType = inputMemrefType.getElementType();
+    int64_t elemSizeBytes = 2;
+    if (elemType.isF32() || elemType.isInteger(32))
+      elemSizeBytes = 4;
+    else if (elemType.isF64() || elemType.isInteger(64))
+      elemSizeBytes = 8;
+    Value elemSize = LLVM::ConstantOp::create(
+        rewriter, loc, indexType,
+        rewriter.getIntegerAttr(indexType, elemSizeBytes));
+
     SmallVector<Value> args = {
         adaptor.getCtx(),
         extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
         extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc), rows,
-        cols};
+        cols, elemSize};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

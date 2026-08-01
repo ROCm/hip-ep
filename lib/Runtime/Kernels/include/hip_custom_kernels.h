@@ -679,6 +679,12 @@ HIP_KERNEL_API int hip_gqa_softmax_inplace(
  * standalone `hip_miopen_softmax` runtime entry point. */
 HIP_KERNEL_API int hip_softmax_row_2d_inplace(void* stream, void* data, int rows, int cols);
 
+/* fp32 variant of the above — for models where Softmax input is fp32.
+ * Qwen VLM vision encoder attention scores are fp32; using the fp16 kernel
+ * there misinterprets the data and produces completely wrong outputs.
+ * Called by hip_miopen_softmax when elem_size_bytes == 4. */
+HIP_KERNEL_API int hip_softmax_row_2d_inplace_fp32(void* stream, void* data, int rows, int cols);
+
 /* Column-wise softmax: fp32 input -> fp16 output.
  * Reads fp32 Score matrix (no fp16 overflow/inf), writes fp16 probabilities.
  * input_batch_stride is in float elements, output_batch_stride in half elements. */
@@ -2174,6 +2180,20 @@ HIP_KERNEL_API int hip_causal_conv_prefill(
  */
 HIP_KERNEL_API int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
                        void* C, int M, int K, int N);
+
+/* GPU compute-shader pretouch for gfx1151 HMM shader TLB fault resolution.
+ * Reads one uint32 per 4KB page of the constants blob via a compute kernel,
+ * forcing shader TLB entries to be resolved before inference. Without this,
+ * DequantizeLinear kernels reading scale/ZP from the constants blob may get
+ * zeros from unfaulted pages, causing cosine~0.31 model output on gfx1151.
+ * blob_size: total bytes in the constants blob.
+ * sink: a single uint32 GPU buffer to prevent dead-code elimination.
+ * Blocks until all TLB entries are resolved (hipStreamSynchronize inside).
+ */
+HIP_KERNEL_API int hip_pretouch_blob(void* stream,
+                                     const void* blob,
+                                     int64_t blob_size,
+                                     void* sink);
 
 #ifdef __cplusplus
 }
