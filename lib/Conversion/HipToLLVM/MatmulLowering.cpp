@@ -32,16 +32,23 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
                                       rewriter.getI64IntegerAttr(value));
     };
 
-    // Extract pointers
+    // Extract pointers — use extractMemRefDataPtr (alignedPtr + offset) so that
+    // subview operands (e.g. Q/V slices from onnx.Split → memref.subview) are
+    // correctly offset-adjusted. extractContiguousMemRefPtr ignores the descriptor
+    // offset and silently reads the parent buffer's base, which gives the wrong
+    // slice when offset != 0 (Bug 4 in gnpu-onnx-flow).
     Value statePtr = adaptor.getCtx();
-    Value APtr = extractContiguousMemRefPtr(adaptor.getA(), rewriter, loc);
-    Value BPtr = extractContiguousMemRefPtr(adaptor.getB(), rewriter, loc);
-    Value outputPtr =
-        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
-
-    // Get memref types and shapes
     auto AType = cast<MemRefType>(op.getA().getType());
     auto BType = cast<MemRefType>(op.getB().getType());
+    auto OutType = cast<MemRefType>(op.getOutput().getType());
+    Value APtr = extractMemRefDataPtr(adaptor.getA(), AType,
+                                      getTypeConverter(), rewriter, loc);
+    Value BPtr = extractMemRefDataPtr(adaptor.getB(), BType,
+                                      getTypeConverter(), rewriter, loc);
+    Value outputPtr = extractMemRefDataPtr(adaptor.getOutput(), OutType,
+                                           getTypeConverter(), rewriter, loc);
+
+    // Get memref types and shapes (AType/BType/OutType declared above)
     int64_t ARank = AType.getRank();
     int64_t BRank = BType.getRank();
 
