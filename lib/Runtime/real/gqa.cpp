@@ -10,8 +10,8 @@
 // The generated IR calls `wrap_group_query_attention` (39-arg ABI, unchanged so
 // the HipToLLVM lowering keeps resolving). Path selection:
 //
-//   * Common fp16 causal GQA (head_dim in {64,128}, templated decode geometry,
-//     no sliding window) -> optimized fused custom kernels:
+//   * Common fp16 causal GQA (head_dim in {64,128}, templated decode geometry)
+//     -> optimized fused custom kernels:
 //       prefill (sq > 1): [split] -> [rope] -> kv-cache update ->
 //                         hip_gqa_flash_prefill_v3
 //       decode  (sq == 1): [split] -> [rope] -> kv-cache update ->
@@ -19,10 +19,12 @@
 //     Attention sinks / smooth softmax are applied here too: by flash decode
 //     for any supported geometry, and by flash prefill at head_dim == 64 (the
 //     v5 kernel). Prefill at head_dim 128/256 with a sink still goes
-//     decomposed.
+//     decomposed. Sliding windows are applied by flash prefill at
+//     head_dim == 64; windowed decode still goes decomposed.
 //
 //   * Everything else the fused kernels do not implement (fp32, no_causal /
-//     bidirectional, sliding window, a sink on 128/256-wide prefill, additive
+//     bidirectional, a window on decode or on 128/256-wide prefill, a sink on
+//     128/256-wide prefill, additive
 //     attention bias, other head_dim, untemplated decode geometry) -> the
 //     feature-complete legacy decomposed hipBLASLt pipeline
 //     gqa_forward_hipblaslt below. This is a verbatim port of the proven
@@ -318,7 +320,8 @@ static int gqa_forward_fused(
     int64_t G, int64_t d, float scale, int64_t do_rotary,
     const void *k_scale = nullptr, const void *v_scale = nullptr,
     KvCacheFormat kv_format = KvCacheFormat::Fp16,
-    const void *head_sink = nullptr, bool use_smooth_softmax = false) {
+    const void *head_sink = nullptr, bool use_smooth_softmax = false,
+    int local_window_size = -1) {
 
   // Any non-fp16 cache reads/writes quantized bytes on the concat/append/decode
   // path; the specific scheme is carried by kv_format (extensible to INT4/FP8).
@@ -648,14 +651,14 @@ static int gqa_forward_fused(
   }
 
   // Single unified entry; v5 (d==64) / v7 (d==128) selection lives in the
-  // kernel TU (gqa_kernel.hip). v3 carries the sink; it returns -1 rather than
-  // dropping it when the kernel for this d cannot apply it, and the caller then
-  // falls back to the decomposed path.
+  // kernel TU (gqa_kernel.hip). v3 carries the sink and the window; it returns
+  // -1 rather than dropping either when the kernel for this d cannot apply it,
+  // and the caller then falls back to the decomposed path.
   int fp_rc = hip_gqa_flash_prefill_v3(
       stream, qSrc, kAttn, vAttn, output, static_cast<int>(B),
       static_cast<int>(H), static_cast<int>(G), static_cast<int>(sq),
       static_cast<int>(total_seq), static_cast<int>(d), attn_max_seq,
-      static_cast<int>(past_len), scale, /*local_window_size=*/-1, head_sink,
+      static_cast<int>(past_len), scale, local_window_size, head_sink,
       static_cast<int>(H), use_smooth_softmax ? 1 : 0);
   RUNTIME_DEBUG_LOG(
       "[REAL] GQA fused prefill (%s d=%lld -> v%d): B=%lld sq=%lld "
@@ -2055,9 +2058,15 @@ int wrap_group_query_attention(
   // would make hip_gqa_flash_prefill_v3 return -1 and fail the op outright
   // instead of falling back.
   const bool sink_ok = !has_smooth_softmax || is_decode || head_dim == 64;
-  const bool fused_supported =
-      element_size_bytes == 2 && no_causal == 0 && local_window_size <= 0 &&
-      sink_ok && head_dim_ok && decode_geometry_ok && attention_bias == nullptr;
+  // Sliding window on the fused path: implemented by flash prefill at
+  // head_dim == 64 (the v5 kernel). Decode is deliberately left on the
+  // decomposed pipeline even though its kernel clamps kv_lo, because that path
+  // is unverified here; prefill is what the window costs us on gpt-oss.
+  const bool window_ok =
+      local_window_size <= 0 || (!is_decode && head_dim == 64);
+  const bool fused_supported = element_size_bytes == 2 && no_causal == 0 &&
+                               window_ok && sink_ok && head_dim_ok &&
+                               decode_geometry_ok && attention_bias == nullptr;
 
   // A quantized KV cache is implemented ONLY on the fused path (quant decode +
   // fp16 prefill-over-dequant), for head_dim in {64,128}. The legacy decomposed
@@ -2112,12 +2121,12 @@ int wrap_group_query_attention(
       (long long)do_rotary,
       static_cast<int>(key == nullptr && value == nullptr));
 
-  int rc = gqa_forward_fused(state, stream, query, key, value, past_key,
-                             past_value, seqlens_k, cos_cache, sin_cache,
-                             output, present_key, present_value, batch_size,
-                             seq_len_q, seq_len_kv, past_buf_seq, num_heads,
-                             kv_num_heads, head_dim, scale, do_rotary, k_scale,
-                             v_scale, kv_format, head_sink, has_smooth_softmax);
+  int rc = gqa_forward_fused(
+      state, stream, query, key, value, past_key, past_value, seqlens_k,
+      cos_cache, sin_cache, output, present_key, present_value, batch_size,
+      seq_len_q, seq_len_kv, past_buf_seq, num_heads, kv_num_heads, head_dim,
+      scale, do_rotary, k_scale, v_scale, kv_format, head_sink,
+      has_smooth_softmax, static_cast<int>(local_window_size));
   if (rc != 0)
     fprintf(stderr,
             "wrap_group_query_attention: gqa_forward_fused failed "
