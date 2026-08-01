@@ -70,8 +70,11 @@ struct Case {
   int sink_mode;  // SinkMode
   // Expect the kernel to decline (rc != 0) instead of computing. Used for the
   // shapes v3 must refuse so the runtime falls back to the decomposed path
-  // rather than dropping the sink.
+  // rather than dropping the sink or the window.
   bool expect_reject;
+  // Sliding window; <= 0 is full attention. Convention matches
+  // causal_mask_kernel_impl: key k is masked when k < past_len + q - window + 1.
+  int window;
 };
 
 // CPU fp32 reference: causal GQA attention. Q/O BSHD, K/V cache BNSD.
@@ -80,7 +83,7 @@ static void cpu_reference(const std::vector<float>& Q,
                           const std::vector<float>& V, std::vector<float>& O,
                           int B, int H, int G, int D, int sq, int max_seq,
                           int past_len, float scale, int sink_mode,
-                          const std::vector<float>& sink) {
+                          const std::vector<float>& sink, int window) {
   const int HPG = H / G;
   const int total = past_len + sq;
   std::vector<float> scores(total);
@@ -90,8 +93,11 @@ static void cpu_reference(const std::vector<float>& Q,
       for (int s = 0; s < sq; ++s) {
         const float* q = &Q[((size_t)(b * sq + s) * H + hq) * D];
         const int kmax = past_len + s;  // causal: attend to keys 0..kmax
+        const int kmin = (window > 0 && kmax - window + 1 > 0)
+                             ? (kmax - window + 1)
+                             : 0;
         float m = -1e30f;
-        for (int k = 0; k <= kmax; ++k) {
+        for (int k = kmin; k <= kmax; ++k) {
           const float* kp = &K[((size_t)(b * G + hkv) * max_seq + k) * D];
           float dot = 0.0f;
           for (int e = 0; e < D; ++e) dot += q[e] * kp[e];
@@ -99,7 +105,7 @@ static void cpu_reference(const std::vector<float>& Q,
           if (scores[k] > m) m = scores[k];
         }
         float l = 0.0f;
-        for (int k = 0; k <= kmax; ++k) {
+        for (int k = kmin; k <= kmax; ++k) {
           scores[k] = std::exp(scores[k] - m);
           l += scores[k];
         }
@@ -110,7 +116,7 @@ static void cpu_reference(const std::vector<float>& Q,
         const float inv = (l > 0.0f) ? 1.0f / l : 0.0f;
         float* o = &O[((size_t)(b * sq + s) * H + hq) * D];
         for (int e = 0; e < D; ++e) o[e] = 0.0f;
-        for (int k = 0; k <= kmax; ++k) {
+        for (int k = kmin; k <= kmax; ++k) {
           const float* vp = &V[((size_t)(b * G + hkv) * max_seq + k) * D];
           const float w = scores[k] * inv;
           for (int e = 0; e < D; ++e) o[e] += w * vp[e];
@@ -159,7 +165,7 @@ static bool run_case(const Case& c, int iters) {
   }
 
   cpu_reference(Qf, Kf, Vf, Oref, B, H, G, D, sq, max_seq, past_len, scale,
-                c.sink_mode, sinkf);
+                c.sink_mode, sinkf, c.window);
 
   std::vector<__half> Qh(qn), Kh(kn), Vh(kn);
   for (size_t i = 0; i < qn; ++i) Qh[i] = __float2half(Qf[i]);
@@ -180,20 +186,21 @@ static bool run_case(const Case& c, int iters) {
   // v5 (D==64) / v7 (D==128) internally.
   const void* sink_arg = (c.sink_mode == kSinkPerHead) ? (const void*)dSink : nullptr;
   const int smooth_arg = (c.sink_mode == kSinkSmooth) ? 1 : 0;
+  const int window_arg = (c.window > 0) ? c.window : -1;
   auto launch = [&]() {
     return hip_gqa_flash_prefill_v3(nullptr, dQ, dK, dV, dO, B, H, G, sq, skv, D,
-                                    max_seq, past_len, scale,
-                                    /*local_window_size=*/-1, sink_arg, H,
-                                    smooth_arg);
+                                    max_seq, past_len, scale, window_arg,
+                                    sink_arg, H, smooth_arg);
   };
 
   int rc = launch();  // first call self-tunes
   HIP_CHECK(hipDeviceSynchronize());
   if (c.expect_reject) {
     const bool ok = (rc != 0);
-    printf("%-16s B%d H%d G%d(hpg%d) D%-3d sq=%-5d past=%-5d %-6s | rc=%d (expected decline)  %s\n",
+    printf("%-16s B%d H%d G%d(hpg%d) D%-3d sq=%-5d past=%-5d %-6s w=%-5d | rc=%d (expected decline)  %s\n",
            c.name, B, H, G, H / G, D, sq, past_len,
-           c.sink_mode == kSinkPerHead ? "sink" : "-", rc, ok ? "PASS" : "FAIL");
+           c.sink_mode == kSinkPerHead ? "sink" : "-", c.window, rc,
+           ok ? "PASS" : "FAIL");
     hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO); hipFree(dSink);
     return ok;
   }
@@ -222,8 +229,8 @@ static bool run_case(const Case& c, int iters) {
                        : (c.sink_mode == kSinkSmooth)  ? "smooth"
                                                        : "-";
   const bool pass = err < 2e-3;
-  printf("%-16s B%d H%d G%d(hpg%d) D%-3d sq=%-5d past=%-5d %-6s | relL2=%.2e  latency=%.4f ms  %s (v%d)\n",
-         c.name, B, H, G, H / G, D, sq, past_len, sink_tag, err, ms,
+  printf("%-16s B%d H%d G%d(hpg%d) D%-3d sq=%-5d past=%-5d %-6s w=%-5d | relL2=%.2e  latency=%.4f ms  %s (v%d)\n",
+         c.name, B, H, G, H / G, D, sq, past_len, sink_tag, c.window, err, ms,
          pass ? "PASS" : "FAIL", D == 64 ? 5 : 7);
 
   hipEventDestroy(e0); hipEventDestroy(e1);
@@ -238,23 +245,45 @@ int main(int argc, char** argv) {
 
   const Case cases[] = {
       // No-sink regression set (must stay as accurate as before).
-      {"gpt_oss-20b",  1, 64, 8,  64, 512,  0,    kSinkNone,    false},
-      {"gpt_oss-20b",  1, 64, 8,  64, 2048, 0,    kSinkNone,    false},
-      {"llama-3.2-1b", 1, 32, 8,  64, 512,  0,    kSinkNone,    false},
-      {"llama-3.2-1b", 1, 32, 8,  64, 2048, 0,    kSinkNone,    false},
-      {"llama-3.1-8b", 1, 32, 8, 128, 512,  0,    kSinkNone,    false},
-      {"llama-3.1-8b", 1, 32, 8, 128, 2048, 0,    kSinkNone,    false},
+      {"gpt_oss-20b",  1, 64, 8,  64, 512,  0,    kSinkNone,    false, 0},
+      {"gpt_oss-20b",  1, 64, 8,  64, 2048, 0,    kSinkNone,    false, 0},
+      {"llama-3.2-1b", 1, 32, 8,  64, 512,  0,    kSinkNone,    false, 0},
+      {"llama-3.2-1b", 1, 32, 8,  64, 2048, 0,    kSinkNone,    false, 0},
+      {"llama-3.1-8b", 1, 32, 8, 128, 512,  0,    kSinkNone,    false, 0},
+      {"llama-3.1-8b", 1, 32, 8, 128, 2048, 0,    kSinkNone,    false, 0},
       // Sink set at the real gpt-oss geometry (H=64, G=8, d=64), including
       // chunked prefill (past > 0), which is what a 16k prompt actually runs.
-      {"gpt_oss-sink",  1, 64, 8,  64, 512,  0,    kSinkPerHead, false},
-      {"gpt_oss-sink",  1, 64, 8,  64, 2048, 0,    kSinkPerHead, false},
-      {"gpt_oss-sink",  1, 64, 8,  64, 512,  512,  kSinkPerHead, false},
-      {"gpt_oss-sink",  1, 64, 8,  64, 512,  8192, kSinkPerHead, false},
-      {"gpt_oss-smooth",1, 64, 8,  64, 512,  0,    kSinkSmooth,  false},
-      {"gpt_oss-smooth",1, 64, 8,  64, 512,  512,  kSinkSmooth,  false},
+      {"gpt_oss-sink",  1, 64, 8,  64, 512,  0,    kSinkPerHead, false, 0},
+      {"gpt_oss-sink",  1, 64, 8,  64, 2048, 0,    kSinkPerHead, false, 0},
+      {"gpt_oss-sink",  1, 64, 8,  64, 512,  512,  kSinkPerHead, false, 0},
+      {"gpt_oss-sink",  1, 64, 8,  64, 512,  8192, kSinkPerHead, false, 0},
+      {"gpt_oss-smooth",1, 64, 8,  64, 512,  0,    kSinkSmooth,  false, 0},
+      {"gpt_oss-smooth",1, 64, 8,  64, 512,  512,  kSinkSmooth,  false, 0},
       // A sink must not silently apply at d == 128: v3 declines so the runtime
       // falls back to the decomposed path, which does implement it.
-      {"llama-sink-d128",1, 32, 8, 128, 512, 0,    kSinkPerHead, true},
+      {"llama-sink-d128",1, 32, 8, 128, 512, 0,    kSinkPerHead, true,  0},
+
+      // Sliding window, gpt-oss geometry, window=128 as the model ships.
+      // Window alone first, so a window bug cannot hide behind the sink.
+      {"gpt_oss-win",   1, 64, 8,  64, 512,  0,    kSinkNone,    false, 128},
+      {"gpt_oss-win",   1, 64, 8,  64, 2048, 0,    kSinkNone,    false, 128},
+      // Chunked: past deeper than the window is the case where whole KV tiles
+      // must be skipped rather than merely masked.
+      {"gpt_oss-win",   1, 64, 8,  64, 512,  512,  kSinkNone,    false, 128},
+      {"gpt_oss-win",   1, 64, 8,  64, 512,  8192, kSinkNone,    false, 128},
+      // Window not aligned to any BKV (32/64), to catch an off-by-one in the
+      // start-tile clamp.
+      {"gpt_oss-win",   1, 64, 8,  64, 512,  1000, kSinkNone,    false, 100},
+      // Window wider than the whole sequence must equal full attention.
+      {"gpt_oss-win-big",1, 64, 8, 64, 512,  0,    kSinkNone,    false, 4096},
+      // Window == 1 is the degenerate case: each query sees only itself.
+      {"gpt_oss-win1",  1, 64, 8,  64, 512,  512,  kSinkNone,    false, 1},
+      // Window together with the sink, which is what gpt-oss actually runs on
+      // its 12 sliding layers.
+      {"gpt_oss-win+sk",1, 64, 8,  64, 512,  0,    kSinkPerHead, false, 128},
+      {"gpt_oss-win+sk",1, 64, 8,  64, 512,  8192, kSinkPerHead, false, 128},
+      // A window must not silently apply at d == 128 either.
+      {"llama-win-d128",1, 32, 8, 128, 512,  0,    kSinkNone,    true,  128},
   };
   int fails = 0;
   for (const auto& c : cases) if (!run_case(c, iters)) ++fails;
