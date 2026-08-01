@@ -147,8 +147,17 @@ void PromoteStridedHipOperandsPass::runOnOperation() {
   // ops) does not invalidate the walk.
   SmallVector<DestinationStyleOpInterface> consumers;
   funcOp.walk([&](DestinationStyleOpInterface dpsOp) {
+    // Include all HIP-namespace DPS ops: the upstream HipDialect ops AND any
+    // NPI plugin ops (hip.npi_quantize, hip.npi_dequantize, etc.) that live in
+    // NpiDialect but use the hip.* namespace and the same contiguous-pointer ABI.
+    // Excluding NPI ops causes strided subview inputs (e.g. the K/V slices from
+    // onnx.Split → memref.subview) to be passed directly to hip.npi_quantize,
+    // whose kernel reads them as flat arrays, silently producing wrong values.
+    // Accept HipDialect ops AND NPI plugin ops (dialect namespace "npi" but
+    // op name "hip.npi_*"). Both use the hip.* namespace and the same ABI.
     Operation *op = dpsOp.getOperation();
-    if (op->getDialect() != op->getContext()->getLoadedDialect<HipDialect>())
+    llvm::StringRef fullOpName = op->getName().getStringRef();
+    if (!fullOpName.starts_with("hip."))
       return;
     consumers.push_back(dpsOp);
   });
@@ -162,7 +171,6 @@ void PromoteStridedHipOperandsPass::runOnOperation() {
         continue;
       tmps.push_back(materializeContiguousCopy(*input, consumer));
     }
-
     // Emit deallocs in the same order as the allocations (TA, TB, ...).
     // Without anchoring, repeated `setInsertionPointAfter(consumer)` would
     // push each new dealloc directly after the consumer, reversing the
