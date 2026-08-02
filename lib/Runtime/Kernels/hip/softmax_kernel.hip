@@ -175,6 +175,8 @@ extern "C" int hip_softmax_row_2d_inplace(void* stream_ptr, void* data,
   if (!data || rows <= 0 || cols <= 0)
     return -1;
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  // Block size: next power of two <= min(cols, 256), min 32 (one RDNA wave).
+  // Vision-encoder attention cols reach ~4096; 256 threads x 16 iters covers that.
   int threads = 32;
   while (threads < cols && threads < 256)
     threads *= 2;
@@ -182,9 +184,10 @@ extern "C" int hip_softmax_row_2d_inplace(void* stream_ptr, void* data,
     threads = 256;
   int num_waves = (threads + WAVE_SIZE - 1) / WAVE_SIZE;
   size_t smem_bytes = static_cast<size_t>(num_waves) * sizeof(float);
+  (void)hipGetLastError();
   softmax_row_2d_inplace_kernel<<<rows, threads, smem_bytes, stream>>>(
       static_cast<__half*>(data), rows, cols);
-  return hipSuccess;
+  return hipGetLastError();
 }
 
 // fp32 variant — for models where Softmax input is fp32 (e.g. Qwen VLM).
@@ -193,6 +196,8 @@ extern "C" int hip_softmax_row_2d_inplace_fp32(void* stream_ptr, void* data,
   if (!data || rows <= 0 || cols <= 0)
     return -1;
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  // Block size: next power of two <= min(cols, 256), min 32 (one RDNA wave).
+  // Vision-encoder attention cols reach ~4096; 256 threads x 16 iters covers that.
   int threads = 32;
   while (threads < cols && threads < 256)
     threads *= 2;
@@ -200,7 +205,8 @@ extern "C" int hip_softmax_row_2d_inplace_fp32(void* stream_ptr, void* data,
     threads = 256;
   int num_waves = (threads + WAVE_SIZE - 1) / WAVE_SIZE;
   size_t smem_bytes = static_cast<size_t>(num_waves) * sizeof(float);
+  (void)hipGetLastError();
   softmax_row_2d_inplace_fp32_kernel<<<rows, threads, smem_bytes, stream>>>(
       static_cast<float*>(data), rows, cols);
-  return hipSuccess;
+  return hipGetLastError();
 }

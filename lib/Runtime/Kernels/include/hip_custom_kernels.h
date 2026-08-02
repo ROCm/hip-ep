@@ -2181,20 +2181,6 @@ HIP_KERNEL_API int hip_causal_conv_prefill(
 HIP_KERNEL_API int hip_gemm_wmma_fp16(void* stream, const void* A, const void* B,
                        void* C, int M, int K, int N);
 
-/* GPU compute-shader pretouch for gfx1151 HMM shader TLB fault resolution.
- * Reads one uint32 per 4KB page of the constants blob via a compute kernel,
- * forcing shader TLB entries to be resolved before inference. Without this,
- * DequantizeLinear kernels reading scale/ZP from the constants blob may get
- * zeros from unfaulted pages, causing cosine~0.31 model output on gfx1151.
- * blob_size: total bytes in the constants blob.
- * sink: a single uint32 GPU buffer to prevent dead-code elimination.
- * Blocks until all TLB entries are resolved (hipStreamSynchronize inside).
- */
-HIP_KERNEL_API int hip_pretouch_blob(void* stream,
-                                     const void* blob,
-                                     int64_t blob_size,
-                                     void* sink);
-
 #ifdef __cplusplus
 }
 #endif

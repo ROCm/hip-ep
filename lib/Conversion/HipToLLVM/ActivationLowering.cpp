@@ -386,14 +386,19 @@ struct MiopenSoftmaxOpLowering
                                  inputDesc.size(rewriter, loc, i));
 
     // Determine element size in bytes from the MemRef element type.
-    // fp16/bf16 = 2, fp32 = 4.  Fall back to 2 for any unrecognised type
-    // to preserve backward-compatible behaviour with the fp16 softmax path.
+    // Only fp16/bf16 (2 bytes) and fp32 (4 bytes) are supported by the
+    // runtime kernels.  Unsupported types are rejected here at compile time
+    // rather than silently producing wrong outputs at runtime.
     Type elemType = inputMemrefType.getElementType();
-    int64_t elemSizeBytes = 2;
-    if (elemType.isF32() || elemType.isInteger(32))
+    int64_t elemSizeBytes;
+    if (elemType.isF16() || elemType.isBF16())
+      elemSizeBytes = 2;
+    else if (elemType.isF32())
       elemSizeBytes = 4;
-    else if (elemType.isF64() || elemType.isInteger(64))
-      elemSizeBytes = 8;
+    else
+      return op.emitOpError(
+          "hip_miopen_softmax: unsupported element type; "
+          "only fp16/bf16/fp32 are supported");
     Value elemSize = LLVM::ConstantOp::create(
         rewriter, loc, indexType,
         rewriter.getIntegerAttr(indexType, elemSizeBytes));

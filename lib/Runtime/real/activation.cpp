@@ -330,10 +330,9 @@ static int hipdnn_ep_to_hip_dtype_elementwise_unary(int64_t data_type) {
 // that kernel is column-wise over a GQA-specific layout AND its launcher
 // only spawns `total_head_queries` blocks, not `total_head_queries * cols`.
 // A standalone softmax wired to that path produces NaN downstream.
-// elem_size_bytes: 2 for fp16, 4 for fp32.  The lowering passes the element
-// size derived from the MemRef type so the runtime can copy and dispatch
-// correctly.  Older bitcode that omits this argument (pre-fix) silently
-// defaults to 0, which the guard below converts to 2 (fp16 = legacy).
+// elem_size_bytes: 2 for fp16/bf16, 4 for fp32.  The lowering passes the
+// element size derived from the MemRef type so the runtime can copy and
+// dispatch with the correct dtype.
 extern "C" int hip_miopen_softmax(void *state, const void *input, void *output,
                                   int64_t rows, int64_t cols,
                                   int64_t elem_size_bytes) {
@@ -356,16 +355,20 @@ extern "C" int hip_miopen_softmax(void *state, const void *input, void *output,
             (long long)rows, (long long)cols);
     return -1;
   }
-  // Default to fp16 (2 bytes) for backward-compat with old bitcode.
-  if (elem_size_bytes <= 0)
-    elem_size_bytes = 2;
+  // Only fp16/bf16 (2 bytes) and fp32 (4 bytes) are supported.  Reject any
+  // other value immediately rather than silently producing wrong outputs.
+  if (elem_size_bytes != 2 && elem_size_bytes != 4) {
+    fprintf(stderr,
+            "[REAL] hip_miopen_softmax: unsupported elem_size_bytes=%lld\n",
+            (long long)elem_size_bytes);
+    return -1;
+  }
 
   void *stream = hipdnn_ep_state_get_stream(st);
 
-  // Copy input -> output with correct element size.
-  // Previously this hardcoded sizeof(uint16_t)=2 bytes, which corrupted fp32
-  // (4-byte) inputs by copying only half the data.  Qwen VLM passes fp32
-  // attention scores into Softmax; using elem_size_bytes=4 fixes that.
+  // Copy input -> output with the correct element size.  Previously this
+  // hardcoded sizeof(uint16_t)=2, corrupting fp32 inputs (Qwen VLM attention
+  // scores) by copying only half the data.
   hipError_t err = hipMemcpyAsync(
       output, input,
       static_cast<size_t>(rows) * static_cast<size_t>(cols) *
