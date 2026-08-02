@@ -247,7 +247,15 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
     # NOTE: this is a CC1 (frontend) flag in TheRock's clang build, not a
     # driver flag, so it must be passed via `-Xclang`.  Driver-form
     # `-fno-cuda-host-device-constexpr` errors with "unknown argument".
-    list(APPEND abi_flags -Xclang -fno-cuda-host-device-constexpr)
+    #
+    # These two workaround flags are kept SEPARATE from abi_flags and applied
+    # per-source below, because `-fno-cuda-host-device-constexpr` also demotes
+    # legitimately host+device `constexpr` members to host-only. Composable
+    # Kernel relies on such members (e.g. `ck::ignore::operator=` used inside
+    # its `__host__ __device__ PassThrough`), so a TU that pulls in CK headers
+    # must be compiled WITHOUT this workaround. Callers list such sources (by
+    # base name) in HIP_UTILS_NO_CONSTEXPR_WORKAROUND_SOURCES.
+    set(cmath_workaround_flags -Xclang -fno-cuda-host-device-constexpr)
     #
     # Layer 2 -- belt-and-suspenders: force-include a header that pre-defines
     # the `_CLANG_BUILTIN1` / `_CLANG_BUILTIN2` macros as empty.  This
@@ -259,7 +267,7 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
     # cases where Layer 1's flag is not respected by some hipcc/clang
     # combination.
     if(EXISTS "${_MSVC_HIP_CMATH_WORKAROUND_HEADER}")
-        list(APPEND abi_flags -include "${_MSVC_HIP_CMATH_WORKAROUND_HEADER}")
+        list(APPEND cmath_workaround_flags -include "${_MSVC_HIP_CMATH_WORKAROUND_HEADER}")
     endif()
 
     # Warning suppression flags
@@ -285,6 +293,12 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
             get_filename_component(source_abs ${source} ABSOLUTE)
             set(output_obj "${obj_dir}/${source_name}.obj")
 
+            # Skip the cmath/constexpr workaround for CK-consuming sources.
+            set(src_cmath_flags ${cmath_workaround_flags})
+            if(source_name IN_LIST HIP_UTILS_NO_CONSTEXPR_WORKAROUND_SOURCES)
+                set(src_cmath_flags "")
+            endif()
+
             # Use generator expressions for config-specific flags
             add_custom_command(
                 OUTPUT ${output_obj}
@@ -295,6 +309,7 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
                     ${include_flags}
                     ${define_flags}
                     ${abi_flags}
+                    ${src_cmath_flags}
                     ${warning_flags}
                     $<$<CONFIG:Debug>:-D_DEBUG>
                     $<$<CONFIG:Debug>:-D_ITERATOR_DEBUG_LEVEL=2>
@@ -326,6 +341,12 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
             get_filename_component(source_abs ${source} ABSOLUTE)
             set(output_obj "${obj_dir}/${source_name}.obj")
 
+            # Skip the cmath/constexpr workaround for CK-consuming sources.
+            set(src_cmath_flags ${cmath_workaround_flags})
+            if(source_name IN_LIST HIP_UTILS_NO_CONSTEXPR_WORKAROUND_SOURCES)
+                set(src_cmath_flags "")
+            endif()
+
             add_custom_command(
                 OUTPUT ${output_obj}
                 COMMAND ${HIPCC_EXECUTABLE}
@@ -335,6 +356,7 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
                     ${include_flags}
                     ${define_flags}
                     ${abi_flags}
+                    ${src_cmath_flags}
                     ${warning_flags}
                     ${build_flags}
                     ${HIP_COMPILE_OPTIONS}

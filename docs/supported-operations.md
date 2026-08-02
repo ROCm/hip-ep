@@ -12,7 +12,7 @@ The conversion registrations in `lib/Conversion/OnnxToHip/OnnxToHip.cpp` and the
 
 | Operation | Backend or lowering |
 |---|---|
-| Conv | MIOpen |
+| Conv | Composable Kernel (group=1) with MIOpen fallback |
 | ConvTranspose | MIOpen |
 | MatMul | hipBLASLt |
 | Gemm | hipBLASLt |
