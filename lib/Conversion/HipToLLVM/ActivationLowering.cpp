@@ -396,9 +396,8 @@ struct MiopenSoftmaxOpLowering
     else if (elemType.isF32())
       elemSizeBytes = 4;
     else
-      return op.emitOpError(
-          "hip_miopen_softmax: unsupported element type; "
-          "only fp16/bf16/fp32 are supported");
+      return op.emitOpError("hip_miopen_softmax: unsupported element type; "
+                            "only fp16/bf16/fp32 are supported");
     Value elemSize = LLVM::ConstantOp::create(
         rewriter, loc, indexType,
         rewriter.getIntegerAttr(indexType, elemSizeBytes));
@@ -406,8 +405,10 @@ struct MiopenSoftmaxOpLowering
     SmallVector<Value> args = {
         adaptor.getCtx(),
         extractContiguousMemRefPtr(adaptor.getInput(), rewriter, loc),
-        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc), rows,
-        cols, elemSize};
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc),
+        rows,
+        cols,
+        elemSize};
 
     LLVM::CallOp::create(rewriter, loc, *funcOp, args);
     rewriter.eraseOp(op);

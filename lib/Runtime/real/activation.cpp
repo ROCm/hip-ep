@@ -369,11 +369,11 @@ extern "C" int hip_miopen_softmax(void *state, const void *input, void *output,
   // Copy input -> output with the correct element size.  Previously this
   // hardcoded sizeof(uint16_t)=2, corrupting fp32 inputs (Qwen VLM attention
   // scores) by copying only half the data.
-  hipError_t err = hipMemcpyAsync(
-      output, input,
-      static_cast<size_t>(rows) * static_cast<size_t>(cols) *
-          static_cast<size_t>(elem_size_bytes),
-      hipMemcpyDeviceToDevice, static_cast<hipStream_t>(stream));
+  hipError_t err =
+      hipMemcpyAsync(output, input,
+                     static_cast<size_t>(rows) * static_cast<size_t>(cols) *
+                         static_cast<size_t>(elem_size_bytes),
+                     hipMemcpyDeviceToDevice, static_cast<hipStream_t>(stream));
   if (err != hipSuccess) {
     fprintf(stderr, "[REAL] hip_miopen_softmax: hipMemcpyAsync failed: %s\n",
             hipGetErrorString(err));
@@ -385,9 +385,8 @@ extern "C" int hip_miopen_softmax(void *state, const void *input, void *output,
       (long long)rows, (long long)cols, (long long)elem_size_bytes);
 
   if (elem_size_bytes == 4)
-    return hip_softmax_row_2d_inplace_fp32(stream, output,
-                                           static_cast<int>(rows),
-                                           static_cast<int>(cols));
+    return hip_softmax_row_2d_inplace_fp32(
+        stream, output, static_cast<int>(rows), static_cast<int>(cols));
   return hip_softmax_row_2d_inplace(stream, output, static_cast<int>(rows),
                                     static_cast<int>(cols));
 }
