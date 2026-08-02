@@ -175,8 +175,9 @@ extern "C" int hip_softmax_row_2d_inplace(void* stream_ptr, void* data,
   if (!data || rows <= 0 || cols <= 0)
     return -1;
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
-  // Block size: next power of two <= min(cols, 256), min 32 (one RDNA wave).
-  // Vision-encoder attention cols reach ~4096; 256 threads x 16 iters covers that.
+  // Pick block size: power of two up to min(cols, 256). 32 minimum for one
+  // wave on RDNA / 64 on CDNA. SoftMax for vision attention has cols up to
+  // ~4096, well-served by 256 threads × 16 iters.
   int threads = 32;
   while (threads < cols && threads < 256)
     threads *= 2;
@@ -196,8 +197,9 @@ extern "C" int hip_softmax_row_2d_inplace_fp32(void* stream_ptr, void* data,
   if (!data || rows <= 0 || cols <= 0)
     return -1;
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
-  // Block size: next power of two <= min(cols, 256), min 32 (one RDNA wave).
-  // Vision-encoder attention cols reach ~4096; 256 threads x 16 iters covers that.
+  // Pick block size: power of two up to min(cols, 256). 32 minimum for one
+  // wave on RDNA / 64 on CDNA. SoftMax for vision attention has cols up to
+  // ~4096, well-served by 256 threads × 16 iters.
   int threads = 32;
   while (threads < cols && threads < 256)
     threads *= 2;
