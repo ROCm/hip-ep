@@ -40,10 +40,10 @@ struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
     auto AType = cast<MemRefType>(op.getA().getType());
     auto BType = cast<MemRefType>(op.getB().getType());
     auto OutType = cast<MemRefType>(op.getOutput().getType());
-    Value APtr = extractMemRefDataPtr(adaptor.getA(), AType,
-                                      getTypeConverter(), rewriter, loc);
-    Value BPtr = extractMemRefDataPtr(adaptor.getB(), BType,
-                                      getTypeConverter(), rewriter, loc);
+    Value APtr = extractMemRefDataPtr(adaptor.getA(), AType, getTypeConverter(),
+                                      rewriter, loc);
+    Value BPtr = extractMemRefDataPtr(adaptor.getB(), BType, getTypeConverter(),
+                                      rewriter, loc);
     Value outputPtr = extractMemRefDataPtr(adaptor.getOutput(), OutType,
                                            getTypeConverter(), rewriter, loc);
 
