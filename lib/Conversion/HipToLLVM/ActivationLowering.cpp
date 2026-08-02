@@ -367,8 +367,8 @@ struct MiopenSoftmaxOpLowering
     Type ptrType = getPtrType();
     Type indexType = getIndexType();
 
-    SmallVector<Type> paramTypes = {ptrType, ptrType, ptrType, indexType,
-                                    indexType, indexType};
+    SmallVector<Type> paramTypes = {ptrType,   ptrType,   ptrType,
+                                    indexType, indexType, indexType};
     FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
         rewriter, module, kMiopenSoftmax, paramTypes, voidType);
     if (failed(funcOp))
