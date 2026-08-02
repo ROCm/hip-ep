@@ -1078,6 +1078,49 @@ HIP_KERNEL_API int hip_reduce_l2(
     int hip_dtype);
 
 /* =========================================================================
+ * Convolution forward (2D, NCHW) — Composable Kernel
+ * =========================================================================
+ *
+ * Standard convolution with group == 1 only. Backed by CK's
+ * DeviceGroupedConvFwdMultipleABD instance factory (G=1 packed GNCHW / GKCYX /
+ * GNKHW layouts, byte-identical to NCHW / KCYX / NKHW). Bias is NOT fused; the
+ * caller (wrap_miopenConvolutionForward) adds per-channel bias afterwards.
+ *
+ * This launcher is compiled only when the CK device_conv_operations library is
+ * available (see lib/Runtime/Kernels/CMakeLists.txt). The runtime wrapper
+ * guards the call on the HIPDNN_EP_USE_CK_CONV compile define and falls back to
+ * MIOpen when CK is unavailable or returns non-zero (e.g. group != 1, or an
+ * unsupported problem shape).
+ *
+ * Supported hip_dtypes: HIP_DTYPE_FLOAT32, HIP_DTYPE_FLOAT16, HIP_DTYPE_BFLOAT16.
+ * Returns: 0 on success, non-zero if CK cannot handle this problem.
+ */
+HIP_KERNEL_API int hip_conv_forward(
+    void* stream,
+    const void* input,
+    const void* weights,
+    void* output,
+    int64_t input_n,
+    int64_t input_c,
+    int64_t input_h,
+    int64_t input_w,
+    int64_t weights_k,
+    int64_t output_h,
+    int64_t output_w,
+    int64_t kernel_h,
+    int64_t kernel_w,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t pad_top,
+    int64_t pad_left,
+    int64_t pad_bottom,
+    int64_t pad_right,
+    int64_t dilation_h,
+    int64_t dilation_w,
+    int64_t group,
+    int hip_dtype);
+
+/* =========================================================================
  * Pool — MaxPool / AveragePool / LpPool (1D / 2D / 3D)
  * =========================================================================
  *

@@ -186,6 +186,9 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
     if(HIPDNN_EP_DISABLE_VENDOR_BLAS)
         list(APPEND COMPILE_FLAGS "-DHIPDNN_EP_DISABLE_VENDOR_BLAS")
     endif()
+    if(HIPDNN_EP_USE_CK_CONV)
+        list(APPEND COMPILE_FLAGS "-DHIPDNN_EP_USE_CK_CONV")
+    endif()
 
     # Always add root directory for public headers
     list(APPEND COMPILE_FLAGS "-I" "${CMAKE_CURRENT_SOURCE_DIR}")

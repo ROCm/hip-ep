@@ -8,6 +8,10 @@
 #include "error_check_macros.h"
 #include "runtime_types.h"
 
+#if !defined(HIPDNN_EP_DISABLE_VENDOR_BLAS) && defined(HIPDNN_EP_USE_CK_CONV)
+#include "hip_custom_kernels.h"
+#endif
+
 #include <cstdio>
 
 // Convenience wrappers for goto cleanup pattern (all functions use 'cleanup'
@@ -119,6 +123,58 @@ static miopenDataType_t conv_to_miopen_type(int64_t data_type, bool &ok) {
   }
 }
 
+#if !defined(HIPDNN_EP_DISABLE_VENDOR_BLAS) && defined(HIPDNN_EP_USE_CK_CONV)
+static int conv_to_hip_dtype(int64_t data_type) {
+  switch (data_type) {
+  case HIPDNN_EP_DATATYPE_FLOAT:
+    return HIP_DTYPE_FLOAT32;
+  case HIPDNN_EP_DATATYPE_HALF:
+    return HIP_DTYPE_FLOAT16;
+  case HIPDNN_EP_DATATYPE_BFLOAT16:
+    return HIP_DTYPE_BFLOAT16;
+  default:
+    return -1;
+  }
+}
+
+// Broadcast-add per-channel bias over [N, K, H, W] via miopenOpTensor.
+static int miopen_conv_add_bias(RuntimeState *state, void *output,
+                                const void *bias, int64_t input_n,
+                                int64_t weights_k, int64_t output_h,
+                                int64_t output_w, miopenDataType_t miopen_dt) {
+  miopenHandle_t miopen_handle =
+      static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
+  miopenTensorDescriptor_t output_desc = nullptr;
+  miopenTensorDescriptor_t bias_desc = nullptr;
+  int result = 0;
+  const float alpha_bias = 1.0f, beta_zero = 0.0f;
+
+  MIOPEN_CHECK(miopenCreateTensorDescriptor(&output_desc));
+  MIOPEN_CHECK(miopenCreateTensorDescriptor(&bias_desc));
+  {
+    int out_dims[] = {(int)input_n, (int)weights_k, (int)output_h,
+                      (int)output_w};
+    int b_dims[] = {1, (int)weights_k, 1, 1};
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        output_desc, miopen_dt, miopenTensorNCHW, out_dims, 4));
+    MIOPEN_CHECK(miopenSetNdTensorDescriptorWithLayout(
+        bias_desc, miopen_dt, miopenTensorNCHW, b_dims, 4));
+  }
+  MIOPEN_CHECK(miopenOpTensor(miopen_handle, miopenTensorOpAdd, &alpha_bias,
+                              output_desc, output, &alpha_bias, bias_desc, bias,
+                              &beta_zero, output_desc, output));
+
+cleanup:
+  if (bias_desc) {
+    miopenDestroyTensorDescriptor(bias_desc);
+  }
+  if (output_desc) {
+    miopenDestroyTensorDescriptor(output_desc);
+  }
+  return result;
+}
+#endif
+
 // MIOpen convolution forward implementation
 // Follows opaque RuntimeState pattern - extracts handle/stream from state.
 //
@@ -141,20 +197,6 @@ int wrap_miopenConvolutionForward(
     int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
     int64_t pad_top, int64_t pad_left, int64_t pad_bottom, int64_t pad_right,
     int64_t dilation_h, int64_t dilation_w, int64_t group, int64_t data_type) {
-  OP_PROFILE(
-      "conv",
-      [&] {
-        char b[80];
-        const char *dt = (data_type == HIPDNN_EP_DATATYPE_HALF)       ? "f16"
-                         : (data_type == HIPDNN_EP_DATATYPE_BFLOAT16) ? "bf16"
-                                                                      : "f32";
-        snprintf(b, sizeof(b), "%lldx%lldx%lldx%lld,k=%lldx%lldx%lld,%s",
-                 (long long)input_n, (long long)input_c, (long long)input_h,
-                 (long long)input_w, (long long)weights_k, (long long)kernel_h,
-                 (long long)kernel_w, dt);
-        return std::string(b);
-      },
-      state);
   if (!state || !input || !weights || !output) {
     fprintf(stderr, "Invalid arguments to wrap_miopenConvolutionForward\n");
     return -1;
@@ -177,6 +219,61 @@ int wrap_miopenConvolutionForward(
       (long long)kernel_w, (long long)stride_h, (long long)stride_w,
       bias ? "yes" : "null", (long long)data_type);
 
+#if !defined(HIPDNN_EP_DISABLE_VENDOR_BLAS) && defined(HIPDNN_EP_USE_CK_CONV)
+  {
+    int hip_dt = conv_to_hip_dtype(data_type);
+    if (hip_dt >= 0 && group == 1) {
+      hipStream_t hip_stream =
+          static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+      OP_PROFILE(
+          "ck_conv",
+          [&] {
+            char b[80];
+            const char *dt = (data_type == HIPDNN_EP_DATATYPE_HALF) ? "f16"
+                             : (data_type == HIPDNN_EP_DATATYPE_BFLOAT16)
+                                 ? "bf16"
+                                 : "f32";
+            snprintf(b, sizeof(b), "%lldx%lldx%lldx%lld,k=%lldx%lldx%lld,%s",
+                     (long long)input_n, (long long)input_c, (long long)input_h,
+                     (long long)input_w, (long long)weights_k,
+                     (long long)kernel_h, (long long)kernel_w, dt);
+            return std::string(b);
+          },
+          state);
+      int ck_rc = hip_conv_forward(
+          hip_stream, input, weights, output, input_n, input_c, input_h,
+          input_w, weights_k, output_h, output_w, kernel_h, kernel_w, stride_h,
+          stride_w, pad_top, pad_left, pad_bottom, pad_right, dilation_h,
+          dilation_w, group, hip_dt);
+      if (ck_rc == 0) {
+        RUNTIME_DEBUG_LOG("[REAL] wrap_miopenConvolutionForward: CK conv OK\n");
+        if (bias) {
+          return miopen_conv_add_bias(state, output, bias, input_n, weights_k,
+                                      output_h, output_w, miopen_dt);
+        }
+        return 0;
+      }
+      RUNTIME_DEBUG_LOG(
+          "[REAL] wrap_miopenConvolutionForward: CK conv unavailable, "
+          "falling back to MIOpen\n");
+    }
+  }
+#endif
+
+  OP_PROFILE(
+      "conv",
+      [&] {
+        char b[80];
+        const char *dt = (data_type == HIPDNN_EP_DATATYPE_HALF)       ? "f16"
+                         : (data_type == HIPDNN_EP_DATATYPE_BFLOAT16) ? "bf16"
+                                                                      : "f32";
+        snprintf(b, sizeof(b), "%lldx%lldx%lldx%lld,k=%lldx%lldx%lld,%s",
+                 (long long)input_n, (long long)input_c, (long long)input_h,
+                 (long long)input_w, (long long)weights_k, (long long)kernel_h,
+                 (long long)kernel_w, dt);
+        return std::string(b);
+      },
+      state);
   // Extract handle and stream from opaque RuntimeState via accessor functions
   // (Maintains abstraction barrier - no direct field access)
   miopenHandle_t miopen_handle =
