@@ -2035,6 +2035,11 @@ HIP_KERNEL_API int hip_linear_attention_decode(
 // fall back to the per-token decode loop); 0 on success; <0 on launch error.
 // Only the gated_delta rule with scalar log-decay (decay_per_key_dim==0) is
 // supported; other rules/layouts/oversized smem are declined.
+// scratch / scratch_bytes: caller-owned device scratch for the chunk-parallel
+// path (RuntimeState::la_scratch, grown on demand, freed on session cleanup).
+// Size it with hip_linear_attention_prefill_scratch_bytes() below. When null or
+// under-sized the launcher declines (returns 1) and the caller falls back to
+// the per-token loop.
 HIP_KERNEL_API int hip_linear_attention_prefill_chunked(
     void* stream,
     const void* query,
@@ -2055,7 +2060,15 @@ HIP_KERNEL_API int hip_linear_attention_prefill_chunked(
     int64_t update_rule,
     int64_t decay_per_key_dim,
     int64_t beta_per_head,
-    int64_t type);
+    int64_t type,
+    void* scratch,
+    size_t scratch_bytes);
+
+// Device-scratch bytes the chunk-parallel prefill needs for a given shape.
+// Returns 0 for shapes/params the parallel path will decline. The runtime
+// wrapper uses this to grow RuntimeState::la_scratch before the launch.
+HIP_KERNEL_API size_t hip_linear_attention_prefill_scratch_bytes(
+    int B, int seq_len, int Hkv, int dk, int dv);
 
 // Max memref rank honoured by the strided memref.copy fast path
 // (hip_strided_copy) and the host per-row fallback in memrefCopy. Defined
