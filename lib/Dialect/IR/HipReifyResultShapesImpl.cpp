@@ -14,6 +14,7 @@
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/IR/HipShapeUtils.h"
 
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Sequence.h"
 
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -399,61 +400,81 @@ GatherOp::reifyResultShapes(OpBuilder &b,
 LogicalResult
 OneHotOp::reifyResultShapes(OpBuilder &b,
                             ReifiedRankedShapedTypeDims &reified) {
+  reified.clear();
   if (getNumResults() == 0)
+    return success(isa<BaseMemRefType>(getOutput().getType()));
+  if (getNumResults() != 1)
     return failure();
+
   auto indicesType = dyn_cast<RankedTensorType>(getIndices().getType());
   auto depthType = dyn_cast<RankedTensorType>(getDepth().getType());
-  if (!indicesType || !depthType)
+  auto valuesType = dyn_cast<RankedTensorType>(getValues().getType());
+  auto outputType = dyn_cast<RankedTensorType>(getOutput().getType());
+  auto resultType = dyn_cast<RankedTensorType>(getResultTypes().front());
+  if (!indicesType || !depthType || !valuesType || !outputType || !resultType ||
+      outputType != resultType)
+    return failure();
+  if ((!indicesType.getElementType().isInteger(32) &&
+       !indicesType.getElementType().isInteger(64)) ||
+      (!depthType.getElementType().isInteger(32) &&
+       !depthType.getElementType().isInteger(64)) ||
+      (depthType.getRank() != 0 &&
+       (depthType.getRank() != 1 || depthType.isDynamicDim(0) ||
+        depthType.getDimSize(0) != 1)) ||
+      valuesType.getRank() != 1 || valuesType.isDynamicDim(0) ||
+      valuesType.getDimSize(0) != 2 ||
+      outputType.getElementType() != valuesType.getElementType())
     return failure();
 
   int64_t outRank = indicesType.getRank() + 1;
+  if (indicesType.getRank() > 7 || outputType.getRank() != outRank)
+    return failure();
   int64_t axis = getAxis();
   if (axis < 0)
     axis += outRank;
+  if (axis < 0 || axis >= outRank)
+    return failure();
 
-  // The one-hot axis extent is the runtime *value* of the `depth` scalar
-  // (data-dependent), NOT any static dim of the `depth` tensor. A scalar
-  // depth's only "dim" is its element count (always 1), so reading
-  // `depth`'s shape here -- a rank-0 attr of 1, or dim(depth, 0) == 1 for a
-  // single-element rank-1 export -- both wrongly report an axis extent of 1.
-  // --hip-infer-shapes would then narrow the (dynamic) axis dim to a static
-  // 1 and the scatter drops every index >= 1, collapsing the axis to one
-  // row. Lift the axis extent from the DPS `outs` init instead: the
-  // ONNX->HIP converter sizes that init to the real depth via
-  // hip.readback_scalar (dynamic, so infer-shapes leaves it alone), or to a
-  // static extent when the depth folded at compile time (so infer-shapes
-  // narrows it correctly). Non-axis dims still come from `indices`, which
-  // may carry tighter static extents than the init.
-  //
-  // Before (buggy): rank-0 depth -> depthDim = 1 -> infer-shapes forces
-  //                 tensor<?x?x?> to tensor<?x?x1>.
-  // After:          depthDim = size(outs, axis) -> stays dynamic (readback)
-  //                 or narrows only to a genuine compile-time depth.
-  //
-  // Lift the axis extent from the init WITHOUT materializing a fresh
-  // `tensor.dim` on it: read the init's static dim directly, and for a
-  // dynamic axis reuse the init producer's own extent operand. A
-  // materialized `tensor.dim` would add a SECOND use to the init
-  // `tensor.empty`, tripping the single-use guard in `--hip-infer-shapes`
-  // (refineOneResult) that gates the whole result refinement -- so the
-  // static non-axis dims (from `indices`) would ALSO fail to narrow.
-  Value initVal = getOutput();
-  OpFoldResult axisExtent;
-  auto initTy = dyn_cast<RankedTensorType>(initVal.getType());
-  if (initTy && !initTy.isDynamicDim(axis))
-    axisExtent = b.getIndexAttr(initTy.getDimSize(axis));
-  else if (auto emptyOp = initVal.getDefiningOp<tensor::EmptyOp>())
-    axisExtent = emptyOp.getMixedSizes()[axis];
-  else
-    axisExtent = tensor::getMixedSize(b, getLoc(), getResult(0), axis);
+  SmallVector<int64_t> depthValues;
+  std::optional<int64_t> staticDepth;
+  if (matchConstantIntTensor(getDepth(), depthValues)) {
+    if (depthValues.size() != 1 || depthValues.front() < 0)
+      return failure();
+    staticDepth = depthValues.front();
+  }
+  FailureOr<SmallVector<int64_t>> semanticShape =
+      inferOneHotShape(indicesType.getShape(), staticDepth, axis);
+  if (failed(semanticShape) ||
+      semanticShape->size() != static_cast<size_t>(outputType.getRank()))
+    return failure();
+  for (auto [semantic, output] :
+       llvm::zip_equal(*semanticShape, outputType.getShape())) {
+    if (!ShapedType::isDynamic(semantic) && !ShapedType::isDynamic(output) &&
+        semantic != output)
+      return failure();
+  }
 
+  // Validation is complete before the first tensor.dim is emitted. Prefer
+  // semantic dimensions from indices and a constant depth payload. When depth
+  // is runtime-only, use the dominating DPS destination for the inserted-axis
+  // extent; never read this op's result while upstream shape resolution is
+  // inserting the reified operations before the defining op.
   SmallVector<OpFoldResult> dims;
+  dims.reserve(outRank);
   int64_t inDim = 0;
   for (int64_t outDim : llvm::seq<int64_t>(0, outRank)) {
-    if (outDim == axis)
-      dims.push_back(axisExtent);
-    else
-      dims.push_back(tensor::getMixedSize(b, getLoc(), getIndices(), inDim++));
+    int64_t semantic = (*semanticShape)[outDim];
+    if (!ShapedType::isDynamic(semantic)) {
+      dims.push_back(b.getIndexAttr(semantic));
+    } else if (outDim != axis) {
+      dims.push_back(tensor::getMixedSize(b, getLoc(), getIndices(), inDim));
+    } else if (auto emptyOp = getOutput().getDefiningOp<tensor::EmptyOp>()) {
+      dims.push_back(emptyOp.getMixedSizes()[outDim]);
+    } else {
+      dims.push_back(tensor::getMixedSize(b, getLoc(), getOutput(), outDim));
+    }
+    if (outDim != axis)
+      ++inDim;
   }
   reified.assign({std::move(dims)});
   return success();

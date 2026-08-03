@@ -1169,6 +1169,56 @@ void OneHotOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult OneHotOp::verify() {
+  if (failed(verifyDpsComputeOp(
+          *this, {getIndices(), getDepth(), getValues(), getOutput()},
+          /*numInits=*/1)))
+    return failure();
+
+  auto indicesType = cast<ShapedType>(getIndices().getType());
+  auto depthType = cast<ShapedType>(getDepth().getType());
+  auto valuesType = cast<ShapedType>(getValues().getType());
+  auto outputType = cast<ShapedType>(getOutput().getType());
+  if (!indicesType.getElementType().isInteger(32) &&
+      !indicesType.getElementType().isInteger(64))
+    return emitOpError("indices element type must be i32 or i64");
+  if (!depthType.getElementType().isInteger(32) &&
+      !depthType.getElementType().isInteger(64))
+    return emitOpError("depth element type must be i32 or i64");
+  if (depthType.getRank() != 0 &&
+      (depthType.getRank() != 1 || depthType.isDynamicDim(0) ||
+       depthType.getDimSize(0) != 1))
+    return emitOpError(
+        "depth must be a scalar or statically one-element tensor");
+  if (valuesType.getRank() != 1 || valuesType.isDynamicDim(0) ||
+      valuesType.getDimSize(0) != 2)
+    return emitOpError("values must be a statically two-element tensor");
+  if (outputType.getElementType() != valuesType.getElementType())
+    return emitOpError("output element type must match values");
+
+  int64_t outputRank = indicesType.getRank() + 1;
+  if (indicesType.getRank() > 7 || outputType.getRank() != outputRank)
+    return emitOpError("output rank must equal indices rank plus one and be at "
+                       "most the runtime maximum of 8");
+  int64_t axis = getAxis();
+  if (axis < -outputRank || axis >= outputRank)
+    return emitOpError("axis must be in the range [-output.rank, output.rank)");
+
+  SmallVector<int64_t> depthValues;
+  std::optional<int64_t> staticDepth;
+  if (matchConstantIntTensor(getDepth(), depthValues)) {
+    if (depthValues.size() != 1)
+      return emitOpError("constant depth must contain exactly one element");
+    if (depthValues.front() < 0)
+      return emitOpError("depth must be nonnegative");
+    staticDepth = depthValues.front();
+  }
+
+  return verifyHipOpShape(*this, [&] {
+    return inferOneHotShape(indicesType.getShape(), staticDepth, axis);
+  });
+}
+
 //===----------------------------------------------------------------------===//
 // CompressOp: ins(input, condition), outs(output)
 //===----------------------------------------------------------------------===//

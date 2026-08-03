@@ -87,6 +87,10 @@ int main(int argc, char **argv) {
   registry.insert<mlir::tensor::TensorDialect>();
   registry.insert<mlir::LLVM::LLVMDialect>();
   registry.insert<mlir::hip::HipDialect>();
+  registry.addExtension(
+      +[](mlir::MLIRContext *, mlir::hip::HipDialect *dialect) {
+        mlir::RegisteredOperationName::insert<TestMalformedReifyOp>(*dialect);
+      });
   registry.insert<mlir::hipsr::HipsrDialect>();
   mlir::hipsr::registerConvertHipsrToLLVMInterface(registry);
   mlir::registerConvertFuncToLLVMInterface(registry);
@@ -115,6 +119,10 @@ int main(int argc, char **argv) {
   // the EP share. Defined once (InitAllPasses.h) so the two never drift; see
   // that function for the set and docs/pipeline_pass_menu.md for the catalogue.
   hip::compiler::registerAllPasses();
+  mlir::PassRegistration<TestHipDpsDefaultReifyPass>();
+  mlir::PassRegistration<TestGqaReifyFailureAtomicPass>();
+  mlir::PassRegistration<TestOneHotReifyFailureAtomicPass>();
+  mlir::PassRegistration<TestMakeGqaSoftcapUnsupportedPass>();
 
 #ifdef HIPDNN_EP_INCLUDE_TEST_PASSES
   mlir::hip::test::registerHipTestPasses(registry);
