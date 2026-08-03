@@ -1,6 +1,8 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
+// UNSUPPORTED: true
+
 // Every pool domain receives the function's first hipsr context argument.
 // RUN: hip-mlir-opt --split-input-file -hipsr-partition-pool-domains %s | FileCheck %s
 

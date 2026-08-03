@@ -85,7 +85,7 @@ Choose the smallest mechanism that matches the operation's semantics:
 | MatMul/Gemm/MatMulNBits | Dedicated shape logic based on operand dimensions and attributes |
 | Attention or normalization with multiple destinations | One shape vector per DPS init unless an op supplies a dedicated thunk |
 | Convolution, pooling, or resize with converter-computed destinations | DPS-init shape, with semantic validity handled by conversion or verification |
-| Runtime-dependent count, such as NonZero | DPS-init shape; unresolved dimensions remain dynamic |
+| Runtime-dependent count, such as NonZero or Compress | DPS-init shape; unresolved dimensions remain dynamic |
 
 Shared helpers live in `HipShapeUtils.{h,cpp}`. Operations that set `autoReify=0` and are not covered by a parameterized sub-base define their member functions in `HipReifyResultShapesImpl.cpp`.
 
@@ -188,6 +188,8 @@ simplify-onnx
 Canonicalization and CSE run immediately afterward to fold dimensions made static by refinement and to deduplicate independently emitted shape arithmetic. `hip-split-duplicate-dps-inits` then repairs same-op DPS init aliasing before bufferization.
 
 Static refinements propagate into bufferization sizing and downstream pool planning. For graph outputs they may also simplify `hip.alloc_output` shape operands; extents that remain dynamic are represented as `-1` in model metadata and are sized in-graph at runtime. Runtime-dependent counts such as `hip.nonzero` remain dynamic at both levels.
+
+A data-dependent extent that reaches a graph output must additionally be a real SSA value *before* the allocation, because `hip.alloc_output` takes the extent as an operand and ORT rejects an output request whose shape differs from the one it computed for the run. The converter therefore materializes the count with a device scan plus a synchronized `hip.readback_dim` and sizes the DPS init with it; reification then reports that init extent. `onnx.Compress` follows this pattern (scanning its `condition` with `hip.nonzero`), so a padded-input encoder that drops its pad slices reports the kept-slice count rather than the padded capacity. Reporting the upper bound instead is not merely conservative — it is the wrong output shape.
 
 ## Pre-conversion loop-body rank inference
 
