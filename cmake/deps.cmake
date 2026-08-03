@@ -308,11 +308,6 @@ if(BUILD_EP)
     message(STATUS "FindPackage Version info: ${ARG_COMPONENT}=${TMP_GIT_COMMIT} ${TMP_VERSION}")
   endfunction()
 
-  morphizen_add_version_info(COMPONENT hip-ep DIR "${CMAKE_SOURCE_DIR}")
-  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/version.txt"
-       "hip-ep;${COMP_GIT_COMMIT};${COMP_VERSION}\n")
-  set(MORPHIZEN_VERSION_INFO_FILE "${CMAKE_CURRENT_BINARY_DIR}/version.txt")
-
   ## MorphiZen is vendored in-tree as a git subtree under morphizen.
   if(NOT EXISTS "${CMAKE_SOURCE_DIR}/morphizen/CMakeLists.txt")
     message(FATAL_ERROR "MorphiZen sources not found under morphizen (expected as an in-tree git subtree).")
@@ -375,6 +370,14 @@ if(BUILD_EP)
     set(onnxruntime_VERSION "${ORT_VERSION}")
     message(STATUS "onnxruntime::onnxruntime synthesized from release zip (v${ORT_VERSION})")
   endif()
+
+  # Version info baked into the EP. Written after ORT resolution because
+  # onnxruntime_VERSION is only set there.
+  morphizen_add_version_info(COMPONENT hip-ep DIR "${CMAKE_SOURCE_DIR}")
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/version.txt"
+       "hip-ep;${COMP_GIT_COMMIT};${COMP_VERSION}\n"
+       "onnxruntime;;${onnxruntime_VERSION}\n")
+  set(MORPHIZEN_VERSION_INFO_FILE "${CMAKE_CURRENT_BINARY_DIR}/version.txt")
 
   # protobuf (+ bundled abseil). Name "Protobuf" matches morphizen's
   # FetchContent_Declare so the first-populated wins and morphizen reuses it.

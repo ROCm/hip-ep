@@ -1021,7 +1021,10 @@ void PassContextImp::print_version_info(const char *prefix) {
   auto &context = get_context_proto();
   for (auto version_info : context.version().version_infos()) {
     LOG_VERBOSE(1) << prefix << version_info.package_name() << " ("
-                   << version_info.version() << ") :" + version_info.commit();
+                   << version_info.version() << ")"
+                   << (version_info.commit().empty()
+                           ? std::string()
+                           : " :" + version_info.commit());
   }
   auto print_kv = [](int level, const char *prefix,
                      std::pair<const std::string, std::string> &kv) {
