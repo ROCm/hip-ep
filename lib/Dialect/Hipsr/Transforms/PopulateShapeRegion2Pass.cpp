@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
+#include "hip/Dialect/Hipsr/Transforms/Passes.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
