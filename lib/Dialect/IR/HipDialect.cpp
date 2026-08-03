@@ -15,6 +15,7 @@
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/SymbolTable.h"
 
+#include "HipShapeUtilsInternal.h"
 #include "hip/Dialect/IR/HipShapeUtils.h"
 
 #include <limits>
@@ -407,40 +408,6 @@ IfOp::inferReturnTypes(MLIRContext *context, std::optional<Location> location,
 // Helpers for DPS compute ops (custom parse/print, verify, interfaces)
 //===----------------------------------------------------------------------===//
 
-static bool isTensorMode(Value v) { return isa<RankedTensorType>(v.getType()); }
-
-/// Verify that all data operands (skipping ctx and Index args) are
-/// uniformly tensor or memref, and that results match the mode.
-static LogicalResult verifyDpsComputeOp(Operation *op,
-                                        ArrayRef<Value> dataOperands,
-                                        unsigned numInits) {
-  if (dataOperands.empty())
-    return op->emitOpError("expected at least one data operand");
-
-  bool tensorMode = isTensorMode(dataOperands.front());
-  for (Value v : dataOperands) {
-    if (isTensorMode(v) != tensorMode)
-      return op->emitOpError(
-          "all data operands must be the same kind (all tensor or all memref)");
-  }
-
-  unsigned numResults = op->getNumResults();
-  if (tensorMode) {
-    if (numResults != numInits)
-      return op->emitOpError("tensor mode requires ")
-             << numInits << " result(s), got " << numResults;
-    for (unsigned i = 0; i < numResults; ++i) {
-      if (!isa<RankedTensorType>(op->getResult(i).getType()))
-        return op->emitOpError("result #") << i << " must be a ranked tensor";
-    }
-  } else {
-    if (numResults != 0)
-      return op->emitOpError("memref mode must have zero results, got ")
-             << numResults;
-  }
-  return success();
-}
-
 /// Emit memory effects for a DPS compute op: memref inputs read, memref inits
 /// write. Non-memref operands (e.g. !hip.context, index scalars) are skipped.
 static void emitDpsMemoryEffects(
@@ -742,21 +709,10 @@ void MatmulOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
-/// Read the shape of `v` if it is a `RankedTensorType` or `MemRefType`;
-/// returns an empty ArrayRef otherwise (caller must guard against this with
-/// `verifyDpsComputeOp`, which already rejects non-shaped data operands).
-static ArrayRef<int64_t> getShapeOf(Value v) {
-  if (auto t = dyn_cast<RankedTensorType>(v.getType()))
-    return t.getShape();
-  if (auto m = dyn_cast<MemRefType>(v.getType()))
-    return m.getShape();
-  return {};
-}
-
 LogicalResult MatmulOp::verify() {
   // First the cross-cutting DPS contract (all-tensor-or-all-memref +
   // result-count parity); failures here also rule out bogus operand types,
-  // so the matmul shape check below can rely on getShapeOf().
+  // so the matmul shape check below can rely on detail::getShapeOf().
   if (failed(verifyDpsComputeOp(*this, {getA(), getB(), getOutput()},
                                 /*numInits=*/1)))
     return failure();
@@ -767,7 +723,7 @@ LogicalResult MatmulOp::verify() {
   return mlir::hip::verifyHipOpShape(
       *this, [&]() -> SmallVector<SmallVector<int64_t>> {
         SmallVector<int64_t> outShape = mlir::hip::inferMatmulShape(
-            getShapeOf(getA()), getShapeOf(getB()),
+            detail::getShapeOf(getA()), detail::getShapeOf(getB()),
             [&]() { return this->emitOpError(); }, getTransA(), getTransB());
         if (outShape.empty())
           return {};
@@ -885,7 +841,7 @@ LogicalResult QMatMulOp::verify() {
   return mlir::hip::verifyHipOpShape(
       *this, [&]() -> SmallVector<SmallVector<int64_t>> {
         SmallVector<int64_t> outShape = mlir::hip::inferMatmulShape(
-            getShapeOf(getA()), getShapeOf(getB()),
+            detail::getShapeOf(getA()), detail::getShapeOf(getB()),
             [&]() { return this->emitOpError(); }, getTransA(), getTransB());
         if (outShape.empty())
           return {};
@@ -921,12 +877,12 @@ LogicalResult QGemmOp::verify() {
   if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
     return failure();
 
-  ArrayRef<int64_t> aShape = getShapeOf(getA());
-  ArrayRef<int64_t> bShape = getShapeOf(getB());
+  ArrayRef<int64_t> aShape = detail::getShapeOf(getA());
+  ArrayRef<int64_t> bShape = detail::getShapeOf(getB());
   if (aShape.size() != 2 || bShape.size() != 2)
     return emitOpError("expected rank-2 A and B operands");
   if (Value c = getC()) {
-    if (getShapeOf(c).size() > 2)
+    if (detail::getShapeOf(c).size() > 2)
       return emitOpError("expected C to be broadcastable to [M, N]");
   }
 
@@ -947,8 +903,8 @@ LogicalResult QGemmOp::verify() {
 
   if (Value bScales = getBScales()) {
     Value bZeroPoints = getBZeroPoints();
-    ArrayRef<int64_t> scaleShape = getShapeOf(bScales);
-    ArrayRef<int64_t> zpShape = getShapeOf(bZeroPoints);
+    ArrayRef<int64_t> scaleShape = detail::getShapeOf(bScales);
+    ArrayRef<int64_t> zpShape = detail::getShapeOf(bZeroPoints);
     if (scaleShape.size() != 1 || zpShape.size() != 1)
       return emitOpError("expected rank-1 B_scales and B_zero_points");
     if (!cast<ShapedType>(bScales.getType()).getElementType().isF32())
