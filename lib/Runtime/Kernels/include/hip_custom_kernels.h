@@ -751,6 +751,31 @@ HIP_KERNEL_API int hip_gqa_flash_prefill_v2(
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale);
 
+/* Same as hip_gqa_flash_prefill_v2, plus attention sinks / smooth softmax and
+ * a sliding window.
+ * Kept as a separate symbol rather than widening v2, because v2 is redeclared
+ * locally by the standalone GQA harnesses and the dispatch_bench shim header;
+ * widening it in place would break those and risk a silent host/kernel ABI skew.
+ *
+ *   local_window_size : <= 0 for full attention. > 0 masks key k for query q
+ *                       when k < past_len + q - local_window_size + 1, the same
+ *                       convention causal_mask_kernel_impl uses.
+ *   head_sink         : [num_heads] __half of per-head sink logits, or null.
+ *   smooth_softmax    : non-zero adds a sink logit of 0, matching the
+ *                       decomposed path when head_sink is null. head_sink takes
+ *                       precedence when both are supplied.
+ *
+ * Sinks and windows are implemented by the v5 kernel, i.e. at d == 64 only.
+ * Returns 0 on success and -1 when the request cannot be served exactly (a sink
+ * or a window with d != 64), so the caller falls back to the decomposed path
+ * instead of silently dropping either. A request with neither is forwarded to
+ * v2 and keeps v2's head-dim coverage. */
+HIP_KERNEL_API int hip_gqa_flash_prefill_v3(
+    void* stream, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
+    int past_len, float scale, int local_window_size, const void* head_sink,
+    int num_heads, int smooth_softmax);
+
 /* NB: prefill is compute-bound, so there is deliberately NO separate int8
  * prefill kernel. The runtime (real/gqa.cpp) dequantizes the int8 KV cache to an
  * fp16 scratch ONCE (hip_gqa_dequant_kv_i8_to_fp16) and reuses the tuned fp16
