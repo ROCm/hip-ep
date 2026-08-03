@@ -13,34 +13,6 @@
 
 include "mlir/Pass/PassBase.td"
 
-def PopulateShapeRegionPass
-    : Pass<"hipsr-populate-shape-region", "mlir::func::FuncOp"> {
-  let summary = "Fill empty hipsr shape regions via ShapeRegionInterface";
-  let description = [{
-    Walks every op implementing `ShapeRegionInterface` and, for each one whose
-    shape region is still empty (zero blocks, i.e. unpopulated), calls
-    `populateShapeRegion()` to emit its output-shape computation. Ops whose
-    region is already populated are left untouched, so the pass is idempotent.
-
-    This is the single place that turns the "unpopulated" ops produced by the
-    conversion stage (e.g. `convert-onnx-to-hipsr`, which leaves shape regions
-    empty) into fully-shaped ops. It is also the driver that exercises each
-    op's `populateShapeRegion()` end-to-end in LIT tests, so the shape
-    computation is verified against generated (not hand-written) IR.
-  }];
-  // Union of the dialects that ops' populateShapeRegion() emit (can't be
-  // auto-derived: getDependentDialects runs before any IR exists). Extend it
-  // when a new op's populateShapeRegion() uses a new dialect; a missing entry
-  // asserts at op creation, caught by that op's populate LIT test.
-  let dependentDialects = [
-    "::mlir::hipsr::HipsrDialect",
-    "::mlir::arith::ArithDialect",
-    "::mlir::memref::MemRefDialect",
-    "::mlir::shape::ShapeDialect",
-    "::mlir::tensor::TensorDialect"
-  ];
-}
-
 def PartitionPoolDomainsPass
     : Pass<"hipsr-partition-pool-domains", "mlir::func::FuncOp"> {
   let summary = "Split a function into hipsr pool domains";

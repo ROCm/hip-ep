@@ -14,9 +14,7 @@ namespace mlir {
 namespace hipsr {
 namespace {
 
-/// onnx.Cast -> hipsr.cast. The op's shape region is left empty (zero blocks)
-/// here; a dedicated later pass populates every op's shape region uniformly, so
-/// this stage does not call populateShapeRegion.
+/// onnx.Cast -> hipsr.cast. The tied placeholder's shape region remains empty.
 ///
 /// The ONNX `saturate` attribute (clamp-vs-wrap when casting to float8) is not
 /// modeled on hipsr.cast yet, so it is currently ignored. Revisit once float8
