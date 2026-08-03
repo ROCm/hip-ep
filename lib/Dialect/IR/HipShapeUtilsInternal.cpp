@@ -6,6 +6,7 @@
 
 #include "HipShapeUtilsInternal.h"
 
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 
 using namespace mlir;
@@ -16,4 +17,12 @@ ArrayRef<int64_t> mlir::hip::detail::getShapeOf(Value value) {
   if (auto memrefType = dyn_cast<MemRefType>(value.getType()))
     return memrefType.getShape();
   return {};
+}
+
+SmallVector<int64_t> mlir::hip::detail::getI64Array(ArrayAttr attr) {
+  SmallVector<int64_t> values;
+  values.reserve(attr.size());
+  for (Attribute value : attr)
+    values.push_back(cast<IntegerAttr>(value).getInt());
+  return values;
 }

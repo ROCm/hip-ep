@@ -112,15 +112,15 @@ module {
   // --------------------------------------------------------------------------
   // 5. Asymmetric stride [2, 3]
   // --------------------------------------------------------------------------
-  func.func @conv_asymmetric_stride(%input: tensor<1x3x224x224xf32>, %weights: tensor<64x3x7x3xf32>, %bias: tensor<64xf32>) -> tensor<1x64x112x74xf32> {
+  func.func @conv_asymmetric_stride(%input: tensor<1x3x224x224xf32>, %weights: tensor<64x3x7x3xf32>, %bias: tensor<64xf32>) -> tensor<1x64x112x75xf32> {
     %output = "onnx.Conv"(%input, %weights, %bias) {
       kernel_shape = [7, 3],
       strides = [2, 3],
       pads = [3, 1, 3, 1],
       dilations = [1, 1],
       group = 1 : i64
-    } : (tensor<1x3x224x224xf32>, tensor<64x3x7x3xf32>, tensor<64xf32>) -> tensor<1x64x112x74xf32>
-    return %output : tensor<1x64x112x74xf32>
+    } : (tensor<1x3x224x224xf32>, tensor<64x3x7x3xf32>, tensor<64xf32>) -> tensor<1x64x112x75xf32>
+    return %output : tensor<1x64x112x75xf32>
   }
 
   // CHECK-LABEL: func.func @conv_asymmetric_stride
@@ -149,8 +149,26 @@ module {
   // CHECK-SAME: !hip.context
   // Spatial output dim resolved from tensor.dim of the input + arith, NOT the
   // conv result (would be a use-before-def).
-  // CHECK: arith.divsi
+  // CHECK: arith.floordivsi
   // CHECK: tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x128x?x64xf16>
   // CHECK: hip.conv({{.*}}) outs({{.*}} : tensor<?x128x?x64xf16>) {dilations = [1, 1], group = 1 : i64, kernel_shape = [3, 3], pads = [1, 1, 1, 1], strides = [2, 2]}
   // CHECK-NOT: hip.alloc
+
+  // --------------------------------------------------------------------------
+  // 7. Omitted kernel_shape is derived from static weight spatial dimensions.
+  // --------------------------------------------------------------------------
+  func.func @conv_derived_kernel(%input: tensor<1x3x8x8xf32>,
+                                 %weights: tensor<4x3x3x5xf32>)
+      -> tensor<1x4x6x4xf32> {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %output = "onnx.Conv"(%input, %weights, %none) {
+      strides = [1, 1], pads = [0, 0, 0, 0]
+    } : (tensor<1x3x8x8xf32>, tensor<4x3x3x5xf32>, none)
+      -> tensor<1x4x6x4xf32>
+    return %output : tensor<1x4x6x4xf32>
+  }
+
+  // CHECK-LABEL: func.func @conv_derived_kernel
+  // CHECK: hip.conv
+  // CHECK-SAME: kernel_shape = [3, 5]
 }
