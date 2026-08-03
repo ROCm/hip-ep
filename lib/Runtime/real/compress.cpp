@@ -35,9 +35,10 @@ int wrap_compress(RuntimeState *state, void *input, void *condition,
   if (condition_len <= 0 || num_output_elements <= 0)
     return 0;
 
+  // Kernel workspace: the compacted selected-index array followed by the
+  // selected-count scalar.
   size_t workspace_bytes =
-      static_cast<size_t>(condition_len) * sizeof(int64_t) +
-      sizeof(unsigned long long);
+      static_cast<size_t>(condition_len) * sizeof(int64_t) + sizeof(int64_t);
   if (hipdnn_ep_state_ensure_workspace(state, workspace_bytes) != 0) {
     RUNTIME_DEBUG_LOG("[REAL] wrap_compress: ensure_workspace failed\n");
     return -1;

@@ -10,6 +10,7 @@
 #include "hip/Dialect/Hipsr/IR/HipsrShapeRegionInterface.h"
 
 #include "mlir/Bytecode/BytecodeOpInterface.h"
+#include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"

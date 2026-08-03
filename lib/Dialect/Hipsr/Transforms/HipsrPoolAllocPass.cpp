@@ -13,8 +13,10 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 
 #include <cstddef>
 #include <optional>
@@ -68,8 +70,57 @@ llvm::DenseMap<Value, Lifetime> computeLiveness(Block &body) {
   return lifetimes;
 }
 
+llvm::SmallVector<llvm::SmallVector<Value>>
+greedyGrouping(Block &body, const llvm::DenseMap<Value, Lifetime> &lifetimes) {
+  llvm::SmallVector<Value> allocs;
+  for (Operation &op : body) {
+    auto allocOp = dyn_cast<memref::AllocOp>(&op);
+    if (!allocOp) {
+      continue;
+    }
+    if (lifetimes.contains(allocOp.getResult())) {
+      allocs.push_back(allocOp.getResult());
+    }
+  }
+  llvm::stable_sort(allocs, [&](Value a, Value b) {
+    return lifetimes.lookup(a).start < lifetimes.lookup(b).start;
+  });
+
+  auto overlaps = [](const Lifetime &a, const Lifetime &b) {
+    return !(a.end < b.start || b.end < a.start);
+  };
+
+  llvm::SmallVector<llvm::SmallVector<Value>> groups;
+  for (Value alloc : allocs) {
+    Lifetime lifetime = lifetimes.lookup(alloc);
+    bool placed = false;
+    for (llvm::SmallVector<Value> &group : groups) {
+      if (llvm::any_of(group, [&](Value member) {
+            return overlaps(lifetimes.lookup(member), lifetime);
+          })) {
+        continue;
+      }
+      group.push_back(alloc);
+      placed = true;
+      break;
+    }
+    if (!placed) {
+      groups.push_back({alloc});
+    }
+  }
+  return groups;
+}
+
 void emitPoolingReport(Block &body,
-                       const llvm::DenseMap<Value, Lifetime> &lifetimes) {
+                       const llvm::DenseMap<Value, Lifetime> &lifetimes,
+                       llvm::ArrayRef<llvm::SmallVector<Value>> groups) {
+  llvm::DenseMap<Value, size_t> groupIndices;
+  for (auto [groupIdx, group] : llvm::enumerate(groups)) {
+    for (Value member : group) {
+      groupIndices[member] = groupIdx;
+    }
+  }
+
   for (Operation &op : body) {
     auto allocOp = dyn_cast<memref::AllocOp>(&op);
     if (!allocOp) {
@@ -80,7 +131,8 @@ void emitPoolingReport(Block &body,
       continue;
     }
     allocOp.emitRemark() << "hipsr-pool-alloc: lifetime [" << it->second.start
-                         << "," << it->second.end << "]";
+                         << "," << it->second.end << "] group "
+                         << groupIndices.lookup(allocOp.getResult());
   }
 }
 
@@ -92,8 +144,10 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
     getOperation().walk([&](PoolDomainOp domain) {
       Block &body = domain.getBody().front();
       llvm::DenseMap<Value, Lifetime> lifetimes = computeLiveness(body);
+      llvm::SmallVector<llvm::SmallVector<Value>> groups =
+          greedyGrouping(body, lifetimes);
       if (emitPoolReport) {
-        emitPoolingReport(body, lifetimes);
+        emitPoolingReport(body, lifetimes, groups);
       }
     });
   }

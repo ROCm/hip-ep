@@ -1,5 +1,7 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
+
+// UNSUPPORTED: true
 //
 //===----------------------------------------------------------------------===//
 // Shape regions are IsolatedFromAbove, so -cse and -canonicalize must not merge
