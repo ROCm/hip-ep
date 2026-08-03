@@ -82,6 +82,20 @@ mlir::hip::inferGatherShape(ArrayRef<int64_t> dataShape,
   return result;
 }
 
+FailureOr<SmallVector<int64_t>>
+mlir::hip::inferOneHotShape(ArrayRef<int64_t> indicesShape,
+                            std::optional<int64_t> depth, int64_t axis) {
+  int64_t outputRank = static_cast<int64_t>(indicesShape.size()) + 1;
+  if (axis < 0)
+    axis += outputRank;
+  if (axis < 0 || axis >= outputRank || (depth && *depth < 0))
+    return failure();
+
+  SmallVector<int64_t> result(indicesShape.begin(), indicesShape.end());
+  result.insert(result.begin() + axis, depth.value_or(ShapedType::kDynamic));
+  return result;
+}
+
 FailureOr<SmallVector<OpFoldResult>>
 mlir::hip::reifyGatherWithAxis(OpBuilder &b, Location loc, Value data,
                                Value indices, int64_t axis) {
