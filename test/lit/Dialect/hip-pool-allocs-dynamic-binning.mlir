@@ -5,12 +5,11 @@
 // FileCheck test for the fallback dynamic packing of --hip-pool-allocs
 // (lifetime-only=false).
 //
-// Two dynamic allocs with the SAME dynamic dim (%d) but DIFFERENT channel width
-// (8192 vs 4096 -> different, both 256-aligned, staticFactor) and DISJOINT
-// lifetimes. The fallback groups by dynamic dim and best-fit-packs the integer
-// staticFactors within the group, so the two allocs share one slab (both at
-// offset 0), sized to the larger -- exercising the greedy best-fit path rather
-// than the cross-group lifetime coloring that the default relies on.
+// The grouped mode best-fit-packs allocs sharing a dynamic factor before
+// applying cross-group lifetime coloring. Besides the basic two-width sharing
+// case, the second test covers the gap-packing advantage retained by this mode:
+// two overlapping small allocs can occupy opposite halves of a larger,
+// lifetime-disjoint alloc's reservation.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt --hip-pool-allocs='lifetime-only=false' %s | FileCheck %s
@@ -38,6 +37,38 @@ func.func @cross_width_share(%ctx: !hip.context,
   %b = memref.alloc(%d) : memref<?x4096xf32>
   hip.miopen.softmax(%ctx) ins(%b : memref<?x4096xf32>)
                            outs(%b : memref<?x4096xf32>)
+
+  return %arg : memref<?xf32>
+}
+
+// CHECK-LABEL: func.func @same_factor_gap_packing
+// A, B, and C share %d. A is disjoint from both smaller allocs, while B and C
+// overlap each other. Best-fit places B and C in opposite halves of A's
+// reservation, keeping the span at 32768 units instead of 49152.
+// CHECK-NOT: arith.constant 49152 : index
+// CHECK: %[[SPAN:[0-9a-z_]+]] = arith.constant 32768 : index
+// CHECK: %[[SIZE:[0-9a-z_]+]] = arith.muli %{{.*}}, %[[SPAN]] : index
+// CHECK: %[[POOL:[0-9a-z_]+]] = hip.get_pool({{.*}}%[[SIZE]])
+// CHECK: memref.view %[[POOL]][%[[OFF:[0-9a-z_]+]]]
+// CHECK: memref.view %[[POOL]][%[[OFF]]]
+// CHECK: memref.view %[[POOL]]
+func.func @same_factor_gap_packing(
+    %ctx: !hip.context, %arg: memref<?xf32>) -> memref<?xf32> {
+  %c0 = arith.constant 0 : index
+  %d = memref.dim %arg, %c0 : memref<?xf32>
+
+  // A: 32768 units, dead before B and C are allocated.
+  %a = memref.alloc(%d) : memref<?x8192xf32>
+  hip.miopen.softmax(%ctx) ins(%a : memref<?x8192xf32>)
+                           outs(%a : memref<?x8192xf32>)
+
+  // B and C: 16384 units each, with overlapping lifetimes.
+  %b = memref.alloc(%d) : memref<?x4096xf32>
+  %c = memref.alloc(%d) : memref<?x4096xf32>
+  hip.miopen.softmax(%ctx) ins(%b : memref<?x4096xf32>)
+                           outs(%b : memref<?x4096xf32>)
+  hip.miopen.softmax(%ctx) ins(%c : memref<?x4096xf32>)
+                           outs(%c : memref<?x4096xf32>)
 
   return %arg : memref<?xf32>
 }

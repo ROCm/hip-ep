@@ -34,8 +34,8 @@
 //     Phase 2 - Partition: split this domain's allocs into static and dynamic.
 //     Phase 3 - Static packing: greedy best-fit offset assignment within
 //               this domain.
-//     Phase 4 - Dynamic packing: color runtime-sized allocs by lifetime so
-//               lifetime-disjoint allocs share a pool slab (Phase 4 header).
+//     Phase 4 - Dynamic packing: build mode-specific runtime-size groups, then
+//               color fully disjoint groups into shared slabs (Phase 4 header).
 //     Phase 5 - IR emission: insert this domain's hip.get_pool and views;
 //               offsets are local to this domain's pool.
 //
@@ -62,13 +62,13 @@
 
 STATISTIC(NumAllocsPooled, "Number of allocations pooled into byte buffer");
 STATISTIC(NumStaticPacked, "Number of static allocations packed");
-STATISTIC(NumDynBuckets, "Number of dynamic size buckets created");
+STATISTIC(NumDynBuckets, "Number of dynamic pool slabs and buckets created");
 STATISTIC(NumDomains, "Number of dominance domains (separate pools) created");
 STATISTIC(NumStaticFragBytes,
           "Static-pool bytes beyond the max-load lower bound (fragmentation)");
 STATISTIC(NumDynFragUnits,
           "Dynamic-pool staticFactor units beyond the max-load lower bound "
-          "(single-F domains only, pre-scale by the dynamic factor)");
+          "(aligned single-F domains only, pre-scale by the dynamic factor)");
 STATISTIC(NumSmallBucketExcessBins,
           "Small-bucket bins beyond the peak concurrent count");
 
@@ -444,28 +444,20 @@ packStaticAllocs(MutableArrayRef<AllocInfo> statics, int64_t alignment) {
 // alloc's byte size is `staticFactor * F`, where staticFactor = elementBytes *
 // product(static dims) and F = product(dynOperands) is a runtime value.
 //
-// Default (lifetime-only): every runtime-sized alloc is its own group, then a
-// group-level lifetime coloring lets ANY two lifetime-disjoint allocs share one
-// pool slab (slab width = max of the member footprints) regardless of their
-// dynOperands. A slab's cost is therefore the MAX of its concurrently-live
-// members, not the SUM of every alloc routed to it. Groups are ordered
-// largest-staticFactor-first -- the only compile-time size proxy, since F is
-// symbolic -- so the biggest members dominate each slab width. Only
-// proven-disjoint allocs ever share, so overlapping address ranges is always
-// safe (no mis-pairing).
+// Default (lifetime-only): make every runtime-sized alloc its own group so any
+// two lifetime-disjoint allocs may share regardless of dynOperands. Each group
+// carries its own F, emitted as `product(dynOperands)`, and each slab is sized
+// to the runtime max of its member footprints. This exposes fine-grained
+// cross-factor reuse, but because a group is an indivisible slab member it can
+// lose same-factor gap packing. A slab containing a non-alignment-multiple
+// alloc rounds its runtime width up so the next slab's base stays aligned.
 //
-// Each group carries its own F, emitted as `product(dynOperands)`. An alloc's
-// byte offset is `slabBase + unitOffset * F`. When staticFactor is a multiple
-// of the alignment the packed unit offsets are too, so the scaled offset stays
-// aligned for any F; a slab that also holds a non-multiple alloc rounds its
-// width up so the next slab's base stays aligned.
-//
-// Fallback (lifetime-only = false): group by dynOperands and best-fit-pack the
-// integer staticFactors within a group (offsets/span later scaled by the common
-// F), then run the same cross-group coloring. Non-alignment-multiple allocs go
-// to per-size lifetime bins in byte space (`DynBucket`) so their offsets are
-// not rounded up and scaled by F. This is strictly <= the default's per-group
-// footprint and never mis-pairs; kept as a conservative escape hatch.
+// Grouped mode (lifetime-only = false): group by dynOperands and best-fit-pack
+// the integer staticFactors within each group (offsets/span later scaled by the
+// common F), then color fully lifetime-disjoint groups into shared slabs. This
+// preserves same-factor gap packing while still allowing whole groups with
+// unrelated dynamic dimensions to share. Non-alignment-multiple allocs remain
+// in per-size lifetime bins in byte space (`DynBucket`).
 
 /// A bucket groups dynamic allocs that share the same runtime byte size.
 /// Within a bucket, each "bin" holds allocs with non-overlapping lifetimes
@@ -503,15 +495,12 @@ struct DynBucket {
   Value alignedSize;
 };
 
-/// An aligned-dynamic group: allocs that share the same `dynOperands` and whose
-/// `staticFactor` is a multiple of the pool alignment.  All member byte sizes
-/// are `staticFactor_i * F` with a common `F = product(dynOperands)`.  We pack
-/// the integer `staticFactor`s with the static greedy packer -- non-overlap is
-/// scale-invariant, so scaling every offset/size by the common `F` preserves it
-/// -- then multiply offsets and the span by `F` at emit.  Because every
-/// `staticFactor` is a multiple of `alignment`, the packed unit offsets are
-/// too, so `unitOffset * F` stays aligned for any integer `F` (no per-alloc
-/// alignment padding).
+/// A dynamic group with one runtime factor `F = product(dynOperands)`.
+/// Lifetime-only mode creates one group per alloc, including
+/// non-alignment-multiple static factors. Grouped mode combines aligned allocs
+/// with common `dynOperands` and best-fit-packs their integer static factors;
+/// scaling every offset and size by the common F preserves non-overlap and
+/// alignment.
 ///
 /// `assignments` = (alloc, unitOffset in staticFactor bytes); `spanUnits` =
 /// highwater in staticFactor bytes.  Emitted byte offset = base + unitOffset*F.
@@ -521,12 +510,10 @@ struct AlignedDynGroup {
   int64_t spanUnits = 0;
 };
 
-/// Phase-4 result: aligned groups (factored static packing -- the memory-
-/// dominant case) plus small buckets (`staticFactor` not a multiple of the
-/// alignment -> per-size bucket/bin packing in byte space).  Small allocs stay
-/// off the factoring path because rounding their unit offsets up to the pool
-/// alignment would inflate each reservation by a factor of F; keeping them
-/// byte-aligned avoids that, and their byte contribution is negligible.
+/// Phase-4 result: dynamic groups plus grouped-mode small buckets.
+/// Lifetime-only mode routes every alloc through `alignedGroups`; grouped mode
+/// sends non-alignment-multiple allocs to per-size bucket/bin packing in byte
+/// space so alignment padding is not multiplied by F.
 struct DynPacking {
   SmallVector<AlignedDynGroup> alignedGroups;
   SmallVector<DynBucket> smallBuckets;
@@ -549,11 +536,10 @@ struct DynPacking {
 /// Group dynamic allocs, color them by lifetime, and record which groups may
 /// share a slab (see the Phase 4 header, AlignedDynGroup, and DynPacking).
 ///
-/// Default (`lifetimeOnly`): one group per alloc, so the cross-group coloring
-/// can share a slab between any two lifetime-disjoint allocs regardless of
-/// their `dynOperands`. Fallback: group by `dynOperands` and best-fit-pack the
-/// integer `staticFactor`s within each group before the same coloring, sending
-/// non-alignment-multiple allocs to per-size byte-space bins instead.
+/// By default, use one group per alloc for fine-grained cross-factor reuse.
+/// With `lifetimeOnly=false`, group by `dynOperands` and best-fit-pack the
+/// integer `staticFactor`s within each group before cross-group coloring,
+/// sending non-alignment-multiple allocs to per-size byte-space bins.
 static DynPacking packDynamicAllocs(MutableArrayRef<AllocInfo> dynamics,
                                     int64_t alignment, bool lifetimeOnly) {
   // staticFactor (elem bytes * product of static dims) + dynOperands per alloc.
@@ -619,9 +605,9 @@ static DynPacking packDynamicAllocs(MutableArrayRef<AllocInfo> dynamics,
   for (AllocInfo &info : dynamics) {
     auto [sf, ops] = computeKey(info);
     staticFactorOf[&info] = sf;
-    // In the default, every dynamic alloc (aligned or not) is packed by the
-    // lifetime coloring below -- no size bucketing. The small-bucket path is
-    // used only by the fallback (lifetimeOnly == false).
+    // Lifetime-only packs every dynamic alloc (aligned or not) through the
+    // cross-group coloring below. Grouped mode keeps
+    // non-alignment-multiple allocs in byte-space buckets.
     if (lifetimeOnly || sf % alignment == 0)
       findAligned(ops).allocs.push_back(&info);
     else
@@ -629,7 +615,7 @@ static DynPacking packDynamicAllocs(MutableArrayRef<AllocInfo> dynamics,
   }
 
   if (lifetimeOnly) {
-    // Each aligned alloc is its own group; the cross-group coloring below then
+    // Each dynamic alloc is its own group; the cross-group coloring below then
     // shares slabs across any lifetime-disjoint allocs. Order largest-
     // staticFactor-first so bigger members dominate each slab width (the only
     // compile-time size proxy, since F is symbolic).
@@ -646,8 +632,8 @@ static DynPacking packDynamicAllocs(MutableArrayRef<AllocInfo> dynamics,
                         return a.spanUnits > b.spanUnits;
                       });
   } else {
-    // Fallback: best-fit-pack each dynOperands group's integer staticFactors,
-    // largest-first (offsets scaled by the common F at emit).
+    // Grouped mode: best-fit-pack each dynOperands group's integer
+    // staticFactors largest-first (offsets scaled by the common F at emit).
     for (AlignedTmp &t : alignedTmp) {
       llvm::stable_sort(t.allocs, [&](AllocInfo *a, AllocInfo *b) {
         return staticFactorOf.lookup(a) > staticFactorOf.lookup(b);
@@ -940,6 +926,10 @@ void PoolAllocsPass::runOnOperation() {
         return ArrayRef<Value>(g.dynOperands) ==
                ArrayRef<Value>(groups.front().dynOperands);
       });
+      bool coefficientComparable =
+          singleF && llvm::all_of(groups, [&](const AlignedDynGroup &g) {
+            return g.spanUnits % align == 0;
+          });
       int64_t dynPoolUnits = 0;
       for (ArrayRef<unsigned> slab : dynPacking.alignedSuperBins) {
         int64_t width = 0;
@@ -955,7 +945,7 @@ void PoolAllocsPass::runOnOperation() {
         memref::AllocOp op = i->allocOp; // copy handle to drop constness
         return staticFactorBytes(op.getType());
       });
-      int64_t dynFrag = singleF ? dynPoolUnits - dynLbUnits : 0;
+      int64_t dynFrag = coefficientComparable ? dynPoolUnits - dynLbUnits : 0;
       NumDynFragUnits += dynFrag;
 
       int64_t smallBins = 0, smallMinBins = 0;
@@ -974,11 +964,13 @@ void PoolAllocsPass::runOnOperation() {
         remark << "hip-pool-allocs fragmentation: domain " << domainId
                << ": static " << staticPoolSize << "/" << staticLb << " B ("
                << staticFrag << " frag); ";
-        if (singleF)
+        if (coefficientComparable)
           remark << "dyn-pool " << dynPoolUnits << "/" << dynLbUnits
                  << " units (" << dynFrag << " frag); ";
-        else
+        else if (!singleF)
           remark << "dyn-pool mixed-F; ";
+        else
+          remark << "dyn-pool runtime-aligned; ";
         remark << "small-buckets " << smallBins << "/" << smallMinBins
                << " bins (" << (smallBins - smallMinBins) << " excess)";
       }

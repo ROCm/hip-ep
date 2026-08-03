@@ -2,10 +2,11 @@
 // Licensed under the MIT License.
 //
 //===----------------------------------------------------------------------===//
-// FileCheck test for the default (lifetime-only) dynamic packing of
+// FileCheck test for the default lifetime-only dynamic packing of
 // --hip-pool-allocs: every runtime-sized alloc is its own group, and any two
 // lifetime-disjoint allocs share one pool slab (width = maxui of footprints)
-// regardless of their dynamic dimensions.
+// regardless of their dynamic dimensions. Grouped common-factor best-fit
+// packing remains available with lifetime-only=false.
 //
 // Three behaviors, one per function:
 //   1. disjoint allocs with DIFFERENT dynamic dims share a slab (maxui);

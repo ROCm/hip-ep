@@ -143,10 +143,36 @@ staticFactor × product(dynamic dimension SSA values)
 
 where `staticFactor` is the element byte width multiplied by all static dimensions.
 
-Dynamic allocations use two paths:
+The default, `lifetime-only=true`, makes each dynamic allocation an
+independent group. Groups are greedily colored into slabs whose members are
+pairwise lifetime-disjoint, including groups with unrelated runtime factors.
+Every member uses the slab base, and the slab width is the runtime maximum of
+its member footprints. A slab containing a non-alignment-multiple
+`staticFactor` is rounded up in byte space so the following slab remains
+aligned.
 
-1. **Aligned groups.** When `staticFactor` is a multiple of the pool alignment, allocations sharing the same dynamic-dimension SSA values share a common runtime factor `F`. Their integer static factors are packed with the greedy best-fit algorithm, then offsets and span are multiplied by `F`.
-2. **Small buckets.** When `staticFactor` is not alignment-multiple, allocations are bucketed by `{staticFactor, dynamic operands}` and placed into first-fit lifetime bins in byte space. This avoids multiplying alignment padding by `F` for tiny allocations.
+This default exposes fine-grained sharing across unrelated dynamic dimensions.
+Because each allocation is an indivisible slab member, however, it does not
+reuse separate address gaps inside a larger same-factor allocation. For
+example, two overlapping 256-unit allocations that are both disjoint from one
+512-unit allocation require 768 units in lifetime-only mode.
+
+`lifetime-only=false` selects grouped packing:
+
+1. **Aligned groups.** Allocations sharing the same dynamic-dimension SSA
+   values share a runtime factor `F`. Their integer `staticFactor`s are
+   best-fit-packed, then offsets and span are multiplied by `F`.
+2. **Cross-group slabs.** Groups that are fully lifetime-disjoint share a slab
+   even when their factors differ. The slab width is the runtime maximum of the
+   complete group footprints.
+3. **Small buckets.** Non-alignment-multiple allocations are bucketed by
+   `{staticFactor, dynamic operands}` and placed into first-fit lifetime bins in
+   byte space.
+
+Grouped packing retains same-factor gap reuse—the example above remains 512
+units—but cross-factor sharing is conservative because two groups may share
+only when every allocation in one is disjoint from every allocation in the
+other.
 
 ### Phase 5: IR emission
 
@@ -161,9 +187,14 @@ The domain pool size is:
 
 ```text
 static prefix
-+ sum(aligned-group runtime factor × packed span)
++ sum(dynamic slab runtime widths)
 + sum(small-bucket aligned size × bin count)
 ```
+
+Each dynamic slab width is the maximum of its member group footprints. A group
+footprint is `runtime factor × packed span`; in lifetime-only mode the packed
+span is simply that allocation's `staticFactor`. Slabs containing
+non-alignment-multiple members are rounded up to the configured alignment.
 
 Each original allocation is replaced at its original position, preserving its dynamic dimensions and memref type.
 
@@ -237,7 +268,14 @@ More than eight domains emits a non-fatal performance remark. Recommended triage
 4. `hip-hoist-alloc-size-arith`;
 5. remaining non-speculatable runtime dependencies.
 
-LLVM statistics include pooled allocation count, static allocation count, aligned dynamic group plus small-bucket count, domain count, and static/dynamic fragmentation measures. `--hip-pool-allocs='emit-fragmentation-report=true'` emits per-domain remarks without changing IR.
+LLVM statistics include pooled allocation count, static allocation count,
+dynamic slab plus small-bucket count, domain count, and static/dynamic
+fragmentation measures.
+`--hip-pool-allocs='emit-fragmentation-report=true'` emits per-domain remarks
+without changing IR. The dynamic coefficient comparison is numeric only when
+all aligned groups share one runtime factor and no slab needs runtime
+alignment. Mixed-factor and runtime-aligned slabs are reported symbolically
+instead of claiming a misleading zero-fragmentation result.
 
 Primary regression coverage:
 
@@ -245,6 +283,7 @@ Primary regression coverage:
 - `test/lit/Dialect/hip-pool-allocs-multi-domain-metadata.mlir`
 - `test/lit/Dialect/hip-pool-allocs-many-domains.mlir`
 - `test/lit/Dialect/hip-pool-allocs-dynamic-binning.mlir`
+- `test/lit/Dialect/hip-pool-allocs-lifetime-only.mlir`
 - `test/lit/Dialect/hip-pool-allocs-fragmentation-report.mlir`
 - `test/lit/Dialect/hip-resolve-tensor-dims.mlir`
 - `test/lit/Dialect/hip-resolve-memref-dims.mlir`
@@ -262,8 +301,10 @@ not a production-pipeline test.
 - PoolAllocs requires single-block functions.
 - Pools in separate domains cannot share storage.
 - Static-prefix and dynamic regions do not share offsets.
-- Distinct small buckets do not share offsets.
-- Small dynamic buckets retain per-key first-fit binning.
+- Default lifetime-only packing does not reuse separate same-factor address
+  gaps; grouped mode retains that reuse.
+- Grouped mode shares across dynamic factors only at whole-group granularity.
+- Distinct small buckets in grouped mode do not share offsets.
 - Pool alignment defaults to 256 bytes.
 
 These are performance or generality limits, not reasons to merge unrelated dominance domains or weaken correctness.

@@ -196,15 +196,19 @@ func.func @alignment_256(
   return %alloc1 : memref<1xf32>
 }
 
-// ===== Dynamic: two buckets with different SSA sizes =====
+// ===== Dynamic: disjoint allocs with different SSA sizes share a slab =====
 //
-// Two dynamic allocs with different dim values (%n vs %m) go into separate
-// buckets.  Pool = bucket0_aligned_size + bucket1_aligned_size.
+// Two dynamic allocs with different dim values (%n vs %m) and disjoint
+// lifetimes share one default lifetime-only slab. The pool contribution is the
+// runtime max of their footprints, and both views use the same base.
 //
 // CHECK-LABEL: func.func @dynamic_two_buckets
+// CHECK:         arith.maxui
 // CHECK:         %[[POOL:.*]] = hip.get_pool({{.*}}) : memref<?xi8>
-// CHECK:         memref.view %[[POOL]]{{.*}} : memref<?xi8> to memref<?x8xf32>
-// CHECK:         memref.view %[[POOL]]{{.*}} : memref<?xi8> to memref<?x4xf32>
+// CHECK:         memref.view %[[POOL]][%[[OFF:[a-zA-Z0-9_]+]]]
+// CHECK-SAME:      : memref<?xi8> to memref<?x8xf32>
+// CHECK:         memref.view %[[POOL]][%[[OFF]]]
+// CHECK-SAME:      : memref<?xi8> to memref<?x4xf32>
 // CHECK:         return
 func.func @dynamic_two_buckets(
     %ctx: !hip.context,

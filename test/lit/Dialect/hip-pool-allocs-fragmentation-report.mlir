@@ -17,7 +17,7 @@
 // exact numbers below.
 //===----------------------------------------------------------------------===//
 
-// RUN: hip-mlir-opt --hip-pool-allocs='emit-fragmentation-report=true' \
+// RUN: hip-mlir-opt --hip-pool-allocs='lifetime-only=true emit-fragmentation-report=true' \
 // RUN:   --verify-diagnostics %s
 // RUN: hip-mlir-opt --hip-pool-allocs %s | FileCheck %s
 
@@ -78,5 +78,28 @@ func.func @frag_report_dyn(%ctx: !hip.context,
   %b = memref.alloc(%d) : memref<?x4096xf32>
   hip.miopen.softmax(%ctx) ins(%b : memref<?x4096xf32>)
                            outs(%b : memref<?x4096xf32>)
+  return %arg : memref<?xf32>
+}
+
+//===----------------------------------------------------------------------===//
+// A non-alignment-multiple dynamic slab is rounded up in byte space at runtime.
+// Its footprint cannot be represented as a staticFactor coefficient times F,
+// so the report must not claim zero coefficient fragmentation.
+//===----------------------------------------------------------------------===//
+
+// CHECK-LABEL: func.func @frag_report_runtime_aligned
+// CHECK: hip.get_pool
+// CHECK-NOT: hip.get_pool
+
+// expected-remark@+1 {{static 0/0 B (0 frag); dyn-pool runtime-aligned; small-buckets 0/0 bins (0 excess)}}
+func.func @frag_report_runtime_aligned(
+    %ctx: !hip.context, %arg: memref<?xf32>) -> memref<?xf32> {
+  %c0 = arith.constant 0 : index
+  %d = memref.dim %arg, %c0 : memref<?xf32>
+
+  // staticFactor = 8, so the emitted slab is alignUp(8 * %d, 256).
+  %small = memref.alloc(%d) : memref<?x2xf32>
+  hip.miopen.softmax(%ctx) ins(%small : memref<?x2xf32>)
+                           outs(%small : memref<?x2xf32>)
   return %arg : memref<?xf32>
 }

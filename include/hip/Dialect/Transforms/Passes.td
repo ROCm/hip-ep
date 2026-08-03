@@ -241,9 +241,11 @@ def PoolAllocsPass : Pass<"hip-pool-allocs", "mlir::func::FuncOp"> {
     which uses grow-on-demand semantics: the runtime grows the pool when the
     requested size exceeds current capacity.
 
-    Static allocations use greedy best-fit offset assignment.  Dynamic
-    allocations are bucketed by their byte-size SSA value: non-overlapping
-    lifetimes within a bucket share an offset.
+    Static allocations use greedy best-fit offset assignment. By default, each
+    dynamic allocation is an independent lifetime-colored slab member, allowing
+    disjoint allocations to share across unrelated runtime factors. The slab is
+    sized to the runtime maximum of its member footprints. The optional grouped
+    mode first best-fit-packs allocations with a common runtime factor.
 
     Sub-buffer offsets are aligned to 256 bytes by default (configurable).
 
@@ -265,10 +267,10 @@ def PoolAllocsPass : Pass<"hip-pool-allocs", "mlir::func::FuncOp"> {
            "Debug-only: emit a per-domain remark comparing the packed pool "
            "size to the max-load lower bound. No effect on generated code.">,
     Option<"lifetimeOnly", "lifetime-only", "bool", /*default=*/"true",
-           "Default: pack dynamic allocs purely by lifetime -- any two "
-           "lifetime-disjoint allocs may share a pool slab regardless of their "
-           "dynamic dimensions. Set false to instead group by dynamic dimension "
-           "and best-fit-pack within a group before sharing across groups.">
+           "Default: make every dynamic alloc an independent lifetime-colored "
+           "slab member for finer cross-factor reuse. This may trade away "
+           "same-factor best-fit gap packing. Set false to best-fit-pack allocs "
+           "with common dynamic dimensions before sharing fully disjoint groups.">
   ];
   let dependentDialects = [
     "mlir::hip::HipDialect",
