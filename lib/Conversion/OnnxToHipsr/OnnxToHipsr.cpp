@@ -4,10 +4,10 @@
  */
 //===- OnnxToHipsr.cpp - Convert ONNX dialect to the hipsr dialect --------===//
 //
-// Converts ONNX dialect IR into hipsr dialect IR (tensor DPS). ONNX ops are
-// matched by name via the generic MLIR Operation API, so no onnx-mlir headers
-// are required. After rewriting, placeholder dependencies are separated from
-// data dependencies. A later pass fills shape regions via ShapeRegionInterface.
+// Converts ONNX dialect IR into hipsr dialect IR (tensor DPS). The conversion
+// target keeps helper computations inside hipsr.compute while allowing scalar
+// constants as graph roots. After conversion, placeholder dependencies are
+// rewired into a parallel shape graph.
 //
 //===----------------------------------------------------------------------===//
 
@@ -15,10 +15,12 @@
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
-#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "mlir/Transforms/DialectConversion.h"
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
@@ -32,13 +34,12 @@ namespace hipsr {
 
 namespace {
 
-// Replace placeholder data dependencies with tied placeholder results.
-static ::mlir::LogicalResult
-finalizePlaceholderDependencies(::mlir::ModuleOp module) {
-  ::llvm::DenseMap<::mlir::Value, ::mlir::Value> placeholderForDataResult;
-  module.walk([&](::mlir::DestinationStyleOpInterface dpsOp) {
-    for (::mlir::OpResult result : dpsOp->getResults()) {
-      ::mlir::OpOperand *initOperand = dpsOp.getTiedOpOperand(result);
+// Shape dependencies flow through placeholders instead of computed data.
+static LogicalResult finalizePlaceholderDependencies(ModuleOp module) {
+  llvm::DenseMap<Value, Value> placeholderForDataResult;
+  module.walk([&](DestinationStyleOpInterface dpsOp) {
+    for (OpResult result : dpsOp->getResults()) {
+      OpOperand *initOperand = dpsOp.getTiedOpOperand(result);
       if (!initOperand) {
         continue;
       }
@@ -51,19 +52,16 @@ finalizePlaceholderDependencies(::mlir::ModuleOp module) {
     }
   });
 
-  ::llvm::SmallVector<std::pair<::mlir::OpOperand *, ::mlir::Value>>
-      replacements;
-  ::mlir::WalkResult walkResult =
-      module.walk([&](PlaceholderOp placeholder) -> ::mlir::WalkResult {
-        ::mlir::MutableOperandRange mutableInputs =
-            placeholder.getInputsMutable();
+  llvm::SmallVector<std::pair<OpOperand *, Value>> replacements;
+  WalkResult walkResult =
+      module.walk([&](PlaceholderOp placeholder) -> WalkResult {
+        MutableOperandRange mutableInputs = placeholder.getInputsMutable();
         for (auto [inputIndex, input] :
-             ::llvm::enumerate(placeholder.getInputs())) {
+             llvm::enumerate(placeholder.getInputs())) {
           auto replacement = placeholderForDataResult.find(input);
-          ::mlir::Value resolvedInput =
-              replacement == placeholderForDataResult.end()
-                  ? input
-                  : replacement->second;
+          Value resolvedInput = replacement == placeholderForDataResult.end()
+                                    ? input
+                                    : replacement->second;
           if (!PlaceholderOp::isAllowedShapeGraphInput(resolvedInput)) {
             placeholder.emitOpError("input ")
                 << inputIndex
@@ -71,46 +69,45 @@ finalizePlaceholderDependencies(::mlir::ModuleOp module) {
                    "hipsr.placeholder, arith.constant, or hipsr.constant; got "
                    "result of '"
                 << resolvedInput.getDefiningOp()->getName() << "'";
-            return ::mlir::WalkResult::interrupt();
+            return WalkResult::interrupt();
           }
           if (resolvedInput != input) {
             replacements.emplace_back(&mutableInputs[inputIndex],
                                       resolvedInput);
           }
         }
-        return ::mlir::WalkResult::advance();
+        return WalkResult::advance();
       });
   if (walkResult.wasInterrupted()) {
-    return ::mlir::failure();
+    return failure();
   }
 
   for (auto [operand, value] : replacements) {
     operand->set(value);
   }
-  return ::mlir::success();
+  return success();
 }
 
 struct ConvertOnnxToHipsrPass
     : impl::ConvertOnnxToHipsrPassBase<ConvertOnnxToHipsrPass> {
   void runOnOperation() override {
-    ::mlir::RewritePatternSet patterns(&getContext());
-    populateOnnxToHipsrConstantPatterns(patterns);
-    populateCastConversionPatterns(patterns, &getContext());
-    populateMatMulConversionPatterns(patterns, &getContext());
-    populateExpandConversionPatterns(patterns, &getContext());
+    ModuleOp module = getOperation();
+    ConversionTarget target(getContext());
+    target.addIllegalDialect("onnx");
+    target.addLegalDialect<HipsrDialect>();
+    target.addLegalOp<ModuleOp, func::FuncOp, func::ReturnOp>();
+    target.addLegalOp<arith::ConstantOp>();
+    target.markUnknownOpDynamicallyLegal([](Operation *op) {
+      return op->getParentOfType<ComputeOp>() != nullptr;
+    });
 
-    // Same driver/config as convert-onnx-to-hip (greedy, ExistingOps): ONNX ops
-    // are matched by name and only the ops present on entry are rewritten, so
-    // generated hipsr / shape-region IR is left untouched.
-    ::mlir::GreedyRewriteConfig config;
-    config.setStrictness(::mlir::GreedyRewriteStrictness::ExistingOps);
-    if (::mlir::failed(::mlir::applyPatternsGreedily(
-            getOperation(), std::move(patterns), config))) {
+    RewritePatternSet patterns(&getContext());
+    if (failed(applyFullConversion(module, target, std::move(patterns)))) {
       signalPassFailure();
       return;
     }
     // Build the parallel shape graph after all data-graph rewrites finish.
-    if (::mlir::failed(finalizePlaceholderDependencies(getOperation()))) {
+    if (failed(finalizePlaceholderDependencies(module))) {
       signalPassFailure();
     }
   }
