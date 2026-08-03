@@ -3,10 +3,12 @@
 
 // RUN: hip-mlir-opt --convert-onnx-to-hipsr %s | FileCheck %s
 
-// Helper operations remain legal at any nesting depth inside hipsr.compute.
+// Scalar constants are legal at top level, and other helper operations remain
+// legal at any nesting depth inside hipsr.compute.
 // CHECK-LABEL: func.func @recursive_legality(
 // CHECK-SAME: %[[CTX:.+]]: !hipsr.context, %[[INPUT:.+]]: tensor<2x3xf16>,
 // CHECK-SAME: %[[INIT:.+]]: tensor<6xf16>) -> tensor<6xf16> {
+// CHECK-NEXT: arith.constant 1.000000e+00 : f32
 // CHECK-NEXT: %[[RESULT:.+]] = hipsr.compute(%[[CTX]]) ins(%[[INPUT]] : tensor<2x3xf16>) outs(%[[INIT]] : tensor<6xf16>) {
 // CHECK-NEXT: ^bb0(%{{.+}}: !hipsr.context, %[[BODY_INPUT:.+]]: tensor<2x3xf16>, %{{.+}}: tensor<6xf16>):
 // CHECK-NEXT: %[[NESTED:.+]] = scf.execute_region -> tensor<6xf16> {
@@ -20,6 +22,7 @@
 func.func @recursive_legality(
     %ctx: !hipsr.context, %input: tensor<2x3xf16>,
     %init: tensor<6xf16>) -> tensor<6xf16> {
+  %scalar = arith.constant 1.0 : f32
   %result = hipsr.compute(%ctx) ins(%input : tensor<2x3xf16>)
                                   outs(%init : tensor<6xf16>) {
   ^bb0(%body_ctx: !hipsr.context, %body_input: tensor<2x3xf16>,

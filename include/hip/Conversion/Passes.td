@@ -21,9 +21,10 @@ def ConvertOnnxToHipsrPass : Pass<"convert-onnx-to-hipsr", "mlir::ModuleOp"> {
     Operation API, so no onnx-mlir headers are required.
 
     Every ONNX operation must be converted. Outside `hipsr.compute`, only
-    module and function structure and hipsr operations are legal. Helper
-    operations from other dialects are legal at any depth inside
-    `hipsr.compute`, but nested ONNX operations must still be converted.
+    module and function structure, hipsr operations, and scalar
+    `arith.constant` operations are legal. Other helper operations are legal at
+    any depth inside `hipsr.compute`, but nested ONNX operations must still be
+    converted.
 
     Each operation pattern creates its data operation and tied placeholder.
     After conversion, downstream placeholder inputs are rewired from data

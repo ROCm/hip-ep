@@ -5,9 +5,9 @@
 //===- OnnxToHipsr.cpp - Convert ONNX dialect to the hipsr dialect --------===//
 //
 // Converts ONNX dialect IR into hipsr dialect IR (tensor DPS). The conversion
-// target keeps helper operations inside hipsr.compute, so the enclosing graph
-// contains only hipsr computation operations. After conversion, placeholder
-// dependencies are rewired into a parallel shape graph.
+// target keeps helper computations inside hipsr.compute while allowing scalar
+// constants as graph roots. After conversion, placeholder dependencies are
+// rewired into a parallel shape graph.
 //
 //===----------------------------------------------------------------------===//
 
@@ -96,6 +96,7 @@ struct ConvertOnnxToHipsrPass
     target.addIllegalDialect("onnx");
     target.addLegalDialect<HipsrDialect>();
     target.addLegalOp<ModuleOp, func::FuncOp, func::ReturnOp>();
+    target.addLegalOp<arith::ConstantOp>();
     target.markUnknownOpDynamicallyLegal([](Operation *op) {
       return op->getParentOfType<ComputeOp>() != nullptr;
     });

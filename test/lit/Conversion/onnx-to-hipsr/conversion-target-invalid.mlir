@@ -23,6 +23,15 @@ func.func @foreign_top_level() -> tensor<2xf32> {
 
 // -----
 
+// Only arith.constant is legal from the arith dialect at top level.
+func.func @foreign_arith_top_level(%lhs: f32, %rhs: f32) -> f32 {
+  // expected-error @+1 {{failed to legalize operation 'arith.addf'}}
+  %result = arith.addf %lhs, %rhs : f32
+  return %result : f32
+}
+
+// -----
+
 // ONNX operations remain illegal at any nesting depth inside hipsr.compute.
 func.func @nested_onnx(
     %ctx: !hipsr.context, %input: tensor<2x3xf16>,
