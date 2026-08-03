@@ -65,8 +65,14 @@ module {
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[A:.*]]: tensor<?x?xf32>, %[[B:.*]]: tensor<?x?xf32>)
   // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
   // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
-  // CHECK: %[[DIM0:.*]] = tensor.dim %[[A]], %[[C0]] : tensor<?x?xf32>
-  // CHECK: %[[DIM1:.*]] = tensor.dim %[[A]], %[[C1]] : tensor<?x?xf32>
+  // CHECK-DAG: %[[A0:.*]] = tensor.dim %[[A]], %[[C0]] : tensor<?x?xf32>
+  // CHECK-DAG: %[[A1:.*]] = tensor.dim %[[A]], %[[C1]] : tensor<?x?xf32>
+  // CHECK-DAG: %[[B0:.*]] = tensor.dim %[[B]], %[[C0]] : tensor<?x?xf32>
+  // CHECK-DAG: %[[B1:.*]] = tensor.dim %[[B]], %[[C1]] : tensor<?x?xf32>
+  // CHECK: %[[IS1_0:.*]] = arith.cmpi eq, %[[A0]], %[[C1]] : index
+  // CHECK: %[[DIM0:.*]] = arith.select %[[IS1_0]], %[[B0]], %[[A0]] : index
+  // CHECK: %[[IS1_1:.*]] = arith.cmpi eq, %[[A1]], %[[C1]] : index
+  // CHECK: %[[DIM1:.*]] = arith.select %[[IS1_1]], %[[B1]], %[[A1]] : index
   // CHECK: %[[INIT:.*]] = tensor.empty(%[[DIM0]], %[[DIM1]]) : tensor<?x?xf32>
   // CHECK: hip.min(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<?x?xf32>, tensor<?x?xf32>) outs(%[[INIT]] : tensor<?x?xf32>)
 

@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 // RUN: hip-mlir-opt --resolve-shaped-type-result-dims %s | FileCheck %s
+// RUN: hip-mlir-opt --test-hip-dps-default-reify %s | FileCheck %s --check-prefix=MEMREF
 
 // What this file tests
 // --------------------
@@ -9,10 +10,10 @@
 // in-dialect `HipDpsOpInterface`. The TableGen base class `Hip_DpsOp`
 // auto-emits a per-op `ReifyRankedShapedTypeOpInterface::reifyResultShapes`
 // dispatcher that forwards to that default. The default walks
-// `getDpsInits()` and lifts each init operand's runtime shape via
-// `tensor::getMixedSizes` (tensor mode) / `memref::getMixedSizes` (memref
-// mode). This file pins that, for any non-opt-out op (i.e. autoReify=1, the
-// default), reify produces:
+// `getDpsInits()` in tensor mode and lifts each init operand's runtime shape
+// via `tensor::getMixedSizes`; memref mode has no SSA results and returns an
+// empty list. This file pins that, for any non-opt-out tensor-mode op
+// (i.e. autoReify=1, the default), reify produces:
 //   - `IntegerAttr` for static dims (fold to `arith.constant`)
 //   - `tensor.dim %outs, %i` for dynamic dims
 //
@@ -92,4 +93,22 @@ func.func @silu_mixed(%ctx: !hip.context,
   %d1 = tensor.dim %r, %c1 : tensor<2x?x8xf16>
   %d2 = tensor.dim %r, %c2 : tensor<2x?x8xf16>
   return %d0, %d1, %d2 : index, index, index
+}
+
+// -----
+
+// Memref-mode DPS ops have zero SSA results. Exercise the shared HipDpsOp
+// default body directly through the tool-only contract probe: it must return
+// success with an empty reified list rather than one vector for the memref init.
+// MEMREF-LABEL: func.func @default_reify_memref_mode
+// MEMREF:         hip.cos
+// MEMREF-SAME:      outs(%{{.*}} : memref<2x8xf32>)
+// MEMREF-NOT:     tensor.dim
+func.func @default_reify_memref_mode(%ctx: !hip.context,
+                                     %x: memref<2x8xf32>,
+                                     %y: memref<2x8xf32>) {
+  hip.cos(%ctx) ins(%x : memref<2x8xf32>)
+                outs(%y : memref<2x8xf32>)
+                {"test.default_reify"}
+  return
 }

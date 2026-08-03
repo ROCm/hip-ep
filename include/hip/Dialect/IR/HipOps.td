@@ -108,7 +108,10 @@ class Hip_DpsOp<string mnemonic,
                 bit autoReify = 1,
                 bit autoInfer = 0,
                 bit declareInfer = 0,
-                string customReifyBody = ""> :
+                string customReifyBody = "",
+                string shapeContract = "unclassified",
+                string sameShapeSource = "",
+                string customVerifyBody = ""> :
     Hip_Op<mnemonic, !listconcat([
         DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
         DeclareOpInterfaceMethods<DestinationStyleOpInterface,
@@ -122,6 +125,10 @@ class Hip_DpsOp<string mnemonic,
                                      ["inferReturnTypes"]>],
           []),
       traits)> {
+  // Source-level metadata used by the later exhaustive contract audit.
+  string hipShapeContract = shapeContract;
+  string hipSameShapeSource = sameShapeSource;
+  bit hipHasExplicitShapeContract = 0;
   let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
   let extraClassDefinition = !strconcat(
     !if(!ne(customReifyBody, ""),
@@ -158,8 +165,63 @@ class Hip_DpsOp<string mnemonic,
           results.push_back(t);
         return ::mlir::success();
       }
+    }]), ""),
+    !if(!ne(customVerifyBody, ""), !strconcat([{
+      ::mlir::LogicalResult $cppClass::verify() {
+    }],
+    customVerifyBody,
+    [{
+      }
     }]), "")
   );
+}
+
+// Behavior-free wrappers for semantic, payload-driven, and
+// destination-authoritative contracts. Leaf migrations and the exhaustive
+// inventory audit land only after the corresponding feature layers.
+class Hip_DpsOp_Semantic<string mnemonic,
+                         list<Trait> traits = [],
+                         string outsAccessor = "Output",
+                         bit autoReify = 1,
+                         bit autoInfer = 0,
+                         bit declareInfer = 0,
+                         string customReifyBody = "",
+                         string customVerifyBody = ""> :
+    Hip_DpsOp<mnemonic, traits, outsAccessor, autoReify, autoInfer,
+              declareInfer, customReifyBody,
+              /*shapeContract=*/"semantic",
+              /*sameShapeSource=*/"", customVerifyBody> {
+  let hipHasExplicitShapeContract = 1;
+}
+
+class Hip_DpsOp_Payload<string mnemonic,
+                        list<Trait> traits = [],
+                        string outsAccessor = "Output",
+                        bit autoReify = 1,
+                        bit autoInfer = 0,
+                        bit declareInfer = 0,
+                        string customReifyBody = "",
+                        string customVerifyBody = ""> :
+    Hip_DpsOp<mnemonic, traits, outsAccessor, autoReify, autoInfer,
+              declareInfer, customReifyBody,
+              /*shapeContract=*/"payload",
+              /*sameShapeSource=*/"", customVerifyBody> {
+  let hipHasExplicitShapeContract = 1;
+}
+
+class Hip_DpsOp_OutsAuthoritative<string mnemonic,
+                                  list<Trait> traits = [],
+                                  string outsAccessor = "Output",
+                                  bit autoReify = 1,
+                                  bit autoInfer = 0,
+                                  bit declareInfer = 0,
+                                  string customReifyBody = "",
+                                  string customVerifyBody = ""> :
+    Hip_DpsOp<mnemonic, traits, outsAccessor, autoReify, autoInfer,
+              declareInfer, customReifyBody,
+              /*shapeContract=*/"outs_authoritative",
+              /*sameShapeSource=*/"", customVerifyBody> {
+  let hipHasExplicitShapeContract = 1;
 }
 
 // Parameterized sub-base for ONNX-style reduction ops (reduce_sum,
@@ -185,7 +247,10 @@ class Hip_DpsOp_Reduction<string mnemonic, list<Trait> traits = []> :
                     b, getLoc(), getData(), getAxes(),
                     getKeepdims(), getNoopWithEmptyAxes(),
                     getOperation(), reified);
-              }]>;
+              }],
+              /*shapeContract=*/"reduction"> {
+  let hipHasExplicitShapeContract = 1;
+}
 
 // Parameterized sub-base for elementwise NumPy-broadcast ops (add,
 // mul, sub, div, min, mod, equal, less, and, where, miopen.add).
@@ -219,7 +284,37 @@ class Hip_DpsOp_Broadcast<string mnemonic, list<string> operandGetters,
                   !foreach(g, operandGetters, "get" # g # "()"),
                   ", "),
                 "}, getOperation(), reified);"
-              )>;
+              ),
+              /*shapeContract=*/"broadcast"> {
+  let hipHasExplicitShapeContract = 1;
+}
+
+// Parameterized sub-base for single-result operations whose output shape
+// equals one named semantic input. No production leaf migrates to this base in
+// the foundation layer.
+class Hip_DpsOp_SameShape<string mnemonic, string sourceAccessor,
+                          string outsAccessor = "Output",
+                          list<Trait> traits = [],
+                          bit autoVerify = 1> :
+    Hip_DpsOp<mnemonic, traits,
+              outsAccessor,
+              /*autoReify=*/0,
+              /*autoInfer=*/1,
+              /*declareInfer=*/1,
+              /*customReifyBody=*/!strconcat(
+                "return ::mlir::hip::reifyElementwiseSameShapeFor("
+                "b, getLoc(), get", sourceAccessor,
+                "(), getOperation(), reified);"
+              ),
+              /*shapeContract=*/"same_shape",
+              /*sameShapeSource=*/sourceAccessor,
+              /*customVerifyBody=*/!if(autoVerify, !strconcat(
+                "return ::mlir::hip::verifySameShapeDpsOp("
+                "getOperation(), get", sourceAccessor, "());"
+              ), "")> {
+  let hasVerifier = 1;
+  let hipHasExplicitShapeContract = 1;
+}
 
 // Accepts both ranked tensor (pre-bufferization) and memref (post-bufferization).
 def Hip_TensorOrMemRef : AnyTypeOf<[AnyRankedTensor, AnyMemRef],
