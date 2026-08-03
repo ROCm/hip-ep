@@ -18,9 +18,8 @@ namespace {
 // rank-0 i64 output buffer (a single GPU memcpy of 8 bytes).
 //
 // We do NOT pass the input pointer to the runtime: Size's value depends
-// only on the shape, not on the bytes. Letting the lowering drop the
-// input pointer also keeps the input memref live only as a shape source,
-// which buffer-deallocation can free aggressively.
+// only on the shape, not on the bytes, so the runtime ABI needs only the
+// element count and output pointer.
 struct SizeOpLowering : public ConvertOpToLLVMPattern<SizeOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 

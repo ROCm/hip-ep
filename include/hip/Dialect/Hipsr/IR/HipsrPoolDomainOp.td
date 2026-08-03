@@ -7,13 +7,6 @@
 // HipsrPoolDomainYieldOp.td.
 //
 
-#ifndef HIPSR_POOL_DOMAIN_OP
-#define HIPSR_POOL_DOMAIN_OP
-
-include "hip/Dialect/Hipsr/IR/HipsrOps.td"
-include "mlir/Interfaces/ControlFlowInterfaces.td"
-include "mlir/Interfaces/SideEffectInterfaces.td"
-
 //===----------------------------------------------------------------------===//
 // Hipsr_PoolDomainOp
 //===----------------------------------------------------------------------===//
@@ -58,5 +51,3 @@ def Hipsr_PoolDomainOp : Hipsr_Op<"pool_domain", [
     (`->` type($results)^)? attr-dict
   }];
 }
-
-#endif // HIPSR_POOL_DOMAIN_OP

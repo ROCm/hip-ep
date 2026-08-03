@@ -2,54 +2,94 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 //
-// The hipsr.placeholder op: a typed stand-in that mirrors a hipsr DPS op's
-// result type(s) so the DPS op can be built without first computing its output
-// shape. The shaped DPS op base class lives in HipsrOps.td.
+// hipsr.placeholder gives DPS ops typed init values before computing output
+// shapes.
 //
-
-#ifndef HIPSR_PLACEHOLDER_OP
-#define HIPSR_PLACEHOLDER_OP
-
-include "mlir/Interfaces/SideEffectInterfaces.td"
-include "hip/Dialect/Hipsr/IR/HipsrOps.td"
 
 //===----------------------------------------------------------------------===//
 // Hipsr_PlaceholderOp
 //===----------------------------------------------------------------------===//
 
-def Hipsr_PlaceholderOp : Hipsr_Op<"placeholder", [Pure]> {
-  let summary = "Typed placeholder for a hipsr DPS op's init operand(s)";
+def Hipsr_PlaceholderOp : Hipsr_Op<
+    "placeholder",
+    [IsolatedFromAbove, SingleBlockImplicitTerminator<"ShapeYieldOp">]> {
+  let summary = "Typed placeholder for hipsr DPS init operands";
   let description = [{
-    Stands in for the `outs` init operand(s) of a hipsr DPS op. It takes the DPS
-    op's result type(s) and re-emits the same type(s) as its own results, which
-    are then passed as the DPS op's init operands. This lets a DPS op be built
-    without computing its output shape first: the shape region stays the source
-    of truth for output dimensions.
+    Provides `outs` init values before a hipsr DPS op computes its output
+    shape. Each DPS init must have the same type as the matching op result, so
+    the placeholder uses the op's result types.
 
-    The DPS verifier requires each init type to equal the matching result type,
-    and mirroring the result types makes that hold by construction. The op is
-    variadic, so one placeholder can back a multi-output DPS op (one result per
-    output).
+    `!hipsr.context` is operand 0. The remaining inputs provide values to the
+    shape graph and must be block arguments or results of `hipsr.placeholder`,
+    `arith.constant`, or `hipsr.constant`. `type` marks the placeholder as
+    `normal` or `barrier`.
 
-    `hipsr.placeholder` is transient: it has no bufferization interface, so it
-    must be replaced before bufferization runs.
+    The shape graph is independent of DPS data inputs: downstream placeholders
+    use upstream placeholder results rather than DPS data results.
+
+    The optional `shape_region` defines the placeholder result shapes. It has
+    one block when present and ends with `hipsr.shape_yield`.
+
+    One placeholder can have several results for one multi-output DPS op. Each
+    result initializes exactly one DPS result and may also feed other
+    placeholders. All DPS init uses must go to the same hipsr op.
+
+    Each placeholder is tied to one DPS op. It is not `Pure`, so CSE cannot
+    merge placeholders used by different ops.
+
+    The pool-domain pass requires placeholders and the DPS ops that use them to
+    be directly in the function body. Every tensor init of those DPS ops must
+    come from a placeholder. The pass checks these rules before changing the
+    IR. Placeholders do not set domain boundaries. The pass moves each one
+    before the op that uses it.
+
+    This op is temporary. It has no bufferization interface and must be replaced
+    before bufferization.
 
     Example:
     ```mlir
-    %inits:2 = hipsr.placeholder : tensor<?x?xf16>, tensor<?xi64>
+    %init = hipsr.placeholder(%ctx)
+        ins(%input : tensor<?x?xf16>)
+        {type = #hipsr.placeholder_type<normal>} : tensor<?x?xf16>
     ```
   }];
 
+  let arguments = (ins
+    Hipsr_ContextType:$ctx,
+    Variadic<AnyRankedTensor>:$inputs,
+    Hipsr_PlaceholderTypeAttr:$type
+  );
   let results = (outs Variadic<AnyRankedTensor>:$results);
+  let regions = (region MaxSizedRegion<1>:$shape_region);
 
-  let assemblyFormat = "attr-dict `:` type($results)";
+  let assemblyFormat = [{
+    `(` $ctx `)` (`ins` `(` $inputs^ `:` type($inputs) `)`)?
+    attr-dict `:` type($results) (`shape_region` $shape_region^)?
+  }];
+
+  let hasVerifier = 1;
+
+  let extraClassDeclaration = [{
+    /// Returns whether a value may be used as a placeholder shape-graph input.
+    static bool isAllowedShapeGraphInput(::mlir::Value value);
+
+    /// Returns the hipsr DPS operation initialized by this placeholder, or
+    /// null if no such use exists.
+    ::mlir::Operation *getDpsConsumer();
+  }];
 
   let builders = [
-    // Pass the DPS op's result types so init and result types match.
-    OpBuilder<(ins "::mlir::TypeRange":$resultTypes), [{
+    OpBuilder<(ins "::mlir::TypeRange":$resultTypes,
+                   "::mlir::Value":$ctx,
+                   "::mlir::ValueRange":$inputs,
+                   "::mlir::hipsr::PlaceholderType":$type), [{
+      $_state.addOperands(ctx);
+      $_state.addOperands(inputs);
+      $_state.addAttribute(
+          "type", ::mlir::hipsr::PlaceholderTypeAttr::get(
+                      $_builder.getContext(), type));
       $_state.addTypes(resultTypes);
+      $_state.addRegion();
     }]>
   ];
 }
-
-#endif // HIPSR_PLACEHOLDER_OP

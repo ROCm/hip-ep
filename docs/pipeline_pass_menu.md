@@ -115,7 +115,7 @@ Options use MLIR's pipeline-option syntax:
 | `onnx-if-outline` | module | Outline `onnx.If` branches before ONNX-to-HIP conversion. |
 | `hip-infer-loop-body-shapes` | module | Rank-establish unranked tensors inside outlined loop bodies. |
 | `outline-onnx-to-hipdnn` | module | Outline subgraphs targeted at hipDNN graph compilation. |
-| `convert-onnx-to-hip` | module | Pattern-match ONNX ops by name → HIP dialect; externalize large constants. |
+| `convert-onnx-to-hip` | module | Pattern-match ONNX ops by name → HIP dialect; externalize large constants; legalize GatherBlockQuantized (INT4 packing, unsigned, quantize_axis). |
 | `hip-infer-shapes` | module | Refine `?` dims on HIP DPS result types via `ReifyRankedShapedTypeOpInterface`. |
 | `hip-split-duplicate-dps-inits` | func.func | De-alias DPS init operands that CSE merged onto one `tensor.empty`, so an op that reads back its own outputs (e.g. `hip.gqa` present K/V) does not share a buffer (pre-bufferize). |
 | `hip-resolve-tensor-dims` | func.func | Fold `tensor.dim` of reshape chains into root-dim arithmetic (pre-bufferize). |
@@ -135,14 +135,14 @@ Options use MLIR's pipeline-option syntax:
 | `generate-op-state-init` | module | Emit `@hipdnn_ep_op_states_init_fn` from each stateful op's `generateOpStateInit`. No-op without stateful ops. |
 | `convert-hip-to-llvm` | module | Lower HIP ops to runtime C-API calls / LLVM dialect. |
 
-### Standard MLIR passes the pipeline interleaves
+### Standard MLIR passes and sub-pipelines
 
 | Name | Anchor | One-liner |
 |---|---|---|
 | `canonicalize` | any | Standard canonicalization. |
 | `cse` | any | Common-subexpression elimination. |
-| `one-shot-bufferize` | module | Tensor → memref bufferization (function boundaries, identity layout). |
-| `buffer-deallocation-pipeline` | module | Ownership-based buffer deallocation (a sub-pipeline). |
+| `one-shot-bufferize` | module | Tensor → memref bufferization (function boundaries, identity layout); `HIPDNN_EP_BUFFERIZE_COPY_BEFORE_WRITE=1` enables the huge-graph copy-before-write escape hatch. |
+| `buffer-deallocation-pipeline` | module | Ownership-based buffer deallocation; available to custom pipelines and characterization tests, but omitted from the built-in pipeline. |
 | `convert-bufferization-to-memref` | any | Lower residual `bufferization.*` ops to memref. |
 | `convert-scf-to-cf` | any | Lower `scf.for`/`scf.if` to unstructured control flow. |
 | `reconcile-unrealized-casts` | any | Drop leftover `unrealized_conversion_cast`s. |
@@ -191,7 +191,6 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   «slot: BeforeBufferization»
   one-shot-bufferize
   hip-loop-body-to-out-params
-  buffer-deallocation-pipeline
   func.func(hip-use-output-allocator)  (slot 4.5)
   func.func(hip-fix-loop-accumulator-offset)
   cse ; canonicalize

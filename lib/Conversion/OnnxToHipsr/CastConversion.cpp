@@ -6,8 +6,7 @@
 #include "OnnxToHipsrUtils.h"
 
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
-#include "hip/Dialect/Hipsr/IR/HipsrCastOp.h"
-#include "hip/Dialect/Hipsr/IR/HipsrPlaceholderOp.h"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "mlir/IR/PatternMatch.h"
 
@@ -50,7 +49,10 @@ struct CastToHipsr : public ::mlir::RewritePattern {
     }
 
     ::mlir::Value init =
-        rewriter.create<PlaceholderOp>(loc, ::mlir::TypeRange{resultType})
+        rewriter
+            .create<PlaceholderOp>(loc, ::mlir::TypeRange{resultType}, *ctx,
+                                   ::mlir::ValueRange{input},
+                                   PlaceholderType::Normal)
             .getResult(0);
 
     auto castOp = rewriter.create<CastOp>(loc, ::mlir::TypeRange{resultType},

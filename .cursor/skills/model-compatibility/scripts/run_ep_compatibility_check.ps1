@@ -9,24 +9,25 @@
 #   3) step2..final compatibility reports using EP input only
 #
 # Usage:
-#   .\run_ep_compatibility_check.ps1 -ModelPath "D:\path\model.onnx"
-#   .\run_ep_compatibility_check.ps1 -ModelPath "D:\path\model.onnx" -OutputDir "D:\temp\my_run"
-#   .\run_ep_compatibility_check.ps1 -ModelPath "D:\path\model.onnx" -SkipDump -EpOnnxPath "D:\path\onnx.onnx"
+#   .\run_ep_compatibility_check.ps1 -ModelPath "<path>\model.onnx"
+#   .\run_ep_compatibility_check.ps1 -ModelPath "<path>\model.onnx" -OutputDir "$env:TEMP\my_run"
+#   .\run_ep_compatibility_check.ps1 -ModelPath "<path>\model.onnx" -SkipDump -EpOnnxPath "<path>\onnx.onnx"
 #
 # Defaults (derived):
-#   -RepoRoot         = (Resolve-Path "$PSScriptRoot\..\..\..\..\")
+#   -RepoRoot         = (Resolve-Path "$PSScriptRoot\..\..\..\..")
 #                       skill lives at <repo>/.cursor/skills/model-compatibility/scripts/
 #   -ToolsDir         = $PSScriptRoot
 #   -VoePackageRoot   = $env:VOE_PACKAGE_ROOT  (when unset and -SkipDump absent,
 #                       script emits [VOE_NOT_CONFIGURED] to stdout and exits 10)
-#   -OutputDir        = D:\temp\<meaningful-path-segments>_ep_compat
+#   -OutputDir        = $env:TEMP\<meaningful-path-segments>_ep_compat
+#                       (or $env:HIP_EP_COMPAT_ROOT when set)
 #                       Built from the last 3 parent segments (skipping generic
 #                       ones like "onnx" / "models") + optional non-generic
 #                       basename. Examples:
 #                         ...\blip\onnx\decoder\fp16\model.onnx
-#                           -> D:\temp\blip_decoder_fp16_ep_compat
-#                         D:\bar\custom_v2.onnx
-#                           -> D:\temp\bar_custom_v2_ep_compat
+#                           -> $env:TEMP\blip_decoder_fp16_ep_compat
+#                         <any-drive>\bar\custom_v2.onnx
+#                           -> $env:TEMP\bar_custom_v2_ep_compat
 #                       Override with -OutputDir <dir> if the auto name collides.
 
 param(
@@ -130,7 +131,15 @@ if ([string]::IsNullOrWhiteSpace($OutputDir)) {
         $sanitized = @($baseLower)
     }
 
-    $OutputDir = Join-Path 'D:\temp' (($sanitized -join '_') + '_ep_compat')
+    $compatRoot = if ($env:HIP_EP_COMPAT_ROOT) {
+        $env:HIP_EP_COMPAT_ROOT
+    } elseif ($env:TEMP) {
+        $env:TEMP
+    } else {
+        [System.IO.Path]::GetTempPath()
+    }
+
+    $OutputDir = Join-Path $compatRoot (($sanitized -join '_') + '_ep_compat')
 }
 $OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null

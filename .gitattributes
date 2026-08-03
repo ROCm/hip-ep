@@ -9,3 +9,7 @@
 *.c   text working-tree-encoding=UTF-8
 *.cc  text working-tree-encoding=UTF-8
 *.md  text working-tree-encoding=UTF-8
+
+# Cursor agent skills/scripts: LF in repo so Linux pre-commit (licenseheaders)
+# does not rewrite line endings on every CI run.
+.cursor/** text eol=lf working-tree-encoding=UTF-8

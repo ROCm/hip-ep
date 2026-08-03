@@ -7,7 +7,10 @@
 #define HIPSR_OPS
 
 include "mlir/IR/OpBase.td"
+include "mlir/Interfaces/ControlFlowInterfaces.td"
 include "mlir/Interfaces/DestinationStyleOpInterface.td"
+include "mlir/Interfaces/SideEffectInterfaces.td"
+include "hip/Dialect/Hipsr/IR/HipsrAttrs.td"
 include "hip/Dialect/Hipsr/IR/HipsrDialect.td"
 include "hip/Dialect/Hipsr/IR/HipsrTypes.td"
 include "hip/Dialect/Hipsr/IR/HipsrShapeRegionInterface.td"
@@ -43,5 +46,20 @@ class Hipsr_DpsOp<string mnemonic, list<Trait> traits = []> :
   let regions = (region MaxSizedRegion<1>:$shape_region);
   let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
 }
+
+include "hip/Dialect/Hipsr/IR/HipsrPlaceholderOp.td"
+include "hip/Dialect/Hipsr/IR/HipsrShapeYieldOp.td"
+include "hip/Dialect/Hipsr/IR/HipsrPoolDomainOp.td"
+include "hip/Dialect/Hipsr/IR/HipsrPoolDomainYieldOp.td"
+include "hip/Dialect/Hipsr/IR/HipsrComputeOp.td"
+include "hip/Dialect/Hipsr/IR/HipsrComputeYieldOp.td"
+include "hip/Dialect/Hipsr/IR/HipsrEmptyOp.td"
+include "hip/Dialect/Hipsr/IR/HipsrEmptyYieldOp.td"
+include "hip/Dialect/Hipsr/IR/HipsrMatMulOp.td"
+include "hip/Dialect/Hipsr/IR/HipsrExpandOp.td"
+include "hip/Dialect/Hipsr/IR/HipsrCastOp.td"
+include "hip/Dialect/Hipsr/IR/HipsrAddOp.td"
+include "hip/Dialect/Hipsr/IR/HipsrConstantOp.td"
+include "hip/Dialect/Hipsr/IR/HipsrGetPoolOp.td"
 
 #endif // HIPSR_OPS

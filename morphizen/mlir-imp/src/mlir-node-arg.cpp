@@ -56,7 +56,7 @@ int mlirElementTypeToOnnxType(mlir::Type elementType) {
     int mlir_type_code = -1;
     switch (width) {
     case 4:
-      mlir_type_code = isSigned ? 21 : 22; // TensorProto_DataType_INT4 or UINT4
+      mlir_type_code = isSigned ? 22 : 21; // TensorProto_DataType_INT4 or UINT4
       break;
     case 8:
       mlir_type_code = isSigned ? 3 : 2; // INT8 : UINT8
@@ -334,8 +334,8 @@ void MLIRNodeArg::validateElementType(int element_type) const {
   case 12: // TensorProto_DataType_UINT32
   case 13: // TensorProto_DataType_UINT64
   case 16: // TensorProto_DataType_BFLOAT16
-  case 21: // TensorProto_DataType_INT4
-  case 22: // TensorProto_DataType_UINT4
+  case 21: // TensorProto_DataType_UINT4
+  case 22: // TensorProto_DataType_INT4
     break; // Valid types
   default:
     LOG(WARNING) << "Unsupported element type: " << element_type;

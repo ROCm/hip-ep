@@ -20,9 +20,17 @@ def ConvertOnnxToHipsrPass : Pass<"convert-onnx-to-hipsr", "mlir::ModuleOp"> {
     style with tensor types. ONNX ops are matched by name via the generic MLIR
     Operation API, so no onnx-mlir headers are required.
 
-    Each shaped op's output-shape computation is emitted by the op's own
-    ShapeRegionInterface::populateShapeRegion(), the single source of truth,
-    so this pass exercises that code path (unlike round-trip tests).
+    Every ONNX operation must be converted. Outside `hipsr.compute`, only
+    module and function structure, hipsr operations, and scalar
+    `arith.constant` operations are legal. Other helper operations are legal at
+    any depth inside `hipsr.compute`, but nested ONNX operations must still be
+    converted.
+
+    Each operation pattern creates its data operation and tied placeholder.
+    After conversion, downstream placeholder inputs are rewired from data
+    results to the corresponding upstream placeholder results, forming a
+    parallel shape-dependency graph. Placeholder shape regions remain empty for
+    the later population pass.
   }];
   let dependentDialects = [
     "::mlir::hipsr::HipsrDialect",

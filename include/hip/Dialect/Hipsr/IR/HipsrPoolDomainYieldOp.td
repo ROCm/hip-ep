@@ -6,13 +6,6 @@
 // region. The hipsr.pool_domain op itself lives in HipsrPoolDomainOp.td.
 //
 
-#ifndef HIPSR_POOL_DOMAIN_YIELD_OP
-#define HIPSR_POOL_DOMAIN_YIELD_OP
-
-include "hip/Dialect/Hipsr/IR/HipsrOps.td"
-include "mlir/Interfaces/ControlFlowInterfaces.td"
-include "mlir/Interfaces/SideEffectInterfaces.td"
-
 //===----------------------------------------------------------------------===//
 // Hipsr_PoolDomainYieldOp
 //===----------------------------------------------------------------------===//
@@ -46,5 +39,3 @@ def Hipsr_PoolDomainYieldOp : Hipsr_Op<"pool_domain_yield",
     }]>
   ];
 }
-
-#endif // HIPSR_POOL_DOMAIN_YIELD_OP
