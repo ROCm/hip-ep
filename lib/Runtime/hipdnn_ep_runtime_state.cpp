@@ -1486,6 +1486,19 @@ int hipdnn_ep_state_reset_error_flag(RuntimeState *state) {
   return (err == hipSuccess) ? 0 : -1;
 }
 
+int hipdnn_ep_state_set_error_flag(RuntimeState *state) {
+  if (!state || !state->device_error_flag || !state->stream) {
+    fprintf(stderr, "hipdnn_ep_state_set_error_flag: invalid state\n");
+    return -1;
+  }
+  // Byte-wise 0xff is the two's-complement representation of the runtime's
+  // generic error code (-1). Queue it on the inference stream so the interface
+  // boundary observes it after the existing stream synchronization.
+  hipError_t err = hipMemsetAsync(state->device_error_flag, 0xff, sizeof(int),
+                                  state->stream);
+  return (err == hipSuccess) ? 0 : -1;
+}
+
 int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state) {
   if (!state || !state->device_error_flag || !state->stream) {
     fprintf(stderr,

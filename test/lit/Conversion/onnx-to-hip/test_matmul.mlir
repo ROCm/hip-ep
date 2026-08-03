@@ -65,4 +65,38 @@ module {
   // CHECK: hip.matmul(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<?x?x?xf16>, tensor<?x?xf16>) outs(%[[INIT]] : tensor<?x?x?xf16>)
   // CHECK-NOT: hip.alloc
   // CHECK-NOT: hip.copy
+
+  // ===== Test 4: 2D x 3D -- batch comes from B, M comes from A =====
+  func.func @matmul_2d_3d(%A: tensor<?x4xf16>, %B: tensor<?x4x?xf16>) -> tensor<?x?x?xf16> {
+    %result = "onnx.MatMul"(%A, %B) : (tensor<?x4xf16>, tensor<?x4x?xf16>) -> tensor<?x?x?xf16>
+    return %result : tensor<?x?x?xf16>
+  }
+
+  // CHECK-LABEL: func.func @matmul_2d_3d
+  // CHECK-SAME: (%{{.*}}: !hip.context, %[[A:[A-Za-z0-9_]+]]: tensor<?x4xf16>, %[[B:[A-Za-z0-9_]+]]: tensor<?x4x?xf16>)
+  // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[C2:.*]] = arith.constant 2 : index
+  // CHECK-DAG: %[[BATCH:.*]] = tensor.dim %[[B]], %[[C0]]
+  // CHECK-DAG: %[[M:.*]] = tensor.dim %[[A]], %[[C0]]
+  // CHECK-DAG: %[[N:.*]] = tensor.dim %[[B]], %[[C2]]
+  // CHECK: %[[INIT:.*]] = tensor.empty(%[[BATCH]], %[[M]], %[[N]]) : tensor<?x?x?xf16>
+  // CHECK: hip.matmul
+
+  // ===== Test 5: 2D x 4D -- both batch axes come from B =====
+  func.func @matmul_2d_4d(%A: tensor<?x4xf16>, %B: tensor<?x?x4x?xf16>) -> tensor<?x?x?x?xf16> {
+    %result = "onnx.MatMul"(%A, %B) : (tensor<?x4xf16>, tensor<?x?x4x?xf16>) -> tensor<?x?x?x?xf16>
+    return %result : tensor<?x?x?x?xf16>
+  }
+
+  // CHECK-LABEL: func.func @matmul_2d_4d
+  // CHECK-SAME: (%{{.*}}: !hip.context, %[[A:[A-Za-z0-9_]+]]: tensor<?x4xf16>, %[[B:[A-Za-z0-9_]+]]: tensor<?x?x4x?xf16>)
+  // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
+  // CHECK-DAG: %[[C3:.*]] = arith.constant 3 : index
+  // CHECK-DAG: %[[B0:.*]] = tensor.dim %[[B]], %[[C0]]
+  // CHECK-DAG: %[[B1:.*]] = tensor.dim %[[B]], %[[C1]]
+  // CHECK-DAG: %[[M:.*]] = tensor.dim %[[A]], %[[C0]]
+  // CHECK-DAG: %[[N:.*]] = tensor.dim %[[B]], %[[C3]]
+  // CHECK: %[[INIT:.*]] = tensor.empty(%[[B0]], %[[B1]], %[[M]], %[[N]]) : tensor<?x?x?x?xf16>
+  // CHECK: hip.matmul
 }
