@@ -19,14 +19,14 @@ namespace {
 //           memref<2048x96xui8, 1>, memref<8xi64, 1>,
 //           memref<2048x12xf16, 1>)
 //       zero_points(%zp : memref<2048x12xui8, 1>)
-//       outs(%out : memref<8x96xf16, 1>)
+//       outs(%out : memref<8x192xf16, 1>)
 //       {bits = 4, block_size = 16, gather_axis = 0, quantize_axis = 1}
 //
 // After:
 //   %data_shape = llvm.alloca <i64 x 2>     ; { 2048, 96 }
 //   %idx_shape  = llvm.alloca <i64 x 1>     ; { 8 }
 //   %scl_shape  = llvm.alloca <i64 x 2>     ; { 2048, 12 }
-//   %out_shape  = llvm.alloca <i64 x 2>     ; { 8, 96 }
+//   %out_shape  = llvm.alloca <i64 x 2>     ; { 8, 192 }
 //   llvm.call @wrap_gather_block_quantized(
 //       %state, %data_p, %idx_p, %scl_p, %zp_p, %out_p,
 //       %data_shape, %data_rank=2,

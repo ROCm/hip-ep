@@ -1052,7 +1052,9 @@ def Hip_QMoEOp : Hip_DpsOp<"qmoe",
   }];
 }
 
-def Hip_GatherBlockQuantizedOp : Hip_DpsOp<"gather_block_quantized"> {
+def Hip_GatherBlockQuantizedOp :
+    Hip_DpsOp_Semantic<"gather_block_quantized", /*traits=*/[],
+                       /*outsAccessor=*/"Output", /*autoReify=*/0> {
   let summary = "Gather + block-wise dequantize "
                 "(com.microsoft GatherBlockQuantized)";
   let description = [{
@@ -1061,17 +1063,22 @@ def Hip_GatherBlockQuantizedOp : Hip_DpsOp<"gather_block_quantized"> {
     integer `indices`, and dequantize the gathered rows using per-block
     `scales` and optional `zero_points`.
 
-    `data` is a constant tensor of rank `r >= 1` quantized along
+    `data` is a constant tensor of rank `r > 1` quantized along
     `quantize_axis` with the given `block_size`. For 4-bit, two values are
     packed per byte (low nibble first, high nibble second); for 8-bit one
     value per byte. `scales` (and `zero_points`, when present) share the
     layout of `data` except along `quantize_axis`, where their extent is
-    `data.shape[quantize_axis] / block_size`. When `zero_points` is absent,
-    the default is `0` for int4/uint4 and `2^(bits-1)` for uint8.
+    `ceil(logical_data.shape[quantize_axis] / block_size)`. When
+    `zero_points` is absent, the default is `0` for signed storage and
+    `2^(bits-1)` for unsigned storage.
 
-    Output rank is `q + (r - 1)` where `q = rank(indices)`. Element type of
-    `output` matches `scales` (T2: f32 / f16 / bf16). For uint8 `data`,
-    `gather_axis` must be 0.
+    The result is Gather over the logical dequantized data shape:
+    `logical_data[:gather_axis] ++ indices.shape ++
+    logical_data[gather_axis+1:]`. For byte-packed 4-bit storage,
+    `logical_data[quantize_axis] = data.shape[quantize_axis] * 2`; no extent is
+    doubled when Gather removes that axis. Output rank is `q + (r - 1)` where
+    `q = rank(indices)`. Element type of `output` matches `scales`
+    (T2: f32 / f16 / bf16). For uint8 `data`, `gather_axis` must be 0.
 
     Optional unit attribute `unsigned_quant_storage`: set when
     convert-onnx-to-hip identifies UINT4/UINT8
@@ -1092,7 +1099,7 @@ def Hip_GatherBlockQuantizedOp : Hip_DpsOp<"gather_block_quantized"> {
             memref<8xi64, 1>,
             memref<2048x12xf16, 1>)
         zero_points(%zp : memref<2048x12xui8, 1>)
-        outs(%out : memref<8x96xf16, 1>)
+        outs(%out : memref<8x192xf16, 1>)
         {bits = 4, block_size = 16, gather_axis = 0, quantize_axis = 1}
     ```
   }];
@@ -1118,6 +1125,7 @@ def Hip_GatherBlockQuantizedOp : Hip_DpsOp<"gather_block_quantized"> {
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+  let hasVerifier = 1;
 }
 
 // ===== MIOpen ops ============================================================
@@ -1640,11 +1648,12 @@ def Hip_MiopenSoftmaxOp : Hip_DpsOp<"miopen.softmax",
 
 // ===== Custom HIP kernel ops (no library equivalent) =========================
 
-def Hip_TransposeOp : Hip_DpsOp<"transpose", /*traits=*/[],
-                                /*outsAccessor=*/"Output",
-                                /*autoReify=*/0,
-                                /*autoInfer=*/1,
-                                /*declareInfer=*/1> {
+def Hip_TransposeOp :
+    Hip_DpsOp_Semantic<"transpose", /*traits=*/[],
+                       /*outsAccessor=*/"Output",
+                       /*autoReify=*/0,
+                       /*autoInfer=*/1,
+                       /*declareInfer=*/1> {
   let summary = "N-D transpose with arbitrary permutation (ONNX Transpose)";
   let description = [{
     Permutes the dimensions of the input tensor according to the `perm`
@@ -1680,11 +1689,12 @@ def Hip_TransposeOp : Hip_DpsOp<"transpose", /*traits=*/[],
   let hasVerifier = 1;
 }
 
-def Hip_GatherOp : Hip_DpsOp<"gather", /*traits=*/[],
-                             /*outsAccessor=*/"Output",
-                             /*autoReify=*/0,
-                             /*autoInfer=*/1,
-                             /*declareInfer=*/1> {
+def Hip_GatherOp :
+    Hip_DpsOp_Semantic<"gather", /*traits=*/[],
+                       /*outsAccessor=*/"Output",
+                       /*autoReify=*/0,
+                       /*autoInfer=*/1,
+                       /*declareInfer=*/1> {
   let summary = "Gather elements along an axis";
   let description = [{
     Gathers elements from data tensor along the given axis using indices.
@@ -1711,6 +1721,7 @@ def Hip_GatherOp : Hip_DpsOp<"gather", /*traits=*/[],
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+  let hasVerifier = 1;
 }
 
 def Hip_OneHotOp : Hip_DpsOp<"one_hot", /*traits=*/[],
@@ -1827,11 +1838,8 @@ def Hip_ScatterElementsOp : Hip_DpsOp<"scatter_elements", /*traits=*/[],
   }];
 }
 
-def Hip_GatherElementsOp : Hip_DpsOp<"gather_elements", /*traits=*/[],
-                                      /*outsAccessor=*/"Output",
-                                      /*autoReify=*/0,
-                                      /*autoInfer=*/1,
-                                      /*declareInfer=*/1> {
+def Hip_GatherElementsOp :
+    Hip_DpsOp_SameShape<"gather_elements", /*sourceAccessor=*/"Indices"> {
   let summary = "Gather elements along an axis using same-rank indices";
   let description = [{
     Gathers values from the data tensor at positions specified by the
@@ -4022,11 +4030,12 @@ def Hip_SliceOp :
   }];
 }
 
-def Hip_GatherNDOp : Hip_DpsOp<"gather_nd", /*traits=*/[],
-                               /*outsAccessor=*/"Output",
-                               /*autoReify=*/0,
-                               /*autoInfer=*/1,
-                               /*declareInfer=*/1> {
+def Hip_GatherNDOp :
+    Hip_DpsOp_Semantic<"gather_nd", /*traits=*/[],
+                       /*outsAccessor=*/"Output",
+                       /*autoReify=*/0,
+                       /*autoInfer=*/1,
+                       /*declareInfer=*/1> {
   let summary = "GatherND: gather slices using N-D index tuples";
   let description = [{
     Gathers slices of `data` indexed by the trailing dimension of `indices`.
@@ -4060,6 +4069,7 @@ def Hip_GatherNDOp : Hip_DpsOp<"gather_nd", /*traits=*/[],
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+  let hasVerifier = 1;
 }
 
 def Hip_ScatterNDOp : Hip_DpsOp<"scatter_nd", /*traits=*/[],
@@ -4191,11 +4201,12 @@ def Hip_ModOp : Hip_DpsOp_Broadcast<"mod", /*operandGetters=*/["Lhs", "Rhs"]> {
   }];
 }
 
-def Hip_SizeOp : Hip_DpsOp<"size", /*traits=*/[],
-                           /*outsAccessor=*/"Y",
-                           /*autoReify=*/1,
-                           /*autoInfer=*/1,
-                           /*declareInfer=*/1> {
+def Hip_SizeOp :
+    Hip_DpsOp_Semantic<"size", /*traits=*/[],
+                       /*outsAccessor=*/"Y",
+                       /*autoReify=*/1,
+                       /*autoInfer=*/1,
+                       /*declareInfer=*/1> {
   let summary = "Total element count of a tensor (ONNX Size, dynamic-shape path)";
   let description = [{
     Implements the runtime path of the standard ONNX Size operator
@@ -4234,6 +4245,7 @@ def Hip_SizeOp : Hip_DpsOp<"size", /*traits=*/[],
     `outs` `(` $y `:` type($y) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+  let hasVerifier = 1;
 }
 
 def Hip_NonZeroOp : Hip_DpsOp<"nonzero", /*traits=*/[], /*outsAccessor=*/"Y",
@@ -4371,7 +4383,9 @@ def Hip_PoolOp :
   let hasVerifier = 1;
 }
 
-def Hip_ResizeOp : Hip_DpsOp<"resize"> {
+def Hip_ResizeOp :
+    Hip_DpsOp_Semantic<"resize", /*traits=*/[],
+                       /*outsAccessor=*/"Output", /*autoReify=*/0> {
   let summary = "Spatial resize / interpolation (ONNX Resize)";
   let description = [{
     Implements a subset of ONNX Resize that covers the common image / volume
@@ -4392,7 +4406,9 @@ def Hip_ResizeOp : Hip_DpsOp<"resize"> {
     Per-axis scale is recovered at runtime from the input/output spatial
     extents (`scale = in_dim / out_dim`), so neither `scales` nor `sizes`
     appear as operands here — they were resolved at compile time into the
-    output type that the upstream importer produced.
+    output type that the upstream importer produced. Therefore every output
+    spatial extent must be static. N/C come from the input and must agree with
+    the output template.
 
     Uses destination-passing style: the output buffer is provided.
 
@@ -4418,6 +4434,8 @@ def Hip_ResizeOp : Hip_DpsOp<"resize"> {
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  let hasVerifier = 1;
 }
 
 // hip.readback_dim : materialize a kernel-computed runtime extent as a host

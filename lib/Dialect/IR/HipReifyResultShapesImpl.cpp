@@ -104,6 +104,27 @@ PoolOp::reifyResultShapes(OpBuilder &b,
 }
 
 //===----------------------------------------------------------------------===//
+// ResizeOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult
+ResizeOp::reifyResultShapes(OpBuilder &b,
+                            ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() != 1)
+    return failure();
+  auto outputType = dyn_cast<RankedTensorType>(getOutput().getType());
+  if (!outputType)
+    return failure();
+  FailureOr<SmallVector<OpFoldResult>> shape = mlir::hip::reifyResizeShape(
+      b, getLoc(), getInput(), outputType.getShape(),
+      [&]() { return this->emitOpError(); });
+  if (failed(shape))
+    return failure();
+  reifiedReturnShapes.assign({std::move(*shape)});
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // CausalConvWithStateOp
 //===----------------------------------------------------------------------===//
 
@@ -391,11 +412,11 @@ LogicalResult TransposeOp::reifyResultShapes(
     perm.push_back(ia.getInt());
   }
 
-  SmallVector<OpFoldResult> dims =
+  FailureOr<SmallVector<OpFoldResult>> dims =
       mlir::hip::reifyTransposeByPerm(b, getLoc(), getInput(), perm);
-  if (dims.empty())
+  if (failed(dims))
     return failure();
-  reifiedReturnShapes.assign({std::move(dims)});
+  reifiedReturnShapes.assign({std::move(*dims)});
   return success();
 }
 
@@ -408,27 +429,34 @@ GatherOp::reifyResultShapes(OpBuilder &b,
       !isa<RankedTensorType>(getIndices().getType()))
     return failure();
 
-  SmallVector<OpFoldResult> dims = mlir::hip::reifyGatherWithAxis(
+  FailureOr<SmallVector<OpFoldResult>> dims = mlir::hip::reifyGatherWithAxis(
       b, getLoc(), getData(), getIndices(), getAxis());
-  if (dims.empty())
+  if (failed(dims))
     return failure();
-  reifiedReturnShapes.assign({std::move(dims)});
+  reifiedReturnShapes.assign({std::move(*dims)});
   return success();
 }
 
-LogicalResult
-GatherElementsOp::reifyResultShapes(OpBuilder &b,
-                                    ReifiedRankedShapedTypeDims &reified) {
+LogicalResult GatherBlockQuantizedOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
   if (getNumResults() == 0)
     return failure();
-  auto indicesType = dyn_cast<RankedTensorType>(getIndices().getType());
-  if (!indicesType)
+  auto dataType = dyn_cast<RankedTensorType>(getData().getType());
+  if (!dataType)
     return failure();
 
-  SmallVector<OpFoldResult> dims;
-  for (auto i : llvm::seq<int64_t>(0, indicesType.getRank()))
-    dims.push_back(tensor::getMixedSize(b, getLoc(), getIndices(), i));
-  reified.assign({std::move(dims)});
+  detail::GatherBlockQuantizedStorageFlags storageFlags =
+      detail::getGatherBlockQuantizedStorageFlags(getBits(),
+                                                  dataType.getElementType());
+  FailureOr<SmallVector<OpFoldResult>> dims =
+      mlir::hip::reifyGatherBlockQuantizedShape(
+          b, getLoc(), getData(), getIndices(), getScales(), getZeroPoints(),
+          getBits(), getBlockSize(), getGatherAxis(), getQuantizeAxis(),
+          storageFlags.bytePackedInt4, storageFlags.uint8Storage,
+          [&]() { return this->emitOpError(); });
+  if (failed(dims))
+    return failure();
+  reifiedReturnShapes.assign({std::move(*dims)});
   return success();
 }
 
@@ -561,11 +589,12 @@ LogicalResult GatherNDOp::reifyResultShapes(
       !isa<RankedTensorType>(getIndices().getType()))
     return failure();
 
-  SmallVector<OpFoldResult> dims = mlir::hip::reifyGatherND(
+  FailureOr<SmallVector<OpFoldResult>> dims = mlir::hip::reifyGatherND(
       b, getLoc(), getData(), getIndices(), getBatchDims());
-  if (dims.empty())
-    return failure();
-  reifiedReturnShapes.assign({std::move(dims)});
+  if (failed(dims))
+    return cast<HipDpsOp>(getOperation())
+        .reifyResultShapes(b, reifiedReturnShapes);
+  reifiedReturnShapes.assign({std::move(*dims)});
   return success();
 }
 

@@ -26,12 +26,12 @@ module {
                                       %indices: memref<8xi64, 1>,
                                       %scales: memref<2048x12xf16, 1>,
                                       %zp: memref<2048x12xui8, 1>,
-                                      %output: memref<8x96xf16, 1>) {
+                                      %output: memref<8x192xf16, 1>) {
     hip.gather_block_quantized(%ctx)
         ins(%data, %indices, %scales :
             memref<2048x96xui8, 1>, memref<8xi64, 1>, memref<2048x12xf16, 1>)
         zero_points(%zp : memref<2048x12xui8, 1>)
-        outs(%output : memref<8x96xf16, 1>)
+        outs(%output : memref<8x192xf16, 1>)
         {bits = 4 : i64, block_size = 16 : i64,
          gather_axis = 0 : i64, quantize_axis = 1 : i64}
     return
@@ -59,11 +59,11 @@ module {
                                        %data: memref<2048x96xui8, 1>,
                                        %indices: memref<?xi64, 1>,
                                        %scales: memref<2048x12xf16, 1>,
-                                       %output: memref<?x96xf16, 1>) {
+                                       %output: memref<?x192xf16, 1>) {
     hip.gather_block_quantized(%ctx)
         ins(%data, %indices, %scales :
             memref<2048x96xui8, 1>, memref<?xi64, 1>, memref<2048x12xf16, 1>)
-        outs(%output : memref<?x96xf16, 1>)
+        outs(%output : memref<?x192xf16, 1>)
         {bits = 4 : i64, block_size = 16 : i64,
          gather_axis = 0 : i64, quantize_axis = 1 : i64}
     return
@@ -77,11 +77,11 @@ module {
                                               %data: memref<2048x96xi8, 1>,
                                               %indices: memref<8xi64, 1>,
                                               %scales: memref<2048x12xf16, 1>,
-                                              %output: memref<8x96xf16, 1>) {
+                                              %output: memref<8x192xf16, 1>) {
     hip.gather_block_quantized(%ctx)
         ins(%data, %indices, %scales :
             memref<2048x96xi8, 1>, memref<8xi64, 1>, memref<2048x12xf16, 1>)
-        outs(%output : memref<8x96xf16, 1>)
+        outs(%output : memref<8x192xf16, 1>)
         {bits = 4 : i64, block_size = 16 : i64,
          gather_axis = 0 : i64, quantize_axis = 1 : i64,
          unsigned_quant_storage}
