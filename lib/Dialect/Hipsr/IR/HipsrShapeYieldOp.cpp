@@ -16,8 +16,20 @@ LogicalResult ShapeYieldOp::verify() {
   // here: there must be one element type per result.
   size_t numResults = getRanks().size();
   size_t numTypes = getElementTypes().size();
-  if (numTypes != numResults)
+  if (numTypes != numResults) {
     return emitOpError() << "has " << numResults << " result(s) but "
                          << numTypes << " element type(s)";
+  }
+  return success();
+}
+
+LogicalResult ShapeYield2Op::verify() {
+  auto placeholder = cast<PlaceholderOp>(getOperation()->getParentOp());
+  if (getShapes().size() != placeholder.getNumResults()) {
+    return emitOpError(
+               "must yield one !shape.shape per enclosing placeholder result; "
+               "expected ")
+           << placeholder.getNumResults() << ", got " << getShapes().size();
+  }
   return success();
 }
