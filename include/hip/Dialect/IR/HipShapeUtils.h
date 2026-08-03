@@ -29,10 +29,13 @@ bool parseDenseIntElements(DenseElementsAttr dense,
 
 /// Match a rank-0/rank-1 integer constant and parse it with
 /// `parseDenseIntElements`. Recognized structural sources are an inline
-/// `arith.constant` tensor and a `memref.get_global` referencing a constant
-/// global with a dense initializer. The latter preserves constant provenance
-/// across tensor-to-memref bufferization. Generic HIP dialect code does not
-/// inspect frontend operations.
+/// `arith.constant` tensor, a dense-value `hip.constant` carrier whose
+/// attribute type exactly matches its result type, and a `memref.get_global`
+/// referencing a constant global with a dense initializer. Location-only
+/// `hip.constant` carriers are deliberately not treated as payload values. The
+/// global form preserves constant provenance across tensor-to-memref
+/// bufferization. Generic HIP dialect code does not inspect frontend
+/// operations.
 bool matchConstantIntTensor(Value value, SmallVectorImpl<int64_t> &out,
                             std::optional<int64_t> expectedRank = std::nullopt);
 
@@ -340,6 +343,13 @@ reifyTransposeByPerm(OpBuilder &b, Location loc, Value input,
 /// `data[:axis] ++ indices.shape ++ data[axis+1:]`.
 FailureOr<SmallVector<int64_t>> inferGatherShape(ArrayRef<int64_t> dataShape,
                                                  ArrayRef<int64_t> indicesShape,
+                                                 int64_t axis);
+
+/// Pure OneHot shape rule: insert the semantic depth extent at `axis` in the
+/// indices shape. `depth` is absent when the scalar payload is not statically
+/// known, in which case the inserted extent remains dynamic.
+FailureOr<SmallVector<int64_t>> inferOneHotShape(ArrayRef<int64_t> indicesShape,
+                                                 std::optional<int64_t> depth,
                                                  int64_t axis);
 
 /// Reify the result shape of a gather op as

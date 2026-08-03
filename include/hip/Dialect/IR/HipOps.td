@@ -1814,6 +1814,7 @@ def Hip_OneHotOp :
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+  let hasVerifier = 1;
 }
 
 def Hip_CompressOp :

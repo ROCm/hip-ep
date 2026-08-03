@@ -57,6 +57,12 @@ public:
       reified.push_back({builder.getIndexAttr(-2)});
       return mlir::success();
     }
+    if (kind.getValue() == "mixed_results") {
+      reified.push_back({builder.getIndexAttr(2), builder.getIndexAttr(4)});
+      reified.emplace_back();
+      reified.emplace_back();
+      return mlir::success();
+    }
     return emitOpError("unknown malformed-reifier fixture kind '")
            << kind.getValue() << "'";
   }
@@ -268,6 +274,75 @@ struct TestHipDpsDefaultReifyPass final
   }
 };
 
+
+struct TestOneHotReifyFailureAtomicPass final
+    : public mlir::PassWrapper<TestOneHotReifyFailureAtomicPass,
+                               mlir::OperationPass<mlir::ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(TestOneHotReifyFailureAtomicPass)
+
+  llvm::StringRef getArgument() const final {
+    return "test-one-hot-reify-failure-atomic";
+  }
+  llvm::StringRef getDescription() const final {
+    return "Test mutation-free failure of malformed OneHot reification";
+  }
+
+  void runOnOperation() final {
+    mlir::IRRewriter rewriter(&getContext());
+    mlir::WalkResult walkResult =
+        getOperation().walk([&](mlir::hip::OneHotOp op) -> mlir::WalkResult {
+          if (!op->hasAttr("test.one_hot_reify_failure_atomic"))
+            return mlir::WalkResult::advance();
+          auto outputType =
+              mlir::dyn_cast<mlir::RankedTensorType>(op.getOutput().getType());
+          if (!outputType || op->getNumResults() != 1) {
+            op.emitOpError("atomicity fixture requires one tensor result");
+            return mlir::WalkResult::interrupt();
+          }
+          int64_t axis = op.getAxis();
+          if (axis < 0)
+            axis += outputType.getRank();
+          if (axis < 0 || axis >= outputType.getRank() ||
+              outputType.isDynamicDim(axis)) {
+            op.emitOpError("atomicity fixture requires a static valid axis");
+            return mlir::WalkResult::interrupt();
+          }
+          llvm::SmallVector<int64_t> contradictoryShape(
+              outputType.getShape().begin(), outputType.getShape().end());
+          ++contradictoryShape[axis];
+          mlir::Type contradictoryType = outputType.clone(contradictoryShape);
+          op.getOutput().setType(contradictoryType);
+          op->getResult(0).setType(contradictoryType);
+
+          mlir::Block *block = op->getBlock();
+          size_t before = std::distance(block->begin(), block->end());
+          mlir::DictionaryAttr attrsBefore = op->getAttrDictionary();
+          mlir::Type outputTypeBefore = op.getOutput().getType();
+          mlir::Type resultTypeBefore = op->getResult(0).getType();
+          rewriter.setInsertionPoint(op);
+          mlir::ReifiedRankedShapedTypeDims reified;
+          if (mlir::succeeded(op.reifyResultShapes(rewriter, reified))) {
+            op.emitOpError(
+                "malformed OneHot reification unexpectedly succeeded");
+            return mlir::WalkResult::interrupt();
+          }
+          size_t after = std::distance(block->begin(), block->end());
+          if (after != before || op->getAttrDictionary() != attrsBefore ||
+              op.getOutput().getType() != outputTypeBefore ||
+              op->getResult(0).getType() != resultTypeBefore ||
+              !reified.empty()) {
+            op.emitOpError("failed OneHot reification mutated IR");
+            return mlir::WalkResult::interrupt();
+          }
+          op.emitRemark("failed OneHot reification left IR unchanged");
+          return mlir::WalkResult::advance();
+        });
+    if (walkResult.wasInterrupted())
+      signalPassFailure();
+  }
+};
+
+
 } // namespace
 
 void mlir::hip::test::registerHipTestPasses(DialectRegistry &registry) {
@@ -276,4 +351,5 @@ void mlir::hip::test::registerHipTestPasses(DialectRegistry &registry) {
   });
   PassRegistration<TestHipWholeShapeDimReifyPass>();
   PassRegistration<TestHipDpsDefaultReifyPass>();
+  PassRegistration<TestOneHotReifyFailureAtomicPass>();
 }

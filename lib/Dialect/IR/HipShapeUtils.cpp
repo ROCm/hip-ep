@@ -11,6 +11,7 @@
 
 #include "hip/Dialect/IR/HipShapeUtils.h"
 #include "HipShapeUtilsInternal.h"
+#include "hip/Dialect/IR/HipDialect.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
@@ -545,6 +546,12 @@ bool mlir::hip::matchConstantIntTensor(Value value,
   }
   if (matchPattern(value, m_Constant(&denseAttr)))
     return parseDenseIntElements(denseAttr, out, expectedRank);
+  if (auto constant = value.getDefiningOp<hip::ConstantOp>()) {
+    auto dense = dyn_cast_or_null<DenseElementsAttr>(constant.getValueAttr());
+    if (!dense || dense.getType() != value.getType())
+      return false;
+    return parseDenseIntElements(dense, out, expectedRank);
+  }
   if (auto getGlobal = value.getDefiningOp<memref::GetGlobalOp>()) {
     auto module = getGlobal->getParentOfType<ModuleOp>();
     if (!module)
