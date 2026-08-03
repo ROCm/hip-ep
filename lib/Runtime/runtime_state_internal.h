@@ -144,6 +144,18 @@ struct RuntimeState {
   void *matmul_dp4a_scratch;
   size_t matmul_dp4a_scratch_size;
 
+  // Per-session scratch for the linear-attention chunk-parallel gated_delta
+  // prefill (hip_linear_attention_prefill_chunked). One contiguous device
+  // buffer holding the per-(head,chunk) Uloc/W/rlast/alast tiles and the
+  // chunk-start states for the whole sequence. Same grow-on-demand /
+  // never-shrink policy as conv_scratch; lazily allocated on first prefill,
+  // freed in hipdnn_ep_state_cleanup. Single-buffer reuse is safe because the
+  // HIP stream is serialised (the three prefill passes consume it before the
+  // next linear-attention layer launches). Replaces a process-static buffer so
+  // the footprint is bounded to the session and released on teardown.
+  void *la_scratch;
+  size_t la_scratch_size;
+
   // NOTE: the GQA GEMM descriptor cache (GqaGemmCache) formerly lived here as
   // gqa_gemm_cache. It is now per-op-instance: each gqa instance owns one in
   // its GqaState op-state slot (see op_states below and

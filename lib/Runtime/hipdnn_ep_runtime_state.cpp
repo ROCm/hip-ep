@@ -165,6 +165,8 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->conv_scratch_size = 0;
   state->matmul_dp4a_scratch = nullptr;
   state->matmul_dp4a_scratch_size = 0;
+  state->la_scratch = nullptr;
+  state->la_scratch_size = 0;
   state->zp_unpack_cache = nullptr;
   state->op_profile = hipdnn_ep_perf_enabled() ? op_profile_create() : nullptr;
   state->device_error_flag = nullptr;
@@ -719,6 +721,12 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   // Free the W4A8 dp4a matmul_nbits scratch (if allocated).
   if (state->matmul_dp4a_scratch) {
     HIP_CLEANUP(hipFree(state->matmul_dp4a_scratch));
+  }
+
+  // Free the linear-attention chunk-parallel prefill scratch (if allocated).
+  // The stream sync above has drained any in-flight prefill still reading it.
+  if (state->la_scratch) {
+    HIP_CLEANUP(hipFree(state->la_scratch));
   }
 
   // Tear down per-op state slots. Each entry's deletor destroys its concrete
@@ -1412,6 +1420,53 @@ int hipdnn_ep_state_ensure_matmul_dp4a_scratch(RuntimeState *state,
     return -1;
   }
   state->matmul_dp4a_scratch_size = alloc_size;
+  return 0;
+}
+
+// Linear-attention chunk-parallel prefill scratch pool. Same grow-on-demand /
+// never-shrink policy as conv_scratch / qmoe_scratch, freed in cleanup. Holds
+// the per-(head,chunk) Uloc/W/rlast/alast tiles + chunk-start states for one
+// prefill. Single-buffer reuse across LA layers is safe because the stream is
+// serialised: the three prefill passes fully consume it before the next launch.
+void *hipdnn_ep_state_get_la_scratch(RuntimeState *state) {
+  return state ? state->la_scratch : nullptr;
+}
+
+int hipdnn_ep_state_ensure_la_scratch(RuntimeState *state, size_t needed_size) {
+  if (!state)
+    return -1;
+  if (needed_size == 0)
+    return 0;
+  if (state->la_scratch_size >= needed_size)
+    return 0;
+
+  // 1.5x growth amortisation mirrors conv_scratch / qmoe_scratch.
+  size_t alloc_size = needed_size;
+  if (state->la_scratch_size > 0) {
+    size_t grown = state->la_scratch_size + state->la_scratch_size / 2;
+    if (grown > alloc_size)
+      alloc_size = grown;
+  }
+
+  if (state->la_scratch) {
+    // Drain any in-flight prefill still reading the old buffer before freeing.
+    // Growth is rare (only when a longer sequence is first seen).
+    if (state->stream) {
+      hipStreamSynchronize(state->stream);
+    }
+    HIP_CLEANUP(hipFree(state->la_scratch));
+    state->la_scratch = nullptr;
+    state->la_scratch_size = 0;
+  }
+
+  if (hipMalloc(&state->la_scratch, alloc_size) != hipSuccess) {
+    fprintf(stderr,
+            "hipdnn_ep_state_ensure_la_scratch: hipMalloc failed for %zu "
+            "bytes\n",
+            alloc_size);
+    return -1;
+  }
+  state->la_scratch_size = alloc_size;
   return 0;
 }
 
