@@ -234,7 +234,7 @@ class Hip_DpsOp_OutsAuthoritative<string mnemonic,
 // declaration; no per-op `.cpp` thunk is needed.
 //
 // Contract on the leaf op: must declare operands `$data` (input
-// tensor), `$axes` (rank-1 i64 tensor), `$output` (DPS init),
+// tensor), `$axes` (rank-0 or rank-1 i64 tensor), `$output` (DPS init),
 // integer attributes `$keepdims` and `$noop_with_empty_axes`.
 class Hip_DpsOp_Reduction<string mnemonic, list<Trait> traits = []> :
     Hip_DpsOp<mnemonic, traits,
@@ -248,7 +248,14 @@ class Hip_DpsOp_Reduction<string mnemonic, list<Trait> traits = []> :
                     getKeepdims(), getNoopWithEmptyAxes(),
                     getOperation(), reified);
               }],
-              /*shapeContract=*/"reduction"> {
+              /*shapeContract=*/"reduction",
+              /*sameShapeSource=*/"",
+              /*customVerifyBody=*/[{
+                return ::mlir::hip::verifyReductionDpsOp(
+                    getOperation(), getData(), getAxes(), getKeepdims(),
+                    getNoopWithEmptyAxes());
+              }]> {
+  let hasVerifier = 1;
   let hipHasExplicitShapeContract = 1;
 }
 
@@ -285,7 +292,17 @@ class Hip_DpsOp_Broadcast<string mnemonic, list<string> operandGetters,
                   ", "),
                 "}, getOperation(), reified);"
               ),
-              /*shapeContract=*/"broadcast"> {
+              /*shapeContract=*/"broadcast",
+              /*sameShapeSource=*/"",
+              /*customVerifyBody=*/!strconcat(
+                "return ::mlir::hip::verifyBroadcastDpsOp("
+                "getOperation(), {",
+                !interleave(
+                  !foreach(g, operandGetters, "get" # g # "()"),
+                  ", "),
+                "});"
+              )> {
+  let hasVerifier = 1;
   let hipHasExplicitShapeContract = 1;
 }
 
@@ -1421,7 +1438,6 @@ def Hip_MiopenAddOp : Hip_DpsOp_Broadcast<"miopen.add",
   );
   // result_tensors inherited from Hip_DpsOp
   let hasCustomAssemblyFormat = 1;
-  let hasVerifier = 1;
 }
 
 def Hip_MulOp : Hip_DpsOp_Broadcast<"mul", /*operandGetters=*/["Lhs", "Rhs"],
@@ -1463,7 +1479,6 @@ def Hip_MulOp : Hip_DpsOp_Broadcast<"mul", /*operandGetters=*/["Lhs", "Rhs"],
 
   // result_tensors inherited from Hip_DpsOp
   let hasCustomAssemblyFormat = 1;
-  let hasVerifier = 1;
 }
 
 def Hip_AddOp : Hip_DpsOp_Broadcast<"add", /*operandGetters=*/["Lhs", "Rhs"],
@@ -1503,7 +1518,6 @@ def Hip_AddOp : Hip_DpsOp_Broadcast<"add", /*operandGetters=*/["Lhs", "Rhs"],
 
   // result_tensors inherited from Hip_DpsOp
   let hasCustomAssemblyFormat = 1;
-  let hasVerifier = 1;
 }
 
 def Hip_MinOp : Hip_DpsOp_Broadcast<"min", /*operandGetters=*/["Lhs", "Rhs"],
@@ -1551,7 +1565,10 @@ def Hip_MinOp : Hip_DpsOp_Broadcast<"min", /*operandGetters=*/["Lhs", "Rhs"],
   }];
 }
 
-def Hip_MaxOp : Hip_DpsOp<"max", /*traits=*/[OpStateOpInterface]> {
+def Hip_MaxOp : Hip_DpsOp_Broadcast<"max",
+                                    /*operandGetters=*/["Lhs", "Rhs"],
+                                    /*outsAccessor=*/"Output",
+                                    /*traits=*/[OpStateOpInterface]> {
   let summary = "Elementwise maximum";
 
   // OpStateOpInterface: shared OpTensorState (see hip.mul).

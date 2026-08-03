@@ -79,6 +79,63 @@ bool extractConstantIntVector(mlir::Value value,
   return extractConstantIntTensor(value, out, /*expectedRank=*/1, scope);
 }
 
+std::optional<llvm::ArrayRef<int64_t>>
+resolveReductionAxes(mlir::Operation *op, mlir::Value data,
+                     int64_t noopWithEmptyAxes,
+                     llvm::SmallVectorImpl<int64_t> &storage) {
+  storage.clear();
+  bool hasAxesOperand = op->getNumOperands() > 1 &&
+                        !mlir::isa<mlir::NoneType>(op->getOperand(1).getType());
+  if (hasAxesOperand) {
+    if (!extractConstantIntVector(op->getOperand(1), storage))
+      return std::nullopt;
+  } else if (auto axesAttr = op->getAttrOfType<mlir::ArrayAttr>("axes")) {
+    for (mlir::Attribute entry : axesAttr)
+      storage.push_back(
+          mlir::cast<mlir::IntegerAttr>(entry).getValue().getSExtValue());
+  }
+
+  if (storage.empty() && noopWithEmptyAxes == 0) {
+    // Empty axes with noop_with_empty_axes = 0 reduces every axis.
+    auto dataType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+    if (!dataType)
+      return std::nullopt;
+    llvm::append_range(storage, llvm::seq<int64_t>(0, dataType.getRank()));
+  }
+  return llvm::ArrayRef<int64_t>(storage);
+}
+
+mlir::Value materializeReductionAxes(mlir::OpBuilder &builder,
+                                     mlir::Location loc, mlir::Operation *op,
+                                     llvm::ArrayRef<int64_t> resolvedAxes) {
+  if (op->getNumOperands() > 1 &&
+      !mlir::isa<mlir::NoneType>(op->getOperand(1).getType()))
+    return op->getOperand(1);
+
+  auto axesType = mlir::RankedTensorType::get(
+      {static_cast<int64_t>(resolvedAxes.size())}, builder.getI64Type());
+  auto axesAttr = mlir::DenseIntElementsAttr::get(axesType, resolvedAxes);
+  return mlir::arith::ConstantOp::create(builder, loc, axesType, axesAttr);
+}
+
+mlir::FailureOr<mlir::RankedTensorType>
+inferReduceResultType(mlir::Operation *op, mlir::Value data,
+                      std::optional<llvm::ArrayRef<int64_t>> reducedAxes,
+                      int64_t keepdims) {
+  if (auto ranked =
+          mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType()))
+    return ranked;
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+  if (!inputType || !reducedAxes)
+    return mlir::failure();
+  mlir::FailureOr<llvm::SmallVector<int64_t>> outShape =
+      mlir::hip::inferReductionShape(inputType.getShape(), *reducedAxes,
+                                     keepdims);
+  if (mlir::failed(outShape))
+    return mlir::failure();
+  return mlir::RankedTensorType::get(*outShape, inputType.getElementType());
+}
+
 mlir::FailureOr<mlir::Value> createEmptyTensorFromReifiedShape(
     mlir::OpBuilder &builder, mlir::Location loc,
     mlir::RankedTensorType resultType,
@@ -138,6 +195,21 @@ createBroadcastEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
   mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>> shape =
       mlir::hip::reifyBroadcastResultShape(
           builder, loc, operands, [&] { return mlir::emitError(loc); });
+  if (mlir::failed(shape))
+    return mlir::failure();
+  return createEmptyTensorFromReifiedShape(builder, loc, resultType, *shape);
+}
+
+mlir::FailureOr<mlir::Value>
+createReductionEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
+                           mlir::RankedTensorType resultType, mlir::Value data,
+                           std::optional<llvm::ArrayRef<int64_t>> reducedAxes,
+                           int64_t keepdims) {
+  if (!reducedAxes)
+    return createEmptyTensor(builder, loc, resultType, data);
+  mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>> shape =
+      mlir::hip::reifyReductionResultShape(builder, loc, data, *reducedAxes,
+                                           keepdims);
   if (mlir::failed(shape))
     return mlir::failure();
   return createEmptyTensorFromReifiedShape(builder, loc, resultType, *shape);

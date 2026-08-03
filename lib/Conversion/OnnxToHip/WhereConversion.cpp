@@ -9,75 +9,18 @@ namespace mlir {
 namespace hip {
 namespace {
 
-/// Create a tensor.empty for a DPS init operand whose shape is the result of
-/// ONNX-style multidirectional (NumPy) broadcasting over multiple inputs.
+/// Lower `onnx.Where` with multidirectional broadcasting.
 ///
-/// Operand shapes are right-aligned with the result. For each dynamic
-/// dimension of \p resultType, the size is taken from the first operand that
-/// truly contributes to the broadcast extent at that axis -- i.e., an operand
-/// whose corresponding dim is not statically 1. Operands whose rank does not
-/// span the dimension (shorter rank, conceptually padded with 1 on the left)
-/// are skipped, as are operands whose dim is statically 1. If every operand
-/// is statically 1 at the axis (degenerate case for a dynamic result), we
-/// fall back to the first operand spanning the dim.
-///
-/// Returns failure if no ranked operand spans a dynamic result dim (e.g.
-/// every operand is unranked while the result is ranked-and-dynamic). We
-/// surface this through `FailureOr` rather than `assert` so that the check
-/// remains active in Release builds (assertions are stripped under NDEBUG)
-/// and the pattern fails cleanly via `notifyMatchFailure` instead of
-/// dereferencing a null Value at the next builder call.
-mlir::FailureOr<mlir::Value>
-createBroadcastEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
-                           mlir::RankedTensorType resultType,
-                           mlir::ValueRange operands) {
-  int64_t resultRank = resultType.getRank();
-  llvm::SmallVector<mlir::Value> dynSizes;
-  for (int64_t dimIdx : llvm::seq<int64_t>(resultRank)) {
-    if (!resultType.isDynamicDim(dimIdx))
-      continue;
-
-    mlir::Value chosen;
-    int64_t chosenDim = -1;
-    mlir::Value fallback;
-    int64_t fallbackDim = -1;
-    for (mlir::Value operand : operands) {
-      auto t = mlir::dyn_cast<mlir::RankedTensorType>(operand.getType());
-      if (!t)
-        continue;
-      int64_t offset = resultRank - t.getRank();
-      if (dimIdx < offset)
-        continue; // operand is broadcast (padded to 1) at this axis
-      int64_t operandDim = dimIdx - offset;
-      if (!fallback) {
-        fallback = operand;
-        fallbackDim = operandDim;
-      }
-      if (!t.isDynamicDim(operandDim) && t.getDimSize(operandDim) == 1)
-        continue; // statically broadcast, does not define the extent
-      chosen = operand;
-      chosenDim = operandDim;
-      break;
-    }
-    if (!chosen) {
-      chosen = fallback;
-      chosenDim = fallbackDim;
-    }
-    if (!chosen)
-      return mlir::failure();
-    dynSizes.push_back(
-        mlir::tensor::DimOp::create(builder, loc, chosen, chosenDim));
-  }
-  return mlir::Value(
-      mlir::tensor::EmptyOp::create(builder, loc, resultType.getShape(),
-                                    resultType.getElementType(), dynSizes));
-}
-
-/// onnx.Where -> hip.where
-/// ONNX Where: output[i] = condition[i] ? X[i] : Y[i].
-/// Supports multidirectional (NumPy-style) broadcasting between condition,
-/// X and Y. The condition tensor is bool (i1); X and Y share the result
-/// element type.
+/// Before:
+///   %r = "onnx.Where"(%cond, %x, %y)
+///       : (tensor<?xi1>, tensor<1xf32>, tensor<?xf32>) -> tensor<?xf32>
+/// After:
+///   %cond_dim = tensor.dim %cond, %c0
+///   %y_dim = tensor.dim %y, %c0
+///   %cond_is_one = arith.cmpi eq, %cond_dim, %c1 : index
+///   %extent = arith.select %cond_is_one, %y_dim, %cond_dim : index
+///   %init = tensor.empty(%extent) : tensor<?xf32>
+///   %r = hip.where ... outs(%init : tensor<?xf32>)
 struct WhereToHip : public mlir::RewritePattern {
   WhereToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Where", /*benefit=*/1, ctx) {}
@@ -110,15 +53,10 @@ WhereToHip::matchAndRewrite(mlir::Operation *op,
     return rewriter.notifyMatchFailure(
         op, "onnx.Where lowering expects a ranked tensor result");
 
-  // ONNX Where supports multidirectional (NumPy-style) broadcasting, so any
-  // given output dim may be contributed by a different operand. Resolve each
-  // dynamic result dim by scanning all three operands rather than relying on
-  // a single "source" tensor.
   mlir::FailureOr<mlir::Value> initOrFailure =
       createBroadcastEmptyTensor(rewriter, loc, resultType, {condition, x, y});
   if (mlir::failed(initOrFailure))
-    return rewriter.notifyMatchFailure(
-        op, "onnx.Where: no ranked operand spans dynamic result dim");
+    return mlir::failure();
   auto hipOp = mlir::hip::WhereOp::create(rewriter, loc, context, condition, x,
                                           y, *initOrFailure);
   rewriter.replaceOp(op, hipOp->getResult(0));
