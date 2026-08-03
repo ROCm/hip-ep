@@ -123,9 +123,12 @@ ReciprocalToHip::matchAndRewrite(mlir::Operation *op,
         op, "onnx.Reciprocal lowering expects a ranked tensor result");
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+  auto init = createSameShapeEmptyTensor(rewriter, loc, resultType, input);
+  if (mlir::failed(init))
+    return rewriter.notifyMatchFailure(
+        op, "Reciprocal result type must match the input shape");
   auto hipOp =
-      mlir::hip::ReciprocalOp::create(rewriter, loc, context, input, init);
+      mlir::hip::ReciprocalOp::create(rewriter, loc, context, input, *init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
@@ -148,8 +151,11 @@ SqrtToHip::matchAndRewrite(mlir::Operation *op,
         op, "onnx.Sqrt lowering expects a ranked tensor result");
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
-  auto hipOp = mlir::hip::SqrtOp::create(rewriter, loc, context, input, init);
+  auto init = createSameShapeEmptyTensor(rewriter, loc, resultType, input);
+  if (mlir::failed(init))
+    return rewriter.notifyMatchFailure(
+        op, "Sqrt result type must match the input shape");
+  auto hipOp = mlir::hip::SqrtOp::create(rewriter, loc, context, input, *init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
@@ -175,8 +181,11 @@ struct NegToHip : public mlir::RewritePattern {
           op, "onnx.Neg lowering expects a ranked tensor input");
     auto resultType =
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
-    auto hipOp = mlir::hip::NegOp::create(rewriter, loc, context, input, init);
+    auto init = createSameShapeEmptyTensor(rewriter, loc, resultType, input);
+    if (mlir::failed(init))
+      return rewriter.notifyMatchFailure(
+          op, "Neg result type must match the input shape");
+    auto hipOp = mlir::hip::NegOp::create(rewriter, loc, context, input, *init);
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }

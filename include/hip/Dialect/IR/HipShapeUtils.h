@@ -21,6 +21,8 @@ namespace hip {
 
 /// Parse the payload of a rank-0 or rank-1 dense integer tensor into signed
 /// i64 values. `expectedRank` may restrict callers to scalar or vector form.
+/// This is the dialect-layer parsing core shared by inline constant matching
+/// and ONNX conversion's broader pre-/post-externalization recognition.
 bool parseDenseIntElements(DenseElementsAttr dense,
                            SmallVectorImpl<int64_t> &out,
                            std::optional<int64_t> expectedRank = std::nullopt);
@@ -31,8 +33,22 @@ bool parseDenseIntElements(DenseElementsAttr dense,
 bool matchConstantIntTensor(Value value, SmallVectorImpl<int64_t> &out,
                             std::optional<int64_t> expectedRank = std::nullopt);
 
-// Every `reify*` helper validates its preconditions before touching the
-// builder. A failed rewrite or reification therefore leaves no stray IR.
+//===----------------------------------------------------------------------===//
+// Contract shared by every helper in this header
+//
+// The `infer*` helpers are pure functions of static shapes: they take no
+// builder and emit no IR. The `reify*` helpers may materialize index SSA, and
+// each one validates every precondition through its `infer*` counterpart
+// BEFORE touching the builder. A `reify*` failure therefore never leaves
+// stray ops behind, which both the pattern-rewrite contract and
+// `ReifyRankedShapedTypeOpInterface` require (see
+// `GreedyPatternRewriteDriver`'s expensive checks and
+// `ResolveShapedTypeResultDims`).
+//
+// Converter destination construction and `reifyResultShapes` call the same
+// helper for a given op, so the DPS `outs` shape and the shape observed by
+// consumers cannot disagree. See `docs/design/hip-shape-inference.md`.
+//===----------------------------------------------------------------------===//
 
 /// Compute the shape of `A @ B` for matmul with NumPy-style batch broadcast
 /// over the leading dimensions. The matrix dimensions are `A[..., M, K]` and
@@ -70,35 +86,43 @@ inferGemmShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
                std::optional<ArrayRef<int64_t>> cShape, int64_t transA,
                int64_t transB, function_ref<InFlightDiagnostic()> emitError);
 
-/// Verify that the actual `outs` operand shapes of a DPS HIP op match the
-/// shapes returned by `computeExpected`. `op` must implement
-/// `DestinationStyleOpInterface`.
+/// Verify that one `outs` shape of a DPS HIP op matches the shape returned by
+/// `inferShape`. `op` must implement `DestinationStyleOpInterface`;
+/// `initIndex` selects the destination (zero for single-destination ops).
 ///
-/// `computeExpected` is invoked once and must return one shape per init
-/// operand (== one per `OpResult` for tensor mode; same count for memref
-/// mode, just no SSA result). An empty outer vector signals that the
-/// shape-arithmetic helper already emitted a diagnostic — this function
-/// returns `failure()` without re-emitting.
+/// `inferShape` is invoked once and returns `failure()` when the underlying
+/// `infer*` helper already emitted a diagnostic, which this function
+/// propagates without re-emitting. Pair it directly with an `infer*` helper:
+///
+///   return verifyHipOpShape(*this, [&] {
+///     return inferMatmulShape(aShape, bShape,
+///                             [&] { return this->emitOpError(); });
+///   });
 ///
 /// Element-type checks are intentionally not handled here: dtype-changing
 /// ops (cast, equal, less, not, and) keep their own element-type checks in
 /// their op-local verifiers.
-LogicalResult verifyHipOpShape(
-    Operation *op,
-    function_ref<SmallVector<SmallVector<int64_t>>()> computeExpected);
-
-/// Verify one DPS destination against a pure `infer*` shape rule.
 LogicalResult
 verifyHipOpShape(Operation *op,
                  function_ref<FailureOr<SmallVector<int64_t>>()> inferShape,
                  unsigned initIndex = 0);
 
-/// Verify the common tensor/memref and result/init invariants of a HIP DPS
-/// compute operation.
+/// Verify the cross-cutting HIP DPS compute contract:
+///   * every listed data operand is a ranked tensor or memref;
+///   * all listed operands use the same tensor/memref mode;
+///   * the DestinationStyleOpInterface init count equals `numInits`;
+///   * tensor mode has one result per init with exactly matching types;
+///   * memref mode has no SSA results.
+///
+/// `dataOperands` must include the DPS init operands as well as the semantic
+/// inputs. Keeping this helper public lets generated TableGen verifier bodies
+/// compose the same structural contract as dedicated op verifiers.
 LogicalResult verifyDpsComputeOp(Operation *op, ArrayRef<Value> dataOperands,
                                  unsigned numInits);
 
-/// Pure NumPy right-aligned broadcast over static shapes.
+/// Pure NumPy right-aligned broadcast over static shapes. Dynamic dimensions
+/// are honest wildcards. This is the common static rule used by conversion,
+/// reification, and verification.
 FailureOr<SmallVector<int64_t>>
 inferBroadcastShape(ArrayRef<ArrayRef<int64_t>> shapes,
                     function_ref<InFlightDiagnostic()> emitError);
@@ -126,22 +150,57 @@ OpFoldResult reifyDimOrConstant(OpBuilder &b, Location loc, int64_t staticDim,
 /// dim becomes `tensor.dim %source, %i`. Used by ops whose result has
 /// the same shape as one designated input (e.g. rope, rms_norm, qmoe).
 ///
-/// The `FailureOr` distinguishes a valid rank-zero shape from failure.
+/// Returns failure when `source` is not a ranked tensor. The `FailureOr`
+/// distinguishes that failure from a successful rank-zero shape.
 FailureOr<SmallVector<OpFoldResult>>
 reifyElementwiseSameShape(OpBuilder &b, Location loc, Value source);
 
-/// One-shot generated reifier and verifier targets for named-source
-/// same-shape operations.
+/// One-shot reify body for a single-result DPS op whose result shape equals
+/// one named source operand. This deliberately does not inspect operand order
+/// or lift the DPS init: `source` is the semantic shape authority selected by
+/// the op's TableGen definition.
 LogicalResult
 reifyElementwiseSameShapeFor(OpBuilder &b, Location loc, Value source,
                              Operation *op,
                              ReifiedRankedShapedTypeDims &reified);
+
+/// Verify the single-result structural DPS contract, then verify that DPS init
+/// `initIndex` has a shape statically compatible with the named semantic
+/// `source`. Dynamic extents on either side are wildcards. All ranked
+/// tensor/memref DPS inputs participate in the structural check, including
+/// non-source operands; non-shaped inputs such as !hip.context are ignored.
+///
+/// This is intentionally named-source based rather than first-operand based:
+/// ops such as CumSum and Scatter carry other shaped inputs that must not
+/// influence the result shape.
 LogicalResult verifySameShapeDpsOp(Operation *op, Value source,
                                    unsigned initIndex = 0);
 
-/// Compute the NumPy-broadcast result shape over `operands`. Static
-/// broadcastability is validated before any `tensor.dim` or arithmetic op is
-/// emitted.
+/// Compute the NumPy-broadcast result shape over ranked tensor `operands`,
+/// using `tensor::getMixedSizes` for each. Static extents remain `IndexAttr`;
+/// dynamic/dynamic pairs materialize the runtime broadcast rule as index SSA.
+///
+/// Before (choosing either dynamic operand is incorrect when it is 1):
+///   %lhs_dim = tensor.dim %lhs, %c0
+///   %init = tensor.empty(%lhs_dim) : tensor<?xf32>
+/// After:
+///   %lhs_dim = tensor.dim %lhs, %c0
+///   %rhs_dim = tensor.dim %rhs, %c0
+///   %lhs_is_one = arith.cmpi eq, %lhs_dim, %c1 : index
+///   %extent = arith.select %lhs_is_one, %rhs_dim, %lhs_dim : index
+///   %init = tensor.empty(%extent) : tensor<?xf32>
+///
+/// The `FailureOr` distinguishes failure from a successful rank-zero shape.
+///
+/// Used by elementwise ops that take broadcast-shape operands and write
+/// the broadcast result into their `outs` (add, mul, sub, div, min, mod,
+/// equal, less, and, where, ...). The output dtype is taken from the
+/// op's `outs` operand and is independent of this helper — comparisons
+/// (equal, less) emit i1 outs while the operands are typically f32/f16,
+/// and the helper handles both cases identically (it only looks at
+/// shapes).
+///
+/// All operands must be `RankedTensorType`-typed Values.
 FailureOr<SmallVector<OpFoldResult>>
 reifyBroadcastResultShape(OpBuilder &b, Location loc, ValueRange operands,
                           function_ref<InFlightDiagnostic()> emitError);
@@ -214,7 +273,15 @@ reifyPoolResultShape(OpBuilder &b, Location loc, Value input,
                      int64_t ceilMode,
                      function_ref<InFlightDiagnostic()> emitError);
 
-/// Compute the supported rank-4 NCHW ONNX ConvTranspose result shape.
+/// Compute the supported rank-4 NCHW ONNX ConvTranspose result shape:
+///   N = input[0]
+///   M = weights[1] * group
+///   spatial[i] = stride[i] * (input[i+2] - 1) + output_padding[i]
+///                + ((kernel[i] - 1) * dilation[i] + 1)
+///                - pads[i] - pads[i+2]
+///
+/// Dynamic input/weight dimensions remain dynamic. All attribute vectors are
+/// validated before a result is produced.
 FailureOr<SmallVector<int64_t>> inferConvTransposeShape(
     ArrayRef<int64_t> inputShape, ArrayRef<int64_t> weightShape,
     ArrayRef<int64_t> kernelShape, ArrayRef<int64_t> strides,
@@ -439,7 +506,8 @@ reifyLinearAttentionOutputShapes(OpBuilder &b, Location loc, Value query,
 ///   present_state = [B, C, weight[2] - 1]
 ///
 /// Also validates the depthwise weight layout `[C, 1, K]`, optional bias
-/// `[C]`, and optional past state `[B, C, K - 1]`.
+/// `[C]`, and optional past state `[B, C, K - 1]`. Dynamic extents are treated
+/// as compatible when equality cannot be decided statically.
 FailureOr<SmallVector<SmallVector<int64_t>>>
 inferCausalConvWithStateOutputShapes(
     ArrayRef<int64_t> inputShape, ArrayRef<int64_t> weightShape,
@@ -493,15 +561,14 @@ LogicalResult reifyReductionShape(OpBuilder &b, Location loc, Value data,
 
 /// One-shot reify body for elementwise NumPy-broadcast ops (add, mul,
 /// sub, div, min, mod, equal, less, and, where, ...). Wraps
-/// `reifyBroadcastShape` with the per-op guards (no-results bail,
+/// `reifyBroadcastResultShape` with the per-op guards (no-results bail,
 /// every operand must be `RankedTensorType`) and writes the lifted
 /// dim list into `reified`.
 ///
 /// `operands` is the list of broadcast input operands in the order
 /// they should be aligned (right-aligned for NumPy broadcast).
-/// Returns `failure()` on any defensive bail or when broadcast itself
-/// fails (verifier should already have caught the latter; reify bails
-/// to avoid materializing nonsense IR).
+/// Returns `failure()` on any defensive bail or when broadcast itself fails.
+/// A successful rank-zero result writes one empty shape into `reified`.
 ///
 /// Used as the body of `Hip_DpsOp_Broadcast`'s auto-emitted reify
 /// dispatcher; see `Hip_DpsOp_Broadcast` in `HipOps.td`.

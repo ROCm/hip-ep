@@ -4,7 +4,7 @@ Licensed under the MIT License.
 -->
 # HIP dialect shape inference
 
-**Date:** 2026-07-24
+**Date:** 2026-07-28
 **Document Type:** Design
 **Status:** Implemented
 **Related:** [unranked-tensor-handling.md](unranked-tensor-handling.md), [pool-allocs-memory-planning.md](pool-allocs-memory-planning.md), [output-allocator-design.md](output-allocator-design.md), [compiler-runtime-contract.md](compiler-runtime-contract.md), [pipeline_pass_menu.md](../pipeline_pass_menu.md)
@@ -48,7 +48,7 @@ This gives two related but distinct jobs:
 | `InferShapedTypeOpInterface` | Not used as the primary HIP DPS contract |
 | `HipDpsOpInterface` | Dialect marker interface extending `DestinationStyleOpInterface`; owns the shared default reification body |
 
-`HipDpsOpInterface` is a generated MLIR `OpInterface`, but it is not a replacement for the standard InferType/Reify contracts. It marks HIP DPS compute operations and provides their shared default reification behavior. In tensor mode it walks `DestinationStyleOpInterface::getDpsInits()` and returns each destination's mixed sizes through `tensor::getMixedSizes`, exactly one vector per SSA result. In memref mode there are no SSA results, so it succeeds with an empty list.
+`HipDpsOpInterface` is a generated MLIR `OpInterface`, but it is not a replacement for the standard InferType/Reify contracts. It marks HIP DPS compute operations and provides their shared default reification behavior: walk `DestinationStyleOpInterface::getDpsInits()` and return each destination's mixed sizes through `tensor::getMixedSizes` or `memref::getMixedSizes`.
 
 Operations whose shape contract is more specific than "result shape equals destination shape" opt out of the default and provide a dedicated reification implementation.
 
@@ -63,21 +63,25 @@ Operations whose shape contract is more specific than "result shape equals desti
 | `autoInfer` | `0` | Emit `inferReturnTypes` using the DPS init tensor type |
 | `declareInfer` | `0` | Add `InferTypeOpInterface`; `autoInfer=1` requires it, while `declareInfer=1, autoInfer=0` requires a hand-written `inferReturnTypes` implementation |
 | `customReifyBody` | empty | Provide an inline custom body for parameterized DPS sub-bases |
+| `sameShapeSource` | empty | Record the ODS accessor stem of a same-shape contract's named semantic source |
 | `customVerifyBody` | empty | Provide an inline verifier body for a parameterized DPS sub-base |
 
-`Hip_DpsOp_Broadcast` and `Hip_DpsOp_Reduction` use `customReifyBody` to share
-broadcast and reduction reification across operation families without per-op
-C++ implementations. Both bases also generate verifier bodies that compose
-`verifyDpsComputeOp`, so tensor/memref uniformity and tensor result-to-init type
-parity are checked before semantic shape rules. Broadcast uses the same pure
-NumPy rule as reification and destination construction. Reduction validates
-exact output shape only when the axes payload is compile-time-known; runtime
-axes validate rank/type and the keepdims/noop attributes, then retain the
-outs-authoritative fallback.
+`Hip_DpsOp_SameShape`, `Hip_DpsOp_Broadcast`, and `Hip_DpsOp_Reduction` use
+these hooks to share named-source, broadcast, and reduction reification across
+operation families without per-op C++ implementations. The same-shape base
+accepts independent source and output accessor stems (`input`/`output`,
+`x`/`y`, `data`/`output`), infers the result type from the DPS init, and emits a
+verifier that checks the structural DPS contract before the named source.
+Leaves with existing verifiers call the same shared verifier helper after
+preserving their structural and op-specific checks.
 
-The `SameShape`, `Semantic`, `Payload`, and `OutsAuthoritative` wrappers name
-reviewed contract categories without requiring the exhaustive inventory audit
-to be enabled while feature migrations are still in progress.
+The broadcast and reduction bases also generate their verifier bodies. Both
+compose `verifyDpsComputeOp`, so tensor/memref uniformity and tensor
+result-to-init type parity are checked before semantic shape rules. Broadcast
+uses the same pure NumPy rule as reification and destination construction.
+Reduction validates exact output shape only when the axes payload is
+compile-time-known; runtime axes validate their rank/type and the keepdims/noop
+attributes, then retain the outs-authoritative fallback.
 
 Multi-result and specialized operations may keep inferred result construction disabled when a single generated body cannot describe all results.
 
@@ -100,26 +104,36 @@ Choose the smallest mechanism that matches the operation's semantics:
 | Slice | Exact constant/static-bound rule; dynamic sliced-axis clamps and runtime parameters preserve capacity/outs policy |
 | Expand, Range | Fold-or-bail helpers with fallback to DPS-init shape |
 | Tile | Constant repeats use exact mixed shape arithmetic; runtime repeats use one bulk synchronized readback and reify from that exact init |
-| MatMul/Gemm/MatMulNBits | Dedicated shape logic based on operand dimensions and attributes |
-| LayerNormalization | Y equals input; Mean/InvStdDev use keepdims reduction shape over `[axis, rank)` |
-| LinearAttention | Shared output/state formula used by converter, reification, and verifier |
-| SkipSimplifiedLayerNormalization | Output and optional residual sum equal input; training stats rejected |
-| GroupQueryAttention | Semantic query/head mapping plus `max(past capacity, total_seq_len)` or logical length alone without past |
-| MultiHeadAttention | Default rank-3 fp16 Q/K/V result equals query; optional/cache forms route to GQA or are rejected |
+| MatMul/Gemm | Shared operand-based helpers used by conversion and reification |
+| MatMulNBits | Shared pure rule based on A and N, reused by reify, conversion, and verification |
 | Forward Conv (rank-3 converter/rank-4 HIP op) | Shared signed-floor spatial-window formula used by converter, reification, and verifier |
 | Window Pool (spatial rank 1..3) | Shared signed floor/ceil spatial-window formula; optional indices reuse the values shape |
 | Rank-4 NCHW ConvTranspose | Shared ONNX formula used by converter, reification, and verifier |
-| GlobalPool | N/C from input and unit spatial extents, shared by converter, reification, and verifier |
+| LayerNormalization | Y equals input; Mean/InvStdDev use keepdims reduction shape over `[axis, rank)` |
+| LinearAttention | Shared output/state formula used by converter, reification, and verifier |
 | CausalConvWithState | Runtime-supported 1D output/state formulas from input and depthwise kernel |
+| SkipSimplifiedLayerNormalization | Output and optional residual sum equal input; training stats rejected |
+| GroupQueryAttention | Semantic query/head mapping plus `max(past capacity, total_seq_len)` or logical length alone without past; verifier covers structural/rank/head and statically decidable cache compatibility without reading payload lengths |
+| MultiHeadAttention | Default rank-3 fp16 Q/K/V result equals query; optional/cache forms route to GQA or are rejected |
 | Resize | N/C from input plus static spatial extents from the imported output template |
-| Runtime-dependent count, such as NonZero or Compress | DPS-init shape; unresolved dimensions remain dynamic |
+| Runtime-dependent count, such as NonZero | DPS-init shape; unresolved dimensions remain dynamic |
 
-Shared declarations live in `HipShapeUtils.h`; common implementation lives in
-`HipShapeUtils.cpp`, with category translation units for matmul/Gemm,
-broadcast/reduction, attention, convolution/pooling, gather, and shape
-operations. Operations that set `autoReify=0` and are not covered by a
-parameterized sub-base define their member functions in
+The public helper API lives in `HipShapeUtils.h`; category implementations live
+in the `HipShapeUtils*.cpp` files. Operations that set `autoReify=0` and are not
+covered by a parameterized sub-base define their member functions in
 `HipReifyResultShapesImpl.cpp`.
+
+The same-shape inventory guard additionally requires every `same_shape` op to
+use `Hip_DpsOp_SameShape`. Converter destinations that need to materialize this
+contract use
+`createSameShapeEmptyTensor`, so dynamic extents and static compatibility come
+from the same named source as reification and verification.
+
+Every HIP DPS op has one reviewed contract category in
+[hip-shape-contract-inventory.md](hip-shape-contract-inventory.md). TableGen's
+`hipShapeContract` field is source-level inventory metadata (not emitted IR),
+and `hip-shape-contract-inventory.mlir` fails when the document and op
+definitions drift or a new DPS op remains unclassified.
 
 Pure descriptor transformations such as Reshape, Squeeze, and Unsqueeze
 generally lower to standard tensor operations rather than HIP DPS compute
@@ -190,22 +204,43 @@ Reification is per result: `reifyResultShapes` returns one shape vector for ever
 
 ### Shared converter/reification shape helpers
 
-Converter destination construction and result reification are two views of one
-shape rule. `HipShapeUtils` therefore separates pure `infer*` helpers, which
-validate static shapes without a builder, from `reify*` helpers, which may
-materialize index SSA only after validation succeeds.
+Converter destination construction and operation reification must not
+independently implement the same shape category. Broadcast, Gemm, MatMul,
+reductions, Conv, and Pool use helpers in `HipShapeUtils` that return
+`FailureOr<SmallVector<OpFoldResult>>`. The `FailureOr` is required because a
+valid rank-zero result has a successful empty shape.
 
-A reifier must validate every precondition before touching the builder.
-Failure must leave the IR unchanged, including when the valid result shape is
-rank zero; `FailureOr` distinguishes that empty success from failure.
-Conversion-side destination builders in `OnnxToHipUtils.cpp` consume the same
-reified shape and validate imported static result metadata before creating
-`tensor.empty`.
+`HipShapeUtils` splits each category into a pure `infer*` function of static
+shapes and a `reify*` function that may materialize index SSA. Every `reify*`
+helper validates its preconditions through the matching `infer*` function
+**before** it touches the builder, so a failure never leaves stray dimension ops
+behind. Both the pattern-rewrite contract and
+`ReifyRankedShapedTypeOpInterface` require the IR to be unchanged when a
+rewrite or reification reports failure; upstream's
+`ResolveShapedTypeResultDims` erases such stray ops explicitly, and this
+codebase avoids creating them in the first place. Emitting IR is therefore the
+last thing a helper does.
 
-Common DPS verification is similarly centralized in `verifyDpsComputeOp`. It
-checks ranked tensor/memref uniformity, destination count, result count, and
-tensor result/init type equality before a category-specific verifier examines
-shape semantics.
+The same split gives targeted operation verifiers a shape rule to check against.
+MatMul and Gemm use `verifyHipOpShape` with their `infer*` helper, so their
+`outs` shape, converter destination, and `reifyResultShapes` are all held to one
+shape function. Broadcast and reduction ops share their converter/reify rule
+but do not yet have shared static shape verifiers:
+
+```c++
+LogicalResult MatmulOp::verify() {
+  // ... DPS contract first ...
+  return verifyHipOpShape(*this, [&] {
+    return inferMatmulShape(aShape, bShape,
+                            [&] { return this->emitOpError(); });
+  });
+}
+```
+
+Only the `infer*` helpers are public. The dimension mappings and static
+broadcast folds they are built from stay internal to the category
+`HipShapeUtils*.cpp` implementation files, so the header exposes shape *rules*
+rather than the machinery behind them.
 
 Broadcast dimensions are right-aligned. Static 1 yields to the other side;
 equal non-unit static dimensions agree; dynamic/static-non-1 tightens to the
@@ -217,9 +252,20 @@ static extent under the ONNX input contract. Two dynamic dimensions emit:
 ```
 
 Do not replace this with an integer maximum: broadcasting dimensions 0 and 1
-produces 0, not 1. Variadic Max/Min share one
-`lowerVariadicBroadcastChain` helper that derives every pairwise intermediate
-type from this shared broadcast shape.
+produces 0, not 1.
+
+ONNX conversion keeps the imported ranked result type and uses the shared
+`OpFoldResult`s only to populate `tensor.empty` dynamic-size operands. When a
+reified dimension is constant but the imported dimension is dynamic, the
+converter materializes a constant index size. `--hip-infer-shapes` remains the
+single owner of later type narrowing, destination rebuilding, and cast
+barriers.
+
+Variadic Max/Min share one `lowerVariadicBroadcastChain` helper that derives
+every pairwise intermediate type from the shared broadcast shape. Gemm derives
+M/N from A/B with transpose-aware indices and validates optional C without using
+C as an extent source. MatMul broadcasts only the leading batch slices, then
+appends M from A[-2] and N from B[-1].
 
 GatherBlockQuantized applies Gather to the logical dequantized data shape, not
 the physical byte-storage shape. For the HIP op's byte-packed 4-bit storage,
@@ -235,23 +281,39 @@ Converter destination construction, op reification, and static verification all
 call this rule. The runtime receives the physical data descriptor and expands
 its quantize-axis extent before launching the logical-element kernel.
 
+Forward Conv and Pool share one validated spatial-window primitive:
+`floor((input + pads - effectiveKernel) / stride) + 1`; Pool selects signed
+ceil division when `ceil_mode = 1`. Signed
+floor/ceil operations are required because the numerator can be negative even
+when the final extent is the valid value zero. Conv conversion applies the rule
+to the original rank-3 NCL shape before its NC1L expansion; `hip.conv` itself
+uses the rank-4 form. An omitted ONNX Conv `kernel_shape` is derived from static
+weight spatial dimensions. Pool values and optional MaxPool indices are
+allocated and reified from the same mixed shape vector.
+
+Reductions resolve to one internal out-to-in dimension map, consumed by both
+`inferReductionShape` (static extents, used for destination types) and
+`reifyReductionResultShape` (mixed extents, used for destination construction
+and `reifyResultShapes`). The mapping matters for `keepdims = 0`, where dropping
+reduced axes makes the output dimension order non-positional in the input:
+reducing axes `[1, 2]` of a rank-4 input maps output dimension 1 to input
+dimension 3. A positional copy from the input is correct only when no reduced
+axis precedes a kept one.
+
+Whether the axes are usable at all is decided once, by
+`resolveReductionAxes`, which returns `std::nullopt` when they are only known at
+runtime. Both the destination and reification key off that single answer: the
+converter falls back to a positional copy and reification lifts the `outs`
+shape. Deciding it twice is how the two drift apart — gating the converter on
+the axes operand *count* while reification gates on the operand being
+*constant* leaves opset-13+ constant axes handled inconsistently.
+
 LinearAttention uses one two-result rule in `HipShapeUtils`:
 `Dk = query[-1] / Hq`, `Dv = value[-1] / Hkv`, output shape
 `[B, T, max(Hq, Hkv) * Dv]`, and recurrent-state shape
 `[B, Hkv, Dk, Dv]`. Conversion, `reifyResultShapes`, and the op verifier all
 call that rule. In particular, a missing `past_state` does not make key's
 positional dimensions authoritative for the state destination.
-
-Forward Conv and Pool share one validated spatial-window primitive:
-`floor((input + pads - effectiveKernel) / stride) + 1`; Pool selects signed
-ceil division when `ceil_mode = 1`. Signed floor/ceil operations are required
-because the numerator can be negative even when the final extent is the valid
-value zero. Conv conversion applies the rule to the original rank-3 NCL shape
-before its NC1L expansion; `hip.conv` itself uses the rank-4 form. An omitted
-ONNX Conv `kernel_shape` is derived from static weight spatial dimensions. Pool
-values and optional MaxPool indices are allocated and reified from the same
-mixed shape vector. ConvTranspose and GlobalPool likewise use one rule for
-destination construction, reification, and static verification.
 
 CausalConvWithState uses the backend's implemented 1D contract. For input
 `[B,C,L]` and depthwise weight `[C,1,K]`, output is `[B,C,L]` and
@@ -284,6 +346,45 @@ extent needs it, reusing that value for separate past-key/past-value maxima.
 Optional QK always uses the logical extent rather than cache capacity.
 Reification keeps the DPS-init fallback for these payload-dependent extents.
 
+Pad resolves compile-time pads and optional axes either from constant operands
+or from attributes stamped before constant externalization. `inferPadShape`
+validates the parameter lengths and axes without emitting IR; both conversion
+and reification then use `reifyPadShape` for the exact affine rule
+`output[d] = input[d] + begin[d] + end[d]`. Dynamic input dimensions therefore
+produce `tensor.dim` plus a constant offset. Genuinely runtime pads retain the
+converter's synchronized payload readback, while dialect reification performs
+no payload read and lifts the already-exact destination.
+
+Slice has two distinct shape authorities. When starts, ends, axes, and steps
+are compile-time values and every sliced input axis has a static extent,
+`inferSliceShape` applies the ONNX clamp rule exactly. Conversion uses that
+shape for `tensor.extract_slice` or the native negative-step destination, and
+reification returns static sliced extents while forwarding untouched dynamic
+input dimensions. If a sliced input extent is dynamic, exact clamping requires
+runtime min/max arithmetic; runtime-valued slice parameters require payload
+readback as well. Those cases deliberately keep the existing physical
+destination capacity equal to the input extents. `wrap_slice` computes a
+separate `logical_extent`, launches only the logical slice, and zeroes unused
+capacity. Reification therefore lifts the physical destination shape and does
+not claim that capacity is the logical ONNX result shape. Changing that policy
+would require proving the output-allocation ABI and all downstream consumers
+against logical extents, so it is intentionally unsupported here.
+
+Tile's refinement is complete. Constant or stamped repeats share
+`inferTileShape`/`reifyTileShape`, including exact multiplication of dynamic
+input dimensions. Runtime repeats are read once in bulk by the converter to
+build the exact destination; reification lifts that destination and never
+duplicates the payload readback.
+
+Resize is semantic rather than payload-dependent at the HIP level. ONNX
+`sizes`/`scales` have already been resolved by the importer and are not operands
+of `hip.resize`; the runtime recovers each scale from the input/output
+descriptors. The shared rule therefore takes N/C from the input and the spatial
+extents from the imported output type, requiring every spatial extent to be
+static. A dynamic input N/C extent requires a dynamic output template extent;
+a static input extent may refine a dynamic template. This deliberately does not
+claim dynamic spatial support without carrying the payload.
+
 The default `hip.multi_head_attention` rule matches its implemented runtime
 path, not the full Microsoft schema: Q/K/V are separate rank-3 fp16 tensors,
 Q/K/V batch and hidden extents agree, K/V sequence extents agree, hidden is
@@ -295,19 +396,6 @@ masks, packed layouts, past/cache inputs, cache indirection, and present/QK
 outputs are rejected before the HIP op is created. The existing decoder
 self-attention and rank-4 cross-attention routes to `hip.gqa` run first and
 retain their separate contracts.
-
-Reductions resolve to one internal out-to-in dimension map, consumed by both
-`inferReductionShape` (static extents) and `reifyReductionResultShape` (mixed
-extents used for destination construction and reification). The mapping matters
-for `keepdims = 0`: reducing axes `[1, 2]` of a rank-4 input maps output
-dimension 1 to input dimension 3, so a positional input-dimension copy is
-incorrect.
-
-`resolveReductionAxes` decides once whether axes are usable and returns
-`std::nullopt` when they are only known at runtime. Both destination
-construction and reification key off that answer: the converter falls back to
-a positional copy and reification lifts the `outs` shape. Constant opset-13+
-axes use the shared map; runtime axes retain the validated fallback.
 
 ### MatMul strided-batch representability
 
@@ -411,43 +499,6 @@ Static refinements propagate into bufferization sizing and downstream pool plann
 
 A data-dependent extent that reaches a graph output must additionally be a real SSA value *before* the allocation, because `hip.alloc_output` takes the extent as an operand and ORT rejects an output request whose shape differs from the one it computed for the run. The converter therefore materializes the count with a device scan plus a synchronized `hip.readback_dim` and sizes the DPS init with it; reification then reports that init extent. `onnx.Compress` follows this pattern (scanning its `condition` with `hip.nonzero`), so a padded-input encoder that drops its pad slices reports the kept-slice count rather than the padded capacity. Reporting the upper bound instead is not merely conservative — it is the wrong output shape.
 
-Pad resolves compile-time pads and optional axes either from constant operands
-or from attributes stamped before constant externalization. `inferPadShape`
-validates the parameter lengths and axes without emitting IR; both conversion
-and reification then use `reifyPadShape` for the exact affine rule
-`output[d] = input[d] + begin[d] + end[d]`. Dynamic input dimensions therefore
-produce `tensor.dim` plus a constant offset. Genuinely runtime pads retain the
-converter's synchronized payload readback, while dialect reification performs
-no payload read and lifts the already-exact destination.
-
-Slice has two distinct shape authorities. When starts, ends, axes, and steps
-are compile-time values and every sliced input axis has a static extent,
-`inferSliceShape` applies the ONNX clamp rule exactly. Conversion uses that
-shape for `tensor.extract_slice` or the native negative-step destination, and
-reification returns static sliced extents while forwarding untouched dynamic
-input dimensions. If a sliced input extent is dynamic, exact clamping requires
-runtime min/max arithmetic; runtime-valued slice parameters require payload
-readback as well. Those cases deliberately keep the existing physical
-destination capacity equal to the input extents. `wrap_slice` computes a
-separate `logical_extent`, launches only the logical slice, and zeroes unused
-capacity. Reification therefore lifts the physical destination shape and does
-not claim that capacity is the logical ONNX result shape.
-
-Tile's refinement is complete. Constant or stamped repeats share
-`inferTileShape`/`reifyTileShape`, including exact multiplication of dynamic
-input dimensions. Runtime repeats are read once in bulk by the converter to
-build the exact destination; reification lifts that destination and never
-duplicates the payload readback.
-
-Resize is semantic rather than payload-dependent at the HIP level. ONNX
-`sizes`/`scales` have already been resolved by the importer and are not operands
-of `hip.resize`; the runtime recovers each scale from the input/output
-descriptors. The shared rule therefore takes N/C from the input and the spatial
-extents from the imported output type, requiring every spatial extent to be
-static. A dynamic input N/C extent requires a dynamic output template extent;
-a static input extent may refine a dynamic template. This deliberately does not
-claim dynamic spatial support without carrying the payload.
-
 ## Pre-conversion loop-body rank inference
 
 `--hip-infer-loop-body-shapes` is a narrow pre-conversion backstop. It runs after loop outlining and before ONNX-to-HIP conversion to establish rank for unranked loop-carried values that would otherwise block conversion; it is not the general HIP shape-inference mechanism.
@@ -491,8 +542,22 @@ Primary regression coverage:
 | `test/lit/Dialect/hip-gather-block-quantized-shape-verifier.mlir` | GatherBlockQuantized logical shape and runtime-contract validation |
 | `test/lit/Dialect/hip-resize-reify-shapes.mlir` | Dynamic N/C and static spatial Resize reification |
 | `test/lit/Dialect/hip-resize-shape-verifier.mlir` | Resize semantic destination validation |
+| `test/lit/Dialect/hip-gemm-reify-shapes.mlir` | Transpose-aware Gemm M/N reification |
 | `test/lit/Dialect/hip-matmul-reify-shapes.mlir` | Per-op reification through `--resolve-shaped-type-result-dims` |
-| `test/lit/Dialect/hip-matmul-shape-verifier.mlir` | Static MatMul shape validation |
+| `test/lit/Dialect/hip-matmul-shape-verifier.mlir` | Static MatMul shape validation, including accepted dynamic batch layouts and rejected partial per-axis broadcast |
+| `test/lit/Dialect/hip-conv-reify-shapes.mlir` | Conv dynamic spatial signed-floor reification |
+| `test/lit/Dialect/hip-conv-shape-verifier.mlir` | Conv rank/channel/kernel and destination-shape validation |
+| `test/lit/Dialect/hip-pool-reify-shapes.mlir` | Pool floor/ceil reification and shared values/indices extents |
+| `test/lit/Dialect/hip-pool-shape-verifier.mlir` | Pool mode/type/output-count and destination-shape validation |
+| `test/lit/Dialect/hip-causal-conv-reify-shapes.mlir` | CausalConv output and dynamic `weight.K-1` state reification |
+| `test/lit/Dialect/hip-causal-conv-shape-verifier.mlir` | CausalConv 1D layout, state, dtype, and attribute validation |
+| `test/lit/Dialect/hip-skip-rms-norm-reify-shapes.mlir` | One/two-output Skip RMS Norm input-shape reification |
+| `test/lit/Dialect/hip-skip-rms-norm-shape-verifier.mlir` | Skip RMS Norm input/gamma/bias/output/type contracts |
+| `test/lit/Conversion/onnx-to-hip/test_conv.mlir` | Conv converter destination shape and omitted-kernel derivation |
+| `test/lit/Conversion/onnx-to-hip/test_pool.mlir` | Pool converter dynamic floor/ceil destination formulas |
+| `test/lit/Conversion/onnx-to-hip/test_causal_conv_with_state.mlir` | CausalConv destinations including dynamic kernel state length |
+| `test/lit/Conversion/onnx-to-hip/test_skip_rms_norm.mlir` | Skip RMS Norm inference output-slot combinations |
+| `test/lit/Conversion/hip-to-llvm/test_matmul.mlir` | Per-operand batch counts and strides: compile-time 0 / matrix size, dynamic count comparison, and the runtime-validation ABI |
 | `test/lit/Conversion/onnx-to-hip/test_reduce_sum.mlir` | Reduction destinations, including the non-positional `keepdims = 0` dimension mapping |
 | `test/lit/Dialect/hip-loop-verifier.mlir` | Loop-carried type contract |
 | `test/lit/Dialect/hip-resolve-tensor-dims.mlir` | Production pre-bufferization dim folding |
@@ -502,6 +567,7 @@ Complex operations may use dedicated files; common shape categories should exten
 ## Current limitations
 
 - ONNX MatMul rank-1 operands require promotion to rank 2 before constructing `hip.matmul`; the runtime and current verifier require rank at least 2.
+- MatMul supports whole-matrix batch broadcast and one-matrix-per-output-batch operands, including dynamic batch extents. Static partial per-axis broadcast is rejected during compilation; a dynamically concealed partial layout returns a recoverable runtime error.
 - Reduction destinations fall back to a positional copy from the input when the reduced axes are only known at runtime; reification mirrors that fallback rather than inventing a shape.
 - Converter migration to inferred-type builders is incremental; explicit result-type builders remain supported.
 - A future multi-result operation that needs custom `InferTypeOpInterface` logic may require a dedicated result-type inference implementation file.

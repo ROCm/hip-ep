@@ -813,6 +813,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
         populateGatherBlockQuantizedPreparePatterns(preLoweringPatterns, ctx);
         populatePadShapeFoldPatterns(preLoweringPatterns, ctx);
         populateSliceShapeFoldPatterns(preLoweringPatterns, ctx);
+        populateTileShapeFoldPatterns(preLoweringPatterns, ctx);
         populateFastGeluFusionPatterns(preLoweringPatterns, ctx);
         populateErfGeluFusionPatterns(preLoweringPatterns, ctx);
         populateProjectorOpsRewritePatterns(preLoweringPatterns, ctx);

@@ -63,9 +63,12 @@ struct GreaterOrEqualDecompose : public mlir::RewritePattern {
             ->getResult(0);
 
     // result = !less
-    mlir::Value notInit = createEmptyTensor(rewriter, loc, resultType, less);
+    auto notInit = createSameShapeEmptyTensor(rewriter, loc, resultType, less);
+    if (mlir::failed(notInit))
+      return rewriter.notifyMatchFailure(
+          op, "GreaterOrEqual negation shape must match comparison shape");
     auto notOp =
-        mlir::hip::NotOp::create(rewriter, loc, context, less, notInit);
+        mlir::hip::NotOp::create(rewriter, loc, context, less, *notInit);
     rewriter.replaceOp(op, notOp->getResult(0));
     return mlir::success();
   }

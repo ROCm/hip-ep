@@ -140,10 +140,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for PR, formatting, AI-disclosure, and co
 
 ### Result-shape agreement
 
-- Converter destination construction and `reifyResultShapes` must use the same `HipShapeUtils` shape rule.
-- Each category splits into a pure `infer*` function of static shapes and a `reify*` function that may emit index SSA. A `reify*` helper must validate through its `infer*` counterpart **before** touching the builder: a rewrite or reification that reports failure must leave the IR unchanged.
+- Converter destination construction and `reifyResultShapes` must use the same `HipShapeUtils` shape rule for broadcast, Gemm, MatMul, and reductions. MatMul and Gemm also use their shared rule for static verification; broadcast and reduction verifiers are future work.
+- Each category splits into a pure `infer*` function of static shapes and a `reify*` function that may emit index SSA. A `reify*` helper must validate through its `infer*` counterpart **before** touching the builder: a rewrite or reification that reports failure must leave the IR unchanged, so emitting IR is always the last step.
 - Keep the shape machinery internal: only the `infer*`/`reify*` rules belong in `HipShapeUtils.h`. Dimension maps and static folds stay file-static in the `.cpp`, and non-template helper bodies belong in `OnnxToHipUtils.cpp` rather than inline in the header every converter includes.
 - Express "not known at compile time" as `std::optional`, not a parallel `bool` flag, so a caller cannot pass a value that contradicts the flag.
+- Make every HIP DPS leaf inherit its exact explicit TableGen contract base (`SameShape`, `Broadcast`, `Reduction`, `Semantic`, `Payload`, or `OutsAuthoritative`) and update `docs/design/hip-shape-contract-inventory.md`; the default local build/LIT audit rejects direct `Hip_DpsOp` leaves and contract-policy bypasses.
 - Fully dynamic broadcast uses `select(lhs == 1, rhs, lhs)`, not integer maximum: broadcasting extents 0 and 1 produces 0.
 - Rank-zero success is an empty shape carried by `FailureOr`; never use an empty vector as both success and failure.
 - Variadic Max/Min share one pairwise-chain helper so every intermediate rank comes from the shared broadcast shape.
