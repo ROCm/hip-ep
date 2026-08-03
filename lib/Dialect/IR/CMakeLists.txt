@@ -11,6 +11,13 @@ add_library(HipDialectIR STATIC
   HipReadbackCanonicalize.cpp
   HipReifyResultShapesImpl.cpp
   HipShapeUtils.cpp
+  HipShapeUtilsInternal.cpp
+  HipShapeUtilsAttention.cpp
+  HipShapeUtilsConvPool.cpp
+  HipShapeUtilsGather.cpp
+  HipShapeUtilsMatmulGemm.cpp
+  HipShapeUtilsReduction.cpp
+  HipShapeUtilsShapeOps.cpp
 )
 
 add_dependencies(HipDialectIR
