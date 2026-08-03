@@ -746,6 +746,15 @@ static constexpr int LA_PAR_THREADS = 256;
 // B*Hkv blocks. 1 = no split.
 #define LA_SCAN_NSPLIT 4
 
+// LDS row strides for the tiles that feed the matrix cores, as a dimension
+// plus a pad, in halves. Wide fragment loads want 16-byte alignment, i.e. a
+// stride that is a multiple of 8 halves; conflict-free banking wants half the
+// stride to be odd. Those cannot both hold, so the pads below are measured
+// rather than derived: at dk=128 the alternatives cost the scan 79% (pad 0,
+// a 32-way conflict) and 6% (pad 16) against pad 8's 4-way one.
+#define LA_SST_PAD 8   // state tile,    row stride dk + pad
+#define LA_KT_PAD  8   // Ktilde^T tile, row stride LA_CHUNK + pad
+
 template <typename T>
 __global__ void la_pf_pass1_local(
     const T* __restrict__ key,
@@ -791,6 +800,11 @@ __global__ void la_pf_pass1_local(
     float*  rlast= bsm + LA_CHUNK;                 // C
     __half* Ksm  = (__half*)(rlast + LA_CHUNK);    // C*dk (half)
 
+    // The Tm fragment load below reads the whole C*dk tile, including the rows
+    // past Ceff that the scalar version never touched, so they have to hold
+    // something finite.
+    for (int idx = Ceff * dk + tid; idx < LA_CHUNK * dk; idx += nthreads)
+        Ksm[idx] = __float2half(0.f);
     for (int idx = tid; idx < Ceff * dk; idx += nthreads) {
         int t = idx / dk, i = idx % dk;
         Ksm[t * dk + i] = __float2half(to_float(
@@ -818,20 +832,34 @@ __global__ void la_pf_pass1_local(
     for (int s = tid; s < Ceff; s += nthreads)
         rlast[s] = expf(clog[Ceff - 1] - clog[s]);
 
-    // T[t][s] strict-lower
-    for (int idx = tid; idx < Ceff * Ceff; idx += nthreads) {
-        int t = idx / Ceff, s = idx % Ceff;
-        if (s < t) {
-            float kk = 0.f;
-            for (int i = 0; i < dk; i++)
-                kk += __half2float(Ksm[t * dk + i]) * __half2float(Ksm[s * dk + i]);
-            Tm[t * Ceff + s] = bsm[t] * expf(clog[t] - clog[s]) * kk;
-        } else {
-            Tm[t * Ceff + s] = 0.f;
+    // T[t][s] strict-lower, on the matrix cores. Same shape as pass 3's Pm: A
+    // is K row-major, B wants K^T column-major, which is the same row-major
+    // Ksm, so one operand serves as both.
+    if (tid < 32) {
+        const int ln = tid % LA_WT;
+        const int pr = tid / LA_WT;
+        la_float8 acc = {};
+        for (int k = 0; k < dk; k += LA_WT) {
+            la_half16 frag;
+            for (int ele = 0; ele < LA_WT; ele++)
+                frag[ele] = (_Float16)__half2float(Ksm[ln * dk + k + ele]);
+            acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(frag, frag, acc);
+        }
+        for (int ele = 0; ele < 8; ele++) {
+            const int t = ele * 2 + pr, s = ln;
+            if (t < Ceff && s < Ceff)
+                Tm[t * Ceff + s] =
+                    (s < t) ? bsm[t] * expf(clog[t] - clog[s]) * acc[ele] : 0.f;
         }
     }
     __syncthreads();
 
+    // The two solves below share a triangular factor and differ only in their
+    // right-hand side, so they can be run as one solve of width dv+dk, which
+    // uses the whole block at dv=128 and halves the 30 barriers per chunk.
+    // Measured: 4.7% slower. Both right-hand sides then have to be resident at
+    // once, which takes this pass from 13,568 to 21,760 B of LDS and 4 blocks
+    // per CU down to 3, and that costs more than the barriers save.
     // --- Solve 1: Uloc = (I-trilT)^{-1}(beta.*v) ---
     for (int idx = tid; idx < Ceff * dv; idx += nthreads) {
         int t = idx / dv, j = idx % dv;
@@ -892,7 +920,8 @@ __global__ void la_pf_scan(
     const float* __restrict__ W_g,
     const float* __restrict__ rlast_g,  // [B*Hkv*nchunks_win, C]
     const float* __restrict__ alast_g,
-    __half* __restrict__ S0_g,     // [B*Hkv*nchunks_win, dk*dv] chunk-start states
+    __half* __restrict__ S0_g,     // [B*Hkv*nchunks_win, dv*dk] chunk-start
+                                   // states, held transposed for pass 3
     __half* __restrict__ carry_g,  // [B*Hkv, dk*dv] state carried across windows
     T* __restrict__ state,         // final state out [B,Hkv,dk,dv]
     int seq_len, int Hkv, int n_k, int dk, int dv,
@@ -920,9 +949,18 @@ __global__ void la_pf_scan(
     __half* carry = carry_g + (int64_t)bg * dk * dv;
 
     extern __shared__ float smem[];
-    __half* Ssm = (__half*)smem;                       // dk*dvs (half)
-    float*  Buf1 = (float*)(Ssm + dk * dvs);           // C*dk (float)
-    float*  Buf2 = Buf1 + LA_CHUNK * dk;               // C*dvs (float)
+    // The state tile is held transposed -- dvs rows of dk, one row per dv
+    // column this block owns. Both GEMMs below read their B operand
+    // column-major, and this is the layout that makes that contiguous; it also
+    // makes the S0 handoff to pass 3 a straight copy instead of a transposing
+    // store, which is what sank an earlier attempt to transpose S0 alone.
+    __half* Ssm  = (__half*)smem;                      // dvs*sst (half)
+    const int sst = dk + LA_SST_PAD;
+    const int ktt = LA_CHUNK + LA_KT_PAD;
+    // One buffer serves both GEMMs' A operand: W for the first, Ktilde^T for
+    // the second, which is only written once the first has been consumed.
+    __half* Ah   = Ssm + dvs * sst;                    // max(C*dk, dk*ktt) half
+    __half* Ubuf = Ah + dk * ktt;                      // dvs*C (half), U^T
 
     // The first window seeds from the incoming state buffer (matches the serial
     // kernel, which reads S in place; == 0 for a fresh prefill). Later windows
@@ -932,7 +970,7 @@ __global__ void la_pf_scan(
     for (int idx = tid; idx < dk * dvs; idx += nthreads) {
         const int i = idx / dvs, jj = idx % dvs;
         const int64_t gi = (int64_t)i * dv + j0 + jj;
-        Ssm[idx] = is_first ? __float2half(to_float(Sout[gi])) : carry[gi];
+        Ssm[jj * sst + i] = is_first ? __float2half(to_float(Sout[gi])) : carry[gi];
     }
     __syncthreads();
 
@@ -940,46 +978,78 @@ __global__ void la_pf_scan(
         const int64_t base = ((int64_t)(b * Hkv + g) * nchunks_win + cw);
         const int c0   = (chunk_begin + cw) * LA_CHUNK;
         const int Ceff = min(LA_CHUNK, seq_len - c0);
-        // store chunk-start state (this split's dv columns only)
-        for (int idx = tid; idx < dk * dvs; idx += nthreads) {
-            const int i = idx / dvs, jj = idx % dvs;
-            S0_g[base * (dk * dv) + (int64_t)i * dv + j0 + jj] = Ssm[idx];
+        // store chunk-start state (this split's dv columns only). S0_g is
+        // [dv][dk], so both sides are contiguous in i.
+        for (int idx = tid; idx < dvs * dk; idx += nthreads) {
+            const int jj = idx / dk, i = idx % dk;
+            S0_g[base * (dk * dv) + (int64_t)(j0 + jj) * dk + i] = Ssm[jj * sst + i];
         }
-        // load W tile (dv-independent: every split re-reads it, which is the
-        // cost the split trades for parallelism)
+        // --- both inner products on the matrix cores ---
+        // Every fragment below is contiguous, which is the whole reason the
+        // state is held transposed: A operands are row-major and B operands
+        // are read column-major, i.e. along a transposed row.
+        const int wf   = tid / 32;
+        const int nwf  = nthreads / 32;
+        const int lane = (tid % 32) % LA_WT;
+        const int pair = (tid % 32) / LA_WT;
+        const int ntv  = dvs / LA_WT;
+
         for (int idx = tid; idx < LA_CHUNK * dk; idx += nthreads)
-            Buf1[idx] = W_g[base * (LA_CHUNK * dk) + idx];
+            Ah[idx] = __float2half(W_g[base * (LA_CHUNK * dk) + idx]);
         __syncthreads();
-        // WS[t][j] = sum_i W[t][i] * S0[i][j]  -> Buf2
-        for (int idx = tid; idx < LA_CHUNK * dvs; idx += nthreads) {
-            int t = idx / dvs, jj = idx % dvs;
-            float acc = 0.f;
-            for (int i = 0; i < dk; i++)
-                acc += Buf1[t * dk + i] * __half2float(Ssm[i * dvs + jj]);
-            // U = Uloc - WS
-            Buf2[idx] = Uloc_g[base * (LA_CHUNK * dv) + (int64_t)t * dv + j0 + jj] - acc;
+        // GEMM 1: U^T[dvs x C] = Uloc^T - (W[C x dk] @ S0[dk x dvs])
+        for (int tile = wf; tile < (LA_CHUNK / LA_WT) * ntv; tile += nwf) {
+            const int m_base = (tile / ntv) * LA_WT;
+            const int n_base = (tile % ntv) * LA_WT;
+            la_float8 acc = {};
+            for (int k = 0; k < dk; k += LA_WT) {
+                la_half16 a_frag, b_frag;
+                for (int ele = 0; ele < LA_WT; ele++) {
+                    a_frag[ele] = (_Float16)__half2float(Ah[(m_base + lane) * dk + k + ele]);
+                    b_frag[ele] = (_Float16)__half2float(Ssm[(n_base + lane) * sst + k + ele]);
+                }
+                acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag, b_frag, acc);
+            }
+            // land it as U^T so GEMM 2 can read it as a column-major B operand
+            const int jj = n_base + lane;
+            for (int ele = 0; ele < 8; ele++) {
+                const int t = m_base + ele * 2 + pair;
+                Ubuf[jj * LA_CHUNK + t] = __float2half(
+                    Uloc_g[base * (LA_CHUNK * dv) + (int64_t)t * dv + j0 + jj] - acc[ele]);
+            }
         }
         __syncthreads();
-        // Rebuild Ktilde[s][i] = rlast[s]*K[s][i] into Buf1 (W no longer
-        // needed). rlast_g is 0 for s >= Ceff, so the padded tail contributes
-        // nothing; guard the key read so it never indexes past seq_len.
+        // Rebuild Ktilde transposed, Ah[i][s] = rlast[s]*K[s][i]. The read of
+        // key stays coalesced and the transpose is paid on the LDS write,
+        // which is the cheaper of the two places to pay it.
         for (int idx = tid; idx < LA_CHUNK * dk; idx += nthreads) {
             int t = idx / dk, i = idx % dk;
             float rl = rlast_g[base * LA_CHUNK + t];
-            Buf1[idx] = (t < Ceff)
+            Ah[i * ktt + t] = __float2half((t < Ceff)
                 ? rl * to_float(key[b * k_bs + (int64_t)(c0 + t) * n_k * dk +
                                     (int64_t)h_k * dk + i])
-                : 0.f;
+                : 0.f);
         }
         const float a_last = alast_g[base];
         __syncthreads();
-        // S1[i][j] = a_last*S0[i][j] + sum_s Ktilde[s][i] U[s][j]
-        for (int idx = tid; idx < dk * dvs; idx += nthreads) {
-            int i = idx / dvs, jj = idx % dvs;
-            float acc = a_last * __half2float(Ssm[idx]);
-            for (int s = 0; s < LA_CHUNK; s++)
-                acc += Buf1[s * dk + i] * Buf2[s * dvs + jj];
-            Ssm[idx] = __float2half(acc);
+        // GEMM 2: S1[dk x dvs] = a_last*S0 + Ktilde^T[dk x C] @ U[C x dvs]
+        for (int tile = wf; tile < (dk / LA_WT) * ntv; tile += nwf) {
+            const int m_base = (tile / ntv) * LA_WT;
+            const int n_base = (tile % ntv) * LA_WT;
+            la_float8 acc = {};
+            for (int k = 0; k < LA_CHUNK; k += LA_WT) {
+                la_half16 a_frag, b_frag;
+                for (int ele = 0; ele < LA_WT; ele++) {
+                    a_frag[ele] = (_Float16)__half2float(Ah[(m_base + lane) * ktt + k + ele]);
+                    b_frag[ele] = (_Float16)__half2float(Ubuf[(n_base + lane) * LA_CHUNK + k + ele]);
+                }
+                acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag, b_frag, acc);
+            }
+            __half* srow = Ssm + (n_base + lane) * sst + m_base;
+            for (int ele = 0; ele < 8; ele++) {
+                const int i = ele * 2 + pair;
+                srow[i] = __float2half(a_last * __half2float(srow[i]) + acc[ele]);
+            }
         }
         __syncthreads();
     }
@@ -990,9 +1060,9 @@ __global__ void la_pf_scan(
         const int i = idx / dvs, jj = idx % dvs;
         const int64_t gi = (int64_t)i * dv + j0 + jj;
         if (is_last)
-            Sout[gi] = from_float<T>(__half2float(Ssm[idx]));
+            Sout[gi] = from_float<T>(__half2float(Ssm[jj * sst + i]));
         else
-            carry[gi] = Ssm[idx];
+            carry[gi] = Ssm[jj * sst + i];
     }
 }
 
@@ -1048,6 +1118,9 @@ __global__ void __launch_bounds__(256) la_pf_pass3_wmma(
     __half* Kh   = QW + M * dk;                   // C*dk (half)
 
     for (int idx = tid; idx < M * dk; idx += nthreads) QW[idx] = __float2half(0.f);
+    // The Pm fragment load below reads the whole C*dk tile, including the rows
+    // past Ceff that the scalar version never touched.
+    for (int idx = tid; idx < LA_CHUNK * dk; idx += nthreads) Kh[idx] = __float2half(0.f);
     __syncthreads();
     for (int idx = tid; idx < Ceff * dk; idx += nthreads) {
         int t = idx / dk, i = idx % dk;
@@ -1067,13 +1140,27 @@ __global__ void __launch_bounds__(256) la_pf_pass3_wmma(
         }
     }
     __syncthreads();
-    for (int idx = tid; idx < Ceff * Ceff; idx += nthreads) {
-        int t = idx / Ceff, s = idx % Ceff;
-        if (s <= t) {
-            float qk = 0.f;
-            for (int i = 0; i < dk; i++)
-                qk += __half2float(QW[t * dk + i]) * __half2float(Kh[s * dk + i]);
-            Pm[t * Ceff + s] = expf(clog[t] - clog[s]) * qk;
+    // Pm[C x C] = Q[C x dk] @ K^T[dk x C]. Neither fragment needs a layout
+    // change: A is Q row-major, and B wants K^T column-major, which is Kh
+    // row-major. One output tile, so one wave does it -- against a scalar loop
+    // in which all eight waves run the full dk-length dot regardless of how
+    // few of their lanes sit below the diagonal.
+    if (tid < 32) {
+        const int ln = tid % LA_WT;
+        const int pr = tid / LA_WT;
+        la_float8 acc = {};
+        for (int k = 0; k < dk; k += LA_WT) {
+            la_half16 a_frag, b_frag;
+            for (int ele = 0; ele < LA_WT; ele++) {
+                a_frag[ele] = (_Float16)__half2float(QW[ln * dk + k + ele]);
+                b_frag[ele] = (_Float16)__half2float(Kh[ln * dk + k + ele]);
+            }
+            acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag, b_frag, acc);
+        }
+        for (int ele = 0; ele < 8; ele++) {
+            const int t = ele * 2 + pr, s = ln;
+            if (t < Ceff && s <= t)
+                Pm[t * Ceff + s] = expf(clog[t] - clog[s]) * acc[ele];
         }
     }
     __syncthreads();
@@ -1093,7 +1180,8 @@ __global__ void __launch_bounds__(256) la_pf_pass3_wmma(
             la_half16 a_frag, b_frag;
             for (int ele = 0; ele < LA_WT; ele++) {
                 a_frag[ele] = (_Float16)__half2float(QW[(m_base + lane) * dk + k + ele]);
-                b_frag[ele] = (_Float16)__half2float(S0[(k + ele) * dv + n_base + lane]);
+                // S0 is [dv][dk], so the B fragment is 16 contiguous halves
+                b_frag[ele] = (_Float16)__half2float(S0[(n_base + lane) * dk + k + ele]);
             }
             acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag, b_frag, acc);
         }
@@ -1103,11 +1191,23 @@ __global__ void __launch_bounds__(256) la_pf_pass3_wmma(
     __syncthreads();
 
     // Postprocess per output column: U = Uloc - (W@S0); O = scale*(A.*qs + P_lower@U).
-    for (int j = tid; j < dv; j += nthreads) {
+    // One thread per column leaves half of a 256-thread block idle at dv=128,
+    // so fold U into the W@S0 rows in place -- it costs no extra LDS and no
+    // extra global traffic -- and split the output rows across the spare
+    // threads as well. Rows are interleaved rather than blocked because the
+    // intra term is triangular, so a 0..7 / 8..15 split would be lopsided.
+    for (int idx = tid; idx < Ceff * dv; idx += nthreads) {
+        const int t = idx / dv, j = idx % dv;
+        QWS[(LA_CHUNK + t) * dv + j] = Ul[t * dv + j] - QWS[(LA_CHUNK + t) * dv + j];
+    }
+    __syncthreads();
+    const int nrep  = (dv < nthreads && nthreads % dv == 0) ? nthreads / dv : 1;
+    const int jstep = nthreads / nrep;
+    for (int j = tid % jstep; j < dv; j += jstep) {
         float U[LA_CHUNK];
         for (int t = 0; t < Ceff; t++)
-            U[t] = Ul[t * dv + j] - QWS[(LA_CHUNK + t) * dv + j];
-        for (int t = 0; t < Ceff; t++) {
+            U[t] = QWS[(LA_CHUNK + t) * dv + j];
+        for (int t = tid / jstep; t < Ceff; t += nrep) {
             float inter = Asm[t] * QWS[t * dv + j];
             float intra = 0.f;
             for (int s = 0; s <= t; s++)
@@ -1195,12 +1295,17 @@ static int la_launch_parallel(
     const size_t s1 = (size_t)(LA_CHUNK * LA_CHUNK + LA_CHUNK * dv +
                                4 * LA_CHUNK) * sizeof(float) +
                       (size_t)(LA_CHUNK * dk) * sizeof(__half);
-    // Pass 2 (scan) LDS: S0 tile (half) + W,U tiles (float). The dv-split
-    // shrinks everything except the dv-independent W tile.
+    // Pass 2 (scan) LDS: padded state tile + the shared A-operand buffer + U,
+    // all fp16 now that the scan runs on the matrix cores, which leaves it
+    // smaller than the 18,432 B the scalar version needed. The dv-split
+    // shrinks everything except the dv-independent A buffer.
     if (dv % LA_SCAN_NSPLIT != 0) return 1;
     const int dvs = dv / LA_SCAN_NSPLIT;
-    const size_t s2 = (size_t)(dk * dvs) * sizeof(__half) +
-                      (size_t)(LA_CHUNK * dk + LA_CHUNK * dvs) * sizeof(float);
+    if (dvs % LA_WT || dk % LA_WT || LA_CHUNK % LA_WT) return 1;
+    const size_t s2 = (size_t)(dvs * (dk + LA_SST_PAD) +
+                               (LA_CHUNK * dk > dk * (LA_CHUNK + LA_KT_PAD)
+                                    ? LA_CHUNK * dk : dk * (LA_CHUNK + LA_KT_PAD)) +
+                               dvs * LA_CHUNK) * sizeof(__half);
     // Pass 3 (WMMA) LDS: QWS(M*dv) + Pm + (Asm,clog) floats, QW(M*dk) + K(C*dk) half.
     const size_t s3 = (size_t)(2 * LA_CHUNK * dv + LA_CHUNK * LA_CHUNK +
                                2 * LA_CHUNK) * sizeof(float) +
