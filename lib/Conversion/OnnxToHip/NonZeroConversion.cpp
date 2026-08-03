@@ -12,28 +12,6 @@ namespace mlir {
 namespace hip {
 namespace {
 
-// Map MLIR element type -> HIPDNN_EP_DATATYPE_* enum used by the runtime
-// stub. Only the subset that NonZero supports today is enumerated here;
-// any other element type fails conversion explicitly so that adding a new
-// type later surfaces the gap loudly instead of silently mis-classifying
-// the input.
-static int64_t getHipdnnInputDataType(mlir::Type elemType) {
-  if (elemType.isF32())
-    return 0; // HIPDNN_EP_DATATYPE_FLOAT
-  if (elemType.isF16())
-    return 1; // HIPDNN_EP_DATATYPE_HALF
-  if (elemType.isInteger(32))
-    return 3; // HIPDNN_EP_DATATYPE_INT32
-  if (elemType.isInteger(64))
-    return 4; // HIPDNN_EP_DATATYPE_INT64
-  if (elemType.isUnsignedInteger(8))
-    return 7; // HIPDNN_EP_DATATYPE_UINT8 (ORT bool, ui8)
-  if (elemType.isInteger(1) || elemType.isSignedInteger(8) ||
-      elemType.isSignlessInteger(8))
-    return 5; // HIPDNN_EP_DATATYPE_INT8 (bool/i1, signed/signless i8)
-  return -1;
-}
-
 // onnx.NonZero -> hip.nonzero
 //
 // Input  X: ranked tensor of shape [D0, ..., D{R-1}]. Static dims are

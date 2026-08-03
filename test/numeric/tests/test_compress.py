@@ -6,11 +6,14 @@
 """Tests for the ONNX Compress op (axis mode).
 
 output = input selected along `axis` at positions where condition[k] is True.
-The static-shape EP sizes the output from the model's declared output extent,
-so each test supplies a `condition` whose number of True entries EXACTLY
-matches the declared output size along the axis -- otherwise the EP's static
-output and ORT CPU's dynamically-sized output would differ in shape. The
-selection is a pure copy, so results are bit-exact (atol=0).
+With a declared static output extent the EP uses it directly, so each of those
+tests supplies a `condition` whose number of True entries EXACTLY matches the
+declared size along the axis -- otherwise the EP's static output and ORT CPU's
+dynamically-sized output would differ in shape. A declared DYNAMIC extent is
+sized from the scanned count instead, which the last test covers with a
+condition whose True count is smaller than its length (the padded-input shape
+of a variable-resolution vision encoder). The selection is a pure copy, so
+results are bit-exact (atol=0).
 
 `condition` is a runtime input (mirrors the e2e LIT form) so the compress
 kernel is genuinely exercised rather than constant-folded away.
@@ -26,7 +29,7 @@ from framework.onnx_utils import make_model_from_nodes, np_to_onnx_type
 
 
 def _make_compress_model(
-    in_shape: list[int], cond_len: int, axis: int, out_shape: list[int]
+    in_shape: list[int], cond_len: int, axis: int, out_shape: list[int | str]
 ):
     inp = helper.make_tensor_value_info(
         "input", np_to_onnx_type(np.float32), list(in_shape)
@@ -62,4 +65,20 @@ class TestCompress:
         rng = np.random.default_rng(702)
         x = rng.uniform(-5.0, 5.0, in_shape).astype(np.float32)
         actual, expected = model_runner.run_sample(model, [x, condition])
+        compare_outputs(actual, expected, atol=0)
+
+    def test_compress_axis0_dynamic_extent(self, model_runner):
+        """Dynamic output extent: rows kept must be the True count, not the
+        condition length (and must stay in condition order)."""
+        rows, cond_len = 40, 48
+        axis = 0
+        condition = np.zeros(cond_len, dtype=np.bool_)
+        condition[:rows] = True  # trailing entries are padding
+        condition[3] = False
+        condition[17] = False
+        model = _make_compress_model([cond_len, 5], cond_len, axis, ["kept", 5])
+        rng = np.random.default_rng(703)
+        x = rng.uniform(-5.0, 5.0, [cond_len, 5]).astype(np.float32)
+        actual, expected = model_runner.run_sample(model, [x, condition])
+        assert actual[0].shape == (int(condition.sum()), 5)
         compare_outputs(actual, expected, atol=0)
