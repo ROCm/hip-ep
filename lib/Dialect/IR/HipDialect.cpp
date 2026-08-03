@@ -648,7 +648,63 @@ void SkipRmsNormOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
-LogicalResult SkipRmsNormOp::verify() { return success(); }
+LogicalResult SkipRmsNormOp::verify() {
+  unsigned numOutputs = getOutputs().size();
+  if (numOutputs < 1 || numOutputs > 2)
+    return emitOpError("expected 1 or 2 output buffers, got ") << numOutputs;
+
+  SmallVector<Value> operands = {getInput(), getSkip(), getGamma()};
+  if (Value bias = getBias())
+    operands.push_back(bias);
+  llvm::append_range(operands, getOutputs());
+  if (failed(verifyDpsComputeOp(*this, operands, numOutputs)))
+    return failure();
+
+  auto inputType = dyn_cast<ShapedType>(getInput().getType());
+  auto skipType = dyn_cast<ShapedType>(getSkip().getType());
+  auto gammaType = dyn_cast<ShapedType>(getGamma().getType());
+  if (!inputType || !inputType.hasRank() || !skipType || !skipType.hasRank() ||
+      !gammaType || !gammaType.hasRank())
+    return emitOpError("input, skip, and gamma must be ranked");
+  std::optional<ArrayRef<int64_t>> biasShape;
+  if (Value bias = getBias()) {
+    auto biasType = dyn_cast<ShapedType>(bias.getType());
+    if (!biasType || !biasType.hasRank())
+      return emitOpError("bias must be ranked");
+    biasShape = biasType.getShape();
+  }
+
+  FailureOr<SmallVector<SmallVector<int64_t>>> expected =
+      inferSkipRmsNormOutputShapes(inputType.getShape(), skipType.getShape(),
+                                   gammaType.getShape(), biasShape, numOutputs,
+                                   [&]() { return this->emitOpError(); });
+  if (failed(expected))
+    return failure();
+
+  Type elementType = inputType.getElementType();
+  if (!elementType.isF16() && !elementType.isF32())
+    return emitOpError("runtime supports only f16/f32 input");
+  for (Value value : operands)
+    if (cast<ShapedType>(value.getType()).getElementType() != elementType)
+      return emitOpError("all input and output element types must match");
+  if (getEpsilon().convertToDouble() < 0.0)
+    return emitOpError("epsilon must be non-negative");
+
+  for (unsigned index = 0; index < numOutputs; ++index) {
+    if (failed(verifyHipOpShape(
+            *this,
+            [&]() -> FailureOr<SmallVector<int64_t>> {
+              return (*expected)[index];
+            },
+            index)))
+      return failure();
+    if (getNumResults() &&
+        getResult(index).getType() != getOutputs()[index].getType())
+      return emitOpError("tensor result #")
+             << index << " type must match its output buffer type";
+  }
+  return success();
+}
 
 //===----------------------------------------------------------------------===//
 // LayerNormOp: ins(input, scale, [bias]) outs(output, [mean, [inv_std]])
@@ -681,7 +737,76 @@ LogicalResult LayerNormOp::verify() {
     dataOperands.push_back(b);
   for (Value out : getOutputs())
     dataOperands.push_back(out);
-  return verifyDpsComputeOp(*this, dataOperands, /*numInits=*/numOutputs);
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/numOutputs)))
+    return failure();
+
+  auto inputType = dyn_cast<ShapedType>(getInput().getType());
+  auto scaleType = dyn_cast<ShapedType>(getScale().getType());
+  if (!inputType || !inputType.hasRank() || inputType.getRank() < 1 ||
+      !scaleType || !scaleType.hasRank())
+    return emitOpError("input and scale must be ranked");
+  int64_t rank = inputType.getRank();
+  int64_t rawAxis = static_cast<int64_t>(getAxis());
+  int64_t axis = rawAxis < 0 ? rawAxis + rank : rawAxis;
+  if (axis < 0 || axis >= rank)
+    return emitOpError("axis must be in [-rank, rank)");
+
+  int64_t normalizedRank = rank - axis;
+  if (scaleType.getRank() != normalizedRank)
+    return emitOpError(
+        "runtime requires scale rank to equal the normalized suffix rank");
+  for (int64_t i : llvm::seq<int64_t>(0, normalizedRank)) {
+    int64_t inputDim = inputType.getDimSize(axis + i);
+    int64_t scaleDim = scaleType.getDimSize(i);
+    if (!ShapedType::isDynamic(inputDim) && !ShapedType::isDynamic(scaleDim) &&
+        inputDim != scaleDim)
+      return emitOpError("scale shape must equal input.shape[axis:]");
+  }
+  if (Value bias = getBias()) {
+    auto biasType = dyn_cast<ShapedType>(bias.getType());
+    if (!biasType || !biasType.hasRank() ||
+        biasType.getShape() != scaleType.getShape())
+      return emitOpError("bias shape must equal scale shape");
+  }
+
+  Type inputElementType = inputType.getElementType();
+  if (!inputElementType.isF16() && !inputElementType.isF32())
+    return emitOpError("runtime supports only f16/f32 input");
+  if (scaleType.getElementType() != inputElementType)
+    return emitOpError("scale element type must match input");
+  if (Value bias = getBias())
+    if (cast<ShapedType>(bias.getType()).getElementType() != inputElementType)
+      return emitOpError("bias element type must match input");
+  if (cast<ShapedType>(getOutputs().front().getType()).getElementType() !=
+      inputElementType)
+    return emitOpError("output element type must match input");
+  FailureOr<Type> statsElementType =
+      mlir::hip::inferLayerNormStatsType(getContext(), getStashType());
+  if (failed(statsElementType))
+    return emitOpError("runtime supports stash_type 0/1 (f32) or 10 (f16)");
+
+  FailureOr<SmallVector<SmallVector<int64_t>>> expected =
+      mlir::hip::inferLayerNormOutputShapes(inputType.getShape(), getAxis(),
+                                            numOutputs);
+  if (failed(expected))
+    return emitOpError("could not infer output shapes");
+  for (auto [index, output] : llvm::enumerate(getOutputs())) {
+    auto outputType = dyn_cast<ShapedType>(output.getType());
+    if (!outputType || !outputType.hasRank() ||
+        outputType.getRank() != static_cast<int64_t>((*expected)[index].size()))
+      return emitOpError("output #") << index << " has the wrong rank";
+    for (int64_t dim : llvm::seq<int64_t>(0, outputType.getRank())) {
+      int64_t actual = outputType.getDimSize(dim);
+      int64_t wanted = (*expected)[index][dim];
+      if (!ShapedType::isDynamic(actual) && !ShapedType::isDynamic(wanted) &&
+          actual != wanted)
+        return emitOpError("output #")
+               << index << " dimension " << dim << " must be " << wanted;
+    }
+    if (index > 0 && outputType.getElementType() != *statsElementType)
+      return emitOpError("stats output element type must match stash_type");
+  }
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
@@ -1684,6 +1809,63 @@ void MultiHeadAttentionOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult MultiHeadAttentionOp::verify() {
+  if (!getKey() || !getValue())
+    return emitOpError(
+        "default runtime requires separate query, key, and value inputs");
+  if (getBias() || getKeyPaddingMask() || getAttentionBias() || getPastKey() ||
+      getPastValue() || getPastSequenceLength() || getCacheIndirection())
+    return emitOpError(
+        "default runtime does not support bias, masks, past/cache inputs, or "
+        "cache indirection");
+  if (getPresentKey() || getPresentValue() || getQk())
+    return emitOpError(
+        "default runtime does not support present_key, present_value, or qk "
+        "outputs");
+
+  SmallVector<Value> operands = {getQuery(), getKey(), getValue(), getOutput()};
+  if (failed(verifyDpsComputeOp(*this, operands, /*numInits=*/1)))
+    return failure();
+
+  auto queryType = cast<ShapedType>(getQuery().getType());
+  auto keyType = cast<ShapedType>(getKey().getType());
+  auto valueType = cast<ShapedType>(getValue().getType());
+  auto outputType = cast<ShapedType>(getOutput().getType());
+  if (!queryType.getElementType().isF16() ||
+      keyType.getElementType() != queryType.getElementType() ||
+      valueType.getElementType() != queryType.getElementType() ||
+      outputType.getElementType() != queryType.getElementType())
+    return emitOpError(
+        "default runtime requires fp16 query, key, value, and output");
+  if (getUnidirectional() != 0 && getUnidirectional() != 1)
+    return emitOpError("unidirectional must be 0 or 1");
+  if (getMaskFilterValue().convertToFloat() != -10000.0f)
+    return emitOpError(
+        "default runtime supports only mask_filter_value = -10000");
+
+  FailureOr<SmallVector<int64_t>> expected = inferMultiHeadAttentionOutputShape(
+      queryType.getShape(), keyType.getShape(), valueType.getShape(),
+      getNumHeads(), [&]() { return this->emitOpError(); });
+  if (failed(expected))
+    return failure();
+
+  // An output template may keep a known query extent dynamic, but it cannot
+  // make an unknown runtime query extent static.
+  ArrayRef<int64_t> outputShape = outputType.getShape();
+  if (outputShape.size() == expected->size()) {
+    for (size_t dim : llvm::seq<size_t>(0, outputShape.size())) {
+      if (ShapedType::isDynamic((*expected)[dim]) &&
+          !ShapedType::isDynamic(outputShape[dim]))
+        return emitOpError("output dimension ")
+               << dim
+               << " must remain dynamic because the corresponding "
+                  "query extent is dynamic";
+    }
+  }
+  return verifyHipOpShape(
+      *this, [&]() -> FailureOr<SmallVector<int64_t>> { return *expected; });
+}
+
 //===----------------------------------------------------------------------===//
 // GqaOp: ins(query, [key, value, past_key, past_value,]
 //             seqlens_k, total_seq_len, [cos_cache, ...])
@@ -1742,7 +1924,101 @@ void GqaOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult LinearAttentionOp::verify() {
+  SmallVector<Value> operands = {getQuery(), getKey(), getValue()};
+  if (Value past = getPastState())
+    operands.push_back(past);
+  if (Value decay = getDecay())
+    operands.push_back(decay);
+  if (Value beta = getBeta())
+    operands.push_back(beta);
+  operands.push_back(getOutput());
+  operands.push_back(getPresentState());
+  if (failed(verifyDpsComputeOp(*this, operands, /*numInits=*/2)))
+    return failure();
+
+  auto queryType = dyn_cast<ShapedType>(getQuery().getType());
+  auto keyType = dyn_cast<ShapedType>(getKey().getType());
+  auto valueType = dyn_cast<ShapedType>(getValue().getType());
+  if (!queryType || !queryType.hasRank() || !keyType || !keyType.hasRank() ||
+      !valueType || !valueType.hasRank())
+    return emitOpError("query, key, and value must be ranked");
+  if (queryType.getElementType() != keyType.getElementType() ||
+      queryType.getElementType() != valueType.getElementType())
+    return emitOpError("query, key, and value element types must match");
+
+  FailureOr<SmallVector<SmallVector<int64_t>>> expected =
+      inferLinearAttentionOutputShapes(queryType.getShape(), keyType.getShape(),
+                                       valueType.getShape(), getQNumHeads(),
+                                       getKvNumHeads(),
+                                       [&]() { return this->emitOpError(); });
+  if (failed(expected))
+    return failure();
+
+  auto verifyShape = [&](Value value, ArrayRef<int64_t> wanted,
+                         StringRef name) -> LogicalResult {
+    auto type = dyn_cast<ShapedType>(value.getType());
+    if (!type || !type.hasRank() ||
+        type.getRank() != static_cast<int64_t>(wanted.size()))
+      return emitOpError() << name << " has the wrong rank";
+    for (int64_t dim : llvm::seq<int64_t>(0, type.getRank())) {
+      int64_t actual = type.getDimSize(dim);
+      if (!ShapedType::isDynamic(actual) &&
+          !ShapedType::isDynamic(wanted[dim]) && actual != wanted[dim])
+        return emitOpError()
+               << name << " dimension " << dim << " must be " << wanted[dim];
+    }
+    if (type.getElementType() != queryType.getElementType())
+      return emitOpError() << name << " element type must match query";
+    return success();
+  };
+
+  if (failed(verifyShape(getOutput(), (*expected)[0], "output")) ||
+      failed(verifyShape(getPresentState(), (*expected)[1], "present_state")))
+    return failure();
+  if (Value past = getPastState())
+    if (failed(verifyShape(past, (*expected)[1], "past_state")))
+      return failure();
+  return success();
+}
+
 LogicalResult GqaOp::verify() {
+  SmallVector<Value> operands = {getQuery()};
+  auto appendIfPresent = [&](Value value) {
+    if (value)
+      operands.push_back(value);
+  };
+  appendIfPresent(getKey());
+  appendIfPresent(getValue());
+  appendIfPresent(getPastKey());
+  appendIfPresent(getPastValue());
+  operands.push_back(getSeqlensK());
+  operands.push_back(getTotalSeqLen());
+  appendIfPresent(getCosCache());
+  appendIfPresent(getSinCache());
+  appendIfPresent(getPositionIds());
+  appendIfPresent(getAttentionBias());
+  appendIfPresent(getHeadSink());
+  appendIfPresent(getKScale());
+  appendIfPresent(getVScale());
+  operands.push_back(getOutput());
+  operands.push_back(getPresentKey());
+  operands.push_back(getPresentValue());
+  appendIfPresent(getOutputQk());
+  unsigned numInits = getOutputQk() ? 4 : 3;
+  if (failed(verifyDpsComputeOp(*this, operands, numInits)))
+    return failure();
+
+  bool hasPastKey = getPastKey() != nullptr;
+  bool hasPastValue = getPastValue() != nullptr;
+  if (hasPastKey != hasPastValue)
+    return emitOpError(
+        "past_key and past_value must both be provided or both be omitted");
+  if (getNumHeads() <= 0 || getKvNumHeads() <= 0)
+    return emitOpError("num_heads and kv_num_heads must be positive");
+  if (getNumHeads() % getKvNumHeads() != 0)
+    return emitOpError("num_heads must be divisible by kv_num_heads");
+
   // Verify quantization parameter consistency
   auto kQuantType = getKQuantType().str();
   auto vQuantType = getVQuantType().str();
@@ -1786,11 +2062,9 @@ LogicalResult GqaOp::verify() {
     return emitOpError("qk_output must be 0, 1, or 2, got ") << qkOutput;
   }
 
-  // If qk_output != 0, output_qk must be provided
-  if (qkOutput != 0 && !getOutputQk()) {
-    return emitOpError("qk_output is ")
-           << qkOutput << " but output_qk buffer is not provided";
-  }
+  if ((qkOutput != 0) != static_cast<bool>(getOutputQk()))
+    return emitOpError(
+        "output_qk must be present exactly when qk_output is nonzero");
 
   // Verify paired optional inputs: cos_cache/sin_cache must both be present or
   // both absent
@@ -1812,6 +2086,173 @@ LogicalResult GqaOp::verify() {
                        "(found key=")
            << (hasKey ? "present" : "absent")
            << ", value=" << (hasValue ? "present" : "absent") << ")";
+  }
+
+  auto queryType = cast<ShapedType>(getQuery().getType());
+  auto outputType = cast<ShapedType>(getOutput().getType());
+  auto presentKeyType = cast<ShapedType>(getPresentKey().getType());
+  auto presentValueType = cast<ShapedType>(getPresentValue().getType());
+  if (queryType.getRank() != 3 || outputType.getRank() != 3)
+    return emitOpError("query and output must be rank-3");
+  if (presentKeyType.getRank() != 4 || presentValueType.getRank() != 4)
+    return emitOpError("present_key and present_value must be rank-4 BNSH");
+
+  auto checkCompatible = [&](int64_t lhs, int64_t rhs,
+                             const Twine &what) -> LogicalResult {
+    if (!ShapedType::isDynamic(lhs) && !ShapedType::isDynamic(rhs) &&
+        lhs != rhs)
+      return emitOpError() << what << " (" << lhs << " vs " << rhs << ")";
+    return success();
+  };
+  auto checkDim = [&](ShapedType lhsType, int64_t lhsDim, ShapedType rhsType,
+                      int64_t rhsDim, const Twine &what) -> LogicalResult {
+    return checkCompatible(lhsType.getDimSize(lhsDim),
+                           rhsType.getDimSize(rhsDim), what);
+  };
+  auto checkStaticValue = [&](ShapedType type, int64_t dim, int64_t expected,
+                              const Twine &what) -> LogicalResult {
+    int64_t actual = type.getDimSize(dim);
+    if (!ShapedType::isDynamic(actual) && actual != expected)
+      return emitOpError() << what << " (expected " << expected << ", got "
+                           << actual << ")";
+    return success();
+  };
+
+  if (failed(checkDim(outputType, 0, queryType, 0,
+                      "output batch must match query batch")) ||
+      failed(checkDim(outputType, 1, queryType, 1,
+                      "output sequence must match query sequence")) ||
+      failed(checkDim(presentKeyType, 0, queryType, 0,
+                      "present_key batch must match query batch")) ||
+      failed(checkDim(presentValueType, 0, queryType, 0,
+                      "present_value batch must match query batch")) ||
+      failed(
+          checkStaticValue(presentKeyType, 1, getKvNumHeads(),
+                           "present_key head count must equal kv_num_heads")) ||
+      failed(
+          checkStaticValue(presentValueType, 1, getKvNumHeads(),
+                           "present_value head count must equal kv_num_heads")))
+    return failure();
+  for (int64_t dim : llvm::seq<int64_t>(0, 4))
+    if (failed(checkDim(presentKeyType, dim, presentValueType, dim,
+                        "present_key and present_value shapes must match")))
+      return failure();
+
+  int64_t headDivisor =
+      hasKey ? getNumHeads() : getNumHeads() + 2 * getKvNumHeads();
+  int64_t queryHidden = queryType.getDimSize(2);
+  std::optional<int64_t> knownHeadSize;
+  if (!ShapedType::isDynamic(queryHidden)) {
+    if (queryHidden % headDivisor != 0)
+      return emitOpError("query hidden extent must be divisible by ")
+             << (hasKey ? "num_heads" : "num_heads + 2 * kv_num_heads");
+    knownHeadSize = queryHidden / headDivisor;
+  }
+
+  auto mergeKnownHeadSize = [&](int64_t candidate,
+                                const Twine &name) -> LogicalResult {
+    if (ShapedType::isDynamic(candidate))
+      return success();
+    if (knownHeadSize && *knownHeadSize != candidate)
+      return emitOpError() << name
+                           << " head size must match the query head size";
+    knownHeadSize = candidate;
+    return success();
+  };
+  auto mergeHeadSize = [&](int64_t hidden, int64_t heads,
+                           const Twine &name) -> LogicalResult {
+    if (ShapedType::isDynamic(hidden))
+      return success();
+    if (hidden % heads != 0)
+      return emitOpError() << name << " hidden extent must be divisible by "
+                           << heads;
+    return mergeKnownHeadSize(hidden / heads, name);
+  };
+
+  if (hasKey) {
+    auto keyType = cast<ShapedType>(getKey().getType());
+    auto valueType = cast<ShapedType>(getValue().getType());
+    if ((keyType.getRank() != 3 && keyType.getRank() != 4) ||
+        valueType.getRank() != keyType.getRank())
+      return emitOpError(
+          "key and value must have the same rank, either rank-3 or rank-4");
+    if (failed(checkDim(keyType, 0, queryType, 0,
+                        "key batch must match query batch")) ||
+        failed(checkDim(valueType, 0, queryType, 0,
+                        "value batch must match query batch")))
+      return failure();
+    if (keyType.getRank() == 3) {
+      if (failed(checkDim(keyType, 1, valueType, 1,
+                          "key and value sequence extents must match")) ||
+          failed(
+              mergeHeadSize(keyType.getDimSize(2), getKvNumHeads(), "key")) ||
+          failed(
+              mergeHeadSize(valueType.getDimSize(2), getKvNumHeads(), "value")))
+        return failure();
+    } else {
+      for (int64_t dim : llvm::seq<int64_t>(0, 4))
+        if (failed(checkDim(keyType, dim, valueType, dim,
+                            "key and value shapes must match")))
+          return failure();
+      if (failed(checkStaticValue(keyType, 1, getKvNumHeads(),
+                                  "key head count must equal kv_num_heads")) ||
+          failed(mergeKnownHeadSize(keyType.getDimSize(3), "key")))
+        return failure();
+    }
+  }
+
+  if (knownHeadSize) {
+    if (failed(checkStaticValue(outputType, 2, getNumHeads() * *knownHeadSize,
+                                "output hidden extent is incompatible with "
+                                "num_heads")) ||
+        failed(checkStaticValue(presentKeyType, 3, *knownHeadSize,
+                                "present_key head size is incompatible")) ||
+        failed(checkStaticValue(presentValueType, 3, *knownHeadSize,
+                                "present_value head size is incompatible")))
+      return failure();
+  }
+
+  if (hasPastKey) {
+    auto pastKeyType = cast<ShapedType>(getPastKey().getType());
+    auto pastValueType = cast<ShapedType>(getPastValue().getType());
+    if (pastKeyType.getRank() != 4 || pastValueType.getRank() != 4)
+      return emitOpError("past_key and past_value must be rank-4 BNSH");
+    for (int64_t dim : llvm::seq<int64_t>(0, 4))
+      if (failed(checkDim(pastKeyType, dim, pastValueType, dim,
+                          "past_key and past_value shapes must match")))
+        return failure();
+    if (failed(checkDim(pastKeyType, 0, queryType, 0,
+                        "past cache batch must match query batch")) ||
+        failed(checkStaticValue(pastKeyType, 1, getKvNumHeads(),
+                                "past cache head count must equal "
+                                "kv_num_heads")) ||
+        failed(checkDim(pastKeyType, 0, presentKeyType, 0,
+                        "past and present cache batches must match")) ||
+        failed(checkDim(pastKeyType, 1, presentKeyType, 1,
+                        "past and present cache head counts must match")) ||
+        failed(checkDim(pastKeyType, 3, presentKeyType, 3,
+                        "past and present cache head sizes must match")))
+      return failure();
+    int64_t pastCapacity = pastKeyType.getDimSize(2);
+    int64_t presentCapacity = presentKeyType.getDimSize(2);
+    if (!ShapedType::isDynamic(pastCapacity) &&
+        !ShapedType::isDynamic(presentCapacity) &&
+        presentCapacity < pastCapacity)
+      return emitOpError(
+          "present cache capacity cannot be smaller than past capacity");
+  }
+
+  if (Value outputQk = getOutputQk()) {
+    auto outputQkType = cast<ShapedType>(outputQk.getType());
+    if (outputQkType.getRank() != 4)
+      return emitOpError("output_qk must be rank-4");
+    if (failed(checkDim(outputQkType, 0, queryType, 0,
+                        "output_qk batch must match query batch")) ||
+        failed(checkStaticValue(outputQkType, 1, getNumHeads(),
+                                "output_qk head count must equal num_heads")) ||
+        failed(checkDim(outputQkType, 2, queryType, 1,
+                        "output_qk query sequence must match query")))
+      return failure();
   }
 
   return success();

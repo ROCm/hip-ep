@@ -125,6 +125,24 @@ ResizeOp::reifyResultShapes(OpBuilder &b,
 }
 
 //===----------------------------------------------------------------------===//
+// MultiHeadAttentionOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult MultiHeadAttentionOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() != 1 || !getKey() || !getValue())
+    return failure();
+  FailureOr<SmallVector<OpFoldResult>> shape =
+      mlir::hip::reifyMultiHeadAttentionOutputShape(
+          b, getLoc(), getQuery(), getKey(), getValue(), getNumHeads(),
+          [&]() { return this->emitOpError(); });
+  if (failed(shape))
+    return failure();
+  reifiedReturnShapes.assign({std::move(*shape)});
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // CausalConvWithStateOp
 //===----------------------------------------------------------------------===//
 
@@ -176,26 +194,56 @@ MatmulOp::reifyResultShapes(OpBuilder &b,
 }
 
 //===----------------------------------------------------------------------===//
-// RopeOp
-//
-// Result shape == input data tensor's shape (rotary embedding rotates
-// values within each head; output rank/extents match `$input` exactly).
-//
-// Before:
-//   %y = hip.rope(%ctx) ins(%x, %pos, %cos, %sin :
-//                            tensor<?x?x4096xf16>, ...)
-//                       outs(%out : tensor<?x?x?xf16>) -> tensor<?x?x?xf16>
-// After (reified result shape):
-//   dim 0 (dynamic) -> %d0 = tensor.dim %x, %c0
-//   dim 1 (dynamic) -> %d1 = tensor.dim %x, %c1
-//   dim 2 (static)  -> 4096 : index
+// SkipRmsNormOp
 //===----------------------------------------------------------------------===//
 
-LogicalResult
-RopeOp::reifyResultShapes(OpBuilder &b,
-                          ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
-  return mlir::hip::reifyElementwiseSameShapeFor(
-      b, getLoc(), getInput(), getOperation(), reifiedReturnShapes);
+LogicalResult SkipRmsNormOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() < 1 || getNumResults() > 2)
+    return failure();
+  FailureOr<ReifiedRankedShapedTypeDims> shapes =
+      mlir::hip::reifySkipRmsNormOutputShapes(
+          b, getLoc(), getInput(), getSkip(), getGamma(), getBias(),
+          getNumResults(), [&]() { return this->emitOpError(); });
+  if (failed(shapes))
+    return failure();
+  reifiedReturnShapes = std::move(*shapes);
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// LayerNormOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult LayerNormOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() == 0)
+    return failure();
+  FailureOr<ReifiedRankedShapedTypeDims> shapes =
+      mlir::hip::reifyLayerNormOutputShapes(b, getLoc(), getInput(), getAxis(),
+                                            getNumResults());
+  if (failed(shapes))
+    return failure();
+  reifiedReturnShapes = std::move(*shapes);
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// LinearAttentionOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult LinearAttentionOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() != 2)
+    return failure();
+  FailureOr<ReifiedRankedShapedTypeDims> shapes =
+      mlir::hip::reifyLinearAttentionOutputShapes(
+          b, getLoc(), getQuery(), getKey(), getValue(), getQNumHeads(),
+          getKvNumHeads(), [&]() { return this->emitOpError(); });
+  if (failed(shapes))
+    return failure();
+  reifiedReturnShapes = std::move(*shapes);
+  return success();
 }
 
 //===----------------------------------------------------------------------===//

@@ -34,7 +34,7 @@ module {
   // the value.
   // Function must be named @main_graph for --hip-add-context-arg to fire.
   func.func @main_graph(
-      %query: tensor<1x128x12288xf16>,
+      %query: tensor<1x128x6144xf16>,
       %past_key: tensor<1x8x0x128xf16>,
       %past_value: tensor<1x8x0x128xf16>,
       %total_seq_len: tensor<i32>)
@@ -62,7 +62,7 @@ module {
          softcap = 0.000000e+00 : f32,
          do_rotary = 0 : si64,
          rotary_interleaved = 0 : si64}
-        : (tensor<1x128x12288xf16>, none, none,
+        : (tensor<1x128x6144xf16>, none, none,
            tensor<1x8x0x128xf16>, tensor<1x8x0x128xf16>,
            tensor<1xi32>, tensor<i32>, none, none)
         -> (tensor<1x128x4096xf16>, tensor<1x8x128x128xf16>, tensor<1x8x128x128xf16>)
