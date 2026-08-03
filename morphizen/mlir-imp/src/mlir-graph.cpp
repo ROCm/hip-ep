@@ -1091,6 +1091,25 @@ void MLIRGraph::add_constant_initialized_tensor(
   const void *data = node_arg->getData();
   size_t dataSize = node_arg->getDataSize();
 
+  // Preserve ONNX UINT8/SINT8 on external initializers so convert-onnx-to-hip
+  // prepare and hip-ep externalize can tell unsigned quant storage apart.
+  // Inline dense constants still use signless integers for DenseElementsAttr.
+  const int onnxElemType = node_arg->getElementType();
+  if (node_arg->isExternalData()) {
+    auto elemType = onnxElementTypeToMlirElementType(onnxElemType, builder);
+    if (shapedTensorType.getElementType() != elemType) {
+      shapedTensorType =
+          mlir::RankedTensorType::get(shapedTensorType.getShape(), elemType);
+    }
+  } else {
+    auto denseElemType =
+        onnxElementTypeToMlirDenseElementType(onnxElemType, builder);
+    if (shapedTensorType.getElementType() != denseElemType) {
+      shapedTensorType = mlir::RankedTensorType::get(
+          shapedTensorType.getShape(), denseElemType);
+    }
+  }
+
   mlir::OperationState state(loc, "onnx.Constant");
   state.addTypes(shapedTensorType);
 

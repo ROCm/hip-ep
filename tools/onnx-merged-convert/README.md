@@ -72,10 +72,12 @@ model-bundle/
 
 | File | Purpose |
 |------|---------|
-| `genai_config.json` | Source for model metadata and search settings. If missing, a default config is generated from the merged graph. |
+| `genai_config.json` | Source for model metadata and search settings. If missing, a default config is generated from the merged graph and bundle metadata (see below). |
 | `adapter.safetensors` | LoRA adapter weights; copied to the output when present. |
 | `tokenizer/` | Not read by the converter; copy manually for inference. |
-| `tokenizer/config.json` or `config.json` | Used to fill in `vocab_size` when the source genai config omits it. |
+| `tokenizer/config.json` or `config.json` | Hugging Face model config; used for `vocab_size`, `context_length`, and decoder architecture fields when the source genai config omits them. |
+| `tokenizer/tokenizer_config.json` or `tokenizer_config.json` | Tokenizer settings; used for pad/EOS token ids when inferring model metadata. |
+| `tokenizer/tokenizer.json` or `tokenizer.json` | Tokenizer vocabulary; used to infer `vocab_size` when not present elsewhere. |
 
 ### What happens if files are missing?
 
@@ -103,7 +105,7 @@ Pipeline **type** is inferred from the decoder prefill graph:
 |------------------|----------|
 | Quantized linear (MatMulNBits) | Standard QDQ removal and merge. |
 | Many Gemm nodes, few MatMulNBits | Treats weights as folded Gemm (pure-Gemm / adapter path); may emit `lora_dequant.json`. |
-| GroupQueryAttention with 8-bit KV cache | Preserves int8 KV path. |
+| GroupQueryAttention with 8-bit KV cache | Preserves int8 KV I/O and GQA quant attrs; rewrites activations to pure fp16 (including RoPE cos/sin at GQA inputs 7–8) for hip-ep. |
 | Many 2-bit MatMulNBits nodes | Low-bit decoder path. |
 
 ## Output files
@@ -120,7 +122,26 @@ The merged `genai_config.json` is adjusted for a single merged graph:
 
 - Decoder inputs use `input_ids` (not precomputed embeddings).
 - Execution provider profile is set to `hip` for AMDGPU stages.
-- `vocab_size` is preserved from the source config or inferred from tokenizer metadata.
+- Missing model and decoder fields are filled in without overwriting values already present in a source config.
+
+### Metadata inference
+
+When no source `genai_config.json` is available, or when specific fields are absent, the converter infers them in this order:
+
+| Field | Primary source | Fallback |
+|-------|----------------|----------|
+| `model.vocab_size` | Source genai config | HF `config.json`, then `tokenizer.json`, then merged graph logits shape |
+| `model.context_length` | Source genai config | HF `max_position_embeddings`, else default (`16384`) |
+| `model.bos_token_id`, `pad_token_id`, `eos_token_id` | Source genai config | HF / tokenizer config files |
+| `decoder.head_size` | HF `head_dim` | First `past_keys_*_0` input shape `[batch, kv_heads, seq, head_dim]` |
+| `decoder.num_attention_heads` | HF `num_attention_heads` | First `GroupQueryAttention` node `num_heads` attribute |
+| `decoder.num_key_value_heads` | HF `num_key_value_heads` | KV input shape or GQA `kv_num_heads` attribute |
+| `decoder.hidden_size` | HF `hidden_size` | `num_attention_heads × head_size` when both are known |
+| `decoder.num_hidden_layers` | Merged graph | Count of `past_keys_*` / `present_keys_*` tensor groups |
+
+HF config paths are checked under `tokenizer/config.json` first, then `config.json` at the bundle root. Tokenizer files follow the same `tokenizer/` subdirectory-first layout.
+
+If inference fails for architecture fields, conservative defaults are used (`head_size=128`, `hidden_size=2048`, `num_attention_heads=24`, `num_key_value_heads=8`). Place an accurate source `genai_config.json` or HF `config.json` in the bundle when automatic detection is insufficient.
 
 ## Code layout
 
@@ -139,8 +160,8 @@ Supporting modules:
 | Module | Role |
 |--------|------|
 | `qdq_ext.py` | Alternate Q/DQ + fp16 path for low-bit models |
-| `int8kv.py` | Decoder conversion with int8 KV cache preserved |
-| `bundle.py` | Input bundle detection and `genai_config.json` generation |
+| `int8kv.py` | Decoder conversion with int8 KV cache preserved; RoPE weights discovered via GQA cos/sin inputs |
+| `bundle.py` | Input bundle detection; merged I/O introspection; `genai_config.json` generation and metadata inference |
 | `pipeline.py` | Wires the steps for each pipeline kind (`quantized_linear`, `int8_kv`, `low_bit`) |
 | `cli.py` | Argument parsing and `main()` |
 
@@ -162,5 +183,7 @@ python -m merged_convert.cli --input-dir ... --output-dir ...
 |---------|----------------|
 | `No decoder pair found` | Missing or misnamed `*_128.onnx` / `*_1.onnx` (or `*_0.onnx` / `*_1.onnx`) pair. |
 | `Missing embedding or lm_head` | Emb or head file missing or name does not match glob patterns. |
-| Runtime error on `vocab_size` | No vocab in source genai config and no `tokenizer/config.json`. Add one or fix paths. |
+| Runtime error on `vocab_size` | No vocab in source genai config and no `tokenizer/config.json` or `tokenizer.json`. Add one or fix paths. |
+| Wrong KV cache / attention layout at runtime | Generated `genai_config.json` has incorrect `head_size`, `num_attention_heads`, or `num_key_value_heads`; supply a source genai config or HF `config.json` with accurate architecture fields. |
 | GenAI rejects `embeddings` input | Re-run with a current script build; merged configs must use `input_ids`. |
+| `Cast->fp32 remain; pure fp16 activations required` | int8-KV decoder still has fp32 activation casts after RoPE/GQA cleanup; inspect remaining `Cast` nodes or upstream export. |
