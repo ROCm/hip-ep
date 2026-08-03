@@ -7,7 +7,7 @@
 //      constants with positive unit stride, so onnx.Slice is rewritten to
 //      a zero-cost tensor.extract_slice.
 //   2. SliceToHip (fallback) — non-constant indices or negative steps fall
-//      through to a native hip.slice op whose runtime is a stub today.
+//      through to the native hip.slice runtime.
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
 
@@ -67,13 +67,11 @@ module {
     return %r : tensor<2x3xf32>
   }
 
-  // Test 4: negative step forces the native fallback (hip.slice).  The
-  // runtime is a stub today, but the conversion + bufferization pipeline
-  // must still produce valid IR.
+  // Test 4: negative step forces the native fallback (hip.slice).
   func.func @test_slice_native_negative_step(%input: tensor<6xf32>) -> tensor<3xf32> {
     // CHECK-LABEL: func.func @test_slice_native_negative_step
     %starts = arith.constant dense<[5]> : tensor<1xi64>
-    %ends   = arith.constant dense<[-1]> : tensor<1xi64>
+    %ends   = arith.constant dense<[0]> : tensor<1xi64>
     %axes   = arith.constant dense<[0]> : tensor<1xi64>
     %steps  = arith.constant dense<[-2]> : tensor<1xi64>
     %r = "onnx.Slice"(%input, %starts, %ends, %axes, %steps)
@@ -145,5 +143,29 @@ module {
     // CHECK: tensor.empty(%[[DIM]]) : tensor<?xf32>
     // CHECK: hip.slice({{.*}}) ins({{.*}}, {{.*}}, {{.*}} : tensor<?xf32>, tensor<1xi64>, tensor<1xi64>)
     return %r : tensor<?xf32>
+  }
+
+  // Test 8: native negative-step Slice shares the exact constant/static-bound
+  // rule with reification. Axis 0 has extent 3; untouched dynamic axis 1
+  // passes through from input. The imported result remains fully dynamic, but
+  // tensor.empty receives exact dynamic-size operands rather than capacity 6
+  // on the sliced axis.
+  func.func @test_slice_native_exact_dynamic_untouched(
+      %input: tensor<6x?xf32>) -> tensor<?x?xf32> {
+    // CHECK-LABEL: func.func @test_slice_native_exact_dynamic_untouched
+    %starts = arith.constant dense<[5]> : tensor<1xi64>
+    %ends   = arith.constant dense<[0]> : tensor<1xi64>
+    %axes   = arith.constant dense<[0]> : tensor<1xi64>
+    %steps  = arith.constant dense<[-2]> : tensor<1xi64>
+    %r = "onnx.Slice"(%input, %starts, %ends, %axes, %steps)
+        : (tensor<6x?xf32>, tensor<1xi64>, tensor<1xi64>,
+           tensor<1xi64>, tensor<1xi64>) -> tensor<?x?xf32>
+
+    // CHECK-DAG: %[[C3:.*]] = arith.constant 3 : index
+    // CHECK-DAG: %[[A1:.*]] = arith.constant 1 : index
+    // CHECK-DAG: %[[D1:.*]] = tensor.dim %{{.*}}, %[[A1]] : tensor<6x?xf32>
+    // CHECK: tensor.empty(%[[C3]], %[[D1]]) : tensor<?x?xf32>
+    // CHECK: hip.slice
+    return %r : tensor<?x?xf32>
   }
 }

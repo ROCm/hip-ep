@@ -102,6 +102,39 @@ struct HipReadbackBufferizableModel
   }
 };
 
+struct HipReadbackShapeBufferizableModel
+    : public bufferization::BufferizableOpInterface::ExternalModel<
+          HipReadbackShapeBufferizableModel, ReadbackShapeOp> {
+  bool bufferizesToMemoryRead(Operation *, OpOperand &,
+                              const bufferization::AnalysisState &) const {
+    return true;
+  }
+  bool bufferizesToMemoryWrite(Operation *, OpOperand &,
+                               const bufferization::AnalysisState &) const {
+    return false;
+  }
+  bufferization::AliasingValueList
+  getAliasingValues(Operation *, OpOperand &,
+                    const bufferization::AnalysisState &) const {
+    return {};
+  }
+  LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
+                          const bufferization::BufferizationOptions &options,
+                          bufferization::BufferizationState &state) const {
+    auto readback = cast<ReadbackShapeOp>(op);
+    FailureOr<Value> vectorBuf =
+        getBuffer(rewriter, readback.getVector(), options, state);
+    if (failed(vectorBuf))
+      return failure();
+    auto newOp = ReadbackShapeOp::create(
+        rewriter, op->getLoc(), readback.getResultTypes(), readback.getCtx(),
+        *vectorBuf, readback.getCountAttr());
+    bufferization::replaceOpWithBufferizedValues(rewriter, op,
+                                                 newOp.getResults());
+    return success();
+  }
+};
+
 inline void
 registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *ctx, HipDialect *) {
@@ -109,6 +142,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
         *ctx);
     ReadbackScalarOp::attachInterface<
         HipReadbackBufferizableModel<ReadbackScalarOp>>(*ctx);
+    ReadbackShapeOp::attachInterface<HipReadbackShapeBufferizableModel>(*ctx);
     ConvOp::attachInterface<HipDstBufferizableModel<ConvOp>>(*ctx);
     ConvTransposeOp::attachInterface<HipDstBufferizableModel<ConvTransposeOp>>(
         *ctx);

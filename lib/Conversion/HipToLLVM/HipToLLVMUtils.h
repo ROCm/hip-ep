@@ -138,6 +138,8 @@ inline constexpr const char *kHipReadbackI32 = "hipdnn_ep_readback_i32";
 // width into a host buffer (used by hip.readback_scalar for non-i32 scalars
 // such as the i64/f32/f16 operands of a data-dependent onnx.Range).
 inline constexpr const char *kHipReadbackScalar = "hipdnn_ep_readback_scalar";
+inline constexpr const char *kHipReadbackShapeI64 =
+    "hipdnn_ep_readback_shape_i64";
 
 // LLVM memref descriptor struct field indices.
 // Layout: { allocatedPtr, alignedPtr, offset, sizes[rank], strides[rank] }
@@ -488,6 +490,8 @@ void populateReadbackDimLoweringPatterns(const LLVMTypeConverter &converter,
 // scalar of arbitrary element type (the i64/f32/f16 sibling of readback_dim).
 void populateReadbackScalarLoweringPatterns(const LLVMTypeConverter &converter,
                                             RewritePatternSet &patterns);
+void populateReadbackShapeLoweringPatterns(const LLVMTypeConverter &converter,
+                                           RewritePatternSet &patterns);
 void populateSizeLoweringPatterns(const LLVMTypeConverter &converter,
                                   RewritePatternSet &patterns);
 void populateLoopLoweringPatterns(const LLVMTypeConverter &converter,

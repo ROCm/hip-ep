@@ -1441,6 +1441,12 @@ int32_t hipdnn_ep_readback_i32(RuntimeState *state, const void *device_scalar);
 void hipdnn_ep_readback_scalar(RuntimeState *state, void *host_dst,
                                const void *device_scalar, int64_t num_bytes);
 
+// Synchronize once and copy a rank-1 i64 shape vector to `host_out`, which must
+// contain `count` slots. Negative entries are clamped to zero and record the
+// recoverable runtime error flag.
+void hipdnn_ep_readback_shape_i64(RuntimeState *state, int64_t *host_out,
+                                  const void *device_vector, int64_t count);
+
 // ONNX Size wrapper (dynamic-shape path only).
 //
 // Static-shape Size ops are folded into arith.constant at OnnxToHip time

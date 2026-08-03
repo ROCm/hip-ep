@@ -1710,6 +1710,37 @@ void TileOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult TileOp::verify() {
+  if (failed(verifyDpsComputeOp(*this, {getInput(), getRepeats(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+  auto inputType = dyn_cast<ShapedType>(getInput().getType());
+  auto repeatsType = dyn_cast<ShapedType>(getRepeats().getType());
+  auto outputType = dyn_cast<ShapedType>(getOutput().getType());
+  if (!inputType || !inputType.hasRank() || !repeatsType ||
+      !repeatsType.hasRank() || !outputType || !outputType.hasRank())
+    return emitOpError("input, repeats, and output must be ranked");
+  if (repeatsType.getRank() != 1 ||
+      !repeatsType.getElementType().isInteger(64) ||
+      repeatsType.isDynamicDim(0) ||
+      repeatsType.getDimSize(0) != inputType.getRank())
+    return emitOpError(
+        "repeats must be static-length rank-1 i64 matching input rank");
+  if (outputType.getRank() != inputType.getRank())
+    return emitOpError("output rank must match input rank");
+
+  std::optional<ArrayRef<int64_t>> staticRepeats = getStaticRepeats();
+  if (!staticRepeats)
+    return success();
+  FailureOr<SmallVector<int64_t>> expected =
+      mlir::hip::inferTileShape(inputType.getShape(), *staticRepeats);
+  if (failed(expected))
+    return emitOpError(
+        "static_repeats must match input rank and be non-negative");
+  return mlir::hip::verifyHipOpShape(
+      *this, [&]() -> FailureOr<SmallVector<int64_t>> { return *expected; });
+}
+
 //===----------------------------------------------------------------------===//
 // ExpandOp: ins(input, shape), outs(output)
 //===----------------------------------------------------------------------===//
@@ -1857,6 +1888,35 @@ void ReadbackScalarOp::getEffects(
     effects.emplace_back(MemoryEffects::Read::get(),
                          &getOperation()->getOpOperand(1),
                          SideEffects::DefaultResource::get());
+}
+
+void ReadbackShapeOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  // Operand order is (ctx, vector); attach the Read to the vector operand.
+  if (isa<MemRefType>(getVector().getType()))
+    effects.emplace_back(MemoryEffects::Read::get(),
+                         &getOperation()->getOpOperand(1),
+                         SideEffects::DefaultResource::get());
+}
+
+LogicalResult ReadbackShapeOp::verify() {
+  auto vectorType = dyn_cast<ShapedType>(getVector().getType());
+  if (!vectorType || !vectorType.hasRank() || vectorType.getRank() != 1)
+    return emitOpError("vector must be rank 1");
+  if (!vectorType.getElementType().isInteger(64))
+    return emitOpError("vector element type must be i64");
+  int64_t count = getCount();
+  if (count < 0)
+    return emitOpError("count must be non-negative");
+  if (vectorType.isDynamicDim(0) || vectorType.getDimSize(0) != count)
+    return emitOpError("vector length must be static and equal count");
+  if (static_cast<int64_t>(getNumResults()) != count)
+    return emitOpError("result count must equal count");
+  if (llvm::any_of(getResultTypes(),
+                   [](Type type) { return !isa<IndexType>(type); }))
+    return emitOpError("all results must be index type");
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
