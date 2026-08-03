@@ -460,8 +460,7 @@ SkipLayerNormToHip::matchAndRewrite(mlir::Operation *op,
   // === 2. output = LayerNorm(sum, gamma, beta, epsilon) =====================
   auto outputType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  mlir::Value outputInit =
-      createEmptyTensor(rewriter, loc, outputType, input);
+  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
 
   // hip.layer_norm uses AttrSizedOperandSegments: [ctx, input, scale, bias?,
   // outputs*]. Whisper requests only output[0], so a single output buffer.
