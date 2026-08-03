@@ -52,9 +52,54 @@
 
 namespace {
 
-/// Tool-only contract probe for the HipDpsOp shared default. LIT tags a
-/// zero-result memref-mode op and checks that the default succeeds with no
-/// reified vectors.
+/// Tool-only malformed reifier fixture used to prove that
+/// --hip-infer-shapes diagnoses interface-contract violations in release
+/// builds. Production code never creates this operation.
+class TestMalformedReifyOp final
+    : public mlir::Op<TestMalformedReifyOp, mlir::OpTrait::ZeroOperands,
+                      mlir::OpTrait::OneResult,
+                      mlir::ReifyRankedShapedTypeOpInterface::Trait> {
+public:
+  using Op::Op;
+
+  static llvm::StringRef getOperationName() {
+    return "hip.test_malformed_reify";
+  }
+  static llvm::ArrayRef<llvm::StringRef> getAttributeNames() {
+    static const llvm::StringRef names[] = {"kind"};
+    return names;
+  }
+
+  mlir::LogicalResult
+  reifyResultShapes(mlir::OpBuilder &builder,
+                    mlir::ReifiedRankedShapedTypeDims &reified) {
+    auto kind = (*this)->getAttrOfType<mlir::StringAttr>("kind");
+    if (!kind)
+      return emitOpError("requires a string 'kind' attribute");
+
+    reified.clear();
+    if (kind.getValue() == "result_count")
+      return mlir::success();
+    if (kind.getValue() == "rank") {
+      reified.push_back({builder.getIndexAttr(1)});
+      return mlir::success();
+    }
+    if (kind.getValue() == "static_contradiction") {
+      reified.push_back({builder.getIndexAttr(3), builder.getIndexAttr(4)});
+      return mlir::success();
+    }
+    if (kind.getValue() == "negative_extent") {
+      reified.push_back({builder.getIndexAttr(-2)});
+      return mlir::success();
+    }
+    return emitOpError("unknown malformed-reifier fixture kind '")
+           << kind.getValue() << "'";
+  }
+};
+
+/// Tool-only contract probe for the HipDpsOp shared default. The marker keeps
+/// ordinary tool invocations unaffected; LIT tags a zero-result memref-mode op
+/// and checks that the default succeeds with no reified vectors.
 struct TestHipDpsDefaultReifyPass final
     : public mlir::PassWrapper<TestHipDpsDefaultReifyPass,
                                mlir::OperationPass<mlir::ModuleOp>> {
@@ -112,6 +157,10 @@ int main(int argc, char **argv) {
   registry.insert<mlir::tensor::TensorDialect>();
   registry.insert<mlir::LLVM::LLVMDialect>();
   registry.insert<mlir::hip::HipDialect>();
+  registry.addExtension(
+      +[](mlir::MLIRContext *, mlir::hip::HipDialect *dialect) {
+        mlir::RegisteredOperationName::insert<TestMalformedReifyOp>(*dialect);
+      });
   registry.insert<mlir::hipsr::HipsrDialect>();
   mlir::hipsr::registerConvertHipsrToLLVMInterface(registry);
   mlir::registerConvertFuncToLLVMInterface(registry);
@@ -140,13 +189,13 @@ int main(int argc, char **argv) {
   // the EP share. Defined once (InitAllPasses.h) so the two never drift; see
   // that function for the set and docs/pipeline_pass_menu.md for the catalogue.
   hip::compiler::registerAllPasses();
+  mlir::PassRegistration<TestHipDpsDefaultReifyPass>();
 
   // Tool-only extras: the standalone LLVM-lowering conversion passes. The
   // production pipeline reaches LLVM through `convert-hip-to-llvm` (which
   // populates these patterns internally), so the EP path does not register
   // them as separate names; they exist here purely so LIT tests can exercise
   // each conversion in isolation.
-  mlir::PassRegistration<TestHipDpsDefaultReifyPass>();
   mlir::registerConvertFuncToLLVMPass();
   mlir::registerArithToLLVMConversionPass();
   mlir::registerFinalizeMemRefToLLVMConversionPass();

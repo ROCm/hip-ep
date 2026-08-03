@@ -48,7 +48,7 @@ This gives two related but distinct jobs:
 | `InferShapedTypeOpInterface` | Not used as the primary HIP DPS contract |
 | `HipDpsOpInterface` | Dialect marker interface extending `DestinationStyleOpInterface`; owns the shared default reification body |
 
-`HipDpsOpInterface` is a generated MLIR `OpInterface`, but it is not a replacement for the standard InferType/Reify contracts. It marks HIP DPS compute operations and provides their shared default reification behavior: walk `DestinationStyleOpInterface::getDpsInits()` and return each destination's mixed sizes through `tensor::getMixedSizes` or `memref::getMixedSizes`.
+`HipDpsOpInterface` is a generated MLIR `OpInterface`, but it is not a replacement for the standard InferType/Reify contracts. It marks HIP DPS compute operations and provides their shared default reification behavior. In tensor mode it walks `DestinationStyleOpInterface::getDpsInits()` and returns each destination's mixed sizes through `tensor::getMixedSizes`, exactly one vector per SSA result. In memref mode there are no SSA results, so it succeeds with an empty list.
 
 Operations whose shape contract is more specific than "result shape equals destination shape" opt out of the default and provide a dedicated reification implementation.
 
@@ -224,8 +224,10 @@ last thing a helper does.
 The same split gives targeted operation verifiers a shape rule to check against.
 MatMul and Gemm use `verifyHipOpShape` with their `infer*` helper, so their
 `outs` shape, converter destination, and `reifyResultShapes` are all held to one
-shape function. Broadcast and reduction ops share their converter/reify rule
-but do not yet have shared static shape verifiers:
+shape function. Broadcast and reduction bases likewise generate verifiers from
+their shared rules. Broadcast checks every statically decidable NumPy extent;
+reduction checks the exact output shape when axes are compile-time-known and
+retains the outs-authoritative fallback for runtime axes:
 
 ```c++
 LogicalResult MatmulOp::verify() {
@@ -430,7 +432,7 @@ LLVM-IR artifacts compiled against the previous wrapper ABI must be invalidated.
 
 ### Phase 1: refine HIP DPS results
 
-The pass collects operations in post-order so producers inside nested regions are considered before enclosing users. An operation is eligible only when all of the following hold:
+Within the supported lexical, single-block HIP/outlined-loop structure, the pass collects operations in post-order so producers are considered before their users. This ordering is not CFG, call-graph, or symbolic inference. An operation is eligible only when all of the following hold:
 
 - it is in the HIP dialect and implements `ReifyRankedShapedTypeOpInterface`;
 - it has at least one ranked tensor result;
@@ -438,14 +440,14 @@ The pass collects operations in post-order so producers inside nested regions ar
 
 For each eligible operation:
 
-1. call `reifyResultShapes`;
+1. call upstream `mlir::reifyResultShapes`, allowing the standard helper to dispatch the applicable reification interface;
 2. preserve existing static dimensions;
 3. replace a dynamic dimension when reification produces a constant;
 4. for a result paired with a DPS init, rebuild its single-use `tensor.empty` producer with the refined type;
 5. update the operation result type;
 6. insert `tensor.cast` barriers for non-DPS uses that still expect the original type.
 
-Non-tensor and unranked results are skipped individually. If a DPS destination cannot be safely rebuilt—such as a function argument, shared producer, or unsupported init-defining operation—that result remains unchanged. Reification failure or a result-count mismatch skips the operation. A per-result rank mismatch violates the reification interface contract and is treated as an implementation error.
+If a DPS destination cannot be safely rebuilt—such as a function argument, shared producer, or unsupported init-defining operation—that result remains unchanged. Reification failure remains a best-effort skip. Successful reification is different: before mutating any result, the pass validates the complete operation-wide response. It must contain exactly one vector per result, every result must be ranked and shaped, every vector must contain exactly the result rank's dimensions, every constant extent must be nonnegative, and a constant must not contradict an existing static extent. Any violation is an op-author/compiler defect: the pass emits a precise operation diagnostic and fails in release builds as well as assertion-enabled builds.
 
 The pass inserts one cast per refined result when needed. Pre-existing non-DPS-init uses are redirected through it, except a `func.return` whose declared result type was already synchronized to the refined type. This preserves the old type at unrelated consumer boundaries while the refined result and rebuilt destination keep the DPS equality invariant. Standard tensor folding can still recover static dimensions through the compatible cast.
 
@@ -532,6 +534,7 @@ Primary regression coverage:
 | File | Contract |
 |---|---|
 | `test/lit/Dialect/hip-infer-shapes.mlir` | Module-level static-dimension refinement and cast barriers |
+| `test/lit/Dialect/hip-infer-shapes-malformed-reify.mlir` | Release-build failure policy for malformed successful reification |
 | `test/lit/Dialect/hip-infer-loop-body-shapes.mlir` | Pre-conversion rank establishment |
 | `test/lit/Dialect/hip-dps-op-interface.mlir` | Shared `HipDpsOpInterface` reification |
 | `test/lit/Dialect/hip-broadcast-reify-shapes.mlir` | Broadcast dynamic SSA, zero extents, and rank-zero success |
