@@ -120,14 +120,14 @@ To test the entire flow, you can use `test_onnx_runner` or your own Python scrip
 
 ```bash
 cd morphizen-demo
-env XLNX_ONNX_EP_VERBOSE=2 DEBUG_LOG_LEVEL=info ../local/bin/test_onnx_runner.exe ../build/morphizen-demo/_deps/morphizen-build/unit-test/pt_resnet50.onnx
+env HIP_EP_VERBOSE=2 DEBUG_LOG_LEVEL=info ../local/bin/test_onnx_runner.exe ../build/morphizen-demo/_deps/morphizen-build/unit-test/pt_resnet50.onnx
 ```
 
 Optional Environment Variables
 
 To assist in debugging and enhance logging during execution, you can configure the following environment variables:
 
-- **`XLNX_ONNX_EP_VERBOSE`**: Enables verbose logging for the Xilinx ONNX Execution Provider, providing detailed insights into its operations.
+- **`HIP_EP_VERBOSE`**: Enables verbose logging for the execution provider, providing detailed insights into its operations.
 - **`DEBUG_LOG_LEVEL`**: Sets the debug log level to control the granularity of logging output for troubleshooting purposes.
 
 Adjust these variables as needed to streamline the debugging process.
