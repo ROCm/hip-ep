@@ -30,10 +30,9 @@
 
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_TAR_CACHE, "0")
 DEF_ENV_PARAM(MORPHIZEN_DEBUG_TARGET_DISCOVERY, "0")
-DEF_ENV_PARAM(XLNX_ONNX_EP_VERBOSE, "0")
+DEF_ENV_PARAM(HIP_EP_VERBOSE, "0")
 #define LOG_VERBOSE(n)                                                         \
-  LOG_IF(INFO, ENV_PARAM(XLNX_ONNX_EP_VERBOSE) >= n)                           \
-      << "[XLNX_ONNX_EP_VERBOSE] "
+  LOG_IF(INFO, ENV_PARAM(HIP_EP_VERBOSE) >= n) << "[HIP_EP_VERBOSE] "
 
 namespace morphizen {
 

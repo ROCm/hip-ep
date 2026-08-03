@@ -111,7 +111,7 @@ protected:
 #else
 #define HIPDNN_SETENV(k, v) setenv((k), (v), /*overwrite=*/1)
 #endif
-    HIPDNN_SETENV("XLNX_ONNX_EP_VERBOSE", "2");
+    HIPDNN_SETENV("HIP_EP_VERBOSE", "2");
     HIPDNN_SETENV("DEBUG_LOG_LEVEL", "info");
     HIPDNN_SETENV("MORPHIZEN_DEBUG_PLUGIN", "1");
 #undef HIPDNN_SETENV
