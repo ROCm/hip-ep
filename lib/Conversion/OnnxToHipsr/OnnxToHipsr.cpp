@@ -91,6 +91,7 @@ static LogicalResult finalizePlaceholderDependencies(ModuleOp module) {
 struct ConvertOnnxToHipsrPass
     : impl::ConvertOnnxToHipsrPassBase<ConvertOnnxToHipsrPass> {
   void runOnOperation() override {
+    ModuleOp module = getOperation();
     ConversionTarget target(getContext());
     target.addIllegalDialect("onnx");
     target.addLegalDialect<HipsrDialect>();
@@ -100,13 +101,12 @@ struct ConvertOnnxToHipsrPass
     });
 
     RewritePatternSet patterns(&getContext());
-    if (failed(
-            applyFullConversion(getOperation(), target, std::move(patterns)))) {
+    if (failed(applyFullConversion(module, target, std::move(patterns)))) {
       signalPassFailure();
       return;
     }
     // Build the parallel shape graph after all data-graph rewrites finish.
-    if (failed(finalizePlaceholderDependencies(getOperation()))) {
+    if (failed(finalizePlaceholderDependencies(module))) {
       signalPassFailure();
     }
   }
