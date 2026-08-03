@@ -10,7 +10,7 @@
 // canonicalisers) in a single fixed point.  Folds `tensor.dim` queries on
 // any op carrying `ReifyRankedShapedTypeOpInterface` -- including
 // `tensor.expand_shape`, `tensor.collapse_shape`, `tensor.pad`, and the
-// HIP DPS ops registered via this dialect's external models -- and
+// HIP DPS ops that implement the interface directly -- and
 // composes the upstream `Compose{Expand,Collapse}OfX` patterns so chains
 // like `dim(collapse(expand(arg)))` collapse end-to-end in one pass.
 //

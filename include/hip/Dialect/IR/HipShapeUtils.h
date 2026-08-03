@@ -14,8 +14,25 @@
 #include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SmallVector.h"
 
+#include <optional>
+
 namespace mlir {
 namespace hip {
+
+/// Parse the payload of a rank-0 or rank-1 dense integer tensor into signed
+/// i64 values. `expectedRank` may restrict callers to scalar or vector form.
+bool parseDenseIntElements(DenseElementsAttr dense,
+                           SmallVectorImpl<int64_t> &out,
+                           std::optional<int64_t> expectedRank = std::nullopt);
+
+/// Match an inline `arith.constant` rank-0/rank-1 integer tensor and parse it
+/// with `parseDenseIntElements`. Generic HIP dialect code intentionally does
+/// not inspect ONNX ops or conversion-side externalized globals.
+bool matchConstantIntTensor(Value value, SmallVectorImpl<int64_t> &out,
+                            std::optional<int64_t> expectedRank = std::nullopt);
+
+// Every `reify*` helper validates its preconditions before touching the
+// builder. A failed rewrite or reification therefore leaves no stray IR.
 
 /// Compute the shape of `A @ B` for matmul with NumPy-style batch broadcast
 /// over the leading dims. By default last two dims of `aShape` are `[M, K]`
@@ -60,6 +77,25 @@ LogicalResult verifyHipOpShape(
     Operation *op,
     function_ref<SmallVector<SmallVector<int64_t>>()> computeExpected);
 
+/// Verify one DPS destination against a pure `infer*` shape rule.
+LogicalResult
+verifyHipOpShape(Operation *op,
+                 function_ref<FailureOr<SmallVector<int64_t>>()> inferShape,
+                 unsigned initIndex = 0);
+
+/// Verify the common tensor/memref and result/init invariants of a HIP DPS
+/// compute operation.
+LogicalResult verifyDpsComputeOp(Operation *op, ArrayRef<Value> dataOperands,
+                                 unsigned numInits);
+
+/// Pure NumPy right-aligned broadcast over static shapes.
+FailureOr<SmallVector<int64_t>>
+inferBroadcastShape(ArrayRef<ArrayRef<int64_t>> shapes,
+                    function_ref<InFlightDiagnostic()> emitError);
+
+/// Generated-verifier target for `Hip_DpsOp_Broadcast`.
+LogicalResult verifyBroadcastDpsOp(Operation *op, ValueRange operands);
+
 /// Build an `OpFoldResult` for one dimension of a reify-callable op's
 /// result:
 ///   - if `staticDim` is not `kDynamic`, returns `b.getIndexAttr(staticDim)`
@@ -80,36 +116,25 @@ OpFoldResult reifyDimOrConstant(OpBuilder &b, Location loc, int64_t staticDim,
 /// dim becomes `tensor.dim %source, %i`. Used by ops whose result has
 /// the same shape as one designated input (e.g. rope, rms_norm, qmoe).
 ///
-/// `source` must be a `RankedTensorType`-typed Value -- this helper is
-/// called from `reifyResultShapes` impls, which are invoked only in
-/// tensor mode per the interface contract.
-SmallVector<OpFoldResult> reifyElementwiseSameShape(OpBuilder &b, Location loc,
-                                                    Value source);
+/// The `FailureOr` distinguishes a valid rank-zero shape from failure.
+FailureOr<SmallVector<OpFoldResult>>
+reifyElementwiseSameShape(OpBuilder &b, Location loc, Value source);
 
-/// Compute the NumPy-broadcast result shape over `operands` and lift each
-/// output dim to an `OpFoldResult`. Static result dims become `IndexAttr`
-/// (no IR emitted); dynamic result dims become `tensor.dim` against
-/// whichever operand contributes the runtime extent — right-aligned, and
-/// preferring the canonical side (in-range and != 1) when multiple
-/// operands could contribute. The canonical-side preference matches the
-/// batch-dim contract in `MatmulOp::reifyResultShapes` and ensures that
-/// a future `tensor.dim` of the result folds back to the operand that
-/// actually determines the size at runtime.
-///
-/// Used by elementwise ops that take broadcast-shape operands and write
-/// the broadcast result into their `outs` (add, mul, sub, div, min, mod,
-/// equal, less, and, where, ...). The output dtype is taken from the
-/// op's `outs` operand and is independent of this helper — comparisons
-/// (equal, less) emit i1 outs while the operands are typically f32/f16,
-/// and the helper handles both cases identically (it only looks at
-/// shapes).
-///
-/// All operands must be `RankedTensorType`-typed Values (the interface
-/// contract for `reifyResultShapes` callers). Returns an empty vector
-/// if broadcast fails — verifiers should already have caught this, but
-/// reify bails defensively to avoid materializing nonsense IR.
-SmallVector<OpFoldResult> reifyBroadcastShape(OpBuilder &b, Location loc,
-                                              ValueRange operands);
+/// One-shot generated reifier and verifier targets for named-source
+/// same-shape operations.
+LogicalResult
+reifyElementwiseSameShapeFor(OpBuilder &b, Location loc, Value source,
+                             Operation *op,
+                             ReifiedRankedShapedTypeDims &reified);
+LogicalResult verifySameShapeDpsOp(Operation *op, Value source,
+                                   unsigned initIndex = 0);
+
+/// Compute the NumPy-broadcast result shape over `operands`. Static
+/// broadcastability is validated before any `tensor.dim` or arithmetic op is
+/// emitted.
+FailureOr<SmallVector<OpFoldResult>>
+reifyBroadcastResultShape(OpBuilder &b, Location loc, ValueRange operands,
+                          function_ref<InFlightDiagnostic()> emitError);
 
 /// Reify the result shape of a transpose op as `output[i] = input[perm[i]]`.
 /// `perm` must be a permutation of `[0, rank-1)` and have the same length
