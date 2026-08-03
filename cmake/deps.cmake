@@ -283,55 +283,34 @@ if(BUILD_EP)
     set(multiValueArgs)
     cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}"
                           ${ARGN})
-    if(EXISTS "${ARG_DIR}/.git" AND IS_DIRECTORY "${ARG_DIR}/.git")
-      execute_process(
-        COMMAND "git" rev-parse HEAD
-        WORKING_DIRECTORY ${ARG_DIR}
-        OUTPUT_VARIABLE TMP_GIT_COMMIT
-        ERROR_VARIABLE error
-        RESULT_VARIABLE resultVar
-        OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
-      execute_process(
-        COMMAND "git" describe --tags --abbrev=1 HEAD
-        WORKING_DIRECTORY ${ARG_DIR}
-        OUTPUT_VARIABLE TMP_VERSION
-        ERROR_VARIABLE error
-        RESULT_VARIABLE resultVar
-        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    # Query git directly instead of testing for a .git directory: a linked
+    # worktree has .git as a file, and that test would reject it.
+    execute_process(
+      COMMAND "git" rev-parse HEAD
+      WORKING_DIRECTORY "${ARG_DIR}"
+      OUTPUT_VARIABLE TMP_GIT_COMMIT
+      ERROR_QUIET
+      OUTPUT_STRIP_TRAILING_WHITESPACE)
+    execute_process(
+      COMMAND "git" describe --tags --abbrev=1 HEAD
+      WORKING_DIRECTORY "${ARG_DIR}"
+      OUTPUT_VARIABLE TMP_VERSION
+      ERROR_QUIET
+      OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT TMP_GIT_COMMIT)
+      set(TMP_GIT_COMMIT "N/A")
+    endif()
+    if(NOT TMP_VERSION)
+      set(TMP_VERSION "N/A")
     endif()
     set(COMP_GIT_COMMIT ${TMP_GIT_COMMIT} PARENT_SCOPE)
     set(COMP_VERSION ${TMP_VERSION} PARENT_SCOPE)
     message(STATUS "FindPackage Version info: ${ARG_COMPONENT}=${TMP_GIT_COMMIT} ${TMP_VERSION}")
   endfunction()
 
-  # Collect version info for onnx-hipdnn-ep
-  set(VERSION_LIST
-      onnx-hipdnn-ep=onnx-hipdnn-ep)
-  set(VERSION_INFO "")
-  foreach(COMP_PAIR IN LISTS VERSION_LIST)
-    string(FIND "${COMP_PAIR}" "=" pos)
-    string(SUBSTRING "${COMP_PAIR}" 0 ${pos} COMP)
-    math(EXPR COMP_BEG "${pos} + 1")
-    string(SUBSTRING "${COMP_PAIR}" ${COMP_BEG} -1 DIR)
-    set(BUILD_DIR "${CMAKE_SOURCE_DIR}/../${DIR}/")
-
-    string(TOLOWER COMP ${COMP})
-    set(FETCH_SRC_DIR "${${COMP}_SOURCE_DIR}")
-    if(EXISTS "${FETCH_SRC_DIR}" AND IS_DIRECTORY "${FETCH_SRC_DIR}")
-      morphizen_add_version_info(COMPONENT ${COMP} DIR ${FETCH_SRC_DIR})
-    elseif(EXISTS ${BUILD_DIR} AND IS_DIRECTORY ${BUILD_DIR})
-      morphizen_add_version_info(COMPONENT ${COMP} DIR ${BUILD_DIR})
-    endif()
-    if (NOT DEFINED COMP_GIT_COMMIT OR NOT DEFINED COMP_VERSION)
-      set(COMP_GIT_COMMIT "N/A")
-      set(COMP_VERSION "N/A")
-    endif()
-    string(APPEND VERSION_INFO "${COMP};${COMP_GIT_COMMIT};${COMP_VERSION}\n")
-    unset(COMP_GIT_COMMIT)
-    unset(COMP_VERSION)
-  endforeach()
-
-  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/version.txt" "${VERSION_INFO}")
+  morphizen_add_version_info(COMPONENT hip-ep DIR "${CMAKE_SOURCE_DIR}")
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/version.txt"
+       "hip-ep;${COMP_GIT_COMMIT};${COMP_VERSION}\n")
   set(MORPHIZEN_VERSION_INFO_FILE "${CMAKE_CURRENT_BINARY_DIR}/version.txt")
 
   ## MorphiZen is vendored in-tree as a git subtree under morphizen.
