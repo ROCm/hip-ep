@@ -41,6 +41,23 @@ def PopulateShapeRegionPass
   ];
 }
 
+def PopulateShapeRegion2Pass
+    : Pass<"hipsr-populate-shape-region2", "mlir::func::FuncOp"> {
+  let summary = "Fill placeholder-owned shape regions";
+  let description = [{
+    Populates each empty `hipsr.placeholder` shape region using the
+    operation-specific recipe selected for its DPS consumer. The placeholder
+    category determines the block argument layout.
+
+    Already-populated placeholders are left unchanged. The pass fails if an
+    empty placeholder has an unsupported consumer or an incompatible layout.
+  }];
+  let dependentDialects = [
+    "::mlir::hipsr::HipsrDialect",
+    "::mlir::shape::ShapeDialect"
+  ];
+}
+
 def PartitionPoolDomainsPass
     : Pass<"hipsr-partition-pool-domains", "mlir::func::FuncOp"> {
   let summary = "Split a function into hipsr pool domains";

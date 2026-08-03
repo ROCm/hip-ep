@@ -29,6 +29,8 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
 
     The optional `shape_region` defines the placeholder result shapes. It has
     one block when present and ends with `hipsr.shape_yield2`.
+    A `normal` region receives one `!shape.shape` argument per input and omits
+    `ctx`. A `barrier` region receives `ctx` followed by its tensor inputs.
 
     One placeholder can have several results for one multi-output DPS op. Each
     result initializes exactly one DPS result and may also feed other
@@ -76,18 +78,26 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
     /// Returns the hipsr DPS operation initialized by this placeholder, or
     /// null if no such use exists.
     ::mlir::Operation *getDpsConsumer();
+
+    /// Returns this placeholder's shape-region category.
+    ::mlir::hipsr::PlaceholderType getPlaceholderType() {
+      return getType().getValue();
+    }
+
+    /// Returns this placeholder's shape-region block argument types.
+    ::llvm::SmallVector<::mlir::Type> getShapeRegionArgumentTypes();
   }];
 
   let builders = [
     OpBuilder<(ins "::mlir::TypeRange":$resultTypes,
                    "::mlir::Value":$ctx,
                    "::mlir::ValueRange":$inputs,
-                   "::mlir::hipsr::PlaceholderType":$type), [{
+                   "::mlir::hipsr::PlaceholderType":$placeholderType), [{
       $_state.addOperands(ctx);
       $_state.addOperands(inputs);
       $_state.addAttribute(
           "type", ::mlir::hipsr::PlaceholderTypeAttr::get(
-                      $_builder.getContext(), type));
+                      $_builder.getContext(), placeholderType));
       $_state.addTypes(resultTypes);
       $_state.addRegion();
     }]>

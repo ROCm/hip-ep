@@ -50,6 +50,22 @@ void CastOp::populateShapeRegion(OpBuilder &builder, Block &shapeBlock) {
                                TypeRange{elemTy});
 }
 
+namespace mlir {
+namespace hipsr {
+
+LogicalResult populateCastShapeRegion(OpBuilder &builder, Block &shapeBlock,
+                                      CastOp op) {
+  OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPointToStart(&shapeBlock);
+
+  Value inputShape = CastShapeArgs{shapeBlock}.getInput();
+  ShapeYield2Op::create(builder, op.getLoc(), ValueRange{inputShape});
+  return success();
+}
+
+} // namespace hipsr
+} // namespace mlir
+
 namespace {
 
 constexpr const char *kWrapCast = "wrap_cast";
