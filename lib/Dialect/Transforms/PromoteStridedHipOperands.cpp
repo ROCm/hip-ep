@@ -147,8 +147,15 @@ void PromoteStridedHipOperandsPass::runOnOperation() {
   // ops) does not invalidate the walk.
   SmallVector<DestinationStyleOpInterface> consumers;
   funcOp.walk([&](DestinationStyleOpInterface dpsOp) {
+    // Match on op-name prefix rather than dialect object: NPI plugin ops
+    // (hip.npi_quantize, hip.npi_dequantize, etc.) live in NpiDialect but
+    // carry "hip.*" names and the same contiguous-pointer ABI. The old
+    // dialect-object check excluded them, causing strided subview inputs
+    // (e.g. Q/K/V slices from onnx.Split) to be passed uncopied to NPI
+    // kernels that read them as flat arrays, producing wrong values.
     Operation *op = dpsOp.getOperation();
-    if (op->getDialect() != op->getContext()->getLoadedDialect<HipDialect>())
+    llvm::StringRef fullOpName = op->getName().getStringRef();
+    if (!fullOpName.starts_with("hip."))
       return;
     consumers.push_back(dpsOp);
   });
