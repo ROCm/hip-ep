@@ -29,8 +29,7 @@ def ConvertOnnxToHipsrPass : Pass<"convert-onnx-to-hipsr", "mlir::ModuleOp"> {
     Each operation pattern creates its data operation and tied placeholder.
     After conversion, downstream placeholder inputs are rewired from data
     results to the corresponding upstream placeholder results, forming a
-    parallel shape-dependency graph. Placeholder shape regions remain empty for
-    the later population pass.
+    parallel shape-dependency graph. Placeholder shape regions remain empty.
   }];
   let dependentDialects = [
     "::mlir::hipsr::HipsrDialect",

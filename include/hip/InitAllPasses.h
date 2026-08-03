@@ -149,8 +149,7 @@ inline void registerAllPasses() {
     mlir::hip::registerHipPasses();
     mlir::hip::registerHipPipelines();
 
-    // hipsr dialect transform passes (TableGen GEN_PASS_REGISTRATION):
-    // hipsr-populate-shape-region, hipsr-externalize-constants, ...
+    // hipsr dialect transform passes (TableGen GEN_PASS_REGISTRATION).
     mlir::hipsr::registerHipsrPasses();
 
     // Conversion passes (convert-onnx-to-hip, outline-onnx-to-hipdnn,

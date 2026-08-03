@@ -5,9 +5,6 @@
 
 add_library(HipsrDialectIR STATIC
   HipsrDialect.cpp
-  HipsrShapeRegionInterface.cpp
-  HipsrStartBarrierInterface.cpp
-  HipsrEndBarrierInterface.cpp
   HipsrShapeYieldOp.cpp
   HipsrOps.cpp
   HipsrPoolDomainYieldOp.cpp
@@ -42,7 +39,6 @@ target_link_libraries(HipsrDialectIR PUBLIC
   MLIRSideEffectInterfaces
   MLIRArithDialect
   MLIRMemRefDialect
-  MLIRShapeDialect
   MLIRLLVMDialect
   MLIRLLVMCommonConversion
   MLIRConvertToLLVMInterface

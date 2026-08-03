@@ -6,8 +6,6 @@
 add_library(HipsrDialectTransforms STATIC
   ExternalizeConstants.cpp
   HipsrPoolAllocPass.cpp
-  PartitionPoolDomains.cpp
-  PopulateShapeRegionPass.cpp
 )
 
 add_dependencies(HipsrDialectTransforms
@@ -19,12 +17,8 @@ target_link_libraries(HipsrDialectTransforms PUBLIC
   HipsrDialectIR
   HipConstantsIO  # writeConstantsBinToFileSystem / ConstantEntry
   MLIRPass
-  MLIRTransformUtils
-  MLIRFuncDialect
   MLIRArithDialect
   MLIRMemRefDialect
-  MLIRShapeDialect
-  MLIRTensorDialect
   MLIRIR
   MLIRSupport
 )

@@ -37,12 +37,6 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
     Each placeholder is tied to one DPS op. It is not `Pure`, so CSE cannot
     merge placeholders used by different ops.
 
-    The pool-domain pass requires placeholders and the DPS ops that use them to
-    be directly in the function body. Every tensor init of those DPS ops must
-    come from a placeholder. The pass checks these rules before changing the
-    IR. Placeholders do not set domain boundaries. The pass moves each one
-    before the op that uses it.
-
     This op is temporary. It has no bufferization interface and must be replaced
     before bufferization.
 

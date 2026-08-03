@@ -7,7 +7,6 @@
 #define HIPSR_OPS_H
 
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
-#include "hip/Dialect/Hipsr/IR/HipsrShapeRegionInterface.h"
 
 #include "mlir/Bytecode/BytecodeOpInterface.h"
 #include "mlir/IR/Builders.h"
