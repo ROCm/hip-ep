@@ -204,24 +204,6 @@ def write_version_rc():
 def main(release_file):
     output_file = "morphizen_version_info.hpp.inc"
     with open(output_file, "w") as f_out:
-        project_commit_id = os.environ.get("PROJECT_GIT_COMMIT_ID", "N/A")
-        project_version_id = os.environ.get("PROJECT_VERSION_ID", "v1.0")
-        if project_commit_id != "N/A":
-            project_out = f"""
-                {{"vai-rt", "{project_commit_id}", "{project_version_id}"}},
-            """
-            f_out.write(project_out)
-        ORT_CORE_PROVIDERS_MORPHIZEN_INCLUDE_DIR = os.environ.get(
-            "ORT_CORE_PROVIDERS_MORPHIZEN_INCLUDE_DIR", "N/A"
-        )
-        if ORT_CORE_PROVIDERS_MORPHIZEN_INCLUDE_DIR != "N/A":
-            ort_branch, ort_git_hash = get_dir_version_info(
-                ORT_CORE_PROVIDERS_MORPHIZEN_INCLUDE_DIR
-            )
-            project_out = f"""
-                {{"onnxruntime", "{ort_git_hash}", "{ort_branch}"}},
-            """
-            f_out.write(project_out)
         with open(release_file, "r") as f_in:
             for line in f_in.readlines():
                 line = line.strip()
@@ -234,11 +216,6 @@ def main(release_file):
                 {{"{project_name}", "{git_commit_id}", "{project_version_id}"}},
                 """
                 f_out.write(output)
-            morphizen_branch, morphizen_git_hash = get_morphizen_version_info()
-            morphizen_output = f"""
-                {{"morphizen", "{morphizen_git_hash}", "{morphizen_branch}"}},
-            """
-            f_out.write(morphizen_output)
     write_version_rc()
 
 

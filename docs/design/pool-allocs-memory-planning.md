@@ -60,7 +60,7 @@ The default domain ID is zero and is omitted from textual IR. Additional domains
 
 ### Correctness and ABI preparation
 
-`hip-promote-strided-operands` materializes contiguous temporaries for HIP runtime calls whose ABI carries a bare pointer but no offset/stride metadata. It must run before pooling so those temporaries become pool views.
+`hip-promote-strided-operands` materializes identity-layout temporaries for non-identity-layout DPS-input memrefs. Selecting by interface covers HIP and plugin runtime consumers without coupling the pass to a dialect or operation-name prefix. The pass must run before pooling so its temporaries become pool views.
 
 `hip-use-output-allocator` must run before pooling so returned buffers are rewritten to runtime-owned `hip.alloc_output` operations rather than absorbed into the transient pool. The production pipeline intentionally omits ownership-based buffer deallocation because every transient is pooled and outputs are runtime-owned. See [output-allocator-design.md](output-allocator-design.md).
 

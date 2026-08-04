@@ -169,15 +169,16 @@ public:
     return RuntimeFunc(*funcOp, rewriter, loc);
   }
 
-  template <typename... Args> LogicalResult call(Args &&...args) {
+  template <typename... Args> FailureOr<Value> call(Args &&...args) {
     static_assert(sizeof...(Params) == sizeof...(Args),
                   "argument count must match parameter count");
 
     llvm::SmallVector<Value, sizeof...(Params)> convertedArgs{
         detail::ArgConverter<Params, std::decay_t<Args>>::convert(
             rewriter, loc, std::forward<Args>(args))...};
-    LLVM::CallOp::create(rewriter, loc, funcOp, convertedArgs);
-    return success();
+    Value result =
+        LLVM::CallOp::create(rewriter, loc, funcOp, convertedArgs).getResult();
+    return result;
   }
 
 private:
@@ -198,6 +199,8 @@ void populateHipsrGetPoolLoweringPatterns(const LLVMTypeConverter &converter,
                                           RewritePatternSet &patterns);
 void populateHipsrCastLoweringPatterns(const LLVMTypeConverter &converter,
                                        RewritePatternSet &patterns);
+void populateHipsrMatMulLoweringPatterns(const LLVMTypeConverter &converter,
+                                         RewritePatternSet &patterns);
 
 } // namespace hipsr
 } // namespace mlir

@@ -115,7 +115,7 @@ Options use MLIR's pipeline-option syntax:
 | `onnx-if-outline` | module | Outline `onnx.If` branches before ONNX-to-HIP conversion. |
 | `hip-infer-loop-body-shapes` | module | Rank-establish unranked tensors inside outlined loop bodies. |
 | `outline-onnx-to-hipdnn` | module | Outline subgraphs targeted at hipDNN graph compilation. |
-| `convert-onnx-to-hip` | module | Pattern-match ONNX ops by name → HIP dialect; externalize large constants. |
+| `convert-onnx-to-hip` | module | Pattern-match ONNX ops by name → HIP dialect; externalize large constants; legalize GatherBlockQuantized (INT4 packing, unsigned, quantize_axis). |
 | `hip-infer-shapes` | module | Refine `?` dims on HIP DPS result types via `ReifyRankedShapedTypeOpInterface`. |
 | `hip-split-duplicate-dps-inits` | func.func | De-alias DPS init operands that CSE merged onto one `tensor.empty`, so an op that reads back its own outputs (e.g. `hip.gqa` present K/V) does not share a buffer (pre-bufferize). |
 | `hip-resolve-tensor-dims` | func.func | Fold `tensor.dim` of reshape chains into root-dim arithmetic (pre-bufferize). |
@@ -123,7 +123,7 @@ Options use MLIR's pipeline-option syntax:
 | `hip-use-output-allocator` | func.func | Rewrite returned `memref.alloc` → `hip.alloc_output` (graph outputs become EP/runtime-owned, not pooled or deallocated). |
 | `hip-fix-loop-accumulator-offset` | func.func | Rewrite frozen Concat-accumulator offsets in loop bodies to iter-driven offsets. |
 | `hip-optimize-memrefs` | func.func | HIP-specific buffer reuse / subview folding. |
-| `hip-promote-strided-operands` | func.func | Materialize contiguous temporaries for strided memref operands of `hip.*` ops. |
+| `hip-promote-strided-operands` | func.func | Materialize identity-layout temporaries for non-identity-layout DPS-input memrefs. |
 | `hip-materialize-host-scalars` | func.func | Redirect tiny host-fed scalar allocs to runtime-owned host-mapped scratch (away from the GPU pool). |
 | `hip-resolve-memref-dims` | func.func | Fold post-bufferization `memref.dim` through view/reshape chains before pool planning. |
 | `hip-hoist-alloc-size-arith` | func.func | Hoist speculatable size arithmetic above the earliest dynamic alloc (PoolAllocs precondition). |

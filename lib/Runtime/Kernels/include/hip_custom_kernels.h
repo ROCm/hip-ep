@@ -751,6 +751,31 @@ HIP_KERNEL_API int hip_gqa_flash_prefill_v2(
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale);
 
+/* Same as hip_gqa_flash_prefill_v2, plus attention sinks / smooth softmax and
+ * a sliding window.
+ * Kept as a separate symbol rather than widening v2, because v2 is redeclared
+ * locally by the standalone GQA harnesses and the dispatch_bench shim header;
+ * widening it in place would break those and risk a silent host/kernel ABI skew.
+ *
+ *   local_window_size : <= 0 for full attention. > 0 masks key k for query q
+ *                       when k < past_len + q - local_window_size + 1, the same
+ *                       convention causal_mask_kernel_impl uses.
+ *   head_sink         : [num_heads] __half of per-head sink logits, or null.
+ *   smooth_softmax    : non-zero adds a sink logit of 0, matching the
+ *                       decomposed path when head_sink is null. head_sink takes
+ *                       precedence when both are supplied.
+ *
+ * Sinks and windows are implemented by the v5 kernel, i.e. at d == 64 only.
+ * Returns 0 on success and -1 when the request cannot be served exactly (a sink
+ * or a window with d != 64), so the caller falls back to the decomposed path
+ * instead of silently dropping either. A request with neither is forwarded to
+ * v2 and keeps v2's head-dim coverage. */
+HIP_KERNEL_API int hip_gqa_flash_prefill_v3(
+    void* stream, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
+    int past_len, float scale, int local_window_size, const void* head_sink,
+    int num_heads, int smooth_softmax);
+
 /* NB: prefill is compute-bound, so there is deliberately NO separate int8
  * prefill kernel. The runtime (real/gqa.cpp) dequantizes the int8 KV cache to an
  * fp16 scratch ONCE (hip_gqa_dequant_kv_i8_to_fp16) and reuses the tuned fp16
@@ -984,10 +1009,13 @@ HIP_KERNEL_API int hip_one_hot(
  *   num_output_elements - total output elements
  *   hip_dtype           - data type (hip_dtype_t value cast to int)
  *
- * Currently supported types: HIP_DTYPE_INT64, HIP_DTYPE_INT32, HIP_DTYPE_FLOAT16
+ * Currently supported types: HIP_DTYPE_INT64, HIP_DTYPE_INT32, HIP_DTYPE_FLOAT16,
+ * HIP_DTYPE_FLOAT32
  *   - INT32 accumulates in int64 internally to avoid overflow on large slices.
  *   - FLOAT16 accumulates in float internally to preserve precision; the
  *     final result is narrowed back to half.
+ *   - FLOAT32 accumulates and stores in float; required by models that upcast
+ *     to fp32 before the sum for numerical stability.
  * Returns: 0 on success, non-zero on failure
  */
 /* `inner_size` = product of input dims AFTER the reduced axis (1 for a
@@ -2035,6 +2063,11 @@ HIP_KERNEL_API int hip_linear_attention_decode(
 // fall back to the per-token decode loop); 0 on success; <0 on launch error.
 // Only the gated_delta rule with scalar log-decay (decay_per_key_dim==0) is
 // supported; other rules/layouts/oversized smem are declined.
+// scratch / scratch_bytes: caller-owned device scratch for the chunk-parallel
+// path (RuntimeState::la_scratch, grown on demand, freed on session cleanup).
+// Size it with hip_linear_attention_prefill_scratch_bytes() below. When null or
+// under-sized the launcher declines (returns 1) and the caller falls back to
+// the per-token loop.
 HIP_KERNEL_API int hip_linear_attention_prefill_chunked(
     void* stream,
     const void* query,
@@ -2055,7 +2088,15 @@ HIP_KERNEL_API int hip_linear_attention_prefill_chunked(
     int64_t update_rule,
     int64_t decay_per_key_dim,
     int64_t beta_per_head,
-    int64_t type);
+    int64_t type,
+    void* scratch,
+    size_t scratch_bytes);
+
+// Device-scratch bytes the chunk-parallel prefill needs for a given shape.
+// Returns 0 for shapes/params the parallel path will decline. The runtime
+// wrapper uses this to grow RuntimeState::la_scratch before the launch.
+HIP_KERNEL_API size_t hip_linear_attention_prefill_scratch_bytes(
+    int B, int seq_len, int Hkv, int dk, int dv);
 
 // Max memref rank honoured by the strided memref.copy fast path
 // (hip_strided_copy) and the host per-row fallback in memrefCopy. Defined

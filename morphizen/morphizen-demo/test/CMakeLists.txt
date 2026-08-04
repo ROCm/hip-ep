@@ -53,7 +53,7 @@ string(APPEND ENVS "\nCACHE_CONTEXT_EMBEDED_MODE=0")
 string(APPEND ENVS "\nXLNX_ENABLE_CACHE_CONTEXT=1")
 string(APPEND ENVS "\nXLNX_ENABLE_CACHE=0")
 string(APPEND ENVS "\nDEBUG_LOG_LEVEL=info")
-string(APPEND ENVS "\nXLNX_ONNX_EP_VERBOSE=2")
+string(APPEND ENVS "\nHIP_EP_VERBOSE=2")
 string(APPEND ENVS "\nMORPHIZEN_DEBUG_DEINITIALIZE=1")
 string(APPEND ENVS "\nDEBUG_MORPHIZEN_PASS=1")
 set_target_properties(test_onnx_runner
@@ -67,7 +67,7 @@ add_dependencies(test_onnx_runner ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET})
 # add_test(NAME test_generate_ep_context_model
 #  COMMAND ${CMAKE_COMMAND} -E env
 #      "DEBUG_LOG_LEVEL=info"
-#      "XLNX_ONNX_EP_VERBOSE=2"
+#      "HIP_EP_VERBOSE=2"
 #      "XLNX_ENABLE_CACHE_CONTEXT=1"
 #      "CACHE_CONTEXT_EMBEDED_MODE=0"
 #      "XLNX_ENABLE_EP_SHARED_CONTEXT=1"
@@ -89,7 +89,7 @@ add_dependencies(test_onnx_runner ${morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET})
 # add_test(NAME test_deploy_ep_context_model
 # COMMAND ${CMAKE_COMMAND} -E env
 # "DEBUG_LOG_LEVEL=info"
-# "XLNX_ONNX_EP_VERBOSE=2"
+# "HIP_EP_VERBOSE=2"
 # "VITISAI_EP_JSON_CONFIG=${CMAKE_SOURCE_DIR}/etc/morphizen_config.json"
 # $<TARGET_FILE:test_onnx_runner>
 # ${morphizen_BINARY_DIR}/unit-test/pt_resnet50_ctx.onnx

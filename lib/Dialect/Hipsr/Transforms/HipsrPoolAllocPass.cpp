@@ -13,10 +13,13 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 
 namespace mlir {
@@ -31,6 +34,26 @@ struct Lifetime {
   size_t start;
   size_t end;
 };
+
+struct AllocationSize {
+  int64_t staticBytes;
+  llvm::SmallVector<Value> dynamicDims;
+};
+
+int64_t staticByteFactor(MemRefType memTy) {
+  int64_t factor = memTy.getElementTypeBitWidth() / 8;
+  for (int64_t dim : memTy.getShape()) {
+    if (!ShapedType::isDynamic(dim)) {
+      factor *= dim;
+    }
+  }
+  return factor;
+}
+
+AllocationSize computeAllocationSize(memref::AllocOp allocOp) {
+  return {staticByteFactor(allocOp.getType()),
+          llvm::to_vector(allocOp.getDynamicSizes())};
+}
 
 llvm::DenseMap<Value, Lifetime> computeLiveness(Block &body) {
   llvm::DenseMap<Operation *, size_t> opIndices;
@@ -68,8 +91,81 @@ llvm::DenseMap<Value, Lifetime> computeLiveness(Block &body) {
   return lifetimes;
 }
 
+llvm::SmallVector<llvm::SmallVector<Value>>
+greedyGrouping(Block &body, const llvm::DenseMap<Value, Lifetime> &lifetimes) {
+  llvm::SmallVector<Value> allocs;
+  for (Operation &op : body) {
+    auto allocOp = dyn_cast<memref::AllocOp>(&op);
+    if (!allocOp) {
+      continue;
+    }
+    if (lifetimes.contains(allocOp.getResult())) {
+      allocs.push_back(allocOp.getResult());
+    }
+  }
+  llvm::stable_sort(allocs, [&](Value a, Value b) {
+    return lifetimes.lookup(a).start < lifetimes.lookup(b).start;
+  });
+
+  auto overlaps = [](const Lifetime &a, const Lifetime &b) {
+    return !(a.end < b.start || b.end < a.start);
+  };
+
+  llvm::SmallVector<llvm::SmallVector<Value>> groups;
+  for (Value alloc : allocs) {
+    Lifetime lifetime = lifetimes.lookup(alloc);
+    bool placed = false;
+    for (llvm::SmallVector<Value> &group : groups) {
+      if (llvm::any_of(group, [&](Value member) {
+            return overlaps(lifetimes.lookup(member), lifetime);
+          })) {
+        continue;
+      }
+      group.push_back(alloc);
+      placed = true;
+      break;
+    }
+    if (!placed) {
+      groups.push_back({alloc});
+    }
+  }
+  return groups;
+}
+
+Operation *
+findInsertionPoint(Block &body,
+                   const llvm::DenseMap<Value, Lifetime> &lifetimes) {
+  Operation *point = nullptr;
+  for (Operation &op : body) {
+    auto allocOp = dyn_cast<memref::AllocOp>(&op);
+    if (allocOp && lifetimes.contains(allocOp.getResult())) {
+      point = &op;
+    }
+  }
+  return point;
+}
+
 void emitPoolingReport(Block &body,
-                       const llvm::DenseMap<Value, Lifetime> &lifetimes) {
+                       const llvm::DenseMap<Value, Lifetime> &lifetimes,
+                       llvm::ArrayRef<llvm::SmallVector<Value>> groups,
+                       Operation *insertionPoint) {
+  size_t insertionIdx = 0;
+  for (Operation &op : body) {
+    if (&op == insertionPoint) {
+      break;
+    }
+    ++insertionIdx;
+  }
+  body.getParentOp()->emitRemark()
+      << "hipsr-pool-alloc: insertion point after op " << insertionIdx;
+
+  llvm::DenseMap<Value, size_t> groupIndices;
+  for (auto [groupIdx, group] : llvm::enumerate(groups)) {
+    for (Value member : group) {
+      groupIndices[member] = groupIdx;
+    }
+  }
+
   for (Operation &op : body) {
     auto allocOp = dyn_cast<memref::AllocOp>(&op);
     if (!allocOp) {
@@ -79,8 +175,15 @@ void emitPoolingReport(Block &body,
     if (it == lifetimes.end()) {
       continue;
     }
-    allocOp.emitRemark() << "hipsr-pool-alloc: lifetime [" << it->second.start
-                         << "," << it->second.end << "]";
+    AllocationSize size = computeAllocationSize(allocOp);
+    InFlightDiagnostic remark = allocOp.emitRemark();
+    remark << "hipsr-pool-alloc: lifetime [" << it->second.start << ","
+           << it->second.end << "] group "
+           << groupIndices.lookup(allocOp.getResult()) << " size "
+           << size.staticBytes;
+    if (!size.dynamicDims.empty()) {
+      remark << " x " << size.dynamicDims.size() << " dyn";
+    }
   }
 }
 
@@ -92,8 +195,17 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
     getOperation().walk([&](PoolDomainOp domain) {
       Block &body = domain.getBody().front();
       llvm::DenseMap<Value, Lifetime> lifetimes = computeLiveness(body);
+      Operation *insertionPoint = findInsertionPoint(body, lifetimes);
+      if (!insertionPoint) {
+        domain.emitError(
+            "hipsr-pool-alloc: pool_domain has no poolable allocation");
+        signalPassFailure();
+        return;
+      }
+      llvm::SmallVector<llvm::SmallVector<Value>> groups =
+          greedyGrouping(body, lifetimes);
       if (emitPoolReport) {
-        emitPoolingReport(body, lifetimes);
+        emitPoolingReport(body, lifetimes, groups, insertionPoint);
       }
     });
   }

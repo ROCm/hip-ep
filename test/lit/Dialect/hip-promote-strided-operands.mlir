@@ -4,17 +4,16 @@
 //===----------------------------------------------------------------------===//
 // FileCheck tests for --hip-promote-strided-operands.
 //
-// The pass inserts memref.alloc + memref.copy + memref.dealloc for any
-// DPS-input memref operand of a hip.* op whose layout is non-identity
-// (non-zero offset or non-contiguous strides).  DPS-init (output) operands
-// and already-contiguous inputs are left untouched.
+// The pass inserts memref.alloc + memref.copy + memref.dealloc for each
+// non-identity-layout DPS-input memref, regardless of the operation's dialect.
+// DPS-init operands and identity-layout inputs are left untouched.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt --hip-promote-strided-operands %s | FileCheck %s
 
 // ----------------------------------------------------------------------------
-// Positive: strided subview feeding hip.sigmoid is promoted to a contiguous
-// alloc, copied in, consumed, then deallocated after the consumer.
+// Positive: a non-identity-layout subview feeding hip.sigmoid is copied into
+// an identity-layout allocation, consumed, then deallocated.
 //
 // Models the bug pattern from onnx.Split -> onnx.Sigmoid: bufferization
 // produces memref.subview with offset/stride layout, which would otherwise
@@ -44,8 +43,7 @@ func.func @sigmoid_promotes_strided_input(
 }
 
 // ----------------------------------------------------------------------------
-// Negative: a hip.sigmoid with an already-contiguous (identity-layout) input
-// is not rewritten.
+// Negative: a hip.sigmoid with an identity-layout input is not rewritten.
 // ----------------------------------------------------------------------------
 // CHECK-LABEL: func.func @sigmoid_contiguous_input_untouched
 // CHECK-SAME:    (%[[CTX:.*]]: !hip.context,
@@ -66,8 +64,8 @@ func.func @sigmoid_contiguous_input_untouched(
 }
 
 // ----------------------------------------------------------------------------
-// Multiple strided inputs: a hip.add with two subview operands gets two
-// independent promotions (separate allocs, copies, and deallocs).
+// Multiple non-identity-layout inputs: a hip.add with two subview operands gets
+// two independent promotions (separate allocs, copies, and deallocs).
 // ----------------------------------------------------------------------------
 // CHECK-LABEL: func.func @add_promotes_both_inputs
 // CHECK:         %[[SVA:.*]] = memref.subview
@@ -98,11 +96,9 @@ func.func @add_promotes_both_inputs(
 }
 
 // ----------------------------------------------------------------------------
-// DPS-init (output) operand is left untouched even when its type carries an
-// explicit strided layout.  Outs are guaranteed contiguous by construction in
-// this pipeline; promoting them would also change observable behavior because
-// the consumer writes through the operand (the strided slice is the intended
-// destination, not a temporary to copy back).
+// DPS-init operands are outside this pass's scope. Even when presented with a
+// non-identity layout, the init is not rewritten: safe output promotion would
+// require copy-back and preservation of any read-before-write semantics.
 // ----------------------------------------------------------------------------
 // CHECK-LABEL: func.func @strided_output_left_alone
 // CHECK:         %[[SV:.*]] = memref.subview
@@ -155,8 +151,9 @@ func.func @func_arg_strided_promoted(
 //
 // Models the pattern from hip-optimize-memrefs buffer-reuse: a single backing
 // allocation can be re-bound at multiple offsets for non-overlapping live
-// ranges.  When the resulting reinterpret_cast carries a non-zero offset, our
-// pass must materialize a contiguous temporary just like the subview case.
+// ranges. When the resulting reinterpret_cast carries a non-zero offset, the
+// pass must materialize an identity-layout temporary just like the subview
+// case.
 // ----------------------------------------------------------------------------
 // CHECK-LABEL: func.func @reinterpret_cast_with_offset_promoted
 // CHECK:         %[[RC:.*]] = memref.reinterpret_cast
@@ -209,11 +206,11 @@ func.func @dynamic_shape_promoted(
 }
 
 // ----------------------------------------------------------------------------
-// Memory-space preservation: the promoted alloc must inherit the memory
-// space of the strided source, not silently fall back to the default space.
+// Memory-space preservation: the promoted allocation must inherit the source
+// memory space rather than silently falling back to the default.
 //
-// makeContiguousType(src) preserves src.getMemorySpace() — this test pins the
-// behavior so a future refactor of that helper can't drop memory spaces.
+// makeIdentityLayoutType preserves sourceType.getMemorySpace(); this test pins
+// that behavior across future refactors.
 // ----------------------------------------------------------------------------
 // CHECK-LABEL: func.func @memory_space_preserved
 // CHECK:         memref.alloc() : memref<1x128x1024xf16, 1>
@@ -260,5 +257,84 @@ func.func @mixed_strided_and_contiguous_inputs(
     ins(%sv, %b : memref<1x128x1024xf16, strided<[262144, 2048, 1], offset: 1024>>,
                   memref<1x128x1024xf16>)
     outs(%out : memref<1x128x1024xf16>)
+  return
+}
+
+// ----------------------------------------------------------------------------
+// MatMul lowering extracts bare pointers, so both DPS-input matrices must have
+// identity layout. This case exercises non-contiguous strides for A and
+// canonical strides with a non-zero offset for B. The identity-layout DPS init
+// remains unchanged.
+// ----------------------------------------------------------------------------
+// CHECK-LABEL: func.func @matmul_promotes_strided_inputs
+// CHECK-SAME:    (%[[CTX:.*]]: !hip.context,
+// CHECK-SAME:     %[[A_PARENT:.*]]: memref<2x8xf16>,
+// CHECK-SAME:     %[[B_PARENT:.*]]: memref<8x3xf16>,
+// CHECK-SAME:     %[[OUT:.*]]: memref<2x3xf16>)
+// CHECK:         %[[A_SV:.*]] = memref.subview %[[A_PARENT]]
+// CHECK:         %[[B_SV:.*]] = memref.subview %[[B_PARENT]]
+// CHECK:         %[[A_TMP:.*]] = memref.alloc() : memref<2x4xf16>
+// CHECK:         memref.copy %[[A_SV]], %[[A_TMP]]
+// CHECK:         %[[B_TMP:.*]] = memref.alloc() : memref<4x3xf16>
+// CHECK:         memref.copy %[[B_SV]], %[[B_TMP]]
+// CHECK:         hip.matmul(%[[CTX]])
+// CHECK-SAME:      ins(%[[A_TMP]], %[[B_TMP]] : memref<2x4xf16>, memref<4x3xf16>)
+// CHECK-SAME:      outs(%[[OUT]] : memref<2x3xf16>)
+// CHECK:         memref.dealloc %[[A_TMP]]
+// CHECK:         memref.dealloc %[[B_TMP]]
+// CHECK:         return
+func.func @matmul_promotes_strided_inputs(
+    %ctx: !hip.context,
+    %a_parent: memref<2x8xf16>,
+    %b_parent: memref<8x3xf16>,
+    %out: memref<2x3xf16>) {
+  %a = memref.subview %a_parent[0, 4][2, 4][1, 1]
+      : memref<2x8xf16>
+        to memref<2x4xf16, strided<[8, 1], offset: 4>>
+  %b = memref.subview %b_parent[4, 0][4, 3][1, 1]
+      : memref<8x3xf16>
+        to memref<4x3xf16, strided<[3, 1], offset: 12>>
+  hip.matmul(%ctx)
+    ins(%a, %b : memref<2x4xf16, strided<[8, 1], offset: 4>>,
+                 memref<4x3xf16, strided<[3, 1], offset: 12>>)
+    outs(%out : memref<2x3xf16>)
+  return
+}
+
+// ----------------------------------------------------------------------------
+// Interface selection: linalg.generic is the lightest non-HIP DPS operation
+// available in this test. The production pipeline lowers linalg before this
+// pass, but the isolated pass deliberately selects by
+// DestinationStyleOpInterface rather than by dialect or operation name.
+// ----------------------------------------------------------------------------
+// CHECK-LABEL: func.func @non_hip_dps_input_promoted
+// CHECK-SAME:    (%[[SRC:.*]]: memref<2x4xf32>,
+// CHECK-SAME:     %[[OUT:.*]]: memref<2x2xf32>)
+// CHECK:         %[[SV:.*]] = memref.subview %[[SRC]]
+// CHECK:         %[[TMP:.*]] = memref.alloc() : memref<2x2xf32>
+// CHECK:         memref.copy %[[SV]], %[[TMP]]
+// CHECK:         linalg.generic
+// CHECK-SAME:      ins(%[[TMP]] : memref<2x2xf32>)
+// CHECK-SAME:      outs(%[[OUT]] : memref<2x2xf32>)
+// CHECK:         memref.dealloc %[[TMP]]
+// CHECK:         return
+func.func @non_hip_dps_input_promoted(
+    %src: memref<2x4xf32>,
+    %out: memref<2x2xf32>) {
+  %sv = memref.subview %src[0, 2][2, 2][1, 1]
+      : memref<2x4xf32>
+        to memref<2x2xf32, strided<[4, 1], offset: 2>>
+  linalg.generic {
+      indexing_maps = [
+        affine_map<(d0, d1) -> (d0, d1)>,
+        affine_map<(d0, d1) -> (d0, d1)>
+      ],
+      iterator_types = ["parallel", "parallel"]
+    }
+    ins(%sv : memref<2x2xf32, strided<[4, 1], offset: 2>>)
+    outs(%out : memref<2x2xf32>) {
+  ^bb0(%in: f32, %unused: f32):
+    linalg.yield %in : f32
+  }
   return
 }

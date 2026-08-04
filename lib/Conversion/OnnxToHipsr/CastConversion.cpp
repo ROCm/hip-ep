@@ -49,7 +49,10 @@ struct CastToHipsr : public ::mlir::RewritePattern {
     }
 
     ::mlir::Value init =
-        rewriter.create<PlaceholderOp>(loc, ::mlir::TypeRange{resultType})
+        rewriter
+            .create<PlaceholderOp>(loc, ::mlir::TypeRange{resultType}, *ctx,
+                                   ::mlir::ValueRange{input},
+                                   PlaceholderType::Normal)
             .getResult(0);
 
     auto castOp = rewriter.create<CastOp>(loc, ::mlir::TypeRange{resultType},

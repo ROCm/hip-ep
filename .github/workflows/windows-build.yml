@@ -10,7 +10,7 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
   merge_group:
   push:
-    branches: [main, "release_*"]
+    branches: [main, "release/**"]
 
 permissions:
   contents: read
@@ -626,7 +626,7 @@ jobs:
         with:
           name: gpu-test-package
           path: staging/
-          retention-days: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release_')) && 14 || 3 }}
+          retention-days: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) && 14 || 3 }}
 
       # -----------------------------------------------------------------------
       # Python wheel package: the three project wheels + run_onnx.py + OGA
@@ -660,7 +660,7 @@ jobs:
         with:
           name: hip-python-package
           path: wheelpkg/
-          retention-days: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release_')) && 14 || 3 }}
+          retention-days: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) && 14 || 3 }}
 
   # ---------------------------------------------------------------------------
   # GPU test job: runs on the self-hosted machine with a real AMD GPU.

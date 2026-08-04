@@ -20,6 +20,7 @@ target_link_libraries(OnnxToHipsr PUBLIC
   HipsrDialectIR
   MLIRPass
   MLIRTransforms
+  MLIRFuncDialect
   MLIRTensorDialect
   MLIRShapeDialect
   MLIRArithDialect

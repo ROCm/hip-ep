@@ -506,22 +506,47 @@ CompressOp::reifyResultShapes(OpBuilder &b,
   if (!inputType || !conditionType || conditionType.getRank() != 1)
     return failure();
 
-  OpFoldResult condLen = tensor::getMixedSize(b, getLoc(), getCondition(), 0);
-
-  if (getFlatten()) {
-    reified.assign({SmallVector<OpFoldResult>{condLen}});
-    return success();
-  }
-
   int64_t rank = inputType.getRank();
   int64_t axis = getAxis();
   if (axis < 0)
     axis += rank;
+  // The flattened result is rank-1, so the selection always shrinks dim 0.
+  int64_t selectDim = getFlatten() ? 0 : axis;
+
+  // The selected extent is the number of TRUE entries in `condition`, which is
+  // data-dependent -- the condition LENGTH is only its upper bound. Reporting
+  // that upper bound here would let --hip-infer-shapes narrow the result to
+  // the padded extent and would size a graph output's hip.alloc_output above
+  // the row count the consumer expects. Lift it from the DPS `outs` init
+  // instead: the ONNX->HIP converter sizes that init to the true count via
+  // hip.readback_dim (dynamic, so infer-shapes leaves it alone), or to a
+  // static extent when ONNX shape inference already knew it.
+  //
+  // Read the init's extent WITHOUT materializing a fresh `tensor.dim` on it:
+  // that would add a second use to the init `tensor.empty` and trip the
+  // single-use guard in `--hip-infer-shapes` (refineOneResult), which gates
+  // the whole result refinement -- so the static non-selection dims would
+  // also stop narrowing.
+  Value initVal = getOutput();
+  OpFoldResult selectedExtent;
+  auto initTy = dyn_cast<RankedTensorType>(initVal.getType());
+  if (initTy && !initTy.isDynamicDim(selectDim))
+    selectedExtent = b.getIndexAttr(initTy.getDimSize(selectDim));
+  else if (auto emptyOp = initVal.getDefiningOp<tensor::EmptyOp>())
+    selectedExtent = emptyOp.getMixedSizes()[selectDim];
+  else
+    // Not an empty, so a `tensor.dim` here cannot trip that guard.
+    selectedExtent = tensor::getMixedSize(b, getLoc(), initVal, selectDim);
+
+  if (getFlatten()) {
+    reified.assign({SmallVector<OpFoldResult>{selectedExtent}});
+    return success();
+  }
 
   SmallVector<OpFoldResult> dims;
   for (int64_t i : llvm::seq<int64_t>(0, rank)) {
     if (i == axis)
-      dims.push_back(condLen);
+      dims.push_back(selectedExtent);
     else
       dims.push_back(tensor::getMixedSize(b, getLoc(), getInput(), i));
   }

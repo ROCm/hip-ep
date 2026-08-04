@@ -68,13 +68,10 @@ static mlir::DenseElementsAttr getCompileTimeConstantTensor(mlir::Value value) {
   return nullptr;
 }
 
-/// Extract a 1-D integer tensor constant into a SmallVector<int64_t>.
-/// Returns failure if the tensor is missing, not 1-D, or not int32/int64.
+/// Populate \p out from a dense 1-D integer tensor attribute.
 static mlir::LogicalResult
-extractIntVector(mlir::Value v, llvm::SmallVectorImpl<int64_t> &out) {
-  if (!v)
-    return mlir::failure();
-  auto dense = getCompileTimeConstantTensor(v);
+denseIntVectorToSmallVector(mlir::DenseElementsAttr dense,
+                            llvm::SmallVectorImpl<int64_t> &out) {
   if (!dense)
     return mlir::failure();
   auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(dense.getType());
@@ -83,9 +80,32 @@ extractIntVector(mlir::Value v, llvm::SmallVectorImpl<int64_t> &out) {
   auto elemTy = tensorType.getElementType();
   if (!elemTy.isInteger(64) && !elemTy.isInteger(32))
     return mlir::failure();
+  out.clear();
   for (mlir::APInt entry : dense.getValues<mlir::APInt>())
     out.push_back(entry.getSExtValue());
   return mlir::success();
+}
+
+/// Extract a 1-D integer tensor constant into a SmallVector<int64_t>.
+/// Returns failure if the tensor is missing, not 1-D, or not int32/int64.
+static mlir::LogicalResult
+extractIntVector(mlir::Value v, llvm::SmallVectorImpl<int64_t> &out) {
+  if (!v)
+    return mlir::failure();
+  return denseIntVectorToSmallVector(getCompileTimeConstantTensor(v), out);
+}
+
+/// Prefer compile-time slice params stamped by SliceShapeFold (captured
+/// before constant externalization); fall back to reading inline operands.
+static mlir::LogicalResult
+extractSliceParamVector(mlir::Operation *op, llvm::StringRef attrName,
+                        mlir::Value operand,
+                        llvm::SmallVectorImpl<int64_t> &out) {
+  if (auto attr = op->getAttrOfType<mlir::DenseI64ArrayAttr>(attrName)) {
+    out.assign(attr.asArrayRef().begin(), attr.asArrayRef().end());
+    return mlir::success();
+  }
+  return extractIntVector(operand, out);
 }
 
 /// Normalise an ONNX Slice operand reference (`v`): if it is an `onnx.NoValue`
@@ -120,8 +140,10 @@ struct SliceDecompose : public mlir::RewritePattern {
     int64_t rank = dataType.getRank();
 
     llvm::SmallVector<int64_t> startsVec, endsVec;
-    if (mlir::failed(extractIntVector(op->getOperand(1), startsVec)) ||
-        mlir::failed(extractIntVector(op->getOperand(2), endsVec)))
+    if (mlir::failed(extractSliceParamVector(op, "hipdnn.slice_starts",
+                                             op->getOperand(1), startsVec)) ||
+        mlir::failed(extractSliceParamVector(op, "hipdnn.slice_ends",
+                                             op->getOperand(2), endsVec)))
       return rewriter.notifyMatchFailure(
           op, "starts/ends are not compile-time constants");
 
@@ -129,9 +151,13 @@ struct SliceDecompose : public mlir::RewritePattern {
     if (op->getNumOperands() >= 4) {
       mlir::Value axes = normaliseOptional(op->getOperand(3));
       if (axes) {
-        if (mlir::failed(extractIntVector(axes, axesVec)))
+        if (mlir::failed(extractSliceParamVector(op, "hipdnn.slice_axes", axes,
+                                                 axesVec)))
           return rewriter.notifyMatchFailure(
               op, "axes is not a compile-time constant");
+      } else if (auto attr = op->getAttrOfType<mlir::DenseI64ArrayAttr>(
+                     "hipdnn.slice_axes")) {
+        axesVec.assign(attr.asArrayRef().begin(), attr.asArrayRef().end());
       }
     }
     if (axesVec.empty())
@@ -142,9 +168,13 @@ struct SliceDecompose : public mlir::RewritePattern {
     if (op->getNumOperands() == 5) {
       mlir::Value steps = normaliseOptional(op->getOperand(4));
       if (steps) {
-        if (mlir::failed(extractIntVector(steps, stepsVec)))
+        if (mlir::failed(extractSliceParamVector(op, "hipdnn.slice_steps",
+                                                 steps, stepsVec)))
           return rewriter.notifyMatchFailure(
               op, "steps is not a compile-time constant");
+      } else if (auto attr = op->getAttrOfType<mlir::DenseI64ArrayAttr>(
+                     "hipdnn.slice_steps")) {
+        stepsVec.assign(attr.asArrayRef().begin(), attr.asArrayRef().end());
       }
     }
     if (stepsVec.empty())

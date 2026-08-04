@@ -7,27 +7,20 @@
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "hip/Dialect/Hipsr/IR/HipsrLLVMLoweringUtils.h"
-#include "hip/Dialect/Hipsr/IR/HipsrShapeRegionInterface.h"
+#include "hip/Dialect/Hipsr/IR/HipsrShapeRegionPopulationUtils.h"
 
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/LLVMIR/FunctionCallUtils.h"
-#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
-#include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/Transforms/DialectConversion.h"
-
-#include "llvm/ADT/Sequence.h"
-
-#include <algorithm>
 
 using namespace mlir;
 using namespace mlir::hipsr;
 
 namespace {
-struct AddShapeArgs : ShapeRegionArgs<AddOp> {
-  using ShapeRegionArgs::ShapeRegionArgs;
+struct AddPlaceholderShapeArgs : PlaceholderShapeRegionArgs {
+  explicit AddPlaceholderShapeArgs(Block &block)
+      : PlaceholderShapeRegionArgs(block) {}
   Value getLhs() const { return in(0); }
   Value getRhs() const { return in(1); }
 };
@@ -35,32 +28,26 @@ struct AddShapeArgs : ShapeRegionArgs<AddOp> {
 
 MutableOperandRange AddOp::getDpsInitsMutable() { return getInitMutable(); }
 
-void AddOp::populateShapeRegion(OpBuilder &builder, Block &shapeBlock) {
+void AddOp::populateShapeRegion(OpBuilder &, Block &) {}
+
+namespace mlir {
+namespace hipsr {
+
+LogicalResult populateAddShapeRegion(OpBuilder &builder, Block &shapeBlock,
+                                     AddOp op) {
   OpBuilder::InsertionGuard guard(builder);
   builder.setInsertionPointToStart(&shapeBlock);
 
-  Location loc = getLoc();
-  AddShapeArgs args{shapeBlock};
-  Value shLhs = builder.create<shape::ShapeOfOp>(loc, args.getLhs());
-  Value shRhs = builder.create<shape::ShapeOfOp>(loc, args.getRhs());
-
-  auto extentTensorTy = RankedTensorType::get(
-      {ShapedType::kDynamic}, IndexType::get(builder.getContext()));
-  Value bcast = builder.create<shape::BroadcastOp>(
-      loc, extentTensorTy, ValueRange{shLhs, shRhs}, /*error=*/nullptr);
-
-  int64_t outRank = cast<ShapedType>(getInit().getType()).getRank();
-  SmallVector<Value> dims;
-  dims.reserve(outRank);
-  for (int64_t i : llvm::seq<int64_t>(0, outRank)) {
-    Value idx = builder.create<arith::ConstantIndexOp>(loc, i);
-    dims.push_back(builder.create<shape::GetExtentOp>(loc, bcast, idx));
-  }
-
-  Type elemTy = cast<ShapedType>(getInit().getType()).getElementType();
-  builder.create<ShapeYieldOp>(loc, ArrayRef<ValueRange>{ValueRange(dims)},
-                               TypeRange{elemTy});
+  AddPlaceholderShapeArgs args{shapeBlock};
+  Value broadcast = builder.create<shape::BroadcastOp>(
+      op.getLoc(), shape::ShapeType::get(builder.getContext()),
+      ValueRange{args.getLhs(), args.getRhs()}, /*error=*/nullptr);
+  ShapeYield2Op::create(builder, op.getLoc(), ValueRange{broadcast});
+  return success();
 }
+
+} // namespace hipsr
+} // namespace mlir
 
 namespace {
 
@@ -74,10 +61,6 @@ struct AddLowering : public ConvertOpToLLVMPattern<AddOp> {
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
-    MLIRContext *ctx = rewriter.getContext();
-    Type hostPtrType = LLVM::LLVMPointerType::get(ctx, 0);
-    Type devicePtrType = LLVM::LLVMPointerType::get(ctx, 1);
-    Type i32Type = rewriter.getI32Type();
     Type i64Type = rewriter.getI64Type();
 
     auto lhsType = dyn_cast<MemRefType>(op.getLhs().getType());
@@ -106,36 +89,22 @@ struct AddLowering : public ConvertOpToLLVMPattern<AddOp> {
       return rewriter.notifyMatchFailure(op, "unsupported element type");
     }
 
-    auto createI64Const = [&](int64_t v) {
-      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
-                                      rewriter.getI64IntegerAttr(v));
-    };
-
-    SmallVector<Type, 19> paramTypes = {hostPtrType, i32Type, devicePtrType,
-                                        devicePtrType, devicePtrType};
-    paramTypes.append(14, i64Type);
-
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kWrapMiopenOpTensor, paramTypes, i32Type);
-    if (failed(funcOp)) {
+    using AddCall = RuntimeFunc<i32, hostPtr, slotIndex, devicePtr, devicePtr,
+                                devicePtr, i64, i64, i64, i64, i64, i64, i64,
+                                i64, i64, i64, i64, i64, i64, i64>;
+    auto addFunc =
+        AddCall::lookupOrCreateFn(rewriter, loc, module, kWrapMiopenOpTensor);
+    if (failed(addFunc)) {
       return failure();
     }
-
-    Value opStateSlot = LLVM::ConstantOp::create(
-        rewriter, loc, i32Type, rewriter.getI32IntegerAttr(-1));
-
-    SmallVector<Value, 19> args = {
-        adaptor.getCtx(), opStateSlot,
-        extractContiguousMemRefPtr(adaptor.getLhs(), rewriter, loc),
-        extractContiguousMemRefPtr(adaptor.getRhs(), rewriter, loc),
-        extractContiguousMemRefPtr(adaptor.getInit(), rewriter, loc)};
-    args.append(lhsDims.begin(), lhsDims.end());
-    args.append(rhsDims.begin(), rhsDims.end());
-    args.append(outDims.begin(), outDims.end());
-    args.push_back(createI64Const(dataType));
-    args.push_back(createI64Const(kTensorOpAdd));
-
-    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    if (failed(addFunc->call(
+            adaptor.getCtx(), SlotIndex{op.getOperation()}, adaptor.getLhs(),
+            adaptor.getRhs(), adaptor.getInit(), lhsDims[0], lhsDims[1],
+            lhsDims[2], lhsDims[3], rhsDims[0], rhsDims[1], rhsDims[2],
+            rhsDims[3], outDims[0], outDims[1], outDims[2], outDims[3],
+            dataType, static_cast<int64_t>(kTensorOpAdd)))) {
+      return failure();
+    }
     rewriter.eraseOp(op);
     return success();
   }
