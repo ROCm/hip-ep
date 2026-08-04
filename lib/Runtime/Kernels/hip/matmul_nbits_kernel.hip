@@ -74,8 +74,8 @@
  * decode TPS swings run-to-run between otherwise-identical processes.
  * Persisting the winning config to disk (keyed by problem shape + a build
  * stamp) makes the first process prime the file and every later process load
- * the SAME config -> deterministic decode. Mirrors the WMMA disk cache
- * (getWmmaCachePath / loadWmmaCache / saveWmmaCache) further down this file.
+ * the SAME config -> deterministic decode. The WMMA path shares these helpers
+ * for the same reason.
  *
  * File format: first line = build stamp (invalidates the file on recompile),
  * then "<key> <config_id>" per line. One file per GPU arch in %TEMP%.
@@ -142,6 +142,22 @@ static void saveTuneCacheFile(const std::string &path,
     fprintf(f, "%s\n", kTuneCacheBuildStamp);
     for (const auto &e : cache) fprintf(f, "%s %d\n", e.first.c_str(), e.second);
     fclose(f);
+}
+
+// Shared key for every autotune cache keyed on shape plus zero-point presence.
+// has_zp has to be part of the key: the asymmetric paths do extra work per tile
+// (an extra zero-point read, and on the GEMV paths an extra fp32 multiply), so
+// the winning config can differ from the symmetric tune. Without it, a process
+// that loads both a symmetric and an asymmetric variant of the same shape would
+// silently reuse the wrong autotune result for one of them.
+//
+// Takes int64_t so both the WMMA callers (int) and the GEMV callers (int64_t)
+// can share it; the widening is lossless.
+static std::string tuneCacheKey(int64_t M, int64_t N, int64_t K, int64_t gs,
+                                bool has_zp) {
+    return std::to_string(M) + "_" + std::to_string(N) + "_" +
+           std::to_string(K) + "_" + std::to_string(gs) + "_" +
+           (has_zp ? "1" : "0");
 }
 
 /* =======================================================================
@@ -1243,11 +1259,8 @@ static std::string gemv_cache_path;
 
 static std::string gemvCacheKey(int64_t M, int64_t N, int64_t K, int64_t bs,
                                 bool col_major, bool has_zp) {
-    // has_zp must be in the key: the asym path executes one extra read_zp +
-    // fp32 mul per K-tile per N-tile, so its optimal (threads, tile_n) can
-    // differ from the sym tune. Without it, a process that loads both sym and
-    // asym variants would silently reuse the wrong autotune result for one of
-    // them. (WMMA path's autotune key already includes has_zp — keep parity.)
+    // Cannot use tuneCacheKey(): this path also tunes per layout, so col_major
+    // is part of the key. See tuneCacheKey() for why has_zp must be keyed on.
     return std::to_string(M) + "_" + std::to_string(N) + "_" +
            std::to_string(K) + "_" + std::to_string(bs) + "_" +
            (col_major ? "1" : "0") + "_" + (has_zp ? "1" : "0");
@@ -1601,15 +1614,6 @@ static std::mutex gemv_i8_tune_mutex;
 static std::once_flag gemv_i8_cache_init_flag;
 static std::string gemv_i8_cache_path;
 
-static std::string gemvI8CacheKey(int64_t M, int64_t N, int64_t K,
-                                   int64_t bs, bool has_zp) {
-    // has_zp affects the inner loop (one global ZP read per iter), so
-    // configs may rank differently with vs without -- key on it.
-    return std::to_string(M) + "_" + std::to_string(N) + "_" +
-           std::to_string(K) + "_" + std::to_string(bs) + "_" +
-           (has_zp ? "1" : "0");
-}
-
 static int getOrTuneGemvConfigI8(
     hipStream_t stream,
     const __half* A, const uint8_t* B,
@@ -1619,7 +1623,7 @@ static int getOrTuneGemvConfigI8(
     int64_t batch, int64_t bs)
 {
     const bool has_zp = (zp != nullptr);
-    std::string key = gemvI8CacheKey(M, N, K, bs, has_zp);
+    std::string key = tuneCacheKey(M, N, K, bs, has_zp);
 
     std::call_once(gemv_i8_cache_init_flag, [] {
         gemv_i8_cache_path = getTuneCachePath("gemv_i8");
@@ -2037,13 +2041,6 @@ static int tuneGemvConfigU3(
 static std::unordered_map<std::string, int> gemv_u3_cache;
 static std::mutex gemv_u3_tune_mutex;
 
-static std::string gemvU3CacheKey(int64_t M, int64_t N, int64_t K,
-                                  int64_t bs, bool has_zp) {
-    return std::to_string(M) + "_" + std::to_string(N) + "_" +
-           std::to_string(K) + "_" + std::to_string(bs) + "_" +
-           (has_zp ? "1" : "0");
-}
-
 static int getOrTuneGemvConfigU3(
     hipStream_t stream,
     const __half* A, const uint8_t* B,
@@ -2053,7 +2050,7 @@ static int getOrTuneGemvConfigU3(
     int64_t batch, int64_t bs)
 {
     const bool has_zp = (zp != nullptr);
-    std::string key = gemvU3CacheKey(M, N, K, bs, has_zp);
+    std::string key = tuneCacheKey(M, N, K, bs, has_zp);
 
     std::lock_guard<std::mutex> lock(gemv_u3_tune_mutex);
 
@@ -2438,13 +2435,6 @@ static int tuneGemvConfigU2(
 static std::unordered_map<std::string, int> gemv_u2_cache;
 static std::mutex gemv_u2_tune_mutex;
 
-static std::string gemvU2CacheKey(int64_t M, int64_t N, int64_t K,
-                                  int64_t bs, bool has_zp) {
-    return std::to_string(M) + "_" + std::to_string(N) + "_" +
-           std::to_string(K) + "_" + std::to_string(bs) + "_" +
-           (has_zp ? "1" : "0");
-}
-
 static int getOrTuneGemvConfigU2(
     hipStream_t stream,
     const __half* A, const uint8_t* B,
@@ -2454,7 +2444,7 @@ static int getOrTuneGemvConfigU2(
     int64_t batch, int64_t bs)
 {
     const bool has_zp = (zp != nullptr);
-    std::string key = gemvU2CacheKey(M, N, K, bs, has_zp);
+    std::string key = tuneCacheKey(M, N, K, bs, has_zp);
 
     std::lock_guard<std::mutex> lock(gemv_u2_tune_mutex);
 
@@ -3324,99 +3314,16 @@ static int tuneWmmaConfig(
 static std::unordered_map<std::string, int> wmma_cache;
 static std::mutex wmma_tune_mutex;
 static std::once_flag wmma_cache_init_flag;
-// Rebuild invalidates cache: __DATE__/__TIME__ change on every recompilation.
-static constexpr const char kWmmaBuildTimestamp[] = __DATE__ " " __TIME__;
-
-static std::string wmmaCacheKey(int M, int N, int K, int gs, bool has_zp) {
-    return std::to_string(M) + "_" + std::to_string(N) + "_" +
-           std::to_string(K) + "_" + std::to_string(gs) + "_" +
-           (has_zp ? "1" : "0");
-}
-
 // Disk-persistent WMMA autotune cache: avoids re-tuning ~1500 kernel launches
 // on every process start. File is per-GPU-arch in %TEMP%.
-static const std::string& getWmmaCachePath() {
-    static std::string path = [] {
-        std::string tmp_dir;
-#ifdef _WIN32
-        char* v = nullptr;
-        size_t len = 0;
-        if (_dupenv_s(&v, &len, "TEMP") == 0 && v != nullptr) {
-            tmp_dir = v;
-            free(v);
-        }
-#else
-        const char* v = getenv("TEMP");
-        if (!v) v = getenv("TMPDIR");
-        if (!v) v = "/tmp";
-        tmp_dir = v;
-#endif
-        if (tmp_dir.empty()) return std::string();
-
-        hipDeviceProp_t prop;
-        if (hipGetDeviceProperties(&prop, 0) != hipSuccess || prop.gcnArchName[0] == '\0')
-            return std::string();
-
-        return tmp_dir + "/morphizen_wmma_cache_" + prop.gcnArchName + ".txt";
-    }();
-    return path;
-}
+static std::string wmma_cache_path;
 
 static void loadWmmaCache() {
-    const std::string& path = getWmmaCachePath();
-    if (path.empty()) return;
-
-    FILE* f = fopen(path.c_str(), "r");
-    if (!f) return;
-
-    // First line is the build timestamp — discard cache if binary was rebuilt.
-    char ts_line[64];
-    if (!fgets(ts_line, sizeof(ts_line), f)) { fclose(f); return; }
-    size_t ts_len = strlen(ts_line);
-    if (ts_len > 0 && ts_line[ts_len - 1] == '\n') ts_line[ts_len - 1] = '\0';
-    if (strcmp(ts_line, kWmmaBuildTimestamp) != 0) {
-        fclose(f);
-        CUSTOM_KERNELS_DEBUG_LOG(
-            "[custom_kernels] WMMA cache: build mismatch (file=\"%s\", "
-            "binary=\"%s\"), will re-tune\n", ts_line, kWmmaBuildTimestamp);
-        return;
-    }
-
-    char key[128];
-    int config_id;
-    int loaded = 0;
-    while (fscanf(f, "%127s %d", key, &config_id) == 2) {
-        if (config_id >= 0 && config_id < kNumWmmaConfigs) {
-            wmma_cache[key] = config_id;
-            loaded++;
-        }
-    }
-    fclose(f);
-
+    wmma_cache_path = getTuneCachePath("wmma");
+    loadTuneCacheFile(wmma_cache_path, wmma_cache, kNumWmmaConfigs);
     CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] WMMA cache: loaded %d entries from %s\n",
-        loaded, path.c_str());
-}
-
-static void saveWmmaCache() {
-    const std::string& path = getWmmaCachePath();
-    if (path.empty()) return;
-
-    FILE* f = fopen(path.c_str(), "w");
-    if (!f) {
-        CUSTOM_KERNELS_DEBUG_LOG(
-            "[custom_kernels] WMMA cache: failed to write %s\n", path.c_str());
-        return;
-    }
-
-    fprintf(f, "%s\n", kWmmaBuildTimestamp);
-    for (const auto& entry : wmma_cache)
-        fprintf(f, "%s %d\n", entry.first.c_str(), entry.second);
-    fclose(f);
-
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] WMMA cache: saved %zu entries to %s\n",
-        wmma_cache.size(), path.c_str());
+        "[custom_kernels] WMMA cache: loaded %zu entries from %s\n",
+        wmma_cache.size(), wmma_cache_path.c_str());
 }
 
 static int getOrTuneWmmaConfig(
@@ -3430,7 +3337,7 @@ static int getOrTuneWmmaConfig(
 {
     std::call_once(wmma_cache_init_flag, loadWmmaCache);
 
-    std::string key = wmmaCacheKey(M, N, K, gs, has_zp);
+    std::string key = tuneCacheKey(M, N, K, gs, has_zp);
 
     std::lock_guard<std::mutex> lock(wmma_tune_mutex);
 
@@ -3441,7 +3348,7 @@ static int getOrTuneWmmaConfig(
     int best = tuneWmmaConfig(stream, M, N, K, A, lda, B,
                                scales, zeros, gs, ngk, C, ldc, has_zp);
     wmma_cache[key] = best;
-    saveWmmaCache();
+    saveTuneCacheFile(wmma_cache_path, wmma_cache);
 
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] WMMA cache: stored key=\"%s\" -> config[%d] "
@@ -3931,12 +3838,6 @@ static int tuneWmmaConfigI8(
 static std::unordered_map<std::string, int> wmma_i8_cache;
 static std::mutex wmma_i8_tune_mutex;
 
-static std::string wmmaI8CacheKey(int M, int N, int K, int gs, bool has_zp) {
-    return std::to_string(M) + "_" + std::to_string(N) + "_" +
-           std::to_string(K) + "_" + std::to_string(gs) + "_" +
-           (has_zp ? "1" : "0");
-}
-
 static int getOrTuneWmmaConfigI8(
     hipStream_t stream,
     int M, int N, int K,
@@ -3946,7 +3847,7 @@ static int getOrTuneWmmaConfigI8(
     int gs, int ngk,
     _Float16* C, int ldc, bool has_zp)
 {
-    std::string key = wmmaI8CacheKey(M, N, K, gs, has_zp);
+    std::string key = tuneCacheKey(M, N, K, gs, has_zp);
 
     std::lock_guard<std::mutex> lock(wmma_i8_tune_mutex);
 
@@ -4649,12 +4550,6 @@ static int tuneWmmaConfigU3(
 static std::unordered_map<std::string, int> wmma_u3_cache;
 static std::mutex wmma_u3_tune_mutex;
 
-static std::string wmmaU3CacheKey(int M, int N, int K, int gs, bool has_zp) {
-    return std::to_string(M) + "_" + std::to_string(N) + "_" +
-           std::to_string(K) + "_" + std::to_string(gs) + "_" +
-           (has_zp ? "1" : "0");
-}
-
 static int getOrTuneWmmaConfigU3(
     hipStream_t stream,
     int M, int N, int K,
@@ -4664,7 +4559,7 @@ static int getOrTuneWmmaConfigU3(
     int gs, int ngk,
     _Float16* C, int ldc, bool has_zp)
 {
-    std::string key = wmmaU3CacheKey(M, N, K, gs, has_zp);
+    std::string key = tuneCacheKey(M, N, K, gs, has_zp);
 
     std::lock_guard<std::mutex> lock(wmma_u3_tune_mutex);
 
@@ -5287,12 +5182,6 @@ static int tuneWmmaConfigU2(
 static std::unordered_map<std::string, int> wmma_u2_cache;
 static std::mutex wmma_u2_tune_mutex;
 
-static std::string wmmaU2CacheKey(int M, int N, int K, int gs, bool has_zp) {
-    return std::to_string(M) + "_" + std::to_string(N) + "_" +
-           std::to_string(K) + "_" + std::to_string(gs) + "_" +
-           (has_zp ? "1" : "0");
-}
-
 static int getOrTuneWmmaConfigU2(
     hipStream_t stream,
     int M, int N, int K,
@@ -5302,7 +5191,7 @@ static int getOrTuneWmmaConfigU2(
     int gs, int ngk,
     _Float16* C, int ldc, bool has_zp)
 {
-    std::string key = wmmaU2CacheKey(M, N, K, gs, has_zp);
+    std::string key = tuneCacheKey(M, N, K, gs, has_zp);
 
     std::lock_guard<std::mutex> lock(wmma_u2_tune_mutex);
 
