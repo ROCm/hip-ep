@@ -9,6 +9,7 @@
 // CHECK-LABEL: func.func @interleaved_allocs
 func.func @interleaved_allocs(%ctx: !hipsr.context,
                               %in: memref<4x1024xf16, #hipsr.mem<device>>) {
+  // expected-remark@+1 {{hipsr-pool-alloc: insertion point after op 4}}
   hipsr.pool_domain(%ctx, %in
       : !hipsr.context, memref<4x1024xf16, #hipsr.mem<device>>) {
   ^bb0(%dctx: !hipsr.context, %din: memref<4x1024xf16, #hipsr.mem<device>>):
@@ -46,6 +47,7 @@ func.func @interleaved_allocs(%ctx: !hipsr.context,
 // CHECK-LABEL: func.func @hoisted_allocs
 func.func @hoisted_allocs(%ctx: !hipsr.context,
                           %in: memref<4x1024xf16, #hipsr.mem<device>>) {
+  // expected-remark@+1 {{hipsr-pool-alloc: insertion point after op 2}}
   hipsr.pool_domain(%ctx, %in
       : !hipsr.context, memref<4x1024xf16, #hipsr.mem<device>>) {
   ^bb0(%dctx: !hipsr.context, %din: memref<4x1024xf16, #hipsr.mem<device>>):
@@ -79,6 +81,7 @@ func.func @hoisted_allocs(%ctx: !hipsr.context,
 // CHECK-LABEL: func.func @nested_region_user
 func.func @nested_region_user(%ctx: !hipsr.context,
                               %in: memref<4x1024xf16, #hipsr.mem<device>>) {
+  // expected-remark@+1 {{hipsr-pool-alloc: insertion point after op 0}}
   hipsr.pool_domain(%ctx, %in
       : !hipsr.context, memref<4x1024xf16, #hipsr.mem<device>>) {
   ^bb0(%dctx: !hipsr.context, %din: memref<4x1024xf16, #hipsr.mem<device>>):
@@ -106,6 +109,7 @@ func.func @coalesce_static(%ctx: !hipsr.context,
                                %in4a: memref<4x1024xf16, #hipsr.mem<device>>,
                                %in2: memref<2x1024xf16, #hipsr.mem<device>>,
                                %in4b: memref<4x1024xf16, #hipsr.mem<device>>) {
+  // expected-remark@+1 {{hipsr-pool-alloc: insertion point after op 3}}
   hipsr.pool_domain(%ctx, %in8, %in4a, %in2, %in4b :
       !hipsr.context,
       memref<8x1024xf16, #hipsr.mem<device>>,
@@ -142,6 +146,7 @@ func.func @coalesce_static(%ctx: !hipsr.context,
 
 // CHECK-LABEL: func.func @split_three_groups
 func.func @split_three_groups(%ctx: !hipsr.context, %in: memref<4x1024xf16, #hipsr.mem<device>>) {
+  // expected-remark@+1 {{hipsr-pool-alloc: insertion point after op 2}}
   hipsr.pool_domain(%ctx, %in : !hipsr.context, memref<4x1024xf16, #hipsr.mem<device>>) {
   ^bb0(%dctx: !hipsr.context, %din: memref<4x1024xf16, #hipsr.mem<device>>):
     // expected-remark@+1 {{hipsr-pool-alloc: lifetime [3,8] group 0 size 8192}}
@@ -166,6 +171,7 @@ func.func @split_three_groups(%ctx: !hipsr.context, %in: memref<4x1024xf16, #hip
 // CHECK-LABEL: func.func @dynamic_size
 func.func @dynamic_size(%ctx: !hipsr.context,
                         %in: memref<?x512xf16, #hipsr.mem<device>>) {
+  // expected-remark@+1 {{hipsr-pool-alloc: insertion point after op 2}}
   hipsr.pool_domain(%ctx, %in : !hipsr.context, memref<?x512xf16, #hipsr.mem<device>>) {
   ^bb0(%dctx: !hipsr.context, %din: memref<?x512xf16, #hipsr.mem<device>>):
     %c0 = arith.constant 0 : index
@@ -185,6 +191,7 @@ func.func @dynamic_size(%ctx: !hipsr.context,
 func.func @coalesce_mixed(%ctx: !hipsr.context,
                           %inf32: memref<4x256xf32, #hipsr.mem<device>>,
                           %inf16: memref<?x512xf16, #hipsr.mem<device>>) {
+  // expected-remark@+1 {{hipsr-pool-alloc: insertion point after op 3}}
   hipsr.pool_domain(%ctx, %inf32, %inf16 :
       !hipsr.context,
       memref<4x256xf32, #hipsr.mem<device>>,
@@ -211,6 +218,7 @@ func.func @coalesce_mixed(%ctx: !hipsr.context,
 
 // CHECK-LABEL: func.func @coalesce_dynamic
 func.func @coalesce_dynamic(%ctx: !hipsr.context, %in: memref<?x1024xf16, #hipsr.mem<device>>) {
+  // expected-remark@+1 {{hipsr-pool-alloc: insertion point after op 3}}
   hipsr.pool_domain(%ctx, %in : !hipsr.context, memref<?x1024xf16, #hipsr.mem<device>>) {
   ^bb0(%dctx: !hipsr.context, %din: memref<?x1024xf16, #hipsr.mem<device>>):
     %c0 = arith.constant 0 : index
@@ -234,6 +242,7 @@ func.func @coalesce_dynamic(%ctx: !hipsr.context, %in: memref<?x1024xf16, #hipsr
 func.func @split_two_groups_dynamic(%ctx: !hipsr.context,
                                     %inf16: memref<?x512xf16, #hipsr.mem<device>>,
                                     %sin: memref<4x1024xf16, #hipsr.mem<device>>) {
+  // expected-remark@+1 {{hipsr-pool-alloc: insertion point after op 3}}
   hipsr.pool_domain(%ctx, %inf16, %sin :
       !hipsr.context,
       memref<?x512xf16, #hipsr.mem<device>>,
@@ -251,6 +260,35 @@ func.func @split_two_groups_dynamic(%ctx: !hipsr.context,
     hipsr.add(%dctx) ins(%dsin, %dsin : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%a_static : memref<4x1024xf16, #hipsr.mem<device>>)
     hipsr.add(%dctx) ins(%a_dyn, %a_dyn : memref<?x512xf16, #hipsr.mem<device>>, memref<?x512xf16, #hipsr.mem<device>>) outs(%din : memref<?x512xf16, #hipsr.mem<device>>)
     hipsr.add(%dctx) ins(%a_static, %a_static : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%dsin : memref<4x1024xf16, #hipsr.mem<device>>)
+    hipsr.pool_domain_yield
+  }
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @alloc_inside_region
+func.func @alloc_inside_region(%ctx: !hipsr.context,
+                               %in: memref<4x1024xf16, #hipsr.mem<device>>) {
+  // expected-remark@+1 {{hipsr-pool-alloc: insertion point after op 0}}
+  hipsr.pool_domain(%ctx, %in
+      : !hipsr.context, memref<4x1024xf16, #hipsr.mem<device>>) {
+  ^bb0(%dctx: !hipsr.context, %din: memref<4x1024xf16, #hipsr.mem<device>>):
+    // expected-remark@+1 {{hipsr-pool-alloc: lifetime [1,2] group 0 size 8192}}
+    %a1 = memref.alloc() : memref<4x1024xf16, #hipsr.mem<device>>
+    hipsr.add(%dctx) ins(%din, %din : memref<4x1024xf16, #hipsr.mem<device>>,
+                                      memref<4x1024xf16, #hipsr.mem<device>>)
+               outs(%a1 : memref<4x1024xf16, #hipsr.mem<device>>)
+    scf.execute_region {
+      %inner = memref.alloc() : memref<4x1024xf16, #hipsr.mem<device>>
+      hipsr.add(%dctx) ins(%a1, %a1 : memref<4x1024xf16, #hipsr.mem<device>>,
+                                      memref<4x1024xf16, #hipsr.mem<device>>)
+                 outs(%inner : memref<4x1024xf16, #hipsr.mem<device>>)
+      hipsr.add(%dctx) ins(%inner, %inner : memref<4x1024xf16, #hipsr.mem<device>>,
+                                            memref<4x1024xf16, #hipsr.mem<device>>)
+                 outs(%din : memref<4x1024xf16, #hipsr.mem<device>>)
+      scf.yield
+    }
     hipsr.pool_domain_yield
   }
   return
