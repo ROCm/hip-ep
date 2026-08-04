@@ -48,9 +48,7 @@ def ShapeRegionInterface : OpInterface<"ShapeRegionInterface"> {
         the pass with the op's args -- see `getShapeRegionArgOperands`), reading
         inputs as the block's arguments.}],
       "void", "populateShapeRegion",
-      (ins "::mlir::OpBuilder &":$builder, "::mlir::Block &":$shapeBlock),
-      /*methodBody=*/[{}],
-      /*defaultImplementation=*/[{ return; }]
+      (ins "::mlir::OpBuilder &":$builder, "::mlir::Block &":$shapeBlock)
     >,
     InterfaceMethod<
       [{Like `populateShapeRegion`, but for the capacity region (region 1); only
