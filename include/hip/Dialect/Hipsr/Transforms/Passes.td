@@ -25,8 +25,10 @@ def PopulateShapeRegionPass
     empty placeholder has an unsupported consumer or an incompatible layout.
   }];
   let dependentDialects = [
+    "::mlir::arith::ArithDialect",
     "::mlir::hipsr::HipsrDialect",
-    "::mlir::shape::ShapeDialect"
+    "::mlir::shape::ShapeDialect",
+    "::mlir::tensor::TensorDialect"
   ];
 }
 

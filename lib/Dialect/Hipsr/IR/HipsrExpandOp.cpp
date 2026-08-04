@@ -5,10 +5,9 @@
 
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
-#include "hip/Dialect/Hipsr/IR/HipsrShapeRegionInterface.h"
+#include "hip/Dialect/Hipsr/IR/HipsrShapeRegionPopulationUtils.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Matchers.h"
@@ -21,8 +20,9 @@ using namespace mlir;
 using namespace mlir::hipsr;
 
 namespace {
-struct ExpandShapeArgs : ShapeRegionArgs<ExpandOp> {
-  using ShapeRegionArgs::ShapeRegionArgs;
+struct ExpandShapeArgs : PlaceholderShapeRegionArgs {
+  explicit ExpandShapeArgs(Block &block) : PlaceholderShapeRegionArgs(block) {}
+  using PlaceholderShapeRegionArgs::getPlaceholderType;
   Value getInput() const { return in(0); }
   Value getRequestedShape() const { return in(1); }
 };
@@ -116,48 +116,44 @@ LogicalResult ExpandOp::verify() {
 
 bool ExpandOp::isStartBarrier() { return getShapeAttrAttr() == nullptr; }
 
-void ExpandOp::populateShapeRegion(OpBuilder &builder, Block &shapeBlock) {
+void ExpandOp::populateShapeRegion(OpBuilder &, Block &) {}
+
+namespace mlir {
+namespace hipsr {
+
+LogicalResult populateExpandShapeRegion(OpBuilder &builder, Block &shapeBlock,
+                                        ExpandOp op) {
   OpBuilder::InsertionGuard guard(builder);
   builder.setInsertionPointToStart(&shapeBlock);
 
-  Location loc = getLoc();
-  MLIRContext *ctx = builder.getContext();
+  Location loc = op.getLoc();
   ExpandShapeArgs args{shapeBlock};
-  Value input = args.getInput();
-  auto inputType = cast<ShapedType>(input.getType());
-
-  Value inputShape = shape::ShapeOfOp::create(builder, loc, input);
+  Value inputShape;
   SmallVector<Value> requestedExtents;
-  int64_t requestedRank;
-  if (DenseI64ArrayAttr shapeAttr = getShapeAttrAttr()) {
-    requestedRank = static_cast<int64_t>(shapeAttr.asArrayRef().size());
-    requestedExtents.reserve(requestedRank);
+  if (args.getPlaceholderType() == PlaceholderType::Normal) {
+    inputShape = args.getInput();
+    DenseI64ArrayAttr shapeAttr = op.getShapeAttrAttr();
+    requestedExtents.reserve(shapeAttr.asArrayRef().size());
     for (int64_t extent : shapeAttr.asArrayRef()) {
       requestedExtents.push_back(
           arith::ConstantIndexOp::create(builder, loc, extent));
     }
   } else {
+    inputShape = shape::ShapeOfOp::create(builder, loc, args.getInput());
     Value requestedShapeArg = args.getRequestedShape();
     auto requestedShapeType = cast<ShapedType>(requestedShapeArg.getType());
-    requestedRank = requestedShapeType.getDimSize(0);
+    int64_t requestedRank = requestedShapeType.getDimSize(0);
     requestedExtents.reserve(requestedRank);
     for (int64_t i : llvm::seq<int64_t>(0, requestedRank)) {
       Value index = arith::ConstantIndexOp::create(builder, loc, i);
-      Value extent;
-      if (isa<RankedTensorType>(requestedShapeArg.getType())) {
-        extent = tensor::ExtractOp::create(builder, loc, requestedShapeArg,
-                                           ValueRange{index});
-      } else {
-        extent = memref::LoadOp::create(builder, loc, requestedShapeArg,
-                                        ValueRange{index});
-      }
+      Value extent = tensor::ExtractOp::create(builder, loc, requestedShapeArg,
+                                               ValueRange{index});
       requestedExtents.push_back(arith::IndexCastOp::create(
           builder, loc, builder.getIndexType(), extent));
     }
   }
 
-  int64_t resultRank = std::max(inputType.getRank(), requestedRank);
-  auto shapeType = shape::ShapeType::get(ctx);
+  auto shapeType = shape::ShapeType::get(builder.getContext());
   Value requestedShape = shape::FromExtentsOp::create(
       builder, loc, shapeType, ValueRange{requestedExtents});
 
@@ -169,16 +165,12 @@ void ExpandOp::populateShapeRegion(OpBuilder &builder, Block &shapeBlock) {
       [&](OpBuilder &b, Location) -> SmallVector<Value, 2> {
         Value broadcastShape = shape::BroadcastOp::create(
             b, loc, shapeType, inputShape, requestedShape, StringAttr{});
-        SmallVector<Value, 2> resultExtents;
-        resultExtents.reserve(resultRank);
-        for (int64_t i : llvm::seq<int64_t>(0, resultRank)) {
-          Value extent = shape::GetExtentOp::create(b, loc, broadcastShape, i);
-          resultExtents.push_back(shape::SizeToIndexOp::create(b, loc, extent));
-        }
-        return resultExtents;
+        return SmallVector<Value, 2>{broadcastShape};
       });
 
-  ShapeYieldOp::create(builder, loc,
-                       ArrayRef<ValueRange>{assuming.getResults()},
-                       TypeRange{inputType.getElementType()});
+  ShapeYield2Op::create(builder, loc, assuming.getResults());
+  return success();
 }
+
+} // namespace hipsr
+} // namespace mlir

@@ -38,7 +38,7 @@ struct PlaceholderShapeRegionArgs {
 
   Value in(unsigned i) const { return arg(numCtxArgs() + i); }
 
-private:
+protected:
   Block &block;
 
   PlaceholderOp getPlaceholder() const {
