@@ -31,7 +31,9 @@ module {
   // Test 1: Packed QKV, default scale (divisor = num_heads + 2*kv_num_heads)
   // H=40, G=10, d=128 -> query dim2 = (40 + 20)*128 = 7680; scale = 1/sqrt(128)
   // ===========================================================================
-  func.func @packed_qkv_default_scale(
+  // Named @main_graph so --hip-add-context-arg fires (it requires a
+  // @main_graph in the module); the second case below is lowered too.
+  func.func @main_graph(
       %query: tensor<1x128x7680xf16>,
       %past_key: tensor<1x10x0x128xf16>,
       %past_value: tensor<1x10x0x128xf16>,
@@ -39,7 +41,7 @@ module {
       %total_seq_len: tensor<i32>)
       -> (tensor<1x128x5120xf16>, tensor<1x10x128x128xf16>, tensor<1x10x128x128xf16>) {
 
-    // CHECK-LABEL: func.func @packed_qkv_default_scale
+    // CHECK-LABEL: func.func @main_graph
     // CHECK-SAME: (%[[CTX:.*]]: !hip.context,
 
     %none_key = "onnx.NoValue"() {value} : () -> none
