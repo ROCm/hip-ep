@@ -21,13 +21,15 @@ using namespace mlir;
 using namespace mlir::hipsr;
 
 namespace {
-struct CastShapeArgs : ShapeRegionArgs {
-  using ShapeRegionArgs::ShapeRegionArgs;
-  FailureOr<Value> getInput() const { return in(0); }
+struct CastShapeArgs : PlaceholderShapeRegionArgs {
+  using PlaceholderShapeRegionArgs::PlaceholderShapeRegionArgs;
+  Value getInput() const { return in(0); }
 };
 } // namespace
 
 MutableOperandRange CastOp::getDpsInitsMutable() { return getInitMutable(); }
+
+void CastOp::populateShapeRegion(OpBuilder &, Block &) {}
 
 namespace mlir {
 namespace hipsr {
@@ -37,11 +39,8 @@ LogicalResult populateCastShapeRegion(OpBuilder &builder, Block &shapeBlock,
   OpBuilder::InsertionGuard guard(builder);
   builder.setInsertionPointToStart(&shapeBlock);
 
-  FailureOr<Value> inputShape = CastShapeArgs{shapeBlock}.getInput();
-  if (failed(inputShape)) {
-    return failure();
-  }
-  ShapeYield2Op::create(builder, op.getLoc(), ValueRange{*inputShape});
+  Value inputShape = CastShapeArgs{shapeBlock}.getInput();
+  ShapeYield2Op::create(builder, op.getLoc(), ValueRange{inputShape});
   return success();
 }
 

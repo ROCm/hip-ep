@@ -3,10 +3,7 @@
 // Licensed under the MIT License.
 //
 
-def Hipsr_AddOp : Hipsr_DpsOp<
-    "add",
-    [DeclareOpInterfaceMethods<ShapeRegionInterface,
-                               ["populateShapeRegion"]>]> {
+def Hipsr_AddOp : Hipsr_DpsOp<"add"> {
   let summary = "Elementwise add, destination-passing style";
   let description = [{
     Elementwise addition with ONNX/NumPy broadcasting: `init = lhs + rhs`.
@@ -23,6 +20,6 @@ def Hipsr_AddOp : Hipsr_DpsOp<
     `(` $ctx `)`
     `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
     `outs` `(` $init `:` type($init) `)`
-    attr-dict (`:` type($result_tensors)^)?
+    attr-dict (`:` type($result_tensors)^)? (`shape_region` $shape_region^)?
   }];
 }

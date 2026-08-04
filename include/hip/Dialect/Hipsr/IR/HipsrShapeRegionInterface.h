@@ -15,8 +15,14 @@
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/Region.h"
 #include "mlir/IR/Value.h"
+#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/raw_ostream.h"
+
+#include <string>
 
 namespace mlir {
 namespace hipsr {
@@ -56,6 +62,54 @@ getCapacityShapeRegionResultShapes(ShapeRegionInterface op);
 
 ::llvm::SmallVector<::mlir::RankedTensorType>
 getCapacityShapeRegionResultTypes(ShapeRegionInterface op);
+
+/// Bounds-checked accessor over the getShapeRegionArgOperands layout above;
+/// ctx()/in(i)/out(j) index the block args, gated by OpTy's barrier category.
+template <typename OpTy> struct ShapeRegionArgs {
+  explicit ShapeRegionArgs(Block &b) : block(b) {}
+
+public:
+  static constexpr bool kIsStartBarrier =
+      OpTy::template hasTrait<StartBarrierInterface::Trait>();
+  static constexpr bool kIsEndBarrier =
+      OpTy::template hasTrait<EndBarrierInterface::Trait>();
+
+  Value ctx() const {
+    static_assert(kIsStartBarrier,
+                  "ctx() is only valid on start-barrier shape regions");
+    return arg(0);
+  }
+
+  Value in(unsigned i) const { return arg(numCtxArgs() + i); }
+
+  Value out(unsigned j) const {
+    static_assert(kIsEndBarrier,
+                  "out() is only valid on end-barrier shape regions");
+    return arg(numDataInputs() + j);
+  }
+
+protected:
+  Block &block;
+
+  static constexpr unsigned numCtxArgs() { return kIsStartBarrier ? 1u : 0u; }
+
+  unsigned numDataInputs() const {
+    auto dps = cast<DestinationStyleOpInterface>(block.getParentOp());
+    unsigned numIns = dps.getDpsInputs().size();
+    return numIns == 0 ? 0 : numIns - 1; // drop ctx
+  }
+
+  Value arg(unsigned index) const {
+    if (index >= block.getNumArguments()) {
+      std::string msg;
+      llvm::raw_string_ostream(msg)
+          << OpTy::getOperationName() << " shape region is missing block arg "
+          << index << " (block has " << block.getNumArguments() << ")";
+      llvm::report_fatal_error(llvm::StringRef(msg));
+    }
+    return block.getArgument(index);
+  }
+};
 
 } // namespace hipsr
 } // namespace mlir

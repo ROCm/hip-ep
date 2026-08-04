@@ -7,7 +7,7 @@
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "hip/Dialect/Hipsr/IR/HipsrLLVMLoweringUtils.h"
-#include "hip/Dialect/Hipsr/IR/HipsrShapeRegionPopulationUtils.h"
+#include "hip/Dialect/Hipsr/IR/HipsrShapeRegionInterface.h"
 
 #include "mlir/Conversion/LLVMCommon/MemRefBuilder.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
@@ -25,10 +25,10 @@ using namespace mlir;
 using namespace mlir::hipsr;
 
 namespace {
-struct MatMulShapeArgs : ShapeRegionArgs {
+struct MatMulShapeArgs : ShapeRegionArgs<MatMulOp> {
   using ShapeRegionArgs::ShapeRegionArgs;
-  Value getA() const { return *in(0); }
-  Value getB() const { return *in(1); }
+  Value getA() const { return in(0); }
+  Value getB() const { return in(1); }
 };
 } // namespace
 

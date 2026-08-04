@@ -12,9 +12,7 @@
 
 def Hipsr_ExpandOp : Hipsr_DpsOp<
     "expand",
-    [DeclareOpInterfaceMethods<StartBarrierInterface, ["isStartBarrier"]>,
-     DeclareOpInterfaceMethods<ShapeRegionInterface,
-                               ["populateShapeRegion"]>]> {
+    [DeclareOpInterfaceMethods<StartBarrierInterface, ["isStartBarrier"]>]> {
   let summary = "Broadcast a tensor to a requested shape";
   let description = [{
     Broadcasts `input` and the requested shape using ONNX multidirectional
@@ -41,7 +39,7 @@ def Hipsr_ExpandOp : Hipsr_DpsOp<
     `ins` `(` $input (`,` $shape^)? `:` type($input)
         (`,` type($shape)^)? `)`
     `outs` `(` $init `:` type($init) `)`
-    attr-dict (`:` type($result_tensors)^)?
+    attr-dict (`:` type($result_tensors)^)? (`shape_region` $shape_region^)?
   }];
 
   let hasCanonicalizer = 1;

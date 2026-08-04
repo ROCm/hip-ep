@@ -10,38 +10,54 @@
 
 #include "mlir/IR/Block.h"
 #include "mlir/IR/Value.h"
-#include "mlir/Support/LogicalResult.h"
+
+#include "llvm/ADT/StringRef.h"
+#include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/raw_ostream.h"
+
+#include <string>
 
 namespace mlir {
 namespace hipsr {
 
 /// Accesses block arguments of a placeholder-owned shape region.
-struct ShapeRegionArgs {
-  explicit ShapeRegionArgs(Block &block) : block(block) {}
+/// Missing arguments are fatal because the population pass creates this block.
+struct PlaceholderShapeRegionArgs {
+  explicit PlaceholderShapeRegionArgs(Block &block) : block(block) {}
 
-  FailureOr<Value> ctx() const {
+  Value ctx() const {
     if (numCtxArgs() == 0) {
-      return failure();
+      llvm::report_fatal_error(
+          "hipsr.placeholder shape region has no context block argument");
     }
     return arg(0);
   }
 
-  FailureOr<Value> in(unsigned i) const { return arg(numCtxArgs() + i); }
+  Value in(unsigned i) const { return arg(numCtxArgs() + i); }
 
 private:
   Block &block;
 
+  PlaceholderOp getPlaceholder() const {
+    return cast<PlaceholderOp>(block.getParentOp());
+  }
+
   PlaceholderType getPlaceholderType() const {
-    return cast<PlaceholderOp>(block.getParentOp()).getPlaceholderType();
+    return getPlaceholder().getPlaceholderType();
   }
 
   unsigned numCtxArgs() const {
     return getPlaceholderType() == PlaceholderType::Barrier ? 1u : 0u;
   }
 
-  FailureOr<Value> arg(unsigned index) const {
+  Value arg(unsigned index) const {
     if (index >= block.getNumArguments()) {
-      return failure();
+      std::string msg;
+      llvm::raw_string_ostream(msg)
+          << PlaceholderOp::getOperationName()
+          << " shape region is missing block arg " << index << " (block has "
+          << block.getNumArguments() << ")";
+      llvm::report_fatal_error(llvm::StringRef(msg));
     }
     return block.getArgument(index);
   }

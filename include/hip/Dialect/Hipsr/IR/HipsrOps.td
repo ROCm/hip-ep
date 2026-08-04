@@ -30,13 +30,20 @@ class Hipsr_Op<string mnemonic, list<Trait> traits = []> :
 // Shaped DPS op base class
 //===----------------------------------------------------------------------===//
 
-// Base for shaped compute ops (MatMul, Add, ...). The `outs` inits are the
-// destination-passing-style outputs.
+// Base for shaped compute ops (MatMul, Add, ...). Every such op:
+//   - is destination-passing style: the `outs` inits are the outputs;
+//   - carries an optional shape region (region 0, ShapeRegionInterface);
+//   - is IsolatedFromAbove: the region reads its inputs via entry-block args.
+// EndBarrier ops additionally carry a capacity region.
 class Hipsr_DpsOp<string mnemonic, list<Trait> traits = []> :
     Hipsr_Op<mnemonic, !listconcat([
+        DeclareOpInterfaceMethods<ShapeRegionInterface, ["populateShapeRegion"]>,
         DeclareOpInterfaceMethods<DestinationStyleOpInterface,
-                                  ["getDpsInitsMutable"]>
+                                  ["getDpsInitsMutable"]>,
+        IsolatedFromAbove,
+        SingleBlock
       ], traits)> {
+  let regions = (region MaxSizedRegion<1>:$shape_region);
   let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
 }
 
