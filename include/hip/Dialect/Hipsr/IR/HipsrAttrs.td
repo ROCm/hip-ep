@@ -26,10 +26,8 @@ def Hipsr_MemorySpaceAttr : AttrDef<Hipsr_Dialect, "MemorySpace"> {
   let assemblyFormat = "`<` $kind `>`";
 }
 
-def Hipsr_PlaceholderTypeAttr : AttrDef<Hipsr_Dialect, "PlaceholderType"> {
-  let mnemonic = "placeholder_type";
-  let summary = "hipsr placeholder shape dependency category";
-  let parameters = (ins EnumParameter<Hipsr_PlaceholderType>:$value);
+def Hipsr_PlaceholderTypeAttr :
+    EnumAttr<Hipsr_Dialect, Hipsr_PlaceholderType, "placeholder_type"> {
   let assemblyFormat = "`<` $value `>`";
 }
 

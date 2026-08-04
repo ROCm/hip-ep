@@ -14,17 +14,17 @@
 // CHECK-SAME: -> tensor<?x4xf16> {
 // CHECK-NEXT: %[[FIRST_DOMAIN:.*]] = hipsr.pool_domain(%[[CTX]], %[[INPUT]] : !hipsr.context, tensor<?x4xf32>) {
 // CHECK-NEXT: ^bb0(%[[FIRST_CTX:.*]]: !hipsr.context, %[[FIRST_INPUT:.*]]: tensor<?x4xf32>):
-// CHECK-NEXT: %[[CAST_INIT:.*]] = hipsr.placeholder(%[[FIRST_CTX]]) ins(%[[FIRST_INPUT]] : tensor<?x4xf32>) {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
+// CHECK-NEXT: %[[CAST_INIT:.*]] = hipsr.placeholder(%[[FIRST_CTX]]) ins(%[[FIRST_INPUT]] : tensor<?x4xf32>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
 // CHECK-NEXT: %[[CAST:.*]] = hipsr.cast(%[[FIRST_CTX]]) ins(%[[FIRST_INPUT]] : tensor<?x4xf32>) outs(%[[CAST_INIT]] : tensor<?x4xf16>) : tensor<?x4xf16>
-// CHECK-NEXT: %[[SHAPE_ATTR_INIT:.*]] = hipsr.placeholder(%[[FIRST_CTX]]) ins(%[[FIRST_INPUT]] : tensor<?x4xf32>) {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
+// CHECK-NEXT: %[[SHAPE_ATTR_INIT:.*]] = hipsr.placeholder(%[[FIRST_CTX]]) ins(%[[FIRST_INPUT]] : tensor<?x4xf32>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
 // CHECK-NEXT: %[[SHAPE_ATTR_EXPANDED:.*]] = hipsr.expand(%[[FIRST_CTX]]) ins(%[[CAST]] : tensor<?x4xf16>) outs(%[[SHAPE_ATTR_INIT]] : tensor<?x4xf16>) {shape_attr = array<i64: 1, 4>} : tensor<?x4xf16>
 // CHECK-NEXT: hipsr.pool_domain_yield %[[SHAPE_ATTR_EXPANDED]] : tensor<?x4xf16>
 // CHECK-NEXT: } -> tensor<?x4xf16>
 // CHECK-NEXT: %[[EXPAND_DOMAIN:.*]] = hipsr.pool_domain(%[[CTX]], %[[INPUT]], %[[SHAPE]], %[[FIRST_DOMAIN]] : !hipsr.context, tensor<?x4xf32>, tensor<2xi64>, tensor<?x4xf16>) {
 // CHECK-NEXT: ^bb0(%[[EXPAND_CTX:.*]]: !hipsr.context, %[[SHAPE_ROOT:.*]]: tensor<?x4xf32>, %[[EXPAND_SHAPE:.*]]: tensor<2xi64>, %[[EXPAND_INPUT:.*]]: tensor<?x4xf16>):
-// CHECK-NEXT: %[[EXPAND_INIT:.*]] = hipsr.placeholder(%[[EXPAND_CTX]]) ins(%[[SHAPE_ROOT]], %[[EXPAND_SHAPE]] : tensor<?x4xf32>, tensor<2xi64>) {type = #hipsr.placeholder_type<barrier>} : tensor<?x4xf16>
+// CHECK-NEXT: %[[EXPAND_INIT:.*]] = hipsr.placeholder(%[[EXPAND_CTX]]) ins(%[[SHAPE_ROOT]], %[[EXPAND_SHAPE]] : tensor<?x4xf32>, tensor<2xi64>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<?x4xf16>
 // CHECK-NEXT: %[[EXPANDED:.*]] = hipsr.expand(%[[EXPAND_CTX]]) ins(%[[EXPAND_INPUT]], %[[EXPAND_SHAPE]] : tensor<?x4xf16>, tensor<2xi64>) outs(%[[EXPAND_INIT]] : tensor<?x4xf16>) : tensor<?x4xf16>
-// CHECK-NEXT: %[[ADD_INIT:.*]] = hipsr.placeholder(%[[EXPAND_CTX]]) ins(%[[SHAPE_ROOT]], %[[SHAPE_ROOT]] : tensor<?x4xf32>, tensor<?x4xf32>) {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
+// CHECK-NEXT: %[[ADD_INIT:.*]] = hipsr.placeholder(%[[EXPAND_CTX]]) ins(%[[SHAPE_ROOT]], %[[SHAPE_ROOT]] : tensor<?x4xf32>, tensor<?x4xf32>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
 // CHECK-NEXT: %[[RESULT:.*]] = hipsr.add(%[[EXPAND_CTX]]) ins(%[[EXPANDED]], %[[EXPANDED]] : tensor<?x4xf16>, tensor<?x4xf16>) outs(%[[ADD_INIT]] : tensor<?x4xf16>) : tensor<?x4xf16>
 // CHECK-NEXT: hipsr.pool_domain_yield %[[RESULT]] : tensor<?x4xf16>
 // CHECK-NEXT: } -> tensor<?x4xf16>
@@ -35,25 +35,25 @@ func.func @expand_barrier_modes(
     -> tensor<?x4xf16> {
   %cast_init = hipsr.placeholder(%ctx)
       ins(%input : tensor<?x4xf32>)
-      {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
+      {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
   %cast = hipsr.cast(%ctx) ins(%input : tensor<?x4xf32>)
       outs(%cast_init : tensor<?x4xf16>) : tensor<?x4xf16>
   %shape_attr_init = hipsr.placeholder(%ctx)
       ins(%input : tensor<?x4xf32>)
-      {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
+      {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
   %shape_attr_expanded = hipsr.expand(%ctx)
       ins(%cast : tensor<?x4xf16>)
       outs(%shape_attr_init : tensor<?x4xf16>)
       {shape_attr = array<i64: 1, 4>} : tensor<?x4xf16>
   %runtime_init = hipsr.placeholder(%ctx)
       ins(%input, %shape : tensor<?x4xf32>, tensor<2xi64>)
-      {type = #hipsr.placeholder_type<barrier>} : tensor<?x4xf16>
+      {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<?x4xf16>
   %runtime_expanded = hipsr.expand(%ctx)
       ins(%shape_attr_expanded, %shape : tensor<?x4xf16>, tensor<2xi64>)
       outs(%runtime_init : tensor<?x4xf16>) : tensor<?x4xf16>
   %add_init = hipsr.placeholder(%ctx)
       ins(%input, %input : tensor<?x4xf32>, tensor<?x4xf32>)
-      {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
+      {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
   %result = hipsr.add(%ctx)
       ins(%runtime_expanded, %runtime_expanded
           : tensor<?x4xf16>, tensor<?x4xf16>)
@@ -74,7 +74,7 @@ func.func @expand_barrier_modes(
 // CHECK-NEXT: %[[SUM:.*]] = arith.addi %[[DCAPTURE]], %[[DCAPTURE]] : i32
 // CHECK-NEXT: scf.yield %[[SUM]] : i32
 // CHECK-NEXT: }
-// CHECK-NEXT: %[[INIT:.*]] = hipsr.placeholder(%[[DCTX]]) ins(%[[DINPUT]] : tensor<?x8xf32>) {type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16>
+// CHECK-NEXT: %[[INIT:.*]] = hipsr.placeholder(%[[DCTX]]) ins(%[[DINPUT]] : tensor<?x8xf32>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16>
 // CHECK-NEXT: %[[CAST:.*]] = hipsr.cast(%[[DCTX]]) ins(%[[DINPUT]] : tensor<?x8xf32>) outs(%[[INIT]] : tensor<?x8xf16>) : tensor<?x8xf16> shape_region {
 // CHECK-NEXT: ^bb0(%[[SHAPE_INPUT:.*]]: tensor<?x8xf32>):
 // CHECK-NEXT: %[[SHAPE:.*]] = shape.shape_of %[[SHAPE_INPUT]] : tensor<?x8xf32> -> tensor<2xindex>
@@ -94,7 +94,7 @@ func.func @nested_shape_region(%ctx: !hipsr.context,
     -> (tensor<?x8xf16>, i32) {
   %init = hipsr.placeholder(%ctx)
       ins(%input : tensor<?x8xf32>)
-      {type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16>
+      {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16>
   %region = scf.execute_region -> i32 {
     %sum = arith.addi %capture, %capture : i32
     scf.yield %sum : i32

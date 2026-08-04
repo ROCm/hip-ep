@@ -7,7 +7,6 @@ add_library(HipsrDialectTransforms STATIC
   ExternalizeConstants.cpp
   HipsrPoolAllocPass.cpp
   PartitionPoolDomains.cpp
-  PopulateShapeRegion2Pass.cpp
   PopulateShapeRegionPass.cpp
 )
 

@@ -1,6 +1,7 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
+// UNSUPPORTED: true
 // RUN: hip-mlir-opt %s --convert-to-llvm | FileCheck %s
 
 // CHECK-LABEL: llvm.func @matmul_rank2

@@ -21,8 +21,8 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
 
     `!hipsr.context` is operand 0. The remaining inputs provide values to the
     shape graph and must be block arguments or results of `hipsr.placeholder`,
-    `arith.constant`, or `hipsr.constant`. `type` marks the placeholder as
-    `normal` or `barrier`.
+    `arith.constant`, or `hipsr.constant`. `placeholder_type` marks the
+    placeholder as `normal` or `barrier`.
 
     The shape graph is independent of DPS data inputs: downstream placeholders
     use upstream placeholder results rather than DPS data results.
@@ -52,14 +52,15 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
     ```mlir
     %init = hipsr.placeholder(%ctx)
         ins(%input : tensor<?x?xf16>)
-        {type = #hipsr.placeholder_type<normal>} : tensor<?x?xf16>
+        {placeholder_type = #hipsr.placeholder_type<normal>}
+        : tensor<?x?xf16>
     ```
   }];
 
   let arguments = (ins
     Hipsr_ContextType:$ctx,
     Variadic<AnyRankedTensor>:$inputs,
-    Hipsr_PlaceholderTypeAttr:$type
+    Hipsr_PlaceholderTypeAttr:$placeholder_type
   );
   let results = (outs Variadic<AnyRankedTensor>:$results);
   let regions = (region MaxSizedRegion<1>:$shape_region);
@@ -79,27 +80,7 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
     /// null if no such use exists.
     ::mlir::Operation *getDpsConsumer();
 
-    /// Returns this placeholder's shape-region category.
-    ::mlir::hipsr::PlaceholderType getPlaceholderType() {
-      return getType().getValue();
-    }
-
     /// Returns this placeholder's shape-region block argument types.
     ::llvm::SmallVector<::mlir::Type> getShapeRegionArgumentTypes();
   }];
-
-  let builders = [
-    OpBuilder<(ins "::mlir::TypeRange":$resultTypes,
-                   "::mlir::Value":$ctx,
-                   "::mlir::ValueRange":$inputs,
-                   "::mlir::hipsr::PlaceholderType":$placeholderType), [{
-      $_state.addOperands(ctx);
-      $_state.addOperands(inputs);
-      $_state.addAttribute(
-          "type", ::mlir::hipsr::PlaceholderTypeAttr::get(
-                      $_builder.getContext(), placeholderType));
-      $_state.addTypes(resultTypes);
-      $_state.addRegion();
-    }]>
-  ];
 }

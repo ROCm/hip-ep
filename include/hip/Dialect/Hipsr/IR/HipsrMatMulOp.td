@@ -10,7 +10,10 @@
 // Hipsr_MatMulOp
 //===----------------------------------------------------------------------===//
 
-def Hipsr_MatMulOp : Hipsr_DpsOp<"matmul"> {
+def Hipsr_MatMulOp : Hipsr_DpsOp<
+    "matmul",
+    [DeclareOpInterfaceMethods<ShapeRegionInterface,
+                               ["populateShapeRegion"]>]> {
   let summary = "Matrix multiply (batched N-D x N-D), destination-passing style";
   let description = [{
     Matrix multiplication with ONNX/NumPy `matmul` semantics. For operands that
@@ -33,7 +36,7 @@ def Hipsr_MatMulOp : Hipsr_DpsOp<"matmul"> {
     `(` $ctx `)`
     `ins` `(` $A `,` $B `:` type($A) `,` type($B) `)`
     `outs` `(` $init `:` type($init) `)`
-    attr-dict (`:` type($result_tensors)^)? (`shape_region` $shape_region^)?
+    attr-dict (`:` type($result_tensors)^)?
   }];
 
   // Rejects rank-0 (scalar) A/B: matmul needs at least a contraction dim.

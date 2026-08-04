@@ -19,7 +19,7 @@
 func.func @multiple_results_and_scalar(%ctx: !hipsr.context)
     -> (tensor<2x3xf16>, tensor<f16>) {
   %inits:2 = hipsr.placeholder(%ctx)
-      {type = #hipsr.placeholder_type<barrier>}
+      {placeholder_type = #hipsr.placeholder_type<barrier>}
       : tensor<2x3xf16>, tensor<f16> shape_region {
   ^bb0(%shape_ctx: !hipsr.context):
     %c2 = arith.constant 2 : index
@@ -45,7 +45,7 @@ func.func @multiple_results_and_scalar(%ctx: !hipsr.context)
 // Shape-yield operands must use the Shape dialect's value shape type.
 func.func @non_shape_operand(%ctx: !hipsr.context) -> tensor<f16> {
   %init = hipsr.placeholder(%ctx)
-      {type = #hipsr.placeholder_type<barrier>} : tensor<f16>
+      {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<f16>
       shape_region {
   ^bb0(%shape_ctx: !hipsr.context):
     %extent = arith.constant 1 : index
@@ -66,7 +66,8 @@ func.func @non_shape_operand(%ctx: !hipsr.context) -> tensor<f16> {
 func.func @implicit_empty_yield(%ctx: !hipsr.context) -> tensor<f16> {
   // expected-error @+1 {{must yield one !shape.shape per enclosing placeholder result; expected 1, got 0}}
   %init = hipsr.placeholder(%ctx)
-      {type = #hipsr.placeholder_type<barrier>} : tensor<f16> shape_region {
+      {placeholder_type = #hipsr.placeholder_type<barrier>}
+      : tensor<f16> shape_region {
   ^bb0(%shape_ctx: !hipsr.context):
   }
   %result = hipsr.compute(%ctx) ins() outs(%init : tensor<f16>) {

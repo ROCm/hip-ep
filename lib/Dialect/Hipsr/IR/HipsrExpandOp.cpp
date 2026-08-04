@@ -5,7 +5,7 @@
 
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
-#include "hip/Dialect/Hipsr/IR/HipsrShapeRegionInterface.h"
+#include "hip/Dialect/Hipsr/IR/HipsrShapeRegionPopulationUtils.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -21,10 +21,10 @@ using namespace mlir;
 using namespace mlir::hipsr;
 
 namespace {
-struct ExpandShapeArgs : ShapeRegionArgs<ExpandOp> {
+struct ExpandShapeArgs : ShapeRegionArgs {
   using ShapeRegionArgs::ShapeRegionArgs;
-  Value getInput() const { return in(0); }
-  Value getRequestedShape() const { return in(1); }
+  Value getInput() const { return *in(0); }
+  Value getRequestedShape() const { return *in(1); }
 };
 
 struct CanonicalizeConstantShape : OpRewritePattern<ExpandOp> {
@@ -32,8 +32,7 @@ struct CanonicalizeConstantShape : OpRewritePattern<ExpandOp> {
 
   LogicalResult matchAndRewrite(ExpandOp op,
                                 PatternRewriter &rewriter) const override {
-    if (!op.getShape() || op.getShapeAttrAttr() ||
-        !op.getShapeRegion().empty()) {
+    if (!op.getShape() || op.getShapeAttrAttr()) {
       return failure();
     }
 
