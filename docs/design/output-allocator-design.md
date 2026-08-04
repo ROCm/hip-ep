@@ -22,7 +22,7 @@ Licensed under the MIT License.
 
 Let `main_graph` allocate each output **at the point where its shape is computed** by pulling the buffer from an EP-supplied allocator. The graph owns *when/what shape*, the EP owns *where the memory comes from*.
 
-**Scope.** Shape-derived dynamic outputs (extent from `memref.dim` of inputs). Data-dependent outputs (`NonZero`, `Range` — extent from kernel results) deferred.
+**Scope.** Shape-derived dynamic outputs (extent from `memref.dim` of inputs). A data-dependent extent works only when its producer's converter turns the count into a host `index` (device scan + `hip.readback_dim`) *before* the allocation, so `hip.alloc_output` receives the real extent; `onnx.Compress` does this. An extent that is only known after the producing kernel ran (`NonZero`, `Range`) is still deferred.
 
 ### Usage
 

@@ -138,7 +138,7 @@ This copies all required DLLs from the install directory to the test binary dire
 ## Environment Variables
 
 The test automatically sets these environment variables for verbose logging:
-- `XLNX_ONNX_EP_VERBOSE=2` - Enable ONNX EP verbose logging
+- `HIP_EP_VERBOSE=2` - Enable ONNX EP verbose logging
 - `DEBUG_LOG_LEVEL=info` - Enable debug logging
 - `MORPHIZEN_DEBUG_PLUGIN=1` - Enable plugin loading debug logging
 
@@ -190,7 +190,7 @@ Set `MORPHIZEN_DEBUG_MLIR_BACKEND=2` to dump MLIR bytecode:
 
 ```bash
 MORPHIZEN_DEBUG_MLIR_BACKEND=2 \
-XLNX_ONNX_EP_VERBOSE=2 \
+HIP_EP_VERBOSE=2 \
 "$BUILD_DIR/bin/Debug/test-e2e-mlir.exe"
 ```
 

@@ -6,6 +6,8 @@
 // ops and the shared Hipsr_Op base class live in HipsrOps.td.
 //
 
+include "mlir/Dialect/Shape/IR/ShapeBase.td"
+
 //===----------------------------------------------------------------------===//
 // Hipsr_ShapeYieldOp
 //===----------------------------------------------------------------------===//
@@ -57,6 +59,38 @@ def Hipsr_ShapeYieldOp : Hipsr_Op<"shape_yield", [Pure, Terminator]> {
                    CArg<"::mlir::TypeRange", "{}">:$elementTypes), [{
       build($_builder, $_state, shapes,
             $_builder.getTypeArrayAttr(elementTypes));
+    }]>
+  ];
+}
+
+//===----------------------------------------------------------------------===//
+// Hipsr_ShapeYield2Op
+//===----------------------------------------------------------------------===//
+
+def Hipsr_ShapeYield2Op : Hipsr_Op<
+    "shape_yield2", [Pure, Terminator, HasParent<"PlaceholderOp">]> {
+  let summary = "Yield result shapes from a placeholder shape region";
+  let description = [{
+    Ends a `hipsr.placeholder` shape region and yields one `!shape.shape`
+    value for each placeholder result. Element types and ranked tensor types
+    remain on the placeholder results.
+
+    A scalar result still has one shape operand whose extent list is empty.
+    For example:
+    ```mlir
+    hipsr.shape_yield2 %shape : !shape.shape
+    hipsr.shape_yield2 %values_shape, %indices_shape
+        : !shape.shape, !shape.shape
+    ```
+  }];
+
+  let arguments = (ins Variadic<Shape_ShapeType>:$shapes);
+  let assemblyFormat = "$shapes attr-dict `:` type($shapes)";
+  let hasVerifier = 1;
+
+  let builders = [
+    OpBuilder<(ins), [{
+      $_state.addOperands(::mlir::ValueRange{});
     }]>
   ];
 }

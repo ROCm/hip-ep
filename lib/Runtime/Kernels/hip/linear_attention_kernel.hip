@@ -16,6 +16,17 @@
 
 static constexpr int LA_THREADS = 256;
 
+// --- WMMA (RDNA3 wave32) support, mirrors gemm_wmma_kernel.hip ---
+typedef _Float16 la_half16 __attribute__((ext_vector_type(16)));
+typedef float    la_float8 __attribute__((ext_vector_type(8)));
+#if !defined(__has_builtin) ||                                                  \
+    !__has_builtin(__builtin_amdgcn_wmma_f32_16x16x16_f16_w32)
+static __device__ __forceinline__ la_float8
+la_wmma_unavailable(la_half16, la_half16, la_float8 c) { __builtin_trap(); return c; }
+#define __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c) la_wmma_unavailable((a),(b),(c))
+#endif
+static constexpr int LA_WT = 16;   // WMMA 16x16x16 tile dim
+
 static constexpr int LA_RULE_LINEAR      = 0;
 static constexpr int LA_RULE_GATED       = 1;
 static constexpr int LA_RULE_DELTA       = 2;
@@ -664,15 +675,15 @@ extern "C" int hip_linear_attention_decode(
 }
 
 //===----------------------------------------------------------------------===//
-// Chunked-parallel gated-delta PREFILL kernel
+// Gated-delta linear-attention PREFILL
 //===----------------------------------------------------------------------===//
 //
 // Replaces the per-token launch loop (one decode-kernel launch per timestep,
-// each streaming the whole recurrent state from global) with a SINGLE launch
-// that processes the entire sequence.  One block per (batch, kv_head); each
-// block loops over chunks of LA_CHUNK tokens, keeping the recurrent state S in
-// GLOBAL (read once / written once per chunk) and the per-chunk tiles + the
-// [C,C] coupling matrices in LDS.
+// each streaming the whole recurrent state from global) with a chunked
+// formulation that processes the whole sequence in a few launches, keeping the
+// per-chunk tiles and [C,C] coupling matrices in LDS. The per-chunk math is
+// stated here; the chunk-parallel decomposition that runs it (and breaks the
+// cross-chunk serial dependency) is documented below.
 //
 // Math (scalar gate a_t = exp(g_t), per kv-head; tokens 0..C-1 in a chunk;
 // chunk-start state S0):
@@ -694,26 +705,394 @@ extern "C" int hip_linear_attention_decode(
 // Only the gated_delta rule with scalar log-decay (decay_per_key_dim==0) is
 // implemented here; the launcher declines other configs so the runtime falls
 // back to the per-token loop.
-static constexpr int LA_CHUNK         = 32;   // tokens per chunk
-static constexpr int LA_PREFILL_THREADS = 256;
+static constexpr int LA_CHUNK         = 16;   // tokens per chunk
+
+//===----------------------------------------------------------------------===//
+// Chunk-parallel gated_delta prefill (breaks the seq_len/LA_CHUNK-deep serial
+// recurrence -- 1,174 chunks for an 18.8k prompt at the current LA_CHUNK).
+//
+// A naive serial kernel would process chunks one at a time, because the chunk
+// output and state-update both read the chunk-start state S0, which is only
+// known after the previous chunk finishes.  We split each chunk's work into an
+// S0-independent local part (fully parallel across all Hkv*chunk blocks) and
+// a light affine state scan (per head, sequential over chunks but cheap):
+//
+//   Within a chunk (tokens t):
+//     Uloc = (I - tril T)^{-1} (beta .* v)                     [C x dv]
+//     W    = (I - tril T)^{-1} (diag(beta .* A) K)             [C x dk]
+//     Ktilde[s][i] = rlast[s] * K[s][i]                        [C x dk]
+//   Then, with true chunk-start state S0:
+//     U   = Uloc - W @ S0                                      (== original U)
+//     S1  = a_last*S0 + Ktilde^T U   (affine in S0)
+//     O[t]= scale*( A_t (q_t . S0) + sum_{s<=t} P[t,s] U[s] )
+//
+// Pass 1 (parallel): compute Uloc, W, rlast, a_last. Ktilde is not stored: it
+//                    is rlast .* K, which the scan rebuilds from the key.
+// Pass 2 (scan):     S0_c per chunk, then S1 = a_last*S0 + Ktilde^T(Uloc - W S0).
+// Pass 3 (parallel): recompute P, form U = Uloc - W S0, emit O.
+//
+// The three passes run over a window of LA_WINDOW_CHUNKS chunks at a time
+// rather than the whole sequence, so the per-(head,chunk) scratch is bounded by
+// the window instead of by seq_len. The scan is already sequential over chunks,
+// so windowing only changes where its running state lives between launches.
+// Numerically equivalent to the serial kernel (same fp32 math, same per-chunk
+// fp16 rounding of S); differs only by fp32 op-order (cosine ~1.0).
+//===----------------------------------------------------------------------===//
+static constexpr int LA_PAR_THREADS = 256;
+
+// Splits of the scan's dv dimension. The scan is serial in the chunk index but
+// both of its inner products touch only column j of S0, so the recurrence
+// factors completely over dv; splitting it is what lets the scan run more than
+// B*Hkv blocks. 1 = no split.
+#define LA_SCAN_NSPLIT 4
+
+// LDS row strides for the tiles that feed the matrix cores, as a dimension
+// plus a pad, in halves. Wide fragment loads want 16-byte alignment, i.e. a
+// stride that is a multiple of 8 halves; conflict-free banking wants half the
+// stride to be odd. Those cannot both hold, so the pads below are measured
+// rather than derived: at dk=128 the alternatives cost the scan 79% (pad 0,
+// a 32-way conflict) and 6% (pad 16) against pad 8's 4-way one.
+#define LA_SST_PAD 8   // state tile,    row stride dk + pad
+#define LA_KT_PAD  8   // Ktilde^T tile, row stride LA_CHUNK + pad
 
 template <typename T>
-__global__ void linear_attention_prefill_chunked_kernel(
-    const T* __restrict__ query,
+__global__ void la_pf_pass1_local(
     const T* __restrict__ key,
     const T* __restrict__ value,
     const T* __restrict__ decay,
     const T* __restrict__ beta_in,
-    T* __restrict__ state,        // [B, Hkv, dk, dv], pre-initialized
-    T* __restrict__ output,       // [B, seq_len, Hout*dv]
-    int seq_len, int Hq, int Hkv, int n_k, int dk, int dv,
-    float scale, int beta_per_head)
+    float* __restrict__ Uloc_g,   // [B*Hkv*nchunks_win, C*dv]
+    float* __restrict__ W_g,      // [B*Hkv*nchunks_win, C*dk]
+    float* __restrict__ rlast_g,  // [B*Hkv*nchunks_win, C] (a_last/A_s per token)
+    float* __restrict__ alast_g,  // [B*Hkv*nchunks_win]
+    int seq_len, int Hkv, int n_k, int dk, int dv,
+    int beta_per_head, int nchunks_win, int chunk_begin)
 {
-    const int bg = blockIdx.x;
-    const int b  = bg / Hkv;
-    const int g  = bg % Hkv;
+    // cw indexes the chunk within this launch window; chunk_begin + cw is the
+    // chunk's position in the sequence. Scratch is sized for one window, so it
+    // is addressed with the window-local index while the input/output tensors
+    // are addressed with the global one.
+    const int cw  = blockIdx.x % nchunks_win;
+    int tmp       = blockIdx.x / nchunks_win;
+    const int g   = tmp % Hkv;
+    const int b   = tmp / Hkv;
     const int tid = threadIdx.x;
     const int nthreads = blockDim.x;
+    const int c0   = (chunk_begin + cw) * LA_CHUNK;
+    const int Ceff = min(LA_CHUNK, seq_len - c0);
+    const int h_k  = g * n_k / Hkv;
+
+    const int64_t k_bs     = (int64_t)seq_len * n_k  * dk;
+    const int64_t v_bs     = (int64_t)seq_len * Hkv  * dv;
+    const int64_t decay_bs = (int64_t)seq_len * Hkv;
+    const int64_t beta_bs  = beta_per_head ? (int64_t)seq_len * Hkv
+                                           : (int64_t)seq_len;
+    const int64_t base = ((int64_t)(b * Hkv + g) * nchunks_win + cw);
+
+    // Compact LDS (K as half, single reused solve buffer) keeps this pass off
+    // the occupancy limit: 13,568 B at C=16, so four blocks fit a CU's 64 KB.
+    extern __shared__ float smem[];
+    float*  Tm   = smem;                           // C*C
+    float*  Buf  = Tm + LA_CHUNK * LA_CHUNK;       // C*dv (Uloc, then W)
+    float*  Asm  = Buf + LA_CHUNK * dv;            // C
+    float*  clog = Asm + LA_CHUNK;                 // C
+    float*  bsm  = clog + LA_CHUNK;                // C
+    float*  rlast= bsm + LA_CHUNK;                 // C
+    __half* Ksm  = (__half*)(rlast + LA_CHUNK);    // C*dk (half)
+
+    // The Tm fragment load below reads the whole C*dk tile, including the rows
+    // past Ceff that the scalar version never touched, so they have to hold
+    // something finite.
+    for (int idx = Ceff * dk + tid; idx < LA_CHUNK * dk; idx += nthreads)
+        Ksm[idx] = __float2half(0.f);
+    for (int idx = tid; idx < Ceff * dk; idx += nthreads) {
+        int t = idx / dk, i = idx % dk;
+        Ksm[t * dk + i] = __float2half(to_float(
+            key[b * k_bs + (int64_t)(c0 + t) * n_k * dk +
+                (int64_t)h_k * dk + i]));
+    }
+    for (int t = tid; t < Ceff; t += nthreads) {
+        const int64_t beta_idx =
+            beta_per_head ? b * beta_bs + (int64_t)(c0 + t) * Hkv + g
+                          : b * beta_bs + (int64_t)(c0 + t);
+        bsm[t] = to_float(beta_in[beta_idx]);
+    }
+    __syncthreads();
+    if (tid == 0) {
+        float acc = 0.f;
+        for (int t = 0; t < Ceff; t++) {
+            float gt = to_float(decay[b * decay_bs + (int64_t)(c0 + t) * Hkv + g]);
+            acc += gt;
+            clog[t] = acc;
+            Asm[t]  = expf(acc);
+        }
+    }
+    __syncthreads();
+    const float a_last = Asm[Ceff - 1];
+    for (int s = tid; s < Ceff; s += nthreads)
+        rlast[s] = expf(clog[Ceff - 1] - clog[s]);
+
+    // T[t][s] strict-lower, on the matrix cores. Same shape as pass 3's Pm: A
+    // is K row-major, B wants K^T column-major, which is the same row-major
+    // Ksm, so one operand serves as both.
+    if (tid < 32) {
+        const int ln = tid % LA_WT;
+        const int pr = tid / LA_WT;
+        la_float8 acc = {};
+        for (int k = 0; k < dk; k += LA_WT) {
+            la_half16 frag;
+            for (int ele = 0; ele < LA_WT; ele++)
+                frag[ele] = (_Float16)__half2float(Ksm[ln * dk + k + ele]);
+            acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(frag, frag, acc);
+        }
+        for (int ele = 0; ele < 8; ele++) {
+            const int t = ele * 2 + pr, s = ln;
+            if (t < Ceff && s < Ceff)
+                Tm[t * Ceff + s] =
+                    (s < t) ? bsm[t] * expf(clog[t] - clog[s]) * acc[ele] : 0.f;
+        }
+    }
+    __syncthreads();
+
+    // The two solves below share a triangular factor and differ only in their
+    // right-hand side, so they can be run as one solve of width dv+dk, which
+    // uses the whole block at dv=128 and halves the 30 barriers per chunk.
+    // Measured: 4.7% slower. Both right-hand sides then have to be resident at
+    // once, which takes this pass from 13,568 to 21,760 B of LDS and 4 blocks
+    // per CU down to 3, and that costs more than the barriers save.
+    // --- Solve 1: Uloc = (I-trilT)^{-1}(beta.*v) ---
+    for (int idx = tid; idx < Ceff * dv; idx += nthreads) {
+        int t = idx / dv, j = idx % dv;
+        float vtj = to_float(
+            value[b * v_bs + (int64_t)(c0 + t) * Hkv * dv + (int64_t)g * dv + j]);
+        Buf[t * dv + j] = bsm[t] * vtj;
+    }
+    __syncthreads();
+    for (int t = 1; t < Ceff; t++) {
+        for (int j = tid; j < dv; j += nthreads) {
+            float acc = Buf[t * dv + j];
+            for (int s = 0; s < t; s++)
+                acc -= Tm[t * Ceff + s] * Buf[s * dv + j];
+            Buf[t * dv + j] = acc;
+        }
+        __syncthreads();
+    }
+    for (int idx = tid; idx < LA_CHUNK * dv; idx += nthreads) {
+        int t = idx / dv;
+        Uloc_g[base * (LA_CHUNK * dv) + idx] = (t < Ceff) ? Buf[idx] : 0.f;
+    }
+    __syncthreads();
+
+    // --- Solve 2: W = (I-trilT)^{-1}(diag(beta.*A) K) ---
+    for (int idx = tid; idx < Ceff * dk; idx += nthreads) {
+        int t = idx / dk, i = idx % dk;
+        Buf[t * dk + i] = bsm[t] * Asm[t] * __half2float(Ksm[t * dk + i]);
+    }
+    __syncthreads();
+    for (int t = 1; t < Ceff; t++) {
+        for (int i = tid; i < dk; i += nthreads) {
+            float acc = Buf[t * dk + i];
+            for (int s = 0; s < t; s++)
+                acc -= Tm[t * Ceff + s] * Buf[s * dk + i];
+            Buf[t * dk + i] = acc;
+        }
+        __syncthreads();
+    }
+    for (int idx = tid; idx < LA_CHUNK * dk; idx += nthreads) {
+        int t = idx / dk;
+        W_g[base * (LA_CHUNK * dk) + idx] = (t < Ceff) ? Buf[idx] : 0.f;
+    }
+    // Store only the per-token rlast scalar (C floats/chunk) instead of the
+    // full Ktilde = rlast*K tile (C*dk floats/chunk). The scan rebuilds Ktilde
+    // from the original key tensor + rlast (bit-identical values, ~1/dk the
+    // scratch). rlast is 0 for the padded tail (t >= Ceff) so Ktilde vanishes
+    // there without the scan needing to read out-of-range key rows.
+    for (int t = tid; t < LA_CHUNK; t += nthreads)
+        rlast_g[base * LA_CHUNK + t] = (t < Ceff) ? rlast[t] : 0.f;
+    if (tid == 0) alast_g[base] = a_last;
+}
+
+// Pass 2: per-head sequential affine scan over chunks.
+template <typename T>
+__global__ void la_pf_scan(
+    const T* __restrict__ key,     // [B, seq, n_k*dk] -- to rebuild Ktilde
+    const float* __restrict__ Uloc_g,
+    const float* __restrict__ W_g,
+    const float* __restrict__ rlast_g,  // [B*Hkv*nchunks_win, C]
+    const float* __restrict__ alast_g,
+    __half* __restrict__ S0_g,     // [B*Hkv*nchunks_win, dv*dk] chunk-start
+                                   // states, held transposed for pass 3
+    __half* __restrict__ carry_g,  // [B*Hkv, dk*dv] state carried across windows
+    T* __restrict__ state,         // final state out [B,Hkv,dk,dv]
+    int seq_len, int Hkv, int n_k, int dk, int dv,
+    int nchunks_win, int chunk_begin, int is_first, int is_last)
+{
+    // The scan is serial in the chunk index, but both of its inner products --
+    // WS[t][j] = sum_i W[t][i] S0[i][j] and S1[i][j] = a S0[i][j] + sum_s
+    // Ktilde[s][i] U[s][j] -- touch only column j. So the recurrence factors
+    // completely over dv and can be split across blocks: at NSPLIT=1 this is
+    // dvs == dv, j0 == 0 and the code below is the unsplit scan unchanged.
+    // The split index varies fastest so the blocks sharing a head (and hence
+    // sharing the W and key reads each split duplicates) are adjacent.
+    const int split = blockIdx.x % LA_SCAN_NSPLIT;
+    const int bg = blockIdx.x / LA_SCAN_NSPLIT;
+    const int b  = bg / Hkv;
+    const int g  = bg % Hkv;
+    const int dvs = dv / LA_SCAN_NSPLIT;   // columns this block owns
+    const int j0  = split * dvs;
+    const int tid = threadIdx.x;
+    const int nthreads = blockDim.x;
+    const int h_k = g * n_k / Hkv;
+    const int64_t k_bs = (int64_t)seq_len * n_k * dk;
+    const int64_t state_bs = (int64_t)Hkv * dk * dv;
+    T* Sout = state + b * state_bs + (int64_t)g * dk * dv;
+    __half* carry = carry_g + (int64_t)bg * dk * dv;
+
+    extern __shared__ float smem[];
+    // The state tile is held transposed -- dvs rows of dk, one row per dv
+    // column this block owns. Both GEMMs below read their B operand
+    // column-major, and this is the layout that makes that contiguous; it also
+    // makes the S0 handoff to pass 3 a straight copy instead of a transposing
+    // store, which is what sank an earlier attempt to transpose S0 alone.
+    __half* Ssm  = (__half*)smem;                      // dvs*sst (half)
+    const int sst = dk + LA_SST_PAD;
+    const int ktt = LA_CHUNK + LA_KT_PAD;
+    // One buffer serves both GEMMs' A operand: W for the first, Ktilde^T for
+    // the second, which is only written once the first has been consumed.
+    __half* Ah   = Ssm + dvs * sst;                    // max(C*dk, dk*ktt) half
+    __half* Ubuf = Ah + dk * ktt;                      // dvs*C (half), U^T
+
+    // The first window seeds from the incoming state buffer (matches the serial
+    // kernel, which reads S in place; == 0 for a fresh prefill). Later windows
+    // resume from the fp16 carry rather than re-reading `state`: the running
+    // state is fp16 in LDS, so a round trip through a narrower T (bf16 has 8
+    // mantissa bits vs fp16's 10) would perturb it at every window boundary.
+    for (int idx = tid; idx < dk * dvs; idx += nthreads) {
+        const int i = idx / dvs, jj = idx % dvs;
+        const int64_t gi = (int64_t)i * dv + j0 + jj;
+        Ssm[jj * sst + i] = is_first ? __float2half(to_float(Sout[gi])) : carry[gi];
+    }
+    __syncthreads();
+
+    for (int cw = 0; cw < nchunks_win; cw++) {
+        const int64_t base = ((int64_t)(b * Hkv + g) * nchunks_win + cw);
+        const int c0   = (chunk_begin + cw) * LA_CHUNK;
+        const int Ceff = min(LA_CHUNK, seq_len - c0);
+        // store chunk-start state (this split's dv columns only). S0_g is
+        // [dv][dk], so both sides are contiguous in i.
+        for (int idx = tid; idx < dvs * dk; idx += nthreads) {
+            const int jj = idx / dk, i = idx % dk;
+            S0_g[base * (dk * dv) + (int64_t)(j0 + jj) * dk + i] = Ssm[jj * sst + i];
+        }
+        // --- both inner products on the matrix cores ---
+        // Every fragment below is contiguous, which is the whole reason the
+        // state is held transposed: A operands are row-major and B operands
+        // are read column-major, i.e. along a transposed row.
+        const int wf   = tid / 32;
+        const int nwf  = nthreads / 32;
+        const int lane = (tid % 32) % LA_WT;
+        const int pair = (tid % 32) / LA_WT;
+        const int ntv  = dvs / LA_WT;
+
+        for (int idx = tid; idx < LA_CHUNK * dk; idx += nthreads)
+            Ah[idx] = __float2half(W_g[base * (LA_CHUNK * dk) + idx]);
+        __syncthreads();
+        // GEMM 1: U^T[dvs x C] = Uloc^T - (W[C x dk] @ S0[dk x dvs])
+        for (int tile = wf; tile < (LA_CHUNK / LA_WT) * ntv; tile += nwf) {
+            const int m_base = (tile / ntv) * LA_WT;
+            const int n_base = (tile % ntv) * LA_WT;
+            la_float8 acc = {};
+            for (int k = 0; k < dk; k += LA_WT) {
+                la_half16 a_frag, b_frag;
+                for (int ele = 0; ele < LA_WT; ele++) {
+                    a_frag[ele] = (_Float16)__half2float(Ah[(m_base + lane) * dk + k + ele]);
+                    b_frag[ele] = (_Float16)__half2float(Ssm[(n_base + lane) * sst + k + ele]);
+                }
+                acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag, b_frag, acc);
+            }
+            // land it as U^T so GEMM 2 can read it as a column-major B operand
+            const int jj = n_base + lane;
+            for (int ele = 0; ele < 8; ele++) {
+                const int t = m_base + ele * 2 + pair;
+                Ubuf[jj * LA_CHUNK + t] = __float2half(
+                    Uloc_g[base * (LA_CHUNK * dv) + (int64_t)t * dv + j0 + jj] - acc[ele]);
+            }
+        }
+        __syncthreads();
+        // Rebuild Ktilde transposed, Ah[i][s] = rlast[s]*K[s][i]. The read of
+        // key stays coalesced and the transpose is paid on the LDS write,
+        // which is the cheaper of the two places to pay it.
+        for (int idx = tid; idx < LA_CHUNK * dk; idx += nthreads) {
+            int t = idx / dk, i = idx % dk;
+            float rl = rlast_g[base * LA_CHUNK + t];
+            Ah[i * ktt + t] = __float2half((t < Ceff)
+                ? rl * to_float(key[b * k_bs + (int64_t)(c0 + t) * n_k * dk +
+                                    (int64_t)h_k * dk + i])
+                : 0.f);
+        }
+        const float a_last = alast_g[base];
+        __syncthreads();
+        // GEMM 2: S1[dk x dvs] = a_last*S0 + Ktilde^T[dk x C] @ U[C x dvs]
+        for (int tile = wf; tile < (dk / LA_WT) * ntv; tile += nwf) {
+            const int m_base = (tile / ntv) * LA_WT;
+            const int n_base = (tile % ntv) * LA_WT;
+            la_float8 acc = {};
+            for (int k = 0; k < LA_CHUNK; k += LA_WT) {
+                la_half16 a_frag, b_frag;
+                for (int ele = 0; ele < LA_WT; ele++) {
+                    a_frag[ele] = (_Float16)__half2float(Ah[(m_base + lane) * ktt + k + ele]);
+                    b_frag[ele] = (_Float16)__half2float(Ubuf[(n_base + lane) * LA_CHUNK + k + ele]);
+                }
+                acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag, b_frag, acc);
+            }
+            __half* srow = Ssm + (n_base + lane) * sst + m_base;
+            for (int ele = 0; ele < 8; ele++) {
+                const int i = ele * 2 + pair;
+                srow[i] = __float2half(a_last * __half2float(srow[i]) + acc[ele]);
+            }
+        }
+        __syncthreads();
+    }
+    // Only the final window publishes the state in the caller's dtype; the rest
+    // hand off through the carry buffer. Each split writes only its own dv
+    // columns, so the splits never overlap.
+    for (int idx = tid; idx < dk * dvs; idx += nthreads) {
+        const int i = idx / dvs, jj = idx % dvs;
+        const int64_t gi = (int64_t)i * dv + j0 + jj;
+        if (is_last)
+            Sout[gi] = from_float<T>(__half2float(Ssm[jj * sst + i]));
+        else
+            carry[gi] = Ssm[jj * sst + i];
+    }
+}
+
+// Pass 3: per (head,chunk) parallel output. The dominant [Q;W]@S0 GEMM
+// (M=2C, K=dk, N=dv) runs on the RDNA3 wave-matrix cores; the small P@U intra
+// term stays scalar. Requires blockDim=256 (8 wave32 wavefronts) and dk,dv
+// multiples of 16.
+template <typename T>
+__global__ void __launch_bounds__(256) la_pf_pass3_wmma(
+    const T* __restrict__ query,
+    const T* __restrict__ key,
+    const T* __restrict__ decay,
+    const float* __restrict__ Uloc_g,
+    const float* __restrict__ W_g,
+    const __half* __restrict__ S0_g,
+    T* __restrict__ output,
+    int seq_len, int Hq, int Hkv, int n_k, int dk, int dv,
+    float scale, int nchunks_win, int chunk_begin)
+{
+    // See la_pf_pass1_local: cw is window-local (indexes scratch), chunk_begin
+    // + cw is global (indexes query/key/decay/output).
+    const int cw  = blockIdx.x % nchunks_win;
+    int tmp       = blockIdx.x / nchunks_win;
+    const int g   = tmp % Hkv;
+    const int b   = tmp / Hkv;
+    const int tid = threadIdx.x;
+    const int nthreads = blockDim.x;
+    const int c0   = (chunk_begin + cw) * LA_CHUNK;
+    const int Ceff = min(LA_CHUNK, seq_len - c0);
+    const int M    = 2 * LA_CHUNK;   // stacked [Q; W] rows
 
     const bool inverse_gqa = (Hq < Hkv);
     const int Hout  = Hq >= Hkv ? Hq : Hkv;
@@ -721,164 +1100,255 @@ __global__ void linear_attention_prefill_chunked_kernel(
     const int h_out = inverse_gqa ? g : (g * (Hq / Hkv));
     const int h_k   = g * n_k / Hkv;
 
-    const int64_t q_bs   = (int64_t)seq_len * Hq   * dk;
-    const int64_t k_bs   = (int64_t)seq_len * n_k  * dk;
-    const int64_t v_bs   = (int64_t)seq_len * Hkv  * dv;
-    const int64_t out_bs = (int64_t)seq_len * Hout * dv;
-    const int64_t decay_bs = (int64_t)seq_len * Hkv;          // scalar per head
-    const int64_t beta_bs  = beta_per_head ? (int64_t)seq_len * Hkv
-                                           : (int64_t)seq_len;
-    const int64_t state_bs = (int64_t)Hkv * dk * dv;
-
-    T* S = state + b * state_bs + (int64_t)g * dk * dv;        // [dk,dv]
+    const int64_t q_bs     = (int64_t)seq_len * Hq   * dk;
+    const int64_t k_bs     = (int64_t)seq_len * n_k  * dk;
+    const int64_t out_bs   = (int64_t)seq_len * Hout * dv;
+    const int64_t decay_bs = (int64_t)seq_len * Hkv;
+    const int64_t base = ((int64_t)(b * Hkv + g) * nchunks_win + cw);
+    const __half* S0 = S0_g + base * (dk * dv);
+    const float*  Wc = W_g  + base * (LA_CHUNK * dk);
+    const float*  Ul = Uloc_g + base * (LA_CHUNK * dv);
 
     extern __shared__ float smem[];
-    float* Ksm = smem;                              // [LA_CHUNK*dk]
-    float* Usm = Ksm + LA_CHUNK * dk;               // [LA_CHUNK*dv] : B -> U
-    float* Tm  = Usm + LA_CHUNK * dv;               // [LA_CHUNK*LA_CHUNK]
-    float* Pm  = Tm + LA_CHUNK * LA_CHUNK;          // [LA_CHUNK*LA_CHUNK]
-    float* Asm = Pm + LA_CHUNK * LA_CHUNK;          // [LA_CHUNK]
-    float* clog = Asm + LA_CHUNK;                   // [LA_CHUNK]
-    float* bsm = clog + LA_CHUNK;                   // [LA_CHUNK]
-    float* rlast = bsm + LA_CHUNK;                  // [LA_CHUNK] a_last/A_s
+    float*  QWS  = smem;                          // M*dv (float, WMMA result)
+    float*  Pm   = QWS + M * dv;                  // C*C
+    float*  Asm  = Pm + LA_CHUNK * LA_CHUNK;      // C
+    float*  clog = Asm + LA_CHUNK;                // C
+    __half* QW   = (__half*)(clog + LA_CHUNK);    // M*dk (half; rows 0..C-1 Q, C..2C-1 W)
+    __half* Kh   = QW + M * dk;                   // C*dk (half)
 
-    for (int c0 = 0; c0 < seq_len; c0 += LA_CHUNK) {
-        const int Ceff = min(LA_CHUNK, seq_len - c0);
-
-        // load K tile, beta; build cumlog/A (single-thread prefix scan)
-        for (int idx = tid; idx < Ceff * dk; idx += nthreads) {
-            int t = idx / dk, i = idx % dk;
-            Ksm[t * dk + i] = to_float(
-                key[b * k_bs + (int64_t)(c0 + t) * n_k * dk +
-                    (int64_t)h_k * dk + i]);
-        }
-        for (int t = tid; t < Ceff; t += nthreads) {
-            const int64_t beta_idx =
-                beta_per_head ? b * beta_bs + (int64_t)(c0 + t) * Hkv + g
-                              : b * beta_bs + (int64_t)(c0 + t);
-            bsm[t] = to_float(beta_in[beta_idx]);
-        }
-        __syncthreads();
-        if (tid == 0) {
-            float acc = 0.f;
-            for (int t = 0; t < Ceff; t++) {
-                float gt = to_float(
-                    decay[b * decay_bs + (int64_t)(c0 + t) * Hkv + g]);
-                acc += gt;
-                clog[t] = acc;
-                Asm[t] = expf(acc);
-            }
-        }
-        __syncthreads();
-        const float a_last = Asm[Ceff - 1];
-        // Precompute the per-s state-update scale (A_{C-1}/A_s) ONCE (Ceff exps
-        // total) instead of recomputing it inside the dk*dv phase-6 loop below.
-        // Compute it as exp(clog_last - clog_s), NOT as the ratio a_last/A_s:
-        // under strong intra-chunk decay clog_s can be very negative, so both
-        // A_s = exp(clog_s) AND a_last = exp(clog_last) underflow to 0 in fp32
-        // and the ratio becomes 0/0 = NaN (which then poisons S and every
-        // subsequent chunk -> all-garbage output). The difference clog_last -
-        // clog_s is bounded (<= 0 for log-decay g <= 0), so exp() of it is in
-        // (0, 1] and always finite. This also matches the exp(clog_t - clog_s)
-        // form already used for the P/T ratios above (internal consistency).
-        for (int s = tid; s < Ceff; s += nthreads)
-            rlast[s] = expf(clog[Ceff - 1] - clog[s]);
-        __syncthreads();
-
-        // B[t][j] = beta_t v_t[j] - beta_t A_t (S0^T k_t)[j]  -> Usm
-        // Register-blocked over t: read each S[i,j] from GLOBAL once and fold it
-        // into all Ceff partial sums sk[t], instead of re-reading the whole S
-        // column once per t (LA_CHUNK x fewer global S loads).
-        for (int j = tid; j < dv; j += nthreads) {
-            float sk[LA_CHUNK];
-            for (int t = 0; t < Ceff; t++)
-                sk[t] = 0.f;
-            for (int i = 0; i < dk; i++) {
-                float s = to_float(S[i * dv + j]);
-                for (int t = 0; t < Ceff; t++)
-                    sk[t] += s * Ksm[t * dk + i];
-            }
-            for (int t = 0; t < Ceff; t++) {
-                float vtj = to_float(
-                    value[b * v_bs + (int64_t)(c0 + t) * Hkv * dv +
-                          (int64_t)g * dv + j]);
-                Usm[t * dv + j] = bsm[t] * vtj - bsm[t] * Asm[t] * sk[t];
-            }
-        }
-
-        // T[t][s] (strict lower), P[t][s] (lower incl diag)
-        for (int idx = tid; idx < Ceff * Ceff; idx += nthreads) {
-            int t = idx / Ceff, s = idx % Ceff;
-            if (s < t) {
-                float kk = 0.f;
-                for (int i = 0; i < dk; i++)
-                    kk += Ksm[t * dk + i] * Ksm[s * dk + i];
-                Tm[t * Ceff + s] = bsm[t] * expf(clog[t] - clog[s]) * kk;
-            } else if (s == t) {
-                Tm[t * Ceff + s] = 0.f;
-            }
-            if (s <= t) {
-                float qk = 0.f;
-                for (int i = 0; i < dk; i++)
-                    qk += to_float(
-                              query[b * q_bs + (int64_t)(c0 + t) * Hq * dk +
-                                    (int64_t)h_q * dk + i]) *
-                          Ksm[s * dk + i];
-                Pm[t * Ceff + s] = expf(clog[t] - clog[s]) * qk;
-            }
-        }
-        __syncthreads();
-
-        // forward substitution: U[t] = B[t] - sum_{s<t} T[t,s] U[s] (serial t)
-        for (int t = 1; t < Ceff; t++) {
-            for (int j = tid; j < dv; j += nthreads) {
-                float acc = Usm[t * dv + j];
-                for (int s = 0; s < t; s++)
-                    acc -= Tm[t * Ceff + s] * Usm[s * dv + j];
-                Usm[t * dv + j] = acc;
-            }
-            __syncthreads();
-        }
-
-        // O[t][j] = scale*( A_t (q_t . S0[:,j]) + sum_{s<=t} P[t,s] U[s,j] )
-        // uses chunk-START S0 (global, not yet updated)
-        // Register-blocked over t: read each S0[i,j] from GLOBAL once and fold
-        // it into all Ceff inter-chunk partial sums qs[t] (the (A.*Q) @ S0 term),
-        // mirroring the phase-2 blocking (LA_CHUNK x fewer global S0 loads).
-        for (int j = tid; j < dv; j += nthreads) {
-            float qs[LA_CHUNK];
-            for (int t = 0; t < Ceff; t++)
-                qs[t] = 0.f;
-            for (int i = 0; i < dk; i++) {
-                float s = to_float(S[i * dv + j]);
-                for (int t = 0; t < Ceff; t++)
-                    qs[t] += to_float(
-                                 query[b * q_bs + (int64_t)(c0 + t) * Hq * dk +
-                                       (int64_t)h_q * dk + i]) *
-                             s;
-            }
-            for (int t = 0; t < Ceff; t++) {
-                float inter = Asm[t] * qs[t];
-                float intra = 0.f;
-                for (int s = 0; s <= t; s++)
-                    intra += Pm[t * Ceff + s] * Usm[s * dv + j];
-                output[b * out_bs + (int64_t)(c0 + t) * Hout * dv +
-                       (int64_t)h_out * dv + j] =
-                    from_float<T>(scale * (inter + intra));
-            }
-        }
-        __syncthreads();   // all reads of S0 done before the update below
-
-        // S = a_last*S + Ktilde^T U,  Ktilde[s][i] = (a_last/A_s) Ksm[s][i]
-        for (int idx = tid; idx < dk * dv; idx += nthreads) {
-            int i = idx / dv, j = idx % dv;
-            float acc = a_last * to_float(S[i * dv + j]);
-            for (int s = 0; s < Ceff; s++)
-                acc += rlast[s] * Ksm[s * dk + i] * Usm[s * dv + j];
-            S[i * dv + j] = from_float<T>(acc);
-        }
-        __syncthreads();   // S update complete before next chunk reads it
+    for (int idx = tid; idx < M * dk; idx += nthreads) QW[idx] = __float2half(0.f);
+    // The Pm fragment load below reads the whole C*dk tile, including the rows
+    // past Ceff that the scalar version never touched.
+    for (int idx = tid; idx < LA_CHUNK * dk; idx += nthreads) Kh[idx] = __float2half(0.f);
+    __syncthreads();
+    for (int idx = tid; idx < Ceff * dk; idx += nthreads) {
+        int t = idx / dk, i = idx % dk;
+        Kh[t * dk + i] = __float2half(to_float(
+            key[b * k_bs + (int64_t)(c0 + t) * n_k * dk + (int64_t)h_k * dk + i]));
+        QW[t * dk + i] = __float2half(to_float(
+            query[b * q_bs + (int64_t)(c0 + t) * Hq * dk + (int64_t)h_q * dk + i]));
+        QW[(LA_CHUNK + t) * dk + i] = __float2half(Wc[t * dk + i]);
     }
+    __syncthreads();
+    if (tid == 0) {
+        float acc = 0.f;
+        for (int t = 0; t < Ceff; t++) {
+            acc += to_float(decay[b * decay_bs + (int64_t)(c0 + t) * Hkv + g]);
+            clog[t] = acc;
+            Asm[t]  = expf(acc);
+        }
+    }
+    __syncthreads();
+    // Pm[C x C] = Q[C x dk] @ K^T[dk x C]. Neither fragment needs a layout
+    // change: A is Q row-major, and B wants K^T column-major, which is Kh
+    // row-major. One output tile, so one wave does it -- against a scalar loop
+    // in which all eight waves run the full dk-length dot regardless of how
+    // few of their lanes sit below the diagonal.
+    if (tid < 32) {
+        const int ln = tid % LA_WT;
+        const int pr = tid / LA_WT;
+        la_float8 acc = {};
+        for (int k = 0; k < dk; k += LA_WT) {
+            la_half16 a_frag, b_frag;
+            for (int ele = 0; ele < LA_WT; ele++) {
+                a_frag[ele] = (_Float16)__half2float(QW[ln * dk + k + ele]);
+                b_frag[ele] = (_Float16)__half2float(Kh[ln * dk + k + ele]);
+            }
+            acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag, b_frag, acc);
+        }
+        for (int ele = 0; ele < 8; ele++) {
+            const int t = ele * 2 + pr, s = ln;
+            if (t < Ceff && s <= t)
+                Pm[t * Ceff + s] = expf(clog[t] - clog[s]) * acc[ele];
+        }
+    }
+    __syncthreads();
+
+    // WMMA: QWS[M x dv] = QW[M x dk] @ S0[dk x dv].
+    const int wf   = tid / 32;
+    const int nwf  = nthreads / 32;
+    const int lane = (tid % 32) % LA_WT;
+    const int pair = (tid % 32) / LA_WT;
+    const int mt   = M  / LA_WT;
+    const int nt   = dv / LA_WT;
+    for (int tile = wf; tile < mt * nt; tile += nwf) {
+        const int m_base = (tile / nt) * LA_WT;
+        const int n_base = (tile % nt) * LA_WT;
+        la_float8 acc = {};
+        for (int k = 0; k < dk; k += LA_WT) {
+            la_half16 a_frag, b_frag;
+            for (int ele = 0; ele < LA_WT; ele++) {
+                a_frag[ele] = (_Float16)__half2float(QW[(m_base + lane) * dk + k + ele]);
+                // S0 is [dv][dk], so the B fragment is 16 contiguous halves
+                b_frag[ele] = (_Float16)__half2float(S0[(n_base + lane) * dk + k + ele]);
+            }
+            acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag, b_frag, acc);
+        }
+        for (int ele = 0; ele < 8; ele++)
+            QWS[(m_base + ele * 2 + pair) * dv + n_base + lane] = acc[ele];
+    }
+    __syncthreads();
+
+    // Postprocess per output column: U = Uloc - (W@S0); O = scale*(A.*qs + P_lower@U).
+    // One thread per column leaves half of a 256-thread block idle at dv=128,
+    // so fold U into the W@S0 rows in place -- it costs no extra LDS and no
+    // extra global traffic -- and split the output rows across the spare
+    // threads as well. Rows are interleaved rather than blocked because the
+    // intra term is triangular, so a 0..7 / 8..15 split would be lopsided.
+    for (int idx = tid; idx < Ceff * dv; idx += nthreads) {
+        const int t = idx / dv, j = idx % dv;
+        QWS[(LA_CHUNK + t) * dv + j] = Ul[t * dv + j] - QWS[(LA_CHUNK + t) * dv + j];
+    }
+    __syncthreads();
+    const int nrep  = (dv < nthreads && nthreads % dv == 0) ? nthreads / dv : 1;
+    const int jstep = nthreads / nrep;
+    for (int j = tid % jstep; j < dv; j += jstep) {
+        float U[LA_CHUNK];
+        for (int t = 0; t < Ceff; t++)
+            U[t] = QWS[(LA_CHUNK + t) * dv + j];
+        for (int t = tid / jstep; t < Ceff; t += nrep) {
+            float inter = Asm[t] * QWS[t * dv + j];
+            float intra = 0.f;
+            for (int s = 0; s <= t; s++)
+                intra += Pm[t * Ceff + s] * U[s];
+            output[b * out_bs + (int64_t)(c0 + t) * Hout * dv +
+                   (int64_t)h_out * dv + j] =
+                from_float<T>(scale * (inter + intra));
+        }
+    }
+}
+
+// Chunks processed per launch window. The passes run one window at a time, so
+// the per-(head,chunk) scratch is sized for a window instead of the whole
+// sequence and stops growing with seq_len. 32 chunks = 512 tokens still gives
+// B*Hkv*32 = 1024 blocks per launch at Hkv=32, far more than the 40 CUs need to
+// stay saturated, so the chunk-parallel speedup is unaffected. The extra
+// launches this costs are not a real cost: holding LA_CHUNK at 16 and varying
+// only this constant, 32 (37 windows for an 18.8k prompt, 49.1 MiB of scratch)
+// beats 128 (10 windows, 193.3 MiB) by 9.6%.
+static constexpr int LA_WINDOW_CHUNKS = 32;
+
+// Scratch layout for the chunk-parallel path. The buffer itself is owned by
+// the runtime (RuntimeState::la_scratch, grown on demand, freed on session
+// cleanup) and passed in; this kernel TU only computes the sub-buffer offsets.
+// Kept in one place so hip_linear_attention_prefill_scratch_bytes (used by the
+// wrapper to size the pool) and la_launch_parallel cannot drift apart.
+struct LaScratchLayout { size_t oU, oW, oR, oA, oS, oC, total; };
+
+static inline LaScratchLayout la_scratch_layout(int B, int seq_len, int Hkv,
+                                                int dk, int dv) {
+    const int nchunks = (seq_len + LA_CHUNK - 1) / LA_CHUNK;
+    const int win = nchunks < LA_WINDOW_CHUNKS ? nchunks : LA_WINDOW_CHUNKS;
+    const int64_t ncb = (int64_t)B * Hkv * win;  // # (head,chunk) blocks / window
+    auto align = [](size_t x){ return (x + 255) & ~((size_t)255); };
+    const size_t sz_Uloc  = (size_t)ncb * LA_CHUNK * dv * sizeof(float);
+    const size_t sz_W     = (size_t)ncb * LA_CHUNK * dk * sizeof(float);
+    const size_t sz_rlast = (size_t)ncb * LA_CHUNK * sizeof(float);
+    const size_t sz_alast = (size_t)ncb * sizeof(float);
+    const size_t sz_S0    = (size_t)ncb * dk * dv * sizeof(__half);
+    // Cross-window carry of the recurrent state, one tile per (batch, kv head).
+    // A single-window prefill hands off through `state` directly and never
+    // touches the carry, so it does not pay for it.
+    const size_t sz_carry = (nchunks > win)
+        ? (size_t)B * Hkv * dk * dv * sizeof(__half) : 0;
+    LaScratchLayout L;
+    L.oU = 0;
+    L.oW = align(L.oU + sz_Uloc);
+    L.oR = align(L.oW + sz_W);
+    L.oA = align(L.oR + sz_rlast);
+    L.oS = align(L.oA + sz_alast);
+    L.oC = align(L.oS + sz_S0);
+    L.total = align(L.oC + sz_carry);
+    return L;
+}
+
+// Bytes of runtime scratch the chunk-parallel prefill needs for this shape.
+// Returns 0 for shapes the parallel path does not run (caller sizes nothing).
+extern "C" HIP_KERNEL_API size_t hip_linear_attention_prefill_scratch_bytes(
+    int B, int seq_len, int Hkv, int dk, int dv) {
+    if (B <= 0 || seq_len <= 1 || Hkv <= 0 || dk <= 0 || dv <= 0) return 0;
+    return la_scratch_layout(B, seq_len, Hkv, dk, dv).total;
+}
+
+template <typename T>
+static int la_launch_parallel(
+    hipStream_t s, const T* q, const T* k, const T* v, const T* dec,
+    const T* beta, T* state, T* out,
+    int B, int seq_len, int Hq, int Hkv, int Nk, int dk, int dv,
+    float scale, int beta_per_head, void* scratch, size_t scratch_bytes)
+{
+    const int nchunks = (seq_len + LA_CHUNK - 1) / LA_CHUNK;
+
+    const LaScratchLayout L = la_scratch_layout(B, seq_len, Hkv, dk, dv);
+    if (!scratch || scratch_bytes < L.total) return 1;  // caller under-sized it
+    char* sp = (char*)scratch;
+    float*  Uloc_g  = (float*)(sp + L.oU);
+    float*  W_g     = (float*)(sp + L.oW);
+    float*  rlast_g = (float*)(sp + L.oR);
+    float*  alast_g = (float*)(sp + L.oA);
+    __half* S0_g    = (__half*)(sp + L.oS);
+    __half* carry_g = (__half*)(sp + L.oC);
+
+    const int block = LA_PAR_THREADS;
+    // Pass 1 LDS: Tm + Buf(=C*dv) + 4 vecs (float), plus K tile (half).
+    const size_t s1 = (size_t)(LA_CHUNK * LA_CHUNK + LA_CHUNK * dv +
+                               4 * LA_CHUNK) * sizeof(float) +
+                      (size_t)(LA_CHUNK * dk) * sizeof(__half);
+    // Pass 2 (scan) LDS: padded state tile + the shared A-operand buffer + U,
+    // all fp16 now that the scan runs on the matrix cores, which leaves it
+    // smaller than the 18,432 B the scalar version needed. The dv-split
+    // shrinks everything except the dv-independent A buffer.
+    if (dv % LA_SCAN_NSPLIT != 0) return 1;
+    const int dvs = dv / LA_SCAN_NSPLIT;
+    if (dvs % LA_WT || dk % LA_WT || LA_CHUNK % LA_WT) return 1;
+    const size_t s2 = (size_t)(dvs * (dk + LA_SST_PAD) +
+                               (LA_CHUNK * dk > dk * (LA_CHUNK + LA_KT_PAD)
+                                    ? LA_CHUNK * dk : dk * (LA_CHUNK + LA_KT_PAD)) +
+                               dvs * LA_CHUNK) * sizeof(__half);
+    // Pass 3 (WMMA) LDS: QWS(M*dv) + Pm + (Asm,clog) floats, QW(M*dk) + K(C*dk) half.
+    const size_t s3 = (size_t)(2 * LA_CHUNK * dv + LA_CHUNK * LA_CHUNK +
+                               2 * LA_CHUNK) * sizeof(float) +
+                      (size_t)(2 * LA_CHUNK * dk + LA_CHUNK * dk) * sizeof(__half);
+    if (s1 > 64 * 1024 || s2 > 64 * 1024 || s3 > 64 * 1024) return 1;
+
+    // With the dv-split there are LA_SCAN_NSPLIT times as many scan blocks and
+    // each owns dv/NSPLIT columns, so a narrower block is what keeps them
+    // resident. Measured: at NSPLIT=4 it is worth 13 points; without the split
+    // it costs 17.
+    const int scan_block = (LA_SCAN_NSPLIT > 1) ? 256 : 1024;
+
+    // Window the sequence so the scratch above covers one window rather than
+    // the whole prefill. The three passes are issued back-to-back on the same
+    // stream, so pass 3 of a window has finished reading Uloc/W/S0 before pass
+    // 1 of the next window overwrites them -- no extra synchronisation needed.
+    // The scan carries the recurrent state between windows (carry_g).
+    for (int cbeg = 0; cbeg < nchunks; cbeg += LA_WINDOW_CHUNKS) {
+        const int rem = nchunks - cbeg;
+        const int win = rem < LA_WINDOW_CHUNKS ? rem : LA_WINDOW_CHUNKS;
+        const int64_t ncb = (int64_t)B * Hkv * win;  // (head,chunk) blocks
+        const int is_first = (cbeg == 0) ? 1 : 0;
+        const int is_last  = (cbeg + win >= nchunks) ? 1 : 0;
+
+        hipLaunchKernelGGL(la_pf_pass1_local<T>, dim3((unsigned)ncb), dim3(block),
+            s1, s, k, v, dec, beta, Uloc_g, W_g, rlast_g, alast_g,
+            seq_len, Hkv, Nk, dk, dv, beta_per_head, win, cbeg);
+        hipLaunchKernelGGL(la_pf_scan<T>,
+            dim3((unsigned)(B * Hkv * LA_SCAN_NSPLIT)), dim3(scan_block),
+            s2, s, k, Uloc_g, W_g, rlast_g, alast_g, S0_g, carry_g, state,
+            seq_len, Hkv, Nk, dk, dv, win, cbeg, is_first, is_last);
+        hipLaunchKernelGGL(la_pf_pass3_wmma<T>, dim3((unsigned)ncb), dim3(256),
+            s3, s, q, k, dec, Uloc_g, W_g, S0_g, out,
+            seq_len, Hq, Hkv, Nk, dk, dv, scale, win, cbeg);
+    }
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        fprintf(stderr, "[custom_kernels] la_launch_parallel failed: %s\n",
+                hipGetErrorString(err));
+        return (int)err;
+    }
+    return 0;
 }
 
 extern "C" int hip_linear_attention_prefill_chunked(
@@ -901,7 +1371,9 @@ extern "C" int hip_linear_attention_prefill_chunked(
     int64_t update_rule,
     int64_t decay_per_key_dim,
     int64_t beta_per_head,
-    int64_t type)
+    int64_t type,
+    void* scratch,
+    size_t scratch_bytes)
 {
     // Decline (return 1 -> caller falls back to per-token loop) for any config
     // this kernel does not implement.
@@ -916,71 +1388,46 @@ extern "C" int hip_linear_attention_prefill_chunked(
     const int dk_i = static_cast<int>(dk);
     const int dv_i = static_cast<int>(dv);
 
-    // LDS budget: Ksm + Usm + Tm + Pm + 4 vectors of length LA_CHUNK
-    // (Asm, clog, bsm, rlast).
-    const size_t smem_bytes =
-        static_cast<size_t>(LA_CHUNK * dk_i + LA_CHUNK * dv_i +
-                            2 * LA_CHUNK * LA_CHUNK + 4 * LA_CHUNK) *
-        sizeof(float);
-    if (smem_bytes > 64 * 1024) return 1;           // too big -> fall back
-
-    hipStream_t hip_stream = static_cast<hipStream_t>(stream);
-    const int grid  = static_cast<int>(B * Hkv);
-    const int block = LA_PREFILL_THREADS;
     const int beta_per_head_i = beta_per_head ? 1 : 0;
 
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] hip_linear_attention_prefill_chunked: B=%lld "
-        "seq_len=%lld Hq=%lld Hkv=%lld Nk=%lld dk=%d dv=%d scale=%.6f "
-        "chunk=%d grid=%d block=%d smem=%zu\n",
-        (long long)B, (long long)seq_len, (long long)Hq, (long long)Hkv,
-        (long long)Nk, dk_i, dv_i, (double)scale, LA_CHUNK, grid, block,
-        smem_bytes);
+    // Pass 3 runs the stacked [Q;W]@S0 GEMM on the RDNA3 WMMA cores
+    // (16x16x16), which requires dk and dv to be multiples of 16; decline
+    // otherwise (return 1) so the runtime falls back to the per-token loop.
+    if (dk_i % 16 != 0 || dv_i % 16 != 0) return 1;
 
-    if (type == 0) {
-        hipLaunchKernelGGL(
-            linear_attention_prefill_chunked_kernel<float>,
-            dim3(grid), dim3(block), smem_bytes, hip_stream,
+    hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+
+    int rc;
+    if (type == 0)
+        rc = la_launch_parallel<float>(hip_stream,
             static_cast<const float*>(query), static_cast<const float*>(key),
             static_cast<const float*>(value), static_cast<const float*>(decay),
             static_cast<const float*>(beta), static_cast<float*>(state),
-            static_cast<float*>(output), static_cast<int>(seq_len),
-            static_cast<int>(Hq), static_cast<int>(Hkv), static_cast<int>(Nk),
-            dk_i, dv_i, scale, beta_per_head_i);
-    } else if (type == 1) {
-        hipLaunchKernelGGL(
-            linear_attention_prefill_chunked_kernel<__half>,
-            dim3(grid), dim3(block), smem_bytes, hip_stream,
+            static_cast<float*>(output), (int)B, (int)seq_len, (int)Hq,
+            (int)Hkv, (int)Nk, dk_i, dv_i, scale, beta_per_head_i,
+            scratch, scratch_bytes);
+    else if (type == 1)
+        rc = la_launch_parallel<__half>(hip_stream,
             static_cast<const __half*>(query), static_cast<const __half*>(key),
             static_cast<const __half*>(value), static_cast<const __half*>(decay),
             static_cast<const __half*>(beta), static_cast<__half*>(state),
-            static_cast<__half*>(output), static_cast<int>(seq_len),
-            static_cast<int>(Hq), static_cast<int>(Hkv), static_cast<int>(Nk),
-            dk_i, dv_i, scale, beta_per_head_i);
-    } else if (type == 2) {
-        hipLaunchKernelGGL(
-            linear_attention_prefill_chunked_kernel<__hip_bfloat16>,
-            dim3(grid), dim3(block), smem_bytes, hip_stream,
+            static_cast<__half*>(output), (int)B, (int)seq_len, (int)Hq,
+            (int)Hkv, (int)Nk, dk_i, dv_i, scale, beta_per_head_i,
+            scratch, scratch_bytes);
+    else if (type == 2)
+        rc = la_launch_parallel<__hip_bfloat16>(hip_stream,
             static_cast<const __hip_bfloat16*>(query),
             static_cast<const __hip_bfloat16*>(key),
             static_cast<const __hip_bfloat16*>(value),
             static_cast<const __hip_bfloat16*>(decay),
             static_cast<const __hip_bfloat16*>(beta),
             static_cast<__hip_bfloat16*>(state),
-            static_cast<__hip_bfloat16*>(output), static_cast<int>(seq_len),
-            static_cast<int>(Hq), static_cast<int>(Hkv), static_cast<int>(Nk),
-            dk_i, dv_i, scale, beta_per_head_i);
-    } else {
+            static_cast<__hip_bfloat16*>(output), (int)B, (int)seq_len,
+            (int)Hq, (int)Hkv, (int)Nk, dk_i, dv_i, scale, beta_per_head_i,
+            scratch, scratch_bytes);
+    else
         return 1;
-    }
 
-    hipError_t err = hipGetLastError();
-    if (err != hipSuccess) {
-        fprintf(stderr,
-                "[custom_kernels] hip_linear_attention_prefill_chunked launch "
-                "failed: %s\n",
-                hipGetErrorString(err));
-        return static_cast<int>(err);   // negative-ish; caller treats !=0,!=1
-    }
-    return 0;
+    // 0 on success; nonzero -> caller falls back to the per-token loop.
+    return rc;
 }

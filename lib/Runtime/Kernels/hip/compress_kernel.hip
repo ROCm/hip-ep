@@ -17,6 +17,7 @@
 namespace {
 
 constexpr int kMaxRank = 8;
+constexpr int kCompressScanBlock = 1024;
 
 struct CompressAxisGeom {
   int64_t axis;
@@ -25,17 +26,60 @@ struct CompressAxisGeom {
   int64_t istrides[kMaxRank];
 };
 
-__global__ void compact_condition_kernel(const uint8_t *__restrict__ condition,
-                                         int64_t condition_len,
-                                         int64_t *__restrict__ selected,
-                                         unsigned long long *__restrict__ count) {
-  int64_t tid =
-      static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (tid >= condition_len)
-    return;
-  if (condition[tid]) {
-    unsigned long long pos = atomicAdd(count, 1ULL);
-    selected[pos] = tid;
+// Ordered stream compaction: writes the indices of the true `condition`
+// entries into `selected` in ASCENDING order, plus their total into `count`.
+//
+// ONNX Compress keeps the selected slices in condition order, so each kept
+// slice must land at its rank among the true entries -- not at the position
+// its thread happened to claim. An atomicAdd-only compaction is cheaper but
+// permutes the slices, which is silently wrong whenever the payload is
+// position-dependent (dropping the padded rows of a vision patch grid, say).
+// Same single-block cooperative scan as nonzero_ordered_kernel:
+//
+//   1. each thread counts the true entries of its chunk [lo, hi)
+//   2. thread 0 exclusive-scans the per-chunk counts and writes the total
+//   3. each thread re-walks its chunk, writing at chunk_offset + local rank
+__global__ void compress_scan_kernel(const uint8_t *__restrict__ condition,
+                                     int64_t condition_len,
+                                     int64_t *__restrict__ selected,
+                                     int64_t *__restrict__ count) {
+  __shared__ int s_chunk_count[kCompressScanBlock];
+  __shared__ int s_chunk_offset[kCompressScanBlock];
+
+  int tid = threadIdx.x;
+  int64_t chunk =
+      (condition_len + kCompressScanBlock - 1) / kCompressScanBlock;
+  int64_t lo = static_cast<int64_t>(tid) * chunk;
+  int64_t hi = lo + chunk;
+  if (lo > condition_len)
+    lo = condition_len;
+  if (hi > condition_len)
+    hi = condition_len;
+
+  int my_count = 0;
+  for (int64_t i = lo; i < hi; ++i) {
+    if (condition[i])
+      ++my_count;
+  }
+  s_chunk_count[tid] = my_count;
+  __syncthreads();
+
+  if (tid == 0) {
+    int sum = 0;
+    for (int t = 0; t < kCompressScanBlock; ++t) {
+      s_chunk_offset[t] = sum;
+      sum += s_chunk_count[t];
+    }
+    *count = sum;
+  }
+  __syncthreads();
+
+  // `selected` holds condition_len slots and the total cannot exceed that, so
+  // no bound check is needed here.
+  int64_t pos = s_chunk_offset[tid];
+  for (int64_t i = lo; i < hi; ++i) {
+    if (condition[i])
+      selected[pos++] = i;
   }
 }
 
@@ -93,49 +137,48 @@ static int launch_compress(void *stream, const void *input, const void *conditio
   if (!input || !condition || !output || !input_shape || !output_shape ||
       !workspace)
     return -1;
-  if (workspace_bytes <
-      static_cast<size_t>(condition_len) * sizeof(int64_t) + sizeof(unsigned long long))
+  if (workspace_bytes < static_cast<size_t>(condition_len) * sizeof(int64_t) +
+                            sizeof(int64_t))
     return -1;
 
   hipStream_t hip_stream = static_cast<hipStream_t>(stream);
   constexpr int kBlockSize = 256;
 
   int64_t *selected = static_cast<int64_t *>(workspace);
-  auto *count_dev = reinterpret_cast<unsigned long long *>(
+  auto *count_dev = reinterpret_cast<int64_t *>(
       static_cast<char *>(workspace) + condition_len * sizeof(int64_t));
 
-  hipError_t err =
-      hipMemsetAsync(count_dev, 0, sizeof(unsigned long long), hip_stream);
-  if (err != hipSuccess)
-    return static_cast<int>(err);
-
-  int compact_grid = static_cast<int>(
-      (condition_len + kBlockSize - 1) / kBlockSize);
-  hipLaunchKernelGGL(compact_condition_kernel, dim3(compact_grid),
-                     dim3(kBlockSize), 0, hip_stream,
-                     static_cast<const uint8_t *>(condition), condition_len,
-                     selected, count_dev);
-  err = hipGetLastError();
+  hipLaunchKernelGGL(compress_scan_kernel, dim3(1), dim3(kCompressScanBlock), 0,
+                     hip_stream, static_cast<const uint8_t *>(condition),
+                     condition_len, selected, count_dev);
+  hipError_t err = hipGetLastError();
   if (err != hipSuccess) {
-    fprintf(stderr,
-            "[custom_kernels] compact_condition_kernel launch failed: %s\n",
+    fprintf(stderr, "[custom_kernels] compress_scan_kernel launch failed: %s\n",
             hipGetErrorString(err));
     return static_cast<int>(err);
   }
 
-  unsigned long long selected_count_host = 0;
-  err = hipMemcpyAsync(&selected_count_host, count_dev,
-                       sizeof(unsigned long long), hipMemcpyDeviceToHost,
-                       hip_stream);
+  int64_t selected_count_host = 0;
+  err = hipMemcpyAsync(&selected_count_host, count_dev, sizeof(int64_t),
+                       hipMemcpyDeviceToHost, hip_stream);
   if (err != hipSuccess)
     return static_cast<int>(err);
   err = hipStreamSynchronize(hip_stream);
   if (err != hipSuccess)
     return static_cast<int>(err);
 
-  int64_t selected_count = static_cast<int64_t>(selected_count_host);
+  int64_t selected_count = selected_count_host;
   if (selected_count <= 0)
     return 0;
+
+  // The destination is written densely with `selected_count` slices along the
+  // selection axis, so a runtime count above the extent the graph allocated
+  // would write past the buffer. That only happens when the declared ONNX
+  // extent disagrees with the data (the compiler sizes a dynamic extent from
+  // the same count via hip.readback_dim); clamp rather than corrupt memory.
+  int64_t out_extent = output_shape[flatten ? 0 : axis];
+  if (selected_count > out_extent)
+    selected_count = out_extent;
 
   if (flatten) {
     int grid = static_cast<int>((selected_count + kBlockSize - 1) / kBlockSize);
