@@ -1629,9 +1629,18 @@ def Hip_CompressOp : Hip_DpsOp<"compress", /*traits=*/[],
   let summary = "Select slices or elements where a 1-D condition is true";
   let description = [{
     Implements ONNX Compress: along `axis`, keep only slices whose
-    corresponding `condition` entry is true. When `flatten` is true the
-    input is treated as a 1-D tensor before selection (no `axis` attribute
-    on the ONNX op).
+    corresponding `condition` entry is true, in condition order. When
+    `flatten` is true the input is treated as a 1-D tensor before selection
+    (no `axis` attribute on the ONNX op).
+
+    The selected extent is data-dependent (the number of true entries), and
+    the `outs` destination defines it: the kernel writes exactly that many
+    slices, densely, starting at the destination's first slice. The condition
+    LENGTH is only an upper bound, so the ONNX->HIP converter sizes a dynamic
+    destination extent from the real count -- scanned on device and read back
+    with `hip.readback_dim` before the destination is allocated -- rather than
+    from the condition length. Reification therefore reports the destination's
+    extent, which is also what sizes `hip.alloc_output` for a graph output.
 
     Example:
     ```mlir
