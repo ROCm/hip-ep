@@ -31,6 +31,8 @@
 namespace mlir {
 namespace hipsr {
 
+LogicalResult populateAddShapeRegion(OpBuilder &builder, Block &block,
+                                     AddOp op);
 LogicalResult populateCastShapeRegion(OpBuilder &builder, Block &block,
                                       CastOp op);
 
@@ -58,7 +60,9 @@ LogicalResult populatePlaceholderShapeRegion(OpBuilder &builder,
   Operation *consumer = placeholder.getDpsConsumer();
   Block &block = createPlaceholderShapeBlock(builder, placeholder);
 
-  if (auto castOp = dyn_cast<CastOp>(consumer)) {
+  if (auto addOp = dyn_cast<AddOp>(consumer)) {
+    return populateAddShapeRegion(builder, block, addOp);
+  } else if (auto castOp = dyn_cast<CastOp>(consumer)) {
     return populateCastShapeRegion(builder, block, castOp);
   }
 
