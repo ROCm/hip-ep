@@ -19,6 +19,7 @@
 #include "llvm/ADT/SmallVector.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 
 namespace mlir {
@@ -33,6 +34,26 @@ struct Lifetime {
   size_t start;
   size_t end;
 };
+
+struct AllocationSize {
+  int64_t staticBytes;
+  llvm::SmallVector<Value> dynamicDims;
+};
+
+int64_t staticByteFactor(MemRefType memTy) {
+  int64_t factor = memTy.getElementTypeBitWidth() / 8;
+  for (int64_t dim : memTy.getShape()) {
+    if (!ShapedType::isDynamic(dim)) {
+      factor *= dim;
+    }
+  }
+  return factor;
+}
+
+AllocationSize computeAllocationSize(memref::AllocOp allocOp) {
+  return {staticByteFactor(allocOp.getType()),
+          llvm::to_vector(allocOp.getDynamicSizes())};
+}
 
 llvm::DenseMap<Value, Lifetime> computeLiveness(Block &body) {
   llvm::DenseMap<Operation *, size_t> opIndices;
@@ -130,9 +151,15 @@ void emitPoolingReport(Block &body,
     if (it == lifetimes.end()) {
       continue;
     }
-    allocOp.emitRemark() << "hipsr-pool-alloc: lifetime [" << it->second.start
-                         << "," << it->second.end << "] group "
-                         << groupIndices.lookup(allocOp.getResult());
+    AllocationSize size = computeAllocationSize(allocOp);
+    InFlightDiagnostic remark = allocOp.emitRemark();
+    remark << "hipsr-pool-alloc: lifetime [" << it->second.start << ","
+           << it->second.end << "] group "
+           << groupIndices.lookup(allocOp.getResult()) << " size "
+           << size.staticBytes;
+    if (!size.dynamicDims.empty()) {
+      remark << " x " << size.dynamicDims.size() << " dyn";
+    }
   }
 }
 
