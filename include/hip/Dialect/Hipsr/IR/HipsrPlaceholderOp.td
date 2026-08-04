@@ -21,14 +21,16 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
 
     `!hipsr.context` is operand 0. The remaining inputs provide values to the
     shape graph and must be block arguments or results of `hipsr.placeholder`,
-    `arith.constant`, or `hipsr.constant`. `type` marks the placeholder as
-    `normal` or `barrier`.
+    `arith.constant`, or `hipsr.constant`. `placeholder_type` marks the
+    placeholder as `normal` or `barrier`.
 
     The shape graph is independent of DPS data inputs: downstream placeholders
     use upstream placeholder results rather than DPS data results.
 
     The optional `shape_region` defines the placeholder result shapes. It has
     one block when present and ends with `hipsr.shape_yield2`.
+    A `normal` region receives one `!shape.shape` argument per input and omits
+    `ctx`. A `barrier` region receives `ctx` followed by its tensor inputs.
 
     One placeholder can have several results for one multi-output DPS op. Each
     result initializes exactly one DPS result and may also feed other
@@ -50,14 +52,15 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
     ```mlir
     %init = hipsr.placeholder(%ctx)
         ins(%input : tensor<?x?xf16>)
-        {type = #hipsr.placeholder_type<normal>} : tensor<?x?xf16>
+        {placeholder_type = #hipsr.placeholder_type<normal>}
+        : tensor<?x?xf16>
     ```
   }];
 
   let arguments = (ins
     Hipsr_ContextType:$ctx,
     Variadic<AnyRankedTensor>:$inputs,
-    Hipsr_PlaceholderTypeAttr:$type
+    Hipsr_PlaceholderTypeAttr:$placeholder_type
   );
   let results = (outs Variadic<AnyRankedTensor>:$results);
   let regions = (region MaxSizedRegion<1>:$shape_region);
@@ -76,20 +79,8 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
     /// Returns the hipsr DPS operation initialized by this placeholder, or
     /// null if no such use exists.
     ::mlir::Operation *getDpsConsumer();
-  }];
 
-  let builders = [
-    OpBuilder<(ins "::mlir::TypeRange":$resultTypes,
-                   "::mlir::Value":$ctx,
-                   "::mlir::ValueRange":$inputs,
-                   "::mlir::hipsr::PlaceholderType":$type), [{
-      $_state.addOperands(ctx);
-      $_state.addOperands(inputs);
-      $_state.addAttribute(
-          "type", ::mlir::hipsr::PlaceholderTypeAttr::get(
-                      $_builder.getContext(), type));
-      $_state.addTypes(resultTypes);
-      $_state.addRegion();
-    }]>
-  ];
+    /// Returns this placeholder's shape-region block argument types.
+    ::llvm::SmallVector<::mlir::Type> getShapeRegionArgumentTypes();
+  }];
 }
