@@ -291,8 +291,8 @@ public:
     auto kh = createI64Const(adaptor.getKernelShape()[0]);
     auto kw = createI64Const(adaptor.getKernelShape()[1]);
     auto pad_top = createI64Const(adaptor.getPads()[0]);
-    auto pad_bottom = createI64Const(adaptor.getPads()[1]);
-    auto pad_left = createI64Const(adaptor.getPads()[2]);
+    auto pad_left = createI64Const(adaptor.getPads()[1]);
+    auto pad_bottom = createI64Const(adaptor.getPads()[2]);
     auto pad_right = createI64Const(adaptor.getPads()[3]);
     auto stride_h = createI64Const(adaptor.getStrides()[0]);
     auto stride_w = createI64Const(adaptor.getStrides()[1]);

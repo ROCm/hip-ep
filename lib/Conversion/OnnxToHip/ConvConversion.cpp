@@ -388,8 +388,8 @@ LogicalResult ConvToGemm::matchAndRewrite(Operation *op,
     pads.assign(spatialDims * 2, 0);
   }
   int64_t pad_h0 = pads[0];
-  int64_t pad_h1 = pads[1];
-  int64_t pad_w0 = pads[2];
+  int64_t pad_w0 = pads[1];
+  int64_t pad_h1 = pads[2];
   int64_t pad_w1 = pads[3];
 
   llvm::SmallVector<int64_t> dilations;
