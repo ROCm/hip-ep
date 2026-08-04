@@ -3181,6 +3181,20 @@ static _Float16* ensureDqBuffer(int N, int K) {
     return g_dq_buf;
 }
 
+// Autotuning benchmarks the dq+gemm candidates, so it has to materialise the
+// N*K fp16 scratch even when a fused candidate ends up winning. Because the
+// buffer is process-global and only ever grows, one losing candidate on the
+// widest matmul in the model pins that size for the lifetime of the process:
+// for a 262144x3840 vocabulary projection that is 1.875 GiB that nothing goes
+// on to read. Release it once the winner is known to need no scratch; the
+// dispatch paths call ensureDqBuffer again if a non-fused config is selected.
+static void releaseDqBufferIfWinnerFused(bool winner_is_fused) {
+    if (!winner_is_fused || !g_dq_buf) return;
+    hipFree(g_dq_buf);
+    g_dq_buf = nullptr;
+    g_dq_buf_elems = 0;
+}
+
 /* -----------------------------------------------------------------------
  * GPU 2-D FP16 transpose + scratch buffer helpers
  *
@@ -3309,6 +3323,8 @@ static int tuneWmmaConfig(
 
     hipEventDestroy(ev0);
     hipEventDestroy(ev1);
+
+    releaseDqBufferIfWinnerFused(kWmmaConfigs[best_id].fused);
 
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] WMMA autotune: M=%d N=%d K=%d gs=%d zp=%s -> "
@@ -4635,6 +4651,8 @@ static int tuneWmmaConfigU3(
     hipEventDestroy(ev0);
     hipEventDestroy(ev1);
 
+    releaseDqBufferIfWinnerFused(kWmmaU3Configs[best_id].fused);
+
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] WMMA-u3 autotune: M=%d N=%d K=%d gs=%d zp=%s -> "
         "best config[%d] %s bm=%d bn=%d sw=%d (%.4f ms/iter)\n",
@@ -5272,6 +5290,8 @@ static int tuneWmmaConfigU2(
 
     hipEventDestroy(ev0);
     hipEventDestroy(ev1);
+
+    releaseDqBufferIfWinnerFused(kWmmaU2Configs[best_id].fused);
 
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] WMMA-u2 autotune: M=%d N=%d K=%d gs=%d zp=%s -> "
