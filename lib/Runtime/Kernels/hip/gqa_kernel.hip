@@ -2502,6 +2502,44 @@ typedef float float8_t __attribute__((ext_vector_type(8)));
 
 
 // ---------------------------------------------------------------------
+// The v5 KV loop is bound by instruction issue, not by occupancy, bandwidth or
+// the matrix units: it issued 1734 instructions per tile to retire 32 WMMA.
+// Three changes below cut that to 967 on the 99.6% of tiles that need no
+// causal mask, and they are the reason this kernel is 21.4% faster than the
+// shape of it that shipped first. They are described where they appear:
+//
+//   - native exp2 in the softmax, at V5_EXP2 just below
+//   - the l reduction deferred out of the loop, at the epilogue that consumes
+//     l_reg unreduced
+//   - the mask-free / masked tile split, at tileBody
+//
+// Measured on gpt_oss-sink sq=512 past=8192, interleaved: exp2 alone -0.5%,
+// the deferred reduction alone -8.9%, both -12.4%, all three -21.4%, and 16k
+// in-model TTFT 9,653 -> 9,172 ms. Native exp2 pays nothing on its own because
+// the reduction chain it sits behind is what the loop waits on.
+//
+// The split is not separable from the restructure it needs: the same lambda
+// without the split costs 32% on every D=64 full-attention case, because the
+// split is what lets the compiler keep a tile's live values in registers
+// instead of scratch (in-loop scratch traffic 52 ops -> 6).
+// ---------------------------------------------------------------------
+
+// Tag for the mask-free / masked dispatch below. A local type rather than
+// std::integral_constant so this TU keeps its current include set.
+template <bool B> struct v5_masked_tag { static constexpr bool value = B; };
+
+// exp2f routes to __builtin_exp2f, whose OCML lowering wraps each v_exp_f32 in
+// a denormal-safe compare/select/bias/ldexp sequence: six instructions where
+// one would do, 48 of each per tile. Both KV-loop call sites take arguments
+// that are always <= 0 (S_reg <= m_new and m_old <= m_new by construction), so
+// results land in (0, 1] and the only value the denormal path protects is one
+// below 2^-126 -- a key scoring 126 log2-units under its row max, contributing
+// ~1e-38 to a sum containing 1.0. Flushing that to zero is the correct answer,
+// not an approximation of it. This is HIP's own idiom: __expf and __exp10f are
+// defined the same way.
+#define V5_EXP2(x) __builtin_amdgcn_exp2f(x)
+
+// ---------------------------------------------------------------------
 // Warp-private prefill kernel (v5). Grid: (num_q_tiles*B, Hq). Block: 32.
 // Each wave owns M_TILES 16-row q-subtiles x all BKV columns. Only LDS is
 // P_lds (C->A transpose); only sync is single-wave around it.
@@ -2628,7 +2666,11 @@ gqa_flash_prefill_v5_kernel(
         t_start = (kv_lo_tile > 0) ? (kv_lo_tile / BKV) : 0;
     }
 
-    for (int t = t_start; t < num_tiles; ++t) {
+    // Tag-dispatched so the mask-free tile shape gets its own instantiation
+    // without a second copy of the source. MASKED is a compile-time constant in
+    // each, so the per-element mask below is gone from the mask-free one.
+    auto tileBody = [&](int t, auto masked_tag) {
+        constexpr bool MASKED = decltype(masked_tag)::value;
         const int kv0 = t * BKV;
 
         // Stage V tile into LDS with coalesced HALF16 loads along D.
@@ -2669,10 +2711,12 @@ gqa_flash_prefill_v5_kernel(
                 float rmax = -INFINITY;
                 #pragma unroll
                 for (int sj = 0; sj < S_TILES_J; ++sj) {
-                    const int kv_pos = kv0 + sj * 16 + wmma_lane;
-                    bool masked = (kv_pos >= skv || kv_pos > abs_q);
-                    if constexpr (HAS_WINDOW) masked = masked || (kv_pos < kv_lo);
-                    if (masked) S_reg[mi][sj][e] = -INFINITY;
+                    if constexpr (MASKED) {
+                        const int kv_pos = kv0 + sj * 16 + wmma_lane;
+                        bool masked = (kv_pos >= skv || kv_pos > abs_q);
+                        if constexpr (HAS_WINDOW) masked = masked || (kv_pos < kv_lo);
+                        if (masked) S_reg[mi][sj][e] = -INFINITY;
+                    }
                     rmax = fmaxf(rmax, S_reg[mi][sj][e]);
                 }
                 rmax = fmaxf(rmax, __shfl_xor(rmax, 1));
@@ -2690,22 +2734,24 @@ gqa_flash_prefill_v5_kernel(
                 // guard folds away in the full-attention instantiation.
                 bool empty = false;
                 if constexpr (HAS_WINDOW) empty = (m_new == -INFINITY);
-                const float corr  = empty ? 1.0f : exp2f(m_old - m_new);
+                const float corr  = empty ? 1.0f : V5_EXP2(m_old - m_new);
                 corr_reg[mi][e]   = corr;
 
                 float rsum = 0.0f;
                 #pragma unroll
                 for (int sj = 0; sj < S_TILES_J; ++sj) {
                     const float p =
-                        empty ? 0.0f : exp2f(S_reg[mi][sj][e] - m_new);
+                        empty ? 0.0f : V5_EXP2(S_reg[mi][sj][e] - m_new);
                     rsum += p;
                     P_lds[row * P_STR + sj * 16 + wmma_lane] = static_cast<_Float16>(p);
                 }
-                rsum += __shfl_xor(rsum, 1);
-                rsum += __shfl_xor(rsum, 2);
-                rsum += __shfl_xor(rsum, 4);
-                rsum += __shfl_xor(rsum, 8);
-
+                // rsum is deliberately left unreduced across the 16 lanes: that
+                // reduction is deferred to the epilogue, which costs 64 fewer
+                // ds_bpermute per tile. Valid because corr is lane-uniform (it
+                // is a function of m_new, already reduced over these same 16
+                // lanes), so sum_lanes(corr*l + rsum) is corr*sum_lanes(l) +
+                // sum_lanes(rsum) and the recursion survives the deferral.
+                // Nothing between here and the epilogue reads l_reg.
                 m_reg[mi][e] = m_new;
                 l_reg[mi][e] = corr * l_reg[mi][e] + rsum;
             }
@@ -2741,6 +2787,21 @@ gqa_flash_prefill_v5_kernel(
             }
         }
         __syncthreads();   // WAR: P_lds reused by next tile's softmax
+    };
+
+    // The tile split is full attention only. With a window the band spans about
+    // five tiles at ROWS=32, so nearly every tile touches a boundary and a
+    // mask-free copy would buy nothing while still costing register pressure.
+    if constexpr (!HAS_WINDOW) {
+        // A tile is mask-free when its highest key is within skv and within the
+        // causal bound of the tile's *first* row; later rows only admit more.
+        const int mask_free_hi = (skv - 1 < past_len + q_start) ? (skv - 1)
+                                                                : (past_len + q_start);
+        const int t_split = (mask_free_hi + 1) / BKV;   // leading mask-free tiles
+        for (int t = t_start; t < t_split;   ++t) tileBody(t, v5_masked_tag<false>{});
+        for (int t = t_split; t < num_tiles; ++t) tileBody(t, v5_masked_tag<true>{});
+    } else {
+        for (int t = t_start; t < num_tiles; ++t) tileBody(t, v5_masked_tag<true>{});
     }
 
     // ---- Attention sink: one extra term in the softmax denominator ----
@@ -2767,6 +2828,13 @@ gqa_flash_prefill_v5_kernel(
         #pragma unroll
         for (int e = 0; e < 8; ++e) {
             float l = l_reg[mi][e];
+            // The reduction the KV loop skipped, paid once per row instead of
+            // once per tile. It must precede the sink, or the sink is counted
+            // 16 times.
+            l += __shfl_xor(l, 1);
+            l += __shfl_xor(l, 2);
+            l += __shfl_xor(l, 4);
+            l += __shfl_xor(l, 8);
             if (apply_sink && m_reg[mi][e] > -INFINITY)
                 l += exp2f(sink_logit * kLog2e - m_reg[mi][e]);
             l_final[mi][e] = fmaxf(l, 1e-6f);
