@@ -707,7 +707,7 @@ __global__ void linear_attention_prefill_chunked_kernel(
     T* __restrict__ state,        // [B, Hkv, dk, dv], pre-initialized
     T* __restrict__ output,       // [B, seq_len, Hout*dv]
     int seq_len, int Hq, int Hkv, int n_k, int dk, int dv,
-    float scale, int beta_per_head)
+    float scale, int beta_per_head, int g_split)
 {
     const int bg = blockIdx.x;
     const int b  = bg / Hkv;
@@ -727,14 +727,20 @@ __global__ void linear_attention_prefill_chunked_kernel(
     const int64_t out_bs = (int64_t)seq_len * Hout * dv;
     const int64_t decay_bs = (int64_t)seq_len * Hkv;          // scalar per head
     const int64_t beta_bs  = beta_per_head ? (int64_t)seq_len * Hkv
-                                           : (int64_t)seq_len;
+                                            : (int64_t)seq_len;
     const int64_t state_bs = (int64_t)Hkv * dk * dv;
 
     T* S = state + b * state_bs + (int64_t)g * dk * dv;        // [dk,dv]
 
     extern __shared__ float smem[];
-    float* Ksm = smem;                              // [LA_CHUNK*dk]
-    float* Usm = Ksm + LA_CHUNK * dk;               // [LA_CHUNK*dv] : B -> U
+    // Pad K/Q rows by one float. With dk=128, an unpadded row stride is an
+    // exact multiple of the 32 LDS banks, so lanes reading different token
+    // rows at the same i collide on one bank. A 129-float stride rotates the
+    // bank mapping per row without changing the logical tile.
+    const int qk_stride = dk + 1;
+    float* Ksm = smem;                              // [LA_CHUNK*qk_stride]
+    float* Qsm = Ksm + LA_CHUNK * qk_stride;        // [LA_CHUNK*qk_stride]
+    float* Usm = Qsm + LA_CHUNK * qk_stride;        // [LA_CHUNK*dv] : B -> U
     float* Tm  = Usm + LA_CHUNK * dv;               // [LA_CHUNK*LA_CHUNK]
     float* Pm  = Tm + LA_CHUNK * LA_CHUNK;          // [LA_CHUNK*LA_CHUNK]
     float* Asm = Pm + LA_CHUNK * LA_CHUNK;          // [LA_CHUNK]
@@ -745,12 +751,17 @@ __global__ void linear_attention_prefill_chunked_kernel(
     for (int c0 = 0; c0 < seq_len; c0 += LA_CHUNK) {
         const int Ceff = min(LA_CHUNK, seq_len - c0);
 
-        // load K tile, beta; build cumlog/A (single-thread prefix scan)
+        // Load K/Q tiles once per chunk. Q is reused by both the P-matrix and
+        // output phases; keeping it in LDS avoids repeatedly reading the same
+        // [Ceff,dk] tile for every s and output column j.
         for (int idx = tid; idx < Ceff * dk; idx += nthreads) {
             int t = idx / dk, i = idx % dk;
-            Ksm[t * dk + i] = to_float(
+            Ksm[t * qk_stride + i] = to_float(
                 key[b * k_bs + (int64_t)(c0 + t) * n_k * dk +
                     (int64_t)h_k * dk + i]);
+            Qsm[t * qk_stride + i] = to_float(
+                query[b * q_bs + (int64_t)(c0 + t) * Hq * dk +
+                      (int64_t)h_q * dk + i]);
         }
         for (int t = tid; t < Ceff; t += nthreads) {
             const int64_t beta_idx =
@@ -786,23 +797,41 @@ __global__ void linear_attention_prefill_chunked_kernel(
         __syncthreads();
 
         // B[t][j] = beta_t v_t[j] - beta_t A_t (S0^T k_t)[j]  -> Usm
-        // Register-blocked over t: read each S[i,j] from GLOBAL once and fold it
-        // into all Ceff partial sums sk[t], instead of re-reading the whole S
-        // column once per t (LA_CHUNK x fewer global S loads).
-        for (int j = tid; j < dv; j += nthreads) {
-            float sk[LA_CHUNK];
-            for (int t = 0; t < Ceff; t++)
-                sk[t] = 0.f;
-            for (int i = 0; i < dk; i++) {
-                float s = to_float(S[i * dv + j]);
+        // Register-blocked over t (each S[i,j] read once, folded into all Ceff
+        // partials) AND dk-split: g_split lanes cooperate on each output column j,
+        // each summing a dk/g_split slice of (S0^T k_t) into its own sk[t], then
+        // reducing across the lanes with a warp shuffle (block = g_split*dv, so a
+        // column's lanes are one aligned sub-warp). g_split==1 is the per-column path.
+        {
+            const int islice    = dk / g_split;
+            const int part      = tid % g_split;
+            const int col0      = tid / g_split;
+            const int colstride = nthreads / g_split;
+            const int i0 = part * islice;
+            const int i1 = i0 + islice;
+            for (int j = col0; j < dv; j += colstride) {
+                float sk[LA_CHUNK];
                 for (int t = 0; t < Ceff; t++)
-                    sk[t] += s * Ksm[t * dk + i];
-            }
-            for (int t = 0; t < Ceff; t++) {
-                float vtj = to_float(
-                    value[b * v_bs + (int64_t)(c0 + t) * Hkv * dv +
-                          (int64_t)g * dv + j]);
-                Usm[t * dv + j] = bsm[t] * vtj - bsm[t] * Asm[t] * sk[t];
+                    sk[t] = 0.f;
+                for (int i = i0; i < i1; i++) {
+                    float s = to_float(S[i * dv + j]);
+                    for (int t = 0; t < Ceff; t++)
+                        sk[t] += s * Ksm[t * qk_stride + i];
+                }
+                for (int t = 0; t < Ceff; t++) {
+                    float v = sk[t];
+                    for (int off = g_split >> 1; off >= 1; off >>= 1)
+                        v += __shfl_xor(v, off, g_split);
+                    sk[t] = v;
+                }
+                if (part == 0) {
+                    for (int t = 0; t < Ceff; t++) {
+                        float vtj = to_float(
+                            value[b * v_bs + (int64_t)(c0 + t) * Hkv * dv +
+                                  (int64_t)g * dv + j]);
+                        Usm[t * dv + j] = bsm[t] * vtj - bsm[t] * Asm[t] * sk[t];
+                    }
+                }
             }
         }
 
@@ -812,7 +841,8 @@ __global__ void linear_attention_prefill_chunked_kernel(
             if (s < t) {
                 float kk = 0.f;
                 for (int i = 0; i < dk; i++)
-                    kk += Ksm[t * dk + i] * Ksm[s * dk + i];
+                    kk += Ksm[t * qk_stride + i] *
+                          Ksm[s * qk_stride + i];
                 Tm[t * Ceff + s] = bsm[t] * expf(clog[t] - clog[s]) * kk;
             } else if (s == t) {
                 Tm[t * Ceff + s] = 0.f;
@@ -820,10 +850,8 @@ __global__ void linear_attention_prefill_chunked_kernel(
             if (s <= t) {
                 float qk = 0.f;
                 for (int i = 0; i < dk; i++)
-                    qk += to_float(
-                              query[b * q_bs + (int64_t)(c0 + t) * Hq * dk +
-                                    (int64_t)h_q * dk + i]) *
-                          Ksm[s * dk + i];
+                    qk += Qsm[t * qk_stride + i] *
+                          Ksm[s * qk_stride + i];
                 Pm[t * Ceff + s] = expf(clog[t] - clog[s]) * qk;
             }
         }
@@ -841,30 +869,43 @@ __global__ void linear_attention_prefill_chunked_kernel(
         }
 
         // O[t][j] = scale*( A_t (q_t . S0[:,j]) + sum_{s<=t} P[t,s] U[s,j] )
-        // uses chunk-START S0 (global, not yet updated)
-        // Register-blocked over t: read each S0[i,j] from GLOBAL once and fold
-        // it into all Ceff inter-chunk partial sums qs[t] (the (A.*Q) @ S0 term),
-        // mirroring the phase-2 blocking (LA_CHUNK x fewer global S0 loads).
-        for (int j = tid; j < dv; j += nthreads) {
-            float qs[LA_CHUNK];
-            for (int t = 0; t < Ceff; t++)
-                qs[t] = 0.f;
-            for (int i = 0; i < dk; i++) {
-                float s = to_float(S[i * dv + j]);
+        // uses chunk-START S0 (global, not yet updated). Register-blocked over t
+        // AND dk-split over the inter-chunk term (q_t . S0[:,j]) with the same lane
+        // layout as phase B; the intra term (dv-local Usm) and the store are done by
+        // part 0 after the shuffle. Q is read from the padded LDS tile (Qsm).
+        {
+            const int islice    = dk / g_split;
+            const int part      = tid % g_split;
+            const int col0      = tid / g_split;
+            const int colstride = nthreads / g_split;
+            const int i0 = part * islice;
+            const int i1 = i0 + islice;
+            for (int j = col0; j < dv; j += colstride) {
+                float qs[LA_CHUNK];
                 for (int t = 0; t < Ceff; t++)
-                    qs[t] += to_float(
-                                 query[b * q_bs + (int64_t)(c0 + t) * Hq * dk +
-                                       (int64_t)h_q * dk + i]) *
-                             s;
-            }
-            for (int t = 0; t < Ceff; t++) {
-                float inter = Asm[t] * qs[t];
-                float intra = 0.f;
-                for (int s = 0; s <= t; s++)
-                    intra += Pm[t * Ceff + s] * Usm[s * dv + j];
-                output[b * out_bs + (int64_t)(c0 + t) * Hout * dv +
-                       (int64_t)h_out * dv + j] =
-                    from_float<T>(scale * (inter + intra));
+                    qs[t] = 0.f;
+                for (int i = i0; i < i1; i++) {
+                    float s = to_float(S[i * dv + j]);
+                    for (int t = 0; t < Ceff; t++)
+                        qs[t] += Qsm[t * qk_stride + i] * s;
+                }
+                for (int t = 0; t < Ceff; t++) {
+                    float v = qs[t];
+                    for (int off = g_split >> 1; off >= 1; off >>= 1)
+                        v += __shfl_xor(v, off, g_split);
+                    qs[t] = v;
+                }
+                if (part == 0) {
+                    for (int t = 0; t < Ceff; t++) {
+                        float inter = Asm[t] * qs[t];
+                        float intra = 0.f;
+                        for (int s = 0; s <= t; s++)
+                            intra += Pm[t * Ceff + s] * Usm[s * dv + j];
+                        output[b * out_bs + (int64_t)(c0 + t) * Hout * dv +
+                              (int64_t)h_out * dv + j] =
+                            from_float<T>(scale * (inter + intra));
+                    }
+                }
             }
         }
         __syncthreads();   // all reads of S0 done before the update below
@@ -874,7 +915,8 @@ __global__ void linear_attention_prefill_chunked_kernel(
             int i = idx / dv, j = idx % dv;
             float acc = a_last * to_float(S[i * dv + j]);
             for (int s = 0; s < Ceff; s++)
-                acc += rlast[s] * Ksm[s * dk + i] * Usm[s * dv + j];
+                acc += rlast[s] * Ksm[s * qk_stride + i] *
+                        Usm[s * dv + j];
             S[i * dv + j] = from_float<T>(acc);
         }
         __syncthreads();   // S update complete before next chunk reads it
@@ -916,17 +958,34 @@ extern "C" int hip_linear_attention_prefill_chunked(
     const int dk_i = static_cast<int>(dk);
     const int dv_i = static_cast<int>(dv);
 
-    // LDS budget: Ksm + Usm + Tm + Pm + 4 vectors of length LA_CHUNK
+    // LDS budget: Ksm + Qsm + Usm + Tm + Pm + 4 vectors of length LA_CHUNK
     // (Asm, clog, bsm, rlast).
     const size_t smem_bytes =
-        static_cast<size_t>(LA_CHUNK * dk_i + LA_CHUNK * dv_i +
+        static_cast<size_t>(2 * LA_CHUNK * (dk_i + 1) +
+                            LA_CHUNK * dv_i +
                             2 * LA_CHUNK * LA_CHUNK + 4 * LA_CHUNK) *
         sizeof(float);
     if (smem_bytes > 64 * 1024) return 1;           // too big -> fall back
 
     hipStream_t hip_stream = static_cast<hipStream_t>(stream);
     const int grid  = static_cast<int>(B * Hkv);
-    const int block = LA_PREFILL_THREADS;
+    int block = LA_PREFILL_THREADS;
+
+    // dk-split: g_split lanes cooperate per output column, splitting the dk
+    // reduction of the two dv-wide phases (B, output) with a warp-shuffle combine
+    // (block = g_split*dv). HIPDNN_EP_LA_PREFILL_DK_SPLIT=1 forces the per-column
+    // path; 2/4/8 pick a split; falls back to 1 when the shape can't satisfy it.
+    static const int la_dk_split_env = []{
+        const char* e = std::getenv("HIPDNN_EP_LA_PREFILL_DK_SPLIT");
+        int v = e ? atoi(e) : 4;
+        return (v == 2 || v == 4 || v == 8) ? v : 1;
+    }();
+    int g_split = 1;
+    if (la_dk_split_env >= 2 && (dk_i % la_dk_split_env == 0) &&
+        (la_dk_split_env * dv_i <= 1024) && (dv_i % 32 == 0)) {
+        g_split = la_dk_split_env;
+        block = g_split * dv_i;                     // one lane-group per column
+    }
     const int beta_per_head_i = beta_per_head ? 1 : 0;
 
     CUSTOM_KERNELS_DEBUG_LOG(
@@ -946,7 +1005,7 @@ extern "C" int hip_linear_attention_prefill_chunked(
             static_cast<const float*>(beta), static_cast<float*>(state),
             static_cast<float*>(output), static_cast<int>(seq_len),
             static_cast<int>(Hq), static_cast<int>(Hkv), static_cast<int>(Nk),
-            dk_i, dv_i, scale, beta_per_head_i);
+            dk_i, dv_i, scale, beta_per_head_i, g_split);
     } else if (type == 1) {
         hipLaunchKernelGGL(
             linear_attention_prefill_chunked_kernel<__half>,
@@ -956,7 +1015,7 @@ extern "C" int hip_linear_attention_prefill_chunked(
             static_cast<const __half*>(beta), static_cast<__half*>(state),
             static_cast<__half*>(output), static_cast<int>(seq_len),
             static_cast<int>(Hq), static_cast<int>(Hkv), static_cast<int>(Nk),
-            dk_i, dv_i, scale, beta_per_head_i);
+            dk_i, dv_i, scale, beta_per_head_i, g_split);
     } else if (type == 2) {
         hipLaunchKernelGGL(
             linear_attention_prefill_chunked_kernel<__hip_bfloat16>,
@@ -969,7 +1028,7 @@ extern "C" int hip_linear_attention_prefill_chunked(
             static_cast<__hip_bfloat16*>(state),
             static_cast<__hip_bfloat16*>(output), static_cast<int>(seq_len),
             static_cast<int>(Hq), static_cast<int>(Hkv), static_cast<int>(Nk),
-            dk_i, dv_i, scale, beta_per_head_i);
+            dk_i, dv_i, scale, beta_per_head_i, g_split);
     } else {
         return 1;
     }
