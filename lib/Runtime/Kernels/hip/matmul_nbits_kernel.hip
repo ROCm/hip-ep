@@ -5981,12 +5981,25 @@ extern "C" int hip_matmul_nbits(
    * coalesced reads) and writes C row-major (no transposes needed).
    * zero_points (if not NULL) must be FP16 [N, num_groups_k].
    *
-   * When M >= kBlockDim (16): WMMA intrinsics (RDNA3 fast path)
-   * When M <  kBlockDim:      GEMV kernel with COL_MAJOR=true
+   * When M >= kWmmaMinM:   WMMA intrinsics (RDNA3 fast path)
+   * When 1 < M < kWmmaMinM: GEMV kernel with COL_MAJOR=true
+   * When M == 1:            row-major GEMV, further down
    * ------------------------------------------------------------------- */
   bool wmma_data_format = (batch_count == 1) && (K % 32 == 0);
 
-  if (wmma_data_format && M >= kBlockDim) {
+  // Previously kBlockDim (16). WMMA reads B far more efficiently than the
+  // col-major GEMV, but it computes a whole tile of rows whatever M is, so
+  // the wasted rows grow as M shrinks and eventually outweigh the read. 8 is
+  // the best of the three cutoffs measured on gpt-oss-20b, over interleaved
+  // and order-reversed 16k-prefill pairs: -211 ms TTFT (-2.3%) against 16,
+  // where moving the whole tier down to 2 is +47 ms, i.e. worse than leaving
+  // it alone. 4 and 12 are untested.
+  //
+  // Any cutoff is safe for partial tiles: need_bc in launchWmmaConfig selects
+  // the bounds-checked variant whenever M is not a multiple of the tile.
+  static constexpr int kWmmaMinM = 8;
+
+  if (wmma_data_format && M >= kWmmaMinM) {
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_matmul_nbits: WMMA fast path M=%lld N=%lld "
         "K=%lld bs=%lld zp=%s bias=%s\n",
@@ -6052,14 +6065,14 @@ extern "C" int hip_matmul_nbits(
   /* -------------------------------------------------------------------
    * GEMV path with col-major data — small M (>1), WMMA data format
    *
-   * When batch==1, K%32==0, but 1 < M < kBlockDim: internally transpose
+   * When batch==1, K%32==0, but 1 < M < kWmmaMinM: internally transpose
    * A row->col and output col->row so the caller sees row-major I/O.
    * GEMV kernel runs with COL_MAJOR=true for K-parallel reduction.
    *
    * M=1 skips this path entirely — row/col layouts are identical for a
    * single row, and the row-major GEMV avoids the ZP conversion kernel.
    * ------------------------------------------------------------------- */
-  if (wmma_data_format && M > 1 && M < kBlockDim) {
+  if (wmma_data_format && M > 1 && M < kWmmaMinM) {
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_matmul_nbits: GEMV col-major path M=%lld "
         "N=%lld K=%lld bs=%lld zp=%s bias=%s\n",
