@@ -27,8 +27,11 @@ struct PlaceholderShapeRegionArgs {
 
   Value ctx() const {
     if (numCtxArgs() == 0) {
-      llvm::report_fatal_error(
-          "hipsr.placeholder shape region has no context block argument");
+      std::string msg;
+      llvm::raw_string_ostream(msg)
+          << PlaceholderOp::getOperationName()
+          << " shape region has no context block argument";
+      llvm::report_fatal_error(llvm::StringRef(msg));
     }
     return arg(0);
   }

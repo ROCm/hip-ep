@@ -22,7 +22,7 @@ using namespace mlir::hipsr;
 
 namespace {
 struct CastShapeArgs : PlaceholderShapeRegionArgs {
-  using PlaceholderShapeRegionArgs::PlaceholderShapeRegionArgs;
+  explicit CastShapeArgs(Block &block) : PlaceholderShapeRegionArgs(block) {}
   Value getInput() const { return in(0); }
 };
 } // namespace
