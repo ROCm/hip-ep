@@ -3181,6 +3181,133 @@ static _Float16* ensureDqBuffer(int N, int K) {
     return g_dq_buf;
 }
 
+// Autotuning benchmarks the dq+gemm candidates, so it has to materialise the
+// N*K fp16 scratch even when a fused candidate ends up winning. Because the
+// buffer is process-global and only ever grows, one losing candidate on the
+// widest matmul in the model pins that size for the lifetime of the process:
+// for a 262144x3840 vocabulary projection that is 1.875 GiB that nothing goes
+// on to read. Release it once the winner is known to need no scratch; the
+// dispatch paths call ensureDqBuffer again if a non-fused config is selected.
+static void releaseDqBufferIfWinnerFused(bool winner_is_fused) {
+    if (!winner_is_fused || !g_dq_buf) return;
+    hipFree(g_dq_buf);
+    g_dq_buf = nullptr;
+    g_dq_buf_elems = 0;
+}
+
+/* -----------------------------------------------------------------------
+ * Shared WMMA autotune sweep
+ *
+ * The 4-bit, u3 and u2 WMMA tuners run the same sweep -- settle the clock,
+ * time every config over WARMUP+ITERS launches, keep the fastest, release the
+ * dq scratch if the winner does not need it. They were three copies, so every
+ * change to the sweep had to be made three times (and drifted when it wasn't).
+ * The parts that genuinely differ are captured below; everything else lives
+ * here once.
+ * ----------------------------------------------------------------------- */
+
+// Per-variant knobs. Values are whatever the variant already used -- this
+// struct records the existing differences, it does not try to reconcile them.
+struct WmmaTuneParams {
+    const char* cfg_label;    // per-config log tag, e.g. "wmma-u3"
+    const char* sweep_label;  // summary log tag, e.g. "WMMA-u3"
+    int  warmup;
+    int  iters;
+    int  default_id;          // returned if every config is skipped
+    // Clock settle: autotune compares configs by wall-time, so all of them
+    // must be measured at the SAME GPU clock. Right after a cold start the GPU
+    // runs at boost clock and decays toward a lower sustained clock under
+    // load; a plain sequential sweep therefore times early configs while
+    // boosted and late configs while throttled, biasing the choice by table
+    // position (e.g. the dq+gemm configs, which sit last, looked ~30-40%
+    // slower than they really are). Drive a fixed compute load until per-iter
+    // latency plateaus (and for at least ~60 ms, so we don't accept the
+    // still-boosted plateau of the very first few iters).
+    // NOTE: the 4-bit tuner has never done this. Enabling it there is a
+    // behaviour change, so it stays off here and is left for a separate look.
+    bool settle_clock;
+    int  settle_id;           // config driven during the settle loop
+};
+
+// launch(cid) enqueues one launch of config `cid`; skip(cfg) drops a config
+// from the sweep. Templated on the config type because the three tables are
+// distinct structs that happen to share the fields read here.
+template <typename CfgT, typename LaunchFn, typename SkipFn>
+static int tuneWmmaSweep(
+    hipStream_t stream,
+    int M, int N, int K, int gs, bool has_zp,
+    const CfgT* configs, int num_configs,
+    const WmmaTuneParams& p,
+    LaunchFn launch, SkipFn skip)
+{
+    hipEvent_t ev0, ev1;
+    hipEventCreate(&ev0);
+    hipEventCreate(&ev1);
+
+    float best_ms = 1e30f;
+    int   best_id = p.default_id;
+
+    if (p.settle_clock) {
+        float prev = 1e30f, cur = 0.0f, total = 0.0f;
+        int stable = 0;
+        for (int i = 0; i < 200 && stable < 3 && total < 200.0f; i++) {
+            hipEventRecord(ev0, stream);
+            launch(p.settle_id);
+            hipEventRecord(ev1, stream);
+            hipEventSynchronize(ev1);
+            hipEventElapsedTime(&cur, ev0, ev1);
+            if (total >= 60.0f && cur <= prev * 1.02f) stable++;
+            else                                       stable = 0;
+            prev = cur;
+            total += cur;
+        }
+    }
+
+    for (int cid = 0; cid < num_configs; cid++) {
+        const CfgT& cfg = configs[cid];
+        if (skip(cfg)) continue;
+
+        for (int w = 0; w < p.warmup; w++)
+            launch(cid);
+
+        // Clocks are settled (where the variant does so), so a single summed
+        // timing over ITERS is a stable, order-independent latency estimate.
+        hipEventRecord(ev0, stream);
+        for (int i = 0; i < p.iters; i++)
+            launch(cid);
+        hipEventRecord(ev1, stream);
+        hipEventSynchronize(ev1);
+
+        float ms = 0.0f;
+        hipEventElapsedTime(&ms, ev0, ev1);
+
+        CUSTOM_KERNELS_DEBUG_LOG(
+            "[custom_kernels]   %s config[%2d] %s bm=%3d bn=%3d sw=%d : %.4f ms\n",
+            p.cfg_label, cid, cfg.fused ? "fused " : "dq+gem",
+            cfg.bm, cfg.bn, cfg.swizzle_n, ms / p.iters);
+
+        if (ms < best_ms) {
+            best_ms = ms;
+            best_id = cid;
+        }
+    }
+
+    hipEventDestroy(ev0);
+    hipEventDestroy(ev1);
+
+    releaseDqBufferIfWinnerFused(configs[best_id].fused);
+
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[custom_kernels] %s autotune: M=%d N=%d K=%d gs=%d zp=%s -> "
+        "best config[%d] %s bm=%d bn=%d sw=%d (%.4f ms/iter)\n",
+        p.sweep_label, M, N, K, gs, has_zp ? "yes" : "no",
+        best_id, configs[best_id].fused ? "fused" : "dq+gemm",
+        configs[best_id].bm, configs[best_id].bn,
+        configs[best_id].swizzle_n, best_ms / p.iters);
+
+    return best_id;
+}
+
 /* -----------------------------------------------------------------------
  * GPU 2-D FP16 transpose + scratch buffer helpers
  *
@@ -3266,59 +3393,19 @@ static int tuneWmmaConfig(
     int gs, int ngk,
     _Float16* C, int ldc, bool has_zp)
 {
-    hipEvent_t ev0, ev1;
-    hipEventCreate(&ev0);
-    hipEventCreate(&ev1);
-
     _Float16* dq_buf = ensureDqBuffer(N, K);
 
-    float best_ms = 1e30f;
-    int   best_id = 9;
-    constexpr int WARMUP = 1;
-    constexpr int ITERS  = 5;
+    static constexpr WmmaTuneParams kParams = {
+        "wmma", "WMMA", /*warmup=*/1, /*iters=*/5, /*default_id=*/9,
+        /*settle_clock=*/false, /*settle_id=*/0};
 
-    for (int cid = 0; cid < kNumWmmaConfigs; cid++) {
-        auto& cfg = kWmmaConfigs[cid];
-        if (cfg.bn < 64 && N > 2 * cfg.bn) continue;
-
-        for (int w = 0; w < WARMUP; w++)
+    return tuneWmmaSweep(
+        stream, M, N, K, gs, has_zp, kWmmaConfigs, kNumWmmaConfigs, kParams,
+        [&](int cid) {
             launchWmmaConfig(cid, stream, M, N, K, A, lda, B,
                              scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf);
-
-        hipEventRecord(ev0, stream);
-        for (int i = 0; i < ITERS; i++)
-            launchWmmaConfig(cid, stream, M, N, K, A, lda, B,
-                             scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf);
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-
-        float ms = 0.0f;
-        hipEventElapsedTime(&ms, ev0, ev1);
-
-        CUSTOM_KERNELS_DEBUG_LOG(
-            "[custom_kernels]   wmma config[%2d] %s bm=%3d bn=%3d sw=%d : %.4f ms\n",
-            cid, kWmmaConfigs[cid].fused ? "fused " : "dq+gem",
-            kWmmaConfigs[cid].bm, kWmmaConfigs[cid].bn,
-            kWmmaConfigs[cid].swizzle_n, ms / ITERS);
-
-        if (ms < best_ms) {
-            best_ms = ms;
-            best_id = cid;
-        }
-    }
-
-    hipEventDestroy(ev0);
-    hipEventDestroy(ev1);
-
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] WMMA autotune: M=%d N=%d K=%d gs=%d zp=%s -> "
-        "best config[%d] %s bm=%d bn=%d sw=%d (%.4f ms/iter)\n",
-        M, N, K, gs, has_zp ? "yes" : "no",
-        best_id, kWmmaConfigs[best_id].fused ? "fused" : "dq+gemm",
-        kWmmaConfigs[best_id].bm, kWmmaConfigs[best_id].bn,
-        kWmmaConfigs[best_id].swizzle_n, best_ms / ITERS);
-
-    return best_id;
+        },
+        [&](const WmmaConfig& cfg) { return cfg.bn < 64 && N > 2 * cfg.bn; });
 }
 
 static std::unordered_map<std::string, int> wmma_cache;
@@ -4562,88 +4649,21 @@ static int tuneWmmaConfigU3(
     int gs, int ngk,
     _Float16* C, int ldc, bool has_zp)
 {
-    hipEvent_t ev0, ev1;
-    hipEventCreate(&ev0);
-    hipEventCreate(&ev1);
-
-    float best_ms = 1e30f;
-    int   best_id = 12; // 128x128 sw=2: a safe default for typical N>=64
-    constexpr int WARMUP = 2;
-    constexpr int ITERS  = 7;
-
     // Scratch fp16 buffer for the separate-dequant configs (fused=false).
     _Float16* dq_buf = ensureDqBuffer(N, K);
 
-    // --- Clock settle -------------------------------------------------------
-    // Autotune compares configs by wall-time, so every config must be measured
-    // at the SAME GPU clock. Right after a cold start the GPU runs at boost
-    // clock and decays toward a lower sustained clock under load; a plain
-    // sequential sweep therefore times early configs while boosted and late
-    // configs while throttled, biasing the choice by table position (e.g. the
-    // dq+gemm configs, which sit last, looked ~30-40% slower than they really
-    // are). Drive a fixed compute load until per-iter latency plateaus (and for
-    // at least ~60 ms, so we don't accept the still-boosted plateau of the very
-    // first few iters) so all measurements happen at the steady-state clock.
-    {
-        float prev = 1e30f, cur = 0.0f, total = 0.0f;
-        int stable = 0;
-        for (int i = 0; i < 200 && stable < 3 && total < 200.0f; i++) {
-            hipEventRecord(ev0, stream);
-            launchWmmaConfigU3(12, stream, M, N, K, A, lda, B,
-                               scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf);
-            hipEventRecord(ev1, stream);
-            hipEventSynchronize(ev1);
-            hipEventElapsedTime(&cur, ev0, ev1);
-            if (total >= 60.0f && cur <= prev * 1.02f) stable++;
-            else                                       stable = 0;
-            prev = cur;
-            total += cur;
-        }
-    }
+    static constexpr WmmaTuneParams kParams = {
+        "wmma-u3", "WMMA-u3", /*warmup=*/2, /*iters=*/7,
+        // 128x128 sw=2: a safe default for typical N>=64
+        /*default_id=*/12, /*settle_clock=*/true, /*settle_id=*/12};
 
-    for (int cid = 0; cid < kNumWmmaU3Configs; cid++) {
-        auto& cfg = kWmmaU3Configs[cid];
-        if (cfg.bn > N * 2) continue;
-
-        for (int w = 0; w < WARMUP; w++)
+    return tuneWmmaSweep(
+        stream, M, N, K, gs, has_zp, kWmmaU3Configs, kNumWmmaU3Configs, kParams,
+        [&](int cid) {
             launchWmmaConfigU3(cid, stream, M, N, K, A, lda, B,
                                scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf);
-
-        // Clocks are settled (above), so a single summed timing over ITERS is a
-        // stable, order-independent estimate of steady-state latency.
-        hipEventRecord(ev0, stream);
-        for (int i = 0; i < ITERS; i++)
-            launchWmmaConfigU3(cid, stream, M, N, K, A, lda, B,
-                               scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf);
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-
-        float ms = 0.0f;
-        hipEventElapsedTime(&ms, ev0, ev1);
-
-        CUSTOM_KERNELS_DEBUG_LOG(
-            "[custom_kernels]   wmma-u3 config[%2d] %s bm=%3d bn=%3d sw=%d : %.4f ms\n",
-            cid, cfg.fused ? "fused " : "dq+gem",
-            cfg.bm, cfg.bn, cfg.swizzle_n, ms / ITERS);
-
-        if (ms < best_ms) {
-            best_ms = ms;
-            best_id = cid;
-        }
-    }
-
-    hipEventDestroy(ev0);
-    hipEventDestroy(ev1);
-
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] WMMA-u3 autotune: M=%d N=%d K=%d gs=%d zp=%s -> "
-        "best config[%d] %s bm=%d bn=%d sw=%d (%.4f ms/iter)\n",
-        M, N, K, gs, has_zp ? "yes" : "no",
-        best_id, kWmmaU3Configs[best_id].fused ? "fused" : "dq+gemm",
-        kWmmaU3Configs[best_id].bm, kWmmaU3Configs[best_id].bn,
-        kWmmaU3Configs[best_id].swizzle_n, best_ms / ITERS);
-
-    return best_id;
+        },
+        [&](const WmmaConfigU3& cfg) { return cfg.bn > N * 2; });
 }
 
 static std::unordered_map<std::string, int> wmma_u3_cache;
@@ -5212,76 +5232,20 @@ static int tuneWmmaConfigU2(
     int gs, int ngk,
     _Float16* C, int ldc, bool has_zp)
 {
-    hipEvent_t ev0, ev1;
-    hipEventCreate(&ev0);
-    hipEventCreate(&ev1);
-
-    float best_ms = 1e30f;
-    int   best_id = 12; // 128x128 sw=2: a safe default for typical N>=64
-    constexpr int WARMUP = 2;
-    constexpr int ITERS  = 7;
-
     _Float16* dq_buf = ensureDqBuffer(N, K);
 
-    // --- Clock settle (see tuneWmmaConfigU3 for rationale) ---------------
-    {
-        float prev = 1e30f, cur = 0.0f, total = 0.0f;
-        int stable = 0;
-        for (int i = 0; i < 200 && stable < 3 && total < 200.0f; i++) {
-            hipEventRecord(ev0, stream);
-            launchWmmaConfigU2(12, stream, M, N, K, A, lda, B,
-                               scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf);
-            hipEventRecord(ev1, stream);
-            hipEventSynchronize(ev1);
-            hipEventElapsedTime(&cur, ev0, ev1);
-            if (total >= 60.0f && cur <= prev * 1.02f) stable++;
-            else                                       stable = 0;
-            prev = cur;
-            total += cur;
-        }
-    }
+    static constexpr WmmaTuneParams kParams = {
+        "wmma-u2", "WMMA-u2", /*warmup=*/2, /*iters=*/7,
+        // 128x128 sw=2: a safe default for typical N>=64
+        /*default_id=*/12, /*settle_clock=*/true, /*settle_id=*/12};
 
-    for (int cid = 0; cid < kNumWmmaU2Configs; cid++) {
-        auto& cfg = kWmmaU2Configs[cid];
-        if (cfg.bn > N * 2) continue;
-
-        for (int w = 0; w < WARMUP; w++)
+    return tuneWmmaSweep(
+        stream, M, N, K, gs, has_zp, kWmmaU2Configs, kNumWmmaU2Configs, kParams,
+        [&](int cid) {
             launchWmmaConfigU2(cid, stream, M, N, K, A, lda, B,
                                scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf);
-
-        hipEventRecord(ev0, stream);
-        for (int i = 0; i < ITERS; i++)
-            launchWmmaConfigU2(cid, stream, M, N, K, A, lda, B,
-                               scales, zeros, gs, ngk, C, ldc, has_zp, dq_buf);
-        hipEventRecord(ev1, stream);
-        hipEventSynchronize(ev1);
-
-        float ms = 0.0f;
-        hipEventElapsedTime(&ms, ev0, ev1);
-
-        CUSTOM_KERNELS_DEBUG_LOG(
-            "[custom_kernels]   wmma-u2 config[%2d] %s bm=%3d bn=%3d sw=%d : %.4f ms\n",
-            cid, cfg.fused ? "fused " : "dq+gem",
-            cfg.bm, cfg.bn, cfg.swizzle_n, ms / ITERS);
-
-        if (ms < best_ms) {
-            best_ms = ms;
-            best_id = cid;
-        }
-    }
-
-    hipEventDestroy(ev0);
-    hipEventDestroy(ev1);
-
-    CUSTOM_KERNELS_DEBUG_LOG(
-        "[custom_kernels] WMMA-u2 autotune: M=%d N=%d K=%d gs=%d zp=%s -> "
-        "best config[%d] %s bm=%d bn=%d sw=%d (%.4f ms/iter)\n",
-        M, N, K, gs, has_zp ? "yes" : "no",
-        best_id, kWmmaU2Configs[best_id].fused ? "fused" : "dq+gemm",
-        kWmmaU2Configs[best_id].bm, kWmmaU2Configs[best_id].bn,
-        kWmmaU2Configs[best_id].swizzle_n, best_ms / ITERS);
-
-    return best_id;
+        },
+        [&](const WmmaConfigU2& cfg) { return cfg.bn > N * 2; });
 }
 
 static std::unordered_map<std::string, int> wmma_u2_cache;
