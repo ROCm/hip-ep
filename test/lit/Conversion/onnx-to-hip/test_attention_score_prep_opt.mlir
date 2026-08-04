@@ -45,5 +45,5 @@ module {
 
 // Broadcast bias constant should expand to 2x3x4x4 before hip.add.
 // CHECK-LABEL: func.func @test_expand_constant_bias
-// CHECK: "onnx.Constant"() {value = dense<1.000000e+00> : tensor<2x3x4x4xf16>}
+// CHECK: arith.constant dense<1.000000e+00> : tensor<2x3x4x4xf16>
 // CHECK: hip.add
