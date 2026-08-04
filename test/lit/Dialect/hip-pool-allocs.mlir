@@ -200,17 +200,23 @@ func.func @alignment_256(
 //
 // Two dynamic allocs with different dim values (%n vs %m) and disjoint
 // lifetimes share one default lifetime-only slab. The pool contribution is the
-// runtime max of their footprints, and both views use the same base.
+// aligned runtime maximum of their footprints, and both views use the same
+// base.
 //
-// CHECK-LABEL: func.func @dynamic_two_buckets
-// CHECK:         arith.maxui
-// CHECK:         %[[POOL:.*]] = hip.get_pool({{.*}}) : memref<?xi8>
+// CHECK-LABEL: func.func @dynamic_disjoint_share
+// CHECK:         %[[WIDTH:.*]] = arith.maxui
+// CHECK:         %[[C255:.*]] = arith.constant 255 : index
+// CHECK:         %[[C256:.*]] = arith.constant 256 : index
+// CHECK:         %[[ADJUSTED:.*]] = arith.addi %[[WIDTH]], %[[C255]] : index
+// CHECK:         %[[QUOTIENT:.*]] = arith.divui %[[ADJUSTED]], %[[C256]] : index
+// CHECK:         %[[ALIGNED:.*]] = arith.muli %[[QUOTIENT]], %[[C256]] : index
+// CHECK:         %[[POOL:.*]] = hip.get_pool(%{{.*}}, %[[ALIGNED]]) : memref<?xi8>
 // CHECK:         memref.view %[[POOL]][%[[OFF:[a-zA-Z0-9_]+]]]
 // CHECK-SAME:      : memref<?xi8> to memref<?x8xf32>
 // CHECK:         memref.view %[[POOL]][%[[OFF]]]
 // CHECK-SAME:      : memref<?xi8> to memref<?x4xf32>
 // CHECK:         return
-func.func @dynamic_two_buckets(
+func.func @dynamic_disjoint_share(
     %ctx: !hip.context,
     %a: memref<?x8xf32>,
     %b: memref<8x8xf32, strided<[?, ?], offset: ?>>,
