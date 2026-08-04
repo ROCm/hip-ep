@@ -132,9 +132,33 @@ greedyGrouping(Block &body, const llvm::DenseMap<Value, Lifetime> &lifetimes) {
   return groups;
 }
 
+Operation *
+findInsertionPoint(Block &body,
+                   const llvm::DenseMap<Value, Lifetime> &lifetimes) {
+  Operation *point = nullptr;
+  for (Operation &op : body) {
+    auto allocOp = dyn_cast<memref::AllocOp>(&op);
+    if (allocOp && lifetimes.contains(allocOp.getResult())) {
+      point = &op;
+    }
+  }
+  return point;
+}
+
 void emitPoolingReport(Block &body,
                        const llvm::DenseMap<Value, Lifetime> &lifetimes,
-                       llvm::ArrayRef<llvm::SmallVector<Value>> groups) {
+                       llvm::ArrayRef<llvm::SmallVector<Value>> groups,
+                       Operation *insertionPoint) {
+  size_t insertionIdx = 0;
+  for (Operation &op : body) {
+    if (&op == insertionPoint) {
+      break;
+    }
+    ++insertionIdx;
+  }
+  body.getParentOp()->emitRemark()
+      << "hipsr-pool-alloc: insertion point after op " << insertionIdx;
+
   llvm::DenseMap<Value, size_t> groupIndices;
   for (auto [groupIdx, group] : llvm::enumerate(groups)) {
     for (Value member : group) {
@@ -171,10 +195,17 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
     getOperation().walk([&](PoolDomainOp domain) {
       Block &body = domain.getBody().front();
       llvm::DenseMap<Value, Lifetime> lifetimes = computeLiveness(body);
+      Operation *insertionPoint = findInsertionPoint(body, lifetimes);
+      if (!insertionPoint) {
+        domain.emitError(
+            "hipsr-pool-alloc: pool_domain has no poolable allocation");
+        signalPassFailure();
+        return;
+      }
       llvm::SmallVector<llvm::SmallVector<Value>> groups =
           greedyGrouping(body, lifetimes);
       if (emitPoolReport) {
-        emitPoolingReport(body, lifetimes, groups);
+        emitPoolingReport(body, lifetimes, groups, insertionPoint);
       }
     });
   }
