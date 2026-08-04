@@ -282,17 +282,15 @@ def PoolAllocsPass : Pass<"hip-pool-allocs", "mlir::func::FuncOp"> {
 
 def HoistAllocSizeArithPass
     : Pass<"hip-hoist-alloc-size-arith", "mlir::func::FuncOp"> {
-  let summary = "Hoist speculatable size arithmetic feeding memref.alloc dynamic "
-                "operands above the earliest dynamic memref.alloc in the entry "
+  let summary = "Hoist pure size arithmetic feeding memref.alloc dynamic "
+                "operands above the earliest used memref.alloc in the entry "
                 "block";
   let description = [{
-    Hoists speculatable producers of `memref.alloc` dynamic operands to a
-    point above the earliest dynamic `memref.alloc` in the function's
-    single entry block.  After this pass, every dynamic alloc's
-    dyn-operand SSA values dominate the earliest dynamic alloc — which is
-    exactly the precondition `--hip-pool-allocs` needs to anchor its
-    bucket-size arithmetic and `hip.get_pool` at a single-block-dominant
-    point.
+    Hoists pure producers of `memref.alloc` dynamic operands to a
+    point above the earliest used `memref.alloc` in the function's single entry
+    block. After this pass, every hoistable dynamic-size value dominates every
+    allocation that `--hip-pool-allocs` may absorb, allowing pool-size
+    arithmetic and `hip.get_pool` to share one insertion point.
 
     Algorithm
     ---------
@@ -300,16 +298,16 @@ def HoistAllocSizeArithPass
     multi-block functions are skipped.  Only entry-block allocs are
     considered — allocs nested inside region-carrying ops are untouched.
 
-    1. Collect every entry-block `memref.alloc` with at least one dynamic
-       operand.
-    2. Pick `earliestAlloc` = the one earliest in the block (per
+    1. Collect every used entry-block `memref.alloc`, and identify those with
+       dynamic operands.
+    2. Pick `earliestAlloc` = the earliest used allocation in the block (per
        `Operation::isBeforeInBlock`).
     3. For each dynamic alloc, walk SSA backward from each of its dynamic
        operands.  An op is hoistable when:
          - it is in the entry block,
          - it is below `earliestAlloc` (otherwise it already dominates),
          - it is not a `memref.alloc` / `memref.alloca`,
-         - it satisfies `mlir::isSpeculatable(op)`,
+         - it has no regions and satisfies `mlir::isPure(op)`,
          - and every transitive operand is itself hoistable (or already
            dominates `earliestAlloc`).
     4. Topologically sorted (operands before uses), each hoistable op is
@@ -318,15 +316,13 @@ def HoistAllocSizeArithPass
        prior moves up by one slot — final layout has the deepest operands
        at the top of the hoist region.
 
-    Why "speculatable" is the right predicate
-    -----------------------------------------
-    `mlir::isSpeculatable` checks for both side effects AND undefined
-    behaviour.  Conditionally-speculatable ops (`arith.divsi`, `arith.divui`)
-    return false unless their divisor is a known-non-zero constant — so
-    hoisting them across a runtime guard cannot expose UB earlier.  This
-    is the same predicate upstream MLIR's LICM uses, and it admits new
-    arith ops automatically as the dialect evolves (vs. an explicit
-    allow-list that has to be maintained by hand).
+    Why "pure" is the right predicate
+    ---------------------------------
+    `mlir::isPure` requires both speculatability and freedom from memory
+    effects, matching upstream MLIR's LICM. Conditionally-speculatable ops
+    (`arith.divsi`, `arith.divui`) move only when their interface proves
+    speculation safe. Region-bearing operations are rejected because their
+    regions may capture values not listed as parent-op operands.
 
     Pipeline placement
     ------------------
@@ -336,12 +332,12 @@ def HoistAllocSizeArithPass
     into a `memref.view` over host scratch are visible (we will not try
     to hoist their producers).  Running before pool-allocs means
     pool-allocs sees IR where every dynamic alloc's operand chain has
-    already been pulled above the earliest dynamic alloc.
+    already been pulled above the earliest used alloc when safe.
 
     Why a separate pass (vs. an internal phase of pool-allocs)
     ----------------------------------------------------------
     `--hip-pool-allocs` deliberately does not move ops or fold shape
-    queries internally; it only places `hip.get_pool` + bucket-size
+    queries internally; it only places `hip.get_pool` + pool-size
     arithmetic at a single dominator point.  Keeping the hoist as a
     standalone, separately-named pass — composed via the pipeline rather
     than embedded in pool-allocs — keeps each pass single-purpose and is
@@ -362,7 +358,7 @@ def HoistAllocSizeArithPass
     Example IR (canonical case after bufferisation)
     ------------------------------------------------------------
 
-    Before — `%6` and `%7` are speculatable but live below `%alloc`,
+    Before — `%6` and `%7` are pure but live below `%alloc`,
     blocking single-block dominator-emit:
 
     ```mlir
@@ -375,8 +371,8 @@ def HoistAllocSizeArithPass
     %alloc_6 = memref.alloc(%7) : memref<3x?xi64>
     ```
 
-    After — `%6` and `%7` hoisted to just before `%alloc`; original
-    locations now live above the earliest dynamic alloc:
+    After — `%6` and `%7` hoisted to just before `%alloc`; original locations
+    now live above the earliest used alloc:
 
     ```mlir
     %dim   = memref.dim %arg, %c0 : memref<?x?xi64>
@@ -559,8 +555,9 @@ def ResolveMemRefDimsPass
     block-top arg dim lets `--hip-hoist-alloc-size-arith` lift it, so
     `--hip-pool-allocs` shares one pool across many allocs instead of splitting
     a dominance domain per alloc. Placement: after promote-strided-operands /
-    materialize-host-scalars, before hoist-alloc-size-arith / pool-allocs.
-    Idempotent. See ResolveMemRefDims.cpp for the before/after IR.
+    materialize-host-scalars, before the final CSE / hoist-alloc-size-arith /
+    pool-allocs sequence. Idempotent. See ResolveMemRefDims.cpp for the
+    before/after IR.
   }];
   let dependentDialects = [
     "mlir::affine::AffineDialect",

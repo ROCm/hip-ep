@@ -64,13 +64,18 @@ void addPluginPassesForSlot(OpPassManager &pm,
 /// Add shape normalizations used only to improve hip-pool-allocs:
 ///   - resolve-memref-dims folds `memref.dim` through view chains to the root
 ///     buffer.
-///   - hoist-alloc-size-arith moves size computations above the first dynamic
+///   - CSE removes repeated size queries exposed by late allocation rewrites.
+///   - hoist-alloc-size-arith moves pure size computations above the first used
 ///     allocation.
-/// Omitting either preserves correctness but may split allocations into more
-/// dominance domains and increase peak memory. Run these after view creation
-/// and immediately before pooling.
+/// Omitting these steps preserves correctness but may split allocations into
+/// more dominance domains and increase peak memory. Run these after view
+/// creation and immediately before pooling.
 void addPoolAllocsShapePreconditionPasses(OpPassManager &pm) {
   pm.addNestedPass<func::FuncOp>(mlir::hip::createResolveMemRefDimsPass());
+  // Allocation and view rewrites run after the pipeline's earlier CSE and may
+  // leave repeated memref.dim queries on the same source. Deduplicate them
+  // before hoisting so equivalent sizes do not open separate pool domains.
+  pm.addNestedPass<func::FuncOp>(mlir::createCSEPass());
   pm.addNestedPass<func::FuncOp>(mlir::hip::createHoistAllocSizeArithPass());
 }
 

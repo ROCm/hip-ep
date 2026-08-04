@@ -27,8 +27,8 @@
 //   %a = memref.alloc(%d)            // --hip-pool-allocs merges the domain
 //
 // Placement: after --hip-promote-strided-operands /
-// --hip-materialize-host-scalars, before --hip-hoist-alloc-size-arith /
-// --hip-pool-allocs.  Idempotent.
+// --hip-materialize-host-scalars, before the final CSE /
+// --hip-hoist-alloc-size-arith / --hip-pool-allocs sequence. Idempotent.
 //
 //===----------------------------------------------------------------------===//
 
