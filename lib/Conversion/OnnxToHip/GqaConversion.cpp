@@ -184,11 +184,58 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
   // === Create DPS init tensors ===
 
   mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, query);
-  mlir::Value presentKeyInit = createEmptyTensor(
-      rewriter, loc, presentKeyType, pastKey ? pastKey : (key ? key : query));
-  mlir::Value presentValueInit =
-      createEmptyTensor(rewriter, loc, presentValueType,
-                        pastValue ? pastValue : (value ? value : query));
+
+  // present KV is concat(past, current) along the seq axis, so its seq extent
+  // is past_seq + current_seq. Taking it from the past operand alone collapses
+  // present to zero length on a fresh prefill (past_seq == 0); the output
+  // allocator then hands the runtime a null present_key/present_value and
+  // wrap_group_query_attention rejects the call, leaving attention zero-filled.
+  // Same reasoning as OnnxAttentionConversion.cpp.
+  // Only rank-3 BSH query (seq at dim 1) and rank-4 BNSH present (seq at dim 2)
+  // are modelled here; for any other layout keep the positional behaviour
+  // rather than guessing which axis carries the sequence.
+  const bool canSizeFromTotal = queryType.getRank() == 3;
+
+  mlir::Value totalKvIdx;
+  auto getTotalKvIdx = [&]() -> mlir::Value {
+    if (totalKvIdx)
+      return totalKvIdx;
+    totalKvIdx = mlir::tensor::DimOp::create(rewriter, loc, query, 1);
+    if (pastKey) {
+      mlir::Value pastIdx =
+          mlir::tensor::DimOp::create(rewriter, loc, pastKey, 2);
+      totalKvIdx =
+          mlir::arith::AddIOp::create(rewriter, loc, pastIdx, totalKvIdx);
+    }
+    return totalKvIdx;
+  };
+
+  auto buildPresentInit = [&](mlir::RankedTensorType t,
+                              mlir::Value fallback) -> mlir::Value {
+    if (!canSizeFromTotal || t.getRank() != 4)
+      return createEmptyTensor(rewriter, loc, t, fallback);
+    llvm::SmallVector<mlir::Value> dynSizes;
+    for (int64_t dimIdx : llvm::seq<int64_t>(t.getRank())) {
+      if (!t.isDynamicDim(dimIdx))
+        continue;
+      if (dimIdx == 2)
+        dynSizes.push_back(getTotalKvIdx());
+      else if (dimIdx == 0)
+        dynSizes.push_back(
+            mlir::tensor::DimOp::create(rewriter, loc, query, 0).getResult());
+      else
+        dynSizes.push_back(
+            mlir::tensor::DimOp::create(rewriter, loc, fallback, dimIdx)
+                .getResult());
+    }
+    return mlir::tensor::EmptyOp::create(rewriter, loc, t.getShape(),
+                                         t.getElementType(), dynSizes);
+  };
+
+  mlir::Value presentKeyInit =
+      buildPresentInit(presentKeyType, pastKey ? pastKey : (key ? key : query));
+  mlir::Value presentValueInit = buildPresentInit(
+      presentValueType, pastValue ? pastValue : (value ? value : query));
 
   mlir::Value outputQkInit = nullptr;
   if (outputQkType)
