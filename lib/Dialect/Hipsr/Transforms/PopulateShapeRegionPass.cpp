@@ -56,18 +56,9 @@ LogicalResult populatePlaceholderShapeRegion(OpBuilder &builder,
   }
 
   Operation *consumer = placeholder.getDpsConsumer();
-  if (!consumer) {
-    return placeholder.emitOpError(
-        "shape-region population requires a DPS consumer");
-  }
-
   Block &block = createPlaceholderShapeBlock(builder, placeholder);
 
   if (auto castOp = dyn_cast<CastOp>(consumer)) {
-    if (placeholder.getPlaceholderType() != PlaceholderType::Normal) {
-      return placeholder.emitOpError(
-          "type does not match the consumer's shape-region category");
-    }
     return populateCastShapeRegion(builder, block, castOp);
   }
 
