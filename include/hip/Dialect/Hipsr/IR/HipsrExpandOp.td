@@ -39,7 +39,7 @@ def Hipsr_ExpandOp : Hipsr_DpsOp<
     `ins` `(` $input (`,` $shape^)? `:` type($input)
         (`,` type($shape)^)? `)`
     `outs` `(` $init `:` type($init) `)`
-    attr-dict (`:` type($result_tensors)^)? (`shape_region` $shape_region^)?
+    attr-dict (`:` type($result_tensors)^)?
   }];
 
   let hasCanonicalizer = 1;

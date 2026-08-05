@@ -112,6 +112,62 @@ __global__ void softmax_row_2d_inplace_kernel(__half* data, int rows,
     row_ptr[j] = __float2half(__half2float(row_ptr[j]) * inv);
 }
 
+// fp32 variant — same algorithm, reads float instead of __half.
+// Used by Qwen VLM and other models where Softmax input is fp32.
+__global__ void softmax_row_2d_inplace_fp32_kernel(float* data, int rows,
+                                                     int cols) {
+  const int row = blockIdx.x;
+  if (row >= rows)
+    return;
+  float* row_ptr = data + (size_t)row * cols;
+
+  const int tid = threadIdx.x;
+  const int wave_id = tid / WAVE_SIZE;
+  const int num_waves = blockDim.x / WAVE_SIZE;
+
+  extern __shared__ float smem[];
+
+  // Pass 1: row max.
+  float local_max = -INFINITY;
+  for (int j = tid; j < cols; j += blockDim.x)
+    local_max = fmaxf(local_max, row_ptr[j]);
+  local_max = warp_reduce_max_f(local_max);
+  if (tid % WAVE_SIZE == 0)
+    smem[wave_id] = local_max;
+  __syncthreads();
+  if (tid < WAVE_SIZE) {
+    float v = (tid < num_waves) ? smem[tid] : -INFINITY;
+    v = warp_reduce_max_f(v);
+    smem[0] = v;
+  }
+  __syncthreads();
+  float row_max = smem[0];
+
+  // Pass 2: exp2f + sum.
+  float local_sum = 0.0f;
+  for (int j = tid; j < cols; j += blockDim.x) {
+    float e = exp2f((row_ptr[j] - row_max) * LOG2E);
+    row_ptr[j] = e;
+    local_sum += e;
+  }
+  local_sum = warp_reduce_sum_f(local_sum);
+  if (tid % WAVE_SIZE == 0)
+    smem[wave_id] = local_sum;
+  __syncthreads();
+  if (tid < WAVE_SIZE) {
+    float v = (tid < num_waves) ? smem[tid] : 0.0f;
+    v = warp_reduce_sum_f(v);
+    smem[0] = v;
+  }
+  __syncthreads();
+  float row_sum = smem[0];
+  float inv = 1.0f / row_sum;
+
+  // Pass 3: normalize.
+  for (int j = tid; j < cols; j += blockDim.x)
+    row_ptr[j] = row_ptr[j] * inv;
+}
+
 } // namespace
 
 extern "C" int hip_softmax_row_2d_inplace(void* stream_ptr, void* data,
@@ -129,7 +185,30 @@ extern "C" int hip_softmax_row_2d_inplace(void* stream_ptr, void* data,
     threads = 256;
   int num_waves = (threads + WAVE_SIZE - 1) / WAVE_SIZE;
   size_t smem_bytes = static_cast<size_t>(num_waves) * sizeof(float);
+  (void)hipGetLastError();
   softmax_row_2d_inplace_kernel<<<rows, threads, smem_bytes, stream>>>(
       static_cast<__half*>(data), rows, cols);
-  return hipSuccess;
+  return hipGetLastError();
+}
+
+// fp32 variant — for models where Softmax input is fp32 (e.g. Qwen VLM).
+extern "C" int hip_softmax_row_2d_inplace_fp32(void* stream_ptr, void* data,
+                                                 int rows, int cols) {
+  if (!data || rows <= 0 || cols <= 0)
+    return -1;
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  // Pick block size: power of two up to min(cols, 256). 32 minimum for one
+  // wave on RDNA / 64 on CDNA. SoftMax for vision attention has cols up to
+  // ~4096, well-served by 256 threads × 16 iters.
+  int threads = 32;
+  while (threads < cols && threads < 256)
+    threads *= 2;
+  if (threads > 256)
+    threads = 256;
+  int num_waves = (threads + WAVE_SIZE - 1) / WAVE_SIZE;
+  size_t smem_bytes = static_cast<size_t>(num_waves) * sizeof(float);
+  (void)hipGetLastError();
+  softmax_row_2d_inplace_fp32_kernel<<<rows, threads, smem_bytes, stream>>>(
+      static_cast<float*>(data), rows, cols);
+  return hipGetLastError();
 }

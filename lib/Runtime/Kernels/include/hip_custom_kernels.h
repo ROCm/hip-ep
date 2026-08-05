@@ -679,6 +679,12 @@ HIP_KERNEL_API int hip_gqa_softmax_inplace(
  * standalone `hip_miopen_softmax` runtime entry point. */
 HIP_KERNEL_API int hip_softmax_row_2d_inplace(void* stream, void* data, int rows, int cols);
 
+/* fp32 variant of the above — for models where Softmax input is fp32.
+ * Qwen VLM vision encoder attention scores are fp32; using the fp16 kernel
+ * there misinterprets the data and produces completely wrong outputs.
+ * Called by hip_miopen_softmax when elem_size_bytes == 4. */
+HIP_KERNEL_API int hip_softmax_row_2d_inplace_fp32(void* stream, void* data, int rows, int cols);
+
 /* Column-wise softmax: fp32 input -> fp16 output.
  * Reads fp32 Score matrix (no fp16 overflow/inf), writes fp16 probabilities.
  * input_batch_stride is in float elements, output_batch_stride in half elements. */

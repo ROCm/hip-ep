@@ -29,6 +29,6 @@ def Hipsr_CastOp : Hipsr_DpsOp<"cast"> {
     `(` $ctx `)`
     `ins` `(` $input `:` type($input) `)`
     `outs` `(` $init `:` type($init) `)`
-    attr-dict (`:` type($result_tensors)^)? (`shape_region` $shape_region^)?
+    attr-dict (`:` type($result_tensors)^)?
   }];
 }
