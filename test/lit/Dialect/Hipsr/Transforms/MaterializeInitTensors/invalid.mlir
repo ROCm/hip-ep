@@ -57,7 +57,7 @@ func.func @barrier_placeholder(%ctx: !hipsr.context, %a: tensor<?x256xf16>,
       %n = shape.get_extent %b_shape, %n_index
           : !shape.shape, !shape.size -> !shape.size
       %result_shape = shape.from_extents %m, %n : !shape.size, !shape.size
-      hipsr.shape_yield2 %result_shape : !shape.shape
+      hipsr.shape_yield %result_shape : !shape.shape
     }
     %matmul = hipsr.matmul(%domain_ctx)
         ins(%domain_a, %domain_b : tensor<?x256xf16>, tensor<256x512xf16>)

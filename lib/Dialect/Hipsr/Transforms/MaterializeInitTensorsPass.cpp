@@ -12,7 +12,7 @@
 // Before:
 //   %init = hipsr.placeholder(%ctx) ins(%a, %b) : tensor<?x512xf16>
 //       shape_region { ^bb0(%a_shape: !shape.shape, %b_shape: !shape.shape):
-//         hipsr.shape_yield2 %result_shape : !shape.shape }
+//         hipsr.shape_yield %result_shape : !shape.shape }
 //   %0 = hipsr.matmul(%ctx) ins(%a, %b) outs(%init) : tensor<?x512xf16>
 // After:
 //   %shape = scf.execute_region -> !shape.shape { ... }
@@ -20,7 +20,7 @@
 //   %0 = hipsr.matmul(%ctx) ins(%a, %b) outs(%init) : tensor<?x512xf16>
 //
 // The phases run per domain: collect and group the placeholders, build the
-// shape regions, build the tensor allocations, then replace and erase.
+// shape regions, build the init tensors, then replace and erase.
 //
 //===----------------------------------------------------------------------===//
 
@@ -106,7 +106,7 @@ Value getShapeForInput(Value input, Location loc,
 }
 
 // Moves a placeholder's shape region body into a new scf.execute_region placed
-// just before it. hipsr.shape_yield2 is bound to hipsr.placeholder by HasParent
+// just before it. hipsr.shape_yield is bound to hipsr.placeholder by HasParent
 // and cannot come along, so the transferred body gets the scf terminator.
 scf::ExecuteRegionOp
 createExecuteRegionAndTransferBody(PlaceholderOp placeholder,
@@ -120,7 +120,7 @@ createExecuteRegionAndTransferBody(PlaceholderOp placeholder,
   executeRegion.getRegion().takeBody(placeholder.getShapeRegion());
 
   auto shapeYield =
-      cast<ShapeYield2Op>(executeRegion.getRegion().front().getTerminator());
+      cast<ShapeYieldOp>(executeRegion.getRegion().front().getTerminator());
   builder.setInsertionPoint(shapeYield);
   builder.create<scf::YieldOp>(shapeYield.getLoc(), shapeYield.getShapes());
   shapeYield.erase();
@@ -211,8 +211,8 @@ SmallVector<Value> extractDynamicDimensions(Value shapeValue,
   return dynamicDimensions;
 }
 
-Value createTensorEmptyFromShape(Value placeholderResult, Value shapeValue,
-                                 Location loc, OpBuilder &builder) {
+Value createInitTensorFromShape(Value placeholderResult, Value shapeValue,
+                                Location loc, OpBuilder &builder) {
   auto tensorType = cast<RankedTensorType>(placeholderResult.getType());
   SmallVector<Value> dynamicDimensions =
       extractDynamicDimensions(shapeValue, tensorType, loc, builder);
@@ -223,10 +223,10 @@ Value createTensorEmptyFromShape(Value placeholderResult, Value shapeValue,
 // last shape computation, so once the placeholders are erased the domain reads
 // as shape computations, then allocations, then data operations.
 DenseMap<Value, Value>
-createTensorAllocs(ArrayRef<PlaceholderOp> placeholders,
-                   const DenseMap<PlaceholderOp, scf::ExecuteRegionOp>
-                       &placeholderToExecuteRegion,
-                   OpBuilder &builder) {
+createInitTensors(ArrayRef<PlaceholderOp> placeholders,
+                  const DenseMap<PlaceholderOp, scf::ExecuteRegionOp>
+                      &placeholderToExecuteRegion,
+                  OpBuilder &builder) {
   builder.setInsertionPointAfter(
       placeholderToExecuteRegion.lookup(placeholders.back()));
 
@@ -236,7 +236,7 @@ createTensorAllocs(ArrayRef<PlaceholderOp> placeholders,
         placeholderToExecuteRegion.lookup(placeholder);
     for (auto [result, shapeValue] : llvm::zip_equal(
              placeholder.getResults(), executeRegion.getResults())) {
-      placeholderResultToInitTensor[result] = createTensorEmptyFromShape(
+      placeholderResultToInitTensor[result] = createInitTensorFromShape(
           result, shapeValue, placeholder.getLoc(), builder);
     }
   }
@@ -278,7 +278,7 @@ LogicalResult materializePoolDomain(PoolDomainOp poolDomain) {
   }
 
   DenseMap<Value, Value> placeholderResultToInitTensor =
-      createTensorAllocs(*placeholders, *placeholderToExecuteRegion, builder);
+      createInitTensors(*placeholders, *placeholderToExecuteRegion, builder);
   replaceAndCleanup(*placeholders, placeholderResultToInitTensor);
   return success();
 }
