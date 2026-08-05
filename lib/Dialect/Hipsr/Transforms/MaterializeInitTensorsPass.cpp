@@ -34,6 +34,9 @@
 #include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Visitors.h"
+
+#include "llvm/ADT/SmallVector.h"
 
 namespace mlir {
 namespace hipsr {
@@ -43,12 +46,53 @@ namespace hipsr {
 
 namespace {
 
+// Collects a domain's placeholders and moves them to the front of the domain
+// block. SSA form already orders them topologically, so grouping only has to
+// keep their relative order.
+FailureOr<SmallVector<PlaceholderOp>>
+collectAndGroupPlaceholders(PoolDomainOp poolDomain) {
+  Block &domainBlock = poolDomain.getBody().front();
+
+  SmallVector<PlaceholderOp> placeholders;
+  for (Operation &operation : domainBlock) {
+    auto placeholder = dyn_cast<PlaceholderOp>(&operation);
+    if (!placeholder) {
+      continue;
+    }
+    if (placeholder.getShapeRegion().empty()) {
+      placeholder.emitOpError(
+          "shape region must be populated by -hipsr-populate-shape-region");
+      return failure();
+    }
+    placeholders.push_back(placeholder);
+  }
+
+  // Placeholders already sitting at the front are skipped rather than moved:
+  // splicing an operation before itself corrupts the block's operation list.
+  Block::iterator insertionPoint = domainBlock.begin();
+  for (PlaceholderOp placeholder : placeholders) {
+    if (&*insertionPoint == placeholder.getOperation()) {
+      ++insertionPoint;
+      continue;
+    }
+    placeholder->moveBefore(&domainBlock, insertionPoint);
+  }
+
+  return placeholders;
+}
+
 struct MaterializeInitTensorsPass
     : impl::MaterializeInitTensorsPassBase<MaterializeInitTensorsPass> {
   void runOnOperation() override {
-    // Each domain is materialized on its own; the per-domain phases hook in
-    // here.
-    getOperation().walk([](PoolDomainOp) {});
+    WalkResult walkResult = getOperation().walk([](PoolDomainOp poolDomain) {
+      if (failed(collectAndGroupPlaceholders(poolDomain))) {
+        return WalkResult::interrupt();
+      }
+      return WalkResult::advance();
+    });
+    if (walkResult.wasInterrupted()) {
+      signalPassFailure();
+    }
   }
 };
 
