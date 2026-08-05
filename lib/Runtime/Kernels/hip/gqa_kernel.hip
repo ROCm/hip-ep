@@ -2412,6 +2412,19 @@ extern "C" int hip_gqa_flash_decode(
   bool no_autotune = false;
   if (const char* e = getenv("HIPDNN_GQA_DECODE_NOAUTOTUNE")) no_autotune = (atoi(e) != 0);
 
+  // RDP/RGP capture on gfx1151 shows a real WMMA-to-scalar crossover for the
+  // gpt-oss full-attention geometry: WMMA@48 wins at 8k/16k, but its 256 VGPR
+  // allocation (33 VGPR spills, five waves/SIMD) loses to scalar@48 at 32k.
+  // Limit this empirical policy to the exact long-context shape and preserve
+  // explicit environment overrides for investigation.
+  const bool capture_scalar_long_gpt_oss =
+      B == 1 && H == 64 && G == 8 && d == 64 &&
+      local_window_size <= 0 && tune_len >= 32768;
+  if (!forced && capture_scalar_long_gpt_oss) {
+    cfg.use_wmma = false;
+    cfg.splits = cap < 48 ? cap : 48;
+  }
+
   // INT8 path: cache is int8, scales are per-channel fp32. Autotune keeps its
   // own cache/mutex (identical geometry, but the int8 kernels time differently).
   if (kv_i8) {
@@ -2440,7 +2453,7 @@ extern "C" int hip_gqa_flash_decode(
 
   const __half* hK = static_cast<const __half*>(Kcache);
   const __half* hV = static_cast<const __half*>(Vcache);
-  if (!forced && !no_autotune) {
+  if (!forced && !no_autotune && !capture_scalar_long_gpt_oss) {
     const uint64_t key = flashDecodeKey(B, H, G, d, tune_len);
     std::lock_guard<std::mutex> lock(g_flash_decode_mutex);
     auto it = g_flash_decode_cache.find(key);
