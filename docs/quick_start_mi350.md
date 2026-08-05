@@ -127,7 +127,7 @@ applies to any CDNA part, not just gfx950.
 | Feature | Behaviour on MI350X | Where |
 |---|---|---|
 | **Quantized / INT8 KV cache for GQA** | **Hard error, returns −1.** Use an fp16 KV cache. | `lib/Runtime/real/gqa.cpp` |
-| WMMA fused GQA (`hip_gqa_flash_prefill_v2` / `_decode_v2`) | Silently routed to the decomposed hipBLASLt pipeline | `gqa.cpp` (`fused_supported`) |
+| WMMA fused GQA (the `hip_gqa_flash_prefill_*` / `_decode_*` kernels, including the attention-sink and sliding-window prefill) | Silently routed to the decomposed hipBLASLt pipeline | `gqa.cpp` (`fused_supported`) |
 | Legacy `flash_decode` launcher | Silently disabled; `HIPDNN_EP_GQA_FLASH_DECODE=1` has no effect | `gqa.cpp` (`gqa_flash_decode_enabled`) |
 | WMMA MatMulNBits prefill | Replaced by dequant-once + hipBLASLt GEMM for INT4 M≥16 | `matmul_nbits_kernel.hip`, `matmul_nbits.cpp` |
 | WMMA MultiHeadAttention flash prefill | Silently routed to the decomposed path | `multi_head_attention.cpp` |
@@ -196,9 +196,17 @@ FFNs go through the `qmoe` kernel, which was ported for correctness on wave64 bu
 still uses the naive, un-tiled prefill route — exactly where MatMulNBits was
 before the dense fast path was added. MoE *decode* is strong.
 
-Dense-prefill TTFT carries roughly ±8 % run-to-run variance from the hipBLASLt
-autotune described above, so treat single samples accordingly and average several
-process invocations for any comparison.
+The TTFT column above is a single sweep, and **dense-prefill TTFT is far noisier
+than that presentation suggests** — the hipBLASLt autotune described above elects
+a different algorithm from run to run. Measured over five separate process
+invocations on one build, phi-4 spans 43.3–55.9 ms at L=128 and 536.7–711.5 ms at
+L=2048, a coefficient of variation near 12 % in both cases.
+
+So do not read a single dense-TTFT sample as a measurement: a 10 % swing between
+two builds is inside the noise. Average several *process* invocations (repeats
+within one process share the elected algorithm and understate the spread) before
+concluding anything about a change. Decode throughput and peak memory are stable
+to ~1 %, so they are the reliable signals for A/B comparisons.
 
 ## Troubleshooting
 
