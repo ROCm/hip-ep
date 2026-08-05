@@ -1183,7 +1183,7 @@ hipdnn_wmma_f32_16x16x16_f16_w32_unavailable(half16, half16, float8 c) {
 
 // [removed] fused_gqa_decode_kernel / hip_gqa_fused_decode: the legacy
 // one-block-per-(batch,head_q) decode kernel has been retired. Decode is now a
-// single path -- hip_gqa_flash_decode_v2 (FA-2 split-K, scalar|WMMA selected by
+// single path -- hip_gqa_flash_decode (FA-2 split-K, scalar|WMMA selected by
 // geometry) -- which serves GQA and MHA (HpG==1) alike. See gqa.cpp decode
 // dispatch and the SCALAR/WMMA kernels above.
 
@@ -2029,7 +2029,7 @@ static inline void launchFlashDecodeConfig(
       case 5:  LAUNCH_SCALAR(5);  break;
       case 8:  LAUNCH_SCALAR(8);  break;
       case 16: LAUNCH_SCALAR(16); break;
-      default: break;  // unsupported HpG is rejected in hip_gqa_flash_decode_v2
+      default: break;  // unsupported HpG is rejected in hip_gqa_flash_decode
     }
     #undef LAUNCH_SCALAR
   }
@@ -2280,7 +2280,7 @@ static FlashDecodeCfg tuneFlashDecode(
 }
 
 // INT8 decode autotune state + helpers (defined below). Forward-declared here so
-// the unified hip_gqa_flash_decode_v2 can dispatch the int8 path when scales are
+// the unified hip_gqa_flash_decode can dispatch the int8 path when scales are
 // supplied; the launcher/tuner bodies live after the fp16 entry to keep the two
 // autotune skeletons side by side.
 static std::unordered_map<uint64_t, FlashDecodeCfg> g_flash_decode_i8_cache;
@@ -2321,7 +2321,7 @@ static FlashDecodeCfg tuneFlashDecodeI8(
 // decode). Both formats share this autotune/env skeleton and emit identical
 // [B,H,splits,d+2] partials, so only the tune/launch tail differs. Adding INT4/
 // FP8 = one enumerator (hip_kv_dtype_t) + a kernel specialization + a branch.
-extern "C" int hip_gqa_flash_decode_v2(
+extern "C" int hip_gqa_flash_decode(
     void* stream_ptr,
     const void* Q, const void* Kcache, const void* Vcache,
     void* O,
@@ -2340,7 +2340,7 @@ extern "C" int hip_gqa_flash_decode_v2(
   // (Qwen2.5-14B's 40:8 at d=128) and HPG=8 (gpt-oss-20b at d=64). HPG=8 with
   // d=128 is rejected to keep template bloat bounded; no current model needs it.
   if (G <= 0 || H % G != 0) {
-    fprintf(stderr, "hip_gqa_flash_decode_v2: H=%d not divisible by G=%d\n", H, G);
+    fprintf(stderr, "hip_gqa_flash_decode: H=%d not divisible by G=%d\n", H, G);
     return -1;
   }
   const int hpg = H / G;
@@ -2349,27 +2349,27 @@ extern "C" int hip_gqa_flash_decode_v2(
   if (hpg != 1 && hpg != 2 && hpg != 3 && hpg != 4 && hpg != 5 && hpg != 8 &&
       hpg != 16) {
     fprintf(stderr,
-            "hip_gqa_flash_decode_v2: unsupported HPG=%d (must be "
+            "hip_gqa_flash_decode: unsupported HPG=%d (must be "
             "1/2/3/4/5/8/16; H=%d, G=%d)\n",
             hpg, H, G);
     return -1;
   }
   if (d != 64 && d != 128 && d != 256) {
     fprintf(stderr,
-            "hip_gqa_flash_decode_v2: unsupported d=%d (must be 64/128/256)\n",
+            "hip_gqa_flash_decode: unsupported d=%d (must be 64/128/256)\n",
             d);
     return -1;
   }
   // Cache format is chosen by kv_dtype (extensible: add a case for INT4/FP8).
   if (kv_dtype != HIP_KV_DTYPE_FP16 && kv_dtype != HIP_KV_DTYPE_INT8) {
-    fprintf(stderr, "hip_gqa_flash_decode_v2: unsupported kv_dtype=%d\n",
+    fprintf(stderr, "hip_gqa_flash_decode: unsupported kv_dtype=%d\n",
             kv_dtype);
     return -1;
   }
   const bool kv_i8 = (kv_dtype == HIP_KV_DTYPE_INT8);
   if (kv_i8 && (k_scale == nullptr || v_scale == nullptr)) {
     fprintf(stderr,
-            "hip_gqa_flash_decode_v2: INT8 KV requires k_scale and v_scale\n");
+            "hip_gqa_flash_decode: INT8 KV requires k_scale and v_scale\n");
     return -1;
   }
 
@@ -2469,7 +2469,7 @@ extern "C" int hip_gqa_flash_decode_v2(
 }
 
 //===----------------------------------------------------------------------===//
-// INT8 decode launcher: same autotune structure as hip_gqa_flash_decode_v2, but
+// INT8 decode launcher: same autotune structure as hip_gqa_flash_decode, but
 // carries the k_scale/v_scale per-channel tables and dispatches the int8 kernels.
 //===----------------------------------------------------------------------===//
 static inline void launchFlashDecodeConfigI8(
@@ -3998,7 +3998,7 @@ extern "C" int hip_gqa_flash_prefill_v2(
 //===----------------------------------------------------------------------===//
 // Legacy decode kernel (folded in from the retired gqa_kernel_legacy.hip).
 //
-// The production decode path is hip_gqa_flash_decode_v2 above; it is the SINGLE
+// The production decode path is hip_gqa_flash_decode above; it is the SINGLE
 // decode kernel the runtime dispatches for every fp16 causal GQA/MHA decode --
 // sliding window and head sink folded in, split count autotuned per shape.
 // This one retired entry backs gqa.cpp::gqa_forward_hipblaslt (the decomposed

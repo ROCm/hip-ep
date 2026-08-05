@@ -2,7 +2,7 @@
 // REAL v2 half of the legacy-vs-v2 double-check probe.
 //
 // Links the CURRENT production kernel (hip/gqa_kernel.hip) and calls the REAL
-// hip_gqa_flash_decode_v2 (per-shape autotune of impl + split-count). Inputs
+// hip_gqa_flash_decode (per-shape autotune of impl + split-count). Inputs
 // use the SAME seed/layout/sink-modeling as probe_legacy.cpp, so the v2 (ms)
 // column here lines up 1:1 with the orig/PR438 columns from the legacy probe.
 // Together they give a fully-real three-column comparison (no env simulation).
@@ -22,7 +22,7 @@
 #include <vector>
 #include <string>
 
-extern "C" int hip_gqa_flash_decode_v2(
+extern "C" int hip_gqa_flash_decode(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, void* partials_workspace,
     int B, int H, int G, int d, int skv, int max_seq, int max_splits,
@@ -116,7 +116,7 @@ static double time_v2(const Case& c, float scale, const __half* dQ,
   }
   const int B = c.B, H = c.H, G = c.G, D = c.D, max_seq = c.max_seq;
   const void* sinkp = c.sink ? (const void*)dSink : nullptr;
-  HIP_CHECK((hipError_t)hip_gqa_flash_decode_v2(
+  HIP_CHECK((hipError_t)hip_gqa_flash_decode(
       nullptr, dQ, dK, dV, dO, dPart, B, H, G, D, c.total, max_seq, MAX_SPLITS,
       scale, dSeq, c.window, sinkp, c.smooth, HIP_KV_DTYPE_FP16, nullptr,
       nullptr));
@@ -133,7 +133,7 @@ static double time_v2(const Case& c, float scale, const __half* dQ,
   HIP_CHECK(hipEventCreate(&b));
   HIP_CHECK(hipEventRecord(a));
   for (int it = 0; it < iters; ++it)
-    hip_gqa_flash_decode_v2(nullptr, dQ, dK, dV, dO, dPart, B, H, G, D, c.total,
+    hip_gqa_flash_decode(nullptr, dQ, dK, dV, dO, dPart, B, H, G, D, c.total,
                             max_seq, MAX_SPLITS, scale, dSeq, c.window, sinkp,
                             c.smooth, HIP_KV_DTYPE_FP16, nullptr, nullptr);
   HIP_CHECK(hipEventRecord(b));
@@ -220,7 +220,7 @@ int main(int argc, char** argv) {
   fprintf(stderr, "Device: %s (%d CUs) iters=%d  [REAL v2 kernel from current gqa_kernel.hip]\n",
           prop.name, prop.multiProcessorCount, iters);
 
-  printf("<!-- device: %s | %d CUs | iters=%d | REAL v2 hip_gqa_flash_decode_v2 (current gqa_kernel.hip) -->\n\n",
+  printf("<!-- device: %s | %d CUs | iters=%d | REAL v2 hip_gqa_flash_decode (current gqa_kernel.hip) -->\n\n",
          prop.name, prop.multiProcessorCount, iters);
   printf("| model / geometry | HpG | D | len | win | feat | v2 (ms) | result |\n");
   printf("|---|--:|--:|--:|--:|:--|--:|:--|\n");

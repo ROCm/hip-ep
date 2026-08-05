@@ -43,7 +43,7 @@ gpt-oss-20b 在 40 CU 机器上 decode 变慢。定位到 PR #438（`9fc5085` / 
 ## 2. 真正的发现：#438 动的那条路径，正是 gpt-oss-20b 唯一走的路径
 
 撤销之后继续查，发现问题比"WMMA kernel 选错了"更深一层——**gpt-oss-20b 的 24 层 GQA 根本就没走到优化过的
-`hip_gqa_flash_decode_v2` 上**。
+`hip_gqa_flash_decode` 上**。
 
 绕路是这样发生的：
 
@@ -54,7 +54,7 @@ gpt-oss-20b 在 40 CU 机器上 decode 变慢。定位到 PR #438（`9fc5085` / 
    没有 autotune、不支持 INT8、只支持 HpG ∈ {4,8}。
 3. 如果 `skv` 低于 flash-decode 的最小阈值（256），连这道门都过不去，decode 直接退化成
    decomposed GEMM 流水线（要物化 `[H, skv]` 的完整 score 矩阵）。
-4. 与此同时，`hip_gqa_flash_decode_v2` 被硬编码传入
+4. 与此同时，`hip_gqa_flash_decode` 被硬编码传入
    `local_window_size = 0, head_sink = nullptr, smooth_softmax = 0`——
    **v2 的运行时可调 split 数和逐 shape 的 (impl, split) autotune，恰好永远够不到最需要它们的那些层。**
 
@@ -71,7 +71,7 @@ autotune 的 key（滑窗层和全注意力层因此会各自独立调优）。�
 改动：
 
 - `gqa_forward_fused` 新增 `local_window_size` / `head_sink` / `use_smooth_softmax` 三个参数，
-  透传给 `hip_gqa_flash_decode_v2`，不再置零。
+  透传给 `hip_gqa_flash_decode`，不再置零。
 - `fused_supported` 里引入 `window_sink_ok`，**只对 decode** 放开 window/sink 限制。
 - **prefill 维持原状**（WMMA prefill 不支持这两个特性），并加了防御性断言，一旦收到就报错。
 
@@ -113,7 +113,7 @@ splits=4 要 0.59ms，而 splits>=8 只要 <=0.36ms）。但 256 这个值把 `s
 
 ### 4.3 split 数兜底改为按设备推导
 
-`hip_gqa_flash_decode_v2` 里原来的启发式默认是写死的 `{WMMA, splits = 8}`——正是[第 1 节](#1-起点为什么先撤销了-use_wmma)
+`hip_gqa_flash_decode` 里原来的启发式默认是写死的 `{WMMA, splits = 8}`——正是[第 1 节](#1-起点为什么先撤销了-use_wmma)
 那个 64-wave 问题。新增两个函数：
 
 ```cpp
@@ -317,7 +317,7 @@ split 超过 48 之后 partials 流量占比会超过 13%，边际收益转负�
 |--------|------|
 | `9fc5085` / `c7c407f` | PR #438，引入 legacy WMMA decode kernel（问题来源） |
 | `b9cc93b` | 撤销 legacy decode 路径上的 WMMA 派发 |
-| `6d04f74` | 把 window/sink decode 接到 `hip_gqa_flash_decode_v2` |
+| `6d04f74` | 把 window/sink decode 接到 `hip_gqa_flash_decode` |
 | `956cdd0` | autotune 测量可信度、候选集放宽、按设备推导的 split 兜底 |
 
 **验证通过后的清理项**：删掉 `gqa_forward_hipblaslt` 里已不可达的 legacy flash decode 分支，

@@ -705,7 +705,7 @@ HIP_KERNEL_API int hip_gqa_softmax_f32_to_f32(
     const void* head_sink, int num_heads, int use_smooth_softmax);
 
 /* Legacy fast-path decode kernel (folded into gqa_kernel.hip with a legacy_*
- * device kernel). The production decode path uses hip_gqa_flash_decode_v2 above
+ * device kernel). The production decode path uses hip_gqa_flash_decode above
  * for EVERY fp16 causal GQA/MHA decode (window + sink folded in, split count
  * autotuned). This one entry backs gqa.cpp::gqa_forward_hipblaslt -- the
  * decomposed hipBLASLt fallback -- only for the odd geometries v2 does not
@@ -779,7 +779,7 @@ HIP_KERNEL_API int hip_gqa_flash_prefill_v3(
  * prefill kernel. The runtime (real/gqa.cpp) dequantizes the int8 KV cache to an
  * fp16 scratch ONCE (hip_gqa_dequant_kv_i8_to_fp16) and reuses the tuned fp16
  * hip_gqa_flash_prefill_v2 above -- ~parity with fp16. Only the bandwidth-bound
- * decode reads int8 directly (hip_gqa_flash_decode_v2 with kv_dtype=INT8). */
+ * decode reads int8 directly (hip_gqa_flash_decode with kv_dtype=INT8). */
 
 /* hip_mha_flash_prefill: fused non-causal FA-2 WMMA prefill for the MS
  * MultiHeadAttention contrib op (self-attention, N_q == N_kv). Replaces the
@@ -842,7 +842,7 @@ HIP_KERNEL_API int hip_mha_flash_prefill(
  *     (kv_head, head_dim) channel, no zero point; dequant x_fp16 = x_i8 *
  *     scale[g*d + c]). The int8 read is 1 byte/elem, halving the DRAM traffic on
  *     the bandwidth-bound decode. Both scales are required for INT8. */
-HIP_KERNEL_API int hip_gqa_flash_decode_v2(
+HIP_KERNEL_API int hip_gqa_flash_decode(
     void* stream,
     const void* Q, const void* Kcache, const void* Vcache,
     void* O,

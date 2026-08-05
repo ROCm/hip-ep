@@ -15,9 +15,9 @@
 //       prefill (sq > 1): [split] -> [rope] -> kv-cache update ->
 //                         hip_gqa_flash_prefill_v3
 //       decode  (sq == 1): [split] -> [rope] -> kv-cache update ->
-//                         hip_gqa_flash_decode_v2
+//                         hip_gqa_flash_decode
 //     Decode additionally covers the sliding window and the head sink /
-//     smooth softmax: hip_gqa_flash_decode_v2 clamps kv_lo to
+//     smooth softmax: hip_gqa_flash_decode clamps kv_lo to
 //     max(0, total_seq - window) in the split kernel and folds the sink into
 //     the reduce denominator, and it autotunes (impl, split-count) per shape --
 //     keying sliding layers on the window rather than the full context. Prefill
@@ -385,7 +385,7 @@ static int gqa_forward_fused(
     if (past_len < 0)
       past_len = 0;
 
-    // Decode has a SINGLE path: hip_gqa_flash_decode_v2. It selects WMMA (D64/
+    // Decode has a SINGLE path: hip_gqa_flash_decode. It selects WMMA (D64/
     // HpG>=8) vs scalar internally and serves GQA and MHA (HpG==1) alike, by
     // GEOMETRY only -- never by KV depth. There is no legacy fused fallback;
     // geometries the kernel cannot template are rejected here.
@@ -473,7 +473,7 @@ static int gqa_forward_fused(
       // Decode structurally clamps kv_lo to the requested local window. This
       // keeps sliding layers on the fused autotuned path rather than treating
       // the window as a decomposed score-mask operation.
-      int drc = hip_gqa_flash_decode_v2(
+      int drc = hip_gqa_flash_decode(
           stream, qSrc, present_key, present_value, output, partials,
           static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
           static_cast<int>(d), static_cast<int>(skv),
@@ -1063,7 +1063,7 @@ static int gqa_forward_hipblaslt(
   // sink / smooth softmax, so a windowed or sink decode cannot use it -- gate
   // it out here and let the decomposed pipeline below own those cases.
   //
-  // NOTE: fp16 causal decode is the domain of hip_gqa_flash_decode_v2, which
+  // NOTE: fp16 causal decode is the domain of hip_gqa_flash_decode, which
   // wrap_group_query_attention keeps on the fused path (it implements window +
   // sink and autotunes its split count). This function only sees the decodes v2
   // rejects for other reasons (fp32, no_causal, attention_bias, or a geometry
@@ -1244,7 +1244,7 @@ static int gqa_forward_hipblaslt(
             seqlens_k_ptr, static_cast<int>(elem_sz)) != 0)
       return -1;
 
-    // hip_gqa_flash_decode_v2 owns every geometry it templates; this fallback
+    // hip_gqa_flash_decode owns every geometry it templates; this fallback
     // only runs for the odd geometries it does not, and fused_predicate already
     // gated out window / sink (sliding_ok_for_fused / sink_ok_for_fused above).
     // Keep the defensive asserts so a future predicate change cannot silently

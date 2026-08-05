@@ -1,7 +1,7 @@
 // ============================================================
 // custom_kernels GQA flash *decode* (TPS) test + 3-column history benchmark.
 //
-// Verifies the SINGLE production decode kernel (hip_gqa_flash_decode_v2) for
+// Verifies the SINGLE production decode kernel (hip_gqa_flash_decode) for
 // correctness against a CPU fp32 reference (incl. seqlens_k / sliding-window /
 // head-sink / smooth-softmax), then reports a three-column latency comparison.
 //
@@ -45,7 +45,7 @@
 // KV-cache dtype ABI (mirrors hip_kv_dtype_t in hip_custom_kernels.h).
 enum { HIP_KV_DTYPE_FP16 = 0, HIP_KV_DTYPE_INT8 = 1 };
 
-extern "C" int hip_gqa_flash_decode_v2(
+extern "C" int hip_gqa_flash_decode(
     void* stream,
     const void* Q, const void* Kcache, const void* Vcache,
     void* O,
@@ -225,7 +225,7 @@ static double run_kernel(DecodeMode mode, const Case& c, float scale,
 
   // Warmup + correctness fetch. For AUTO this first call also runs the autotune
   // pass (timed candidates) and caches the winner; subsequent calls reuse it.
-  HIP_CHECK((hipError_t)hip_gqa_flash_decode_v2(
+  HIP_CHECK((hipError_t)hip_gqa_flash_decode(
       nullptr, dQ, dK, dV, dO, dPart, B, H, G, D, c.total, max_seq, MAX_SPLITS,
       scale, dSeq, c.window, sinkp, c.smooth, HIP_KV_DTYPE_FP16, nullptr,
       nullptr));
@@ -243,7 +243,7 @@ static double run_kernel(DecodeMode mode, const Case& c, float scale,
   HIP_CHECK(hipEventCreate(&b));
   HIP_CHECK(hipEventRecord(a));
   for (int it = 0; it < iters; ++it) {
-    hip_gqa_flash_decode_v2(nullptr, dQ, dK, dV, dO, dPart, B, H, G, D, c.total,
+    hip_gqa_flash_decode(nullptr, dQ, dK, dV, dO, dPart, B, H, G, D, c.total,
                             max_seq, MAX_SPLITS, scale, dSeq, c.window, sinkp,
                             c.smooth, HIP_KV_DTYPE_FP16, nullptr, nullptr);
   }

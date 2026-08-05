@@ -1,6 +1,6 @@
 # GQA Decode 单版本(v2)统一 + gpt-oss-20b 真实三列性能对比
 
-> 目标:把 decode 收敛为**单一** kernel(`hip_gqa_flash_decode_v2`),让 sliding window
+> 目标:把 decode 收敛为**单一** kernel(`hip_gqa_flash_decode`),让 sliding window
 > 与 head sink 成为 decode 的**一等、永久**特性;删除已死的 legacy flash decode;并用
 > **真实历史代码**(不是 env 模拟)量化 gpt-oss-20b「随 seq_len 增大 TPS 下降」到底被解决了多少。
 
@@ -26,7 +26,7 @@
    `gqa.cpp` 中不可达的 `use_flash_decode` 分支及 `gqa_flash_decode_enabled` /
    `gqa_flash_decode_min_skv` / `legacy_flash_decode_geometry_ok` / `kFlashDecodeKSplits`;
    `hip_custom_kernels.h` 中的对应声明。
-2. **固化 window/sink**:decode 唯一 kernel = `hip_gqa_flash_decode_v2`,window + head_sink
+2. **固化 window/sink**:decode 唯一 kernel = `hip_gqa_flash_decode`,window + head_sink
    + smooth-softmax 无条件走它,不再有第二个 windowed/sink decode 变体。这正是让 gpt-oss-20b
    的 24 层(全部带 sink、其中 12 层带 window)从「够不到 v2」变成「全部走 v2 autotune」的关键。
 3. **保留** `hip_gqa_fused_decode`(一块一 head)仅作 v2 模板外**边缘几何**
@@ -54,7 +54,7 @@
 
 **更深一层、也是本机(20 CU 8060S)上真正的拖累**:gpt-oss-20b 的 24 层因带 window /
 head_sink,被旧 `fused_supported` 谓词全部拒绝,于是**困在 legacy `hip_gqa_flash_decode`
-的固定 8-split 路径上,永远够不到 `hip_gqa_flash_decode_v2` 的 per-shape autotune**。
+的固定 8-split 路径上,永远够不到 `hip_gqa_flash_decode` 的 per-shape autotune**。
 8 split 在长 context 填不满 20 CU(实测最优 16–48 split,见第 5 节),所以越长越亏——
 **这才是同事看到「随 seq_len 下降愈发明显」的直接原因**,也正是本次「把 window/sink 直接做进
 decode、统一走 v2」要解决的问题。
@@ -67,7 +67,7 @@ decode、统一走 v2」要解决的问题。
 |---|---|---|
 | **orig** | `gqa_kernel_back.hip` 的真实 legacy `hip_gqa_flash_decode`,强制 scalar | `probe_legacy.exe`(`HIPDNN_GQA_DECODE_SCALAR=1`) |
 | **PR438** | 同上,default(`d==64`→WMMA)@ 8 split | `probe_legacy.exe`(无覆盖) |
-| **v2** | 当前 `gqa_kernel.hip` 的真实 `hip_gqa_flash_decode_v2`(autotune) | `probe_v2.exe` |
+| **v2** | 当前 `gqa_kernel.hip` 的真实 `hip_gqa_flash_decode`(autotune) | `probe_v2.exe` |
 
 两个 probe 用**相同 seed / 输入布局 / sink 建模**,所以绝对 ms 可 1:1 对比。正确性统一对
 CPU fp32 参考做 relL2 校验(全部 < 4e-4,阈值 2e-2)。
@@ -289,7 +289,7 @@ gpt-oss-20b 在**所有 24 层**都带一个可学习的 per-head **attention si
 
 ## 8. 结论
 
-1. **代码统一**:decode 只剩 `hip_gqa_flash_decode_v2` 一个版本,window + head_sink +
+1. **代码统一**:decode 只剩 `hip_gqa_flash_decode` 一个版本,window + head_sink +
    smooth-softmax 是它的一等永久特性;legacy flash decode 与其死分支已删除。
 2. **对同事关切的直接回答**(本机 20 CU 8060S):真正让 gpt-oss-20b 长 context 变慢的,不是
    PR#438 的 scalar→WMMA(本机实测该步几乎无差),而是**window/sink 层被挡在 v2 之外、困在固定
@@ -341,7 +341,7 @@ test_decode.exe --md --iters 500     # 生成本节第 7 张表(stderr 为 autot
 ## 10. 涉及改动的文件
 
 - `hip-ep/lib/Runtime/Kernels/hip/gqa_kernel.hip`:删除 legacy flash decode 三 kernel +
-  `hip_gqa_flash_decode` launcher(~530 行);保留 `hip_gqa_flash_decode_v2`(唯一生产 decode)
+  `hip_gqa_flash_decode` launcher(~530 行);保留 `hip_gqa_flash_decode`(唯一生产 decode)
   与 `hip_gqa_fused_decode`(边缘几何兜底)。
 - `hip-ep/lib/Runtime/real/gqa.cpp`:删除 `use_flash_decode` 死分支及
   `gqa_flash_decode_enabled` / `gqa_flash_decode_min_skv` / `legacy_flash_decode_geometry_ok`

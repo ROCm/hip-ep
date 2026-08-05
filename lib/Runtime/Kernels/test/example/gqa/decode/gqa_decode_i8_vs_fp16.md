@@ -17,9 +17,9 @@ Source model: `models/gqa_kv_u8/psu_orc_211_merged_fp16_gqa.onnx` (`com.microsof
 - **Scales: fp32 `[G*D]` = `[10*128]` = 1280** (`dec_k_scale_*`, `dec_v_scale_*`), i.e. one scale per `(kv_head, head_dim)` channel; all positive -> **symmetric** quant, **no zero point**.
 - Dequant: `k_fp16 = k_i8 * k_scale[g*D + c]`, `v_fp16 = v_i8 * v_scale[g*D + c]`. Attention is then the standard GQA math over the dequantized K/V.
 
-## Kernel implementation (`hip_gqa_flash_decode_v2` + scales)
+## Kernel implementation (`hip_gqa_flash_decode` + scales)
 
-Same FA-2 split-K algorithm, `[B,H,K_SPLITS,D+2]` partials, autotune and reduce as the fp16 `hip_gqa_flash_decode_v2`, so seqlens_k / sliding-window / head-sink / smooth-softmax all carry over unchanged. The only change is the K/V load:
+Same FA-2 split-K algorithm, `[B,H,K_SPLITS,D+2]` partials, autotune and reduce as the fp16 `hip_gqa_flash_decode`, so seqlens_k / sliding-window / head-sink / smooth-softmax all carry over unchanged. The only change is the K/V load:
 
 - **Scalar kernel** (MHA + GQA d128 / high-hpg): keeps the tile INT8 (GQA stages it into LDS with a vectorized int4 copy -> half the fp16 path's LDS; MHA streams it straight from global) and reads it 1 byte/elem. The per-channel **K scale is folded into Q** (`dot = Sum (Q*Ksc)*K_i8`) and the **V scale is deferred to the epilogue** (`O = Vsc*Sum p*V_i8`), so the inner loop drops the per-key dequant multiplies (int8 costs only ~1 extra int->float vs fp16) and frees the K-scale registers. int8 is read via 32-bit `char4` LDS accesses when EPT is a multiple of 4.
 - **WMMA kernel** (GQA d64): dequantizes INT8 -> fp16 during the global->LDS stage (with the same register software-prefetch pipeline as the fp16 path) so the 16x16x16 WMMA GEMMs are byte-identical.
