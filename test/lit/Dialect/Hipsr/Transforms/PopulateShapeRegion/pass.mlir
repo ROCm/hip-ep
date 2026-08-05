@@ -11,7 +11,7 @@
 // CHECK-NEXT: %[[C4:.+]] = arith.constant 4 : index
 // CHECK-NEXT: %[[C8:.+]] = arith.constant 8 : index
 // CHECK-NEXT: %[[OUTPUT_SHAPE:.+]] = shape.from_extents %[[C4]], %[[C8]] : index, index
-// CHECK-NEXT: hipsr.shape_yield2 %[[OUTPUT_SHAPE]] : !shape.shape
+// CHECK-NEXT: hipsr.shape_yield %[[OUTPUT_SHAPE]] : !shape.shape
 // CHECK-NEXT: }
 // CHECK-NEXT: %{{.+}} = hipsr.cast(%[[CTX]]) ins(%[[INPUT]] : tensor<4x8xf32>) outs(%[[INIT]] : tensor<4x8xf16>) : tensor<4x8xf16>
 // CHECK-NEXT: return
@@ -26,7 +26,7 @@ func.func @already_populated(
     %c4 = arith.constant 4 : index
     %c8 = arith.constant 8 : index
     %output_shape = shape.from_extents %c4, %c8 : index, index
-    hipsr.shape_yield2 %output_shape : !shape.shape
+    hipsr.shape_yield %output_shape : !shape.shape
   }
   %result = hipsr.cast(%ctx)
       ins(%input : tensor<4x8xf32>)

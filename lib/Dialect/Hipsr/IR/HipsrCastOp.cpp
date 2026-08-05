@@ -37,7 +37,7 @@ LogicalResult populateCastShapeRegion(OpBuilder &builder, Block &shapeBlock,
   builder.setInsertionPointToStart(&shapeBlock);
 
   Value inputShape = CastShapeArgs{shapeBlock}.getInput();
-  ShapeYield2Op::create(builder, op.getLoc(), ValueRange{inputShape});
+  ShapeYieldOp::create(builder, op.getLoc(), ValueRange{inputShape});
   return success();
 }
 

@@ -27,7 +27,7 @@
 // CHECK-NEXT: %[[BROADCAST:.+]] = shape.broadcast %[[INPUT_SHAPE]], %[[REQUEST_SHAPE]] : tensor<2xindex>, !shape.shape -> !shape.shape
 // CHECK-NEXT: shape.assuming_yield %[[BROADCAST]] : !shape.shape
 // CHECK-NEXT: }
-// CHECK-NEXT: hipsr.shape_yield2 %[[RESULT_SHAPE]] : !shape.shape
+// CHECK-NEXT: hipsr.shape_yield %[[RESULT_SHAPE]] : !shape.shape
 // CHECK-NEXT: }
 // CHECK-NEXT: %[[RESULT:.+]] = hipsr.expand(%[[CTX]]) ins(%[[INPUT]], %[[REQUEST]] : tensor<?x3xf16>, tensor<3xi64>) outs(%[[INIT]] : tensor<?x?x?xf16>) : tensor<?x?x?xf16>
 // CHECK-NEXT: return
@@ -59,7 +59,7 @@ func.func @expand_runtime_shape(
 // CHECK-NEXT: %[[BROADCAST:.+]] = shape.broadcast %[[INPUT_SHAPE]], %[[REQUEST_SHAPE]] : !shape.shape, !shape.shape -> !shape.shape
 // CHECK-NEXT: shape.assuming_yield %[[BROADCAST]] : !shape.shape
 // CHECK-NEXT: }
-// CHECK-NEXT: hipsr.shape_yield2 %[[RESULT_SHAPE]] : !shape.shape
+// CHECK-NEXT: hipsr.shape_yield %[[RESULT_SHAPE]] : !shape.shape
 // CHECK-NEXT: }
 // CHECK-NEXT: %[[RESULT:.+]] = hipsr.expand(%[[CTX]]) ins(%[[INPUT]] : tensor<?x3xf16>) outs(%[[INIT]] : tensor<?x3xf16>) {shape_attr = array<i64: 3>} : tensor<?x3xf16>
 // CHECK-NEXT: return

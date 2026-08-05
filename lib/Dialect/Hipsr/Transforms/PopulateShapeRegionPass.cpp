@@ -14,7 +14,7 @@
 //   %init = hipsr.placeholder(%ctx) ins(%input) : tensor<?x8xf16>
 //       shape_region {
 //   ^bb0(%input_shape: !shape.shape):
-//     hipsr.shape_yield2 %input_shape : !shape.shape
+//     hipsr.shape_yield %input_shape : !shape.shape
 //   }
 //   %0 = hipsr.cast(%ctx) ins(%input) outs(%init) : tensor<?x8xf16>
 //
