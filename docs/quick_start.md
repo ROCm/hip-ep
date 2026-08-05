@@ -248,20 +248,19 @@ cp "$LOCAL_DIR/bin/onnxruntime_providers_shared.dll" "$ORT_HOME/lib/"
 
 ```bash
 cd ..  # Go to workspace directory (sibling of hip-ep)
-git clone https://github.com/microsoft/onnxruntime-genai.git
+# Upstream published no v0.15.1 tag; the release lives on the rel-0.15.1 branch.
+git clone -b rel-0.15.1 https://github.com/microsoft/onnxruntime-genai.git
 cd onnxruntime-genai
-# Upstream published no v0.15.1 tag, so check out the release commit.
-git checkout 3abf4a847fd7876e81d5d1ed3ad97d77284b37e4
 git submodule update --init --recursive
 
-# Apply the AMDGPU integration PR on top of the pinned commit. pull/<n>.patch is
-# a format-patch series, so apply it with `git am` -- `git apply` flattens the
+# Apply the AMDGPU integration PR on top of the branch. pull/<n>.patch is a
+# format-patch series, so apply it with `git am` -- `git apply` flattens the
 # series and fails on anything that depends on an earlier commit in it.
 curl -fsSL https://github.com/microsoft/onnxruntime-genai/pull/2376.patch -o /tmp/oga-2376.patch
 git am --3way --whitespace=nowarn /tmp/oga-2376.patch
 ```
 
-> **Note**: the upstream commit + PR list are pinned in CI via `OGA_COMMIT` and
+> **Note**: the upstream branch + PR list are pinned in CI via `OGA_BRANCH` and
 > `OGA_PR_PATCHES` in
 > [`.github/workflows/windows-build.yml`](../.github/workflows/windows-build.yml);
 > match those for byte-for-byte reproducibility.

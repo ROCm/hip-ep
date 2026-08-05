@@ -32,12 +32,13 @@ env:
   # ORT is still built from source either way). Part of the ort-install cache
   # key. Remove a PR once its fix lands in the pinned ONNX Runtime release.
   ONNXRUNTIME_PR_PATCHES: ""
-  # onnxruntime-genai 0.15.1. Upstream published no v0.15.1 tag and rel-0.15.1
-  # is a moving branch, so pin the release commit itself.
-  OGA_COMMIT: "3abf4a847fd7876e81d5d1ed3ad97d77284b37e4"
+  # onnxruntime-genai release branch (upstream published no v0.15.1 tag). Its
+  # head is resolved at run time and folded into the OGA cache key, so a new
+  # commit on the branch rebuilds instead of reusing a stale artifact.
+  OGA_BRANCH: "rel-0.15.1"
   # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
-  # pull/<n>.patch and `git am` on top of OGA_COMMIT. Part of the OGA cache key.
-  # Remove a PR once it lands in the pinned OGA commit.
+  # pull/<n>.patch and `git am` on top of OGA_BRANCH. Part of the OGA cache key.
+  # Remove a PR once it lands in OGA_BRANCH.
   OGA_PR_PATCHES: "2376"
   # The GPU arch the artifact targets. CI runners have no GPU, so it is passed
   # explicitly (build.py auto-detects from /sys on a real GPU host).
@@ -286,16 +287,26 @@ jobs:
       # build.py (whose target is the project .so) because OGA is a
       # CI/artifact concern.
       # -----------------------------------------------------------------------
-      # A PR patch is fetched from the PR's head, which moves whenever the PR
-      # branch is updated, so the PR number alone does not identify the patch
-      # content. Resolve the head SHAs and fold them into the OGA cache key.
-      - name: Resolve OGA PR head SHAs
-        id: oga-pr-shas
+      # Both the release branch and every patch PR move under a fixed name, so
+      # neither identifies its content. Resolve their heads once: the cache key
+      # folds in the short SHAs and the checkout below uses the branch SHA this
+      # step resolved, so a mid-run push cannot desync key from source.
+      - name: Resolve OGA source SHAs
+        id: oga-shas
         env:
           GH_TOKEN: ${{ github.token }}
           OGA_PRS: ${{ env.OGA_PR_PATCHES }}
         run: |
           set -euo pipefail
+          branch="$(gh api "repos/microsoft/onnxruntime-genai/commits/${OGA_BRANCH}" --jq .sha)"
+          if [ -z "$branch" ]; then
+            echo "Failed to resolve head SHA for OGA branch ${OGA_BRANCH}"
+            exit 1
+          fi
+          echo "OGA branch head: ${OGA_BRANCH} ${branch}"
+          echo "branch-sha=${branch}" >> "$GITHUB_OUTPUT"
+          echo "branch-sha12=${branch:0:12}" >> "$GITHUB_OUTPUT"
+
           prs="$(echo "$OGA_PRS" | xargs || true)"
           if [ -z "$prs" ]; then
             echo "shas=none" >> "$GITHUB_OUTPUT"
@@ -318,7 +329,7 @@ jobs:
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/oga-artifacts
-          key: linux-oga-${{ env.OGA_COMMIT }}-pr${{ steps.oga-pr-shas.outputs.shas }}-am-whl-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
+          key: linux-oga-${{ env.OGA_BRANCH }}-${{ steps.oga-shas.outputs.branch-sha12 }}-pr${{ steps.oga-shas.outputs.shas }}-am-whl-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
 
       # Checkout + build are skipped on an OGA cache hit (step-level gate); the
       # install-copy below always runs so the
@@ -328,7 +339,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: microsoft/onnxruntime-genai
-          ref: ${{ env.OGA_COMMIT }}
+          ref: ${{ steps.oga-shas.outputs.branch-sha }}
           submodules: recursive
           path: onnxruntime-genai
           fetch-depth: 1
