@@ -32,9 +32,6 @@ env:
   # ORT is still built from source either way). Part of the ort-install cache
   # key. Remove a PR once its fix lands in the pinned ONNX Runtime release.
   ONNXRUNTIME_PR_PATCHES: ""
-  # onnxruntime-genai release branch (upstream published no v0.15.1 tag). Its
-  # head is resolved at run time and folded into the OGA cache key, so a new
-  # commit on the branch rebuilds instead of reusing a stale artifact.
   OGA_BRANCH: "rel-0.15.1"
   # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
   # pull/<n>.patch and `git am` on top of OGA_BRANCH. Part of the OGA cache key.
