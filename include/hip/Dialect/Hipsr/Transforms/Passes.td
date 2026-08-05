@@ -170,8 +170,8 @@ def PartitionPoolDomainsPass
   let options = [
     Option<"emitAnalysisReport", "emit-analysis-report", "bool",
            /*default=*/"false",
-           "Debug-only: emit remarks describing domain assignments. "
-           "No effect on generated code.">
+           "Debug-only: emit remarks describing domain assignments and "
+           "results. No effect on generated code.">
   ];
   let dependentDialects = [
     "::mlir::hipsr::HipsrDialect"

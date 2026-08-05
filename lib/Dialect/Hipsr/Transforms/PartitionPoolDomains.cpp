@@ -84,9 +84,47 @@ DomainAssignment assignDomains(Block &block) {
   return assignment;
 }
 
+// Domain materialization must yield every result consumed outside its domain.
+bool isResultUsedOutsideDomain(Value result, DomainId domainId, Block &block,
+                               const DomainAssignment &assignment) {
+  return llvm::any_of(result.getUsers(), [&](Operation *user) {
+    Operation *topLevelUser = block.findAncestorOpInBlock(*user);
+    if (!topLevelUser) {
+      llvm::report_fatal_error(
+          "pool-domain analysis found a result use outside the function block");
+    }
+    auto userDomain = assignment.operationDomains.find(topLevelUser);
+    return userDomain == assignment.operationDomains.end() ||
+           userDomain->second != domainId;
+  });
+}
+
+// Build the yield list used when each domain is materialized.
+void collectDomainResults(Block &block, DomainAssignment &assignment) {
+  for (auto [domainId, domain] : llvm::enumerate(assignment.domains)) {
+    for (Operation *operation : domain.operations) {
+      if (isa<PlaceholderOp>(operation)) {
+        continue;
+      }
+      for (OpResult result : operation->getResults()) {
+        if (isResultUsedOutsideDomain(result, domainId, block, assignment)) {
+          domain.results.push_back(result);
+        }
+      }
+    }
+  }
+}
+
+// Result analysis runs after assignment because domain IDs must be stable.
+DomainAssignment analyzeDomains(Block &block) {
+  DomainAssignment assignment = assignDomains(block);
+  collectDomainResults(block, assignment);
+  return assignment;
+}
+
 // Op numbers follow their order in the function. The first report maps each
-// op number to its domain. The other reports list the numbered ops in each
-// domain, so LIT can check both views of the same assignment.
+// op number to its domain. The other reports list each domain's ops and
+// results.
 void emitAnalysisReport(Block &block, const DomainAssignment &assignment) {
   llvm::DenseMap<Operation *, unsigned> operationIndices;
   for (auto [index, operation] : llvm::enumerate(block.without_terminator())) {
@@ -117,6 +155,15 @@ void emitAnalysisReport(Block &block, const DomainAssignment &assignment) {
       }
       report << operationIndices.lookup(operation) << "="
              << operation->getName().getStringRef();
+    }
+
+    report << "] results [";
+    for (auto [index, result] : llvm::enumerate(domain.results)) {
+      if (index != 0) {
+        report << ",";
+      }
+      report << operationIndices.lookup(result.getOwner()) << "#"
+             << result.getResultNumber();
     }
     report << "]";
   }
@@ -422,7 +469,7 @@ struct PartitionPoolDomainsPass
     }
 
     partition_analysis::DomainAssignment assignment =
-        partition_analysis::assignDomains(entryBlock);
+        partition_analysis::analyzeDomains(entryBlock);
     if (emitAnalysisReport) {
       partition_analysis::emitAnalysisReport(entryBlock, assignment);
     }
