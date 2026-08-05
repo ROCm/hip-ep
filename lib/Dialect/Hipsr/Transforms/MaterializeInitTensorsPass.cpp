@@ -245,6 +245,22 @@ DenseMap<Value, Value> createTensorAllocs(
   return placeholderResultToInitTensor;
 }
 
+// Hands every placeholder result over to the tensor.empty that stands in for
+// it and drops the placeholder. A placeholder result can feed a later
+// placeholder's inputs, which is why the erase cannot come before the
+// replacement, and why every placeholder in the domain has to go in the same
+// run: an input that now reads a tensor.empty is not a legal shape-graph input.
+void replaceAndCleanup(
+    ArrayRef<PlaceholderOp> placeholders,
+    const DenseMap<Value, Value> &placeholderResultToInitTensor) {
+  for (PlaceholderOp placeholder : placeholders) {
+    for (Value result : placeholder.getResults()) {
+      result.replaceAllUsesWith(placeholderResultToInitTensor.lookup(result));
+    }
+    placeholder.erase();
+  }
+}
+
 LogicalResult materializePoolDomain(PoolDomainOp poolDomain) {
   FailureOr<SmallVector<PlaceholderOp>> placeholders =
       collectAndGroupPlaceholders(poolDomain);
@@ -263,7 +279,9 @@ LogicalResult materializePoolDomain(PoolDomainOp poolDomain) {
     return failure();
   }
 
-  createTensorAllocs(*placeholders, *placeholderToExecuteRegion, builder);
+  DenseMap<Value, Value> placeholderResultToInitTensor =
+      createTensorAllocs(*placeholders, *placeholderToExecuteRegion, builder);
+  replaceAndCleanup(*placeholders, placeholderResultToInitTensor);
   return success();
 }
 
