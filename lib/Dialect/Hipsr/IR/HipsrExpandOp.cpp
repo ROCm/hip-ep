@@ -8,6 +8,7 @@
 #include "hip/Dialect/Hipsr/IR/HipsrShapeRegionPopulationUtils.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Matchers.h"
@@ -146,8 +147,14 @@ LogicalResult populateExpandShapeRegion(OpBuilder &builder, Block &shapeBlock,
     requestedExtents.reserve(requestedRank);
     for (int64_t i : llvm::seq<int64_t>(0, requestedRank)) {
       Value index = arith::ConstantIndexOp::create(builder, loc, i);
-      Value extent = tensor::ExtractOp::create(builder, loc, requestedShapeArg,
-                                               ValueRange{index});
+      Value extent;
+      if (isa<RankedTensorType>(requestedShapeArg.getType())) {
+        extent = tensor::ExtractOp::create(builder, loc, requestedShapeArg,
+                                           ValueRange{index});
+      } else {
+        extent = memref::LoadOp::create(builder, loc, requestedShapeArg,
+                                        ValueRange{index});
+      }
       requestedExtents.push_back(arith::IndexCastOp::create(
           builder, loc, builder.getIndexType(), extent));
     }

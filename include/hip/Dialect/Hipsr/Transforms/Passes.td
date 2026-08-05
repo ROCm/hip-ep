@@ -27,6 +27,7 @@ def PopulateShapeRegionPass
   let dependentDialects = [
     "::mlir::arith::ArithDialect",
     "::mlir::hipsr::HipsrDialect",
+    "::mlir::memref::MemRefDialect",
     "::mlir::shape::ShapeDialect",
     "::mlir::tensor::TensorDialect"
   ];
