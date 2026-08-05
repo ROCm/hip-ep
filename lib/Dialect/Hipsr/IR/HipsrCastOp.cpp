@@ -28,8 +28,6 @@ struct CastShapeArgs : PlaceholderShapeRegionArgs {
 
 MutableOperandRange CastOp::getDpsInitsMutable() { return getInitMutable(); }
 
-void CastOp::populateShapeRegion(OpBuilder &, Block &) {}
-
 namespace mlir {
 namespace hipsr {
 

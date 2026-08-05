@@ -26,8 +26,6 @@ struct AddPlaceholderShapeArgs : PlaceholderShapeRegionArgs {
 
 MutableOperandRange AddOp::getDpsInitsMutable() { return getInitMutable(); }
 
-void AddOp::populateShapeRegion(OpBuilder &, Block &) {}
-
 namespace mlir {
 namespace hipsr {
 

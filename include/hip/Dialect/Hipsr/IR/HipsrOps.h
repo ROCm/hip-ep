@@ -7,7 +7,8 @@
 #define HIPSR_OPS_H
 
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
-#include "hip/Dialect/Hipsr/IR/HipsrShapeRegionInterface.h"
+#include "hip/Dialect/Hipsr/IR/HipsrEndBarrierInterface.h"
+#include "hip/Dialect/Hipsr/IR/HipsrStartBarrierInterface.h"
 
 #include "mlir/Bytecode/BytecodeOpInterface.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
