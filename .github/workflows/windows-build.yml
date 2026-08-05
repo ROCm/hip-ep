@@ -46,11 +46,13 @@ jobs:
       # Remove a PR number once its fix is in the pinned ONNXRUNTIME_VERSION.
       ONNXRUNTIME_PR_PATCHES: ""
       SCCACHE_GHA_ENABLED: "true"
-      OGA_VERSION: "0.14.0"
+      # onnxruntime-genai 0.15.1. Upstream published no v0.15.1 tag and
+      # rel-0.15.1 is a moving branch, so pin the release commit itself.
+      OGA_COMMIT: "3abf4a847fd7876e81d5d1ed3ad97d77284b37e4"
       # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
-      # pull/<n>.patch and `git apply` on top of v<OGA_VERSION>. Part of the OGA
-      # cache key. Remove a PR once it lands in the pinned OGA release.
-      OGA_PR_PATCHES: "2194"
+      # pull/<n>.patch and `git am` on top of OGA_COMMIT. Part of the OGA cache
+      # key. Remove a PR once it lands in the pinned OGA commit.
+      OGA_PR_PATCHES: "2376"
       # ilammy/msvc-dev-cmd and mozilla-actions/sccache-action have no
       # Node.js 24 releases yet; allow Node.js 20 until they are updated.
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
@@ -360,28 +362,53 @@ jobs:
       # Cache only the two artifacts we need: model_benchmark.exe and
       # onnxruntime-genai.dll, keyed on OGA commit + ORT version.
       # -----------------------------------------------------------------------
+      # A PR patch is fetched from the PR's head, which moves whenever the PR
+      # branch is updated, so the PR number alone does not identify the patch
+      # content. Resolve the head SHAs and fold them into the OGA cache key.
+      - name: Resolve OGA PR head SHAs
+        id: oga-pr-shas
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OGA_PRS: ${{ env.OGA_PR_PATCHES }}
+        run: |
+          $prs = $env:OGA_PRS.Trim()
+          if (-not $prs) {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "shas=none"
+            exit 0
+          }
+          $parts = foreach ($pr in $prs -split '\s+') {
+            if (-not $pr) { continue }
+            $sha = gh api "repos/microsoft/onnxruntime-genai/pulls/$pr" --jq .head.sha
+            if ($LASTEXITCODE -ne 0 -or -not $sha) {
+              throw "Failed to resolve head SHA for OGA PR #$pr"
+            }
+            "$pr-$($sha.Substring(0, 12))"
+          }
+          $shas = $parts -join '_'
+          Write-Host "OGA PR heads: $shas"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "shas=$shas"
+
       - name: Cache OGA artifacts
         id: cache-oga
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/oga-artifacts
           # OGA is built against the patched ort-install, so the key folds in
-          # both OGA's own PR list and ONNXRUNTIME_PR_PATCHES; editing either
-          # forces a rebuild. The mm<N> token bumps when the OGA artifact set
-          # changes shape, or when a PR's branch content changes under the same
-          # number (mm2: PR 2194 now carries the AMDGPU OGA integration).
-          key: oga-dml-mm2-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
+          # both OGA's own PR heads and ONNXRUNTIME_PR_PATCHES; editing either
+          # forces a rebuild.
+          key: oga-dml-${{ env.OGA_COMMIT }}-pr${{ steps.oga-pr-shas.outputs.shas }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
 
       # OGA is built from upstream microsoft/onnxruntime-genai + PR patches
-      # (OGA_PR_PATCHES). PR 2194 (the dynamic-shape-morphizen branch) now also
-      # carries the AMDGPU umbrella integration, so the patched upstream build
-      # is the AMDGPU-targeted OGA -- no fork checkout needed.
+      # (OGA_PR_PATCHES). PR 2376 carries the AMDGPU umbrella integration, so
+      # the patched upstream build is the AMDGPU-targeted OGA -- no fork
+      # checkout needed.
       - name: Checkout OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: microsoft/onnxruntime-genai
-          ref: v${{ env.OGA_VERSION }}
+          ref: ${{ env.OGA_COMMIT }}
           path: source-oga
           submodules: true
           fetch-depth: 1
@@ -403,10 +430,10 @@ jobs:
             Write-Host "OGA_PR_PATCHES is empty; nothing to apply"
             exit 0
           }
-          # pull/<n>.patch is a format-patch series; apply with `git am` so that
-          # intra-series file renames (morphizen_ep -> amdgpu) replay against the
-          # correct intermediate tree. `git apply` flattens the series and chokes
-          # on the rename whose pre-image only exists after an earlier commit.
+          # pull/<n>.patch is a format-patch series; apply with `git am` so each
+          # commit replays against the intermediate tree it was authored against.
+          # `git apply` flattens the series and chokes on anything that depends on
+          # an earlier commit in it (a file rename, for example).
           git config user.email "ci@rocm.amd.com"
           git config user.name "ROCm CI"
           foreach ($pr in $prs -split '\s+') {
@@ -446,6 +473,7 @@ jobs:
             --use_dml \
             --ort_home "$ORT_HOME" \
             --skip_tests --skip_examples \
+            --no_telemetry \
             --parallel \
             --build_dir "${{ runner.workspace }}/build-oga" \
             --cmake_extra_defines \
