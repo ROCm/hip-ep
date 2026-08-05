@@ -51,6 +51,7 @@ The default domain ID is zero and is omitted from textual IR. Additional domains
 → hip-promote-strided-operands
 → hip-materialize-host-scalars
 → hip-resolve-memref-dims
+→ CSE
 → hip-hoist-alloc-size-arith
 → hip-pool-allocs
 → convert-bufferization-to-memref
@@ -72,9 +73,14 @@ The default domain ID is zero and is omitted from textual IR. Additional domains
 
 `hip-resolve-memref-dims` folds post-bufferization `memref.dim` queries through view chains to root-buffer dimensions. These views may be created by bufferization or operand promotion, so this pass runs after both.
 
-`hip-hoist-alloc-size-arith` moves speculatable dynamic-size arithmetic above the earliest dynamic allocation when the complete operand cone can move safely.
+The following CSE removes repeated size queries exposed by late allocation and
+view rewrites.
 
-Both passes preserve correctness when omitted, but omission may create more dominance domains and increase peak memory.
+`hip-hoist-alloc-size-arith` moves pure dynamic-size arithmetic above
+the earliest used allocation when the complete operand cone can move safely.
+
+These preconditions preserve correctness when omitted, but omission may create
+more dominance domains and increase peak memory.
 
 Pre-bufferization `hip-resolve-tensor-dims` serves a related purpose for tensor reshape chains. It lets upstream reification and canonicalization reduce `tensor.dim` queries before they become memref-level size arithmetic. Coverage of standard tensor reshape operations requires `tensor::registerInferTypeOpInterfaceExternalModels` on the dialect registry.
 
@@ -265,6 +271,7 @@ Primary regression coverage:
 - `test/lit/Dialect/hip-pool-allocs-dynamic-binning.mlir`
 - `test/lit/Dialect/hip-pool-allocs-lifetime-only.mlir`
 - `test/lit/Dialect/hip-pool-allocs-fragmentation-report.mlir`
+- `test/lit/Dialect/hip-pool-preconditions.mlir`
 - `test/lit/Dialect/hip-resolve-tensor-dims.mlir`
 - `test/lit/Dialect/hip-resolve-memref-dims.mlir`
 - `test/lit/Dialect/hip-hoist-alloc-size-arith.mlir`
