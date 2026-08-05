@@ -2933,26 +2933,20 @@ static inline void dispatchPrefillV5(
     if (d == 64) {
         if (local_window_size > 0) {
             if (m_tiles == 2 && bkv == 64)  LAUNCH_V5(2, 64, 64, true);
-            else if (m_tiles == 2 && bkv == 32) LAUNCH_V5(2, 32, 64, true);
-            else if (m_tiles == 2)          LAUNCH_V5(2, 16, 64, true);
+            else if (m_tiles == 2)          LAUNCH_V5(2, 32, 64, true);
             else if (bkv == 64)             LAUNCH_V5(1, 64, 64, true);
-            else if (bkv == 32)             LAUNCH_V5(1, 32, 64, true);
-            else                            LAUNCH_V5(1, 16, 64, true);
+            else                            LAUNCH_V5(1, 32, 64, true);
         } else {
             if (m_tiles == 2 && bkv == 64)  LAUNCH_V5(2, 64, 64, false);
-            else if (m_tiles == 2 && bkv == 32) LAUNCH_V5(2, 32, 64, false);
-            else if (m_tiles == 2)          LAUNCH_V5(2, 16, 64, false);
+            else if (m_tiles == 2)          LAUNCH_V5(2, 32, 64, false);
             else if (bkv == 64)             LAUNCH_V5(1, 64, 64, false);
-            else if (bkv == 32)             LAUNCH_V5(1, 32, 64, false);
-            else                            LAUNCH_V5(1, 16, 64, false);
+            else                            LAUNCH_V5(1, 32, 64, false);
         }
     } else {
         if (m_tiles == 2 && bkv == 64)      LAUNCH_V5(2, 64, 128, false);
-        else if (m_tiles == 2 && bkv == 32) LAUNCH_V5(2, 32, 128, false);
-        else if (m_tiles == 2)              LAUNCH_V5(2, 16, 128, false);
+        else if (m_tiles == 2)              LAUNCH_V5(2, 32, 128, false);
         else if (bkv == 64)                 LAUNCH_V5(1, 64, 128, false);
-        else if (bkv == 32)                 LAUNCH_V5(1, 32, 128, false);
-        else                                LAUNCH_V5(1, 16, 128, false);
+        else                                LAUNCH_V5(1, 32, 128, false);
     }
     #undef LAUNCH_V5
 }
@@ -2960,7 +2954,7 @@ static inline void dispatchPrefillV5(
 struct PrefillV5Cfg { int m_tiles; int bkv; };
 static inline int prefillV5Candidates(int d, PrefillV5Cfg* out) {
     static const PrefillV5Cfg kAll[] = {
-        {1, 16}, {1, 32}, {1, 64}, {2, 16}, {2, 32}, {2, 64}};
+        {1, 32}, {1, 64}, {2, 32}, {2, 64}};
     int n = 0;
     for (const PrefillV5Cfg& c : kAll)
         if (prefillV5SmemBytes(c.m_tiles, c.bkv, d) <= kPrefillV5MaxSmem) out[n++] = c;
