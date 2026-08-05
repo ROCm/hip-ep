@@ -32,8 +32,7 @@ struct MatMulPlaceholderShapeArgs : PlaceholderShapeRegionArgs {
 
 MutableOperandRange MatMulOp::getDpsInitsMutable() { return getInitMutable(); }
 
-// A and B must be at least 1-D: matmul needs a contraction dim, and the shape
-// region reads the last one or two dims of each.
+// A and B must be at least 1-D because matmul needs a contraction dimension.
 LogicalResult MatMulOp::verify() {
   if (cast<ShapedType>(getA().getType()).getRank() < 1) {
     return emitOpError("operand A must be at least 1-D");
@@ -43,8 +42,6 @@ LogicalResult MatMulOp::verify() {
   }
   return success();
 }
-
-void MatMulOp::populateShapeRegion(OpBuilder &, Block &) {}
 
 namespace mlir {
 namespace hipsr {

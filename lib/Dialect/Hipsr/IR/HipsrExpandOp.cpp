@@ -31,8 +31,7 @@ struct CanonicalizeConstantShape : OpRewritePattern<ExpandOp> {
 
   LogicalResult matchAndRewrite(ExpandOp op,
                                 PatternRewriter &rewriter) const override {
-    if (!op.getShape() || op.getShapeAttrAttr() ||
-        !op.getShapeRegion().empty()) {
+    if (!op.getShape() || op.getShapeAttrAttr()) {
       return failure();
     }
 
@@ -114,8 +113,6 @@ LogicalResult ExpandOp::verify() {
 }
 
 bool ExpandOp::isStartBarrier() { return getShapeAttrAttr() == nullptr; }
-
-void ExpandOp::populateShapeRegion(OpBuilder &, Block &) {}
 
 namespace mlir {
 namespace hipsr {

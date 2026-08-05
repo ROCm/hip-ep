@@ -7,10 +7,6 @@ set(LLVM_TARGET_DEFINITIONS HipsrDialect.td)
 mlir_tablegen(HipsrDialect.h.inc -gen-dialect-decls -dialect=hipsr)
 mlir_tablegen(HipsrDialect.cpp.inc -gen-dialect-defs -dialect=hipsr)
 
-set(LLVM_TARGET_DEFINITIONS HipsrShapeRegionInterface.td)
-mlir_tablegen(HipsrShapeRegionInterface.h.inc -gen-op-interface-decls)
-mlir_tablegen(HipsrShapeRegionInterface.cpp.inc -gen-op-interface-defs)
-
 set(LLVM_TARGET_DEFINITIONS HipsrStartBarrierInterface.td)
 mlir_tablegen(HipsrStartBarrierInterface.h.inc -gen-op-interface-decls)
 mlir_tablegen(HipsrStartBarrierInterface.cpp.inc -gen-op-interface-defs)
