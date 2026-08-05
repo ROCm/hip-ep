@@ -52,8 +52,6 @@ func.func @expand_runtime_shape(
 // CHECK-SAME: %[[CTX:.+]]: !hipsr.context, %[[INPUT:.+]]: tensor<?x3xf16>) {
 // CHECK-NEXT: %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<?x3xf16>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x3xf16> shape_region {
 // CHECK-NEXT: ^bb0(%[[INPUT_SHAPE:.+]]: !shape.shape):
-// CHECK-NOT: shape.shape_of
-// CHECK-NOT: tensor.extract
 // CHECK-NEXT: %[[REQUEST0:.+]] = arith.constant 3 : index
 // CHECK-NEXT: %[[REQUEST_SHAPE:.+]] = shape.from_extents %[[REQUEST0]] : index
 // CHECK-NEXT: %[[WITNESS:.+]] = shape.cstr_broadcastable %[[INPUT_SHAPE]], %[[REQUEST_SHAPE]] : !shape.shape, !shape.shape
