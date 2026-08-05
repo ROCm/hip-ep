@@ -113,7 +113,7 @@ LogicalResult populateMatMulShapeRegion(OpBuilder &builder, Block &shapeBlock,
         return {resultShape};
       });
 
-  ShapeYield2Op::create(builder, loc, ValueRange{assuming.getResult(0)});
+  ShapeYieldOp::create(builder, loc, ValueRange{assuming.getResult(0)});
   return success();
 }
 

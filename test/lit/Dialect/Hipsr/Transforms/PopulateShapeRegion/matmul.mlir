@@ -32,7 +32,7 @@
 // CHECK-NEXT: %[[OUTPUT_SHAPE:.+]] = shape.concat %[[BATCH_SHAPE]], %[[MATRIX_SHAPE]] : !shape.shape, !shape.shape -> !shape.shape
 // CHECK-NEXT: shape.assuming_yield %[[OUTPUT_SHAPE]] : !shape.shape
 // CHECK-NEXT: }
-// CHECK-NEXT: hipsr.shape_yield2 %[[RESULT_SHAPE]] : !shape.shape
+// CHECK-NEXT: hipsr.shape_yield %[[RESULT_SHAPE]] : !shape.shape
 // CHECK-NEXT: }
 // CHECK-NEXT: %[[RESULT:.+]] = hipsr.matmul(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<?x?xf16>, tensor<?x?xf16>) outs(%[[INIT]] : tensor<?x?xf16>) : tensor<?x?xf16>
 // CHECK-NEXT: return
@@ -67,7 +67,7 @@ func.func @matmul_2d(%ctx: !hipsr.context, %a: tensor<?x?xf16>,
 // CHECK-NEXT: %[[OUTPUT_SHAPE:.+]] = shape.concat %[[BROADCAST]], %[[MATRIX_SHAPE]] : !shape.shape, !shape.shape -> !shape.shape
 // CHECK-NEXT: shape.assuming_yield %[[OUTPUT_SHAPE]] : !shape.shape
 // CHECK-NEXT: }
-// CHECK-NEXT: hipsr.shape_yield2 %[[RESULT_SHAPE]] : !shape.shape
+// CHECK-NEXT: hipsr.shape_yield %[[RESULT_SHAPE]] : !shape.shape
 // CHECK-NEXT: }
 // CHECK-NEXT: %[[RESULT:.+]] = hipsr.matmul
 // CHECK-NOT: shape_region
@@ -102,7 +102,7 @@ func.func @matmul_vector_matrix(%ctx: !hipsr.context, %a: tensor<?xf16>,
 // CHECK-NEXT: %[[OUTPUT_SHAPE:.+]] = shape.concat %[[BROADCAST]], %[[MATRIX_SHAPE]] : !shape.shape, !shape.shape -> !shape.shape
 // CHECK-NEXT: shape.assuming_yield %[[OUTPUT_SHAPE]] : !shape.shape
 // CHECK-NEXT: }
-// CHECK-NEXT: hipsr.shape_yield2 %[[RESULT_SHAPE]] : !shape.shape
+// CHECK-NEXT: hipsr.shape_yield %[[RESULT_SHAPE]] : !shape.shape
 // CHECK-NEXT: }
 // CHECK-NEXT: %[[RESULT:.+]] = hipsr.matmul
 // CHECK-NOT: shape_region
@@ -134,7 +134,7 @@ func.func @matmul_matrix_vector(%ctx: !hipsr.context, %a: tensor<?x?xf16>,
 // CHECK-NEXT: %[[OUTPUT_SHAPE:.+]] = shape.concat %[[BROADCAST]], %[[EMPTY_SHAPE]] : !shape.shape, !shape.shape -> !shape.shape
 // CHECK-NEXT: shape.assuming_yield %[[OUTPUT_SHAPE]] : !shape.shape
 // CHECK-NEXT: }
-// CHECK-NEXT: hipsr.shape_yield2 %[[RESULT_SHAPE]] : !shape.shape
+// CHECK-NEXT: hipsr.shape_yield %[[RESULT_SHAPE]] : !shape.shape
 // CHECK-NEXT: }
 // CHECK-NEXT: %[[RESULT:.+]] = hipsr.matmul
 // CHECK-NOT: shape_region
@@ -175,7 +175,7 @@ func.func @matmul_dot(%ctx: !hipsr.context, %a: tensor<?xf16>,
 // CHECK-NEXT: %[[OUTPUT_SHAPE:.+]] = shape.concat %[[BROADCAST]], %[[MATRIX_SHAPE]] : !shape.shape, !shape.shape -> !shape.shape
 // CHECK-NEXT: shape.assuming_yield %[[OUTPUT_SHAPE]] : !shape.shape
 // CHECK-NEXT: }
-// CHECK-NEXT: hipsr.shape_yield2 %[[RESULT_SHAPE]] : !shape.shape
+// CHECK-NEXT: hipsr.shape_yield %[[RESULT_SHAPE]] : !shape.shape
 // CHECK-NEXT: }
 // CHECK-NEXT: %[[RESULT:.+]] = hipsr.matmul(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<?x1x?x?xf16>, tensor<3x?x?xf16>) outs(%[[INIT]] : tensor<?x3x?x?xf16>) : tensor<?x3x?x?xf16>
 // CHECK-NEXT: return

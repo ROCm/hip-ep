@@ -13,7 +13,7 @@
 // CHECK-NEXT: %[[C3:.+]] = arith.constant 3 : index
 // CHECK-NEXT: %[[VALUES_SHAPE:.+]] = shape.from_extents %[[C2]], %[[C3]]
 // CHECK-NEXT: %[[SCALAR_SHAPE:.+]] = shape.from_extents
-// CHECK-NEXT: hipsr.shape_yield2 %[[VALUES_SHAPE]], %[[SCALAR_SHAPE]]
+// CHECK-NEXT: hipsr.shape_yield %[[VALUES_SHAPE]], %[[SCALAR_SHAPE]]
 // CHECK-SAME: : !shape.shape, !shape.shape
 // CHECK-NEXT: }
 func.func @multiple_results_and_scalar(%ctx: !hipsr.context)
@@ -27,7 +27,7 @@ func.func @multiple_results_and_scalar(%ctx: !hipsr.context)
     %values_shape = "shape.from_extents"(%c2, %c3)
         : (index, index) -> !shape.shape
     %scalar_shape = "shape.from_extents"() : () -> !shape.shape
-    hipsr.shape_yield2 %values_shape, %scalar_shape
+    hipsr.shape_yield %values_shape, %scalar_shape
         : !shape.shape, !shape.shape
   }
   %results:2 = hipsr.compute(%ctx) ins()
@@ -50,7 +50,7 @@ func.func @non_shape_operand(%ctx: !hipsr.context) -> tensor<f16> {
   ^bb0(%shape_ctx: !hipsr.context):
     %extent = arith.constant 1 : index
     // expected-error @+1 {{operand #0 must be variadic of , but got 'index'}}
-    hipsr.shape_yield2 %extent : index
+    hipsr.shape_yield %extent : index
   }
   %result = hipsr.compute(%ctx) ins() outs(%init : tensor<f16>) {
   ^bb0(%body_ctx: !hipsr.context, %dest: tensor<f16>):
@@ -79,9 +79,9 @@ func.func @implicit_empty_yield(%ctx: !hipsr.context) -> tensor<f16> {
 
 // -----
 
-// ShapeYield2 terminates placeholder shape regions only.
+// ShapeYield terminates placeholder shape regions only.
 func.func @wrong_parent() {
   %shape = "shape.from_extents"() : () -> !shape.shape
   // expected-error @+1 {{expects parent op 'hipsr.placeholder'}}
-  hipsr.shape_yield2 %shape : !shape.shape
+  hipsr.shape_yield %shape : !shape.shape
 }

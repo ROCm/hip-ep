@@ -11,7 +11,7 @@
 // CHECK-NEXT: %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[LHS]], %[[RHS]] : tensor<?x1024xf16>, tensor<1024xf16>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x1024xf16> shape_region {
 // CHECK-NEXT: ^bb0(%[[LHS_SHAPE:.+]]: !shape.shape, %[[RHS_SHAPE:.+]]: !shape.shape):
 // CHECK-NEXT: %[[BROADCAST:.+]] = shape.broadcast %[[LHS_SHAPE]], %[[RHS_SHAPE]] : !shape.shape, !shape.shape -> !shape.shape
-// CHECK-NEXT: hipsr.shape_yield2 %[[BROADCAST]] : !shape.shape
+// CHECK-NEXT: hipsr.shape_yield %[[BROADCAST]] : !shape.shape
 // CHECK-NEXT: }
 // CHECK-NEXT: %[[RESULT:.+]] = hipsr.add(%[[CTX]]) ins(%[[LHS]], %[[RHS]] : tensor<?x1024xf16>, tensor<1024xf16>) outs(%[[INIT]] : tensor<?x1024xf16>) : tensor<?x1024xf16>
 // CHECK-NEXT: return

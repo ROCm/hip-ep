@@ -171,7 +171,7 @@ LogicalResult populateExpandShapeRegion(OpBuilder &builder, Block &shapeBlock,
         return SmallVector<Value, 2>{broadcastShape};
       });
 
-  ShapeYield2Op::create(builder, loc, assuming.getResults());
+  ShapeYieldOp::create(builder, loc, assuming.getResults());
   return success();
 }
 

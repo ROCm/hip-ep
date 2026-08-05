@@ -38,7 +38,7 @@ LogicalResult populateAddShapeRegion(OpBuilder &builder, Block &shapeBlock,
   Value broadcast = builder.create<shape::BroadcastOp>(
       op.getLoc(), shape::ShapeType::get(builder.getContext()),
       ValueRange{args.getLhs(), args.getRhs()}, /*error=*/nullptr);
-  ShapeYield2Op::create(builder, op.getLoc(), ValueRange{broadcast});
+  ShapeYieldOp::create(builder, op.getLoc(), ValueRange{broadcast});
   return success();
 }
 

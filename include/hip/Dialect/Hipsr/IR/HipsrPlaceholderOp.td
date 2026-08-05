@@ -12,7 +12,7 @@
 
 def Hipsr_PlaceholderOp : Hipsr_Op<
     "placeholder",
-    [IsolatedFromAbove, SingleBlockImplicitTerminator<"ShapeYield2Op">]> {
+    [IsolatedFromAbove, SingleBlockImplicitTerminator<"ShapeYieldOp">]> {
   let summary = "Typed placeholder for hipsr DPS init operands";
   let description = [{
     Provides `outs` init values before a hipsr DPS op computes its output
@@ -28,7 +28,7 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
     use upstream placeholder results rather than DPS data results.
 
     The optional `shape_region` defines the placeholder result shapes. It has
-    one block when present and ends with `hipsr.shape_yield2`.
+    one block when present and ends with `hipsr.shape_yield`.
     A `normal` region receives one `!shape.shape` argument per input and omits
     `ctx`. A `barrier` region receives `ctx` followed by its tensor inputs.
 
