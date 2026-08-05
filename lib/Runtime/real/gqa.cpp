@@ -13,7 +13,7 @@
 //   * Common fp16 causal GQA (head_dim in {64,128,256}, templated decode
 //     geometry) -> optimized fused custom kernels:
 //       prefill (sq > 1): [split] -> [rope] -> kv-cache update ->
-//                         hip_gqa_flash_prefill_v3
+//                         hip_gqa_flash_prefill
 //       decode  (sq == 1): [split] -> [rope] -> kv-cache update ->
 //                         hip_gqa_flash_decode
 //     Decode additionally covers the sliding window and the head sink /
@@ -21,7 +21,7 @@
 //     max(0, total_seq - window) in the split kernel and folds the sink into
 //     the reduce denominator, and it autotunes (impl, split-count) per shape --
 //     keying sliding layers on the window rather than the full context. Prefill
-//     applies sinks and sliding windows through hip_gqa_flash_prefill_v3 for
+//     applies sinks and sliding windows through hip_gqa_flash_prefill for
 //     head_dim == 64; unsupported prefill geometries route to decomposed.
 //
 //   * Everything else the fused kernels do not implement (fp32, no_causal /
@@ -660,7 +660,7 @@ static int gqa_forward_fused(
   // kernel TU (gqa_kernel.hip). v3 carries the sink and the window; it returns
   // -1 rather than dropping either when the kernel for this d cannot apply it,
   // and the caller then falls back to the decomposed path.
-  int fp_rc = hip_gqa_flash_prefill_v3(
+  int fp_rc = hip_gqa_flash_prefill(
       stream, qSrc, kAttn, vAttn, output, static_cast<int>(B),
       static_cast<int>(H), static_cast<int>(G), static_cast<int>(sq),
       static_cast<int>(total_seq), static_cast<int>(d), attn_max_seq,

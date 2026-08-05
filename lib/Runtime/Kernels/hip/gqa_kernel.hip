@@ -2927,26 +2927,32 @@ static inline void dispatchPrefillV5(
                 scale, ablate, head_sink, num_heads, smooth_softmax,            \
                 local_window_size)
 
-    // Only d == 64 gets windowed instantiations: hip_gqa_flash_prefill_v3
+    // Only d == 64 gets windowed instantiations: hip_gqa_flash_prefill
     // rejects a window at any other head dim, so d == 128 with a window would
     // be dead code.
     if (d == 64) {
         if (local_window_size > 0) {
             if (m_tiles == 2 && bkv == 64)  LAUNCH_V5(2, 64, 64, true);
-            else if (m_tiles == 2)          LAUNCH_V5(2, 32, 64, true);
+            else if (m_tiles == 2 && bkv == 32) LAUNCH_V5(2, 32, 64, true);
+            else if (m_tiles == 2)          LAUNCH_V5(2, 16, 64, true);
             else if (bkv == 64)             LAUNCH_V5(1, 64, 64, true);
-            else                            LAUNCH_V5(1, 32, 64, true);
+            else if (bkv == 32)             LAUNCH_V5(1, 32, 64, true);
+            else                            LAUNCH_V5(1, 16, 64, true);
         } else {
             if (m_tiles == 2 && bkv == 64)  LAUNCH_V5(2, 64, 64, false);
-            else if (m_tiles == 2)          LAUNCH_V5(2, 32, 64, false);
+            else if (m_tiles == 2 && bkv == 32) LAUNCH_V5(2, 32, 64, false);
+            else if (m_tiles == 2)          LAUNCH_V5(2, 16, 64, false);
             else if (bkv == 64)             LAUNCH_V5(1, 64, 64, false);
-            else                            LAUNCH_V5(1, 32, 64, false);
+            else if (bkv == 32)             LAUNCH_V5(1, 32, 64, false);
+            else                            LAUNCH_V5(1, 16, 64, false);
         }
     } else {
         if (m_tiles == 2 && bkv == 64)      LAUNCH_V5(2, 64, 128, false);
-        else if (m_tiles == 2)              LAUNCH_V5(2, 32, 128, false);
+        else if (m_tiles == 2 && bkv == 32) LAUNCH_V5(2, 32, 128, false);
+        else if (m_tiles == 2)              LAUNCH_V5(2, 16, 128, false);
         else if (bkv == 64)                 LAUNCH_V5(1, 64, 128, false);
-        else                                LAUNCH_V5(1, 32, 128, false);
+        else if (bkv == 32)                 LAUNCH_V5(1, 32, 128, false);
+        else                                LAUNCH_V5(1, 16, 128, false);
     }
     #undef LAUNCH_V5
 }
@@ -2954,7 +2960,7 @@ static inline void dispatchPrefillV5(
 struct PrefillV5Cfg { int m_tiles; int bkv; };
 static inline int prefillV5Candidates(int d, PrefillV5Cfg* out) {
     static const PrefillV5Cfg kAll[] = {
-        {1, 32}, {1, 64}, {2, 32}, {2, 64}};
+        {1, 16}, {1, 32}, {1, 64}, {2, 16}, {2, 32}, {2, 64}};
     int n = 0;
     for (const PrefillV5Cfg& c : kAll)
         if (prefillV5SmemBytes(c.m_tiles, c.bkv, d) <= kPrefillV5MaxSmem) out[n++] = c;
@@ -3935,7 +3941,7 @@ extern "C" void hip_gqa_flash_prefill_v8_set_ablate(int mask) {
 // request carrying neither is forwarded to v2 and keeps v2's head-dim coverage
 // and its v5/v7/v8 selection; d == 64 lands on v5 either way, so a sink or a
 // window never changes which kernel runs.
-extern "C" int hip_gqa_flash_prefill_v3(
+extern "C" int hip_gqa_flash_prefill(
     void* stream_ptr,
     const void* Q, const void* Kcache, const void* Vcache, void* O,
     int B, int Hq, int G, int sq, int skv, int d, int max_seq, int past_len,

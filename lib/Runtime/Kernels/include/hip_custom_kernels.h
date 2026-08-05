@@ -769,7 +769,7 @@ HIP_KERNEL_API int hip_gqa_flash_prefill_v2(
  * or a window with d != 64), so the caller falls back to the decomposed path
  * instead of silently dropping either. A request with neither is forwarded to
  * v2 and keeps v2's head-dim coverage. */
-HIP_KERNEL_API int hip_gqa_flash_prefill_v3(
+HIP_KERNEL_API int hip_gqa_flash_prefill(
     void* stream, const void* Q, const void* Kcache, const void* Vcache,
     void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
     int past_len, float scale, int local_window_size, const void* head_sink,
