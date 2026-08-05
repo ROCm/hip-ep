@@ -22,7 +22,6 @@ using namespace mlir::hipsr;
 
 namespace {
 struct CastShapeArgs : PlaceholderShapeRegionArgs {
-  explicit CastShapeArgs(Block &block) : PlaceholderShapeRegionArgs(block) {}
   Value getInput() const { return in(0); }
 };
 } // namespace
