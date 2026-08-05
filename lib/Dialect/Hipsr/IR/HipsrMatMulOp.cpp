@@ -25,8 +25,6 @@ using namespace mlir::hipsr;
 
 namespace {
 struct MatMulPlaceholderShapeArgs : PlaceholderShapeRegionArgs {
-  explicit MatMulPlaceholderShapeArgs(Block &block)
-      : PlaceholderShapeRegionArgs(block) {}
   Value getA() const { return in(0); }
   Value getB() const { return in(1); }
 };

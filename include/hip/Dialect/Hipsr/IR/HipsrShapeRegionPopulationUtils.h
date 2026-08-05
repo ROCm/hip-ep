@@ -23,7 +23,7 @@ namespace hipsr {
 /// Accesses block arguments of a placeholder-owned shape region.
 /// Missing arguments are fatal because the population pass creates this block.
 struct PlaceholderShapeRegionArgs {
-  explicit PlaceholderShapeRegionArgs(Block &block) : block(block) {}
+  PlaceholderShapeRegionArgs(Block &block) : block(block) {}
 
   Value ctx() const {
     if (numCtxArgs() == 0) {
@@ -38,7 +38,7 @@ struct PlaceholderShapeRegionArgs {
 
   Value in(unsigned i) const { return arg(numCtxArgs() + i); }
 
-protected:
+private:
   Block &block;
 
   PlaceholderOp getPlaceholder() const {

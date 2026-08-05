@@ -22,8 +22,6 @@ using namespace mlir::hipsr;
 
 namespace {
 struct ExpandShapeArgs : PlaceholderShapeRegionArgs {
-  explicit ExpandShapeArgs(Block &block) : PlaceholderShapeRegionArgs(block) {}
-  using PlaceholderShapeRegionArgs::getPlaceholderType;
   Value getInput() const { return in(0); }
   Value getRequestedShape() const { return in(1); }
 };
@@ -131,9 +129,10 @@ LogicalResult populateExpandShapeRegion(OpBuilder &builder, Block &shapeBlock,
   ExpandShapeArgs args{shapeBlock};
   Value inputShape;
   SmallVector<Value> requestedExtents;
-  if (args.getPlaceholderType() == PlaceholderType::Normal) {
+  if (DenseI64ArrayAttr shapeAttr = op.getShapeAttrAttr()) {
+    cast<PlaceholderOp>(shapeBlock.getParentOp())
+        .setPlaceholderType(PlaceholderType::Normal);
     inputShape = args.getInput();
-    DenseI64ArrayAttr shapeAttr = op.getShapeAttrAttr();
     requestedExtents.reserve(shapeAttr.asArrayRef().size());
     for (int64_t extent : shapeAttr.asArrayRef()) {
       requestedExtents.push_back(
