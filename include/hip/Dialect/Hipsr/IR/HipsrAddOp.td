@@ -20,6 +20,6 @@ def Hipsr_AddOp : Hipsr_DpsOp<"add"> {
     `(` $ctx `)`
     `ins` `(` $lhs `,` $rhs `:` type($lhs) `,` type($rhs) `)`
     `outs` `(` $init `:` type($init) `)`
-    attr-dict (`:` type($result_tensors)^)? (`shape_region` $shape_region^)?
+    attr-dict (`:` type($result_tensors)^)?
   }];
 }

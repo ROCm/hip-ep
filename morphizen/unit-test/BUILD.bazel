@@ -204,7 +204,7 @@ cc_test(
         # EP-level debug log (morphizen-ep.cpp:31 DEF_ENV_PARAM).
         "MORPHIZEN_DEBUG_MORPHIZEN_EP": "1",
         # Verbose pass/compile log (morphizen_compile_model.cpp:44 DEF_ENV_PARAM).
-        "XLNX_ONNX_EP_VERBOSE": "2",
+        "HIP_EP_VERBOSE": "2",
     },
     # The test sources include headers from the package root (e.g. "test_environment.hpp")
     # and from the morphizen/ subdirectory (e.g. "pt_resnet50_add.h.inc" in test_pattern.cpp).

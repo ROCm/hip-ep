@@ -193,12 +193,11 @@ def OptimizeMemRefsPass : Pass<"hip-optimize-memrefs", "mlir::func::FuncOp"> {
 
 def PromoteStridedHipOperandsPass
     : Pass<"hip-promote-strided-operands", "mlir::func::FuncOp"> {
-  let summary = "Materialize contiguous temporaries for non-canonical memref "
-                "operands of hip.* ops";
+  let summary = "Materialize identity-layout temporaries for DPS-input memrefs "
+                "with non-identity layouts";
   let description = [{
-    Walks every DestinationStyleOpInterface op in the `hip` dialect.  For
-    each input (DPS-input) operand whose memref type has a non-identity
-    layout (non-zero offset or non-contiguous strides), inserts:
+    Walks every DestinationStyleOpInterface op. For each DPS-input memref with
+    a non-identity layout (a non-zero offset or non-contiguous strides), inserts:
 
     ```mlir
     %tmp = memref.alloc() : memref<...identity-layout...>
@@ -207,15 +206,18 @@ def PromoteStridedHipOperandsPass
     memref.dealloc %tmp : memref<...identity-layout...>
     ```
 
-    DPS-init (output) operands are left untouched: in this pipeline they are
-    always either fresh `memref.alloc` results or function arguments under
-    `IdentityLayoutMap`, so they are guaranteed contiguous by construction.
+    DPS-init operands are intentionally left untouched because promoting a
+    write target requires copy-back and must preserve read-before-write
+    semantics. The production pipeline normally supplies identity-layout inits
+    through fresh allocations, `hip.alloc_output`, or `IdentityLayoutMap` at
+    function boundaries.
 
     The pass exists to bridge the contract gap between the IR (which can
-    represent strided memrefs faithfully via memref.subview) and the HIP
-    runtime call ABI (which receives a single bare pointer with no offset /
-    strides channel).  Without this promotion, hip.* runtime calls silently
-    read the base of the parent buffer instead of the intended slice.
+    represent non-identity layouts faithfully) and runtime ABIs that receive a
+    bare pointer with no offset or strides. Matching the DPS interface rather
+    than a dialect or operation name covers plugin ops without dialect
+    coupling. In the ONNX-to-HIP pipeline, this pass runs after linalg cleanup;
+    the remaining DPS operations are HIP or plugin operations.
 
     Recommended pipeline position:
       hip-optimize-memrefs -> hip-promote-strided-operands -> hip-pool-allocs
@@ -544,7 +546,7 @@ def ResolveMemRefDimsPass
     function argument).
 
     The strided views that pin these queries are created during bufferization
-    and by `--hip-promote-strided-hip-operands`, i.e. after resolve-tensor-dims
+    and by `--hip-promote-strided-operands`, i.e. after resolve-tensor-dims
     ran, so the patterns had nothing to fold then. Re-rooting the size to a
     block-top arg dim lets `--hip-hoist-alloc-size-arith` lift it, so
     `--hip-pool-allocs` shares one pool across many allocs instead of splitting

@@ -41,7 +41,7 @@
 DEF_ENV_PARAM_2(XLNX_ONNX_EP_REPORT_FILE, "", std::string)
 DEF_ENV_PARAM(XLNX_ENABLE_CACHE, "1")
 DEF_ENV_PARAM(XLNX_ENABLE_SKIP_FATAL, "1")
-DEF_ENV_PARAM(XLNX_ONNX_EP_VERBOSE, "0")
+DEF_ENV_PARAM(HIP_EP_VERBOSE, "0")
 DEF_ENV_PARAM(XLNX_ENABLE_FILE_BASED_CACHE_KEY, "0")
 DEF_ENV_PARAM_2(DEBUG_MD5_SIG, "", std::string)
 DEF_ENV_PARAM(DEBUG_VITIS_AI_EP, "1")
@@ -102,8 +102,7 @@ DEF_ENV_PARAM_2(XLNX_MD5_SIG_SKIP_OPS, "QuantizeLinear,DequantizeLinear",
                 std::vector<std::string>)
 
 #define LOG_VERBOSE(n)                                                         \
-  LOG_IF(INFO, ENV_PARAM(XLNX_ONNX_EP_VERBOSE) >= n)                           \
-      << "[XLNX_ONNX_EP_VERBOSE] "
+  LOG_IF(INFO, ENV_PARAM(HIP_EP_VERBOSE) >= n) << "[HIP_EP_VERBOSE] "
 #ifdef ENABLE_PYTHON
 #include <pybind11/pybind11.h>
 namespace py = pybind11;

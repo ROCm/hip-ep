@@ -330,8 +330,12 @@ static int hipdnn_ep_to_hip_dtype_elementwise_unary(int64_t data_type) {
 // that kernel is column-wise over a GQA-specific layout AND its launcher
 // only spawns `total_head_queries` blocks, not `total_head_queries * cols`.
 // A standalone softmax wired to that path produces NaN downstream.
+// elem_size_bytes: 2 for fp16/bf16, 4 for fp32.  The lowering passes the
+// element size derived from the MemRef type so the runtime can copy and
+// dispatch with the correct dtype.
 extern "C" int hip_miopen_softmax(void *state, const void *input, void *output,
-                                  int64_t rows, int64_t cols) {
+                                  int64_t rows, int64_t cols,
+                                  int64_t elem_size_bytes) {
   RuntimeState *st = static_cast<RuntimeState *>(state);
   OP_PROFILE(
       "softmax",
@@ -351,22 +355,38 @@ extern "C" int hip_miopen_softmax(void *state, const void *input, void *output,
             (long long)rows, (long long)cols);
     return -1;
   }
+  // Only fp16/bf16 (2 bytes) and fp32 (4 bytes) are supported.  Reject any
+  // other value immediately rather than silently producing wrong outputs.
+  if (elem_size_bytes != 2 && elem_size_bytes != 4) {
+    fprintf(stderr,
+            "[REAL] hip_miopen_softmax: unsupported elem_size_bytes=%lld\n",
+            (long long)elem_size_bytes);
+    return -1;
+  }
 
   void *stream = hipdnn_ep_state_get_stream(st);
 
-  // Copy input -> output (kernel is in-place; both are fp16 contiguous
-  // buffers from `extractContiguousMemRefPtr`).
-  hipError_t err = hipMemcpyAsync(
-      output, input, static_cast<size_t>(rows) * cols * sizeof(uint16_t),
-      hipMemcpyDeviceToDevice, static_cast<hipStream_t>(stream));
+  // Copy input -> output with the correct element size.  Previously this
+  // hardcoded sizeof(uint16_t)=2, corrupting fp32 inputs (Qwen VLM attention
+  // scores) by copying only half the data.
+  hipError_t err =
+      hipMemcpyAsync(output, input,
+                     static_cast<size_t>(rows) * static_cast<size_t>(cols) *
+                         static_cast<size_t>(elem_size_bytes),
+                     hipMemcpyDeviceToDevice, static_cast<hipStream_t>(stream));
   if (err != hipSuccess) {
     fprintf(stderr, "[REAL] hip_miopen_softmax: hipMemcpyAsync failed: %s\n",
             hipGetErrorString(err));
     return -1;
   }
 
-  RUNTIME_DEBUG_LOG("[REAL] hip_miopen_softmax: rows=%lld cols=%lld\n",
-                    (long long)rows, (long long)cols);
+  RUNTIME_DEBUG_LOG(
+      "[REAL] hip_miopen_softmax: rows=%lld cols=%lld elem_size=%lld\n",
+      (long long)rows, (long long)cols, (long long)elem_size_bytes);
+
+  if (elem_size_bytes == 4)
+    return hip_softmax_row_2d_inplace_fp32(
+        stream, output, static_cast<int>(rows), static_cast<int>(cols));
   return hip_softmax_row_2d_inplace(stream, output, static_cast<int>(rows),
                                     static_cast<int>(cols));
 }

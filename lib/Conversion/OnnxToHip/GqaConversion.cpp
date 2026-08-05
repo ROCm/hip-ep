@@ -134,18 +134,32 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
     return attr ? attr : rewriter.getStringAttr(defaultVal);
   };
 
-  // Calculate default scale = 1/sqrt(head_size) per ONNX spec
-  // Query shape: [batch_size, seq_len, num_heads * head_size]
-  // head_size = (num_heads * head_size) / num_heads = query_dim_2 / num_heads
+  // Calculate default scale = 1/sqrt(head_size) per ONNX spec.
   // Fallback 0.0 is the ORT sentinel meaning "auto-compute at runtime"
   // (gqa_attention_base.h: scale_ == 0.0f ? 1/sqrt(head_size) : scale_)
+  //
+  // head_size is recovered from query's last dim, but the divisor differs by
+  // input layout:
+  //   * separate Q/K/V: query dim2 = num_heads * head_size
+  //       -> divide by num_heads
+  //   * packed QKV:     query dim2 = (num_heads + 2*kv_num_heads) * head_size
+  //       (key/value are absent) -> divide by (num_heads + 2*kv_num_heads)
+  // Using num_heads for the packed layout computes head_size too large
+  // (e.g. H=40,G=10,d=128: 7680/40 = 192 instead of 128) and bakes a wrong
+  // 1/sqrt(head_size) into the op, silently mis-scaling every score -- packed
+  // prefill then diverges from ORT-CPU (cosine ~0.99) even though Q/K/V are
+  // byte-identical to the separate path. Divide by the packing factor so the
+  // recovered head_size is correct for both layouts.
   auto queryType = mlir::cast<mlir::RankedTensorType>(query.getType());
   int64_t numHeads = numHeadsAttrOnnx.getValue().getSExtValue();
+  int64_t kvNumHeads = kvNumHeadsAttrOnnx.getValue().getSExtValue();
+  bool packedQkv = (key == nullptr && value == nullptr);
+  int64_t headDivisor = packedQkv ? (numHeads + 2 * kvNumHeads) : numHeads;
   float defaultScale = 0.0f;
   if (queryType.hasRank() && queryType.getRank() >= 3) {
-    int64_t hiddenSize = queryType.getDimSize(2); // num_heads * head_size
-    if (hiddenSize != mlir::ShapedType::kDynamic && numHeads > 0) {
-      int64_t headSize = hiddenSize / numHeads;
+    int64_t hiddenSize = queryType.getDimSize(2);
+    if (hiddenSize != mlir::ShapedType::kDynamic && headDivisor > 0) {
+      int64_t headSize = hiddenSize / headDivisor;
       defaultScale = 1.0f / std::sqrt(static_cast<float>(headSize));
     }
   }

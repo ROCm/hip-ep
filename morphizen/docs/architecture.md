@@ -1161,7 +1161,7 @@ void morphizen_register_ops(
 **Key Environment Variables**:
 - `MORPHIZEN_ORT_BRIDGE_BACKEND` - Backend selection ("onnx" or "mlir")
 - `DEBUG_REWRITE_RULE` - Pattern matching debug level (0/1/2)
-- `XLNX_ONNX_EP_VERBOSE` - Verbose logging (0/1/2)
+- `HIP_EP_VERBOSE` - Verbose logging (0/1/2)
 - `MORPHIZEN_DEBUG_ORT_EP_API` - Debug EP API calls
 
 ---

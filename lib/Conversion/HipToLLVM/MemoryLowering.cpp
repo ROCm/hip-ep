@@ -192,7 +192,7 @@ struct GetPoolOpLowering : public ConvertOpToLLVMPattern<GetPoolOp> {
 // The runtime returns hipHostMalloc(hipHostMallocMapped) memory, which is
 // accessible from both host and device. The result memref uses the default
 // address space (AS 0) — so host stores from materialized scalars work, and
-// downstream GPU ops that consume it via hip-promote-strided-hip-operands /
+// downstream GPU ops that consume it via hip-promote-strided-operands /
 // memref.view see the same pointer.
 struct GetHostScratchOpLowering
     : public ConvertOpToLLVMPattern<GetHostScratchOp> {
