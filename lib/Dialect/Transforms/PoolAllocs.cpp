@@ -34,13 +34,12 @@
 //     Phase 2 - Partition: split this domain's allocs into static and dynamic.
 //     Phase 3 - Static packing: greedy best-fit offset assignment within
 //               this domain.
-//     Phase 4 - Dynamic packing: bucket by structural byte-size key + bin
-//               by lifetime within this domain.
+//     Phase 4 - Dynamic packing: build runtime-factor groups, then assign
+//               groups with pairwise disjoint member lifetimes to shared slabs.
 //     Phase 5 - IR emission: insert this domain's hip.get_pool and views;
 //               offsets are local to this domain's pool.
 //
-// All sub-buffer offsets are aligned to the configured alignment (default 256
-// bytes) to satisfy GPU coalesced-access requirements.
+// All sub-buffer offsets use the configured alignment (default 256 bytes).
 //
 //===----------------------------------------------------------------------===//
 
@@ -62,13 +61,21 @@
 
 STATISTIC(NumAllocsPooled, "Number of allocations pooled into byte buffer");
 STATISTIC(NumStaticPacked, "Number of static allocations packed");
-STATISTIC(NumDynBuckets, "Number of dynamic size buckets created");
+STATISTIC(NumDynSlabs, "Number of dynamic shared slabs created");
+STATISTIC(NumSmallBuckets, "Number of grouped-mode small size buckets created");
+STATISTIC(NumSmallBins, "Number of grouped-mode small lifetime bins created");
 STATISTIC(NumDomains, "Number of dominance domains (separate pools) created");
 STATISTIC(NumStaticFragBytes,
           "Static-pool bytes beyond the max-load lower bound (fragmentation)");
 STATISTIC(NumDynFragUnits,
-          "Aligned dynamic-group staticFactor bytes beyond the max-load lower "
-          "bound (per-group fragmentation, pre-scale by the dynamic factor)");
+          "Dynamic coefficient excess above the max-load lower bound for "
+          "common-factor domains with alignment-multiple slab coefficients");
+STATISTIC(NumDynFragComparableDomains,
+          "Number of domains with dynamic groups and a numeric coefficient "
+          "comparison");
+STATISTIC(NumDynFragUnavailableDomains,
+          "Number of domains with dynamic groups but no numeric coefficient "
+          "comparison");
 STATISTIC(NumSmallBucketExcessBins,
           "Small-bucket bins beyond the peak concurrent count");
 
@@ -96,12 +103,9 @@ static bool lifetimesOverlap(const AllocInfo &a, const AllocInfo &b) {
   return !(a.lastUseIndex < b.defIndex || b.lastUseIndex < a.defIndex);
 }
 
-/// Byte size of a memref's STATIC dims: elementBytes * product(static dims).
-/// For a static memref this is the whole byte size; for a dynamic one it is the
-/// per-alloc `staticFactor` -- multiply by product(dynOperands) for the runtime
-/// byte size. Shared by the dynamic packer (as `staticFactor`) and the
-/// fragmentation probe (which compares aligned groups in these units, since the
-/// dynamic factor is common and symbolic within a group).
+/// Compile-time byte coefficient: element bytes times all static dimensions.
+/// For dynamic memrefs, multiplying this coefficient by the ordered dynamic
+/// size operands yields the runtime byte size.
 static int64_t staticFactorBytes(MemRefType type) {
   int64_t staticElems = 1;
   for (int64_t dim : type.getShape())
@@ -437,35 +441,21 @@ packStaticAllocs(MutableArrayRef<AllocInfo> statics, int64_t alignment) {
 }
 
 //===----------------------------------------------------------------------===//
-// Phase 4 - Dynamic packing: factored static packing + small-bucket fallback
+// Phase 4 - Dynamic packing by runtime factor and lifetime
 //===----------------------------------------------------------------------===//
 //
-// For allocs with runtime-unknown sizes we cannot hardcode byte offsets. Each
-// alloc's byte size is `staticFactor * product(dynOperands)`, where
-// staticFactor = elementBytes * product_of_static_dims and dynOperands are the
-// SSA values for the dynamic dims.
+// A dynamic allocation has byte size `C * F`, where C is its compile-time byte
+// coefficient and F is the product of its ordered dynamic-size operands.
 //
-// Two paths, split on whether `staticFactor` is a multiple of the pool
-// alignment (default 256 B):
+// In lifetime-only mode, each allocation forms a group. The pass assigns each
+// group to the first slab whose existing groups have no overlapping member
+// lifetimes. Groups in a slab share its base; its width is the runtime maximum
+// of their footprints. A slab is rounded up when its width is not known to be
+// alignment-multiple.
 //
-//   ALIGNED (staticFactor % alignment == 0, the memory-dominant case):
-//     Group by dynOperands (common factor F = product(dynOperands)). Every
-//     member size is `staticFactor_i * F`, so members differ only by the
-//     integer staticFactor. Non-overlap is scale-invariant, so we run the same
-//     greedy best-fit packer as Phase 3 on the integer staticFactors -- packing
-//     largest-first, gap-filling, and letting disjoint-lifetime allocs of
-//     different sizes share one slab -- then scale offsets and the span by F at
-//     emit. Because staticFactor is a multiple of the alignment, the packed
-//     unit offsets are too, so `unitOffset * F` stays aligned for any F. This
-//     turns a group's transient footprint from a SUM of its size classes into
-//     a MAX of its concurrently-live members (see AlignedDynGroup).
-//
-//   SMALL (staticFactor not a multiple of the alignment, e.g. a per-channel
-//   scalar of 1 or 2 B):
-//     Negligible bytes; kept on the simple per-size scheme -- bucket by
-//     {staticFactor, dynOperands}, first-fit lifetime bins -- because the
-//     factoring would round their unit offsets up to the alignment and inflate
-//     each reservation by a factor of F.
+// In grouped mode, alignment-multiple allocations with SSA-identical ordered
+// dynamic-size operands are best-fit-packed as one group before slab
+// assignment. Other allocations use per-size lifetime bins in byte space.
 
 /// A bucket groups dynamic allocs that share the same runtime byte size.
 /// Within a bucket, each "bin" holds allocs with non-overlapping lifetimes
@@ -480,12 +470,8 @@ packStaticAllocs(MutableArrayRef<AllocInfo> statics, int64_t alignment) {
 ///   `alignedSize`   (= alignUp(byteSizeValue, alignment), or the same
 ///                    SSA value when staticFactor is already aligned).
 ///
-/// Splitting structural analysis from SSA emission lets Phase 5 pick a
-/// per-bucket insertion point — see `findLatestLegalInsertionPoint` — so
-/// the size arithmetic naturally lands AFTER every dyn-operand def of
-/// the bucket AND above the earliest pooled alloc in the function (the
-/// pool acquisition itself is anchored there, and pool size depends on
-/// every bucket's `alignedSize`).
+/// Structural fields are populated during planning; SSA size values are
+/// populated during emission after their dynamic operands are available.
 struct DynBucket {
   /// Element bytes times the product of static dims of this bucket's
   /// MemRefType. Multiplying by `dynOperands` yields the runtime byte
@@ -503,49 +489,29 @@ struct DynBucket {
   Value alignedSize;
 };
 
-/// An aligned-dynamic group: allocs that share the same `dynOperands` and whose
-/// `staticFactor` is a multiple of the pool alignment.  All member byte sizes
-/// are `staticFactor_i * F` with a common `F = product(dynOperands)`.  We pack
-/// the integer `staticFactor`s with the static greedy packer -- non-overlap is
-/// scale-invariant, so scaling every offset/size by the common `F` preserves it
-/// -- then multiply offsets and the span by `F` at emit.  Because every
-/// `staticFactor` is a multiple of `alignment`, the packed unit offsets are
-/// too, so `unitOffset * F` stays aligned for any integer `F` (no per-alloc
-/// alignment padding).
-///
-/// `assignments` = (alloc, unitOffset in staticFactor bytes); `spanUnits` =
-/// highwater in staticFactor bytes.  Emitted byte offset = base + unitOffset*F.
-struct AlignedDynGroup {
+/// A group whose offsets and span are byte coefficients of one runtime factor
+/// `F = product(dynOperands)`. Emitted offsets are
+/// `slabBase + unitOffset * F`; the footprint is `spanUnits * F`.
+struct DynGroup {
   SmallVector<Value, 2> dynOperands;
   SmallVector<std::pair<AllocInfo *, int64_t>> assignments;
   int64_t spanUnits = 0;
 };
 
-/// Phase-4 result: aligned groups (factored static packing -- the memory-
-/// dominant case) plus small buckets (`staticFactor` not a multiple of the
-/// alignment -> per-size bucket/bin packing in byte space).  Small allocs stay
-/// off the factoring path because rounding their unit offsets up to the pool
-/// alignment would inflate each reservation by a factor of F; keeping them
-/// byte-aligned avoids that, and their byte contribution is negligible.
+/// Dynamic groups assigned to shared slabs, plus grouped-mode small buckets.
 struct DynPacking {
-  SmallVector<AlignedDynGroup> alignedGroups;
+  SmallVector<DynGroup> groups;
   SmallVector<DynBucket> smallBuckets;
-  bool empty() const { return alignedGroups.empty() && smallBuckets.empty(); }
+  /// Each slab lists group indices whose member lifetimes are pairwise
+  /// disjoint. Its runtime width is the maximum group footprint.
+  SmallVector<SmallVector<unsigned>> slabs;
+  bool empty() const { return groups.empty() && smallBuckets.empty(); }
 };
 
-/// Group dynamic allocs and assign each a byte offset (see AlignedDynGroup /
-/// DynPacking).
-///
-/// Aligned allocs are grouped by `dynOperands`; within a group every size is
-/// `staticFactor_i * F` with a common `F = product(dynOperands)`, so best-fit-
-/// packing the integer `staticFactor`s largest-first and scaling by `F` lets
-/// disjoint-lifetime allocs of different sizes share one slab -- a group's
-/// footprint is then the MAX of its concurrently-live members, not the SUM of
-/// its size classes. Small (non-alignment-multiple) allocs are bucketed by
-/// `{staticFactor, dynOperands}` and lifetime-binned in byte space instead (see
-/// DynPacking for why they stay off the factoring path).
+/// Build dynamic groups and assign groups with disjoint member lifetimes to
+/// shared slabs.
 static DynPacking packDynamicAllocs(MutableArrayRef<AllocInfo> dynamics,
-                                    int64_t alignment) {
+                                    int64_t alignment, bool lifetimeOnly) {
   // staticFactor (elem bytes * product of static dims) + dynOperands per alloc.
   auto computeKey = [](AllocInfo &info) {
     MemRefType type = info.allocOp.getType();
@@ -562,23 +528,22 @@ static DynPacking packDynamicAllocs(MutableArrayRef<AllocInfo> dynamics,
   DynPacking result;
   DenseMap<const AllocInfo *, int64_t> staticFactorOf;
 
-  // ALIGNED allocs: collect per `dynOperands` group (SSA identity) before
-  // packing, so each group can be sorted largest-first.
-  struct AlignedTmp {
+  // Collect allocations by SSA-identical ordered dynamic-size operands.
+  struct FactorClass {
     SmallVector<Value, 2> dynOperands;
     SmallVector<AllocInfo *> allocs;
   };
-  SmallVector<AlignedTmp> alignedTmp;
-  auto findAligned = [&](ArrayRef<Value> ops) -> AlignedTmp & {
-    for (auto &t : alignedTmp)
-      if (ArrayRef<Value>(t.dynOperands) == ops)
-        return t;
-    alignedTmp.push_back({SmallVector<Value, 2>(ops.begin(), ops.end()), {}});
-    return alignedTmp.back();
+  SmallVector<FactorClass> factorClasses;
+  auto findFactorClass = [&](ArrayRef<Value> ops) -> FactorClass & {
+    for (FactorClass &factorClass : factorClasses)
+      if (ArrayRef<Value>(factorClass.dynOperands) == ops)
+        return factorClass;
+    factorClasses.push_back(
+        {SmallVector<Value, 2>(ops.begin(), ops.end()), {}});
+    return factorClasses.back();
   };
 
-  // SMALL allocs: bucket by `{staticFactor, dynOperands}` + first-fit lifetime
-  // bins (per-size packing in byte space).
+  // Grouped-mode small allocations use per-key first-fit lifetime bins.
   auto findOrCreateBucket = [&](int64_t sf,
                                 ArrayRef<Value> ops) -> DynBucket & {
     for (auto &b : result.smallBuckets)
@@ -609,23 +574,63 @@ static DynPacking packDynamicAllocs(MutableArrayRef<AllocInfo> dynamics,
   for (AllocInfo &info : dynamics) {
     auto [sf, ops] = computeKey(info);
     staticFactorOf[&info] = sf;
-    if (sf % alignment == 0)
-      findAligned(ops).allocs.push_back(&info);
+    // Lifetime-only packs every dynamic alloc (aligned or not) through the
+    // slab assignment below. Grouped mode keeps
+    // non-alignment-multiple allocs in byte-space buckets.
+    if (lifetimeOnly || sf % alignment == 0)
+      findFactorClass(ops).allocs.push_back(&info);
     else
       binPack(findOrCreateBucket(sf, ops), &info);
   }
 
-  // Pack each aligned group largest-`staticFactor`-first with best-fit gaps.
-  for (auto &t : alignedTmp) {
-    llvm::stable_sort(t.allocs, [&](AllocInfo *a, AllocInfo *b) {
-      return staticFactorOf.lookup(a) > staticFactorOf.lookup(b);
+  if (lifetimeOnly) {
+    for (FactorClass &factorClass : factorClasses)
+      for (AllocInfo *a : factorClass.allocs) {
+        DynGroup g;
+        g.dynOperands = factorClass.dynOperands;
+        g.assignments.push_back({a, /*unitOffset=*/0});
+        g.spanUnits = staticFactorOf.lookup(a);
+        result.groups.push_back(std::move(g));
+      }
+    // Runtime factors are symbolic, so the static coefficient is only a
+    // deterministic compile-time proxy for footprint.
+    llvm::stable_sort(result.groups, [](const DynGroup &a, const DynGroup &b) {
+      return a.spanUnits > b.spanUnits;
     });
-    AlignedDynGroup g;
-    g.dynOperands = std::move(t.dynOperands);
-    g.assignments = packGreedyBestFit(
-        t.allocs, [&](const AllocInfo *i) { return staticFactorOf.lookup(i); },
-        alignment, g.spanUnits);
-    result.alignedGroups.push_back(std::move(g));
+  } else {
+    for (FactorClass &factorClass : factorClasses) {
+      llvm::stable_sort(factorClass.allocs, [&](AllocInfo *a, AllocInfo *b) {
+        return staticFactorOf.lookup(a) > staticFactorOf.lookup(b);
+      });
+      DynGroup g;
+      g.dynOperands = std::move(factorClass.dynOperands);
+      g.assignments = packGreedyBestFit(
+          factorClass.allocs,
+          [&](const AllocInfo *i) { return staticFactorOf.lookup(i); },
+          alignment, g.spanUnits);
+      result.groups.push_back(std::move(g));
+    }
+  }
+
+  // Assign each group to the first slab whose existing groups have no
+  // overlapping member lifetimes.
+  auto groupsDisjoint = [](const DynGroup &a, const DynGroup &b) {
+    return llvm::none_of(a.assignments, [&](const auto &ea) {
+      return llvm::any_of(b.assignments, [&](const auto &eb) {
+        return lifetimesOverlap(*ea.first, *eb.first);
+      });
+    });
+  };
+  for (auto [gi, group] : llvm::enumerate(result.groups)) {
+    auto *slab = llvm::find_if(result.slabs, [&](ArrayRef<unsigned> members) {
+      return llvm::all_of(members, [&](unsigned other) {
+        return groupsDisjoint(group, result.groups[other]);
+      });
+    });
+    if (slab == result.slabs.end())
+      result.slabs.push_back({static_cast<unsigned>(gi)});
+    else
+      slab->push_back(static_cast<unsigned>(gi));
   }
 
   return result;
@@ -842,24 +847,23 @@ void PoolAllocsPass::runOnOperation() {
       staticPoolSize = std::max(staticPoolSize, end);
     }
 
-    // Phase 4: bucket dynamics within this domain.
-    auto dynPacking = packDynamicAllocs(dynamics, align);
-    NumDynBuckets +=
-        dynPacking.alignedGroups.size() + dynPacking.smallBuckets.size();
+    // Phase 4: pack dynamic allocations within this domain.
+    auto dynPacking = packDynamicAllocs(dynamics, align, lifetimeOnly);
+    NumDynSlabs += dynPacking.slabs.size();
+    NumSmallBuckets += dynPacking.smallBuckets.size();
     bool hasDynamic = !dynPacking.empty();
-    // F = product(dynOperands) per aligned group; emitted below (Phase 5) and
-    // reused for both the pool-size and per-alloc offset arithmetic.
-    SmallVector<Value> groupFactors(dynPacking.alignedGroups.size());
+    // F = product(dynOperands) per group; reused by pool-size and offset
+    // arithmetic.
+    SmallVector<Value> groupFactors(dynPacking.groups.size());
 
-    // Debug-only fragmentation probe. Reads the packing result (no IR emitted,
-    // no offsets changed) and compares each part of this domain's footprint to
-    // its max-load lower bound; the surplus is recoverable fragmentation. A
-    // zero surplus means best-fit reached the theoretical floor for that part.
-    // Static bytes and small-bucket bins are exact; aligned dynamic groups are
-    // compared in staticFactor units because the dynamic factor F is common
-    // (and symbolic) within a group, so the byte surplus is (unit surplus) * F.
-    // Runs unconditionally (accumulates statistics); only the per-domain remark
-    // is gated behind the emit-fragmentation-report option.
+    // Compare each part of the packed footprint with peak concurrent load, a
+    // lower bound for any contiguous packing. The difference is overhead
+    // relative to that bound; zero means the bound is attained.
+    //
+    // Dynamic coefficients are comparable only when all groups share one
+    // runtime factor and each effective slab-width coefficient is
+    // alignment-multiple. The analysis always updates statistics; remarks are
+    // optional and do not affect generated IR.
     {
       SmallVector<const AllocInfo *> members;
       members.reserve(statics.size());
@@ -871,18 +875,38 @@ void PoolAllocsPass::runOnOperation() {
       int64_t staticFrag = staticPoolSize - staticLb;
       NumStaticFragBytes += staticFrag;
 
-      int64_t dynSpanUnits = 0, dynLbUnits = 0;
-      for (const AlignedDynGroup &group : dynPacking.alignedGroups) {
-        members.clear();
-        for (const auto &[info, unitOffset] : group.assignments)
-          members.push_back(info);
-        dynSpanUnits += group.spanUnits;
-        dynLbUnits += maxConcurrentLoad(members, [](const AllocInfo *i) {
-          memref::AllocOp op = i->allocOp; // copy handle to drop constness
-          return staticFactorBytes(op.getType());
-        });
+      ArrayRef<DynGroup> groups = dynPacking.groups;
+      bool singleF = llvm::all_of(groups, [&](const DynGroup &g) {
+        return ArrayRef<Value>(g.dynOperands) ==
+               ArrayRef<Value>(groups.front().dynOperands);
+      });
+      int64_t dynPoolUnits = 0;
+      bool slabCoefficientsAligned = true;
+      for (ArrayRef<unsigned> slab : dynPacking.slabs) {
+        int64_t width = 0;
+        for (unsigned gi : slab)
+          width = std::max(width, groups[gi].spanUnits);
+        dynPoolUnits += width;
+        slabCoefficientsAligned &= width % align == 0;
       }
-      NumDynFragUnits += dynSpanUnits - dynLbUnits;
+      bool coefficientComparable = singleF && slabCoefficientsAligned;
+      members.clear();
+      for (const DynGroup &g : groups)
+        for (const auto &[info, unitOffset] : g.assignments)
+          members.push_back(info);
+      int64_t dynLbUnits = maxConcurrentLoad(members, [](const AllocInfo *i) {
+        memref::AllocOp op = i->allocOp; // copy handle to drop constness
+        return staticFactorBytes(op.getType());
+      });
+      int64_t dynFrag = coefficientComparable ? dynPoolUnits - dynLbUnits : 0;
+      if (!groups.empty()) {
+        if (coefficientComparable) {
+          NumDynFragUnits += dynFrag;
+          ++NumDynFragComparableDomains;
+        } else {
+          ++NumDynFragUnavailableDomains;
+        }
+      }
 
       int64_t smallBins = 0, smallMinBins = 0;
       for (const DynBucket &bucket : dynPacking.smallBuckets) {
@@ -893,16 +917,25 @@ void PoolAllocsPass::runOnOperation() {
         smallMinBins += maxConcurrentLoad(
             members, [](const AllocInfo *) { return int64_t{1}; });
       }
+      NumSmallBins += smallBins;
       NumSmallBucketExcessBins += smallBins - smallMinBins;
 
-      if (emitFragmentationReport)
-        funcOp.emitRemark()
-            << "hip-pool-allocs fragmentation: domain " << domainId
-            << ": static " << staticPoolSize << "/" << staticLb << " B ("
-            << staticFrag << " frag); dyn-groups " << dynSpanUnits << "/"
-            << dynLbUnits << " units (" << (dynSpanUnits - dynLbUnits)
-            << " frag); small-buckets " << smallBins << "/" << smallMinBins
-            << " bins (" << (smallBins - smallMinBins) << " excess)";
+      if (emitFragmentationReport) {
+        InFlightDiagnostic remark = funcOp.emitRemark();
+        remark << "hip-pool-allocs fragmentation: domain " << domainId
+               << ": static " << staticPoolSize << "/" << staticLb << " B ("
+               << staticFrag << " frag); ";
+        if (coefficientComparable)
+          remark << "dyn-pool " << dynPoolUnits << "/" << dynLbUnits
+                 << " units (" << dynFrag << " frag); ";
+        else if (!singleF)
+          remark
+              << "dyn-pool coefficient unavailable (mixed runtime factors); ";
+        else
+          remark << "dyn-pool coefficient unavailable (runtime alignment); ";
+        remark << "small-buckets " << smallBins << "/" << smallMinBins
+               << " bins (" << (smallBins - smallMinBins) << " excess)";
+      }
     }
 
     domainPoolStaticSizes.push_back(staticPoolSize);
@@ -910,22 +943,15 @@ void PoolAllocsPass::runOnOperation() {
     if (!hasDynamic && staticPoolSize == 0)
       continue;
 
-    // Phase 5: emit per-bucket sizes, the pool, offsets, and views — all
-    // constrained to THIS domain's allocs as `requiredBefore`. Per-domain
-    // `requiredBefore` is the key change vs. the pre-multi-domain code:
-    // domain N's emission point need only dominate domain N's allocs, not
-    // every pooled alloc in the function.
+    // Phase 5: emit size arithmetic, the pool, offsets, and views. Every
+    // emitted value is constrained to dominate this domain's allocations.
     SmallVector<Operation *> domainAllocOps;
     domainAllocOps.reserve(domain.allocs.size());
     for (AllocInfo *info : domain.allocs)
       domainAllocOps.push_back(info->allocOp.getOperation());
 
-    // Move the builder to the latest legal point for `dynOperands`-derived
-    // size arithmetic: strictly after every dyn-operand def, strictly before
-    // every alloc in this domain. Shared by the aligned-group F emit and the
-    // small-bucket size emit. Returns false (after emitting an error) when no
-    // such point exists -- impossible after a successful Phase 1.5 partition,
-    // whose feasibility check is a superset of this one.
+    // Select the latest insertion point after all dynamic operand definitions
+    // and before every allocation in this domain.
     auto seekSizeInsertionPoint = [&](ArrayRef<Value> dynOperands) -> bool {
       SmallVector<Operation *> requiredAfter;
       for (Value dynOp : dynOperands)
@@ -945,8 +971,8 @@ void PoolAllocsPass::runOnOperation() {
       return true;
     };
 
-    // Emit each aligned group's F = product(dynOperands).
-    for (auto [gi, group] : llvm::enumerate(dynPacking.alignedGroups)) {
+    // Emit each group's F = product(dynOperands).
+    for (auto [gi, group] : llvm::enumerate(dynPacking.groups)) {
       if (!seekSizeInsertionPoint(group.dynOperands))
         return signalPassFailure();
       Value f = arith::ConstantIndexOp::create(builder, loc, 1);
@@ -962,8 +988,8 @@ void PoolAllocsPass::runOnOperation() {
       emitBucketSize(builder, loc, bucket, align);
     }
 
-    // Pool acquisition insertion point: after every bucket's aligned size
-    // SSA value, before every alloc IN THIS DOMAIN.
+    // Pool acquisition follows every emitted size prerequisite and precedes
+    // every allocation in this domain.
     {
       SmallVector<Operation *> requiredAfter;
       for (Value f : groupFactors)
@@ -992,19 +1018,48 @@ void PoolAllocsPass::runOnOperation() {
       builder.setInsertionPoint(&block, *ip);
     }
 
+    // Per-group footprint = spanUnits * F; per-slab width = max of member
+    // footprints (lifetime-disjoint groups share a slab). Emitted before
+    // hip.get_pool so they dominate every alloc, and reused for the per-alloc
+    // offsets below.
+    SmallVector<Value> groupFootprints(dynPacking.groups.size());
+    for (auto [gi, group] : llvm::enumerate(dynPacking.groups)) {
+      Value spanVal =
+          arith::ConstantIndexOp::create(builder, loc, group.spanUnits);
+      groupFootprints[gi] =
+          builder.createOrFold<arith::MulIOp>(loc, groupFactors[gi], spanVal);
+    }
+    SmallVector<Value> slabWidths(dynPacking.slabs.size());
+    for (auto [si, slab] : llvm::enumerate(dynPacking.slabs)) {
+      Value width = groupFootprints[slab[0]];
+      int64_t maxSpanUnits = dynPacking.groups[slab[0]].spanUnits;
+      bool commonFactor = llvm::all_of(slab, [&](unsigned gi) {
+        return ArrayRef<Value>(dynPacking.groups[gi].dynOperands) ==
+               ArrayRef<Value>(dynPacking.groups[slab[0]].dynOperands);
+      });
+      bool hasUnalignedSpan = maxSpanUnits % align != 0;
+      for (unsigned gi : llvm::drop_begin(slab)) {
+        width = builder.createOrFold<arith::MaxUIOp>(loc, width,
+                                                     groupFootprints[gi]);
+        maxSpanUnits = std::max(maxSpanUnits, dynPacking.groups[gi].spanUnits);
+        hasUnalignedSpan |= dynPacking.groups[gi].spanUnits % align != 0;
+      }
+      // With a common runtime factor, the effective coefficient is the maximum
+      // span. With mixed factors, any unaligned member may determine the width.
+      bool needAlign =
+          commonFactor ? maxSpanUnits % align != 0 : hasUnalignedSpan;
+      if (needAlign)
+        width = emitAlignUp(builder, loc, width, align);
+      slabWidths[si] = width;
+    }
+
     // Pool size = staticPoolSize
-    //           + sum_alignedGroups(spanUnits * F)
+    //           + sum_slabs(max member footprint)
     //           + sum_smallBuckets(alignedSize * numBins).
     Value poolSize =
         arith::ConstantIndexOp::create(builder, loc, staticPoolSize);
-    for (auto [gi, group] : llvm::enumerate(dynPacking.alignedGroups)) {
-      Value spanVal =
-          arith::ConstantIndexOp::create(builder, loc, group.spanUnits);
-      Value contribution =
-          builder.createOrFold<arith::MulIOp>(loc, groupFactors[gi], spanVal);
-      poolSize =
-          builder.createOrFold<arith::AddIOp>(loc, poolSize, contribution);
-    }
+    for (Value w : slabWidths)
+      poolSize = builder.createOrFold<arith::AddIOp>(loc, poolSize, w);
     for (auto &bucket : dynPacking.smallBuckets) {
       Value numBinsVal = arith::ConstantIndexOp::create(
           builder, loc, static_cast<int64_t>(bucket.bins.size()));
@@ -1034,24 +1089,25 @@ void PoolAllocsPass::runOnOperation() {
     if (hasDynamic) {
       Value currentBase =
           arith::ConstantIndexOp::create(builder, loc, staticPoolSize);
-      // Aligned groups: byte offset = currentBase + unitOffset * F; the group
-      // occupies spanUnits * F bytes.
-      for (auto [gi, group] : llvm::enumerate(dynPacking.alignedGroups)) {
-        Value f = groupFactors[gi];
-        for (auto &[info, unitOffset] : group.assignments) {
-          Value off = currentBase;
-          if (unitOffset != 0) {
-            Value uo = arith::ConstantIndexOp::create(builder, loc, unitOffset);
-            Value scaled = builder.createOrFold<arith::MulIOp>(loc, f, uo);
-            off = builder.createOrFold<arith::AddIOp>(loc, currentBase, scaled);
+      // Groups in a slab share its base. Within a group, each allocation starts
+      // at base + unitOffset * F.
+      for (auto [si, slab] : llvm::enumerate(dynPacking.slabs)) {
+        for (unsigned gi : slab) {
+          Value f = groupFactors[gi];
+          for (auto &[info, unitOffset] : dynPacking.groups[gi].assignments) {
+            Value off = currentBase;
+            if (unitOffset != 0) {
+              Value uo =
+                  arith::ConstantIndexOp::create(builder, loc, unitOffset);
+              Value scaled = builder.createOrFold<arith::MulIOp>(loc, f, uo);
+              off =
+                  builder.createOrFold<arith::AddIOp>(loc, currentBase, scaled);
+            }
+            allocToOffset[info->allocOp.getOperation()] = off;
           }
-          allocToOffset[info->allocOp.getOperation()] = off;
         }
-        Value spanVal =
-            arith::ConstantIndexOp::create(builder, loc, group.spanUnits);
-        Value groupTotal = builder.createOrFold<arith::MulIOp>(loc, f, spanVal);
-        currentBase =
-            builder.createOrFold<arith::AddIOp>(loc, currentBase, groupTotal);
+        currentBase = builder.createOrFold<arith::AddIOp>(loc, currentBase,
+                                                          slabWidths[si]);
       }
       // Small buckets: bin offset = currentBase + binIdx * alignedSize.
       for (auto &bucket : dynPacking.smallBuckets) {
@@ -1076,9 +1132,10 @@ void PoolAllocsPass::runOnOperation() {
 
     LLVM_DEBUG(llvm::dbgs()
                << "  Pool[" << domainId << "]: static=" << staticPoolSize
-               << " bytes, " << dynPacking.alignedGroups.size()
-               << " aligned dyn groups, " << dynPacking.smallBuckets.size()
-               << " small buckets, " << domain.allocs.size() << " allocs\n");
+               << " bytes, " << dynPacking.groups.size() << " dynamic groups, "
+               << dynPacking.slabs.size() << " slabs, "
+               << dynPacking.smallBuckets.size() << " small buckets, "
+               << domain.allocs.size() << " allocs\n");
 
     // Replace this domain's allocs with views into THIS domain's pool.
     // Metadata (offset + domain id) is recorded BEFORE erasing the alloc

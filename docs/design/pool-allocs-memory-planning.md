@@ -143,10 +143,21 @@ staticFactor × product(dynamic dimension SSA values)
 
 where `staticFactor` is the element byte width multiplied by all static dimensions.
 
-Dynamic allocations use two paths:
+With `lifetime-only=true`, each allocation forms a group. The pass assigns a
+group to the first slab whose existing groups have no overlapping member
+lifetimes, or creates a new slab. Groups in a slab share its base. The slab
+width is the runtime maximum of their footprints, rounded to pool alignment
+when required.
 
-1. **Aligned groups.** When `staticFactor` is a multiple of the pool alignment, allocations sharing the same dynamic-dimension SSA values share a common runtime factor `F`. Their integer static factors are packed with the greedy best-fit algorithm, then offsets and span are multiplied by `F`.
-2. **Small buckets.** When `staticFactor` is not alignment-multiple, allocations are bucketed by `{staticFactor, dynamic operands}` and placed into first-fit lifetime bins in byte space. This avoids multiplying alignment padding by `F` for tiny allocations.
+With `lifetime-only=false`, allocations with SSA-identical ordered dynamic-size
+operands and alignment-multiple `staticFactor`s are best-fit-packed into groups
+before the same slab assignment. Non-alignment-multiple allocations use
+first-fit bins keyed by `{staticFactor, dynamic operands}`.
+
+The modes differ in packing granularity. For a common factor `F`, one
+allocation of size `512*F` that is disjoint from two mutually overlapping
+allocations of size `256*F` requires `768*F` bytes in lifetime-only mode and
+`512*F` bytes in grouped mode.
 
 ### Phase 5: IR emission
 
@@ -161,7 +172,7 @@ The domain pool size is:
 
 ```text
 static prefix
-+ sum(aligned-group runtime factor × packed span)
++ sum(dynamic slab runtime widths)
 + sum(small-bucket aligned size × bin count)
 ```
 
@@ -237,7 +248,14 @@ More than eight domains emits a non-fatal performance remark. Recommended triage
 4. `hip-hoist-alloc-size-arith`;
 5. remaining non-speculatable runtime dependencies.
 
-LLVM statistics include pooled allocation count, static allocation count, aligned dynamic group plus small-bucket count, domain count, and static/dynamic fragmentation measures. `--hip-pool-allocs='emit-fragmentation-report=true'` emits per-domain remarks without changing IR.
+LLVM statistics report allocation, domain, dynamic slab, small-bucket, and
+small-bin counts; static excess bytes; comparable dynamic coefficient excess;
+and small-bucket excess bins.
+`--hip-pool-allocs='emit-fragmentation-report=true'` emits per-domain remarks
+without changing IR. The dynamic coefficient comparison is numeric only when
+all groups share one runtime factor and every effective slab-width coefficient
+is alignment-multiple. Otherwise the remark states why the coefficient is
+unavailable.
 
 Primary regression coverage:
 
@@ -245,6 +263,7 @@ Primary regression coverage:
 - `test/lit/Dialect/hip-pool-allocs-multi-domain-metadata.mlir`
 - `test/lit/Dialect/hip-pool-allocs-many-domains.mlir`
 - `test/lit/Dialect/hip-pool-allocs-dynamic-binning.mlir`
+- `test/lit/Dialect/hip-pool-allocs-lifetime-only.mlir`
 - `test/lit/Dialect/hip-pool-allocs-fragmentation-report.mlir`
 - `test/lit/Dialect/hip-resolve-tensor-dims.mlir`
 - `test/lit/Dialect/hip-resolve-memref-dims.mlir`
@@ -262,8 +281,7 @@ not a production-pipeline test.
 - PoolAllocs requires single-block functions.
 - Pools in separate domains cannot share storage.
 - Static-prefix and dynamic regions do not share offsets.
-- Distinct small buckets do not share offsets.
-- Small dynamic buckets retain per-key first-fit binning.
+- Dynamic reuse is limited to whole allocations in lifetime-only mode, whole
+  groups in grouped mode, and allocations with identical
+  `{staticFactor, dynamic operands}` keys in grouped-mode bins.
 - Pool alignment defaults to 256 bytes.
-
-These are performance or generality limits, not reasons to merge unrelated dominance domains or weaken correctness.

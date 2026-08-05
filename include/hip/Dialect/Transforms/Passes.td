@@ -231,39 +231,47 @@ def PromoteStridedHipOperandsPass
 }
 
 def PoolAllocsPass : Pass<"hip-pool-allocs", "mlir::func::FuncOp"> {
-  let summary = "Pool memref.alloc ops into a grow-on-demand i8 byte buffer";
+  let summary =
+      "Pool memref.alloc ops into per-domain grow-on-demand i8 byte buffers";
   let description = [{
-    Packs all memref.alloc ops in a single-block function into one contiguous
-    byte pool (memref<?xi8>) obtained via hip.get_pool.  Each original
-    allocation is replaced with a memref.view at a computed byte offset.
+    Packs used memref.alloc ops in a single-block function into one byte pool
+    per dominance domain. Each pool is obtained with hip.get_pool, and each
+    original allocation is replaced with a memref.view at a computed byte
+    offset.
 
     The pool size is computed as an SSA value and passed to hip.get_pool,
     which uses grow-on-demand semantics: the runtime grows the pool when the
     requested size exceeds current capacity.
 
-    Static allocations use greedy best-fit offset assignment.  Dynamic
-    allocations are bucketed by their byte-size SSA value: non-overlapping
-    lifetimes within a bucket share an offset.
+    Static allocations use greedy best-fit offset assignment. By default, each
+    dynamic allocation forms a separate lifetime group. Groups with pairwise
+    disjoint member lifetimes may share a slab across different dynamic-size
+    operands; the slab width is the runtime maximum of the group footprints.
+    Grouped mode first best-fit-packs alignment-multiple allocations with
+    SSA-identical ordered dynamic-size operands.
 
     Sub-buffer offsets are aligned to 256 bytes by default (configurable).
 
     Recommended pipeline position:
       hip-optimize-memrefs (optional) -> hip-pool-allocs -> hip-lower-allocs
 
-    Emission strategy:
-      Per-bucket size arithmetic and the pool acquisition are anchored at
-      the latest legal point in the block — after every dyn-operand def
-      and before the earliest pooled alloc. No code motion, no hoist
-      whitelist, no reshape pre-folds. See `findLatestLegalInsertionPoint`
-      in PoolAllocs.cpp for the helper that picks the point.
+    Dynamic size arithmetic and pool acquisition are emitted after their SSA
+    dependencies and before every allocation in the corresponding domain.
   }];
   let options = [
     Option<"alignment", "alignment", "int64_t", /*default=*/"256",
            "Sub-buffer byte offset alignment (must be power of 2)">,
     Option<"emitFragmentationReport", "emit-fragmentation-report", "bool",
            /*default=*/"false",
-           "Debug-only: emit a per-domain remark comparing the packed pool "
-           "size to the max-load lower bound. No effect on generated code.">
+           "Debug-only: emit per-domain packing remarks with lower-bound "
+           "comparisons where representable. No effect on generated code.">,
+    Option<"lifetimeOnly", "lifetime-only", "bool", /*default=*/"true",
+           "Default: treat each dynamic alloc as a separate lifetime group. "
+           "This permits slab reuse across different dynamic-size operands but "
+           "does not pack gaps among allocs with identical operands. Set false "
+           "to best-fit-pack alignment-multiple allocs with SSA-identical "
+           "ordered dynamic-size operands before slab assignment; other allocs "
+           "use per-size bins.">
   ];
   let dependentDialects = [
     "mlir::hip::HipDialect",
