@@ -12,10 +12,14 @@
 //   of the domain block, keeping the relative order SSA form already gives it;
 //   phase 2, shape computation -- each shape region body moves into an
 //   scf.execute_region yielding !shape.shape, with the region's block arguments
-//   replaced by the shapes of the placeholder inputs.
+//   replaced by the shapes of the placeholder inputs;
+//   phase 3, allocation -- one tensor.empty per placeholder result, its dynamic
+//   extents read out of the computed shape, all of them grouped after the last
+//   scf.execute_region.
 //
-// The placeholders still stand, now with an empty shape region, until the
-// phases that build tensor.empty and erase them land.
+// The placeholders still stand, now with an empty shape region and no reader of
+// the tensor.empty that stands in for them, until the phase that rewires their
+// uses and erases them lands.
 //
 // Error paths live in invalid.mlir.
 //===----------------------------------------------------------------------===//
@@ -26,17 +30,22 @@
 // CHECK detail as the later phases land. Its placeholder already leads the
 // block, so grouping leaves the domain as it is. The two shape region arguments
 // become shape.shape_of on the matmul inputs, and hipsr.shape_yield2 becomes
-// scf.yield because it is bound to hipsr.placeholder by HasParent.
+// scf.yield because it is bound to hipsr.placeholder by HasParent. Only dim 0
+// of the result is dynamic, so the allocation reads a single extent back out of
+// the shape and 512 stays in the tensor.empty type.
 // CHECK-LABEL: func.func @matmul_domain(
 // CHECK:         ^bb0(%[[DCTX:.+]]: !hipsr.context, %[[DA:.+]]: tensor<?x256xf16>, %[[DB:.+]]: tensor<256x512xf16>):
-// CHECK:           scf.execute_region -> !shape.shape {
+// CHECK:           %[[MATMUL_SHAPE:.+]] = scf.execute_region -> !shape.shape {
 // CHECK:             %[[A_SHAPE:.+]] = shape.shape_of %[[DA]] : tensor<?x256xf16> -> !shape.shape
 // CHECK:             %[[B_SHAPE:.+]] = shape.shape_of %[[DB]] : tensor<256x512xf16> -> !shape.shape
 // CHECK:             %[[M:.+]] = shape.get_extent %[[A_SHAPE]], %{{.+}} : !shape.shape, !shape.size -> !shape.size
 // CHECK:             %[[N:.+]] = shape.get_extent %[[B_SHAPE]], %{{.+}} : !shape.shape, !shape.size -> !shape.size
-// CHECK:             %[[MATMUL_SHAPE:.+]] = shape.from_extents %[[M]], %[[N]] : !shape.size, !shape.size
-// CHECK:             scf.yield %[[MATMUL_SHAPE]] : !shape.shape
+// CHECK:             %[[RESULT_SHAPE:.+]] = shape.from_extents %[[M]], %[[N]] : !shape.size, !shape.size
+// CHECK:             scf.yield %[[RESULT_SHAPE]] : !shape.shape
 // CHECK:           }
+// CHECK:           %[[EXTENT:.+]] = shape.get_extent %[[MATMUL_SHAPE]], %{{.+}} : !shape.shape, !shape.size -> !shape.size
+// CHECK:           %[[DIM0:.+]] = shape.size_to_index %[[EXTENT]] : !shape.size
+// CHECK:           tensor.empty(%[[DIM0]]) : tensor<?x512xf16>
 // CHECK:           %[[INIT:.+]] = hipsr.placeholder(%[[DCTX]]) ins(%[[DA]], %[[DB]] : tensor<?x256xf16>, tensor<256x512xf16>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x512xf16>
 // CHECK-NOT:       shape_region
 // CHECK:           %[[MATMUL:.+]] = hipsr.matmul(%[[DCTX]]) ins(%[[DA]], %[[DB]] : tensor<?x256xf16>, tensor<256x512xf16>) outs(%[[INIT]] : tensor<?x512xf16>) : tensor<?x512xf16>
@@ -71,11 +80,59 @@ func.func @matmul_domain(%ctx: !hipsr.context, %a: tensor<?x256xf16>,
 
 // -----
 
+// A result with two dynamic dims and one static dim. The CHECK-NEXT run pins
+// the whole allocation down to the operation: dim 0 and dim 1 are read back out
+// of the computed shape, dim 2 is not, because 64 is already in the type.
+// CHECK-LABEL: func.func @multi_dynamic(
+// CHECK:         ^bb0(%[[DCTX:.+]]: !hipsr.context, %[[DA:.+]]: tensor<?x?x64xf16>, %[[DB:.+]]: tensor<?x?x64xf16>):
+// CHECK:           %[[SHAPE:.+]] = scf.execute_region -> !shape.shape {
+// CHECK:             %[[A_SHAPE:.+]] = shape.shape_of %[[DA]] : tensor<?x?x64xf16> -> !shape.shape
+// CHECK:             %[[B_SHAPE:.+]] = shape.shape_of %[[DB]] : tensor<?x?x64xf16> -> !shape.shape
+// CHECK:             %[[BROADCAST:.+]] = shape.broadcast %[[A_SHAPE]], %[[B_SHAPE]] : !shape.shape, !shape.shape -> !shape.shape
+// CHECK:             scf.yield %[[BROADCAST]] : !shape.shape
+// CHECK:           }
+// CHECK:           %[[D0_INDEX:.+]] = shape.const_size 0
+// CHECK-NEXT:      %[[D0_EXTENT:.+]] = shape.get_extent %[[SHAPE]], %[[D0_INDEX]] : !shape.shape, !shape.size -> !shape.size
+// CHECK-NEXT:      %[[D0:.+]] = shape.size_to_index %[[D0_EXTENT]] : !shape.size
+// CHECK-NEXT:      %[[D1_INDEX:.+]] = shape.const_size 1
+// CHECK-NEXT:      %[[D1_EXTENT:.+]] = shape.get_extent %[[SHAPE]], %[[D1_INDEX]] : !shape.shape, !shape.size -> !shape.size
+// CHECK-NEXT:      %[[D1:.+]] = shape.size_to_index %[[D1_EXTENT]] : !shape.size
+// CHECK-NEXT:      tensor.empty(%[[D0]], %[[D1]]) : tensor<?x?x64xf16>
+// CHECK-NEXT:      %[[INIT:.+]] = hipsr.placeholder(%[[DCTX]])
+// CHECK:           %[[ADD:.+]] = hipsr.add(%[[DCTX]]) ins(%[[DA]], %[[DB]] : tensor<?x?x64xf16>, tensor<?x?x64xf16>) outs(%[[INIT]] : tensor<?x?x64xf16>) : tensor<?x?x64xf16>
+// CHECK:           hipsr.pool_domain_yield %[[ADD]] : tensor<?x?x64xf16>
+func.func @multi_dynamic(%ctx: !hipsr.context, %a: tensor<?x?x64xf16>,
+                         %b: tensor<?x?x64xf16>) -> tensor<?x?x64xf16> {
+  %0 = hipsr.pool_domain(%ctx, %a, %b
+      : !hipsr.context, tensor<?x?x64xf16>, tensor<?x?x64xf16>) {
+  ^bb0(%domain_ctx: !hipsr.context, %domain_a: tensor<?x?x64xf16>,
+       %domain_b: tensor<?x?x64xf16>):
+    %init = hipsr.placeholder(%domain_ctx)
+        ins(%domain_a, %domain_b : tensor<?x?x64xf16>, tensor<?x?x64xf16>)
+        {placeholder_type = #hipsr.placeholder_type<normal>}
+        : tensor<?x?x64xf16> shape_region {
+    ^bb0(%lhs_shape: !shape.shape, %rhs_shape: !shape.shape):
+      %result_shape = shape.broadcast %lhs_shape, %rhs_shape
+          : !shape.shape, !shape.shape -> !shape.shape
+      hipsr.shape_yield2 %result_shape : !shape.shape
+    }
+    %add = hipsr.add(%domain_ctx)
+        ins(%domain_a, %domain_b : tensor<?x?x64xf16>, tensor<?x?x64xf16>)
+        outs(%init : tensor<?x?x64xf16>) : tensor<?x?x64xf16>
+    hipsr.pool_domain_yield %add : tensor<?x?x64xf16>
+  } -> tensor<?x?x64xf16>
+  return %0 : tensor<?x?x64xf16>
+}
+
+// -----
+
 // The add placeholder is defined after the matmul in the input; grouping pulls
 // it in front of both data ops without overtaking the matmul placeholder it
 // depends on. That dependency then shows up in the shape graph: the add shape
 // region took the matmul placeholder result as its first input, so its first
 // argument becomes the matmul execute_region result rather than a shape.shape_of.
+// Both allocations are grouped after the second execute_region, which is still
+// followed by the add placeholder until the erase phase lands.
 // CHECK-LABEL: func.func @interleaved(
 // CHECK:         ^bb0(%[[DCTX:.+]]: !hipsr.context, %[[DA:.+]]: tensor<?x256xf16>, %[[DB:.+]]: tensor<256x512xf16>, %[[DC:.+]]: tensor<?x512xf16>):
 // CHECK:           %[[MATMUL_SHAPE:.+]] = scf.execute_region -> !shape.shape {
@@ -84,11 +141,17 @@ func.func @matmul_domain(%ctx: !hipsr.context, %a: tensor<?x256xf16>,
 // CHECK:             scf.yield %{{.+}} : !shape.shape
 // CHECK:           }
 // CHECK:           %[[MATMUL_INIT:.+]] = hipsr.placeholder(%[[DCTX]]) ins(%[[DA]], %[[DB]] : tensor<?x256xf16>, tensor<256x512xf16>)
-// CHECK:           scf.execute_region -> !shape.shape {
+// CHECK:           %[[ADD_SHAPE:.+]] = scf.execute_region -> !shape.shape {
 // CHECK:             %[[C_SHAPE:.+]] = shape.shape_of %[[DC]] : tensor<?x512xf16> -> !shape.shape
-// CHECK:             %[[ADD_SHAPE:.+]] = shape.broadcast %[[MATMUL_SHAPE]], %[[C_SHAPE]] : !shape.shape, !shape.shape -> !shape.shape
-// CHECK:             scf.yield %[[ADD_SHAPE]] : !shape.shape
+// CHECK:             %[[BROADCAST:.+]] = shape.broadcast %[[MATMUL_SHAPE]], %[[C_SHAPE]] : !shape.shape, !shape.shape -> !shape.shape
+// CHECK:             scf.yield %[[BROADCAST]] : !shape.shape
 // CHECK:           }
+// CHECK:           %[[MATMUL_EXTENT:.+]] = shape.get_extent %[[MATMUL_SHAPE]], %{{.+}} : !shape.shape, !shape.size -> !shape.size
+// CHECK:           %[[MATMUL_DIM0:.+]] = shape.size_to_index %[[MATMUL_EXTENT]] : !shape.size
+// CHECK:           tensor.empty(%[[MATMUL_DIM0]]) : tensor<?x512xf16>
+// CHECK:           %[[ADD_EXTENT:.+]] = shape.get_extent %[[ADD_SHAPE]], %{{.+}} : !shape.shape, !shape.size -> !shape.size
+// CHECK:           %[[ADD_DIM0:.+]] = shape.size_to_index %[[ADD_EXTENT]] : !shape.size
+// CHECK:           tensor.empty(%[[ADD_DIM0]]) : tensor<?x512xf16>
 // CHECK:           %[[ADD_INIT:.+]] = hipsr.placeholder(%[[DCTX]]) ins(%[[MATMUL_INIT]], %[[DC]] : tensor<?x512xf16>, tensor<?x512xf16>)
 // CHECK:           %[[MATMUL:.+]] = hipsr.matmul(%[[DCTX]]) ins(%[[DA]], %[[DB]] : tensor<?x256xf16>, tensor<256x512xf16>) outs(%[[MATMUL_INIT]] : tensor<?x512xf16>) : tensor<?x512xf16>
 // CHECK:           %[[ADD:.+]] = hipsr.add(%[[DCTX]]) ins(%[[MATMUL]], %[[DC]] : tensor<?x512xf16>, tensor<?x512xf16>) outs(%[[ADD_INIT]] : tensor<?x512xf16>) : tensor<?x512xf16>
@@ -149,11 +212,17 @@ func.func @interleaved(%ctx: !hipsr.context, %a: tensor<?x256xf16>,
 // CHECK:             scf.yield %{{.+}} : !shape.shape
 // CHECK:           }
 // CHECK:           %[[MATMUL_INIT:.+]] = hipsr.placeholder(%[[DCTX]]) ins(%[[DA]], %[[DB]] : tensor<?x256xf16>, tensor<256x512xf16>)
-// CHECK:           scf.execute_region -> !shape.shape {
+// CHECK:           %[[ADD_SHAPE:.+]] = scf.execute_region -> !shape.shape {
 // CHECK:             %[[C_SHAPE:.+]] = shape.shape_of %[[DC]] : tensor<?x512xf16> -> !shape.shape
-// CHECK:             %[[ADD_SHAPE:.+]] = shape.broadcast %[[MATMUL_SHAPE]], %[[C_SHAPE]] : !shape.shape, !shape.shape -> !shape.shape
-// CHECK:             scf.yield %[[ADD_SHAPE]] : !shape.shape
+// CHECK:             %[[BROADCAST:.+]] = shape.broadcast %[[MATMUL_SHAPE]], %[[C_SHAPE]] : !shape.shape, !shape.shape -> !shape.shape
+// CHECK:             scf.yield %[[BROADCAST]] : !shape.shape
 // CHECK:           }
+// CHECK:           %[[MATMUL_EXTENT:.+]] = shape.get_extent %[[MATMUL_SHAPE]], %{{.+}} : !shape.shape, !shape.size -> !shape.size
+// CHECK:           %[[MATMUL_DIM0:.+]] = shape.size_to_index %[[MATMUL_EXTENT]] : !shape.size
+// CHECK:           tensor.empty(%[[MATMUL_DIM0]]) : tensor<?x512xf16>
+// CHECK:           %[[ADD_EXTENT:.+]] = shape.get_extent %[[ADD_SHAPE]], %{{.+}} : !shape.shape, !shape.size -> !shape.size
+// CHECK:           %[[ADD_DIM0:.+]] = shape.size_to_index %[[ADD_EXTENT]] : !shape.size
+// CHECK:           tensor.empty(%[[ADD_DIM0]]) : tensor<?x512xf16>
 // CHECK:           %[[ADD_INIT:.+]] = hipsr.placeholder(%[[DCTX]]) ins(%[[MATMUL_INIT]], %[[DC]] : tensor<?x512xf16>, tensor<?x512xf16>)
 // CHECK:           %[[MATMUL:.+]] = hipsr.matmul(%[[DCTX]]) ins(%[[DA]], %[[DB]] : tensor<?x256xf16>, tensor<256x512xf16>) outs(%[[MATMUL_INIT]] : tensor<?x512xf16>) : tensor<?x512xf16>
 // CHECK:           %[[ADD:.+]] = hipsr.add(%[[DCTX]]) ins(%[[MATMUL]], %[[DC]] : tensor<?x512xf16>, tensor<?x512xf16>) outs(%[[ADD_INIT]] : tensor<?x512xf16>) : tensor<?x512xf16>

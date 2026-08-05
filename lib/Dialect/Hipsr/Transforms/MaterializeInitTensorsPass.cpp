@@ -39,6 +39,7 @@
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/Sequence.h"
 #include "llvm/ADT/SmallVector.h"
 
 namespace mlir {
@@ -193,6 +194,57 @@ createShapeComputations(ArrayRef<PlaceholderOp> placeholders,
   return placeholderToExecuteRegion;
 }
 
+// Reads the dynamic extents of a result out of its computed shape. Static
+// dimensions are already carried by the result type, so only the dynamic ones
+// need an SSA value, converted to index for tensor.empty.
+SmallVector<Value> extractDynamicDimensions(Value shapeValue,
+                                            RankedTensorType tensorType,
+                                            Location loc, OpBuilder &builder) {
+  SmallVector<Value> dynamicDimensions;
+  for (int64_t dimension : llvm::seq<int64_t>(0, tensorType.getRank())) {
+    if (!tensorType.isDynamicDim(dimension)) {
+      continue;
+    }
+    Value extent =
+        builder.create<shape::GetExtentOp>(loc, shapeValue, dimension);
+    dynamicDimensions.push_back(
+        builder.create<shape::SizeToIndexOp>(loc, extent));
+  }
+  return dynamicDimensions;
+}
+
+Value createTensorEmptyFromShape(Value placeholderResult, Value shapeValue,
+                                 Location loc, OpBuilder &builder) {
+  auto tensorType = cast<RankedTensorType>(placeholderResult.getType());
+  SmallVector<Value> dynamicDimensions =
+      extractDynamicDimensions(shapeValue, tensorType, loc, builder);
+  return builder.create<tensor::EmptyOp>(loc, tensorType, dynamicDimensions);
+}
+
+// Materializes one tensor.empty per placeholder result. They all go after the
+// last shape computation, so once the placeholders are erased the domain reads
+// as shape computations, then allocations, then data operations.
+DenseMap<Value, Value> createTensorAllocs(
+    ArrayRef<PlaceholderOp> placeholders,
+    const DenseMap<PlaceholderOp, scf::ExecuteRegionOp>
+        &placeholderToExecuteRegion,
+    OpBuilder &builder) {
+  builder.setInsertionPointAfter(
+      placeholderToExecuteRegion.lookup(placeholders.back()));
+
+  DenseMap<Value, Value> placeholderResultToInitTensor;
+  for (PlaceholderOp placeholder : placeholders) {
+    scf::ExecuteRegionOp executeRegion =
+        placeholderToExecuteRegion.lookup(placeholder);
+    for (auto [result, shapeValue] : llvm::zip_equal(
+             placeholder.getResults(), executeRegion.getResults())) {
+      placeholderResultToInitTensor[result] = createTensorEmptyFromShape(
+          result, shapeValue, placeholder.getLoc(), builder);
+    }
+  }
+  return placeholderResultToInitTensor;
+}
+
 LogicalResult materializePoolDomain(PoolDomainOp poolDomain) {
   FailureOr<SmallVector<PlaceholderOp>> placeholders =
       collectAndGroupPlaceholders(poolDomain);
@@ -204,7 +256,15 @@ LogicalResult materializePoolDomain(PoolDomainOp poolDomain) {
   }
 
   OpBuilder builder(poolDomain.getContext());
-  return createShapeComputations(*placeholders, builder);
+  FailureOr<DenseMap<PlaceholderOp, scf::ExecuteRegionOp>>
+      placeholderToExecuteRegion =
+          createShapeComputations(*placeholders, builder);
+  if (failed(placeholderToExecuteRegion)) {
+    return failure();
+  }
+
+  createTensorAllocs(*placeholders, *placeholderToExecuteRegion, builder);
+  return success();
 }
 
 struct MaterializeInitTensorsPass
