@@ -33,9 +33,12 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Visitors.h"
 
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 
 namespace mlir {
@@ -81,11 +84,134 @@ collectAndGroupPlaceholders(PoolDomainOp poolDomain) {
   return placeholders;
 }
 
+// Returns the shape a placeholder input contributes to the shape graph. An
+// input produced by another placeholder reads that placeholder's shape from its
+// scf.execute_region, because the placeholder itself is erased later; any other
+// input is a value that outlives the pass, so its shape is taken directly.
+Value getShapeForInput(
+    Value input, Location loc,
+    const DenseMap<PlaceholderOp, scf::ExecuteRegionOp>
+        &placeholderToExecuteRegion,
+    OpBuilder &builder) {
+  if (auto producer = input.getDefiningOp<PlaceholderOp>()) {
+    scf::ExecuteRegionOp executeRegion =
+        placeholderToExecuteRegion.lookup(producer);
+    if (!executeRegion) {
+      return nullptr;
+    }
+    return executeRegion.getResult(cast<OpResult>(input).getResultNumber());
+  }
+  return builder.create<shape::ShapeOfOp>(
+      loc, shape::ShapeType::get(builder.getContext()), input);
+}
+
+// Moves a placeholder's shape region body into a new scf.execute_region placed
+// just before it. hipsr.shape_yield2 is bound to hipsr.placeholder by HasParent
+// and cannot come along, so the transferred body gets the scf terminator.
+scf::ExecuteRegionOp
+createExecuteRegionAndTransferBody(PlaceholderOp placeholder,
+                                   OpBuilder &builder) {
+  Location loc = placeholder.getLoc();
+  SmallVector<Type> shapeTypes(placeholder.getNumResults(),
+                               shape::ShapeType::get(builder.getContext()));
+
+  builder.setInsertionPoint(placeholder);
+  auto executeRegion = builder.create<scf::ExecuteRegionOp>(loc, shapeTypes);
+  executeRegion.getRegion().takeBody(placeholder.getShapeRegion());
+
+  auto shapeYield =
+      cast<ShapeYield2Op>(executeRegion.getRegion().front().getTerminator());
+  builder.setInsertionPoint(shapeYield);
+  builder.create<scf::YieldOp>(shapeYield.getLoc(), shapeYield.getShapes());
+  shapeYield.erase();
+
+  return executeRegion;
+}
+
+// Rewrites a transferred body to read from the enclosing domain instead of the
+// shape region's own block arguments, then drops those arguments: an
+// scf.execute_region region takes none.
+LogicalResult replaceShapeRegionArguments(
+    PlaceholderOp placeholder, Block &shapeBlock,
+    const DenseMap<PlaceholderOp, scf::ExecuteRegionOp>
+        &placeholderToExecuteRegion,
+    OpBuilder &builder) {
+  ValueRange inputs = placeholder.getInputs();
+  if (shapeBlock.getNumArguments() != inputs.size()) {
+    return placeholder.emitOpError("shape region takes ")
+           << shapeBlock.getNumArguments()
+           << " arguments but the placeholder has " << inputs.size()
+           << " inputs";
+  }
+
+  // The shapes go at the top of the body so they dominate every use of the
+  // argument they replace.
+  builder.setInsertionPointToStart(&shapeBlock);
+
+  for (auto [argument, input] :
+       llvm::zip_equal(shapeBlock.getArguments(), inputs)) {
+    Value shape = getShapeForInput(input, placeholder.getLoc(),
+                                   placeholderToExecuteRegion, builder);
+    if (!shape) {
+      return placeholder.emitOpError(
+          "input has no shape computation; the producing placeholder was not "
+          "materialized first");
+    }
+    argument.replaceAllUsesWith(shape);
+  }
+
+  shapeBlock.eraseArguments(0, shapeBlock.getNumArguments());
+  return success();
+}
+
+// Turns every placeholder shape region into an scf.execute_region yielding one
+// !shape.shape per placeholder result, and maps each placeholder to it so later
+// placeholders can consume the shapes.
+FailureOr<DenseMap<PlaceholderOp, scf::ExecuteRegionOp>>
+createShapeComputations(ArrayRef<PlaceholderOp> placeholders,
+                        OpBuilder &builder) {
+  for (PlaceholderOp placeholder : placeholders) {
+    if (placeholder.getPlaceholderType() != PlaceholderType::Normal) {
+      placeholder.emitOpError("barrier placeholders are not materialized yet");
+      return failure();
+    }
+  }
+
+  DenseMap<PlaceholderOp, scf::ExecuteRegionOp> placeholderToExecuteRegion;
+  for (PlaceholderOp placeholder : placeholders) {
+    scf::ExecuteRegionOp executeRegion =
+        createExecuteRegionAndTransferBody(placeholder, builder);
+    if (failed(replaceShapeRegionArguments(placeholder,
+                                           executeRegion.getRegion().front(),
+                                           placeholderToExecuteRegion,
+                                           builder))) {
+      return failure();
+    }
+    placeholderToExecuteRegion[placeholder] = executeRegion;
+  }
+
+  return placeholderToExecuteRegion;
+}
+
+LogicalResult materializePoolDomain(PoolDomainOp poolDomain) {
+  FailureOr<SmallVector<PlaceholderOp>> placeholders =
+      collectAndGroupPlaceholders(poolDomain);
+  if (failed(placeholders)) {
+    return failure();
+  }
+  if (placeholders->empty()) {
+    return success();
+  }
+
+  OpBuilder builder(poolDomain.getContext());
+  return createShapeComputations(*placeholders, builder);
+}
+
 struct MaterializeInitTensorsPass
     : impl::MaterializeInitTensorsPassBase<MaterializeInitTensorsPass> {
   void runOnOperation() override {
     WalkResult walkResult = getOperation().walk([](PoolDomainOp poolDomain) {
-      if (failed(collectAndGroupPlaceholders(poolDomain))) {
+      if (failed(materializePoolDomain(poolDomain))) {
         return WalkResult::interrupt();
       }
       return WalkResult::advance();
