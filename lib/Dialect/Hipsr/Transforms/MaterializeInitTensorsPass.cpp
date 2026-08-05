@@ -89,11 +89,10 @@ collectAndGroupPlaceholders(PoolDomainOp poolDomain) {
 // input produced by another placeholder reads that placeholder's shape from its
 // scf.execute_region, because the placeholder itself is erased later; any other
 // input is a value that outlives the pass, so its shape is taken directly.
-Value getShapeForInput(
-    Value input, Location loc,
-    const DenseMap<PlaceholderOp, scf::ExecuteRegionOp>
-        &placeholderToExecuteRegion,
-    OpBuilder &builder) {
+Value getShapeForInput(Value input, Location loc,
+                       const DenseMap<PlaceholderOp, scf::ExecuteRegionOp>
+                           &placeholderToExecuteRegion,
+                       OpBuilder &builder) {
   if (auto producer = input.getDefiningOp<PlaceholderOp>()) {
     scf::ExecuteRegionOp executeRegion =
         placeholderToExecuteRegion.lookup(producer);
@@ -132,11 +131,11 @@ createExecuteRegionAndTransferBody(PlaceholderOp placeholder,
 // Rewrites a transferred body to read from the enclosing domain instead of the
 // shape region's own block arguments, then drops those arguments: an
 // scf.execute_region region takes none.
-LogicalResult replaceShapeRegionArguments(
-    PlaceholderOp placeholder, Block &shapeBlock,
-    const DenseMap<PlaceholderOp, scf::ExecuteRegionOp>
-        &placeholderToExecuteRegion,
-    OpBuilder &builder) {
+LogicalResult
+replaceShapeRegionArguments(PlaceholderOp placeholder, Block &shapeBlock,
+                            const DenseMap<PlaceholderOp, scf::ExecuteRegionOp>
+                                &placeholderToExecuteRegion,
+                            OpBuilder &builder) {
   ValueRange inputs = placeholder.getInputs();
   if (shapeBlock.getNumArguments() != inputs.size()) {
     return placeholder.emitOpError("shape region takes ")
@@ -182,10 +181,9 @@ createShapeComputations(ArrayRef<PlaceholderOp> placeholders,
   for (PlaceholderOp placeholder : placeholders) {
     scf::ExecuteRegionOp executeRegion =
         createExecuteRegionAndTransferBody(placeholder, builder);
-    if (failed(replaceShapeRegionArguments(placeholder,
-                                           executeRegion.getRegion().front(),
-                                           placeholderToExecuteRegion,
-                                           builder))) {
+    if (failed(replaceShapeRegionArguments(
+            placeholder, executeRegion.getRegion().front(),
+            placeholderToExecuteRegion, builder))) {
       return failure();
     }
     placeholderToExecuteRegion[placeholder] = executeRegion;
@@ -224,11 +222,11 @@ Value createTensorEmptyFromShape(Value placeholderResult, Value shapeValue,
 // Materializes one tensor.empty per placeholder result. They all go after the
 // last shape computation, so once the placeholders are erased the domain reads
 // as shape computations, then allocations, then data operations.
-DenseMap<Value, Value> createTensorAllocs(
-    ArrayRef<PlaceholderOp> placeholders,
-    const DenseMap<PlaceholderOp, scf::ExecuteRegionOp>
-        &placeholderToExecuteRegion,
-    OpBuilder &builder) {
+DenseMap<Value, Value>
+createTensorAllocs(ArrayRef<PlaceholderOp> placeholders,
+                   const DenseMap<PlaceholderOp, scf::ExecuteRegionOp>
+                       &placeholderToExecuteRegion,
+                   OpBuilder &builder) {
   builder.setInsertionPointAfter(
       placeholderToExecuteRegion.lookup(placeholders.back()));
 
