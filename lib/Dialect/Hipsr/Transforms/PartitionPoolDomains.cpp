@@ -52,7 +52,7 @@ void assignOpToDomain(Operation &operation, DomainAssignment &assignment) {
     if (Operation *definingOp = operand.getDefiningOp()) {
       auto dependency = assignment.operationDomains.find(definingOp);
       if (dependency == assignment.operationDomains.end()) {
-        llvm_unreachable(
+        llvm::report_fatal_error(
             "pool-domain analysis expected an assigned dependency");
       }
       dependencies.insert(dependency->second);
@@ -84,6 +84,9 @@ DomainAssignment assignDomains(Block &block) {
   return assignment;
 }
 
+// Op numbers follow their order in the function. The first report maps each
+// op number to its domain. The other reports list the numbered ops in each
+// domain, so LIT can check both views of the same assignment.
 void emitAnalysisReport(Block &block, const DomainAssignment &assignment) {
   llvm::DenseMap<Operation *, unsigned> operationIndices;
   for (auto [index, operation] : llvm::enumerate(block.without_terminator())) {
@@ -98,7 +101,8 @@ void emitAnalysisReport(Block &block, const DomainAssignment &assignment) {
     }
     auto domain = assignment.operationDomains.find(&operation);
     if (domain == assignment.operationDomains.end()) {
-      llvm_unreachable("pool-domain analysis expected an assigned operation");
+      llvm::report_fatal_error(
+          "pool-domain analysis expected an assigned operation");
     }
     operationReport << index << "->" << domain->second;
   }
