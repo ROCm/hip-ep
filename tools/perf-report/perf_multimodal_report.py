@@ -178,7 +178,7 @@ class OgaHeadline:
                 cur_block = None
                 continue
 
-            m = re.match(r"Peak working set size \(bytes\):\s*(\d+)", line)
+            m = re.match(r"Peak working set size:\s*(\d+)\s+bytes", line)
             if m:
                 out.peak_ws_bytes = int(m.group(1))
                 cur_block = None
