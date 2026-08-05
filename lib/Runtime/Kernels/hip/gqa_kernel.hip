@@ -2607,7 +2607,11 @@ typedef float float8_t __attribute__((ext_vector_type(8)));
 // Each wave owns M_TILES 16-row q-subtiles x all BKV columns. Only LDS is
 // P_lds (C->A transpose); only sync is single-wave around it.
 // ---------------------------------------------------------------------
-template <int M_TILES, int BKV, int D>
+// HAS_WINDOW is a template parameter rather than a runtime test because this
+// kernel runs at the VGPR ceiling: carrying the window's per-row state live in
+// the full-attention instantiation pushed M_TILES=2 from 120 to 180 bytes/lane
+// of scratch (38 -> 68 spills) and cost that path 21% at deep KV.
+template <int M_TILES, int BKV, int D, bool HAS_WINDOW>
 __global__ void __launch_bounds__(32)
 gqa_flash_prefill_v5_kernel(
     const _Float16* __restrict__ Q,       // [B, sq, Hq, D]
@@ -2615,7 +2619,10 @@ gqa_flash_prefill_v5_kernel(
     const _Float16* __restrict__ Vcache,  // [B, G, max_seq, D]
     _Float16* __restrict__ O,             // [B, sq, Hq, D]
     int B_count, int Hq, int G, int sq, int skv, int max_seq, int past_len,
-    float scale, int ablate)
+    float scale, int ablate,
+    const _Float16* __restrict__ head_sink,  // [num_heads] or null
+    int num_heads, int smooth_softmax,
+    int local_window_size)                   // <= 0 for full attention
 {
     // ablation bitmask (perf diagnostics only; wrong numerics):
     //   bit0 skip softmax, bit1 skip valueGEMM, bit2 skip scoreGEMM,
@@ -2711,7 +2718,18 @@ gqa_flash_prefill_v5_kernel(
                               ? (skv - 1) : (past_len + q_start + ROWS - 1);
     const int num_tiles = kv_max / BKV + 1;
 
-    for (int t = 0; t < num_tiles; ++t) {
+    // With a window, every row in this Q tile has a lower bound at least as high
+    // as the first row's, so starting from the first row's bound covers the whole
+    // tile and the per-row mask trims the rest. This is what makes the window
+    // cheaper rather than merely masked: the number of tiles walked stops growing
+    // with skv once the window is filled.
+    int t_start = 0;
+    if constexpr (HAS_WINDOW) {
+        const int kv_lo_tile = past_len + q_start - local_window_size + 1;
+        t_start = (kv_lo_tile > 0) ? (kv_lo_tile / BKV) : 0;
+    }
+
+    for (int t = t_start; t < num_tiles; ++t) {
         const int kv0 = t * BKV;
 
         // Stage V tile into LDS with coalesced HALF16 loads along D.
@@ -2744,13 +2762,18 @@ gqa_flash_prefill_v5_kernel(
             for (int e = 0; e < 8; ++e) {
                 const int row    = mi * 16 + e * 2 + pair;        // local q row
                 const int q_pos  = q_start + row;
-                // causal mask + per-row partial max over this lane's columns
+                // causal mask, sliding-window lower bound, and per-row partial
+                // max over this lane's columns
+                const int abs_q = past_len + q_pos;
+                int kv_lo = 0;
+                if constexpr (HAS_WINDOW) kv_lo = abs_q - local_window_size + 1;
                 float rmax = -INFINITY;
                 #pragma unroll
                 for (int sj = 0; sj < S_TILES_J; ++sj) {
                     const int kv_pos = kv0 + sj * 16 + wmma_lane;
-                    if (kv_pos >= skv || kv_pos > past_len + q_pos)
-                        S_reg[mi][sj][e] = -INFINITY;
+                    bool masked = (kv_pos >= skv || kv_pos > abs_q);
+                    if constexpr (HAS_WINDOW) masked = masked || (kv_pos < kv_lo);
+                    if (masked) S_reg[mi][sj][e] = -INFINITY;
                     rmax = fmaxf(rmax, S_reg[mi][sj][e]);
                 }
                 rmax = fmaxf(rmax, __shfl_xor(rmax, 1));
@@ -2760,13 +2783,22 @@ gqa_flash_prefill_v5_kernel(
 
                 const float m_old = m_reg[mi][e];
                 const float m_new = fmaxf(m_old, rmax);
-                const float corr  = exp2f(m_old - m_new);
+                // A window can mask a whole tile for a row while that row has
+                // still seen nothing, leaving m_old and m_new both at -inf.
+                // exp2f(-inf - -inf) is NaN, so short-circuit: contribute
+                // nothing and leave the running state untouched. Causal-only
+                // never reaches this, since tile 0 always holds key 0, so the
+                // guard folds away in the full-attention instantiation.
+                bool empty = false;
+                if constexpr (HAS_WINDOW) empty = (m_new == -INFINITY);
+                const float corr  = empty ? 1.0f : exp2f(m_old - m_new);
                 corr_reg[mi][e]   = corr;
 
                 float rsum = 0.0f;
                 #pragma unroll
                 for (int sj = 0; sj < S_TILES_J; ++sj) {
-                    const float p = exp2f(S_reg[mi][sj][e] - m_new);
+                    const float p =
+                        empty ? 0.0f : exp2f(S_reg[mi][sj][e] - m_new);
                     rsum += p;
                     P_lds[row * P_STR + sj * 16 + wmma_lane] = static_cast<_Float16>(p);
                 }
@@ -2812,6 +2844,36 @@ gqa_flash_prefill_v5_kernel(
         __syncthreads();   // WAR: P_lds reused by next tile's softmax
     }
 
+    // ---- Attention sink: one extra term in the softmax denominator ----
+    // m_reg / l_reg are in log2 space (scores were premultiplied by
+    // scale * kLog2e above and exp2f is used for both), so m_reg == m_nat *
+    // kLog2e and the natural-units sink term exp(s - m_nat) becomes
+    // exp2(s * kLog2e - m_reg) -- the same identity the decode reduce kernel
+    // documents. Row-invariant in the D dimension, so it is folded into l once
+    // here rather than inside the D_TILES loop below.
+    //
+    // smooth_softmax with a null sink means s = 0, matching
+    // softmax_f32_to_out_kernel. A row where every key was masked keeps
+    // m_reg == -INFINITY; it must be skipped, because the exponent would
+    // otherwise be +inf and the whole row would come out zero instead of
+    // sink-only.
+    float l_final[M_TILES][8];
+    const bool apply_sink = (head_sink != nullptr) || (smooth_softmax != 0);
+    float sink_logit = 0.0f;
+    if (head_sink != nullptr)
+        sink_logit = static_cast<float>(
+            head_sink[num_heads > 0 ? (head_q % num_heads) : head_q]);
+    #pragma unroll
+    for (int mi = 0; mi < M_TILES; ++mi) {
+        #pragma unroll
+        for (int e = 0; e < 8; ++e) {
+            float l = l_reg[mi][e];
+            if (apply_sink && m_reg[mi][e] > -INFINITY)
+                l += exp2f(sink_logit * kLog2e - m_reg[mi][e]);
+            l_final[mi][e] = fmaxf(l, 1e-6f);
+        }
+    }
+
     // ---- Epilogue: O / l ----
     #pragma unroll
     for (int mi = 0; mi < M_TILES; ++mi) {
@@ -2823,8 +2885,7 @@ gqa_flash_prefill_v5_kernel(
                 const int c     = tj * 16 + wmma_lane;
                 const int q_pos = q_start + row;
                 if (q_pos < sq && c < D) {
-                    const float l_val   = fmaxf(l_reg[mi][e], 1e-6f);
-                    const float out_val = O_frag[mi][tj][e] / l_val;
+                    const float out_val = O_frag[mi][tj][e] / l_final[mi][e];
                     O[(static_cast<size_t>(batch * sq + q_pos) * Hq + head_q) * D + c] =
                         static_cast<_Float16>(out_val);
                 }
@@ -2849,7 +2910,9 @@ static inline void dispatchPrefillV5(
     int m_tiles, int bkv, int d, hipStream_t stream,
     const _Float16* Q, const _Float16* Kcache, const _Float16* Vcache,
     _Float16* O, int B, int Hq, int G, int sq, int skv, int max_seq,
-    int past_len, float scale)
+    int past_len, float scale,
+    const _Float16* head_sink, int num_heads, int smooth_softmax,
+    int local_window_size)
 {
     const int rows = m_tiles * 16;
     const int num_q_tiles = (sq + rows - 1) / rows;
@@ -2857,22 +2920,33 @@ static inline void dispatchPrefillV5(
     const size_t smem = prefillV5SmemBytes(m_tiles, bkv, d);
     const int ablate = g_v5_ablate;
 
-    #define LAUNCH_V5(MT_, BKV_, D_)                                            \
-        gqa_flash_prefill_v5_kernel<MT_, BKV_, D_>                              \
+    #define LAUNCH_V5(MT_, BKV_, D_, HW_)                                       \
+        gqa_flash_prefill_v5_kernel<MT_, BKV_, D_, HW_>                         \
             <<<grid, 32, smem, stream>>>(                                       \
                 Q, Kcache, Vcache, O, B, Hq, G, sq, skv, max_seq, past_len,     \
-                scale, ablate)
+                scale, ablate, head_sink, num_heads, smooth_softmax,            \
+                local_window_size)
 
+    // Only d == 64 gets windowed instantiations: hip_gqa_flash_prefill_v3
+    // rejects a window at any other head dim, so d == 128 with a window would
+    // be dead code.
     if (d == 64) {
-        if (m_tiles == 2 && bkv == 64)      LAUNCH_V5(2, 64, 64);
-        else if (m_tiles == 2)              LAUNCH_V5(2, 32, 64);
-        else if (bkv == 64)                 LAUNCH_V5(1, 64, 64);
-        else                                LAUNCH_V5(1, 32, 64);
+        if (local_window_size > 0) {
+            if (m_tiles == 2 && bkv == 64)  LAUNCH_V5(2, 64, 64, true);
+            else if (m_tiles == 2)          LAUNCH_V5(2, 32, 64, true);
+            else if (bkv == 64)             LAUNCH_V5(1, 64, 64, true);
+            else                            LAUNCH_V5(1, 32, 64, true);
+        } else {
+            if (m_tiles == 2 && bkv == 64)  LAUNCH_V5(2, 64, 64, false);
+            else if (m_tiles == 2)          LAUNCH_V5(2, 32, 64, false);
+            else if (bkv == 64)             LAUNCH_V5(1, 64, 64, false);
+            else                            LAUNCH_V5(1, 32, 64, false);
+        }
     } else {
-        if (m_tiles == 2 && bkv == 64)      LAUNCH_V5(2, 64, 128);
-        else if (m_tiles == 2)              LAUNCH_V5(2, 32, 128);
-        else if (bkv == 64)                 LAUNCH_V5(1, 64, 128);
-        else                                LAUNCH_V5(1, 32, 128);
+        if (m_tiles == 2 && bkv == 64)      LAUNCH_V5(2, 64, 128, false);
+        else if (m_tiles == 2)              LAUNCH_V5(2, 32, 128, false);
+        else if (bkv == 64)                 LAUNCH_V5(1, 64, 128, false);
+        else                                LAUNCH_V5(1, 32, 128, false);
     }
     #undef LAUNCH_V5
 }
@@ -2895,15 +2969,21 @@ static int tunePrefillV5Cfg(
     int d, hipStream_t stream,
     const _Float16* Q, const _Float16* Kcache, const _Float16* Vcache,
     _Float16* O, int B, int Hq, int G, int sq, int skv, int max_seq,
-    int past_len, float scale)
+    int past_len, float scale, int local_window_size)
 {
     PrefillV5Cfg cands[8];
     const int nc = prefillV5Candidates(d, cands);
     constexpr int kWarmup = 30, kRounds = 4, kIters = 30;
 
+    // Tuning launches carry no sink: it is a single fused-multiply-add per row in
+    // the epilogue, so it cannot shift which (M_TILES, BKV) wins, and leaving it
+    // out keeps tuned configs comparable with the non-sink case. The window is
+    // passed through, because it changes how many KV tiles each block walks and
+    // therefore genuinely can change the winner.
     auto launch_cfg = [&](const PrefillV5Cfg& c) {
         dispatchPrefillV5(c.m_tiles, c.bkv, d, stream, Q, Kcache, Vcache, O,
-                          B, Hq, G, sq, skv, max_seq, past_len, scale);
+                          B, Hq, G, sq, skv, max_seq, past_len, scale,
+                          nullptr, Hq, 0, local_window_size);
     };
 
     for (int w = 0; w < kWarmup; ++w) launch_cfg(cands[w % nc]);
@@ -3728,11 +3808,12 @@ extern "C" void hip_gqa_flash_prefill_v5_set_ablate(int mask) {
     g_v5_ablate = mask;
 }
 
-extern "C" int hip_gqa_flash_prefill_v5_v2(
+static int prefillV5Run(
     void* stream_ptr,
     const void* Q, const void* Kcache, const void* Vcache, void* O,
     int B, int Hq, int G, int sq, int skv, int d, int max_seq, int past_len,
-    float scale)
+    float scale, const void* head_sink, int num_heads, int smooth_softmax,
+    int local_window_size)
 {
     if (d != 64 && d != 128) return -1;
 
@@ -3741,10 +3822,20 @@ extern "C" int hip_gqa_flash_prefill_v5_v2(
     const _Float16* K_ptr = static_cast<const _Float16*>(Kcache);
     const _Float16* V_ptr = static_cast<const _Float16*>(Vcache);
     _Float16* O_ptr       = static_cast<_Float16*>(O);
+    const _Float16* sink_ptr = static_cast<const _Float16*>(head_sink);
 
+    // Neither skv nor the sink belongs in the key. skv only scales the KV loop
+    // length, uniformly across candidates, so it cannot reorder them: measured
+    // on gpt-oss-20b, M_TILES=2/BKV=32 wins at all 32 chunk skv values from 512
+    // to 16384 with an identical candidate ranking. Keying on skv re-tuned once
+    // per chunk of a chunked prefill instead of once per process. The sink is
+    // one FMA per row in the epilogue (see tunePrefillV5Cfg).
+    //
+    // The window does belong in the key: it caps how many KV tiles a block walks,
+    // which is a different work profile, not a scaled one.
     std::string key = std::to_string(d) + "_" + std::to_string(sq) + "_" +
-                      std::to_string(skv) + "_" + std::to_string(Hq) + "_" +
-                      std::to_string(G);
+                      std::to_string(Hq) + "_" + std::to_string(G) + "_w" +
+                      std::to_string(local_window_size > 0 ? local_window_size : 0);
     int cfg;
     {
         std::lock_guard<std::mutex> lk(g_v5_cfg_mutex);
@@ -3753,7 +3844,8 @@ extern "C" int hip_gqa_flash_prefill_v5_v2(
             cfg = it->second;
         } else {
             cfg = tunePrefillV5Cfg(d, stream, Q_ptr, K_ptr, V_ptr, O_ptr,
-                                   B, Hq, G, sq, skv, max_seq, past_len, scale);
+                                   B, Hq, G, sq, skv, max_seq, past_len, scale,
+                                   local_window_size);
             g_v5_cfg_cache[key] = cfg;
             snprintf(g_v5_tune_info, sizeof(g_v5_tune_info),
                      "gqa_flash_prefill_v5 cfg=M%d_BKV%d", cfg / 1000, cfg % 1000);
@@ -3761,8 +3853,19 @@ extern "C" int hip_gqa_flash_prefill_v5_v2(
     }
     int m_tiles = cfg / 1000, bkv = cfg % 1000;
     dispatchPrefillV5(m_tiles, bkv, d, stream, Q_ptr, K_ptr, V_ptr, O_ptr,
-                      B, Hq, G, sq, skv, max_seq, past_len, scale);
+                      B, Hq, G, sq, skv, max_seq, past_len, scale,
+                      sink_ptr, num_heads, smooth_softmax, local_window_size);
     return 0;
+}
+
+extern "C" int hip_gqa_flash_prefill_v5_v2(
+    void* stream_ptr,
+    const void* Q, const void* Kcache, const void* Vcache, void* O,
+    int B, int Hq, int G, int sq, int skv, int d, int max_seq, int past_len,
+    float scale)
+{
+    return prefillV5Run(stream_ptr, Q, Kcache, Vcache, O, B, Hq, G, sq, skv, d,
+                        max_seq, past_len, scale, nullptr, Hq, 0, 0);
 }
 
 
@@ -3821,6 +3924,35 @@ extern "C" void hip_gqa_flash_prefill_v8_set_ablate(int mask) {
     g_v8_ablate = mask;
 }
 
+
+// Wide fused flash-prefill entry: adds attention sinks and the sliding window
+// on top of v2. v2 stays the narrow ABI so the standalone harnesses and shim
+// headers that redeclare it keep linking unchanged.
+//
+// Both features are implemented for d == 64 (the v5 kernel) only. For any other
+// d we return -1 rather than silently ignoring them, so the runtime keeps
+// routing those shapes to the decomposed path, which does implement both. A
+// request carrying neither is forwarded to v2 and keeps v2's head-dim coverage
+// and its v5/v7/v8 selection; d == 64 lands on v5 either way, so a sink or a
+// window never changes which kernel runs.
+extern "C" int hip_gqa_flash_prefill_v3(
+    void* stream_ptr,
+    const void* Q, const void* Kcache, const void* Vcache, void* O,
+    int B, int Hq, int G, int sq, int skv, int d, int max_seq, int past_len,
+    float scale, int local_window_size, const void* head_sink,
+    int num_heads, int smooth_softmax)
+{
+    const bool wants_sink   = (head_sink != nullptr) || (smooth_softmax != 0);
+    const bool wants_window = local_window_size > 0;
+    if ((wants_sink || wants_window) && d != 64) return -1;
+    if (!wants_sink && !wants_window) {
+        return hip_gqa_flash_prefill_v2(stream_ptr, Q, Kcache, Vcache, O, B, Hq,
+                                        G, sq, skv, d, max_seq, past_len, scale);
+    }
+    return prefillV5Run(stream_ptr, Q, Kcache, Vcache, O, B, Hq, G, sq, skv, d,
+                        max_seq, past_len, scale, head_sink, num_heads,
+                        smooth_softmax, local_window_size);
+}
 
 // Unified fused flash-prefill entry. The kernel-selection strategy lives here
 // (in the kernel TU) instead of in the runtime dispatcher: v5 wins at d==64

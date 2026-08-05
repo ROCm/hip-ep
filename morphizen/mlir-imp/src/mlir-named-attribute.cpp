@@ -168,7 +168,7 @@ MLIRNamedAttribute::create_tensor(const std::string &name,
   size_t data_size = tensor.getDataSize();
   llvm::SmallVector<int64_t> mlir_shape(shape->begin(), shape->end());
   mlir::Type elem_type =
-      onnxElementTypeToMlirElementType(tensor.getElementType(), builder);
+      onnxElementTypeToMlirDenseElementType(tensor.getElementType(), builder);
   auto tensor_type = mlir::RankedTensorType::get(mlir_shape, elem_type);
 
   // `DenseElementsAttr::getFromRawBuffer` requires data_size to equal the

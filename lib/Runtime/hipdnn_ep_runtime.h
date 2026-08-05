@@ -409,6 +409,15 @@ void *hipdnn_ep_state_get_matmul_dp4a_scratch(RuntimeState *state);
 int hipdnn_ep_state_ensure_matmul_dp4a_scratch(RuntimeState *state,
                                                size_t needed_size);
 
+// Per-session scratch for the linear-attention chunk-parallel gated_delta
+// prefill (hip_linear_attention_prefill_chunked). Lazily grown via
+// hipdnn_ep_state_ensure_la_scratch (same policy as conv_scratch: never
+// shrinks, freed in hipdnn_ep_state_cleanup). Single buffer reused across all
+// linear-attention layers in the session -- safe because the stream is
+// serialised. See runtime_state_internal.h for design rationale.
+void *hipdnn_ep_state_get_la_scratch(RuntimeState *state);
+int hipdnn_ep_state_ensure_la_scratch(RuntimeState *state, size_t needed_size);
+
 // Per-op state slots (see docs/design/op-state-slots-design.md). The generated
 // @hipdnn_ep_op_states_init_fn (built by --generate-op-state-init) calls
 // _alloc once, then per stateful op calls its construct symbol; each construct
@@ -1044,6 +1053,19 @@ int wrap_reduce_mean(RuntimeState *state, void *data, void *axes, void *output,
                      int64_t axes_num_elements, int64_t data_type,
                      int64_t keepdims, int64_t noop_with_empty_axes,
                      int64_t inner_size);
+
+// ReduceL2 operation wrapper
+// data_type: HIPDNN_EP_DATATYPE_* enum value identifying the element type.
+// Supported types: HIPDNN_EP_DATATYPE_HALF, HIPDNN_EP_DATATYPE_FLOAT.
+// Computes sqrt(sum(x^2)) in-kernel, so a dynamic reduce axis is tolerated.
+// `inner_size` = product of input dims AFTER the reduced axis (1 for a
+// trailing/contiguous reduce); enables strided reduction over a non-trailing
+// axis.
+int wrap_reduce_l2(RuntimeState *state, void *data, void *axes, void *output,
+                   int64_t data_num_elements, int64_t output_num_elements,
+                   int64_t axes_num_elements, int64_t data_type,
+                   int64_t keepdims, int64_t noop_with_empty_axes,
+                   int64_t inner_size);
 
 // ReduceMax operation wrapper
 // data_type: HIPDNN_EP_DATATYPE_* enum value identifying the element type.

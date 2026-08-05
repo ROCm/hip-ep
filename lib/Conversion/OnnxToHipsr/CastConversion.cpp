@@ -14,10 +14,6 @@ namespace mlir {
 namespace hipsr {
 namespace {
 
-/// onnx.Cast -> hipsr.cast. The op's shape region is left empty (zero blocks)
-/// here; a dedicated later pass populates every op's shape region uniformly, so
-/// this stage does not call populateShapeRegion.
-///
 /// The ONNX `saturate` attribute (clamp-vs-wrap when casting to float8) is not
 /// modeled on hipsr.cast yet, so it is currently ignored. Revisit once float8
 /// cast targets are supported.
@@ -49,7 +45,10 @@ struct CastToHipsr : public ::mlir::RewritePattern {
     }
 
     ::mlir::Value init =
-        rewriter.create<PlaceholderOp>(loc, ::mlir::TypeRange{resultType})
+        rewriter
+            .create<PlaceholderOp>(loc, ::mlir::TypeRange{resultType}, *ctx,
+                                   ::mlir::ValueRange{input},
+                                   PlaceholderType::Normal)
             .getResult(0);
 
     auto castOp = rewriter.create<CastOp>(loc, ::mlir::TypeRange{resultType},

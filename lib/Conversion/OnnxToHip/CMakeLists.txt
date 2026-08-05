@@ -16,6 +16,7 @@ add_library(OnnxToHip STATIC
   CastConversion.cpp
   ReduceSumConversion.cpp
   ReduceMeanConversion.cpp
+  ReduceL2Conversion.cpp
   MatMulNBitsConversion.cpp
   QMoEConversion.cpp
   GatherBlockQuantizedConversion.cpp
@@ -38,6 +39,7 @@ add_library(OnnxToHip STATIC
   GatherShapeFold.cpp
   ReshapeShapeFold.cpp
   PadShapeFold.cpp
+  SliceShapeFold.cpp
   ShapeConversion.cpp
   ReshapeConversion.cpp
   CausalConvWithStateConversion.cpp

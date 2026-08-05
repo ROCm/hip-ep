@@ -85,6 +85,7 @@ inline constexpr const char *kWrapPower = "wrap_power";
 inline constexpr const char *kWrapRange = "wrap_range";
 inline constexpr const char *kWrapReduceSum = "wrap_reduce_sum";
 inline constexpr const char *kWrapReduceMean = "wrap_reduce_mean";
+inline constexpr const char *kWrapReduceL2 = "wrap_reduce_l2";
 inline constexpr const char *kWrapReduceMax = "wrap_reduce_max";
 inline constexpr const char *kWrapReduceMin = "wrap_reduce_min";
 inline constexpr const char *kWrapGQA = "wrap_group_query_attention";
@@ -208,11 +209,11 @@ enum class TensorOp : int64_t {
 // (e.g., the result of memref.subview) silently produces a pointer to the
 // base of the parent buffer, not the slice.
 //
-// The --hip-promote-strided-operands pass enforces this precondition for
-// hip.* DPS-input operands by materializing contiguous temporaries upstream.
-// Direct callers (outside the standard hip.* lowering path) must guarantee
-// it themselves; if you need the descriptor's offset / strides, use
-// extractMemRefDescriptor below.
+// The --hip-promote-strided-operands pass establishes this precondition for
+// DPS-input memrefs. It does not rewrite DPS inits, whose layouts must satisfy
+// the precondition independently. Other callers must also establish the
+// precondition; use extractMemRefDescriptor below when the ABI carries offset
+// or stride metadata.
 //
 // Uses alignedPtr (not allocatedPtr) so that memref.view offsets into a memory
 // pool are respected -- each view has the same allocatedPtr but a distinct

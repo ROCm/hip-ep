@@ -947,6 +947,12 @@ def Hip_GatherBlockQuantizedOp : Hip_DpsOp<"gather_block_quantized"> {
     `output` matches `scales` (T2: f32 / f16 / bf16). For uint8 `data`,
     `gather_axis` must be 0.
 
+    Optional unit attribute `unsigned_quant_storage`: set when
+    convert-onnx-to-hip identifies UINT4/UINT8
+    packed byte storage (MLIR cannot represent ui4). Lowering passes
+    HIPDNN_EP_DATATYPE_UINT8 to the runtime instead of the signless-i8 default
+    (INT8 / signed int4). Absent for signed INT4 or explicit ui8/i8 storage.
+
     Uses destination-passing style: the `output` buffer is provided as an
     argument. The runtime is responsible for fetching the per-element
     quantized value (handling sub-byte unpacking when `bits == 4`),
@@ -975,7 +981,8 @@ def Hip_GatherBlockQuantizedOp : Hip_DpsOp<"gather_block_quantized"> {
     I64Attr:$bits,
     I64Attr:$block_size,
     I64Attr:$gather_axis,
-    I64Attr:$quantize_axis
+    I64Attr:$quantize_axis,
+    UnitAttr:$unsigned_quant_storage
   );
 
   let assemblyFormat = [{
@@ -1622,9 +1629,18 @@ def Hip_CompressOp : Hip_DpsOp<"compress", /*traits=*/[],
   let summary = "Select slices or elements where a 1-D condition is true";
   let description = [{
     Implements ONNX Compress: along `axis`, keep only slices whose
-    corresponding `condition` entry is true. When `flatten` is true the
-    input is treated as a 1-D tensor before selection (no `axis` attribute
-    on the ONNX op).
+    corresponding `condition` entry is true, in condition order. When
+    `flatten` is true the input is treated as a 1-D tensor before selection
+    (no `axis` attribute on the ONNX op).
+
+    The selected extent is data-dependent (the number of true entries), and
+    the `outs` destination defines it: the kernel writes exactly that many
+    slices, densely, starting at the destination's first slice. The condition
+    LENGTH is only an upper bound, so the ONNX->HIP converter sizes a dynamic
+    destination extent from the real count -- scanned on device and read back
+    with `hip.readback_dim` before the destination is allocated -- rather than
+    from the condition length. Reification therefore reports the destination's
+    extent, which is also what sizes `hip.alloc_output` for a graph output.
 
     Example:
     ```mlir
@@ -2712,6 +2728,45 @@ def Hip_ReduceMeanOp : Hip_DpsOp_Reduction<"reduce_mean"> {
     ```mlir
     hip.reduce_mean(%ctx) ins(%data, %axes : memref<1x128xf16, 1>, memref<i64, 1>)
                           outs(%output : memref<1x1xf16, 1>) {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64}
+    ```
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$data,
+    Hip_TensorOrMemRef:$axes,
+    Hip_TensorOrMemRef:$output,
+    DefaultValuedAttr<I64Attr, "1">:$keepdims,
+    DefaultValuedAttr<I64Attr, "0">:$noop_with_empty_axes
+  );
+
+  let assemblyFormat = [{
+    `(` $ctx `)` `ins` `(` $data `,` $axes `:` type($data) `,` type($axes) `)`
+    `outs` `(` $output `:` type($output) `)`
+    attr-dict (`:` type($result_tensors)^)?
+  }];
+}
+
+def Hip_ReduceL2Op : Hip_DpsOp_Reduction<"reduce_l2"> {
+  let summary = "Reduce tensor by L2 norm along axes";
+  let description = [{
+    Computes the L2 norm (Euclidean norm) of input tensor elements along the
+    specified axes: output = sqrt(sum(x^2)). Implements the ONNX ReduceL2
+    operator (opset 18+).
+
+    Uses destination-passing style: output buffer is provided as argument.
+    The sum-of-squares and sqrt are performed inside the runtime kernel
+    (`reduce_size = num_input / num_output`), so this op is tolerant of a
+    dynamic reduce axis.
+
+    When axes is not provided in ONNX, an empty tensor<0xi64> is passed.
+    Combined with noop_with_empty_axes attribute, this enables ONNX-compliant
+    optional axes semantics while keeping all operands required.
+
+    Example:
+    ```mlir
+    hip.reduce_l2(%ctx) ins(%data, %axes : memref<128x3x256x32xf16, 1>, memref<1xi64, 1>)
+                         outs(%output : memref<128x3x256x1xf16, 1>) {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64}
     ```
   }];
 

@@ -199,10 +199,23 @@ extern "C" int wrap_linear_attention(
   // returns 1 when it declines an unsupported config; we then fall back to the
   // per-token loop below.
   if (update_rule == kUpdateRuleGatedDelta && seq_len > 1) {
+    // The chunk-parallel path needs a device scratch arena sized to this shape.
+    // It lives in the per-session RuntimeState::la_scratch pool
+    // (grow-on-demand, freed in hipdnn_ep_state_cleanup) -- same policy as
+    // qmoe/conv scratch -- rather than a process-static buffer. If
+    // sizing/growth fails we pass a null scratch and the launcher declines
+    // (rc=1 -> per-token loop below).
+    void *la_scratch = nullptr;
+    size_t la_bytes = hip_linear_attention_prefill_scratch_bytes(
+        (int)B, (int)seq_len, (int)Hkv, (int)dk, (int)dv);
+    if (la_bytes > 0 &&
+        hipdnn_ep_state_ensure_la_scratch(state, la_bytes) == 0) {
+      la_scratch = hipdnn_ep_state_get_la_scratch(state);
+    }
     int rc = hip_linear_attention_prefill_chunked(
         hip_stream, query, key, value, decay, beta, present_state, output, B,
         seq_len, Hq, Hkv, Nk, dk, dv, scale, update_rule, decay_per_key_dim,
-        beta_per_head, type);
+        beta_per_head, type, la_scratch, la_bytes);
     if (rc == 0) {
       RUNTIME_DEBUG_LOG(
           "[linear_attention] prefill via chunked-parallel kernel (%lld "

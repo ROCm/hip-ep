@@ -24,11 +24,16 @@
 
 // Map HIPDNN_EP_DATATYPE_* -> hip_dtype_t for hip_reduce_sum.
 // The two enum systems use different orderings; only types implemented in
-// reduce_sum_kernel.hip are listed here.
+// reduce_sum_kernel.hip are listed here. fp32 is required by models that upcast
+// to fp32 before the sum for numerical stability (e.g. a fp32 softmax-
+// denominator / RMSNorm chain exported as Cast(fp16->fp32) -> ... ->
+// ReduceSum).
 static int hipdnn_to_hip_dtype(int64_t hipdnn_type) {
   switch (hipdnn_type) {
   case HIPDNN_EP_DATATYPE_HALF:
     return HIP_DTYPE_FLOAT16;
+  case HIPDNN_EP_DATATYPE_FLOAT:
+    return HIP_DTYPE_FLOAT32;
   case HIPDNN_EP_DATATYPE_INT32:
     return HIP_DTYPE_INT32;
   case HIPDNN_EP_DATATYPE_INT64:
@@ -85,7 +90,7 @@ int wrap_reduce_sum(RuntimeState *state, void *data, void *axes, void *output,
   if (hip_dtype < 0) {
     fprintf(stderr,
             "[REAL] wrap_reduce_sum: unsupported data_type=%s(%lld) "
-            "(supported: f16, i32, i64)\n",
+            "(supported: f16, f32, i32, i64)\n",
             hipdnn_ep_datatype_name(data_type), (long long)data_type);
     return -1;
   }

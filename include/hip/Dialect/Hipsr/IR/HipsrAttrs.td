@@ -26,6 +26,11 @@ def Hipsr_MemorySpaceAttr : AttrDef<Hipsr_Dialect, "MemorySpace"> {
   let assemblyFormat = "`<` $kind `>`";
 }
 
+def Hipsr_PlaceholderTypeAttr :
+    EnumAttr<Hipsr_Dialect, Hipsr_PlaceholderType, "placeholder_type"> {
+  let assemblyFormat = "`<` $value `>`";
+}
+
 // A constant whose bytes live in an external file: absolute path + byte offset
 // + byte size. Read on demand (streaming) via the dialect's file-map cache.
 def Hipsr_FileSourceAttr : AttrDef<Hipsr_Dialect, "FileSource"> {
