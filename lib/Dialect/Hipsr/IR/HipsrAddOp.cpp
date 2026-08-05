@@ -19,16 +19,12 @@ using namespace mlir::hipsr;
 
 namespace {
 struct AddPlaceholderShapeArgs : PlaceholderShapeRegionArgs {
-  explicit AddPlaceholderShapeArgs(Block &block)
-      : PlaceholderShapeRegionArgs(block) {}
   Value getLhs() const { return in(0); }
   Value getRhs() const { return in(1); }
 };
 } // namespace
 
 MutableOperandRange AddOp::getDpsInitsMutable() { return getInitMutable(); }
-
-void AddOp::populateShapeRegion(OpBuilder &, Block &) {}
 
 namespace mlir {
 namespace hipsr {
@@ -42,7 +38,7 @@ LogicalResult populateAddShapeRegion(OpBuilder &builder, Block &shapeBlock,
   Value broadcast = builder.create<shape::BroadcastOp>(
       op.getLoc(), shape::ShapeType::get(builder.getContext()),
       ValueRange{args.getLhs(), args.getRhs()}, /*error=*/nullptr);
-  ShapeYield2Op::create(builder, op.getLoc(), ValueRange{broadcast});
+  ShapeYieldOp::create(builder, op.getLoc(), ValueRange{broadcast});
   return success();
 }
 

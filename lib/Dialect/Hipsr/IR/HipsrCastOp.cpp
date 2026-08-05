@@ -22,14 +22,11 @@ using namespace mlir::hipsr;
 
 namespace {
 struct CastShapeArgs : PlaceholderShapeRegionArgs {
-  explicit CastShapeArgs(Block &block) : PlaceholderShapeRegionArgs(block) {}
   Value getInput() const { return in(0); }
 };
 } // namespace
 
 MutableOperandRange CastOp::getDpsInitsMutable() { return getInitMutable(); }
-
-void CastOp::populateShapeRegion(OpBuilder &, Block &) {}
 
 namespace mlir {
 namespace hipsr {
@@ -40,7 +37,7 @@ LogicalResult populateCastShapeRegion(OpBuilder &builder, Block &shapeBlock,
   builder.setInsertionPointToStart(&shapeBlock);
 
   Value inputShape = CastShapeArgs{shapeBlock}.getInput();
-  ShapeYield2Op::create(builder, op.getLoc(), ValueRange{inputShape});
+  ShapeYieldOp::create(builder, op.getLoc(), ValueRange{inputShape});
   return success();
 }
 

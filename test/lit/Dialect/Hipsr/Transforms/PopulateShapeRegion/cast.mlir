@@ -8,7 +8,7 @@
 // CHECK-SAME: %[[CTX:.+]]: !hipsr.context, %[[INPUT:.+]]: tensor<?x8xf32>) {
 // CHECK-NEXT: %[[INIT:.+]] = hipsr.placeholder(%[[CTX]]) ins(%[[INPUT]] : tensor<?x8xf32>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16> shape_region {
 // CHECK-NEXT: ^bb0(%[[INPUT_SHAPE:.+]]: !shape.shape):
-// CHECK-NEXT: hipsr.shape_yield2 %[[INPUT_SHAPE]] : !shape.shape
+// CHECK-NEXT: hipsr.shape_yield %[[INPUT_SHAPE]] : !shape.shape
 // CHECK-NEXT: }
 // CHECK-NEXT: %[[RESULT:.+]] = hipsr.cast(%[[CTX]]) ins(%[[INPUT]] : tensor<?x8xf32>) outs(%[[INIT]] : tensor<?x8xf16>) : tensor<?x8xf16>
 // CHECK-NEXT: return

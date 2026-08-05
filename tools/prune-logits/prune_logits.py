@@ -51,6 +51,11 @@ Design / safety contract:
 - ORT numeric verification is OPT-IN (`--ort-verify`) and requires onnxruntime
   (kept out of the core requirements). It is checked in pre-flight so a missing
   onnxruntime fails fast, before any change is made.
+- Seq dim is pinned to a static 1 not only on the `logits` output but on every
+  tensor between lm_head and it (lm_head output + trailing shape-preserving ops
+  like a softcap Div/Tanh/Mul or a final Cast): they carry a single position
+  after the Gather, so leaving the original dynamic seq symbol would be stale
+  and ambiguous (it is bound graph-wide to the real input length).
 
 Input is always a model DIRECTORY (never a bare `.onnx`): the target decoder
 graph is resolved from `genai_config.json`'s `model.decoder.filename`, so on
@@ -234,6 +239,74 @@ def tail_trace(graph, logits_name, depth=6):
     return lines
 
 
+def collect_tail_tensors(graph, lm, logits_name):
+    """Tensors downstream of lm_head's output (the seq-collapsed tail).
+
+    The prune inserts Gather(-1)+Unsqueeze on lm_head's INPUT, so lm_head's
+    output -- and everything computed from it -- now carries a single position.
+    This returns exactly that set: a FORWARD reach from lm_head's output
+    tensor(s), following consumer nodes' outputs. The graph output `logits` is
+    excluded (the caller pins it separately).
+
+    Forward (not backward-from-logits) is the correct direction: a backward walk
+    escapes through SIBLING inputs of the trailing ops -- e.g. a shared
+    logit-softcap constant fed via CastLike into both Div and Mul -- and would
+    wander into unrelated upstream subgraphs (attention mask, etc.), wrongly
+    collapsing their seq dims. Only true descendants of the pruned point became
+    seq==1, and forward reach yields exactly those.
+
+    In the common case (lm_head directly produces `logits`) this set is empty:
+    lm_head's only output IS `logits`. In the trailing-node case (softcap
+    Div/Tanh/Mul or a final Cast) it is those intermediate tensors.
+    """
+    consumers = {}
+    for n in graph.node:
+        for i in n.input:
+            consumers.setdefault(i, []).append(n)
+
+    tail = set()
+    frontier = []
+    for o in lm.output:
+        # Seed from lm_head's outputs. If an output already IS `logits`
+        # (lm_head directly produces the graph output), it is pinned by the
+        # caller, not here -- and there is nothing downstream to collapse.
+        if o and o != logits_name:
+            tail.add(o)
+            frontier.append(o)
+    while frontier:
+        t = frontier.pop()
+        for n in consumers.get(t, []):
+            for o in n.output:
+                if o and o != logits_name and o not in tail:
+                    tail.add(o)
+                    frontier.append(o)
+    return tail
+
+
+def _pin_seq_dim(tensor_type, seq_param):
+    """Pin a value_info's sequence axis to a static 1.
+
+    Prefer matching the known dynamic seq symbol (`seq_param`) wherever it
+    appears -- this is exact and never touches the batch/vocab axes. When
+    logits' seq dim was already static (no symbol to match), fall back to axis 1
+    of a rank-3 tensor (the [batch, seq, vocab] layout the trailing
+    shape-preserving ops keep). A non-rank-3 tensor with no symbol match is left
+    untouched (we do not guess an axis we cannot identify).
+    """
+    dims = tensor_type.shape.dim
+    pinned = False
+    if seq_param:
+        for d in dims:
+            if d.HasField("dim_param") and d.dim_param == seq_param:
+                d.ClearField("dim_param")
+                d.dim_value = 1
+                pinned = True
+    if not pinned and len(dims) == 3:
+        d = dims[1]
+        d.ClearField("dim_param")
+        d.dim_value = 1
+
+
 # ---------------------------------------------------------------------------
 # Pre-check (eligibility)
 # ---------------------------------------------------------------------------
@@ -324,10 +397,29 @@ def apply_prune(model, lm, hidden, logits_name):
     del graph.node[:]
     graph.node.extend(nodes)
 
-    # Collapse the logits sequence dim to a static 1.
+    # Collapse the logits sequence dim to a static 1, remembering the dynamic
+    # seq symbol it carried so we can pin the SAME dimension on the trailing
+    # tensors between lm_head and logits (below).
     seq_dim = _output_vi(graph, logits_name).type.tensor_type.shape.dim[1]
+    seq_param = seq_dim.dim_param if seq_dim.HasField("dim_param") else None
     seq_dim.ClearField("dim_param")
     seq_dim.dim_value = 1
+
+    # The Gather(-1,axis=1)+Unsqueeze makes lm_head run on a single position, so
+    # lm_head's output and every shape-preserving trailing op (e.g. Gemma's
+    # logit-softcap Div/Tanh/Mul, or a final Cast) now have sequence length 1.
+    # Their value_info, however, still declares the ORIGINAL dynamic seq symbol.
+    # That is stale and ambiguous: the symbol is bound graph-wide to the real
+    # input length, so a shape-inference / compiler consumer would wrongly treat
+    # these [batch, 1, vocab] tensors as [batch, seq, vocab]. Pin their seq axis
+    # to a static 1 to match the actual (now fixed) shape. Only value_info on the
+    # collapsed tail is touched; the pre-Gather hidden state keeps its real
+    # dynamic seq dim.
+    vi_by_name = {vi.name: vi for vi in graph.value_info}
+    for tname in collect_tail_tensors(graph, lm, logits_name):
+        vi = vi_by_name.get(tname)
+        if vi is not None and vi.type.HasField("tensor_type"):
+            _pin_seq_dim(vi.type.tensor_type, seq_param)
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +471,22 @@ def review_structure(model_path, lm_head_name, logits_name):
         dims[1].HasField("dim_value") and dims[1].dim_value == 1,
         f"logits sequence dim == 1 (got {[_dim_repr(d) for d in dims]})",
     )
+
+    # Every tensor between lm_head's output and logits must have had its seq
+    # axis pinned to a static 1 -- no stale dynamic symbol left behind (the
+    # ambiguity the prune would otherwise introduce). Empty in the common
+    # (lm_head-directly-produces-logits) case, non-empty for softcap/Cast tails.
+    vi_by_name = {v.name: v for v in g.value_info}
+    for tname in sorted(collect_tail_tensors(g, lm, logits_name)):
+        v = vi_by_name.get(tname)
+        if v is None or not v.type.HasField("tensor_type"):
+            continue
+        td = v.type.tensor_type.shape.dim
+        if len(td) == 3:
+            require(
+                td[1].HasField("dim_value") and td[1].dim_value == 1,
+                f"tail tensor seq dim == 1: {tname} ({[_dim_repr(x) for x in td]})",
+            )
     return checks
 
 

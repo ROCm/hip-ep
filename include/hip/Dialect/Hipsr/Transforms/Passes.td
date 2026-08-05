@@ -25,8 +25,11 @@ def PopulateShapeRegionPass
     empty placeholder has an unsupported consumer or an incompatible layout.
   }];
   let dependentDialects = [
+    "::mlir::arith::ArithDialect",
     "::mlir::hipsr::HipsrDialect",
-    "::mlir::shape::ShapeDialect"
+    "::mlir::memref::MemRefDialect",
+    "::mlir::shape::ShapeDialect",
+    "::mlir::tensor::TensorDialect"
   ];
 }
 
@@ -166,6 +169,36 @@ def PartitionPoolDomainsPass
   }];
   let dependentDialects = [
     "::mlir::hipsr::HipsrDialect"
+  ];
+}
+
+def MaterializeInitTensorsPass
+    : Pass<"hipsr-materialize-init-tensors", "mlir::ModuleOp"> {
+  let summary = "Materialize hipsr.placeholder inits into tensor.empty";
+  let description = [{
+    Materializes every `hipsr.placeholder` init tensor inside each
+    `hipsr.pool_domain`, leaving the domain body in three ordered groups:
+
+    1. shape computation: one `scf.execute_region` per placeholder, yielding
+       `!shape.shape` and holding the body moved out of the placeholder's
+       `shape_region`;
+    2. tensor allocation: `shape.get_extent` plus `tensor.empty` per
+       placeholder result, taking rank and element type from that result type;
+    3. data: the hipsr DPS ops, now initialized by the `tensor.empty` values.
+
+    Every `scf.execute_region` precedes every `tensor.empty`, which precedes
+    every data op, so `hipsr-pool-alloc` sees all buffer sizes at domain entry.
+
+    Runs after `hipsr-partition-pool-domains` and requires shape regions
+    already filled by `hipsr-populate-shape-region`. `hipsr.placeholder` has no
+    bufferization interface, so this pass must run before bufferization.
+  }];
+  let dependentDialects = [
+    "::mlir::hipsr::HipsrDialect",
+    "::mlir::arith::ArithDialect",
+    "::mlir::scf::SCFDialect",
+    "::mlir::shape::ShapeDialect",
+    "::mlir::tensor::TensorDialect"
   ];
 }
 

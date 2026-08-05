@@ -14,7 +14,7 @@
 //   %init = hipsr.placeholder(%ctx) ins(%input) : tensor<?x8xf16>
 //       shape_region {
 //   ^bb0(%input_shape: !shape.shape):
-//     hipsr.shape_yield2 %input_shape : !shape.shape
+//     hipsr.shape_yield %input_shape : !shape.shape
 //   }
 //   %0 = hipsr.cast(%ctx) ins(%input) outs(%init) : tensor<?x8xf16>
 //
@@ -23,8 +23,11 @@
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Visitors.h"
 
@@ -35,6 +38,8 @@ LogicalResult populateAddShapeRegion(OpBuilder &builder, Block &block,
                                      AddOp op);
 LogicalResult populateCastShapeRegion(OpBuilder &builder, Block &block,
                                       CastOp op);
+LogicalResult populateExpandShapeRegion(OpBuilder &builder, Block &block,
+                                        ExpandOp op);
 LogicalResult populateMatMulShapeRegion(OpBuilder &builder, Block &block,
                                         MatMulOp op);
 
@@ -66,6 +71,8 @@ LogicalResult populatePlaceholderShapeRegion(OpBuilder &builder,
     return populateAddShapeRegion(builder, block, addOp);
   } else if (auto castOp = dyn_cast<CastOp>(consumer)) {
     return populateCastShapeRegion(builder, block, castOp);
+  } else if (auto expandOp = dyn_cast<ExpandOp>(consumer)) {
+    return populateExpandShapeRegion(builder, block, expandOp);
   } else if (auto matMulOp = dyn_cast<MatMulOp>(consumer)) {
     return populateMatMulShapeRegion(builder, block, matMulOp);
   }

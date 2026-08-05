@@ -6,6 +6,7 @@
 add_library(HipsrDialectTransforms STATIC
   ExternalizeConstants.cpp
   HipsrPoolAllocPass.cpp
+  MaterializeInitTensorsPass.cpp
   PartitionPoolDomains.cpp
   PopulateShapeRegionPass.cpp
 )
@@ -23,6 +24,7 @@ target_link_libraries(HipsrDialectTransforms PUBLIC
   MLIRFuncDialect
   MLIRArithDialect
   MLIRMemRefDialect
+  MLIRSCFDialect
   MLIRShapeDialect
   MLIRTensorDialect
   MLIRIR
