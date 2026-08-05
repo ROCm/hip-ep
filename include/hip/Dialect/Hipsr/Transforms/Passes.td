@@ -167,6 +167,12 @@ def PartitionPoolDomainsPass
     The end barrier stays in the first domain. Its first user starts the second
     domain. Expand is a start barrier, so it starts the third domain.
   }];
+  let options = [
+    Option<"emitAnalysisReport", "emit-analysis-report", "bool",
+           /*default=*/"false",
+           "Debug-only: emit remarks describing domain assignments. "
+           "No effect on generated code.">
+  ];
   let dependentDialects = [
     "::mlir::hipsr::HipsrDialect"
   ];

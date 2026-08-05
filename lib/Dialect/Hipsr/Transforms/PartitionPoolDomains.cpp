@@ -13,11 +13,13 @@
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Transforms/RegionUtils.h"
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/ErrorHandling.h"
 
 namespace mlir {
 namespace hipsr {
@@ -26,6 +28,97 @@ namespace hipsr {
 #include "hip/Dialect/Hipsr/Transforms/Passes.h.inc"
 
 namespace {
+namespace partition_analysis {
+
+struct Domain {
+  llvm::SmallVector<Operation *> operations;
+  llvm::SmallVector<OpResult> results;
+};
+
+using DomainId = unsigned;
+using OperationDomains = llvm::DenseMap<Operation *, DomainId>;
+
+struct DomainAssignment {
+  llvm::SmallVector<Domain> domains;
+  OperationDomains operationDomains;
+};
+
+// Each op uses the highest domain of the ops that feed it. This lets separate
+// branches share a pool domain. A barrier moves its branch to the next domain.
+// Two barriers can share that domain when their inputs are in the same domain.
+void assignOpToDomain(Operation &operation, DomainAssignment &assignment) {
+  llvm::SmallDenseSet<DomainId, 4> dependencies;
+  for (Value operand : operation.getOperands()) {
+    if (Operation *definingOp = operand.getDefiningOp()) {
+      auto dependency = assignment.operationDomains.find(definingOp);
+      if (dependency == assignment.operationDomains.end()) {
+        llvm_unreachable(
+            "pool-domain analysis expected an assigned dependency");
+      }
+      dependencies.insert(dependency->second);
+    }
+  }
+
+  DomainId domainId = 0;
+  if (!dependencies.empty()) {
+    domainId = *llvm::max_element(dependencies);
+    if (auto placeholder = dyn_cast<PlaceholderOp>(operation);
+        placeholder &&
+        placeholder.getPlaceholderType() == PlaceholderType::Barrier) {
+      ++domainId;
+    }
+  }
+
+  if (assignment.domains.size() <= domainId) {
+    assignment.domains.resize(domainId + 1);
+  }
+  assignment.domains[domainId].operations.push_back(&operation);
+  assignment.operationDomains.try_emplace(&operation, domainId);
+}
+
+DomainAssignment assignDomains(Block &block) {
+  DomainAssignment assignment;
+  for (Operation &operation : block.without_terminator()) {
+    assignOpToDomain(operation, assignment);
+  }
+  return assignment;
+}
+
+void emitAnalysisReport(Block &block, const DomainAssignment &assignment) {
+  llvm::DenseMap<Operation *, unsigned> operationIndices;
+  for (auto [index, operation] : llvm::enumerate(block.without_terminator())) {
+    operationIndices[&operation] = index;
+  }
+
+  InFlightDiagnostic operationReport = block.getParentOp()->emitRemark();
+  operationReport << "hipsr-partition-pool-domains: operation domains [";
+  for (auto [index, operation] : llvm::enumerate(block.without_terminator())) {
+    if (index != 0) {
+      operationReport << ",";
+    }
+    auto domain = assignment.operationDomains.find(&operation);
+    if (domain == assignment.operationDomains.end()) {
+      llvm_unreachable("pool-domain analysis expected an assigned operation");
+    }
+    operationReport << index << "->" << domain->second;
+  }
+  operationReport << "]";
+
+  for (auto [domainId, domain] : llvm::enumerate(assignment.domains)) {
+    InFlightDiagnostic report = domain.operations.front()->emitRemark();
+    report << "hipsr-partition-pool-domains: domain " << domainId << " ops [";
+    for (auto [index, operation] : llvm::enumerate(domain.operations)) {
+      if (index != 0) {
+        report << ",";
+      }
+      report << operationIndices.lookup(operation) << "="
+             << operation->getName().getStringRef();
+    }
+    report << "]";
+  }
+}
+
+} // namespace partition_analysis
 
 struct Domain {
   SmallVector<Operation *> operations;
@@ -301,6 +394,9 @@ static void materializeDomains(ArrayRef<Domain> domains, Value context) {
 
 struct PartitionPoolDomainsPass
     : impl::PartitionPoolDomainsPassBase<PartitionPoolDomainsPass> {
+  using impl::PartitionPoolDomainsPassBase<
+      PartitionPoolDomainsPass>::PartitionPoolDomainsPassBase;
+
   void runOnOperation() override {
     func::FuncOp funcOp = getOperation();
 
@@ -321,13 +417,11 @@ struct PartitionPoolDomainsPass
       return;
     }
 
-    SmallVector<Domain> domains = partitionIntoDomains(entryBlock);
-    Value context;
-    if (entryBlock.getNumArguments() > 0 &&
-        isa<ContextType>(entryBlock.getArgument(0).getType())) {
-      context = entryBlock.getArgument(0);
+    partition_analysis::DomainAssignment assignment =
+        partition_analysis::assignDomains(entryBlock);
+    if (emitAnalysisReport) {
+      partition_analysis::emitAnalysisReport(entryBlock, assignment);
     }
-    materializeDomains(domains, context);
   }
 };
 
