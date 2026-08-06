@@ -80,8 +80,7 @@ func.func @opaque_shape(%d0: index, %shape: !shape.shape) {
 
 // The data operand must be ranked: an unranked tensor has no dimensions for a
 // shape to describe.
-func.func @unranked_data(%data: tensor<*xf16>) {
-  %shape = "shape.from_extents"() : () -> !shape.shape
+func.func @unranked_data(%shape: !shape.shape, %data: tensor<*xf16>) {
   // expected-error @+1 {{operand #1 must be ranked tensor or memref}}
   hipsr.preserve_shape %shape, %data : tensor<*xf16>
   return
