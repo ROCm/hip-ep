@@ -489,8 +489,7 @@ static int gqa_forward_fused(
           "d=%lld max_splits=%d window=%lld sink=%d smooth=%d\n",
           kv_quantized ? "quant" : "fp16", (long long)B, (long long)skv,
           (long long)H, (long long)G, (long long)d, kFlashDecodeMaxSplits,
-          (long long)local_window_size,
-          static_cast<int>(head_sink != nullptr),
+          (long long)local_window_size, static_cast<int>(head_sink != nullptr),
           static_cast<int>(use_smooth_softmax));
     }
     return 0;
@@ -1273,8 +1272,8 @@ static int gqa_forward_hipblaslt(
       return -1;
     RUNTIME_DEBUG_LOG("[REAL] fused GQA decode (legacy fallback): B=%lld "
                       "sq=%lld skv=%lld H=%lld G=%lld d=%lld\n",
-                      (long long)B, (long long)sq, (long long)skv,
-                      (long long)H, (long long)G, (long long)d);
+                      (long long)B, (long long)sq, (long long)skv, (long long)H,
+                      (long long)G, (long long)d);
     return 0;
   }
 
@@ -1952,8 +1951,7 @@ int wrap_group_query_attention(
   // Decode handles the window itself (kv_lo clamp), so it is allowed for any
   // supported geometry; prefill only implements it at D64. This subsumes the
   // narrower prefill-only form, so nothing prefill accepted before is widened.
-  const bool window_ok =
-      is_decode || local_window_size <= 0 || head_dim == 64;
+  const bool window_ok = is_decode || local_window_size <= 0 || head_dim == 64;
   // The whole fused path (gqa_forward_fused, including the sink and windowed
   // prefill kernels above) is built on the RDNA-only WMMA intrinsics, which
   // trap on CDNA (wave64, e.g. MI350). Route wave64 to the decomposed hipBLASLt
