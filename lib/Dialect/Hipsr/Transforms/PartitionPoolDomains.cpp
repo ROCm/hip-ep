@@ -46,7 +46,7 @@ struct DomainAssignment {
   OperationDomains operationDomains;
 };
 
-// Resolve operand producers through assignments already built in block order.
+// Find the domain of each operation that defines an input value.
 DependencyDomainIds
 collectOperandDependencyDomainIds(const ValueRange &operands,
                                   const OperationDomains &operationDomains) {
@@ -64,8 +64,8 @@ collectOperandDependencyDomainIds(const ValueRange &operands,
   return dependencyDomainIds;
 }
 
-// Keep an operation with its deepest dependency. A barrier starts the next
-// domain for that branch, while unrelated branches can still share domains.
+// Use the highest input domain. A barrier moves its branch to the next domain,
+// while other branches can stay in the same domain.
 DomainId
 computeOperationDomainId(const Operation &operation,
                          const DependencyDomainIds &dependencyDomainIds) {
@@ -81,7 +81,7 @@ computeOperationDomainId(const Operation &operation,
   return domainId;
 }
 
-// Assign in block order so each producer has a domain before its consumers.
+// Visit in block order so each operation is assigned before its users.
 DomainAssignment assignOperationsToDomains(Block &block) {
   DomainAssignment assignment;
   for (Operation &operation : block.without_terminator()) {
@@ -102,7 +102,7 @@ DomainAssignment assignOperationsToDomains(Block &block) {
   return assignment;
 }
 
-// Materialization must yield a result used by another domain or the terminator.
+// Check whether another domain or the function return uses this result.
 bool isResultUsedOutsideDomain(Value result, DomainId domainId, Block &block,
                                const DomainAssignment &assignment) {
   return llvm::any_of(result.getUsers(), [&](Operation *user) {
@@ -117,7 +117,7 @@ bool isResultUsedOutsideDomain(Value result, DomainId domainId, Block &block,
   });
 }
 
-// Collect the non-placeholder results that one materialized domain must yield.
+// Find the non-placeholder results that this domain must yield.
 llvm::SmallVector<OpResult>
 collectDomainResults(Block &block, DomainId domainId, const Domain &domain,
                      const DomainAssignment &assignment) {
@@ -135,7 +135,7 @@ collectDomainResults(Block &block, DomainId domainId, const Domain &domain,
   return results;
 }
 
-// Build the full assignment, collecting results after user domains are stable.
+// Assign all operations first, then find the results each domain must yield.
 DomainAssignment buildDomainAssignment(Block &block) {
   DomainAssignment assignment = assignOperationsToDomains(block);
   for (auto [domainId, domain] : llvm::enumerate(assignment.domains)) {
@@ -144,7 +144,7 @@ DomainAssignment buildDomainAssignment(Block &block) {
   return assignment;
 }
 
-// Use operation order as stable labels in optional assignment/result remarks.
+// Print each operation's domain and each domain's operations and results.
 void emitAnalysisReport(Block &block, const DomainAssignment &assignment) {
   llvm::DenseMap<Operation *, unsigned> operationIndices;
   for (auto [index, operation] : llvm::enumerate(block.without_terminator())) {
