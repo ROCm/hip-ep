@@ -9,6 +9,7 @@
 #include "../op_state.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
+#include "hip_arch_compat.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
@@ -481,7 +482,12 @@ extern "C" int wrap_multi_head_attention(
   // O stay in their native BSND layout (no Q/O transpose). Always on for
   // eligible shapes; the decomposed path below still handles the ineligible
   // cases (decode Sq==1, causal/unidirectional, head-dim>256).
-  if (Sq > 1 && unidirectional != 1 && (((H + 15) / 16) * 16) <= 256) {
+  //
+  // The kernel is built on the RDNA-only wave32 WMMA intrinsic, which compiles
+  // to __builtin_trap() on CDNA (wave64, e.g. MI350) and aborts the HSA queue
+  // on launch, so wave64 takes the decomposed path instead.
+  if (Sq > 1 && unidirectional != 1 && (((H + 15) / 16) * 16) <= 256 &&
+      !hipdnn_device_is_wave64()) {
     const size_t fa_align = 64;
     auto fa_align_up = [&](size_t v) {
       return (v + fa_align - 1) & ~(fa_align - 1);
