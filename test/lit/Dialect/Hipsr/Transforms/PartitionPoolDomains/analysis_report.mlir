@@ -3,10 +3,9 @@
 
 // RUN: hip-mlir-opt %s -split-input-file --verify-diagnostics \
 // RUN:   -hipsr-partition-pool-domains='emit-analysis-report=true' \
-// RUN:   | FileCheck %s --implicit-check-not=hipsr.pool_domain
+// RUN:   -o %t
 
 // Parallel barriers over one producer share the same next domain.
-// CHECK-LABEL: func.func @parallel_barriers
 // expected-remark@+1 {{hipsr-partition-pool-domains: operation domains [0->0,1->0,2->1,3->1,4->1,5->1,6->1,7->1]}}
 func.func @parallel_barriers(
     %ctx: !hipsr.context, %input: tensor<?x8xf16>) -> tensor<?x8xf16> {
@@ -42,7 +41,6 @@ func.func @parallel_barriers(
 // -----
 
 // A barrier with only block-argument dependencies remains in domain zero.
-// CHECK-LABEL: func.func @root_barrier
 // expected-remark@+1 {{hipsr-partition-pool-domains: operation domains [0->0,1->0]}}
 func.func @root_barrier(
     %ctx: !hipsr.context, %input: tensor<?x8xf16>) -> tensor<?x8xf16> {
@@ -58,7 +56,6 @@ func.func @root_barrier(
 // -----
 
 // Normal placeholders do not move work beyond the barrier's domain.
-// CHECK-LABEL: func.func @normal_after_barrier
 // expected-remark@+1 {{hipsr-partition-pool-domains: operation domains [0->0,1->0,2->1,3->1,4->1,5->1,6->1,7->1]}}
 func.func @normal_after_barrier(
     %ctx: !hipsr.context, %input: tensor<?x8xf16>) -> tensor<?x8xf16> {
@@ -94,7 +91,6 @@ func.func @normal_after_barrier(
 
 // Later branches can return to earlier domains. A normal join uses its deepest
 // input domain, while a barrier join starts the next domain.
-// CHECK-LABEL: func.func @mixed_depth_branches
 // expected-remark@+1 {{hipsr-partition-pool-domains: operation domains [0->0,1->0,2->1,3->1,4->2,5->2,6->1,7->1,8->0,9->0,10->1,11->1,12->3,13->3]}}
 func.func @mixed_depth_branches(
     %ctx: !hipsr.context, %input: tensor<?x8xf16>) -> tensor<?x8xf16> {
@@ -152,7 +148,6 @@ func.func @mixed_depth_branches(
 // -----
 
 // Each result used in a later domain is collected independently.
-// CHECK-LABEL: func.func @multi_result_domain_results
 // expected-remark@+1 {{hipsr-partition-pool-domains: operation domains [0->0,1->0,2->1,3->1,4->1,5->1]}}
 func.func @multi_result_domain_results(
     %ctx: !hipsr.context, %input: tensor<?x8xf16>)
@@ -189,11 +184,9 @@ func.func @multi_result_domain_results(
 // -----
 
 // An empty body has no assignments. Declarations are skipped.
-// CHECK-LABEL: func.func @empty()
 // expected-remark@+1 {{hipsr-partition-pool-domains: operation domains []}}
-func.func @empty() {
+func.func @empty(%ctx: !hipsr.context) {
   return
 }
 
-// CHECK-LABEL: func.func private @declaration
 func.func private @declaration(i32) -> i32

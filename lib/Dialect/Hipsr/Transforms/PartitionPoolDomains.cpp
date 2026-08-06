@@ -22,6 +22,7 @@
 #include "llvm/Support/ErrorHandling.h"
 
 #include <cstdint>
+#include <utility>
 
 namespace mlir {
 namespace hipsr {
@@ -463,6 +464,225 @@ static void materializeDomains(ArrayRef<Domain> domains, Value context) {
   }
 }
 
+namespace partition_materialization {
+
+// Placeholder results do not cross domains. Record each shape input and its
+// tied data result so the input can use the exported data value instead.
+struct PlaceholderReplacement {
+  OpOperand *placeholderInput;
+  OpResult dataResult;
+};
+
+using PlaceholderReplacements = llvm::SmallVector<PlaceholderReplacement>;
+
+// Find placeholder inputs that use this result as a shape edge.
+llvm::SmallVector<OpOperand *> collectPlaceholderUses(Value result) {
+  llvm::SmallVector<OpOperand *> uses;
+  for (OpOperand &use : result.getUses()) {
+    if (isa<PlaceholderOp>(use.getOwner())) {
+      uses.push_back(&use);
+    }
+  }
+  return uses;
+}
+
+// A placeholder result and its tied DPS result describe the same logical
+// output. Placeholder results form the shape graph, while DPS results form the
+// matching data graph:
+//
+//   shape graph: %init0 --------------------> %init1
+//                  | initializes                | initializes
+//                  v                            v
+//   data graph:  %data0 --------------------> %data1
+//
+// Before partitioning, each graph uses its own value:
+//   %init0 = hipsr.placeholder ...
+//   %data0 = hipsr.cast ... outs(%init0)
+//   %init1 = hipsr.placeholder ... ins(%init0)
+//   %data1 = hipsr.cast ... ins(%data0) outs(%init1)
+//
+// Placeholder results stay inside their domain, so %init0 cannot cross the
+// boundary. The source domain exports tied result %data0 as %data0_out.
+// Redirect %init1's shape input to that exported value:
+//
+//                          +-- shape --> %init1
+//   %data0_out ------------|
+//                          +-- data  --> %data1
+//
+// After partitioning, the target domain captures %data0_out once and uses its
+// block argument for both edges:
+//   %data0_out = hipsr.pool_domain(...) {
+//     ...
+//     hipsr.pool_domain_yield %data0
+//   }
+//   hipsr.pool_domain(%data0_out) {
+//   ^bb0(%input: tensor<...>):
+//     %init1 = hipsr.placeholder ... ins(%input)
+//     %data1 = hipsr.cast ... ins(%input) outs(%init1)
+//   }
+// Find shape inputs that must use an exported data value.
+FailureOr<PlaceholderReplacements> collectPlaceholderReplacements(
+    partition_analysis::DomainId sourceDomainId,
+    const partition_analysis::Domain &domain,
+    const partition_analysis::OperationDomains &operationDomains) {
+  PlaceholderReplacements replacements;
+  for (Operation *operation : domain.operations) {
+    auto placeholder = dyn_cast<PlaceholderOp>(operation);
+    if (!placeholder) {
+      continue;
+    }
+
+    Operation *consumer = placeholder.getDpsConsumer();
+    auto consumerDomain = operationDomains.find(consumer);
+    if (consumerDomain == operationDomains.end() ||
+        consumerDomain->second != sourceDomainId) {
+      placeholder.emitOpError(
+          "and its DPS consumer must be in the same pool domain");
+      return failure();
+    }
+    auto dpsConsumer = cast<DestinationStyleOpInterface>(consumer);
+
+    // Match each data result with the placeholder result that initializes it.
+    for (auto [dataResult, placeholderResult] :
+         llvm::zip_equal(consumer->getResults(), dpsConsumer.getDpsInits())) {
+      if (placeholderResult.getDefiningOp() != placeholder.getOperation()) {
+        continue;
+      }
+
+      for (OpOperand *placeholderUse :
+           collectPlaceholderUses(placeholderResult)) {
+        auto downstreamPlaceholder =
+            cast<PlaceholderOp>(placeholderUse->getOwner());
+        auto targetDomain =
+            operationDomains.find(downstreamPlaceholder.getOperation());
+        if (targetDomain == operationDomains.end()) {
+          downstreamPlaceholder.emitOpError(
+              "does not have an assigned pool domain");
+          return failure();
+        }
+        // Same-domain shape edges stay inside the region and need no rewrite.
+        if (targetDomain->second < sourceDomainId) {
+          downstreamPlaceholder.emitOpError(
+              "depends on a placeholder in a later pool domain");
+          return failure();
+        } else if (targetDomain->second > sourceDomainId) {
+          // Forward shape edges use the exported data result as their bridge.
+          if (!llvm::is_contained(domain.results, dataResult)) {
+            placeholder.emitOpError(
+                "requires its tied data result to leave the pool domain");
+            return failure();
+          }
+
+          replacements.push_back(
+              PlaceholderReplacement{placeholderUse, dataResult});
+        }
+      }
+    }
+  }
+  return replacements;
+}
+
+// Move one assigned group into a pool_domain and wire its inputs and results.
+void materializeDomain(IRRewriter &rewriter,
+                       partition_analysis::DomainId domainId,
+                       const partition_analysis::Domain &domain,
+                       ArrayRef<PlaceholderReplacement> replacements,
+                       Value context) {
+  SmallVector<Value> results(domain.results.begin(), domain.results.end());
+  SmallVector<Type> resultTypes = llvm::map_to_vector(
+      domain.results, [](OpResult result) { return result.getType(); });
+  Operation *insertionPoint = domain.operations.front();
+  rewriter.setInsertionPoint(insertionPoint);
+
+  auto domainOp = PoolDomainOp::create(rewriter, insertionPoint->getLoc(),
+                                       resultTypes, ValueRange{}, domainId);
+  Region &bodyRegion = domainOp.getBody();
+  Block *body = rewriter.createBlock(&bodyRegion);
+  // Seed context first so isolation appends every other capture after it.
+  body->addArgument(context.getType(), context.getLoc());
+  for (Operation *operation : domain.operations) {
+    rewriter.moveOpBefore(operation, body, body->end());
+  }
+  // Reuse argument zero so isolation does not capture context again.
+  replaceAllUsesInRegionWith(context, body->getArgument(0), bodyRegion);
+
+  // Capture the remaining values used from outside this domain.
+  SmallVector<Value> capturedValues =
+      makeRegionIsolatedFromAbove(rewriter, bodyRegion);
+  Block &entryBlock = bodyRegion.front();
+
+  // Domain operands mirror block arguments: context, then captured values.
+  SmallVector<Value> domainOperands{context};
+  llvm::append_range(domainOperands, capturedValues);
+  rewriter.modifyOpInPlace(
+      domainOp, [&] { domainOp->insertOperands(0, domainOperands); });
+
+  // Region isolation updates direct uses. Nested regions need the same mapping.
+  auto capturedArguments =
+      entryBlock.getArguments().take_back(capturedValues.size());
+  for (auto [capturedValue, argument] :
+       llvm::zip_equal(capturedValues, capturedArguments)) {
+    replaceAllUsesInRegionWith(capturedValue, argument, bodyRegion);
+  }
+
+  rewriter.setInsertionPointToEnd(&entryBlock);
+  PoolDomainYieldOp::create(rewriter, insertionPoint->getLoc(), results);
+
+  llvm::DenseMap<Value, Value> exportedValues;
+  for (auto [result, domainResult] :
+       llvm::zip_equal(results, domainOp.getResults())) {
+    exportedValues.try_emplace(result, domainResult);
+  }
+  // External users must use the domain results; internal uses stay unchanged.
+  rewriter.replaceUsesWithIf(
+      results, domainOp.getResults(), [&](OpOperand &use) {
+        return !domainOp->isProperAncestor(use.getOwner());
+      });
+
+  // Replace shape inputs only after their tied data result has been exported.
+  for (auto [placeholderInput, dataResult] : replacements) {
+    Value exportedValue = exportedValues.lookup(dataResult);
+    if (!exportedValue) {
+      llvm::report_fatal_error(
+          "pool-domain materialization expected an exported data result");
+    }
+    placeholderInput->set(exportedValue);
+  }
+}
+
+// Find all shape-edge redirects first, then build domains in order.
+LogicalResult
+materializeDomains(const partition_analysis::DomainAssignment &assignment,
+                   Value context) {
+  if (assignment.domains.empty()) {
+    return success();
+  }
+
+  // Plan all shape bridges before moving any operation into a domain.
+  llvm::SmallVector<PlaceholderReplacements> replacementsByDomain(
+      assignment.domains.size());
+  for (auto [domainId, domain] : llvm::enumerate(assignment.domains)) {
+    FailureOr<PlaceholderReplacements> replacements =
+        collectPlaceholderReplacements(domainId, domain,
+                                       assignment.operationDomains);
+    if (failed(replacements)) {
+      return failure();
+    }
+    replacementsByDomain[domainId] = std::move(*replacements);
+  }
+
+  IRRewriter rewriter(
+      assignment.domains.front().operations.front()->getContext());
+  // Build domains in order so each exported value exists before its users.
+  for (auto [domainId, domain] : llvm::enumerate(assignment.domains)) {
+    materializeDomain(rewriter, domainId, domain,
+                      replacementsByDomain[domainId], context);
+  }
+  return success();
+}
+
+} // namespace partition_materialization
+
 struct PartitionPoolDomainsPass
     : impl::PartitionPoolDomainsPassBase<PartitionPoolDomainsPass> {
   using impl::PartitionPoolDomainsPassBase<
@@ -483,6 +703,16 @@ struct PartitionPoolDomainsPass
     }
 
     Block &entryBlock = funcOp.front();
+    if (entryBlock.getNumArguments() == 0 ||
+        !isa<ContextType>(entryBlock.getArgument(0).getType())) {
+      funcOp.emitError(
+          "hipsr-partition-pool-domains requires function argument zero to be "
+          "!hipsr.context");
+      signalPassFailure();
+      return;
+    }
+    Value context = entryBlock.getArgument(0);
+
     if (failed(validatePartitionInput(entryBlock))) {
       signalPassFailure();
       return;
@@ -492,6 +722,12 @@ struct PartitionPoolDomainsPass
         partition_analysis::buildDomainAssignment(entryBlock);
     if (emitAnalysisReport) {
       partition_analysis::emitAnalysisReport(entryBlock, assignment);
+    }
+
+    if (failed(partition_materialization::materializeDomains(assignment,
+                                                             context))) {
+      signalPassFailure();
+      return;
     }
   }
 };
