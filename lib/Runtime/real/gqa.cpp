@@ -52,6 +52,7 @@
 #include "../runtime_state_internal.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
+#include "hip_arch_compat.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
@@ -1948,11 +1949,35 @@ int wrap_group_query_attention(
   // Sink/window are first-class decode features. Prefill v3 implements both at
   // D64; D128/D256 prefill must fall back rather than silently drop them.
   const bool sink_ok = !has_smooth_softmax || is_decode || head_dim == 64;
+  // Decode handles the window itself (kv_lo clamp), so it is allowed for any
+  // supported geometry; prefill only implements it at D64. This subsumes the
+  // narrower prefill-only form, so nothing prefill accepted before is widened.
   const bool window_ok =
       is_decode || local_window_size <= 0 || head_dim == 64;
-  const bool fused_supported = element_size_bytes == 2 && no_causal == 0 &&
-                               window_ok && sink_ok && head_dim_ok &&
-                               decode_geometry_ok && attention_bias == nullptr;
+  // The whole fused path (gqa_forward_fused, including the sink and windowed
+  // prefill kernels above) is built on the RDNA-only WMMA intrinsics, which
+  // trap on CDNA (wave64, e.g. MI350). Route wave64 to the decomposed hipBLASLt
+  // pipeline below (MFMA GEMMs + wave-portable scalar kernels), which is
+  // feature-complete and correct on both wave sizes. RDNA is unaffected.
+  const bool fused_supported =
+      element_size_bytes == 2 && no_causal == 0 && window_ok && sink_ok &&
+      head_dim_ok && decode_geometry_ok && attention_bias == nullptr &&
+      !hipdnn_device_is_wave64();
+
+  // The quantized-cache kernels live exclusively on the fused path, which is
+  // disabled above on wave64 because it is built on the RDNA-only WMMA
+  // intrinsics. A quantized cache therefore has no implementation at all on
+  // CDNA. Reject it here, naming the architecture: the generic check below
+  // would only report fused_supported=0, pointing a reader at the feature gates
+  // (causal / window / sink / bias) instead of the real reason.
+  if (kv_quantized && hipdnn_device_is_wave64()) {
+    fprintf(
+        stderr,
+        "wrap_group_query_attention: quantized KV cache is not supported on "
+        "wave64 devices (CDNA, e.g. MI350) -- its kernels are on the WMMA "
+        "fused path, which is RDNA-only. Use an fp16 KV cache.\n");
+    return -1;
+  }
 
   // A quantized KV cache is implemented ONLY on the fused path (quant decode +
   // fp16 prefill-over-dequant), for head_dim in {64,128}. The legacy decomposed

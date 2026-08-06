@@ -19,7 +19,7 @@
 // CHECK-NEXT: %[[SHAPE_ATTR_INIT:.*]] = hipsr.placeholder(%[[FIRST_CTX]]) ins(%[[FIRST_INPUT]] : tensor<?x4xf32>) {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
 // CHECK-NEXT: %[[SHAPE_ATTR_EXPANDED:.*]] = hipsr.expand(%[[FIRST_CTX]]) ins(%[[CAST]] : tensor<?x4xf16>) outs(%[[SHAPE_ATTR_INIT]] : tensor<?x4xf16>) {shape_attr = array<i64: 1, 4>} : tensor<?x4xf16>
 // CHECK-NEXT: hipsr.pool_domain_yield %[[SHAPE_ATTR_EXPANDED]] : tensor<?x4xf16>
-// CHECK-NEXT: } -> tensor<?x4xf16>
+// CHECK-NEXT: } -> tensor<?x4xf16> {domain_id = 0 : i64}
 // CHECK-NEXT: %[[EXPAND_DOMAIN:.*]] = hipsr.pool_domain(%[[CTX]], %[[INPUT]], %[[SHAPE]], %[[FIRST_DOMAIN]] : !hipsr.context, tensor<?x4xf32>, tensor<2xi64>, tensor<?x4xf16>) {
 // CHECK-NEXT: ^bb0(%[[EXPAND_CTX:.*]]: !hipsr.context, %[[SHAPE_ROOT:.*]]: tensor<?x4xf32>, %[[EXPAND_SHAPE:.*]]: tensor<2xi64>, %[[EXPAND_INPUT:.*]]: tensor<?x4xf16>):
 // CHECK-NEXT: %[[EXPAND_INIT:.*]] = hipsr.placeholder(%[[EXPAND_CTX]]) ins(%[[SHAPE_ROOT]], %[[EXPAND_SHAPE]] : tensor<?x4xf32>, tensor<2xi64>) {type = #hipsr.placeholder_type<barrier>} : tensor<?x4xf16>
@@ -27,7 +27,7 @@
 // CHECK-NEXT: %[[ADD_INIT:.*]] = hipsr.placeholder(%[[EXPAND_CTX]]) ins(%[[SHAPE_ROOT]], %[[SHAPE_ROOT]] : tensor<?x4xf32>, tensor<?x4xf32>) {type = #hipsr.placeholder_type<normal>} : tensor<?x4xf16>
 // CHECK-NEXT: %[[RESULT:.*]] = hipsr.add(%[[EXPAND_CTX]]) ins(%[[EXPANDED]], %[[EXPANDED]] : tensor<?x4xf16>, tensor<?x4xf16>) outs(%[[ADD_INIT]] : tensor<?x4xf16>) : tensor<?x4xf16>
 // CHECK-NEXT: hipsr.pool_domain_yield %[[RESULT]] : tensor<?x4xf16>
-// CHECK-NEXT: } -> tensor<?x4xf16>
+// CHECK-NEXT: } -> tensor<?x4xf16> {domain_id = 1 : i64}
 // CHECK-NEXT: return %[[EXPAND_DOMAIN]] : tensor<?x4xf16>
 // CHECK-NEXT: }
 func.func @expand_barrier_modes(
@@ -85,7 +85,7 @@ func.func @expand_barrier_modes(
 // CHECK-NEXT: hipsr.shape_yield (%[[D0]], %[[D1]]) : [f16]
 // CHECK-NEXT: }
 // CHECK-NEXT: hipsr.pool_domain_yield %[[REGION]], %[[CAST]] : i32, tensor<?x8xf16>
-// CHECK-NEXT: } -> i32, tensor<?x8xf16>
+// CHECK-NEXT: } -> i32, tensor<?x8xf16> {domain_id = 0 : i64}
 // CHECK-NEXT: return %[[DOMAIN]]#1, %[[DOMAIN]]#0 : tensor<?x8xf16>, i32
 // CHECK-NEXT: }
 func.func @nested_shape_region(%ctx: !hipsr.context,
@@ -121,7 +121,7 @@ func.func @nested_shape_region(%ctx: !hipsr.context,
 // CHECK-NEXT: hipsr.pool_domain(%[[CTX]], %[[VALUE]], %[[BUFFER]], %[[INDEX]] : !hipsr.context, i32, memref<4xi32>, index) {
 // CHECK-NEXT: ^bb0(%[[DCTX:.*]]: !hipsr.context, %[[DVALUE:.*]]: i32, %[[DBUFFER:.*]]: memref<4xi32>, %[[DINDEX:.*]]: index):
 // CHECK-NEXT: memref.store %[[DVALUE]], %[[DBUFFER]]{{\[}}%[[DINDEX]]] : memref<4xi32>
-// CHECK-NEXT: }
+// CHECK-NEXT: } {domain_id = 0 : i64}
 // CHECK-NEXT: return
 // CHECK-NEXT: }
 func.func @zero_result_retained(

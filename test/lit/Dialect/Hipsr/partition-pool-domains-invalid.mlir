@@ -21,7 +21,7 @@ func.func @existing_domain(%ctx: !hipsr.context, %arg: i32) -> i32 {
   %0 = hipsr.pool_domain(%ctx, %arg : !hipsr.context, i32) {
   ^bb0(%domain_ctx: !hipsr.context, %domain_arg: i32):
     hipsr.pool_domain_yield %domain_arg : i32
-  } -> i32
+  } -> i32 {domain_id = 0 : i64}
   return %0 : i32
 }
 
@@ -35,7 +35,7 @@ func.func @nested_existing_domain(
     %1 = hipsr.pool_domain(%ctx, %arg : !hipsr.context, i32) {
     ^bb0(%domain_ctx: !hipsr.context, %domain_arg: i32):
       hipsr.pool_domain_yield %domain_arg : i32
-    } -> i32
+    } -> i32 {domain_id = 0 : i64}
     scf.yield %1 : i32
   }
   return %0 : i32

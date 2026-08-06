@@ -40,6 +40,8 @@ struct AllocationSize {
   llvm::SmallVector<Value> dynamicDims;
 };
 
+constexpr int64_t kPoolAlignment = 256;
+
 int64_t staticByteFactor(MemRefType memTy) {
   int64_t factor = memTy.getElementTypeBitWidth() / 8;
   for (int64_t dim : memTy.getShape()) {
@@ -187,6 +189,57 @@ void emitPoolingReport(Block &body,
   }
 }
 
+Value emitAllocationSize(OpBuilder &builder, Location loc,
+                         memref::AllocOp allocOp) {
+  AllocationSize size = computeAllocationSize(allocOp);
+  Value bytes = arith::ConstantIndexOp::create(builder, loc, size.staticBytes);
+  for (Value dyn : size.dynamicDims) {
+    bytes = arith::MulIOp::create(builder, loc, bytes, dyn);
+  }
+  return bytes;
+}
+
+Value emitGroupSize(OpBuilder &builder, Location loc,
+                    llvm::ArrayRef<Value> group, int64_t alignment) {
+  llvm::SmallVector<Value> sizes;
+  for (Value alloc : group) {
+    sizes.push_back(emitAllocationSize(builder, loc,
+                                       alloc.getDefiningOp<memref::AllocOp>()));
+  }
+  Value maxSize = sizes.front();
+  for (Value size : llvm::ArrayRef<Value>(sizes).drop_front()) {
+    maxSize = arith::MaxUIOp::create(builder, loc, maxSize, size);
+  }
+  Value alignVal = arith::ConstantIndexOp::create(builder, loc, alignment);
+  Value alignMinus1 =
+      arith::ConstantIndexOp::create(builder, loc, alignment - 1);
+  Value numerator = arith::AddIOp::create(builder, loc, maxSize, alignMinus1);
+  Value divided = arith::DivUIOp::create(builder, loc, numerator, alignVal);
+  return arith::MulIOp::create(builder, loc, divided, alignVal);
+}
+
+Value findContext(Block &body) {
+  for (BlockArgument arg : body.getArguments()) {
+    if (isa<ContextType>(arg.getType())) {
+      return arg;
+    }
+  }
+  return nullptr;
+}
+
+Value emitPool(OpBuilder &builder, Location loc, Value ctx,
+               llvm::ArrayRef<Value> groupSizes, uint64_t domainId) {
+  Value poolSize = groupSizes.front();
+  for (Value groupSize : groupSizes.drop_front()) {
+    poolSize = arith::AddIOp::create(builder, loc, poolSize, groupSize);
+  }
+  auto deviceSpace =
+      MemorySpaceAttr::get(builder.getContext(), MemorySpaceKind::Device);
+  auto poolType = MemRefType::get({ShapedType::kDynamic}, builder.getI8Type(),
+                                  MemRefLayoutAttrInterface{}, deviceSpace);
+  return GetPoolOp::create(builder, loc, poolType, ctx, poolSize, domainId);
+}
+
 struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
   using impl::HipsrPoolAllocPassBase<
       HipsrPoolAllocPass>::HipsrPoolAllocPassBase;
@@ -202,11 +255,26 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
         signalPassFailure();
         return;
       }
+      Value ctx = findContext(body);
+      if (!ctx) {
+        domain.emitError("hipsr-pool-alloc: pool_domain has no context");
+        signalPassFailure();
+        return;
+      }
       llvm::SmallVector<llvm::SmallVector<Value>> groups =
           greedyGrouping(body, lifetimes);
       if (emitPoolReport) {
         emitPoolingReport(body, lifetimes, groups, insertionPoint);
       }
+
+      OpBuilder builder(&getContext());
+      builder.setInsertionPointAfter(insertionPoint);
+      llvm::SmallVector<Value> groupSizes;
+      for (llvm::ArrayRef<Value> group : groups) {
+        groupSizes.push_back(
+            emitGroupSize(builder, domain.getLoc(), group, kPoolAlignment));
+      }
+      emitPool(builder, domain.getLoc(), ctx, groupSizes, domain.getDomainId());
     });
   }
 };
