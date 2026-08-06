@@ -9,7 +9,6 @@
 //   chi=1  single point : align_up_rounding, dynamic_size, dead_alloc_skipped
 //   chi=1  independent  : coalesce_static
 //   chi=2  staggered    : split_two_groups, split_two_groups_dynamic
-// two_domains covers the domain_id each pool_domain declares.
 
 // 3xf16 = 6 B is not a multiple of 256, so the alignUp chain must round up.
 // CHECK-LABEL: func.func @align_up_rounding
@@ -148,8 +147,7 @@ func.func @coalesce_static(%ctx: !hipsr.context,
 // -----
 
 // a1 is read while writing a2, so their lifetimes overlap and land in separate
-// groups: two independent size chains, each aligned on its own, and the pool
-// size is their sum.
+// groups: two independent size chains, each aligned on its own.
 // CHECK-LABEL: func.func @split_two_groups
 // CHECK: %[[C8192A:.+]] = arith.constant 8192 : index
 // CHECK-NEXT: %[[C256A:.+]] = arith.constant 256 : index
@@ -180,9 +178,6 @@ func.func @split_two_groups(%ctx: !hipsr.context, %in: memref<4x1024xf16, #hipsr
 
 // -----
 
-// Same staggered topology, but one group carries a dynamic batch dim: the
-// %dim factor flows through its align chain into the pool-size sum, so a
-// dynamic group is summed like any other.
 // CHECK-LABEL: func.func @split_two_groups_dynamic
 // CHECK: %[[DIM:.+]] = memref.dim %{{.+}} : memref<?x512xf16, #hipsr.mem<device>>
 // CHECK: %[[C1024:.+]] = arith.constant 1024 : index
@@ -226,9 +221,6 @@ func.func @split_two_groups_dynamic(%ctx: !hipsr.context,
 
 // -----
 
-// Each get_pool carries the id its pool_domain declared. The ids are 0 and 7,
-// not 0 and 1, so a pass that numbered domains itself would not match. The
-// first one prints bare because get_pool defaults domain_id to 0.
 // CHECK-LABEL: func.func @two_domains
 // CHECK: %[[G0:.+]] = arith.muli %{{.+}}, %{{.+}} : index
 // CHECK-NEXT: hipsr.get_pool(%{{.+}}, %[[G0]]) : memref<?xi8, #hipsr.mem<device>>
