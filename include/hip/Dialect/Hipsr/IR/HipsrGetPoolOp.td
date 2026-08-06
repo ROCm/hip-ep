@@ -10,12 +10,12 @@ def Hipsr_GetPoolOp : Hipsr_Op<"get_pool",
     Returns a runtime-managed GPU memory pool.
 
     - `pool_size` : minimum size in bytes the returned buffer must hold.
-    - `domain_id` : selects an independent pool (default 0); pools with distinct
+    - `domain_id` : selects which pool to draw from; pools with distinct
                     domain_ids grow independently.
   }];
 
   let arguments = (ins Hipsr_ContextType:$ctx, Index:$pool_size,
-                       DefaultValuedAttr<I64Attr, "0">:$domain_id);
+                       I64Attr:$domain_id);
   let results = (outs Hipsr_DeviceMemRef:$pool);
   let assemblyFormat = "`(` $ctx `,` $pool_size `)` attr-dict `:` type($pool)";
 }
