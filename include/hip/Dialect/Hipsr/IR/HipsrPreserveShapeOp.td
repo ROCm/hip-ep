@@ -39,6 +39,4 @@ def Hipsr_PreserveShapeOp : Hipsr_Op<"preserve_shape",
   let results = (outs);
 
   let assemblyFormat = "$shape `,` $data attr-dict `:` type($data)";
-
-  let hasVerifier = 1;
 }

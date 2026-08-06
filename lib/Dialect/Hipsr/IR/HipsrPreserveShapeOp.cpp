@@ -19,5 +19,3 @@ void PreserveShapeOp::getEffects(
   effects.emplace_back(MemoryEffects::Write::get(),
                        SideEffects::DefaultResource::get());
 }
-
-LogicalResult PreserveShapeOp::verify() { return success(); }
