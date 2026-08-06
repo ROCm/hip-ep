@@ -21,6 +21,8 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/ErrorHandling.h"
 
+#include <cstdint>
+
 namespace mlir {
 namespace hipsr {
 
@@ -35,56 +37,72 @@ struct Domain {
   llvm::SmallVector<OpResult> results;
 };
 
-using DomainId = unsigned;
+using DomainId = std::uint64_t;
 using OperationDomains = llvm::DenseMap<Operation *, DomainId>;
+using DependencyDomainIds = llvm::SmallDenseSet<DomainId, 4>;
 
 struct DomainAssignment {
   llvm::SmallVector<Domain> domains;
   OperationDomains operationDomains;
 };
 
-// Each op uses the highest domain of the ops that feed it. This lets separate
-// branches share a pool domain. A barrier moves its branch to the next domain.
-// Two barriers can share that domain when their inputs are in the same domain.
-void assignOpToDomain(Operation &operation, DomainAssignment &assignment) {
-  llvm::SmallDenseSet<DomainId, 4> dependencies;
-  for (Value operand : operation.getOperands()) {
+// Resolve operand producers through assignments already built in block order.
+DependencyDomainIds
+collectOperandDependencyDomainIds(const ValueRange &operands,
+                                  const OperationDomains &operationDomains) {
+  DependencyDomainIds dependencyDomainIds;
+  for (Value operand : operands) {
     if (Operation *definingOp = operand.getDefiningOp()) {
-      auto dependency = assignment.operationDomains.find(definingOp);
-      if (dependency == assignment.operationDomains.end()) {
+      auto dependency = operationDomains.find(definingOp);
+      if (dependency == operationDomains.end()) {
         llvm::report_fatal_error(
             "pool-domain analysis expected an assigned dependency");
       }
-      dependencies.insert(dependency->second);
+      dependencyDomainIds.insert(dependency->second);
     }
   }
+  return dependencyDomainIds;
+}
 
+// Keep an operation with its deepest dependency. A barrier starts the next
+// domain for that branch, while unrelated branches can still share domains.
+DomainId
+computeOperationDomainId(const Operation &operation,
+                         const DependencyDomainIds &dependencyDomainIds) {
   DomainId domainId = 0;
-  if (!dependencies.empty()) {
-    domainId = *llvm::max_element(dependencies);
+  if (!dependencyDomainIds.empty()) {
+    domainId = *llvm::max_element(dependencyDomainIds);
     if (auto placeholder = dyn_cast<PlaceholderOp>(operation);
         placeholder &&
         placeholder.getPlaceholderType() == PlaceholderType::Barrier) {
       ++domainId;
     }
   }
-
-  if (assignment.domains.size() <= domainId) {
-    assignment.domains.resize(domainId + 1);
-  }
-  assignment.domains[domainId].operations.push_back(&operation);
-  assignment.operationDomains.try_emplace(&operation, domainId);
+  return domainId;
 }
 
-DomainAssignment assignDomains(Block &block) {
+// Assign in block order so each producer has a domain before its consumers.
+DomainAssignment assignOperationsToDomains(Block &block) {
   DomainAssignment assignment;
   for (Operation &operation : block.without_terminator()) {
-    assignOpToDomain(operation, assignment);
+    DependencyDomainIds dependencyDomainIds = collectOperandDependencyDomainIds(
+        operation.getOperands(), assignment.operationDomains);
+    DomainId domainId =
+        computeOperationDomainId(operation, dependencyDomainIds);
+    if (domainId > assignment.domains.size()) {
+      llvm::report_fatal_error(
+          "pool-domain analysis produced a non-contiguous domain");
+    }
+    if (domainId == assignment.domains.size()) {
+      assignment.domains.emplace_back();
+    }
+    assignment.domains[domainId].operations.push_back(&operation);
+    assignment.operationDomains.try_emplace(&operation, domainId);
   }
   return assignment;
 }
 
-// Domain materialization must yield every result consumed outside its domain.
+// Materialization must yield a result used by another domain or the terminator.
 bool isResultUsedOutsideDomain(Value result, DomainId domainId, Block &block,
                                const DomainAssignment &assignment) {
   return llvm::any_of(result.getUsers(), [&](Operation *user) {
@@ -99,32 +117,34 @@ bool isResultUsedOutsideDomain(Value result, DomainId domainId, Block &block,
   });
 }
 
-// Build the yield list used when each domain is materialized.
-void collectDomainResults(Block &block, DomainAssignment &assignment) {
-  for (auto [domainId, domain] : llvm::enumerate(assignment.domains)) {
-    for (Operation *operation : domain.operations) {
-      if (isa<PlaceholderOp>(operation)) {
-        continue;
-      }
-      for (OpResult result : operation->getResults()) {
-        if (isResultUsedOutsideDomain(result, domainId, block, assignment)) {
-          domain.results.push_back(result);
-        }
+// Collect the non-placeholder results that one materialized domain must yield.
+llvm::SmallVector<OpResult>
+collectDomainResults(Block &block, DomainId domainId, const Domain &domain,
+                     const DomainAssignment &assignment) {
+  llvm::SmallVector<OpResult> results;
+  for (Operation *operation : domain.operations) {
+    if (isa<PlaceholderOp>(operation)) {
+      continue;
+    }
+    for (OpResult result : operation->getResults()) {
+      if (isResultUsedOutsideDomain(result, domainId, block, assignment)) {
+        results.push_back(result);
       }
     }
   }
+  return results;
 }
 
-// Result analysis runs after assignment because domain IDs must be stable.
-DomainAssignment analyzeDomains(Block &block) {
-  DomainAssignment assignment = assignDomains(block);
-  collectDomainResults(block, assignment);
+// Build the full assignment, collecting results after user domains are stable.
+DomainAssignment buildDomainAssignment(Block &block) {
+  DomainAssignment assignment = assignOperationsToDomains(block);
+  for (auto [domainId, domain] : llvm::enumerate(assignment.domains)) {
+    domain.results = collectDomainResults(block, domainId, domain, assignment);
+  }
   return assignment;
 }
 
-// Op numbers follow their order in the function. The first report maps each
-// op number to its domain. The other reports list each domain's ops and
-// results.
+// Use operation order as stable labels in optional assignment/result remarks.
 void emitAnalysisReport(Block &block, const DomainAssignment &assignment) {
   llvm::DenseMap<Operation *, unsigned> operationIndices;
   for (auto [index, operation] : llvm::enumerate(block.without_terminator())) {
@@ -469,7 +489,7 @@ struct PartitionPoolDomainsPass
     }
 
     partition_analysis::DomainAssignment assignment =
-        partition_analysis::analyzeDomains(entryBlock);
+        partition_analysis::buildDomainAssignment(entryBlock);
     if (emitAnalysisReport) {
       partition_analysis::emitAnalysisReport(entryBlock, assignment);
     }
