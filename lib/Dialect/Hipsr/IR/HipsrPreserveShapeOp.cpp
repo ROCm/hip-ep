@@ -11,22 +11,13 @@
 using namespace mlir;
 using namespace mlir::hipsr;
 
-namespace {
-
-struct ShapeMetadataResource
-    : public SideEffects::Resource::Base<ShapeMetadataResource> {
-  StringRef getName() final { return "hipsr::shape_metadata"; }
-};
-
-} // namespace
-
 // PreserveShapeOp does not modify memory, but it must report a side effect
 // to avoid being eliminated as a trivially dead operation.
 void PreserveShapeOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   effects.emplace_back(MemoryEffects::Write::get(),
-                       ShapeMetadataResource::get());
+                       SideEffects::DefaultResource::get());
 }
 
 LogicalResult PreserveShapeOp::verify() {
@@ -34,7 +25,7 @@ LogicalResult PreserveShapeOp::verify() {
   if (!fromExtents) {
     return success();
   }
-
+  // check shape.size() == data.rank
   int64_t extents = static_cast<int64_t>(fromExtents.getExtents().size());
   int64_t dataRank = cast<ShapedType>(getData().getType()).getRank();
   if (extents != dataRank) {
