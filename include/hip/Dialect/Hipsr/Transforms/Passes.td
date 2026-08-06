@@ -35,24 +35,24 @@ def PopulateShapeRegionPass
 
 def PartitionPoolDomainsPass
     : Pass<"hipsr-partition-pool-domains", "mlir::func::FuncOp"> {
-  let summary = "Partition a function into dependency-depth pool domains";
+  let summary = "Split a function into pool domains based on its inputs";
   let description = [{
-    Assigns each top-level operation in a single-block function to the deepest
-    domain used by its operands. A barrier `hipsr.placeholder` with an operation
-    dependency advances to the next domain. Block-argument roots remain in
-    domain zero.
+    Splits the top-level ops in a single-block function into pool domains. Each
+    op goes into the highest domain used by its inputs. A barrier
+    `hipsr.placeholder` with an input from another op starts the next domain.
+    Ops whose inputs are only block arguments stay in domain zero.
 
-    The pass computes the complete assignment before creating
-    `hipsr.pool_domain` operations in domain order. Each domain is
-    `IsolatedFromAbove`; captured values become operands and block arguments,
-    and escaping non-placeholder values become results. The function must have
-    a `!hipsr.context` as argument zero; it becomes operand and block argument
-    zero in every domain.
+    The pass chooses all domains before changing the IR, then builds
+    `hipsr.pool_domain` ops in order. Each domain has `IsolatedFromAbove`.
+    Values from outside the domain become operands and block arguments.
+    Non-placeholder results used outside the domain become its results.
+    Function argument zero must be `!hipsr.context`; it stays operand and block
+    argument zero in every domain.
 
-    A placeholder and its tied DPS consumer stay in one domain. When a
-    placeholder shape input crosses a boundary, the pass replaces that input
-    with the tied DPS data result exported from the source domain. Placeholder
-    results are not yielded across domain boundaries.
+    A placeholder stays in the same domain as the DPS op that uses it as an
+    init. If a placeholder result is a shape input in a later domain, the pass
+    changes that input to the matching DPS data result returned by the earlier
+    domain. Placeholder results are never returned from a domain.
 
     Before:
     ```mlir
@@ -109,8 +109,8 @@ def PartitionPoolDomainsPass
   let options = [
     Option<"emitAnalysisReport", "emit-analysis-report", "bool",
            /*default=*/"false",
-           "Debug-only: report the read-only domain assignment before "
-           "materialization. Does not change generated IR.">
+           "Debug-only: report the chosen domains before building them. "
+           "Does not change the generated IR.">
   ];
   let dependentDialects = [
     "::mlir::hipsr::HipsrDialect"

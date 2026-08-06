@@ -42,14 +42,8 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
     The pool-domain pass requires placeholders and the DPS ops that use them to
     be directly in the function body. Every tensor init of those DPS ops must
     come from a placeholder. The pass checks these rules before changing the
-    IR. A normal placeholder uses its deepest input domain. A barrier
-    placeholder with an operation dependency advances to the next domain. Its
-    tied DPS consumer remains in the same domain.
-
-    When a placeholder result feeds a shape input in a later domain, the
-    pool-domain pass replaces that input with the tied DPS data result exported
-    from the source domain. Placeholder results are never yielded across domain
-    boundaries.
+    IR. Placeholders do not set domain boundaries. The pass moves each one
+    before the op that uses it.
 
     This op is temporary. It has no bufferization interface and must be replaced
     before bufferization.
