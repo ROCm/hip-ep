@@ -15,10 +15,10 @@ namespace {
 
 // The resource hipsr.preserve_shape writes to. Its own, rather than the default
 // one, because the write is not about memory: the op needs exactly enough of an
-// effect that `wouldOpBeTriviallyDead` says no, and nothing more. A write on the
-// default resource would order against every other memory op in the block, and
-// a write naming the data operand would claim the op touches that buffer, which
-// it does not.
+// effect that `wouldOpBeTriviallyDead` says no, and nothing more. A write on
+// the default resource would order against every other memory op in the block,
+// and a write naming the data operand would claim the op touches that buffer,
+// which it does not.
 struct ShapeMetadataResource
     : public SideEffects::Resource::Base<ShapeMetadataResource> {
   StringRef getName() final { return "hipsr::shape_metadata"; }
