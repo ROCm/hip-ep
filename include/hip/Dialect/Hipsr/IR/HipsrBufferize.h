@@ -12,20 +12,17 @@
 namespace mlir {
 namespace hipsr {
 
-// Bufferization model for hipsr.preserve_shape. The op is not DPS -- it has no
-// results and no init operand -- so DstBufferizableOpInterfaceExternalModel
-// does not apply and the three analysis queries have to be answered by hand.
+// Bufferization model for hipsr.preserve_shape.
+// This op is not DPS: it has no results and no init operand.
+// DstBufferizableOpInterfaceExternalModel does not apply,
+// so the three analysis queries are implemented manually.
 //
-// It records that `$shape` describes `$data` and touches neither, so all three
-// report "nothing happens here". That is what keeps the op from ever forcing a
-// copy on the buffer it names: with no read, no write and no aliasing value,
-// the One-Shot analysis has no conflict to resolve, and a DPS op downstream is
-// still free to write that buffer in place. The op then names whichever buffer
-// its `$data` tensor was folded into, which is the reason it exists.
-//
-// The Write effect the op reports through MemoryEffectOpInterface is a separate
-// mechanism, there only to keep DCE off a result-less op. Bufferization never
-// consults it; it reads the queries below.
+// The op only records that `$shape` describes `$data`.
+// It does not read, write, or create aliases, so all queries return
+// "nothing happens here".
+// This avoids unnecessary buffer copies and allows later DPS ops
+// to write the buffer in place.
+
 struct PreserveShapeBufferizableModel
     : public bufferization::BufferizableOpInterface::ExternalModel<
           PreserveShapeBufferizableModel, PreserveShapeOp> {

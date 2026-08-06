@@ -20,17 +20,4 @@ void PreserveShapeOp::getEffects(
                        SideEffects::DefaultResource::get());
 }
 
-LogicalResult PreserveShapeOp::verify() {
-  auto fromExtents = getShape().getDefiningOp<shape::FromExtentsOp>();
-  if (!fromExtents) {
-    return success();
-  }
-  // check shape.size() == data.rank
-  int64_t extents = static_cast<int64_t>(fromExtents.getExtents().size());
-  int64_t dataRank = cast<ShapedType>(getData().getType()).getRank();
-  if (extents != dataRank) {
-    return emitOpError("shape has ")
-           << extents << " extents but data has rank " << dataRank;
-  }
-  return success();
-}
+LogicalResult PreserveShapeOp::verify() { return success(); }
