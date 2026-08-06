@@ -135,8 +135,9 @@ calculate_return_values(const Graph &graph, const Node &output_node,
   auto args = node_get_output_node_args(output_node);
   auto graph_outputs = morphizen_cxx::GraphConstRef(graph).outputs();
   for (auto arg : args) {
-    if (arg == nullptr) {
-      // for optional outputs
+    if (arg == nullptr || !node_arg_exists(*arg)) {
+      // for optional outputs (nullptr) or empty optional output slots that
+      // carry a non-null but non-existent NodeArg placeholder.
       continue;
     }
     auto &arg_name = node_arg_get_name(*arg);
@@ -284,12 +285,11 @@ check_loop(const Graph &graph, const std::vector<const Node *> &input_nodes,
         if (hit_output) {
           ret = true;
           auto route = map_route[current_node.ptr()];
-          for (size_t i = 0; i < route.size(); i++) {
-            auto node = route[i];
+          for (auto *node : route) {
             auto node_ref =
                 morphizen_cxx::NodeConstRef::from_node(graph, *node);
             maybe_loop_path.push_back(
-                morphizen::node_arg_get_name(node_ref.first_output_node_arg()));
+                node_get_first_existing_output_name(*node_ref.ptr()));
           }
         }
         return false; // leave callback return value
@@ -548,7 +548,13 @@ IPass_try_fuse(const Graph &graph, const std::string &name,
       body_nodes.push_back(island.ptr());
       // insert island's initalizers input args
       for (auto input : node_inputs_1) {
-        if (input.node == nullptr) {
+        // input.node == nullptr covers both real initializers and empty
+        // optional input slots (e.g. DequantizeLinear's optional zero_point in
+        // INT4-quantized models). The latter carry a non-null but non-existent
+        // NodeArg placeholder, so guard node_arg_get_name with node_arg_exists
+        // to avoid the CHECK failure in node_arg.cpp.
+        if (input.node == nullptr && input.node_arg != nullptr &&
+            node_arg_exists(*input.node_arg)) {
           constant_initializers.insert(node_arg_get_name(*input.node_arg));
         }
       }
@@ -597,7 +603,7 @@ IPass_try_fuse(const Graph &graph, const std::string &name,
     meta_def->add_constant_initializers(constant_initializer);
   }
   for (auto node : body_nodes) {
-    meta_def->add_nodes(node_get_first_output_name(*node));
+    meta_def->add_nodes(node_get_first_existing_output_name(*node));
   }
   meta_def->set_device(device);
   return std::make_pair(

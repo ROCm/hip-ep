@@ -128,6 +128,19 @@ const std::string &node_get_first_output_name(const Node &node) {
   return node_arg_get_name(output);
 }
 
+const std::string &node_get_first_existing_output_name(const Node &node) {
+  const std::string *name = nullptr;
+  for (const NodeArg *arg : node_get_output_node_args(node)) {
+    if (arg != nullptr && node_arg_exists(*arg)) {
+      name = &node_arg_get_name(*arg);
+      break;
+    }
+  }
+  CHECK(name != nullptr) << "no existing output NodeArg on node: "
+                         << node_as_string(node);
+  return *name;
+}
+
 bool node_is_op(const Node &node, const std::string &op_type1,
                 const std::string &domain1) {
   auto domain = MORPHIZEN_ORT_API(node_op_domain)(node);
