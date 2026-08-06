@@ -206,10 +206,14 @@ int main(int argc, char** argv) {
   int iters = 120;
   unsigned seed = 1234;
   bool keep_decode_env = false;
+  // Restricting the run to one model isolates it from the GPU clock/thermal
+  // state left behind by the shapes that would otherwise precede it.
+  std::string only;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--iters" && i + 1 < argc) iters = atoi(argv[++i]);
     else if (a == "--seed" && i + 1 < argc) seed = (unsigned)atoi(argv[++i]);
+    else if (a == "--only" && i + 1 < argc) only = argv[++i];
     else if (a == "--keep-decode-env") keep_decode_env = true;
   }
 
@@ -226,11 +230,15 @@ int main(int argc, char** argv) {
   printf("|---|--:|--:|--:|--:|:--|--:|:--|\n");
 
   const int lens[] = {512, 2048, 8192, 32768};
+  auto maybe_run = [&](const Case& c) {
+    if (only.empty() || std::string(c.name).find(only) != std::string::npos)
+      run_case(c, iters, seed, keep_decode_env);
+  };
   for (int L : lens) {
-    run_case({"gpt_oss-20b full",    1, 64, 8,  64, L, L,   0, 1, 0}, iters, seed, keep_decode_env);
-    run_case({"gpt_oss-20b sliding", 1, 64, 8,  64, L, L, 128, 1, 0}, iters, seed, keep_decode_env);
-    run_case({"llama-3.2-1b",        1, 32, 8,  64, L, L,   0, 0, 0}, iters, seed, keep_decode_env);
-    run_case({"llama-3.1-8b",        1, 32, 8, 128, L, L,   0, 0, 0}, iters, seed, keep_decode_env);
+    maybe_run({"gpt_oss-20b full",    1, 64, 8,  64, L, L,   0, 1, 0});
+    maybe_run({"gpt_oss-20b sliding", 1, 64, 8,  64, L, L, 128, 1, 0});
+    maybe_run({"llama-3.2-1b",        1, 32, 8,  64, L, L,   0, 0, 0});
+    maybe_run({"llama-3.1-8b",        1, 32, 8, 128, L, L,   0, 0, 0});
   }
   printf("\nDONE\n");
   return 0;
