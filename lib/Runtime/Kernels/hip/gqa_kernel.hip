@@ -1627,30 +1627,38 @@ gqa_flash_decode_wmma_kernel(
   _Float16* V_lds = K_lds + BKV * DSTR;
   _Float16* P_lds = V_lds + BKV * DSTR;
   float*    ml    = reinterpret_cast<float*>(P_lds + 16 * P_STR);  // [16*3]
-  // INT8 only: this KV head's per-channel scales, staged into LDS once. The
-  // fp16 launcher does NOT reserve this trailing region, so it is untouched.
-  float* ksc_sh = nullptr;
-  float* vsc_sh = nullptr;
-  if constexpr (KV_I8) {
-    ksc_sh = ml + 16 * 3;   // [D]
-    vsc_sh = ksc_sh + D;    // [D]
-    const float* ks = k_scale + (size_t)head_kv * D;
-    const float* vs = v_scale + (size_t)head_kv * D;
-    for (int c = lane; c < D; c += 32) { ksc_sh[c] = ks[c]; vsc_sh[c] = vs[c]; }
-  }
 
   const size_t kv_base = (static_cast<size_t>(batch) * G + head_kv)
                          * static_cast<size_t>(max_seq) * D;
 
   // Q fragments: lane wmma_lane holds row wmma_lane (head_kv*HPG + wmma_lane).
+  // For INT8 the per-channel K scale is folded in here, exactly as the scalar
+  // kernel does: dot = sum_e (Q[e]*Ksc[e]) * K_i8[e]. Q is 16xD per block and
+  // read once, whereas scaling K would cost a multiply per staged element on
+  // every tile. Fragment element e is D-index tk*16+e, which is the channel the
+  // scale is indexed by.
   half16 Q_reg[Q_TILES];
   {
     const bool valid = wmma_lane < HPG;
     const int head = head_kv * HPG + wmma_lane;
     const size_t q_row = (static_cast<size_t>(batch) * H + head) * D;
-    #pragma unroll
-    for (int tk = 0; tk < Q_TILES; ++tk)
-      Q_reg[tk] = valid ? HALF16(Q[q_row + tk * 16]) : half16{};
+    if constexpr (KV_I8) {
+      const float* ks = k_scale + (size_t)head_kv * D;
+      #pragma unroll
+      for (int tk = 0; tk < Q_TILES; ++tk) {
+        half16 q{};
+        if (valid) {
+          #pragma unroll
+          for (int e = 0; e < 16; ++e)
+            q[e] = (_Float16)((float)Q[q_row + tk * 16 + e] * ks[tk * 16 + e]);
+        }
+        Q_reg[tk] = q;
+      }
+    } else {
+      #pragma unroll
+      for (int tk = 0; tk < Q_TILES; ++tk)
+        Q_reg[tk] = valid ? HALF16(Q[q_row + tk * 16]) : half16{};
+    }
   }
 
   if (lane < 16) {
@@ -1658,7 +1666,6 @@ gqa_flash_decode_wmma_kernel(
     ml[lane * 3 + 1] = 0.0f;
     ml[lane * 3 + 2] = 1.0f;
   }
-  if constexpr (KV_I8) __syncthreads();  // ml + scale tables visible to all lanes
 
   float8 O_frag[O_TILES] = {};
 
@@ -1666,12 +1673,15 @@ gqa_flash_decode_wmma_kernel(
   const int num_tiles = (kv_end - kv_start + BKV - 1) / BKV;
 
   // Software pipeline: prefetch the next tile's K/V global loads into registers
-  // while the current tile's GEMMs run (see gqa_flash_decode_wmma.hip rationale).
-  // Only viable when the per-lane register footprint is small (D=64/BKV=16).
-  // For INT8 the prefetch registers stay int8 (KVt) and dequant to fp16 happens
-  // on the LDS write below, keeping the global read at 1 byte/elem.
+  // while the current tile's GEMMs run. For INT8 the prefetch registers stay
+  // int8 (KVt) and widen to fp16 only on the LDS write, so the global read
+  // stays at 1 byte per element.
   constexpr int kPET = (BKV * D) / 32;          // elements per lane per tile
-  constexpr bool kPrefetch = (kPET <= 32);
+  // Budget the prefetch by the register footprint it costs, not by element
+  // count: K and V together hold 2*kPFBytes per lane, so 128 B caps them at
+  // 64 VGPRs. Element count alone would reject D=64/BKV=32, which fits.
+  constexpr int kPFBytes = kPET * (int)sizeof(KVt);
+  constexpr bool kPrefetch = (kPFBytes <= 128);
 
   // A KV row is D*sizeof(KVt) bytes; for D=64 fp16 that is exactly one 128 B
   // gfx1151 cache line. Loading one element per lane only reaches 64 B across
@@ -1724,7 +1734,8 @@ gqa_flash_decode_wmma_kernel(
     const int kv0 = kv_start + t * BKV;
 
     if constexpr (kPrefetch) {
-      // Write the prefetched tile to LDS (int8: dequant to fp16 on the way in).
+      // Write the prefetched tile to LDS (int8 widens to fp16 here; its scales
+      // are applied outside the KV loop).
       #pragma unroll
       for (int s = 0; s < kSlots; ++s) {
         const int i0 = slot_first(s);
@@ -1735,8 +1746,9 @@ gqa_flash_decode_wmma_kernel(
           const KVt kval = k_pf[s * kSlotElems + e];
           const KVt vval = v_pf[s * kSlotElems + e];
           if constexpr (KV_I8) {
-            K_lds[row * DSTR + col] = (_Float16)((float)kval * ksc_sh[col]);
-            V_lds[row * DSTR + col] = (_Float16)((float)vval * vsc_sh[col]);
+            // Raw int8 magnitudes; both scales are applied outside the KV loop.
+            K_lds[row * DSTR + col] = (_Float16)(float)kval;
+            V_lds[row * DSTR + col] = (_Float16)(float)vval;
           } else {
             K_lds[row * DSTR + col] = kval;
             V_lds[row * DSTR + col] = vval;
@@ -1752,8 +1764,8 @@ gqa_flash_decode_wmma_kernel(
         if (kv_pos < kv_end) {
           const size_t off = kv_base + static_cast<size_t>(kv_pos) * D + col;
           if constexpr (KV_I8) {
-            K_lds[row * DSTR + col] = (_Float16)((float)Ksrc[off] * ksc_sh[col]);
-            V_lds[row * DSTR + col] = (_Float16)((float)Vsrc[off] * vsc_sh[col]);
+            K_lds[row * DSTR + col] = (_Float16)(float)Ksrc[off];
+            V_lds[row * DSTR + col] = (_Float16)(float)Vsrc[off];
           } else {
             K_lds[row * DSTR + col] = Ksrc[off];
             V_lds[row * DSTR + col] = Vsrc[off];
@@ -1847,6 +1859,9 @@ gqa_flash_decode_wmma_kernel(
 
   // Epilogue: write UN-normalized partials (m, l, O) per query head row; the
   // shared reduce kernel performs the /l normalization + sink terms.
+  // INT8 applies the deferred per-channel V scale here. O accumulates in fp32
+  // over the KV range for a fixed channel, so one multiply at the end is both
+  // cheaper and more accurate than scaling every staged V element.
   #pragma unroll
   for (int tj = 0; tj < O_TILES; ++tj)
     #pragma unroll
@@ -1857,7 +1872,11 @@ gqa_flash_decode_wmma_kernel(
         const int head_q = head_kv * HPG + r;
         float* pd = partials +
             flash_decode_partial_offset(batch, head_q, split, H, K_SPLITS, D);
-        pd[2 + c] = O_frag[tj][ele];
+        if constexpr (KV_I8) {
+          pd[2 + c] = O_frag[tj][ele] * v_scale[(size_t)head_kv * D + c];
+        } else {
+          pd[2 + c] = O_frag[tj][ele];
+        }
       }
     }
   if (lane < HPG) {
@@ -1981,7 +2000,12 @@ gqa_flash_decode_reduce_kernel(
 // the reduce's per-head serial scan, so cap here.
 static constexpr int kFlashDecodeMaxSplits = 64;
 
-struct FlashDecodeCfg { bool use_wmma; int splits; };
+// bkv is the WMMA KV tile height and only applies to d==64, where both 16 and
+// 32 are instantiated. A taller tile halves the barrier count per KV element
+// but wastes more of the last tile and costs more registers, so which one wins
+// depends on how many tiles a split actually covers; it is autotuned. d==128
+// has only the BKV=32 instantiation and ignores this.
+struct FlashDecodeCfg { bool use_wmma; int splits; int bkv = 16; };
 
 // WMMA decode packs the HpG query heads of a KV group into a 16-row tile, so it
 // only pays off (and is only instantiated) for these geometries:
@@ -2009,8 +2033,8 @@ static inline void launchFlashDecodeConfig(
   const int splits = cfg.splits;
   const bool use_wmma = cfg.use_wmma && flash_decode_wmma_supported(d, hpg);
   if (use_wmma) {
-    // BKV: D=64 -> 16 (small tile, more resident -> better latency hiding);
-    // D=128 -> 32 (direct staging path). Grid (G, splits, B), one wave/block.
+    // BKV: D=64 has both 16 and 32 instantiated and cfg.bkv picks between them;
+    // D=128 has only 32. Grid (G, splits, B), one wave per block.
     auto smem_bytes = [](int D_, int bkv) -> size_t {
       const int DSTR = D_ + 2;
       return (size_t)16 * (bkv + 1) * sizeof(float)
@@ -2025,9 +2049,11 @@ static inline void launchFlashDecodeConfig(
               hQ, hK, hV, nullptr, nullptr, hP, H, G, max_seq, scale, iSeq,    \
               local_window_size, splits)
     if (hpg == 4) {
-      if (d == 128) LAUNCH_DW(128, 4, 32); else LAUNCH_DW(64, 4, 16);
+      if (d == 128) LAUNCH_DW(128, 4, 32);
+      else if (cfg.bkv == 32) LAUNCH_DW(64, 4, 32);
+      else LAUNCH_DW(64, 4, 16);
     } else { /* hpg == 8, d == 64 */
-      LAUNCH_DW(64, 8, 16);
+      if (cfg.bkv == 32) LAUNCH_DW(64, 8, 32); else LAUNCH_DW(64, 8, 16);
     }
     #undef LAUNCH_DW
   } else {
@@ -2175,6 +2201,18 @@ static int flashDecodeDefaultSplits(bool use_wmma, int B, int H, int G, int skv,
   return split_set[n - 1];  // ascending; nothing reaches the target
 }
 
+// A taller WMMA tile pays for itself by halving the barriers per KV element,
+// but it only amortises once a split spans many tiles, and it costs registers
+// and a longer ragged tail. Measured on gfx1151, BKV=32 wins by 4-6% once a
+// split covers a few hundred KV positions and loses by a similar margin below
+// that. Keeping the short-range candidate set exactly as it was also stops the
+// extra candidates from perturbing tuning decisions where they cannot win.
+static inline bool flashDecodeTallTileUseful(int bkv, int kv_range,
+                                             int splits) {
+  if (bkv <= 16) return true;
+  return kv_range / (splits > 0 ? splits : 1) >= 512;
+}
+
 static std::unordered_map<uint64_t, FlashDecodeCfg> g_flash_decode_cache;
 static std::mutex g_flash_decode_mutex;
 
@@ -2292,19 +2330,30 @@ static FlashDecodeCfg tuneFlashDecode(
   FlashDecodeCfg best{wmma_ok && (d == 64), split_set[0]};
   float best_ms = 1e30f;
 
+  // Only d==64 WMMA has a choice of tile height; everything else has one.
+  int bkv_set[2] = {16, 32};
+  const int n_bkv = (wmma_ok && d == 64) ? 2 : 1;
+
   for (int ii = 0; ii < 2; ++ii) {
     if (impls[ii] && !wmma_ok) continue;  // skip WMMA where it isn't templated
-    for (int si = 0; si < n_splits; ++si) {
-      FlashDecodeCfg cfg{impls[ii], split_set[si]};
-      const float ms = timeDecodeCandidate(stream, [&] {
-        launchFlashDecodeConfig(cfg, stream, hQ, hK, hV, hO, hP, B, H, G, d, hpg,
-                                max_seq, scale, iSeq, local_window_size, hSink,
-                                use_smooth_softmax);
-      });
-      CUSTOM_KERNELS_DEBUG_LOG(
-          "[custom_kernels]   flash_decode cand impl=%-6s splits=%2d : %.4f ms\n",
-          cfg.use_wmma ? "wmma" : "scalar", cfg.splits, ms);
-      if (ms < best_ms) { best_ms = ms; best = cfg; }
+    const int bkv_count = impls[ii] ? n_bkv : 1;
+    for (int bi = 0; bi < bkv_count; ++bi) {
+      for (int si = 0; si < n_splits; ++si) {
+        if (!flashDecodeTallTileUseful(bkv_set[bi], skv, split_set[si]))
+          continue;
+        FlashDecodeCfg cfg{impls[ii], split_set[si], bkv_set[bi]};
+        const float ms = timeDecodeCandidate(stream, [&] {
+          launchFlashDecodeConfig(cfg, stream, hQ, hK, hV, hO, hP, B, H, G, d,
+                                  hpg, max_seq, scale, iSeq, local_window_size,
+                                  hSink, use_smooth_softmax);
+        });
+        CUSTOM_KERNELS_DEBUG_LOG(
+            "[custom_kernels]   flash_decode cand impl=%-6s splits=%2d bkv=%2d "
+            ": %.4f ms%s\n",
+            cfg.use_wmma ? "wmma" : "scalar", cfg.splits, cfg.bkv, ms,
+            ms < best_ms ? "  <-- best so far" : "");
+        if (ms < best_ms) { best_ms = ms; best = cfg; }
+      }
     }
   }
 
@@ -2442,6 +2491,9 @@ extern "C" int hip_gqa_flash_decode(
   if (const char* e = getenv("HIPDNN_GQA_DECODE_SPLITS")) {
     int v = atoi(e); if (v >= 1) { cfg.splits = v > cap ? cap : v; forced = true; }
   }
+  if (const char* e = getenv("HIPDNN_GQA_DECODE_BKV")) {
+    int v = atoi(e); if (v == 16 || v == 32) { cfg.bkv = v; forced = true; }
+  }
   bool no_autotune = false;
   if (const char* e = getenv("HIPDNN_GQA_DECODE_NOAUTOTUNE")) no_autotune = (atoi(e) != 0);
 
@@ -2520,8 +2572,7 @@ static inline void launchFlashDecodeConfigI8(
       return (size_t)16 * (bkv + 1) * sizeof(float)
            + (size_t)2 * bkv * DSTR * sizeof(_Float16)
            + (size_t)16 * (bkv + 2) * sizeof(_Float16)
-           + (size_t)16 * 3 * sizeof(float)
-           + (size_t)2 * D_ * sizeof(float);  // ksc_sh + vsc_sh
+           + (size_t)16 * 3 * sizeof(float);
     };
     dim3 grid_wmma((unsigned)G, (unsigned)splits, (unsigned)B);
     #define LAUNCH_DW_I8(D_, HPG_, BKV_)                                        \
@@ -2530,9 +2581,11 @@ static inline void launchFlashDecodeConfigI8(
               hQ, hK, hV, kSc, vSc, hP, H, G, max_seq, scale, iSeq,             \
               local_window_size, splits)
     if (hpg == 4) {
-      if (d == 128) LAUNCH_DW_I8(128, 4, 32); else LAUNCH_DW_I8(64, 4, 16);
+      if (d == 128) LAUNCH_DW_I8(128, 4, 32);
+      else if (cfg.bkv == 32) LAUNCH_DW_I8(64, 4, 32);
+      else LAUNCH_DW_I8(64, 4, 16);
     } else { /* hpg == 8, d == 64 */
-      LAUNCH_DW_I8(64, 8, 16);
+      if (cfg.bkv == 32) LAUNCH_DW_I8(64, 8, 32); else LAUNCH_DW_I8(64, 8, 16);
     }
     #undef LAUNCH_DW_I8
   } else {
@@ -2595,19 +2648,29 @@ static FlashDecodeCfg tuneFlashDecodeI8(
   FlashDecodeCfg best{wmma_ok && (d == 64), split_set[0]};
   float best_ms = 1e30f;
 
+  int bkv_set[2] = {16, 32};
+  const int n_bkv = (wmma_ok && d == 64) ? 2 : 1;
+
   for (int ii = 0; ii < 2; ++ii) {
     if (impls[ii] && !wmma_ok) continue;
-    for (int si = 0; si < n_splits; ++si) {
-      FlashDecodeCfg cfg{impls[ii], split_set[si]};
-      const float ms = timeDecodeCandidate(stream, [&] {
-        launchFlashDecodeConfigI8(cfg, stream, hQ, hK, hV, kSc, vSc, hO, hP,
-                                  B, H, G, d, hpg, max_seq, scale, iSeq,
-                                  local_window_size, hSink, use_smooth_softmax);
-      });
-      CUSTOM_KERNELS_DEBUG_LOG(
-          "[custom_kernels]   flash_decode_i8 cand impl=%-6s splits=%2d : %.4f ms\n",
-          cfg.use_wmma ? "wmma" : "scalar", cfg.splits, ms);
-      if (ms < best_ms) { best_ms = ms; best = cfg; }
+    const int bkv_count = impls[ii] ? n_bkv : 1;
+    for (int bi = 0; bi < bkv_count; ++bi) {
+      for (int si = 0; si < n_splits; ++si) {
+        if (!flashDecodeTallTileUseful(bkv_set[bi], skv, split_set[si]))
+          continue;
+        FlashDecodeCfg cfg{impls[ii], split_set[si], bkv_set[bi]};
+        const float ms = timeDecodeCandidate(stream, [&] {
+          launchFlashDecodeConfigI8(cfg, stream, hQ, hK, hV, kSc, vSc, hO, hP,
+                                    B, H, G, d, hpg, max_seq, scale, iSeq,
+                                    local_window_size, hSink,
+                                    use_smooth_softmax);
+        });
+        CUSTOM_KERNELS_DEBUG_LOG(
+            "[custom_kernels]   flash_decode_i8 cand impl=%-6s splits=%2d "
+            "bkv=%2d : %.4f ms\n",
+            cfg.use_wmma ? "wmma" : "scalar", cfg.splits, cfg.bkv, ms);
+        if (ms < best_ms) { best_ms = ms; best = cfg; }
+      }
     }
   }
   return best;
