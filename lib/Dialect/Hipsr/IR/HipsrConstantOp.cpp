@@ -3,14 +3,13 @@
  * Licensed under the MIT License.
  */
 
-#include "hip/Dialect/Hipsr/IR/HipsrConstantOp.h"
+#include "hip/Conversion/HipsrToLLVM/HipsrToLLVM.h"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "mlir/Conversion/LLVMCommon/MemRefBuilder.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
-#include "mlir/Dialect/LLVMIR/FunctionCallUtils.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
-#include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Transforms/DialectConversion.h"
 
 using namespace mlir;
@@ -34,9 +33,6 @@ LogicalResult ConstantOp::verify() {
   return success();
 }
 
-#define GET_OP_CLASSES
-#include "hip/Dialect/Hipsr/IR/HipsrConstantOp.cpp.inc"
-
 namespace {
 
 constexpr const char *kHipsrGetConstant = "hipdnn_ep_constant_get";
@@ -56,9 +52,6 @@ struct ConstantLowering : public ConvertOpToLLVMPattern<ConstantOp> {
 
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
-    MLIRContext *ctx = rewriter.getContext();
-    Type ptrType = LLVM::LLVMPointerType::get(ctx, 0);
-    Type i64Type = IntegerType::get(ctx, 64);
 
     auto memRefType = dyn_cast<MemRefType>(op.getResult().getType());
     if (!memRefType) {
@@ -78,34 +71,19 @@ struct ConstantLowering : public ConvertOpToLLVMPattern<ConstantOp> {
     }
     Value ctxArg = llvmFn.getArgument(0);
 
-    Value indexVal = LLVM::ConstantOp::create(
-        rewriter, loc, i64Type,
-        rewriter.getI64IntegerAttr(op.getIndexAttr().getInt()));
-
-    SmallVector<Type, 2> paramTypes = {ptrType, i64Type};
-    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
-        rewriter, module, kHipsrGetConstant, paramTypes, ptrType);
-    if (failed(funcOp)) {
+    using ConstantCall = RuntimeFunc<devicePtr, hostPtr, i64>;
+    auto constantFunc = ConstantCall::lookupOrCreateFn(rewriter, loc, module,
+                                                       kHipsrGetConstant);
+    if (failed(constantFunc)) {
+      return failure();
+    }
+    FailureOr<Value> dataPtr =
+        constantFunc->call(ctxArg, op.getIndexAttr().getInt());
+    if (failed(dataPtr)) {
       return failure();
     }
 
-    SmallVector<Value, 2> args = {ctxArg, indexVal};
-    auto callOp = LLVM::CallOp::create(rewriter, loc, *funcOp, args);
-
-    FailureOr<unsigned> addrSpace =
-        getTypeConverter()->getMemRefAddressSpace(memRefType);
-    if (failed(addrSpace)) {
-      return failure();
-    }
-
-    Value dataPtr = callOp.getResult();
-    // TODO: hipdnn_ep_constant_get should return !llvm.ptr<1> so this cast is
-    // unnecessary.
-    if (*addrSpace != 0) {
-      dataPtr = LLVM::AddrSpaceCastOp::create(
-          rewriter, loc, LLVM::LLVMPointerType::get(ctx, *addrSpace), dataPtr);
-    }
-
+    Type i64Type = rewriter.getI64Type();
     auto shape = memRefType.getShape();
     SmallVector<Value, 4> sizes;
     SmallVector<Value, 4> strides;
@@ -122,7 +100,7 @@ struct ConstantLowering : public ConvertOpToLLVMPattern<ConstantOp> {
     }
 
     MemRefDescriptor desc = createMemRefDescriptor(
-        loc, memRefType, dataPtr, dataPtr, sizes, strides, rewriter);
+        loc, memRefType, *dataPtr, *dataPtr, sizes, strides, rewriter);
     rewriter.replaceOp(op, {desc});
     return success();
   }

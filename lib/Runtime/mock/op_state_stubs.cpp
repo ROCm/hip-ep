@@ -21,6 +21,12 @@ namespace {
 struct MockOpState : OpStateT<MockOpState> {};
 } // namespace
 
+// ZpUnpackCache teardown: real runtime deletes a ZpUnpackCache allocated
+// in real/matmul_nbits.cpp. The mock never creates one, so this is a no-op
+// (the cache pointer is always null under mock). Called from
+// hipdnn_ep_state_cleanup in the shared runtime_state TU.
+extern "C" void hipdnn_ep_zp_unpack_cache_destroy(void * /*cache_ptr*/) {}
+
 // MatMulNBits: real runtime owns a zero_points unpack cache (MatmulNbitsState
 // in real/matmul_nbits.cpp); the mock owns no device memory.
 extern "C" int8_t hipdnn_ep_op_state_construct_matmul_nbits(RuntimeState *state,

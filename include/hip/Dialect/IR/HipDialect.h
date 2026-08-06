@@ -16,6 +16,8 @@
 #include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
+#include "llvm/ADT/StringRef.h"
+
 #include "hip/Dialect/IR/HipDialect.h.inc"
 
 #define GET_TYPEDEF_CLASSES
@@ -32,6 +34,28 @@
 
 namespace mlir {
 namespace hip {
+/// Discardable attribute names stamped on `hip.alloc_output` by
+/// `hip-use-output-allocator` and consumed by `AllocOutputOpLowering`. They
+/// describe the ONNX / func.return ("ABI") output shape when it differs from
+/// the internal compute buffer rank:
+///   * **Collapse** (internal rank > external): `abi_groups` has one entry per
+///     **external** dim -- how many consecutive **internal** dims it folds.
+///   * **Expand** (internal rank < external): `abi_groups` has one entry per
+///     **internal** dim -- how many consecutive **external** dims it expands
+///     into.
+///
+/// The mapping is captured while the view reassociation is still explicit,
+/// i.e. BEFORE `expand-strided-metadata` decomposes the view op. The lowering
+/// re-computes each external dim from the internal alloc sizes (which
+/// dominate):
+///   kAbiShapeAttrName  : DenseI64ArrayAttr -- external (ONNX) shape.
+///   kAbiGroupsAttrName : DenseI64ArrayAttr -- reassociation group sizes; see
+///                        collapse vs expand semantics above (entries sum to
+///                        internal rank for collapse, external rank for
+///                        expand).
+inline constexpr ::llvm::StringLiteral kAbiShapeAttrName = "hipdnn.abi_shape";
+inline constexpr ::llvm::StringLiteral kAbiGroupsAttrName = "hipdnn.abi_groups";
+
 /// Shared helper for `OpStateOpInterface::generateOpStateInit` bodies: declare
 /// (or look up) the extern construct symbol `ctorSymbol` with signature
 /// `(RuntimeState*, i32 slot, i64 x N) -> i8`, emit the call passing

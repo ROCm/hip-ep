@@ -95,12 +95,19 @@ ort-bridge): preserve unranked tensors at the ORT boundary`).
   operand types via the value's MLIR type, not from a separate
   declared field. Converters that genuinely require a ranked operand
   (e.g. those that index into a specific dim to size a `tensor.empty`)
-  bail on unranked input; the rank gap is closed by the next pass.
+  bail on unranked input.
+- **`--hip-infer-loop-body-shapes`**
+  (`lib/Dialect/Transforms/InferLoopBodyShapesPass.cpp`) runs before
+  ONNX-to-HIP conversion. It seeds outlined-loop carried arguments from
+  `v_init`, forward-infers supported unranked ONNX results (currently
+  `onnx.Concat`), and applies the ONNX loop-carried type contract as a
+  backstop. This is the EP's narrow rank-establishment stage.
 - **`--hip-infer-shapes`** (lib/Dialect/Transforms/InferShapesPass.cpp)
-  refines unranked / under-refined HIP DPS op result types from the
-  shapes reified by `ReifyRankedShapedTypeOpInterface` on each op,
-  and runs `refineLoopSignatures` (Phase 2) to sync `hip.loop` body
-  signatures with v_init types after HIP-dialect conversion. See
+  narrows dynamic dimensions (`?`) on already-ranked HIP DPS result
+  types from shapes reified by `ReifyRankedShapedTypeOpInterface`.
+  It does not convert `UnrankedTensorType` into a ranked type. Phase 2
+  synchronizes `hip.loop` body signatures with `v_init` types after
+  HIP-dialect conversion. See
   [`hip-shape-inference.md`](hip-shape-inference.md) for the full
   pass design.
 - **`--onnx-loop-outline`** (lib/Conversion/OnnxToHip/LoopOutline.cpp)
@@ -109,8 +116,9 @@ ort-bridge): preserve unranked tensors at the ORT boundary`).
   body block arg types — so `hip.loop`'s `result_type[i] ==
   v_init[i].type` invariant holds at outline-pass exit even when the
   body block arg is unranked. Cloned body ops keep their source-IR
-  result types (typically unranked); `--hip-infer-shapes` refines
-  them post-conversion.
+  result types (typically unranked);
+  `--hip-infer-loop-body-shapes` establishes the required rank before
+  conversion.
 
 ## Pipeline ordering
 
@@ -120,12 +128,19 @@ ONNX file → ort-bridge → mlir-imp → MLIR module → onnx-to-hip-pipeline
                                        (with        ├─ simplify-onnx
                                         tensor<*x>  ├─ hip-add-context-arg
                                         for unknown ├─ onnx-loop-outline
-                                        ranks)      ├─ convert-onnx-to-hip
+                                        ranks)      ├─ onnx-if-outline
+                                                    ├─ hip-infer-loop-body-shapes
+                                                    ├─ convert-onnx-to-hip
                                                     │  (tail:)
-                                                    ├─ hip-infer-shapes  ← single refinement
+                                                    ├─ hip-infer-shapes
+                                                    ├─ canonicalize ; CSE
+                                                    ├─ hip-split-duplicate-dps-inits
+                                                    ├─ hip-resolve-tensor-dims
                                                     ├─ one-shot-bufferize
-                                                    ├─ buffer-deallocation
+                                                    ├─ hip-use-output-allocator
                                                     ├─ hip-optimize-memrefs
+                                                    ├─ hip-materialize-host-scalars
+                                                    ├─ hip-resolve-memref-dims
                                                     ├─ hip-pool-allocs
                                                     └─ ...
                                                   → hip-to-llvm-pipeline
@@ -135,10 +150,11 @@ ONNX file → ort-bridge → mlir-imp → MLIR module → onnx-to-hip-pipeline
                                                     └─ generate-interface
 ```
 
-The single refinement step on the EP side is `--hip-infer-shapes`,
-which runs once at the head of the ONNX-to-HIP pipeline tail
-(immediately after `--convert-onnx-to-hip`, before bufferize). There
-is no per-dialect ONNX-level inference pass.
+The EP uses two deliberately narrow stages: pre-conversion
+`--hip-infer-loop-body-shapes` establishes rank where outlined-loop
+conversion requires it; post-conversion `--hip-infer-shapes` narrows
+`?` dimensions within already-known ranks. There is no general
+ONNX-level inference pass in the EP.
 
 ## Why we don't run ONNX shape inference in the EP
 
@@ -161,15 +177,14 @@ deliberately do not:
    unregistered ONNX dialect that lacks the OpInterface scaffolding
    (`InferTypeOpInterface`, `ShapeInferenceOpInterface`) that
    upstream projects (onnx-mlir, torch-mlir, TOSA) rely on.
-3. **The HIP-side refinement already covers it.** Once
-   `--convert-onnx-to-hip` produces HIP ops, those ops carry
-   `ReifyRankedShapedTypeOpInterface` and `--hip-infer-shapes` walks
-   them to refine unranked → ranked result types. This works because
-   HIP DPS ops have ranked operands (the `outs` operand types come
-   from preceding ops or from `tensor.empty` with explicit shape),
-   and the result shape is a function of operand shapes via the
-   helpers in `lib/Dialect/IR/HipShapeUtils.cpp`. A single pass closes
-   the gap for every HIP op the converter emits.
+3. **The two HIP-side stages close the supported gap.**
+   `--hip-infer-loop-body-shapes` establishes rank before conversion
+   for the outlined-loop patterns that need it. Once
+   `--convert-onnx-to-hip` produces HIP ops,
+   `ReifyRankedShapedTypeOpInterface` and `--hip-infer-shapes` narrow
+   dynamic dimensions without inventing runtime-dependent extents.
+   Unsupported interior ONNX rank gaps remain explicit conversion
+   failures rather than being guessed post-conversion.
 
 The historical workaround `--onnx-infer-shapes`, with its op-name
 keyed rules library (`RefineOnnxResultType.{cpp,h}`), was deleted once
@@ -207,14 +222,17 @@ Two end-to-end signals tell you the contract is healthy:
    should be `tensor<*xT>` (unranked) or genuinely ranked, never
    rank-0 unless the ONNX source genuinely declared a scalar.
 
-2. **`--hip-infer-shapes` refines all unranked HIP ops.** After the
-   `--onnx-to-hip-pipeline` runs, every HIP-dialect op result type
-   should be `RankedTensorType` (with `?` dynamic dims allowed). If a
-   HIP op result type is `UnrankedTensorType` after pipeline exit,
-   either the converter that produced it doesn't propagate operand
-   shapes, or `ReifyRankedShapedTypeOpInterface` is missing on that
-   op kind. Both are `--hip-infer-shapes`-side bugs to fix; they are
-   never resolved by reintroducing ONNX-level inference.
+2. **Rank-required loop-body ops are ranked before conversion.** After
+   `--hip-infer-loop-body-shapes`, supported loop-carried ONNX results
+   should be `RankedTensorType` (with `?` dynamic dims allowed). An
+   unranked value that reaches a rank-requiring converter indicates a
+   missing pre-conversion rule or an importer contract gap.
+
+3. **`--hip-infer-shapes` only narrows ranked HIP results.** After the
+   ONNX-to-HIP pipeline, HIP DPS result types should remain ranked,
+   with any non-reifiable runtime extents represented by `?`.
+   `ReifyRankedShapedTypeOpInterface` bugs affect dimension refinement;
+   they are not repaired by reintroducing ONNX-level shape inference.
 
 The LIT case `test_loop_outline.mlir`'s `vision_encoder_loop` test
 pins the outline-time half of the contract (v_init drives the body

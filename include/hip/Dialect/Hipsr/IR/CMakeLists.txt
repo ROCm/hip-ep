@@ -19,37 +19,9 @@ set(LLVM_TARGET_DEFINITIONS HipsrEndBarrierInterface.td)
 mlir_tablegen(HipsrEndBarrierInterface.h.inc -gen-op-interface-decls)
 mlir_tablegen(HipsrEndBarrierInterface.cpp.inc -gen-op-interface-defs)
 
-set(LLVM_TARGET_DEFINITIONS HipsrShapeYieldOp.td)
-mlir_tablegen(HipsrShapeYieldOp.h.inc -gen-op-decls)
-mlir_tablegen(HipsrShapeYieldOp.cpp.inc -gen-op-defs)
-
 set(LLVM_TARGET_DEFINITIONS HipsrOps.td)
 mlir_tablegen(HipsrOps.h.inc -gen-op-decls)
 mlir_tablegen(HipsrOps.cpp.inc -gen-op-defs)
-
-set(LLVM_TARGET_DEFINITIONS HipsrPoolDomainYieldOp.td)
-mlir_tablegen(HipsrPoolDomainYieldOp.h.inc -gen-op-decls)
-mlir_tablegen(HipsrPoolDomainYieldOp.cpp.inc -gen-op-defs)
-
-set(LLVM_TARGET_DEFINITIONS HipsrPoolDomainOp.td)
-mlir_tablegen(HipsrPoolDomainOp.h.inc -gen-op-decls)
-mlir_tablegen(HipsrPoolDomainOp.cpp.inc -gen-op-defs)
-
-set(LLVM_TARGET_DEFINITIONS HipsrConstantOp.td)
-mlir_tablegen(HipsrConstantOp.h.inc -gen-op-decls)
-mlir_tablegen(HipsrConstantOp.cpp.inc -gen-op-defs)
-
-set(LLVM_TARGET_DEFINITIONS HipsrCastOp.td)
-mlir_tablegen(HipsrCastOp.h.inc -gen-op-decls)
-mlir_tablegen(HipsrCastOp.cpp.inc -gen-op-defs)
-
-set(LLVM_TARGET_DEFINITIONS HipsrMatMulOp.td)
-mlir_tablegen(HipsrMatMulOp.h.inc -gen-op-decls)
-mlir_tablegen(HipsrMatMulOp.cpp.inc -gen-op-defs)
-
-set(LLVM_TARGET_DEFINITIONS HipsrPlaceholderOp.td)
-mlir_tablegen(HipsrPlaceholderOp.h.inc -gen-op-decls)
-mlir_tablegen(HipsrPlaceholderOp.cpp.inc -gen-op-defs)
 
 add_public_tablegen_target(HipsrDialectIncGen)
 

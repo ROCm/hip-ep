@@ -219,6 +219,29 @@ getContextArg(mlir::Operation *op, mlir::PatternRewriter &rewriter) {
   return ctx;
 }
 
+/// Map an MLIR element type onto the HIPDNN_EP_DATATYPE_* enum that runtime
+/// wrappers take as an `input_data_type` argument. Only the subset needed by
+/// the converters that scan a raw buffer (hip.nonzero, and the Compress
+/// selected-count scan built on top of it) is enumerated; any other element
+/// type returns -1 so the caller fails conversion explicitly instead of
+/// silently mis-classifying the buffer.
+inline int64_t getHipdnnInputDataType(mlir::Type elemType) {
+  if (elemType.isF32())
+    return 0; // HIPDNN_EP_DATATYPE_FLOAT
+  if (elemType.isF16())
+    return 1; // HIPDNN_EP_DATATYPE_HALF
+  if (elemType.isInteger(32))
+    return 3; // HIPDNN_EP_DATATYPE_INT32
+  if (elemType.isInteger(64))
+    return 4; // HIPDNN_EP_DATATYPE_INT64
+  if (elemType.isUnsignedInteger(8))
+    return 7; // HIPDNN_EP_DATATYPE_UINT8 (ORT bool, ui8)
+  if (elemType.isInteger(1) || elemType.isSignedInteger(8) ||
+      elemType.isSignlessInteger(8))
+    return 5; // HIPDNN_EP_DATATYPE_INT8 (bool/i1, signed/signless i8)
+  return -1;
+}
+
 /// Build a hip.gqa op for the Whisper-MHA / Whisper-encoder-Attention paths.
 ///
 /// Emits one `hip.gqa` op with the 19-slot AttrSizedOperandSegments layout
@@ -306,10 +329,14 @@ void populateReduceSumConversionPatterns(RewritePatternSet &patterns,
                                          MLIRContext *ctx);
 void populateReduceMeanConversionPatterns(RewritePatternSet &patterns,
                                           MLIRContext *ctx);
+void populateReduceL2ConversionPatterns(RewritePatternSet &patterns,
+                                        MLIRContext *ctx);
 void populateMatMulNBitsConversionPatterns(RewritePatternSet &patterns,
                                            MLIRContext *ctx);
 void populateQMoEConversionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+void populateGatherBlockQuantizedPreparePatterns(RewritePatternSet &patterns,
+                                                 MLIRContext *ctx);
 void populateGatherBlockQuantizedConversionPatterns(RewritePatternSet &patterns,
                                                     MLIRContext *ctx);
 void populateConvConversionPatterns(RewritePatternSet &patterns,

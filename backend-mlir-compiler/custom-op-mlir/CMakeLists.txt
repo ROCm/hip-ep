@@ -17,11 +17,17 @@ if(HIPDNN_EP_LINK_HIP_HOST)
   find_package(hip CONFIG REQUIRED)
 endif()
 
-# Re-import LLVM into this scope (already resolved transitively via
-# morphizen) so llvm_map_components_to_libnames works here.
-find_package(LLVM REQUIRED CONFIG)
-list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
-include(AddLLVM)
+# Re-import LLVM only when it comes from an external prefix. In the embedded
+# (from-source FetchContent) build LLVM_DIR is unset, and a find_package here
+# would wrongly resolve TheRock's LLVM from CMAKE_PREFIX_PATH -- mixing two
+# LLVMs into the EP DLL and crashing LLJIT in detectHost/~TargetOptions.
+# In that mode the parent scope already provides LLVM_INCLUDE_DIRS, AddLLVM,
+# and the LLVM targets, so just reuse them (as lib/Compiler etc. do).
+if(NOT HIPDNN_LLVM_EMBEDDED)
+  find_package(LLVM REQUIRED CONFIG)
+  list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
+  include(AddLLVM)
+endif()
 
 # Both RuntimeDyld and JITLink are required: LLJIT auto-selects the object
 # linking layer by triple -- RuntimeDyld on Windows (x86_64 COFF), JITLink on

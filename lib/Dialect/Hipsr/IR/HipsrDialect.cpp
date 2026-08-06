@@ -5,14 +5,8 @@
 
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 
-#include "hip/Dialect/Hipsr/IR/HipsrCastOp.h"
-#include "hip/Dialect/Hipsr/IR/HipsrConstantOp.h"
-#include "hip/Dialect/Hipsr/IR/HipsrMatMulOp.h"
+#include "hip/Conversion/HipsrToLLVM/HipsrToLLVM.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
-#include "hip/Dialect/Hipsr/IR/HipsrPlaceholderOp.h"
-#include "hip/Dialect/Hipsr/IR/HipsrPoolDomainOp.h"
-#include "hip/Dialect/Hipsr/IR/HipsrPoolDomainYieldOp.h"
-#include "hip/Dialect/Hipsr/IR/HipsrShapeYieldOp.h"
 
 #include "llvm/ADT/TypeSwitch.h"
 
@@ -42,25 +36,7 @@ using namespace mlir::hipsr;
 void HipsrDialect::initialize() {
   addOperations<
 #define GET_OP_LIST
-#include "hip/Dialect/Hipsr/IR/HipsrShapeYieldOp.cpp.inc"
-      ,
-#define GET_OP_LIST
-#include "hip/Dialect/Hipsr/IR/HipsrPoolDomainYieldOp.cpp.inc"
-      ,
-#define GET_OP_LIST
-#include "hip/Dialect/Hipsr/IR/HipsrPoolDomainOp.cpp.inc"
-      ,
-#define GET_OP_LIST
-#include "hip/Dialect/Hipsr/IR/HipsrConstantOp.cpp.inc"
-      ,
-#define GET_OP_LIST
-#include "hip/Dialect/Hipsr/IR/HipsrCastOp.cpp.inc"
-      ,
-#define GET_OP_LIST
-#include "hip/Dialect/Hipsr/IR/HipsrMatMulOp.cpp.inc"
-      ,
-#define GET_OP_LIST
-#include "hip/Dialect/Hipsr/IR/HipsrPlaceholderOp.cpp.inc"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.cpp.inc"
       >();
   addAttributes<
 #define GET_ATTRDEF_LIST
@@ -98,6 +74,10 @@ namespace {
 void populateHipsrToLLVMPatterns(const LLVMTypeConverter &typeConverter,
                                  RewritePatternSet &patterns) {
   populateHipsrConstantLoweringPatterns(typeConverter, patterns);
+  populateHipsrAddLoweringPatterns(typeConverter, patterns);
+  populateHipsrGetPoolLoweringPatterns(typeConverter, patterns);
+  populateHipsrCastLoweringPatterns(typeConverter, patterns);
+  populateHipsrMatMulLoweringPatterns(typeConverter, patterns);
 }
 
 struct HipsrConvertToLLVMInterface : public ConvertToLLVMPatternInterface {
@@ -119,6 +99,9 @@ struct HipsrConvertToLLVMInterface : public ConvertToLLVMPatternInterface {
           return IntegerAttr::get(IntegerType::get(space.getContext(), 64),
                                   static_cast<int64_t>(space.getKind()));
         });
+    typeConverter.addConversion([](ContextType type) -> Type {
+      return LLVM::LLVMPointerType::get(type.getContext(), 0);
+    });
     target.addIllegalDialect<HipsrDialect>();
     populateHipsrToLLVMPatterns(typeConverter, patterns);
   }

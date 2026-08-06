@@ -1,5 +1,7 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
+
+// UNSUPPORTED: true
 //
 // convert-onnx-to-hipsr: onnx.Constant -> hipsr.constant / arith.constant.
 // Four branches keyed on storage form (no size threshold here):

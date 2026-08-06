@@ -31,8 +31,8 @@
 //
 // Assumes per-iter chunks tile the output axis in order (so seqlens_k[iter] is
 // the chunk start) and v_init is pre-sized to full capacity (the canonical
-// `Slice(x, k, k, axis) -> Loop` pattern). Runs after buffer-deallocation (the
-// alias only exists post-out-param-promotion) and before the pool/hoist passes.
+// `Slice(x, k, k, axis) -> Loop` pattern). Runs after out-param promotion (the
+// alias only exists after that rewrite) and before the pool/hoist passes.
 //
 //===----------------------------------------------------------------------===//
 

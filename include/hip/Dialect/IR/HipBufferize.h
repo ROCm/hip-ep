@@ -152,6 +152,7 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
     ReduceMaxOp::attachInterface<HipDstBufferizableModel<ReduceMaxOp>>(*ctx);
     ReduceMinOp::attachInterface<HipDstBufferizableModel<ReduceMinOp>>(*ctx);
     ReduceMeanOp::attachInterface<HipDstBufferizableModel<ReduceMeanOp>>(*ctx);
+    ReduceL2Op::attachInterface<HipDstBufferizableModel<ReduceL2Op>>(*ctx);
     MatMulNBitsOp::attachInterface<HipDstBufferizableModel<MatMulNBitsOp>>(
         *ctx);
     QMoEOp::attachInterface<HipDstBufferizableModel<QMoEOp>>(*ctx);

@@ -81,6 +81,21 @@ static int64_t alignTo(int64_t value, int64_t alignment) {
   return (value + alignment - 1) / alignment * alignment;
 }
 
+// DenseElementsAttr::getFromRawBuffer requires signless integer (or index)
+// element types. Applied only on the inline materialization path; extern
+// memref globals keep ui8/si8 so GBQ lowering preserves unsigned semantics.
+static mlir::RankedTensorType
+signlessRankedTypeForDenseBuffer(mlir::RankedTensorType tensorType) {
+  mlir::Type elem = tensorType.getElementType();
+  if (auto intTy = mlir::dyn_cast<mlir::IntegerType>(elem)) {
+    if (!intTy.isSignless())
+      return mlir::RankedTensorType::get(
+          tensorType.getShape(),
+          mlir::IntegerType::get(tensorType.getContext(), intTy.getWidth()));
+  }
+  return tensorType;
+}
+
 /// Mutable state shared across calls to lowerOnnxConstants when
 /// externalization is enabled. Constants are collected here during the
 /// walk; the finalize step in runOnOperation emits either constants.bin
@@ -350,13 +365,16 @@ resolveExternalLocationConstant(mlir::ModuleOp module, mlir::Operation *constOp,
         reinterpret_cast<const void *>(static_cast<uintptr_t>(offsetVal));
 
     if (extState) {
+      // Keep ui8/si8 on extern globals so GBQ lowering preserves unsigned vs
+      // signed storage semantics (see GatherBlockQuantizedLowering).
       externalizeConstant(module, constOp, tensorType, dataPtr, dataSize,
                           extState);
     } else {
+      auto denseType = signlessRankedTypeForDenseBuffer(tensorType);
       auto rawData =
           llvm::ArrayRef<char>(static_cast<const char *>(dataPtr), dataSize);
       auto denseAttr =
-          mlir::DenseElementsAttr::getFromRawBuffer(tensorType, rawData);
+          mlir::DenseElementsAttr::getFromRawBuffer(denseType, rawData);
       replaceWithArithConstant(constOp, denseAttr);
     }
     return mlir::success();
@@ -374,6 +392,7 @@ resolveExternalLocationConstant(mlir::ModuleOp module, mlir::Operation *constOp,
     return mlir::success();
   }
 
+  tensorType = signlessRankedTypeForDenseBuffer(tensorType);
   std::vector<char> buf(static_cast<size_t>(dataSize));
   std::ifstream ifs(location.str(), std::ios::binary);
   if (!ifs)
@@ -478,6 +497,7 @@ static mlir::LogicalResult convertComputeOps(mlir::func::FuncOp funcOp,
   populateCastConversionPatterns(patterns, ctx);
   populateReduceSumConversionPatterns(patterns, ctx);
   populateReduceMeanConversionPatterns(patterns, ctx);
+  populateReduceL2ConversionPatterns(patterns, ctx);
   populateGatherConversionPatterns(patterns, ctx);
   populateCompressConversionPatterns(patterns, ctx);
   populateOneHotConversionPatterns(patterns, ctx);
@@ -745,6 +765,9 @@ void ConvertOnnxToHipPass::runOnOperation() {
     //     AveragePool decomposition's emitted Reshape feeds the next
     //     round's ReduceMean handling), so the set is applied in a
     //     fixed-point loop until quiescence rather than a single pass.
+    //   * GatherBlockQuantized INT4 legalize (packed-byte weight shapes,
+    //     unsigned_quant_storage, quantize_axis inference) on
+    //     com.microsoft.GatherBlockQuantized custom ops.
     // All patterns are value-based and require the literal constants to
     // still be inline in `onnx.Constant` `value` attributes — once the
     // constants are externalized to memref.get_global the matchers break.
@@ -787,6 +810,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
       for (int round = 0; round < kMaxRounds; ++round) {
         mlir::RewritePatternSet preLoweringPatterns(ctx);
         populateGatherShapeFoldPatterns(preLoweringPatterns, ctx);
+        populateGatherBlockQuantizedPreparePatterns(preLoweringPatterns, ctx);
         populateReshapeShapeFoldPatterns(preLoweringPatterns, ctx);
         populatePadShapeFoldPatterns(preLoweringPatterns, ctx);
         populateFastGeluFusionPatterns(preLoweringPatterns, ctx);

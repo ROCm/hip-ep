@@ -52,10 +52,21 @@ if(_HIPDNN_NEED_TOOLCHAIN)
   # The resolved path is added to CMAKE_PREFIX_PATH so find_package(hip) finds it.
   if(NOT BUILD_MOCK_RUNTIME)
     set(THEROCK_DIST "" CACHE PATH "TheRock ROCm SDK distribution path")
-    if(THEROCK_DIST)
-      # Provided via -DTHEROCK_DIST: use as-is.
+    set(_therock_dist_resolved "${THEROCK_DIST}")
+    if(_therock_dist_resolved)
+      string(STRIP "${_therock_dist_resolved}" _therock_dist_resolved)
     elseif(DEFINED ENV{THEROCK_DIST})
-      set(THEROCK_DIST "$ENV{THEROCK_DIST}")
+      string(STRIP "$ENV{THEROCK_DIST}" _therock_dist_resolved)
+    endif()
+    if(_therock_dist_resolved AND NOT EXISTS "${_therock_dist_resolved}/bin")
+      message(WARNING
+        "THEROCK_DIST is set to '${_therock_dist_resolved}' but bin/ is missing; "
+        "falling back to auto-download under the build tree.")
+      set(_therock_dist_resolved "")
+    endif()
+    if(_therock_dist_resolved)
+      set(THEROCK_DIST "${_therock_dist_resolved}"
+          CACHE PATH "TheRock ROCm SDK distribution path" FORCE)
     else()
       # Auto-download: no SDK provided, so download the official tarball from the
       # public AMD host and extract it under the build tree, so a fresh real
@@ -272,56 +283,30 @@ if(BUILD_EP)
     set(multiValueArgs)
     cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}"
                           ${ARGN})
-    if(EXISTS "${ARG_DIR}/.git" AND IS_DIRECTORY "${ARG_DIR}/.git")
-      execute_process(
-        COMMAND "git" rev-parse HEAD
-        WORKING_DIRECTORY ${ARG_DIR}
-        OUTPUT_VARIABLE TMP_GIT_COMMIT
-        ERROR_VARIABLE error
-        RESULT_VARIABLE resultVar
-        OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
-      execute_process(
-        COMMAND "git" describe --tags --abbrev=1 HEAD
-        WORKING_DIRECTORY ${ARG_DIR}
-        OUTPUT_VARIABLE TMP_VERSION
-        ERROR_VARIABLE error
-        RESULT_VARIABLE resultVar
-        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    # Query git directly instead of testing for a .git directory: a linked
+    # worktree has .git as a file, and that test would reject it.
+    execute_process(
+      COMMAND "git" rev-parse HEAD
+      WORKING_DIRECTORY "${ARG_DIR}"
+      OUTPUT_VARIABLE TMP_GIT_COMMIT
+      ERROR_QUIET
+      OUTPUT_STRIP_TRAILING_WHITESPACE)
+    execute_process(
+      COMMAND "git" describe --tags --abbrev=1 HEAD
+      WORKING_DIRECTORY "${ARG_DIR}"
+      OUTPUT_VARIABLE TMP_VERSION
+      ERROR_QUIET
+      OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT TMP_GIT_COMMIT)
+      set(TMP_GIT_COMMIT "N/A")
+    endif()
+    if(NOT TMP_VERSION)
+      set(TMP_VERSION "N/A")
     endif()
     set(COMP_GIT_COMMIT ${TMP_GIT_COMMIT} PARENT_SCOPE)
     set(COMP_VERSION ${TMP_VERSION} PARENT_SCOPE)
     message(STATUS "FindPackage Version info: ${ARG_COMPONENT}=${TMP_GIT_COMMIT} ${TMP_VERSION}")
   endfunction()
-
-  # Collect version info for onnx-hipdnn-ep
-  set(VERSION_LIST
-      onnx-hipdnn-ep=onnx-hipdnn-ep)
-  set(VERSION_INFO "")
-  foreach(COMP_PAIR IN LISTS VERSION_LIST)
-    string(FIND "${COMP_PAIR}" "=" pos)
-    string(SUBSTRING "${COMP_PAIR}" 0 ${pos} COMP)
-    math(EXPR COMP_BEG "${pos} + 1")
-    string(SUBSTRING "${COMP_PAIR}" ${COMP_BEG} -1 DIR)
-    set(BUILD_DIR "${CMAKE_SOURCE_DIR}/../${DIR}/")
-
-    string(TOLOWER COMP ${COMP})
-    set(FETCH_SRC_DIR "${${COMP}_SOURCE_DIR}")
-    if(EXISTS "${FETCH_SRC_DIR}" AND IS_DIRECTORY "${FETCH_SRC_DIR}")
-      morphizen_add_version_info(COMPONENT ${COMP} DIR ${FETCH_SRC_DIR})
-    elseif(EXISTS ${BUILD_DIR} AND IS_DIRECTORY ${BUILD_DIR})
-      morphizen_add_version_info(COMPONENT ${COMP} DIR ${BUILD_DIR})
-    endif()
-    if (NOT DEFINED COMP_GIT_COMMIT OR NOT DEFINED COMP_VERSION)
-      set(COMP_GIT_COMMIT "N/A")
-      set(COMP_VERSION "N/A")
-    endif()
-    string(APPEND VERSION_INFO "${COMP};${COMP_GIT_COMMIT};${COMP_VERSION}\n")
-    unset(COMP_GIT_COMMIT)
-    unset(COMP_VERSION)
-  endforeach()
-
-  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/version.txt" "${VERSION_INFO}")
-  set(MORPHIZEN_VERSION_INFO_FILE "${CMAKE_CURRENT_BINARY_DIR}/version.txt")
 
   ## MorphiZen is vendored in-tree as a git subtree under morphizen.
   if(NOT EXISTS "${CMAKE_SOURCE_DIR}/morphizen/CMakeLists.txt")
@@ -386,6 +371,14 @@ if(BUILD_EP)
     message(STATUS "onnxruntime::onnxruntime synthesized from release zip (v${ORT_VERSION})")
   endif()
 
+  # Version info baked into the EP. Written after ORT resolution because
+  # onnxruntime_VERSION is only set there.
+  morphizen_add_version_info(COMPONENT hip-ep DIR "${CMAKE_SOURCE_DIR}")
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/version.txt"
+       "hip-ep;${COMP_GIT_COMMIT};${COMP_VERSION}\n"
+       "onnxruntime;;${onnxruntime_VERSION}\n")
+  set(MORPHIZEN_VERSION_INFO_FILE "${CMAKE_CURRENT_BINARY_DIR}/version.txt")
+
   # protobuf (+ bundled abseil). Name "Protobuf" matches morphizen's
   # FetchContent_Declare so the first-populated wins and morphizen reuses it.
   # CMAKE_CXX_STANDARD=17 is required (abseil pins its installed options.h ABI
@@ -412,6 +405,18 @@ if(BUILD_EP)
       GIT_SUBMODULES_RECURSE TRUE
       EXCLUDE_FROM_ALL)
     FetchContent_MakeAvailable(Protobuf)
+    # morphizen/unit-test/.../proto.cmake calls find_package(Protobuf CONFIG
+    # REQUIRED). FetchContent exposes protobuf:: targets but does not always
+    # populate Protobuf_DIR for a nested CONFIG-mode find.
+    if(TARGET protobuf::libprotobuf)
+      if(EXISTS "${Protobuf_BINARY_DIR}/protobuf-config.cmake")
+        set(Protobuf_DIR "${Protobuf_BINARY_DIR}" CACHE PATH
+            "Protobuf package config (FetchContent)" FORCE)
+      elseif(EXISTS "${Protobuf_BINARY_DIR}/cmake/protobuf-config.cmake")
+        set(Protobuf_DIR "${Protobuf_BINARY_DIR}/cmake" CACHE PATH
+            "Protobuf package config (FetchContent)" FORCE)
+      endif()
+    endif()
   endif()
 
   # Add morphizen subdirectory.

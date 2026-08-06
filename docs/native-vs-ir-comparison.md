@@ -7,7 +7,7 @@ Licensed under the MIT License.
 **Date:** 2026-05-29 (dual-format update 2026-06-08)
 **Document Type:** Design (Alternatives Considered)
 **Status:** Both formats supported — **LLVM IR bitcode is the production default**; **Native DLL is opt-in** (benchmarking/dev), selected by a single compile option.
-**Related:** [design/morphizen-ep-integration.md](design/morphizen-ep-integration.md), [design/compiler-runtime-contract.md](design/compiler-runtime-contract.md), [design/compilation-options.md](design/compilation-options.md), [technical-pipeline-walkthrough.md](technical-pipeline-walkthrough.md)
+**Related:** [design/morphizen-ep-integration.md](design/morphizen-ep-integration.md), [design/compiler-runtime-contract.md](design/compiler-runtime-contract.md), [design/compilation-options.md](design/compilation-options.md)
 
 **Adapted from:** [ROCm/hip-compiler `docs/design/alternatives/NATIVE-VS-IR-COMPARISON.md`](https://github.com/ROCm/hip-compiler/blob/main/docs/design/alternatives/NATIVE-VS-IR-COMPARISON.md).
 
@@ -131,7 +131,6 @@ Project documents:
 - [design/morphizen-ep-integration.md](design/morphizen-ep-integration.md) — DLL boundary contracts, `FileSystem`, JIT loader integration.
 - [design/compiler-runtime-contract.md](design/compiler-runtime-contract.md) — `model_metadata` schema; five-symbol C ABI between the per-model bitcode and the EP DLL.
 - [design/compilation-options.md](design/compilation-options.md) — compilation options (opt level, externalized constants).
-- [technical-pipeline-walkthrough.md](technical-pipeline-walkthrough.md) — end-to-end flow; signed-DLL motivation for the in-process JIT.
 - [`LlvmIrJit.cpp`](../backend-mlir-compiler/custom-op-mlir/src/LlvmIrJit.cpp) — in-process JIT implementation referenced throughout this doc.
 
 External:

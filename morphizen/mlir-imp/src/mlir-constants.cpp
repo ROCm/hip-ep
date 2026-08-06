@@ -39,6 +39,10 @@ mlir::Type onnxElementTypeToMlirElementType(int element_type,
     return builder.getF16Type();
   case 11: // TensorProto_DataType_DOUBLE
     return builder.getF64Type();
+  case 21: // TensorProto_DataType_UINT4
+    return builder.getIntegerType(8, false);
+  case 22: // TensorProto_DataType_INT4
+    return builder.getIntegerType(8);
   default:
     // TensorProto_DataType_UNDEFINED = 0,
     // TensorProto_DataType_STRING = 8,
@@ -65,6 +69,16 @@ mlir::Type onnxElementTypeToMlirElementType(int element_type,
                  << ", using F32";
     return builder.getF32Type();
   }
+}
+
+mlir::Type onnxElementTypeToMlirDenseElementType(int element_type,
+                                                 mlir::OpBuilder &builder) {
+  mlir::Type elem = onnxElementTypeToMlirElementType(element_type, builder);
+  if (auto intTy = mlir::dyn_cast<mlir::IntegerType>(elem)) {
+    if (!intTy.isSignless())
+      return mlir::IntegerType::get(builder.getContext(), intTy.getWidth());
+  }
+  return elem;
 }
 
 mlir::Type onnxElementTypeToMlirType(int element_type, mlir::OpBuilder &builder,
