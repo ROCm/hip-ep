@@ -1244,6 +1244,11 @@ __device__ __forceinline__ size_t flash_decode_partial_offset(
 // parameter is needed (a bool per format would not scale).
 enum class KvDtype { kF16, kI8 };
 
+// Element type of the KV cache for a given format. Lets the launchers below be
+// written once against the format rather than once per element type.
+template <KvDtype FMT>
+using KvElem = std::conditional_t<FMT == KvDtype::kI8, int8_t, __half>;
+
 // FMT==kF16: fp16 K/V cache (k_scale/v_scale ignored, pass nullptr).
 // FMT==kI8 : symmetric per-channel INT8 K/V cache with fp32 scales [G, D]:
 //   k_fp16 = k_i8 * k_scale[head_kv*D + channel]  (folded into Q here)
@@ -2022,11 +2027,19 @@ static inline bool flash_decode_wmma_supported(int d, int hpg) {
   return false;
 }
 
-// Launch one (impl, splits) configuration: split-K decode + FA-2 reduce. Both
-// impls emit identical [B,H,splits,D+2] partials, so the reduce is shared.
+// Launch one (impl, splits, bkv) configuration: split-K decode + FA-2 reduce.
+// Both impls emit identical [B,H,splits,D+2] partials, so the reduce is shared.
+//
+// Templated on the KV format because the decode kernels already are, and the
+// two formats pick their kernel by the same (d, hpg, bkv) rules. Writing those
+// ladders once is what keeps a newly supported geometry from being reachable in
+// fp16 but not INT8; they used to be two copies and the INT8 one had already
+// drifted. kSc/vSc are ignored when FMT is kF16 -- pass nullptr.
+template <KvDtype FMT>
 static inline void launchFlashDecodeConfig(
-    const FlashDecodeCfg& cfg, hipStream_t stream,
-    const __half* hQ, const __half* hK, const __half* hV, __half* hO, float* hP,
+    const FlashDecodeCfg& cfg, hipStream_t stream, const __half* hQ,
+    const KvElem<FMT>* hK, const KvElem<FMT>* hV,
+    const float* kSc, const float* vSc, __half* hO, float* hP,
     int B, int H, int G, int d, int hpg, int max_seq, float scale,
     const int* iSeq, int local_window_size,
     const __half* hSink, int use_smooth_softmax) {
@@ -2044,9 +2057,9 @@ static inline void launchFlashDecodeConfig(
     };
     dim3 grid_wmma((unsigned)G, (unsigned)splits, (unsigned)B);
     #define LAUNCH_DW(D_, HPG_, BKV_)                                          \
-      gqa_flash_decode_wmma_kernel<D_, HPG_, BKV_, KvDtype::kF16>             \
+      gqa_flash_decode_wmma_kernel<D_, HPG_, BKV_, FMT>                        \
           <<<grid_wmma, 32, smem_bytes(D_, BKV_), stream>>>(                   \
-              hQ, hK, hV, nullptr, nullptr, hP, H, G, max_seq, scale, iSeq,    \
+              hQ, hK, hV, kSc, vSc, hP, H, G, max_seq, scale, iSeq,            \
               local_window_size, splits)
     if (hpg == 4) {
       if (d == 128) LAUNCH_DW(128, 4, 32);
@@ -2062,23 +2075,16 @@ static inline void launchFlashDecodeConfig(
     // The kernel body is HpG-generic (each wave owns one query head and reads
     // the KV cache with the max_seq stride), so a single template covers GQA
     // and MHA (HpG==1) alike; we just instantiate every supported HpG.
+    #define LAUNCH_SCALAR_D(D_, HPG_)                                          \
+      gqa_flash_decode_kernel<D_, HPG_, FMT>                                   \
+          <<<grid_main, (HPG_) * WAVE_SIZE, 0, stream>>>(                      \
+              hQ, hK, hV, kSc, vSc, hP, H, G, max_seq, scale, iSeq,            \
+              local_window_size, splits)
     #define LAUNCH_SCALAR(HPG_)                                                \
       do {                                                                     \
-        if (d == 256)                                                          \
-          gqa_flash_decode_kernel<256, HPG_, KvDtype::kF16>                    \
-              <<<grid_main, (HPG_) * WAVE_SIZE, 0, stream>>>(                  \
-                  hQ, hK, hV, nullptr, nullptr, hP, H, G, max_seq, scale,      \
-                  iSeq, local_window_size, splits);                            \
-        else if (d == 128)                                                     \
-          gqa_flash_decode_kernel<128, HPG_, KvDtype::kF16>                   \
-              <<<grid_main, (HPG_) * WAVE_SIZE, 0, stream>>>(                  \
-                  hQ, hK, hV, nullptr, nullptr, hP, H, G, max_seq, scale,      \
-                  iSeq, local_window_size, splits);                            \
-        else                                                                   \
-          gqa_flash_decode_kernel<64, HPG_, KvDtype::kF16>                    \
-              <<<grid_main, (HPG_) * WAVE_SIZE, 0, stream>>>(                  \
-                  hQ, hK, hV, nullptr, nullptr, hP, H, G, max_seq, scale,      \
-                  iSeq, local_window_size, splits);                            \
+        if (d == 256)      LAUNCH_SCALAR_D(256, HPG_);                         \
+        else if (d == 128) LAUNCH_SCALAR_D(128, HPG_);                         \
+        else               LAUNCH_SCALAR_D(64, HPG_);                          \
       } while (0)
     switch (hpg) {
       case 1:  LAUNCH_SCALAR(1);  break;
@@ -2091,6 +2097,7 @@ static inline void launchFlashDecodeConfig(
       default: break;  // unsupported HpG is rejected in hip_gqa_flash_decode
     }
     #undef LAUNCH_SCALAR
+    #undef LAUNCH_SCALAR_D
   }
 
   // Reduce: one block per query head, block dim D. seqlens_k / sliding-window /
@@ -2364,17 +2371,12 @@ static FlashDecodeCfg tuneFlashDecodeConfig(
 
 // INT8 decode autotune state + helpers (defined below). Forward-declared here so
 // the unified hip_gqa_flash_decode can dispatch the int8 path when scales are
-// supplied; the launcher body lives after the fp16 entry. Tuning is shared:
-// both formats go through tuneFlashDecodeConfig above.
+// supplied. Launching and tuning are both shared with fp16:
+// launchFlashDecodeConfig<KvDtype::kI8> and tuneFlashDecodeConfig above. Only
+// the config cache is per format, because the two time differently on the same
+// geometry.
 static std::unordered_map<uint64_t, FlashDecodeCfg> g_flash_decode_i8_cache;
 static std::mutex g_flash_decode_i8_mutex;
-static inline void launchFlashDecodeConfigI8(
-    const FlashDecodeCfg& cfg, hipStream_t stream,
-    const __half* hQ, const int8_t* hK, const int8_t* hV,
-    const float* kSc, const float* vSc, __half* hO, float* hP,
-    int B, int H, int G, int d, int hpg, int max_seq, float scale,
-    const int* iSeq, int local_window_size,
-    const __half* hSink, int use_smooth_softmax);
 
 // Launcher: dispatches FA-2 split-K decode + reduction.
 //   partials_workspace: float scratch of size B*H*max_splits*(d+2)*4 bytes.
@@ -2508,17 +2510,17 @@ extern "C" int hip_gqa_flash_decode(
         cfg = tuneFlashDecodeConfig(
             stream, d, hpg, tune_len, cap, "flash_decode_i8",
             [&](const FlashDecodeCfg& c) {
-              launchFlashDecodeConfigI8(c, stream, hQ, hK, hV, kSc, vSc, hO, hP,
-                                        B, H, G, d, hpg, max_seq, scale, iSeq,
-                                        local_window_size, hSink,
-                                        use_smooth_softmax);
+              launchFlashDecodeConfig<KvDtype::kI8>(
+                  c, stream, hQ, hK, hV, kSc, vSc, hO, hP, B, H, G, d, hpg,
+                  max_seq, scale, iSeq, local_window_size, hSink,
+                  use_smooth_softmax);
             });
         g_flash_decode_i8_cache[key] = cfg;
       }
     }
-    launchFlashDecodeConfigI8(cfg, stream, hQ, hK, hV, kSc, vSc, hO, hP, B, H, G,
-                              d, hpg, max_seq, scale, iSeq, local_window_size,
-                              hSink, use_smooth_softmax);
+    launchFlashDecodeConfig<KvDtype::kI8>(
+        cfg, stream, hQ, hK, hV, kSc, vSc, hO, hP, B, H, G, d, hpg, max_seq,
+        scale, iSeq, local_window_size, hSink, use_smooth_softmax);
     return hipGetLastError();
   }
 
@@ -2534,10 +2536,10 @@ extern "C" int hip_gqa_flash_decode(
       cfg = tuneFlashDecodeConfig(
           stream, d, hpg, tune_len, cap, "flash_decode",
           [&](const FlashDecodeCfg& c) {
-            launchFlashDecodeConfig(c, stream, hQ, hK, hV, hO, hP, B, H, G, d,
-                                    hpg, max_seq, scale, iSeq,
-                                    local_window_size, hSink,
-                                    use_smooth_softmax);
+            launchFlashDecodeConfig<KvDtype::kF16>(
+                c, stream, hQ, hK, hV, nullptr, nullptr, hO, hP, B, H, G, d,
+                hpg, max_seq, scale, iSeq, local_window_size, hSink,
+                use_smooth_softmax);
           });
       g_flash_decode_cache[key] = cfg;
       CUSTOM_KERNELS_DEBUG_LOG(
@@ -2550,91 +2552,11 @@ extern "C" int hip_gqa_flash_decode(
 
   // Produce the correct output with the selected config (tuning above left the
   // buffers holding the last candidate's result).
-  launchFlashDecodeConfig(cfg, stream, hQ, hK, hV, hO, hP, B, H, G, d, hpg,
-                          max_seq, scale, iSeq, local_window_size, hSink,
-                          use_smooth_softmax);
+  launchFlashDecodeConfig<KvDtype::kF16>(
+      cfg, stream, hQ, hK, hV, nullptr, nullptr, hO, hP, B, H, G, d, hpg,
+      max_seq, scale, iSeq, local_window_size, hSink, use_smooth_softmax);
 
   return hipGetLastError();
-}
-
-//===----------------------------------------------------------------------===//
-// INT8 decode launcher: same autotune structure as hip_gqa_flash_decode, but
-// carries the k_scale/v_scale per-channel tables and dispatches the int8 kernels.
-//===----------------------------------------------------------------------===//
-static inline void launchFlashDecodeConfigI8(
-    const FlashDecodeCfg& cfg, hipStream_t stream,
-    const __half* hQ, const int8_t* hK, const int8_t* hV,
-    const float* kSc, const float* vSc, __half* hO, float* hP,
-    int B, int H, int G, int d, int hpg, int max_seq, float scale,
-    const int* iSeq, int local_window_size,
-    const __half* hSink, int use_smooth_softmax) {
-  const int splits = cfg.splits;
-  const bool use_wmma = cfg.use_wmma && flash_decode_wmma_supported(d, hpg);
-  if (use_wmma) {
-    auto smem_bytes = [](int D_, int bkv) -> size_t {
-      const int DSTR = D_ + 2;
-      return (size_t)16 * (bkv + 1) * sizeof(float)
-           + (size_t)2 * bkv * DSTR * sizeof(_Float16)
-           + (size_t)16 * (bkv + 2) * sizeof(_Float16)
-           + (size_t)16 * 3 * sizeof(float);
-    };
-    dim3 grid_wmma((unsigned)G, (unsigned)splits, (unsigned)B);
-    #define LAUNCH_DW_I8(D_, HPG_, BKV_)                                        \
-      gqa_flash_decode_wmma_kernel<D_, HPG_, BKV_, KvDtype::kI8>                \
-          <<<grid_wmma, 32, smem_bytes(D_, BKV_), stream>>>(                    \
-              hQ, hK, hV, kSc, vSc, hP, H, G, max_seq, scale, iSeq,             \
-              local_window_size, splits)
-    if (hpg == 4) {
-      if (d == 128) LAUNCH_DW_I8(128, 4, 32);
-      else if (cfg.bkv == 32) LAUNCH_DW_I8(64, 4, 32);
-      else LAUNCH_DW_I8(64, 4, 16);
-    } else { /* hpg == 8, d == 64 */
-      if (cfg.bkv == 32) LAUNCH_DW_I8(64, 8, 32); else LAUNCH_DW_I8(64, 8, 16);
-    }
-    #undef LAUNCH_DW_I8
-  } else {
-    dim3 grid_main(B * G, splits);
-    #define LAUNCH_SCALAR_I8(HPG_)                                              \
-      do {                                                                      \
-        if (d == 256)                                                           \
-          gqa_flash_decode_kernel<256, HPG_, KvDtype::kI8>                      \
-              <<<grid_main, (HPG_) * WAVE_SIZE, 0, stream>>>(                    \
-                  hQ, hK, hV, kSc, vSc, hP, H, G, max_seq, scale, iSeq,         \
-                  local_window_size, splits);                                   \
-        else if (d == 128)                                                      \
-          gqa_flash_decode_kernel<128, HPG_, KvDtype::kI8>                     \
-              <<<grid_main, (HPG_) * WAVE_SIZE, 0, stream>>>(                    \
-                  hQ, hK, hV, kSc, vSc, hP, H, G, max_seq, scale, iSeq,         \
-                  local_window_size, splits);                                   \
-        else                                                                    \
-          gqa_flash_decode_kernel<64, HPG_, KvDtype::kI8>                      \
-              <<<grid_main, (HPG_) * WAVE_SIZE, 0, stream>>>(                    \
-                  hQ, hK, hV, kSc, vSc, hP, H, G, max_seq, scale, iSeq,         \
-                  local_window_size, splits);                                   \
-      } while (0)
-    switch (hpg) {
-      case 1:  LAUNCH_SCALAR_I8(1);  break;
-      case 2:  LAUNCH_SCALAR_I8(2);  break;
-      case 3:  LAUNCH_SCALAR_I8(3);  break;
-      case 4:  LAUNCH_SCALAR_I8(4);  break;
-      case 5:  LAUNCH_SCALAR_I8(5);  break;
-      case 8:  LAUNCH_SCALAR_I8(8);  break;
-      case 16: LAUNCH_SCALAR_I8(16); break;
-      default: break;
-    }
-    #undef LAUNCH_SCALAR_I8
-  }
-
-  dim3 grid_reduce(B * H);
-  if (d == 256)
-    gqa_flash_decode_reduce_kernel<256><<<grid_reduce, 256, 0, stream>>>(
-        hP, hO, H, hSink, H, use_smooth_softmax, splits);
-  else if (d == 128)
-    gqa_flash_decode_reduce_kernel<128><<<grid_reduce, 128, 0, stream>>>(
-        hP, hO, H, hSink, H, use_smooth_softmax, splits);
-  else
-    gqa_flash_decode_reduce_kernel<64><<<grid_reduce, 64, 0, stream>>>(
-        hP, hO, H, hSink, H, use_smooth_softmax, splits);
 }
 
 //===----------------------------------------------------------------------===//
