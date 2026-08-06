@@ -122,7 +122,7 @@ Options use MLIR's pipeline-option syntax:
 | `hip-loop-body-to-out-params` | module | Promote outlined loop bodies to the out-param ABI. |
 | `hip-use-output-allocator` | func.func | Rewrite returned `memref.alloc` → `hip.alloc_output` (graph outputs become EP/runtime-owned, not pooled or deallocated). |
 | `hip-fix-loop-accumulator-offset` | func.func | Rewrite frozen Concat-accumulator offsets in loop bodies to iter-driven offsets. |
-| `hip-optimize-memrefs` | func.func | HIP-specific buffer reuse / subview folding. |
+| `hip-optimize-memrefs` | func.func | HIP-specific buffer reuse / subview folding; the built-in pipeline runs it both before and after strided-operand promotion, with the late invocation immediately followed by `optimize-allocation-liveness`. |
 | `hip-promote-strided-operands` | func.func | Materialize identity-layout temporaries for non-identity-layout DPS-input memrefs. |
 | `hip-materialize-host-scalars` | func.func | Redirect tiny host-fed scalar allocs to runtime-owned host-mapped scratch (away from the GPU pool). |
 | `hip-resolve-memref-dims` | func.func | Fold post-bufferization `memref.dim` through view/reshape chains before pool planning. |
@@ -143,6 +143,7 @@ Options use MLIR's pipeline-option syntax:
 | `cse` | any | Common-subexpression elimination. |
 | `one-shot-bufferize` | module | Tensor → memref bufferization (function boundaries, identity layout); `HIPDNN_EP_BUFFERIZE_COPY_BEFORE_WRITE=1` enables the huge-graph copy-before-write escape hatch. |
 | `buffer-deallocation-pipeline` | module | Ownership-based buffer deallocation; available to custom pipelines and characterization tests, but omitted from the built-in pipeline. |
+| `optimize-allocation-liveness` | func.func | Move existing deallocations after the allocation's final use; does not introduce ownership-based deallocation. |
 | `convert-bufferization-to-memref` | any | Lower residual `bufferization.*` ops to memref. |
 | `convert-scf-to-cf` | any | Lower `scf.for`/`scf.if` to unstructured control flow. |
 | `reconcile-unrealized-casts` | any | Drop leftover `unrealized_conversion_cast`s. |
@@ -200,6 +201,8 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   func.func(hip-materialize-host-scalars)
   func.func(hip-resolve-memref-dims)
   func.func(cse)
+  func.func(hip-optimize-memrefs)  (reuse late promotion temporaries)
+  func.func(optimize-allocation-liveness)
   func.func(hip-hoist-alloc-size-arith)
   func.func(hip-pool-allocs)
   «slot: AfterPoolAllocs»

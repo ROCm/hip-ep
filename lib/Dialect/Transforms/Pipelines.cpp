@@ -61,21 +61,37 @@ void addPluginPassesForSlot(OpPassManager &pm,
   }
 }
 
-/// Add shape normalizations used only to improve hip-pool-allocs:
+/// Add late buffer reuse and shape normalization before hip-pool-allocs:
 ///   - resolve-memref-dims folds `memref.dim` through view chains to the root
 ///     buffer.
 ///   - CSE removes repeated size queries exposed by late allocation rewrites.
+///   - a second optimize-memrefs reuses compatible temporaries introduced by
+///     strided-operand promotion, and optimize-allocation-liveness moves an
+///     existing slot deallocation after its final aliased use.
 ///   - hoist-alloc-size-arith moves pure size computations above the first used
 ///     allocation.
-/// Omitting these steps preserves correctness but may split allocations into
-/// more dominance domains and increase peak memory. Run these after view
-/// creation and immediately before pooling.
-void addPoolAllocsShapePreconditionPasses(OpPassManager &pm) {
+/// The second reuse and liveness passes are correctness-coupled: if reuse runs,
+/// liveness must follow. Omitting both preserves correctness but leaves the
+/// late temporaries separate. Omitting the shape-normalization steps also
+/// preserves correctness but may split allocations into more dominance domains
+/// and increase peak memory. Run this preparation after view creation and
+/// immediately before pooling.
+void addPoolAllocsPreparationPasses(OpPassManager &pm) {
   pm.addNestedPass<func::FuncOp>(mlir::hip::createResolveMemRefDimsPass());
   // Allocation and view rewrites run after the pipeline's earlier CSE and may
   // leave repeated memref.dim queries on the same source. Deduplicate them
   // before hoisting so equivalent sizes do not open separate pool domains.
   pm.addNestedPass<func::FuncOp>(mlir::createCSEPass());
+  // PromoteStridedHipOperands runs after the pipeline's first OptimizeMemRefs
+  // and creates late identity-layout alloc/copy/dealloc temporaries. Re-run
+  // slot assignment after size CSE so compatible, non-overlapping promotion
+  // temporaries can share one allocation. Reusing a slot can extend its
+  // lifetime past its original dealloc, so relocate existing deallocs after
+  // the final aliased use. This liveness pass does not introduce ownership-
+  // based deallocation.
+  pm.addNestedPass<func::FuncOp>(mlir::hip::createOptimizeMemRefsPass());
+  pm.addNestedPass<func::FuncOp>(
+      mlir::bufferization::createOptimizeAllocationLivenessPass());
   pm.addNestedPass<func::FuncOp>(mlir::hip::createHoistAllocSizeArithPass());
 }
 
@@ -268,9 +284,10 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
   //     down this ordering.
   pm.addNestedPass<func::FuncOp>(mlir::hip::createMaterializeHostScalarsPass());
 
-  // 6c. Pool quality: normalize dynamic allocation sizes after all view and
-  //     allocation rewrites, immediately before hip-pool-allocs.
-  addPoolAllocsShapePreconditionPasses(pm);
+  // 6c. Late buffer reuse and pool quality: reuse allocations introduced by
+  //     ABI preparation, repair their deallocation liveness, and normalize
+  //     dynamic allocation sizes immediately before hip-pool-allocs.
+  addPoolAllocsPreparationPasses(pm);
 
   pm.addNestedPass<func::FuncOp>(mlir::hip::createPoolAllocsPass());
 
