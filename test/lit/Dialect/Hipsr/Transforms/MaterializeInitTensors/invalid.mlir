@@ -26,7 +26,7 @@ func.func @unpopulated_shape_region(%ctx: !hipsr.context, %a: tensor<?x256xf16>,
         ins(%domain_a, %domain_b : tensor<?x256xf16>, tensor<256x512xf16>)
         outs(%init : tensor<?x512xf16>) : tensor<?x512xf16>
     hipsr.pool_domain_yield %matmul : tensor<?x512xf16>
-  } -> tensor<?x512xf16>
+  } -> tensor<?x512xf16> {domain_id = 0 : i64}
   return %0 : tensor<?x512xf16>
 }
 
@@ -63,6 +63,6 @@ func.func @barrier_placeholder(%ctx: !hipsr.context, %a: tensor<?x256xf16>,
         ins(%domain_a, %domain_b : tensor<?x256xf16>, tensor<256x512xf16>)
         outs(%init : tensor<?x512xf16>) : tensor<?x512xf16>
     hipsr.pool_domain_yield %matmul : tensor<?x512xf16>
-  } -> tensor<?x512xf16>
+  } -> tensor<?x512xf16> {domain_id = 0 : i64}
   return %0 : tensor<?x512xf16>
 }

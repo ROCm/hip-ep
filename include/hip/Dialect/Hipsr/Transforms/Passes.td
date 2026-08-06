@@ -117,7 +117,7 @@ def PartitionPoolDomainsPass
             ins(%cast : tensor<?x4xf16>)
             outs(%ready_init : tensor<?x4xf16>) : tensor<?x4xf16>
         hipsr.pool_domain_yield %ready : tensor<?x4xf16>
-      } -> tensor<?x4xf16>
+      } -> tensor<?x4xf16> {domain_id = 0 : i64}
       %1 = hipsr.pool_domain(%ctx, %input, %0
           : !hipsr.context, tensor<?x4xf32>, tensor<?x4xf16>) {
       ^bb0(%domain_ctx: !hipsr.context,
@@ -133,7 +133,7 @@ def PartitionPoolDomainsPass
                 : tensor<?x4xf16>, tensor<?x4xf16>)
             outs(%add_init : tensor<?x4xf16>) : tensor<?x4xf16>
         hipsr.pool_domain_yield %sum : tensor<?x4xf16>
-      } -> tensor<?x4xf16>
+      } -> tensor<?x4xf16> {domain_id = 1 : i64}
       %2 = hipsr.pool_domain(%ctx, %input, %1, %shape
           : !hipsr.context, tensor<?x4xf32>, tensor<?x4xf16>,
             tensor<2xi64>) {
@@ -159,7 +159,7 @@ def PartitionPoolDomainsPass
             ins(%expanded, %expanded : tensor<?x4xf16>, tensor<?x4xf16>)
             outs(%result_init : tensor<?x4xf16>) : tensor<?x4xf16>
         hipsr.pool_domain_yield %result : tensor<?x4xf16>
-      } -> tensor<?x4xf16>
+      } -> tensor<?x4xf16> {domain_id = 2 : i64}
       return %2 : tensor<?x4xf16>
     }
     ```

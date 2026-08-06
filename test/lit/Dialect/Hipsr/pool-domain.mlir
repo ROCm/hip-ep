@@ -20,7 +20,7 @@
 // CHECK-NEXT: %[[INDEX_BUFFER:.+]] = tensor.empty(%[[DIM]]) : tensor<2x?xi64>
 // CHECK-NEXT: %[[COUNT_BUFFER:.+]] = tensor.empty() : tensor<i32>
 // CHECK-NEXT: hipsr.pool_domain_yield %[[INDEX_BUFFER]], %[[COUNT_BUFFER]] : tensor<2x?xi64>, tensor<i32>
-// CHECK-NEXT: } -> tensor<2x?xi64>, tensor<i32>
+// CHECK-NEXT: } -> tensor<2x?xi64>, tensor<i32> {domain_id = 0 : i64}
 // CHECK-NEXT: return %[[RESULTS]]#0, %[[RESULTS]]#1 : tensor<2x?xi64>, tensor<i32>
 // CHECK-NEXT: }
 func.func @roundtrip(%in: tensor<3x4xf32>) -> (tensor<2x?xi64>, tensor<i32>) {
@@ -31,7 +31,7 @@ func.func @roundtrip(%in: tensor<3x4xf32>) -> (tensor<2x?xi64>, tensor<i32>) {
     %idx = tensor.empty(%n) : tensor<2x?xi64>
     %cnt = tensor.empty() : tensor<i32>
     hipsr.pool_domain_yield %idx, %cnt : tensor<2x?xi64>, tensor<i32>
-  } -> tensor<2x?xi64>, tensor<i32>
+  } -> tensor<2x?xi64>, tensor<i32> {domain_id = 0 : i64}
   return %0#0, %0#1 : tensor<2x?xi64>, tensor<i32>
 }
 
@@ -44,7 +44,7 @@ func.func @roundtrip(%in: tensor<3x4xf32>) -> (tensor<2x?xi64>, tensor<i32>) {
 // CHECK-NEXT: %[[C1:.+]] = arith.constant 1 : index
 // CHECK-NEXT: %[[DIM:.+]] = memref.dim %[[DOMAIN_INPUT]], %[[C1]] : memref<2x?xi64>
 // CHECK-NEXT: hipsr.pool_domain_yield %[[DOMAIN_INPUT]], %[[DIM]] : memref<2x?xi64>, index
-// CHECK-NEXT: } -> memref<2x?xi64>, index
+// CHECK-NEXT: } -> memref<2x?xi64>, index {domain_id = 0 : i64}
 // CHECK-NEXT: return %[[RESULTS]]#0, %[[RESULTS]]#1 : memref<2x?xi64>, index
 // CHECK-NEXT: }
 func.func @memref_form(%in: memref<2x?xi64>) -> (memref<2x?xi64>, index) {
@@ -53,7 +53,7 @@ func.func @memref_form(%in: memref<2x?xi64>) -> (memref<2x?xi64>, index) {
     %c1 = arith.constant 1 : index
     %n = memref.dim %domain_in, %c1 : memref<2x?xi64>
     hipsr.pool_domain_yield %domain_in, %n : memref<2x?xi64>, index
-  } -> memref<2x?xi64>, index
+  } -> memref<2x?xi64>, index {domain_id = 0 : i64}
   return %0#0, %0#1 : memref<2x?xi64>, index
 }
 
@@ -61,13 +61,13 @@ func.func @memref_form(%in: memref<2x?xi64>) -> (memref<2x?xi64>, index) {
 // The printer omits the empty implicit yield.
 // CHECK-LABEL: func.func @empty_domain() {
 // CHECK-NEXT: hipsr.pool_domain() {
-// CHECK-NEXT: }
+// CHECK-NEXT: } {domain_id = 0 : i64}
 // CHECK-NEXT: return
 // CHECK-NEXT: }
 func.func @empty_domain() {
   hipsr.pool_domain() {
     hipsr.pool_domain_yield
-  }
+  } {domain_id = 0 : i64}
   return
 }
 
@@ -76,7 +76,7 @@ func.func @empty_domain() {
 func.func @empty_body() {
   // expected-error @+1 {{failed to verify constraint: region with 1 blocks}}
   "hipsr.pool_domain"() ({
-  }) : () -> ()
+  }) {domain_id = 0 : i64} : () -> ()
   return
 }
 
@@ -88,7 +88,7 @@ func.func @missing_entry_argument(%in: tensor<3x4xf32>) -> tensor<3x4xf32> {
   %0 = hipsr.pool_domain(%in : tensor<3x4xf32>) {
     %local = tensor.empty() : tensor<3x4xf32>
     hipsr.pool_domain_yield %local : tensor<3x4xf32>
-  } -> tensor<3x4xf32>
+  } -> tensor<3x4xf32> {domain_id = 0 : i64}
   return %0 : tensor<3x4xf32>
 }
 
@@ -100,7 +100,7 @@ func.func @extra_entry_argument() -> tensor<3x4xf32> {
   %0 = hipsr.pool_domain() {
   ^bb0(%domain_in: tensor<3x4xf32>):
     hipsr.pool_domain_yield %domain_in : tensor<3x4xf32>
-  } -> tensor<3x4xf32>
+  } -> tensor<3x4xf32> {domain_id = 0 : i64}
   return %0 : tensor<3x4xf32>
 }
 
@@ -113,7 +113,7 @@ func.func @entry_argument_type_mismatch(%in: tensor<3x4xf32>)
   %0 = hipsr.pool_domain(%in : tensor<3x4xf32>) {
   ^bb0(%domain_in: tensor<3x4xi64>):
     hipsr.pool_domain_yield %domain_in : tensor<3x4xi64>
-  } -> tensor<3x4xi64>
+  } -> tensor<3x4xi64> {domain_id = 0 : i64}
   return %0 : tensor<3x4xi64>
 }
 
@@ -124,7 +124,7 @@ func.func @missing_yield_value() -> tensor<3x4xf32> {
   %0 = hipsr.pool_domain() {
     // expected-note @+1 {{region branch point}}
     hipsr.pool_domain_yield
-  } -> tensor<3x4xf32>
+  } -> tensor<3x4xf32> {domain_id = 0 : i64}
   return %0 : tensor<3x4xf32>
 }
 
@@ -136,7 +136,7 @@ func.func @extra_yield_value() {
     %local = tensor.empty() : tensor<3x4xf32>
     // expected-note @+1 {{region branch point}}
     hipsr.pool_domain_yield %local : tensor<3x4xf32>
-  }
+  } {domain_id = 0 : i64}
   return
 }
 
@@ -148,7 +148,7 @@ func.func @yield_type_mismatch() -> tensor<3x4xi64> {
     %local = tensor.empty() : tensor<3x4xf32>
     // expected-note @+1 {{region branch point}}
     hipsr.pool_domain_yield %local : tensor<3x4xf32>
-  } -> tensor<3x4xi64>
+  } -> tensor<3x4xi64> {domain_id = 0 : i64}
   return %0 : tensor<3x4xi64>
 }
 
@@ -161,7 +161,7 @@ func.func @body_uses_parent_value_directly(%in: tensor<3x4xf32>)
   ^bb0(%domain_in: tensor<3x4xf32>):
     // expected-error @+1 {{using value defined outside the region}}
     hipsr.pool_domain_yield %in : tensor<3x4xf32>
-  } -> tensor<3x4xf32>
+  } -> tensor<3x4xf32> {domain_id = 0 : i64}
   return %0 : tensor<3x4xf32>
 }
 
@@ -180,6 +180,6 @@ func.func @multi_block_body() {
     hipsr.pool_domain_yield
   ^bb1:
     hipsr.pool_domain_yield
-  }
+  } {domain_id = 0 : i64}
   return
 }

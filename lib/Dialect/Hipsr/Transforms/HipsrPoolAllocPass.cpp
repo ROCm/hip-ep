@@ -218,6 +218,28 @@ Value emitGroupSize(OpBuilder &builder, Location loc,
   return arith::MulIOp::create(builder, loc, divided, alignVal);
 }
 
+Value findContext(Block &body) {
+  for (BlockArgument arg : body.getArguments()) {
+    if (isa<ContextType>(arg.getType())) {
+      return arg;
+    }
+  }
+  return nullptr;
+}
+
+Value emitPool(OpBuilder &builder, Location loc, Value ctx,
+               llvm::ArrayRef<Value> groupSizes, uint64_t domainId) {
+  Value poolSize = groupSizes.front();
+  for (Value groupSize : groupSizes.drop_front()) {
+    poolSize = arith::AddIOp::create(builder, loc, poolSize, groupSize);
+  }
+  auto deviceSpace =
+      MemorySpaceAttr::get(builder.getContext(), MemorySpaceKind::Device);
+  auto poolType = MemRefType::get({ShapedType::kDynamic}, builder.getI8Type(),
+                                  MemRefLayoutAttrInterface{}, deviceSpace);
+  return GetPoolOp::create(builder, loc, poolType, ctx, poolSize, domainId);
+}
+
 struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
   using impl::HipsrPoolAllocPassBase<
       HipsrPoolAllocPass>::HipsrPoolAllocPassBase;
@@ -233,6 +255,12 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
         signalPassFailure();
         return;
       }
+      Value ctx = findContext(body);
+      if (!ctx) {
+        domain.emitError("hipsr-pool-alloc: pool_domain has no context");
+        signalPassFailure();
+        return;
+      }
       llvm::SmallVector<llvm::SmallVector<Value>> groups =
           greedyGrouping(body, lifetimes);
       if (emitPoolReport) {
@@ -241,9 +269,12 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
 
       OpBuilder builder(&getContext());
       builder.setInsertionPointAfter(insertionPoint);
+      llvm::SmallVector<Value> groupSizes;
       for (llvm::ArrayRef<Value> group : groups) {
-        emitGroupSize(builder, domain.getLoc(), group, kPoolAlignment);
+        groupSizes.push_back(
+            emitGroupSize(builder, domain.getLoc(), group, kPoolAlignment));
       }
+      emitPool(builder, domain.getLoc(), ctx, groupSizes, domain.getDomainId());
     });
   }
 };

@@ -22,7 +22,8 @@
 // CHECK-NEXT:    llvm.return %[[D5]]
 func.func @get_pool(%ctx: !hipsr.context, %size: index)
     -> memref<?xi8, #hipsr.mem<device>> {
-  %pool = hipsr.get_pool(%ctx, %size) : memref<?xi8, #hipsr.mem<device>>
+  %pool = hipsr.get_pool(%ctx, %size) {domain_id = 0 : i64}
+      : memref<?xi8, #hipsr.mem<device>>
   return %pool : memref<?xi8, #hipsr.mem<device>>
 }
 

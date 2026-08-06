@@ -61,7 +61,7 @@
 // CHECK-NEXT:      %[[INIT:.+]] = tensor.empty(%[[DIM0]]) : tensor<?x512xf16>
 // CHECK-NEXT:      %[[MATMUL:.+]] = hipsr.matmul(%[[DCTX]]) ins(%[[DA]], %[[DB]] : tensor<?x256xf16>, tensor<256x512xf16>) outs(%[[INIT]] : tensor<?x512xf16>) : tensor<?x512xf16>
 // CHECK-NEXT:      hipsr.pool_domain_yield %[[MATMUL]] : tensor<?x512xf16>
-// CHECK-NEXT:    } -> tensor<?x512xf16>
+// CHECK-NEXT:    } -> tensor<?x512xf16> {domain_id = 0 : i64}
 // CHECK-NEXT:    return %[[DOMAIN]] : tensor<?x512xf16>
 // CHECK-NEXT:  }
 func.func @matmul_domain(%ctx: !hipsr.context, %a: tensor<?x256xf16>,
@@ -88,7 +88,7 @@ func.func @matmul_domain(%ctx: !hipsr.context, %a: tensor<?x256xf16>,
         ins(%domain_a, %domain_b : tensor<?x256xf16>, tensor<256x512xf16>)
         outs(%init : tensor<?x512xf16>) : tensor<?x512xf16>
     hipsr.pool_domain_yield %matmul : tensor<?x512xf16>
-  } -> tensor<?x512xf16>
+  } -> tensor<?x512xf16> {domain_id = 0 : i64}
   return %0 : tensor<?x512xf16>
 }
 
@@ -116,7 +116,7 @@ func.func @matmul_domain(%ctx: !hipsr.context, %a: tensor<?x256xf16>,
 // CHECK-NEXT:      %[[INIT:.+]] = tensor.empty() : tensor<128x512xf16>
 // CHECK-NEXT:      %[[MATMUL:.+]] = hipsr.matmul(%[[DCTX]]) ins(%[[DA]], %[[DB]] : tensor<128x256xf16>, tensor<256x512xf16>) outs(%[[INIT]] : tensor<128x512xf16>) : tensor<128x512xf16>
 // CHECK-NEXT:      hipsr.pool_domain_yield %[[MATMUL]] : tensor<128x512xf16>
-// CHECK-NEXT:    } -> tensor<128x512xf16>
+// CHECK-NEXT:    } -> tensor<128x512xf16> {domain_id = 0 : i64}
 // CHECK-NEXT:    return %[[DOMAIN]] : tensor<128x512xf16>
 // CHECK-NEXT:  }
 func.func @static_shape(%ctx: !hipsr.context, %a: tensor<128x256xf16>,
@@ -143,7 +143,7 @@ func.func @static_shape(%ctx: !hipsr.context, %a: tensor<128x256xf16>,
         ins(%domain_a, %domain_b : tensor<128x256xf16>, tensor<256x512xf16>)
         outs(%init : tensor<128x512xf16>) : tensor<128x512xf16>
     hipsr.pool_domain_yield %matmul : tensor<128x512xf16>
-  } -> tensor<128x512xf16>
+  } -> tensor<128x512xf16> {domain_id = 0 : i64}
   return %0 : tensor<128x512xf16>
 }
 
@@ -173,7 +173,7 @@ func.func @static_shape(%ctx: !hipsr.context, %a: tensor<128x256xf16>,
 // CHECK-NEXT:      %[[INIT:.+]] = tensor.empty(%[[D0]], %[[D1]]) : tensor<?x?x64xf16>
 // CHECK-NEXT:      %[[ADD:.+]] = hipsr.add(%[[DCTX]]) ins(%[[DA]], %[[DB]] : tensor<?x?x64xf16>, tensor<?x?x64xf16>) outs(%[[INIT]] : tensor<?x?x64xf16>) : tensor<?x?x64xf16>
 // CHECK-NEXT:      hipsr.pool_domain_yield %[[ADD]] : tensor<?x?x64xf16>
-// CHECK-NEXT:    } -> tensor<?x?x64xf16>
+// CHECK-NEXT:    } -> tensor<?x?x64xf16> {domain_id = 0 : i64}
 // CHECK-NEXT:    return %[[DOMAIN]] : tensor<?x?x64xf16>
 // CHECK-NEXT:  }
 func.func @multi_dynamic(%ctx: !hipsr.context, %a: tensor<?x?x64xf16>,
@@ -195,7 +195,7 @@ func.func @multi_dynamic(%ctx: !hipsr.context, %a: tensor<?x?x64xf16>,
         ins(%domain_a, %domain_b : tensor<?x?x64xf16>, tensor<?x?x64xf16>)
         outs(%init : tensor<?x?x64xf16>) : tensor<?x?x64xf16>
     hipsr.pool_domain_yield %add : tensor<?x?x64xf16>
-  } -> tensor<?x?x64xf16>
+  } -> tensor<?x?x64xf16> {domain_id = 0 : i64}
   return %0 : tensor<?x?x64xf16>
 }
 
@@ -239,7 +239,7 @@ func.func @multi_dynamic(%ctx: !hipsr.context, %a: tensor<?x?x64xf16>,
 // CHECK-NEXT:      %[[MATMUL:.+]] = hipsr.matmul(%[[DCTX]]) ins(%[[DA]], %[[DB]] : tensor<?x256xf16>, tensor<256x512xf16>) outs(%[[MATMUL_INIT]] : tensor<?x512xf16>) : tensor<?x512xf16>
 // CHECK-NEXT:      %[[ADD:.+]] = hipsr.add(%[[DCTX]]) ins(%[[MATMUL]], %[[DC]] : tensor<?x512xf16>, tensor<?x512xf16>) outs(%[[ADD_INIT]] : tensor<?x512xf16>) : tensor<?x512xf16>
 // CHECK-NEXT:      hipsr.pool_domain_yield %[[ADD]] : tensor<?x512xf16>
-// CHECK-NEXT:    } -> tensor<?x512xf16>
+// CHECK-NEXT:    } -> tensor<?x512xf16> {domain_id = 0 : i64}
 // CHECK-NEXT:    return %[[DOMAIN]] : tensor<?x512xf16>
 // CHECK-NEXT:  }
 func.func @interleaved(%ctx: !hipsr.context, %a: tensor<?x256xf16>,
@@ -280,7 +280,7 @@ func.func @interleaved(%ctx: !hipsr.context, %a: tensor<?x256xf16>,
         ins(%matmul, %domain_c : tensor<?x512xf16>, tensor<?x512xf16>)
         outs(%add_init : tensor<?x512xf16>) : tensor<?x512xf16>
     hipsr.pool_domain_yield %add : tensor<?x512xf16>
-  } -> tensor<?x512xf16>
+  } -> tensor<?x512xf16> {domain_id = 0 : i64}
   return %0 : tensor<?x512xf16>
 }
 
@@ -321,7 +321,7 @@ func.func @interleaved(%ctx: !hipsr.context, %a: tensor<?x256xf16>,
 // CHECK-NEXT:      %[[MATMUL:.+]] = hipsr.matmul(%[[DCTX]]) ins(%[[DA]], %[[DB]] : tensor<?x256xf16>, tensor<256x512xf16>) outs(%[[MATMUL_INIT]] : tensor<?x512xf16>) : tensor<?x512xf16>
 // CHECK-NEXT:      %[[ADD:.+]] = hipsr.add(%[[DCTX]]) ins(%[[MATMUL]], %[[DC]] : tensor<?x512xf16>, tensor<?x512xf16>) outs(%[[ADD_INIT]] : tensor<?x512xf16>) : tensor<?x512xf16>
 // CHECK-NEXT:      hipsr.pool_domain_yield %[[ADD]] : tensor<?x512xf16>
-// CHECK-NEXT:    } -> tensor<?x512xf16>
+// CHECK-NEXT:    } -> tensor<?x512xf16> {domain_id = 0 : i64}
 // CHECK-NEXT:    return %[[DOMAIN]] : tensor<?x512xf16>
 // CHECK-NEXT:  }
 func.func @already_grouped(%ctx: !hipsr.context, %a: tensor<?x256xf16>,
@@ -362,7 +362,7 @@ func.func @already_grouped(%ctx: !hipsr.context, %a: tensor<?x256xf16>,
         ins(%matmul, %domain_c : tensor<?x512xf16>, tensor<?x512xf16>)
         outs(%add_init : tensor<?x512xf16>) : tensor<?x512xf16>
     hipsr.pool_domain_yield %add : tensor<?x512xf16>
-  } -> tensor<?x512xf16>
+  } -> tensor<?x512xf16> {domain_id = 0 : i64}
   return %0 : tensor<?x512xf16>
 }
 
@@ -378,7 +378,7 @@ func.func @already_grouped(%ctx: !hipsr.context, %a: tensor<?x256xf16>,
 // CHECK-NEXT:      %[[DIM:.+]] = tensor.dim %[[DIN]], %[[C1]] : tensor<3x4xf32>
 // CHECK-NEXT:      %[[BUFFER:.+]] = tensor.empty(%[[DIM]]) : tensor<2x?xi64>
 // CHECK-NEXT:      hipsr.pool_domain_yield %[[BUFFER]] : tensor<2x?xi64>
-// CHECK-NEXT:    } -> tensor<2x?xi64>
+// CHECK-NEXT:    } -> tensor<2x?xi64> {domain_id = 0 : i64}
 // CHECK-NEXT:    return %[[DOMAIN]] : tensor<2x?xi64>
 // CHECK-NEXT:  }
 func.func @no_placeholder(%in: tensor<3x4xf32>) -> tensor<2x?xi64> {
@@ -388,6 +388,6 @@ func.func @no_placeholder(%in: tensor<3x4xf32>) -> tensor<2x?xi64> {
     %n = tensor.dim %domain_in, %c1 : tensor<3x4xf32>
     %buffer = tensor.empty(%n) : tensor<2x?xi64>
     hipsr.pool_domain_yield %buffer : tensor<2x?xi64>
-  } -> tensor<2x?xi64>
+  } -> tensor<2x?xi64> {domain_id = 0 : i64}
   return %0 : tensor<2x?xi64>
 }
