@@ -36,7 +36,7 @@
 func.func @dps_init(%ctx: !hip.context, %d0: index, %lhs: tensor<?x64xf32>,
                     %rhs: tensor<64x2048xf32>) -> tensor<?x2048xf32> {
   %c2048 = arith.constant 2048 : index
-  %shape = "shape.from_extents"(%d0, %c2048) : (index, index) -> !shape.shape
+  %shape = shape.from_extents %d0, %c2048 : index, index
   %init = tensor.empty(%d0) : tensor<?x2048xf32>
   hipsr.preserve_shape %shape, %init : tensor<?x2048xf32>
   %out = hip.matmul(%ctx) ins(%lhs, %rhs : tensor<?x64xf32>, tensor<64x2048xf32>)
@@ -60,7 +60,7 @@ func.func @dps_init(%ctx: !hip.context, %d0: index, %lhs: tensor<?x64xf32>,
 func.func @dps_result(%ctx: !hip.context, %d0: index, %lhs: tensor<?x64xf32>,
                       %rhs: tensor<64x2048xf32>) -> tensor<?x2048xf32> {
   %c2048 = arith.constant 2048 : index
-  %shape = "shape.from_extents"(%d0, %c2048) : (index, index) -> !shape.shape
+  %shape = shape.from_extents %d0, %c2048 : index, index
   %init = tensor.empty(%d0) : tensor<?x2048xf32>
   %out = hip.matmul(%ctx) ins(%lhs, %rhs : tensor<?x64xf32>, tensor<64x2048xf32>)
                           outs(%init : tensor<?x2048xf32>) : tensor<?x2048xf32>
@@ -83,7 +83,7 @@ func.func @dps_result(%ctx: !hip.context, %d0: index, %lhs: tensor<?x64xf32>,
 // CHECK-NEXT: }
 func.func @func_arg(%d0: index, %data: tensor<?x2048xf32>) {
   %c2048 = arith.constant 2048 : index
-  %shape = "shape.from_extents"(%d0, %c2048) : (index, index) -> !shape.shape
+  %shape = shape.from_extents %d0, %c2048 : index, index
   hipsr.preserve_shape %shape, %data : tensor<?x2048xf32>
   return
 }

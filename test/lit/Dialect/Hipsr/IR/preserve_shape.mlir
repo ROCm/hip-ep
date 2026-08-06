@@ -14,7 +14,7 @@
 // CHECK-NEXT: }
 func.func @tensor_form(%d0: index) {
   %c2048 = arith.constant 2048 : index
-  %shape = "shape.from_extents"(%d0, %c2048) : (index, index) -> !shape.shape
+  %shape = shape.from_extents %d0, %c2048 : index, index
   %init = tensor.empty(%d0) : tensor<?x2048xf16>
   hipsr.preserve_shape %shape, %init : tensor<?x2048xf16>
   return
@@ -34,7 +34,7 @@ func.func @tensor_form(%d0: index) {
 // CHECK-NEXT: }
 func.func @memref_form(%d0: index) {
   %c2048 = arith.constant 2048 : index
-  %shape = "shape.from_extents"(%d0, %c2048) : (index, index) -> !shape.shape
+  %shape = shape.from_extents %d0, %c2048 : index, index
   %alloc = memref.alloc(%d0) : memref<?x2048xf16>
   hipsr.preserve_shape %shape, %alloc : memref<?x2048xf16>
   return
@@ -54,7 +54,7 @@ func.func @memref_form(%d0: index) {
 func.func @device_memref_form(%data: memref<4x8xf16, #hipsr.mem<device>>) {
   %c4 = arith.constant 4 : index
   %c8 = arith.constant 8 : index
-  %shape = "shape.from_extents"(%c4, %c8) : (index, index) -> !shape.shape
+  %shape = shape.from_extents %c4, %c8 : index, index
   hipsr.preserve_shape %shape, %data : memref<4x8xf16, #hipsr.mem<device>>
   return
 }
@@ -64,6 +64,7 @@ func.func @device_memref_form(%data: memref<4x8xf16, #hipsr.mem<device>>) {
 // A scalar has one shape with an empty extent list, matching hipsr.shape_yield.
 // The from_extents line stops at the op name because an empty extent list prints
 // an empty type list after the colon, same as in shape_yield.mlir.
+
 // CHECK-LABEL: func.func @scalar() {
 // CHECK-NEXT: %[[SHAPE:.+]] = shape.from_extents
 // CHECK-NEXT: %[[INIT:.+]] = tensor.empty() : tensor<f16>
@@ -83,8 +84,7 @@ func.func @scalar() {
 // checkable when the extent list is in the IR. Here it is, and it disagrees.
 func.func @extent_count_mismatch(%d0: index) {
   %c2048 = arith.constant 2048 : index
-  %shape = "shape.from_extents"(%d0, %c2048, %c2048)
-      : (index, index, index) -> !shape.shape
+  %shape = shape.from_extents %d0, %c2048, %c2048 : index, index, index
   %init = tensor.empty(%d0) : tensor<?x2048xf16>
   // expected-error @+1 {{shape has 3 extents but data has rank 2}}
   hipsr.preserve_shape %shape, %init : tensor<?x2048xf16>
