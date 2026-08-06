@@ -1167,6 +1167,11 @@ typedef _Float16 half16 __attribute__((ext_vector_type(16)));
 typedef float    float8 __attribute__((ext_vector_type(8)));
 #define HALF16(pointer) (reinterpret_cast<half16*>((void *)&(pointer))[0])
 
+// 16-byte opaque vector, used only to widen KV cache global loads to a single
+// dwordx4 per lane. The element type is irrelevant; the bytes are memcpy'd
+// into the typed prefetch registers.
+typedef unsigned int bytes16 __attribute__((ext_vector_type(4)));
+
 // The WMMA builtin below is RDNA3-family (wave32) only. Where __has_builtin
 // reports it absent, trap instead so this file still compiles and a WMMA
 // launch on an unsupported arch aborts loudly rather than returning garbage.
@@ -1668,50 +1673,78 @@ gqa_flash_decode_wmma_kernel(
   constexpr int kPET = (BKV * D) / 32;          // elements per lane per tile
   constexpr bool kPrefetch = (kPET <= 32);
 
+  // A KV row is D*sizeof(KVt) bytes; for D=64 fp16 that is exactly one 128 B
+  // gfx1151 cache line. Loading one element per lane only reaches 64 B across
+  // the wave, so every line is requested in two halves and RGP shows twice the
+  // DRAM traffic the kernel actually needs. Loading 16 B per lane makes one
+  // instruction cover four whole lines. Safe as long as the cache base is 16 B
+  // aligned (hipMalloc guarantees 256 B) since every lane offset here is a
+  // multiple of kVecElems.
+  constexpr int kVecElems = KV_I8 ? 16 : 8;
+  constexpr bool kVecLoad =
+      kPrefetch && (D % kVecElems == 0) && (kPET % kVecElems == 0);
+  constexpr int kSlotElems = kVecLoad ? kVecElems : 1;
+  // Zero when there is no prefetch, so the staging loops below collapse away
+  // instead of indexing the placeholder one-element register arrays.
+  constexpr int kSlots     = kPrefetch ? (kPET / kSlotElems) : 0;
+
   KVt k_pf[kPrefetch ? kPET : 1];
   KVt v_pf[kPrefetch ? kPET : 1];
-  if (kPrefetch) {
+
+  // First element this lane owns in slot s. kSlotElems divides D, so a slot
+  // never straddles two KV rows and the bounds check stays per row.
+  auto slot_first = [&](int s) { return (lane + s * 32) * kSlotElems; };
+
+  auto prefetch_tile = [&](int tile_kv0) {
     #pragma unroll
-    for (int j = 0; j < kPET; ++j) {
-      const int i = lane + j * 32;
+    for (int s = 0; s < kSlots; ++s) {
+      const int i = slot_first(s);
       const int row = i / D, col = i % D;
-      const int kv_pos = kv_start + row;          // tile 0
+      const int kv_pos = tile_kv0 + row;
       const bool ok = kv_pos < kv_end;
-      k_pf[j] = ok ? Ksrc[kv_base + static_cast<size_t>(kv_pos) * D + col] : (KVt)0;
-      v_pf[j] = ok ? Vsrc[kv_base + static_cast<size_t>(kv_pos) * D + col] : (KVt)0;
+      const size_t off = kv_base + static_cast<size_t>(kv_pos) * D + col;
+      if constexpr (kVecLoad) {
+        bytes16 kv{}, vv{};
+        if (ok) {
+          kv = *reinterpret_cast<const bytes16*>(Ksrc + off);
+          vv = *reinterpret_cast<const bytes16*>(Vsrc + off);
+        }
+        __builtin_memcpy(&k_pf[s * kSlotElems], &kv, sizeof(bytes16));
+        __builtin_memcpy(&v_pf[s * kSlotElems], &vv, sizeof(bytes16));
+      } else {
+        k_pf[s] = ok ? Ksrc[off] : (KVt)0;
+        v_pf[s] = ok ? Vsrc[off] : (KVt)0;
+      }
     }
-  }
+  };
+
+  if constexpr (kPrefetch) prefetch_tile(kv_start);
 
   for (int t = 0; t < num_tiles; ++t) {
     const int kv0 = kv_start + t * BKV;
 
-    if (kPrefetch) {
+    if constexpr (kPrefetch) {
       // Write the prefetched tile to LDS (int8: dequant to fp16 on the way in).
       #pragma unroll
-      for (int j = 0; j < kPET; ++j) {
-        const int i = lane + j * 32;
-        const int row = i / D, col = i % D;
-        if constexpr (KV_I8) {
-          K_lds[row * DSTR + col] = (_Float16)((float)k_pf[j] * ksc_sh[col]);
-          V_lds[row * DSTR + col] = (_Float16)((float)v_pf[j] * vsc_sh[col]);
-        } else {
-          K_lds[row * DSTR + col] = k_pf[j];
-          V_lds[row * DSTR + col] = v_pf[j];
+      for (int s = 0; s < kSlots; ++s) {
+        const int i0 = slot_first(s);
+        const int row = i0 / D, col0 = i0 % D;
+        #pragma unroll
+        for (int e = 0; e < kSlotElems; ++e) {
+          const int col = col0 + e;
+          const KVt kval = k_pf[s * kSlotElems + e];
+          const KVt vval = v_pf[s * kSlotElems + e];
+          if constexpr (KV_I8) {
+            K_lds[row * DSTR + col] = (_Float16)((float)kval * ksc_sh[col]);
+            V_lds[row * DSTR + col] = (_Float16)((float)vval * vsc_sh[col]);
+          } else {
+            K_lds[row * DSTR + col] = kval;
+            V_lds[row * DSTR + col] = vval;
+          }
         }
       }
       __syncthreads();
-      const int kv0n = kv_start + (t + 1) * BKV;
-      if (t + 1 < num_tiles) {
-        #pragma unroll
-        for (int j = 0; j < kPET; ++j) {
-          const int i = lane + j * 32;
-          const int row = i / D, col = i % D;
-          const int kv_pos = kv0n + row;
-          const bool ok = kv_pos < kv_end;
-          k_pf[j] = ok ? Ksrc[kv_base + static_cast<size_t>(kv_pos) * D + col] : (KVt)0;
-          v_pf[j] = ok ? Vsrc[kv_base + static_cast<size_t>(kv_pos) * D + col] : (KVt)0;
-        }
-      }
+      if (t + 1 < num_tiles) prefetch_tile(kv_start + (t + 1) * BKV);
     } else {
       for (int i = lane; i < BKV * D; i += 32) {
         const int row = i / D, col = i % D;
