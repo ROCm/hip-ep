@@ -26,13 +26,6 @@ def Hipsr_TensorOrHostMemRef    : AnyTypeOf<[AnyRankedTensor, Hipsr_HostMemRef],
 def Hipsr_TensorOrDeviceMemRef  : AnyTypeOf<[AnyRankedTensor, Hipsr_DeviceMemRef],  "ranked tensor or device memref">;
 def Hipsr_TensorOrPinnedMemRef  : AnyTypeOf<[AnyRankedTensor, Hipsr_PinnedMemRef],  "ranked tensor or pinned memref">;
 def Hipsr_TensorOrManagedMemRef : AnyTypeOf<[AnyRankedTensor, Hipsr_ManagedMemRef], "ranked tensor or managed memref">;
-
-// Deliberately space agnostic, unlike the four constraints above: a ranked
-// tensor or a ranked memref in ANY space, including none. Only for metadata ops
-// that hold a value without touching it, and therefore have to verify at every
-// point of the pipeline -- including right after `-one-shot-bufferize`, whose
-// `memref.alloc`s carry no `#hipsr.mem` space yet. Compute ops must keep naming
-// their space.
 def Hipsr_TensorOrMemRef : AnyTypeOf<[AnyRankedTensor, AnyMemRef], "ranked tensor or memref">;
 
 // Base class for hipsr types.

@@ -13,12 +13,6 @@ using namespace mlir::hipsr;
 
 namespace {
 
-// The resource hipsr.preserve_shape writes to. Its own, rather than the default
-// one, because the write is not about memory: the op needs exactly enough of an
-// effect that `wouldOpBeTriviallyDead` says no, and nothing more. A write on
-// the default resource would order against every other memory op in the block,
-// and a write naming the data operand would claim the op touches that buffer,
-// which it does not.
 struct ShapeMetadataResource
     : public SideEffects::Resource::Base<ShapeMetadataResource> {
   StringRef getName() final { return "hipsr::shape_metadata"; }
@@ -26,6 +20,8 @@ struct ShapeMetadataResource
 
 } // namespace
 
+// PreserveShapeOp does not modify memory, but it must report a side effect
+// to avoid being eliminated as a trivially dead operation.
 void PreserveShapeOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
@@ -34,10 +30,6 @@ void PreserveShapeOp::getEffects(
 }
 
 LogicalResult PreserveShapeOp::verify() {
-  // !shape.shape is rank erased, so the rank agreement this op documents is
-  // only checkable when the extent list is right there in the IR. A shape that
-  // comes out of an scf.execute_region -- the form the intended producer builds
-  // -- lands in the unchecked case.
   auto fromExtents = getShape().getDefiningOp<shape::FromExtentsOp>();
   if (!fromExtents) {
     return success();

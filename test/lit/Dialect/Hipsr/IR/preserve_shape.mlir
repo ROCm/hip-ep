@@ -1,21 +1,6 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-//===----------------------------------------------------------------------===//
-// hipsr.preserve_shape round trip and verifier.
-//
-// No pass runs here, so every chunk's output is fully determined and the checks
-// cover each body line by line. The point of the contiguous CHECK-NEXT runs is
-// that the metadata op sits directly after the value it names with nothing
-// between them, and that a round trip adds nothing anywhere else either.
-//
-// The op is meant to straddle bufferization, so both forms of its data operand
-// are covered here: a ranked tensor before, a memref after. The memref cases
-// also pin the deliberately space-agnostic type constraint
-// (Hipsr_TensorOrMemRef): the space-less `memref.alloc` one-shot-bufferize emits
-// has to verify, and so does the `#hipsr.mem<device>` form the rest of the
-// dialect uses.
-//===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt --split-input-file --verify-diagnostics %s | FileCheck %s
 
