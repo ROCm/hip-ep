@@ -28,3 +28,22 @@ func.func @alloc_without_dps_write(%ctx: !hipsr.context,
   }
   return
 }
+
+// -----
+
+// linalg.fill is a DPS write that takes no context, so the alloc is poolable
+// while the domain still has no context to hand to hipsr.get_pool.
+func.func @no_context(%in: memref<4x1024xf16, #hipsr.mem<device>>) {
+  // expected-error@+1 {{hipsr-pool-alloc: pool_domain has no context}}
+  hipsr.pool_domain(%in : memref<4x1024xf16, #hipsr.mem<device>>) {
+  ^bb0(%din: memref<4x1024xf16, #hipsr.mem<device>>):
+    %cst = arith.constant 0.0 : f16
+    %a1 = memref.alloc() : memref<4x1024xf16, #hipsr.mem<device>>
+    linalg.fill ins(%cst : f16)
+           outs(%a1 : memref<4x1024xf16, #hipsr.mem<device>>)
+    linalg.copy ins(%a1 : memref<4x1024xf16, #hipsr.mem<device>>)
+           outs(%din : memref<4x1024xf16, #hipsr.mem<device>>)
+    hipsr.pool_domain_yield
+  }
+  return
+}
