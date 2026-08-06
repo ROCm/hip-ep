@@ -1675,6 +1675,30 @@ HIP_KERNEL_API int hip_matmul_nbits(
     const void* pre_unpacked_zp_u8,
     const void* pre_unpacked_zp_fp16);
 
+/* Grouped symmetric-int4 WMMA for MoE prefill.
+ * A/C rows are grouped by expert according to expert_offsets/counts:
+ *   A       [total_pairs, K], C [total_pairs, N]
+ *   B       [num_experts, N, K/2]
+ *   scales  [num_experts, N, K/block_size]
+ * One grid.z slice handles one expert; empty/tail M tiles return early.
+ * Prototype currently supports the two Qwen3.5 MoE projection shapes and
+ * requires zero_points to be absent.
+ */
+HIP_KERNEL_API int hip_matmul_nbits_grouped_nozp(
+    void* stream,
+    const void* A,
+    const void* B,
+    const void* scales,
+    const void* bias,
+    void* C,
+    const int32_t* expert_counts,
+    const int32_t* expert_offsets,
+    int64_t num_experts,
+    int64_t max_m,
+    int64_t N,
+    int64_t K,
+    int64_t block_size);
+
 /* W4A8 integer-dot-product (dp4a) GEMV for a single decode row (M==1).
  * Dynamically quantizes the fp16 activation row to per-group int8 (into
  * caller-owned scratch) and runs a `v_dot4_i32_iu8` (`__builtin_amdgcn_sudot4`)
