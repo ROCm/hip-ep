@@ -13,11 +13,15 @@
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Transforms/RegionUtils.h"
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/ErrorHandling.h"
+
+#include <cstdint>
 
 namespace mlir {
 namespace hipsr {
@@ -26,6 +30,166 @@ namespace hipsr {
 #include "hip/Dialect/Hipsr/Transforms/Passes.h.inc"
 
 namespace {
+namespace partition_analysis {
+
+struct Domain {
+  llvm::SmallVector<Operation *> operations;
+  llvm::SmallVector<OpResult> results;
+};
+
+using DomainId = std::uint64_t;
+using OperationDomains = llvm::DenseMap<Operation *, DomainId>;
+using DependencyDomainIds = llvm::SmallDenseSet<DomainId, 4>;
+
+struct DomainAssignment {
+  llvm::SmallVector<Domain> domains;
+  OperationDomains operationDomains;
+};
+
+// Find the domain of each operation that defines an input value.
+DependencyDomainIds
+collectOperandDependencyDomainIds(const ValueRange &operands,
+                                  const OperationDomains &operationDomains) {
+  DependencyDomainIds dependencyDomainIds;
+  for (Value operand : operands) {
+    if (Operation *definingOp = operand.getDefiningOp()) {
+      auto dependency = operationDomains.find(definingOp);
+      if (dependency == operationDomains.end()) {
+        llvm::report_fatal_error(
+            "pool-domain analysis expected an assigned dependency");
+      }
+      dependencyDomainIds.insert(dependency->second);
+    }
+  }
+  return dependencyDomainIds;
+}
+
+// Use the highest input domain. A barrier moves its branch to the next domain,
+// while other branches can stay in the same domain.
+DomainId
+computeOperationDomainId(const Operation &operation,
+                         const DependencyDomainIds &dependencyDomainIds) {
+  DomainId domainId = 0;
+  if (!dependencyDomainIds.empty()) {
+    domainId = *llvm::max_element(dependencyDomainIds);
+    if (auto placeholder = dyn_cast<PlaceholderOp>(operation);
+        placeholder &&
+        placeholder.getPlaceholderType() == PlaceholderType::Barrier) {
+      ++domainId;
+    }
+  }
+  return domainId;
+}
+
+// Visit in block order so each operation is assigned before its users.
+DomainAssignment assignOperationsToDomains(Block &block) {
+  DomainAssignment assignment;
+  for (Operation &operation : block.without_terminator()) {
+    DependencyDomainIds dependencyDomainIds = collectOperandDependencyDomainIds(
+        operation.getOperands(), assignment.operationDomains);
+    DomainId domainId =
+        computeOperationDomainId(operation, dependencyDomainIds);
+    if (domainId > assignment.domains.size()) {
+      llvm::report_fatal_error(
+          "pool-domain analysis produced a non-contiguous domain");
+    }
+    if (domainId == assignment.domains.size()) {
+      assignment.domains.emplace_back();
+    }
+    assignment.domains[domainId].operations.push_back(&operation);
+    assignment.operationDomains.try_emplace(&operation, domainId);
+  }
+  return assignment;
+}
+
+// Check whether another domain or the function return uses this result.
+bool isResultUsedOutsideDomain(Value result, DomainId domainId, Block &block,
+                               const DomainAssignment &assignment) {
+  return llvm::any_of(result.getUsers(), [&](Operation *user) {
+    Operation *topLevelUser = block.findAncestorOpInBlock(*user);
+    if (!topLevelUser) {
+      llvm::report_fatal_error(
+          "pool-domain analysis found a result use outside the function block");
+    }
+    auto userDomain = assignment.operationDomains.find(topLevelUser);
+    return userDomain == assignment.operationDomains.end() ||
+           userDomain->second != domainId;
+  });
+}
+
+// Find the non-placeholder results that this domain must yield.
+llvm::SmallVector<OpResult>
+collectDomainResults(Block &block, DomainId domainId, const Domain &domain,
+                     const DomainAssignment &assignment) {
+  llvm::SmallVector<OpResult> results;
+  for (Operation *operation : domain.operations) {
+    if (isa<PlaceholderOp>(operation)) {
+      continue;
+    }
+    for (OpResult result : operation->getResults()) {
+      if (isResultUsedOutsideDomain(result, domainId, block, assignment)) {
+        results.push_back(result);
+      }
+    }
+  }
+  return results;
+}
+
+// Assign all operations first, then find the results each domain must yield.
+DomainAssignment buildDomainAssignment(Block &block) {
+  DomainAssignment assignment = assignOperationsToDomains(block);
+  for (auto [domainId, domain] : llvm::enumerate(assignment.domains)) {
+    domain.results = collectDomainResults(block, domainId, domain, assignment);
+  }
+  return assignment;
+}
+
+// Print each operation's domain and each domain's operations and results.
+void emitAnalysisReport(Block &block, const DomainAssignment &assignment) {
+  llvm::DenseMap<Operation *, unsigned> operationIndices;
+  for (auto [index, operation] : llvm::enumerate(block.without_terminator())) {
+    operationIndices[&operation] = index;
+  }
+
+  InFlightDiagnostic operationReport = block.getParentOp()->emitRemark();
+  operationReport << "hipsr-partition-pool-domains: operation domains [";
+  for (auto [index, operation] : llvm::enumerate(block.without_terminator())) {
+    if (index != 0) {
+      operationReport << ",";
+    }
+    auto domain = assignment.operationDomains.find(&operation);
+    if (domain == assignment.operationDomains.end()) {
+      llvm::report_fatal_error(
+          "pool-domain analysis expected an assigned operation");
+    }
+    operationReport << index << "->" << domain->second;
+  }
+  operationReport << "]";
+
+  for (auto [domainId, domain] : llvm::enumerate(assignment.domains)) {
+    InFlightDiagnostic report = domain.operations.front()->emitRemark();
+    report << "hipsr-partition-pool-domains: domain " << domainId << " ops [";
+    for (auto [index, operation] : llvm::enumerate(domain.operations)) {
+      if (index != 0) {
+        report << ",";
+      }
+      report << operationIndices.lookup(operation) << "="
+             << operation->getName().getStringRef();
+    }
+
+    report << "] results [";
+    for (auto [index, result] : llvm::enumerate(domain.results)) {
+      if (index != 0) {
+        report << ",";
+      }
+      report << operationIndices.lookup(result.getOwner()) << "#"
+             << result.getResultNumber();
+    }
+    report << "]";
+  }
+}
+
+} // namespace partition_analysis
 
 struct Domain {
   SmallVector<Operation *> operations;
@@ -301,6 +465,9 @@ static void materializeDomains(ArrayRef<Domain> domains, Value context) {
 
 struct PartitionPoolDomainsPass
     : impl::PartitionPoolDomainsPassBase<PartitionPoolDomainsPass> {
+  using impl::PartitionPoolDomainsPassBase<
+      PartitionPoolDomainsPass>::PartitionPoolDomainsPassBase;
+
   void runOnOperation() override {
     func::FuncOp funcOp = getOperation();
 
@@ -321,13 +488,11 @@ struct PartitionPoolDomainsPass
       return;
     }
 
-    SmallVector<Domain> domains = partitionIntoDomains(entryBlock);
-    Value context;
-    if (entryBlock.getNumArguments() > 0 &&
-        isa<ContextType>(entryBlock.getArgument(0).getType())) {
-      context = entryBlock.getArgument(0);
+    partition_analysis::DomainAssignment assignment =
+        partition_analysis::buildDomainAssignment(entryBlock);
+    if (emitAnalysisReport) {
+      partition_analysis::emitAnalysisReport(entryBlock, assignment);
     }
-    materializeDomains(domains, context);
   }
 };
 
