@@ -199,8 +199,6 @@ Value emitAllocationSize(OpBuilder &builder, Location loc,
   return bytes;
 }
 
-// Aligns up once per group rather than per member: members share the group's
-// base offset, so only the group extent has to land on a boundary.
 Value emitGroupSize(OpBuilder &builder, Location loc,
                     llvm::ArrayRef<Value> group, int64_t alignment) {
   llvm::SmallVector<Value> sizes;
