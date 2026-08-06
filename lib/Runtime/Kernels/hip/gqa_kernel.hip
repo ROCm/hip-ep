@@ -1348,10 +1348,10 @@ gqa_flash_decode_kernel(
   // LDS tiles for K/V (shared across HPG=4 query heads for dedup). 16B-aligned
   // so the cooperative load can move 8 fp16 per float4 (see staging below).
   // The __half2-vectorized staging below assumes an even EPT. Flash-decode is a
-  // wave32 (RDNA) path only -- it is disabled at dispatch on wave64 (see the
-  // gqa_flash_decode_enabled() gate in gqa.cpp), so this invariant only needs to
-  // hold there. On wave64 (CDNA/MI350) D=64 yields EPT=1; the kernel is then
-  // dead code that must still compile, so exempt the wave64 device pass.
+  // wave32 (RDNA) path only -- wrap_group_query_attention clears fused_supported
+  // on wave64 (hipdnn_device_is_wave64()), so this invariant only needs to hold
+  // there. On wave64 (CDNA/MI350) D=64 yields EPT=1; the kernel is then dead
+  // code that must still compile, so exempt the wave64 device pass.
   static_assert(EPT % 2 == 0 || WAVE_SIZE != 32,
                 "EPT must be even for __half2 vectorized loads (wave32)");
   // HpG==1 (MHA) runs a single wave per block, so the K/V tile in LDS is never
