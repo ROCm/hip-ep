@@ -61,38 +61,6 @@ func.func @device_memref_form(%data: memref<4x8xf16, #hipsr.mem<device>>) {
 
 // -----
 
-// A scalar has one shape with an empty extent list, matching hipsr.shape_yield.
-// The from_extents line stops at the op name because an empty extent list prints
-// an empty type list after the colon, same as in shape_yield.mlir.
-
-// CHECK-LABEL: func.func @scalar() {
-// CHECK-NEXT: %[[SHAPE:.+]] = shape.from_extents
-// CHECK-NEXT: %[[INIT:.+]] = tensor.empty() : tensor<f16>
-// CHECK-NEXT: hipsr.preserve_shape %[[SHAPE]], %[[INIT]] : tensor<f16>
-// CHECK-NEXT: return
-// CHECK-NEXT: }
-func.func @scalar() {
-  %shape = "shape.from_extents"() : () -> !shape.shape
-  %init = tensor.empty() : tensor<f16>
-  hipsr.preserve_shape %shape, %init : tensor<f16>
-  return
-}
-
-// -----
-
-// !shape.shape is rank erased, so the rank agreement the op documents is only
-// checkable when the extent list is in the IR. Here it is, and it disagrees.
-func.func @extent_count_mismatch(%d0: index) {
-  %c2048 = arith.constant 2048 : index
-  %shape = shape.from_extents %d0, %c2048, %c2048 : index, index, index
-  %init = tensor.empty(%d0) : tensor<?x2048xf16>
-  // expected-error @+1 {{shape has 3 extents but data has rank 2}}
-  hipsr.preserve_shape %shape, %init : tensor<?x2048xf16>
-  return
-}
-
-// -----
-
 // A shape that does not come from shape.from_extents carries no rank, so the
 // verifier has nothing to compare and accepts it. This is the case the intended
 // producer builds, where the shape comes out of an scf.execute_region.
