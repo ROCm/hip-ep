@@ -5,6 +5,41 @@
 // RUN:   -hipsr-partition-pool-domains='emit-analysis-report=true' \
 // RUN:   -o %t
 
+// Parallel barriers over one producer share the same next domain.
+// expected-remark@+1 {{hipsr-partition-pool-domains: operation domains [0->0,1->0,2->1,3->1,4->1,5->1,6->1,7->1]}}
+func.func @parallel_barriers(
+    %ctx: !hipsr.context, %input: tensor<?x8xf16>) -> tensor<?x8xf16> {
+  // expected-remark@+1 {{hipsr-partition-pool-domains: domain 0 ops [0=hipsr.placeholder,1=hipsr.cast] results [1#0]}}
+  %root_init = hipsr.placeholder(%ctx)
+      ins(%input : tensor<?x8xf16>)
+      {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16>
+  %root = hipsr.cast(%ctx) ins(%input : tensor<?x8xf16>)
+      outs(%root_init : tensor<?x8xf16>) : tensor<?x8xf16>
+
+  // expected-remark@+1 {{hipsr-partition-pool-domains: domain 1 ops [2=hipsr.placeholder,3=hipsr.cast,4=hipsr.placeholder,5=hipsr.cast,6=hipsr.placeholder,7=hipsr.add] results [7#0]}}
+  %lhs_init = hipsr.placeholder(%ctx)
+      ins(%root_init : tensor<?x8xf16>)
+      {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<?x8xf16>
+  %lhs = hipsr.cast(%ctx) ins(%root : tensor<?x8xf16>)
+      outs(%lhs_init : tensor<?x8xf16>) : tensor<?x8xf16>
+
+  %rhs_init = hipsr.placeholder(%ctx)
+      ins(%root_init : tensor<?x8xf16>)
+      {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<?x8xf16>
+  %rhs = hipsr.cast(%ctx) ins(%root : tensor<?x8xf16>)
+      outs(%rhs_init : tensor<?x8xf16>) : tensor<?x8xf16>
+
+  %sum_init = hipsr.placeholder(%ctx)
+      ins(%lhs_init, %rhs_init : tensor<?x8xf16>, tensor<?x8xf16>)
+      {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16>
+  %sum = hipsr.add(%ctx)
+      ins(%lhs, %rhs : tensor<?x8xf16>, tensor<?x8xf16>)
+      outs(%sum_init : tensor<?x8xf16>) : tensor<?x8xf16>
+  return %sum : tensor<?x8xf16>
+}
+
+// -----
+
 // A barrier with only block-argument dependencies remains in domain zero.
 // expected-remark@+1 {{hipsr-partition-pool-domains: operation domains [0->0,1->0]}}
 func.func @root_barrier(
@@ -16,6 +51,40 @@ func.func @root_barrier(
   %result = hipsr.cast(%ctx) ins(%input : tensor<?x8xf16>)
       outs(%init : tensor<?x8xf16>) : tensor<?x8xf16>
   return %result : tensor<?x8xf16>
+}
+
+// -----
+
+// Normal placeholders do not move work beyond the barrier's domain.
+// expected-remark@+1 {{hipsr-partition-pool-domains: operation domains [0->0,1->0,2->1,3->1,4->1,5->1,6->1,7->1]}}
+func.func @normal_after_barrier(
+    %ctx: !hipsr.context, %input: tensor<?x8xf16>) -> tensor<?x8xf16> {
+  // expected-remark@+1 {{hipsr-partition-pool-domains: domain 0 ops [0=hipsr.placeholder,1=hipsr.cast] results [1#0]}}
+  %root_init = hipsr.placeholder(%ctx)
+      ins(%input : tensor<?x8xf16>)
+      {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16>
+  %root = hipsr.cast(%ctx) ins(%input : tensor<?x8xf16>)
+      outs(%root_init : tensor<?x8xf16>) : tensor<?x8xf16>
+
+  // expected-remark@+1 {{hipsr-partition-pool-domains: domain 1 ops [2=hipsr.placeholder,3=hipsr.cast,4=hipsr.placeholder,5=hipsr.cast,6=hipsr.placeholder,7=hipsr.cast] results [7#0]}}
+  %barrier_init = hipsr.placeholder(%ctx)
+      ins(%root_init : tensor<?x8xf16>)
+      {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<?x8xf16>
+  %barrier = hipsr.cast(%ctx) ins(%root : tensor<?x8xf16>)
+      outs(%barrier_init : tensor<?x8xf16>) : tensor<?x8xf16>
+
+  %normal_init = hipsr.placeholder(%ctx)
+      ins(%barrier_init : tensor<?x8xf16>)
+      {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16>
+  %normal = hipsr.cast(%ctx) ins(%barrier : tensor<?x8xf16>)
+      outs(%normal_init : tensor<?x8xf16>) : tensor<?x8xf16>
+
+  %next_init = hipsr.placeholder(%ctx)
+      ins(%normal_init : tensor<?x8xf16>)
+      {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16>
+  %next = hipsr.cast(%ctx) ins(%normal : tensor<?x8xf16>)
+      outs(%next_init : tensor<?x8xf16>) : tensor<?x8xf16>
+  return %next : tensor<?x8xf16>
 }
 
 // -----
