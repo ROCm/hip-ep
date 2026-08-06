@@ -40,6 +40,8 @@ struct AllocationSize {
   llvm::SmallVector<Value> dynamicDims;
 };
 
+constexpr int64_t kPoolAlignment = 256;
+
 int64_t staticByteFactor(MemRefType memTy) {
   int64_t factor = memTy.getElementTypeBitWidth() / 8;
   for (int64_t dim : memTy.getShape()) {
@@ -187,6 +189,35 @@ void emitPoolingReport(Block &body,
   }
 }
 
+Value emitAllocationSize(OpBuilder &builder, Location loc,
+                         memref::AllocOp allocOp) {
+  AllocationSize size = computeAllocationSize(allocOp);
+  Value bytes = arith::ConstantIndexOp::create(builder, loc, size.staticBytes);
+  for (Value dyn : size.dynamicDims) {
+    bytes = arith::MulIOp::create(builder, loc, bytes, dyn);
+  }
+  return bytes;
+}
+
+Value emitGroupSize(OpBuilder &builder, Location loc,
+                    llvm::ArrayRef<Value> group, int64_t alignment) {
+  llvm::SmallVector<Value> sizes;
+  for (Value alloc : group) {
+    sizes.push_back(emitAllocationSize(builder, loc,
+                                       alloc.getDefiningOp<memref::AllocOp>()));
+  }
+  Value maxSize = sizes.front();
+  for (Value size : llvm::ArrayRef<Value>(sizes).drop_front()) {
+    maxSize = arith::MaxUIOp::create(builder, loc, maxSize, size);
+  }
+  Value alignVal = arith::ConstantIndexOp::create(builder, loc, alignment);
+  Value alignMinus1 =
+      arith::ConstantIndexOp::create(builder, loc, alignment - 1);
+  Value numerator = arith::AddIOp::create(builder, loc, maxSize, alignMinus1);
+  Value divided = arith::DivUIOp::create(builder, loc, numerator, alignVal);
+  return arith::MulIOp::create(builder, loc, divided, alignVal);
+}
+
 struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
   using impl::HipsrPoolAllocPassBase<
       HipsrPoolAllocPass>::HipsrPoolAllocPassBase;
@@ -206,6 +237,12 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
           greedyGrouping(body, lifetimes);
       if (emitPoolReport) {
         emitPoolingReport(body, lifetimes, groups, insertionPoint);
+      }
+
+      OpBuilder builder(&getContext());
+      builder.setInsertionPointAfter(insertionPoint);
+      for (llvm::ArrayRef<Value> group : groups) {
+        emitGroupSize(builder, domain.getLoc(), group, kPoolAlignment);
       }
     });
   }
