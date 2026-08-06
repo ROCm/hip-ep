@@ -228,7 +228,7 @@ Value findContext(Block &body) {
 }
 
 Value emitPool(OpBuilder &builder, Location loc, Value ctx,
-               llvm::ArrayRef<Value> groupSizes, int64_t domainId) {
+               llvm::ArrayRef<Value> groupSizes, uint64_t domainId) {
   Value poolSize = groupSizes.front();
   for (Value groupSize : groupSizes.drop_front()) {
     poolSize = arith::AddIOp::create(builder, loc, poolSize, groupSize);
@@ -245,7 +245,6 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
       HipsrPoolAllocPass>::HipsrPoolAllocPassBase;
 
   void runOnOperation() override {
-    int64_t domainId = 0;
     getOperation().walk([&](PoolDomainOp domain) {
       Block &body = domain.getBody().front();
       llvm::DenseMap<Value, Lifetime> lifetimes = computeLiveness(body);
@@ -275,7 +274,7 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
         groupSizes.push_back(
             emitGroupSize(builder, domain.getLoc(), group, kPoolAlignment));
       }
-      emitPool(builder, domain.getLoc(), ctx, groupSizes, domainId++);
+      emitPool(builder, domain.getLoc(), ctx, groupSizes, domain.getDomainId());
     });
   }
 };

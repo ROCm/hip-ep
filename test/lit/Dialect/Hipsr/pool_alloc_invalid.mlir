@@ -7,7 +7,7 @@ func.func @empty_domain() {
   // expected-error@+1 {{hipsr-pool-alloc: pool_domain has no poolable allocation}}
   hipsr.pool_domain() {
     hipsr.pool_domain_yield
-  }
+  } {domain_id = 0 : i64}
   return
 }
 
@@ -25,7 +25,7 @@ func.func @alloc_without_dps_write(%ctx: !hipsr.context,
                                memref<4x1024xf16, #hipsr.mem<device>>)
                outs(%din : memref<4x1024xf16, #hipsr.mem<device>>)
     hipsr.pool_domain_yield
-  }
+  } {domain_id = 0 : i64}
   return
 }
 
@@ -44,6 +44,6 @@ func.func @no_context(%in: memref<4x1024xf16, #hipsr.mem<device>>) {
     linalg.copy ins(%a1 : memref<4x1024xf16, #hipsr.mem<device>>)
            outs(%din : memref<4x1024xf16, #hipsr.mem<device>>)
     hipsr.pool_domain_yield
-  }
+  } {domain_id = 0 : i64}
   return
 }

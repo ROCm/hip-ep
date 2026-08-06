@@ -9,7 +9,7 @@
 //   chi=1  single point : align_up_rounding, dynamic_size, dead_alloc_skipped
 //   chi=1  independent  : coalesce_static
 //   chi=2  staggered    : split_two_groups, split_two_groups_dynamic
-// two_domains covers the module-level domain_id counter.
+// two_domains covers the domain_id each pool_domain declares.
 
 // 3xf16 = 6 B is not a multiple of 256, so the alignUp chain must round up.
 // CHECK-LABEL: func.func @align_up_rounding
@@ -29,7 +29,7 @@ func.func @align_up_rounding(%ctx: !hipsr.context,
     hipsr.add(%dctx) ins(%d, %d : memref<3xf16, #hipsr.mem<device>>, memref<3xf16, #hipsr.mem<device>>)
                outs(%a1 : memref<3xf16, #hipsr.mem<device>>)
     hipsr.pool_domain_yield
-  }
+  } {domain_id = 0 : i64}
   return
 }
 
@@ -59,7 +59,7 @@ func.func @dynamic_size(%ctx: !hipsr.context,
     hipsr.add(%dctx) ins(%din, %din : memref<?x512xf16, #hipsr.mem<device>>, memref<?x512xf16, #hipsr.mem<device>>)
                outs(%a1 : memref<?x512xf16, #hipsr.mem<device>>)
     hipsr.pool_domain_yield
-  }
+  } {domain_id = 0 : i64}
   return
 }
 
@@ -88,7 +88,7 @@ func.func @dead_alloc_skipped(%ctx: !hipsr.context,
     hipsr.add(%dctx) ins(%din, %din : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>)
                outs(%a1 : memref<4x1024xf16, #hipsr.mem<device>>)
     hipsr.pool_domain_yield
-  }
+  } {domain_id = 0 : i64}
   return
 }
 
@@ -141,7 +141,7 @@ func.func @coalesce_static(%ctx: !hipsr.context,
     hipsr.add(%dctx) ins(%d4b, %d4b : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%a4 : memref<4x1024xf16, #hipsr.mem<device>>)
     hipsr.add(%dctx) ins(%a4, %a4 : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%d4b : memref<4x1024xf16, #hipsr.mem<device>>)
     hipsr.pool_domain_yield
-  }
+  } {domain_id = 0 : i64}
   return
 }
 
@@ -174,7 +174,7 @@ func.func @split_two_groups(%ctx: !hipsr.context, %in: memref<4x1024xf16, #hipsr
     hipsr.add(%dctx) ins(%din, %din : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%a1 : memref<4x1024xf16, #hipsr.mem<device>>)
     hipsr.add(%dctx) ins(%a1, %din : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%a2 : memref<4x1024xf16, #hipsr.mem<device>>)
     hipsr.pool_domain_yield
-  }
+  } {domain_id = 0 : i64}
   return
 }
 
@@ -220,31 +220,32 @@ func.func @split_two_groups_dynamic(%ctx: !hipsr.context,
     hipsr.add(%dctx) ins(%a_dyn, %a_dyn : memref<?x512xf16, #hipsr.mem<device>>, memref<?x512xf16, #hipsr.mem<device>>) outs(%din : memref<?x512xf16, #hipsr.mem<device>>)
     hipsr.add(%dctx) ins(%a_static, %a_static : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%dsin : memref<4x1024xf16, #hipsr.mem<device>>)
     hipsr.pool_domain_yield
-  }
+  } {domain_id = 0 : i64}
   return
 }
 
 // -----
 
-// domain_id counts up per pool_domain across the module. It equals the
-// default 0 in the first domain, which the printer elides.
+// Each get_pool carries the id its pool_domain declared. The ids are 0 and 7,
+// not 0 and 1, so a pass that numbered domains itself would not match. The
+// first one prints bare because get_pool defaults domain_id to 0.
 // CHECK-LABEL: func.func @two_domains
 // CHECK: %[[G0:.+]] = arith.muli %{{.+}}, %{{.+}} : index
 // CHECK-NEXT: hipsr.get_pool(%{{.+}}, %[[G0]]) : memref<?xi8, #hipsr.mem<device>>
 // CHECK: %[[G1:.+]] = arith.muli %{{.+}}, %{{.+}} : index
-// CHECK-NEXT: hipsr.get_pool(%{{.+}}, %[[G1]]) {domain_id = 1 : i64} : memref<?xi8, #hipsr.mem<device>>
+// CHECK-NEXT: hipsr.get_pool(%{{.+}}, %[[G1]]) {domain_id = 7 : i64} : memref<?xi8, #hipsr.mem<device>>
 func.func @two_domains(%ctx: !hipsr.context, %in: memref<4x1024xf16, #hipsr.mem<device>>) {
   hipsr.pool_domain(%ctx, %in : !hipsr.context, memref<4x1024xf16, #hipsr.mem<device>>) {
   ^bb0(%dctx: !hipsr.context, %din: memref<4x1024xf16, #hipsr.mem<device>>):
     %a1 = memref.alloc() : memref<4x1024xf16, #hipsr.mem<device>>
     hipsr.add(%dctx) ins(%din, %din : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%a1 : memref<4x1024xf16, #hipsr.mem<device>>)
     hipsr.pool_domain_yield
-  }
+  } {domain_id = 0 : i64}
   hipsr.pool_domain(%ctx, %in : !hipsr.context, memref<4x1024xf16, #hipsr.mem<device>>) {
   ^bb0(%dctx: !hipsr.context, %din: memref<4x1024xf16, #hipsr.mem<device>>):
     %a2 = memref.alloc() : memref<4x1024xf16, #hipsr.mem<device>>
     hipsr.add(%dctx) ins(%din, %din : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%a2 : memref<4x1024xf16, #hipsr.mem<device>>)
     hipsr.pool_domain_yield
-  }
+  } {domain_id = 7 : i64}
   return
 }

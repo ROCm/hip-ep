@@ -34,7 +34,7 @@ func.func @interleaved_allocs(%ctx: !hipsr.context,
                                     memref<4x1024xf16, #hipsr.mem<device>>)
                outs(%din : memref<4x1024xf16, #hipsr.mem<device>>)
     hipsr.pool_domain_yield
-  }
+  } {domain_id = 0 : i64}
   return
 }
 
@@ -69,7 +69,7 @@ func.func @hoisted_allocs(%ctx: !hipsr.context,
                                     memref<4x1024xf16, #hipsr.mem<device>>)
                outs(%din : memref<4x1024xf16, #hipsr.mem<device>>)
     hipsr.pool_domain_yield
-  }
+  } {domain_id = 0 : i64}
   return
 }
 
@@ -96,7 +96,7 @@ func.func @nested_region_user(%ctx: !hipsr.context,
       scf.yield
     }
     hipsr.pool_domain_yield
-  }
+  } {domain_id = 0 : i64}
   return
 }
 
@@ -137,7 +137,7 @@ func.func @coalesce_static(%ctx: !hipsr.context,
     hipsr.add(%dctx) ins(%d4b, %d4b : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%a4 : memref<4x1024xf16, #hipsr.mem<device>>)
     hipsr.add(%dctx) ins(%a4, %a4 : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%d4b : memref<4x1024xf16, #hipsr.mem<device>>)
     hipsr.pool_domain_yield
-  }
+  } {domain_id = 0 : i64}
   return
 }
 
@@ -161,7 +161,7 @@ func.func @split_three_groups(%ctx: !hipsr.context, %in: memref<4x1024xf16, #hip
     hipsr.add(%dctx) ins(%a2, %a3 : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%din : memref<4x1024xf16, #hipsr.mem<device>>)
     hipsr.add(%dctx) ins(%a1, %a3 : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%din : memref<4x1024xf16, #hipsr.mem<device>>)
     hipsr.pool_domain_yield
-  }
+  } {domain_id = 0 : i64}
   return
 }
 
@@ -180,7 +180,7 @@ func.func @dynamic_size(%ctx: !hipsr.context,
     hipsr.add(%dctx) ins(%din, %din : memref<?x512xf16, #hipsr.mem<device>>, memref<?x512xf16, #hipsr.mem<device>>)
                outs(%a1 : memref<?x512xf16, #hipsr.mem<device>>)
     hipsr.pool_domain_yield
-  }
+  } {domain_id = 0 : i64}
   return
 }
 
@@ -209,7 +209,7 @@ func.func @coalesce_mixed(%ctx: !hipsr.context,
     hipsr.add(%dctx) ins(%sf16, %sf16 : memref<?x512xf16, #hipsr.mem<device>>, memref<?x512xf16, #hipsr.mem<device>>)
                outs(%a2 : memref<?x512xf16, #hipsr.mem<device>>)
     hipsr.pool_domain_yield
-  }
+  } {domain_id = 0 : i64}
   return
 }
 
@@ -231,7 +231,7 @@ func.func @coalesce_dynamic(%ctx: !hipsr.context, %in: memref<?x1024xf16, #hipsr
     hipsr.add(%dctx) ins(%din, %din : memref<?x1024xf16, #hipsr.mem<device>>, memref<?x1024xf16, #hipsr.mem<device>>) outs(%a2 : memref<?x1024xf16, #hipsr.mem<device>>)
     hipsr.add(%dctx) ins(%a2, %din : memref<?x1024xf16, #hipsr.mem<device>>, memref<?x1024xf16, #hipsr.mem<device>>) outs(%din : memref<?x1024xf16, #hipsr.mem<device>>)
     hipsr.pool_domain_yield
-  }
+  } {domain_id = 0 : i64}
   return
 }
 
@@ -260,7 +260,7 @@ func.func @split_two_groups_dynamic(%ctx: !hipsr.context,
     hipsr.add(%dctx) ins(%a_dyn, %a_dyn : memref<?x512xf16, #hipsr.mem<device>>, memref<?x512xf16, #hipsr.mem<device>>) outs(%din : memref<?x512xf16, #hipsr.mem<device>>)
     hipsr.add(%dctx) ins(%a_static, %a_static : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%dsin : memref<4x1024xf16, #hipsr.mem<device>>)
     hipsr.pool_domain_yield
-  }
+  } {domain_id = 0 : i64}
   return
 }
 
@@ -289,6 +289,6 @@ func.func @alloc_inside_region(%ctx: !hipsr.context,
       scf.yield
     }
     hipsr.pool_domain_yield
-  }
+  } {domain_id = 0 : i64}
   return
 }

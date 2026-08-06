@@ -28,6 +28,11 @@ def Hipsr_PoolDomainOp : Hipsr_Op<"pool_domain", [
     `RecursiveMemoryEffects` keeps nested effects visible to analyses.
     `AnyType` lets the group stay in place during bufferization.
 
+    `domain_id` selects the runtime pool this domain draws from;
+    `hipsr-pool-alloc` conveys it unchanged to the `hipsr.get_pool` it emits.
+    Domains with different ids grow independently, and a repeated id means the
+    author wants those domains to share one pool.
+
     Example:
     ```mlir
     %out = hipsr.pool_domain(%ctx, %input : !hipsr.context, tensor<?xf32>) {
@@ -36,11 +41,11 @@ def Hipsr_PoolDomainOp : Hipsr_Op<"pool_domain", [
       %size = tensor.dim %domain_input, %c0 : tensor<?xf32>
       %buffer = tensor.empty(%size) : tensor<?xf32>
       hipsr.pool_domain_yield %buffer : tensor<?xf32>
-    } -> tensor<?xf32>
+    } -> tensor<?xf32> {domain_id = 0 : i64}
     ```
   }];
 
-  let arguments = (ins Variadic<AnyType>:$operands);
+  let arguments = (ins Variadic<AnyType>:$operands, I64Attr:$domain_id);
   let results = (outs Variadic<AnyType>:$results);
   let regions = (region SizedRegion<1>:$body);
 

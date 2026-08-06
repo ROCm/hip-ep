@@ -422,15 +422,15 @@ static void materializeDomains(ArrayRef<Domain> domains, Value context) {
 
   IRRewriter rewriter(domains.front().operations.front()->getContext());
 
-  for (const Domain &domain : domains) {
+  for (auto [domainId, domain] : llvm::enumerate(domains)) {
     Operation *insertionPoint = domain.operations.front();
     rewriter.setInsertionPoint(insertionPoint);
 
     SmallVector<Type> resultTypes = llvm::map_to_vector(
         domain.results, [](Value result) { return result.getType(); });
 
-    auto domainOp = rewriter.create<PoolDomainOp>(insertionPoint->getLoc(),
-                                                  resultTypes, ValueRange{});
+    auto domainOp = rewriter.create<PoolDomainOp>(
+        insertionPoint->getLoc(), resultTypes, ValueRange{}, domainId);
     Region &bodyRegion = domainOp.getBody();
     Block *body = rewriter.createBlock(&bodyRegion);
     for (Operation *operation : domain.operations) {
