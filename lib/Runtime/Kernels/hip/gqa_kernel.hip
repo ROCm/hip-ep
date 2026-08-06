@@ -2313,15 +2313,22 @@ static float timeDecodeCandidate(hipStream_t stream, LaunchFn&& launch) {
   return samples[n / 2];  // median of the surviving bursts
 }
 
-// Benchmark all (impl, splits) candidates on the actual device buffers and pick
-// the fastest. Leaves the output buffers holding the *last* candidate's result;
-// the caller relaunches the winner afterwards to produce the correct output.
-static FlashDecodeCfg tuneFlashDecode(
-    hipStream_t stream,
-    const __half* hQ, const __half* hK, const __half* hV, __half* hO, float* hP,
-    int B, int H, int G, int d, int hpg, int skv, int max_seq, int max_splits,
-    float scale, const int* iSeq, int local_window_size,
-    const __half* hSink, int use_smooth_softmax) {
+// Benchmark every (impl, splits, bkv) candidate on the actual device buffers
+// and pick the fastest. Leaves the output buffers holding the *last*
+// candidate's result; the caller relaunches the winner afterwards to produce
+// the correct output.
+//
+// fp16 and INT8 share this: the candidate set and the selection rule are the
+// same, only the launcher differs, so `launch` is a callable taking the config.
+// Keeping one copy is the point. The two used to be separate near-identical
+// functions, and a tuning change applied to one but not the other would make
+// that format silently pick a worse configuration while every test still
+// passed, since the choice affects speed and not results. `launch` is a lambda
+// and inlines, so this costs nothing at runtime.
+template <typename LaunchFn>
+static FlashDecodeCfg tuneFlashDecodeConfig(
+    hipStream_t stream, int d, int hpg, int skv, int max_splits,
+    const char* tag, LaunchFn&& launch) {
   int split_set[7]; int n_splits = 0;
   flashDecodeCandidateSplits(skv, max_splits, split_set, n_splits);
   const bool impls[2] = {false, true};  // {scalar, WMMA}; geometry is identical
@@ -2331,7 +2338,7 @@ static FlashDecodeCfg tuneFlashDecode(
   float best_ms = 1e30f;
 
   // Only d==64 WMMA has a choice of tile height; everything else has one.
-  int bkv_set[2] = {16, 32};
+  const int bkv_set[2] = {16, 32};
   const int n_bkv = (wmma_ok && d == 64) ? 2 : 1;
 
   for (int ii = 0; ii < 2; ++ii) {
@@ -2341,30 +2348,24 @@ static FlashDecodeCfg tuneFlashDecode(
       for (int si = 0; si < n_splits; ++si) {
         if (!flashDecodeTallTileUseful(bkv_set[bi], skv, split_set[si]))
           continue;
-        FlashDecodeCfg cfg{impls[ii], split_set[si], bkv_set[bi]};
-        const float ms = timeDecodeCandidate(stream, [&] {
-          launchFlashDecodeConfig(cfg, stream, hQ, hK, hV, hO, hP, B, H, G, d,
-                                  hpg, max_seq, scale, iSeq, local_window_size,
-                                  hSink, use_smooth_softmax);
-        });
+        const FlashDecodeCfg cfg{impls[ii], split_set[si], bkv_set[bi]};
+        const float ms = timeDecodeCandidate(stream, [&] { launch(cfg); });
         CUSTOM_KERNELS_DEBUG_LOG(
-            "[custom_kernels]   flash_decode cand impl=%-6s splits=%2d bkv=%2d "
+            "[custom_kernels]   %s cand impl=%-6s splits=%2d bkv=%2d "
             ": %.4f ms%s\n",
-            cfg.use_wmma ? "wmma" : "scalar", cfg.splits, cfg.bkv, ms,
+            tag, cfg.use_wmma ? "wmma" : "scalar", cfg.splits, cfg.bkv, ms,
             ms < best_ms ? "  <-- best so far" : "");
         if (ms < best_ms) { best_ms = ms; best = cfg; }
       }
     }
   }
-
-
   return best;
 }
 
 // INT8 decode autotune state + helpers (defined below). Forward-declared here so
 // the unified hip_gqa_flash_decode can dispatch the int8 path when scales are
-// supplied; the launcher/tuner bodies live after the fp16 entry to keep the two
-// autotune skeletons side by side.
+// supplied; the launcher body lives after the fp16 entry. Tuning is shared:
+// both formats go through tuneFlashDecodeConfig above.
 static std::unordered_map<uint64_t, FlashDecodeCfg> g_flash_decode_i8_cache;
 static std::mutex g_flash_decode_i8_mutex;
 static inline void launchFlashDecodeConfigI8(
@@ -2373,13 +2374,6 @@ static inline void launchFlashDecodeConfigI8(
     const float* kSc, const float* vSc, __half* hO, float* hP,
     int B, int H, int G, int d, int hpg, int max_seq, float scale,
     const int* iSeq, int local_window_size,
-    const __half* hSink, int use_smooth_softmax);
-static FlashDecodeCfg tuneFlashDecodeI8(
-    hipStream_t stream,
-    const __half* hQ, const int8_t* hK, const int8_t* hV,
-    const float* kSc, const float* vSc, __half* hO, float* hP,
-    int B, int H, int G, int d, int hpg, int skv, int max_seq, int max_splits,
-    float scale, const int* iSeq, int local_window_size,
     const __half* hSink, int use_smooth_softmax);
 
 // Launcher: dispatches FA-2 split-K decode + reduction.
@@ -2511,9 +2505,14 @@ extern "C" int hip_gqa_flash_decode(
       if (it != g_flash_decode_i8_cache.end()) {
         cfg = it->second;
       } else {
-        cfg = tuneFlashDecodeI8(stream, hQ, hK, hV, kSc, vSc, hO, hP, B, H, G, d,
-                                hpg, tune_len, max_seq, cap, scale, iSeq,
-                                local_window_size, hSink, use_smooth_softmax);
+        cfg = tuneFlashDecodeConfig(
+            stream, d, hpg, tune_len, cap, "flash_decode_i8",
+            [&](const FlashDecodeCfg& c) {
+              launchFlashDecodeConfigI8(c, stream, hQ, hK, hV, kSc, vSc, hO, hP,
+                                        B, H, G, d, hpg, max_seq, scale, iSeq,
+                                        local_window_size, hSink,
+                                        use_smooth_softmax);
+            });
         g_flash_decode_i8_cache[key] = cfg;
       }
     }
@@ -2532,9 +2531,14 @@ extern "C" int hip_gqa_flash_decode(
     if (it != g_flash_decode_cache.end()) {
       cfg = it->second;
     } else {
-      cfg = tuneFlashDecode(stream, hQ, hK, hV, hO, hP, B, H, G, d, hpg,
-                            tune_len, max_seq, cap, scale, iSeq,
-                            local_window_size, hSink, use_smooth_softmax);
+      cfg = tuneFlashDecodeConfig(
+          stream, d, hpg, tune_len, cap, "flash_decode",
+          [&](const FlashDecodeCfg& c) {
+            launchFlashDecodeConfig(c, stream, hQ, hK, hV, hO, hP, B, H, G, d,
+                                    hpg, max_seq, scale, iSeq,
+                                    local_window_size, hSink,
+                                    use_smooth_softmax);
+          });
       g_flash_decode_cache[key] = cfg;
       CUSTOM_KERNELS_DEBUG_LOG(
           "[custom_kernels] flash_decode autotune: key=0x%llx -> impl=%s splits=%d "
@@ -2631,49 +2635,6 @@ static inline void launchFlashDecodeConfigI8(
   else
     gqa_flash_decode_reduce_kernel<64><<<grid_reduce, 64, 0, stream>>>(
         hP, hO, H, hSink, H, use_smooth_softmax, splits);
-}
-
-static FlashDecodeCfg tuneFlashDecodeI8(
-    hipStream_t stream,
-    const __half* hQ, const int8_t* hK, const int8_t* hV,
-    const float* kSc, const float* vSc, __half* hO, float* hP,
-    int B, int H, int G, int d, int hpg, int skv, int max_seq, int max_splits,
-    float scale, const int* iSeq, int local_window_size,
-    const __half* hSink, int use_smooth_softmax) {
-  int split_set[7]; int n_splits = 0;
-  flashDecodeCandidateSplits(skv, max_splits, split_set, n_splits);
-  const bool impls[2] = {false, true};
-
-  const bool wmma_ok = flash_decode_wmma_supported(d, hpg);
-  FlashDecodeCfg best{wmma_ok && (d == 64), split_set[0]};
-  float best_ms = 1e30f;
-
-  int bkv_set[2] = {16, 32};
-  const int n_bkv = (wmma_ok && d == 64) ? 2 : 1;
-
-  for (int ii = 0; ii < 2; ++ii) {
-    if (impls[ii] && !wmma_ok) continue;
-    const int bkv_count = impls[ii] ? n_bkv : 1;
-    for (int bi = 0; bi < bkv_count; ++bi) {
-      for (int si = 0; si < n_splits; ++si) {
-        if (!flashDecodeTallTileUseful(bkv_set[bi], skv, split_set[si]))
-          continue;
-        FlashDecodeCfg cfg{impls[ii], split_set[si], bkv_set[bi]};
-        const float ms = timeDecodeCandidate(stream, [&] {
-          launchFlashDecodeConfigI8(cfg, stream, hQ, hK, hV, kSc, vSc, hO, hP,
-                                    B, H, G, d, hpg, max_seq, scale, iSeq,
-                                    local_window_size, hSink,
-                                    use_smooth_softmax);
-        });
-        CUSTOM_KERNELS_DEBUG_LOG(
-            "[custom_kernels]   flash_decode_i8 cand impl=%-6s splits=%2d "
-            "bkv=%2d : %.4f ms\n",
-            cfg.use_wmma ? "wmma" : "scalar", cfg.splits, cfg.bkv, ms);
-        if (ms < best_ms) { best_ms = ms; best = cfg; }
-      }
-    }
-  }
-  return best;
 }
 
 //===----------------------------------------------------------------------===//
