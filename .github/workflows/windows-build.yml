@@ -22,12 +22,22 @@ jobs:
     # (gsl/util C2220 warning-as-error). Pin to the VS 2022 image per
     # actions/runner-images#14017.
     runs-on: windows-2022
+    # Build once per GPU arch. Each leg auto-downloads its own per-arch TheRock
+    # SDK (cmake/deps.cmake derives the tarball from HIP_ARCHITECTURES) and
+    # builds custom_kernels_<arch>.dll. Only the gfx1151 leg feeds gpu-test;
+    # the others are compile/package coverage. fail-fast off so one arch's
+    # failure does not abort the rest.
+    strategy:
+      fail-fast: false
+      matrix:
+        hip_arch: [gfx1151, gfx1152, gfx1150]
     # Cancel the build job when a newer commit lands on the same PR ref to
     # save runner minutes. gpu-test deliberately does NOT inherit this rule
     # (see its own concurrency block below) so an in-progress GPU run keeps
-    # going to completion even if a newer build supersedes it.
+    # going to completion even if a newer build supersedes it. The group folds
+    # in matrix.hip_arch so the per-arch legs do not cancel each other.
     concurrency:
-      group: build-windows-${{ github.ref }}
+      group: build-windows-${{ github.ref }}-${{ matrix.hip_arch }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
     env:
@@ -64,6 +74,9 @@ jobs:
           submodules: false
           fetch-depth: 1
           show-progress: false
+          # .github/rocm-runtime/*.zip is LFS-tracked; without this the checkout
+          # leaves a pointer file and Expand-Archive fails on it.
+          lfs: true
 
       # -----------------------------------------------------------------------
       # Per-dependency caches. Each dep is built from source into its own
@@ -350,7 +363,7 @@ jobs:
           python build.py \
             --config Release \
             --cmake_generator Ninja \
-            --hip_arch gfx1151 \
+            --hip_arch ${{ matrix.hip_arch }} \
             --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install" \
             --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON \
             --cmake_extra_defines "HIP_WHEEL_EXTRA_DLLS=$AMDGPU_EP;$HIP_BACKEND"
@@ -544,9 +557,9 @@ jobs:
           # Smoke: the per-arch kernel DLL must be present in staging/bin/
           # for the gpu-test job to load it. Failure here means the install
           # rule in lib/Runtime/Kernels/CMakeLists.txt regressed.
-          KERNEL_DLL="staging/bin/custom_kernels_gfx1151.dll"
+          KERNEL_DLL="staging/bin/custom_kernels_${{ matrix.hip_arch }}.dll"
           if [ ! -f "$KERNEL_DLL" ]; then
-            echo "ERROR: $KERNEL_DLL missing from install (HIP_ARCHITECTURES=gfx1151)"
+            echo "ERROR: $KERNEL_DLL missing from install (HIP_ARCHITECTURES=${{ matrix.hip_arch }})"
             ls -1 "${{ runner.workspace }}/install/bin/" || true
             exit 1
           fi
@@ -621,10 +634,30 @@ jobs:
           echo "=== Staged package contents ==="
           find staging/ -type f | sort
 
+      # -----------------------------------------------------------------------
+      # Vendored gfx115x ROCm runtime, overlaid so the artifact runs on a box
+      # without a separate ROCm SDK. Runs after staging on purpose: its
+      # amdhip64_7.dll must win over the TheRock dist copy above, so the
+      # packaged HIP runtime stays consistent with the comgr/rocblas next to it.
+      # -----------------------------------------------------------------------
+      - name: Overlay vendored ROCm runtime into package bin/
+        shell: pwsh
+        run: |
+          $dist = "${{ runner.workspace }}/rocm-vendored"
+          if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
+          Expand-Archive -Path ".github/rocm-runtime/rocm_7.11-gfx115x_bin.zip" `
+            -DestinationPath $dist -Force
+          if (-not (Test-Path "$dist/amdhip64_7.dll")) {
+            throw "vendored ROCm runtime looks wrong: $dist"
+          }
+          Copy-Item "$dist/*" staging/bin -Recurse -Force
+          $n = (Get-ChildItem staging/bin -Recurse -File | Measure-Object).Count
+          Write-Host "=== staging/bin holds $n files after overlay ==="
+
       - name: Upload GPU test package
         uses: actions/upload-artifact@v4
         with:
-          name: gpu-test-package
+          name: gpu-test-package-${{ matrix.hip_arch }}
           path: staging/
           retention-days: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) && 14 || 3 }}
 
@@ -658,7 +691,7 @@ jobs:
       - name: Upload Python wheel package
         uses: actions/upload-artifact@v4
         with:
-          name: hip-python-package
+          name: hip-python-package-${{ matrix.hip_arch }}
           path: wheelpkg/
           retention-days: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) && 14 || 3 }}
 
@@ -703,13 +736,13 @@ jobs:
       - name: Download GPU test package
         uses: actions/download-artifact@v4
         with:
-          name: gpu-test-package
+          name: gpu-test-package-gfx1151
           path: gpu-test-package
 
       - name: Download Python wheel package
         uses: actions/download-artifact@v4
         with:
-          name: hip-python-package
+          name: hip-python-package-gfx1151
           path: wheelpkg
 
       # TheRock DLLs are required at runtime on the GPU machine.
