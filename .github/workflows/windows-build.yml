@@ -46,11 +46,11 @@ jobs:
       # Remove a PR number once its fix is in the pinned ONNXRUNTIME_VERSION.
       ONNXRUNTIME_PR_PATCHES: ""
       SCCACHE_GHA_ENABLED: "true"
-      OGA_VERSION: "0.14.0"
+      OGA_BRANCH: "rel-0.15.1"
       # Space-separated microsoft/onnxruntime-genai PR numbers fetched from
-      # pull/<n>.patch and `git apply` on top of v<OGA_VERSION>. Part of the OGA
-      # cache key. Remove a PR once it lands in the pinned OGA release.
-      OGA_PR_PATCHES: "2194"
+      # pull/<n>.patch and `git am` on top of OGA_BRANCH. Part of the OGA cache
+      # key. Remove a PR once it lands in OGA_BRANCH.
+      OGA_PR_PATCHES: "2376"
       # ilammy/msvc-dev-cmd and mozilla-actions/sccache-action have no
       # Node.js 24 releases yet; allow Node.js 20 until they are updated.
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
@@ -360,28 +360,62 @@ jobs:
       # Cache only the two artifacts we need: model_benchmark.exe and
       # onnxruntime-genai.dll, keyed on OGA commit + ORT version.
       # -----------------------------------------------------------------------
+      # Both the release branch and every patch PR move under a fixed name, so
+      # neither identifies its content. Resolve their heads once: the cache key
+      # folds in the short SHAs and the checkout below uses the branch SHA this
+      # step resolved, so a mid-run push cannot desync key from source.
+      - name: Resolve OGA source SHAs
+        id: oga-shas
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OGA_PRS: ${{ env.OGA_PR_PATCHES }}
+        run: |
+          $branch = gh api "repos/microsoft/onnxruntime-genai/commits/$env:OGA_BRANCH" --jq .sha
+          if ($LASTEXITCODE -ne 0 -or -not $branch) {
+            throw "Failed to resolve head SHA for OGA branch $env:OGA_BRANCH"
+          }
+          Write-Host "OGA branch head: $env:OGA_BRANCH $branch"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "branch-sha=$branch"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "branch-sha12=$($branch.Substring(0, 12))"
+
+          $prs = $env:OGA_PRS.Trim()
+          if (-not $prs) {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "shas=none"
+            exit 0
+          }
+          $parts = foreach ($pr in $prs -split '\s+') {
+            if (-not $pr) { continue }
+            $sha = gh api "repos/microsoft/onnxruntime-genai/pulls/$pr" --jq .head.sha
+            if ($LASTEXITCODE -ne 0 -or -not $sha) {
+              throw "Failed to resolve head SHA for OGA PR #$pr"
+            }
+            "$pr-$($sha.Substring(0, 12))"
+          }
+          $shas = $parts -join '_'
+          Write-Host "OGA PR heads: $shas"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "shas=$shas"
+
       - name: Cache OGA artifacts
         id: cache-oga
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/oga-artifacts
           # OGA is built against the patched ort-install, so the key folds in
-          # both OGA's own PR list and ONNXRUNTIME_PR_PATCHES; editing either
-          # forces a rebuild. The mm<N> token bumps when the OGA artifact set
-          # changes shape, or when a PR's branch content changes under the same
-          # number (mm2: PR 2194 now carries the AMDGPU OGA integration).
-          key: oga-dml-mm2-${{ env.OGA_VERSION }}-pr${{ env.OGA_PR_PATCHES }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
+          # both OGA's own sources and ONNXRUNTIME_PR_PATCHES; a new commit on
+          # either side forces a rebuild.
+          key: oga-dml-${{ env.OGA_BRANCH }}-${{ steps.oga-shas.outputs.branch-sha12 }}-pr${{ steps.oga-shas.outputs.shas }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
 
       # OGA is built from upstream microsoft/onnxruntime-genai + PR patches
-      # (OGA_PR_PATCHES). PR 2194 (the dynamic-shape-morphizen branch) now also
-      # carries the AMDGPU umbrella integration, so the patched upstream build
-      # is the AMDGPU-targeted OGA -- no fork checkout needed.
+      # (OGA_PR_PATCHES). PR 2376 carries the AMDGPU umbrella integration, so
+      # the patched upstream build is the AMDGPU-targeted OGA -- no fork
+      # checkout needed.
       - name: Checkout OGA
         if: steps.cache-oga.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: microsoft/onnxruntime-genai
-          ref: v${{ env.OGA_VERSION }}
+          ref: ${{ steps.oga-shas.outputs.branch-sha }}
           path: source-oga
           submodules: true
           fetch-depth: 1
@@ -403,10 +437,10 @@ jobs:
             Write-Host "OGA_PR_PATCHES is empty; nothing to apply"
             exit 0
           }
-          # pull/<n>.patch is a format-patch series; apply with `git am` so that
-          # intra-series file renames (morphizen_ep -> amdgpu) replay against the
-          # correct intermediate tree. `git apply` flattens the series and chokes
-          # on the rename whose pre-image only exists after an earlier commit.
+          # pull/<n>.patch is a format-patch series; apply with `git am` so each
+          # commit replays against the intermediate tree it was authored against.
+          # `git apply` flattens the series and chokes on anything that depends on
+          # an earlier commit in it (a file rename, for example).
           git config user.email "ci@rocm.amd.com"
           git config user.name "ROCm CI"
           foreach ($pr in $prs -split '\s+') {
@@ -446,6 +480,7 @@ jobs:
             --use_dml \
             --ort_home "$ORT_HOME" \
             --skip_tests --skip_examples \
+            --no_telemetry \
             --parallel \
             --build_dir "${{ runner.workspace }}/build-oga" \
             --cmake_extra_defines \
@@ -1288,7 +1323,7 @@ jobs:
             $content = Get-Content $f.FullName -Raw
             $ttftMatch = [regex]::Match($content, 'Prompt processing \(time to first token\):\s*\n\s*avg \(us\):\s+([\d.]+)')
             $tpsMatch  = [regex]::Match($content, 'Token generation:\s*\n\s*avg \(us\):\s+([\d.]+)\s*\n\s*avg \(tokens/s\):\s+([\d.]+)')
-            $memMatch  = [regex]::Match($content, 'Peak working set size \(bytes\):\s+(\d+)')
+            $memMatch  = [regex]::Match($content, 'Peak working set size:\s+(\d+)\s+bytes')
             $ttft = if ($ttftMatch.Success) { "{0:F1}" -f ([double]$ttftMatch.Groups[1].Value / 1000) } else { "-" }
             $tps  = if ($tpsMatch.Success) { "{0:F1}" -f [double]$tpsMatch.Groups[2].Value } else { "-" }
             $mem  = if ($memMatch.Success) { "{0:F2}" -f ([double]$memMatch.Groups[1].Value / 1GB) } else { "-" }
