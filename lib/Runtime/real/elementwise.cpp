@@ -380,13 +380,6 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
                     (long long)out_n, (long long)out_c, (long long)out_h,
                     (long long)out_w, type_name, (long long)data_type);
 
-  miopenHandle_t handle =
-      static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
-  if (!handle) {
-    fprintf(stderr, "wrap_miopenOpTensor: null MIOpen handle\n");
-    return -1;
-  }
-
   bool op_ok;
   miopenTensorOp_t miopen_op = hipdnn_ep_to_miopen_op(tensor_op, op_ok);
   if (!op_ok) {
@@ -654,6 +647,19 @@ int wrap_miopenOpTensor(RuntimeState *state, int op_state_slot, void *lhs,
   }
 
   float alpha1 = 1.0f, alpha2 = 1.0f, beta = 0.0f;
+
+  // The handle is fetched here — after the integer and float/half fast paths
+  // above have had their chance to return — because only the MIOpen fallback
+  // below actually needs it. Builds that disable the vendor backends
+  // (HIPDNN_EP_DISABLE_VENDOR_BLAS) leave the handle null by design and expect
+  // ADD/MUL/MIN/MAX to be served entirely by the custom kernels; checking the
+  // handle earlier would abort those ops even though they never touch MIOpen.
+  miopenHandle_t handle =
+      static_cast<miopenHandle_t>(hipdnn_ep_state_get_miopen_handle(state));
+  if (!handle) {
+    fprintf(stderr, "wrap_miopenOpTensor: null MIOpen handle\n");
+    return -1;
+  }
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_miopenOpTensor: calling miopenOpTensor"
                     "(op=%s, alpha1=%.1f, alpha2=%.1f, beta=%.1f)\n",
