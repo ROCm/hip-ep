@@ -24,7 +24,7 @@
 // CHECK-NOT: onnx.NoValue
 
 module {
-  func.func @main_graph(%indices: tensor<8xi64> {onnx.name = "indices"}) -> (tensor<8x96xf16> {onnx.name = "output"}) {
+  func.func @main_graph(%indices: tensor<8xi64> {onnx.name = "indices"}) -> (tensor<8x192xf16> {onnx.name = "output"}) {
     %data = "onnx.Constant"() {value = dense<1> : tensor<2048x96xui8>} : () -> tensor<2048x96xui8>
     %scales = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<2048x12xf16>} : () -> tensor<2048x12xf16>
     %zp = "onnx.Constant"() {value = dense<8> : tensor<2048x12xui8>} : () -> tensor<2048x12xui8>
@@ -36,8 +36,8 @@ module {
       gather_axis = 0 : si64,
       quantize_axis = 1 : si64,
       onnx_node_name = "GatherBlockQuantized_0"
-    } : (tensor<2048x96xui8>, tensor<8xi64>, tensor<2048x12xf16>, tensor<2048x12xui8>) -> tensor<8x96xf16>
-    "onnx.Return"(%out) : (tensor<8x96xf16>) -> ()
+    } : (tensor<2048x96xui8>, tensor<8xi64>, tensor<2048x12xf16>, tensor<2048x12xui8>) -> tensor<8x192xf16>
+    "onnx.Return"(%out) : (tensor<8x192xf16>) -> ()
   }
   "onnx.EntryPoint"() <{func = @main_graph}> : () -> ()
 }

@@ -155,8 +155,12 @@ extern "C" int wrap_gather_block_quantized(
   }
   for (int64_t i = 0; i < data_rank; ++i)
     logical_data_shape_buf[i] = data_shape[i];
-  if (bits == 4 && scales_shape[quantize_axis_n] * block_size ==
-                       data_shape[quantize_axis_n] * 2)
+  // Every bits=4 HIP operand uses byte-packed storage: native ONNX int4/uint4
+  // constants are legalized to i8 before this wrapper, and uint8 fallback
+  // models arrive packed already. Shape compatibility was verified in the HIP
+  // dialect, so the logical extent is always twice the byte extent, including
+  // a partially filled final quantization block.
+  if (bits == 4)
     logical_data_shape_buf[quantize_axis_n] *= 2;
   const int64_t *logical_data_shape = logical_data_shape_buf;
 

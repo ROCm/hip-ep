@@ -78,11 +78,6 @@ struct ResizeToHip : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "Resize: roi (tf_crop_and_resize) not supported");
 
-    auto ctxOrFailure = getContextArg(op, rewriter);
-    if (mlir::failed(ctxOrFailure))
-      return mlir::failure();
-    mlir::Value context = *ctxOrFailure;
-
     mlir::Location loc = op->getLoc();
     mlir::Value input = operands[0];
     auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
@@ -99,23 +94,12 @@ struct ResizeToHip : public mlir::RewritePattern {
     if (spatialRank < 1 || spatialRank > 3)
       return rewriter.notifyMatchFailure(
           op, "only 1D / 2D / 3D spatial Resize supported");
-    if (!mlir::isa<mlir::FloatType>(inputType.getElementType()) ||
+    mlir::Type elementType = inputType.getElementType();
+    if ((!elementType.isF16() && !elementType.isF32() &&
+         !elementType.isBF16() && !elementType.isF64()) ||
         inputType.getElementType() != outputType.getElementType())
       return rewriter.notifyMatchFailure(
-          op, "Resize runtime supports only matching float types");
-
-    // (N, C) must be pass-through.  If both extents are static and differ,
-    // bail.  Dynamic on either side is OK as long as both are dynamic
-    // (tensor.dim of input feeds tensor.empty for the output).
-    for (int64_t i : llvm::seq<int64_t>(2)) {
-      bool inDyn = inputType.isDynamicDim(i);
-      bool outDyn = outputType.isDynamicDim(i);
-      if (!inDyn && !outDyn &&
-          inputType.getDimSize(i) != outputType.getDimSize(i))
-        return rewriter.notifyMatchFailure(
-            op, "Resize: only spatial-axis resampling supported "
-                "(N, C must match between input and output)");
-    }
+          op, "Resize runtime supports only matching f16/f32/bf16/f64 types");
 
     // ===== Decode string attrs to enum-like i64 values =====================
 
@@ -183,31 +167,29 @@ struct ResizeToHip : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "keep_aspect_ratio_policy must be 'stretch'");
 
-    // ===== Build DPS init =================================================
-    //
-    // Output shape: leading (N, C) inherit from the input (their dynamic
-    // status is required to match by the check above).  Trailing spatial
-    // dims must be static — at runtime the kernel reads them off the
-    // output memref descriptor; if they were dynamic we'd need arith ops
-    // for the per-axis output extents, left out of scope.
-    for (int64_t i : llvm::seq<int64_t>(spatialRank)) {
-      if (outputType.isDynamicDim(2 + i))
-        return rewriter.notifyMatchFailure(
-            op, "Resize: dynamic output spatial dims not supported");
-    }
+    // Validate the complete shape contract before the mixed helper emits any
+    // tensor.dim operations. N/C come from input; spatial extents are the
+    // static template resolved by the importer from sizes/scales.
+    if (mlir::failed(mlir::hip::inferResizeShape(
+            inputType.getShape(), outputType.getShape(),
+            [&]() { return op->emitError(); })))
+      return mlir::failure();
 
-    llvm::SmallVector<mlir::Value> dynSizes;
-    for (int64_t i : llvm::seq<int64_t>(rank)) {
-      if (outputType.isDynamicDim(i)) {
-        if (i >= 2)
-          return rewriter.notifyMatchFailure(op, "unreachable");
-        dynSizes.push_back(
-            mlir::tensor::DimOp::create(rewriter, loc, input, i));
-      }
-    }
-    mlir::Value init =
-        mlir::tensor::EmptyOp::create(rewriter, loc, outputType.getShape(),
-                                      outputType.getElementType(), dynSizes);
+    auto ctxOrFailure = getContextArg(op, rewriter);
+    if (mlir::failed(ctxOrFailure))
+      return mlir::failure();
+    mlir::Value context = *ctxOrFailure;
+
+    mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>> outputShape =
+        mlir::hip::reifyResizeShape(rewriter, loc, input, outputType.getShape(),
+                                    [&]() { return op->emitError(); });
+    if (mlir::failed(outputShape))
+      return mlir::failure();
+    mlir::FailureOr<mlir::Value> init = createEmptyTensorFromReifiedShape(
+        rewriter, loc, outputType, *outputShape);
+    if (mlir::failed(init))
+      return rewriter.notifyMatchFailure(
+          op, "Resize output type contradicts the supported shape contract");
 
     auto modeAttr = rewriter.getI64IntegerAttr(modeId);
     auto coordAttr = rewriter.getI64IntegerAttr(coordId);
@@ -215,7 +197,7 @@ struct ResizeToHip : public mlir::RewritePattern {
 
     auto hipOp =
         mlir::hip::ResizeOp::create(rewriter, loc, outputType, context, input,
-                                    init, modeAttr, coordAttr, nearestAttr);
+                                    *init, modeAttr, coordAttr, nearestAttr);
     rewriter.replaceOp(op, hipOp.getResult(0));
     return mlir::success();
   }
