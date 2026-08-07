@@ -48,6 +48,8 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
       OGA_VERSION: "0.15.0"
       OGA_PR_PATCHES: "2165"
+      AMDGPU_EP_COMMIT: 9f98d26ba808205101d7844d38b6756f9c44caf3
+      AMDGPU_EP_PR_PATCHES: "77"
       # ilammy/msvc-dev-cmd and mozilla-actions/sccache-action have no
       # Node.js 24 releases yet; allow Node.js 20 until they are updated.
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
@@ -95,13 +97,6 @@ jobs:
       # FetchContent fallback) during the project build. With no prefix install
       # they take the from-source path (sccache-accelerated). gtest is only
       # pulled when unit tests are enabled (morphizen_ENABLE_UNIT_TEST=OFF here).
-
-      # -----------------------------------------------------------------------
-      # TheRock HIP SDK is NOT downloaded explicitly here: with no -DTHEROCK_DIST
-      # passed to Configure, cmake/deps.cmake auto-downloads + extracts it into
-      # the build tree (<build>/_therock) during configure. This exercises the
-      # default auto-download path in CI. (gpu-test downloads TheRock itself.)
-      # -----------------------------------------------------------------------
 
       # -----------------------------------------------------------------------
       # llvm-lit.py (from prebuilt) requires the lit pip package at runtime.
@@ -273,37 +268,96 @@ jobs:
       # from-source FetchContent fallback, sccache-accelerated).
       # -----------------------------------------------------------------------
 
-      # -----------------------------------------------------------------------
-      # Build the AMD GPU umbrella EP (onnxruntime-ep-amdgpu) + hip-backend
-      # shim from the fork's PR branch. USE_AMDGPU forces DML/MIGraphX off and
-      # HIPGPU on (no MIGraphX SDK needed); the shim loads hipgpu.dll (the
-      # morphizen EP, renamed via cmake/deps.cmake). Built against ort-install.
-      # Commit is pinned; bump it (and the cache key below) when the fork moves.
-      #
-      # Built BEFORE onnx-hipdnn-ep so its wheel target can bundle amdgpu-ep.dll
-      # + hip-backend.dll (HIP_WHEEL_EXTRA_DLLS below). amdgpu-ep only
-      # links ort-install, so it has no dependency on the onnx-hipdnn-ep build.
-      # -----------------------------------------------------------------------
+      - name: Download TheRock ROCm SDK
+        id: therock
+        shell: pwsh
+        run: |
+          $entry = Get-Content cmake/deps.txt | Where-Object { $_ -like 'therock;*' }
+          if (-not $entry) {
+            Write-Host "ERROR: no therock entry in cmake/deps.txt"
+            exit 1
+          }
+          $fields = $entry -split ';'
+          $baseUrl = $fields[1]
+          $rocmVersion = $fields[2]
+          $tarball = "therock-dist-windows-gfx1151-$rocmVersion.tar.gz"
+          $dist = "${{ runner.workspace }}/therock-dist"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Write-Host "Downloading $baseUrl/$tarball"
+          curl.exe -fsSL --retry 3 --retry-delay 10 "$baseUrl/$tarball" -o therock.tar.gz
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          tar -xzf therock.tar.gz -C $dist --strip-components=1
+          Remove-Item therock.tar.gz
+          if (-not (Test-Path "$dist/bin/amdhip64_7.dll")) {
+            Write-Host "ERROR: $dist does not look like a TheRock dist"
+            exit 1
+          }
+          "dist=$dist" >> $env:GITHUB_OUTPUT
+
+      - name: Resolve amdgpu-ep PR head SHAs
+        id: amdgpu-shas
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AMDGPU_PRS: ${{ env.AMDGPU_EP_PR_PATCHES }}
+        run: |
+          $tokens = @()
+          foreach ($pr in ($env:AMDGPU_PRS.Trim() -split '\s+')) {
+            if (-not $pr) { continue }
+            $sha = gh api "repos/onnxruntime/onnxruntime-ep-amdgpu/pulls/$pr" --jq .head.sha
+            if ($LASTEXITCODE -ne 0 -or -not $sha) {
+              throw "Cannot resolve the head of amdgpu-ep PR #$pr"
+            }
+            Write-Host "amdgpu-ep PR #$pr -> $sha"
+            $tokens += "$pr-$($sha.Substring(0, 12))"
+          }
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "shas=$($tokens -join '_')"
+
       - name: Cache amdgpu-ep build
         id: cache-amdgpu
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ runner.workspace }}/build-amdgpu
-          # amdgpu-ep/hip-backend link against the patched ort-install, so the
-          # key folds in the pinned fork commit + ORT version/PR list; bumping
-          # any of them forces a rebuild. On a hit the checkout + build below are
-          # skipped and the staging step finds the cached DLLs in build-amdgpu.
-          key: dep-amdgpu-a1318ed-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
+          key: dep-amdgpu-${{ env.AMDGPU_EP_COMMIT }}-pr${{ steps.amdgpu-shas.outputs.shas }}-ort${{ env.ONNXRUNTIME_VERSION }}-ortpr${{ env.ONNXRUNTIME_PR_PATCHES }}
 
       - name: Checkout amdgpu-ep
         if: steps.cache-amdgpu.outputs.cache-hit != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: zz002/onnxruntime-ep-amdgpu
-          ref: a1318edb3c5b87d539bd797eff3addaa7ba2ddda
+          repository: onnxruntime/onnxruntime-ep-amdgpu
+          ref: ${{ env.AMDGPU_EP_COMMIT }}
           path: source-amdgpu
           fetch-depth: 1
           show-progress: false
+
+      - name: Apply amdgpu-ep PR patches
+        if: steps.cache-amdgpu.outputs.cache-hit != 'true'
+        shell: bash
+        working-directory: source-amdgpu
+        env:
+          AMDGPU_PRS: ${{ env.AMDGPU_EP_PR_PATCHES }}
+        run: |
+          set -euo pipefail
+          prs="$(echo "$AMDGPU_PRS" | xargs || true)"
+          if [ -z "$prs" ]; then
+            echo "AMDGPU_EP_PR_PATCHES is empty; nothing to apply"
+            exit 0
+          fi
+          # git am needs a committer identity on a bare runner.
+          git config user.email "ci@onnx-hipdnn-ep.local"
+          git config user.name "onnx-hipdnn-ep CI"
+          for pr in $prs; do
+            url="https://github.com/onnxruntime/onnxruntime-ep-amdgpu/pull/${pr}.patch"
+            echo "Fetching $url"
+            # github.com throttles raw .patch fetches with HTTP 429; retry with
+            # backoff (--retry-all-errors covers 429/5xx) to ride out the limit.
+            curl -fsSL --retry 6 --retry-delay 10 --retry-all-errors \
+              "$url" -o "amdgpu-pr-${pr}.patch"
+            echo "Applying PR #${pr}"
+            git am --3way --whitespace=nowarn "amdgpu-pr-${pr}.patch" \
+              || { git am --abort; echo "PR #${pr} failed to apply"; exit 1; }
+            rm -f "amdgpu-pr-${pr}.patch"
+          done
 
       - name: Build amdgpu-ep
         if: steps.cache-amdgpu.outputs.cache-hit != 'true'
@@ -317,25 +371,13 @@ jobs:
           "$CMAKE" -G Ninja -S source-amdgpu -B "${{ runner.workspace }}/build-amdgpu" \
             -DCMAKE_BUILD_TYPE=Release \
             -DUSE_AMDGPU=ON \
-            -DCMAKE_PREFIX_PATH="${{ runner.workspace }}/ort-install" \
+            -DUSE_DML=OFF \
+            -DCMAKE_PREFIX_PATH="${{ runner.workspace }}/ort-install;${{ steps.therock.outputs.dist }}" \
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
           "$CMAKE" --build "${{ runner.workspace }}/build-amdgpu" --target amdgpu-ep hip-ep
 
-      # -----------------------------------------------------------------------
-      # Build onnx-hipdnn-ep via the cross-platform build.py (same driver
-      # as the Linux CI and docs/quick_start.md). Cached LLVM/ORT prefixes are
-      # injected; protobuf/flatbuffers build from source and TheRock auto-downloads
-      # via cmake/deps.cmake. build.py's default build/install dirs resolve to
-      # ${{ runner.workspace }}/build/<repo> and ${{ runner.workspace }}/install
-      # (repo.parent), matching what the later staging step expects. The LIT tests
-      # run inside build.py after install.
-      #
-      # HIP_WHEEL_EXTRA_DLLS feeds the wheel target the amdgpu-ep.dll +
-      # hip-backend.dll built above, so the morphizen wheel ships the whole
-      # AMD GPU umbrella chain in onnxruntime/capi/ next to hipgpu.dll.
-      # -----------------------------------------------------------------------
       - name: Build onnx-hipdnn-ep
         shell: bash
         run: |
@@ -348,6 +390,7 @@ jobs:
             --config Release \
             --cmake_generator Ninja \
             --hip_arch gfx1151 \
+            --therock_dist "${{ steps.therock.outputs.dist }}" \
             --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install" \
             --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON \
             --cmake_extra_defines "HIP_WHEEL_EXTRA_DLLS=$AMDGPU_EP;$HIP_BACKEND"
@@ -556,10 +599,7 @@ jobs:
           # without touching this workflow each time.
           cp "${{ runner.workspace }}/install/lib/"*.lib staging/lib/ 2>/dev/null || true
 
-          # amdhip64_7.dll – HIP runtime required at inference time. TheRock was
-          # auto-downloaded by cmake/deps.cmake into the build tree's _therock.
-          THEROCK_DIR="../build/$(basename "$PWD")/_therock"
-          cp "$THEROCK_DIR/bin/amdhip64_7.dll" staging/bin/
+          cp "${{ steps.therock.outputs.dist }}/bin/amdhip64_7.dll" staging/bin/
 
           # MorphiZen EP config
           cp etc/morphizen_config.json staging/
