@@ -13,8 +13,6 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 include "hip/Dialect/Hipsr/IR/HipsrAttrs.td"
 include "hip/Dialect/Hipsr/IR/HipsrDialect.td"
 include "hip/Dialect/Hipsr/IR/HipsrTypes.td"
-include "hip/Dialect/Hipsr/IR/HipsrStartBarrierInterface.td"
-include "hip/Dialect/Hipsr/IR/HipsrEndBarrierInterface.td"
 
 //===----------------------------------------------------------------------===//
 // Base op class
