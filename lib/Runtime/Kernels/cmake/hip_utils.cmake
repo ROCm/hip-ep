@@ -23,23 +23,57 @@ set(_MSVC_HIP_CMATH_WORKAROUND_HEADER
 # Configuration
 #------------------------------------------------------------------------------
 
-# Find HIP_PATH from environment or CMake variable
-if(NOT DEFINED HIP_PATH)
-    if(DEFINED ENV{HIP_PATH})
-        set(HIP_PATH $ENV{HIP_PATH})
-    elseif(DEFINED ENV{ROCM_PATH})
-        set(HIP_PATH $ENV{ROCM_PATH})
-    elseif(DEFINED ENV{THEROCK_DIST})
-        set(HIP_PATH $ENV{THEROCK_DIST})
-    elseif(DEFINED THEROCK_DIST)
-        set(HIP_PATH ${THEROCK_DIST})
-    elseif(EXISTS "/opt/rocm")
-        set(HIP_PATH "/opt/rocm")
+function(_hip_root_has_toolchain root out_var)
+    if(NOT root)
+        set(${out_var} FALSE PARENT_SCOPE)
+        return()
     endif()
-endif()
+    if(WIN32)
+        if(EXISTS "${root}/bin/hipcc.exe" OR EXISTS "${root}/bin/hipcc.bat")
+            set(${out_var} TRUE PARENT_SCOPE)
+        else()
+            set(${out_var} FALSE PARENT_SCOPE)
+        endif()
+    else()
+        if(EXISTS "${root}/bin/hipcc" OR EXISTS "${root}/bin/amdclang++")
+            set(${out_var} TRUE PARENT_SCOPE)
+        else()
+            set(${out_var} FALSE PARENT_SCOPE)
+        endif()
+    endif()
+endfunction()
 
-if(NOT DEFINED HIP_PATH)
-    message(FATAL_ERROR "HIP_PATH must be set. Set HIP_PATH environment variable or CMake variable.")
+# Resolve the ROCm/HIP root. Prefer an explicit, valid THEROCK_DIST over a
+# stale HIP_PATH/ROCM_PATH env var (common on Windows dev boxes where
+# C:/opt/rocm/7.1 is listed in the environment but not actually installed).
+set(_hip_root_candidates "")
+if(DEFINED THEROCK_DIST AND NOT "${THEROCK_DIST}" STREQUAL "")
+    list(APPEND _hip_root_candidates "${THEROCK_DIST}")
+endif()
+if(DEFINED ENV{THEROCK_DIST} AND NOT "$ENV{THEROCK_DIST}" STREQUAL "")
+    list(APPEND _hip_root_candidates "$ENV{THEROCK_DIST}")
+endif()
+if(DEFINED ENV{HIP_PATH} AND NOT "$ENV{HIP_PATH}" STREQUAL "")
+    list(APPEND _hip_root_candidates "$ENV{HIP_PATH}")
+endif()
+if(DEFINED ENV{ROCM_PATH} AND NOT "$ENV{ROCM_PATH}" STREQUAL "")
+    list(APPEND _hip_root_candidates "$ENV{ROCM_PATH}")
+endif()
+list(APPEND _hip_root_candidates "/opt/rocm")
+
+set(HIP_PATH "")
+foreach(_candidate IN LISTS _hip_root_candidates)
+    _hip_root_has_toolchain("${_candidate}" _hip_root_ok)
+    if(_hip_root_ok)
+        set(HIP_PATH "${_candidate}")
+        break()
+    endif()
+endforeach()
+
+if(NOT HIP_PATH)
+    message(FATAL_ERROR
+        "Could not locate a ROCm/HIP SDK with hipcc.\n"
+        "Set -DTHEROCK_DIST=/path/to/therock or point HIP_PATH at a valid install.")
 endif()
 
 # GPU architectures - must be set by developer
@@ -64,16 +98,23 @@ if(NOT DEFINED HIP_PLATFORM)
 endif()
 
 # Try to find HIP package (provides hip::host target for host-side code)
+set(_hip_utils_resolved_root "${HIP_PATH}")
 find_package(hip QUIET)
+# hip-config-amd.cmake prefers ENV{HIP_PATH} on Windows even when a valid
+# THEROCK_DIST prefix was found; keep the validated root for hipcc compilation.
+set(HIP_PATH "${_hip_utils_resolved_root}")
 
 if(WIN32)
     # Find hipcc compiler (needed for .hip device code compilation)
+    if(HIPCC_EXECUTABLE AND NOT EXISTS "${HIPCC_EXECUTABLE}")
+        unset(HIPCC_EXECUTABLE CACHE)
+    endif()
     find_program(HIPCC_EXECUTABLE
         NAMES hipcc.exe hipcc hipcc.bat
         PATHS "${HIP_PATH}/bin"
         NO_DEFAULT_PATH
     )
-    if(NOT HIPCC_EXECUTABLE)
+    if(NOT HIPCC_EXECUTABLE OR NOT EXISTS "${HIPCC_EXECUTABLE}")
         message(FATAL_ERROR "Could not find hipcc in ${HIP_PATH}/bin")
     endif()
 
@@ -82,7 +123,29 @@ if(WIN32)
     set(HIP_LIBRARY_DIR "${HIP_PATH}/lib")
     set(HIP_RUNTIME_LIBRARY "${HIP_LIBRARY_DIR}/amdhip64.lib")
 
+    # TheRock packs device bitcode under lib/llvm/amdgcn/bitcode; stock ROCm
+    # uses lib/clang/<ver>/lib/amdgcn/bitcode. Teach hipcc where to look.
+    set(HIP_DEVICE_LIB_PATH "")
+    if(EXISTS "${HIP_PATH}/lib/llvm/amdgcn/bitcode")
+        set(HIP_DEVICE_LIB_PATH "${HIP_PATH}/lib/llvm/amdgcn/bitcode")
+    else()
+        file(GLOB _hip_clang_lib_dirs "${HIP_PATH}/lib/clang/*/lib/amdgcn/bitcode")
+        if(_hip_clang_lib_dirs)
+            list(GET _hip_clang_lib_dirs 0 HIP_DEVICE_LIB_PATH)
+        endif()
+    endif()
+    set(HIP_ROCM_COMPILE_FLAGS "--rocm-path=${HIP_PATH}")
+    if(HIP_DEVICE_LIB_PATH)
+        list(APPEND HIP_ROCM_COMPILE_FLAGS
+            "--rocm-device-lib-path=${HIP_DEVICE_LIB_PATH}")
+    endif()
+
     message(STATUS "[hip_utils] HIP_PATH: ${HIP_PATH}")
+    if(HIP_DEVICE_LIB_PATH)
+        message(STATUS "[hip_utils] device libs: ${HIP_DEVICE_LIB_PATH}")
+    else()
+        message(WARNING "[hip_utils] ROCm device bitcode not found under ${HIP_PATH}")
+    endif()
     message(STATUS "[hip_utils] hipcc: ${HIPCC_EXECUTABLE}")
     message(STATUS "[hip_utils] HIP_ARCHITECTURES: ${HIP_ARCHITECTURES}")
     if(TARGET hip::host)
@@ -192,6 +255,9 @@ endfunction()
 #------------------------------------------------------------------------------
 function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS ARCH_LIST OUTPUT_OBJS)
     _hip_get_arch_flags("${ARCH_LIST}" arch_flags)
+    if(DEFINED HIP_ROCM_COMPILE_FLAGS)
+        list(APPEND arch_flags ${HIP_ROCM_COMPILE_FLAGS})
+    endif()
 
     # Build include flags
     # NOTE: -I and path are separate list items to handle paths with spaces
@@ -267,6 +333,15 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
         -Wno-ignored-attributes
     )
 
+    # hipcc on Windows resolves clang from ENV{HIP_PATH}. Override per compile so
+    # a stale machine-wide HIP_PATH (e.g. C:/opt/rocm/7.1) cannot hijack builds
+    # that target THEROCK_DIST.
+    set(_hipcc_env
+        "HIP_PATH=${HIP_PATH}"
+        "ROCM_PATH=${HIP_PATH}"
+        "HIP_PLATFORM=amd"
+    )
+
     # Check if multi-config generator
     _hip_is_multi_config(is_multi)
 
@@ -288,7 +363,9 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
             # Use generator expressions for config-specific flags
             add_custom_command(
                 OUTPUT ${output_obj}
-                COMMAND ${HIPCC_EXECUTABLE}
+                COMMAND ${CMAKE_COMMAND} -E env
+                    ${_hipcc_env}
+                    ${HIPCC_EXECUTABLE}
                     -c "${source_abs}"
                     -o "${output_obj}"
                     ${arch_flags}
@@ -328,7 +405,9 @@ function(_hip_compile_sources TARGET_NAME HIP_SOURCES INCLUDE_DIRS COMPILE_OPTS 
 
             add_custom_command(
                 OUTPUT ${output_obj}
-                COMMAND ${HIPCC_EXECUTABLE}
+                COMMAND ${CMAKE_COMMAND} -E env
+                    ${_hipcc_env}
+                    ${HIPCC_EXECUTABLE}
                     -c "${source_abs}"
                     -o "${output_obj}"
                     ${arch_flags}
