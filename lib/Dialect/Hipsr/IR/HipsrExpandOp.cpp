@@ -112,8 +112,6 @@ LogicalResult ExpandOp::verify() {
   return success();
 }
 
-bool ExpandOp::isStartBarrier() { return getShapeAttrAttr() == nullptr; }
-
 namespace mlir {
 namespace hipsr {
 

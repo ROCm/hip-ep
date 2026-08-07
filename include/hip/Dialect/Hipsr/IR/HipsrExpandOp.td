@@ -10,9 +10,7 @@
 // Hipsr_ExpandOp
 //===----------------------------------------------------------------------===//
 
-def Hipsr_ExpandOp : Hipsr_DpsOp<
-    "expand",
-    [DeclareOpInterfaceMethods<StartBarrierInterface, ["isStartBarrier"]>]> {
+def Hipsr_ExpandOp : Hipsr_DpsOp<"expand"> {
   let summary = "Broadcast a tensor to a requested shape";
   let description = [{
     Broadcasts `input` and the requested shape using ONNX multidirectional
