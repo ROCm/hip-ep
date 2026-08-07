@@ -765,11 +765,12 @@ def Hip_ConvTransposeOp : Hip_DpsOp<"conv_transpose"> {
 // reason to write that boilerplate by hand. Matmul is the worked
 // example for the orthogonality of these two layers on #260; #262
 // extends the same split to gemm / qmoe / matmul_nbits.
-def Hip_MatmulOp : Hip_DpsOp<"matmul", /*traits=*/[OpStateOpInterface],
-                             /*outsAccessor=*/"Output",
-                             /*autoReify=*/0,
-                             /*autoInfer=*/1,
-                             /*declareInfer=*/1> {
+def Hip_MatmulOp :
+    Hip_DpsOp_Semantic<"matmul", /*traits=*/[OpStateOpInterface],
+                       /*outsAccessor=*/"Output",
+                       /*autoReify=*/0,
+                       /*autoInfer=*/1,
+                       /*declareInfer=*/1> {
   let summary = "Matrix multiplication (supports batched N-D x N-D)";
   let description = [{
     Performs matrix multiplication: output = A @ B
@@ -841,13 +842,14 @@ def Hip_MatmulOp : Hip_DpsOp<"matmul", /*traits=*/[OpStateOpInterface],
 // Quantized Operations
 //===----------------------------------------------------------------------===//
 
-def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
-                                  /*traits=*/[AttrSizedOperandSegments,
-                                              OpStateOpInterface],
-                                  /*outsAccessor=*/"Output",
-                                  /*autoReify=*/0,
-                                  /*autoInfer=*/1,
-                                  /*declareInfer=*/1> {
+def Hip_MatMulNBitsOp :
+    Hip_DpsOp_Semantic<"matmul_nbits",
+                       /*traits=*/[AttrSizedOperandSegments,
+                                   OpStateOpInterface],
+                       /*outsAccessor=*/"Output",
+                       /*autoReify=*/0,
+                       /*autoInfer=*/1,
+                       /*declareInfer=*/1> {
   let summary = "Quantized N-bit matrix multiplication (com.microsoft MatMulNBits)";
   let description = [{
     Performs matrix multiplication with N-bit quantized weights.
@@ -920,6 +922,7 @@ def Hip_MatMulNBitsOp : Hip_DpsOp<"matmul_nbits",
           "hipdnn_ep_op_state_construct_matmul_nbits", {});
     }
   }];
+  let hasVerifier = 1;
 }
 
 def Hip_QMoEOp : Hip_DpsOp<"qmoe",
@@ -3563,11 +3566,12 @@ def Hip_LinearAttentionOp : Hip_DpsOp<"linear_attention",
   }];
 }
 
-def Hip_GemmOp : Hip_DpsOp<"gemm", /*traits=*/[OpStateOpInterface],
-                           /*outsAccessor=*/"Output",
-                           /*autoReify=*/0,
-                           /*autoInfer=*/1,
-                           /*declareInfer=*/1> {
+def Hip_GemmOp :
+    Hip_DpsOp_Semantic<"gemm", /*traits=*/[OpStateOpInterface],
+                       /*outsAccessor=*/"Output",
+                       /*autoReify=*/0,
+                       /*autoInfer=*/1,
+                       /*declareInfer=*/1> {
   let summary = "General matrix multiplication (ONNX Gemm)";
   let description = [{
     Computes Y = alpha * A' * B' + beta * C, where:
@@ -3622,6 +3626,11 @@ def Hip_GemmOp : Hip_DpsOp<"gemm", /*traits=*/[OpStateOpInterface],
           {});
     }
   }];
+
+  // Verifies the DPS contract plus the shared `inferGemmShape` rule, so the
+  // `outs` shape, the converter destination, and `reifyResultShapes` are all
+  // held to one ONNX Gemm shape function.
+  let hasVerifier = 1;
 }
 
 def Hip_CumSumOp : Hip_DpsOp<"cumsum", /*traits=*/[],

@@ -185,6 +185,33 @@ checks ranked tensor/memref uniformity, destination count, result count, and
 tensor result/init type equality before a category-specific verifier examines
 shape semantics.
 
+### MatMul strided-batch representability
+
+The hipBLASLt MatMul lowering takes the batch count from the reified output
+shape and carries independent A/B batch strides, so either whole matrix may
+broadcast across the other's batches. One constant stride per operand can
+express exactly two layouts: stride 0 reuses a single matrix across every output
+batch, and a stride of the matrix size walks one matrix per output batch. An
+operand's matrix count must therefore be either 1 or the output's.
+
+A partial per-axis broadcast falls strictly between the two — batch `[2, 1]`
+against an output batch of `[2, 3]` holds 2 matrices where the output needs 6.
+`verifyStridedBatchMatmul` rejects partial layouts visible in the static types.
+Dynamic extents can conceal the same layout, so the lowering also computes each
+operand's runtime matrix count. `wrap_hipblasLtMatmul` dispatches only when each
+count is either 1 or the output batch count; otherwise it records an error in
+the runtime state's device error flag and skips hipBLASLt. The generated
+interface observes that flag after its existing stream synchronization and
+returns a recoverable non-zero inference status to ORT.
+
+This preserves ordinary dynamic batched matmul
+(`[?, H, M, K] @ [?, H, K, N]`) without treating every non-output matrix count
+as whole-matrix broadcast. The stride is 0 only for one matrix and the matrix
+size only for one matrix per output batch.
+
+`wrap_hipblasLtMatmul` carries both operand batch counts and both strides.
+LLVM-IR artifacts compiled against the previous wrapper ABI must be invalidated.
+
 ## `--hip-infer-shapes`
 
 `--hip-infer-shapes` is a module pass that runs after ONNX-to-HIP conversion and before One-Shot Bufferize. It is restricted to HIP dialect operations.

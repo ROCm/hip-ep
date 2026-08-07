@@ -11,6 +11,15 @@ namespace {
 
 //===----------------------------------------------------------------------===//
 // ONNX Gemm -> HIP Gemm
+//
+// Before:
+//   %r = "onnx.Gemm"(%a, %b) {transA = 1 : i64, transB = 0 : i64}
+//       : (tensor<?x?xf16>, tensor<?x?xf16>) -> tensor<?x?xf16>
+// After:
+//   %m = tensor.dim %a, %c1
+//   %n = tensor.dim %b, %c1
+//   %init = tensor.empty(%m, %n) : tensor<?x?xf16>
+//   %r = hip.gemm ... outs(%init : tensor<?x?xf16>)
 //===----------------------------------------------------------------------===//
 struct GemmToHip : public mlir::RewritePattern {
   GemmToHip(mlir::MLIRContext *ctx)
@@ -44,9 +53,18 @@ struct GemmToHip : public mlir::RewritePattern {
     mlir::Location loc = op->getLoc();
     auto resultType =
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    mlir::Value init = createEmptyTensor(rewriter, loc, resultType, inputA);
+    mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>> resultShape =
+        mlir::hip::reifyGemmResultShape(rewriter, loc, inputA, inputB, inputC,
+                                        transA, transB,
+                                        [&]() { return op->emitError(); });
+    if (mlir::failed(resultShape))
+      return mlir::failure();
+    mlir::FailureOr<mlir::Value> init = createEmptyTensorFromReifiedShape(
+        rewriter, loc, resultType, *resultShape);
+    if (mlir::failed(init))
+      return rewriter.notifyMatchFailure(
+          op, "Gemm result type is incompatible with inferred shape");
 
-    // hip.gemm
     llvm::SmallVector<mlir::NamedAttribute> attrs;
     attrs.push_back(
         rewriter.getNamedAttr("alpha", rewriter.getF32FloatAttr(alpha)));
@@ -58,12 +76,10 @@ struct GemmToHip : public mlir::RewritePattern {
         rewriter.getNamedAttr("transB", rewriter.getI64IntegerAttr(transB)));
 
     llvm::SmallVector<mlir::Value> operands = {context, inputA, inputB};
-    if (hasInputC) {
+    if (hasInputC)
       operands.push_back(inputC);
-    }
-    operands.push_back(init);
-    // Result type inferred from `init` via InferTypeOpInterface — DPS contract:
-    // result type == outs operand type.
+    operands.push_back(*init);
+    // Let ODS infer the result type from the DPS init.
     auto hipOp = mlir::hip::GemmOp::create(rewriter, loc, operands, attrs);
     rewriter.replaceOp(op, hipOp.getResult(0));
     return mlir::success();
