@@ -34,7 +34,8 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
 
     One placeholder can have several results for one multi-output DPS op. Each
     result initializes exactly one DPS result and may also feed other
-    placeholders. All DPS init uses must go to the same hipsr op.
+    placeholders or leave a pool domain through `hipsr.pool_domain_yield`. All
+    DPS init uses must go to the same hipsr op.
 
     Each placeholder is tied to one DPS op. It is not `Pure`, so CSE cannot
     merge placeholders used by different ops.
@@ -42,8 +43,8 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
     The pool-domain pass requires placeholders and the DPS ops that use them to
     be directly in the function body. Every tensor init of those DPS ops must
     come from a placeholder. The pass checks these rules before changing the
-    IR. Placeholders do not set domain boundaries. The pass moves each one
-    before the op that uses it.
+    IR. A placeholder stays with the op that uses it. Placeholder results used
+    by later domains are returned to keep the shape graph connected.
 
     This op is temporary. It has no bufferization interface and must be replaced
     before bufferization.
