@@ -5,8 +5,6 @@
 
 add_library(HipsrDialectIR STATIC
   HipsrDialect.cpp
-  HipsrStartBarrierInterface.cpp
-  HipsrEndBarrierInterface.cpp
   HipsrShapeYieldOp.cpp
   HipsrOps.cpp
   HipsrPoolDomainYieldOp.cpp
