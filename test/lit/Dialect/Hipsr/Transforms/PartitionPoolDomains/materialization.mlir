@@ -6,18 +6,29 @@
 // Diagram notation:
 //   name [N, D0] = a normal placeholder and its DPS consumer in domain 0
 //   name [B, D1] = a barrier placeholder and its DPS consumer in domain 1
-// Every arrow carries matching shape and data dependencies.
+// Diagrams flow from top to bottom. Between paired nodes, each arrow carries
+// matching shape and data dependencies.
 //
 // Normal placeholders stay in the current domain, while barriers advance to
 // the next domain.
 //
-//   input -> data0 [N, D0]
-//                    |
-//                    v
-//           data1 [B, D1] -> data2 [N, D1]
-//                                      |
-//                                      v
-//                             data3 [B, D2] -> data4 [N, D2]
+//          input
+//            |
+//            v
+//   data0 [N, D0]
+//            |
+//            v
+//   data1 [B, D1]
+//            |
+//            v
+//   data2 [N, D1]
+//            |
+//            v
+//   data3 [B, D2]
+//            |
+//            v
+//   data4 [N, D2]
+//
 // CHECK-LABEL: func.func @mixed_chain(
 // CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<4xf32>) -> tensor<4xf16> {
 // CHECK-NEXT: %[[DOMAIN0:.*]]:2 = hipsr.pool_domain(%[[CTX]], %[[INPUT]] : !hipsr.context, tensor<4xf32>) {
@@ -78,19 +89,42 @@ func.func @mixed_chain(
 
 // Parallel barriers share a domain. One branch grows deeper, a later
 // independent branch returns to domain zero, and normal joins use the deepest
-// input domain.
+// input domain. The independent branch comes directly from the input and joins
+// in the second panel.
 //
-//   root [N, D0]
-//     +-> lhs [B, D1] -> lhs_normal [N, D1] -> lhs_deep [B, D2]
-//     +-> rhs [B, D1] -> rhs_normal [N, D1]
+//                             input
+//                               |
+//                               v
+//                         root [N, D0]
+//                               |
+//                  +------------+------------+
+//                  |                         |
+//                  v                         v
+//             lhs [B, D1]              rhs [B, D1]
+//                  |                         |
+//                  v                         v
+//      lhs_normal [N, D1]      rhs_normal [N, D1]
+//                  |                         |
+//                  v                         |
+//       lhs_deep [B, D2]                    |
+//                  |                         |
+//                  +------------+------------+
+//                               |
+//                               v
+//                    deep_join [N, D2]
 //
-//   lhs_deep [B, D2] ----+
-//                          +-> deep_join [N, D2]
-//   rhs_normal [N, D1] ---+
+//   continued:
 //
-//   deep_join [N, D2] ----+
-//                           +-> join [N, D2] -> result [B, D3]
-//   independent [N, D0] ---+
+//       deep_join [N, D2]       independent [N, D0]
+//                  |                         |
+//                  +------------+------------+
+//                               |
+//                               v
+//                         join [N, D2]
+//                               |
+//                               v
+//                       result [B, D3]
+//
 // CHECK-LABEL: func.func @multi_branch(
 // CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<4xf32>) -> tensor<4xf16> {
 // CHECK-NEXT: %[[DOMAIN0:.*]]:4 = hipsr.pool_domain(%[[CTX]], %[[INPUT]] : !hipsr.context, tensor<4xf32>) {
@@ -194,9 +228,17 @@ func.func @multi_branch(
 // A barrier join puts the merge point one domain deeper than both parallel
 // arms. Shape and data values for both arms cross the second boundary.
 //
-//   root [N, D0]
-//     +-> lhs [B, D1] --+
-//     +-> rhs [B, D1] --+-> join [B, D2]
+//                 root [N, D0]
+//                       |
+//             +---------+---------+
+//             |                   |
+//             v                   v
+//       lhs [B, D1]         rhs [B, D1]
+//             |                   |
+//             +---------+---------+
+//                       |
+//                       v
+//                join [B, D2]
 //
 // CHECK-LABEL: func.func @diamond(
 // CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<4xf32>) -> tensor<4xf16> {
@@ -256,13 +298,27 @@ func.func @diamond(
 // Two diamonds cascade. Each barrier fan-out starts a new domain, while each
 // normal join stays with its two arms.
 //
-//   root [N, D0]
-//     +-> upper_lhs [B, D1] --+
-//     +-> upper_rhs [B, D1] --+-> upper_join [N, D1]
-//
-//   upper_join [N, D1]
-//     +-> lower_lhs [B, D2] --+
-//     +-> lower_rhs [B, D2] --+-> lower_join [N, D2]
+//                         root [N, D0]
+//                               |
+//                  +------------+------------+
+//                  |                         |
+//                  v                         v
+//          upper_lhs [B, D1]        upper_rhs [B, D1]
+//                  |                         |
+//                  +------------+------------+
+//                               |
+//                               v
+//                    upper_join [N, D1]
+//                               |
+//                  +------------+------------+
+//                  |                         |
+//                  v                         v
+//          lower_lhs [B, D2]        lower_rhs [B, D2]
+//                  |                         |
+//                  +------------+------------+
+//                               |
+//                               v
+//                    lower_join [N, D2]
 //
 // CHECK-LABEL: func.func @cascaded_diamonds(
 // CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<4xf32>) -> tensor<4xf16> {
@@ -348,9 +404,21 @@ func.func @cascaded_diamonds(
 // and keep their result order. root#i denotes placeholder result i and its
 // matching DPS result.
 //
-//   input
-//     +-> root#0 [N, D0] -> lhs [B, D1] --+
-//     +-> root#1 [N, D0] -> rhs [B, D1] --+-> return (lhs, rhs)
+//                           input
+//                             |
+//                +------------+------------+
+//                |                         |
+//                v                         v
+//       root#0 [N, D0]            root#1 [N, D0]
+//                |                         |
+//                v                         v
+//          lhs [B, D1]              rhs [B, D1]
+//                |                         |
+//                +------------+------------+
+//                             |
+//                             v
+//                     return (lhs, rhs)
+//
 // CHECK-LABEL: func.func @multi_result_boundaries(
 // CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<4xf16>)
 // CHECK-SAME: -> (tensor<4xf16>, tensor<4xf16>) {
@@ -405,9 +473,16 @@ func.func @multi_result_boundaries(
 
 // A domain without escaping results is retained without an explicit yield.
 //
-//   input -> unused [N, D0] -> (no escaping value)
+//          input
+//            |
+//            v
+//   unused [N, D0]
+//            |
+//            v
+//   (no escaping value)
 //
-//   return
+//   return (no operands)
+//
 // CHECK-LABEL: func.func @no_result_domain(
 // CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<4xf32>) {
 // CHECK-NEXT: hipsr.pool_domain(%[[CTX]], %[[INPUT]] : !hipsr.context, tensor<4xf32>) {
@@ -432,8 +507,12 @@ func.func @no_result_domain(
 
 // Empty functions are unchanged.
 //
-//   (no partitionable operations) -> return
+//   (no partitionable operations)
+//                |
+//                v
+//             return
 //   pool domains: none
+//
 // CHECK-LABEL: func.func @empty(%{{.*}}: !hipsr.context) {
 // CHECK-NEXT: return
 // CHECK-NEXT: }
@@ -445,7 +524,14 @@ func.func @empty(%ctx: !hipsr.context) {
 
 // Declarations are unchanged.
 //
-//   i32 -> @declaration (no body) -> i32
+//          i32 input
+//              |
+//              v
+//   @declaration (no body)
+//              |
+//              v
+//         i32 result
 //   pool domains: none
+//
 // CHECK-LABEL: func.func private @declaration(i32) -> i32
 func.func private @declaration(i32) -> i32
