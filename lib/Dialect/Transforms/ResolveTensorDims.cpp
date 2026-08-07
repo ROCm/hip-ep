@@ -59,6 +59,18 @@ namespace mlir::hip {
 
 namespace {
 
+struct FoldSelectOfSameValue final : public OpRewritePattern<arith::SelectOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(arith::SelectOp op,
+                                PatternRewriter &rewriter) const override {
+    if (op.getTrueValue() != op.getFalseValue())
+      return failure();
+    rewriter.replaceOp(op, op.getTrueValue());
+    return success();
+  }
+};
+
 struct ResolveTensorDimsPass final
     : public impl::ResolveTensorDimsPassBase<ResolveTensorDimsPass> {
   using Base::Base;
@@ -89,6 +101,7 @@ void ResolveTensorDimsPass::runOnOperation() {
   tensor::DimOp::getCanonicalizationPatterns(patterns, ctx);
   tensor::ExpandShapeOp::getCanonicalizationPatterns(patterns, ctx);
   tensor::CollapseShapeOp::getCanonicalizationPatterns(patterns, ctx);
+  patterns.add<FoldSelectOfSameValue>(ctx);
 
   if (failed(applyPatternsGreedily(funcOp, std::move(patterns))))
     return signalPassFailure();

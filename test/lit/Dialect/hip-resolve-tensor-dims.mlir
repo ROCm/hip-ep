@@ -33,6 +33,16 @@
 
 // -----
 
+// CHECK-LABEL: @select_of_same_shape_value
+// CHECK-NOT: arith.select
+// CHECK: return %arg1
+func.func @select_of_same_shape_value(%condition: i1, %extent: i64) -> i64 {
+  %selected = arith.select %condition, %extent, %extent : i64
+  return %selected : i64
+}
+
+// -----
+
 // CHECK-LABEL: @dim_of_expand_static_slot
 func.func @dim_of_expand_static_slot(%arg0: tensor<?x4096xf16>) -> index {
   %c0 = arith.constant 0 : index
