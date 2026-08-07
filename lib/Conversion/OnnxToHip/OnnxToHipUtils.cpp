@@ -18,6 +18,21 @@
 namespace mlir {
 namespace hip {
 
+bool isLosslessShapeIndexCast(mlir::arith::IndexCastOp op) {
+  constexpr unsigned kIndexBitWidth = 64;
+  mlir::Type sourceType = op.getIn().getType();
+  mlir::Type resultType = op.getType();
+  if (sourceType.isIndex()) {
+    auto integerType = mlir::dyn_cast<mlir::IntegerType>(resultType);
+    return integerType && integerType.getWidth() >= kIndexBitWidth;
+  }
+  if (resultType.isIndex()) {
+    auto integerType = mlir::dyn_cast<mlir::IntegerType>(sourceType);
+    return integerType && integerType.getWidth() <= kIndexBitWidth;
+  }
+  return false;
+}
+
 mlir::DenseElementsAttr
 getCompileTimeConstantTensor(mlir::Value value,
                              CompileTimeConstantScope scope) {

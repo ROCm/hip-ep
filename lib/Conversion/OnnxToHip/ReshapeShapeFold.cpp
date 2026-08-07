@@ -2,89 +2,19 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-//===- ReshapeShapeFold.cpp - Pre-lowering Reshape(_, Shape) folding ------===//
+//===- ReshapeShapeFold.cpp - Materialize proven Reshape shapes -----------===//
 //
-// Sibling pass to GatherShapeFold.  Recognises the
-//
-//     %shape = onnx.Shape(%src)            : tensor<Nxi64>
-//     %out   = onnx.Reshape(%data, %shape) : tensor<...?...>
-//
-// idiom and rewrites the Reshape's shape operand into a
-//
-//     %d_i  = tensor.dim %src, i                            : index
-//     %s_i  = arith.index_cast %d_i : index to i64          ;; for dyn dims
-//     %s_j  = arith.constant <static_size> : i64            ;; for static dims
-//     %new  = tensor.from_elements %s_0, ..., %s_{N-1}      : tensor<Nxi64>
-//
-//     %out  = onnx.Reshape(%data, %new)
-//
-// so ReshapeConversion's `buildExpandShapeOutputShape` multi-dyn-per-group
-// branch (which already understands tensor.from_elements) can recover
-// per-output-dim sizes when the result has >1 dynamic dim in the same
-// reassociation group.
-//
-// Why this matters
-// ----------------
-// PR #212 GatherShapeFold rewrites Gather(Shape, idx) so the canonical
-// transformer-shape-arithmetic chain
-//
-//     bs   = Gather(Shape(input), 0)
-//     ss   = Gather(Shape(input), 1)
-//     mul  = bs * ss
-//     out  = Range(0, mul, 1)
-//
-// collapses to host arith over tensor.dim of input, avoiding the
-// SEGV-on-device-store-of-shape-vector issue on gfx1151.  But when the
-// SAME Shape(input) value is ALSO directly fed to Reshape (as in
-// Qwen3.5 mrope: `Reshape(Range_output, Shape(input))`), that use is
-// not a Gather — GatherShapeFold leaves it alone, and `onnx.Shape`
-// survives into ConvertOnnxToHip.  ReshapeConversion ignores its
-// second operand (it derives output shape from result type alone),
-// so for a `<?> -> <?, ?>` reshape with both output dims dynamic it
-// emits `output_shape [tensor.dim(out, 0), tensor.dim(out, 0)]` — the
-// SAME SSA value twice, semantically [N, N] backed by an N-element
-// buffer.  No downstream pass recovers the correct per-dim sizes once
-// the [N, N] expand_shape has been emitted.  Net effect: a 1×1 input
-// passes by coincidence (1×1 = 1²), every asymmetric shape silently
-// corrupts.
-//
-// This fold rewrites the shape operand BEFORE ConvertOnnxToHip so the
-// resulting `tensor.from_elements` is exactly what ReshapeConversion's
-// existing multi-dyn-per-group branch picks up.  Bug fix is structural
-// at the operand level; no change to ReshapeConversion required.
-//
-// Implementation notes
-// --------------------
-//   * Pattern roots on `onnx.Reshape` (greedy applier visits ops in
-//     post-order; we only need to fire once per Reshape).
-//   * Uses `modifyOpInPlace` to swap operand 1.  Under
-//     `GreedyRewriteStrictness::ExistingOps` (the OnnxToHipPass's
-//     pre-lowering set strictness) the modified op is re-considered
-//     but our match guard `operand(1).getDefiningOp() == onnx.Shape`
-//     fails on the second visit, so no infinite loop.
-//   * Honors `onnx.Shape`'s ONNX-15 `start`/`end` attributes (matches
-//     GatherShapeFold's normalization).  When the sub-range is empty
-//     we leave the op alone (a downstream verifier will reject it).
-//   * Leaves the original `onnx.Shape` op in place — it may have other
-//     uses (e.g. another Gather still pending fold).  DCE removes it
-//     later if it becomes unused.
-//   * Result-type check: the Reshape's existing result type is the
-//     ground truth ONNX shape inference computed; we don't touch it.
-//     The shape operand's RankedTensorType is `tensor<rangeLen x i64>`
-//     by construction.
-//
-// Non-goals
-// ---------
-//   * Folding `Reshape(_, Concat(Gather(Shape, 0), Gather(Shape, 1)))`:
-//     after GatherShapeFold each Gather becomes a 1-element
-//     tensor.from_elements, and ConcatConversion (or ReshapeConversion
-//     itself) handles the Concat case directly.  This fold only
-//     addresses the `Reshape(_, Shape)` direct-use case.
-//   * Folding `Range(_, Shape[*], _)` or `Slice(_, Shape, ...)`:
-//     analogous patterns; out of scope for this fix.  Add sibling
-//     folds when those uses arise.
+// Consume a completed function-level ShapeProvenanceAnalysis. Accepted payloads
+// are rebuilt from constants, canonical tensor dimensions, and proven host
+// scalar SSA values, then stamped for the dynamic runtime-shaped Reshape
+// fallback. That path revalidates every consumed marker claim before its first
+// mutation. Earlier shape-independent/static rewrites do not consume markers
+// and may bypass validation. Unknown or partially proven payloads remain
+// untouched; a dynamic fallback that needs them uses synchronized readback.
 //
 //===----------------------------------------------------------------------===//
+
+#include "ShapeProvenanceAnalysis.h"
 
 #include "OnnxToHipUtils.h"
 
@@ -94,121 +24,268 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Debug.h"
 
+#include <optional>
+#include <utility>
+
 #define DEBUG_TYPE "reshape-shape-fold"
 
 STATISTIC(NumReshapeShapeFolds,
-          "Number of Reshape(_, Shape(x)) idioms whose shape operand was "
-          "rewritten to tensor.from_elements(tensor.dim(x, *))");
+          "Number of Reshape target shapes proven to be host-side");
 
 namespace mlir {
 namespace hip {
 
 namespace {
 
-struct ReshapeOfShapeToFromElements : public mlir::RewritePattern {
-  ReshapeOfShapeToFromElements(mlir::MLIRContext *ctx)
-      : RewritePattern("onnx.Reshape", /*benefit=*/1, ctx) {}
+mlir::FailureOr<mlir::Value>
+materializeHostShape(mlir::IRRewriter &rewriter, mlir::Location loc,
+                     llvm::ArrayRef<ShapeProvenanceExpr> expressions,
+                     mlir::Type elementType) {
+  auto integerType = mlir::dyn_cast<mlir::IntegerType>(elementType);
+  if (!integerType)
+    return mlir::failure();
 
-  mlir::LogicalResult
-  matchAndRewrite(mlir::Operation *reshapeOp,
-                  mlir::PatternRewriter &rewriter) const override {
-    if (reshapeOp->getNumOperands() < 2)
-      return rewriter.notifyMatchFailure(reshapeOp, "reshape.arity");
-
-    mlir::Value shapeOperand = reshapeOp->getOperand(1);
-    mlir::Operation *shapeOp = shapeOperand.getDefiningOp();
-    if (!shapeOp || shapeOp->getName().getStringRef() != "onnx.Shape")
-      return rewriter.notifyMatchFailure(reshapeOp, "operand1.not_onnx_shape");
-
-    // onnx.Shape has a single operand (the input whose shape is being
-    // queried).  Defensive against malformed IR.
-    if (shapeOp->getNumOperands() != 1)
-      return rewriter.notifyMatchFailure(reshapeOp, "shape.arity");
-
-    mlir::Value src = shapeOp->getOperand(0);
-    auto srcType = mlir::dyn_cast<mlir::RankedTensorType>(src.getType());
-    if (!srcType)
-      return rewriter.notifyMatchFailure(reshapeOp, "shape.src_unranked");
-    int64_t rank = srcType.getRank();
-
-    // ONNX-15 Shape start/end attributes select a sub-range of the shape
-    // vector.  Normalize the same way GatherShapeFold does.
-    int64_t start = 0;
-    int64_t end = rank;
-    if (auto startAttr = shapeOp->getAttrOfType<mlir::IntegerAttr>("start"))
-      start = startAttr.getSInt();
-    if (auto endAttr = shapeOp->getAttrOfType<mlir::IntegerAttr>("end"))
-      end = endAttr.getSInt();
-    if (start < 0)
-      start += rank;
-    if (end < 0)
-      end += rank;
-    start = std::max(start, int64_t(0));
-    end = std::min(end, rank);
-    int64_t rangeLen = std::max(end - start, int64_t(0));
-    if (rangeLen == 0)
-      return rewriter.notifyMatchFailure(reshapeOp, "shape.empty_range");
-
-    // The shape operand's tensor type must be tensor<rangeLen x i64>.
-    // If the existing operand type disagrees the IR is malformed; bail.
-    auto shapeOperandType =
-        mlir::dyn_cast<mlir::RankedTensorType>(shapeOperand.getType());
-    if (!shapeOperandType || shapeOperandType.getRank() != 1 ||
-        !shapeOperandType.getElementType().isInteger(64) ||
-        (!shapeOperandType.isDynamicDim(0) &&
-         shapeOperandType.getDimSize(0) != rangeLen))
-      return rewriter.notifyMatchFailure(reshapeOp,
-                                         "shape.operand_type_mismatch");
-
-    mlir::Location loc = reshapeOp->getLoc();
-    auto i64Type = rewriter.getI64Type();
-
-    // Materialize per-dim i64 SSA values.  For dynamic dims emit
-    // `arith.index_cast %tensor.dim`, for static dims a plain
-    // `arith.constant` so canonicalization can fold downstream.
-    llvm::SmallVector<mlir::Value> elems;
-    elems.reserve(rangeLen);
-    for (int64_t i = 0; i < rangeLen; ++i) {
-      int64_t absDim = start + i;
-      mlir::Value elem;
-      if (srcType.isDynamicDim(absDim)) {
-        mlir::Value dimVal =
-            mlir::tensor::DimOp::create(rewriter, loc, src, absDim);
-        elem = mlir::arith::IndexCastOp::create(rewriter, loc, i64Type, dimVal);
-      } else {
-        elem = mlir::arith::ConstantOp::create(
-            rewriter, loc,
-            rewriter.getI64IntegerAttr(srcType.getDimSize(absDim)));
-      }
-      elems.push_back(elem);
+  // Validate the complete plan before creating IR. A failed materialization
+  // must not leave a partially constructed shape expression behind.
+  for (const ShapeProvenanceExpr &expression : expressions) {
+    if (expression.kind == ShapeProvenanceExpr::Kind::TensorDim) {
+      auto shapedType =
+          mlir::dyn_cast<mlir::ShapedType>(expression.value.getType());
+      if (!shapedType || !shapedType.hasRank() || expression.dimension < 0 ||
+          expression.dimension >= shapedType.getRank())
+        return mlir::failure();
     }
-
-    // Reconstruct the shape operand's tensor type with the now-static
-    // length (rangeLen).  Even if the original op carried tensor<?xi64>,
-    // tensor.from_elements demands a static rank-1 type with size ==
-    // elems.size().
-    auto newShapeType = mlir::RankedTensorType::get({rangeLen}, i64Type);
-    mlir::Value newShape =
-        mlir::tensor::FromElementsOp::create(rewriter, loc, newShapeType, elems)
-            .getResult();
-
-    LLVM_DEBUG(llvm::dbgs()
-               << "[" DEBUG_TYPE "] rewrote " << reshapeOp->getName()
-               << " shape operand from " << shapeOp->getName()
-               << " to from_elements over " << rangeLen << " dim(s) of src\n");
-
-    rewriter.modifyOpInPlace(reshapeOp,
-                             [&] { reshapeOp->setOperand(1, newShape); });
-    ++NumReshapeShapeFolds;
-    return mlir::success();
+    if (expression.kind == ShapeProvenanceExpr::Kind::HostScalar &&
+        !expression.value.getType().isIntOrIndex())
+      return mlir::failure();
   }
+
+  llvm::SmallVector<mlir::Value> elements;
+  elements.reserve(expressions.size());
+  for (const ShapeProvenanceExpr &expression : expressions) {
+    mlir::Value element;
+    switch (expression.kind) {
+    case ShapeProvenanceExpr::Kind::Constant:
+      element = mlir::arith::ConstantOp::create(
+          rewriter, loc,
+          rewriter.getIntegerAttr(integerType, expression.constant));
+      break;
+    case ShapeProvenanceExpr::Kind::TensorDim: {
+      mlir::Value dim = mlir::tensor::DimOp::create(
+          rewriter, loc, expression.value, expression.dimension);
+      element =
+          mlir::arith::IndexCastOp::create(rewriter, loc, integerType, dim);
+      break;
+    }
+    case ShapeProvenanceExpr::Kind::HostScalar:
+      element = expression.value;
+      if (element.getType() == integerType)
+        break;
+      if (element.getType().isIndex()) {
+        element = mlir::arith::IndexCastOp::create(rewriter, loc, integerType,
+                                                   element);
+        break;
+      }
+      auto sourceType = mlir::dyn_cast<mlir::IntegerType>(element.getType());
+      if (!sourceType)
+        return mlir::failure();
+      if (sourceType.getWidth() < integerType.getWidth())
+        element =
+            mlir::arith::ExtSIOp::create(rewriter, loc, integerType, element);
+      else if (sourceType.getWidth() > integerType.getWidth())
+        element =
+            mlir::arith::TruncIOp::create(rewriter, loc, integerType, element);
+      break;
+    }
+    elements.push_back(element);
+  }
+
+  auto shapeType = mlir::RankedTensorType::get(
+      {static_cast<int64_t>(elements.size())}, integerType);
+  return mlir::tensor::FromElementsOp::create(rewriter, loc, shapeType,
+                                              elements)
+      .getResult();
+}
+
+struct ReshapeMaterializationPlan {
+  mlir::Operation *reshapeOp;
+  mlir::Type shapeElementType;
+  llvm::SmallVector<ShapeProvenanceExpr> expressions;
+  llvm::SmallVector<int64_t> inputDimMap;
+  bool noMinusOne;
 };
+
+std::optional<ReshapeMaterializationPlan>
+buildMaterializationPlan(mlir::Operation *reshapeOp,
+                         const ShapeProvenanceAnalysis &analysis) {
+  if (reshapeOp->getNumOperands() != 2 || reshapeOp->getNumResults() != 1 ||
+      reshapeOp->hasAttr(kHostShapeOperandAttr))
+    return std::nullopt;
+
+  mlir::Value shapeOperand = reshapeOp->getOperand(1);
+  auto shapeOperandType =
+      mlir::dyn_cast<mlir::RankedTensorType>(shapeOperand.getType());
+  if (!shapeOperandType || shapeOperandType.getRank() != 1 ||
+      !shapeOperandType.getElementType().isInteger(64))
+    return std::nullopt;
+  auto resultType =
+      mlir::dyn_cast<mlir::RankedTensorType>(reshapeOp->getResult(0).getType());
+  if (!resultType)
+    return std::nullopt;
+
+  mlir::FailureOr<llvm::SmallVector<ShapeProvenanceExpr>> expressions =
+      analysis.getPayload(shapeOperand);
+  if (mlir::failed(expressions) ||
+      expressions->size() != static_cast<size_t>(resultType.getRank()))
+    return std::nullopt;
+
+  unsigned minusOneCount =
+      llvm::count_if(*expressions, [](const ShapeProvenanceExpr &expression) {
+        return expression.proof == ShapeValueProof::MinusOne;
+      });
+  if (llvm::any_of(*expressions,
+                   [](const ShapeProvenanceExpr &expression) {
+                     return expression.proof == ShapeValueProof::Invalid;
+                   }) ||
+      minusOneCount > 1)
+    return std::nullopt;
+  if (llvm::any_of(*expressions, [](const ShapeProvenanceExpr &expression) {
+        return expression.proof == ShapeValueProof::Unknown;
+      }))
+    return std::nullopt;
+
+  int64_t allowzero = 0;
+  if (auto attr = reshapeOp->getAttrOfType<mlir::IntegerAttr>("allowzero"))
+    allowzero = attr.getSInt();
+  if (allowzero != 0 && allowzero != 1)
+    return std::nullopt;
+  if (allowzero == 1 && minusOneCount != 0 &&
+      llvm::any_of(*expressions, [](const ShapeProvenanceExpr &expression) {
+        return expression.proof != ShapeValueProof::MinusOne &&
+               expression.proof != ShapeValueProof::Positive;
+      }))
+    return std::nullopt;
+
+  mlir::Value data = reshapeOp->getOperand(0);
+  auto dataType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+  if (!dataType)
+    return std::nullopt;
+  if (allowzero == 0) {
+    for (auto [index, expression] : llvm::enumerate(*expressions)) {
+      if (index < static_cast<size_t>(dataType.getRank()))
+        continue;
+      if (expression.kind != ShapeProvenanceExpr::Kind::Constant ||
+          expression.constant <= 0)
+        return std::nullopt;
+    }
+  }
+
+  // Rewrite every proven equivalent dimension onto the actual Reshape data
+  // operand. The marker's input-dimension map can then be revalidated
+  // structurally at the conversion boundary without retaining or rerunning the
+  // solver.
+  llvm::SmallVector<int64_t> inputDimMap(expressions->size(), -1);
+  for (auto [index, expression] : llvm::enumerate(*expressions)) {
+    if (index >= static_cast<size_t>(dataType.getRank()) ||
+        expression.kind != ShapeProvenanceExpr::Kind::TensorDim ||
+        !analysis.isEquivalentToDimension(expression, data,
+                                          static_cast<int64_t>(index)))
+      continue;
+    inputDimMap[index] = static_cast<int64_t>(index);
+    expression.value = data;
+    expression.dimension = static_cast<int64_t>(index);
+  }
+
+  bool noMinusOne =
+      llvm::all_of(*expressions, [](const ShapeProvenanceExpr &expression) {
+        return expression.proof == ShapeValueProof::Positive ||
+               expression.proof == ShapeValueProof::NonNegative;
+      });
+  return ReshapeMaterializationPlan{
+      reshapeOp, shapeOperandType.getElementType(), std::move(*expressions),
+      std::move(inputDimMap), noMinusOne};
+}
+
+bool applyMaterializationPlan(const ReshapeMaterializationPlan &plan,
+                              mlir::IRRewriter &rewriter) {
+  mlir::Operation *reshapeOp = plan.reshapeOp;
+  rewriter.setInsertionPoint(reshapeOp);
+  mlir::FailureOr<mlir::Value> newShape = materializeHostShape(
+      rewriter, reshapeOp->getLoc(), plan.expressions, plan.shapeElementType);
+  if (mlir::failed(newShape))
+    return false;
+
+  LLVM_DEBUG(llvm::dbgs() << "[" DEBUG_TYPE "] rewrote " << reshapeOp->getName()
+                          << " shape operand from function-level dataflow over "
+                          << plan.expressions.size() << " entries\n");
+
+  rewriter.modifyOpInPlace(reshapeOp, [&] {
+    reshapeOp->setOperand(1, *newShape);
+    reshapeOp->setAttr(kHostShapeOperandAttr, rewriter.getUnitAttr());
+    reshapeOp->setAttr(kHostShapeInputDimMapAttr,
+                       rewriter.getDenseI64ArrayAttr(plan.inputDimMap));
+    if (plan.noMinusOne)
+      reshapeOp->setAttr(kHostShapeNoMinusOneAttr, rewriter.getUnitAttr());
+  });
+  ++NumReshapeShapeFolds;
+  return true;
+}
 
 } // namespace
 
-void populateReshapeShapeFoldPatterns(mlir::RewritePatternSet &patterns,
-                                      mlir::MLIRContext *ctx) {
-  patterns.add<ReshapeOfShapeToFromElements>(ctx);
+bool hasEligibleReshapeShapeProvenanceCandidate(mlir::func::FuncOp funcOp) {
+  bool found = false;
+  funcOp.walk([&](mlir::Operation *op) {
+    if (found || op->getName().getStringRef() != "onnx.Reshape" ||
+        op->hasAttr(kHostShapeOperandAttr) || op->getNumOperands() != 2 ||
+        op->getNumResults() != 1)
+      return;
+
+    auto inputType =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getOperand(0).getType());
+    auto outputType =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    auto shapeType =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getOperand(1).getType());
+    if (!inputType || !outputType || !shapeType || inputType == outputType ||
+        (inputType.hasStaticShape() && outputType.hasStaticShape()) ||
+        shapeType.getRank() != 1 || !shapeType.getElementType().isInteger(64))
+      return;
+    if (!shapeType.isDynamicDim(0) &&
+        shapeType.getDimSize(0) != outputType.getRank())
+      return;
+    found = true;
+  });
+  return found;
+}
+
+mlir::LogicalResult
+materializeReshapeShapeOperands(mlir::func::FuncOp funcOp,
+                                const ShapeProvenanceAnalysis &analysis) {
+  llvm::SmallVector<mlir::Operation *> reshapes;
+  funcOp.walk([&](mlir::Operation *op) {
+    if (op->getName().getStringRef() == "onnx.Reshape")
+      reshapes.push_back(op);
+  });
+
+  // Query the complete analysis before mutating any analyzed IR. Plans contain
+  // non-owning Value handles, but these mutations only insert scalar shape ops
+  // and update Reshape operands; they do not erase referenced values.
+  llvm::SmallVector<ReshapeMaterializationPlan> plans;
+  for (mlir::Operation *reshape : reshapes)
+    if (std::optional<ReshapeMaterializationPlan> plan =
+            buildMaterializationPlan(reshape, analysis))
+      plans.push_back(std::move(*plan));
+
+  mlir::IRRewriter rewriter(funcOp.getContext());
+  for (const ReshapeMaterializationPlan &plan : plans) {
+    if (!applyMaterializationPlan(plan, rewriter)) {
+      plan.reshapeOp->emitError(
+          "failed to materialize proven Reshape target shape");
+      return mlir::failure();
+    }
+  }
+  return mlir::success();
 }
 
 } // namespace hip

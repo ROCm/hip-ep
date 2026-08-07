@@ -82,6 +82,15 @@ the earliest used allocation when the complete operand cone can move safely.
 These preconditions preserve correctness when omitted, but omission may create
 more dominance domains and increase peak memory.
 
+Pre-conversion Reshape shape-provenance dataflow is an earlier pool-quality
+optimization for dynamic vision graphs. One function-level sparse analysis
+shares Shape/Gather/Slice/Concat payload facts across consumers and canonicalizes
+Add/MatMul/Cast dimension roots before constant externalization. It replaces
+fully proven target payloads with host scalar SSA, giving broadcast reification,
+CSE, and buffer reuse a canonical root dimension. Conflicting control-flow
+joins and unknown or device-produced target shapes deliberately keep the
+synchronized fallback.
+
 Pre-bufferization `hip-resolve-tensor-dims` serves a related purpose for tensor reshape chains. It lets upstream reification and canonicalization reduce `tensor.dim` queries before they become memref-level size arithmetic. Coverage of standard tensor reshape operations requires `tensor::registerInferTypeOpInterfaceExternalModels` on the dialect registry.
 
 ## PoolAllocs algorithm

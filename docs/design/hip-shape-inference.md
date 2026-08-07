@@ -99,7 +99,47 @@ operations. Operations that set `autoReify=0` and are not covered by a
 parameterized sub-base define their member functions in
 `HipReifyResultShapesImpl.cpp`.
 
-Pure descriptor transformations such as Reshape, Squeeze, and Unsqueeze generally lower to standard tensor operations rather than HIP DPS compute operations. Their shape inference and dim folding use MLIR's standard tensor interfaces and external models, not a second HIP-specific contract.
+Pure descriptor transformations such as Reshape, Squeeze, and Unsqueeze
+generally lower to standard tensor operations rather than HIP DPS compute
+operations. Their result-extent inference and dim folding use MLIR's standard
+tensor interfaces and external models, not a second HIP-specific contract.
+`ReifyRankedShapedTypeOpInterface` exposes shaped-result extents, and
+ValueBounds can reason about dimensions and scalar/index bounds; neither
+directly transports the integer payload of a rank-1 ONNX shape tensor. Typed
+ONNX operations and shape helpers could replace name-based transfer dispatch,
+while Shape-dialect integration would require representing the payload as
+explicit shape values.
+
+After pre-lowering ONNX rewrites reach their fixed point and before constant
+externalization, one function-level MLIR sparse forward dataflow solve computes
+Reshape target-payload provenance. Its monotonic lattice carries canonical
+tensor dimensions and an optional complete host payload through Shape, constant
+Gather/Slice, axis-zero Concat, Identity, Unsqueeze, scalar/vector Reshape,
+constants, and proven `tensor.from_elements` chains. Add, MatMul, and Cast
+transfer canonical dimension roots without claiming payload provenance. Joins
+keep a dimension fact only when incoming roots agree and keep a payload only
+when the complete vectors agree; there is no `hip.loop` dimension propagation.
+A complete proof rebuilds the target from constants, canonical `tensor.dim`
+values, and proven host scalar SSA. Disagreement, unknown producers,
+partially-known payloads, and device-produced payloads leave the operand
+untouched. If no earlier shape-independent or static rewrite applies, the
+dynamic runtime-shaped fallback then uses synchronized readback.
+
+For `allowzero=1`, the provenance path accepts a target containing `-1` only
+when every other entry is proven strictly positive. A merely nonnegative entry
+could be zero, which ONNX forbids alongside `-1`, so it retains the unknown
+fallback. A target proven nonnegative throughout may bypass generic `-1`
+inference.
+
+Materialization stamps pass-internal markers for the dynamic runtime-shaped
+Reshape fallback. Before that fallback's first mutation, it revalidates the
+marker dependencies it consumes, target rank and length, host-safe scalar
+structure, nonnegative/no-`-1` claims, and mapped input-dimension identities.
+Earlier shape-independent or static Reshape rewrites do not consume marker
+claims and may bypass their validation. The fallback does not rerun the
+dataflow solver, so the markers are a handoff across this fixed pipeline
+boundary rather than durable proof after arbitrary IR mutation. The analysis is
+skipped for functions without an eligible dynamic Reshape.
 
 ## Static result typing
 
@@ -256,6 +296,7 @@ Primary regression coverage:
 | `test/lit/Dialect/hip-infer-loop-body-shapes.mlir` | Pre-conversion rank establishment |
 | `test/lit/Dialect/hip-dps-op-interface.mlir` | Shared `HipDpsOpInterface` reification |
 | `test/lit/Dialect/hip-broadcast-reify-shapes.mlir` | Shared broadcast reification and rank-zero success |
+| `test/lit/Conversion/onnx-to-hip/test_reshape_shape_provenance.mlir` | Proven host Reshape shapes, dataflow joins/shared producers, unknown-payload fallback, and `-1` handling |
 | `test/lit/Dialect/hip-matmul-reify-shapes.mlir` | Per-op reification through `--resolve-shaped-type-result-dims` |
 | `test/lit/Dialect/hip-matmul-shape-verifier.mlir` | Static MatMul shape validation |
 | `test/lit/Dialect/hip-loop-verifier.mlir` | Loop-carried type contract |

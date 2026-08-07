@@ -3,10 +3,10 @@
 # Licensed under the MIT License.
 #
 
-"""Tests for data-rearrangement / shape ops: Tile, Expand, Pad, GatherND,
-Slice, ScatterND.
+"""Tests for data-rearrangement / shape ops: Reshape, Tile, Expand, Pad,
+GatherND, Slice, ScatterND.
 
-All six ops are added by the qwen-vision-kernels PR. They share a common
+The runtime-shaped operations share a common
 property: the **shape** of an output depends on a graph-time tensor (repeats
 for Tile, shape for Expand, pads for Pad, indices for GatherND, starts/ends
 for Slice, indices for ScatterND). The runtime D2H-reads these small tensors
@@ -33,6 +33,74 @@ from onnx import TensorProto, helper, numpy_helper
 
 from framework.comparator import compare_outputs
 from framework.onnx_utils import make_model_from_nodes, np_to_onnx_type
+
+
+# ---------------------------------------------------------------------------
+# Reshape
+# ---------------------------------------------------------------------------
+def _make_runtime_reshape_model(
+    dtype, input_rank: int, output_rank: int, allowzero: int
+):
+    tp = np_to_onnx_type(dtype)
+    X = helper.make_tensor_value_info("X", tp, [None] * input_rank)
+    shape = helper.make_tensor_value_info("shape", TensorProto.INT64, [output_rank])
+    Y = helper.make_tensor_value_info("Y", tp, [None] * output_rank)
+    reshape = helper.make_node(
+        "Reshape", ["X", "shape"], ["reshaped"], allowzero=allowzero
+    )
+    zero = numpy_helper.from_array(np.asarray(0, dtype=dtype), name="zero")
+    add = helper.make_node("Add", ["reshaped", "zero"], ["Y"])
+    return make_model_from_nodes([reshape, add], [X, shape], [Y], initializers=[zero])
+
+
+def _make_provenance_reshape_model(dtype):
+    """Build Shape->Gather->Unsqueeze->Concat->Reshape provenance."""
+    tp = np_to_onnx_type(dtype)
+    X = helper.make_tensor_value_info("X", tp, [None, None, None])
+    Y = helper.make_tensor_value_info("Y", tp, [None, None])
+    index = numpy_helper.from_array(np.asarray(1, dtype=np.int64), name="index")
+    axes = numpy_helper.from_array(np.asarray([0], dtype=np.int64), name="axes")
+    suffix = numpy_helper.from_array(np.asarray([8], dtype=np.int64), name="suffix")
+    zero = numpy_helper.from_array(np.asarray(0, dtype=dtype), name="zero")
+    nodes = [
+        helper.make_node("Shape", ["X"], ["input_shape"]),
+        helper.make_node("Gather", ["input_shape", "index"], ["middle_dim"], axis=0),
+        helper.make_node("Unsqueeze", ["middle_dim", "axes"], ["middle_dim_vec"]),
+        helper.make_node(
+            "Concat", ["middle_dim_vec", "suffix"], ["target_shape"], axis=0
+        ),
+        helper.make_node("Reshape", ["X", "target_shape"], ["reshaped"], allowzero=1),
+        helper.make_node("Add", ["reshaped", "zero"], ["Y"]),
+    ]
+    return make_model_from_nodes(
+        nodes, [X], [Y], initializers=[index, axes, suffix, zero]
+    )
+
+
+class TestRuntimeReshape:
+    @pytest.mark.parametrize(
+        "input_shape,target_shape,allowzero",
+        [
+            ((2, 3, 4), (6, 4), 0),
+            ((2, 6), (0, 3, 2), 0),
+            ((2, 6), (-1, 2, 2), 0),
+            ((0, 6), (0, 3, 2), 1),
+        ],
+    )
+    def test_runtime_reshape(self, model_runner, input_shape, target_shape, allowzero):
+        model = _make_runtime_reshape_model(
+            np.float32, len(input_shape), len(target_shape), allowzero
+        )
+        x = np.arange(np.prod(input_shape), dtype=np.float32).reshape(input_shape)
+        shape = np.asarray(target_shape, dtype=np.int64)
+        actual, expected = model_runner.run_sample(model, [x, shape])
+        compare_outputs(actual, expected, atol=0)
+
+    def test_shape_gather_concat_provenance(self, model_runner):
+        model = _make_provenance_reshape_model(np.float32)
+        x = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+        actual, expected = model_runner.run_sample(model, [x])
+        compare_outputs(actual, expected, atol=0)
 
 
 # ---------------------------------------------------------------------------
