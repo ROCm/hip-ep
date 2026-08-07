@@ -34,12 +34,15 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
     and omits `ctx`; a `barrier` region takes `ctx` followed by its inputs.
 
     All results must fill `outs` slots of one op, one slot each, and may also
-    feed other placeholders. Being tied to a single op, it is not `Pure`, so
+    feed other placeholders or leave a pool domain through
+    `hipsr.pool_domain_yield`. Being tied to a single op, it is not `Pure`, so
     CSE cannot merge placeholders.
 
     The pool-domain pass requires a placeholder and its consumer to sit
     directly in the function body, and moves each placeholder before its
-    consumer. Placeholders do not set domain boundaries.
+    consumer. Placeholders do not set domain boundaries. A result that a later
+    domain needs is returned from the domain holding it, which keeps the shape
+    graph connected across the boundary.
 
     This op is temporary: it has no bufferization interface and must be
     replaced before bufferization.

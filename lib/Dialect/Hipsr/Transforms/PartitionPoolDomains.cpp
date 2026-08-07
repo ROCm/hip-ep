@@ -116,15 +116,12 @@ bool isResultUsedOutsideDomain(Value result, DomainId domainId, Block &block,
   });
 }
 
-// Find the non-placeholder results that this domain must yield.
+// Find the results that this domain must yield.
 llvm::SmallVector<OpResult>
 collectDomainResults(Block &block, DomainId domainId, const Domain &domain,
                      const DomainAssignment &assignment) {
   llvm::SmallVector<OpResult> results;
   for (Operation *operation : domain.operations) {
-    if (isa<PlaceholderOp>(operation)) {
-      continue;
-    }
     for (OpResult result : operation->getResults()) {
       if (isResultUsedOutsideDomain(result, domainId, block, assignment)) {
         results.push_back(result);
@@ -442,6 +439,76 @@ static void materializeDomains(ArrayRef<Domain> domains, Value context) {
   }
 }
 
+namespace partition_materialization {
+
+// Move one assigned group into a pool_domain and wire its inputs and results.
+void materializeDomain(IRRewriter &rewriter,
+                       partition_analysis::DomainId domainId,
+                       const partition_analysis::Domain &domain,
+                       Value context) {
+  SmallVector<Value> results(domain.results.begin(), domain.results.end());
+  SmallVector<Type> resultTypes = llvm::map_to_vector(
+      domain.results, [](OpResult result) { return result.getType(); });
+  Operation *insertionPoint = domain.operations.front();
+  rewriter.setInsertionPoint(insertionPoint);
+
+  auto domainOp = PoolDomainOp::create(rewriter, insertionPoint->getLoc(),
+                                       resultTypes, ValueRange{}, domainId);
+  Region &bodyRegion = domainOp.getBody();
+  Block *body = rewriter.createBlock(&bodyRegion);
+  // Seed context first so isolation appends every other capture after it.
+  body->addArgument(context.getType(), context.getLoc());
+  for (Operation *operation : domain.operations) {
+    rewriter.moveOpBefore(operation, body, body->end());
+  }
+  // Reuse argument zero so isolation does not capture context again.
+  replaceAllUsesInRegionWith(context, body->getArgument(0), bodyRegion);
+
+  // Capture the remaining values used from outside this domain.
+  SmallVector<Value> capturedValues =
+      makeRegionIsolatedFromAbove(rewriter, bodyRegion);
+  Block &entryBlock = bodyRegion.front();
+
+  // Domain operands mirror block arguments: context, then captured values.
+  SmallVector<Value> domainOperands{context};
+  llvm::append_range(domainOperands, capturedValues);
+  rewriter.modifyOpInPlace(
+      domainOp, [&] { domainOp->insertOperands(0, domainOperands); });
+
+  // Region isolation updates direct uses. Nested regions need the same mapping.
+  auto capturedArguments =
+      entryBlock.getArguments().take_back(capturedValues.size());
+  for (auto [capturedValue, argument] :
+       llvm::zip_equal(capturedValues, capturedArguments)) {
+    replaceAllUsesInRegionWith(capturedValue, argument, bodyRegion);
+  }
+
+  rewriter.setInsertionPointToEnd(&entryBlock);
+  PoolDomainYieldOp::create(rewriter, insertionPoint->getLoc(), results);
+
+  // External users must use the domain results; internal uses stay unchanged.
+  rewriter.replaceUsesWithIf(
+      results, domainOp.getResults(), [&](OpOperand &use) {
+        return !domainOp->isProperAncestor(use.getOwner());
+      });
+}
+
+// Build domains in order so earlier results are available to later domains.
+void materializeDomains(const partition_analysis::DomainAssignment &assignment,
+                        Value context) {
+  if (assignment.domains.empty()) {
+    return;
+  }
+
+  IRRewriter rewriter(
+      assignment.domains.front().operations.front()->getContext());
+  for (auto [domainId, domain] : llvm::enumerate(assignment.domains)) {
+    materializeDomain(rewriter, domainId, domain, context);
+  }
+}
+
+} // namespace partition_materialization
+
 struct PartitionPoolDomainsPass
     : impl::PartitionPoolDomainsPassBase<PartitionPoolDomainsPass> {
   using impl::PartitionPoolDomainsPassBase<
@@ -462,6 +529,16 @@ struct PartitionPoolDomainsPass
     }
 
     Block &entryBlock = funcOp.front();
+    if (entryBlock.getNumArguments() == 0 ||
+        !isa<ContextType>(entryBlock.getArgument(0).getType())) {
+      funcOp.emitError(
+          "hipsr-partition-pool-domains requires function argument zero to be "
+          "!hipsr.context");
+      signalPassFailure();
+      return;
+    }
+    Value context = entryBlock.getArgument(0);
+
     if (failed(validatePartitionInput(entryBlock))) {
       signalPassFailure();
       return;
@@ -472,6 +549,8 @@ struct PartitionPoolDomainsPass
     if (emitAnalysisReport) {
       partition_analysis::emitAnalysisReport(entryBlock, assignment);
     }
+
+    partition_materialization::materializeDomains(assignment, context);
   }
 };
 

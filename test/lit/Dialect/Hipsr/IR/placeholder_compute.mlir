@@ -72,7 +72,7 @@ func.func @multi_result_compute_outs(
 // a destination, whether or not the consumer is DPS.
 func.func @compute_input_placeholder(
     %ctx: !hipsr.context, %data: tensor<2x3xf16>) {
-  // expected-error @+1 {{requires each result use to be a placeholder input or an outs operand of a hipsr operation}}
+  // expected-error @+1 {{requires each result use to be a placeholder input, pool-domain yield, or an outs operand of a hipsr operation}}
   %init = hipsr.placeholder(%ctx)
       ins(%data : tensor<2x3xf16>)
       {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<2x3xf16>

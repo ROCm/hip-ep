@@ -67,13 +67,14 @@ LogicalResult PlaceholderOp::verify() {
   for (auto [resultIndex, result] : llvm::enumerate(getResults())) {
     OpOperand *outsUse = nullptr;
     for (OpOperand &use : result.getUses()) {
-      if (isa<PlaceholderOp>(use.getOwner())) {
+      if (isa<PlaceholderOp, PoolDomainYieldOp>(use.getOwner())) {
         continue;
       }
 
       if (!isHipsrDestinationOperand(use)) {
-        return emitOpError("requires each result use to be a placeholder input "
-                           "or an outs operand of a hipsr operation");
+        return emitOpError("requires each result use to be a placeholder "
+                           "input, pool-domain yield, or an outs operand of a "
+                           "hipsr operation");
       }
       if (outsUse) {
         return emitOpError(
