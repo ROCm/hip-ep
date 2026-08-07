@@ -39,6 +39,8 @@ namespace hipsr {
 /// memref destinations and has no results.
 ::mlir::OperandRange getHipsrDestinationOperands(::mlir::Operation *op);
 
+// compute: use is in Outputs
+// dps: use is in Init
 bool isHipsrDestinationOperand(::mlir::OpOperand &use);
 
 // CONTRACT: MorphiZen-generated constants only. Works both before and after
