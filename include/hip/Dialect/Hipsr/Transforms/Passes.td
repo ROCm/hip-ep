@@ -45,14 +45,14 @@ def PartitionPoolDomainsPass
     The pass chooses all domains before changing the IR, then builds
     `hipsr.pool_domain` ops in order. Each domain has `IsolatedFromAbove`.
     Values from outside the domain become operands and block arguments.
-    Non-placeholder results used outside the domain become its results.
+    Results used outside the domain become its results, including placeholder
+    results that keep the shape graph connected across domains.
     Function argument zero must be `!hipsr.context`; it stays operand and block
     argument zero in every domain.
 
     A placeholder stays in the same domain as the DPS op that uses it as an
-    init. If a placeholder result is a shape input in a later domain, the pass
-    changes that input to the matching DPS data result returned by the earlier
-    domain. Placeholder results are never returned from a domain.
+    init. Its result and the matching DPS data result are returned separately
+    when both are used by a later domain.
 
     Before:
     ```mlir
@@ -78,7 +78,7 @@ def PartitionPoolDomainsPass
     ```mlir
     func.func @graph(%ctx: !hipsr.context, %input: tensor<4xf32>)
         -> tensor<4xf32> {
-      %0 = hipsr.pool_domain(
+      %0:2 = hipsr.pool_domain(
           %ctx, %input : !hipsr.context, tensor<4xf32>) {
       ^bb0(%domain_ctx: !hipsr.context, %domain_input: tensor<4xf32>):
         %init0 = hipsr.placeholder(%domain_ctx)
@@ -88,17 +88,20 @@ def PartitionPoolDomainsPass
         %data0 = hipsr.cast(%domain_ctx)
             ins(%domain_input : tensor<4xf32>)
             outs(%init0 : tensor<4xf16>) : tensor<4xf16>
-        hipsr.pool_domain_yield %data0 : tensor<4xf16>
-      } -> tensor<4xf16> {domain_id = 0 : i64}
-      %1 = hipsr.pool_domain(%ctx, %0
-          : !hipsr.context, tensor<4xf16>) {
-      ^bb0(%domain_ctx: !hipsr.context, %domain_input: tensor<4xf16>):
+        hipsr.pool_domain_yield %init0, %data0
+            : tensor<4xf16>, tensor<4xf16>
+      } -> tensor<4xf16>, tensor<4xf16> {domain_id = 0 : i64}
+      %1 = hipsr.pool_domain(%ctx, %0#0, %0#1
+          : !hipsr.context, tensor<4xf16>, tensor<4xf16>) {
+      ^bb0(%domain_ctx: !hipsr.context,
+           %domain_shape_input: tensor<4xf16>,
+           %domain_data_input: tensor<4xf16>):
         %init1 = hipsr.placeholder(%domain_ctx)
-            ins(%domain_input : tensor<4xf16>)
+            ins(%domain_shape_input : tensor<4xf16>)
             {placeholder_type = #hipsr.placeholder_type<barrier>}
             : tensor<4xf32>
         %data1 = hipsr.cast(%domain_ctx)
-            ins(%domain_input : tensor<4xf16>)
+            ins(%domain_data_input : tensor<4xf16>)
             outs(%init1 : tensor<4xf32>) : tensor<4xf32>
         hipsr.pool_domain_yield %data1 : tensor<4xf32>
       } -> tensor<4xf32> {domain_id = 1 : i64}

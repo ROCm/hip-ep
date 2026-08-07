@@ -4,27 +4,27 @@
 // RUN: hip-mlir-opt --split-input-file -hipsr-partition-pool-domains %s | FileCheck %s
 
 // Normal placeholders stay in the current domain, while barriers advance to
-// the next domain. Shape edges at both boundaries use exported data values.
+// the next domain. Shape and data edges cross each boundary separately.
 // CHECK-LABEL: func.func @mixed_chain(
 // CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<4xf32>) -> tensor<4xf16> {
-// CHECK-NEXT: %[[DOMAIN0:.*]] = hipsr.pool_domain(%[[CTX]], %[[INPUT]] : !hipsr.context, tensor<4xf32>) {
+// CHECK-NEXT: %[[DOMAIN0:.*]]:2 = hipsr.pool_domain(%[[CTX]], %[[INPUT]] : !hipsr.context, tensor<4xf32>) {
 // CHECK-NEXT: ^bb0(%[[CTX0:.*]]: !hipsr.context, %[[INPUT0:.*]]: tensor<4xf32>):
 // CHECK-NEXT: %[[INIT0:.*]] = hipsr.placeholder(%[[CTX0]]) ins(%[[INPUT0]] : tensor<4xf32>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16>
 // CHECK-NEXT: %[[DATA0:.*]] = hipsr.cast(%[[CTX0]]) ins(%[[INPUT0]] : tensor<4xf32>) outs(%[[INIT0]] : tensor<4xf16>) : tensor<4xf16>
-// CHECK-NEXT: hipsr.pool_domain_yield %[[DATA0]] : tensor<4xf16>
-// CHECK-NEXT: } -> tensor<4xf16> {domain_id = 0 : i64}
-// CHECK-NEXT: %[[DOMAIN1:.*]] = hipsr.pool_domain(%[[CTX]], %[[DOMAIN0]] : !hipsr.context, tensor<4xf16>) {
-// CHECK-NEXT: ^bb0(%[[CTX1:.*]]: !hipsr.context, %[[INPUT1:.*]]: tensor<4xf16>):
-// CHECK-NEXT: %[[INIT1:.*]] = hipsr.placeholder(%[[CTX1]]) ins(%[[INPUT1]] : tensor<4xf16>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf32>
-// CHECK-NEXT: %[[DATA1:.*]] = hipsr.cast(%[[CTX1]]) ins(%[[INPUT1]] : tensor<4xf16>) outs(%[[INIT1]] : tensor<4xf32>) : tensor<4xf32>
+// CHECK-NEXT: hipsr.pool_domain_yield %[[INIT0]], %[[DATA0]] : tensor<4xf16>, tensor<4xf16>
+// CHECK-NEXT: } -> tensor<4xf16>, tensor<4xf16> {domain_id = 0 : i64}
+// CHECK-NEXT: %[[DOMAIN1:.*]]:2 = hipsr.pool_domain(%[[CTX]], %[[DOMAIN0]]#0, %[[DOMAIN0]]#1 : !hipsr.context, tensor<4xf16>, tensor<4xf16>) {
+// CHECK-NEXT: ^bb0(%[[CTX1:.*]]: !hipsr.context, %[[SHAPE_INPUT1:.*]]: tensor<4xf16>, %[[DATA_INPUT1:.*]]: tensor<4xf16>):
+// CHECK-NEXT: %[[INIT1:.*]] = hipsr.placeholder(%[[CTX1]]) ins(%[[SHAPE_INPUT1]] : tensor<4xf16>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf32>
+// CHECK-NEXT: %[[DATA1:.*]] = hipsr.cast(%[[CTX1]]) ins(%[[DATA_INPUT1]] : tensor<4xf16>) outs(%[[INIT1]] : tensor<4xf32>) : tensor<4xf32>
 // CHECK-NEXT: %[[INIT2:.*]] = hipsr.placeholder(%[[CTX1]]) ins(%[[INIT1]] : tensor<4xf32>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16>
 // CHECK-NEXT: %[[DATA2:.*]] = hipsr.cast(%[[CTX1]]) ins(%[[DATA1]] : tensor<4xf32>) outs(%[[INIT2]] : tensor<4xf16>) : tensor<4xf16>
-// CHECK-NEXT: hipsr.pool_domain_yield %[[DATA2]] : tensor<4xf16>
-// CHECK-NEXT: } -> tensor<4xf16> {domain_id = 1 : i64}
-// CHECK-NEXT: %[[DOMAIN2:.*]] = hipsr.pool_domain(%[[CTX]], %[[DOMAIN1]] : !hipsr.context, tensor<4xf16>) {
-// CHECK-NEXT: ^bb0(%[[CTX2:.*]]: !hipsr.context, %[[INPUT2:.*]]: tensor<4xf16>):
-// CHECK-NEXT: %[[INIT3:.*]] = hipsr.placeholder(%[[CTX2]]) ins(%[[INPUT2]] : tensor<4xf16>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf32>
-// CHECK-NEXT: %[[DATA3:.*]] = hipsr.cast(%[[CTX2]]) ins(%[[INPUT2]] : tensor<4xf16>) outs(%[[INIT3]] : tensor<4xf32>) : tensor<4xf32>
+// CHECK-NEXT: hipsr.pool_domain_yield %[[INIT2]], %[[DATA2]] : tensor<4xf16>, tensor<4xf16>
+// CHECK-NEXT: } -> tensor<4xf16>, tensor<4xf16> {domain_id = 1 : i64}
+// CHECK-NEXT: %[[DOMAIN2:.*]] = hipsr.pool_domain(%[[CTX]], %[[DOMAIN1]]#0, %[[DOMAIN1]]#1 : !hipsr.context, tensor<4xf16>, tensor<4xf16>) {
+// CHECK-NEXT: ^bb0(%[[CTX2:.*]]: !hipsr.context, %[[SHAPE_INPUT2:.*]]: tensor<4xf16>, %[[DATA_INPUT2:.*]]: tensor<4xf16>):
+// CHECK-NEXT: %[[INIT3:.*]] = hipsr.placeholder(%[[CTX2]]) ins(%[[SHAPE_INPUT2]] : tensor<4xf16>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf32>
+// CHECK-NEXT: %[[DATA3:.*]] = hipsr.cast(%[[CTX2]]) ins(%[[DATA_INPUT2]] : tensor<4xf16>) outs(%[[INIT3]] : tensor<4xf32>) : tensor<4xf32>
 // CHECK-NEXT: %[[INIT4:.*]] = hipsr.placeholder(%[[CTX2]]) ins(%[[INIT3]] : tensor<4xf32>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16>
 // CHECK-NEXT: %[[DATA4:.*]] = hipsr.cast(%[[CTX2]]) ins(%[[DATA3]] : tensor<4xf32>) outs(%[[INIT4]] : tensor<4xf16>) : tensor<4xf16>
 // CHECK-NEXT: hipsr.pool_domain_yield %[[DATA4]] : tensor<4xf16>
@@ -68,40 +68,40 @@ func.func @mixed_chain(
 // input domain.
 // CHECK-LABEL: func.func @multi_branch(
 // CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<4xf32>) -> tensor<4xf16> {
-// CHECK-NEXT: %[[DOMAIN0:.*]]:2 = hipsr.pool_domain(%[[CTX]], %[[INPUT]] : !hipsr.context, tensor<4xf32>) {
+// CHECK-NEXT: %[[DOMAIN0:.*]]:4 = hipsr.pool_domain(%[[CTX]], %[[INPUT]] : !hipsr.context, tensor<4xf32>) {
 // CHECK-NEXT: ^bb0(%[[CTX0:.*]]: !hipsr.context, %[[INPUT0:.*]]: tensor<4xf32>):
 // CHECK-NEXT: %[[ROOT_INIT:.*]] = hipsr.placeholder(%[[CTX0]]) ins(%[[INPUT0]] : tensor<4xf32>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16>
 // CHECK-NEXT: %[[ROOT:.*]] = hipsr.cast(%[[CTX0]]) ins(%[[INPUT0]] : tensor<4xf32>) outs(%[[ROOT_INIT]] : tensor<4xf16>) : tensor<4xf16>
 // CHECK-NEXT: %[[INDEPENDENT_INIT:.*]] = hipsr.placeholder(%[[CTX0]]) ins(%[[INPUT0]] : tensor<4xf32>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16>
 // CHECK-NEXT: %[[INDEPENDENT:.*]] = hipsr.cast(%[[CTX0]]) ins(%[[INPUT0]] : tensor<4xf32>) outs(%[[INDEPENDENT_INIT]] : tensor<4xf16>) : tensor<4xf16>
-// CHECK-NEXT: hipsr.pool_domain_yield %[[ROOT]], %[[INDEPENDENT]] : tensor<4xf16>, tensor<4xf16>
-// CHECK-NEXT: } -> tensor<4xf16>, tensor<4xf16> {domain_id = 0 : i64}
-// CHECK-NEXT: %[[DOMAIN1:.*]]:2 = hipsr.pool_domain(%[[CTX]], %[[DOMAIN0]]#0 : !hipsr.context, tensor<4xf16>) {
-// CHECK-NEXT: ^bb0(%[[CTX1:.*]]: !hipsr.context, %[[ROOT1:.*]]: tensor<4xf16>):
-// CHECK-NEXT: %[[LHS_INIT:.*]] = hipsr.placeholder(%[[CTX1]]) ins(%[[ROOT1]] : tensor<4xf16>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16>
-// CHECK-NEXT: %[[LHS:.*]] = hipsr.cast(%[[CTX1]]) ins(%[[ROOT1]] : tensor<4xf16>) outs(%[[LHS_INIT]] : tensor<4xf16>) : tensor<4xf16>
+// CHECK-NEXT: hipsr.pool_domain_yield %[[ROOT_INIT]], %[[ROOT]], %[[INDEPENDENT_INIT]], %[[INDEPENDENT]] : tensor<4xf16>, tensor<4xf16>, tensor<4xf16>, tensor<4xf16>
+// CHECK-NEXT: } -> tensor<4xf16>, tensor<4xf16>, tensor<4xf16>, tensor<4xf16> {domain_id = 0 : i64}
+// CHECK-NEXT: %[[DOMAIN1:.*]]:4 = hipsr.pool_domain(%[[CTX]], %[[DOMAIN0]]#0, %[[DOMAIN0]]#1 : !hipsr.context, tensor<4xf16>, tensor<4xf16>) {
+// CHECK-NEXT: ^bb0(%[[CTX1:.*]]: !hipsr.context, %[[ROOT_SHAPE1:.*]]: tensor<4xf16>, %[[ROOT_DATA1:.*]]: tensor<4xf16>):
+// CHECK-NEXT: %[[LHS_INIT:.*]] = hipsr.placeholder(%[[CTX1]]) ins(%[[ROOT_SHAPE1]] : tensor<4xf16>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16>
+// CHECK-NEXT: %[[LHS:.*]] = hipsr.cast(%[[CTX1]]) ins(%[[ROOT_DATA1]] : tensor<4xf16>) outs(%[[LHS_INIT]] : tensor<4xf16>) : tensor<4xf16>
 // CHECK-NEXT: %[[LHS_NORMAL_INIT:.*]] = hipsr.placeholder(%[[CTX1]]) ins(%[[LHS_INIT]] : tensor<4xf16>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16>
 // CHECK-NEXT: %[[LHS_NORMAL:.*]] = hipsr.cast(%[[CTX1]]) ins(%[[LHS]] : tensor<4xf16>) outs(%[[LHS_NORMAL_INIT]] : tensor<4xf16>) : tensor<4xf16>
-// CHECK-NEXT: %[[RHS_INIT:.*]] = hipsr.placeholder(%[[CTX1]]) ins(%[[ROOT1]] : tensor<4xf16>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16>
-// CHECK-NEXT: %[[RHS:.*]] = hipsr.cast(%[[CTX1]]) ins(%[[ROOT1]] : tensor<4xf16>) outs(%[[RHS_INIT]] : tensor<4xf16>) : tensor<4xf16>
+// CHECK-NEXT: %[[RHS_INIT:.*]] = hipsr.placeholder(%[[CTX1]]) ins(%[[ROOT_SHAPE1]] : tensor<4xf16>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16>
+// CHECK-NEXT: %[[RHS:.*]] = hipsr.cast(%[[CTX1]]) ins(%[[ROOT_DATA1]] : tensor<4xf16>) outs(%[[RHS_INIT]] : tensor<4xf16>) : tensor<4xf16>
 // CHECK-NEXT: %[[RHS_NORMAL_INIT:.*]] = hipsr.placeholder(%[[CTX1]]) ins(%[[RHS_INIT]] : tensor<4xf16>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16>
 // CHECK-NEXT: %[[RHS_NORMAL:.*]] = hipsr.cast(%[[CTX1]]) ins(%[[RHS]] : tensor<4xf16>) outs(%[[RHS_NORMAL_INIT]] : tensor<4xf16>) : tensor<4xf16>
-// CHECK-NEXT: hipsr.pool_domain_yield %[[LHS_NORMAL]], %[[RHS_NORMAL]] : tensor<4xf16>, tensor<4xf16>
-// CHECK-NEXT: } -> tensor<4xf16>, tensor<4xf16> {domain_id = 1 : i64}
-// CHECK-NEXT: %[[DOMAIN2:.*]] = hipsr.pool_domain(%[[CTX]], %[[DOMAIN1]]#0, %[[DOMAIN1]]#1, %[[DOMAIN0]]#1 : !hipsr.context, tensor<4xf16>, tensor<4xf16>, tensor<4xf16>) {
-// CHECK-NEXT: ^bb0(%[[CTX2:.*]]: !hipsr.context, %[[LHS2:.*]]: tensor<4xf16>, %[[RHS2:.*]]: tensor<4xf16>, %[[INDEPENDENT2:.*]]: tensor<4xf16>):
-// CHECK-NEXT: %[[LHS_DEEP_INIT:.*]] = hipsr.placeholder(%[[CTX2]]) ins(%[[LHS2]] : tensor<4xf16>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16>
-// CHECK-NEXT: %[[LHS_DEEP:.*]] = hipsr.cast(%[[CTX2]]) ins(%[[LHS2]] : tensor<4xf16>) outs(%[[LHS_DEEP_INIT]] : tensor<4xf16>) : tensor<4xf16>
-// CHECK-NEXT: %[[DEEP_JOIN_INIT:.*]] = hipsr.placeholder(%[[CTX2]]) ins(%[[LHS_DEEP_INIT]], %[[RHS2]] : tensor<4xf16>, tensor<4xf16>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16>
-// CHECK-NEXT: %[[DEEP_JOIN:.*]] = hipsr.add(%[[CTX2]]) ins(%[[LHS_DEEP]], %[[RHS2]] : tensor<4xf16>, tensor<4xf16>) outs(%[[DEEP_JOIN_INIT]] : tensor<4xf16>) : tensor<4xf16>
-// CHECK-NEXT: %[[JOIN_INIT:.*]] = hipsr.placeholder(%[[CTX2]]) ins(%[[DEEP_JOIN_INIT]], %[[INDEPENDENT2]] : tensor<4xf16>, tensor<4xf16>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16>
-// CHECK-NEXT: %[[JOIN:.*]] = hipsr.add(%[[CTX2]]) ins(%[[DEEP_JOIN]], %[[INDEPENDENT2]] : tensor<4xf16>, tensor<4xf16>) outs(%[[JOIN_INIT]] : tensor<4xf16>) : tensor<4xf16>
-// CHECK-NEXT: hipsr.pool_domain_yield %[[JOIN]] : tensor<4xf16>
-// CHECK-NEXT: } -> tensor<4xf16> {domain_id = 2 : i64}
-// CHECK-NEXT: %[[DOMAIN3:.*]] = hipsr.pool_domain(%[[CTX]], %[[DOMAIN2]] : !hipsr.context, tensor<4xf16>) {
-// CHECK-NEXT: ^bb0(%[[CTX3:.*]]: !hipsr.context, %[[INPUT3:.*]]: tensor<4xf16>):
-// CHECK-NEXT: %[[RESULT_INIT:.*]] = hipsr.placeholder(%[[CTX3]]) ins(%[[INPUT3]] : tensor<4xf16>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16>
-// CHECK-NEXT: %[[RESULT:.*]] = hipsr.cast(%[[CTX3]]) ins(%[[INPUT3]] : tensor<4xf16>) outs(%[[RESULT_INIT]] : tensor<4xf16>) : tensor<4xf16>
+// CHECK-NEXT: hipsr.pool_domain_yield %[[LHS_NORMAL_INIT]], %[[LHS_NORMAL]], %[[RHS_NORMAL_INIT]], %[[RHS_NORMAL]] : tensor<4xf16>, tensor<4xf16>, tensor<4xf16>, tensor<4xf16>
+// CHECK-NEXT: } -> tensor<4xf16>, tensor<4xf16>, tensor<4xf16>, tensor<4xf16> {domain_id = 1 : i64}
+// CHECK-NEXT: %[[DOMAIN2:.*]]:2 = hipsr.pool_domain(%[[CTX]], %[[DOMAIN1]]#0, %[[DOMAIN1]]#1, %[[DOMAIN1]]#2, %[[DOMAIN1]]#3, %[[DOMAIN0]]#2, %[[DOMAIN0]]#3 : !hipsr.context, tensor<4xf16>, tensor<4xf16>, tensor<4xf16>, tensor<4xf16>, tensor<4xf16>, tensor<4xf16>) {
+// CHECK-NEXT: ^bb0(%[[CTX2:.*]]: !hipsr.context, %[[LHS_SHAPE2:.*]]: tensor<4xf16>, %[[LHS_DATA2:.*]]: tensor<4xf16>, %[[RHS_SHAPE2:.*]]: tensor<4xf16>, %[[RHS_DATA2:.*]]: tensor<4xf16>, %[[INDEPENDENT_SHAPE2:.*]]: tensor<4xf16>, %[[INDEPENDENT_DATA2:.*]]: tensor<4xf16>):
+// CHECK-NEXT: %[[LHS_DEEP_INIT:.*]] = hipsr.placeholder(%[[CTX2]]) ins(%[[LHS_SHAPE2]] : tensor<4xf16>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16>
+// CHECK-NEXT: %[[LHS_DEEP:.*]] = hipsr.cast(%[[CTX2]]) ins(%[[LHS_DATA2]] : tensor<4xf16>) outs(%[[LHS_DEEP_INIT]] : tensor<4xf16>) : tensor<4xf16>
+// CHECK-NEXT: %[[DEEP_JOIN_INIT:.*]] = hipsr.placeholder(%[[CTX2]]) ins(%[[LHS_DEEP_INIT]], %[[RHS_SHAPE2]] : tensor<4xf16>, tensor<4xf16>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16>
+// CHECK-NEXT: %[[DEEP_JOIN:.*]] = hipsr.add(%[[CTX2]]) ins(%[[LHS_DEEP]], %[[RHS_DATA2]] : tensor<4xf16>, tensor<4xf16>) outs(%[[DEEP_JOIN_INIT]] : tensor<4xf16>) : tensor<4xf16>
+// CHECK-NEXT: %[[JOIN_INIT:.*]] = hipsr.placeholder(%[[CTX2]]) ins(%[[DEEP_JOIN_INIT]], %[[INDEPENDENT_SHAPE2]] : tensor<4xf16>, tensor<4xf16>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16>
+// CHECK-NEXT: %[[JOIN:.*]] = hipsr.add(%[[CTX2]]) ins(%[[DEEP_JOIN]], %[[INDEPENDENT_DATA2]] : tensor<4xf16>, tensor<4xf16>) outs(%[[JOIN_INIT]] : tensor<4xf16>) : tensor<4xf16>
+// CHECK-NEXT: hipsr.pool_domain_yield %[[JOIN_INIT]], %[[JOIN]] : tensor<4xf16>, tensor<4xf16>
+// CHECK-NEXT: } -> tensor<4xf16>, tensor<4xf16> {domain_id = 2 : i64}
+// CHECK-NEXT: %[[DOMAIN3:.*]] = hipsr.pool_domain(%[[CTX]], %[[DOMAIN2]]#0, %[[DOMAIN2]]#1 : !hipsr.context, tensor<4xf16>, tensor<4xf16>) {
+// CHECK-NEXT: ^bb0(%[[CTX3:.*]]: !hipsr.context, %[[SHAPE_INPUT3:.*]]: tensor<4xf16>, %[[DATA_INPUT3:.*]]: tensor<4xf16>):
+// CHECK-NEXT: %[[RESULT_INIT:.*]] = hipsr.placeholder(%[[CTX3]]) ins(%[[SHAPE_INPUT3]] : tensor<4xf16>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16>
+// CHECK-NEXT: %[[RESULT:.*]] = hipsr.cast(%[[CTX3]]) ins(%[[DATA_INPUT3]] : tensor<4xf16>) outs(%[[RESULT_INIT]] : tensor<4xf16>) : tensor<4xf16>
 // CHECK-NEXT: hipsr.pool_domain_yield %[[RESULT]] : tensor<4xf16>
 // CHECK-NEXT: } -> tensor<4xf16> {domain_id = 3 : i64}
 // CHECK-NEXT: return %[[DOMAIN3]] : tensor<4xf16>
@@ -166,25 +166,25 @@ func.func @multi_branch(
 
 // -----
 
-// Multi-result DPS values cross one boundary independently and keep their
-// result order.
+// Multi-result placeholder and DPS values cross one boundary independently
+// and keep their result order.
 // CHECK-LABEL: func.func @multi_result_boundaries(
 // CHECK-SAME: %[[CTX:.*]]: !hipsr.context, %[[INPUT:.*]]: tensor<4xf16>)
 // CHECK-SAME: -> (tensor<4xf16>, tensor<4xf16>) {
-// CHECK-NEXT: %[[DOMAIN0:.*]]:2 = hipsr.pool_domain(%[[CTX]], %[[INPUT]] : !hipsr.context, tensor<4xf16>) {
+// CHECK-NEXT: %[[DOMAIN0:.*]]:4 = hipsr.pool_domain(%[[CTX]], %[[INPUT]] : !hipsr.context, tensor<4xf16>) {
 // CHECK-NEXT: ^bb0(%[[CTX0:.*]]: !hipsr.context, %[[INPUT0:.*]]: tensor<4xf16>):
 // CHECK-NEXT: %[[ROOT_INITS:.*]]:2 = hipsr.placeholder(%[[CTX0]]) ins(%[[INPUT0]] : tensor<4xf16>) {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4xf16>, tensor<4xf16>
 // CHECK-NEXT: %[[ROOT:.*]]:2 = hipsr.compute(%[[CTX0]]) ins(%[[INPUT0]] : tensor<4xf16>) outs(%[[ROOT_INITS]]#0, %[[ROOT_INITS]]#1 : tensor<4xf16>, tensor<4xf16>) {
 // CHECK-NEXT: ^bb0(%[[BODY_CTX:.*]]: !hipsr.context, %[[BODY_INPUT:.*]]: tensor<4xf16>, %[[LHS_DEST:.*]]: tensor<4xf16>, %[[RHS_DEST:.*]]: tensor<4xf16>):
 // CHECK-NEXT: hipsr.compute_yield %[[LHS_DEST]], %[[RHS_DEST]] : tensor<4xf16>, tensor<4xf16>
 // CHECK-NEXT: } : tensor<4xf16>, tensor<4xf16>
-// CHECK-NEXT: hipsr.pool_domain_yield %[[ROOT]]#0, %[[ROOT]]#1 : tensor<4xf16>, tensor<4xf16>
-// CHECK-NEXT: } -> tensor<4xf16>, tensor<4xf16> {domain_id = 0 : i64}
-// CHECK-NEXT: %[[DOMAIN1:.*]]:2 = hipsr.pool_domain(%[[CTX]], %[[DOMAIN0]]#0, %[[DOMAIN0]]#1 : !hipsr.context, tensor<4xf16>, tensor<4xf16>) {
-// CHECK-NEXT: ^bb0(%[[CTX1:.*]]: !hipsr.context, %[[LHS_INPUT:.*]]: tensor<4xf16>, %[[RHS_INPUT:.*]]: tensor<4xf16>):
-// CHECK-NEXT: %[[LHS_INIT:.*]] = hipsr.placeholder(%[[CTX1]]) ins(%[[LHS_INPUT]] : tensor<4xf16>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16>
+// CHECK-NEXT: hipsr.pool_domain_yield %[[ROOT_INITS]]#0, %[[ROOT_INITS]]#1, %[[ROOT]]#0, %[[ROOT]]#1 : tensor<4xf16>, tensor<4xf16>, tensor<4xf16>, tensor<4xf16>
+// CHECK-NEXT: } -> tensor<4xf16>, tensor<4xf16>, tensor<4xf16>, tensor<4xf16> {domain_id = 0 : i64}
+// CHECK-NEXT: %[[DOMAIN1:.*]]:2 = hipsr.pool_domain(%[[CTX]], %[[DOMAIN0]]#0, %[[DOMAIN0]]#2, %[[DOMAIN0]]#1, %[[DOMAIN0]]#3 : !hipsr.context, tensor<4xf16>, tensor<4xf16>, tensor<4xf16>, tensor<4xf16>) {
+// CHECK-NEXT: ^bb0(%[[CTX1:.*]]: !hipsr.context, %[[LHS_SHAPE:.*]]: tensor<4xf16>, %[[LHS_INPUT:.*]]: tensor<4xf16>, %[[RHS_SHAPE:.*]]: tensor<4xf16>, %[[RHS_INPUT:.*]]: tensor<4xf16>):
+// CHECK-NEXT: %[[LHS_INIT:.*]] = hipsr.placeholder(%[[CTX1]]) ins(%[[LHS_SHAPE]] : tensor<4xf16>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16>
 // CHECK-NEXT: %[[LHS:.*]] = hipsr.cast(%[[CTX1]]) ins(%[[LHS_INPUT]] : tensor<4xf16>) outs(%[[LHS_INIT]] : tensor<4xf16>) : tensor<4xf16>
-// CHECK-NEXT: %[[RHS_INIT:.*]] = hipsr.placeholder(%[[CTX1]]) ins(%[[RHS_INPUT]] : tensor<4xf16>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16>
+// CHECK-NEXT: %[[RHS_INIT:.*]] = hipsr.placeholder(%[[CTX1]]) ins(%[[RHS_SHAPE]] : tensor<4xf16>) {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<4xf16>
 // CHECK-NEXT: %[[RHS:.*]] = hipsr.cast(%[[CTX1]]) ins(%[[RHS_INPUT]] : tensor<4xf16>) outs(%[[RHS_INIT]] : tensor<4xf16>) : tensor<4xf16>
 // CHECK-NEXT: hipsr.pool_domain_yield %[[LHS]], %[[RHS]] : tensor<4xf16>, tensor<4xf16>
 // CHECK-NEXT: } -> tensor<4xf16>, tensor<4xf16> {domain_id = 1 : i64}

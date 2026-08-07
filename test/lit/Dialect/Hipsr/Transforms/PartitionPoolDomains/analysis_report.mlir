@@ -9,7 +9,7 @@
 // expected-remark@+1 {{hipsr-partition-pool-domains: operation domains [0->0,1->0,2->1,3->1,4->1,5->1,6->1,7->1]}}
 func.func @parallel_barriers(
     %ctx: !hipsr.context, %input: tensor<?x8xf16>) -> tensor<?x8xf16> {
-  // expected-remark@+1 {{hipsr-partition-pool-domains: domain 0 ops [0=hipsr.placeholder,1=hipsr.cast] results [1#0]}}
+  // expected-remark@+1 {{hipsr-partition-pool-domains: domain 0 ops [0=hipsr.placeholder,1=hipsr.cast] results [0#0,1#0]}}
   %root_init = hipsr.placeholder(%ctx)
       ins(%input : tensor<?x8xf16>)
       {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16>
@@ -59,7 +59,7 @@ func.func @root_barrier(
 // expected-remark@+1 {{hipsr-partition-pool-domains: operation domains [0->0,1->0,2->1,3->1,4->1,5->1,6->1,7->1]}}
 func.func @normal_after_barrier(
     %ctx: !hipsr.context, %input: tensor<?x8xf16>) -> tensor<?x8xf16> {
-  // expected-remark@+1 {{hipsr-partition-pool-domains: domain 0 ops [0=hipsr.placeholder,1=hipsr.cast] results [1#0]}}
+  // expected-remark@+1 {{hipsr-partition-pool-domains: domain 0 ops [0=hipsr.placeholder,1=hipsr.cast] results [0#0,1#0]}}
   %root_init = hipsr.placeholder(%ctx)
       ins(%input : tensor<?x8xf16>)
       {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16>
@@ -94,21 +94,21 @@ func.func @normal_after_barrier(
 // expected-remark@+1 {{hipsr-partition-pool-domains: operation domains [0->0,1->0,2->1,3->1,4->2,5->2,6->1,7->1,8->0,9->0,10->1,11->1,12->3,13->3]}}
 func.func @mixed_depth_branches(
     %ctx: !hipsr.context, %input: tensor<?x8xf16>) -> tensor<?x8xf16> {
-  // expected-remark@+1 {{hipsr-partition-pool-domains: domain 0 ops [0=hipsr.placeholder,1=hipsr.cast,8=hipsr.placeholder,9=hipsr.cast] results [1#0,9#0]}}
+  // expected-remark@+1 {{hipsr-partition-pool-domains: domain 0 ops [0=hipsr.placeholder,1=hipsr.cast,8=hipsr.placeholder,9=hipsr.cast] results [0#0,1#0,8#0,9#0]}}
   %root_init = hipsr.placeholder(%ctx)
       ins(%input : tensor<?x8xf16>)
       {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<?x8xf16>
   %root = hipsr.cast(%ctx) ins(%input : tensor<?x8xf16>)
       outs(%root_init : tensor<?x8xf16>) : tensor<?x8xf16>
 
-  // expected-remark@+1 {{hipsr-partition-pool-domains: domain 1 ops [2=hipsr.placeholder,3=hipsr.cast,6=hipsr.placeholder,7=hipsr.cast,10=hipsr.placeholder,11=hipsr.add] results [3#0,11#0]}}
+  // expected-remark@+1 {{hipsr-partition-pool-domains: domain 1 ops [2=hipsr.placeholder,3=hipsr.cast,6=hipsr.placeholder,7=hipsr.cast,10=hipsr.placeholder,11=hipsr.add] results [2#0,3#0,10#0,11#0]}}
   %deep1_init = hipsr.placeholder(%ctx)
       ins(%root_init : tensor<?x8xf16>)
       {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<?x8xf16>
   %deep1 = hipsr.cast(%ctx) ins(%root : tensor<?x8xf16>)
       outs(%deep1_init : tensor<?x8xf16>) : tensor<?x8xf16>
 
-  // expected-remark@+1 {{hipsr-partition-pool-domains: domain 2 ops [4=hipsr.placeholder,5=hipsr.cast] results [5#0]}}
+  // expected-remark@+1 {{hipsr-partition-pool-domains: domain 2 ops [4=hipsr.placeholder,5=hipsr.cast] results [4#0,5#0]}}
   %deep2_init = hipsr.placeholder(%ctx)
       ins(%deep1_init : tensor<?x8xf16>)
       {placeholder_type = #hipsr.placeholder_type<barrier>} : tensor<?x8xf16>
@@ -152,7 +152,7 @@ func.func @mixed_depth_branches(
 func.func @multi_result_domain_results(
     %ctx: !hipsr.context, %input: tensor<?x8xf16>)
     -> (tensor<?x8xf16>, tensor<?x8xf16>) {
-  // expected-remark@+1 {{hipsr-partition-pool-domains: domain 0 ops [0=hipsr.placeholder,1=hipsr.compute] results [1#0,1#1]}}
+  // expected-remark@+1 {{hipsr-partition-pool-domains: domain 0 ops [0=hipsr.placeholder,1=hipsr.compute] results [0#0,0#1,1#0,1#1]}}
   %root_inits:2 = hipsr.placeholder(%ctx)
       ins(%input : tensor<?x8xf16>)
       {placeholder_type = #hipsr.placeholder_type<normal>}
