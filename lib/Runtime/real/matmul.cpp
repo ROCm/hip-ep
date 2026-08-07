@@ -45,22 +45,13 @@ static bool autotune_enabled() {
 
 struct MatmulCacheKey {
   int64_t M, N, K, batch_count, elem_size;
-  // hipBLASLt's STRIDED_BATCH_OFFSET on layA, in elements. Two distinct
-  // values reach this site at the same (M,N,K,batch,elem_size):
-  //   * 0   — B is a broadcast weight (rank-2 [K,N], or rank-N
-  //           [1,...,1,K,N] whose leading-dim product is 1).
-  //   * K*N — B is per-batch (leading-dim product > 1; the buffer holds
-  //           multiple [K,N] matrices laid out contiguously).
-  // Part of the cache key because the layout descriptor is parameterised
-  // by the stride: mixing the two would silently route one path through
-  // the other's stride and read past the end of a broadcast weight buffer.
-  // Keyed on the actual int stride (not a 0/1 bool) so any future site
-  // that legitimately uses a stride other than {0, K*N} also gets its
-  // own cache entry rather than aliasing one of these two.
-  int64_t b_batch_stride;
+  // hipBLASLt STRIDED_BATCH_OFFSET values for the user's A and B buffers.
+  // They are part of the key because both matrix layouts depend on them.
+  int64_t a_batch_stride, b_batch_stride;
   bool operator==(const MatmulCacheKey &o) const {
     return M == o.M && N == o.N && K == o.K && batch_count == o.batch_count &&
-           elem_size == o.elem_size && b_batch_stride == o.b_batch_stride;
+           elem_size == o.elem_size && a_batch_stride == o.a_batch_stride &&
+           b_batch_stride == o.b_batch_stride;
   }
 };
 
@@ -72,15 +63,17 @@ struct MatmulCacheKeyHash {
     hash_combine_val(h, k.K);
     hash_combine_val(h, k.batch_count);
     hash_combine_val(h, k.elem_size);
+    hash_combine_val(h, k.a_batch_stride);
     hash_combine_val(h, k.b_batch_stride);
     return h;
   }
 };
 
 /// Cached hipBLASLt descriptors + multi-algorithm auto-tune state for a
-/// single (M, N, K, batch, elem_size) shape. Descriptors are created in
-/// queryOrCreateMatmul() and owned by the MatmulAlgoTable, which frees them
-/// when the last session sharing it is destroyed.
+/// single (M, N, K, batch, elem_size, A stride, B stride) configuration.
+/// Descriptors are created in queryOrCreateMatmul() and owned by the
+/// MatmulAlgoTable, which frees them when the last session sharing it is
+/// destroyed.
 struct MatmulCacheEntry {
   hipblasLtMatmulDesc_t desc;
   hipblasLtMatrixLayout_t layA, layB, layC;
@@ -198,19 +191,10 @@ static MatmulCacheEntry *queryOrCreateMatmul(MatmulAlgoTable &table,
 
   if (key.batch_count > 1) {
     int64_t bc = key.batch_count;
-    // layA → user's B. The stride is whatever the compiler computed —
-    // 0 for broadcast B (rank-2 [K,N] or rank-N [1,...,1,K,N]), K*N for
-    // per-batch B (rank-N with leading-dim product > 1). Setting sA = K*N
-    // for a broadcast weight reads K*N elements PAST the end of the
-    // buffer on batch 1+ and feeds garbage into the GEMM — typical symptom
-    // on vision models is image-0 correct, image-1+ NaN (the OOB read
-    // often lands in a fp16-NaN pattern from adjacent pool slots /
-    // constants). Mis-setting sA = 0 for a per-batch B does the opposite:
-    // every batch reads matrix 0 instead of its own.
-    // layB → user's A and layC → output are always per-batch (the BATCH
-    // partition comes from A's leading dim by construction).
+    // Row-major -> column-major swaps operands: layA describes user's B and
+    // layB describes user's A.
     int64_t sA = key.b_batch_stride;
-    int64_t sB = M * K, sC = M * N;
+    int64_t sB = key.a_batch_stride, sC = M * N;
     MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutSetAttribute(
         entry.layA, HIPBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &bc, sizeof(bc)));
     MATMUL_CACHE_CHECK(hipblasLtMatrixLayoutSetAttribute(
@@ -435,7 +419,8 @@ static void autotuneMatmul(hipblasLtHandle_t handle, hipStream_t stream,
 int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
                          const void *B, void *output, int64_t M, int64_t N,
                          int64_t K, int64_t batch_count, int64_t elem_size,
-                         int64_t b_batch_stride) {
+                         int64_t a_batch_count, int64_t b_batch_count,
+                         int64_t a_batch_stride, int64_t b_batch_stride) {
   OP_PROFILE(
       "matmul",
       [&] {
@@ -447,6 +432,22 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
       state);
   if (!state || !A || !B || !output) {
     fprintf(stderr, "Invalid arguments to wrap_hipblasLtMatmul\n");
+    return -1;
+  }
+
+  auto isRepresentable = [batch_count](int64_t operandBatchCount) {
+    return operandBatchCount == 1 || operandBatchCount == batch_count;
+  };
+  if (!isRepresentable(a_batch_count) || !isRepresentable(b_batch_count)) {
+    fprintf(stderr,
+            "wrap_hipblasLtMatmul: runtime batch layout is not representable "
+            "by one stride per operand (A batches=%lld, B batches=%lld, "
+            "output batches=%lld)\n",
+            (long long)a_batch_count, (long long)b_batch_count,
+            (long long)batch_count);
+    // The generated interface reads this flag after stream synchronization and
+    // returns a non-zero inference status to ORT.
+    (void)hipdnn_ep_state_set_error_flag(state);
     return -1;
   }
 
@@ -468,11 +469,13 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
 
   const char *type_name = (elem_size == 2) ? "f16" : "f32";
   RUNTIME_DEBUG_LOG("[REAL] wrap_hipblasLtMatmul: M=%lld, N=%lld, K=%lld, "
-                    "batch=%lld, b_batch_stride=%lld, elem_size=%lld (%s), "
-                    "total_bytes=%lld\n",
+                    "batch=%lld, a_batches=%lld, b_batches=%lld, "
+                    "a_batch_stride=%lld, b_batch_stride=%lld, "
+                    "elem_size=%lld (%s), total_bytes=%lld\n",
                     (long long)M, (long long)N, (long long)K,
-                    (long long)batch_count, (long long)b_batch_stride,
-                    (long long)elem_size, type_name,
+                    (long long)batch_count, (long long)a_batch_count,
+                    (long long)b_batch_count, (long long)a_batch_stride,
+                    (long long)b_batch_stride, (long long)elem_size, type_name,
                     (long long)(batch_count * M * N * elem_size));
 
   MatmulState *ms = MatmulState::get_op_state(state, op_state_slot);
@@ -482,7 +485,8 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
     return -1;
   }
 
-  MatmulCacheKey key{M, N, K, batch_count, elem_size, b_batch_stride};
+  MatmulCacheKey key{
+      M, N, K, batch_count, elem_size, a_batch_stride, b_batch_stride};
   MatmulCacheEntry *cached = queryOrCreateMatmul(*ms->table, handle, key);
   if (!cached) {
     fprintf(stderr,

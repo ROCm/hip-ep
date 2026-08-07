@@ -427,11 +427,16 @@ int hipdnn_ep_state_ensure_la_scratch(RuntimeState *state, size_t needed_size);
 // walks the array via each object's deletor.
 bool hipdnn_ep_op_states_alloc(RuntimeState *state, int64_t n);
 
-// Device-side runtime error flag (set by kernels, observed by wrappers).
-// Intended for operators that detect runtime-invalid inputs on GPU (e.g. Range
-// delta==0) and need to propagate an error code back through main_graph.
+// Device-side runtime error flag (set by kernels or queued by wrappers).
+// Intended for operators that detect runtime-invalid inputs (e.g. Range
+// delta==0 or a dynamically concealed partial MatMul batch broadcast) and need
+// to propagate an error code back through main_graph.
 void *hipdnn_ep_state_get_error_flag_device_ptr(RuntimeState *state);
 int hipdnn_ep_state_reset_error_flag(RuntimeState *state);
+// Record a host-detected runtime error on the stream. The generated interface
+// observes it at the same boundary as device-detected errors and returns a
+// recoverable non-zero status to ORT.
+int hipdnn_ep_state_set_error_flag(RuntimeState *state);
 int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state);
 // Mark the start of a new Compute() call. Invalidates per-forward-pass
 // runtime caches -- today: the GQA seqlens_k cache (see
@@ -810,37 +815,22 @@ int wrap_hipblasLtGemm(void *handle, // hipBLASLt handle
                        const void *beta,  // Scalar beta
                        void *C);          // Matrix C GPU pointer (in/out)
 
-// MatMul operation wrapper (batched matrix multiplication)
-// Called by generated IR for onnx.MatMul lowering
-// Computes output = A @ B for each batch
-// A: [batch_count x M x K], B: [K x N] (broadcast) or [batch_count x K x N]
-// output: [batch_count x M x N]
+// Compute output = A @ B for each batch. Either operand may contain one matrix
+// broadcast across all output batches or one matrix per output batch.
 //
-// `b_batch_stride` is hipBLASLt's STRIDED_BATCH_OFFSET on layA when
-// `batch_count > 1`: the per-batch advance in elements through B. It MUST be:
-//   * 0   when B is a broadcast weight — one matrix reused across all
-//         batches. Includes both rank-2 `[K, N]` and rank-N
-//         `[1, ..., 1, K, N]` (any leading-dim product == 1).
-//   * K*N when B is per-batch — leading-dim product > 1, so the buffer
-//         actually holds multiple `[K, N]` matrices laid out contiguously.
-// Mis-setting this to K*N for a broadcast B causes hipBLASLt to step K*N
-// elements past the end of the weight buffer on every batch beyond the
-// first, reading uninitialised memory into the GEMM and producing wrong
-// (often NaN) outputs for batch > 0. For batch_count == 1 the value is
-// ignored. Always pass an exact stride; the compiler computes 0 vs K*N
-// at compile time when B's leading dims are static, else at runtime.
-int wrap_hipblasLtMatmul(
-    RuntimeState *state,
-    int op_state_slot,       // per-instance op-state slot (shared algo table)
-    const void *A,           // Matrix A GPU pointer
-    const void *B,           // Matrix B GPU pointer
-    void *output,            // Output GPU pointer
-    int64_t M,               // Rows of A (per batch)
-    int64_t N,               // Columns of B
-    int64_t K,               // Columns of A / Rows of B
-    int64_t batch_count,     // Number of batches
-    int64_t elem_size,       // Element size in bytes (2=f16, 4=f32)
-    int64_t b_batch_stride); // 0 = broadcast (any rank); K*N = per-batch
+// `a_batch_stride` / `b_batch_stride` are hipBLASLt's per-batch advances in
+// elements. A stride is 0 when one matrix is broadcast across all batches;
+// otherwise it is M*K for A or K*N for B.
+//
+// `a_batch_count` / `b_batch_count` are validated at runtime because dynamic
+// batch extents can conceal a partial per-axis broadcast from the static
+// verifier. Each count must be either 1 or `batch_count`; otherwise the wrapper
+// records a recoverable runtime error and does not dispatch hipBLASLt.
+int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
+                         const void *B, void *output, int64_t M, int64_t N,
+                         int64_t K, int64_t batch_count, int64_t elem_size,
+                         int64_t a_batch_count, int64_t b_batch_count,
+                         int64_t a_batch_stride, int64_t b_batch_stride);
 
 // GroupQueryAttention operation wrapper (Full MS spec)
 // Called by generated IR for onnx.Custom(GroupQueryAttention) lowering
