@@ -10,6 +10,7 @@
 #include "hip/Compiler/PluginRegistry.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/Passes.h"
+#include "hip/Dialect/Hipsr/IR/HipsrBufferize.h"
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
 #include "hip/Dialect/IR/HipBufferize.h"
@@ -88,6 +89,7 @@ inline void registerAllDialects(mlir::DialectRegistry &registry) {
       registry);
   mlir::memref::registerAllocationOpInterfaceExternalModels(registry);
   mlir::hip::registerHipBufferizableOpInterfaceModels(registry);
+  mlir::hipsr::registerHipsrBufferizableOpInterfaceModels(registry);
 }
 
 /// Load all required dialects into an MLIRContext.

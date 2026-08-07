@@ -26,6 +26,7 @@ def Hipsr_TensorOrHostMemRef    : AnyTypeOf<[AnyRankedTensor, Hipsr_HostMemRef],
 def Hipsr_TensorOrDeviceMemRef  : AnyTypeOf<[AnyRankedTensor, Hipsr_DeviceMemRef],  "ranked tensor or device memref">;
 def Hipsr_TensorOrPinnedMemRef  : AnyTypeOf<[AnyRankedTensor, Hipsr_PinnedMemRef],  "ranked tensor or pinned memref">;
 def Hipsr_TensorOrManagedMemRef : AnyTypeOf<[AnyRankedTensor, Hipsr_ManagedMemRef], "ranked tensor or managed memref">;
+def Hipsr_TensorOrMemRef : AnyTypeOf<[AnyRankedTensor, AnyMemRef], "ranked tensor or memref">;
 
 // Base class for hipsr types.
 class Hipsr_Type<string name, string typeMnemonic> : TypeDef<Hipsr_Dialect, name> {
