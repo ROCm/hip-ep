@@ -373,6 +373,7 @@ jobs:
             -DUSE_AMDGPU=ON \
             -DUSE_DML=OFF \
             -DCMAKE_PREFIX_PATH="${{ runner.workspace }}/ort-install;${{ steps.therock.outputs.dist }}" \
+            -DHIP_PLATFORM=amd \
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
