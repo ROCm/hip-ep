@@ -74,6 +74,9 @@ jobs:
           submodules: false
           fetch-depth: 1
           show-progress: false
+          # .github/rocm-runtime/*.zip is LFS-tracked; without this the checkout
+          # leaves a pointer file and Expand-Archive fails on it.
+          lfs: true
 
       # -----------------------------------------------------------------------
       # Per-dependency caches. Each dep is built from source into its own
@@ -630,6 +633,26 @@ jobs:
 
           echo "=== Staged package contents ==="
           find staging/ -type f | sort
+
+      # -----------------------------------------------------------------------
+      # Vendored gfx115x ROCm runtime, overlaid so the artifact runs on a box
+      # without a separate ROCm SDK. Runs after staging on purpose: its
+      # amdhip64_7.dll must win over the TheRock dist copy above, so the
+      # packaged HIP runtime stays consistent with the comgr/rocblas next to it.
+      # -----------------------------------------------------------------------
+      - name: Overlay vendored ROCm runtime into package bin/
+        shell: pwsh
+        run: |
+          $dist = "${{ runner.workspace }}/rocm-vendored"
+          if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
+          Expand-Archive -Path ".github/rocm-runtime/rocm_7.11-gfx115x_bin.zip" `
+            -DestinationPath $dist -Force
+          if (-not (Test-Path "$dist/amdhip64_7.dll")) {
+            throw "vendored ROCm runtime looks wrong: $dist"
+          }
+          Copy-Item "$dist/*" staging/bin -Recurse -Force
+          $n = (Get-ChildItem staging/bin -Recurse -File | Measure-Object).Count
+          Write-Host "=== staging/bin holds $n files after overlay ==="
 
       - name: Upload GPU test package
         uses: actions/upload-artifact@v4
