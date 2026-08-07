@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "OnnxToHipUtils.h"
+#include "ShapeProvenanceAnalysis.h"
 
 #include "hip/Support/ConstantsIO.h"
 #include "hip/Support/DiskFileSystem.h"
@@ -772,10 +773,9 @@ void ConvertOnnxToHipPass::runOnOperation() {
     // still be inline in `onnx.Constant` `value` attributes — once the
     // constants are externalized to memref.get_global the matchers break.
     // ExistingOps strictness is sufficient: the patterns either rewrite to
-    // tensor.* (Gather) or emit `onnx.*` ops. FastGelu (-> onnx.Gelu) and
-    // ReshapeShapeFold (roots on onnx.Reshape, only swaps its shape operand
-    // in place; the re-visit fails the "operand1 is onnx.Shape" guard) are
-    // convergent. ProjectorOpsRewrites emits NEW `onnx.*` ops (Reshape, Gemm,
+    // tensor.* (Gather) or emit `onnx.*` ops. FastGelu (-> onnx.Gelu) is
+    // convergent.
+    // ProjectorOpsRewrites emits NEW `onnx.*` ops (Reshape, Gemm,
     // ReduceMean, ...) that a subsequent round must visit (e.g. the
     // AveragePool decomposition's emitted Reshape feeds the next round's
     // ReduceMean handling), so the set is applied in a fixed-point loop until
@@ -811,7 +811,6 @@ void ConvertOnnxToHipPass::runOnOperation() {
         mlir::RewritePatternSet preLoweringPatterns(ctx);
         populateGatherShapeFoldPatterns(preLoweringPatterns, ctx);
         populateGatherBlockQuantizedPreparePatterns(preLoweringPatterns, ctx);
-        populateReshapeShapeFoldPatterns(preLoweringPatterns, ctx);
         populatePadShapeFoldPatterns(preLoweringPatterns, ctx);
         populateSliceShapeFoldPatterns(preLoweringPatterns, ctx);
         populateFastGeluFusionPatterns(preLoweringPatterns, ctx);
@@ -839,6 +838,17 @@ void ConvertOnnxToHipPass::runOnOperation() {
         funcOp.emitWarning()
             << "convert-onnx-to-hip: pre-lowering round loop hit kMaxRounds="
             << kMaxRounds << " without quiescence";
+    }
+    // Run one function-level solve over the quiesced generic ONNX IR while
+    // shape constants are still inline. Sparse dataflow shares producer facts
+    // across Reshapes and conservatively joins block arguments. Materialization
+    // stamps the proof contract consumed and revalidated if conversion reaches
+    // the dynamic runtime-shaped fallback.
+    if (hasEligibleReshapeShapeProvenanceCandidate(funcOp)) {
+      ShapeProvenanceAnalysis analysis(funcOp);
+      if (mlir::failed(analysis.run()) ||
+          mlir::failed(materializeReshapeShapeOperands(funcOp, analysis)))
+        return signalPassFailure();
     }
     // Run ConstantOfShape folding BEFORE `lowerOnnxConstants` so it can
     // still see the original `onnx.Constant` (or `onnx.Shape`) as the

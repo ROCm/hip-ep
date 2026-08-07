@@ -36,15 +36,25 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Sequence.h"
 #include "llvm/ADT/SmallSet.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <optional>
 
-#define DEBUG_TYPE "convert-onnx-to-hip"
-
 namespace mlir {
 namespace hip {
+
+inline constexpr llvm::StringLiteral kHostShapeOperandAttr =
+    "hip.host_shape_operand";
+inline constexpr llvm::StringLiteral kHostShapeNoMinusOneAttr =
+    "hip.host_shape_no_minus_one";
+inline constexpr llvm::StringLiteral kHostShapeInputDimMapAttr =
+    "hip.host_shape_input_dim_map";
+
+/// Return whether an arith.index_cast preserves every nonnegative value under
+/// the generated ABI's 64-bit index model.
+bool isLosslessShapeIndexCast(mlir::arith::IndexCastOp op);
 
 //===----------------------------------------------------------------------===//
 // Helpers
@@ -481,17 +491,6 @@ void populateFlattenConversionPatterns(RewritePatternSet &patterns,
 /// dynseqlen-regression rationale.
 void populateGatherShapeFoldPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
-
-/// Pre-lowering pattern set: rewrite the `Reshape(data, Shape(src))` idiom
-/// so the shape operand becomes an explicit
-/// `tensor.from_elements(tensor.dim(src, *))`. This lets ReshapeConversion's
-/// `tensor.reshape` fallback recover per-output-dim sizes when the result has
-/// >1 dynamic dim in one reassociation group (otherwise ReshapeConversion
-/// ignores its second operand and emits the same SSA dim twice — the [N, N]
-/// bug). Sibling of GatherShapeFold; must run BEFORE lowerOnnxConstants.
-/// See ReshapeShapeFold.cpp.
-void populateReshapeShapeFoldPatterns(RewritePatternSet &patterns,
-                                      MLIRContext *ctx);
 
 /// Pre-lowering pattern set: stamp `onnx.Pad`'s compile-time `pads` (and
 /// optional `axes`) constant onto the op as `hipdnn.pad_amounts` /
