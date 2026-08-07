@@ -159,6 +159,8 @@ else()
     message(STATUS "Building mock runtime (BUILD_MOCK_RUNTIME explicitly set)")
 endif()
 
+# AMDMLSS paths are resolved in cmake/amdmlss.cmake (included from deps.cmake).
+
 # ============================================================================
 # STEP 3: Generate LLVM Bitcode from Runtime Modules
 # ============================================================================
@@ -193,6 +195,8 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
     if(HIPDNN_EP_GQA_AUTOTUNE_ONLINE_DEFAULT)
         list(APPEND COMPILE_FLAGS "-DHIPDNN_EP_GQA_AUTOTUNE_ONLINE_DEFAULT=1")
     endif()
+
+    list(APPEND COMPILE_FLAGS ${HIPDNN_EP_AMDMLSS_COMPILE_FLAGS})
 
     # Always add root directory for public headers
     list(APPEND COMPILE_FLAGS "-I" "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -305,6 +309,7 @@ if(NOT BUILD_MOCK_RUNTIME)
     # Real GPU runtime implementation
     compile_to_bitcode(real/hip.cpp runtime_hip.bc)
     compile_to_bitcode(real/miopen.cpp runtime_miopen.bc)
+    compile_to_bitcode(real/mlss_conv.cpp runtime_mlss_conv.bc)
     compile_to_bitcode(real/hipblas.cpp runtime_hipblas.bc)
     # Vendor-symbol stubs so a model links without libMIOpen / libhipblaslt (see
     # real/vendor_blas_stub.cpp).
@@ -428,6 +433,7 @@ if(NOT BUILD_MOCK_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_memory.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_hip.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_miopen.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_mlss_conv.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_hipblas.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_elementwise.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_power.bc
@@ -577,6 +583,10 @@ target_include_directories(hipdnn-ep-tls PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # test machine; staging hipdnn-ep-tls.lib into install/lib (then onto LIB) lets
 # lld-link resolve it there. Bitcode (default) does not need it.
 install(TARGETS hipdnn-ep-tls ARCHIVE DESTINATION lib)
+if(HIPDNN_EP_AMDMLSS_DLL)
+    get_filename_component(_amdmlss_dll_name "${HIPDNN_EP_AMDMLSS_DLL}" NAME)
+    install(FILES "${HIPDNN_EP_AMDMLSS_DLL}" DESTINATION bin RENAME "${_amdmlss_dll_name}")
+endif()
 
 # ============================================================================
 # STEP 7: Shared embedded runtime.bc (single source of truth)

@@ -3,6 +3,8 @@
 # ** Licensed under the MIT License.
 ##
 
+include(${CMAKE_SOURCE_DIR}/cmake/amdmlss_stage.cmake)
+
 # hip-test loads a per-model artifact -- LLVM bitcode via LlvmIrJit or a
 # native .dll/.so via morphizen::Plugin, selected by file extension (the same
 # two loaders the EP uses at runtime) -- resolves the inference_* entry points,
@@ -50,6 +52,9 @@ if(NOT BUILD_MOCK_RUNTIME AND HIP_ARCHITECTURES)
     set_property(TARGET hip-test APPEND PROPERTY INSTALL_RPATH "$ORIGIN/../lib")
     set_target_properties(hip-test PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE)
   endif()
+endif()
+if(HIPDNN_EP_AMDMLSS_DLL)
+  hip_ep_stage_amdmlss_dll(hip-test)
 endif()
 if(NOT BUILD_MOCK_RUNTIME)
   find_package(hip CONFIG REQUIRED)

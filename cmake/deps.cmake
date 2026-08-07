@@ -423,6 +423,8 @@ if(BUILD_EP)
     endif()
   endif()
 
+  include(${CMAKE_CURRENT_LIST_DIR}/amdmlss.cmake)
+
   # Add morphizen subdirectory.
   #
   # GCC -Wconversion on protobuf >=22 *.pb.h accessors is suppressed at the

@@ -8,6 +8,7 @@
 #include "../op_state.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
+#include "mlss_conv.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -385,6 +386,16 @@ int wrap_miopenConvolutionForward(
       (long long)input_w, (long long)weights_k, (long long)kernel_h,
       (long long)kernel_w, (long long)stride_h, (long long)stride_w,
       bias ? "yes" : "null", (long long)data_type);
+
+  int mlss_rc = try_mlss_conv_forward(
+      state, input, input_n, input_c, input_h, input_w, weights, weights_k,
+      bias, output, output_h, output_w, kernel_h, kernel_w, stride_h, stride_w,
+      pad_top, pad_left, pad_bottom, pad_right, dilation_h, dilation_w, group,
+      data_type);
+  if (mlss_rc == 0)
+    return 0;
+  if (mlss_rc < 0)
+    return -1;
 
   // Extract handle and stream from opaque RuntimeState via accessor functions
   // (Maintains abstraction barrier - no direct field access)

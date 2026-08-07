@@ -91,3 +91,6 @@ DEBUG_TAR_CACHE=1
 )
 
 target_link_libraries(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PUBLIC glog::glog protobuf::libprotobuf )
+
+include(${CMAKE_SOURCE_DIR}/cmake/amdmlss_stage.cmake)
+hip_ep_stage_amdmlss_dll(${morphizen_CORE_DYNAMIC_UNIQUE_ID})
