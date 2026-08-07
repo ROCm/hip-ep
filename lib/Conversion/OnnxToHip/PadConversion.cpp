@@ -13,54 +13,6 @@ namespace mlir {
 namespace hip {
 namespace {
 
-/// Try to recognise \p v as a compile-time 1-D integer constant tensor
-/// (matching the forms produced by `lowerOnnxConstants`). Returns null
-/// otherwise. Mirrors the helper in SliceConversion.cpp.
-static mlir::DenseElementsAttr getCompileTimeConstantTensor(mlir::Value value) {
-  mlir::Operation *defOp = value.getDefiningOp();
-  if (!defOp)
-    return nullptr;
-  if (auto cst = mlir::dyn_cast<mlir::arith::ConstantOp>(defOp))
-    return mlir::dyn_cast<mlir::DenseElementsAttr>(cst.getValue());
-  if (auto attr = defOp->getAttr("value"))
-    if (auto dense = mlir::dyn_cast<mlir::DenseElementsAttr>(attr))
-      return dense;
-  if (auto toTensor = mlir::dyn_cast<mlir::bufferization::ToTensorOp>(defOp)) {
-    auto bufDef =
-        toTensor.getBuffer().getDefiningOp<mlir::memref::GetGlobalOp>();
-    if (!bufDef)
-      return nullptr;
-    auto module = bufDef->getParentOfType<mlir::ModuleOp>();
-    if (!module)
-      return nullptr;
-    auto global =
-        module.lookupSymbol<mlir::memref::GlobalOp>(bufDef.getNameAttr());
-    if (!global)
-      return nullptr;
-    return mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
-        global.getInitialValueAttr());
-  }
-  return nullptr;
-}
-
-static mlir::LogicalResult
-extractIntVector(mlir::Value v, llvm::SmallVectorImpl<int64_t> &out) {
-  if (!v)
-    return mlir::failure();
-  auto dense = getCompileTimeConstantTensor(v);
-  if (!dense)
-    return mlir::failure();
-  auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(dense.getType());
-  if (!tensorType || tensorType.getRank() != 1)
-    return mlir::failure();
-  auto elemTy = tensorType.getElementType();
-  if (!elemTy.isInteger(64) && !elemTy.isInteger(32))
-    return mlir::failure();
-  for (mlir::APInt entry : dense.getValues<mlir::APInt>())
-    out.push_back(entry.getSExtValue());
-  return mlir::success();
-}
-
 /// Read entry `[idx]` from a 1-D int tensor on the host and return an
 /// `index`-typed value.
 ///
@@ -127,32 +79,52 @@ static mlir::FailureOr<mlir::Value> buildPadOutputInit(
     // Stamped by PadShapeFold before externalization.
     axesVec.assign(axesAttr.begin(), axesAttr.end());
   } else if (axes) {
-    if (mlir::failed(extractIntVector(axes, axesVec)))
+    if (!extractConstantIntVector(axes, axesVec))
       return rewriter.notifyMatchFailure(
           op, "dynamic `axes` operand is not supported by Pad conversion");
   }
-  if (axesVec.empty())
+  if (!axes)
     for (int64_t i = 0; i < rank; ++i)
       axesVec.push_back(i);
-  for (int64_t &a : axesVec)
+  llvm::DenseMap<int64_t, int64_t> axisToSlot;
+  for (auto [slot, a] : llvm::enumerate(axesVec)) {
     if (a < 0)
       a += rank;
-
-  llvm::DenseMap<int64_t, int64_t> axisToSlot;
-  for (auto [slot, axis] : llvm::enumerate(axesVec))
-    axisToSlot[axis] = static_cast<int64_t>(slot);
+    if (a < 0 || a >= rank || axisToSlot.contains(a))
+      return rewriter.notifyMatchFailure(
+          op, "Pad axes must be unique and within the data rank");
+    axisToSlot[a] = static_cast<int64_t>(slot);
+  }
   int64_t nPadded = static_cast<int64_t>(axesVec.size());
 
   // Decide whether we can use compile-time pad values. Prefer the attribute
   // stamped by PadShapeFold (captured before externalization); otherwise try
   // to read an inline operand (only succeeds when `pads` was small enough to
-  // stay inline). A miss leaves `padsAreConst == false` -> readback fallback.
+  // stay inline). A miss leaves `padsAreStatic == false` -> readback fallback.
   llvm::SmallVector<int64_t> padsConst;
-  if (hasPadsAttr)
+  bool padsAreStatic = hasPadsAttr;
+  if (padsAreStatic)
     padsConst.assign(padsAttr.begin(), padsAttr.end());
   else
-    (void)extractIntVector(pads, padsConst);
-  bool padsAreConst = static_cast<int64_t>(padsConst.size()) == 2 * nPadded;
+    padsAreStatic = extractConstantIntVector(pads, padsConst);
+
+  if (padsAreStatic) {
+    std::optional<llvm::ArrayRef<int64_t>> staticAxes;
+    if (axes)
+      staticAxes = axesVec;
+    llvm::SmallVector<mlir::OpFoldResult> resultShape;
+    if (mlir::failed(mlir::hip::reifyPadShape(rewriter, loc, data, pads, axes,
+                                              padsConst, staticAxes,
+                                              resultShape)))
+      return rewriter.notifyMatchFailure(
+          op, "constant Pad parameters are invalid for the data shape");
+    mlir::FailureOr<mlir::Value> init = createEmptyTensorFromReifiedShape(
+        rewriter, loc, resultType, resultShape);
+    if (mlir::failed(init))
+      return rewriter.notifyMatchFailure(
+          op, "Pad result type is incompatible with inferred extents");
+    return *init;
+  }
 
   llvm::SmallVector<mlir::Value> dynSizes;
   for (int64_t i = 0; i < resultType.getRank(); ++i) {
@@ -175,16 +147,8 @@ static mlir::FailureOr<mlir::Value> buildPadOutputInit(
     }
     int64_t slot = it->second;
 
-    mlir::Value begin, end;
-    if (padsAreConst) {
-      begin =
-          mlir::arith::ConstantIndexOp::create(rewriter, loc, padsConst[slot]);
-      end = mlir::arith::ConstantIndexOp::create(rewriter, loc,
-                                                 padsConst[slot + nPadded]);
-    } else {
-      begin = extractAsIndex(rewriter, loc, ctx, pads, slot);
-      end = extractAsIndex(rewriter, loc, ctx, pads, slot + nPadded);
-    }
+    mlir::Value begin = extractAsIndex(rewriter, loc, ctx, pads, slot);
+    mlir::Value end = extractAsIndex(rewriter, loc, ctx, pads, slot + nPadded);
     mlir::Value sum =
         mlir::arith::AddIOp::create(rewriter, loc, dataDim, begin);
     sum = mlir::arith::AddIOp::create(rewriter, loc, sum, end);
@@ -291,6 +255,12 @@ struct PadToHip : public mlir::RewritePattern {
 
     mlir::SmallVector<mlir::NamedAttribute> attrs;
     attrs.push_back(rewriter.getNamedAttr("mode", modeAttr));
+    if (hasPadsAttr)
+      attrs.push_back(rewriter.getNamedAttr(
+          "static_pads", rewriter.getDenseI64ArrayAttr(padsAttr)));
+    if (hasAxesAttr)
+      attrs.push_back(rewriter.getNamedAttr(
+          "static_axes", rewriter.getDenseI64ArrayAttr(axesAttr)));
 
     mlir::OperationState state(loc, "hip.pad");
     state.addOperands(operands);

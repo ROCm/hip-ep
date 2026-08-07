@@ -229,13 +229,15 @@ GemmOp::reifyResultShapes(OpBuilder &b,
 // thunks below: each calls a dedicated `reifyPadShape` /
 // `reifyTileShape` / `reifyExpandShape` / `reifySliceShape` /
 // `reifyRangeShape` helper (`HipShapeUtils.cpp`) that computes the
-// output shape from the INPUT operands using a fold-or-bail strategy.
-// On bail (non-constant operands, dynamic input dims) the thunk falls
-// back to `cast<HipDpsOp>(getOperation()).reifyResultShapes` — i.e. the
-// shared `HipDpsOp` outs-lift default. This avoids emitting per-dim
-// `arith.addi(tensor.dim, const)` / `arith.divsi(...)` chains that
-// don't fold and would clutter the IR (particularly important for
-// slice's per-axis chain and range's count-only output).
+// output shape from the INPUT operands. Pad emits exact affine SSA for
+// dynamic input dims when pads/axes are constant or stamped. Slice emits
+// exact constants for statically bounded sliced axes and passes through
+// untouched dynamic data dims. On a payload-dynamic operand or dynamic
+// sliced-axis clamp, the thunk falls back to
+// `cast<HipDpsOp>(getOperation()).reifyResultShapes` — i.e. the shared
+// `HipDpsOp` outs-lift default. This preserves runtime Pad readback and
+// Slice's physical-capacity/logical-extent policy without payload reads
+// from dialect reification.
 //
 // Before (transpose, perm-driven mapping):
 //   %t = hip.transpose(%ctx) ins(%x : tensor<2x?x4096xf16>)
@@ -483,9 +485,12 @@ LogicalResult GatherNDOp::reifyResultShapes(
 LogicalResult
 PadOp::reifyResultShapes(OpBuilder &b,
                          ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  std::optional<ArrayRef<int64_t>> staticPads = getStaticPads();
+  std::optional<ArrayRef<int64_t>> staticAxes = getStaticAxes();
   SmallVector<OpFoldResult> dims;
   if (succeeded(mlir::hip::reifyPadShape(b, getLoc(), getData(), getPads(),
-                                         getAxes(), dims))) {
+                                         getAxes(), staticPads, staticAxes,
+                                         dims))) {
     reifiedReturnShapes.assign({std::move(dims)});
     return success();
   }
@@ -496,9 +501,10 @@ PadOp::reifyResultShapes(OpBuilder &b,
 LogicalResult
 TileOp::reifyResultShapes(OpBuilder &b,
                           ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  std::optional<ArrayRef<int64_t>> staticRepeats = getStaticRepeats();
   SmallVector<OpFoldResult> dims;
   if (succeeded(mlir::hip::reifyTileShape(b, getLoc(), getInput(), getRepeats(),
-                                          dims))) {
+                                          staticRepeats, dims))) {
     reifiedReturnShapes.assign({std::move(dims)});
     return success();
   }

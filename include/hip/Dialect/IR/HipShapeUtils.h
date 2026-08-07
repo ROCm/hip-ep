@@ -233,6 +233,9 @@ FailureOr<SmallVector<int64_t>> inferReductionShape(ArrayRef<int64_t> dataShape,
 LogicalResult verifyReductionDpsOp(Operation *op, Value data, Value axes,
                                    int64_t keepdims, int64_t noopWithEmptyAxes);
 
+/// ONNX Size always produces one rank-zero i64 result.
+FailureOr<SmallVector<int64_t>> inferSizeShape();
+
 /// ONNX reduction result shape over `axes` as mixed extents, emitting
 /// `tensor.dim` only for dimensions that are dynamic in `data`. Same mapping
 /// as `inferReductionShape`; see it for the `keepdims` semantics. `data` must
@@ -280,37 +283,46 @@ LogicalResult reifyBroadcastShapeFor(OpBuilder &b, Location loc,
                                      ValueRange operands, Operation *op,
                                      ReifiedRankedShapedTypeDims &reified);
 
-/// Reify the result shape of an ONNX-style `pad` op:
+/// Compute the result shape of an ONNX-style `pad` op:
 ///   `output[d] = data.shape[d] + pre_pad[d] + post_pad[d]`
 /// where `pre_pad[d]` / `post_pad[d]` come from `pads[axes.find(d)]` /
 /// `pads[axes.find(d) + N]` (default `axes = [0, rank)`, `N = num_axes`).
 ///
-/// Fold-or-bail strategy: tries to introspect `pads` and (if non-null)
-/// `axes` as constant int vectors, then per-dim computes static output
-/// extents from `data.shape`. Returns `success()` and writes the per-dim
-/// `OpFoldResult`s into `out` ONLY when EVERY output dim is statically
-/// known; returns `failure()` otherwise (the per-op reify thunk falls
-/// back to `HipDpsOp::reifyResultShapes`'s outs-lift default so reify
-/// still succeeds end-to-end). This avoids emitting per-dim
-/// `arith.addi(tensor.dim, const)` chains that don't fold and would
-/// clutter the IR; the typical Tier-1 case is `pads` from an ONNX
-/// attribute (constant) + a fully-static `data.shape`, which folds
-/// entirely to `IndexAttr` results.
+/// The pure form validates axes, lengths, duplicate axes, and statically
+/// computable extents. Dynamic data dimensions remain dynamic.
+FailureOr<SmallVector<int64_t>>
+inferPadShape(ArrayRef<int64_t> dataShape, ArrayRef<int64_t> pads,
+              std::optional<ArrayRef<int64_t>> axes);
+///
+/// The mixed form first resolves compile-time pads/axes from the optional
+/// stamped attributes or constant operands and validates through
+/// `inferPadShape`. Only then does it emit exact affine index SSA for dynamic
+/// input dimensions. Payload-dynamic pads/axes return failure so the caller
+/// can preserve its synchronized-readback (converter) or outs-lift (reify)
+/// policy; dialect reification never reads tensor payload.
 ///
 /// `axes` may be null (ONNX "pad all axes" default).
 LogicalResult reifyPadShape(OpBuilder &b, Location loc, Value data, Value pads,
-                            Value axes, SmallVectorImpl<OpFoldResult> &out);
+                            Value axes,
+                            std::optional<ArrayRef<int64_t>> staticPads,
+                            std::optional<ArrayRef<int64_t>> staticAxes,
+                            SmallVectorImpl<OpFoldResult> &out);
 
 /// Reify the result shape of an ONNX-style `tile` op:
 ///   `output[d] = input.shape[d] * repeats[d]`
 /// where `repeats` is a rank-1 i64 tensor of length `input.rank`.
 ///
-/// Same fold-or-bail strategy as `reifyPadShape`: tries to introspect
-/// `repeats` as a constant int vector, computes static output extents
-/// from `input.shape`, and returns `success()` only when EVERY dim is
-/// statically known.
+/// The pure static form validates rank/length/non-negative repeats.
+FailureOr<SmallVector<int64_t>> inferTileShape(ArrayRef<int64_t> inputShape,
+                                               ArrayRef<int64_t> repeats);
+
+/// Mixed form for constant repeats. Dynamic input dims produce exact index SSA;
+/// payload-dynamic repeats return failure so the caller can use bulk readback
+/// (converter) or outs-lift (reify).
 LogicalResult reifyTileShape(OpBuilder &b, Location loc, Value input,
-                             Value repeats, SmallVectorImpl<OpFoldResult> &out);
+                             Value repeats,
+                             std::optional<ArrayRef<int64_t>> staticRepeats,
+                             SmallVectorImpl<OpFoldResult> &out);
 
 /// Reify the result shape of an ONNX-style `expand` op:
 ///   broadcast `input.shape` against `shape`'s constant values
@@ -322,20 +334,27 @@ LogicalResult reifyTileShape(OpBuilder &b, Location loc, Value input,
 /// `OpTrait::util::getBroadcastedShape` and lifts the result shape.
 /// Returns `failure()` when the broadcast result has any dynamic dim
 /// (so the caller falls back to outs-lifting).
-LogicalResult reifyExpandShape(OpBuilder &b, Location loc, Value input,
-                               Value shape, SmallVectorImpl<OpFoldResult> &out);
+LogicalResult
+reifyExpandShape(OpBuilder &b, Location loc, Value input, Value shape,
+                 SmallVectorImpl<OpFoldResult> &out,
+                 std::optional<ArrayRef<int64_t>> staticShape = std::nullopt);
 
-/// Reify the result shape of an ONNX-style `slice` op. `output[axis]`
+/// Compute the result shape of an ONNX-style `slice` op. `output[axis]`
 /// for each `axis` in `axes` is `ceil_div(end - start, step)` (negative
 /// indices and steps clamp per ONNX rules); for axes not in `axes`,
 /// `output[d] = data.shape[d]`.
 ///
-/// Pure fold-or-bail (no fallback for partial constants). The dim-arith
-/// chain `arith.divsi(arith.subi(end, start), step)` per axis would
-/// clutter the IR persistently when any of starts / ends / axes / steps
-/// is non-constant; returning `failure()` early lets the per-op reify
-/// thunk fall back to the `HipDpsOp` outs-lift default for a single
-/// `tensor.dim` per dim instead.
+/// Exact static clamping requires a static input extent on every sliced axis.
+/// Dynamic untouched axes remain dynamic and pass through from `data`.
+FailureOr<SmallVector<int64_t>>
+inferSliceShape(ArrayRef<int64_t> dataShape, ArrayRef<int64_t> starts,
+                ArrayRef<int64_t> ends, std::optional<ArrayRef<int64_t>> axes,
+                std::optional<ArrayRef<int64_t>> steps);
+///
+/// The mixed form folds all four parameter tensors, validates through
+/// `inferSliceShape` before emitting IR, and materializes `tensor.dim` only for
+/// untouched dynamic axes. A payload-dynamic parameter or dynamic sliced-axis
+/// clamp returns failure, preserving the native Slice capacity/outs fallback.
 ///
 /// `axes` and `steps` may be null (ONNX defaults: `[0, rank)` and
 /// all-ones respectively).
@@ -353,9 +372,10 @@ LogicalResult reifySliceShape(OpBuilder &b, Location loc, Value data,
 /// `IndexAttr` vector. Else `failure()` -- the dim-arith chain to
 /// compute the count at runtime is rarely useful for refinement and
 /// would persist in IR.
-LogicalResult reifyRangeShape(OpBuilder &b, Location loc, Value start,
-                              Value limit, Value delta,
-                              SmallVectorImpl<OpFoldResult> &out);
+LogicalResult
+reifyRangeShape(OpBuilder &b, Location loc, Value start, Value limit,
+                Value delta, SmallVectorImpl<OpFoldResult> &out,
+                std::optional<ArrayRef<int64_t>> staticValues = std::nullopt);
 
 } // namespace hip
 } // namespace mlir

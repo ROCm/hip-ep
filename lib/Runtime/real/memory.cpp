@@ -248,3 +248,50 @@ void hipdnn_ep_readback_scalar(RuntimeState *state, void *host_dst,
             hipGetErrorString(err));
   }
 }
+
+void hipdnn_ep_readback_shape_i64(RuntimeState *state, int64_t *host_out,
+                                  const void *device_vector, int64_t count) {
+  OP_PROFILE_CPU("readback_shape", state);
+  if (!state || !host_out || count < 0 || (count > 0 && !device_vector)) {
+    fprintf(stderr, "hipdnn_ep_readback_shape_i64: invalid argument\n");
+    if (state)
+      (void)hipdnn_ep_state_set_error_flag(state);
+    return;
+  }
+  if (count == 0)
+    return;
+
+  auto fail = [&]() {
+    for (int64_t i = 0; i < count; ++i)
+      host_out[i] = 0;
+    (void)hipdnn_ep_state_set_error_flag(state);
+  };
+
+  hipStream_t stream =
+      static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+  hipError_t err = hipMemcpyAsync(host_out, device_vector,
+                                  static_cast<size_t>(count) * sizeof(int64_t),
+                                  hipMemcpyDefault, stream);
+  if (err != hipSuccess) {
+    fprintf(stderr, "hipdnn_ep_readback_shape_i64: D2H copy failed: %s\n",
+            hipGetErrorString(err));
+    fail();
+    return;
+  }
+  err = hipStreamSynchronize(stream);
+  if (err != hipSuccess) {
+    fprintf(stderr, "hipdnn_ep_readback_shape_i64: stream sync failed: %s\n",
+            hipGetErrorString(err));
+    fail();
+    return;
+  }
+
+  bool invalid = false;
+  for (int64_t i = 0; i < count; ++i) {
+    invalid |= host_out[i] < 0;
+    if (host_out[i] < 0)
+      host_out[i] = 0;
+  }
+  if (invalid)
+    (void)hipdnn_ep_state_set_error_flag(state);
+}

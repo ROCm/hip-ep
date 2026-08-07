@@ -22,8 +22,9 @@
 //       step > 0: start in [0, dim], end in [0, dim].
 //       step < 0: start in [0, dim-1], end in [-1, dim-1].
 //
-// Output shape is statically known (the SliceToHip lowering enforces
-// this), so the only work we do at runtime is:
+// `output_shape` describes physical destination capacity. For runtime
+// parameters or dynamic sliced-axis clamps it can exceed the logical ONNX
+// extent, so the runtime derives `logical_extent` separately. The work is:
 //
 //   1. D2H of starts / ends / (optional) axes / (optional) steps.
 //   2. Resolve to per-input-axis (start, step) per ONNX rules.

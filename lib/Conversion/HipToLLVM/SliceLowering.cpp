@@ -17,11 +17,9 @@ namespace {
 //                 starts_num_elements, axes_num_elements,
 //                 steps_num_elements, data_type)
 //
-// Today the runtime function is a no-op stub that only logs its parameters
-// (see lib/Runtime/real/slice.cpp). This lowering exists to keep the IR
-// pipeline (bufferize -> hip-to-llvm -> generate-interface) functional even
-// when a Slice cannot be folded to tensor.extract_slice by the OnnxToHip
-// decompose pattern.
+// The runtime resolves payload-dependent indices, computes logical extents,
+// and launches the slice kernel. This lowering also covers negative-step and
+// dynamic-clamp cases that cannot become tensor.extract_slice upstream.
 struct SliceOpLowering : public ConvertOpToLLVMPattern<SliceOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 

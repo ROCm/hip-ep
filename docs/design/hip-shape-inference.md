@@ -94,7 +94,10 @@ Choose the smallest mechanism that matches the operation's semantics:
 | Permutation | `reifyTransposeByPerm` |
 | Gather/GatherND/GatherElements | Gather-specific helpers or thunks |
 | OneHot, Compress, TopK | Dedicated reification thunks |
-| Pad, Tile, Expand, Slice, Range | Fold-or-bail helpers with fallback to DPS-init shape |
+| Pad | Exact affine input-dimension arithmetic for constant/stamped pads; runtime pads use converter readback and reify from outs |
+| Slice | Exact constant/static-bound rule; dynamic sliced-axis clamps and runtime parameters preserve capacity/outs policy |
+| Expand, Range | Fold-or-bail helpers with fallback to DPS-init shape |
+| Tile | Constant repeats use exact mixed shape arithmetic; runtime repeats use one bulk synchronized readback and reify from that exact init |
 | MatMul/Gemm/MatMulNBits | Dedicated shape logic based on operand dimensions and attributes |
 | Attention or normalization with multiple destinations | One shape vector per DPS init unless an op supplies a dedicated thunk |
 | Convolution, pooling, or resize with converter-computed destinations | DPS-init shape, with semantic validity handled by conversion or verification |
@@ -321,6 +324,34 @@ Canonicalization and CSE run immediately afterward to fold dimensions made stati
 Static refinements propagate into bufferization sizing and downstream pool planning. For graph outputs they may also simplify `hip.alloc_output` shape operands; extents that remain dynamic are represented as `-1` in model metadata and are sized in-graph at runtime. Runtime-dependent counts such as `hip.nonzero` remain dynamic at both levels.
 
 A data-dependent extent that reaches a graph output must additionally be a real SSA value *before* the allocation, because `hip.alloc_output` takes the extent as an operand and ORT rejects an output request whose shape differs from the one it computed for the run. The converter therefore materializes the count with a device scan plus a synchronized `hip.readback_dim` and sizes the DPS init with it; reification then reports that init extent. `onnx.Compress` follows this pattern (scanning its `condition` with `hip.nonzero`), so a padded-input encoder that drops its pad slices reports the kept-slice count rather than the padded capacity. Reporting the upper bound instead is not merely conservative — it is the wrong output shape.
+
+Pad resolves compile-time pads and optional axes either from constant operands
+or from attributes stamped before constant externalization. `inferPadShape`
+validates the parameter lengths and axes without emitting IR; both conversion
+and reification then use `reifyPadShape` for the exact affine rule
+`output[d] = input[d] + begin[d] + end[d]`. Dynamic input dimensions therefore
+produce `tensor.dim` plus a constant offset. Genuinely runtime pads retain the
+converter's synchronized payload readback, while dialect reification performs
+no payload read and lifts the already-exact destination.
+
+Slice has two distinct shape authorities. When starts, ends, axes, and steps
+are compile-time values and every sliced input axis has a static extent,
+`inferSliceShape` applies the ONNX clamp rule exactly. Conversion uses that
+shape for `tensor.extract_slice` or the native negative-step destination, and
+reification returns static sliced extents while forwarding untouched dynamic
+input dimensions. If a sliced input extent is dynamic, exact clamping requires
+runtime min/max arithmetic; runtime-valued slice parameters require payload
+readback as well. Those cases deliberately keep the existing physical
+destination capacity equal to the input extents. `wrap_slice` computes a
+separate `logical_extent`, launches only the logical slice, and zeroes unused
+capacity. Reification therefore lifts the physical destination shape and does
+not claim that capacity is the logical ONNX result shape.
+
+Tile's refinement is complete. Constant or stamped repeats share
+`inferTileShape`/`reifyTileShape`, including exact multiplication of dynamic
+input dimensions. Runtime repeats are read once in bulk by the converter to
+build the exact destination; reification lifts that destination and never
+duplicates the payload readback.
 
 ## Pre-conversion loop-body rank inference
 

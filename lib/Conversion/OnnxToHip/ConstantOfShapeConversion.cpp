@@ -52,28 +52,27 @@ namespace {
 //      function is needed -- `tensor.splat` bufferizes naturally and lowers
 //      through the standard MLIR pipeline.
 
-/// Return the dense-elements attribute backing \p value if it can be
-/// determined at compile time (the same forms recognised by ReshapeConversion
-/// for "axes" inputs).  Returns null otherwise.
-static mlir::DenseElementsAttr getCompileTimeConstantTensor(mlir::Value value) {
+/// Extract ConstantOfShape's rank-1 integer shape. Ordinary constants use the
+/// shared pre-/post-externalization helper; `onnx.Shape` is the one dedicated
+/// pre-lowering extension because its payload is implicit in its source type.
+static bool extractConstantOfShapeVector(mlir::Value value,
+                                         llvm::SmallVectorImpl<int64_t> &out) {
+  if (extractConstantIntVector(value, out))
+    return true;
   mlir::Operation *defOp = value.getDefiningOp();
   if (!defOp)
-    return nullptr;
-
-  if (auto cst = mlir::dyn_cast<mlir::arith::ConstantOp>(defOp))
-    return mlir::dyn_cast<mlir::DenseElementsAttr>(cst.getValue());
-
+    return false;
   // `onnx.Shape(static-tensor)` is itself a compile-time constant -- the
   // transformer-emitted `Shape -> ConstantOfShape` pattern (zero-initialised
   // KV / mask buffers) relies on this fold to collapse to a single splat
   // constant when the source tensor has fully static shape.
   if (defOp->getName().getStringRef() == "onnx.Shape") {
     if (defOp->getNumOperands() != 1)
-      return nullptr;
+      return false;
     auto srcType =
         mlir::dyn_cast<mlir::RankedTensorType>(defOp->getOperand(0).getType());
     if (!srcType || !srcType.hasStaticShape())
-      return nullptr;
+      return false;
     // ONNX Shape supports start/end attributes for slicing the shape vector.
     int64_t rank = srcType.getRank();
     int64_t start = 0;
@@ -90,44 +89,13 @@ static mlir::DenseElementsAttr getCompileTimeConstantTensor(mlir::Value value) {
     end = std::max<int64_t>(0, std::min<int64_t>(rank, end));
     if (end < start)
       end = start;
-    llvm::SmallVector<int64_t> dims;
-    dims.reserve(end - start);
+    out.clear();
+    out.reserve(end - start);
     for (int64_t i = start; i < end; ++i)
-      dims.push_back(srcType.getDimSize(i));
-    auto i64 = mlir::IntegerType::get(value.getContext(), 64);
-    auto outTy = mlir::RankedTensorType::get({end - start}, i64);
-    llvm::SmallVector<mlir::APInt> apDims;
-    apDims.reserve(dims.size());
-    for (int64_t d : dims)
-      apDims.emplace_back(64, d);
-    return mlir::DenseElementsAttr::get(outTy, apDims);
+      out.push_back(srcType.getDimSize(i));
+    return true;
   }
-
-  // onnx.Constant carrying a dense `value` attribute (pre-lowerOnnxConstants).
-  if (auto attr = defOp->getAttr("value"))
-    if (auto dense = mlir::dyn_cast<mlir::DenseElementsAttr>(attr))
-      return dense;
-
-  // Externalised path: bufferization.to_tensor of a memref.get_global whose
-  // global has a dense initial_value.  Used when the shape input came in
-  // through the constant externalisation route.
-  if (auto toTensor = mlir::dyn_cast<mlir::bufferization::ToTensorOp>(defOp)) {
-    auto bufDef =
-        toTensor.getBuffer().getDefiningOp<mlir::memref::GetGlobalOp>();
-    if (!bufDef)
-      return nullptr;
-    auto module = bufDef->getParentOfType<mlir::ModuleOp>();
-    if (!module)
-      return nullptr;
-    auto global =
-        module.lookupSymbol<mlir::memref::GlobalOp>(bufDef.getNameAttr());
-    if (!global)
-      return nullptr;
-    return mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
-        global.getInitialValueAttr());
-  }
-
-  return nullptr;
+  return false;
 }
 
 /// Build the scalar fill value for ConstantOfShape, respecting the optional
@@ -268,33 +236,15 @@ struct ConstantOfShapeFold : public mlir::RewritePattern {
     if (op->getNumOperands() != 1 || op->getNumResults() != 1)
       return rewriter.notifyMatchFailure(op, "expected 1 input and 1 output");
 
-    mlir::Value shapeInput = op->getOperand(0);
-    mlir::DenseElementsAttr shapeAttr =
-        getCompileTimeConstantTensor(shapeInput);
-    if (!shapeAttr)
+    llvm::SmallVector<int64_t> outShape;
+    if (!extractConstantOfShapeVector(op->getOperand(0), outShape))
       return rewriter.notifyMatchFailure(
           op, "shape input is not a compile-time constant; "
               "falling back to ConstantOfShapeDynamic");
-
-    auto shapeTensorType =
-        mlir::dyn_cast<mlir::RankedTensorType>(shapeAttr.getType());
-    if (!shapeTensorType || shapeTensorType.getRank() != 1)
-      return rewriter.notifyMatchFailure(op,
-                                         "shape input must be a rank-1 tensor");
-    if (!shapeTensorType.getElementType().isInteger(64) &&
-        !shapeTensorType.getElementType().isInteger(32))
-      return rewriter.notifyMatchFailure(
-          op, "shape input must have int32 or int64 element type");
-
-    llvm::SmallVector<int64_t> outShape;
-    outShape.reserve(shapeTensorType.getDimSize(0));
-    for (mlir::APInt v : shapeAttr.getValues<mlir::APInt>()) {
-      int64_t d = v.getSExtValue();
+    for (int64_t d : outShape)
       if (d < 0)
         return rewriter.notifyMatchFailure(
             op, "negative dimension in ConstantOfShape input");
-      outShape.push_back(d);
-    }
 
     auto resultType =
         mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());

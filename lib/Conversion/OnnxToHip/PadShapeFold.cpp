@@ -77,41 +77,6 @@ namespace hip {
 
 namespace {
 
-/// Return the values of `v` as an int64 vector when `v` is an inline 1-D
-/// integer constant (`arith.constant` or `onnx.Constant {value = dense<...>}`),
-/// or std::nullopt otherwise. Mirrors the inline-constant recognition used by
-/// the sibling shape folds; deliberately does NOT peek through
-/// `bufferization.to_tensor(memref.get_global)` because this pattern runs
-/// BEFORE externalization, where that form does not yet exist.
-static std::optional<llvm::SmallVector<int64_t>>
-getInlineIntVector(mlir::Value v) {
-  if (!v)
-    return std::nullopt;
-  mlir::Operation *defOp = v.getDefiningOp();
-  if (!defOp)
-    return std::nullopt;
-
-  mlir::DenseElementsAttr dense;
-  if (auto cst = mlir::dyn_cast<mlir::arith::ConstantOp>(defOp))
-    dense = mlir::dyn_cast<mlir::DenseElementsAttr>(cst.getValue());
-  else if (defOp->getName().getStringRef() == "onnx.Constant")
-    dense = defOp->getAttrOfType<mlir::DenseElementsAttr>("value");
-
-  if (!dense)
-    return std::nullopt;
-  auto tensorType = mlir::dyn_cast<mlir::RankedTensorType>(dense.getType());
-  if (!tensorType || tensorType.getRank() != 1)
-    return std::nullopt;
-  auto elemTy = tensorType.getElementType();
-  if (!elemTy.isInteger(64) && !elemTy.isInteger(32))
-    return std::nullopt;
-
-  llvm::SmallVector<int64_t> out;
-  for (mlir::APInt entry : dense.getValues<mlir::APInt>())
-    out.push_back(entry.getSExtValue());
-  return out;
-}
-
 struct PadStampConstShape : public mlir::RewritePattern {
   PadStampConstShape(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Pad", /*benefit=*/1, ctx) {}
@@ -133,35 +98,37 @@ struct PadStampConstShape : public mlir::RewritePattern {
     if (!resultType || resultType.hasStaticShape())
       return rewriter.notifyMatchFailure(op, "pad.static_result");
 
-    auto padsVec = getInlineIntVector(op->getOperand(1));
-    if (!padsVec)
+    llvm::SmallVector<int64_t> padsVec;
+    if (!extractConstantIntVector(op->getOperand(1), padsVec,
+                                  CompileTimeConstantScope::InlineOnly))
       return rewriter.notifyMatchFailure(op, "pad.pads_not_inline_const");
 
     // `axes` is operand 3 when present and not an onnx.NoValue. Stamp it too so
     // PadConversion's axis->slot mapping does not have to read an (also
     // possibly externalized) `axes` constant. Absent/None axes => default
     // identity, handled by PadConversion without an attribute.
-    std::optional<llvm::SmallVector<int64_t>> axesVec;
+    llvm::SmallVector<int64_t> axesVec;
+    bool hasAxesVec = false;
     if (op->getNumOperands() > 3) {
       mlir::Value axes = op->getOperand(3);
       bool axesIsNone = axes && mlir::isa<mlir::NoneType>(axes.getType());
       if (!axesIsNone) {
-        axesVec = getInlineIntVector(axes);
-        if (!axesVec)
+        if (!extractConstantIntVector(axes, axesVec,
+                                      CompileTimeConstantScope::InlineOnly))
           return rewriter.notifyMatchFailure(op, "pad.axes_not_inline_const");
+        hasAxesVec = true;
       }
     }
 
     rewriter.modifyOpInPlace(op, [&] {
-      op->setAttr("hipdnn.pad_amounts",
-                  rewriter.getDenseI64ArrayAttr(*padsVec));
-      if (axesVec)
-        op->setAttr("hipdnn.pad_axes", rewriter.getDenseI64ArrayAttr(*axesVec));
+      op->setAttr("hipdnn.pad_amounts", rewriter.getDenseI64ArrayAttr(padsVec));
+      if (hasAxesVec)
+        op->setAttr("hipdnn.pad_axes", rewriter.getDenseI64ArrayAttr(axesVec));
     });
 
     LLVM_DEBUG(llvm::dbgs()
-               << "[" DEBUG_TYPE "] stamped pad_amounts (" << padsVec->size()
-               << " entries)" << (axesVec ? " + pad_axes" : "") << "\n");
+               << "[" DEBUG_TYPE "] stamped pad_amounts (" << padsVec.size()
+               << " entries)" << (hasAxesVec ? " + pad_axes" : "") << "\n");
     ++NumPadConstStamps;
     return mlir::success();
   }

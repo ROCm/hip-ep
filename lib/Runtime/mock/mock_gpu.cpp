@@ -1722,6 +1722,23 @@ void hipdnn_ep_readback_scalar(RuntimeState *state, void *host_dst,
   memcpy(host_dst, device_scalar, static_cast<size_t>(num_bytes));
 }
 
+void hipdnn_ep_readback_shape_i64(RuntimeState *state, int64_t *host_out,
+                                  const void *device_vector, int64_t count) {
+  if (!state || !host_out || count < 0 || (count > 0 && !device_vector)) {
+    if (state)
+      (void)hipdnn_ep_state_set_error_flag(state);
+    return;
+  }
+  const int64_t *input = static_cast<const int64_t *>(device_vector);
+  bool invalid = false;
+  for (int64_t i = 0; i < count; ++i) {
+    invalid |= input[i] < 0;
+    host_out[i] = input[i] < 0 ? 0 : input[i];
+  }
+  if (invalid)
+    (void)hipdnn_ep_state_set_error_flag(state);
+}
+
 int wrap_cos(RuntimeState *state, void *input, void *output,
              int64_t num_elements, int64_t data_type) {
   if (!state) {

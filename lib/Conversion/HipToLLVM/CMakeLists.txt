@@ -53,6 +53,7 @@ add_library(HipToLLVM STATIC
   NonZeroLowering.cpp
   ReadbackDimLowering.cpp
   ReadbackScalarLowering.cpp
+  ReadbackShapeLowering.cpp
   SizeLowering.cpp
   LoopLowering.cpp
   IfLowering.cpp

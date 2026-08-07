@@ -32,11 +32,11 @@ namespace {
 //     at compile time.
 //
 //   * SliceToHip (benefit=1) — fallback for non-constant indices or negative
-//     steps. Produces a native `hip.slice` DPS op whose runtime function is
-//     a stub today (throws); models that hit this path are unsupported until
-//     the runtime is implemented, but the conversion / bufferization pipeline
-//     can still verify and link the IR. Dynamic output dims are sourced from
-//     `tensor.dim` on `data` (an upper bound — Slice cannot widen any axis).
+//     steps. Produces a native `hip.slice` DPS op. Constant parameters with
+//     static sliced-axis bounds use the same exact shape rule as reification.
+//     Other dynamic output dims are sourced from `tensor.dim` on `data` as
+//     physical capacity (Slice cannot widen any axis); the runtime separately
+//     tracks the logical slice extent.
 
 /// Return the dense-elements attribute backing \p value if it can be
 /// determined at compile time. Matches the patterns produced by
@@ -147,9 +147,10 @@ struct SliceDecompose : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "starts/ends are not compile-time constants");
 
+    mlir::Value axes;
     llvm::SmallVector<int64_t> axesVec;
     if (op->getNumOperands() >= 4) {
-      mlir::Value axes = normaliseOptional(op->getOperand(3));
+      axes = normaliseOptional(op->getOperand(3));
       if (axes) {
         if (mlir::failed(extractSliceParamVector(op, "hipdnn.slice_axes", axes,
                                                  axesVec)))
@@ -160,13 +161,11 @@ struct SliceDecompose : public mlir::RewritePattern {
         axesVec.assign(attr.asArrayRef().begin(), attr.asArrayRef().end());
       }
     }
-    if (axesVec.empty())
-      for (int64_t i : llvm::seq<int64_t>(rank))
-        axesVec.push_back(i);
 
+    mlir::Value steps;
     llvm::SmallVector<int64_t> stepsVec;
     if (op->getNumOperands() == 5) {
-      mlir::Value steps = normaliseOptional(op->getOperand(4));
+      steps = normaliseOptional(op->getOperand(4));
       if (steps) {
         if (mlir::failed(extractSliceParamVector(op, "hipdnn.slice_steps",
                                                  steps, stepsVec)))
@@ -177,42 +176,49 @@ struct SliceDecompose : public mlir::RewritePattern {
         stepsVec.assign(attr.asArrayRef().begin(), attr.asArrayRef().end());
       }
     }
-    if (stepsVec.empty())
-      stepsVec.assign(axesVec.size(), 1);
-
-    if (axesVec.size() != startsVec.size() ||
-        axesVec.size() != endsVec.size() || axesVec.size() != stepsVec.size())
-      return rewriter.notifyMatchFailure(op, "starts/ends/axes/steps mismatch");
 
     // tensor.extract_slice only supports positive strides; negative-step
     // slices need a separate reverse pass and fall through to the native op.
+    if (steps)
+      for (int64_t s : stepsVec)
+        if (s <= 0)
+          return rewriter.notifyMatchFailure(
+              op, "negative or zero step is not supported by extract_slice");
+
+    std::optional<llvm::ArrayRef<int64_t>> constantAxes;
+    if (axes)
+      constantAxes = axesVec;
+    std::optional<llvm::ArrayRef<int64_t>> constantSteps;
+    if (steps)
+      constantSteps = stepsVec;
+    mlir::FailureOr<llvm::SmallVector<int64_t>> inferredShape =
+        mlir::hip::inferSliceShape(dataType.getShape(), startsVec, endsVec,
+                                   constantAxes, constantSteps);
+    if (mlir::failed(inferredShape))
+      return rewriter.notifyMatchFailure(
+          op, "Slice exact shape requires valid constants and static sliced "
+              "input dimensions");
+
+    // Validate the imported result type before emitting tensor.dim.
+    for (int64_t i : llvm::seq<int64_t>(rank)) {
+      if (outType.isDynamicDim(i))
+        continue;
+      if (mlir::ShapedType::isDynamic((*inferredShape)[i]) ||
+          outType.getDimSize(i) != (*inferredShape)[i])
+        return rewriter.notifyMatchFailure(
+            op, "computed slice size does not match inferred output");
+    }
+
+    if (!axes)
+      axesVec = llvm::to_vector(llvm::seq<int64_t>(0, rank));
+    if (!steps)
+      stepsVec.assign(axesVec.size(), 1);
     for (int64_t s : stepsVec)
       if (s <= 0)
         return rewriter.notifyMatchFailure(
             op, "negative or zero step is not supported by extract_slice");
 
     mlir::Location loc = op->getLoc();
-
-    // Build the set of axes touched by slice and validate the input is
-    // static on each of those axes (we need the static dim size to apply
-    // the ONNX clamping rules at compile time).
-    llvm::SmallSet<int64_t, 8> seenAxes;
-    for (size_t k = 0; k < axesVec.size(); ++k) {
-      int64_t axis = axesVec[k];
-      if (axis < 0)
-        axis += rank;
-      if (axis < 0 || axis >= rank)
-        return rewriter.notifyMatchFailure(op, "axis out of range");
-      if (!seenAxes.insert(axis).second)
-        return rewriter.notifyMatchFailure(op, "duplicate axis");
-      // ONNX clamps start/end against `dim`. If dim is dynamic we cannot
-      // resolve the slice size at compile time -- fall through to the
-      // hip.slice runtime op.
-      if (dataType.isDynamicDim(axis))
-        return rewriter.notifyMatchFailure(
-            op, "slice axis has dynamic input dim; "
-                "cannot apply ONNX clamping at compile time");
-    }
 
     // Default: full range, unit stride on every dim. Untouched dynamic
     // dims forward through as `tensor.dim` so the extract_slice's size
@@ -222,12 +228,12 @@ struct SliceDecompose : public mlir::RewritePattern {
     sizes.reserve(rank);
     strides.assign(rank, rewriter.getIndexAttr(1));
     for (int64_t i : llvm::seq<int64_t>(rank)) {
-      if (dataType.isDynamicDim(i)) {
+      if (mlir::ShapedType::isDynamic((*inferredShape)[i])) {
         mlir::Value dimVal =
             mlir::tensor::DimOp::create(rewriter, loc, data, i);
         sizes.push_back(dimVal);
       } else {
-        sizes.push_back(rewriter.getIndexAttr(dataType.getDimSize(i)));
+        sizes.push_back(rewriter.getIndexAttr((*inferredShape)[i]));
       }
     }
 
@@ -239,43 +245,20 @@ struct SliceDecompose : public mlir::RewritePattern {
         axis += rank;
 
       int64_t dim = dataType.getDimSize(axis);
-      int64_t start = startsVec[k];
-      int64_t end = endsVec[k];
       int64_t step = stepsVec[k];
 
-      if (start < 0)
-        start += dim;
-      if (end < 0)
-        end += dim;
-      // Positive-step clamp per spec: start in [0, dim], end in [0, dim].
-      start = std::clamp<int64_t>(start, 0, dim);
-      end = std::clamp<int64_t>(end, 0, dim);
-      if (end < start)
-        end = start; // empty slice
+      mlir::APInt start(128, startsVec[k], /*isSigned=*/true);
+      mlir::APInt extent(128, dim, /*isSigned=*/true);
+      mlir::APInt zero(128, 0, /*isSigned=*/true);
+      if (start.isNegative())
+        start += extent;
+      if (start.slt(zero))
+        start = zero;
+      if (start.sgt(extent))
+        start = extent;
 
-      int64_t size = (end - start + step - 1) / step;
-      if (size < 0)
-        size = 0;
-
-      offsets[axis] = rewriter.getIndexAttr(start);
-      sizes[axis] = rewriter.getIndexAttr(size);
+      offsets[axis] = rewriter.getIndexAttr(start.getSExtValue());
       strides[axis] = rewriter.getIndexAttr(step);
-    }
-
-    // Sanity check (only meaningful for static output dims): computed
-    // sizes must match the IR-inferred output type. If they diverge we
-    // have an unsupported corner case and should fall through to the
-    // native op rather than silently produce wrong shapes. Dynamic output
-    // dims are intentionally skipped -- the IR cannot tell us what value
-    // to compare against.
-    for (int64_t i : llvm::seq<int64_t>(rank)) {
-      if (outType.isDynamicDim(i))
-        continue;
-      auto attr = llvm::dyn_cast_if_present<mlir::Attribute>(sizes[i]);
-      auto intAttr = mlir::dyn_cast_or_null<mlir::IntegerAttr>(attr);
-      if (!intAttr || intAttr.getInt() != outType.getDimSize(i))
-        return rewriter.notifyMatchFailure(
-            op, "computed slice size does not match inferred output");
     }
 
     mlir::OperationState state(
@@ -322,27 +305,74 @@ struct SliceToHip : public mlir::RewritePattern {
 
     auto dataType = mlir::cast<mlir::RankedTensorType>(data.getType());
 
-    // For each dynamic output dim, source an upper bound from the data
-    // dim at the same position. This is sound because ONNX Slice can
-    // never widen any axis -- output dim i is at most data dim i. The
-    // runtime stub honours `output_shape[i]` as the actual extent so the
-    // over-allocation is benign.
-    llvm::SmallVector<mlir::Value> dynSizes;
-    for (int64_t i = 0; i < resultType.getRank(); ++i) {
-      if (!resultType.isDynamicDim(i))
-        continue;
-      if (i >= dataType.getRank())
+    // Constant parameters with static sliced-axis bounds have one exact shape
+    // shared with dialect reification. This includes negative-step native
+    // slices and allows untouched dynamic axes to pass through from data.
+    llvm::SmallVector<int64_t> startsVec, endsVec, axesVec, stepsVec;
+    bool hasConstantParams =
+        mlir::succeeded(extractSliceParamVector(op, "hipdnn.slice_starts",
+                                                starts, startsVec)) &&
+        mlir::succeeded(
+            extractSliceParamVector(op, "hipdnn.slice_ends", ends, endsVec));
+    if (hasConstantParams && axes)
+      hasConstantParams = mlir::succeeded(
+          extractSliceParamVector(op, "hipdnn.slice_axes", axes, axesVec));
+    if (hasConstantParams && steps)
+      hasConstantParams = mlir::succeeded(
+          extractSliceParamVector(op, "hipdnn.slice_steps", steps, stepsVec));
+
+    std::optional<llvm::ArrayRef<int64_t>> constantAxes;
+    if (axes && hasConstantParams)
+      constantAxes = axesVec;
+    std::optional<llvm::ArrayRef<int64_t>> constantSteps;
+    if (steps && hasConstantParams)
+      constantSteps = stepsVec;
+    mlir::FailureOr<llvm::SmallVector<int64_t>> exactShape = mlir::failure();
+    if (hasConstantParams)
+      exactShape = mlir::hip::inferSliceShape(
+          dataType.getShape(), startsVec, endsVec, constantAxes, constantSteps);
+
+    mlir::Value init;
+    if (mlir::succeeded(exactShape)) {
+      llvm::SmallVector<mlir::OpFoldResult> mixedShape;
+      mixedShape.reserve(exactShape->size());
+      for (int64_t i : llvm::seq<int64_t>(resultType.getRank()))
+        mixedShape.push_back(mlir::hip::reifyDimOrConstant(
+            rewriter, loc, (*exactShape)[i], data, i));
+      mlir::FailureOr<mlir::Value> exactInit =
+          createEmptyTensorFromReifiedShape(rewriter, loc, resultType,
+                                            mixedShape);
+      if (mlir::failed(exactInit))
         return rewriter.notifyMatchFailure(
-            op, "result rank exceeds data rank — invalid Slice");
-      if (dataType.isDynamicDim(i))
-        dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, data, i));
-      else
-        dynSizes.push_back(mlir::arith::ConstantIndexOp::create(
-            rewriter, loc, dataType.getDimSize(i)));
+            op, "Slice result type is incompatible with exact constant shape");
+      init = *exactInit;
     }
-    mlir::Value init =
-        mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
-                                      resultType.getElementType(), dynSizes);
+
+    // Otherwise each dynamic output dim uses the corresponding data extent as
+    // physical capacity. Runtime starts/ends or a dynamic sliced-axis clamp
+    // determine a logical extent no greater than that capacity; wrap_slice
+    // records the logical extent for the kernel and zeroes the unused tail.
+    // Reification deliberately lifts this init instead of reporting capacity
+    // as a semantic logical shape.
+    llvm::SmallVector<mlir::Value> dynSizes;
+    if (!init) {
+      for (int64_t i = 0; i < resultType.getRank(); ++i) {
+        if (!resultType.isDynamicDim(i))
+          continue;
+        if (i >= dataType.getRank())
+          return rewriter.notifyMatchFailure(
+              op, "result rank exceeds data rank — invalid Slice");
+        if (dataType.isDynamicDim(i))
+          dynSizes.push_back(
+              mlir::tensor::DimOp::create(rewriter, loc, data, i));
+        else
+          dynSizes.push_back(mlir::arith::ConstantIndexOp::create(
+              rewriter, loc, dataType.getDimSize(i)));
+      }
+      init =
+          mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                        resultType.getElementType(), dynSizes);
+    }
 
     auto hipOp = mlir::hip::SliceOp::create(rewriter, loc, context, data,
                                             starts, ends, axes, steps, init);

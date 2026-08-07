@@ -1736,11 +1736,12 @@ def Hip_OneHotOp : Hip_DpsOp<"one_hot", /*traits=*/[],
   }];
 }
 
-def Hip_CompressOp : Hip_DpsOp<"compress", /*traits=*/[],
-                               /*outsAccessor=*/"Output",
-                               /*autoReify=*/0,
-                               /*autoInfer=*/1,
-                               /*declareInfer=*/1> {
+def Hip_CompressOp :
+    Hip_DpsOp_Payload<"compress", /*traits=*/[],
+                      /*outsAccessor=*/"Output",
+                      /*autoReify=*/0,
+                      /*autoInfer=*/1,
+                      /*declareInfer=*/1> {
   let summary = "Select slices or elements where a 1-D condition is true";
   let description = [{
     Implements ONNX Compress: along `axis`, keep only slices whose
@@ -1891,11 +1892,12 @@ def Hip_TopKOp : Hip_DpsOp<"top_k",
   }];
 }
 
-def Hip_RangeOp : Hip_DpsOp<"range", /*traits=*/[],
-                            /*outsAccessor=*/"Output",
-                            /*autoReify=*/0,
-                            /*autoInfer=*/1,
-                            /*declareInfer=*/1> {
+def Hip_RangeOp :
+    Hip_DpsOp_Payload<"range", /*traits=*/[],
+                      /*outsAccessor=*/"Output",
+                      /*autoReify=*/0,
+                      /*autoInfer=*/1,
+                      /*declareInfer=*/1> {
   let summary = "Generate 1-D range tensor";
   let description = [{
     Implements ONNX Range semantics:
@@ -3690,12 +3692,13 @@ def Hip_CumSumOp : Hip_DpsOp<"cumsum", /*traits=*/[],
   }];
 }
 
-def Hip_PadOp : Hip_DpsOp<"pad",
-                          /*traits=*/[AttrSizedOperandSegments],
-                          /*outsAccessor=*/"Output",
-                          /*autoReify=*/0,
-                          /*autoInfer=*/1,
-                          /*declareInfer=*/1> {
+def Hip_PadOp :
+    Hip_DpsOp_Payload<"pad",
+                      /*traits=*/[AttrSizedOperandSegments],
+                      /*outsAccessor=*/"Output",
+                      /*autoReify=*/0,
+                      /*autoInfer=*/1,
+                      /*declareInfer=*/1> {
   let summary = "Pad a tensor with constant / reflect / edge / wrap";
   let description = [{
     Pads input tensor along the axes selected by `axes` (or all axes if
@@ -3707,6 +3710,11 @@ def Hip_PadOp : Hip_DpsOp<"pad",
     an optional scalar used in `constant` mode (default 0). `axes` is an
     optional 1-D int64 tensor selecting which axes the pads apply to;
     when omitted (rank-0 / size-0), all axes are padded.
+
+    Optional `static_pads` / `static_axes` preserve compile-time shape metadata
+    when constant externalization removes the inline payload. They are used
+    only for destination sizing and shape reification; the runtime still
+    receives the original operands.
 
     The `mode` attribute is one of `"constant"`, `"reflect"`, `"edge"`,
     `"wrap"`.
@@ -3729,7 +3737,9 @@ def Hip_PadOp : Hip_DpsOp<"pad",
     Optional<Hip_TensorOrMemRef>:$constant_value,
     Optional<Hip_TensorOrMemRef>:$axes,
     Hip_TensorOrMemRef:$output,
-    DefaultValuedAttr<StrAttr, "\"constant\"">:$mode
+    DefaultValuedAttr<StrAttr, "\"constant\"">:$mode,
+    OptionalAttr<DenseI64ArrayAttr>:$static_pads,
+    OptionalAttr<DenseI64ArrayAttr>:$static_axes
   );
 
   let assemblyFormat = [{
@@ -3741,11 +3751,12 @@ def Hip_PadOp : Hip_DpsOp<"pad",
   }];
 }
 
-def Hip_TileOp : Hip_DpsOp<"tile", /*traits=*/[],
-                           /*outsAccessor=*/"Output",
-                           /*autoReify=*/0,
-                           /*autoInfer=*/1,
-                           /*declareInfer=*/1> {
+def Hip_TileOp :
+    Hip_DpsOp_Payload<"tile", /*traits=*/[],
+                      /*outsAccessor=*/"Output",
+                      /*autoReify=*/0,
+                      /*autoInfer=*/1,
+                      /*declareInfer=*/1> {
   let summary = "Tile a tensor by repeating along each dimension";
   let description = [{
     Constructs a new tensor by repeating `input` along each dimension by the
@@ -3767,7 +3778,8 @@ def Hip_TileOp : Hip_DpsOp<"tile", /*traits=*/[],
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$input,
     Hip_TensorOrMemRef:$repeats,
-    Hip_TensorOrMemRef:$output
+    Hip_TensorOrMemRef:$output,
+    OptionalAttr<DenseI64ArrayAttr>:$static_repeats
   );
 
   let assemblyFormat = [{
@@ -3775,13 +3787,16 @@ def Hip_TileOp : Hip_DpsOp<"tile", /*traits=*/[],
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  let hasVerifier = 1;
 }
 
-def Hip_ExpandOp : Hip_DpsOp<"expand", /*traits=*/[],
-                             /*outsAccessor=*/"Output",
-                             /*autoReify=*/0,
-                             /*autoInfer=*/1,
-                             /*declareInfer=*/1> {
+def Hip_ExpandOp :
+    Hip_DpsOp_Payload<"expand", /*traits=*/[],
+                      /*outsAccessor=*/"Output",
+                      /*autoReify=*/0,
+                      /*autoInfer=*/1,
+                      /*declareInfer=*/1> {
   let summary = "Broadcast a tensor to a target shape";
   let description = [{
     Broadcasts `input` to the target `shape` following NumPy broadcast rules.
@@ -3926,12 +3941,13 @@ def Hip_LessOp : Hip_DpsOp_Broadcast<"less", /*operandGetters=*/["Lhs", "Rhs"]> 
   }];
 }
 
-def Hip_SliceOp : Hip_DpsOp<"slice",
-                            /*traits=*/[AttrSizedOperandSegments],
-                            /*outsAccessor=*/"Output",
-                            /*autoReify=*/0,
-                            /*autoInfer=*/1,
-                            /*declareInfer=*/1> {
+def Hip_SliceOp :
+    Hip_DpsOp_Payload<"slice",
+                      /*traits=*/[AttrSizedOperandSegments],
+                      /*outsAccessor=*/"Output",
+                      /*autoReify=*/0,
+                      /*autoInfer=*/1,
+                      /*declareInfer=*/1> {
   let summary = "Slice a tensor along multiple axes (ONNX Slice fallback)";
   let description = [{
     Native fallback for ONNX Slice when the OnnxToHip pass cannot decompose
@@ -4467,5 +4483,39 @@ def Hip_ReadbackScalarOp : Hip_Op<"readback_scalar",
   let assemblyFormat = [{
     `(` $ctx `,` $scalar `:` type($scalar) `)` attr-dict `->` type($value)
   }];
+}
+
+// hip.readback_shape : synchronize once and read a statically-sized rank-1
+// i64 shape vector into one host index SSA value per element. Used when a
+// payload tensor (e.g. Tile repeats) determines allocation extents.
+def Hip_ReadbackShapeOp : Hip_Op<"readback_shape",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Synchronize and read a device i64 shape vector";
+  let description = [{
+    Copies the statically-sized rank-1 i64 `vector` from device to host with
+    one stream synchronization and returns each entry as an `index`.
+
+    Negative entries are runtime-invalid shape extents. The runtime clamps
+    them to zero and records the shared recoverable error flag so generated
+    inference returns a non-zero status instead of allocating with a negative
+    extent or aborting the host.
+
+    This op has device-to-host copy and synchronization side effects and is not
+    speculatable.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$vector,
+    I64Attr:$count
+  );
+  let results = (outs Variadic<Index>:$dims);
+
+  let assemblyFormat = [{
+    `(` $ctx `,` $vector `:` type($vector) `)` attr-dict
+    `->` `(` type($dims) `)`
+  }];
+
+  let hasVerifier = 1;
 }
 #endif // HIP_OPS

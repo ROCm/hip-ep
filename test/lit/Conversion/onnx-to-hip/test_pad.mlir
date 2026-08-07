@@ -77,10 +77,8 @@ module {
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[D:.*]]: tensor<?x4xf32>)
   // CHECK-DAG: %[[A0:.*]] = arith.constant 0 : index
   // CHECK-DAG: %[[D0:.*]] = tensor.dim %[[D]], %[[A0]] : tensor<?x4xf32>
-  // CHECK-DAG: %[[B0:.*]] = arith.constant 1 : index
-  // CHECK-DAG: %[[E0:.*]] = arith.constant 2 : index
-  // CHECK: %[[S0:.*]] = arith.addi %[[D0]], %[[B0]] : index
-  // CHECK: %[[OUT0:.*]] = arith.addi %[[S0]], %[[E0]] : index
+  // CHECK-DAG: %[[OFFSET:.*]] = arith.constant 3 : index
+  // CHECK: %[[OUT0:.*]] = arith.addi %[[D0]], %[[OFFSET]] : index
   // CHECK: tensor.empty(%[[OUT0]]) : tensor<?x6xf32>
   // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<?x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<?x6xf32>)
 
@@ -105,7 +103,7 @@ module {
   // CHECK-NOT: hip.readback_scalar
   // CHECK-NOT: tensor.extract_slice
   // CHECK: tensor.empty({{.*}}) : tensor<?x6xf32>
-  // CHECK: hip.pad({{.*}}) ins({{.*}} : tensor<?x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<?x6xf32>)
+  // CHECK: hip.pad({{.*}}) ins({{.*}} : tensor<?x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<?x6xf32>) {static_pads = array<i64: 1, 1, 2, 1>}
 
   // Dynamic output dims with a non-constant `pads` (function arg): the
   // per-axis padding amounts are read on the HOST through a synchronized
