@@ -66,10 +66,11 @@ func.func @unused_placeholder(
 
 // -----
 
-// Uses other than placeholder inputs and HIPSR DPS inits are invalid.
+// Uses other than placeholder inputs, pool-domain yields, and HIPSR DPS inits
+// are invalid.
 func.func @non_dps_placeholder_use(
     %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<?x8xf16> {
-  // expected-error @+1 {{requires each result use to be a placeholder input or a DPS init of a hipsr operation}}
+  // expected-error @+1 {{requires each result use to be a placeholder input, pool-domain yield, or a DPS init of a hipsr operation}}
   %init = hipsr.placeholder(%ctx)
       ins(%input : tensor<4x8xf32>)
       {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
@@ -83,7 +84,7 @@ func.func @non_dps_placeholder_use(
 func.func @non_hipsr_dps_use(
     %ctx: !hipsr.context, %input: tensor<4x8xf32>,
     %value: f32) -> tensor<4x8xf32> {
-  // expected-error @+1 {{requires each result use to be a placeholder input or a DPS init of a hipsr operation}}
+  // expected-error @+1 {{requires each result use to be a placeholder input, pool-domain yield, or a DPS init of a hipsr operation}}
   %init = hipsr.placeholder(%ctx)
       ins(%input : tensor<4x8xf32>)
       {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf32>
@@ -98,7 +99,7 @@ func.func @non_hipsr_dps_use(
 func.func @dps_input_placeholder(
     %ctx: !hipsr.context, %source: tensor<4x8xf32>,
     %init: tensor<4x8xf16>) -> tensor<4x8xf16> {
-  // expected-error @+1 {{requires each result use to be a placeholder input or a DPS init of a hipsr operation}}
+  // expected-error @+1 {{requires each result use to be a placeholder input, pool-domain yield, or a DPS init of a hipsr operation}}
   %input = hipsr.placeholder(%ctx)
       ins(%source : tensor<4x8xf32>)
       {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf32>

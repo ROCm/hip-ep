@@ -71,15 +71,16 @@ LogicalResult PlaceholderOp::verify() {
     OpOperand *dpsInitUse = nullptr;
     for (OpOperand &use : result.getUses()) {
       Operation *owner = use.getOwner();
-      if (isa<PlaceholderOp>(owner)) {
+      if (isa<PlaceholderOp, PoolDomainYieldOp>(owner)) {
         continue;
       }
 
       auto dpsOp = dyn_cast<DestinationStyleOpInterface>(owner);
       if (!dpsOp || owner->getDialect() != getOperation()->getDialect() ||
           !dpsOp.isDpsInit(&use)) {
-        return emitOpError("requires each result use to be a placeholder input "
-                           "or a DPS init of a hipsr operation");
+        return emitOpError(
+            "requires each result use to be a placeholder input, pool-domain "
+            "yield, or a DPS init of a hipsr operation");
       }
       if (dpsInitUse) {
         return emitOpError(
