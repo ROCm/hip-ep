@@ -10,7 +10,6 @@
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/PatternMatch.h"
-#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Transforms/RegionUtils.h"
 
 #include "llvm/ADT/DenseMap.h"
@@ -224,12 +223,6 @@ static bool usesAnyEndBarrierResult(
   return hasNestedUse;
 }
 
-static bool isHipsrDpsOp(Operation &operation) {
-  return operation.getName().getDialectNamespace() ==
-             HipsrDialect::getDialectNamespace() &&
-         isa<DestinationStyleOpInterface>(operation);
-}
-
 static LogicalResult verifyNoUnsupportedNestedOps(Operation &operation) {
   WalkResult result = operation.walk([&](Operation *nested) {
     if (nested == &operation) {
@@ -251,21 +244,16 @@ static LogicalResult verifyNoUnsupportedNestedOps(Operation &operation) {
   return result.wasInterrupted() ? failure() : success();
 }
 
-static LogicalResult verifyDpsInitPlaceholders(Operation &operation,
-                                               Block &block) {
-  if (!isHipsrDpsOp(operation)) {
-    return success();
-  }
-
-  auto dpsOp = cast<DestinationStyleOpInterface>(operation);
-  for (Value init : dpsOp.getDpsInits()) {
+static LogicalResult verifyOutsPlaceholders(Operation &operation,
+                                            Block &block) {
+  for (Value init : getHipsrDestinationOperands(&operation)) {
     if (!isa<TensorType>(init.getType())) {
       continue;
     }
     auto placeholder = init.getDefiningOp<PlaceholderOp>();
     if (!placeholder || placeholder->getBlock() != &block) {
       operation.emitOpError(
-          "requires each tensor DPS init to be produced by a top-level "
+          "requires each tensor outs operand to be produced by a top-level "
           "hipsr.placeholder");
       return failure();
     }
@@ -284,10 +272,10 @@ static LogicalResult validatePartitionInput(Block &block) {
     }
 
     if (auto placeholder = dyn_cast<PlaceholderOp>(operation)) {
-      Operation *consumer = placeholder.getDpsConsumer();
+      Operation *consumer = placeholder.getConsumer();
       if (!consumer || consumer->getBlock() != &block) {
         placeholder.emitOpError(
-            "requires its DPS consumer to be top-level when partitioning pool "
+            "requires its consumer to be top-level when partitioning pool "
             "domains");
         return failure();
       }
@@ -297,7 +285,7 @@ static LogicalResult validatePartitionInput(Block &block) {
     if (failed(verifyNoUnsupportedNestedOps(operation))) {
       return failure();
     }
-    if (failed(verifyDpsInitPlaceholders(operation, block))) {
+    if (failed(verifyOutsPlaceholders(operation, block))) {
       return failure();
     }
   }
@@ -308,13 +296,9 @@ static LogicalResult validatePartitionInput(Block &block) {
 static void computeDomainResults(Domain &domain, Block &parentBlock) {
   llvm::SmallPtrSet<Operation *, 16> domainOperations(domain.operations.begin(),
                                                       domain.operations.end());
-  // Treat each DPS init placeholder as part of its consumer's domain.
+  // Treat each outs placeholder as part of its consumer's domain.
   for (Operation *operation : domain.operations) {
-    if (!isHipsrDpsOp(*operation)) {
-      continue;
-    }
-    auto dpsOp = cast<DestinationStyleOpInterface>(*operation);
-    for (Value init : dpsOp.getDpsInits()) {
+    for (Value init : getHipsrDestinationOperands(operation)) {
       if (auto placeholder = init.getDefiningOp<PlaceholderOp>()) {
         domainOperations.insert(placeholder);
       }
@@ -371,13 +355,8 @@ static SmallVector<Domain> partitionIntoDomains(Block &block) {
 
 static void movePlaceholders(IRRewriter &rewriter, const Domain &domain) {
   for (Operation *consumer : domain.operations) {
-    if (!isHipsrDpsOp(*consumer)) {
-      continue;
-    }
-
     llvm::SmallSetVector<Operation *, 4> placeholders;
-    auto dpsOp = cast<DestinationStyleOpInterface>(*consumer);
-    for (Value init : dpsOp.getDpsInits()) {
+    for (Value init : getHipsrDestinationOperands(consumer)) {
       if (isa<TensorType>(init.getType())) {
         auto placeholder = cast<PlaceholderOp>(init.getDefiningOp());
         placeholders.insert(placeholder.getOperation());

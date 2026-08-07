@@ -43,11 +43,11 @@ func.func @nested_existing_domain(
 
 // -----
 
-// Each tensor DPS init needs a top-level placeholder.
+// Each tensor outs operand needs a top-level placeholder.
 func.func @non_placeholder_init(
     %ctx: !hipsr.context, %input: tensor<4x8xf32>,
     %init: tensor<4x8xf16>) -> tensor<4x8xf16> {
-  // expected-error @+1 {{requires each tensor DPS init to be produced by a top-level hipsr.placeholder}}
+  // expected-error @+1 {{requires each tensor outs operand to be produced by a top-level hipsr.placeholder}}
   %result = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
       outs(%init : tensor<4x8xf16>) : tensor<4x8xf16>
   return %result : tensor<4x8xf16>
@@ -77,7 +77,7 @@ func.func @nested_placeholder(%ctx: !hipsr.context,
 func.func @nested_placeholder_consumer(%ctx: !hipsr.context,
                                        %input: tensor<4x8xf32>)
     -> tensor<4x8xf16> {
-  // expected-error @+1 {{requires its DPS consumer to be top-level when partitioning pool domains}}
+  // expected-error @+1 {{requires its consumer to be top-level when partitioning pool domains}}
   %init = hipsr.placeholder(%ctx)
       ins(%input : tensor<4x8xf32>)
       {type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>

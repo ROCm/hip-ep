@@ -11,7 +11,6 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinOps.h"
-#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
@@ -77,8 +76,7 @@ llvm::DenseMap<Value, Lifetime> computeLiveness(Block &body) {
       Operation *blockLevelUser = body.findAncestorOpInBlock(*user);
       assert(blockLevelUser && "alloc escapes its IsolatedFromAbove domain");
       size_t userIdx = opIndices.lookup(blockLevelUser);
-      auto dpsUser = dyn_cast<DestinationStyleOpInterface>(user);
-      if (dpsUser && llvm::is_contained(dpsUser.getDpsInits(), buffer) &&
+      if (llvm::is_contained(getHipsrDestinationOperands(user), buffer) &&
           (!start || userIdx < *start)) {
         start = userIdx;
       }

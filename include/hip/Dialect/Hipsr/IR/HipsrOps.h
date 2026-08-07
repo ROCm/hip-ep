@@ -35,6 +35,12 @@
 namespace mlir {
 namespace hipsr {
 
+/// result[i] is written into destination[i]; a bufferized op writes into
+/// memref destinations and has no results.
+::mlir::OperandRange getHipsrDestinationOperands(::mlir::Operation *op);
+
+bool isHipsrDestinationOperand(::mlir::OpOperand &use);
+
 // CONTRACT: MorphiZen-generated constants only. Works both before and after
 // externalization (value/source are never removed -- offset/size only mark the
 // constants-file location). Fails fast on forms MorphiZen never emits
