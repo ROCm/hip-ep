@@ -144,6 +144,25 @@ bool extractConstantIntVector(
     CompileTimeConstantScope scope =
         CompileTimeConstantScope::IncludeExternalized);
 
+/// Conversion-side RotaryEmbedding attributes after applying ONNX defaults and
+/// the shared shape-based inference rules used by the standard and contrib
+/// spellings of the op.
+struct RotaryEmbeddingConfig {
+  int64_t interleaved;
+  int64_t numHeads;
+  int64_t rotaryDim;
+};
+
+/// Resolve RotaryEmbedding's optional attributes from `input` and `cosCache`.
+///
+/// This deliberately remains conversion-side: the two ONNX spellings share
+/// attribute defaults and layout inference, while hip.rope's result shape is
+/// simply its input shape. Failures are reported through the pattern rewriter.
+mlir::FailureOr<RotaryEmbeddingConfig>
+resolveRotaryEmbeddingConfig(mlir::PatternRewriter &rewriter,
+                             mlir::Operation *op, mlir::Value input,
+                             mlir::Value cosCache);
+
 /// Resolve the reduced axis list of an ONNX reduction op.
 ///
 /// The axes arrive either as an `axes` attribute (opset < 13) or as an operand
@@ -452,6 +471,18 @@ readbackScalarToHostOrExtract(mlir::PatternRewriter &rewriter,
   return readbackScalarToHost(rewriter, loc, *ctx, rank0Tensor);
 }
 
+inline mlir::Value
+readbackScalarToIndexOrExtract(mlir::PatternRewriter &rewriter,
+                               mlir::Location loc, mlir::Operation *op,
+                               mlir::Value rank0Tensor) {
+  mlir::Value scalar =
+      readbackScalarToHostOrExtract(rewriter, loc, op, rank0Tensor);
+  if (scalar.getType().isIndex())
+    return scalar;
+  return mlir::arith::IndexCastOp::create(rewriter, loc,
+                                          rewriter.getIndexType(), scalar);
+}
+
 /// `readbackShapeEntryToHost` recovering !hip.context from `op`. Falls back to
 /// a bare `tensor.extract %shape[idx]` when there is no context arg.
 inline mlir::Value
@@ -467,6 +498,51 @@ readbackShapeEntryToHostOrExtract(mlir::PatternRewriter &rewriter,
   }
   return readbackShapeEntryToHost(rewriter, loc, *ctx, shape, idx);
 }
+
+/// Dynamic sequence extents used by GQA destination construction.
+///
+/// A null field means the corresponding result dimension is static.
+struct GqaSequenceExtents {
+  mlir::Value logical;
+  mlir::Value presentKey;
+  mlir::Value presentValue;
+};
+
+/// Validate and materialize the payload-dependent GQA sequence extents.
+///
+/// When any dynamic present-cache or QK extent needs `total_seq_len`, this
+/// helper performs one synchronized readback and reuses the resulting
+/// nonnegative index. A dynamic present-cache extent is the unsigned maximum
+/// of that logical extent and its matching past-cache dim 2 when past exists;
+/// without past it is the logical extent directly. Optional QK always uses the
+/// logical extent, never cache capacity.
+///
+/// Pair/rank validation happens before any IR is emitted.
+mlir::FailureOr<GqaSequenceExtents>
+resolveGqaSequenceExtents(mlir::PatternRewriter &rewriter, mlir::Location loc,
+                          mlir::Operation *op, mlir::Value totalSeqLen,
+                          mlir::Value pastKey, mlir::Value pastValue,
+                          mlir::RankedTensorType presentKeyType,
+                          mlir::RankedTensorType presentValueType,
+                          mlir::RankedTensorType outputQkType = nullptr);
+
+/// Build an exact GQA present-cache destination in BNSH layout.
+///
+/// The caller supplies the sequence capacity resolved by
+/// `resolveGqaSequenceExtents`.
+/// Dynamic batch and head-size extents are derived from the query/KV operands;
+/// all static extents remain authoritative in `resultType`.
+mlir::FailureOr<mlir::Value>
+createGqaPresentEmpty(mlir::PatternRewriter &rewriter, mlir::Location loc,
+                      mlir::RankedTensorType resultType, mlir::Value query,
+                      mlir::Value key, mlir::Value totalSeqExtent,
+                      int64_t numHeads, int64_t kvNumHeads);
+
+/// Build an exact optional GQA QK destination `[B, H, S_q, S_kv]`.
+mlir::FailureOr<mlir::Value>
+createGqaQkEmpty(mlir::PatternRewriter &rewriter, mlir::Location loc,
+                 mlir::RankedTensorType resultType, mlir::Value query,
+                 mlir::Value totalSeqExtent, int64_t numHeads);
 
 // Pattern population functions (one per operator file)
 void populateMatMulConversionPatterns(RewritePatternSet &patterns,

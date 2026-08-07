@@ -1193,8 +1193,11 @@ def Hip_RmsNormOp : Hip_DpsOp<"rms_norm", /*traits=*/[OpStateOpInterface],
   let hasVerifier = 1;
 }
 
-def Hip_LayerNormOp : Hip_DpsOp<"layer_norm",
-    [AttrSizedOperandSegments]> {
+def Hip_LayerNormOp :
+    Hip_DpsOp_Semantic<"layer_norm",
+                       /*traits=*/[AttrSizedOperandSegments],
+                       /*outsAccessor=*/"Outputs",
+                       /*autoReify=*/0> {
   let summary = "Standard layer normalization (ONNX LayerNormalization opset 17)";
   let description = [{
     Full ONNX LayerNormalization (opset 17+) with mean subtraction and an
@@ -1285,8 +1288,11 @@ def Hip_LayerNormOp : Hip_DpsOp<"layer_norm",
   let hasVerifier = 1;
 }
 
-def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
-    [AttrSizedOperandSegments, OpStateOpInterface]> {
+def Hip_SkipRmsNormOp :
+    Hip_DpsOp_Semantic<"skip_rms_norm",
+                       [AttrSizedOperandSegments, OpStateOpInterface],
+                       /*outsAccessor=*/"Outputs",
+                       /*autoReify=*/0> {
   let summary = "Fused skip + RMS normalization (com.microsoft.SkipSimplifiedLayerNormalization)";
   let description = [{
     Full alignment with Microsoft ONNX Runtime SkipSimplifiedLayerNormalization
@@ -1377,11 +1383,8 @@ def Hip_SkipRmsNormOp : Hip_DpsOp<"skip_rms_norm",
   let hasVerifier = 1;
 }
 
-def Hip_RopeOp : Hip_DpsOp<"rope", /*traits=*/[],
-                           /*outsAccessor=*/"Output",
-                           /*autoReify=*/0,
-                           /*autoInfer=*/1,
-                           /*declareInfer=*/1> {
+def Hip_RopeOp :
+    Hip_DpsOp_SameShape<"rope", /*sourceAccessor=*/"Input"> {
   let summary = "Rotary position embedding (RoPE)";
   let description = [{
     Applies rotary position embedding to the input tensor.
@@ -3084,8 +3087,9 @@ def Hip_CausalConvWithStateOp :
 
 // ===== Group Query Attention =================================================
 
-def Hip_GqaOp : Hip_DpsOp<"gqa",
-    [AttrSizedOperandSegments, OpStateOpInterface]> {
+def Hip_GqaOp :
+    Hip_DpsOp_Semantic<"gqa",
+                       [AttrSizedOperandSegments, OpStateOpInterface]> {
   let summary = "Group Query Attention - Full MS spec implementation";
   let description = [{
     Complete implementation of com.microsoft.GroupQueryAttention (v1) specification.
@@ -3351,18 +3355,28 @@ def Hip_HipDNNGraphOp : Hip_DpsOp<"hipdnn_graph", [
 
 // ===== Multi-Head Attention =================================================
 
-def Hip_MultiHeadAttentionOp : Hip_DpsOp<"multi_head_attention",
-    [AttrSizedOperandSegments, OpStateOpInterface]> {
+def Hip_MultiHeadAttentionOp :
+    Hip_DpsOp_Semantic<"multi_head_attention",
+                       [AttrSizedOperandSegments, OpStateOpInterface],
+                       /*outsAccessor=*/"Output", /*autoReify=*/0> {
   let summary = "Multi-Head Attention (com.microsoft.MultiHeadAttention v1)";
   let description = [{
     Implements the com.microsoft.MultiHeadAttention operator (opset v1).
 
-    Multi-Head Self/Cross Attention with optional bias from input projection.
-    Supports packed QKV in `query`, packed KV in `key`, separate Q/K/V,
-    optional key padding mask, optional additive attention bias, KV cache
-    (past_key/past_value) with optional buffer-sharing
-    (past_sequence_length), unidirectional (causal) masking, and an optional
-    cache_indirection buffer for beam-search decoding.
+    The default runtime implements self/cross attention for separate rank-3
+    fp16 Q/K/V only:
+      * query: `(batch, query_sequence, hidden)`
+      * key/value: `(batch, kv_sequence, hidden)`
+      * output: `(batch, query_sequence, hidden)`
+      * `hidden` is positive and divisible by `num_heads`
+      * `unidirectional` is 0 or 1
+      * `mask_filter_value` remains its schema default, -10000
+
+    Biases, masks, packed layouts, KV cache inputs, cache indirection, and the
+    optional present/QK outputs are not implemented by this HIP op and are
+    rejected by its verifier. The ONNX converter routes separately supported
+    decoder/cache and rank-4 cross-attention forms to `hip.gqa` before applying
+    this default-path contract.
 
     Inputs (1-10, MS spec order):
       1. query                 (required, T) - either:
@@ -3507,10 +3521,15 @@ def Hip_MultiHeadAttentionOp : Hip_DpsOp<"multi_head_attention",
           "hipdnn_ep_op_state_construct_multi_head_attention", {});
     }
   }];
+
+  let hasVerifier = 1;
 }
 
-def Hip_LinearAttentionOp : Hip_DpsOp<"linear_attention",
-    [AttrSizedOperandSegments]> {
+def Hip_LinearAttentionOp :
+    Hip_DpsOp_Semantic<"linear_attention",
+                       [AttrSizedOperandSegments],
+                       /*outsAccessor=*/"Output",
+                       /*autoReify=*/0> {
   let summary = "Linear attention with recurrent state (com.microsoft.LinearAttention)";
   let description = [{
     Unified linear attention operator for autoregressive decoding (T=1) and
@@ -3606,6 +3625,8 @@ def Hip_LinearAttentionOp : Hip_DpsOp<"linear_attention",
               type($output) `,` type($present_state) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  let hasVerifier = 1;
 }
 
 def Hip_GemmOp :
