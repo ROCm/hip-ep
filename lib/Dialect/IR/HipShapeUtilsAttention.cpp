@@ -304,6 +304,8 @@ mlir::hip::inferCausalConvWithStateOutputShapes(
     std::optional<ArrayRef<int64_t>> biasShape,
     std::optional<ArrayRef<int64_t>> pastStateShape, int64_t ndim,
     function_ref<InFlightDiagnostic()> emitError) {
+  // The schema describes ndim 1..3, but both the current lowering ABI and
+  // runtime flatten to the 1D [B,C,L] interpretation and reject ndim != 1.
   if (ndim != 1) {
     emitError() << "causal_conv_with_state runtime supports only ndim=1";
     return failure();
@@ -393,6 +395,7 @@ mlir::hip::reifyCausalConvWithStateOutputShapes(
           pastStateShape, ndim, emitError)))
     return failure();
 
+  // Validation above is complete before the first tensor.dim is emitted.
   SmallVector<OpFoldResult> outputShape = tensor::getMixedSizes(b, loc, input);
   FailureOr<OpFoldResult> stateLength =
       detail::scaleAndOffsetDim(b, loc, tensor::getMixedSize(b, loc, weight, 2),

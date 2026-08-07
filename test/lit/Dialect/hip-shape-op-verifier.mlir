@@ -58,6 +58,22 @@ func.func @gather_nd_dynamic_tuple_fallback(
 
 // -----
 
+func.func @gather_nd_tuple_width_addition_overflow(
+    %ctx: !hip.context,
+    %data: memref<1x1xf32, 1>,
+    %indices: memref<1x9223372036854775807xi64, 1>,
+    %out: memref<?xf32, 1>) {
+  // expected-error @+1 {{indices tuple width and batch_dims are incompatible with data rank}}
+  hip.gather_nd(%ctx)
+    ins(%data, %indices : memref<1x1xf32, 1>,
+         memref<1x9223372036854775807xi64, 1>)
+    outs(%out : memref<?xf32, 1>)
+    {batch_dims = 1 : i64}
+  return
+}
+
+// -----
+
 func.func @gather_nd_bad_batch_prefix(
     %ctx: !hip.context,
     %data: memref<2x3x4xf32, 1>,

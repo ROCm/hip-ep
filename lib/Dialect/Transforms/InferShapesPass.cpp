@@ -51,6 +51,7 @@
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
+#include "mlir/Interfaces/InferTypeOpInterface.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Sequence.h"
@@ -80,31 +81,25 @@ namespace {
 /// reified per-dim `OpFoldResult`s. For each dim, the existing static
 /// value is preserved; if the dim is currently `kDynamic` and the reified
 /// `OpFoldResult` is a constant integer, the constant replaces it.
-/// Returns true iff at least one dim moved from `kDynamic` to static.
-///
-/// In debug builds, asserts that a constant reified dim agrees with an
-/// existing static dim — a contradiction signals a buggy
-/// `reifyResultShapes` impl on the op being refined.
-///
-/// Precondition: `cur.size() == reif.size()`. The
-/// `ReifyRankedShapedTypeOpInterface` contract guarantees one
-/// `OpFoldResult` per dim of the reified result; a mismatch signals a
-/// programmer error in the op's `reifyResultShapes` impl.
-static bool composeRefinedShape(ArrayRef<int64_t> cur,
-                                ArrayRef<OpFoldResult> reif,
-                                SmallVectorImpl<int64_t> &out) {
-  assert(cur.size() == reif.size() &&
-         "rank mismatch between current type and reified shape");
+/// Returns whether at least one dim moved from `kDynamic` to static. Contract
+/// violations return failure in every build configuration; callers diagnose
+/// the precise result/dimension before invoking this helper.
+static FailureOr<bool> composeRefinedShape(ArrayRef<int64_t> cur,
+                                           ArrayRef<OpFoldResult> reif,
+                                           SmallVectorImpl<int64_t> &out) {
+  if (cur.size() != reif.size())
+    return failure();
   bool refined = false;
   out.assign(cur.begin(), cur.end());
   for (size_t d : llvm::seq<size_t>(0, cur.size())) {
+    if (!reif[d])
+      continue;
     std::optional<int64_t> reifCst = getConstantIntValue(reif[d]);
+    if (reifCst && *reifCst < 0)
+      return failure();
     if (!ShapedType::isDynamic(cur[d])) {
-      // Static dim must agree with reify if reify gave a constant. A
-      // mismatch is an op-author bug in `reifyResultShapes` and would
-      // otherwise be silently swallowed by the pass.
-      assert((!reifCst || *reifCst == cur[d]) &&
-             "reifyResultShapes contradicts existing static dim");
+      if (reifCst && *reifCst != cur[d])
+        return failure();
       continue;
     }
     if (reifCst) {
@@ -113,6 +108,86 @@ static bool composeRefinedShape(ArrayRef<int64_t> cur,
     }
   }
   return refined;
+}
+
+struct ValidatedResultShape {
+  bool refines = false;
+  SmallVector<int64_t> shape;
+};
+
+/// Validate the complete successful reification before mutating any result or
+/// DPS init. A malformed success is an op-author/compiler defect, not a
+/// best-effort miss: emit a precise diagnostic and fail the pass in release
+/// builds as well as debug builds.
+static FailureOr<SmallVector<ValidatedResultShape>>
+validateReifiedResultShapes(Operation *op,
+                            const ReifiedRankedShapedTypeDims &reified) {
+  if (reified.size() != op->getNumResults()) {
+    op->emitOpError() << "--hip-infer-shapes: successful reification returned "
+                      << reified.size() << " shape vector(s) for "
+                      << op->getNumResults()
+                      << " result(s); expected exactly one vector per result";
+    return failure();
+  }
+
+  SmallVector<ValidatedResultShape> validated;
+  validated.reserve(reified.size());
+  for (auto [resultIdx, dims] : llvm::enumerate(reified)) {
+    auto shapedType = dyn_cast<ShapedType>(op->getResult(resultIdx).getType());
+    if (!shapedType || !shapedType.hasRank()) {
+      op->emitOpError()
+          << "--hip-infer-shapes: successful reification described result #"
+          << resultIdx << ", but its type is not a ranked shaped type";
+      return failure();
+    }
+
+    ArrayRef<int64_t> currentShape = shapedType.getShape();
+    if (dims.size() != currentShape.size()) {
+      op->emitOpError()
+          << "--hip-infer-shapes: successful reification returned "
+          << dims.size() << " dimension(s) for result #" << resultIdx
+          << " of rank " << currentShape.size();
+      return failure();
+    }
+
+    for (auto [dimIdx, dim] : llvm::enumerate(dims)) {
+      if (!dim)
+        continue;
+      std::optional<int64_t> constant = getConstantIntValue(dim);
+      if (!constant)
+        continue;
+      if (*constant < 0) {
+        op->emitOpError()
+            << "--hip-infer-shapes: successful reification returned negative "
+               "extent "
+            << *constant << " for result #" << resultIdx << ", dimension #"
+            << dimIdx;
+        return failure();
+      }
+      int64_t current = currentShape[dimIdx];
+      if (!ShapedType::isDynamic(current) && *constant != current) {
+        op->emitOpError()
+            << "--hip-infer-shapes: successful reification returned extent "
+            << *constant << " for result #" << resultIdx << ", dimension #"
+            << dimIdx << ", contradicting existing static extent " << current;
+        return failure();
+      }
+    }
+
+    ValidatedResultShape result;
+    FailureOr<bool> refines =
+        composeRefinedShape(currentShape, dims, result.shape);
+    if (failed(refines)) {
+      op->emitOpError()
+          << "--hip-infer-shapes: internal error while composing validated "
+             "shape for result #"
+          << resultIdx;
+      return failure();
+    }
+    result.refines = *refines;
+    validated.push_back(std::move(result));
+  }
+  return validated;
 }
 
 /// Rebuild `emptyOp` with the refined shape. Dynamic-dim operands whose
@@ -204,21 +279,15 @@ static void rewireUsesThroughCast(RewriterBase &rewriter, Operation *op,
     use->set(cast.getResult());
 }
 
-/// Refine a single result of a single op. Returns success() iff at least
-/// one dim was narrowed; failure() means "nothing to do" or "couldn't
-/// safely refine here".
-static LogicalResult refineOneResult(RewriterBase &rewriter,
-                                     ReifyRankedShapedTypeOpInterface reifyOp,
-                                     unsigned resultIdx,
-                                     ArrayRef<OpFoldResult> reifiedDims) {
+/// Refine a single result of a single op. Returns true iff the result was
+/// narrowed; false means the destination could not be safely rebuilt here.
+static bool refineOneResult(RewriterBase &rewriter,
+                            ReifyRankedShapedTypeOpInterface reifyOp,
+                            unsigned resultIdx, ArrayRef<int64_t> newShape) {
   Operation *op = reifyOp.getOperation();
   auto curType = dyn_cast<RankedTensorType>(op->getResult(resultIdx).getType());
   if (!curType)
-    return failure();
-
-  SmallVector<int64_t> newShape;
-  if (!composeRefinedShape(curType.getShape(), reifiedDims, newShape))
-    return failure();
+    return false;
 
   // DPS contract is `result_type == outs_operand_type`; only tensor.empty
   // outs producers can be rebuilt zero-cost today, so we skip the rest.
@@ -229,7 +298,7 @@ static LogicalResult refineOneResult(RewriterBase &rewriter,
     if (!emptyProducer) {
       LLVM_DEBUG(DBGS() << "skip " << op->getName() << " result #" << resultIdx
                         << ": outs producer is not tensor.empty\n");
-      return failure();
+      return false;
     }
     // Refining a shared `tensor.empty` would retype every sibling
     // consumer's outs operand without retyping their result, breaking
@@ -239,10 +308,10 @@ static LogicalResult refineOneResult(RewriterBase &rewriter,
     if (!emptyProducer->hasOneUse()) {
       LLVM_DEBUG(DBGS() << "skip " << op->getName() << " result #" << resultIdx
                         << ": outs producer is a shared tensor.empty\n");
-      return failure();
+      return false;
     }
     if (failed(refineTensorEmptyProducer(rewriter, emptyProducer, newShape)))
-      return failure();
+      return false;
   }
 
   // In-place type mutation; can't replaceOp here because we still need the
@@ -255,19 +324,19 @@ static LogicalResult refineOneResult(RewriterBase &rewriter,
   result.setType(newTypeVal);
   ++NumResultsRefined;
   rewireUsesThroughCast(rewriter, op, result, oldType, usesToCast);
-  return success();
+  return true;
 }
 
 /// Phase 1 worker: collect every `ReifyRankedShapedTypeOpInterface` op
-/// within `funcOp`'s body region in post-order, then refine each of
-/// their results. Post-order visits producers before consumers — the
-/// safe order for in-place result-type narrowing followed by cast
-/// insertion.
+/// within `funcOp`'s supported lexical/single-block structure in post-order,
+/// then refine each result. Post-order visits producers before consumers —
+/// the safe order for in-place result-type narrowing followed by cast
+/// insertion. This is not CFG, call-graph, or symbolic inference.
 ///
 /// HIP-dialect ops only. Upstream ops with the same interface (e.g.
 /// `tensor.empty`) carry operand-shape invariants this pass would
 /// desync, and they have their own canonicalizers anyway.
-static void refineFuncBody(func::FuncOp funcOp, IRRewriter &rewriter) {
+static LogicalResult refineFuncBody(func::FuncOp funcOp, IRRewriter &rewriter) {
   HipDialect *hipDialect = funcOp->getContext()->getLoadedDialect<HipDialect>();
   SmallVector<ReifyRankedShapedTypeOpInterface> ops;
   funcOp.walk([&](ReifyRankedShapedTypeOpInterface reifyOp) {
@@ -288,14 +357,22 @@ static void refineFuncBody(func::FuncOp funcOp, IRRewriter &rewriter) {
     rewriter.setInsertionPoint(op);
 
     ReifiedRankedShapedTypeDims reified;
-    if (failed(reifyOp.reifyResultShapes(rewriter, reified)))
-      continue;
-    if (reified.size() != op->getNumResults())
+    if (failed(mlir::reifyResultShapes(rewriter, op, reified)))
       continue;
 
-    for (auto [resultIdx, dims] : llvm::enumerate(reified))
-      (void)refineOneResult(rewriter, reifyOp, resultIdx, dims);
+    FailureOr<SmallVector<ValidatedResultShape>> validated =
+        validateReifiedResultShapes(op, reified);
+    if (failed(validated))
+      return failure();
+
+    // Validation covers every result before the first mutation, so a malformed
+    // successful reifier cannot leave a partly retyped operation behind.
+    for (auto [resultIdx, resultShape] : llvm::enumerate(*validated)) {
+      if (resultShape.refines)
+        (void)refineOneResult(rewriter, reifyOp, resultIdx, resultShape.shape);
+    }
   }
+  return success();
 }
 
 /// Sync `bodyFunc`'s `FunctionType` + entry-block-arg types at the
@@ -423,7 +500,8 @@ static bool syncLoopResultsAndInsertCasts(IRRewriter &rewriter,
 ///   // non-DPS-init use of %r so consumer signatures are preserved.
 ///   func.func @loop_body(%ctx, %iter, %cond, %carry: tensor<128xf32>, ...)
 ///                       -> (i1, tensor<128xf32>) { ... }
-static void refineLoopSignatures(ModuleOp module, IRRewriter &rewriter) {
+static LogicalResult refineLoopSignatures(ModuleOp module,
+                                          IRRewriter &rewriter) {
   // Hard cap. Each iteration narrows a finite type lattice across a
   // finite set of hip.loop ops — bounded; the cap is a paranoia guard
   // against a buggy reify impl that returns a wider type than the
@@ -431,11 +509,11 @@ static void refineLoopSignatures(ModuleOp module, IRRewriter &rewriter) {
   static constexpr unsigned kMaxIters = 16;
   for (unsigned iter = 0; iter < kMaxIters; ++iter) {
     bool changed = false;
-    module.walk([&](hip::LoopOp loopOp) {
+    WalkResult walkResult = module.walk([&](hip::LoopOp loopOp) -> WalkResult {
       auto bodyFunc =
           module.lookupSymbol<func::FuncOp>(loopOp.getBodyFuncAttr());
       if (!bodyFunc || bodyFunc.getBody().empty())
-        return;
+        return WalkResult::advance();
 
       bool bodyChanged = syncBodyFuncSignatureFromVInit(bodyFunc, loopOp);
       bool resultsChanged = syncLoopResultsAndInsertCasts(rewriter, loopOp);
@@ -448,15 +526,19 @@ static void refineLoopSignatures(ModuleOp module, IRRewriter &rewriter) {
       // types disagree with the now-tighter entry block arg types; a
       // re-walk of this body func via `refineFuncBody` lets each
       // body op's `reifyResultShapes` catch up.
-      if (bodyChanged)
-        refineFuncBody(bodyFunc, rewriter);
+      if (bodyChanged && failed(refineFuncBody(bodyFunc, rewriter)))
+        return WalkResult::interrupt();
+      return WalkResult::advance();
     });
+    if (walkResult.wasInterrupted())
+      return failure();
     if (!changed)
-      return;
+      return success();
   }
   module.emitWarning() << "--hip-infer-shapes: hip.loop signature refinement "
                           "did not converge after "
                        << kMaxIters << " iterations; bailing";
+  return success();
 }
 
 struct InferShapesPass : public impl::InferShapesPassBase<InferShapesPass> {
@@ -477,14 +559,21 @@ void InferShapesPass::runOnOperation() {
   // signatures except on DPS-init uses (which propagate refinement
   // directly — `hip.loop`'s `$v_init` operands are DPS-init by
   // `LoopOp::getDpsInitsMutable`, see HipDialect.cpp).
-  module.walk([&](func::FuncOp funcOp) { refineFuncBody(funcOp, rewriter); });
+  WalkResult walkResult = module.walk([&](func::FuncOp funcOp) -> WalkResult {
+    return succeeded(refineFuncBody(funcOp, rewriter))
+               ? WalkResult::advance()
+               : WalkResult::interrupt();
+  });
+  if (walkResult.wasInterrupted())
+    return signalPassFailure();
 
   // Phase 2: hip.loop signature catch-up. Sync each loop's result
   // types and its body func's signature from the (potentially
   // Phase-1-refined) v_init operand types, then re-walk the body func
   // so body op result types catch up with the tighter entry-block
   // arg types.
-  refineLoopSignatures(module, rewriter);
+  if (failed(refineLoopSignatures(module, rewriter)))
+    signalPassFailure();
 }
 
 } // namespace
