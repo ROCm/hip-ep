@@ -515,8 +515,8 @@ void materializeDomain(IRRewriter &rewriter,
 }
 
 // Build domains in order so earlier results are available to later domains.
-void materializeDomains(
-    const partition_analysis::DomainAssignment &assignment, Value context) {
+void materializeDomains(const partition_analysis::DomainAssignment &assignment,
+                        Value context) {
   if (assignment.domains.empty()) {
     return;
   }
