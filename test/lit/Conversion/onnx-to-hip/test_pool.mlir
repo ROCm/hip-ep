@@ -230,4 +230,21 @@ module {
 
     return %y : tensor<1x3x16x16xf32>
   }
+
+  // Test 9: dynamic spatial ceil_mode uses signed ceil division.
+  func.func @test_averagepool_dynamic_ceil(%arg0: tensor<1x3x?xf32>)
+      -> tensor<1x3x?xf32> {
+    // CHECK-LABEL: func.func @test_averagepool_dynamic_ceil
+    %y = "onnx.AveragePool"(%arg0)
+        {kernel_shape = [4], strides = [3], pads = [1, 0],
+         ceil_mode = 1 : si64}
+        : (tensor<1x3x?xf32>) -> tensor<1x3x?xf32>
+
+    // CHECK: arith.ceildivsi
+    // CHECK: tensor.empty(%{{.*}}) : tensor<1x3x?xf32>
+    // CHECK: hip.pool
+    // CHECK-SAME: ceil_mode = 1
+
+    return %y : tensor<1x3x?xf32>
+  }
 }

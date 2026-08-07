@@ -174,6 +174,74 @@ reifyGemmResultShape(OpBuilder &b, Location loc, Value A, Value B,
                      Value optionalC, int64_t transA, int64_t transB,
                      function_ref<InFlightDiagnostic()> emitError);
 
+/// Compute the ONNX forward-convolution result shape for rank-3 NCL or rank-4
+/// NCHW operands. The result is `{input[0], weights[0], spatial...}` and each
+/// spatial extent follows the signed-floor window formula.
+///
+/// An empty `kernelShape` means the ONNX attribute was omitted. In that case
+/// the kernel is derived from the static spatial dimensions of `weightShape`;
+/// dynamic weight spatial dimensions require an explicit kernel.
+FailureOr<SmallVector<int64_t>>
+inferConvShape(ArrayRef<int64_t> inputShape, ArrayRef<int64_t> weightShape,
+               ArrayRef<int64_t> kernelShape, ArrayRef<int64_t> strides,
+               ArrayRef<int64_t> pads, ArrayRef<int64_t> dilations,
+               int64_t group, function_ref<InFlightDiagnostic()> emitError);
+
+/// Mixed-shape form of `inferConvShape`. Validates through the static helper
+/// before materializing any dimension arithmetic.
+FailureOr<SmallVector<OpFoldResult>>
+reifyConvResultShape(OpBuilder &b, Location loc, Value input, Value weights,
+                     ArrayRef<int64_t> kernelShape, ArrayRef<int64_t> strides,
+                     ArrayRef<int64_t> pads, ArrayRef<int64_t> dilations,
+                     int64_t group,
+                     function_ref<InFlightDiagnostic()> emitError);
+
+/// Compute an ONNX MaxPool/AveragePool/LpPool result shape for spatial rank
+/// 1..3. N/C pass through from the input; spatial extents use signed floor
+/// division, or signed ceil division when `ceilMode` is 1.
+FailureOr<SmallVector<int64_t>>
+inferPoolShape(ArrayRef<int64_t> inputShape, ArrayRef<int64_t> kernelShape,
+               ArrayRef<int64_t> strides, ArrayRef<int64_t> pads,
+               ArrayRef<int64_t> dilations, int64_t ceilMode,
+               function_ref<InFlightDiagnostic()> emitError);
+
+/// Mixed-shape form of `inferPoolShape`. The returned shape is shared by the
+/// values result and optional MaxPool indices result.
+FailureOr<SmallVector<OpFoldResult>>
+reifyPoolResultShape(OpBuilder &b, Location loc, Value input,
+                     ArrayRef<int64_t> kernelShape, ArrayRef<int64_t> strides,
+                     ArrayRef<int64_t> pads, ArrayRef<int64_t> dilations,
+                     int64_t ceilMode,
+                     function_ref<InFlightDiagnostic()> emitError);
+
+/// Compute the supported rank-4 NCHW ONNX ConvTranspose result shape.
+FailureOr<SmallVector<int64_t>> inferConvTransposeShape(
+    ArrayRef<int64_t> inputShape, ArrayRef<int64_t> weightShape,
+    ArrayRef<int64_t> kernelShape, ArrayRef<int64_t> strides,
+    ArrayRef<int64_t> pads, ArrayRef<int64_t> dilations,
+    ArrayRef<int64_t> outputPadding, int64_t group,
+    function_ref<InFlightDiagnostic()> emitError);
+
+/// Mixed-shape form of `inferConvTransposeShape`. Validates through the static
+/// helper before materializing any dimension arithmetic.
+FailureOr<SmallVector<OpFoldResult>>
+reifyConvTransposeResultShape(OpBuilder &b, Location loc, Value input,
+                              Value weights, ArrayRef<int64_t> kernelShape,
+                              ArrayRef<int64_t> strides, ArrayRef<int64_t> pads,
+                              ArrayRef<int64_t> dilations,
+                              ArrayRef<int64_t> outputPadding, int64_t group,
+                              function_ref<InFlightDiagnostic()> emitError);
+
+/// GlobalPool shape: preserve N/C and replace every spatial extent with 1.
+FailureOr<SmallVector<int64_t>>
+inferGlobalPoolShape(ArrayRef<int64_t> inputShape,
+                     function_ref<InFlightDiagnostic()> emitError);
+
+/// Mixed-shape form of `inferGlobalPoolShape`.
+FailureOr<SmallVector<OpFoldResult>>
+reifyGlobalPoolResultShape(OpBuilder &b, Location loc, Value input,
+                           function_ref<InFlightDiagnostic()> emitError);
+
 /// Reify the result shape of a transpose op as `output[i] = input[perm[i]]`.
 /// `perm` must be a permutation of `[0, rank-1)` and have the same length
 /// as `input`'s rank — the verifier should already guarantee this; the
@@ -243,6 +311,25 @@ FailureOr<SmallVector<int64_t>> inferSizeShape();
 FailureOr<SmallVector<OpFoldResult>>
 reifyReductionResultShape(OpBuilder &b, Location loc, Value data,
                           ArrayRef<int64_t> axes, int64_t keepdims);
+
+/// CausalConvWithState output shapes for the runtime-supported 1D layout:
+///   output        = input = [B, C, L]
+///   present_state = [B, C, weight[2] - 1]
+///
+/// Also validates the depthwise weight layout `[C, 1, K]`, optional bias
+/// `[C]`, and optional past state `[B, C, K - 1]`.
+FailureOr<SmallVector<SmallVector<int64_t>>>
+inferCausalConvWithStateOutputShapes(
+    ArrayRef<int64_t> inputShape, ArrayRef<int64_t> weightShape,
+    std::optional<ArrayRef<int64_t>> biasShape,
+    std::optional<ArrayRef<int64_t>> pastStateShape, int64_t ndim,
+    function_ref<InFlightDiagnostic()> emitError);
+
+/// Mixed-shape form of `inferCausalConvWithStateOutputShapes`.
+FailureOr<ReifiedRankedShapedTypeDims> reifyCausalConvWithStateOutputShapes(
+    OpBuilder &b, Location loc, Value input, Value weight, Value bias,
+    Value pastState, int64_t ndim,
+    function_ref<InFlightDiagnostic()> emitError);
 
 /// One-shot reify body for ONNX-style reduction ops (reduce_sum,
 /// reduce_max, reduce_prod). Tries `reifyReductionWithKeepdims` first

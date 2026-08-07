@@ -123,7 +123,7 @@ module {
   }
 
   // CHECK-LABEL: func.func @depthwise_conv1d_dynamic
-  // CHECK: arith.divsi
+  // CHECK: arith.floordivsi
   // CHECK: tensor.empty({{.*}}) : tensor<?x1024x?xf16>
   // CHECK: tensor.expand_shape
   // CHECK: hip.conv({{.*}}) outs({{.*}}) {dilations = [1, 1], group = 1024 : i64, kernel_shape = [1, 5], pads = [0, 4, 0, 0], strides = [1, 1]}

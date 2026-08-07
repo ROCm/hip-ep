@@ -13,6 +13,7 @@
 // 4. causal_conv_no_activation           — different shape, activation=none
 // 5. causal_conv_dynamic                 — dynamic batch + seq_len (LLM decode)
 // 6. causal_conv_dynamic_no_past_state   — dynamic input with no past_state
+// 7. causal_conv_fully_dynamic_weight     — present K-1 comes from weight
 //
 // All static cases assert:
 // - context argument prepended
@@ -134,8 +135,8 @@ module {
   //    Expectations:
   //    - output init: tensor.dim for dims 0 and 2 of input + tensor.empty with
   //      two dynamic sizes.
-  //    - present_state init: tensor.dim for dim 0 of past_state + tensor.empty
-  //      with one dynamic size.
+  //    - present_state init: batch comes from input (past_state validates but
+  //      does not own the state shape).
   // --------------------------------------------------------------------------
   func.func @causal_conv_dynamic(
       %input: tensor<?x64x?xf16>,
@@ -155,12 +156,9 @@ module {
 
   // CHECK-LABEL: func.func @causal_conv_dynamic
   // CHECK-SAME: (%[[CTX5:.*]]: !hip.context, %[[IN5:.*]]: tensor<?x64x?xf16>, %[[W5:.*]]: tensor<64x1x4xf16>, %[[B5:.*]]: tensor<64xf16>, %[[PS5:.*]]: tensor<?x64x3xf16>)
-  // output init: dims 0 and 2 of input extracted at runtime, fed into empty.
-  // CHECK: tensor.dim %[[IN5]]
-  // CHECK: tensor.dim %[[IN5]]
+  // output + present init: input supplies B twice and output L once.
+  // CHECK-COUNT-3: tensor.dim %[[IN5]]
   // CHECK: tensor.empty({{.*}}) : tensor<?x64x?xf16>
-  // present_state init: dim 0 of past_state extracted at runtime.
-  // CHECK: tensor.dim %[[PS5]]
   // CHECK: tensor.empty({{.*}}) : tensor<?x64x3xf16>
   // CHECK: hip.causal_conv_with_state(%[[CTX5]]) ins(%[[IN5]], %[[W5]], %[[B5]], %[[PS5]] : tensor<?x64x?xf16>, tensor<64x1x4xf16>, tensor<64xf16>, tensor<?x64x3xf16>) outs({{.*}}, {{.*}} : tensor<?x64x?xf16>, tensor<?x64x3xf16>) {activation = "silu"
   // CHECK-NOT: hip.alloc
@@ -186,11 +184,36 @@ module {
 
   // CHECK-LABEL: func.func @causal_conv_dynamic_no_past_state
   // CHECK-SAME: (%[[CTX6:.*]]: !hip.context, %[[IN6:.*]]: tensor<?x64x?xf16>, %[[W6:.*]]: tensor<64x1x4xf16>)
-  // CHECK: tensor.dim %[[IN6]]
+  // CHECK-COUNT-3: tensor.dim %[[IN6]]
   // CHECK: tensor.empty({{.*}}) : tensor<?x64x?xf16>
-  // present_state falls back to input for dim extraction (batch only).
-  // CHECK: tensor.dim %[[IN6]]
   // CHECK: tensor.empty({{.*}}) : tensor<?x64x3xf16>
   // CHECK: hip.causal_conv_with_state(%[[CTX6]]) ins(%[[IN6]], %[[W6]] : tensor<?x64x?xf16>, tensor<64x1x4xf16>) outs({{.*}}, {{.*}} : tensor<?x64x?xf16>, tensor<?x64x3xf16>)
+  // CHECK-NOT: hip.alloc
+
+  // --------------------------------------------------------------------------
+  // 7. Dynamic kernel: present_state's final extent is weight.K - 1, not an
+  //    input or absent-past-state dimension.
+  // --------------------------------------------------------------------------
+  func.func @causal_conv_fully_dynamic_weight(
+      %input: tensor<?x?x?xf16>,
+      %weight: tensor<?x?x?xf16>
+  ) -> (tensor<?x?x?xf16>, tensor<?x?x?xf16>) {
+    %none = "onnx.NoValue"() {value} : () -> none
+    %output, %present_state = "onnx.Custom"(%input, %weight, %none, %none) {
+      function_name = "CausalConvWithState",
+      domain_name = "com.microsoft",
+      ndim = 1 : si64
+    } : (tensor<?x?x?xf16>, tensor<?x?x?xf16>, none, none)
+      -> (tensor<?x?x?xf16>, tensor<?x?x?xf16>)
+    return %output, %present_state : tensor<?x?x?xf16>, tensor<?x?x?xf16>
+  }
+
+  // CHECK-LABEL: func.func @causal_conv_fully_dynamic_weight
+  // CHECK-SAME: %[[IN7:[^,]+]]: tensor<?x?x?xf16>
+  // CHECK-SAME: %[[W7:[^)]+]]: tensor<?x?x?xf16>
+  // CHECK: %[[K:.*]] = tensor.dim %[[W7]], %{{.*}} : tensor<?x?x?xf16>
+  // CHECK: %[[STATE_LEN:.*]] = arith.addi %[[K]], %{{.*}} : index
+  // CHECK: tensor.empty({{.*}}, {{.*}}, %[[STATE_LEN]]) : tensor<?x?x?xf16>
+  // CHECK: hip.causal_conv_with_state({{.*}})
   // CHECK-NOT: hip.alloc
 }

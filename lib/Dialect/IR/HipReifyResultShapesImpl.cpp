@@ -25,6 +25,103 @@ using namespace mlir;
 using namespace mlir::hip;
 
 //===----------------------------------------------------------------------===//
+// ConvOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult
+ConvOp::reifyResultShapes(OpBuilder &b,
+                          ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() != 1)
+    return failure();
+  FailureOr<SmallVector<OpFoldResult>> shape = mlir::hip::reifyConvResultShape(
+      b, getLoc(), getInput(), getWeights(),
+      detail::getI64Array(getKernelShape()), detail::getI64Array(getStrides()),
+      detail::getI64Array(getPads()), detail::getI64Array(getDilations()),
+      getGroup(), [&]() { return this->emitOpError(); });
+  if (failed(shape))
+    return failure();
+  reifiedReturnShapes.assign({std::move(*shape)});
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// ConvTransposeOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult ConvTransposeOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() == 0)
+    return failure();
+  FailureOr<SmallVector<OpFoldResult>> dims =
+      mlir::hip::reifyConvTransposeResultShape(
+          b, getLoc(), getInput(), getWeights(),
+          detail::getI64Array(getKernelShape()),
+          detail::getI64Array(getStrides()), detail::getI64Array(getPads()),
+          detail::getI64Array(getDilations()),
+          detail::getI64Array(getOutputPadding()), getGroup(),
+          [&]() { return this->emitOpError(); });
+  if (failed(dims))
+    return failure();
+  reifiedReturnShapes.assign({std::move(*dims)});
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// GlobalPoolOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult GlobalPoolOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() != 1)
+    return failure();
+  FailureOr<SmallVector<OpFoldResult>> shape =
+      mlir::hip::reifyGlobalPoolResultShape(
+          b, getLoc(), getInput(), [&]() { return this->emitOpError(); });
+  if (failed(shape))
+    return failure();
+  reifiedReturnShapes.assign({std::move(*shape)});
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// PoolOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult
+PoolOp::reifyResultShapes(OpBuilder &b,
+                          ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() < 1 || getNumResults() > 2)
+    return failure();
+  FailureOr<SmallVector<OpFoldResult>> shape = mlir::hip::reifyPoolResultShape(
+      b, getLoc(), getInput(), detail::getI64Array(getKernelShape()),
+      detail::getI64Array(getStrides()), detail::getI64Array(getPads()),
+      detail::getI64Array(getDilations()), getCeilMode(),
+      [&]() { return this->emitOpError(); });
+  if (failed(shape))
+    return failure();
+  reifiedReturnShapes.assign(getNumResults(), *shape);
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// CausalConvWithStateOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult CausalConvWithStateOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() != 2)
+    return failure();
+  FailureOr<ReifiedRankedShapedTypeDims> shapes =
+      mlir::hip::reifyCausalConvWithStateOutputShapes(
+          b, getLoc(), getInput(), getWeight(), getBias(), getPastState(),
+          getNdim(), [&]() { return this->emitOpError(); });
+  if (failed(shapes))
+    return failure();
+  reifiedReturnShapes = std::move(*shapes);
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // MatmulOp
 //
 // Reify delegates to the shared MatMul helper used by converter destination

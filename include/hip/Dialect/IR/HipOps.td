@@ -658,9 +658,10 @@ def Hip_HipblasltGraphOp : Hip_Op<"hipblaslt.graph", [SingleBlock, NoTerminator]
 
 // ===== MIOpen DNN Operations =================================================
 
-def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[], /*outsAccessor=*/"Output",
-                           /*autoReify=*/1,
-                           /*autoInfer=*/1, /*declareInfer=*/1> {
+def Hip_ConvOp :
+    Hip_DpsOp_Semantic<"conv", /*traits=*/[], /*outsAccessor=*/"Output",
+                       /*autoReify=*/0,
+                       /*autoInfer=*/1, /*declareInfer=*/1> {
   let summary = "2D convolution operation using MIOpen (in-place)";
   let description = [{
     Performs 2D convolution using MIOpen (miopenConvolutionForward).
@@ -706,9 +707,17 @@ def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[], /*outsAccessor=*/"Output",
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^ )?
   }];
+
+  let hasVerifier = 1;
 }
 
-def Hip_ConvTransposeOp : Hip_DpsOp<"conv_transpose"> {
+def Hip_ConvTransposeOp :
+    Hip_DpsOp_Semantic<"conv_transpose",
+                       /*traits=*/[],
+                       /*outsAccessor=*/"Output",
+                       /*autoReify=*/0,
+                       /*autoInfer=*/1,
+                       /*declareInfer=*/1> {
   let summary = "2D transposed convolution / deconvolution using MIOpen "
                 "(in-place)";
   let description = [{
@@ -767,6 +776,8 @@ def Hip_ConvTransposeOp : Hip_DpsOp<"conv_transpose"> {
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^ )?
   }];
+
+  let hasVerifier = 1;
 }
 
 // ===== hipBLASLt ops =========================================================
@@ -2975,8 +2986,11 @@ def Hip_ReduceMinOp : Hip_DpsOp_Reduction<"reduce_min"> {
 
 // ===== Causal Conv with State ================================================
 
-def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
-    [AttrSizedOperandSegments, OpStateOpInterface]> {
+def Hip_CausalConvWithStateOp :
+    Hip_DpsOp_Semantic<"causal_conv_with_state",
+                       [AttrSizedOperandSegments, OpStateOpInterface],
+                       /*outsAccessor=*/"Output",
+                       /*autoReify=*/0> {
   let summary = "Stateful causal depthwise convolution";
   let description = [{
     Causal depthwise convolution with carry state for incremental decoding.
@@ -3057,6 +3071,7 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp<"causal_conv_with_state",
           "hipdnn_ep_op_state_construct_causal_conv_with_state", {});
     }
   }];
+  let hasVerifier = 1;
 }
 
 // ===== Group Query Attention =================================================
@@ -3829,7 +3844,11 @@ def Hip_ExpandOp :
   }];
 }
 
-def Hip_GlobalPoolOp : Hip_DpsOp<"global_pool"> {
+def Hip_GlobalPoolOp :
+    Hip_DpsOp_Semantic<"global_pool",
+                       /*traits=*/[],
+                       /*outsAccessor=*/"Output",
+                       /*autoReify=*/0> {
   let summary = "Global pooling over spatial dimensions (average / max / lp)";
   let description = [{
     Unified lowering for ONNX GlobalAveragePool / GlobalMaxPool / GlobalLpPool.
@@ -3873,6 +3892,8 @@ def Hip_GlobalPoolOp : Hip_DpsOp<"global_pool"> {
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  let hasVerifier = 1;
 }
 
 def Hip_ReduceProdOp : Hip_DpsOp_Reduction<"reduce_prod"> {
@@ -4267,7 +4288,10 @@ def Hip_NonZeroOp : Hip_DpsOp<"nonzero", /*traits=*/[], /*outsAccessor=*/"Y",
   }];
 }
 
-def Hip_PoolOp : Hip_DpsOp<"pool"> {
+def Hip_PoolOp :
+    Hip_DpsOp_Semantic<"pool", /*traits=*/[],
+                       /*outsAccessor=*/"Outputs",
+                       /*autoReify=*/0> {
   let summary = "Spatial pooling (ONNX MaxPool / AveragePool / LpPool)";
   let description = [{
     Unified window pooling for ONNX MaxPool / AveragePool / LpPool. For an
@@ -4343,6 +4367,8 @@ def Hip_PoolOp : Hip_DpsOp<"pool"> {
     `outs` `(` $outputs `:` type($outputs) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  let hasVerifier = 1;
 }
 
 def Hip_ResizeOp : Hip_DpsOp<"resize"> {
