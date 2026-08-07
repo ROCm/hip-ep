@@ -65,7 +65,15 @@ Operations whose shape contract is more specific than "result shape equals desti
 | `customReifyBody` | empty | Provide an inline custom body for parameterized DPS sub-bases |
 | `customVerifyBody` | empty | Provide an inline verifier body for a parameterized DPS sub-base |
 
-`Hip_DpsOp_Broadcast` and `Hip_DpsOp_Reduction` use `customReifyBody` to share broadcast and reduction reification across operation families without per-op C++ implementations.
+`Hip_DpsOp_Broadcast` and `Hip_DpsOp_Reduction` use `customReifyBody` to share
+broadcast and reduction reification across operation families without per-op
+C++ implementations. Both bases also generate verifier bodies that compose
+`verifyDpsComputeOp`, so tensor/memref uniformity and tensor result-to-init type
+parity are checked before semantic shape rules. Broadcast uses the same pure
+NumPy rule as reification and destination construction. Reduction validates
+exact output shape only when the axes payload is compile-time-known; runtime
+axes validate rank/type and the keepdims/noop attributes, then retain the
+outs-authoritative fallback.
 
 The `SameShape`, `Semantic`, `Payload`, and `OutsAuthoritative` wrappers name
 reviewed contract categories without requiring the exhaustive inventory audit
@@ -81,7 +89,7 @@ Choose the smallest mechanism that matches the operation's semantics:
 |---|---|
 | Result shape equals DPS init shape, including most multi-result DPS ops | Shared `HipDpsOpInterface` default |
 | Result shape equals a named input | `reifyElementwiseSameShape` or a small dedicated thunk |
-| NumPy-style broadcast | `Hip_DpsOp_Broadcast` and broadcast helpers |
+| NumPy-style broadcast | `Hip_DpsOp_Broadcast`, `reifyBroadcastResultShape`, and the shared converter bridge |
 | Reduction with constant axes/keepdims | `Hip_DpsOp_Reduction` and reduction helpers |
 | Permutation | `reifyTransposeByPerm` |
 | Gather/GatherND/GatherElements | Gather-specific helpers or thunks |
@@ -184,6 +192,33 @@ Common DPS verification is similarly centralized in `verifyDpsComputeOp`. It
 checks ranked tensor/memref uniformity, destination count, result count, and
 tensor result/init type equality before a category-specific verifier examines
 shape semantics.
+
+Broadcast dimensions are right-aligned. Static 1 yields to the other side;
+equal non-unit static dimensions agree; dynamic/static-non-1 tightens to the
+static extent under the ONNX input contract. Two dynamic dimensions emit:
+
+```mlir
+%lhs_is_one = arith.cmpi eq, %lhs_dim, %c1 : index
+%extent = arith.select %lhs_is_one, %rhs_dim, %lhs_dim : index
+```
+
+Do not replace this with an integer maximum: broadcasting dimensions 0 and 1
+produces 0, not 1. Variadic Max/Min share one
+`lowerVariadicBroadcastChain` helper that derives every pairwise intermediate
+type from this shared broadcast shape.
+
+Reductions resolve to one internal out-to-in dimension map, consumed by both
+`inferReductionShape` (static extents) and `reifyReductionResultShape` (mixed
+extents used for destination construction and reification). The mapping matters
+for `keepdims = 0`: reducing axes `[1, 2]` of a rank-4 input maps output
+dimension 1 to input dimension 3, so a positional input-dimension copy is
+incorrect.
+
+`resolveReductionAxes` decides once whether axes are usable and returns
+`std::nullopt` when they are only known at runtime. Both destination
+construction and reification key off that answer: the converter falls back to
+a positional copy and reification lifts the `outs` shape. Constant opset-13+
+axes use the shared map; runtime axes retain the validated fallback.
 
 ### MatMul strided-batch representability
 
@@ -322,10 +357,13 @@ Primary regression coverage:
 | `test/lit/Dialect/hip-infer-shapes.mlir` | Module-level static-dimension refinement and cast barriers |
 | `test/lit/Dialect/hip-infer-loop-body-shapes.mlir` | Pre-conversion rank establishment |
 | `test/lit/Dialect/hip-dps-op-interface.mlir` | Shared `HipDpsOpInterface` reification |
-| `test/lit/Dialect/hip-broadcast-reify-shapes.mlir` | Shared broadcast reification and rank-zero success |
+| `test/lit/Dialect/hip-broadcast-reify-shapes.mlir` | Broadcast dynamic SSA, zero extents, and rank-zero success |
+| `test/lit/Dialect/hip-broadcast-shape-verifier.mlir` | Generated NumPy broadcast shape verification |
+| `test/lit/Dialect/hip-reduction-shape-verifier.mlir` | Generated reduction shape and axes verification |
 | `test/lit/Conversion/onnx-to-hip/test_reshape_shape_provenance.mlir` | Proven host Reshape shapes, dataflow joins/shared producers, unknown-payload fallback, and `-1` handling |
 | `test/lit/Dialect/hip-matmul-reify-shapes.mlir` | Per-op reification through `--resolve-shaped-type-result-dims` |
 | `test/lit/Dialect/hip-matmul-shape-verifier.mlir` | Static MatMul shape validation |
+| `test/lit/Conversion/onnx-to-hip/test_reduce_sum.mlir` | Reduction destinations, including the non-positional `keepdims = 0` dimension mapping |
 | `test/lit/Dialect/hip-loop-verifier.mlir` | Loop-carried type contract |
 | `test/lit/Dialect/hip-resolve-tensor-dims.mlir` | Production pre-bufferization dim folding |
 
@@ -334,6 +372,7 @@ Complex operations may use dedicated files; common shape categories should exten
 ## Current limitations
 
 - ONNX MatMul rank-1 operands require promotion to rank 2 before constructing `hip.matmul`; the runtime and current verifier require rank at least 2.
+- Reduction destinations fall back to a positional copy from the input when the reduced axes are only known at runtime; reification mirrors that fallback rather than inventing a shape.
 - Converter migration to inferred-type builders is incremental; explicit result-type builders remain supported.
 - A future multi-result operation that needs custom `InferTypeOpInterface` logic may require a dedicated result-type inference implementation file.
 - Runtime-dependent extents without pre-execution SSA remain dynamic.

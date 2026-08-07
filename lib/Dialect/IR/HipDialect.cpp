@@ -635,10 +635,6 @@ void MiopenAddOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
-LogicalResult MiopenAddOp::verify() {
-  return verifyDpsComputeOp(*this, {getA(), getB(), getC()}, /*numInits=*/1);
-}
-
 ParseResult MiopenAddOp::parse(OpAsmParser &parser, OperationState &result) {
   return parseSingleInitDpsOp(parser, result, /*numIns=*/2);
 }
@@ -660,11 +656,6 @@ void MulOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
-LogicalResult MulOp::verify() {
-  return verifyDpsComputeOp(*this, {getLhs(), getRhs(), getOutput()},
-                            /*numInits=*/1);
-}
-
 ParseResult MulOp::parse(OpAsmParser &parser, OperationState &result) {
   return parseSingleInitDpsOp(parser, result, /*numIns=*/2);
 }
@@ -684,11 +675,6 @@ void AddOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
-}
-
-LogicalResult AddOp::verify() {
-  return verifyDpsComputeOp(*this, {getLhs(), getRhs(), getOutput()},
-                            /*numInits=*/1);
 }
 
 ParseResult AddOp::parse(OpAsmParser &parser, OperationState &result) {

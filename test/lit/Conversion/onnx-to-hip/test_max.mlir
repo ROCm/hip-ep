@@ -61,8 +61,41 @@ module {
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[A:.*]]: tensor<?x?xf32>, %[[B:.*]]: tensor<?x?xf32>)
   // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
   // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
-  // CHECK: %[[DIM0:.*]] = tensor.dim %[[A]], %[[C0]] : tensor<?x?xf32>
-  // CHECK: %[[DIM1:.*]] = tensor.dim %[[A]], %[[C1]] : tensor<?x?xf32>
+  // CHECK-DAG: %[[A0:.*]] = tensor.dim %[[A]], %[[C0]] : tensor<?x?xf32>
+  // CHECK-DAG: %[[A1:.*]] = tensor.dim %[[A]], %[[C1]] : tensor<?x?xf32>
+  // CHECK-DAG: %[[B0:.*]] = tensor.dim %[[B]], %[[C0]] : tensor<?x?xf32>
+  // CHECK-DAG: %[[B1:.*]] = tensor.dim %[[B]], %[[C1]] : tensor<?x?xf32>
+  // CHECK: %[[IS1_0:.*]] = arith.cmpi eq, %[[A0]], %[[C1]] : index
+  // CHECK: %[[DIM0:.*]] = arith.select %[[IS1_0]], %[[B0]], %[[A0]] : index
+  // CHECK: %[[IS1_1:.*]] = arith.cmpi eq, %[[A1]], %[[C1]] : index
+  // CHECK: %[[DIM1:.*]] = arith.select %[[IS1_1]], %[[B1]], %[[A1]] : index
   // CHECK: %[[INIT:.*]] = tensor.empty(%[[DIM0]], %[[DIM1]]) : tensor<?x?xf32>
   // CHECK: hip.max(%[[CTX]]) ins(%[[A]], %[[B]] : tensor<?x?xf32>, tensor<?x?xf32>) outs(%[[INIT]] : tensor<?x?xf32>)
+
+  // --- Case 5: different operands contribute different dynamic axes ---
+  func.func @max_asymmetric_broadcast(%a: tensor<?x1xf32>, %b: tensor<1x?xf32>) -> tensor<?x?xf32> {
+    %result = "onnx.Max"(%a, %b) : (tensor<?x1xf32>, tensor<1x?xf32>) -> tensor<?x?xf32>
+    return %result : tensor<?x?xf32>
+  }
+
+  // CHECK-LABEL: func.func @max_asymmetric_broadcast
+  // CHECK-SAME: (%{{.*}}: !hip.context, %[[A:[A-Za-z0-9_]+]]: tensor<?x1xf32>, %[[B:[A-Za-z0-9_]+]]: tensor<1x?xf32>)
+  // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
+  // CHECK: %[[M:.*]] = tensor.dim %[[A]], %[[C0]] : tensor<?x1xf32>
+  // CHECK: %[[N:.*]] = tensor.dim %[[B]], %[[C1]] : tensor<1x?xf32>
+  // CHECK: %[[INIT:.*]] = tensor.empty(%[[M]], %[[N]]) : tensor<?x?xf32>
+  // CHECK: hip.max
+
+  // --- Case 6: variadic pairwise lowering grows intermediate rank ---
+  func.func @max_variadic_rank_growth(%a: tensor<4xf32>, %b: tensor<3x4xf32>, %c: tensor<2x3x4xf32>) -> tensor<2x3x4xf32> {
+    %result = "onnx.Max"(%a, %b, %c) : (tensor<4xf32>, tensor<3x4xf32>, tensor<2x3x4xf32>) -> tensor<2x3x4xf32>
+    return %result : tensor<2x3x4xf32>
+  }
+
+  // CHECK-LABEL: func.func @max_variadic_rank_growth
+  // CHECK: %[[E0:.*]] = tensor.empty() : tensor<3x4xf32>
+  // CHECK: %[[M0:.*]] = hip.max{{.*}}outs(%[[E0]] : tensor<3x4xf32>)
+  // CHECK: %[[E1:.*]] = tensor.empty() : tensor<2x3x4xf32>
+  // CHECK: hip.max{{.*}}ins(%[[M0]], {{.*}} : tensor<3x4xf32>, tensor<2x3x4xf32>) outs(%[[E1]] : tensor<2x3x4xf32>)
 }

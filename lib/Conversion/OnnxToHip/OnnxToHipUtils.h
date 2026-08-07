@@ -144,6 +144,25 @@ bool extractConstantIntVector(
     CompileTimeConstantScope scope =
         CompileTimeConstantScope::IncludeExternalized);
 
+/// Resolve the reduced axis list of an ONNX reduction op.
+///
+/// The axes arrive either as an `axes` attribute (opset < 13) or as an operand
+/// (opset 13+) that may still be a compile-time constant. ONNX's empty-axes
+/// semantics are applied here: with `noop_with_empty_axes = 0` an absent or
+/// empty list reduces every axis, and with 1 it reduces nothing.
+///
+/// Returns `std::nullopt` when the axes are only known at runtime. The axis
+/// mapping is then data-dependent and no shape rule applies, so both
+/// destination construction and reification fall back to the `outs` shape.
+/// Deciding this from one predicate is what keeps those two paths in agreement.
+///
+/// \p storage is caller-owned scratch that backs the returned view; it must
+/// outlive the result and must not be modified while the view is in use.
+std::optional<llvm::ArrayRef<int64_t>>
+resolveReductionAxes(mlir::Operation *op, mlir::Value data,
+                     int64_t noopWithEmptyAxes,
+                     llvm::SmallVectorImpl<int64_t> &storage);
+
 /// Build a tensor.empty with the imported result type and the dynamic sizes
 /// described by `reifiedShape`. Validation completes before any index values or
 /// destination IR are emitted.
@@ -179,38 +198,19 @@ getTensorTypeFromReifiedShape(llvm::ArrayRef<mlir::OpFoldResult> reifiedShape,
 ///   keepdims=1: reduced axes become size 1, other dims preserved.
 ///   keepdims=0: reduced axes are dropped.
 ///
-/// \p reducedAxes          reduced axis indices (may be negative; normalized
-///                         here). For the all-axes default the caller passes
-///                         every axis; for a noop (empty axes) it passes none.
-/// \p axesStaticallyKnown  false when axes are only known at runtime, in which
-///                         case an unranked result cannot be inferred.
+/// The shape rule itself is shared with destination construction and
+/// `reifyResultShapes` through `mlir::hip::inferReductionShape`.
+///
+/// \p reducedAxes reduced axis indices (may be negative; normalized by the
+///                shared helper), or `std::nullopt` when the axes are only
+///                known at runtime, in which case an unranked result cannot be
+///                inferred.
 /// Returns failure only when the result is unranked AND cannot be inferred
 /// (unranked/absent input type, or runtime-only axes).
-inline mlir::FailureOr<mlir::RankedTensorType>
+mlir::FailureOr<mlir::RankedTensorType>
 inferReduceResultType(mlir::Operation *op, mlir::Value data,
-                      llvm::ArrayRef<int64_t> reducedAxes,
-                      bool axesStaticallyKnown, int64_t keepdims) {
-  if (auto ranked =
-          mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType()))
-    return ranked;
-  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
-  if (!inputType || !axesStaticallyKnown)
-    return mlir::failure();
-  int64_t rank = inputType.getRank();
-  llvm::SmallVector<bool> reduced(rank, false);
-  for (int64_t a : reducedAxes)
-    reduced[a < 0 ? a + rank : a] = true;
-  llvm::SmallVector<int64_t> outShape;
-  for (int64_t i = 0; i < rank; ++i) {
-    if (reduced[i]) {
-      if (keepdims)
-        outShape.push_back(1);
-    } else {
-      outShape.push_back(inputType.getDimSize(i));
-    }
-  }
-  return mlir::RankedTensorType::get(outShape, inputType.getElementType());
-}
+                      std::optional<llvm::ArrayRef<int64_t>> reducedAxes,
+                      int64_t keepdims);
 
 /// Create a tensor.empty for a DPS init whose shape is the NumPy-style
 /// broadcast of \p operands. Converter destination construction delegates to
@@ -219,6 +219,31 @@ mlir::FailureOr<mlir::Value>
 createBroadcastEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
                            mlir::RankedTensorType resultType,
                            mlir::ValueRange operands);
+
+/// Create a tensor.empty for the DPS init of an ONNX reduction op.
+///
+/// When \p reducedAxes carries a value the extents come from
+/// `reifyReductionResultShape` — the same helper that backs
+/// `reifyResultShapes` — so the destination and the shape observed by
+/// consumers implement one ONNX reduction shape function. This matters for
+/// `keepdims=0`, where the output dimension order is not positional in the
+/// input.
+///
+/// `std::nullopt` means the axes are only known at runtime: the mapping is then
+/// data-dependent and no shape function applies, so the destination falls back
+/// to a positional copy from `data`. `reifyReductionShape` bails on the same
+/// condition and lifts the `outs` shape instead, so the two still agree.
+mlir::FailureOr<mlir::Value>
+createReductionEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
+                           mlir::RankedTensorType resultType, mlir::Value data,
+                           std::optional<llvm::ArrayRef<int64_t>> reducedAxes,
+                           int64_t keepdims);
+
+/// Return the ONNX reduction's axes operand, or materialize the resolved
+/// attribute/default axes as one rank-1 i64 constant.
+mlir::Value materializeReductionAxes(mlir::OpBuilder &builder,
+                                     mlir::Location loc, mlir::Operation *op,
+                                     llvm::ArrayRef<int64_t> resolvedAxes);
 
 /// Get !hip.context from function argument 0. Returns failure if the
 /// function has no arguments or the first argument is not !hip.context.
@@ -258,6 +283,123 @@ inline int64_t getHipdnnInputDataType(mlir::Type elemType) {
       elemType.isSignlessInteger(8))
     return 5; // HIPDNN_EP_DATATYPE_INT8 (bool/i1, signed/signless i8)
   return -1;
+}
+
+/// Shared ONNX reduction conversion skeleton. All six supported reductions
+/// differ only by their HIP op type; axes/default resolution, unranked result
+/// recovery, destination construction, and attributes stay centralized here.
+template <typename HipOpTy>
+class OnnxReductionToHip final : public mlir::RewritePattern {
+public:
+  OnnxReductionToHip(mlir::MLIRContext *ctx, llvm::StringRef onnxOpName)
+      : RewritePattern(onnxOpName, /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    if (op->getNumOperands() < 1 || op->getNumResults() != 1)
+      return rewriter.notifyMatchFailure(
+          op, "reduction expects at least one input and one output");
+
+    auto context = getContextArg(op, rewriter);
+    if (mlir::failed(context))
+      return mlir::failure();
+
+    mlir::Value data = op->getOperand(0);
+    int64_t noopWithEmptyAxes = 0;
+    if (auto attr =
+            op->getAttrOfType<mlir::IntegerAttr>("noop_with_empty_axes"))
+      noopWithEmptyAxes = attr.getSInt();
+    int64_t keepdims = 1;
+    if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("keepdims"))
+      keepdims = attr.getSInt();
+
+    llvm::SmallVector<int64_t> axesStorage;
+    std::optional<llvm::ArrayRef<int64_t>> reducedAxes =
+        resolveReductionAxes(op, data, noopWithEmptyAxes, axesStorage);
+    auto resultType = inferReduceResultType(op, data, reducedAxes, keepdims);
+    if (mlir::failed(resultType))
+      return rewriter.notifyMatchFailure(
+          op, "cannot infer unranked reduction result without ranked data and "
+              "compile-time axes");
+
+    mlir::Location loc = op->getLoc();
+    auto init = createReductionEmptyTensor(rewriter, loc, *resultType, data,
+                                           reducedAxes, keepdims);
+    if (mlir::failed(init))
+      return rewriter.notifyMatchFailure(
+          op, "result type is incompatible with the reduction shape");
+
+    mlir::Value axes = materializeReductionAxes(rewriter, loc, op, axesStorage);
+    auto hipOp = HipOpTy::create(rewriter, loc, *context, data, axes, *init,
+                                 rewriter.getI64IntegerAttr(keepdims),
+                                 rewriter.getI64IntegerAttr(noopWithEmptyAxes));
+    rewriter.replaceOp(op, hipOp->getResult(0));
+    return mlir::success();
+  }
+};
+
+/// Lower a variadic ONNX elementwise op to a left-associated chain of pairwise
+/// broadcasting HIP ops:
+///
+///   Max(a, b, c) -> hip.max(hip.max(a, b), c)
+///
+/// Each step's destination comes from `reifyBroadcastResultShape`, the same
+/// helper backing `Hip_DpsOp_Broadcast`'s `reifyResultShapes`, so no step's
+/// `outs` shape can disagree with the shape its consumers observe. Intermediate
+/// steps take the type of their own broadcast shape; only the final step has to
+/// match the imported ONNX result type. A single operand is the identity.
+template <typename HipOpTy>
+mlir::LogicalResult
+lowerVariadicBroadcastChain(mlir::Operation *op,
+                            mlir::PatternRewriter &rewriter) {
+  llvm::StringRef opName = op->getName().getStringRef();
+  unsigned numInputs = op->getNumOperands();
+  if (numInputs == 0)
+    return rewriter.notifyMatchFailure(op, llvm::Twine(opName) +
+                                               " requires at least 1 input");
+
+  if (numInputs == 1) {
+    rewriter.replaceOp(op, op->getOperand(0));
+    return mlir::success();
+  }
+
+  auto ctxOrFailure = getContextArg(op, rewriter);
+  if (mlir::failed(ctxOrFailure))
+    return mlir::failure();
+  mlir::Value context = *ctxOrFailure;
+  mlir::Location loc = op->getLoc();
+
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+
+  mlir::Value accumulate = op->getOperand(0);
+  for (unsigned i : llvm::seq<unsigned>(1, numInputs)) {
+    mlir::Value rhs = op->getOperand(i);
+    mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>> stepShape =
+        mlir::hip::reifyBroadcastResultShape(rewriter, loc, {accumulate, rhs},
+                                             [&]() { return op->emitError(); });
+    if (mlir::failed(stepShape))
+      return mlir::failure();
+
+    bool isFinal = i == numInputs - 1;
+    mlir::RankedTensorType stepResultType =
+        isFinal ? resultType
+                : getTensorTypeFromReifiedShape(*stepShape,
+                                                resultType.getElementType());
+    mlir::FailureOr<mlir::Value> init = createEmptyTensorFromReifiedShape(
+        rewriter, loc, stepResultType, *stepShape);
+    if (mlir::failed(init))
+      return rewriter.notifyMatchFailure(
+          op, llvm::Twine(opName) +
+                  " result type is incompatible with the broadcast shape");
+
+    accumulate = HipOpTy::create(rewriter, loc, context, accumulate, rhs, *init)
+                     ->getResult(0);
+  }
+
+  rewriter.replaceOp(op, accumulate);
+  return mlir::success();
 }
 
 /// Build a hip.gqa op for the Whisper-MHA / Whisper-encoder-Attention paths.
