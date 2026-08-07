@@ -5,9 +5,265 @@
 
 #include "OnnxToHipUtils.h"
 
+#include <algorithm>
+#include <optional>
+#include <utility>
+
 namespace mlir {
 namespace hip {
 namespace {
+
+bool isProvenHostShapeScalar(mlir::Value value) {
+  mlir::Operation *def = value.getDefiningOp();
+  if (!def)
+    return false;
+  if (mlir::isa<mlir::arith::ConstantOp, mlir::tensor::DimOp>(def))
+    return true;
+  if (mlir::isa<mlir::arith::IndexCastOp, mlir::arith::ExtSIOp,
+                mlir::arith::TruncIOp, mlir::arith::AddIOp, mlir::arith::SubIOp,
+                mlir::arith::MulIOp, mlir::arith::DivSIOp, mlir::arith::DivUIOp,
+                mlir::arith::CmpIOp, mlir::arith::SelectOp, mlir::arith::AndIOp,
+                mlir::arith::OrIOp>(def))
+    return llvm::all_of(def->getOperands(), isProvenHostShapeScalar);
+  return false;
+}
+
+bool isProvenNonNegativeShapeScalar(mlir::Value value) {
+  mlir::Operation *def = value.getDefiningOp();
+  if (!def)
+    return false;
+  if (auto constant = mlir::dyn_cast<mlir::arith::ConstantOp>(def)) {
+    auto integer = mlir::dyn_cast<mlir::IntegerAttr>(constant.getValue());
+    return integer && integer.getValue().isNonNegative();
+  }
+  if (mlir::isa<mlir::tensor::DimOp>(def))
+    return true;
+  if (auto indexCast = mlir::dyn_cast<mlir::arith::IndexCastOp>(def))
+    return isLosslessShapeIndexCast(indexCast) &&
+           isProvenNonNegativeShapeScalar(indexCast.getIn());
+  if (mlir::isa<mlir::arith::ExtSIOp>(def))
+    return isProvenNonNegativeShapeScalar(def->getOperand(0));
+  return false;
+}
+
+bool isProvenPositiveShapeScalar(mlir::Value value) {
+  mlir::Operation *def = value.getDefiningOp();
+  if (!def)
+    return false;
+  if (auto constant = mlir::dyn_cast<mlir::arith::ConstantOp>(def)) {
+    auto integer = mlir::dyn_cast<mlir::IntegerAttr>(constant.getValue());
+    return integer && integer.getValue().isStrictlyPositive();
+  }
+  if (auto indexCast = mlir::dyn_cast<mlir::arith::IndexCastOp>(def))
+    return isLosslessShapeIndexCast(indexCast) &&
+           isProvenPositiveShapeScalar(indexCast.getIn());
+  if (mlir::isa<mlir::arith::ExtSIOp>(def))
+    return isProvenPositiveShapeScalar(def->getOperand(0));
+  return false;
+}
+
+struct ValidatedDynamicReshapeShape {
+  bool hasProvenHostShape;
+  bool hasNoMinusOneProof;
+  mlir::DenseI64ArrayAttr inputDimMap;
+  int64_t allowzero;
+  std::optional<llvm::SmallVector<mlir::Value>> hostElements;
+  std::optional<llvm::SmallVector<int64_t>> constantElements;
+};
+
+mlir::FailureOr<ValidatedDynamicReshapeShape>
+validateDynamicReshapeShape(mlir::Operation *op, mlir::Value data,
+                            mlir::Value shapeOperand, int64_t inputRank,
+                            int64_t outputRank) {
+  bool hasProvenHostShape = op->hasAttr(kHostShapeOperandAttr);
+  bool hasNoMinusOneProof = op->hasAttr(kHostShapeNoMinusOneAttr);
+  auto inputDimMap =
+      op->getAttrOfType<mlir::DenseI64ArrayAttr>(kHostShapeInputDimMapAttr);
+  if (hasNoMinusOneProof && !hasProvenHostShape) {
+    op->emitError("nonnegative shape proof requires host shape proof");
+    return mlir::failure();
+  }
+  if (hasProvenHostShape &&
+      (!inputDimMap || inputDimMap.size() != static_cast<size_t>(outputRank))) {
+    op->emitError("host shape proof requires an input-dimension map");
+    return mlir::failure();
+  }
+
+  int64_t allowzero = 0;
+  if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("allowzero"))
+    allowzero = attr.getSInt();
+  if (allowzero != 0 && allowzero != 1) {
+    op->emitError("Reshape allowzero must be 0 or 1");
+    return mlir::failure();
+  }
+
+  std::optional<llvm::SmallVector<mlir::Value>> hostElements;
+  std::optional<llvm::SmallVector<int64_t>> constantElements;
+  if (hasProvenHostShape) {
+    if (auto fromElements =
+            shapeOperand.getDefiningOp<mlir::tensor::FromElementsOp>()) {
+      if (fromElements.getElements().size() !=
+          static_cast<size_t>(outputRank)) {
+        op->emitError("malformed proven host shape operand");
+        return mlir::failure();
+      }
+      hostElements.emplace(fromElements.getElements().begin(),
+                           fromElements.getElements().end());
+      if (llvm::any_of(*hostElements, [](mlir::Value element) {
+            return !isProvenHostShapeScalar(element);
+          })) {
+        op->emitError("proven host shape contains unsafe scalar");
+        return mlir::failure();
+      }
+    } else {
+      llvm::SmallVector<int64_t> constants;
+      if (!extractConstantIntTensor(shapeOperand, constants,
+                                    /*expectedRank=*/1) ||
+          constants.size() != static_cast<size_t>(outputRank)) {
+        op->emitError("malformed proven host shape operand");
+        return mlir::failure();
+      }
+      constantElements = std::move(constants);
+    }
+  } else {
+    llvm::SmallVector<int64_t> constants;
+    if (extractConstantIntTensor(shapeOperand, constants, /*expectedRank=*/1) &&
+        constants.size() == static_cast<size_t>(outputRank))
+      constantElements = std::move(constants);
+  }
+
+  unsigned minusOneCount = 0;
+  auto validateConstant = [&](int64_t value) -> mlir::LogicalResult {
+    if (value < -1) {
+      op->emitError("Reshape target dimensions must be at least -1");
+      return mlir::failure();
+    }
+    minusOneCount += value == -1;
+    return mlir::success();
+  };
+  if (constantElements) {
+    for (int64_t value : *constantElements)
+      if (mlir::failed(validateConstant(value)))
+        return mlir::failure();
+  } else if (hostElements) {
+    for (mlir::Value element : *hostElements) {
+      mlir::IntegerAttr constant;
+      if (mlir::matchPattern(element, mlir::m_Constant(&constant))) {
+        if (mlir::failed(validateConstant(constant.getValue().getSExtValue())))
+          return mlir::failure();
+        continue;
+      }
+      if (!isProvenNonNegativeShapeScalar(element)) {
+        op->emitError("host shape proof contains an unproven runtime value");
+        return mlir::failure();
+      }
+    }
+  }
+  if (minusOneCount > 1) {
+    op->emitError(hasProvenHostShape
+                      ? "host shape proof contains multiple -1 entries"
+                      : "Reshape target may contain at most one -1");
+    return mlir::failure();
+  }
+  if (constantElements)
+    hasNoMinusOneProof = llvm::all_of(*constantElements,
+                                      [](int64_t value) { return value >= 0; });
+
+  auto isNonNegative = [](mlir::Value value) {
+    return isProvenNonNegativeShapeScalar(value);
+  };
+  if (hasNoMinusOneProof &&
+      ((constantElements &&
+        llvm::any_of(*constantElements,
+                     [](int64_t value) { return value < 0; })) ||
+       (hostElements && llvm::any_of(*hostElements, [&](mlir::Value value) {
+          return !isNonNegative(value);
+        })))) {
+    op->emitError("invalid nonnegative shape proof");
+    return mlir::failure();
+  }
+
+  if (allowzero == 1 && minusOneCount != 0) {
+    bool hasZero =
+        constantElements &&
+        llvm::is_contained(*constantElements, static_cast<int64_t>(0));
+    if (hostElements)
+      hasZero |= llvm::any_of(*hostElements, [](mlir::Value value) {
+        mlir::IntegerAttr constant;
+        return mlir::matchPattern(value, mlir::m_Constant(&constant)) &&
+               constant.getValue().isZero();
+      });
+    if (hasZero) {
+      op->emitError("Reshape cannot combine allowzero=1, zero, and -1");
+      return mlir::failure();
+    }
+    bool allOtherEntriesPositive =
+        (constantElements && llvm::all_of(*constantElements,
+                                          [](int64_t value) {
+                                            return value == -1 || value > 0;
+                                          })) ||
+        (hostElements && llvm::all_of(*hostElements, [](mlir::Value value) {
+           mlir::IntegerAttr constant;
+           return (mlir::matchPattern(value, mlir::m_Constant(&constant)) &&
+                   constant.getValue().getSExtValue() == -1) ||
+                  isProvenPositiveShapeScalar(value);
+         }));
+    if (hasProvenHostShape && !allOtherEntriesPositive) {
+      op->emitError(
+          "allowzero=1 with -1 requires positive proven target dimensions");
+      return mlir::failure();
+    }
+  }
+
+  auto getConstantAt = [&](int64_t index) -> std::optional<int64_t> {
+    if (constantElements)
+      return (*constantElements)[index];
+    if (!hostElements)
+      return std::nullopt;
+    mlir::IntegerAttr constant;
+    if (!mlir::matchPattern((*hostElements)[index],
+                            mlir::m_Constant(&constant)))
+      return std::nullopt;
+    return constant.getValue().getSExtValue();
+  };
+  if (allowzero == 0) {
+    for (int64_t index = inputRank; index < outputRank; ++index) {
+      std::optional<int64_t> constant = getConstantAt(index);
+      if (constant && *constant == 0) {
+        op->emitError("out-of-rank Reshape target entry cannot be zero");
+        return mlir::failure();
+      }
+      if (hasProvenHostShape && (!constant || *constant < 0)) {
+        op->emitError("out-of-rank proven Reshape target must be positive");
+        return mlir::failure();
+      }
+    }
+  }
+
+  if (hasProvenHostShape) {
+    for (int64_t index : llvm::seq<int64_t>(std::min(inputRank, outputRank))) {
+      if (inputDimMap[index] != index)
+        continue;
+      if (!hostElements) {
+        op->emitError("invalid input-dimension equivalence proof");
+        return mlir::failure();
+      }
+      mlir::Value dimValue = (*hostElements)[index];
+      if (auto cast = dimValue.getDefiningOp<mlir::arith::IndexCastOp>())
+        dimValue = cast.getIn();
+      auto dim = dimValue.getDefiningOp<mlir::tensor::DimOp>();
+      if (!dim || !dim.getConstantIndex() || dim.getSource() != data ||
+          *dim.getConstantIndex() != index) {
+        op->emitError("invalid input-dimension equivalence proof");
+        return mlir::failure();
+      }
+    }
+  }
+
+  return ValidatedDynamicReshapeShape{
+      hasProvenHostShape, hasNoMinusOneProof,      inputDimMap,
+      allowzero,          std::move(hostElements), std::move(constantElements)};
+}
 
 //===----------------------------------------------------------------------===//
 // Shape Operations Helpers (Reshape, Unsqueeze, Squeeze)
@@ -190,6 +446,10 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
                   mlir::PatternRewriter &rewriter) const override {
+    if (op->getNumOperands() != 2 || op->getNumResults() != 1) {
+      op->emitError("onnx.Reshape expects exactly two operands and one result");
+      return mlir::failure();
+    }
     mlir::Value data = op->getOperand(0);
     auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
     auto outputType =
@@ -494,8 +754,21 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
       auto shapeTy =
           mlir::dyn_cast<mlir::RankedTensorType>(shapeOperand.getType());
       if (shapeTy && shapeTy.getRank() == 1 &&
-          shapeTy.getElementType().isInteger() &&
+          shapeTy.getElementType().isInteger(64) &&
           shapeTy.getDimSize(0) == outputRank) {
+        // Complete every fallible check, including proof-marker revalidation,
+        // before creating replacement IR. RewritePattern failure must leave the
+        // original IR unchanged, so this path's first rewriter mutation occurs
+        // only after validation succeeds.
+        mlir::FailureOr<ValidatedDynamicReshapeShape> validatedShape =
+            validateDynamicReshapeShape(op, data, shapeOperand, inputRank,
+                                        outputRank);
+        if (mlir::failed(validatedShape))
+          return mlir::failure();
+        bool hasProvenHostShape = validatedShape->hasProvenHostShape;
+        bool hasNoMinusOneProof = validatedShape->hasNoMinusOneProof;
+        mlir::DenseI64ArrayAttr inputDimMap = validatedShape->inputDimMap;
+        int64_t allowzero = validatedShape->allowzero;
         // ONNX `Reshape` permits one shape entry to be `-1`, meaning "infer
         // this dim so the total element count is preserved". `memref.reshape`
         // (the bufferization target of `tensor.reshape`) does NOT interpret
@@ -531,6 +804,8 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
                                                         /*isSigned=*/true)));
         mlir::Value cOne = mlir::arith::ConstantOp::create(
             rewriter, loc, rewriter.getIntegerAttr(elemTy, 1));
+        mlir::Value cZero = mlir::arith::ConstantOp::create(
+            rewriter, loc, rewriter.getIntegerAttr(elemTy, 0));
 
         // total = product of input dim sizes (as elemTy).
         mlir::Value total = cOne;
@@ -546,15 +821,61 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
         // negative / zero as 1 for the divisor) to find the inferred dim.
         llvm::SmallVector<mlir::Value> dims;
         dims.reserve(outputRank);
+        if (validatedShape->hostElements) {
+          llvm::append_range(dims, *validatedShape->hostElements);
+        } else if (validatedShape->constantElements) {
+          for (int64_t value : *validatedShape->constantElements)
+            dims.push_back(mlir::arith::ConstantOp::create(
+                rewriter, loc, rewriter.getI64IntegerAttr(value)));
+        } else {
+          for (int64_t i : llvm::seq<int64_t>(outputRank)) {
+            // Read each shape entry to the host with a stream sync (constants
+            // fold) instead of a bare host load of device memory. A bare
+            // tensor.extract here races a GPU-computed shape tensor and yields
+            // a garbage dim that collapses the reshape. See ReadbackScalar.h.
+            dims.push_back(readbackShapeEntryToHostOrExtract(rewriter, loc, op,
+                                                             shapeOperand, i));
+          }
+        }
+
+        if (allowzero == 0) {
+          for (int64_t i : llvm::seq<int64_t>(outputRank)) {
+            mlir::IntegerAttr constant;
+            bool isConstant =
+                mlir::matchPattern(dims[i], mlir::m_Constant(&constant));
+            if (i >= inputRank)
+              continue;
+            if (hasProvenHostShape && inputDimMap[i] == i)
+              continue;
+            mlir::Value inputDim =
+                mlir::tensor::DimOp::create(rewriter, loc, data, i);
+            mlir::Value inputDimI64 = mlir::arith::IndexCastOp::create(
+                rewriter, loc, elemTy, inputDim);
+            if (isConstant) {
+              if (constant.getValue().getSExtValue() == 0)
+                dims[i] = inputDimI64;
+              continue;
+            }
+            mlir::Value isZero = mlir::arith::CmpIOp::create(
+                rewriter, loc, mlir::arith::CmpIPredicate::eq, dims[i], cZero);
+            dims[i] = mlir::arith::SelectOp::create(rewriter, loc, isZero,
+                                                    inputDimI64, dims[i]);
+          }
+        }
+
+        if (hasNoMinusOneProof) {
+          auto newShapeTy =
+              mlir::RankedTensorType::get({(int64_t)outputRank}, elemTy);
+          mlir::Value newShape = mlir::tensor::FromElementsOp::create(
+              rewriter, loc, newShapeTy, dims);
+          auto reshapeOp = mlir::tensor::ReshapeOp::create(
+              rewriter, loc, outputType, data, newShape);
+          rewriter.replaceOp(op, reshapeOp.getResult());
+          return mlir::success();
+        }
+
         mlir::Value posProduct = cOne;
-        for (int64_t i : llvm::seq<int64_t>(outputRank)) {
-          // Read each shape entry to the host with a stream sync (constants
-          // fold) instead of a bare host load of device memory. A bare
-          // tensor.extract here races a GPU-computed shape tensor and yields a
-          // garbage dim that collapses the reshape. See ReadbackScalar.h.
-          mlir::Value v = readbackShapeEntryToHostOrExtract(rewriter, loc, op,
-                                                            shapeOperand, i);
-          dims.push_back(v);
+        for (mlir::Value v : dims) {
           mlir::Value isPositive = mlir::arith::CmpIOp::create(
               rewriter, loc, mlir::arith::CmpIPredicate::sgt, v, cOne);
           // sgt 1 catches >=2; combine with == 1 to keep 1 too.
