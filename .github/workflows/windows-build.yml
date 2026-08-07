@@ -22,12 +22,23 @@ jobs:
     # (gsl/util C2220 warning-as-error). Pin to the VS 2022 image per
     # actions/runner-images#14017.
     runs-on: windows-2022
+    # Build each TheRock ROCm SDK version in parallel. fail-fast: false so one
+    # version's failure does not cancel the others. The version flows into the
+    # build (-DTHEROCK_VERSION drives the deps.cmake auto-download + the rocm
+    # wheel pin), the packaged amdhip64_7.dll, and the per-version artifact names
+    # consumed by the matching gpu-test leg.
+    strategy:
+      fail-fast: false
+      matrix:
+        therock: ["7.11.0", "7.12.0", "7.13.0"]
     # Cancel the build job when a newer commit lands on the same PR ref to
-    # save runner minutes. gpu-test deliberately does NOT inherit this rule
-    # (see its own concurrency block below) so an in-progress GPU run keeps
-    # going to completion even if a newer build supersedes it.
+    # save runner minutes. The matrix version is part of the group so sibling
+    # legs of the same run do not cancel each other. gpu-test deliberately does
+    # NOT inherit this rule (see its own concurrency block below) so an
+    # in-progress GPU run keeps going to completion even if a newer build
+    # supersedes it.
     concurrency:
-      group: build-windows-${{ github.ref }}
+      group: build-windows-${{ github.ref }}-${{ matrix.therock }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
     env:
@@ -330,10 +341,10 @@ jobs:
       # Build onnx-hipdnn-ep via the cross-platform build.py (same driver
       # as the Linux CI and docs/quick_start.md). Cached LLVM/ORT prefixes are
       # injected; protobuf/flatbuffers build from source and TheRock auto-downloads
-      # via cmake/deps.cmake. build.py's default build/install dirs resolve to
-      # ${{ runner.workspace }}/build/<repo> and ${{ runner.workspace }}/install
-      # (repo.parent), matching what the later staging step expects. The LIT tests
-      # run inside build.py after install.
+      # via cmake/deps.cmake at the matrix version (-DTHEROCK_VERSION). build.py's
+      # default build/install dirs resolve to ${{ runner.workspace }}/build/<repo>
+      # and ${{ runner.workspace }}/install (repo.parent), matching what the later
+      # staging step expects. The LIT tests run inside build.py after install.
       #
       # HIP_WHEEL_EXTRA_DLLS feeds the wheel target the amdgpu-ep.dll +
       # hip-backend.dll built above, so the morphizen wheel ships the whole
@@ -353,6 +364,7 @@ jobs:
             --hip_arch gfx1151 \
             --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install" \
             --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON \
+            --cmake_extra_defines THEROCK_VERSION=${{ matrix.therock }} \
             --cmake_extra_defines "HIP_WHEEL_EXTRA_DLLS=$AMDGPU_EP;$HIP_BACKEND"
 
       # -----------------------------------------------------------------------
@@ -558,7 +570,8 @@ jobs:
           cp "${{ runner.workspace }}/install/lib/"*.lib staging/lib/ 2>/dev/null || true
 
           # amdhip64_7.dll – HIP runtime required at inference time. TheRock was
-          # auto-downloaded by cmake/deps.cmake into the build tree's _therock.
+          # auto-downloaded by cmake/deps.cmake (at THEROCK_VERSION) into the
+          # build tree's _therock.
           THEROCK_DIR="../build/$(basename "$PWD")/_therock"
           cp "$THEROCK_DIR/bin/amdhip64_7.dll" staging/bin/
 
@@ -624,7 +637,7 @@ jobs:
       - name: Upload GPU test package
         uses: actions/upload-artifact@v4
         with:
-          name: gpu-test-package
+          name: gpu-test-package-${{ matrix.therock }}
           path: staging/
           retention-days: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) && 14 || 3 }}
 
@@ -658,7 +671,7 @@ jobs:
       - name: Upload Python wheel package
         uses: actions/upload-artifact@v4
         with:
-          name: hip-python-package
+          name: hip-python-package-${{ matrix.therock }}
           path: wheelpkg/
           retention-days: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) && 14 || 3 }}
 
@@ -669,12 +682,20 @@ jobs:
   gpu-test:
     needs: build-windows
     runs-on: StrixHalo
+    # Test each TheRock version against its matching build artifact. fail-fast:
+    # false so one version's failure does not cancel the others. The StrixHalo
+    # runner serializes physically, so legs run back-to-back.
+    strategy:
+      fail-fast: false
+      matrix:
+        therock: ["7.11.0", "7.12.0", "7.13.0"]
     # Never cancel an in-progress GPU run: queue newer runs of the same ref
     # behind it instead of killing the long-running perf / OGA / L2 suites.
-    # The self-hosted StrixHalo runner already serializes physically, so
-    # this group only adds explicit logical queueing for clarity.
+    # The matrix version is part of the group so sibling legs do not cancel
+    # each other. The self-hosted StrixHalo runner already serializes
+    # physically, so this group only adds explicit logical queueing for clarity.
     concurrency:
-      group: gpu-test-${{ github.ref }}
+      group: gpu-test-${{ github.ref }}-${{ matrix.therock }}
       cancel-in-progress: false
 
     permissions:
@@ -682,7 +703,7 @@ jobs:
       pull-requests: write
 
     env:
-      THEROCK_VERSION: therock-dist-windows-gfx1151-7.11.0
+      THEROCK_VERSION: therock-dist-windows-gfx1151-${{ matrix.therock }}
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
 
     steps:
@@ -703,13 +724,13 @@ jobs:
       - name: Download GPU test package
         uses: actions/download-artifact@v4
         with:
-          name: gpu-test-package
+          name: gpu-test-package-${{ matrix.therock }}
           path: gpu-test-package
 
       - name: Download Python wheel package
         uses: actions/download-artifact@v4
         with:
-          name: hip-python-package
+          name: hip-python-package-${{ matrix.therock }}
           path: wheelpkg
 
       # TheRock DLLs are required at runtime on the GPU machine.
@@ -1182,7 +1203,7 @@ jobs:
             }
           }
 
-          $header = "## L2 Accuracy Results (EP vs CPU)`n`n" +
+          $header = "## L2 Accuracy Results (EP vs CPU) - TheRock ${{ matrix.therock }}`n`n" +
                     "| Model | Combined L2 | Total Elems | Skipped NaN/Inf |`n" +
                     "|-------|------------|------------|----------------|`n"
           $footer = "`nThreshold: $threshold | Run: [${{ github.run_number }}]($runUrl) - Commit: ``$sha``"
@@ -1192,7 +1213,7 @@ jobs:
           Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
 
           if ("${{ github.event_name }}" -eq "pull_request" -and $prNumber) {
-            $marker = "<!-- morphizen-l2-results -->"
+            $marker = "<!-- morphizen-l2-results-${{ matrix.therock }} -->"
             $body = "$marker`n$summary"
 
             $commentsJson = gh api "repos/${{ github.repository }}/issues/$prNumber/comments" 2>$null
@@ -1268,7 +1289,7 @@ jobs:
 
           $perfHeader = "| Model | QPS | Session (s) | 1st Infer (ms) | CPU% | Mem (MB) |`n" +
                         "|-------|----:|----:|----:|----:|----:|`n"
-          $header = "## MorphiZen EP Performance Results`n`n" + $perfHeader
+          $header = "## MorphiZen EP Performance Results - TheRock ${{ matrix.therock }}`n`n" + $perfHeader
 
           # EPContext export/import perf tables (full_model_seq128 only).
           $epctxExportRows = Get-PerfRows "gpu-test-package/results-epctx-export"
@@ -1347,7 +1368,7 @@ jobs:
           # On pull_request events, also post/update a PR comment via gh CLI.
           # Errors are non-fatal — step summary is already written above.
           if ("${{ github.event_name }}" -eq "pull_request" -and $prNumber) {
-            $marker = "<!-- morphizen-perf-results -->"
+            $marker = "<!-- morphizen-perf-results-${{ matrix.therock }} -->"
             $body = "$marker`n$summary"
 
             # Find existing comment with marker using PowerShell JSON parsing (avoids jq escaping issues)
