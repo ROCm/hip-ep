@@ -6,28 +6,22 @@
 
 // What this file tests
 // --------------------
-// `HipDpsOp::reifyResultShapes` -- the SHARED default body carried by the
-// in-dialect `HipDpsOpInterface`. The TableGen base class `Hip_DpsOp`
-// auto-emits a per-op `ReifyRankedShapedTypeOpInterface::reifyResultShapes`
-// dispatcher that forwards to that default. The default walks
-// `getDpsInits()` in tensor mode and lifts each init operand's runtime shape
-// via `tensor::getMixedSizes`; memref mode has no SSA results and returns an
-// empty list. This file pins that, for any non-opt-out tensor-mode op
-// (i.e. autoReify=1, the default), reify produces:
+// `Hip_DpsOp_SameShape` -- the parameterized TableGen base for ops whose
+// result shape equals one named semantic source. It emits a per-op
+// `ReifyRankedShapedTypeOpInterface::reifyResultShapes` dispatcher through
+// `reifyElementwiseSameShape`, independent of the DPS init operand. This file
+// pins that the generated dispatcher produces:
 //   - `IntegerAttr` for static dims (fold to `arith.constant`)
-//   - `tensor.dim %outs, %i` for dynamic dims
+//   - `tensor.dim %source, %i` for dynamic dims
 //
-// `hip.silu` is the worked example -- a single-init same-shape elementwise
-// op with no per-op reify override on the #260 base. Other Hip_DpsOps with
-// the default (silu, sigmoid, rope, rms_norm, ...) follow the same contract
-// because they share the same auto-emitted dispatcher.
+// `hip.silu` is the input/output accessor-family example. Other migrated
+// same-shape ops use the same generated mechanism with their own accessor
+// stems.
 //
 // What this file does NOT test
 // ----------------------------
-// `MatmulOp::reifyResultShapes` -- matmul opts out of the default
-// (`autoReify=0`) and provides a tighter contract that lifts dims from the
-// `A` / `B` ins operands instead of the outs. That is covered by
-// `hip-matmul-reify-shapes.mlir`.
+// The shared outs-lift default and semantic shape contracts such as matmul are
+// covered by their respective focused tests.
 
 // CHECK-LABEL: func.func @silu_static
 // CHECK-DAG:   %[[C2:.*]] = arith.constant 2 : index
@@ -47,16 +41,13 @@ func.func @silu_static(%ctx: !hip.context,
 
 // -----
 
-// Dynamic outs operand: dim folds to `tensor.dim %y, %i`. Static dim folds
-// to a constant. The `, %[[Y...]]: tensor<?x8xf16>)` regex anchors to the
-// LAST arg of `tensor<?x8xf16>` shape (i.e. the outs operand), since the
-// input shares the same shape and FileCheck would otherwise capture the
-// first one.
+// Dynamic source operand: dim folds to `tensor.dim %x, %i`. Static dim folds
+// to a constant.
 // CHECK-LABEL: func.func @silu_dynamic
-// CHECK-SAME:   , %[[Y:[A-Za-z0-9_]+]]: tensor<?x8xf16>)
+// CHECK-SAME:   (%{{[^,]*}}, %[[X:[A-Za-z0-9_]+]]: tensor<?x8xf16>,
 // CHECK-DAG:   %[[C0:.*]] = arith.constant 0 : index
 // CHECK-DAG:   %[[C8:.*]] = arith.constant 8 : index
-// CHECK:       %[[D0:.*]] = tensor.dim %[[Y]], %[[C0]] : tensor<?x8xf16>
+// CHECK:       %[[D0:.*]] = tensor.dim %[[X]], %[[C0]] : tensor<?x8xf16>
 // CHECK:       return %[[D0]], %[[C8]]
 func.func @silu_dynamic(%ctx: !hip.context,
                         %x: tensor<?x8xf16>,
@@ -72,14 +63,14 @@ func.func @silu_dynamic(%ctx: !hip.context,
 
 // -----
 
-// Mixed static + dynamic outs: confirms per-dim handling (constant for
+// Mixed static + dynamic source: confirms per-dim handling (constant for
 // static, tensor.dim for dynamic) on the same op invocation.
 // CHECK-LABEL: func.func @silu_mixed
-// CHECK-SAME:   , %[[Y:[A-Za-z0-9_]+]]: tensor<2x?x8xf16>)
+// CHECK-SAME:   (%{{[^,]*}}, %[[X:[A-Za-z0-9_]+]]: tensor<2x?x8xf16>,
 // CHECK-DAG:   %[[C2:.*]] = arith.constant 2 : index
 // CHECK-DAG:   %[[C1:.*]] = arith.constant 1 : index
 // CHECK-DAG:   %[[C8:.*]] = arith.constant 8 : index
-// CHECK:       %[[D1:.*]] = tensor.dim %[[Y]], %[[C1]] : tensor<2x?x8xf16>
+// CHECK:       %[[D1:.*]] = tensor.dim %[[X]], %[[C1]] : tensor<2x?x8xf16>
 // CHECK:       return %[[C2]], %[[D1]], %[[C8]]
 func.func @silu_mixed(%ctx: !hip.context,
                       %x: tensor<2x?x8xf16>,

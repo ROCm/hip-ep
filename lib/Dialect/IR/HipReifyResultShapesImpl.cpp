@@ -84,26 +84,6 @@ LogicalResult GlobalPoolOp::reifyResultShapes(
 }
 
 //===----------------------------------------------------------------------===//
-// PoolOp
-//===----------------------------------------------------------------------===//
-
-LogicalResult
-PoolOp::reifyResultShapes(OpBuilder &b,
-                          ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
-  if (getNumResults() < 1 || getNumResults() > 2)
-    return failure();
-  FailureOr<SmallVector<OpFoldResult>> shape = mlir::hip::reifyPoolResultShape(
-      b, getLoc(), getInput(), detail::getI64Array(getKernelShape()),
-      detail::getI64Array(getStrides()), detail::getI64Array(getPads()),
-      detail::getI64Array(getDilations()), getCeilMode(),
-      [&]() { return this->emitOpError(); });
-  if (failed(shape))
-    return failure();
-  reifiedReturnShapes.assign(getNumResults(), *shape);
-  return success();
-}
-
-//===----------------------------------------------------------------------===//
 // ResizeOp
 //===----------------------------------------------------------------------===//
 
@@ -143,20 +123,22 @@ LogicalResult MultiHeadAttentionOp::reifyResultShapes(
 }
 
 //===----------------------------------------------------------------------===//
-// CausalConvWithStateOp
+// PoolOp
 //===----------------------------------------------------------------------===//
 
-LogicalResult CausalConvWithStateOp::reifyResultShapes(
-    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
-  if (getNumResults() != 2)
+LogicalResult
+PoolOp::reifyResultShapes(OpBuilder &b,
+                          ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() < 1 || getNumResults() > 2)
     return failure();
-  FailureOr<ReifiedRankedShapedTypeDims> shapes =
-      mlir::hip::reifyCausalConvWithStateOutputShapes(
-          b, getLoc(), getInput(), getWeight(), getBias(), getPastState(),
-          getNdim(), [&]() { return this->emitOpError(); });
-  if (failed(shapes))
+  FailureOr<SmallVector<OpFoldResult>> shape = mlir::hip::reifyPoolResultShape(
+      b, getLoc(), getInput(), detail::getI64Array(getKernelShape()),
+      detail::getI64Array(getStrides()), detail::getI64Array(getPads()),
+      detail::getI64Array(getDilations()), getCeilMode(),
+      [&]() { return this->emitOpError(); });
+  if (failed(shape))
     return failure();
-  reifiedReturnShapes = std::move(*shapes);
+  reifiedReturnShapes.assign(getNumResults(), *shape);
   return success();
 }
 
@@ -247,54 +229,21 @@ LogicalResult LinearAttentionOp::reifyResultShapes(
 }
 
 //===----------------------------------------------------------------------===//
-// RmsNormOp
-//
-// Result shape == input data tensor's shape (per-element normalization;
-// `$scale` broadcasts over leading dims and does not contribute extents).
-//
-// Before:
-//   %y = hip.rms_norm(%ctx) ins(%x, %scale : tensor<?x?x4096xf16>,
-//                                            tensor<4096xf16>)
-//                            outs(%out : tensor<?x?x?xf16>)
-//                            : tensor<?x?x?xf16>
-// After (reified result shape):
-//   dim 0 (dynamic) -> %d0 = tensor.dim %x, %c0
-//   dim 1 (dynamic) -> %d1 = tensor.dim %x, %c1
-//   dim 2 (static)  -> 4096 : index
+// CausalConvWithStateOp
 //===----------------------------------------------------------------------===//
 
-LogicalResult
-RmsNormOp::reifyResultShapes(OpBuilder &b,
-                             ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
-  return mlir::hip::reifyElementwiseSameShapeFor(
-      b, getLoc(), getInput(), getOperation(), reifiedReturnShapes);
-}
-
-//===----------------------------------------------------------------------===//
-// QMoEOp
-//
-// Result shape == input data tensor's shape. Top-k expert routing happens
-// inside the kernel and produces per-token outputs that are accumulated
-// back into the original token slot — output rank/extents match `$input`.
-// Verified against `lib/Runtime/real/qmoe.cpp`'s output buffer sizing
-// (num_tokens * hidden_size * elem_size).
-//
-// Before:
-//   %y = hip.qmoe(%ctx) ins(%x, %router, %fc1w, ... :
-//                            tensor<?x?x2880xf16>, ...)
-//                       outs(%out : tensor<?x?x?xf16>)
-//                       : tensor<?x?x?xf16>
-// After (reified result shape):
-//   dim 0 (dynamic) -> %d0 = tensor.dim %x, %c0
-//   dim 1 (dynamic) -> %d1 = tensor.dim %x, %c1
-//   dim 2 (static)  -> 2880 : index
-//===----------------------------------------------------------------------===//
-
-LogicalResult
-QMoEOp::reifyResultShapes(OpBuilder &b,
-                          ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
-  return mlir::hip::reifyElementwiseSameShapeFor(
-      b, getLoc(), getInput(), getOperation(), reifiedReturnShapes);
+LogicalResult CausalConvWithStateOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() != 2)
+    return failure();
+  FailureOr<ReifiedRankedShapedTypeDims> shapes =
+      mlir::hip::reifyCausalConvWithStateOutputShapes(
+          b, getLoc(), getInput(), getWeight(), getBias(), getPastState(),
+          getNdim(), [&]() { return this->emitOpError(); });
+  if (failed(shapes))
+    return failure();
+  reifiedReturnShapes = std::move(*shapes);
+  return success();
 }
 
 //===----------------------------------------------------------------------===//

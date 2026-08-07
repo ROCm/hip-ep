@@ -233,46 +233,6 @@ LogicalResult mlir::hip::verifyDpsComputeOp(Operation *op,
 }
 
 LogicalResult mlir::hip::verifyHipOpShape(
-    Operation *op,
-    function_ref<SmallVector<SmallVector<int64_t>>()> computeExpected) {
-  auto dpsOp = cast<DestinationStyleOpInterface>(op);
-  SmallVector<SmallVector<int64_t>> expected = computeExpected();
-  if (expected.empty())
-    return failure();
-
-  auto inits = dpsOp.getDpsInits();
-  assert(expected.size() == inits.size() &&
-         "shape helper must produce one expected shape per DPS init operand");
-  if (expected.size() != inits.size())
-    return failure();
-
-  for (auto [i, init] : llvm::enumerate(inits)) {
-    auto initType = dyn_cast<ShapedType>(init.getType());
-    if (!initType)
-      return op->emitOpError("init #") << i << " is not a shaped type";
-    ArrayRef<int64_t> actualShape = initType.getShape();
-    ArrayRef<int64_t> expectedShape = expected[i];
-    if (actualShape.size() != expectedShape.size())
-      return op->emitOpError("rank mismatch on result #")
-             << i << ": expected rank " << expectedShape.size() << " "
-             << detail::formatShape(expectedShape) << " but outs has rank "
-             << actualShape.size() << " " << detail::formatShape(actualShape);
-    for (size_t dim : llvm::seq<size_t>(0, actualShape.size())) {
-      if (ShapedType::isDynamic(actualShape[dim]) ||
-          ShapedType::isDynamic(expectedShape[dim]))
-        continue;
-      if (actualShape[dim] != expectedShape[dim])
-        return op->emitOpError("dim ")
-               << dim << " of result #" << i << " mismatch: expected "
-               << expectedShape[dim] << " "
-               << detail::formatShape(expectedShape) << " but outs has "
-               << actualShape[dim] << " " << detail::formatShape(actualShape);
-    }
-  }
-  return success();
-}
-
-LogicalResult mlir::hip::verifyHipOpShape(
     Operation *op, function_ref<FailureOr<SmallVector<int64_t>>()> inferShape,
     unsigned initIndex) {
   auto dpsOp = dyn_cast<DestinationStyleOpInterface>(op);

@@ -83,10 +83,12 @@ llvm_config.with_environment("PATH", hip_tools_dirs, append_path=True)
 tools = [
     "hip-mlir-opt",
     "hip-compiler",
+    "llvm-tblgen",
     "FileCheck",
     "not",
 ]
 llvm_config.add_tool_substitutions(tools, hip_tools_dirs + [config.llvm_tools_dir])
+config.substitutions.append(("%python", config.python_executable))
 
 # `hip_static_plugins` feature: gates the Plugin/ pass tests. The sample plugin
 # is linked STATICALLY into hip-mlir-opt when the build selected it (`sample` in

@@ -4,6 +4,7 @@
  */
 
 #include "hip/Dialect/IR/HipDialect.h"
+#include "HipShapeUtilsInternal.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -14,7 +15,6 @@
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/SymbolTable.h"
 
-#include "HipShapeUtilsInternal.h"
 #include "hip/Dialect/IR/HipShapeUtils.h"
 
 using namespace mlir;
@@ -540,6 +540,25 @@ void ConvTransposeOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+//===----------------------------------------------------------------------===//
+// HipblasltMatmulOp: ins(A, B), outs(C)
+//===----------------------------------------------------------------------===//
+
+//===----------------------------------------------------------------------===//
+// MatmulOp: ins(A, B), outs(output)
+//===----------------------------------------------------------------------===//
+
+MutableOperandRange MatmulOp::getDpsInitsMutable() {
+  // 0=ctx, 1=A, 2=B, 3=output
+  return getOutputMutable();
+}
+
+void MatmulOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
 LogicalResult ConvTransposeOp::verify() {
   SmallVector<Value> dataOperands = {getInput(), getWeights()};
   if (getBias())
@@ -571,25 +590,6 @@ LogicalResult ConvTransposeOp::verify() {
       return emitOpError("bias length must match output channels");
   }
   return success();
-}
-
-//===----------------------------------------------------------------------===//
-// HipblasltMatmulOp: ins(A, B), outs(C)
-//===----------------------------------------------------------------------===//
-
-//===----------------------------------------------------------------------===//
-// MatmulOp: ins(A, B), outs(output)
-//===----------------------------------------------------------------------===//
-
-MutableOperandRange MatmulOp::getDpsInitsMutable() {
-  // 0=ctx, 1=A, 2=B, 3=output
-  return getOutputMutable();
-}
-
-void MatmulOp::getEffects(
-    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
-        &effects) {
-  emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
 LogicalResult MatmulOp::verify() {
@@ -630,8 +630,10 @@ void RmsNormOp::getEffects(
 }
 
 LogicalResult RmsNormOp::verify() {
-  return verifyDpsComputeOp(*this, {getInput(), getScale(), getOutput()},
-                            /*numInits=*/1);
+  if (failed(verifyDpsComputeOp(*this, {getInput(), getScale(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+  return mlir::hip::verifySameShapeDpsOp(*this, getInput());
 }
 
 //===----------------------------------------------------------------------===//
@@ -903,7 +905,10 @@ void MiopenSoftmaxOp::getEffects(
 }
 
 LogicalResult MiopenSoftmaxOp::verify() {
-  return verifyDpsComputeOp(*this, {getInput(), getOutput()}, /*numInits=*/1);
+  if (failed(
+          verifyDpsComputeOp(*this, {getInput(), getOutput()}, /*numInits=*/1)))
+    return failure();
+  return mlir::hip::verifySameShapeDpsOp(*this, getInput());
 }
 
 ParseResult MiopenSoftmaxOp::parse(OpAsmParser &parser,
@@ -1093,7 +1098,10 @@ void SiluOp::getEffects(
 }
 
 LogicalResult SiluOp::verify() {
-  return verifyDpsComputeOp(*this, {getInput(), getOutput()}, /*numInits=*/1);
+  if (failed(
+          verifyDpsComputeOp(*this, {getInput(), getOutput()}, /*numInits=*/1)))
+    return failure();
+  return mlir::hip::verifySameShapeDpsOp(*this, getInput());
 }
 
 ParseResult SiluOp::parse(OpAsmParser &parser, OperationState &result) {

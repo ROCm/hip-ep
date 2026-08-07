@@ -139,6 +139,11 @@ bool extractConstantIntTensor(
         CompileTimeConstantScope::IncludeExternalized);
 
 /// Rank-1 convenience wrapper around `extractConstantIntTensor`.
+///
+/// This must recognize at least everything the reification helpers can
+/// introspect (an inlined `arith.constant`). A converter that saw *fewer*
+/// constants than reification would build its destination from a weaker rule
+/// than the shape consumers observe, and the two would disagree.
 bool extractConstantIntVector(
     mlir::Value value, llvm::SmallVectorImpl<int64_t> &out,
     CompileTimeConstantScope scope =
@@ -173,7 +178,9 @@ resolveRotaryEmbeddingConfig(mlir::PatternRewriter &rewriter,
 /// Returns `std::nullopt` when the axes are only known at runtime. The axis
 /// mapping is then data-dependent and no shape rule applies, so both
 /// destination construction and reification fall back to the `outs` shape.
-/// Deciding this from one predicate is what keeps those two paths in agreement.
+/// Deciding this from one predicate is what keeps those two paths in agreement
+/// -- gating the converter on the operand *count* while reification gates on
+/// the operand being *constant* is exactly how they drift apart.
 ///
 /// \p storage is caller-owned scratch that backs the returned view; it must
 /// outlive the result and must not be modified while the view is in use.
@@ -181,27 +188,6 @@ std::optional<llvm::ArrayRef<int64_t>>
 resolveReductionAxes(mlir::Operation *op, mlir::Value data,
                      int64_t noopWithEmptyAxes,
                      llvm::SmallVectorImpl<int64_t> &storage);
-
-/// Build a tensor.empty with the imported result type and the dynamic sizes
-/// described by `reifiedShape`. Validation completes before any index values or
-/// destination IR are emitted.
-mlir::FailureOr<mlir::Value> createEmptyTensorFromReifiedShape(
-    mlir::OpBuilder &builder, mlir::Location loc,
-    mlir::RankedTensorType resultType,
-    llvm::ArrayRef<mlir::OpFoldResult> reifiedShape);
-
-/// Create a DPS init whose shape comes from one named semantic source operand.
-mlir::FailureOr<mlir::Value>
-createSameShapeEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
-                           mlir::RankedTensorType resultType,
-                           mlir::Value source);
-
-/// Derive a tensor type for a synthesized intermediate from a reified shape.
-/// Constant dimensions become static; all other dimensions stay dynamic.
-mlir::RankedTensorType
-getTensorTypeFromReifiedShape(llvm::ArrayRef<mlir::OpFoldResult> reifiedShape,
-                              mlir::Type elementType,
-                              mlir::Attribute encoding = {});
 
 /// Resolve the ranked result type of an ONNX reduction op (ReduceMax / Sum /
 /// Mean / Prod / ...).
@@ -231,9 +217,41 @@ inferReduceResultType(mlir::Operation *op, mlir::Value data,
                       std::optional<llvm::ArrayRef<int64_t>> reducedAxes,
                       int64_t keepdims);
 
+/// Build a tensor.empty with the imported result type and the dynamic sizes
+/// described by `reifiedShape`. Static reified dimensions are materialized as
+/// constant index operands when the imported type keeps that dimension
+/// dynamic; the existing `hip-infer-shapes` pass owns later type refinement.
+mlir::FailureOr<mlir::Value> createEmptyTensorFromReifiedShape(
+    mlir::OpBuilder &builder, mlir::Location loc,
+    mlir::RankedTensorType resultType,
+    llvm::ArrayRef<mlir::OpFoldResult> reifiedShape);
+
+/// Create a DPS init whose shape comes from one named semantic source operand.
+/// This is the converter-side bridge for `Hip_DpsOp_SameShape`: both paths use
+/// `reifyElementwiseSameShape`, and contradictory static result metadata is
+/// rejected before any destination IR is emitted.
+mlir::FailureOr<mlir::Value>
+createSameShapeEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
+                           mlir::RankedTensorType resultType,
+                           mlir::Value source);
+
+/// Derive a tensor type for a synthesized intermediate from a reified shape.
+/// Constant dimensions become static; all other dimensions stay dynamic.
+mlir::RankedTensorType
+getTensorTypeFromReifiedShape(llvm::ArrayRef<mlir::OpFoldResult> reifiedShape,
+                              mlir::Type elementType,
+                              mlir::Attribute encoding = {});
+
 /// Create a tensor.empty for a DPS init whose shape is the NumPy-style
 /// broadcast of \p operands. Converter destination construction delegates to
 /// the same dialect helper used by ReifyRankedShapedTypeOpInterface.
+///
+/// Before:
+///   %init = tensor.empty(%lhs_dim) : tensor<?xf32>
+/// After:
+///   %lhs_is_one = arith.cmpi eq, %lhs_dim, %c1 : index
+///   %extent = arith.select %lhs_is_one, %rhs_dim, %lhs_dim : index
+///   %init = tensor.empty(%extent) : tensor<?xf32>
 mlir::FailureOr<mlir::Value>
 createBroadcastEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
                            mlir::RankedTensorType resultType,
@@ -246,7 +264,16 @@ createBroadcastEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
 /// `reifyResultShapes` — so the destination and the shape observed by
 /// consumers implement one ONNX reduction shape function. This matters for
 /// `keepdims=0`, where the output dimension order is not positional in the
-/// input.
+/// input:
+///
+/// Before (positional, wrong once a reduced axis precedes a kept one):
+///   %d0 = tensor.dim %data, %c0
+///   %d1 = tensor.dim %data, %c1
+///   %init = tensor.empty(%d0, %d1) : tensor<?x?xf32>
+/// After (axes = [1, 2], keepdims = 0 on a rank-4 input):
+///   %d0 = tensor.dim %data, %c0
+///   %d3 = tensor.dim %data, %c3
+///   %init = tensor.empty(%d0, %d3) : tensor<?x?xf32>
 ///
 /// `std::nullopt` means the axes are only known at runtime: the mapping is then
 /// data-dependent and no shape function applies, so the destination falls back
@@ -726,6 +753,12 @@ void populatePadShapeFoldPatterns(RewritePatternSet &patterns,
 /// lowerOnnxConstants. See SliceShapeFold.cpp.
 void populateSliceShapeFoldPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
+
+/// Pre-lowering pattern set: stamp a compile-time Tile `repeats` vector onto
+/// the op before constant externalization so conversion and reification can
+/// compute exact dynamic result extents without runtime readback.
+void populateTileShapeFoldPatterns(RewritePatternSet &patterns,
+                                   MLIRContext *ctx);
 
 /// Pre-lowering pattern set: collapse ORT's inlined `FastGelu` primitive
 /// chain (Pow / Mul / Sum / Tanh) back into a single

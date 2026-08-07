@@ -44,11 +44,14 @@ Matrix multiplication backed by the hipBLASLt library (`hipblasLtMatmul`).
 
 | Op | DPS Syntax | Runtime | Status |
 |---|---|---|---|
-| `hip.hipblaslt.matmul` | `(%ctx) ins(%A, %B : ...) outs(%C : ...)` | `hip_hipblaslt_matmul(handle, A, B, C, rankA, rankB, batch, M, K, N)` | Full impl |
+| `hip.matmul` | `(%ctx) ins(%A, %B : ...) outs(%C : ...)` | `wrap_hipblasLtMatmul(state, slot, A, B, C, M, N, K, batch, elem, a_batches, b_batches, a_stride, b_stride)` | Full impl |
 
-Rank-generic: batch is determined from A's rank (3D -> batched, 2D -> single).
-If B has fewer dims than A (e.g. `X[B,S,D] @ W[D,D]`), B is broadcast across
-batches (`stride_B = 0`). Supports strided batched GEMM via hipBLASLt.
+The output batch count is the product of the broadcasted leading dimensions.
+Either operand may provide one matrix for all batches (`stride = 0`) or one
+matrix per output batch, including when the leading extents are dynamic. Only
+partial per-axis batch broadcasting -- some axes broadcast up while others carry
+batches -- is rejected, because the resulting matrix count cannot be expressed
+by one constant stride per operand.
 
 ---
 
