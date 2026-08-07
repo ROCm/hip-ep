@@ -8,7 +8,6 @@
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/PatternMatch.h"
-#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Transforms/RegionUtils.h"
 
 #include "llvm/ADT/DenseMap.h"
@@ -26,78 +25,6 @@ namespace hipsr {
 #include "hip/Dialect/Hipsr/Transforms/Passes.h.inc"
 
 namespace {
-
-// The pass only handles operations directly in this block. Reject existing
-// domains, nested placeholders, and nested placeholder users.
-LogicalResult verifyOperationPlacement(Block &block) {
-  WalkResult result =
-      block.walk<WalkOrder::PreOrder>([&](Operation *operation) {
-        if (isa<PoolDomainOp>(operation)) {
-          operation->emitError(
-              "hipsr-partition-pool-domains does not support existing pool "
-              "domains");
-          return WalkResult::interrupt();
-        }
-
-        auto placeholder = dyn_cast<PlaceholderOp>(operation);
-        if (!placeholder) {
-          return WalkResult::advance();
-        }
-        if (placeholder->getBlock() != &block) {
-          placeholder.emitOpError(
-              "must be top-level when partitioning pool domains");
-          return WalkResult::interrupt();
-        }
-        if (placeholder.getDpsConsumer()->getBlock() != &block) {
-          placeholder.emitOpError(
-              "requires its DPS consumer to be top-level when partitioning "
-              "pool domains");
-          return WalkResult::interrupt();
-        }
-        return WalkResult::advance();
-      });
-  return result.wasInterrupted() ? failure() : success();
-}
-
-// Each tensor DPS init must come from a top-level placeholder so both stay in
-// the same domain.
-LogicalResult verifyDpsInitPlaceholders(Block &block) {
-  for (Operation &operation : block.without_terminator()) {
-    if (operation.getName().getDialectNamespace() !=
-        HipsrDialect::getDialectNamespace()) {
-      continue;
-    }
-
-    auto dpsOp = dyn_cast<DestinationStyleOpInterface>(operation);
-    if (!dpsOp) {
-      continue;
-    }
-
-    bool hasInvalidTensorInit =
-        llvm::any_of(dpsOp.getDpsInits(), [&](Value init) {
-          if (!isa<TensorType>(init.getType())) {
-            return false;
-          }
-          auto placeholder = init.getDefiningOp<PlaceholderOp>();
-          return !placeholder || placeholder->getBlock() != &block;
-        });
-    if (hasInvalidTensorInit) {
-      return operation.emitOpError(
-          "requires each tensor DPS init to be produced by a top-level "
-          "hipsr.placeholder");
-    }
-  }
-
-  return success();
-}
-
-// Check the input before splitting it into domains.
-LogicalResult validatePartitionInput(Block &block) {
-  if (failed(verifyOperationPlacement(block))) {
-    return failure();
-  }
-  return verifyDpsInitPlaceholders(block);
-}
 
 namespace partition_analysis {
 
@@ -356,11 +283,6 @@ struct PartitionPoolDomainsPass
       return;
     }
     Value context = entryBlock.getArgument(0);
-
-    if (failed(validatePartitionInput(entryBlock))) {
-      signalPassFailure();
-      return;
-    }
 
     partition_analysis::DomainAssignment assignment =
         partition_analysis::buildDomainAssignment(entryBlock);
