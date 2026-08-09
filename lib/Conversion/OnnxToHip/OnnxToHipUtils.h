@@ -468,9 +468,10 @@ void populateFlattenConversionPatterns(RewritePatternSet &patterns,
 
 /// Pre-lowering pattern set: collapse the Gather(Shape(x), const_idx)
 /// idiom into tensor.from_elements over a tensor.dim of x. Must run
-/// BEFORE lowerOnnxConstants so the index value is still inline in the
-/// onnx.Constant `value` attribute. See GatherShapeFold.cpp for the
-/// dynseqlen-regression rationale.
+/// BEFORE lowerOnnxConstants so this ONNX-rooted matcher still sees the
+/// generic onnx.Constant and its inline `value` attribute. The lowering creates
+/// an inspectable hip.constant carrier; externalization happens later, after
+/// compute conversion. See GatherShapeFold.cpp for the dynseqlen rationale.
 void populateGatherShapeFoldPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 
@@ -480,25 +481,26 @@ void populateGatherShapeFoldPatterns(RewritePatternSet &patterns,
 /// `tensor.reshape` fallback recover per-output-dim sizes when the result has
 /// >1 dynamic dim in one reassociation group (otherwise ReshapeConversion
 /// ignores its second operand and emits the same SSA dim twice — the [N, N]
-/// bug). Sibling of GatherShapeFold; must run BEFORE lowerOnnxConstants.
-/// See ReshapeShapeFold.cpp.
+/// bug). Sibling of GatherShapeFold; must run while the producer is still a
+/// generic ONNX op, before lowerOnnxConstants creates its carrier. See
+/// ReshapeShapeFold.cpp.
 void populateReshapeShapeFoldPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
 
 /// Pre-lowering pattern set: stamp `onnx.Pad`'s compile-time `pads` (and
 /// optional `axes`) constant onto the op as `hipdnn.pad_amounts` /
 /// `hipdnn.pad_axes` attributes so PadConversion can compute the dynamic
-/// output shape from them without reading the (by-then externalized) operand.
-/// Sibling of GatherShapeFold; must run BEFORE lowerOnnxConstants. See
-/// PadShapeFold.cpp.
+/// output shape from stable provenance attributes. Sibling of GatherShapeFold;
+/// runs while generic ONNX constants are still available, before carrier
+/// creation and the later standalone externalization. See PadShapeFold.cpp.
 void populatePadShapeFoldPatterns(RewritePatternSet &patterns,
                                   MLIRContext *ctx);
 
 /// Pre-lowering pattern set: stamp compile-time `onnx.Slice` starts/ends/axes/
 /// steps onto the op as `hipdnn.slice_*` attributes so SliceDecompose can
-/// rewrite to `tensor.extract_slice` after `lowerOnnxConstants` externalizes
-/// the operand constants. Sibling of PadShapeFold; must run BEFORE
-/// lowerOnnxConstants. See SliceShapeFold.cpp.
+/// rewrite to `tensor.extract_slice` after lowerOnnxConstants creates the
+/// operand carriers. Sibling of PadShapeFold; it runs while the generic ONNX
+/// constants are still directly matchable. See SliceShapeFold.cpp.
 void populateSliceShapeFoldPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
 
@@ -507,8 +509,8 @@ void populateSliceShapeFoldPatterns(RewritePatternSet &patterns,
 /// `onnx.Gelu(approximate="tanh")`. ORT inlines the Gelu function body
 /// for some loading paths (notably dynamic-shape models) and the inlined
 /// primitives have no MorphiZen converters. Must run BEFORE
-/// `lowerOnnxConstants` so the literal float values of the embedded
-/// constants (3.0, 0.044715, sqrt(2/π), 1.0, 0.5) are still inline.
+/// `lowerOnnxConstants` so the ONNX-rooted matcher sees generic constant
+/// producers and their literal values (3.0, 0.044715, sqrt(2/π), 1.0, 0.5).
 /// See FastGeluFusion.cpp.
 void populateFastGeluFusionPatterns(RewritePatternSet &patterns,
                                     MLIRContext *ctx);
@@ -516,11 +518,10 @@ void populateFastGeluFusionPatterns(RewritePatternSet &patterns,
 /// Pre-lowering pattern set: decompose `onnx.Pow(x, c)` (constant scalar
 /// exponent c, optionally wrapped in `onnx.Cast`/`onnx.CastLike`) into ONNX
 /// primitives (`onnx.Mul` / `onnx.Sqrt` / `onnx.Reciprocal`), which then flow
-/// through their own ONNX→HIP converters in `convertComputeOps`. Must run
-/// BEFORE `lowerOnnxConstants` because production builds externalize every
-/// `onnx.Constant` (incl. 1-element scalars) into a memref.global with the
-/// value moved to the constants file — at that point the exponent is no
-/// longer recoverable from IR. See PowerConversion.cpp.
+/// through their own ONNX→HIP converters in `convertComputeOps`. It runs before
+/// `lowerOnnxConstants` because the matcher follows generic ONNX Constant/Cast
+/// chains. Carrier values remain inspectable; the standalone externalizer runs
+/// only after compute conversion. See PowerConversion.cpp.
 void populatePowDecompositionPatterns(RewritePatternSet &patterns,
                                       MLIRContext *ctx);
 /// Pre-lowering pattern set: collapse the inlined erf-form `Gelu` primitive
@@ -528,8 +529,9 @@ void populatePowDecompositionPatterns(RewritePatternSet &patterns,
 /// `Sqrt(2.0)`) back into a single `onnx.Gelu(approximate="none")`. Some
 /// exports (e.g. ConvNeXt) inline the exact erf-based Gelu definition
 /// `0.5 * x * (1 + erf(x / sqrt(2)))` as primitives that have no MorphiZen
-/// converters. Must run BEFORE `lowerOnnxConstants` so the literal float
-/// values (1.0, 2.0, 0.5) of the wrapped constants are still inline.
+/// converters. Must run BEFORE `lowerOnnxConstants` so the ONNX-rooted matcher
+/// sees the generic wrapped constants and their literal values (1.0, 2.0,
+/// 0.5).
 /// See ErfGeluFusion.cpp.
 void populateErfGeluFusionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);

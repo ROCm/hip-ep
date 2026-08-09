@@ -76,31 +76,15 @@ def ConvertOnnxToHipPass : Pass<"convert-onnx-to-hip", "mlir::ModuleOp"> {
     destination-passing style (DPS) with tensor types.
 
     Transformations:
-      1. Constants: onnx.Constant -> arith.constant (small/inline) or
-         memref.global extern + memref.get_global + bufferization.to_tensor
-         (large/externalized to constants file .constants.bin + .constants.json)
+      1. Constants: onnx.Constant -> hip.constant. The two existing constant
+         sweeps remain around compute-op conversion, but neither applies
+         storage policy or performs file I/O.
       2. Op mapping: onnx.{MatMul,Transpose,Mul,Softmax} -> hip.* (tensor DPS)
       3. Cleanup: erase onnx.EntryPoint
 
     Requires hip-add-context-arg to have run first so that !hip.context is
     available as function argument 0.
-
-    Constant externalization (opt-in via --externalize-min-num-elements):
-      Large constants above the threshold are written to a binary constants file
-      and replaced with extern memref.global ops carrying a hip.external_data
-      attribute (offset + size).  The filename is recorded as a
-      hip.constants_file attribute on the module.  This follows the onnx-mlir
-      pattern (krnl.global + omMMapBinaryFile) adapted to standard MLIR ops.
-      Splat constants are always kept inline regardless of size.
   }];
-  let options = [
-    Option<"externalizeOutputDir", "externalize-output-dir", "std::string",
-           /*default=*/"\"\"",
-           "Directory for constants-file .constants.bin/.json files (empty = cwd)">,
-    Option<"externalizeMinNumElements", "externalize-min-num-elements",
-           "int64_t", /*default=*/"0",
-           "Minimum number of tensor elements to externalize (0 = disabled)">
-  ];
   let dependentDialects = [
     "mlir::hip::HipDialect",
     "mlir::arith::ArithDialect",
@@ -799,6 +783,48 @@ def ResolveExternConstantsPass
     "mlir::arith::ArithDialect",
     "mlir::func::FuncDialect",
     "mlir::memref::MemRefDialect"
+  ];
+}
+
+def ExternalizeConstantsPass
+    : Pass<"hip-externalize-constants", "mlir::ModuleOp"> {
+  let summary = "Apply storage policy to hip.constant carriers";
+  let description = [{
+    Validates every `hip.constant` and the unique compiler-owned absolute order,
+    appends unmarked plugin carriers in stable module walk order, plans one
+    64-byte-aligned layout, serializes the current constants.bin/json artifacts,
+    and only then commits IR rewrites and the existing parallel module metadata
+    arrays.
+
+    Inline carriers below the threshold become `arith.constant`. Carriers at or
+    above it, plus every ORT location carrier when externalization is enabled,
+    become the existing private extern `memref.global` +
+    `bufferization.to_tensor` bridge consumed by
+    `hip-resolve-extern-constants`.
+
+    This pass preserves full-sidecar, streaming, and hybrid skip-data behavior.
+    It runs after the `AfterConvertOnnxToHip` plugin slot, allowing plugins to
+    emit `hip.constant` there, and before shape inference, canonicalization, and
+    bufferization.
+  }];
+  let options = [
+    Option<"externalizeMinNumElements", "externalize-min-num-elements",
+           "int64_t", /*default=*/"0",
+           "Minimum number of tensor elements to externalize (0 = disabled)">,
+    Option<"externalizeOutputDir", "externalize-output-dir", "std::string",
+           /*default=*/"\"\"",
+           "Directory for constants-file .constants.bin/.json files (empty = cwd)">,
+    Option<"skipConstantData", "skip-constant-data", "bool",
+           /*default=*/"false",
+           "Use existing streaming/hybrid source metadata instead of writing "
+           "all constant bytes to constants.bin">
+  ];
+  let dependentDialects = [
+    "mlir::hip::HipDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::func::FuncDialect",
+    "mlir::memref::MemRefDialect",
+    "mlir::bufferization::BufferizationDialect"
   ];
 }
 

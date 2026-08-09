@@ -7,6 +7,7 @@
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "llvm/Support/MathExtras.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
@@ -15,6 +16,8 @@
 #include "mlir/IR/SymbolTable.h"
 
 #include "hip/Dialect/IR/HipShapeUtils.h"
+
+#include <limits>
 
 using namespace mlir;
 using namespace mlir::hip;
@@ -109,6 +112,91 @@ LogicalResult AllocOutputOp::verify() {
     return emitOpError("expected ")
            << memrefTy.getNumDynamicDims() << " dynamic size operand(s), got "
            << getDynamicSizes().size();
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// ConstantOp: policy-neutral externalizable constant carrier
+//===----------------------------------------------------------------------===//
+
+LogicalResult ConstantOp::verify() {
+  RankedTensorType resultType = getResult().getType();
+  if (!resultType.hasStaticShape())
+    return emitOpError("requires a statically shaped ranked tensor result");
+
+  Type elementType = resultType.getElementType();
+  unsigned elementBits = 0;
+  if (auto floatType = dyn_cast<FloatType>(elementType)) {
+    if (!elementType.isF16() && !elementType.isBF16() && !elementType.isF32() &&
+        !elementType.isF64())
+      return emitOpError("has unsupported floating-point element type ")
+             << elementType;
+    elementBits = floatType.getWidth();
+  } else if (auto integerType = dyn_cast<IntegerType>(elementType)) {
+    elementBits = integerType.getWidth();
+    if (elementBits != 1 && elementBits != 8 && elementBits != 16 &&
+        elementBits != 32 && elementBits != 64)
+      return emitOpError("has unsupported integer element type ")
+             << elementType;
+  } else {
+    return emitOpError("has unsupported element type ") << elementType;
+  }
+
+  int64_t numElements = 1;
+  for (int64_t dim : resultType.getShape()) {
+    if (llvm::MulOverflow(numElements, dim, numElements))
+      return emitOpError("result element count overflows int64");
+  }
+  int64_t elementBytes = static_cast<int64_t>((elementBits + 7) / 8);
+  int64_t expectedBytes = 0;
+  if (llvm::MulOverflow(numElements, elementBytes, expectedBytes))
+    return emitOpError("result byte size overflows int64");
+
+  bool hasValue = getValueAttr() != nullptr;
+  bool hasLocation = getLocationAttr() != nullptr;
+  bool hasOffset = getOffsetAttr() != nullptr;
+  bool hasSize = getSizeAttr() != nullptr;
+  if (hasValue) {
+    if (hasLocation || hasOffset || hasSize)
+      return emitOpError("inline source must contain only `value`");
+    auto denseValue = dyn_cast<DenseElementsAttr>(getValueAttr());
+    if (!denseValue)
+      return emitOpError("inline `value` must be a DenseElementsAttr");
+    if (denseValue.getType() != resultType)
+      return emitOpError("inline `value` type ")
+             << denseValue.getType() << " does not match result type "
+             << resultType;
+    return success();
+  }
+
+  if (!hasLocation && !hasOffset && !hasSize)
+    return emitOpError("requires exactly one source: `value` or complete "
+                       "`location`/`offset`/`size`");
+  if (!hasLocation || !hasOffset || !hasSize)
+    return emitOpError(
+        "external source requires `location`, `offset`, and `size` together");
+
+  StringRef location = getLocationAttr().getValue();
+  int64_t offset = getOffsetAttr().getInt();
+  int64_t size = getSizeAttr().getInt();
+  if (location.empty())
+    return emitOpError("external source `location` must not be empty");
+  if (size <= 0)
+    return emitOpError("external source `size` must be positive");
+  if (size != expectedBytes)
+    return emitOpError("external source byte size ")
+           << size << " does not match result byte size " << expectedBytes;
+
+  constexpr llvm::StringLiteral kOrtMemAddrTag = "*/_ORT_MEM_ADDR_/*";
+  if (location == kOrtMemAddrTag) {
+    if (offset == 0)
+      return emitOpError("memory-address source has null address");
+  } else {
+    if (offset < 0)
+      return emitOpError("file source `offset` must be non-negative");
+    if (offset > std::numeric_limits<int64_t>::max() - size)
+      return emitOpError("file source range overflows int64");
+  }
   return success();
 }
 

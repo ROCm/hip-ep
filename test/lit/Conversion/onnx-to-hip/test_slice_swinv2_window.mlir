@@ -5,10 +5,10 @@
 //   input  1x128x256x96
 //   axis=1, start=0, end=8  ->  1x8x256x96
 //
-// Uses onnx.Constant operands (externalized by convert-onnx-to-hip) so the
-// SliceShapeFold -> SliceDecompose path is exercised end-to-end.
+// Uses onnx.Constant operands so the SliceShapeFold -> SliceDecompose path is
+// exercised before carrier conversion and externalization.
 
-// RUN: mkdir -p %t && hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip='externalize-min-num-elements=1 externalize-output-dir=%t' %s | FileCheck %s
+// RUN: mkdir -p %t && hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t' %s | FileCheck %s
 
 module {
   func.func @main_graph(%arg0: tensor<4xf32>) -> tensor<4xf32> {

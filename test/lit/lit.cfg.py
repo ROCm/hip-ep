@@ -85,6 +85,7 @@ tools = [
     "hip-compiler",
     "FileCheck",
     "not",
+    "split-file",
 ]
 llvm_config.add_tool_substitutions(tools, hip_tools_dirs + [config.llvm_tools_dir])
 

@@ -7,6 +7,7 @@
 #include "hip/Compiler/PluginRegistry.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Conversion/OnnxToHipDNN/Passes.h"
+#include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 #include "hip/debug_log.h"
 
@@ -77,6 +78,27 @@ void addPoolAllocsShapePreconditionPasses(OpPassManager &pm) {
   // before hoisting so equivalent sizes do not open separate pool domains.
   pm.addNestedPass<func::FuncOp>(mlir::createCSEPass());
   pm.addNestedPass<func::FuncOp>(mlir::hip::createHoistAllocSizeArithPass());
+}
+
+struct VerifyNoConstantCarriersPass
+    : PassWrapper<VerifyNoConstantCarriersPass, OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(VerifyNoConstantCarriersPass)
+
+  void runOnOperation() override {
+    bool found = false;
+    getOperation().walk([&](mlir::hip::ConstantOp op) {
+      op.emitError("hip.constant survived past hip-externalize-constants; "
+                   "plugins must emit carriers at AfterConvertOnnxToHip, not "
+                   "at BeforeBufferization");
+      found = true;
+    });
+    if (found)
+      signalPassFailure();
+  }
+};
+
+std::unique_ptr<Pass> createVerifyNoConstantCarriersPass() {
+  return std::make_unique<VerifyNoConstantCarriersPass>();
 }
 
 } // namespace
@@ -151,6 +173,11 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
   // to memrefs.
   addPluginPassesForSlot(pm,
                          ::hip::compiler::PipelineSlot::BeforeBufferization);
+
+  // A BeforeBufferization plugin runs after the supported constant-producer
+  // boundary. Diagnose any carrier it introduced before One-Shot Bufferize
+  // reports the much less actionable "op was not bufferized".
+  pm.addPass(createVerifyNoConstantCarriersPass());
 
   // 2. Bufferize tensor IR to memref IR
   //
@@ -353,21 +380,26 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   addPluginPassesForSlot(pm,
                          ::hip::compiler::PipelineSlot::AfterOnnxLoopOutline);
 
-  if (fs) {
-    pm.addPass(mlir::hip::createConvertOnnxToHipPass(
-        fs, options.externalizeMinNumElements, options.skipConstantData));
-  } else {
-    ConvertOnnxToHipPassOptions onnxToHipOpts;
-    onnxToHipOpts.externalizeOutputDir = options.externalizeOutputDir;
-    onnxToHipOpts.externalizeMinNumElements = options.externalizeMinNumElements;
-    pm.addPass(createConvertOnnxToHipPass(std::move(onnxToHipOpts)));
-  }
+  pm.addPass(createConvertOnnxToHipPass());
 
   // Plugin slot: AfterConvertOnnxToHip. The most common slot for
   // vendor lowerings of `onnx.Custom` ops or vendor-specific hip.*
-  // canonicalisations.
+  // canonicalisations. This is the supported plugin boundary for emitting
+  // hip.constant carriers.
   addPluginPassesForSlot(pm,
                          ::hip::compiler::PipelineSlot::AfterConvertOnnxToHip);
+
+  if (fs) {
+    pm.addPass(mlir::hip::createExternalizeConstantsPass(
+        fs, options.externalizeMinNumElements, options.skipConstantData));
+  } else {
+    ExternalizeConstantsPassOptions externalizeOptions;
+    externalizeOptions.externalizeOutputDir = options.externalizeOutputDir;
+    externalizeOptions.externalizeMinNumElements =
+        options.externalizeMinNumElements;
+    externalizeOptions.skipConstantData = options.skipConstantData;
+    pm.addPass(createExternalizeConstantsPass(std::move(externalizeOptions)));
+  }
 
   buildOnnxToHipPipelineTail(pm);
 }
@@ -393,18 +425,22 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
     pm.addPass(createCompileHipDNNGraphsPass(handle, std::move(output_graphs)));
   }
 
-  if (fs) {
-    pm.addPass(mlir::hip::createConvertOnnxToHipPass(
-        fs, options.externalizeMinNumElements, options.skipConstantData));
-  } else {
-    ConvertOnnxToHipPassOptions onnxToHipOpts;
-    onnxToHipOpts.externalizeOutputDir = options.externalizeOutputDir;
-    onnxToHipOpts.externalizeMinNumElements = options.externalizeMinNumElements;
-    pm.addPass(createConvertOnnxToHipPass(std::move(onnxToHipOpts)));
-  }
+  pm.addPass(createConvertOnnxToHipPass());
 
   addPluginPassesForSlot(pm,
                          ::hip::compiler::PipelineSlot::AfterConvertOnnxToHip);
+
+  if (fs) {
+    pm.addPass(mlir::hip::createExternalizeConstantsPass(
+        fs, options.externalizeMinNumElements, options.skipConstantData));
+  } else {
+    ExternalizeConstantsPassOptions externalizeOptions;
+    externalizeOptions.externalizeOutputDir = options.externalizeOutputDir;
+    externalizeOptions.externalizeMinNumElements =
+        options.externalizeMinNumElements;
+    externalizeOptions.skipConstantData = options.skipConstantData;
+    pm.addPass(createExternalizeConstantsPass(std::move(externalizeOptions)));
+  }
 
   buildOnnxToHipPipelineTail(pm);
 }

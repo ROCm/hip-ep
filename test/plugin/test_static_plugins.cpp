@@ -15,22 +15,36 @@
 // Either way dispatch must be safe + idempotent. Plain main() (no GTest).
 
 #include "hip/Compiler/PluginRegistry.h"
+#include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/Transforms/Pipelines.h"
 #include "hip/InitAllPasses.h"
 
+#include "morphizen-foundation/file_io.hpp"
+
 #include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"
+#include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/MLIRContext.h"
+#include "mlir/Parser/Parser.h"
+#include "mlir/Pass/PassManager.h"
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <cstddef>
+#include <map>
 #include <string>
+#include <vector>
 
 #ifndef HIP_EP_EXPECT_SAMPLE
 #define HIP_EP_EXPECT_SAMPLE 0
 #endif
+
+extern "C" void
+hipEpRegisterPlugin_sample(hip::compiler::HipEpPluginRegistry &registry);
 
 namespace {
 
@@ -53,6 +67,49 @@ bool contains(const Range &range, llvm::StringRef needle) {
   return false;
 }
 
+class CapturingFileSystem : public morphizen::FileSystem {
+public:
+  class Writer : public morphizen::FileWriter {
+  public:
+    explicit Writer(std::vector<char> &data) : data(data) {}
+    std::size_t fwrite(const void *source, std::size_t size) const override {
+      const char *bytes = static_cast<const char *>(source);
+      data.insert(data.end(), bytes, bytes + size);
+      return size;
+    }
+
+  private:
+    std::vector<char> &data;
+  };
+
+  morphizen::FileReader *create_reader(const char *) override {
+    return nullptr;
+  }
+  morphizen::FileWriter *create_writer(const char *path) override {
+    return new Writer(files[path]);
+  }
+  void destroy_reader(morphizen::FileReader *reader) override { delete reader; }
+  void destroy_writer(morphizen::FileWriter *writer) override { delete writer; }
+
+  std::map<std::string, std::vector<char>> files;
+};
+
+mlir::OwningOpRef<mlir::ModuleOp>
+runOnnxToHipPipeline(mlir::MLIRContext &context, llvm::StringRef text,
+                     CapturingFileSystem &fs, bool &ok) {
+  auto module = mlir::parseSourceString<mlir::ModuleOp>(text, &context);
+  if (!module) {
+    ok = false;
+    return module;
+  }
+  mlir::PassManager manager(&context);
+  mlir::hip::OnnxToHipPipelineOptions options;
+  options.externalizeMinNumElements = 1;
+  mlir::hip::buildOnnxToHipPipeline(manager, options, &fs);
+  ok = mlir::succeeded(manager.run(*module));
+  return module;
+}
+
 } // namespace
 
 int main() {
@@ -64,6 +121,7 @@ int main() {
   check(true, "dispatchPluginRegistrationsOnce() ran without crashing");
 
   auto slotPasses = pluginPassesForSlot(PipelineSlot::AfterConvertOnnxToHip);
+  auto lateSlotPasses = pluginPassesForSlot(PipelineSlot::BeforeBufferization);
   auto libs = pluginLibraries();
   auto libPaths = pluginLibraryPaths();
   auto bitcode = pluginBitcodeBuffers();
@@ -74,6 +132,8 @@ int main() {
 
   check(contains(slotPasses, "func.func(hip-ep-sample-print-functions)"),
         "AfterConvertOnnxToHip slot records the sample pass request");
+  check(contains(lateSlotPasses, "func.func(hip-ep-sample-emit-late-constant)"),
+        "BeforeBufferization slot records the late-carrier fixture");
   check(contains(libs, "hip_ep_sample_lib"),
         "pluginLibraries() records 'hip_ep_sample_lib'");
   check(!libPaths.empty(), "pluginLibraryPaths() records a search path");
@@ -122,10 +182,88 @@ int main() {
   llvm::outs() << "Mode: NO plugins selected (dispatch must be a no-op)\n";
 
   check(slotPasses.empty(), "no plugin slot requests recorded");
+  check(lateSlotPasses.empty(), "no late plugin slot requests recorded");
   check(libs.empty(), "no plugin libraries recorded");
   check(libPaths.empty(), "no plugin library paths recorded");
   check(bitcode.empty(), "no plugin bitcode recorded");
   check(dialectRegs.empty(), "no plugin dialect registrations recorded");
+
+  // The authoritative default build deliberately selects no production
+  // plugins, but still links the real sample archive into this focused test.
+  // Register it explicitly and exercise the actual pipeline slots so carrier
+  // production/consumption and the late-carrier diagnostic run in default CI.
+  hipEpRegisterPlugin_sample(getProcessPluginRegistry());
+  check(contains(pluginPassesForSlot(PipelineSlot::AfterConvertOnnxToHip),
+                 "func.func(hip-ep-sample-print-functions)"),
+        "focused sample registration records AfterConvertOnnxToHip");
+  check(contains(pluginPassesForSlot(PipelineSlot::BeforeBufferization),
+                 "func.func(hip-ep-sample-emit-late-constant)"),
+        "focused sample registration records BeforeBufferization");
+
+  mlir::MLIRContext context;
+  context.allowUnregisteredDialects();
+  hip::compiler::loadAllDialects(context);
+
+  CapturingFileSystem carrierFs;
+  bool carrierOk = false;
+  auto carrierModule = runOnnxToHipPipeline(context,
+                                            R"mlir(
+        module {
+          func.func @main_graph(
+              %input: tensor<2xf32> {onnx.name = "input"})
+              -> tensor<2xf32> attributes {hip_ep_sample.emit_constant} {
+            "onnx.Return"(%input) : (tensor<2xf32>) -> ()
+          }
+        }
+      )mlir",
+                                            carrierFs, carrierOk);
+  check(carrierOk && carrierModule,
+        "AfterConvert sample carrier pipeline succeeds");
+  if (carrierOk && carrierModule) {
+    auto sizes =
+        (*carrierModule)
+            ->getAttrOfType<mlir::DenseI64ArrayAttr>("hipdnn.constant_sizes");
+    auto offsets =
+        (*carrierModule)
+            ->getAttrOfType<mlir::DenseI64ArrayAttr>("hipdnn.constant_offsets");
+    size_t carriers = 0;
+    carrierModule->walk([&](mlir::hip::ConstantOp) { ++carriers; });
+    check(sizes && sizes.asArrayRef().size() == 1 &&
+              sizes.asArrayRef()[0] == 2 && offsets &&
+              offsets.asArrayRef().size() == 1 &&
+              offsets.asArrayRef()[0] == 0 &&
+              carrierFs.files["model.constants.bin"] ==
+                  std::vector<char>({101, 102}) &&
+              carriers == 0,
+          "AfterConvert sample carrier is externalized with exact artifact");
+  }
+
+  bool sawLateCarrierDiagnostic = false;
+  mlir::ScopedDiagnosticHandler diagnosticHandler(
+      &context, [&](mlir::Diagnostic &diagnostic) {
+        std::string text;
+        llvm::raw_string_ostream stream(text);
+        diagnostic.print(stream);
+        sawLateCarrierDiagnostic |= llvm::StringRef(text).contains(
+            "hip.constant survived past hip-externalize-constants");
+        return mlir::success();
+      });
+  CapturingFileSystem lateFs;
+  bool lateOk = true;
+  runOnnxToHipPipeline(context,
+                       R"mlir(
+        module {
+          func.func @main_graph(
+              %input: tensor<2xf32> {onnx.name = "input"})
+              -> tensor<2xf32>
+              attributes {hip_ep_sample.emit_late_constant} {
+            "onnx.Return"(%input) : (tensor<2xf32>) -> ()
+          }
+        }
+      )mlir",
+                       lateFs, lateOk);
+  check(!lateOk && sawLateCarrierDiagnostic,
+        "BeforeBufferization sample carrier is diagnosed");
 #endif
 
   if (g_failures == 0) {

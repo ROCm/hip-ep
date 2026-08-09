@@ -491,6 +491,65 @@ def Hip_FreeOp : Hip_Op<"free",
 
 // ===== Constant Management ===================================================
 
+def Hip_ConstantOp : Hip_Op<"constant", [Pure]> {
+  let summary = "Policy-neutral constant tensor carrier";
+  let description = [{
+    Carries a statically-shaped tensor constant from a producer to
+    `hip-externalize-constants`. The carrier has exactly one source:
+
+      * `value`: an inline `DenseElementsAttr`; or
+      * `location`, `offset`, and `size`: a complete ORT external-data
+        reference. The location `*/_ORT_MEM_ADDR_/*` means that `offset` is a
+        live host address; every other location is a file path and `offset` is
+        a byte offset in that file.
+
+    `convert-onnx-to-hip` emits this op for every `onnx.Constant`. Plugins may
+    also emit it from the `AfterConvertOnnxToHip` slot. The standalone
+    externalizer applies the size policy, writes constant artifacts, and
+    replaces every carrier before shape inference and bufferization.
+
+    In-tree conversion also stamps the compiler-owned
+    `hip.constant_origin`/`hip.constant_order` pair. The externalizer validates
+    the unique absolute order and restores the original conversion visitation:
+    each function's imported sweep followed by its synthesized sweep, then the
+    next function. Plugins must not set those reserved attributes; unmarked
+    plugin carriers follow afterward in stable module walk order.
+
+    This op deliberately has no fold method. Generic canonicalization may
+    reason about its purity, but only `hip-externalize-constants` may choose
+    between inline and external storage.
+  }];
+
+  let arguments = (ins
+    OptionalAttr<ElementsAttr>:$value,
+    OptionalAttr<StrAttr>:$location,
+    OptionalAttr<I64Attr>:$offset,
+    OptionalAttr<I64Attr>:$size
+  );
+  let results = (outs AnyRankedTensor:$result);
+
+  let assemblyFormat = [{
+    attr-dict `:` type($result)
+  }];
+
+  let builders = [
+    OpBuilder<(ins "::mlir::RankedTensorType":$result,
+                   "::mlir::DenseElementsAttr":$value), [{
+      build($_builder, $_state, result, value, /*location=*/nullptr,
+            /*offset=*/nullptr, /*size=*/nullptr);
+    }]>,
+    OpBuilder<(ins "::mlir::RankedTensorType":$result,
+                   "::mlir::StringAttr":$location,
+                   "::mlir::IntegerAttr":$offset,
+                   "::mlir::IntegerAttr":$size), [{
+      build($_builder, $_state, result, /*value=*/nullptr, location, offset,
+            size);
+    }]>
+  ];
+
+  let hasVerifier = 1;
+}
+
 def Hip_GetConstantOp : Hip_Op<"get_constant", [
   DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
 ]> {

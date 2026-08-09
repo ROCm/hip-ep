@@ -16,6 +16,9 @@ module {
   // CHECK-LABEL: func.func @relu_static_f32
   // CHECK-SAME: (%[[CTX:.*]]: !hip.context, %[[X:.*]]: tensor<3x4xf32>)
   // CHECK-NOT: onnx.Relu
+  // The zero literal is synthesized during compute conversion, so this
+  // carrier proves the second constant sweep ran.
+  // CHECK: hip.constant {hip.constant_order = 0 : i64, hip.constant_origin = "onnx-synthesized", value = dense<0.000000e+00> : tensor<f32>}
   // CHECK: hip.max(%[[CTX]]) ins(%[[X]]
 
   func.func @relu_static_f16(%x: tensor<2x3xf16>) -> tensor<2x3xf16> {

@@ -85,11 +85,10 @@ module {
   // CHECK: hip.pad({{.*}}) ins({{.*}}, {{.*}} : tensor<?x4xf32>, tensor<4xi64>) outs({{.*}} : tensor<?x6xf32>)
 
   // Dynamic output with `pads` supplied as an onnx.Constant -- the form that
-  // lowerOnnxConstants may externalize (replacing the inline value with a NULL
-  // memref.global). The pre-lowering PadShapeFold stamps the constant onto the
-  // op BEFORE externalization, so the output shape folds to arith.constants
-  // here: no hip.readback_scalar, no device read of the pads buffer. This is
-  // the path-1 fix for the externalized-pads host-read SEGV.
+  // lowerOnnxConstants turns into a carrier. The pre-lowering PadShapeFold
+  // stamps the constant onto the op BEFORE carrier conversion and later
+  // externalization, so the output shape folds to arith.constants here: no
+  // hip.readback_scalar and no device read of the pads buffer.
   func.func @pad_dyn_output_onnx_const_pads(%data: tensor<?x4xf32>) -> tensor<?x6xf32> {
     %pads = "onnx.Constant"() {value = dense<[1, 1, 2, 1]> : tensor<4xi64>} : () -> tensor<4xi64>
     %none = "onnx.NoValue"() {value} : () -> none
