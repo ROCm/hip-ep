@@ -33,7 +33,6 @@ void ComputeOp::getSuccessorRegions(RegionBranchPoint point,
   regions.emplace_back(getOperation(), getResults());
 }
 
-// Only the result-to-output pairing needs checking here.
 LogicalResult ComputeOp::verify() {
   ValueRange results = getResults();
   if (!results.empty() && results.size() != getOutputs().size()) {
