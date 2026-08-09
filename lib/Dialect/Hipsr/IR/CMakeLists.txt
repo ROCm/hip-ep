@@ -11,8 +11,6 @@ add_library(HipsrDialectIR STATIC
   HipsrPoolDomainOp.cpp
   HipsrComputeYieldOp.cpp
   HipsrComputeOp.cpp
-  HipsrEmptyYieldOp.cpp
-  HipsrEmptyOp.cpp
   HipsrConstantOp.cpp
   HipsrPlaceholderOp.cpp
   HipsrCastOp.cpp
