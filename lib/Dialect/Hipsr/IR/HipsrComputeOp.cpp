@@ -33,14 +33,8 @@ void ComputeOp::getSuccessorRegions(RegionBranchPoint point,
   regions.emplace_back(getOperation(), getResults());
 }
 
-// Only the result-to-output pairing needs checking here. SizedRegion<1> and
-// SingleBlock enforce the single block, SingleBlockImplicitTerminator the
-// terminator, and RegionBranchOpInterface both the operand-to-argument entry
-// edge and the yield-to-result exit edge.
+// Only the result-to-output pairing needs checking here.
 LogicalResult ComputeOp::verify() {
-  // A result's destination is the outs entry in the same position. The two
-  // types may differ, but a result without a destination has nowhere to be
-  // written. A bufferized compute writes into memref outs and has no results.
   ValueRange results = getResults();
   if (!results.empty() && results.size() != getOutputs().size()) {
     return emitOpError("expects one result per output, but got ")
