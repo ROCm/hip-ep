@@ -24,7 +24,7 @@ bool PlaceholderOp::isAllowedShapeGraphInput(Value value) {
       definingOp);
 }
 
-// Uniqueness is a rule the verifier imposes: 
+// Uniqueness is a rule the verifier imposes:
 // every result must fill one outs slot of the same operation, so
 // the first outs use found identifies the consumer.
 Operation *PlaceholderOp::getConsumer() {
