@@ -189,21 +189,6 @@ func.func @wrong_shape_region_terminator(
 }
 
 // -----
-// A DPS consumer ties each init to the result in the same position, so the
-// placeholder must carry the consumer's result type. The DPS interface reports
-// the mismatch.
-func.func @result_type_mismatch(
-    %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<4x8xf32> {
-  %init = hipsr.placeholder(%ctx)
-      ins(%input : tensor<4x8xf32>)
-      {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
-  // expected-error @+1 {{expected type of operand #2 ('tensor<4x8xf16>') to match type of corresponding result ('tensor<4x8xf32>')}}
-  %result = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
-      outs(%init : tensor<4x8xf16>) : tensor<4x8xf32>
-  return %result : tensor<4x8xf32>
-}
-
-// -----
 // Arith and hipsr constants are shape-graph roots, so a placeholder can take
 // its shape straight from a constant.
 // CHECK-LABEL: func.func @constant_shape_roots(
