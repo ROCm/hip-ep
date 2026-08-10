@@ -6,8 +6,8 @@
 //
 // Converts ONNX dialect IR into tensor-form hipsr dialect IR. The conversion
 // target keeps helper computations inside hipsr.compute while allowing scalar
-// constants as graph roots. After conversion, placeholder dependencies are
-// rewired into a parallel shape graph.
+// constants as graph roots. After conversion, placeholder inputs are moved onto
+// the shape graph.
 //
 //===----------------------------------------------------------------------===//
 
@@ -21,7 +21,6 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Transforms/DialectConversion.h"
 
-#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 
@@ -33,54 +32,34 @@ namespace hipsr {
 
 namespace {
 
-// Shape dependencies flow through placeholders instead of computed data.
-static LogicalResult finalizePlaceholderDependencies(ModuleOp module) {
-  llvm::DenseMap<Value, Value> placeholderForDataResult;
-  module.walk([&](Operation *op) {
-    ResultRange results = op->getResults();
-    OperandRange destinations = getHipsrDestinationOperands(op);
-    for (auto [result, destination] : llvm::zip(results, destinations)) {
-      if (!destination.getDefiningOp<PlaceholderOp>()) {
-        continue;
-      }
-      placeholderForDataResult.try_emplace(result, destination);
+// Conversion leaves each placeholder input pointing at a data result. Point it
+// at the outs operand its producer writes into, which has the same shape.
+static SmallVector<Value> resolveShapeGraphInputs(PlaceholderOp placeholder) {
+  SmallVector<Value> resolved = llvm::to_vector(placeholder.getInputs());
+  for (Value &input : resolved) {
+    if (PlaceholderOp::isAllowedShapeGraphInput(input)) {
+      continue;
+    }
+    // Block arguments are allowed, so anything left is a result.
+    auto result = cast<OpResult>(input);
+    OperandRange destinations = getHipsrDestinationOperands(result.getOwner());
+    if (result.getResultNumber() >= destinations.size()) {
+      continue;
+    }
+    input = destinations[result.getResultNumber()];
+  }
+  return resolved;
+}
+
+// Placeholder inputs form the shape graph, not the data graph.
+// PlaceholderOp::verify reports any input this cannot fix.
+static void rewirePlaceholderInputs(ModuleOp module) {
+  module.walk([](PlaceholderOp placeholder) {
+    SmallVector<Value> resolvedInputs = resolveShapeGraphInputs(placeholder);
+    if (!llvm::equal(resolvedInputs, placeholder.getInputs())) {
+      placeholder.getInputsMutable().assign(resolvedInputs);
     }
   });
-
-  llvm::SmallVector<std::pair<OpOperand *, Value>> replacements;
-  WalkResult walkResult =
-      module.walk([&](PlaceholderOp placeholder) -> WalkResult {
-        MutableOperandRange mutableInputs = placeholder.getInputsMutable();
-        for (auto [inputIndex, input] :
-             llvm::enumerate(placeholder.getInputs())) {
-          auto replacement = placeholderForDataResult.find(input);
-          Value resolvedInput = replacement == placeholderForDataResult.end()
-                                    ? input
-                                    : replacement->second;
-          if (!PlaceholderOp::isAllowedShapeGraphInput(resolvedInput)) {
-            placeholder.emitOpError("input ")
-                << inputIndex
-                << " must be a block argument or a result of "
-                   "hipsr.placeholder, arith.constant, or hipsr.constant; got "
-                   "result of '"
-                << resolvedInput.getDefiningOp()->getName() << "'";
-            return WalkResult::interrupt();
-          }
-          if (resolvedInput != input) {
-            replacements.emplace_back(&mutableInputs[inputIndex],
-                                      resolvedInput);
-          }
-        }
-        return WalkResult::advance();
-      });
-  if (walkResult.wasInterrupted()) {
-    return failure();
-  }
-
-  for (auto [operand, value] : replacements) {
-    operand->set(value);
-  }
-  return success();
 }
 
 struct ConvertOnnxToHipsrPass
@@ -101,10 +80,8 @@ struct ConvertOnnxToHipsrPass
       signalPassFailure();
       return;
     }
-    // Build the parallel shape graph after all data-graph rewrites finish.
-    if (failed(finalizePlaceholderDependencies(module))) {
-      signalPassFailure();
-    }
+    // Runs after conversion so every producer has its outs operand.
+    rewirePlaceholderInputs(module);
   }
 };
 
