@@ -33,8 +33,8 @@
 namespace mlir {
 namespace hipsr {
 
-/// result[i] is written into destination[i]; a bufferized op writes into
-/// memref destinations and has no results.
+// return Outputs if op is a hipsr.compute op, or the DPS inits if op is a
+// hipsr DPS op. return empty range if op is not a hipsr op.
 ::mlir::OperandRange getHipsrDestinationOperands(::mlir::Operation *op);
 
 // compute: use is in Outputs
