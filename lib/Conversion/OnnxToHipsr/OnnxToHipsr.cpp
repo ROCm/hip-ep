@@ -34,7 +34,7 @@ namespace {
 
 // Conversion leaves each placeholder input pointing at a data result. Point it
 // at the outs operand its producer writes into, which has the same shape.
-static SmallVector<Value> resolveShapeGraphInputs(PlaceholderOp placeholder) {
+SmallVector<Value> resolveShapeGraphInputs(PlaceholderOp placeholder) {
   SmallVector<Value> resolved = llvm::to_vector(placeholder.getInputs());
   for (Value &input : resolved) {
     if (PlaceholderOp::isAllowedShapeGraphInput(input)) {
@@ -53,7 +53,7 @@ static SmallVector<Value> resolveShapeGraphInputs(PlaceholderOp placeholder) {
 
 // Placeholder inputs form the shape graph, not the data graph.
 // PlaceholderOp::verify reports any input this cannot fix.
-static void rewirePlaceholderInputs(ModuleOp module) {
+void rewirePlaceholderInputs(ModuleOp module) {
   module.walk([](PlaceholderOp placeholder) {
     SmallVector<Value> resolvedInputs = resolveShapeGraphInputs(placeholder);
     if (!llvm::equal(resolvedInputs, placeholder.getInputs())) {
