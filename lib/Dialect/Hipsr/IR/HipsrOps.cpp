@@ -14,7 +14,7 @@ using namespace mlir::hipsr;
 #include "hip/Dialect/Hipsr/IR/HipsrOps.cpp.inc"
 
 OperandRange mlir::hipsr::getHipsrDestinationOperands(Operation *op) {
-  OperandRange none = OperandRange(op->getOpOperands().data(), 0);
+  OperandRange none = OperandRange(nullptr, 0);
   if (op->getName().getDialectNamespace() !=
       HipsrDialect::getDialectNamespace()) {
     return none;
