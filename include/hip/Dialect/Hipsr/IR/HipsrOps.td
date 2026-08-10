@@ -13,8 +13,6 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 include "hip/Dialect/Hipsr/IR/HipsrAttrs.td"
 include "hip/Dialect/Hipsr/IR/HipsrDialect.td"
 include "hip/Dialect/Hipsr/IR/HipsrTypes.td"
-include "hip/Dialect/Hipsr/IR/HipsrStartBarrierInterface.td"
-include "hip/Dialect/Hipsr/IR/HipsrEndBarrierInterface.td"
 
 //===----------------------------------------------------------------------===//
 // Base op class
@@ -45,13 +43,12 @@ include "hip/Dialect/Hipsr/IR/HipsrPoolDomainOp.td"
 include "hip/Dialect/Hipsr/IR/HipsrPoolDomainYieldOp.td"
 include "hip/Dialect/Hipsr/IR/HipsrComputeOp.td"
 include "hip/Dialect/Hipsr/IR/HipsrComputeYieldOp.td"
-include "hip/Dialect/Hipsr/IR/HipsrEmptyOp.td"
-include "hip/Dialect/Hipsr/IR/HipsrEmptyYieldOp.td"
 include "hip/Dialect/Hipsr/IR/HipsrMatMulOp.td"
 include "hip/Dialect/Hipsr/IR/HipsrExpandOp.td"
 include "hip/Dialect/Hipsr/IR/HipsrCastOp.td"
 include "hip/Dialect/Hipsr/IR/HipsrAddOp.td"
 include "hip/Dialect/Hipsr/IR/HipsrConstantOp.td"
 include "hip/Dialect/Hipsr/IR/HipsrGetPoolOp.td"
+include "hip/Dialect/Hipsr/IR/HipsrPreserveShapeOp.td"
 
 #endif // HIPSR_OPS

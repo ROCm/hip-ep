@@ -4,8 +4,8 @@
  */
 //===- PopulateShapeRegionPass.cpp - Fill hipsr shape regions -------------===//
 //
-// Each empty placeholder shape region is populated from its DPS consumer.
-// Already-populated placeholders are skipped.
+// Each empty placeholder shape region is populated from the consumer whose
+// `outs` it fills. Already-populated placeholders are skipped.
 //
 // Before:
 //   %init = hipsr.placeholder(%ctx) ins(%input) : tensor<?x8xf16>
@@ -64,7 +64,7 @@ LogicalResult populatePlaceholderShapeRegion(OpBuilder &builder,
     return success();
   }
 
-  Operation *consumer = placeholder.getDpsConsumer();
+  Operation *consumer = placeholder.getConsumer();
   Block &block = createPlaceholderShapeBlock(builder, placeholder);
 
   if (auto addOp = dyn_cast<AddOp>(consumer)) {

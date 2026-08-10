@@ -4,7 +4,7 @@
  */
 //===- OnnxToHipsr.cpp - Convert ONNX dialect to the hipsr dialect --------===//
 //
-// Converts ONNX dialect IR into hipsr dialect IR (tensor DPS). The conversion
+// Converts ONNX dialect IR into tensor-form hipsr dialect IR. The conversion
 // target keeps helper computations inside hipsr.compute while allowing scalar
 // constants as graph roots. After conversion, placeholder dependencies are
 // rewired into a parallel shape graph.
@@ -19,7 +19,6 @@
 #include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinOps.h"
-#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Transforms/DialectConversion.h"
 
 #include "llvm/ADT/DenseMap.h"
@@ -37,18 +36,14 @@ namespace {
 // Shape dependencies flow through placeholders instead of computed data.
 static LogicalResult finalizePlaceholderDependencies(ModuleOp module) {
   llvm::DenseMap<Value, Value> placeholderForDataResult;
-  module.walk([&](DestinationStyleOpInterface dpsOp) {
-    for (OpResult result : dpsOp->getResults()) {
-      OpOperand *initOperand = dpsOp.getTiedOpOperand(result);
-      if (!initOperand) {
+  module.walk([&](Operation *op) {
+    ResultRange results = op->getResults();
+    OperandRange destinations = getHipsrDestinationOperands(op);
+    for (auto [result, destination] : llvm::zip(results, destinations)) {
+      if (!destination.getDefiningOp<PlaceholderOp>()) {
         continue;
       }
-
-      auto placeholder = initOperand->get().getDefiningOp<PlaceholderOp>();
-      if (!placeholder || placeholder->getDialect() != dpsOp->getDialect()) {
-        continue;
-      }
-      placeholderForDataResult.try_emplace(result, initOperand->get());
+      placeholderForDataResult.try_emplace(result, destination);
     }
   });
 

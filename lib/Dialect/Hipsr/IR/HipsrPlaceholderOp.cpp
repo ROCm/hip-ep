@@ -24,14 +24,13 @@ bool PlaceholderOp::isAllowedShapeGraphInput(Value value) {
       definingOp);
 }
 
-Operation *PlaceholderOp::getDpsConsumer() {
+// every result must fill one outs slot of the same operation, so
+// the first outs use found identifies the consumer.
+Operation *PlaceholderOp::getConsumer() {
   for (Value result : getResults()) {
     for (OpOperand &use : result.getUses()) {
-      Operation *owner = use.getOwner();
-      auto dpsOp = dyn_cast<DestinationStyleOpInterface>(owner);
-      if (dpsOp && owner->getDialect() == getOperation()->getDialect() &&
-          dpsOp.isDpsInit(&use)) {
-        return owner;
+      if (isHipsrDestinationOperand(use)) {
+        return use.getOwner();
       }
     }
   }
@@ -53,7 +52,7 @@ SmallVector<Type> PlaceholderOp::getShapeRegionArgumentTypes() {
 
 LogicalResult PlaceholderOp::verify() {
   if (getNumResults() == 0) {
-    return emitOpError("must produce at least one tensor DPS init");
+    return emitOpError("must produce at least one tensor outs operand");
   }
 
   for (auto [inputIndex, input] : llvm::enumerate(getInputs())) {
@@ -68,37 +67,37 @@ LogicalResult PlaceholderOp::verify() {
 
   Operation *consumer = nullptr;
   for (auto [resultIndex, result] : llvm::enumerate(getResults())) {
-    OpOperand *dpsInitUse = nullptr;
+    OpOperand *outsUse = nullptr;
     for (OpOperand &use : result.getUses()) {
-      Operation *owner = use.getOwner();
-      if (isa<PlaceholderOp>(owner)) {
+      if (isa<PlaceholderOp, PoolDomainYieldOp>(use.getOwner())) {
         continue;
       }
 
-      auto dpsOp = dyn_cast<DestinationStyleOpInterface>(owner);
-      if (!dpsOp || owner->getDialect() != getOperation()->getDialect() ||
-          !dpsOp.isDpsInit(&use)) {
-        return emitOpError("requires each result use to be a placeholder input "
-                           "or a DPS init of a hipsr operation");
+      if (!isHipsrDestinationOperand(use)) {
+        return emitOpError("requires each result use to be a placeholder "
+                           "input, pool-domain yield, or an outs operand of a "
+                           "hipsr operation");
       }
-      if (dpsInitUse) {
+      if (outsUse) {
         return emitOpError(
             "requires each result to initialize exactly one hipsr operation");
       }
-      dpsInitUse = &use;
+      outsUse = &use;
     }
-    if (!dpsInitUse) {
+    if (!outsUse) {
       return emitOpError(
           "requires each result to initialize exactly one hipsr operation");
     }
 
-    Operation *owner = dpsInitUse->getOwner();
-    auto dpsOp = cast<DestinationStyleOpInterface>(owner);
-    OpResult consumerResult = dpsOp.getTiedOpResult(dpsInitUse);
-    if (result.getType() != consumerResult.getType()) {
-      return emitOpError("result ")
-             << resultIndex << " type " << result.getType()
-             << " must match consumer result type " << consumerResult.getType();
+    Operation *owner = outsUse->getOwner();
+    if (auto dpsOp = dyn_cast<DestinationStyleOpInterface>(owner)) {
+      OpResult consumerResult = dpsOp.getTiedOpResult(outsUse);
+      if (result.getType() != consumerResult.getType()) {
+        return emitOpError("result ")
+               << resultIndex << " type " << result.getType()
+               << " must match consumer result type "
+               << consumerResult.getType();
+      }
     }
 
     if (consumer && consumer != owner) {
