@@ -107,14 +107,14 @@ LogicalResult ComputeOpBufferization::bufferize(
   // so the two already agree.
   SmallVector<Value> newOperands;
   for (Value operand : op->getOperands()) {
-    if (!isa<TensorType>(operand.getType())) {
-      newOperands.push_back(operand);
-    }else{
+    if (isa<TensorType>(operand.getType())) {
       FailureOr<Value> buffer =
           bufferization::getBuffer(rewriter, operand, options, state);
       if (failed(buffer))
         return failure();
       newOperands.push_back(*buffer);
+    }else{
+      newOperands.push_back(operand);
     }
   }
 
