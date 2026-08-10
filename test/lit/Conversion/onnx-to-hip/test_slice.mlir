@@ -44,6 +44,7 @@ module {
   // supports strides).
   func.func @test_slice_decompose_stride(%input: tensor<2x4xf32>) -> tensor<1x2xf32> {
     // CHECK-LABEL: func.func @test_slice_decompose_stride
+    // NO-DECOMPOSE-LABEL: func.func @test_slice_decompose_stride
     %starts = arith.constant dense<[1, 0]> : tensor<2xi64>
     %ends   = arith.constant dense<[2, 3]> : tensor<2xi64>
     %axes   = arith.constant dense<[0, 1]> : tensor<2xi64>
@@ -54,6 +55,8 @@ module {
 
     // CHECK-NOT: onnx.Slice
     // CHECK: tensor.extract_slice {{.*}}[1, 0] [1, 2] [1, 2]
+    // NO-DECOMPOSE-NOT: tensor.extract_slice
+    // NO-DECOMPOSE: hip.slice(
 
     return %r : tensor<1x2xf32>
   }
@@ -61,6 +64,7 @@ module {
   // Test 3: omitted axes / steps — default to all axes, unit stride.
   func.func @test_slice_decompose_default_axes(%input: tensor<4x6xf32>) -> tensor<2x3xf32> {
     // CHECK-LABEL: func.func @test_slice_decompose_default_axes
+    // NO-DECOMPOSE-LABEL: func.func @test_slice_decompose_default_axes
     %starts = arith.constant dense<[0, 0]> : tensor<2xi64>
     %ends   = arith.constant dense<[2, 3]> : tensor<2xi64>
     %r = "onnx.Slice"(%input, %starts, %ends)
@@ -68,6 +72,8 @@ module {
 
     // CHECK-NOT: onnx.Slice
     // CHECK: tensor.extract_slice {{.*}}[0, 0] [2, 3] [1, 1]
+    // NO-DECOMPOSE-NOT: tensor.extract_slice
+    // NO-DECOMPOSE: hip.slice(
 
     return %r : tensor<2x3xf32>
   }
@@ -112,6 +118,7 @@ module {
   // tensor.dim Value, not a constant).
   func.func @test_slice_decompose_dyn_untouched(%input: tensor<4x?xf32>) -> tensor<2x?xf32> {
     // CHECK-LABEL: func.func @test_slice_decompose_dyn_untouched
+    // NO-DECOMPOSE-LABEL: func.func @test_slice_decompose_dyn_untouched
     %starts = arith.constant dense<[1]> : tensor<1xi64>
     %ends   = arith.constant dense<[3]> : tensor<1xi64>
     %axes   = arith.constant dense<[0]> : tensor<1xi64>
@@ -127,6 +134,8 @@ module {
     // The first dim's slice is [start=1, size=2, step=1]; the second
     // dim is untouched and uses the runtime dim value.
     // CHECK: tensor.extract_slice %{{.*}}[1, 0] [2, %[[DIM]]] [1, 1]
+    // NO-DECOMPOSE-NOT: tensor.extract_slice
+    // NO-DECOMPOSE: hip.slice(
     return %r : tensor<2x?xf32>
   }
 
