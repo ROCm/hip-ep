@@ -10,10 +10,6 @@
 using namespace mlir;
 using namespace mlir::hipsr;
 
-MutableOperandRange ComputeOp::getDpsInitsMutable() {
-  return getInitsMutable();
-}
-
 OperandRange ComputeOp::getEntrySuccessorOperands(RegionSuccessor successor) {
   if (successor.getSuccessor() != &getBody()) {
     llvm::report_fatal_error(
@@ -35,4 +31,15 @@ void ComputeOp::getSuccessorRegions(RegionBranchPoint point,
         "hipsr.compute received an unexpected branch point");
   }
   regions.emplace_back(getOperation(), getResults());
+}
+
+LogicalResult ComputeOp::verify() {
+  ValueRange results = getResults();
+  if (!results.empty() && results.size() != getOutputs().size()) {
+    return emitOpError("expects one result per output, but got ")
+           << results.size() << " results and " << getOutputs().size()
+           << " outputs";
+  }
+
+  return success();
 }

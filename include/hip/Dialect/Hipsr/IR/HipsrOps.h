@@ -33,6 +33,14 @@
 namespace mlir {
 namespace hipsr {
 
+// return Outputs if op is a hipsr.compute op, or the DPS inits if op is a
+// hipsr DPS op. return empty range if op is not a hipsr op.
+::mlir::OperandRange getHipsrDestinationOperands(::mlir::Operation *op);
+
+// compute: use is in Outputs
+// dps: use is in Init
+bool isHipsrDestinationOperand(::mlir::OpOperand &use);
+
 // CONTRACT: MorphiZen-generated constants only. Works both before and after
 // externalization (value/source are never removed -- offset/size only mark the
 // constants-file location). Fails fast on forms MorphiZen never emits

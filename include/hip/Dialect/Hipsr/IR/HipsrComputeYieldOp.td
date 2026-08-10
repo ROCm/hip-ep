@@ -16,10 +16,10 @@ def Hipsr_ComputeYieldOp : Hipsr_Op<"compute_yield",
   let description = [{
     Returns values from a compute body to the parent op.
 
-    `ReturnLike` lets the parent's `RegionBranchOpInterface` verify these
-    outputs. Because the op only forwards values, `Pure` lets effect analyses
-    ignore it. Operands are ranked tensors, like the results of
-    `hipsr.compute`; a bufferized compute has no results and yields nothing.
+    Operands are ranked tensors and give `hipsr.compute` its result
+    types; because that op is not destination-passing style, those types need
+    not match its `outs` types. A bufferized compute has no results and yields
+    nothing.
 
     Example:
     ```mlir
