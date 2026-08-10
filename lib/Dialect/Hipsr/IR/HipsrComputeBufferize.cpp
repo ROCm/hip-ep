@@ -102,35 +102,45 @@ LogicalResult ComputeOpBufferization::bufferize(
   auto computeOp = cast<ComputeOp>(op);
   Block *oldBody = &computeOp.getBody().front();
 
-  // ctx is not a buffer and passes through. The operand buffers need no cast:
-  // getBufferType above defines a block argument's buffer type as its operand's,
-  // so the two already agree.
-  SmallVector<Value> newOperands;
-  for (Value operand : op->getOperands()) {
-    if (isa<TensorType>(operand.getType())) {
+  Value ctx = computeOp.getCtx();
+
+  SmallVector<Value> bufferizedInputs;
+  for (Value input : computeOp.getInputs()) {
+    if (isa<TensorType>(input.getType())) {
       FailureOr<Value> buffer =
-          bufferization::getBuffer(rewriter, operand, options, state);
+          bufferization::getBuffer(rewriter, input, options, state);
       if (failed(buffer))
         return failure();
-      newOperands.push_back(*buffer);
-    }else{
-      newOperands.push_back(operand);
+      bufferizedInputs.push_back(*buffer);
+    } else {
+      bufferizedInputs.push_back(input);
     }
   }
 
-  // The driver bufferizes nested ops before their parent, terminator included,
-  // so the yield already holds the buffers the new results take their types
-  // from.
-  ArrayRef<Value> operands = newOperands;
-  size_t numInputs = computeOp.getInputs().size();
+  SmallVector<Value> bufferizedOutputs;
+  for (Value output : computeOp.getOutputs()) {
+    if (isa<TensorType>(output.getType())) {
+      FailureOr<Value> buffer =
+          bufferization::getBuffer(rewriter, output, options, state);
+      if (failed(buffer))
+        return failure();
+      bufferizedOutputs.push_back(*buffer);
+    } else {
+      bufferizedOutputs.push_back(output);
+    }
+  }
+
+  // Create new op with memref operands
   auto newOp = ComputeOp::create(
       rewriter, op->getLoc(), TypeRange(getYieldOp(computeOp)->getOperands()),
-      operands.front(), operands.slice(1, numInputs),
-      operands.drop_front(1 + numInputs));
+      ctx, bufferizedInputs, bufferizedOutputs);
 
-  // Give the new body the bufferized argument types, then wrap each buffer in a
-  // to_tensor so the still-tensor body can move over unchanged. The resulting
-  // to_buffer/to_tensor pairs fold away once the pass finishes.
+  // ctx + ins + outs, aligned with bb0 block arguments.
+  SmallVector<Value> newOperands;
+  newOperands.push_back(ctx);
+  newOperands.append(bufferizedInputs.begin(), bufferizedInputs.end());
+  newOperands.append(bufferizedOutputs.begin(), bufferizedOutputs.end());
+
   SmallVector<Type> argumentTypes;
   SmallVector<Location> argumentLocs;
   for (BlockArgument oldArgument : oldBody->getArguments()) {
