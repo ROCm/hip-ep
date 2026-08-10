@@ -9,8 +9,9 @@
 //   2. SliceToHip (fallback) — non-constant indices or negative steps fall
 //      through to a native hip.slice op whose runtime is a stub today.
 
-// RUN: env -u HIPDNN_EP_DISABLE_SLICE_DECOMPOSITION hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
-// RUN: env HIPDNN_EP_DISABLE_SLICE_DECOMPOSITION=1 hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s --check-prefix=NO-DECOMPOSE
+// RUN: env HIPDNN_EP_ENABLE_SLICE_DECOMPOSITION=1 hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
+// RUN: env -u HIPDNN_EP_ENABLE_SLICE_DECOMPOSITION hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s --check-prefix=NO-DECOMPOSE
+// RUN: env HIPDNN_EP_ENABLE_SLICE_DECOMPOSITION=0 hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s --check-prefix=NO-DECOMPOSE
 
 module {
   func.func @main_graph(%arg0: tensor<4xf32>) -> tensor<4xf32> {

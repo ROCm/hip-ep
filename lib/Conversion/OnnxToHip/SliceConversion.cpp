@@ -357,7 +357,9 @@ struct SliceToHip : public mlir::RewritePattern {
 
 void populateSliceConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx) {
-  if (hip_get_env("HIPDNN_EP_DISABLE_SLICE_DECOMPOSITION").empty())
+  const std::string enable =
+      hip_get_env("HIPDNN_EP_ENABLE_SLICE_DECOMPOSITION");
+  if (!enable.empty() && enable[0] >= '1')
     patterns.add<SliceDecompose>(ctx);
   patterns.add<SliceToHip>(ctx);
 }
