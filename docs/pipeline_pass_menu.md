@@ -185,8 +185,8 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   [outline-onnx-to-hipdnn + compile-hipdnn-graphs]   (handle overload only)
   convert-onnx-to-hip
   «slot: AfterConvertOnnxToHip»  (supported hip.constant producer boundary)
-  hip-externalize-constants
   hip-infer-shapes
+  hip-externalize-constants
   canonicalize ; cse
   func.func(hip-split-duplicate-dps-inits)
   func.func(hip-resolve-tensor-dims)

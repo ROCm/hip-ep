@@ -100,10 +100,12 @@ two constant sweeps, but each sweep only lowers `onnx.Constant` to the neutral
 `hip.constant` carrier. A carrier contains either an inline dense `value` or a
 complete ORT external-data `location`/`offset`/`size` reference.
 
-The standalone `hip-externalize-constants` pass runs after the
-`AfterConvertOnnxToHip` plugin slot. It validates and plans all carriers, writes
-the artifacts, then commits the IR and metadata. Plugins may emit
-`hip.constant` at that slot and receive the same policy as in-tree constants.
+After the `AfterConvertOnnxToHip` plugin slot, `hip-infer-shapes` consumes any
+inspectable carrier payload needed for compile-time shape refinement. The
+standalone `hip-externalize-constants` pass then validates and plans all
+carriers, writes the artifacts, and commits the IR and metadata. Plugins may
+emit `hip.constant` at that slot and receive the same policy as in-tree
+constants.
 The externalizer calls
 `fs->create_writer(constants_filename)` to stream raw constant bytes into
 storage. `constants_filename` is the configured constants file
@@ -147,7 +149,9 @@ the buffer after a single bulk read.
   ┌─────────────────────────────────────────┐  compile time
   │ Step 1a: convert-onnx-to-hip            │
   │  → hip.constant carriers                │
-  │ Step 1b: hip-externalize-constants      │
+  │ Step 1b: hip-infer-shapes               │
+  │  → consume compile-time shape payloads  │
+  │ Step 1c: hip-externalize-constants      │
   │  → constants file (via fs)              │
   │  → hipdnn.constant_sizes                │
   │  → hipdnn.constant_offsets              │

@@ -110,7 +110,10 @@ std::unique_ptr<Pass> createVerifyNoConstantCarriersPass() {
 /// (allocated in-graph at runtime via the EP's output-allocator callback).
 /// It must run before pool-allocs (slot 6); the reason is at that slot. See
 /// docs/design/output-allocator-design.md.
-static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
+static void
+buildOnnxToHipPipelineTail(OpPassManager &pm,
+                           const mlir::hip::OnnxToHipPipelineOptions &options,
+                           morphizen::FileSystem *fs) {
   // 1b. Refine `?` (kDynamic) dims on HIP DPS op result types using each
   //     op's `ReifyRankedShapedTypeOpInterface` impl. Placed here so the
   //     refinements propagate through bufferize and into pool / alloc
@@ -126,16 +129,33 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
   //     the reference cases.
   pm.addPass(mlir::hip::createInferShapesPass());
 
-  // 1b'. Canonicalize + CSE immediately after shape inference. The dynamic-
-  //      shape op conversions (e.g. pool / reduce) size each dynamic result dim
-  //      by emitting `tensor.dim` of a (statically-typed) producer plus a
-  //      little index arithmetic, then build the `tensor.empty` init from those
-  //      values. InferShapes above has just tightened many of those producers
-  //      to static dims, so canonicalization now folds `tensor.dim` of a static
-  //      dim to a constant, collapses the dependent arithmetic, and DCEs the
-  //      dead shape computations; CSE dedups the identical per-dim
-  //      recomputations the per-op conversions emit independently. Both run
-  //      before bufferize so
+  // Apply constant storage policy only after HIP shape inference has consumed
+  // every inspectable dense carrier payload. This keeps compile-time shape
+  // values visible through conversion and reification while still replacing
+  // every carrier before canonicalization, CSE, and bufferization.
+  if (fs) {
+    pm.addPass(mlir::hip::createExternalizeConstantsPass(
+        fs, options.externalizeMinNumElements, options.skipConstantData));
+  } else {
+    mlir::hip::ExternalizeConstantsPassOptions externalizeOptions;
+    externalizeOptions.externalizeOutputDir = options.externalizeOutputDir;
+    externalizeOptions.externalizeMinNumElements =
+        options.externalizeMinNumElements;
+    externalizeOptions.skipConstantData = options.skipConstantData;
+    pm.addPass(mlir::hip::createExternalizeConstantsPass(
+        std::move(externalizeOptions)));
+  }
+
+  // 1b'. Canonicalize + CSE immediately after shape inference and constant
+  //      externalization. The dynamic-shape op conversions (e.g. pool /
+  //      reduce) size each dynamic result dim by emitting `tensor.dim` of a
+  //      (statically-typed) producer plus a little index arithmetic, then build
+  //      the `tensor.empty` init from those values. InferShapes above has just
+  //      tightened many of those producers to static dims, so canonicalization
+  //      now folds `tensor.dim` of a static dim to a constant, collapses the
+  //      dependent arithmetic, and DCEs the dead shape computations; CSE
+  //      dedups the identical per-dim recomputations the per-op conversions
+  //      emit independently. Both run before bufferize so
   //      `--hip-pool-allocs` sees folded constant dims instead of fragmented
   //      `memref.dim` chains (un-folded chains split the pool and pessimize
   //      buffer reuse).
@@ -389,19 +409,7 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   addPluginPassesForSlot(pm,
                          ::hip::compiler::PipelineSlot::AfterConvertOnnxToHip);
 
-  if (fs) {
-    pm.addPass(mlir::hip::createExternalizeConstantsPass(
-        fs, options.externalizeMinNumElements, options.skipConstantData));
-  } else {
-    ExternalizeConstantsPassOptions externalizeOptions;
-    externalizeOptions.externalizeOutputDir = options.externalizeOutputDir;
-    externalizeOptions.externalizeMinNumElements =
-        options.externalizeMinNumElements;
-    externalizeOptions.skipConstantData = options.skipConstantData;
-    pm.addPass(createExternalizeConstantsPass(std::move(externalizeOptions)));
-  }
-
-  buildOnnxToHipPipelineTail(pm);
+  buildOnnxToHipPipelineTail(pm, options, fs);
 }
 
 void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
@@ -430,19 +438,7 @@ void mlir::hip::buildOnnxToHipPipeline(OpPassManager &pm,
   addPluginPassesForSlot(pm,
                          ::hip::compiler::PipelineSlot::AfterConvertOnnxToHip);
 
-  if (fs) {
-    pm.addPass(mlir::hip::createExternalizeConstantsPass(
-        fs, options.externalizeMinNumElements, options.skipConstantData));
-  } else {
-    ExternalizeConstantsPassOptions externalizeOptions;
-    externalizeOptions.externalizeOutputDir = options.externalizeOutputDir;
-    externalizeOptions.externalizeMinNumElements =
-        options.externalizeMinNumElements;
-    externalizeOptions.skipConstantData = options.skipConstantData;
-    pm.addPass(createExternalizeConstantsPass(std::move(externalizeOptions)));
-  }
-
-  buildOnnxToHipPipelineTail(pm);
+  buildOnnxToHipPipelineTail(pm, options, fs);
 }
 
 void mlir::hip::buildHipToLLVMPipeline(

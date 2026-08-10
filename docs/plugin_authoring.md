@@ -230,8 +230,9 @@ needs to run.
 
 It is also the only supported slot for producing constant weights. Emit
 `hip.constant` with a statically shaped ranked tensor result and exactly one
-source (dense `value`, or complete `location`/`offset`/`size`). The host runs
-`hip-externalize-constants` immediately after the slot, applying the same
+source (dense `value`, or complete `location`/`offset`/`size`).
+`hip-infer-shapes` first consumes any compile-time payload needed for shape
+refinement; `hip-externalize-constants` then applies the same
 inline/full/streaming/hybrid policy and metadata contract to plugin and in-tree
 carriers. Leave `hip.constant_origin` and `hip.constant_order` unset; those are
 reserved for in-tree conversion, and plugin carriers are deterministically
