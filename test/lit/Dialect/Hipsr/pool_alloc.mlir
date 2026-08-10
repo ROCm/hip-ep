@@ -6,8 +6,9 @@
 // Cases are ordered by lifetime-interval topology (interference-graph chromatic
 // number chi = group count), ascending:
 //   chi=1  single point : align_up_rounding, dynamic_size, dead_alloc_skipped
-//   chi=1  independent  : coalesce_static
+//   chi=1  independent  : coalesce_static, coalesce_dynamic, coalesce_mixed
 //   chi=2  staggered    : split_two_groups, split_two_groups_dynamic
+//   chi=2  one-over-many: split_with_coalesced_group
 //   chi=3  clique K3    : split_three_groups
 
 // 3xf16 = 6 B is not a multiple of 256, so the alignUp chain must round up.
@@ -163,6 +164,88 @@ func.func @coalesce_static(%ctx: !hipsr.context,
 
 // -----
 
+// CHECK-LABEL: func.func @coalesce_dynamic
+// CHECK: %[[DIM:.+]] = memref.dim %{{.+}}, %{{.+}} : memref<?x1024xf16, #hipsr.mem<device>>
+// CHECK-NEXT: %[[C2048A:.+]] = arith.constant 2048 : index
+// CHECK-NEXT: %[[S0:.+]] = arith.muli %[[C2048A]], %[[DIM]] : index
+// CHECK-NEXT: %[[C2048B:.+]] = arith.constant 2048 : index
+// CHECK-NEXT: %[[S1:.+]] = arith.muli %[[C2048B]], %[[DIM]] : index
+// CHECK-NEXT: %[[MAX:.+]] = arith.maxui %[[S0]], %[[S1]] : index
+// CHECK-NEXT: %[[C256:.+]] = arith.constant 256 : index
+// CHECK-NEXT: %[[C255:.+]] = arith.constant 255 : index
+// CHECK-NEXT: %[[NUM:.+]] = arith.addi %[[MAX]], %[[C255]] : index
+// CHECK-NEXT: %[[DIV:.+]] = arith.divui %[[NUM]], %[[C256]] : index
+// CHECK-NEXT: %[[G0:.+]] = arith.muli %[[DIV]], %[[C256]] : index
+// CHECK-NEXT: %[[OFF:.+]] = arith.constant 0 : index
+// CHECK-NEXT: %[[POOL:.+]] = hipsr.get_pool(%{{.+}}, %[[G0]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
+// CHECK-NEXT: %[[V0:.+]] = memref.view %[[POOL]][%[[OFF]]][%[[DIM]]] : memref<?xi8, #hipsr.mem<device>> to memref<?x1024xf16, #hipsr.mem<device>>
+// CHECK-NEXT: %[[V1:.+]] = memref.view %[[POOL]][%[[OFF]]][%[[DIM]]] : memref<?xi8, #hipsr.mem<device>> to memref<?x1024xf16, #hipsr.mem<device>>
+// CHECK-NEXT: hipsr.add(%{{.+}}) ins(%{{.+}}, %{{.+}} : memref<?x1024xf16, #hipsr.mem<device>>, memref<?x1024xf16, #hipsr.mem<device>>) outs(%[[V0]] : memref<?x1024xf16, #hipsr.mem<device>>)
+// CHECK-NEXT: hipsr.add(%{{.+}}) ins(%[[V0]], %{{.+}} : memref<?x1024xf16, #hipsr.mem<device>>, memref<?x1024xf16, #hipsr.mem<device>>) outs(%{{.+}} : memref<?x1024xf16, #hipsr.mem<device>>)
+// CHECK-NEXT: hipsr.add(%{{.+}}) ins(%{{.+}}, %{{.+}} : memref<?x1024xf16, #hipsr.mem<device>>, memref<?x1024xf16, #hipsr.mem<device>>) outs(%[[V1]] : memref<?x1024xf16, #hipsr.mem<device>>)
+// CHECK-NEXT: hipsr.add(%{{.+}}) ins(%[[V1]], %{{.+}} : memref<?x1024xf16, #hipsr.mem<device>>, memref<?x1024xf16, #hipsr.mem<device>>) outs(%{{.+}} : memref<?x1024xf16, #hipsr.mem<device>>)
+// CHECK-NOT: memref.alloc
+func.func @coalesce_dynamic(%ctx: !hipsr.context, %in: memref<?x1024xf16, #hipsr.mem<device>>) {
+  hipsr.pool_domain(%ctx, %in : !hipsr.context, memref<?x1024xf16, #hipsr.mem<device>>) {
+  ^bb0(%dctx: !hipsr.context, %din: memref<?x1024xf16, #hipsr.mem<device>>):
+    %c0 = arith.constant 0 : index
+    %d = memref.dim %din, %c0 : memref<?x1024xf16, #hipsr.mem<device>>
+    %a1 = memref.alloc(%d) : memref<?x1024xf16, #hipsr.mem<device>>
+    %a2 = memref.alloc(%d) : memref<?x1024xf16, #hipsr.mem<device>>
+    hipsr.add(%dctx) ins(%din, %din : memref<?x1024xf16, #hipsr.mem<device>>, memref<?x1024xf16, #hipsr.mem<device>>) outs(%a1 : memref<?x1024xf16, #hipsr.mem<device>>)
+    hipsr.add(%dctx) ins(%a1, %din : memref<?x1024xf16, #hipsr.mem<device>>, memref<?x1024xf16, #hipsr.mem<device>>) outs(%din : memref<?x1024xf16, #hipsr.mem<device>>)
+    hipsr.add(%dctx) ins(%din, %din : memref<?x1024xf16, #hipsr.mem<device>>, memref<?x1024xf16, #hipsr.mem<device>>) outs(%a2 : memref<?x1024xf16, #hipsr.mem<device>>)
+    hipsr.add(%dctx) ins(%a2, %din : memref<?x1024xf16, #hipsr.mem<device>>, memref<?x1024xf16, #hipsr.mem<device>>) outs(%din : memref<?x1024xf16, #hipsr.mem<device>>)
+    hipsr.pool_domain_yield
+  } {domain_id = 0 : i64}
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @coalesce_mixed
+// CHECK: %[[DIM:.+]] = memref.dim %{{.+}}, %{{.+}} : memref<?x512xf16, #hipsr.mem<device>>
+// CHECK-NEXT: %[[C4096:.+]] = arith.constant 4096 : index
+// CHECK-NEXT: %[[C1024:.+]] = arith.constant 1024 : index
+// CHECK-NEXT: %[[BYTES:.+]] = arith.muli %[[C1024]], %[[DIM]] : index
+// CHECK-NEXT: %[[MAX:.+]] = arith.maxui %[[C4096]], %[[BYTES]] : index
+// CHECK-NEXT: %[[C256:.+]] = arith.constant 256 : index
+// CHECK-NEXT: %[[C255:.+]] = arith.constant 255 : index
+// CHECK-NEXT: %[[NUM:.+]] = arith.addi %[[MAX]], %[[C255]] : index
+// CHECK-NEXT: %[[DIV:.+]] = arith.divui %[[NUM]], %[[C256]] : index
+// CHECK-NEXT: %[[G0:.+]] = arith.muli %[[DIV]], %[[C256]] : index
+// CHECK-NEXT: %[[OFF:.+]] = arith.constant 0 : index
+// CHECK-NEXT: %[[POOL:.+]] = hipsr.get_pool(%{{.+}}, %[[G0]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
+// CHECK-NEXT: %[[V0:.+]] = memref.view %[[POOL]][%[[OFF]]][] : memref<?xi8, #hipsr.mem<device>> to memref<4x256xf32, #hipsr.mem<device>>
+// CHECK-NEXT: %[[V1:.+]] = memref.view %[[POOL]][%[[OFF]]][%[[DIM]]] : memref<?xi8, #hipsr.mem<device>> to memref<?x512xf16, #hipsr.mem<device>>
+// CHECK-NEXT: hipsr.add(%{{.+}}) ins(%{{.+}}, %{{.+}} : memref<4x256xf32, #hipsr.mem<device>>, memref<4x256xf32, #hipsr.mem<device>>) outs(%[[V0]] : memref<4x256xf32, #hipsr.mem<device>>)
+// CHECK-NEXT: hipsr.add(%{{.+}}) ins(%{{.+}}, %{{.+}} : memref<?x512xf16, #hipsr.mem<device>>, memref<?x512xf16, #hipsr.mem<device>>) outs(%[[V1]] : memref<?x512xf16, #hipsr.mem<device>>)
+// CHECK-NOT: memref.alloc
+func.func @coalesce_mixed(%ctx: !hipsr.context,
+                          %inf32: memref<4x256xf32, #hipsr.mem<device>>,
+                          %inf16: memref<?x512xf16, #hipsr.mem<device>>) {
+  hipsr.pool_domain(%ctx, %inf32, %inf16 :
+      !hipsr.context,
+      memref<4x256xf32, #hipsr.mem<device>>,
+      memref<?x512xf16, #hipsr.mem<device>>) {
+  ^bb0(%dctx: !hipsr.context,
+       %sf32: memref<4x256xf32, #hipsr.mem<device>>,
+       %sf16: memref<?x512xf16, #hipsr.mem<device>>):
+    %c0 = arith.constant 0 : index
+    %d = memref.dim %sf16, %c0 : memref<?x512xf16, #hipsr.mem<device>>
+    %a1 = memref.alloc() : memref<4x256xf32, #hipsr.mem<device>>
+    %a2 = memref.alloc(%d) : memref<?x512xf16, #hipsr.mem<device>>
+    hipsr.add(%dctx) ins(%sf32, %sf32 : memref<4x256xf32, #hipsr.mem<device>>, memref<4x256xf32, #hipsr.mem<device>>)
+               outs(%a1 : memref<4x256xf32, #hipsr.mem<device>>)
+    hipsr.add(%dctx) ins(%sf16, %sf16 : memref<?x512xf16, #hipsr.mem<device>>, memref<?x512xf16, #hipsr.mem<device>>)
+               outs(%a2 : memref<?x512xf16, #hipsr.mem<device>>)
+    hipsr.pool_domain_yield
+  } {domain_id = 0 : i64}
+  return
+}
+
+// -----
+
 // CHECK-LABEL: func.func @split_two_groups
 // CHECK: %[[C8192A:.+]] = arith.constant 8192 : index
 // CHECK-NEXT: %[[C256A:.+]] = arith.constant 256 : index
@@ -243,6 +326,78 @@ func.func @split_two_groups_dynamic(%ctx: !hipsr.context,
     hipsr.add(%dctx) ins(%dsin, %dsin : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%a_static : memref<4x1024xf16, #hipsr.mem<device>>)
     hipsr.add(%dctx) ins(%a_dyn, %a_dyn : memref<?x512xf16, #hipsr.mem<device>>, memref<?x512xf16, #hipsr.mem<device>>) outs(%din : memref<?x512xf16, #hipsr.mem<device>>)
     hipsr.add(%dctx) ins(%a_static, %a_static : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%dsin : memref<4x1024xf16, #hipsr.mem<device>>)
+    hipsr.pool_domain_yield
+  } {domain_id = 0 : i64}
+  return
+}
+
+// -----
+
+// CHECK-LABEL: func.func @split_with_coalesced_group
+// CHECK: %[[DIM:.+]] = memref.dim %{{.+}}, %{{.+}} : memref<?x1024xf16, #hipsr.mem<device>>
+// CHECK-NEXT: %[[C16384:.+]] = arith.constant 16384 : index
+// CHECK-NEXT: %[[C4096:.+]] = arith.constant 4096 : index
+// CHECK-NEXT: %[[C2048:.+]] = arith.constant 2048 : index
+// CHECK-NEXT: %[[S2:.+]] = arith.muli %[[C2048]], %[[DIM]] : index
+// CHECK-NEXT: %[[M0:.+]] = arith.maxui %[[C16384]], %[[C4096]] : index
+// CHECK-NEXT: %[[M1:.+]] = arith.maxui %[[M0]], %[[S2]] : index
+// CHECK-NEXT: %[[C256A:.+]] = arith.constant 256 : index
+// CHECK-NEXT: %[[C255A:.+]] = arith.constant 255 : index
+// CHECK-NEXT: %[[N0:.+]] = arith.addi %[[M1]], %[[C255A]] : index
+// CHECK-NEXT: %[[D0:.+]] = arith.divui %[[N0]], %[[C256A]] : index
+// CHECK-NEXT: %[[G0:.+]] = arith.muli %[[D0]], %[[C256A]] : index
+// CHECK-NEXT: %[[C8192:.+]] = arith.constant 8192 : index
+// CHECK-NEXT: %[[C256B:.+]] = arith.constant 256 : index
+// CHECK-NEXT: %[[C255B:.+]] = arith.constant 255 : index
+// CHECK-NEXT: %[[N1:.+]] = arith.addi %[[C8192]], %[[C255B]] : index
+// CHECK-NEXT: %[[D1:.+]] = arith.divui %[[N1]], %[[C256B]] : index
+// CHECK-NEXT: %[[G1:.+]] = arith.muli %[[D1]], %[[C256B]] : index
+// CHECK-NEXT: %[[OFF0:.+]] = arith.constant 0 : index
+// CHECK-NEXT: %[[POOLSZ:.+]] = arith.addi %[[G0]], %[[G1]] : index
+// CHECK-NEXT: %[[POOL:.+]] = hipsr.get_pool(%{{.+}}, %[[POOLSZ]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
+// CHECK-NEXT: %[[V0:.+]] = memref.view %[[POOL]][%[[OFF0]]][] : memref<?xi8, #hipsr.mem<device>> to memref<8x1024xf16, #hipsr.mem<device>>
+// CHECK-NEXT: %[[V1:.+]] = memref.view %[[POOL]][%[[OFF0]]][] : memref<?xi8, #hipsr.mem<device>> to memref<4x256xf32, #hipsr.mem<device>>
+// CHECK-NEXT: %[[V2:.+]] = memref.view %[[POOL]][%[[OFF0]]][%[[DIM]]] : memref<?xi8, #hipsr.mem<device>> to memref<?x1024xf16, #hipsr.mem<device>>
+// CHECK-NEXT: %[[V3:.+]] = memref.view %[[POOL]][%[[G0]]][] : memref<?xi8, #hipsr.mem<device>> to memref<4x1024xf16, #hipsr.mem<device>>
+// CHECK-NEXT: hipsr.add(%{{.+}}) ins(%{{.+}}, %{{.+}} : memref<8x1024xf16, #hipsr.mem<device>>, memref<8x1024xf16, #hipsr.mem<device>>) outs(%[[V0]] : memref<8x1024xf16, #hipsr.mem<device>>)
+// CHECK-NEXT: hipsr.add(%{{.+}}) ins(%{{.+}}, %{{.+}} : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%[[V3]] : memref<4x1024xf16, #hipsr.mem<device>>)
+// CHECK-NEXT: hipsr.add(%{{.+}}) ins(%[[V0]], %[[V0]] : memref<8x1024xf16, #hipsr.mem<device>>, memref<8x1024xf16, #hipsr.mem<device>>) outs(%{{.+}} : memref<8x1024xf16, #hipsr.mem<device>>)
+// CHECK-NEXT: hipsr.add(%{{.+}}) ins(%{{.+}}, %{{.+}} : memref<4x256xf32, #hipsr.mem<device>>, memref<4x256xf32, #hipsr.mem<device>>) outs(%[[V1]] : memref<4x256xf32, #hipsr.mem<device>>)
+// CHECK-NEXT: hipsr.add(%{{.+}}) ins(%[[V1]], %[[V1]] : memref<4x256xf32, #hipsr.mem<device>>, memref<4x256xf32, #hipsr.mem<device>>) outs(%{{.+}} : memref<4x256xf32, #hipsr.mem<device>>)
+// CHECK-NEXT: hipsr.add(%{{.+}}) ins(%{{.+}}, %{{.+}} : memref<?x1024xf16, #hipsr.mem<device>>, memref<?x1024xf16, #hipsr.mem<device>>) outs(%[[V2]] : memref<?x1024xf16, #hipsr.mem<device>>)
+// CHECK-NEXT: hipsr.add(%{{.+}}) ins(%[[V2]], %[[V2]] : memref<?x1024xf16, #hipsr.mem<device>>, memref<?x1024xf16, #hipsr.mem<device>>) outs(%{{.+}} : memref<?x1024xf16, #hipsr.mem<device>>)
+// CHECK-NEXT: hipsr.add(%{{.+}}) ins(%[[V3]], %[[V3]] : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%{{.+}} : memref<4x1024xf16, #hipsr.mem<device>>)
+// CHECK-NOT: memref.alloc
+func.func @split_with_coalesced_group(%ctx: !hipsr.context,
+                               %in16: memref<8x1024xf16, #hipsr.mem<device>>,
+                               %inf32: memref<4x256xf32, #hipsr.mem<device>>,
+                               %in2: memref<?x1024xf16, #hipsr.mem<device>>,
+                               %in4: memref<4x1024xf16, #hipsr.mem<device>>) {
+  hipsr.pool_domain(%ctx, %in16, %inf32, %in2, %in4 :
+      !hipsr.context,
+      memref<8x1024xf16, #hipsr.mem<device>>,
+      memref<4x256xf32, #hipsr.mem<device>>,
+      memref<?x1024xf16, #hipsr.mem<device>>,
+      memref<4x1024xf16, #hipsr.mem<device>>) {
+  ^bb0(%dctx: !hipsr.context,
+       %d16: memref<8x1024xf16, #hipsr.mem<device>>,
+       %df32: memref<4x256xf32, #hipsr.mem<device>>,
+       %d2: memref<?x1024xf16, #hipsr.mem<device>>,
+       %d4: memref<4x1024xf16, #hipsr.mem<device>>):
+    %c0 = arith.constant 0 : index
+    %d = memref.dim %d2, %c0 : memref<?x1024xf16, #hipsr.mem<device>>
+    %a1 = memref.alloc() : memref<8x1024xf16, #hipsr.mem<device>>
+    %a2 = memref.alloc() : memref<4x256xf32, #hipsr.mem<device>>
+    %a3 = memref.alloc(%d) : memref<?x1024xf16, #hipsr.mem<device>>
+    %a4 = memref.alloc() : memref<4x1024xf16, #hipsr.mem<device>>
+    hipsr.add(%dctx) ins(%d16, %d16 : memref<8x1024xf16, #hipsr.mem<device>>, memref<8x1024xf16, #hipsr.mem<device>>) outs(%a1 : memref<8x1024xf16, #hipsr.mem<device>>)
+    hipsr.add(%dctx) ins(%d4, %d4 : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%a4 : memref<4x1024xf16, #hipsr.mem<device>>)
+    hipsr.add(%dctx) ins(%a1, %a1 : memref<8x1024xf16, #hipsr.mem<device>>, memref<8x1024xf16, #hipsr.mem<device>>) outs(%d16 : memref<8x1024xf16, #hipsr.mem<device>>)
+    hipsr.add(%dctx) ins(%df32, %df32 : memref<4x256xf32, #hipsr.mem<device>>, memref<4x256xf32, #hipsr.mem<device>>) outs(%a2 : memref<4x256xf32, #hipsr.mem<device>>)
+    hipsr.add(%dctx) ins(%a2, %a2 : memref<4x256xf32, #hipsr.mem<device>>, memref<4x256xf32, #hipsr.mem<device>>) outs(%df32 : memref<4x256xf32, #hipsr.mem<device>>)
+    hipsr.add(%dctx) ins(%d2, %d2 : memref<?x1024xf16, #hipsr.mem<device>>, memref<?x1024xf16, #hipsr.mem<device>>) outs(%a3 : memref<?x1024xf16, #hipsr.mem<device>>)
+    hipsr.add(%dctx) ins(%a3, %a3 : memref<?x1024xf16, #hipsr.mem<device>>, memref<?x1024xf16, #hipsr.mem<device>>) outs(%d2 : memref<?x1024xf16, #hipsr.mem<device>>)
+    hipsr.add(%dctx) ins(%a4, %a4 : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%d4 : memref<4x1024xf16, #hipsr.mem<device>>)
     hipsr.pool_domain_yield
   } {domain_id = 0 : i64}
   return
