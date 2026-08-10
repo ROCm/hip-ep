@@ -9,7 +9,8 @@
 //   2. SliceToHip (fallback) — non-constant indices or negative steps fall
 //      through to a native hip.slice op whose runtime is a stub today.
 
-// RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
+// RUN: env -u HIPDNN_EP_DISABLE_SLICE_DECOMPOSITION hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
+// RUN: env HIPDNN_EP_DISABLE_SLICE_DECOMPOSITION=1 hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s --check-prefix=NO-DECOMPOSE
 
 module {
   func.func @main_graph(%arg0: tensor<4xf32>) -> tensor<4xf32> {
@@ -20,6 +21,7 @@ module {
   // tensor.extract_slice.
   func.func @test_slice_decompose_simple(%input: tensor<4x6xf32>) -> tensor<2x6xf32> {
     // CHECK-LABEL: func.func @test_slice_decompose_simple
+    // NO-DECOMPOSE-LABEL: func.func @test_slice_decompose_simple
     %starts = arith.constant dense<[1]> : tensor<1xi64>
     %ends   = arith.constant dense<[3]> : tensor<1xi64>
     %axes   = arith.constant dense<[0]> : tensor<1xi64>
@@ -31,6 +33,9 @@ module {
     // CHECK-NOT: onnx.Slice
     // CHECK-NOT: hip.slice
     // CHECK: tensor.extract_slice {{.*}}[1, 0] [2, 6] [1, 1]
+    // NO-DECOMPOSE-NOT: onnx.Slice
+    // NO-DECOMPOSE-NOT: tensor.extract_slice
+    // NO-DECOMPOSE: hip.slice(
 
     return %r : tensor<2x6xf32>
   }

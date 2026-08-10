@@ -8,7 +8,7 @@
 // Uses onnx.Constant operands (externalized by convert-onnx-to-hip) so the
 // SliceShapeFold -> SliceDecompose path is exercised end-to-end.
 
-// RUN: mkdir -p %t && hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip='externalize-min-num-elements=1 externalize-output-dir=%t' %s | FileCheck %s
+// RUN: mkdir -p %t && env -u HIPDNN_EP_DISABLE_SLICE_DECOMPOSITION hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip='externalize-min-num-elements=1 externalize-output-dir=%t' %s | FileCheck %s
 
 module {
   func.func @main_graph(%arg0: tensor<4xf32>) -> tensor<4xf32> {
