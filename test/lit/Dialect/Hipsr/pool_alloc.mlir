@@ -19,8 +19,8 @@
 // CHECK-NEXT: %[[NUM:.+]] = arith.addi %[[C6]], %[[C255]] : index
 // CHECK-NEXT: %[[DIV:.+]] = arith.divui %[[NUM]], %[[C256]] : index
 // CHECK-NEXT: %[[G0:.+]] = arith.muli %[[DIV]], %[[C256]] : index
-// CHECK-NEXT: hipsr.get_pool(%{{.+}}, %[[G0]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
 // CHECK-NEXT: arith.constant 0 : index
+// CHECK-NEXT: hipsr.get_pool(%{{.+}}, %[[G0]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
 // CHECK-NOT: arith.maxui
 func.func @align_up_rounding(%ctx: !hipsr.context,
                         %in: memref<3xf16, #hipsr.mem<device>>) {
@@ -49,8 +49,8 @@ func.func @align_up_rounding(%ctx: !hipsr.context,
 // CHECK-NEXT: %[[NUM:.+]] = arith.addi %[[BYTES]], %[[C255]] : index
 // CHECK-NEXT: %[[DIV:.+]] = arith.divui %[[NUM]], %[[C256]] : index
 // CHECK-NEXT: %[[G0:.+]] = arith.muli %[[DIV]], %[[C256]] : index
-// CHECK-NEXT: hipsr.get_pool(%{{.+}}, %[[G0]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
 // CHECK-NEXT: arith.constant 0 : index
+// CHECK-NEXT: hipsr.get_pool(%{{.+}}, %[[G0]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
 func.func @dynamic_size(%ctx: !hipsr.context,
                    %in: memref<?x512xf16, #hipsr.mem<device>>) {
   hipsr.pool_domain(%ctx, %in : !hipsr.context, memref<?x512xf16, #hipsr.mem<device>>) {
@@ -78,8 +78,8 @@ func.func @dynamic_size(%ctx: !hipsr.context,
 // CHECK-NEXT: %[[NUM:.+]] = arith.addi %[[C8192]], %[[C255]] : index
 // CHECK-NEXT: %[[DIV:.+]] = arith.divui %[[NUM]], %[[C256]] : index
 // CHECK-NEXT: %[[G0:.+]] = arith.muli %[[DIV]], %[[C256]] : index
-// CHECK-NEXT: hipsr.get_pool(%{{.+}}, %[[G0]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
 // CHECK-NEXT: arith.constant 0 : index
+// CHECK-NEXT: hipsr.get_pool(%{{.+}}, %[[G0]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
 // CHECK-NEXT: hipsr.add(%{{.+}}) ins(%{{.+}}, %{{.+}} : memref<4x1024xf16, #hipsr.mem<device>>, memref<4x1024xf16, #hipsr.mem<device>>) outs(%[[LIVE]] : memref<4x1024xf16, #hipsr.mem<device>>)
 // CHECK-NOT: arith.maxui
 func.func @dead_alloc_skipped(%ctx: !hipsr.context,
@@ -113,8 +113,8 @@ func.func @dead_alloc_skipped(%ctx: !hipsr.context,
 // CHECK-NEXT: %[[NUM:.+]] = arith.addi %[[M2]], %[[C255]] : index
 // CHECK-NEXT: %[[DIV:.+]] = arith.divui %[[NUM]], %[[C256]] : index
 // CHECK-NEXT: %[[G0:.+]] = arith.muli %[[DIV]], %[[C256]] : index
-// CHECK-NEXT: hipsr.get_pool(%{{.+}}, %[[G0]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
 // CHECK-NEXT: arith.constant 0 : index
+// CHECK-NEXT: hipsr.get_pool(%{{.+}}, %[[G0]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
 // CHECK-NOT: arith.divui
 func.func @coalesce_static(%ctx: !hipsr.context,
                                %in8: memref<8x1024xf16, #hipsr.mem<device>>,
@@ -166,10 +166,9 @@ func.func @coalesce_static(%ctx: !hipsr.context,
 // CHECK-NEXT: %[[N1:.+]] = arith.addi %[[C8192B]], %[[C255B]] : index
 // CHECK-NEXT: %[[D1:.+]] = arith.divui %[[N1]], %[[C256B]] : index
 // CHECK-NEXT: %[[G1:.+]] = arith.muli %[[D1]], %[[C256B]] : index
+// CHECK-NEXT: arith.constant 0 : index
 // CHECK-NEXT: %[[POOLSZ:.+]] = arith.addi %[[G0]], %[[G1]] : index
 // CHECK-NEXT: hipsr.get_pool(%{{.+}}, %[[POOLSZ]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
-// CHECK-NEXT: %[[OFF0:.+]] = arith.constant 0 : index
-// CHECK-NEXT: arith.addi %[[OFF0]], %[[G0]] : index
 // CHECK-NOT: arith.maxui
 func.func @split_two_groups(%ctx: !hipsr.context, %in: memref<4x1024xf16, #hipsr.mem<device>>) {
   hipsr.pool_domain(%ctx, %in : !hipsr.context, memref<4x1024xf16, #hipsr.mem<device>>) {
@@ -200,10 +199,9 @@ func.func @split_two_groups(%ctx: !hipsr.context, %in: memref<4x1024xf16, #hipsr
 // CHECK-NEXT: %[[N1:.+]] = arith.addi %[[C8192]], %[[C255B]] : index
 // CHECK-NEXT: %[[D1:.+]] = arith.divui %[[N1]], %[[C256B]] : index
 // CHECK-NEXT: %[[G1:.+]] = arith.muli %[[D1]], %[[C256B]] : index
+// CHECK-NEXT: arith.constant 0 : index
 // CHECK-NEXT: %[[POOLSZ:.+]] = arith.addi %[[G0]], %[[G1]] : index
 // CHECK-NEXT: hipsr.get_pool(%{{.+}}, %[[POOLSZ]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
-// CHECK-NEXT: %[[OFF0:.+]] = arith.constant 0 : index
-// CHECK-NEXT: arith.addi %[[OFF0]], %[[G0]] : index
 // CHECK-NOT: arith.maxui
 func.func @split_two_groups_dynamic(%ctx: !hipsr.context,
                                     %inf16: memref<?x512xf16, #hipsr.mem<device>>,
@@ -249,12 +247,10 @@ func.func @split_two_groups_dynamic(%ctx: !hipsr.context,
 // CHECK-NEXT: %[[N2:.+]] = arith.addi %[[C8192C]], %[[C255C]] : index
 // CHECK-NEXT: %[[D2:.+]] = arith.divui %[[N2]], %[[C256C]] : index
 // CHECK-NEXT: %[[G2:.+]] = arith.muli %[[D2]], %[[C256C]] : index
+// CHECK-NEXT: arith.constant 0 : index
 // CHECK-NEXT: %[[SUM0:.+]] = arith.addi %[[G0]], %[[G1]] : index
 // CHECK-NEXT: %[[POOLSZ:.+]] = arith.addi %[[SUM0]], %[[G2]] : index
 // CHECK-NEXT: hipsr.get_pool(%{{.+}}, %[[POOLSZ]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
-// CHECK-NEXT: %[[OFF0:.+]] = arith.constant 0 : index
-// CHECK-NEXT: %[[OFF1:.+]] = arith.addi %[[OFF0]], %[[G0]] : index
-// CHECK-NEXT: arith.addi %[[OFF1]], %[[G1]] : index
 // CHECK-NOT: arith.maxui
 func.func @split_three_groups(%ctx: !hipsr.context, %in: memref<4x1024xf16, #hipsr.mem<device>>) {
   hipsr.pool_domain(%ctx, %in : !hipsr.context, memref<4x1024xf16, #hipsr.mem<device>>) {
@@ -277,11 +273,11 @@ func.func @split_three_groups(%ctx: !hipsr.context, %in: memref<4x1024xf16, #hip
 
 // CHECK-LABEL: func.func @two_domains
 // CHECK: %[[G0:.+]] = arith.muli %{{.+}}, %{{.+}} : index
+// CHECK-NEXT: arith.constant 0 : index
 // CHECK-NEXT: hipsr.get_pool(%{{.+}}, %[[G0]]) {domain_id = 0 : i64} : memref<?xi8, #hipsr.mem<device>>
-// CHECK-NEXT: arith.constant 0 : index
 // CHECK: %[[G1:.+]] = arith.muli %{{.+}}, %{{.+}} : index
-// CHECK-NEXT: hipsr.get_pool(%{{.+}}, %[[G1]]) {domain_id = 7 : i64} : memref<?xi8, #hipsr.mem<device>>
 // CHECK-NEXT: arith.constant 0 : index
+// CHECK-NEXT: hipsr.get_pool(%{{.+}}, %[[G1]]) {domain_id = 7 : i64} : memref<?xi8, #hipsr.mem<device>>
 func.func @two_domains(%ctx: !hipsr.context, %in: memref<4x1024xf16, #hipsr.mem<device>>) {
   hipsr.pool_domain(%ctx, %in : !hipsr.context, memref<4x1024xf16, #hipsr.mem<device>>) {
   ^bb0(%dctx: !hipsr.context, %din: memref<4x1024xf16, #hipsr.mem<device>>):

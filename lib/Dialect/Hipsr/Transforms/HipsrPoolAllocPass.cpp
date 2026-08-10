@@ -21,6 +21,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <utility>
 
 namespace mlir {
 namespace hipsr {
@@ -227,12 +228,8 @@ Value findContext(Block &body) {
   return nullptr;
 }
 
-Value emitPool(OpBuilder &builder, Location loc, Value ctx,
-               llvm::ArrayRef<Value> groupSizes, uint64_t domainId) {
-  Value poolSize = groupSizes.front();
-  for (Value groupSize : groupSizes.drop_front()) {
-    poolSize = arith::AddIOp::create(builder, loc, poolSize, groupSize);
-  }
+Value emitPool(OpBuilder &builder, Location loc, Value ctx, Value poolSize,
+               uint64_t domainId) {
   auto deviceSpace =
       MemorySpaceAttr::get(builder.getContext(), MemorySpaceKind::Device);
   auto poolType = MemRefType::get({ShapedType::kDynamic}, builder.getI8Type(),
@@ -240,15 +237,17 @@ Value emitPool(OpBuilder &builder, Location loc, Value ctx,
   return GetPoolOp::create(builder, loc, poolType, ctx, poolSize, domainId);
 }
 
-llvm::SmallVector<Value> emitOffsets(OpBuilder &builder, Location loc,
-                                     llvm::ArrayRef<Value> groupSizes) {
+std::pair<llvm::SmallVector<Value>, Value>
+emitPoolLayout(OpBuilder &builder, Location loc,
+               llvm::ArrayRef<Value> groupSizes) {
   llvm::SmallVector<Value> offsets;
   offsets.push_back(arith::ConstantIndexOp::create(builder, loc, 0));
-  for (Value groupSize : groupSizes.drop_back()) {
-    offsets.push_back(
-        arith::AddIOp::create(builder, loc, offsets.back(), groupSize));
+  Value poolSize = groupSizes.front();
+  for (Value groupSize : groupSizes.drop_front()) {
+    offsets.push_back(poolSize);
+    poolSize = arith::AddIOp::create(builder, loc, poolSize, groupSize);
   }
-  return offsets;
+  return {offsets, poolSize};
 }
 
 struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
@@ -285,8 +284,9 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
         groupSizes.push_back(
             emitGroupSize(builder, domain.getLoc(), group, kPoolAlignment));
       }
-      emitPool(builder, domain.getLoc(), ctx, groupSizes, domain.getDomainId());
-      emitOffsets(builder, domain.getLoc(), groupSizes);
+      auto [offsets, poolSize] =
+          emitPoolLayout(builder, domain.getLoc(), groupSizes);
+      emitPool(builder, domain.getLoc(), ctx, poolSize, domain.getDomainId());
     });
   }
 };
