@@ -52,6 +52,7 @@
  */
 
 #include "hip_custom_kernels.h"
+#include "hip_arch_compat.h"
 #include "debug_log.h"
 
 #include <hip/hip_runtime.h>
@@ -800,14 +801,19 @@ __global__ void matmul_nbits_gemv_kernel(
     // --- Reduction: warp shuffle then shared memory ---
     // RDNA 3/3.5 (gfx11xx) runs wave32 by default. Compile-time constant
     // for warp_size allows the compiler to dead-strip unused branches.
-    constexpr int WARP_SIZE = 32;
+    // Compile-time wavefront size (32 on RDNA, 64 on CDNA/MI350). For a block
+    // smaller than a hardware wave (e.g. BLOCK_SIZE=32 on wave64) only the first
+    // BLOCK_SIZE lanes are live, so the single-wave shuffle tree below must start
+    // at BLOCK_SIZE/2 -- starting at WARP_SIZE/2 would fold in inactive lanes.
+    constexpr int WARP_SIZE = HIPDNN_WAVE_SIZE;
     const int warp_id   = tid / WARP_SIZE;
     const int lane_id   = tid % WARP_SIZE;
-    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+    constexpr int NUM_WARPS = (BLOCK_SIZE + WARP_SIZE - 1) / WARP_SIZE;
+    constexpr int RED_W = BLOCK_SIZE < WARP_SIZE ? BLOCK_SIZE : WARP_SIZE;
 
 #pragma unroll
     for (int tn = 0; tn < TILE_N; tn++) {
-        for (int offset = WARP_SIZE >> 1; offset > 0; offset >>= 1)
+        for (int offset = RED_W >> 1; offset > 0; offset >>= 1)
             partial[tn] += __shfl_down(partial[tn], offset);
     }
 
@@ -919,14 +925,18 @@ __global__ void matmul_nbits_quant_act_i8_kernel(
     for (int64_t k = g0 + tid; k < g1; k += BLOCK_SIZE)
         local_max = fmaxf(local_max, fabsf(static_cast<float>(A[k])));
 
-    constexpr int WARP_SIZE = 32;
-    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
-    for (int off = WARP_SIZE >> 1; off > 0; off >>= 1)
+    // Wave-portable (32 on RDNA, 64 on CDNA/MI350). RED_W caps the shuffle to
+    // the active lanes for a sub-wave block, and the per-wave fan-in index uses
+    // tid / WARP_SIZE rather than a hard-coded /32.
+    constexpr int WARP_SIZE = HIPDNN_WAVE_SIZE;
+    constexpr int NUM_WARPS = (BLOCK_SIZE + WARP_SIZE - 1) / WARP_SIZE;
+    constexpr int RED_W = BLOCK_SIZE < WARP_SIZE ? BLOCK_SIZE : WARP_SIZE;
+    for (int off = RED_W >> 1; off > 0; off >>= 1)
         local_max = fmaxf(local_max, __shfl_down(local_max, off));
 
     __shared__ float smax[NUM_WARPS > 0 ? NUM_WARPS : 1];
     if ((tid & (WARP_SIZE - 1)) == 0)
-        smax[tid >> 5] = local_max;
+        smax[tid / WARP_SIZE] = local_max;
     __syncthreads();
     if (tid == 0) {
         float m = 0.0f;
@@ -1017,10 +1027,8 @@ __global__ void matmul_nbits_gemv_dp4a_kernel(
         int a_sum_q = 0;
 #pragma unroll
         for (int j = 0; j < 4; j++) {
-            a_sum_q = __builtin_amdgcn_sudot4(true, a_lo[j], false, 0x01010101,
-                                              a_sum_q, false);
-            a_sum_q = __builtin_amdgcn_sudot4(true, a_hi[j], false, 0x01010101,
-                                              a_sum_q, false);
+            a_sum_q = hipdnn_sudot4(a_lo[j], 0x01010101, a_sum_q);
+            a_sum_q = hipdnn_sudot4(a_hi[j], 0x01010101, a_sum_q);
         }
 
 #pragma unroll
@@ -1032,10 +1040,8 @@ __global__ void matmul_nbits_gemv_dp4a_kernel(
             for (int j = 0; j < 4; j++) {
                 const int lo_w = static_cast<int>(comp[j] & 0x0F0F0F0Fu);
                 const int hi_w = static_cast<int>((comp[j] >> 4) & 0x0F0F0F0Fu);
-                dot = __builtin_amdgcn_sudot4(true, a_lo[j], false, lo_w, dot,
-                                              false);
-                dot = __builtin_amdgcn_sudot4(true, a_hi[j], false, hi_w, dot,
-                                              false);
+                dot = hipdnn_sudot4(a_lo[j], lo_w, dot);
+                dot = hipdnn_sudot4(a_hi[j], hi_w, dot);
             }
             const float sv = static_cast<float>(s_rows[tn][grp]);
             const int   zv = has_zp
@@ -1046,14 +1052,19 @@ __global__ void matmul_nbits_gemv_dp4a_kernel(
     }
 
     // --- Reduction: warp shuffle then shared memory (mirrors int4 path) ---
-    constexpr int WARP_SIZE = 32;
+    // Compile-time wavefront size (32 on RDNA, 64 on CDNA/MI350). For a block
+    // smaller than a hardware wave (e.g. BLOCK_SIZE=32 on wave64) only the first
+    // BLOCK_SIZE lanes are live, so the single-wave shuffle tree below must start
+    // at BLOCK_SIZE/2 -- starting at WARP_SIZE/2 would fold in inactive lanes.
+    constexpr int WARP_SIZE = HIPDNN_WAVE_SIZE;
     const int warp_id   = tid / WARP_SIZE;
     const int lane_id   = tid % WARP_SIZE;
-    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+    constexpr int NUM_WARPS = (BLOCK_SIZE + WARP_SIZE - 1) / WARP_SIZE;
+    constexpr int RED_W = BLOCK_SIZE < WARP_SIZE ? BLOCK_SIZE : WARP_SIZE;
 
 #pragma unroll
     for (int tn = 0; tn < TILE_N; tn++) {
-        for (int offset = WARP_SIZE >> 1; offset > 0; offset >>= 1)
+        for (int offset = RED_W >> 1; offset > 0; offset >>= 1)
             partial[tn] += __shfl_down(partial[tn], offset);
     }
 
@@ -1859,14 +1870,19 @@ __global__ void matmul_nbits_gemv_kernel_u3(
     }
 
     // --- Reduction: warp shuffle then shared memory (mirrors int4 path) ---
-    constexpr int WARP_SIZE = 32;
+    // Compile-time wavefront size (32 on RDNA, 64 on CDNA/MI350). For a block
+    // smaller than a hardware wave (e.g. BLOCK_SIZE=32 on wave64) only the first
+    // BLOCK_SIZE lanes are live, so the single-wave shuffle tree below must start
+    // at BLOCK_SIZE/2 -- starting at WARP_SIZE/2 would fold in inactive lanes.
+    constexpr int WARP_SIZE = HIPDNN_WAVE_SIZE;
     const int warp_id   = tid / WARP_SIZE;
     const int lane_id   = tid % WARP_SIZE;
-    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+    constexpr int NUM_WARPS = (BLOCK_SIZE + WARP_SIZE - 1) / WARP_SIZE;
+    constexpr int RED_W = BLOCK_SIZE < WARP_SIZE ? BLOCK_SIZE : WARP_SIZE;
 
 #pragma unroll
     for (int tn = 0; tn < TILE_N; tn++) {
-        for (int offset = WARP_SIZE >> 1; offset > 0; offset >>= 1)
+        for (int offset = RED_W >> 1; offset > 0; offset >>= 1)
             partial[tn] += __shfl_down(partial[tn], offset);
     }
 
@@ -2265,14 +2281,19 @@ __global__ void matmul_nbits_gemv_kernel_u2(
     }
 
     // --- Reduction: warp shuffle then shared memory (mirrors u3 path) ---
-    constexpr int WARP_SIZE = 32;
+    // Compile-time wavefront size (32 on RDNA, 64 on CDNA/MI350). For a block
+    // smaller than a hardware wave (e.g. BLOCK_SIZE=32 on wave64) only the first
+    // BLOCK_SIZE lanes are live, so the single-wave shuffle tree below must start
+    // at BLOCK_SIZE/2 -- starting at WARP_SIZE/2 would fold in inactive lanes.
+    constexpr int WARP_SIZE = HIPDNN_WAVE_SIZE;
     const int warp_id   = tid / WARP_SIZE;
     const int lane_id   = tid % WARP_SIZE;
-    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+    constexpr int NUM_WARPS = (BLOCK_SIZE + WARP_SIZE - 1) / WARP_SIZE;
+    constexpr int RED_W = BLOCK_SIZE < WARP_SIZE ? BLOCK_SIZE : WARP_SIZE;
 
 #pragma unroll
     for (int tn = 0; tn < TILE_N; tn++) {
-        for (int offset = WARP_SIZE >> 1; offset > 0; offset >>= 1)
+        for (int offset = RED_W >> 1; offset > 0; offset >>= 1)
             partial[tn] += __shfl_down(partial[tn], offset);
     }
 
@@ -5509,6 +5530,30 @@ extern "C" void hip_matmul_nbits_convert_zp_fp16(
                        N, groups_k, packed_cols);
 }
 
+// Full-weight int4 -> fp16 dequantization into a row-major [N, K] buffer, used
+// by the CDNA/wave64 prefill fast path (lib/Runtime/real/matmul_nbits.cpp),
+// which lacks WMMA and instead dequantizes B once (weights are constant) and
+// calls a hipBLASLt fp16 GEMM. scales/zeros are fp16 [N, num_groups_k]; when
+// zeros_fp16 is null the ONNX 4-bit default zero-point (8) is used.
+extern "C" void hip_matmul_nbits_dequant_b_fp16(
+    void* stream, const void* B_packed, const void* scales_fp16,
+    const void* zeros_fp16, void* B_fp16_out, int N, int K, int group_size)
+{
+    int num_groups_k = (K + group_size - 1) / group_size;
+    int threads_along_k = (K + 7) / 8;   // each thread emits 8 contiguous nibbles
+    constexpr int THR = 256;
+    dim3 grid(static_cast<unsigned>((threads_along_k + THR - 1) / THR),
+              static_cast<unsigned>(N));
+    dim3 block(THR);
+    hipLaunchKernelGGL(dequant_u4_to_fp16, grid, block, 0,
+                       static_cast<hipStream_t>(stream),
+                       static_cast<const unsigned char*>(B_packed),
+                       static_cast<const _Float16*>(scales_fp16),
+                       static_cast<const _Float16*>(zeros_fp16),
+                       static_cast<_Float16*>(B_fp16_out),
+                       N, K, group_size, num_groups_k);
+}
+
 extern "C" int hip_matmul_nbits(
     void* stream,
     const void* A,
@@ -5583,7 +5628,8 @@ extern "C" int hip_matmul_nbits(
     const bool wmma_data_format = (batch_count == 1) && (K % 32 == 0);
     const bool use_wmma_i8 =
         wmma_data_format && (M >= kBlockDim) &&
-        (block_size >= 32) && (block_size % 32 == 0);
+        (block_size >= 32) && (block_size % 32 == 0) &&
+        !hipdnn_device_is_wave64();  // WMMA is RDNA-only; wave64 uses GEMV/naive
     const bool use_gemv_i8 = !use_wmma_i8 && (block_size >= kI8GemvMinBs);
 
     if (use_wmma_i8) {
@@ -5709,7 +5755,8 @@ extern "C" int hip_matmul_nbits(
     const bool u2_data_format = (batch_count == 1) && (K % 32 == 0);
     const bool use_wmma_u2 =
         u2_data_format && (M >= kBlockDim) &&
-        (block_size >= 32) && (block_size % 32 == 0);
+        (block_size >= 32) && (block_size % 32 == 0) &&
+        !hipdnn_device_is_wave64();  // WMMA is RDNA-only; wave64 uses GEMV/naive
     const bool is_pow2_bs = (block_size & (block_size - 1)) == 0;
     const bool use_gemv_u2 =
         !use_wmma_u2 && is_pow2_bs && (block_size >= kU2GemvMinBs) &&
@@ -5851,7 +5898,8 @@ extern "C" int hip_matmul_nbits(
     const bool u3_data_format = (batch_count == 1) && (K % 32 == 0);
     const bool use_wmma_u3 =
         u3_data_format && (M >= kBlockDim) &&
-        (block_size >= 32) && (block_size % 32 == 0);
+        (block_size >= 32) && (block_size % 32 == 0) &&
+        !hipdnn_device_is_wave64();  // WMMA is RDNA-only; wave64 uses GEMV/naive
     const bool is_pow2_bs = (block_size & (block_size - 1)) == 0;
     const bool use_gemv_u3 =
         !use_wmma_u3 && is_pow2_bs && (block_size >= kU3GemvMinBs) &&
@@ -5986,7 +6034,12 @@ extern "C" int hip_matmul_nbits(
    * ------------------------------------------------------------------- */
   bool wmma_data_format = (batch_count == 1) && (K % 32 == 0);
 
-  if (wmma_data_format && M >= kBlockDim) {
+  // WMMA is an RDNA3/RDNA4 (wave32) intrinsic. On CDNA (wave64, e.g. MI350)
+  // there is no WMMA, so the prefill fast path is unavailable here; int4 M>=16
+  // is instead served by the dequant-once + hipBLASLt path in
+  // lib/Runtime/real/matmul_nbits.cpp, and any residual case falls through to
+  // the correct GEMV/naive fallback below.
+  if (wmma_data_format && M >= kBlockDim && !hipdnn_device_is_wave64()) {
     CUSTOM_KERNELS_DEBUG_LOG(
         "[custom_kernels] hip_matmul_nbits: WMMA fast path M=%lld N=%lld "
         "K=%lld bs=%lld zp=%s bias=%s\n",

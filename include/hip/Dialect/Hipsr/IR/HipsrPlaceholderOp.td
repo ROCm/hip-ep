@@ -2,8 +2,8 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 //
-// hipsr.placeholder gives DPS ops typed init values before computing output
-// shapes.
+// hipsr.placeholder gives hipsr ops typed `outs` values before computing
+// output shapes.
 //
 
 //===----------------------------------------------------------------------===//
@@ -12,41 +12,40 @@
 
 def Hipsr_PlaceholderOp : Hipsr_Op<
     "placeholder",
-    [IsolatedFromAbove, SingleBlockImplicitTerminator<"ShapeYield2Op">]> {
-  let summary = "Typed placeholder for hipsr DPS init operands";
+    [IsolatedFromAbove, SingleBlockImplicitTerminator<"ShapeYieldOp">]> {
+  let summary = "Typed placeholder for hipsr `outs` operands";
   let description = [{
-    Provides `outs` init values before a hipsr DPS op computes its output
-    shape. Each DPS init must have the same type as the matching op result, so
-    the placeholder uses the op's result types.
+    Supplies a hipsr op's `outs` values before its output shape is known. The
+    result type follows the consumer:
 
-    `!hipsr.context` is operand 0. The remaining inputs provide values to the
-    shape graph and must be block arguments or results of `hipsr.placeholder`,
-    `arith.constant`, or `hipsr.constant`. `placeholder_type` marks the
-    placeholder as `normal` or `barrier`.
+    - A DPS op ties each init to the result in the same position, so the
+      placeholder carries the op's result types.
+    - `hipsr.compute` is not DPS. Its `outs` entry is only the destination the
+      body writes into, so the placeholder carries that destination's shape,
+      which may differ from the result held there.
 
-    The shape graph is independent of DPS data inputs: downstream placeholders
-    use upstream placeholder results rather than DPS data results.
+    Inputs feed the shape graph and must be block arguments or results of
+    `hipsr.placeholder`, `arith.constant`, or `hipsr.constant` — never data
+    results, which keeps the shape graph parallel to the data graph.
+    `placeholder_type` is `normal` or `barrier`.
 
-    The optional `shape_region` defines the placeholder result shapes. It has
-    one block when present and ends with `hipsr.shape_yield2`.
-    A `normal` region receives one `!shape.shape` argument per input and omits
-    `ctx`. A `barrier` region receives `ctx` followed by its tensor inputs.
+    The optional `shape_region` computes the result shapes and ends with
+    `hipsr.shape_yield`. A `normal` region takes one `!shape.shape` per input
+    and omits `ctx`; a `barrier` region takes `ctx` followed by its inputs.
 
-    One placeholder can have several results for one multi-output DPS op. Each
-    result initializes exactly one DPS result and may also feed other
-    placeholders. All DPS init uses must go to the same hipsr op.
+    All results must fill `outs` slots of one op, one slot each, and may also
+    feed other placeholders or leave a pool domain through
+    `hipsr.pool_domain_yield`. Being tied to a single op, it is not `Pure`, so
+    CSE cannot merge placeholders.
 
-    Each placeholder is tied to one DPS op. It is not `Pure`, so CSE cannot
-    merge placeholders used by different ops.
+    The pool-domain pass requires a placeholder and its consumer to sit
+    directly in the function body, and moves each placeholder before its
+    consumer. Placeholders do not set domain boundaries. A result that a later
+    domain needs is returned from the domain holding it, which keeps the shape
+    graph connected across the boundary.
 
-    The pool-domain pass requires placeholders and the DPS ops that use them to
-    be directly in the function body. Every tensor init of those DPS ops must
-    come from a placeholder. The pass checks these rules before changing the
-    IR. Placeholders do not set domain boundaries. The pass moves each one
-    before the op that uses it.
-
-    This op is temporary. It has no bufferization interface and must be replaced
-    before bufferization.
+    This op is temporary: it has no bufferization interface and must be
+    replaced before bufferization.
 
     Example:
     ```mlir
@@ -76,9 +75,9 @@ def Hipsr_PlaceholderOp : Hipsr_Op<
     /// Returns whether a value may be used as a placeholder shape-graph input.
     static bool isAllowedShapeGraphInput(::mlir::Value value);
 
-    /// Returns the hipsr DPS operation initialized by this placeholder, or
+    /// Returns the hipsr operation whose `outs` this placeholder fills, or
     /// null if no such use exists.
-    ::mlir::Operation *getDpsConsumer();
+    ::mlir::Operation *getConsumer();
 
     /// Returns this placeholder's shape-region block argument types.
     ::llvm::SmallVector<::mlir::Type> getShapeRegionArgumentTypes();

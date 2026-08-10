@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 //
-// The hipsr.compute op: a DPS op whose region groups a multi-operation
+// The hipsr.compute op: a non-DPS op whose region groups a multi-operation
 // computation. Its terminator, hipsr.compute_yield, lives in
 // HipsrComputeYieldOp.td.
 //
@@ -14,43 +14,39 @@
 def Hipsr_ComputeOp : Hipsr_Op<"compute", [
     AttrSizedOperandSegments,
     AutomaticAllocationScope,
-    DeclareOpInterfaceMethods<DestinationStyleOpInterface,
-                              ["getDpsInitsMutable"]>,
     DeclareOpInterfaceMethods<RegionBranchOpInterface,
                               ["getEntrySuccessorOperands"]>,
     IsolatedFromAbove,
     RecursiveMemoryEffects,
+    RecursivelySpeculatable,
     SingleBlockImplicitTerminator<"ComputeYieldOp">
   ]> {
-  let summary = "Group a multi-operation computation as one DPS op";
+  let summary = "Group a multi-operation computation as one non-DPS op";
   let description = [{
-    Groups the operations that implement one high-level computation, so an ONNX
-    op that needs several tensor or shape operations still appears as a single
-    hipsr op. Without the grouping those intermediates stay in the enclosing
-    block, where a later op's `hipsr.placeholder` cannot use one: a placeholder
-    input must be a block argument or the result of a constant or another
-    placeholder.
+    Groups the ops that implement one high-level computation, so an ONNX op
+    that lowers to several tensor or shape ops still appears as a single hipsr
+    op. Without the grouping those intermediates sit in the enclosing block,
+    where a later `hipsr.placeholder` may not take them as inputs. `ctx`, the
+    inputs, and the outputs enter the isolated body as entry-block arguments,
+    in that order.
 
-    Each tensor init is tied to the result in the same position. The inits come
-    from `hipsr.placeholder`, which owns the output-shape computation, so this
-    op has no shape region of its own.
+    This is not a DPS op: an `outs` entry only supplies the destination buffer
+    for the result in the same position, and its type may differ from that
+    result's, which is what lets a body reshape its data. Result types come
+    from `hipsr.compute_yield`; the `outs` values come from
+    `hipsr.placeholder`, which owns the output-shape computation, so this op
+    has no shape region of its own. A bufferized compute writes into device
+    memrefs, has no results, and yields nothing.
 
-    `IsolatedFromAbove` and `RegionBranchOpInterface` make every value crossing
-    the boundary explicit and verifiable, so `ctx`, the inputs, and the inits
-    enter the body as entry-block arguments, in that order.
-    `RecursiveMemoryEffects` keeps nested effects visible to analyses, and
-    `AutomaticAllocationScope` frees allocations made in the body when it exits.
-
-    Example:
+    Example (the body flattens, so the result type differs from `outs`):
     ```mlir
     %out = hipsr.compute(%ctx) ins(%data : tensor<2x3xf16>)
-                               outs(%init : tensor<6xf16>) {
-    ^bb0(%body_ctx: !hipsr.context, %in: tensor<2x3xf16>, %dest: tensor<6xf16>):
+                               outs(%init : tensor<2x3xf16>) {
+    ^bb0(%body_ctx: !hipsr.context, %in: tensor<2x3xf16>,
+         %dest: tensor<2x3xf16>):
       %flat = tensor.collapse_shape %in [[0, 1]]
           : tensor<2x3xf16> into tensor<6xf16>
-      %filled = tensor.insert_slice %flat into %dest[0] [6] [1]
-          : tensor<6xf16> into tensor<6xf16>
-      hipsr.compute_yield %filled : tensor<6xf16>
+      hipsr.compute_yield %flat : tensor<6xf16>
     } : tensor<6xf16>
     ```
   }];
@@ -58,7 +54,7 @@ def Hipsr_ComputeOp : Hipsr_Op<"compute", [
   let arguments = (ins
     Hipsr_ContextType:$ctx,
     Variadic<Hipsr_TensorOrDeviceMemRef>:$inputs,
-    Variadic<Hipsr_TensorOrDeviceMemRef>:$inits
+    Variadic<Hipsr_TensorOrDeviceMemRef>:$outputs
   );
   let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
   let regions = (region SizedRegion<1>:$body);
@@ -66,7 +62,9 @@ def Hipsr_ComputeOp : Hipsr_Op<"compute", [
   let assemblyFormat = [{
     `(` $ctx `)`
     `ins` `(` ($inputs^ `:` type($inputs))? `)`
-    `outs` `(` ($inits^ `:` type($inits))? `)`
+    `outs` `(` ($outputs^ `:` type($outputs))? `)`
     $body (`:` type($result_tensors)^)? attr-dict
   }];
+
+  let hasVerifier = 1;
 }

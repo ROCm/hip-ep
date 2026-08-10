@@ -679,6 +679,12 @@ HIP_KERNEL_API int hip_gqa_softmax_inplace(
  * standalone `hip_miopen_softmax` runtime entry point. */
 HIP_KERNEL_API int hip_softmax_row_2d_inplace(void* stream, void* data, int rows, int cols);
 
+/* fp32 variant of the above — for models where Softmax input is fp32.
+ * Qwen VLM vision encoder attention scores are fp32; using the fp16 kernel
+ * there misinterprets the data and produces completely wrong outputs.
+ * Called by hip_miopen_softmax when elem_size_bytes == 4. */
+HIP_KERNEL_API int hip_softmax_row_2d_inplace_fp32(void* stream, void* data, int rows, int cols);
+
 /* Column-wise softmax: fp32 input -> fp16 output.
  * Reads fp32 Score matrix (no fp16 overflow/inf), writes fp16 probabilities.
  * input_batch_stride is in float elements, output_batch_stride in half elements. */
@@ -1710,6 +1716,15 @@ HIP_KERNEL_API void hip_matmul_nbits_unpack_zp_u8_3bit(
     void* stream, const void* zp_packed, void* dst_u8, int N, int groups_k);
 HIP_KERNEL_API void hip_matmul_nbits_convert_zp_fp16(
     void* stream, const void* zp_packed, void* dst_fp16, int N, int groups_k);
+
+/* Dequantize a full packed int4 weight matrix into row-major fp16 [N, K].
+ * Used by the CDNA/wave64 prefill fast path (no WMMA): dequantize B once
+ * (weights are constant) then run a hipBLASLt fp16 GEMM. scales_fp16 and
+ * zeros_fp16 are fp16 [N, ceil(K/group_size)]; zeros_fp16 may be null (ONNX
+ * 4-bit default zero-point 8). */
+HIP_KERNEL_API void hip_matmul_nbits_dequant_b_fp16(
+    void* stream, const void* B_packed, const void* scales_fp16,
+    const void* zeros_fp16, void* B_fp16_out, int N, int K, int group_size);
 
 /* =========================================================================
  * GatherBlockQuantized (com.microsoft)

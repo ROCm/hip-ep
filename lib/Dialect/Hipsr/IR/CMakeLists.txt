@@ -5,17 +5,12 @@
 
 add_library(HipsrDialectIR STATIC
   HipsrDialect.cpp
-  HipsrShapeRegionInterface.cpp
-  HipsrStartBarrierInterface.cpp
-  HipsrEndBarrierInterface.cpp
   HipsrShapeYieldOp.cpp
   HipsrOps.cpp
   HipsrPoolDomainYieldOp.cpp
   HipsrPoolDomainOp.cpp
   HipsrComputeYieldOp.cpp
   HipsrComputeOp.cpp
-  HipsrEmptyYieldOp.cpp
-  HipsrEmptyOp.cpp
   HipsrConstantOp.cpp
   HipsrPlaceholderOp.cpp
   HipsrCastOp.cpp
@@ -23,6 +18,7 @@ add_library(HipsrDialectIR STATIC
   HipsrExpandOp.cpp
   HipsrAddOp.cpp
   HipsrGetPoolOp.cpp
+  HipsrPreserveShapeOp.cpp
   HipsrLLVMLoweringUtils.cpp
   HipsrTypes.cpp
 )

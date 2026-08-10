@@ -8,6 +8,7 @@
  */
 
 #include "hip_custom_kernels.h"
+#include "hip_arch_compat.h"
 #include "debug_log.h"
 
 #include <hip/hip_runtime.h>
@@ -694,10 +695,18 @@ __global__ void qmoe_decode_fc1_kernel(
   // act_out[slot, sw_base+i] where sw_base = n_base/2. This eliminates the
   // separate qmoe_decode_swiglu_kernel launch (saves 1 launch per layer).
   // Requires TILE_N to be even and n_base to be even (callers ensure both).
-  constexpr int WARP_SIZE = 32;
+  // Wave size is 32 on RDNA and 64 on CDNA/MI350 (HIPDNN_WAVE_SIZE). __shfl_down
+  // defaults to the full hardware-wave width, so warp_id / lane / NUM_WARPS must
+  // all be expressed in terms of the real wave size to keep the shuffle
+  // reduction from crossing wave boundaries.
+  constexpr int WARP_SIZE = HIPDNN_WAVE_SIZE;
   const int warp_id = tid / WARP_SIZE;
   const int lane    = tid % WARP_SIZE;
-  constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+  constexpr int NUM_WARPS = BLOCK_SIZE > WARP_SIZE ? BLOCK_SIZE / WARP_SIZE : 1;
+  // When BLOCK_SIZE < WARP_SIZE (e.g. a 32-thread config on a 64-lane wave) only
+  // the first BLOCK_SIZE lanes are active; cap the reduction span so we never
+  // shuffle in an inactive lane.
+  constexpr int RED_SPAN = BLOCK_SIZE < WARP_SIZE ? BLOCK_SIZE : WARP_SIZE;
   static_assert((TILE_N & 1) == 0, "TILE_N must be even for SwiGLU pairing");
   constexpr int TILE_OUT = TILE_N / 2;
   const int sw_base = n_base / 2;
@@ -705,7 +714,7 @@ __global__ void qmoe_decode_fc1_kernel(
 
   #pragma unroll
   for (int t = 0; t < TILE_N; t++) {
-    for (int off = WARP_SIZE >> 1; off > 0; off >>= 1)
+    for (int off = RED_SPAN >> 1; off > 0; off >>= 1)
       partial[t] += __shfl_down(partial[t], off);
   }
 
@@ -882,14 +891,18 @@ __global__ void qmoe_decode_fc2_kernel(
     }
   }
 
-  constexpr int WARP_SIZE = 32;
+  // See the SwiGLU kernel above: express the warp geometry in terms of the real
+  // hardware wave size (32 on RDNA, 64 on CDNA/MI350) and cap the shuffle span
+  // so a sub-wave block never reduces across inactive lanes.
+  constexpr int WARP_SIZE = HIPDNN_WAVE_SIZE;
   const int warp_id = tid / WARP_SIZE;
   const int lane    = tid % WARP_SIZE;
-  constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+  constexpr int NUM_WARPS = BLOCK_SIZE > WARP_SIZE ? BLOCK_SIZE / WARP_SIZE : 1;
+  constexpr int RED_SPAN = BLOCK_SIZE < WARP_SIZE ? BLOCK_SIZE : WARP_SIZE;
 
   #pragma unroll
   for (int t = 0; t < TILE_N; t++) {
-    for (int off = WARP_SIZE >> 1; off > 0; off >>= 1)
+    for (int off = RED_SPAN >> 1; off > 0; off >>= 1)
       partial[t] += __shfl_down(partial[t], off);
   }
 
@@ -1341,13 +1354,17 @@ __global__ void qmoe_quant_act_i8_kernel(
   for (int k = g0 + tid; k < g1; k += BLOCK_SIZE)
     local_max = fmaxf(local_max, fabsf(static_cast<float>(Arow[k])));
 
-  constexpr int WARP_SIZE = 32;
-  constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
-  for (int off = WARP_SIZE >> 1; off > 0; off >>= 1)
+  // Wave-portable (32 on RDNA, 64 on CDNA/MI350). RED_SPAN caps the shuffle to
+  // the active lanes when BLOCK_SIZE is smaller than a hardware wave, and the
+  // per-wave fan-in index uses tid / WARP_SIZE rather than a hard-coded /32.
+  constexpr int WARP_SIZE = HIPDNN_WAVE_SIZE;
+  constexpr int NUM_WARPS = BLOCK_SIZE > WARP_SIZE ? BLOCK_SIZE / WARP_SIZE : 1;
+  constexpr int RED_SPAN = BLOCK_SIZE < WARP_SIZE ? BLOCK_SIZE : WARP_SIZE;
+  for (int off = RED_SPAN >> 1; off > 0; off >>= 1)
     local_max = fmaxf(local_max, __shfl_down(local_max, off));
-  __shared__ float smax[NUM_WARPS > 0 ? NUM_WARPS : 1];
+  __shared__ float smax[NUM_WARPS];
   if ((tid & (WARP_SIZE - 1)) == 0)
-    smax[tid >> 5] = local_max;
+    smax[tid / WARP_SIZE] = local_max;
   __syncthreads();
   if (tid == 0) {
     float m = 0.0f;
@@ -1437,8 +1454,8 @@ __global__ void qmoe_decode_fc1_dp4a_kernel(
     int a_sum_q = 0;
 #pragma unroll
     for (int j = 0; j < 4; j++) {
-      a_sum_q = __builtin_amdgcn_sudot4(true, a_lo[j], false, 0x01010101, a_sum_q, false);
-      a_sum_q = __builtin_amdgcn_sudot4(true, a_hi[j], false, 0x01010101, a_sum_q, false);
+      a_sum_q = hipdnn_sudot4(a_lo[j], 0x01010101, a_sum_q);
+      a_sum_q = hipdnn_sudot4(a_hi[j], 0x01010101, a_sum_q);
     }
 
 #pragma unroll
@@ -1450,8 +1467,8 @@ __global__ void qmoe_decode_fc1_dp4a_kernel(
       for (int j = 0; j < 4; j++) {
         const int lo_w = static_cast<int>(comp[j] & 0x0F0F0F0Fu);
         const int hi_w = static_cast<int>((comp[j] >> 4) & 0x0F0F0F0Fu);
-        dot = __builtin_amdgcn_sudot4(true, a_lo[j], false, lo_w, dot, false);
-        dot = __builtin_amdgcn_sudot4(true, a_hi[j], false, hi_w, dot, false);
+        dot = hipdnn_sudot4(a_lo[j], lo_w, dot);
+        dot = hipdnn_sudot4(a_hi[j], hi_w, dot);
       }
       const float sv = static_cast<float>(S_rows[t][grp]);
       int zv = 8;
@@ -1463,10 +1480,13 @@ __global__ void qmoe_decode_fc1_dp4a_kernel(
     }
   }
 
-  constexpr int WARP_SIZE = 32;
+  // Wave-portable warp geometry (32 on RDNA, 64 on CDNA/MI350); see the fp16
+  // SwiGLU kernel above for the RED_SPAN / NUM_WARPS rationale.
+  constexpr int WARP_SIZE = HIPDNN_WAVE_SIZE;
   const int warp_id = tid / WARP_SIZE;
   const int lane    = tid % WARP_SIZE;
-  constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+  constexpr int NUM_WARPS = BLOCK_SIZE > WARP_SIZE ? BLOCK_SIZE / WARP_SIZE : 1;
+  constexpr int RED_SPAN = BLOCK_SIZE < WARP_SIZE ? BLOCK_SIZE : WARP_SIZE;
   static_assert((TILE_N & 1) == 0, "TILE_N must be even for SwiGLU pairing");
   constexpr int TILE_OUT = TILE_N / 2;
   const int sw_base = n_base / 2;
@@ -1474,7 +1494,7 @@ __global__ void qmoe_decode_fc1_dp4a_kernel(
 
 #pragma unroll
   for (int t = 0; t < TILE_N; t++) {
-    for (int off = WARP_SIZE >> 1; off > 0; off >>= 1)
+    for (int off = RED_SPAN >> 1; off > 0; off >>= 1)
       partial[t] += __shfl_down(partial[t], off);
   }
 
@@ -1600,8 +1620,8 @@ __global__ void qmoe_decode_fc2_dp4a_kernel(
     int a_sum_q = 0;
 #pragma unroll
     for (int j = 0; j < 4; j++) {
-      a_sum_q = __builtin_amdgcn_sudot4(true, a_lo[j], false, 0x01010101, a_sum_q, false);
-      a_sum_q = __builtin_amdgcn_sudot4(true, a_hi[j], false, 0x01010101, a_sum_q, false);
+      a_sum_q = hipdnn_sudot4(a_lo[j], 0x01010101, a_sum_q);
+      a_sum_q = hipdnn_sudot4(a_hi[j], 0x01010101, a_sum_q);
     }
 
 #pragma unroll
@@ -1613,8 +1633,8 @@ __global__ void qmoe_decode_fc2_dp4a_kernel(
       for (int j = 0; j < 4; j++) {
         const int lo_w = static_cast<int>(comp[j] & 0x0F0F0F0Fu);
         const int hi_w = static_cast<int>((comp[j] >> 4) & 0x0F0F0F0Fu);
-        dot = __builtin_amdgcn_sudot4(true, a_lo[j], false, lo_w, dot, false);
-        dot = __builtin_amdgcn_sudot4(true, a_hi[j], false, hi_w, dot, false);
+        dot = hipdnn_sudot4(a_lo[j], lo_w, dot);
+        dot = hipdnn_sudot4(a_hi[j], hi_w, dot);
       }
       const float sv = static_cast<float>(S_rows[t][grp]);
       int zv = 8;
@@ -1626,14 +1646,16 @@ __global__ void qmoe_decode_fc2_dp4a_kernel(
     }
   }
 
-  constexpr int WARP_SIZE = 32;
+  // Wave-portable warp geometry (32 on RDNA, 64 on CDNA/MI350); see above.
+  constexpr int WARP_SIZE = HIPDNN_WAVE_SIZE;
   const int warp_id = tid / WARP_SIZE;
   const int lane    = tid % WARP_SIZE;
-  constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+  constexpr int NUM_WARPS = BLOCK_SIZE > WARP_SIZE ? BLOCK_SIZE / WARP_SIZE : 1;
+  constexpr int RED_SPAN = BLOCK_SIZE < WARP_SIZE ? BLOCK_SIZE : WARP_SIZE;
 
 #pragma unroll
   for (int t = 0; t < TILE_N; t++) {
-    for (int off = WARP_SIZE >> 1; off > 0; off >>= 1)
+    for (int off = RED_SPAN >> 1; off > 0; off >>= 1)
       partial[t] += __shfl_down(partial[t], off);
   }
 

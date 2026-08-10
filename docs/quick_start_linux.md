@@ -22,7 +22,9 @@ built from source, so the host needs no system LLVM. The cold from-source LLVM
 build is the long pole (multi-hour); it lands under `<workspace>/build/` and is
 reused across rebuilds.
 
-See [quick_start.md](quick_start.md) for the Windows flow.
+See [quick_start.md](quick_start.md) for the Windows flow. If your target is an
+**AMD Instinct MI350X** (`gfx950`, CDNA4), read this guide first and then
+[quick_start_mi350.md](quick_start_mi350.md), which covers what wave64 changes.
 
 ## Host prerequisites
 
