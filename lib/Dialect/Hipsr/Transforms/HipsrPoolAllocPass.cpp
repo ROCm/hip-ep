@@ -248,6 +248,18 @@ emitPoolLayout(OpBuilder &builder, Location loc,
   return {offsets, poolSize};
 }
 
+void replaceAllocsWithViews(OpBuilder &builder, llvm::ArrayRef<Value> group,
+                            Value pool, Value offset) {
+  for (Value alloc : group) {
+    auto allocOp = alloc.getDefiningOp<memref::AllocOp>();
+    auto view =
+        memref::ViewOp::create(builder, allocOp.getLoc(), allocOp.getType(),
+                               pool, offset, allocOp.getDynamicSizes());
+    allocOp.getResult().replaceAllUsesWith(view.getResult());
+    allocOp.erase();
+  }
+}
+
 struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
   using impl::HipsrPoolAllocPassBase<
       HipsrPoolAllocPass>::HipsrPoolAllocPassBase;
@@ -284,7 +296,11 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
       }
       auto [offsets, poolSize] =
           emitPoolLayout(builder, domain.getLoc(), groupSizes);
-      emitPool(builder, domain.getLoc(), ctx, poolSize, domain.getDomainId());
+      Value pool = emitPool(builder, domain.getLoc(), ctx, poolSize,
+                            domain.getDomainId());
+      for (auto [group, offset] : llvm::zip_equal(groups, offsets)) {
+        replaceAllocsWithViews(builder, group, pool, offset);
+      }
     });
   }
 };
