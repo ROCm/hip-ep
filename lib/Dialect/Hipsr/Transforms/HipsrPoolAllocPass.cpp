@@ -240,6 +240,17 @@ Value emitPool(OpBuilder &builder, Location loc, Value ctx,
   return GetPoolOp::create(builder, loc, poolType, ctx, poolSize, domainId);
 }
 
+llvm::SmallVector<Value> emitOffsets(OpBuilder &builder, Location loc,
+                                     llvm::ArrayRef<Value> groupSizes) {
+  llvm::SmallVector<Value> offsets;
+  offsets.push_back(arith::ConstantIndexOp::create(builder, loc, 0));
+  for (Value groupSize : groupSizes.drop_back()) {
+    offsets.push_back(
+        arith::AddIOp::create(builder, loc, offsets.back(), groupSize));
+  }
+  return offsets;
+}
+
 struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
   using impl::HipsrPoolAllocPassBase<
       HipsrPoolAllocPass>::HipsrPoolAllocPassBase;
@@ -275,6 +286,7 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
             emitGroupSize(builder, domain.getLoc(), group, kPoolAlignment));
       }
       emitPool(builder, domain.getLoc(), ctx, groupSizes, domain.getDomainId());
+      emitOffsets(builder, domain.getLoc(), groupSizes);
     });
   }
 };
