@@ -35,8 +35,7 @@ def Hipsr_ComputeOp : Hipsr_Op<"compute", [
     result's, which is what lets a body reshape its data. Result types come
     from `hipsr.compute_yield`; the `outs` values come from
     `hipsr.placeholder`, which owns the output-shape computation, so this op
-    has no shape region of its own. A bufferized compute writes into device
-    memrefs, has no results, and yields nothing.
+    has no shape region of its own.
 
     Example (the body flattens, so the result type differs from `outs`):
     ```mlir
@@ -49,6 +48,26 @@ def Hipsr_ComputeOp : Hipsr_Op<"compute", [
       hipsr.compute_yield %flat : tensor<6xf16>
     } : tensor<6xf16>
     ```
+
+    A bufferized compute takes and produces device memrefs. Because `outs` is
+    not tied to a result, a result's buffer cannot be the `outs` buffer
+    whenever the two types differ; it is the buffer of the value yielded in
+    the same position, so the results survive bufferization as memrefs and
+    `hipsr.compute_yield` carries them out of the body. That mirrors how
+    `scf.execute_region` bufferizes. A compute that had no results still ends
+    up with none, writing only through its `outs` buffers.
+
+    ```mlir
+    %out = hipsr.compute(%ctx) ins(%data : memref<2x3xf16, #hipsr.mem<device>>)
+                               outs(%init : memref<2x3xf16, #hipsr.mem<device>>) {
+    ^bb0(%body_ctx: !hipsr.context, %in: memref<2x3xf16, #hipsr.mem<device>>,
+         %dest: memref<2x3xf16, #hipsr.mem<device>>):
+      %flat = memref.collapse_shape %in [[0, 1]]
+          : memref<2x3xf16, #hipsr.mem<device>>
+          into memref<6xf16, #hipsr.mem<device>>
+      hipsr.compute_yield %flat : memref<6xf16, #hipsr.mem<device>>
+    } : memref<6xf16, #hipsr.mem<device>>
+    ```
   }];
 
   let arguments = (ins
@@ -56,7 +75,9 @@ def Hipsr_ComputeOp : Hipsr_Op<"compute", [
     Variadic<Hipsr_TensorOrDeviceMemRef>:$inputs,
     Variadic<Hipsr_TensorOrDeviceMemRef>:$outputs
   );
-  let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
+  // Named after linalg's $result_tensors, which is also the pre-bufferization
+  // form; a bufferized compute holds device memrefs here.
+  let results = (outs Variadic<Hipsr_TensorOrDeviceMemRef>:$result_tensors);
   let regions = (region SizedRegion<1>:$body);
 
   let assemblyFormat = [{

@@ -94,9 +94,8 @@ func.func @shape_changing_result(%ctx: !hipsr.context, %data: tensor<2x3xf16>,
 }
 
 // -----
-// A post-bufferization form takes device memrefs as outputs. Memref outputs are
-// not tensor results, so the op has none, and the printer omits the empty
-// implicit yield.
+// A post-bufferization form takes device memrefs as outputs. A compute that had
+// no results still has none, so its yield stays empty and the printer omits it.
 // CHECK-LABEL: func.func @memref_form(
 // CHECK-SAME: %[[CTX:.+]]: !hipsr.context, %[[DATA:.+]]: memref<2x3xf16, #hipsr.mem<device>>, %[[INIT:.+]]: memref<6xf16, #hipsr.mem<device>>) {
 // CHECK-NEXT: hipsr.compute(%[[CTX]]) ins(%[[DATA]] : memref<2x3xf16, #hipsr.mem<device>>) outs(%[[INIT]] : memref<6xf16, #hipsr.mem<device>>) {
@@ -114,6 +113,35 @@ func.func @memref_form(%ctx: !hipsr.context,
     hipsr.compute_yield
   }
   return
+}
+
+// -----
+// A compute whose result type differs from its output keeps that result through
+// bufferization, as a device memref yielded out of the body. The output buffer
+// cannot stand in for it: the two types disagree.
+// CHECK-LABEL: func.func @memref_form_with_result(
+// CHECK-SAME: %[[CTX:.+]]: !hipsr.context, %[[DATA:.+]]: memref<2x3xf16, #hipsr.mem<device>>, %[[INIT:.+]]: memref<2x3xf16, #hipsr.mem<device>>) -> memref<6xf16, #hipsr.mem<device>> {
+// CHECK-NEXT: %[[RESULT:.+]] = hipsr.compute(%[[CTX]]) ins(%[[DATA]] : memref<2x3xf16, #hipsr.mem<device>>) outs(%[[INIT]] : memref<2x3xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT: ^bb0(%[[BODY_CTX:.+]]: !hipsr.context, %[[IN:.+]]: memref<2x3xf16, #hipsr.mem<device>>, %[[DEST:.+]]: memref<2x3xf16, #hipsr.mem<device>>):
+// CHECK-NEXT: %[[FLAT:.+]] = memref.collapse_shape %[[IN]] {{\[\[}}0, 1]] : memref<2x3xf16, #hipsr.mem<device>> into memref<6xf16, #hipsr.mem<device>>
+// CHECK-NEXT: hipsr.compute_yield %[[FLAT]] : memref<6xf16, #hipsr.mem<device>>
+// CHECK-NEXT: } : memref<6xf16, #hipsr.mem<device>>{{$}}
+// CHECK-NEXT: return %[[RESULT]] : memref<6xf16, #hipsr.mem<device>>
+// CHECK-NEXT: }
+func.func @memref_form_with_result(%ctx: !hipsr.context,
+                                   %data: memref<2x3xf16, #hipsr.mem<device>>,
+                                   %init: memref<2x3xf16, #hipsr.mem<device>>)
+    -> memref<6xf16, #hipsr.mem<device>> {
+  %out = hipsr.compute(%ctx) ins(%data : memref<2x3xf16, #hipsr.mem<device>>)
+                             outs(%init : memref<2x3xf16, #hipsr.mem<device>>) {
+  ^bb0(%body_ctx: !hipsr.context, %in: memref<2x3xf16, #hipsr.mem<device>>,
+       %dest: memref<2x3xf16, #hipsr.mem<device>>):
+    %flat = memref.collapse_shape %in [[0, 1]]
+        : memref<2x3xf16, #hipsr.mem<device>>
+        into memref<6xf16, #hipsr.mem<device>>
+    hipsr.compute_yield %flat : memref<6xf16, #hipsr.mem<device>>
+  } : memref<6xf16, #hipsr.mem<device>>
+  return %out : memref<6xf16, #hipsr.mem<device>>
 }
 
 // -----
