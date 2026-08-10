@@ -21,8 +21,8 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Transforms/DialectConversion.h"
 
-#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/SmallVectorExtras.h"
 
 namespace mlir {
 namespace hipsr {
@@ -32,33 +32,28 @@ namespace hipsr {
 
 namespace {
 
-// Conversion leaves each placeholder input pointing at a data result. Point it
-// at the outs operand its producer writes into, which has the same shape.
-SmallVector<Value> resolveShapeGraphInputs(PlaceholderOp placeholder) {
-  SmallVector<Value> resolved = llvm::to_vector(placeholder.getInputs());
-  for (Value &input : resolved) {
-    if (PlaceholderOp::isAllowedShapeGraphInput(input)) {
-      continue;
-    }
-    // Block arguments are allowed, so anything left is a result.
-    auto result = cast<OpResult>(input);
-    OperandRange destinations = getHipsrDestinationOperands(result.getOwner());
-    if (result.getResultNumber() >= destinations.size()) {
-      continue;
-    }
-    input = destinations[result.getResultNumber()];
+// Returns the shape-graph value for a placeholder input. A data result becomes
+// the outs operand its producer writes into, which has the same shape.
+Value resolveShapeGraphInput(Value input) {
+  if (PlaceholderOp::isAllowedShapeGraphInput(input)) {
+    return input;
   }
-  return resolved;
+  // Block arguments are allowed, so anything left is a result.
+  auto result = cast<OpResult>(input);
+  OperandRange destinations = getHipsrDestinationOperands(result.getOwner());
+  if (result.getResultNumber() >= destinations.size()) {
+    return input;
+  }
+  return destinations[result.getResultNumber()];
 }
 
 // Placeholder inputs form the shape graph, not the data graph.
 // PlaceholderOp::verify reports any input this cannot fix.
 void rewirePlaceholderInputs(ModuleOp module) {
   module.walk([](PlaceholderOp placeholder) {
-    SmallVector<Value> resolvedInputs = resolveShapeGraphInputs(placeholder);
-    if (!llvm::equal(resolvedInputs, placeholder.getInputs())) {
-      placeholder.getInputsMutable().assign(resolvedInputs);
-    }
+    SmallVector<Value> resolvedInputs =
+        llvm::map_to_vector(placeholder.getInputs(), resolveShapeGraphInput);
+    placeholder.getInputsMutable().assign(resolvedInputs);
   });
 }
 
