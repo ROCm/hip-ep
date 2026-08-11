@@ -5,17 +5,15 @@
 // Checks that One-Shot Bufferize rewrites hipsr.compute, its body, and its
 // hipsr.compute_yield terminator into device memrefs.
 //
-// Each case starts from device memrefs wrapped in `bufferization.to_tensor
-// restrict`, rather than from `tensor.empty`, because the buffer a hipsr op
+// Each positive case uses device memrefs at the function boundary (wrapped in
+// `bufferization.to_tensor restrict` where the body still starts as tensors),
+// rather than tensor.empty at the boundary, because the buffer a hipsr op takes
 // takes must name its memory space and One-Shot Bufferize has no default one to
 // give (`memref<6xf16>` would fail the Hipsr_TensorOrDeviceMemRef constraint).
 // Bufferizing a view keeps the space, so device memrefs on the way in are what
 // makes device memrefs on the way out. Assigning the space to allocations that
 // the pipeline itself creates is a separate, still missing, stage.
 //
-// The cases spell out their whole function with CHECK-NEXT, so absences are
-// load bearing: a leftover `tensor.*` op, or a `bufferization.to_tensor` that
-// did not fold away, shows up as an extra line and breaks the chain.
 //
 // Nothing here should copy: every result is a view of a buffer that crossed the
 // boundary, which is the point of implementing all three alias layers.
@@ -41,8 +39,8 @@
 // CHECK-NEXT: return
 // CHECK-NEXT: }
 func.func @flatten(%ctx: !hipsr.context, %shape: !shape.shape,
-                   %data: memref<2x3xf16, #hipsr.mem<device>>,
-                   %init: memref<2x3xf16, #hipsr.mem<device>>) {
+                          %data: memref<2x3xf16, #hipsr.mem<device>>,
+                          %init: memref<2x3xf16, #hipsr.mem<device>>) {
   %in = bufferization.to_tensor %data restrict
       : memref<2x3xf16, #hipsr.mem<device>> to tensor<2x3xf16>
   %dest = bufferization.to_tensor %init restrict writable
