@@ -4,6 +4,7 @@
 // RUN: split-file %s %t
 // RUN: mkdir -p %t/out
 // RUN: hip-mlir-opt --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/out' %t/valid.mlir | FileCheck %s --check-prefix=EXTERNAL
+// RUN: %python %S/../Inputs/check_hip_constant_artifact.py %t/out/model.constants.bin %t/out/model.constants.json
 // RUN: hip-mlir-opt --hip-externalize-constants %t/default-inline.mlir | FileCheck %s --check-prefix=INLINE
 // RUN: not hip-mlir-opt --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/out' %t/stale.mlir 2>&1 | FileCheck %s --check-prefix=STALE
 // RUN: not hip-mlir-opt --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/out' %t/collision.mlir 2>&1 | FileCheck %s --check-prefix=COLLISION

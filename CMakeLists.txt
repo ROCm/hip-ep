@@ -221,7 +221,7 @@ if(BUILD_HIP_TOOLS)
     # See docs/design/plugin-interface.md.
     add_subdirectory(test/plugin)
 
-    # MLIR dialect/pass unit tests (GTest; cover Phase 2 write paths LIT can't).
+    # MLIR dialect/pass unit tests (plain main; GPU-free injected-I/O coverage).
     add_subdirectory(test/unit)
   endif()
 

@@ -341,9 +341,7 @@ def run_tests(args, build_dir):
     )
 
     # GPU-free ctest unit suites (built as part of the default target above).
-    # -R limits the run to the plugin registrar, output allocator, and the
-    # production HIP constant externalizer. GPU / hip-test e2e suites are not
-    # invoked here.
+    # GPU / hip-test e2e suites are not invoked here.
     step("Test (compiler/runtime GPU-free unit tests)")
     run_subprocess(
         [
@@ -353,7 +351,7 @@ def run_tests(args, build_dir):
             "-C",
             args.config,
             "-R",
-            "StaticPlugins|OutputAllocator|HipExternalizeConstantsUnit",
+            "StaticPlugins|OutputAllocator",
             "--output-on-failure",
         ]
     )

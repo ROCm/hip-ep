@@ -22,6 +22,7 @@
 #   config.hip_build_mode  — "Debug" or "Release" (resolved at runtime for VS)
 
 import os
+import sys
 import lit.formats
 import lit.llvm
 
@@ -88,6 +89,7 @@ tools = [
     "split-file",
 ]
 llvm_config.add_tool_substitutions(tools, hip_tools_dirs + [config.llvm_tools_dir])
+config.substitutions.append(("%python", sys.executable))
 
 # `hip_static_plugins` feature: gates the Plugin/ pass tests. The sample plugin
 # is linked STATICALLY into hip-mlir-opt when the build selected it (`sample` in

@@ -41,39 +41,3 @@ add_test(NAME HipsrExternalizeConstantsUnit
 set_target_properties(test-hipsr-externalize-constants PROPERTIES
   FOLDER "mlir/Test/Dialect/Hipsr"
 )
-
-# Production HIP carrier/externalizer coverage with an injected FileSystem.
-# Kept as a separate target so the existing Hipsr unit remains unchanged.
-add_executable(test-hip-externalize-constants
-  test_hip_externalize_constants.cpp
-)
-
-target_compile_features(test-hip-externalize-constants PRIVATE cxx_std_17)
-
-target_include_directories(test-hip-externalize-constants PRIVATE
-  ${MLIR_INCLUDE_DIRS}
-  ${LLVM_INCLUDE_DIRS}
-  ${CMAKE_SOURCE_DIR}/morphizen/morphizen-foundation/include
-)
-
-target_link_libraries(test-hip-externalize-constants PRIVATE
-  HipDialectTransforms
-  HipDialectIR
-  HipConstantsIO
-  MLIRArithDialect
-  MLIRBufferizationDialect
-  MLIRFuncDialect
-  MLIRIR
-  MLIRMemRefDialect
-  MLIRParser
-  MLIRPass
-  MLIRSupport
-)
-
-add_test(NAME HipExternalizeConstantsUnit
-  COMMAND test-hip-externalize-constants
-)
-
-set_target_properties(test-hip-externalize-constants PROPERTIES
-  FOLDER "mlir/Test/Dialect/Hip"
-)
