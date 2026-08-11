@@ -4,9 +4,6 @@
 // RUN: hip-mlir-opt %s -split-input-file --verify-diagnostics \
 // RUN:   -hipsr-pool-alloc='emit-pool-report=true' | FileCheck %s
 
-// Hoisted allocs are the form materialize-init-tensors produces. Ranges start
-// at the DPS write, so a1 and a3 stay disjoint; indexing the allocs themselves
-// would overlap all three and defeat reuse.
 // CHECK-LABEL: func.func @hoisted_allocs
 func.func @hoisted_allocs(%ctx: !hipsr.context,
                           %in: memref<4x1024xf16, #hipsr.mem<device>>) {
@@ -39,8 +36,6 @@ func.func @hoisted_allocs(%ctx: !hipsr.context,
 
 // -----
 
-// A user inside a nested region extends the range to the enclosing
-// block-level op (index 2), not to the nested op's own index.
 // CHECK-LABEL: func.func @nested_region_user
 func.func @nested_region_user(%ctx: !hipsr.context,
                               %in: memref<4x1024xf16, #hipsr.mem<device>>) {

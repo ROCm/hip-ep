@@ -3,7 +3,6 @@
 
 // RUN: hip-mlir-opt %s -split-input-file -hipsr-pool-alloc | FileCheck %s
 
-// 3xf16 = 6 B is not a multiple of 256, so the alignUp chain must round up.
 // CHECK-LABEL: func.func @align_up_rounding
 // CHECK: %[[C6:.+]] = arith.constant 6 : index
 // CHECK-NEXT: %[[C256:.+]] = arith.constant 256 : index
