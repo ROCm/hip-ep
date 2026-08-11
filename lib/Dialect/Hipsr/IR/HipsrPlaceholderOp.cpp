@@ -7,7 +7,6 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
-#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 
 #include "llvm/ADT/STLExtras.h"
 
@@ -33,7 +32,7 @@ LogicalResult verifyShapeGraphInputs(PlaceholderOp op) {
 // A placeholder holds the outs values of one op, one slot per result.
 LogicalResult verifyResultUses(PlaceholderOp op) {
   SmallVector<Operation *> consumers;
-  for (auto [resultIndex, result] : llvm::enumerate(op.getResults())) {
+  for (OpResult result : op.getResults()) {
     auto initUses =
         llvm::make_filter_range(result.getUses(), [](OpOperand &use) {
           return !isa<PlaceholderOp, PoolDomainYieldOp>(use.getOwner());
@@ -48,19 +47,7 @@ LogicalResult verifyResultUses(PlaceholderOp op) {
       return op.emitOpError(
           "requires each result to initialize exactly one hipsr operation");
     }
-
-    OpOperand &outsUse = *initUses.begin();
-    Operation *owner = outsUse.getOwner();
-    if (auto dpsOp = dyn_cast<DestinationStyleOpInterface>(owner)) {
-      OpResult consumerResult = dpsOp.getTiedOpResult(&outsUse);
-      if (result.getType() != consumerResult.getType()) {
-        return op.emitOpError("result ")
-               << resultIndex << " type " << result.getType()
-               << " must match consumer result type "
-               << consumerResult.getType();
-      }
-    }
-    consumers.push_back(owner);
+    consumers.push_back(initUses.begin()->getOwner());
   }
 
   if (!llvm::all_equal(consumers)) {
