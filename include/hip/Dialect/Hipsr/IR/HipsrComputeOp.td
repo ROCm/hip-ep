@@ -35,7 +35,8 @@ def Hipsr_ComputeOp : Hipsr_Op<"compute", [
     result's, which is what lets a body reshape its data. Result types come
     from `hipsr.compute_yield`; the `outs` values come from
     `hipsr.placeholder`, which owns the output-shape computation, so this op
-    has no shape region of its own.
+    has no shape region of its own. A bufferized compute writes into device
+    memrefs, has no results, and yields nothing.
 
     Example (the body flattens, so the result type differs from `outs`):
     ```mlir

@@ -16,11 +16,10 @@ def Hipsr_ComputeYieldOp : Hipsr_Op<"compute_yield",
   let description = [{
     Returns values from a compute body to the parent op.
 
-    Operands give `hipsr.compute` its result types; because that op is not
-    destination-passing style, those types need not match its `outs` types.
-    Bufferization turns the operands into the device memrefs that back them,
-    which is how a result whose type differs from its `outs` gets its buffer
-    out of the isolated body. A compute with no results yields nothing.
+    Operands are ranked tensors and give `hipsr.compute` its result
+    types; because that op is not destination-passing style, those types need
+    not match its `outs` types. A bufferized compute has no results and yields
+    nothing.
 
     Example:
     ```mlir
