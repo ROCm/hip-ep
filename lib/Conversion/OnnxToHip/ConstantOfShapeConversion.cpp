@@ -211,6 +211,7 @@ static mlir::LogicalResult buildScalarFillValue(mlir::Operation *op,
 /// (host-writable AND GPU-readable at the same VA on UMA), so the where kernel
 /// reads a valid device-side address.
 struct ConstantOfShapeAsScalar : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ConstantOfShapeAsScalar)
   ConstantOfShapeAsScalar(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.ConstantOfShape", /*benefit=*/3, ctx) {}
 
@@ -259,6 +260,7 @@ struct ConstantOfShapeAsScalar : public mlir::RewritePattern {
 };
 
 struct ConstantOfShapeFold : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ConstantOfShapeFold)
   ConstantOfShapeFold(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.ConstantOfShape", /*benefit=*/2, ctx) {}
 
@@ -361,6 +363,7 @@ struct ConstantOfShapeFold : public mlir::RewritePattern {
 /// Handles either (a) a non-constant shape input or (b) a result type with
 /// at least one dynamic dim.
 struct ConstantOfShapeDynamic : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ConstantOfShapeDynamic)
   ConstantOfShapeDynamic(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.ConstantOfShape", /*benefit=*/1, ctx) {}
 

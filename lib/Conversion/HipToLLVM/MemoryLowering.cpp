@@ -41,6 +41,7 @@ static LogicalResult verifyCallbackRankAgainstMetadata(ModuleOp module,
 
 // --- AllocOp: hip.alloc(%ctx, %dyn...) -> hipMalloc(bytes) + memref descriptor
 struct AllocOpLowering : public ConvertOpToLLVMPattern<AllocOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(AllocOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
@@ -96,6 +97,7 @@ struct AllocOpLowering : public ConvertOpToLLVMPattern<AllocOp> {
 
 // --- FreeOp: hip.free(%ctx, %memref) -> llvm.call @hipFree(allocated_ptr)
 struct FreeOpLowering : public ConvertOpToLLVMPattern<FreeOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(FreeOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
@@ -135,6 +137,7 @@ struct FreeOpLowering : public ConvertOpToLLVMPattern<FreeOp> {
 // Single-domain models emit `domain_id = 0` and round-trip identically to
 // the pre-multi-domain IR (printer elides the default).
 struct GetPoolOpLowering : public ConvertOpToLLVMPattern<GetPoolOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GetPoolOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
@@ -196,6 +199,7 @@ struct GetPoolOpLowering : public ConvertOpToLLVMPattern<GetPoolOp> {
 // memref.view see the same pointer.
 struct GetHostScratchOpLowering
     : public ConvertOpToLLVMPattern<GetHostScratchOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GetHostScratchOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
@@ -268,6 +272,7 @@ struct GetHostScratchOpLowering
 //   llvm.store %c2560, %shape[1]
 //   %p = llvm.call @hipdnn_ep_alloc_output(..., %shape, %c2_rank, ...)
 struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(AllocOutputOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
@@ -473,6 +478,7 @@ struct AllocOutputOpLowering : public ConvertOpToLLVMPattern<AllocOutputOp> {
 //===----------------------------------------------------------------------===//
 
 struct GetConstantOpLowering : public ConvertOpToLLVMPattern<GetConstantOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GetConstantOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
@@ -537,6 +543,7 @@ struct GetConstantOpLowering : public ConvertOpToLLVMPattern<GetConstantOp> {
 // --- memref.alloc -> hip_device_malloc (produced by bufferization for
 // tensor.empty)
 struct MemRefAllocOpLowering : public ConvertOpToLLVMPattern<memref::AllocOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(MemRefAllocOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
@@ -575,6 +582,7 @@ struct MemRefAllocOpLowering : public ConvertOpToLLVMPattern<memref::AllocOp> {
 // --- memref.dealloc -> hip_device_free (produced by bufferization)
 struct MemRefDeallocOpLowering
     : public ConvertOpToLLVMPattern<memref::DeallocOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(MemRefDeallocOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult
@@ -674,6 +682,7 @@ static bool strideVectorsEqual(ArrayRef<int64_t> a, ArrayRef<int64_t> b) {
 /// wrap_hipMemcpy2DAsync when strides are statically known. Otherwise leaves
 /// conversion to the default MemRef→LLVM copy lowering (benefit 1).
 struct MemRefCopyOpLowering : public ConvertOpToLLVMPattern<memref::CopyOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(MemRefCopyOpLowering)
   MemRefCopyOpLowering(const LLVMTypeConverter &converter)
       : ConvertOpToLLVMPattern(converter, PatternBenefit(10)) {}
 

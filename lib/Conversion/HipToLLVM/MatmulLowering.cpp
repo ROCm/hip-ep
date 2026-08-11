@@ -15,6 +15,7 @@ namespace {
 //   -> hip_hipblaslt_matmul(handle, A, B, C, rankA, rankB, batch, M, K, N)
 // Rank-generic: batch from A if 3D, B broadcast if rankB < rankA.
 struct MatmulOpLowering : public ConvertOpToLLVMPattern<MatmulOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(MatmulOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

@@ -28,6 +28,7 @@ namespace {
 /// The runtime stub today only logs its parameters, so any reduction mode
 /// is accepted at compile time.
 struct ScatterNDToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ScatterNDToHip)
   ScatterNDToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.ScatterND", /*benefit=*/1, ctx) {}
 

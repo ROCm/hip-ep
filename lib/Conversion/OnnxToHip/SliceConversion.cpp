@@ -120,6 +120,7 @@ static mlir::Value normaliseOptional(mlir::Value v) {
 }
 
 struct SliceDecompose : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SliceDecompose)
   SliceDecompose(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Slice", /*benefit=*/2, ctx) {}
 
@@ -289,6 +290,7 @@ struct SliceDecompose : public mlir::RewritePattern {
 };
 
 struct SliceToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SliceToHip)
   SliceToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Slice", /*benefit=*/1, ctx) {}
 

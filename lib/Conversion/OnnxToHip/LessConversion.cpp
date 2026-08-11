@@ -11,6 +11,7 @@ namespace {
 
 /// onnx.Less -> hip.less
 struct LessToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LessToHip)
   LessToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Less", /*benefit=*/1, ctx) {}
 

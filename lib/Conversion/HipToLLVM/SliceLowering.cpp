@@ -23,6 +23,7 @@ namespace {
 // when a Slice cannot be folded to tensor.extract_slice by the OnnxToHip
 // decompose pattern.
 struct SliceOpLowering : public ConvertOpToLLVMPattern<SliceOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SliceOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

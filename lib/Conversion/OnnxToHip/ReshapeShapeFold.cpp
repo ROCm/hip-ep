@@ -106,6 +106,7 @@ namespace hip {
 namespace {
 
 struct ReshapeOfShapeToFromElements : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ReshapeOfShapeToFromElements)
   ReshapeOfShapeToFromElements(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Reshape", /*benefit=*/1, ctx) {}
 

@@ -58,6 +58,7 @@ static mlir::Value buildZeroScalar(mlir::PatternRewriter &rewriter,
 }
 
 struct ReluToHipMax : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ReluToHipMax)
   ReluToHipMax(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Relu", /*benefit=*/1, ctx) {}
 

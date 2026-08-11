@@ -21,6 +21,7 @@ namespace {
 // host-side index arithmetic (tensor.extract_slice size, tensor.empty
 // dynsize, hip.alloc_output extent, ...).
 struct ReadbackDimOpLowering : public ConvertOpToLLVMPattern<ReadbackDimOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ReadbackDimOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

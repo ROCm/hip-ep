@@ -21,6 +21,7 @@ namespace {
 //   %y = hip.exp(%ctx) ins(%x : tensor<1024x1x64x64xf16>)
 //                     outs(%init : tensor<1024x1x64x64xf16>)
 struct ExpToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ExpToHip)
   ExpToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Exp", /*benefit=*/1, ctx) {}
 

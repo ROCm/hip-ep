@@ -11,6 +11,7 @@ namespace {
 
 /// onnx.Custom(LinearAttention) -> hip.linear_attention
 struct LinearAttentionToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LinearAttentionToHip)
   LinearAttentionToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
 

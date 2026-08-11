@@ -70,6 +70,7 @@ namespace {
 // failing the match -- preserving op semantics is the priority over
 // surfacing a "shouldn't happen" error.
 struct ShapeToTensorDims : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ShapeToTensorDims)
   ShapeToTensorDims(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Shape", /*benefit=*/1, ctx) {}
 

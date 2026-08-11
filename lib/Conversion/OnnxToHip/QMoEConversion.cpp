@@ -16,6 +16,7 @@ namespace {
 //===----------------------------------------------------------------------===//
 
 struct QMoEToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(QMoEToHip)
   QMoEToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
 

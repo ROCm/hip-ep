@@ -11,6 +11,7 @@ namespace {
 
 /// com.microsoft.CausalConvWithState -> hip.causal_conv_with_state
 struct CausalConvWithStateToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(CausalConvWithStateToHip)
   CausalConvWithStateToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
 

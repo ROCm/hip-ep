@@ -30,6 +30,7 @@ namespace {
 /// NaN-correct lowering would need e.g. `(B < A) || (A == B)` (extra ops) or a
 /// dedicated `>=` kernel.
 struct GreaterOrEqualDecompose : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GreaterOrEqualDecompose)
   GreaterOrEqualDecompose(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.GreaterOrEqual", /*benefit=*/1, ctx) {}
 

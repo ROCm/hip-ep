@@ -12,6 +12,7 @@ namespace {
 // hip.mod(ctx, a, b, output) {fmod}
 //   -> wrap_mod(state, a_ptr, b_ptr, out_ptr, num_elements, data_type, fmod)
 struct ModOpLowering : public ConvertOpToLLVMPattern<ModOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ModOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

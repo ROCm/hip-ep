@@ -26,6 +26,7 @@ namespace {
 // Supports both static and dynamic shapes (computes num_elements at runtime).
 template <typename OpTy>
 struct ReduceOpLowering : public ConvertOpToLLVMPattern<OpTy> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ReduceOpLowering)
   using ConvertOpToLLVMPattern<OpTy>::ConvertOpToLLVMPattern;
   const char *funcName;
   const char *opName;

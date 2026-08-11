@@ -18,6 +18,7 @@ namespace {
 // the runtime handles same-shape / scalar directly and materialises any other
 // ONNX multidirectional broadcast via hip_expand -- mirrors DivOpLowering.
 struct EqualOpLowering : public ConvertOpToLLVMPattern<EqualOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(EqualOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

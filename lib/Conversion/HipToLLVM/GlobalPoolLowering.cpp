@@ -44,6 +44,7 @@ namespace {
 // rely on small positive values (>=1, validated upstream in OnnxToHip).
 
 struct GlobalPoolOpLowering : public ConvertOpToLLVMPattern<GlobalPoolOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GlobalPoolOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

@@ -16,6 +16,7 @@ namespace {
 //                     output_shape_ptr, output_rank,
 //                     batch_dims, data_type)
 struct GatherNDOpLowering : public ConvertOpToLLVMPattern<GatherNDOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GatherNDOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

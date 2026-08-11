@@ -111,6 +111,7 @@ llvm::SmallVector<mlir::OpFoldResult> buildExpandShapeOutputShape(
 /// alias) and then to LLVM struct manipulation (same data pointer, new
 /// sizes/strides).  No HIP kernel is needed.
 struct ReshapeToStdTensor : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ReshapeToStdTensor)
   ReshapeToStdTensor(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Reshape", /*benefit=*/1, ctx) {}
 
@@ -558,6 +559,7 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
 ///          output_shape [%b, %s, 128, 1]
 ///          : tensor<?x?x128xf16> into tensor<?x?x128x1xf16>
 struct UnsqueezeToStdTensor : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(UnsqueezeToStdTensor)
   UnsqueezeToStdTensor(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Unsqueeze", /*benefit=*/1, ctx) {}
 
@@ -593,6 +595,7 @@ struct UnsqueezeToStdTensor : public mlir::RewritePattern {
 
 /// onnx.Squeeze -> tensor.collapse_shape (zero-cost metadata operation).
 struct SqueezeToStdTensor : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SqueezeToStdTensor)
   SqueezeToStdTensor(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Squeeze", /*benefit=*/1, ctx) {}
 
@@ -672,6 +675,7 @@ struct SqueezeToStdTensor : public mlir::RewritePattern {
 /// which bufferize to memref.subview (zero-copy alias) and then to LLVM
 /// pointer arithmetic. No HIP kernel is needed.
 struct SplitToStdTensor : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SplitToStdTensor)
   SplitToStdTensor(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Split", /*benefit=*/1, ctx) {}
 

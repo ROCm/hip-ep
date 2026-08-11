@@ -28,6 +28,7 @@ namespace hip {
 namespace {
 
 struct LeakyReluToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LeakyReluToHip)
   LeakyReluToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.LeakyRelu", /*benefit=*/1, ctx) {}
 

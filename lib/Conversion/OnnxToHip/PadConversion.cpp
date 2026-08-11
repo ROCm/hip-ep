@@ -202,6 +202,7 @@ static mlir::FailureOr<mlir::Value> buildPadOutputInit(
 /// Optional inputs may be present and typed `none` (onnx.NoValue) when omitted
 /// by the producer.
 struct PadToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(PadToHip)
   PadToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Pad", /*benefit=*/1, ctx) {}
 

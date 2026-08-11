@@ -11,6 +11,7 @@ namespace {
 
 /// onnx.Custom(RotaryEmbedding) -> hip.rope
 struct RotaryEmbeddingToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(RotaryEmbeddingToHip)
   RotaryEmbeddingToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
 

@@ -86,6 +86,7 @@ namespace {
 /// primitives. See file header for the rewrite shape and the rationale for
 /// living in the pre-lowering loop instead of `convertComputeOps`.
 struct LpNormalizationDecompose : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LpNormalizationDecompose)
   LpNormalizationDecompose(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.LpNormalization", /*benefit=*/2, ctx) {}
 

@@ -16,6 +16,7 @@ namespace {
 // Ops lower to wrap_{op}(state, input, output, num_elements, data_type).
 template <typename OpTy>
 struct UnaryElementwiseOpLowering : public ConvertOpToLLVMPattern<OpTy> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(UnaryElementwiseOpLowering)
   using ConvertOpToLLVMPattern<OpTy>::ConvertOpToLLVMPattern;
   const char *funcName;
   const char *opName;

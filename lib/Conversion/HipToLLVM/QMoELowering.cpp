@@ -14,6 +14,7 @@ namespace {
 //===----------------------------------------------------------------------===//
 
 struct QMoEOpLowering : public ConvertOpToLLVMPattern<QMoEOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(QMoEOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

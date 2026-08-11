@@ -14,6 +14,7 @@ namespace {
 //===----------------------------------------------------------------------===//
 
 struct GatherToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GatherToHip)
   GatherToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Gather", /*benefit=*/1, ctx) {}
 

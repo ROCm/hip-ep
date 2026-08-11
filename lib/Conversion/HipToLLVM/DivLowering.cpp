@@ -19,6 +19,7 @@ namespace {
 // Full 4D shapes enable runtime broadcast materialisation via hip_expand
 // before the flat hip_elementwise_div kernel (rank <= 4, left-padded with 1).
 struct DivOpLowering : public ConvertOpToLLVMPattern<DivOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(DivOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

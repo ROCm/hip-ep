@@ -11,6 +11,7 @@ namespace {
 
 /// onnx.MatMul -> hip.hipblaslt.matmul
 struct MatMulToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(MatMulToHip)
   MatMulToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.MatMul", /*benefit=*/1, ctx) {}
 

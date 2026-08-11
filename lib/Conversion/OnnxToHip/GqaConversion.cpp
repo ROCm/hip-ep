@@ -11,6 +11,7 @@ namespace {
 
 /// onnx.Custom(GroupQueryAttention) -> hip.gqa
 struct GroupQueryAttentionToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(GroupQueryAttentionToHip)
   GroupQueryAttentionToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Custom", /*benefit=*/1, ctx) {}
 

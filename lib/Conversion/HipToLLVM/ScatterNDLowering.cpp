@@ -35,6 +35,7 @@ namespace {
 // param list here in lockstep with the wrap_scatter_nd declaration in
 // hipdnn_ep_runtime.h.
 struct ScatterNDOpLowering : public ConvertOpToLLVMPattern<ScatterNDOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ScatterNDOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   static int64_t reductionIdFromString(StringRef r) {

@@ -13,6 +13,7 @@ namespace {
 //   -> wrap_tile(state, in_ptr, repeats_ptr, out_ptr,
 //                in_shape_ptr, in_rank, out_shape_ptr, out_rank, data_type)
 struct TileOpLowering : public ConvertOpToLLVMPattern<TileOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(TileOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

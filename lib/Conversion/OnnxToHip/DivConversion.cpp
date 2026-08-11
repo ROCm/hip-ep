@@ -11,6 +11,7 @@ namespace {
 
 /// onnx.Div -> hip.div
 struct DivToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(DivToHip)
   DivToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Div", /*benefit=*/1, ctx) {}
 

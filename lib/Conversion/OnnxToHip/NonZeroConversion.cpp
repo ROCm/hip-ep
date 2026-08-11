@@ -24,6 +24,7 @@ namespace {
 //           `tensor.empty` init operand so the buffer is large enough to
 //           hold the worst case.
 struct NonZeroToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(NonZeroToHip)
   NonZeroToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.NonZero", /*benefit=*/1, ctx) {}
 

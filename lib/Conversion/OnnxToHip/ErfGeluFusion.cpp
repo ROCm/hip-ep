@@ -128,6 +128,7 @@ matchCommutativeConst(mlir::Operation *op, double expected) {
 }
 
 struct InlinedErfGeluToGelu : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(InlinedErfGeluToGelu)
   InlinedErfGeluToGelu(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Erf", /*benefit=*/1, ctx) {}
 

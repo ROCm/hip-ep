@@ -21,6 +21,7 @@ namespace {
 // only on the shape, not on the bytes, so the runtime ABI needs only the
 // element count and output pointer.
 struct SizeOpLowering : public ConvertOpToLLVMPattern<SizeOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(SizeOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

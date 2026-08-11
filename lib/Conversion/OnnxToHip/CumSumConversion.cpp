@@ -11,6 +11,7 @@ namespace {
 
 /// onnx.CumSum -> hip.cumsum
 struct CumSumToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(CumSumToHip)
   CumSumToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.CumSum", /*benefit=*/1, ctx) {}
 

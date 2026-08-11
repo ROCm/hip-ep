@@ -15,6 +15,7 @@ namespace {
 //     output, [present_key], [present_value], [qk]) {attributes...}
 struct MultiHeadAttentionOpLowering
     : public ConvertOpToLLVMPattern<MultiHeadAttentionOp> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(MultiHeadAttentionOpLowering)
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
 
   LogicalResult

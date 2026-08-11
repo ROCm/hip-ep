@@ -12,6 +12,7 @@ namespace {
 /// onnx.Cos -> hip.cos
 /// Unary element-wise cosine: Y = cos(X). Float types.
 struct CosToHip : public mlir::RewritePattern {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(CosToHip)
   CosToHip(mlir::MLIRContext *ctx)
       : RewritePattern("onnx.Cos", /*benefit=*/1, ctx) {}
 
