@@ -5,8 +5,8 @@
 
 #include "CrashHandler.h"
 #include "hip/Compiler/PluginRegistry.h"
-#include "hip/Dialect/Hipsr/IR/HipsrBufferize.h"
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
+#include "hip/Dialect/Hipsr/Transforms/BufferizableOpInterfaceImpl.h"
 #include "hip/Dialect/IR/HipBufferize.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
@@ -86,7 +86,7 @@ int main(int argc, char **argv) {
   // in HipBufferize.h so the HIP op bufferization models never drift between
   // the tool and the EP.
   mlir::hip::registerHipBufferizableOpInterfaceModels(registry);
-  mlir::hipsr::registerHipsrBufferizableOpInterfaceModels(registry);
+  mlir::hipsr::registerBufferizableOpInterfaceExternalModels(registry);
 
   // Registers every nameable HIP / pipeline / standard-MLIR pass the tool and
   // the EP share. Defined once (InitAllPasses.h) so the two never drift; see
