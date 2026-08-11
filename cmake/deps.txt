@@ -32,4 +32,4 @@ cpptrace;https://github.com/jeremy-rifkin/cpptrace.git;v0.8.3
 ## TheRock ROCm SDK. url = tarball base host; hash = pinned ROCm release. The
 ## full tarball basename (therock-dist-<os>-<gfxArch>-<rocmVersion>) is derived
 ## in cmake/deps.cmake from the host OS + HIP_ARCHITECTURES. Real builds only.
-therock;https://repo.amd.com/rocm/tarball;7.11.0
+therock;https://repo.amd.com/rocm/tarball;7.13.0
