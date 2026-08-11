@@ -33,9 +33,10 @@ enum class ConstantMetadataSourceKind : int32_t {
 
 /// Creates hip-externalize-constants for the production EP path. The supplied
 /// FileSystem receives constant artifacts, and the production caller normally
-/// passes kDefaultExternalizeMinNumElements (1). The generated no-arg/options
-/// overload keeps the direct-pass threshold default at 0 and uses
-/// DiskFileSystem.
+/// passes kDefaultExternalizeMinNumElements (1). Supplying the FileSystem also
+/// authorizes process-local ORT memory-address carriers while their backing
+/// storage is live. The generated no-arg/options overload keeps the direct-pass
+/// threshold default at 0, uses DiskFileSystem, and rejects memory addresses.
 std::unique_ptr<mlir::Pass>
 createExternalizeConstantsPass(morphizen::FileSystem *fs,
                                int64_t minNumElements,

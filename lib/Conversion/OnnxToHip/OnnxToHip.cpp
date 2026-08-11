@@ -59,13 +59,18 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::func::FuncOp funcOp,
     if (!tensorType)
       return constOp->emitError(
           "onnx.Constant requires a ranked tensor result");
+    if (nextOrder == std::numeric_limits<int64_t>::max())
+      return constOp->emitError("hip.constant order overflows int64");
 
     mlir::OpBuilder builder(constOp);
+    auto originAttr = builder.getStringAttr(origin);
+    auto orderAttr = builder.getI64IntegerAttr(nextOrder);
     mlir::hip::ConstantOp carrier;
     if (auto valueAttr = mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
             constOp->getAttrOfType<mlir::ElementsAttr>("value"))) {
-      carrier = mlir::hip::ConstantOp::create(builder, constOp->getLoc(),
-                                              tensorType, valueAttr);
+      carrier =
+          mlir::hip::ConstantOp::create(builder, constOp->getLoc(), tensorType,
+                                        valueAttr, originAttr, orderAttr);
     } else if (auto location =
                    constOp->getAttrOfType<mlir::StringAttr>("location")) {
       auto offset = constOp->getAttrOfType<mlir::IntegerAttr>("offset");
@@ -73,23 +78,19 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::func::FuncOp funcOp,
       if (!offset || !size)
         return constOp->emitError(
             "onnx.Constant external source requires location/offset/size");
-      carrier = mlir::hip::ConstantOp::create(
-          builder, constOp->getLoc(), tensorType, location, offset, size);
+      carrier = mlir::hip::ConstantOp::create(builder, constOp->getLoc(),
+                                              tensorType, location, offset,
+                                              size, originAttr, orderAttr);
     } else {
       return constOp->emitError(
           "unsupported onnx.Constant form (expected dense value attribute "
           "or location attribute)");
     }
+    ++nextOrder;
 
     for (llvm::StringRef attrName : {"onnx_node_name", "node.outputs"})
       if (mlir::Attribute attr = constOp->getAttr(attrName))
         carrier->setAttr(attrName, attr);
-    if (nextOrder == std::numeric_limits<int64_t>::max())
-      return constOp->emitError("hip.constant order overflows int64");
-    carrier->setAttr(mlir::hip::kConstantOriginAttrName,
-                     builder.getStringAttr(origin));
-    carrier->setAttr(mlir::hip::kConstantOrderAttrName,
-                     builder.getI64IntegerAttr(nextOrder++));
     constOp->getResult(0).replaceAllUsesWith(carrier.getResult());
     constOp->erase();
   }

@@ -200,6 +200,13 @@ bridge. The direct pass threshold defaults to `0` (inline); production
 compilation passes the default `1`. External sources require a positive byte
 size, matching the pre-split behavior.
 
+The ORT memory-address sentinel is a process-local import contract, not a
+serializable IR representation. ORT retains initializer storage through
+compilation, and the production pass receives an injected `FileSystem` while
+that storage is live. Direct/textual pass invocation rejects memory-address
+carriers before dereferencing them. Keeping the handoff zero-copy avoids
+duplicating potentially multi-gigabyte weights throughout shape inference.
+
 For externalized constants, the pass writes raw bytes to the configured
 constants file via `fs`, and emits the existing module attributes:
 

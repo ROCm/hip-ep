@@ -16,12 +16,14 @@
 
 #include "hip/Compiler/PluginRegistry.h"
 #include "hip/Dialect/IR/HipDialect.h"
+#include "hip/Dialect/Transforms/Passes.h"
 #include "hip/Dialect/Transforms/Pipelines.h"
 #include "hip/InitAllPasses.h"
 
 #include "morphizen-foundation/file_io.hpp"
 
 #include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Diagnostics.h"
@@ -34,7 +36,9 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <array>
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <string>
 #include <vector>
@@ -108,6 +112,34 @@ runOnnxToHipPipeline(mlir::MLIRContext &context, llvm::StringRef text,
   mlir::hip::buildOnnxToHipPipeline(manager, options, &fs);
   ok = mlir::succeeded(manager.run(*module));
   return module;
+}
+
+mlir::OwningOpRef<mlir::ModuleOp>
+runMemoryExternalizer(mlir::MLIRContext &context, llvm::StringRef text,
+                      CapturingFileSystem &fs, int64_t minElements,
+                      bool skipData, bool &ok) {
+  auto module = mlir::parseSourceString<mlir::ModuleOp>(text, &context);
+  if (!module) {
+    ok = false;
+    return module;
+  }
+  mlir::PassManager manager(&context);
+  manager.addPass(
+      mlir::hip::createExternalizeConstantsPass(&fs, minElements, skipData));
+  ok = mlir::succeeded(manager.run(*module));
+  return module;
+}
+
+std::string memorySourceModule(uintptr_t address) {
+  return "module {\n"
+         "  func.func @memory_source() -> tensor<4xui8> {\n"
+         "    %0 = hip.constant {location = \"*/_ORT_MEM_ADDR_/*\", "
+         "offset = " +
+         std::to_string(address) +
+         " : i64, size = 4 : i64} : tensor<4xui8>\n"
+         "    return %0 : tensor<4xui8>\n"
+         "  }\n"
+         "}\n";
 }
 
 } // namespace
@@ -265,6 +297,66 @@ int main() {
   check(!lateOk && sawLateCarrierDiagnostic,
         "BeforeBufferization sample carrier is diagnosed");
 #endif
+
+  // Memory-address carriers are an in-process production contract: the pass
+  // receives an injected FileSystem while the referenced ORT storage is live.
+  // Exercise all three consumers with a tiny buffer so this test detects an
+  // accidental eager copy, source-kind mismatch, or partial-blob offset bug.
+  std::array<char, 4> hostBytes = {11, 22, 33, 44};
+  std::string memoryIr =
+      memorySourceModule(reinterpret_cast<uintptr_t>(hostBytes.data()));
+  const std::vector<char> expectedBytes(hostBytes.begin(), hostBytes.end());
+
+  CapturingFileSystem fullMemoryFs;
+  bool fullMemoryOk = false;
+  auto fullMemoryModule =
+      runMemoryExternalizer(context, memoryIr, fullMemoryFs, /*minElements=*/1,
+                            /*skipData=*/false, fullMemoryOk);
+  check(fullMemoryOk && fullMemoryModule &&
+            fullMemoryFs.files["model.constants.bin"] == expectedBytes,
+        "memory source writes exact full-artifact bytes");
+
+  CapturingFileSystem streamingMemoryFs;
+  bool streamingMemoryOk = false;
+  auto streamingMemoryModule = runMemoryExternalizer(
+      context, memoryIr, streamingMemoryFs, /*minElements=*/1,
+      /*skipData=*/true, streamingMemoryOk);
+  auto sourceKinds = streamingMemoryModule
+                         ? (*streamingMemoryModule)
+                               ->getAttrOfType<mlir::DenseI32ArrayAttr>(
+                                   "hipdnn.constant_source_kinds")
+                         : nullptr;
+  auto memoryOffsets = streamingMemoryModule
+                           ? (*streamingMemoryModule)
+                                 ->getAttrOfType<mlir::DenseI64ArrayAttr>(
+                                     "hipdnn.constant_mem_offsets")
+                           : nullptr;
+  check(streamingMemoryOk && streamingMemoryModule && sourceKinds &&
+            sourceKinds.asArrayRef().size() == 1 &&
+            sourceKinds.asArrayRef()[0] ==
+                static_cast<int32_t>(
+                    mlir::hip::ConstantMetadataSourceKind::Memory) &&
+            memoryOffsets && memoryOffsets.asArrayRef().size() == 1 &&
+            memoryOffsets.asArrayRef()[0] == 0 &&
+            streamingMemoryFs.files["model.constants.bin"] == expectedBytes,
+        "memory source writes exact streaming metadata and partial blob");
+
+  CapturingFileSystem inlineMemoryFs;
+  bool inlineMemoryOk = false;
+  auto inlineMemoryModule = runMemoryExternalizer(
+      context, memoryIr, inlineMemoryFs, /*minElements=*/0,
+      /*skipData=*/false, inlineMemoryOk);
+  std::vector<char> materializedBytes;
+  if (inlineMemoryModule)
+    inlineMemoryModule->walk([&](mlir::arith::ConstantOp op) {
+      if (auto value = mlir::dyn_cast<mlir::DenseElementsAttr>(op.getValue())) {
+        auto raw = value.getRawData();
+        materializedBytes.assign(raw.begin(), raw.end());
+      }
+    });
+  check(inlineMemoryOk && inlineMemoryModule &&
+            materializedBytes == expectedBytes && inlineMemoryFs.files.empty(),
+        "memory source materializes exact inline bytes");
 
   if (g_failures == 0) {
     llvm::outs() << "\nAll checks passed.\n";

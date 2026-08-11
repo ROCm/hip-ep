@@ -79,11 +79,16 @@ struct ConstantPlan {
   bool splat = false;
   int64_t numElements = 0;
   int64_t size = 0;
+  /// Dense index in the generated constant metadata arrays.
   int64_t index = -1;
-  int64_t offset = 0;
-  int64_t memoryAddress = 0;
-  int64_t fileOffset = 0;
-  int64_t memOffset = 0;
+  /// Offset in the logical full constants blob and `hip.external_data`.
+  int64_t blobOffset = 0;
+  /// Process-local address of ORT-owned initializer storage.
+  int64_t hostAddress = 0;
+  /// Offset in the original external-data file named by `filePath`.
+  int64_t sourceFileOffset = 0;
+  /// Offset in the partial constants blob used by streaming memory sources.
+  int64_t partialBlobOffset = 0;
   int64_t splatElementSize = 0;
   std::string filePath;
   std::string symbolName;
@@ -95,7 +100,7 @@ struct ConstantPlan {
       return ownedData.data();
     if (source == SourceKind::Memory)
       return reinterpret_cast<const void *>(
-          static_cast<uintptr_t>(memoryAddress));
+          static_cast<uintptr_t>(hostAddress));
     return value ? value.getRawData().data() : nullptr;
   }
 };
@@ -245,42 +250,13 @@ collectOrderedCarriers(ModuleOp module) {
     carrier.op = op;
     carrier.walkOrder = walkOrder++;
 
-    Attribute originRaw = op->getAttr(kConstantOriginAttrName);
-    Attribute orderRaw = op->getAttr(kConstantOrderAttrName);
-    if (!originRaw && !orderRaw) {
+    StringAttr origin = op.getOriginAttr();
+    if (!origin) {
       carrier.order = carrier.walkOrder;
       ordered.push_back(carrier);
       return;
     }
-    if (!originRaw || !orderRaw) {
-      op.emitError("compiler-owned `hip.constant_origin` and "
-                   "`hip.constant_order` must be present together");
-      valid = false;
-      return;
-    }
-
-    auto origin = dyn_cast<StringAttr>(originRaw);
-    auto order = dyn_cast<IntegerAttr>(orderRaw);
-    if (!origin || !order) {
-      op.emitError("compiler-owned constant origin/order attributes have "
-                   "invalid types");
-      valid = false;
-      return;
-    }
-    carrier.order = order.getInt();
-    if (carrier.order < 0) {
-      op.emitError("compiler-owned constant order must be non-negative");
-      valid = false;
-      return;
-    }
-
-    if (origin.getValue() != kOnnxImportedConstantOrigin &&
-        origin.getValue() != kOnnxSynthesizedConstantOrigin) {
-      op.emitError("unknown compiler-owned constant origin `")
-          << origin.getValue() << "`";
-      valid = false;
-      return;
-    }
+    carrier.order = op.getOrderAttr().getInt();
     carrier.category = 0;
     if (!compilerOrders.insert(carrier.order).second) {
       op.emitError("duplicate compiler-owned constant order ") << carrier.order;
@@ -310,8 +286,10 @@ collectOrderedCarriers(ModuleOp module) {
 class ConstantExternalizer {
 public:
   ConstantExternalizer(ModuleOp module, morphizen::FileSystem &fs,
-                       int64_t minElements, bool skipData)
+                       int64_t minElements, bool skipData,
+                       bool allowMemorySources)
       : module(module), fs(fs), minElements(minElements), skipData(skipData),
+        allowMemorySources(allowMemorySources),
         binFileName(moduleBaseName(module) + ".constants.bin") {}
 
   LogicalResult buildPlan() {
@@ -417,16 +395,20 @@ private:
     StringRef location = plan.op.getLocationAttr().getValue();
     plan.externalize = minElements > 0;
     if (plan.source == SourceKind::Memory) {
-      plan.memoryAddress = plan.op.getOffsetAttr().getInt();
+      if (!allowMemorySources)
+        return plan.op.emitError(
+            "memory-address sources require production externalization with "
+            "an injected FileSystem");
+      plan.hostAddress = plan.op.getOffsetAttr().getInt();
     } else {
       plan.filePath = location.str();
-      plan.fileOffset = plan.op.getOffsetAttr().getInt();
+      plan.sourceFileOffset = plan.op.getOffsetAttr().getInt();
       // Full serialization and inline materialization consume the source now.
       // Streaming preserves the file reference and deliberately does not
       // require the source file to be present at compile time.
       if ((!skipData || !plan.externalize) &&
-          failed(
-              validateFileRange(plan.op, location, plan.fileOffset, plan.size)))
+          failed(validateFileRange(plan.op, location, plan.sourceFileOffset,
+                                   plan.size)))
         return failure();
     }
 
@@ -441,11 +423,11 @@ private:
       if (plan.size > 0)
         std::memcpy(plan.ownedData.data(),
                     reinterpret_cast<const void *>(
-                        static_cast<uintptr_t>(plan.memoryAddress)),
+                        static_cast<uintptr_t>(plan.hostAddress)),
                     static_cast<size_t>(plan.size));
     } else if (plan.size > 0) {
       FilePtr file(std::fopen(plan.filePath.c_str(), "rb"), &std::fclose);
-      if (!file || fileSeek(file.get(), plan.fileOffset, SEEK_SET) != 0 ||
+      if (!file || fileSeek(file.get(), plan.sourceFileOffset, SEEK_SET) != 0 ||
           std::fread(plan.ownedData.data(), 1, static_cast<size_t>(plan.size),
                      file.get()) != static_cast<size_t>(plan.size))
         return plan.op.emitError("failed to read external data file: ")
@@ -465,10 +447,10 @@ private:
     FailureOr<int64_t> aligned = checkedAlign(plan.op, currentOffset);
     if (failed(aligned))
       return failure();
-    plan.offset = *aligned;
-    if (plan.offset > std::numeric_limits<int64_t>::max() - plan.size)
+    plan.blobOffset = *aligned;
+    if (plan.blobOffset > std::numeric_limits<int64_t>::max() - plan.size)
       return plan.op.emitError("constant layout range overflows int64");
-    currentOffset = plan.offset + plan.size;
+    currentOffset = plan.blobOffset + plan.size;
 
     if (externalizedCount >
         static_cast<size_t>(std::numeric_limits<int64_t>::max()))
@@ -490,11 +472,12 @@ private:
       FailureOr<int64_t> aligned = checkedAlign(plan.op, currentOffset);
       if (failed(aligned))
         return failure();
-      plan.memOffset = *aligned;
-      if (plan.memOffset > std::numeric_limits<int64_t>::max() - plan.size)
+      plan.partialBlobOffset = *aligned;
+      if (plan.partialBlobOffset >
+          std::numeric_limits<int64_t>::max() - plan.size)
         return plan.op.emitError(
             "hybrid constant layout range overflows int64");
-      currentOffset = plan.memOffset + plan.size;
+      currentOffset = plan.partialBlobOffset + plan.size;
     }
     partialBlobSize = currentOffset;
     return success();
@@ -518,7 +501,7 @@ private:
       if (!plan.externalize)
         continue;
       sizes.push_back(plan.size);
-      offsets.push_back(plan.offset);
+      offsets.push_back(plan.blobOffset);
       if (!skipData)
         continue;
 
@@ -540,8 +523,8 @@ private:
       splatValues.push_back(splatValue);
       splatElementSizes.push_back(plan.splatElementSize);
       filePaths.push_back(filePath);
-      fileOffsets.push_back(plan.fileOffset);
-      memOffsets.push_back(plan.memOffset);
+      fileOffsets.push_back(plan.sourceFileOffset);
+      memOffsets.push_back(plan.partialBlobOffset);
     }
 
     module->setAttr("hip.constants_file", StringAttr::get(ctx, binFileName));
@@ -620,7 +603,7 @@ private:
     entry.data = plan.data();
     entry.splat_elem_size = plan.splatElementSize;
     entry.file_path = plan.filePath;
-    entry.file_offset = plan.fileOffset;
+    entry.file_offset = plan.sourceFileOffset;
     return entry;
   }
 
@@ -630,7 +613,7 @@ private:
     for (const ConstantPlan &plan : plans) {
       if (!plan.externalize)
         continue;
-      entries.push_back(makeEntry(plan, plan.offset));
+      entries.push_back(makeEntry(plan, plan.blobOffset));
       llvm::json::Array shape;
       for (int64_t dim : plan.type.getShape())
         shape.push_back(dim);
@@ -638,7 +621,7 @@ private:
       item["name"] = plan.symbolName;
       item["shape"] = std::move(shape);
       item["element_type"] = elementTypeToString(plan.type.getElementType());
-      item["offset"] = plan.offset;
+      item["offset"] = plan.blobOffset;
       item["size"] = plan.size;
       item["alignment"] = kConstantAlignment;
       manifestEntries.push_back(std::move(item));
@@ -677,7 +660,7 @@ private:
     for (const ConstantPlan &plan : plans) {
       if (!plan.externalize || plan.source == SourceKind::File || plan.splat)
         continue;
-      partialEntries.push_back(makeEntry(plan, plan.memOffset));
+      partialEntries.push_back(makeEntry(plan, plan.partialBlobOffset));
       partialEntries.back().file_path.clear();
       partialEntries.back().splat_elem_size = 0;
     }
@@ -707,7 +690,7 @@ private:
         moduleBuilder.getNamedAttr("index",
                                    moduleBuilder.getI64IntegerAttr(plan.index)),
         moduleBuilder.getNamedAttr(
-            "offset", moduleBuilder.getI64IntegerAttr(plan.offset)),
+            "offset", moduleBuilder.getI64IntegerAttr(plan.blobOffset)),
         moduleBuilder.getNamedAttr("size",
                                    moduleBuilder.getI64IntegerAttr(plan.size)),
     });
@@ -732,6 +715,7 @@ private:
   morphizen::FileSystem &fs;
   int64_t minElements;
   bool skipData;
+  bool allowMemorySources;
   std::string binFileName;
   size_t externalizedCount = 0;
   int64_t totalBlobSize = 0;
@@ -752,6 +736,7 @@ struct ExternalizeConstantsPass
     ModuleOp module = getOperation();
     std::unique_ptr<DiskFileSystem> fallback;
     morphizen::FileSystem *fs = fileSystem;
+    bool allowMemorySources = fs != nullptr;
     int64_t minElements =
         fileSystem ? fsMinElements : externalizeMinNumElements.getValue();
     bool skipData =
@@ -763,7 +748,8 @@ struct ExternalizeConstantsPass
       fs = fallback.get();
     }
 
-    ConstantExternalizer externalizer(module, *fs, minElements, skipData);
+    ConstantExternalizer externalizer(module, *fs, minElements, skipData,
+                                      allowMemorySources);
     if (failed(externalizer.buildPlan()) ||
         failed(externalizer.writeArtifacts())) {
       signalPassFailure();

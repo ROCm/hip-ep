@@ -160,6 +160,20 @@ LogicalResult ConstantOp::verify() {
   if (llvm::MulOverflow(numElements, elementBytes, expectedBytes))
     return emitOpError("result byte size overflows int64");
 
+  StringAttr origin = getOriginAttr();
+  IntegerAttr order = getOrderAttr();
+  if (static_cast<bool>(origin) != static_cast<bool>(order))
+    return emitOpError(
+        "compiler-owned `origin` and `order` must be present together");
+  if (origin) {
+    if (origin.getValue() != kOnnxImportedConstantOrigin &&
+        origin.getValue() != kOnnxSynthesizedConstantOrigin)
+      return emitOpError("has unknown compiler-owned origin `")
+             << origin.getValue() << "`";
+    if (order.getInt() < 0)
+      return emitOpError("compiler-owned order must be non-negative");
+  }
+
   bool hasValue = getValueAttr() != nullptr;
   bool hasLocation = getLocationAttr() != nullptr;
   bool hasOffset = getOffsetAttr() != nullptr;

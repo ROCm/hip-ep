@@ -72,6 +72,30 @@ func.func @null_memory_address() -> tensor<2xi8> {
   return %0 : tensor<2xi8>
 }
 
+func.func @origin_without_order() -> tensor<2xi8> {
+  // expected-error @+1 {{compiler-owned `origin` and `order` must be present together}}
+  %0 = hip.constant {origin = "onnx-imported", value = dense<[1, 2]> : tensor<2xi8>} : tensor<2xi8>
+  return %0 : tensor<2xi8>
+}
+
+func.func @order_without_origin() -> tensor<2xi8> {
+  // expected-error @+1 {{compiler-owned `origin` and `order` must be present together}}
+  %0 = hip.constant {order = 0 : i64, value = dense<[1, 2]> : tensor<2xi8>} : tensor<2xi8>
+  return %0 : tensor<2xi8>
+}
+
+func.func @unknown_origin() -> tensor<2xi8> {
+  // expected-error @+1 {{has unknown compiler-owned origin `plugin`}}
+  %0 = hip.constant {order = 0 : i64, origin = "plugin", value = dense<[1, 2]> : tensor<2xi8>} : tensor<2xi8>
+  return %0 : tensor<2xi8>
+}
+
+func.func @negative_order() -> tensor<2xi8> {
+  // expected-error @+1 {{compiler-owned order must be non-negative}}
+  %0 = hip.constant {order = -1 : i64, origin = "onnx-imported", value = dense<[1, 2]> : tensor<2xi8>} : tensor<2xi8>
+  return %0 : tensor<2xi8>
+}
+
 func.func @dynamic_shape() -> tensor<?xi8> {
   // expected-error @+1 {{requires a statically shaped ranked tensor result}}
   %0 = hip.constant {location = "/tmp/w", offset = 0 : i64, size = 2 : i64} : tensor<?xi8>

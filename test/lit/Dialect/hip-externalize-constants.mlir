@@ -10,6 +10,7 @@
 // RUN: not hip-mlir-opt --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/out' %t/collision.mlir 2>&1 | FileCheck %s --check-prefix=COLLISION
 // RUN: not hip-mlir-opt --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/out' %t/missing-file.mlir 2>&1 | FileCheck %s --check-prefix=MISSING
 // RUN: hip-mlir-opt --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/out skip-constant-data=true' %t/missing-file.mlir | FileCheck %s --check-prefix=STREAM
+// RUN: not hip-mlir-opt --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/out' %t/memory-source.mlir 2>&1 | FileCheck %s --check-prefix=MEMORY
 // RUN: printf '\376\377\000\200\000\200\377\377' > %t/typed.bin
 // RUN: cd %t && hip-mlir-opt --hip-externalize-constants typed-inline.mlir | FileCheck %s --check-prefix=TYPED
 
@@ -34,6 +35,7 @@
 // MISSING: error: failed to open external data file:
 // STREAM: hipdnn.constant_file_paths = ["/definitely/missing/hip-constant.bin"]
 // STREAM-SAME: hipdnn.constant_source_kinds = array<i32: 2>
+// MEMORY: error: memory-address sources require production externalization with an injected FileSystem
 // TYPED-LABEL: func.func @typed_inline
 // TYPED: arith.constant dense<[-2, -32768]> : tensor<2xsi16>
 // TYPED: arith.constant dense<[32768, 65535]> : tensor<2xui16>
@@ -100,5 +102,15 @@ module {
       location = "typed.bin", offset = 4 : i64, size = 4 : i64
     } : tensor<2xui16>
     return %s, %u : tensor<2xsi16>, tensor<2xui16>
+  }
+}
+
+//--- memory-source.mlir
+module {
+  func.func @memory_source() -> tensor<4xi8> {
+    %0 = hip.constant {
+      location = "*/_ORT_MEM_ADDR_/*", offset = 1 : i64, size = 4 : i64
+    } : tensor<4xi8>
+    return %0 : tensor<4xi8>
   }
 }

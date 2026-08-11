@@ -39,13 +39,7 @@ namespace hip {
 inline constexpr ::llvm::StringLiteral kOrtMemoryAddressLocation =
     "*/_ORT_MEM_ADDR_/*";
 
-/// Discardable conversion provenance used only to preserve the historical
-/// constant serialization order. These are not inherent ConstantOp
-/// attributes: plugin-created carriers intentionally omit them.
-inline constexpr ::llvm::StringLiteral kConstantOriginAttrName =
-    "hip.constant_origin";
-inline constexpr ::llvm::StringLiteral kConstantOrderAttrName =
-    "hip.constant_order";
+/// Values of ConstantOp's optional compiler-owned `origin` attribute.
 inline constexpr ::llvm::StringLiteral kOnnxImportedConstantOrigin =
     "onnx-imported";
 inline constexpr ::llvm::StringLiteral kOnnxSynthesizedConstantOrigin =

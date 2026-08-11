@@ -508,12 +508,17 @@ def Hip_ConstantOp : Hip_Op<"constant", [Pure]> {
     externalizer applies the size policy, writes constant artifacts, and
     replaces every carrier after shape inference and before bufferization.
 
-    In-tree conversion also stamps the compiler-owned
-    `hip.constant_origin`/`hip.constant_order` pair. The externalizer validates
-    the unique absolute order and restores the original conversion visitation:
-    each function's imported sweep followed by its synthesized sweep, then the
-    next function. Plugins must not set those reserved attributes; unmarked
-    plugin carriers follow afterward in stable module walk order.
+    In-tree conversion also sets the optional compiler-owned `origin`/`order`
+    pair. The externalizer validates the unique absolute order and restores the
+    original conversion visitation: each function's imported sweep followed by
+    its synthesized sweep, then the next function. Plugins must leave those
+    attributes unset; unmarked plugin carriers follow afterward in stable
+    module walk order.
+
+    Memory-address sources are process-local and non-serializable. They are
+    accepted only by the production externalizer while ORT still owns the
+    initializer storage; textual pass invocation rejects them before any
+    address is dereferenced.
 
     This op deliberately has no fold method. Generic canonicalization may
     reason about its purity, but only `hip-externalize-constants` may choose
@@ -524,7 +529,9 @@ def Hip_ConstantOp : Hip_Op<"constant", [Pure]> {
     OptionalAttr<ElementsAttr>:$value,
     OptionalAttr<StrAttr>:$location,
     OptionalAttr<I64Attr>:$offset,
-    OptionalAttr<I64Attr>:$size
+    OptionalAttr<I64Attr>:$size,
+    OptionalAttr<StrAttr>:$origin,
+    OptionalAttr<I64Attr>:$order
   );
   let results = (outs AnyRankedTensor:$result);
 
@@ -543,14 +550,31 @@ def Hip_ConstantOp : Hip_Op<"constant", [Pure]> {
     OpBuilder<(ins "::mlir::RankedTensorType":$result,
                    "::mlir::DenseElementsAttr":$value), [{
       build($_builder, $_state, result, value, /*location=*/nullptr,
-            /*offset=*/nullptr, /*size=*/nullptr);
+            /*offset=*/nullptr, /*size=*/nullptr, /*origin=*/nullptr,
+            /*order=*/nullptr);
+    }]>,
+    OpBuilder<(ins "::mlir::RankedTensorType":$result,
+                   "::mlir::DenseElementsAttr":$value,
+                   "::mlir::StringAttr":$origin,
+                   "::mlir::IntegerAttr":$order), [{
+      build($_builder, $_state, result, value, /*location=*/nullptr,
+            /*offset=*/nullptr, /*size=*/nullptr, origin, order);
     }]>,
     OpBuilder<(ins "::mlir::RankedTensorType":$result,
                    "::mlir::StringAttr":$location,
                    "::mlir::IntegerAttr":$offset,
                    "::mlir::IntegerAttr":$size), [{
       build($_builder, $_state, result, /*value=*/nullptr, location, offset,
-            size);
+            size, /*origin=*/nullptr, /*order=*/nullptr);
+    }]>,
+    OpBuilder<(ins "::mlir::RankedTensorType":$result,
+                   "::mlir::StringAttr":$location,
+                   "::mlir::IntegerAttr":$offset,
+                   "::mlir::IntegerAttr":$size,
+                   "::mlir::StringAttr":$origin,
+                   "::mlir::IntegerAttr":$order), [{
+      build($_builder, $_state, result, /*value=*/nullptr, location, offset,
+            size, origin, order);
     }]>
   ];
 

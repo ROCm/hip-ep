@@ -234,8 +234,8 @@ source (dense `value`, or complete `location`/`offset`/`size`).
 `hip-infer-shapes` first consumes any compile-time payload needed for shape
 refinement; `hip-externalize-constants` then applies the same
 inline/full/streaming/hybrid policy and metadata contract to plugin and in-tree
-carriers. Leave `hip.constant_origin` and `hip.constant_order` unset; those are
-reserved for in-tree conversion, and plugin carriers are deterministically
+carriers. Leave `origin` and `order` unset; those are reserved for in-tree
+conversion, and plugin carriers are deterministically
 serialized afterward in stable module walk order. Do not emit `hip.constant`
 from `BeforeBufferization` or later; the pipeline rejects a surviving late
 carrier before One-Shot Bufferize.
