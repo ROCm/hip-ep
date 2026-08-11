@@ -154,14 +154,15 @@ LogicalResult ComputeOpBufferization::bufferize(
   SmallVector<Value> argumentReplacements;
   for (BlockArgument oldArgument : oldBody->getArguments()) {
     Value newArgument = newBody->getArgument(oldArgument.getArgNumber());
-    if (!isa<TensorType>(oldArgument.getType())) {
-      argumentReplacements.push_back(newArgument);
-      continue;
-    }
-    argumentReplacements.push_back(
+    if (isa<TensorType>(oldArgument.getType())) {
+      argumentReplacements.push_back(
         bufferization::ToTensorOp::create(rewriter, oldArgument.getLoc(),
                                           oldArgument.getType(), newArgument)
             .getResult());
+    }else{
+      argumentReplacements.push_back(newArgument);
+    }
+
   }
   rewriter.mergeBlocks(oldBody, newBody, argumentReplacements);
 
@@ -178,9 +179,6 @@ bufferization::AliasingValueList
 ComputeYieldOpBufferization::getAliasingValues(
     Operation *op, OpOperand &opOperand,
     const bufferization::AnalysisState &) const {
-  // Layer 3: a yielded value and the result in the same position are one
-  // buffer. The RegionBranchOpInterface exit edge already checks that the two
-  // lists have the same length.
   return {{op->getParentOp()->getResult(opOperand.getOperandNumber()),
            bufferization::BufferRelation::Equivalent}};
 }
@@ -193,15 +191,15 @@ LogicalResult ComputeYieldOpBufferization::bufferize(
   // the type of the buffer yielded here.
   SmallVector<Value> newOperands;
   for (Value operand : op->getOperands()) {
-    if (!isa<TensorType>(operand.getType())) {
-      newOperands.push_back(operand);
-      continue;
-    }
-    FailureOr<Value> buffer =
+    if (isa<TensorType>(operand.getType())) {
+      FailureOr<Value> buffer =
         bufferization::getBuffer(rewriter, operand, options, state);
-    if (failed(buffer))
-      return failure();
-    newOperands.push_back(*buffer);
+      if (failed(buffer))
+        return failure();
+      newOperands.push_back(*buffer);
+    }else{
+      newOperands.push_back(operand);
+    }
   }
 
   bufferization::replaceOpWithNewBufferizedOp<ComputeYieldOp>(rewriter, op,
