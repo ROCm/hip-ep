@@ -23,6 +23,8 @@ namespace {
 
 struct ConvertHipToLLVMPass
     : public impl::ConvertHipToLLVMPassBase<ConvertHipToLLVMPass> {
+  using ConvertHipToLLVMPassBase::ConvertHipToLLVMPassBase;
+
   void runOnOperation() override;
 
 private:
@@ -232,7 +234,15 @@ void ConvertHipToLLVMPass::runOnOperation() {
 
   // HIP dialect-specific lowerings
   populateMemoryLoweringPatterns(typeConverter, patterns);
-  populateConvLoweringPatterns(typeConverter, patterns);
+
+  // Backend selection: DynamicDispatch (NPU/IPU) vs GPU (MIOpen/hipBLASLt)
+  if (useDynamicDispatch) {
+    // NPU/IPU path via DynamicDispatch (XRT)
+    populateDynamicDispatchConvLoweringPatterns(typeConverter, patterns);
+  } else {
+    // GPU path via MIOpen
+    populateConvLoweringPatterns(typeConverter, patterns);
+  }
   populateConvTransposeLoweringPatterns(typeConverter, patterns);
   populateMatmulLoweringPatterns(typeConverter, patterns);
   populateElementwiseLoweringPatterns(typeConverter, patterns);
@@ -257,7 +267,16 @@ void ConvertHipToLLVMPass::runOnOperation() {
   populateMatMulNBitsLoweringPatterns(typeConverter, patterns);
   populateQMoELoweringPatterns(typeConverter, patterns);
   populateGatherBlockQuantizedLoweringPatterns(typeConverter, patterns);
-  populateGemmLoweringPatterns(typeConverter, patterns);
+
+  // Backend selection for GEMM: DynamicDispatch (NPU/IPU) vs GPU (hipBLASLt)
+  if (useDynamicDispatch) {
+    // NPU/IPU path via DynamicDispatch (XRT)
+    populateDynamicDispatchGemmLoweringPatterns(typeConverter, patterns);
+  } else {
+    // GPU path via hipBLASLt
+    populateGemmLoweringPatterns(typeConverter, patterns);
+  }
+
   populateLinearAttentionLoweringPatterns(typeConverter, patterns);
   populateGraphLoweringPatterns(typeConverter, patterns);
   populateLoopLoweringPatterns(typeConverter, patterns);

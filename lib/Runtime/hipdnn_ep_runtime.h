@@ -1681,6 +1681,54 @@ int wrap_hipMemcpyD2H(void *dst, const void *src, int64_t size, void *stream);
 // HIP stream synchronization wrapper
 int wrap_hipStreamSynchronize(void *stream);
 
+//===----------------------------------------------------------------------===//
+// XRT / DynamicDispatch Backend Support
+//===----------------------------------------------------------------------===//
+
+// Get XRT device handle from state (for DynamicDispatch NPU operations)
+// Returns: xrt::device* cast to void* (NULL if XRT not initialized)
+// Ownership: Caller does NOT own handle (destroyed in cleanup)
+//
+// NOTE: XRT context management is not yet implemented in RuntimeState.
+//       This accessor will return NULL until XRT initialization is added.
+void *hipdnn_ep_state_get_xrt_device(RuntimeState *state);
+
+// Get XRT context from state (for DynamicDispatch NPU operations)
+// Returns: ryzenai::dynamic_dispatch::xrt_context* cast to void*
+//          (NULL if XRT not initialized)
+// Ownership: Caller does NOT own context (destroyed in cleanup)
+void *hipdnn_ep_state_get_xrt_context(RuntimeState *state);
+
+//===----------------------------------------------------------------------===//
+// DynamicDispatch Operator Wrappers (NPU/IPU Backend)
+//===----------------------------------------------------------------------===//
+//
+// These wrappers expose AMD DynamicDispatch operators (Vitis AI / XRT)
+// for NPU/IPU execution. They follow the same pattern as GPU backend
+// wrappers (MIOpen, hipBLASLt) but target the NPU instead of GPU.
+//
+// Enabled via --use-dynamic-dispatch lowering option.
+//===----------------------------------------------------------------------===//
+
+// DynamicDispatch MatMul/GEMM operation
+// Uses ryzenai::combined_gemm operator for NPU execution
+int wrap_dd_matmul(RuntimeState *state, int32_t op_state_slot,
+                   const void *input_a, const void *input_b, const void *bias,
+                   void *output, int64_t M, int64_t N, int64_t K, double alpha,
+                   double beta, int64_t transA, int64_t transB,
+                   int64_t data_type);
+
+// DynamicDispatch 2D Convolution operation
+// Uses ryzenai::iconv operator for NPU execution
+int wrap_dd_conv2d(RuntimeState *state, int32_t op_state_slot,
+                   const void *input, int64_t n, int64_t c, int64_t h,
+                   int64_t w, const void *weights, int64_t k, const void *bias,
+                   void *output, int64_t out_h, int64_t out_w,
+                   int64_t kernel_h, int64_t kernel_w, int64_t stride_h,
+                   int64_t stride_w, int64_t pad_top, int64_t pad_left,
+                   int64_t pad_bottom, int64_t pad_right, int64_t dilation_h,
+                   int64_t dilation_w, int64_t group, int64_t data_type);
+
 #ifdef __cplusplus
 }
 #endif

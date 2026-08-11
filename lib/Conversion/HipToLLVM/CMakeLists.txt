@@ -59,6 +59,7 @@ add_library(HipToLLVM STATIC
   PoolLowering.cpp
   ResizeLowering.cpp
   GlobalPoolLowering.cpp
+  DynamicDispatchLowering.cpp
 )
 
 add_dependencies(HipToLLVM
