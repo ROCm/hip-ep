@@ -1271,6 +1271,21 @@ void GatherBlockQuantizedOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult GatherBlockQuantizedOp::verify() {
+  // T1 is constrained to {uint4, int4, uint8}, so 4 and 8 are the only legal
+  // storage widths. uint8 legally holds 2- or 4-bit values, so the width may
+  // exceed `bits` but never the reverse.
+  if (std::optional<int64_t> storageBits = getQuantStorageBits()) {
+    if (*storageBits != 4 && *storageBits != 8)
+      return emitOpError("quant_storage_bits must be 4 or 8, got ")
+             << *storageBits;
+    if (*storageBits < getBits())
+      return emitOpError("quant_storage_bits (")
+             << *storageBits << ") must be >= bits (" << getBits() << ")";
+  }
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // CausalConvWithStateOp: ins(input, weight, [bias], [past_state])
 //                        outs(output, present_state)

@@ -157,4 +157,86 @@ module {
   // CHECK-SAME: quantize_axis = 1
   // CHECK-SAME: unsigned_quant_storage
   // CHECK-NOT: onnx.Custom
+
+  // ===== Tests 6-8: T1 storage width from the importer's element-type mark ==
+  // The importer stamps `onnx.element_type` (the ONNX TensorProto code) on
+  // every constant. These three cases are the reason it has to: they are
+  // pairwise indistinguishable by MLIR type and `bits` alone, yet ONNX gives
+  // them different default zero points (0 for int4/uint4, 2^(bits-1) for
+  // uint8). Only `quant_storage_bits` separates them downstream.
+
+  // Test 6: UINT8 (code 2) carrying two nibbles per byte -> storage width 8.
+
+  func.func @test_gbq_storage_uint8_packed(%indices: tensor<8xi64>) -> tensor<8x96xf16> {
+    %data = "onnx.Constant"() {value = dense<1> : tensor<2048x96xui8>, onnx.element_type = 2 : i64} : () -> tensor<2048x96xui8>
+    %scales = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<2048x12xf16>} : () -> tensor<2048x12xf16>
+    %out = "onnx.Custom"(%data, %indices, %scales) {
+      function_name = "GatherBlockQuantized",
+      domain_name = "com.microsoft",
+      bits = 4 : si64,
+      block_size = 16 : si64,
+      gather_axis = 0 : si64,
+      quantize_axis = 1 : si64,
+      onnx_node_name = "GatherBlockQuantized_5"
+    } : (tensor<2048x96xui8>, tensor<8xi64>, tensor<2048x12xf16>) -> tensor<8x96xf16>
+    return %out : tensor<8x96xf16>
+  }
+
+  // CHECK-LABEL: func.func @test_gbq_storage_uint8_packed
+  // CHECK: hip.gather_block_quantized
+  // CHECK-SAME: bits = 4
+  // CHECK-SAME: quant_storage_bits = 8
+  // CHECK-SAME: unsigned_quant_storage
+  // CHECK-NOT: onnx.Custom
+
+  // Test 7: UINT4 (code 21) -> storage width 4, even though `data` is the same
+  // ui8 byte tensor with the same `bits` as test 6. Getting 8 here is exactly
+  // the bug that biases every uint4 embedding by +(8 * scale).
+
+  func.func @test_gbq_storage_uint4(%indices: tensor<8xi64>) -> tensor<8x96xf16> {
+    %data = "onnx.Constant"() {value = dense<1> : tensor<2048x96xui8>, onnx.element_type = 21 : i64} : () -> tensor<2048x96xui8>
+    %scales = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<2048x12xf16>} : () -> tensor<2048x12xf16>
+    %out = "onnx.Custom"(%data, %indices, %scales) {
+      function_name = "GatherBlockQuantized",
+      domain_name = "com.microsoft",
+      bits = 4 : si64,
+      block_size = 16 : si64,
+      gather_axis = 0 : si64,
+      quantize_axis = 1 : si64,
+      onnx_node_name = "GatherBlockQuantized_6"
+    } : (tensor<2048x96xui8>, tensor<8xi64>, tensor<2048x12xf16>) -> tensor<8x96xf16>
+    return %out : tensor<8x96xf16>
+  }
+
+  // CHECK-LABEL: func.func @test_gbq_storage_uint4
+  // CHECK: hip.gather_block_quantized
+  // CHECK-SAME: bits = 4
+  // CHECK-SAME: quant_storage_bits = 4
+  // CHECK-SAME: unsigned_quant_storage
+  // CHECK-NOT: onnx.Custom
+
+  // Test 8: INT4 (code 22) -> storage width 4 and signed, so no
+  // `unsigned_quant_storage`.
+
+  func.func @test_gbq_storage_int4(%indices: tensor<8xi64>) -> tensor<8x96xf16> {
+    %data = "onnx.Constant"() {value = dense<1> : tensor<2048x96xi8>, onnx.element_type = 22 : i64} : () -> tensor<2048x96xi8>
+    %scales = "onnx.Constant"() {value = dense<1.000000e+00> : tensor<2048x12xf16>} : () -> tensor<2048x12xf16>
+    %out = "onnx.Custom"(%data, %indices, %scales) {
+      function_name = "GatherBlockQuantized",
+      domain_name = "com.microsoft",
+      bits = 4 : si64,
+      block_size = 16 : si64,
+      gather_axis = 0 : si64,
+      quantize_axis = 1 : si64,
+      onnx_node_name = "GatherBlockQuantized_7"
+    } : (tensor<2048x96xi8>, tensor<8xi64>, tensor<2048x12xf16>) -> tensor<8x96xf16>
+    return %out : tensor<8x96xf16>
+  }
+
+  // CHECK-LABEL: func.func @test_gbq_storage_int4
+  // CHECK: hip.gather_block_quantized
+  // CHECK-SAME: bits = 4
+  // CHECK-SAME: quant_storage_bits = 4
+  // CHECK-NOT: unsigned_quant_storage
+  // CHECK-NOT: onnx.Custom
 }
