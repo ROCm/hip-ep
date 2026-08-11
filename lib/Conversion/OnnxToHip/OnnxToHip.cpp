@@ -86,8 +86,9 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::func::FuncOp funcOp,
         carrier->setAttr(attrName, attr);
     if (nextOrder == std::numeric_limits<int64_t>::max())
       return constOp->emitError("hip.constant order overflows int64");
-    carrier->setAttr("hip.constant_origin", builder.getStringAttr(origin));
-    carrier->setAttr("hip.constant_order",
+    carrier->setAttr(mlir::hip::kConstantOriginAttrName,
+                     builder.getStringAttr(origin));
+    carrier->setAttr(mlir::hip::kConstantOrderAttrName,
                      builder.getI64IntegerAttr(nextOrder++));
     constOp->getResult(0).replaceAllUsesWith(carrier.getResult());
     constOp->erase();
@@ -449,8 +450,8 @@ void ConvertOnnxToHipPass::runOnOperation() {
               funcOp, std::move(preFoldPatterns), cfg)))
         return signalPassFailure();
     }
-    if (mlir::failed(
-            lowerOnnxConstants(funcOp, "onnx-imported", constantOrder)))
+    if (mlir::failed(lowerOnnxConstants(
+            funcOp, mlir::hip::kOnnxImportedConstantOrigin, constantOrder)))
       return signalPassFailure();
     lowerOnnxReturns(funcOp);
     if (mlir::failed(convertComputeOps(funcOp, ctx)))
@@ -463,8 +464,8 @@ void ConvertOnnxToHipPass::runOnOperation() {
     // pass and one-shot-bufferize aborts with "op was not bufferized" (the EP
     // then silently falls back to CPU). Re-running creates carriers for them
     // exactly like every imported constant.
-    if (mlir::failed(
-            lowerOnnxConstants(funcOp, "onnx-synthesized", constantOrder)))
+    if (mlir::failed(lowerOnnxConstants(
+            funcOp, mlir::hip::kOnnxSynthesizedConstantOrigin, constantOrder)))
       return signalPassFailure();
   }
 

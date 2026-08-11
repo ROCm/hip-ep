@@ -119,6 +119,14 @@ LogicalResult AllocOutputOp::verify() {
 // ConstantOp: policy-neutral externalizable constant carrier
 //===----------------------------------------------------------------------===//
 
+ConstantOp::SourceKind ConstantOp::getSourceKind() {
+  if (getValueAttr())
+    return SourceKind::Inline;
+  return getLocationAttr().getValue() == kOrtMemoryAddressLocation
+             ? SourceKind::Memory
+             : SourceKind::File;
+}
+
 LogicalResult ConstantOp::verify() {
   RankedTensorType resultType = getResult().getType();
   if (!resultType.hasStaticShape())
@@ -187,8 +195,7 @@ LogicalResult ConstantOp::verify() {
     return emitOpError("external source byte size ")
            << size << " does not match result byte size " << expectedBytes;
 
-  constexpr llvm::StringLiteral kOrtMemAddrTag = "*/_ORT_MEM_ADDR_/*";
-  if (location == kOrtMemAddrTag) {
+  if (location == kOrtMemoryAddressLocation) {
     if (offset == 0)
       return emitOpError("memory-address source has null address");
   } else {

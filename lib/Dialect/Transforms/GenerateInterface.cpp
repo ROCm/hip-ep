@@ -115,8 +115,12 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
       auto ci = std::make_unique<mlir::hip::ConstantInfoT>();
       ci->size = sizes[i];
       ci->offset = (i < offsets.size()) ? offsets[i] : 0;
-      int32_t kind = (i < kinds.size()) ? kinds[i] : 0;
-      if (kind == 1) {
+      auto kind = static_cast<mlir::hip::ConstantMetadataSourceKind>(
+          (i < kinds.size())
+              ? kinds[i]
+              : static_cast<int32_t>(
+                    mlir::hip::ConstantMetadataSourceKind::Bulk));
+      if (kind == mlir::hip::ConstantMetadataSourceKind::Splat) {
         // Splat: extract the left-packed elem bytes out of the i64 carrier.
         auto splat = std::make_unique<mlir::hip::SplatSourceT>();
         int64_t elemSize = (i < splatElemSizes.size()) ? splatElemSizes[i] : 0;
@@ -124,7 +128,7 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
         const auto *base = reinterpret_cast<const uint8_t *>(&splatValues[i]);
         splat->elem_bytes.assign(base, base + n);
         ci->source.Set(std::move(*splat));
-      } else if (kind == 2) {
+      } else if (kind == mlir::hip::ConstantMetadataSourceKind::File) {
         auto fref = std::make_unique<mlir::hip::FileRefSourceT>();
         if (filePathsAttr && i < filePathsAttr.size()) {
           if (auto s = dyn_cast<StringAttr>(filePathsAttr.getValue()[i]))
@@ -132,7 +136,7 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
         }
         fref->file_offset = (i < fileOffsets.size()) ? fileOffsets[i] : 0;
         ci->source.Set(std::move(*fref));
-      } else if (kind == 3) {
+      } else if (kind == mlir::hip::ConstantMetadataSourceKind::Memory) {
         // Mem: mem-addr entry packed into
         // HipModelMetaInfo.constants_filename at mem_offset by the
         // OnnxToHip hybrid finalize. Runtime reads size bytes from that offset

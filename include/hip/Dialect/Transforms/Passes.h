@@ -6,6 +6,7 @@
 #define HIP_PASSES_H
 
 #include "mlir/Pass/Pass.h"
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -17,6 +18,15 @@ namespace mlir {
 namespace hip {
 
 struct CompilationOptionsT;
+
+/// Integer encoding used by the temporary module metadata exchanged between
+/// hip-externalize-constants and hip-generate-interface.
+enum class ConstantMetadataSourceKind : int32_t {
+  Bulk = 0,
+  Splat = 1,
+  File = 2,
+  Memory = 3,
+};
 
 #define GEN_PASS_DECL
 #include "hip/Dialect/Transforms/Passes.h.inc"

@@ -34,6 +34,23 @@
 
 namespace mlir {
 namespace hip {
+/// The ORT bridge uses this location to distinguish a live host address from
+/// an external-data file offset.
+inline constexpr ::llvm::StringLiteral kOrtMemoryAddressLocation =
+    "*/_ORT_MEM_ADDR_/*";
+
+/// Discardable conversion provenance used only to preserve the historical
+/// constant serialization order. These are not inherent ConstantOp
+/// attributes: plugin-created carriers intentionally omit them.
+inline constexpr ::llvm::StringLiteral kConstantOriginAttrName =
+    "hip.constant_origin";
+inline constexpr ::llvm::StringLiteral kConstantOrderAttrName =
+    "hip.constant_order";
+inline constexpr ::llvm::StringLiteral kOnnxImportedConstantOrigin =
+    "onnx-imported";
+inline constexpr ::llvm::StringLiteral kOnnxSynthesizedConstantOrigin =
+    "onnx-synthesized";
+
 /// Discardable attribute names stamped on `hip.alloc_output` by
 /// `hip-use-output-allocator` and consumed by `AllocOutputOpLowering`. They
 /// describe the ONNX / func.return ("ABI") output shape when it differs from

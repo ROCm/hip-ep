@@ -506,7 +506,7 @@ def Hip_ConstantOp : Hip_Op<"constant", [Pure]> {
     `convert-onnx-to-hip` emits this op for every `onnx.Constant`. Plugins may
     also emit it from the `AfterConvertOnnxToHip` slot. The standalone
     externalizer applies the size policy, writes constant artifacts, and
-    replaces every carrier before shape inference and bufferization.
+    replaces every carrier after shape inference and before bufferization.
 
     In-tree conversion also stamps the compiler-owned
     `hip.constant_origin`/`hip.constant_order` pair. The externalizer validates
@@ -527,6 +527,13 @@ def Hip_ConstantOp : Hip_Op<"constant", [Pure]> {
     OptionalAttr<I64Attr>:$size
   );
   let results = (outs AnyRankedTensor:$result);
+
+  let extraClassDeclaration = [{
+    enum class SourceKind { Inline, Memory, File };
+
+    /// Classify the source of a verified carrier.
+    SourceKind getSourceKind();
+  }];
 
   let assemblyFormat = [{
     attr-dict `:` type($result)

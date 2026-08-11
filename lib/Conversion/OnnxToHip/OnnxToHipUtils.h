@@ -46,39 +46,6 @@ namespace hip {
 // Helpers
 //===----------------------------------------------------------------------===//
 
-/// Sanitize an arbitrary string (typically an ONNX node name) into a valid
-/// MLIR bare identifier fragment.  Non-alphanumeric characters are replaced
-/// with '_', consecutive underscores are collapsed, and leading/trailing
-/// underscores are stripped.  Returns an empty string if the input yields
-/// no usable characters.
-inline std::string sanitizeForMlirIdentifier(llvm::StringRef raw) {
-  std::string sanitized;
-  sanitized.reserve(raw.size());
-  for (char c : raw) {
-    if (std::isalnum(static_cast<unsigned char>(c)) || c == '_')
-      sanitized.push_back(c);
-    else
-      sanitized.push_back('_');
-  }
-  // Collapse runs of underscores and trim leading/trailing ones.
-  std::string result;
-  result.reserve(sanitized.size());
-  bool lastWasUnderscore = true; // suppress leading '_'
-  for (char c : sanitized) {
-    if (c == '_') {
-      if (!lastWasUnderscore)
-        result.push_back(c);
-      lastWasUnderscore = true;
-    } else {
-      result.push_back(c);
-      lastWasUnderscore = false;
-    }
-  }
-  while (!result.empty() && result.back() == '_')
-    result.pop_back();
-  return result;
-}
-
 /// Create a tensor.empty for a DPS init operand.  Dynamic dimension sizes
 /// are extracted from \p source using tensor.dim at each dynamic index.
 /// Suitable for ops where the output shape aligns positionally with one input
