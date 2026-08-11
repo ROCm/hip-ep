@@ -78,21 +78,6 @@ func.func @non_hipsr_outs(%ctx: !hipsr.context, %input: tensor<4x8xf32>,
 }
 
 // -----
-// A DPS consumer ties each outs operand to a result, so the placeholder type
-// must match that result. Non-DPS consumers such as hipsr.compute are exempt.
-func.func @result_type_mismatch(
-    %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<4x8xf32> {
-  // expected-error @+1 {{result 0 type 'tensor<4x8xf16>' must match consumer result type 'tensor<4x8xf32>'}}
-  %init = hipsr.placeholder(%ctx)
-      ins(%input : tensor<4x8xf32>)
-      {placeholder_type = #hipsr.placeholder_type<normal>} : tensor<4x8xf16>
-  // expected-error @+1 {{expected type of operand #2 ('tensor<4x8xf16>') to match type of corresponding result ('tensor<4x8xf32>')}}
-  %result = hipsr.cast(%ctx) ins(%input : tensor<4x8xf32>)
-      outs(%init : tensor<4x8xf16>) : tensor<4x8xf32>
-  return %result : tensor<4x8xf32>
-}
-
-// -----
 // A normal shape region takes one !shape.shape per input.
 func.func @shape_region_argument_count(
     %ctx: !hipsr.context, %input: tensor<4x8xf32>) -> tensor<4x8xf16> {

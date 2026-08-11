@@ -187,8 +187,6 @@ LogicalResult ComputeYieldOpBufferization::bufferize(
     Operation *op, RewriterBase &rewriter,
     const bufferization::BufferizationOptions &options,
     bufferization::BufferizationState &state) const {
-  // Nothing to reconcile on the way out: the parent's result type is defined as
-  // the type of the buffer yielded here.
   SmallVector<Value> newOperands;
   for (Value operand : op->getOperands()) {
     if (isa<TensorType>(operand.getType())) {
