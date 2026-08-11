@@ -16,7 +16,7 @@ def Hipsr_ComputeYieldOp : Hipsr_Op<"compute_yield",
   let description = [{
     Returns values from a compute body to the parent op.
 
-    Operands are ranked tensors and give `hipsr.compute` its result
+    Operands are ranked tensors or memrefs and give `hipsr.compute` its result
     types; because that op is not destination-passing style, those types need
     not match its `outs` types. A bufferized compute has no results and yields
     nothing.
@@ -27,7 +27,7 @@ def Hipsr_ComputeYieldOp : Hipsr_Op<"compute_yield",
     ```
   }];
 
-  let arguments = (ins Variadic<Hipsr_TensorOrDeviceMemRef>:$operands);
+  let arguments = (ins Variadic<Hipsr_TensorOrMemRef>:$operands);
 
   let assemblyFormat = "($operands^ `:` type($operands))? attr-dict";
 

@@ -35,8 +35,9 @@ def Hipsr_ComputeOp : Hipsr_Op<"compute", [
     result's, which is what lets a body reshape its data. Result types come
     from `hipsr.compute_yield`; the `outs` values come from
     `hipsr.placeholder`, which owns the output-shape computation, so this op
-    has no shape region of its own. A bufferized compute writes into device
-    memrefs, has no results, and yields nothing.
+    has no shape region of its own. Operands and results accept ranked tensors
+    or memrefs (with or without a `#hipsr.mem<...>` space). A bufferized
+    compute has no results and yields nothing.
 
     Example (the body flattens, so the result type differs from `outs`):
     ```mlir
@@ -53,12 +54,12 @@ def Hipsr_ComputeOp : Hipsr_Op<"compute", [
 
   let arguments = (ins
     Hipsr_ContextType:$ctx,
-    Variadic<Hipsr_TensorOrDeviceMemRef>:$inputs,
-    Variadic<Hipsr_TensorOrDeviceMemRef>:$outputs
+    Variadic<Hipsr_TensorOrMemRef>:$inputs,
+    Variadic<Hipsr_TensorOrMemRef>:$outputs
   );
   // Named after linalg's $result_tensors, which is also the pre-bufferization
-  // form; a bufferized compute holds device memrefs here.
-  let results = (outs Variadic<Hipsr_TensorOrDeviceMemRef>:$result_tensors);
+  // form; a bufferized compute holds memrefs here.
+  let results = (outs Variadic<Hipsr_TensorOrMemRef>:$result_tensors);
   let regions = (region SizedRegion<1>:$body);
 
   let assemblyFormat = [{
