@@ -53,6 +53,10 @@
 
 #include "llvm/Support/CommandLine.h"
 
+#ifdef HIPDNN_EP_INCLUDE_TEST_PASSES
+#include "Dialect/Hip/TestHipPasses.h"
+#endif
+
 namespace {
 /// Which dialect claims the `onnx` namespace.
 enum class OnnxDialectKind { Stub, Modeled };
@@ -65,49 +69,6 @@ llvm::cl::opt<OnnxDialectKind> onnxDialectKind(
                    "Namespace only; every onnx.* op stays unregistered"),
         clEnumValN(OnnxDialectKind::Modeled, "modeled",
                    "ODS-modeled ops, verified as they are parsed")));
-
-/// Tool-only contract probe for the HipDpsOp shared default. LIT tags a
-/// zero-result memref-mode op and checks that the default succeeds with no
-/// reified vectors.
-struct TestHipDpsDefaultReifyPass final
-    : public mlir::PassWrapper<TestHipDpsDefaultReifyPass,
-                               mlir::OperationPass<mlir::ModuleOp>> {
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(TestHipDpsDefaultReifyPass)
-
-  llvm::StringRef getArgument() const final {
-    return "test-hip-dps-default-reify";
-  }
-  llvm::StringRef getDescription() const final {
-    return "Test the shared HIP DPS default reification contract";
-  }
-
-  void runOnOperation() final {
-    mlir::IRRewriter rewriter(&getContext());
-    mlir::WalkResult walkResult =
-        getOperation().walk([&](mlir::hip::HipDpsOp op) -> mlir::WalkResult {
-          mlir::Operation *operation = op.getOperation();
-          if (!operation->hasAttr("test.default_reify"))
-            return mlir::WalkResult::advance();
-          rewriter.setInsertionPoint(operation);
-          mlir::ReifiedRankedShapedTypeDims reified;
-          if (mlir::failed(op.reifyResultShapes(rewriter, reified))) {
-            operation->emitOpError(
-                "shared default reification unexpectedly failed");
-            return mlir::WalkResult::interrupt();
-          }
-          if (!reified.empty()) {
-            operation->emitOpError()
-                << "shared default reification returned " << reified.size()
-                << " vector(s) for a zero-result memref-mode op";
-            return mlir::WalkResult::interrupt();
-          }
-          return mlir::WalkResult::advance();
-        });
-    if (walkResult.wasInterrupted())
-      signalPassFailure();
-  }
-};
-
 } // namespace
 
 int main(int argc, char **argv) {
@@ -155,12 +116,15 @@ int main(int argc, char **argv) {
   // that function for the set and docs/pipeline_pass_menu.md for the catalogue.
   hip::compiler::registerAllPasses();
 
+#ifdef HIPDNN_EP_INCLUDE_TEST_PASSES
+  mlir::hip::test::registerHipTestPasses(registry);
+#endif
+
   // Tool-only extras: the standalone LLVM-lowering conversion passes. The
   // production pipeline reaches LLVM through `convert-hip-to-llvm` (which
   // populates these patterns internally), so the EP path does not register
   // them as separate names; they exist here purely so LIT tests can exercise
   // each conversion in isolation.
-  mlir::PassRegistration<TestHipDpsDefaultReifyPass>();
   mlir::registerConvertFuncToLLVMPass();
   mlir::registerArithToLLVMConversionPass();
   mlir::registerFinalizeMemRefToLLVMConversionPass();

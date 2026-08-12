@@ -195,6 +195,12 @@ add_subdirectory(lib)
 # (tools/hip-test links morphizen-custom-op-mlir).
 add_subdirectory(backend-mlir-compiler)
 
+# Test-only pass registrations used by hip-mlir-opt LIT coverage.
+# Define the library before configuring tools so the target is linked by name.
+if(BUILD_HIP_UNIT_TESTS)
+  add_subdirectory(test/lib/Dialect/Hip)
+endif()
+
 # Executable targets
 add_subdirectory(tools)
 
