@@ -109,9 +109,11 @@ func.func @yield_destination(%ctx: !hipsr.context, %shape: !shape.shape,
 // intended pipeline layout: shape regions first, then the allocations they
 // describe, then the data ops, then the preserve_shape links.
 //
-// compute takes %sum as both ins and outs. The body only builds a collapse view
-// of that buffer, so the result lands in init2 and needs no buffer of its own
-// and the domain allocates twice rather than three times. The shared value is
+// compute takes %sum as both ins and outs, so the two entry block arguments
+// name one buffer and collapsing the ins argument still holds the result in the
+// destination. The body only builds that collapse view, so the result lands in
+// init2 and needs no buffer of its own and the domain allocates twice rather
+// than three times. The shared value is
 // only conflict-free because bufferizesToMemoryWrite asks the body, where the
 // outs block argument has no uses; reporting every outs as written would make
 // the analysis allocate a second buffer for it.
@@ -192,7 +194,6 @@ func.func @pool_domain_mlp_flatten(
     }
     %init1 = tensor.empty(%m) : tensor<?x512xf16>
     %init2 = tensor.empty(%m) : tensor<?x512xf16>
-    %init3 = tensor.empty(%flat_size) : tensor<?xf16>
     %mm = hip.matmul(%dhip) ins(%input_arg, %weight_arg
                                 : tensor<?x256xf16>, tensor<256x512xf16>)
                             outs(%init1 : tensor<?x512xf16>) : tensor<?x512xf16>
@@ -200,9 +201,9 @@ func.func @pool_domain_mlp_flatten(
                               : tensor<?x512xf16>, tensor<?x512xf16>)
                           outs(%init2 : tensor<?x512xf16>) -> tensor<?x512xf16>
     %flat = hipsr.compute(%dctx) ins(%sum : tensor<?x512xf16>)
-                                 outs(%init3 : tensor<?xf16>) {
+                                 outs(%sum : tensor<?x512xf16>) {
     ^bb0(%body_ctx: !hipsr.context, %in: tensor<?x512xf16>,
-         %dest: tensor<?xf16>):
+         %dest: tensor<?x512xf16>):
       %collapsed = tensor.collapse_shape %in [[0, 1]]
           : tensor<?x512xf16> into tensor<?xf16>
       hipsr.compute_yield %collapsed : tensor<?xf16>
