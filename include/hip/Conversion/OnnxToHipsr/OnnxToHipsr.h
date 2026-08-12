@@ -61,6 +61,11 @@ void populateEqualConversionPatterns(::mlir::RewritePatternSet &patterns,
 void populateTransposeConversionPatterns(::mlir::RewritePatternSet &patterns,
                                          ::mlir::MLIRContext *ctx);
 
+// Populates the pattern converting `onnx.Gather` into `hipsr.gather`,
+// normalizing a negative `axis` against the data rank.
+void populateGatherConversionPatterns(::mlir::RewritePatternSet &patterns,
+                                      ::mlir::MLIRContext *ctx);
+
 void populateReturnConversionPatterns(::mlir::RewritePatternSet &patterns,
                                       ::mlir::MLIRContext *ctx);
 
