@@ -20,9 +20,11 @@ enum GqaTuneKvDtype : ubyte {
   Int8 = 1
 }
 
-// Keys are normalized by the runtime before lookup. For exact entries, seq_q
-// and seq_kv are the actual host-known lengths. For bucket entries they are the
-// inclusive power-of-two upper bounds. Fields unused by a phase are zero.
+// Keys are normalized by the runtime before lookup. For Decode exact entries,
+// seq_kv is the effective work length after the sliding-window clamp and
+// max_seq is the backing cache stride. For Prefill exact entries, seq_q/seq_kv
+// are the actual host-known lengths. Bucket entries use inclusive power-of-two
+// upper bounds. Fields unused by a phase are zero.
 table GqaTuneKey {
   phase: GqaTunePhase = Decode;
   match: GqaTuneMatch = Exact;
