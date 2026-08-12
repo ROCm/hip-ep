@@ -13,7 +13,6 @@ void mlir::hipsr::buildHipsrPipeline(OpPassManager & /*pm*/,
 
 void mlir::hipsr::registerHipsrPipelines() {
   PassPipelineRegistration<HipsrPipelineOptions>(
-      "hipsr-pipeline",
-      "Run the hipsr dialect lowering pipeline",
+      "hipsr-pipeline", "Run the hipsr dialect lowering pipeline",
       buildHipsrPipeline);
 }

@@ -14,8 +14,8 @@ namespace hipsr {
 
 /// Options for `hipsr-pipeline`. Empty for now. Add an option here together
 /// with the pass that reads it.
-struct HipsrPipelineOptions
-    : public PassPipelineOptions<HipsrPipelineOptions> {};
+struct HipsrPipelineOptions : public PassPipelineOptions<HipsrPipelineOptions> {
+};
 
 /// Build the hipsr pipeline into `pm`. Adds no passes yet.
 ///
