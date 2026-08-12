@@ -51,6 +51,13 @@ inline ::mlir::Value computeBodyInput(::mlir::Block &body, unsigned index) {
   return body.getArgument(1 + index);
 }
 
+/// Returns `compute`'s entry-block argument for output `index`, which the
+/// inputs precede.
+inline ::mlir::Value computeBodyOutput(::mlir::Block &body, ComputeOp compute,
+                                       unsigned index) {
+  return body.getArgument(1 + compute.getInputs().size() + index);
+}
+
 /// Reads extent `axis` of a shape-region `!shape.shape` argument as an `index`.
 /// An extent of a `!shape.shape` is a `!shape.size`, which carries the error
 /// state that arith cannot express, so it converts before any arithmetic.

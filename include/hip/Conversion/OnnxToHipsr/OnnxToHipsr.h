@@ -77,6 +77,14 @@ void populateSliceConversionPatterns(::mlir::RewritePatternSet &patterns,
 void populateScatterNDConversionPatterns(::mlir::RewritePatternSet &patterns,
                                          ::mlir::MLIRContext *ctx);
 
+// Populates the pattern converting `onnx.NonZero` into `hipsr.nonzero`, which
+// searches into a worst-case destination, followed by a `hipsr.compute` that
+// narrows it to the positions found. The compute's placeholder is a barrier
+// whose shape region is populated here, because that extent comes from a host
+// read of the count `hipsr.nonzero` published.
+void populateNonZeroConversionPatterns(::mlir::RewritePatternSet &patterns,
+                                       ::mlir::MLIRContext *ctx);
+
 void populateReturnConversionPatterns(::mlir::RewritePatternSet &patterns,
                                       ::mlir::MLIRContext *ctx);
 
