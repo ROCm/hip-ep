@@ -23,11 +23,24 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 project(
   onnx-hipdnn-ep
-  VERSION 1.0.0
+  VERSION 0.4.0
   LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+if(MSVC)
+  if(NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  elseif(CMAKE_MSVC_RUNTIME_LIBRARY MATCHES "DLL")
+    message(FATAL_ERROR
+      "CMAKE_MSVC_RUNTIME_LIBRARY=${CMAKE_MSVC_RUNTIME_LIBRARY} selects the dynamic "
+      "MSVC runtime; released binaries must link it statically.")
+  endif()
+  add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/guard:cf>)
+endif()
+
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/VersionInfo.cmake)
 
 # Use /Z7 (embedded debug info) instead of /Zi (shared PDB) so that parallel
 # compilations under sccache don't fight over a single .pdb file (C1041).
