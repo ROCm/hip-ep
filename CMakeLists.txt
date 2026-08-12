@@ -40,7 +40,7 @@ if(MSVC)
   add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/guard:cf>)
 endif()
 
-include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/BinaryCompliance.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/VersionInfo.cmake)
 
 # Use /Z7 (embedded debug info) instead of /Zi (shared PDB) so that parallel
 # compilations under sccache don't fight over a single .pdb file (C1041).
