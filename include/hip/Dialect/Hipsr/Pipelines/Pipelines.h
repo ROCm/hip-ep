@@ -12,8 +12,7 @@
 namespace mlir {
 namespace hipsr {
 
-/// Options for `hipsr-pipeline`. Empty for now. Add an option here together
-/// with the pass that reads it.
+/// Options for `hipsr-pipeline`.
 struct HipsrPipelineOptions : public PassPipelineOptions<HipsrPipelineOptions> {
 };
 

@@ -10,9 +10,6 @@
 // pipeline must never freeze an extent to a constant. The embedding table is a
 // two-gigabyte external constant carried as an offset/size reference rather
 // than inline data.
-//
-// buildHipsrPipeline() currently adds no passes, so the graph must survive
-// unchanged.
 //===----------------------------------------------------------------------===//
 
 // RUN: hip-mlir-opt --hipsr-pipeline %s | FileCheck %s
