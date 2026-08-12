@@ -45,7 +45,7 @@ find_path(DynamicDispatch_INCLUDE_DIR
 
 # Search for library
 find_library(DynamicDispatch_LIBRARY
-  NAMES dynamic_dispatch dd_helper
+  NAMES dyn_dispatch_core dynamic_dispatch dd_helper
   PATHS
     ${_DD_ROOT}
     "c:/Vai-rt-0/Vai-rt-build/Install"
