@@ -72,6 +72,11 @@ void populateGatherConversionPatterns(::mlir::RewritePatternSet &patterns,
 void populateSliceConversionPatterns(::mlir::RewritePatternSet &patterns,
                                      ::mlir::MLIRContext *ctx);
 
+// Populates the pattern converting `onnx.ScatterND` into `hipsr.scatter_nd`.
+// Covers the overwriting mode; the four reducing ones are rejected.
+void populateScatterNDConversionPatterns(::mlir::RewritePatternSet &patterns,
+                                         ::mlir::MLIRContext *ctx);
+
 void populateReturnConversionPatterns(::mlir::RewritePatternSet &patterns,
                                       ::mlir::MLIRContext *ctx);
 
