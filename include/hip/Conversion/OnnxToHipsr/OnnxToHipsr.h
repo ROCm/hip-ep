@@ -66,6 +66,12 @@ void populateTransposeConversionPatterns(::mlir::RewritePatternSet &patterns,
 void populateGatherConversionPatterns(::mlir::RewritePatternSet &patterns,
                                       ::mlir::MLIRContext *ctx);
 
+// Populates the pattern converting `onnx.Slice` into `hipsr.slice`, resolving
+// the window operands against the data extents. Covers constant windows over
+// statically sized axes.
+void populateSliceConversionPatterns(::mlir::RewritePatternSet &patterns,
+                                     ::mlir::MLIRContext *ctx);
+
 void populateReturnConversionPatterns(::mlir::RewritePatternSet &patterns,
                                       ::mlir::MLIRContext *ctx);
 

@@ -103,6 +103,7 @@ struct ConvertOnnxToHipsrPass
     populateEqualConversionPatterns(patterns, &getContext());
     populateTransposeConversionPatterns(patterns, &getContext());
     populateGatherConversionPatterns(patterns, &getContext());
+    populateSliceConversionPatterns(patterns, &getContext());
     populateReturnConversionPatterns(patterns, &getContext());
 
     if (failed(applyFullConversion(module, target, std::move(patterns)))) {
