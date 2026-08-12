@@ -14,10 +14,15 @@
 #define HIP_CONVERSION_ONNXTOHIPSR_UTILS_H
 
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Shape/IR/Shape.h"
+#include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/PatternMatch.h"
+
+#include "llvm/ADT/SmallVector.h"
 
 namespace mlir {
 namespace hipsr {
@@ -27,6 +32,40 @@ inline ::mlir::RankedTensorType tensorTypeInSpace(::mlir::RankedTensorType type,
                                                   MemorySpace space) {
   return type.cloneWithEncoding(
       ::mlir::hipsr::MemorySpaceAttr::get(type.getContext(), space));
+}
+
+/// Creates `compute`'s entry block and leaves `builder` inserting at its
+/// start. The ODS builder only reserves the region, so every conversion that
+/// emits a compute has to fill it.
+inline ::mlir::Block &createComputeBodyBlock(::mlir::OpBuilder &builder,
+                                             ComputeOp compute) {
+  // The body's arguments are the operands: ctx, then the inputs, then the
+  // outputs.
+  ::mlir::TypeRange argTypes = compute->getOperandTypes();
+  ::llvm::SmallVector<::mlir::Location> argLocs(argTypes.size(),
+                                                compute.getLoc());
+  ::mlir::Block *block =
+      builder.createBlock(&compute.getBody(), {}, argTypes, argLocs);
+  builder.setInsertionPointToStart(block);
+  return *block;
+}
+
+/// Returns `compute`'s entry-block argument for input `index`, skipping the
+/// leading `ctx` argument.
+inline ::mlir::Value computeBodyInput(::mlir::Block &body, unsigned index) {
+  return body.getArgument(1 + index);
+}
+
+/// Terminates a placeholder's shape region with `extents`. The region yields
+/// one `!shape.shape` however it was computed, so only the extents differ
+/// between the conversions that fill one.
+inline void yieldShapeFromExtents(::mlir::OpBuilder &builder,
+                                  ::mlir::Location loc,
+                                  ::mlir::ValueRange extents) {
+  ::mlir::Value shape = ::mlir::shape::FromExtentsOp::create(
+      builder, loc, ::mlir::shape::ShapeType::get(builder.getContext()),
+      extents);
+  ShapeYieldOp::create(builder, loc, ::mlir::ValueRange{shape});
 }
 
 /// Gets the `!hipsr.context` from function argument 0. The ONNX phase adds it
