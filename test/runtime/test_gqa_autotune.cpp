@@ -70,11 +70,12 @@ std::vector<uint8_t> makeLut() {
   std::vector<flatbuffers::Offset<mlir::hip::GqaTuneEntry>> entries;
 
   auto add_decode = [&](mlir::hip::GqaTuneMatch match, int skv, bool wmma,
-                        int splits) {
+                        int splits, int max_seq = 0,
+                        int local_window = 0) {
     auto key = mlir::hip::CreateGqaTuneKey(
         builder, mlir::hip::GqaTunePhase::Decode, match,
         mlir::hip::GqaTuneKvDtype::Fp16, 1, 32, 8, 64,
-        /*seq_q=*/1, skv, /*max_seq=*/0, /*local_window=*/0);
+        /*seq_q=*/1, skv, max_seq, local_window);
     auto config = mlir::hip::CreateGqaTuneConfig(
         builder, wmma, splits, 0, 0, 0, 0, 0);
     entries.push_back(mlir::hip::CreateGqaTuneEntry(builder, key, config));
@@ -82,6 +83,11 @@ std::vector<uint8_t> makeLut() {
   add_decode(mlir::hip::GqaTuneMatch::Exact, 128, true, 4);
   add_decode(mlir::hip::GqaTuneMatch::Bucket, 128, false, 2);
   add_decode(mlir::hip::GqaTuneMatch::Bucket, 1024, false, 8);
+  // Same effective window length, different cache stride and measured winner.
+  add_decode(mlir::hip::GqaTuneMatch::Exact, 128, true, 8,
+             /*max_seq=*/253, /*local_window=*/128);
+  add_decode(mlir::hip::GqaTuneMatch::Exact, 128, false, 8,
+             /*max_seq=*/2112, /*local_window=*/128);
 
   auto prefill_key = mlir::hip::CreateGqaTuneKey(
       builder, mlir::hip::GqaTunePhase::PrefillV5,
@@ -134,6 +140,19 @@ int main() {
   result = hipdnn_ep::gqa_autotune_resolve_decode(policy, decode);
   REQUIRE(result.source == hipdnn_ep::GqaTuneSource::Heuristic);
   REQUIRE(result.config.use_wmma && result.config.splits == 8);
+
+  decode.effective_skv = 253;
+  decode.max_seq = 253;
+  decode.local_window = 128;
+  result = hipdnn_ep::gqa_autotune_resolve_decode(policy, decode);
+  REQUIRE(result.source == hipdnn_ep::GqaTuneSource::Exact);
+  REQUIRE(result.config.use_wmma && result.config.splits == 8);
+
+  decode.effective_skv = 2112;
+  decode.max_seq = 2112;
+  result = hipdnn_ep::gqa_autotune_resolve_decode(policy, decode);
+  REQUIRE(result.source == hipdnn_ep::GqaTuneSource::Exact);
+  REQUIRE(!result.config.use_wmma && result.config.splits == 8);
 
   const hipdnn_ep::GqaPrefillRequest prefill{
       hipdnn_ep::GqaPrefillVariant::V5, 1, 32, 8, 64, 256, 512, 4096, 0};
