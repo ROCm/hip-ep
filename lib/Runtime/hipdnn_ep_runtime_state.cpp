@@ -139,6 +139,7 @@ static int initialize_state_handles(RuntimeState **out_state) {
   state->stream = nullptr;
   state->miopen_handle = nullptr;
   state->hipblas_handle = nullptr;
+  state->xrt_context = nullptr;
   state->gpu_constants_blob = nullptr;
   state->gpu_constants = nullptr;
   state->num_constants = 0;
@@ -820,6 +821,15 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   if (state->op_profile) {
     op_profile_destroy(static_cast<OpProfileState *>(state->op_profile));
     state->op_profile = nullptr;
+  }
+
+  // Destroy XRT context (DynamicDispatch NPU/IPU backend)
+  // The xrt_context is an opaque void* pointing to a C++ shared_ptr.
+  // We delegate cleanup to the DynamicDispatch-specific helper to avoid
+  // exposing XRT headers in this file.
+  if (state->xrt_context) {
+    hipdnn_ep_state_cleanup_xrt_context(state->xrt_context);
+    state->xrt_context = nullptr;
   }
 
   // Destroy hipBLASLt handle

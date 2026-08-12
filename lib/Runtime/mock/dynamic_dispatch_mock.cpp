@@ -91,4 +91,10 @@ void *hipdnn_ep_state_get_xrt_context(RuntimeState *state) {
   return nullptr;
 }
 
+// XRT context cleanup (no-op in mock)
+void hipdnn_ep_state_cleanup_xrt_context(void *xrt_context_ptr) {
+  (void)xrt_context_ptr;
+  // No cleanup needed in mock build
+}
+
 } // extern "C"

@@ -49,19 +49,44 @@ static const char *hipdnn_datatype_to_dd_string(int64_t data_type) {
   }
 }
 
-// Get XRT context from RuntimeState
-// For now, we'll create a shared XRT context lazily
-// TODO: Add xrt_context field to RuntimeState
+// Get or create XRT context from RuntimeState
+// Lazily initialized on first DynamicDispatch operation call
 static std::shared_ptr<ryzenai::dynamic_dispatch::xrt_context>
 get_xrt_context(RuntimeState *state) {
-  // Placeholder: In full implementation, this would retrieve
-  // the XRT context from RuntimeState. For now, return nullptr
-  // to indicate XRT context needs to be added to RuntimeState
-  (void)state;
+  if (!state) {
+    fprintf(stderr, "get_xrt_context: null RuntimeState\n");
+    return nullptr;
+  }
 
-  // TODO: Implement XRT context management in RuntimeState
-  // This will be part of RuntimeState initialization
-  return nullptr;
+  // If XRT context already exists, return it
+  if (state->xrt_context) {
+    auto *ctx_ptr = static_cast<
+        std::shared_ptr<ryzenai::dynamic_dispatch::xrt_context> *>(
+        state->xrt_context);
+    return *ctx_ptr;
+  }
+
+  // Lazy initialization: create XRT context on first use
+  // XRT context requires an XRT device. For now, we'll use the default device.
+  // In a multi-device setup, this could be configured via environment variable
+  // or passed through RuntimeState initialization.
+  try {
+    auto ctx = std::make_shared<ryzenai::dynamic_dispatch::xrt_context>();
+
+    // Store the shared_ptr in RuntimeState for reuse
+    // Allocate on heap so it persists beyond this function
+    auto *ctx_ptr =
+        new std::shared_ptr<ryzenai::dynamic_dispatch::xrt_context>(ctx);
+    state->xrt_context = static_cast<void *>(ctx_ptr);
+
+    fprintf(stderr,
+            "[DynamicDispatch] Initialized XRT context for NPU/IPU backend\n");
+    return ctx;
+  } catch (const std::exception &e) {
+    fprintf(stderr, "get_xrt_context: failed to create XRT context: %s\n",
+            e.what());
+    return nullptr;
+  }
 }
 
 //===----------------------------------------------------------------------===//
@@ -323,3 +348,44 @@ int wrap_dd_conv2d(RuntimeState *state, int32_t op_state_slot,
 
   return 0;
 }
+
+//===----------------------------------------------------------------------===//
+// XRT Context Accessors
+//===----------------------------------------------------------------------===//
+
+extern "C" {
+
+// Get XRT device from RuntimeState
+// Currently returns nullptr as device selection is handled by xrt_context
+void *hipdnn_ep_state_get_xrt_device(RuntimeState *state) {
+  (void)state;
+  // XRT device selection is handled internally by xrt_context
+  // In a multi-device setup, this could return the selected device ID
+  return nullptr;
+}
+
+// Get XRT context from RuntimeState
+// Returns the cached context or creates it lazily on first call
+void *hipdnn_ep_state_get_xrt_context(RuntimeState *state) {
+  if (!state) {
+    return nullptr;
+  }
+
+  // Lazy initialization via get_xrt_context helper
+  auto ctx = get_xrt_context(state);
+  return ctx ? ctx.get() : nullptr;
+}
+
+// Cleanup XRT context (called from hipdnn_ep_state_cleanup)
+// This is a helper to properly destroy the C++ shared_ptr without
+// exposing XRT headers to the main runtime state file
+void hipdnn_ep_state_cleanup_xrt_context(void *xrt_context_ptr) {
+  if (xrt_context_ptr) {
+    auto *ctx_ptr = static_cast<
+        std::shared_ptr<ryzenai::dynamic_dispatch::xrt_context> *>(
+        xrt_context_ptr);
+    delete ctx_ptr;
+  }
+}
+
+} // extern "C"
