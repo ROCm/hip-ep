@@ -174,9 +174,10 @@ unset HIP_PATH
 
 python build.py --install_dir "$LOCAL_DIR" --cmake_prefix_path "$LOCAL_DIR"
 #   --mock                    mock runtime (no GPU/HIP/TheRock)
-#   --hip_arch gfx1151        target GPU; auto-detected by default. Set it for a
-#                             cross-machine build+run -- the *target* GPU's arch
-#                             (e.g. from `offload-arch.exe` on that machine)
+#   --hip_arch gfx1151        concrete GPU arch (single-slice custom_kernels DLL)
+#   --hip_arch gfx115X-all    family fatbin (multi-slice; covers gfx1150-1153)
+#                             cross-machine builds: use the target GPU's arch or
+#                             a family that includes it (offload-arch / hipInfo)
 #   --therock_dist <path>     reuse a local TheRock SDK (else auto-downloaded)
 #   --cmake_generator Ninja   use Ninja (run from an x64 Native Tools prompt)
 #   --config RelWithDebInfo   build type (default Release)

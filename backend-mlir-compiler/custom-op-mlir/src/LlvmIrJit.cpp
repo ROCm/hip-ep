@@ -32,6 +32,8 @@
 // this lib also links (see this dir's CMakeLists).
 #include "hip/Compiler/PluginRegistry.h"
 
+#include "hip/HipGpuFamilies.h"
+
 #include <glog/logging.h>
 
 // Per-OS runtime bitcode embedded as bytes; emitted by
@@ -318,30 +320,65 @@ bool installSearchGenerators(llvm::orc::LLJIT &jit) {
   }
 
 #ifdef HIPDNN_EP_LOAD_KERNEL_DLLS
-  // Per-arch GPU kernel DLL/SO, dlopen'd from the EP binary's own directory.
+  // Per-arch or family GPU kernel DLL/SO, dlopen'd from the EP directory.
+  // Try custom_kernels_<gcnArchName> first, then a family fatbin (e.g.
+  // custom_kernels_gfx115X-all) when the per-arch variant is not installed.
   {
     const std::string arch = detectCustomKernelArch();
+    const char sep =
 #ifdef _WIN32
-    const std::string basename = "custom_kernels_" + arch + ".dll";
-    const char sep = '\\';
+        '\\';
 #else
-    const std::string basename = "libcustom_kernels_" + arch + ".so";
-    const char sep = '/';
+        '/';
 #endif
-    std::string kernel_lib = thisModuleDirectory();
-    if (!kernel_lib.empty())
-      kernel_lib.push_back(sep);
-    kernel_lib += basename;
+    std::string kernel_dir = thisModuleDirectory();
+    const auto basenames = hip_ep::customKernelLibraryBasenames(arch);
 
-    auto gen = llvm::orc::DynamicLibrarySearchGenerator::Load(
-        kernel_lib.c_str(), global_prefix);
-    if (!gen) {
-      LOG(ERROR) << "LlvmIrJit: Load(" << kernel_lib << ") for arch=" << arch
-                 << " failed: " << llvm::toString(gen.takeError())
-                 << ". Install " << basename << " next to the EP DLL/SO.";
+    bool loaded = false;
+    for (const std::string &basename : basenames) {
+#ifdef _WIN32
+      const std::string filename = basename + ".dll";
+#else
+      const std::string filename = "lib" + basename + ".so";
+#endif
+      std::string kernel_lib = kernel_dir;
+      if (!kernel_lib.empty())
+        kernel_lib.push_back(sep);
+      kernel_lib += filename;
+
+      if (!llvm::sys::fs::exists(kernel_lib)) {
+        LOG(INFO) << "LlvmIrJit: " << kernel_lib << " not found; trying next "
+                  << "custom-kernels candidate.";
+        continue;
+      }
+
+      auto gen = llvm::orc::DynamicLibrarySearchGenerator::Load(
+          kernel_lib.c_str(), global_prefix);
+      if (!gen) {
+        LOG(WARNING) << "LlvmIrJit: Load(" << kernel_lib
+                     << ") failed: " << llvm::toString(gen.takeError());
+        continue;
+      }
+      jd.addGenerator(std::move(*gen));
+      LOG(INFO) << "LlvmIrJit: loaded custom kernels from " << kernel_lib
+                << " (device arch=" << arch << ")";
+      loaded = true;
+      break;
+    }
+
+    if (!loaded) {
+      LOG(ERROR) << "LlvmIrJit: no custom-kernels library found for arch="
+                 << arch << ". Tried:";
+      for (const std::string &basename : basenames) {
+#ifdef _WIN32
+        LOG(ERROR) << "  custom_kernels candidate: " << basename << ".dll";
+#else
+        LOG(ERROR) << "  custom_kernels candidate: lib" << basename << ".so";
+#endif
+      }
+      LOG(ERROR) << "Install one next to the EP DLL/SO.";
       return false;
     }
-    jd.addGenerator(std::move(*gen));
   }
 #endif // HIPDNN_EP_LOAD_KERNEL_DLLS
 

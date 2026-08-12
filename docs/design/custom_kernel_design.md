@@ -139,7 +139,12 @@ Implements GQA as a multi-step operation:
 
 ### 5. `lib/Runtime/Kernels/CMakeLists.txt`
 
-Build one SHARED library per arch in `HIP_ARCHITECTURES`, each carrying a single fatbin slice for that arch. Install side-by-side with the EP binary so `LlvmIrJit` finds it via `GetModuleFileName` / `dladdr` anchoring. No static archive is produced.
+Build one SHARED library per `HIP_ARCHITECTURES` entry. Concrete arch names
+(e.g. `gfx1151`) produce a single-slice fatbin; family names (e.g.
+`gfx115X-all`, see `cmake/hip_families.cmake`) produce one multi-slice fatbin
+with native code objects for every member arch. Install side-by-side with the EP
+binary so `LlvmIrJit` finds it via `GetModuleFileName` / `dladdr` anchoring.
+No static archive is produced.
 
 ```cmake
 cmake_minimum_required(VERSION 3.18)
@@ -277,7 +282,14 @@ Four execution paths, auto-dispatched by shape:
 
 ## Key Design Decisions
 
-- **Per-arch SHARED library, not static lib**: One `custom_kernels_<arch>.{dll,so}` per arch in `HIP_ARCHITECTURES`, each with a single fatbin slice. Co-located with the EP binary; `LlvmIrJit::create` `dlopen`s the matching variant at JIT init based on `gcnArchName`. Per-model bitcode stays free of GPU code, which is what keeps it OS-portable and bytewise-stable across model recompiles when only the host CRT changes.
+- **Per-arch or per-family SHARED library, not static lib**: Each concrete entry
+  in `HIP_ARCHITECTURES` becomes `custom_kernels_<name>.{dll,so}`. Concrete
+  arches carry one native fatbin slice; family names (e.g. `gfx115X-all`) carry
+  one multi-slice native fatbin. Co-located with the EP binary; `LlvmIrJit`
+  dlopens `custom_kernels_<gcnArchName>` first, then falls back to a family DLL
+  when the per-arch variant is absent (`include/hip/HipGpuFamilies.h`). Per-model
+  bitcode stays free of GPU code, which is what keeps it OS-portable and
+  bytewise-stable across model recompiles when only the host CRT changes.
 - **Pure C header interface**: The header uses only C types (`void`*, `int64_t`, `float`) so it can be included by Clang during bitcode compilation AND by MSVC if needed.
 - **Separation of concerns**: `.hip` files contain device code (compiled by hipcc); `.cpp` runtime wrappers contain host logic (compiled by Clang to bitcode and embedded as `runtime.bc` inside the EP DLL). They communicate through the C header.
-- **`hip_utils.cmake` reuse**: Proven approach for Windows hipcc compilation, multi-config generators, architecture flags. The `OFFLOAD_ARCHS` arg overrides the global `HIP_ARCHITECTURES` so each per-arch target builds a single-slice fatbin instead of a multi-slice bloated one.
+- **`hip_utils.cmake` reuse**: Proven approach for Windows hipcc compilation, multi-config generators, architecture flags. The `OFFLOAD_ARCHS` arg overrides the global `HIP_ARCHITECTURES`. Per-arch targets pass a single arch; family targets pass every member arch so hipcc emits one native slice per member in the same shared library.
