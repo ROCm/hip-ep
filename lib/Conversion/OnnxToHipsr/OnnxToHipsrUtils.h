@@ -17,6 +17,7 @@
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/PatternMatch.h"
 
@@ -48,6 +49,18 @@ inline ::mlir::Block &createComputeBodyBlock(::mlir::OpBuilder &builder,
 /// leading `ctx` argument.
 inline ::mlir::Value computeBodyInput(::mlir::Block &body, unsigned index) {
   return body.getArgument(1 + index);
+}
+
+/// Reads extent `axis` of a shape-region `!shape.shape` argument as an `index`.
+/// An extent of a `!shape.shape` is a `!shape.size`, which carries the error
+/// state that arith cannot express, so it converts before any arithmetic.
+inline ::mlir::Value shapeExtentAsIndex(::mlir::OpBuilder &builder,
+                                        ::mlir::Location loc,
+                                        ::mlir::Value shape, int64_t axis) {
+  ::mlir::Value extent =
+      ::mlir::shape::GetExtentOp::create(builder, loc, shape, axis);
+  return ::mlir::shape::SizeToIndexOp::create(builder, loc,
+                                              builder.getIndexType(), extent);
 }
 
 /// Gets the `!hipsr.context` from function argument 0. The ONNX phase adds it

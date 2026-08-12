@@ -105,16 +105,18 @@ namespace {
       continue;
     }
     ::mlir::Value extent = getInputExtent(axis);
-    elementCount = elementCount ? ::mlir::arith::MulIOp::create(
-                                      builder, loc, elementCount, extent)
-                                : extent;
+    elementCount =
+        elementCount
+            ? ::mlir::arith::MulIOp::create(builder, loc, elementCount, extent)
+            : extent;
   }
   if (staticInputProduct != 1 || !elementCount) {
     ::mlir::Value factor = ::mlir::arith::ConstantIndexOp::create(
         builder, loc, staticInputProduct);
-    elementCount = elementCount ? ::mlir::arith::MulIOp::create(
-                                      builder, loc, elementCount, factor)
-                                : factor;
+    elementCount =
+        elementCount
+            ? ::mlir::arith::MulIOp::create(builder, loc, elementCount, factor)
+            : factor;
   }
   if (staticResultProduct != 1) {
     ::mlir::Value divisor = ::mlir::arith::ConstantIndexOp::create(
@@ -137,15 +139,8 @@ void populateReshapeShapeRegion(::mlir::OpBuilder &builder,
   ::mlir::Location loc = placeholder.getLoc();
   ::mlir::Value inputShape = PlaceholderShapeRegionArgs{block}.in(0);
   ::llvm::SmallVector<::mlir::OpFoldResult> extents = buildDestinationExtents(
-      builder, loc, inputType, resultType,
-      [&](int64_t axis) -> ::mlir::Value {
-        // An extent of a `!shape.shape` is a `!shape.size`, which carries the
-        // error state that arith cannot express.
-        ::mlir::Value extent =
-            ::mlir::shape::GetExtentOp::create(builder, loc, inputShape, axis);
-        return ::mlir::shape::SizeToIndexOp::create(builder, loc,
-                                                    builder.getIndexType(),
-                                                    extent);
+      builder, loc, inputType, resultType, [&](int64_t axis) -> ::mlir::Value {
+        return shapeExtentAsIndex(builder, loc, inputShape, axis);
       });
 
   ::llvm::SmallVector<::mlir::Value> extentValues = ::llvm::map_to_vector(
@@ -177,14 +172,13 @@ void populateReshapeComputeBody(
     // Expanding splits one input extent over a group, which the input type
     // cannot pin down, so the op carries the destination extents.
     ::llvm::SmallVector<::mlir::OpFoldResult> outputShape =
-        buildDestinationExtents(builder, loc, inputType, resultType,
-                                [&](int64_t axis) -> ::mlir::Value {
-                                  ::mlir::Value index =
-                                      ::mlir::arith::ConstantIndexOp::create(
-                                          builder, loc, axis);
-                                  return ::mlir::tensor::DimOp::create(
-                                      builder, loc, input, index);
-                                });
+        buildDestinationExtents(
+            builder, loc, inputType, resultType,
+            [&](int64_t axis) -> ::mlir::Value {
+              ::mlir::Value index =
+                  ::mlir::arith::ConstantIndexOp::create(builder, loc, axis);
+              return ::mlir::tensor::DimOp::create(builder, loc, input, index);
+            });
     reshaped = ::mlir::tensor::ExpandShapeOp::create(
         builder, loc, resultType, input, reassociation, outputShape);
   }
