@@ -17,12 +17,7 @@ namespace hipsr {
 struct HipsrPipelineOptions : public PassPipelineOptions<HipsrPipelineOptions> {
 };
 
-/// Build the hipsr pipeline into `pm`. Adds no passes yet.
-///
-/// The passes it will add, in order: hipsr-populate-shape-region,
-/// hipsr-partition-pool-domains, hipsr-materialize-init-tensors,
-/// bufferization, hipsr-pool-alloc, hipsr-externalize-constants. See
-/// Dialect/Hipsr/Transforms/Passes.td for the order rules.
+/// Build the hipsr pipeline into `pm`.
 void buildHipsrPipeline(OpPassManager &pm,
                         const HipsrPipelineOptions &options = {});
 
