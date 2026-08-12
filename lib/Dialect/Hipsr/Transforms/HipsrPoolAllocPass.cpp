@@ -16,11 +16,23 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/Statistic.h"
+#include "llvm/Support/Debug.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <utility>
+
+#define DEBUG_TYPE "hipsr-pool-alloc"
+#define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "] ")
+
+STATISTIC(NumDomainsProcessed, "Number of pool domains processed");
+STATISTIC(NumAllocationsPooled, "Number of allocations backed by a pool view");
+STATISTIC(NumGroupsCreated, "Number of pool groups created");
+STATISTIC(NumAllocationsReused,
+          "Number of pool slots saved by reusing a group");
 
 namespace mlir {
 namespace hipsr {
@@ -57,6 +69,43 @@ AllocationSize computeAllocationSize(memref::AllocOp allocOp) {
           llvm::to_vector(allocOp.getDynamicSizes())};
 }
 
+struct MeasuredSizes {
+  int64_t maxBytes;
+  int64_t sumBytes;
+  size_t numDynamicDims;
+};
+
+std::optional<MeasuredSizes> measureSizes(llvm::ArrayRef<Value> allocs) {
+  AllocationSize first =
+      computeAllocationSize(allocs.front().getDefiningOp<memref::AllocOp>());
+  MeasuredSizes measured{first.staticBytes, first.staticBytes,
+                         first.dynamicDims.size()};
+  for (Value alloc : allocs.drop_front()) {
+    AllocationSize size =
+        computeAllocationSize(alloc.getDefiningOp<memref::AllocOp>());
+    if (size.dynamicDims != first.dynamicDims) {
+      return std::nullopt;
+    }
+    measured.maxBytes = std::max(measured.maxBytes, size.staticBytes);
+    measured.sumBytes += size.staticBytes;
+  }
+  return measured;
+}
+
+int64_t percentOf(int64_t part, int64_t whole) {
+  return whole == 0 ? 0 : part * 100 / whole;
+}
+
+llvm::DenseMap<Value, size_t> mapAllocIndices(Block &body) {
+  llvm::DenseMap<Value, size_t> indices;
+  for (auto [opIdx, op] : llvm::enumerate(body)) {
+    if (auto allocOp = dyn_cast<memref::AllocOp>(&op)) {
+      indices[allocOp.getResult()] = opIdx;
+    }
+  }
+  return indices;
+}
+
 llvm::DenseMap<Value, Lifetime> computeLiveness(Block &body) {
   llvm::DenseMap<Operation *, size_t> opIndices;
   size_t idx = 0;
@@ -73,6 +122,8 @@ llvm::DenseMap<Value, Lifetime> computeLiveness(Block &body) {
     Value buffer = allocOp.getResult();
     std::optional<size_t> start;
     std::optional<size_t> end;
+    Operation *firstWrite = nullptr;
+    Operation *lastUse = nullptr;
     for (Operation *user : buffer.getUsers()) {
       Operation *blockLevelUser = body.findAncestorOpInBlock(*user);
       assert(blockLevelUser && "alloc escapes its IsolatedFromAbove domain");
@@ -80,13 +131,19 @@ llvm::DenseMap<Value, Lifetime> computeLiveness(Block &body) {
       if (llvm::is_contained(getHipsrDestinationOperands(user), buffer) &&
           (!start || userIdx < *start)) {
         start = userIdx;
+        firstWrite = blockLevelUser;
       }
       if (!end || userIdx > *end) {
         end = userIdx;
+        lastUse = blockLevelUser;
       }
     }
     if (start) {
       lifetimes[buffer] = Lifetime{*start, *end};
+      LLVM_DEBUG(DBGS() << "alloc #" << opIndices.lookup(&op) << " lifetime ["
+                        << *start << "," << *end << "]: first write "
+                        << firstWrite->getName() << ", last use "
+                        << lastUse->getName() << "\n");
     }
   }
   return lifetimes;
@@ -112,14 +169,24 @@ greedyGrouping(Block &body, const llvm::DenseMap<Value, Lifetime> &lifetimes) {
     return !(a.end < b.start || b.end < a.start);
   };
 
+  llvm::DenseMap<Value, size_t> allocIndices = mapAllocIndices(body);
   llvm::SmallVector<llvm::SmallVector<Value>> groups;
   for (Value alloc : allocs) {
     Lifetime lifetime = lifetimes.lookup(alloc);
     bool placed = false;
-    for (llvm::SmallVector<Value> &group : groups) {
-      if (llvm::any_of(group, [&](Value member) {
-            return overlaps(lifetimes.lookup(member), lifetime);
-          })) {
+    for (auto [groupIdx, group] : llvm::enumerate(groups)) {
+      Value *conflict = llvm::find_if(group, [&](Value member) {
+        return overlaps(lifetimes.lookup(member), lifetime);
+      });
+      if (conflict != group.end()) {
+        LLVM_DEBUG({
+          Lifetime other = lifetimes.lookup(*conflict);
+          DBGS() << "alloc #" << allocIndices.lookup(alloc) << " ["
+                 << lifetime.start << "," << lifetime.end
+                 << "] conflicts with alloc #" << allocIndices.lookup(*conflict)
+                 << " [" << other.start << "," << other.end << "] in group "
+                 << groupIdx << "\n";
+        });
         continue;
       }
       group.push_back(alloc);
@@ -127,6 +194,8 @@ greedyGrouping(Block &body, const llvm::DenseMap<Value, Lifetime> &lifetimes) {
       break;
     }
     if (!placed) {
+      LLVM_DEBUG(DBGS() << "alloc #" << allocIndices.lookup(alloc)
+                        << " opens group " << groups.size() << "\n");
       groups.push_back({alloc});
     }
   }
@@ -146,45 +215,90 @@ findInsertionPoint(Block &body,
   return point;
 }
 
-void emitPoolingReport(Block &body,
-                       const llvm::DenseMap<Value, Lifetime> &lifetimes,
-                       llvm::ArrayRef<llvm::SmallVector<Value>> groups,
-                       Operation *insertionPoint) {
-  size_t insertionIdx = 0;
-  for (Operation &op : body) {
-    if (&op == insertionPoint) {
-      break;
-    }
-    ++insertionIdx;
-  }
-  body.getParentOp()->emitRemark()
-      << "hipsr-pool-alloc: insertion point after op " << insertionIdx;
-
-  llvm::DenseMap<Value, size_t> groupIndices;
+void logGroupSizes(Block &body,
+                   llvm::ArrayRef<llvm::SmallVector<Value>> groups) {
+  llvm::DenseMap<Value, size_t> allocIndices = mapAllocIndices(body);
   for (auto [groupIdx, group] : llvm::enumerate(groups)) {
+    std::optional<MeasuredSizes> measured = measureSizes(group);
+    if (!measured) {
+      DBGS() << "group " << groupIdx
+             << " max not comparable (mixed dynamic extents)\n";
+      for (Value member : group) {
+        AllocationSize size =
+            computeAllocationSize(member.getDefiningOp<memref::AllocOp>());
+        DBGS() << "  alloc #" << allocIndices.lookup(member) << " "
+               << size.staticBytes << " bytes x " << size.dynamicDims.size()
+               << " dyn\n";
+      }
+      continue;
+    }
+    DBGS() << "group " << groupIdx << " max " << measured->maxBytes << " bytes";
+    if (measured->numDynamicDims != 0) {
+      llvm::dbgs() << " x " << measured->numDynamicDims << " dyn";
+    }
+    llvm::dbgs() << "\n";
     for (Value member : group) {
-      groupIndices[member] = groupIdx;
+      int64_t bytes =
+          computeAllocationSize(member.getDefiningOp<memref::AllocOp>())
+              .staticBytes;
+      DBGS() << "  alloc #" << allocIndices.lookup(member) << " " << bytes
+             << " bytes, " << (measured->maxBytes - bytes) << " unused\n";
+    }
+  }
+}
+
+void emitPoolingReport(PoolDomainOp domain,
+                       llvm::ArrayRef<llvm::SmallVector<Value>> groups) {
+  llvm::SmallVector<Value> allocs;
+  for (llvm::ArrayRef<Value> group : groups) {
+    allocs.append(group.begin(), group.end());
+  }
+
+  auto remark = [&] {
+    InFlightDiagnostic diag = domain.emitRemark();
+    diag << "hipsr-pool-alloc: domain " << domain.getDomainId() << ": ";
+    return diag;
+  };
+
+  int64_t numAllocs = allocs.size();
+  int64_t numGroups = groups.size();
+  int64_t saved = numAllocs - numGroups;
+  remark() << numAllocs << " allocs in " << numGroups << " groups, " << saved
+           << " saved (" << percentOf(saved, numAllocs) << "%)";
+
+  std::optional<MeasuredSizes> domainSizes = measureSizes(allocs);
+  {
+    InFlightDiagnostic diag = remark();
+    diag << "before vs after: ";
+    if (!domainSizes) {
+      diag << "not comparable (mixed dynamic extents)";
+    } else {
+      int64_t after = 0;
+      for (llvm::ArrayRef<Value> group : groups) {
+        after += measureSizes(group)->maxBytes;
+      }
+      int64_t before = domainSizes->sumBytes;
+      if (domainSizes->numDynamicDims == 0) {
+        diag << before << " bytes vs " << after << " bytes, ";
+      }
+      diag << percentOf(before - after, before) << "% saved";
     }
   }
 
-  for (Operation &op : body) {
-    auto allocOp = dyn_cast<memref::AllocOp>(&op);
-    if (!allocOp) {
+  for (auto [groupIdx, group] : llvm::enumerate(groups)) {
+    InFlightDiagnostic diag = remark();
+    diag << "group " << groupIdx << ": " << group.size() << " allocs, ";
+    std::optional<MeasuredSizes> measured = measureSizes(group);
+    if (!measured) {
+      diag << "not comparable (mixed dynamic extents)";
       continue;
     }
-    auto it = lifetimes.find(allocOp.getResult());
-    if (it == lifetimes.end()) {
-      continue;
+    if (measured->numDynamicDims == 0) {
+      diag << "max " << measured->maxBytes << " bytes, ";
     }
-    AllocationSize size = computeAllocationSize(allocOp);
-    InFlightDiagnostic remark = allocOp.emitRemark();
-    remark << "hipsr-pool-alloc: lifetime [" << it->second.start << ","
-           << it->second.end << "] group "
-           << groupIndices.lookup(allocOp.getResult()) << " size "
-           << size.staticBytes;
-    if (!size.dynamicDims.empty()) {
-      remark << " x " << size.dynamicDims.size() << " dyn";
-    }
+    int64_t capacity = measured->maxBytes * group.size();
+    diag << percentOf(capacity - measured->sumBytes, capacity)
+         << "% avg unused";
   }
 }
 
@@ -265,7 +379,11 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
       HipsrPoolAllocPass>::HipsrPoolAllocPassBase;
 
   void runOnOperation() override {
+    size_t domainOrdinal = 0;
     getOperation().walk([&](PoolDomainOp domain) {
+      LLVM_DEBUG(DBGS() << "pool_domain #" << domainOrdinal << " (domain_id "
+                        << domain.getDomainId() << ")\n");
+      ++domainOrdinal;
       Block &body = domain.getBody().front();
       llvm::DenseMap<Value, Lifetime> lifetimes = computeLiveness(body);
       Operation *insertionPoint = findInsertionPoint(body, lifetimes);
@@ -275,6 +393,16 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
         signalPassFailure();
         return;
       }
+      LLVM_DEBUG({
+        size_t insertionIdx = 0;
+        for (Operation &op : body) {
+          if (&op == insertionPoint) {
+            break;
+          }
+          ++insertionIdx;
+        }
+        DBGS() << "insertion point after op #" << insertionIdx << "\n";
+      });
       Value ctx = findContext(body);
       if (!ctx) {
         domain.emitError("hipsr-pool-alloc: pool_domain has no context");
@@ -283,8 +411,13 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
       }
       llvm::SmallVector<llvm::SmallVector<Value>> groups =
           greedyGrouping(body, lifetimes);
+      LLVM_DEBUG(logGroupSizes(body, groups));
+      ++NumDomainsProcessed;
+      NumAllocationsPooled += lifetimes.size();
+      NumGroupsCreated += groups.size();
+      NumAllocationsReused += lifetimes.size() - groups.size();
       if (emitPoolReport) {
-        emitPoolingReport(body, lifetimes, groups, insertionPoint);
+        emitPoolingReport(domain, groups);
       }
 
       OpBuilder builder(&getContext());

@@ -7,12 +7,81 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
-#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 
 #include "llvm/ADT/STLExtras.h"
 
 using namespace mlir;
 using namespace mlir::hipsr;
+
+namespace {
+
+// Keep the shape graph apart from the data graph: no data results as inputs.
+LogicalResult verifyShapeGraphInputs(PlaceholderOp op) {
+  for (auto [index, input] : llvm::enumerate(op.getInputs())) {
+    if (!PlaceholderOp::isAllowedShapeGraphInput(input)) {
+      return op.emitOpError("input ")
+             << index
+             << " must be a block argument or a result of hipsr.placeholder, "
+                "arith.constant, or hipsr.constant; got result of '"
+             << input.getDefiningOp()->getName() << "'";
+    }
+  }
+  return success();
+}
+
+// A placeholder holds the outs values of one op, one slot per result.
+LogicalResult verifyResultUses(PlaceholderOp op) {
+  SmallVector<Operation *> consumers;
+  for (OpResult result : op.getResults()) {
+    auto initUses =
+        llvm::make_filter_range(result.getUses(), [](OpOperand &use) {
+          return !isa<PlaceholderOp, PoolDomainYieldOp>(use.getOwner());
+        });
+
+    if (!llvm::all_of(initUses, isHipsrDestinationOperand)) {
+      return op.emitOpError("requires each result use to be a placeholder "
+                            "input, pool-domain yield, or an outs operand of a "
+                            "hipsr operation");
+    }
+    if (!llvm::hasSingleElement(initUses)) {
+      return op.emitOpError(
+          "requires each result to initialize exactly one hipsr operation");
+    }
+    consumers.push_back(initUses.begin()->getOwner());
+  }
+
+  if (!llvm::all_equal(consumers)) {
+    return op.emitOpError(
+        "requires all results to initialize the same hipsr operation");
+  }
+  return success();
+}
+
+// The placeholder type sets the shape region's block arguments.
+LogicalResult verifyShapeRegionSignature(PlaceholderOp op) {
+  if (op.getBodyRegion().empty()) {
+    return success();
+  }
+
+  Block &block = *op.getBody();
+  SmallVector<Type> expectedTypes = op.getShapeRegionArgumentTypes();
+  if (block.getNumArguments() != expectedTypes.size()) {
+    return op.emitOpError("shape region block argument count does not match "
+                          "the placeholder type layout; expected ")
+           << expectedTypes.size() << ", got " << block.getNumArguments();
+  }
+  for (auto [index, actualType, expectedType] :
+       llvm::enumerate(block.getArgumentTypes(), expectedTypes)) {
+    if (actualType != expectedType) {
+      return op.emitOpError("shape region block argument ")
+             << index << " type " << actualType
+             << " does not match expected type " << expectedType;
+    }
+  }
+  return success();
+}
+
+} // namespace
 
 bool PlaceholderOp::isAllowedShapeGraphInput(Value value) {
   if (isa<BlockArgument>(value)) {
@@ -24,10 +93,9 @@ bool PlaceholderOp::isAllowedShapeGraphInput(Value value) {
       definingOp);
 }
 
-// every result must fill one outs slot of the same operation, so
-// the first outs use found identifies the consumer.
+// All results go to the same op, so the first outs use names the consumer.
 Operation *PlaceholderOp::getConsumer() {
-  for (Value result : getResults()) {
+  for (OpResult result : getResults()) {
     for (OpOperand &use : result.getUses()) {
       if (isHipsrDestinationOperand(use)) {
         return use.getOwner();
@@ -54,78 +122,14 @@ LogicalResult PlaceholderOp::verify() {
   if (getNumResults() == 0) {
     return emitOpError("must produce at least one tensor outs operand");
   }
-
-  for (auto [inputIndex, input] : llvm::enumerate(getInputs())) {
-    if (!isAllowedShapeGraphInput(input)) {
-      return emitOpError("input ")
-             << inputIndex
-             << " must be a block argument or a result of hipsr.placeholder, "
-                "arith.constant, or hipsr.constant; got result of '"
-             << input.getDefiningOp()->getName() << "'";
-    }
+  if (failed(verifyShapeGraphInputs(*this))) {
+    return failure();
   }
-
-  Operation *consumer = nullptr;
-  for (auto [resultIndex, result] : llvm::enumerate(getResults())) {
-    OpOperand *outsUse = nullptr;
-    for (OpOperand &use : result.getUses()) {
-      if (isa<PlaceholderOp, PoolDomainYieldOp>(use.getOwner())) {
-        continue;
-      }
-
-      if (!isHipsrDestinationOperand(use)) {
-        return emitOpError("requires each result use to be a placeholder "
-                           "input, pool-domain yield, or an outs operand of a "
-                           "hipsr operation");
-      }
-      if (outsUse) {
-        return emitOpError(
-            "requires each result to initialize exactly one hipsr operation");
-      }
-      outsUse = &use;
-    }
-    if (!outsUse) {
-      return emitOpError(
-          "requires each result to initialize exactly one hipsr operation");
-    }
-
-    Operation *owner = outsUse->getOwner();
-    if (auto dpsOp = dyn_cast<DestinationStyleOpInterface>(owner)) {
-      OpResult consumerResult = dpsOp.getTiedOpResult(outsUse);
-      if (result.getType() != consumerResult.getType()) {
-        return emitOpError("result ")
-               << resultIndex << " type " << result.getType()
-               << " must match consumer result type "
-               << consumerResult.getType();
-      }
-    }
-
-    if (consumer && consumer != owner) {
-      return emitOpError(
-          "requires all results to initialize the same hipsr operation");
-    }
-    consumer = owner;
+  if (failed(verifyResultUses(*this))) {
+    return failure();
   }
-
-  if (getBodyRegion().empty()) {
-    return success();
+  if (failed(verifyShapeRegionSignature(*this))) {
+    return failure();
   }
-
-  Block &block = *getBody();
-  SmallVector<Type> expectedTypes = getShapeRegionArgumentTypes();
-  if (block.getNumArguments() != expectedTypes.size()) {
-    return emitOpError("shape region block argument count does not match the "
-                       "placeholder type layout; expected ")
-           << expectedTypes.size() << ", got " << block.getNumArguments();
-  }
-  for (auto [index, expectedType] : llvm::enumerate(expectedTypes)) {
-    Type actualType = block.getArgument(index).getType();
-    if (actualType != expectedType) {
-      return emitOpError("shape region block argument ")
-             << index << " type " << actualType
-             << " does not match expected type " << expectedType;
-    }
-  }
-
   return success();
 }
