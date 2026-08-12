@@ -77,6 +77,29 @@ module {
     %result = "onnx.Reshape"(%data, %shape) {allowzero = 0 : si64} : (tensor<f16>, tensor<3xi64>) -> tensor<1x1x1xf16>
     return %result : tensor<1x1x1xf16>
   }
+
+  // --- Multi-dynamic expand: [bs*ss, H] -> [bs, ss, H] ---
+  // The source dim only holds the PRODUCT bs*ss, so the split has to come from
+  // the shape operand.  Deriving both extents positionally from the source
+  // yields [bs*ss, bs*ss, H], which is how every Gemma-4 decoder layer's input
+  // norm ended up dispatched over ss^2 rows.
+  func.func @test_reshape_expand_multi_dyn(%data: tensor<?x2816xf16>,
+                                           %ref: tensor<?x?x2816xf16>)
+      -> tensor<?x?x2816xf16> {
+    %shape = "onnx.Shape"(%ref) : (tensor<?x?x2816xf16>) -> tensor<3xi64>
+    %result = "onnx.Reshape"(%data, %shape) {allowzero = 0 : si64} : (tensor<?x2816xf16>, tensor<3xi64>) -> tensor<?x?x2816xf16>
+    return %result : tensor<?x?x2816xf16>
+  }
+
+  // --- Multi-dynamic expand with an opaque shape operand ---
+  // Nothing here reveals the split, so the conversion must decline to build an
+  // expand_shape and hand the runtime shape vector to tensor.reshape instead.
+  func.func @test_reshape_expand_multi_dyn_opaque(%data: tensor<?x2816xf16>,
+                                                  %shape: tensor<3xi64>)
+      -> tensor<?x?x2816xf16> {
+    %result = "onnx.Reshape"(%data, %shape) {allowzero = 0 : si64} : (tensor<?x2816xf16>, tensor<3xi64>) -> tensor<?x?x2816xf16>
+    return %result : tensor<?x?x2816xf16>
+  }
 }
 
 // CHECK-LABEL: func.func @test_reshape_expand
@@ -118,4 +141,19 @@ module {
 // CHECK: hip.readback_scalar
 // CHECK: tensor.from_elements
 // CHECK: tensor.expand_shape
+// CHECK-NOT: onnx.Reshape
+
+// The two dynamic output extents must be DISTINCT dims of the rank-3 reference,
+// never the same source dim twice.
+// CHECK-LABEL: func.func @test_reshape_expand_multi_dyn
+// CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+// CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
+// CHECK: %[[BS:.*]] = tensor.dim %[[REF:.*]], %[[C0]] : tensor<?x?x2816xf16>
+// CHECK: %[[SS:.*]] = tensor.dim %[[REF]], %[[C1]] : tensor<?x?x2816xf16>
+// CHECK: tensor.expand_shape %{{.*}} {{\[\[}}0, 1], [2]] output_shape [%[[BS]], %[[SS]], 2816]
+// CHECK-NOT: onnx.Reshape
+
+// CHECK-LABEL: func.func @test_reshape_expand_multi_dyn_opaque
+// CHECK-NOT: tensor.expand_shape
+// CHECK: tensor.reshape
 // CHECK-NOT: onnx.Reshape

@@ -113,6 +113,39 @@ func.func @rms_norm_dynamic(%ctx: !hip.context, %input: memref<?x512xf16, 1>) {
   return
 }
 
+// Rank-3 [batch, seq, hidden] with both leading extents dynamic: the shape a
+// decoder layer's input norm actually has. input_num_elements must be the
+// product of THREE distinct descriptor reads -- if dim 0 and dim 1 resolve to
+// the same value the norm is dispatched over seq^2 rows.
+// CHECK-LABEL: @rms_norm_dynamic_batch_seq_3d
+func.func @rms_norm_dynamic_batch_seq_3d(%ctx: !hip.context,
+                                         %input: memref<?x?x2816xf16, 1>) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %c2816 = arith.constant 2816 : index
+  %dim0 = memref.dim %input, %c0 : memref<?x?x2816xf16, 1>
+  %dim1 = memref.dim %input, %c1 : memref<?x?x2816xf16, 1>
+  %scale = memref.alloc(%c2816) : memref<?xf16, 1>
+  %output = memref.alloc(%dim0, %dim1) : memref<?x?x2816xf16, 1>
+
+  // Batch and sequence come from separate descriptor slots.
+  // CHECK: llvm.extractvalue {{.*}}[3, 0]
+  // CHECK: llvm.extractvalue {{.*}}[3, 1]
+
+  // input_num_elements = dim0 * dim1 * 2816
+  // CHECK: llvm.mul {{.*}}, {{.*}} : i64
+  // CHECK: llvm.mul {{.*}}, {{.*}} : i64
+  // CHECK: llvm.mul {{.*}}, {{.*}} : i64
+
+  // CHECK: llvm.call @wrap_miopenT5LayerNormForward({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, f32, i64) -> i32
+  hip.rms_norm(%ctx)
+      ins(%input, %scale : memref<?x?x2816xf16, 1>, memref<?xf16, 1>)
+      outs(%output : memref<?x?x2816xf16, 1>)
+      {axis = -1 : i64, epsilon = 9.99999997e-07 : f32, stash_type = 1 : i64}
+
+  return
+}
+
 // CHECK-LABEL: @rms_norm_fully_dynamic
 func.func @rms_norm_fully_dynamic(%ctx: !hip.context, %input: memref<?x?xf16, 1>) {
   %c0 = arith.constant 0 : index

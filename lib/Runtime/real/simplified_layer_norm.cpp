@@ -212,6 +212,25 @@ int wrap_miopenT5LayerNormForward(RuntimeState *state, int op_state_slot,
     return -1;
   }
 
+  // The [num_rows, hidden_dim] flattening below is only meaningful while the
+  // caller's element counts agree; matches the checks in
+  // wrap_layer_normalization. The axis-vs-scale agreement cannot be rechecked
+  // here (the ABI carries element counts, not shapes) and is enforced at
+  // conversion time by verifyNormAxisMatchesScale.
+  if (scale_num_elements <= 0) {
+    fprintf(stderr,
+            "[REAL] wrap_miopenT5LayerNormForward: scale_num_elements=%lld\n",
+            (long long)scale_num_elements);
+    return -1;
+  }
+  if (input_num_elements % scale_num_elements != 0) {
+    fprintf(stderr,
+            "[REAL] wrap_miopenT5LayerNormForward: input_num(%lld) not "
+            "divisible by scale_num(%lld)\n",
+            (long long)input_num_elements, (long long)scale_num_elements);
+    return -1;
+  }
+
   int64_t hidden_dim = scale_num_elements;
   int64_t num_rows = input_num_elements / hidden_dim;
 
