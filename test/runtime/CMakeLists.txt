@@ -42,7 +42,7 @@ set_target_properties(test-output-allocator PROPERTIES FOLDER "runtime-tests")
 # FlatBuffer loader exercise the same implementation compiled into runtime.bc.
 add_executable(test-gqa-autotune
     test_gqa_autotune.cpp
-    ${CMAKE_SOURCE_DIR}/lib/Runtime/real/gqa_autotune.cpp
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/hip/autotune/gqa/gqa_autotune.cpp
 )
 
 target_compile_features(test-gqa-autotune PRIVATE cxx_std_17)
@@ -52,6 +52,7 @@ target_compile_definitions(test-gqa-autotune PRIVATE
 target_include_directories(test-gqa-autotune PRIVATE
     ${CMAKE_SOURCE_DIR}/lib/Runtime
     ${CMAKE_SOURCE_DIR}/lib/Runtime/real
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/hip/autotune/gqa
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/morphizen/morphizen-foundation/include
 )

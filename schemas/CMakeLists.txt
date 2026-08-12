@@ -17,11 +17,17 @@ else()
 endif()
 message(STATUS "Using flatc: ${FLATC_EXECUTABLE}")
 
-# Generate C++ headers from .fbs schemas
+# Generate C++ headers from .fbs schemas.
+#
+# Schemas do not all live here: gqa_autotune.fbs sits next to the code that
+# reads it (lib/Runtime/Kernels/hip/autotune/gqa/) so the whole GQA autotune
+# story -- schema, lookup, cost model -- is one directory. Generation stays
+# centralised because every schema needs the same flatc invocation and the same
+# generated-header include path.
 set(FBS_SCHEMAS
     ${CMAKE_CURRENT_SOURCE_DIR}/compilation_options.fbs
-    ${CMAKE_CURRENT_SOURCE_DIR}/gqa_autotune.fbs
     ${CMAKE_CURRENT_SOURCE_DIR}/model_metadata.fbs
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/hip/autotune/gqa/gqa_autotune.fbs
 )
 
 set(GENERATED_HEADERS "")

@@ -3,10 +3,20 @@
  * Licensed under the MIT License.
  */
 
+// Tier 1 (offline LUT) and tier 3 (heuristic) of the GQA autotune policy; tier 2
+// is gqa_cost_model.h next door. See README.md in this directory.
+//
+// This is host code compiled into the runtime bitcode, not into the per-arch
+// kernel library -- it lives here because it belongs to the GQA autotune story,
+// not because it is device code. lib/Runtime/CMakeLists.txt compiles it.
 #include "gqa_autotune.h"
 
-#include "../debug_log.h"
 #include "gqa_autotune_generated.h"
+// debug_log.h goes by explicit relative path: Kernels/include/ ships its own
+// debug_log.h, so an unqualified include would resolve to the kernel-side one
+// depending on -I order. runtime_types.h deliberately does NOT: real/ and mock/
+// each ship one and the -I flag selects the right copy.
+#include "../../../../debug_log.h"
 #if !defined(HIPDNN_EP_GQA_AUTOTUNE_GPU_FREE)
 #include "runtime_types.h"
 #endif
@@ -514,6 +524,10 @@ GqaPrefillResult gqa_autotune_resolve_prefill(
     policy->heuristic_misses.fetch_add(1, std::memory_order_relaxed);
   }
   return {prefillHeuristic(request), GqaTuneSource::Heuristic};
+}
+
+GqaPrefillConfig gqa_autotune_fallback_prefill(const GqaPrefillRequest &request) {
+  return prefillHeuristic(request);
 }
 
 const char *gqa_tune_source_name(GqaTuneSource source) {

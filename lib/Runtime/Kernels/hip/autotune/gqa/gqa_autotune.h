@@ -16,6 +16,15 @@ namespace hipdnn_ep {
 inline constexpr const char kGqaAutotuneFilename[] = "gqa_autotune.fb";
 inline constexpr const char kGqaKernelAbi[] = "gqa-v1";
 
+// Where a config came from, in the order the policy tries them.
+//   Exact      offline LUT keyed on the measured shape.
+//   Bucket     same LUT, keyed on power-of-two ceilings of the lengths.
+//   Heuristic  last resort: a fixed config that is only known to run.
+//
+// Both LUT tiers are data. Widening what the table answers means generating
+// more rows offline (the cost model in gqa_cost_model.h does that), never
+// adding another matcher here -- a config that has to be computed at dispatch
+// time is a config nobody reviewed.
 enum class GqaTuneSource : uint8_t {
   Exact,
   Bucket,
@@ -93,6 +102,12 @@ GqaDecodeResult gqa_autotune_resolve_decode(void *policy,
 GqaPrefillResult
 gqa_autotune_resolve_prefill(void *policy,
                              const GqaPrefillRequest &request);
+
+// Tier 3 on its own: the config that is only known to run. Callers use this to
+// recover after the kernel rejected a resolved config -- asking resolve_* again
+// would just hand back another config from the same tiers that already failed.
+GqaPrefillConfig gqa_autotune_fallback_prefill(const GqaPrefillRequest &request);
+
 const char *gqa_tune_source_name(GqaTuneSource source);
 
 } // namespace hipdnn_ep

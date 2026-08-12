@@ -219,6 +219,12 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
 
         # Add custom_kernels include directory
         list(APPEND COMPILE_FLAGS "-I" "${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/include")
+        # The GQA autotune policy (schema, LUT lookup, cost model) lives with the
+        # kernels it configures. Only its own directory goes on the include path:
+        # adding Kernels/hip wholesale would shadow runtime headers that share a
+        # name with kernel-side ones (debug_log.h).
+        list(APPEND COMPILE_FLAGS "-I"
+            "${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/hip/autotune/gqa")
 
         # Add ROCm includes
         if(THEROCK_DIST)
@@ -230,7 +236,7 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
         list(APPEND IMPL_DEPS
             ${CMAKE_CURRENT_SOURCE_DIR}/real/runtime_types.h
             ${CMAKE_CURRENT_SOURCE_DIR}/real/cache_utils.h
-            ${CMAKE_CURRENT_SOURCE_DIR}/real/gqa_autotune.h
+            ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/hip/autotune/gqa/gqa_autotune.h
             ${CMAKE_CURRENT_SOURCE_DIR}/real/zp_unpack_cache.h
             ${CMAKE_SOURCE_DIR}/lib/Runtime/Kernels/include/hip_custom_kernels.h)
     else()
@@ -309,7 +315,8 @@ if(NOT BUILD_MOCK_RUNTIME)
     compile_to_bitcode(real/simplified_layer_norm.cpp runtime_simplified_layer_norm.bc)
     compile_to_bitcode(real/skip_simplified_layer_norm.cpp runtime_skip_simplified_layer_norm.bc)
     compile_to_bitcode(real/rotary_embedding.cpp runtime_rotary_embedding.bc)
-    compile_to_bitcode(real/gqa_autotune.cpp runtime_gqa_autotune.bc)
+    # Host code, but it lives next to the kernels it configures.
+    compile_to_bitcode(Kernels/hip/autotune/gqa/gqa_autotune.cpp runtime_gqa_autotune.bc)
     compile_to_bitcode(real/gqa.cpp runtime_gqa.bc)
     compile_to_bitcode(real/cast.cpp runtime_cast.bc)
     compile_to_bitcode(real/range.cpp runtime_range.bc)

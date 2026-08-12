@@ -39,13 +39,18 @@ different winners when their backing cache strides differ.
 To package this LUT into EPContext, set the MorphiZen provider option:
 
 ```text
-gqa_autotune_lut=/path/to/etc/gqa_autotune/gfx1151.fb
+gqa_autotune_lut=/path/to/lib/Runtime/Kernels/hip/autotune/gqa/lut/gfx1151.fb
 ```
 
 To regenerate the binary with `flatc`:
 
+Run from this directory:
+
 ```bash
-flatc --binary --strict-json -o /tmp \
-  schemas/gqa_autotune.fbs etc/gqa_autotune/gfx1151.json
-cp /tmp/gfx1151.bin etc/gqa_autotune/gfx1151.fb
+flatc --binary --strict-json -o /tmp ../gqa_autotune.fbs gfx1151.json
+cp /tmp/gfx1151.bin gfx1151.fb
 ```
+
+The schema (`../gqa_autotune.fbs`) and the code that reads these tables
+(`../gqa_autotune.cpp`) sit one level up; see `../README.md` for the resolution
+order and for how to generate rows for geometries nobody measured.

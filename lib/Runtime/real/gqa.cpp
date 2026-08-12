@@ -744,9 +744,13 @@ static int gqa_forward_fused(
     fp_rc = launch_configured(selected.config);
     if (fp_rc != 0 &&
         selected.source != hipdnn_ep::GqaTuneSource::Heuristic) {
+      // Ask for tier 3 explicitly. Re-running resolve_* would walk the same
+      // tiers that just produced the rejected config.
       RUNTIME_DEBUG_LOG(
-          "[REAL] rejected GQA prefill LUT config; using heuristic\n");
-      selected = hipdnn_ep::gqa_autotune_resolve_prefill(nullptr, request);
+          "[REAL] rejected GQA prefill config (source=%s); using heuristic\n",
+          hipdnn_ep::gqa_tune_source_name(selected.source));
+      selected = {hipdnn_ep::gqa_autotune_fallback_prefill(request),
+                  hipdnn_ep::GqaTuneSource::Heuristic};
       fp_rc = launch_configured(selected.config);
     }
     RUNTIME_DEBUG_LOG(
