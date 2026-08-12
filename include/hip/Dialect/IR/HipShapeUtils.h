@@ -91,9 +91,6 @@ FailureOr<SmallVector<int64_t>>
 inferBroadcastShape(ArrayRef<ArrayRef<int64_t>> shapes,
                     function_ref<InFlightDiagnostic()> emitError);
 
-/// Generated-verifier target for `Hip_DpsOp_Broadcast`.
-LogicalResult verifyBroadcastDpsOp(Operation *op, ValueRange operands);
-
 /// Build an `OpFoldResult` for one dimension of a reify-callable op's
 /// result:
 ///   - if `staticDim` is not `kDynamic`, returns `b.getIndexAttr(staticDim)`
@@ -118,14 +115,11 @@ OpFoldResult reifyDimOrConstant(OpBuilder &b, Location loc, int64_t staticDim,
 FailureOr<SmallVector<OpFoldResult>>
 reifyElementwiseSameShape(OpBuilder &b, Location loc, Value source);
 
-/// One-shot generated reifier and verifier targets for named-source
-/// same-shape operations.
+/// One-shot reifier target for named-source same-shape operations.
 LogicalResult
 reifyElementwiseSameShapeFor(OpBuilder &b, Location loc, Value source,
                              Operation *op,
                              ReifiedRankedShapedTypeDims &reified);
-LogicalResult verifySameShapeDpsOp(Operation *op, Value source,
-                                   unsigned initIndex = 0);
 
 /// Compute the NumPy-broadcast result shape over `operands`. Static
 /// broadcastability is validated before any `tensor.dim` or arithmetic op is

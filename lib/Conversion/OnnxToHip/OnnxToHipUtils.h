@@ -68,39 +68,6 @@ inline mlir::Value createEmptyTensor(mlir::OpBuilder &builder,
                                        resultType.getElementType(), dynSizes);
 }
 
-enum class CompileTimeConstantScope {
-  InlineOnly,
-  IncludeExternalized,
-};
-
-/// Return the dense payload of a compile-time tensor constant. Inline matching
-/// covers `arith.constant` and pre-externalization ops carrying a `value`
-/// attribute. `IncludeExternalized` additionally recognizes
-/// `to_tensor(get_global)` when the global retains an initializer.
-///
-/// Externalized-global lookup remains conversion-side because generic HIP
-/// dialect shape code must not depend on bufferization/global policy. Integer
-/// payload parsing is nevertheless shared through
-/// `mlir::hip::parseDenseIntElements`.
-mlir::DenseElementsAttr
-getCompileTimeConstantTensor(mlir::Value value,
-                             CompileTimeConstantScope scope =
-                                 CompileTimeConstantScope::IncludeExternalized);
-
-/// Recognize \p value as a compile-time rank-0/rank-1 integer tensor, covering
-/// the inline and optional externalized forms selected by \p scope.
-bool extractConstantIntTensor(
-    mlir::Value value, llvm::SmallVectorImpl<int64_t> &out,
-    std::optional<int64_t> expectedRank = std::nullopt,
-    CompileTimeConstantScope scope =
-        CompileTimeConstantScope::IncludeExternalized);
-
-/// Rank-1 convenience wrapper around `extractConstantIntTensor`.
-bool extractConstantIntVector(
-    mlir::Value value, llvm::SmallVectorImpl<int64_t> &out,
-    CompileTimeConstantScope scope =
-        CompileTimeConstantScope::IncludeExternalized);
-
 /// Build a tensor.empty with the imported result type and the dynamic sizes
 /// described by `reifiedShape`. Validation completes before any index values or
 /// destination IR are emitted.
@@ -108,19 +75,6 @@ mlir::FailureOr<mlir::Value> createEmptyTensorFromReifiedShape(
     mlir::OpBuilder &builder, mlir::Location loc,
     mlir::RankedTensorType resultType,
     llvm::ArrayRef<mlir::OpFoldResult> reifiedShape);
-
-/// Create a DPS init whose shape comes from one named semantic source operand.
-mlir::FailureOr<mlir::Value>
-createSameShapeEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
-                           mlir::RankedTensorType resultType,
-                           mlir::Value source);
-
-/// Derive a tensor type for a synthesized intermediate from a reified shape.
-/// Constant dimensions become static; all other dimensions stay dynamic.
-mlir::RankedTensorType
-getTensorTypeFromReifiedShape(llvm::ArrayRef<mlir::OpFoldResult> reifiedShape,
-                              mlir::Type elementType,
-                              mlir::Attribute encoding = {});
 
 /// Resolve the ranked result type of an ONNX reduction op (ReduceMax / Sum /
 /// Mean / Prod / ...).
