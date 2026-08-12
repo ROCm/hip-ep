@@ -52,6 +52,7 @@
 #include "../runtime_state_internal.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
+#include "gqa_autotune.h"
 #include "hip_arch_compat.h"
 #include "hip_custom_kernels.h"
 #include "runtime_types.h"
@@ -471,17 +472,65 @@ static int gqa_forward_fused(
       // int8 halves the DRAM traffic). One entry serves every format --
       // kv_dtype selects the code path inside the kernel; scales feed dequant.
       //
-      // Decode structurally clamps kv_lo to the requested local window. This
-      // keeps sliding layers on the fused autotuned path rather than treating
-      // the window as a decomposed score-mask operation.
-      int drc = hip_gqa_flash_decode(
-          stream, qSrc, present_key, present_value, output, partials,
-          static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
-          static_cast<int>(d), static_cast<int>(skv),
-          static_cast<int>(present_seq), kFlashDecodeMaxSplits, scale,
-          seqlens_k_ptr, static_cast<int>(local_window_size), head_sink,
-          static_cast<int>(use_smooth_softmax), kv_dtype_abi(kv_format),
-          kv_quantized ? k_scale : nullptr, kv_quantized ? v_scale : nullptr);
+      // Decode structurally clamps kv_lo to the requested local window. Keep the
+      // window in the LUT key: it changes the range the split-K kernels scan and
+      // therefore the split count that wins.
+      const int kv_dtype = kv_dtype_abi(kv_format);
+      int drc;
+      if (hipdnn_ep::gqa_autotune_mode(state->gqa_autotune_policy) ==
+          hipdnn_ep::GqaAutotuneMode::Online) {
+        drc = hip_gqa_flash_decode(
+            stream, qSrc, present_key, present_value, output, partials,
+            static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
+            static_cast<int>(d), static_cast<int>(skv),
+            static_cast<int>(present_seq), kFlashDecodeMaxSplits, scale,
+            seqlens_k_ptr, static_cast<int>(local_window_size), head_sink,
+            use_smooth_softmax ? 1 : 0, kv_dtype,
+            kv_quantized ? k_scale : nullptr,
+            kv_quantized ? v_scale : nullptr);
+      } else {
+        // B==1 already paid (and caches) the seqlens_k read above, so the LUT
+        // sees the length the kernel will actually scan without adding a sync.
+        // For B>1 this is the host-known shape length, which is the upper
+        // bound; it rounds up to the same bucket or the next one.
+        int effective_skv = static_cast<int>(skv);
+        if (seqlens_k_pre != kSeqlensKNotRead && seqlens_k_pre >= 0)
+          effective_skv = seqlens_k_pre + 1;
+        const bool exact_length_known =
+            seqlens_k_ptr == nullptr ||
+            (B == 1 && seqlens_k_pre != kSeqlensKNotRead &&
+             seqlens_k_pre >= 0);
+        const hipdnn_ep::GqaDecodeRequest request{
+            kv_dtype,
+            static_cast<int>(B),
+            static_cast<int>(H),
+            static_cast<int>(G),
+            static_cast<int>(d),
+            effective_skv,
+            exact_length_known,
+            static_cast<int>(present_seq),
+            kFlashDecodeMaxSplits,
+            static_cast<int>(local_window_size)};
+        const hipdnn_ep::GqaDecodeResult selected =
+            hipdnn_ep::gqa_autotune_resolve_decode(
+                state->gqa_autotune_policy, request);
+        drc = hip_gqa_flash_decode_v2_configured(
+            stream, qSrc, present_key, present_value, output, partials,
+            static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
+            static_cast<int>(d), effective_skv,
+            static_cast<int>(present_seq), kFlashDecodeMaxSplits, scale,
+            seqlens_k_ptr, static_cast<int>(local_window_size), head_sink,
+            use_smooth_softmax ? 1 : 0, kv_dtype,
+            kv_quantized ? k_scale : nullptr,
+            kv_quantized ? v_scale : nullptr,
+            selected.config.use_wmma ? 1 : 0, selected.config.splits);
+        RUNTIME_DEBUG_LOG(
+            "[REAL] GQA decode config source=%s impl=%s splits=%d "
+            "effective_skv=%d\n",
+            hipdnn_ep::gqa_tune_source_name(selected.source),
+            selected.config.use_wmma ? "wmma" : "scalar",
+            selected.config.splits, effective_skv);
+      }
       if (drc != 0)
         return -1;
       RUNTIME_DEBUG_LOG(
@@ -656,23 +705,66 @@ static int gqa_forward_fused(
     attn_max_seq = static_cast<int>(total_seq);
   }
 
-  // Single unified entry; v5 (d==64) / v7 (d==128) selection lives in the
-  // kernel TU (gqa_kernel.hip). v3 carries the sink and the window; it returns
-  // -1 rather than dropping either when the kernel for this d cannot apply it,
-  // and the caller then falls back to the decomposed path.
-  int fp_rc = hip_gqa_flash_prefill(
-      stream, qSrc, kAttn, vAttn, output, static_cast<int>(B),
-      static_cast<int>(H), static_cast<int>(G), static_cast<int>(sq),
-      static_cast<int>(total_seq), static_cast<int>(d), attn_max_seq,
-      static_cast<int>(past_len), scale, local_window_size, head_sink,
-      static_cast<int>(H), use_smooth_softmax ? 1 : 0);
+  int fp_rc;
+  if (hipdnn_ep::gqa_autotune_mode(state->gqa_autotune_policy) ==
+      hipdnn_ep::GqaAutotuneMode::Online) {
+    fp_rc = hip_gqa_flash_prefill(
+        stream, qSrc, kAttn, vAttn, output, static_cast<int>(B),
+        static_cast<int>(H), static_cast<int>(G), static_cast<int>(sq),
+        static_cast<int>(total_seq), static_cast<int>(d), attn_max_seq,
+        static_cast<int>(past_len), scale, local_window_size, head_sink,
+        static_cast<int>(H), use_smooth_softmax ? 1 : 0);
+  } else {
+    const hipdnn_ep::GqaPrefillVariant variant =
+        d == 64   ? hipdnn_ep::GqaPrefillVariant::V5
+        : d == 128 ? hipdnn_ep::GqaPrefillVariant::V7
+                   : hipdnn_ep::GqaPrefillVariant::V8;
+    const hipdnn_ep::GqaPrefillRequest request{
+        variant,
+        static_cast<int>(B),
+        static_cast<int>(H),
+        static_cast<int>(G),
+        static_cast<int>(d),
+        static_cast<int>(sq),
+        static_cast<int>(total_seq),
+        attn_max_seq,
+        local_window_size};
+    hipdnn_ep::GqaPrefillResult selected =
+        hipdnn_ep::gqa_autotune_resolve_prefill(
+            state->gqa_autotune_policy, request);
+    auto launch_configured = [&](const hipdnn_ep::GqaPrefillConfig &config) {
+      return hip_gqa_flash_prefill_v3_configured(
+          stream, qSrc, kAttn, vAttn, output, static_cast<int>(B),
+          static_cast<int>(H), static_cast<int>(G), static_cast<int>(sq),
+          static_cast<int>(total_seq), static_cast<int>(d), attn_max_seq,
+          static_cast<int>(past_len), scale, local_window_size, head_sink,
+          static_cast<int>(H), use_smooth_softmax ? 1 : 0, config.m_tiles,
+          config.bkv, config.nw, config.mt, config.nd);
+    };
+    fp_rc = launch_configured(selected.config);
+    if (fp_rc != 0 &&
+        selected.source != hipdnn_ep::GqaTuneSource::Heuristic) {
+      RUNTIME_DEBUG_LOG(
+          "[REAL] rejected GQA prefill LUT config; using heuristic\n");
+      selected = hipdnn_ep::gqa_autotune_resolve_prefill(nullptr, request);
+      fp_rc = launch_configured(selected.config);
+    }
+    RUNTIME_DEBUG_LOG(
+        "[REAL] GQA prefill config source=%s v%d "
+        "m_tiles=%d bkv=%d nw=%d mt=%d nd=%d\n",
+        hipdnn_ep::gqa_tune_source_name(selected.source),
+        d == 64 ? 5 : (d == 128 ? 7 : 8), selected.config.m_tiles,
+        selected.config.bkv, selected.config.nw, selected.config.mt,
+        selected.config.nd);
+  }
   // window is logged because it selects the HAS_WINDOW instantiation, so a
   // dispatch that looks identical here can be two different kernels.
   RUNTIME_DEBUG_LOG(
       "[REAL] GQA fused prefill (%s d=%lld -> v%d): B=%lld sq=%lld "
       "total_seq=%lld H=%lld G=%lld past_len=%lld sink=%d smooth=%d window=%d "
       "rc=%d\n",
-      kv_quantized ? "quant" : "fp16", (long long)d, (d == 64 ? 5 : 7),
+      kv_quantized ? "quant" : "fp16", (long long)d,
+      (d == 64 ? 5 : (d == 128 ? 7 : 8)),
       (long long)B, (long long)sq, (long long)total_seq, (long long)H,
       (long long)G, (long long)past_len, static_cast<int>(head_sink != nullptr),
       static_cast<int>(use_smooth_softmax), local_window_size, fp_rc);

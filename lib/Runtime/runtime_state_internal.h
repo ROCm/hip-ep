@@ -196,6 +196,11 @@ struct RuntimeState {
   // Allocated in state_init, freed in state_cleanup.
   void *op_profile;
 
+  // Session-owned GQA offline performance policy (GqaAutotunePolicy*).
+  // Loaded once from gqa_autotune.fb through the EP FileSystem. The concrete
+  // type lives in real/gqa_autotune.cpp to keep this ABI-facing struct opaque.
+  void *gqa_autotune_policy;
+
   // Device-side error flag used by kernels to report runtime-invalid inputs.
   // 0 = no error, non-zero = error code (currently -1).
   int *device_error_flag;

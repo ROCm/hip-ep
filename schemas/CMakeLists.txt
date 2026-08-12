@@ -20,6 +20,7 @@ message(STATUS "Using flatc: ${FLATC_EXECUTABLE}")
 # Generate C++ headers from .fbs schemas
 set(FBS_SCHEMAS
     ${CMAKE_CURRENT_SOURCE_DIR}/compilation_options.fbs
+    ${CMAKE_CURRENT_SOURCE_DIR}/gqa_autotune.fbs
     ${CMAKE_CURRENT_SOURCE_DIR}/model_metadata.fbs
 )
 
