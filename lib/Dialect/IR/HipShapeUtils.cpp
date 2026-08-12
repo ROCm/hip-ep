@@ -36,6 +36,14 @@ using namespace mlir::hip;
 
 namespace mlir::hip::detail {
 
+ArrayRef<int64_t> getShapeOf(Value value) {
+  if (auto tensorType = dyn_cast<RankedTensorType>(value.getType()))
+    return tensorType.getShape();
+  if (auto memrefType = dyn_cast<MemRefType>(value.getType()))
+    return memrefType.getShape();
+  return {};
+}
+
 /// Pretty-print a shape vector with `?` for kDynamic. Used in diagnostics.
 std::string formatShape(ArrayRef<int64_t> shape) {
   std::string out;
@@ -313,28 +321,6 @@ LogicalResult mlir::hip::verifyHipOpShape(
   return success();
 }
 
-LogicalResult mlir::hip::verifyBroadcastDpsOp(Operation *op,
-                                              ValueRange operands) {
-  auto dpsOp = dyn_cast<DestinationStyleOpInterface>(op);
-  if (!dpsOp)
-    return op->emitOpError(
-        "broadcast verification requires DestinationStyleOpInterface");
-  SmallVector<Value> inits = dpsOp.getDpsInits();
-  SmallVector<Value> dataOperands(operands.begin(), operands.end());
-  llvm::append_range(dataOperands, inits);
-  if (failed(verifyDpsComputeOp(op, dataOperands, /*numInits=*/1)))
-    return failure();
-
-  SmallVector<ArrayRef<int64_t>> shapes;
-  shapes.reserve(operands.size());
-  for (Value operand : operands)
-    shapes.push_back(cast<ShapedType>(operand.getType()).getShape());
-  return verifyHipOpShape(op, [&] {
-    return inferBroadcastShape(
-        shapes, [&]() { return op->emitOpError("broadcast verification: "); });
-  });
-}
-
 OpFoldResult mlir::hip::reifyDimOrConstant(OpBuilder &b, Location loc,
                                            int64_t staticDim, Value source,
                                            int64_t sourceDim) {
@@ -363,45 +349,15 @@ mlir::hip::reifyElementwiseSameShapeFor(OpBuilder &b, Location loc,
                                         Value source, Operation *op,
                                         ReifiedRankedShapedTypeDims &reified) {
   if (op->getNumResults() == 0)
-    return failure();
+    return op->emitOpError(
+        "same-shape reification requires at least one result");
   FailureOr<SmallVector<OpFoldResult>> dims =
       reifyElementwiseSameShape(b, loc, source);
   if (failed(dims))
-    return failure();
+    return op->emitOpError(
+        "same-shape reification requires a ranked tensor source");
   reified.assign({std::move(*dims)});
   return success();
-}
-
-LogicalResult mlir::hip::verifySameShapeDpsOp(Operation *op, Value source,
-                                              unsigned initIndex) {
-  auto dpsOp = dyn_cast<DestinationStyleOpInterface>(op);
-  if (!dpsOp)
-    return op->emitOpError(
-        "same-shape verification requires DestinationStyleOpInterface");
-
-  // Generated same-shape verifiers have no leaf-specific operand list. Recover
-  // every shaped DPS input here so non-source operands participate in the same
-  // all-tensor-or-all-memref and result/init checks as dedicated verifiers.
-  // Non-shaped DPS inputs such as !hip.context are intentionally ignored.
-  SmallVector<Value> dataOperands;
-  for (OpOperand *operand : dpsOp.getDpsInputOperands()) {
-    Value value = operand->get();
-    if (isa<RankedTensorType, MemRefType>(value.getType()))
-      dataOperands.push_back(value);
-  }
-  SmallVector<Value> inits = dpsOp.getDpsInits();
-  llvm::append_range(dataOperands, inits);
-  if (failed(verifyDpsComputeOp(op, dataOperands, /*numInits=*/1)))
-    return failure();
-
-  auto sourceType = dyn_cast<ShapedType>(source.getType());
-  if (!sourceType || !sourceType.hasRank())
-    return op->emitOpError(
-        "same-shape source operand must be a ranked shaped type");
-  SmallVector<int64_t> expected(sourceType.getShape());
-  return verifyHipOpShape(
-      op, [&]() -> FailureOr<SmallVector<int64_t>> { return expected; },
-      initIndex);
 }
 
 FailureOr<SmallVector<OpFoldResult>> mlir::hip::reifyBroadcastResultShape(

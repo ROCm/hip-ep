@@ -18,52 +18,6 @@
 namespace mlir {
 namespace hip {
 
-mlir::DenseElementsAttr
-getCompileTimeConstantTensor(mlir::Value value,
-                             CompileTimeConstantScope scope) {
-  // Optional ONNX operands arrive as a null Value; `getDefiningOp` would
-  // dereference it.
-  if (!value)
-    return {};
-  mlir::Operation *defOp = value.getDefiningOp();
-  if (!defOp)
-    return {};
-
-  mlir::DenseElementsAttr dense;
-  if (auto cst = mlir::dyn_cast<mlir::arith::ConstantOp>(defOp))
-    dense = mlir::dyn_cast<mlir::DenseElementsAttr>(cst.getValue());
-  if (!dense)
-    if (auto attr = defOp->getAttr("value"))
-      dense = mlir::dyn_cast<mlir::DenseElementsAttr>(attr);
-  if (!dense && scope == CompileTimeConstantScope::IncludeExternalized) {
-    // Externalized constant: to_tensor(get_global) whose global still carries
-    // an initial value.
-    if (auto toTensor = mlir::dyn_cast<mlir::bufferization::ToTensorOp>(defOp))
-      if (auto getGlobal =
-              toTensor.getBuffer().getDefiningOp<mlir::memref::GetGlobalOp>())
-        if (auto module = getGlobal->getParentOfType<mlir::ModuleOp>())
-          if (auto global = module.lookupSymbol<mlir::memref::GlobalOp>(
-                  getGlobal.getNameAttr()))
-            dense = mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
-                global.getInitialValueAttr());
-  }
-  return dense;
-}
-
-bool extractConstantIntTensor(mlir::Value value,
-                              llvm::SmallVectorImpl<int64_t> &out,
-                              std::optional<int64_t> expectedRank,
-                              CompileTimeConstantScope scope) {
-  return mlir::hip::parseDenseIntElements(
-      getCompileTimeConstantTensor(value, scope), out, expectedRank);
-}
-
-bool extractConstantIntVector(mlir::Value value,
-                              llvm::SmallVectorImpl<int64_t> &out,
-                              CompileTimeConstantScope scope) {
-  return extractConstantIntTensor(value, out, /*expectedRank=*/1, scope);
-}
-
 mlir::FailureOr<mlir::Value> createEmptyTensorFromReifiedShape(
     mlir::OpBuilder &builder, mlir::Location loc,
     mlir::RankedTensorType resultType,
@@ -91,29 +45,6 @@ mlir::FailureOr<mlir::Value> createEmptyTensorFromReifiedShape(
   return mlir::Value(
       mlir::tensor::EmptyOp::create(builder, loc, resultType.getShape(),
                                     resultType.getElementType(), dynSizes));
-}
-
-mlir::FailureOr<mlir::Value>
-createSameShapeEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
-                           mlir::RankedTensorType resultType,
-                           mlir::Value source) {
-  mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>> shape =
-      mlir::hip::reifyElementwiseSameShape(builder, loc, source);
-  if (mlir::failed(shape))
-    return mlir::failure();
-  return createEmptyTensorFromReifiedShape(builder, loc, resultType, *shape);
-}
-
-mlir::RankedTensorType
-getTensorTypeFromReifiedShape(llvm::ArrayRef<mlir::OpFoldResult> reifiedShape,
-                              mlir::Type elementType,
-                              mlir::Attribute encoding) {
-  llvm::SmallVector<int64_t> shape;
-  shape.reserve(reifiedShape.size());
-  for (mlir::OpFoldResult dim : reifiedShape)
-    shape.push_back(
-        mlir::getConstantIntValue(dim).value_or(mlir::ShapedType::kDynamic));
-  return mlir::RankedTensorType::get(shape, elementType, encoding);
 }
 
 mlir::FailureOr<mlir::Value>
