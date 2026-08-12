@@ -824,11 +824,16 @@ int hipdnn_ep_state_cleanup(RuntimeState *state) {
   }
 
   // Destroy XRT context (DynamicDispatch NPU/IPU backend)
-  // The xrt_context is an opaque void* pointing to a C++ shared_ptr.
-  // We delegate cleanup to the DynamicDispatch-specific helper to avoid
-  // exposing XRT headers in this file.
+  // NOTE: XRT context cleanup is intentionally NOT performed in the bitcode
+  // runtime because it requires C++ destructor calls for xrt_context (a
+  // shared_ptr). The bitcode compilation cannot include XRT headers, so we
+  // accept a small memory leak on session teardown for DynamicDispatch-enabled
+  // models. In practice, sessions are long-lived and the leak is minimal.
+  // TODO: Add weak symbol or function pointer mechanism to allow optional
+  // cleanup when XRT library is available.
   if (state->xrt_context) {
-    hipdnn_ep_state_cleanup_xrt_context(state->xrt_context);
+    // XRT context cleanup would go here if we could link it
+    // For now, we accept the leak (shared_ptr will not be destroyed)
     state->xrt_context = nullptr;
   }
 

@@ -376,16 +376,4 @@ void *hipdnn_ep_state_get_xrt_context(RuntimeState *state) {
   return ctx ? ctx.get() : nullptr;
 }
 
-// Cleanup XRT context (called from hipdnn_ep_state_cleanup)
-// This is a helper to properly destroy the C++ shared_ptr without
-// exposing XRT headers to the main runtime state file
-void hipdnn_ep_state_cleanup_xrt_context(void *xrt_context_ptr) {
-  if (xrt_context_ptr) {
-    auto *ctx_ptr = static_cast<
-        std::shared_ptr<ryzenai::dynamic_dispatch::xrt_context> *>(
-        xrt_context_ptr);
-    delete ctx_ptr;
-  }
-}
-
 } // extern "C"

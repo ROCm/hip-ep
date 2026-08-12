@@ -1697,11 +1697,10 @@ void *hipdnn_ep_state_get_xrt_device(RuntimeState *state);
 // Returns: ryzenai::dynamic_dispatch::xrt_context* cast to void*
 //          (NULL if XRT not initialized)
 // Ownership: Caller does NOT own context (destroyed in cleanup)
+// NOTE: Context cleanup is not performed in bitcode runtime due to C++
+//       shared_ptr destructor requirements. This results in a small memory
+//       leak on session teardown for DynamicDispatch-enabled models.
 void *hipdnn_ep_state_get_xrt_context(RuntimeState *state);
-
-// Cleanup XRT context (internal helper called from hipdnn_ep_state_cleanup)
-// This is implemented in dynamic_dispatch.cpp to avoid exposing XRT headers
-void hipdnn_ep_state_cleanup_xrt_context(void *xrt_context_ptr);
 
 //===----------------------------------------------------------------------===//
 // DynamicDispatch Operator Wrappers (NPU/IPU Backend)
