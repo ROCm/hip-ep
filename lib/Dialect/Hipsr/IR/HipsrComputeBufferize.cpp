@@ -14,6 +14,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 
 using namespace mlir;
@@ -33,6 +34,29 @@ BlockArgument getEntryArgument(ComputeOp computeOp, unsigned operandIndex) {
   return computeOp.getBody().front().getArgument(operandIndex);
 }
 
+bool isValueWritten(Value value, const bufferization::AnalysisState &state) {
+  SmallVector<OpOperand *> worklist;
+  DenseSet<OpOperand *> visited;
+  for (OpOperand &use : value.getUses())
+    worklist.push_back(&use);
+
+  while (!worklist.empty()) {
+    OpOperand *use = worklist.pop_back_val();
+    if (!visited.insert(use).second)
+      continue;
+    if (state.bufferizesToMemoryWrite(*use))
+      return true;
+    if (state.bufferizesToAliasOnly(*use)) {
+      for (const bufferization::AliasingValue &alias :
+           state.getAliasingValues(*use)) {
+        for (OpOperand &aliasUse : alias.value.getUses())
+          worklist.push_back(&aliasUse);
+      }
+    }
+  }
+  return false;
+}
+
 } // namespace
 
 //===----------------------------------------------------------------------===//
@@ -47,9 +71,13 @@ bool ComputeOpBufferization::bufferizesToMemoryRead(
 }
 
 bool ComputeOpBufferization::bufferizesToMemoryWrite(
-    Operation *, OpOperand &opOperand,
-    const bufferization::AnalysisState &) const {
-  return isHipsrDestinationOperand(opOperand);
+    Operation *op, OpOperand &opOperand,
+    const bufferization::AnalysisState &state) const {
+  if (!isHipsrDestinationOperand(opOperand))
+    return false;
+  return isValueWritten(
+      getEntryArgument(cast<ComputeOp>(op), opOperand.getOperandNumber()),
+      state);
 }
 
 bool ComputeOpBufferization::isWritable(

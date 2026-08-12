@@ -107,8 +107,14 @@ func.func @yield_destination(%ctx: !hipsr.context, %shape: !shape.shape,
 // A pool_domain body with DPS matmul/add followed by non-DPS compute that
 // flattens its input, entered from a pure tensor boundary. The body follows the
 // intended pipeline layout: shape regions first, then the allocations they
-// describe, then the data ops, then the preserve_shape links. init3 is the
-// flattened 1D buffer (m * n).
+// describe, then the data ops, then the preserve_shape links.
+//
+// compute takes %sum as both ins and outs. The body only builds a collapse view
+// of that buffer, so the result lands in init2 and needs no buffer of its own
+// and the domain allocates twice rather than three times. The shared value is
+// only conflict-free because bufferizesToMemoryWrite asks the body, where the
+// outs block argument has no uses; reporting every outs as written would make
+// the analysis allocate a second buffer for it.
 //
 // matmul and add are hip ops rather than hipsr ones because Hipsr_MatMulOp and
 // Hipsr_AddOp still require a device memref, which a tensor boundary cannot
@@ -140,12 +146,11 @@ func.func @yield_destination(%ctx: !hipsr.context, %shape: !shape.shape,
 // CHECK-NEXT: scf.yield %[[S3]] : !shape.shape
 // CHECK-NEXT: }
 // CHECK-NEXT: %[[INIT1:.+]] = memref.alloc(%[[M]]){{.*}} : memref<?x512xf16>
-// CHECK-NEXT: %[[INIT3:.+]] = memref.alloc(%[[FLAT_SIZE]]){{.*}} : memref<?xf16>
 // CHECK-NEXT: hip.matmul(%[[DHIP]]) ins(%[[IN]], %[[W]] : memref<?x256xf16>, memref<256x512xf16>) outs(%[[INIT1]] : memref<?x512xf16>)
 // CHECK-NEXT: %[[INIT2:.+]] = memref.alloc(%[[M]]){{.*}} : memref<?x512xf16>
 // CHECK-NEXT: hip.add(%[[DHIP]]) ins(%[[INIT1]], %[[B]] : memref<?x512xf16>, memref<?x512xf16>) outs(%[[INIT2]] : memref<?x512xf16>)
-// CHECK-NEXT: %[[FLAT:.+]] = hipsr.compute(%[[DCTX]]) ins(%[[INIT2]] : memref<?x512xf16>) outs(%[[INIT3]] : memref<?xf16>) {
-// CHECK-NEXT: ^bb0(%[[BODY_CTX:.+]]: !hipsr.context, %[[BODY_IN:.+]]: memref<?x512xf16>, %[[BODY_DEST:.+]]: memref<?xf16>):
+// CHECK-NEXT: %[[FLAT:.+]] = hipsr.compute(%[[DCTX]]) ins(%[[INIT2]] : memref<?x512xf16>) outs(%[[INIT2]] : memref<?x512xf16>) {
+// CHECK-NEXT: ^bb0(%[[BODY_CTX:.+]]: !hipsr.context, %[[BODY_IN:.+]]: memref<?x512xf16>, %[[BODY_DEST:.+]]: memref<?x512xf16>):
 // CHECK-NEXT: %[[COLLAPSED:.+]] = memref.collapse_shape %[[BODY_IN]] {{\[\[}}0, 1]] : memref<?x512xf16> into memref<?xf16>
 // CHECK-NEXT: hipsr.compute_yield %[[COLLAPSED]] : memref<?xf16>
 // CHECK-NEXT: } : memref<?xf16>{{$}}
