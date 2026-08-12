@@ -32,7 +32,7 @@ def Hipsr_ComputeOp : Hipsr_Op<"compute", [
 
     This is not a DPS op: an `outs` entry supplies the destination buffer for
     the result in the same position, but its type may differ from that
-    result's, which is what lets a body reshape its destination. Result types
+    result's. Result types
     come from `hipsr.compute_yield`; the `outs` values come from
     `hipsr.placeholder`, which owns the output-shape computation, so this op
     has no shape region of its own. Operands and results accept ranked tensors
@@ -41,14 +41,7 @@ def Hipsr_ComputeOp : Hipsr_Op<"compute", [
 
     Each result is held in the buffer its `outs` entry names: the yielded value
     has to be that entry seen through producers that keep a whole buffer --
-    reshapes, casts, destination-passing writes. Bufferization relies on this
-    and reports the two as `BufferRelation::Equivalent` even where their types
-    disagree, the same way `memref.collapse_shape` stays equivalent to the
-    memref it reshapes. A body may therefore view its destination with another
-    type, but it may not yield a view of an input: that would leave the
-    destination unused and put the result in memory the pool allocator handed
-    to someone else. Nothing checks this yet; the verifier is still to be
-    written.
+    reshapes, casts, destination-passing writes.
 
     Example (the body flattens its destination, so the result type differs
     from `outs`):
