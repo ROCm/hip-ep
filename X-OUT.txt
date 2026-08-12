@@ -1,0 +1,1574 @@
+[build] REPO=D:\DEVELOP\WORKFINAL\hip-ep
+[build] WORKSPACE=D:\DEVELOP\WORKFINAL
+[build] platform=windows  jobs=24
+[build] cmake generator: Visual Studio 17 2022
+[build] Checking git submodules ...
+[build]   submodules OK.
+[build] auto-detected HIP_ARCHITECTURES=gfx1150
+
+====================================================================
+> Configure (HIP_ARCHITECTURES=gfx1150)
+====================================================================
+[build] cmake -S 'D:\DEVELOP\WORKFINAL\hip-ep' -B 'D:\DEVELOP\WORKFINAL\build\hip-ep' -G 'Visual Studio 17 2022' -A x64 -DCMAKE_BUILD_TYPE=Release '-DCMAKE_INSTALL_PREFIX=D:\DEVELOP\WORKFINAL\install' -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DBUILD_EP=ON -DBUILD_HIP_TOOLS=ON -DBUILD_PYTHON_WHEEL=ON -DBUILD_MOCK_RUNTIME=OFF -DHIP_ARCHITECTURES=gfx1150 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache '-DPython3_EXECUTABLE=C:\Users\amd\anaconda3\envs\hipdnn-ep\python.exe'
+-- Selecting Windows SDK version 10.0.26100.0 to target Windows 10.0.26200.
+-- [onnx-hipdnn-ep] THEROCK_DIST: d:/DEVELOP/WORKFINAL/_therock
+-- Cpptrace auto config: Using dbghelp for symbols
+-- Cpptrace auto config: Using dbghelp for demangling
+-- LLVM/MLIR not found; building from source (llvmorg-22.1.0)
+-- bolt project is disabled
+-- clang project is enabled
+-- clang-tools-extra project is disabled
+-- compiler-rt project is disabled
+-- cross-project-tests project is disabled
+-- libclc project is disabled
+-- lld project is enabled
+-- lldb project is disabled
+-- mlir project is enabled
+-- openmp project is disabled
+-- polly project is disabled
+-- flang project is disabled
+-- libc project is disabled
+-- Found Python3: C:\Users\amd\anaconda3\envs\hipdnn-ep\python.exe (found suitable version "3.14.6", minimum required is "3.0") found components: Interpreter
+-- Could NOT find LibXml2 (missing: LIBXML2_LIBRARY LIBXML2_INCLUDE_DIR) 
+-- Could NOT find Backtrace (missing: Backtrace_LIBRARY Backtrace_INCLUDE_DIR) 
+-- LLVM host triple: x86_64-pc-windows-msvc
+-- Native target architecture is X86
+-- Threads enabled.
+-- Doxygen disabled.
+-- Could NOT find OCaml (missing: OCAMLFIND OCAML_VERSION OCAML_STDLIB_PATH) 
+-- OCaml bindings disabled.
+-- LLVM default target triple: x86_64-pc-windows-msvc
+-- Targeting X86
+-- LLD version: 22.1.0
+-- Clang version: 22.1.0
+-- BugpointPasses ignored -- Loadable modules not supported on this platform.
+-- Not building llvm-mt.exe because libxml2 is not available
+-- Using MorphiZen subtree: morphizen
+-- onnxruntime not found via find_package; fetching https://github.com/microsoft/onnxruntime/releases/download/v1.27.0/onnxruntime-win-x64-1.27.0.zip
+CMake Warning (author) at C:/Users/amd/anaconda3/envs/hipdnn-ep/Library/share/cmake-4.4/Modules/FetchContent.cmake:1386 (message):
+  The DOWNLOAD_EXTRACT_TIMESTAMP option was not given and policy CMP0135 is
+  not set.  The policy's OLD behavior will be used.  When using a URL
+  download, the timestamps of extracted files should preferably be that of
+  the time of extraction, otherwise code that depends on the extracted
+  contents might not be rebuilt if the URL changes.  The OLD behavior
+  preserves the timestamps from the archive instead, but this is usually not
+  what you want.  Update your project to the NEW behavior or specify the
+  DOWNLOAD_EXTRACT_TIMESTAMP option with a value of true to avoid this
+  robustness issue.
+Call Stack (most recent call first):
+  cmake/deps.cmake:353 (FetchContent_Declare)
+  CMakeLists.txt:72 (include)
+This warning is for project developers.  Use -Wno-author to suppress it.
+
+-- onnxruntime::onnxruntime synthesized from release zip (v1.27.0)
+-- FindPackage Version info: hip-ep=be1c53e02a2468fcc622b71c0f1cbe27fdc19d51 v0.3.0-39-gbe1c5
+-- protobuf not found; building from source (v34.0)
+CMake Warning (deprecated) at D:/DEVELOP/WORKFINAL/build/hip-ep/_deps/protobuf-src/CMakeLists.txt:7 (cmake_policy):
+  The OLD behavior for policy CMP0141 will be removed from a future version
+  of CMake.
+
+  The cmake-policies(7) manual explains that the OLD behaviors of all
+  policies are deprecated and that a policy should be set to OLD only under
+  specific short-term circumstances.  Projects should be ported to the NEW
+  behavior and not rely on setting a policy to OLD.
+This warning is for project developers.  Use -Wno-author or -Wno-deprecated
+to suppress it.
+
+-- protobuf version: 34.0.0
+-- Could NOT find absl (missing: absl_DIR)
+-- Fallback to downloading Abseil 20250512.1 from GitHub
+-- MorphiZen OPTIONS:
+--   morphizen_ONNXRUNTIME_MORPHIZEN_EP_TARGET : morphizen-core-dynamic-3249214a20ae917c7b4de55d31c24dad4f986973
+--   morphizen_ENABLE_MORPHIZEN_CORE_DYNAMIC : ON
+--   MORPHIZEN_EMBEDDED_RESOURCE_PATH : 
+--   morphizen_WITH_MORPHIZEN_CONFIG_FILE : ON
+--   MORPHIZEN_JSON_CONFIG_FILE : D:/DEVELOP/WORKFINAL/hip-ep/etc/morphizen_config.json
+--   MORPHIZEN_VERSION_INFO_FILE : D:/DEVELOP/WORKFINAL/build/hip-ep/version.txt
+--   morphizen_OUTPUT_NAME : hipgpu
+--   MORPHIZEN_EP_REGISTRATION_NAME : hipgpu
+--   TRIM_CONFIG : OFF
+--   BUILD_PYTHON : 
+--   morphizen_ENABLE_ORT_BRIDGE : ON
+--   morphizen_ENABLE_ONNX_BACKEND : OFF
+--   morphizen_ENABLE_MLIR_BACKEND : ON
+--   morphizen_ENABLE_UNIT_TEST : OFF
+--   morphizen_ENABLE_BOOST : OFF
+--   morphizen_ENABLE_ONNX_SCHEMA_SUPPORT : OFF
+--   morphizen_ENABLE_PATTERN_MATCHING : ON
+--   morphizen_ENABLE_HIP_GPU_ALLOCATOR : ON
+-- MORPHIZEN_DEP =  2024 Advanced Micro Devices, Inc. All rights reserved.
+-- MORPHIZEN_DEP = microsoft_gsl;https://github.com/microsoft/GSL/archive/refs/tags/v4.0.0.zip;cf368104cd22a87b4dd0c80228919bb2df3e2a14
+-- MORPHIZEN_DEP = glog;https://github.com/google/glog/archive/refs/tags/v0.7.1.zip;8ec29681a237045e7ceec92587278c023664f18a
+-- MORPHIZEN_DEP = GTest;https://github.com/google/googletest.git;v1.15.0
+-- MORPHIZEN_DEP = protobuf;https://github.com/protocolbuffers/protobuf/archive/refs/tags/v21.12.zip;7cf2733949036c7d52fda017badcab093fe73bfa
+-- MORPHIZEN_DEP = pybind11;https://github.com/pybind/pybind11/archive/refs/tags/v2.13.6.tar.gz;a2e59f0e7065404b44dfe92a28aca47ba1378dc4
+-- MORPHIZEN_DEP = Boost;https://github.com/boostorg/boost/releases/download/boost-1.84.0/boost-1.84.0.tar.xz;893b5203b862eb9bbd08553e24ff146a
+-- MORPHIZEN_DEP = onnx;https://github.com/onnx/onnx/archive/refs/tags/v1.18.0.zip;f156d032a3af91b66d554e11158b33ca77bbb1f2
+-- MORPHIZEN_DEP = llvm;https://github.com/llvm/llvm-project.git;f8cb7987c64dcffb72414a40560055cb717dbf74
+-- MORPHIZEN_DEP = hash-library;https://github.com/stbrumme/hash-library.git;d389d18112bcf7e4786ec5e8723f3658a7f433d7
+-- cannot find_package(Microsoft.GSL), fetch it from https://github.com/microsoft/GSL/archive/refs/tags/v4.0.0.zip
+-- cannot find_package(glog), fetch it from https://github.com/google/glog/archive/refs/tags/v0.7.1.zip
+-- Could NOT find GTest (missing: GTest_DIR)
+-- Could NOT find Unwind (missing: Unwind_INCLUDE_DIR Unwind_LIBRARY) 
+-- found protobuf at $<BUILD_INTERFACE:D:/DEVELOP/WORKFINAL/build/hip-ep/_deps/protobuf-src/src>;$<INSTALL_INTERFACE:include>
+-- find_package(Python3) for python scripts
+-- Found Python3: C:\Users\amd\anaconda3\envs\hipdnn-ep\python.exe (found version "3.14.6") found components: Interpreter
+-- ONNX backend is disabled, skipping ONNX find/fetch
+-- Fetching hash-library from https://github.com/stbrumme/hash-library.git
+-- Configuring LLVM/MLIR for MorphiZen
+-- LLVM/MLIR not found in CMAKE_PREFIX_PATH, will use FetchContent
+-- Cannot find LLVM in local directories
+-- Fetching LLVM source from GitHub
+-- WARNING: This will download and build LLVM (~20GB, 30-60 min)
+-- LLVM source dir: D:/DEVELOP/WORKFINAL/build/hip-ep/_deps/llvm-project-src
+-- LLVM binary dir: D:/DEVELOP/WORKFINAL/build/hip-ep/_deps/llvm-project-build
+-- LLVM_INCLUDE_DIRS: D:/DEVELOP/WORKFINAL/build/hip-ep/_deps/llvm-project-src/llvm/include;D:/DEVELOP/WORKFINAL/build/hip-ep/_deps/llvm-project-build/include
+-- MLIR_INCLUDE_DIRS: D:/DEVELOP/WORKFINAL/build/hip-ep/_deps/llvm-project-src/mlir/include;D:/DEVELOP/WORKFINAL/build/hip-ep/_deps/llvm-project-build/tools/mlir/include
+-- LLVM_DIR: D:/DEVELOP/WORKFINAL/build/hip-ep/_deps/llvm-project-build/lib/cmake/llvm
+-- MLIR_DIR: D:/DEVELOP/WORKFINAL/build/hip-ep/_deps/llvm-project-build/tools/mlir/cmake/modules/CMakeFiles
+-- LLVM/MLIR configuration complete
+-- ORT_CORE_PROVIDERS_MORPHIZEN_INCLUDE_DIR: D:/DEVELOP/WORKFINAL/hip-ep/morphizen/3rd-party/onnxruntime-morphizen-headers
+-- MORPHIZEN_ORT_API_DIR: D:/DEVELOP/WORKFINAL/hip-ep/morphizen/3rd-party/onnxruntime-morphizen-headers
+MORPHIZEN_COMPILER_OPTIONS is /Zc:__cplusplus;/Qspectre;/guard:cf;/sdl;/MP;/W4;/WX;/EHsc;/w14505;/w14189;/w14456;/w14457;/w14458;/w14459;/w14946;/wd4251;/wd4275;/wd4996;/utf-8
+-- ORT_CORE_PROVIDERS_MORPHIZEN_INCLUDE_DIR: D:/DEVELOP/WORKFINAL/hip-ep/morphizen/3rd-party/onnxruntime-morphizen-headers
+-- MORPHIZEN_ORT_API_DIR: D:/DEVELOP/WORKFINAL/hip-ep/morphizen/3rd-party/onnxruntime-morphizen-headers
+-- ORT_CORE_PROVIDERS_MORPHIZEN_INCLUDE_DIR: D:/DEVELOP/WORKFINAL/hip-ep/morphizen/3rd-party/onnxruntime-morphizen-headers
+-- MORPHIZEN_ORT_API_DIR: D:/DEVELOP/WORKFINAL/hip-ep/morphizen/3rd-party/onnxruntime-morphizen-headers
+-- generating proto --- config.pb.cc config.pb.h
+-- generating proto --- anchor_point.pb.cc anchor_point.pb.h
+-- generating proto --- capability.pb.cc capability.pb.h
+-- generating proto --- pass_context.pb.cc pass_context.pb.h
+-- generating proto --- version.pb.cc version.pb.h
+-- generating proto --- model_compatibility.pb.cc model_compatibility.pb.h
+-- ONNX schema support disabled in morphizen-core-static
+-- Generating version info header...
+CMake Warning at morphizen/morphizen-core/cmake/generate_version_header.cmake:26 (message):
+  Fetching RAI version failed, using default: 9999.0.0
+Call Stack (most recent call first):
+  morphizen/morphizen-core/cmake/morphizen-core-dynamic.cmake:8 (generate_version_info_header)
+  morphizen/morphizen-core/CMakeLists.txt:13 (include)
+
+
+-- Build number: 0
+-- Compiler: MSVC 19.43.34810.0
+-- Generated version header: D:/DEVELOP/WORKFINAL/build/hip-ep/morphizen/morphizen-core/version_info_config.h
+-- create target morphizen-core-dynamic-3249214a20ae917c7b4de55d31c24dad4f986973 for onnxruntime_vitisai_ep.dll
+-- generating proto --- pattern.pb.cc pattern.pb.h
+-- ORT_CORE_PROVIDERS_MORPHIZEN_INCLUDE_DIR: D:/DEVELOP/WORKFINAL/hip-ep/morphizen/3rd-party/onnxruntime-morphizen-headers
+-- MORPHIZEN_ORT_API_DIR: D:/DEVELOP/WORKFINAL/hip-ep/morphizen/3rd-party/onnxruntime-morphizen-headers
+-- ✓ ONNX Runtime version 1.27.0 meets requirements (>= 1.23.0)
+-- flatbuffers >= 25.12.19 not found; building from source
+-- Proceeding with version: 25.12.19.0
+-- CMAKE_CXX_FLAGS: /DWIN32 /D_WINDOWS /EHsc
+-- [hip_utils] HIP_PATH: D:/DEVELOP/WORKFINAL/_therock
+-- [hip_utils] hipcc: D:/DEVELOP/WORKFINAL/_therock/bin/hipcc.exe
+-- [hip_utils] HIP_ARCHITECTURES: gfx1150
+-- [hip_utils] hip::host target available - using imported target
+-- [custom_kernels] Using HIP_ARCHITECTURES: gfx1150
+-- [custom_kernels] Adding per-arch SHARED target: custom_kernels_gfx1150
+-- Found LLVM 
+-- Using LLVMConfig.cmake in: D:/DEVELOP/WORKFINAL/build/hip-ep/_deps/llvm-project-build/lib/cmake/llvm
+-- Using MLIRConfig.cmake in: D:/DEVELOP/WORKFINAL/build/hip-ep/_deps/llvm-project-build/tools/mlir/cmake/modules/CMakeFiles
+-- Using FlatBuffers version: 
+-- Using flatc: flatbuffers::flatc
+-- Building Conversion Libraries
+-- Found Python: C:\Users\amd\anaconda3\envs\hipdnn-ep\python.exe
+-- Using in-tree clang target for bitcode generation
+-- Found Clang for bitcode generation: clang
+-- Using in-tree llvm-link target
+-- Found llvm-link: llvm-link
+-- Found morphizen-foundation: D:/DEVELOP/WORKFINAL/hip-ep/include
+-- Using TheRock ROCm SDK at: d:/DEVELOP/WORKFINAL/_therock
+-- Building REAL runtime with HIP/MIOpen/hipBLASLt
+--   HIP: D:/DEVELOP/WORKFINAL/_therock/lib/cmake/hip
+--   MIOpen: D:/DEVELOP/WORKFINAL/_therock/lib/cmake/miopen
+--   hipBLASLt: D:/DEVELOP/WORKFINAL/_therock/lib/cmake/hipblaslt
+-- Adding TheRock includes for runtime_state.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_tensor.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_loop.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_if.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_op_profile.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_chrome_trace.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_output_allocator.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_op_state.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_hip.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_miopen.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_hipblas.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_memory.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_elementwise.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_power.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_matmul.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_activation.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_bias_gelu.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_fast_gelu.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_layer_normalization.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_simplified_layer_norm.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_skip_simplified_layer_norm.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_rotary_embedding.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_gqa.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_cast.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_range.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_gather.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_gather_elements.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_top_k.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_scatter_elements.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_compress.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_one_hot.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_reduce_sum.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_reduce_mean.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_reduce_l2.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_reduce_max.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_reduce_min.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_matmul_nbits.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_qmoe.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_gather_block_quantized.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_causal_conv_with_state.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for test_hip_from_dll.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_gemm.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_where.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_equal.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_or.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_and.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_div.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_linear_attention.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_transpose.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_abs.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_neg.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_not.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_cos.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_sin.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_ceil.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_exp.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_log.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_cumsum.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_pad.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_tile.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_expand.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_reduce_prod.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_less.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_gather_nd.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_sign.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_mod.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_slice.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_scatter_nd.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_multi_head_attention.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_nonzero.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_size.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_pool.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_resize.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_global_pool.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Adding TheRock includes for runtime_dynamic_dispatch.bc: d:/DEVELOP/WORKFINAL/_therock/include
+-- Runtime library configuration:
+--   Mode: OFF
+--   Runtime bitcode will be at: D:/DEVELOP/WORKFINAL/build/hip-ep/lib/Runtime/runtime.bc
+-- Building Target LLVM Library
+-- Could NOT find ZLIB (missing: ZLIB_LIBRARY ZLIB_INCLUDE_DIR) 
+-- Found LLD via CONFIG package: D:/DEVELOP/WORKFINAL/_therock/lib/cmake/lld
+-- Building Compiler Library
+-- Custom kernels (native link): arch=gfx1150, dir=$<TARGET_LINKER_FILE_DIR:custom_kernels_gfx1150>
+-- Configuring MLIR Compiler Backend
+-- Configuring level-1-pass (MLIR compiler plugin)
+-- level-1-pass will dynamically load hip-compiler.dll at runtime (morphizen plugin pattern)
+-- Configuring MLIR Custom Op
+-- Building hip-compiler.dll
+-- hip-compiler.dll configuration complete
+-- Configuring E2E integration tests
+-- Configured 90 E2E test(s)
+-- Configuring runtime unit tests
+-- Configuring static compiler-plugin tests
+-- Sample plugin: clang or python not found; embedding empty bitcode buffer (SAMPLE_PLUGIN_CLANG=SAMPLE_PLUGIN_CLANG-NOTFOUND, Python3_EXECUTABLE=C:\Users\amd\anaconda3\envs\hipdnn-ep\python.exe)
+-- Configuring MLIR dialect/pass unit tests
+-- Static compiler plugins: none selected (HIPDNN_EP_COMPILER_PLUGINS='')
+-- Python wheel target 'wheel' configured (out: D:/DEVELOP/WORKFINAL/build/hip-ep/python/dist)
+-- Configuring done (26.0s)
+-- Generating done (217.5s)
+-- Build files have been written to: D:/DEVELOP/WORKFINAL/build/hip-ep
+
+====================================================================
+> Build
+====================================================================
+[build] cmake --build 'D:\DEVELOP\WORKFINAL\build\hip-ep' --config Release --parallel 24
+MSBuild version 17.13.26+f3741e9cf for .NET Framework
+
+  Checking File Globs
+  HASH_LIBRARY.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\morphizen\morphizen-core\HASH_LIBRARY.dir\Release\HASH_LIBRARY.lib
+  flatc.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\bin\Release\flatc.exe
+  custom_kernels_gfx1150_dummy.cpp
+  HipConstantsIO.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\lib\Support\Release\HipConstantsIO.lib
+  cpptrace-lib.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\cpptrace-build\Release\cpptrace.lib
+  obj.LLVMTableGenBasic.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\utils\TableGen\Basic\obj.LLVMTableGenBasic.dir\Release\obj.LLVMTableGenBasic.lib
+  LLVMDemangle.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMDemangle.lib
+  LLVMSupportBlake3.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\lib\Support\BLAKE3\LLVMSupportBlake3.dir\Release\LLVMSupportBlake3.lib
+     Creating library D:/DEVELOP/WORKFINAL/build/hip-ep/lib/Runtime/Kernels/Release/custom_kernels_gfx1150.lib and object D:/DEVELOP/WORKFINAL/build/hip-ep/lib/Runtime/Kernels/Release/custom_kernels_gfx1150.exp
+  1>
+  custom_kernels_gfx1150.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\bin\Release\custom_kernels_gfx1150.dll
+  LLVMSupport.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMSupport.lib
+  LLVMWindowsManifest.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMWindowsManifest.lib
+  LLVMDebugInfoCodeView.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMDebugInfoCodeView.lib
+  LLVMTableGen.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMTableGen.lib
+  LLVMBitstreamReader.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMBitstreamReader.lib
+  LLVMFrontendDirective.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMFrontendDirective.lib
+  LLVMDebugInfoMSF.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMDebugInfoMSF.lib
+  LLVMPlugins.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMPlugins.lib
+  LLVMOption.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMOption.lib
+  LLVMExtensions.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMExtensions.lib
+  HipSupport.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\lib\Support\Release\HipSupport.lib
+  llvm-min-tblgen.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\bin\llvm-min-tblgen.exe
+  1>
+  1>
+  civil_time.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\time\Release\absl_civil_time.lib
+  1>
+  1>
+  1>
+  log_severity.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\base\Release\absl_log_severity.lib
+  spinlock_wait.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\base\Release\absl_spinlock_wait.lib
+  utf8_for_code_point.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\debugging\Release\absl_utf8_for_code_point.lib
+  flatbuffers.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\flatbuffers-build\Release\flatbuffers.lib
+  MLIRTableGen.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRTableGen.lib
+  exponential_biased.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\profiling\Release\absl_exponential_biased.lib
+  LLVMDebugInfoBTF.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMDebugInfoBTF.lib
+  clangSupport.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangSupport.lib
+  LLVMCodeGenTypes.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMCodeGenTypes.lib
+  time_zone.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\time\Release\absl_time_zone.lib
+  LLVMTargetParser.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMTargetParser.lib
+  LLVMOrcShared.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMOrcShared.lib
+  obj.LLVMTableGenCommon.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\utils\TableGen\Common\obj.LLVMTableGenCommon.dir\Release\obj.LLVMTableGenCommon.lib
+  clang-tblgen.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\bin\clang-tblgen.exe
+  LLVMRemarks.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMRemarks.lib
+  LLVMBinaryFormat.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMBinaryFormat.lib
+  raw_logging_internal.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\base\Release\absl_raw_logging_internal.lib
+  MLIRTblgenLib.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRTblgenLib.lib
+  flags_commandlineflag_internal.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\flags\Release\absl_flags_commandlineflag_internal.lib
+  hipdnn-ep-tls.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\lib\Runtime\Release\hipdnn-ep-tls.lib
+  glog_internal.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\glog-build\glog_internal.dir\Release\glog_internal.lib
+  leak_check.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\debugging\Release\absl_leak_check.lib
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  strerror.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\base\Release\absl_strerror.lib
+  1>
+  1>
+  1>
+  1>
+  1>
+  log_internal_nullguard.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\log\Release\absl_log_internal_nullguard.lib
+  random_internal_platform.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\random\Release\absl_random_internal_platform.lib
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  LLVMTextAPI.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMTextAPI.lib
+  LLVMDebugInfoDWARFLowLevel.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMDebugInfoDWARFLowLevel.lib
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  LLVMCore.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMCore.lib
+  1>
+  1>
+  llvm-tblgen.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\bin\llvm-tblgen.exe
+  1>
+  1>
+  1>
+  1>
+  glog.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\glog-build\Release\glog.lib
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  random_internal_randen_hwaes_impl.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\random\Release\absl_random_internal_randen_hwaes_impl.lib
+  utf8_range.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\protobuf-build\third_party\utf8_range\Release\libutf8_range.lib
+  1>
+  1>
+  1>
+  random_internal_randen_slow.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\random\Release\absl_random_internal_randen_slow.lib
+  1>
+  1>
+  1>
+  1>
+  1>
+  mlir-tblgen.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\bin\mlir-tblgen.exe
+  1>
+  1>
+  LLVMMC.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMMC.lib
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  morphizen-foundation.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\morphizen\morphizen-foundation\Release\morphizen-foundation.lib
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  LLVMAsmParser.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMAsmParser.lib
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  LLVMBitReader.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMBitReader.lib
+  LLVMCFGuard.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMCFGuard.lib
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  LLVMFrontendHLSL.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMFrontendHLSL.lib
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  debugging_internal.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\debugging\Release\absl_debugging_internal.lib
+  base.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\base\Release\absl_base.lib
+  throw_delegate.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\base\Release\absl_throw_delegate.lib
+  1>
+  1>
+  random_seed_gen_exception.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\random\Release\absl_random_seed_gen_exception.lib
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  LLVMWindowsDriver.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMWindowsDriver.lib
+  random_internal_randen_hwaes.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\random\Release\absl_random_internal_randen_hwaes.lib
+  morphizen-utils.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\morphizen\morphizen-utils\Release\morphizen-utils.lib
+  1>
+  libupb.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\protobuf-build\Release\libupb.lib
+  1>
+  1>
+  1>
+  1>
+  1>
+  string_view.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\strings\Release\absl_string_view.lib
+  decode_rust_punycode.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\debugging\Release\absl_decode_rust_punycode.lib
+  city.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\hash\Release\absl_city.lib
+  strings_internal.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\strings\Release\absl_strings_internal.lib
+  tracing_internal.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\base\Release\absl_tracing_internal.lib
+  1>
+  1>
+  malloc_internal.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\base\Release\absl_malloc_internal.lib
+  1>
+  log_internal_conditions.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\log\Release\absl_log_internal_conditions.lib
+  LLVMIRReader.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMIRReader.lib
+  1>
+  1>
+  int128.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\numeric\Release\absl_int128.lib
+  stacktrace.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\debugging\Release\absl_stacktrace.lib
+  1>
+  demangle_rust.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\debugging\Release\absl_demangle_rust.lib
+  1>
+  1>
+  random_internal_randen.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\random\Release\absl_random_internal_randen.lib
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  graphcycles_internal.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\synchronization\Release\absl_graphcycles_internal.lib
+  morphizen-ort-api-ext.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\morphizen\morphizen-ort-api-ext\Release\morphizen-ort-api-ext.lib
+  crc_cpu_detect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\crc\Release\absl_crc_cpu_detect.lib
+  low_level_hash.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\hash\Release\absl_low_level_hash.lib
+  1>
+  strings.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\strings\Release\absl_strings.lib
+  1>
+  1>
+  1>
+  1>
+  demangle_internal.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\debugging\Release\absl_demangle_internal.lib
+  cordz_functions.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\strings\Release\absl_cordz_functions.lib
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  1>
+  log_internal_proto.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\log\Release\absl_log_internal_proto.lib
+  random_internal_seed_material.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\random\Release\absl_random_internal_seed_material.lib
+  log_internal_fnmatch.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\log\Release\absl_log_internal_fnmatch.lib
+  time.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\time\Release\absl_time.lib
+  utf8_validity.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\protobuf-build\third_party\utf8_range\Release\libutf8_validity.lib
+  str_format_internal.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\strings\Release\absl_str_format_internal.lib
+  flags_commandlineflag.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\flags\Release\absl_flags_commandlineflag.lib
+  random_distributions.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\random\Release\absl_random_distributions.lib
+  symbolize.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\debugging\Release\absl_symbolize.lib
+  1>
+  1>
+  1>
+  1>
+  1>
+  log_internal_structured_proto.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\log\Release\absl_log_internal_structured_proto.lib
+  hash.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\hash\Release\absl_hash.lib
+  1>
+  1>
+  LLVMMCDisassembler.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMMCDisassembler.lib
+  1>
+  LLVMX86Info.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMX86Info.lib
+  LLVMMCParser.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMMCParser.lib
+  flags_marshalling.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\flags\Release\absl_flags_marshalling.lib
+  flags_private_handle_accessor.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\flags\Release\absl_flags_private_handle_accessor.lib
+  kernel_timeout_internal.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\synchronization\Release\absl_kernel_timeout_internal.lib
+  log_sink.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\log\Release\absl_log_sink.lib
+  log_internal_globals.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\log\Release\absl_log_internal_globals.lib
+  1>
+  examine_stack.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\debugging\Release\absl_examine_stack.lib
+  1>
+  1>
+  synchronization.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\synchronization\Release\absl_synchronization.lib
+  1>
+  crc_internal.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\crc\Release\absl_crc_internal.lib
+  morphizen-graph.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\morphizen\morphizen-graph\Release\morphizen-graph.lib
+  log_internal_format.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\log\Release\absl_log_internal_format.lib
+  LLVMX86Disassembler.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMX86Disassembler.lib
+  flags_program_name.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\flags\Release\absl_flags_program_name.lib
+  crc32c.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\crc\Release\absl_crc32c.lib
+  vlog_config_internal.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\log\Release\absl_vlog_config_internal.lib
+  1>
+  hashtablez_sampler.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\container\Release\absl_hashtablez_sampler.lib
+  1>
+  random_internal_entropy_pool.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\random\Release\absl_random_internal_entropy_pool.lib
+  LLVMX86Desc.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMX86Desc.lib
+  1>
+  1>
+  crc_cord_state.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\crc\Release\absl_crc_cord_state.lib
+  1>
+  flags_config.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\flags\Release\absl_flags_config.lib
+  1>
+  1>
+  cordz_handle.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\strings\Release\absl_cordz_handle.lib
+  log_globals.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\log\Release\absl_log_globals.lib
+  cord_internal.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\strings\Release\absl_cord_internal.lib
+  LLVMX86AsmParser.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMX86AsmParser.lib
+  flags_internal.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\flags\Release\absl_flags_internal.lib
+  1>
+  random_seed_sequences.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\random\Release\absl_random_seed_sequences.lib
+  1>
+  LLVMObject.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMObject.lib
+  1>
+  cordz_info.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\strings\Release\absl_cordz_info.lib
+  1>
+  LLVMRuntimeDyld.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMRuntimeDyld.lib
+  LLVMLibDriver.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMLibDriver.lib
+  1>
+  LLVMOrcTargetProcess.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMOrcTargetProcess.lib
+  log_initialize.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\log\Release\absl_log_initialize.lib
+  LLVMDebugInfoDWARF.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMDebugInfoDWARF.lib
+  LLVMObjectYAML.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMObjectYAML.lib
+  log_internal_log_sink_set.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\log\Release\absl_log_internal_log_sink_set.lib
+  1>
+  LLVMDebugInfoPDB.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMDebugInfoPDB.lib
+  1>
+  LLVMDebugInfoGSYM.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMDebugInfoGSYM.lib
+  log_internal_message.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\log\Release\absl_log_internal_message.lib
+  1>
+  1>
+  LLVMJITLink.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMJITLink.lib
+  cord.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\strings\Release\absl_cord.lib
+  LLVMSymbolize.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMSymbolize.lib
+  1>
+  raw_hash_set.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\container\Release\absl_raw_hash_set.lib
+  1>
+  status.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\status\Release\absl_status.lib
+  1>
+  LLVMProfileData.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMProfileData.lib
+  die_if_null.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\log\Release\absl_die_if_null.lib
+  log_internal_check_op.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\log\Release\absl_log_internal_check_op.lib
+  1>
+  flags_reflection.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\flags\Release\absl_flags_reflection.lib
+  LLVMTextAPIBinaryReader.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMTextAPIBinaryReader.lib
+  1>
+  1>
+  1>
+  statusor.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\absl-build\absl\status\Release\absl_statusor.lib
+  LLVMCoverage.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMCoverage.lib
+  1>
+  1>
+  1>
+  1>
+  LLVMAnalysis.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMAnalysis.lib
+  1>
+  1>
+  libprotobuf.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\protobuf-build\Release\libprotobuf.lib
+  LLVMBitWriter.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMBitWriter.lib
+  LLVMIRPrinter.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMIRPrinter.lib
+  LLVMSandboxIR.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMSandboxIR.lib
+  LLVMTarget.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMTarget.lib
+  LLVMTransformUtils.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMTransformUtils.lib
+  LLVMCGData.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMCGData.lib
+  LLVMExecutionEngine.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMExecutionEngine.lib
+  LLVMFrontendAtomic.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMFrontendAtomic.lib
+  LLVMHipStdPar.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMHipStdPar.lib
+  LLVMAggressiveInstCombine.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMAggressiveInstCombine.lib
+  LLVMFrontendOffloading.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMFrontendOffloading.lib
+  LLVMObjCARCOpts.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMObjCARCOpts.lib
+  LLVMInstCombine.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMInstCombine.lib
+  LLVMInstrumentation.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMInstrumentation.lib
+  1>
+  1>
+  LLVMVectorize.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMVectorize.lib
+  IRMover.cpp
+  LLVMFrontendDriver.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMFrontendDriver.lib
+  MLIRPresburger.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRPresburger.lib
+  MLIRSupport.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRSupport.lib
+  1>
+  1>
+  libprotoc.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\protobuf-build\Release\libprotoc.lib
+  LLVMScalarOpts.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMScalarOpts.lib
+  LLVMFrontendOpenMP.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMFrontendOpenMP.lib
+  protoc.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\bin\Release\protoc.exe
+  mlir_compilation_proto.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\backend-mlir-compiler\proto\Release\mlir_compilation_proto.lib
+  MLIRIR.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRIR.lib
+  morphizen-pattern.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\morphizen\morphizen-pattern\Release\morphizen-pattern.lib
+  LLVMCodeGen.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMCodeGen.lib
+  MLIRShapedOpInterfaces.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRShapedOpInterfaces.lib
+  MLIRInferIntRangeInterface.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRInferIntRangeInterface.lib
+  MLIRControlFlowInterfaces.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRControlFlowInterfaces.lib
+  MLIRMaskingOpInterface.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRMaskingOpInterface.lib
+  MLIRDialect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRDialect.lib
+  MLIRSideEffectInterfaces.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRSideEffectInterfaces.lib
+  MLIRMaskableOpInterface.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRMaskableOpInterface.lib
+  MLIROpenACCMPCommon.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIROpenACCMPCommon.lib
+  MLIRCastInterfaces.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRCastInterfaces.lib
+  MLIRInferTypeOpInterface.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRInferTypeOpInterface.lib
+  MLIRDataLayoutInterfaces.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRDataLayoutInterfaces.lib
+  MLIRMemorySlotInterfaces.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRMemorySlotInterfaces.lib
+  MLIRAsmParser.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRAsmParser.lib
+  MLIRRuntimeVerifiableOpInterface.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRRuntimeVerifiableOpInterface.lib
+  MLIRCallInterfaces.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRCallInterfaces.lib
+  MLIRViewLikeInterface.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRViewLikeInterface.lib
+  MLIRVectorInterfaces.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRVectorInterfaces.lib
+  1>Generating morphizen_version_info.hpp.inc, version.rc
+  MLIRParallelCombiningOpInterface.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRParallelCombiningOpInterface.lib
+  MLIRIndexingMapOpInterface.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRIndexingMapOpInterface.lib
+  PROJECT_GIT_COMMIT_ID= ORT_CORE_PROVIDERS_MORPHIZEN_INCLUDE_DIR=D:/DEVELOP/WORKFINAL/hip-ep/morphizen/3rd-party/onnxruntime-morphizen-headers morphizen_OUTPUT_NAME=hipgpu.dll C:\Users\amd\anaconda3\envs\hipdnn-ep\python.exe D:/DEVELOP/WORKFINAL/hip-ep/morphizen/morphizen-core/src/morphizen_version_info.hpp.inc.py D:/DEVELOP/WORKFINAL/build/hip-ep/version.txt
+  MLIRDestinationStyleOpInterface.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRDestinationStyleOpInterface.lib
+  MLIRBytecodeOpInterface.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRBytecodeOpInterface.lib
+  MLIRInferStridedMetadataInterface.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRInferStridedMetadataInterface.lib
+  MLIRFunctionInterfaces.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRFunctionInterfaces.lib
+  MLIRInferIntRangeCommon.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRInferIntRangeCommon.lib
+  clangBasic.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangBasic.lib
+  MLIRBytecodeReader.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRBytecodeReader.lib
+  MLIRMemOpInterfaces.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRMemOpInterfaces.lib
+  MLIRLoopLikeInterface.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRLoopLikeInterface.lib
+  MLIRBytecodeWriter.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRBytecodeWriter.lib
+  lldCommon.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\lldCommon.lib
+  LLVMAsmPrinter.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMAsmPrinter.lib
+  config.cpp
+  version_info.cpp
+  MLIRParser.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRParser.lib
+  LLVMSelectionDAG.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMSelectionDAG.lib
+  mlir-linalg-ods-yaml-gen.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\bin\mlir-linalg-ods-yaml-gen.exe
+  MLIRTranslateLib.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRTranslateLib.lib
+  LLVMGlobalISel.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMGlobalISel.lib
+  1>
+  1>
+  1>
+  1>
+  clangOptions.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangOptions.lib
+  1>
+  clangAPINotes.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangAPINotes.lib
+  LLVMX86CodeGen.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMX86CodeGen.lib
+  clangLex.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangLex.lib
+  1>
+  clangRewrite.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangRewrite.lib
+  1>
+  clangToolingCore.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangToolingCore.lib
+  clangAST.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangAST.lib
+  1>
+  clangToolingInclusions.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangToolingInclusions.lib
+  clangASTMatchers.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangASTMatchers.lib
+  clangInstallAPI.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangInstallAPI.lib
+  clangEdit.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangEdit.lib
+  clangFormat.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangFormat.lib
+  clangAnalysis.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangAnalysis.lib
+  LLVMLinker.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMLinker.lib
+  clangAnalysisLifetimeSafety.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangAnalysisLifetimeSafety.lib
+  MLIRConvertToLLVMInterface.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRConvertToLLVMInterface.lib
+  MLIRUBDialect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRUBDialect.lib
+  MLIRPtrMemorySpaceInterfaces.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRPtrMemorySpaceInterfaces.lib
+  MLIRPDLDialect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRPDLDialect.lib
+  MLIRQuantDialect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRQuantDialect.lib
+  MLIRIndexDialect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRIndexDialect.lib
+  MLIRFuncDialect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRFuncDialect.lib
+  MLIRDLTIDialect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRDLTIDialect.lib
+  AlwaysInliner.cpp
+  Annotation2Metadata.cpp
+  ArgumentPromotion.cpp
+  Attributor.cpp
+  AttributorAttributes.cpp
+  BlockExtractor.cpp
+  CalledValuePropagation.cpp
+  ConstantMerge.cpp
+  CrossDSOCFI.cpp
+  DeadArgumentElimination.cpp
+  ElimAvailExtern.cpp
+  EmbedBitcodePass.cpp
+  ExpandVariadics.cpp
+  ExtractGV.cpp
+  FatLTOCleanup.cpp
+  ForceFunctionAttrs.cpp
+  FunctionAttrs.cpp
+  FunctionImport.cpp
+  FunctionSpecialization.cpp
+  GlobalDCE.cpp
+  GlobalOpt.cpp
+  GlobalSplit.cpp
+  HotColdSplitting.cpp
+  IROutliner.cpp
+  clangSema.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangSema.lib
+  MLIRAnalysis.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRAnalysis.lib
+  MLIRArithDialect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRArithDialect.lib
+  MLIRQuantUtils.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRQuantUtils.lib
+  MLIRPass.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRPass.lib
+  clangSerialization.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangSerialization.lib
+  MLIRValueBoundsOpInterface.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRValueBoundsOpInterface.lib
+  MLIRComplexDialect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRComplexDialect.lib
+  MLIRPDLInterpDialect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRPDLInterpDialect.lib
+  MLIRMathDialect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRMathDialect.lib
+  MLIRControlFlowDialect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRControlFlowDialect.lib
+  MLIRPDLToPDLInterp.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRPDLToPDLInterp.lib
+  MLIRDialectUtils.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRDialectUtils.lib
+  morphizen-core-static.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\morphizen\morphizen-core\Release\morphizen-core-static.lib
+  MLIRShardDialect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRShardDialect.lib
+  MLIRTilingInterface.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRTilingInterface.lib
+  MLIRSparseTensorDialect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRSparseTensorDialect.lib
+  MLIRRewritePDL.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRRewritePDL.lib
+  MLIRSubsetOpInterface.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRSubsetOpInterface.lib
+  MLIRArithUtils.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRArithUtils.lib
+  MLIRRewrite.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRRewrite.lib
+  morphizen-custom-op-generic.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\morphizen\custom-op-generic\Release\morphizen-custom-op-generic.lib
+  morphizen-pass-init.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\morphizen\morphizen-pass-init\Release\morphizen-pass-init.lib
+  ort-bridge.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\morphizen\ort-bridge\Release\ort-bridge.lib
+  morphizen-level1-pass-mlir-compiler.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\backend-mlir-compiler\level-1-pass\Release\morphizen-level1-pass-mlir-compiler.lib
+  MLIRMemRefDialect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRMemRefDialect.lib
+  MLIRTransformUtils.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRTransformUtils.lib
+  MLIRGPUDialect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRGPUDialect.lib
+  MLIRAffineDialect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRAffineDialect.lib
+  InferFunctionAttrs.cpp
+  mlir-imp.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\morphizen\mlir-imp\Release\mlir-imp.lib
+  Inliner.cpp
+  MLIRMemRefUtils.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRMemRefUtils.lib
+  MLIRGPUUtils.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRGPUUtils.lib
+  Internalize.cpp
+  MLIRNVGPUDialect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRNVGPUDialect.lib
+  LoopExtractor.cpp
+  LowerTypeTests.cpp
+  clangParse.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangParse.lib
+  MemProfContextDisambiguation.cpp
+  MergeFunctions.cpp
+  MLIRTensorDialect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRTensorDialect.lib
+  MLIRLLVMDialect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRLLVMDialect.lib
+  MLIRTransforms.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRTransforms.lib
+  ModuleInliner.cpp
+  OpenMPOpt.cpp
+  PartialInlining.cpp
+  clangFrontend.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangFrontend.lib
+  MLIRTensorInferTypeOpInterfaceImpl.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRTensorInferTypeOpInterfaceImpl.lib
+  MLIRNVVMDialect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRNVVMDialect.lib
+  MLIROpenMPDialect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIROpenMPDialect.lib
+  MLIRFuncTransforms.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRFuncTransforms.lib
+  MLIRReconcileUnrealizedCasts.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRReconcileUnrealizedCasts.lib
+  MLIRArithAttrToLLVMConversion.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRArithAttrToLLVMConversion.lib
+  MLIRTensorUtils.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRTensorUtils.lib
+  MLIRShardingInterface.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRShardingInterface.lib
+  MLIRLLVMCommonConversion.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRLLVMCommonConversion.lib
+  MLIRShapeDialect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRShapeDialect.lib
+  HipDialectIR.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\lib\Dialect\IR\Release\HipDialectIR.lib
+  MLIRVectorDialect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRVectorDialect.lib
+  MLIRTosaDialect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRTosaDialect.lib
+  MLIRMemRefToLLVM.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRMemRefToLLVM.lib
+  SCCP.cpp
+  MLIRControlFlowToLLVM.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRControlFlowToLLVM.lib
+  SampleContextTracker.cpp
+  MLIRSCFDialect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRSCFDialect.lib
+  MLIRBufferizationDialect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRBufferizationDialect.lib
+  HipsrDialectIR.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\lib\Dialect\Hipsr\IR\Release\HipsrDialectIR.lib
+  MLIRLLVMIRTransforms.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRLLVMIRTransforms.lib
+  OnnxToHipDNN.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\lib\Conversion\OnnxToHipDNN\Release\OnnxToHipDNN.lib
+  clangRewriteFrontend.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangRewriteFrontend.lib
+  clangDriver.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangDriver.lib
+  MLIRTargetLLVMIRExport.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRTargetLLVMIRExport.lib
+  MLIRAffineAnalysis.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRAffineAnalysis.lib
+  MLIRLinalgDialect.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRLinalgDialect.lib
+  clangIndex.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangIndex.lib
+  SampleProfile.cpp
+  MLIRBufferizationTransforms.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRBufferizationTransforms.lib
+  MLIRVectorUtils.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRVectorUtils.lib
+  SampleProfileMatcher.cpp
+  MLIRBufferizationToMemRef.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRBufferizationToMemRef.lib
+  MLIRArithTransforms.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRArithTransforms.lib
+  SampleProfileProbe.cpp
+  clangExtractAPI.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangExtractAPI.lib
+  clangCrossTU.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangCrossTU.lib
+  MLIRAffineUtils.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRAffineUtils.lib
+  OnnxToHipsr.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\lib\Conversion\OnnxToHipsr\Release\OnnxToHipsr.lib
+  MLIRLLVMToLLVMIRTranslation.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRLLVMToLLVMIRTranslation.lib
+  OnnxToHip.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\lib\Conversion\OnnxToHip\Release\OnnxToHip.lib
+  HipsrDialectTransforms.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\lib\Dialect\Hipsr\Transforms\Release\HipsrDialectTransforms.lib
+  StripDeadPrototypes.cpp
+  clangStaticAnalyzerCore.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangStaticAnalyzerCore.lib
+  MLIRBuiltinToLLVMIRTranslation.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRBuiltinToLLVMIRTranslation.lib
+  HipToLLVM.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\lib\Conversion\HipToLLVM\Release\HipToLLVM.lib
+  MLIRLinalgUtils.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRLinalgUtils.lib
+  StripSymbols.cpp
+  MLIRSCFUtils.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRSCFUtils.lib
+  ThinLTOBitcodeWriter.cpp
+  MLIRArithToLLVM.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRArithToLLVM.lib
+  WholeProgramDevirt.cpp
+  MLIRTosaShardingInterfaceImpl.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRTosaShardingInterfaceImpl.lib
+  MLIRAffineTransforms.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRAffineTransforms.lib
+  MLIRShardTransforms.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRShardTransforms.lib
+  MLIRAffineToStandard.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRAffineToStandard.lib
+  MLIRTensorTransforms.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRTensorTransforms.lib
+  MLIRMemRefTransforms.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRMemRefTransforms.lib
+  MLIRVectorTransforms.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRVectorTransforms.lib
+  MLIRBufferizationPipelines.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRBufferizationPipelines.lib
+  MLIRSCFTransforms.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRSCFTransforms.lib
+  clangStaticAnalyzerCheckers.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangStaticAnalyzerCheckers.lib
+  MLIRVectorToSCF.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRVectorToSCF.lib
+  MLIRTensorTilingInterfaceImpl.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRTensorTilingInterfaceImpl.lib
+  MLIRFuncToLLVM.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRFuncToLLVM.lib
+  MLIRSCFToControlFlow.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRSCFToControlFlow.lib
+  HipConversion.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\lib\Conversion\Release\HipConversion.lib
+  clangStaticAnalyzerFrontend.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangStaticAnalyzerFrontend.lib
+  ConvertToDestinationStyle.cpp
+  DecomposeGenericByUnfoldingPermutation.cpp
+  DecomposeLinalgOps.cpp
+  Detensorize.cpp
+  DropUnitDims.cpp
+  FoldAddIntoDest.cpp
+  FoldIntoElementwise.cpp
+  FusePadOpWithLinalgProducer.cpp
+  Fusion.cpp
+  Generalization.cpp
+  HoistPadding.cpp
+  Hoisting.cpp
+  InlineScalarOperands.cpp
+  Interchange.cpp
+  Loops.cpp
+  MorphOps.cpp
+  NamedToElementwise.cpp
+  PackAndUnpackPatterns.cpp
+  PadTilingInterface.cpp
+  Padding.cpp
+  Promotion.cpp
+  RuntimeOpVerification.cpp
+  ShardingInterfaceImpl.cpp
+  SimplifyDepthwiseConv.cpp
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/Fusion.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/FoldAddIntoDest.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/DecomposeGenericByUnfoldingPermutation.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/MorphOps.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/FusePadOpWithLinalgProducer.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/ConvertToDestinationStyle.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/FoldIntoElementwise.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/Interchange.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/Loops.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/RuntimeOpVerification.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/ShardingInterfaceImpl.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/SimplifyDepthwiseConv.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/DecomposeLinalgOps.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/Detensorize.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/NamedToElementwise.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/PadTilingInterface.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/DropUnitDims.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/Padding.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/Generalization.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/InlineScalarOperands.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/PackAndUnpackPatterns.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/Hoisting.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/Promotion.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/HoistPadding.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\include\mlir\Dialect\Complex\IR\ComplexAttributes.h.inc(37,33): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/MorphOps.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\include\mlir\Dialect\Complex\IR\ComplexAttributes.h.inc(37,33): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/Promotion.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\include\mlir\Dialect\Complex\IR\ComplexAttributes.h.inc(37,33): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/Padding.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\include\mlir\Dialect\Complex\IR\ComplexAttributes.h.inc(37,33): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/PadTilingInterface.cpp')
+  
+  Specialize.cpp
+  Split.cpp
+  SplitReduction.cpp
+  SubsetInsertionOpInterfaceImpl.cpp
+  SwapExtractSliceWithFillPatterns.cpp
+  Tiling.cpp
+  TilingInterfaceImpl.cpp
+  LLVMipo.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMipo.lib
+  Transforms.cpp
+  TransposeConv2D.cpp
+  TransposeMatmul.cpp
+  Vectorization.cpp
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/Split.cpp')
+  
+  llvm-link.cpp
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/Specialize.cpp')
+  
+  WinogradConv2D.cpp
+  CoroAnnotationElide.cpp
+  CoroCleanup.cpp
+  CoroConditionalWrapper.cpp
+  CoroEarly.cpp
+  CoroElide.cpp
+  CoroFrame.cpp
+  CoroSplit.cpp
+  Coroutines.cpp
+  MaterializationUtils.cpp
+  SpillUtils.cpp
+  SuspendCrossingInfo.cpp
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/SplitReduction.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/SubsetInsertionOpInterfaceImpl.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/SwapExtractSliceWithFillPatterns.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/Tiling.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/Transforms.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/TilingInterfaceImpl.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/TransposeConv2D.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/TransposeMatmul.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/Vectorization.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\include\mlir\IR\BuiltinAttributes.h(359,7): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/WinogradConv2D.cpp')
+  
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\include\mlir\Dialect\Complex\IR\ComplexAttributes.h.inc(37,33): warning C4996: 'std::complex<llvm::APFloat>::complex': warning STL4037: The effect of instantiating the template std::complex for any type other than float, double, or long double is unspecified. You can define _SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING to suppress this warning. [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  (compiling source file '../../../_deps/llvm-project-src/mlir/lib/Dialect/Linalg/Transforms/Specialize.cpp')
+  
+  LLVMCoroutines.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMCoroutines.lib
+  CodeGenPassBuilder.cpp
+  PassBuilder.cpp
+  PassBuilderBindings.cpp
+  PassBuilderPipelines.cpp
+  StandardInstrumentations.cpp
+  llvm-link.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\bin\llvm-link.exe
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(90,5): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(90,12): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(90,19): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(91,5): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(91,12): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(91,19): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(92,4): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(92,12): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(92,19): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(93,4): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(93,12): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(93,19): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(98,9): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(98,16): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(98,22): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(98,29): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(99,9): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(99,16): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(99,23): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(99,30): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(100,9): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(100,16): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(100,23): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(100,30): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(139,5): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(139,12): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(139,20): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(139,28): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(139,36): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(140,5): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(140,12): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(140,20): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(140,28): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(140,36): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(141,4): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(141,11): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(141,19): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(141,27): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(141,35): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(142,4): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(142,11): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(142,19): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(142,27): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(142,35): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(147,10): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(147,17): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(147,24): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(147,31): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(148,10): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(148,17): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(148,24): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(148,31): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(149,10): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(149,17): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(149,24): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(149,31): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(150,10): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(150,17): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(150,24): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(150,31): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(151,10): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(151,17): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(151,24): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-src\mlir\lib\Dialect\Linalg\Transforms\WinogradConv2D.cpp(151,31): warning C4305: 'initializing': truncation from 'double' to 'const float' [D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\tools\mlir\lib\Dialect\Linalg\Transforms\MLIRLinalgTransforms.vcxproj]
+  MLIRLinalgTransforms.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\MLIRLinalgTransforms.lib
+  AddHipContextArg.cpp
+  AssignOpStateSlots.cpp
+  LLVMPasses.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMPasses.lib
+  LTO.cpp
+  LTOBackend.cpp
+  LTOCodeGenerator.cpp
+  LTOModule.cpp
+  ThinLTOCodeGenerator.cpp
+  UpdateCompilerUsed.cpp
+  BacktraceTools.cpp
+  COFFPlatform.cpp
+  COFFVCRuntimeSupport.cpp
+  CompileOnDemandLayer.cpp
+  CompileUtils.cpp
+  EHFrameRegistrationPlugin.cpp
+  ELFNixPlatform.cpp
+  EPCIndirectionUtils.cpp
+  ExecutionUtils.cpp
+  IRCompileLayer.cpp
+  IRPartitionLayer.cpp
+  IRTransformLayer.cpp
+  IndirectionUtils.cpp
+  JITLinkRedirectableSymbolManager.cpp
+  JITLinkReentryTrampolines.cpp
+  LLJIT.cpp
+  Layer.cpp
+  LazyObjectLinkingLayer.cpp
+  LazyReexports.cpp
+  LinkGraphLinkingLayer.cpp
+  MachO.cpp
+  MachOPlatform.cpp
+  Mangling.cpp
+  ObjectLinkingLayer.cpp
+  BufferUtils.cpp
+  ObjectTransformLayer.cpp
+  OrcV2CBindings.cpp
+  RTDyldObjectLinkingLayer.cpp
+  ReOptimizeLayer.cpp
+  SectCreate.cpp
+  SpeculateAnalyses.cpp
+  Speculation.cpp
+  ThreadSafeModule.cpp
+  UnwindInfoRegistrationPlugin.cpp
+  FixLoopAccumulatorOffset.cpp
+  LLVMOrcJIT.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMOrcJIT.lib
+  LLVMLTO.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMLTO.lib
+  DTLTO.cpp
+  ABIInfo.cpp
+  ABIInfoImpl.cpp
+  BackendUtil.cpp
+  CGAtomic.cpp
+  CGBlocks.cpp
+  CGBuiltin.cpp
+  CGCUDANV.cpp
+  CGCUDARuntime.cpp
+  CGCXX.cpp
+  CGCXXABI.cpp
+  CGCall.cpp
+  CGClass.cpp
+  CGCleanup.cpp
+  CGCoroutine.cpp
+  CGDebugInfo.cpp
+  CGDecl.cpp
+  CGDeclCXX.cpp
+  CGException.cpp
+  CGExpr.cpp
+  CGExprAgg.cpp
+  CGExprCXX.cpp
+  CGExprComplex.cpp
+  CGExprConstant.cpp
+  CGExprScalar.cpp
+  GenerateInterface.cpp
+  LLVMDTLTO.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\LLVMDTLTO.lib
+  COFFLinkerContext.cpp
+  CallGraphSort.cpp
+  Chunks.cpp
+  DLL.cpp
+  DebugTypes.cpp
+  Driver.cpp
+  DriverUtils.cpp
+  ICF.cpp
+  InputFiles.cpp
+  LLDMapFile.cpp
+  LTO.cpp
+  MapFile.cpp
+  MarkLive.cpp
+  MinGW.cpp
+  PDB.cpp
+  SymbolTable.cpp
+  Symbols.cpp
+  Writer.cpp
+  CGGPUBuiltin.cpp
+  CGHLSLBuiltins.cpp
+  CGHLSLRuntime.cpp
+  CGLoopInfo.cpp
+  CGNonTrivialStruct.cpp
+  CGObjC.cpp
+  CGObjCGNU.cpp
+  CGObjCMac.cpp
+  CGObjCRuntime.cpp
+  GenerateOpStateInit.cpp
+  CGOpenCLRuntime.cpp
+  CGOpenMPRuntime.cpp
+  CGOpenMPRuntimeGPU.cpp
+  CGPointerAuth.cpp
+  CGRecordLayoutBuilder.cpp
+  CGStmt.cpp
+  CGStmtOpenMP.cpp
+  CGVTT.cpp
+  CGVTables.cpp
+  CodeGenABITypes.cpp
+  HoistAllocSizeArith.cpp
+  CodeGenAction.cpp
+  CodeGenFunction.cpp
+  CodeGenModule.cpp
+  CodeGenPGO.cpp
+  CodeGenSYCL.cpp
+  CodeGenTBAA.cpp
+  CodeGenTypes.cpp
+  ConstantInitBuilder.cpp
+  CoverageMappingGen.cpp
+  HLSLBufferLayoutBuilder.cpp
+  ItaniumCXXABI.cpp
+  LinkInModulesPass.cpp
+  MacroPPCallbacks.cpp
+  InferLoopBodyShapesPass.cpp
+  MicrosoftCXXABI.cpp
+  ModuleBuilder.cpp
+  ObjectFilePCHContainerWriter.cpp
+  PatternInit.cpp
+  SanitizerMetadata.cpp
+  SwiftCallingConv.cpp
+  TargetInfo.cpp
+  lldCOFF.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\lldCOFF.lib
+  InferShapesPass.cpp
+  AArch64.cpp
+  ARC.cpp
+  AVR.cpp
+  BPF.cpp
+  CSKY.cpp
+  Lanai.cpp
+  LoongArch.cpp
+  M68k.cpp
+  MSP430.cpp
+  Mips.cpp
+  LoopBodyToOutParams.cpp
+  Sparc.cpp
+  TCE.cpp
+  VE.cpp
+  XCore.cpp
+  TrapReasonBuilder.cpp
+  VarBypassDetector.cpp
+  LowerAllocs.cpp
+  MaterializeHostScalars.cpp
+  ARM.cpp
+  OptimizeMemRefs.cpp
+  Pipelines.cpp
+  PoolAllocs.cpp
+  AMDGPU.cpp
+  PromoteStridedHipOperands.cpp
+  RelaxMultiDynExpandShape.cpp
+  ResolveExternConstants.cpp
+  DirectX.cpp
+  ResolveMemRefDims.cpp
+  Hexagon.cpp
+  ResolveTensorDims.cpp
+  Generating Code...
+  NVPTX.cpp
+  PPC.cpp
+  Compiling...
+  SplitDuplicateDpsInits.cpp
+  UseOutputAllocator.cpp
+  Generating Code...
+  HipDialectTransforms.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\lib\Dialect\Transforms\Release\HipDialectTransforms.lib
+  RISCV.cpp
+  SPIR.cpp
+  SystemZ.cpp
+  WebAssembly.cpp
+  X86.cpp
+  AMDGPU.cpp
+  ARM.cpp
+  DirectX.cpp
+  Hexagon.cpp
+  NVPTX.cpp
+  PPC.cpp
+  RISCV.cpp
+  SPIR.cpp
+  SystemZ.cpp
+  WebAssembly.cpp
+  X86.cpp
+  clangCodeGen.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangCodeGen.lib
+  ExecuteCompilerInvocation.cpp
+  clangFrontendTool.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\lib\clangFrontendTool.lib
+  cc1_main.cpp
+  cc1as_main.cpp
+  cc1gen_reproducer_main.cpp
+  driver.cpp
+  clang.vcxproj -> D:\DEVELOP\WORKFINAL\build\hip-ep\_deps\llvm-project-build\Release\bin\clang.exe
+  Compiling mock/dynamic_dispatch_mock.cpp to bitcode
+D:/DEVELOP/WORKFINAL/hip-ep/lib/Runtime/mock/dynamic_dispatch_mock.cpp(41,10): error G13DA7946: use of undeclared identifier 'HIPDNN_STATUS_NOT_SUPPORTED' [D:\DEVELOP\WORKFINAL\build\hip-ep\lib\Runtime\HipRuntime.vcxproj]
+     41 |   return HIPDNN_STATUS_NOT_SUPPORTED;
+        |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+D:/DEVELOP/WORKFINAL/hip-ep/lib/Runtime/mock/dynamic_dispatch_mock.cpp(80,10): error G13DA7946: use of undeclared identifier 'HIPDNN_STATUS_NOT_SUPPORTED' [D:\DEVELOP\WORKFINAL\build\hip-ep\lib\Runtime\HipRuntime.vcxproj]
+     80 |   return HIPDNN_STATUS_NOT_SUPPORTED;
+        |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+  2 errors generated.
+C:\Program Files\Microsoft Visual Studio\2022\Professional\MSBuild\Microsoft\VC\v170\Microsoft.CppCommon.targets(254,5): error MSB8066: Custom build for 'D:\DEVELOP\WORKFINAL\build\hip-ep\CMakeFiles\5341dde9714953bedf3dd22a3e4864b5\runtime_dynamic_dispatch.bc.rule;D:\DEVELOP\WORKFINAL\build\hip-ep\CMakeFiles\5341dde9714953bedf3dd22a3e4864b5\runtime.bc.rule;D:\DEVELOP\WORKFINAL\build\hip-ep\CMakeFiles\433419f410c4fff6e2fdf5feff0cb56d\HipRuntime.rule' exited with code 1. [D:\DEVELOP\WORKFINAL\build\hip-ep\lib\Runtime\HipRuntime.vcxproj]
+Traceback (most recent call last):
+  File "D:\DEVELOP\WORKFINAL\hip-ep\build.py", line 496, in <module>
+    main()
+    ~~~~^^
+  File "D:\DEVELOP\WORKFINAL\hip-ep\build.py", line 485, in main
+    build_targets(args, build_dir)
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "D:\DEVELOP\WORKFINAL\hip-ep\build.py", line 290, in build_targets
+    run_subprocess(
+    ~~~~~~~~~~~~~~^
+        [
+        ^
+    ...<7 lines>...
+        ]
+        ^
+    )
+    ^
+  File "D:\DEVELOP\WORKFINAL\hip-ep\build.py", line 73, in run_subprocess
+    return subprocess.run(
+           ~~~~~~~~~~~~~~^
+        args,
+        ^^^^^
+    ...<4 lines>...
+        text=True if capture_stdout else None,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\amd\anaconda3\envs\hipdnn-ep\Lib\subprocess.py", line 578, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['cmake', '--build', 'D:\\DEVELOP\\WORKFINAL\\build\\hip-ep', '--config', 'Release', '--parallel', '24']' returned non-zero exit status 1.

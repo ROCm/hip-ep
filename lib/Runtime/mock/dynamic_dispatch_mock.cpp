@@ -38,7 +38,7 @@ int wrap_dd_matmul(RuntimeState *state, int32_t op_state_slot,
 
   fprintf(stderr,
           "wrap_dd_matmul: DynamicDispatch not available (mock runtime)\n");
-  return HIPDNN_STATUS_NOT_SUPPORTED;
+  return -1;
 }
 
 int wrap_dd_conv2d(RuntimeState *state, int32_t op_state_slot,
@@ -77,7 +77,7 @@ int wrap_dd_conv2d(RuntimeState *state, int32_t op_state_slot,
 
   fprintf(stderr,
           "wrap_dd_conv2d: DynamicDispatch not available (mock runtime)\n");
-  return HIPDNN_STATUS_NOT_SUPPORTED;
+  return -1;
 }
 
 // XRT context accessors (return NULL in mock)
