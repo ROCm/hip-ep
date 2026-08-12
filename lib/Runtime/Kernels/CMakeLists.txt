@@ -13,10 +13,11 @@
 # filename, so the output names are decoupled from the directory name -- do not
 # rename the targets to match the folder.
 #
-# Per-arch shared libraries: one SHARED library per arch in HIP_ARCHITECTURES,
-# each carrying a single fatbin slice. The EP DLL dlopens the matching variant
-# at JIT init via gcnArchName probing. No static archive is produced; the EP
-# DLL no longer carries hip_* launcher symbols.
+# Per-arch or per-family shared libraries driven by HIP_ARCHITECTURES:
+#   * concrete arch (gfx1151): one SHARED lib, single native fatbin slice
+#   * family name (gfx115X-all): one SHARED lib, multi-slice native fatbin
+#   * semicolon list (gfx1150;gfx1151): one single-slice lib per entry
+# LlvmIrJit dlopens custom_kernels_<gcnArchName> first, then the family DLL.
 #
 # Build flow (per arch):
 #   .hip files -> hipcc -c --offload-arch=<arch> -> .obj
@@ -24,13 +25,16 @@
 
 cmake_minimum_required(VERSION 3.18)
 
+include(${CMAKE_SOURCE_DIR}/cmake/hip_families.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/hip_utils.cmake)
 
 # Require HIP_ARCHITECTURES to be set (no silent defaults that may not match hardware)
 if(NOT HIP_ARCHITECTURES)
     message(FATAL_ERROR
         "[custom_kernels] HIP_ARCHITECTURES is not set.\n"
-        "Pass -DHIP_ARCHITECTURES=<arch>[;<arch>...] to cmake (e.g. gfx1100;gfx1151).\n"
+        "Pass -DHIP_ARCHITECTURES=<arch>[;<arch>...] or a family (e.g. gfx115X-all).\n"
+        "Examples: gfx1151 (single arch), gfx115X-all (family fatbin), "
+        "gfx1100;gfx1151 (multiple single-slice libs).\n"
         "Run 'rocminfo | grep gfx' or 'hipInfo' to find your GPU architecture.")
 endif()
 message(STATUS "[custom_kernels] Using HIP_ARCHITECTURES: ${HIP_ARCHITECTURES}")
@@ -81,19 +85,31 @@ set(_kernel_sources
     hip/strided_copy_kernel.hip
 )
 
-# One SHARED target per arch. Each builds a fatbin with that single slice;
-# OFFLOAD_ARCHS narrows the global list to one element so the resulting
-# DLL/SO is not bloated with code for archs the consumer won't load.
-foreach(_arch IN LISTS HIP_ARCHITECTURES)
-    set(_target custom_kernels_${_arch})
+# One SHARED target per HIP_ARCHITECTURES entry. Families compile all member
+# arches into one multi-slice fatbin; concrete entries get a single slice.
+foreach(_entry IN LISTS HIP_ARCHITECTURES)
+    set(_target custom_kernels_${_entry})
+    hip_is_gpu_family("${_entry}" _is_family)
+    if(_is_family)
+        hip_expand_gpu_family("${_entry}" _offload_archs)
+        if(NOT _offload_archs)
+            message(FATAL_ERROR
+                "[custom_kernels] family '${_entry}' has no member arches.")
+        endif()
+        message(STATUS
+            "[custom_kernels] family '${_entry}' -> offload: ${_offload_archs}")
+    else()
+        set(_offload_archs ${_entry})
+    endif()
+
     hip_add_library(${_target} SHARED ${_kernel_sources}
         INCLUDE_DIRECTORIES
             ${CMAKE_CURRENT_SOURCE_DIR}/include
         OFFLOAD_ARCHS
-            ${_arch}
+            ${_offload_archs}
     )
     set_target_properties(${_target} PROPERTIES
-        OUTPUT_NAME custom_kernels_${_arch}
+        OUTPUT_NAME custom_kernels_${_entry}
         FOLDER "custom_kernels"
     )
     hipdnn_ep_apply_binary_compliance(${_target}
@@ -103,7 +119,11 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
         LIBRARY DESTINATION lib   # Linux .so co-located with EP .so
         ARCHIVE DESTINATION lib   # Windows import lib; unused by the EP but harmless
     )
-    message(STATUS "[custom_kernels] Adding per-arch SHARED target: ${_target}")
+    if(_is_family)
+        message(STATUS "[custom_kernels] Adding family SHARED target: ${_target}")
+    else()
+        message(STATUS "[custom_kernels] Adding per-arch SHARED target: ${_target}")
+    endif()
 endforeach()
 
 # Export include directory for Runtime bitcode compilation

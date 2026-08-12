@@ -350,7 +350,7 @@ jobs:
           python build.py \
             --config Release \
             --cmake_generator Ninja \
-            --hip_arch gfx1151 \
+            --hip_arch gfx115X-all \
             --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install" \
             --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON \
             --cmake_extra_defines "HIP_WHEEL_EXTRA_DLLS=$AMDGPU_EP;$HIP_BACKEND"
@@ -521,7 +521,7 @@ jobs:
           cp "$PREBUILT/bin/onnxruntime_providers_shared.dll" staging/bin/
           cp "$PREBUILT/bin/DirectML.dll" staging/bin/
 
-          # MorphiZen EP DLL + per-arch custom_kernels_gfx<arch>.dll + other
+          # MorphiZen EP DLL + family custom_kernels_gfx115X-all.dll + other
           # install DLLs/EXEs (kernel DLL must sit next to the EP DLL so
           # LlvmIrJit's GetModuleFileName-anchored Load finds it).
           cp "${{ runner.workspace }}/install/bin/"*.dll staging/bin/ 2>/dev/null || true
@@ -541,12 +541,12 @@ jobs:
           cp "$AMDGPU_EP" staging/bin/
           cp "$HIP_BACKEND" staging/bin/
 
-          # Smoke: the per-arch kernel DLL must be present in staging/bin/
+          # Smoke: the family kernel DLL must be present in staging/bin/
           # for the gpu-test job to load it. Failure here means the install
           # rule in lib/Runtime/Kernels/CMakeLists.txt regressed.
-          KERNEL_DLL="staging/bin/custom_kernels_gfx1151.dll"
+          KERNEL_DLL="staging/bin/custom_kernels_gfx115X-all.dll"
           if [ ! -f "$KERNEL_DLL" ]; then
-            echo "ERROR: $KERNEL_DLL missing from install (HIP_ARCHITECTURES=gfx1151)"
+            echo "ERROR: $KERNEL_DLL missing from install (HIP_ARCHITECTURES=gfx115X-all)"
             ls -1 "${{ runner.workspace }}/install/bin/" || true
             exit 1
           fi

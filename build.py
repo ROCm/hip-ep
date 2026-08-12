@@ -402,7 +402,8 @@ def parse_arguments():
     p.add_argument(
         "--hip_arch",
         default="",
-        help="GPU arch (e.g. gfx1151); auto-detected on Linux if unset",
+        help="GPU arch (e.g. gfx1151) or family (e.g. gfx115X-all); "
+        "auto-detected on Linux if unset",
     )
     p.add_argument(
         "--mock", action="store_true", help="mock runtime (no GPU/HIP/TheRock)"
