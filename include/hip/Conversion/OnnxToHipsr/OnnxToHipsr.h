@@ -52,6 +52,10 @@ void populateReshapeConversionPatterns(::mlir::RewritePatternSet &patterns,
 void populateUnsqueezeConversionPatterns(::mlir::RewritePatternSet &patterns,
                                          ::mlir::MLIRContext *ctx);
 
+// Populates the pattern converting `onnx.Equal` into `hipsr.equal`.
+void populateEqualConversionPatterns(::mlir::RewritePatternSet &patterns,
+                                     ::mlir::MLIRContext *ctx);
+
 void populateReturnConversionPatterns(::mlir::RewritePatternSet &patterns,
                                       ::mlir::MLIRContext *ctx);
 
