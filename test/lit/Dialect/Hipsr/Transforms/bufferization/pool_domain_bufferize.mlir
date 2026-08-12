@@ -11,6 +11,8 @@
 
 // Nothing is written twice, so no buffer needs duplicating.
 // NOCOPY-NOT: memref.copy
+// NOTENSOR-NOT: tensor<
+// NOTENSOR-NOT: bufferization.to_
 
 // CHECK-LABEL: func.func @mlp_domain(
 // CHECK-SAME: %[[CTX:.+]]: !hip.context, %[[INPUT:.+]]: memref<4x256xf16>, %[[WEIGHT:.+]]: memref<256x512xf16>, %[[BIAS:.+]]: memref<4x512xf16>) -> memref<4x512xf16> {
