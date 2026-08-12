@@ -5,6 +5,8 @@
 
 #include "OnnxToHipUtils.h"
 
+#include "hip/debug_log.h"
+
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 
@@ -355,7 +357,11 @@ struct SliceToHip : public mlir::RewritePattern {
 
 void populateSliceConversionPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx) {
-  patterns.add<SliceDecompose, SliceToHip>(ctx);
+  const std::string enable =
+      hip_get_env("HIPDNN_EP_ENABLE_SLICE_DECOMPOSITION");
+  if (!enable.empty() && enable[0] >= '1')
+    patterns.add<SliceDecompose>(ctx);
+  patterns.add<SliceToHip>(ctx);
 }
 
 } // namespace hip

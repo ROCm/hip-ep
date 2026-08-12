@@ -8,7 +8,9 @@
 // Uses onnx.Constant operands (externalized by convert-onnx-to-hip) so the
 // SliceShapeFold -> SliceDecompose path is exercised end-to-end.
 
-// RUN: mkdir -p %t && hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip='externalize-min-num-elements=1 externalize-output-dir=%t' %s | FileCheck %s
+// RUN: mkdir -p %t && env HIPDNN_EP_ENABLE_SLICE_DECOMPOSITION=1 hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip='externalize-min-num-elements=1 externalize-output-dir=%t' %s | FileCheck %s
+// RUN: mkdir -p %t && env -u HIPDNN_EP_ENABLE_SLICE_DECOMPOSITION hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip='externalize-min-num-elements=1 externalize-output-dir=%t' %s | FileCheck %s --check-prefix=NO-DECOMPOSE
+// RUN: mkdir -p %t && env HIPDNN_EP_ENABLE_SLICE_DECOMPOSITION=0 hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip='externalize-min-num-elements=1 externalize-output-dir=%t' %s | FileCheck %s --check-prefix=NO-DECOMPOSE
 
 module {
   func.func @main_graph(%arg0: tensor<4xf32>) -> tensor<4xf32> {
@@ -18,6 +20,7 @@ module {
   func.func @test_swinv2_window_slice(%input: tensor<1x128x256x96xf16>)
       -> tensor<1x8x256x96xf16> {
     // CHECK-LABEL: func.func @test_swinv2_window_slice
+    // NO-DECOMPOSE-LABEL: func.func @test_swinv2_window_slice
     %starts = "onnx.Constant"() {value = dense<0> : tensor<1xi64>}
         : () -> tensor<1xi64>
     %ends = "onnx.Constant"() {value = dense<8> : tensor<1xi64>}
@@ -31,6 +34,8 @@ module {
     // CHECK-NOT: onnx.Slice
     // CHECK-NOT: hip.slice
     // CHECK: tensor.extract_slice {{.*}}[0, 0, 0, 0] [1, 8, 256, 96] [1, 1, 1, 1]
+    // NO-DECOMPOSE-NOT: tensor.extract_slice
+    // NO-DECOMPOSE: hip.slice(
 
     return %r : tensor<1x8x256x96xf16>
   }
@@ -40,6 +45,7 @@ module {
   func.func @test_swinv2_downsample_stride_slice(%input: tensor<1x128x256x96xf16>)
       -> tensor<1x64x256x96xf16> {
     // CHECK-LABEL: func.func @test_swinv2_downsample_stride_slice
+    // NO-DECOMPOSE-LABEL: func.func @test_swinv2_downsample_stride_slice
     %starts = "onnx.Constant"() {value = dense<1> : tensor<1xi64>}
         : () -> tensor<1xi64>
     %ends = "onnx.Constant"() {value = dense<9223372036854775807> : tensor<1xi64>}
@@ -54,6 +60,8 @@ module {
 
     // CHECK-NOT: hip.slice
     // CHECK: tensor.extract_slice {{.*}}[0, 1, 0, 0] [1, 64, 256, 96] [1, 2, 1, 1]
+    // NO-DECOMPOSE-NOT: tensor.extract_slice
+    // NO-DECOMPOSE: hip.slice(
 
     return %r : tensor<1x64x256x96xf16>
   }
