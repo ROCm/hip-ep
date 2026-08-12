@@ -52,6 +52,8 @@ The default domain ID is zero and is omitted from textual IR. Additional domains
 → hip-materialize-host-scalars
 → hip-resolve-memref-dims
 → CSE
+→ hip-optimize-memrefs
+→ optimize-allocation-liveness
 → hip-hoist-alloc-size-arith
 → hip-pool-allocs
 → convert-bufferization-to-memref
@@ -69,12 +71,22 @@ The default domain ID is zero and is omitted from textual IR. Additional domains
 
 `hip-materialize-host-scalars` redirects small integer/index buffers with host accesses to host-mapped scratch. It runs after allocation-producing rewrites and before PoolAllocs so host-written memory never becomes a view into device-only pool storage.
 
-### Pool-quality preconditions
+### Late buffer reuse and pool-quality preconditions
 
 `hip-resolve-memref-dims` folds post-bufferization `memref.dim` queries through view chains to root-buffer dimensions. These views may be created by bufferization or operand promotion, so this pass runs after both.
 
 The following CSE removes repeated size queries exposed by late allocation and
 view rewrites.
+
+The second `hip-optimize-memrefs` invocation reuses compatible, non-overlapping
+identity-layout temporaries introduced by `hip-promote-strided-operands`, which
+runs after the pipeline's first reuse pass. Reusing the earlier slot extends its
+effective lifetime, so upstream `optimize-allocation-liveness` moves the slot's
+existing deallocation after the final aliased use. These two passes are
+correctness-coupled and must remain adjacent: running the second reuse pass
+without liveness repair can leave the surviving deallocation before a later
+reuse. This is not the ownership-based buffer-deallocation pipeline and does not
+introduce new deallocations.
 
 `hip-hoist-alloc-size-arith` moves pure dynamic-size arithmetic above
 the earliest used allocation when the complete operand cone can move safely.
