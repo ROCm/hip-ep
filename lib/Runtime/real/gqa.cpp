@@ -486,8 +486,7 @@ static int gqa_forward_fused(
             static_cast<int>(present_seq), kFlashDecodeMaxSplits, scale,
             seqlens_k_ptr, static_cast<int>(local_window_size), head_sink,
             use_smooth_softmax ? 1 : 0, kv_dtype,
-            kv_quantized ? k_scale : nullptr,
-            kv_quantized ? v_scale : nullptr);
+            kv_quantized ? k_scale : nullptr, kv_quantized ? v_scale : nullptr);
       } else {
         // B==1 already paid (and caches) the seqlens_k read above, so the LUT
         // sees the length the kernel will actually scan without adding a sync.
@@ -512,8 +511,8 @@ static int gqa_forward_fused(
             kFlashDecodeMaxSplits,
             static_cast<int>(local_window_size)};
         const hipdnn_ep::GqaDecodeResult selected =
-            hipdnn_ep::gqa_autotune_resolve_decode(
-                state->gqa_autotune_policy, request);
+            hipdnn_ep::gqa_autotune_resolve_decode(state->gqa_autotune_policy,
+                                                   request);
         drc = hip_gqa_flash_decode_v2_configured(
             stream, qSrc, present_key, present_value, output, partials,
             static_cast<int>(B), static_cast<int>(H), static_cast<int>(G),
@@ -716,22 +715,21 @@ static int gqa_forward_fused(
         static_cast<int>(H), use_smooth_softmax ? 1 : 0);
   } else {
     const hipdnn_ep::GqaPrefillVariant variant =
-        d == 64   ? hipdnn_ep::GqaPrefillVariant::V5
+        d == 64    ? hipdnn_ep::GqaPrefillVariant::V5
         : d == 128 ? hipdnn_ep::GqaPrefillVariant::V7
                    : hipdnn_ep::GqaPrefillVariant::V8;
-    const hipdnn_ep::GqaPrefillRequest request{
-        variant,
-        static_cast<int>(B),
-        static_cast<int>(H),
-        static_cast<int>(G),
-        static_cast<int>(d),
-        static_cast<int>(sq),
-        static_cast<int>(total_seq),
-        attn_max_seq,
-        local_window_size};
+    const hipdnn_ep::GqaPrefillRequest request{variant,
+                                               static_cast<int>(B),
+                                               static_cast<int>(H),
+                                               static_cast<int>(G),
+                                               static_cast<int>(d),
+                                               static_cast<int>(sq),
+                                               static_cast<int>(total_seq),
+                                               attn_max_seq,
+                                               local_window_size};
     hipdnn_ep::GqaPrefillResult selected =
-        hipdnn_ep::gqa_autotune_resolve_prefill(
-            state->gqa_autotune_policy, request);
+        hipdnn_ep::gqa_autotune_resolve_prefill(state->gqa_autotune_policy,
+                                                request);
     auto launch_configured = [&](const hipdnn_ep::GqaPrefillConfig &config) {
       return hip_gqa_flash_prefill_v3_configured(
           stream, qSrc, kAttn, vAttn, output, static_cast<int>(B),
@@ -742,8 +740,7 @@ static int gqa_forward_fused(
           config.bkv, config.nw, config.mt, config.nd);
     };
     fp_rc = launch_configured(selected.config);
-    if (fp_rc != 0 &&
-        selected.source != hipdnn_ep::GqaTuneSource::Heuristic) {
+    if (fp_rc != 0 && selected.source != hipdnn_ep::GqaTuneSource::Heuristic) {
       // Ask for tier 3 explicitly. Re-running resolve_* would walk the same
       // tiers that just produced the rejected config.
       RUNTIME_DEBUG_LOG(
@@ -753,13 +750,12 @@ static int gqa_forward_fused(
                   hipdnn_ep::GqaTuneSource::Heuristic};
       fp_rc = launch_configured(selected.config);
     }
-    RUNTIME_DEBUG_LOG(
-        "[REAL] GQA prefill config source=%s v%d "
-        "m_tiles=%d bkv=%d nw=%d mt=%d nd=%d\n",
-        hipdnn_ep::gqa_tune_source_name(selected.source),
-        d == 64 ? 5 : (d == 128 ? 7 : 8), selected.config.m_tiles,
-        selected.config.bkv, selected.config.nw, selected.config.mt,
-        selected.config.nd);
+    RUNTIME_DEBUG_LOG("[REAL] GQA prefill config source=%s v%d "
+                      "m_tiles=%d bkv=%d nw=%d mt=%d nd=%d\n",
+                      hipdnn_ep::gqa_tune_source_name(selected.source),
+                      d == 64 ? 5 : (d == 128 ? 7 : 8), selected.config.m_tiles,
+                      selected.config.bkv, selected.config.nw,
+                      selected.config.mt, selected.config.nd);
   }
   // window is logged because it selects the HAS_WINDOW instantiation, so a
   // dispatch that looks identical here can be two different kernels.
@@ -768,9 +764,9 @@ static int gqa_forward_fused(
       "total_seq=%lld H=%lld G=%lld past_len=%lld sink=%d smooth=%d window=%d "
       "rc=%d\n",
       kv_quantized ? "quant" : "fp16", (long long)d,
-      (d == 64 ? 5 : (d == 128 ? 7 : 8)),
-      (long long)B, (long long)sq, (long long)total_seq, (long long)H,
-      (long long)G, (long long)past_len, static_cast<int>(head_sink != nullptr),
+      (d == 64 ? 5 : (d == 128 ? 7 : 8)), (long long)B, (long long)sq,
+      (long long)total_seq, (long long)H, (long long)G, (long long)past_len,
+      static_cast<int>(head_sink != nullptr),
       static_cast<int>(use_smooth_softmax), local_window_size, fp_rc);
   return fp_rc != 0 ? -1 : 0;
 }

@@ -18,8 +18,7 @@ namespace {
 void require(bool condition, const char *expression, int line) {
   if (condition)
     return;
-  std::fprintf(stderr, "requirement failed at line %d: %s\n", line,
-               expression);
+  std::fprintf(stderr, "requirement failed at line %d: %s\n", line, expression);
   std::exit(1);
 }
 
@@ -70,14 +69,13 @@ std::vector<uint8_t> makeLut() {
   std::vector<flatbuffers::Offset<mlir::hip::GqaTuneEntry>> entries;
 
   auto add_decode = [&](mlir::hip::GqaTuneMatch match, int skv, bool wmma,
-                        int splits, int max_seq = 0,
-                        int local_window = 0) {
+                        int splits, int max_seq = 0, int local_window = 0) {
     auto key = mlir::hip::CreateGqaTuneKey(
         builder, mlir::hip::GqaTunePhase::Decode, match,
         mlir::hip::GqaTuneKvDtype::Fp16, 1, 32, 8, 64,
         /*seq_q=*/1, skv, max_seq, local_window);
-    auto config = mlir::hip::CreateGqaTuneConfig(
-        builder, wmma, splits, 0, 0, 0, 0, 0);
+    auto config =
+        mlir::hip::CreateGqaTuneConfig(builder, wmma, splits, 0, 0, 0, 0, 0);
     entries.push_back(mlir::hip::CreateGqaTuneEntry(builder, key, config));
   };
   add_decode(mlir::hip::GqaTuneMatch::Exact, 128, true, 4);
@@ -91,8 +89,8 @@ std::vector<uint8_t> makeLut() {
 
   auto prefill_key = mlir::hip::CreateGqaTuneKey(
       builder, mlir::hip::GqaTunePhase::PrefillV5,
-      mlir::hip::GqaTuneMatch::Exact, mlir::hip::GqaTuneKvDtype::Fp16,
-      1, 32, 8, 64, /*seq_q=*/256, /*seq_kv=*/0, /*max_seq=*/0,
+      mlir::hip::GqaTuneMatch::Exact, mlir::hip::GqaTuneKvDtype::Fp16, 1, 32, 8,
+      64, /*seq_q=*/256, /*seq_kv=*/0, /*max_seq=*/0,
       /*local_window=*/0);
   auto prefill_config = mlir::hip::CreateGqaTuneConfig(
       builder, false, 0, /*m_tiles=*/2, /*bkv=*/64, 0, 0, 0);
@@ -118,9 +116,16 @@ int main() {
   REQUIRE(hipdnn_ep::gqa_autotune_mode(policy) ==
           hipdnn_ep::GqaAutotuneMode::Lookup);
 
-  hipdnn_ep::GqaDecodeRequest decode{
-      /*kv_dtype=*/0, 1, 32, 8, 64, 128,
-      /*exact_length_known=*/true, 4096, 64, 0};
+  hipdnn_ep::GqaDecodeRequest decode{/*kv_dtype=*/0,
+                                     1,
+                                     32,
+                                     8,
+                                     64,
+                                     128,
+                                     /*exact_length_known=*/true,
+                                     4096,
+                                     64,
+                                     0};
   auto result = hipdnn_ep::gqa_autotune_resolve_decode(policy, decode);
   REQUIRE(result.source == hipdnn_ep::GqaTuneSource::Exact);
   REQUIRE(result.config.use_wmma && result.config.splits == 4);

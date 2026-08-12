@@ -7,9 +7,9 @@
 // shape as etc/gqa_autotune/*.json.
 //
 // The runtime resolves a config in two data tiers (exact key, then bucket key)
-// and nothing else; there is no model on the dispatch path. This tool is how the
-// model still earns its keep: it precomputes rows offline for geometries nobody
-// measured, so those shapes hit the table instead of the heuristic.
+// and nothing else; there is no model on the dispatch path. This tool is how
+// the model still earns its keep: it precomputes rows offline for geometries
+// nobody measured, so those shapes hit the table instead of the heuristic.
 //
 //   gqa-lut-rows-from-model --arch gfx1151 --cus 20 \
 //       --geometry 32:8:128 --geometry 64:8:64 \
@@ -52,8 +52,8 @@ struct Row {
 };
 
 // Power-of-two ceilings, matching how the runtime builds a bucket key.
-const int kLengthBuckets[] = {128,  256,   512,   1024,  2048,
-                              4096, 8192,  16384, 32768, 65536};
+const int kLengthBuckets[] = {128,  256,  512,   1024,  2048,
+                              4096, 8192, 16384, 32768, 65536};
 
 bool parseGeometry(const std::string &text, Geometry *out) {
   // "<num_heads>:<kv_heads>:<head_dim>"
@@ -155,7 +155,7 @@ bool bestPrefill(const hip_gqa_shape_t &shape, hip_gqa_config_t *out) {
       for (const int mt : {1, 2})
         for (const int bkv : {32, 64}) {
           if (nd == 4 && bkv != 32)
-            continue;  // not instantiated
+            continue; // not instantiated
           hip_gqa_config_t cfg{};
           cfg.path = HIP_GQA_PATH_PREFILL_V8;
           cfg.num_waves = nd;
@@ -207,7 +207,7 @@ void usage(const char *argv0) {
       argv0);
 }
 
-}  // namespace
+} // namespace
 
 int main(int argc, char **argv) {
   std::vector<Geometry> geometries;
@@ -229,7 +229,8 @@ int main(int argc, char **argv) {
     } else if (arg == "--geometry") {
       Geometry g;
       if (!parseGeometry(next(), &g)) {
-        std::fprintf(stderr, "bad --geometry (want H:G:d, H%%G==0, d in 64/128/256)\n");
+        std::fprintf(stderr,
+                     "bad --geometry (want H:G:d, H%%G==0, d in 64/128/256)\n");
         return 2;
       }
       geometries.push_back(g);
@@ -283,7 +284,7 @@ int main(int argc, char **argv) {
 
       // Prefill: v5 keys on seq_q and the window only; v7/v8 also on seq_kv.
       if (window > 0 && g.head_dim != 64)
-        continue;  // the fused prefill declines a window at d != 64
+        continue; // the fused prefill declines a window at d != 64
       for (const int sq : kLengthBuckets) {
         for (const int kv : kLengthBuckets) {
           if (kv < sq)
@@ -302,7 +303,7 @@ int main(int argc, char **argv) {
           switch (g.head_dim) {
           case 64:
             row.phase = "PrefillV5";
-            row.seq_kv = 0;  // not part of the v5 key
+            row.seq_kv = 0; // not part of the v5 key
             row.local_window = window > 0 ? window : 0;
             row.m_tiles = best.m_tiles;
             row.bkv = best.bkv;
@@ -324,7 +325,7 @@ int main(int argc, char **argv) {
           }
           rows.push_back(row);
           if (g.head_dim == 64)
-            break;  // v5 ignores seq_kv, so one row per seq_q is enough
+            break; // v5 ignores seq_kv, so one row per seq_q is enough
         }
       }
     }

@@ -169,14 +169,12 @@ static bool import_gqa_lut_to_epcontext(PassContext *ctx) {
 
   constexpr const char *kLogicalFilename = "gqa_autotune.fb";
   auto output = ctx->open_file_for_write(kLogicalFilename);
-  if (!output ||
-      output->fwrite(bytes.data(), bytes.size()) != bytes.size()) {
-    LOG(WARNING) << "Failed to write " << kLogicalFilename
-                 << " to EPContext";
+  if (!output || output->fwrite(bytes.data(), bytes.size()) != bytes.size()) {
+    LOG(WARNING) << "Failed to write " << kLogicalFilename << " to EPContext";
     return false;
   }
-  MY_LOG(1) << "Imported GQA autotune LUT (" << bytes.size()
-            << " bytes) from " << input_path;
+  MY_LOG(1) << "Imported GQA autotune LUT (" << bytes.size() << " bytes) from "
+            << input_path;
   return true;
 }
 
