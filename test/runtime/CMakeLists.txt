@@ -36,3 +36,26 @@ target_compile_definitions(test-output-allocator PRIVATE HIPDNN_EP_RT_NO_EXPORT)
 add_test(NAME OutputAllocatorUnitTest COMMAND test-output-allocator)
 
 set_target_properties(test-output-allocator PROPERTIES FOLDER "runtime-tests")
+
+# GQA offline policy tests are GPU-free: compatibility fields use wildcard
+# arch/ROCm values, while exact -> bucket -> heuristic resolution and the
+# FlatBuffer loader exercise the same implementation compiled into runtime.bc.
+add_executable(test-gqa-autotune
+    test_gqa_autotune.cpp
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/real/gqa_autotune.cpp
+)
+
+target_compile_features(test-gqa-autotune PRIVATE cxx_std_17)
+target_compile_definitions(test-gqa-autotune PRIVATE
+    HIPDNN_EP_GQA_AUTOTUNE_GPU_FREE=1
+)
+target_include_directories(test-gqa-autotune PRIVATE
+    ${CMAKE_SOURCE_DIR}/lib/Runtime
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/real
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/morphizen/morphizen-foundation/include
+)
+target_link_libraries(test-gqa-autotune PRIVATE HipSchemasLib)
+
+add_test(NAME GqaAutotuneUnitTest COMMAND test-gqa-autotune)
+set_target_properties(test-gqa-autotune PROPERTIES FOLDER "runtime-tests")

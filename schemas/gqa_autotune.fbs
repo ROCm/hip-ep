@@ -1,0 +1,71 @@
+// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+// Licensed under the MIT License.
+
+namespace mlir.hip;
+
+enum GqaTunePhase : ubyte {
+  Decode = 0,
+  PrefillV5 = 1,
+  PrefillV7 = 2,
+  PrefillV8 = 3
+}
+
+enum GqaTuneMatch : ubyte {
+  Exact = 0,
+  Bucket = 1
+}
+
+enum GqaTuneKvDtype : ubyte {
+  Fp16 = 0,
+  Int8 = 1
+}
+
+// Keys are normalized by the runtime before lookup. For exact entries, seq_q
+// and seq_kv are the actual host-known lengths. For bucket entries they are the
+// inclusive power-of-two upper bounds. Fields unused by a phase are zero.
+table GqaTuneKey {
+  phase: GqaTunePhase = Decode;
+  match: GqaTuneMatch = Exact;
+  kv_dtype: GqaTuneKvDtype = Fp16;
+  batch: int32;
+  num_heads: int32;
+  kv_num_heads: int32;
+  head_dim: int32;
+  seq_q: int32;
+  seq_kv: int32;
+  max_seq: int32;
+  local_window: int32;
+}
+
+// The fields used depend on phase:
+//   Decode:   use_wmma, splits
+//   PrefillV5: m_tiles, bkv
+//   PrefillV7: nw, bkv, mt
+//   PrefillV8: nd, bkv, mt
+// Actual launch parameters are stored instead of an unstable candidate index.
+table GqaTuneConfig {
+  use_wmma: bool;
+  splits: int32;
+  m_tiles: int32;
+  bkv: int32;
+  nw: int32;
+  mt: int32;
+  nd: int32;
+}
+
+table GqaTuneEntry {
+  key: GqaTuneKey;
+  config: GqaTuneConfig;
+}
+
+table GqaAutotuneLut {
+  schema_version: uint32 = 1;
+  gpu_arch: string;
+  rocm_version: int32;
+  kernel_abi: string;
+  model_key: string;
+  entries: [GqaTuneEntry];
+}
+
+root_type GqaAutotuneLut;
+file_identifier "GQAL";
