@@ -12,16 +12,12 @@
 namespace mlir {
 namespace hipsr {
 
-/// Options for `hipsr-pipeline`.
 struct HipsrPipelineOptions : public PassPipelineOptions<HipsrPipelineOptions> {
 };
 
-/// Build the hipsr pipeline into `pm`.
 void buildHipsrPipeline(OpPassManager &pm,
                         const HipsrPipelineOptions &options = {});
 
-/// Register the `hipsr-pipeline` name so it can be used in `hip-mlir-opt` and
-/// in pipeline strings.
 void registerHipsrPipelines();
 
 } // namespace hipsr
