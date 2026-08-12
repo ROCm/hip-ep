@@ -34,6 +34,25 @@ BlockArgument getEntryArgument(ComputeOp computeOp, unsigned operandIndex) {
   return computeOp.getBody().front().getArgument(operandIndex);
 }
 
+OpResult getResultHeldIn(ComputeOp computeOp, OpOperand &opOperand) {
+  OperandRange outputs = computeOp.getOutputs();
+  if (outputs.empty())
+    return {};
+
+  unsigned begin = outputs.getBeginOperandIndex();
+  unsigned number = opOperand.getOperandNumber();
+  if (number < begin || number - begin >= computeOp->getNumResults())
+    return {};
+  return computeOp->getResult(number - begin);
+}
+
+OpOperand *getDestinationOf(ComputeOp computeOp, unsigned resultIndex) {
+  OperandRange outputs = computeOp.getOutputs();
+  if (resultIndex >= outputs.size())
+    return nullptr;
+  return &computeOp->getOpOperand(outputs.getBeginOperandIndex() + resultIndex);
+}
+
 bool isValueWritten(Value value, const bufferization::AnalysisState &state) {
   SmallVector<OpOperand *> worklist;
   DenseSet<OpOperand *> visited;
@@ -90,21 +109,32 @@ bool ComputeOpBufferization::isWritable(
 bufferization::AliasingValueList ComputeOpBufferization::getAliasingValues(
     Operation *op, OpOperand &opOperand,
     const bufferization::AnalysisState &) const {
-  return {{getEntryArgument(cast<ComputeOp>(op), opOperand.getOperandNumber()),
-           bufferization::BufferRelation::Equivalent}};
+  auto computeOp = cast<ComputeOp>(op);
+
+  bufferization::AliasingValueList aliases;
+  aliases.addAlias({getEntryArgument(computeOp, opOperand.getOperandNumber()),
+                    bufferization::BufferRelation::Equivalent});
+ 
+  if (OpResult result = getResultHeldIn(computeOp, opOperand))
+    aliases.addAlias({result, bufferization::BufferRelation::Equivalent});
+  return aliases;
 }
 
 bufferization::AliasingOpOperandList
 ComputeOpBufferization::getAliasingOpOperands(
     Operation *op, Value value, const bufferization::AnalysisState &) const {
+  auto computeOp = cast<ComputeOp>(op);
   if (auto blockArg = dyn_cast<BlockArgument>(value))
     return {{&op->getOpOperand(blockArg.getArgNumber()),
              bufferization::BufferRelation::Equivalent}};
 
-  auto opResult = cast<OpResult>(value);
-  return {{&getYieldOp(cast<ComputeOp>(op))
-                ->getOpOperand(opResult.getResultNumber()),
-           bufferization::BufferRelation::Equivalent}};
+  unsigned resultIndex = cast<OpResult>(value).getResultNumber();
+  bufferization::AliasingOpOperandList aliases;
+  aliases.addAlias({&getYieldOp(computeOp)->getOpOperand(resultIndex),
+                    bufferization::BufferRelation::Equivalent});
+  if (OpOperand *destination = getDestinationOf(computeOp, resultIndex))
+    aliases.addAlias({destination, bufferization::BufferRelation::Equivalent});
+  return aliases;
 }
 
 FailureOr<bufferization::BufferLikeType> ComputeOpBufferization::getBufferType(
@@ -117,10 +147,13 @@ FailureOr<bufferization::BufferLikeType> ComputeOpBufferization::getBufferType(
     return bufferization::getBufferType(op->getOperand(blockArg.getArgNumber()),
                                         options, state, invocationStack);
 
-  // A result's buffer is the yielded value's, which the default reaches through
-  // the equivalent alias getAliasingOpOperands reports.
-  return bufferization::detail::defaultGetBufferType(value, options, state,
-                                                     invocationStack);
+  // The outs operand supplies the memory a result is held in, the yield the
+  // type that memory is viewed through, so the type comes from the yield. The
+  // default would pick whichever equivalent alias comes first instead.
+  unsigned resultIndex = cast<OpResult>(value).getResultNumber();
+  return bufferization::getBufferType(
+      getYieldOp(cast<ComputeOp>(op))->getOperand(resultIndex), options, state,
+      invocationStack);
 }
 
 LogicalResult ComputeOpBufferization::bufferize(
