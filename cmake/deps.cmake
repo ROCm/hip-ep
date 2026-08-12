@@ -84,7 +84,7 @@ if(_HIPDNN_NEED_TOOLCHAIN)
         if(_therock_arch MATCHES ";")
           list(GET _therock_arch 0 _therock_arch)
         endif()
-        include(${CMAKE_CURRENT_SOURCE_DIR}/hip_families.cmake)
+        include(${CMAKE_CURRENT_LIST_DIR}/hip_families.cmake)
         hip_first_concrete_gpu_arch("${_therock_arch}" _therock_arch)
         if(NOT _therock_arch)
           message(FATAL_ERROR
