@@ -11,16 +11,19 @@
 //        MatMul(A, B) -> Mul(scores, scale)   [scale broadcasts, e.g. Hx1x1]
 //      =>
 //        Mul(A, scale) -> MatMul(A', B)
-//      Removes the broadcast Mul on the large [W,H,M,N] score tensor. Per-head
-//      scale commutes with the MatMul inner product when scale depends only on
-//      the head/batch axis shared with A.
+//      Removes the broadcast Mul on the large [W,H,M,N] score tensor. The fold
+//      is valid only when scale is constant along MatMul's contraction (K) and
+//      output column (N) axes; e.g. Swin per-head Hx1x1 scales pass, column
+//      scales like [10,100] on a 2x2 MatMul are rejected.
 //
 //   2. ExpandConstantBroadcastAdd
 //        Add(activation, Constant[c])   [Constant broadcasts to output]
 //      =>
 //        Add(activation, Constant[c'] )  [c' pre-expanded to output shape]
 //      Removes runtime broadcast Add; lowers to same-shape hip.add instead of
-//      hip_elementwise_binary_bcast on large attention maps.
+//      hip_elementwise_binary_bcast on large attention maps. Skipped when the
+//      expanded constant would exceed kMaxConstantExpandElements (compile/memory
+//      guard for tiny biases on huge static tensors).
 //
 // Must run BEFORE lowerOnnxConstants so inline and ORT mem-addr constants are
 // still readable (value attribute or host pointer in location/offset).
@@ -47,6 +50,10 @@ namespace hip {
 namespace {
 
 static constexpr llvm::StringLiteral kOrtMemAddrTag = "*/_ORT_MEM_ADDR_/*";
+
+/// Max output elements when materializing a broadcast constant at compile time
+/// (~1 Mi elems; ~2 MiB fp16). Avoids multi-GB DenseElementsAttr on huge maps.
+static constexpr int64_t kMaxConstantExpandElements = 1 << 20;
 
 static RankedTensorType signlessForRawBuffer(RankedTensorType tensorType) {
   Type elem = tensorType.getElementType();
@@ -105,6 +112,33 @@ static bool broadcastsTo(ArrayRef<int64_t> smallShape,
     return false;
   auto bc = broadcastShape(smallShape, outShape);
   return succeeded(bc) && shapesEqual(*bc, outShape);
+}
+
+/// Scale extent aligned to tensorShape[tensorDim] (NumPy right-aligned broadcast).
+static int64_t alignedScaleExtent(ArrayRef<int64_t> tensorShape,
+                                  ArrayRef<int64_t> scaleShape,
+                                  size_t tensorDim) {
+  size_t tensorRank = tensorShape.size();
+  size_t scaleRank = scaleShape.size();
+  if (tensorDim >= tensorRank)
+    return 1;
+  if (tensorRank - tensorDim > scaleRank)
+    return 1;
+  size_t scaleDim = tensorDim - (tensorRank - scaleRank);
+  return scaleShape[scaleDim];
+}
+
+/// (A * scale) @ B == (A @ B) * scale when scale does not vary on K or N.
+static bool scaleCommutesWithMatMulOnA(ArrayRef<int64_t> aShape,
+                                       ArrayRef<int64_t> resultShape,
+                                       ArrayRef<int64_t> scaleShape) {
+  if (aShape.size() < 2 || resultShape.size() < 2)
+    return false;
+  int64_t kExtent =
+      alignedScaleExtent(aShape, scaleShape, aShape.size() - 1);
+  int64_t nExtent = alignedScaleExtent(resultShape, scaleShape,
+                                       resultShape.size() - 1);
+  return kExtent == 1 && nExtent == 1;
 }
 
 /// Read dense data for an inline-value or ORT mem-addr onnx.Constant.
@@ -259,6 +293,9 @@ struct FoldMatMulScaleMul : public RewritePattern {
     auto scaledATy = broadcastShape(aTy.getShape(), scaleTy.getShape());
     if (failed(scaledATy) || !shapesEqual(*scaledATy, aTy.getShape()))
       return failure();
+    if (!scaleCommutesWithMatMulOnA(aTy.getShape(), matmulResultTy.getShape(),
+                                    scaleTy.getShape()))
+      return failure();
 
     Location loc = mulOp->getLoc();
     rewriter.setInsertionPoint(matmulOp);
@@ -307,6 +344,10 @@ struct ExpandConstantBroadcastAdd : public RewritePattern {
     if (!constTy || !isStaticShape(constTy))
       return failure();
     if (!broadcastsTo(constTy.getShape(), outTy.getShape()))
+      return failure();
+
+    int64_t outNumel = numElements(outTy.getShape());
+    if (outNumel <= 0 || outNumel > kMaxConstantExpandElements)
       return failure();
 
     auto denseOr = getConstantDenseElements(constOp);
