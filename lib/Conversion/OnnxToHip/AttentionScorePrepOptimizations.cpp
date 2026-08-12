@@ -22,8 +22,8 @@
 //        Add(activation, Constant[c'] )  [c' pre-expanded to output shape]
 //      Removes runtime broadcast Add; lowers to same-shape hip.add instead of
 //      hip_elementwise_binary_bcast on large attention maps. Skipped when the
-//      expanded constant would exceed kMaxConstantExpandElements (compile/memory
-//      guard for tiny biases on huge static tensors).
+//      expanded constant would exceed kMaxConstantExpandElements
+//      (compile/memory guard for tiny biases on huge static tensors).
 //
 // Must run BEFORE lowerOnnxConstants so inline and ORT mem-addr constants are
 // still readable (value attribute or host pointer in location/offset).
@@ -114,7 +114,8 @@ static bool broadcastsTo(ArrayRef<int64_t> smallShape,
   return succeeded(bc) && shapesEqual(*bc, outShape);
 }
 
-/// Scale extent aligned to tensorShape[tensorDim] (NumPy right-aligned broadcast).
+/// Scale extent aligned to tensorShape[tensorDim] (NumPy right-aligned
+/// broadcast).
 static int64_t alignedScaleExtent(ArrayRef<int64_t> tensorShape,
                                   ArrayRef<int64_t> scaleShape,
                                   size_t tensorDim) {
@@ -134,10 +135,9 @@ static bool scaleCommutesWithMatMulOnA(ArrayRef<int64_t> aShape,
                                        ArrayRef<int64_t> scaleShape) {
   if (aShape.size() < 2 || resultShape.size() < 2)
     return false;
-  int64_t kExtent =
-      alignedScaleExtent(aShape, scaleShape, aShape.size() - 1);
-  int64_t nExtent = alignedScaleExtent(resultShape, scaleShape,
-                                       resultShape.size() - 1);
+  int64_t kExtent = alignedScaleExtent(aShape, scaleShape, aShape.size() - 1);
+  int64_t nExtent =
+      alignedScaleExtent(resultShape, scaleShape, resultShape.size() - 1);
   return kExtent == 1 && nExtent == 1;
 }
 
