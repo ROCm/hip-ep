@@ -97,8 +97,10 @@ Runtime  (hip-compiler.dll NOT loaded)                                          
 
 **Compile time**: `convert-onnx-to-hip` preserves its value-based pre-folds and
 two constant sweeps, but each sweep only lowers `onnx.Constant` to the neutral
-`hip.constant` carrier. A carrier contains either an inline dense `value` or a
-complete ORT external-data `location`/`offset`/`size` reference.
+`hip.constant` carrier. A carrier contains an inline dense `value`, a complete
+file `location`/`offset`/`size`, or a complete
+`memory_address`/`size`. The ONNX converter translates the ORT memory sentinel
+into the generic memory form; no ORT encoding enters the HIP dialect.
 
 After the `AfterConvertOnnxToHip` plugin slot, `hip-infer-shapes` consumes any
 inspectable carrier payload needed for compile-time shape refinement. The
@@ -188,24 +190,26 @@ literal. It does no filesystem access, layout, index assignment, global
 creation, or constant metadata stamping.
 
 `hip-externalize-constants`
-(`lib/Dialect/Transforms/ExternalizeConstants.cpp`) validates the
-compiler-owned order stamped by conversion, then assigns each externalized
-carrier a sequential `globalIndex` (0, 1, 2, …). One absolute counter preserves
-the original conversion visitation across functions: function 0 imported
-sweep, function 0 synthesized sweep, function 1 imported sweep, function 1
-synthesized sweep, and so on. Unmarked plugin carriers follow in stable module
-walk order. Inline values below the threshold become `arith.constant`; larger
-values and ORT external references become the existing extern `memref.global`
-bridge. The direct pass threshold defaults to `0` (inline); production
-compilation passes the default `1`. External sources require a positive byte
-size, matching the pre-split behavior.
+(`lib/Dialect/Transforms/ExternalizeConstants.cpp`) validates each explicit
+`serialization_order`, then assigns every externalized carrier a sequential
+`globalIndex` (0, 1, 2, …). The ONNX converter's absolute counter preserves its
+original visitation across functions: function 0 imported sweep, function 0
+synthesized sweep, function 1 imported sweep, function 1 synthesized sweep, and
+so on. Unordered plugin carriers follow in stable module walk order. Inline
+values below the threshold become `arith.constant`; larger values and external
+references become the existing extern `memref.global` bridge. The direct pass
+threshold defaults to `0` (inline); production compilation passes the default
+`1`, so every non-empty production constant, including a scalar, is
+externalized. External sources require a positive byte size, matching the
+pre-split behavior.
 
-The ORT memory-address sentinel is a process-local import contract, not a
-serializable IR representation. ORT retains initializer storage through
-compilation, and the production pass receives an injected `FileSystem` while
-that storage is live. Direct/textual pass invocation rejects memory-address
-carriers before dereferencing them. Keeping the handoff zero-copy avoids
-duplicating potentially multi-gigabyte weights throughout shape inference.
+The ORT memory-address sentinel is handled only by the ONNX converter. It
+becomes the generic carrier `memory_address`, which remains process-local and
+non-serializable. ORT retains initializer storage through compilation, and the
+production pass receives an injected `FileSystem` while that storage is live.
+Direct/textual pass invocation rejects memory-address carriers before
+dereferencing them. Keeping the handoff zero-copy avoids duplicating
+potentially multi-gigabyte weights throughout shape inference.
 
 For externalized constants, the pass writes raw bytes to the configured
 constants file via `fs`, and emits the existing module attributes:
@@ -234,7 +238,7 @@ External `i1` is the sole normalization case because the runtime contract uses
 one byte per element while DenseElementsAttr bit-packs it. Type agreement is
 checked before any IR mutation.
 
-The implementation validates carriers, compiler-owned order, source ranges
+The implementation validates carriers, explicit serialization order, source ranges
 that compilation reads, layout arithmetic, metadata freshness, and symbol
 availability before serialization, then mutates IR only after serialization
 succeeds. The shared `ConstantsIO` contract intentionally remains unchanged:

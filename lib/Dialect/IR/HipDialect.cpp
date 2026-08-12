@@ -122,9 +122,7 @@ LogicalResult AllocOutputOp::verify() {
 ConstantOp::SourceKind ConstantOp::getSourceKind() {
   if (getValueAttr())
     return SourceKind::Inline;
-  return getLocationAttr().getValue() == kOrtMemoryAddressLocation
-             ? SourceKind::Memory
-             : SourceKind::File;
+  return getMemoryAddressAttr() ? SourceKind::Memory : SourceKind::File;
 }
 
 LogicalResult ConstantOp::verify() {
@@ -160,26 +158,17 @@ LogicalResult ConstantOp::verify() {
   if (llvm::MulOverflow(numElements, elementBytes, expectedBytes))
     return emitOpError("result byte size overflows int64");
 
-  StringAttr origin = getOriginAttr();
-  IntegerAttr order = getOrderAttr();
-  if (static_cast<bool>(origin) != static_cast<bool>(order))
-    return emitOpError(
-        "compiler-owned `origin` and `order` must be present together");
-  if (origin) {
-    if (origin.getValue() != kOnnxImportedConstantOrigin &&
-        origin.getValue() != kOnnxSynthesizedConstantOrigin)
-      return emitOpError("has unknown compiler-owned origin `")
-             << origin.getValue() << "`";
+  if (IntegerAttr order = getSerializationOrderAttr())
     if (order.getInt() < 0)
-      return emitOpError("compiler-owned order must be non-negative");
-  }
+      return emitOpError("serialization order must be non-negative");
 
   bool hasValue = getValueAttr() != nullptr;
   bool hasLocation = getLocationAttr() != nullptr;
   bool hasOffset = getOffsetAttr() != nullptr;
+  bool hasMemoryAddress = getMemoryAddressAttr() != nullptr;
   bool hasSize = getSizeAttr() != nullptr;
   if (hasValue) {
-    if (hasLocation || hasOffset || hasSize)
+    if (hasLocation || hasOffset || hasMemoryAddress || hasSize)
       return emitOpError("inline source must contain only `value`");
     auto denseValue = dyn_cast<DenseElementsAttr>(getValueAttr());
     if (!denseValue)
@@ -191,28 +180,38 @@ LogicalResult ConstantOp::verify() {
     return success();
   }
 
-  if (!hasLocation && !hasOffset && !hasSize)
-    return emitOpError("requires exactly one source: `value` or complete "
-                       "`location`/`offset`/`size`");
-  if (!hasLocation || !hasOffset || !hasSize)
+  bool hasAnyFileField = hasLocation || hasOffset;
+  if (hasAnyFileField && hasMemoryAddress)
+    return emitOpError("file and memory sources are mutually exclusive");
+  if (!hasAnyFileField && !hasMemoryAddress && !hasSize)
+    return emitOpError(
+        "requires exactly one source: `value`, complete file source, or "
+        "complete memory source");
+  if (hasAnyFileField && (!hasLocation || !hasOffset || !hasSize))
     return emitOpError(
         "external source requires `location`, `offset`, and `size` together");
+  if (hasMemoryAddress && !hasSize)
+    return emitOpError(
+        "memory source requires `memory_address` and `size` together");
+  if (!hasAnyFileField && !hasMemoryAddress)
+    return emitOpError(
+        "external source requires a file location or memory address");
 
-  StringRef location = getLocationAttr().getValue();
-  int64_t offset = getOffsetAttr().getInt();
   int64_t size = getSizeAttr().getInt();
-  if (location.empty())
-    return emitOpError("external source `location` must not be empty");
   if (size <= 0)
     return emitOpError("external source `size` must be positive");
   if (size != expectedBytes)
     return emitOpError("external source byte size ")
            << size << " does not match result byte size " << expectedBytes;
 
-  if (location == kOrtMemoryAddressLocation) {
-    if (offset == 0)
+  if (hasMemoryAddress) {
+    if (getMemoryAddressAttr().getInt() == 0)
       return emitOpError("memory-address source has null address");
   } else {
+    StringRef location = getLocationAttr().getValue();
+    int64_t offset = getOffsetAttr().getInt();
+    if (location.empty())
+      return emitOpError("external source `location` must not be empty");
     if (offset < 0)
       return emitOpError("file source `offset` must be non-negative");
     if (offset > std::numeric_limits<int64_t>::max() - size)

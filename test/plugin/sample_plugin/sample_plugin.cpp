@@ -35,7 +35,8 @@ extern "C" const std::size_t kSamplePluginBitcodeSize;
 
 namespace {
 
-void emitSampleConstant(mlir::func::FuncOp function, llvm::StringRef nodeName) {
+void emitSampleConstant(mlir::func::FuncOp function,
+                        llvm::StringRef sourceName) {
   mlir::OpBuilder builder(function.getContext());
   builder.setInsertionPointToStart(&function.front());
   auto tensorType = mlir::RankedTensorType::get({2}, builder.getIntegerType(8));
@@ -46,7 +47,9 @@ void emitSampleConstant(mlir::func::FuncOp function, llvm::StringRef nodeName) {
   auto value = mlir::DenseElementsAttr::get(tensorType, values);
   auto constant = mlir::hip::ConstantOp::create(builder, function.getLoc(),
                                                 tensorType, value);
-  constant->setAttr("onnx_node_name", builder.getStringAttr(nodeName));
+  auto name = builder.getStringAttr(sourceName);
+  constant.setSymbolNameHintAttr(name);
+  constant.setSourceNameAttr(name);
 }
 
 // Emits one remark per func.func. A marked function also gets a plugin-owned

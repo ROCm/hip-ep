@@ -31,7 +31,7 @@ func.func @incomplete_source() -> tensor<2xi8> {
 }
 
 func.func @missing_source() -> tensor<2xi8> {
-  // expected-error @+1 {{requires exactly one source: `value` or complete `location`/`offset`/`size`}}
+  // expected-error @+1 {{requires exactly one source: `value`, complete file source, or complete memory source}}
   %0 = hip.constant : tensor<2xi8>
   return %0 : tensor<2xi8>
 }
@@ -68,31 +68,25 @@ func.func @file_range_overflow() -> tensor<2xi8> {
 
 func.func @null_memory_address() -> tensor<2xi8> {
   // expected-error @+1 {{memory-address source has null address}}
-  %0 = hip.constant {location = "*/_ORT_MEM_ADDR_/*", offset = 0 : i64, size = 2 : i64} : tensor<2xi8>
+  %0 = hip.constant {memory_address = 0 : i64, size = 2 : i64} : tensor<2xi8>
   return %0 : tensor<2xi8>
 }
 
-func.func @origin_without_order() -> tensor<2xi8> {
-  // expected-error @+1 {{compiler-owned `origin` and `order` must be present together}}
-  %0 = hip.constant {origin = "onnx-imported", value = dense<[1, 2]> : tensor<2xi8>} : tensor<2xi8>
+func.func @incomplete_memory_source() -> tensor<2xi8> {
+  // expected-error @+1 {{memory source requires `memory_address` and `size` together}}
+  %0 = hip.constant {memory_address = 1 : i64} : tensor<2xi8>
   return %0 : tensor<2xi8>
 }
 
-func.func @order_without_origin() -> tensor<2xi8> {
-  // expected-error @+1 {{compiler-owned `origin` and `order` must be present together}}
-  %0 = hip.constant {order = 0 : i64, value = dense<[1, 2]> : tensor<2xi8>} : tensor<2xi8>
+func.func @mixed_external_sources() -> tensor<2xi8> {
+  // expected-error @+1 {{file and memory sources are mutually exclusive}}
+  %0 = hip.constant {location = "/tmp/w", offset = 0 : i64, memory_address = 1 : i64, size = 2 : i64} : tensor<2xi8>
   return %0 : tensor<2xi8>
 }
 
-func.func @unknown_origin() -> tensor<2xi8> {
-  // expected-error @+1 {{has unknown compiler-owned origin `plugin`}}
-  %0 = hip.constant {order = 0 : i64, origin = "plugin", value = dense<[1, 2]> : tensor<2xi8>} : tensor<2xi8>
-  return %0 : tensor<2xi8>
-}
-
-func.func @negative_order() -> tensor<2xi8> {
-  // expected-error @+1 {{compiler-owned order must be non-negative}}
-  %0 = hip.constant {order = -1 : i64, origin = "onnx-imported", value = dense<[1, 2]> : tensor<2xi8>} : tensor<2xi8>
+func.func @negative_serialization_order() -> tensor<2xi8> {
+  // expected-error @+1 {{serialization order must be non-negative}}
+  %0 = hip.constant {serialization_order = -1 : i64, value = dense<[1, 2]> : tensor<2xi8>} : tensor<2xi8>
   return %0 : tensor<2xi8>
 }
 

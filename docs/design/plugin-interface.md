@@ -198,14 +198,14 @@ warning rather than a silent miss.
 
 `AfterConvertOnnxToHip` is also the supported plugin-producer boundary for
 constant weights. A plugin may emit the production `hip.constant` carrier
-there with exactly one source: a dense `value`, or complete ORT
-`location`/`offset`/`size`. `hip-infer-shapes` consumes any compile-time
-payload required for shape refinement before `hip-externalize-constants`
-validates and serializes in-tree and plugin carriers together. Plugins must not
-set the compiler-owned `origin` or `order` attributes; unmarked plugin
-carriers follow the imported and synthesized ONNX sweeps in stable module walk
-order. Later slots must not emit carriers; the pipeline diagnoses any
-`hip.constant` that survives to `BeforeBufferization`.
+there with exactly one source: a dense `value`, complete file
+`location`/`offset`/`size`, or complete `memory_address`/`size`.
+`hip-infer-shapes` consumes any compile-time payload required for shape
+refinement before `hip-externalize-constants` validates and serializes all
+carriers together. Plugins normally leave `serialization_order` unset, so they
+follow explicitly ordered producer carriers in stable module walk order. Later
+slots must not emit carriers; the pipeline diagnoses any `hip.constant` that
+survives to `BeforeBufferization`.
 
 ## How the host dispatches plugins
 

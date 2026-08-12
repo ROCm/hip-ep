@@ -230,13 +230,15 @@ needs to run.
 
 It is also the only supported slot for producing constant weights. Emit
 `hip.constant` with a statically shaped ranked tensor result and exactly one
-source (dense `value`, or complete `location`/`offset`/`size`).
+source (dense `value`, complete file `location`/`offset`/`size`, or complete
+`memory_address`/`size`). Optional `symbol_name_hint` and `source_name`
+attributes control the private symbol fragment and manifest label.
 `hip-infer-shapes` first consumes any compile-time payload needed for shape
 refinement; `hip-externalize-constants` then applies the same
 inline/full/streaming/hybrid policy and metadata contract to plugin and in-tree
-carriers. Leave `origin` and `order` unset; those are reserved for in-tree
-conversion, and plugin carriers are deterministically
-serialized afterward in stable module walk order. Do not emit `hip.constant`
+carriers. Leave `serialization_order` unset unless the producer owns a stable
+module-wide order; unordered plugin carriers are deterministically serialized
+after ordered carriers in stable module walk order. Do not emit `hip.constant`
 from `BeforeBufferization` or later; the pipeline rejects a surviving late
 carrier before One-Shot Bufferize.
 

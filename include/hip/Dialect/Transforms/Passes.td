@@ -797,15 +797,15 @@ def ExternalizeConstantsPass
     arrays.
 
     Inline carriers below the threshold become `arith.constant`. Carriers at or
-    above it, plus every ORT location carrier when externalization is enabled,
-    become the existing private extern `memref.global` +
+    above it, plus every file-backed or memory-backed carrier when
+    externalization is enabled, become the existing private extern
+    `memref.global` +
     `bufferization.to_tensor` bridge consumed by
     `hip-resolve-extern-constants`.
 
     This pass preserves full-sidecar, streaming, and hybrid skip-data behavior.
-    It runs after the `AfterConvertOnnxToHip` plugin slot, allowing plugins to
-    emit `hip.constant` there, and before shape inference, canonicalization, and
-    bufferization.
+    It must run after all constant producers and shape inference, and before
+    canonicalization and bufferization.
   }];
   let options = [
     Option<"externalizeMinNumElements", "externalize-min-num-elements",

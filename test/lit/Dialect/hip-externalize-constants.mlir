@@ -11,6 +11,8 @@
 // RUN: not hip-mlir-opt --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/out' %t/missing-file.mlir 2>&1 | FileCheck %s --check-prefix=MISSING
 // RUN: hip-mlir-opt --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/out skip-constant-data=true' %t/missing-file.mlir | FileCheck %s --check-prefix=STREAM
 // RUN: not hip-mlir-opt --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/out' %t/memory-source.mlir 2>&1 | FileCheck %s --check-prefix=MEMORY
+// RUN: mkdir -p %t/order-out
+// RUN: hip-mlir-opt --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t/order-out' %t/ordered.mlir | FileCheck %s --check-prefix=ORDER
 // RUN: printf '\376\377\000\200\000\200\377\377' > %t/typed.bin
 // RUN: cd %t && hip-mlir-opt --hip-externalize-constants typed-inline.mlir | FileCheck %s --check-prefix=TYPED
 
@@ -36,6 +38,11 @@
 // STREAM: hipdnn.constant_file_paths = ["/definitely/missing/hip-constant.bin"]
 // STREAM-SAME: hipdnn.constant_source_kinds = array<i32: 2>
 // MEMORY: error: memory-address sources require production externalization with an injected FileSystem
+// ORDER: module attributes
+// ORDER-SAME: hipdnn.constant_offsets = array<i64: 0, 64, 128>
+// ORDER-DAG: memref.global "private" @hip_ext_constant_first_0
+// ORDER-DAG: memref.global "private" @hip_ext_constant_second_1
+// ORDER-DAG: memref.global "private" @hip_ext_constant_plugin_2
 // TYPED-LABEL: func.func @typed_inline
 // TYPED: arith.constant dense<[-2, -32768]> : tensor<2xsi16>
 // TYPED: arith.constant dense<[32768, 65535]> : tensor<2xui16>
@@ -45,7 +52,8 @@
 module {
   func.func @plugin_constants() -> (tensor<si8>, tensor<4xui8>) {
     %0 = hip.constant {
-      onnx_node_name = "/plugin/weight",
+      source_name = "/plugin/weight",
+      symbol_name_hint = "/plugin/weight",
       value = dense<7> : tensor<si8>
     } : tensor<si8>
     %1 = hip.constant {
@@ -109,8 +117,39 @@ module {
 module {
   func.func @memory_source() -> tensor<4xi8> {
     %0 = hip.constant {
-      location = "*/_ORT_MEM_ADDR_/*", offset = 1 : i64, size = 4 : i64
+      memory_address = 1 : i64, size = 4 : i64
     } : tensor<4xi8>
     return %0 : tensor<4xi8>
+  }
+}
+
+//--- ordered.mlir
+module {
+  // Structural walk order intentionally differs from serialization order.
+  func.func @second() -> tensor<ui8> {
+    %0 = hip.constant {
+      serialization_order = 1 : i64,
+      source_name = "second",
+      symbol_name_hint = "second",
+      value = dense<2> : tensor<ui8>
+    } : tensor<ui8>
+    return %0 : tensor<ui8>
+  }
+  func.func @first() -> tensor<ui8> {
+    %0 = hip.constant {
+      serialization_order = 0 : i64,
+      source_name = "first",
+      symbol_name_hint = "first",
+      value = dense<1> : tensor<ui8>
+    } : tensor<ui8>
+    return %0 : tensor<ui8>
+  }
+  func.func @plugin() -> tensor<ui8> {
+    %0 = hip.constant {
+      source_name = "plugin",
+      symbol_name_hint = "plugin",
+      value = dense<3> : tensor<ui8>
+    } : tensor<ui8>
+    return %0 : tensor<ui8>
   }
 }

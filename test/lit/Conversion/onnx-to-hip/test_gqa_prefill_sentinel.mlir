@@ -70,7 +70,7 @@ module {
     // The constant -1 must reach the conversion intact and the op must
     // lower cleanly to hip.gqa. The onnx.Constant becomes a hip.constant
     // carrier; the value must be preserved verbatim.
-    // CHECK: hip.constant {order = 0 : i64, origin = "onnx-imported", value = dense<-1> : tensor<1xi32>}
+    // CHECK: hip.constant {serialization_order = 0 : i64, value = dense<-1> : tensor<1xi32>}
     // CHECK: hip.gqa(%[[CTX]])
     // CHECK-SAME: kv_num_heads = 8
     // CHECK-SAME: num_heads = 32

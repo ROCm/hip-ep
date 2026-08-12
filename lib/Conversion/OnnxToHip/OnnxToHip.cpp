@@ -38,6 +38,8 @@ namespace {
 // Constant carrier lowering
 //===----------------------------------------------------------------------===//
 
+constexpr llvm::StringLiteral kOrtMemoryAddressLocation = "*/_ORT_MEM_ADDR_/*";
+
 /// Lower every onnx.Constant to a policy-neutral hip.constant carrier.
 ///
 /// Both conversion sweeps call this helper: the first handles imported
@@ -45,7 +47,6 @@ namespace {
 /// synthesized by compute-op conversion. Externalization policy and artifact
 /// I/O deliberately live in the later hip-externalize-constants module pass.
 static mlir::LogicalResult lowerOnnxConstants(mlir::func::FuncOp funcOp,
-                                              llvm::StringRef origin,
                                               int64_t &nextOrder) {
   llvm::SmallVector<mlir::Operation *> constants;
   funcOp.walk([&](mlir::Operation *op) {
@@ -63,14 +64,12 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::func::FuncOp funcOp,
       return constOp->emitError("hip.constant order overflows int64");
 
     mlir::OpBuilder builder(constOp);
-    auto originAttr = builder.getStringAttr(origin);
     auto orderAttr = builder.getI64IntegerAttr(nextOrder);
     mlir::hip::ConstantOp carrier;
     if (auto valueAttr = mlir::dyn_cast_or_null<mlir::DenseElementsAttr>(
             constOp->getAttrOfType<mlir::ElementsAttr>("value"))) {
-      carrier =
-          mlir::hip::ConstantOp::create(builder, constOp->getLoc(), tensorType,
-                                        valueAttr, originAttr, orderAttr);
+      carrier = mlir::hip::ConstantOp::create(builder, constOp->getLoc(),
+                                              tensorType, valueAttr);
     } else if (auto location =
                    constOp->getAttrOfType<mlir::StringAttr>("location")) {
       auto offset = constOp->getAttrOfType<mlir::IntegerAttr>("offset");
@@ -78,19 +77,30 @@ static mlir::LogicalResult lowerOnnxConstants(mlir::func::FuncOp funcOp,
       if (!offset || !size)
         return constOp->emitError(
             "onnx.Constant external source requires location/offset/size");
-      carrier = mlir::hip::ConstantOp::create(builder, constOp->getLoc(),
-                                              tensorType, location, offset,
-                                              size, originAttr, orderAttr);
+      carrier = location.getValue() == kOrtMemoryAddressLocation
+                    ? mlir::hip::ConstantOp::create(builder, constOp->getLoc(),
+                                                    tensorType, offset, size)
+                    : mlir::hip::ConstantOp::create(builder, constOp->getLoc(),
+                                                    tensorType, location,
+                                                    offset, size);
     } else {
       return constOp->emitError(
           "unsupported onnx.Constant form (expected dense value attribute "
           "or location attribute)");
     }
     ++nextOrder;
+    carrier.setSerializationOrderAttr(orderAttr);
 
-    for (llvm::StringRef attrName : {"onnx_node_name", "node.outputs"})
-      if (mlir::Attribute attr = constOp->getAttr(attrName))
-        carrier->setAttr(attrName, attr);
+    auto nodeName = constOp->getAttrOfType<mlir::StringAttr>("onnx_node_name");
+    if (nodeName) {
+      carrier.setSymbolNameHintAttr(nodeName);
+      carrier.setSourceNameAttr(nodeName);
+    } else if (auto outputs =
+                   constOp->getAttrOfType<mlir::ArrayAttr>("node.outputs")) {
+      if (!outputs.empty())
+        if (auto outputName = mlir::dyn_cast<mlir::StringAttr>(outputs[0]))
+          carrier.setSourceNameAttr(outputName);
+    }
     constOp->getResult(0).replaceAllUsesWith(carrier.getResult());
     constOp->erase();
   }
@@ -451,8 +461,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
               funcOp, std::move(preFoldPatterns), cfg)))
         return signalPassFailure();
     }
-    if (mlir::failed(lowerOnnxConstants(
-            funcOp, mlir::hip::kOnnxImportedConstantOrigin, constantOrder)))
+    if (mlir::failed(lowerOnnxConstants(funcOp, constantOrder)))
       return signalPassFailure();
     lowerOnnxReturns(funcOp);
     if (mlir::failed(convertComputeOps(funcOp, ctx)))
@@ -465,8 +474,7 @@ void ConvertOnnxToHipPass::runOnOperation() {
     // pass and one-shot-bufferize aborts with "op was not bufferized" (the EP
     // then silently falls back to CPU). Re-running creates carriers for them
     // exactly like every imported constant.
-    if (mlir::failed(lowerOnnxConstants(
-            funcOp, mlir::hip::kOnnxSynthesizedConstantOrigin, constantOrder)))
+    if (mlir::failed(lowerOnnxConstants(funcOp, constantOrder)))
       return signalPassFailure();
   }
 

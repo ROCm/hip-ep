@@ -498,27 +498,18 @@ def Hip_ConstantOp : Hip_Op<"constant", [Pure]> {
     `hip-externalize-constants`. The carrier has exactly one source:
 
       * `value`: an inline `DenseElementsAttr`; or
-      * `location`, `offset`, and `size`: a complete ORT external-data
-        reference. The location `*/_ORT_MEM_ADDR_/*` means that `offset` is a
-        live host address; every other location is a file path and `offset` is
-        a byte offset in that file.
+      * `location`, `offset`, and `size`: a file-backed byte range; or
+      * `memory_address` and `size`: a process-local host-memory byte range.
 
-    `convert-onnx-to-hip` emits this op for every `onnx.Constant`. Plugins may
-    also emit it from the `AfterConvertOnnxToHip` slot. The standalone
-    externalizer applies the size policy, writes constant artifacts, and
-    replaces every carrier after shape inference and before bufferization.
-
-    In-tree conversion also sets the optional compiler-owned `origin`/`order`
-    pair. The externalizer validates the unique absolute order and restores the
-    original conversion visitation: each function's imported sweep followed by
-    its synthesized sweep, then the next function. Plugins must leave those
-    attributes unset; unmarked plugin carriers follow afterward in stable
-    module walk order.
+    Producers that need a stable artifact order set `serialization_order`.
+    Unordered carriers follow ordered carriers in stable module walk order.
+    `symbol_name_hint` contributes only to the generated private symbol name;
+    `source_name` is copied into the human-readable artifact manifest.
 
     Memory-address sources are process-local and non-serializable. They are
-    accepted only by the production externalizer while ORT still owns the
-    initializer storage; textual pass invocation rejects them before any
-    address is dereferenced.
+    accepted only when the production externalizer is given a FileSystem while
+    the producer-owned storage is live. Textual pass invocation rejects them
+    before any address is dereferenced.
 
     This op deliberately has no fold method. Generic canonicalization may
     reason about its purity, but only `hip-externalize-constants` may choose
@@ -529,9 +520,11 @@ def Hip_ConstantOp : Hip_Op<"constant", [Pure]> {
     OptionalAttr<ElementsAttr>:$value,
     OptionalAttr<StrAttr>:$location,
     OptionalAttr<I64Attr>:$offset,
+    OptionalAttr<I64Attr>:$memory_address,
     OptionalAttr<I64Attr>:$size,
-    OptionalAttr<StrAttr>:$origin,
-    OptionalAttr<I64Attr>:$order
+    OptionalAttr<StrAttr>:$symbol_name_hint,
+    OptionalAttr<StrAttr>:$source_name,
+    OptionalAttr<I64Attr>:$serialization_order
   );
   let results = (outs AnyRankedTensor:$result);
 
@@ -550,31 +543,25 @@ def Hip_ConstantOp : Hip_Op<"constant", [Pure]> {
     OpBuilder<(ins "::mlir::RankedTensorType":$result,
                    "::mlir::DenseElementsAttr":$value), [{
       build($_builder, $_state, result, value, /*location=*/nullptr,
-            /*offset=*/nullptr, /*size=*/nullptr, /*origin=*/nullptr,
-            /*order=*/nullptr);
-    }]>,
-    OpBuilder<(ins "::mlir::RankedTensorType":$result,
-                   "::mlir::DenseElementsAttr":$value,
-                   "::mlir::StringAttr":$origin,
-                   "::mlir::IntegerAttr":$order), [{
-      build($_builder, $_state, result, value, /*location=*/nullptr,
-            /*offset=*/nullptr, /*size=*/nullptr, origin, order);
+            /*offset=*/nullptr, /*memory_address=*/nullptr, /*size=*/nullptr,
+            /*symbol_name_hint=*/nullptr, /*source_name=*/nullptr,
+            /*serialization_order=*/nullptr);
     }]>,
     OpBuilder<(ins "::mlir::RankedTensorType":$result,
                    "::mlir::StringAttr":$location,
                    "::mlir::IntegerAttr":$offset,
                    "::mlir::IntegerAttr":$size), [{
       build($_builder, $_state, result, /*value=*/nullptr, location, offset,
-            size, /*origin=*/nullptr, /*order=*/nullptr);
+            /*memory_address=*/nullptr, size, /*symbol_name_hint=*/nullptr,
+            /*source_name=*/nullptr, /*serialization_order=*/nullptr);
     }]>,
     OpBuilder<(ins "::mlir::RankedTensorType":$result,
-                   "::mlir::StringAttr":$location,
-                   "::mlir::IntegerAttr":$offset,
-                   "::mlir::IntegerAttr":$size,
-                   "::mlir::StringAttr":$origin,
-                   "::mlir::IntegerAttr":$order), [{
-      build($_builder, $_state, result, /*value=*/nullptr, location, offset,
-            size, origin, order);
+                   "::mlir::IntegerAttr":$memory_address,
+                   "::mlir::IntegerAttr":$size), [{
+      build($_builder, $_state, result, /*value=*/nullptr,
+            /*location=*/nullptr, /*offset=*/nullptr, memory_address, size,
+            /*symbol_name_hint=*/nullptr, /*source_name=*/nullptr,
+            /*serialization_order=*/nullptr);
     }]>
   ];
 

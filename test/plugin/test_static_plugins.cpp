@@ -133,8 +133,7 @@ runMemoryExternalizer(mlir::MLIRContext &context, llvm::StringRef text,
 std::string memorySourceModule(uintptr_t address) {
   return "module {\n"
          "  func.func @memory_source() -> tensor<4xui8> {\n"
-         "    %0 = hip.constant {location = \"*/_ORT_MEM_ADDR_/*\", "
-         "offset = " +
+         "    %0 = hip.constant {memory_address = " +
          std::to_string(address) +
          " : i64, size = 4 : i64} : tensor<4xui8>\n"
          "    return %0 : tensor<4xui8>\n"

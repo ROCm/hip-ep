@@ -83,7 +83,7 @@ struct ConstantPlan {
   int64_t index = -1;
   /// Offset in the logical full constants blob and `hip.external_data`.
   int64_t blobOffset = 0;
-  /// Process-local address of ORT-owned initializer storage.
+  /// Process-local address of producer-owned constant storage.
   int64_t hostAddress = 0;
   /// Offset in the original external-data file named by `filePath`.
   int64_t sourceFileOffset = 0;
@@ -241,7 +241,7 @@ struct OrderedCarrier {
 FailureOr<SmallVector<hip::ConstantOp>>
 collectOrderedCarriers(ModuleOp module) {
   SmallVector<OrderedCarrier> ordered;
-  llvm::SmallDenseSet<int64_t, 16> compilerOrders;
+  llvm::SmallDenseSet<int64_t, 16> explicitOrders;
   int64_t walkOrder = 0;
   bool valid = true;
 
@@ -250,16 +250,16 @@ collectOrderedCarriers(ModuleOp module) {
     carrier.op = op;
     carrier.walkOrder = walkOrder++;
 
-    StringAttr origin = op.getOriginAttr();
-    if (!origin) {
+    IntegerAttr explicitOrder = op.getSerializationOrderAttr();
+    if (!explicitOrder) {
       carrier.order = carrier.walkOrder;
       ordered.push_back(carrier);
       return;
     }
-    carrier.order = op.getOrderAttr().getInt();
+    carrier.order = explicitOrder.getInt();
     carrier.category = 0;
-    if (!compilerOrders.insert(carrier.order).second) {
-      op.emitError("duplicate compiler-owned constant order ") << carrier.order;
+    if (!explicitOrders.insert(carrier.order).second) {
+      op.emitError("duplicate constant serialization order ") << carrier.order;
       valid = false;
       return;
     }
@@ -392,15 +392,15 @@ private:
   }
 
   LogicalResult planExternalSource(ConstantPlan &plan) {
-    StringRef location = plan.op.getLocationAttr().getValue();
     plan.externalize = minElements > 0;
     if (plan.source == SourceKind::Memory) {
       if (!allowMemorySources)
         return plan.op.emitError(
             "memory-address sources require production externalization with "
             "an injected FileSystem");
-      plan.hostAddress = plan.op.getOffsetAttr().getInt();
+      plan.hostAddress = plan.op.getMemoryAddressAttr().getInt();
     } else {
+      StringRef location = plan.op.getLocationAttr().getValue();
       plan.filePath = location.str();
       plan.sourceFileOffset = plan.op.getOffsetAttr().getInt();
       // Full serialization and inline materialization consume the source now.
@@ -577,22 +577,16 @@ private:
   }
 
   void setNames(ConstantPlan &plan) {
-    std::string nodeName;
-    if (auto attr = plan.op->getAttrOfType<StringAttr>("onnx_node_name"))
-      nodeName = attr.getValue().str();
-
     plan.symbolName = "hip_ext_constant_";
-    std::string fragment = sanitizeForMlirIdentifier(nodeName);
+    std::string fragment;
+    if (StringAttr hint = plan.op.getSymbolNameHintAttr())
+      fragment = sanitizeForMlirIdentifier(hint.getValue());
     if (!fragment.empty())
       plan.symbolName += fragment + "_";
     plan.symbolName += std::to_string(plan.index);
 
-    plan.constantName = nodeName;
-    if (plan.constantName.empty())
-      if (auto outputs = plan.op->getAttrOfType<ArrayAttr>("node.outputs"))
-        if (!outputs.empty())
-          if (auto name = dyn_cast<StringAttr>(outputs[0]))
-            plan.constantName = name.getValue().str();
+    if (StringAttr sourceName = plan.op.getSourceNameAttr())
+      plan.constantName = sourceName.getValue().str();
   }
 
   ConstantEntry makeEntry(const ConstantPlan &plan, int64_t offset) const {

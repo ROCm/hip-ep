@@ -73,7 +73,7 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
   auto constantOffsetsAttr =
       module->getAttrOfType<DenseI64ArrayAttr>("hipdnn.constant_offsets");
 
-  // Streaming-mode source descriptors. Present when OnnxToHip's finalize
+  // Streaming-mode source descriptors. Present when constant externalization
   // emitted per-constant source info (splat / file-ref / mem). Absent in
   // full-constants-file mode (EPContext export), in which case every
   // ConstantInfo keeps source = NONE and runtime falls back to the bulk
@@ -139,8 +139,8 @@ buildMetadataNative(ModuleOp module, const std::string &constantsFile) {
       } else if (kind == mlir::hip::ConstantMetadataSourceKind::Memory) {
         // Mem: mem-addr entry packed into
         // HipModelMetaInfo.constants_filename at mem_offset by the
-        // OnnxToHip hybrid finalize. Runtime reads size bytes from that offset
-        // through the EP FileSystem.
+        // externalizer's hybrid artifact. Runtime reads size bytes from that
+        // offset through the EP FileSystem.
         auto mem = std::make_unique<mlir::hip::MemSourceT>();
         mem->mem_offset = (i < memOffsets.size()) ? memOffsets[i] : 0;
         ci->source.Set(std::move(*mem));
@@ -384,7 +384,7 @@ public:
       return;
     }
 
-    // Prefer the hip.constants_file attribute set by OnnxToHip pass;
+    // Prefer the hip.constants_file attribute set by constant externalization;
     // compilation-option override is not yet wired end-to-end.
     std::string constantsFile = "constants.bin";
     if (auto attr =
