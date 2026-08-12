@@ -22,6 +22,10 @@ jobs:
     # (gsl/util C2220 warning-as-error). Pin to the VS 2022 image per
     # actions/runner-images#14017.
     runs-on: windows-2022
+    # Single build for all gfx115x targets: cmake/deps.cmake auto-downloads TheRock
+    # from the first HIP_ARCHITECTURES entry (gfx1151); lib/Runtime/Kernels emits
+    # one custom_kernels_<arch>.dll per arch into install/bin/, all staged into
+    # one gpu-test-package artifact.
     # Cancel the build job when a newer commit lands on the same PR ref to
     # save runner minutes. gpu-test deliberately does NOT inherit this rule
     # (see its own concurrency block below) so an in-progress GPU run keeps
@@ -54,6 +58,9 @@ jobs:
       # ilammy/msvc-dev-cmd and mozilla-actions/sccache-action have no
       # Node.js 24 releases yet; allow Node.js 20 until they are updated.
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
+      # gfx1151 first: TheRock tarball selection, NATIVE default import lib, and
+      # wheel rocm index hint all take the first list entry (see cmake/deps.cmake).
+      HIP_ARCHITECTURES: "gfx1151;gfx1152;gfx1150"
 
     steps:
       # MorphiZen is vendored in-tree as a git subtree under morphizen,
@@ -350,7 +357,7 @@ jobs:
           python build.py \
             --config Release \
             --cmake_generator Ninja \
-            --hip_arch gfx1151 \
+            --hip_arch "${{ env.HIP_ARCHITECTURES }}" \
             --cmake_prefix_path "${{ runner.workspace }}/ort-install;${{ runner.workspace }}/llvm-install" \
             --cmake_extra_defines CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON \
             --cmake_extra_defines "HIP_WHEEL_EXTRA_DLLS=$AMDGPU_EP;$HIP_BACKEND"
@@ -541,16 +548,20 @@ jobs:
           cp "$AMDGPU_EP" staging/bin/
           cp "$HIP_BACKEND" staging/bin/
 
-          # Smoke: the per-arch kernel DLL must be present in staging/bin/
-          # for the gpu-test job to load it. Failure here means the install
-          # rule in lib/Runtime/Kernels/CMakeLists.txt regressed.
-          KERNEL_DLL="staging/bin/custom_kernels_gfx1151.dll"
-          if [ ! -f "$KERNEL_DLL" ]; then
-            echo "ERROR: $KERNEL_DLL missing from install (HIP_ARCHITECTURES=gfx1151)"
-            ls -1 "${{ runner.workspace }}/install/bin/" || true
-            exit 1
-          fi
-          echo "OK: $(basename "$KERNEL_DLL") present"
+          # Smoke: every per-arch kernel DLL must be present in staging/bin/
+          # (LlvmIrJit dlopens custom_kernels_<gcnArchName>.dll at runtime).
+          # Failure here means the install rule in lib/Runtime/Kernels/CMakeLists.txt
+          # regressed or HIP_ARCHITECTURES was trimmed.
+          IFS=';' read -ra HIP_ARCHS <<< "${{ env.HIP_ARCHITECTURES }}"
+          for arch in "${HIP_ARCHS[@]}"; do
+            KERNEL_DLL="staging/bin/custom_kernels_${arch}.dll"
+            if [ ! -f "$KERNEL_DLL" ]; then
+              echo "ERROR: $KERNEL_DLL missing from install (HIP_ARCHITECTURES=${{ env.HIP_ARCHITECTURES }})"
+              ls -1 "${{ runner.workspace }}/install/bin/" || true
+              exit 1
+            fi
+            echo "OK: $(basename "$KERNEL_DLL") present"
+          done
 
           # Import libraries that get bundled into the MorphiZen JIT-linker
           # path. Kept as a glob so the set evolves with the install rules
