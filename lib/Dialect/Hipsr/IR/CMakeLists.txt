@@ -9,6 +9,7 @@ add_library(HipsrDialectIR STATIC
   HipsrOps.cpp
   HipsrPoolDomainYieldOp.cpp
   HipsrPoolDomainOp.cpp
+  HipsrPoolDomainBufferize.cpp
   HipsrComputeYieldOp.cpp
   HipsrComputeOp.cpp
   HipsrComputeBufferize.cpp

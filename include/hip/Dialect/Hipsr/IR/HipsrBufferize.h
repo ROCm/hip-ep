@@ -110,12 +110,64 @@ struct ComputeYieldOpBufferization
                           bufferization::BufferizationState &state) const;
 };
 
+struct PoolDomainOpBufferization
+    : public bufferization::BufferizableOpInterface::ExternalModel<
+          PoolDomainOpBufferization, PoolDomainOp> {
+  bool bufferizesToMemoryRead(Operation *op, OpOperand &opOperand,
+                              const bufferization::AnalysisState &state) const;
+  bool bufferizesToMemoryWrite(Operation *op, OpOperand &opOperand,
+                               const bufferization::AnalysisState &state) const;
+  bool isWritable(Operation *op, Value value,
+                  const bufferization::AnalysisState &state) const;
+  bufferization::AliasingValueList
+  getAliasingValues(Operation *op, OpOperand &opOperand,
+                    const bufferization::AnalysisState &state) const;
+  bufferization::AliasingOpOperandList
+  getAliasingOpOperands(Operation *op, Value value,
+                        const bufferization::AnalysisState &state) const;
+  FailureOr<bufferization::BufferLikeType>
+  getBufferType(Operation *op, Value value,
+                const bufferization::BufferizationOptions &options,
+                const bufferization::BufferizationState &state,
+                SmallVector<Value> &invocationStack) const;
+  LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
+                          const bufferization::BufferizationOptions &options,
+                          bufferization::BufferizationState &state) const;
+};
+
+struct PoolDomainYieldOpBufferization
+    : public bufferization::BufferizableOpInterface::ExternalModel<
+          PoolDomainYieldOpBufferization, PoolDomainYieldOp> {
+  bool bufferizesToMemoryRead(Operation *, OpOperand &,
+                              const bufferization::AnalysisState &) const {
+    return true;
+  }
+  bool bufferizesToMemoryWrite(Operation *, OpOperand &,
+                               const bufferization::AnalysisState &) const {
+    return false;
+  }
+  // A result's buffer is the buffer of the operand yielded here, so yielding
+  // out of place would make that result a buffer allocated inside the body.
+  bool mustBufferizeInPlace(Operation *, OpOperand &,
+                            const bufferization::AnalysisState &) const {
+    return true;
+  }
+  bufferization::AliasingValueList
+  getAliasingValues(Operation *op, OpOperand &opOperand,
+                    const bufferization::AnalysisState &state) const;
+  LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
+                          const bufferization::BufferizationOptions &options,
+                          bufferization::BufferizationState &state) const;
+};
+
 inline void
 registerHipsrBufferizableOpInterfaceModels(DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *ctx, HipsrDialect *) {
     PreserveShapeOp::attachInterface<PreserveShapeBufferizableModel>(*ctx);
     ComputeOp::attachInterface<ComputeOpBufferization>(*ctx);
     ComputeYieldOp::attachInterface<ComputeYieldOpBufferization>(*ctx);
+    PoolDomainOp::attachInterface<PoolDomainOpBufferization>(*ctx);
+    PoolDomainYieldOp::attachInterface<PoolDomainYieldOpBufferization>(*ctx);
   });
 }
 
