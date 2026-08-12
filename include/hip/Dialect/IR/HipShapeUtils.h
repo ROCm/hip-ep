@@ -27,7 +27,7 @@ bool parseDenseIntElements(DenseElementsAttr dense,
 
 /// Match an inline `arith.constant` rank-0/rank-1 integer tensor and parse it
 /// with `parseDenseIntElements`. Generic HIP dialect code intentionally does
-/// not inspect ONNX ops or conversion-side externalized globals.
+/// not inspect frontend operations or conversion-side storage wrappers.
 bool matchConstantIntTensor(Value value, SmallVectorImpl<int64_t> &out,
                             std::optional<int64_t> expectedRank = std::nullopt);
 
