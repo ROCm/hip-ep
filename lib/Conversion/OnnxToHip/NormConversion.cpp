@@ -51,6 +51,51 @@ inline mlir::Value getOptionalResult(mlir::Operation *op, unsigned idx) {
   return v;
 }
 
+/// Reject a norm whose `axis` does not select exactly the trailing block that
+/// the scale operand covers.
+///
+/// The runtime wrappers flatten the input to `[num_rows, hidden_dim]` with
+/// `hidden_dim` taken from the scale's element count and `num_rows` recovered
+/// by dividing the input's total element count. That is only the requested
+/// reduction when normalization spans `dims[axis:]` and those dims multiply to
+/// the scale's size; the wrappers cannot check it themselves because the ABI
+/// carries element counts rather than shapes. Rank is known here, so check it
+/// here -- an unnoticed mismatch normalizes over the wrong axis and returns
+/// plausible-looking numbers.
+///
+/// Dynamic trailing extents are not checkable and are accepted; in practice the
+/// normalized axes are the static feature dims.
+mlir::LogicalResult verifyNormAxisMatchesScale(mlir::Operation *op,
+                                               mlir::Value input,
+                                               mlir::Value scale,
+                                               int64_t axis) {
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+  auto scaleType = mlir::dyn_cast<mlir::RankedTensorType>(scale.getType());
+  if (!inputType || !scaleType || !scaleType.hasStaticShape())
+    return mlir::success();
+
+  int64_t rank = inputType.getRank();
+  int64_t normAxis = axis < 0 ? axis + rank : axis;
+  if (normAxis < 0 || normAxis >= rank)
+    return op->emitError("norm axis ")
+           << axis << " is out of range for a rank-" << rank << " input";
+
+  int64_t normalizedExtent = 1;
+  for (int64_t d = normAxis; d < rank; ++d) {
+    if (inputType.isDynamicDim(d))
+      return mlir::success();
+    normalizedExtent *= inputType.getDimSize(d);
+  }
+  if (normalizedExtent != scaleType.getNumElements())
+    return op->emitError("norm axis ")
+           << axis << " spans " << normalizedExtent
+           << " element(s) of the rank-" << rank << " input, but scale has "
+           << scaleType.getNumElements()
+           << "; the runtime flattens to [rows, scale_num_elements] and would "
+              "normalize over the wrong axis";
+  return mlir::success();
+}
+
 /// onnx.Custom(SimplifiedLayerNormalization) -> hip.rms_norm
 struct SimplifiedLayerNormToHip : public mlir::RewritePattern {
   SimplifiedLayerNormToHip(mlir::MLIRContext *ctx)
@@ -97,6 +142,10 @@ mlir::LogicalResult SimplifiedLayerNormToHip::matchAndRewrite(
   auto stashTypeAttr = op->getAttrOfType<mlir::IntegerAttr>("stash_type");
   if (!stashTypeAttr)
     return rewriter.notifyMatchFailure(op, "missing stash_type attribute");
+
+  if (mlir::failed(
+          verifyNormAxisMatchesScale(op, input, scale, axisAttr.getSInt())))
+    return mlir::failure();
 
   // Convert axis to i64
   auto axisI64Attr = rewriter.getI64IntegerAttr(axisAttr.getSInt());
@@ -152,6 +201,9 @@ RMSNormalizationToHip::matchAndRewrite(mlir::Operation *op,
   int64_t axis = -1;
   if (auto axisAttr = op->getAttrOfType<mlir::IntegerAttr>("axis"))
     axis = axisAttr.getSInt();
+
+  if (mlir::failed(verifyNormAxisMatchesScale(op, input, scale, axis)))
+    return mlir::failure();
 
   llvm::APFloat epsValue(9.99999974E-6f);
   if (auto epsilonAttr = op->getAttrOfType<mlir::FloatAttr>("epsilon"))
