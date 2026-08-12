@@ -14,12 +14,41 @@
 #define HIP_CONVERSION_ONNXTOHIPSR_UTILS_H
 
 #include "hip/Dialect/Hipsr/IR/HipsrDialect.h"
+#include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/Builders.h"
 #include "mlir/IR/PatternMatch.h"
+
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 
 namespace mlir {
 namespace hipsr {
+
+/// Creates `compute`'s entry block and leaves `builder` inserting at its
+/// start. The arguments are `ctx`, then the inputs, then the outputs, as
+/// hipsr.compute documents; the ODS builder only reserves the region, so a
+/// conversion that emits a compute has to build the block and its terminator
+/// itself.
+inline ::mlir::Block &createComputeBodyBlock(::mlir::OpBuilder &builder,
+                                             ComputeOp compute) {
+  ::llvm::SmallVector<::mlir::Type> argTypes{compute.getCtx().getType()};
+  ::llvm::append_range(argTypes, compute.getInputs().getTypes());
+  ::llvm::append_range(argTypes, compute.getOutputs().getTypes());
+  ::llvm::SmallVector<::mlir::Location> argLocs(argTypes.size(),
+                                                compute.getLoc());
+  ::mlir::Block *block =
+      builder.createBlock(&compute.getBody(), {}, argTypes, argLocs);
+  builder.setInsertionPointToStart(block);
+  return *block;
+}
+
+/// Returns `compute`'s entry-block argument for input `index`, skipping the
+/// leading `ctx` argument.
+inline ::mlir::Value computeBodyInput(::mlir::Block &body, unsigned index) {
+  return body.getArgument(1 + index);
+}
 
 /// Gets the `!hipsr.context` from function argument 0. The ONNX phase adds it
 /// as the enclosing function's first argument, so every hipsr op can thread it

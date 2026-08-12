@@ -40,6 +40,12 @@ void populateExpandConversionPatterns(::mlir::RewritePatternSet &patterns,
 void populateShapeConversionPatterns(::mlir::RewritePatternSet &patterns,
                                      ::mlir::MLIRContext *ctx);
 
+// Populates the pattern converting `onnx.Reshape` into a `hipsr.compute` whose
+// body collapses or expands the input's extents. Like the `onnx.Shape`
+// pattern, it populates its placeholder's shape region itself.
+void populateReshapeConversionPatterns(::mlir::RewritePatternSet &patterns,
+                                       ::mlir::MLIRContext *ctx);
+
 void populateReturnConversionPatterns(::mlir::RewritePatternSet &patterns,
                                       ::mlir::MLIRContext *ctx);
 

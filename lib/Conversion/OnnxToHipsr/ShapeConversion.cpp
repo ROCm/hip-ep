@@ -110,17 +110,9 @@ void populateComputeBody(::mlir::OpBuilder &builder, ComputeOp computeOp,
                          int64_t end) {
   ::mlir::OpBuilder::InsertionGuard guard(builder);
   ::mlir::Location loc = computeOp.getLoc();
+  ::mlir::Block &body = createComputeBodyBlock(builder, computeOp);
 
-  ::llvm::SmallVector<::mlir::Type> argTypes{computeOp.getCtx().getType()};
-  ::llvm::append_range(argTypes, computeOp.getInputs().getTypes());
-  ::llvm::append_range(argTypes, computeOp.getOutputs().getTypes());
-  ::llvm::SmallVector<::mlir::Location> argLocs(argTypes.size(), loc);
-  ::mlir::Block *body =
-      builder.createBlock(&computeOp.getBody(), {}, argTypes, argLocs);
-  builder.setInsertionPointToStart(body);
-
-  // Entry-block arguments are ctx, then the inputs, then the outputs.
-  ::mlir::Value input = body->getArgument(1);
+  ::mlir::Value input = computeBodyInput(body, 0);
   ::mlir::Type i64Type = builder.getI64Type();
   ::llvm::SmallVector<::mlir::Value> extents;
   extents.reserve(end - start);
