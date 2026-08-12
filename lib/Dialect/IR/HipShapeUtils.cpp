@@ -82,7 +82,7 @@ broadcastDim(OpBuilder &b, Location loc, OpFoldResult lhs, OpFoldResult rhs,
     return failure();
   }
 
-  // Under the ONNX broadcastability precondition, a dynamic extent paired
+  // Under the multidirectional broadcast precondition, a dynamic extent paired
   // with a known non-unit extent must be either 1 or that known extent.
   if (lhsStatic)
     return *lhsStatic == 1 ? rhs : lhs;
