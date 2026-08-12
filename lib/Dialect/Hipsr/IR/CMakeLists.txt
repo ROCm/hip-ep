@@ -9,10 +9,8 @@ add_library(HipsrDialectIR STATIC
   HipsrOps.cpp
   HipsrPoolDomainYieldOp.cpp
   HipsrPoolDomainOp.cpp
-  HipsrPoolDomainBufferize.cpp
   HipsrComputeYieldOp.cpp
   HipsrComputeOp.cpp
-  HipsrComputeBufferize.cpp
   HipsrConstantOp.cpp
   HipsrPlaceholderOp.cpp
   HipsrCastOp.cpp
@@ -35,7 +33,6 @@ add_dependencies(HipsrDialectIR
 target_link_libraries(HipsrDialectIR PUBLIC
   MLIRIR
   MLIRSupport
-  MLIRBufferizationDialect
   MLIRControlFlowInterfaces
   MLIRDestinationStyleOpInterface
   MLIRSideEffectInterfaces

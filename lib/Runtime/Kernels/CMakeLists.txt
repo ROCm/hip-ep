@@ -96,6 +96,8 @@ foreach(_arch IN LISTS HIP_ARCHITECTURES)
         OUTPUT_NAME custom_kernels_${_arch}
         FOLDER "custom_kernels"
     )
+    hipdnn_ep_apply_binary_compliance(${_target}
+        DESCRIPTION "AMD GPU Execution Provider kernels (${_arch})")
     install(TARGETS ${_target}
         RUNTIME DESTINATION bin   # Windows .dll co-located with EP .dll
         LIBRARY DESTINATION lib   # Linux .so co-located with EP .so
