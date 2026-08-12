@@ -24,12 +24,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Advanced Micro Devices, Inc."
             VALUE "FileDescription", "@HIPEP_RC_FILE_DESCRIPTION@"
-            VALUE "FileVersion", "@HIPEP_RC_VERSION_DOTTED@"
+            VALUE "FileVersion", "@HIPEP_RC_FILE_VERSION@"
             VALUE "InternalName", "@HIPEP_RC_INTERNAL_NAME@"
             VALUE "LegalCopyright", "Copyright (C) @HIPEP_RC_YEAR@ Advanced Micro Devices, Inc. All rights reserved."
             VALUE "OriginalFilename", "@HIPEP_RC_ORIGINAL_FILENAME@"
             VALUE "ProductName", "AMD GPU Execution Provider"
-            VALUE "ProductVersion", "@HIPEP_RC_VERSION_DOTTED@"
+            VALUE "ProductVersion", "@HIPEP_RC_PRODUCT_VERSION@"
         END
     END
     BLOCK "VarFileInfo"
