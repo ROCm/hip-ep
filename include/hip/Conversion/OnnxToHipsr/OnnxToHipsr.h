@@ -56,6 +56,11 @@ void populateUnsqueezeConversionPatterns(::mlir::RewritePatternSet &patterns,
 void populateEqualConversionPatterns(::mlir::RewritePatternSet &patterns,
                                      ::mlir::MLIRContext *ctx);
 
+// Populates the pattern converting `onnx.Transpose` into `hipsr.transpose`,
+// materializing ONNX's default reverse permutation when `perm` is absent.
+void populateTransposeConversionPatterns(::mlir::RewritePatternSet &patterns,
+                                         ::mlir::MLIRContext *ctx);
+
 void populateReturnConversionPatterns(::mlir::RewritePatternSet &patterns,
                                       ::mlir::MLIRContext *ctx);
 
