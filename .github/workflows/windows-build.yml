@@ -630,14 +630,10 @@ jobs:
           path: staging/
           retention-days: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) && 14 || 3 }}
 
-      # -----------------------------------------------------------------------
-      # Python wheel package: the three project wheels + run_onnx.py + OGA
-      # benchmark scripts. ROCm wheels are NOT bundled — they are installed
-      # from repo.amd.com at runtime (CI smoke) or downloaded by the local
-      # package_release.ps1 script when building the offline distribution.
-      # -----------------------------------------------------------------------
       - name: Stage Python wheel package
         shell: bash
+        env:
+          VLM_BENCHMARK_REF: f02a82c8312224ef3e2f673c4c6569d487d47e64
         run: |
           mkdir -p wheelpkg/wheels
           ORT_WHEEL=$(find "${{ runner.workspace }}/ort-install/wheels" \
@@ -654,6 +650,8 @@ jobs:
           cp "$ORT_WHEEL" "$OGA_WHEEL" "$EP_WHEEL" wheelpkg/wheels/
           cp python/examples/run_onnx.py wheelpkg/
           cp "${{ runner.workspace }}/oga-artifacts/benchmark-python/"*.py wheelpkg/
+          curl -fsSL --retry 3 -o wheelpkg/vlm_benchmark.py \
+            "https://raw.githubusercontent.com/amd/RyzenAI-SW/$VLM_BENCHMARK_REF/LLM-examples/VLM/vlm_benchmark.py"
           echo "=== Python wheel package layout ==="
           find wheelpkg/ -maxdepth 2 -mindepth 1 | sort
 
