@@ -71,6 +71,11 @@ struct ConvertOnnxToHipsrPass
     });
 
     RewritePatternSet patterns(&getContext());
+    populateOnnxToHipsrConstantPatterns(patterns);
+    populateCastConversionPatterns(patterns, &getContext());
+    populateMatMulConversionPatterns(patterns, &getContext());
+    populateExpandConversionPatterns(patterns, &getContext());
+
     if (failed(applyFullConversion(module, target, std::move(patterns)))) {
       signalPassFailure();
       return;

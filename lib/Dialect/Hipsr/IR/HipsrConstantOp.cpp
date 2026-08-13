@@ -16,22 +16,20 @@ using namespace mlir;
 using namespace mlir::hipsr;
 
 LogicalResult ConstantOp::verify() {
-  bool hasValue = getValueAttr() != nullptr;
-  bool hasSource = getSourceAttr() != nullptr;
-  bool hasOffset = getOffsetAttr() != nullptr;
-  bool hasSize = getSizeAttr() != nullptr;
-  bool hasIndex = getIndexAttr() != nullptr;
-
-  if (hasValue == hasSource) {
-    return emitOpError("expected exactly one of {value} or {source}");
+  ElementsAttr value = getValue();
+  if (auto dense = dyn_cast<DenseElementsAttr>(value)) {
+    if (dense.isSplat() && dense.getNumElements() > 1) {
+      return emitOpError("splat value is not supported.");
+    }
+    return success();
   }
-
-  if (hasOffset != hasSize || hasOffset != hasIndex) {
-    return emitOpError("`offset`, `size` and `index` must be set together");
+  if (!isa<DenseResourceElementsAttr>(value)) {
+    return emitOpError("value must be dense<...> or dense_resource<...>");
   }
-
   return success();
 }
+
+OpFoldResult ConstantOp::fold(FoldAdaptor) { return getValue(); }
 
 namespace {
 
