@@ -15,8 +15,8 @@ def Hipsr_Device  : I32EnumAttrCase<"Device",  1, "device">;
 def Hipsr_Pinned  : I32EnumAttrCase<"Pinned",  2, "pinned">;
 def Hipsr_Managed : I32EnumAttrCase<"Managed", 3, "managed">;
 
-def Hipsr_MemorySpaceKind : I32EnumAttr<"MemorySpaceKind",
-    "hipsr memory space kind",
+def Hipsr_MemorySpace : I32EnumAttr<"MemorySpace",
+    "hipsr memory space",
     [Hipsr_Host, Hipsr_Device, Hipsr_Pinned, Hipsr_Managed]> {
   let cppNamespace = "::mlir::hipsr";
   // The enum is wrapped by MemorySpaceAttr (HipsrAttrs.td), so the syntax

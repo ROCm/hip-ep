@@ -10,9 +10,8 @@ include "hip/Dialect/Hipsr/IR/HipsrDialect.td"
 include "hip/Dialect/Hipsr/IR/HipsrEnums.td"
 include "mlir/IR/AttrTypeBase.td"
 
-def Hipsr_MemorySpaceAttr : AttrDef<Hipsr_Dialect, "MemorySpace"> {
-  let mnemonic = "mem";
-  let summary = "hipsr memory space attribute";
+def Hipsr_MemorySpaceAttr :
+    EnumAttr<Hipsr_Dialect, Hipsr_MemorySpace, "mem"> {
   let description = [{
     Says where a buffer lives, used as a `memref` memory space:
     `device` (VRAM), `host` (pageable), `pinned` (page-locked host),
@@ -20,10 +19,9 @@ def Hipsr_MemorySpaceAttr : AttrDef<Hipsr_Dialect, "MemorySpace"> {
 
     Every hipsr `memref` must have one of these memory spaces; a memref
     with no memory space is not allowed. The `Hipsr_*MemRef` type
-    constraints in `HipsrTypes.td` check this once ops start using them.
+    constraints in `HipsrTypes.td` enforce this on op operands and results.
   }];
-  let parameters = (ins EnumParameter<Hipsr_MemorySpaceKind>:$kind);
-  let assemblyFormat = "`<` $kind `>`";
+  let assemblyFormat = "`<` $value `>`";
 }
 
 def Hipsr_PlaceholderTypeAttr :
