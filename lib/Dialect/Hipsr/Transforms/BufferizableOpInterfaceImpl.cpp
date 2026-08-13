@@ -15,7 +15,12 @@
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
+#include "mlir/Dialect/Bufferization/IR/DstBufferizableOpInterfaceImpl.h"
 #include "mlir/IR/DialectRegistry.h"
+#include "mlir/IR/OperationSupport.h"
+#include "mlir/Interfaces/DestinationStyleOpInterface.h"
+
+#include "llvm/ADT/STLExtras.h"
 
 using namespace mlir;
 using namespace mlir::bufferization;
@@ -62,6 +67,79 @@ struct PreserveShapeBufferizableModel
   }
 };
 
+// Bufferizes any hipsr destination-passing op, ported from upstream linalg's
+// bufferizeDestinationStyleOpInterface. A hipsr DPS op carries no region, so
+// the bufferized op is built in one step.
+LogicalResult bufferizeDpsOp(RewriterBase &rewriter,
+                             DestinationStyleOpInterface op,
+                             const BufferizationOptions &options,
+                             const BufferizationState &state) {
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPoint(op);
+
+  if (op.hasPureBufferSemantics()) {
+    return success();
+  }
+  if (!op.hasPureTensorSemantics()) {
+    return op->emitOpError("does not have pure tensor semantics");
+  }
+
+  // A DPS scalar has no buffer, so it is forwarded as it is. `!hipsr.context`
+  // is the one every hipsr DPS op carries.
+  SmallVector<Value> newOperands;
+  newOperands.reserve(op->getNumOperands());
+  for (OpOperand *input : op.getDpsInputOperands()) {
+    if (op.isScalar(input)) {
+      newOperands.push_back(input->get());
+      continue;
+    }
+    FailureOr<Value> buffer = getBuffer(rewriter, input->get(), options, state);
+    if (failed(buffer)) {
+      return failure();
+    }
+    newOperands.push_back(*buffer);
+  }
+
+  SmallVector<Value> initBuffers;
+  for (OpResult result : op->getOpResults()) {
+    OpOperand *init = op.getDpsInitOperand(result.getResultNumber());
+    FailureOr<Value> buffer = getBuffer(rewriter, init->get(), options, state);
+    if (failed(buffer)) {
+      return failure();
+    }
+    initBuffers.push_back(*buffer);
+  }
+  llvm::append_range(newOperands, initBuffers);
+
+  // Reading the buffers above may have inserted allocations.
+  rewriter.setInsertionPoint(op);
+
+  // Every Hipsr_DpsOp result is a tensor tied to an init, so the bufferized op
+  // writes through its init buffers and keeps no result. Each tensor result is
+  // therefore replaced by the buffer of its init instead of by a result of the
+  // new op, which is what rules out replaceOpWithNewBufferizedOp here.
+  OperationState newState(op->getLoc(), op->getName(), newOperands, TypeRange{},
+                          op->getAttrs());
+  rewriter.create(newState);
+  replaceOpWithBufferizedValues(rewriter, op, initBuffers);
+  return success();
+}
+
+// Binds the shared destination-passing rewrite to one op, the way upstream's
+// LinalgOpInterface does: the DPS base model answers the analysis queries and
+// bufferize() delegates to bufferizeDpsOp.
+template <typename OpTy>
+struct DpsBufferizableModel
+    : public DstBufferizableOpInterfaceExternalModel<DpsBufferizableModel<OpTy>,
+                                                     OpTy> {
+  LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
+                          const BufferizationOptions &options,
+                          BufferizationState &state) const {
+    return bufferizeDpsOp(rewriter, cast<DestinationStyleOpInterface>(op),
+                          options, state);
+  }
+};
+
 } // namespace
 } // namespace hipsr
 } // namespace mlir
@@ -70,5 +148,6 @@ void mlir::hipsr::registerBufferizableOpInterfaceExternalModels(
     DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *ctx, HipsrDialect *) {
     PreserveShapeOp::attachInterface<PreserveShapeBufferizableModel>(*ctx);
+    CastOp::attachInterface<DpsBufferizableModel<CastOp>>(*ctx);
   });
 }
