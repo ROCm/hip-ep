@@ -90,22 +90,20 @@ Operations whose shape contract is more specific than "result shape equals desti
 
 ## TableGen wiring
 
-`Hip_DpsOp` centralizes the interface boilerplate used by HIP compute operations.
+`Hip_DpsOp` is a structural two-parameter root (`mnemonic`, `traits`) that
+centralizes the interfaces and variadic tensor results used by HIP compute
+operations. Shape behavior is selected by a named family rather than by
+independent booleans or injected function-body parameters:
 
-| Parameter | Default | Purpose |
-|---|---|---|
-| `outsAccessor` | `"Output"` | ODS accessor used by generated result-type inference |
-| `autoReify` | `1` | Emit a dispatcher to the shared `HipDpsOpInterface` reification body |
-| `autoInfer` | `0` | Emit `inferReturnTypes` using the DPS init tensor type |
-| `declareInfer` | `0` | Add `InferTypeOpInterface`; `autoInfer=1` requires it, while `declareInfer=1, autoInfer=0` requires a hand-written `inferReturnTypes` implementation |
-| `customReifyBody` | empty | Provide an inline custom body for parameterized DPS sub-bases |
-| `customVerifyBody` | empty | Provide an inline verifier body for a parameterized DPS sub-base |
+- `Hip_DpsOp_AutoReify` forwards to the shared `HipDpsOpInterface` body.
+- `Hip_DpsOp_WithInfer` emits single-result typing from a named outs accessor.
+- `Hip_DpsOp_AutoReifyInfer` combines those two common behaviors.
+- `Hip_DpsOp_Broadcast` and `Hip_DpsOp_Reduction` own fixed family reification
+  bodies that call shared C++ helpers.
 
-`Hip_DpsOp_Broadcast` and `Hip_DpsOp_Reduction` use `customReifyBody` to share broadcast and reduction reification across operation families without per-op C++ implementations.
-
-The `SameShape`, `Semantic`, `Payload`, and `OutsAuthoritative` wrappers name
-reviewed contract categories without requiring the exhaustive inventory audit
-to be enabled while feature migrations are still in progress.
+Families use typed TableGen `code` fragments only for their forwarding methods.
+The shape rules and validation remain in `HipShapeUtils` C++ helpers, while
+semantic long-tail operations keep handwritten reification methods.
 
 Multi-result and specialized operations may keep inferred result construction disabled when a single generated body cannot describe all results.
 
@@ -131,15 +129,17 @@ Choose the smallest mechanism that matches the operation's semantics:
 Shared declarations live in `HipShapeUtils.h`; common implementation lives in
 `HipShapeUtils.cpp`, with category translation units for matmul/Gemm,
 broadcast/reduction, attention, convolution/pooling, gather, and shape
-operations. Operations that set `autoReify=0` and are not covered by a
-parameterized sub-base define their member functions in
+operations. Operations that select a manual-reification family define their
+member functions in
 `HipReifyResultShapesImpl.cpp`.
 
 Pure descriptor transformations such as Reshape, Squeeze, and Unsqueeze generally lower to standard tensor operations rather than HIP DPS compute operations. Their shape inference and dim folding use MLIR's standard tensor interfaces and external models, not a second HIP-specific contract.
 
 ## Static result typing
 
-For a single-result DPS operation with `declareInfer=1` and `autoInfer=1`, ODS provides an inferred-type `Op::create` overload. The generated `inferReturnTypes` reads the typed DPS init and emits:
+For a single-result operation in `Hip_DpsOp_WithInfer` (directly or through a
+more specific family), ODS provides an inferred-type `Op::create` overload. The
+generated `inferReturnTypes` reads the typed DPS init and emits:
 
 - one result type in tensor mode;
 - no result type in memref mode.
@@ -272,9 +272,11 @@ The loop-carried fallback is authoritative: if a carried body output is still un
 ## Adding or changing a HIP DPS operation
 
 1. **Choose the contract row** in [Shape-contract mechanisms](#shape-contract-mechanisms).
-2. **Set TableGen parameters** on `Hip_DpsOp` or use an existing DPS sub-base; use `declareInfer=1, autoInfer=0` only when supplying custom InferType logic.
+2. **Choose a named DPS behavior family**; add a family only when no existing
+   reify/infer combination fits.
 3. **Add a shared helper** in `HipShapeUtils` only when no existing category fits.
-4. **Add a member reification implementation** in `HipReifyResultShapesImpl.cpp` only for `autoReify=0` operations not covered by a sub-base.
+4. **Add a member reification implementation** in
+   `HipReifyResultShapesImpl.cpp` only for a manual-reify family.
 5. **Return one shape vector per tensor result** and preserve dynamic extents honestly when no pre-execution SSA value exists.
 6. **Use the inferred-type builder** in the converter when the generated or custom InferType contract supports it.
 7. **Add a verifier** only for non-trivial static contracts not already closed by DPS typing.
