@@ -8,7 +8,7 @@ add_library(HipTestPasses STATIC
 )
 
 target_include_directories(HipTestPasses PUBLIC
-  ${CMAKE_SOURCE_DIR}/test/lib
+  ${CMAKE_CURRENT_SOURCE_DIR}/../..
 )
 
 target_link_libraries(HipTestPasses PUBLIC
