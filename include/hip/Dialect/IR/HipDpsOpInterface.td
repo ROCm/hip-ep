@@ -18,13 +18,12 @@ def HipDpsOpInterface : OpInterface<"HipDpsOp", [DestinationStyleOpInterface]> {
     SSA result. In memref mode the operation has no SSA results, so reification
     succeeds with an empty list. Ops with a tighter shape contract -- e.g.
     matmul where the result shape can be computed from `A.shape[-2]` /
-    `B.shape[-1]` rather than from the outs operand -- opt out by setting
-    `autoReify=0` on `Hip_DpsOp` and providing a per-op override.
+    `B.shape[-1]` rather than from the outs operand -- select a manual-reify
+    family and provide a per-op override.
 
     The interface owns the default body in a sibling `.cpp` file, and
     the per-op `ReifyRankedShapedTypeOpInterface::reifyResultShapes` is
-    a 3-line dispatcher auto-emitted from `Hip_DpsOp`'s
-    `extraClassDefinition`.
+    a three-line dispatcher emitted by the operation's behavior family.
   }];
 
   let cppNamespace = "::mlir::hip";

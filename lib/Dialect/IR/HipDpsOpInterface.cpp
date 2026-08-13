@@ -8,9 +8,8 @@
 // mode, walks `DestinationStyleOpInterface::getDpsInits()` and lifts each
 // init's runtime shape via `tensor::getMixedSizes`. In memref mode there are
 // no SSA results, so it returns an empty reified-result list.
-// Ops that need a tighter contract opt out via `autoReify=0` on
-// `Hip_DpsOp` and provide a per-op override in
-// `HipReifyResultShapesImpl.cpp`.
+// Ops that need a tighter contract select a manual-reify family and provide a
+// per-op override in `HipReifyResultShapesImpl.cpp`.
 //
 // See `docs/design/hip-shape-inference.md` for the design rationale and
 // the recipe for wiring a new op (or a new shape category) into the
