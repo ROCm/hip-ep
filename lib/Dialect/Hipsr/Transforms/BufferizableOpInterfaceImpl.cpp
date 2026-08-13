@@ -31,10 +31,6 @@ namespace mlir {
 namespace hipsr {
 namespace {
 
-// The entry block argument the operand at `operandIndex` is forwarded to. Both
-// region-carrying ops below forward every operand in order -- compute's ctx
-// takes index 0 of both lists -- so operands and block arguments line up
-// without an offset.
 template <typename OpTy>
 BlockArgument getEntryArgument(OpTy op, unsigned operandIndex) {
   return op.getBody().front().getArgument(operandIndex);
@@ -85,11 +81,11 @@ struct PreserveShapeBufferizableModel
 // ComputeOp / ComputeYieldOp
 //===----------------------------------------------------------------------===//
 
-// SingleBlockImplicitTerminator pins the body's terminator to this op.
 ComputeYieldOp getYieldOp(ComputeOp computeOp) {
   return cast<ComputeYieldOp>(computeOp.getBody().front().getTerminator());
 }
 
+// get result by output operand
 OpResult getResultHeldIn(ComputeOp computeOp, OpOperand &opOperand) {
   OperandRange outputs = computeOp.getOutputs();
   if (outputs.empty())
@@ -102,6 +98,7 @@ OpResult getResultHeldIn(ComputeOp computeOp, OpOperand &opOperand) {
   return computeOp->getResult(number - begin);
 }
 
+// get output operand by result index
 OpOperand *getDestinationOf(ComputeOp computeOp, unsigned resultIndex) {
   OperandRange outputs = computeOp.getOutputs();
   if (resultIndex >= outputs.size())
@@ -109,6 +106,7 @@ OpOperand *getDestinationOf(ComputeOp computeOp, unsigned resultIndex) {
   return &computeOp->getOpOperand(outputs.getBeginOperandIndex() + resultIndex);
 }
 
+// Returns true if the buffer underlying `value` or any of its aliases is written.
 bool isValueWritten(Value value, const AnalysisState &state) {
   SmallVector<OpOperand *> worklist;
   DenseSet<OpOperand *> visited;
@@ -131,11 +129,6 @@ bool isValueWritten(Value value, const AnalysisState &state) {
   return false;
 }
 
-// hipsr.compute is not DPS: an `outs` entry supplies the destination buffer for
-// the result in the same position, but the two types may differ because the
-// body may view that destination through a reshape. Every analysis query is
-// therefore answered from the body's entry argument the operand feeds, and the
-// operand, that argument and the result are reported as one equivalent buffer.
 struct ComputeOpBufferization
     : public BufferizableOpInterface::ExternalModel<ComputeOpBufferization,
                                                     ComputeOp> {
@@ -176,15 +169,19 @@ struct ComputeOpBufferization
 
   AliasingOpOperandList getAliasingOpOperands(Operation *op, Value value,
                                               const AnalysisState &) const {
+    // block argument <-> input operand
     auto computeOp = cast<ComputeOp>(op);
     if (auto blockArg = dyn_cast<BlockArgument>(value))
       return {{&op->getOpOperand(blockArg.getArgNumber()),
                BufferRelation::Equivalent}};
 
+    // op result <-> yield op result
     unsigned resultIndex = cast<OpResult>(value).getResultNumber();
     AliasingOpOperandList aliases;
     aliases.addAlias({&getYieldOp(computeOp)->getOpOperand(resultIndex),
                       BufferRelation::Equivalent});
+
+    // op result <-> output operand
     if (OpOperand *destination = getDestinationOf(computeOp, resultIndex))
       aliases.addAlias({destination, BufferRelation::Equivalent});
     return aliases;
@@ -294,8 +291,8 @@ struct ComputeYieldOpBufferization
     return false;
   }
 
-  // A result's buffer is the buffer of the operand yielded here, so yielding
-  // out of place would make that result a buffer allocated inside the body.
+  // A result's buffer is the buffer of the operand yielded here
+  // so this operand must be bufferized in-place.
   bool mustBufferizeInPlace(Operation *, OpOperand &,
                             const AnalysisState &) const {
     return true;
@@ -444,20 +441,18 @@ struct PoolDomainOpBufferization
 
     rewriter.setInsertionPointToStart(newBody);
     SmallVector<Value> argumentReplacements;
-    SmallVector<ToTensorOp> bridges;
     for (BlockArgument oldArgument : oldBody->getArguments()) {
       Value newArgument = newBody->getArgument(oldArgument.getArgNumber());
-      if (!isa<TensorType>(oldArgument.getType())) {
+      if (isa<TensorType>(oldArgument.getType())) {
+        argumentReplacements.push_back(
+            ToTensorOp::create(rewriter, oldArgument.getLoc(),
+                                oldArgument.getType(), newArgument)
+                .getResult());
+      } else {
         argumentReplacements.push_back(newArgument);
-        continue;
       }
-      auto bridge = ToTensorOp::create(rewriter, oldArgument.getLoc(),
-                                       oldArgument.getType(), newArgument);
-      bridges.push_back(bridge);
-      argumentReplacements.push_back(bridge.getResult());
     }
     rewriter.mergeBlocks(oldBody, newBody, argumentReplacements);
-    foldBridges(rewriter, bridges);
 
     replaceOpWithBufferizedValues(rewriter, op, newOp->getResults());
     return success();
