@@ -343,7 +343,7 @@ Value findContext(Block &body) {
 Value emitPool(OpBuilder &builder, Location loc, Value ctx, Value poolSize,
                uint64_t domainId) {
   auto deviceSpace =
-      MemorySpaceAttr::get(builder.getContext(), MemorySpaceKind::Device);
+      MemorySpaceAttr::get(builder.getContext(), MemorySpace::Device);
   auto poolType = MemRefType::get({ShapedType::kDynamic}, builder.getI8Type(),
                                   MemRefLayoutAttrInterface{}, deviceSpace);
   return GetPoolOp::create(builder, loc, poolType, ctx, poolSize, domainId);

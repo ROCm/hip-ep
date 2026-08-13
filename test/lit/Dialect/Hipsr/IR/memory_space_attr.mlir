@@ -9,7 +9,6 @@
 
 // RUN: hip-mlir-opt --split-input-file --verify-diagnostics %s | FileCheck %s
 
-// -----
 // All four kinds print back unchanged as a memref memory space.
 // CHECK-LABEL: func.func @roundtrip_spaces
 // CHECK-SAME:    memref<4xf32, #hipsr.mem<device>>
@@ -34,7 +33,7 @@ func.func @attr_on_op() attributes {hipsr.space = #hipsr.mem<pinned>} {
 // -----
 // An unknown kind fails to parse.
 // expected-error @+2 {{to be one of: host, device, pinned, managed}}
-// expected-error @+1 {{failed to parse Hipsr_MemorySpaceAttr parameter 'kind'}}
+// expected-error @+1 {{failed to parse Hipsr_MemorySpaceAttr parameter 'value'}}
 func.func @bad_kind(%x: memref<4xf32, #hipsr.mem<bogus>>) {
   return
 }
