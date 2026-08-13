@@ -127,10 +127,11 @@ Choose the smallest mechanism that matches the operation's semantics:
 | Runtime-dependent count, such as NonZero or Compress | DPS-init shape; unresolved dimensions remain dynamic |
 
 Shared declarations live in `HipShapeUtils.h`; common implementation lives in
-`HipShapeUtils.cpp`, with category translation units for matmul/Gemm,
-broadcast/reduction, attention, convolution/pooling, gather, and shape
-operations. Operations that select a manual-reification family define their
-member functions in
+`HipShapeUtils.cpp`, with focused category translation units introduced by the
+stack layer that first consumes each family. This foundation includes
+matmul/Gemm, reduction, gather, and shape-operation helpers; later family PRs
+add attention and convolution/pooling implementations. Operations that select
+a manual-reification family define their member functions in
 `HipReifyResultShapesImpl.cpp`.
 
 Pure descriptor transformations such as Reshape, Squeeze, and Unsqueeze generally lower to standard tensor operations rather than HIP DPS compute operations. Their shape inference and dim folding use MLIR's standard tensor interfaces and external models, not a second HIP-specific contract.
