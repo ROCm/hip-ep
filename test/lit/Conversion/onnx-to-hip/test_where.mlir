@@ -102,8 +102,27 @@ module {
     return %output : tensor<?x?xf16>
   }
 
+  // Test 5: An earlier dynamic operand may resolve to the broadcast value 1.
+  // The destination must select X's runtime extent rather than unconditionally
+  // using condition's extent.
+  func.func @test_where_dynamic_unit_broadcast(
+      %cond: tensor<?xi1>, %x: tensor<?xf16>, %y: tensor<?xf16>)
+      -> tensor<?xf16> {
+    // CHECK-LABEL: func.func @test_where_dynamic_unit_broadcast
+    // CHECK-DAG: %[[COND_DIM:.*]] = tensor.dim %[[COND:.*]], %{{.*}} : tensor<?xi1>
+    // CHECK-DAG: %[[X_DIM:.*]] = tensor.dim %[[X:.*]], %{{.*}} : tensor<?xf16>
+    // CHECK-DAG: %[[ONE:.*]] = arith.constant 1 : index
+    // CHECK: %[[COND_IS_ONE:.*]] = arith.cmpi eq, %[[COND_DIM]], %[[ONE]] : index
+    // CHECK: %[[EXTENT:.*]] = arith.select %[[COND_IS_ONE]], %[[X_DIM]], %[[COND_DIM]] : index
+    // CHECK: tensor.empty(%{{.*}}) : tensor<?xf16>
+
+    %output = "onnx.Where"(%cond, %x, %y) :
+        (tensor<?xi1>, tensor<?xf16>, tensor<?xf16>) -> tensor<?xf16>
+    return %output : tensor<?xf16>
+  }
+
   // --------------------------------------------------------------------------
-  // Tests 5-8: type-agnostic conversion coverage.
+  // Tests 6-9: type-agnostic conversion coverage.
   //
   // These cases confirm the OnnxToHip rewrite preserves the operand/result
   // element type for the full ONNX `Where` T constraint (uint8, int8, double,
@@ -114,7 +133,7 @@ module {
   // kernel's dtype switch, which are exercised by other test layers.
   // --------------------------------------------------------------------------
 
-  // Test 5: Signed 8-bit integer X/Y.
+  // Test 6: Signed 8-bit integer X/Y.
   func.func @test_where_i8(%cond: tensor<2x4xi1>,
                            %x: tensor<2x4xi8>,
                            %y: tensor<2x4xi8>) -> tensor<2x4xi8> {
@@ -128,7 +147,7 @@ module {
     return %output : tensor<2x4xi8>
   }
 
-  // Test 6: Unsigned 8-bit integer X/Y (verifies the ui8 path is not rejected).
+  // Test 7: Unsigned 8-bit integer X/Y (verifies the ui8 path is not rejected).
   func.func @test_where_ui8(%cond: tensor<2x4xi1>,
                             %x: tensor<2x4xui8>,
                             %y: tensor<2x4xui8>) -> tensor<2x4xui8> {
@@ -142,7 +161,7 @@ module {
     return %output : tensor<2x4xui8>
   }
 
-  // Test 7: f64 (double) X/Y.
+  // Test 8: f64 (double) X/Y.
   func.func @test_where_f64(%cond: tensor<2x4xi1>,
                             %x: tensor<2x4xf64>,
                             %y: tensor<2x4xf64>) -> tensor<2x4xf64> {
@@ -156,7 +175,7 @@ module {
     return %output : tensor<2x4xf64>
   }
 
-  // Test 8: bool (i1) X/Y -- where(cond, true_v, false_v) over bool tensors.
+  // Test 9: bool (i1) X/Y -- where(cond, true_v, false_v) over bool tensors.
   func.func @test_where_bool(%cond: tensor<2x4xi1>,
                              %x: tensor<2x4xi1>,
                              %y: tensor<2x4xi1>) -> tensor<2x4xi1> {
@@ -171,7 +190,7 @@ module {
   }
 
   // --------------------------------------------------------------------------
-  // Tests 9-10: rank-0 (scalar) coverage.
+  // Tests 10-11: rank-0 (scalar) coverage.
   //
   // ONNX Where permits rank-0 tensors under NumPy-style multidirectional
   // broadcasting. The runtime kernel handles scalars through natural loop
@@ -182,7 +201,7 @@ module {
   // tensor.empty() plus a hip.where on rank-0 operands.
   // --------------------------------------------------------------------------
 
-  // Test 9: All-scalar Where -- cond / x / y / out are all rank-0 f32.
+  // Test 10: All-scalar Where -- cond / x / y / out are all rank-0 f32.
   func.func @test_where_scalar(%cond: tensor<i1>,
                                %x: tensor<f32>,
                                %y: tensor<f32>) -> tensor<f32> {
@@ -198,7 +217,7 @@ module {
     return %output : tensor<f32>
   }
 
-  // Test 10: Scalar broadcast against a rank-2 tensor.
+  // Test 11: Scalar broadcast against a rank-2 tensor.
   // cond: i1, x: f32 (scalar), y: 2x4xf32 -> 2x4xf32. Verifies scalar
   // broadcast path on the conversion side.
   func.func @test_where_scalar_broadcast(%cond: tensor<i1>,
