@@ -32,9 +32,10 @@ def Hipsr_ComputeOp : Hipsr_Op<"compute", [
     type need not match that result's, so the body may yield a reshaped or cast
     view of it.
 
-    Operands and results are tensors before bufferization and device memrefs
-    (`#hipsr.mem<device>`) after. A bufferized compute has no results and
-    yields nothing.
+    Operands and results are tensors before bufferization and memrefs after. A
+    memref may name any `#hipsr.mem` space, so a body that produces extents can
+    keep them in host memory while data stays on the device. A bufferized
+    compute has no results and yields nothing.
 
     Example, where the body fills its output and then flattens it, so the
     result type differs:
@@ -54,12 +55,12 @@ def Hipsr_ComputeOp : Hipsr_Op<"compute", [
 
   let arguments = (ins
     Hipsr_ContextType:$ctx,
-    Variadic<Hipsr_TensorOrDeviceMemRef>:$inputs,
-    Variadic<Hipsr_TensorOrDeviceMemRef>:$outputs
+    Variadic<Hipsr_TensorOrAnySpaceMemRef>:$inputs,
+    Variadic<Hipsr_TensorOrAnySpaceMemRef>:$outputs
   );
   // Named after linalg's $result_tensors, which is also the pre-bufferization
   // form; a bufferized compute holds memrefs here.
-  let results = (outs Variadic<Hipsr_TensorOrDeviceMemRef>:$result_tensors);
+  let results = (outs Variadic<Hipsr_TensorOrAnySpaceMemRef>:$result_tensors);
   let regions = (region SizedRegion<1>:$body);
 
   let assemblyFormat = [{
