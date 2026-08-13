@@ -16,7 +16,7 @@
 //   %0 = hipsr.matmul(%ctx) ins(%a, %b) outs(%init) : tensor<?x512xf16>
 // After:
 //   %shape = scf.execute_region -> !shape.shape { ... }
-//   %init = tensor.empty(%d0) : tensor<?x512xf16>
+//   %init = tensor.empty(%d0) : tensor<?x512xf16, #hipsr.mem<device>>
 //   %0 = hipsr.matmul(%ctx) ins(%a, %b) outs(%init) : tensor<?x512xf16>
 //
 // The phases run per domain: collect and group the placeholders, build the
@@ -211,12 +211,21 @@ SmallVector<Value> extractDynamicDimensions(Value shapeValue,
   return dynamicDimensions;
 }
 
+RankedTensorType getDeviceTensorType(RankedTensorType tensorType,
+                                     OpBuilder &builder) {
+  auto deviceSpace =
+      MemorySpaceAttr::get(builder.getContext(), MemorySpaceKind::Device);
+  return RankedTensorType::get(tensorType.getShape(),
+                               tensorType.getElementType(), deviceSpace);
+}
+
 Value createInitTensorFromShape(Value placeholderResult, Value shapeValue,
                                 Location loc, OpBuilder &builder) {
   auto tensorType = cast<RankedTensorType>(placeholderResult.getType());
   SmallVector<Value> dynamicDimensions =
       extractDynamicDimensions(shapeValue, tensorType, loc, builder);
-  return builder.create<tensor::EmptyOp>(loc, tensorType, dynamicDimensions);
+  return builder.create<tensor::EmptyOp>(
+      loc, getDeviceTensorType(tensorType, builder), dynamicDimensions);
 }
 
 // Materializes one tensor.empty per placeholder result. They all go after the
