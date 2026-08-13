@@ -4,18 +4,6 @@
  */
 //===- ExternalizeConstants.cpp - hipsr.constant -> constants file -------===//
 //
-// Phase 2 of the hipsr constant subsystem. Two stages inside one pass:
-//
-//   Phase 1 (always): walk each opted-in hipsr.constant, assign a 64-byte
-//     aligned cumulative offset, and stamp offset/size on the op (append-only
-//     -- value/source are kept). Builds one hip::ConstantEntry per constant.
-//   Phase 2 (only when a FileSystem is injected on the dialect): write the
-//     entries to the constants file via writeConstantsBinToFileSystem.
-//
-// file_source entries carry their file_path/offset only (data = nullptr) so
-// this pass does not read the weight file; inline / mem_source entries carry a
-// byte view (getDataValues). See Passes.td.
-//
 //===----------------------------------------------------------------------===//
 
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
@@ -25,6 +13,7 @@
 
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/DialectResourceBlobManager.h"
 
 #include "llvm/Support/MathExtras.h"
 
@@ -42,6 +31,8 @@ namespace {
 // Constants-file alignment: every constant starts on a 64-byte boundary (GPU
 // alignment; matches the hip.* constants-file layout).
 constexpr int64_t kConstantAlignment = 64;
+
+constexpr llvm::StringLiteral kFileKeyPrefix = "file|";
 
 struct HipsrExternalizeConstantsPass
     : impl::HipsrExternalizeConstantsPassBase<HipsrExternalizeConstantsPass> {
@@ -62,23 +53,26 @@ struct HipsrExternalizeConstantsPass
     int64_t constantIndex = 0;
     module.walk([&](ConstantOp c) {
       hip::ConstantEntry entry;
-      int64_t size = 0;
-      if (auto fileSrc =
-              llvm::dyn_cast_or_null<FileSourceAttr>(c.getSourceAttr())) {
-        // File-ref: keep the on-disk reference (path/offset); this pass does
-        // not read the (possibly multi-GB) weight file.
-        entry.file_path = fileSrc.getPath().getValue().str();
-        entry.file_offset = fileSrc.getOffset();
-        size = fileSrc.getSize();
+      ElementsAttr value = c.getValue();
+      llvm::ArrayRef<char> bytes;
+      if (auto resource = dyn_cast<DenseResourceElementsAttr>(value)) {
+        bytes = resource.getData();
+        StringRef key = resource.getRawHandle().getKey();
+        if (key.consume_front(kFileKeyPrefix)) {
+          // File-ref: keep the on-disk reference (path/offset); this pass does
+          // not read the (possibly multi-GB) weight file.
+          auto [path, offsetText] = key.rsplit('|');
+          entry.file_path = path.str();
+          offsetText.getAsInteger(10, entry.file_offset);
+        } else {
+          entry.data = bytes.data();
+        }
       } else {
-        // inline value or mem_source: a byte view. getDataValues does not read
-        // the bytes here (it only forms the pointer/size); the writer reads
-        // them in Phase 2.
-        llvm::ArrayRef<uint8_t> bytes = c.getDataValues<uint8_t>();
+        bytes = cast<DenseElementsAttr>(value).getRawData();
         entry.data = bytes.data();
-        size = static_cast<int64_t>(bytes.size());
       }
 
+      int64_t size = static_cast<int64_t>(bytes.size());
       int64_t offset = llvm::alignTo(filePos, kConstantAlignment);
       entry.offset = offset;
       entry.size = size;

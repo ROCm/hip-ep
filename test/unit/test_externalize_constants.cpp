@@ -3,17 +3,6 @@
  * Licensed under the MIT License.
  */
 
-// Unit test for -hipsr-externalize-constants that exercises Phase 2 (the
-// constants-file write), which the LIT tests cannot: LIT runs hip-mlir-opt with
-// no injected FileSystem, so it only sees the Phase 1 IR mutation
-// (offset/size). Here we inject an in-memory FileSystem and assert the actual
-// bytes written -- the only way to catch entry-field bugs (e.g. file_source vs
-// inline routing) that are invisible in the IR because they produce identical
-// offset/size.
-//
-// Plain main() (no GTest): matches the other MLIR-side unit tests and avoids a
-// GTest dependency that is not present in the compiler build.
-
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 #include "hip/Dialect/Hipsr/Transforms/Passes.h"
 #include "hip/Support/DiskFileSystem.h"
@@ -21,12 +10,15 @@
 #include "morphizen-foundation/file_io.hpp"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Diagnostics.h"
+#include "mlir/IR/DialectResourceBlobManager.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Pass/PassManager.h"
 
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -35,6 +27,7 @@
 #include <fstream>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -129,10 +122,6 @@ void verifyLayout(const std::vector<char> &blob,
         label + ": blob length == aligned total");
 }
 
-// FileSystem that captures every write into an in-memory buffer per filename,
-// so a test can inspect the exact constants-file bytes. create_reader is unused
-// -- writeConstantsBinToFileSystem reads file_source data via std::fopen on the
-// file path directly, not through the FileSystem.
 class CapturingFileSystem : public morphizen::FileSystem {
 public:
   class Writer : public morphizen::FileWriter {
@@ -173,9 +162,9 @@ public:
   void destroy_writer(morphizen::FileWriter *) override {}
 };
 
-// Loads the parsed dialects, injects `fs`, runs the pass. Returns the module
-// and sets `ok` to whether the pass succeeded.
 struct Harness {
+  using Blobs = std::vector<std::pair<std::string, llvm::ArrayRef<char>>>;
+
   mlir::MLIRContext ctx;
 
   Harness() {
@@ -183,12 +172,19 @@ struct Harness {
   }
 
   mlir::OwningOpRef<mlir::ModuleOp> run(const std::string &ir,
-                                        morphizen::FileSystem *fs, bool &ok) {
+                                        morphizen::FileSystem *fs, bool &ok,
+                                        const Blobs &blobs = {}) {
     auto module = mlir::parseSourceString<mlir::ModuleOp>(ir, &ctx);
     if (!module) {
       llvm::errs() << "failed to parse IR\n";
       ok = false;
       return module;
+    }
+    auto &manager =
+        mlir::DenseResourceElementsHandle::getManagerInterface(&ctx);
+    for (const auto &[key, bytes] : blobs) {
+      manager.update(key,
+                     mlir::UnmanagedAsmResourceBlob::allocateInferAlign(bytes));
     }
     ctx.getLoadedDialect<mlir::hipsr::HipsrDialect>()->setFileSystem(fs);
 
@@ -234,37 +230,32 @@ void testInlineValueBytesWritten() {
         "inline: blob bytes match dense value, rest zero");
 }
 
-// mem_source: the writer must copy the bytes at the raw address (entry.data),
-// not treat it as a file. Covers the getDataValues mem-pointer branch.
-void testMemSourceBytesWritten() {
-  std::vector<uint8_t> host = {50, 60, 70};
-  auto addr = reinterpret_cast<uintptr_t>(host.data());
+void testMemResourceBytesWritten() {
+  std::vector<char> host = {50, 60, 70};
 
   Harness h;
   CapturingFileSystem fs;
   bool ok = false;
-  auto module = h.run("func.func @f() -> tensor<3xi8> {\n"
-                      "  %0 = hipsr.constant {source = #hipsr.mem_source<" +
-                          std::to_string(addr) +
-                          ", 3>} : tensor<3xi8>\n"
-                          "  return %0 : tensor<3xi8>\n"
-                          "}\n",
-                      &fs, ok);
-  check(ok, "mem_source: pass succeeds");
+  auto module = h.run(R"mlir(
+    func.func @f() -> tensor<3xi8> {
+      %0 = hipsr.constant {value = dense_resource<"mem|0x1"> : tensor<3xi8>} : tensor<3xi8>
+      return %0 : tensor<3xi8>
+    }
+  )mlir",
+                      &fs, ok, {{"mem|0x1", host}});
+  check(ok, "mem resource: pass succeeds");
   if (!ok) {
     return;
   }
 
   const std::vector<char> &blob = fs.files["constants.bin"];
-  check(blob.size() == 64, "mem_source: blob padded to 64");
+  check(blob.size() == 64, "mem resource: blob padded to 64");
   check(blob.size() == 64 && static_cast<uint8_t>(blob[0]) == 50 &&
             static_cast<uint8_t>(blob[2]) == 70,
-        "mem_source: blob bytes copied from address");
+        "mem resource: blob bytes copied from the pointed-at memory");
 }
 
-// file_source: the constants-file bytes come from the referenced file at the
-// given offset. Covers the file-ref branch.
-void testFileSourceBytesStreamed() {
+void testFileResourceBytesStreamed() {
   auto path = std::filesystem::temp_directory_path() /
               "hipsr_externalize_test_weights.bin";
   {
@@ -276,20 +267,22 @@ void testFileSourceBytesStreamed() {
   Harness h;
   CapturingFileSystem fs;
   bool ok = false;
+  std::string key = "file|" + path.generic_string() + "|0";
+  std::vector<char> window(5);
   auto module = h.run("func.func @f() -> tensor<5xi8> {\n"
-                      "  %0 = hipsr.constant {source = #hipsr.file_source<\"" +
-                          path.generic_string() +
-                          "\", 0, 5>} : tensor<5xi8>\n"
+                      "  %0 = hipsr.constant {value = dense_resource<\"" +
+                          key +
+                          "\"> : tensor<5xi8>} : tensor<5xi8>\n"
                           "  return %0 : tensor<5xi8>\n"
                           "}\n",
-                      &fs, ok);
-  check(ok, "file_source: pass succeeds");
+                      &fs, ok, {{key, window}});
+  check(ok, "file resource: pass succeeds");
 
   const std::vector<char> &blob = fs.files["constants.bin"];
-  check(blob.size() == 64, "file_source: blob padded to 64");
+  check(blob.size() == 64, "file resource: blob padded to 64");
   check(blob.size() == 64 && static_cast<uint8_t>(blob[0]) == 1 &&
             static_cast<uint8_t>(blob[4]) == 5,
-        "file_source: blob bytes streamed from file");
+        "file resource: blob bytes streamed from file");
 
   std::filesystem::remove(path);
 }
@@ -301,8 +294,6 @@ void testCumulativeAlignmentAndPadding() {
   Harness h;
   CapturingFileSystem fs;
   bool ok = false;
-  // Non-splat values: getDataValues is a MorphiZen-only contract that does not
-  // support splat-optimized DenseElementsAttr, so use distinct bytes.
   auto module = h.run(R"mlir(
     func.func @f() -> (tensor<4xi8>, tensor<8xi8>) {
       %0 = hipsr.constant {value = dense<[1, 2, 3, 4]> : tensor<4xi8>} : tensor<4xi8>
@@ -382,9 +373,6 @@ void testOffsetDrivenReadBack() {
   fs::remove_all(dir, ec);
   fs::create_directories(dir, ec);
 
-  // Source file for the file_source constant: 200 bytes, src[i] == i, so the
-  // window [50, 150) is bytes 50..149. A nonzero file_offset also checks that
-  // the writer reads from the right place in the source.
   fs::path srcFile = dir / "weights.bin";
   {
     std::ofstream ofs(srcFile, std::ios::binary);
@@ -394,12 +382,10 @@ void testOffsetDrivenReadBack() {
     }
   }
 
-  // Live host buffer for the mem_source constant.
-  std::vector<uint8_t> memHost(7);
+  std::vector<char> memHost(7);
   for (int i = 0; i < 7; ++i) {
-    memHost[i] = static_cast<uint8_t>(200 + i);
+    memHost[i] = static_cast<char>(200 + i);
   }
-  auto addr = reinterpret_cast<uintptr_t>(memHost.data());
 
   // Expected bytes, in declaration order (== module walk order).
   std::vector<std::vector<char>> expected;
@@ -411,11 +397,10 @@ void testOffsetDrivenReadBack() {
   }
   expected.push_back(std::move(e1));
   expected.push_back({91, 92, 93}); // c2
-  std::vector<char> e3;             // c3 mem buffer
-  for (int i = 0; i < 7; ++i) {
-    e3.push_back(static_cast<char>(memHost[i]));
-  }
-  expected.push_back(std::move(e3));
+  expected.push_back(memHost);      // c3 mem buffer
+
+  std::string fileKey = "file|" + srcFile.generic_string() + "|50";
+  std::vector<char> fileWindow(100);
 
   // c0's i32 values whose little-endian bytes are {1..4} and {5..8}.
   std::string ir =
@@ -423,14 +408,13 @@ void testOffsetDrivenReadBack() {
       "tensor<7xi8>) {\n"
       "  %0 = hipsr.constant {value = dense<[67305985, 134678021]> : "
       "tensor<2xi32>} : tensor<2xi32>\n"
-      "  %1 = hipsr.constant {source = #hipsr.file_source<\"" +
-      srcFile.generic_string() +
-      "\", 50, 100>} : tensor<100xi8>\n"
+      "  %1 = hipsr.constant {value = dense_resource<\"" +
+      fileKey +
+      "\"> : tensor<100xi8>} : tensor<100xi8>\n"
       "  %2 = hipsr.constant {value = dense<[91, 92, 93]> : tensor<3xi8>} : "
       "tensor<3xi8>\n"
-      "  %3 = hipsr.constant {source = #hipsr.mem_source<" +
-      std::to_string(addr) +
-      ", 7>} : tensor<7xi8>\n"
+      "  %3 = hipsr.constant {value = dense_resource<\"mem|0x1\"> : "
+      "tensor<7xi8>} : tensor<7xi8>\n"
       "  return %0, %1, %2, %3 : tensor<2xi32>, tensor<100xi8>, tensor<3xi8>, "
       "tensor<7xi8>\n"
       "}\n";
@@ -438,7 +422,8 @@ void testOffsetDrivenReadBack() {
   Harness h;
   mlir::hip::DiskFileSystem diskFs(dir.string().c_str());
   bool ok = false;
-  auto module = h.run(ir, &diskFs, ok);
+  auto module =
+      h.run(ir, &diskFs, ok, {{fileKey, fileWindow}, {"mem|0x1", memHost}});
   check(ok, "readback: pass succeeds");
   if (!ok || !module) {
     fs::remove_all(dir, ec);
@@ -520,8 +505,8 @@ void testWriteFailureFailsPass() {
 
 int main() {
   testInlineValueBytesWritten();
-  testMemSourceBytesWritten();
-  testFileSourceBytesStreamed();
+  testMemResourceBytesWritten();
+  testFileResourceBytesStreamed();
   testCumulativeAlignmentAndPadding();
   testMultiFunctionSharesOneConstantsFile();
   testOffsetDrivenReadBack();

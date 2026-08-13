@@ -2,31 +2,18 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
-//===- ConstantConversion.cpp - onnx.Constant -> hipsr.constant ----------===//
-//
-// Converts `onnx.Constant` into the hipsr constant forms. Matched by name via
-// the generic Operation API (no onnx-mlir headers), consistent with the rest
-// of convert-onnx-to-hipsr. Four branches, keyed only on the storage form of
-// the incoming onnx.Constant -- no size threshold (that policy is layered on
-// later, in externalization):
-//
-//   inline value + rank-0 scalar     -> arith.constant <scalar>
-//   inline value + rank>=1           -> hipsr.constant {value}      : tensor<>
-//   location == "*/_ORT_MEM_ADDR_/*" -> hipsr.constant {mem_source} : tensor<>
-//   location == <other path>         -> hipsr.constant {file_source}: tensor<>
-//
-// The result stays a ranked tensor (pre-bufferization); the broadened
-// hipsr.constant result type (Hipsr_TensorOrDeviceMemRef) means no
-// memref->tensor bridge is needed here.
-//
-//===----------------------------------------------------------------------===//
 
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/IR/AsmState.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+
+#include "llvm/ADT/StringExtras.h"
+#include "llvm/ADT/Twine.h"
+#include "llvm/Support/MemoryBuffer.h"
 
 namespace mlir {
 namespace hipsr {
@@ -61,11 +48,10 @@ struct ConstantOpLowering : public ::mlir::RewritePattern {
         return ::mlir::success();
       }
 
-      // rank>=1 -> hipsr.constant {value}.
       rewriter.replaceOpWithNewOp<ConstantOp>(
           op, /*result=*/tensorType, /*value=*/valueAttr,
-          /*source=*/::mlir::Attribute(), /*offset=*/::mlir::IntegerAttr(),
-          /*size=*/::mlir::IntegerAttr(), /*index=*/::mlir::IntegerAttr());
+          /*index=*/IntegerAttr(), /*offset=*/IntegerAttr(),
+          /*size=*/IntegerAttr());
       return ::mlir::success();
     }
 
@@ -84,17 +70,30 @@ struct ConstantOpLowering : public ::mlir::RewritePattern {
     int64_t offset = offsetAttr.getInt();
     int64_t size = sizeAttr.getInt();
 
-    ::mlir::Attribute source;
+    std::string key;
+    ArrayRef<char> data;
     if (locAttr.getValue() == kOrtMemAddrTag) {
-      source = MemSourceAttr::get(op->getContext(), /*address=*/offset, size);
+      key = ("mem|0x" + llvm::utohexstr(static_cast<uint64_t>(offset),
+                                        /*LowerCase=*/true));
+      data = {reinterpret_cast<const char *>(static_cast<uintptr_t>(offset)),
+              static_cast<size_t>(size)};
     } else {
-      source = FileSourceAttr::get(op->getContext(), locAttr, offset, size);
+      auto *dialect = op->getContext()->getLoadedDialect<HipsrDialect>();
+      llvm::MemoryBuffer *buf = dialect->getOrLoadFileMap(locAttr.getValue());
+      if (!buf) {
+        return rewriter.notifyMatchFailure(
+            op, "cannot memory-map the external data file");
+      }
+      key = ("file|" + locAttr.getValue() + "|" + Twine(offset)).str();
+      data = {buf->getBufferStart() + offset, static_cast<size_t>(size)};
     }
 
+    auto value = DenseResourceElementsAttr::get(
+        tensorType, key, UnmanagedAsmResourceBlob::allocateInferAlign(data));
+
     rewriter.replaceOpWithNewOp<ConstantOp>(
-        op, /*result=*/tensorType, /*value=*/::mlir::ElementsAttr(), source,
-        /*offset=*/::mlir::IntegerAttr(), /*size=*/::mlir::IntegerAttr(),
-        /*index=*/::mlir::IntegerAttr());
+        op, /*result=*/tensorType, value, /*index=*/IntegerAttr(),
+        /*offset=*/IntegerAttr(), /*size=*/IntegerAttr());
     return ::mlir::success();
   }
 };
