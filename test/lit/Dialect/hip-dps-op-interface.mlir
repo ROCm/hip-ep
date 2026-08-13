@@ -7,27 +7,25 @@
 // What this file tests
 // --------------------
 // `HipDpsOp::reifyResultShapes` -- the SHARED default body carried by the
-// in-dialect `HipDpsOpInterface`. The TableGen base class `Hip_DpsOp`
-// auto-emits a per-op `ReifyRankedShapedTypeOpInterface::reifyResultShapes`
-// dispatcher that forwards to that default. The default walks
+// in-dialect `HipDpsOpInterface`. `Hip_DpsOp_AutoReify` emits a per-op
+// `ReifyRankedShapedTypeOpInterface::reifyResultShapes` dispatcher that
+// forwards to that default. The default walks
 // `getDpsInits()` in tensor mode and lifts each init operand's runtime shape
 // via `tensor::getMixedSizes`; memref mode has no SSA results and returns an
-// empty list. This file pins that, for any non-opt-out tensor-mode op
-// (i.e. autoReify=1, the default), reify produces:
+// empty list. This file pins that, for any tensor-mode operation selecting the
+// default-reify family, reify produces:
 //   - `IntegerAttr` for static dims (fold to `arith.constant`)
 //   - `tensor.dim %outs, %i` for dynamic dims
 //
 // `hip.silu` is the worked example -- a single-init same-shape elementwise
-// op with no per-op reify override on the #260 base. Other Hip_DpsOps with
-// the default (silu, sigmoid, rope, rms_norm, ...) follow the same contract
-// because they share the same auto-emitted dispatcher.
+// op with no per-op reify override on the #260 base. Other operations in the
+// default-reify family follow the same contract.
 //
 // What this file does NOT test
 // ----------------------------
-// `MatmulOp::reifyResultShapes` -- matmul opts out of the default
-// (`autoReify=0`) and provides a tighter contract that lifts dims from the
-// `A` / `B` ins operands instead of the outs. That is covered by
-// `hip-matmul-reify-shapes.mlir`.
+// `MatmulOp::reifyResultShapes` -- matmul selects a manual-reify family with a
+// tighter contract that lifts dims from the `A` / `B` ins operands. That is
+// covered by `hip-matmul-reify-shapes.mlir`.
 
 // CHECK-LABEL: func.func @silu_static
 // CHECK-DAG:   %[[C2:.*]] = arith.constant 2 : index

@@ -703,17 +703,9 @@ def Hip_ConvTransposeOp : Hip_DpsOp_AutoReify<
 
 // ===== hipBLASLt ops =========================================================
 
-// `autoReify=0` opts out of the shared default reify body: matmul
-// recovers its result dims from operand shapes (M, K from A; K, N from
-// B) rather than echoing the outs shape, so the body is hand-written
-// in `HipReifyResultShapesImpl.cpp`. `autoInfer=1, declareInfer=1`
-// keep the op on the parameterized auto-emit path for
-// `inferReturnTypes` because at construction time the converter passes
-// a typed outs operand whose tensor type already encodes the result
-// shape -- the auto-emitted body just reads it back, so there is no
-// reason to write that boilerplate by hand. Matmul is the worked
-// example for the orthogonality of these two layers on #260; #262
-// extends the same split to gemm / qmoe / matmul_nbits.
+// Matmul selects a manual-reify/generated-infer family: reification recovers
+// M/K/N from operand shapes in `HipReifyResultShapesImpl.cpp`, while the
+// generated `inferReturnTypes` body reads the typed outs operand.
 def Hip_MatmulOp : Hip_DpsOp_WithInfer<"matmul", "Output", [OpStateOpInterface]> {
   let summary = "Matrix multiplication (supports batched N-D x N-D)";
   let description = [{
@@ -3972,8 +3964,8 @@ def Hip_NonZeroOp : Hip_DpsOp_AutoReify<"nonzero"> {
     to the host via `hip.readback_dim` and slices `y` to `[R, N]` so the
     real extent (not the capacity) flows to consumers and to the
     ORT-reported output shape. Two destinations means the op is
-    multi-result (`y`, `count`); like the other multi-output DPS ops it
-    keeps `autoInfer=0` (converters pass explicit result types).
+    multi-result (`y`, `count`); like the other multi-output DPS ops it does
+    not use the single-result inference family (converters pass explicit types).
 
     Uses destination-passing style: both output buffers are provided as
     arguments.
