@@ -228,6 +228,20 @@ seven public seams in `lib/Dialect/Transforms/Pipelines.cpp`.
 of `onnx.Custom` ops; pick the slot that matches when your transform
 needs to run.
 
+It is also the only supported slot for producing constant weights. Emit
+`hip.constant` with a statically shaped ranked tensor result and exactly one
+source (dense `value`, complete file `location`/`offset`/`size`, or complete
+`memory_address`/`size`). Optional `symbol_name_hint` and `source_name`
+attributes control the private symbol fragment and manifest label.
+`hip-infer-shapes` first consumes any compile-time payload needed for shape
+refinement; `hip-externalize-constants` then applies the same
+inline/full/streaming/hybrid policy and metadata contract to plugin and in-tree
+carriers. Leave `serialization_order` unset unless the producer owns a stable
+module-wide order; unordered plugin carriers are deterministically serialized
+after ordered carriers in stable module walk order. Do not emit `hip.constant`
+from `BeforeBufferization` or later; the pipeline rejects a surviving late
+carrier before One-Shot Bufferize.
+
 > **Slot-string nesting:** the slot pass manager is anchored on
 > `builtin.module`, so a non-module pass must be requested with its anchor
 > (`func.func(<arg>)`, `func.func(<region-pass>)`, ...), exactly as you would

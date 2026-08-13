@@ -282,13 +282,13 @@ runtime kernel — `ConstantOfShapeConversion.cpp` folds it to an
 `arith.constant` splat at compile time. The fold has two
 non-obvious requirements:
 
-1. **It must run BEFORE `lowerOnnxConstants`** (which externalises
-   any `onnx.Constant >= 1 element` into `constants.bin` via a
-   `memref.global` with `initial_value = nullptr`). After
-   externalisation the shape data is on disk, not in the IR, and the
-   fold can't reach it. `ConvertOnnxToHipPass::runOnOperation` runs
-   ConstantOfShape patterns in a dedicated "pre-fold" greedy pass
-   immediately before the externaliser loop.
+1. **It must run BEFORE `lowerOnnxConstants`**, while the producer is
+   still a generic `onnx.Constant`/`onnx.Shape` that this ONNX-rooted
+   fold recognises. `lowerOnnxConstants` creates an inspectable
+   `hip.constant`; the standalone externalizer runs only after compute
+   conversion. `ConvertOnnxToHipPass::runOnOperation` runs
+   ConstantOfShape patterns in a dedicated pre-fold greedy pass
+   immediately before carrier creation.
 
 2. **The fold accepts `onnx.Shape(static-tensor)` as a compile-time
    constant input**, not just `onnx.Constant`. This is what
@@ -482,13 +482,12 @@ doesn't re-discover them:
   input must be a recognised compile-time constant — currently:
   `arith.constant`, `onnx.Constant` with a dense `value` attribute,
   `onnx.Shape(static-tensor)` (with optional `start`/`end` slicing),
-  or a `bufferization.to_tensor` of an externalised
+  or a legacy `bufferization.to_tensor` of an initialized
   `memref.get_global`. The fold runs in `ConvertOnnxToHipPass`
-  **before** `lowerOnnxConstants` externalises constants, so the
-  shape's dense bytes are still reachable. After externalisation the
-  shape would be `memref.global` with null `initial_value` and the
-  fold could no longer recover the data. No runtime symbol exists —
-  the op disappears from the IR entirely.
+  **before** `lowerOnnxConstants` changes generic ONNX producers into
+  inspectable `hip.constant` carriers. Standalone externalization runs
+  later, after compute conversion. No runtime symbol exists — the op
+  disappears from the IR entirely.
 
 ## 8. What this leaves unfinished for `vision.onnx`
 

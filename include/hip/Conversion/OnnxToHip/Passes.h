@@ -5,28 +5,16 @@
 #ifndef HIP_CONVERSION_ONNXTOHIP_PASSES_H
 #define HIP_CONVERSION_ONNXTOHIP_PASSES_H
 
-#include "hip/Dialect/Transforms/Pipelines.h"
 #include "mlir/Pass/Pass.h"
 #include <memory>
-
-namespace morphizen {
-class FileSystem;
-} // namespace morphizen
 
 namespace mlir {
 namespace hip {
 
-/// Creates a pass that converts ONNX operations to HIP dialect.
-/// Uses default options (constants.bin, no externalization).
+/// Creates a pass that converts ONNX operations to HIP dialect. Both constant
+/// sweeps lower onnx.Constant only to policy-neutral hip.constant carriers;
+/// hip-externalize-constants owns storage policy and artifact I/O.
 std::unique_ptr<Pass> createConvertOnnxToHipPass();
-
-/// Creates a pass with an external FileSystem for constant storage.
-/// When \p fs is non-null, externalized constants are written via \p fs
-/// instead of a DiskFileSystem rooted at the output directory.
-std::unique_ptr<Pass> createConvertOnnxToHipPass(
-    morphizen::FileSystem *fs,
-    int64_t minNumElements = kDefaultExternalizeMinNumElements,
-    bool skipConstantData = false);
 
 /// Creates a pass that outlines each onnx.Loop body into a separate
 /// func.func and rewrites the loop into a hip.loop op that points at it.

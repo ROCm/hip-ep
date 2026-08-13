@@ -14,8 +14,9 @@ namespace hip {
 namespace {
 
 /// Try to recognise \p v as a compile-time 1-D integer constant tensor
-/// (matching the forms produced by `lowerOnnxConstants`). Returns null
-/// otherwise. Mirrors the helper in SliceConversion.cpp.
+/// (`arith.constant`, an inspectable `hip.constant` value carrier, or a legacy
+/// initialized global bridge). Returns null otherwise. Mirrors the helper in
+/// SliceConversion.cpp.
 static mlir::DenseElementsAttr getCompileTimeConstantTensor(mlir::Value value) {
   mlir::Operation *defOp = value.getDefiningOp();
   if (!defOp)
@@ -64,12 +65,11 @@ extractIntVector(mlir::Value v, llvm::SmallVectorImpl<int64_t> &out) {
 /// Read entry `[idx]` from a 1-D int tensor on the host and return an
 /// `index`-typed value.
 ///
-/// The `pads` operand is frequently an externalized constant (its inline
-/// `dense` value is stripped by constant externalization), so a bare
-/// `tensor.extract` would bufferize to an UNSYNCHRONIZED host `memref.load` of
-/// the device-resident constants blob -- a SEGV on targets where that blob is
-/// true device memory. `readbackShapeEntryToHost` folds the value when the
-/// constant is still inline and otherwise emits a synchronized
+/// A non-inline `pads` source may become device-resident when the standalone
+/// externalizer runs after conversion, so a bare `tensor.extract` would
+/// bufferize to an UNSYNCHRONIZED host `memref.load` -- a SEGV on targets where
+/// the source is true device memory. `readbackShapeEntryToHost` folds an
+/// inspectable carrier value and otherwise emits a synchronized
 /// `hip.readback_scalar` (D2H + stream sync). See ReadbackScalar.h.
 static mlir::Value extractAsIndex(mlir::PatternRewriter &rewriter,
                                   mlir::Location loc, mlir::Value ctx,
@@ -94,11 +94,10 @@ static mlir::Value extractAsIndex(mlir::PatternRewriter &rewriter,
 /// can't express with `tensor.empty` dynsizes.
 ///
 /// `padsAttr` / `axesAttr` carry the compile-time `pads` / `axes` values when
-/// the pre-lowering `PadShapeFold` stamped them onto the op (the common case:
-/// the operand was an inline constant before externalization). When present we
-/// use them directly -- no operand read, no `hip.readback_scalar`. When absent
-/// (genuinely runtime-dynamic `pads`) we fall back to reading the operand via
-/// the synchronized readback path.
+/// the pre-lowering `PadShapeFold` stamped them onto the generic ONNX op. When
+/// present we use them directly -- no producer-form dependency, operand read,
+/// or `hip.readback_scalar`. When absent (genuinely runtime-dynamic `pads`) we
+/// fall back to the synchronized readback path.
 static mlir::FailureOr<mlir::Value> buildPadOutputInit(
     mlir::PatternRewriter &rewriter, mlir::Location loc, mlir::Operation *op,
     mlir::Value ctx, mlir::RankedTensorType resultType, mlir::Value data,
@@ -124,7 +123,7 @@ static mlir::FailureOr<mlir::Value> buildPadOutputInit(
   // compile-time constant we honour it.
   llvm::SmallVector<int64_t> axesVec;
   if (hasAxesAttr) {
-    // Stamped by PadShapeFold before externalization.
+    // Stamped by PadShapeFold before carrier lowering.
     axesVec.assign(axesAttr.begin(), axesAttr.end());
   } else if (axes) {
     if (mlir::failed(extractIntVector(axes, axesVec)))
@@ -144,9 +143,9 @@ static mlir::FailureOr<mlir::Value> buildPadOutputInit(
   int64_t nPadded = static_cast<int64_t>(axesVec.size());
 
   // Decide whether we can use compile-time pad values. Prefer the attribute
-  // stamped by PadShapeFold (captured before externalization); otherwise try
-  // to read an inline operand (only succeeds when `pads` was small enough to
-  // stay inline). A miss leaves `padsAreConst == false` -> readback fallback.
+  // stamped by PadShapeFold while the producer was generic ONNX; otherwise
+  // inspect an inline arith/hip carrier value. A miss leaves
+  // `padsAreConst == false` -> readback fallback.
   llvm::SmallVector<int64_t> padsConst;
   if (hasPadsAttr)
     padsConst.assign(padsAttr.begin(), padsAttr.end());
@@ -232,8 +231,8 @@ struct PadToHip : public mlir::RewritePattern {
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 
     // Compile-time pads/axes stamped by the pre-lowering PadShapeFold pattern
-    // (before externalization stripped the inline constant). Their presence
-    // lets buildPadOutputInit fold the output shape with zero device traffic;
+    // while the producer was still generic ONNX. Their presence lets
+    // buildPadOutputInit fold the output shape with zero device traffic;
     // absence falls back to the synchronized readback path.
     llvm::ArrayRef<int64_t> padsAttr;
     bool hasPadsAttr = false;
