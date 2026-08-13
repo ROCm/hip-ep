@@ -214,7 +214,7 @@ SmallVector<Value> extractDynamicDimensions(Value shapeValue,
 RankedTensorType getDeviceTensorType(RankedTensorType tensorType,
                                      OpBuilder &builder) {
   auto deviceSpace =
-      MemorySpaceAttr::get(builder.getContext(), MemorySpaceKind::Device);
+      MemorySpaceAttr::get(builder.getContext(), MemorySpace::Device);
   return RankedTensorType::get(tensorType.getShape(),
                                tensorType.getElementType(), deviceSpace);
 }
