@@ -123,9 +123,17 @@ inferReduceResultType(mlir::Operation *op, mlir::Value data,
   return mlir::RankedTensorType::get(outShape, inputType.getElementType());
 }
 
+/// Pure compatibility check for an imported result type and an inferred shape.
+/// An imported dynamic dimension may be refined, but an imported static extent
+/// requires the inference rule to prove that exact value.
+bool isResultTypeCompatibleWithInferredShape(
+    mlir::RankedTensorType resultType, llvm::ArrayRef<int64_t> inferredShape);
+
 /// Create a tensor.empty for a DPS init whose shape is the NumPy-style
 /// broadcast of \p operands. Converter destination construction delegates to
-/// the same dialect helper used by ReifyRankedShapedTypeOpInterface.
+/// the same dialect helper used by ReifyRankedShapedTypeOpInterface. Pure
+/// static inference and imported-result compatibility are checked before any
+/// shape SSA is emitted.
 mlir::FailureOr<mlir::Value>
 createBroadcastEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
                            mlir::RankedTensorType resultType,
