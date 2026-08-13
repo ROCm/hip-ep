@@ -87,23 +87,76 @@ struct ConvKeyHash {
 };
 
 std::mutex g_mu;
-// Caches the index of the first CK instance that supports a given problem so
-// repeated inferences of the same layer skip the linear IsSupportedArgument
-// scan. Process-lifetime; entries are POD ints.
-std::unordered_map<ConvKey, int, ConvKeyHash> g_instance_cache;
+
+// Selected-plan cache: for a given problem shape, the index of the chosen CK
+// instance plus its (shape-invariant) workspace size. Repeated inferences of
+// the same layer reuse this, skipping the linear IsSupportedArgument scan.
+// Process lifetime; entries are POD.
+struct ConvPlan {
+  int idx;
+  size_t ws_size;
+};
+std::unordered_map<ConvKey, ConvPlan, ConvKeyHash> g_plan_cache;
+
+// The CK device ops AND their invokers are materialized ONCE per element-type
+// and kept for the process lifetime, so nothing about the "kernel" is rebuilt
+// per launch. DeviceOperationInstanceFactory::GetInstances() constructs ~100+
+// concrete device-op objects (each a vtable + precomputed descriptors), and
+// each op's Invoker (the object that computes grid/block dims and issues the
+// hipLaunch) is built up front here too. Doing this on every call was the
+// dominant per-launch cost ("the whole CK library bootstrapped inside
+// hip_conv_forward"). All of these methods are const/stateless w.r.t. a call
+// (MakeArgumentPointer / IsSupportedArgument / GetWorkSpaceSize / Invoker::Run
+// read only the op + the per-call Argument), so sharing them read-only across
+// threads is safe.
+template <typename InT, typename WeiT, typename OutT> struct CkConvStore {
+  using Op = DeviceConvOp<InT, WeiT, OutT>;
+  std::vector<std::unique_ptr<Op>> ops;
+  std::vector<std::unique_ptr<ck::tensor_operation::device::BaseInvoker>>
+      invokers;
+};
+
+template <typename InT, typename WeiT, typename OutT>
+const CkConvStore<InT, WeiT, OutT> &ck_conv_store() {
+  using Store = CkConvStore<InT, WeiT, OutT>;
+  static const Store store = [] {
+    Store s;
+    s.ops = ck::tensor_operation::device::instance::
+        DeviceOperationInstanceFactory<typename Store::Op>::GetInstances();
+    s.invokers.reserve(s.ops.size());
+    for (auto &op : s.ops)
+      s.invokers.push_back(op->MakeInvokerPointer());
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[CK conv] built %zu instances + invokers (once)\n", s.ops.size());
+    return s;
+  }();
+  return store;
+}
+
+// Grow-on-demand device scratch for the CK conv workspace, kept per-thread so
+// concurrent streams never share a buffer (no lock needed). Reused for the
+// thread lifetime; most conv-fwd instances need zero workspace anyway.
+void *ensure_conv_ws(size_t bytes) {
+  static thread_local void *ws = nullptr;
+  static thread_local size_t cap = 0;
+  if (bytes > cap) {
+    if (ws)
+      (void)!hipFree(ws);
+    if (hipMalloc(&ws, bytes) != hipSuccess) {
+      ws = nullptr;
+      cap = 0;
+      return nullptr;
+    }
+    cap = bytes;
+  }
+  return ws;
+}
 
 template <typename InT, typename WeiT, typename OutT>
 int run(hipStream_t stream, const void *input, const void *weights,
         void *output, const ConvKey &key) {
-  using Op = DeviceConvOp<InT, WeiT, OutT>;
-  const auto &op_ptrs = ck::tensor_operation::device::instance::
-      DeviceOperationInstanceFactory<Op>::GetInstances();
-  CUSTOM_KERNELS_DEBUG_LOG("[CK conv] dtype=%d NxCxHxW=%lldx%lldx%lldx%lld "
-                           "K=%lld kHxkW=%lldx%lld instances=%zu\n",
-                           key.dtype, (long long)key.n, (long long)key.c,
-                           (long long)key.h, (long long)key.w,
-                           (long long)key.k, (long long)key.kh,
-                           (long long)key.kw, op_ptrs.size());
+  const auto &store = ck_conv_store<InT, WeiT, OutT>();
+  const auto &op_ptrs = store.ops;
   if (op_ptrs.empty())
     return -1;
 
@@ -150,61 +203,76 @@ int run(hipStream_t stream, const void *input, const void *weights,
         PassThrough{});
   };
 
+  // Fast path: reuse the plan selected on the first inference of this shape.
+  // Only the buffer pointers change between inferences of a static-shape model,
+  // so the previously chosen instance (or the "no CK instance supports this
+  // shape" verdict) still applies. idx < 0 is a NEGATIVE cache entry: return
+  // immediately so an unsupported shape never re-runs the whole support scan.
   int idx = -1;
+  size_t ws_size = 0;
+  bool have_plan = false;
   {
     std::lock_guard<std::mutex> lock(g_mu);
-    auto it = g_instance_cache.find(key);
-    if (it != g_instance_cache.end() && it->second >= 0 &&
-        it->second < (int)op_ptrs.size())
-      idx = it->second;
+    auto it = g_plan_cache.find(key);
+    if (it != g_plan_cache.end()) {
+      idx = it->second.idx;
+      ws_size = it->second.ws_size;
+      have_plan = true;
+    }
   }
+  if (have_plan && (idx < 0 || idx >= (int)op_ptrs.size()))
+    return -1; // cached: no supporting CK instance -> caller uses MIOpen
 
-  if (idx < 0) {
+  // Cold path (once per shape): pick the first supporting instance, or record a
+  // negative entry so future calls skip the scan entirely.
+  if (!have_plan) {
     int supported = 0;
     for (int i = 0; i < (int)op_ptrs.size(); ++i) {
       auto arg = make_arg(op_ptrs[i]);
       if (op_ptrs[i]->IsSupportedArgument(arg.get())) {
         ++supported;
-        if (idx < 0)
+        if (idx < 0) {
           idx = i;
+          ws_size = op_ptrs[i]->GetWorkSpaceSize(arg.get());
+        }
       }
+    }
+    {
+      std::lock_guard<std::mutex> lock(g_mu);
+      g_plan_cache[key] = ConvPlan{idx, ws_size};
     }
     if (idx < 0) {
       CUSTOM_KERNELS_DEBUG_LOG(
-          "[CK conv] none of %zu instances support this problem\n",
-          op_ptrs.size());
+          "[CK conv] fallback (0/%zu supported) "
+          "CxHxW=%lldx%lldx%lld K=%lld k=%lldx%lld s=%lldx%lld\n",
+          op_ptrs.size(), (long long)key.c, (long long)key.h, (long long)key.w,
+          (long long)key.k, (long long)key.kh, (long long)key.kw,
+          (long long)key.sh, (long long)key.sw);
       return -1;
     }
-    CUSTOM_KERNELS_DEBUG_LOG("[CK conv] %d/%zu instances supported; using #%d\n",
-                             supported, op_ptrs.size(), idx);
-    std::lock_guard<std::mutex> lock(g_mu);
-    g_instance_cache[key] = idx;
+    CUSTOM_KERNELS_DEBUG_LOG(
+        "[CK conv] using #%d (%d/%zu supported) "
+        "CxHxW=%lldx%lldx%lld K=%lld k=%lldx%lld s=%lldx%lld ws=%zu\n",
+        idx, supported, op_ptrs.size(), (long long)key.c, (long long)key.h,
+        (long long)key.w, (long long)key.k, (long long)key.kh,
+        (long long)key.kw, (long long)key.sh, (long long)key.sw, ws_size);
   }
 
+  // Warm launch: build the argument for the current pointers, point it at the
+  // persistent scratch, and run the pre-built invoker. No instance rebuild, no
+  // support scan, no MakeInvokerPointer, and no per-call hipMalloc.
   auto &op = op_ptrs[idx];
   auto arg = make_arg(op);
-  if (!op->IsSupportedArgument(arg.get())) {
-    std::lock_guard<std::mutex> lock(g_mu);
-    g_instance_cache.erase(key);
-    return -1;
-  }
-
-  void *ws = nullptr;
-  size_t ws_size = op->GetWorkSpaceSize(arg.get());
   if (ws_size > 0) {
-    if (hipMalloc(&ws, ws_size) != hipSuccess)
+    void *ws = ensure_conv_ws(ws_size);
+    if (!ws)
       return -1;
     op->SetWorkSpacePointer(arg.get(), ws);
   }
 
   (void)hipGetLastError();
-  auto invoker = op->MakeInvokerPointer();
-  invoker->Run(arg.get(), StreamConfig{stream, /*time_kernel=*/false});
-  hipError_t launch = hipGetLastError();
-
-  if (ws)
-    (void)!hipFree(ws);
-  return launch == hipSuccess ? 0 : -1;
+  store.invokers[idx]->Run(arg.get(), StreamConfig{stream, /*time_kernel=*/false});
+  return hipGetLastError() == hipSuccess ? 0 : -1;
 }
 
 template <typename InT, typename WeiT, typename OutT>
