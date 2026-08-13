@@ -53,11 +53,10 @@ MatMulToHip::matchAndRewrite(mlir::Operation *op,
       mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
                                     resultType.getElementType(), dynSizes);
   // Inferred-type Op::create overload: result type is read from the typed
-  // outs operand via the auto-emitted MatmulOp::inferReturnTypes (HipOps.td
-  // base, autoInfer=1). Equivalent to passing `resultType` explicitly --
-  // outs.getType() == resultType by construction here -- but keeps the DPS
-  // contract `result_type == outs_operand_type` closed by ODS rather than
-  // restated at the callsite.
+  // outs operand by MatmulOp's inference family. This is equivalent to passing
+  // `resultType` explicitly -- outs.getType() == resultType by construction
+  // here -- but keeps `result_type == outs_operand_type` closed by ODS rather
+  // than restated at the callsite.
   auto hipOp = mlir::hip::MatmulOp::create(rewriter, loc, context, a, b, init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
