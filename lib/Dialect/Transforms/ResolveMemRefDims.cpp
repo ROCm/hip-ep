@@ -9,7 +9,7 @@
 // ultimately `memref.dim` of a function argument.  Post-bufferize twin of
 // `--hip-resolve-tensor-dims`: it re-applies the reify-based `memref` dim folds
 // once the memref views exist (they are created during bufferization and by
-// `--hip-promote-strided-hip-operands`, i.e. after resolve-tensor-dims ran).
+// `--hip-promote-strided-operands`, i.e. after resolve-tensor-dims ran).
 //
 // Why: `--hip-pool-allocs` opens a new pool "domain" for every alloc whose
 // size SSA is defined below the earliest pooled alloc.  `memref.dim` of a
@@ -26,9 +26,9 @@
 //   %d = memref.dim %arg, %c0        // size at block top, hoistable
 //   %a = memref.alloc(%d)            // --hip-pool-allocs merges the domain
 //
-// Placement: after --hip-promote-strided-hip-operands /
-// --hip-materialize-host-scalars, before --hip-hoist-alloc-size-arith /
-// --hip-pool-allocs.  Idempotent.
+// Placement: after --hip-promote-strided-operands /
+// --hip-materialize-host-scalars, before the final CSE /
+// --hip-hoist-alloc-size-arith / --hip-pool-allocs sequence. Idempotent.
 //
 //===----------------------------------------------------------------------===//
 

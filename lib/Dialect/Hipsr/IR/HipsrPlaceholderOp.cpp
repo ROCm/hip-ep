@@ -6,12 +6,82 @@
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Interfaces/DestinationStyleOpInterface.h"
+#include "mlir/Dialect/Shape/IR/Shape.h"
 
 #include "llvm/ADT/STLExtras.h"
 
 using namespace mlir;
 using namespace mlir::hipsr;
+
+namespace {
+
+// Keep the shape graph apart from the data graph: no data results as inputs.
+LogicalResult verifyShapeGraphInputs(PlaceholderOp op) {
+  for (auto [index, input] : llvm::enumerate(op.getInputs())) {
+    if (!PlaceholderOp::isAllowedShapeGraphInput(input)) {
+      return op.emitOpError("input ")
+             << index
+             << " must be a block argument or a result of hipsr.placeholder, "
+                "arith.constant, or hipsr.constant; got result of '"
+             << input.getDefiningOp()->getName() << "'";
+    }
+  }
+  return success();
+}
+
+// A placeholder holds the outs values of one op, one slot per result.
+LogicalResult verifyResultUses(PlaceholderOp op) {
+  SmallVector<Operation *> consumers;
+  for (OpResult result : op.getResults()) {
+    auto initUses =
+        llvm::make_filter_range(result.getUses(), [](OpOperand &use) {
+          return !isa<PlaceholderOp, PoolDomainYieldOp>(use.getOwner());
+        });
+
+    if (!llvm::all_of(initUses, isHipsrDestinationOperand)) {
+      return op.emitOpError("requires each result use to be a placeholder "
+                            "input, pool-domain yield, or an outs operand of a "
+                            "hipsr operation");
+    }
+    if (!llvm::hasSingleElement(initUses)) {
+      return op.emitOpError(
+          "requires each result to initialize exactly one hipsr operation");
+    }
+    consumers.push_back(initUses.begin()->getOwner());
+  }
+
+  if (!llvm::all_equal(consumers)) {
+    return op.emitOpError(
+        "requires all results to initialize the same hipsr operation");
+  }
+  return success();
+}
+
+// The placeholder type sets the shape region's block arguments.
+LogicalResult verifyShapeRegionSignature(PlaceholderOp op) {
+  if (op.getBodyRegion().empty()) {
+    return success();
+  }
+
+  Block &block = *op.getBody();
+  SmallVector<Type> expectedTypes = op.getShapeRegionArgumentTypes();
+  if (block.getNumArguments() != expectedTypes.size()) {
+    return op.emitOpError("shape region block argument count does not match "
+                          "the placeholder type layout; expected ")
+           << expectedTypes.size() << ", got " << block.getNumArguments();
+  }
+  for (auto [index, actualType, expectedType] :
+       llvm::enumerate(block.getArgumentTypes(), expectedTypes)) {
+    if (actualType != expectedType) {
+      return op.emitOpError("shape region block argument ")
+             << index << " type " << actualType
+             << " does not match expected type " << expectedType;
+    }
+  }
+  return success();
+}
+
+} // namespace
 
 bool PlaceholderOp::isAllowedShapeGraphInput(Value value) {
   if (isa<BlockArgument>(value)) {
@@ -23,87 +93,43 @@ bool PlaceholderOp::isAllowedShapeGraphInput(Value value) {
       definingOp);
 }
 
-Operation *PlaceholderOp::getDpsConsumer() {
-  for (Value result : getResults()) {
+// All results go to the same op, so the first outs use names the consumer.
+Operation *PlaceholderOp::getConsumer() {
+  for (OpResult result : getResults()) {
     for (OpOperand &use : result.getUses()) {
-      Operation *owner = use.getOwner();
-      auto dpsOp = dyn_cast<DestinationStyleOpInterface>(owner);
-      if (dpsOp && owner->getDialect() == getOperation()->getDialect() &&
-          dpsOp.isDpsInit(&use)) {
-        return owner;
+      if (isHipsrDestinationOperand(use)) {
+        return use.getOwner();
       }
     }
   }
   return nullptr;
 }
 
+SmallVector<Type> PlaceholderOp::getShapeRegionArgumentTypes() {
+  SmallVector<Type> types;
+  if (getPlaceholderType() == PlaceholderType::Normal) {
+    types.assign(getInputs().size(), shape::ShapeType::get(getContext()));
+    return types;
+  }
+
+  types.reserve(getNumOperands());
+  types.push_back(getCtx().getType());
+  llvm::append_range(types, getInputs().getTypes());
+  return types;
+}
+
 LogicalResult PlaceholderOp::verify() {
   if (getNumResults() == 0) {
-    return emitOpError("must produce at least one tensor DPS init");
+    return emitOpError("must produce at least one tensor outs operand");
   }
-
-  for (auto [inputIndex, input] : llvm::enumerate(getInputs())) {
-    if (!isAllowedShapeGraphInput(input)) {
-      return emitOpError("input ")
-             << inputIndex
-             << " must be a block argument or a result of hipsr.placeholder, "
-                "arith.constant, or hipsr.constant; got result of '"
-             << input.getDefiningOp()->getName() << "'";
-    }
+  if (failed(verifyShapeGraphInputs(*this))) {
+    return failure();
   }
-
-  Operation *consumer = nullptr;
-  for (auto [resultIndex, result] : llvm::enumerate(getResults())) {
-    OpOperand *dpsInitUse = nullptr;
-    for (OpOperand &use : result.getUses()) {
-      Operation *owner = use.getOwner();
-      if (isa<PlaceholderOp>(owner)) {
-        continue;
-      }
-
-      auto dpsOp = dyn_cast<DestinationStyleOpInterface>(owner);
-      if (!dpsOp || owner->getDialect() != getOperation()->getDialect() ||
-          !dpsOp.isDpsInit(&use)) {
-        return emitOpError("requires each result use to be a placeholder input "
-                           "or a DPS init of a hipsr operation");
-      }
-      if (dpsInitUse) {
-        return emitOpError(
-            "requires each result to initialize exactly one hipsr operation");
-      }
-      dpsInitUse = &use;
-    }
-    if (!dpsInitUse) {
-      return emitOpError(
-          "requires each result to initialize exactly one hipsr operation");
-    }
-
-    Operation *owner = dpsInitUse->getOwner();
-    auto dpsOp = cast<DestinationStyleOpInterface>(owner);
-    OpResult consumerResult = dpsOp.getTiedOpResult(dpsInitUse);
-    if (result.getType() != consumerResult.getType()) {
-      return emitOpError("result ")
-             << resultIndex << " type " << result.getType()
-             << " must match consumer result type " << consumerResult.getType();
-    }
-
-    if (consumer && consumer != owner) {
-      return emitOpError(
-          "requires all results to initialize the same hipsr operation");
-    }
-    consumer = owner;
+  if (failed(verifyResultUses(*this))) {
+    return failure();
   }
-
-  if (getBodyRegion().empty()) {
-    return success();
+  if (failed(verifyShapeRegionSignature(*this))) {
+    return failure();
   }
-
-  Block &block = *getBody();
-  if (block.getNumArguments() != getNumOperands()) {
-    return emitOpError("shape region block argument count must match operand "
-                       "count; expected ")
-           << getNumOperands() << ", got " << block.getNumArguments();
-  }
-
   return success();
 }

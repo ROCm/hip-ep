@@ -123,10 +123,10 @@ Options use MLIR's pipeline-option syntax:
 | `hip-use-output-allocator` | func.func | Rewrite returned `memref.alloc` → `hip.alloc_output` (graph outputs become EP/runtime-owned, not pooled or deallocated). |
 | `hip-fix-loop-accumulator-offset` | func.func | Rewrite frozen Concat-accumulator offsets in loop bodies to iter-driven offsets. |
 | `hip-optimize-memrefs` | func.func | HIP-specific buffer reuse / subview folding. |
-| `hip-promote-strided-operands` | func.func | Materialize contiguous temporaries for strided memref operands of `hip.*` ops. |
+| `hip-promote-strided-operands` | func.func | Materialize identity-layout temporaries for non-identity-layout DPS-input memrefs. |
 | `hip-materialize-host-scalars` | func.func | Redirect tiny host-fed scalar allocs to runtime-owned host-mapped scratch (away from the GPU pool). |
 | `hip-resolve-memref-dims` | func.func | Fold post-bufferization `memref.dim` through view/reshape chains before pool planning. |
-| `hip-hoist-alloc-size-arith` | func.func | Hoist speculatable size arithmetic above the earliest dynamic alloc (PoolAllocs precondition). |
+| `hip-hoist-alloc-size-arith` | func.func | Hoist pure size arithmetic above the earliest used alloc (PoolAllocs precondition). |
 | `hip-pool-allocs` | func.func | Pack allocations into one or more grow-on-demand GPU pools; stamp pool-planning module attributes. |
 | `hip-lower-allocs` | func.func | Replace `memref.alloc`/`dealloc` with `hip.alloc`/`hip.free`. |
 | `hip-relax-multi-dyn-expand-shape` | func.func | Rewrite multi-dynamic-per-group `memref.expand_shape` → `reinterpret_cast` before strided-metadata expansion. |
@@ -199,6 +199,7 @@ ONNX → HIP  (buildOnnxToHipPipeline)
   func.func(hip-promote-strided-operands)
   func.func(hip-materialize-host-scalars)
   func.func(hip-resolve-memref-dims)
+  func.func(cse)
   func.func(hip-hoist-alloc-size-arith)
   func.func(hip-pool-allocs)
   «slot: AfterPoolAllocs»

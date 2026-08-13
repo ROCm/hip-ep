@@ -21,6 +21,15 @@ After:   final_norm -[B, seq, H]-> Gather(idx=-1, axis=1) -[B, H]->
              Unsqueeze(axes=[1]) -[B, 1, H]-> lm_head -> logits [B, 1, vocab]
 ```
 
+The sequence dim is pinned to a static `1` not only on the graph output
+`logits`, but on **every intermediate tensor between lm_head and the output** —
+lm_head's own output plus any trailing shape-preserving op (e.g. a Gemma-style
+logit soft-cap `Div/Tanh/Mul`, or a final `Cast`). After the `Gather` those
+tensors genuinely carry a single position, so leaving their declared shape at
+the original dynamic seq symbol would be stale and ambiguous (that symbol is
+bound graph-wide to the real input length, so a shape-inference / compiler
+consumer would wrongly read `[batch, 1, vocab]` as `[batch, seq, vocab]`).
+
 The rewrite is purely structural. External weights (`*.onnx_data*`) are **never**
 rewritten — the tool loads structure only and shares the original data files.
 

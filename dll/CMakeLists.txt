@@ -35,6 +35,9 @@ set_target_properties(hip-compiler-dll PROPERTIES
     OUTPUT_NAME "hip-compiler"
 )
 
+hipdnn_ep_apply_binary_compliance(hip-compiler-dll
+    DESCRIPTION "AMD GPU Execution Provider JIT compiler")
+
 # Localize statically-linked LLVM/MLIR/clang symbols so they are not exported
 # into the global dynamic symbol table. If they are exported, ROCm's
 # libamd_comgr.so binds its own (versioned @LLVM_22.0) llvm:: references to our

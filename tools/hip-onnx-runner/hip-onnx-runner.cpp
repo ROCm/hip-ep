@@ -82,7 +82,7 @@ static void enable_compiler_mlir_dump_env() {
   set_process_env("MORPHIZEN_DEBUG_MLIR_BACKEND", "2");
   set_process_env("MORPHIZEN_SAVE_MLIR_AS_TEXT", "1");
   set_process_env("ENABLE_SAVE_GRAPH_MLIR", "1");
-  set_process_env("XLNX_ONNX_EP_VERBOSE", "2");
+  set_process_env("HIP_EP_VERBOSE", "2");
 }
 
 static std::filesystem::path

@@ -21,6 +21,7 @@ target_link_libraries(hip-mlir-opt PRIVATE
   HipDialectIR
   HipsrDialectIR
   HipsrDialectTransforms
+  HipsrDialectPipelines
   HipDialectTransforms
   HipToLLVM
   OnnxToHip

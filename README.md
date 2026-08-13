@@ -25,6 +25,7 @@ The provider integrates with ONNX Runtime through the MorphiZen pass framework. 
 |---|---|
 | Build and run on Windows | [Windows quick start](docs/quick_start.md) |
 | Build on Linux, use Docker, or download a prebuilt package | [Linux quick start](docs/quick_start_linux.md) |
+| Run on AMD Instinct MI350X (gfx950, CDNA4) | [MI350X quick start](docs/quick_start_mi350.md) |
 | Understand artifact formats | [LLVM IR vs native artifacts](docs/native-vs-ir-comparison.md) |
 | Extend the pipeline with a plugin | [Plugin authoring guide](docs/plugin_authoring.md) |
 | Contribute to the project | [Contributing guide](CONTRIBUTING.md) |

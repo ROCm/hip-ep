@@ -193,12 +193,11 @@ def OptimizeMemRefsPass : Pass<"hip-optimize-memrefs", "mlir::func::FuncOp"> {
 
 def PromoteStridedHipOperandsPass
     : Pass<"hip-promote-strided-operands", "mlir::func::FuncOp"> {
-  let summary = "Materialize contiguous temporaries for non-canonical memref "
-                "operands of hip.* ops";
+  let summary = "Materialize identity-layout temporaries for DPS-input memrefs "
+                "with non-identity layouts";
   let description = [{
-    Walks every DestinationStyleOpInterface op in the `hip` dialect.  For
-    each input (DPS-input) operand whose memref type has a non-identity
-    layout (non-zero offset or non-contiguous strides), inserts:
+    Walks every DestinationStyleOpInterface op. For each DPS-input memref with
+    a non-identity layout (a non-zero offset or non-contiguous strides), inserts:
 
     ```mlir
     %tmp = memref.alloc() : memref<...identity-layout...>
@@ -207,15 +206,18 @@ def PromoteStridedHipOperandsPass
     memref.dealloc %tmp : memref<...identity-layout...>
     ```
 
-    DPS-init (output) operands are left untouched: in this pipeline they are
-    always either fresh `memref.alloc` results or function arguments under
-    `IdentityLayoutMap`, so they are guaranteed contiguous by construction.
+    DPS-init operands are intentionally left untouched because promoting a
+    write target requires copy-back and must preserve read-before-write
+    semantics. The production pipeline normally supplies identity-layout inits
+    through fresh allocations, `hip.alloc_output`, or `IdentityLayoutMap` at
+    function boundaries.
 
     The pass exists to bridge the contract gap between the IR (which can
-    represent strided memrefs faithfully via memref.subview) and the HIP
-    runtime call ABI (which receives a single bare pointer with no offset /
-    strides channel).  Without this promotion, hip.* runtime calls silently
-    read the base of the parent buffer instead of the intended slice.
+    represent non-identity layouts faithfully) and runtime ABIs that receive a
+    bare pointer with no offset or strides. Matching the DPS interface rather
+    than a dialect or operation name covers plugin ops without dialect
+    coupling. In the ONNX-to-HIP pipeline, this pass runs after linalg cleanup;
+    the remaining DPS operations are HIP or plugin operations.
 
     Recommended pipeline position:
       hip-optimize-memrefs -> hip-promote-strided-operands -> hip-pool-allocs
@@ -229,39 +231,47 @@ def PromoteStridedHipOperandsPass
 }
 
 def PoolAllocsPass : Pass<"hip-pool-allocs", "mlir::func::FuncOp"> {
-  let summary = "Pool memref.alloc ops into a grow-on-demand i8 byte buffer";
+  let summary =
+      "Pool memref.alloc ops into per-domain grow-on-demand i8 byte buffers";
   let description = [{
-    Packs all memref.alloc ops in a single-block function into one contiguous
-    byte pool (memref<?xi8>) obtained via hip.get_pool.  Each original
-    allocation is replaced with a memref.view at a computed byte offset.
+    Packs used memref.alloc ops in a single-block function into one byte pool
+    per dominance domain. Each pool is obtained with hip.get_pool, and each
+    original allocation is replaced with a memref.view at a computed byte
+    offset.
 
     The pool size is computed as an SSA value and passed to hip.get_pool,
     which uses grow-on-demand semantics: the runtime grows the pool when the
     requested size exceeds current capacity.
 
-    Static allocations use greedy best-fit offset assignment.  Dynamic
-    allocations are bucketed by their byte-size SSA value: non-overlapping
-    lifetimes within a bucket share an offset.
+    Static allocations use greedy best-fit offset assignment. By default, each
+    dynamic allocation forms a separate lifetime group. Groups with pairwise
+    disjoint member lifetimes may share a slab across different dynamic-size
+    operands; the slab width is the runtime maximum of the group footprints.
+    Grouped mode first best-fit-packs alignment-multiple allocations with
+    SSA-identical ordered dynamic-size operands.
 
     Sub-buffer offsets are aligned to 256 bytes by default (configurable).
 
     Recommended pipeline position:
       hip-optimize-memrefs (optional) -> hip-pool-allocs -> hip-lower-allocs
 
-    Emission strategy:
-      Per-bucket size arithmetic and the pool acquisition are anchored at
-      the latest legal point in the block — after every dyn-operand def
-      and before the earliest pooled alloc. No code motion, no hoist
-      whitelist, no reshape pre-folds. See `findLatestLegalInsertionPoint`
-      in PoolAllocs.cpp for the helper that picks the point.
+    Dynamic size arithmetic and pool acquisition are emitted after their SSA
+    dependencies and before every allocation in the corresponding domain.
   }];
   let options = [
     Option<"alignment", "alignment", "int64_t", /*default=*/"256",
            "Sub-buffer byte offset alignment (must be power of 2)">,
     Option<"emitFragmentationReport", "emit-fragmentation-report", "bool",
            /*default=*/"false",
-           "Debug-only: emit a per-domain remark comparing the packed pool "
-           "size to the max-load lower bound. No effect on generated code.">
+           "Debug-only: emit per-domain packing remarks with lower-bound "
+           "comparisons where representable. No effect on generated code.">,
+    Option<"lifetimeOnly", "lifetime-only", "bool", /*default=*/"true",
+           "Default: treat each dynamic alloc as a separate lifetime group. "
+           "This permits slab reuse across different dynamic-size operands but "
+           "does not pack gaps among allocs with identical operands. Set false "
+           "to best-fit-pack alignment-multiple allocs with SSA-identical "
+           "ordered dynamic-size operands before slab assignment; other allocs "
+           "use per-size bins.">
   ];
   let dependentDialects = [
     "mlir::hip::HipDialect",
@@ -272,17 +282,15 @@ def PoolAllocsPass : Pass<"hip-pool-allocs", "mlir::func::FuncOp"> {
 
 def HoistAllocSizeArithPass
     : Pass<"hip-hoist-alloc-size-arith", "mlir::func::FuncOp"> {
-  let summary = "Hoist speculatable size arithmetic feeding memref.alloc dynamic "
-                "operands above the earliest dynamic memref.alloc in the entry "
+  let summary = "Hoist pure size arithmetic feeding memref.alloc dynamic "
+                "operands above the earliest used memref.alloc in the entry "
                 "block";
   let description = [{
-    Hoists speculatable producers of `memref.alloc` dynamic operands to a
-    point above the earliest dynamic `memref.alloc` in the function's
-    single entry block.  After this pass, every dynamic alloc's
-    dyn-operand SSA values dominate the earliest dynamic alloc — which is
-    exactly the precondition `--hip-pool-allocs` needs to anchor its
-    bucket-size arithmetic and `hip.get_pool` at a single-block-dominant
-    point.
+    Hoists pure producers of `memref.alloc` dynamic operands to a
+    point above the earliest used `memref.alloc` in the function's single entry
+    block. After this pass, every hoistable dynamic-size value dominates every
+    allocation that `--hip-pool-allocs` may absorb, allowing pool-size
+    arithmetic and `hip.get_pool` to share one insertion point.
 
     Algorithm
     ---------
@@ -290,16 +298,16 @@ def HoistAllocSizeArithPass
     multi-block functions are skipped.  Only entry-block allocs are
     considered — allocs nested inside region-carrying ops are untouched.
 
-    1. Collect every entry-block `memref.alloc` with at least one dynamic
-       operand.
-    2. Pick `earliestAlloc` = the one earliest in the block (per
+    1. Collect every used entry-block `memref.alloc`, and identify those with
+       dynamic operands.
+    2. Pick `earliestAlloc` = the earliest used allocation in the block (per
        `Operation::isBeforeInBlock`).
     3. For each dynamic alloc, walk SSA backward from each of its dynamic
        operands.  An op is hoistable when:
          - it is in the entry block,
          - it is below `earliestAlloc` (otherwise it already dominates),
          - it is not a `memref.alloc` / `memref.alloca`,
-         - it satisfies `mlir::isSpeculatable(op)`,
+         - it has no regions and satisfies `mlir::isPure(op)`,
          - and every transitive operand is itself hoistable (or already
            dominates `earliestAlloc`).
     4. Topologically sorted (operands before uses), each hoistable op is
@@ -308,15 +316,13 @@ def HoistAllocSizeArithPass
        prior moves up by one slot — final layout has the deepest operands
        at the top of the hoist region.
 
-    Why "speculatable" is the right predicate
-    -----------------------------------------
-    `mlir::isSpeculatable` checks for both side effects AND undefined
-    behaviour.  Conditionally-speculatable ops (`arith.divsi`, `arith.divui`)
-    return false unless their divisor is a known-non-zero constant — so
-    hoisting them across a runtime guard cannot expose UB earlier.  This
-    is the same predicate upstream MLIR's LICM uses, and it admits new
-    arith ops automatically as the dialect evolves (vs. an explicit
-    allow-list that has to be maintained by hand).
+    Why "pure" is the right predicate
+    ---------------------------------
+    `mlir::isPure` requires both speculatability and freedom from memory
+    effects, matching upstream MLIR's LICM. Conditionally-speculatable ops
+    (`arith.divsi`, `arith.divui`) move only when their interface proves
+    speculation safe. Region-bearing operations are rejected because their
+    regions may capture values not listed as parent-op operands.
 
     Pipeline placement
     ------------------
@@ -326,12 +332,12 @@ def HoistAllocSizeArithPass
     into a `memref.view` over host scratch are visible (we will not try
     to hoist their producers).  Running before pool-allocs means
     pool-allocs sees IR where every dynamic alloc's operand chain has
-    already been pulled above the earliest dynamic alloc.
+    already been pulled above the earliest used alloc when safe.
 
     Why a separate pass (vs. an internal phase of pool-allocs)
     ----------------------------------------------------------
     `--hip-pool-allocs` deliberately does not move ops or fold shape
-    queries internally; it only places `hip.get_pool` + bucket-size
+    queries internally; it only places `hip.get_pool` + pool-size
     arithmetic at a single dominator point.  Keeping the hoist as a
     standalone, separately-named pass — composed via the pipeline rather
     than embedded in pool-allocs — keeps each pass single-purpose and is
@@ -352,7 +358,7 @@ def HoistAllocSizeArithPass
     Example IR (canonical case after bufferisation)
     ------------------------------------------------------------
 
-    Before — `%6` and `%7` are speculatable but live below `%alloc`,
+    Before — `%6` and `%7` are pure but live below `%alloc`,
     blocking single-block dominator-emit:
 
     ```mlir
@@ -365,8 +371,8 @@ def HoistAllocSizeArithPass
     %alloc_6 = memref.alloc(%7) : memref<3x?xi64>
     ```
 
-    After — `%6` and `%7` hoisted to just before `%alloc`; original
-    locations now live above the earliest dynamic alloc:
+    After — `%6` and `%7` hoisted to just before `%alloc`; original locations
+    now live above the earliest used alloc:
 
     ```mlir
     %dim   = memref.dim %arg, %c0 : memref<?x?xi64>
@@ -544,13 +550,14 @@ def ResolveMemRefDimsPass
     function argument).
 
     The strided views that pin these queries are created during bufferization
-    and by `--hip-promote-strided-hip-operands`, i.e. after resolve-tensor-dims
+    and by `--hip-promote-strided-operands`, i.e. after resolve-tensor-dims
     ran, so the patterns had nothing to fold then. Re-rooting the size to a
     block-top arg dim lets `--hip-hoist-alloc-size-arith` lift it, so
     `--hip-pool-allocs` shares one pool across many allocs instead of splitting
     a dominance domain per alloc. Placement: after promote-strided-operands /
-    materialize-host-scalars, before hoist-alloc-size-arith / pool-allocs.
-    Idempotent. See ResolveMemRefDims.cpp for the before/after IR.
+    materialize-host-scalars, before the final CSE / hoist-alloc-size-arith /
+    pool-allocs sequence. Idempotent. See ResolveMemRefDims.cpp for the
+    before/after IR.
   }];
   let dependentDialects = [
     "mlir::affine::AffineDialect",

@@ -33,7 +33,7 @@ def Hipsr_MatMulOp : Hipsr_DpsOp<"matmul"> {
     `(` $ctx `)`
     `ins` `(` $A `,` $B `:` type($A) `,` type($B) `)`
     `outs` `(` $init `:` type($init) `)`
-    attr-dict (`:` type($result_tensors)^)? (`shape_region` $shape_region^)?
+    attr-dict (`:` type($result_tensors)^)?
   }];
 
   // Rejects rank-0 (scalar) A/B: matmul needs at least a contraction dim.

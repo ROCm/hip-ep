@@ -4,8 +4,10 @@
 ##
 
 add_library(HipsrDialectTransforms STATIC
+  BufferizableOpInterfaceImpl.cpp
   ExternalizeConstants.cpp
   HipsrPoolAllocPass.cpp
+  MaterializeInitTensorsPass.cpp
   PartitionPoolDomains.cpp
   PopulateShapeRegionPass.cpp
 )
@@ -18,11 +20,13 @@ add_dependencies(HipsrDialectTransforms
 target_link_libraries(HipsrDialectTransforms PUBLIC
   HipsrDialectIR
   HipConstantsIO  # writeConstantsBinToFileSystem / ConstantEntry
+  MLIRBufferizationDialect  # BufferizableOpInterface models
   MLIRPass
   MLIRTransformUtils
   MLIRFuncDialect
   MLIRArithDialect
   MLIRMemRefDialect
+  MLIRSCFDialect
   MLIRShapeDialect
   MLIRTensorDialect
   MLIRIR

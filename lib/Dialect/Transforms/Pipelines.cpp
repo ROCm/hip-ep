@@ -64,13 +64,18 @@ void addPluginPassesForSlot(OpPassManager &pm,
 /// Add shape normalizations used only to improve hip-pool-allocs:
 ///   - resolve-memref-dims folds `memref.dim` through view chains to the root
 ///     buffer.
-///   - hoist-alloc-size-arith moves size computations above the first dynamic
+///   - CSE removes repeated size queries exposed by late allocation rewrites.
+///   - hoist-alloc-size-arith moves pure size computations above the first used
 ///     allocation.
-/// Omitting either preserves correctness but may split allocations into more
-/// dominance domains and increase peak memory. Run these after view creation
-/// and immediately before pooling.
+/// Omitting these steps preserves correctness but may split allocations into
+/// more dominance domains and increase peak memory. Run these after view
+/// creation and immediately before pooling.
 void addPoolAllocsShapePreconditionPasses(OpPassManager &pm) {
   pm.addNestedPass<func::FuncOp>(mlir::hip::createResolveMemRefDimsPass());
+  // Allocation and view rewrites run after the pipeline's earlier CSE and may
+  // leave repeated memref.dim queries on the same source. Deduplicate them
+  // before hoisting so equivalent sizes do not open separate pool domains.
+  pm.addNestedPass<func::FuncOp>(mlir::createCSEPass());
   pm.addNestedPass<func::FuncOp>(mlir::hip::createHoistAllocSizeArithPass());
 }
 
@@ -245,14 +250,12 @@ static void buildOnnxToHipPipelineTail(OpPassManager &pm) {
   //     before pooling (6a and 6b).
   //   - Shape preconditions used only to improve pool quality (grouped in 6c).
 
-  // 6a. Correctness/ABI: promote strided memref operands of hip.* ops to
-  //     contiguous temporaries. The HIP runtime ABI (--convert-hip-to-llvm)
-  //     forwards only a bare aligned pointer per memref, with no offset or
-  //     stride metadata; otherwise, a hip.* op fed a `memref.subview` would
-  //     read the parent buffer's base instead of the slice. Runs after
-  //     OptimizeMemRefs to avoid competing subview rewrites and before pooling
-  //     so the new temporaries become pool views rather than per-inference
-  //     allocations.
+  // 6a. Correctness/ABI: materialize identity-layout temporaries for
+  //     non-identity-layout DPS-input memrefs. The interface-based selection
+  //     covers plugin ops whose bare-pointer runtime ABI carries no descriptor
+  //     offset or strides. Runs after linalg cleanup and OptimizeMemRefs, and
+  //     before pooling so the temporaries become pool views rather than
+  //     per-inference allocations.
   pm.addNestedPass<func::FuncOp>(
       mlir::hip::createPromoteStridedHipOperandsPass());
 

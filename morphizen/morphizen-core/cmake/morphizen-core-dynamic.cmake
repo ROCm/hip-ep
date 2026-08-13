@@ -7,12 +7,17 @@
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/generate_version_header.cmake)
 generate_version_info_header()
 
-add_library(${morphizen_CORE_DYNAMIC_UNIQUE_ID} SHARED src/main.cpp ${ryzenai_version_rc_file})
+add_library(${morphizen_CORE_DYNAMIC_UNIQUE_ID} SHARED src/main.cpp)
 message(STATUS "create target ${morphizen_CORE_DYNAMIC_UNIQUE_ID} for onnxruntime_vitisai_ep.dll")
 add_library (morphizen::${morphizen_CORE_DYNAMIC_UNIQUE_ID} ALIAS ${morphizen_CORE_DYNAMIC_UNIQUE_ID})
 set_target_properties(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PROPERTIES FOLDER morphizen)
 # set output name of ${morphizen_CORE_DYNAMIC_UNIQUE_ID}, it is required by MorphiZen EP.
 set_target_properties(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PROPERTIES OUTPUT_NAME ${morphizen_OUTPUT_NAME})
+
+if(COMMAND hipdnn_ep_apply_binary_compliance)
+  hipdnn_ep_apply_binary_compliance(${morphizen_CORE_DYNAMIC_UNIQUE_ID}
+    DESCRIPTION "AMD GPU Execution Provider for ONNX Runtime")
+endif()
 
 if(MSVC)
   if(morphizen_ENABLE_ORT_BRIDGE)
@@ -76,7 +81,7 @@ endif()
 set_target_properties(${morphizen_CORE_DYNAMIC_UNIQUE_ID} PROPERTIES
   VS_DEBUGGER_COMMAND "${CMAKE_INSTALL_PREFIX}\\bin\\test_onnx_runner.exe"
   VS_DEBUGGER_COMMAND_ARGUMENTS "${CMAKE_CURRENT_SOURCE_DIR}\\..\\..\\test_onnx_runner\\data\\pt_resnet50.onnx"
-  VS_DEBUGGER_ENVIRONMENT "XLNX_ONNX_EP_VERBOSE=2
+  VS_DEBUGGER_ENVIRONMENT "HIP_EP_VERBOSE=2
 DEBUG_LOG_LEVEL=info
 DEBUG_MORPHIZEN_PASS=1
 MORPHIZEN_DEBUG_TAR_ENTRY=1
