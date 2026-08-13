@@ -1,8 +1,6 @@
 // Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-// UNSUPPORTED: true
-//
 // convert-onnx-to-hipsr: onnx.Constant -> hipsr.constant / arith.constant.
 // Four branches keyed on storage form (no size threshold here):
 //   rank-0 scalar          -> arith.constant (compile-time)
@@ -11,7 +9,7 @@
 //   other location path    -> hipsr.constant {file_source}
 // onnx.Constant is written in generic form so no onnx dialect is required.
 
-// RUN: hip-mlir-opt --convert-onnx-to-hipsr %s | FileCheck %s
+// RUN: hip-mlir-opt --convert-onnx-to-hipsr --split-input-file %s | FileCheck %s
 
 // CHECK-LABEL: func.func @scalar_const
 func.func @scalar_const() -> tensor<f32> {
