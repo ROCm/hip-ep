@@ -111,7 +111,8 @@ OpOperand *getDestinationOf(ComputeOp computeOp, unsigned resultIndex) {
   return &computeOp->getOpOperand(outputs.getBeginOperandIndex() + resultIndex);
 }
 
-// Returns true if the buffer underlying `value` or any of its aliases is written.
+// Returns true if the buffer underlying `value` or any of its aliases is
+// written.
 bool isValueWritten(Value value, const AnalysisState &state) {
   SmallVector<OpOperand *> worklist;
   DenseSet<OpOperand *> visited;
@@ -337,25 +338,6 @@ PoolDomainYieldOp getYieldOp(PoolDomainOp domainOp) {
   return cast<PoolDomainYieldOp>(domainOp.getBody().front().getTerminator());
 }
 
-// Rewrite `to_buffer(bridge)` into the buffer the bridge wraps, then drop the
-// bridges left without users. A bridge stays when its user asked for a
-// different buffer type, since removing it there would need a cast.
-void foldBridges(RewriterBase &rewriter, ArrayRef<ToTensorOp> bridges) {
-  for (ToTensorOp bridge : bridges) {
-    Value buffer = bridge.getBuffer();
-    SmallVector<ToBufferOp> redundantOps;
-    for (Operation *user : bridge.getResult().getUsers()) {
-      auto toBufferOp = dyn_cast<ToBufferOp>(user);
-      if (toBufferOp && toBufferOp.getResult().getType() == buffer.getType())
-        redundantOps.push_back(toBufferOp);
-    }
-    for (ToBufferOp toBufferOp : redundantOps)
-      rewriter.replaceOp(toBufferOp, buffer);
-    if (bridge.getResult().use_empty())
-      rewriter.eraseOp(bridge);
-  }
-}
-
 struct PoolDomainOpBufferization
     : public BufferizableOpInterface::ExternalModel<PoolDomainOpBufferization,
                                                     PoolDomainOp> {
@@ -451,7 +433,7 @@ struct PoolDomainOpBufferization
       if (isa<TensorType>(oldArgument.getType())) {
         argumentReplacements.push_back(
             ToTensorOp::create(rewriter, oldArgument.getLoc(),
-                                oldArgument.getType(), newArgument)
+                               oldArgument.getType(), newArgument)
                 .getResult());
       } else {
         argumentReplacements.push_back(newArgument);
