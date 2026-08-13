@@ -23,28 +23,21 @@ def Hipsr_ComputeOp : Hipsr_Op<"compute", [
   ]> {
   let summary = "Group a multi-operation computation as one non-DPS op";
   let description = [{
-    Groups the ops that implement one high-level computation, so an ONNX op
-    that lowers to several tensor or shape ops still appears as a single hipsr
-    op. Without the grouping those intermediates sit in the enclosing block,
-    where a later `hipsr.placeholder` may not take them as inputs. `ctx`, the
-    inputs, and the outputs enter the isolated body as entry-block arguments,
-    in that order.
+    Groups the ops of one high-level computation into a single hipsr op, so an
+    ONNX op that lowers to several tensor or shape ops stays one op here. The
+    isolated body takes `ctx`, then the inputs, then the outputs as its block
+    arguments, and `hipsr.compute_yield` returns the results.
 
-    This is not a DPS op: an `outs` entry supplies the destination buffer for
-    the result in the same position, but its type may differ from that
-    result's. Result types
-    come from `hipsr.compute_yield`; the `outs` values come from
-    `hipsr.placeholder`, which owns the output-shape computation, so this op
-    has no shape region of its own. Operands and results accept ranked tensors
-    or memrefs (with or without a `#hipsr.mem<...>` space). A bufferized
-    compute has no results and yields nothing.
+    An `outs` entry names where the result in the same position is stored. Its
+    type need not match that result's, so the body may yield a reshaped or cast
+    view of it.
 
-    Each result is held in the buffer its `outs` entry names: the yielded value
-    has to be that entry seen through producers that keep a whole buffer --
-    reshapes, casts, destination-passing writes.
+    Operands and results are tensors before bufferization and device memrefs
+    (`#hipsr.mem<device>`) after. A bufferized compute has no results and
+    yields nothing.
 
-    Example (the body flattens its destination, so the result type differs
-    from `outs`):
+    Example, where the body fills its output and then flattens it, so the
+    result type differs:
     ```mlir
     %out = hipsr.compute(%ctx) ins(%data : tensor<2x3xf16>)
                                outs(%init : tensor<2x3xf16>) {

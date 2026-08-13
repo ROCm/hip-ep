@@ -145,32 +145,6 @@ func.func @memref_form_with_result(%ctx: !hipsr.context,
 }
 
 // -----
-// A memref needs no memory space here. Bufferizing a tensor boundary yields
-// plain memrefs, because One-Shot Bufferize has no space to assign; the op
-// takes them so that form stays legal until a later stage names the space.
-// CHECK-LABEL: func.func @unspaced_memref_form(
-// CHECK-SAME: %[[CTX:.+]]: !hipsr.context, %[[DATA:.+]]: memref<2x3xf16>, %[[INIT:.+]]: memref<6xf16>) -> memref<6xf16> {
-// CHECK-NEXT: %[[RESULT:.+]] = hipsr.compute(%[[CTX]]) ins(%[[DATA]] : memref<2x3xf16>) outs(%[[INIT]] : memref<6xf16>) {
-// CHECK-NEXT: ^bb0(%[[BODY_CTX:.+]]: !hipsr.context, %[[IN:.+]]: memref<2x3xf16>, %[[DEST:.+]]: memref<6xf16>):
-// CHECK-NEXT: %[[FLAT:.+]] = memref.collapse_shape %[[IN]] {{\[\[}}0, 1]] : memref<2x3xf16> into memref<6xf16>
-// CHECK-NEXT: hipsr.compute_yield %[[FLAT]] : memref<6xf16>
-// CHECK-NEXT: } : memref<6xf16>{{$}}
-// CHECK-NEXT: return %[[RESULT]] : memref<6xf16>
-// CHECK-NEXT: }
-func.func @unspaced_memref_form(%ctx: !hipsr.context,
-                                %data: memref<2x3xf16>,
-                                %init: memref<6xf16>) -> memref<6xf16> {
-  %out = hipsr.compute(%ctx) ins(%data : memref<2x3xf16>)
-                             outs(%init : memref<6xf16>) {
-  ^bb0(%body_ctx: !hipsr.context, %in: memref<2x3xf16>, %dest: memref<6xf16>):
-    %flat = memref.collapse_shape %in [[0, 1]]
-        : memref<2x3xf16> into memref<6xf16>
-    hipsr.compute_yield %flat : memref<6xf16>
-  } : memref<6xf16>
-  return %out : memref<6xf16>
-}
-
-// -----
 // The generic form is invalid because the body has no block.
 func.func @empty_body(%ctx: !hipsr.context) {
   // expected-error @+1 {{failed to verify constraint: region with 1 blocks}}
@@ -269,7 +243,7 @@ func.func @body_uses_parent_value(%ctx: !hipsr.context, %init: tensor<6xf16>) {
 // -----
 // Inputs carry tensor data, so a scalar cannot cross the boundary.
 func.func @non_tensor_input(%ctx: !hipsr.context, %n: index) {
-  // expected-error @+1 {{operand #1 must be variadic of ranked tensor or memref, but got 'index'}}
+  // expected-error @+1 {{operand #1 must be variadic of ranked tensor or device memref, but got 'index'}}
   hipsr.compute(%ctx) ins(%n : index) outs() {
   ^bb0(%body_ctx: !hipsr.context, %extent: index):
     hipsr.compute_yield
