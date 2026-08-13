@@ -35,7 +35,7 @@ def Hipsr_PreserveShapeOp : Hipsr_Op<"preserve_shape",
     `$shape` has the same rank as `$data`.
   }];
 
-  let arguments = (ins Shape_ShapeType:$shape, Hipsr_TensorOrMemRef:$data);
+  let arguments = (ins Shape_ShapeType:$shape, Hipsr_DeviceTensorOrMemRef:$data);
   let results = (outs);
 
   let assemblyFormat = "$shape `,` $data attr-dict `:` type($data)";

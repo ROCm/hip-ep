@@ -54,12 +54,12 @@ def Hipsr_ComputeOp : Hipsr_Op<"compute", [
 
   let arguments = (ins
     Hipsr_ContextType:$ctx,
-    Variadic<Hipsr_TensorOrDeviceMemRef>:$inputs,
-    Variadic<Hipsr_TensorOrDeviceMemRef>:$outputs
+    Variadic<Hipsr_DeviceTensorOrMemRef>:$inputs,
+    Variadic<Hipsr_DeviceTensorOrMemRef>:$outputs
   );
   // Named after linalg's $result_tensors, which is also the pre-bufferization
   // form; a bufferized compute holds memrefs here.
-  let results = (outs Variadic<Hipsr_TensorOrDeviceMemRef>:$result_tensors);
+  let results = (outs Variadic<Hipsr_DeviceTensorOrMemRef>:$result_tensors);
   let regions = (region SizedRegion<1>:$body);
 
   let assemblyFormat = [{
