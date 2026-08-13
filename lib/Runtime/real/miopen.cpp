@@ -152,9 +152,29 @@ struct ConvTableEntry {
   miopenTensorDescriptor_t weights_desc = nullptr;
   miopenTensorDescriptor_t output_desc = nullptr;
   miopenConvolutionDescriptor_t conv_desc = nullptr;
+  miopenProblem_t problem = nullptr;
   miopenSolution_t solution = nullptr;
-  void *workspace;
-  size_t workspaceSize;
+  void *workspace = nullptr;
+  size_t workspaceSize = 0;
+
+  ConvTableEntry() = default;
+
+  // Disable copy
+  ConvTableEntry(const ConvTableEntry &other) = delete;
+  ConvTableEntry &operator=(const ConvTableEntry &other) = delete;
+
+  // Enable move
+  ConvTableEntry(ConvTableEntry &&other) {
+    std::swap(input_desc, other.input_desc);
+    std::swap(weights_desc, other.weights_desc);
+    std::swap(output_desc, other.output_desc);
+    std::swap(conv_desc, other.conv_desc);
+    std::swap(problem, other.problem);
+    std::swap(solution, other.solution);
+    std::swap(workspace, other.workspace);
+    std::swap(workspaceSize, other.workspaceSize);
+  }
+  ConvTableEntry &operator=(ConvTableEntry &&other) = delete;
 
   ~ConvTableEntry() {
     if (input_desc)
@@ -165,6 +185,8 @@ struct ConvTableEntry {
       miopenDestroyTensorDescriptor(output_desc);
     if (conv_desc)
       miopenDestroyConvolutionDescriptor(conv_desc);
+    if (problem)
+      miopenDestroyProblem(problem);
     if (solution)
       miopenDestroySolution(solution);
     if (workspace)
@@ -194,6 +216,7 @@ struct ConvKeyHash {
     hash_combine_val(h, key.dilation_w);
     hash_combine_val(h, key.group);
     hash_combine_val(h, key.data_type);
+    return h;
   }
 };
 
@@ -230,7 +253,6 @@ queryOrCreateConv(ConvTable &table, const ConvTableKey &key,
   int result = 0;
 
   ConvTableEntry entry;
-  miopenProblem_t convProblem;
   miopenFindOptions_t options;
   size_t foundSolutions;
 
@@ -284,14 +306,14 @@ queryOrCreateConv(ConvTable &table, const ConvTableKey &key,
   }
 
   // Find API
-  MIOPEN_CHECK(miopenCreateConvProblem(&convProblem, entry.conv_desc,
+  MIOPEN_CHECK(miopenCreateConvProblem(&entry.problem, entry.conv_desc,
                                        miopenProblemDirectionForward));
   MIOPEN_CHECK(miopenSetProblemTensorDescriptor(
-      convProblem, miopenTensorConvolutionX, entry.input_desc));
+      entry.problem, miopenTensorConvolutionX, entry.input_desc));
   MIOPEN_CHECK(miopenSetProblemTensorDescriptor(
-      convProblem, miopenTensorConvolutionW, entry.weights_desc));
+      entry.problem, miopenTensorConvolutionW, entry.weights_desc));
   MIOPEN_CHECK(miopenSetProblemTensorDescriptor(
-      convProblem, miopenTensorConvolutionY, entry.output_desc));
+      entry.problem, miopenTensorConvolutionY, entry.output_desc));
 
   MIOPEN_CHECK(miopenCreateFindOptions(&options));
   MIOPEN_CHECK(miopenSetFindOptionTuning(options, 1));
@@ -304,7 +326,7 @@ queryOrCreateConv(ConvTable &table, const ConvTableKey &key,
   MIOPEN_CHECK(miopenSetFindOptionPreallocatedTensor(
       options, miopenTensorConvolutionY, output));
 
-  MIOPEN_CHECK(miopenFindSolutions(miopen_handle, convProblem, options,
+  MIOPEN_CHECK(miopenFindSolutions(miopen_handle, entry.problem, options,
                                    &entry.solution, &foundSolutions, 1));
   if (foundSolutions == 0 || entry.solution == nullptr) {
     return nullptr;
@@ -316,7 +338,6 @@ queryOrCreateConv(ConvTable &table, const ConvTableKey &key,
     HIP_CHECK(hipMalloc(&entry.workspace, entry.workspaceSize));
 
   MIOPEN_CHECK(miopenDestroyFindOptions(options));
-  MIOPEN_CHECK(miopenDestroyProblem(convProblem));
 
   {
     auto [ins, _] = table.map.emplace(key, std::move(entry));
@@ -409,7 +430,7 @@ int wrap_miopenConvolutionForward(
 
   const ConvTableEntry *entry =
       queryOrCreateConv(*os->table, key, miopen_handle, input, weights, output);
-  if (entry->solution == nullptr) {
+  if (!entry || !entry->solution) {
     fprintf(stderr, "wrap_miopenOpTensor: missing solution for problem\n");
     return -1;
   }
