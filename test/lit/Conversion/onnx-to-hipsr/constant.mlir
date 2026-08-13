@@ -22,8 +22,8 @@ func.func @inline_const() -> tensor<4xf32> {
 
 // -----
 
-// CHECK-LABEL: func.func @mem_source_const
-func.func @mem_source_const() -> tensor<2x4xf32> {
+// CHECK-LABEL: func.func @mem_resource_const
+func.func @mem_resource_const() -> tensor<2x4xf32> {
   // CHECK: hipsr.constant {value = dense_resource<"mem|0x7ff620910000"> : tensor<2x4xf32>} : tensor<2x4xf32>
   %0 = "onnx.Constant"() {location = "*/_ORT_MEM_ADDR_/*", offset = 140695085056000 : i64, size = 32 : i64} : () -> tensor<2x4xf32>
   return %0 : tensor<2x4xf32>
@@ -31,8 +31,8 @@ func.func @mem_source_const() -> tensor<2x4xf32> {
 
 // -----
 
-// CHECK-LABEL: func.func @file_source_const
-func.func @file_source_const() -> tensor<4xi8> {
+// CHECK-LABEL: func.func @file_resource_const
+func.func @file_resource_const() -> tensor<4xi8> {
   // CHECK: hipsr.constant {value = dense_resource<"file|w.bin|4"> : tensor<4xi8>} : tensor<4xi8>
   %0 = "onnx.Constant"() {location = "w.bin", offset = 4 : i64, size = 4 : i64} : () -> tensor<4xi8>
   return %0 : tensor<4xi8>
