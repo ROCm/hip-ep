@@ -18,6 +18,18 @@
 namespace mlir {
 namespace hip {
 
+bool isResultTypeCompatibleWithInferredShape(
+    mlir::RankedTensorType resultType, llvm::ArrayRef<int64_t> inferredShape) {
+  if (resultType.getRank() != static_cast<int64_t>(inferredShape.size()))
+    return false;
+  for (auto [actual, inferred] :
+       llvm::zip_equal(resultType.getShape(), inferredShape)) {
+    if (!mlir::ShapedType::isDynamic(actual) && actual != inferred)
+      return false;
+  }
+  return true;
+}
+
 mlir::FailureOr<mlir::Value> createEmptyTensorFromReifiedShape(
     mlir::OpBuilder &builder, mlir::Location loc,
     mlir::RankedTensorType resultType,
@@ -51,6 +63,24 @@ mlir::FailureOr<mlir::Value>
 createBroadcastEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
                            mlir::RankedTensorType resultType,
                            mlir::ValueRange operands) {
+  llvm::SmallVector<llvm::ArrayRef<int64_t>> staticShapes;
+  staticShapes.reserve(operands.size());
+  for (mlir::Value operand : operands) {
+    auto ranked = mlir::dyn_cast<mlir::RankedTensorType>(operand.getType());
+    if (!ranked)
+      return mlir::failure();
+    staticShapes.push_back(ranked.getShape());
+  }
+
+  // Complete all fallible static checks before reification emits tensor.dim or
+  // broadcast-selection IR.
+  mlir::FailureOr<llvm::SmallVector<int64_t>> inferredShape =
+      mlir::hip::inferBroadcastShape(staticShapes,
+                                     [&] { return mlir::emitError(loc); });
+  if (mlir::failed(inferredShape) ||
+      !isResultTypeCompatibleWithInferredShape(resultType, *inferredShape))
+    return mlir::failure();
+
   mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>> shape =
       mlir::hip::reifyBroadcastResultShape(
           builder, loc, operands, [&] { return mlir::emitError(loc); });

@@ -54,9 +54,9 @@ HipDpsOp::reifyResultShapes(OpBuilder &b,
            << inits.size() << " init(s) for " << op->getNumResults()
            << " result(s)";
 
-  reified.reserve(op->getNumResults());
+  // Validate every result/init pair before getMixedSizes emits tensor.dim.
+  // Failure must leave the IR unchanged and the reified output list empty.
   for (auto [idx, result, out] : llvm::enumerate(op->getResults(), inits)) {
-    SmallVector<OpFoldResult> dims;
     Type resultType = result.getType();
     Type outType = out.getType();
     if (!isa<RankedTensorType>(resultType))
@@ -65,7 +65,12 @@ HipDpsOp::reifyResultShapes(OpBuilder &b,
     if (!isa<RankedTensorType>(outType))
       return op->emitOpError("invalid tensor-mode DPS init #")
              << idx << ": expected ranked tensor, got " << outType;
-    dims = tensor::getMixedSizes(b, op->getLoc(), out);
+  }
+
+  reified.reserve(op->getNumResults());
+  for (Value out : inits) {
+    SmallVector<OpFoldResult> dims =
+        tensor::getMixedSizes(b, op->getLoc(), out);
     reified.emplace_back(std::move(dims));
   }
   return success();

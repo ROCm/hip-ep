@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 // RUN: hip-mlir-opt --resolve-shaped-type-result-dims %s | FileCheck %s
-// RUN: hip-mlir-opt --test-hip-dps-default-reify %s | FileCheck %s --check-prefix=MEMREF
+// RUN: hip-mlir-opt --verify-each=0 --test-hip-dps-default-reify %s 2>&1 | FileCheck %s --check-prefix=MEMREF
 
 // What this file tests
 // --------------------
@@ -109,4 +109,43 @@ func.func @default_reify_memref_mode(%ctx: !hip.context,
                 outs(%y : memref<2x8xf32>)
                 {"test.default_reify"}
   return
+}
+
+// -----
+
+// Rank-zero success is one reified result with an empty dimension vector, not
+// failure and not an empty result list.
+// MEMREF: hip.where
+// MEMREF-SAME: test.rank_zero_reified
+func.func @rank_zero_reify(%ctx: !hip.context, %cond: tensor<i1>,
+                           %x: tensor<f32>, %y: tensor<f32>,
+                           %out: tensor<f32>) -> tensor<f32> {
+  %result = hip.where(%ctx)
+      ins(%cond, %x, %y : tensor<i1>, tensor<f32>, tensor<f32>)
+      outs(%out : tensor<f32>)
+      {test.reify_rank_zero} : tensor<f32>
+  return %result : tensor<f32>
+}
+
+// -----
+
+// A malformed later result must be diagnosed before the dynamic first output
+// emits tensor.dim. The test pass temporarily changes result/init #1 to i32,
+// invokes the shared default, and restores the valid types afterward.
+// MEMREF: hip.layer_norm
+// MEMREF-SAME: test.default_reify_failure_atomic_passed
+func.func @default_reify_second_result_failure(
+    %ctx: !hip.context, %input: tensor<?x?xf16>, %scale: tensor<?xf16>,
+    %out: tensor<?x?xf16>, %mean: tensor<?x?xf32>,
+    %inv_std: tensor<?x?xf32>)
+    -> (tensor<?x?xf16>, tensor<?x?xf32>, tensor<?x?xf32>) {
+  %result:3 = hip.layer_norm(%ctx)
+      ins(%input, %scale : tensor<?x?xf16>, tensor<?xf16>)
+      outs(%out, %mean, %inv_std :
+           tensor<?x?xf16>, tensor<?x?xf32>, tensor<?x?xf32>)
+      {axis = -1 : i64, epsilon = 9.99999974e-06 : f32,
+       stash_type = 1 : i64, test.default_reify_failure_atomic}
+      : tensor<?x?xf16>, tensor<?x?xf32>, tensor<?x?xf32>
+  return %result#0, %result#1, %result#2 :
+      tensor<?x?xf16>, tensor<?x?xf32>, tensor<?x?xf32>
 }
