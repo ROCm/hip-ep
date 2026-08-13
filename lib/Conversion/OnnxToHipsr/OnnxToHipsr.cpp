@@ -84,8 +84,12 @@ struct ConvertOnnxToHipsrPass
     target.addLegalDialect<HipsrDialect>();
     target.addLegalOp<ModuleOp, func::FuncOp, func::ReturnOp>();
     target.addLegalOp<arith::ConstantOp>();
+    // Helper operations are legal inside the hipsr regions that own them: a
+    // compute body, and the shape region of a placeholder a conversion
+    // populated itself.
     target.markUnknownOpDynamicallyLegal([](Operation *op) {
-      return op->getParentOfType<ComputeOp>() != nullptr;
+      return op->getParentOfType<ComputeOp>() != nullptr ||
+             op->getParentOfType<PlaceholderOp>() != nullptr;
     });
 
     RewritePatternSet patterns(&getContext());
@@ -93,6 +97,7 @@ struct ConvertOnnxToHipsrPass
     populateCastConversionPatterns(patterns, &getContext());
     populateMatMulConversionPatterns(patterns, &getContext());
     populateExpandConversionPatterns(patterns, &getContext());
+    populateShapeConversionPatterns(patterns, &getContext());
     populateReturnConversionPatterns(patterns, &getContext());
 
     if (failed(applyFullConversion(module, target, std::move(patterns)))) {

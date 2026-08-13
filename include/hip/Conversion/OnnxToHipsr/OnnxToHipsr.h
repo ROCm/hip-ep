@@ -33,6 +33,13 @@ void populateMatMulConversionPatterns(::mlir::RewritePatternSet &patterns,
 void populateExpandConversionPatterns(::mlir::RewritePatternSet &patterns,
                                       ::mlir::MLIRContext *ctx);
 
+// Populates the pattern converting `onnx.Shape` into a `hipsr.compute` whose
+// body reads the input extents. The compute's placeholder gets its shape
+// region populated here, because a compute op's result shape follows its body
+// and so has no recipe hipsr-populate-shape-region could dispatch on.
+void populateShapeConversionPatterns(::mlir::RewritePatternSet &patterns,
+                                     ::mlir::MLIRContext *ctx);
+
 void populateReturnConversionPatterns(::mlir::RewritePatternSet &patterns,
                                       ::mlir::MLIRContext *ctx);
 
