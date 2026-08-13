@@ -27,6 +27,7 @@
 #include <atomic>
 #include <climits>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -161,7 +162,7 @@ static GqaDecodeConfig decodeHeuristic(const GqaDecodeRequest &request) {
                       : 0;
   return {/*use_wmma=*/request.head_dim == 64 &&
                               wmmaSupported(request.head_dim, hpg),
-          /*splits=*/std::min({8, cap, useful_splits})};
+          /*splits=*/std::min(8, std::min(cap, useful_splits))};
 }
 
 static bool validDecodeConfig(const GqaDecodeRequest &request,
@@ -256,11 +257,14 @@ static std::string currentGpuArch() {
   if (hipGetDevice(&device) != hipSuccess ||
       hipGetDeviceProperties(&prop, device) != hipSuccess)
     return {};
-  std::string arch(prop.gcnArchName);
-  const size_t feature_suffix = arch.find(':');
-  if (feature_suffix != std::string::npos)
-    arch.resize(feature_suffix);
-  return arch;
+  // gcnArchName may carry a feature suffix (gfx1151:xnack-) that the LUT keys
+  // do not. Scanned with strchr because std::string::find lowers to MSVC's
+  // vectorized helpers, which have no definition in JIT-linked bitcode.
+  const char *arch = prop.gcnArchName;
+  const char *feature_suffix = std::strchr(arch, ':');
+  if (feature_suffix)
+    return std::string(arch, feature_suffix);
+  return std::string(arch);
 #endif
 }
 
