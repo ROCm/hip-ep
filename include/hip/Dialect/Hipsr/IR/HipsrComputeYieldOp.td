@@ -27,7 +27,7 @@ def Hipsr_ComputeYieldOp : Hipsr_Op<"compute_yield",
     ```
   }];
 
-  let arguments = (ins Variadic<Hipsr_TensorOrMemRef>:$operands);
+  let arguments = (ins Variadic<Hipsr_TensorOrDeviceMemRef>:$operands);
 
   let assemblyFormat = "($operands^ `:` type($operands))? attr-dict";
 
