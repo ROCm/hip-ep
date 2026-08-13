@@ -52,9 +52,8 @@ validateSqueezeUnsqueezeOp(mlir::Operation *op, mlir::PatternRewriter &rewriter,
 }
 
 /// Count the dynamic output dims a reassociation group covers.
-static int64_t
-countDynOutDims(mlir::RankedTensorType outputType,
-                const mlir::ReassociationIndices &group) {
+static int64_t countDynOutDims(mlir::RankedTensorType outputType,
+                               const mlir::ReassociationIndices &group) {
   return llvm::count_if(
       group, [&](int64_t idx) { return outputType.isDynamicDim(idx); });
 }
@@ -131,11 +130,10 @@ resolveShapeOperandExtents(mlir::PatternRewriter &rewriter, mlir::Location loc,
 /// `[bs*ss, 2816] -> [bs, ss, 2816]` became `[ss, ss, 2816]` and dispatched
 /// every Gemma-4 layer's input norm over ss^2 rows.
 std::optional<llvm::SmallVector<mlir::OpFoldResult>>
-buildExpandShapeOutputShape(
-    mlir::PatternRewriter &rewriter, mlir::Location loc, mlir::Value data,
-    mlir::RankedTensorType outputType,
-    llvm::ArrayRef<mlir::ReassociationIndices> reassoc,
-    mlir::Value shapeOperand = {}) {
+buildExpandShapeOutputShape(mlir::PatternRewriter &rewriter, mlir::Location loc,
+                            mlir::Value data, mlir::RankedTensorType outputType,
+                            llvm::ArrayRef<mlir::ReassociationIndices> reassoc,
+                            mlir::Value shapeOperand = {}) {
   int64_t outputRank = outputType.getRank();
 
   llvm::SmallVector<int64_t> outDimToInDim(outputRank, -1);
@@ -289,9 +287,8 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
           // `Shape(x)` into a host-visible tensor.from_elements for it.
           mlir::Value shapeOperand =
               op->getNumOperands() >= 2 ? op->getOperand(1) : mlir::Value();
-          if (auto outputShape =
-                  buildExpandShapeOutputShape(rewriter, loc, data, outputType,
-                                              *reassocOpt, shapeOperand)) {
+          if (auto outputShape = buildExpandShapeOutputShape(
+                  rewriter, loc, data, outputType, *reassocOpt, shapeOperand)) {
             auto expandOp = mlir::tensor::ExpandShapeOp::create(
                 rewriter, loc, outputType, data, *reassocOpt, *outputShape);
             rewriter.replaceOp(op, expandOp.getResult());
