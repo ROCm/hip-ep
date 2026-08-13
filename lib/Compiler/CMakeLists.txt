@@ -27,6 +27,7 @@ target_link_libraries(LibHipCompiler PUBLIC
   HipDialectIR
   HipsrDialectIR
   HipsrDialectTransforms
+  HipsrDialectPipelines
   HipDialectTransforms
   HipTargetLLVM
   MLIRIR
