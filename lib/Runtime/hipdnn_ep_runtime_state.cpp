@@ -1192,9 +1192,21 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
   // that drops to O(log N) reallocations over the whole generation.
   // Cold-start (no existing workspace) keeps the exact requested size so
   // warmup doesn't silently double large initial allocations.
+  //
+  // The slack is capped in absolute terms as well. The churn it exists to
+  // absorb is a few elements per decode step, so a bounded headroom amortizes
+  // it just as well as a proportional one, while 1.5x of an already-large
+  // buffer is not free: the decomposed GQA prefill sizes its score buffers as
+  // H*sq*total_seq, which at a 16K prompt is 24.5 GiB, and 1.5x of that asks
+  // the driver for 36.75 GiB on a 63.6 GiB shared-memory part that already
+  // holds the weights. That turns a feasible allocation into an OOM.
+  constexpr size_t kMaxGrowthSlack = size_t{256} << 20; // 256 MiB
   size_t alloc_size = needed_size;
   if (state->workspace_size > 0) {
-    size_t grown = state->workspace_size + state->workspace_size / 2; // 1.5x
+    size_t slack = state->workspace_size / 2; // 1.5x
+    if (slack > kMaxGrowthSlack)
+      slack = kMaxGrowthSlack;
+    size_t grown = state->workspace_size + slack;
     if (grown > alloc_size)
       alloc_size = grown;
   }
@@ -1211,13 +1223,30 @@ int hipdnn_ep_state_ensure_workspace(RuntimeState *state, size_t needed_size) {
     state->workspace_size = 0;
   }
 
-  if (hipMalloc(&state->workspace, alloc_size) != hipSuccess) {
-    fprintf(
-        stderr,
-        "hipdnn_ep_state_ensure_workspace: hipMalloc failed for %zu bytes\n",
-        alloc_size);
-    std::abort();
+  void *buf = nullptr;
+  if (hipMalloc(&buf, alloc_size) != hipSuccess) {
+    // The amortization slack above is an optimization, so never let it be the
+    // reason we die: fall back to the size the caller actually asked for before
+    // giving up. Only an exact-size failure is genuinely out of memory.
+    buf = nullptr;
+    if (alloc_size > needed_size) {
+      fprintf(stderr,
+              "hipdnn_ep_state_ensure_workspace: hipMalloc failed for %zu "
+              "bytes (grown); retrying at the requested %zu bytes\n",
+              alloc_size, needed_size);
+      alloc_size = needed_size;
+      if (hipMalloc(&buf, alloc_size) != hipSuccess)
+        buf = nullptr;
+    }
+    if (!buf) {
+      fprintf(
+          stderr,
+          "hipdnn_ep_state_ensure_workspace: hipMalloc failed for %zu bytes\n",
+          alloc_size);
+      std::abort();
+    }
   }
+  state->workspace = buf;
 
   state->workspace_size = alloc_size;
   RUNTIME_DEBUG_LOG(
