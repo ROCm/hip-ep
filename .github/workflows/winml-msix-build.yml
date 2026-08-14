@@ -1,0 +1,335 @@
+##
+## Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+## Licensed under the MIT License.
+##
+name: WinML MSIX Build
+
+# Standalone workflow that packages the AMD GPU EP into a signed Windows ML MSIX.
+# It does NOT build the EP: it pulls the gpu-test-package artifact produced by the
+# latest successful windows-build.yml run on a chosen branch (main / release_*),
+# and runs the MSIX packaging tool over it. The ROCm runtime ships inside that
+# artifact (windows-build.yml stages TheRock's DLLs + Tensile data into bin/).
+# Build-only: the .msix is uploaded as an artifact (no install / no validation).
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: "Branch whose latest successful windows-build.yml run to pull gpu-test-package from"
+        type: string
+        default: main
+  push:
+    branches:
+      - ci/winml-msix-build*
+
+jobs:
+  build-msix:
+    runs-on: [windows, gfx1151]
+    env:
+      ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
+      PROVIDER_NAME: MIGraphXExecutionProvider
+      PROVIDER_PATH: amdgpu-ep.dll
+      PACKAGE_NAME: MicrosoftCorporationII.WinML.AMD.GPU.EP
+      SEMANTIC_VERSION: "1.8"
+      PACKAGE_VERSION: 1.8.90.22
+
+    steps:
+      - name: Checkout (for the vendored MSIX tool + validation app zips)
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Clean workspace
+        shell: cmd
+        run: |
+          if exist msix-gpu-test-package rd /s /q msix-gpu-test-package
+          if exist msix-tool rd /s /q msix-tool
+          if exist msix-stage rd /s /q msix-stage
+          if exist msix-out rd /s /q msix-out
+          if exist oga-app rd /s /q oga-app
+          if exist winml-validate-stage rd /s /q winml-validate-stage
+          if exist hip-python-package rd /s /q hip-python-package
+          if exist release-out rd /s /q release-out
+
+      # Extract the vendored MSIX packaging tool first (fail fast). It ships its
+      # own x64\makeappx.exe + signtool.exe, and is vendored under .github/winml-msix/
+      # because the AMD Artifactory is not reachable from the CI runner.
+      - name: Extract MSIX packaging tool
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $toolDir = "$PWD\msix-tool"
+          Expand-Archive -Path ".github\winml-msix\msix_packaging_script.zip" -DestinationPath $toolDir -Force
+          $buildScript = (Get-ChildItem $toolDir -Recurse -Filter "Build-MSIXPackage.ps1" | Select-Object -First 1).FullName
+          if (-not $buildScript) { throw "Build-MSIXPackage.ps1 not found after extracting tool zip" }
+
+          # The stock tool copies the ExecutionProvider source with `Get-ChildItem -File`
+          # (top-level only), dropping data subdirs (rocblas\library, hipblaslt\library).
+          # Patch it to copy recursively so those Tensile kernel data dirs survive.
+          $bs = Get-Content $buildScript -Raw
+          if ($bs -match 'Get-ChildItem \$ExecutionProviderPath -File') {
+            $bs = $bs -replace 'Get-ChildItem \$ExecutionProviderPath -File', 'Get-ChildItem $ExecutionProviderPath'
+            $bs = $bs -replace 'Copy-Item \$file\.FullName \$epTarget -Force', 'Copy-Item $file.FullName $epTarget -Force -Recurse'
+            Set-Content $buildScript -Value $bs -Encoding UTF8
+            Write-Host "patched tool: ExecutionProvider copy is now recursive (keeps data dirs)"
+          }
+
+      # Pull the gpu-test-package built by windows-build.yml on the chosen branch
+      # (defaults to main; release_* also works). Uses the latest *successful* run.
+      - name: Download gpu-test-package (from ${{ github.event.inputs.source_branch || 'main' }})
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: windows-build.yml
+          branch: ${{ github.event.inputs.source_branch || 'main' }}
+          workflow_conclusion: success
+          name: gpu-test-package
+          path: msix-gpu-test-package
+
+      # Stage a whitelist, not the whole bin/: the artifact also carries
+      # onnxruntime / DirectML / OGA binaries and test executables, which the
+      # WinML host provides and the MSIX must not ship.
+      - name: Stage EP chain + ROCm runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $bin   = "$PWD\msix-gpu-test-package\bin"
+          $stage = "$PWD\msix-stage"
+          if (-not (Test-Path $bin)) { throw "gpu-test-package bin not found: $bin" }
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          $epPatterns = @("amdgpu-ep.dll","hip-backend.dll","hipgpu.dll","hip-compiler.dll","custom_kernels_*.dll")
+          foreach ($pat in $epPatterns) {
+            Get-ChildItem $bin -File -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
+              Copy-Item $_.FullName $stage -Force; Write-Host "  + [ep]   $($_.Name)"
+            }
+          }
+          # ROCm runtime: exact names, and every one is required at inference
+          # time, so a missing dll fails the job instead of shipping a broken MSIX.
+          $rocmDlls = @("amdhip64_7.dll","MIOpen.dll","amd_comgr0702.dll","rocblas.dll",
+                        "libhipblaslt.dll","hiprtc0702.dll","hiprtc-builtins0702.dll",
+                        "hipdnn_backend.dll")
+          # Tensile data keeps its directory structure so the dlls find it next
+          # to them at runtime.
+          foreach ($item in ($rocmDlls + @("hipblaslt","rocblas"))) {
+            $src = Join-Path $bin $item
+            if (-not (Test-Path $src)) { throw "ROCm runtime missing from gpu-test-package: $src" }
+            Copy-Item $src (Join-Path $stage $item) -Recurse -Force
+            Write-Host "  + [rocm] $item"
+          }
+
+          if (-not (Test-Path (Join-Path $stage $env:PROVIDER_PATH))) {
+            throw "Entry provider dll '$env:PROVIDER_PATH' not staged - check gpu-test-package bin contents."
+          }
+          $allFiles = Get-ChildItem $stage -Recurse -File
+          $mb = [math]::Round((($allFiles | Measure-Object Length -Sum).Sum / 1MB), 1)
+          Write-Host "staged $($allFiles.Count) files, $mb MB -> $stage"
+
+      - name: Write AMD GPU EP manifest
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msixScriptDir = (Get-ChildItem "$PWD\msix-tool" -Recurse -Filter "Build-MSIXPackage.ps1" | Select-Object -First 1).Directory.FullName
+          if (-not $msixScriptDir) { throw "msix-tool not extracted (run the download step first)" }
+
+          # single AMD GPU EP extension manifest (back up original once)
+          $tmpl = Join-Path $msixScriptDir "AppxManifestTemplate.xml"
+          $bak  = "$tmpl.orig"
+          if ((Test-Path $tmpl) -and -not (Test-Path $bak)) { Copy-Item $tmpl $bak -Force }
+          @'
+          <?xml version="1.0" encoding="utf-8"?>
+          <Package
+            xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+            xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+            xmlns:uap15="http://schemas.microsoft.com/appx/manifest/uap/windows10/15"
+            xmlns:uap17="http://schemas.microsoft.com/appx/manifest/uap/windows10/17"
+            IgnorableNamespaces="uap uap17">
+
+            <Identity
+              Name="@PACKAGE_NAME@.@SEMANTIC_VERSION@"
+              Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+              Version="@PACKAGE_VERSION@"
+              ProcessorArchitecture="@PACKAGE_ARCH@" />
+
+            <Properties>
+              <DisplayName>Windows ML Runtime Execution Provider</DisplayName>
+              <PublisherDisplayName>Microsoft Corporation</PublisherDisplayName>
+              <Logo>Images\StoreLogo.png</Logo>
+              <uap15:DependencyTarget>true</uap15:DependencyTarget>
+            </Properties>
+
+            <Dependencies>
+              <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.22000.0" MaxVersionTested="10.0.26100.0" />
+              <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.22000.0" MaxVersionTested="10.0.26100.0" />
+            </Dependencies>
+
+            <Extensions>
+              <uap17:Extension Category="windows.packageExtension">
+                <uap17:PackageExtension Name="com.microsoft.windowsmlruntime.executionprovider"
+                    Id="AMDGPUEP"
+                    DisplayName="Windows ML Runtime AMD GPU Execution Provider"
+                    PublicFolder="ExecutionProvider"
+                    Description="Windows ML Runtime AMD GPU Execution Provider">
+                  <uap17:Properties>
+                    <ProviderName>@PROVIDER_NAME@</ProviderName>
+                    <ProviderPath>@PROVIDER_PATH@</ProviderPath>
+                  </uap17:Properties>
+                </uap17:PackageExtension>
+              </uap17:Extension>
+            </Extensions>
+
+          </Package>
+          '@ | Set-Content $tmpl -Encoding UTF8
+          Write-Host "wrote single AMD GPU EP extension template"
+
+      - name: Pack and sign MSIX
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $buildScriptItem = Get-ChildItem "$PWD\msix-tool" -Recurse -Filter "Build-MSIXPackage.ps1" | Select-Object -First 1
+          if (-not $buildScriptItem) { throw "msix-tool not extracted (run the download step first)" }
+          $msixScriptDir = $buildScriptItem.Directory.FullName
+          $buildScript   = $buildScriptItem.FullName
+
+          # pack + sign (self-signed; no -Install so no admin / cert-store needed)
+          $stage = "$PWD\msix-stage"
+          $out   = "$PWD\msix-out"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $params = @{
+            ProviderName          = $env:PROVIDER_NAME
+            ExecutionProviderPath = $stage
+            ProviderPath          = $env:PROVIDER_PATH
+            PackageName           = $env:PACKAGE_NAME
+            SemanticVersion       = $env:SEMANTIC_VERSION
+            PackageVersion        = $env:PACKAGE_VERSION
+            OutputPath            = $out
+          }
+          Push-Location $msixScriptDir
+          try { & $buildScript @params -Sign }
+          finally { Pop-Location }
+
+          $msix = Get-ChildItem $out -Recurse -Filter *.msix | Select-Object -First 1
+          if (-not $msix) { throw "No .msix produced under $out" }
+          $size = [math]::Round($msix.Length / 1MB, 1)
+          Write-Host "MSIX: $($msix.FullName) ($size MB)"
+
+      - name: Upload MSIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: winml-amdgpu-ep-msix
+          path: msix-out/*.msix
+          retention-days: 14
+
+      # ---- Release package 1: winml-ep-validate (msix + cert + app runtime) ----
+      - name: Package winml-ep-validate.zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $date = Get-Date -Format 'yyyyMMdd'
+          $msix = Get-ChildItem "$PWD\msix-out" -Recurse -Filter *.msix | Select-Object -First 1
+          if (-not $msix) { throw "MSIX not found in msix-out" }
+          $cer = Get-ChildItem "$PWD\msix-tool" -Recurse -Filter "SelfSignedCertificate.cer" | Select-Object -First 1
+          if (-not $cer) { throw "SelfSignedCertificate.cer not found under msix-tool" }
+          $appDir = "$PWD\oga-app"
+          Expand-Archive -Path ".github\winml-msix\oga_winml_app.zip" -DestinationPath $appDir -Force
+          $stage = "$PWD\winml-validate-stage"
+          if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item $msix.FullName $stage -Force
+          Copy-Item $cer.FullName $stage -Force
+          foreach ($n in @("oga_winml_app.exe","Microsoft.Windows.AI.MachineLearning.dll","onnxruntime-genai.dll","onnxruntime.dll")) {
+            $p = Join-Path $appDir $n
+            if (-not (Test-Path $p)) { throw "app file missing: $p" }
+            Copy-Item $p $stage -Force
+          }
+          $out = "$PWD\release-out"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $zip = Join-Path $out "winml-ep-validate-$date.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::CreateFromDirectory($stage, $zip, [System.IO.Compression.CompressionLevel]::Optimal, $false)
+          Write-Host "Created $zip ($([math]::Round((Get-Item $zip).Length/1MB,1)) MB)"
+
+      - name: Upload winml-ep-validate
+        uses: actions/upload-artifact@v4
+        with:
+          name: winml-ep-validate
+          path: release-out/winml-ep-validate-*.zip
+          retention-days: 14
+
+      # ---- Release package 2: gpu-test-package ----
+      - name: Package gpu-test-package.zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $date = Get-Date -Format 'yyyyMMdd'
+          $pkg = "$PWD\msix-gpu-test-package"
+          if (-not (Test-Path $pkg)) { throw "gpu-test-package not downloaded: $pkg" }
+          $out = "$PWD\release-out"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $zip = Join-Path $out "gpu-test-package-$date.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::CreateFromDirectory($pkg, $zip, [System.IO.Compression.CompressionLevel]::Optimal, $false)
+          Write-Host "Created $zip ($([math]::Round((Get-Item $zip).Length/1MB,1)) MB)"
+
+      - name: Upload gpu-test-package-zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-test-package-zip
+          path: release-out/gpu-test-package-*.zip
+          retention-days: 14
+
+      # ---- Release package 3: hipep-wheels (project wheels + ROCm deps + examples) ----
+      - name: Download hip-python-package
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: windows-build.yml
+          branch: ${{ github.event.inputs.source_branch || 'main' }}
+          workflow_conclusion: success
+          name: hip-python-package
+          path: hip-python-package
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Package hipep-wheels.zip
+        shell: pwsh
+        run: |
+          # pip writes warnings/progress to stderr; under the default Stop that
+          # would terminate the step (NativeCommandError). Use Continue + disable
+          # native-exit mapping, and gate on $LASTEXITCODE explicitly instead.
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $date = Get-Date -Format 'yyyyMMdd'
+          $pkg = "$PWD\hip-python-package"
+          $wheels = Join-Path $pkg "wheels"
+          if (-not (Test-Path $wheels)) { throw "wheels/ not found in hip-python-package" }
+          $ep = Get-ChildItem $wheels -Filter "onnxruntime_ep_hip-*.whl" | Select-Object -First 1
+          if (-not $ep) { throw "onnxruntime_ep_hip-*.whl not found in $wheels" }
+          # Pull the EP wheel's ROCm dependencies (version pinned by the wheel itself).
+          python -m pip download $ep.FullName --extra-index-url https://repo.amd.com/rocm/whl/gfx1151/ -d $wheels 2>&1 | ForEach-Object { Write-Host $_ }
+          if ($LASTEXITCODE -ne 0) { throw "pip download (ROCm deps) failed" }
+          $out = "$PWD\release-out"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $zip = Join-Path $out "hipep-wheels-$date.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          # Wheels are already-compressed zips; NoCompression avoids wasted CPU.
+          [System.IO.Compression.ZipFile]::CreateFromDirectory($wheels, $zip, [System.IO.Compression.CompressionLevel]::NoCompression, $false)
+          # Append the artifact's top-level example scripts under examples/.
+          $za = [System.IO.Compression.ZipFile]::Open($zip, [System.IO.Compression.ZipArchiveMode]::Update)
+          Get-ChildItem $pkg -File -Filter *.py | ForEach-Object {
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($za, $_.FullName, "examples/$($_.Name)", [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+          }
+          $za.Dispose()
+          Write-Host "Created $zip ($([math]::Round((Get-Item $zip).Length/1MB,1)) MB)"
+
+      - name: Upload hipep-wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: hipep-wheels
+          path: release-out/hipep-wheels-*.zip
+          retention-days: 14
