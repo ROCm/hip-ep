@@ -767,6 +767,26 @@ static size_t gqa_score_budget_bytes() {
   return budget;
 }
 
+// Ask the score GEMM for a fp16 rather than fp32 output, so the whole
+// score/bias/softmax chain runs over one fp16 S x S buffer instead of an fp32
+// one plus a fp16 copy. At a 16K prompt that chain is the pipeline's dominant
+// memory traffic and this removes roughly half of it, and it also halves the
+// per-head footprint that decides head grouping, so groups get larger and the
+// GEMMs get fewer and bigger.
+//
+// Off by default: the fp32 score buffer is what keeps softmax and the causal
+// mask clear of inf - inf = NaN. In fp16 the headroom is real but finite -- a
+// pre-softmax logit above 65504 saturates to inf, and then exp2(inf - inf) is
+// NaN -- so this trades a bound that cannot be exceeded for one that merely is
+// not, on the models measured so far.
+static bool gqa_score_fp16_enabled() {
+  static const bool enabled = [] {
+    const char *env = std::getenv("HIPDNN_EP_GQA_SCORE_FP16");
+    return env && std::strcmp(env, "0") != 0;
+  }();
+  return enabled;
+}
+
 // Env-var gate to force decode through the decomposed hipBLASLt pipeline
 // instead of the fused custom kernel hip_gqa_fused_decode. Default off
 // (fused path is preferred). Set HIPDNN_EP_GQA_DISABLE_FUSED_DECODE=1 to
@@ -1738,11 +1758,17 @@ static int gqa_forward_hipblaslt(
   const bool groupable = need_transpose && !use_no_expand && B == 1 &&
                          bias_head_broadcast && head_sink == nullptr &&
                          !use_smooth_softmax;
+  // fp16 scores need one buffer, not an fp32 score buffer plus a fp16
+  // probability buffer: the chain runs in place. Requires fp16 elements, since
+  // with fp32 elements the "narrow" buffer would be the same width as the wide
+  // one and there would be nothing to save.
+  const bool score_fp16 = gqa_score_fp16_enabled() && !gemm_fp32;
+
   int64_t heads_per_group = B * H;
   if (groupable) {
     const size_t bytes_per_head = static_cast<size_t>(sq) *
                                   static_cast<size_t>(total_seq) *
-                                  (sizeof(float) + elem_sz);
+                                  (score_fp16 ? elem_sz : sizeof(float) + elem_sz);
     const size_t budget = gqa_score_budget_bytes();
     int64_t chosen = 1; // a single head is always permitted, budget or not
     for (int64_t cand = 1; cand <= B * H; ++cand) {
@@ -1768,7 +1794,7 @@ static int gqa_forward_hipblaslt(
                 /*k=*/d,
                 /*batch=*/B * G,
                 /*transA=*/true,
-                /*outputFp32=*/true,
+                /*outputFp32=*/!score_fp16,
                 /*inputFp32=*/gemm_fp32,
                 /*strideA=*/present_seq * d,
                 /*strideB=*/HPG * sq * d,
@@ -1789,8 +1815,8 @@ static int gqa_forward_hipblaslt(
   } else {
     // Batched over one head group; the loop below advances the base pointers by
     // whole heads, so the default dense strides still apply.
-    scoreKey = {total_seq,           sq,        d, heads_per_group, true,
-                /*outputFp32=*/true, gemm_fp32,
+    scoreKey = {total_seq,                  sq, d, heads_per_group, true,
+                /*outputFp32=*/!score_fp16, gemm_fp32,
                 /*strideA=*/0,
                 /*strideB=*/0,
                 /*strideC=*/0};
@@ -1833,9 +1859,13 @@ static int gqa_forward_hipblaslt(
   size_t Kexp_bytes =
       use_no_expand ? 0 : static_cast<size_t>(B) * H * total_seq * d * elem_sz;
   size_t Vexp_bytes = Kexp_bytes;
-  // Sized for one head group, not all B*H heads.
+  // Sized for one head group, not all B*H heads. Under score_fp16 the fp32
+  // score buffer is not allocated at all: the GEMM writes fp16 into S_fp16 and
+  // bias, mask and softmax all run in place there.
   size_t S_f32_bytes =
-      static_cast<size_t>(heads_per_group) * sq * total_seq * sizeof(float);
+      score_fp16 ? 0
+                 : static_cast<size_t>(heads_per_group) * sq * total_seq *
+                       sizeof(float);
   size_t S_fp16_bytes =
       static_cast<size_t>(heads_per_group) * sq * total_seq * elem_sz;
   size_t O_bytes =
@@ -1897,8 +1927,11 @@ static int gqa_forward_hipblaslt(
     void *d_Qtrans = need_transpose ? (ws + off_Qtrans) : nullptr;
     void *d_Kexp = use_no_expand ? nullptr : (ws + off_Kexp);
     void *d_Vexp = use_no_expand ? nullptr : (ws + off_Vexp);
-    void *d_S_f32 = ws + off_S_f32;
     void *d_S_fp16 = ws + off_S_fp16;
+    // Under score_fp16 the two aliases are the same buffer: the GEMM writes
+    // fp16 scores where the probabilities will later be, and every step between
+    // rewrites them in place.
+    void *d_S_f32 = score_fp16 ? d_S_fp16 : (ws + off_S_f32);
     void *d_O = need_transpose ? (ws + off_O) : nullptr;
 
     void *gemm_ws_ptr = ws + temp_end;
@@ -2035,7 +2068,9 @@ static int gqa_forward_hipblaslt(
     // ---- Step 8b: Add external attention bias (onnx.Attention attn_mask) ----
     int scoreF32BatchStride = static_cast<int>(sq * total_seq);
     if (attention_bias) {
-      HIP_CHECK(hip_gqa_add_attention_bias_f32(
+      auto add_bias = score_fp16 ? hip_gqa_add_attention_bias_f16
+                                 : hip_gqa_add_attention_bias_f32;
+      HIP_CHECK(add_bias(
           stream, d_S_f32, const_cast<void *>(attention_bias),
           static_cast<int>(heads_per_group), static_cast<int>(H),
           static_cast<int>(attn_bias_batch),
@@ -2064,7 +2099,11 @@ static int gqa_forward_hipblaslt(
     if ((sq > 1 || local_window_size > 0) && !no_causal) {
       // The causal / window mask is the same for every head, so a group needs no
       // head offset -- only the group's head count.
-      HIP_CHECK(hip_gqa_causal_mask_f32(
+      // The fp16 mask writes -65504 where the fp32 one writes -INFINITY. Both
+      // are "masked" to the softmax below, which subtracts the column max.
+      auto causal_mask =
+          score_fp16 ? hip_gqa_causal_mask : hip_gqa_causal_mask_f32;
+      HIP_CHECK(causal_mask(
           stream, d_S_f32, static_cast<int>(heads_per_group),
           static_cast<int>(total_seq), static_cast<int>(sq),
           scoreF32BatchStride, static_cast<int>(past_len),
@@ -2075,7 +2114,15 @@ static int gqa_forward_hipblaslt(
     // fp32 Value GEMM. d_S_fp16 is the probabilities buffer either way (sized
     // by elem_sz above), so the name is fp16-specific but holds fp32 when
     // gemm_fp32.
-    if (gemm_fp32) {
+    if (score_fp16) {
+      // In place: d_S_f32 and d_S_fp16 are the same buffer here.
+      HIP_CHECK(hip_gqa_softmax_f16_to_f16(
+          stream, d_S_f32, d_S_fp16,
+          static_cast<int>(heads_per_group * sq), static_cast<int>(total_seq),
+          static_cast<int>(sq), scoreFp16BatchStride, scoreFp16BatchStride,
+          head_sink, static_cast<int>(H),
+          static_cast<int>(use_smooth_softmax)));
+    } else if (gemm_fp32) {
       HIP_CHECK(hip_gqa_softmax_f32_to_f32(
           stream, d_S_f32, d_S_fp16,
           static_cast<int>(heads_per_group * sq), static_cast<int>(total_seq),
@@ -2123,11 +2170,12 @@ static int gqa_forward_hipblaslt(
 
     RUNTIME_DEBUG_LOG(
         "[REAL] GQA hipBLASLt: B=%lld sq=%lld total_seq=%lld H=%lld G=%lld "
-        "d=%lld no_expand=%d transpose=%d heads_per_group=%lld groups=%lld\n",
+        "d=%lld no_expand=%d transpose=%d heads_per_group=%lld groups=%lld "
+        "score_fp16=%d\n",
         (long long)B, (long long)sq, (long long)total_seq, (long long)H,
         (long long)G, (long long)d, static_cast<int>(use_no_expand),
         static_cast<int>(need_transpose), (long long)heads_per_group,
-        (long long)((B * H) / heads_per_group));
+        (long long)((B * H) / heads_per_group), static_cast<int>(score_fp16));
   }
 
 cleanup:
