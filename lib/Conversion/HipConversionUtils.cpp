@@ -89,8 +89,7 @@ createEmptyTensorFromReifiedShape(OpBuilder &builder, Location loc,
     if (resultType.isDynamicDim(dimIdx))
       dynSizes.push_back(
           getValueOrCreateConstantIndexOp(builder, loc, reifiedShape[dimIdx]));
-  return Value(tensor::EmptyOp::create(builder, loc, resultType.getShape(),
-                                       resultType.getElementType(), dynSizes));
+  return Value(tensor::EmptyOp::create(builder, loc, resultType, dynSizes));
 }
 
 FailureOr<Value> createBroadcastEmptyTensor(OpBuilder &builder, Location loc,
