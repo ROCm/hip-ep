@@ -97,8 +97,20 @@ struct ConvTableKey {
   int64_t dilation_w;
   int64_t group;
   miopenDataType_t data_type;
+  miopenConvolutionMode_t conv_mode;
 
-  bool operator==(const ConvTableKey &other) const = default;
+  bool operator==(const ConvTableKey &other) const {
+    return (input_n == other.input_n) && (input_c == other.input_c) &&
+           (input_h == other.input_h) && (input_w == other.input_w) &&
+           (weights_k == other.weights_k) && (output_h == other.output_h) &&
+           (output_w == other.output_w) && (kernel_h == other.kernel_h) &&
+           (kernel_w == other.kernel_w) && (stride_h == other.stride_h) &&
+           (stride_w == other.stride_w) && (pad_top == other.pad_top) &&
+           (pad_left == other.pad_left) && (pad_bottom == other.pad_bottom) &&
+           (pad_right == other.pad_right) && (dilation_h == other.dilation_h) &&
+           (dilation_w == other.dilation_w) && (group == other.group) &&
+           (data_type == other.data_type) && (conv_mode == other.conv_mode);
+  }
 };
 
 struct ConvTableEntry {
@@ -174,6 +186,7 @@ struct ConvKeyHash {
     hash_combine_val(h, key.dilation_w);
     hash_combine_val(h, key.group);
     hash_combine_val(h, key.data_type);
+    hash_combine_val(h, key.conv_mode);
     return h;
   }
 };
@@ -257,8 +270,8 @@ queryOrCreateConv(ConvTable &table, const ConvTableKey &key,
   // Create convolution descriptor
   MIOPEN_CHECK(miopenCreateConvolutionDescriptor(&entry.conv_desc));
   MIOPEN_CHECK(miopenInitConvolutionDescriptor(
-      entry.conv_desc, miopenConvolution, key.pad_top, key.pad_left,
-      key.stride_h, key.stride_w, key.dilation_h, key.dilation_w));
+      entry.conv_desc, key.conv_mode, key.pad_top, key.pad_left, key.stride_h,
+      key.stride_w, key.dilation_h, key.dilation_w));
   if (key.group > 1) {
     MIOPEN_CHECK(miopenSetConvolutionGroupCount(entry.conv_desc, key.group));
   }
@@ -379,10 +392,12 @@ int wrap_miopenConvolutionForward(
     return -1;
   }
 
-  ConvTableKey key{input_n,    input_c,    input_h,  input_w,    weights_k,
-                   output_h,   output_w,   kernel_h, kernel_w,   stride_h,
-                   stride_w,   pad_top,    pad_left, pad_bottom, pad_right,
-                   dilation_h, dilation_w, group,    miopen_dt};
+  ConvTableKey key{
+      input_n,    input_c,    input_h,  input_w,    weights_k,
+      output_h,   output_w,   kernel_h, kernel_w,   stride_h,
+      stride_w,   pad_top,    pad_left, pad_bottom, pad_right,
+      dilation_h, dilation_w, group,    miopen_dt,  miopenConvolution,
+  };
   miopenTensorDescriptor_t bias_desc = nullptr;
   int result = 0;
 
