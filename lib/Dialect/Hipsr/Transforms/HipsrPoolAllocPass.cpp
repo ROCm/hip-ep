@@ -9,6 +9,7 @@
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Bufferization/Transforms/BufferViewFlowAnalysis.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinOps.h"
 
@@ -106,7 +107,10 @@ llvm::DenseMap<Value, size_t> mapAllocIndices(Block &body) {
   return indices;
 }
 
-llvm::DenseMap<Value, Lifetime> computeLiveness(Block &body) {
+llvm::DenseMap<Value, Lifetime> computeLiveness(PoolDomainOp domain) {
+  Block &body = domain.getBody().front();
+  BufferViewFlowAnalysis aliases(domain);
+
   llvm::DenseMap<Operation *, size_t> opIndices;
   size_t idx = 0;
   for (Operation &op : body) {
@@ -124,18 +128,23 @@ llvm::DenseMap<Value, Lifetime> computeLiveness(Block &body) {
     std::optional<size_t> end;
     Operation *firstWrite = nullptr;
     Operation *lastUse = nullptr;
-    for (Operation *user : buffer.getUsers()) {
-      Operation *blockLevelUser = body.findAncestorOpInBlock(*user);
-      assert(blockLevelUser && "alloc escapes its IsolatedFromAbove domain");
-      size_t userIdx = opIndices.lookup(blockLevelUser);
-      if (llvm::is_contained(getHipsrDestinationOperands(user), buffer) &&
-          (!start || userIdx < *start)) {
-        start = userIdx;
-        firstWrite = blockLevelUser;
-      }
-      if (!end || userIdx > *end) {
-        end = userIdx;
-        lastUse = blockLevelUser;
+    for (Value alias : aliases.resolve(buffer)) {
+      for (Operation *user : alias.getUsers()) {
+        if (isa<memref::DeallocOp>(user)) {
+          continue;
+        }
+        Operation *blockLevelUser = body.findAncestorOpInBlock(*user);
+        assert(blockLevelUser && "alloc escapes its IsolatedFromAbove domain");
+        size_t userIdx = opIndices.lookup(blockLevelUser);
+        if (llvm::is_contained(getHipsrDestinationOperands(user), alias) &&
+            (!start || userIdx < *start)) {
+          start = userIdx;
+          firstWrite = blockLevelUser;
+        }
+        if (!end || userIdx > *end) {
+          end = userIdx;
+          lastUse = blockLevelUser;
+        }
       }
     }
     if (start) {
@@ -385,7 +394,7 @@ struct HipsrPoolAllocPass : impl::HipsrPoolAllocPassBase<HipsrPoolAllocPass> {
                         << domain.getDomainId() << ")\n");
       ++domainOrdinal;
       Block &body = domain.getBody().front();
-      llvm::DenseMap<Value, Lifetime> lifetimes = computeLiveness(body);
+      llvm::DenseMap<Value, Lifetime> lifetimes = computeLiveness(domain);
       Operation *insertionPoint = findInsertionPoint(body, lifetimes);
       if (!insertionPoint) {
         domain.emitError(
