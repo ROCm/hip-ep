@@ -69,7 +69,8 @@ struct ConvertOnnxToHipsrPass
     TypeConverter converter;
     converter.addConversion([](Type type) { return type; });
     converter.addConversion([](RankedTensorType type) -> Type {
-      if (type.getEncoding()) {
+      // Leave rank-0 scalars (compile-time host roots lowered to arith.constant)
+      if (type.getRank() == 0 || type.getEncoding()) {
         return type;
       }
       return deviceTensorType(type);
