@@ -1465,7 +1465,10 @@ def Hip_MinOp : Hip_DpsOp_Broadcast<"min", /*operandGetters=*/["Lhs", "Rhs"],
   }];
 }
 
-def Hip_MaxOp : Hip_DpsOp_AutoReify<"max", [OpStateOpInterface]> {
+def Hip_MaxOp : Hip_DpsOp_Broadcast<"max",
+                                    /*operandGetters=*/["Lhs", "Rhs"],
+                                    /*outsAccessor=*/"Output",
+                                    /*traits=*/[OpStateOpInterface]> {
   let summary = "Elementwise maximum";
 
   // OpStateOpInterface: shared OpTensorState (see hip.mul).

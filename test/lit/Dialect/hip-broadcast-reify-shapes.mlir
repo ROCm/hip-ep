@@ -24,6 +24,28 @@ func.func @dynamic_dynamic(%ctx: !hip.context, %a: tensor<?xf32>,
   return %d : index
 }
 
+// Max uses the same operand-derived broadcast contract as Min/Add rather than
+// lifting a potentially stale extent from its destination.
+// REIFY-LABEL: func.func @max_dynamic_dynamic
+// REIFY-SAME: (%{{.*}}: !hip.context, %[[A:[A-Za-z0-9_]+]]: tensor<?xf32>, %[[B:[A-Za-z0-9_]+]]: tensor<?xf32>
+// REIFY-DAG: %[[C0:.*]] = arith.constant 0 : index
+// REIFY-DAG: %[[C1:.*]] = arith.constant 1 : index
+// REIFY-DAG: %[[AD:.*]] = tensor.dim %[[A]], %[[C0]]
+// REIFY-DAG: %[[BD:.*]] = tensor.dim %[[B]], %[[C0]]
+// REIFY: %[[IS1:.*]] = arith.cmpi eq, %[[AD]], %[[C1]] : index
+// REIFY: %[[D:.*]] = arith.select %[[IS1]], %[[BD]], %[[AD]] : index
+// REIFY: return %[[D]]
+func.func @max_dynamic_dynamic(%ctx: !hip.context, %a: tensor<?xf32>,
+                               %b: tensor<?xf32>,
+                               %out: tensor<?xf32>) -> index {
+  %r = hip.max(%ctx)
+    ins(%a, %b : tensor<?xf32>, tensor<?xf32>)
+    outs(%out : tensor<?xf32>) : tensor<?xf32>
+  %c0 = arith.constant 0 : index
+  %d = tensor.dim %r, %c0 : tensor<?xf32>
+  return %d : index
+}
+
 // Broadcasting zero with one yields zero; max(0, 1) would be incorrect.
 // REIFY-LABEL: func.func @zero_one
 // REIFY-DAG: %[[C0:.*]] = arith.constant 0 : index
