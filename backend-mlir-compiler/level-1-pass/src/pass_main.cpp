@@ -42,6 +42,7 @@ static CompilationConfig load_config(PassContext *ctx) {
   CompilationConfig config;
   config.artifactFormat = ArtifactFormat::LLVM_IR;
   config.optLevel = 2;
+  config.useDynamicDispatch = false;
 
   auto ep_ctx = ctx->get_session_config("ep.context_enable");
   bool epctxExport = ep_ctx.has_value() && ep_ctx.value() == "1";
@@ -71,6 +72,26 @@ static CompilationConfig load_config(PassContext *ctx) {
         ctx->get_provider_option("optimization_level", "2");
     config.optLevel = std::stoi(opt_level_str);
 
+    // DynamicDispatch backend selection (NPU/IPU vs GPU)
+    // Check provider option first, then fall back to env var
+    std::string use_dd_str =
+        ctx->get_provider_option("use_dynamic_dispatch", "");
+    if (use_dd_str.empty()) {
+      // Fallback to environment variable for tools that don't support provider options
+      const char* env_dd = std::getenv("HIPEP_USE_DYNAMIC_DISPATCH");
+      if (env_dd) {
+        use_dd_str = env_dd;
+      }
+    }
+    config.useDynamicDispatch = (use_dd_str == "true" || use_dd_str == "1");
+
+    MY_LOG(1) << "use_dynamic_dispatch provider option: '"
+              << ctx->get_provider_option("use_dynamic_dispatch", "<unset>") << "'";
+    if (std::getenv("HIPEP_USE_DYNAMIC_DISPATCH")) {
+      MY_LOG(1) << "HIPEP_USE_DYNAMIC_DISPATCH env var: '"
+                << std::getenv("HIPEP_USE_DYNAMIC_DISPATCH") << "'";
+    }
+
   } catch (const std::exception &ex) {
     MY_LOG(1) << "Failed to parse provider options: " << ex.what()
               << ", using defaults";
@@ -82,7 +103,9 @@ static CompilationConfig load_config(PassContext *ctx) {
             << "; skipConstantData="
             << (config.skipConstantData ? "true" : "false")
             << (epctxExport ? " (EPContext export -> constants file)"
-                            : " (streaming default)");
+                            : " (streaming default)")
+            << "; useDynamicDispatch="
+            << (config.useDynamicDispatch ? "true" : "false");
 
   return config;
 }

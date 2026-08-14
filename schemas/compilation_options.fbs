@@ -14,6 +14,7 @@ table CompilationOptions {
   verbose: bool = false;
   constants_file: string = "constants.bin";
   skip_constant_data: bool = false;
+  use_dynamic_dispatch: bool = false;
 }
 
 root_type CompilationOptions;

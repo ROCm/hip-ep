@@ -321,6 +321,7 @@ bool CompilerDriver::runMLIRPasses(
 
     mlir::hip::HipToLLVMPipelineOptions hipToLlvmOpts;
     hipToLlvmOpts.constantsFile = options.constants_file;
+    hipToLlvmOpts.useDynamicDispatch = options.use_dynamic_dispatch;
     mlir::hip::buildHipToLLVMPipeline(pm, hipToLlvmOpts);
   }
 

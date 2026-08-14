@@ -460,7 +460,9 @@ void mlir::hip::buildHipToLLVMPipeline(
   pm.addPass(createSCFToControlFlowPass());
   pm.addPass(createReconcileUnrealizedCastsPass());
 
-  pm.addPass(createConvertHipToLLVMPass());
+  ConvertHipToLLVMPassOptions hipToLlvmOpts;
+  hipToLlvmOpts.useDynamicDispatch = options.useDynamicDispatch;
+  pm.addPass(createConvertHipToLLVMPass(hipToLlvmOpts));
 
   mlir::hip::CompilationOptionsT compOpts;
   compOpts.constants_file = options.constantsFile;
@@ -486,6 +488,7 @@ void mlir::hip::buildHipdnnPipeline(OpPassManager &pm,
 
   HipToLLVMPipelineOptions llvmOpts;
   llvmOpts.constantsFile = options.constantsFile;
+  llvmOpts.useDynamicDispatch = options.useDynamicDispatch;
   buildHipToLLVMPipeline(pm, llvmOpts);
 }
 
