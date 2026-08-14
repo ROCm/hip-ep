@@ -109,8 +109,9 @@ static mlir::DenseElementsAttr getCompileTimeConstantTensor(mlir::Value value) {
       return dense;
 
   // Externalised path: bufferization.to_tensor of a memref.get_global whose
-  // global has a dense initial_value.  Used when the shape input came in
-  // through the constant externalisation route.
+  // global has a dense initial_value. This preserves compatibility with the
+  // legacy initialized-global bridge; production carrier externalization runs
+  // only after this fold.
   if (auto toTensor = mlir::dyn_cast<mlir::bufferization::ToTensorOp>(defOp)) {
     auto bufDef =
         toTensor.getBuffer().getDefiningOp<mlir::memref::GetGlobalOp>();

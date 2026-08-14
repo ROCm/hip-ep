@@ -10,15 +10,16 @@ include "mlir/IR/OpBase.td"
 include "mlir/IR/AttrTypeBase.td"
 include "hip/Dialect/Hipsr/IR/HipsrDialect.td"
 
-// Type constraints for ops that need a memref in a specific memory space.
-//
-// One per memory space, in enum order (host, device, pinned, managed). A memref
-// with no space, or a space that is not a `#hipsr.mem<...>` attribute, does not
-// match (see the predicates in HipsrTypes.cpp).
+// Type constraints for ops that need a memref in a named memory space, one per
+// space in enum order (host, device, pinned, managed), plus one for an op that
+// takes any of them. A memref with no space, or a space that is not a
+// `#hipsr.mem<...>` attribute, matches none of them (see the predicates in
+// HipsrTypes.cpp).
 def Hipsr_HostMemRef    : Type<CPred<"::mlir::hipsr::isHostMemRef($_self)">,    "host memref">;
 def Hipsr_DeviceMemRef  : Type<CPred<"::mlir::hipsr::isDeviceMemRef($_self)">,  "device memref">;
 def Hipsr_PinnedMemRef  : Type<CPred<"::mlir::hipsr::isPinnedMemRef($_self)">,  "pinned memref">;
 def Hipsr_ManagedMemRef : Type<CPred<"::mlir::hipsr::isManagedMemRef($_self)">, "managed memref">;
+def Hipsr_AnySpaceMemRef : Type<CPred<"::mlir::hipsr::isAnySpaceMemRef($_self)">, "memref in a hipsr memory space">;
 
 def Hipsr_AnyHostRankedTensor   : Type<CPred<"::mlir::hipsr::isHostRankedTensor($_self)">,   "host ranked tensor">;
 def Hipsr_AnyDeviceRankedTensor : Type<CPred<"::mlir::hipsr::isDeviceRankedTensor($_self)">, "device ranked tensor">;
@@ -28,6 +29,7 @@ def Hipsr_DeviceTensorOrMemRef  : AnyTypeOf<[Hipsr_AnyDeviceRankedTensor, Hipsr_
 def Hipsr_TensorOrPinnedMemRef  : AnyTypeOf<[AnyRankedTensor, Hipsr_PinnedMemRef],  "ranked tensor or pinned memref">;
 def Hipsr_TensorOrManagedMemRef : AnyTypeOf<[AnyRankedTensor, Hipsr_ManagedMemRef], "ranked tensor or managed memref">;
 def Hipsr_TensorOrMemRef : AnyTypeOf<[AnyRankedTensor, AnyMemRef], "ranked tensor or memref">;
+def Hipsr_TensorOrAnySpaceMemRef : AnyTypeOf<[AnyRankedTensor, Hipsr_AnySpaceMemRef], "ranked tensor or hipsr memref">;
 
 // Base class for hipsr types.
 class Hipsr_Type<string name, string typeMnemonic> : TypeDef<Hipsr_Dialect, name> {

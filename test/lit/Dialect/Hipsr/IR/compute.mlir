@@ -145,6 +145,42 @@ func.func @memref_form_with_result(%ctx: !hipsr.context,
 }
 
 // -----
+// Device is not the only space a bufferized compute may use: extents are read
+// on the host, so a compute that produces them holds its input, its output and
+// its result in host memory.
+// CHECK-LABEL: func.func @memref_form_host_space(
+// CHECK-SAME: %[[CTX:.+]]: !hipsr.context, %[[EXTENTS:.+]]: memref<2xi64, #hipsr.mem<host>>, %[[INIT:.+]]: memref<2xi64, #hipsr.mem<host>>) -> memref<2xi64, #hipsr.mem<host>> {
+// CHECK-NEXT: %[[RESULT:.+]] = hipsr.compute(%[[CTX]]) ins(%[[EXTENTS]] : memref<2xi64, #hipsr.mem<host>>) outs(%[[INIT]] : memref<2xi64, #hipsr.mem<host>>) {
+// CHECK-NEXT: ^bb0(%{{.+}}: !hipsr.context, %{{.+}}: memref<2xi64, #hipsr.mem<host>>, %[[DEST:.+]]: memref<2xi64, #hipsr.mem<host>>):
+// CHECK-NEXT: hipsr.compute_yield %[[DEST]] : memref<2xi64, #hipsr.mem<host>>
+// CHECK-NEXT: } : memref<2xi64, #hipsr.mem<host>>{{$}}
+// CHECK-NEXT: return %[[RESULT]] : memref<2xi64, #hipsr.mem<host>>
+// CHECK-NEXT: }
+func.func @memref_form_host_space(%ctx: !hipsr.context,
+                                  %extents: memref<2xi64, #hipsr.mem<host>>,
+                                  %init: memref<2xi64, #hipsr.mem<host>>)
+    -> memref<2xi64, #hipsr.mem<host>> {
+  %out = hipsr.compute(%ctx) ins(%extents : memref<2xi64, #hipsr.mem<host>>)
+                             outs(%init : memref<2xi64, #hipsr.mem<host>>) {
+  ^bb0(%body_ctx: !hipsr.context, %in: memref<2xi64, #hipsr.mem<host>>,
+       %dest: memref<2xi64, #hipsr.mem<host>>):
+    hipsr.compute_yield %dest : memref<2xi64, #hipsr.mem<host>>
+  } : memref<2xi64, #hipsr.mem<host>>
+  return %out : memref<2xi64, #hipsr.mem<host>>
+}
+
+// -----
+// Any space is accepted, but a buffer still has to name the one it lives in.
+func.func @memref_without_space(%ctx: !hipsr.context, %init: memref<6xf16>) {
+  // expected-error @+1 {{operand #1 must be variadic of ranked tensor or hipsr memref, but got 'memref<6xf16>'}}
+  hipsr.compute(%ctx) ins() outs(%init : memref<6xf16>) {
+  ^bb0(%body_ctx: !hipsr.context, %dest: memref<6xf16>):
+    hipsr.compute_yield
+  }
+  return
+}
+
+// -----
 // The generic form is invalid because the body has no block.
 func.func @empty_body(%ctx: !hipsr.context) {
   // expected-error @+1 {{failed to verify constraint: region with 1 blocks}}
@@ -243,7 +279,7 @@ func.func @body_uses_parent_value(%ctx: !hipsr.context, %init: tensor<6xf16, #hi
 // -----
 // Inputs carry tensor data, so a scalar cannot cross the boundary.
 func.func @non_tensor_input(%ctx: !hipsr.context, %n: index) {
-  // expected-error @+1 {{operand #1 must be variadic of ranked device tensor or device memref, but got 'index'}}
+  // expected-error @+1 {{operand #1 must be variadic of ranked tensor or hipsr memref, but got 'index'}}
   hipsr.compute(%ctx) ins(%n : index) outs() {
   ^bb0(%body_ctx: !hipsr.context, %extent: index):
     hipsr.compute_yield

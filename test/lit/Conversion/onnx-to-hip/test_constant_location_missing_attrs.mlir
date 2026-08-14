@@ -11,7 +11,7 @@
 
 // RUN: not hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s 2>&1 | FileCheck %s
 
-// CHECK: error: onnx.Constant with location attribute missing location/offset/size
+// CHECK: error: onnx.Constant external source requires location/offset/size
 // CHECK-NEXT: %0 = "onnx.Constant"() {location = "*/_ORT_MEM_ADDR_/*"} : () -> tensor<2x4xf32>
 // CHECK-NEXT: ^
 

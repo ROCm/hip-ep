@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 //
 //===----------------------------------------------------------------------===//
-// Pipeline test: constant externalization in convert-onnx-to-hip.
+// Pipeline test: carrier conversion followed by constant externalization.
 //
 // Verifies that --externalize-min-num-elements selectively externalizes
 // constants:
@@ -18,7 +18,7 @@
 // pattern rewrite driver that runs as part of convertComputeOps.
 //===----------------------------------------------------------------------===//
 
-// RUN: mkdir -p %t && hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip='externalize-min-num-elements=4 externalize-output-dir=%t' %s | FileCheck %s
+// RUN: mkdir -p %t && hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip --hip-externalize-constants='externalize-min-num-elements=4 externalize-output-dir=%t' %s | FileCheck %s
 
 // Module-level: constants file attribute, sizes, and offsets.
 // CHECK: module attributes {

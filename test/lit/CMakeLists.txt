@@ -81,13 +81,13 @@ configure_file(
 set(LIT_ARGS "-sv" CACHE STRING "Extra arguments passed to lit (e.g. -j4 --no-progress-bar)")
 
 # Tools the suite needs at run time. hip-mlir-opt/hip-compiler are always our
-# targets. The LIT support utilities (FileCheck/not/count) are EXCLUDE_FROM_ALL
-# LLVM targets in a from-source (embedded) build and must be built before the
-# suite runs; in a prebuilt-prefix build they are plain executables in the
-# prefix (not targets), already on disk, so only depend on the ones that exist
-# as targets here.
+# targets. The LIT support utilities (FileCheck/not/count/split-file) are
+# EXCLUDE_FROM_ALL LLVM targets in a from-source (embedded) build and must be
+# built before the suite runs; in a prebuilt-prefix build they are plain
+# executables in the prefix (not targets), already on disk, so only depend on
+# the ones that exist as targets here.
 set(_lit_deps hip-mlir-opt hip-compiler)
-foreach(_lit_tool FileCheck not count)
+foreach(_lit_tool FileCheck not count split-file)
     if(TARGET ${_lit_tool})
         list(APPEND _lit_deps ${_lit_tool})
     endif()

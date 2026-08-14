@@ -26,6 +26,9 @@ add_custom_command(
 # include dirs as INTERFACE, so no manual Protobuf_INCLUDE_DIRS needed.
 add_library(mlir_compilation_proto STATIC ${PROTO_SRCS} ${PROTO_HDRS})
 
+# protobuf::libprotobuf propagates PROTOBUF_USE_DLLS when built shared.
+# Do not set it here: protobuf checks definedness, so setting it to 0 still
+# marks symbols dllimport and causes LNK2019 with static libprotobuf.lib.
 target_link_libraries(mlir_compilation_proto PUBLIC protobuf::libprotobuf)
 target_include_directories(mlir_compilation_proto PUBLIC
     ${CMAKE_CURRENT_BINARY_DIR}
@@ -34,5 +37,3 @@ target_include_directories(mlir_compilation_proto PUBLIC
 if(MSVC)
   set_source_files_properties(${PROTO_SRCS} PROPERTIES COMPILE_FLAGS "/wd4267")
 endif()
-# Fix LNK4217 warnings: protobuf is statically linked, not a DLL
-target_compile_definitions(mlir_compilation_proto PRIVATE PROTOBUF_USE_DLLS=0)

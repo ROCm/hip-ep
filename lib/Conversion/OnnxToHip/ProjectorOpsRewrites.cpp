@@ -38,9 +38,10 @@
 //
 // These rewrites run in the pre-lowering block of `ConvertOnnxToHipPass`,
 // alongside `FastGeluFusionPatterns` in a fixed-point round loop (an emitted
-// op from one round may be the root of a rewrite in the next). ONNX constant
-// `value` attrs must still be inline (lowerOnnxConstants has not run yet) so
-// the scalar exponent of Pow is readable.
+// op from one round may be the root of a rewrite in the next). These
+// ONNX-rooted patterns run before lowerOnnxConstants so generic
+// `onnx.Constant` producers and scalar Pow values are directly matchable;
+// standalone externalization happens after compute conversion.
 //
 // Note: `onnx.ReduceMean` is NOT rewritten here. It lowers directly to the
 // first-class `hip.reduce_mean` op (ReduceMeanConversion.cpp), whose runtime

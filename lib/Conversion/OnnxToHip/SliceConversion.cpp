@@ -39,8 +39,9 @@ namespace {
 //     `tensor.dim` on `data` (an upper bound — Slice cannot widen any axis).
 
 /// Return the dense-elements attribute backing \p value if it can be
-/// determined at compile time. Matches the patterns produced by
-/// `lowerOnnxConstants` (which runs before `convertComputeOps`).
+/// determined at compile time. Recognizes arith constants, inspectable
+/// hip.constant value carriers produced before `convertComputeOps`, and a
+/// legacy initialized-global bridge.
 static mlir::DenseElementsAttr getCompileTimeConstantTensor(mlir::Value value) {
   mlir::Operation *defOp = value.getDefiningOp();
   if (!defOp)
@@ -95,8 +96,8 @@ extractIntVector(mlir::Value v, llvm::SmallVectorImpl<int64_t> &out) {
   return denseIntVectorToSmallVector(getCompileTimeConstantTensor(v), out);
 }
 
-/// Prefer compile-time slice params stamped by SliceShapeFold (captured
-/// before constant externalization); fall back to reading inline operands.
+/// Prefer compile-time slice params stamped by SliceShapeFold while producers
+/// were generic ONNX constants; fall back to inspecting inline carriers.
 static mlir::LogicalResult
 extractSliceParamVector(mlir::Operation *op, llvm::StringRef attrName,
                         mlir::Value operand,

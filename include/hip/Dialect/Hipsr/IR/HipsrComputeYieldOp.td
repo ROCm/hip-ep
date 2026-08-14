@@ -16,9 +16,9 @@ def Hipsr_ComputeYieldOp : Hipsr_Op<"compute_yield",
   let description = [{
     Terminates a `hipsr.compute` body and gives that op its results.
 
-    Operands are tensors before bufferization and device memrefs
-    (`#hipsr.mem<device>`) after, and their types need not match the parent's
-    `outs` types. A bufferized compute has no results, so its yield carries no
+    Operands are tensors before bufferization and memrefs after, in any
+    `#hipsr.mem` space, and their types need not match the parent's `outs`
+    types. A bufferized compute has no results, so its yield carries no
     operands.
 
     Example:
@@ -27,7 +27,7 @@ def Hipsr_ComputeYieldOp : Hipsr_Op<"compute_yield",
     ```
   }];
 
-  let arguments = (ins Variadic<Hipsr_DeviceTensorOrMemRef>:$operands);
+  let arguments = (ins Variadic<Hipsr_TensorOrAnySpaceMemRef>:$operands);
 
   let assemblyFormat = "($operands^ `:` type($operands))? attr-dict";
 

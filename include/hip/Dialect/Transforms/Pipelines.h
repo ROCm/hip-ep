@@ -42,8 +42,8 @@ namespace hip {
 /// scalar lives in device or host-accessible memory).
 constexpr int64_t kDefaultExternalizeMinNumElements = 1;
 
-/// Pipeline options forwarded to the ConvertOnnxToHipPass for constant
-/// externalization. These mirror the pass options on ConvertOnnxToHipPass
+/// Pipeline options forwarded to ExternalizeConstantsPass. ConvertOnnxToHipPass
+/// only emits hip.constant carriers. These mirror the externalizer options
 /// so the pipeline flag surface is:
 ///   --onnx-to-hip-pipeline='externalize-min-num-elements=256
 ///                                externalize-output-dir=/tmp'
