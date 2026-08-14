@@ -805,6 +805,29 @@ HIP_KERNEL_API int hip_gqa_softmax_f32_to_f32(
     int input_batch_stride, int output_batch_stride,
     const void* head_sink, int num_heads, int use_smooth_softmax);
 
+/* Same as hip_gqa_softmax_f32_to_f32 / _f16, with the external additive mask
+ * folded into the score read so a preceding hip_gqa_add_attention_bias_f32 pass
+ * over the same buffer is not needed. output_fp32 picks the probability dtype
+ * (0 = fp16, feeding the fp16 Value GEMM; 1 = fp32) and
+ * bias_element_size_bytes the mask dtype (2 = fp16, 4 = fp32). The bias is
+ * added before the column max is taken.
+ *
+ * The bias is indexed on its own full extents, exactly as
+ * hip_gqa_add_attention_bias_f32 does, because the score buffer can be a
+ * sub-block of the logical [bias_sq, bias_total_seq] matrix: `cols` query rows
+ * starting at bias_row_offset, and `rows` key columns starting at
+ * bias_col_offset. Mind the axis names -- this kernel reduces along `rows`, so
+ * its `rows` is the key extent and its `cols` the query count, which is the
+ * transpose of the naming hip_gqa_add_attention_bias_f32 uses. */
+HIP_KERNEL_API int hip_gqa_softmax_f32_to_out_biased(
+    void* stream, const void* input_f32, void* output,
+    int total_head_queries, int rows, int cols,
+    int input_batch_stride, int output_batch_stride,
+    const void* head_sink, int num_heads, int use_smooth_softmax,
+    const void* bias, int bias_batch, int bias_heads,
+    int bias_element_size_bytes, int output_fp32,
+    int bias_sq, int bias_row_offset, int bias_total_seq, int bias_col_offset);
+
 /* Legacy fast-path decode kernel (folded into gqa_kernel.hip with a legacy_*
  * device kernel). The production decode path uses hip_gqa_flash_decode above
  * for EVERY fp16 causal GQA/MHA decode (window + sink folded in, split count
