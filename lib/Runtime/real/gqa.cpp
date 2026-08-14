@@ -307,15 +307,28 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
 }
 
 // A/B gate for serving an is_causal=0 export's additive attention mask on the
-// fused prefill path instead of the decomposed one. Default on; set
-// HIPDNN_EP_GQA_FUSED_EXT_MASK=0 to route those shapes back to the decomposed
-// pipeline, which is what makes the two paths comparable on one binary. Both
-// compute the same attention, so a numeric diff between them is a bug in this
-// path and not a modelling choice.
+// fused prefill path instead of the decomposed one. Set
+// HIPDNN_EP_GQA_FUSED_EXT_MASK=1 to route those shapes to the fused pipeline,
+// which is what makes the two paths comparable on one binary. Both compute the
+// same attention, so a numeric diff between them is a bug in this path and not
+// a modelling choice.
+//
+// Default OFF, on measurement rather than on principle. Against an *untuned*
+// decomposed pipeline the fused path wins (36.9 s against 39.8 s on a Gemma-4
+// 16K prefill). Against the autotuned one it loses badly: with the GQA GEMM
+// autotuner and the fused bias-softmax on, routing the 25 sliding d=256 layers
+// here costs 31.3 s against 20.1 s for leaving them decomposed -- 11.2 s worse.
+// The reason is the prefill tiling: at d=256 the v8 kernel keeps only 16-32
+// query rows resident per block, so it re-reads K/V from global memory for each
+// tile (~8.6 GB per head) and lands near 9% of peak, while the decomposed path
+// gets hipBLASLt's tuned tiles over the same FLOPs. The fused path stays in the
+// build because it needs no S x S score buffer, which is what makes long
+// prompts allocatable at all, and because that ranking will invert on a d where
+// more query rows fit per block.
 static bool gqa_fused_ext_mask_enabled() {
   static const bool enabled = [] {
     const char *v = std::getenv("HIPDNN_EP_GQA_FUSED_EXT_MASK");
-    return !v || std::strcmp(v, "0") != 0;
+    return v && std::strcmp(v, "0") != 0;
   }();
   return enabled;
 }
@@ -2235,11 +2248,12 @@ static int gqa_forward_hipblaslt(
     RUNTIME_DEBUG_LOG(
         "[REAL] GQA hipBLASLt: B=%lld sq=%lld total_seq=%lld H=%lld G=%lld "
         "d=%lld no_expand=%d transpose=%d heads_per_group=%lld groups=%lld "
-        "score_fp16=%d\n",
+        "score_fp16=%d fuse_bias=%d\n",
         (long long)B, (long long)sq, (long long)total_seq, (long long)H,
         (long long)G, (long long)d, static_cast<int>(use_no_expand),
         static_cast<int>(need_transpose), (long long)heads_per_group,
-        (long long)((B * H) / heads_per_group), static_cast<int>(score_fp16));
+        (long long)((B * H) / heads_per_group), static_cast<int>(score_fp16),
+        static_cast<int>(fuse_bias));
   }
 
 cleanup:
