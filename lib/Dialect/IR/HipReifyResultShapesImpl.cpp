@@ -39,12 +39,12 @@ LogicalResult reifyMatmulLikeShape(Operation *op, OpBuilder &b, Value A,
   if (aShape.empty() || bShape.empty())
     return failure();
 
-  // Re-run the matmul-shape helper. verify() has already passed by reify
-  // time, but bail on empty() in case a pre-verify call sneaks in.
-  SmallVector<int64_t> outShape = mlir::hip::inferMatmulShape(
+  // Validate before emitting dimension queries, including pre-verification calls.
+  FailureOr<SmallVector<int64_t>> inferredShape = mlir::hip::inferMatmulShape(
       aShape, bShape, [&]() { return op->emitOpError(); }, transA, transB);
-  if (outShape.empty())
+  if (failed(inferredShape))
     return failure();
+  ArrayRef<int64_t> outShape = *inferredShape;
 
   Location loc = op->getLoc();
   size_t outRank = outShape.size();
@@ -431,11 +431,11 @@ LogicalResult TransposeOp::reifyResultShapes(
     perm.push_back(ia.getInt());
   }
 
-  SmallVector<OpFoldResult> dims =
+  FailureOr<SmallVector<OpFoldResult>> dims =
       mlir::hip::reifyTransposeByPerm(b, getLoc(), getInput(), perm);
-  if (dims.empty())
+  if (failed(dims))
     return failure();
-  reifiedReturnShapes.assign({std::move(dims)});
+  reifiedReturnShapes.assign({std::move(*dims)});
   return success();
 }
 
@@ -448,11 +448,11 @@ GatherOp::reifyResultShapes(OpBuilder &b,
       !isa<RankedTensorType>(getIndices().getType()))
     return failure();
 
-  SmallVector<OpFoldResult> dims = mlir::hip::reifyGatherWithAxis(
+  FailureOr<SmallVector<OpFoldResult>> dims = mlir::hip::reifyGatherWithAxis(
       b, getLoc(), getData(), getIndices(), getAxis());
-  if (dims.empty())
+  if (failed(dims))
     return failure();
-  reifiedReturnShapes.assign({std::move(dims)});
+  reifiedReturnShapes.assign({std::move(*dims)});
   return success();
 }
 
@@ -601,11 +601,11 @@ LogicalResult GatherNDOp::reifyResultShapes(
       !isa<RankedTensorType>(getIndices().getType()))
     return failure();
 
-  SmallVector<OpFoldResult> dims = mlir::hip::reifyGatherND(
+  FailureOr<SmallVector<OpFoldResult>> dims = mlir::hip::reifyGatherND(
       b, getLoc(), getData(), getIndices(), getBatchDims());
-  if (dims.empty())
+  if (failed(dims))
     return failure();
-  reifiedReturnShapes.assign({std::move(dims)});
+  reifiedReturnShapes.assign({std::move(*dims)});
   return success();
 }
 
