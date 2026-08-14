@@ -34,7 +34,7 @@ func.func @alloc_without_dps_write(%ctx: !hipsr.context,
   hipsr.pool_domain(%ctx, %in
       : !hipsr.context, memref<4x1024xf16, #hipsr.mem<device>>) {
   ^bb0(%dctx: !hipsr.context, %din: memref<4x1024xf16, #hipsr.mem<device>>):
-    // expected-error@+1 {{allocation has users but no DPS write}}
+    // expected-error@+1 {{buffer used before written}}
     %unwritten = memref.alloc() : memref<4x1024xf16, #hipsr.mem<device>>
     hipsr.add(%dctx) ins(%unwritten, %unwritten
                              : memref<4x1024xf16, #hipsr.mem<device>>,

@@ -12,6 +12,7 @@
 #include "mlir/Dialect/Bufferization/Transforms/BufferViewFlowAnalysis.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/Interfaces/ViewLikeInterface.h"
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
@@ -120,19 +121,14 @@ computeLiveness(PoolDomainOp domain) {
 
   LLVM_DEBUG(DBGS() << "Computing liveness for " << idx << " operations\n");
 
-  struct FoldState {
-    std::optional<size_t> firstWrite;
-    std::optional<size_t> lastUse;
-  };
-
   auto processUser =
-      [&body, &opIndices](
-          Operation *user, Value alias, memref::AllocOp allocOp,
-          const FailureOr<FoldState> &current) -> FailureOr<FoldState> {
+      [&body, &opIndices](Operation *user, Value alias, memref::AllocOp allocOp,
+                          const FailureOr<std::optional<Lifetime>> &current)
+      -> FailureOr<std::optional<Lifetime>> {
     if (failed(current)) {
       return current;
     }
-    if (isa<memref::DeallocOp>(user)) {
+    if (isa<memref::DeallocOp, ViewLikeOpInterface>(user)) {
       return current;
     }
     Operation *blockLevelUser = body.findAncestorOpInBlock(*user);
@@ -152,37 +148,52 @@ computeLiveness(PoolDomainOp domain) {
     bool isDpsWrite =
         llvm::is_contained(getHipsrDestinationOperands(user), alias);
 
-    FoldState next = *current;
-    if (isDpsWrite) {
-      next.firstWrite = std::min(next.firstWrite.value_or(userIdx), userIdx);
+    if (current->has_value()) {
+      return std::optional<Lifetime>(Lifetime{
+          isDpsWrite ? std::min((*current)->start, userIdx) : (*current)->start,
+          std::max((*current)->end, userIdx)});
     }
-    next.lastUse = std::max(next.lastUse.value_or(userIdx), userIdx);
-    return next;
+    if (!isDpsWrite) {
+      allocOp.emitError("buffer used before written - invalid IR "
+                        "(first use is not a DPS destination)");
+      return failure();
+    }
+    return std::optional<Lifetime>(Lifetime{userIdx, userIdx});
+  };
+
+  auto blockLevelIndex =
+      [&body, &opIndices](Operation *user) -> std::optional<size_t> {
+    Operation *blockLevelUser = body.findAncestorOpInBlock(*user);
+    if (!blockLevelUser) {
+      return std::nullopt;
+    }
+    auto it = opIndices.find(blockLevelUser);
+    if (it == opIndices.end()) {
+      return std::nullopt;
+    }
+    return it->second;
   };
 
   auto processAllocation =
-      [&aliases, &processUser](
+      [&aliases, &processUser, &blockLevelIndex](
           memref::AllocOp allocOp) -> FailureOr<std::optional<Lifetime>> {
     Value buffer = allocOp.getResult();
-    FailureOr<FoldState> state = FoldState{};
+    llvm::SmallVector<std::pair<Value, Operation *>> users;
     for (Value alias : aliases.resolve(buffer)) {
       for (Operation *user : alias.getUsers()) {
-        state = processUser(user, alias, allocOp, state);
+        users.emplace_back(alias, user);
       }
     }
-    if (failed(state)) {
-      return failure();
+    llvm::stable_sort(
+        users, [&blockLevelIndex](const auto &lhs, const auto &rhs) {
+          return blockLevelIndex(lhs.second) < blockLevelIndex(rhs.second);
+        });
+    FailureOr<std::optional<Lifetime>> lifetime =
+        std::optional<Lifetime>(std::nullopt);
+    for (auto [alias, user] : users) {
+      lifetime = processUser(user, alias, allocOp, lifetime);
     }
-    if (!state->lastUse) {
-      return std::optional<Lifetime>(std::nullopt);
-    }
-    if (!state->firstWrite) {
-      allocOp.emitError("allocation has users but no DPS write - invalid IR "
-                        "(buffer read before it is written)");
-      return failure();
-    }
-    return std::optional<Lifetime>(
-        Lifetime{*state->firstWrite, *state->lastUse});
+    return lifetime;
   };
 
   llvm::DenseMap<Value, Lifetime> lifetimes;
