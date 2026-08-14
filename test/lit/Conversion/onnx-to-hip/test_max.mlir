@@ -96,4 +96,16 @@ module {
   // CHECK: %[[M0:.*]] = hip.max{{.*}}outs(%[[E0]] : tensor<2x3xf32>)
   // CHECK: %[[E1:.*]] = tensor.empty() : tensor<2x3xf32>
   // CHECK: hip.max{{.*}}ins(%[[M0]], {{.*}} : tensor<2x3xf32>, tensor<2x3xf32>) outs(%[[E1]] : tensor<2x3xf32>)
+
+  // --- Case 6: static final result refines dynamic pairwise inference ---
+  func.func @max_variadic_static_refinement(%a: tensor<?x1xf32>, %b: tensor<1x?xf32>, %c: tensor<?x?xf32>) -> tensor<2x3xf32> {
+    %result = "onnx.Max"(%a, %b, %c) : (tensor<?x1xf32>, tensor<1x?xf32>, tensor<?x?xf32>) -> tensor<2x3xf32>
+    return %result : tensor<2x3xf32>
+  }
+
+  // CHECK-LABEL: func.func @max_variadic_static_refinement
+  // CHECK: %[[E0:.*]] = tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?xf32>
+  // CHECK: %[[M0:.*]] = hip.max{{.*}}outs(%[[E0]] : tensor<?x?xf32>)
+  // CHECK: %[[E1:.*]] = tensor.empty() : tensor<2x3xf32>
+  // CHECK: hip.max{{.*}}ins(%[[M0]], {{.*}} : tensor<?x?xf32>, tensor<?x?xf32>) outs(%[[E1]] : tensor<2x3xf32>)
 }

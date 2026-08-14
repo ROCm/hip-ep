@@ -156,31 +156,52 @@ lowerVariadicBroadcastChain(mlir::Operation *op,
     return rewriter.notifyMatchFailure(op, llvm::Twine(opName) +
                                                " requires at least 1 input");
 
+  if (op->getNumResults() != 1)
+    return rewriter.notifyMatchFailure(op, llvm::Twine(opName) +
+                                               " requires exactly 1 result");
+  auto resultType =
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!resultType)
+    return rewriter.notifyMatchFailure(op, llvm::Twine(opName) +
+                                               " requires a ranked result");
+
+  llvm::SmallVector<mlir::RankedTensorType> inputTypes;
+  inputTypes.reserve(numInputs);
+  for (mlir::Value input : op->getOperands()) {
+    auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+    if (!inputType)
+      return rewriter.notifyMatchFailure(op, llvm::Twine(opName) +
+                                                 " requires ranked inputs");
+    if (inputType.getElementType() != resultType.getElementType())
+      return rewriter.notifyMatchFailure(
+          op, llvm::Twine(opName) +
+                  " requires homogeneous input and result element types");
+    inputTypes.push_back(inputType);
+  }
+
   if (numInputs == 1) {
-    rewriter.replaceOp(op, op->getOperand(0));
+    if (!isResultTypeCompatibleWithInferredShape(resultType,
+                                                 inputTypes.front().getShape()))
+      return rewriter.notifyMatchFailure(
+          op, llvm::Twine(opName) +
+                  " result type is incompatible with the input shape");
+    mlir::Value replacement = op->getOperand(0);
+    if (replacement.getType() != resultType)
+      replacement = mlir::tensor::CastOp::create(rewriter, op->getLoc(),
+                                                 resultType, replacement)
+                        .getResult();
+    rewriter.replaceOp(op, replacement);
     return mlir::success();
   }
 
   mlir::Location loc = op->getLoc();
-  auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 
   // Infer the complete pairwise chain before reification emits any shape SSA.
   llvm::SmallVector<llvm::SmallVector<int64_t>> stepStaticShapes;
-  auto firstType =
-      mlir::dyn_cast<mlir::RankedTensorType>(op->getOperand(0).getType());
-  if (!firstType)
-    return rewriter.notifyMatchFailure(op, llvm::Twine(opName) +
-                                               " requires ranked inputs");
-  llvm::SmallVector<int64_t> accumulatedShape(firstType.getShape());
+  llvm::SmallVector<int64_t> accumulatedShape(inputTypes.front().getShape());
   for (unsigned i : llvm::seq<unsigned>(1, numInputs)) {
-    auto rhsType =
-        mlir::dyn_cast<mlir::RankedTensorType>(op->getOperand(i).getType());
-    if (!rhsType)
-      return rewriter.notifyMatchFailure(op, llvm::Twine(opName) +
-                                                 " requires ranked inputs");
-    llvm::SmallVector<llvm::ArrayRef<int64_t>> pairShapes{accumulatedShape,
-                                                          rhsType.getShape()};
+    llvm::SmallVector<llvm::ArrayRef<int64_t>> pairShapes{
+        accumulatedShape, inputTypes[i].getShape()};
     auto stepShape = mlir::hip::inferBroadcastShape(
         pairShapes, [&]() { return op->emitError(); });
     if (mlir::failed(stepShape))
