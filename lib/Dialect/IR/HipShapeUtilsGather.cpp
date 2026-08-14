@@ -11,41 +11,46 @@
 
 using namespace mlir;
 
-SmallVector<OpFoldResult>
+FailureOr<SmallVector<OpFoldResult>>
 mlir::hip::reifyTransposeByPerm(OpBuilder &b, Location loc, Value input,
                                 ArrayRef<int64_t> perm) {
   auto inputType = dyn_cast<RankedTensorType>(input.getType());
   if (!inputType)
-    return {};
+    return failure();
   ArrayRef<int64_t> inputShape = inputType.getShape();
   int64_t rank = inputType.getRank();
   if (static_cast<int64_t>(perm.size()) != rank)
-    return {};
+    return failure();
+
+  // Validate the complete permutation before materializing any tensor.dim.
+  SmallVector<bool> seen(rank, false);
+  for (int64_t permutedDim : perm) {
+    if (permutedDim < 0 || permutedDim >= rank || seen[permutedDim])
+      return failure();
+    seen[permutedDim] = true;
+  }
 
   SmallVector<OpFoldResult> dims;
   dims.reserve(perm.size());
-  for (int64_t permutedDim : perm) {
-    if (permutedDim < 0 || permutedDim >= rank)
-      return {};
+  for (int64_t permutedDim : perm)
     dims.push_back(reifyDimOrConstant(b, loc, inputShape[permutedDim], input,
                                       permutedDim));
-  }
   return dims;
 }
 
-SmallVector<OpFoldResult>
+FailureOr<SmallVector<OpFoldResult>>
 mlir::hip::reifyGatherWithAxis(OpBuilder &b, Location loc, Value data,
                                Value indices, int64_t axis) {
   auto dataType = dyn_cast<RankedTensorType>(data.getType());
   auto indicesType = dyn_cast<RankedTensorType>(indices.getType());
   if (!dataType || !indicesType)
-    return {};
+    return failure();
   int64_t dataRank = dataType.getRank();
   int64_t indicesRank = indicesType.getRank();
   if (axis < 0)
     axis += dataRank;
   if (axis < 0 || axis >= dataRank)
-    return {};
+    return failure();
 
   ArrayRef<int64_t> dataShape = dataType.getShape();
   ArrayRef<int64_t> indicesShape = indicesType.getShape();
@@ -60,25 +65,25 @@ mlir::hip::reifyGatherWithAxis(OpBuilder &b, Location loc, Value data,
   return dims;
 }
 
-SmallVector<OpFoldResult> mlir::hip::reifyGatherND(OpBuilder &b, Location loc,
-                                                   Value data, Value indices,
-                                                   int64_t batchDims) {
+FailureOr<SmallVector<OpFoldResult>>
+mlir::hip::reifyGatherND(OpBuilder &b, Location loc, Value data, Value indices,
+                         int64_t batchDims) {
   auto dataType = dyn_cast<RankedTensorType>(data.getType());
   auto indicesType = dyn_cast<RankedTensorType>(indices.getType());
   if (!dataType || !indicesType)
-    return {};
+    return failure();
   int64_t dataRank = dataType.getRank();
   int64_t indicesRank = indicesType.getRank();
   if (indicesRank < 1)
-    return {};
+    return failure();
   ArrayRef<int64_t> dataShape = dataType.getShape();
   ArrayRef<int64_t> indicesShape = indicesType.getShape();
   int64_t tupleWidth = indicesShape[indicesRank - 1];
   if (ShapedType::isDynamic(tupleWidth))
-    return {};
+    return failure();
   if (batchDims < 0 || batchDims > indicesRank - 1 ||
       batchDims + tupleWidth > dataRank)
-    return {};
+    return failure();
 
   SmallVector<OpFoldResult> dims;
   dims.reserve(batchDims + (indicesRank - 1 - batchDims) +

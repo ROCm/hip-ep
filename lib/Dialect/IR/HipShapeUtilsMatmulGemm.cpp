@@ -11,17 +11,17 @@
 
 using namespace mlir;
 
-SmallVector<int64_t>
+FailureOr<SmallVector<int64_t>>
 mlir::hip::inferMatmulShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
                             function_ref<InFlightDiagnostic()> emitError,
                             int64_t transA, int64_t transB) {
   if (aShape.size() < 2) {
     emitError() << "matmul A must have rank >= 2, got rank " << aShape.size();
-    return {};
+    return failure();
   }
   if (bShape.size() < 2) {
     emitError() << "matmul B must have rank >= 2, got rank " << bShape.size();
-    return {};
+    return failure();
   }
 
   int64_t m = transA ? aShape.back() : aShape[aShape.size() - 2];
@@ -31,7 +31,7 @@ mlir::hip::inferMatmulShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
   if (!ShapedType::isDynamic(kA) && !ShapedType::isDynamic(kB) && kA != kB) {
     emitError() << "matmul contraction dim mismatch: A.shape[-1]=" << kA
                 << " vs B.shape[-2]=" << kB;
-    return {};
+    return failure();
   }
 
   ArrayRef<int64_t> aBatch = aShape.drop_back(2);
@@ -41,7 +41,7 @@ mlir::hip::inferMatmulShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
     emitError() << "matmul batch broadcast failure: A.batch="
                 << mlir::hip::detail::formatShape(aBatch)
                 << " B.batch=" << mlir::hip::detail::formatShape(bBatch);
-    return {};
+    return failure();
   }
   result.push_back(m);
   result.push_back(n);

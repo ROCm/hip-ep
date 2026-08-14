@@ -129,6 +129,52 @@ func.func @rank_zero_reify(%ctx: !hip.context, %cond: tensor<i1>,
 
 // -----
 
+// Rank-zero semantic helpers must distinguish a successful empty shape from
+// failure for Transpose, Gather, and GatherND.
+// MEMREF-LABEL: func.func @transpose_rank_zero_reify
+// MEMREF: hip.transpose
+// MEMREF-SAME: test.rank_zero_reified
+func.func @transpose_rank_zero_reify(
+    %ctx: !hip.context, %input: tensor<f32>,
+    %out: tensor<f32>) -> tensor<f32> {
+  %result = hip.transpose(%ctx)
+      ins(%input : tensor<f32>)
+      outs(%out : tensor<f32>)
+      {perm = [], test.reify_rank_zero}
+      : tensor<f32>
+  return %result : tensor<f32>
+}
+
+// MEMREF-LABEL: func.func @gather_rank_zero_reify
+// MEMREF: hip.gather
+// MEMREF-SAME: test.rank_zero_reified
+func.func @gather_rank_zero_reify(
+    %ctx: !hip.context, %data: tensor<4xf32>, %indices: tensor<i64>,
+    %out: tensor<f32>) -> tensor<f32> {
+  %result = hip.gather(%ctx)
+      ins(%data, %indices : tensor<4xf32>, tensor<i64>)
+      outs(%out : tensor<f32>)
+      {axis = 0 : i64, test.reify_rank_zero}
+      : tensor<f32>
+  return %result : tensor<f32>
+}
+
+// MEMREF-LABEL: func.func @gather_nd_rank_zero_reify
+// MEMREF: hip.gather_nd
+// MEMREF-SAME: test.rank_zero_reified
+func.func @gather_nd_rank_zero_reify(
+    %ctx: !hip.context, %data: tensor<4xf32>,
+    %indices: tensor<1xi64>, %out: tensor<f32>) -> tensor<f32> {
+  %result = hip.gather_nd(%ctx)
+      ins(%data, %indices : tensor<4xf32>, tensor<1xi64>)
+      outs(%out : tensor<f32>)
+      {batch_dims = 0 : i64, test.reify_rank_zero}
+      : tensor<f32>
+  return %result : tensor<f32>
+}
+
+// -----
+
 // A rank-mismatched later init must be diagnosed before the dynamic first
 // output emits tensor.dim. The test pass temporarily adds one rank to init #1,
 // invokes the shared default, and restores the valid type afterward.
