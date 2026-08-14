@@ -26,8 +26,9 @@ bool isLosslessShapeIndexCast(arith::IndexCastOp op);
 /// payload type exactly matches the SSA value type.
 DenseElementsAttr matchHipCompileTimeConstantTensor(Value value);
 
-/// Return whether an imported ranked type is proven compatible with a pure
-/// inferred shape. Static imported extents require equal static inference.
+/// Return whether an imported ranked type is compatible with a pure inferred
+/// shape. A dynamic extent on either side is compatible; unequal static
+/// extents are contradictions.
 bool isResultTypeCompatibleWithInferredShape(
     RankedTensorType resultType, llvm::ArrayRef<int64_t> inferredShape);
 

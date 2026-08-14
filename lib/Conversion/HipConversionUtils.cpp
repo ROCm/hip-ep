@@ -61,7 +61,8 @@ bool isResultTypeCompatibleWithInferredShape(
     return false;
   for (auto [actual, inferred] :
        llvm::zip_equal(resultType.getShape(), inferredShape)) {
-    if (!ShapedType::isDynamic(actual) && actual != inferred)
+    if (!ShapedType::isDynamic(actual) && !ShapedType::isDynamic(inferred) &&
+        actual != inferred)
       return false;
   }
   return true;
