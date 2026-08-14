@@ -37,6 +37,8 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Sequence.h"
 #include "llvm/ADT/SmallSet.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -137,6 +139,91 @@ inline int64_t getHipdnnInputDataType(mlir::Type elemType) {
       elemType.isSignlessInteger(8))
     return 5; // HIPDNN_EP_DATATYPE_INT8 (bool/i1, signed/signless i8)
   return -1;
+}
+
+/// Lower a variadic ONNX elementwise op to a left-associated chain of pairwise
+/// broadcasting HIP ops. Every intermediate result type comes from that
+/// pair's shared broadcast shape; only the final step must match the imported
+/// ONNX result type.
+template <typename HipOpTy>
+mlir::LogicalResult
+lowerVariadicBroadcastChain(mlir::Operation *op,
+                            mlir::PatternRewriter &rewriter) {
+  llvm::StringRef opName = op->getName().getStringRef();
+  unsigned numInputs = op->getNumOperands();
+  if (numInputs == 0)
+    return rewriter.notifyMatchFailure(op, llvm::Twine(opName) +
+                                               " requires at least 1 input");
+
+  if (numInputs == 1) {
+    rewriter.replaceOp(op, op->getOperand(0));
+    return mlir::success();
+  }
+
+  mlir::Location loc = op->getLoc();
+  auto resultType =
+      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+
+  // Infer the complete pairwise chain before reification emits any shape SSA.
+  llvm::SmallVector<llvm::SmallVector<int64_t>> stepStaticShapes;
+  auto firstType =
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getOperand(0).getType());
+  if (!firstType)
+    return rewriter.notifyMatchFailure(op, llvm::Twine(opName) +
+                                               " requires ranked inputs");
+  llvm::SmallVector<int64_t> accumulatedShape(firstType.getShape());
+  for (unsigned i : llvm::seq<unsigned>(1, numInputs)) {
+    auto rhsType =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getOperand(i).getType());
+    if (!rhsType)
+      return rewriter.notifyMatchFailure(op, llvm::Twine(opName) +
+                                                 " requires ranked inputs");
+    llvm::SmallVector<llvm::ArrayRef<int64_t>> pairShapes{accumulatedShape,
+                                                          rhsType.getShape()};
+    auto stepShape = mlir::hip::inferBroadcastShape(
+        pairShapes, [&]() { return op->emitError(); });
+    if (mlir::failed(stepShape))
+      return mlir::failure();
+    accumulatedShape.assign(stepShape->begin(), stepShape->end());
+    stepStaticShapes.push_back(*stepShape);
+  }
+  if (!isResultTypeCompatibleWithInferredShape(resultType, accumulatedShape))
+    return rewriter.notifyMatchFailure(
+        op, llvm::Twine(opName) +
+                " result type is incompatible with the broadcast shape");
+
+  auto context = getContextArg(op, rewriter);
+  if (mlir::failed(context))
+    return mlir::failure();
+
+  mlir::Value accumulate = op->getOperand(0);
+  for (unsigned i : llvm::seq<unsigned>(1, numInputs)) {
+    mlir::Value rhs = op->getOperand(i);
+    auto stepShape = mlir::hip::reifyBroadcastResultShape(
+        rewriter, loc, {accumulate, rhs}, [&]() { return op->emitError(); });
+    if (mlir::failed(stepShape))
+      return mlir::failure();
+
+    bool isFinal = i == numInputs - 1;
+    mlir::RankedTensorType stepResultType =
+        isFinal ? resultType
+                : mlir::RankedTensorType::get(stepStaticShapes[i - 1],
+                                              resultType.getElementType(),
+                                              resultType.getEncoding());
+    auto init = createEmptyTensorFromReifiedShape(rewriter, loc, stepResultType,
+                                                  *stepShape);
+    if (mlir::failed(init))
+      return rewriter.notifyMatchFailure(
+          op, llvm::Twine(opName) +
+                  " result type is incompatible with the broadcast shape");
+
+    accumulate = HipOpTy::create(rewriter, loc, stepResultType, *context,
+                                 accumulate, rhs, *init)
+                     ->getResult(0);
+  }
+
+  rewriter.replaceOp(op, accumulate);
+  return mlir::success();
 }
 
 /// Build a hip.gqa op for the Whisper-MHA / Whisper-encoder-Attention paths.
