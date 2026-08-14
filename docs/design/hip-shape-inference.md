@@ -66,6 +66,28 @@ compiler graph and rejects a mutation. This closes the hash-to-compile window;
 it does not make later changes to a streaming source file safe after
 compilation.
 
+## Shape knowledge and symbolic scope
+
+The foundation represents compile-time extents in `RankedTensorType` and
+runtime extents as ordinary index SSA carried by `OpFoldResult`. It does not
+maintain a persistent inter-operation constraint set for facts such as “these
+two dynamic dimensions are equal.” Consequently, type-level verification treats
+dynamic extents as compatible unknowns, while runtime contracts check
+relationships that are not statically visible.
+
+This does not preclude symbolic reasoning. A future analysis may use MLIR's
+`ValueBoundsOpInterface` and external models over the same dimension SSA without
+changing the infer/reify interfaces defined here. Prefer that standard mechanism
+before introducing another feature-specific symbolic analysis. Frontend payload
+provenance, such as reconstructing a shape tensor's values, is a separate
+problem from proving affine equality between dimensions.
+
+Phase 1 of `--hip-infer-shapes` is intentionally local rather than a global
+fixpoint: each operation is refined once in producer-before-consumer order, and
+cast barriers preserve existing consumer signatures instead of propagating
+narrowed types through the whole graph. The loop-signature phase iterates only
+because outlined loop body signatures form an explicit cyclic contract.
+
 ## DPS shape contract
 
 In tensor mode, each HIP DPS tensor result must equal the corresponding `outs` operand type. In memref mode, the operation has no tensor result; it writes directly through the destination memref.
