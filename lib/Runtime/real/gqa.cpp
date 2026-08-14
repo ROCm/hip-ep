@@ -305,6 +305,20 @@ static int update_kv_cache(hipStream_t stream, const void *past_key,
   return 0;
 }
 
+// A/B gate for serving an is_causal=0 export's additive attention mask on the
+// fused prefill path instead of the decomposed one. Default on; set
+// HIPDNN_EP_GQA_FUSED_EXT_MASK=0 to route those shapes back to the decomposed
+// pipeline, which is what makes the two paths comparable on one binary. Both
+// compute the same attention, so a numeric diff between them is a bug in this
+// path and not a modelling choice.
+static bool gqa_fused_ext_mask_enabled() {
+  static const bool enabled = [] {
+    const char *v = std::getenv("HIPDNN_EP_GQA_FUSED_EXT_MASK");
+    return !v || std::strcmp(v, "0") != 0;
+  }();
+  return enabled;
+}
+
 //===----------------------------------------------------------------------===//
 // Fused-only forward: fp16, causal, GQA. No hipBLASLt, no decomposed fallback.
 //===----------------------------------------------------------------------===//
@@ -321,7 +335,12 @@ static int gqa_forward_fused(
     const void *k_scale = nullptr, const void *v_scale = nullptr,
     KvCacheFormat kv_format = KvCacheFormat::Fp16,
     const void *head_sink = nullptr, bool use_smooth_softmax = false,
-    int local_window_size = -1) {
+    int local_window_size = -1,
+    // Additive attention mask (onnx.Attention `attn_mask`). Prefill only, and
+    // only together with no_causal: the mask replaces the implicit causal
+    // triangle rather than adding to it. See hip_gqa_flash_prefill_v4.
+    const void *attention_bias = nullptr, int64_t attn_bias_batch = 1,
+    int64_t attn_bias_num_heads = 1, bool no_causal = false) {
 
   // Any non-fp16 cache reads/writes quantized bytes on the concat/append/decode
   // path; the specific scheme is carried by kv_format (extensible to INT4/FP8).
@@ -658,26 +677,32 @@ static int gqa_forward_fused(
     attn_max_seq = static_cast<int>(total_seq);
   }
 
-  // Single unified entry; v5 (d==64) / v7 (d==128) selection lives in the
-  // kernel TU (gqa_kernel.hip). v3 carries the sink and the window; it returns
-  // -1 rather than dropping either when the kernel for this d cannot apply it,
-  // and the caller then falls back to the decomposed path.
-  int fp_rc = hip_gqa_flash_prefill_v3(
+  // Single unified entry; v5 (d==64) / v7 (d==128) / v8 (d==256) selection lives
+  // in the kernel TU (gqa_kernel.hip). v4 carries the sink, the window and the
+  // additive mask; it returns -1 rather than dropping any of them when the
+  // kernel for this d cannot apply it, and the caller then falls back to the
+  // decomposed path.
+  int fp_rc = hip_gqa_flash_prefill_v4(
       stream, qSrc, kAttn, vAttn, output, static_cast<int>(B),
       static_cast<int>(H), static_cast<int>(G), static_cast<int>(sq),
       static_cast<int>(total_seq), static_cast<int>(d), attn_max_seq,
       static_cast<int>(past_len), scale, local_window_size, head_sink,
-      static_cast<int>(H), use_smooth_softmax ? 1 : 0);
-  // window is logged because it selects the HAS_WINDOW instantiation, so a
-  // dispatch that looks identical here can be two different kernels.
+      static_cast<int>(H), use_smooth_softmax ? 1 : 0, attention_bias,
+      static_cast<int>(attn_bias_batch), static_cast<int>(attn_bias_num_heads),
+      no_causal ? 1 : 0);
+  // window and mask are logged because each selects a different instantiation,
+  // so a dispatch that looks identical here can be several different kernels.
   RUNTIME_DEBUG_LOG(
       "[REAL] GQA fused prefill (%s d=%lld -> v%d): B=%lld sq=%lld "
       "total_seq=%lld H=%lld G=%lld past_len=%lld sink=%d smooth=%d window=%d "
-      "rc=%d\n",
-      kv_quantized ? "quant" : "fp16", (long long)d, (d == 64 ? 5 : 7),
+      "extmask=%d no_causal=%d rc=%d\n",
+      kv_quantized ? "quant" : "fp16", (long long)d,
+      (d == 64 ? 5 : (d == 256 ? 8 : 7)),
       (long long)B, (long long)sq, (long long)total_seq, (long long)H,
       (long long)G, (long long)past_len, static_cast<int>(head_sink != nullptr),
-      static_cast<int>(use_smooth_softmax), local_window_size, fp_rc);
+      static_cast<int>(use_smooth_softmax), local_window_size,
+      static_cast<int>(attention_bias != nullptr), static_cast<int>(no_causal),
+      fp_rc);
   return fp_rc != 0 ? -1 : 0;
 }
 
@@ -2167,11 +2192,6 @@ int wrap_group_query_attention(
   // to the templated set here.
   const bool head_dim_ok =
       is_decode ? true : (head_dim == 64 || head_dim == 128 || head_dim == 256);
-  // attention_bias (onnx.Attention external mask) is only applied by the legacy
-  // decomposed pipeline (Step 8b); the lean fused path would silently drop it,
-  // so exclude it here to route masked attention to gqa_forward_hipblaslt
-  // below.
-  //
   // Smooth softmax is active when a sink is supplied OR the attribute is
   // explicitly 1, matching ORT (gqa_attention_base.h:
   // use_smooth_softmax_ || head_sink != nullptr).
@@ -2189,15 +2209,43 @@ int wrap_group_query_attention(
   // is unverified here; prefill is what the window costs us on gpt-oss.
   const bool window_ok =
       local_window_size <= 0 || (!is_decode && head_dim == 64);
+
+  // An is_causal=0 export with an additive mask -- Gemma-4, whose mask carries
+  // causality and a 1024-token sliding window together -- used to fail both the
+  // no_causal and the attention_bias term and was therefore forced onto the
+  // decomposed pipeline, which materializes the whole S x S score matrix. That
+  // is the dominant cost of its prefill: at a 16K prompt the score buffers alone
+  // want 24.5 GiB and SQTT attributes ~80% of TTFT to those layers.
+  //
+  // The v8 prefill kernel now applies such a mask itself (EXT_MASK), so admit
+  // exactly the shape it serves and nothing more. The two conditions are a pair,
+  // not independent relaxations: the mask REPLACES the implicit causal triangle,
+  // so a mask without no_causal would need both applied and is still declined,
+  // and no_causal without a mask is unmasked bidirectional attention, which no
+  // prefill kernel here implements.
+  //
+  // Prefill only. Decode has no masked instantiation, and its own geometry gate
+  // is separate. Terms are kept deliberately narrow -- every combination not
+  // named here keeps routing to the decomposed pipeline, which implements all of
+  // them. hip_gqa_flash_prefill_v4 re-checks the same conditions and returns -1
+  // rather than dropping a mask, so a gate that is wider than the kernel fails
+  // the op instead of silently computing unmasked attention.
+  const bool ext_mask_prefill =
+      !is_decode && no_causal != 0 && attention_bias != nullptr &&
+      head_dim == 256 && !has_smooth_softmax && local_window_size <= 0 &&
+      gqa_fused_ext_mask_enabled();
+  const bool causal_ok = (no_causal == 0) || ext_mask_prefill;
+  const bool bias_ok = (attention_bias == nullptr) || ext_mask_prefill;
+
   // The whole fused path (gqa_forward_fused, including the sink and windowed
   // prefill kernels above) is built on the RDNA-only WMMA intrinsics, which
   // trap on CDNA (wave64, e.g. MI350). Route wave64 to the decomposed hipBLASLt
   // pipeline below (MFMA GEMMs + wave-portable scalar kernels), which is
   // feature-complete and correct on both wave sizes. RDNA is unaffected.
-  const bool fused_supported =
-      element_size_bytes == 2 && no_causal == 0 && window_ok && sink_ok &&
-      head_dim_ok && decode_geometry_ok && attention_bias == nullptr &&
-      !hipdnn_device_is_wave64();
+  const bool fused_supported = element_size_bytes == 2 && causal_ok &&
+                               window_ok && sink_ok && head_dim_ok &&
+                               decode_geometry_ok && bias_ok &&
+                               !hipdnn_device_is_wave64();
 
   // The quantized-cache kernels live exclusively on the fused path, which is
   // disabled above on wave64 because it is built on the RDNA-only WMMA
@@ -2236,15 +2284,20 @@ int wrap_group_query_attention(
       fprintf(stderr, "wrap_group_query_attention: null hipblas handle\n");
       return -1;
     }
+    // bias / ext_mask are printed because they are two of the gate terms; a
+    // reader chasing "why is this not fused" cannot otherwise tell an absent
+    // mask from a mask that was rejected.
     RUNTIME_DEBUG_LOG(
         "[REAL] wrap_group_query_attention: routing to legacy decomposed "
         "pipeline "
         "(elem=%lld no_causal=%d window=%lld sink=%d smooth=%lld d=%lld "
-        "sq=%lld geom_ok=%d)\n",
+        "sq=%lld geom_ok=%d bias=%d bias_b=%lld bias_h=%lld ext_mask=%d)\n",
         (long long)element_size_bytes, static_cast<int>(no_causal),
         (long long)local_window_size, static_cast<int>(head_sink != nullptr),
         (long long)smooth_softmax, (long long)head_dim, (long long)seq_len_q,
-        static_cast<int>(decode_geometry_ok));
+        static_cast<int>(decode_geometry_ok),
+        static_cast<int>(attention_bias != nullptr), (long long)attn_bias_batch,
+        (long long)attn_bias_num_heads, static_cast<int>(ext_mask_prefill));
     int lrc = gqa_forward_hipblaslt(
         state, stream, ltHandle, query, key, value, past_key, past_value,
         seqlens_k, cos_cache, sin_cache, head_sink, has_smooth_softmax,
@@ -2273,7 +2326,9 @@ int wrap_group_query_attention(
       cos_cache, sin_cache, output, present_key, present_value, batch_size,
       seq_len_q, seq_len_kv, past_buf_seq, num_heads, kv_num_heads, head_dim,
       scale, do_rotary, k_scale, v_scale, kv_format, head_sink,
-      has_smooth_softmax, static_cast<int>(local_window_size));
+      has_smooth_softmax, static_cast<int>(local_window_size),
+      ext_mask_prefill ? attention_bias : nullptr, attn_bias_batch,
+      attn_bias_num_heads, ext_mask_prefill);
   if (rc != 0)
     fprintf(stderr,
             "wrap_group_query_attention: gqa_forward_fused failed "

@@ -782,6 +782,32 @@ HIP_KERNEL_API int hip_gqa_flash_prefill_v3(
     int past_len, float scale, int local_window_size, const void* head_sink,
     int num_heads, int smooth_softmax);
 
+/* Same as hip_gqa_flash_prefill_v3, plus the additive attention mask carried by
+ * the onnx.Attention `attn_mask` input. This is what lets an is_causal=0 export
+ * (Gemma-4, whose mask encodes causality and a sliding window together) use the
+ * fused prefill at all: previously any such model was excluded and materialized
+ * the full S x S score matrix on the decomposed path.
+ *
+ *   attn_bias   : fp16 [bias_batch, bias_heads, sq, skv], either leading dim 1
+ *                 to broadcast, or null for no mask. Same operand and layout
+ *                 the decomposed path's add_attention_bias reads.
+ *   no_causal   : must be non-zero when attn_bias is non-null. The mask
+ *                 REPLACES the implicit causal triangle rather than adding to
+ *                 it, so a masked request that also wants the triangle is
+ *                 declined instead of served with only one of the two.
+ *
+ * A masked request is served only at d == 256 (the v8 kernel), and only without
+ * a sink, smooth softmax, or a separate window argument. Everything else
+ * returns -1 so the caller falls back to the decomposed pipeline, which
+ * implements them all -- no combination is silently dropped. With a null
+ * attn_bias and no_causal == 0 this forwards to v3 unchanged. */
+HIP_KERNEL_API int hip_gqa_flash_prefill_v4(
+    void* stream, const void* Q, const void* Kcache, const void* Vcache,
+    void* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
+    int past_len, float scale, int local_window_size, const void* head_sink,
+    int num_heads, int smooth_softmax, const void* attn_bias, int bias_batch,
+    int bias_heads, int no_causal);
+
 /* NB: prefill is compute-bound, so there is deliberately NO separate int8
  * prefill kernel. The runtime (real/gqa.cpp) dequantizes the int8 KV cache to an
  * fp16 scratch ONCE (hip_gqa_dequant_kv_i8_to_fp16) and reuses the tuned fp16

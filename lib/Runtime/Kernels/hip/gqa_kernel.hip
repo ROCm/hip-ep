@@ -3304,8 +3304,25 @@ static int tunePrefillV7Cfg(
 // that capped v7); the smaller ROWS also spawns more blocks, filling the
 // GPU better on short prompts.
 // Grid: (num_q_tiles*B, Hq). Block: ND*32.
+//
+// EXT_MASK swaps the implicit causal triangle for the additive fp16 mask the
+// onnx.Attention `attn_mask` input carries (is_causal=0 exports, e.g. Gemma-4,
+// where the mask encodes causality AND a sliding window). Three things change,
+// and all three are required together -- the mask is the only masking, so
+// keeping the triangle as well would over-mask, and dropping the triangle
+// without the mask would under-mask:
+//   * the score gets `+ bias` before the log2 rescale, matching the decomposed
+//     path's order (GEMM applies alpha=scale, then add_attention_bias adds the
+//     mask in natural units, then softmax). Adding in natural units and
+//     rescaling once keeps the two paths algebraically identical.
+//   * the causal predicate drops out of the softmax masking loop; only the
+//     kv_pos >= skv bounds guard stays.
+//   * num_tiles can no longer stop at the diagonal, so the KV loop runs the
+//     full skv. This is the cost of the feature: roughly 2x the tile count of a
+//     causal prefill. It is still far below materializing S x S, which is what
+//     this path exists to avoid.
 // =====================================================================
-template <int ND, int MT, int BKV, int D>
+template <int ND, int MT, int BKV, int D, bool EXT_MASK>
 __global__ void __launch_bounds__(ND * 32)
 gqa_flash_prefill_v8_kernel(
     const _Float16* __restrict__ Q,       // [B, sq, Hq, D]
@@ -3313,7 +3330,10 @@ gqa_flash_prefill_v8_kernel(
     const _Float16* __restrict__ Vcache,  // [B, G, max_seq, D]
     _Float16* __restrict__ O,             // [B, sq, Hq, D]
     int B_count, int Hq, int G, int sq, int skv, int max_seq, int past_len,
-    float scale, int ablate)
+    float scale, int ablate,
+    // EXT_MASK only: [bias_batch, bias_heads, sq, skv], either leading dim 1
+    // to broadcast. Same operand and layout add_attention_bias_kernel reads.
+    const _Float16* __restrict__ bias, int bias_batch, int bias_heads)
 {
     const int abl = __builtin_amdgcn_readfirstlane(ablate);
     constexpr int kWmmaTile = 16;
@@ -3339,6 +3359,17 @@ gqa_flash_prefill_v8_kernel(
     const int pair      = lane_id / kWmmaTile;
     const int dt_base   = group * DPG;         // this wave's first D-tile
     const int q_start   = q_tile_idx * ROWS;
+
+    // Broadcast-resolved base offset of this (batch, head) plane in the mask.
+    // Hoisted out of the score loop: only q_pos/kv_pos vary per element, and a
+    // head-broadcast mask (bias_heads == 1, the common export) makes every head
+    // in the grid read the same plane.
+    size_t bias_base = 0;
+    if constexpr (EXT_MASK) {
+        const int bias_b = (bias_batch == 1) ? 0 : batch;
+        const int bias_h = (bias_heads == 1) ? 0 : head_q;
+        bias_base = ((size_t)bias_b * bias_heads + bias_h) * (size_t)sq * skv;
+    }
 
     extern __shared__ char smem_v8[];
     _Float16* V_lds  = reinterpret_cast<_Float16*>(smem_v8);
@@ -3372,8 +3403,12 @@ gqa_flash_prefill_v8_kernel(
         #pragma unroll
         for (int e = 0; e < 8; ++e) { m_reg[mt][e] = -INFINITY; l_reg[mt][e] = 0.0f; }
 
-    const int kv_max    = (skv - 1 < past_len + q_start + ROWS - 1)
-                              ? (skv - 1) : (past_len + q_start + ROWS - 1);
+    // Without the implicit triangle there is no diagonal to stop at, so every
+    // query tile must sweep the whole KV extent.
+    const int kv_max    = EXT_MASK
+                              ? (skv - 1)
+                              : ((skv - 1 < past_len + q_start + ROWS - 1)
+                                     ? (skv - 1) : (past_len + q_start + ROWS - 1));
     const int num_tiles = kv_max / BKV + 1;
 
     for (int t = 0; t < num_tiles; ++t) {
@@ -3441,7 +3476,20 @@ gqa_flash_prefill_v8_kernel(
                     #pragma unroll
                     for (int g = 0; g < ND; ++g)
                         acc += Sp_lds[((size_t)g * ROWS + mt * 16 + rl) * SP_STR + col];
-                    S_reg[mt][sj][e] = acc * scale * kLog2e;
+                    float s = acc * scale;
+                    if constexpr (EXT_MASK) {
+                        // Natural units here, exactly where add_attention_bias
+                        // adds it on the decomposed path; the single kLog2e
+                        // below then carries score and mask together, so the
+                        // mask must NOT be pre-scaled by kLog2e or by scale.
+                        // Out-of-range lanes are dropped by the softmax guard
+                        // below, so skip the load rather than read past the end.
+                        const int q_pos  = q_start + mt * 16 + rl;
+                        const int kv_pos = kv0 + col;
+                        if (q_pos < sq && kv_pos < skv)
+                            s += (float)bias[bias_base + (size_t)q_pos * skv + kv_pos];
+                    }
+                    S_reg[mt][sj][e] = s * kLog2e;
                 }
 
         // ---- online softmax on full S (identical across waves) ----
@@ -3459,7 +3507,12 @@ gqa_flash_prefill_v8_kernel(
                     #pragma unroll
                     for (int sj = 0; sj < S_TILES_J; ++sj) {
                         const int kv_pos = kv0 + sj * 16 + wmma_lane;
-                        if (kv_pos >= skv || kv_pos > past_len + q_pos)
+                        // Under EXT_MASK the additive mask is the only masking;
+                        // only the KV bound still has to be enforced here.
+                        const bool drop = EXT_MASK
+                            ? (kv_pos >= skv)
+                            : (kv_pos >= skv || kv_pos > past_len + q_pos);
+                        if (drop)
                             S_reg[mt][sj][e] = -INFINITY;
                         rmax = fmaxf(rmax, S_reg[mt][sj][e]);
                     }
@@ -3566,11 +3619,23 @@ static inline size_t prefillV8SmemBytes(int nd, int mt, int bkv, int d) {
 static constexpr size_t kPrefillV8MaxSmem = 65536;
 static int g_v8_ablate = 0;
 
+// The additive attention mask, threaded to the kernel as one value so adding it
+// does not widen every host signature by three parameters. A null `bias` means
+// no external mask, which selects the EXT_MASK=false instantiation and leaves
+// the causal kernel byte-identical to before.
+struct PrefillExtMask {
+    const _Float16* bias = nullptr;
+    int batch = 1;
+    int heads = 1;
+
+    bool active() const { return bias != nullptr; }
+};
+
 static inline void dispatchPrefillV8(
     int nd, int mt, int bkv, int d, hipStream_t stream,
     const _Float16* Q, const _Float16* Kcache, const _Float16* Vcache,
     _Float16* O, int B, int Hq, int G, int sq, int skv, int max_seq,
-    int past_len, float scale)
+    int past_len, float scale, PrefillExtMask mask)
 {
     const int rows = mt * 16;
     const int num_q_tiles = (sq + rows - 1) / rows;
@@ -3578,19 +3643,25 @@ static inline void dispatchPrefillV8(
     const size_t smem = prefillV8SmemBytes(nd, mt, bkv, d);
     const int ablate = g_v8_ablate;
 
-    #define LAUNCH_V8(ND_, MT_, BKV_)                                           \
-        gqa_flash_prefill_v8_kernel<ND_, MT_, BKV_, 256>                        \
+    #define LAUNCH_V8(ND_, MT_, BKV_, EM_)                                      \
+        gqa_flash_prefill_v8_kernel<ND_, MT_, BKV_, 256, EM_>                   \
             <<<grid, ND_ * 32, smem, stream>>>(                                 \
                 Q, Kcache, Vcache, O, B, Hq, G, sq, skv, max_seq, past_len,     \
-                scale, ablate)
+                scale, ablate, mask.bias, mask.batch, mask.heads)
+    #define DISPATCH_V8(EM_)                                                    \
+        do {                                                                    \
+            if      (nd == 2 && mt == 1 && bkv == 32) LAUNCH_V8(2, 1, 32, EM_); \
+            else if (nd == 2 && mt == 2 && bkv == 32) LAUNCH_V8(2, 2, 32, EM_); \
+            else if (nd == 2 && mt == 1 && bkv == 64) LAUNCH_V8(2, 1, 64, EM_); \
+            else if (nd == 2 && mt == 2 && bkv == 64) LAUNCH_V8(2, 2, 64, EM_); \
+            else if (nd == 4 && mt == 1 && bkv == 32) LAUNCH_V8(4, 1, 32, EM_); \
+            else if (nd == 4 && mt == 2 && bkv == 32) LAUNCH_V8(4, 2, 32, EM_); \
+            else                                      LAUNCH_V8(2, 1, 32, EM_); \
+        } while (0)
 
-    if      (nd == 2 && mt == 1 && bkv == 32) LAUNCH_V8(2, 1, 32);
-    else if (nd == 2 && mt == 2 && bkv == 32) LAUNCH_V8(2, 2, 32);
-    else if (nd == 2 && mt == 1 && bkv == 64) LAUNCH_V8(2, 1, 64);
-    else if (nd == 2 && mt == 2 && bkv == 64) LAUNCH_V8(2, 2, 64);
-    else if (nd == 4 && mt == 1 && bkv == 32) LAUNCH_V8(4, 1, 32);
-    else if (nd == 4 && mt == 2 && bkv == 32) LAUNCH_V8(4, 2, 32);
-    else                                      LAUNCH_V8(2, 1, 32);
+    if (mask.active()) DISPATCH_V8(true);
+    else               DISPATCH_V8(false);
+    #undef DISPATCH_V8
     #undef LAUNCH_V8
 }
 
@@ -3613,23 +3684,46 @@ static int tunePrefillV8Cfg(
     int d, hipStream_t stream,
     const _Float16* Q, const _Float16* Kcache, const _Float16* Vcache,
     _Float16* O, int B, int Hq, int G, int sq, int skv, int max_seq,
-    int past_len, float scale)
+    int past_len, float scale, PrefillExtMask mask)
 {
     PrefillV8Cfg cands[8];
     const int nc = prefillV8Candidates(d, cands);
-    constexpr int kWarmup = 30, kRounds = 4, kIters = 30;
 
+    // Tune the instantiation that will actually run: EXT_MASK changes the tile
+    // count per query tile, so a config tuned against the causal kernel is not
+    // necessarily the winner for the masked one.
     auto launch_cfg = [&](const PrefillV8Cfg& c) {
         dispatchPrefillV8(c.nd, c.mt, c.bkv, d, stream, Q, Kcache, Vcache, O,
-                          B, Hq, G, sq, skv, max_seq, past_len, scale);
+                          B, Hq, G, sq, skv, max_seq, past_len, scale, mask);
     };
-
-    for (int w = 0; w < kWarmup; ++w) launch_cfg(cands[w % nc]);
-    (void)hipDeviceSynchronize();
 
     hipEvent_t ev0, ev1;
     (void)hipEventCreate(&ev0);
     (void)hipEventCreate(&ev1);
+
+    // Size the sweep to what a launch costs. The 30-warmup + 4 rounds x 30 iters
+    // schedule assumes a launch is microseconds, which held for the causal
+    // shapes v8 was written against. A masked 16K prefill launch is ~0.8 s, so
+    // the same schedule spends ~13 minutes tuning to win back seconds -- the
+    // sweep becomes the cost. One probe launch decides, and at that duration a
+    // single timed iteration is already a fair comparison: launch overhead and
+    // run-to-run noise are negligible fractions of it. Cheap shapes keep the
+    // original schedule exactly.
+    float probe_ms = 0.0f;
+    launch_cfg(cands[0]);
+    (void)hipEventRecord(ev0, stream);
+    launch_cfg(cands[0]);
+    (void)hipEventRecord(ev1, stream);
+    (void)hipEventSynchronize(ev1);
+    (void)hipEventElapsedTime(&probe_ms, ev0, ev1);
+    const bool expensive = probe_ms > 20.0f;
+    const int kWarmup = expensive ? 0 : 30;
+    const int kRounds = expensive ? 2 : 4;
+    const int kIters  = expensive ? 1 : 30;
+
+    for (int w = 0; w < kWarmup; ++w) launch_cfg(cands[w % nc]);
+    (void)hipDeviceSynchronize();
+
     float best_ms[8];
     for (int i = 0; i < nc; ++i) best_ms[i] = 1.0e30f;
     for (int r = 0; r < kRounds; ++r) {
@@ -3648,6 +3742,10 @@ static int tunePrefillV8Cfg(
     (void)hipEventDestroy(ev1);
 
     if (getenv("HIPDNN_PREFILL_TUNE_DEBUG")) {
+        fprintf(stderr,
+            "[prefill-v8-tune] d=%d sq=%d skv=%d extmask=%d probe=%.3f ms -> "
+            "%d rounds x %d iters\n",
+            d, sq, skv, (int)mask.active(), probe_ms, kRounds, kIters);
         for (int i = 0; i < nc; ++i)
             fprintf(stderr,
                 "[prefill-v8-tune] d=%d sq=%d skv=%d  ND=%d MT=%d BKV=%-3d : "
@@ -3667,12 +3765,15 @@ static int runPrefillV8(
     hipStream_t stream,
     const _Float16* Q, const _Float16* Kcache, const _Float16* Vcache,
     _Float16* O, int B, int Hq, int G, int sq, int skv, int d, int max_seq,
-    int past_len, float scale)
+    int past_len, float scale, PrefillExtMask mask)
 {
     if (d != 256) return -1;
+    // The mask flag belongs in the key: the two instantiations do different
+    // amounts of work per query tile, so they can prefer different configs and
+    // must not share a tuning result.
     std::string key = std::to_string(d) + "_" + std::to_string(sq) + "_" +
                       std::to_string(skv) + "_" + std::to_string(Hq) + "_" +
-                      std::to_string(G);
+                      std::to_string(G) + (mask.active() ? "_m" : "");
     int cfg;
     {
         std::lock_guard<std::mutex> lk(g_v8_cfg_mutex);
@@ -3680,17 +3781,18 @@ static int runPrefillV8(
         if (it != g_v8_cfg_cache.end()) {
             cfg = it->second;
         } else {
-            cfg = tunePrefillV8Cfg(d, stream, Q, Kcache, Vcache, O,
-                                   B, Hq, G, sq, skv, max_seq, past_len, scale);
+            cfg = tunePrefillV8Cfg(d, stream, Q, Kcache, Vcache, O, B, Hq, G,
+                                   sq, skv, max_seq, past_len, scale, mask);
             g_v8_cfg_cache[key] = cfg;
             snprintf(g_v8_tune_info, sizeof(g_v8_tune_info),
-                     "gqa_flash_prefill_v8 cfg=ND%d_MT%d_BKV%d",
-                     cfg / 1000000, (cfg / 1000) % 1000, cfg % 1000);
+                     "gqa_flash_prefill_v8 cfg=ND%d_MT%d_BKV%d%s",
+                     cfg / 1000000, (cfg / 1000) % 1000, cfg % 1000,
+                     mask.active() ? " extmask" : "");
         }
     }
     const int nd = cfg / 1000000, mt = (cfg / 1000) % 1000, bkv = cfg % 1000;
     dispatchPrefillV8(nd, mt, bkv, d, stream, Q, Kcache, Vcache, O,
-                      B, Hq, G, sq, skv, max_seq, past_len, scale);
+                      B, Hq, G, sq, skv, max_seq, past_len, scale, mask);
     return 0;
 }
 
@@ -3881,7 +3983,8 @@ extern "C" int hip_gqa_flash_prefill_v2(
                               static_cast<const _Float16*>(Kcache),
                               static_cast<const _Float16*>(Vcache),
                               static_cast<_Float16*>(O),
-                              B, Hq, G, sq, skv, d, max_seq, past_len, scale);
+                              B, Hq, G, sq, skv, d, max_seq, past_len, scale,
+                              PrefillExtMask{});
         if (rc == 0) return 0;
         // fall through to v7
     }
@@ -3892,6 +3995,61 @@ extern "C" int hip_gqa_flash_prefill_v2(
                                         scale);
     }
     return -1;
+}
+
+// Widest fused flash-prefill entry: v3 plus the additive attention mask that
+// the onnx.Attention `attn_mask` input carries. A separate symbol rather than a
+// wider v3 because v3's signature is redeclared in the standalone kernel
+// harnesses, and silently changing an extern "C" ABI they still compile against
+// is how a mismatched call gets to run.
+//
+// Every unsupported combination returns -1 so the runtime falls back to the
+// decomposed pipeline, which implements all of them. Nothing here drops a mask,
+// a sink or a window, because dropping one produces a plausible wrong answer
+// rather than a failure.
+extern "C" int hip_gqa_flash_prefill_v4(
+    void* stream_ptr,
+    const void* Q, const void* Kcache, const void* Vcache, void* O,
+    int B, int Hq, int G, int sq, int skv, int d, int max_seq, int past_len,
+    float scale, int local_window_size, const void* head_sink,
+    int num_heads, int smooth_softmax,
+    const void* attn_bias, int bias_batch, int bias_heads, int no_causal)
+{
+    if (attn_bias == nullptr) {
+        // no_causal with no mask is unmasked bidirectional attention. Every
+        // prefill kernel here applies the causal triangle, so serving it would
+        // over-mask; decline instead.
+        if (no_causal) return -1;
+        return hip_gqa_flash_prefill_v3(stream_ptr, Q, Kcache, Vcache, O, B, Hq,
+                                        G, sq, skv, d, max_seq, past_len, scale,
+                                        local_window_size, head_sink, num_heads,
+                                        smooth_softmax);
+    }
+
+    // A mask replaces the triangle rather than adding to it, so is_causal=1
+    // alongside a mask needs both applied -- which EXT_MASK does not do.
+    if (!no_causal) return -1;
+    // Sinks and smooth softmax alter the softmax denominator; the EXT_MASK
+    // instantiation does not carry either.
+    if (head_sink != nullptr || smooth_softmax != 0) return -1;
+    // A separate window argument would be applied on top of the mask. For the
+    // is_causal=0 exports this path targets the window is already inside the
+    // mask, so a non-zero one here means a combination nothing has verified.
+    if (local_window_size > 0) return -1;
+    // EXT_MASK is implemented in v8, which is D=256-specialized.
+    if (d != 256) return -1;
+    (void)num_heads;
+
+    PrefillExtMask mask;
+    mask.bias  = static_cast<const _Float16*>(attn_bias);
+    mask.batch = bias_batch > 0 ? bias_batch : 1;
+    mask.heads = bias_heads > 0 ? bias_heads : 1;
+    return runPrefillV8(static_cast<hipStream_t>(stream_ptr),
+                        static_cast<const _Float16*>(Q),
+                        static_cast<const _Float16*>(Kcache),
+                        static_cast<const _Float16*>(Vcache),
+                        static_cast<_Float16*>(O),
+                        B, Hq, G, sq, skv, d, max_seq, past_len, scale, mask);
 }
 
 //===----------------------------------------------------------------------===//
