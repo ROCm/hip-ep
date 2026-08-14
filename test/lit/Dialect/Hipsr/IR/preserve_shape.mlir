@@ -8,11 +8,32 @@
 // CHECK-SAME: %[[D0:.+]]: index) {
 // CHECK-NEXT: %[[C2048:.+]] = arith.constant 2048 : index
 // CHECK-NEXT: %[[SHAPE:.+]] = shape.from_extents %[[D0]], %[[C2048]] : index, index
+// CHECK-NEXT: %[[INIT:.+]] = tensor.empty(%[[D0]]) : tensor<?x2048xf16>
+// CHECK-NEXT: hipsr.preserve_shape %[[SHAPE]], %[[INIT]] : tensor<?x2048xf16>
+// CHECK-NEXT: return
+// CHECK-NEXT: }
+func.func @tensor_form(%d0: index) {
+  %c2048 = arith.constant 2048 : index
+  %shape = shape.from_extents %d0, %c2048 : index, index
+  %init = tensor.empty(%d0) : tensor<?x2048xf16>
+  hipsr.preserve_shape %shape, %init : tensor<?x2048xf16>
+  return
+}
+
+// -----
+
+// The same tensor form, but device-spaced: preserve_shape's data operand is
+// unconstrained on memory space, so a #hipsr.mem<device> tensor is equally
+// accepted.
+// CHECK-LABEL: func.func @tensor_form_device(
+// CHECK-SAME: %[[D0:.+]]: index) {
+// CHECK-NEXT: %[[C2048:.+]] = arith.constant 2048 : index
+// CHECK-NEXT: %[[SHAPE:.+]] = shape.from_extents %[[D0]], %[[C2048]] : index, index
 // CHECK-NEXT: %[[INIT:.+]] = tensor.empty(%[[D0]]) : tensor<?x2048xf16, #hipsr.mem<device>>
 // CHECK-NEXT: hipsr.preserve_shape %[[SHAPE]], %[[INIT]] : tensor<?x2048xf16, #hipsr.mem<device>>
 // CHECK-NEXT: return
 // CHECK-NEXT: }
-func.func @tensor_form(%d0: index) {
+func.func @tensor_form_device(%d0: index) {
   %c2048 = arith.constant 2048 : index
   %shape = shape.from_extents %d0, %c2048 : index, index
   %init = tensor.empty(%d0) : tensor<?x2048xf16, #hipsr.mem<device>>
@@ -22,21 +43,21 @@ func.func @tensor_form(%d0: index) {
 
 // -----
 
-// The memref form: same shape operand, data operand now the kind of
-// device-spaced memref one-shot-bufferize emits.
+// The memref form: same shape operand, data operand now the kind of space-less
+// memref one-shot-bufferize emits.
 // CHECK-LABEL: func.func @memref_form(
 // CHECK-SAME: %[[D0:.+]]: index) {
 // CHECK-NEXT: %[[C2048:.+]] = arith.constant 2048 : index
 // CHECK-NEXT: %[[SHAPE:.+]] = shape.from_extents %[[D0]], %[[C2048]] : index, index
-// CHECK-NEXT: %[[ALLOC:.+]] = memref.alloc(%[[D0]]) : memref<?x2048xf16, #hipsr.mem<device>>
-// CHECK-NEXT: hipsr.preserve_shape %[[SHAPE]], %[[ALLOC]] : memref<?x2048xf16, #hipsr.mem<device>>
+// CHECK-NEXT: %[[ALLOC:.+]] = memref.alloc(%[[D0]]) : memref<?x2048xf16>
+// CHECK-NEXT: hipsr.preserve_shape %[[SHAPE]], %[[ALLOC]] : memref<?x2048xf16>
 // CHECK-NEXT: return
 // CHECK-NEXT: }
 func.func @memref_form(%d0: index) {
   %c2048 = arith.constant 2048 : index
   %shape = shape.from_extents %d0, %c2048 : index, index
-  %alloc = memref.alloc(%d0) : memref<?x2048xf16, #hipsr.mem<device>>
-  hipsr.preserve_shape %shape, %alloc : memref<?x2048xf16, #hipsr.mem<device>>
+  %alloc = memref.alloc(%d0) : memref<?x2048xf16>
+  hipsr.preserve_shape %shape, %alloc : memref<?x2048xf16>
   return
 }
 
@@ -66,13 +87,13 @@ func.func @device_memref_form(%data: memref<4x8xf16, #hipsr.mem<device>>) {
 // producer builds, where the shape comes out of an scf.execute_region.
 // CHECK-LABEL: func.func @opaque_shape(
 // CHECK-SAME: %[[D0:.+]]: index, %[[SHAPE:.+]]: !shape.shape) {
-// CHECK-NEXT: %[[INIT:.+]] = tensor.empty(%[[D0]]) : tensor<?x2048xf16, #hipsr.mem<device>>
-// CHECK-NEXT: hipsr.preserve_shape %[[SHAPE]], %[[INIT]] : tensor<?x2048xf16, #hipsr.mem<device>>
+// CHECK-NEXT: %[[INIT:.+]] = tensor.empty(%[[D0]]) : tensor<?x2048xf16>
+// CHECK-NEXT: hipsr.preserve_shape %[[SHAPE]], %[[INIT]] : tensor<?x2048xf16>
 // CHECK-NEXT: return
 // CHECK-NEXT: }
 func.func @opaque_shape(%d0: index, %shape: !shape.shape) {
-  %init = tensor.empty(%d0) : tensor<?x2048xf16, #hipsr.mem<device>>
-  hipsr.preserve_shape %shape, %init : tensor<?x2048xf16, #hipsr.mem<device>>
+  %init = tensor.empty(%d0) : tensor<?x2048xf16>
+  hipsr.preserve_shape %shape, %init : tensor<?x2048xf16>
   return
 }
 
@@ -81,7 +102,7 @@ func.func @opaque_shape(%d0: index, %shape: !shape.shape) {
 // The data operand must be ranked: an unranked tensor has no dimensions for a
 // shape to describe.
 func.func @unranked_data(%shape: !shape.shape, %data: tensor<*xf16>) {
-  // expected-error @+1 {{operand #1 must be ranked device tensor or device memref}}
+  // expected-error @+1 {{operand #1 must be ranked tensor or memref}}
   hipsr.preserve_shape %shape, %data : tensor<*xf16>
   return
 }
