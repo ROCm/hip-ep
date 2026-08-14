@@ -144,7 +144,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for PR, formatting, AI-disclosure, and co
 
 - Converter destination construction and `reifyResultShapes` must use the same `HipShapeUtils` shape rule.
 - Each category splits into a pure `infer*` function of static shapes and a `reify*` function that may emit index SSA. A `reify*` helper must validate through its `infer*` counterpart **before** touching the builder: a rewrite or reification that reports failure must leave the IR unchanged.
-- Keep the shape machinery internal: only the `infer*`/`reify*` rules belong in `HipShapeUtils.h`. Dimension maps and static folds stay file-static in the `.cpp`, and non-template helper bodies belong in `OnnxToHipUtils.cpp` rather than inline in the header every converter includes.
+- Keep shape machinery internal: only `infer*`/`reify*` rules belong in `HipShapeUtils.h`, while dimension maps and static folds stay file-static. Frontend-neutral conversion helper bodies belong in `HipConversionUtils.cpp`; `OnnxToHipUtils` retains ONNX import semantics and pattern-facing templates.
 - Express "not known at compile time" as `std::optional`, not a parallel `bool` flag, so a caller cannot pass a value that contradicts the flag.
 - See [docs/design/hip-shape-inference.md](docs/design/hip-shape-inference.md).
 
