@@ -134,6 +134,12 @@ add attention and convolution/pooling implementations. Operations that select
 a manual-reification family define their member functions in
 `HipReifyResultShapesImpl.cpp`.
 
+Frontend-neutral destination construction lives in
+`hip/Conversion/HipConversionUtils.h`: result-shape compatibility, reified
+`tensor.empty` creation, broadcast destination construction, and HIP context
+lookup. `OnnxToHipUtils` retains only ONNX import semantics and wrappers, so a
+future frontend can target HIP without depending on the ONNX conversion layer.
+
 Pure descriptor transformations such as Reshape, Squeeze, and Unsqueeze generally lower to standard tensor operations rather than HIP DPS compute operations. Their shape inference and dim folding use MLIR's standard tensor interfaces and external models, not a second HIP-specific contract.
 
 ## Static result typing
