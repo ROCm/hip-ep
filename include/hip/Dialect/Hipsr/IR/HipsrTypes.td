@@ -23,8 +23,6 @@ def Hipsr_ManagedMemRef : Type<CPred<"::mlir::hipsr::isManagedMemRef($_self)">, 
 def AnyHostRankedTensor   : Type<CPred<"::mlir::hipsr::isHostRankedTensor($_self)">,   "host ranked tensor">;
 def AnyDeviceRankedTensor : Type<CPred<"::mlir::hipsr::isDeviceRankedTensor($_self)">, "device ranked tensor">;
 
-// Matches a ranked tensor (which has no memory space) or a memref in the named
-// space. For ops that run both before and after bufferization.
 def Hipsr_HostTensorOrMemRef    : AnyTypeOf<[AnyHostRankedTensor, Hipsr_HostMemRef],    "ranked host tensor or host memref">;
 def Hipsr_DeviceTensorOrMemRef  : AnyTypeOf<[AnyDeviceRankedTensor, Hipsr_DeviceMemRef],  "ranked device tensor or device memref">;
 def Hipsr_TensorOrPinnedMemRef  : AnyTypeOf<[AnyRankedTensor, Hipsr_PinnedMemRef],  "ranked tensor or pinned memref">;
