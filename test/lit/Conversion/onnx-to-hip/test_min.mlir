@@ -12,6 +12,8 @@
 // 3. 1-input min (identity pass-through)
 // 4. Dynamic shape
 // 5. Variadic pairwise broadcast grows the intermediate shape
+// 6. Static final result refines dynamic pairwise inference
+// 7. Single-input identity preserves a static result refinement
 // ============================================================================
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
@@ -101,4 +103,27 @@ module {
   // CHECK: %[[M0:.*]] = hip.min{{.*}}outs(%[[E0]] : tensor<2x3xf32>)
   // CHECK: %[[E1:.*]] = tensor.empty() : tensor<2x3xf32>
   // CHECK: hip.min{{.*}}ins(%[[M0]], {{.*}} : tensor<2x3xf32>, tensor<2x3xf32>) outs(%[[E1]] : tensor<2x3xf32>)
+
+  // --- Case 6: static final result refines dynamic pairwise inference ---
+  func.func @min_variadic_static_refinement(%a: tensor<?x1xf32>, %b: tensor<1x?xf32>, %c: tensor<?x?xf32>) -> tensor<2x3xf32> {
+    %result = "onnx.Min"(%a, %b, %c) : (tensor<?x1xf32>, tensor<1x?xf32>, tensor<?x?xf32>) -> tensor<2x3xf32>
+    return %result : tensor<2x3xf32>
+  }
+
+  // CHECK-LABEL: func.func @min_variadic_static_refinement
+  // CHECK: %[[E0:.*]] = tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?xf32>
+  // CHECK: %[[M0:.*]] = hip.min{{.*}}outs(%[[E0]] : tensor<?x?xf32>)
+  // CHECK: %[[E1:.*]] = tensor.empty() : tensor<2x3xf32>
+  // CHECK: hip.min{{.*}}ins(%[[M0]], {{.*}} : tensor<?x?xf32>, tensor<?x?xf32>) outs(%[[E1]] : tensor<2x3xf32>)
+
+  // --- Case 7: single-input identity keeps the imported refinement ---
+  func.func @min_single_static_refinement(%a: tensor<?xf32>) -> tensor<7xf32> {
+    %result = "onnx.Min"(%a) : (tensor<?xf32>) -> tensor<7xf32>
+    return %result : tensor<7xf32>
+  }
+
+  // CHECK-LABEL: func.func @min_single_static_refinement
+  // CHECK-NOT: onnx.Min
+  // CHECK-NOT: hip.min
+  // CHECK: tensor.cast %{{.*}} : tensor<?xf32> to tensor<7xf32>
 }
