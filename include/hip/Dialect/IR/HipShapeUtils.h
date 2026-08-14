@@ -54,7 +54,7 @@ bool matchConstantIntTensor(Value value, SmallVectorImpl<int64_t> &out,
 ///       * dynamic + dynamic -> dynamic.
 ///       * static + static, equal -> static; unequal and neither is 1
 ///         -> error.
-SmallVector<int64_t>
+FailureOr<SmallVector<int64_t>>
 inferMatmulShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
                  function_ref<InFlightDiagnostic()> emitError);
 
@@ -71,10 +71,6 @@ inferMatmulShape(ArrayRef<int64_t> aShape, ArrayRef<int64_t> bShape,
 /// Element-type checks are intentionally not handled here: dtype-changing
 /// ops (cast, equal, less, not, and) keep their own element-type checks in
 /// their op-local verifiers.
-LogicalResult verifyHipOpShape(
-    Operation *op,
-    function_ref<SmallVector<SmallVector<int64_t>>()> computeExpected);
-
 /// Verify one DPS destination against a pure `infer*` shape rule.
 LogicalResult
 verifyHipOpShape(Operation *op,
@@ -130,27 +126,26 @@ reifyBroadcastResultShape(OpBuilder &b, Location loc, ValueRange operands,
 
 /// Reify the result shape of a transpose op as `output[i] = input[perm[i]]`.
 /// `perm` must be a permutation of `[0, rank-1)` and have the same length
-/// as `input`'s rank — the verifier should already guarantee this; the
-/// helper bails (returns empty) on mismatch.
+/// as `input`'s rank.
 ///
 /// Each output dim `i`:
 ///   - emits `IndexAttr(input.shape[perm[i]])` when that dim is static,
 ///   - emits `tensor.dim %input, perm[i]` otherwise.
 ///
-/// `input` must be a `RankedTensorType`-typed Value.
-SmallVector<OpFoldResult> reifyTransposeByPerm(OpBuilder &b, Location loc,
-                                               Value input,
-                                               ArrayRef<int64_t> perm);
+/// The `FailureOr` distinguishes failure from a successful rank-zero shape.
+FailureOr<SmallVector<OpFoldResult>>
+reifyTransposeByPerm(OpBuilder &b, Location loc, Value input,
+                     ArrayRef<int64_t> perm);
 
 /// Reify the result shape of a gather op as
 /// `output = data.shape[:axis] ++ indices.shape ++ data.shape[axis+1:]`.
 /// `axis` is normalized into `[0, data.rank)` (negative axis follows ONNX
-/// convention). The helper bails (returns empty) on a malformed axis.
+/// convention). Returns failure on a malformed axis.
 ///
-/// `data` and `indices` must be `RankedTensorType`-typed Values.
-SmallVector<OpFoldResult> reifyGatherWithAxis(OpBuilder &b, Location loc,
-                                              Value data, Value indices,
-                                              int64_t axis);
+/// The `FailureOr` distinguishes failure from a successful rank-zero shape.
+FailureOr<SmallVector<OpFoldResult>>
+reifyGatherWithAxis(OpBuilder &b, Location loc, Value data, Value indices,
+                    int64_t axis);
 
 /// Reify the result shape of a `gather_nd` op as
 /// `batch_dims_from_data ++ indices.shape[batch_dims:-1] ++
@@ -161,9 +156,10 @@ SmallVector<OpFoldResult> reifyGatherWithAxis(OpBuilder &b, Location loc,
 /// trailing index-tuple width (`indices.shape[-1]`) is dynamic — the
 /// output rank itself is then unknown and reify cannot run.
 ///
-/// `data` and `indices` must be `RankedTensorType`-typed Values.
-SmallVector<OpFoldResult> reifyGatherND(OpBuilder &b, Location loc, Value data,
-                                        Value indices, int64_t batchDims);
+/// The `FailureOr` distinguishes failure from a successful rank-zero shape.
+FailureOr<SmallVector<OpFoldResult>> reifyGatherND(OpBuilder &b, Location loc,
+                                                   Value data, Value indices,
+                                                   int64_t batchDims);
 
 /// Reify the result shape of a reduction op (reduce_sum / reduce_max /
 /// reduce_prod) given `data`, the `axes` operand (rank-1 i64 tensor),
