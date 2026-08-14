@@ -11,14 +11,18 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "OnnxToHipsrUtils.h"
+
 #include "hip/Conversion/OnnxToHipsr/OnnxToHipsr.h"
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Func/Transforms/FuncConversions.h"
 #include "mlir/Dialect/Shape/IR/Shape.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Transforms/DialectConversion.h"
 
 #include "llvm/ADT/SmallVector.h"
@@ -61,20 +65,38 @@ struct ConvertOnnxToHipsrPass
     : impl::ConvertOnnxToHipsrPassBase<ConvertOnnxToHipsrPass> {
   void runOnOperation() override {
     ModuleOp module = getOperation();
+
+    TypeConverter converter;
+    converter.addConversion([](Type type) { return type; });
+    converter.addConversion([](RankedTensorType type) -> Type {
+      if (type.getEncoding()) {
+        return type;
+      }
+      return deviceTensorType(type);
+    });
+
     ConversionTarget target(getContext());
     target.addIllegalDialect("onnx");
     target.addLegalDialect<HipsrDialect>();
-    target.addLegalOp<ModuleOp, func::FuncOp, func::ReturnOp>();
+    target.addLegalOp<ModuleOp>();
     target.addLegalOp<arith::ConstantOp>();
+    target.addDynamicallyLegalOp<func::FuncOp>([&](func::FuncOp op) {
+      return converter.isSignatureLegal(op.getFunctionType());
+    });
+    target.addDynamicallyLegalOp<func::ReturnOp>(
+        [&](func::ReturnOp op) { return converter.isLegal(op); });
     target.markUnknownOpDynamicallyLegal([](Operation *op) {
       return op->getParentOfType<ComputeOp>() != nullptr;
     });
 
     RewritePatternSet patterns(&getContext());
     populateOnnxToHipsrConstantPatterns(patterns);
-    populateCastConversionPatterns(patterns, &getContext());
+    populateCastConversionPatterns(converter, patterns, &getContext());
     populateMatMulConversionPatterns(patterns, &getContext());
     populateExpandConversionPatterns(patterns, &getContext());
+    populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns,
+                                                                   converter);
+    populateReturnOpTypeConversionPattern(patterns, converter);
 
     if (failed(applyFullConversion(module, target, std::move(patterns)))) {
       signalPassFailure();

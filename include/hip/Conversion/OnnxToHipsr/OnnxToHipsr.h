@@ -8,6 +8,7 @@
 
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
+#include "mlir/Transforms/DialectConversion.h"
 
 #include <memory>
 
@@ -24,7 +25,8 @@ namespace hipsr {
 
 void populateOnnxToHipsrConstantPatterns(::mlir::RewritePatternSet &patterns);
 
-void populateCastConversionPatterns(::mlir::RewritePatternSet &patterns,
+void populateCastConversionPatterns(const ::mlir::TypeConverter &typeConverter,
+                                    ::mlir::RewritePatternSet &patterns,
                                     ::mlir::MLIRContext *ctx);
 
 void populateMatMulConversionPatterns(::mlir::RewritePatternSet &patterns,

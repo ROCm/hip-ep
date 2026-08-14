@@ -19,8 +19,8 @@
 // CHECK-NEXT: %[[SECOND:.+]] = hipsr.cast(%[[CTX]]) ins(%[[FIRST]] : tensor<?x8xf16, #hipsr.mem<device>>) outs(%[[SECOND_INIT]] : tensor<?x8xf32, #hipsr.mem<device>>) : tensor<?x8xf32, #hipsr.mem<device>>
 // CHECK-NOT: shape_region
 func.func @cast_chain(
-    %ctx: !hipsr.context, %input: tensor<?x8xf32, #hipsr.mem<device>>) -> tensor<?x8xf32, #hipsr.mem<device>> {
-  %0 = "onnx.Cast"(%input) : (tensor<?x8xf32, #hipsr.mem<device>>) -> tensor<?x8xf16, #hipsr.mem<device>>
-  %1 = "onnx.Cast"(%0) : (tensor<?x8xf16, #hipsr.mem<device>>) -> tensor<?x8xf32, #hipsr.mem<device>>
-  return %1 : tensor<?x8xf32, #hipsr.mem<device>>
+    %ctx: !hipsr.context, %input: tensor<?x8xf32>) -> tensor<?x8xf32> {
+  %0 = "onnx.Cast"(%input) : (tensor<?x8xf32>) -> tensor<?x8xf16>
+  %1 = "onnx.Cast"(%0) : (tensor<?x8xf16>) -> tensor<?x8xf32>
+  return %1 : tensor<?x8xf32>
 }

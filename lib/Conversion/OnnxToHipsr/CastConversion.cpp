@@ -9,6 +9,7 @@
 #include "hip/Dialect/Hipsr/IR/HipsrOps.h"
 
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Transforms/DialectConversion.h"
 
 namespace mlir {
 namespace hipsr {
@@ -17,13 +18,14 @@ namespace {
 /// The ONNX `saturate` attribute (clamp-vs-wrap when casting to float8) is not
 /// modeled on hipsr.cast yet, so it is currently ignored. Revisit once float8
 /// cast targets are supported.
-struct CastToHipsr : public ::mlir::RewritePattern {
-  CastToHipsr(::mlir::MLIRContext *ctx)
-      : RewritePattern("onnx.Cast", /*benefit=*/1, ctx) {}
+struct CastToHipsr : public ::mlir::ConversionPattern {
+  CastToHipsr(const ::mlir::TypeConverter &typeConverter,
+              ::mlir::MLIRContext *ctx)
+      : ConversionPattern(typeConverter, "onnx.Cast", /*benefit=*/1, ctx) {}
 
   ::mlir::LogicalResult
-  matchAndRewrite(::mlir::Operation *op,
-                  ::mlir::PatternRewriter &rewriter) const override {
+  matchAndRewrite(::mlir::Operation *op, ::mlir::ArrayRef<::mlir::Value> operands,
+                  ::mlir::ConversionPatternRewriter &rewriter) const override {
     // Matching is by name on an (unregistered) ONNX op, so guard the shape:
     // onnx.Cast is single-input / single-result.
     if (op->getNumOperands() != 1 || op->getNumResults() != 1) {
@@ -37,9 +39,9 @@ struct CastToHipsr : public ::mlir::RewritePattern {
     }
 
     ::mlir::Location loc = op->getLoc();
-    ::mlir::Value input = op->getOperand(0);
-    auto resultType =
-        ::mlir::dyn_cast<::mlir::RankedTensorType>(op->getResult(0).getType());
+    ::mlir::Value input = operands[0];
+    auto resultType = ::mlir::dyn_cast_or_null<::mlir::RankedTensorType>(
+        getTypeConverter()->convertType(op->getResult(0).getType()));
     if (!resultType) {
       return rewriter.notifyMatchFailure(op, "expected ranked tensor result");
     }
@@ -60,9 +62,10 @@ struct CastToHipsr : public ::mlir::RewritePattern {
 
 } // namespace
 
-void populateCastConversionPatterns(::mlir::RewritePatternSet &patterns,
+void populateCastConversionPatterns(const ::mlir::TypeConverter &typeConverter,
+                                    ::mlir::RewritePatternSet &patterns,
                                     ::mlir::MLIRContext *ctx) {
-  patterns.add<CastToHipsr>(ctx);
+  patterns.add<CastToHipsr>(typeConverter, ctx);
 }
 
 } // namespace hipsr
