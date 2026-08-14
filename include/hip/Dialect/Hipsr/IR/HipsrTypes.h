@@ -19,8 +19,8 @@ bool isDeviceMemRef(::mlir::Type type);
 bool isPinnedMemRef(::mlir::Type type);
 bool isManagedMemRef(::mlir::Type type);
 
-// Predicates for the AnyHostRankedTensor / AnyDeviceRankedTensor type
-// constraints in HipsrTypes.td. Each returns true only when the type is a
+// Predicates for the Hipsr_AnyHostRankedTensor / Hipsr_AnyDeviceRankedTensor
+// type constraints in HipsrTypes.td. Each returns true only when the type is a
 // ranked tensor whose encoding is a #hipsr.mem attribute naming that memory
 // space; a tensor with no encoding (or an encoding set by some other attribute)
 // returns false.

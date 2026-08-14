@@ -20,11 +20,11 @@ def Hipsr_DeviceMemRef  : Type<CPred<"::mlir::hipsr::isDeviceMemRef($_self)">,  
 def Hipsr_PinnedMemRef  : Type<CPred<"::mlir::hipsr::isPinnedMemRef($_self)">,  "pinned memref">;
 def Hipsr_ManagedMemRef : Type<CPred<"::mlir::hipsr::isManagedMemRef($_self)">, "managed memref">;
 
-def AnyHostRankedTensor   : Type<CPred<"::mlir::hipsr::isHostRankedTensor($_self)">,   "host ranked tensor">;
-def AnyDeviceRankedTensor : Type<CPred<"::mlir::hipsr::isDeviceRankedTensor($_self)">, "device ranked tensor">;
+def Hipsr_AnyHostRankedTensor   : Type<CPred<"::mlir::hipsr::isHostRankedTensor($_self)">,   "host ranked tensor">;
+def Hipsr_AnyDeviceRankedTensor : Type<CPred<"::mlir::hipsr::isDeviceRankedTensor($_self)">, "device ranked tensor">;
 
-def Hipsr_HostTensorOrMemRef    : AnyTypeOf<[AnyHostRankedTensor, Hipsr_HostMemRef],    "ranked host tensor or host memref">;
-def Hipsr_DeviceTensorOrMemRef  : AnyTypeOf<[AnyDeviceRankedTensor, Hipsr_DeviceMemRef],  "ranked device tensor or device memref">;
+def Hipsr_HostTensorOrMemRef    : AnyTypeOf<[Hipsr_AnyHostRankedTensor, Hipsr_HostMemRef],    "ranked host tensor or host memref">;
+def Hipsr_DeviceTensorOrMemRef  : AnyTypeOf<[Hipsr_AnyDeviceRankedTensor, Hipsr_DeviceMemRef],  "ranked device tensor or device memref">;
 def Hipsr_TensorOrPinnedMemRef  : AnyTypeOf<[AnyRankedTensor, Hipsr_PinnedMemRef],  "ranked tensor or pinned memref">;
 def Hipsr_TensorOrManagedMemRef : AnyTypeOf<[AnyRankedTensor, Hipsr_ManagedMemRef], "ranked tensor or managed memref">;
 def Hipsr_TensorOrMemRef : AnyTypeOf<[AnyRankedTensor, AnyMemRef], "ranked tensor or memref">;
