@@ -16,6 +16,48 @@
 
 namespace {
 
+class TestMalformedReifyOp final
+    : public mlir::Op<TestMalformedReifyOp, mlir::OpTrait::ZeroOperands,
+                      mlir::OpTrait::VariadicResults,
+                      mlir::ReifyRankedShapedTypeOpInterface::Trait> {
+public:
+  using Op::Op;
+
+  static llvm::StringRef getOperationName() {
+    return "hip.test_malformed_reify";
+  }
+  static llvm::ArrayRef<llvm::StringRef> getAttributeNames() {
+    static const llvm::StringRef names[] = {"kind"};
+    return names;
+  }
+
+  mlir::LogicalResult
+  reifyResultShapes(mlir::OpBuilder &builder,
+                    mlir::ReifiedRankedShapedTypeDims &reified) {
+    auto kind = (*this)->getAttrOfType<mlir::StringAttr>("kind");
+    if (!kind)
+      return emitOpError("requires a string 'kind' attribute");
+
+    reified.clear();
+    if (kind.getValue() == "result_count")
+      return mlir::success();
+    if (kind.getValue() == "rank") {
+      reified.push_back({builder.getIndexAttr(1)});
+      return mlir::success();
+    }
+    if (kind.getValue() == "static_contradiction") {
+      reified.push_back({builder.getIndexAttr(3), builder.getIndexAttr(4)});
+      return mlir::success();
+    }
+    if (kind.getValue() == "negative_extent") {
+      reified.push_back({builder.getIndexAttr(-2)});
+      return mlir::success();
+    }
+    return emitOpError("unknown malformed-reifier fixture kind '")
+           << kind.getValue() << "'";
+  }
+};
+
 /// Probe the HipDpsOp shared default on a zero-result memref-mode operation.
 struct TestHipDpsDefaultReifyPass final
     : public mlir::PassWrapper<TestHipDpsDefaultReifyPass,
@@ -117,6 +159,8 @@ struct TestHipDpsDefaultReifyPass final
 } // namespace
 
 void mlir::hip::test::registerHipTestPasses(DialectRegistry &registry) {
-  (void)registry;
+  registry.addExtension(+[](MLIRContext *, HipDialect *dialect) {
+    RegisteredOperationName::insert<TestMalformedReifyOp>(*dialect);
+  });
   PassRegistration<TestHipDpsDefaultReifyPass>();
 }
