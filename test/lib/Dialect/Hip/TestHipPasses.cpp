@@ -12,6 +12,8 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
 
+#include <iterator>
+
 namespace {
 
 /// Probe the HipDpsOp shared default on a zero-result memref-mode operation.
@@ -58,12 +60,14 @@ struct TestHipDpsDefaultReifyPass final
             }
 
             mlir::Value secondInit = *std::next(inits.begin());
-            mlir::Value secondResult = operation->getResult(1);
             mlir::Type initType = secondInit.getType();
-            mlir::Type resultType = secondResult.getType();
-            mlir::Type invalidType = rewriter.getI32Type();
+            auto rankedInit = mlir::cast<mlir::RankedTensorType>(initType);
+            llvm::SmallVector<int64_t> invalidShape(rankedInit.getShape());
+            invalidShape.push_back(mlir::ShapedType::kDynamic);
+            mlir::Type invalidType = mlir::RankedTensorType::get(
+                invalidShape, rankedInit.getElementType(),
+                rankedInit.getEncoding());
             secondInit.setType(invalidType);
-            secondResult.setType(invalidType);
 
             mlir::Block *block = operation->getBlock();
             size_t before = std::distance(block->begin(), block->end());
@@ -74,10 +78,9 @@ struct TestHipDpsDefaultReifyPass final
             size_t after = std::distance(block->begin(), block->end());
 
             secondInit.setType(initType);
-            secondResult.setType(resultType);
             if (mlir::succeeded(status)) {
               operation->emitOpError(
-                  "malformed second result unexpectedly reified");
+                  "rank-mismatched second init unexpectedly reified");
               return mlir::WalkResult::interrupt();
             }
             if (after != before || !reified.empty()) {
