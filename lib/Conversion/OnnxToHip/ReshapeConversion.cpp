@@ -51,22 +51,105 @@ validateSqueezeUnsqueezeOp(mlir::Operation *op, mlir::PatternRewriter &rewriter,
   return mlir::success();
 }
 
+/// Count the dynamic output dims a reassociation group covers.
+static int64_t countDynOutDims(mlir::RankedTensorType outputType,
+                               const mlir::ReassociationIndices &group) {
+  return llvm::count_if(
+      group, [&](int64_t idx) { return outputType.isDynamicDim(idx); });
+}
+
+/// Resolve a Reshape's `shape` operand into one extent per output dim.
+///
+/// Only a host-visible shape vector is honoured, i.e. the
+/// `tensor.from_elements` that ReshapeShapeFold leaves behind for the
+/// `Reshape(_, Shape(x))` idiom. A shape tensor that is still device-resident
+/// yields nullopt instead of paying for a readback; the caller then falls back
+/// to `tensor.reshape`, which consumes the runtime shape vector directly.
+static std::optional<llvm::SmallVector<mlir::OpFoldResult>>
+resolveShapeOperandExtents(mlir::PatternRewriter &rewriter, mlir::Location loc,
+                           mlir::Value shapeOperand, int64_t outputRank) {
+  if (!shapeOperand)
+    return std::nullopt;
+  auto fromElements =
+      shapeOperand.getDefiningOp<mlir::tensor::FromElementsOp>();
+  if (!fromElements ||
+      static_cast<int64_t>(fromElements.getElements().size()) != outputRank)
+    return std::nullopt;
+
+  // Resolve every element before building anything, so a late unresolvable
+  // entry cannot leave a half-materialized cast behind in the IR.
+  llvm::SmallVector<mlir::OpFoldResult> extents;
+  llvm::SmallVector<mlir::Value> needsCast(outputRank);
+  extents.reserve(outputRank);
+  for (auto [i, element] : llvm::enumerate(fromElements.getElements())) {
+    // ReshapeShapeFold emits `arith.index_cast %tensor.dim`. Reusing the
+    // pre-cast index keeps the extent on the same SSA value the rest of the
+    // conversion derives dims from, instead of a round trip through i64.
+    if (auto cast = element.getDefiningOp<mlir::arith::IndexCastOp>();
+        cast && mlir::isa<mlir::IndexType>(cast.getIn().getType())) {
+      extents.push_back(cast.getIn());
+      continue;
+    }
+    if (auto constant = element.getDefiningOp<mlir::arith::ConstantOp>()) {
+      auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(constant.getValue());
+      // ONNX gives 0 ("keep the input dim") and -1 ("infer") meanings that
+      // this helper does not resolve; neither is usable as an extent.
+      if (!intAttr || intAttr.getInt() <= 0)
+        return std::nullopt;
+      extents.push_back(rewriter.getIndexAttr(intAttr.getInt()));
+      continue;
+    }
+    needsCast[i] = element;
+    extents.push_back(mlir::OpFoldResult{});
+  }
+
+  for (int64_t i : llvm::seq<int64_t>(outputRank)) {
+    if (!needsCast[i])
+      continue;
+    mlir::Value asIndex = mlir::arith::IndexCastOp::create(
+        rewriter, loc, rewriter.getIndexType(), needsCast[i]);
+    extents[i] = asIndex;
+  }
+  return extents;
+}
+
 /// Build output shape for expand_shape operations.
 /// Used by both Reshape and Unsqueeze when expanding dimensions.
 ///
 /// For static dimensions: use compile-time size from outputType.
 /// For dynamic dimensions: extract from input via DimOp, dividing out any
 /// static dimensions in the same reassociation group.
-llvm::SmallVector<mlir::OpFoldResult> buildExpandShapeOutputShape(
-    mlir::PatternRewriter &rewriter, mlir::Location loc, mlir::Value data,
-    mlir::RankedTensorType outputType,
-    llvm::ArrayRef<mlir::ReassociationIndices> reassoc) {
+///
+/// That derivation only holds while a group covers at most ONE dynamic output
+/// dim. When a group splits one dynamic source dim into several dynamic output
+/// dims, the source extent is their PRODUCT and says nothing about the split,
+/// so those extents have to come from \p shapeOperand (the Reshape's `shape`
+/// input). Returns nullopt when that is needed but unreadable, letting the
+/// caller fall back to `tensor.reshape` instead of emitting an expand_shape
+/// that claims each dynamic output dim is the whole product -- which is how
+/// `[bs*ss, 2816] -> [bs, ss, 2816]` became `[ss, ss, 2816]` and dispatched
+/// every Gemma-4 layer's input norm over ss^2 rows.
+std::optional<llvm::SmallVector<mlir::OpFoldResult>>
+buildExpandShapeOutputShape(mlir::PatternRewriter &rewriter, mlir::Location loc,
+                            mlir::Value data, mlir::RankedTensorType outputType,
+                            llvm::ArrayRef<mlir::ReassociationIndices> reassoc,
+                            mlir::Value shapeOperand = {}) {
   int64_t outputRank = outputType.getRank();
 
   llvm::SmallVector<int64_t> outDimToInDim(outputRank, -1);
   for (auto [g, group] : llvm::enumerate(reassoc))
     for (int64_t idx : group)
       outDimToInDim[idx] = g;
+
+  std::optional<llvm::SmallVector<mlir::OpFoldResult>> shapeExtents;
+  if (llvm::any_of(reassoc, [&](const mlir::ReassociationIndices &group) {
+        return countDynOutDims(outputType, group) > 1;
+      })) {
+    shapeExtents =
+        resolveShapeOperandExtents(rewriter, loc, shapeOperand, outputRank);
+    if (!shapeExtents)
+      return std::nullopt;
+  }
 
   llvm::SmallVector<mlir::OpFoldResult> outputShape;
   for (int64_t i : llvm::seq<int64_t>(outputRank)) {
@@ -77,6 +160,11 @@ llvm::SmallVector<mlir::OpFoldResult> buildExpandShapeOutputShape(
 
     int64_t srcDim = outDimToInDim[i];
     const auto &group = reassoc[srcDim];
+
+    if (countDynOutDims(outputType, group) > 1) {
+      outputShape.push_back((*shapeExtents)[i]);
+      continue;
+    }
 
     int64_t staticProduct = 1;
     for (int64_t idx : group)
@@ -194,17 +282,27 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
       if (auto reassocOpt =
               mlir::getReassociationIndicesForReshape(inputType, outputType)) {
         if (outputRank > inputRank) {
-          auto outputShape = buildExpandShapeOutputShape(
-              rewriter, loc, data, outputType, *reassocOpt);
-          auto expandOp = mlir::tensor::ExpandShapeOp::create(
-              rewriter, loc, outputType, data, *reassocOpt, outputShape);
-          rewriter.replaceOp(op, expandOp.getResult());
+          // The `shape` operand is the only place a multi-dynamic split's
+          // per-dim extents exist; ReshapeShapeFold has already folded
+          // `Shape(x)` into a host-visible tensor.from_elements for it.
+          mlir::Value shapeOperand =
+              op->getNumOperands() >= 2 ? op->getOperand(1) : mlir::Value();
+          if (auto outputShape = buildExpandShapeOutputShape(
+                  rewriter, loc, data, outputType, *reassocOpt, shapeOperand)) {
+            auto expandOp = mlir::tensor::ExpandShapeOp::create(
+                rewriter, loc, outputType, data, *reassocOpt, *outputShape);
+            rewriter.replaceOp(op, expandOp.getResult());
+            return mlir::success();
+          }
+          // Multi-dynamic split with an unreadable shape operand: fall through
+          // to the tensor.reshape fallback, which takes the runtime shape
+          // vector verbatim.
         } else {
           auto collapseOp = mlir::tensor::CollapseShapeOp::create(
               rewriter, loc, outputType, data, *reassocOpt);
           rewriter.replaceOp(op, collapseOp.getResult());
+          return mlir::success();
         }
-        return mlir::success();
       }
       // Fall through to tensor.reshape fallback (no structured reassoc).
     }
@@ -349,11 +447,15 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
         // combine direction here. (PoolAllocs's hoistable whitelist must
         // include arith.divui for the resulting dim arithmetic to survive
         // pool-base hoisting.)
+        // Each group here pairs one dynamic extent with the static factor K,
+        // so no group is multi-dynamic and the shape operand is never needed.
         auto intOutShape = buildExpandShapeOutputShape(rewriter, loc, data,
                                                        intType, expandReassoc);
+        if (!intOutShape)
+          break; // fall through to tensor.reshape fallback
 
         auto expanded = mlir::tensor::ExpandShapeOp::create(
-            rewriter, loc, intType, data, expandReassoc, intOutShape);
+            rewriter, loc, intType, data, expandReassoc, *intOutShape);
 
         // (e) Collapse: the OUTPUT dim that absorbs the factor pair maps to the
         // two intermediate dims; everything else is identity.
@@ -578,10 +680,15 @@ struct UnsqueezeToStdTensor : public mlir::RewritePattern {
           op, "cannot compute unsqueeze reassociation");
 
     mlir::Location loc = op->getLoc();
+    // Unsqueeze only inserts unit dims, so every group keeps at most one
+    // dynamic dim and no shape operand is needed.
     auto outputShape = buildExpandShapeOutputShape(rewriter, loc, data,
                                                    outputType, *reassocOpt);
+    if (!outputShape)
+      return rewriter.notifyMatchFailure(
+          op, "unsqueeze: multi-dynamic reassociation group");
     auto expandOp = mlir::tensor::ExpandShapeOp::create(
-        rewriter, loc, outputType, data, *reassocOpt, outputShape);
+        rewriter, loc, outputType, data, *reassocOpt, *outputShape);
     rewriter.replaceOp(op, expandOp.getResult());
     return mlir::success();
   }

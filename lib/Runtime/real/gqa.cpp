@@ -735,6 +735,37 @@ static bool gqa_no_expand_prefill_enabled() {
   return enabled;
 }
 
+// Byte budget for the decomposed pipeline's score buffers (S_f32 + S_fp16),
+// which decides how many attention heads it processes per group. Those buffers
+// are quadratic in sequence length, so at long prompts the ungrouped size stops
+// being allocatable: H=16 at a 16K prompt wants 24.5 GiB in one block. The
+// default keeps every head resident for short sequences -- where the whole
+// buffer is a few hundred MB and grouping would only cost launches -- and starts
+// splitting once the buffer would exceed the budget.
+//
+// The budget is deliberately generous, because splitting is not free: each group
+// is a separate pair of strided-batched GEMMs over a smaller batch, so more
+// groups means more launches with less work each. Measured on gfx1151 with a
+// Gemma-4 16K prompt, 8 groups of 2 heads cost 39.8 s of TTFT against 38.1 s for
+// 2 groups of 8, and forcing groups at 12K -- where the ungrouped buffer still
+// fits -- cost 0.5%. So the default is set just above what a 12K prompt needs
+// ungrouped (14.1 GiB), which leaves everything that already worked ungrouped
+// and splits only where the alternative is not running at all.
+static size_t gqa_score_budget_bytes() {
+  static const size_t budget = [] {
+    constexpr size_t kDefaultMiB = 16384;
+    size_t mib = kDefaultMiB;
+    if (const char *v = std::getenv("HIPDNN_EP_GQA_SCORE_BUDGET_MB")) {
+      char *end = nullptr;
+      unsigned long long parsed = std::strtoull(v, &end, 10);
+      if (end != v && parsed > 0)
+        mib = static_cast<size_t>(parsed);
+    }
+    return mib << 20;
+  }();
+  return budget;
+}
+
 // Env-var gate to force decode through the decomposed hipBLASLt pipeline
 // instead of the fused custom kernel hip_gqa_fused_decode. Default off
 // (fused path is preferred). Set HIPDNN_EP_GQA_DISABLE_FUSED_DECODE=1 to
@@ -1517,6 +1548,50 @@ static int gqa_forward_hipblaslt(
                        (sq == 1 || gqa_no_expand_prefill_enabled());
   bool need_transpose = (sq > 1);
 
+  //===--------------------------------------------------------------------===//
+  // Head grouping for the score buffers.
+  //
+  // S_f32 and S_fp16 are sized B*H*sq*total_seq, quadratic in sequence length:
+  // at H=16 and a 16K prompt that is 24.5 GiB in a single buffer, which on a
+  // shared-memory part the driver will not hand out at all, so the op dies
+  // instead of merely running slowly. Nothing here needs every head resident at
+  // once -- both GEMMs are strided-batched over heads and every consumer kernel
+  // takes a head count plus a batch stride -- so heads are processed in groups
+  // sized to a byte budget. Only the score buffers shrink; Q/K/V/O stay whole
+  // (they are linear in sequence length and small), and the output transpose
+  // still runs once over all heads.
+  //
+  // The group size divides B*H so that every group has the same shape and can
+  // share one pair of GEMM descriptors. It is B*H whenever the ungrouped buffer
+  // already fits the budget, which keeps short sequences byte-identical and
+  // launch-for-launch identical to before.
+  //
+  // Grouping renumbers the head index that kernels see, so it is restricted to
+  // cases where no consumer depends on the absolute head: a per-head additive
+  // bias or a per-head softmax sink both would. no-expand is excluded too, since
+  // its K/V operands are addressed per KV head rather than per Q head.
+  const bool bias_head_broadcast =
+      attention_bias == nullptr ||
+      (attn_bias_batch <= 1 && attn_bias_num_heads <= 1);
+  const bool groupable = need_transpose && !use_no_expand && B == 1 &&
+                         bias_head_broadcast && head_sink == nullptr &&
+                         !use_smooth_softmax;
+  int64_t heads_per_group = B * H;
+  if (groupable) {
+    const size_t bytes_per_head = static_cast<size_t>(sq) *
+                                  static_cast<size_t>(total_seq) *
+                                  (sizeof(float) + elem_sz);
+    const size_t budget = gqa_score_budget_bytes();
+    int64_t chosen = 1; // a single head is always permitted, budget or not
+    for (int64_t cand = 1; cand <= B * H; ++cand) {
+      if ((B * H) % cand != 0)
+        continue;
+      if (static_cast<size_t>(cand) * bytes_per_head <= budget)
+        chosen = cand;
+    }
+    heads_per_group = chosen;
+  }
+
   // GEMM descriptor keys. The no-expand flavour uses explicit per-operand
   // strides (non-zero stride fields); the expand flavour leaves them zero so
   // queryOrCreateGemmState falls back to the dense packed-batch defaults.
@@ -1550,7 +1625,9 @@ static int gqa_forward_hipblaslt(
                 /*strideB=*/HPG * sq * total_seq,
                 /*strideC=*/HPG * sq * d};
   } else {
-    scoreKey = {total_seq,           sq,        d, B * H, true,
+    // Batched over one head group; the loop below advances the base pointers by
+    // whole heads, so the default dense strides still apply.
+    scoreKey = {total_seq,           sq,        d, heads_per_group, true,
                 /*outputFp32=*/true, gemm_fp32,
                 /*strideA=*/0,
                 /*strideB=*/0,
@@ -1558,7 +1635,7 @@ static int gqa_forward_hipblaslt(
     valueKey = {d,
                 sq,
                 total_seq,
-                B * H,
+                heads_per_group,
                 false,
                 /*outputFp32=*/gemm_fp32,
                 gemm_fp32,
@@ -1594,9 +1671,11 @@ static int gqa_forward_hipblaslt(
   size_t Kexp_bytes =
       use_no_expand ? 0 : static_cast<size_t>(B) * H * total_seq * d * elem_sz;
   size_t Vexp_bytes = Kexp_bytes;
+  // Sized for one head group, not all B*H heads.
   size_t S_f32_bytes =
-      static_cast<size_t>(B) * H * sq * total_seq * sizeof(float);
-  size_t S_fp16_bytes = static_cast<size_t>(B) * H * sq * total_seq * elem_sz;
+      static_cast<size_t>(heads_per_group) * sq * total_seq * sizeof(float);
+  size_t S_fp16_bytes =
+      static_cast<size_t>(heads_per_group) * sq * total_seq * elem_sz;
   size_t O_bytes =
       need_transpose ? static_cast<size_t>(B) * H * sq * d * elem_sz : 0;
 
@@ -1749,11 +1828,29 @@ static int gqa_forward_hipblaslt(
                             expandCopy, static_cast<int>(elem_sz)));
     }
 
+    // Steps 8-10 run once per head group (see the head-grouping note above).
+    // The score buffers hold one group, so each iteration overwrites them; the
+    // group's results are consumed into d_O before the next iteration starts,
+    // and the stream is serialised, so the reuse needs no extra sync. When
+    // heads_per_group == B*H this loop runs once and every pointer below is the
+    // buffer base, identical to the ungrouped pipeline.
+    for (int64_t head0 = 0; head0 < B * H; head0 += heads_per_group) {
+    // Byte offsets of this group inside the whole-head Q/K/V/O buffers. Q and O
+    // are BNSD [B,H,sq,d]; the expanded K/V are [B*H,total_seq,d].
+    const size_t group_q_off =
+        static_cast<size_t>(head0) * sq * d * elem_sz;
+    const size_t group_kv_off =
+        static_cast<size_t>(head0) * total_seq * d * elem_sz;
+
     // ---- Step 8: Score GEMM (fp16/fp32 in, fp32 out) ----
     // A = K: no-expand reads present_key directly, expand reads d_Kexp.
     // B = Q: need_transpose reads d_Qtrans (BNSD), else qSrc (BSHD==BNSD@sq=1).
-    const void *scoreA = use_no_expand ? present_key : d_Kexp;
-    const void *scoreB = need_transpose ? d_Qtrans : qSrc;
+    const void *scoreA =
+        use_no_expand ? present_key
+                      : static_cast<const char *>(d_Kexp) + group_kv_off;
+    const void *scoreB =
+        need_transpose ? static_cast<const char *>(d_Qtrans) + group_q_off
+                       : qSrc;
     float scoreAlpha = scale;
     float beta = 0.0f;
     hipblasLtMatmulAlgo_t sAlgo = scoreState->algo;
@@ -1768,7 +1865,7 @@ static int gqa_forward_hipblaslt(
     if (attention_bias) {
       HIP_CHECK(hip_gqa_add_attention_bias_f32(
           stream, d_S_f32, const_cast<void *>(attention_bias),
-          static_cast<int>(B * H), static_cast<int>(H),
+          static_cast<int>(heads_per_group), static_cast<int>(H),
           static_cast<int>(attn_bias_batch),
           static_cast<int>(attn_bias_num_heads), static_cast<int>(sq),
           static_cast<int>(total_seq), scoreF32BatchStride,
@@ -1793,9 +1890,12 @@ static int gqa_forward_hipblaslt(
     // 1 || local_window_size > 0).
     int scoreFp16BatchStride = static_cast<int>(sq * total_seq);
     if ((sq > 1 || local_window_size > 0) && !no_causal) {
+      // The causal / window mask is the same for every head, so a group needs no
+      // head offset -- only the group's head count.
       HIP_CHECK(hip_gqa_causal_mask_f32(
-          stream, d_S_f32, static_cast<int>(B * H), static_cast<int>(total_seq),
-          static_cast<int>(sq), scoreF32BatchStride, static_cast<int>(past_len),
+          stream, d_S_f32, static_cast<int>(heads_per_group),
+          static_cast<int>(total_seq), static_cast<int>(sq),
+          scoreF32BatchStride, static_cast<int>(past_len),
           static_cast<int>(local_window_size)));
     }
     // fp16 GQA: softmax writes fp16 probabilities for the fp16 Value GEMM.
@@ -1805,24 +1905,29 @@ static int gqa_forward_hipblaslt(
     // gemm_fp32.
     if (gemm_fp32) {
       HIP_CHECK(hip_gqa_softmax_f32_to_f32(
-          stream, d_S_f32, d_S_fp16, static_cast<int>(B * H * sq),
-          static_cast<int>(total_seq), static_cast<int>(sq),
-          scoreF32BatchStride, scoreFp16BatchStride, head_sink,
-          static_cast<int>(H), static_cast<int>(use_smooth_softmax)));
+          stream, d_S_f32, d_S_fp16,
+          static_cast<int>(heads_per_group * sq), static_cast<int>(total_seq),
+          static_cast<int>(sq), scoreF32BatchStride, scoreFp16BatchStride,
+          head_sink, static_cast<int>(H),
+          static_cast<int>(use_smooth_softmax)));
     } else {
       HIP_CHECK(hip_gqa_softmax_f32_to_f16(
-          stream, d_S_f32, d_S_fp16, static_cast<int>(B * H * sq),
-          static_cast<int>(total_seq), static_cast<int>(sq),
-          scoreF32BatchStride, scoreFp16BatchStride, head_sink,
-          static_cast<int>(H), static_cast<int>(use_smooth_softmax)));
+          stream, d_S_f32, d_S_fp16,
+          static_cast<int>(heads_per_group * sq), static_cast<int>(total_seq),
+          static_cast<int>(sq), scoreF32BatchStride, scoreFp16BatchStride,
+          head_sink, static_cast<int>(H),
+          static_cast<int>(use_smooth_softmax)));
     }
 
     // ---- Step 10: Value GEMM (fp16/fp32 in, fp16/fp32 out) ----
     // A = V: no-expand reads present_value directly, expand reads d_Vexp.
     // C = O: need_transpose writes d_O (BNSD, transposed below); at sq==1 the
     //        GEMM writes straight to output (BSHD==BNSD).
-    const void *valueA = use_no_expand ? present_value : d_Vexp;
-    void *valueC = need_transpose ? d_O : output;
+    const void *valueA =
+        use_no_expand ? present_value
+                      : static_cast<const char *>(d_Vexp) + group_kv_off;
+    void *valueC = need_transpose ? static_cast<char *>(d_O) + group_q_off
+                                  : output;
     float valAlpha = 1.0f;
     hipblasLtMatmulAlgo_t vAlgo = valueState->algo;
 
@@ -1830,6 +1935,7 @@ static int gqa_forward_hipblaslt(
         ltHandle, valueState->desc, &valAlpha, valueA, valueState->layA,
         d_S_fp16, valueState->layB, &beta, valueC, valueState->layC, valueC,
         valueState->layD, &vAlgo, gemm_ws_ptr, gemm_ws_bytes, stream));
+    } // head group
 
     // ---- Step 11: O Transpose BNSD [B,H,sq,d] -> BSHD [B,sq,H,d] ----
     // Skipped at sq == 1: the Value GEMM already wrote into output.
@@ -1842,10 +1948,11 @@ static int gqa_forward_hipblaslt(
 
     RUNTIME_DEBUG_LOG(
         "[REAL] GQA hipBLASLt: B=%lld sq=%lld total_seq=%lld H=%lld G=%lld "
-        "d=%lld no_expand=%d transpose=%d\n",
+        "d=%lld no_expand=%d transpose=%d heads_per_group=%lld groups=%lld\n",
         (long long)B, (long long)sq, (long long)total_seq, (long long)H,
         (long long)G, (long long)d, static_cast<int>(use_no_expand),
-        static_cast<int>(need_transpose));
+        static_cast<int>(need_transpose), (long long)heads_per_group,
+        (long long)((B * H) / heads_per_group));
   }
 
 cleanup:

@@ -240,6 +240,22 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, int op_state_slot,
     return -1;
   }
 
+  // Same flattening precondition as wrap_layer_normalization: without it a
+  // caller whose element counts disagree silently gets a truncated row count.
+  if (gamma_num_elements <= 0) {
+    fprintf(stderr,
+            "[REAL] wrap_skip_simplified_layer_norm: gamma_num_elements=%lld\n",
+            (long long)gamma_num_elements);
+    return -1;
+  }
+  if (input_num_elements % gamma_num_elements != 0) {
+    fprintf(stderr,
+            "[REAL] wrap_skip_simplified_layer_norm: input_num(%lld) not "
+            "divisible by gamma_num(%lld)\n",
+            (long long)input_num_elements, (long long)gamma_num_elements);
+    return -1;
+  }
+
   int64_t hidden_dim = gamma_num_elements;
   int64_t num_rows = input_num_elements / hidden_dim;
 
