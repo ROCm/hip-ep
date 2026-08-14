@@ -164,15 +164,19 @@ struct ConvTableEntry {
   ConvTableEntry &operator=(const ConvTableEntry &other) = delete;
 
   // Enable move
-  ConvTableEntry(ConvTableEntry &&other) {
-    std::swap(input_desc, other.input_desc);
-    std::swap(weights_desc, other.weights_desc);
-    std::swap(output_desc, other.output_desc);
-    std::swap(conv_desc, other.conv_desc);
-    std::swap(problem, other.problem);
-    std::swap(solution, other.solution);
-    std::swap(workspace, other.workspace);
-    std::swap(workspaceSize, other.workspaceSize);
+  ConvTableEntry(ConvTableEntry &&other)
+      : input_desc(other.input_desc), weights_desc(other.weights_desc),
+        output_desc(other.output_desc), conv_desc(other.conv_desc),
+        problem(other.problem), solution(other.solution),
+        workspace(other.workspace), workspaceSize(other.workspaceSize) {
+    other.input_desc = nullptr;
+    other.weights_desc = nullptr;
+    other.output_desc = nullptr;
+    other.conv_desc = nullptr;
+    other.problem = nullptr;
+    other.solution = nullptr;
+    other.workspace = nullptr;
+    other.workspaceSize = 0;
   }
   ConvTableEntry &operator=(ConvTableEntry &&other) = delete;
 
