@@ -179,8 +179,8 @@ materialize index SSA only after validation succeeds.
 A reifier must validate every precondition before touching the builder.
 Failure must leave the IR unchanged, including when the valid result shape is
 rank zero; `FailureOr` distinguishes that empty success from failure.
-Conversion-side destination builders in `OnnxToHipUtils.cpp` consume the same
-reified shape and validate imported static result metadata before creating
+Conversion-side destination builders in `HipConversionUtils.cpp` consume the
+same reified shape and validate imported static result metadata before creating
 `tensor.empty`.
 
 Common DPS verification is similarly centralized in `verifyDpsComputeOp`. It
