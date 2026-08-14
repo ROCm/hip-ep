@@ -812,6 +812,17 @@ static bool gqa_score_fp16_enabled() {
   return enabled;
 }
 
+// Fold the external additive mask into the softmax's score read instead of
+// running add_attention_bias_f32 as its own pass first. Default on; set
+// HIPDNN_EP_GQA_FUSE_BIAS_SOFTMAX=0 to A/B the separate pass from one binary.
+static bool gqa_fuse_bias_softmax_enabled() {
+  static const bool enabled = [] {
+    const char *env = std::getenv("HIPDNN_EP_GQA_FUSE_BIAS_SOFTMAX");
+    return !env || std::strcmp(env, "0") != 0;
+  }();
+  return enabled;
+}
+
 // Env-var gate to force decode through the decomposed hipBLASLt pipeline
 // instead of the fused custom kernel hip_gqa_fused_decode. Default off
 // (fused path is preferred). Set HIPDNN_EP_GQA_DISABLE_FUSED_DECODE=1 to
@@ -1789,6 +1800,11 @@ static int gqa_forward_hipblaslt(
   // one and there would be nothing to save.
   const bool score_fp16 = gqa_score_fp16_enabled() && !gemm_fp32;
 
+  // The fold needs a bias to fold; with none, the softmax runs exactly as
+  // before.
+  const bool fuse_bias =
+      gqa_fuse_bias_softmax_enabled() && attention_bias != nullptr;
+
   int64_t heads_per_group = B * H;
   if (groupable) {
     const size_t bytes_per_head = static_cast<size_t>(sq) *
@@ -2091,8 +2107,11 @@ static int gqa_forward_hipblaslt(
         scoreState->layD, &sAlgo, gemm_ws_ptr, gemm_ws_bytes, stream));
 
     // ---- Step 8b: Add external attention bias (onnx.Attention attn_mask) ----
+    // Skipped when the softmax below folds the bias into its own score read:
+    // this pass reads and rewrites the whole S x S buffer to deliver a value
+    // that kernel is about to read anyway.
     int scoreF32BatchStride = static_cast<int>(sq * total_seq);
-    if (attention_bias) {
+    if (attention_bias && !fuse_bias) {
       auto add_bias = score_fp16 ? hip_gqa_add_attention_bias_f16
                                  : hip_gqa_add_attention_bias_f32;
       HIP_CHECK(add_bias(
@@ -2139,7 +2158,27 @@ static int gqa_forward_hipblaslt(
     // fp32 Value GEMM. d_S_fp16 is the probabilities buffer either way (sized
     // by elem_sz above), so the name is fp16-specific but holds fp32 when
     // gemm_fp32.
-    if (score_fp16) {
+    if (fuse_bias) {
+      // Applying the causal triangle above and the bias here inverts the
+      // documented order, which is safe only because the triangle writes
+      // -INFINITY (-65504 in fp16): adding any finite bias to it leaves it
+      // masked, and elsewhere the sum is the same either way.
+      //
+      // With fp16 scores this runs in place, d_S_f32 and d_S_fp16 being the
+      // same buffer; the kernel's one-block-per-column ownership makes that
+      // safe.
+      HIP_CHECK(hip_gqa_softmax_f32_to_out_biased(
+          stream, d_S_f32, d_S_fp16,
+          static_cast<int>(heads_per_group * sq), static_cast<int>(total_seq),
+          static_cast<int>(sq), scoreF32BatchStride, scoreFp16BatchStride,
+          head_sink, static_cast<int>(H),
+          static_cast<int>(use_smooth_softmax), attention_bias,
+          static_cast<int>(attn_bias_batch),
+          static_cast<int>(attn_bias_num_heads), static_cast<int>(elem_sz),
+          static_cast<int>(gemm_fp32),
+          score_fp16 ? static_cast<int>(elem_sz)
+                     : static_cast<int>(sizeof(float))));
+    } else if (score_fp16) {
       // In place: d_S_f32 and d_S_fp16 are the same buffer here.
       HIP_CHECK(hip_gqa_softmax_f16_to_f16(
           stream, d_S_f32, d_S_fp16,
