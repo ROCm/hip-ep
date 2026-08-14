@@ -46,6 +46,31 @@ namespace hip {
 // Helpers
 //===----------------------------------------------------------------------===//
 
+/// Read an ONNX IntegerAttr as int64_t. Works for signed, unsigned, and
+/// signless integer types — unlike IntegerAttr::getSInt() which asserts on
+/// non-signed types in debug builds.
+inline int64_t getOnnxIntegerAttrValue(mlir::IntegerAttr attr) {
+  return attr.getValue().getSExtValue();
+}
+
+/// True when \p op is a dead ONNX op that manual DCE may erase. Terminators
+/// (onnx.Yield / onnx.Return) have no results so use_empty() is always true —
+/// erasing them leaves an empty block and fails verification. Dead onnx.NoValue
+/// placeholders must also be erased — they have no LLVM lowering path.
+inline bool isDeadOnnxOpSafeToErase(mlir::Operation *op) {
+  if (!op || !op->use_empty())
+    return false;
+  llvm::StringRef name = op->getName().getStringRef();
+  if (!name.starts_with("onnx."))
+    return false;
+  if (name == "onnx.EntryPoint" || name == "onnx.Yield" ||
+      name == "onnx.Return")
+    return false;
+  if (op->hasTrait<mlir::OpTrait::IsTerminator>())
+    return false;
+  return true;
+}
+
 /// Create a tensor.empty for a DPS init operand.  Dynamic dimension sizes
 /// are extracted from \p source using tensor.dim at each dynamic index.
 /// Suitable for ops where the output shape aligns positionally with one input
@@ -502,6 +527,11 @@ void populatePowDecompositionPatterns(RewritePatternSet &patterns,
 /// See ErfGeluFusion.cpp.
 void populateErfGeluFusionPatterns(RewritePatternSet &patterns,
                                    MLIRContext *ctx);
+
+/// Pre-lowering: fold LoRA weight_pack (Transpose/Cast/Add/Cast/Reshape) into
+/// MatMulNBits(bits=8) with lora_weight_pack=1 for runtime pack+cache.
+/// See LoraWeightPackFusion.cpp.
+void runLoraWeightPackFusion(mlir::func::FuncOp funcOp);
 
 /// Pre-lowering pattern set: decompose vision/projector ops that have no
 /// direct MorphiZen converter into supported primitives — patch-embed

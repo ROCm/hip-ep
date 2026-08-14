@@ -10,6 +10,7 @@
 #include "error_check_macros.h"
 #include "hip_arch_compat.h"
 #include "hip_custom_kernels.h"
+#include "lora_weight_pack_cache.h"
 #include "runtime_types.h"
 #include "zp_unpack_cache.h"
 
@@ -191,6 +192,48 @@ const void *lookup_or_convert_zp_fp16(ZpUnpackCache &cache, void *stream,
   return dst;
 }
 
+LoraWeightPackEntry::~LoraWeightPackEntry() {
+  if (packed)
+    hipFree(packed);
+}
+
+const void *lookup_or_pack_lora_weight(LoraWeightPackEntry &entry, void *stream,
+                                       const void *raw_i8, int K, int N) {
+  const size_t need = static_cast<size_t>(K) * static_cast<size_t>(N);
+
+  if (entry.packed && entry.cached_k == K && entry.cached_n == N &&
+      entry.bytes >= need) {
+    RUNTIME_DEBUG_LOG("[lora-weight-pack] cache hit K=%d N=%d bytes=%zu\n", K,
+                      N, need);
+    return entry.packed;
+  }
+
+  if (entry.packed) {
+    hipFree(entry.packed);
+    entry.packed = nullptr;
+    entry.bytes = 0;
+    entry.cached_k = 0;
+    entry.cached_n = 0;
+  }
+
+  void *dst = nullptr;
+  if (hipMalloc(&dst, need) != hipSuccess) {
+    fprintf(stderr,
+            "matmul_nbits: hipMalloc(%zu) for lora weight pack cache failed\n",
+            need);
+    return nullptr;
+  }
+  RUNTIME_DEBUG_LOG(
+      "[lora-weight-pack] packing raw=%p -> dst=%p K=%d N=%d bytes=%zu\n",
+      raw_i8, dst, K, N, need);
+  hip_pack_lora_weight_mnbits_int8(stream, raw_i8, dst, K, N);
+  entry.packed = dst;
+  entry.bytes = need;
+  entry.cached_k = K;
+  entry.cached_n = N;
+  return entry.packed;
+}
+
 } // namespace hipdnn_ep_real
 
 // Teardown shim for the qmoe-owned RuntimeState::zp_unpack_cache. Called from
@@ -206,6 +249,7 @@ extern "C" void hipdnn_ep_zp_unpack_cache_destroy(void *cache_ptr) {
 // share it.
 struct MatmulNbitsState : OpStateT<MatmulNbitsState> {
   hipdnn_ep_real::ZpUnpackCache zp;
+  hipdnn_ep_real::LoraWeightPackEntry lora_pack;
 
   // CDNA/wave64 prefill fast path: dequantized fp16 weights, keyed by the
   // packed-B device pointer (stable for the model's lifetime, so each weight
@@ -499,7 +543,7 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
                       const void *bias, void *output, int64_t M, int64_t N,
                       int64_t K, int64_t batch_count, int64_t bits,
                       int64_t block_size, int64_t elem_size,
-                      int64_t zp_elem_size) {
+                      int64_t zp_elem_size, int64_t lora_weight_pack) {
   OP_PROFILE(
       "matmul_nbits",
       [&] {
@@ -532,6 +576,31 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
   if (g_idx) {
     fprintf(stderr, "wrap_matmul_nbits: g_idx not supported\n");
     return -1;
+  }
+
+  if (lora_weight_pack) {
+    if (bits != 8 || block_size <= 0 || (K % block_size) != 0) {
+      fprintf(stderr, "wrap_matmul_nbits: lora_weight_pack requires bits=8, "
+                      "K%%block_size==0\n");
+      return -1;
+    }
+    MatmulNbitsState *mst =
+        MatmulNbitsState::get_op_state(state, op_state_slot);
+    if (!mst) {
+      fprintf(stderr, "wrap_matmul_nbits: no MatmulNbitsState at slot %d\n",
+              op_state_slot);
+      return -1;
+    }
+    // Replaces raw int8 [K,N] with cached packed uint8 [N,K] for the kernel.
+    const void *packed_b = hipdnn_ep_real::lookup_or_pack_lora_weight(
+        mst->lora_pack, stream, B, static_cast<int>(K), static_cast<int>(N));
+    if (!packed_b) {
+      fprintf(stderr,
+              "wrap_matmul_nbits: lora weight pack failed (K=%lld N=%lld)\n",
+              (long long)K, (long long)N);
+      return -1;
+    }
+    B = packed_b;
   }
 
   // Pre-unpack zero_points (asym path) using this instance's pointer-keyed

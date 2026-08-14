@@ -1725,6 +1725,10 @@ HIP_KERNEL_API void hip_matmul_nbits_convert_zp_fp16(
 HIP_KERNEL_API void hip_matmul_nbits_dequant_b_fp16(
     void* stream, const void* B_packed, const void* scales_fp16,
     const void* zeros_fp16, void* B_fp16_out, int N, int K, int group_size);
+/* LoRA weight_pack fusion: transpose [K,N] int8 + signed_offset(+128) -> [N,K] uint8.
+ * Used by the per-op-state cache in lib/Runtime/real/matmul_nbits.cpp. */
+HIP_KERNEL_API void hip_pack_lora_weight_mnbits_int8(
+    void* stream, const void* raw_i8, void* dst_u8, int K, int N);
 
 /* =========================================================================
  * GatherBlockQuantized (com.microsoft)

@@ -108,14 +108,20 @@ MatMulNBitsToHip::matchAndRewrite(mlir::Operation *op,
   }
   auto zpElemSizeAttr = rewriter.getI64IntegerAttr(zpElemSize);
 
+  // Non-zero when LoraWeightPackFusion folded the LoRA weight pack chain: B is
+  // raw int8 [K,N] and runtime packs it once into a per-op GPU cache.
+  int64_t loraWeightPack = 0;
+  if (auto loraPackAttr =
+          op->getAttrOfType<mlir::IntegerAttr>("lora_weight_pack"))
+    loraWeightPack = getOnnxIntegerAttrValue(loraPackAttr);
+
   auto rt = mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
   mlir::Value init = createEmptyTensor(rewriter, loc, rt, A);
 
-  // Result type inferred from `init` via InferTypeOpInterface — DPS contract:
-  // result type == outs operand type.
   auto hipOp = mlir::hip::MatMulNBitsOp::create(
       rewriter, loc, context, A, B, scales, zeroPoints, gIdx, bias, init, KAttr,
-      NAttr, bitsAttr, blockSizeAttr, accuracyLevelAttr, zpElemSizeAttr);
+      NAttr, bitsAttr, blockSizeAttr, accuracyLevelAttr, zpElemSizeAttr,
+      rewriter.getI64IntegerAttr(loraWeightPack));
   rewriter.replaceOp(op, hipOp->getResults());
   return mlir::success();
 }
