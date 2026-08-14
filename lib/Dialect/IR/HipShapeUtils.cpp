@@ -236,10 +236,10 @@ LogicalResult mlir::hip::verifyHipOpShape(
     return op->emitOpError("init operand is not a shaped type");
   ArrayRef<int64_t> actual = initType.getShape();
   if (actual.size() != expected->size())
-    return op->emitOpError("rank mismatch on result #")
-           << initIndex << ": expected rank " << expected->size() << " "
-           << detail::formatShape(*expected) << " but outs has rank "
-           << actual.size() << " " << detail::formatShape(actual);
+    return op->emitOpError("rank mismatch on result: expected rank ")
+           << expected->size() << " " << detail::formatShape(*expected)
+           << " but outs has rank " << actual.size() << " "
+           << detail::formatShape(actual);
 
   for (size_t d : llvm::seq<size_t>(0, actual.size())) {
     // kDynamic on either side is a wildcard.
@@ -248,10 +248,9 @@ LogicalResult mlir::hip::verifyHipOpShape(
       continue;
     if (actual[d] != (*expected)[d])
       return op->emitOpError("dim ")
-             << d << " of result #" << initIndex << " mismatch: expected "
-             << (*expected)[d] << " " << detail::formatShape(*expected)
-             << " but outs has " << actual[d] << " "
-             << detail::formatShape(actual);
+             << d << " of result mismatch: expected " << (*expected)[d] << " "
+             << detail::formatShape(*expected) << " but outs has " << actual[d]
+             << " " << detail::formatShape(actual);
   }
   return success();
 }
