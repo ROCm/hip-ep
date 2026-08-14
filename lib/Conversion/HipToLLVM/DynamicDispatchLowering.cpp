@@ -319,6 +319,117 @@ struct ConvOpDynamicDispatchLowering : public ConvertOpToLLVMPattern<ConvOp> {
   }
 };
 
+//===----------------------------------------------------------------------===//
+// MatmulOpDynamicDispatchLowering - Matmul via DynamicDispatch
+//===----------------------------------------------------------------------===//
+//
+// Lowers hip.matmul to wrap_dd_matmul (NPU execution via DynamicDispatch)
+// Similar to GemmOp but supports batched N-D x N-D operations
+//
+// For now, we only support rank-2 (non-batched) matmul via DynamicDispatch.
+// Batched operations will fall back to GPU.
+//===----------------------------------------------------------------------===//
+
+struct MatmulOpDynamicDispatchLowering
+    : public ConvertOpToLLVMPattern<MatmulOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(MatmulOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    ModuleOp module = op->getParentOfType<ModuleOp>();
+
+    auto AType = cast<MemRefType>(op.getA().getType());
+    auto BType = cast<MemRefType>(op.getB().getType());
+
+    // For now, only support rank-2 matmul (no batching)
+    // Batched operations require more complex handling in DynamicDispatch
+    if (AType.getRank() != 2 || BType.getRank() != 2) {
+      return failure(); // Let GPU patterns handle batched matmul
+    }
+
+    Type ptrType = getPtrType();
+    Type i32Type = rewriter.getI32Type();
+    Type i64Type = rewriter.getI64Type();
+    Type f64Type = rewriter.getF64Type();
+
+    auto createI64Const = [&](int64_t value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+
+    // Extract element type
+    Type elemType = AType.getElementType();
+    int64_t dataType = getHipdnnDataType(elemType);
+    if (dataType < 0) {
+      return op.emitError("Unsupported element type for DynamicDispatch Matmul");
+    }
+    Value dataTypeVal = createI64Const(dataType);
+
+    // Extract memref pointers
+    Value statePtr = adaptor.getCtx();
+    Value APtr = extractContiguousMemRefPtr(adaptor.getA(), rewriter, loc);
+    Value BPtr = extractContiguousMemRefPtr(adaptor.getB(), rewriter, loc);
+    Value outputPtr =
+        extractContiguousMemRefPtr(adaptor.getOutput(), rewriter, loc);
+
+    // hip.matmul is always: C = A @ B (no alpha/beta, no transpose)
+    // A: [M, K], B: [K, N], C: [M, N]
+    Value M = getMemRefDimSize(AType, 0, adaptor.getA(), rewriter, loc);
+    Value K = getMemRefDimSize(AType, 1, adaptor.getA(), rewriter, loc);
+    Value N = getMemRefDimSize(BType, 1, adaptor.getB(), rewriter, loc);
+
+    // DynamicDispatch matmul: alpha=1.0, beta=0.0, no transpose
+    Value alpha = LLVM::ConstantOp::create(rewriter, loc, f64Type,
+                                           rewriter.getF64FloatAttr(1.0));
+    Value beta = LLVM::ConstantOp::create(rewriter, loc, f64Type,
+                                          rewriter.getF64FloatAttr(0.0));
+    Value transA = createI64Const(0);
+    Value transB = createI64Const(0);
+
+    // Null bias pointer (hip.matmul has no bias)
+    Value nullBias = LLVM::ZeroOp::create(rewriter, loc, ptrType);
+
+    // Build function signature for wrap_dd_matmul
+    SmallVector<Type, 16> paramTypes = {
+        ptrType, // state
+        i32Type, // op_state_slot
+        ptrType, // input_a
+        ptrType, // input_b
+        ptrType, // bias
+        ptrType, // output
+        i64Type, // M
+        i64Type, // N
+        i64Type, // K
+        f64Type, // alpha
+        f64Type, // beta
+        i64Type, // transA
+        i64Type, // transB
+        i64Type, // data_type
+    };
+
+    FailureOr<LLVM::LLVMFuncOp> funcOp = LLVM::lookupOrCreateFn(
+        rewriter, module, kWrapDDMatMul, paramTypes, i32Type);
+    if (failed(funcOp)) {
+      return failure();
+    }
+
+    SmallVector<Value, 16> args = {
+        statePtr,    getOpStateSlotValue(op, rewriter, loc),
+        APtr,        BPtr,
+        nullBias,    outputPtr,
+        M,           N,
+        K,           alpha,
+        beta,        transA,
+        transB,      dataTypeVal};
+
+    LLVM::CallOp::create(rewriter, loc, *funcOp, args);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 } // namespace
 
 //===----------------------------------------------------------------------===//
@@ -328,6 +439,7 @@ struct ConvOpDynamicDispatchLowering : public ConvertOpToLLVMPattern<ConvOp> {
 void populateDynamicDispatchGemmLoweringPatterns(
     const LLVMTypeConverter &converter, RewritePatternSet &patterns) {
   patterns.add<GemmOpDynamicDispatchLowering>(converter);
+  patterns.add<MatmulOpDynamicDispatchLowering>(converter);
 }
 
 void populateDynamicDispatchConvLoweringPatterns(
