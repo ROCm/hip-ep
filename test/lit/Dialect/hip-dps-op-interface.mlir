@@ -129,9 +129,9 @@ func.func @rank_zero_reify(%ctx: !hip.context, %cond: tensor<i1>,
 
 // -----
 
-// A malformed later result must be diagnosed before the dynamic first output
-// emits tensor.dim. The test pass temporarily changes result/init #1 to i32,
-// invokes the shared default, and restores the valid types afterward.
+// A rank-mismatched later init must be diagnosed before the dynamic first
+// output emits tensor.dim. The test pass temporarily adds one rank to init #1,
+// invokes the shared default, and restores the valid type afterward.
 // MEMREF: hip.layer_norm
 // MEMREF-SAME: test.default_reify_failure_atomic_passed
 func.func @default_reify_second_result_failure(

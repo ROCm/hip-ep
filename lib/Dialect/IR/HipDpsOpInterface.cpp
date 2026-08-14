@@ -65,6 +65,12 @@ HipDpsOp::reifyResultShapes(OpBuilder &b,
     if (!isa<RankedTensorType>(outType))
       return op->emitOpError("invalid tensor-mode DPS init #")
              << idx << ": expected ranked tensor, got " << outType;
+    auto resultTensor = cast<RankedTensorType>(resultType);
+    auto outTensor = cast<RankedTensorType>(outType);
+    if (resultTensor.getRank() != outTensor.getRank())
+      return op->emitOpError("invalid tensor-mode result/init pair #")
+             << idx << ": result rank " << resultTensor.getRank()
+             << " does not match DPS init rank " << outTensor.getRank();
   }
 
   reified.reserve(op->getNumResults());
