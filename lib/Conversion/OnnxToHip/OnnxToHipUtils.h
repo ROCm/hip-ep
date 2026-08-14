@@ -14,6 +14,7 @@
 
 #include "ReadbackScalar.h"
 
+#include "hip/Conversion/HipConversionUtils.h"
 #include "hip/Conversion/OnnxToHip/Passes.h"
 #include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/IR/HipShapeUtils.h"
@@ -69,14 +70,6 @@ inline mlir::Value createEmptyTensor(mlir::OpBuilder &builder,
                                        resultType.getElementType(), dynSizes);
 }
 
-/// Build a tensor.empty with the imported result type and the dynamic sizes
-/// described by `reifiedShape`. Validation completes before any index values or
-/// destination IR are emitted.
-mlir::FailureOr<mlir::Value> createEmptyTensorFromReifiedShape(
-    mlir::OpBuilder &builder, mlir::Location loc,
-    mlir::RankedTensorType resultType,
-    llvm::ArrayRef<mlir::OpFoldResult> reifiedShape);
-
 /// Resolve the ranked result type of an ONNX reduction op (ReduceMax / Sum /
 /// Mean / Prod / ...).
 ///
@@ -122,39 +115,6 @@ inferReduceResultType(mlir::Operation *op, mlir::Value data,
     }
   }
   return mlir::RankedTensorType::get(outShape, inputType.getElementType());
-}
-
-/// Pure compatibility check for an imported result type and an inferred shape.
-/// An imported dynamic dimension may be refined, but an imported static extent
-/// requires the inference rule to prove that exact value.
-bool isResultTypeCompatibleWithInferredShape(
-    mlir::RankedTensorType resultType, llvm::ArrayRef<int64_t> inferredShape);
-
-/// Create a tensor.empty for a DPS init whose shape is the NumPy-style
-/// broadcast of \p operands. Converter destination construction delegates to
-/// the same dialect helper used by ReifyRankedShapedTypeOpInterface. Pure
-/// static inference and imported-result compatibility are checked before any
-/// shape SSA is emitted.
-mlir::FailureOr<mlir::Value>
-createBroadcastEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
-                           mlir::RankedTensorType resultType,
-                           mlir::ValueRange operands);
-
-/// Get !hip.context from function argument 0. Returns failure if the
-/// function has no arguments or the first argument is not !hip.context.
-inline mlir::FailureOr<mlir::Value>
-getContextArg(mlir::Operation *op, mlir::PatternRewriter &rewriter) {
-  auto funcOp = op->getParentOfType<mlir::func::FuncOp>();
-  if (!funcOp)
-    return rewriter.notifyMatchFailure(op, "not inside a function");
-  auto &entry = funcOp.getBody().front();
-  if (entry.getNumArguments() == 0)
-    return rewriter.notifyMatchFailure(op, "function has no arguments");
-  mlir::Value ctx = entry.getArgument(0);
-  if (!mlir::isa<mlir::hip::ContextType>(ctx.getType()))
-    return rewriter.notifyMatchFailure(op,
-                                       "first argument is not !hip.context");
-  return ctx;
 }
 
 /// Map an MLIR element type onto the HIPDNN_EP_DATATYPE_* enum that runtime
