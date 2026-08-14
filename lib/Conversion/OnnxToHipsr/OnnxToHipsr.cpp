@@ -93,8 +93,8 @@ struct ConvertOnnxToHipsrPass
     RewritePatternSet patterns(&getContext());
     populateOnnxToHipsrConstantPatterns(patterns);
     populateCastConversionPatterns(converter, patterns, &getContext());
-    populateMatMulConversionPatterns(patterns, &getContext());
-    populateExpandConversionPatterns(patterns, &getContext());
+    populateMatMulConversionPatterns(converter, patterns, &getContext());
+    populateExpandConversionPatterns(converter, patterns, &getContext());
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns,
                                                                    converter);
     populateReturnOpTypeConversionPattern(patterns, converter);

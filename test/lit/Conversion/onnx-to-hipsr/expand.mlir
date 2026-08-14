@@ -21,11 +21,11 @@
 //
 // The conversion leaves the region empty; hipsr-populate-shape-region fills it.
 // CHECK-NOT:     shape_region
-func.func @expand(%ctx: !hipsr.context, %input: tensor<?x3xf16, #hipsr.mem<device>>,
-                  %shape: tensor<2xi64, #hipsr.mem<host>>) -> tensor<?x?xf16, #hipsr.mem<device>> {
+func.func @expand(%ctx: !hipsr.context, %input: tensor<?x3xf16>,
+                  %shape: tensor<2xi64, #hipsr.mem<host>>) -> tensor<?x?xf16> {
   %0 = "onnx.Expand"(%input, %shape)
-      : (tensor<?x3xf16, #hipsr.mem<device>>, tensor<2xi64, #hipsr.mem<host>>) -> tensor<?x?xf16, #hipsr.mem<device>>
-  return %0 : tensor<?x?xf16, #hipsr.mem<device>>
+      : (tensor<?x3xf16>, tensor<2xi64, #hipsr.mem<host>>) -> tensor<?x?xf16>
+  return %0 : tensor<?x?xf16>
 }
 
 // -----
@@ -40,10 +40,10 @@ func.func @expand(%ctx: !hipsr.context, %input: tensor<?x3xf16, #hipsr.mem<devic
 // CHECK-NEXT:    hipsr.expand(%[[CTX]]) ins(%[[INPUT]], %[[SHAPE]] : tensor<2x3xf16, #hipsr.mem<device>>, tensor<4xi64, #hipsr.mem<host>>)
 // CHECK-SAME:      outs(%[[INIT]] : tensor<?x?x?x?xf16, #hipsr.mem<device>>) : tensor<?x?x?x?xf16, #hipsr.mem<device>>
 func.func @expand_broadcast_rank(%ctx: !hipsr.context,
-                                 %input: tensor<2x3xf16, #hipsr.mem<device>>,
+                                 %input: tensor<2x3xf16>,
                                  %shape: tensor<4xi64, #hipsr.mem<host>>)
-    -> tensor<?x?x?x?xf16, #hipsr.mem<device>> {
+    -> tensor<?x?x?x?xf16> {
   %0 = "onnx.Expand"(%input, %shape)
-      : (tensor<2x3xf16, #hipsr.mem<device>>, tensor<4xi64, #hipsr.mem<host>>) -> tensor<?x?x?x?xf16, #hipsr.mem<device>>
-  return %0 : tensor<?x?x?x?xf16, #hipsr.mem<device>>
+      : (tensor<2x3xf16>, tensor<4xi64, #hipsr.mem<host>>) -> tensor<?x?x?x?xf16>
+  return %0 : tensor<?x?x?x?xf16>
 }

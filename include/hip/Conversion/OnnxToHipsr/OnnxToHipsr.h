@@ -29,11 +29,13 @@ void populateCastConversionPatterns(const ::mlir::TypeConverter &typeConverter,
                                     ::mlir::RewritePatternSet &patterns,
                                     ::mlir::MLIRContext *ctx);
 
-void populateMatMulConversionPatterns(::mlir::RewritePatternSet &patterns,
-                                      ::mlir::MLIRContext *ctx);
+void populateMatMulConversionPatterns(
+    const ::mlir::TypeConverter &typeConverter,
+    ::mlir::RewritePatternSet &patterns, ::mlir::MLIRContext *ctx);
 
-void populateExpandConversionPatterns(::mlir::RewritePatternSet &patterns,
-                                      ::mlir::MLIRContext *ctx);
+void populateExpandConversionPatterns(
+    const ::mlir::TypeConverter &typeConverter,
+    ::mlir::RewritePatternSet &patterns, ::mlir::MLIRContext *ctx);
 
 } // namespace hipsr
 } // namespace mlir
