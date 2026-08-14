@@ -564,13 +564,20 @@ int wrap_matmul_nbits(RuntimeState *state, int op_state_slot, const void *A,
                   mst->zp, stream, zero_points, static_cast<int>(N), ngk);
     if (!pre_zp_u8)
       return -1;
-    // The fp16 buffer is consumed only by the bits=4 WMMA (batch==1 &&
-    // K%32==0 && M>=16) and col-major GEMV M>1 fallback (same predicate on K,
-    // M>1). Build it eagerly when those preconditions are met — the cache
-    // makes the cost a one-time hit per zero_points pointer. The u2 WMMA path
-    // consumes uint8 zp directly, so bits=2 never needs the fp16 buffer (and
-    // the converter is nibble-specific anyway).
-    bool wmma_data_format = (batch_count == 1) && (K % 32 == 0);
+    // The fp16 buffer is consumed only by the bits=4 WMMA (batch==1 && M>=16)
+    // and col-major GEMV M>1 fallback. Build it eagerly when those
+    // preconditions are met — the cache makes the cost a one-time hit per
+    // zero_points pointer. The u2 WMMA path consumes uint8 zp directly, so
+    // bits=2 never needs the fp16 buffer (and the converter is nibble-specific
+    // anyway).
+    //
+    // The K predicate must match the WMMA gate in matmul_nbits_kernel.hip
+    // exactly, at 16 rather than 32: that kernel treats a null fp16 buffer as
+    // "use zero_points directly", which reinterprets packed nibbles as fp16
+    // instead of falling back, so a gate that is stricter here than there is
+    // silent corruption rather than a slow path. 16 is the smallest K tile in
+    // the WMMA config table.
+    bool wmma_data_format = (batch_count == 1) && (K % 16 == 0);
     if (bits == 4 && wmma_data_format && M > 1) {
       pre_zp_fp16 = hipdnn_ep_real::lookup_or_convert_zp_fp16(
           mst->zp, stream, zero_points, static_cast<int>(N), ngk);
