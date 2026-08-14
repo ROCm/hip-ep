@@ -98,6 +98,8 @@ struct ConvTableKey {
   int64_t group;
   miopenDataType_t data_type;
   miopenConvolutionMode_t conv_mode;
+  int64_t output_padding_h;
+  int64_t output_padding_w;
 
   bool operator==(const ConvTableKey &other) const {
     return (input_n == other.input_n) && (input_c == other.input_c) &&
@@ -109,7 +111,9 @@ struct ConvTableKey {
            (pad_left == other.pad_left) && (pad_bottom == other.pad_bottom) &&
            (pad_right == other.pad_right) && (dilation_h == other.dilation_h) &&
            (dilation_w == other.dilation_w) && (group == other.group) &&
-           (data_type == other.data_type) && (conv_mode == other.conv_mode);
+           (data_type == other.data_type) && (conv_mode == other.conv_mode) &&
+           (output_padding_h == other.output_padding_h) &&
+           (output_padding_w == other.output_padding_w);
   }
 };
 
@@ -187,6 +191,8 @@ struct ConvKeyHash {
     hash_combine_val(h, key.group);
     hash_combine_val(h, key.data_type);
     hash_combine_val(h, key.conv_mode);
+    hash_combine_val(h, key.output_padding_h);
+    hash_combine_val(h, key.output_padding_w);
     return h;
   }
 };
@@ -393,10 +399,10 @@ int wrap_miopenConvolutionForward(
   }
 
   ConvTableKey key{
-      input_n,    input_c,    input_h,  input_w,    weights_k,
-      output_h,   output_w,   kernel_h, kernel_w,   stride_h,
-      stride_w,   pad_top,    pad_left, pad_bottom, pad_right,
-      dilation_h, dilation_w, group,    miopen_dt,  miopenConvolution,
+      input_n,   input_c,           input_h,   input_w,    weights_k,  output_h,
+      output_w,  kernel_h,          kernel_w,  stride_h,   stride_w,   pad_top,
+      pad_left,  pad_bottom,        pad_right, dilation_h, dilation_w, group,
+      miopen_dt, miopenConvolution, 0,         0,
   };
   miopenTensorDescriptor_t bias_desc = nullptr;
   int result = 0;
