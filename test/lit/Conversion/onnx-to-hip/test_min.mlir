@@ -11,6 +11,7 @@
 // 2. 3-input min (variadic → pairwise chaining)
 // 3. 1-input min (identity pass-through)
 // 4. Dynamic shape
+// 5. Variadic pairwise broadcast grows the intermediate shape
 // ============================================================================
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
@@ -88,4 +89,16 @@ module {
     %r = "onnx.Min"(%a, %b) : (tensor<4x1x6x8x1xf32>, tensor<f32>) -> tensor<4x1x6x8x1xf32>
     return %r : tensor<4x1x6x8x1xf32>
   }
+
+  // --- Case 6: each pair uses its own broadcast shape ---
+  func.func @min_variadic_pairwise_broadcast(%a: tensor<2x1xf32>, %b: tensor<1x3xf32>, %c: tensor<2x3xf32>) -> tensor<2x3xf32> {
+    %result = "onnx.Min"(%a, %b, %c) : (tensor<2x1xf32>, tensor<1x3xf32>, tensor<2x3xf32>) -> tensor<2x3xf32>
+    return %result : tensor<2x3xf32>
+  }
+
+  // CHECK-LABEL: func.func @min_variadic_pairwise_broadcast
+  // CHECK: %[[E0:.*]] = tensor.empty() : tensor<2x3xf32>
+  // CHECK: %[[M0:.*]] = hip.min{{.*}}outs(%[[E0]] : tensor<2x3xf32>)
+  // CHECK: %[[E1:.*]] = tensor.empty() : tensor<2x3xf32>
+  // CHECK: hip.min{{.*}}ins(%[[M0]], {{.*}} : tensor<2x3xf32>, tensor<2x3xf32>) outs(%[[E1]] : tensor<2x3xf32>)
 }
