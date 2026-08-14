@@ -683,7 +683,7 @@ def Hip_ConvOp : Hip_DpsOp<"conv", /*traits=*/[OpStateOpInterface], /*outsAccess
   }];
 }
 
-def Hip_ConvTransposeOp : Hip_DpsOp<"conv_transpose"> {
+def Hip_ConvTransposeOp : Hip_DpsOp<"conv_transpose", /*traits=*/[OpStateOpInterface]> {
   let summary = "2D transposed convolution / deconvolution using MIOpen "
                 "(in-place)";
   let description = [{
@@ -741,6 +741,16 @@ def Hip_ConvTransposeOp : Hip_DpsOp<"conv_transpose"> {
     type($input) `,` type($weights) (`,` type($bias)^)? `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^ )?
+  }];
+
+  let extraClassDeclaration = [{
+    ::mlir::Value generateOpStateInit(::mlir::OpBuilder &builder,
+                                      ::mlir::Location loc,
+                                      ::mlir::Value statePtr, int32_t slot) {
+      return ::mlir::hip::emitOpStateConstruct(
+          builder, loc, statePtr, slot, "hipdnn_ep_op_state_construct_conv",
+          {});
+    }
   }];
 }
 
