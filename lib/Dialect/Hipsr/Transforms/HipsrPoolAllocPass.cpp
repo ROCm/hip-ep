@@ -120,10 +120,15 @@ computeLiveness(PoolDomainOp domain) {
 
   LLVM_DEBUG(DBGS() << "Computing liveness for " << idx << " operations\n");
 
+  struct FoldState {
+    std::optional<size_t> firstWrite;
+    std::optional<size_t> lastUse;
+  };
+
   auto processUser =
-      [&body, &opIndices](Operation *user, Value alias, memref::AllocOp allocOp,
-                          const FailureOr<std::optional<Lifetime>> &current)
-      -> FailureOr<std::optional<Lifetime>> {
+      [&body, &opIndices](
+          Operation *user, Value alias, memref::AllocOp allocOp,
+          const FailureOr<FoldState> &current) -> FailureOr<FoldState> {
     if (failed(current)) {
       return current;
     }
@@ -147,31 +152,37 @@ computeLiveness(PoolDomainOp domain) {
     bool isDpsWrite =
         llvm::is_contained(getHipsrDestinationOperands(user), alias);
 
-    if (current->has_value()) {
-      return std::optional<Lifetime>(Lifetime{
-          isDpsWrite ? std::min((*current)->start, userIdx) : (*current)->start,
-          std::max((*current)->end, userIdx)});
+    FoldState next = *current;
+    if (isDpsWrite) {
+      next.firstWrite = std::min(next.firstWrite.value_or(userIdx), userIdx);
     }
-    if (!isDpsWrite) {
-      allocOp.emitError("buffer used before written - invalid IR "
-                        "(first use is not a DPS destination)");
-      return failure();
-    }
-    return std::optional<Lifetime>(Lifetime{userIdx, userIdx});
+    next.lastUse = std::max(next.lastUse.value_or(userIdx), userIdx);
+    return next;
   };
 
   auto processAllocation =
       [&aliases, &processUser](
           memref::AllocOp allocOp) -> FailureOr<std::optional<Lifetime>> {
     Value buffer = allocOp.getResult();
-    FailureOr<std::optional<Lifetime>> lifetime =
-        std::optional<Lifetime>(std::nullopt);
+    FailureOr<FoldState> state = FoldState{};
     for (Value alias : aliases.resolve(buffer)) {
       for (Operation *user : alias.getUsers()) {
-        lifetime = processUser(user, alias, allocOp, lifetime);
+        state = processUser(user, alias, allocOp, state);
       }
     }
-    return lifetime;
+    if (failed(state)) {
+      return failure();
+    }
+    if (!state->lastUse) {
+      return std::optional<Lifetime>(std::nullopt);
+    }
+    if (!state->firstWrite) {
+      allocOp.emitError("allocation has users but no DPS write - invalid IR "
+                        "(buffer read before it is written)");
+      return failure();
+    }
+    return std::optional<Lifetime>(
+        Lifetime{*state->firstWrite, *state->lastUse});
   };
 
   llvm::DenseMap<Value, Lifetime> lifetimes;

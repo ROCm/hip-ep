@@ -31,10 +31,10 @@ func.func @no_alloc(%ctx: !hipsr.context,
 
 func.func @alloc_without_dps_write(%ctx: !hipsr.context,
                                    %in: memref<4x1024xf16, #hipsr.mem<device>>) {
-  // expected-error@+1 {{hipsr-pool-alloc: pool_domain has no poolable allocation}}
   hipsr.pool_domain(%ctx, %in
       : !hipsr.context, memref<4x1024xf16, #hipsr.mem<device>>) {
   ^bb0(%dctx: !hipsr.context, %din: memref<4x1024xf16, #hipsr.mem<device>>):
+    // expected-error@+1 {{allocation has users but no DPS write}}
     %unwritten = memref.alloc() : memref<4x1024xf16, #hipsr.mem<device>>
     hipsr.add(%dctx) ins(%unwritten, %unwritten
                              : memref<4x1024xf16, #hipsr.mem<device>>,
