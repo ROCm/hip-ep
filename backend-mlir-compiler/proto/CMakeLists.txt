@@ -34,5 +34,6 @@ target_include_directories(mlir_compilation_proto PUBLIC
 if(MSVC)
   set_source_files_properties(${PROTO_SRCS} PROPERTIES COMPILE_FLAGS "/wd4267")
 endif()
-# Fix LNK4217 warnings: protobuf is statically linked, not a DLL
-target_compile_definitions(mlir_compilation_proto PRIVATE PROTOBUF_USE_DLLS=0)
+# Do not define PROTOBUF_USE_DLLS for a static protobuf build: protobuf checks
+# whether the macro is defined, not its numeric value. Defining it to 0 still
+# marks symbols dllimport and causes LNK2019 failures against libprotobuf.lib.
