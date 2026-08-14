@@ -22,11 +22,10 @@ DenseElementsAttr getCompileTimeConstantTensor(Value value) {
     return {};
   auto dense = defOp->getAttrOfType<DenseElementsAttr>("value");
   return dense && dense.getType() == value.getType() ? dense
-                                                      : DenseElementsAttr();
+                                                     : DenseElementsAttr();
 }
 
-bool extractConstantIntTensor(Value value,
-                              llvm::SmallVectorImpl<int64_t> &out,
+bool extractConstantIntTensor(Value value, llvm::SmallVectorImpl<int64_t> &out,
                               std::optional<int64_t> expectedRank) {
   return parseDenseIntElements(getCompileTimeConstantTensor(value), out,
                                expectedRank);
