@@ -660,6 +660,15 @@ HIP_KERNEL_API int hip_gqa_add_attention_bias_f32(
     int total_heads, int num_heads, int bias_batch, int bias_heads,
     int sq, int total_seq, int score_batch_stride, int bias_element_size_bytes);
 
+/* As above, but the score buffer is fp16 rather than fp32, for the fp16 score
+ * path (HIPDNN_EP_GQA_SCORE_FP16). score_batch_stride is in half elements.
+ * The add is still evaluated in fp32, so a masked entry becomes a finite fp16
+ * (score + -65504) rather than saturating to -inf. */
+HIP_KERNEL_API int hip_gqa_add_attention_bias_f16(
+    void* stream, void* scores, const void* bias,
+    int total_heads, int num_heads, int bias_batch, int bias_heads,
+    int sq, int total_seq, int score_batch_stride, int bias_element_size_bytes);
+
 /* Column-wise softmax in-place. One threadblock per (head, query).
  * Smooth softmax is activated when head_sink is non-null OR use_smooth_softmax
  * is set.  When head_sink is non-null, uses per-head sink factors:
@@ -700,6 +709,17 @@ HIP_KERNEL_API int hip_gqa_softmax_f32_to_f16(
  * input_batch_stride and output_batch_stride are both in float elements. */
 HIP_KERNEL_API int hip_gqa_softmax_f32_to_f32(
     void* stream, const void* input_f32, void* output_f32,
+    int total_head_queries, int rows, int cols,
+    int input_batch_stride, int output_batch_stride,
+    const void* head_sink, int num_heads, int use_smooth_softmax);
+
+/* Column-wise softmax: fp16 scores -> fp16 probabilities, for the fp16 score
+ * path (HIPDNN_EP_GQA_SCORE_FP16). Both strides are in half elements. May be
+ * called in place (output_f16 == input_f16): one block owns one column, so a
+ * pass-3 store is never read by another block. Max and sum reductions remain
+ * fp32, so only the stored logits lose precision, not the accumulation. */
+HIP_KERNEL_API int hip_gqa_softmax_f16_to_f16(
+    void* stream, const void* input_f16, void* output_f16,
     int total_head_queries, int rows, int cols,
     int input_batch_stride, int output_batch_stride,
     const void* head_sink, int num_heads, int use_smooth_softmax);

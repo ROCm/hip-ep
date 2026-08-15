@@ -66,6 +66,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <unordered_map>
 #include <vector>
 
@@ -766,6 +767,26 @@ static size_t gqa_score_budget_bytes() {
   return budget;
 }
 
+// Ask the score GEMM for a fp16 rather than fp32 output, so the whole
+// score/bias/softmax chain runs over one fp16 S x S buffer instead of an fp32
+// one plus a fp16 copy. At a 16K prompt that chain is the pipeline's dominant
+// memory traffic and this removes roughly half of it, and it also halves the
+// per-head footprint that decides head grouping, so groups get larger and the
+// GEMMs get fewer and bigger.
+//
+// Off by default: the fp32 score buffer is what keeps softmax and the causal
+// mask clear of inf - inf = NaN. In fp16 the headroom is real but finite -- a
+// pre-softmax logit above 65504 saturates to inf, and then exp2(inf - inf) is
+// NaN -- so this trades a bound that cannot be exceeded for one that merely is
+// not, on the models measured so far.
+static bool gqa_score_fp16_enabled() {
+  static const bool enabled = [] {
+    const char *env = std::getenv("HIPDNN_EP_GQA_SCORE_FP16");
+    return env && std::strcmp(env, "0") != 0;
+  }();
+  return enabled;
+}
+
 // Env-var gate to force decode through the decomposed hipBLASLt pipeline
 // instead of the fused custom kernel hip_gqa_fused_decode. Default off
 // (fused path is preferred). Set HIPDNN_EP_GQA_DISABLE_FUSED_DECODE=1 to
@@ -932,6 +953,26 @@ struct GqaGemmKeyHash {
   }
 };
 
+// Autotune bounds, matching lib/Runtime/real/matmul.cpp, which has run the same
+// sweep on the same API against this model's other GEMMs for far longer.
+static constexpr int GQA_MAX_ALGO_CANDIDATES = 60;
+static constexpr int GQA_AUTOTUNE_TIMING_ITERS = 3;
+
+// Follows the runtime-wide HIPDNN_EP_AUTOTUNE (matmul.cpp's switch) so a build
+// with tuning off has it off everywhere. HIPDNN_EP_GQA_AUTOTUNE overrides it for
+// GQA only, which is what makes this branch measurable: flipping the shared flag
+// would also retune every other GEMM in the model, so a TTFT delta could not be
+// attributed here. With the override, one binary gives both A and B legs.
+static bool gqa_autotune_enabled() {
+  static const bool enabled = [] {
+    if (const char *gqa_env = std::getenv("HIPDNN_EP_GQA_AUTOTUNE"))
+      return std::strcmp(gqa_env, "0") != 0;
+    const char *env = std::getenv("HIPDNN_EP_AUTOTUNE");
+    return !env || std::strcmp(env, "0") != 0;
+  }();
+  return enabled;
+}
+
 /// Cached hipBLASLt state for a single GEMM shape.
 /// Ownership: descriptors are created in queryOrCreateGemmState() and live for
 /// the process lifetime (destroyed together when the owning op-state slot is
@@ -939,8 +980,23 @@ struct GqaGemmKeyHash {
 struct GqaGemmCacheEntry {
   hipblasLtMatmulDesc_t desc;                     // matmul operation descriptor
   hipblasLtMatrixLayout_t layA, layB, layC, layD; // matrix layouts
-  hipblasLtMatmulAlgo_t algo; // heuristic-selected algorithm
+  hipblasLtMatmulAlgo_t algo; // selected algorithm
   size_t workspace_size;      // workspace bytes required by algo
+
+  // Autotune state. The heuristic is queried at descriptor-creation time, but
+  // it cannot be benchmarked there: queryOrCreateGemmState is given a shape, not
+  // the device pointers a matmul needs. So the candidates are parked here and
+  // the winner is picked on the first real GEMM of this shape, which is the same
+  // two-phase split matmul.cpp uses. No mutex or atomic, unlike matmul.cpp's
+  // device-wide table: this cache hangs off a per-instance op-state slot, so one
+  // entry is never touched by two sessions.
+  hipblasLtMatmulHeuristicResult_t candidates[GQA_MAX_ALGO_CANDIDATES];
+  int num_candidates;
+  bool tuned;
+  // Largest workspace any candidate wants. The tuning pass must be given at
+  // least this much or the candidates that want more get skipped, which would
+  // quietly narrow the sweep to the small-workspace algorithms.
+  size_t max_candidate_workspace;
 };
 
 struct GqaGemmCache {
@@ -968,10 +1024,11 @@ static GqaGemmCache *get_gemm_cache(RuntimeState *state, int op_state_slot) {
   return gs ? &gs->cache : nullptr;
 }
 
-static const GqaGemmCacheEntry *queryOrCreateGemmState(RuntimeState *state,
-                                                       hipblasLtHandle_t handle,
-                                                       const GqaGemmKey &key,
-                                                       int op_state_slot) {
+// Non-const: the returned entry is tuned in place on its first real GEMM.
+static GqaGemmCacheEntry *queryOrCreateGemmState(RuntimeState *state,
+                                                 hipblasLtHandle_t handle,
+                                                 const GqaGemmKey &key,
+                                                 int op_state_slot) {
   assert(handle && "queryOrCreateGemmState: null handle");
   auto *cache = get_gemm_cache(state, op_state_slot);
   if (!cache) {
@@ -1042,11 +1099,18 @@ static const GqaGemmCacheEntry *queryOrCreateGemmState(RuntimeState *state,
   }
 
   {
-    hipblasLtMatmulHeuristicResult_t heur;
+    // Ask for the whole candidate list rather than one algorithm. hipBLASLt
+    // returns these in its own predicted order, and that prediction was wrong
+    // here by a wide margin: at a 16K prompt the score GEMM took 26.25 ms/head
+    // against the value GEMM's 9.76 ms/head for the same 137.5 GFLOP, purely
+    // because the score shape's first-ranked algorithm is a poor fit. Nothing
+    // benchmarked them, so the misprediction was never visible.
+    const int request_count =
+        gqa_autotune_enabled() ? GQA_MAX_ALGO_CANDIDATES : 1;
     int returned = 0;
     GQA_CACHE_CHECK(hipblasLtMatmulAlgoGetHeuristic(
         handle, entry.desc, entry.layA, entry.layB, entry.layC, entry.layD,
-        pref, 1, &heur, &returned));
+        pref, request_count, entry.candidates, &returned));
     hipblasLtMatmulPreferenceDestroy(pref);
     pref = nullptr;
 
@@ -1058,8 +1122,18 @@ static const GqaGemmCacheEntry *queryOrCreateGemmState(RuntimeState *state,
       goto cache_fail;
     }
 
-    entry.algo = heur.algo;
-    entry.workspace_size = heur.workspaceSize;
+    // Candidate 0 stays the active algorithm until tuning replaces it, so a
+    // failure to tune degrades to exactly today's behaviour.
+    entry.num_candidates = returned;
+    entry.algo = entry.candidates[0].algo;
+    entry.workspace_size = entry.candidates[0].workspaceSize;
+    entry.max_candidate_workspace = 0;
+    for (int i = 0; i < returned; ++i)
+      entry.max_candidate_workspace =
+          std::max(entry.max_candidate_workspace,
+                   entry.candidates[i].workspaceSize);
+    // One candidate is already the winner; nothing to time.
+    entry.tuned = !gqa_autotune_enabled() || returned <= 1;
   }
 
 #undef GQA_CACHE_CHECK
@@ -1083,6 +1157,114 @@ cache_fail:
 cache_done:
   auto [ins, _] = cache->entries.emplace(key, entry);
   return &ins->second;
+}
+
+/// Benchmark this shape's candidate algorithms and keep the fastest. Runs once
+/// per (shape, op-state slot), on the first real GEMM, because timing needs the
+/// device pointers a matmul is about to be issued with.
+///
+/// Called immediately before the real matmul with that matmul's own operands, so
+/// it measures the actual access pattern rather than a synthetic one, and the
+/// output buffer it scribbles into is overwritten by the real call that follows.
+/// alpha/beta are the caller's: with beta=0 the C read is skipped, and timing an
+/// algorithm under a different beta than production would rank it on work it
+/// will not do.
+static void autotuneGqaGemm(hipblasLtHandle_t handle, hipStream_t stream,
+                            GqaGemmCacheEntry *entry, float alpha, float beta,
+                            const void *A, const void *B, void *C, void *ws_ptr,
+                            size_t ws_size, const char *tag) {
+  entry->tuned = true; // one attempt only, whatever the outcome
+
+  hipEvent_t ev0 = nullptr, ev1 = nullptr;
+  if (hipEventCreate(&ev0) != hipSuccess ||
+      hipEventCreate(&ev1) != hipSuccess) {
+    if (ev0)
+      (void)hipEventDestroy(ev0);
+    fprintf(stderr, "[GQA-AUTOTUNE] %s: hipEventCreate failed, skipping\n", tag);
+    return;
+  }
+
+  // A GQA GEMM at a long prompt is tens of ms, so 60 candidates x 3 timed
+  // iterations is seconds per shape and the sweep itself becomes a cost. Probe
+  // the incumbent once and drop to a single timed iteration when a launch is
+  // already long enough that launch overhead and run-to-run noise are
+  // negligible fractions of it.
+  int iters = GQA_AUTOTUNE_TIMING_ITERS;
+  float probe_ms = 0.0f;
+  if (hipblasLtMatmul(handle, entry->desc, &alpha, A, entry->layA, B,
+                      entry->layB, &beta, C, entry->layC, C, entry->layD,
+                      &entry->candidates[0].algo, ws_ptr, ws_size,
+                      stream) == HIPBLAS_STATUS_SUCCESS) {
+    (void)hipEventRecord(ev0, stream);
+    (void)hipblasLtMatmul(handle, entry->desc, &alpha, A, entry->layA, B,
+                          entry->layB, &beta, C, entry->layC, C, entry->layD,
+                          &entry->candidates[0].algo, ws_ptr, ws_size, stream);
+    (void)hipEventRecord(ev1, stream);
+    if (hipEventSynchronize(ev1) == hipSuccess)
+      (void)hipEventElapsedTime(&probe_ms, ev0, ev1);
+  }
+  if (probe_ms > 1.0f)
+    iters = 1;
+
+  float best_ms = std::numeric_limits<float>::max();
+  int best_idx = 0;
+  int tested = 0;
+
+  for (int i = 0; i < entry->num_candidates; ++i) {
+    hipblasLtMatmulHeuristicResult_t &cand = entry->candidates[i];
+    if (cand.workspaceSize > ws_size)
+      continue;
+
+    // Warm-up doubles as the validity check: an algorithm the library reported
+    // but cannot run for these operands fails here and is skipped rather than
+    // being timed and possibly winning.
+    if (hipblasLtMatmul(handle, entry->desc, &alpha, A, entry->layA, B,
+                        entry->layB, &beta, C, entry->layC, C, entry->layD,
+                        &cand.algo, ws_ptr, ws_size,
+                        stream) != HIPBLAS_STATUS_SUCCESS)
+      continue;
+
+    (void)hipEventRecord(ev0, stream);
+    for (int t = 0; t < iters; ++t)
+      (void)hipblasLtMatmul(handle, entry->desc, &alpha, A, entry->layA, B,
+                            entry->layB, &beta, C, entry->layC, C, entry->layD,
+                            &cand.algo, ws_ptr, ws_size, stream);
+    (void)hipEventRecord(ev1, stream);
+    if (hipEventSynchronize(ev1) != hipSuccess)
+      continue;
+
+    float ms = 0.0f;
+    if (hipEventElapsedTime(&ms, ev0, ev1) != hipSuccess)
+      continue;
+    ++tested;
+    if (ms < best_ms) {
+      best_ms = ms;
+      best_idx = i;
+    }
+  }
+
+  (void)hipEventDestroy(ev0);
+  (void)hipEventDestroy(ev1);
+
+  if (tested == 0) {
+    fprintf(stderr,
+            "[GQA-AUTOTUNE] %s: 0/%d candidates ran, keeping heuristic #0\n",
+            tag, entry->num_candidates);
+    return;
+  }
+
+  entry->algo = entry->candidates[best_idx].algo;
+  entry->workspace_size = entry->candidates[best_idx].workspaceSize;
+
+  // Reports the heuristic's own first choice next to the winner, in the same
+  // units and on the same operands: that ratio is the whole justification for
+  // this sweep, and without it the log shows only that tuning ran.
+  RUNTIME_DEBUG_LOG("[GQA-AUTOTUNE] %s: tested %d/%d algos, best=#%d "
+                    "%.3f ms vs heuristic #0 %.3f ms (%.2fx) / %d iter\n",
+                    tag, tested, entry->num_candidates, best_idx,
+                    best_ms / iters, probe_ms,
+                    probe_ms > 0.0f ? probe_ms / (best_ms / iters) : 0.0f,
+                    iters);
 }
 
 //===----------------------------------------------------------------------===//
@@ -1576,11 +1758,17 @@ static int gqa_forward_hipblaslt(
   const bool groupable = need_transpose && !use_no_expand && B == 1 &&
                          bias_head_broadcast && head_sink == nullptr &&
                          !use_smooth_softmax;
+  // fp16 scores need one buffer, not an fp32 score buffer plus a fp16
+  // probability buffer: the chain runs in place. Requires fp16 elements, since
+  // with fp32 elements the "narrow" buffer would be the same width as the wide
+  // one and there would be nothing to save.
+  const bool score_fp16 = gqa_score_fp16_enabled() && !gemm_fp32;
+
   int64_t heads_per_group = B * H;
   if (groupable) {
     const size_t bytes_per_head = static_cast<size_t>(sq) *
                                   static_cast<size_t>(total_seq) *
-                                  (sizeof(float) + elem_sz);
+                                  (score_fp16 ? elem_sz : sizeof(float) + elem_sz);
     const size_t budget = gqa_score_budget_bytes();
     int64_t chosen = 1; // a single head is always permitted, budget or not
     for (int64_t cand = 1; cand <= B * H; ++cand) {
@@ -1606,7 +1794,7 @@ static int gqa_forward_hipblaslt(
                 /*k=*/d,
                 /*batch=*/B * G,
                 /*transA=*/true,
-                /*outputFp32=*/true,
+                /*outputFp32=*/!score_fp16,
                 /*inputFp32=*/gemm_fp32,
                 /*strideA=*/present_seq * d,
                 /*strideB=*/HPG * sq * d,
@@ -1627,8 +1815,8 @@ static int gqa_forward_hipblaslt(
   } else {
     // Batched over one head group; the loop below advances the base pointers by
     // whole heads, so the default dense strides still apply.
-    scoreKey = {total_seq,           sq,        d, heads_per_group, true,
-                /*outputFp32=*/true, gemm_fp32,
+    scoreKey = {total_seq,                  sq, d, heads_per_group, true,
+                /*outputFp32=*/!score_fp16, gemm_fp32,
                 /*strideA=*/0,
                 /*strideB=*/0,
                 /*strideC=*/0};
@@ -1644,11 +1832,11 @@ static int gqa_forward_hipblaslt(
                 /*strideC=*/0};
   }
 
-  const GqaGemmCacheEntry *scoreState =
+  GqaGemmCacheEntry *scoreState =
       queryOrCreateGemmState(state, ltHandle, scoreKey, op_state_slot);
   if (!scoreState)
     return -1;
-  const GqaGemmCacheEntry *valueState =
+  GqaGemmCacheEntry *valueState =
       queryOrCreateGemmState(state, ltHandle, valueKey, op_state_slot);
   if (!valueState)
     return -1;
@@ -1671,9 +1859,13 @@ static int gqa_forward_hipblaslt(
   size_t Kexp_bytes =
       use_no_expand ? 0 : static_cast<size_t>(B) * H * total_seq * d * elem_sz;
   size_t Vexp_bytes = Kexp_bytes;
-  // Sized for one head group, not all B*H heads.
+  // Sized for one head group, not all B*H heads. Under score_fp16 the fp32
+  // score buffer is not allocated at all: the GEMM writes fp16 into S_fp16 and
+  // bias, mask and softmax all run in place there.
   size_t S_f32_bytes =
-      static_cast<size_t>(heads_per_group) * sq * total_seq * sizeof(float);
+      score_fp16 ? 0
+                 : static_cast<size_t>(heads_per_group) * sq * total_seq *
+                       sizeof(float);
   size_t S_fp16_bytes =
       static_cast<size_t>(heads_per_group) * sq * total_seq * elem_sz;
   size_t O_bytes =
@@ -1714,9 +1906,16 @@ static int gqa_forward_hipblaslt(
   int result = 0;
 
   // Single workspace allocation: temp buffers + GEMM workspace.
+  //
+  // While a shape is still untuned the sweep has to be able to run every
+  // candidate, so reserve the largest workspace any of them asks for. Sizing to
+  // the incumbent's requirement instead would skip the hungrier candidates and
+  // silently restrict tuning to the small-workspace algorithms.
   {
-    size_t gemm_ws =
-        std::max(scoreState->workspace_size, valueState->workspace_size);
+    auto gemm_ws_for = [](const GqaGemmCacheEntry *e) {
+      return e->tuned ? e->workspace_size : e->max_candidate_workspace;
+    };
+    size_t gemm_ws = std::max(gemm_ws_for(scoreState), gemm_ws_for(valueState));
     size_t total_needed = temp_end + gemm_ws;
     HIP_CHECK(hipdnn_ep_state_ensure_workspace(state, total_needed));
   }
@@ -1728,8 +1927,11 @@ static int gqa_forward_hipblaslt(
     void *d_Qtrans = need_transpose ? (ws + off_Qtrans) : nullptr;
     void *d_Kexp = use_no_expand ? nullptr : (ws + off_Kexp);
     void *d_Vexp = use_no_expand ? nullptr : (ws + off_Vexp);
-    void *d_S_f32 = ws + off_S_f32;
     void *d_S_fp16 = ws + off_S_fp16;
+    // Under score_fp16 the two aliases are the same buffer: the GEMM writes
+    // fp16 scores where the probabilities will later be, and every step between
+    // rewrites them in place.
+    void *d_S_f32 = score_fp16 ? d_S_fp16 : (ws + off_S_f32);
     void *d_O = need_transpose ? (ws + off_O) : nullptr;
 
     void *gemm_ws_ptr = ws + temp_end;
@@ -1853,6 +2055,9 @@ static int gqa_forward_hipblaslt(
                        : qSrc;
     float scoreAlpha = scale;
     float beta = 0.0f;
+    if (!scoreState->tuned)
+      autotuneGqaGemm(ltHandle, stream, scoreState, scoreAlpha, beta, scoreA,
+                      scoreB, d_S_f32, gemm_ws_ptr, gemm_ws_bytes, "score");
     hipblasLtMatmulAlgo_t sAlgo = scoreState->algo;
 
     HIPBLAS_CHECK(hipblasLtMatmul(
@@ -1863,7 +2068,9 @@ static int gqa_forward_hipblaslt(
     // ---- Step 8b: Add external attention bias (onnx.Attention attn_mask) ----
     int scoreF32BatchStride = static_cast<int>(sq * total_seq);
     if (attention_bias) {
-      HIP_CHECK(hip_gqa_add_attention_bias_f32(
+      auto add_bias = score_fp16 ? hip_gqa_add_attention_bias_f16
+                                 : hip_gqa_add_attention_bias_f32;
+      HIP_CHECK(add_bias(
           stream, d_S_f32, const_cast<void *>(attention_bias),
           static_cast<int>(heads_per_group), static_cast<int>(H),
           static_cast<int>(attn_bias_batch),
@@ -1892,7 +2099,11 @@ static int gqa_forward_hipblaslt(
     if ((sq > 1 || local_window_size > 0) && !no_causal) {
       // The causal / window mask is the same for every head, so a group needs no
       // head offset -- only the group's head count.
-      HIP_CHECK(hip_gqa_causal_mask_f32(
+      // The fp16 mask writes -65504 where the fp32 one writes -INFINITY. Both
+      // are "masked" to the softmax below, which subtracts the column max.
+      auto causal_mask =
+          score_fp16 ? hip_gqa_causal_mask : hip_gqa_causal_mask_f32;
+      HIP_CHECK(causal_mask(
           stream, d_S_f32, static_cast<int>(heads_per_group),
           static_cast<int>(total_seq), static_cast<int>(sq),
           scoreF32BatchStride, static_cast<int>(past_len),
@@ -1903,7 +2114,15 @@ static int gqa_forward_hipblaslt(
     // fp32 Value GEMM. d_S_fp16 is the probabilities buffer either way (sized
     // by elem_sz above), so the name is fp16-specific but holds fp32 when
     // gemm_fp32.
-    if (gemm_fp32) {
+    if (score_fp16) {
+      // In place: d_S_f32 and d_S_fp16 are the same buffer here.
+      HIP_CHECK(hip_gqa_softmax_f16_to_f16(
+          stream, d_S_f32, d_S_fp16,
+          static_cast<int>(heads_per_group * sq), static_cast<int>(total_seq),
+          static_cast<int>(sq), scoreFp16BatchStride, scoreFp16BatchStride,
+          head_sink, static_cast<int>(H),
+          static_cast<int>(use_smooth_softmax)));
+    } else if (gemm_fp32) {
       HIP_CHECK(hip_gqa_softmax_f32_to_f32(
           stream, d_S_f32, d_S_fp16,
           static_cast<int>(heads_per_group * sq), static_cast<int>(total_seq),
@@ -1929,6 +2148,9 @@ static int gqa_forward_hipblaslt(
     void *valueC = need_transpose ? static_cast<char *>(d_O) + group_q_off
                                   : output;
     float valAlpha = 1.0f;
+    if (!valueState->tuned)
+      autotuneGqaGemm(ltHandle, stream, valueState, valAlpha, beta, valueA,
+                      d_S_fp16, valueC, gemm_ws_ptr, gemm_ws_bytes, "value");
     hipblasLtMatmulAlgo_t vAlgo = valueState->algo;
 
     HIPBLAS_CHECK(hipblasLtMatmul(
@@ -1948,11 +2170,12 @@ static int gqa_forward_hipblaslt(
 
     RUNTIME_DEBUG_LOG(
         "[REAL] GQA hipBLASLt: B=%lld sq=%lld total_seq=%lld H=%lld G=%lld "
-        "d=%lld no_expand=%d transpose=%d heads_per_group=%lld groups=%lld\n",
+        "d=%lld no_expand=%d transpose=%d heads_per_group=%lld groups=%lld "
+        "score_fp16=%d\n",
         (long long)B, (long long)sq, (long long)total_seq, (long long)H,
         (long long)G, (long long)d, static_cast<int>(use_no_expand),
         static_cast<int>(need_transpose), (long long)heads_per_group,
-        (long long)((B * H) / heads_per_group));
+        (long long)((B * H) / heads_per_group), static_cast<int>(score_fp16));
   }
 
 cleanup:

@@ -961,9 +961,14 @@ extern "C" int hip_gqa_causal_mask_f32(
   GQA_RETURN_LAUNCH_STATUS();
 }
 
-template <typename TBias>
+// TScore is the score buffer's type: fp32 by default, fp16 when the score GEMM
+// is asked for a narrower output to halve S x S traffic. The add itself is done
+// in fp32 either way, so with a fp16 buffer a masked entry lands at
+// score + (-65504) as a finite fp16 rather than saturating to -inf, which is
+// what keeps the downstream softmax free of inf - inf = NaN.
+template <typename TBias, typename TScore = float>
 __global__ void add_attention_bias_kernel(
-    float* __restrict__ scores, const TBias* __restrict__ bias,
+    TScore* __restrict__ scores, const TBias* __restrict__ bias,
     int total_heads, int num_heads, int bias_batch, int bias_heads, int sq,
     int total_seq, int score_batch_stride) {
   int head = blockIdx.y;
@@ -980,8 +985,36 @@ __global__ void add_attention_bias_kernel(
   size_t bias_idx = static_cast<size_t>(bias_b) * bias_heads * sq * total_seq +
                     static_cast<size_t>(bias_h) * sq * total_seq +
                     static_cast<size_t>(row) * total_seq + col;
-  scores[static_cast<size_t>(head) * score_batch_stride + tid] +=
-      static_cast<float>(bias[bias_idx]);
+  const size_t si = static_cast<size_t>(head) * score_batch_stride + tid;
+  scores[si] = gqa_from_float<TScore>(gqa_to_float<TScore>(scores[si]) +
+                                     static_cast<float>(bias[bias_idx]));
+}
+
+template <typename TScore>
+static int launch_add_attention_bias(
+    hipStream_t stream, void* scores, const void* bias, int total_heads,
+    int num_heads, int bias_batch, int bias_heads, int sq, int total_seq,
+    int score_batch_stride, int bias_element_size_bytes, const char* entry) {
+  int n = sq * total_seq;
+  int blocksX = (n + GQA_THREADS - 1) / GQA_THREADS;
+  if (bias_element_size_bytes == 2) {
+    add_attention_bias_kernel<__half, TScore>
+        <<<dim3(blocksX, total_heads), GQA_THREADS, 0, stream>>>(
+            static_cast<TScore*>(scores), static_cast<const __half*>(bias),
+            total_heads, num_heads, bias_batch, bias_heads, sq, total_seq,
+            score_batch_stride);
+  } else if (bias_element_size_bytes == 4) {
+    add_attention_bias_kernel<float, TScore>
+        <<<dim3(blocksX, total_heads), GQA_THREADS, 0, stream>>>(
+            static_cast<TScore*>(scores), static_cast<const float*>(bias),
+            total_heads, num_heads, bias_batch, bias_heads, sq, total_seq,
+            score_batch_stride);
+  } else {
+    fprintf(stderr, "%s: unsupported bias elem size %d\n", entry,
+            bias_element_size_bytes);
+    return -1;
+  }
+  return 0;
 }
 
 extern "C" int hip_gqa_add_attention_bias_f32(
@@ -991,45 +1024,54 @@ extern "C" int hip_gqa_add_attention_bias_f32(
   if (!scores || !bias)
     return -1;
   hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
-  int n = sq * total_seq;
-  int blocksX = (n + GQA_THREADS - 1) / GQA_THREADS;
   (void)hipGetLastError();
-  if (bias_element_size_bytes == 2) {
-    add_attention_bias_kernel<__half>
-        <<<dim3(blocksX, total_heads), GQA_THREADS, 0, stream>>>(
-            static_cast<float*>(scores), static_cast<const __half*>(bias),
-            total_heads, num_heads, bias_batch, bias_heads, sq, total_seq,
-            score_batch_stride);
-  } else if (bias_element_size_bytes == 4) {
-    add_attention_bias_kernel<float>
-        <<<dim3(blocksX, total_heads), GQA_THREADS, 0, stream>>>(
-            static_cast<float*>(scores), static_cast<const float*>(bias),
-            total_heads, num_heads, bias_batch, bias_heads, sq, total_seq,
-            score_batch_stride);
-  } else {
-    fprintf(stderr,
-            "hip_gqa_add_attention_bias_f32: unsupported bias elem size %d\n",
-            bias_element_size_bytes);
+  if (launch_add_attention_bias<float>(
+          stream, scores, bias, total_heads, num_heads, bias_batch, bias_heads,
+          sq, total_seq, score_batch_stride, bias_element_size_bytes,
+          "hip_gqa_add_attention_bias_f32") != 0)
     return -1;
-  }
+  GQA_RETURN_LAUNCH_STATUS();
+}
+
+// fp16-score-buffer variant. score_batch_stride is in half elements, matching
+// the fp32 entry's float elements.
+extern "C" int hip_gqa_add_attention_bias_f16(
+    void* stream_ptr, void* scores, const void* bias, int total_heads,
+    int num_heads, int bias_batch, int bias_heads, int sq, int total_seq,
+    int score_batch_stride, int bias_element_size_bytes) {
+  if (!scores || !bias)
+    return -1;
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  (void)hipGetLastError();
+  if (launch_add_attention_bias<__half>(
+          stream, scores, bias, total_heads, num_heads, bias_batch, bias_heads,
+          sq, total_seq, score_batch_stride, bias_element_size_bytes,
+          "hip_gqa_add_attention_bias_f16") != 0)
+    return -1;
   GQA_RETURN_LAUNCH_STATUS();
 }
 
 // Step 9b (fp32->fp16 variant): Softmax reading fp32 scores, writing fp16 output
 // Avoids inf-inf=NaN by operating entirely in fp32 before the final fp16 store.
 
-// Output-type-templated: reads fp32 scores, writes TOut ∈ {__half, float}.
-// fp16 output (TOut=__half) feeds the fp16 Value GEMM; fp32 output (TOut=float)
-// feeds the fp32 Value GEMM on the Whisper no_causal fp32 decomposed path.
-template <typename TOut>
+// Type-templated on both ends. TOut ∈ {__half, float}: fp16 output feeds the
+// fp16 Value GEMM, fp32 output feeds the fp32 Value GEMM on the Whisper
+// no_causal fp32 decomposed path. TIn ∈ {float, __half}: fp32 is the default
+// score buffer, while fp16 scores halve the traffic over an S x S buffer that
+// dominates long-prompt prefill. All reductions stay in fp32 regardless of TIn,
+// so a narrower score buffer costs input precision only, never accumulation.
+//
+// TIn == TOut is legal and is used in place (input == output): each block owns
+// one column exclusively, so pass 3's stores cannot be read by another block.
+template <typename TOut, typename TIn = float>
 __global__ void softmax_f32_to_out_kernel(
-    const float* input, TOut* output,
+    const TIn* input, TOut* output,
     int rows, int cols, int input_batch_stride, int output_batch_stride,
     const __half* head_sink, int num_heads, int use_smooth_softmax) {
   const int linear = __builtin_amdgcn_readfirstlane(blockIdx.x);
   const int head = __builtin_amdgcn_readfirstlane(linear / cols);
   const int col  = __builtin_amdgcn_readfirstlane(linear % cols);
-  const float* in_col = input + (size_t)head * input_batch_stride + (size_t)col * rows;
+  const TIn* in_col = input + (size_t)head * input_batch_stride + (size_t)col * rows;
   TOut* out_col = output + (size_t)head * output_batch_stride + (size_t)col * rows;
 
   const int tid = threadIdx.x;
@@ -1041,7 +1083,7 @@ __global__ void softmax_f32_to_out_kernel(
   // Pass 1: find max (fp32, no overflow risk)
   float local_max = -INFINITY;
   for (int i = tid; i < rows; i += blockDim.x)
-    local_max = fmaxf(local_max, in_col[i]);
+    local_max = fmaxf(local_max, gqa_to_float<TIn>(in_col[i]));
 
   local_max = warp_reduce_max(local_max);
   if (tid % WAVE_SIZE == 0)
@@ -1059,7 +1101,7 @@ __global__ void softmax_f32_to_out_kernel(
   // Pass 2: exp2f + sum (fp32 throughout, values recomputed in Pass 3)
   float local_sum = 0.0f;
   for (int i = tid; i < rows; i += blockDim.x)
-    local_sum += exp2f((in_col[i] - max_val) * LOG2E);
+    local_sum += exp2f((gqa_to_float<TIn>(in_col[i]) - max_val) * LOG2E);
 
   local_sum = warp_reduce_sum(local_sum);
   if (tid % WAVE_SIZE == 0)
@@ -1085,12 +1127,12 @@ __global__ void softmax_f32_to_out_kernel(
   // Pass 3: normalize and write output (fp16 or fp32 per TOut).
   float inv_sum = 1.0f / sum_val;
   for (int i = tid; i < rows; i += blockDim.x) {
-    float e = exp2f((in_col[i] - max_val) * LOG2E);
+    float e = exp2f((gqa_to_float<TIn>(in_col[i]) - max_val) * LOG2E);
     out_col[i] = gqa_from_float<TOut>(e * inv_sum);
   }
 }
 
-template <typename TOut>
+template <typename TOut, typename TIn = float>
 static void launch_softmax_f32_to_out(
     hipStream_t stream, const void* input_f32, void* output,
     int total_head_queries, int rows, int cols,
@@ -1107,9 +1149,9 @@ static void launch_softmax_f32_to_out(
   while (threads < std::min(rows, 256)) threads *= 2;
   if (threads > 256) threads = 256;
   int num_waves = threads / wave;
-  softmax_f32_to_out_kernel<TOut><<<total_head_queries, threads,
-                                    num_waves * sizeof(float), stream>>>(
-      static_cast<const float*>(input_f32), static_cast<TOut*>(output),
+  softmax_f32_to_out_kernel<TOut, TIn><<<total_head_queries, threads,
+                                         num_waves * sizeof(float), stream>>>(
+      static_cast<const TIn*>(input_f32), static_cast<TOut*>(output),
       rows, cols, input_batch_stride, output_batch_stride,
       static_cast<const __half*>(head_sink), num_heads, use_smooth_softmax);
 }
@@ -1140,6 +1182,24 @@ extern "C" int hip_gqa_softmax_f32_to_f32(
   (void)hipGetLastError();  // clear stale error for correct attribution
   launch_softmax_f32_to_out<float>(
       stream, input_f32, output_f32, total_head_queries, rows, cols,
+      input_batch_stride, output_batch_stride, head_sink, num_heads,
+      use_smooth_softmax);
+  GQA_RETURN_LAUNCH_STATUS();
+}
+
+// fp16 scores -> fp16 probabilities, for the fp16 score buffer on the
+// decomposed prefill path. Safe to call with output == input: see the kernel.
+// Reductions are still fp32, so this differs from the fp32-score variant only
+// in the precision of the stored logits.
+extern "C" int hip_gqa_softmax_f16_to_f16(
+    void* stream_ptr, const void* input_f16, void* output_f16,
+    int total_head_queries, int rows, int cols,
+    int input_batch_stride, int output_batch_stride,
+    const void* head_sink, int num_heads, int use_smooth_softmax) {
+  hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+  (void)hipGetLastError();  // clear stale error for correct attribution
+  launch_softmax_f32_to_out<__half, __half>(
+      stream, input_f16, output_f16, total_head_queries, rows, cols,
       input_batch_stride, output_batch_stride, head_sink, num_heads,
       use_smooth_softmax);
   GQA_RETURN_LAUNCH_STATUS();
