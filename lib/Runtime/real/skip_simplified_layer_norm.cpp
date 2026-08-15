@@ -12,9 +12,12 @@
 #include "../op_state.h"
 #include "cache_utils.h"
 #include "error_check_macros.h"
+#include "hip_custom_kernels.h"
 #include "runtime_types.h"
 
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -25,6 +28,17 @@
 #define MIOPEN_CHECK(cmd) MIOPEN_CHECK_GOTO(cmd, cleanup)
 
 static constexpr size_t kScratchAlignment = 256;
+
+// Escape hatch back to the MIOpen composition below. Default on; explicit "0"
+// disables. Also what makes the fused path A/B-able without building two sets
+// of DLLs, since the change spans both the kernel library and this call site.
+static bool fused_skip_rmsnorm_enabled() {
+  static const bool enabled = [] {
+    const char *v = std::getenv("HIPDNN_EP_FUSED_SKIP_RMSNORM");
+    return !v || std::strcmp(v, "0") != 0;
+  }();
+  return enabled;
+}
 
 //===----------------------------------------------------------------------===//
 // Descriptor cache: T5LayerNorm + OpTensor descriptors created once per unique
@@ -279,6 +293,27 @@ int wrap_skip_simplified_layer_norm(RuntimeState *state, int op_state_slot,
             "wrap_skip_simplified_layer_norm: unsupported element_size %lld\n",
             (long long)element_size_bytes);
     return -1;
+  }
+
+  // Fused single-dispatch path. The MIOpen composition below needs three
+  // dispatches and moves the row through global memory four times (write tmp,
+  // read + add bias, write tmp, read to normalise); this reads input and skip
+  // once and writes the output once. It declines shapes it cannot stage in LDS,
+  // in which case the composition still runs.
+  if (fused_skip_rmsnorm_enabled()) {
+    hipStream_t hip_stream =
+        static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+    int rc = hip_skip_rms_norm(hip_stream, input, skip, gamma, bias, output,
+                               input_skip_bias_sum, num_rows, hidden_dim,
+                               element_size_bytes, epsilon);
+    if (rc == 0) {
+      RUNTIME_DEBUG_LOG("[REAL] wrap_skip_simplified_layer_norm: fused kernel "
+                        "(num_rows=%lld hidden_dim=%lld)\n",
+                        (long long)num_rows, (long long)hidden_dim);
+      return 0;
+    }
+    if (rc < 0)
+      return rc;
   }
 
   SkipT5NormState *ns = SkipT5NormState::get_op_state(state, op_state_slot);
