@@ -3590,14 +3590,26 @@ static inline void dispatchPrefillV8(
     else if (nd == 2 && mt == 2 && bkv == 64) LAUNCH_V8(2, 2, 64);
     else if (nd == 4 && mt == 1 && bkv == 32) LAUNCH_V8(4, 1, 32);
     else if (nd == 4 && mt == 2 && bkv == 32) LAUNCH_V8(4, 2, 32);
+    else if (nd == 2 && mt == 1 && bkv == 16) LAUNCH_V8(2, 1, 16);
+    else if (nd == 4 && mt == 1 && bkv == 16) LAUNCH_V8(4, 1, 16);
     else                                      LAUNCH_V8(2, 1, 32);
     #undef LAUNCH_V8
 }
 
 struct PrefillV8Cfg { int nd; int mt; int bkv; };
+// Every entry needs a LAUNCH_V8 arm in dispatchPrefillV8: a config the tuner can
+// pick but the dispatcher cannot spell falls through to {2,1,32}, which would
+// silently run something other than what was timed.
 static inline int prefillV8Candidates(int d, PrefillV8Cfg* out) {
     static const PrefillV8Cfg kAll[] = {
-        {2, 1, 32}, {2, 2, 32}, {2, 1, 64}, {2, 2, 64}, {4, 1, 32}, {4, 2, 32}};
+        {2, 1, 32}, {2, 2, 32}, {2, 1, 64}, {2, 2, 64}, {4, 1, 32}, {4, 2, 32},
+        // The only configs here that clear the LDS occupancy cliff. The V tile
+        // is bkv*(d+2) halves and dominates the footprint, so halving BKV is
+        // what moves it: {4,1,16} is 12928 B (5 workgroups per CU) and {2,1,16}
+        // is 10880 B (6), against 25792 B and 2 for the {4,1,32} that wins
+        // today. They pay for it in tile count, hence barriers, so let the
+        // tuner decide rather than assuming occupancy wins.
+        {2, 1, 16}, {4, 1, 16}};
     int n = 0;
     for (const PrefillV8Cfg& c : kAll)
         if (prefillV8SmemBytes(c.nd, c.mt, c.bkv, d) <= kPrefillV8MaxSmem)
@@ -3615,7 +3627,7 @@ static int tunePrefillV8Cfg(
     _Float16* O, int B, int Hq, int G, int sq, int skv, int max_seq,
     int past_len, float scale)
 {
-    PrefillV8Cfg cands[8];
+    PrefillV8Cfg cands[12];
     const int nc = prefillV8Candidates(d, cands);
     constexpr int kWarmup = 30, kRounds = 4, kIters = 30;
 
@@ -3630,7 +3642,7 @@ static int tunePrefillV8Cfg(
     hipEvent_t ev0, ev1;
     (void)hipEventCreate(&ev0);
     (void)hipEventCreate(&ev1);
-    float best_ms[8];
+    float best_ms[12];
     for (int i = 0; i < nc; ++i) best_ms[i] = 1.0e30f;
     for (int r = 0; r < kRounds; ++r) {
         for (int idx = 0; idx < nc; ++idx) {
