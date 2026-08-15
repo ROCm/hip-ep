@@ -704,6 +704,22 @@ HIP_KERNEL_API int hip_gqa_softmax_f32_to_f32(
     int input_batch_stride, int output_batch_stride,
     const void* head_sink, int num_heads, int use_smooth_softmax);
 
+/* Softmax with the external additive mask folded into its score read, which
+ * replaces a preceding hip_gqa_add_attention_bias_f32 pass over the same S x S
+ * buffer (a full read-modify-write, 2.14 GB per head at a 16K prompt).
+ * bias layout is [bias_batch, bias_heads, cols, rows], the same as the score
+ * buffer's per-head [sq, total_seq]; bias_batch / bias_heads may be 1 for
+ * ONNX-style broadcast. bias_element_size_bytes is 2 (fp16) or 4 (fp32).
+ * output_fp32 selects the probability dtype: 0 = fp16 (feeds the fp16 Value
+ * GEMM), 1 = fp32. The bias is added before the column max is taken. */
+HIP_KERNEL_API int hip_gqa_softmax_f32_to_out_biased(
+    void* stream, const void* input_f32, void* output,
+    int total_head_queries, int rows, int cols,
+    int input_batch_stride, int output_batch_stride,
+    const void* head_sink, int num_heads, int use_smooth_softmax,
+    const void* bias, int bias_batch, int bias_heads,
+    int bias_element_size_bytes, int output_fp32);
+
 /* Legacy fast-path decode kernels (folded into gqa_kernel.hip with legacy_*
  * device kernels). The production fused decode path uses hip_gqa_flash_decode_v2
  * above; these two entries back gqa.cpp::gqa_forward_hipblaslt -- the decomposed
