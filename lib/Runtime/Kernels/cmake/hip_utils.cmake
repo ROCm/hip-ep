@@ -474,20 +474,11 @@ function(hip_add_library TARGET_NAME)
     endif()
 
     if(WIN32)
-        # Build CRT flags based on CMAKE_MSVC_RUNTIME_LIBRARY
-        # Default to MultiThreadedDLL (/MD) if not specified
         set(crt_flags "")
-        if(CMAKE_MSVC_RUNTIME_LIBRARY)
-            if(CMAKE_MSVC_RUNTIME_LIBRARY MATCHES "DLL")
-                # /MD or /MDd - Dynamic CRT
-                list(APPEND crt_flags -D_DLL -D_MT "-Xclang" "--dependent-lib=msvcrt")
-            else()
-                # /MT or /MTd - Static CRT
-                list(APPEND crt_flags -D_MT "-Xclang" "--dependent-lib=libcmt")
-            endif()
-        else()
-            # Default to dynamic CRT (/MD)
+        if(CMAKE_MSVC_RUNTIME_LIBRARY MATCHES "DLL")
             list(APPEND crt_flags -D_DLL -D_MT "-Xclang" "--dependent-lib=msvcrt")
+        else()
+            list(APPEND crt_flags -D_MT "-Xclang" "--dependent-lib=libcmt")
         endif()
 
         # Combine user options with CRT flags

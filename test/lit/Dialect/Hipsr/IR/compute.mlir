@@ -94,9 +94,8 @@ func.func @shape_changing_result(%ctx: !hipsr.context, %data: tensor<2x3xf16>,
 }
 
 // -----
-// A post-bufferization form takes device memrefs as outputs. Memref outputs are
-// not tensor results, so the op has none, and the printer omits the empty
-// implicit yield.
+// A post-bufferization form takes device memrefs as outputs. A compute that had
+// no results still has none, so its yield stays empty and the printer omits it.
 // CHECK-LABEL: func.func @memref_form(
 // CHECK-SAME: %[[CTX:.+]]: !hipsr.context, %[[DATA:.+]]: memref<2x3xf16, #hipsr.mem<device>>, %[[INIT:.+]]: memref<6xf16, #hipsr.mem<device>>) {
 // CHECK-NEXT: hipsr.compute(%[[CTX]]) ins(%[[DATA]] : memref<2x3xf16, #hipsr.mem<device>>) outs(%[[INIT]] : memref<6xf16, #hipsr.mem<device>>) {
@@ -111,6 +110,71 @@ func.func @memref_form(%ctx: !hipsr.context,
                       outs(%init : memref<6xf16, #hipsr.mem<device>>) {
   ^bb0(%body_ctx: !hipsr.context, %in: memref<2x3xf16, #hipsr.mem<device>>,
        %dest: memref<6xf16, #hipsr.mem<device>>):
+    hipsr.compute_yield
+  }
+  return
+}
+
+// -----
+// A compute whose result type differs from its output keeps that result through
+// bufferization, as a device memref yielded out of the body. The output buffer
+// cannot stand in for it: the two types disagree.
+// CHECK-LABEL: func.func @memref_form_with_result(
+// CHECK-SAME: %[[CTX:.+]]: !hipsr.context, %[[DATA:.+]]: memref<2x3xf16, #hipsr.mem<device>>, %[[INIT:.+]]: memref<2x3xf16, #hipsr.mem<device>>) -> memref<6xf16, #hipsr.mem<device>> {
+// CHECK-NEXT: %[[RESULT:.+]] = hipsr.compute(%[[CTX]]) ins(%[[DATA]] : memref<2x3xf16, #hipsr.mem<device>>) outs(%[[INIT]] : memref<2x3xf16, #hipsr.mem<device>>) {
+// CHECK-NEXT: ^bb0(%[[BODY_CTX:.+]]: !hipsr.context, %[[IN:.+]]: memref<2x3xf16, #hipsr.mem<device>>, %[[DEST:.+]]: memref<2x3xf16, #hipsr.mem<device>>):
+// CHECK-NEXT: %[[FLAT:.+]] = memref.collapse_shape %[[IN]] {{\[\[}}0, 1]] : memref<2x3xf16, #hipsr.mem<device>> into memref<6xf16, #hipsr.mem<device>>
+// CHECK-NEXT: hipsr.compute_yield %[[FLAT]] : memref<6xf16, #hipsr.mem<device>>
+// CHECK-NEXT: } : memref<6xf16, #hipsr.mem<device>>{{$}}
+// CHECK-NEXT: return %[[RESULT]] : memref<6xf16, #hipsr.mem<device>>
+// CHECK-NEXT: }
+func.func @memref_form_with_result(%ctx: !hipsr.context,
+                                   %data: memref<2x3xf16, #hipsr.mem<device>>,
+                                   %init: memref<2x3xf16, #hipsr.mem<device>>)
+    -> memref<6xf16, #hipsr.mem<device>> {
+  %out = hipsr.compute(%ctx) ins(%data : memref<2x3xf16, #hipsr.mem<device>>)
+                             outs(%init : memref<2x3xf16, #hipsr.mem<device>>) {
+  ^bb0(%body_ctx: !hipsr.context, %in: memref<2x3xf16, #hipsr.mem<device>>,
+       %dest: memref<2x3xf16, #hipsr.mem<device>>):
+    %flat = memref.collapse_shape %in [[0, 1]]
+        : memref<2x3xf16, #hipsr.mem<device>>
+        into memref<6xf16, #hipsr.mem<device>>
+    hipsr.compute_yield %flat : memref<6xf16, #hipsr.mem<device>>
+  } : memref<6xf16, #hipsr.mem<device>>
+  return %out : memref<6xf16, #hipsr.mem<device>>
+}
+
+// -----
+// Device is not the only space a bufferized compute may use: extents are read
+// on the host, so a compute that produces them holds its input, its output and
+// its result in host memory.
+// CHECK-LABEL: func.func @memref_form_host_space(
+// CHECK-SAME: %[[CTX:.+]]: !hipsr.context, %[[EXTENTS:.+]]: memref<2xi64, #hipsr.mem<host>>, %[[INIT:.+]]: memref<2xi64, #hipsr.mem<host>>) -> memref<2xi64, #hipsr.mem<host>> {
+// CHECK-NEXT: %[[RESULT:.+]] = hipsr.compute(%[[CTX]]) ins(%[[EXTENTS]] : memref<2xi64, #hipsr.mem<host>>) outs(%[[INIT]] : memref<2xi64, #hipsr.mem<host>>) {
+// CHECK-NEXT: ^bb0(%{{.+}}: !hipsr.context, %{{.+}}: memref<2xi64, #hipsr.mem<host>>, %[[DEST:.+]]: memref<2xi64, #hipsr.mem<host>>):
+// CHECK-NEXT: hipsr.compute_yield %[[DEST]] : memref<2xi64, #hipsr.mem<host>>
+// CHECK-NEXT: } : memref<2xi64, #hipsr.mem<host>>{{$}}
+// CHECK-NEXT: return %[[RESULT]] : memref<2xi64, #hipsr.mem<host>>
+// CHECK-NEXT: }
+func.func @memref_form_host_space(%ctx: !hipsr.context,
+                                  %extents: memref<2xi64, #hipsr.mem<host>>,
+                                  %init: memref<2xi64, #hipsr.mem<host>>)
+    -> memref<2xi64, #hipsr.mem<host>> {
+  %out = hipsr.compute(%ctx) ins(%extents : memref<2xi64, #hipsr.mem<host>>)
+                             outs(%init : memref<2xi64, #hipsr.mem<host>>) {
+  ^bb0(%body_ctx: !hipsr.context, %in: memref<2xi64, #hipsr.mem<host>>,
+       %dest: memref<2xi64, #hipsr.mem<host>>):
+    hipsr.compute_yield %dest : memref<2xi64, #hipsr.mem<host>>
+  } : memref<2xi64, #hipsr.mem<host>>
+  return %out : memref<2xi64, #hipsr.mem<host>>
+}
+
+// -----
+// Any space is accepted, but a buffer still has to name the one it lives in.
+func.func @memref_without_space(%ctx: !hipsr.context, %init: memref<6xf16>) {
+  // expected-error @+1 {{operand #1 must be variadic of ranked tensor or hipsr memref, but got 'memref<6xf16>'}}
+  hipsr.compute(%ctx) ins() outs(%init : memref<6xf16>) {
+  ^bb0(%body_ctx: !hipsr.context, %dest: memref<6xf16>):
     hipsr.compute_yield
   }
   return
@@ -215,7 +279,7 @@ func.func @body_uses_parent_value(%ctx: !hipsr.context, %init: tensor<6xf16>) {
 // -----
 // Inputs carry tensor data, so a scalar cannot cross the boundary.
 func.func @non_tensor_input(%ctx: !hipsr.context, %n: index) {
-  // expected-error @+1 {{operand #1 must be variadic of ranked tensor or device memref, but got 'index'}}
+  // expected-error @+1 {{operand #1 must be variadic of ranked tensor or hipsr memref, but got 'index'}}
   hipsr.compute(%ctx) ins(%n : index) outs() {
   ^bb0(%body_ctx: !hipsr.context, %extent: index):
     hipsr.compute_yield
@@ -223,16 +287,6 @@ func.func @non_tensor_input(%ctx: !hipsr.context, %n: index) {
   return
 }
 
-// -----
-// An output must live in device memory once bufferized.
-func.func @host_memref_output(%ctx: !hipsr.context, %init: memref<6xf16>) {
-  // expected-error @+1 {{operand #1 must be variadic of ranked tensor or device memref, but got 'memref<6xf16>'}}
-  hipsr.compute(%ctx) ins() outs(%init : memref<6xf16>) {
-  ^bb0(%body_ctx: !hipsr.context, %dest: memref<6xf16>):
-    hipsr.compute_yield
-  }
-  return
-}
 
 // -----
 // The body must end with hipsr.compute_yield.

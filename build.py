@@ -341,10 +341,8 @@ def run_tests(args, build_dir):
     )
 
     # GPU-free ctest unit suites (built as part of the default target above).
-    # -R limits the run to these two -- the plugin registrar (compiler-only) and
-    # the output-allocator test (links the mock runtime) -- so the GPU / hip-test
-    # e2e ctest suites, which need a real device, are not invoked here.
-    step("Test (plugin registrar + output-allocator unit tests)")
+    # GPU / hip-test e2e suites are not invoked here.
+    step("Test (compiler/runtime GPU-free unit tests)")
     run_subprocess(
         [
             "ctest",

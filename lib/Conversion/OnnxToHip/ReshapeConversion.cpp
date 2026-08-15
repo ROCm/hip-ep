@@ -718,9 +718,8 @@ struct SplitToStdTensor : public mlir::RewritePattern {
           splitDefOp->getName().getStringRef() == "onnx.NoValue") {
         isEqualSplit = true;
       } else {
-        // Custom splits: prefer compile-time constants when available, but
-        // also support runtime split-length tensors (e.g. externalized
-        // constants loaded via globals).
+        // Custom splits: prefer inspectable compile-time constants/carriers
+        // when available, but also support runtime split-length tensors.
         mlir::DenseElementsAttr splitAttr;
         if (splitDefOp && mlir::isa<mlir::arith::ConstantOp>(splitDefOp))
           if (auto constOp =

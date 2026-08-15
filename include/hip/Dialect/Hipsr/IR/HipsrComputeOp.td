@@ -23,28 +23,30 @@ def Hipsr_ComputeOp : Hipsr_Op<"compute", [
   ]> {
   let summary = "Group a multi-operation computation as one non-DPS op";
   let description = [{
-    Groups the ops that implement one high-level computation, so an ONNX op
-    that lowers to several tensor or shape ops still appears as a single hipsr
-    op. Without the grouping those intermediates sit in the enclosing block,
-    where a later `hipsr.placeholder` may not take them as inputs. `ctx`, the
-    inputs, and the outputs enter the isolated body as entry-block arguments,
-    in that order.
+    Groups the ops of one high-level computation into a single hipsr op, so an
+    ONNX op that lowers to several tensor or shape ops stays one op here. The
+    isolated body takes `ctx`, then the inputs, then the outputs as its block
+    arguments, and `hipsr.compute_yield` returns the results.
 
-    This is not a DPS op: an `outs` entry only supplies the destination buffer
-    for the result in the same position, and its type may differ from that
-    result's, which is what lets a body reshape its data. Result types come
-    from `hipsr.compute_yield`; the `outs` values come from
-    `hipsr.placeholder`, which owns the output-shape computation, so this op
-    has no shape region of its own. A bufferized compute writes into device
-    memrefs, has no results, and yields nothing.
+    An `outs` entry names where the result in the same position is stored. Its
+    type need not match that result's, so the body may yield a reshaped or cast
+    view of it.
 
-    Example (the body flattens, so the result type differs from `outs`):
+    Operands and results are tensors before bufferization and memrefs after. A
+    memref may name any `#hipsr.mem` space, so a body that produces extents can
+    keep them in host memory while data stays on the device. A bufferized
+    compute has no results and yields nothing.
+
+    Example, where the body fills its output and then flattens it, so the
+    result type differs:
     ```mlir
     %out = hipsr.compute(%ctx) ins(%data : tensor<2x3xf16>)
                                outs(%init : tensor<2x3xf16>) {
     ^bb0(%body_ctx: !hipsr.context, %in: tensor<2x3xf16>,
          %dest: tensor<2x3xf16>):
-      %flat = tensor.collapse_shape %in [[0, 1]]
+      %written = tensor.insert_slice %in into %dest[0, 0] [2, 3] [1, 1]
+          : tensor<2x3xf16> into tensor<2x3xf16>
+      %flat = tensor.collapse_shape %written [[0, 1]]
           : tensor<2x3xf16> into tensor<6xf16>
       hipsr.compute_yield %flat : tensor<6xf16>
     } : tensor<6xf16>
@@ -53,10 +55,12 @@ def Hipsr_ComputeOp : Hipsr_Op<"compute", [
 
   let arguments = (ins
     Hipsr_ContextType:$ctx,
-    Variadic<Hipsr_TensorOrDeviceMemRef>:$inputs,
-    Variadic<Hipsr_TensorOrDeviceMemRef>:$outputs
+    Variadic<Hipsr_TensorOrAnySpaceMemRef>:$inputs,
+    Variadic<Hipsr_TensorOrAnySpaceMemRef>:$outputs
   );
-  let results = (outs Variadic<AnyRankedTensor>:$result_tensors);
+  // Named after linalg's $result_tensors, which is also the pre-bufferization
+  // form; a bufferized compute holds memrefs here.
+  let results = (outs Variadic<Hipsr_TensorOrAnySpaceMemRef>:$result_tensors);
   let regions = (region SizedRegion<1>:$body);
 
   let assemblyFormat = [{

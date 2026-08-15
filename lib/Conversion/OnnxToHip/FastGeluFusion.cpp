@@ -43,9 +43,10 @@
 // in `onnx.Cast` (f32 → f16); we peek through one level of Cast.
 //
 // Implemented as a RewritePattern rooted on `onnx.Tanh` and run BEFORE
-// `lowerOnnxConstants` so the literal float values are still inline in
-// `onnx.Constant` `value` attributes (post-lowering, constants become
-// `arith.constant` / `memref.get_global`, defeating value-based matching).
+// `lowerOnnxConstants` so the ONNX-rooted matcher sees generic
+// `onnx.Constant` producers and their inline values. Lowering creates
+// inspectable `hip.constant` carriers, but changes the producer dialect;
+// standalone externalization runs only after compute conversion.
 // Per-Tanh failure diagnostics flow through MLIR's standard
 // `notifyMatchFailure` mechanism (toggle via `-debug-only=fast-gelu-fusion`
 // or `-debug-only=greedy-rewriter`).

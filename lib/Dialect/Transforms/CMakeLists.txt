@@ -7,6 +7,7 @@ add_library(HipDialectTransforms STATIC
   AddHipContextArg.cpp
   AssignOpStateSlots.cpp
   BufferUtils.cpp
+  ExternalizeConstants.cpp
   FixLoopAccumulatorOffset.cpp
   GenerateInterface.cpp
   GenerateOpStateInit.cpp
@@ -38,6 +39,7 @@ add_dependencies(HipDialectTransforms
 
 target_link_libraries(HipDialectTransforms PUBLIC
   HipDialectIR
+  HipConstantsIO
   HipToLLVM
   OnnxToHip
   OnnxToHipDNN

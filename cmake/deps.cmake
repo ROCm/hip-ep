@@ -68,29 +68,33 @@ if(_HIPDNN_NEED_TOOLCHAIN)
       set(THEROCK_DIST "${_therock_dist_resolved}"
           CACHE PATH "TheRock ROCm SDK distribution path" FORCE)
     else()
-      # Auto-download: no SDK provided, so download the official tarball from the
-      # public AMD host and extract it under the build tree, so a fresh real
-      # build needs no manual SDK setup. The pin lives in cmake/deps.txt
-      # (therock;<base-url>;<rocm-version>); the full tarball basename is derived
-      # from the host OS + the first HIP_ARCHITECTURES entry.
       set(_therock_root "${CMAKE_BINARY_DIR}/_therock")
       if(NOT EXISTS "${_therock_root}/bin")
         if(WIN32)
-          set(_therock_os "windows")
+          set(_therock_windows_archs gfx1150 gfx1151 gfx1152 gfx1153)
+          foreach(_arch IN LISTS HIP_ARCHITECTURES)
+            if(NOT _arch IN_LIST _therock_windows_archs)
+              message(FATAL_ERROR
+                "HIP_ARCHITECTURES has '${_arch}', which the pinned TheRock "
+                "bundle (${_therock_windows_archs}) does not cover. Provide "
+                "your own SDK with -DTHEROCK_DIST=/path/to/therock.")
+            endif()
+          endforeach()
+          set(_therock_base "${DEP_HASH_therock_windows}")
+          set(_therock_url "${DEP_URL_therock_windows}/${_therock_base}.tar.gz")
         else()
-          set(_therock_os "linux")
+          set(_therock_arch "${HIP_ARCHITECTURES}")
+          if(_therock_arch MATCHES ";")
+            list(GET _therock_arch 0 _therock_arch)
+          endif()
+          if(NOT _therock_arch)
+            message(FATAL_ERROR
+              "Cannot derive the TheRock tarball: set -DHIP_ARCHITECTURES=<gfxNNNN> "
+              "(GPU arch), or provide -DTHEROCK_DIST=/path/to/therock.")
+          endif()
+          set(_therock_base "therock-dist-linux-${_therock_arch}-${DEP_HASH_therock_linux}")
+          set(_therock_url "${DEP_URL_therock_linux}/${_therock_base}.tar.gz")
         endif()
-        set(_therock_arch "${HIP_ARCHITECTURES}")
-        if(_therock_arch MATCHES ";")
-          list(GET _therock_arch 0 _therock_arch)
-        endif()
-        if(NOT _therock_arch)
-          message(FATAL_ERROR
-            "Cannot derive the TheRock tarball: set -DHIP_ARCHITECTURES=<gfxNNNN> "
-            "(GPU arch), or provide -DTHEROCK_DIST=/path/to/therock.")
-        endif()
-        set(_therock_base "therock-dist-${_therock_os}-${_therock_arch}-${DEP_HASH_therock}")
-        set(_therock_url "${DEP_URL_therock}/${_therock_base}.tar.gz")
         set(_therock_tgz "${CMAKE_BINARY_DIR}/${_therock_base}.tar.gz")
         if(NOT EXISTS "${_therock_tgz}")
           message(STATUS "THEROCK_DIST not provided; downloading ${_therock_url}")

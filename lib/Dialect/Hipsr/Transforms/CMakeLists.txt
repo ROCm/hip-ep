@@ -21,6 +21,7 @@ target_link_libraries(HipsrDialectTransforms PUBLIC
   HipsrDialectIR
   HipConstantsIO  # writeConstantsBinToFileSystem / ConstantEntry
   MLIRBufferizationDialect  # BufferizableOpInterface models
+  MLIRBufferizationTransforms  # BufferViewFlowAnalysis
   MLIRPass
   MLIRTransformUtils
   MLIRFuncDialect

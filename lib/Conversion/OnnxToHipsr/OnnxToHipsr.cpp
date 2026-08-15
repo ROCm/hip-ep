@@ -47,6 +47,21 @@ Value resolveShapeGraphInput(Value input) {
   return destinations[result.getResultNumber()];
 }
 
+// onnx.NoValue stands in for an omitted optional operand, so it only becomes
+// dead once the conversion of its consumer drops that operand. Sweeping it up
+// therefore belongs after the conversion.
+void eraseDeadNoValue(ModuleOp module) {
+  SmallVector<Operation *> dead;
+  module.walk([&](Operation *op) {
+    if (op->getName().getStringRef() == "onnx.NoValue" && op->use_empty()) {
+      dead.push_back(op);
+    }
+  });
+  for (Operation *op : dead) {
+    op->erase();
+  }
+}
+
 // Placeholder inputs form the shape graph, not the data graph.
 // PlaceholderOp::verify reports any input this cannot fix.
 void rewirePlaceholderInputs(ModuleOp module) {
@@ -63,6 +78,9 @@ struct ConvertOnnxToHipsrPass
     ModuleOp module = getOperation();
     ConversionTarget target(getContext());
     target.addIllegalDialect("onnx");
+    // The consumer's conversion drops the operand this stands for, so the
+    // placeholder has to survive until then.
+    target.addLegalOp(OperationName("onnx.NoValue", &getContext()));
     target.addLegalDialect<HipsrDialect>();
     target.addLegalOp<ModuleOp, func::FuncOp, func::ReturnOp>();
     target.addLegalOp<arith::ConstantOp>();
@@ -71,10 +89,17 @@ struct ConvertOnnxToHipsrPass
     });
 
     RewritePatternSet patterns(&getContext());
+    populateOnnxToHipsrConstantPatterns(patterns);
+    populateCastConversionPatterns(patterns, &getContext());
+    populateMatMulConversionPatterns(patterns, &getContext());
+    populateExpandConversionPatterns(patterns, &getContext());
+    populateReturnConversionPatterns(patterns, &getContext());
+
     if (failed(applyFullConversion(module, target, std::move(patterns)))) {
       signalPassFailure();
       return;
     }
+    eraseDeadNoValue(module);
     // Runs after conversion so every producer has its outs operand.
     rewirePlaceholderInputs(module);
   }

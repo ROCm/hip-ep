@@ -491,6 +491,83 @@ def Hip_FreeOp : Hip_Op<"free",
 
 // ===== Constant Management ===================================================
 
+def Hip_ConstantOp : Hip_Op<"constant", [Pure]> {
+  let summary = "Policy-neutral constant tensor carrier";
+  let description = [{
+    Carries a statically-shaped tensor constant from a producer to
+    `hip-externalize-constants`. The carrier has exactly one source:
+
+      * `value`: an inline `DenseElementsAttr`; or
+      * `location`, `offset`, and `size`: a file-backed byte range; or
+      * `memory_address` and `size`: a process-local host-memory byte range.
+
+    Producers that need a stable artifact order set `serialization_order`.
+    Unordered carriers follow ordered carriers in stable module walk order.
+    `symbol_name_hint` contributes only to the generated private symbol name;
+    `source_name` is copied into the human-readable artifact manifest.
+
+    Memory-address sources are process-local and non-serializable. They are
+    accepted only when the production externalizer is given a FileSystem while
+    the producer-owned storage is live. Textual pass invocation rejects them
+    before any address is dereferenced.
+
+    This op deliberately has no fold method. Generic canonicalization may
+    reason about its purity, but only `hip-externalize-constants` may choose
+    between inline and external storage.
+  }];
+
+  let arguments = (ins
+    OptionalAttr<ElementsAttr>:$value,
+    OptionalAttr<StrAttr>:$location,
+    OptionalAttr<I64Attr>:$offset,
+    OptionalAttr<I64Attr>:$memory_address,
+    OptionalAttr<I64Attr>:$size,
+    OptionalAttr<StrAttr>:$symbol_name_hint,
+    OptionalAttr<StrAttr>:$source_name,
+    OptionalAttr<I64Attr>:$serialization_order
+  );
+  let results = (outs AnyRankedTensor:$result);
+
+  let extraClassDeclaration = [{
+    enum class SourceKind { Inline, Memory, File };
+
+    /// Classify the source of a verified carrier.
+    SourceKind getSourceKind();
+  }];
+
+  let assemblyFormat = [{
+    attr-dict `:` type($result)
+  }];
+
+  let builders = [
+    OpBuilder<(ins "::mlir::RankedTensorType":$result,
+                   "::mlir::DenseElementsAttr":$value), [{
+      build($_builder, $_state, result, value, /*location=*/nullptr,
+            /*offset=*/nullptr, /*memory_address=*/nullptr, /*size=*/nullptr,
+            /*symbol_name_hint=*/nullptr, /*source_name=*/nullptr,
+            /*serialization_order=*/nullptr);
+    }]>,
+    OpBuilder<(ins "::mlir::RankedTensorType":$result,
+                   "::mlir::StringAttr":$location,
+                   "::mlir::IntegerAttr":$offset,
+                   "::mlir::IntegerAttr":$size), [{
+      build($_builder, $_state, result, /*value=*/nullptr, location, offset,
+            /*memory_address=*/nullptr, size, /*symbol_name_hint=*/nullptr,
+            /*source_name=*/nullptr, /*serialization_order=*/nullptr);
+    }]>,
+    OpBuilder<(ins "::mlir::RankedTensorType":$result,
+                   "::mlir::IntegerAttr":$memory_address,
+                   "::mlir::IntegerAttr":$size), [{
+      build($_builder, $_state, result, /*value=*/nullptr,
+            /*location=*/nullptr, /*offset=*/nullptr, memory_address, size,
+            /*symbol_name_hint=*/nullptr, /*source_name=*/nullptr,
+            /*serialization_order=*/nullptr);
+    }]>
+  ];
+
+  let hasVerifier = 1;
+}
+
 def Hip_GetConstantOp : Hip_Op<"get_constant", [
   DeclareOpInterfaceMethods<MemoryEffectsOpInterface>
 ]> {
