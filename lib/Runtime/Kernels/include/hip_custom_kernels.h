@@ -1508,6 +1508,36 @@ HIP_KERNEL_API int hip_layer_norm(
     int mean_dtype);
 
 /* =========================================================================
+ * SkipSimplifiedLayerNormalization (com.microsoft), fused
+ * =========================================================================
+ *
+ *   sum = input + skip [+ bias]
+ *   out = sum * rsqrt(mean(sum^2) + epsilon) * gamma
+ *
+ * One dispatch in place of MIOpen's ADD [+ ADD] + T5LayerNormForward
+ * composition. Staged per row in LDS, so a row wider than 32 KB is declined.
+ *
+ * input / skip / output       : [num_rows, hidden_dim]
+ * gamma / bias (optional)     : [hidden_dim]
+ * input_skip_bias_sum         : [num_rows, hidden_dim], optional ONNX output
+ *
+ * Returns 0 on success, 1 when it declines (caller must keep its own path,
+ * e.g. the MIOpen composition), <0 / hipError_t on launch failure.
+ */
+HIP_KERNEL_API int hip_skip_rms_norm(
+    void* stream,
+    const void* input,
+    const void* skip,
+    const void* gamma,
+    const void* bias,              // optional
+    void* output,
+    void* input_skip_bias_sum,     // optional
+    int64_t num_rows,
+    int64_t hidden_dim,
+    int64_t element_size_bytes,
+    float epsilon);
+
+/* =========================================================================
  * Range (1-D sequence generation)
  * =========================================================================
  *

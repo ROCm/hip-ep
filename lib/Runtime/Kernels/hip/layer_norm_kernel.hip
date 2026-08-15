@@ -206,3 +206,135 @@ extern "C" int hip_layer_norm(void *stream, const void *input,
   }
   return static_cast<int>(err);
 }
+
+//===----------------------------------------------------------------------===//
+// SkipSimplifiedLayerNormalization, fused.
+//
+//   sum = input + skip [+ bias]
+//   out = sum * rsqrt(mean(sum^2) + epsilon) * gamma
+//
+// MIOpen has no fused add+RMS-norm entry point, so the runtime composed it from
+// miopenOpTensor(ADD) [+ a second ADD for bias] followed by
+// miopenT5LayerNormForward. Three dispatches, and the row is moved four times:
+// written as tmp, read back to add bias, written again, read again to normalise.
+// This does it in one pass -- read input and skip once, keep the row in LDS,
+// write the output once.
+//
+// The staged row is kept in the tensor dtype rather than fp32 on purpose. The
+// composed path already round-trips the sum through a dtype-typed tmp buffer
+// before T5LayerNorm reads it, so normalising from the rounded value is what
+// reproduces it; staging fp32 would quietly be *more* accurate than the path
+// being replaced and make the two harder to compare. Sum of squares
+// accumulates in fp32 either way, as T5LayerNormForward does.
+//===----------------------------------------------------------------------===//
+
+template <typename T>
+__global__ void hip_skip_rms_norm_kernel(const T *__restrict__ input,
+                                        const T *__restrict__ skip,
+                                        const T *__restrict__ gamma,
+                                        const T *__restrict__ bias,
+                                        T *__restrict__ output,
+                                        T *__restrict__ sum_out,
+                                        int64_t hidden, float epsilon) {
+  const int64_t row = blockIdx.x;
+  const int64_t base = row * hidden;
+  const int tid = threadIdx.x;
+  const int nthreads = blockDim.x;
+
+  extern __shared__ char smem_raw[];
+  T *xs = reinterpret_cast<T *>(smem_raw);
+
+  __shared__ float s_reduce[kLayerNormBlockSize];
+  __shared__ float s_inv;
+
+  float local_sumsq = 0.0f;
+  for (int64_t i = tid; i < hidden; i += nthreads) {
+    float v = static_cast<float>(input[base + i]) +
+              static_cast<float>(skip[base + i]);
+    if (bias)
+      v += static_cast<float>(bias[i]);
+    const T t = store_from_float<T>(v);
+    xs[i] = t;
+    // input_skip_bias_sum is an optional ONNX output; when the graph asks for
+    // it, it is the pre-norm sum, so it must be the same rounded value the norm
+    // consumes.
+    if (sum_out)
+      sum_out[base + i] = t;
+    const float f = static_cast<float>(t);
+    local_sumsq += f * f;
+  }
+
+  s_reduce[tid] = local_sumsq;
+  __syncthreads();
+  for (int stride = nthreads / 2; stride > 0; stride >>= 1) {
+    if (tid < stride)
+      s_reduce[tid] += s_reduce[tid + stride];
+    __syncthreads();
+  }
+  if (tid == 0)
+    s_inv = rsqrtf(s_reduce[0] / static_cast<float>(hidden) + epsilon);
+  __syncthreads();
+
+  const float inv = s_inv;
+  for (int64_t i = tid; i < hidden; i += nthreads)
+    output[base + i] = store_from_float<T>(static_cast<float>(xs[i]) * inv *
+                                           static_cast<float>(gamma[i]));
+}
+
+extern "C" int hip_skip_rms_norm(void *stream, const void *input,
+                                 const void *skip, const void *gamma,
+                                 const void *bias, void *output,
+                                 void *input_skip_bias_sum, int64_t num_rows,
+                                 int64_t hidden_dim, int64_t element_size_bytes,
+                                 float epsilon) {
+  if (num_rows <= 0 || hidden_dim <= 0)
+    return 0;
+  if (!input || !skip || !gamma || !output)
+    return 1;   // decline; caller keeps its own path
+
+  // The row is staged in LDS, so a row too wide to stage is declined rather
+  // than handled by a second global round trip -- that would be the composed
+  // path again, with none of the saving.
+  const size_t row_bytes =
+      static_cast<size_t>(hidden_dim) * static_cast<size_t>(element_size_bytes);
+  if (row_bytes > 32768)
+    return 1;
+  if (element_size_bytes != 2 && element_size_bytes != 4)
+    return 1;
+
+  hipStream_t hip_stream = static_cast<hipStream_t>(stream);
+  dim3 grid(static_cast<unsigned int>(num_rows));
+  dim3 block(kLayerNormBlockSize);
+
+  (void)hipGetLastError();
+
+  if (element_size_bytes == 2) {
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_skip_rms_norm_kernel<__half>), grid,
+                       block, row_bytes, hip_stream,
+                       static_cast<const __half *>(input),
+                       static_cast<const __half *>(skip),
+                       static_cast<const __half *>(gamma),
+                       static_cast<const __half *>(bias),
+                       static_cast<__half *>(output),
+                       static_cast<__half *>(input_skip_bias_sum), hidden_dim,
+                       epsilon);
+  } else {
+    hipLaunchKernelGGL(HIP_KERNEL_NAME(hip_skip_rms_norm_kernel<float>), grid,
+                       block, row_bytes, hip_stream,
+                       static_cast<const float *>(input),
+                       static_cast<const float *>(skip),
+                       static_cast<const float *>(gamma),
+                       static_cast<const float *>(bias),
+                       static_cast<float *>(output),
+                       static_cast<float *>(input_skip_bias_sum), hidden_dim,
+                       epsilon);
+  }
+
+  hipError_t err = hipGetLastError();
+  if (err != hipSuccess) {
+    fprintf(stderr, "[custom_kernels] hip_skip_rms_norm launch failed: %s\n",
+            hipGetErrorString(err));
+    return static_cast<int>(err);
+  }
+  return 0;
+}
