@@ -34,31 +34,46 @@ def main() -> None:
         cap = Capture(path, spec)
         k = cap.layer_scale
         by_region: dict[str, float] = defaultdict(float)
+        scaled_region: dict[str, float] = defaultdict(float)
         int4_us: dict[tuple[str, str], float] = defaultdict(float)
         int4_n: dict[tuple[str, str], int] = defaultdict(int)
+        dense_int4_chunk = 0.0
 
         for i, r in enumerate(cap.rows):
             fam, dur = r["family"], float(r["dur_us"])
             reg = "lm_head" if i in cap.lm_head_idx else cap.regions[i]
             by_region[reg] += dur
+            scaled_region[reg] += cap.scaled_us(i)
             if fam in INT4_FAMILIES:
                 int4_us[(reg, fam)] += dur
                 int4_n[(reg, fam)] += 1
+                if reg == "dense":
+                    dense_int4_chunk += cap.scaled_us(i)
 
         total = cap.total_us
-        # lm_head runs once per chunk; everything else scales with the layer stack.
-        chunk_us = (total - cap.lm_head_us) * k + cap.lm_head_us
+        chunk_us = cap.chunk_us
 
         print(f"\n######## {path}")
         print(f"window {total/1000:.1f} ms over {len(cap.rows)} dispatches, "
-              f"{cap.layers_in_window} layer-groups -> x{k:.2f}")
+              f"{cap.layer_groups} layer-groups -> x{k:.2f}"
+              + ("" if cap.layers_in_window else " (dated by attention markers)"))
+        if spec.hybrid:
+            # Say the census out loud: it is what makes the ms/chunk column
+            # differ from a flat multiply, and a window holding none of one type
+            # is the case where a reader should distrust that type's row.
+            print(f"  hybrid stack: window holds {cap.linear_in_window} of "
+                  f"{spec.linear_attn_layers} linear and {cap.full_in_window} of "
+                  f"{spec.full_attn_layers} full-attention layers, scaled apart")
+            print(f"  (only kernels owned by one layer type are scaled by type; the "
+                  f"norms,\n   projections and MoE run in all {spec.layers} layers and "
+                  f"take the flat x{k:.0f})")
         print(f"{'region':10} {'window ms':>10} {'%window':>8} {'ms/chunk':>10}")
         for reg in ("qmoe", "dense", "lm_head"):
             us = by_region.get(reg, 0.0)
             if not us:
                 continue
-            per_chunk = us if reg == "lm_head" else us * k
-            print(f"{reg:10} {us/1000:10.1f} {100*us/total:8.1f} {per_chunk/1000:10.1f}")
+            print(f"{reg:10} {us/1000:10.1f} {100*us/total:8.1f} "
+                  f"{scaled_region[reg]/1000:10.1f}")
         print(f"{'chunk':10} {'':>10} {'':>8} {chunk_us/1000:10.1f}")
 
         print(f"\n--- int4 stack by region ---")
@@ -77,10 +92,25 @@ def main() -> None:
         # headroom.py's dense floor is built from the QKV/o_proj/router weights,
         # so it must be fed the int4 projection time -- not the whole dense
         # region, which also carries attention, layernorm and rope.
-        print(f"\nfeed headroom.py:  --dense-ms {d*k/1000:.1f} "
+        print(f"\nfeed headroom.py:  --dense-ms {dense_int4_chunk/1000:.1f} "
               f"--lm-head-ms {cap.lm_head_us/1000:.1f}")
         print(f"  (dense int4 projections only; the full dense region incl. attention "
-              f"is {by_region.get('dense', 0)*k/1000:.1f} ms/chunk)")
+              f"is {scaled_region.get('dense', 0)/1000:.1f} ms/chunk)")
+
+        if cap.fused_moe:
+            # No gather_tokens in the stream: this model's MoE is bucketed
+            # grouped GEMMs, so there are no per-expert blocks to report. Roll
+            # the region up by kernel instead of printing an empty table.
+            print(f"\n--- MoE region: bucketed grouped GEMMs, no per-expert blocks ---")
+            fused: dict[str, list] = defaultdict(lambda: [0, 0.0])
+            for i, r in enumerate(cap.rows):
+                if cap.regions[i] != "qmoe" or i in cap.lm_head_idx:
+                    continue
+                fused[r["family"]][0] += 1
+                fused[r["family"]][1] += cap.scaled_us(i)
+            for fam, (n_, us) in sorted(fused.items(), key=lambda kv: -kv[1][1]):
+                print(f"  {fam:34} n={n_:4d}  {us/1000:8.2f} ms/chunk")
+            continue
 
         print(f"\n--- expert blocks: {len(cap.blocks)} ---")
         paths: dict[str, list] = defaultdict(lambda: [0, 0.0, 0])

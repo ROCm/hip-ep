@@ -38,16 +38,42 @@ def main() -> None:
     for path in args.captures:
         cap = Capture(path, spec)
         k = cap.layer_scale
-        chunk_us = (cap.total_us - cap.lm_head_us) * k + cap.lm_head_us
+        chunk_us = cap.chunk_us
         floor_us = spec.expert_weight_bytes / dev.bw_bytes_s * 1e6
 
         print(f"\n######## {path}")
         print(f"window {cap.total_us/1000:.1f} ms, {len(cap.rows)} dispatches, "
-              f"{cap.layers_in_window} layer-groups -> x{k:.2f} for {spec.layers} layers")
+              f"{cap.layer_groups} layer-groups -> x{k:.2f} for {spec.layers} layers")
         print(f"reconstructed chunk ({spec.chunk_tokens} tok): {chunk_us/1000:.1f} ms"
               + (f"  (incl. lm_head {cap.lm_head_us/1000:.1f} ms)" if cap.lm_head_us else ""))
         print(f"one expert = {spec.expert_weight_bytes/1e6:.1f} MB of weights+scales "
               f"-> {floor_us:.1f} us at {dev.bw_bytes_s/1e9:.0f} GB/s\n")
+
+        if cap.fused_moe:
+            # Bucketed grouped GEMMs: the M buckets below cannot be filled
+            # because there is no per-expert block to measure. The region still
+            # has a floor -- at prefill every expert is hit, so the whole expert
+            # bank is read once per layer -- so report against that instead.
+            region_us = cap.moe_region_us
+            bank = spec.experts * spec.expert_weight_bytes * spec.layers
+            bank_us = bank / dev.bw_bytes_s * 1e6
+            print("MoE runs as bucketed grouped GEMMs: no gather_tokens, so no "
+                  "per-expert\nblocks exist in the stream. Reporting the region "
+                  "against its weight floor.")
+            print(f"  expert bank: {spec.experts} experts x {spec.layers} layers = "
+                  f"{bank/1e9:.1f} GB -> {bank_us/1000:.1f} ms")
+            print(f"  measured region: {region_us/1000:.1f} ms/chunk  "
+                  f"-> {100*bank_us/region_us:.0f}% of the weight-read floor")
+            print(f"{'kernel':34} {'n':>5} {'ms/chunk':>9} {'%region':>8}")
+            roll: dict[str, list] = defaultdict(lambda: [0, 0.0])
+            for i, r in enumerate(cap.rows):
+                if cap.regions[i] != "qmoe" or i in cap.lm_head_idx:
+                    continue
+                roll[r["family"]][0] += 1
+                roll[r["family"]][1] += cap.scaled_us(i)
+            for fam, (n_, us) in sorted(roll.items(), key=lambda kv: -kv[1][1]):
+                print(f"  {fam:32} {n_:5d} {us/1000:9.2f} {100*us/region_us:8.1f}")
+            continue
 
         print(f"{'M range':>10} {'blocks':>7} {'tokens':>7} {'ms/chunk':>9} {'%chunk':>7} "
               f"{'us/blk':>8} {'mean M':>7} {'x floor':>8} {'eff GB/s':>9}  path")

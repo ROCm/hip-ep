@@ -28,6 +28,7 @@ from perfcommon import (
     Capture,
     add_common_args,
     bucket_label,
+    linear_attn_floor,
     specs_from_args,
 )
 
@@ -97,11 +98,45 @@ def main() -> None:
         f"-> {spec.expert_weight_bytes / dev.bw_bytes_s * 1e6:.1f} us\n"
     )
 
-    print("=== MoE expert blocks: measured vs the floor its own work implies ===")
-    print(
-        f"{'M':>10} {'blk/chunk':>9} {'meas ms':>8} {'floor ms':>9} {'binding':>10} "
-        f"{'util':>6} {'headroom s':>11}"
-    )
+    fused = all(cap.fused_moe for cap in caps)
+    if fused:
+        # Bucketed grouped GEMMs: no per-expert blocks to bucket by M. The
+        # region's floor is the expert bank, which prefill reads in full because
+        # 3985 tokens x top-8 hits every expert.
+        moe_meas = sum(cap.moe_region_us for cap in caps) / n
+        bank_b = spec.experts * spec.expert_weight_bytes * spec.layers
+        act_b = spec.layers * spec.fp16(
+            spec.chunk_tokens * (spec.hidden * 2 + 2 * spec.inter * spec.topk)
+        )
+        moe_b = bank_b + act_b
+        moe_f = spec.layers * spec.expert_flop_per_token * spec.chunk_tokens * spec.topk
+        moe_floor_s = dev.floor_s(moe_b, moe_f)
+        print("=== MoE region: bucketed grouped GEMMs, no per-expert blocks ===")
+        print(
+            f"   every expert is hit at {spec.chunk_tokens} tokens x top-{spec.topk}, "
+            f"so the whole bank is read: {bank_b/1e9:.1f} GB over {spec.layers} layers"
+        )
+        print(
+            f"{'component':42} {'meas ms':>8} {'floor ms':>9} {'binding':>10} "
+            f"{'util':>6} {'headroom s':>11}"
+        )
+        moe_bind = (
+            "compute"
+            if moe_f / dev.peak_flops > moe_b / dev.bw_bytes_s
+            else "bandwidth"
+        )
+        print(
+            f"{'MoE region (routing + grouped GEMMs)':42} {moe_meas/1e3:8.1f} "
+            f"{moe_floor_s*1e3:9.1f} {moe_bind:>10} "
+            f"{100*moe_floor_s/(moe_meas/1e6):5.0f}% "
+            f"{(moe_meas/1e6 - moe_floor_s) * spec.chunks:11.2f}"
+        )
+    else:
+        print("=== MoE expert blocks: measured vs the floor its own work implies ===")
+        print(
+            f"{'M':>10} {'blk/chunk':>9} {'meas ms':>8} {'floor ms':>9} {'binding':>10} "
+            f"{'util':>6} {'headroom s':>11}"
+        )
     m_all = f_all = small_m = small_f = 0.0
     for lo, hi in M_BUCKETS:
         meas = fl = nb = 0.0
@@ -131,31 +166,42 @@ def main() -> None:
             f"{bucket_label(lo, hi):>10} {nb:9.0f} {meas / 1000:8.1f} {fl / 1000:9.1f} "
             f"{b:>10} {100 * fl / meas:5.0f}% {(meas - fl) * spec.chunks / 1e6:11.2f}"
         )
-    print(
-        f"{'all':>10} {'':>9} {m_all / 1000:8.1f} {f_all / 1000:9.1f} {'':>10} "
-        f"{100 * f_all / m_all:5.0f}% {(m_all - f_all) * spec.chunks / 1e6:11.2f}"
-    )
+    if m_all:
+        print(
+            f"{'all':>10} {'':>9} {m_all / 1000:8.1f} {f_all / 1000:9.1f} {'':>10} "
+            f"{100 * f_all / m_all:5.0f}% {(m_all - f_all) * spec.chunks / 1e6:11.2f}"
+        )
 
     # --- the rest of the chunk -------------------------------------------
     print("\n=== the rest, per chunk ===")
     c = spec.chunk_tokens
-    dense_b = spec.layers * (
-        spec.int4w(spec.hidden * spec.qkv_n)
-        + spec.int4w(spec.o_proj_k * spec.hidden)
-        + spec.int4w(spec.hidden * spec.router_n)
-        + spec.fp16(c * spec.qkv_n)
-        + spec.fp16(c * spec.hidden) * 4
-    )
-    dense_f = (
-        spec.layers
-        * 2
-        * c
-        * (
-            spec.hidden * spec.qkv_n
-            + spec.o_proj_k * spec.hidden
-            + spec.hidden * spec.router_n
+
+    def proj_floor(n_layers: int, in_n: int, out_k: int) -> tuple[float, float]:
+        """Bytes and FLOP for `n_layers` layers of in_proj + out_proj + router."""
+        byts = n_layers * (
+            spec.int4w(spec.hidden * in_n)
+            + spec.int4w(out_k * spec.hidden)
+            + spec.int4w(spec.hidden * spec.router_n)
+            + spec.fp16(c * in_n)
+            + spec.fp16(c * spec.hidden) * 4
         )
-    )
+        flop = (
+            n_layers
+            * 2
+            * c
+            * (spec.hidden * in_n + out_k * spec.hidden + spec.hidden * spec.router_n)
+        )
+        return byts, flop
+
+    # On a hybrid stack the two layer types do not share a projection width -- a
+    # linear layer's in_proj carries qkv+z+a+b -- so one width over all layers
+    # would misprice whichever group it was not taken from.
+    if spec.hybrid:
+        fb, ff = proj_floor(spec.full_attn_layers, spec.qkv_n, spec.o_proj_k)
+        lb, lf = proj_floor(spec.linear_attn_layers, spec.la_proj_n, spec.la_out_k)
+        dense_b, dense_f = fb + lb, ff + lf
+    else:
+        dense_b, dense_f = proj_floor(spec.layers, spec.qkv_n, spec.o_proj_k)
     lm_b = spec.int4w(spec.vocab * spec.hidden) + spec.fp16(c * spec.vocab)
     lm_f = 2 * c * spec.hidden * spec.vocab
 
@@ -185,7 +231,7 @@ def main() -> None:
     # Softmax/exp is real work this omits, so the utilisation is a LOWER bound
     # and is not comparable to the GEMM rows above.
     nfull = spec.full_attn_layers
-    nslide = spec.layers - nfull
+    nslide = 0 if spec.hybrid else spec.layers - nfull
 
     # Global layers: context grows one chunk at a time, so both the FLOPs and
     # the KV read grow linearly with chunk index.
@@ -199,18 +245,45 @@ def main() -> None:
     slide_flop = sum(nslide * 2 * 2 * c * w * spec.heads * spec.head_dim for w in win)
     slide_kv_b = sum(nslide * w * spec.kv_heads * spec.head_dim * 2 * 2 for w in win)
 
-    att_bytes, att_flop = full_kv_b + slide_kv_b, full_flop + slide_flop
+    # A hybrid stack's other group is a recurrence, not a shorter softmax
+    # attention: cost is linear in context and dominated by state traffic, so it
+    # needs its own floor rather than a sliding window of size zero.
+    la_s, la_b, la_f = linear_attn_floor(spec, dev, spec.chunk_tokens * spec.chunks)
+
+    att_bytes = full_kv_b + slide_kv_b + la_b
+    att_flop = full_flop + slide_flop + la_f
     att_floor_s = dev.floor_s(att_bytes, att_flop)
     att_bind = (
         "compute"
         if att_flop / dev.peak_flops > att_bytes / dev.bw_bytes_s
         else "bandwidth"
     )
-    print(
-        f"\n   attention floor: {nfull} global (kv{spec.full_kv} x {spec.full_hd}, "
-        f"full context) + {nslide} sliding (kv{spec.kv_heads} x {spec.head_dim}, "
-        f"window {spec.sliding_window})"
-    )
+    if spec.hybrid:
+        print(
+            f"\n   attention floor: {nfull} full (kv{spec.full_kv} x {spec.full_hd}, "
+            f"full context) + {spec.linear_attn_layers} linear "
+            f"({spec.la_value_heads}x{spec.la_head_dim}x{spec.la_head_dim} state, "
+            f"chunk {spec.la_chunk}, incl. the {spec.conv_kernel}-tap conv)"
+        )
+        la_bind = (
+            "compute"
+            if la_f / dev.peak_flops > la_b / dev.bw_bytes_s
+            else "bandwidth"
+        )
+        n_chunk = max(1, -(-spec.chunk_tokens * spec.chunks // spec.la_chunk))
+        state_b = spec.linear_attn_layers * spec.la_state_bytes * 2 * n_chunk
+        print(
+            f"   the linear group alone: {la_b/1e9:.1f} GB, {la_f/1e9:.0f} GFLOP "
+            f"-> {la_s*1e3:.0f} ms, {la_bind}-bound "
+            f"({state_b/1e9:.1f} GB of it is the state, read and written once per "
+            f"{spec.la_chunk}-token chunk)"
+        )
+    else:
+        print(
+            f"\n   attention floor: {nfull} global (kv{spec.full_kv} x {spec.full_hd}, "
+            f"full context) + {nslide} sliding (kv{spec.kv_heads} x {spec.head_dim}, "
+            f"window {spec.sliding_window})"
+        )
     print(
         f"{'attention over the whole prefill':42} {args.attention_s * 1e3:8.1f} "
         f"{att_floor_s * 1e3:9.1f} {att_bind:>10} {100 * att_floor_s / args.attention_s:5.0f}% "
@@ -221,17 +294,29 @@ def main() -> None:
 
     print("\n=== recoverable seconds, ranked ===")
     dense_fl_s = max(dense_b / dev.bw_bytes_s, dense_f / dev.peak_flops) * 1e3
-    items = [
-        (
-            "MoE experts, large M (ordinary GEMM efficiency)",
-            ((m_all - small_m) - (f_all - small_f)) * spec.chunks / 1e6,
-            "hard",
-        ),
-        (
-            "MoE experts, small M (structural: per-expert launch)",
-            (small_m - small_f) * spec.chunks / 1e6,
-            "new kernel",
-        ),
+    items = []
+    if fused:
+        items.append(
+            (
+                "MoE region (routing + grouped GEMMs)",
+                (moe_meas / 1e6 - moe_floor_s) * spec.chunks,
+                "medium",
+            )
+        )
+    else:
+        items += [
+            (
+                "MoE experts, large M (ordinary GEMM efficiency)",
+                ((m_all - small_m) - (f_all - small_f)) * spec.chunks / 1e6,
+                "hard",
+            ),
+            (
+                "MoE experts, small M (structural: per-expert launch)",
+                (small_m - small_f) * spec.chunks / 1e6,
+                "new kernel",
+            ),
+        ]
+    items += [
         (
             "dense projections",
             (args.dense_ms - dense_fl_s) * spec.chunks / 1e3,

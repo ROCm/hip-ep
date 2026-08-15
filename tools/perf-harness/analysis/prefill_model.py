@@ -43,6 +43,19 @@ def main() -> None:
     if len(args.captures) != 2 or len(args.at_chunk) != 2:
         raise SystemExit("need exactly two captures and two --at-chunk positions "
                          "(one shallow, one deep)")
+    # This model extrapolates a chunked prefill: it fits how attention grows with
+    # KV depth across chunks, and splits each layer's attention dispatches at the
+    # median to separate a full-attention group from a sliding one. Neither holds
+    # on a hybrid stack whose prefill runs as one chunk -- there is no depth axis
+    # to fit and no sliding group to split out -- so it would return a confident
+    # number built on two broken assumptions.
+    if spec.hybrid or spec.chunks < 2:
+        raise SystemExit(
+            f"preset '{getattr(args, 'preset', '?')}' has "
+            f"{'a hybrid layer stack' if spec.hybrid else 'an unchunked prefill'}; "
+            "this model needs a chunked prefill with a full/sliding split. Use "
+            "attrib_regions.py and headroom.py for that model instead."
+        )
 
     order = sorted(range(2), key=lambda i: args.at_chunk[i])
     names = ("shallow", "deep")
