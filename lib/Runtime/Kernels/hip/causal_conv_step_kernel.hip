@@ -318,6 +318,168 @@ __global__ void causal_conv_prefill_kernel(
     }
 }
 
+// Channels-last prefill: input and output are [B, L, C] instead of [B, C, L].
+// The recurrent state keeps its native [B, C, K-1] layout either way.
+//
+// This exists because the ONNX export brackets the conv with a Transpose pair --
+// [B,L,C] -> [B,C,L] in, and back out -- purely because ONNX Conv wants its
+// channels first. Those two transposes move 65 MB each on Qwen3.6-35B-A3B and
+// together cost more than the convolution they surround. Nothing about the
+// arithmetic needs channels first, so the layout is a parameter here and the
+// transposes can be folded away by the caller.
+//
+// The shape falls out differently from the channels-first kernel. There, time is
+// the contiguous axis, so a wave must cover consecutive t and the K-deep window
+// overlaps between neighbouring lanes -- hence the LDS staging. Here channels are
+// contiguous, so a lane owns one channel and walks time by itself: the window
+// lives entirely in that lane's registers with no sharing, no LDS and no halo
+// staging, while each load still coalesces because neighbouring lanes read
+// neighbouring channels at the same t. A block covers CTILE channels x TTILE
+// timesteps and re-reads only the K-1 timesteps preceding its tile.
+template <typename T, int K, int HAS_BIAS, int ACT_SILU, int CTILE, int TTILE>
+__global__ void causal_conv_prefill_nlc_kernel(
+    const T* __restrict__ input,
+    const T* __restrict__ weight,
+    const T* __restrict__ bias,
+    const T* __restrict__ past_state,
+    T* __restrict__ output,
+    T* __restrict__ present_state,
+    int batch_size,
+    int channels,
+    int seq_len) {
+
+    const int c = static_cast<int>(blockIdx.x) * CTILE + static_cast<int>(threadIdx.x);
+    const int b = static_cast<int>(blockIdx.z);
+    const int t0 = static_cast<int>(blockIdx.y) * TTILE;
+    if (c >= channels || t0 >= seq_len || b >= batch_size)
+        return;
+
+    constexpr int STATE_LEN = K - 1;
+    const int64_t plane = static_cast<int64_t>(b) * channels + c;
+    const T* ps = (STATE_LEN > 0 && past_state != nullptr)
+                      ? past_state + plane * STATE_LEN
+                      : nullptr;
+    const T* in_b = input + static_cast<int64_t>(b) * seq_len * channels;
+    T* out_b = output + static_cast<int64_t>(b) * seq_len * channels;
+
+    // The virtual sequence the convolution slides over, same definition as the
+    // channels-first kernel: virtual[i] = past_state[i] for i < K-1, else
+    // input[i - (K-1)]. Output t reads virtual[t .. t+K-1].
+    auto virt = [&](int i) -> float {
+        if (i < STATE_LEN)
+            return ps ? to_f32<T>(ps[i]) : 0.0f;
+        const int ti = i - STATE_LEN;
+        return (ti < seq_len)
+                   ? to_f32<T>(in_b[static_cast<int64_t>(ti) * channels + c])
+                   : 0.0f;
+    };
+
+    // One channel per lane, so each lane reads its own K taps. Strided by K
+    // across the wave, but the whole filter bank is C*K elements and is reused
+    // by every timestep this lane walks.
+    float w[K];
+    {
+        const T* wp = weight + static_cast<int64_t>(c) * K;
+        #pragma unroll
+        for (int j = 0; j < K; ++j)
+            w[j] = to_f32<T>(wp[j]);
+    }
+    const float bias_v = HAS_BIAS ? to_f32<T>(bias[c]) : 0.0f;
+
+    // Seed with the K-1 virtual elements preceding this tile's first output.
+    float win[K];
+    #pragma unroll
+    for (int j = 0; j < STATE_LEN; ++j)
+        win[j] = virt(t0 + j);
+
+    const int tend = (t0 + TTILE < seq_len) ? t0 + TTILE : seq_len;
+    for (int t = t0; t < tend; ++t) {
+        win[K - 1] = to_f32<T>(in_b[static_cast<int64_t>(t) * channels + c]);
+        float y = 0.0f;
+        #pragma unroll
+        for (int j = 0; j < K; ++j)
+            y += w[j] * win[j];
+        if (HAS_BIAS)
+            y += bias_v;
+        if (ACT_SILU) {
+            const float s = 1.0f / (1.0f + expf(-y));
+            y *= s;
+        }
+        out_b[static_cast<int64_t>(t) * channels + c] = from_f32<T>(y);
+        #pragma unroll
+        for (int j = 0; j < K - 1; ++j)
+            win[j] = win[j + 1];
+    }
+
+    // present_state[j] = virtual[L + j], written by the tile holding the tail.
+    if (STATE_LEN > 0 && tend == seq_len) {
+        T* nps = present_state + plane * STATE_LEN;
+        #pragma unroll
+        for (int j = 0; j < STATE_LEN; ++j)
+            nps[j] = from_f32<T>(virt(seq_len + j));
+    }
+}
+
+template <typename T>
+hipError_t launch_prefill_nlc_for_K(
+    int K, hipStream_t stream,
+    const T* input, const T* weight, const T* bias, const T* past_state,
+    T* output, T* present_state,
+    int batch_size, int channels, int seq_len, int has_bias, int act_silu) {
+
+    // CTILE is the block size, so it sets the coalesced width; 256 covers four
+    // 64-lane waves of consecutive channels. TTILE trades halo re-reads against
+    // block count: at K=4 a 64-step tile re-reads 3 of every 64 timesteps, ~5%,
+    // while still giving 8192/256 x 3985/64 = 2016 blocks on this model.
+    constexpr int kCTile = 256;
+    constexpr int kTTile = 64;
+    const dim3 grid((channels + kCTile - 1) / kCTile,
+                    (seq_len + kTTile - 1) / kTTile,
+                    batch_size);
+
+    auto launch = [&](auto k_const, auto bias_const, auto act_const) {
+        constexpr int Kc = decltype(k_const)::value;
+        constexpr int Bc = decltype(bias_const)::value;
+        constexpr int Ac = decltype(act_const)::value;
+        hipLaunchKernelGGL(
+            (causal_conv_prefill_nlc_kernel<T, Kc, Bc, Ac, kCTile, kTTile>),
+            grid, dim3(kCTile), 0, stream,
+            input, weight, bias, past_state, output, present_state,
+            batch_size, channels, seq_len);
+        return hipGetLastError();
+    };
+
+#define DISPATCH_PREFILL_NLC_K(KVAL)                                          \
+    case KVAL: {                                                              \
+        using K_t = std::integral_constant<int, KVAL>;                        \
+        if (has_bias && act_silu)                                             \
+            return launch(K_t{}, std::integral_constant<int, 1>{},            \
+                          std::integral_constant<int, 1>{});                  \
+        if (has_bias)                                                         \
+            return launch(K_t{}, std::integral_constant<int, 1>{},            \
+                          std::integral_constant<int, 0>{});                  \
+        if (act_silu)                                                         \
+            return launch(K_t{}, std::integral_constant<int, 0>{},            \
+                          std::integral_constant<int, 1>{});                  \
+        return launch(K_t{}, std::integral_constant<int, 0>{},                \
+                      std::integral_constant<int, 0>{});                      \
+    }
+
+    switch (K) {
+        DISPATCH_PREFILL_NLC_K(1)
+        DISPATCH_PREFILL_NLC_K(2)
+        DISPATCH_PREFILL_NLC_K(3)
+        DISPATCH_PREFILL_NLC_K(4)
+        DISPATCH_PREFILL_NLC_K(5)
+        DISPATCH_PREFILL_NLC_K(6)
+        DISPATCH_PREFILL_NLC_K(7)
+        DISPATCH_PREFILL_NLC_K(8)
+        default:
+            return hipErrorInvalidValue;
+    }
+#undef DISPATCH_PREFILL_NLC_K
+}
+
 template <typename T>
 hipError_t launch_prefill_for_K(
     int K, hipStream_t stream,
@@ -467,6 +629,68 @@ extern "C" int hip_causal_conv_step_decode(
     return 0;
 }
 
+namespace {
+
+// Shared body of the two prefill entry points: identical contract and
+// validation, differing only in which launcher (and so which activation layout)
+// they use. `who` names the caller in diagnostics.
+template <typename Launch>
+int prefill_common(
+    const char* who,
+    const void* input, const void* weight, const void* output,
+    const void* present_state,
+    int64_t batch_size, int64_t channels, int64_t seq_len,
+    int64_t kernel_size, int64_t activation, int64_t element_size_bytes,
+    Launch&& launch) {
+
+    if (!input || !weight || !output || !present_state) {
+        fprintf(stderr,
+                "[custom_kernels] %s: null required "
+                "pointer (input=%p weight=%p output=%p present_state=%p)\n",
+                who, input, weight, output, present_state);
+        return -1;
+    }
+    if (batch_size <= 0 || channels <= 0 || seq_len <= 0) {
+        fprintf(stderr,
+                "[custom_kernels] %s: invalid "
+                "batch=%lld channels=%lld seq_len=%lld\n",
+                who, (long long)batch_size, (long long)channels,
+                (long long)seq_len);
+        return -1;
+    }
+    if (kernel_size < 1 || kernel_size > 8) {
+        fprintf(stderr,
+                "[custom_kernels] %s: kernel_size=%lld "
+                "outside supported range [1,8]\n",
+                who, (long long)kernel_size);
+        return -1;
+    }
+    if (activation != 0 && activation != 1) {
+        fprintf(stderr,
+                "[custom_kernels] %s: unsupported "
+                "activation=%lld (0=none, 1=SiLU)\n",
+                who, (long long)activation);
+        return -1;
+    }
+    if (element_size_bytes != 2 && element_size_bytes != 4) {
+        fprintf(stderr,
+                "[custom_kernels] %s: unsupported "
+                "element_size_bytes=%lld (expect 2 or 4)\n",
+                who, (long long)element_size_bytes);
+        return -1;
+    }
+
+    const hipError_t err = launch(element_size_bytes == 4);
+    if (err != hipSuccess) {
+        fprintf(stderr, "[custom_kernels] %s: launch failed (%s)\n", who,
+                hipGetErrorString(err));
+        return static_cast<int>(err);
+    }
+    return 0;
+}
+
+} // namespace
+
 extern "C" int hip_causal_conv_prefill(
     void* stream,
     const void* input,
@@ -482,77 +706,85 @@ extern "C" int hip_causal_conv_prefill(
     int64_t activation,
     int64_t element_size_bytes) {
 
-    if (!input || !weight || !output || !present_state) {
-        fprintf(stderr,
-                "[custom_kernels] hip_causal_conv_prefill: null required "
-                "pointer (input=%p weight=%p output=%p present_state=%p)\n",
-                input, weight, output, present_state);
-        return -1;
-    }
-    if (batch_size <= 0 || channels <= 0 || seq_len <= 0) {
-        fprintf(stderr,
-                "[custom_kernels] hip_causal_conv_prefill: invalid "
-                "batch=%lld channels=%lld seq_len=%lld\n",
-                (long long)batch_size, (long long)channels, (long long)seq_len);
-        return -1;
-    }
-    if (kernel_size < 1 || kernel_size > 8) {
-        fprintf(stderr,
-                "[custom_kernels] hip_causal_conv_prefill: kernel_size=%lld "
-                "outside supported range [1,8]\n",
-                (long long)kernel_size);
-        return -1;
-    }
-    if (activation != 0 && activation != 1) {
-        fprintf(stderr,
-                "[custom_kernels] hip_causal_conv_prefill: unsupported "
-                "activation=%lld (0=none, 1=SiLU)\n",
-                (long long)activation);
-        return -1;
-    }
+    return prefill_common(
+        "hip_causal_conv_prefill", input, weight, output, present_state,
+        batch_size, channels, seq_len, kernel_size, activation,
+        element_size_bytes,
+        [&](bool is_f32) {
+            hipStream_t s = static_cast<hipStream_t>(stream);
+            const int K = static_cast<int>(kernel_size);
+            const int B = static_cast<int>(batch_size);
+            const int C = static_cast<int>(channels);
+            const int L = static_cast<int>(seq_len);
+            const int has_bias = bias ? 1 : 0;
+            const int act_silu = (activation == 1) ? 1 : 0;
+            if (is_f32)
+                return launch_prefill_for_K<float>(
+                    K, s,
+                    static_cast<const float*>(input),
+                    static_cast<const float*>(weight),
+                    static_cast<const float*>(bias),
+                    static_cast<const float*>(past_state),
+                    static_cast<float*>(output),
+                    static_cast<float*>(present_state),
+                    B, C, L, has_bias, act_silu);
+            return launch_prefill_for_K<__half>(
+                K, s,
+                static_cast<const __half*>(input),
+                static_cast<const __half*>(weight),
+                static_cast<const __half*>(bias),
+                static_cast<const __half*>(past_state),
+                static_cast<__half*>(output),
+                static_cast<__half*>(present_state),
+                B, C, L, has_bias, act_silu);
+        });
+}
 
-    hipStream_t s = static_cast<hipStream_t>(stream);
-    const int K = static_cast<int>(kernel_size);
-    const int B = static_cast<int>(batch_size);
-    const int C = static_cast<int>(channels);
-    const int L = static_cast<int>(seq_len);
-    const int has_bias = bias ? 1 : 0;
-    const int act_silu = (activation == 1) ? 1 : 0;
+extern "C" int hip_causal_conv_prefill_nlc(
+    void* stream,
+    const void* input,
+    const void* weight,
+    const void* bias,
+    const void* past_state,
+    void* output,
+    void* present_state,
+    int64_t batch_size,
+    int64_t channels,
+    int64_t seq_len,
+    int64_t kernel_size,
+    int64_t activation,
+    int64_t element_size_bytes) {
 
-    hipError_t err;
-    if (element_size_bytes == 4) {
-        err = launch_prefill_for_K<float>(
-            K, s,
-            static_cast<const float*>(input),
-            static_cast<const float*>(weight),
-            static_cast<const float*>(bias),
-            static_cast<const float*>(past_state),
-            static_cast<float*>(output),
-            static_cast<float*>(present_state),
-            B, C, L, has_bias, act_silu);
-    } else if (element_size_bytes == 2) {
-        err = launch_prefill_for_K<__half>(
-            K, s,
-            static_cast<const __half*>(input),
-            static_cast<const __half*>(weight),
-            static_cast<const __half*>(bias),
-            static_cast<const __half*>(past_state),
-            static_cast<__half*>(output),
-            static_cast<__half*>(present_state),
-            B, C, L, has_bias, act_silu);
-    } else {
-        fprintf(stderr,
-                "[custom_kernels] hip_causal_conv_prefill: unsupported "
-                "element_size_bytes=%lld (expect 2 or 4)\n",
-                (long long)element_size_bytes);
-        return -1;
-    }
-
-    if (err != hipSuccess) {
-        fprintf(stderr,
-                "[custom_kernels] hip_causal_conv_prefill: launch failed (%s)\n",
-                hipGetErrorString(err));
-        return static_cast<int>(err);
-    }
-    return 0;
+    return prefill_common(
+        "hip_causal_conv_prefill_nlc", input, weight, output, present_state,
+        batch_size, channels, seq_len, kernel_size, activation,
+        element_size_bytes,
+        [&](bool is_f32) {
+            hipStream_t s = static_cast<hipStream_t>(stream);
+            const int K = static_cast<int>(kernel_size);
+            const int B = static_cast<int>(batch_size);
+            const int C = static_cast<int>(channels);
+            const int L = static_cast<int>(seq_len);
+            const int has_bias = bias ? 1 : 0;
+            const int act_silu = (activation == 1) ? 1 : 0;
+            if (is_f32)
+                return launch_prefill_nlc_for_K<float>(
+                    K, s,
+                    static_cast<const float*>(input),
+                    static_cast<const float*>(weight),
+                    static_cast<const float*>(bias),
+                    static_cast<const float*>(past_state),
+                    static_cast<float*>(output),
+                    static_cast<float*>(present_state),
+                    B, C, L, has_bias, act_silu);
+            return launch_prefill_nlc_for_K<__half>(
+                K, s,
+                static_cast<const __half*>(input),
+                static_cast<const __half*>(weight),
+                static_cast<const __half*>(bias),
+                static_cast<const __half*>(past_state),
+                static_cast<__half*>(output),
+                static_cast<__half*>(present_state),
+                B, C, L, has_bias, act_silu);
+        });
 }
