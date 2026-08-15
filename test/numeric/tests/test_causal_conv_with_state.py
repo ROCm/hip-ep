@@ -110,6 +110,74 @@ def _make_causal_conv_with_state_model(
     )
 
 
+def _make_channels_last_causal_conv_model(
+    batch: int,
+    channels: int,
+    seq_len: int,
+    kernel_size: int,
+    activation: str = "silu",
+    dtype: np.dtype = np.float16,
+):
+    """Build the shape the exporter actually emits: a channels-last graph with
+    the convolution bracketed by a Transpose pair.
+
+    ONNX Conv is channels-first, so a channels-last graph has to permute into
+    the op and back out again. Those two transposes are what the
+    `channels_last` fold removes, so this is the model that exercises it --
+    building the op with a channels-last input directly would not, since
+    nothing in the ONNX op says which layout it was given.
+
+    The carry state is channels-first in both graphs: only input and output are
+    permuted.
+    """
+    tp = _NP_TO_TP[dtype]
+    state_len = kernel_size - 1
+
+    X = helper.make_tensor_value_info("input_nlc", tp, [batch, seq_len, channels])
+    State = helper.make_tensor_value_info(
+        "past_state", tp, [batch, channels, state_len]
+    )
+    Y = helper.make_tensor_value_info("output_nlc", tp, [batch, seq_len, channels])
+    Present = helper.make_tensor_value_info(
+        "present_state", tp, [batch, channels, state_len]
+    )
+
+    rng = np.random.default_rng(0xC0DE)
+    weight = (rng.standard_normal((channels, 1, kernel_size)) * 0.1).astype(dtype)
+    bias = (rng.standard_normal((channels,)) * 0.05).astype(dtype)
+    initializers = [
+        numpy_helper.from_array(weight, name="weight"),
+        numpy_helper.from_array(bias, name="bias"),
+    ]
+
+    nodes = [
+        helper.make_node(
+            "Transpose", ["input_nlc"], ["input_ncl"], perm=[0, 2, 1], name="pre_t"
+        ),
+        helper.make_node(
+            "CausalConvWithState",
+            ["input_ncl", "weight", "bias", "past_state"],
+            ["output_ncl", "present_state"],
+            domain="com.microsoft",
+            activation=activation,
+            ndim=1,
+        ),
+        helper.make_node(
+            "Transpose", ["output_ncl"], ["output_nlc"], perm=[0, 2, 1], name="post_t"
+        ),
+    ]
+
+    ms_opset = helper.make_opsetid("com.microsoft", 1)
+    return make_model_from_nodes(
+        nodes,
+        [X, State],
+        [Y, Present],
+        initializers=initializers,
+        opset=17,
+        extra_opsets=[ms_opset],
+    )
+
+
 class TestCausalConvWithState:
     """SiLU is the only activation observed in chunk_opt; we additionally
     cover 'none' on a tiny shape so a regression in the activation branch
@@ -252,3 +320,78 @@ class TestCausalConvWithState:
         # the activation dominates, so allow a slightly looser absolute
         # tolerance than the tiny-shape variant above.
         compare_outputs(actual, expected, atol=5e-3, rtol=1e-2)
+
+    # ---- channels-last -----------------------------------------------------
+
+    @pytest.mark.parametrize("seq_len", [1, 128, 257])
+    def test_ccws_channels_last_matches_reference(self, model_runner, seq_len):
+        """The Transpose/Conv/Transpose graph, which the compiler folds into one
+        channels-last convolution, still agrees with the reference.
+
+        seq_len=1 is the decode regime, where the fold's premise is that the
+        permuted axis has extent 1 and the layouts coincide. 257 crosses the
+        prefill kernel's output tile so the channels-last kernel's tail handling
+        (the tile that owns present_state) is exercised, not just its first tile.
+        """
+        batch, channels, kernel_size = 1, 32, 4
+        model = _make_channels_last_causal_conv_model(
+            batch, channels, seq_len, kernel_size, activation="silu"
+        )
+
+        rng = np.random.default_rng(5)
+        x = (rng.standard_normal((batch, seq_len, channels)) * 0.5).astype(np.float16)
+        state = (rng.standard_normal((batch, channels, kernel_size - 1)) * 0.5).astype(
+            np.float16
+        )
+
+        actual, expected = model_runner.run_sample(model, [x, state])
+        compare_outputs(actual, expected, atol=2e-3, rtol=1e-2)
+
+    @pytest.mark.parametrize("seq_len", [128, 257])
+    def test_ccws_channels_last_bit_identical(self, model_runner, seq_len):
+        """The folded path is bit-identical to the channels-first path.
+
+        Both kernels accumulate the same K taps in fp32 in the same order, so
+        the layout change must not perturb a single bit. Comparing against the
+        CPU reference (the test above) cannot show that -- it has its own error
+        -- so this compares the two GPU results to each other and asserts exact
+        equality. A tolerance here would hide precisely the class of bug this
+        exists to catch: a reordered accumulation that is merely close.
+        """
+        batch, channels, kernel_size = 1, 32, 4
+        rng = np.random.default_rng(6)
+        x_ncl = (rng.standard_normal((batch, channels, seq_len)) * 0.5).astype(
+            np.float16
+        )
+        state = (rng.standard_normal((batch, channels, kernel_size - 1)) * 0.5).astype(
+            np.float16
+        )
+
+        cf_model = _make_causal_conv_with_state_model(
+            batch, channels, seq_len, kernel_size, activation="silu"
+        )
+        nlc_model = _make_channels_last_causal_conv_model(
+            batch, channels, seq_len, kernel_size, activation="silu"
+        )
+
+        cf_actual, _ = model_runner.run_sample(
+            cf_model, [x_ncl, state], name=f"ccws_bitident_cf_{seq_len}"
+        )
+        nlc_actual, _ = model_runner.run_sample(
+            nlc_model,
+            [np.ascontiguousarray(x_ncl.transpose(0, 2, 1)), state],
+            name=f"ccws_bitident_nlc_{seq_len}",
+        )
+
+        # Both helpers seed weight and bias from the same generator, so the two
+        # graphs hold identical initializers.
+        np.testing.assert_array_equal(
+            nlc_actual[0].transpose(0, 2, 1),
+            cf_actual[0],
+            err_msg="channels-last output differs from channels-first",
+        )
+        np.testing.assert_array_equal(
+            nlc_actual[1],
+            cf_actual[1],
+            err_msg="channels-last present_state differs from channels-first",
+        )
