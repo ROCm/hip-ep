@@ -130,15 +130,32 @@ DENSE_MARKERS = frozenset(
 INT4_FAMILIES = frozenset(
     {
         "MatMulNBitsWMMA_NoZP",
+        "MatMulNBitsWMMA_ZP",
         "MatMulNBitsFp16GEMM",
         "matmul_nbits_gemv",
+        # The naive thread-per-output-element fallback. Its absence here is why a
+        # 38.88 ms vision down_proj dispatch was filed under "other" instead of
+        # against the int4 stack, so nothing in a harness report pointed at it.
+        # It is the slowest kernel in the family and the one most worth seeing.
+        #
+        # Spelled without the _kernel suffix on purpose: kernelinfo.py derives the
+        # family by stripping a trailing "_kernel" and a leading "hip_", so
+        # matmul_nbits_kernel<...> is reported as "matmul_nbits" and the fuller
+        # name would match nothing.
+        "matmul_nbits",
         "dequant_u4_to_fp16",
         "matmul_nbits_add_bias_rowmajor",
         "transpose2d_fp16",
     }
 )
 
-GEMM_FAMILIES = ("MatMulNBitsWMMA_NoZP", "MatMulNBitsFp16GEMM", "matmul_nbits_gemv")
+GEMM_FAMILIES = (
+    "MatMulNBitsWMMA_NoZP",
+    "MatMulNBitsWMMA_ZP",
+    "MatMulNBitsFp16GEMM",
+    "matmul_nbits_gemv",
+    "matmul_nbits",
+)
 
 # Buckets chosen to straddle the dispatch thresholds in matmul_nbits_kernel.hip
 # (row-major GEMV, col-major GEMV, WMMA), so a routing change shows up as a
