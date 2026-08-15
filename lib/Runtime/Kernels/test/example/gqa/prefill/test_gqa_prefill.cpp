@@ -247,7 +247,7 @@ static bool run_case(const Case& c, int iters) {
   const bool pass = err < 2e-3;
   printf("%-16s B%d H%d G%d(hpg%d) D%-3d sq=%-5d past=%-5d %-6s w=%-5d | relL2=%.2e  latency=%.4f ms  %s (v%d)\n",
          c.name, B, H, G, H / G, D, sq, past_len, sink_tag, c.window, err, ms,
-         pass ? "PASS" : "FAIL", D == 64 ? 5 : 7);
+         pass ? "PASS" : "FAIL", D == 64 ? 5 : (D == 256 ? 8 : 7));
 
   hipEventDestroy(e0); hipEventDestroy(e1);
   hipFree(dQ); hipFree(dK); hipFree(dV); hipFree(dO); hipFree(dSink);
@@ -267,6 +267,14 @@ int main(int argc, char** argv) {
       {"llama-3.2-1b", 1, 32, 8,  64, 2048, 0,    kSinkNone,    false, 0},
       {"llama-3.1-8b", 1, 32, 8, 128, 512,  0,    kSinkNone,    false, 0},
       {"llama-3.1-8b", 1, 32, 8, 128, 2048, 0,    kSinkNone,    false, 0},
+      // d == 256 routes to v8, which nothing here covered: every case above is
+      // d 64 or 128. Geometry is Qwen3.6-35B-A3B's full-attention layers
+      // (Hq=16, G=2, head_dim=256), the only shipping shape that reaches v8.
+      // The past>0 case matters because v8's KV tiling clamps against
+      // past_len + q_start, so a chunked prefill takes a different tile count.
+      {"qwen3.6-35b",  1, 16, 2, 256, 512,  0,    kSinkNone,    false, 0},
+      {"qwen3.6-35b",  1, 16, 2, 256, 1024, 0,    kSinkNone,    false, 0},
+      {"qwen3.6-35b",  1, 16, 2, 256, 512,  512,  kSinkNone,    false, 0},
       // Sink set at the real gpt-oss geometry (H=64, G=8, d=64), including
       // chunked prefill (past > 0), which is what a 16k prompt actually runs.
       {"gpt_oss-sink",  1, 64, 8,  64, 512,  0,    kSinkPerHead, false, 0},
