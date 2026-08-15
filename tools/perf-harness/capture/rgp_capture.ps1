@@ -169,8 +169,21 @@ while (-not $bench.HasExited -and (Get-Date) -lt $deadline) {
 # nothing -- that is what -Reps buys, not extra measurement.
 Write-Host "model exited=$($bench.HasExited) triggered=$triggered ; dwell ${Dwell}s for the dump"
 Start-Sleep $Dwell
+# The panel writes the .rgp as it shuts down, not when the transfer finishes, so
+# it has to be allowed to exit on its own. Killing it a few seconds after 'quit'
+# loses the whole capture: the trace transfers to 100%, the panel dies
+# mid-write, and no file is ever created.
 try { $panel.StandardInput.WriteLine('quit'); $panel.StandardInput.Flush() } catch {}
-Start-Sleep 4
+$sz = -1
+for ($i = 0; $i -lt 100; $i++) {
+  if ($panel.HasExited) { break }
+  Start-Sleep 3
+  if (Test-Path $OutRgp) {
+    $now = (Get-Item $OutRgp).Length
+    if ($now -gt 0 -and $now -eq $sz) { break }   # written and no longer growing
+    $sz = $now
+  }
+}
 Stop-HarnessProcesses -IncludePython:$isVlm
 Remove-Item Env:RGP_FENCE, Env:RGP_FENCE_SKIP, Env:RGP_FENCE_MS -EA SilentlyContinue
 
