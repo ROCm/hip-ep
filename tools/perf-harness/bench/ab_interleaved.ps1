@@ -25,8 +25,21 @@
 ##   { "base":  { "dll": "D:\\builds\\base\\custom_kernels_gfx1151.dll" },
 ##     "cand":  { "dll": "D:\\builds\\cand\\custom_kernels_gfx1151.dll" } }
 ##
-## The named DLL is copied over the same filename in $env:HIPEP_BIN before each
+## Each named DLL is copied over the same filename in $env:HIPEP_BIN before each
 ## run, so every arm is measured through one identical harness.
+##
+## An arm may name several DLLs, with "dlls" instead of "dll":
+##
+##   { "cand": { "dlls": ["D:\\builds\\cand\\custom_kernels_gfx1151.dll",
+##                        "D:\\builds\\cand\\hipgpu.dll"] } }
+##
+## which a change spanning more than one binary requires, and this repo splits
+## them three ways: kernels in custom_kernels_<arch>.dll, lib/Runtime/real in
+## hipgpu.dll (embedded as runtime.bc), lib/Conversion and lib/Dialect in
+## hip-compiler.dll. Naming only the kernels DLL for a change that also moved the
+## call site measures a mixed pair -- a result that looks plausible and belongs to
+## no build. Every arm should list the same filenames so each swap fully
+## overwrites the last, otherwise an arm inherits whatever its predecessor left.
 
 param(
   [Parameter(Mandatory = $true)][string]$Manifest,
@@ -57,9 +70,40 @@ $ErrorActionPreference = 'Stop'
 $armDefs = Get-Content $Manifest -Raw | ConvertFrom-Json
 $allArms = $armDefs.PSObject.Properties.Name
 if (-not $Arms) { $Arms = $allArms }
+
+function Get-ArmDlls {
+  param([string]$Name)
+  $def = $armDefs.$Name
+  $have = $def.PSObject.Properties.Name
+  $list = @()
+  if ('dlls' -in $have) { $list += $def.dlls }
+  if ('dll'  -in $have) { $list += $def.dll }
+  if (-not $list) { throw "Arm '$Name' names neither 'dll' nor 'dlls'." }
+  # A repeated leaf name would make the last copy win at random, which is
+  # unattributable rather than merely wrong.
+  $dupes = $list | Group-Object { Split-Path -Leaf $_ } | Where-Object Count -gt 1
+  if ($dupes) { throw "Arm '$Name' names '$($dupes[0].Name)' more than once." }
+  $list
+}
+
+$armDlls = @{}
 foreach ($a in $Arms) {
   if ($a -notin $allArms) { throw "Arm '$a' is not in $Manifest (have: $($allArms -join ', '))" }
-  if (-not (Test-Path $armDefs.$a.dll)) { throw "Arm '$a': DLL not found: $($armDefs.$a.dll)" }
+  $armDlls[$a] = @(Get-ArmDlls -Name $a)
+  foreach ($d in $armDlls[$a]) {
+    if (-not (Test-Path $d)) { throw "Arm '$a': DLL not found: $d" }
+  }
+}
+
+# Arms that swap different filenames cannot be compared: whatever one arm
+# deploys and the next does not is left in place and silently joins its result.
+$leafSets = [ordered]@{}
+foreach ($a in $Arms) {
+  $leafSets[$a] = (($armDlls[$a] | ForEach-Object { Split-Path -Leaf $_ }) | Sort-Object) -join ','
+}
+if (@($leafSets.Values | Select-Object -Unique).Count -gt 1) {
+  throw ("Arms deploy different files, so an arm would inherit the previous one's leftovers:`n  " +
+         (($Arms | ForEach-Object { "$_ -> $($leafSets[$_])" }) -join "`n  "))
 }
 
 if (-not $OutDir) { $OutDir = Join-Path $HarnessEnv.OutRoot 'ttft' }
@@ -68,9 +112,9 @@ $benchTtft = Join-Path $PSScriptRoot 'bench_ttft.ps1'
 
 function Invoke-Arm {
   param([string]$Name, [string]$Tag, [int]$RunReps)
-  $dll  = $armDefs.$Name.dll
-  $dest = Join-Path $HarnessEnv.Bin (Split-Path -Leaf $dll)
-  Copy-Item $dll $dest -Force
+  foreach ($dll in $armDlls[$Name]) {
+    Copy-Item $dll (Join-Path $HarnessEnv.Bin (Split-Path -Leaf $dll)) -Force
+  }
   $temp = Join-Path $cacheRoot $Name
   New-Item -ItemType Directory -Force -Path $temp | Out-Null
   $env:TEMP = $temp; $env:TMP = $temp

@@ -13,15 +13,24 @@
 ## result, which is the worst kind. Deploying prints each file's hash so a
 ## comparison against the previous run's hash proves the binary actually moved.
 ##
-## Only two artifacts matter for the operators the harness profiles:
-##   hipgpu.dll                  lib/Runtime (gqa.cpp, matmul_nbits.cpp) and
-##                               lib/Conversion
+## Two artifacts matter for the operators the harness profiles:
+##   hipgpu.dll                  lib/Runtime (gqa.cpp, matmul_nbits.cpp), with
+##                               lib/Runtime/real embedded as runtime.bc
 ##   custom_kernels_<arch>.dll   lib/Runtime/Kernels/hip (gqa_kernel.hip,
 ##                               matmul_nbits_kernel.hip)
 ## They are deployed as a pair on purpose. They share the extern "C" kernel ABI,
 ## so a mixed pair is only accidentally correct -- and a mixed pair was in fact
 ## deployed on this machine (hipgpu from one build, custom_kernels from an
 ## eight-hour-older one), which is unattributable as a baseline.
+##
+## A third artifact holds the compiler:
+##   hip-compiler.dll            lib/Conversion, lib/Dialect, HipOps.td
+## It is off by default because most measured changes do not touch it, and it is
+## loaded by bare name (LoadLibraryW without a path) so the copy in $HIPEP_BIN is
+## the one that runs. Pass -WithCompiler for a change to a lowering, a pattern or
+## the op definitions: hipgpu.dll links LibHipCompiler too, so ninja relinks the
+## EP and it *looks* like the change deployed, while the compilation itself still
+## goes through the stale hip-compiler.dll and the change is inert.
 
 [CmdletBinding()]
 param(
@@ -31,9 +40,12 @@ param(
   [string]$Config = 'Release',
   [switch]$SkipBuild,
   [switch]$SkipDeploy,
-  # Build everything instead of just the two deployed artifacts. Slower; needed
-  # when a change touches the MLIR tools or the lit suite.
+  # Build everything instead of just the deployed artifacts. Slower; needed when
+  # a change touches the MLIR tools or the lit suite.
   [switch]$All,
+  # Also build and deploy hip-compiler.dll. Required for any lib/Conversion,
+  # lib/Dialect or HipOps.td change to have an effect.
+  [switch]$WithCompiler,
   [int]$Parallel = 0
 )
 
@@ -113,6 +125,7 @@ $arch = ($arch -split ';')[0].Trim()
 if (-not $arch) { throw "Could not read HIP_ARCHITECTURES from the cmake cache." }
 
 $artifacts = @('hipgpu.dll', "custom_kernels_$arch.dll")
+if ($WithCompiler) { $artifacts += 'hip-compiler.dll' }
 
 if (-not $SkipBuild) {
   Write-Host ">>> build [$Config] $BuildDir"
@@ -124,7 +137,7 @@ if (-not $SkipBuild) {
     # versioned unique id and only its OUTPUT_NAME is hipgpu, so ask cmake for
     # the file and let ninja resolve the producing target.
     $cmd += @('--target')
-    $cmd += @("bin/hipgpu.dll", "bin/custom_kernels_$arch.dll")
+    $cmd += ($artifacts | ForEach-Object { "bin/$_" })
   }
   $sw = [Diagnostics.Stopwatch]::StartNew()
   & cmake @cmd
