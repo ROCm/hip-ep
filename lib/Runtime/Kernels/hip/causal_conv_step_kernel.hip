@@ -198,16 +198,38 @@ hipError_t launch_for_K(
 }
 
 // Prefill (seq_len > 1) fused causal depthwise 1D conv + bias + SiLU.
-// One thread per (b, c) plane slides a length-K window over the virtual
-// sequence [past_state[0..K-2], input[0..L-1]], writing L outputs and the
-// trailing K-1 present_state. fp32 accumulate -- numerically matches
-// causal_conv_step_kernel at L=1. Replaces the MIOpen prefill path (Find +
-// 3 pitched memcpys + conv + bias + activation + mul) with a single launch.
+// A thread slides a length-K window over its slice of the virtual sequence
+// [past_state[0..K-2], input[0..L-1]], writing that slice's outputs; the thread
+// holding the tail also writes the trailing K-1 present_state. fp32 accumulate
+// -- numerically matches causal_conv_step_kernel at L=1. Replaces the MIOpen
+// prefill path (Find + 3 pitched memcpys + conv + bias + activation + mul)
+// with a single launch. Layout matches wrap_causal_conv_with_state:
+//   input, output            flat [(b*C + c)*L + t]
+//   past_state, present_state flat [(b*C + c)*(K-1) + j]
+//   weight                    flat [c*K + j];   bias flat [c]
+//
+// One block owns one (b, c) plane and a TILE-long run of its outputs: lane i
+// produces output t0 + i, and the block stages virtual[t0 .. t0+TILE+K-2] in LDS
+// first so every global access is contiguous across the wave.
+//
+// Why it is shaped this way rather than one-thread-per-plane walking t. That
+// form fixes the grid at B*C, so a 4k-token prefill launches exactly as many
+// threads as a 40-token one -- 8192 threads, ~6 waves per CU, far too few to
+// cover DRAM latency, which is why it sat at 105 GB/s. But simply splitting t
+// across more blocks while keeping one thread per plane is *worse*, measured
+// 2.6x worse: each lane's addresses are seq_len apart, so a wave touches 32
+// different cache lines per load and only recovers the cost by consuming the
+// rest of each line on later iterations of its own serial walk. Multiply the
+// resident lane count and those lines no longer survive in cache between uses,
+// and the same traffic is refetched per element. Coalescing across lanes is what
+// actually removes the problem: consecutive lanes read consecutive t, so one
+// line serves the whole wave immediately and no cache retention is required.
+//
 // Layout matches wrap_causal_conv_with_state:
 //   input, output            flat [(b*C + c)*L + t]
 //   past_state, present_state flat [(b*C + c)*(K-1) + j]
 //   weight                    flat [c*K + j];   bias flat [c]
-template <typename T, int K, int HAS_BIAS, int ACT_SILU>
+template <typename T, int K, int HAS_BIAS, int ACT_SILU, int TILE>
 __global__ void causal_conv_prefill_kernel(
     const T* __restrict__ input,
     const T* __restrict__ weight,
@@ -219,15 +241,49 @@ __global__ void causal_conv_prefill_kernel(
     int channels,
     int seq_len) {
 
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int plane = static_cast<int>(blockIdx.x);
     const int total = batch_size * channels;
-    if (idx >= total)
+    if (plane >= total)
         return;
 
-    const int c = idx % channels;
-    constexpr int STATE_LEN = K - 1;
+    const int t0 = static_cast<int>(blockIdx.y) * TILE;
+    if (t0 >= seq_len)
+        return;
 
-    // Per-channel weights (K taps) and optional bias.
+    const int c = plane % channels;
+    const int lane = static_cast<int>(threadIdx.x);
+    constexpr int STATE_LEN = K - 1;
+    constexpr int SMEM_LEN = TILE + K - 1;
+
+    const T* in_row = input + static_cast<int64_t>(plane) * seq_len;
+    T* out_row = output + static_cast<int64_t>(plane) * seq_len;
+
+    // smem[j] = virtual[t0 + j], where the virtual sequence is
+    //   virtual[i] = past_state[i]      for i < K-1
+    //                input[i - (K-1)]   otherwise,
+    // so output t reads virtual[t .. t+K-1] = smem[t-t0 .. t-t0+K-1]. Only the
+    // first tile of the first block touches past_state; every later tile reads
+    // its whole window from input.
+    __shared__ float smem[SMEM_LEN];
+    {
+        const T* ps = (STATE_LEN > 0 && past_state != nullptr)
+                          ? past_state + static_cast<int64_t>(plane) * STATE_LEN
+                          : nullptr;
+        for (int j = lane; j < SMEM_LEN; j += TILE) {
+            const int vi = t0 + j;
+            float v;
+            if (vi < STATE_LEN) {
+                v = ps ? to_f32<T>(ps[vi]) : 0.0f;
+            } else {
+                const int ii = vi - STATE_LEN;
+                v = (ii < seq_len) ? to_f32<T>(in_row[ii]) : 0.0f;
+            }
+            smem[j] = v;
+        }
+    }
+
+    // Per-channel weights (K taps) and optional bias: one channel per block, so
+    // every lane reads the same values and the load broadcasts.
     float w[K];
     {
         const T* wp = weight + static_cast<int64_t>(c) * K;
@@ -237,33 +293,14 @@ __global__ void causal_conv_prefill_kernel(
     }
     const float bias_v = HAS_BIAS ? to_f32<T>(bias[c]) : 0.0f;
 
-    // window[0..K-1] holds virtual[t .. t+K-1] for the current output t.
-    // Init for t=0: [past_state[0..K-2], input[0]].
-    float window[K];
-    {
-        const T* ps = (STATE_LEN > 0 && past_state != nullptr)
-                          ? past_state + static_cast<int64_t>(idx) * STATE_LEN
-                          : nullptr;
-        #pragma unroll
-        for (int j = 0; j < STATE_LEN; ++j)
-            window[j] = ps ? to_f32<T>(ps[j]) : 0.0f;
-    }
-    const T* in_row = input + static_cast<int64_t>(idx) * seq_len;
-    T* out_row = output + static_cast<int64_t>(idx) * seq_len;
-    window[K - 1] = to_f32<T>(in_row[0]);
+    __syncthreads();
 
-    for (int t = 0; t < seq_len; ++t) {
-        if (t > 0) {
-            // Slide the window: drop oldest, append virtual[t+K-1] = input[t].
-            #pragma unroll
-            for (int j = 0; j < K - 1; ++j)
-                window[j] = window[j + 1];
-            window[K - 1] = to_f32<T>(in_row[t]);
-        }
+    const int t = t0 + lane;
+    if (t < seq_len) {
         float y = 0.0f;
         #pragma unroll
         for (int j = 0; j < K; ++j)
-            y += w[j] * window[j];
+            y += w[j] * smem[lane + j];
         if (HAS_BIAS)
             y += bias_v;
         if (ACT_SILU) {
@@ -273,12 +310,11 @@ __global__ void causal_conv_prefill_kernel(
         out_row[t] = from_f32<T>(y);
     }
 
-    // present_state = last K-1 of virtual = window[1..K-1] after the last step.
-    if (STATE_LEN > 0) {
-        T* nps = present_state + static_cast<int64_t>(idx) * STATE_LEN;
-        #pragma unroll
-        for (int j = 0; j < STATE_LEN; ++j)
-            nps[j] = from_f32<T>(window[j + 1]);
+    // present_state[j] = virtual[L + j]: the trailing K-1 of the virtual
+    // sequence, owned by whichever block covers the final output.
+    if (STATE_LEN > 0 && t0 + TILE >= seq_len && lane < STATE_LEN) {
+        T* nps = present_state + static_cast<int64_t>(plane) * STATE_LEN;
+        nps[lane] = from_f32<T>(smem[seq_len - t0 + lane]);
     }
 }
 
@@ -289,17 +325,21 @@ hipError_t launch_prefill_for_K(
     T* output, T* present_state,
     int batch_size, int channels, int seq_len, int has_bias, int act_silu) {
 
-    const int total = batch_size * channels;
-    const int block = 256;
-    const int grid = (total + block - 1) / block;
+    // One block per (b, c) plane per kTile outputs. kTile is also the block
+    // size, so it sets the coalesced load width and the LDS staging buffer at
+    // once; 256 keeps that buffer near 1 KB and the halo re-read to K-1 elements
+    // per 256 outputs.
+    constexpr int kTile = 256;
+    const int planes = batch_size * channels;
+    const int tiles = (seq_len + kTile - 1) / kTile;
 
     auto launch = [&](auto k_const, auto bias_const, auto act_const) {
         constexpr int Kc = decltype(k_const)::value;
         constexpr int Bc = decltype(bias_const)::value;
         constexpr int Ac = decltype(act_const)::value;
         hipLaunchKernelGGL(
-            (causal_conv_prefill_kernel<T, Kc, Bc, Ac>),
-            dim3(grid), dim3(block), 0, stream,
+            (causal_conv_prefill_kernel<T, Kc, Bc, Ac, kTile>),
+            dim3(planes, tiles), dim3(kTile), 0, stream,
             input, weight, bias, past_state, output, present_state,
             batch_size, channels, seq_len);
         return hipGetLastError();

@@ -188,6 +188,36 @@ class TestCausalConvWithState:
         else:
             compare_outputs(actual, expected, atol=2e-3, rtol=1e-2)
 
+    @pytest.mark.parametrize("seq_len", [257, 600])
+    def test_ccws_prefill_multi_tile(self, model_runner, seq_len):
+        """Sequences longer than the prefill kernel's 256-output tile.
+
+        The fused prefill kernel gives each block one 256-long run of outputs
+        and stages that run's window in LDS, so everything specific to tiling
+        only happens above 256: a block whose window starts inside `input`
+        rather than in `past_state`, and the single block that owns
+        `present_state` because it covers the tail. Both 128 and 1 (the sweep
+        the other cases use) are single-tile, which leaves that logic
+        unexercised. 257 puts one output in the second tile; 600 spans three.
+        """
+        batch, channels, kernel_size = 1, 32, 4
+        model = _make_causal_conv_with_state_model(
+            batch,
+            channels,
+            seq_len,
+            kernel_size,
+            activation="silu",
+        )
+
+        rng = np.random.default_rng(4)
+        x = (rng.standard_normal((batch, channels, seq_len)) * 0.5).astype(np.float16)
+        state = (rng.standard_normal((batch, channels, kernel_size - 1)) * 0.5).astype(
+            np.float16
+        )
+
+        actual, expected = model_runner.run_sample(model, [x, state])
+        compare_outputs(actual, expected, atol=2e-3, rtol=1e-2)
+
     @pytest.mark.parametrize("seq_len", SEQ_LENS)
     def test_ccws_chunk_opt_shape(self, model_runner, seq_len):
         """CausalConvWithState with chunk_opt prefill/decode shapes:
