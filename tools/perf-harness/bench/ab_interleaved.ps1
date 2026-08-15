@@ -36,7 +36,19 @@ param(
   [int]$StartRound = 1,
   [switch]$Reverse,
   [switch]$SkipPrime,                 # caches survive while the DLLs are unchanged
-  [string]$OutDir
+  [string]$OutDir,
+  # Everything below only shapes the workload and is forwarded verbatim to
+  # bench_ttft.ps1, whose defaults these mirror. Without them an A/B silently
+  # measures bench_ttft's defaults rather than the operating point the arms were
+  # built for -- on a VLM that means the text-only driver, a 16k sequence, and
+  # whatever provider the model's genai_config happens to name.
+  [ValidateSet('model_benchmark', 'vlm')]
+  [string]$Driver = 'model_benchmark',
+  [int]$SeqLen = 16384,
+  [int]$MaxTokens = 4,
+  [int]$MaxLength,
+  [string]$ExecutionProvider = 'follow_config',
+  [string[]]$SetEnv = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -62,7 +74,15 @@ function Invoke-Arm {
   $temp = Join-Path $cacheRoot $Name
   New-Item -ItemType Directory -Force -Path $temp | Out-Null
   $env:TEMP = $temp; $env:TMP = $temp
-  & $benchTtft -Tag $Tag -Reps $RunReps -Warmup 1 -OutDir $OutDir 2>&1 |
+  $fwd = @{
+    Driver           = $Driver
+    SeqLen           = $SeqLen
+    MaxTokens        = $MaxTokens
+    ExecutionProvider = $ExecutionProvider
+    SetEnv           = $SetEnv
+  }
+  if ($PSBoundParameters.ContainsKey('MaxLength')) { $fwd.MaxLength = $MaxLength }
+  & $benchTtft -Tag $Tag -Reps $RunReps -Warmup 1 -OutDir $OutDir @fwd 2>&1 |
     Where-Object { $_ -match 'TTFT \[' }
 }
 
