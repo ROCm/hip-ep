@@ -1221,13 +1221,38 @@ __global__ void __launch_bounds__(256) la_pf_pass3_wmma(
 
 // Chunks processed per launch window. The passes run one window at a time, so
 // the per-(head,chunk) scratch is sized for a window instead of the whole
-// sequence and stops growing with seq_len. 32 chunks = 512 tokens still gives
-// B*Hkv*32 = 1024 blocks per launch at Hkv=32, far more than the 40 CUs need to
-// stay saturated, so the chunk-parallel speedup is unaffected. The extra
-// launches this costs are not a real cost: holding LA_CHUNK at 16 and varying
-// only this constant, 32 (37 windows for an 18.8k prompt, 49.1 MiB of scratch)
-// beats 128 (10 windows, 193.3 MiB) by 9.6%.
-static constexpr int LA_WINDOW_CHUNKS = 32;
+// sequence and stops growing with seq_len. 16 chunks = 256 tokens still gives
+// B*Hkv*16 = 512 blocks per launch at Hkv=32, far more than the 40 CUs need to
+// stay saturated, so the chunk-parallel speedup is unaffected.
+//
+// This constant is a cache-residency knob, not just a memory-footprint one, and
+// that is what picks 16. The window sets how much scratch the pass1 -> scan ->
+// pass3 chain streams through between the write and the read of the same Uloc/W
+// tile, so shrinking it keeps that tile resident instead of going to DRAM.
+// Swept at 3985 tokens (Hkv=32, dk=dv=128), GPU time for one layer's three
+// passes, alongside the wall time for the same work:
+//
+//   win  scratch    gpu ms   wall ms   launches
+//     1    2.5 MiB    1.27     14.71        750
+//     2    4.0         1.68      9.79        375
+//     4    7.0         2.76      7.91        189
+//     8   13.0         5.58      7.66         96
+//    16   25.0         7.46      7.56         48
+//    32   49.1        12.87     12.91         24   (was here)
+//
+// Below 16 the GPU number keeps falling and the wall number does not: the host
+// cannot issue 3 launches per window fast enough to keep the queue fed, and
+// TTFT pays the wall column. 16 is where the two meet. End-to-end on
+// Qwen3.6-35B-A3B at 3985 tokens, 6 interleaved order-reversed rounds, 16 beat
+// 32 in every round: -294 ms TTFT, 95% CI [-495, -94]. 8 was measured too and
+// is within noise of 16 (-241 ms, n=4) while doubling the launches again, so
+// there is nothing to buy below 16.
+//
+// The window is numerically inert -- the passes recompute the same per-chunk
+// quantities and the scan carries the recurrent state across windows -- and
+// that was checked, not assumed: output and final state are bit-identical to
+// the 32-chunk window at 3985 tokens for every window from 1 to 32.
+static constexpr int LA_WINDOW_CHUNKS = 16;
 
 // Scratch layout for the chunk-parallel path. The buffer itself is owned by
 // the runtime (RuntimeState::la_scratch, grown on demand, freed on session
@@ -1307,6 +1332,16 @@ static int la_launch_parallel(
                                     ? LA_CHUNK * dk : dk * (LA_CHUNK + LA_KT_PAD)) +
                                dvs * LA_CHUNK) * sizeof(__half);
     // Pass 3 (WMMA) LDS: QWS(M*dv) + Pm + (Asm,clog) floats, QW(M*dk) + K(C*dk) half.
+    //
+    // 29,824 B at dk=dv=128, which is over 65536/3 = 21845 and so caps pass 3 at
+    // two workgroups per CU. Tried and rejected: QWS in half puts it at 21,632 B
+    // and does land the third workgroup, but it is worth 2.4% (7.43 -> 7.25 ms
+    // per layer at 3985 tokens) and costs output accuracy (relL2 3.5e-4 against
+    // the fp32-QWS result; the state is unaffected, pass 3 does not feed the
+    // recurrence). Occupancy is not what binds this kernel -- it reads a 32 KB
+    // S0 tile per (head,chunk) block, ~256 MB per layer, so it is bound by that
+    // stream and a third resident workgroup has nothing to hide. Shrink the S0
+    // traffic before spending accuracy on occupancy here.
     const size_t s3 = (size_t)(2 * LA_CHUNK * dv + LA_CHUNK * LA_CHUNK +
                                2 * LA_CHUNK) * sizeof(float) +
                       (size_t)(2 * LA_CHUNK * dk + LA_CHUNK * dk) * sizeof(__half);
