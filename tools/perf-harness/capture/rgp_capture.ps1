@@ -43,6 +43,10 @@ param(
   [string]$Driver = 'model_benchmark',
   [int]$MaxTokens = 2,                           # vlm only
   [int]$MaxLength,                               # vlm only
+  # vlm only. 'follow_config' leaves the model's own genai_config provider list
+  # alone; naming a provider overrides it, which is what an export pinned to
+  # another EP (a -dml directory, say) needs to run here.
+  [string]$ExecutionProvider = 'follow_config',
   [int]$Gen = 1,
   [int]$Reps = 2,                                # RGP streams the dump from the LIVE process; see note below
   [int]$OpCount = 4000,                          # --rgp-render-op-count: window size, not usability
@@ -124,7 +128,8 @@ if ($isVlm) {
   $exe   = $HarnessEnv.Python
   $margs = @('-u', $HarnessEnv.VlmBench, '-m', $HarnessEnv.Model, '-i', $HarnessEnv.Image,
              '--prompt_file', $PromptFile, '--max_tokens', "$MaxTokens",
-             '--max_length', "$MaxLength", '-n', "$Reps", '-w', '0')
+             '--max_length', "$MaxLength", '-e', $ExecutionProvider,
+             '-n', "$Reps", '-w', '0')
   $wd    = Split-Path -Parent $HarnessEnv.VlmBench
 } else {
   $exe   = Join-Path $HarnessEnv.Bin 'model_benchmark.exe'
