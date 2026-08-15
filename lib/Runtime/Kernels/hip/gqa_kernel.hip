@@ -3682,9 +3682,15 @@ static int runPrefillV8(
     int past_len, float scale)
 {
     if (d != 256) return -1;
+    // skv stays out of the key for the same reason it stays out of v5's: it
+    // scales the KV loop length uniformly across candidates, so it cannot
+    // reorder them. Measured at Hq=16, G=2, d=256, sq=512: skv 512 and skv 1024
+    // rank all eight candidates identically, {2,1,16} through {2,2,64}. Keying
+    // on it re-tuned once per distinct KV length -- once per chunk of a chunked
+    // prefill -- and each tune is eight configs x 4 rounds x 30 iterations at
+    // this model's dispatch cost, which is where the cold-start seconds went.
     std::string key = std::to_string(d) + "_" + std::to_string(sq) + "_" +
-                      std::to_string(skv) + "_" + std::to_string(Hq) + "_" +
-                      std::to_string(G);
+                      std::to_string(Hq) + "_" + std::to_string(G);
     int cfg;
     {
         std::lock_guard<std::mutex> lk(g_v8_cfg_mutex);
