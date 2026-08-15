@@ -24,7 +24,11 @@ param(
   [ValidateSet('model_benchmark', 'vlm')]
   [string]$Driver = 'model_benchmark',
   [int]$MaxTokens = 4,              # vlm only: keep decode short, TTFT is the target
-  [int]$MaxLength                   # vlm only: KV cache size; defaults to prompt + headroom
+  [int]$MaxLength,                  # vlm only: KV cache size; defaults to prompt + headroom
+  # vlm only. 'follow_config' leaves the model's own genai_config provider list
+  # alone; naming a provider overrides it, which is what an export pinned to
+  # another EP (a -dml directory, say) needs to run here.
+  [string]$ExecutionProvider = 'follow_config'
 )
 
 $ErrorActionPreference = 'Continue'
@@ -70,6 +74,7 @@ if ($Driver -eq 'vlm') {
   & $HarnessEnv.Python '-u' $HarnessEnv.VlmBench `
     '-m' $HarnessEnv.Model '-i' $HarnessEnv.Image '--prompt_file' $HarnessEnv.PromptFile `
     '--max_tokens' "$MaxTokens" '--max_length' "$MaxLength" `
+    '-e' $ExecutionProvider `
     '-n' "$Reps" '-w' "$Warmup" '-o' $json *>&1 |
     Tee-Object -FilePath $log | Out-Null
   $rc = $LASTEXITCODE
