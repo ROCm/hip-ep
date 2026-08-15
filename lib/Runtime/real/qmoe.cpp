@@ -145,6 +145,11 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   size_t sz_a_scale_in = align_up_64(k_blocks_fc1 * sizeof(float));
   size_t sz_a_qb_mid = align_up_64(k * inter_size * sizeof(int8_t));
   size_t sz_a_scale_mid = align_up_64(k * k_blocks_fc2 * sizeof(float));
+  // Per-chunk histogram matrix for the chunked bucketing path. 0 for shapes
+  // that bucket in a single workgroup anyway (decode), so this costs nothing
+  // there; a prefill of this model asks for 256 chunks x 256 experts = 256 KB.
+  size_t sz_bucket_scratch =
+      align_up_64(hip_qmoe_bucket_scratch_bytes(num_tokens, num_experts, k));
 
   size_t off_expert_indices = 0;
   size_t off_expert_weights = off_expert_indices + sz_expert_indices;
@@ -160,7 +165,8 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   size_t off_a_scale_in = off_a_qb_in + sz_a_qb_in;
   size_t off_a_qb_mid = off_a_scale_in + sz_a_scale_in;
   size_t off_a_scale_mid = off_a_qb_mid + sz_a_qb_mid;
-  size_t total_scratch = off_a_scale_mid + sz_a_scale_mid;
+  size_t off_bucket_scratch = off_a_scale_mid + sz_a_scale_mid;
+  size_t total_scratch = off_bucket_scratch + sz_bucket_scratch;
 
   if (hipdnn_ep_state_ensure_qmoe_scratch(state, total_scratch) != 0) {
     fprintf(stderr, "wrap_qmoe: ensure_qmoe_scratch(%zu) failed\n",
@@ -186,6 +192,8 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
   void *d_a_scale_in = scratch_base + off_a_scale_in;
   void *d_a_qb_mid = scratch_base + off_a_qb_mid;
   void *d_a_scale_mid = scratch_base + off_a_scale_mid;
+  void *d_bucket_scratch =
+      sz_bucket_scratch ? (scratch_base + off_bucket_scratch) : nullptr;
 
   RUNTIME_DEBUG_LOG("[REAL] wrap_qmoe: topk_routing(tokens=%lld, experts=%lld, "
                     "k=%lld, normalize=%lld)\n",
@@ -267,7 +275,8 @@ int wrap_qmoe(RuntimeState *state, const void *input, const void *router_probs,
     HIP_CHECK(hip_qmoe_bucket_tokens(stream, d_expert_indices, d_expert_weights,
                                      d_expert_counts, d_expert_offsets,
                                      d_sorted_token_ids, d_sorted_weights,
-                                     num_tokens, num_experts, k, elem_size));
+                                     num_tokens, num_experts, k, elem_size,
+                                     d_bucket_scratch, sz_bucket_scratch));
 
     // Only readback the counts (num_experts * int32, e.g. 32*4 = 128 bytes)
     // to drive the host-side per-expert dispatch loop. Offsets are computed

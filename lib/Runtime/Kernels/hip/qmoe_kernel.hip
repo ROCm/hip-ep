@@ -309,6 +309,140 @@ __global__ void bucket_tokens_kernel(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Chunked bucketing: the same three phases, but over ranges of (token, slot)
+// pairs so the work is spread across the machine instead of one workgroup.
+//
+// bucket_tokens_kernel above walks every pair in every thread, so its cost is
+// num_tokens*k long no matter how many CUs are idle. That is invisible at
+// decode (k pairs) and dominant at prefill: 3985 tokens x top-8 is 31,880 pairs
+// scanned twice by one workgroup, ~1.75 ms per layer on Qwen3.6-35B-A3B, 70 ms
+// across its 40 layers.
+//
+// Splitting it is a stable counting sort. Phase 1 histograms each chunk
+// independently. Phase 2 turns those per-chunk histograms into a per-(chunk,
+// expert) write base: expert_offsets[e] plus the counts of the same expert in
+// every earlier chunk. Phase 3 has each chunk write its own pairs from that
+// base, in ascending pair order.
+//
+// Ordering is what makes this safe to swap in. Pair index i == t*k + s, so
+// ascending i is exactly the (t, s) nesting of the serial version, chunks are
+// contiguous ascending ranges of i, and phase 2 hands out bases in chunk order.
+// Every expert's slice therefore comes out token-major, byte for byte what the
+// single-workgroup kernel produces -- which the downstream weighted scatter_add
+// depends on for reproducibility.
+// ---------------------------------------------------------------------------
+
+// Pairs per chunk. Small enough that a prefill splits into enough chunks to
+// fill the machine, large enough that the per-chunk histogram and the phase-2
+// scan over chunks stay cheap.
+#define QMOE_BUCKET_CHUNK 512
+// Chunk cap, which bounds the scratch matrix at nchunks*num_experts int32.
+#define QMOE_BUCKET_MAX_CHUNKS 256
+
+__global__ void bucket_count_chunks_kernel(
+    const int32_t* __restrict__ expert_indices,
+    int32_t* __restrict__ chunk_counts,   // [nchunks][num_experts]
+    int total_pairs,
+    int chunk_pairs,
+    int num_experts) {
+  extern __shared__ int32_t hist[];
+  const int chunk = static_cast<int>(blockIdx.x);
+  const int tid = static_cast<int>(threadIdx.x);
+  const int nthreads = static_cast<int>(blockDim.x);
+
+  for (int e = tid; e < num_experts; e += nthreads) hist[e] = 0;
+  __syncthreads();
+
+  const int begin = chunk * chunk_pairs;
+  const int end = min(begin + chunk_pairs, total_pairs);
+  for (int i = begin + tid; i < end; i += nthreads) {
+    const int e = expert_indices[i];
+    // topk_routing writes -1 for a token it could not route; the serial kernel
+    // drops those by never matching an eid, so they must not be counted here.
+    if (e >= 0 && e < num_experts) atomicAdd(&hist[e], 1);
+  }
+  __syncthreads();
+
+  for (int e = tid; e < num_experts; e += nthreads)
+    chunk_counts[(int64_t)chunk * num_experts + e] = hist[e];
+}
+
+// One block. Turns the per-chunk histograms into per-(chunk, expert) write
+// bases, and emits the same expert_counts / expert_offsets the serial kernel
+// does. Reads chunk_counts and overwrites it with the bases in place.
+__global__ void bucket_scan_chunks_kernel(
+    int32_t* __restrict__ chunk_counts,   // in: counts, out: write bases
+    int32_t* __restrict__ expert_counts,
+    int32_t* __restrict__ expert_offsets,
+    int nchunks,
+    int num_experts) {
+  extern __shared__ int32_t totals[];
+  const int e = static_cast<int>(threadIdx.x);
+
+  if (e < num_experts) {
+    int sum = 0;
+    for (int c = 0; c < nchunks; c++)
+      sum += chunk_counts[(int64_t)c * num_experts + e];
+    totals[e] = sum;
+    expert_counts[e] = sum;
+  }
+  __syncthreads();
+
+  // Exclusive prefix sum over experts. num_experts is <= 1024 and this runs
+  // once per layer, so a serial pass on one thread costs less than a Hillis-
+  // Steele scan's log2(n) barriers over the same LDS.
+  if (e == 0) {
+    int sum = 0;
+    expert_offsets[0] = 0;
+    for (int x = 0; x < num_experts; x++) {
+      const int c = totals[x];
+      totals[x] = sum;          // exclusive offset of expert x
+      sum += c;
+      expert_offsets[x + 1] = sum;
+    }
+  }
+  __syncthreads();
+
+  if (e < num_experts) {
+    int running = totals[e];
+    for (int c = 0; c < nchunks; c++) {
+      const int64_t idx = (int64_t)c * num_experts + e;
+      const int cnt = chunk_counts[idx];
+      chunk_counts[idx] = running;
+      running += cnt;
+    }
+  }
+}
+
+__global__ void bucket_scatter_chunks_kernel(
+    const int32_t* __restrict__ expert_indices,
+    const __half* __restrict__ expert_weights,
+    const int32_t* __restrict__ chunk_bases,   // [nchunks][num_experts]
+    int32_t* __restrict__ sorted_token_ids,
+    __half* __restrict__ sorted_weights,
+    int total_pairs,
+    int chunk_pairs,
+    int k,
+    int num_experts) {
+  const int chunk = static_cast<int>(blockIdx.x);
+  const int eid = static_cast<int>(threadIdx.x);
+  if (eid >= num_experts) return;
+
+  const int begin = chunk * chunk_pairs;
+  const int end = min(begin + chunk_pairs, total_pairs);
+  // Every thread reads the same pair index each step, so the load broadcasts
+  // out of one cache line rather than gathering per lane.
+  int write_pos = chunk_bases[(int64_t)chunk * num_experts + eid];
+  for (int i = begin; i < end; i++) {
+    if (expert_indices[i] == eid) {
+      sorted_token_ids[write_pos] = i / k;
+      sorted_weights[write_pos] = expert_weights[i];
+      write_pos++;
+    }
+  }
+}
+
 // ===== Host launchers (extern "C") — pure kernel launches, no alloc/sync ====
 
 extern "C" int hip_qmoe_topk_routing(
@@ -496,6 +630,16 @@ extern "C" int hip_qmoe_scatter_add(
   return static_cast<int>(err);
 }
 
+extern "C" size_t hip_qmoe_bucket_scratch_bytes(
+    int64_t num_tokens, int64_t num_experts, int64_t k) {
+  if (num_tokens <= 0 || num_experts <= 0 || k <= 0) return 0;
+  const int64_t total_pairs = num_tokens * k;
+  int64_t nchunks = (total_pairs + QMOE_BUCKET_CHUNK - 1) / QMOE_BUCKET_CHUNK;
+  if (nchunks > QMOE_BUCKET_MAX_CHUNKS) nchunks = QMOE_BUCKET_MAX_CHUNKS;
+  if (nchunks <= 1) return 0;   // single-workgroup path needs nothing
+  return (size_t)nchunks * (size_t)num_experts * sizeof(int32_t);
+}
+
 extern "C" int hip_qmoe_bucket_tokens(
     void* stream,
     const void* expert_indices,
@@ -507,7 +651,9 @@ extern "C" int hip_qmoe_bucket_tokens(
     int64_t num_tokens,
     int64_t num_experts,
     int64_t k,
-    int64_t element_size_bytes) {
+    int64_t element_size_bytes,
+    void* scratch,
+    size_t scratch_bytes) {
   if (num_tokens <= 0 || num_experts <= 0 || k <= 0) return 0;
 
   hipStream_t s = static_cast<hipStream_t>(stream);
@@ -531,6 +677,50 @@ extern "C" int hip_qmoe_bucket_tokens(
     return -1;
   }
   int block_dim = static_cast<int>(((num_experts + 31) / 32) * 32);
+
+  // Chunked path when there are enough pairs to be worth splitting and the
+  // caller supplied the scratch matrix. Decode (k pairs) keeps the single
+  // workgroup, where three launches would cost more than the scan they save.
+  const int64_t total_pairs = num_tokens * k;
+  int64_t nchunks = (total_pairs + QMOE_BUCKET_CHUNK - 1) / QMOE_BUCKET_CHUNK;
+  if (nchunks > QMOE_BUCKET_MAX_CHUNKS) nchunks = QMOE_BUCKET_MAX_CHUNKS;
+  const size_t need = (size_t)nchunks * num_experts * sizeof(int32_t);
+  if (nchunks > 1 && scratch && scratch_bytes >= need) {
+    // Chunks cover the pairs exactly, so the last one may be short.
+    const int chunk_pairs =
+        static_cast<int>((total_pairs + nchunks - 1) / nchunks);
+    const int64_t grid = (total_pairs + chunk_pairs - 1) / chunk_pairs;
+    int32_t* chunk_counts = static_cast<int32_t*>(scratch);
+    const size_t hist_bytes = num_experts * sizeof(int32_t);
+
+    hipLaunchKernelGGL(bucket_count_chunks_kernel, dim3((unsigned)grid),
+                       dim3(256), hist_bytes, s,
+                       static_cast<const int32_t*>(expert_indices),
+                       chunk_counts, static_cast<int>(total_pairs), chunk_pairs,
+                       static_cast<int>(num_experts));
+    hipLaunchKernelGGL(bucket_scan_chunks_kernel, dim3(1), dim3(block_dim),
+                       hist_bytes, s, chunk_counts,
+                       static_cast<int32_t*>(expert_counts),
+                       static_cast<int32_t*>(expert_offsets),
+                       static_cast<int>(grid),
+                       static_cast<int>(num_experts));
+    hipLaunchKernelGGL(bucket_scatter_chunks_kernel, dim3((unsigned)grid),
+                       dim3(block_dim), 0, s,
+                       static_cast<const int32_t*>(expert_indices),
+                       static_cast<const __half*>(expert_weights),
+                       chunk_counts,
+                       static_cast<int32_t*>(sorted_token_ids),
+                       static_cast<__half*>(sorted_weights),
+                       static_cast<int>(total_pairs), chunk_pairs,
+                       static_cast<int>(k), static_cast<int>(num_experts));
+
+    hipError_t cerr = hipGetLastError();
+    if (cerr != hipSuccess)
+      fprintf(stderr,
+              "[custom_kernels] hip_qmoe_bucket_tokens (chunked) failed: %s\n",
+              hipGetErrorString(cerr));
+    return static_cast<int>(cerr);
+  }
 
   hipLaunchKernelGGL(bucket_tokens_kernel, dim3(1), dim3(block_dim), 0, s,
                      static_cast<const int32_t*>(expert_indices),
