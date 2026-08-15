@@ -1332,6 +1332,16 @@ static int la_launch_parallel(
                                     ? LA_CHUNK * dk : dk * (LA_CHUNK + LA_KT_PAD)) +
                                dvs * LA_CHUNK) * sizeof(__half);
     // Pass 3 (WMMA) LDS: QWS(M*dv) + Pm + (Asm,clog) floats, QW(M*dk) + K(C*dk) half.
+    //
+    // 29,824 B at dk=dv=128, which is over 65536/3 = 21845 and so caps pass 3 at
+    // two workgroups per CU. Tried and rejected: QWS in half puts it at 21,632 B
+    // and does land the third workgroup, but it is worth 2.4% (7.43 -> 7.25 ms
+    // per layer at 3985 tokens) and costs output accuracy (relL2 3.5e-4 against
+    // the fp32-QWS result; the state is unaffected, pass 3 does not feed the
+    // recurrence). Occupancy is not what binds this kernel -- it reads a 32 KB
+    // S0 tile per (head,chunk) block, ~256 MB per layer, so it is bound by that
+    // stream and a third resident workgroup has nothing to hide. Shrink the S0
+    // traffic before spending accuracy on occupancy here.
     const size_t s3 = (size_t)(2 * LA_CHUNK * dv + LA_CHUNK * LA_CHUNK +
                                2 * LA_CHUNK) * sizeof(float) +
                       (size_t)(2 * LA_CHUNK * dk + LA_CHUNK * dk) * sizeof(__half);
