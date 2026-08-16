@@ -176,6 +176,61 @@ inferReduceResultType(mlir::Operation *op, mlir::Value data,
   return mlir::RankedTensorType::get(outShape, inputType.getElementType());
 }
 
+/// Build a reduction destination while preserving the pre-contract behavior:
+/// known axes map dynamic result dimensions back to their input dimensions,
+/// while runtime axes retain the historical positional fallback.
+inline mlir::FailureOr<mlir::Value> createOnnxReductionEmptyTensor(
+    mlir::PatternRewriter &rewriter, mlir::Location loc,
+    mlir::RankedTensorType resultType, mlir::Value data,
+    llvm::ArrayRef<int64_t> reducedAxes, bool axesStaticallyKnown,
+    int64_t keepdims) {
+  auto dataType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+  if (!dataType)
+    return mlir::failure();
+
+  int64_t dataRank = dataType.getRank();
+  llvm::SmallSet<int64_t, 8> reduced;
+  for (int64_t axis : reducedAxes)
+    reduced.insert(axis < 0 ? axis + dataRank : axis);
+
+  llvm::SmallVector<int64_t> outputToInput(resultType.getRank(), -1);
+  if (axesStaticallyKnown) {
+    if (keepdims) {
+      for (int64_t dim : llvm::seq<int64_t>(resultType.getRank()))
+        outputToInput[dim] = reduced.contains(dim) ? -1 : dim;
+    } else {
+      int64_t outputDim = 0;
+      for (int64_t inputDim : llvm::seq<int64_t>(dataRank)) {
+        if (reduced.contains(inputDim))
+          continue;
+        if (outputDim < resultType.getRank())
+          outputToInput[outputDim] = inputDim;
+        ++outputDim;
+      }
+    }
+  } else {
+    for (int64_t dim : llvm::seq<int64_t>(resultType.getRank()))
+      outputToInput[dim] = dim < dataRank ? dim : -1;
+  }
+
+  llvm::SmallVector<mlir::Value> dynamicSizes;
+  for (int64_t dim : llvm::seq<int64_t>(resultType.getRank())) {
+    if (!resultType.isDynamicDim(dim))
+      continue;
+    int64_t inputDim = outputToInput[dim];
+    if (inputDim < 0) {
+      dynamicSizes.push_back(
+          mlir::arith::ConstantIndexOp::create(rewriter, loc, 1));
+    } else {
+      dynamicSizes.push_back(
+          mlir::tensor::DimOp::create(rewriter, loc, data, inputDim));
+    }
+  }
+  return mlir::Value(
+      mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                    resultType.getElementType(), dynamicSizes));
+}
+
 /// Map an MLIR element type onto the HIPDNN_EP_DATATYPE_* enum that runtime
 /// wrappers take as an `input_data_type` argument. Only the subset needed by
 /// the converters that scan a raw buffer (hip.nonzero, and the Compress
@@ -198,6 +253,89 @@ inline int64_t getHipdnnInputDataType(mlir::Type elemType) {
     return 5; // HIPDNN_EP_DATATYPE_INT8 (bool/i1, signed/signless i8)
   return -1;
 }
+
+/// Shared conversion skeleton for the supported ONNX reductions. This
+/// centralizes attribute/default handling, optional axes materialization,
+/// unranked-result recovery, and destination construction without changing the
+/// dialect or runtime reduction contract.
+template <typename HipOpTy>
+class OnnxReductionToHip final : public mlir::RewritePattern {
+public:
+  OnnxReductionToHip(mlir::MLIRContext *ctx, llvm::StringRef onnxOpName)
+      : RewritePattern(onnxOpName, /*benefit=*/1, ctx) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+    auto context = getContextArg(op, rewriter);
+    if (mlir::failed(context))
+      return mlir::failure();
+
+    mlir::Value data = op->getOperand(0);
+    int64_t noopWithEmptyAxes = 0;
+    if (auto attr =
+            op->getAttrOfType<mlir::IntegerAttr>("noop_with_empty_axes"))
+      noopWithEmptyAxes = attr.getSInt();
+    int64_t keepdims = 1;
+    if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("keepdims"))
+      keepdims = attr.getSInt();
+
+    llvm::SmallVector<int64_t> reducedAxes;
+    bool axesStaticallyKnown = false;
+    mlir::Value axesOperand;
+    bool hasAxesOperand =
+        op->getNumOperands() > 1 &&
+        !mlir::isa<mlir::NoneType>(op->getOperand(1).getType());
+    if (hasAxesOperand) {
+      axesOperand = op->getOperand(1);
+      axesStaticallyKnown = extractConstantIntTensor(axesOperand, reducedAxes,
+                                                     /*expectedRank=*/1);
+    } else {
+      axesStaticallyKnown = true;
+      if (auto axesAttr = op->getAttrOfType<mlir::ArrayAttr>("axes")) {
+        for (mlir::Attribute entry : axesAttr)
+          reducedAxes.push_back(
+              mlir::cast<mlir::IntegerAttr>(entry).getValue().getSExtValue());
+      } else if (noopWithEmptyAxes == 0) {
+        auto dataType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+        if (!dataType)
+          return rewriter.notifyMatchFailure(
+              op, "cannot resolve default reduction axes for unranked data");
+        llvm::append_range(
+            reducedAxes,
+            llvm::seq<int64_t>(0, static_cast<int64_t>(dataType.getRank())));
+      }
+    }
+
+    auto resultType = inferReduceResultType(op, data, reducedAxes,
+                                            axesStaticallyKnown, keepdims);
+    if (mlir::failed(resultType))
+      return rewriter.notifyMatchFailure(
+          op, "cannot infer unranked reduction result without static axes");
+
+    mlir::Location loc = op->getLoc();
+    auto init = createOnnxReductionEmptyTensor(rewriter, loc, *resultType, data,
+                                               reducedAxes, axesStaticallyKnown,
+                                               keepdims);
+    if (mlir::failed(init))
+      return rewriter.notifyMatchFailure(
+          op, "reduction data must be a ranked tensor");
+
+    if (!hasAxesOperand) {
+      auto axesType = mlir::RankedTensorType::get(
+          {static_cast<int64_t>(reducedAxes.size())}, rewriter.getI64Type());
+      auto axesAttr = mlir::DenseIntElementsAttr::get(axesType, reducedAxes);
+      axesOperand =
+          mlir::arith::ConstantOp::create(rewriter, loc, axesType, axesAttr);
+    }
+
+    auto hipOp = HipOpTy::create(rewriter, loc, *context, data, axesOperand,
+                                 *init, rewriter.getI64IntegerAttr(keepdims),
+                                 rewriter.getI64IntegerAttr(noopWithEmptyAxes));
+    rewriter.replaceOp(op, hipOp->getResult(0));
+    return mlir::success();
+  }
+};
 
 /// Lower a variadic ONNX elementwise op to a left-associated chain of pairwise
 /// broadcasting HIP ops. Every intermediate result type comes from that
