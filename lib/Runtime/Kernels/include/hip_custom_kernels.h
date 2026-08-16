@@ -992,10 +992,9 @@ HIP_KERNEL_API int hip_one_hot(
  * ReduceSum (Parallel Sum Reduction)
  * =========================================================================
  *
- * Reduces input by summing over contiguous blocks.
+ * Reduces one compiler-validated contiguous axis span. The span is flattened
+ * into `reduce_size`; `inner_size` carries the product of dimensions after it.
  * reduce_size = num_input_elements / num_output_elements
- * For each output element j:
- *   output[j] = sum(input[j*reduce_size .. (j+1)*reduce_size - 1])
  *
  * Parameters:
  *   stream              - hipStream_t cast to void*
@@ -1014,10 +1013,9 @@ HIP_KERNEL_API int hip_one_hot(
  *     to fp32 before the sum for numerical stability.
  * Returns: 0 on success, non-zero on failure
  */
-/* `inner_size` = product of input dims AFTER the reduced axis (1 for a
- * trailing/contiguous reduce). Enables reducing a non-trailing axis (e.g.
- * channel-axis LayerNorm2d over NCHW): reduced elements are strided by
- * `inner_size`. inner_size==1 preserves the contiguous fast path. */
+/* `inner_size` = product of input dims AFTER the contiguous span's final axis.
+ * Reduced elements are strided by `inner_size`; inner_size==1 preserves the
+ * trailing-span fast path. */
 HIP_KERNEL_API int hip_reduce_sum(
     void* stream,
     const void* data,
@@ -1033,9 +1031,8 @@ HIP_KERNEL_API int hip_reduce_sum(
  *
  * Same layout convention and `inner_size` semantics as hip_reduce_sum, but
  * divides the float-accumulated sum of each `reduce_size`-element slice by
- * reduce_size = num_input / num_output before narrowing to the output type. The
- * division is performed in-kernel so the op needs no compile-time-static reduce
- * dim and tolerates a dynamic reduce axis.
+ * reduce_size = num_input / num_output before narrowing to the output type.
+ * Span extents may be dynamic, but axis identities are compile-time constants.
  *
  * Supported types: HIP_DTYPE_FLOAT16 and HIP_DTYPE_FLOAT32 (ONNX ReduceMean is
  * float-domain; both the true-fp16 path and fp32-upcast RMSNorm-style paths
@@ -1056,9 +1053,8 @@ HIP_KERNEL_API int hip_reduce_mean(
  * =========================================================================
  *
  * Same layout convention and `inner_size` semantics as hip_reduce_sum, but
- * accumulates sum(x^2) in float and writes sqrt(sum) to the output. The
- * reduction is performed in-kernel so the op needs no compile-time-static reduce
- * dim and tolerates a dynamic reduce axis.
+ * accumulates sum(x^2) in float and writes sqrt(sum) to the output. Span
+ * extents may be dynamic, but axis identities are compile-time constants.
  *
  * Supported types: HIP_DTYPE_FLOAT16 and HIP_DTYPE_FLOAT32 (ONNX ReduceL2 is
  * float-domain). Both accumulate in float. Other dtypes return -1.

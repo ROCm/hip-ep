@@ -5,13 +5,10 @@
 
 // ReduceMin: y = min(x) over the reduce axes.
 //
-// Port note: the HipToLLVM lowering for hip.reduce_* passes only
-// `data_num_elements`, `output_num_elements` and the `axes` buffer pointer.
-// The actual reduce axes are NOT inspected here -- the kernel assumes the
-// upstream lowering has arranged for the reduce dims to occupy the trailing
-// portion of `data` so that
-//      reduce_size = data_num_elements / output_num_elements
-// is correct. This mirrors how wrap_reduce_max / hip_reduce_max already work.
+// The compiler validates one constant contiguous axis span. The kernel flattens
+// that span using reduce_size = data_num_elements / output_num_elements and
+// receives inner_size = product of dimensions after the span, so non-trailing
+// spans remain representable without reading the axes payload at runtime.
 #include "../debug_log.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"

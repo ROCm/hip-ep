@@ -145,9 +145,17 @@ independent booleans or injected function-body parameters:
 Families use typed TableGen `code` fragments only for their forwarding methods.
 The shape rules and validation remain in `HipShapeUtils` C++ helpers, while
 semantic long-tail operations keep handwritten reification methods.
-`Hip_DpsOp_Broadcast` also generates a fixed verifier body that composes
+`Hip_DpsOp_Broadcast` and `Hip_DpsOp_Reduction` also generate fixed verifier
+bodies that compose
 `verifyDpsComputeOp`, so tensor/memref uniformity and tensor result-to-init type
-parity are checked before the shared NumPy broadcast shape rule.
+parity are checked before semantic shape rules. Broadcast uses the same pure
+NumPy rule as reification and destination construction. Reduction requires a
+structurally-proven constant axes source in tensor and memref form. Runtime
+axes are rejected regardless of result type.
+
+The `SameShape`, `Semantic`, `Payload`, and `OutsAuthoritative` wrappers name
+reviewed contract categories without requiring the exhaustive inventory audit
+to be enabled while feature migrations are still in progress.
 
 Multi-result and specialized operations may keep inferred result construction disabled when a single generated body cannot describe all results.
 
@@ -296,6 +304,33 @@ Do not replace this with an integer maximum: broadcasting dimensions 0 and 1
 produces 0, not 1. Variadic Max/Min share one
 `lowerVariadicBroadcastChain` helper that derives every pairwise intermediate
 type from this shared broadcast shape.
+
+Reductions resolve to one internal out-to-in dimension map, consumed by both
+`inferReductionShape` (static extents) and `reifyReductionResultShape` (mixed
+extents used for destination construction and reification). The mapping matters
+for `keepdims = 0`: reducing axes `[1, 2]` of a rank-4 input maps output
+dimension 1 to input dimension 3, so a positional input-dimension copy is
+incorrect.
+
+`resolveReductionAxes` decides once whether axes are usable and returns
+`std::nullopt` when they are only known at runtime. Constant opset-13+ axes,
+attribute axes, absent axes, and empty axes use the shared semantic map.
+Runtime axes always produce a conversion error before creating `tensor.empty`.
+Negative axes are normalized and sorted, then must form one contiguous span.
+The runtime kernel flattens exactly that span: `reduce_size` is
+`input_elements / output_elements`, and `inner_size` is the product of input
+dimensions after the span's final axis. Non-contiguous sets such as `[0, 2]`
+cannot be represented and are rejected.
+
+Conversion materializes the normalized axes as an inline constant. Bufferization
+preserves it as a constant `memref.global`. The HIP op also carries a durable
+`normalized_axes` attribute; tensor and memref verification compare that
+attribute exactly against the structural constant source, so a forged marker is
+invalid. Reification uses the same checked pair. Lowering consumes the
+already-verified normalized attribute after dialect conversion has rewritten
+the global source, and never infers axes by comparing input and output extents,
+which would be ambiguous for equal extents such as reducing axis 0 versus axis
+1 of a `4x4` tensor.
 
 MatMul and Gemm accept a dynamic contraction K as unknown-compatible. Static
 equal K remains valid, while static unequal K is rejected by the pure shape
@@ -462,9 +497,12 @@ Primary regression coverage:
 | `test/lit/Dialect/hip-dps-op-interface.mlir` | Shared `HipDpsOpInterface` reification |
 | `test/lit/Dialect/hip-broadcast-reify-shapes.mlir` | Broadcast dynamic SSA, zero extents, and rank-zero success |
 | `test/lit/Dialect/hip-broadcast-shape-verifier.mlir` | Generated NumPy broadcast shape verification |
+| `test/lit/Dialect/hip-reduction-shape-verifier.mlir` | Generated reduction shape and axes verification |
 | `test/lit/Conversion/onnx-to-hip/test_reshape_shape_provenance.mlir` | Proven host Reshape shapes, dataflow joins/shared producers, unknown-payload fallback, and `-1` handling |
 | `test/lit/Dialect/hip-matmul-reify-shapes.mlir` | Per-op reification through `--resolve-shaped-type-result-dims` |
 | `test/lit/Dialect/hip-matmul-shape-verifier.mlir` | Static MatMul shape validation |
+| `test/lit/Conversion/onnx-to-hip/test_reduce_sum.mlir` | Reduction destinations, including the non-positional `keepdims = 0` dimension mapping |
+| `test/lit/Conversion/onnx-to-hip/test_reduce_runtime_axes_invalid.mlir` | Conversion-time rejection of all runtime axes and non-contiguous constant axes |
 | `test/lit/Dialect/hip-loop-verifier.mlir` | Loop-carried type contract |
 | `test/lit/Dialect/hip-resolve-tensor-dims.mlir` | Production pre-bufferization dim folding |
 
@@ -473,6 +511,7 @@ Complex operations may use dedicated files; common shape categories should exten
 ## Current limitations
 
 - ONNX MatMul rank-1 operands require promotion to rank 2 before constructing `hip.matmul`; the runtime and current verifier require rank at least 2.
+- Runtime reduction axes and non-contiguous constant axis sets are unsupported by the current flattened-span kernel ABI.
 - Converter migration to inferred-type builders is incremental; explicit result-type builders remain supported.
 - A future multi-result operation that needs custom `InferTypeOpInterface` logic may require a dedicated result-type inference implementation file.
 - Runtime-dependent extents without pre-execution SSA remain dynamic.
