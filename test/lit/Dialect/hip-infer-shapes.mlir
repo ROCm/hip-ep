@@ -540,7 +540,8 @@ func.func @refine_reduce_sum_keepdims_constant_axes(%ctx: !hip.context,
   %y = hip.reduce_sum(%ctx)
     ins(%data, %axes : tensor<?x4096xf16>, tensor<1xi64>)
     outs(%e : tensor<?x?xf16>)
-    {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64}
+    {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64,
+     normalized_axes = array<i64: 1>}
     : tensor<?x?xf16>
   return %y : tensor<?x?xf16>
 }
@@ -568,7 +569,8 @@ func.func @refine_reduce_mean_keepdims_constant_axes(%ctx: !hip.context,
   %y = hip.reduce_mean(%ctx)
     ins(%data, %axes : tensor<?x4096xf16>, tensor<1xi64>)
     outs(%e : tensor<?x?xf16>)
-    {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64}
+    {keepdims = 1 : i64, noop_with_empty_axes = 0 : i64,
+     normalized_axes = array<i64: 1>}
     : tensor<?x?xf16>
   return %y : tensor<?x?xf16>
 }
