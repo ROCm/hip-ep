@@ -174,7 +174,8 @@ Choose the smallest mechanism that matches the operation's semantics:
 | OneHot, Compress, TopK | Dedicated reification thunks |
 | Pad, Tile, Expand, Slice, Range | Fold-or-bail helpers with fallback to DPS-init shape |
 | MatMul/Gemm/MatMulNBits | Dedicated shape logic based on operand dimensions and attributes |
-| Attention or normalization with multiple destinations | One shape vector per DPS init unless an op supplies a dedicated thunk |
+| LayerNormalization | Y equals input; Mean/InvStdDev use keepdims reduction shape over `[axis, rank)` |
+| SkipSimplifiedLayerNormalization | Output and optional residual sum equal input; training stats rejected |
 | Forward Conv (rank-3 converter/rank-4 HIP op) | Shared signed-floor spatial-window formula used by converter, reification, and verifier |
 | Rank-4 NCHW ConvTranspose | Shared ONNX formula used by converter, reification, and verifier |
 | CausalConvWithState | Runtime-supported 1D output/state formulas from input and depthwise kernel |
@@ -337,6 +338,16 @@ more dynamic than the weight, the state length still comes from `weight.K-1`.
 The mixed helper emits subtraction only after its pure helper has validated
 rank, depthwise layout, channel agreement, optional bias/state, and the current
 runtime restriction `ndim=1`.
+
+SkipSimplifiedLayerNormalization's implemented outputs are the normalized
+output and optional `input_skip_bias_sum`; both have the input shape. The
+runtime flattens every non-final input axis into `num_rows`, requires skip to
+match input, and takes `hidden_dim` from rank-1 gamma (and optional bias).
+The ONNX schema's optional mean and inverse-standard-deviation outputs are
+training outputs and are not implemented by `hip.skip_rms_norm`. Conversion
+accepts every inference output arity (one to four schema slots with omitted
+stats) but rejects a real stats tensor rather than treating the last present
+tensor as the residual output.
 
 Reductions resolve to one internal out-to-in dimension map, consumed by both
 `inferReductionShape` (static extents) and `reifyReductionResultShape` (mixed

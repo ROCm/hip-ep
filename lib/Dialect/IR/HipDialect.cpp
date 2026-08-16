@@ -756,7 +756,63 @@ void SkipRmsNormOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
-LogicalResult SkipRmsNormOp::verify() { return success(); }
+LogicalResult SkipRmsNormOp::verify() {
+  unsigned numOutputs = getOutputs().size();
+  if (numOutputs < 1 || numOutputs > 2)
+    return emitOpError("expected 1 or 2 output buffers, got ") << numOutputs;
+
+  SmallVector<Value> operands = {getInput(), getSkip(), getGamma()};
+  if (Value bias = getBias())
+    operands.push_back(bias);
+  llvm::append_range(operands, getOutputs());
+  if (failed(verifyDpsComputeOp(*this, operands, numOutputs)))
+    return failure();
+
+  auto inputType = dyn_cast<ShapedType>(getInput().getType());
+  auto skipType = dyn_cast<ShapedType>(getSkip().getType());
+  auto gammaType = dyn_cast<ShapedType>(getGamma().getType());
+  if (!inputType || !inputType.hasRank() || !skipType || !skipType.hasRank() ||
+      !gammaType || !gammaType.hasRank())
+    return emitOpError("input, skip, and gamma must be ranked");
+  std::optional<ArrayRef<int64_t>> biasShape;
+  if (Value bias = getBias()) {
+    auto biasType = dyn_cast<ShapedType>(bias.getType());
+    if (!biasType || !biasType.hasRank())
+      return emitOpError("bias must be ranked");
+    biasShape = biasType.getShape();
+  }
+
+  FailureOr<SmallVector<SmallVector<int64_t>>> expected =
+      inferSkipRmsNormOutputShapes(inputType.getShape(), skipType.getShape(),
+                                   gammaType.getShape(), biasShape, numOutputs,
+                                   [&]() { return this->emitOpError(); });
+  if (failed(expected))
+    return failure();
+
+  Type elementType = inputType.getElementType();
+  if (!elementType.isF16() && !elementType.isF32())
+    return emitOpError("runtime supports only f16/f32 input");
+  for (Value value : operands)
+    if (cast<ShapedType>(value.getType()).getElementType() != elementType)
+      return emitOpError("all input and output element types must match");
+  if (getEpsilon().convertToDouble() < 0.0)
+    return emitOpError("epsilon must be non-negative");
+
+  for (unsigned index = 0; index < numOutputs; ++index) {
+    if (failed(verifyHipOpShape(
+            *this,
+            [&]() -> FailureOr<SmallVector<int64_t>> {
+              return (*expected)[index];
+            },
+            index)))
+      return failure();
+    if (getNumResults() &&
+        getResult(index).getType() != getOutputs()[index].getType())
+      return emitOpError("tensor result #")
+             << index << " type must match its output buffer type";
+  }
+  return success();
+}
 
 //===----------------------------------------------------------------------===//
 // LayerNormOp: ins(input, scale, [bias]) outs(output, [mean, [inv_std]])
@@ -789,7 +845,76 @@ LogicalResult LayerNormOp::verify() {
     dataOperands.push_back(b);
   for (Value out : getOutputs())
     dataOperands.push_back(out);
-  return verifyDpsComputeOp(*this, dataOperands, /*numInits=*/numOutputs);
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/numOutputs)))
+    return failure();
+
+  auto inputType = dyn_cast<ShapedType>(getInput().getType());
+  auto scaleType = dyn_cast<ShapedType>(getScale().getType());
+  if (!inputType || !inputType.hasRank() || inputType.getRank() < 1 ||
+      !scaleType || !scaleType.hasRank())
+    return emitOpError("input and scale must be ranked");
+  int64_t rank = inputType.getRank();
+  int64_t rawAxis = static_cast<int64_t>(getAxis());
+  int64_t axis = rawAxis < 0 ? rawAxis + rank : rawAxis;
+  if (axis < 0 || axis >= rank)
+    return emitOpError("axis must be in [-rank, rank)");
+
+  int64_t normalizedRank = rank - axis;
+  if (scaleType.getRank() != normalizedRank)
+    return emitOpError(
+        "runtime requires scale rank to equal the normalized suffix rank");
+  for (int64_t i : llvm::seq<int64_t>(0, normalizedRank)) {
+    int64_t inputDim = inputType.getDimSize(axis + i);
+    int64_t scaleDim = scaleType.getDimSize(i);
+    if (!ShapedType::isDynamic(inputDim) && !ShapedType::isDynamic(scaleDim) &&
+        inputDim != scaleDim)
+      return emitOpError("scale shape must equal input.shape[axis:]");
+  }
+  if (Value bias = getBias()) {
+    auto biasType = dyn_cast<ShapedType>(bias.getType());
+    if (!biasType || !biasType.hasRank() ||
+        biasType.getShape() != scaleType.getShape())
+      return emitOpError("bias shape must equal scale shape");
+  }
+
+  Type inputElementType = inputType.getElementType();
+  if (!inputElementType.isF16() && !inputElementType.isF32())
+    return emitOpError("runtime supports only f16/f32 input");
+  if (scaleType.getElementType() != inputElementType)
+    return emitOpError("scale element type must match input");
+  if (Value bias = getBias())
+    if (cast<ShapedType>(bias.getType()).getElementType() != inputElementType)
+      return emitOpError("bias element type must match input");
+  if (cast<ShapedType>(getOutputs().front().getType()).getElementType() !=
+      inputElementType)
+    return emitOpError("output element type must match input");
+  FailureOr<Type> statsElementType =
+      mlir::hip::inferLayerNormStatsType(getContext(), getStashType());
+  if (failed(statsElementType))
+    return emitOpError("runtime supports stash_type 0/1 (f32) or 10 (f16)");
+
+  FailureOr<SmallVector<SmallVector<int64_t>>> expected =
+      mlir::hip::inferLayerNormOutputShapes(inputType.getShape(), getAxis(),
+                                            numOutputs);
+  if (failed(expected))
+    return emitOpError("could not infer output shapes");
+  for (auto [index, output] : llvm::enumerate(getOutputs())) {
+    auto outputType = dyn_cast<ShapedType>(output.getType());
+    if (!outputType || !outputType.hasRank() ||
+        outputType.getRank() != static_cast<int64_t>((*expected)[index].size()))
+      return emitOpError("output #") << index << " has the wrong rank";
+    for (int64_t dim : llvm::seq<int64_t>(0, outputType.getRank())) {
+      int64_t actual = outputType.getDimSize(dim);
+      int64_t wanted = (*expected)[index][dim];
+      if (!ShapedType::isDynamic(actual) && !ShapedType::isDynamic(wanted) &&
+          actual != wanted)
+        return emitOpError("output #")
+               << index << " dimension " << dim << " must be " << wanted;
+    }
+    if (index > 0 && outputType.getElementType() != *statsElementType)
+      return emitOpError("stats output element type must match stash_type");
+  }
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
