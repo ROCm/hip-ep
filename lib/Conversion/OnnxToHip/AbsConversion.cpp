@@ -38,9 +38,12 @@ struct AbsToHip : public mlir::RewritePattern {
           op, "onnx.Abs lowering expects a ranked tensor input");
     auto resultType =
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+    auto init = createSameShapeEmptyTensor(rewriter, loc, resultType, input);
+    if (mlir::failed(init))
+      return rewriter.notifyMatchFailure(
+          op, "Abs result type must match the input shape");
     auto hipOp = mlir::hip::AbsOp::create(rewriter, loc, resultType, context,
-                                          input, init);
+                                          input, *init);
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }

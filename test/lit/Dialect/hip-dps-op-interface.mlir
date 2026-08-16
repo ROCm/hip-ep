@@ -9,25 +9,19 @@
 // `HipDpsOp::reifyResultShapes` and `reifyDimOfResult` -- the shared
 // whole-result and direct-dimension bodies carried by the in-dialect
 // `HipDpsOpInterface`. Every HIP DPS family emits a direct-dimension
-// dispatcher; `Hip_DpsOp_AutoReify` additionally emits a per-op
-// `ReifyRankedShapedTypeOpInterface::reifyResultShapes` dispatcher that
-// forwards to that default. The default walks
-// `getDpsInits()` in tensor mode and lifts each init operand's runtime shape
-// via `tensor::getMixedSizes`; memref mode has no SSA results and returns an
-// empty list. This file pins that, for any tensor-mode operation selecting the
-// default-reify family, reify produces:
+// dispatcher. Same-shape families additionally emit whole-shape semantic
+// reification from their named source. This file pins the production direct
+// path:
 //   - `IntegerAttr` for static dims (fold to `arith.constant`)
 //   - `tensor.dim %outs, %i` for dynamic dims
 //
-// `hip.silu` is the worked example -- a single-init same-shape elementwise
-// op with no per-op reify override on the #260 base. Other operations in the
-// default-reify family follow the same contract.
+// `hip.silu` is the worked example. Its semantic source and destination have
+// the same runtime shape, while direct queries terminate at the destination.
 //
 // What this file does NOT test
 // ----------------------------
-// `MatmulOp::reifyResultShapes` -- matmul selects a manual-reify family with a
-// tighter contract that lifts dims from the `A` / `B` ins operands. That is
-// covered by `hip-matmul-reify-shapes.mlir`.
+// Whole-shape same-shape and long-tail semantic contracts are covered by their
+// respective focused tests.
 
 // CHECK-LABEL: func.func @silu_static
 // CHECK-DAG:   %[[C2:.*]] = arith.constant 2 : index
@@ -47,11 +41,8 @@ func.func @silu_static(%ctx: !hip.context,
 
 // -----
 
-// Dynamic outs operand: dim folds to `tensor.dim %y, %i`. Static dim folds
-// to a constant. The `, %[[Y...]]: tensor<?x8xf16>)` regex anchors to the
-// LAST arg of `tensor<?x8xf16>` shape (i.e. the outs operand), since the
-// input shares the same shape and FileCheck would otherwise capture the
-// first one.
+// Dynamic destination operand: dim folds to `tensor.dim %y, %i`. Static dim
+// folds to a constant.
 // CHECK-LABEL: func.func @silu_dynamic
 // CHECK-SAME:   , %[[Y:[A-Za-z0-9_]+]]: tensor<?x8xf16>)
 // CHECK-DAG:   %[[C0:.*]] = arith.constant 0 : index
@@ -72,8 +63,7 @@ func.func @silu_dynamic(%ctx: !hip.context,
 
 // -----
 
-// Mixed static + dynamic outs: confirms per-dim handling (constant for
-// static, tensor.dim for dynamic) on the same op invocation.
+// Mixed static + dynamic destination: confirms per-dim handling on one op.
 // CHECK-LABEL: func.func @silu_mixed
 // CHECK-SAME:   , %[[Y:[A-Za-z0-9_]+]]: tensor<2x?x8xf16>)
 // CHECK-DAG:   %[[C2:.*]] = arith.constant 2 : index
