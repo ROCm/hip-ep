@@ -844,40 +844,33 @@ func.func @refine_gqa_multi_result_dps_out_fallback(
 
 // -----
 
-// `hip.layer_norm` is variadic-multi-result: 1, 2, or 3 outs (output
-// required; mean and inv_std optional, training-only). The default
-// `Hip_DpsOp::reifyResultShapes` body walks `getDpsInits()` regardless
-// of arity; this case exercises the full 3-out form so the variadic
-// iteration is covered (1-out covered implicitly by every Tier-2
-// fallback test).
-//
-// Same matching-dynamic-outs pattern as the gqa case above: pass walks
-// all 3 results, reify lifts dynamic outs, no narrowing happens, op
-// stays intact -- guards "Variadic outputs interpreted correctly".
+// `hip.layer_norm` is variadic-multi-result: Y has the input shape; Mean and
+// InvStdDev keep reduced axes as 1. For axis=-1 over rank 3, stats are
+// `[d0, d1, 1]`. This guards semantic multi-result reification.
 // CHECK-LABEL: func.func @refine_layer_norm_variadic_three_outs
 // CHECK:         %[[E0:.*]] = tensor.empty(%{{.*}}, %{{.*}}, %{{.*}}) : tensor<?x?x?xf16>
-// CHECK:         %[[E1:.*]] = tensor.empty(%{{.*}}, %{{.*}}, %{{.*}}) : tensor<?x?x?xf32>
-// CHECK:         %[[E2:.*]] = tensor.empty(%{{.*}}, %{{.*}}, %{{.*}}) : tensor<?x?x?xf32>
+// CHECK:         %[[E1:.*]] = tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?x1xf32>
+// CHECK:         %[[E2:.*]] = tensor.empty(%{{.*}}, %{{.*}}) : tensor<?x?x1xf32>
 // CHECK:         %[[R:.*]]:3 = hip.layer_norm
 // CHECK-SAME:      outs(%[[E0]], %[[E1]], %[[E2]] :
-// CHECK-SAME:           tensor<?x?x?xf16>, tensor<?x?x?xf32>, tensor<?x?x?xf32>)
+// CHECK-SAME:           tensor<?x?x?xf16>, tensor<?x?x1xf32>, tensor<?x?x1xf32>)
 // CHECK:         return %[[R]]#0, %[[R]]#1, %[[R]]#2
 func.func @refine_layer_norm_variadic_three_outs(
     %ctx: !hip.context,
     %input: tensor<?x?x?xf16>,
     %scale: tensor<?xf16>,
     %d0: index, %d1: index, %d2: index)
-    -> (tensor<?x?x?xf16>, tensor<?x?x?xf32>, tensor<?x?x?xf32>) {
+    -> (tensor<?x?x?xf16>, tensor<?x?x1xf32>, tensor<?x?x1xf32>) {
   %e0 = tensor.empty(%d0, %d1, %d2) : tensor<?x?x?xf16>
-  %e1 = tensor.empty(%d0, %d1, %d2) : tensor<?x?x?xf32>
-  %e2 = tensor.empty(%d0, %d1, %d2) : tensor<?x?x?xf32>
+  %e1 = tensor.empty(%d0, %d1) : tensor<?x?x1xf32>
+  %e2 = tensor.empty(%d0, %d1) : tensor<?x?x1xf32>
   %r:3 = hip.layer_norm(%ctx)
     ins(%input, %scale : tensor<?x?x?xf16>, tensor<?xf16>)
     outs(%e0, %e1, %e2 :
-         tensor<?x?x?xf16>, tensor<?x?x?xf32>, tensor<?x?x?xf32>)
+         tensor<?x?x?xf16>, tensor<?x?x1xf32>, tensor<?x?x1xf32>)
     {axis = -1 : i64, epsilon = 9.99999974e-06 : f32, stash_type = 1 : i64}
-    : tensor<?x?x?xf16>, tensor<?x?x?xf32>, tensor<?x?x?xf32>
-  return %r#0, %r#1, %r#2 : tensor<?x?x?xf16>, tensor<?x?x?xf32>, tensor<?x?x?xf32>
+    : tensor<?x?x?xf16>, tensor<?x?x1xf32>, tensor<?x?x1xf32>
+  return %r#0, %r#1, %r#2 : tensor<?x?x?xf16>, tensor<?x?x1xf32>, tensor<?x?x1xf32>
 }
 
 // -----
