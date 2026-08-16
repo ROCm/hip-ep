@@ -306,20 +306,24 @@ The likely cause is that the first-round run was instrumented. Enabling
 `HIPDNN_EP_TRACE_FILE` on the current build measures **17,545 ms**, which matches
 the unexplained 17,587 ms to 0.24%.
 
-**`Clear-HarnessProfilingEnv` cannot prevent this.** It removes `HIPDNN_EP_PERF`
-and `HIPDNN_EP_DEBUG` only:
+**`Clear-HarnessProfilingEnv` could not prevent this.** It removed
+`HIPDNN_EP_PERF` and `HIPDNN_EP_DEBUG` only:
 
 ```powershell
-# tools/perf-harness/common.ps1
+# tools/perf-harness/common.ps1, before the fix
 Remove-Item Env:HIPDNN_EP_PERF, Env:HIPDNN_EP_DEBUG -EA SilentlyContinue
 ```
 
 But `hipdnn_ep_perf_enabled()` is true if **either** `HIPDNN_EP_PERF` is set *or*
 `HIPDNN_EP_TRACE_FILE` is non-empty (`lib/Runtime/debug_log.h:41-44`). A leaked
-`HIPDNN_EP_TRACE_FILE` therefore turns on full instrumentation, costs ~21% of
-TTFT, and no harness script clears it. It should be added to that list. Nothing
-is set at User or Machine scope on this box, so the leak would have been
-per-shell.
+`HIPDNN_EP_TRACE_FILE` therefore turned on full instrumentation, cost ~21% of
+TTFT, and no harness script cleared it. Nothing is set at User or Machine scope
+on this box, so the leak was per-shell.
+
+`HIPDNN_EP_TRACE_FILE` is now in that list, and the variable is worth treating
+as the dangerous one of the three: unlike `HIPDNN_EP_PERF` it prints nothing to
+the console, so an instrumented run is indistinguishable from a clean one except
+by its number.
 
 ## KV-cache oversizing is real but small
 
@@ -498,3 +502,121 @@ $env:HIPDNN_EP_TRACE_FILE = 'C:\Users\zyq\logs\eptrace\qwen16k.json'
 being the obvious guess), on `causal_conv` or `qmoe` for the decoder, and note
 that fencing on `gqa` wastes the window because that one kernel fills the buffer
 by itself.
+
+The numeric suite needs `profile=hip`, which is easy to miss because leaving it
+out fails with `Conflicting session configuration: explicitly added the CPU EP`
+rather than with anything about profiles. The real error is one frame further in:
+`amdgpu EP: no backend available for the requested profile`. The EP defaults to
+`Profile::Auto`, which resolves a backend only in a build carrying `USE_DML` or
+`USE_MIGRAPHX`; provider creation fails without one, and ORT then falls back to
+CPU, which is what actually trips `disable_cpu_ep_fallback`.
+
+```powershell
+cd test\numeric
+& $env:HIPEP_PY -m pytest -c pytest.ini --rootdir . tests\test_causal_conv_with_state.py `
+  --backend ort_ep --ep-name AMDGPUExecutionProvider `
+  --ep-dll "$env:HIPEP_BIN\amdgpu-ep.dll" --ep-option profile=hip -q
+```
+
+# Third round: landing the prepared work
+
+The second round's top targets already had implementations on unlanded branches.
+This round integrates them one at a time and measures each at 16K, which none of
+them had been.
+
+## Absolute TTFT moved, and it was the box
+
+Today's clean baseline is **17,129-17,481 ms**, about 19% above the
+14,455-14,610 ms recorded a few hours earlier from the same source. The gap is
+machine state, not a regression, and three things establish that:
+
+- It appeared across an unrelated reboot (02:37) that separates the two sets of
+  runs. Nothing in `lib/` differs.
+- It is not confined to prefill. Decode moved 19.70 -> 23.27 ms/token and
+  CPU-side image preprocessing moved 154 -> 191 ms, so the whole SoC is slower,
+  not one kernel.
+- It scales with sequence length: 4K is +8.9% where 16K is +20.1%, which is the
+  signature of reduced memory bandwidth rather than a flat clock drop.
+
+Instrumentation was ruled out directly: zero `[PERF]` lines in the run logs and
+no trace file written. The `Ultimate Performance` power plan was tried and made
+things *worse* (4K: 4,398 ms against 4,186 ms on `Balanced`), which is consistent
+with a shared-TDP APU where keeping cores unparked steals budget from the iGPU.
+The cause was not identified further.
+
+**None of this affects the deltas below**, because every one is a paired
+interleaved A/B where both arms run in the same window. It does mean the absolute
+figures here cannot be compared against the second round's.
+
+Run-to-run spread today is tight: 17,360 and 17,481 ms on repeat baseline runs
+(121 ms, 0.7%), and 145 ms as the sd of paired differences across four rounds.
+
+## Two harness defects that would have hidden the result
+
+**`build_deploy.ps1` did not deploy `hip-compiler.dll`.** Every MLIR pass, fold
+and canonicalization lives there, not in `hipgpu.dll`. The causal-conv Transpose
+fold is entirely a canonicalization, so deploying the old pair would have shipped
+the new conv *kernel* while silently discarding the fold, and reported the
+Transpose elimination as worthless. Confirmed by symbol lookup:
+`FoldTransposePairIntoChannelsLast` resolves in `hip-compiler.dll` and is absent
+from `hipgpu.dll`.
+
+This is worse than a stale kernel because it is invisible. A graph-level change
+lowers to the same runtime entry points, so the run is correct and merely misses
+the rewrite.
+
+**`ab_interleaved.ps1` swapped one DLL per arm**, which cannot express a change
+spanning the kernel and the compiler. Arms now take a `dlls` list, and the script
+refuses arms that do not list the same file names -- a file swapped by one arm
+but not another persists into the next run and reads as a real effect.
+
+## Step 1: channels-last causal convolution
+
+Landed as [#722](https://github.com/ROCm/hip-ep/pull/722). Interleaved
+order-reversed A/B, 3 reps per run:
+
+| round | order | base | conv | delta |
+|---|---|---:|---:|---:|
+| 1 | base first | 17,217 | 15,253 | -1,964 |
+| 2 | base first | 17,221 | 15,495 | -1,726 |
+| 4 | conv first | 16,959 | 15,341 | -1,618 |
+| 5 | conv first | 17,118 | 15,337 | -1,781 |
+
+**-1,772 ms (-10.35%), 95% CI [-2,002, -1,542]**, better in all four rounds and
+in both orderings. The op profile confirms the mechanism independently: 100
+`transpose` calls become 40, with `causal_conv` unchanged at 30.
+
+Against the round-2 prediction of 2,334 ms (1,459 recoverable on transpose plus
+875 on the conv), the realised 1,772 ms is 76%. The roofline floor assumes a
+pegged clock, and today's box is not that, so the shortfall is expected rather
+than surprising.
+
+The fold needed one fix before landing. It set `channels_last` without checking
+the kernel width, and only the custom prefill kernel can read `[B, L, C]` -- the
+MIOpen path behind it refuses the attribute rather than misreading the buffer. On
+a k > 8 convolution the fold therefore turned a working graph into a hard runtime
+failure. It now guards on the same envelope the runtime enforces.
+
+## Step 2: chunked MoE token bucketing
+
+Measured on top of step 1, so the baseline arm here is the channels-last build:
+
+| round | order | conv | bucket | delta |
+|---|---|---:|---:|---:|
+| 1 | conv first | 15,197 | 14,880 | -317 |
+| 2 | conv first | 15,266 | 14,874 | -392 |
+| 3 | bucket first | 15,451 | 15,097 | -354 |
+| 4 | bucket first | 15,417 | 15,087 | -330 |
+
+**-348 ms (-2.27%), 95% CI [-401, -296]**, sd of paired differences 33 ms.
+
+This is the round-2 table's cleanest prediction and it landed almost exactly:
+353 ms predicted, 348 ms realised. That is the expected outcome for this row and
+not luck -- `bucket_tokens_kernel` was not bandwidth-limited but
+dispatch-limited, running in a single 256-thread workgroup on 1 of 40 CUs, so
+there was no clock-dependent floor to fall short of.
+
+Worth noting for the record: the branch itself predicted this would *not* be
+resolvable end-to-end, having been measured at 4K where the effect is ~71 ms
+against a ±200 ms noise floor. At 16K the same defect costs 5x more while the
+noise floor is unchanged, which is what makes it measurable.
