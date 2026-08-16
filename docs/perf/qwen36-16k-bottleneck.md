@@ -620,3 +620,47 @@ Worth noting for the record: the branch itself predicted this would *not* be
 resolvable end-to-end, having been measured at 4K where the effect is ~71 ms
 against a ±200 ms noise floor. At 16K the same defect costs 5x more while the
 noise floor is unchanged, which is what makes it measurable.
+
+## Step 3: halve the linear-attention launch window
+
+Landed as [#726](https://github.com/ROCm/hip-ep/pull/726). One constant,
+`LA_WINDOW_CHUNKS` 32 -> 16. Measured on top of steps 1 and 2, so the baseline
+arm is the chunked-bucketing build:
+
+| round | order | bucket | la | delta |
+|---|---|---:|---:|---:|
+| 1 | bucket first | 15,080 | 14,312 | -768 |
+| 2 | bucket first | 14,886 | 14,291 | -595 |
+| 3 | la first | 15,108 | 14,319 | -789 |
+| 4 | la first | 14,869 | 14,326 | -543 |
+
+**-674 ms (-4.49%), 95% CI [-870, -477]**, sd of paired differences 123 ms,
+better in all four rounds and in both orderings.
+
+This is the one step that beat its prediction, and by more than a factor of two:
+the same constant was worth -294 ms when measured before any of this round's
+work landed. The mechanism explains the growth. The window governs how much
+scratch the pass1 -> scan -> pass3 chain streams through between writing a
+Uloc/W tile and reading it back, so its value depends on what else is competing
+for cache in that interval. Step 1 deleted 60 Transpose dispatches, each of
+which had been streaming a full 18,646-token activation through the same cache,
+so the 25 MiB this change keeps resident now survives where it previously did
+not. Stacked wins are usually sub-additive; this pair is the opposite, and only
+because the first change removed the thing that was evicting the second.
+
+## Where the three land
+
+| stage | TTFT | vs previous | cumulative |
+|---|---:|---:|---:|
+| baseline | 17,129 | -- | -- |
+| + channels-last conv | 15,334 | -1,772 | -10.4% |
+| + chunked bucketing | 14,986 | -348 | -12.5% |
+| + LA window 16 | 14,312 | -674 | -16.4% |
+
+**-2,817 ms, -16.4%**, all four arms measured in one interleaved series so the
+box's drift cancels across the whole table.
+
+The plan expected roughly 3.0 s and 21%. The 2.8 s is within reach of that; the
+percentage falls short only because the denominator moved, since today's box
+runs 17.1 s where the plan was written against 14.5 s. Against that original
+baseline the same relative reduction would read 12.1 s.
