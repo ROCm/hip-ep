@@ -2892,7 +2892,10 @@ def Hip_ReduceMinOp : Hip_DpsOp_Reduction<"reduce_min"> {
 
 // ===== Causal Conv with State ================================================
 
-def Hip_CausalConvWithStateOp : Hip_DpsOp_AutoReify<"causal_conv_with_state", [AttrSizedOperandSegments, OpStateOpInterface]> {
+def Hip_CausalConvWithStateOp :
+    Hip_DpsOp_SemanticNoInfer<"causal_conv_with_state",
+                              [AttrSizedOperandSegments,
+                               OpStateOpInterface]> {
   let summary = "Stateful causal depthwise convolution";
   let description = [{
     Causal depthwise convolution with carry state for incremental decoding.
@@ -2973,6 +2976,7 @@ def Hip_CausalConvWithStateOp : Hip_DpsOp_AutoReify<"causal_conv_with_state", [A
           "hipdnn_ep_op_state_construct_causal_conv_with_state", {});
     }
   }];
+  let hasVerifier = 1;
 }
 
 // ===== Group Query Attention =================================================
