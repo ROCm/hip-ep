@@ -637,9 +637,10 @@ PadOp::reifyResultShapes(OpBuilder &b,
 LogicalResult
 TileOp::reifyResultShapes(OpBuilder &b,
                           ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  std::optional<ArrayRef<int64_t>> staticRepeats = getStaticRepeats();
   SmallVector<OpFoldResult> dims;
   if (succeeded(mlir::hip::reifyTileShape(b, getLoc(), getInput(), getRepeats(),
-                                          dims))) {
+                                          staticRepeats, dims))) {
     reifiedReturnShapes.assign({std::move(dims)});
     return success();
   }
