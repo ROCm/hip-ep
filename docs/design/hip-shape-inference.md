@@ -179,7 +179,9 @@ Choose the smallest mechanism that matches the operation's semantics:
 | Tile | Constant repeats use exact mixed shape arithmetic; runtime repeats use one bulk synchronized readback and reify from that exact init |
 | MatMul/Gemm/MatMulNBits | Dedicated shape logic based on operand dimensions and attributes |
 | Attention or normalization with multiple destinations | One shape vector per DPS init unless an op supplies a dedicated thunk |
-| Convolution, pooling, or resize with converter-computed destinations | DPS-init shape, with semantic validity handled by conversion or verification |
+| Forward Conv (rank-3 converter/rank-4 HIP op) | Shared signed-floor spatial-window formula used by converter, reification, and verifier |
+| Rank-4 NCHW ConvTranspose | Shared ONNX formula used by converter, reification, and verifier |
+| Resize | DPS-init shape, with semantic validity handled by conversion |
 | Runtime-dependent count, such as NonZero or Compress | DPS-init shape; unresolved dimensions remain dynamic |
 
 Expand is the payload-aware exception in that row. A constant target validates
@@ -328,6 +330,31 @@ Do not replace this with an integer maximum: broadcasting dimensions 0 and 1
 produces 0, not 1. Variadic Max/Min share one
 `lowerVariadicBroadcastChain` helper that derives every pairwise intermediate
 type from this shared broadcast shape.
+
+Forward Conv uses a validated signed-floor spatial-window formula:
+`floor((input + pads - effectiveKernel) / stride) + 1`. Signed floor and
+intermediate arithmetic are required because the numerator can be negative
+even when the final extent is the valid value zero. Dilation contributes through
+`effectiveKernel = (kernel - 1) * dilation + 1`.
+
+Conv conversion applies the shared rule to the original rank-3 NCL shape before
+its NC1L expansion; `hip.conv` itself uses the rank-4 form. An omitted ONNX Conv
+`kernel_shape` is derived from static weight spatial dimensions. ConvTranspose
+likewise uses one rule for destination construction, reification, and static
+verification.
+
+Dynamic spatial-window arithmetic uses signed i128 from the input-dimension
+cast through effective-kernel multiplication, padded input, signed numerator,
+floor division, and raw output. This width covers every combination of
+nonnegative i64/index extents and i64 attributes without intermediate
+wraparound and stays equivalent to the static APInt rule. Before narrowing,
+each final extent must be in `[0, INT64_MAX]`; invalid extents select zero, so
+destination allocation is always safe. Forward Conv combines its per-axis
+checks into a `shape_valid` operand. The runtime records the shared recoverable
+error flag and skips MIOpen dispatch when that operand is false; the zero extent
+is failure containment, not successful shape recovery. Cached model artifacts
+compiled against the prior `wrap_miopenConvolutionForward` ABI must be
+invalidated.
 
 Reductions resolve to one internal out-to-in dimension map, consumed by both
 `inferReductionShape` (static extents) and `reifyReductionResultShape` (mixed

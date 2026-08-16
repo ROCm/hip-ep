@@ -662,14 +662,17 @@ def Hip_HipblasltGraphOp : Hip_Op<"hipblaslt.graph", [SingleBlock, NoTerminator]
 
 // ===== MIOpen DNN Operations =================================================
 
-def Hip_ConvOp : Hip_DpsOp_AutoReifyInfer<
-    "conv", /*outsAccessor=*/"Output", /*traits=*/[OpStateOpInterface]> {
+def Hip_ConvOp :
+    Hip_DpsOp_Semantic<"conv", /*traits=*/[OpStateOpInterface]> {
   let summary = "2D convolution operation using MIOpen (in-place)";
   let description = [{
     Performs 2D convolution using MIOpen (miopenConvolutionForward).
 
     Uses destination-passing style: output buffer is provided as argument,
-    operation writes result in-place.
+    operation writes result in-place. `shape_valid` is the combined runtime
+    range check for dynamic spatial extents; false means the destination was
+    safely clamped to zero and runtime dispatch must be skipped with a
+    recoverable inference error.
 
     Attributes:
     - kernel_shape: Array of kernel dimensions [H, W]
@@ -680,7 +683,7 @@ def Hip_ConvOp : Hip_DpsOp_AutoReifyInfer<
 
     Example:
     ```mlir
-    hip.conv(%ctx) ins(%input, %weights, %bias :
+    hip.conv(%ctx) valid(%shape_valid) ins(%input, %weights, %bias :
                        memref<1x3x224x224xf32, 1>,
                        memref<64x3x3x3xf32, 1>,
                        memref<64xf32, 1>)
@@ -692,6 +695,7 @@ def Hip_ConvOp : Hip_DpsOp_AutoReifyInfer<
 
   let arguments = (ins
     Hip_ContextType:$ctx,
+    I1:$shape_valid,
     Hip_TensorOrMemRef:$input,
     Hip_TensorOrMemRef:$weights,
     Optional<Hip_TensorOrMemRef>:$bias,
@@ -704,7 +708,8 @@ def Hip_ConvOp : Hip_DpsOp_AutoReifyInfer<
   );
 
   let assemblyFormat = [{
-    `(` $ctx `)` `ins` `(` $input `,` $weights (`,` $bias^)? `:`
+    `(` $ctx `)` `valid` `(` $shape_valid `)` `ins`
+    `(` $input `,` $weights (`,` $bias^)? `:`
     type($input) `,` type($weights) (`,` type($bias)^)? `)`
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^ )?
@@ -719,10 +724,14 @@ def Hip_ConvOp : Hip_DpsOp_AutoReifyInfer<
           {});
     }
   }];
+
+  let hasVerifier = 1;
 }
 
-def Hip_ConvTransposeOp : Hip_DpsOp_AutoReify<
-    "conv_transpose", /*traits=*/[OpStateOpInterface]> {
+def Hip_ConvTransposeOp :
+    Hip_DpsOp_Semantic<"conv_transpose",
+                       /*traits=*/[OpStateOpInterface],
+                       /*outsAccessor=*/"Output"> {
   let summary = "2D transposed convolution / deconvolution using MIOpen "
                 "(in-place)";
   let description = [{
@@ -791,6 +800,8 @@ def Hip_ConvTransposeOp : Hip_DpsOp_AutoReify<
           {});
     }
   }];
+
+  let hasVerifier = 1;
 }
 
 // ===== hipBLASLt ops =========================================================

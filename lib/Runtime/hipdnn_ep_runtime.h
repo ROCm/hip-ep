@@ -441,6 +441,18 @@ int hipdnn_ep_state_read_and_clear_error_flag(RuntimeState *state);
 // call this immediately after status-returning wrappers so generated inference
 // cannot silently continue with an unwritten output. Returns `status`.
 int hipdnn_ep_state_record_status(RuntimeState *state, int status);
+
+// Shared host-side guard for dynamic shape arithmetic. Returns 0 when valid.
+// On invalid input, records the recoverable runtime error flag and returns -1;
+// callers must skip all kernel/library dispatch.
+static inline int hipdnn_ep_validate_dynamic_shape(RuntimeState *state,
+                                                   int64_t shape_valid) {
+  if (shape_valid)
+    return 0;
+  if (state)
+    (void)hipdnn_ep_state_set_error_flag(state);
+  return -1;
+}
 // Mark the start of a new Compute() call. Invalidates per-forward-pass
 // runtime caches -- today: the GQA seqlens_k cache (see
 // runtime_state_internal.h for the canonical list).
@@ -748,34 +760,36 @@ int wrap_strided_copy(RuntimeState *state, void *dst_ptr, const void *src_ptr,
 // `data_type` is a HIPDNN_EP_DATATYPE_* enum value applied uniformly to the
 // input / weights / output tensor descriptors — MIOpen requires all three to
 // share the same element type. The host-side lowering derives this from the
-// hip.conv result memref's element type.
+// hip.conv result memref's element type. `shape_valid=0` records a recoverable
+// error and returns before descriptor creation or MIOpen dispatch.
 int wrap_miopenConvolutionForward(
     RuntimeState
         *state, // RuntimeState (opaque - extracts handle/stream internally)
     int32_t op_state_slot, // Op state slot
-    const void *input,     // Input tensor GPU pointer
-    int64_t input_n,       // Input batch size
-    int64_t input_c,       // Input channels
-    int64_t input_h,       // Input height
-    int64_t input_w,       // Input width
-    const void *weights,   // Weights tensor GPU pointer
-    int64_t weights_k,     // Output channels (number of filters)
-    const void *bias,      // Bias tensor GPU pointer (nullable)
-    void *output,          // Output tensor GPU pointer (in-place)
-    int64_t output_h,      // Output height
-    int64_t output_w,      // Output width
-    int64_t kernel_h,      // Kernel height
-    int64_t kernel_w,      // Kernel width
-    int64_t stride_h,      // Stride height
-    int64_t stride_w,      // Stride width
-    int64_t pad_top,       // Padding top
-    int64_t pad_left,      // Padding left
-    int64_t pad_bottom,    // Padding bottom
-    int64_t pad_right,     // Padding right
-    int64_t dilation_h,    // Dilation height
-    int64_t dilation_w,    // Dilation width
-    int64_t group,         // Number of groups
-    int64_t data_type);    // HIPDNN_EP_DATATYPE_* for I/O and weights
+    int64_t shape_valid, // Dynamic output-shape validity
+    const void *input,   // Input tensor GPU pointer
+    int64_t input_n,     // Input batch size
+    int64_t input_c,     // Input channels
+    int64_t input_h,     // Input height
+    int64_t input_w,     // Input width
+    const void *weights, // Weights tensor GPU pointer
+    int64_t weights_k,   // Output channels (number of filters)
+    const void *bias,    // Bias tensor GPU pointer (nullable)
+    void *output,        // Output tensor GPU pointer (in-place)
+    int64_t output_h,    // Output height
+    int64_t output_w,    // Output width
+    int64_t kernel_h,    // Kernel height
+    int64_t kernel_w,    // Kernel width
+    int64_t stride_h,    // Stride height
+    int64_t stride_w,    // Stride width
+    int64_t pad_top,     // Padding top
+    int64_t pad_left,    // Padding left
+    int64_t pad_bottom,  // Padding bottom
+    int64_t pad_right,   // Padding right
+    int64_t dilation_h,  // Dilation height
+    int64_t dilation_w,  // Dilation width
+    int64_t group,       // Number of groups
+    int64_t data_type);  // HIPDNN_EP_DATATYPE_* for I/O and weights
 
 // MIOpen transposed convolution (deconvolution) wrapper
 // Uses MIOpen's miopenTranspose convolution mode. Follows the opaque

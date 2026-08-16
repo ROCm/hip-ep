@@ -25,6 +25,48 @@ using namespace mlir;
 using namespace mlir::hip;
 
 //===----------------------------------------------------------------------===//
+// ConvOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult
+ConvOp::reifyResultShapes(OpBuilder &b,
+                          ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() != 1)
+    return failure();
+  FailureOr<SmallVector<OpFoldResult>> shape = mlir::hip::reifyConvResultShape(
+      b, getLoc(), getInput(), getWeights(),
+      detail::getI64Array(getKernelShape()), detail::getI64Array(getStrides()),
+      detail::getI64Array(getPads()), detail::getI64Array(getDilations()),
+      getGroup(), [&]() { return this->emitOpError(); });
+  if (failed(shape))
+    return failure();
+  reifiedReturnShapes.assign({std::move(*shape)});
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// ConvTransposeOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult ConvTransposeOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() == 0)
+    return failure();
+  FailureOr<SmallVector<OpFoldResult>> dims =
+      mlir::hip::reifyConvTransposeResultShape(
+          b, getLoc(), getInput(), getWeights(),
+          detail::getI64Array(getKernelShape()),
+          detail::getI64Array(getStrides()), detail::getI64Array(getPads()),
+          detail::getI64Array(getDilations()),
+          detail::getI64Array(getOutputPadding()), getGroup(),
+          [&]() { return this->emitOpError(); });
+  if (failed(dims))
+    return failure();
+  reifiedReturnShapes.assign({std::move(*dims)});
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // MatmulOp
 //
 // Reify delegates to the shared MatMul helper used by converter destination
