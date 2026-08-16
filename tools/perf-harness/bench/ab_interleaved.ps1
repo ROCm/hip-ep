@@ -67,6 +67,11 @@ param(
 $ErrorActionPreference = 'Stop'
 . (Join-Path (Split-Path -Parent $PSScriptRoot) 'common.ps1')
 
+# Captured here because inside a function $PSBoundParameters is that function's
+# own, so testing it from Invoke-Arm silently drops -MaxLength and bench_ttft
+# falls back to SeqLen + 128 instead.
+$maxLengthSet = $PSBoundParameters.ContainsKey('MaxLength')
+
 $armDefs = Get-Content $Manifest -Raw | ConvertFrom-Json
 $allArms = $armDefs.PSObject.Properties.Name
 if (-not $Arms) { $Arms = $allArms }
@@ -125,7 +130,7 @@ function Invoke-Arm {
     ExecutionProvider = $ExecutionProvider
     SetEnv           = $SetEnv
   }
-  if ($PSBoundParameters.ContainsKey('MaxLength')) { $fwd.MaxLength = $MaxLength }
+  if ($maxLengthSet) { $fwd.MaxLength = $MaxLength }
   & $benchTtft -Tag $Tag -Reps $RunReps -Warmup 1 -OutDir $OutDir @fwd 2>&1 |
     Where-Object { $_ -match 'TTFT \[' }
 }

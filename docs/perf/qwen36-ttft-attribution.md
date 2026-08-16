@@ -16,10 +16,20 @@ lowers its floor.
 
 ## Operating point
 
-`-Driver vlm -MaxTokens 2 -MaxLength 8192 -ExecutionProvider AMDGPU` against
+`-Driver vlm -MaxTokens 2 -ExecutionProvider AMDGPU` against
 `Qwen3.6-35B-A3B-fp16-ve-fp16-int4-text-gs32-dml` with the 2K prompt file, which
-yields **3985 prompt tokens** (2162 text, 1823 image). 16K was not used: a 16K
-VLM prefill exhausts this box's 63.6 GB of shared memory and hard-reboots it.
+yields **3985 prompt tokens** (2162 text, 1823 image) and a KV cache sized
+`max_length = 16512`. A 16K *prompt* was not used: it exhausts this box's 63.6 GB
+of shared memory and hard-reboots it. A 16K cache in front of a 4K prompt is
+fine, and peaks at about 5.0 GB.
+
+The cache size was not the intended one. These runs passed `-MaxLength 8192`, but
+`ab_interleaved.ps1` tested `$PSBoundParameters` from inside `Invoke-Arm`, where
+it holds that function's own parameters, so the value was silently dropped and
+`bench_ttft.ps1` fell back to `SeqLen + 128` = 16512. That is fixed now. It does
+not affect any comparison here — every arm ran the identical configuration, and
+the paired deltas are unchanged — but reproducing the absolute levels below needs
+the 16512 cache, not 8192.
 
 One artifact set per arm was built from the common merge-base and staged before
 any measurement, so no arm was rebuilt mid-campaign. Every arm deploys all three
@@ -193,8 +203,10 @@ single run.
 ```powershell
 . C:\Users\zyq\hipep-env.ps1
 $ab = 'tools\perf-harness\bench\ab_interleaved.ps1'
+# No -MaxLength: the campaign ran on the SeqLen + 128 = 16512 default, and
+# passing 8192 now that the forwarding bug is fixed would not reproduce it.
 $common = @{ Manifest = 'arms.json'; Reps = 4; SkipPrime = $true; Driver = 'vlm'
-             MaxTokens = 2; MaxLength = 8192; ExecutionProvider = 'AMDGPU' }
+             MaxTokens = 2; ExecutionProvider = 'AMDGPU' }
 & $ab @common -Arms base,stack -Rounds 10 -StartRound 1
 & $ab @common -Arms base,stack -Rounds 10 -StartRound 11 -Reverse
 python tools\perf-harness\bench\ab_summary.py <out>\ttft_summary.csv --baseline base
