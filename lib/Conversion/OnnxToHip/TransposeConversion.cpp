@@ -78,22 +78,21 @@ TransposeToHip::matchAndRewrite(mlir::Operation *op,
     seen[p] = true;
   }
 
-  // Build dynamic sizes for the DPS init tensor: output dim i = input dim
-  // perm[i].
-  llvm::SmallVector<mlir::Value> dynSizes;
-  for (auto [outDimIdx, srcDim] : llvm::enumerate(perm)) {
-    if (resultType.isDynamicDim(outDimIdx))
-      dynSizes.push_back(mlir::tensor::DimOp::create(
-          rewriter, loc, data, static_cast<int64_t>(srcDim)));
-  }
-
-  mlir::Value init =
-      mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
-                                    resultType.getElementType(), dynSizes);
+  // Same helper that backs `TransposeOp::reifyResultShapes`, so the
+  // destination and the shape consumers observe cannot disagree.
+  mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>> resultShape =
+      mlir::hip::reifyTransposeByPerm(rewriter, loc, data, perm);
+  if (mlir::failed(resultShape))
+    return rewriter.notifyMatchFailure(op, "Transpose perm is not reifiable");
+  mlir::FailureOr<mlir::Value> init = createEmptyTensorFromReifiedShape(
+      rewriter, loc, resultType, *resultShape);
+  if (mlir::failed(init))
+    return rewriter.notifyMatchFailure(
+        op, "Transpose result type is incompatible with the permuted shape");
 
   mlir::ArrayAttr permArrayAttr = rewriter.getI64ArrayAttr(perm);
   auto hipOp = mlir::hip::TransposeOp::create(rewriter, loc, context, data,
-                                              init, permArrayAttr);
+                                              *init, permArrayAttr);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
