@@ -46,15 +46,11 @@ ScatterElementsToHip::matchAndRewrite(mlir::Operation *op,
     return rewriter.notifyMatchFailure(
         op, "ScatterElements requires result rank == data rank");
 
-  llvm::SmallVector<mlir::Value> dynSizes;
-  for (int64_t i : llvm::seq<int64_t>(0, resultType.getRank())) {
-    if (!resultType.isDynamicDim(i))
-      continue;
-    dynSizes.push_back(mlir::tensor::DimOp::create(rewriter, loc, data, i));
-  }
-  mlir::Value init =
-      mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
-                                    resultType.getElementType(), dynSizes);
+  mlir::FailureOr<mlir::Value> init =
+      createSameShapeEmptyTensor(rewriter, loc, resultType, data);
+  if (mlir::failed(init))
+    return rewriter.notifyMatchFailure(
+        op, "result shape contradicts ScatterElements data shape");
 
   int64_t axis = 0;
   if (auto axisAttr = op->getAttrOfType<mlir::IntegerAttr>("axis"))
@@ -67,7 +63,7 @@ ScatterElementsToHip::matchAndRewrite(mlir::Operation *op,
     reductionAttr = rewriter.getStringAttr("none");
 
   auto scatterOp = mlir::hip::ScatterElementsOp::create(
-      rewriter, loc, context, data, indices, updates, init,
+      rewriter, loc, context, data, indices, updates, *init,
       rewriter.getI64IntegerAttr(axis), reductionAttr);
   rewriter.replaceOp(op, scatterOp->getResult(0));
   return mlir::success();
