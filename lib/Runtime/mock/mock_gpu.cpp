@@ -2,6 +2,7 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
+#include "gqa_contract.h"
 #include "hip/Support/SliceUtils.h"
 #include "hipdnn_ep_runtime.h"
 #include "matmul_gemm_contract.h"
@@ -735,16 +736,20 @@ int wrap_group_query_attention(
     fprintf(stderr, "Invalid state in wrap_group_query_attention\n");
     return -1;
   }
+  GqaRuntimeContractViolation contractViolation = validateGqaRuntimeContract(
+      position_ids != nullptr, output_qk != nullptr, qk_output, softcap);
+  if (contractViolation != GqaRuntimeContractViolation::None) {
+    fprintf(stderr, "wrap_group_query_attention: %s\n",
+            gqaRuntimeContractMessage(contractViolation));
+    return -1;
+  }
   (void)op_state_slot;
 
-  (void)position_ids;
   (void)head_sink;
   (void)k_scale;
   (void)v_scale;
-  (void)output_qk;
   (void)local_window_size;
   (void)smooth_softmax;
-  (void)qk_output;
   (void)k_quant_type;
   (void)v_quant_type;
   (void)kv_cache_bit_width;

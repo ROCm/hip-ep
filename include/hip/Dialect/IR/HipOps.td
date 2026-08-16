@@ -132,11 +132,6 @@ class Hip_DpsOp_SemanticAutoReifyInfer<
     list<Trait> traits = []> :
     Hip_DpsOp_AutoReifyInfer<mnemonic, outsAccessor, traits>;
 
-/// Semantic operation using the default destination-based reification only.
-class Hip_DpsOp_SemanticAutoReify<string mnemonic,
-                                  list<Trait> traits = []> :
-    Hip_DpsOp_AutoReify<mnemonic, traits>;
-
 /// Shape behavior controlled by compile-time or runtime tensor payloads.
 class Hip_DpsOp_Payload<string mnemonic,
                         list<Trait> traits = [],
@@ -3061,22 +3056,27 @@ def Hip_CausalConvWithStateOp :
 // ===== Group Query Attention =================================================
 
 def Hip_GqaOp :
-    Hip_DpsOp_SemanticAutoReify<"gqa",
-                                [AttrSizedOperandSegments,
-                                 OpStateOpInterface]> {
-  let summary = "Group Query Attention - Full MS spec implementation";
+    Hip_DpsOp_SemanticNoInfer<"gqa",
+                              [AttrSizedOperandSegments,
+                               OpStateOpInterface]> {
+  let summary = "Group Query Attention - supported Microsoft subset";
   let description = [{
-    Complete implementation of com.microsoft.GroupQueryAttention (v1) specification.
+    Implements the runtime-supported subset of
+    com.microsoft.GroupQueryAttention (v1).
 
     Supported features:
     - Grouped-query/Multi-query attention (GQA/MQA)
     - KV cache (BNSH format, supports past/present buffer sharing)
-    - RoPE (rotary position embedding, supports cos/sin cache + position_ids)
+    - RoPE with cos/sin caches (explicit position_ids is not supported)
     - Attention bias (ALiBi, T5 relative position bias, etc.)
     - Local / sliding-window attention
     - KV cache quantization (float8/int8/int4, per-tensor/per-channel)
     - Smooth softmax (numerical stability optimization)
-    - Debug output (QK matrix visualization)
+
+    The runtime contract rejects explicit `position_ids`, a materialized
+    `output_qk` or nonzero `qk_output`, and nonzero `softcap`. These forms must
+    be rejected by conversion, verification, reification, and lowering rather
+    than reaching a runtime path that ignores them.
 
     Cache format: BNSH (batch_size, num_heads, seq_len, head_size)
 
@@ -3119,7 +3119,7 @@ def Hip_GqaOp :
     // Inputs 8-10: RoPE related (optional)
     Optional<Hip_TensorOrMemRef>:$cos_cache,      // 2D (max_seq_len, head_size/2)
     Optional<Hip_TensorOrMemRef>:$sin_cache,      // 2D (max_seq_len, head_size/2)
-    Optional<Hip_TensorOrMemRef>:$position_ids,   // 2D (batch, seq_len), int64
+    Optional<Hip_TensorOrMemRef>:$position_ids,   // Schema slot; runtime-unsupported
 
     // Input 11: attention bias (optional - ALiBi etc.)
     Optional<Hip_TensorOrMemRef>:$attention_bias, // 4D (batch/1, heads/1, seq_q, seq_kv)
@@ -3135,7 +3135,7 @@ def Hip_GqaOp :
     Hip_TensorOrMemRef:$output,        // 3D (batch, seq_len, hidden_size)
     Hip_TensorOrMemRef:$present_key,   // 4D BNSH format
     Hip_TensorOrMemRef:$present_value, // 4D BNSH format
-    Optional<Hip_TensorOrMemRef>:$output_qk,  // Optional QK matrix output (debug)
+    Optional<Hip_TensorOrMemRef>:$output_qk,  // Schema slot; runtime-unsupported
 
     // === MS GQA Standard Attributes ===
 

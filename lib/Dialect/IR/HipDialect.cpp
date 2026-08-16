@@ -2075,7 +2075,7 @@ LogicalResult GemmOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
-// GqaOp: Full MS spec implementation
+// GqaOp: Runtime-supported Microsoft GroupQueryAttention subset
 //        ins(query, [key, value, past_key, past_value], seqlens_k,
 //        total_seq_len,
 //            [cos_cache, sin_cache, position_ids, attention_bias, head_sink,
@@ -2330,6 +2330,17 @@ LogicalResult LinearAttentionOp::verify() {
 }
 
 LogicalResult GqaOp::verify() {
+  if (getPositionIds())
+    return emitOpError("position_ids is unsupported by the runtime");
+  if (getOutputQk())
+    return emitOpError("output_qk is unsupported by the runtime");
+  if (getQkOutput() != 0)
+    return emitOpError("qk_output must be zero; QK output is unsupported by "
+                       "the runtime");
+  if (!getSoftcap().isZero())
+    return emitOpError("softcap must be exactly zero; nonzero softcap is "
+                       "unsupported by the runtime");
+
   SmallVector<Value> operands = {getQuery()};
   auto appendIfPresent = [&](Value value) {
     if (value)
@@ -2402,16 +2413,6 @@ LogicalResult GqaOp::verify() {
   if (bitWidth != 4 && bitWidth != 8) {
     return emitOpError("kv_cache_bit_width must be 4 or 8, got ") << bitWidth;
   }
-
-  // Verify qk_output mode
-  int64_t qkOutput = getQkOutput();
-  if (qkOutput < 0 || qkOutput > 2) {
-    return emitOpError("qk_output must be 0, 1, or 2, got ") << qkOutput;
-  }
-
-  if ((qkOutput != 0) != static_cast<bool>(getOutputQk()))
-    return emitOpError(
-        "output_qk must be present exactly when qk_output is nonzero");
 
   // Verify paired optional inputs: cos_cache/sin_cache must both be present or
   // both absent
@@ -2587,19 +2588,6 @@ LogicalResult GqaOp::verify() {
         presentCapacity < pastCapacity)
       return emitOpError(
           "present cache capacity cannot be smaller than past capacity");
-  }
-
-  if (Value outputQk = getOutputQk()) {
-    auto outputQkType = cast<ShapedType>(outputQk.getType());
-    if (outputQkType.getRank() != 4)
-      return emitOpError("output_qk must be rank-4");
-    if (failed(checkDim(outputQkType, 0, queryType, 0,
-                        "output_qk batch must match query batch")) ||
-        failed(checkStaticValue(outputQkType, 1, getNumHeads(),
-                                "output_qk head count must equal num_heads")) ||
-        failed(checkDim(outputQkType, 2, queryType, 1,
-                        "output_qk query sequence must match query")))
-      return failure();
   }
 
   return success();

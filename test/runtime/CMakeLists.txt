@@ -206,6 +206,20 @@ target_link_libraries(test-loop-frame PRIVATE Threads::Threads)
 add_test(NAME LoopFrameUnitTest COMMAND test-loop-frame)
 set_target_properties(test-loop-frame PROPERTIES FOLDER "runtime-tests")
 
+add_executable(test-gqa-contract
+    test_gqa_contract.cpp
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/mock/mock_gpu.cpp
+)
+target_compile_features(test-gqa-contract PRIVATE cxx_std_17)
+target_include_directories(test-gqa-contract PRIVATE
+    ${CMAKE_SOURCE_DIR}/lib/Runtime
+    ${CMAKE_SOURCE_DIR}/lib/Runtime/mock
+    ${CMAKE_SOURCE_DIR}/include
+)
+target_compile_definitions(test-gqa-contract PRIVATE HIPDNN_EP_RT_NO_EXPORT)
+add_test(NAME GqaContractUnitTest COMMAND test-gqa-contract)
+set_target_properties(test-gqa-contract PROPERTIES FOLDER "runtime-tests")
+
 # Header-only Slice preflight/extent arithmetic shared by compiler and runtime.
 # This keeps empty-output pointer handling and extreme-step ceil division
 # GPU-free and directly testable.

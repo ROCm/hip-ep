@@ -275,6 +275,19 @@ HIP-to-LLVM lowering all require i64 indices before emitting destination-shape
 IR or a runtime call. Supporting i32 indices would require an explicit runtime
 ABI extension rather than reusing this call.
 
+GroupQueryAttention's generated call retains Microsoft schema slots that the
+current runtime does not implement. `wrap_group_query_attention` requires a
+null `position_ids` pointer, a null `output_qk` pointer with `qk_output = 0`,
+and exact-zero f32 `softcap`. ONNX conversion rejects a live position input, a
+materialized fourth QK result, nonzero QK mode, and nonzero softcap before
+destination or readback IR is created. A four-result ONNX form whose fourth
+result has `NoneType` is an omitted optional output and maps to no HIP value.
+`hip.gqa` verification/reification and HIP-to-LLVM lowering repeat the checks
+defensively before shape or LLVM IR mutation. The real and mock wrappers reject
+violations as an ABI backstop; neither may silently ignore nonzero softcap.
+Supporting any of these forms requires an explicit runtime implementation and
+tests, not merely relaxing the compiler checks.
+
 ---
 
 ## Consumers

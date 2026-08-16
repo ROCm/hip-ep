@@ -20,6 +20,19 @@ struct GqaOpLowering : public ConvertOpToLLVMPattern<GqaOp> {
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     ModuleOp module = op->getParentOfType<ModuleOp>();
+    // Defend the runtime ABI even when lowering is invoked on unverified IR.
+    // These checks precede every LLVM operation and declaration insertion.
+    if (op.getPositionIds())
+      return op.emitOpError("position_ids is unsupported by the runtime");
+    if (op.getOutputQk())
+      return op.emitOpError("output_qk is unsupported by the runtime");
+    if (op.getQkOutput() != 0)
+      return op.emitOpError(
+          "qk_output must be zero; QK output is unsupported by the runtime");
+    if (!op.getSoftcap().isZero())
+      return op.emitOpError("softcap must be exactly zero; nonzero softcap is "
+                            "unsupported by the runtime");
+
     Type ptrType = getPtrType();
     Type i32Type = rewriter.getI32Type();
     Type i64Type = rewriter.getI64Type();

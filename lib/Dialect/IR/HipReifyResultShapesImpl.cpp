@@ -125,6 +125,37 @@ ResizeOp::reifyResultShapes(OpBuilder &b,
 }
 
 //===----------------------------------------------------------------------===//
+// GqaOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult
+GqaOp::reifyResultShapes(OpBuilder &b,
+                         ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  // Keep the defensive reifier contract mutation-free: reject unsupported
+  // schema forms before the shared DPS fallback can materialize tensor.dim.
+  if (getPositionIds()) {
+    emitOpError("position_ids is unsupported by the runtime");
+    return failure();
+  }
+  if (getOutputQk()) {
+    emitOpError("output_qk is unsupported by the runtime");
+    return failure();
+  }
+  if (getQkOutput() != 0) {
+    emitOpError("qk_output must be zero; QK output is unsupported by the "
+                "runtime");
+    return failure();
+  }
+  if (!getSoftcap().isZero()) {
+    emitOpError("softcap must be exactly zero; nonzero softcap is unsupported "
+                "by the runtime");
+    return failure();
+  }
+  return cast<HipDpsOp>(getOperation())
+      .reifyResultShapes(b, reifiedReturnShapes);
+}
+
+//===----------------------------------------------------------------------===//
 // MultiHeadAttentionOp
 //===----------------------------------------------------------------------===//
 

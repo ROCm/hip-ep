@@ -859,13 +859,15 @@ int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
                          int64_t a_batch_count, int64_t b_batch_count,
                          int64_t a_batch_stride, int64_t b_batch_stride);
 
-// GroupQueryAttention operation wrapper (Full MS spec)
+// GroupQueryAttention operation wrapper (supported Microsoft subset)
 // Called by generated IR for onnx.Custom(GroupQueryAttention) lowering
-// GQA runtime wrapper following the complete Microsoft ONNX Runtime
-// specification (14 inputs + 12 attributes).  Supports separate Q/K/V and
-// packed QKV paths, optional RoPE, KV cache management, local window
-// attention (local_window_size), and smooth softmax (head_sink /
-// smooth_softmax).
+// GQA runtime wrapper for the supported subset of the Microsoft ONNX Runtime
+// contract. Supports separate Q/K/V and packed QKV paths, optional RoPE
+// without explicit position_ids, KV cache management, local window attention
+// (local_window_size), and smooth softmax (head_sink / smooth_softmax).
+// Explicit position_ids, output_qk/qk_output, and nonzero softcap are rejected;
+// compiler conversion, verification, reification, and lowering reject the same
+// forms before this defensive runtime boundary.
 int wrap_group_query_attention(
     RuntimeState *state,
     int op_state_slot, // per-instance op-state slot (GEMM descriptor cache)

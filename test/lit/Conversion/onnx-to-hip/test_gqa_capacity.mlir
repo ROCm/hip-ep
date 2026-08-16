@@ -153,43 +153,4 @@ module {
           tensor<1x2x?x4xf16>
   }
 
-  // Optional QK is sized by the logical extent, not either present capacity.
-  // CHECK-LABEL: func.func @qk_uses_logical_extent
-  // CHECK-SAME: %[[QK_CTX:.*]]: !hip.context
-  // CHECK-SAME: %[[QK_PK:[^,]+]]: tensor<1x2x?x4xf16>
-  // CHECK-SAME: %[[QK_PV:[^,]+]]: tensor<1x2x?x4xf16>
-  // CHECK-SAME: %[[QK_TOTAL:[^,)]+]]: tensor<i32>
-  // CHECK: %[[QK_I32:.*]] = hip.readback_scalar(%[[QK_CTX]], %[[QK_TOTAL]] : tensor<i32>) -> i32
-  // CHECK: %[[QK_LOGICAL:.*]] = arith.index_cast %[[QK_I32]] : i32 to index
-  // CHECK-NOT: hip.readback_scalar
-  // CHECK: %[[QK_PK_DIM:.*]] = tensor.dim %[[QK_PK]]
-  // CHECK: %[[QK_PK_CAP:.*]] = arith.maxui %[[QK_PK_DIM]], %[[QK_LOGICAL]] : index
-  // CHECK: %[[QK_PV_DIM:.*]] = tensor.dim %[[QK_PV]]
-  // CHECK: %[[QK_PV_CAP:.*]] = arith.maxui %[[QK_PV_DIM]], %[[QK_LOGICAL]] : index
-  // CHECK: tensor.empty(%[[QK_PK_CAP]]) : tensor<1x2x?x4xf16>
-  // CHECK: tensor.empty(%[[QK_PV_CAP]]) : tensor<1x2x?x4xf16>
-  // CHECK: tensor.empty(%[[QK_LOGICAL]]) : tensor<1x4x1x?xf16>
-  func.func @qk_uses_logical_extent(
-      %query: tensor<1x1x16xf16>,
-      %key: tensor<1x1x8xf16>,
-      %value: tensor<1x1x8xf16>,
-      %past_key: tensor<1x2x?x4xf16>,
-      %past_value: tensor<1x2x?x4xf16>,
-      %seqlens_k: tensor<1xi32>,
-      %total: tensor<i32>)
-      -> (tensor<1x1x16xf16>, tensor<1x2x?x4xf16>,
-          tensor<1x2x?x4xf16>, tensor<1x4x1x?xf16>) {
-    %out:4 = "onnx.Custom"(%query, %key, %value, %past_key, %past_value,
-                           %seqlens_k, %total)
-        {domain_name = "com.microsoft", function_name = "GroupQueryAttention",
-         kv_num_heads = 2 : si64, num_heads = 4 : si64, qk_output = 1 : si64}
-        : (tensor<1x1x16xf16>, tensor<1x1x8xf16>, tensor<1x1x8xf16>,
-           tensor<1x2x?x4xf16>, tensor<1x2x?x4xf16>, tensor<1xi32>,
-           tensor<i32>)
-        -> (tensor<1x1x16xf16>, tensor<1x2x?x4xf16>,
-            tensor<1x2x?x4xf16>, tensor<1x4x1x?xf16>)
-    return %out#0, %out#1, %out#2, %out#3
-        : tensor<1x1x16xf16>, tensor<1x2x?x4xf16>,
-          tensor<1x2x?x4xf16>, tensor<1x4x1x?xf16>
-  }
 }

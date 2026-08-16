@@ -86,6 +86,9 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
   mlir::Value cosCache = getOptionalOperand(7);
   mlir::Value sinCache = getOptionalOperand(8);
   mlir::Value positionIds = getOptionalOperand(9);
+  if (positionIds)
+    return op->emitError(
+        "GroupQueryAttention position_ids is unsupported by the runtime");
 
   // Input 11: attention_bias (optional - ALiBi etc.)
   mlir::Value attentionBias = getOptionalOperand(10);
@@ -167,7 +170,21 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
   auto scaleAttr = getFloatAttr("scale", defaultScale);
   auto doRotaryAttr = getI64Attr("do_rotary", 0);
   auto rotaryInterleavedAttr = getI64Attr("rotary_interleaved", 0);
-  auto softcapAttr = getFloatAttr("softcap", 0.0f);
+  mlir::FloatAttr softcapAttr;
+  if (mlir::Attribute rawSoftcap = op->getAttr("softcap")) {
+    softcapAttr = mlir::dyn_cast<mlir::FloatAttr>(rawSoftcap);
+    if (!softcapAttr || !softcapAttr.getType().isF32())
+      return op->emitError(
+          "GroupQueryAttention softcap must be an f32 attribute");
+    // Inspect the source APFloat before any narrowing. This accepts either
+    // signed representation of exact zero and rejects every finite/non-finite
+    // nonzero value instead of silently rounding a tiny value to f32 zero.
+    if (!softcapAttr.getValue().isZero())
+      return op->emitError(
+          "GroupQueryAttention nonzero softcap is unsupported by the runtime");
+  } else {
+    softcapAttr = rewriter.getF32FloatAttr(0.0f);
+  }
   auto localWindowSizeAttr = getI64Attr("local_window_size", -1);
   auto smoothSoftmaxAttr = getI64Attr("smooth_softmax", 0);
   auto qkOutputAttr = getI64Attr("qk_output", 0);
@@ -182,6 +199,14 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
   if (numResults < 3 || numResults > 4)
     return rewriter.notifyMatchFailure(
         op, "GroupQueryAttention expects 3-4 results");
+  if (qkOutputAttr.getInt() != 0)
+    return op->emitError(
+        "GroupQueryAttention qk_output is unsupported by the runtime");
+  bool outputQkRequested =
+      numResults == 4 && !mlir::isa<mlir::NoneType>(op->getResult(3).getType());
+  if (outputQkRequested)
+    return op->emitError(
+        "GroupQueryAttention output_qk is unsupported by the runtime");
 
   auto outputType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
@@ -190,17 +215,11 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
   auto presentValueType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(2).getType());
 
-  mlir::RankedTensorType outputQkType = nullptr;
-  if (numResults == 4)
-    outputQkType =
-        mlir::cast<mlir::RankedTensorType>(op->getResult(3).getType());
-
   // === Create DPS init tensors ===
 
   mlir::FailureOr<GqaSequenceExtents> sequenceExtents =
       resolveGqaSequenceExtents(rewriter, loc, op, totalSeqLen, pastKey,
-                                pastValue, presentKeyType, presentValueType,
-                                outputQkType);
+                                pastValue, presentKeyType, presentValueType);
   if (mlir::failed(sequenceExtents))
     return rewriter.notifyMatchFailure(
         op, "cannot derive the GQA sequence extents");
@@ -216,24 +235,12 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
     return rewriter.notifyMatchFailure(
         op, "cannot derive the GQA present-cache destination shape");
 
-  mlir::Value outputQkInit = nullptr;
-  if (outputQkType) {
-    mlir::FailureOr<mlir::Value> init = createGqaQkEmpty(
-        rewriter, loc, outputQkType, query, sequenceExtents->logical, numHeads);
-    if (mlir::failed(init))
-      return rewriter.notifyMatchFailure(
-          op, "cannot derive the GQA QK destination shape");
-    outputQkInit = *init;
-  }
-
   // === Create hip.gqa operation ===
 
   mlir::SmallVector<mlir::Type> resultTypes;
   resultTypes.push_back(outputType);
   resultTypes.push_back(presentKeyType);
   resultTypes.push_back(presentValueType);
-  if (outputQkType)
-    resultTypes.push_back(outputQkType);
 
   // Build operands: context + inputs + outputs
   // Note: Only add non-null operands (optional ones may be nullptr)
@@ -267,8 +274,6 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
   operands.push_back(outputInit);
   operands.push_back(*presentKeyInit);
   operands.push_back(*presentValueInit);
-  if (outputQkInit)
-    operands.push_back(outputQkInit);
 
   // Build named attributes
   mlir::SmallVector<mlir::NamedAttribute> attrs;
@@ -325,17 +330,21 @@ mlir::LogicalResult GroupQueryAttentionToHip::matchAndRewrite(
   segmentSizes.push_back(headSink ? 1 : 0);
   segmentSizes.push_back(kScale ? 1 : 0);
   segmentSizes.push_back(vScale ? 1 : 0);
-  segmentSizes.push_back(1);                    // output
-  segmentSizes.push_back(1);                    // present_key
-  segmentSizes.push_back(1);                    // present_value
-  segmentSizes.push_back(outputQkInit ? 1 : 0); // output_qk
+  segmentSizes.push_back(1); // output
+  segmentSizes.push_back(1); // present_key
+  segmentSizes.push_back(1); // present_value
+  segmentSizes.push_back(0); // output_qk is unsupported
 
   state.addAttribute("operand_segment_sizes",
                      rewriter.getDenseI32ArrayAttr(segmentSizes));
 
   auto hipOp = rewriter.create(state);
 
-  rewriter.replaceOp(op, hipOp->getResults());
+  llvm::SmallVector<mlir::Value> replacements;
+  replacements.append(hipOp->result_begin(), hipOp->result_end());
+  if (numResults == 4)
+    replacements.push_back(mlir::Value{});
+  rewriter.replaceOp(op, replacements);
   return mlir::success();
 }
 

@@ -8,7 +8,7 @@
 //
 // This test suite validates:
 // - Custom ONNX op matching by function_name and domain_name
-// - Multi-output op lowering (3-4 outputs)
+// - Three materialized outputs, including an omitted fourth NoneType slot
 // - Attribute preservation (num_heads, kv_num_heads, scale, etc.)
 // - Optional inputs handling (packed QKV, quantization, etc.)
 // - f16 element type support
@@ -18,7 +18,7 @@
 // 1. Basic GQA (Llama-3.1-8B decode step)
 // 2. Packed QKV (key/value optional)
 // 3. Local window attention (Mistral)
-// 4. Full spec (all 14 inputs + all attributes)
+// 4. Supported advanced inputs with omitted position_ids/QK and zero softcap
 // ============================================================================
 
 // RUN: hip-mlir-opt %s --hip-add-context-arg --convert-onnx-to-hip | FileCheck %s
@@ -158,7 +158,7 @@ module {
   }
 
   // ===========================================================================
-  // Test 4: Full Spec - All 14 inputs + All 12 attributes + 4 outputs
+  // Test 4: Supported advanced inputs; unsupported schema slots stay omitted.
   // ===========================================================================
   func.func @test_full_spec(
       %query: tensor<1x128x4096xf16>,
@@ -170,20 +170,19 @@ module {
       %total_seq_len: tensor<i32>,
       %cos_cache: tensor<2048x64xf16>,
       %sin_cache: tensor<2048x64xf16>,
-      %position_ids: tensor<1x128xi64>,
       %attention_bias: tensor<1x32x128x128xf16>,
       %head_sink: tensor<32xf16>,
       %k_scale: tensor<1x8x1x128xf32>,
       %v_scale: tensor<1x8x1x128xf32>
-  ) -> (tensor<1x128x4096xf16>, tensor<1x8x128x128xf16>, tensor<1x8x128x128xf16>, tensor<1x32x128x128xf16>) {
+  ) -> (tensor<1x128x4096xf16>, tensor<1x8x128x128xf16>, tensor<1x8x128x128xf16>) {
 
     // CHECK-LABEL: func.func @test_full_spec
     // CHECK-SAME: (%[[CTX:.*]]: !hip.context,
 
-    // All 14 inputs (complete MS spec)
-    %out:4 = "onnx.Custom"(%query, %key, %value, %past_key, %past_value,
+    %none_position = "onnx.NoValue"() {value} : () -> none
+    %out:3 = "onnx.Custom"(%query, %key, %value, %past_key, %past_value,
                            %seqlens_k, %total_seq_len,
-                           %cos_cache, %sin_cache, %position_ids,
+                           %cos_cache, %sin_cache, %none_position,
                            %attention_bias, %head_sink, %k_scale, %v_scale)
         <{function_name = "GroupQueryAttention"}>
         {domain_name = "com.microsoft",
@@ -192,20 +191,20 @@ module {
          scale = 8.838834e-02 : f32,
          do_rotary = 1 : si64,
          rotary_interleaved = 0 : si64,
-         softcap = 3.000000e+01 : f32,
+         softcap = 0.000000e+00 : f32,
          local_window_size = 4096 : si64,
          smooth_softmax = 1 : si64,
-         qk_output = 2 : si64,
+         qk_output = 0 : si64,
          k_quant_type = "PER_CHANNEL",
          v_quant_type = "PER_CHANNEL",
          kv_cache_bit_width = 8 : si64}
         : (tensor<1x128x4096xf16>, tensor<1x128x1024xf16>, tensor<1x128x1024xf16>,
            tensor<1x8x0x128xf16>, tensor<1x8x0x128xf16>,
            tensor<1xi32>, tensor<i32>,
-           tensor<2048x64xf16>, tensor<2048x64xf16>, tensor<1x128xi64>,
+           tensor<2048x64xf16>, tensor<2048x64xf16>, none,
            tensor<1x32x128x128xf16>, tensor<32xf16>,
            tensor<1x8x1x128xf32>, tensor<1x8x1x128xf32>)
-        -> (tensor<1x128x4096xf16>, tensor<1x8x128x128xf16>, tensor<1x8x128x128xf16>, tensor<1x32x128x128xf16>)
+        -> (tensor<1x128x4096xf16>, tensor<1x8x128x128xf16>, tensor<1x8x128x128xf16>)
 
     // Verify all attributes are preserved (in alphabetical order)
     // CHECK: hip.gqa(%[[CTX]])
@@ -215,13 +214,11 @@ module {
     // CHECK-SAME: kv_num_heads = 8
     // CHECK-SAME: local_window_size = 4096
     // CHECK-SAME: num_heads = 32
-    // CHECK-SAME: qk_output = 2
     // CHECK-SAME: scale = {{0.088388[0-9]*|8.838834e-02}}
     // CHECK-SAME: smooth_softmax = 1
-    // CHECK-SAME: softcap = {{30.0+|3.000000e\+01}}
     // CHECK-SAME: v_quant_type = "PER_CHANNEL"
 
-    return %out#0, %out#1, %out#2, %out#3 : tensor<1x128x4096xf16>, tensor<1x8x128x128xf16>, tensor<1x8x128x128xf16>, tensor<1x32x128x128xf16>
+    return %out#0, %out#1, %out#2 : tensor<1x128x4096xf16>, tensor<1x8x128x128xf16>, tensor<1x8x128x128xf16>
   }
 
   // Dynamic present-cache sequence capacity is the maximum of the matching
@@ -269,5 +266,36 @@ module {
     return %out#0, %out#1, %out#2
         : tensor<?x?x4096xf16>, tensor<?x8x?x128xf16>,
           tensor<?x8x?x128xf16>
+  }
+
+  // A fourth NoneType result is an omitted output_qk, not a request to
+  // materialize QK. Negative zero has the same exact-zero softcap semantics.
+  func.func @test_fourth_none_and_negative_zero(
+      %query: tensor<1x1x32xf16>,
+      %key: tensor<1x1x16xf16>,
+      %value: tensor<1x1x16xf16>,
+      %past_key: tensor<1x2x4x8xf16>,
+      %past_value: tensor<1x2x4x8xf16>,
+      %seqlens: tensor<1xi32>,
+      %total: tensor<i32>)
+      -> (tensor<1x1x32xf16>, tensor<1x2x5x8xf16>,
+          tensor<1x2x5x8xf16>) {
+    %out:4 = "onnx.Custom"(
+        %query, %key, %value, %past_key, %past_value, %seqlens, %total)
+        <{function_name = "GroupQueryAttention"}>
+        {domain_name = "com.microsoft", num_heads = 4 : si64,
+         kv_num_heads = 2 : si64, softcap = -0.000000e+00 : f32}
+        : (tensor<1x1x32xf16>, tensor<1x1x16xf16>,
+           tensor<1x1x16xf16>, tensor<1x2x4x8xf16>,
+           tensor<1x2x4x8xf16>, tensor<1xi32>, tensor<i32>)
+        -> (tensor<1x1x32xf16>, tensor<1x2x5x8xf16>,
+            tensor<1x2x5x8xf16>, none)
+
+    // CHECK-LABEL: func.func @test_fourth_none_and_negative_zero
+    // CHECK: %{{.*}}:3 = hip.gqa
+    // CHECK-NOT: onnx.Custom
+    return %out#0, %out#1, %out#2
+        : tensor<1x1x32xf16>, tensor<1x2x5x8xf16>,
+          tensor<1x2x5x8xf16>
   }
 }

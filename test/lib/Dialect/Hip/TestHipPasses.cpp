@@ -268,6 +268,74 @@ struct TestHipDpsDefaultReifyPass final
   }
 };
 
+struct TestGqaReifyFailureAtomicPass final
+    : public mlir::PassWrapper<TestGqaReifyFailureAtomicPass,
+                               mlir::OperationPass<mlir::ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(TestGqaReifyFailureAtomicPass)
+
+  llvm::StringRef getArgument() const final {
+    return "test-gqa-reify-failure-atomic";
+  }
+  llvm::StringRef getDescription() const final {
+    return "Test mutation-free failure of unsupported GQA reification";
+  }
+
+  void runOnOperation() final {
+    mlir::IRRewriter rewriter(&getContext());
+    mlir::WalkResult walkResult =
+        getOperation().walk([&](mlir::hip::GqaOp op) -> mlir::WalkResult {
+          if (!op->hasAttr("test.gqa_reify_failure_atomic"))
+            return mlir::WalkResult::advance();
+          op->setAttr(
+              "softcap",
+              mlir::FloatAttr::get(mlir::Float32Type::get(&getContext()), 1.0));
+          mlir::Block *block = op->getBlock();
+          size_t before = std::distance(block->begin(), block->end());
+          mlir::DictionaryAttr attrsBefore = op->getAttrDictionary();
+          rewriter.setInsertionPoint(op);
+          mlir::ReifiedRankedShapedTypeDims reified;
+          if (mlir::succeeded(op.reifyResultShapes(rewriter, reified))) {
+            op.emitOpError(
+                "unsupported GQA reification unexpectedly succeeded");
+            return mlir::WalkResult::interrupt();
+          }
+          size_t after = std::distance(block->begin(), block->end());
+          if (after != before || op->getAttrDictionary() != attrsBefore ||
+              !reified.empty()) {
+            op.emitOpError("failed GQA reification mutated IR");
+            return mlir::WalkResult::interrupt();
+          }
+          op.emitRemark("failed GQA reification left IR unchanged");
+          return mlir::WalkResult::advance();
+        });
+    if (walkResult.wasInterrupted())
+      signalPassFailure();
+  }
+};
+
+struct TestMakeGqaSoftcapUnsupportedPass final
+    : public mlir::PassWrapper<TestMakeGqaSoftcapUnsupportedPass,
+                               mlir::OperationPass<mlir::ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(
+      TestMakeGqaSoftcapUnsupportedPass)
+
+  llvm::StringRef getArgument() const final {
+    return "test-make-gqa-softcap-unsupported";
+  }
+  llvm::StringRef getDescription() const final {
+    return "Inject unsupported GQA softcap after input verification";
+  }
+
+  void runOnOperation() final {
+    getOperation().walk([&](mlir::hip::GqaOp op) {
+      if (!op->hasAttr("test.gqa_lowering_unsupported"))
+        return;
+      op->setAttr("softcap", mlir::FloatAttr::get(
+                                 mlir::Float32Type::get(&getContext()), 1.0));
+    });
+  }
+};
+
 } // namespace
 
 void mlir::hip::test::registerHipTestPasses(DialectRegistry &registry) {
@@ -276,4 +344,6 @@ void mlir::hip::test::registerHipTestPasses(DialectRegistry &registry) {
   });
   PassRegistration<TestHipWholeShapeDimReifyPass>();
   PassRegistration<TestHipDpsDefaultReifyPass>();
+  PassRegistration<TestGqaReifyFailureAtomicPass>();
+  PassRegistration<TestMakeGqaSoftcapUnsupportedPass>();
 }

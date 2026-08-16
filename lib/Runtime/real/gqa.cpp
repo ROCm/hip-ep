@@ -46,6 +46,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "../debug_log.h"
+#include "../gqa_contract.h"
 #include "../hipdnn_ep_runtime.h"
 #include "../op_profile.h"
 #include "../op_state.h"
@@ -1876,8 +1877,11 @@ int wrap_group_query_attention(
   // wrong results. present_key/present_value are required by both paths (the
   // legacy decomposed pipeline reads/writes them as the BNSD KV cache).
   //===------------------------------------------------------------------===//
-  if (position_ids != nullptr) {
-    fprintf(stderr, "wrap_group_query_attention: position_ids not supported\n");
+  GqaRuntimeContractViolation contractViolation = validateGqaRuntimeContract(
+      position_ids != nullptr, output_qk != nullptr, qk_output, softcap);
+  if (contractViolation != GqaRuntimeContractViolation::None) {
+    fprintf(stderr, "wrap_group_query_attention: %s\n",
+            gqaRuntimeContractMessage(contractViolation));
     return -1;
   }
   // attention_bias (onnx.Attention external mask) is intentionally NOT rejected
@@ -1893,10 +1897,6 @@ int wrap_group_query_attention(
                          k_scale, v_scale, &kv_format))
     return -1;
   const bool kv_quantized = (kv_format != KvCacheFormat::Fp16);
-  if (output_qk != nullptr || qk_output != 0) {
-    fprintf(stderr, "wrap_group_query_attention: qk_output not supported\n");
-    return -1;
-  }
   if (!present_key || !present_value) {
     fprintf(stderr, "wrap_group_query_attention: GQA requires "
                     "present_key/present_value KV cache\n");
@@ -1917,7 +1917,6 @@ int wrap_group_query_attention(
 
   (void)total_seq_len;      // runtime derives total_seq from seqlens_k
   (void)rotary_interleaved; // interleaved layout handled inside hip_gqa_rope
-  (void)softcap;            // softcap not applied on either path
   (void)kv_cache_bit_width; // validated above for the int8 KV path
 
   //===------------------------------------------------------------------===//
