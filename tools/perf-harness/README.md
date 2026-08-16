@@ -110,8 +110,17 @@ Each of these is here because ignoring it produced a confident wrong answer.
 
 `HIPDNN_EP_PERF=1` costs about 4% on its own, which is larger than most changes
 worth shipping. SQTT is hardware thread tracing and perturbs far less, so it
-carries the timing. The harness clears `HIPDNN_EP_PERF` and `HIPDNN_EP_DEBUG`
-before every run rather than trusting the shell to be clean.
+carries the timing. The harness clears `HIPDNN_EP_PERF`, `HIPDNN_EP_DEBUG` and
+`HIPDNN_EP_TRACE_FILE` before every run rather than trusting the shell to be
+clean.
+
+`HIPDNN_EP_TRACE_FILE` is the dangerous one. `hipdnn_ep_perf_enabled()` is true
+for it as well as for `HIPDNN_EP_PERF`, so it enables the profiler while
+printing none of PERF's console output, and it survives in the shell after the
+capture that wanted it. A 16K VLM baseline was reported as 17,587 ms for a
+whole round of analysis on that basis; the same binaries measure 14,455-14,610
+ms once the variable is gone, and re-setting it reproduces 17,545 ms on demand.
+Cross-check any suspicious baseline by re-running it in a fresh shell.
 
 ### Rank by utilisation, not by share of runtime
 
