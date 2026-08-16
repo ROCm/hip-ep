@@ -79,12 +79,15 @@ FastGeluToHip::matchAndRewrite(mlir::Operation *op,
   if (!resultType)
     return rewriter.notifyMatchFailure(op, "FastGelu expects ranked output");
 
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+  auto init = createSameShapeEmptyTensor(rewriter, loc, resultType, input);
+  if (mlir::failed(init))
+    return rewriter.notifyMatchFailure(
+        op, "FastGelu result type must match the input shape");
 
   llvm::SmallVector<mlir::Value> operands = {context, input};
   if (bias)
     operands.push_back(bias);
-  operands.push_back(init);
+  operands.push_back(*init);
 
   auto hipOp = mlir::hip::FastGeluOp::create(rewriter, loc, operands);
   rewriter.replaceOp(op, hipOp.getResult(0));
