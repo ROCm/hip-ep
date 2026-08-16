@@ -177,8 +177,8 @@ def OptimizeMemRefsPass : Pass<"hip-optimize-memrefs", "mlir::func::FuncOp"> {
 
 def PromoteStridedHipOperandsPass
     : Pass<"hip-promote-strided-operands", "mlir::func::FuncOp"> {
-  let summary = "Materialize identity-layout temporaries for DPS-input memrefs "
-                "with non-identity layouts";
+  let summary = "Materialize identity-layout temporaries for bare-pointer "
+                "consumer memrefs with non-identity layouts";
   let description = [{
     Walks every DestinationStyleOpInterface op. For each DPS-input memref with
     a non-identity layout (a non-zero offset or non-contiguous strides), inserts:
@@ -195,6 +195,13 @@ def PromoteStridedHipOperandsPass
     semantics. The production pipeline normally supplies identity-layout inits
     through fresh allocations, `hip.alloc_output`, or `IdentityLayoutMap` at
     function boundaries.
+
+    Post-bufferization `hip.loop` captures are also promoted when the outlined
+    body argument expects identity layout. The pass validates the body symbol
+    and capture ABI before mutation, shares a copy across repeated identical
+    read-only captures, and deallocates it immediately after the invocation.
+    Loop-carried `v_init` operands are never promoted here because zero-trip
+    results may alias their borrowed seed descriptors.
 
     The pass exists to bridge the contract gap between the IR (which can
     represent non-identity layouts faithfully) and runtime ABIs that receive a

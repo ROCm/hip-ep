@@ -4,8 +4,9 @@
  */
 //===- PromoteStridedHipOperands.cpp - Normalize DPS input layouts --------===//
 //
-// Materializes an identity-layout temporary for each DPS-input memref operand
-// with a non-identity layout (a non-zero offset or non-contiguous strides).
+// Materializes an identity-layout temporary for each bare-pointer consumer
+// memref operand with a non-identity layout (a non-zero offset or
+// non-contiguous strides).
 //
 // Why this pass exists
 // --------------------
@@ -29,6 +30,15 @@
 // hip.alloc_output, or IdentityLayoutMap at function boundaries. Lowerings
 // that extract a bare pointer rely on that independent output-side invariant.
 //
+// Loop captures
+// -------------
+// After bufferization, a hip.loop capture may be a strided view while its
+// outlined body argument has the identity layout selected for function
+// boundaries. Captures are read-only and cannot alias loop results, so one
+// identity-layout copy per distinct capture is live only across the loop
+// invocation. Loop-carried v_init operands are deliberately excluded: a
+// zero-trip loop may return the borrowed seed descriptor.
+//
 // Pipeline placement
 // ------------------
 // Run between hip-optimize-memrefs and hip-pool-allocs (see Pipelines.cpp).
@@ -38,20 +48,23 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "hip/Dialect/IR/HipDialect.h"
 #include "hip/Dialect/Transforms/Passes.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "hip-promote-strided-operands"
 
 STATISTIC(NumOperandsPromoted,
-          "Number of non-identity-layout DPS inputs promoted");
+          "Number of non-identity-layout operands promoted");
 
 namespace mlir {
 namespace hip {
@@ -89,17 +102,15 @@ static SmallVector<Value> collectDynamicSizes(OpBuilder &builder, Location loc,
   return sizes;
 }
 
-/// Materializes an identity-layout copy of \p input immediately before
-/// \p consumer and rewrites the operand to use it. Returns the temporary so the
-/// caller can place a paired deallocation.
+/// Materializes an identity-layout copy of \p source immediately before
+/// \p consumer. Returns the temporary so the caller can rewrite the operand and
+/// place a paired deallocation.
 ///
 /// Resulting IR (alloc + copy only):
 ///   %tmp = memref.alloc(%dyn0, %dyn1, ...) : memref<...identity...>
 ///   memref.copy %source, %tmp
 ///   <consumer rewritten to read %tmp>
-static Value materializeIdentityLayoutCopy(OpOperand &input,
-                                           Operation *consumer) {
-  Value source = input.get();
+static Value materializeIdentityLayoutCopy(Value source, Operation *consumer) {
   auto sourceType = cast<MemRefType>(source.getType());
   MemRefType identityType = makeIdentityLayoutType(sourceType);
 
@@ -112,8 +123,6 @@ static Value materializeIdentityLayoutCopy(OpOperand &input,
   auto allocOp = memref::AllocOp::create(builder, loc, identityType, dynSizes);
   memref::CopyOp::create(builder, loc, source, allocOp.getResult());
 
-  input.set(allocOp.getResult());
-
   ++NumOperandsPromoted;
   LLVM_DEBUG(llvm::dbgs() << "  promoted " << sourceType << " -> "
                           << identityType << " before " << consumer->getName()
@@ -121,6 +130,22 @@ static Value materializeIdentityLayoutCopy(OpOperand &input,
 
   return allocOp.getResult();
 }
+
+/// Places paired deallocations immediately after \p consumer in allocation
+/// order.
+static void deallocateAfter(Operation *consumer, ValueRange temporaries) {
+  Operation *anchor = consumer;
+  OpBuilder builder(consumer);
+  for (Value temporary : temporaries) {
+    builder.setInsertionPointAfter(anchor);
+    anchor = memref::DeallocOp::create(builder, consumer->getLoc(), temporary);
+  }
+}
+
+struct LoopPromotionPlan {
+  LoopOp loop;
+  SmallVector<unsigned> captureIndices;
+};
 
 struct PromoteStridedHipOperandsPass
     : public impl::PromoteStridedHipOperandsPassBase<
@@ -138,6 +163,115 @@ void PromoteStridedHipOperandsPass::runOnOperation() {
   if (funcOp.empty())
     return;
 
+  // Validate every loop plan before changing any IR. A malformed body ABI must
+  // not leave earlier loops partially promoted.
+  SymbolTableCollection symbolTable;
+  SmallVector<LoopPromotionPlan> loopPlans;
+  WalkResult loopValidation = funcOp.walk([&](LoopOp loop) {
+    SmallVector<unsigned> candidates;
+    for (auto [index, capture] : llvm::enumerate(loop.getCaptures())) {
+      auto captureType = dyn_cast<MemRefType>(capture.getType());
+      if (captureType && isNonIdentityMemRef(captureType))
+        candidates.push_back(index);
+    }
+    if (candidates.empty())
+      return WalkResult::advance();
+
+    auto body = symbolTable.lookupNearestSymbolFrom<func::FuncOp>(
+        loop, loop.getBodyFuncAttr());
+    if (!body) {
+      loop.emitOpError("cannot promote strided captures: body_func '")
+          << loop.getBodyFunc() << "' does not reference a func.func";
+      return WalkResult::interrupt();
+    }
+
+    unsigned numCarriers = loop.getNumLoopCarried();
+    unsigned expectedArgs = 4 + numCarriers + loop.getCaptures().size();
+    if (body.getNumArguments() != expectedArgs) {
+      loop.emitOpError("cannot promote strided captures: body_func argument "
+                       "count mismatch; expected ")
+          << expectedArgs
+          << " (context, iter, cond, carriers, captures, frame), "
+          << "got " << body.getNumArguments();
+      return WalkResult::interrupt();
+    }
+
+    LoopPromotionPlan plan{loop, {}};
+    for (unsigned index : candidates) {
+      auto sourceType = cast<MemRefType>(loop.getCaptures()[index].getType());
+      unsigned bodyArgIndex = 3 + numCarriers + index;
+      auto bodyType =
+          dyn_cast<MemRefType>(body.getArgumentTypes()[bodyArgIndex]);
+      if (!bodyType) {
+        loop.emitOpError("cannot promote strided capture #")
+            << index << ": body argument #" << bodyArgIndex
+            << " must be a ranked memref";
+        return WalkResult::interrupt();
+      }
+      if (!bodyType.getLayout().isIdentity()) {
+        if (bodyType == sourceType)
+          continue;
+        loop.emitOpError("cannot promote strided capture #")
+            << index << ": body argument #" << bodyArgIndex
+            << " has an unsupported non-identity layout mismatch";
+        return WalkResult::interrupt();
+      }
+      if (bodyType.getRank() != sourceType.getRank()) {
+        loop.emitOpError("cannot promote strided capture #")
+            << index << ": body argument rank " << bodyType.getRank()
+            << " does not match capture rank " << sourceType.getRank();
+        return WalkResult::interrupt();
+      }
+      if (bodyType.getElementType() != sourceType.getElementType()) {
+        loop.emitOpError("cannot promote strided capture #")
+            << index << ": body argument element type "
+            << bodyType.getElementType()
+            << " does not match capture element type "
+            << sourceType.getElementType();
+        return WalkResult::interrupt();
+      }
+      MemRefType promotedType = makeIdentityLayoutType(sourceType);
+      if (bodyType.getShape() != promotedType.getShape()) {
+        loop.emitOpError("cannot promote strided capture #")
+            << index << ": body argument shape " << bodyType.getShape()
+            << " does not match capture shape " << promotedType.getShape();
+        return WalkResult::interrupt();
+      }
+      if (bodyType.getMemorySpace() != promotedType.getMemorySpace()) {
+        loop.emitOpError("cannot promote strided capture #")
+            << index << ": body argument memory space "
+            << bodyType.getMemorySpace()
+            << " does not match capture memory space "
+            << promotedType.getMemorySpace();
+        return WalkResult::interrupt();
+      }
+      plan.captureIndices.push_back(index);
+    }
+    if (!plan.captureIndices.empty())
+      loopPlans.push_back(std::move(plan));
+    return WalkResult::advance();
+  });
+  if (loopValidation.wasInterrupted())
+    return signalPassFailure();
+
+  for (LoopPromotionPlan &plan : loopPlans) {
+    DenseMap<Value, Value> promoted;
+    SmallVector<Value> temporaries;
+    MutableOperandRange captures = plan.loop.getCapturesMutable();
+    for (unsigned index : plan.captureIndices) {
+      OpOperand &capture = captures[index];
+      Value source = capture.get();
+      auto [it, inserted] = promoted.try_emplace(source);
+      if (inserted) {
+        it->second =
+            materializeIdentityLayoutCopy(source, plan.loop.getOperation());
+        temporaries.push_back(it->second);
+      }
+      capture.set(it->second);
+    }
+    deallocateAfter(plan.loop.getOperation(), temporaries);
+  }
+
   // Collect candidate consumers first so that rewriting (which inserts new
   // ops) does not invalidate the walk.
   SmallVector<DestinationStyleOpInterface> consumers;
@@ -151,21 +285,12 @@ void PromoteStridedHipOperandsPass::runOnOperation() {
       auto type = dyn_cast<MemRefType>(input->get().getType());
       if (!type || !isNonIdentityMemRef(type))
         continue;
-      temporaries.push_back(materializeIdentityLayoutCopy(*input, consumer));
+      Value temporary = materializeIdentityLayoutCopy(input->get(), consumer);
+      input->set(temporary);
+      temporaries.push_back(temporary);
     }
 
-    // Emit deallocs in the same order as the allocations (TA, TB, ...).
-    // Without anchoring, repeated `setInsertionPointAfter(consumer)` would
-    // push each new dealloc directly after the consumer, reversing the
-    // sequence.  Advancing the anchor preserves source order and makes the
-    // IR easier to read in tests / dumps.
-    Operation *anchor = consumer;
-    OpBuilder builder(consumer);
-    for (Value temporary : temporaries) {
-      builder.setInsertionPointAfter(anchor);
-      anchor =
-          memref::DeallocOp::create(builder, consumer->getLoc(), temporary);
-    }
+    deallocateAfter(consumer, temporaries);
   }
 }
 

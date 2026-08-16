@@ -338,3 +338,55 @@ func.func @non_hip_dps_input_promoted(
   }
   return
 }
+
+// ----------------------------------------------------------------------------
+// Loop captures use the outlined body signature as their ABI contract. Repeated
+// read-only captures of the same strided value share one identity-layout copy,
+// which remains live through the invocation and is deallocated immediately
+// afterward. The carrier seed is not promoted or deallocated: a zero-trip loop
+// may return that borrowed descriptor.
+//
+// The input intentionally models the verifier-supported transient
+// post-bufferization layout mismatch repaired by this pass.
+// ----------------------------------------------------------------------------
+// CHECK-LABEL: func.func @loop_capture_promoted_once
+// CHECK-SAME:    %[[SEED:[^ ,]+]]: memref<4x4xf32>
+// CHECK:         %[[CAPTURE:.*]] = memref.subview
+// CHECK:         %[[TMP:.*]] = memref.alloc() : memref<4x4xf32>
+// CHECK-NEXT:    memref.copy %[[CAPTURE]], %[[TMP]]
+// CHECK-NEXT:    %[[LOOP:.*]]:2 = hip.loop
+// CHECK-SAME:      iter_args(%[[SEED]] : memref<4x4xf32>)
+// CHECK-SAME:      captures(%[[TMP]], %[[TMP]] : memref<4x4xf32>, memref<4x4xf32>)
+// CHECK-NEXT:    memref.dealloc %[[TMP]]
+// CHECK-NEXT:    memref.copy %[[LOOP]]#0
+// CHECK-NOT:     memref.dealloc %[[SEED]]
+func.func private @loop_capture_promoted_once_body(
+    %ctx: !hip.context, %iter: memref<i64>, %cond: memref<i1>,
+    %current: memref<4x4xf32>, %capture0: memref<4x4xf32>,
+    %capture1: memref<4x4xf32>, %frame: !hip.loop_frame)
+    -> (i32, memref<4x4xf32>) {
+  %status = arith.constant 0 : i32
+  return %status, %current : i32, memref<4x4xf32>
+}
+
+func.func @loop_capture_promoted_once(
+    %ctx: !hip.context, %parent: memref<4x8xf32>,
+    %seed: memref<4x4xf32>, %after: memref<4x4xf32>) {
+  %zero = arith.constant 0 : index
+  %true = arith.constant true
+  %capture = memref.subview %parent[0, 2][4, 4][1, 1]
+      : memref<4x8xf32>
+        to memref<4x4xf32, strided<[8, 1], offset: 2>>
+  %result, %loop_frame = hip.loop(%ctx, %zero, %true)
+      iter_args(%seed : memref<4x4xf32>)
+      captures(%capture, %capture
+        : memref<4x4xf32, strided<[8, 1], offset: 2>>,
+          memref<4x4xf32, strided<[8, 1], offset: 2>>)
+      -> (memref<4x4xf32>, !hip.loop_frame)
+      body @loop_capture_promoted_once_body
+      {cond_is_passthrough, descriptor_return,
+       num_loop_carried = 1 : i32}
+  memref.copy %result, %after : memref<4x4xf32> to memref<4x4xf32>
+  hip.loop_frame_destroy(%ctx, %loop_frame)
+  return
+}
