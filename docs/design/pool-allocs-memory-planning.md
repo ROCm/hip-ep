@@ -93,6 +93,14 @@ reification, CSE, and buffer reuse a canonical root dimension. Conflicting
 control-flow joins and unknown or device-produced target shapes deliberately
 keep the synchronized fallback.
 
+ONNX symbolic dimension identity is another pre-conversion pool-quality input.
+When every dynamic non-unit contributor to one broadcast result axis carries
+the same eligible non-empty `dim_param`, destination construction reuses one
+operand dimension instead of materializing a redundant runtime merge. The
+exact runtime broadcast remains for missing, unequal, malformed, or
+independently bound identities. This avoids late duplicate size cones without
+changing PoolAllocs, HIP reification, or runtime allocation semantics.
+
 Pre-bufferization `hip-resolve-tensor-dims` serves a related purpose for tensor reshape chains. It lets upstream reification and canonicalization reduce `tensor.dim` queries before they become memref-level size arithmetic. Coverage of standard tensor reshape operations requires `tensor::registerInferTypeOpInterfaceExternalModels` on the dialect registry.
 
 ## PoolAllocs algorithm

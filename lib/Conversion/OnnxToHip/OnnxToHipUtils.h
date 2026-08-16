@@ -12,6 +12,7 @@
 #ifndef HIP_CONVERSION_ONNXTOHIP_UTILS_H
 #define HIP_CONVERSION_ONNXTOHIP_UTILS_H
 
+#include "OnnxDimParams.h"
 #include "ReadbackScalar.h"
 
 #include "hip/Conversion/HipConversionUtils.h"
@@ -75,6 +76,27 @@ inline mlir::Value createEmptyTensor(mlir::OpBuilder &builder,
   }
   return mlir::tensor::EmptyOp::create(builder, loc, resultType.getShape(),
                                        resultType.getElementType(), dynSizes);
+}
+
+inline mlir::FailureOr<mlir::Value>
+createOnnxBroadcastEmptyTensor(mlir::OpBuilder &builder, mlir::Location loc,
+                               mlir::RankedTensorType resultType,
+                               mlir::ValueRange operands,
+                               mlir::Operation *onnxOp) {
+  llvm::SmallVector<int64_t> sources = getBroadcastDimSources(onnxOp);
+  for (int64_t &source : sources) {
+    if (source < 0)
+      continue;
+    if (source >= static_cast<int64_t>(onnxOp->getNumOperands()))
+      return mlir::failure();
+    mlir::Value plannedOperand = onnxOp->getOperand(source);
+    auto found = llvm::find(operands, plannedOperand);
+    if (found == operands.end())
+      return mlir::failure();
+    source = static_cast<int64_t>(found - operands.begin());
+  }
+  return mlir::hip::createBroadcastEmptyTensor(builder, loc, resultType,
+                                               operands, sources);
 }
 
 /// Return the dense payload of a structurally known compile-time tensor
@@ -240,14 +262,19 @@ lowerVariadicBroadcastChain(mlir::Operation *op,
   mlir::Value accumulate = op->getOperand(0);
   for (unsigned i : llvm::seq<unsigned>(1, numInputs)) {
     mlir::Value rhs = op->getOperand(i);
+    auto stepShape = mlir::hip::reifyBroadcastResultShape(
+        rewriter, loc, {accumulate, rhs}, [&]() { return op->emitError(); });
+    if (mlir::failed(stepShape))
+      return mlir::failure();
+
     bool isFinal = i == numInputs - 1;
     mlir::RankedTensorType stepResultType =
         isFinal ? resultType
                 : mlir::RankedTensorType::get(stepStaticShapes[i - 1],
                                               resultType.getElementType(),
                                               resultType.getEncoding());
-    auto init = createBroadcastEmptyTensor(rewriter, loc, stepResultType,
-                                           {accumulate, rhs});
+    auto init = createEmptyTensorFromReifiedShape(rewriter, loc, stepResultType,
+                                                  *stepShape);
     if (mlir::failed(init))
       return rewriter.notifyMatchFailure(
           op, llvm::Twine(opName) +

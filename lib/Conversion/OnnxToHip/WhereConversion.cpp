@@ -48,8 +48,8 @@ WhereToHip::matchAndRewrite(mlir::Operation *op,
 
   // Use the same NumPy broadcast rule as hip.where reification, including the
   // runtime case where an earlier dynamic operand resolves to one.
-  mlir::FailureOr<mlir::Value> initOrFailure =
-      createBroadcastEmptyTensor(rewriter, loc, resultType, {condition, x, y});
+  mlir::FailureOr<mlir::Value> initOrFailure = createOnnxBroadcastEmptyTensor(
+      rewriter, loc, resultType, {condition, x, y}, op);
   if (mlir::failed(initOrFailure))
     return rewriter.notifyMatchFailure(
         op, "onnx.Where: no ranked operand spans dynamic result dim");
