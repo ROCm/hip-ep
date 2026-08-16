@@ -152,6 +152,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for PR, formatting, AI-disclosure, and co
 - Fully dynamic broadcast uses `select(lhs == 1, rhs, lhs)`, not integer maximum: broadcasting extents 0 and 1 produces 0.
 - Rank-zero success is an empty shape carried by `FailureOr`; never use an empty vector as both success and failure.
 - Variadic Max/Min share one pairwise-chain helper so every intermediate rank comes from the shared broadcast shape.
+- Reductions resolve to one out-to-in dimension map. `keepdims = 0` makes the output dimension order non-positional in the input, so never copy input extents positionally when a reduced axis can precede a kept one.
+- Reduction axes must be compile-time constants in both tensor and memref form. Normalize negative axes, require one contiguous span, and derive lowering strides from that validated span rather than comparing input/output extents.
 - MatMul and Gemm share static shape validation across conversion, verification, and reification. Unknown extents are not proofs of equality. The existing lowering carries one contraction K; MatMul takes its batch count from A and selects B's batch stride. Do not describe these compile-time checks as runtime validation or change the runtime ABI as part of a shape-only refactor.
 - See [docs/design/hip-shape-inference.md](docs/design/hip-shape-inference.md).
 
