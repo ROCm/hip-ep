@@ -255,20 +255,23 @@ module {
   }
 
   // CHECK-LABEL: func.func @main_graph_v_init_refined
-  // The ABI-only layer normalizes under-refined body boundaries to v_init.
+  // The joined carrier contract widens because the body current/yield are
+  // dynamic even though v_init and the source Loop result are static.
+  // CHECK: %[[SEED_CAST:.*]] = tensor.cast %{{.*}} : tensor<16xf32> to tensor<?xf32>
   // CHECK: %[[R:.*]] = hip.loop
-  // CHECK-SAME: iter_args(%{{.*}} : tensor<16xf32>)
-  // CHECK-SAME: -> (tensor<16xf32>)
+  // CHECK-SAME: iter_args(%[[SEED_CAST]] : tensor<?xf32>)
+  // CHECK-SAME: -> (tensor<?xf32>)
   // CHECK-SAME: body @main_graph_v_init_refined_loop_body_n0
-  // CHECK: return %[[R]] : tensor<16xf32>
+  // CHECK: %[[RESULT_CAST:.*]] = tensor.cast %[[R]] : tensor<?xf32> to tensor<16xf32>
+  // CHECK: return %[[RESULT_CAST]] : tensor<16xf32>
   //
-  // Body current/result slots use the same exact descriptor contract.
+  // Body current/result slots use the same joined dynamic contract.
   // CHECK-LABEL: func.func private @main_graph_v_init_refined_loop_body_n0
   // CHECK-SAME: (%{{.*}}: !hip.context,
   // CHECK-SAME:  %{{.*}}: tensor<i64>,
   // CHECK-SAME:  %{{.*}}: tensor<i1>,
-  // CHECK-SAME:  %[[V_IN:.*]]: tensor<16xf32>,
-  // CHECK-SAME:  %{{.*}}: !hip.loop_frame) -> (i32, tensor<16xf32>)
+  // CHECK-SAME:  %[[V_IN:.*]]: tensor<?xf32>,
+  // CHECK-SAME:  %{{.*}}: !hip.loop_frame) -> (i32, tensor<?xf32>)
 }
 
 // -----

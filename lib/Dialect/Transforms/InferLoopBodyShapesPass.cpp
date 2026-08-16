@@ -243,12 +243,13 @@ static void inferLoopBodyShapes(func::FuncOp body, hip::LoopOp loopOp) {
   Operation::operand_range vInit = loopOp.getVInit();
   static constexpr unsigned kArgVCarryStart = 3;
 
-  // 1. Seed loop-carried block args from the exact v_init types. This ABI-only
-  //    layer rejects shape-changing carriers before outlining.
+  // 1. Seed loop-carried block args from the conservative joined loop result
+  //    types. Never re-narrow from a more-static zero/one-trip seed.
   for (auto [i, v] : llvm::enumerate(vInit)) {
+    (void)v;
     unsigned argSlot = kArgVCarryStart + i;
     if (argSlot < entry.getNumArguments())
-      entry.getArgument(argSlot).setType(v.getType());
+      entry.getArgument(argSlot).setType(loopOp.getResult(i).getType());
   }
 
   // 2. Forward-infer unranked onnx.* results from their (seeded) operands.
@@ -267,13 +268,13 @@ static void inferLoopBodyShapes(func::FuncOp body, hip::LoopOp loopOp) {
     if (auto cast = carried.getDefiningOp<tensor::CastOp>()) {
       Value source = cast.getSource();
       if (isa<UnrankedTensorType>(source.getType())) {
-        Type contract = v.getType();
+        Type contract = loopOp.getResult(i).getType();
         source.setType(contract);
         ++NumLoopContractRanked;
       }
     }
     if (isa<UnrankedTensorType>(carried.getType())) {
-      Type contract = v.getType();
+      Type contract = loopOp.getResult(i).getType();
       LLVM_DEBUG(DBGS() << "backstop return slot " << slot << ": "
                         << carried.getType() << " -> " << contract << "\n");
       carried.setType(contract);
