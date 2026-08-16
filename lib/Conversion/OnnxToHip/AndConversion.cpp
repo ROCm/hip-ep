@@ -44,7 +44,7 @@ struct AndToHip : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(op, "expected ranked tensor inputs");
 
     mlir::FailureOr<mlir::Value> initOrFailure =
-        createBroadcastEmptyTensor(rewriter, loc, resultType, {a, b});
+        createOnnxBroadcastEmptyTensor(rewriter, loc, resultType, {a, b}, op);
     if (mlir::failed(initOrFailure))
       return rewriter.notifyMatchFailure(
           op, "And: no ranked operand spans dynamic result dim");
