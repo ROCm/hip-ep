@@ -26,6 +26,14 @@ reifyBroadcastShape(OpBuilder &b, Location loc,
                     function_ref<InFlightDiagnostic()> emitError,
                     ArrayRef<int64_t> canonicalOperandForResultDim = {});
 
+/// Apply `dim * scale + offset`, folding constants when possible. Static
+/// arithmetic is checked before narrowing to an index attribute. Dynamic SSA
+/// arithmetic intentionally retains the existing index operations; callers
+/// must validate every statically-derived scale and offset before calling.
+FailureOr<OpFoldResult> scaleAndOffsetDim(OpBuilder &b, Location loc,
+                                          OpFoldResult dim, int64_t scale,
+                                          int64_t offset);
+
 } // namespace mlir::hip::detail
 
 #endif // HIP_DIALECT_IR_HIP_SHAPE_UTILS_INTERNAL_H

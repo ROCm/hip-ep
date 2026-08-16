@@ -226,6 +226,32 @@ reifyBroadcastShape(OpBuilder &b, Location loc,
 
 } // namespace mlir::hip::detail
 
+namespace mlir::hip::detail {
+
+FailureOr<OpFoldResult> scaleAndOffsetDim(OpBuilder &b, Location loc,
+                                          OpFoldResult dim, int64_t scale,
+                                          int64_t offset) {
+  if (std::optional<int64_t> constant = getConstantIntValue(dim)) {
+    APInt value = APInt(128, *constant, /*isSigned=*/true) *
+                      APInt(128, scale, /*isSigned=*/true) +
+                  APInt(128, offset, /*isSigned=*/true);
+    if (!value.isSignedIntN(64))
+      return failure();
+    return OpFoldResult(b.getIndexAttr(value.getSExtValue()));
+  }
+
+  Value value = getValueOrCreateConstantIndexOp(b, loc, dim);
+  if (scale != 1)
+    value = arith::MulIOp::create(
+        b, loc, value, arith::ConstantIndexOp::create(b, loc, scale));
+  if (offset != 0)
+    value = arith::AddIOp::create(
+        b, loc, value, arith::ConstantIndexOp::create(b, loc, offset));
+  return OpFoldResult(value);
+}
+
+} // namespace mlir::hip::detail
+
 LogicalResult mlir::hip::verifyDpsComputeOp(Operation *op,
                                             ArrayRef<Value> dataOperands,
                                             unsigned numInits) {
