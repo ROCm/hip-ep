@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 
 int runtime_errors = 0;
 
@@ -140,10 +141,52 @@ void test_set_null_state() {
 //    `!state` half of the guard (test 2 covers the `!allocate` half).
 void test_alloc_null_state() {
   g_cap = StubCapture{};
+  runtime_errors = 0;
   const int64_t shape[1] = {1};
   void *p = hipdnn_ep_alloc_output(nullptr, 0, shape, 1, 4);
   CHECK(p == nullptr);
   CHECK(g_cap.calls == 0);
+  CHECK(runtime_errors == 0);
+}
+
+void test_invalid_logical_shapes_record_error() {
+  g_cap = StubCapture{};
+  int ctx = 0;
+  RuntimeState st = makeState();
+  hipdnn_output_allocator_t alloc{&ctx, stub_allocate};
+  hipdnn_ep_set_output_allocator(&st, &alloc);
+
+  auto expectInvalid = [&](const int64_t *shape, int64_t rank,
+                           int64_t elemSize) {
+    int previousErrors = runtime_errors;
+    int previousCalls = g_cap.calls;
+    CHECK(hipdnn_ep_alloc_output(&st, 0, shape, rank, elemSize) == nullptr);
+    CHECK(runtime_errors == previousErrors + 1);
+    CHECK(g_cap.calls == previousCalls);
+  };
+
+  runtime_errors = 0;
+  const int64_t negativeShape[1] = {-1};
+  expectInvalid(negativeShape, 1, sizeof(float));
+  expectInvalid(nullptr, 1, sizeof(float));
+  expectInvalid(negativeShape, -1, sizeof(float));
+  const int64_t overflowShape[2] = {std::numeric_limits<int64_t>::max(), 2};
+  expectInvalid(overflowShape, 2, sizeof(int64_t));
+  const int64_t validShape[1] = {1};
+  expectInvalid(validShape, 1, 0);
+}
+
+void test_zero_byte_output_remains_valid() {
+  g_cap = StubCapture{};
+  runtime_errors = 0;
+  int ctx = 0;
+  RuntimeState st = makeState();
+  hipdnn_output_allocator_t alloc{&ctx, stub_allocate};
+  hipdnn_ep_set_output_allocator(&st, &alloc);
+  const int64_t zeroShape[2] = {3, 0};
+  CHECK(hipdnn_ep_alloc_output(&st, 4, zeroShape, 2, sizeof(float)) == nullptr);
+  CHECK(g_cap.calls == 1);
+  CHECK(runtime_errors == 0);
 }
 
 void test_safe_output_copy() {
@@ -182,6 +225,8 @@ int main() {
   test_nullptr_setter_arg();
   test_set_null_state();
   test_alloc_null_state();
+  test_invalid_logical_shapes_record_error();
+  test_zero_byte_output_remains_valid();
   test_safe_output_copy();
   if (g_failures == 0) {
     std::printf("output_allocator unit test: ALL PASS\n");

@@ -5,8 +5,8 @@
 //   input  1x128x256x96
 //   axis=1, start=0, end=8  ->  1x8x256x96
 //
-// Uses onnx.Constant operands so the SliceShapeFold -> SliceDecompose path is
-// exercised before carrier conversion and externalization.
+// Uses onnx.Constant operands so SliceDecompose must consume the dense
+// hip.constant carriers directly before standalone externalization.
 
 // RUN: mkdir -p %t && hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip --hip-externalize-constants='externalize-min-num-elements=1 externalize-output-dir=%t' %s | FileCheck %s
 
@@ -30,6 +30,7 @@ module {
 
     // CHECK-NOT: onnx.Slice
     // CHECK-NOT: hip.slice
+    // CHECK-NOT: hipdnn.slice_
     // CHECK: tensor.extract_slice {{.*}}[0, 0, 0, 0] [1, 8, 256, 96] [1, 1, 1, 1]
 
     return %r : tensor<1x8x256x96xf16>

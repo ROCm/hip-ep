@@ -10,6 +10,8 @@
 #include "llvm/Support/MathExtras.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpDefinition.h"
@@ -447,9 +449,30 @@ LogicalResult LoopOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
              << i << " type " << args[3 + i]
              << " must match loop carrier result type "
              << getResult(i).getType();
-  for (unsigned i = 0; i < numCaptures; ++i)
-    if (args[3 + numLoopCarried + i] != getCaptures()[i].getType())
+  for (unsigned i = 0; i < numCaptures; ++i) {
+    Type bodyCapture = args[3 + numLoopCarried + i];
+    Type capture = getCaptures()[i].getType();
+    if (bodyCapture == capture)
+      continue;
+
+    // One-Shot Bufferize can turn an extract_slice capture into a strided
+    // memref while function-boundary conversion gives the outlined body an
+    // identity-layout argument. Permit only that layout-only transient; the
+    // immediately following hip-promote-strided-operands pass materializes the
+    // identity-layout copy. All semantic type mismatches remain verifier
+    // errors.
+    auto bodyMemref = dyn_cast<MemRefType>(bodyCapture);
+    auto captureMemref = dyn_cast<MemRefType>(capture);
+    bool promotableLayoutMismatch =
+        bodyDescriptorMode && bodyMemref && captureMemref &&
+        bodyMemref.getLayout().isIdentity() &&
+        !captureMemref.getLayout().isIdentity() &&
+        bodyMemref.getShape() == captureMemref.getShape() &&
+        bodyMemref.getElementType() == captureMemref.getElementType() &&
+        bodyMemref.getMemorySpace() == captureMemref.getMemorySpace();
+    if (!promotableLayoutMismatch)
       return emitOpError("body_func capture #") << i << " type mismatch";
+  }
   for (unsigned i = 0; i < numCaptures; ++i) {
     Type capture = getCaptures()[i].getType();
     bool supported = bodyDescriptorMode ? isa<MemRefType>(capture)
@@ -2180,7 +2203,7 @@ void GatherNDOp::getEffects(
 }
 
 //===----------------------------------------------------------------------===//
-// SliceOp: ins(data, starts, ends, [axes], [steps]), outs(output)
+// SliceOp: exact normalized host controls plus DPS output
 //===----------------------------------------------------------------------===//
 
 MutableOperandRange SliceOp::getDpsInitsMutable() { return getOutputMutable(); }
@@ -2189,6 +2212,43 @@ void SliceOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult SliceOp::verify() {
+  if (failed(verifyDpsComputeOp(getOperation(), {getData(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+
+  auto dataType = dyn_cast<ShapedType>(getData().getType());
+  auto outputType = dyn_cast<ShapedType>(getOutput().getType());
+  if (!dataType || !outputType || !dataType.hasRank() || !outputType.hasRank())
+    return emitOpError("data and output must be ranked shaped types");
+  int64_t rank = dataType.getRank();
+  if (outputType.getRank() != rank)
+    return emitOpError("output rank must equal data rank");
+  if (dataType.getElementType() != outputType.getElementType())
+    return emitOpError("output element type must equal data element type");
+  if (static_cast<int64_t>(getStarts().size()) != rank ||
+      static_cast<int64_t>(getSteps().size()) != rank ||
+      static_cast<int64_t>(getExtents().size()) != rank)
+    return emitOpError(
+        "starts, steps, and extents must each contain exactly data-rank "
+        "entries");
+
+  // In tensor mode conversion constructs the exact destination with these same
+  // extent SSA values. Static dimensions are encoded by the tensor.empty type;
+  // dynamic dimensions must be tied to the corresponding extent operand.
+  if (auto empty = getOutput().getDefiningOp<tensor::EmptyOp>()) {
+    unsigned dynamicIndex = 0;
+    for (int64_t dim : llvm::seq<int64_t>(rank)) {
+      if (!outputType.isDynamicDim(dim))
+        continue;
+      if (empty.getDynamicSizes()[dynamicIndex++] != getExtents()[dim])
+        return emitOpError("dynamic output dimension ")
+               << dim << " must be allocated from the matching exact extent";
+    }
+  }
+  return success();
 }
 
 //===----------------------------------------------------------------------===//

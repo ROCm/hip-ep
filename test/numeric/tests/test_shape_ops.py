@@ -9,9 +9,10 @@ GatherND, Slice, ScatterND.
 The runtime-shaped operations share a common
 property: the **shape** of an output depends on a graph-time tensor (repeats
 for Tile, shape for Expand, pads for Pad, indices for GatherND, starts/ends
-for Slice, indices for ScatterND). The runtime D2H-reads these small tensors
-once per call and dispatches a host-built launch -- so the test must pin
-both the value tensors and the data tensor in the same model.
+for Slice, indices for ScatterND). Slice groups genuinely runtime i32/i64
+controls into one readback before exact output allocation; other operations
+retain their documented payload paths. The test must pin both the value
+tensors and the data tensor in the same model.
 
 Per the runtime dtype tables in lib/Runtime/real/<op>.cpp the supported
 data dtype set is:
@@ -20,7 +21,7 @@ data dtype set is:
     Expand    : f16, f32, i32, i64
     Pad       : f16, f32, i32, i64       (modes: constant, reflect, edge, wrap)
     GatherND  : f16, f32, i32, i64       (indices: int64 only)
-    Slice     : f16, f32, i32, i64       (starts/ends/axes/steps: int64 only)
+    Slice     : f16, f32, i32, i64       (controls: int32 or int64)
     ScatterND : f16, f32, i32, i64       (indices: int64 only;
                                           reductions: none, add, mul, min, max)
 """
@@ -528,7 +529,7 @@ class TestGatherND:
 # `tensor.extract_slice` upstream; this test exercises the runtime fallback
 # kernel by:
 #   (a) feeding `starts` / `ends` as *graph inputs* (non-constant) -- forces
-#       the runtime D2H + host-side resolution path, OR
+#       one grouped readback plus compiler-materialized normalization, OR
 #   (b) using negative steps -- the fold rejects this case so it falls
 #       through to the runtime kernel as well.
 #
@@ -544,6 +545,7 @@ def _make_slice_model(
     steps: list[int] | None,
     output_shape: list[int],
     constant_indices: bool,
+    index_dtype=np.int64,
 ):
     """Build a Slice model.
 
@@ -554,6 +556,7 @@ def _make_slice_model(
     runtime kernel path.
     """
     tp = np_to_onnx_type(dtype)
+    index_tp = np_to_onnx_type(index_dtype)
     X = helper.make_tensor_value_info("X", tp, list(input_shape))
 
     input_names = ["X", "starts", "ends"]
@@ -562,42 +565,41 @@ def _make_slice_model(
 
     if constant_indices:
         initializers.append(
-            numpy_helper.from_array(np.array(starts, dtype=np.int64), name="starts")
+            numpy_helper.from_array(np.array(starts, dtype=index_dtype), name="starts")
         )
         initializers.append(
-            numpy_helper.from_array(np.array(ends, dtype=np.int64), name="ends")
+            numpy_helper.from_array(np.array(ends, dtype=index_dtype), name="ends")
         )
     else:
-        starts_vi = helper.make_tensor_value_info(
-            "starts", TensorProto.INT64, [len(starts)]
-        )
-        ends_vi = helper.make_tensor_value_info("ends", TensorProto.INT64, [len(ends)])
+        starts_vi = helper.make_tensor_value_info("starts", index_tp, [len(starts)])
+        ends_vi = helper.make_tensor_value_info("ends", index_tp, [len(ends)])
         inputs_list += [starts_vi, ends_vi]
 
     if axes is not None:
         input_names.append("axes")
         if constant_indices:
             initializers.append(
-                numpy_helper.from_array(np.array(axes, dtype=np.int64), name="axes")
+                numpy_helper.from_array(np.array(axes, dtype=index_dtype), name="axes")
             )
         else:
-            axes_vi = helper.make_tensor_value_info(
-                "axes", TensorProto.INT64, [len(axes)]
-            )
+            axes_vi = helper.make_tensor_value_info("axes", index_tp, [len(axes)])
             inputs_list.append(axes_vi)
     if steps is not None:
         input_names.append("steps")
         if constant_indices:
             initializers.append(
-                numpy_helper.from_array(np.array(steps, dtype=np.int64), name="steps")
+                numpy_helper.from_array(
+                    np.array(steps, dtype=index_dtype), name="steps"
+                )
             )
         else:
-            steps_vi = helper.make_tensor_value_info(
-                "steps", TensorProto.INT64, [len(steps)]
-            )
+            steps_vi = helper.make_tensor_value_info("steps", index_tp, [len(steps)])
             inputs_list.append(steps_vi)
 
-    Y = helper.make_tensor_value_info("Y", tp, list(output_shape))
+    declared_output_shape = (
+        list(output_shape) if constant_indices else [None] * len(output_shape)
+    )
+    Y = helper.make_tensor_value_info("Y", tp, declared_output_shape)
     node = helper.make_node("Slice", input_names, ["Y"])
     return (
         make_model_from_nodes([node], inputs_list, [Y], initializers=initializers),
@@ -672,6 +674,20 @@ class TestSlice:
             # step=-2 walking 7,5,3,1 down to 0 exclusive (so 4 elements):
             #   start=7, end=-9=-(8+1) -> end=-1, step=-2 -> 4 elements.
             (np.int32, [8], [7], [-9], [0], [-2], [4]),
+            # Exact empty native Slice: allocator may represent output [0]
+            # with a null pointer, which must remain a successful no-op.
+            (np.float32, [6], [0], [5], [0], [-1], [0]),
+            # INT64_MIN is both the negative-end sentinel and the most-negative
+            # step; magnitude/ceil division must not overflow.
+            (
+                np.float32,
+                [10],
+                [9],
+                [np.iinfo(np.int64).min],
+                [0],
+                [np.iinfo(np.int64).min],
+                [1],
+            ),
         ],
     )
     def test_slice_negative_step(
@@ -723,6 +739,61 @@ class TestSlice:
         ]
         actual, expected = model_runner.run_sample(model, feeds)
         compare_outputs(actual, expected, atol=0)
+
+    def test_slice_runtime_i32_repeated_extents(self, model_runner):
+        """One i32-control model produces different exact shapes on reuse."""
+        shape = [1, 8, 4]
+        model, _ = _make_slice_model(
+            np.float32,
+            shape,
+            [0],
+            [1],
+            [1],
+            [1],
+            [1, 1, 4],
+            constant_indices=False,
+            index_dtype=np.int32,
+        )
+        x = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
+        for iteration, (start, end) in enumerate(((0, 3), (3, 8))):
+            feeds = [
+                x,
+                np.array([start], dtype=np.int32),
+                np.array([end], dtype=np.int32),
+                np.array([1], dtype=np.int32),
+                np.array([1], dtype=np.int32),
+            ]
+            actual, expected = model_runner.run_sample(
+                model, feeds, name=f"slice_runtime_i32_repeat_{iteration}"
+            )
+            compare_outputs(actual, expected, atol=0)
+            assert actual[0].shape == (1, end - start, 4)
+
+    def test_slice_rank_greater_than_eight(self, model_runner):
+        """Arbitrary-rank metadata uses runtime-managed scratch, not rank-8."""
+        shape = [2] * 9
+        out_shape = [2] * 8 + [1]
+        model, _ = _make_slice_model(
+            np.float32,
+            shape,
+            [1],
+            [2],
+            [8],
+            [1],
+            out_shape,
+            constant_indices=False,
+        )
+        x = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
+        feeds = [
+            x,
+            np.array([1], dtype=np.int64),
+            np.array([2], dtype=np.int64),
+            np.array([8], dtype=np.int64),
+            np.array([1], dtype=np.int64),
+        ]
+        actual, expected = model_runner.run_sample(model, feeds)
+        compare_outputs(actual, expected, atol=0)
+        assert actual[0].shape == tuple(out_shape)
 
 
 # ---------------------------------------------------------------------------

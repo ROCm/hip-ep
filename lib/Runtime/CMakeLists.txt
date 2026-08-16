@@ -266,6 +266,7 @@ macro(compile_to_bitcode SOURCE_FILE OUTPUT_BC)
                 ${CMAKE_CURRENT_SOURCE_DIR}/op_profile.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/chrome_trace.h
                 ${CMAKE_CURRENT_SOURCE_DIR}/debug_log.h
+                ${CMAKE_SOURCE_DIR}/include/hip/Support/SliceUtils.h
                 ${IMPL_DEPS}
                 ${CMAKE_BINARY_DIR}/schemas/model_metadata_generated.h
         COMMENT "Compiling ${SOURCE_FILE} to bitcode"

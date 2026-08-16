@@ -82,8 +82,12 @@ extern "C" void *hipdnn_ep_alloc_output(RuntimeState *state, int64_t out_idx,
                                         const int64_t *shape, int64_t rank,
                                         int64_t elem_size) {
   size_t bytes = 0;
-  if (!state || !logicalBytes(shape, rank, elem_size, bytes))
+  if (!state)
     return nullptr;
+  if (!logicalBytes(shape, rank, elem_size, bytes)) {
+    (void)recordOutputFailure(state);
+    return nullptr;
+  }
   if (!state->output_allocator.allocate) {
     fprintf(stderr,
             "hipdnn_ep_alloc_output: no output allocator installed "

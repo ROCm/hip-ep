@@ -2,6 +2,7 @@
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the MIT License.
  */
+#include "hip/Support/SliceUtils.h"
 #include "hipdnn_ep_runtime.h"
 #include "matmul_gemm_contract.h"
 #include "runtime_types.h"
@@ -9,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -2078,29 +2080,52 @@ int wrap_gather_nd(RuntimeState *state, void *data, void *indices, void *output,
   return 0;
 }
 
-int wrap_slice(RuntimeState *state, void *data, void *starts, void *ends,
-               void *axes, void *steps, void *output, const int64_t *data_shape,
-               int64_t data_rank, const int64_t *output_shape,
-               int64_t output_rank, int64_t starts_num_elements,
-               int64_t axes_num_elements, int64_t steps_num_elements,
-               int64_t data_type) {
-  if (!state) {
-    fprintf(stderr, "Invalid state in wrap_slice\n");
+int wrap_slice(RuntimeState *state, void *data, void *output,
+               const int64_t *data_shape, const int64_t *output_shape,
+               const int64_t *starts, const int64_t *steps,
+               const int64_t *extents, int64_t rank, int64_t data_type,
+               bool params_valid) {
+  int64_t elementBytes = hipdnn_ep_datatype_size(data_type);
+  hipdnn_ep::slice::PreflightResult checked = hipdnn_ep::slice::preflight(
+      state, data, output, data_shape, output_shape, starts, steps, extents,
+      rank, elementBytes, params_valid);
+  if (checked.status == hipdnn_ep::slice::PreflightStatus::Error) {
+    if (state)
+      (void)hipdnn_ep_state_set_error_flag(state);
     return -1;
   }
-  (void)data;
-  (void)starts;
-  (void)ends;
-  (void)output;
-  (void)data_shape;
-  (void)output_shape;
-  MOCK_PRINT("[MOCK] wrap_slice(data_rank=%lld, output_rank=%lld, "
-             "starts_n=%lld, axes_n=%lld (%s), steps_n=%lld (%s), "
-             "data_type=%s(%lld))\n",
-             (long long)data_rank, (long long)output_rank,
-             (long long)starts_num_elements, (long long)axes_num_elements,
-             axes ? "yes" : "null", (long long)steps_num_elements,
-             steps ? "yes" : "null", hipdnn_ep_datatype_name(data_type),
+  if (checked.status == hipdnn_ep::slice::PreflightStatus::EmptyOutput)
+    return 0;
+
+  std::vector<int64_t> inputStrides(static_cast<size_t>(rank));
+  std::vector<int64_t> outputStrides(static_cast<size_t>(rank));
+  int64_t inputStride = 1;
+  int64_t outputStride = 1;
+  for (int64_t axis = rank; axis-- > 0;) {
+    inputStrides[static_cast<size_t>(axis)] = inputStride;
+    outputStrides[static_cast<size_t>(axis)] = outputStride;
+    inputStride *= data_shape[axis];
+    outputStride *= output_shape[axis];
+  }
+  auto *inputBytes = static_cast<const unsigned char *>(data);
+  auto *outputBytes = static_cast<unsigned char *>(output);
+  for (uint64_t outputIndex = 0; outputIndex < checked.outputElements;
+       ++outputIndex) {
+    int64_t remaining = static_cast<int64_t>(outputIndex);
+    int64_t inputIndex = 0;
+    for (int64_t axis = 0; axis < rank; ++axis) {
+      int64_t coordinate = remaining / outputStrides[static_cast<size_t>(axis)];
+      remaining -= coordinate * outputStrides[static_cast<size_t>(axis)];
+      inputIndex += (starts[axis] + coordinate * steps[axis]) *
+                    inputStrides[static_cast<size_t>(axis)];
+    }
+    std::memcpy(outputBytes + outputIndex * static_cast<size_t>(elementBytes),
+                inputBytes + static_cast<size_t>(inputIndex) *
+                                 static_cast<size_t>(elementBytes),
+                static_cast<size_t>(elementBytes));
+  }
+  MOCK_PRINT("[MOCK] wrap_slice(rank=%lld, data_type=%s(%lld))\n",
+             (long long)rank, hipdnn_ep_datatype_name(data_type),
              (long long)data_type);
   return 0;
 }

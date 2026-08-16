@@ -72,9 +72,10 @@ The default layout is:
 <workspace>/install/         install prefix
 ```
 
-`build.py` runs the LIT suite plus the GPU-free plugin, output-allocator, and
-symbolic-metadata unit tests by default. To run tests manually from Linux or Git
-Bash at the repository root:
+`build.py` runs the LIT suite plus the GPU-free plugin, output-allocator,
+symbolic-metadata, MatMul/Gemm, loop-frame, Slice utility, and grouped-readback
+unit tests by default. To run tests manually from Linux or Git Bash at the
+repository root:
 
 ```bash
 BUILD_DIR=../build/$(basename "$PWD")

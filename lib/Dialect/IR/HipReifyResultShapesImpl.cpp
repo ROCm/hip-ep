@@ -224,18 +224,12 @@ GemmOp::reifyResultShapes(OpBuilder &b,
 // leaf op contributes only the list of operand getter names; no
 // per-op `.cpp` thunk is needed.
 //
-// Other ops whose output dims are arithmetic functions of operand
-// values (pad, tile, expand, slice, range) have per-op Tier-1 reify
-// thunks below: each calls a dedicated `reifyPadShape` /
-// `reifyTileShape` / `reifyExpandShape` / `reifySliceShape` /
-// `reifyRangeShape` helper (`HipShapeUtils.cpp`) that computes the
-// output shape from the INPUT operands using a fold-or-bail strategy.
-// On bail (non-constant operands, dynamic input dims) the thunk falls
-// back to `cast<HipDpsOp>(getOperation()).reifyResultShapes` — i.e. the
-// shared `HipDpsOp` outs-lift default. This avoids emitting per-dim
-// `arith.addi(tensor.dim, const)` / `arith.divsi(...)` chains that
-// don't fold and would clutter the IR (particularly important for
-// slice's per-axis chain and range's count-only output).
+// Other ops whose output dims are arithmetic functions of operand values (pad,
+// tile, expand, range) have per-op Tier-1 reify thunks below that call their
+// dedicated HipShapeUtils helper. Slice is different: conversion has already
+// normalized every control and materialized exact rank extents, so its reifier
+// returns those extent operands directly and never reads payload tensors or
+// lifts destination capacity.
 //
 // Before (transpose, perm-driven mapping):
 //   %t = hip.transpose(%ctx) ins(%x : tensor<2x?x4096xf16>)
@@ -526,15 +520,16 @@ ExpandOp::reifyResultShapes(OpBuilder &b,
 LogicalResult
 SliceOp::reifyResultShapes(OpBuilder &b,
                            ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  auto dataType = dyn_cast<RankedTensorType>(getData().getType());
+  if (!dataType ||
+      static_cast<int64_t>(getExtents().size()) != dataType.getRank())
+    return failure();
   SmallVector<OpFoldResult> dims;
-  if (succeeded(mlir::hip::reifySliceShape(b, getLoc(), getData(), getStarts(),
-                                           getEnds(), getAxes(), getSteps(),
-                                           dims))) {
-    reifiedReturnShapes.assign({std::move(dims)});
-    return success();
-  }
-  return cast<HipDpsOp>(getOperation())
-      .reifyResultShapes(b, reifiedReturnShapes);
+  dims.reserve(getExtents().size());
+  for (Value extent : getExtents())
+    dims.push_back(extent);
+  reifiedReturnShapes.assign({std::move(dims)});
+  return success();
 }
 
 LogicalResult

@@ -1305,19 +1305,16 @@ HIP_KERNEL_API int hip_gather_nd(
  * services slices whose `starts` / `ends` / `axes` / `steps` are NOT
  * graph-constant (or have negative steps).
  *
- * The host wrapper D2Hs the (typically tiny) index tensors and resolves
- * them into per-axis `(start, step)` pairs in INPUT-space, one entry per
- * data dimension. Axes not listed default to `(0, 1)`. The kernel runs
- * one thread per output element and computes:
+ * Conversion resolves exact per-axis `(start, step, extent)` controls on the
+ * host. The launcher stages arbitrary-rank input/output strides plus starts and
+ * steps into runtime-managed device scratch on the same stream as the kernel.
+ * The kernel runs one thread per exact output element and computes:
  *
  *     in_offset = sum_d ( start[d] + out_coord[d] * step[d] ) * input_stride[d]
  *     output[out_idx] = input[in_offset]
  *
- * `step[d]` may be negative; correctness relies on the host wrapper
- * having already resolved start / end to absolute positions per ONNX's
- * negative-index and clamping rules (see lib/Runtime/real/slice.cpp).
- *
- * Bounded to rank <= 8 (matches kPadMaxRank / kGatherNDMaxRank).
+ * `step[d]` may be negative. Runtime preflight validates every first/last
+ * address before launch. There is no fixed rank cap.
  *
  * Supported dtypes: f16, f32, i32, i64.
  */
@@ -1326,23 +1323,13 @@ HIP_KERNEL_API int hip_slice(
     const void* input,
     void* output,
     const int64_t* input_shape_host,
-    const int64_t* output_shape_host,     /* physical alloc shape       */
-    const int64_t* logical_extent_host,   /* per-axis actual slice extent;
-                                             may be NULL, in which case the
-                                             kernel treats it as identical to
-                                             output_shape_host (i.e. no
-                                             over-alloc; entire physical
-                                             buffer is filled by the slice).
-                                             When set and logical[d] <
-                                             output_shape[d] for some d,
-                                             positions in the over-allocated
-                                             tail are filled with zero — the
-                                             host wrapper does not need to
-                                             pre-memset the buffer.        */
+    const int64_t* output_shape_host,
     const int64_t* starts_per_axis_host,  /* length = rank */
     const int64_t* steps_per_axis_host,   /* length = rank */
     int rank,
-    int hip_dtype);
+    int hip_dtype,
+    void *metadata_scratch_device,
+    size_t metadata_scratch_bytes);
 
 /* =========================================================================
  * ScatterND (ONNX-13+ with optional `reduction`)
