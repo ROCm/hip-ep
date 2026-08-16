@@ -68,6 +68,16 @@ bool isResultTypeCompatibleWithInferredShape(
   return true;
 }
 
+RankedTensorType
+getTensorTypeFromReifiedShape(llvm::ArrayRef<OpFoldResult> reifiedShape,
+                              Type elementType, Attribute encoding) {
+  llvm::SmallVector<int64_t> shape;
+  shape.reserve(reifiedShape.size());
+  for (OpFoldResult dim : reifiedShape)
+    shape.push_back(getConstantIntValue(dim).value_or(ShapedType::kDynamic));
+  return RankedTensorType::get(shape, elementType, encoding);
+}
+
 FailureOr<Value>
 createEmptyTensorFromReifiedShape(OpBuilder &builder, Location loc,
                                   RankedTensorType resultType,

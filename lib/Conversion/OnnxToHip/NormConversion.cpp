@@ -228,39 +228,93 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
   if (!epsilonAttr)
     return rewriter.notifyMatchFailure(op, "missing epsilon attribute");
 
-  // MS spec outputs (1-4): output, [mean], [inv_std_var], [input_skip_bias_sum]
-  // mean and inv_std_var are training-only; not modeled in HIP op.
+  // MS outputs are positional: output, mean, inv_std_var,
+  // input_skip_bias_sum. The HIP runtime is inference-only, so real training
+  // stats are unsupported and must not be mistaken for the residual output.
   unsigned numResults = op->getNumResults();
+  if (numResults < 1 || numResults > 4)
+    return rewriter.notifyMatchFailure(
+        op, "SkipSimplifiedLayerNormalization expects 1-4 results");
+  for (unsigned index : {1u, 2u})
+    if (index < numResults &&
+        !mlir::isa<mlir::NoneType>(op->getResult(index).getType()))
+      return rewriter.notifyMatchFailure(
+          op, "training mean/inv_std_var outputs are not supported");
 
   auto outputType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+  auto skipType = mlir::dyn_cast<mlir::RankedTensorType>(skip.getType());
+  auto gammaType = mlir::dyn_cast<mlir::RankedTensorType>(gamma.getType());
+  auto biasType = bias ? mlir::dyn_cast<mlir::RankedTensorType>(bias.getType())
+                       : mlir::RankedTensorType{};
+  if (!outputType || !inputType || !skipType || !gammaType ||
+      (bias && !biasType))
+    return rewriter.notifyMatchFailure(
+        op, "SkipSimplifiedLayerNormalization requires ranked tensors");
 
-  // Find input_skip_bias_sum: it's the last non-None result (index 1 or 3)
-  bool hasSkipOutput = numResults >= 2;
-  unsigned skipOutIdx = hasSkipOutput ? numResults - 1 : 0;
-
-  // Check if the last result is actually a real tensor (not None)
-  bool skipOutputIsReal = false;
+  bool skipOutputIsReal =
+      numResults == 4 && !mlir::isa<mlir::NoneType>(op->getResult(3).getType());
   mlir::RankedTensorType skipOutputType;
-  if (hasSkipOutput) {
-    mlir::Type lastType = op->getResult(skipOutIdx).getType();
-    if (!mlir::isa<mlir::NoneType>(lastType)) {
-      skipOutputIsReal = true;
-      skipOutputType = mlir::cast<mlir::RankedTensorType>(lastType);
-    }
+  if (skipOutputIsReal) {
+    skipOutputType =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(3).getType());
+    if (!skipOutputType)
+      return rewriter.notifyMatchFailure(
+          op, "input_skip_bias_sum must be a ranked tensor");
   }
+  unsigned hipOutputCount = skipOutputIsReal ? 2 : 1;
 
-  mlir::Value skipOutputInit = nullptr;
-  if (skipOutputIsReal)
-    skipOutputInit = createEmptyTensor(rewriter, loc, skipOutputType, input);
+  std::optional<llvm::ArrayRef<int64_t>> biasShape;
+  if (biasType)
+    biasShape = biasType.getShape();
+  auto staticShapes = mlir::hip::inferSkipRmsNormOutputShapes(
+      inputType.getShape(), skipType.getShape(), gammaType.getShape(),
+      biasShape, hipOutputCount, [&]() { return op->emitError(); });
+  if (mlir::failed(staticShapes))
+    return mlir::failure();
+  auto importedTypeAgrees = [](mlir::RankedTensorType imported,
+                               llvm::ArrayRef<int64_t> expected) {
+    if (imported.getRank() != static_cast<int64_t>(expected.size()))
+      return false;
+    for (int64_t dim : llvm::seq<int64_t>(0, imported.getRank()))
+      if (!imported.isDynamicDim(dim) &&
+          !mlir::ShapedType::isDynamic(expected[dim]) &&
+          imported.getDimSize(dim) != expected[dim])
+        return false;
+    return true;
+  };
+  if (!importedTypeAgrees(outputType, (*staticShapes)[0]) ||
+      (skipOutputIsReal &&
+       !importedTypeAgrees(skipOutputType, (*staticShapes)[1])))
+    return rewriter.notifyMatchFailure(
+        op, "SkipSimplifiedLayerNormalization outputs must match input shape");
+
+  auto resultShapes = mlir::hip::reifySkipRmsNormOutputShapes(
+      rewriter, loc, input, skip, gamma, bias, hipOutputCount,
+      [&]() { return op->emitError(); });
+  if (mlir::failed(resultShapes))
+    return mlir::failure();
+  auto outputInit = createEmptyTensorFromReifiedShape(rewriter, loc, outputType,
+                                                      (*resultShapes)[0]);
+  if (mlir::failed(outputInit))
+    return rewriter.notifyMatchFailure(op, "output shape is not reifiable");
+  mlir::Value skipOutputInit;
+  if (skipOutputIsReal) {
+    auto init = createEmptyTensorFromReifiedShape(rewriter, loc, skipOutputType,
+                                                  (*resultShapes)[1]);
+    if (mlir::failed(init))
+      return rewriter.notifyMatchFailure(
+          op, "input_skip_bias_sum shape is not reifiable");
+    skipOutputInit = *init;
+  }
   constexpr int64_t kCtxSize = 1;
   constexpr int64_t kInputSize = 1;
   constexpr int64_t kSkipSize = 1;
   constexpr int64_t kGammaSize = 1;
   int64_t kBiasSize = bias ? 1 : 0;
   // Variadic outputs: always output (1) + optional skip_output (0|1)
-  int64_t kOutputsSize = 1 + (skipOutputIsReal ? 1 : 0);
+  int64_t kOutputsSize = hipOutputCount;
   // Build operands list for hip.skip_rms_norm
   mlir::SmallVector<mlir::Value> operands;
   operands.push_back(context);
@@ -270,7 +324,7 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
   if (bias)
     operands.push_back(bias);
   // DPS outs (Variadic): [output] or [output, input_skip_bias_sum]
-  operands.push_back(outputInit);
+  operands.push_back(*outputInit);
   if (skipOutputInit)
     operands.push_back(skipOutputInit);
 
@@ -307,26 +361,9 @@ mlir::LogicalResult SkipSimplifiedLayerNormToHip::matchAndRewrite(
   llvm::SmallVector<mlir::Value> replacements;
   replacements.push_back(hipOp->getResult(0)); // output
 
-  if (hasSkipOutput) {
-    // Fill intermediate None results (mean, inv_std_var) with empty tensors
-    for (unsigned i = 1; i < skipOutIdx; ++i) {
-      mlir::Type origType = op->getResult(i).getType();
-      if (mlir::isa<mlir::NoneType>(origType)) {
-        replacements.push_back(mlir::Value{});
-        continue;
-      }
-      auto dummyType = mlir::cast<mlir::RankedTensorType>(origType);
-      replacements.push_back(mlir::tensor::EmptyOp::create(
-          rewriter, loc, dummyType.getShape(), dummyType.getElementType()));
-    }
-    if (skipOutputIsReal)
-      replacements.push_back(hipOp->getResult(1)); // input_skip_bias_sum
-    else {
-      auto dummyType = mlir::RankedTensorType::get({}, rewriter.getF32Type());
-      replacements.push_back(mlir::tensor::EmptyOp::create(
-          rewriter, loc, dummyType.getShape(), dummyType.getElementType()));
-    }
-  }
+  for (unsigned index = 1; index < numResults; ++index)
+    replacements.push_back(index == 3 && skipOutputIsReal ? hipOp->getResult(1)
+                                                          : mlir::Value{});
 
   rewriter.replaceOp(op, replacements);
   return mlir::success();
@@ -538,25 +575,66 @@ LayerNormToHip::matchAndRewrite(mlir::Operation *op,
   if (auto a = op->getAttrOfType<mlir::IntegerAttr>("stash_type"))
     stashType = a.getSInt();
 
-  // First output (Y) is required and dictates the result shape.
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+  if (!inputType)
+    return rewriter.notifyMatchFailure(op, "input must be a ranked tensor");
+
+  // First output (Y) is required. Optional InvStdDev requires a real mean
+  // scratch output because the HIP/runtime ABI uses contiguous [Y, Mean,
+  // InvStdDev] slots even when ONNX leaves Mean as None.
   auto outputType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
-
-  // Optional Mean (output 1) and InvStdDev (output 2). Each is real iff the
-  // corresponding ONNX result is a non-None ranked tensor.
   mlir::Value meanResult = getOptionalResult(op, 1);
   mlir::Value invStdResult = getOptionalResult(op, 2);
+  bool needsMean = meanResult || invStdResult;
+  unsigned numHipOutputs = 1 + static_cast<unsigned>(needsMean) +
+                           static_cast<unsigned>(bool(invStdResult));
+  mlir::FailureOr<mlir::ReifiedRankedShapedTypeDims> outputShapes =
+      mlir::hip::reifyLayerNormOutputShapes(rewriter, loc, input, axis,
+                                            numHipOutputs);
+  if (mlir::failed(outputShapes))
+    return rewriter.notifyMatchFailure(
+        op, "LayerNormalization axis/output shape is invalid");
+  mlir::FailureOr<mlir::Type> statsElementType =
+      mlir::hip::inferLayerNormStatsType(rewriter.getContext(), stashType);
+  if (mlir::failed(statsElementType))
+    return rewriter.notifyMatchFailure(
+        op, "LayerNormalization runtime supports stash_type 0/1 or 10");
+
+  mlir::FailureOr<mlir::Value> outputInit = createEmptyTensorFromReifiedShape(
+      rewriter, loc, outputType, (*outputShapes)[0]);
+  if (mlir::failed(outputInit))
+    return rewriter.notifyMatchFailure(
+        op, "LayerNormalization Y type contradicts input shape");
 
   mlir::Value meanInit, invStdInit;
   mlir::RankedTensorType meanType, invStdType;
-  if (meanResult) {
-    meanType = mlir::cast<mlir::RankedTensorType>(meanResult.getType());
-    meanInit = createEmptyTensor(rewriter, loc, meanType, input);
+  if (needsMean) {
+    meanType = meanResult
+                   ? mlir::cast<mlir::RankedTensorType>(meanResult.getType())
+                   : getTensorTypeFromReifiedShape((*outputShapes)[1],
+                                                   *statsElementType);
+    if (meanType.getElementType() != *statsElementType)
+      return rewriter.notifyMatchFailure(
+          op, "LayerNormalization Mean dtype contradicts stash_type");
+    mlir::FailureOr<mlir::Value> init = createEmptyTensorFromReifiedShape(
+        rewriter, loc, meanType, (*outputShapes)[1]);
+    if (mlir::failed(init))
+      return rewriter.notifyMatchFailure(
+          op, "LayerNormalization Mean shape contradicts axis");
+    meanInit = *init;
   }
   if (invStdResult) {
     invStdType = mlir::cast<mlir::RankedTensorType>(invStdResult.getType());
-    invStdInit = createEmptyTensor(rewriter, loc, invStdType, input);
+    if (invStdType.getElementType() != *statsElementType)
+      return rewriter.notifyMatchFailure(
+          op, "LayerNormalization InvStdDev dtype contradicts stash_type");
+    mlir::FailureOr<mlir::Value> init = createEmptyTensorFromReifiedShape(
+        rewriter, loc, invStdType, (*outputShapes)[2]);
+    if (mlir::failed(init))
+      return rewriter.notifyMatchFailure(
+          op, "LayerNormalization InvStdDev shape contradicts axis");
+    invStdInit = *init;
   }
 
   // hip.layer_norm uses AttrSizedOperandSegments for [ctx, input, scale,
@@ -564,7 +642,7 @@ LayerNormToHip::matchAndRewrite(mlir::Operation *op,
   // collapse [output, mean?, inv_std?] into a single trailing run.
   llvm::SmallVector<mlir::Value> hipOutputs;
   llvm::SmallVector<mlir::Type> hipResultTypes;
-  hipOutputs.push_back(outputInit);
+  hipOutputs.push_back(*outputInit);
   hipResultTypes.push_back(outputType);
   if (meanInit) {
     hipOutputs.push_back(meanInit);
@@ -614,17 +692,16 @@ LayerNormToHip::matchAndRewrite(mlir::Operation *op,
   // Map HIP results back to the ONNX result list, preserving Mean / InvStdDev
   // None slots when they were not requested.
   llvm::SmallVector<mlir::Value> replacements;
-  unsigned hipResultIdx = 0;
-  replacements.push_back(hipOp->getResult(hipResultIdx++)); // Y
+  replacements.push_back(hipOp->getResult(/*Y=*/0));
   if (op->getNumResults() >= 2) {
     if (meanResult)
-      replacements.push_back(hipOp->getResult(hipResultIdx++));
+      replacements.push_back(hipOp->getResult(/*mean=*/1));
     else
       replacements.push_back(mlir::Value{}); // None -> drop
   }
   if (op->getNumResults() >= 3) {
     if (invStdResult)
-      replacements.push_back(hipOp->getResult(hipResultIdx++));
+      replacements.push_back(hipOp->getResult(/*inv_std=*/2));
     else
       replacements.push_back(mlir::Value{}); // None -> drop
   }
