@@ -39,13 +39,12 @@ createEmptyTensorFromReifiedShape(OpBuilder &builder, Location loc,
                                   RankedTensorType resultType,
                                   llvm::ArrayRef<OpFoldResult> reifiedShape);
 
-/// Validate against the shared NumPy broadcast shape rule, then build a
-/// tensor.empty using the established conversion-time extent source policy.
-/// Exact dynamic merge materialization is activated with frontend proofs in a
-/// later stack layer.
-FailureOr<Value> createBroadcastEmptyTensor(OpBuilder &builder, Location loc,
-                                            RankedTensorType resultType,
-                                            ValueRange operands);
+/// Build a tensor.empty from the shared NumPy broadcast shape rule. Pure shape
+/// and imported-result checks complete before shape SSA emits.
+FailureOr<Value>
+createBroadcastEmptyTensor(OpBuilder &builder, Location loc,
+                           RankedTensorType resultType, ValueRange operands,
+                           ArrayRef<int64_t> canonicalOperandForResultDim = {});
 
 /// Return !hip.context from function argument 0.
 FailureOr<Value> getContextArg(Operation *op, PatternRewriter &rewriter);
