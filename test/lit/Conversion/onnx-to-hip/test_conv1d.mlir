@@ -49,7 +49,7 @@ module {
   // CHECK: %[[WX:.*]] = tensor.expand_shape %[[W]] {{\[\[}}0], [1], [2, 3]] output_shape [1280, 128, 1, 3] : tensor<1280x128x3xf16> into tensor<1280x128x1x3xf16>
   // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<1x1280x3000xf16>
   // CHECK: %[[INITX:.*]] = tensor.expand_shape %[[INIT]] {{\[\[}}0], [1], [2, 3]] output_shape [1, 1280, 1, 3000] : tensor<1x1280x3000xf16> into tensor<1x1280x1x3000xf16>
-  // CHECK: %[[CONV:.*]] = hip.conv(%[[CTX]]) ins(%[[INX]], %[[WX]], %[[B]] : tensor<1x128x1x3000xf16>, tensor<1280x128x1x3xf16>, tensor<1280xf16>) outs(%[[INITX]] : tensor<1x1280x1x3000xf16>) {dilations = [1, 1], group = 1 : i64, kernel_shape = [1, 3], pads = [0, 1, 0, 1], strides = [1, 1]}
+  // CHECK: %[[CONV:.*]] = hip.conv(%[[CTX]]) valid(%{{.*}}) ins(%[[INX]], %[[WX]], %[[B]] : tensor<1x128x1x3000xf16>, tensor<1280x128x1x3xf16>, tensor<1280xf16>) outs(%[[INITX]] : tensor<1x1280x1x3000xf16>) {dilations = [1, 1], group = 1 : i64, kernel_shape = [1, 3], pads = [0, 1, 0, 1], strides = [1, 1]}
   // CHECK: tensor.collapse_shape %[[CONV]] {{\[\[}}0], [1], [2, 3]] : tensor<1x1280x1x3000xf16> into tensor<1x1280x3000xf16>
   // CHECK-NOT: hip.conv1d
 
@@ -75,7 +75,7 @@ module {
   // CHECK: %[[WX:.*]] = tensor.expand_shape %[[W]] {{\[\[}}0], [1], [2, 3]] output_shape [1280, 1280, 1, 3] : tensor<1280x1280x3xf16> into tensor<1280x1280x1x3xf16>
   // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<1x1280x1500xf16>
   // CHECK: %[[INITX:.*]] = tensor.expand_shape %[[INIT]] {{\[\[}}0], [1], [2, 3]] output_shape [1, 1280, 1, 1500] : tensor<1x1280x1500xf16> into tensor<1x1280x1x1500xf16>
-  // CHECK: %[[CONV:.*]] = hip.conv(%[[CTX]]) ins(%[[INX]], %[[WX]], %[[B]] : tensor<1x1280x1x3000xf16>, tensor<1280x1280x1x3xf16>, tensor<1280xf16>) outs(%[[INITX]] : tensor<1x1280x1x1500xf16>) {dilations = [1, 1], group = 1 : i64, kernel_shape = [1, 3], pads = [0, 1, 0, 1], strides = [1, 2]}
+  // CHECK: %[[CONV:.*]] = hip.conv(%[[CTX]]) valid(%{{.*}}) ins(%[[INX]], %[[WX]], %[[B]] : tensor<1x1280x1x3000xf16>, tensor<1280x1280x1x3xf16>, tensor<1280xf16>) outs(%[[INITX]] : tensor<1x1280x1x1500xf16>) {dilations = [1, 1], group = 1 : i64, kernel_shape = [1, 3], pads = [0, 1, 0, 1], strides = [1, 2]}
   // CHECK: tensor.collapse_shape %[[CONV]] {{\[\[}}0], [1], [2, 3]] : tensor<1x1280x1x1500xf16> into tensor<1x1280x1500xf16>
   // CHECK-NOT: hip.conv1d
 
@@ -123,7 +123,7 @@ module {
   }
 
   // CHECK-LABEL: func.func @depthwise_conv1d_dynamic
-  // CHECK: arith.divsi
+  // CHECK: arith.floordivsi
   // CHECK: tensor.empty({{.*}}) : tensor<?x1024x?xf16>
   // CHECK: tensor.expand_shape
   // CHECK: hip.conv({{.*}}) outs({{.*}}) {dilations = [1, 1], group = 1024 : i64, kernel_shape = [1, 5], pads = [0, 2, 0, 2], strides = [1, 1]}
