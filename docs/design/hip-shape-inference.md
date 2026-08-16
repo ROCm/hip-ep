@@ -30,6 +30,26 @@ Shape ownership is intentionally split:
 
 ONNX-level shape inference remains upstream's responsibility. `--hip-infer-shapes` does not convert `UnrankedTensorType` into a ranked type; see [unranked-tensor-handling.md](unranked-tensor-handling.md).
 
+## Symbolic metadata transport
+
+ONNX `dim_param` names are authoritative frontend identities, but ranked MLIR
+tensor types retain only static integers and dynamic markers. MorphiZen
+therefore records each named tensor's symbolic dimensions in the deterministic
+`HSDI1` metadata format. The ORT bridge reserves the metadata key, MLIR model
+serialization projects it temporarily onto the module, and loading imports it
+back into model metadata.
+
+The transport alone does not change destination construction or HIP shape
+semantics. A later conversion layer may consume the metadata conservatively; a
+missing identity always means no proof.
+
+Compiled artifacts are keyed by the source or canonical compiler graph,
+initializer bytes for persistent artifacts, canonical symbolic metadata, and
+the resolved compiler contract. Process-local initializer addresses are
+normalized out of graph identity. Prebuilt artifacts without finalized
+initializer identity are ignored, and restored cache metadata must match the
+already-finalized key.
+
 ## DPS shape contract
 
 In tensor mode, each HIP DPS tensor result must equal the corresponding `outs` operand type. In memref mode, the operation has no tensor result; it writes directly through the destination memref.
