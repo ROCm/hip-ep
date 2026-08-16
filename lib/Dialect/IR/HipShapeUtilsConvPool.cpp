@@ -640,3 +640,66 @@ FailureOr<SmallVector<OpFoldResult>> mlir::hip::reifyGlobalPoolResultShape(
     result.push_back(b.getIndexAttr(1));
   return result;
 }
+
+FailureOr<SmallVector<int64_t>>
+mlir::hip::inferResizeShape(ArrayRef<int64_t> inputShape,
+                            ArrayRef<int64_t> outputTemplate,
+                            function_ref<InFlightDiagnostic()> emitError) {
+  if (inputShape.size() < 3 || inputShape.size() > 5 ||
+      inputShape.size() != outputTemplate.size()) {
+    emitError() << "resize input and output must have matching rank in [3, 5]";
+    return failure();
+  }
+
+  SmallVector<int64_t> result(inputShape.begin(), inputShape.begin() + 2);
+  for (int64_t dim : llvm::seq<int64_t>(2)) {
+    int64_t inputExtent = inputShape[dim];
+    int64_t templateExtent = outputTemplate[dim];
+    if (ShapedType::isDynamic(inputExtent)) {
+      if (!ShapedType::isDynamic(templateExtent)) {
+        emitError() << "resize output dimension " << dim
+                    << " must remain dynamic because input N/C is dynamic";
+        return failure();
+      }
+      continue;
+    }
+    if (!ShapedType::isDynamic(templateExtent) &&
+        inputExtent != templateExtent) {
+      emitError() << "resize output dimension " << dim
+                  << " must match input N/C extent " << inputExtent;
+      return failure();
+    }
+  }
+
+  for (size_t dim : llvm::seq<size_t>(2, outputTemplate.size())) {
+    if (ShapedType::isDynamic(outputTemplate[dim])) {
+      emitError() << "resize output spatial dimension " << dim
+                  << " must be static because sizes/scales are not carried by "
+                     "hip.resize";
+      return failure();
+    }
+    result.push_back(outputTemplate[dim]);
+  }
+  return result;
+}
+
+FailureOr<SmallVector<OpFoldResult>>
+mlir::hip::reifyResizeShape(OpBuilder &b, Location loc, Value input,
+                            ArrayRef<int64_t> outputTemplate,
+                            function_ref<InFlightDiagnostic()> emitError) {
+  auto inputType = dyn_cast<RankedTensorType>(input.getType());
+  if (!inputType ||
+      failed(inferResizeShape(inputType.getShape(), outputTemplate, emitError)))
+    return failure();
+
+  // Validation above is complete before the first tensor.dim is emitted.
+  SmallVector<OpFoldResult> result;
+  result.reserve(outputTemplate.size());
+  result.push_back(
+      reifyDimOrConstant(b, loc, inputType.getDimSize(0), input, 0));
+  result.push_back(
+      reifyDimOrConstant(b, loc, inputType.getDimSize(1), input, 1));
+  for (size_t dim : llvm::seq<size_t>(2, outputTemplate.size()))
+    result.push_back(b.getIndexAttr(outputTemplate[dim]));
+  return result;
+}

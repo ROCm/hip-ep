@@ -1628,7 +1628,8 @@ int wrap_less(RuntimeState *state, void *a, void *b, void *output, int64_t a_n,
               int64_t b_h, int64_t b_w, int64_t out_n, int64_t out_c,
               int64_t out_h, int64_t out_w, int64_t data_type);
 
-// GatherND operation wrapper. data_shape has rank `data_rank`; indices has
+// GatherND operation wrapper. `indices` points to int64 values; this ABI
+// carries no index-width argument. data_shape has rank `data_rank`; indices has
 // rank `indices_rank` with last dim `indices_inner = indices_shape[-1]`.
 int wrap_gather_nd(RuntimeState *state, void *data, void *indices, void *output,
                    const int64_t *data_shape, int64_t data_rank,

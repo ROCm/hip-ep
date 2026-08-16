@@ -265,6 +265,16 @@ a known, valid nonempty output allocation is zero-filled on failure.
 
 Artifacts built against the former 11-argument MatMul signature or the old
 one-K Gemm signature must be recompiled.
+
+GatherND has another generated-code-only contract. `wrap_gather_nd` receives
+the data, indices, and output pointers plus their host-side i64 shape arrays,
+ranks, `batch_dims`, and the data element type. It carries no indices element
+width. Both the wrapper and custom kernel interpret `indices` as an
+`int64_t *`, so ONNX conversion, HIP verification and reification, and
+HIP-to-LLVM lowering all require i64 indices before emitting destination-shape
+IR or a runtime call. Supporting i32 indices would require an explicit runtime
+ABI extension rather than reusing this call.
+
 ---
 
 ## Consumers

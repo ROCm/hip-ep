@@ -20,6 +20,12 @@ ArrayRef<int64_t> getShapeOf(Value value);
 /// so malformed entries retain the existing cast/assert behavior.
 SmallVector<int64_t> getI64Array(ArrayAttr attr);
 
+/// Validate that `perm` is a permutation of `[0, rank)`. The diagnostic
+/// overload is used by verification; the silent overload is used by reify.
+LogicalResult validatePermutation(ArrayRef<int64_t> perm, int64_t rank,
+                                  function_ref<InFlightDiagnostic()> emitError);
+LogicalResult validatePermutation(ArrayRef<int64_t> perm, int64_t rank);
+
 /// Pretty-print a static shape for implementation diagnostics.
 std::string formatShape(ArrayRef<int64_t> shape);
 

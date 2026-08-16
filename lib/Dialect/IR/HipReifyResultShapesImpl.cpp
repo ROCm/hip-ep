@@ -104,6 +104,27 @@ PoolOp::reifyResultShapes(OpBuilder &b,
 }
 
 //===----------------------------------------------------------------------===//
+// ResizeOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult
+ResizeOp::reifyResultShapes(OpBuilder &b,
+                            ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() != 1)
+    return failure();
+  auto outputType = dyn_cast<RankedTensorType>(getOutput().getType());
+  if (!outputType)
+    return failure();
+  FailureOr<SmallVector<OpFoldResult>> shape = mlir::hip::reifyResizeShape(
+      b, getLoc(), getInput(), outputType.getShape(),
+      [&]() { return this->emitOpError(); });
+  if (failed(shape))
+    return failure();
+  reifiedReturnShapes.assign({std::move(*shape)});
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // CausalConvWithStateOp
 //===----------------------------------------------------------------------===//
 
@@ -409,22 +430,6 @@ GatherOp::reifyResultShapes(OpBuilder &b,
 }
 
 LogicalResult
-GatherElementsOp::reifyResultShapes(OpBuilder &b,
-                                    ReifiedRankedShapedTypeDims &reified) {
-  if (getNumResults() == 0)
-    return failure();
-  auto indicesType = dyn_cast<RankedTensorType>(getIndices().getType());
-  if (!indicesType)
-    return failure();
-
-  SmallVector<OpFoldResult> dims;
-  for (auto i : llvm::seq<int64_t>(0, indicesType.getRank()))
-    dims.push_back(tensor::getMixedSize(b, getLoc(), getIndices(), i));
-  reified.assign({std::move(dims)});
-  return success();
-}
-
-LogicalResult
 OneHotOp::reifyResultShapes(OpBuilder &b,
                             ReifiedRankedShapedTypeDims &reified) {
   if (getNumResults() == 0)
@@ -549,14 +554,16 @@ LogicalResult GatherNDOp::reifyResultShapes(
     OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
   if (getNumResults() == 0)
     return failure();
-  if (!isa<RankedTensorType>(getData().getType()) ||
-      !isa<RankedTensorType>(getIndices().getType()))
+  auto dataType = dyn_cast<RankedTensorType>(getData().getType());
+  auto indicesType = dyn_cast<RankedTensorType>(getIndices().getType());
+  if (!dataType || !indicesType || !indicesType.getElementType().isInteger(64))
     return failure();
 
   FailureOr<SmallVector<OpFoldResult>> dims = mlir::hip::reifyGatherND(
       b, getLoc(), getData(), getIndices(), getBatchDims());
   if (failed(dims))
-    return failure();
+    return cast<HipDpsOp>(getOperation())
+        .reifyResultShapes(b, reifiedReturnShapes);
   reifiedReturnShapes.assign({std::move(*dims)});
   return success();
 }
