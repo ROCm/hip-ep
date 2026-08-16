@@ -132,6 +132,11 @@ class Hip_DpsOp_SemanticAutoReifyInfer<
     list<Trait> traits = []> :
     Hip_DpsOp_AutoReifyInfer<mnemonic, outsAccessor, traits>;
 
+/// Semantic operation using the default destination-based reification only.
+class Hip_DpsOp_SemanticAutoReify<string mnemonic,
+                                  list<Trait> traits = []> :
+    Hip_DpsOp_AutoReify<mnemonic, traits>;
+
 /// Shape behavior controlled by compile-time or runtime tensor payloads.
 class Hip_DpsOp_Payload<string mnemonic,
                         list<Trait> traits = [],
@@ -3055,7 +3060,10 @@ def Hip_CausalConvWithStateOp :
 
 // ===== Group Query Attention =================================================
 
-def Hip_GqaOp : Hip_DpsOp_AutoReify<"gqa", [AttrSizedOperandSegments, OpStateOpInterface]> {
+def Hip_GqaOp :
+    Hip_DpsOp_SemanticAutoReify<"gqa",
+                                [AttrSizedOperandSegments,
+                                 OpStateOpInterface]> {
   let summary = "Group Query Attention - Full MS spec implementation";
   let description = [{
     Complete implementation of com.microsoft.GroupQueryAttention (v1) specification.
