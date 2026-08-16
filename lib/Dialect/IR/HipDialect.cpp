@@ -740,6 +740,22 @@ void QConvOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult QConvOp::verify() {
+  SmallVector<Value> dataOperands{getInput(), getWeights(), getWeightScales(),
+                                  getWeightZeroPoints(), getOutput()};
+  if (getBias())
+    dataOperands.push_back(getBias());
+  if (failed(verifyDpsComputeOp(*this, dataOperands, /*numInits=*/1)))
+    return failure();
+  return verifyHipOpShape(*this, [&] {
+    return inferConvShape(
+        detail::getShapeOf(getInput()), detail::getShapeOf(getWeights()),
+        detail::getI64Array(getKernelShape()), detail::getI64Array(getStrides()),
+        detail::getI64Array(getPads()), detail::getI64Array(getDilations()),
+        getGroup(), [&] { return emitOpError(); });
+  });
+}
+
 //===----------------------------------------------------------------------===//
 // QLpNormalizationOp: quantized ins(input), outs(output)
 //===----------------------------------------------------------------------===//
@@ -1025,8 +1041,10 @@ void RmsNormOp::getEffects(
 }
 
 LogicalResult RmsNormOp::verify() {
-  return verifyDpsComputeOp(*this, {getInput(), getScale(), getOutput()},
-                            /*numInits=*/1);
+  if (failed(verifyDpsComputeOp(*this, {getInput(), getScale(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+  return mlir::hip::verifySameShapeDpsOp(*this, getInput());
 }
 
 //===----------------------------------------------------------------------===//
@@ -1533,7 +1551,10 @@ void SiluOp::getEffects(
 }
 
 LogicalResult SiluOp::verify() {
-  return verifyDpsComputeOp(*this, {getInput(), getOutput()}, /*numInits=*/1);
+  if (failed(
+          verifyDpsComputeOp(*this, {getInput(), getOutput()}, /*numInits=*/1)))
+    return failure();
+  return mlir::hip::verifySameShapeDpsOp(*this, getInput());
 }
 
 ParseResult SiluOp::parse(OpAsmParser &parser, OperationState &result) {
