@@ -87,8 +87,14 @@ function Set-HarnessPath {
 
 # Throughput must never be measured with the EP's own instrumentation: PERF
 # alone costs ~4%. SQTT carries the timing instead.
+#
+# HIPDNN_EP_TRACE_FILE has to go too: hipdnn_ep_perf_enabled() is true for
+# either variable, so a trace path left over from an earlier shell turns the
+# profiler on with none of PERF's console output to give it away. That leak
+# inflated a 16K VLM baseline from 14,610 ms to 17,545 ms before it was found.
 function Clear-HarnessProfilingEnv {
-  Remove-Item Env:HIPDNN_EP_PERF, Env:HIPDNN_EP_DEBUG -EA SilentlyContinue
+  Remove-Item Env:HIPDNN_EP_PERF, Env:HIPDNN_EP_DEBUG, Env:HIPDNN_EP_TRACE_FILE `
+    -EA SilentlyContinue
 }
 
 function Stop-HarnessProcesses {
