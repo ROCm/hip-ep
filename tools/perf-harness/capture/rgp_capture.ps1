@@ -54,6 +54,11 @@ param(
   [string]$Buf = 'default',
   [switch]$Counters,                             # SPM: required for memory/compute bound classification
   [int]$Dwell = 30,                              # seconds to let the .rgp finish dumping
+  # How long to wait for the fence to arm. A 16K VLM prefill under the panel
+  # needs far more than the 10 minutes that suffices for a 2K one: model load,
+  # the per-process prefill autotune sweep and a cold first rep all land before
+  # the fence can fire.
+  [int]$ArmTimeoutSec = 600,
   [string]$OutDir
 )
 
@@ -148,7 +153,7 @@ Write-Host "model PID=$($bench.Id) launched"
 # In fence mode, watch stderr for the armed marker and trigger inside the idle
 # window. In trigger mode there is nothing to wait for; the panel fires itself.
 $triggered = ($PSCmdlet.ParameterSetName -ne 'Fence')
-$deadline = (Get-Date).AddSeconds(600)
+$deadline = (Get-Date).AddSeconds($ArmTimeoutSec)
 while (-not $bench.HasExited -and (Get-Date) -lt $deadline) {
   if ($pOutTask.IsCompleted) { if ($pOutTask.Result) { Add-Content $panelLog $pOutTask.Result }; $pOutTask = $pOut.ReadLineAsync() }
   if ($pErrTask.IsCompleted) { if ($pErrTask.Result) { Add-Content $panelLog $pErrTask.Result }; $pErrTask = $pErr.ReadLineAsync() }
