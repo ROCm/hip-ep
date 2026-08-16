@@ -1072,6 +1072,10 @@ void PassContextImp::pass_context_update_context_json(
 
   CHECK(status.ok()) << "cannot parse json string:" << status.message()
                      << &json_str[0];
+  if (cache_key_finalized) {
+    CHECK_EQ(context_proto_in_cache.cache_key(), context_proto.cache_key())
+        << "cached context key does not match the finalized graph cache key";
+  }
   // Note: Old cache files with config field in ContextProto are not supported
   // after this refactoring (breaking change). The config field is now
   // runtime-only.
@@ -1100,9 +1104,9 @@ void PassContextImp::update_config_proto_root_field() {
     auto ret = std::optional<std::string>();
     return this->get_provider_option_with_priority(names);
   };
-  if (auto cache_key = get_provider_option_local({"cache_key", "cacheKey"})) {
-    context_proto.set_cache_key(*cache_key);
-  }
+  if (!cache_key_finalized)
+    if (auto cache_key = get_provider_option_local({"cache_key", "cacheKey"}))
+      context_proto.set_cache_key(*cache_key);
   // cache_dir removed by Issue #006 (PR #80)
   // encryption_key removed - now read from provider_options directly (Issue
   // #004)
