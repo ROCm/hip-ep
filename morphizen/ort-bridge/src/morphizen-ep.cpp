@@ -263,10 +263,17 @@ OrtStatus *ORT_API_CALL MorphiZenEP::GetCapabilityImpl(
     MY_LOG(1) << " no available IR converter.";
     return nullptr;
   }
-  // Use the OrtGraphWrapper class instead of manual API calls
-  auto graph_wrapper = morphizen::OrtGraphWrapper(*self, *graph);
-  self->GetCapability(graph_wrapper, *graph_support_info);
-  return nullptr;
+  try {
+    // Use the OrtGraphWrapper class instead of manual API calls.
+    auto graph_wrapper = morphizen::OrtGraphWrapper(*self, *graph);
+    self->GetCapability(graph_wrapper, *graph_support_info);
+    return nullptr;
+  } catch (const std::exception &error) {
+    return Ort::GetApi().CreateStatus(ORT_FAIL, error.what());
+  } catch (...) {
+    return Ort::GetApi().CreateStatus(
+        ORT_FAIL, "GetCapability failed with unknown exception");
+  }
 }
 
 OrtStatus *ORT_API_CALL MorphiZenEP::CompileImpl(
@@ -355,6 +362,11 @@ MorphiZenEP::GetCapability(OrtGraphWrapper &graph_viewer,
     ir_config.external_data_threshold = static_cast<size_t>(std::stoull(
         provider_options_.at("XLNX_model_clone_external_data_threshold")));
   }
+  ir_config.hash_initializer_data =
+      enable_ep_context_ ||
+      provider_options_.count("prebuild_cache_context") != 0 ||
+      provider_options_.count("config_file") != 0 ||
+      provider_options_.count("target") != 0;
   MY_LOG(2) << "IRConverter external_data_threshold: "
             << ir_config.external_data_threshold;
   auto ir_model = ir_converter(*this, graph_viewer.get(), ir_config);
