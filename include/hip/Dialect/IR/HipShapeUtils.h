@@ -104,6 +104,9 @@ FailureOr<SmallVector<int64_t>>
 inferBroadcastShape(ArrayRef<ArrayRef<int64_t>> shapes,
                     function_ref<InFlightDiagnostic()> emitError);
 
+/// Generated-verifier target for `Hip_DpsOp_Broadcast`.
+LogicalResult verifyBroadcastDpsOp(Operation *op, ValueRange operands);
+
 /// Build an `OpFoldResult` for one dimension of a reify-callable op's
 /// result:
 ///   - if `staticDim` is not `kDynamic`, returns `b.getIndexAttr(staticDim)`
