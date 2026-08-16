@@ -84,6 +84,7 @@ llvm_config.with_environment("PATH", hip_tools_dirs, append_path=True)
 tools = [
     "hip-mlir-opt",
     "hip-compiler",
+    "llvm-tblgen",
     "FileCheck",
     "not",
     "split-file",
