@@ -49,12 +49,29 @@ ConvTransposeToHip::matchAndRewrite(mlir::Operation *op,
                  !mlir::isa<mlir::NoneType>(op->getOperand(2).getType());
   mlir::Value bias = hasBias ? op->getOperand(2) : nullptr;
 
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+  auto weightsType = mlir::dyn_cast<mlir::RankedTensorType>(weights.getType());
   auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!inputType || !weightsType || !resultType)
+    return rewriter.notifyMatchFailure(
+        op, "ConvTranspose requires ranked input, weights, and result");
+  if (inputType.getRank() != 4 || weightsType.getRank() != 4 ||
+      resultType.getRank() != 4)
+    return rewriter.notifyMatchFailure(
+        op, "ConvTranspose currently supports rank-4 NCHW tensors only");
+  if (auto autoPad = op->getAttrOfType<mlir::StringAttr>("auto_pad"))
+    if (autoPad.getValue() != "NOTSET")
+      return rewriter.notifyMatchFailure(
+          op, "ConvTranspose auto_pad modes are not supported; use explicit "
+              "pads");
+  if (op->hasAttr("output_shape"))
+    return rewriter.notifyMatchFailure(
+        op, "ConvTranspose output_shape is not supported by the current "
+            "runtime ABI");
 
   // Weight layout for ConvTranspose is [C, M/group, kH, kW] (input channels
   // first), so spatial kernel dims are at indices 2..N of the weight tensor.
-  auto weightsType = mlir::cast<mlir::RankedTensorType>(weights.getType());
   int64_t numSpatial = weightsType.getRank() - 2;
 
   llvm::SmallVector<int64_t> kernelShape;
@@ -64,8 +81,13 @@ ConvTransposeToHip::matchAndRewrite(mlir::Operation *op,
           mlir::cast<mlir::IntegerAttr>(a).getValue().getSExtValue());
   } else {
     // Infer kernel_shape from the weight tensor's trailing spatial dims.
-    for (int64_t i : llvm::seq<int64_t>(numSpatial))
-      kernelShape.push_back(weightsType.getDimSize(2 + i));
+    for (int64_t i : llvm::seq<int64_t>(numSpatial)) {
+      int64_t kernelDim = weightsType.getDimSize(2 + i);
+      if (mlir::ShapedType::isDynamic(kernelDim))
+        return rewriter.notifyMatchFailure(
+            op, "dynamic weight kernel dimensions require kernel_shape");
+      kernelShape.push_back(kernelDim);
+    }
   }
 
   llvm::SmallVector<int64_t> strides;
@@ -108,10 +130,18 @@ ConvTransposeToHip::matchAndRewrite(mlir::Operation *op,
   if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("group"))
     group = attr.getValue().getSExtValue();
 
-  // Output spatial dims are determined by the ONNX shape inference and live in
-  // resultType. Dynamic dims (typically only the batch dim N) align
-  // positionally with the input, so derive them from the input tensor.
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+  mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>> resultShape =
+      mlir::hip::reifyConvTransposeResultShape(
+          rewriter, loc, input, weights, kernelShape, strides, pads, dilations,
+          outputPadding, group, [&]() { return op->emitError(); });
+  if (mlir::failed(resultShape))
+    return mlir::failure();
+  mlir::FailureOr<mlir::Value> init = createEmptyTensorFromReifiedShape(
+      rewriter, loc, resultType, *resultShape);
+  if (mlir::failed(init))
+    return rewriter.notifyMatchFailure(
+        op, "ConvTranspose result type is incompatible with the inferred "
+            "shape");
 
   auto kernelShapeAttr = rewriter.getI64ArrayAttr(kernelShape);
   auto stridesAttr = rewriter.getI64ArrayAttr(strides);
@@ -123,7 +153,7 @@ ConvTransposeToHip::matchAndRewrite(mlir::Operation *op,
   llvm::SmallVector<mlir::Value> operands = {context, input, weights};
   if (bias)
     operands.push_back(bias);
-  operands.push_back(init);
+  operands.push_back(*init);
 
   llvm::SmallVector<mlir::NamedAttribute> attrs;
   attrs.push_back(rewriter.getNamedAttr("kernel_shape", kernelShapeAttr));
