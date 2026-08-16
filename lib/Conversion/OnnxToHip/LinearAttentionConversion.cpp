@@ -122,9 +122,23 @@ LinearAttentionToHip::matchAndRewrite(mlir::Operation *op,
       mlir::cast<mlir::RankedTensorType>(op->getResult(1).getType());
 
   // === Create DPS init tensors ===
-  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, query);
-  mlir::Value presentStateInit = createEmptyTensor(
-      rewriter, loc, presentStateType, pastState ? pastState : key);
+  int64_t kvNumHeads = kvNumHeadsAttr.getValue().getSExtValue();
+  mlir::FailureOr<mlir::ReifiedRankedShapedTypeDims> outputShapes =
+      reifyLinearAttentionOutputShapes(rewriter, loc, query, key, value,
+                                       qNumHeads, kvNumHeads,
+                                       [&]() { return op->emitError(); });
+  if (mlir::failed(outputShapes))
+    return rewriter.notifyMatchFailure(
+        op, "cannot derive LinearAttention output shapes");
+
+  mlir::FailureOr<mlir::Value> outputInit = createEmptyTensorFromReifiedShape(
+      rewriter, loc, outputType, (*outputShapes)[0]);
+  mlir::FailureOr<mlir::Value> presentStateInit =
+      createEmptyTensorFromReifiedShape(rewriter, loc, presentStateType,
+                                        (*outputShapes)[1]);
+  if (mlir::failed(outputInit) || mlir::failed(presentStateInit))
+    return rewriter.notifyMatchFailure(
+        op, "LinearAttention result types disagree with inferred shapes");
 
   // === Create hip.linear_attention operation ===
   mlir::SmallVector<mlir::Type> resultTypes;
@@ -142,8 +156,8 @@ LinearAttentionToHip::matchAndRewrite(mlir::Operation *op,
     operands.push_back(decay);
   if (beta)
     operands.push_back(beta);
-  operands.push_back(outputInit);
-  operands.push_back(presentStateInit);
+  operands.push_back(*outputInit);
+  operands.push_back(*presentStateInit);
 
   mlir::SmallVector<mlir::NamedAttribute> attrs;
   attrs.push_back(rewriter.getNamedAttr("q_num_heads", qNumHeadsAttr));
