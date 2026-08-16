@@ -62,9 +62,12 @@ SigmoidToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value input = op->getOperand(0);
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+  auto init = createSameShapeEmptyTensor(rewriter, loc, resultType, input);
+  if (mlir::failed(init))
+    return rewriter.notifyMatchFailure(
+        op, "Sigmoid result type must match the input shape");
   auto hipOp =
-      mlir::hip::SigmoidOp::create(rewriter, loc, context, input, init);
+      mlir::hip::SigmoidOp::create(rewriter, loc, context, input, *init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
@@ -94,8 +97,11 @@ TanhToHip::matchAndRewrite(mlir::Operation *op,
   if (!resultType)
     return rewriter.notifyMatchFailure(op,
                                        "Tanh expects a ranked tensor result");
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
-  auto hipOp = mlir::hip::TanhOp::create(rewriter, loc, context, input, init);
+  auto init = createSameShapeEmptyTensor(rewriter, loc, resultType, input);
+  if (mlir::failed(init))
+    return rewriter.notifyMatchFailure(
+        op, "Tanh result type must match the input shape");
+  auto hipOp = mlir::hip::TanhOp::create(rewriter, loc, context, input, *init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
@@ -122,9 +128,12 @@ SoftplusToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value input = op->getOperand(0);
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+  auto init = createSameShapeEmptyTensor(rewriter, loc, resultType, input);
+  if (mlir::failed(init))
+    return rewriter.notifyMatchFailure(
+        op, "Softplus result type must match the input shape");
   auto hipOp =
-      mlir::hip::SoftplusOp::create(rewriter, loc, context, input, init);
+      mlir::hip::SoftplusOp::create(rewriter, loc, context, input, *init);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
 }
@@ -151,8 +160,6 @@ GeluToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value input = op->getOperand(0);
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
-
   // Extract and validate approximate attribute from ONNX op (default to "none")
   mlir::StringAttr approximateAttr = rewriter.getStringAttr("none");
   if (auto attr = op->getAttrOfType<mlir::StringAttr>("approximate")) {
@@ -166,7 +173,11 @@ GeluToHip::matchAndRewrite(mlir::Operation *op,
     approximateAttr = attr;
   }
 
-  auto hipOp = mlir::hip::GeluOp::create(rewriter, loc, context, input, init,
+  auto init = createSameShapeEmptyTensor(rewriter, loc, resultType, input);
+  if (mlir::failed(init))
+    return rewriter.notifyMatchFailure(
+        op, "Gelu result type must match the input shape");
+  auto hipOp = mlir::hip::GeluOp::create(rewriter, loc, context, input, *init,
                                          approximateAttr);
   rewriter.replaceOp(op, hipOp->getResult(0));
   return mlir::success();
