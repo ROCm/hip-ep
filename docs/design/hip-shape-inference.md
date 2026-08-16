@@ -177,6 +177,7 @@ Choose the smallest mechanism that matches the operation's semantics:
 | Attention or normalization with multiple destinations | One shape vector per DPS init unless an op supplies a dedicated thunk |
 | Forward Conv (rank-3 converter/rank-4 HIP op) | Shared signed-floor spatial-window formula used by converter, reification, and verifier |
 | Rank-4 NCHW ConvTranspose | Shared ONNX formula used by converter, reification, and verifier |
+| CausalConvWithState | Runtime-supported 1D output/state formulas from input and depthwise kernel |
 | Resize | DPS-init shape, with semantic validity handled by conversion |
 | Runtime-dependent count, such as NonZero or Compress | DPS-init shape; unresolved dimensions remain dynamic |
 
@@ -327,6 +328,15 @@ wraparound and stays equivalent to the static APInt rule. Before narrowing,
 each final extent must be in `[0, INT64_MAX]`; invalid extents select zero so
 destination allocation remains bounded. Runtime rejection of those invalid
 dynamic combinations belongs to the later runtime-hardening layer.
+
+CausalConvWithState uses the backend's implemented 1D contract. For input
+`[B,C,L]` and depthwise weight `[C,1,K]`, output is `[B,C,L]` and
+`present_state` is `[B,C,K-1]`. Optional `past_state` must have that same state
+shape, but it is a validator rather than an extent source: when it is absent or
+more dynamic than the weight, the state length still comes from `weight.K-1`.
+The mixed helper emits subtraction only after its pure helper has validated
+rank, depthwise layout, channel agreement, optional bias/state, and the current
+runtime restriction `ndim=1`.
 
 Reductions resolve to one internal out-to-in dimension map, consumed by both
 `inferReductionShape` (static extents) and `reifyReductionResultShape` (mixed

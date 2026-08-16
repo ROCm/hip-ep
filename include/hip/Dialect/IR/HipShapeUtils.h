@@ -296,6 +296,25 @@ FailureOr<SmallVector<OpFoldResult>>
 reifyReductionResultShape(OpBuilder &b, Location loc, Value data,
                           ArrayRef<int64_t> axes, int64_t keepdims);
 
+/// CausalConvWithState output shapes for the runtime-supported 1D layout:
+///   output        = input = [B, C, L]
+///   present_state = [B, C, weight[2] - 1]
+///
+/// Also validates the depthwise weight layout `[C, 1, K]`, optional bias
+/// `[C]`, and optional past state `[B, C, K - 1]`.
+FailureOr<SmallVector<SmallVector<int64_t>>>
+inferCausalConvWithStateOutputShapes(
+    ArrayRef<int64_t> inputShape, ArrayRef<int64_t> weightShape,
+    std::optional<ArrayRef<int64_t>> biasShape,
+    std::optional<ArrayRef<int64_t>> pastStateShape, int64_t ndim,
+    function_ref<InFlightDiagnostic()> emitError);
+
+/// Mixed-shape form of `inferCausalConvWithStateOutputShapes`.
+FailureOr<ReifiedRankedShapedTypeDims> reifyCausalConvWithStateOutputShapes(
+    OpBuilder &b, Location loc, Value input, Value weight, Value bias,
+    Value pastState, int64_t ndim,
+    function_ref<InFlightDiagnostic()> emitError);
+
 /// One-shot reify body for ONNX-style reduction ops. Structurally-proven
 /// constant `axes` use the shared semantic dimension map. Runtime,
 /// malformed, and non-contiguous axes fail without emitting IR.
