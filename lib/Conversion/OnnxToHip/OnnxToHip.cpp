@@ -445,8 +445,8 @@ void ConvertOnnxToHipPass::runOnOperation() {
         mlir::RewritePatternSet preLoweringPatterns(ctx);
         populateGatherShapeFoldPatterns(preLoweringPatterns, ctx);
         populateGatherBlockQuantizedPreparePatterns(preLoweringPatterns, ctx);
-        populatePadShapeFoldPatterns(preLoweringPatterns, ctx);
         populateSliceShapeFoldPatterns(preLoweringPatterns, ctx);
+        populateConstantOfShapePreLoweringPatterns(preLoweringPatterns, ctx);
         populateFastGeluFusionPatterns(preLoweringPatterns, ctx);
         populateErfGeluFusionPatterns(preLoweringPatterns, ctx);
         populateProjectorOpsRewritePatterns(preLoweringPatterns, ctx);
@@ -483,20 +483,6 @@ void ConvertOnnxToHipPass::runOnOperation() {
       ShapeProvenanceAnalysis analysis(funcOp);
       if (mlir::failed(analysis.run()) ||
           mlir::failed(materializeReshapeShapeOperands(funcOp, analysis)))
-        return signalPassFailure();
-    }
-    // Run ConstantOfShape folding BEFORE `lowerOnnxConstants` so it can still
-    // see the original `onnx.Constant` (or `onnx.Shape`) as the shape input.
-    // Roots on `onnx.ConstantOfShape`, disjoint from the pre-lowering
-    // patterns above (which root on `onnx.Gather` and `onnx.Tanh`), so
-    // ordering and pattern-set separation are both safe.
-    {
-      mlir::RewritePatternSet preFoldPatterns(ctx);
-      populateConstantOfShapeConversionPatterns(preFoldPatterns, ctx);
-      mlir::GreedyRewriteConfig cfg;
-      cfg.setStrictness(mlir::GreedyRewriteStrictness::ExistingOps);
-      if (mlir::failed(mlir::applyPatternsGreedily(
-              funcOp, std::move(preFoldPatterns), cfg)))
         return signalPassFailure();
     }
     if (dimParams && funcOp.getSymName() == "main_graph")

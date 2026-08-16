@@ -172,6 +172,12 @@ class Hip_DpsOp_SameShape<string mnemonic, string sourceAccessor,
   let hasVerifier = 1;
 }
 
+/// Shape behavior controlled by compile-time or runtime tensor payloads.
+class Hip_DpsOp_Payload<string mnemonic,
+                        list<Trait> traits = [],
+                        string outsAccessor = "Output"> :
+    Hip_DpsOp_WithInfer<mnemonic, outsAccessor, traits>;
+
 // Parameterized sub-base for ONNX-style reduction ops (reduce_sum,
 // reduce_max, reduce_prod). Auto-emits a `reifyResultShapes` body
 // that calls `mlir::hip::reifyReductionShape`. The axes operand must
@@ -1727,7 +1733,9 @@ def Hip_OneHotOp : Hip_DpsOp_WithInfer<"one_hot"> {
   }];
 }
 
-def Hip_CompressOp : Hip_DpsOp_WithInfer<"compress"> {
+def Hip_CompressOp :
+    Hip_DpsOp_Payload<"compress", /*traits=*/[],
+                      /*outsAccessor=*/"Output"> {
   let summary = "Select slices or elements where a 1-D condition is true";
   let description = [{
     Implements ONNX Compress: along `axis`, keep only slices whose
@@ -3615,7 +3623,10 @@ def Hip_CumSumOp : Hip_DpsOp_AutoReifyInfer<"cumsum", "Y"> {
   }];
 }
 
-def Hip_PadOp : Hip_DpsOp_WithInfer<"pad", "Output", [AttrSizedOperandSegments]> {
+def Hip_PadOp :
+    Hip_DpsOp_Payload<"pad",
+                      /*traits=*/[AttrSizedOperandSegments],
+                      /*outsAccessor=*/"Output"> {
   let summary = "Pad a tensor with constant / reflect / edge / wrap";
   let description = [{
     Pads input tensor along the axes selected by `axes` (or all axes if
@@ -3627,6 +3638,12 @@ def Hip_PadOp : Hip_DpsOp_WithInfer<"pad", "Output", [AttrSizedOperandSegments]>
     an optional scalar used in `constant` mode (default 0). `axes` is an
     optional 1-D int64 tensor selecting which axes the pads apply to;
     when omitted (rank-0 / size-0), all axes are padded.
+
+
+    Optional `static_pads` / `static_axes` preserve shape metadata read directly
+    from dense constant carriers during compute conversion. They remain
+    available after standalone constant externalization for destination sizing
+    and shape reification; the runtime still receives the original operands.
 
     The `mode` attribute is one of `"constant"`, `"reflect"`, `"edge"`,
     `"wrap"`.
@@ -3649,7 +3666,9 @@ def Hip_PadOp : Hip_DpsOp_WithInfer<"pad", "Output", [AttrSizedOperandSegments]>
     Optional<Hip_TensorOrMemRef>:$constant_value,
     Optional<Hip_TensorOrMemRef>:$axes,
     Hip_TensorOrMemRef:$output,
-    DefaultValuedAttr<StrAttr, "\"constant\"">:$mode
+    DefaultValuedAttr<StrAttr, "\"constant\"">:$mode,
+    OptionalAttr<DenseI64ArrayAttr>:$static_pads,
+    OptionalAttr<DenseI64ArrayAttr>:$static_axes
   );
 
   let assemblyFormat = [{
@@ -3693,7 +3712,9 @@ def Hip_TileOp : Hip_DpsOp_WithInfer<"tile"> {
   }];
 }
 
-def Hip_ExpandOp : Hip_DpsOp_WithInfer<"expand"> {
+def Hip_ExpandOp :
+    Hip_DpsOp_Payload<"expand", /*traits=*/[],
+                      /*outsAccessor=*/"Output"> {
   let summary = "Broadcast a tensor to a target shape";
   let description = [{
     Broadcasts `input` to the target `shape` following NumPy broadcast rules.
