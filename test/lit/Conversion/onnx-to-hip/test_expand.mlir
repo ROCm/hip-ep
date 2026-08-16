@@ -28,4 +28,20 @@ module {
   // CHECK: tensor.extract
   // CHECK: tensor.empty
   // CHECK: hip.expand({{.*}}) ins({{.*}}, {{.*}} : tensor<3x1xf32>, tensor<3xi64>) outs({{.*}} : tensor<?x3x?xf32>)
+
+  func.func @expand_constant_shape(%input: tensor<1x3x1xf32>) -> tensor<?x3x?xf32> {
+    %shape = "onnx.Constant"() {
+      value = dense<[2, 3, 6]> : tensor<3xi64>
+    } : () -> tensor<3xi64>
+    %r = "onnx.Expand"(%input, %shape) : (tensor<1x3x1xf32>, tensor<3xi64>) -> tensor<?x3x?xf32>
+    return %r : tensor<?x3x?xf32>
+  }
+
+  // CHECK-LABEL: func.func @expand_constant_shape
+  // CHECK-DAG: %[[SHAPE:.*]] = hip.constant {{.*}}value = dense<[2, 3, 6]>
+  // CHECK-DAG: %[[D0:.*]] = arith.constant 2 : index
+  // CHECK-DAG: %[[D2:.*]] = arith.constant 6 : index
+  // CHECK-NOT: hip.readback_scalar
+  // CHECK: tensor.empty(%[[D0]], %[[D2]]) : tensor<?x3x?xf32>
+  // CHECK: hip.expand({{.*}}) ins({{.*}}, %[[SHAPE]]
 }
