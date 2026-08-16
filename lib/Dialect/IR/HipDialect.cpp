@@ -10,7 +10,6 @@
 #include "llvm/Support/MathExtras.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
-#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
@@ -449,30 +448,9 @@ LogicalResult LoopOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
              << i << " type " << args[3 + i]
              << " must match loop carrier result type "
              << getResult(i).getType();
-  for (unsigned i = 0; i < numCaptures; ++i) {
-    Type bodyCapture = args[3 + numLoopCarried + i];
-    Type capture = getCaptures()[i].getType();
-    if (bodyCapture == capture)
-      continue;
-
-    // One-Shot Bufferize can turn an extract_slice capture into a strided
-    // memref while function-boundary conversion gives the outlined body an
-    // identity-layout argument. Permit only that layout-only transient; the
-    // immediately following hip-promote-strided-operands pass materializes the
-    // identity-layout copy. All semantic type mismatches remain verifier
-    // errors.
-    auto bodyMemref = dyn_cast<MemRefType>(bodyCapture);
-    auto captureMemref = dyn_cast<MemRefType>(capture);
-    bool promotableLayoutMismatch =
-        bodyDescriptorMode && bodyMemref && captureMemref &&
-        bodyMemref.getLayout().isIdentity() &&
-        !captureMemref.getLayout().isIdentity() &&
-        bodyMemref.getShape() == captureMemref.getShape() &&
-        bodyMemref.getElementType() == captureMemref.getElementType() &&
-        bodyMemref.getMemorySpace() == captureMemref.getMemorySpace();
-    if (!promotableLayoutMismatch)
+  for (unsigned i = 0; i < numCaptures; ++i)
+    if (args[3 + numLoopCarried + i] != getCaptures()[i].getType())
       return emitOpError("body_func capture #") << i << " type mismatch";
-  }
   for (unsigned i = 0; i < numCaptures; ++i) {
     Type capture = getCaptures()[i].getType();
     bool supported = bodyDescriptorMode ? isa<MemRefType>(capture)
