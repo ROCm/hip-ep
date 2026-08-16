@@ -113,6 +113,196 @@ mlir::hip::reifyGatherWithAxis(OpBuilder &b, Location loc, Value data,
   return dims;
 }
 
+FailureOr<SmallVector<int64_t>> mlir::hip::inferGatherBlockQuantizedShape(
+    ArrayRef<int64_t> dataShape, ArrayRef<int64_t> indicesShape,
+    ArrayRef<int64_t> scalesShape,
+    std::optional<ArrayRef<int64_t>> zeroPointsShape, int64_t bits,
+    int64_t blockSize, int64_t gatherAxis, int64_t quantizeAxis,
+    bool bytePackedInt4, bool uint8Storage,
+    function_ref<InFlightDiagnostic()> emitError) {
+  constexpr int64_t maxRank = 8;
+  int64_t dataRank = dataShape.size();
+  int64_t indicesRank = indicesShape.size();
+  if (dataRank <= 1 || dataRank > maxRank) {
+    emitError() << "gather_block_quantized data rank must be in [2, " << maxRank
+                << "], got " << dataRank;
+    return failure();
+  }
+  if (indicesRank > maxRank || indicesRank + dataRank - 1 > maxRank) {
+    emitError() << "gather_block_quantized output rank "
+                << indicesRank + dataRank - 1 << " exceeds the runtime maximum "
+                << maxRank;
+    return failure();
+  }
+  if (scalesShape.size() != dataShape.size()) {
+    emitError() << "gather_block_quantized scales rank must match data rank";
+    return failure();
+  }
+  if (zeroPointsShape && zeroPointsShape->size() != dataShape.size()) {
+    emitError()
+        << "gather_block_quantized zero_points rank must match data rank";
+    return failure();
+  }
+  if (bits != 4 && bits != 8) {
+    emitError() << "gather_block_quantized bits must be 4 or 8";
+    return failure();
+  }
+  if (blockSize < 16 || (blockSize & (blockSize - 1)) != 0) {
+    emitError() << "gather_block_quantized block_size must be a power of two "
+                   "and at least 16";
+    return failure();
+  }
+  if (bytePackedInt4 && bits != 4) {
+    emitError() << "gather_block_quantized byte-packed int4 storage requires "
+                   "bits = 4";
+    return failure();
+  }
+
+  auto normalizeAxis = [dataRank](int64_t axis) {
+    return axis < 0 ? axis + dataRank : axis;
+  };
+  int64_t normalizedGatherAxis = normalizeAxis(gatherAxis);
+  int64_t normalizedQuantizeAxis = normalizeAxis(quantizeAxis);
+  if (normalizedGatherAxis < 0 || normalizedGatherAxis >= dataRank) {
+    emitError() << "gather_block_quantized gather_axis must be in [-"
+                << dataRank << ", " << dataRank - 1 << "]";
+    return failure();
+  }
+  if (normalizedQuantizeAxis < 0 || normalizedQuantizeAxis >= dataRank) {
+    emitError() << "gather_block_quantized quantize_axis must be in [-"
+                << dataRank << ", " << dataRank - 1 << "]";
+    return failure();
+  }
+  if (uint8Storage && normalizedGatherAxis != 0) {
+    emitError()
+        << "gather_block_quantized gather_axis must be 0 for uint8 storage";
+    return failure();
+  }
+
+  SmallVector<int64_t> logicalDataShape(dataShape);
+  int64_t packedDim = dataShape[normalizedQuantizeAxis];
+  if (bytePackedInt4 && !ShapedType::isDynamic(packedDim)) {
+    APInt logicalExtent = APInt(128, packedDim, /*isSigned=*/true) * 2;
+    if (!logicalExtent.isSignedIntN(64) || logicalExtent.isNegative()) {
+      emitError()
+          << "gather_block_quantized logical quantized extent overflows i64";
+      return failure();
+    }
+    logicalDataShape[normalizedQuantizeAxis] = logicalExtent.getSExtValue();
+  }
+
+  for (int64_t i : llvm::seq<int64_t>(0, dataRank)) {
+    int64_t dataDim = logicalDataShape[i];
+    int64_t scalesDim = scalesShape[i];
+    if (ShapedType::isDynamic(dataDim) || ShapedType::isDynamic(scalesDim))
+      continue;
+    int64_t expectedScalesDim =
+        i == normalizedQuantizeAxis
+            ? dataDim / blockSize + (dataDim % blockSize != 0)
+            : dataDim;
+    if (scalesDim != expectedScalesDim) {
+      emitError() << "gather_block_quantized data/scales mismatch at axis " << i
+                  << ": expected scales extent " << expectedScalesDim
+                  << " but got " << scalesDim;
+      return failure();
+    }
+  }
+
+  if (zeroPointsShape) {
+    for (int64_t i : llvm::seq<int64_t>(0, dataRank)) {
+      int64_t scalesDim = scalesShape[i];
+      int64_t zeroPointsDim = (*zeroPointsShape)[i];
+      if (ShapedType::isDynamic(scalesDim) ||
+          ShapedType::isDynamic(zeroPointsDim))
+        continue;
+      bool compatible = zeroPointsDim == scalesDim;
+      if (bytePackedInt4 && i == normalizedQuantizeAxis)
+        compatible |= zeroPointsDim == scalesDim / 2 + (scalesDim % 2 != 0);
+      if (!compatible) {
+        emitError() << "gather_block_quantized zero_points extent at axis " << i
+                    << " must match scales"
+                    << (bytePackedInt4 && i == normalizedQuantizeAxis
+                            ? " or its packed-byte extent"
+                            : "");
+        return failure();
+      }
+    }
+  }
+
+  SmallVector<int64_t> result;
+  result.reserve(indicesRank + dataRank - 1);
+  llvm::append_range(
+      result,
+      ArrayRef<int64_t>(logicalDataShape).take_front(normalizedGatherAxis));
+  llvm::append_range(result, indicesShape);
+  llvm::append_range(
+      result,
+      ArrayRef<int64_t>(logicalDataShape).drop_front(normalizedGatherAxis + 1));
+  return result;
+}
+
+FailureOr<SmallVector<OpFoldResult>> mlir::hip::reifyGatherBlockQuantizedShape(
+    OpBuilder &b, Location loc, Value data, Value indices, Value scales,
+    Value zeroPoints, int64_t bits, int64_t blockSize, int64_t gatherAxis,
+    int64_t quantizeAxis, bool bytePackedInt4, bool uint8Storage,
+    function_ref<InFlightDiagnostic()> emitError) {
+  auto dataType = dyn_cast<RankedTensorType>(data.getType());
+  auto indicesType = dyn_cast<RankedTensorType>(indices.getType());
+  auto scalesType = dyn_cast<RankedTensorType>(scales.getType());
+  auto zeroPointsType = zeroPoints
+                            ? dyn_cast<RankedTensorType>(zeroPoints.getType())
+                            : RankedTensorType();
+  if (!dataType || !indicesType || !scalesType ||
+      (zeroPoints && !zeroPointsType)) {
+    emitError() << "gather_block_quantized reification requires ranked tensor "
+                   "operands";
+    return failure();
+  }
+
+  std::optional<ArrayRef<int64_t>> zeroPointsShape;
+  if (zeroPointsType)
+    zeroPointsShape = zeroPointsType.getShape();
+  FailureOr<SmallVector<int64_t>> inferred = inferGatherBlockQuantizedShape(
+      dataType.getShape(), indicesType.getShape(), scalesType.getShape(),
+      zeroPointsShape, bits, blockSize, gatherAxis, quantizeAxis,
+      bytePackedInt4, uint8Storage, emitError);
+  if (failed(inferred))
+    return failure();
+
+  int64_t dataRank = dataType.getRank();
+  int64_t normalizedGatherAxis =
+      gatherAxis < 0 ? gatherAxis + dataRank : gatherAxis;
+  int64_t normalizedQuantizeAxis =
+      quantizeAxis < 0 ? quantizeAxis + dataRank : quantizeAxis;
+  auto reifyDataDim = [&](int64_t dim) -> FailureOr<OpFoldResult> {
+    int64_t staticDim = dataType.getDimSize(dim);
+    if (!bytePackedInt4 || dim != normalizedQuantizeAxis)
+      return reifyDimOrConstant(b, loc, staticDim, data, dim);
+    return detail::scaleAndOffsetDim(
+        b, loc, tensor::getMixedSize(b, loc, data, dim), /*scale=*/2,
+        /*offset=*/0);
+  };
+
+  SmallVector<OpFoldResult> result;
+  result.reserve(indicesType.getRank() + dataRank - 1);
+  for (int64_t i : llvm::seq<int64_t>(0, normalizedGatherAxis)) {
+    FailureOr<OpFoldResult> extent = reifyDataDim(i);
+    if (failed(extent))
+      return failure();
+    result.push_back(*extent);
+  }
+  for (int64_t i : llvm::seq<int64_t>(0, indicesType.getRank()))
+    result.push_back(
+        reifyDimOrConstant(b, loc, indicesType.getDimSize(i), indices, i));
+  for (int64_t i : llvm::seq<int64_t>(normalizedGatherAxis + 1, dataRank)) {
+    FailureOr<OpFoldResult> extent = reifyDataDim(i);
+    if (failed(extent))
+      return failure();
+    result.push_back(*extent);
+  }
+  return result;
+}
+
 FailureOr<SmallVector<int64_t>>
 mlir::hip::inferGatherNDShape(ArrayRef<int64_t> dataShape,
                               ArrayRef<int64_t> indicesShape,

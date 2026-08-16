@@ -1774,6 +1774,55 @@ void GatherBlockQuantizedOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult GatherBlockQuantizedOp::verify() {
+  SmallVector<Value> operands = {getData(), getIndices(), getScales()};
+  if (Value zeroPoints = getZeroPoints())
+    operands.push_back(zeroPoints);
+  operands.push_back(getOutput());
+  if (failed(verifyDpsComputeOp(*this, operands, /*numInits=*/1)))
+    return failure();
+
+  auto dataType = cast<ShapedType>(getData().getType());
+  auto indicesType = cast<ShapedType>(getIndices().getType());
+  auto scalesType = cast<ShapedType>(getScales().getType());
+  auto outputType = cast<ShapedType>(getOutput().getType());
+  auto dataElementType = dyn_cast<IntegerType>(dataType.getElementType());
+  if (!dataElementType || dataElementType.getWidth() != 8)
+    return emitOpError("data storage must have an 8-bit integer element type");
+  auto indicesElementType = dyn_cast<IntegerType>(indicesType.getElementType());
+  if (!indicesElementType || (indicesElementType.getWidth() != 32 &&
+                              indicesElementType.getWidth() != 64))
+    return emitOpError("indices element type must be i32 or i64");
+  Type scalesElementType = scalesType.getElementType();
+  if (!scalesElementType.isF16() && !scalesElementType.isF32() &&
+      !scalesElementType.isBF16())
+    return emitOpError("scales element type must be f16, f32, or bf16");
+  if (outputType.getElementType() != scalesElementType)
+    return emitOpError("output element type must match scales");
+  if (Value zeroPoints = getZeroPoints()) {
+    auto zeroPointsType = cast<ShapedType>(zeroPoints.getType());
+    if (zeroPointsType.getElementType() != dataElementType)
+      return emitOpError("zero_points element type must match data");
+  }
+  if (getNumResults() && getResult(0).getType() != getOutput().getType())
+    return emitOpError("tensor result type must match its output buffer type");
+
+  detail::GatherBlockQuantizedStorageFlags storageFlags =
+      detail::getGatherBlockQuantizedStorageFlags(getBits(),
+                                                  dataType.getElementType());
+  std::optional<ArrayRef<int64_t>> zeroPointsShape;
+  if (Value zeroPoints = getZeroPoints())
+    zeroPointsShape = detail::getShapeOf(zeroPoints);
+  return mlir::hip::verifyHipOpShape(*this, [&] {
+    return mlir::hip::inferGatherBlockQuantizedShape(
+        detail::getShapeOf(getData()), detail::getShapeOf(getIndices()),
+        detail::getShapeOf(getScales()), zeroPointsShape, getBits(),
+        getBlockSize(), getGatherAxis(), getQuantizeAxis(),
+        storageFlags.bytePackedInt4, storageFlags.uint8Storage,
+        [&]() { return this->emitOpError(); });
+  });
+}
+
 //===----------------------------------------------------------------------===//
 // CausalConvWithStateOp: ins(input, weight, [bias], [past_state])
 //                        outs(output, present_state)

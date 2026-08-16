@@ -1102,7 +1102,8 @@ def Hip_QMoEOp : Hip_DpsOp_WithInfer<"qmoe", "Output", [AttrSizedOperandSegments
   }];
 }
 
-def Hip_GatherBlockQuantizedOp : Hip_DpsOp_AutoReify<"gather_block_quantized"> {
+def Hip_GatherBlockQuantizedOp :
+    Hip_DpsOp_SemanticNoInfer<"gather_block_quantized"> {
   let summary = "Gather + block-wise dequantize "
                 "(com.microsoft GatherBlockQuantized)";
   let description = [{
@@ -1111,17 +1112,22 @@ def Hip_GatherBlockQuantizedOp : Hip_DpsOp_AutoReify<"gather_block_quantized"> {
     integer `indices`, and dequantize the gathered rows using per-block
     `scales` and optional `zero_points`.
 
-    `data` is a constant tensor of rank `r >= 1` quantized along
+    `data` is a constant tensor of rank `r > 1` quantized along
     `quantize_axis` with the given `block_size`. For 4-bit, two values are
     packed per byte (low nibble first, high nibble second); for 8-bit one
     value per byte. `scales` (and `zero_points`, when present) share the
     layout of `data` except along `quantize_axis`, where their extent is
-    `data.shape[quantize_axis] / block_size`. When `zero_points` is absent,
-    the default is `0` for int4/uint4 and `2^(bits-1)` for uint8.
+    `ceil(logical_data.shape[quantize_axis] / block_size)`. When
+    `zero_points` is absent, the default is `0` for signed storage and
+    `2^(bits-1)` for unsigned storage.
 
-    Output rank is `q + (r - 1)` where `q = rank(indices)`. Element type of
-    `output` matches `scales` (T2: f32 / f16 / bf16). For uint8 `data`,
-    `gather_axis` must be 0.
+    The result is Gather over the logical dequantized data shape:
+    `logical_data[:gather_axis] ++ indices.shape ++
+    logical_data[gather_axis+1:]`. For byte-packed 4-bit storage,
+    `logical_data[quantize_axis] = data.shape[quantize_axis] * 2`; no extent is
+    doubled when Gather removes that axis. Output rank is `q + (r - 1)` where
+    `q = rank(indices)`. Element type of `output` matches `scales`
+    (T2: f32 / f16 / bf16). For uint8 `data`, `gather_axis` must be 0.
 
     Optional unit attribute `unsigned_quant_storage`: set when
     convert-onnx-to-hip identifies UINT4/UINT8
@@ -1142,7 +1148,7 @@ def Hip_GatherBlockQuantizedOp : Hip_DpsOp_AutoReify<"gather_block_quantized"> {
             memref<8xi64, 1>,
             memref<2048x12xf16, 1>)
         zero_points(%zp : memref<2048x12xui8, 1>)
-        outs(%out : memref<8x96xf16, 1>)
+        outs(%out : memref<8x192xf16, 1>)
         {bits = 4, block_size = 16, gather_axis = 0, quantize_axis = 1}
     ```
   }];
@@ -1168,6 +1174,7 @@ def Hip_GatherBlockQuantizedOp : Hip_DpsOp_AutoReify<"gather_block_quantized"> {
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+  let hasVerifier = 1;
 }
 
 // ===== MIOpen ops ============================================================

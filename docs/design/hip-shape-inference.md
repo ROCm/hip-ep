@@ -172,6 +172,7 @@ Choose the smallest mechanism that matches the operation's semantics:
 | Permutation | Shared pure `inferTransposeShape` plus `reifyTransposeByPerm` and verifier |
 | Gather/GatherND | Shared pure Gather/GatherND helpers plus reify/verifier thunks; dynamic GatherND tuple width falls back to outs |
 | GatherElements | `Hip_DpsOp_SameShape` with `indices` as its named source |
+| GatherBlockQuantized | Shared logical-dequantized Gather rule; packed int4 expands the surviving quantize axis |
 | OneHot, Compress, TopK | Dedicated reification thunks |
 | Pad | Exact affine input-dimension arithmetic for constant/stamped pads; runtime pads use converter readback and reify from outs |
 | Slice | Shared static/SSA normalization; runtime i32/i64 controls use one grouped readback and exact extents |
@@ -343,6 +344,20 @@ contract defensively. A static trailing tuple width uses the shared exact shape
 rule. An already-formed HIP op whose i64 tuple width is dynamic remains legal:
 its reifier cannot know the result rank from the operands and falls back to the
 DPS destination shape.
+
+GatherBlockQuantized applies Gather to the logical dequantized data shape, not
+the physical byte-storage shape. For the HIP op's byte-packed 4-bit storage,
+`logical_data[quantize_axis] = 2 * data[quantize_axis]`; all other extents are
+unchanged. The result is
+`logical_data[:gather_axis] ++ indices.shape ++
+logical_data[gather_axis+1:]`. If Gather removes the quantize axis itself, no
+result extent is doubled. The shared helper also validates the statically known
+block grid (`scales[quantize_axis] =
+ceil(logical_data[quantize_axis] / block_size)`), non-quantized extents,
+optional zero-point packing, axes, ranks, and runtime-supported attributes.
+Converter destination construction, op reification, and static verification all
+call this rule. The runtime receives the physical data descriptor and expands
+its quantize-axis extent before launching the logical-element kernel.
 
 Forward Conv and Pool share one validated spatial-window primitive:
 `floor((input + pads - effectiveKernel) / stride) + 1`; Pool selects signed
@@ -659,6 +674,8 @@ Primary regression coverage:
 | `test/lit/Conversion/onnx-to-hip/test_gather_nd_invalid.mlir` | Mutation-free rejection of i32 GatherND indices |
 | `test/lit/Dialect/hip-gather-nd-reify-shapes.mlir` | Static tuple-width reification and dynamic tuple-width destination fallback |
 | `test/lit/Dialect/hip-gather-nd-shape-verifier.mlir` | GatherND i64 ABI and static/dynamic tuple-width verification |
+| `test/lit/Dialect/hip-gather-block-quantized-reify-shapes.mlir` | Packed-int4 logical Gather shape reification |
+| `test/lit/Dialect/hip-gather-block-quantized-shape-verifier.mlir` | GatherBlockQuantized logical shape and runtime-contract validation |
 | `test/lit/Dialect/hip-resize-reify-shapes.mlir` | Dynamic N/C and static spatial Resize reification |
 | `test/lit/Dialect/hip-resize-shape-verifier.mlir` | Resize semantic destination validation |
 | `test/lit/Dialect/hip-matmul-reify-shapes.mlir` | Per-op reification through `--resolve-shaped-type-result-dims` |
