@@ -6,7 +6,6 @@
 
 // Dynamic condition takes the slow runtime path and exits after the body's
 // first false condition publication.
-// -----
 module {
   // CHECK-LABEL: func.func @main_graph
   // CHECK: hip.loop
