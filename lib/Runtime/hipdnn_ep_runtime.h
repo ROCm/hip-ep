@@ -427,7 +427,8 @@ int hipdnn_ep_state_ensure_la_scratch(RuntimeState *state, size_t needed_size);
 bool hipdnn_ep_op_states_alloc(RuntimeState *state, int64_t n);
 
 // Shared runtime error flag. Generated code records every nonzero operation
-// status here; kernels may also write the device pointer directly.
+// status here; kernels may write the device pointer directly, and wrappers can
+// queue a generic host-detected failure on the inference stream.
 void *hipdnn_ep_state_get_error_flag_device_ptr(RuntimeState *state);
 int hipdnn_ep_state_reset_error_flag(RuntimeState *state);
 int hipdnn_ep_state_set_error_flag(RuntimeState *state);
@@ -814,37 +815,28 @@ int wrap_hipblasLtGemm(void *handle, // hipBLASLt handle
                        const void *beta,  // Scalar beta
                        void *C);          // Matrix C GPU pointer (in/out)
 
-// MatMul operation wrapper (batched matrix multiplication)
-// Called by generated IR for onnx.MatMul lowering
-// Computes output = A @ B for each batch
-// A: [batch_count x M x K], B: [K x N] (broadcast) or [batch_count x K x N]
-// output: [batch_count x M x N]
+// HIP MatMul ABI. Either operand may contain one matrix broadcast across all
+// output batches or one matrix per output batch.
 //
-// `b_batch_stride` is hipBLASLt's STRIDED_BATCH_OFFSET on layA when
-// `batch_count > 1`: the per-batch advance in elements through B. It MUST be:
-//   * 0   when B is a broadcast weight — one matrix reused across all
-//         batches. Includes both rank-2 `[K, N]` and rank-N
-//         `[1, ..., 1, K, N]` (any leading-dim product == 1).
-//   * K*N when B is per-batch — leading-dim product > 1, so the buffer
-//         actually holds multiple `[K, N]` matrices laid out contiguously.
-// Mis-setting this to K*N for a broadcast B causes hipBLASLt to step K*N
-// elements past the end of the weight buffer on every batch beyond the
-// first, reading uninitialised memory into the GEMM and producing wrong
-// (often NaN) outputs for batch > 0. For batch_count == 1 the value is
-// ignored. Always pass an exact stride; the compiler computes 0 vs K*N
-// at compile time when B's leading dims are static, else at runtime.
-int wrap_hipblasLtMatmul(
-    RuntimeState *state,
-    int op_state_slot,       // per-instance op-state slot (shared algo table)
-    const void *A,           // Matrix A GPU pointer
-    const void *B,           // Matrix B GPU pointer
-    void *output,            // Output GPU pointer
-    int64_t M,               // Rows of A (per batch)
-    int64_t N,               // Columns of B
-    int64_t K,               // Columns of A / Rows of B
-    int64_t batch_count,     // Number of batches
-    int64_t elem_size,       // Element size in bytes (2=f16, 4=f32)
-    int64_t b_batch_stride); // 0 = broadcast (any rank); K*N = per-batch
+// `batch_axes_valid` is the lowering's per-axis right-aligned broadcast and
+// output-shape check. False records a recoverable error before cache/BLAS work.
+//
+// `a_batch_stride` / `b_batch_stride` are hipBLASLt's per-batch advances in
+// elements. A stride is 0 when one matrix is broadcast across all batches;
+// otherwise it is M*K_a for A or K_b*N for B.
+//
+// `a_batch_count` / `b_batch_count` are validated at runtime because dynamic
+// batch extents can conceal a partial per-axis broadcast from the static
+// verifier. Each count must be either 1 or `batch_count`; otherwise the wrapper
+// records a recoverable runtime error and does not dispatch hipBLASLt.
+// `K_a` and `K_b` are compared before cache lookup or descriptor creation.
+// Artifacts compiled against the earlier 11-argument ABI must be rebuilt.
+int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
+                         const void *B, void *output, bool batch_axes_valid,
+                         int64_t M, int64_t N, int64_t K_a, int64_t K_b,
+                         int64_t batch_count, int64_t elem_size,
+                         int64_t a_batch_count, int64_t b_batch_count,
+                         int64_t a_batch_stride, int64_t b_batch_stride);
 
 // GroupQueryAttention operation wrapper (Full MS spec)
 // Called by generated IR for onnx.Custom(GroupQueryAttention) lowering
@@ -1383,10 +1375,13 @@ int wrap_linear_attention(
 // ONNX Gemm via hipBLASLt
 //==============================================================================
 // Y = alpha * op(A) * op(B) + beta * C
-// op(A) shape: [M, K], op(B) shape: [K, N], C optional broadcastable to [M, N]
+// op(A) shape: [M, K_a], op(B) shape: [K_b, N].
+// K_a and K_b are checked before descriptors, cache lookup, or dispatch.
+// C is optional and broadcastable to [M, N]. This ABI is incompatible with
+// artifacts that passed one compiler-proven K.
 int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
               const void *B, const void *C, void *output, int64_t M, int64_t N,
-              int64_t K, float alpha, float beta, int64_t transA,
+              int64_t K_a, int64_t K_b, float alpha, float beta, int64_t transA,
               int64_t transB, int64_t typeCode, int64_t cDim0, int64_t cDim1);
 
 // Element-wise Equal. Operand shapes are passed as 4D (N, C, H, W), left-

@@ -155,6 +155,7 @@ struct MatMulLowering : ConvertOpToLLVMPattern<MatMulOp> {
     Value m =
         aRank == 1 ? createI64Const(1) : aDesc.size(rewriter, loc, aRank - 2);
     Value k = aDesc.size(rewriter, loc, aRank - 1);
+    Value bK = bDesc.size(rewriter, loc, bRank == 1 ? 0 : bRank - 2);
     Value n =
         bRank == 1 ? createI64Const(1) : bDesc.size(rewriter, loc, bRank - 1);
 
@@ -164,8 +165,10 @@ struct MatMulLowering : ConvertOpToLLVMPattern<MatMulOp> {
                                        aDesc.size(rewriter, loc, i));
     }
 
+    Value bBatchCount;
     Value bBatchStride;
     if (bRank <= 2) {
+      bBatchCount = createI64Const(1);
       bBatchStride = createI64Const(0);
     } else {
       bool allLeadingStatic = true;
@@ -178,30 +181,34 @@ struct MatMulLowering : ConvertOpToLLVMPattern<MatMulOp> {
         staticLeadingProduct *= bType.getDimSize(i);
       }
       if (allLeadingStatic) {
+        bBatchCount = createI64Const(staticLeadingProduct);
         bBatchStride =
             staticLeadingProduct <= 1
                 ? createI64Const(0)
-                : LLVM::MulOp::create(rewriter, loc, k, n).getResult();
+                : LLVM::MulOp::create(rewriter, loc, bK, n).getResult();
       } else {
         Value one = createI64Const(1);
         Value zero = createI64Const(0);
-        Value leadingProduct = one;
+        bBatchCount = one;
         for (int64_t i : llvm::seq<int64_t>(0, bRank - 2)) {
-          leadingProduct = LLVM::MulOp::create(rewriter, loc, leadingProduct,
-                                               bDesc.size(rewriter, loc, i));
+          bBatchCount = LLVM::MulOp::create(rewriter, loc, bBatchCount,
+                                            bDesc.size(rewriter, loc, i));
         }
         Value isBroadcast = LLVM::ICmpOp::create(
-            rewriter, loc, LLVM::ICmpPredicate::sle, leadingProduct, one);
-        Value kn = LLVM::MulOp::create(rewriter, loc, k, n);
+            rewriter, loc, LLVM::ICmpPredicate::sle, bBatchCount, one);
+        Value kn = LLVM::MulOp::create(rewriter, loc, bK, n);
         bBatchStride =
             LLVM::SelectOp::create(rewriter, loc, isBroadcast, zero, kn);
       }
     }
 
+    Value batchAxesValid = LLVM::ConstantOp::create(
+        rewriter, loc, rewriter.getI1Type(), rewriter.getBoolAttr(true));
+    Value aBatchStride = LLVM::MulOp::create(rewriter, loc, m, k);
     int64_t elementSize = aType.getElementType().getIntOrFloatBitWidth() / 8;
     using MatMulCall =
         RuntimeFunc<i32, hostPtr, slotIndex, devicePtr, devicePtr, devicePtr,
-                    i64, i64, i64, i64, i64, i64>;
+                    i1, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64>;
     auto matMulFunc = MatMulCall::lookupOrCreateFn(rewriter, loc, module,
                                                    kWrapHipblasLtMatmul);
     if (failed(matMulFunc)) {
@@ -209,8 +216,9 @@ struct MatMulLowering : ConvertOpToLLVMPattern<MatMulOp> {
     }
     if (failed(matMulFunc->call(adaptor.getCtx(), SlotIndex{op.getOperation()},
                                 adaptor.getA(), adaptor.getB(),
-                                adaptor.getInit(), m, n, k, batchCount,
-                                elementSize, bBatchStride))) {
+                                adaptor.getInit(), batchAxesValid, m, n, k, bK,
+                                batchCount, elementSize, batchCount,
+                                bBatchCount, aBatchStride, bBatchStride))) {
       return failure();
     }
     rewriter.eraseOp(op);

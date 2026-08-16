@@ -249,6 +249,17 @@ dynamic descriptor equality before copying or dispatching f16, bf16, or f32
 storage through the typed custom kernel. This contract supersedes the former
 element-byte-width argument and therefore requires artifact invalidation.
 
+HIP MatMul and Gemm carry two contraction extents in generated calls. MatMul
+calls `wrap_hipblasLtMatmul` with `A[-1]`, `B[-2]`, and one i1 proving
+all right-aligned runtime batch axes and output extents agree with ONNX
+broadcast. Gemm passes the transpose-aware K extent from each operand. The real
+and mock wrappers validate these contracts before descriptor/cache creation or
+dispatch, then use the equal K value in cache keys. Runtime-invalid dimensions
+and checked output-size overflow set the shared error flag and skip BLAS work;
+a known, valid nonempty output allocation is zero-filled on failure.
+
+Artifacts built against the former 11-argument MatMul signature or the old
+one-K Gemm signature must be recompiled.
 ---
 
 ## Consumers

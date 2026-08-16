@@ -3,6 +3,7 @@
  * Licensed under the MIT License.
  */
 #include "hipdnn_ep_runtime.h"
+#include "matmul_gemm_contract.h"
 #include "runtime_types.h"
 
 #include <cstdio>
@@ -35,6 +36,24 @@
 
 // Comprehensive mock implementations for all GPU functions
 // Prints all operations for debugging and verification
+
+#ifdef HIPDNN_EP_RUNTIME_TESTING
+static int mockMatmulDispatchCount = 0;
+static int mockGemmDispatchCount = 0;
+
+extern "C" void hipdnn_ep_mock_reset_blas_dispatch_counts() {
+  mockMatmulDispatchCount = 0;
+  mockGemmDispatchCount = 0;
+}
+
+extern "C" int hipdnn_ep_mock_matmul_dispatch_count() {
+  return mockMatmulDispatchCount;
+}
+
+extern "C" int hipdnn_ep_mock_gemm_dispatch_count() {
+  return mockGemmDispatchCount;
+}
+#endif
 
 // Mock HIP device functions
 extern "C" hipError_t hipGetDeviceCount(int *count) {
@@ -595,20 +614,88 @@ int wrap_hipblasLtGemm(void *handle, void *stream, int64_t m, int64_t n,
 }
 
 int wrap_hipblasLtMatmul(RuntimeState *state, int op_state_slot, const void *A,
-                         const void *B, void *output, int64_t M, int64_t N,
-                         int64_t K, int64_t batch_count, int64_t elem_size,
-                         int64_t b_batch_stride) {
-  (void)b_batch_stride;
+                         const void *B, void *output, bool batch_axes_valid,
+                         int64_t M, int64_t N, int64_t K_a, int64_t K_b,
+                         int64_t batch_count, int64_t elem_size,
+                         int64_t a_batch_count, int64_t b_batch_count,
+                         int64_t a_batch_stride, int64_t b_batch_stride) {
+  using namespace hipdnn_ep::blas_contract;
   (void)op_state_slot;
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_hipblasLtMatmul\n");
     return -1;
   }
 
-  MOCK_PRINT("[MOCK] wrap_hipblasLtMatmul(M=%lld, N=%lld, K=%lld, "
-             "batch=%lld, elem_size=%lld)\n",
-             (long long)M, (long long)N, (long long)K, (long long)batch_count,
-             (long long)elem_size);
+  ValidationResult validation = validateMatmul(
+      batch_axes_valid, M, N, K_a, K_b, batch_count, elem_size, a_batch_count,
+      b_batch_count, a_batch_stride, b_batch_stride, A != nullptr, B != nullptr,
+      output != nullptr);
+  auto fail = [&]() {
+    (void)hipdnn_ep_state_set_error_flag(state);
+    if (validation.outputSizeKnown && validation.outputSize.bytes != 0 &&
+        output)
+      memset(output, 0, validation.outputSize.bytes);
+    return -1;
+  };
+
+  if (validation.status == ValidationStatus::EmptyOutput)
+    return 0;
+  if (validation.status != ValidationStatus::Success)
+    return fail();
+
+#ifdef HIPDNN_EP_RUNTIME_TESTING
+  ++mockMatmulDispatchCount;
+#endif
+
+  MOCK_PRINT("[MOCK] wrap_hipblasLtMatmul(M=%lld, N=%lld, K_a=%lld, "
+             "K_b=%lld, batch=%lld, elem_size=%lld, a_batches=%lld, "
+             "b_batches=%lld, a_batch_stride=%lld, b_batch_stride=%lld)\n",
+             (long long)M, (long long)N, (long long)K_a, (long long)K_b,
+             (long long)batch_count, (long long)elem_size,
+             (long long)a_batch_count, (long long)b_batch_count,
+             (long long)a_batch_stride, (long long)b_batch_stride);
+
+  return 0;
+}
+
+int wrap_gemm(RuntimeState *state, int op_state_slot, const void *A,
+              const void *B, const void *C, void *output, int64_t M, int64_t N,
+              int64_t K_a, int64_t K_b, float alpha, float beta, int64_t transA,
+              int64_t transB, int64_t typeCode, int64_t cDim0, int64_t cDim1) {
+  using namespace hipdnn_ep::blas_contract;
+  (void)op_state_slot;
+  (void)alpha;
+  (void)beta;
+  if (!state) {
+    fprintf(stderr, "Invalid state in wrap_gemm\n");
+    return -1;
+  }
+
+  ValidationResult validation =
+      validateGemm(M, N, K_a, K_b, transA, transB, typeCode, C != nullptr,
+                   cDim0, cDim1, A != nullptr, B != nullptr, output != nullptr);
+  auto fail = [&]() {
+    (void)hipdnn_ep_state_set_error_flag(state);
+    if (validation.outputSizeKnown && validation.outputSize.bytes != 0 &&
+        output)
+      memset(output, 0, validation.outputSize.bytes);
+    return -1;
+  };
+
+  if (validation.status == ValidationStatus::EmptyOutput)
+    return 0;
+  if (validation.status != ValidationStatus::Success)
+    return fail();
+
+#ifdef HIPDNN_EP_RUNTIME_TESTING
+  ++mockGemmDispatchCount;
+#endif
+
+  MOCK_PRINT("[MOCK] wrap_gemm(M=%lld, N=%lld, K_a=%lld, K_b=%lld, "
+             "transA=%lld, transB=%lld, typeCode=%lld, C=%s)\n",
+             (long long)M, (long long)N, (long long)K_a, (long long)K_b,
+             (long long)transA, (long long)transB, (long long)typeCode,
+             C ? "yes" : "null");
 
   return 0;
 }

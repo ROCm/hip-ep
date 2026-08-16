@@ -13,12 +13,12 @@
 // - Attributes: alpha, beta, transA, transB passed as constants
 // - M/N/K dimensions extracted correctly (respecting transA/transB)
 // - C shape (cDim0, cDim1) extracted and passed for broadcast support
-// - 16-param signature: state, A, B, C, output, M, N, K,
+// - 17-param signature: state, A, B, C, output, M, N, K_a, K_b,
 //                        alpha, beta, transA, transB, typeCode, cDim0, cDim1,
 //                        op_state_slot
 //
 // Expected: wrap_gemm(state, A_ptr, B_ptr, C_ptr, output_ptr,
-//             M, N, K, alpha, beta, transA, transB, typeCode, cDim0, cDim1,
+//             M, N, K_a, K_b, alpha, beta, transA, transB, typeCode, cDim0, cDim1,
 //             op_state_slot)
 // ============================================================================
 
@@ -39,7 +39,7 @@ module {
     hip.gemm(%ctx) ins(%a, %b, %c : memref<1x5120xf16, 1>, memref<5120x5120xf16, 1>, memref<5120xf16, 1>)
                    outs(%y : memref<1x5120xf16, 1>)
 
-    // CHECK: llvm.call @wrap_gemm({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32, f32, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_gemm({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, f32, f32, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -59,7 +59,7 @@ module {
 
     // null pointer for absent C
     // CHECK: llvm.mlir.zero
-    // CHECK: llvm.call @wrap_gemm({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32, f32, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_gemm({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, f32, f32, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -79,7 +79,7 @@ module {
                    outs(%y : memref<1x512xf16, 1>)
                    {transB = 1 : i64}
 
-    // CHECK: llvm.call @wrap_gemm({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32, f32, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_gemm({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, f32, f32, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -99,7 +99,7 @@ module {
                    outs(%y : memref<128x512xf32, 1>)
                    {alpha = 2.000000e+00 : f32, beta = 5.000000e-01 : f32, transA = 1 : i64}
 
-    // CHECK: llvm.call @wrap_gemm({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32, f32, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_gemm({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, f32, f32, i64, i64, i64, i64, i64) -> i32
 
     return
   }
@@ -118,8 +118,28 @@ module {
     hip.gemm(%ctx) ins(%a, %b, %c : memref<128x256xf32, 1>, memref<256x512xf32, 1>, memref<128x512xf32, 1>)
                    outs(%y : memref<128x512xf32, 1>)
 
-    // CHECK: llvm.call @wrap_gemm({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, f32, f32, i64, i64, i64, i64, i64) -> i32
+    // CHECK: llvm.call @wrap_gemm({{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, f32, f32, i64, i64, i64, i64, i64) -> i32
 
+    return
+  }
+
+  // Test 6: transpose-aware dynamic contraction extraction.
+  // transA=1 takes K_a from A.dim0; transB=1 takes K_b from B.dim1.
+  func.func @gemm_dynamic_k_transposed(
+      %ctx: !hip.context,
+      %a: memref<?x2xf16, 1>,
+      %b: memref<3x?xf16, 1>,
+      %y: memref<2x3xf16, 1>) {
+    // CHECK-LABEL: llvm.func @gemm_dynamic_k_transposed
+    // CHECK: %[[KA:.*]] = llvm.extractvalue {{.*}}[3, 0]
+    // CHECK: %[[KB:.*]] = llvm.extractvalue {{.*}}[3, 1]
+
+    hip.gemm(%ctx)
+      ins(%a, %b : memref<?x2xf16, 1>, memref<3x?xf16, 1>)
+      outs(%y : memref<2x3xf16, 1>)
+      {transA = 1 : i64, transB = 1 : i64}
+
+    // CHECK: llvm.call @wrap_gemm({{.*}}, %[[KA]], %[[KB]], {{.*}}) : (!llvm.ptr, i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64, i64, i64, i64, f32, f32, i64, i64, i64, i64, i64) -> i32
     return
   }
 }
