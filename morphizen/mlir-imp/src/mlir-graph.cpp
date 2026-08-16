@@ -22,7 +22,9 @@
 #include "mlir/IR/Verifier.h"
 #include "mlir/Transforms/RegionUtils.h" // for getUsedValuesDefinedAbove
 #include "morphizen-foundation/env_config.hpp"
-#include "llvm/ADT/STLExtras.h"       // for map_range, to_vector
+#include "morphizen/symbolic_dims.hpp"
+#include "llvm/ADT/STLExtras.h" // for map_range, to_vector
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/SetVector.h"       // for SetVector
 #include "llvm/ADT/SmallPtrSet.h"     // for SmallPtrSet
 #include "llvm/ADT/SmallSet.h"        // for SmallSet
@@ -1214,6 +1216,21 @@ std::string MLIRGraph::save_string() const {
       MLIRNode(op).restoreMorphizenAttrs(snapshot);
     }
   };
+  bool projected = false;
+  llvm::scope_exit restore_state([&]() {
+    if (projected)
+      module->removeAttr(kOnnxDimParamsModuleAttr);
+    restore_backups();
+  });
+
+  if (module->hasAttr(kOnnxDimParamsModuleAttr)) {
+    throw std::runtime_error(
+        "live module contains conflicting symbolic dimension metadata");
+  }
+  const MLIRModel &model = get_model();
+  projected = model.has_metadata_prop(kOnnxDimParamsMetadataKey);
+  if (projected)
+    module->setAttr(kOnnxDimParamsModuleAttr, model.get_symbolic_dim_attr());
 
   // Serialize the MLIR module (text or bytecode based on env var)
   std::string result;
@@ -1227,13 +1244,10 @@ std::string MLIRGraph::save_string() const {
     mlir::BytecodeWriterConfig config;
     if (failed(mlir::writeBytecodeToFile(module, stream, config))) {
       LOG(ERROR) << "Failed to write MLIR bytecode";
-      restore_backups();
       return "";
     }
   }
   stream.flush();
-
-  restore_backups();
 
   MY_LOG(1) << "Successfully serialized MLIR graph to string ("
             << backups.size() << " ops snapshotted, format="
