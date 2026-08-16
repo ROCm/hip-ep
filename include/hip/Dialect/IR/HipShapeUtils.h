@@ -139,6 +139,8 @@ LogicalResult
 reifyElementwiseSameShapeFor(OpBuilder &b, Location loc, Value source,
                              Operation *op,
                              ReifiedRankedShapedTypeDims &reified);
+LogicalResult verifySameShapeDpsOp(Operation *op, Value source,
+                                   unsigned initIndex = 0);
 
 /// Compute the NumPy-broadcast result shape over `operands`. Static
 /// broadcastability is validated before any `tensor.dim` or arithmetic op is
@@ -236,9 +238,33 @@ FailureOr<SmallVector<OpFoldResult>> reifyMultiHeadAttentionOutputShape(
     OpBuilder &b, Location loc, Value query, Value key, Value value,
     int64_t numHeads, function_ref<InFlightDiagnostic()> emitError);
 
+/// Compute the supported spatial Resize result shape. The HIP op deliberately
+/// does not carry ONNX `sizes` or `scales`: N/C therefore come from `input`,
+/// while every spatial extent must already be static in `outputTemplate`.
+///
+/// A dynamic input N/C extent requires the corresponding template extent to
+/// remain dynamic; a static template cannot promise equality to an unknown
+/// runtime input extent. A static input N/C extent may refine a dynamic
+/// template extent.
+FailureOr<SmallVector<int64_t>>
+inferResizeShape(ArrayRef<int64_t> inputShape, ArrayRef<int64_t> outputTemplate,
+                 function_ref<InFlightDiagnostic()> emitError);
+
+/// Mixed-shape form of `inferResizeShape`. Validation completes before any
+/// `tensor.dim` is emitted. Dynamic N/C extents come from `input`; spatial
+/// extents are constants from `outputTemplate`.
+FailureOr<SmallVector<OpFoldResult>>
+reifyResizeShape(OpBuilder &b, Location loc, Value input,
+                 ArrayRef<int64_t> outputTemplate,
+                 function_ref<InFlightDiagnostic()> emitError);
+
+/// Pure transpose shape rule: `output[i] = input[perm[i]]`.
+FailureOr<SmallVector<int64_t>>
+inferTransposeShape(ArrayRef<int64_t> inputShape, ArrayRef<int64_t> perm);
+
 /// Reify the result shape of a transpose op as `output[i] = input[perm[i]]`.
-/// `perm` must be a permutation of `[0, rank-1)` and have the same length
-/// as `input`'s rank.
+/// `perm` must be a permutation of `[0, rank)` and have the same length as
+/// `input`'s rank. Returns failure on malformed input, before emitting IR.
 ///
 /// Each output dim `i`:
 ///   - emits `IndexAttr(input.shape[perm[i]])` when that dim is static,
@@ -248,6 +274,12 @@ FailureOr<SmallVector<OpFoldResult>> reifyMultiHeadAttentionOutputShape(
 FailureOr<SmallVector<OpFoldResult>>
 reifyTransposeByPerm(OpBuilder &b, Location loc, Value input,
                      ArrayRef<int64_t> perm);
+
+/// Pure Gather shape rule:
+/// `data[:axis] ++ indices.shape ++ data[axis+1:]`.
+FailureOr<SmallVector<int64_t>> inferGatherShape(ArrayRef<int64_t> dataShape,
+                                                 ArrayRef<int64_t> indicesShape,
+                                                 int64_t axis);
 
 /// Reify the result shape of a gather op as
 /// `output = data.shape[:axis] ++ indices.shape ++ data.shape[axis+1:]`.
@@ -259,12 +291,21 @@ FailureOr<SmallVector<OpFoldResult>>
 reifyGatherWithAxis(OpBuilder &b, Location loc, Value data, Value indices,
                     int64_t axis);
 
+/// Pure GatherND shape rule. A dynamic trailing tuple width returns failure
+/// because the output rank is not statically knowable; callers that support an
+/// outs-authoritative fallback must distinguish that case before diagnosing.
+FailureOr<SmallVector<int64_t>>
+inferGatherNDShape(ArrayRef<int64_t> dataShape, ArrayRef<int64_t> indicesShape,
+                   int64_t batchDims);
+
 /// Reify the result shape of a `gather_nd` op as
 /// `batch_dims_from_data ++ indices.shape[batch_dims:-1] ++
 ///  data.shape[batch_dims + indices.shape[-1]:]`.
+/// The indices tensor must have i64 elements, matching the width-less runtime
+/// ABI that interprets its pointer as `int64_t *`.
 /// Per ONNX GatherND semantics, output rank =
 /// `q + r - indices.shape[-1] - 1 - batch_dims`, where `q = rank(indices)`
-/// and `r = rank(data)`. The helper bails (returns empty) when the
+/// and `r = rank(data)`. Returns failure when the
 /// trailing index-tuple width (`indices.shape[-1]`) is dynamic — the
 /// output rank itself is then unknown and reify cannot run.
 ///
