@@ -49,7 +49,7 @@ struct GreaterDecompose : public mlir::RewritePattern {
           op, "onnx.Greater decompose expects a ranked tensor result");
 
     mlir::FailureOr<mlir::Value> initOrFailure =
-        createBroadcastEmptyTensor(rewriter, loc, resultType, {b, a});
+        createOnnxBroadcastEmptyTensor(rewriter, loc, resultType, {b, a}, op);
     if (mlir::failed(initOrFailure))
       return rewriter.notifyMatchFailure(
           op, "Greater: cannot infer dynamic result dimensions from "
