@@ -1154,18 +1154,20 @@ int wrap_leaky_relu(RuntimeState *state, void *input, void *output,
 // `spatial_rank` selects how many of the three trailing axes
 // (in_*, out_*, k*, s*, p*, dil*) are read; unused slots must be 1
 // (kernel/dim) or 0 (pad).  `storage_order` and `ceil_mode` are pre-resolved
-// at compile time and accepted only for ABI completeness.  `count_include_pad`
-// is the AveragePool divisor selector; `p` is the LpPool norm exponent — both
-// are ignored for the modes that don't use them.
+// at compile time and accepted only for ABI completeness. `shape_valid=0`
+// reports a recoverable dynamic-shape error and skips the kernel launch.
+// `count_include_pad` is the AveragePool divisor selector; `p` is the LpPool
+// norm exponent — both are ignored for the modes that don't use them.
 // data_type: HIPDNN_EP_DATATYPE_* (supports FLOAT, HALF, BFLOAT16, DOUBLE).
 int wrap_pool(RuntimeState *state, void *input, void *output, void *indices,
-              int64_t data_type, int64_t pool_mode, int64_t spatial_rank,
-              int64_t N, int64_t C, int64_t in0, int64_t in1, int64_t in2,
-              int64_t out0, int64_t out1, int64_t out2, int64_t k0, int64_t k1,
-              int64_t k2, int64_t s0, int64_t s1, int64_t s2, int64_t p0,
-              int64_t p1, int64_t p2, int64_t dil0, int64_t dil1, int64_t dil2,
-              int64_t storage_order, int64_t ceil_mode, int64_t has_indices,
-              int64_t count_include_pad, int64_t p);
+              int64_t shape_valid, int64_t data_type, int64_t pool_mode,
+              int64_t spatial_rank, int64_t N, int64_t C, int64_t in0,
+              int64_t in1, int64_t in2, int64_t out0, int64_t out1,
+              int64_t out2, int64_t k0, int64_t k1, int64_t k2, int64_t s0,
+              int64_t s1, int64_t s2, int64_t p0, int64_t p1, int64_t p2,
+              int64_t dil0, int64_t dil1, int64_t dil2, int64_t storage_order,
+              int64_t ceil_mode, int64_t has_indices, int64_t count_include_pad,
+              int64_t p);
 // Resize wrapper (uses custom HIP kernel).
 // Spatial-axis-only resize over (N, C, D_1[, D_2[, D_3]]) input; (N, C)
 // pass-through.  `mode` (0=nearest, 1=linear), `coord_transform`

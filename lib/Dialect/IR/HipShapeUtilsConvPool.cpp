@@ -437,6 +437,51 @@ FailureOr<SmallVector<OpFoldResult>> mlir::hip::reifyConvResultShape(
                                 runtimeValid);
 }
 
+FailureOr<SmallVector<int64_t>>
+mlir::hip::inferPoolShape(ArrayRef<int64_t> inputShape,
+                          ArrayRef<int64_t> kernelShape,
+                          ArrayRef<int64_t> strides, ArrayRef<int64_t> pads,
+                          ArrayRef<int64_t> dilations, int64_t ceilMode,
+                          function_ref<InFlightDiagnostic()> emitError) {
+  if (inputShape.size() < 3 || inputShape.size() > 5) {
+    emitError() << "pool input must have spatial rank 1, 2, or 3";
+    return failure();
+  }
+  if (ceilMode != 0 && ceilMode != 1) {
+    emitError() << "pool ceil_mode must be 0 or 1";
+    return failure();
+  }
+  FailureOr<SmallVector<int64_t>> spatial = inferSpatialWindowExtents(
+      inputShape.drop_front(2), kernelShape, strides, pads, dilations,
+      ceilMode == 1, "pool", emitError);
+  if (failed(spatial))
+    return failure();
+  SmallVector<int64_t> result = {inputShape[0], inputShape[1]};
+  result.append(spatial->begin(), spatial->end());
+  return result;
+}
+
+FailureOr<SmallVector<OpFoldResult>> mlir::hip::reifyPoolResultShape(
+    OpBuilder &b, Location loc, Value input, ArrayRef<int64_t> kernelShape,
+    ArrayRef<int64_t> strides, ArrayRef<int64_t> pads,
+    ArrayRef<int64_t> dilations, int64_t ceilMode,
+    function_ref<InFlightDiagnostic()> emitError, Value *runtimeValid) {
+  auto inputType = dyn_cast<RankedTensorType>(input.getType());
+  if (!inputType) {
+    emitError() << "pool input must be a ranked tensor";
+    return failure();
+  }
+  FailureOr<SmallVector<int64_t>> inferred =
+      inferPoolShape(inputType.getShape(), kernelShape, strides, pads,
+                     dilations, ceilMode, emitError);
+  if (failed(inferred))
+    return failure();
+
+  return reifyWindowResultShape(b, loc, input, input, /*channelDim=*/1,
+                                *inferred, kernelShape, strides, pads,
+                                dilations, ceilMode == 1, runtimeValid);
+}
+
 FailureOr<SmallVector<int64_t>> mlir::hip::inferConvTransposeShape(
     ArrayRef<int64_t> inputShape, ArrayRef<int64_t> weightShape,
     ArrayRef<int64_t> kernelShape, ArrayRef<int64_t> strides,
@@ -562,5 +607,36 @@ FailureOr<SmallVector<OpFoldResult>> mlir::hip::reifyConvTransposeResultShape(
       return failure();
     result.push_back(*extent);
   }
+  return result;
+}
+
+FailureOr<SmallVector<int64_t>>
+mlir::hip::inferGlobalPoolShape(ArrayRef<int64_t> inputShape,
+                                function_ref<InFlightDiagnostic()> emitError) {
+  if (inputShape.size() < 3) {
+    emitError() << "global_pool input must have rank >= 3";
+    return failure();
+  }
+  SmallVector<int64_t> result(inputShape.begin(), inputShape.end());
+  std::fill(result.begin() + 2, result.end(), 1);
+  return result;
+}
+
+FailureOr<SmallVector<OpFoldResult>> mlir::hip::reifyGlobalPoolResultShape(
+    OpBuilder &b, Location loc, Value input,
+    function_ref<InFlightDiagnostic()> emitError) {
+  auto inputType = dyn_cast<RankedTensorType>(input.getType());
+  if (!inputType ||
+      failed(inferGlobalPoolShape(inputType.getShape(), emitError)))
+    return failure();
+
+  SmallVector<OpFoldResult> result;
+  result.reserve(inputType.getRank());
+  result.push_back(
+      reifyDimOrConstant(b, loc, inputType.getDimSize(0), input, 0));
+  result.push_back(
+      reifyDimOrConstant(b, loc, inputType.getDimSize(1), input, 1));
+  for (int64_t dim : llvm::seq<int64_t>(2, inputType.getRank()))
+    result.push_back(b.getIndexAttr(1));
   return result;
 }

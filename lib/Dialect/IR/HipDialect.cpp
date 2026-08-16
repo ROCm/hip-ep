@@ -1407,6 +1407,56 @@ void PoolOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult PoolOp::verify() {
+  unsigned numOutputs = getOutputs().size();
+  if (numOutputs < 1 || numOutputs > 2)
+    return emitOpError(
+        "expected one values output and optional indices output");
+  if (getPoolMode() < 0 || getPoolMode() > 2)
+    return emitOpError("pool_mode must be 0 (average), 1 (max), or 2 (lp)");
+  if (getPoolMode() != 1 && numOutputs != 1)
+    return emitOpError("only max pooling may produce an indices output");
+  if (getCeilMode() != 0 && getCeilMode() != 1)
+    return emitOpError("ceil_mode must be 0 or 1");
+  if (getStorageOrder() != 0)
+    return emitOpError("storage_order must be 0");
+  if (getCountIncludePad() != 0 && getCountIncludePad() != 1)
+    return emitOpError("count_include_pad must be 0 or 1");
+  if (getPoolMode() == 2 && getP() < 1)
+    return emitOpError("LP mode requires p >= 1");
+
+  SmallVector<Value> dataOperands = {getInput()};
+  dataOperands.append(getOutputs().begin(), getOutputs().end());
+  if (failed(verifyDpsComputeOp(*this, dataOperands, numOutputs)))
+    return failure();
+
+  auto inputType = cast<ShapedType>(getInput().getType());
+  auto valuesType = cast<ShapedType>(getOutputs().front().getType());
+  if (!isa<FloatType>(inputType.getElementType()) ||
+      valuesType.getElementType() != inputType.getElementType())
+    return emitOpError(
+        "input and values output must have the same floating-point type");
+  if (numOutputs == 2) {
+    auto indicesType = cast<ShapedType>(getOutputs()[1].getType());
+    if (!indicesType.getElementType().isInteger(64))
+      return emitOpError("indices output must have i64 element type");
+  }
+
+  FailureOr<SmallVector<int64_t>> expected = mlir::hip::inferPoolShape(
+      detail::getShapeOf(getInput()), detail::getI64Array(getKernelShape()),
+      detail::getI64Array(getStrides()), detail::getI64Array(getPads()),
+      detail::getI64Array(getDilations()), getCeilMode(),
+      [&]() { return this->emitOpError(); });
+  if (failed(expected))
+    return failure();
+  for (unsigned i = 0; i < numOutputs; ++i)
+    if (failed(mlir::hip::verifyHipOpShape(
+            *this,
+            [&]() -> FailureOr<SmallVector<int64_t>> { return *expected; }, i)))
+      return failure();
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // ResizeOp: ins(input), outs(output)
 //===----------------------------------------------------------------------===//
@@ -1433,6 +1483,20 @@ void GlobalPoolOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult GlobalPoolOp::verify() {
+  if (failed(verifyDpsComputeOp(*this, {getInput(), getOutput()},
+                                /*numInits=*/1)))
+    return failure();
+  if (getMode() < 0 || getMode() > 2)
+    return emitOpError("mode must be 0 (average), 1 (max), or 2 (lp)");
+  if (getMode() == 2 && getP() <= 0)
+    return emitOpError("LP mode requires p > 0");
+  return mlir::hip::verifyHipOpShape(*this, [&] {
+    return mlir::hip::inferGlobalPoolShape(detail::getShapeOf(getInput()),
+                                           [&] { return this->emitOpError(); });
+  });
 }
 
 //===----------------------------------------------------------------------===//

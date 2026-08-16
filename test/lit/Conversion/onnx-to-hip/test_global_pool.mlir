@@ -139,4 +139,20 @@ module {
 
     return %r : tensor<?x4x1x1xf32>
   }
+
+  // Even if imported spatial result dimensions remain dynamic, GlobalPool's
+  // semantic destination extents are 1 rather than positional input extents.
+  func.func @test_gap_dynamic_result_spatial(
+      %arg0: tensor<?x?x?x?xf16>) -> tensor<?x?x?x?xf16> {
+    %r = "onnx.GlobalAveragePool"(%arg0)
+        : (tensor<?x?x?x?xf16>) -> tensor<?x?x?x?xf16>
+
+    // CHECK-LABEL: func.func @test_gap_dynamic_result_spatial
+    // CHECK-SAME: %[[ARG:.*]]: tensor<?x?x?x?xf16>
+    // CHECK: %[[ONE:.*]] = arith.constant 1 : index
+    // CHECK: tensor.empty(%{{.*}}, %{{.*}}, %[[ONE]], %[[ONE]]) : tensor<?x?x?x?xf16>
+    // CHECK: hip.global_pool
+
+    return %r : tensor<?x?x?x?xf16>
+  }
 }

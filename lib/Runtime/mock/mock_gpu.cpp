@@ -1262,17 +1262,20 @@ int wrap_cast(RuntimeState *state, void *input, void *output,
 }
 
 int wrap_pool(RuntimeState *state, void *input, void *output, void *indices,
-              int64_t data_type, int64_t pool_mode, int64_t spatial_rank,
-              int64_t N, int64_t C, int64_t in0, int64_t in1, int64_t in2,
-              int64_t out0, int64_t out1, int64_t out2, int64_t k0, int64_t k1,
-              int64_t k2, int64_t s0, int64_t s1, int64_t s2, int64_t p0,
-              int64_t p1, int64_t p2, int64_t dil0, int64_t dil1, int64_t dil2,
-              int64_t storage_order, int64_t ceil_mode, int64_t has_indices,
-              int64_t count_include_pad, int64_t p) {
+              int64_t shape_valid, int64_t data_type, int64_t pool_mode,
+              int64_t spatial_rank, int64_t N, int64_t C, int64_t in0,
+              int64_t in1, int64_t in2, int64_t out0, int64_t out1,
+              int64_t out2, int64_t k0, int64_t k1, int64_t k2, int64_t s0,
+              int64_t s1, int64_t s2, int64_t p0, int64_t p1, int64_t p2,
+              int64_t dil0, int64_t dil1, int64_t dil2, int64_t storage_order,
+              int64_t ceil_mode, int64_t has_indices, int64_t count_include_pad,
+              int64_t p) {
   if (!state) {
     fprintf(stderr, "Invalid state in wrap_pool\n");
     return -1;
   }
+  if (hipdnn_ep_validate_dynamic_shape(state, shape_valid) != 0)
+    return -1;
   (void)k0;
   (void)k1;
   (void)k2;

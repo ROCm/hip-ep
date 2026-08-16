@@ -16,13 +16,15 @@ namespace {
 // Generic 1D / 2D / 3D window-pool lowering shared by MaxPool / AveragePool /
 // LpPool.  spatial_rank in {1, 2, 3} is derived from `input`'s rank
 // (= 2 + spatial_rank).  All shape-derived scalar params come from the
-// memref descriptors so dynamic N is honored; spatial dims are required
-// static at conversion time (see PoolConversion.cpp), so they fold to
-// constants here.  The reduction kind is carried verbatim in `pool_mode`
-// (0 = AVERAGE, 1 = MAX, 2 = LP) and resolved by the runtime kernel.
+// memref descriptors so dynamic N and spatial extents are honored.
+// `shape_valid` carries the converter's checked-narrowing result; the runtime
+// records a recoverable error and skips dispatch when it is false. The
+// reduction kind is carried verbatim in `pool_mode` (0 = AVERAGE, 1 = MAX,
+// 2 = LP) and resolved by the runtime kernel.
 //
 // Runtime ABI (matches `wrap_pool` in real/pool.cpp):
 //   wrap_pool(state, input, output, indices, /* indices nullable, MAX only */
+//             shape_valid,
 //             data_type,
 //             pool_mode,
 //             spatial_rank,
@@ -94,6 +96,8 @@ struct PoolOpLowering : public ConvertOpToLLVMPattern<PoolOp> {
 
     Value inputDesc = adaptor.getInput();
     Value outputDesc = adaptor.getOutputs()[0];
+    Value shapeValid =
+        LLVM::ZExtOp::create(rewriter, loc, i64Type, adaptor.getShapeValid());
 
     Value batchN = getMemRefDimSize(inputType, 0, inputDesc, rewriter, loc);
     Value channelC = getMemRefDimSize(inputType, 1, inputDesc, rewriter, loc);
@@ -137,7 +141,7 @@ struct PoolOpLowering : public ConvertOpToLLVMPattern<PoolOp> {
     Value spatialRankV = createI64(spatialRank);
     Value dataTypeV = createI64(dataType);
 
-    // Argument list: 4 ptrs + 28 i64.
+    // Argument list: 4 ptrs + 29 i64.
     SmallVector<Type, 36> paramTypes;
     SmallVector<Value, 36> args;
     auto addPtr = [&](Value v) {
@@ -153,6 +157,7 @@ struct PoolOpLowering : public ConvertOpToLLVMPattern<PoolOp> {
     addPtr(inputPtr);
     addPtr(outputPtr);
     addPtr(indicesPtr);
+    addI64(shapeValid);
     addI64(dataTypeV);
     addI64(poolMode);
     addI64(spatialRankV);

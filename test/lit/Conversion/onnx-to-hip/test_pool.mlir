@@ -30,7 +30,7 @@ module {
 
     // CHECK-NOT: onnx.MaxPool
     // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<1x3x16x16xf16>
-    // CHECK: hip.pool(%[[CTX]]) ins(%[[ARG]] : tensor<1x3x32x32xf16>)
+    // CHECK: hip.pool(%[[CTX]]) valid(%{{.*}}) ins(%[[ARG]] : tensor<1x3x32x32xf16>)
     // CHECK-SAME: outs(%[[INIT]] : tensor<1x3x16x16xf16>)
     // CHECK-SAME: ceil_mode = 0
     // CHECK-SAME: dilations = [1, 1]
@@ -136,7 +136,7 @@ module {
     // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
     // CHECK: %[[DN:.*]] = tensor.dim %[[ARG]], %[[C0]] : tensor<?x3x16x16xf16>
     // CHECK: %[[INIT:.*]] = tensor.empty(%[[DN]]) : tensor<?x3x8x8xf16>
-    // CHECK: hip.pool(%[[CTX]]) ins(%[[ARG]] : tensor<?x3x16x16xf16>)
+    // CHECK: hip.pool(%[[CTX]]) valid(%{{.*}}) ins(%[[ARG]] : tensor<?x3x16x16xf16>)
     // CHECK-SAME: outs(%[[INIT]] : tensor<?x3x8x8xf16>)
 
     return %y : tensor<?x3x8x8xf16>
@@ -229,5 +229,120 @@ module {
     // CHECK-SAME: pool_mode = 2
 
     return %y : tensor<1x3x16x16xf32>
+  }
+
+  // Test 9: dynamic spatial ceil_mode uses signed ceil division.
+  func.func @test_averagepool_dynamic_ceil(%arg0: tensor<1x3x?xf32>)
+      -> tensor<1x3x?xf32> {
+    // CHECK-LABEL: func.func @test_averagepool_dynamic_ceil
+    %y = "onnx.AveragePool"(%arg0)
+        {kernel_shape = [4], strides = [3], pads = [1, 0],
+         ceil_mode = 1 : si64}
+        : (tensor<1x3x?xf32>) -> tensor<1x3x?xf32>
+
+    // CHECK: %[[WIDE:.*]] = arith.index_cast %{{.*}} : index to i128
+    // CHECK: %[[QUOTIENT:.*]] = arith.ceildivsi %{{.*}}, %{{.*}} : i128
+    // CHECK: %[[RAW:.*]] = arith.addi %[[QUOTIENT]], %{{.*}} : i128
+    // CHECK: %[[POSITIVE:.*]] = arith.cmpi sgt, %[[RAW]], %{{.*}} : i128
+    // CHECK: %[[DECREMENTED:.*]] = arith.subi %[[RAW]], %{{.*}} : i128
+    // CHECK: %[[START:.*]] = arith.muli %[[DECREMENTED]], %{{.*}} : i128
+    // CHECK: %[[TRAILING:.*]] = arith.cmpi sge, %[[START]], %{{.*}} : i128
+    // CHECK: %[[SHOULD_DECREMENT:.*]] = arith.andi %[[POSITIVE]], %[[TRAILING]]
+    // CHECK: %[[CORRECTED:.*]] = arith.select %[[SHOULD_DECREMENT]], %[[DECREMENTED]], %[[RAW]] : i128
+    // CHECK: %[[NONNEGATIVE:.*]] = arith.cmpi sge, %[[CORRECTED]], %{{.*}} : i128
+    // CHECK: %[[IN_RANGE:.*]] = arith.cmpi sle, %[[CORRECTED]], %{{.*}} : i128
+    // CHECK: %[[VALID:.*]] = arith.andi %[[NONNEGATIVE]], %[[IN_RANGE]]
+    // CHECK: %[[SAFE:.*]] = arith.select %[[VALID]], %[[CORRECTED]], %{{.*}} : i128
+    // CHECK: %[[I64:.*]] = arith.trunci %[[SAFE]] : i128 to i64
+    // CHECK: %[[INDEX:.*]] = arith.index_cast %[[I64]] : i64 to index
+    // CHECK: tensor.empty(%[[INDEX]]) : tensor<1x3x?xf32>
+    // CHECK: hip.pool
+    // CHECK-SAME: valid(%[[VALID]])
+    // CHECK-SAME: ceil_mode = 1
+
+    return %y : tensor<1x3x?xf32>
+  }
+
+  // Test 10: ONNX ceil_mode excludes a window that starts in the trailing
+  // padding. The uncorrected ceil formula gives 3; the semantic shape is 2.
+  // Values and optional MaxPool indices must use that same corrected shape.
+  func.func @test_maxpool_ceil_trailing_window_with_indices(
+      %arg0: tensor<1x3x4xf32>)
+      -> (tensor<1x3x2xf32>, tensor<1x3x2xi64>) {
+    // CHECK-LABEL: func.func @test_maxpool_ceil_trailing_window_with_indices
+    %y, %idx = "onnx.MaxPool"(%arg0)
+        {kernel_shape = [3], strides = [2], pads = [0, 2],
+         ceil_mode = 1 : si64}
+        : (tensor<1x3x4xf32>) -> (tensor<1x3x2xf32>,
+                                  tensor<1x3x2xi64>)
+
+    // CHECK: %[[Y_INIT:.*]] = tensor.empty() : tensor<1x3x2xf32>
+    // CHECK: %[[I_INIT:.*]] = tensor.empty() : tensor<1x3x2xi64>
+    // CHECK: hip.pool
+    // CHECK-SAME: outs(%[[Y_INIT]], %[[I_INIT]]
+    // CHECK-SAME: tensor<1x3x2xf32>, tensor<1x3x2xi64>
+    // CHECK-SAME: ceil_mode = 1
+    // CHECK-SAME: dilations = [1]
+    // CHECK-SAME: pads = [0, 2]
+
+    return %y, %idx : tensor<1x3x2xf32>, tensor<1x3x2xi64>
+  }
+
+  // Test 11: review counterexample. Every term individually fits i64, while
+  // input + both pads and the final-window start exceed it. The complete
+  // ceil-mode rule stays in i128 and only the checked safe result is narrowed.
+  func.func @test_maxpool_dynamic_ceil_i64_overflow_counterexample(
+      %arg0: tensor<1x1x?xf32>) -> tensor<1x1x?xf32> {
+    // CHECK-LABEL: func.func @test_maxpool_dynamic_ceil_i64_overflow_counterexample
+    %y = "onnx.MaxPool"(%arg0)
+        {kernel_shape = [1], strides = [9223372036854775807],
+         pads = [9223372036854775807, 9223372036854775807],
+         ceil_mode = 1 : si64}
+        : (tensor<1x1x?xf32>) -> tensor<1x1x?xf32>
+
+    // CHECK: %[[WIDE:.*]] = arith.index_cast %{{.*}} : index to i128
+    // CHECK: arith.addi %[[WIDE]], %{{.*}} : i128
+    // CHECK: %[[QUOTIENT:.*]] = arith.ceildivsi %{{.*}}, %{{.*}} : i128
+    // CHECK: %[[START:.*]] = arith.muli %{{.*}}, %{{.*}} : i128
+    // CHECK: arith.cmpi sge, %[[START]], %{{.*}} : i128
+    // CHECK: %[[IN_RANGE:.*]] = arith.cmpi sle, %{{.*}}, %{{.*}} : i128
+    // CHECK: %[[SAFE:.*]] = arith.select %{{.*}}, %{{.*}}, %{{.*}} : i128
+    // CHECK: %[[I64:.*]] = arith.trunci %[[SAFE]] : i128 to i64
+    // CHECK: %[[INDEX:.*]] = arith.index_cast %[[I64]] : i64 to index
+    // CHECK: tensor.empty(%[[INDEX]]) : tensor<1x1x?xf32>
+    // CHECK: hip.pool
+    // CHECK-SAME: valid(%{{.*}})
+
+    return %y : tensor<1x1x?xf32>
+  }
+
+  // Test 12: effective-kernel multiplication, pads, signed negative numerator,
+  // and floor division all remain i128 for maximal positive i64 attributes.
+  func.func @test_maxpool_dynamic_floor_wide_dilation(
+      %arg0: tensor<1x1x?xf32>) -> tensor<1x1x?xf32> {
+    // CHECK-LABEL: func.func @test_maxpool_dynamic_floor_wide_dilation
+    %y = "onnx.MaxPool"(%arg0)
+        {kernel_shape = [9223372036854775807],
+         strides = [9223372036854775807],
+         pads = [9223372036854775807, 9223372036854775807],
+         dilations = [9223372036854775807]}
+        : (tensor<1x1x?xf32>) -> tensor<1x1x?xf32>
+
+    // CHECK: arith.constant {{[0-9]+}} : i128
+    // CHECK: %[[WIDE:.*]] = arith.index_cast %{{.*}} : index to i128
+    // CHECK: %[[KERNEL_MINUS_ONE:.*]] = arith.subi %{{.*}}, %{{.*}} : i128
+    // CHECK: %[[KERNEL_PRODUCT:.*]] = arith.muli %[[KERNEL_MINUS_ONE]], %{{.*}} : i128
+    // CHECK: %[[EFFECTIVE:.*]] = arith.addi %[[KERNEL_PRODUCT]], %{{.*}} : i128
+    // CHECK: %[[PADDED_BEGIN:.*]] = arith.addi %[[WIDE]], %{{.*}} : i128
+    // CHECK: %[[PADDED:.*]] = arith.addi %[[PADDED_BEGIN]], %{{.*}} : i128
+    // CHECK: %[[NUMERATOR:.*]] = arith.subi %[[PADDED]], %[[EFFECTIVE]] : i128
+    // CHECK: %[[QUOTIENT:.*]] = arith.floordivsi %[[NUMERATOR]], %{{.*}} : i128
+    // CHECK: arith.cmpi sge, %{{.*}}, %{{.*}} : i128
+    // CHECK: arith.cmpi sle, %{{.*}}, %{{.*}} : i128
+    // CHECK: arith.select %{{.*}}, %{{.*}}, %{{.*}} : i128
+    // CHECK: arith.trunci %{{.*}} : i128 to i64
+    // CHECK: arith.index_cast %{{.*}} : i64 to index
+
+    return %y : tensor<1x1x?xf32>
   }
 }

@@ -53,7 +53,8 @@ namespace {
 // After (single-output form, dynamic N example):
 //   %dim0 = tensor.dim %x, %c0 : tensor<?x3x32x32xf16>
 //   %init = tensor.empty(%dim0) : tensor<?x3x16x16xf16>
-//   %y = hip.pool(%ctx) ins(%x : tensor<?x3x32x32xf16>)
+//   %y = hip.pool(%ctx) valid(%shape_valid)
+//                       ins(%x : tensor<?x3x32x32xf16>)
 //                       outs(%init : tensor<?x3x16x16xf16>)
 //                       {pool_mode = 0, kernel_shape = [3, 3], strides = [2,
 //                       2],
@@ -234,86 +235,35 @@ struct PoolToHip : public mlir::RewritePattern {
       return rewriter.notifyMatchFailure(
           op, "strides / dilations length must equal spatial rank");
 
-    // ===== DPS init tensors =================================================
-    //
-    // Output shape leading dims (N, C) are passed through from the input.
-    // A dynamic spatial output dim is materialized at runtime by emitting
-    // the ONNX pooling output-size formula in arith from the (dynamic)
-    // input spatial extent. Every window parameter (kernel / stride /
-    // dilation / pad) is a compile-time constant by this point (auto_pad
-    // already resolved to explicit `pads` above), so the only runtime input
-    // is the spatial extent read via `tensor.dim`:
-    //
-    //   kdTerm = (k - 1) * dilation + 1
-    //   t      = in + pad_begin + pad_end - kdTerm
-    //   out    = floor(t / stride) + 1        (ceil_mode = 0)
-    //          = ceil (t / stride) + 1        (ceil_mode = 1)
-    //
-    // Mirrors the NOTSET branch of onnx-mlir's
-    // `ONNXGenericPoolOpShapeHelper<>::customComputeShape`
-    // (src/Dialect/ONNX/ONNXOps/NN/NNHelper.cpp.inc), whose published formula
-    // is `O[i] = floor((I[i] + P[i] - ((K[i]-1)*d[i]+1)) / s[i]) + 1`.
-    //
-    // Before (dynamic spatial AveragePool, kernel=stride=4, no pad):
-    //   %y = "onnx.AveragePool"(%x) {kernel_shape=[4,4], strides=[4,4], ...}
-    //          : (tensor<?x?x?x?xf16>) -> tensor<?x?x?x?xf16>
-    // After:
-    //   %n   = tensor.dim %x, %c0
-    //   %c   = tensor.dim %x, %c1
-    //   %h   = tensor.dim %x, %c2
-    //   %ho  = arith.addi (arith.floordivsi (arith.addi %h, -4), 4-as-stride),
-    //   1
-    //   ... (same for W) ...
-    //   %init = tensor.empty(%n, %c, %ho, %wo) : tensor<?x?x?x?xf16>
-    //   %y    = hip.pool(%ctx) ins(%x) outs(%init) {pool_mode=0, ...}
-    auto buildInit = [&](mlir::RankedTensorType resultType) -> mlir::Value {
-      llvm::SmallVector<mlir::Value> dynSizes;
-      for (int64_t dimIdx : llvm::seq<int64_t>(rank)) {
-        if (!resultType.isDynamicDim(dimIdx))
-          continue;
-        if (dimIdx < 2) {
-          // N or C — passthrough from input.
-          dynSizes.push_back(
-              mlir::tensor::DimOp::create(rewriter, loc, input, dimIdx));
-          continue;
-        }
-        // Dynamic spatial dim: materialize out = f(in) in arith. The window
-        // params are all compile-time constants, so `in` is the only runtime
-        // value; `kdTerm`/`pad`/`stride` fold into two index constants.
-        int64_t s = dimIdx - 2; // spatial index
-        int64_t kdTerm = (kernelShape[s] - 1) * dilations[s] + 1;
-        int64_t addConst = pads[s] + pads[spatialRank + s] - kdTerm;
-        mlir::Value inDim =
-            mlir::tensor::DimOp::create(rewriter, loc, input, dimIdx);
-        mlir::Value t = mlir::arith::AddIOp::create(
-            rewriter, loc, inDim,
-            mlir::arith::ConstantIndexOp::create(rewriter, loc, addConst));
-        mlir::Value strideV =
-            mlir::arith::ConstantIndexOp::create(rewriter, loc, strides[s]);
-        mlir::Value div =
-            ceilMode
-                ? mlir::arith::CeilDivSIOp::create(rewriter, loc, t, strideV)
-                      .getResult()
-                : mlir::arith::FloorDivSIOp::create(rewriter, loc, t, strideV)
-                      .getResult();
-        mlir::Value outDim = mlir::arith::AddIOp::create(
-            rewriter, loc, div,
-            mlir::arith::ConstantIndexOp::create(rewriter, loc, 1));
-        dynSizes.push_back(outDim);
-      }
-      return mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
-                                           resultType.getElementType(),
-                                           dynSizes);
-    };
+    // Derive one semantic window shape and use it for both MaxPool results.
+    // This includes ONNX's ceil-mode trailing-window correction and also backs
+    // hip.pool reification and static verification.
+    mlir::Value shapeValid;
+    mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>> resultShape =
+        mlir::hip::reifyPoolResultShape(
+            rewriter, loc, input, kernelShape, strides, pads, dilations,
+            ceilMode, [&]() { return op->emitError(); }, &shapeValid);
+    if (mlir::failed(resultShape))
+      return mlir::failure();
 
-    mlir::Value yInit = buildInit(outputType);
+    mlir::FailureOr<mlir::Value> yInitOrFailure =
+        createEmptyTensorFromReifiedShape(rewriter, loc, outputType,
+                                          *resultShape);
+    if (mlir::failed(yInitOrFailure))
+      return rewriter.notifyMatchFailure(
+          op, "pool values type is incompatible with inferred shape");
+    mlir::Value yInit = *yInitOrFailure;
     llvm::SmallVector<mlir::Value> outputs = {yInit};
     llvm::SmallVector<mlir::Type> resultTypes = {outputType};
     if (numResults == 2) {
       auto idxType =
           mlir::cast<mlir::RankedTensorType>(op->getResult(1).getType());
-      mlir::Value idxInit = buildInit(idxType);
-      outputs.push_back(idxInit);
+      mlir::FailureOr<mlir::Value> idxInit = createEmptyTensorFromReifiedShape(
+          rewriter, loc, idxType, *resultShape);
+      if (mlir::failed(idxInit))
+        return rewriter.notifyMatchFailure(
+            op, "MaxPool indices type must match the values shape");
+      outputs.push_back(*idxInit);
       resultTypes.push_back(idxType);
     }
 
@@ -329,7 +279,7 @@ struct PoolToHip : public mlir::RewritePattern {
     auto countIncludePadAttr = rewriter.getI64IntegerAttr(countIncludePad);
     auto pAttr = rewriter.getI64IntegerAttr(p);
 
-    llvm::SmallVector<mlir::Value> operands = {context, input};
+    llvm::SmallVector<mlir::Value> operands = {context, shapeValid, input};
     operands.append(outputs.begin(), outputs.end());
 
     llvm::SmallVector<mlir::NamedAttribute> attrs;
