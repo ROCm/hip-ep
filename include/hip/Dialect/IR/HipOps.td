@@ -4315,4 +4315,70 @@ def Hip_ReadbackScalarOp : Hip_Op<"readback_scalar",
     `(` $ctx `,` $scalar `:` type($scalar) `)` attr-dict `->` type($value)
   }];
 }
+
+// hip.readback_shape : synchronize once and read a statically-sized rank-1
+// i64 shape vector into one host index SSA value per element. Used when a
+// payload tensor (e.g. Tile repeats) determines allocation extents.
+def Hip_ReadbackShapeOp : Hip_Op<"readback_shape",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Synchronize and read a device i64 shape vector";
+  let description = [{
+    Copies the statically-sized rank-1 i64 `vector` from device to host with
+    one stream synchronization and returns each entry as an `index`.
+
+    Negative entries are runtime-invalid shape extents. The runtime clamps
+    them to zero and records the shared recoverable error flag so generated
+    inference returns a non-zero status instead of allocating with a negative
+    extent or aborting the host.
+
+    This op has device-to-host copy and synchronization side effects and is not
+    speculatable.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Hip_TensorOrMemRef:$vector,
+    I64Attr:$count
+  );
+  let results = (outs Variadic<Index>:$dims);
+
+  let assemblyFormat = [{
+    `(` $ctx `,` $vector `:` type($vector) `)` attr-dict
+    `->` `(` type($dims) `)`
+  }];
+
+  let hasVerifier = 1;
+}
+
+// hip.readback_control : one synchronized host boundary for a group of small
+// integer control tensors. Unlike readback_shape, signed values are preserved.
+def Hip_ReadbackControlOp : Hip_Op<"readback_control",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+     DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
+  let summary = "Read statically-sized integer control tensors with one sync";
+  let description = [{
+    Copies one or more statically-sized rank-0/rank-1 i32/i64 sources from
+    device-visible memory to the host. Results are flattened in operand-major
+    order and converted to signed i64 (i32 values are sign-extended). `valid`
+    is false if argument validation, any copy enqueue, or the single stream
+    synchronization fails. Values are initialized to zero before the runtime
+    call and are never clamped.
+
+    This op has device-to-host copy and synchronization side effects and is not
+    speculatable.
+  }];
+
+  let arguments = (ins
+    Hip_ContextType:$ctx,
+    Variadic<Hip_TensorOrMemRef>:$sources
+  );
+  let results = (outs I1:$valid, Variadic<I64>:$values);
+
+  let assemblyFormat = [{
+    `(` $ctx `,` $sources `:` type($sources) `)` attr-dict
+    `->` `(` type($valid) (`,` type($values)^)? `)`
+  }];
+
+  let hasVerifier = 1;
+}
 #endif // HIP_OPS

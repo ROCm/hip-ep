@@ -20,6 +20,21 @@
 namespace mlir {
 namespace hip {
 
+/// Static grouping information for `hip.readback_control`. Sources are
+/// flattened in operand-major order; `resultOffsets[i]` is the first i64 result
+/// produced for source `i`, and the final entry equals `totalCount`.
+struct ReadbackControlLayout {
+  SmallVector<int64_t> sourceLengths;
+  SmallVector<int64_t> resultOffsets;
+  int64_t totalCount = 0;
+};
+
+/// Validate rank-0/rank-1 statically-sized i32/i64 source types and compute the
+/// operand-major result grouping used by conversion, verification, and
+/// lowering. At least one source is required.
+FailureOr<ReadbackControlLayout>
+getReadbackControlLayout(TypeRange sourceTypes);
+
 /// Parse the payload of a rank-0 or rank-1 dense integer tensor into signed
 /// i64 values. `expectedRank` may restrict callers to scalar or vector form.
 bool parseDenseIntElements(DenseElementsAttr dense,

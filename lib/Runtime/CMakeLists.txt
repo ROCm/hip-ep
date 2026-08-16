@@ -450,6 +450,7 @@ if(NOT BUILD_MOCK_RUNTIME)
 else()
     # Mock runtime for testing without GPU
     compile_to_bitcode(mock/mock_gpu.cpp runtime_mock.bc)
+    compile_to_bitcode(mock/readback_control.cpp runtime_readback_control.bc)
     compile_to_bitcode(mock/memory.cpp runtime_memory.bc)
     compile_to_bitcode(mock/test_hip_from_dll.cpp test_hip_from_dll.bc)
     # Mock per-op state constructors (real ones live in each op's real/ TU).
@@ -468,6 +469,7 @@ else()
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_state.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_op_state_stubs.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_memory.bc
+        ${CMAKE_CURRENT_BINARY_DIR}/runtime_readback_control.bc
         ${CMAKE_CURRENT_BINARY_DIR}/runtime_mock.bc
         ${CMAKE_CURRENT_BINARY_DIR}/test_hip_from_dll.bc
     )

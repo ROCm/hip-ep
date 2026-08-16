@@ -8,6 +8,7 @@
 #include "hip/Dialect/IR/HipDialect.h"
 #include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
 #include "mlir/Dialect/Bufferization/IR/DstBufferizableOpInterfaceImpl.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/OperationSupport.h"
 
@@ -134,6 +135,7 @@ struct HipLoopBufferizableModel
   LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
                           const bufferization::BufferizationOptions &options,
                           bufferization::BufferizationState &state) const {
+    auto loop = cast<LoopOp>(op);
     SmallVector<Value> newOperands;
     newOperands.reserve(op->getNumOperands());
     for (OpOperand &operand : op->getOpOperands()) {
@@ -145,6 +147,41 @@ struct HipLoopBufferizableModel
           getBuffer(rewriter, operand.get(), options, state);
       if (failed(buffer))
         return failure();
+
+      // A tensor.extract_slice seed bufferizes to a strided view, while the
+      // descriptor-return loop contract and outlined body use identity-layout
+      // carrier descriptors. Materialize only loop-carried seeds into that
+      // joined descriptor type. The allocation intentionally has no local
+      // dealloc: zero-trip/failure may return this borrowed seed, and the loop
+      // may-alias relation keeps it live through all carrier-result users.
+      for (auto [index, init] : llvm::enumerate(loop.getVInitMutable())) {
+        if (&init != &operand)
+          continue;
+        auto tensorType =
+            dyn_cast<RankedTensorType>(loop.getResult(index).getType());
+        if (!tensorType)
+          return loop.emitOpError(
+              "loop bufferization requires ranked tensor results");
+        auto desiredType =
+            MemRefType::get(tensorType.getShape(), tensorType.getElementType());
+        if ((*buffer).getType() == desiredType)
+          break;
+        auto sourceType = dyn_cast<MemRefType>((*buffer).getType());
+        if (!sourceType || sourceType.getRank() != desiredType.getRank())
+          return loop.emitOpError(
+              "loop seed buffer rank must match joined carrier rank");
+        SmallVector<Value> dynamicSizes;
+        for (int64_t dim : llvm::seq<int64_t>(desiredType.getRank()))
+          if (desiredType.isDynamicDim(dim))
+            dynamicSizes.push_back(
+                memref::DimOp::create(rewriter, op->getLoc(), *buffer, dim));
+        auto copy = memref::AllocOp::create(rewriter, op->getLoc(), desiredType,
+                                            dynamicSizes);
+        memref::CopyOp::create(rewriter, op->getLoc(), *buffer,
+                               copy.getResult());
+        *buffer = copy.getResult();
+        break;
+      }
       newOperands.push_back(*buffer);
     }
 
@@ -173,6 +210,85 @@ struct HipLoopBufferizableModel
   }
 };
 
+struct HipReadbackShapeBufferizableModel
+    : public bufferization::BufferizableOpInterface::ExternalModel<
+          HipReadbackShapeBufferizableModel, ReadbackShapeOp> {
+  bool bufferizesToMemoryRead(Operation *, OpOperand &,
+                              const bufferization::AnalysisState &) const {
+    return true;
+  }
+  bool bufferizesToMemoryWrite(Operation *, OpOperand &,
+                               const bufferization::AnalysisState &) const {
+    return false;
+  }
+  bufferization::AliasingValueList
+  getAliasingValues(Operation *, OpOperand &,
+                    const bufferization::AnalysisState &) const {
+    return {};
+  }
+  LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
+                          const bufferization::BufferizationOptions &options,
+                          bufferization::BufferizationState &state) const {
+    auto readback = cast<ReadbackShapeOp>(op);
+    FailureOr<Value> vectorBuf =
+        getBuffer(rewriter, readback.getVector(), options, state);
+    if (failed(vectorBuf))
+      return failure();
+    auto newOp = ReadbackShapeOp::create(
+        rewriter, op->getLoc(), readback.getResultTypes(), readback.getCtx(),
+        *vectorBuf, readback.getCountAttr());
+    bufferization::replaceOpWithBufferizedValues(rewriter, op,
+                                                 newOp.getResults());
+    return success();
+  }
+};
+
+struct HipReadbackControlBufferizableModel
+    : public bufferization::BufferizableOpInterface::ExternalModel<
+          HipReadbackControlBufferizableModel, ReadbackControlOp> {
+  bool bufferizesToMemoryRead(Operation *, OpOperand &operand,
+                              const bufferization::AnalysisState &) const {
+    return isa<TensorType>(operand.get().getType()) ||
+           isa<MemRefType>(operand.get().getType());
+  }
+  bool bufferizesToMemoryWrite(Operation *, OpOperand &,
+                               const bufferization::AnalysisState &) const {
+    return false;
+  }
+  bufferization::AliasingValueList
+  getAliasingValues(Operation *, OpOperand &,
+                    const bufferization::AnalysisState &) const {
+    return {};
+  }
+  LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
+                          const bufferization::BufferizationOptions &options,
+                          bufferization::BufferizationState &state) const {
+    auto readback = cast<ReadbackControlOp>(op);
+    SmallVector<Value> operands = {readback.getCtx()};
+    operands.reserve(1 + readback.getSources().size());
+    for (Value source : readback.getSources()) {
+      if (isa<TensorType>(source.getType())) {
+        FailureOr<Value> buffer = getBuffer(rewriter, source, options, state);
+        if (failed(buffer))
+          return failure();
+        operands.push_back(*buffer);
+      } else {
+        operands.push_back(source);
+      }
+    }
+
+    OperationState newState(op->getLoc(), op->getName().getStringRef());
+    newState.addOperands(operands);
+    newState.addTypes(op->getResultTypes());
+    newState.addAttributes(op->getAttrs());
+    newState.propertiesAttr = op->getPropertiesAsAttribute();
+    Operation *newOp = rewriter.create(newState);
+    bufferization::replaceOpWithBufferizedValues(rewriter, op,
+                                                 newOp->getResults());
+    return success();
+  }
+};
+
 inline void
 registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *ctx, HipDialect *) {
@@ -180,6 +296,9 @@ registerHipBufferizableOpInterfaceModels(DialectRegistry &registry) {
         *ctx);
     ReadbackScalarOp::attachInterface<
         HipReadbackBufferizableModel<ReadbackScalarOp>>(*ctx);
+    ReadbackShapeOp::attachInterface<HipReadbackShapeBufferizableModel>(*ctx);
+    ReadbackControlOp::attachInterface<HipReadbackControlBufferizableModel>(
+        *ctx);
     ConvOp::attachInterface<HipDstBufferizableModel<ConvOp>>(*ctx);
     ConvTransposeOp::attachInterface<HipDstBufferizableModel<ConvTransposeOp>>(
         *ctx);

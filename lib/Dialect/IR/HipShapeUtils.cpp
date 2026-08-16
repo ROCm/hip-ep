@@ -62,6 +62,41 @@ std::string formatShape(ArrayRef<int64_t> shape) {
 
 } // namespace mlir::hip::detail
 
+FailureOr<ReadbackControlLayout>
+mlir::hip::getReadbackControlLayout(TypeRange sourceTypes) {
+  if (sourceTypes.empty())
+    return failure();
+
+  ReadbackControlLayout layout;
+  layout.sourceLengths.reserve(sourceTypes.size());
+  layout.resultOffsets.reserve(sourceTypes.size() + 1);
+  layout.resultOffsets.push_back(0);
+
+  for (Type type : sourceTypes) {
+    auto shaped = dyn_cast<ShapedType>(type);
+    if (!shaped || !shaped.hasRank() ||
+        (shaped.getRank() != 0 && shaped.getRank() != 1))
+      return failure();
+    Type elementType = shaped.getElementType();
+    if (!elementType.isInteger(32) && !elementType.isInteger(64))
+      return failure();
+
+    int64_t length = 1;
+    if (shaped.getRank() == 1) {
+      if (shaped.isDynamicDim(0))
+        return failure();
+      length = shaped.getDimSize(0);
+    }
+    if (length < 0 ||
+        layout.totalCount > std::numeric_limits<int64_t>::max() - length)
+      return failure();
+    layout.sourceLengths.push_back(length);
+    layout.totalCount += length;
+    layout.resultOffsets.push_back(layout.totalCount);
+  }
+  return layout;
+}
+
 namespace {
 
 FailureOr<OpFoldResult>

@@ -9,6 +9,9 @@
 #include "runtime_types.h"
 
 #include <cstdio>
+#include <cstring>
+#include <limits>
+#include <vector>
 
 // GPU D2D memcpy via hipMemcpyAsync.
 // Follows opaque RuntimeState pattern - extracts stream internally
@@ -247,4 +250,163 @@ void hipdnn_ep_readback_scalar(RuntimeState *state, void *host_dst,
     fprintf(stderr, "hipdnn_ep_readback_scalar: stream sync failed: %s\n",
             hipGetErrorString(err));
   }
+}
+
+void hipdnn_ep_readback_shape_i64(RuntimeState *state, int64_t *host_out,
+                                  const void *device_vector, int64_t count) {
+  OP_PROFILE_CPU("readback_shape", state);
+  if (!state || !host_out || count < 0 || (count > 0 && !device_vector)) {
+    fprintf(stderr, "hipdnn_ep_readback_shape_i64: invalid argument\n");
+    if (state)
+      (void)hipdnn_ep_state_set_error_flag(state);
+    return;
+  }
+  if (count == 0)
+    return;
+
+  auto fail = [&]() {
+    for (int64_t i = 0; i < count; ++i)
+      host_out[i] = 0;
+    (void)hipdnn_ep_state_set_error_flag(state);
+  };
+
+  hipStream_t stream =
+      static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+  hipError_t err = hipMemcpyAsync(host_out, device_vector,
+                                  static_cast<size_t>(count) * sizeof(int64_t),
+                                  hipMemcpyDefault, stream);
+  if (err != hipSuccess) {
+    fprintf(stderr, "hipdnn_ep_readback_shape_i64: D2H copy failed: %s\n",
+            hipGetErrorString(err));
+    fail();
+    return;
+  }
+  err = hipStreamSynchronize(stream);
+  if (err != hipSuccess) {
+    fprintf(stderr, "hipdnn_ep_readback_shape_i64: stream sync failed: %s\n",
+            hipGetErrorString(err));
+    fail();
+    return;
+  }
+
+  bool invalid = false;
+  for (int64_t i = 0; i < count; ++i) {
+    invalid |= host_out[i] < 0;
+    if (host_out[i] < 0)
+      host_out[i] = 0;
+  }
+  if (invalid)
+    (void)hipdnn_ep_state_set_error_flag(state);
+}
+
+int hipdnn_ep_readback_control(RuntimeState *state, int64_t *host_out,
+                               const void *const *device_sources,
+                               const int64_t *element_counts,
+                               const int64_t *element_bytes,
+                               int64_t source_count, int64_t total_count) {
+  OP_PROFILE_CPU("readback_control", state);
+
+  auto fail = [&]() {
+    if (state)
+      (void)hipdnn_ep_state_set_error_flag(state);
+    return -1;
+  };
+  if (!state || !host_out || !device_sources || !element_counts ||
+      !element_bytes || source_count <= 0 || total_count < 0 ||
+      static_cast<uint64_t>(source_count) >
+          std::numeric_limits<size_t>::max() / sizeof(size_t) ||
+      static_cast<uint64_t>(total_count) >
+          std::numeric_limits<size_t>::max() / sizeof(int64_t)) {
+    fprintf(stderr, "hipdnn_ep_readback_control: invalid argument\n");
+    return fail();
+  }
+
+  for (int64_t i = 0; i < total_count; ++i)
+    host_out[i] = 0;
+
+  size_t totalBytes = 0;
+  int64_t checkedTotal = 0;
+  std::vector<size_t> byteOffsets(static_cast<size_t>(source_count));
+  for (int64_t i = 0; i < source_count; ++i) {
+    int64_t count = element_counts[i];
+    int64_t width = element_bytes[i];
+    if (count < 0 || (width != 4 && width != 8) ||
+        (count > 0 && !device_sources[i]) ||
+        count > std::numeric_limits<int64_t>::max() - checkedTotal ||
+        static_cast<uint64_t>(count) >
+            std::numeric_limits<size_t>::max() / static_cast<size_t>(width)) {
+      fprintf(stderr,
+              "hipdnn_ep_readback_control: invalid source descriptor %lld\n",
+              (long long)i);
+      return fail();
+    }
+    size_t bytes = static_cast<size_t>(count) * static_cast<size_t>(width);
+    if (bytes > std::numeric_limits<size_t>::max() - totalBytes) {
+      fprintf(stderr, "hipdnn_ep_readback_control: byte count overflow\n");
+      return fail();
+    }
+    byteOffsets[static_cast<size_t>(i)] = totalBytes;
+    totalBytes += bytes;
+    checkedTotal += count;
+  }
+  if (checkedTotal != total_count) {
+    fprintf(stderr,
+            "hipdnn_ep_readback_control: flattened count mismatch "
+            "(descriptors=%lld, output=%lld)\n",
+            (long long)checkedTotal, (long long)total_count);
+    return fail();
+  }
+
+  std::vector<unsigned char> staging(totalBytes);
+  hipStream_t stream =
+      static_cast<hipStream_t>(hipdnn_ep_state_get_stream(state));
+  bool enqueueFailed = false;
+  for (int64_t i = 0; i < source_count; ++i) {
+    int64_t count = element_counts[i];
+    if (count == 0)
+      continue;
+    size_t bytes =
+        static_cast<size_t>(count) * static_cast<size_t>(element_bytes[i]);
+    hipError_t err =
+        hipMemcpyAsync(staging.data() + byteOffsets[static_cast<size_t>(i)],
+                       device_sources[i], bytes, hipMemcpyDefault, stream);
+    if (err != hipSuccess) {
+      fprintf(stderr,
+              "hipdnn_ep_readback_control: source %lld D2H enqueue failed: "
+              "%s\n",
+              (long long)i, hipGetErrorString(err));
+      enqueueFailed = true;
+    }
+  }
+
+  // Exactly one synchronization covers every successfully enqueued source.
+  // It is intentionally unconditional after enqueue attempts so a partial
+  // enqueue failure cannot leave an earlier copy using `staging` after return.
+  hipError_t syncError = hipStreamSynchronize(stream);
+  if (syncError != hipSuccess) {
+    fprintf(stderr, "hipdnn_ep_readback_control: stream sync failed: %s\n",
+            hipGetErrorString(syncError));
+  }
+  if (enqueueFailed || syncError != hipSuccess)
+    return fail();
+
+  int64_t outputIndex = 0;
+  for (int64_t i = 0; i < source_count; ++i) {
+    if (element_counts[i] == 0)
+      continue;
+    const unsigned char *source =
+        staging.data() + byteOffsets[static_cast<size_t>(i)];
+    for (int64_t j = 0; j < element_counts[i]; ++j) {
+      if (element_bytes[i] == 4) {
+        int32_t value = 0;
+        std::memcpy(&value, source + static_cast<size_t>(j) * 4, sizeof(value));
+        host_out[outputIndex++] = static_cast<int64_t>(value);
+      } else {
+        int64_t value = 0;
+        std::memcpy(&value, source + static_cast<size_t>(j) * 8, sizeof(value));
+        host_out[outputIndex++] = value;
+      }
+    }
+  }
+  return 0;
 }
