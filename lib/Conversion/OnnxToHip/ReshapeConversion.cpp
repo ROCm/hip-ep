@@ -71,6 +71,36 @@ struct ValidatedDynamicReshapeShape {
   std::optional<llvm::SmallVector<int64_t>> constantElements;
 };
 
+std::optional<std::pair<mlir::Value, mlir::RankedTensorType>>
+recoverRankedReshapeData(mlir::Value data) {
+  auto dataType = mlir::dyn_cast<mlir::UnrankedTensorType>(data.getType());
+  if (!dataType)
+    return std::nullopt;
+
+  mlir::Type elementType = dataType.getElementType();
+  while (mlir::isa<mlir::UnrankedTensorType>(data.getType())) {
+    auto cast = data.getDefiningOp<mlir::tensor::CastOp>();
+    if (!cast)
+      return std::nullopt;
+
+    auto sourceType =
+        mlir::dyn_cast<mlir::TensorType>(cast.getSource().getType());
+    auto resultType = mlir::dyn_cast<mlir::TensorType>(cast.getType());
+    if (!sourceType || !resultType ||
+        sourceType.getElementType() != elementType ||
+        resultType.getElementType() != elementType ||
+        !mlir::tensor::CastOp::areCastCompatible(cast->getOperandTypes(),
+                                                 cast->getResultTypes()))
+      return std::nullopt;
+    data = cast.getSource();
+  }
+
+  auto rankedType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+  if (!rankedType || rankedType.getElementType() != elementType)
+    return std::nullopt;
+  return std::pair{data, rankedType};
+}
+
 mlir::FailureOr<ValidatedDynamicReshapeShape>
 validateDynamicReshapeShape(mlir::Operation *op, mlir::Value data,
                             mlir::Value shapeOperand, int64_t inputRank,
@@ -452,9 +482,23 @@ struct ReshapeToStdTensor : public mlir::RewritePattern {
     }
     mlir::Value data = op->getOperand(0);
     auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(data.getType());
+    if (!inputType) {
+      // Loop result reconciliation may preserve the ranked carrier value but
+      // expose it to generic ONNX consumers through a rank-erasing
+      // tensor.cast. Such casts carry no payload transformation, so Reshape
+      // can consume the original ranked source directly. Do not infer a rank
+      // for genuinely unranked values: every traversed cast must be a valid,
+      // element-type-preserving tensor.cast and the chain must end at an
+      // already-ranked source.
+      auto recovered = recoverRankedReshapeData(data);
+      if (!recovered)
+        return rewriter.notifyMatchFailure(op, "expected ranked tensor types");
+      data = recovered->first;
+      inputType = recovered->second;
+    }
     auto outputType =
         mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    if (!inputType || !outputType)
+    if (!outputType)
       return rewriter.notifyMatchFailure(op, "expected ranked tensor types");
     if (inputType.getElementType() != outputType.getElementType())
       return rewriter.notifyMatchFailure(op, "element type mismatch");

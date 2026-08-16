@@ -20,10 +20,14 @@ module {
     return %arg0 : tensor<4xf32>
   }
 
-  // Test 1: default value (fp32 zero) with shape from arith.constant.
+  // Test 1: default value with shape from an imported ONNX constant. The first
+  // carrier sweep makes the dense payload visible to ordinary compute
+  // conversion; no ConstantOfShape-specific pre-carrier invocation is needed.
   func.func @test_constant_of_shape_default() -> tensor<2x3xf32> {
     // CHECK-LABEL: func.func @test_constant_of_shape_default
-    %shape = arith.constant dense<[2, 3]> : tensor<2xi64>
+    %shape = "onnx.Constant"() {
+      value = dense<[2, 3]> : tensor<2xi64>
+    } : () -> tensor<2xi64>
     %r = "onnx.ConstantOfShape"(%shape) : (tensor<2xi64>) -> tensor<2x3xf32>
 
     // CHECK-NOT: onnx.ConstantOfShape
