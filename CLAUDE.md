@@ -142,7 +142,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for PR, formatting, AI-disclosure, and co
 
 ### Result-shape agreement
 
-- Converter destination construction and `reifyResultShapes` must use the same `HipShapeUtils` shape rule.
+- Converter destination construction and `reifyResultShapes` must validate
+  through the same `HipShapeUtils` shape rule. A stack foundation may defer
+  exact dynamic destination materialization only when the activation layer is
+  explicit and tested together with its memory mitigations.
 - Each category splits into a pure `infer*` function of static shapes and a `reify*` function that may emit index SSA. A `reify*` helper must validate through its `infer*` counterpart **before** touching the builder: a rewrite or reification that reports failure must leave the IR unchanged.
 - Keep shape machinery internal: only `infer*`/`reify*` rules belong in `HipShapeUtils.h`, while dimension maps and static folds stay file-static. Frontend-neutral conversion helper bodies belong in `HipConversionUtils.cpp`; `OnnxToHipUtils` retains ONNX import semantics and pattern-facing templates.
 - Express "not known at compile time" as `std::optional`, not a parallel `bool` flag, so a caller cannot pass a value that contradicts the flag.

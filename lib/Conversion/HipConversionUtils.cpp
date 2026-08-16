@@ -110,11 +110,45 @@ FailureOr<Value> createBroadcastEmptyTensor(OpBuilder &builder, Location loc,
       !isResultTypeCompatibleWithInferredShape(resultType, *inferredShape))
     return failure();
 
-  FailureOr<llvm::SmallVector<OpFoldResult>> shape = reifyBroadcastResultShape(
-      builder, loc, operands, [&] { return emitError(loc); });
-  if (failed(shape))
-    return failure();
-  return createEmptyTensorFromReifiedShape(builder, loc, resultType, *shape);
+  // The foundation deliberately keeps the established conversion-time
+  // materialization policy. Exact dynamic broadcast reification remains
+  // available to shape interfaces, but activating it for destination sizing
+  // is deferred until frontend identity proofs can fold redundant merges.
+  int64_t resultRank = resultType.getRank();
+  llvm::SmallVector<Value> dynSizes;
+  for (int64_t dimIdx : llvm::seq<int64_t>(resultRank)) {
+    if (!resultType.isDynamicDim(dimIdx))
+      continue;
+
+    Value chosen;
+    int64_t chosenDim = -1;
+    Value fallback;
+    int64_t fallbackDim = -1;
+    for (Value operand : operands) {
+      auto type = dyn_cast<RankedTensorType>(operand.getType());
+      int64_t offset = resultRank - type.getRank();
+      if (dimIdx < offset)
+        continue;
+      int64_t operandDim = dimIdx - offset;
+      if (!fallback) {
+        fallback = operand;
+        fallbackDim = operandDim;
+      }
+      if (!type.isDynamicDim(operandDim) && type.getDimSize(operandDim) == 1)
+        continue;
+      chosen = operand;
+      chosenDim = operandDim;
+      break;
+    }
+    if (!chosen) {
+      chosen = fallback;
+      chosenDim = fallbackDim;
+    }
+    if (!chosen)
+      return failure();
+    dynSizes.push_back(tensor::DimOp::create(builder, loc, chosen, chosenDim));
+  }
+  return Value(tensor::EmptyOp::create(builder, loc, resultType, dynSizes));
 }
 
 FailureOr<Value> getContextArg(Operation *op, PatternRewriter &rewriter) {
