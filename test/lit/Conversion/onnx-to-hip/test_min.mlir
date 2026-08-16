@@ -14,6 +14,8 @@
 // 5. Variadic pairwise broadcast grows the intermediate shape
 // 6. Static final result refines dynamic pairwise inference
 // 7. Single-input identity preserves a static result refinement
+// 8. Asymmetric dynamic broadcast
+// 9. Variadic rank growth
 // ============================================================================
 
 // RUN: hip-mlir-opt --hip-add-context-arg --convert-onnx-to-hip %s | FileCheck %s
@@ -90,7 +92,6 @@ module {
   // CHECK: %[[M0:.*]] = hip.min{{.*}}outs(%[[E0]] : tensor<2x3xf32>)
   // CHECK: %[[E1:.*]] = tensor.empty() : tensor<2x3xf32>
   // CHECK: hip.min{{.*}}ins(%[[M0]], {{.*}} : tensor<2x3xf32>, tensor<2x3xf32>) outs(%[[E1]] : tensor<2x3xf32>)
-
   // --- Case 6: static final result refines dynamic pairwise inference ---
   func.func @min_variadic_static_refinement(%a: tensor<?x1xf32>, %b: tensor<1x?xf32>, %c: tensor<?x?xf32>) -> tensor<2x3xf32> {
     %result = "onnx.Min"(%a, %b, %c) : (tensor<?x1xf32>, tensor<1x?xf32>, tensor<?x?xf32>) -> tensor<2x3xf32>
@@ -113,4 +114,31 @@ module {
   // CHECK-NOT: onnx.Min
   // CHECK-NOT: hip.min
   // CHECK: tensor.cast %{{.*}} : tensor<?xf32> to tensor<7xf32>
+
+  // --- Case 8: different operands contribute different dynamic axes ---
+  func.func @min_asymmetric_broadcast(%a: tensor<?x1xf32>, %b: tensor<1x?xf32>) -> tensor<?x?xf32> {
+    %result = "onnx.Min"(%a, %b) : (tensor<?x1xf32>, tensor<1x?xf32>) -> tensor<?x?xf32>
+    return %result : tensor<?x?xf32>
+  }
+
+  // CHECK-LABEL: func.func @min_asymmetric_broadcast
+  // CHECK-SAME: (%{{.*}}: !hip.context, %[[A:[A-Za-z0-9_]+]]: tensor<?x1xf32>, %[[B:[A-Za-z0-9_]+]]: tensor<1x?xf32>)
+  // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+  // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
+  // CHECK: %[[M:.*]] = tensor.dim %[[A]], %[[C0]] : tensor<?x1xf32>
+  // CHECK: %[[N:.*]] = tensor.dim %[[B]], %[[C1]] : tensor<1x?xf32>
+  // CHECK: %[[INIT:.*]] = tensor.empty(%[[M]], %[[N]]) : tensor<?x?xf32>
+  // CHECK: hip.min
+
+  // --- Case 9: variadic pairwise lowering grows intermediate rank ---
+  func.func @min_variadic_rank_growth(%a: tensor<4xf32>, %b: tensor<3x4xf32>, %c: tensor<2x3x4xf32>) -> tensor<2x3x4xf32> {
+    %result = "onnx.Min"(%a, %b, %c) : (tensor<4xf32>, tensor<3x4xf32>, tensor<2x3x4xf32>) -> tensor<2x3x4xf32>
+    return %result : tensor<2x3x4xf32>
+  }
+
+  // CHECK-LABEL: func.func @min_variadic_rank_growth
+  // CHECK: %[[E0:.*]] = tensor.empty() : tensor<3x4xf32>
+  // CHECK: %[[M0:.*]] = hip.min{{.*}}outs(%[[E0]] : tensor<3x4xf32>)
+  // CHECK: %[[E1:.*]] = tensor.empty() : tensor<2x3x4xf32>
+  // CHECK: hip.min{{.*}}ins(%[[M0]], {{.*}} : tensor<3x4xf32>, tensor<2x3x4xf32>) outs(%[[E1]] : tensor<2x3x4xf32>)
 }

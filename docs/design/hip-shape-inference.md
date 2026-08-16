@@ -145,6 +145,9 @@ independent booleans or injected function-body parameters:
 Families use typed TableGen `code` fragments only for their forwarding methods.
 The shape rules and validation remain in `HipShapeUtils` C++ helpers, while
 semantic long-tail operations keep handwritten reification methods.
+`Hip_DpsOp_Broadcast` also generates a fixed verifier body that composes
+`verifyDpsComputeOp`, so tensor/memref uniformity and tensor result-to-init type
+parity are checked before the shared NumPy broadcast shape rule.
 
 Multi-result and specialized operations may keep inferred result construction disabled when a single generated body cannot describe all results.
 
@@ -156,7 +159,7 @@ Choose the smallest mechanism that matches the operation's semantics:
 |---|---|
 | Result shape equals DPS init shape, including most multi-result DPS ops | Shared `HipDpsOpInterface` default |
 | Result shape equals a named input | `reifyElementwiseSameShape` or a small dedicated thunk |
-| NumPy-style broadcast | `Hip_DpsOp_Broadcast` and broadcast helpers |
+| NumPy-style broadcast | `Hip_DpsOp_Broadcast`, `reifyBroadcastResultShape`, and the shared converter bridge |
 | Reduction with constant axes/keepdims | `Hip_DpsOp_Reduction` and reduction helpers |
 | Permutation | `reifyTransposeByPerm` |
 | Gather/GatherND/GatherElements | Gather-specific helpers or thunks |
@@ -279,6 +282,20 @@ Common DPS verification is similarly centralized in `verifyDpsComputeOp`. It
 checks ranked tensor/memref uniformity, destination count, result count, and
 tensor result/init type equality before a category-specific verifier examines
 shape semantics.
+
+Broadcast dimensions are right-aligned. Static 1 yields to the other side;
+equal non-unit static dimensions agree; dynamic/static-non-1 tightens to the
+static extent under the ONNX input contract. Two dynamic dimensions emit:
+
+```mlir
+%lhs_is_one = arith.cmpi eq, %lhs_dim, %c1 : index
+%extent = arith.select %lhs_is_one, %rhs_dim, %lhs_dim : index
+```
+
+Do not replace this with an integer maximum: broadcasting dimensions 0 and 1
+produces 0, not 1. Variadic Max/Min share one
+`lowerVariadicBroadcastChain` helper that derives every pairwise intermediate
+type from this shared broadcast shape.
 
 MatMul and Gemm accept a dynamic contraction K as unknown-compatible. Static
 equal K remains valid, while static unequal K is rejected by the pure shape
@@ -443,7 +460,8 @@ Primary regression coverage:
 | `test/lit/Dialect/hip-infer-shapes.mlir` | Module-level static-dimension refinement and cast barriers |
 | `test/lit/Dialect/hip-infer-loop-body-shapes.mlir` | Pre-conversion rank establishment |
 | `test/lit/Dialect/hip-dps-op-interface.mlir` | Shared `HipDpsOpInterface` reification |
-| `test/lit/Dialect/hip-broadcast-reify-shapes.mlir` | Shared broadcast reification and rank-zero success |
+| `test/lit/Dialect/hip-broadcast-reify-shapes.mlir` | Broadcast dynamic SSA, zero extents, and rank-zero success |
+| `test/lit/Dialect/hip-broadcast-shape-verifier.mlir` | Generated NumPy broadcast shape verification |
 | `test/lit/Conversion/onnx-to-hip/test_reshape_shape_provenance.mlir` | Proven host Reshape shapes, dataflow joins/shared producers, unknown-payload fallback, and `-1` handling |
 | `test/lit/Dialect/hip-matmul-reify-shapes.mlir` | Per-op reification through `--resolve-shaped-type-result-dims` |
 | `test/lit/Dialect/hip-matmul-shape-verifier.mlir` | Static MatMul shape validation |
