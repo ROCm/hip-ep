@@ -14,6 +14,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Traits.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
@@ -427,6 +428,18 @@ bool mlir::hip::matchConstantIntTensor(Value value,
   }
   if (matchPattern(value, m_Constant(&denseAttr)))
     return parseDenseIntElements(denseAttr, out, expectedRank);
+  if (auto getGlobal = value.getDefiningOp<memref::GetGlobalOp>()) {
+    auto module = getGlobal->getParentOfType<ModuleOp>();
+    if (!module)
+      return false;
+    auto global =
+        module.lookupSymbol<memref::GlobalOp>(getGlobal.getNameAttr());
+    if (!global || !global.getConstant())
+      return false;
+    auto globalDense =
+        dyn_cast_or_null<DenseElementsAttr>(global.getInitialValueAttr());
+    return parseDenseIntElements(globalDense, out, expectedRank);
+  }
   return false;
 }
 
