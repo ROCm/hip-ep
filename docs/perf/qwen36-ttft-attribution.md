@@ -4,6 +4,29 @@ Licensed under the MIT License.
 -->
 # Qwen3.6-35B-A3B prefill: what each optimisation was worth
 
+> **These numbers are withdrawn. Every measurement below was taken against a
+> corrupted copy of the model and has to be re-run.**
+>
+> The local `text.onnx.data` was an interrupted copy: correct up to 9.3 GB, then
+> 8.7 GB of `0x00` padding out to the full 18.0 GB length, so nothing flagged it
+> as short. Byte-sampling against
+> `\\XCONUCSTRHALO19\ROCm_workspace\oga_models` confirmed the first half matches
+> and the second half does not. The file is dated 08-14; every run in this
+> document is from 08-15, so all of them are affected. `embedding.onnx.data` and
+> `vision.onnx.data` were intact.
+>
+> This was not a silent difference. With half the weights zeroed the model
+> emitted `!!!!` instead of text, and it was measurably *faster*: at the same
+> 3985-token operating point, prefill was ~3,491 ms corrupted against
+> ~4,670 ms repaired, a 34% understatement of the real cost. A plausible
+> mechanism is degenerate MoE routing — zeroed router weights make the top-k
+> choice identical for every token, collapsing the expert working set — but that
+> has not been confirmed, and it is reason enough to distrust any per-item
+> attribution that turns on which kernels dominate.
+>
+> The paired A/B structure itself was sound and every arm saw the same corrupt
+> weights, so the harness and method carry over unchanged. The deltas do not.
+
 Eight items came out of the Qwen3.6 prefill investigation. Six changed runtime
 code; items 7 (analysis tooling) and 8 (an fp32-gate investigation that
 concluded no change was warranted) changed none, so their TTFT is zero by
