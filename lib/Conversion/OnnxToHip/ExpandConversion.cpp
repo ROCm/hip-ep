@@ -35,6 +35,9 @@ struct ExpandToHip : public mlir::RewritePattern {
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
                   mlir::PatternRewriter &rewriter) const override {
+    if (op->getNumOperands() != 2 || op->getNumResults() != 1)
+      return rewriter.notifyMatchFailure(op, "expected 2 inputs, 1 output");
+
     auto ctxOrFailure = getContextArg(op, rewriter);
     if (mlir::failed(ctxOrFailure))
       return mlir::failure();
@@ -45,8 +48,12 @@ struct ExpandToHip : public mlir::RewritePattern {
     mlir::Value shape = op->getOperand(1);
 
     auto resultType =
-        mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    auto inputType = mlir::cast<mlir::RankedTensorType>(input.getType());
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+    auto shapeType = mlir::dyn_cast<mlir::RankedTensorType>(shape.getType());
+    if (!resultType || !inputType || !shapeType)
+      return rewriter.notifyMatchFailure(
+          op, "Expand input, shape, and result must be ranked tensors");
 
     int64_t resultRank = resultType.getRank();
     int64_t inputRank = inputType.getRank();
@@ -54,36 +61,71 @@ struct ExpandToHip : public mlir::RewritePattern {
     // shape is a 1-D int tensor; for dynamic result dims we extract entries
     // from it (right-aligned with the result rank). When `shape` itself has
     // a dynamic length we cannot reason about it here, so bail out.
-    auto shapeType = mlir::cast<mlir::RankedTensorType>(shape.getType());
-    if (shapeType.getRank() != 1 || shapeType.isDynamicDim(0))
+    if (shapeType.getRank() != 1 || shapeType.isDynamicDim(0) ||
+        (!shapeType.getElementType().isInteger(32) &&
+         !shapeType.getElementType().isInteger(64)))
       return rewriter.notifyMatchFailure(
-          op, "expand shape input must have static rank-1 type");
+          op, "Expand shape must be a static-length rank-1 i32 or i64 tensor");
     int64_t shapeLen = shapeType.getDimSize(0);
+    if (resultRank != std::max(inputRank, shapeLen))
+      return rewriter.notifyMatchFailure(
+          op, "Expand result rank must match the broadcast rank");
 
-    llvm::SmallVector<mlir::Value> dynSizes;
-    for (int64_t i = 0; i < resultRank; ++i) {
-      if (!resultType.isDynamicDim(i))
-        continue;
-      int64_t shapeIdx = i - (resultRank - shapeLen);
-      mlir::Value dim;
-      if (shapeIdx >= 0) {
-        // The shape entry may be GPU-computed; read it back with a stream sync
-        // (constants fold) instead of a bare host load of device memory. See
-        // readShapeEntryToIndex for the correctness rationale.
-        dim = readShapeEntryToIndex(rewriter, loc, context, shape, shapeIdx);
-      } else {
+    mlir::Value init;
+    llvm::SmallVector<mlir::OpFoldResult> constantShape;
+    llvm::SmallVector<int64_t> shapeValues;
+    std::optional<llvm::ArrayRef<int64_t>> staticShape;
+    if (extractConstantIntVector(shape, shapeValues))
+      staticShape = shapeValues;
+    if (staticShape) {
+      auto inferredShape =
+          mlir::hip::inferExpandShape(inputType.getShape(), *staticShape);
+      if (mlir::failed(inferredShape))
+        return rewriter.notifyMatchFailure(
+            op, "constant Expand shape is not broadcast-compatible");
+      if (!isResultTypeCompatibleWithPayloadShape(resultType, *inferredShape))
+        return rewriter.notifyMatchFailure(
+            op, "Expand result type contradicts constant shape");
+    }
+    if (mlir::succeeded(mlir::hip::reifyExpandShape(
+            rewriter, loc, input, shape, constantShape, staticShape))) {
+      auto constantInit = createEmptyTensorFromReifiedShape(
+          rewriter, loc, resultType, constantShape);
+      if (mlir::failed(constantInit))
+        return rewriter.notifyMatchFailure(
+            op, "Expand result type contradicts constant broadcast shape");
+      init = *constantInit;
+    } else {
+      // Preserve the payload-dynamic path exactly: every shape entry is read
+      // back with synchronization before it sizes the destination.
+      for (int64_t i = 0; i < resultRank; ++i) {
+        if (!resultType.isDynamicDim(i))
+          continue;
+        int64_t shapeIdx = i - (resultRank - shapeLen);
         int64_t inputIdx = i - (resultRank - inputRank);
-        if (inputIdx < 0)
+        if (shapeIdx < 0 && inputIdx < 0)
           return rewriter.notifyMatchFailure(
               op, "cannot resolve dynamic dim from input or shape");
-        dim = mlir::tensor::DimOp::create(rewriter, loc, input, inputIdx);
       }
-      dynSizes.push_back(dim);
-    }
 
-    mlir::Value init =
-        mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
-                                      resultType.getElementType(), dynSizes);
+      llvm::SmallVector<mlir::Value> dynSizes;
+      for (int64_t i = 0; i < resultRank; ++i) {
+        if (!resultType.isDynamicDim(i))
+          continue;
+        int64_t shapeIdx = i - (resultRank - shapeLen);
+        mlir::Value dim;
+        if (shapeIdx >= 0) {
+          dim = readShapeEntryToIndex(rewriter, loc, context, shape, shapeIdx);
+        } else {
+          int64_t inputIdx = i - (resultRank - inputRank);
+          dim = mlir::tensor::DimOp::create(rewriter, loc, input, inputIdx);
+        }
+        dynSizes.push_back(dim);
+      }
+      init =
+          mlir::tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                        resultType.getElementType(), dynSizes);
+    }
 
     auto hipOp =
         mlir::hip::ExpandOp::create(rewriter, loc, context, input, shape, init);

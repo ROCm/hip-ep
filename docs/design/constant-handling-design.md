@@ -95,10 +95,11 @@ Runtime  (hip-compiler.dll NOT loaded)                                          
                                                                               EP tar cache ◀┘
 ```
 
-**Compile time**: `convert-onnx-to-hip` preserves its value-based pre-folds and
-two constant sweeps, but each sweep only lowers `onnx.Constant` to the neutral
-`hip.constant` carrier. A carrier contains an inline dense `value`, a complete
-file `location`/`offset`/`size`, or a complete
+**Compile time**: `convert-onnx-to-hip` runs semantic ONNX rewrites first, then
+its two constant sweeps lower `onnx.Constant` to the neutral `hip.constant`
+carrier. Ordinary compute conversion runs between the sweeps and can inspect a
+dense carrier payload directly. A carrier contains an inline dense `value`, a
+complete file `location`/`offset`/`size`, or a complete
 `memory_address`/`size`. The ONNX converter translates the ORT memory sentinel
 into the generic memory form; no ORT encoding enters the HIP dialect.
 
@@ -184,10 +185,12 @@ the buffer after a single bulk read.
 
 `convert-onnx-to-hip`
 (`lib/Conversion/OnnxToHip/OnnxToHip.cpp`) lowers each `onnx.Constant` to
-`hip.constant` after the existing Pad/Slice/Tile/Gather/Reshape and
-GatherBlockQuantized value-based rewrites have had access to the original
-literal. It does no filesystem access, layout, index assignment, global
-creation, or constant metadata stamping.
+`hip.constant` after the semantic Gather/Reshape, activation/projector, and
+GatherBlockQuantized rewrites have had access to generic ONNX structure.
+Pad, Slice, Tile, Expand, ConstantOfShape, and OneHot consume dense carrier
+payloads during normal compute conversion; they do not require ONNX stamping
+attributes or constant-preservation prepasses. Conversion does no filesystem
+access, layout, index assignment, or global creation.
 
 `hip-externalize-constants`
 (`lib/Dialect/Transforms/ExternalizeConstants.cpp`) validates each explicit

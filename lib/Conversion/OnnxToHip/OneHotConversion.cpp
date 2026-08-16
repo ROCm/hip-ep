@@ -33,8 +33,28 @@ OneHotToHip::matchAndRewrite(mlir::Operation *op,
   mlir::Value values = op->getOperand(2);
 
   auto resultType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  auto indicesType = mlir::cast<mlir::RankedTensorType>(indices.getType());
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  auto indicesType = mlir::dyn_cast<mlir::RankedTensorType>(indices.getType());
+  auto depthType = mlir::dyn_cast<mlir::RankedTensorType>(depth.getType());
+  if (!resultType || !indicesType || !depthType)
+    return rewriter.notifyMatchFailure(
+        op, "OneHot indices, depth, and result must be ranked tensors");
+  if ((depthType.getRank() != 0 &&
+       (depthType.getRank() != 1 || depthType.isDynamicDim(0) ||
+        depthType.getDimSize(0) != 1)) ||
+      (!depthType.getElementType().isInteger(32) &&
+       !depthType.getElementType().isInteger(64)))
+    return rewriter.notifyMatchFailure(
+        op, "OneHot depth must be a scalar or one-element i32/i64 tensor");
+
+  llvm::SmallVector<int64_t> depthValues;
+  std::optional<int64_t> staticDepth;
+  if (extractConstantIntTensor(depth, depthValues) && depthValues.size() == 1) {
+    if (depthValues.front() < 0)
+      return rewriter.notifyMatchFailure(op,
+                                         "OneHot depth must be non-negative");
+    staticDepth = depthValues.front();
+  }
 
   int64_t axis = -1;
   if (auto axisAttr = op->getAttrOfType<mlir::IntegerAttr>("axis"))
@@ -64,7 +84,11 @@ OneHotToHip::matchAndRewrite(mlir::Operation *op,
       //          %di = arith.index_cast %d : i64 to index
       //          %init = tensor.empty(%di) : tensor<...x?x...>  // extent =
       //          depth
-      auto depthType = mlir::cast<mlir::RankedTensorType>(depth.getType());
+      if (staticDepth) {
+        dynSizes.push_back(
+            mlir::arith::ConstantIndexOp::create(rewriter, loc, *staticDepth));
+        continue;
+      }
       mlir::Value depthScalar = depth;
       if (depthType.getRank() != 0) {
         // ONNX OneHot depth is a scalar; collapse a single-element rank-1
