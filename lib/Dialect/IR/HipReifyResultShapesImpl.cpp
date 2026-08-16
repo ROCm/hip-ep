@@ -67,6 +67,24 @@ LogicalResult ConvTransposeOp::reifyResultShapes(
 }
 
 //===----------------------------------------------------------------------===//
+// CausalConvWithStateOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult CausalConvWithStateOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() != 2)
+    return failure();
+  FailureOr<ReifiedRankedShapedTypeDims> shapes =
+      mlir::hip::reifyCausalConvWithStateOutputShapes(
+          b, getLoc(), getInput(), getWeight(), getBias(), getPastState(),
+          getNdim(), [&]() { return this->emitOpError(); });
+  if (failed(shapes))
+    return failure();
+  reifiedReturnShapes = std::move(*shapes);
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // MatmulOp
 //
 // Reify delegates to the shared MatMul helper used by converter destination
