@@ -1551,6 +1551,70 @@ void CausalConvWithStateOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult CausalConvWithStateOp::verify() {
+  SmallVector<Value> operands = {getInput(), getWeight()};
+  if (Value bias = getBias())
+    operands.push_back(bias);
+  if (Value pastState = getPastState())
+    operands.push_back(pastState);
+  operands.push_back(getOutput());
+  operands.push_back(getPresentState());
+  if (failed(verifyDpsComputeOp(*this, operands, /*numInits=*/2)))
+    return failure();
+
+  auto inputType = dyn_cast<ShapedType>(getInput().getType());
+  auto weightType = dyn_cast<ShapedType>(getWeight().getType());
+  if (!inputType || !inputType.hasRank() || !weightType ||
+      !weightType.hasRank())
+    return emitOpError("input and weight must be ranked");
+  std::optional<ArrayRef<int64_t>> biasShape;
+  if (Value bias = getBias()) {
+    auto biasType = dyn_cast<ShapedType>(bias.getType());
+    if (!biasType || !biasType.hasRank())
+      return emitOpError("bias must be ranked");
+    biasShape = biasType.getShape();
+  }
+  std::optional<ArrayRef<int64_t>> pastStateShape;
+  if (Value pastState = getPastState()) {
+    auto pastStateType = dyn_cast<ShapedType>(pastState.getType());
+    if (!pastStateType || !pastStateType.hasRank())
+      return emitOpError("past_state must be ranked");
+    pastStateShape = pastStateType.getShape();
+  }
+
+  FailureOr<SmallVector<SmallVector<int64_t>>> expected =
+      inferCausalConvWithStateOutputShapes(
+          inputType.getShape(), weightType.getShape(), biasShape,
+          pastStateShape, getNdim(), [&]() { return this->emitOpError(); });
+  if (failed(expected))
+    return failure();
+  if (getActivation() != "none" && getActivation() != "silu" &&
+      getActivation() != "swish")
+    return emitOpError("activation must be one of: none, silu, swish");
+
+  Type elementType = inputType.getElementType();
+  if (!elementType.isF16() && !elementType.isF32())
+    return emitOpError("runtime supports only f16/f32 input");
+  for (Value value : operands)
+    if (cast<ShapedType>(value.getType()).getElementType() != elementType)
+      return emitOpError("all input and output element types must match");
+
+  for (unsigned index = 0; index < 2; ++index) {
+    if (failed(verifyHipOpShape(
+            *this,
+            [&]() -> FailureOr<SmallVector<int64_t>> {
+              return (*expected)[index];
+            },
+            index)))
+      return failure();
+    Value init = index == 0 ? getOutput() : getPresentState();
+    if (getNumResults() && getResult(index).getType() != init.getType())
+      return emitOpError("tensor result #")
+             << index << " type must match its output buffer type";
+  }
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // GemmOp
 //===----------------------------------------------------------------------===//
