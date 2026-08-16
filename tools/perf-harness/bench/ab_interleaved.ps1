@@ -27,6 +27,16 @@
 ##
 ## The named DLL is copied over the same filename in $env:HIPEP_BIN before each
 ## run, so every arm is measured through one identical harness.
+##
+## Use "dlls" instead when an arm spans more than one artifact:
+##
+##   { "base": { "dlls": ["D:\\b\\base\\hipgpu.dll",
+##                        "D:\\b\\base\\custom_kernels_gfx1151.dll"] }, ... }
+##
+## Anything touching lib/Conversion or lib/Runtime/real lands in hipgpu.dll, and
+## the two share the extern "C" kernel ABI, so swapping only one of the pair
+## measures a mix of both arms. Every arm must list the same file names, or the
+## unlisted one silently persists from whichever arm ran last.
 
 param(
   [Parameter(Mandatory = $true)][string]$Manifest,
@@ -57,9 +67,35 @@ $ErrorActionPreference = 'Stop'
 $armDefs = Get-Content $Manifest -Raw | ConvertFrom-Json
 $allArms = $armDefs.PSObject.Properties.Name
 if (-not $Arms) { $Arms = $allArms }
+
+function Get-ArmDlls {
+  param([string]$Name)
+  $def = $armDefs.$Name
+  $has = $def.PSObject.Properties.Name
+  if ($has -contains 'dlls') { return @($def.dlls) }
+  if ($has -contains 'dll')  { return @($def.dll) }
+  throw "Arm '$Name' declares neither 'dll' nor 'dlls'."
+}
+
 foreach ($a in $Arms) {
   if ($a -notin $allArms) { throw "Arm '$a' is not in $Manifest (have: $($allArms -join ', '))" }
-  if (-not (Test-Path $armDefs.$a.dll)) { throw "Arm '$a': DLL not found: $($armDefs.$a.dll)" }
+  foreach ($d in (Get-ArmDlls $a)) {
+    if (-not (Test-Path $d)) { throw "Arm '$a': DLL not found: $d" }
+  }
+}
+
+# A file swapped by one arm but not another keeps that arm's build for every
+# later run, which reads as a real effect and is invisible in the output.
+$armFileSets = @{}
+foreach ($a in $Arms) {
+  $armFileSets[$a] = @(Get-ArmDlls $a | ForEach-Object { Split-Path -Leaf $_ } | Sort-Object)
+}
+$reference = $armFileSets[$Arms[0]]
+foreach ($a in $Arms) {
+  if (Compare-Object $reference $armFileSets[$a]) {
+    throw ("Arms swap different files, so one arm's build would leak into the other. " +
+           "'$($Arms[0])' has [$($reference -join ', ')], '$a' has [$($armFileSets[$a] -join ', ')].")
+  }
 }
 
 if (-not $OutDir) { $OutDir = Join-Path $HarnessEnv.OutRoot 'ttft' }
@@ -68,9 +104,9 @@ $benchTtft = Join-Path $PSScriptRoot 'bench_ttft.ps1'
 
 function Invoke-Arm {
   param([string]$Name, [string]$Tag, [int]$RunReps)
-  $dll  = $armDefs.$Name.dll
-  $dest = Join-Path $HarnessEnv.Bin (Split-Path -Leaf $dll)
-  Copy-Item $dll $dest -Force
+  foreach ($dll in (Get-ArmDlls $Name)) {
+    Copy-Item $dll (Join-Path $HarnessEnv.Bin (Split-Path -Leaf $dll)) -Force
+  }
   $temp = Join-Path $cacheRoot $Name
   New-Item -ItemType Directory -Force -Path $temp | Out-Null
   $env:TEMP = $temp; $env:TMP = $temp
