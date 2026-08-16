@@ -201,6 +201,8 @@ public:
   ContextProto context_proto;
   const ConfigProto config_; // Runtime-only INPUT (never serialized, immutable)
   bool is_ep_context_model = false;
+  bool cache_key_finalized = false;
+  bool initializer_digest_finalized = false;
   std::filesystem::path model_path;
   std::unique_ptr<morphizen_cxx::Model> ep_context_model_;
   std::chrono::time_point<std::chrono::steady_clock> start_ =
