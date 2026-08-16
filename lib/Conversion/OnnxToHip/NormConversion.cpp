@@ -105,13 +105,15 @@ mlir::LogicalResult SimplifiedLayerNormToHip::matchAndRewrite(
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
 
-  // Create init tensor
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+  auto init = createSameShapeEmptyTensor(rewriter, loc, resultType, input);
+  if (mlir::failed(init))
+    return rewriter.notifyMatchFailure(
+        op, "SimplifiedLayerNormalization output must match input shape");
 
   // Result type inferred from `init` via InferTypeOpInterface — DPS contract:
   // result type == outs operand type.
   auto hipOp =
-      mlir::hip::RmsNormOp::create(rewriter, loc, context, input, scale, init,
+      mlir::hip::RmsNormOp::create(rewriter, loc, context, input, scale, *init,
                                    axisI64Attr, epsilonAttr, stashTypeI64Attr);
 
   rewriter.replaceOp(op, hipOp->getResult(0));
@@ -163,10 +165,13 @@ RMSNormalizationToHip::matchAndRewrite(mlir::Operation *op,
 
   auto resultType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  mlir::Value init = createEmptyTensor(rewriter, loc, resultType, input);
+  auto init = createSameShapeEmptyTensor(rewriter, loc, resultType, input);
+  if (mlir::failed(init))
+    return rewriter.notifyMatchFailure(
+        op, "RMSNormalization output must match input shape");
 
   auto hipOp = mlir::hip::RmsNormOp::create(
-      rewriter, loc, context, input, scale, init,
+      rewriter, loc, context, input, scale, *init,
       rewriter.getI64IntegerAttr(axis),
       rewriter.getF32FloatAttr(epsValue.convertToFloat()),
       rewriter.getI64IntegerAttr(stashType));
@@ -452,15 +457,22 @@ SkipLayerNormToHip::matchAndRewrite(mlir::Operation *op,
   auto inputType = mlir::cast<mlir::RankedTensorType>(input.getType());
 
   // === 1. sum = input + skip (this is also output[3] input_skip_bias_sum) ===
-  mlir::Value sumInit = createEmptyTensor(rewriter, loc, inputType, input);
+  auto sumInit =
+      createBroadcastEmptyTensor(rewriter, loc, inputType, {input, skip});
+  if (mlir::failed(sumInit))
+    return rewriter.notifyMatchFailure(
+        op, "SkipLayerNormalization inputs are not broadcast-compatible");
   mlir::Value sum = mlir::hip::AddOp::create(rewriter, loc, inputType, context,
-                                             input, skip, sumInit)
+                                             input, skip, *sumInit)
                         .getResult(0);
 
   // === 2. output = LayerNorm(sum, gamma, beta, epsilon) =====================
   auto outputType =
       mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, input);
+  auto outputInit = createSameShapeEmptyTensor(rewriter, loc, outputType, sum);
+  if (mlir::failed(outputInit))
+    return rewriter.notifyMatchFailure(
+        op, "SkipLayerNormalization output must match summed input shape");
 
   // hip.layer_norm uses AttrSizedOperandSegments: [ctx, input, scale, bias?,
   // outputs*]. Whisper requests only output[0], so a single output buffer.
@@ -470,7 +482,7 @@ SkipLayerNormToHip::matchAndRewrite(mlir::Operation *op,
   operands.push_back(gamma);
   if (beta)
     operands.push_back(beta);
-  operands.push_back(outputInit);
+  operands.push_back(*outputInit);
 
   llvm::SmallVector<int32_t> segmentSizes;
   segmentSizes.push_back(/*ctx=*/1);

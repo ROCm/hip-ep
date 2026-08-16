@@ -102,6 +102,16 @@ createEmptyTensorFromReifiedShape(OpBuilder &builder, Location loc,
   return Value(tensor::EmptyOp::create(builder, loc, resultType, dynSizes));
 }
 
+FailureOr<Value> createSameShapeEmptyTensor(OpBuilder &builder, Location loc,
+                                            RankedTensorType resultType,
+                                            Value source) {
+  FailureOr<llvm::SmallVector<OpFoldResult>> shape =
+      reifyElementwiseSameShape(builder, loc, source);
+  if (failed(shape))
+    return failure();
+  return createEmptyTensorFromReifiedShape(builder, loc, resultType, *shape);
+}
+
 FailureOr<Value>
 createBroadcastEmptyTensor(OpBuilder &builder, Location loc,
                            RankedTensorType resultType, ValueRange operands,

@@ -58,11 +58,14 @@ struct LeakyReluToHip : public mlir::RewritePattern {
 
     auto resultType =
         mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    mlir::Value init = createEmptyTensor(rewriter, loc, resultType, x);
+    auto init = createSameShapeEmptyTensor(rewriter, loc, resultType, x);
+    if (mlir::failed(init))
+      return rewriter.notifyMatchFailure(
+          op, "LeakyRelu result type must match the input shape");
 
     auto alphaAttr = rewriter.getF64FloatAttr(alphaVal);
     auto hipOp = mlir::hip::LeakyReluOp::create(rewriter, loc, resultType,
-                                                context, x, init, alphaAttr);
+                                                context, x, *init, alphaAttr);
     rewriter.replaceOp(op, hipOp->getResult(0));
     return mlir::success();
   }
