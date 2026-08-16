@@ -16,6 +16,10 @@ namespace mlir::hip::detail {
 /// reification callers use the empty view as a silent bail-out.
 ArrayRef<int64_t> getShapeOf(Value value);
 
+/// Decode an integer ArrayAttr. Hip op definitions constrain the element type,
+/// so malformed entries retain the existing cast/assert behavior.
+SmallVector<int64_t> getI64Array(ArrayAttr attr);
+
 /// Pretty-print a static shape for implementation diagnostics.
 std::string formatShape(ArrayRef<int64_t> shape);
 

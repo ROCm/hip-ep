@@ -25,7 +25,62 @@ using namespace mlir;
 using namespace mlir::hip;
 
 //===----------------------------------------------------------------------===//
-// MatmulOp and QMatMulOp
+// ConvOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult
+ConvOp::reifyResultShapes(OpBuilder &b,
+                          ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() != 1)
+    return failure();
+  FailureOr<SmallVector<OpFoldResult>> shape = mlir::hip::reifyConvResultShape(
+      b, getLoc(), getInput(), getWeights(),
+      detail::getI64Array(getKernelShape()), detail::getI64Array(getStrides()),
+      detail::getI64Array(getPads()), detail::getI64Array(getDilations()),
+      getGroup(), [&]() { return this->emitOpError(); });
+  if (failed(shape))
+    return failure();
+  reifiedReturnShapes.assign({std::move(*shape)});
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// ConvTransposeOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult ConvTransposeOp::reifyResultShapes(
+    OpBuilder &b, ReifiedRankedShapedTypeDims &reifiedReturnShapes) {
+  if (getNumResults() == 0)
+    return failure();
+  FailureOr<SmallVector<OpFoldResult>> dims =
+      mlir::hip::reifyConvTransposeResultShape(
+          b, getLoc(), getInput(), getWeights(),
+          detail::getI64Array(getKernelShape()),
+          detail::getI64Array(getStrides()), detail::getI64Array(getPads()),
+          detail::getI64Array(getDilations()),
+          detail::getI64Array(getOutputPadding()), getGroup(),
+          [&]() { return this->emitOpError(); });
+  if (failed(dims))
+    return failure();
+  reifiedReturnShapes.assign({std::move(*dims)});
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// MatmulOp
+//
+// Reify delegates to the shared MatMul helper used by converter destination
+// construction: M comes from A[-2], N from B[-1], and leading dimensions use
+// NumPy broadcast semantics.
+//
+// Before:
+//   %r = hip.matmul ins(%a, %b : tensor<?x4096xf16>,
+//                                tensor<?x4096x?xf16>)
+//                   outs(%out : tensor<?x?x?xf16>) -> tensor<?x?x?xf16>
+// After (reified result shape):
+//   dim 0 (batch) -> tensor.dim %b, %c0
+//   dim 1 (M)     -> tensor.dim %a, %c0
+//   dim 2 (N)     -> tensor.dim %b, %c2
 //===----------------------------------------------------------------------===//
 
 LogicalResult
