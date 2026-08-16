@@ -370,13 +370,14 @@ module {
     return %result : tensor<?x4xf32>
   }
 
-  // Two dynamic Add operands are ambiguous: the correct broadcast select must
-  // remain because neither dimension is proven to be the canonical source.
-  // CHECK-LABEL: func.func @ambiguous_add_keeps_select
+  // Two dynamic Add operands remain ambiguous to provenance. This stack layer
+  // still uses the foundation's deferred destination materialization policy;
+  // exact broadcast fallback is activated together with symbolic proofs later.
+  // CHECK-LABEL: func.func @ambiguous_add_defers_exact_materialization
   // CHECK-NOT: hip.readback_scalar
-  // CHECK: arith.select
+  // CHECK-NOT: arith.select
   // CHECK: tensor.reshape
-  func.func @ambiguous_add_keeps_select(
+  func.func @ambiguous_add_defers_exact_materialization(
       %lhs: tensor<?x?x4xf16>,
       %rhs: tensor<?x?x4xf16>) -> tensor<?x?x?x?xf16> {
     %sum = "onnx.Add"(%lhs, %rhs)
