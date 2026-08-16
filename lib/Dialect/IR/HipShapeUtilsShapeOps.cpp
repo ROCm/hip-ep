@@ -136,45 +136,66 @@ mlir::hip::reifyPadShape(OpBuilder &b, Location loc, Value data, Value pads,
   SmallVector<OpFoldResult> inputSizes = tensor::getMixedSizes(b, loc, data);
   out.reserve(dataRank);
   for (int64_t axis : llvm::seq<int64_t>(0, dataRank)) {
-    if (!dataType.isDynamicDim(axis)) {
-      out.push_back(b.getIndexAttr(inferred->result[axis]));
-      continue;
-    }
-    Value inputExtent =
-        getValueOrCreateConstantIndexOp(b, loc, inputSizes[axis]);
-    int64_t offset = inferred->offsets[axis];
-    if (offset == 0) {
-      out.push_back(inputExtent);
-      continue;
-    }
-    Value offsetValue = arith::ConstantIndexOp::create(b, loc, offset);
-    out.push_back(
-        arith::AddIOp::create(b, loc, inputExtent, offsetValue).getResult());
+    FailureOr<OpFoldResult> extent = detail::scaleAndOffsetDim(
+        b, loc, inputSizes[axis], /*scale=*/1, inferred->offsets[axis]);
+    if (failed(extent))
+      return failure();
+    out.push_back(*extent);
   }
   return success();
 }
 
-LogicalResult mlir::hip::reifyTileShape(OpBuilder &b, Location loc, Value input,
-                                        Value repeats,
-                                        SmallVectorImpl<OpFoldResult> &out) {
+FailureOr<SmallVector<int64_t>>
+mlir::hip::inferTileShape(ArrayRef<int64_t> inputShape,
+                          ArrayRef<int64_t> repeats) {
+  if (inputShape.size() != repeats.size())
+    return failure();
+  SmallVector<int64_t> result;
+  result.reserve(inputShape.size());
+  for (auto [dim, repeat] : llvm::zip_equal(inputShape, repeats)) {
+    if (repeat < 0)
+      return failure();
+    if (ShapedType::isDynamic(dim)) {
+      result.push_back(ShapedType::kDynamic);
+      continue;
+    }
+    APInt extent = APInt(128, dim, /*isSigned=*/true) *
+                   APInt(128, repeat, /*isSigned=*/true);
+    if (!extent.isSignedIntN(64) || extent.isNegative())
+      return failure();
+    result.push_back(extent.getSExtValue());
+  }
+  return result;
+}
+
+LogicalResult
+mlir::hip::reifyTileShape(OpBuilder &b, Location loc, Value input,
+                          Value repeats,
+                          std::optional<ArrayRef<int64_t>> staticRepeats,
+                          SmallVectorImpl<OpFoldResult> &out) {
   out.clear();
   auto inputType = dyn_cast<RankedTensorType>(input.getType());
   if (!inputType)
     return failure();
-  ArrayRef<int64_t> inputShape = inputType.getShape();
-  int64_t inputRank = inputType.getRank();
 
-  SmallVector<int64_t> repeatsList;
-  if (!matchConstantIntTensor(repeats, repeatsList))
-    return failure();
-  if (static_cast<int64_t>(repeatsList.size()) != inputRank)
-    return failure();
-
-  out.reserve(inputRank);
-  for (int64_t dim : llvm::seq<int64_t>(0, inputRank)) {
-    if (ShapedType::isDynamic(inputShape[dim]) || repeatsList[dim] < 0)
+  SmallVector<int64_t> extractedRepeats;
+  if (!staticRepeats) {
+    if (!matchConstantIntTensor(repeats, extractedRepeats,
+                                /*expectedRank=*/1))
       return failure();
-    out.push_back(b.getIndexAttr(inputShape[dim] * repeatsList[dim]));
+    staticRepeats = extractedRepeats;
+  }
+  if (failed(inferTileShape(inputType.getShape(), *staticRepeats)))
+    return failure();
+
+  SmallVector<OpFoldResult> inputSizes = tensor::getMixedSizes(b, loc, input);
+  out.reserve(inputSizes.size());
+  for (auto [dim, repeat] : llvm::zip_equal(inputSizes, *staticRepeats)) {
+    FailureOr<OpFoldResult> extent =
+        detail::scaleAndOffsetDim(b, loc, dim, repeat, /*offset=*/0);
+    if (failed(extent))
+      return failure();
+    out.push_back(*extent);
   }
   return success();
 }
@@ -291,34 +312,52 @@ LogicalResult mlir::hip::reifySliceShape(OpBuilder &b, Location loc, Value data,
   return success();
 }
 
-LogicalResult mlir::hip::reifyRangeShape(OpBuilder &b, Location loc,
-                                         Value start, Value limit, Value delta,
-                                         SmallVectorImpl<OpFoldResult> &out) {
+LogicalResult
+mlir::hip::reifyRangeShape(OpBuilder &b, Location loc, Value start, Value limit,
+                           Value delta, SmallVectorImpl<OpFoldResult> &out,
+                           std::optional<ArrayRef<int64_t>> staticValues) {
   out.clear();
-  SmallVector<int64_t> starts, limits, deltas;
-  if (!matchConstantIntTensor(start, starts) ||
-      !matchConstantIntTensor(limit, limits) ||
-      !matchConstantIntTensor(delta, deltas))
+
+  // Each operand is a rank-0 (scalar) integer tensor. matchConstantIntTensor
+  // returns a 1-element vector for the rank-0 / IntegerAttr case.
+  SmallVector<int64_t> sList, lList, dList;
+  if (staticValues) {
+    if (staticValues->size() != 3)
+      return failure();
+    sList.push_back((*staticValues)[0]);
+    lList.push_back((*staticValues)[1]);
+    dList.push_back((*staticValues)[2]);
+  } else if (!matchConstantIntTensor(start, sList, /*expectedRank=*/0) ||
+             !matchConstantIntTensor(limit, lList, /*expectedRank=*/0) ||
+             !matchConstantIntTensor(delta, dList, /*expectedRank=*/0)) {
     return failure();
-  if (starts.size() != 1 || limits.size() != 1 || deltas.size() != 1)
+  }
+  if (sList.size() != 1 || lList.size() != 1 || dList.size() != 1)
+    return failure();
+  APInt s(128, sList[0], /*isSigned=*/true);
+  APInt l(128, lList[0], /*isSigned=*/true);
+  APInt d(128, dList[0], /*isSigned=*/true);
+  if (d.isZero())
     return failure();
 
-  int64_t startValue = starts[0];
-  int64_t limitValue = limits[0];
-  int64_t deltaValue = deltas[0];
-  if (deltaValue == 0)
-    return failure();
-  int64_t count = 0;
-  if ((deltaValue > 0 && limitValue > startValue) ||
-      (deltaValue < 0 && limitValue < startValue)) {
-    int64_t difference = limitValue - startValue;
-    int64_t step = deltaValue;
-    if (step < 0) {
-      difference = -difference;
+  // ONNX Range: count = max(0, ceil((limit - start) / delta)) for the
+  // direction implied by sign(delta). Negative direction (delta < 0)
+  // counts down from start to limit. Wide arithmetic is required for
+  // INT64_MIN negation and opposite-sign endpoint subtraction.
+  APInt count(128, 0, /*isSigned=*/true);
+  if ((d.isStrictlyPositive() && l.sgt(s)) || (d.isNegative() && l.slt(s))) {
+    APInt diff = l - s;
+    APInt step = d;
+    if (step.isNegative()) {
+      diff = -diff;
       step = -step;
     }
-    count = (difference + step - 1) / step;
+    APInt one(128, 1, /*isSigned=*/true);
+    count = (diff + step - one).sdiv(step);
   }
-  out.push_back(b.getIndexAttr(count));
+  if (!count.isSignedIntN(64) || count.isNegative())
+    return failure();
+
+  out.push_back(b.getIndexAttr(count.getSExtValue()));
   return success();
 }

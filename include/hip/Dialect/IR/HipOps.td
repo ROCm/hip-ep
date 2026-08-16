@@ -2036,7 +2036,9 @@ def Hip_TopKOp : Hip_DpsOp<"top_k"> {
   }];
 }
 
-def Hip_RangeOp : Hip_DpsOp_WithInfer<"range"> {
+def Hip_RangeOp :
+    Hip_DpsOp_Payload<"range", /*traits=*/[],
+                      /*outsAccessor=*/"Output"> {
   let summary = "Generate 1-D range tensor";
   let description = [{
     Implements ONNX Range semantics:
@@ -3979,7 +3981,9 @@ def Hip_PadOp :
   }];
 }
 
-def Hip_TileOp : Hip_DpsOp_WithInfer<"tile"> {
+def Hip_TileOp :
+    Hip_DpsOp_Payload<"tile", /*traits=*/[],
+                      /*outsAccessor=*/"Output"> {
   let summary = "Tile a tensor by repeating along each dimension";
   let description = [{
     Constructs a new tensor by repeating `input` along each dimension by the
@@ -4001,7 +4005,8 @@ def Hip_TileOp : Hip_DpsOp_WithInfer<"tile"> {
     Hip_ContextType:$ctx,
     Hip_TensorOrMemRef:$input,
     Hip_TensorOrMemRef:$repeats,
-    Hip_TensorOrMemRef:$output
+    Hip_TensorOrMemRef:$output,
+    OptionalAttr<DenseI64ArrayAttr>:$static_repeats
   );
 
   let assemblyFormat = [{
@@ -4009,6 +4014,8 @@ def Hip_TileOp : Hip_DpsOp_WithInfer<"tile"> {
     `outs` `(` $output `:` type($output) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  let hasVerifier = 1;
 }
 
 def Hip_ExpandOp :
