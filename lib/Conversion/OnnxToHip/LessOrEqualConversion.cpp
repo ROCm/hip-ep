@@ -54,7 +54,7 @@ struct LessOrEqualDecompose : public mlir::RewritePattern {
 
     // less = (B < A); same (boolean, broadcasted) type as the final result.
     mlir::FailureOr<mlir::Value> lessInit =
-        createBroadcastEmptyTensor(rewriter, loc, resultType, {b, a});
+        createOnnxBroadcastEmptyTensor(rewriter, loc, resultType, {b, a}, op);
     if (mlir::failed(lessInit))
       return rewriter.notifyMatchFailure(
           op, "LessOrEqual: cannot infer dynamic result dimensions from "
