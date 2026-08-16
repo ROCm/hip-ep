@@ -630,11 +630,6 @@ void populateFlattenConversionPatterns(RewritePatternSet &patterns,
 void populateGatherShapeFoldPatterns(RewritePatternSet &patterns,
                                      MLIRContext *ctx);
 
-/// Preserve compile-time Slice controls until the shared normalization layer
-/// replaces this pre-lowering fold.
-void populateSliceShapeFoldPatterns(RewritePatternSet &patterns,
-                                    MLIRContext *ctx);
-
 /// Pre-lowering pattern set: collapse ORT's inlined `FastGelu` primitive
 /// chain (Pow / Mul / Sum / Tanh) back into a single
 /// `onnx.Gelu(approximate="tanh")`. ORT inlines the Gelu function body

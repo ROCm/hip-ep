@@ -41,7 +41,6 @@ add_library(OnnxToHip STATIC
   GatherShapeFold.cpp
   ShapeProvenanceAnalysis.cpp
   ReshapeShapeFold.cpp
-  SliceShapeFold.cpp
   ShapeConversion.cpp
   ReshapeConversion.cpp
   CausalConvWithStateConversion.cpp
