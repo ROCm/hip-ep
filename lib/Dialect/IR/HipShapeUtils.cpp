@@ -284,6 +284,28 @@ LogicalResult mlir::hip::verifyHipOpShape(
   return success();
 }
 
+LogicalResult mlir::hip::verifyBroadcastDpsOp(Operation *op,
+                                              ValueRange operands) {
+  auto dpsOp = dyn_cast<DestinationStyleOpInterface>(op);
+  if (!dpsOp)
+    return op->emitOpError(
+        "broadcast verification requires DestinationStyleOpInterface");
+  SmallVector<Value> inits = dpsOp.getDpsInits();
+  SmallVector<Value> dataOperands(operands.begin(), operands.end());
+  llvm::append_range(dataOperands, inits);
+  if (failed(verifyDpsComputeOp(op, dataOperands, /*numInits=*/1)))
+    return failure();
+
+  SmallVector<ArrayRef<int64_t>> shapes;
+  shapes.reserve(operands.size());
+  for (Value operand : operands)
+    shapes.push_back(cast<ShapedType>(operand.getType()).getShape());
+  return verifyHipOpShape(op, [&] {
+    return inferBroadcastShape(
+        shapes, [&]() { return op->emitOpError("broadcast verification: "); });
+  });
+}
+
 OpFoldResult mlir::hip::reifyDimOrConstant(OpBuilder &b, Location loc,
                                            int64_t staticDim, Value source,
                                            int64_t sourceDim) {

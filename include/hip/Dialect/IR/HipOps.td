@@ -171,7 +171,17 @@ class Hip_DpsOp_Broadcast<string mnemonic, list<string> operandGetters,
   [{}, getOperation(), reified);
     }
   }]);
-  let extraClassDefinition = reifyClassDefinition # inferClassDefinition;
+  code verifyClassDefinition = !strconcat([{
+    ::mlir::LogicalResult $cppClass::verify() {
+      return ::mlir::hip::verifyBroadcastDpsOp(getOperation(), {
+  }],
+  !interleave(!foreach(g, operandGetters, "get" # g # "()"), ", "),
+  [{});
+    }
+  }]);
+  let extraClassDefinition =
+      reifyClassDefinition # inferClassDefinition # verifyClassDefinition;
+  let hasVerifier = 1;
 }
 
 // Accepts both ranked tensor (pre-bufferization) and memref (post-bufferization).
@@ -1347,7 +1357,6 @@ def Hip_MiopenAddOp : Hip_DpsOp_Broadcast<"miopen.add",
   );
   // result_tensors inherited from Hip_DpsOp
   let hasCustomAssemblyFormat = 1;
-  let hasVerifier = 1;
 }
 
 def Hip_MulOp : Hip_DpsOp_Broadcast<"mul", /*operandGetters=*/["Lhs", "Rhs"],
@@ -1389,7 +1398,6 @@ def Hip_MulOp : Hip_DpsOp_Broadcast<"mul", /*operandGetters=*/["Lhs", "Rhs"],
 
   // result_tensors inherited from Hip_DpsOp
   let hasCustomAssemblyFormat = 1;
-  let hasVerifier = 1;
 }
 
 def Hip_AddOp : Hip_DpsOp_Broadcast<"add", /*operandGetters=*/["Lhs", "Rhs"],
@@ -1429,7 +1437,6 @@ def Hip_AddOp : Hip_DpsOp_Broadcast<"add", /*operandGetters=*/["Lhs", "Rhs"],
 
   // result_tensors inherited from Hip_DpsOp
   let hasCustomAssemblyFormat = 1;
-  let hasVerifier = 1;
 }
 
 def Hip_MinOp : Hip_DpsOp_Broadcast<"min", /*operandGetters=*/["Lhs", "Rhs"],
