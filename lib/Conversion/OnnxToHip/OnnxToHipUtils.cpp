@@ -41,6 +41,67 @@ bool isResultTypeCompatibleWithPayloadShape(
   return isResultTypeCompatibleWithInferredShape(resultType, inferredShape);
 }
 
+mlir::FailureOr<RotaryEmbeddingConfig>
+resolveRotaryEmbeddingConfig(mlir::PatternRewriter &rewriter,
+                             mlir::Operation *op, mlir::Value input,
+                             mlir::Value cosCache) {
+  auto interleavedAttr = op->getAttrOfType<mlir::IntegerAttr>("interleaved");
+  auto numHeadsAttr = op->getAttrOfType<mlir::IntegerAttr>("num_heads");
+  auto rotaryDimAttr =
+      op->getAttrOfType<mlir::IntegerAttr>("rotary_embedding_dim");
+
+  // ONNX INT attributes import as signed IntegerAttr, so getSInt() is required
+  // here: IntegerAttr::getInt() asserts for signed integer types.
+  RotaryEmbeddingConfig config{interleavedAttr ? interleavedAttr.getSInt() : 0,
+                               numHeadsAttr ? numHeadsAttr.getSInt() : 0,
+                               rotaryDimAttr ? rotaryDimAttr.getSInt() : 0};
+
+  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
+  if (config.rotaryDim == 0) {
+    auto cosCacheType =
+        mlir::dyn_cast<mlir::RankedTensorType>(cosCache.getType());
+    if (!cosCacheType || cosCacheType.getRank() < 2 ||
+        cosCacheType.isDynamicDim(cosCacheType.getRank() - 1)) {
+      rewriter.notifyMatchFailure(
+          op, "Cannot infer rotary_embedding_dim: "
+              "cos_cache last dim must be static with rank >= 2");
+      return mlir::failure();
+    }
+    config.rotaryDim = cosCacheType.getDimSize(cosCacheType.getRank() - 1) * 2;
+  }
+
+  if (inputType && inputType.getRank() == 4) {
+    int64_t shapeNumHeads = inputType.getShape()[1];
+    if (!mlir::ShapedType::isDynamic(shapeNumHeads)) {
+      if (config.numHeads == 0)
+        config.numHeads = shapeNumHeads;
+      else if (config.numHeads != shapeNumHeads) {
+        rewriter.notifyMatchFailure(
+            op, "RotaryEmbedding: num_heads attribute disagrees with 4D "
+                "input shape (BNSH)");
+        return mlir::failure();
+      }
+    }
+    if (config.numHeads == 0) {
+      rewriter.notifyMatchFailure(
+          op, "Cannot infer num_heads: 4D input has dynamic num_heads dim "
+              "and no num_heads attribute");
+      return mlir::failure();
+    }
+  } else if (config.numHeads == 0 && config.rotaryDim > 0) {
+    if (!inputType || inputType.getRank() < 1 ||
+        inputType.isDynamicDim(inputType.getRank() - 1)) {
+      rewriter.notifyMatchFailure(
+          op, "Cannot infer num_heads: input last dim must be static");
+      return mlir::failure();
+    }
+    config.numHeads =
+        inputType.getDimSize(inputType.getRank() - 1) / config.rotaryDim;
+  }
+
+  return config;
+}
+
 std::optional<llvm::ArrayRef<int64_t>>
 resolveReductionAxes(Operation *op, Value data, int64_t noopWithEmptyAxes,
                      llvm::SmallVectorImpl<int64_t> &storage) {

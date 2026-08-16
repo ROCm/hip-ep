@@ -30,11 +30,9 @@ namespace {
 ///      tensor [Skv,…,Skv] equal to the K's static sequence length.  Cross-
 ///      attention is bidirectional (Q can see all of K).
 ///
-///   3. Everything else (8-input pre-surgery decoder self-attn, plain 3-input
-///      MHA, models with bias / mask / attention_bias, etc.) — keep the
-///      existing `hip.multi_head_attention` lowering.  This preserves Llama
-///      and gpt-oss behaviour and gives the unmodified Whisper self-attn form
-///      a working (if slower) CPU-fallback path.
+///   3. Plain separate-Q/K/V rank-3 fp16 MHA with one output lowers to
+///      `hip.multi_head_attention`. Other forms are rejected before HIP IR is
+///      emitted because the default runtime returns an error for them.
 ///
 /// The constant `seqlens_k` / `total_sequence_length` for the cross-attn case
 /// are emitted as `arith.constant` (not `onnx.Constant`): the greedy rewrite
@@ -74,6 +72,10 @@ mlir::LogicalResult MultiHeadAttentionToHip::matchAndRewrite(
   if (numOps < 1 || numOps > 10)
     return rewriter.notifyMatchFailure(
         op, "MultiHeadAttention expects 1-10 operands");
+  size_t numResults = op->getNumResults();
+  if (numResults < 1 || numResults > 4)
+    return rewriter.notifyMatchFailure(
+        op, "MultiHeadAttention expects 1-4 results");
 
   // Helper: get optional operand (check for NoneType / out-of-range).
   auto getOptionalOperand = [&](size_t idx) -> mlir::Value {
@@ -178,8 +180,19 @@ mlir::LogicalResult MultiHeadAttentionToHip::matchAndRewrite(
     // emit a constant tensor of `present_key.shape[2]` — the static buffer
     // size from the IR (== `past_sequence_length_max + S`, baked in at compile
     // time).
+    if (numResults != 3)
+      return rewriter.notifyMatchFailure(
+          op, "post-surgery self-attn GQA route requires output, present_key, "
+              "and present_value");
+    auto outputType =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
     auto presentKType =
         mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(1).getType());
+    auto presentValueType =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(2).getType());
+    if (!outputType || !presentValueType)
+      return rewriter.notifyMatchFailure(
+          op, "post-surgery self-attn requires ranked output types");
     if (!presentKType || presentKType.getRank() != 4 ||
         presentKType.isDynamicDim(2))
       return rewriter.notifyMatchFailure(
@@ -192,11 +205,6 @@ mlir::LogicalResult MultiHeadAttentionToHip::matchAndRewrite(
         totalSeqLenType, llvm::APInt(32, totalLen, /*isSigned=*/true));
     mlir::Value totalSeqLen =
         mlir::arith::ConstantOp::create(rewriter, loc, totalSeqLenAttr);
-
-    auto outputType =
-        mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-    auto presentValueType =
-        mlir::cast<mlir::RankedTensorType>(op->getResult(2).getType());
 
     return buildHipGqaCall(
         op, rewriter, context, query, key, value, pastKey, pastValue,
@@ -219,6 +227,9 @@ mlir::LogicalResult MultiHeadAttentionToHip::matchAndRewrite(
   // intend cross-attn semantics.
   if (numOps >= 8 && noExtraInputs && key && value && !pastKey && !pastValue &&
       !pastSequenceLength && !cacheIndirection) {
+    if (numResults != 1)
+      return rewriter.notifyMatchFailure(
+          op, "cross-attn GQA route supports only the primary output");
     // Cross-attn: no_causal=true, seqlens_k = constant [Skv,…,Skv].
     //
     // Skv is K's sequence-length dim.  ONNX MHA's K can come in two layouts:
@@ -241,6 +252,13 @@ mlir::LogicalResult MultiHeadAttentionToHip::matchAndRewrite(
       return rewriter.notifyMatchFailure(
           op, "cross-attn rank-3 key not yet supported; expected rank-4 BNSH");
 
+    auto outputType =
+        mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+    auto valueType = mlir::dyn_cast<mlir::RankedTensorType>(value.getType());
+    if (!outputType || !valueType)
+      return rewriter.notifyMatchFailure(
+          op, "cross-attn dispatch requires ranked output and value");
+
     auto i32Ty = rewriter.getIntegerType(32);
     auto seqlensKType = mlir::RankedTensorType::get({batch}, i32Ty);
     llvm::SmallVector<llvm::APInt, 1> seqlensVals(
@@ -256,14 +274,10 @@ mlir::LogicalResult MultiHeadAttentionToHip::matchAndRewrite(
     mlir::Value totalSeqLen =
         mlir::arith::ConstantOp::create(rewriter, loc, totalSeqLenAttr);
 
-    auto outputType =
-        mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
-
     // hip.gqa always emits present_key / present_value buffers.  Cross-attn
     // has no KV cache exposed at the ONNX boundary, so the present_* types
     // just mirror K/V (they're discarded after the call).  K is guaranteed to
     // be rank-4 BNSH here — the rank-3 case was rejected above.
-    auto valueType = mlir::cast<mlir::RankedTensorType>(value.getType());
     mlir::RankedTensorType presentKType = keyType;
     mlir::RankedTensorType presentVType = valueType;
     const int64_t numHeads = numHeadsAttr.getValue().getSExtValue();
@@ -275,90 +289,85 @@ mlir::LogicalResult MultiHeadAttentionToHip::matchAndRewrite(
         /*noCausal=*/true, outputType, presentKType, presentVType);
   }
 
-  // === Default: existing hip.multi_head_attention lowering (unchanged) =====
+  // === Default: runtime-supported hip.multi_head_attention subset ==========
 
-  // === Check Outputs (1-4: output, [present_key, present_value, qk]) ===
+  if (!key || !value)
+    return op->emitError(
+        "default MultiHeadAttention runtime requires separate key and value");
+  if (bias || keyPaddingMask || attentionBias || pastKey || pastValue ||
+      pastSequenceLength || cacheIndirection)
+    return op->emitError(
+        "default MultiHeadAttention runtime does not support bias, masks, "
+        "past/cache inputs, or cache indirection");
+  if (numResults != 1)
+    return op->emitError(
+        "default MultiHeadAttention runtime supports only the primary output; "
+        "present_key, present_value, and qk are unsupported");
 
-  size_t numResults = op->getNumResults();
-  if (numResults < 1 || numResults > 4)
-    return rewriter.notifyMatchFailure(
-        op, "MultiHeadAttention expects 1-4 results");
-
+  auto queryType = mlir::dyn_cast<mlir::RankedTensorType>(query.getType());
+  auto keyType = mlir::dyn_cast<mlir::RankedTensorType>(key.getType());
+  auto valueType = mlir::dyn_cast<mlir::RankedTensorType>(value.getType());
   auto outputType =
-      mlir::cast<mlir::RankedTensorType>(op->getResult(0).getType());
+      mlir::dyn_cast<mlir::RankedTensorType>(op->getResult(0).getType());
+  if (!queryType || !keyType || !valueType || !outputType)
+    return op->emitError(
+        "default MultiHeadAttention runtime requires ranked Q/K/V and output");
+  if (!queryType.getElementType().isF16() ||
+      keyType.getElementType() != queryType.getElementType() ||
+      valueType.getElementType() != queryType.getElementType() ||
+      outputType.getElementType() != queryType.getElementType())
+    return op->emitError(
+        "default MultiHeadAttention runtime requires fp16 Q/K/V and output");
+  if (unidirectionalAttr.getValue().getSExtValue() != 0 &&
+      unidirectionalAttr.getValue().getSExtValue() != 1)
+    return op->emitError("MultiHeadAttention unidirectional must be 0 or 1");
+  if (maskFilterValueAttr.getValue().convertToFloat() != -10000.0f)
+    return op->emitError(
+        "default MultiHeadAttention runtime supports only the default "
+        "mask_filter_value -10000");
 
-  mlir::RankedTensorType presentKeyType = nullptr;
-  mlir::RankedTensorType presentValueType = nullptr;
-  mlir::RankedTensorType qkType = nullptr;
-  if (numResults >= 2)
-    presentKeyType =
-        mlir::cast<mlir::RankedTensorType>(op->getResult(1).getType());
-  if (numResults >= 3)
-    presentValueType =
-        mlir::cast<mlir::RankedTensorType>(op->getResult(2).getType());
-  if (numResults >= 4)
-    qkType = mlir::cast<mlir::RankedTensorType>(op->getResult(3).getType());
+  const int64_t numHeads = numHeadsAttr.getValue().getSExtValue();
+  mlir::FailureOr<llvm::SmallVector<int64_t>> expectedShape =
+      mlir::hip::inferMultiHeadAttentionOutputShape(
+          queryType.getShape(), keyType.getShape(), valueType.getShape(),
+          numHeads, [&]() { return op->emitError(); });
+  if (mlir::failed(expectedShape))
+    return mlir::failure();
 
-  // === Create DPS init tensors ===
+  if (outputType.getRank() != static_cast<int64_t>(expectedShape->size()))
+    return op->emitError(
+        "MultiHeadAttention output rank contradicts Q/K/V shape contract");
+  for (int64_t dim : llvm::seq<int64_t>(outputType.getRank())) {
+    int64_t expected = (*expectedShape)[dim];
+    int64_t actual = outputType.getDimSize(dim);
+    if (mlir::ShapedType::isDynamic(expected)) {
+      if (!mlir::ShapedType::isDynamic(actual))
+        return op->emitError("MultiHeadAttention output dimension ")
+               << dim << " must remain dynamic because query is dynamic";
+    } else if (!mlir::ShapedType::isDynamic(actual) && actual != expected) {
+      return op->emitError("MultiHeadAttention output dimension ")
+             << dim << " must equal query extent " << expected;
+    }
+  }
 
-  mlir::Value outputInit = createEmptyTensor(rewriter, loc, outputType, query);
-
-  // For present_key/present_value, derive dynamic dims from the most
-  // appropriate source: past_key/past_value when present (same buffer
-  // shape), otherwise key/value, otherwise query (packed QKV).
-  mlir::Value presentKeyInit = nullptr;
-  mlir::Value presentValueInit = nullptr;
-  mlir::Value qkInit = nullptr;
-  if (presentKeyType)
-    presentKeyInit = createEmptyTensor(rewriter, loc, presentKeyType,
-                                       pastKey ? pastKey : (key ? key : query));
-  if (presentValueType)
-    presentValueInit =
-        createEmptyTensor(rewriter, loc, presentValueType,
-                          pastValue ? pastValue : (value ? value : query));
-  if (qkType)
-    qkInit = createEmptyTensor(rewriter, loc, qkType, query);
+  mlir::FailureOr<llvm::SmallVector<mlir::OpFoldResult>> reifiedShape =
+      mlir::hip::reifyMultiHeadAttentionOutputShape(
+          rewriter, loc, query, key, value, numHeads,
+          [&]() { return op->emitError(); });
+  if (mlir::failed(reifiedShape))
+    return mlir::failure();
+  mlir::FailureOr<mlir::Value> outputInit = createEmptyTensorFromReifiedShape(
+      rewriter, loc, outputType, *reifiedShape);
+  if (mlir::failed(outputInit))
+    return op->emitError(
+        "MultiHeadAttention output type contradicts Q/K/V shape contract");
 
   // === Build the new hip.multi_head_attention op ===
 
-  mlir::SmallVector<mlir::Type> resultTypes;
-  resultTypes.push_back(outputType);
-  if (presentKeyType)
-    resultTypes.push_back(presentKeyType);
-  if (presentValueType)
-    resultTypes.push_back(presentValueType);
-  if (qkType)
-    resultTypes.push_back(qkType);
+  mlir::SmallVector<mlir::Type> resultTypes = {outputType};
 
-  // Build operands: ctx + inputs (only non-null) + outputs (only non-null).
-  mlir::SmallVector<mlir::Value> operands;
-  operands.push_back(context);
-  operands.push_back(query);
-  if (key)
-    operands.push_back(key);
-  if (value)
-    operands.push_back(value);
-  if (bias)
-    operands.push_back(bias);
-  if (keyPaddingMask)
-    operands.push_back(keyPaddingMask);
-  if (attentionBias)
-    operands.push_back(attentionBias);
-  if (pastKey)
-    operands.push_back(pastKey);
-  if (pastValue)
-    operands.push_back(pastValue);
-  if (pastSequenceLength)
-    operands.push_back(pastSequenceLength);
-  if (cacheIndirection)
-    operands.push_back(cacheIndirection);
-  operands.push_back(outputInit);
-  if (presentKeyInit)
-    operands.push_back(presentKeyInit);
-  if (presentValueInit)
-    operands.push_back(presentValueInit);
-  if (qkInit)
-    operands.push_back(qkInit);
+  mlir::SmallVector<mlir::Value> operands = {context, query, key, value,
+                                             *outputInit};
 
   // Build named attributes.
   mlir::SmallVector<mlir::NamedAttribute> attrs;
@@ -383,19 +392,19 @@ mlir::LogicalResult MultiHeadAttentionToHip::matchAndRewrite(
   llvm::SmallVector<int32_t> segmentSizes;
   segmentSizes.push_back(1); // ctx
   segmentSizes.push_back(1); // query
-  segmentSizes.push_back(key ? 1 : 0);
-  segmentSizes.push_back(value ? 1 : 0);
-  segmentSizes.push_back(bias ? 1 : 0);
-  segmentSizes.push_back(keyPaddingMask ? 1 : 0);
-  segmentSizes.push_back(attentionBias ? 1 : 0);
-  segmentSizes.push_back(pastKey ? 1 : 0);
-  segmentSizes.push_back(pastValue ? 1 : 0);
-  segmentSizes.push_back(pastSequenceLength ? 1 : 0);
-  segmentSizes.push_back(cacheIndirection ? 1 : 0);
+  segmentSizes.push_back(1); // key
+  segmentSizes.push_back(1); // value
+  segmentSizes.push_back(0); // bias
+  segmentSizes.push_back(0); // key_padding_mask
+  segmentSizes.push_back(0); // attention_bias
+  segmentSizes.push_back(0); // past_key
+  segmentSizes.push_back(0); // past_value
+  segmentSizes.push_back(0); // past_sequence_length
+  segmentSizes.push_back(0); // cache_indirection
   segmentSizes.push_back(1); // output
-  segmentSizes.push_back(presentKeyInit ? 1 : 0);
-  segmentSizes.push_back(presentValueInit ? 1 : 0);
-  segmentSizes.push_back(qkInit ? 1 : 0);
+  segmentSizes.push_back(0); // present_key
+  segmentSizes.push_back(0); // present_value
+  segmentSizes.push_back(0); // qk
 
   state.addAttribute("operand_segment_sizes",
                      rewriter.getDenseI32ArrayAttr(segmentSizes));

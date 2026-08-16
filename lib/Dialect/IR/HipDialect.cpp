@@ -2156,6 +2156,63 @@ void MultiHeadAttentionOp::getEffects(
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
 }
 
+LogicalResult MultiHeadAttentionOp::verify() {
+  if (!getKey() || !getValue())
+    return emitOpError(
+        "default runtime requires separate query, key, and value inputs");
+  if (getBias() || getKeyPaddingMask() || getAttentionBias() || getPastKey() ||
+      getPastValue() || getPastSequenceLength() || getCacheIndirection())
+    return emitOpError(
+        "default runtime does not support bias, masks, past/cache inputs, or "
+        "cache indirection");
+  if (getPresentKey() || getPresentValue() || getQk())
+    return emitOpError(
+        "default runtime does not support present_key, present_value, or qk "
+        "outputs");
+
+  SmallVector<Value> operands = {getQuery(), getKey(), getValue(), getOutput()};
+  if (failed(verifyDpsComputeOp(*this, operands, /*numInits=*/1)))
+    return failure();
+
+  auto queryType = cast<ShapedType>(getQuery().getType());
+  auto keyType = cast<ShapedType>(getKey().getType());
+  auto valueType = cast<ShapedType>(getValue().getType());
+  auto outputType = cast<ShapedType>(getOutput().getType());
+  if (!queryType.getElementType().isF16() ||
+      keyType.getElementType() != queryType.getElementType() ||
+      valueType.getElementType() != queryType.getElementType() ||
+      outputType.getElementType() != queryType.getElementType())
+    return emitOpError(
+        "default runtime requires fp16 query, key, value, and output");
+  if (getUnidirectional() != 0 && getUnidirectional() != 1)
+    return emitOpError("unidirectional must be 0 or 1");
+  if (getMaskFilterValue().convertToFloat() != -10000.0f)
+    return emitOpError(
+        "default runtime supports only mask_filter_value = -10000");
+
+  FailureOr<SmallVector<int64_t>> expected = inferMultiHeadAttentionOutputShape(
+      queryType.getShape(), keyType.getShape(), valueType.getShape(),
+      getNumHeads(), [&]() { return this->emitOpError(); });
+  if (failed(expected))
+    return failure();
+
+  // An output template may keep a known query extent dynamic, but it cannot
+  // make an unknown runtime query extent static.
+  ArrayRef<int64_t> outputShape = outputType.getShape();
+  if (outputShape.size() == expected->size()) {
+    for (size_t dim : llvm::seq<size_t>(0, outputShape.size())) {
+      if (ShapedType::isDynamic((*expected)[dim]) &&
+          !ShapedType::isDynamic(outputShape[dim]))
+        return emitOpError("output dimension ")
+               << dim
+               << " must remain dynamic because the corresponding "
+                  "query extent is dynamic";
+    }
+  }
+  return verifyHipOpShape(
+      *this, [&]() -> FailureOr<SmallVector<int64_t>> { return *expected; });
+}
+
 //===----------------------------------------------------------------------===//
 // GqaOp: ins(query, [key, value, past_key, past_value,]
 //             seqlens_k, total_seq_len, [cos_cache, ...])
@@ -2212,6 +2269,64 @@ void GqaOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
   emitDpsMemoryEffects(getDpsInputOperands(), getDpsInitsMutable(), effects);
+}
+
+LogicalResult LinearAttentionOp::verify() {
+  SmallVector<Value> operands = {getQuery(), getKey(), getValue()};
+  if (Value past = getPastState())
+    operands.push_back(past);
+  if (Value decay = getDecay())
+    operands.push_back(decay);
+  if (Value beta = getBeta())
+    operands.push_back(beta);
+  operands.push_back(getOutput());
+  operands.push_back(getPresentState());
+  if (failed(verifyDpsComputeOp(*this, operands, /*numInits=*/2)))
+    return failure();
+
+  auto queryType = dyn_cast<ShapedType>(getQuery().getType());
+  auto keyType = dyn_cast<ShapedType>(getKey().getType());
+  auto valueType = dyn_cast<ShapedType>(getValue().getType());
+  if (!queryType || !queryType.hasRank() || !keyType || !keyType.hasRank() ||
+      !valueType || !valueType.hasRank())
+    return emitOpError("query, key, and value must be ranked");
+  if (queryType.getElementType() != keyType.getElementType() ||
+      queryType.getElementType() != valueType.getElementType())
+    return emitOpError("query, key, and value element types must match");
+
+  FailureOr<SmallVector<SmallVector<int64_t>>> expected =
+      inferLinearAttentionOutputShapes(queryType.getShape(), keyType.getShape(),
+                                       valueType.getShape(), getQNumHeads(),
+                                       getKvNumHeads(),
+                                       [&]() { return this->emitOpError(); });
+  if (failed(expected))
+    return failure();
+
+  auto verifyShape = [&](Value value, ArrayRef<int64_t> wanted,
+                         StringRef name) -> LogicalResult {
+    auto type = dyn_cast<ShapedType>(value.getType());
+    if (!type || !type.hasRank() ||
+        type.getRank() != static_cast<int64_t>(wanted.size()))
+      return emitOpError() << name << " has the wrong rank";
+    for (int64_t dim : llvm::seq<int64_t>(0, type.getRank())) {
+      int64_t actual = type.getDimSize(dim);
+      if (!ShapedType::isDynamic(actual) &&
+          !ShapedType::isDynamic(wanted[dim]) && actual != wanted[dim])
+        return emitOpError()
+               << name << " dimension " << dim << " must be " << wanted[dim];
+    }
+    if (type.getElementType() != queryType.getElementType())
+      return emitOpError() << name << " element type must match query";
+    return success();
+  };
+
+  if (failed(verifyShape(getOutput(), (*expected)[0], "output")) ||
+      failed(verifyShape(getPresentState(), (*expected)[1], "present_state")))
+    return failure();
+  if (Value past = getPastState())
+    if (failed(verifyShape(past, (*expected)[1], "past_state")))
+      return failure();
+  return success();
 }
 
 LogicalResult GqaOp::verify() {

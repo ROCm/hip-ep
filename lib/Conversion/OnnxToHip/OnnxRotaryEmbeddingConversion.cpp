@@ -66,75 +66,19 @@ mlir::LogicalResult OnnxRotaryEmbeddingToHip::matchAndRewrite(
     return rewriter.notifyMatchFailure(op, "missing context argument");
   mlir::Value context = *ctxOrFailure;
 
-  // Attributes are all optional per the ONNX spec.
-  // Defaults: interleaved=0, num_heads=0, rotary_embedding_dim=0.
-  // 0 for num_heads / rotary_embedding_dim means "infer from tensor shapes".
-  auto interleavedAttr = op->getAttrOfType<mlir::IntegerAttr>("interleaved");
-  auto numHeadsAttr = op->getAttrOfType<mlir::IntegerAttr>("num_heads");
-  auto rotaryDimAttr =
-      op->getAttrOfType<mlir::IntegerAttr>("rotary_embedding_dim");
+  // Both ONNX spellings share attribute defaults and shape-based inference.
+  mlir::FailureOr<RotaryEmbeddingConfig> config =
+      resolveRotaryEmbeddingConfig(rewriter, op, input, cosCache);
+  if (mlir::failed(config))
+    return mlir::failure();
 
-  // ONNX INT attributes import as signed (si64) IntegerAttr, so read via
-  // getSInt() -- IntegerAttr::getInt() asserts the type is signless/index and
-  // would trip on the signed attribute in an assertions-enabled build.
-  int64_t interleavedVal = interleavedAttr ? interleavedAttr.getSInt() : 0;
-  int64_t numHeadsVal = numHeadsAttr ? numHeadsAttr.getSInt() : 0;
-  int64_t rotaryDimVal = rotaryDimAttr ? rotaryDimAttr.getSInt() : 0;
-
-  auto inputType = mlir::dyn_cast<mlir::RankedTensorType>(input.getType());
-
-  // rotary_embedding_dim = cos_cache last dim * 2. The last dim (rotary_dim/2)
-  // is an architecture constant, static in both the 2D lookup-table form
-  // ([max_pos, rotary_dim/2]) and the 3D precomputed form
-  // ([batch, seq, rotary_dim/2]).
-  if (rotaryDimVal == 0) {
-    auto cosCacheType =
-        mlir::dyn_cast<mlir::RankedTensorType>(cosCache.getType());
-    if (cosCacheType && cosCacheType.getRank() >= 2 &&
-        !cosCacheType.isDynamicDim(cosCacheType.getRank() - 1)) {
-      rotaryDimVal = cosCacheType.getDimSize(cosCacheType.getRank() - 1) * 2;
-    } else {
-      return rewriter.notifyMatchFailure(
-          op, "Cannot infer rotary_embedding_dim: cos_cache last dim must be "
-              "static with rank >= 2");
-    }
-  }
-
-  // num_heads: 4D input carries it in shape[1]; 3D input requires the
-  // num_heads attribute (ONNX mandates it for 3D) or derives it from
-  // hidden / rotary_dim (full-rotation fallback).
-  if (inputType && inputType.getRank() == 4) {
-    int64_t shapeNumHeads = inputType.getShape()[1];
-    if (shapeNumHeads != mlir::ShapedType::kDynamic) {
-      if (numHeadsVal == 0)
-        numHeadsVal = shapeNumHeads;
-      else if (numHeadsVal != shapeNumHeads)
-        return rewriter.notifyMatchFailure(
-            op, "RotaryEmbedding: num_heads attribute disagrees with 4D input "
-                "shape (BNSH)");
-    }
-    if (numHeadsVal == 0)
-      return rewriter.notifyMatchFailure(
-          op, "Cannot infer num_heads: 4D input has dynamic num_heads dim and "
-              "no num_heads attribute");
-  } else if (numHeadsVal == 0 && rotaryDimVal > 0) {
-    if (inputType && inputType.getRank() >= 1 &&
-        !inputType.isDynamicDim(inputType.getRank() - 1)) {
-      int64_t hidden = inputType.getDimSize(inputType.getRank() - 1);
-      numHeadsVal = hidden / rotaryDimVal;
-    } else {
-      return rewriter.notifyMatchFailure(
-          op, "Cannot infer num_heads: input last dim must be static");
-    }
-  }
-
-  if (numHeadsVal <= 0)
+  if (config->numHeads <= 0)
     return rewriter.notifyMatchFailure(op,
                                        "RotaryEmbedding: invalid num_heads");
 
-  auto interleavedI64Attr = rewriter.getI64IntegerAttr(interleavedVal);
-  auto numHeadsI64Attr = rewriter.getI64IntegerAttr(numHeadsVal);
-  auto rotaryDimI64Attr = rewriter.getI64IntegerAttr(rotaryDimVal);
+  auto interleavedI64Attr = rewriter.getI64IntegerAttr(config->interleaved);
+  auto numHeadsI64Attr = rewriter.getI64IntegerAttr(config->numHeads);
+  auto rotaryDimI64Attr = rewriter.getI64IntegerAttr(config->rotaryDim);
 
   if (op->getNumResults() != 1)
     return rewriter.notifyMatchFailure(op,

@@ -1442,7 +1442,8 @@ def Hip_SkipRmsNormOp :
   let hasVerifier = 1;
 }
 
-def Hip_RopeOp : Hip_DpsOp_WithInfer<"rope"> {
+def Hip_RopeOp :
+    Hip_DpsOp_SameShape<"rope", /*sourceAccessor=*/"Input"> {
   let summary = "Rotary position embedding (RoPE)";
   let description = [{
     Applies rotary position embedding to the input tensor.
@@ -3320,17 +3321,28 @@ def Hip_HipDNNGraphOp : Hip_DpsOp_AutoReify<"hipdnn_graph", [
 
 // ===== Multi-Head Attention =================================================
 
-def Hip_MultiHeadAttentionOp : Hip_DpsOp_AutoReify<"multi_head_attention", [AttrSizedOperandSegments, OpStateOpInterface]> {
+def Hip_MultiHeadAttentionOp :
+    Hip_DpsOp_SemanticNoInfer<"multi_head_attention",
+                              [AttrSizedOperandSegments,
+                               OpStateOpInterface]> {
   let summary = "Multi-Head Attention (com.microsoft.MultiHeadAttention v1)";
   let description = [{
     Implements the com.microsoft.MultiHeadAttention operator (opset v1).
 
-    Multi-Head Self/Cross Attention with optional bias from input projection.
-    Supports packed QKV in `query`, packed KV in `key`, separate Q/K/V,
-    optional key padding mask, optional additive attention bias, KV cache
-    (past_key/past_value) with optional buffer-sharing
-    (past_sequence_length), unidirectional (causal) masking, and an optional
-    cache_indirection buffer for beam-search decoding.
+    The default runtime implements self/cross attention for separate rank-3
+    fp16 Q/K/V only:
+      * query: `(batch, query_sequence, hidden)`
+      * key/value: `(batch, kv_sequence, hidden)`
+      * output: `(batch, query_sequence, hidden)`
+      * `hidden` is positive and divisible by `num_heads`
+      * `unidirectional` is 0 or 1
+      * `mask_filter_value` remains its schema default, -10000
+
+    Biases, masks, packed layouts, KV cache inputs, cache indirection, and the
+    optional present/QK outputs are not implemented by this HIP op and are
+    rejected by its verifier. The ONNX converter routes separately supported
+    decoder/cache and rank-4 cross-attention forms to `hip.gqa` before applying
+    this default-path contract.
 
     Inputs (1-10, MS spec order):
       1. query                 (required, T) - either:
@@ -3475,9 +3487,13 @@ def Hip_MultiHeadAttentionOp : Hip_DpsOp_AutoReify<"multi_head_attention", [Attr
           "hipdnn_ep_op_state_construct_multi_head_attention", {});
     }
   }];
+
+  let hasVerifier = 1;
 }
 
-def Hip_LinearAttentionOp : Hip_DpsOp_AutoReify<"linear_attention", [AttrSizedOperandSegments]> {
+def Hip_LinearAttentionOp :
+    Hip_DpsOp_SemanticNoInfer<"linear_attention",
+                              [AttrSizedOperandSegments]> {
   let summary = "Linear attention with recurrent state (com.microsoft.LinearAttention)";
   let description = [{
     Unified linear attention operator for autoregressive decoding (T=1) and
@@ -3573,6 +3589,8 @@ def Hip_LinearAttentionOp : Hip_DpsOp_AutoReify<"linear_attention", [AttrSizedOp
               type($output) `,` type($present_state) `)`
     attr-dict (`:` type($result_tensors)^)?
   }];
+
+  let hasVerifier = 1;
 }
 
 def Hip_GemmOp :
