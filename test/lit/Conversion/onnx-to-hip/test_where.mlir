@@ -114,19 +114,16 @@ module {
     return %output : tensor<7xf32>
   }
 
-  // Test 6: An earlier dynamic operand may resolve to the broadcast value 1.
-  // The destination must select X's runtime extent rather than unconditionally
-  // using condition's extent.
+  // Test 6: The foundation retains the established conversion-time extent
+  // source until the later activation layer can pair exact semantics with
+  // frontend symbolic identity proofs.
   func.func @test_where_dynamic_unit_broadcast(
       %cond: tensor<?xi1>, %x: tensor<?xf16>, %y: tensor<?xf16>)
       -> tensor<?xf16> {
     // CHECK-LABEL: func.func @test_where_dynamic_unit_broadcast
-    // CHECK-DAG: %[[COND_DIM:.*]] = tensor.dim %[[COND:.*]], %{{.*}} : tensor<?xi1>
-    // CHECK-DAG: %[[X_DIM:.*]] = tensor.dim %[[X:.*]], %{{.*}} : tensor<?xf16>
-    // CHECK-DAG: %[[ONE:.*]] = arith.constant 1 : index
-    // CHECK: %[[COND_IS_ONE:.*]] = arith.cmpi eq, %[[COND_DIM]], %[[ONE]] : index
-    // CHECK: %[[EXTENT:.*]] = arith.select %[[COND_IS_ONE]], %[[X_DIM]], %[[COND_DIM]] : index
-    // CHECK: tensor.empty(%{{.*}}) : tensor<?xf16>
+    // CHECK: %[[COND_DIM:.*]] = tensor.dim %[[COND:.*]], %{{.*}} : tensor<?xi1>
+    // CHECK-NOT: arith.select
+    // CHECK: tensor.empty(%[[COND_DIM]]) : tensor<?xf16>
 
     %output = "onnx.Where"(%cond, %x, %y) :
         (tensor<?xi1>, tensor<?xf16>, tensor<?xf16>) -> tensor<?xf16>

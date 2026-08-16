@@ -221,19 +221,14 @@ lowerVariadicBroadcastChain(mlir::Operation *op,
   mlir::Value accumulate = op->getOperand(0);
   for (unsigned i : llvm::seq<unsigned>(1, numInputs)) {
     mlir::Value rhs = op->getOperand(i);
-    auto stepShape = mlir::hip::reifyBroadcastResultShape(
-        rewriter, loc, {accumulate, rhs}, [&]() { return op->emitError(); });
-    if (mlir::failed(stepShape))
-      return mlir::failure();
-
     bool isFinal = i == numInputs - 1;
     mlir::RankedTensorType stepResultType =
         isFinal ? resultType
                 : mlir::RankedTensorType::get(stepStaticShapes[i - 1],
                                               resultType.getElementType(),
                                               resultType.getEncoding());
-    auto init = createEmptyTensorFromReifiedShape(rewriter, loc, stepResultType,
-                                                  *stepShape);
+    auto init = createBroadcastEmptyTensor(rewriter, loc, stepResultType,
+                                           {accumulate, rhs});
     if (mlir::failed(init))
       return rewriter.notifyMatchFailure(
           op, llvm::Twine(opName) +
