@@ -9,6 +9,7 @@
 #include <glog/logging.h>
 
 #include "md5.h"
+#include "sha256.h"
 #include "./config.hpp"
 #include "./file_lock.hpp"
 #include "./logger_adapter.hpp"
@@ -16,11 +17,15 @@
 #include "./version_info.hpp"
 #include "profile_utils.hpp"
 #include "morphizen/morphizen.hpp"
+#include "morphizen/symbolic_dims.hpp"
 #include "morphizen/util.hpp"
 #include "morphizen-foundation/env_config.hpp"
+#include <cctype>
 #include <codecvt>
 #include <errno.h>
 #include <functional>
+#include <google/protobuf/io/coded_stream.h>
+#include <google/protobuf/io/zero_copy_stream_impl_lite.h>
 #include <google/protobuf/util/json_util.h>
 #include <ios>
 #include <limits>
@@ -30,6 +35,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string>
+#include <string_view>
 #include <sstream>
 #include <set>
 #include "morphizen-foundation/encryption.hpp"
@@ -140,6 +146,11 @@ bool check_cache_hit(PassContextImp &context) {
   auto prebuild_cache_context_name =
       context.get_provider_option("prebuild_cache_context");
   if (prebuild_cache_context_name) {
+    if (!context.initializer_digest_finalized) {
+      LOG(WARNING) << "ignoring prebuild cache because initializer bytes were "
+                      "not included in the finalized key";
+      return false;
+    }
     MY_LOG(1) << "==== prebuild_cache_context hit ====";
     if (!has_mem_binary(prebuild_cache_context_name.value())) {
       LOG(ERROR) << " " << prebuild_cache_context_name.value()
@@ -303,6 +314,120 @@ static std::string get_signature(const std::string &model_path,
   return md5_in_memory_a;
 }
 
+static void add_framed(SHA256 &sha256, std::string_view value) {
+  uint64_t size = value.size();
+  unsigned char big_endian_size[sizeof(size)];
+  for (size_t i = 0; i < sizeof(size); ++i)
+    big_endian_size[sizeof(size) - i - 1] =
+        static_cast<unsigned char>((size >> (i * 8)) & 0xff);
+  sha256.add(big_endian_size, sizeof(big_endian_size));
+  if (!value.empty())
+    sha256.add(value.data(), value.size());
+}
+
+static std::string
+serialize_deterministically(const google::protobuf::MessageLite &message) {
+  std::string result;
+  google::protobuf::io::StringOutputStream output(&result);
+  google::protobuf::io::CodedOutputStream coded(&output);
+  coded.SetSerializationDeterministic(true);
+  if (!message.SerializeToCodedStream(&coded) || coded.HadError())
+    throw std::runtime_error(
+        "cannot serialize compiler contract for cache identity");
+  return result;
+}
+
+static std::string
+get_complete_graph_digest(const std::filesystem::path &model_path,
+                          const Graph &graph, const Model &model) {
+  if (!model_path.empty()) {
+    std::ifstream input(model_path, std::ios::binary);
+    if (!input)
+      throw std::runtime_error("cannot open model for cache identity: " +
+                               model_path.string());
+    SHA256 sha256;
+    char buffer[64 * 1024];
+    while (input) {
+      input.read(buffer, sizeof(buffer));
+      sha256.add(buffer, static_cast<size_t>(input.gcount()));
+    }
+    if (!input.eof())
+      throw std::runtime_error("cannot read model for cache identity: " +
+                               model_path.string());
+    return sha256.getHash();
+  }
+
+  if (morphizen_cxx::ModelConstRef(model).has_metadata(
+          kCompilerGraphDigestMetadataKey))
+    return morphizen_cxx::ModelConstRef(model).get_metadata(
+        kCompilerGraphDigestMetadataKey);
+
+  auto serialized = morphizen_cxx::GraphConstRef(graph).save_string();
+  if (!serialized.get() || serialized->empty())
+    throw std::runtime_error(
+        "cannot serialize graph for cache identity finalization");
+  return SHA256()(*serialized);
+}
+
+static std::string finalize_cache_key(const std::string &base_key,
+                                      const std::string &graph_digest,
+                                      const std::string &compiler_contract,
+                                      const Model &model) {
+  std::string symbolic_bytes =
+      std::string(kOnnxDimParamsEncodingVersion) + "\n0\n";
+  auto model_ref = morphizen_cxx::ModelConstRef(model);
+  if (model_ref.has_metadata(kOnnxDimParamsMetadataKey))
+    symbolic_bytes = model_ref.get_metadata(kOnnxDimParamsMetadataKey);
+
+  std::string error;
+  if (!decode_symbolic_dim_records(symbolic_bytes, error))
+    throw std::runtime_error("invalid symbolic dimension metadata: " + error);
+  std::string initializer_digest;
+  if (model_ref.has_metadata(kInitializerDataDigestMetadataKey))
+    initializer_digest =
+        model_ref.get_metadata(kInitializerDataDigestMetadataKey);
+  if (!initializer_digest.empty() &&
+      (initializer_digest.size() != 64 ||
+       !std::all_of(initializer_digest.begin(), initializer_digest.end(),
+                    [](unsigned char c) {
+                      return std::isdigit(c) || (c >= 'a' && c <= 'f');
+                    })))
+    throw std::runtime_error("invalid initializer data SHA-256 metadata");
+  std::string compiler_graph_digest;
+  if (model_ref.has_metadata(kCompilerGraphDigestMetadataKey))
+    compiler_graph_digest =
+        model_ref.get_metadata(kCompilerGraphDigestMetadataKey);
+  if (!compiler_graph_digest.empty() &&
+      (compiler_graph_digest.size() != 64 ||
+       !std::all_of(compiler_graph_digest.begin(), compiler_graph_digest.end(),
+                    [](unsigned char c) {
+                      return std::isdigit(c) || (c >= 'a' && c <= 'f');
+                    })))
+    throw std::runtime_error("invalid compiler graph SHA-256 metadata");
+
+  SHA256 sha256;
+  add_framed(sha256, "hipdnn.symbolic.extent.cache.v1");
+  add_framed(sha256, graph_digest);
+  add_framed(sha256, base_key);
+  add_framed(sha256, compiler_contract);
+  add_framed(sha256, symbolic_bytes);
+  add_framed(sha256, initializer_digest);
+  add_framed(sha256, compiler_graph_digest);
+  add_framed(sha256, kOnnxDimParamsEncodingVersion);
+  add_framed(sha256, kOnnxDimParamsResolverPolicyVersion);
+  return "hsdi1-" + sha256.getHash();
+}
+
+static bool is_finalized_cache_key(std::string_view key) {
+  constexpr std::string_view prefix = "hsdi1-";
+  return key.size() == prefix.size() + 64 &&
+         key.substr(0, prefix.size()) == prefix &&
+         std::all_of(key.begin() + prefix.size(), key.end(),
+                     [](unsigned char c) {
+                       return std::isdigit(c) || (c >= 'a' && c <= 'f');
+                     });
+}
+
 std::shared_ptr<PassContextImp> initialize_context(
     const std::string &model_path, const Graph &onnx_graph,
     const std::vector<morphizen_cxx::NodeConstRef> &ep_context_nodes,
@@ -328,6 +453,37 @@ std::shared_ptr<PassContextImp> initialize_context(
   auto &model = morphizen_cxx::GraphConstRef(onnx_graph).model();
   auto md5 =
       get_signature(context->model_path.string(), onnx_graph, context->config_);
+  std::string complete_graph_digest;
+  if (!context->is_ep_context_model)
+    complete_graph_digest =
+        get_complete_graph_digest(context->model_path, onnx_graph, model);
+
+  // Target selection and effective pass configuration are compiler inputs, so
+  // resolve them before freezing the cache identity.
+  context->target_auto_discovery(model);
+  std::string compiler_contract;
+  if (!context->is_ep_context_model) {
+    SHA256 contract;
+    add_framed(contract, serialize_deterministically(context->config_));
+    if (context->target_proto_)
+      add_framed(contract,
+                 serialize_deterministically(*context->target_proto_));
+    add_framed(contract,
+               serialize_deterministically(context->context_proto.version()));
+    for (const PassProto &pass : context->compute_effective_passes())
+      add_framed(contract, serialize_deterministically(pass));
+    static const std::set<std::string> non_compiler_options = {
+        "cache_key",      "cacheKey", "config_file",
+        "encryption_key", "target",   "prebuild_cache_context",
+    };
+    for (const auto &[key, value] : context->get_all_provider_options()) {
+      if (non_compiler_options.count(key))
+        continue;
+      add_framed(contract, key);
+      add_framed(contract, value);
+    }
+    compiler_contract = contract.getHash();
+  }
 
   if (!context->context_proto.cache_key().empty()) {
     MY_LOG(1) << "use cache key specified by user "
@@ -349,13 +505,17 @@ std::shared_ptr<PassContextImp> initialize_context(
     LOG_VERBOSE(1) << "use cache key in memory signature " << new_cache_key;
     *context->context_proto.mutable_cache_key() = new_cache_key;
   }
-  // Algorithm-A : based on names of node-args tensor0-names of
-  // topologically ordered model-graph Algorithm-B : based on
-  // input/output-tensor names overall auto-mapping mechanism will be to use
-  // Algorithm-A first, if that fails then use Algorithm-B to identify the
-  // model/target
-  context->target_auto_discovery(model);
-
+  if (!context->is_ep_context_model) {
+    auto finalized =
+        finalize_cache_key(context->context_proto.cache_key(),
+                           complete_graph_digest, compiler_contract, model);
+    MY_LOG(1) << "finalized symbolic-aware cache key " << finalized;
+    *context->context_proto.mutable_cache_key() = std::move(finalized);
+    context->cache_key_finalized = true;
+    context->initializer_digest_finalized =
+        morphizen_cxx::ModelConstRef(model).has_metadata(
+            kInitializerDataDigestMetadataKey);
+  }
   // log version of binary
   context->print_version_info("EXEC VERSION: ");
   if (!context->is_ep_context_model) {
@@ -776,6 +936,7 @@ store_cache_directory_from_main_node(PassContextImp &context,
   CHECK(!loaded_cache_key.empty())
       << "EP context node must have non-empty cache_file_prefix attribute";
   *context.context_proto.mutable_cache_key() = loaded_cache_key;
+  context.cache_key_finalized = true;
 #if MORPHIZEN_ORT_API_MAJOR >= 12
   auto ep_cache_context = main_node.release_attr_string("ep_cache_context");
 #else
@@ -903,11 +1064,12 @@ restore_execution_providers_from_ep_context_model(
   store_cache_directory_from_main_node(*context, main_node.value());
 
   auto ep_context_cache_key = context->context_proto.cache_key();
-  bool user_provided_different_cache_key =
+  bool user_provided_different_final_cache_key =
       user_cache_key.has_value() && !user_cache_key->empty() &&
+      is_finalized_cache_key(*user_cache_key) &&
       user_cache_key.value() != ep_context_cache_key;
 
-  if (user_provided_different_cache_key) {
+  if (user_provided_different_final_cache_key) {
     LOG(ERROR) << "When using EP context model, your cache key '"
                << user_cache_key.value()
                << "' is different from the one in the EP context model '"
